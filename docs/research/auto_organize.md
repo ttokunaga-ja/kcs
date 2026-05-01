@@ -89,6 +89,64 @@ semantic_similarity
 + recency
 ```
 
+### スコア合成の規約
+
+各成分はスケールが異なるので、加算前に [0, 1] へ正規化してから重み付き和をとる。
+
+```text
+semantic_similarity: cosine(file_embedding, folder_embedding) を [-1,1] → [0,1] に線形変換
+keyword_overlap:    Jaccard(file_keywords, folder_keywords). [0,1]
+file_type_match:    folder の主要 MIME 分布における該当 MIME の出現確率. [0,1]
+recency:            exp(-days_since_last_match / τ),  τ=30. [0,1]
+
+score = 0.50 * semantic_similarity
+      + 0.20 * keyword_overlap
+      + 0.20 * file_type_match
+      + 0.10 * recency
+```
+
+重みのデフォルトは上記。`.kcs/config.toml` の `[organize.weights]` で上書き可。
+
+### 採否しきい値
+
+```text
+score >= 0.85: 自動承認候補 (auto-mode 時のみ自動移動。それ以外は最上位提案として inbox に出す)
+0.65 <= score < 0.85: 提案として表示 (ユーザー承認待ち)
+score < 0.65: 表示しない (低信頼)
+```
+
+### Embedding profile mismatch 時の退避
+
+Folder Profile は配下ファイルの Embedding 平均だが、`embedding profile_hash` が混在するフォルダでは平均を取れない。`(dimensions, distance, modality, profile_hash)` ごとに **subprofile** を持ち、新ファイルの profile に一致する subprofile のみを比較対象にする。一致がない場合は `keyword_overlap + file_type_match + recency` だけで提案を出す (semantic は欠損扱い)。
+
+### 評価方針
+
+precision / recall を継続的にモニタするため、ground truth セットと評価指標を定める。
+
+```text
+Ground truth セット:
+- ユーザーが kcs move --accept / --reject した過去 N=500 件を保存
+  (~/.local/share/kcs/organize-feedback.sqlite)
+- accept = 提案が正しかった、reject = 誤りだった
+
+指標:
+- precision@1 = accept(1) / (accept(1) + reject(1))   # 最上位提案の正解率
+- recall@k    = ユーザーが手動で動かした先が上位 k 件に含まれた率
+- target: precision@1 >= 0.7, recall@3 >= 0.85 (MVP 受入)
+```
+
+### フィードバックループ
+
+reject されたファイル × フォルダ組は、24h は提案上位から抑制する (negative cache)。連続 reject が閾値を超えたフォルダ profile は再構築候補として `kcs status` に表示。
+
+### 循環防止
+
+`kcs move --accept` 直後の N=10 分間、移動先フォルダで同ファイルの再分類提案を出さない。これにより「移動 → 別 `.kcs` で再 indexing → 別フォルダへの再分類提案」サイクルを抑制する。
+
+### コールドスタート
+
+配下ファイル数 < 5 のフォルダは folder profile を構築しない (= 提案先候補から除外)。ユーザーが手動でファイルを移動して数が増えてから提案対象になる。
+
 ---
 
 ## Agentなしでの分類提案例

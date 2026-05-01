@@ -71,8 +71,8 @@ KCS GENERATED FILE
 Do not edit manually.
 Source: docs/report.pdf
 Raw-Hash: sha256:...
-Normalized-Hash: sha256:...
-Generated-By: markdownize-profile sha256:...
+Tool-Profile-Hash: sha256:...
+Generated-At: 2026-04-25T12:00:00Z
 -->
 ```
 
@@ -258,10 +258,10 @@ GUIなら、Finder/Explorer風UIでMarkdownプレビューを出します。
 
 # 9. Markdownの保存形式
 
-内部保存はhashベースがよいです。
+内部保存はhashベースがよいです。Markdown 自体の content hash は取らないので、ファイル名は **原文の `raw_hash` と `tool_profile_hash` の組** で構成します。
 
 ```text
-.kcs/objects/normalized/ab/cd/<normalized_hash>.md
+.kcs/objects/normalized/ab/cd/<raw_hash>.<tool_profile_hash>.md
 ```
 
 ユーザーに見せるときは、元パスベースの仮想パスで表示します。
@@ -287,17 +287,20 @@ docs/report.pdf.md
 
 ただしクロスプラットフォームで面倒なので、必須ではない。
 
-## 2. ハッシュ検証
+## 2. ハッシュ検証は行わない
 
-KCSは読み取り時に `normalized_hash` を検証できます。
+KCS は Markdown 側の content hash (normalized_hash) を計算・保存しないため、Markdown が直接編集されたかをハッシュで検証することはしません。Markdownize Adapter は LLM ベースで非決定的なため、生成のたびに content hash が変わりえます。content hash 一致を破損検出条件にすると、正常な再生成までもが「破損」と誤検出されます。
 
-もし直接編集されたら：
+直接編集を防ぐ・検出する手段は次のレイヤーに委ねます:
 
 ```text
-normalized_hash mismatch
+1. ファイルの存在チェック (missing_output)
+2. (raw_hash, tool_profile_hash) の組と normalization_run の状態
+3. 必要なら OS 権限・ACL での read-only 化 (オプション)
+4. ユーザーへの規約: .kcs/objects/normalized/ は手で編集しない
 ```
 
-と判断して、破損扱いにする。
+仮にユーザーが直接編集した場合でも、KCS は次回 `kcs index` 等で `(raw_hash, tool_profile_hash)` が一致する `done` 記録を見つけ「up-to-date」と判定します。これは設計上意図された挙動 (= Markdown 内容そのものは正本ではなく、原文 + tool_profile が正本) です。
 
 ## 3. statusで検出
 
@@ -331,6 +334,7 @@ nodeを作る
 relationを作る
 分類候補を出す
 原文ファイルを編集する提案を出す
+原文ファイルの「移動」を提案として出す (kcs move --propose)
 ```
 
 Agentがしてはいけないこと：
@@ -338,7 +342,30 @@ Agentがしてはいけないこと：
 ```text
 normalized markdownを直接編集する
 raw objectを直接編集する
+原文ファイルを承認なしに移動・削除する
 ```
+
+## 書き込み主体マトリクス
+
+各レイヤーの書き込み権限を以下に固定する。
+
+```text
+レイヤー                       | User | KCS  | Agent (提案) | Agent (自動適用)
+------------------------------ | ---- | ---- | ----------- | ---------------
+原本 (raw)                     | yes  | no*  | propose     | no
+原本の移動 (file system mv)     | yes  | yes* | propose     | user 承認後のみ
+normalized markdown            | no   | yes  | no          | no
+chunks / embeddings            | no   | yes  | no          | no
+annotations / tags / notes     | yes  | no   | yes         | yes
+nodes / edges (knowledge graph)| yes  | no   | yes         | yes
+commits / refs (履歴)           | no   | yes  | no          | yes (auto commit)
+extraction issues              | yes  | yes  | yes         | yes
+```
+
+注:
+- `*` 「原本の移動」は [auto_organize.md](auto_organize.md) の `kcs move --accept` 経由でのみ KCS が原本ファイルを mv する。これは「KCS による原本の物理位置変更」であり、原本の **内容** は不変である点で書き込みではない (移動のみ)。
+- Agent が `kcs move --accept` を直接呼ぶことは禁止。Agent は `kcs move --propose` で提案キューに積み、ユーザーが承認した場合のみ適用される。
+- `auto-mode` を ON にした場合に限り、Agent の提案を自動適用できるが、その場合も commit_type=auto で履歴に残し、いつでも revert 可能とする。
 
 OCRやlayout detectionの誤りも、Normalized Markdownの手編集では直さない。MVPでは最低限、誤抽出箇所を extraction issue として記録し、再Markdown化または原本更新の候補として扱う。未反映の extraction issue は通常検索・RAGの根拠本文には混ぜず、修復・レビュー用の補助情報として扱う。
 

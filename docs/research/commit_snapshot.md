@@ -214,7 +214,66 @@ gc_policy(commit_type):
 
 `shallow` GC は履歴DAGの連続性を保つため、commit object 自体は残しつつ tree のみ破棄する。これにより autosnapshot が manual commit の parent chain に含まれていても、parent chain が切れない。
 
+`shallow` 後の commit を `kcs view <commit>` した場合の挙動:
+
+```text
+- メタ情報 (id, parents, message, timestamp, commit_type) は表示
+- tree は "shallow: tree discarded" と表示し、ファイル一覧は出さない
+- kcs restore <shallow-commit> は KCS-E-COMMIT-SHALLOW-001 を返して拒否
+- kcs diff <a> <b> でいずれかが shallow なら全ファイル差分は不能と明示
+```
+
 ただし、法務・秘匿・誤取り込みのための `purge` は通常のGCとは別扱いにする。`protected = true` のsnapshotであっても、ユーザーまたは管理者が明示的に「特定ファイルの全履歴削除」を実行した場合は、対象ファイルに由来する tree / commit / raw / normalized / chunk / embedding / evidence を履歴から除去できる必要がある。これは通常削除ではなく、Gitの履歴書き換えに相当する破壊的操作として扱い、結果commitの `commit_type` は `purged` になる。
+
+## GC スケジューリングと保持ポリシー
+
+GC は **on-demand を基本** とし、自動実行は idle 検出時のみ行います。常時バックグラウンドで動かさないのは、`kcs index` 中に GC が走ると I/O とロック競合が起きるためです。
+
+```toml
+# .kcs/config.toml
+[gc]
+mode = "on_idle"               # "on_idle" | "manual_only" | "after_index"
+idle_threshold_seconds = 300   # 直近5分間 KCS が活動していなければ走らせる
+max_runtime_seconds = 60       # 1回の GC は最大1分でyield
+```
+
+トリガー:
+
+```text
+on_idle:        idle_threshold_seconds 経過後に低優先度で開始
+manual_only:    `kcs gc` を明示実行したときのみ
+after_index:    `kcs index` 完了時に1回だけ実行 (短期確定したい用途)
+```
+
+### auto snapshot の保持ポリシー (tiered retention)
+
+`commit_type=auto` のみ tiered retention を適用します。`manual/imported/merged/purged` は保持対象外 (常に残す)。
+
+```toml
+[gc.auto_retention]
+keep_last_hours    = 24    # 直近24時間の auto は全保持
+keep_hourly_days   = 7     # 直近7日は1時間ごとに1本
+keep_daily_weeks   = 4     # 直近4週は1日ごとに1本
+keep_weekly_months = 6     # 直近6か月は1週間ごとに1本
+# それ以前は full GC で消去 (commit object も削除)
+```
+
+`migrated` / `repaired` は **個数ベース**:
+
+```toml
+[gc.derived_retention]
+keep_migrated_per_branch = 5
+keep_repaired_per_branch = 5
+# 超過分は shallow GC (commit 残し、tree 破棄)
+```
+
+### 並行性
+
+```text
+- GC 中は新規 commit 受け入れを block しない (CoW 風 readonly snapshot 上で走る)
+- ただし object 物理削除は exclusive lock を取る短い critical section に限定
+- power-loss 中断時は次回起動時に sweep 再開 (.kcs/gc/in_progress マーカーで検出)
+```
 
 ---
 

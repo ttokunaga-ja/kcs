@@ -212,8 +212,8 @@ access_events
 ```sql
 CREATE TABLE chunks (
   chunk_id TEXT PRIMARY KEY,
-  normalized_hash TEXT NOT NULL,
   raw_hash TEXT NOT NULL,
+  tool_profile_hash TEXT NOT NULL,
   raw_path TEXT NOT NULL,
   normalized_path TEXT NOT NULL,
   heading_path TEXT,
@@ -224,6 +224,11 @@ CREATE TABLE chunks (
   text TEXT NOT NULL,
   created_at TEXT NOT NULL
 );
+
+-- 注: chunk が属する Markdown 全体の content hash (normalized_hash) は持たない。
+-- chunk の identity は (raw_hash, tool_profile_hash, heading_path/section_id, char_start, char_end)
+-- から導かれる。`text_hash` は chunk の抽出範囲のテキストに対する hash であり、
+-- Markdown 全体の hash ではない。
 ```
 
 ---
@@ -242,7 +247,49 @@ CREATE VIRTUAL TABLE chunk_fts USING fts5(
 );
 ```
 
-実装上、`content_rowid` の扱いが面倒なら、MVPでは外部contentなしのFTS5でもよい。
+### MVP での FTS5 構成方針
+
+MVP では **外部 content モード (`content='chunks'`) を採用** します。理由:
+
+```text
+1. chunks テーブルとの整合を SQLite の trigger で自動保守できる
+   (DELETE / INSERT / UPDATE on chunks → chunk_fts も同期)
+2. text を二重保存せずディスク使用量を抑えられる
+3. データ不整合 (chunks にあって chunk_fts に無い、逆も) を構造的に防げる
+   = MVP done-criteria の「最小完全系」(productization_notes.md §1) を満たす
+```
+
+過去に「`content_rowid` が面倒なら外部contentなしでもよい」と書いていたが、整合性保証のため **MVP から外部 content モードを採用** に方針を変える。`content_rowid='rowid'` を使い、chunks の rowid を chunk_fts と共有する。
+
+trigger の例:
+
+```sql
+CREATE TRIGGER chunks_ai AFTER INSERT ON chunks BEGIN
+  INSERT INTO chunk_fts(rowid, chunk_id, text, heading_path)
+    VALUES (new.rowid, new.chunk_id, new.text, new.heading_path);
+END;
+CREATE TRIGGER chunks_ad AFTER DELETE ON chunks BEGIN
+  INSERT INTO chunk_fts(chunk_fts, rowid, chunk_id, text, heading_path)
+    VALUES('delete', old.rowid, old.chunk_id, old.text, old.heading_path);
+END;
+CREATE TRIGGER chunks_au AFTER UPDATE ON chunks BEGIN
+  INSERT INTO chunk_fts(chunk_fts, rowid, chunk_id, text, heading_path)
+    VALUES('delete', old.rowid, old.chunk_id, old.text, old.heading_path);
+  INSERT INTO chunk_fts(rowid, chunk_id, text, heading_path)
+    VALUES (new.rowid, new.chunk_id, new.text, new.heading_path);
+END;
+```
+
+### CJK tokenizer
+
+FTS5 デフォルトの `unicode61` は日本語/中国語/韓国語で適切に動かないため、tokenizer は以下を採用する。
+
+```text
+日本語/CJK: tokenize="trigram" (または ICU tokenizer がビルド済みなら ICU)
+英文中心の用途のみ: tokenize="unicode61 remove_diacritics 2"
+```
+
+config (`.kcs/config.toml` の `[search.fts]`) で切替可能とし、デフォルトは `trigram` (CJK 対応のため)。
 
 ---
 

@@ -283,14 +283,15 @@ batch job
 
 ## APIエラー時の扱い
 
-APIエラーは種類で分けます。
+APIエラーは種類で分けます。エラーコードは横断 namespace ([productization_notes.md §横断規約](productization_notes.md)) に従い `KCS-E-BATCH-*` のかたちで一意化します。
 
 ```text
-network_error      → retryable
-rate_limit         → retryable later
-auth_error         → user action required
-quota_exceeded     → retryable after billing/reset
-invalid_input      → failed permanent
+network_error      → retryable    (KCS-E-BATCH-NET-001)
+rate_limit         → retryable later (KCS-E-BATCH-RATE-001)
+auth_error         → user action required (KCS-E-BATCH-AUTH-001)
+quota_exceeded     → retryable after billing/reset (KCS-E-BATCH-QUOTA-001)
+invalid_input      → failed permanent (KCS-E-BATCH-INPUT-001)
+budget_exceeded    → paused (KCS-E-BATCH-BUDGET-001)
 ```
 
 例：
@@ -299,9 +300,70 @@ invalid_input      → failed permanent
 {
   "status": "failed",
   "error_kind": "network_error",
-  "retryable": true
+  "error_code": "KCS-E-BATCH-NET-001",
+  "retryable": true,
+  "attempts": 2,
+  "next_retry_at": "2026-04-25T12:05:00Z"
 }
 ```
+
+---
+
+## Retry budget と backoff
+
+リトライは無制限ではなく、エラー種別ごとに以下の予算を設けます。
+
+```text
+network_error:      max_attempts=5,  backoff="exp(base=2s, cap=60s)", jitter="full"
+rate_limit:         max_attempts=∞,  honor "Retry-After" header. ヘッダ無ければ exp(base=10s, cap=300s)
+quota_exceeded:     max_attempts=3,  backoff="fixed(1h)" (billing/reset を待つ)
+auth_error:         max_attempts=0   (user action 待ち)
+invalid_input:      max_attempts=0   (permanent failure)
+```
+
+- `next_retry_at` はタスク行に保持し、worker は `now() >= next_retry_at` のものだけ pull する。
+- 各タスクには `deadline` (絶対時刻) を持たせ、超過時は `failed (deadline_exceeded)` で確定。
+- `running` 状態が `heartbeat_at + 5min` を超えたら `stale` 扱い。別 worker が pull 可能。
+
+## Cost guardrail / kill switch
+
+将来 LLM コスト低下を前提とする ([productization_notes.md §横断規約](productization_notes.md)) ものの、移行期の暴走を防ぐため **MVP から budget guardrail を入れます**。
+
+```toml
+# .kcs/config.toml または ~/.config/kcs/config.toml
+[budget]
+monthly_usd_cap = 50.0          # 上限。超過で全 batch を pause
+warn_at_percent = 80            # 80% で warn
+hard_stop = true                # true: cap で全 task を paused に遷移
+[budget.per_adapter]
+markdown = 30.0
+embedding = 15.0
+summary = 5.0
+```
+
+- 累積コストは Adapter 報告値 (input/output token × 単価) を `~/.local/share/kcs/cost-ledger.sqlite` に記録。
+- `monthly_usd_cap` 超過時、走行中タスクは完了させ、新規タスクは `paused` 状態へ。`kcs status` に `budget exceeded` と表示。
+- `kcs batch resume --override-budget` で明示的に再開可能。
+- ローカル LLM 利用時は単価 0 として記録 (= cap に効かない)。
+
+---
+
+## CLI exit code
+
+`kcs batch` 系コマンドの exit code は横断規約 ([productization_notes.md §横断規約](productization_notes.md)) に従い、以下を返します。
+
+```text
+0   全タスク success または all up_to_date
+1   汎用 failure (詳細不明)
+2   invalid usage / config 不正
+3   一部タスク failed (retryable 残あり)
+4   全タスク failed permanent
+5   auth_error がある (user action 必要)
+6   budget_exceeded により paused
+7   user による中断 (SIGINT/SIGTERM)
+```
+
+スクリプト連携 (`kcs batch run && kcs index`) はこれらを参照します。
 
 ---
 

@@ -177,6 +177,8 @@ README.md
 
 ただし、KCSでは各フォルダの `.kcs` が自分のフォルダ直下だけを管理するため、dedup の保証範囲は **同一 `.kcs` の object store 内** に限定します。
 
+ここでの「自分のフォルダ直下」は、サブフォルダ配下に別の `.kcs` がある場合、そのサブツリーは子 `.kcs` のスコープとなり、親 `.kcs` は子 `.kcs` 配下のファイルを再帰的に取り込んで object 化しないことを意味します。よって、階層的に `.kcs` が並んでも親子間で同一ファイルが二重に保存されることは発生しません (別 `.kcs` 間で同一内容が物理的に重複するのは、後述のとおり **ユーザーが意図的に複数フォルダへ同じファイルを配置した場合に限られます**)。
+
 同じ `.kcs` 内で同じ内容なら、ファイル名が違っても保存は1回。
 
 ```text
@@ -195,7 +197,7 @@ path → object_hash
 
 だけを持ちます。
 
-一方で、別フォルダの別 `.kcs` に同一内容のファイルがある場合は、物理的な重複保存を許容します。
+一方で、別フォルダの別 `.kcs` に同一内容のファイルがある場合 (= ユーザーが意図的に複数フォルダへ同じファイルを配置している状態であり、親 `.kcs` がサブツリーを再帰取り込みした結果ではない) は、物理的な重複保存を許容します。
 
 ```text
 A/
@@ -238,13 +240,13 @@ KCSでも同様に、ある時点のフォルダ構造を保存します。
       "path": "docs/report.pdf",
       "type": "file",
       "raw_hash": "sha256:abc",
-      "normalized_hash": "sha256:def"
+      "normalize": { "tool_profile_hash": "sha256:tool1" }
     },
     {
       "path": "notes/idea.md",
       "type": "file",
       "raw_hash": "sha256:ghi",
-      "normalized_hash": "sha256:jkl"
+      "normalize": { "tool_profile_hash": "sha256:tool1" }
     }
   ]
 }
@@ -334,9 +336,10 @@ Time-travel knowledge navigation
 KCSでは各raw objectに対して、Markdown化結果も保存します。
 
 ```text
-raw_hash + markdown_tool_profile_hash
-→ normalized_hash
+(raw_hash, tool_profile_hash) → normalized object のパス
 ```
+
+Markdown 自体の content hash (normalized_hash) は計算しません。Markdownize Adapter は LLM ベースで非決定的なため、content hash で identity を取ると再生成のたびに別物として扱われ、判定が安定しません。identity は `(raw_hash, tool_profile_hash)` で一意に決め、物理パスは raw_hash と tool_profile_hash の組をファイル名に埋め込む形にします。
 
 例：
 
@@ -344,8 +347,7 @@ raw_hash + markdown_tool_profile_hash
 {
   "raw_hash": "sha256:abc",
   "tool_profile_hash": "sha256:tool1",
-  "normalized_hash": "sha256:def",
-  "normalized_object": "objects/normalized/de/f0/def.md"
+  "normalized_object": "objects/normalized/ab/cd/abc.tool1.md"
 }
 ```
 
@@ -355,7 +357,7 @@ raw_hash + markdown_tool_profile_hash
 この原文をこのMarkdown化ツールで処理した結果
 ```
 
-を固定できます。
+を固定できます。Markdown は read-only artifact として扱い、破損検出はファイル存在チェックや再生成に委ねます。
 
 ---
 
@@ -393,7 +395,7 @@ Embedding object は正本ではなく、chunk と embedding profile から再�
 Normalized Markdownから見出し単位でchunkを作る。
 
 ```text
-normalized_hash + heading/span
+(raw_hash, tool_profile_hash) + heading/span
 → chunk_hash
 ```
 
@@ -402,13 +404,16 @@ chunk object：
 ```json
 {
   "chunk_hash": "sha256:chunk",
-  "normalized_hash": "sha256:def",
+  "raw_hash": "sha256:abc",
+  "tool_profile_hash": "sha256:tool1",
   "heading_path": ["認証仕様", "API Token"],
   "char_start": 1200,
   "char_end": 1500,
   "text_hash": "sha256:text"
 }
 ```
+
+`text_hash` は chunk の **抽出範囲** に対する hash であり、Markdown 全体の content hash ではない点に注意。chunk の identity は `(raw_hash, tool_profile_hash, heading/span)` から決まる。
 
 ---
 
@@ -776,7 +781,7 @@ zstd compression
 dedup within one .kcs
 ```
 
-v0では、別 `.kcs` 間の同一 raw_hash / normalized_hash を物理的に統合しない。重複排除よりも、フォルダ単位の独立性、移動・削除・export・purge の分かりやすさを優先する。
+v0では、別 `.kcs` 間の同一 raw_hash や同一 `(raw_hash, tool_profile_hash)` 組の派生 artifact を物理的に統合しない。重複排除よりも、フォルダ単位の独立性、移動・削除・export・purge の分かりやすさを優先する。
 
 ## v1
 
@@ -1797,14 +1802,14 @@ folder/
       "path": "memo.md",
       "kind": "text_native",
       "raw_hash": "sha256:...",
-      "normalized_hash": "sha256:...",
+      "normalize": { "tool_profile_hash": "sha256:..." },
       "status": "indexed"
     },
     {
       "path": "report.pdf",
       "kind": "non_text_native",
       "raw_hash": "sha256:...",
-      "normalized_hash": "sha256:...",
+      "normalize": { "tool_profile_hash": "sha256:..." },
       "status": "indexed"
     }
   ],

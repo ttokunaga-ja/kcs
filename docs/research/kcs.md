@@ -5,7 +5,9 @@
 `.kcs` は、基本的に **各フォルダに隠しディレクトリとして生成されるフォルダローカルな知識メタデータ**です。macOS の `.DS_Store` に近く、子フォルダや孫フォルダにもそれぞれ `.kcs` が存在する前提です。
 ただし、Prepare・Markdownize（OCRを含む）・マルチモーダル Embedding・optional Summary / Classification / Rerank などの実行方法は `.kcs` に直接持たせません。Adapter の実行設定、コマンドパス、URL、認証情報は各デバイスの `~/.config/kcs/` や OS keychain に保存し、`.kcs` は生成済み artifact の provenance と互換性判定に必要な profile hash だけを保持します。
 
-`.kcs` が分散配置されるため、raw / normalized object の dedup は **各 `.kcs/objects` 内** に限定します。別フォルダの別 `.kcs` に同一内容のファイルがある場合は、フォルダ単位の独立性・部分公開・partial sync・purge の単純さを優先し、物理的な重複保存を許容します。
+> **スコープ境界 (重要)**: 各 `.kcs` が管理するのは **その `.kcs` が配置されたフォルダ自身が直接保持するファイルのみ** です。サブフォルダに別の `.kcs` が存在する場合、そのサブツリーは独立したスコープとして子 `.kcs` が管理し、親 `.kcs` は子 `.kcs` 配下のファイルを再帰的に取り込んで object 化することはありません。したがって、階層的に `.kcs` が並んでも、親子間で同一ファイルが二重に object 保存されることは発生しません。横断検索は scope registry を通じて複数 `.kcs` を束ねる別レイヤーで実現します (詳細は本文書 §6 と [git_kcs.md](git_kcs.md))。
+
+`.kcs` が分散配置されるため、raw / normalized object の dedup は **各 `.kcs/objects` 内** に限定します。別フォルダの別 `.kcs` に同一内容のファイルがある場合 (= ユーザーが意図的に複数フォルダへ同一ファイルを配置した場合) は、フォルダ単位の独立性・部分公開・partial sync・purge の単純さを優先し、物理的な重複保存を許容します。これは「親 `.kcs` がサブツリーを再帰的に取り込んで生じる重複」ではなく、ユーザーのファイル配置に起因する重複である点に注意してください。
 
 ---
 
@@ -318,6 +320,36 @@ patterns = [
 共有先デバイスのAdapter設定を上書きしない
 ```
 
+## 8.1 tool_lock_hash の計算規約
+
+commit object 等で参照される `tool_lock_hash` は、`tool-lock.json` 全体を1つの hash に畳み込んだものです。各 adapter の `profile_hash` 計算規約は [hash.md §9.1](hash.md) に従います。
+
+```text
+tool_lock_hash =
+  "sha256:" + base16(
+    sha256(
+      JCS({
+        spec_version: <int>,
+        prepare:        { tool_id, profile_hash },
+        markdown:       { tool_id, profile_hash },
+        embedding:      { tool_id, profile_hash, dimensions, distance, modality },
+        summary:        { tool_id, profile_hash },         # optional
+        classification: { tool_id, profile_hash },         # optional
+        rerank:         { tool_id, profile_hash }          # optional
+      })
+    )
+  )
+```
+
+ルール:
+
+- `cmd`, `args`, `url`, `config_hash`, capabilities などの実行可能・派生情報は **`tool_lock_hash` の入力に含めない**。`tool_lock_hash` は capability identity のみを表現する。
+- optional adapter (summary 等) が未設定の場合、そのキーごと省略する (= null と未設定を識別しない)。
+- `embedding` のみ次元・距離・modality を含めるのは、横断検索互換性 (§9) の決定根拠になるため。
+- `tool_lock_hash` の `spec_version` は `tool-lock.json` 自体の schema バージョンを指し、bump は breaking change として扱う ([productization_notes.md §横断規約](productization_notes.md))。
+
+これにより、commit が参照する `tool_lock_hash` から **どの artifact 群が再現可能か** を一意に決定できます。
+
 ---
 
 # 9. Embedding互換性ルール
@@ -354,12 +386,10 @@ BM25のみ横断検索
       "path": "docs/report.pdf",
       "raw_hash": "sha256:abc...",
       "kind": "non_text_native",
-      "normalized_path": ".kcs/normalized/docs/report.pdf.md",
-      "normalized_hash": "sha256:def...",
+      "normalized_path": ".kcs/objects/normalized/ab/cd/abc.tool1.md",
       "status": "indexed",
       "last_indexed_at": "2026-04-25T12:00:00Z",
-      "tool_profile_hash": "sha256:...",
-      "last_indexed_git_commit": null
+      "tool_profile_hash": "sha256:..."
     }
   ]
 }
@@ -367,19 +397,18 @@ BM25のみ横断検索
 
 ---
 
-# 11. `normalized/`
+# 11. `objects/normalized/`
 
-すべての入力をNormalized Markdownとして保存します。
+すべての入力をNormalized Markdownとして保存します。**物理保存は hash ベースの object store に統一**し、原文パスベースの表示は仮想 view として別レイヤーで提供します ([read_only.md §9](read_only.md), [productization_notes.md §5](productization_notes.md))。
 
 ```text
-.kcs/normalized/
-  README.md
-  docs/
-    report.pdf.md
-  slides/
-    intro.pptx.md
-  images/
-    architecture.png.md
+internal (正本):
+  .kcs/objects/normalized/ab/cd/<raw_hash>.<tool_profile_hash>.md
+
+virtual view (UI 表示用):
+  docs/report.pdf.md
+  slides/intro.pptx.md
+  images/architecture.png.md
 ```
 
 処理ルール：
@@ -389,7 +418,7 @@ Text-native → Normalized Markdownとして保存
 Non-text-native → Markdown化 → Normalized Markdownとして保存
 ```
 
-KCS Coreは **Normalized Markdownだけを扱う**。
+KCS Coreは **Normalized Markdownだけを扱う**。Markdown 自体の content hash は計算・保存・比較しない (identity は `(raw_hash, tool_profile_hash)`、判定は [hash.md](hash.md) 参照)。
 
 ---
 
@@ -411,7 +440,7 @@ preserve_blocks = true
 {
   "chunk_id": "chk_01H...",
   "raw_path": "docs/report.pdf",
-  "normalized_path": ".kcs/normalized/docs/report.pdf.md",
+  "normalized_path": ".kcs/objects/normalized/ab/cd/<raw_hash>.<tool_profile_hash>.md",
   "heading_path": ["認証仕様", "API Token", "有効期限"],
   "section_id": "auth/api-token/expiry",
   "char_start": 1200,
@@ -431,7 +460,7 @@ MVPではSQLite内保存でもよいですが、将来公開可能性を考え�
   "chunk_id": "chk_01H...",
   "file_id": "sha256:abc...",
   "raw_path": "docs/report.pdf",
-  "normalized_path": ".kcs/normalized/docs/report.pdf.md",
+  "normalized_path": ".kcs/objects/normalized/ab/cd/<raw_hash>.<tool_profile_hash>.md",
   "heading_path": ["認証仕様", "API Token"],
   "section_id": "auth/api-token",
   "char_start": 880,

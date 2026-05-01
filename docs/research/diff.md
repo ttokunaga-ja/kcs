@@ -145,8 +145,6 @@ objects/normalized_units/
   "unit_type": "page",
   "unit_key": "page:12",
   "markdown": "## 3.2 認証仕様\n...",
-  "canonical_text_hash": "sha256:...",
-  "markdown_hash": "sha256:...",
   "tool_profile_hash": "sha256:..."
 }
 ```
@@ -284,36 +282,25 @@ report.pdf.md は正本ではなく view
 
 # 8. Agent出力ゆれ対策
 
-それでも、同じページをMarkdown化しても出力が少し変わる可能性があります。
+同じページをMarkdown化しても LLM ベースの Adapter は出力が少し変わる可能性があります。
 
-そのため、差分判定には `markdown_hash` だけでなく、**canonical hash** を使います。
+KCS ではこの非決定性を **Markdown 側 content hash で吸収しようとしない** 方針です。Markdown の content hash (markdown_hash / canonical_text_hash 等) は計算・保存・比較しません。代わりに、差分判定は **raw 側で完結** させます。
 
 ---
 
-## canonicalization
+## raw 側で差分を判定する
 
-Markdownを比較する前に正規化します。
-
-例：
+unit が「変わったか」は次で判定します。
 
 ```text
-空白正規化
-連続改行正規化
-Markdown table整形
-箇条書き記号統一
-全角半角の一部正規化
-HTML entity正規化
-コードブロック保持
-LaTeX保持
+prepared_hash が変わった
+  または
+raw_hash が変わり、unit に対応する page_fingerprint (§13) が変わった
+  または
+tool_profile_hash が変わった
 ```
 
-その後にhash。
-
-```text
-canonical_text_hash = hash(canonicalize(markdown))
-```
-
-これにより、軽微な表記ゆれによる全差分を減らせます。
+これらが変わらなければ、Markdown を再生成する必要はなく、既存の Markdown unit をそのまま再利用します (= LLM 再呼び出し不要)。Markdownize Adapter の出力ゆれは「同じ unit について複数の表現がありうる」状態を許容することで吸収し、表記ゆれ吸収のための canonicalization は **検索インデックス側** (FTS tokenization, normalization) に閉じます。
 
 ---
 
@@ -583,11 +570,14 @@ CREATE TABLE normalized_units (
   unit_id TEXT NOT NULL,
   prepared_hash TEXT NOT NULL,
   tool_profile_hash TEXT NOT NULL,
-  markdown_hash TEXT NOT NULL,
-  canonical_hash TEXT NOT NULL,
-  normalized_object_hash TEXT NOT NULL,
-  created_at TEXT NOT NULL
+  normalized_object_path TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  UNIQUE (unit_id, prepared_hash, tool_profile_hash)
 );
+
+-- 注: Markdown 側 content hash (markdown_hash / canonical_hash) は持たない。
+-- normalized_unit の identity は (unit_id, prepared_hash, tool_profile_hash) で
+-- 一意に決まり、再生成判定もこの組のみで行う。
 ```
 
 ---

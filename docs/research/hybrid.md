@@ -138,6 +138,55 @@ kcs search "..." --no-vector  # 明示的にvector無効
 
 ---
 
+# 結果の多様化 (MMR / dedup)
+
+Hybrid 検索は素の RRF だけでは「同一原文の隣接 chunk が上位を独占」する偏りが起きやすいので、後処理で多様化を行います。
+
+```toml
+[search.diversify]
+enabled = true
+strategy = "mmr"          # "mmr" | "group_by_raw_hash" | "off"
+mmr_lambda = 0.7          # 1.0 = relevance only, 0.0 = diversity only
+max_per_raw_hash = 3      # 同一原文からの最大採用 chunk 数 (group_by_raw_hash 時)
+```
+
+MMR の実装は標準的な選択則:
+
+```text
+score(c) = λ * relevance(c) - (1-λ) * max_{c' ∈ selected} similarity(c, c')
+```
+
+`similarity` は vector 利用可なら cosine、無ければ heading_path / section_id の Jaccard。
+
+# ページング / カーソル
+
+Agent が長尾を辿るための規約:
+
+```bash
+kcs search "..." --limit 20                  # default 20, max 200
+kcs search "..." --limit 20 --offset 20      # offset ベース。小規模向け
+kcs search "..." --limit 20 --cursor <token> # cursor ベース。スナップショット越し安全
+```
+
+- **offset** は同一スナップショット内で動作。検索中に index 更新があると drift しうる。
+- **cursor** は `(snapshot_id, last_score, last_chunk_id)` を opaque にエンコード。**index 更新があっても結果順序が安定**する。
+- snapshot 時点指定 (`--at <commit>`) と cursor は併用可。`--at` を指定すると cursor は対象 snapshot を固定。
+
+レスポンスに `next_cursor` を含めます。
+
+# Snapshot 越し検索 (`--at`) と hybrid mode の組合せ
+
+```text
+--at <commit>          → 指定 commit 時点で indexed だった chunks のみ対象
+--at <commit> --vector → 指定 commit 時点の embedding profile が現在と互換ならOK、
+                         非互換 (dimensions/distance/modality/profile_hash 不一致) なら
+                         KCS-E-SEARCH-VEC-INCOMPAT を返す。fail_behavior=fallback なら text へ落ちる。
+```
+
+過去 snapshot の embedding を再生成するかは別操作 (`kcs reindex --at`) として分離します。
+
+---
+
 # AI Agent向けレスポンス
 
 Agentには、実際にどの検索が使われたかを返すべきです。
@@ -149,6 +198,10 @@ Agentには、実際にどの検索が使われたかを返すべきです。
   "resolved_mode": "text",
   "fallback": true,
   "fallback_reason": "embedding_endpoint_not_configured",
+  "error_code": "KCS-E-SEARCH-VEC-UNAVAIL-001",
+  "diversify": { "strategy": "mmr", "mmr_lambda": 0.7 },
+  "paging": { "limit": 20, "offset": 0, "next_cursor": "eyJzbmFwIjoi..." },
+  "snapshot_at": "kcs_01H...",
   "results": [...]
 }
 ```
