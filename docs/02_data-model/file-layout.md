@@ -85,6 +85,22 @@ task state は検索効率と再開性のための運用データであり、喪
 
 初回に indexed scope として扱う範囲は、ユーザーが `.kcsignore` や設定で明示的に除外していないすべての対象範囲である。
 
+ただし、初回スキャンでは対象範囲 preview、除外提案、明示承認を必須にする。承認前に raw object 保存や Adapter 実行を開始してはならない。
+
+全体検索は device-local な scope registry または探索済み `.kcs/` 一覧を検索実行側が束ねることで実現する。scope registry は共有 `.kcs/` の正本ではなく、デバイスローカルな探索・検索対象管理である。
+
+```text
+scope_id
+root_path
+kcs_path
+folder_id
+participates_in_global_search
+approved_at
+last_seen_at
+effective_ignore_hash
+permission_status
+```
+
 ## Purge Tombstones
 
 `objects/tombstones/` は履歴完全削除の最小監査情報を保持する場所である。本文、normalized text、秘匿path、復元可能なraw hashを保存してはならない。

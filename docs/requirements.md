@@ -711,6 +711,22 @@ kcs search "認証仕様" --since 2026-04-01
 
 初回登録時の indexed scope は、ユーザーが `.kcsignore` や設定で明示的に除外していないすべての対象範囲とする。デフォルト全体検索は、明示 ignore されていないローカル知識空間を横断するための既定動作である。
 
+ただし、初回スキャンでは対象範囲 preview、除外提案、明示承認を必須とする。これはデフォルト全管理を弱めるものではなく、KCS が単なる検索インデックスではなく原本複製を伴う content-addressed archive であることを、ユーザーが理解したうえで開始するためである。
+
+初回スキャン前に表示する情報:
+
+```text
+対象 root / scope
+推定ファイル数
+推定容量
+大容量ファイル
+hidden / system / build / cache 系候補
+現在有効な ignore
+network transmission policy
+```
+
+除外候補は提案に留め、ユーザーの明示なしに自動除外しない。未承認 scope に対する `kcs index` は preview と確認を要求し、非対話環境では承認情報または `--yes` / `--approve` がない限り失敗させる。
+
 ```bash
 kcs search "認証仕様"
 ```
@@ -799,11 +815,15 @@ target/
 
 KCS はデフォルト全管理を維持し、除外は `.kcsignore` または設定で明示する。実装は便利な ignore テンプレートを提供してよいが、ユーザーの明示なしに検索範囲や保存範囲を現在フォルダだけへ狭めない。
 
+容量効率よりも、知識を失わず、あとから検索・履歴探索・復元できる利便性を優先する。したがって、動画・巨大PDF・画像・Officeファイルも、ユーザーが明示的に除外しない限り管理対象に含める。
+
+ただし、UI / CLI では、KCS が検索インデックスだけでなく原本ファイルを content-addressed archive に保存すること、初回 index で追加ディスク容量を使うこと、dedup 後の保存見込みを明示する。
+
 ---
 
 ## 23. 大容量ファイルの扱い
 
-デフォルトは管理対象。ただし警告は必須。
+デフォルトは管理対象。ただし警告と容量見積もりは必須。
 
 ```text
 Large file detected: video.mp4 (8.2GB)
@@ -818,6 +838,8 @@ Add pattern to .kcsignore to exclude.
 archive_all_files = true
 large_file_warning = "1GB"
 ```
+
+ディスク枯渇が予測される場合でも、KCS が勝手に対象範囲を狭めてはならない。必要容量、空き容量、除外候補を表示し、続行・除外・延期・中断をユーザーに選ばせる。
 
 ---
 
@@ -909,6 +931,8 @@ kcs purge --raw-hash sha256:abc... --all-history
 ```
 
 GUI では、検索結果・履歴ビュー・ファイル詳細画面から **このファイルの履歴を完全削除** を実行できるようにする。この操作は通常削除や archive とは別物であり、確認 UI と影響範囲の preview を必須にする。
+
+`purge` の保証範囲は KCS 管理下の object store、snapshot DAG、index、pack、cache、tombstone である。OS backup、Time Machine、クラウド同期の過去版、外部 export、ユーザーが手動コピーしたファイル、KCS 外のログまでは KCS 単体では保証しない。UI 文言では「KCS 管理下の履歴から完全削除」という意味で扱う。
 
 purge は次を行う。
 

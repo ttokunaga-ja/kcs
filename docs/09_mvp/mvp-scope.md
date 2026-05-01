@@ -59,6 +59,10 @@ Tauri GUI本実装
 
 初回の indexed scope は、ユーザーが明示的に `.kcsignore` や設定で除外していないすべての対象範囲とする。
 
+ただし、初回スキャンでは対象範囲 preview、除外提案、明示承認を必須にする。KCS は全ファイル管理をデフォルトにするが、単なる検索インデックスではなく原本複製を伴う content-addressed archive であることを、ユーザーが確認してから index を開始する。
+
+preview には、対象 scope、推定ファイル数、推定容量、大容量ファイル、現在有効な ignore、除外候補を含める。除外候補は提案であり、ユーザーの承認なしに自動除外しない。
+
 ```bash
 kcs search "query"
 ```
@@ -83,6 +87,7 @@ vector unavailableでも全文検索できる
 restoreが現実ファイルを直接上書きしない
 purge後に対象ファイル由来objectが検索・復元できない
 purge tombstoneから本文や秘匿pathを復元できない
+未承認scopeに対する初回indexがpreviewと明示承認なしに開始されない
 ```
 
 task state / retry queue / index は喪失を許容する。失われた場合でも raw object、履歴 object、tool profile から未完了作業と検索インデックスを再構築できることを完了条件に含める。

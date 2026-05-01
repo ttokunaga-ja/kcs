@@ -168,6 +168,7 @@ KCS の作成意図は、AI を契機としてローカルの知識空間を再�
 | [0013-folder-local-kcs-per-directory.md](adr/0013-folder-local-kcs-per-directory.md) | `.kcs/` は各フォルダに生成されるフォルダローカルな隠しメタデータ |
 | [0014-mvp-preserves-core-search-experience.md](adr/0014-mvp-preserves-core-search-experience.md) | MVP は検索体験を削った薄いデモではなく、基本機能を備えた最小の完全系 |
 | [0015-adapters-are-device-local.md](adr/0015-adapters-are-device-local.md) | Adapter 実行設定はデバイスローカルに保持し、共有 `.kcs/` では管理しない |
+| [0016-initial-scan-preview-and-approval.md](adr/0016-initial-scan-preview-and-approval.md) | 初回スキャンでは対象範囲 preview、除外提案、明示承認を必須にする |
 
 ### `research/` — 研究ノート(正本)
 
@@ -180,22 +181,24 @@ KCS の作成意図は、AI を契機としてローカルの知識空間を再�
 | [hash.md](research/hash.md) | ハッシュアルゴリズムの検討 |
 | [hybrid.md](research/hybrid.md) | ハイブリッド検索の検討 |
 | [kcs.md](research/kcs.md) | KCS の初期構想 |
+| [productization_notes.md](research/productization_notes.md) | 初回スキャン承認、scope registry、purge保証範囲、Adapter安全境界などプロダクト化時の補足 |
 
 ---
 
 ## 3. 読む順序(依存順)
 
 1. [research/philosophy.md](research/philosophy.md) + [research/git_kcs.md](research/git_kcs.md) — プロダクト意図と正本方針
-2. [requirements.md](requirements.md) — 研究ノートを統合した要件ドラフト
-3. [01_concepts/overview.md](01_concepts/overview.md) + [kcs-vs-git.md](01_concepts/kcs-vs-git.md) + [00_overview/glossary.md](00_overview/glossary.md) — 共通語彙と全体像
-4. **`02_data-model/`** の中核 — [file-layout.md](02_data-model/file-layout.md) → [object-store.md](02_data-model/object-store.md) → [snapshot-dag.md](02_data-model/snapshot-dag.md) → [evidence-pointer-schema.md](02_data-model/evidence-pointer-schema.md)
-5. `02_data-model/` のスキーマ群 — normalized-markdown-spec / chunk / node / edge / kcsignore / manifest / sqlite
-6. [01_concepts/folder-local-kcs.md](01_concepts/folder-local-kcs.md), [evidence-pointer.md](01_concepts/evidence-pointer.md) — 境界条件と原文回帰
-7. [06_adapters/trait-definitions.md](06_adapters/trait-definitions.md) — 差し替え契約(`tool_profile_hash` の意味も)
-8. [05_interface/cli-spec.md](05_interface/cli-spec.md) — ユーザー契約(`commit / checkout / restore / search --at` を含む)
-9. `03_pipeline/` → `04_runtime/`(特に [time-travel-search.md](04_runtime/time-travel-search.md), [restore.md](04_runtime/restore.md), [gc-and-pack.md](04_runtime/gc-and-pack.md))
-10. `07_implementation/` および `09_mvp/`
-11. `08_evaluation/` は実装と並走可
+2. [research/productization_notes.md](research/productization_notes.md) — 初回スキャン、容量表示、安全境界、scope registry などプロダクト化時の補足
+3. [requirements.md](requirements.md) — 研究ノートを統合した要件ドラフト
+4. [01_concepts/overview.md](01_concepts/overview.md) + [kcs-vs-git.md](01_concepts/kcs-vs-git.md) + [00_overview/glossary.md](00_overview/glossary.md) — 共通語彙と全体像
+5. **`02_data-model/`** の中核 — [file-layout.md](02_data-model/file-layout.md) → [object-store.md](02_data-model/object-store.md) → [snapshot-dag.md](02_data-model/snapshot-dag.md) → [evidence-pointer-schema.md](02_data-model/evidence-pointer-schema.md)
+6. `02_data-model/` のスキーマ群 — normalized-markdown-spec / chunk / node / edge / kcsignore / manifest / sqlite
+7. [01_concepts/folder-local-kcs.md](01_concepts/folder-local-kcs.md), [evidence-pointer.md](01_concepts/evidence-pointer.md) — 境界条件と原文回帰
+8. [06_adapters/trait-definitions.md](06_adapters/trait-definitions.md) — 差し替え契約(`tool_profile_hash` の意味も)
+9. [05_interface/cli-spec.md](05_interface/cli-spec.md) — ユーザー契約(`commit / checkout / restore / search --at` を含む)
+10. `03_pipeline/` → `04_runtime/`(特に [time-travel-search.md](04_runtime/time-travel-search.md), [restore.md](04_runtime/restore.md), [gc-and-pack.md](04_runtime/gc-and-pack.md))
+11. `07_implementation/` および `09_mvp/`
+12. `08_evaluation/` は実装と並走可
 
 > NOTE: 現時点では `00_overview/`、`01_concepts/`、`02_data-model/`、`03_pipeline/`、`04_runtime/`、`05_interface/`、`06_adapters/`、`07_implementation/`、`08_evaluation/`、`09_mvp/`、`adr/` の多くはプレースホルダーです。実装時は `research/` と `requirements.md` を参照して順次具体化します。
 

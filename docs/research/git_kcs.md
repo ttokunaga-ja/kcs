@@ -658,13 +658,57 @@ target/
 
 デフォルト全管理は維持する。実装は便利な `.kcsignore` テンプレートを提供してよいが、ユーザーの明示なしに検索範囲や保存範囲を現在フォルダだけへ狭めない。
 
+ただし、初回スキャンでは、KCS がどの範囲を indexed scope として扱うかを事前に表示し、ユーザーの明示承認を必須にする。これは「デフォルト全管理」を弱めるためではなく、KCS が単なる検索インデックスではなく content-addressed archive であることをユーザーが理解したうえで開始するためである。
+
+初回スキャン前の必須フロー:
+
+```text
+1. 候補 scope を探索する
+2. 対象フォルダ、推定ファイル数、推定容量、大容量ファイル、hidden/system/build/cache 系候補を preview 表示する
+3. 除外候補を提案する
+4. ユーザーが .kcsignore / 設定を調整できるようにする
+5. 最終的な対象範囲を再 preview する
+6. 明示承認後に raw object 保存、Markdownize、Embedding、index 更新を開始する
+```
+
+除外候補はあくまで提案であり、ユーザーの承認なしに自動除外しない。
+
+提案例:
+
+```text
+Suggested exclusions:
+  node_modules/     build/cache candidate
+  target/           build output candidate
+  .git/             VCS internal metadata
+  *.tmp             temporary file
+  *.cache           cache file
+  video.mp4         large file: 8.2GB
+```
+
+CLI では、未承認 scope に対して `kcs index` を実行した場合、まず preview を表示し、対話的な確認または `--yes` / `--approve` を要求する。非対話環境では、承認情報または明示オプションがない限り失敗させる。
+
+承認記録には少なくとも次を残す。
+
+```text
+scope_id
+root_path
+approved_at
+actor
+kcs_version
+effective_ignore_hash
+estimated_file_count
+estimated_total_bytes
+```
+
 ---
 
 # 22. 大容量ファイルの扱い
 
 あなたの思想では、デフォルト管理です。
 
-ただし警告は必要です。
+容量効率よりも、知識を失わず、ユーザーがあとから横断検索・履歴検索・復元できる利便性を優先する。したがって、大容量ファイルであってもユーザーが明示的に除外しない限り管理対象に含める。
+
+ただし、プロダクトとしては「検索インデックス」ではなく「原本複製を伴う知識アーカイブ」であることを明示し、警告と容量見積もりは必要です。
 
 ```text
 Large file detected: video.mp4 (8.2GB)
@@ -679,6 +723,8 @@ Add pattern to .kcsignore to exclude.
 archive_all_files = true
 large_file_warning = "1GB"
 ```
+
+ディスク枯渇が予測される場合も、KCS が勝手に対象範囲を狭めてはならない。代わりに、必要容量、空き容量、除外候補を表示し、ユーザーに続行・除外・中断を選ばせる。
 
 ---
 

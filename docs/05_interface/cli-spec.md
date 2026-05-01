@@ -10,6 +10,7 @@
 kcs init
 kcs status
 kcs index
+kcs index --preview
 kcs resume
 kcs retry
 kcs repair
@@ -27,6 +28,20 @@ kcs purge <path> --all-history --reason <reason>
 ```
 
 `kcs init` は現在フォルダの `.kcs` を作成する。子フォルダの `.kcs` は `kcs index` や探索処理が対象を検出した時点で必要に応じて生成する。
+
+## Init / Index Preview
+
+未承認 scope に対して `kcs index` を実行した場合、KCS は raw object 保存や Adapter 実行を始める前に対象範囲 preview を表示する。
+
+```bash
+kcs index --preview
+kcs index --approve
+kcs index --yes
+```
+
+preview には、対象 root / scope、推定ファイル数、推定容量、大容量ファイル、現在有効な ignore、除外候補、network transmission policy を含める。
+
+除外候補は提案であり、ユーザーの承認なしに自動除外しない。非対話環境では、承認済み scope または `--yes` / `--approve` がない限り `kcs index` は失敗する。
 
 ## Search
 

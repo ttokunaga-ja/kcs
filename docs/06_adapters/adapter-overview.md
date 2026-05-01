@@ -153,12 +153,16 @@ Adapter には最低限以下を設定できるようにする。
 ```toml
 [adapter.policy]
 allow_network = false
+allowed_scope = "."
 max_input_bytes = 104857600
 timeout_seconds = 300
 redact_logs = true
 store_request_body = false
 store_response_body = false
+require_command_confirmation = true
 ```
+
+任意コマンドや任意URLを使う Adapter は、初回実行時に command / URL / scope / network policy を preview し、ユーザー承認を得る。実装では command allowlist、secret redaction、ログ本文禁止を前提にする。
 
 ## ログ
 

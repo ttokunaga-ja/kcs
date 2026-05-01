@@ -47,6 +47,8 @@ kcs purge --raw-hash sha256:abc... --all-history
 
 GUI では、検索結果・履歴ビュー・ファイル詳細画面から **このファイルの履歴を完全削除** を実行できるようにする。
 
+`purge` の保証範囲は KCS 管理下の object store、snapshot DAG、index、pack、cache、tombstone である。OS backup、Time Machine、クラウド同期の過去版、外部 export、ユーザーが手動コピーしたファイル、KCS 外のログまでは KCS 単体では保証しない。UI では「KCS 管理下の履歴から完全削除」という意味で扱う。
+
 purge は次を行う。
 
 ```text
