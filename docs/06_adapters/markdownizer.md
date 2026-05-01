@@ -1,15 +1,15 @@
-# Markdown Processing Adapter
+# Markdownize Adapter
 
-> 正本: `adapter-overview.md`。Markdown 化は OCR と並列の処理ではなく、OCR を必要に応じて内包する Markdown 処理として扱う。
+> 正本: `adapter-overview.md`。Markdownize は OCR と並列の処理ではなく、OCR を必要に応じて内包する。
 
 ## 役割
 
-Markdown 処理 Adapter は raw object を Normalized Markdown artifact に変換する。対象は text-native な Markdown / txt だけでなく、PDF、Office 文書、画像、音声を含む。
+Markdownize Adapter は raw object または prepared unit を Normalized Markdown artifact に変換する。対象は text-native な Markdown / txt だけでなく、PDF、Office 文書、画像、音声を含む。
 
 ```text
 raw object
   -> prepared unit
-  -> Markdown processing Adapter
+  -> Markdownize Adapter
   -> normalized Markdown
 ```
 

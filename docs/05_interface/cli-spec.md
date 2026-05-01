@@ -4,6 +4,8 @@
 
 ## Core Commands
 
+`snapshot` を正規コマンド名とし、`commit` は Git に慣れた開発者向け alias として扱う。どちらも内部的には同じ履歴 object を作る。
+
 ```bash
 kcs init
 kcs status
@@ -23,6 +25,8 @@ kcs gc --dry-run
 kcs gc --prune-unreachable
 kcs purge <path> --all-history --reason <reason>
 ```
+
+`kcs init` は現在フォルダの `.kcs` を作成する。子フォルダの `.kcs` は `kcs index` や探索処理が対象を検出した時点で必要に応じて生成する。
 
 ## Search
 

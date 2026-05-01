@@ -6,9 +6,9 @@ Accepted.
 
 ## Context
 
-KCS core must preserve access to existing knowledge even when network services, cloud APIs, or device-local tools are unavailable. At the same time, Markdown processing, Embedding processing, search-delegation Agent work, and summarization Agent work may require different local, cloud, internal, or faculty services depending on the user environment.
+KCS core must preserve access to existing knowledge even when online APIs, offline APIs, or device-local tools are unavailable. At the same time, Prepare, Markdownize, multimodal Embedding, and optional Summary / Classification / Rerank work may use different execution modes depending on the user environment: online APIs such as hosted LLMs, offline APIs such as local LLM servers, or deterministic libraries.
 
-OCR is not modeled as a top-level peer of Markdown processing. It is a capability inside Markdown processing for scanned PDFs, images, and other non-text-native inputs.
+OCR is not modeled as a top-level peer of Markdownize. It is a capability inside Markdownize for scanned PDFs, images, and other non-text-native inputs.
 
 ## Decision
 
@@ -17,10 +17,12 @@ KCS core remains offline-capable for existing snapshot / artifact exploration, r
 The following work is delegated to user-selected Adapters:
 
 ```text
-Markdown processing, including OCR when needed
-Embedding processing
-Search delegation Agent
-Summarization Agent
+Prepare
+Markdownize, including OCR when needed
+Multimodal Embedding
+Summary optional
+Classification optional
+Rerank optional
 ```
 
 All Adapters connect through the common KCS API. Executable configuration, service URLs, commands, and credentials are device-local and are not stored in shared `.kcs/` metadata.

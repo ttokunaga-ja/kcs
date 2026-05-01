@@ -2,9 +2,9 @@
 
 > 正本は `docs/research/` 配下の研究ノートである。このファイルは研究ノートを実装向けに統合した要件ドラフトであり、矛盾がある場合は `docs/research/` 側を優先して同期する。
 
-> **KCSは、すべてのローカルファイルを content-addressed object として保存し、Markdown 化して、現在と過去の知識を人間と AI Agent が探索できるようにする Git inspired なローカル知識アーカイブである。KCS core はオフラインで既存 snapshot / artifact を探索・復元でき、Markdown 処理（OCRを含む） / Embedding 処理 / 検索代行 Agent / 要約 Agent はユーザー選択の Adapter に委譲する。**
+> **KCSは、すべてのローカルファイルを content-addressed object として保存し、Markdown 化して、現在と過去の知識を人間と AI Agent が探索できるようにする Git inspired なローカル知識アーカイブである。KCS core はオフラインで既存 snapshot / artifact を探索・復元でき、Prepare / Markdownize（OCRを含む） / マルチモーダル Embedding / optional Summary・Classification・Rerank はユーザー選択の Adapter に委譲する。**
 
-> **KCS is a Git-inspired, local-first knowledge archive that stores every file as a content-addressed object, normalizes it into Markdown, and makes both current and historical knowledge navigable by humans and AI Agents. The KCS core remains offline-capable for existing snapshots and artifacts, while Markdown processing (including OCR), Embedding processing, search-delegation Agent work, and summarization Agent work are delegated to user-selected adapters.**
+> **KCS is a Git-inspired, local-first knowledge archive that stores every file as a content-addressed object, normalizes it into Markdown, and makes both current and historical knowledge navigable by humans and AI Agents. The KCS core remains offline-capable for existing snapshots and artifacts, while Prepare, Markdownize (including OCR), multimodal Embedding, and optional Summary / Classification / Rerank work are delegated to user-selected adapters.**
 
 ---
 
@@ -51,7 +51,7 @@ KCS: ローカルファイル全体の知識アーカイブ
 
 KCS は **core が完全オフラインで動作する** ことを基本要件とする。ネットワーク接続は前提としない。
 
-ここでいうオフライン保証の対象は、KCS 本体の object store / snapshot / restore / search / index 管理である。Markdown 処理（OCRを含む）、Embedding 処理、検索代行 Agent、要約 Agent などの知能処理は Adapter に委譲し、ユーザーがローカル実装・クラウド実装・社内/学部サービス実装を自由に選べるようにする。
+ここでいうオフライン保証の対象は、KCS 本体の object store / snapshot / restore / search / index 管理である。Prepare、Markdownize（OCRを含む）、マルチモーダル Embedding、optional Summary / Classification / Rerank などの処理は Adapter に委譲し、ユーザーが LLM などのオンライン API、ローカル LLM などのオフライン API、決定論的ライブラリ実装を自由に選べるようにする。
 
 ### オフライン動作が必須となる機能
 
@@ -67,44 +67,67 @@ Adapter 実行の状態管理と再開
 Adapter がオフライン実装を提供する場合、以下もオフラインで動作できる。
 
 ```text
-Markdown 処理 (PDF / docx / pptx / xlsx / 画像 / 音声 → Markdown。OCR を含む)
-Embedding 生成
-Agent 処理 (検索代行 / 要約 / 知識抽出 / Agent 応答)
+Prepare 処理 (raw object → prepared object / prepared unit)
+Markdownize 処理 (PDF / docx / pptx / xlsx / 画像 / 音声 → Markdown。OCR を含む)
+マルチモーダル Embedding 生成
+optional Summary / Classification / Rerank
 BM25 / Vector / Graph 検索
 ```
 
-これらは Adapter が提供する能力であり、KCS core のオフライン保証対象ではない。KCS core が保証するのは、外部 Adapter が利用できない状態でも、すでに生成済みの snapshot / normalized object / chunk / embedding object / index を使って探索・復元できることである。
+これらは Adapter が提供する能力であり、KCS core のオフライン保証対象ではない。KCS core が保証するのは、実行時 Adapter が利用できない状態でも、すでに生成済みの snapshot / normalized object / chunk / embedding object / index を使って探索・復元できることである。
 
 Adapter の実行設定、コマンドパス、URL、認証情報は共有対象ではない。各デバイスの `~/.config/kcs/` や OS keychain などに保存し、`.kcs/` は Adapter を管理しない。`.kcs/` に残すのは、生成済み artifact の provenance と互換性判定に必要な profile hash などの非実行情報に限る。
 
 ### Adapter 設計への含意
 
-クラウドサービス、社内サービス、学部サービス、ローカルコマンドは **差し替え可能な Adapter** として位置付ける。KCS は特定の Markdown 処理 / Embedding / Agent 実装を中核に含めず、Adapter 契約と実行記録を管理する。OCR は単独 Adapter として Markdown 化と並列に置かず、画像・スキャン PDF などを Markdown 化する Markdown 処理 Adapter の内部能力として扱う。
+LLM などのオンライン API、ローカル LLM などのオフライン API、決定論的ライブラリ、ローカルコマンドは **差し替え可能な Adapter** として位置付ける。KCS は特定の Prepare / Markdownize / Embedding / Summary / Classification / Rerank 実装を中核に含めず、Adapter 契約と実行記録を管理する。OCR は単独 Adapter として Markdownize と並列に置かず、画像・スキャン PDF などを Markdown 化する Markdownize Adapter の内部能力として扱う。
 
-選択可能な Adapter は最低限次を想定する。
+Adapter は提供主体ではなく、実行形態と決定性で分類する。
 
 ```text
-Markdown 処理 Adapter     OCRを含む raw -> normalized Markdown
-Embedding 処理 Adapter    chunk -> embedding object
-検索代行 Agent Adapter    KCS APIを使った検索・再ランキング・回答用コンテキスト収集
-要約 Agent Adapter        normalized / chunk / search result -> summary
+online_api:
+  ネットワーク越しに呼び出す API。例: hosted LLM / hosted embedding / hosted OCR API
+
+offline_api:
+  同一端末またはローカルネットワーク内で呼び出す API。例: local LLM server / local embedding server
+
+deterministic_library:
+  決定論的なライブラリやローカル処理。例: PDF text extraction / parser / rule-based normalizer
 ```
 
-Adapter は共通の KCS API を通じて KCS core と接続する。外部・社内・学部サービスを使う場合も、KCS core は同じ API 境界で task、input hash、output hash、profile hash、送信許可、実行状態を管理する。
+MVP で必要な Adapter は以下である。
+
+```text
+1. Prepare Adapter
+2. Markdownize Adapter
+3. Embedding Adapter
+4. Summary Adapter optional
+5. Classification Adapter optional
+6. Rerank Adapter optional
+```
+
+廃止する Adapter:
+
+```text
+Image Embedding Adapter
+Text Embedding Adapter
+```
+
+Adapter は共通の KCS API を通じて KCS core と接続する。オンライン API、オフライン API、決定論的ライブラリのいずれを使う場合も、KCS core は同じ API 境界で task、input hash、output hash、profile hash、ネットワーク送信許可、実行状態を管理する。
 
 ```text
 KCS core:  offline-capable
 Adapter:   user-selected
-Optional:  cloud adapter (explicit opt-in)
+Optional:  online_api adapter (explicit network opt-in)
 ```
 
-`--online` 等の明示オプトインなしに外部送信を行わない。Adapter は外部処理を使えるが、KCS core は外部サービスが停止しても既存 snapshot と既存 artifact を探索・復元できなければならない。
+`--online` 等の明示オプトインなしにネットワーク越しの API へファイル内容を送信しない。Adapter はオンライン API を使えるが、KCS core はオンライン API が停止しても既存 snapshot と既存 artifact を探索・復元できなければならない。
 
 ### `tool_profile_hash` による再現性
 
-Markdown 処理ツール / Embedding model / Agent のバージョン・量子化・パラメータは、実行設定そのものではなく、`tool-lock.json` と `tool_profile_hash` に非実行の profile 情報として記録する。
+Prepare / Markdownize / Embedding / Summary / Classification / Rerank のバージョン・量子化・パラメータは、実行設定そのものではなく、`tool-lock.json` と `tool_profile_hash` に非実行の profile 情報として記録する。
 
-ただし、Markdown 処理（OCR / 画像認識を含む）や Agent 処理など非決定的な処理を挟む場合、KCS の再現性は「同じ入力から必ず同じ出力を再生成できる」ことではなく、**一度生成された artifact を原本 hash と tool profile に紐付けて固定し、同じ原本 hash では既存 artifact を尊重する**ことを意味する。
+ただし、Markdownize（OCR / 画像認識を含む）、Embedding、Summary、Classification、Rerank など非決定的な処理を挟む場合、KCS の再現性は「同じ入力から必ず同じ出力を再生成できる」ことではなく、**一度生成された artifact を原本 hash と tool profile に紐付けて固定し、同じ原本 hash では既存 artifact を尊重する**ことを意味する。
 
 ```text
 raw_hash unchanged
@@ -137,7 +160,10 @@ Evidence Pointer
 履歴込み検索
 restore
 resume / retry / repair
+purge
 ```
+
+MVP は短期デモではなく、KCS の基本機能を実装する最初の完成形として扱う。実装順序は段階化してよいが、MVP の受入範囲から横断検索、履歴検索、出典追跡、復元、purge、安全な再実行を外さない。
 
 ### 理由
 
@@ -145,7 +171,7 @@ resume / retry / repair
 ローカルファイルアーカイブの本質は所有とプライバシー
 ネットワーク依存は機密文書 / 規制下文書の運用と相容れない
 オフライン環境 (現場 / 機内 / 法務隔離) でも知識にアクセスできる必要がある
-クラウド API への依存はサービス停止時に knowledge access を失う
+オンライン API への依存はサービス停止時に knowledge access を失う
 ```
 
 ---
@@ -179,6 +205,8 @@ KCS では以下のように再解釈します。
 | checkout   | snapshot materialization / view              |
 | blame      | evidence provenance                          |
 
+`index` / pending task / retry state は、KCS の正本ではない。これらは処理効率と再開性のための運用状態であり、失われても raw object / normalized object / tree / commit object から再検出・再生成できることを優先する。KCS が失ってはならないのは原本ファイル由来の raw object と、その raw object に紐づく履歴・証拠・snapshot である。
+
 ---
 
 ## 4. KCS の基本構造
@@ -186,6 +214,10 @@ KCS では以下のように再解釈します。
 KCS の `.kcs` は、知識スコープのルートに1つだけ置くものではない。基本的には `.DS_Store` のように各フォルダに隠しディレクトリとして生成され、子フォルダや孫フォルダにもそれぞれ `.kcs` が存在する。
 
 各 `.kcs` は、自分が配置されたフォルダ直下のファイルと子フォルダリンクを管理する。子フォルダの中身は、その子フォルダ自身の `.kcs` が管理する。
+
+ファイル名は `scope.json` を正とする。過去の研究メモに出てくる `folder.json` は同じ概念の旧称であり、実装・契約ドキュメントでは採用しない。
+
+`kcs init` は実行フォルダの `.kcs` を作成する。子フォルダの `.kcs` は、`kcs index` や探索処理が ignore されていない対象を発見した時点で必要に応じて生成する。つまり、各フォルダに `.kcs` が存在する設計を前提にしつつ、空フォルダや未到達フォルダへ先回りして大量生成する必要はない。
 
 Git 風の内部構造としては、各フォルダの `.kcs` はこうなります。
 
@@ -384,21 +416,33 @@ raw_hash + markdown_tool_profile_hash
 }
 ```
 
-これにより「この原文をこの Markdown 処理 Adapter / tool profile で処理した結果」を固定できる。Markdown 化処理の実体は KCS core ではなく Adapter が担う。OCR はこの Markdown 処理の内部能力として扱う。KCS は Adapter の実装種別に依存せず、生成済み normalized object を原本 hash と tool profile に紐付けて保持する。
+これにより「この原文をこの Markdownize Adapter / tool profile で処理した結果」を固定できる。Markdown 化処理の実体は KCS core ではなく Adapter が担う。OCR はこの Markdownize Adapter の内部能力として扱う。KCS は Adapter の実装種別に依存せず、生成済み normalized object を原本 hash と tool profile に紐付けて保持する。
 
 Normalized Markdown は、原本ファイルから生成された **読み取り専用の派生 artifact** である。ユーザーや AI Agent は normalized object を直接編集しない。追記・補足・誤抽出の指摘は annotation / note / extraction issue として別 object に保存する。
 
 原本が Markdown ファイルである場合は、その Markdown ファイル自体を原本として編集する。PDF / 画像 / Office 文書などから生成された Normalized Markdown を編集対象にしたい場合は、原本を Markdown に移行し、その Markdown を新しい正本として扱う。
 
+OCR や layout detection の誤りは Normalized Markdown の手編集では直さない。MVP では最低限、誤抽出箇所を `extraction issue` として記録し、再 Markdown 化または原本更新の候補として扱う。未反映の extraction issue は通常検索・RAG の根拠本文には混ぜず、レビューや修復のための補助情報として扱う。
+
 ---
 
 ## 11. Embedding も Git 風に管理する
 
-Embedding は raw file ではなく chunk に対して生成されます。
+Embedding は Text / Image で Adapter を分けない。Gemini 等のマルチモーダル Embedding を前提に、単一の Embedding Adapter が Markdown chunk、Image Object、検索クエリを同一のベクトル空間へ写像する。
 
 ```text
-chunk_hash + embedding_profile_hash
+target_hash + embedding_profile_hash
 → embedding_object
+```
+
+入力対象:
+
+```text
+markdown_chunk
+image_object
+query
+text
+image
 ```
 
 保存先:
@@ -407,9 +451,54 @@ chunk_hash + embedding_profile_hash
 objects/embeddings/ab/cd/<hash>
 ```
 
-Embedding は commit に直接埋め込まず、commit からは「どの embedding object を使ったか」を参照するだけにする。Embedding 生成の実体は Adapter が担う。KCS core は embedding object と `embedding_profile_hash` の対応、互換性、検索時の fallback を管理する。
+Embedding は commit に直接埋め込まず、commit からは「どの embedding object を使ったか」を参照するだけにする。Embedding 生成の実体は単一の Embedding Adapter が担う。KCS core は embedding object と `embedding_profile_hash`、`dimensions`、`distance`、`modality` の対応、互換性、検索時の fallback を管理する。
 
-Embedding object は正本ではなく、`chunk_hash + embedding_profile_hash` から再構築可能な派生 artifact として扱う。欠損・破損・profile 不一致がある場合、KCS は再生成タスクを作るか、全文検索へ fallback する。秘匿・法務・誤取り込みの purge では、embedding も本文情報を含み得る派生物として削除対象に含める。
+Embedding object は正本ではなく、`target_hash + embedding_profile_hash` から再構築可能な派生 artifact として扱う。欠損・破損・profile 不一致がある場合、KCS は再生成タスクを作るか、全文検索へ fallback する。秘匿・法務・誤取り込みの purge では、embedding も本文情報を含み得る派生物として削除対象に含める。
+
+画像説明文を経由した二段階 Embedding や、Image 専用 Embedding Adapter は採用しない。インデックスは物理的には `chunk_vec` / `image_vec` のように分けてもよいが、概念上は同じ Embedding Adapter、同じ `profile_hash`、同じ vector space で扱う。
+
+推奨する概念テーブル:
+
+```sql
+CREATE TABLE embeddings (
+  id TEXT PRIMARY KEY,
+  target_type TEXT NOT NULL, -- chunk | image | node | query_cache
+  target_id TEXT NOT NULL,
+  modality TEXT NOT NULL,    -- text | image | multimodal
+  vector BLOB NOT NULL,
+  dimensions INTEGER NOT NULL,
+  distance TEXT NOT NULL,
+  profile_hash TEXT NOT NULL
+);
+```
+
+`tool-lock.json` では、旧来の `embedding_text` / `embedding_image` を使わず、単一の `embedding` profile を記録する。
+
+```json
+{
+  "embedding": {
+    "tool_id": "embed_multimodal",
+    "kind": "command",
+    "cmd_hash": "sha256:...",
+    "args_hash": "sha256:...",
+    "config_hash": "sha256:...",
+    "mode": "batch",
+    "dimensions": 1536,
+    "distance": "cosine",
+    "modality": "multimodal",
+    "profile_hash": "sha256:..."
+  }
+}
+```
+
+`.kcs/config.toml` でも Embedding tool は単一指定にする。
+
+```toml
+[tools]
+embedding = "gemini_multimodal_embedding"
+```
+
+> KCSでは、Embedding処理をText/Imageで分離せず、Gemini等のマルチモーダルEmbeddingを前提とした単一のEmbedding Adapterに統合する。Embedding Adapterは、Markdown chunk、Image Object、検索クエリを同一のベクトル空間へ写像し、KCSはそのprofile_hash・dimensions・distance・modalityを記録する。画像説明文を経由した二段階Embeddingや、Image専用Embedding Adapterは採用しない。
 
 ---
 
@@ -504,7 +593,7 @@ Modified files:
 Deleted files:
   old/spec.pdf
 
-Pending Markdown processing:
+Pending Markdownize:
   docs/new.pdf
 
 Pending Embedding:
@@ -519,6 +608,8 @@ Ready to snapshot:
 ## 16. KCS commit / snapshot
 
 KCS では `commit` と `snapshot` を内部的に別 object として分けない。どちらも `tree + parent + metadata` を持つ同一の履歴 object とし、`message`、`actor`、`reason`、`protected` などのメタデータによって、手動保存・自動保存・import・repair・重要保存点を区別する。
+
+ユーザー向けの公式語彙は `snapshot` とし、CLI では開発者向け alias として `commit` を許可する。実装上の object type は単一であり、`commit` と `snapshot` の二重管理を作らない。
 
 ```bash
 kcs commit -m "before refactor"
@@ -705,6 +796,8 @@ target/
 *.mp4
 *.mov
 ```
+
+KCS はデフォルト全管理を維持し、除外は `.kcsignore` または設定で明示する。実装は便利な ignore テンプレートを提供してよいが、ユーザーの明示なしに検索範囲や保存範囲を現在フォルダだけへ狭めない。
 
 ---
 
@@ -988,7 +1081,7 @@ Git本体との完全互換
 Gitフォーク
 差分だけ保存という説明
 DBだけの軽量index思想
-クラウド前提の設計
+オンライン API 前提の設計
 ```
 
 ---
@@ -1042,7 +1135,7 @@ Optional:
   purge で特定ファイルの全履歴を完全削除
   large file warning
   user-selected adapter
-  cloud adapter (explicit opt-in)
+  online_api adapter (explicit network opt-in)
 ```
 
 ---
@@ -1051,6 +1144,6 @@ Optional:
 
 README や設計書の最初に置くべき一文。
 
-> **KCS is a Git-inspired, local-first knowledge archive that stores every file as a content-addressed object, normalizes it into Markdown, and makes both current and historical knowledge navigable by humans and AI Agents. The KCS core remains offline-capable for existing snapshots and artifacts, while Markdown processing (including OCR), Embedding processing, search-delegation Agent work, and summarization Agent work are delegated to user-selected adapters.**
+> **KCS is a Git-inspired, local-first knowledge archive that stores every file as a content-addressed object, normalizes it into Markdown, and makes both current and historical knowledge navigable by humans and AI Agents. The KCS core remains offline-capable for existing snapshots and artifacts, while Prepare, Markdownize (including OCR), multimodal Embedding, and optional Summary / Classification / Rerank work are delegated to user-selected adapters.**
 
-> **KCSは、すべてのローカルファイルを content-addressed object として保存し、Markdown 化して、現在と過去の知識を人間と AI Agent が探索できるようにする Git inspired なローカル知識アーカイブである。KCS core はオフラインで既存 snapshot / artifact を探索・復元でき、Markdown 処理（OCRを含む） / Embedding 処理 / 検索代行 Agent / 要約 Agent はユーザー選択の Adapter に委譲する。**
+> **KCSは、すべてのローカルファイルを content-addressed object として保存し、Markdown 化して、現在と過去の知識を人間と AI Agent が探索できるようにする Git inspired なローカル知識アーカイブである。KCS core はオフラインで既存 snapshot / artifact を探索・復元でき、Prepare / Markdownize（OCRを含む） / マルチモーダル Embedding / optional Summary・Classification・Rerank はユーザー選択の Adapter に委譲する。**

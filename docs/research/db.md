@@ -47,6 +47,8 @@ KCSでは、原文・Markdown化結果・snapshot object は `.kcs/objects` を�
 
 Embedding object は検索用の派生 artifact であり、正本ではない。欠損・破損・profile 不一致がある場合は再生成または全文検索 fallback により扱う。
 
+SQLite 内の tasks / queue / retry state も正本ではない。DB が失われた場合、KCS は raw object、normalized object、tree / commit object、tool profile から未完了処理を再検出し、検索インデックスとタスクキューを再構築する。正本として守るのは `.kcs/objects` 側の原本由来 object と履歴 object である。
+
 ---
 
 ## 3. SQLiteを正本にしない
@@ -194,7 +196,7 @@ raw_objects
 normalized_objects
 chunks
 chunk_fts
-chunk_vectors
+embeddings
 nodes
 edges
 evidence_pointers
@@ -244,33 +246,43 @@ CREATE VIRTUAL TABLE chunk_fts USING fts5(
 
 ---
 
-## 11. sqlite-vecテーブル
+## 11. Embedding / sqlite-vecテーブル
 
-sqlite-vec用のvector tableを持つ。
+KCSでは Text Embedding Adapter と Image Embedding Adapter を分けず、単一のマルチモーダル Embedding Adapter を使う。概念上の metadata table は1つに統一する。
 
-概念的には以下。
+```sql
+CREATE TABLE embeddings (
+  id TEXT PRIMARY KEY,
+  target_type TEXT NOT NULL, -- chunk | image | node | query_cache
+  target_id TEXT NOT NULL,
+  modality TEXT NOT NULL,    -- text | image | multimodal
+  vector BLOB NOT NULL,
+  dimensions INTEGER NOT NULL,
+  distance TEXT NOT NULL,
+  profile_hash TEXT NOT NULL
+);
+```
+
+sqlite-vec用のvector tableは、実装都合で分けてもよい。
 
 ```sql
 CREATE VIRTUAL TABLE chunk_vec USING vec0(
   chunk_id TEXT PRIMARY KEY,
   embedding FLOAT[DIM]
 );
+
+CREATE VIRTUAL TABLE image_vec USING vec0(
+  image_id TEXT PRIMARY KEY,
+  embedding FLOAT[DIM]
+);
 ```
 
-実際のsqlite-vec構文に合わせて実装する。
+ただし概念上は次を満たす。
 
-保存するメタデータ：
-
-```sql
-CREATE TABLE vector_metadata (
-  id TEXT PRIMARY KEY,
-  target_type TEXT NOT NULL, -- chunk or node
-  target_id TEXT NOT NULL,
-  embedding_profile_hash TEXT NOT NULL,
-  dimensions INTEGER NOT NULL,
-  distance TEXT NOT NULL,
-  created_at TEXT NOT NULL
-);
+```text
+same Embedding Adapter
+same profile_hash
+same vector space
 ```
 
 ---
@@ -283,9 +295,10 @@ Embedding互換性を判定するため、必ず保存する。
 {
   "embedding": {
     "enabled": true,
-    "tool_id": "embed_default",
+    "tool_id": "gemini_multimodal_embedding",
     "dimensions": 1536,
     "distance": "cosine",
+    "modality": "multimodal",
     "profile_hash": "sha256:..."
   }
 }
@@ -296,6 +309,7 @@ Embedding互換性を判定するため、必ず保存する。
 ```text
 dimensions一致
 distance一致
+modality一致
 profile_hash一致
 ```
 
@@ -369,14 +383,16 @@ embedding profileが一致する.kcsのみsqlite-vec検索
 
 ## 15. バッチ処理との関係
 
-Markdown処理（OCRを含む）・Embeddingはデフォルトでバッチ。
+Prepare・Markdownize（OCRを含む）・Embeddingはデフォルトでバッチ。
 
 Embedding処理後にsqlite-vecへupsertする。
 
 ```text
 kcs index
   ↓
-Markdown処理 batch
+Prepare batch
+  ↓
+Markdownize batch
   ↓
 chunking
   ↓
@@ -475,13 +491,13 @@ optional = true
 fail_behavior = "fallback"
 ```
 
-グローバル設定側ではEmbedding toolを定義。
+グローバル設定側では単一のマルチモーダル Embedding toolを定義。
 
 ```toml
-[tools.embed_default]
-kind = "command"
-cmd = "/path/to/embed"
-args = ["--input", "{input}", "--output", "{output}"]
+[tools.gemini_multimodal_embedding]
+kind = "http"
+url = "https://example.invalid/embedding"
+method = "POST"
 ```
 
 ---

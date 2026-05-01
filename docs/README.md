@@ -6,7 +6,7 @@ KCS は **Git inspired な local-first content-addressed knowledge archive** で
 
 `.kcs/` は知識スコープのルートに1つだけ置くものではなく、基本的には各フォルダに隠しディレクトリとして生成されるフォルダローカルな管理単位です。子フォルダや孫フォルダにもそれぞれ `.kcs/` が存在し、各 `.kcs/` は自フォルダ直下のファイルと子フォルダリンクを管理します。
 
-KCS core は **オフラインで既存 snapshot / artifact を探索・復元できる** ことを基本要件とする(`requirements.md §2`)。Markdown 処理（OCRを含む） / Embedding 処理 / 検索代行 Agent / 要約 Agent は KCS core ではなくユーザー選択の Adapter に委譲し、ローカル実装・クラウド実装・社内/学部サービス実装を差し替え可能にする。
+KCS core は **オフラインで既存 snapshot / artifact を探索・復元できる** ことを基本要件とする(`requirements.md §2`)。Prepare / Markdownize（OCRを含む） / マルチモーダル Embedding / optional Summary・Classification・Rerank は KCS core ではなくユーザー選択の Adapter に委譲し、LLM などのオンライン API、ローカル LLM などのオフライン API、決定論的ライブラリ実装を差し替え可能にする。
 
 KCS の作成意図は、AI を契機としてローカルの知識空間を再定義することです。長年、PDF / Office / 画像のような検索に向かないファイル空間がデフォルトでしたが、KCS はそれらを Markdown を主とする統一テキスト表現へ変換し、Google が Web 文書にもたらした共通の検索体験をローカルファイル空間にも持ち込みます。副目的として、開発者が Git で享受してきた履歴付き知識アーカイブの恩恵を、すべてのユーザーが扱える形へ広げます。
 
@@ -109,10 +109,12 @@ KCS の作成意図は、AI を契機としてローカルの知識空間を再�
 | --- | --- |
 | [adapter-overview.md](06_adapters/adapter-overview.md) | ライフサイクル、`tool-lock.json` との関係、優先順位、フォールバック |
 | [trait-definitions.md](06_adapters/trait-definitions.md) | 各 Adapter の trait 署名 |
-| [markdownizer.md](06_adapters/markdownizer.md) | PDF / docx / 画像 → MD の I/O 契約。OCR はこの Adapter の内部能力として扱う |
-| [embedder.md](06_adapters/embedder.md) | Embedding 処理 Adapter。`embedding_profile_hash` |
-| [search-agent.md](06_adapters/search-agent.md) | 検索代行 Agent Adapter。KCS API を使った検索・再ランキング・文脈収集 |
-| [summarizer.md](06_adapters/summarizer.md) | 要約 Agent Adapter |
+| [prepare.md](06_adapters/prepare.md) | raw object → prepared object / prepared unit の I/O 契約 |
+| [markdownizer.md](06_adapters/markdownizer.md) | prepared unit / raw text → MD の I/O 契約。OCR はこの Adapter の内部能力として扱う |
+| [embedder.md](06_adapters/embedder.md) | マルチモーダル Embedding Adapter。Text / Image 分離は行わない |
+| [summarizer.md](06_adapters/summarizer.md) | Summary Adapter(optional) |
+| [classification.md](06_adapters/classification.md) | Classification Adapter(optional) |
+| [rerank.md](06_adapters/rerank.md) | Rerank Adapter(optional) |
 | [bm25-backend.md](06_adapters/bm25-backend.md) | BM25 バックエンド |
 | [vector-backend.md](06_adapters/vector-backend.md) | ベクトル検索バックエンド |
 | [graph-backend.md](06_adapters/graph-backend.md) | グラフ DB バックエンド |
@@ -160,7 +162,7 @@ KCS の作成意図は、AI を契機としてローカルの知識空間を再�
 | [0007-snapshot-vs-commit-naming.md](adr/0007-snapshot-vs-commit-naming.md) | `commit` / `snapshot` は同一履歴 object。CLI は Git 風、GUI は一般向けに言い換え |
 | [0008-archive-all-by-default.md](adr/0008-archive-all-by-default.md) | デフォルト全管理(容量効率より知識喪失防止を優先) |
 | [0009-content-addressed-storage.md](adr/0009-content-addressed-storage.md) | raw / normalized / chunk / embedding / node / edge / tree / commit を全て CAS で管理 |
-| [0010-offline-first.md](adr/0010-offline-first.md) | KCS core はオフラインで既存 snapshot / artifact を探索・復元可能。Markdown 処理（OCRを含む） / Embedding 処理 / 検索代行 Agent / 要約 Agent は Adapter に委譲 |
+| [0010-offline-first.md](adr/0010-offline-first.md) | KCS core はオフラインで既存 snapshot / artifact を探索・復元可能。Prepare / Markdownize（OCRを含む） / マルチモーダル Embedding / optional Summary・Classification・Rerank は Adapter に委譲 |
 | [0011-default-global-search.md](adr/0011-default-global-search.md) | デフォルト検索は全 indexed scope を対象にし、scope option で現在フォルダ/配下に制限 |
 | [0012-history-purge-for-legal-erasure.md](adr/0012-history-purge-for-legal-erasure.md) | 法務・秘匿・誤取り込み向けに特定ファイルの全履歴を完全削除する purge を提供 |
 | [0013-folder-local-kcs-per-directory.md](adr/0013-folder-local-kcs-per-directory.md) | `.kcs/` は各フォルダに生成されるフォルダローカルな隠しメタデータ |

@@ -530,6 +530,8 @@ kcs commit
 alias: commit
 ```
 
+実装上は単一の履歴 object とし、`snapshot` と `commit` を別 object type として分けない。ユーザー向けの正規名は `snapshot`、CLI 自動化や Git に慣れた開発者向けの互換 alias が `commit` である。
+
 ---
 
 # 17. KCS checkout
@@ -653,6 +655,8 @@ target/
 *.mp4
 *.mov
 ```
+
+デフォルト全管理は維持する。実装は便利な `.kcsignore` テンプレートを提供してよいが、ユーザーの明示なしに検索範囲や保存範囲を現在フォルダだけへ狭めない。
 
 ---
 
@@ -1266,7 +1270,9 @@ all indexed scopes
 
 ---
 
-# 7. `.kcs/folder.json` のポリシー
+# 7. `.kcs/scope.json` のポリシー
+
+ファイル名は `scope.json` を正とする。過去メモでの `folder.json` は同じ概念の旧称であり、実装では使わない。
 
 各 `.kcs` にはこう書けます。
 
@@ -1323,6 +1329,8 @@ all indexed scopes
 Default search = all indexed scopes
 Restricted search = explicit scope option
 ```
+
+`kcs init` は現在フォルダの `.kcs` を作成する。子フォルダの `.kcs` は、`kcs index` や探索処理が ignore されていない対象を発見した時点で必要に応じて生成する。各フォルダに `.kcs` を置く前提は維持しつつ、空フォルダや未到達フォルダへ先回りして全生成する必要はない。
 
 この仕様で進めるのが良いです。
 
@@ -1667,7 +1675,7 @@ kcs search "認証" --all-scopes
 folder/
   .kcs/
     VERSION
-    folder.json
+    scope.json
     manifest.json
     normalized/
     index/
@@ -1678,7 +1686,7 @@ folder/
 
 ---
 
-# `folder.json`
+# `scope.json`
 
 ```json
 {

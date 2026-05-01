@@ -72,9 +72,12 @@ rebuildable:
   index/sqlite.db
   index/bm25
   index/vector
+  task state / retry queue
   cache
   tmp
 ```
+
+task state は検索効率と再開性のための運用データであり、喪失を許容する。失われた場合は object store、manifest、tool profile から未完了処理を再検出してキューを再構築する。
 
 ## Scope
 

@@ -1,7 +1,7 @@
 はい。ここはKCSのかなり重要な設計課題です。
 結論から言うと、**PDF全体を毎回Markdown化して、単純にMarkdown全文diffを取る設計は避けるべき**です。
 
-理由はあなたの指摘通りで、Markdown処理Agentは同じPDFでも表現ゆれを起こすため、
+理由はあなたの指摘通りで、Markdownize Adapterは同じPDFでも表現ゆれを起こすため、
 
 ```text
 原文は一部しか変わっていない
@@ -228,7 +228,7 @@ PDF page 2 → image/page_002.png → hash
 
 ---
 
-# 6. Markdown処理Agentには「単位ごと」に入力する
+# 6. Markdownize Adapterには「単位ごと」に入力する
 
 重要なのは、Markdown化をファイル全体でなく **unit単位** にすることです。
 
@@ -486,7 +486,7 @@ prepared page image hash
 高度には：
 
 ```text
-Markdown処理前のページ画像 pHash
+Markdownize前のページ画像 pHash
 ```
 
 これで、ページ番号が変わっても同じページを対応づけます。
@@ -522,7 +522,7 @@ heading path
 paragraph block hash
 ```
 
-ただし、KCS方針では非テキストはMarkdown処理Agentに渡すので、最初は
+ただし、KCS方針では非テキストはMarkdownize Adapterに渡すので、最初は
 
 ```text
 DOCX → prepared PDF or page images

@@ -160,7 +160,7 @@ metadata json   // type固有の追加情報
 | AIエージェントが保存             | `manual`, actor=agent                         |
 | 別デバイスから取り込んで統合          | `merged`, source=kcs:device-b                 |
 | テンプレKCSから派生して新規作成       | `imported`, source=kcs:template-x             |
-| Markdown処理 profile 差し替えによる再抽出 | `migrated`, metadata.tool_profile_diff=...    |
+| Markdownize profile 差し替えによる再抽出 | `migrated`, metadata.tool_profile_diff=...    |
 | 定期autosnapshot          | `auto`, trigger=timer                         |
 | 抽出パイプライン完走起点のautosnapshot | `auto`, trigger=extraction                  |
 
@@ -247,7 +247,7 @@ commit_type TEXT NOT NULL CHECK (commit_type IN (
 | 別 `.kcs` をテンプレートに新規作成                | imported (source指定)         |
 | 一括ファイル取り込みコマンド                      | imported                   |
 | Schema v2 → v3 のマイグレーション             | migrated                   |
-| Markdown処理 profile 変更による再抽出        | migrated                   |
+| Markdownize profile 変更による再抽出        | migrated                   |
 | Embedding model変更による再ベクトル化           | migrated                   |
 | SQLiteのfsck的修復                      | repaired                   |
 | 抽出失敗の途中状態からの復旧                      | repaired                   |

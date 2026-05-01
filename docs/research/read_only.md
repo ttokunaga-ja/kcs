@@ -340,6 +340,8 @@ normalized markdownを直接編集する
 raw objectを直接編集する
 ```
 
+OCRやlayout detectionの誤りも、Normalized Markdownの手編集では直さない。MVPでは最低限、誤抽出箇所を extraction issue として記録し、再Markdown化または原本更新の候補として扱う。未反映の extraction issue は通常検索・RAGの根拠本文には混ぜず、修復・レビュー用の補助情報として扱う。
+
 ---
 
 # 12. 要件文

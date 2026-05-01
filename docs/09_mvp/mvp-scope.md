@@ -35,6 +35,8 @@ gc --dry-run / --prune-unreachable
 purgeによる特定ファイルの全履歴削除
 ```
 
+MVP は時間をかけてでも基本機能を実装する。実装マイルストーンは分割してよいが、MVP の定義から上記の中核体験を削らない。
+
 ## MVPでやらない
 
 ```text
@@ -82,3 +84,5 @@ restoreが現実ファイルを直接上書きしない
 purge後に対象ファイル由来objectが検索・復元できない
 purge tombstoneから本文や秘匿pathを復元できない
 ```
+
+task state / retry queue / index は喪失を許容する。失われた場合でも raw object、履歴 object、tool profile から未完了作業と検索インデックスを再構築できることを完了条件に含める。

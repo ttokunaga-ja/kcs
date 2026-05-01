@@ -13,6 +13,8 @@
 
 またはSQLiteに `tasks` テーブルを作ります。実装上は **SQLite管理がおすすめ**です。
 
+ただし task state は KCS の正本ではありません。途中失敗や未完了タスクの記録は失われてもよく、失われた場合は raw object、normalized object、tree / commit object、現在の tool profile から未完了作業を再検出してキューを再構築します。優先して守る対象は原本 PDF などに由来する raw object と履歴・証拠であり、task state は検索効率と再開性のための運用データです。
+
 ---
 
 ## 基本方針
@@ -20,10 +22,12 @@
 KCSの処理はすべてタスク化します。
 
 ```text
-Markdown処理（OCRを含む）
+Prepare
+Markdownize（OCRを含む）
 Embedding
-検索代行Agent
-要約Agent
+Summary
+Classification
+Rerank
 index更新
 node生成
 ```
@@ -303,7 +307,7 @@ invalid_input      → failed permanent
 
 ## 最終要件文
 
-> KCSでは、Markdown処理（OCRを含む）・Embedding・検索代行Agent・要約Agent・インデックス更新をすべてタスクとして管理する。各タスクには入力ハッシュ、出力ハッシュ、Tool Profile Hash、状態、試行回数を記録する。オフライン・API失敗・プロセス中断が発生した場合でも、`kcs status` で未完了タスクを検出し、`kcs resume` により後から安全に再実行できる。
+> KCSでは、Prepare・Markdownize（OCRを含む）・Embedding・Summary・Classification・Rerank・インデックス更新をすべてタスクとして管理する。各タスクには入力ハッシュ、出力ハッシュ、Tool Profile Hash、状態、試行回数を記録する。task state は正本ではなく喪失を許容する運用データであり、失われた場合は object store と tool profile から未完了作業を再検出する。オフライン・API失敗・プロセス中断が発生した場合でも、`kcs status` で未完了タスクを検出し、`kcs resume` により後から安全に再実行できる。
 
 ---
 

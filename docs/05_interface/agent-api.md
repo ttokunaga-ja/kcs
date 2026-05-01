@@ -4,7 +4,7 @@
 
 ## 基本方針
 
-KCS API は、人間向け CLI、AI Agent、検索代行 Agent Adapter、要約 Agent Adapter、Markdown 処理 Adapter、Embedding 処理 Adapter が共通して使う境界である。
+KCS API は、人間向け CLI、AI Agent、Prepare Adapter、Markdownize Adapter、Embedding Adapter、optional Summary / Classification / Rerank Adapter が共通して使う境界である。
 
 KCS core は object store / snapshot / search / task state を管理する。Agent や Adapter は KCS API を通じて対象 object、許可された scope、既存 artifact、実行結果を書き戻す。
 
@@ -13,7 +13,8 @@ KCS core は object store / snapshot / search / task state を管理する。Age
 ```text
 入力 object hash を明示する
 処理対象 scope を明示する
-外部送信の許可状態を明示する
+execution_mode を明示する
+ネットワーク送信の許可状態を明示する
 出力 artifact hash を記録する
 tool_profile_hash / agent_profile_hash を記録する
 検索時は searched scopes / excluded scopes / fallback reason を返す
@@ -22,30 +23,49 @@ tool_profile_hash / agent_profile_hash を記録する
 ## Adapter 種別
 
 ```text
-markdown_processor:
-  raw object -> normalized Markdown
+prepare:
+  raw object -> prepared object / prepared unit
+
+markdownize:
+  prepared unit / raw text -> normalized Markdown
   OCR はこの処理の内部能力として扱う
 
-embedder:
-  chunk object -> embedding object
+embedding:
+  markdown chunk / image object / query text -> vector
+  Text / Image Adapter には分けない
 
-search_agent:
-  query + scope -> ranked context
-  KCS core の検索結果、履歴検索、fallback 情報を利用する
-
-summarizer_agent:
+summary optional:
   normalized object / chunk / search result -> summary artifact
+
+classification optional:
+  raw / normalized / chunk / image object -> labels / categories
+
+rerank optional:
+  query + candidate results -> reranked results
 ```
 
-## 外部サービス接続
+## 実行形態
 
-外部サービス、社内サービス、学部サービスへ接続する場合も、KCS API の契約は変えない。接続先固有の URL、認証情報、コマンドパスは device-local config に置き、`.kcs/` には保存しない。
+Adapter は提供主体ではなく、実行形態と決定性で分類する。
+
+```text
+online_api:
+  LLM などのネットワーク越し API
+
+offline_api:
+  ローカル LLM などのオフライン API
+
+deterministic_library:
+  決定論的なライブラリやローカル処理
+```
+
+いずれの実行形態でも、KCS API の契約は変えない。URL、認証情報、コマンドパス、ライブラリ選択などの実行設定は device-local config に置き、`.kcs/` には保存しない。
 
 ```text
 KCS core
   -> task descriptor
   -> device-local Adapter
-  -> local / cloud / internal / faculty service
+  -> online API / offline API / deterministic library
   -> artifact descriptor
   -> KCS core
 ```

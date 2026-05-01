@@ -3,7 +3,7 @@
 > NOTE: この文書は `.kcs` ディレクトリ構造の初期設計案を含む。object store / snapshot DAG / デフォルト検索範囲については、後続の [git_kcs.md](git_kcs.md) と [philosophy.md](philosophy.md) の方針を優先する。
 
 `.kcs` は、基本的に **各フォルダに隠しディレクトリとして生成されるフォルダローカルな知識メタデータ**です。macOS の `.DS_Store` に近く、子フォルダや孫フォルダにもそれぞれ `.kcs` が存在する前提です。
-ただし、Markdown 処理（OCRを含む）・Embedding・検索代行 Agent・要約 Agent などの実行方法は `.kcs` に直接持たせません。Adapter の実行設定、コマンドパス、URL、認証情報は各デバイスの `~/.config/kcs/` や OS keychain に保存し、`.kcs` は生成済み artifact の provenance と互換性判定に必要な profile hash だけを保持します。
+ただし、Prepare・Markdownize（OCRを含む）・マルチモーダル Embedding・optional Summary / Classification / Rerank などの実行方法は `.kcs` に直接持たせません。Adapter の実行設定、コマンドパス、URL、認証情報は各デバイスの `~/.config/kcs/` や OS keychain に保存し、`.kcs` は生成済み artifact の provenance と互換性判定に必要な profile hash だけを保持します。
 
 ---
 
@@ -80,10 +80,10 @@ KCS履歴
 APIキー
 秘密情報
 外部ツール本体
-Markdown処理ツールの詳細実装
+Prepareツールの詳細実装
+Markdownizeツールの詳細実装
 Embeddingツールの詳細実装
-検索代行Agentの詳細実装
-要約ツールの詳細実装
+Summary / Classification / Rerankツールの詳細実装
 ```
 
 ---
@@ -110,31 +110,40 @@ Embeddingツールの詳細実装
 例：
 
 ```toml
+[tools.prepare_default]
+kind = "library"
+library = "kcs_prepare_default"
+
 [tools.markdown_default]
 kind = "command"
 cmd = "/Users/takumi/bin/markdownize"
 args = ["--input", "{input}", "--output", "{output}"]
 
-[tools.embed_default]
-kind = "command"
-cmd = "/Users/takumi/bin/embed"
-args = ["--input", "{input}", "--output", "{output}"]
-
-[tools.summarize_default]
+[tools.gemini_multimodal_embedding]
 kind = "http"
-url = "http://localhost:8000/summarize"
+url = "https://example.invalid/embedding"
 method = "POST"
 
-[tools.search_agent_default]
+[tools.summary_default]
 kind = "http"
-url = "http://localhost:8000/search-agent"
+url = "http://localhost:8000/summary"
 method = "POST"
+
+[tools.classification_default]
+kind = "library"
+library = "kcs_classification_rules"
+
+[tools.rerank_default]
+kind = "http"
+url = "http://localhost:8000/rerank"
 
 [defaults]
-markdown = "markdown_default"
-embed = "embed_default"
-search_agent = "search_agent_default"
-summarize = "summarize_default"
+prepare = "prepare_default"
+markdownize = "markdown_default"
+embedding = "gemini_multimodal_embedding"
+summary = "summary_default"
+classification = "classification_default"
+rerank = "rerank_default"
 ```
 
 KCSは provider を制限せず、任意のコマンド・URL・パスを呼び出せるようにします。
@@ -154,6 +163,8 @@ KCSは provider を制限せず、任意のコマンド・URL・パスを呼び�
 # 6. `scope.json`
 
 `.kcs` が配置されたフォルダ自身と、全体検索への参加ポリシーを定義します。
+
+このファイル名を正とします。過去メモに出てくる `folder.json` は同じ概念の旧称であり、実装・契約ドキュメントでは `scope.json` に統一します。
 
 ```json
 {
@@ -204,10 +215,12 @@ root = "."
 allow_parent_access = false
 
 [tools]
-markdown = "markdown_default"
-embed = "embed_default"
-search_agent = "search_agent_default"
-summarize = "summarize_default"
+prepare = "prepare_default"
+markdownize = "markdown_default"
+embedding = "gemini_multimodal_embedding"
+summary = "summary_default"
+classification = "classification_default"
+rerank = "rerank_default"
 
 [chunking]
 strategy = "heading"
@@ -250,6 +263,12 @@ patterns = [
 
 ```json
 {
+  "prepare": {
+    "tool_id": "prepare_default",
+    "kind": "deterministic_library",
+    "profile_hash": "sha256:...",
+    "config_hash": "sha256:..."
+  },
   "markdown": {
     "tool_id": "markdown_default",
     "kind": "local_adapter",
@@ -258,22 +277,30 @@ patterns = [
     "config_hash": "sha256:..."
   },
   "embedding": {
-    "tool_id": "embed_default",
-    "kind": "local_adapter",
+    "tool_id": "gemini_multimodal_embedding",
+    "kind": "online_api",
+    "mode": "batch",
     "config_hash": "sha256:...",
-    "dimensions": 1024,
+    "dimensions": 1536,
     "distance": "cosine",
+    "modality": "multimodal",
     "profile_hash": "sha256:..."
   },
-  "search_agent": {
-    "tool_id": "search_agent_default",
-    "kind": "local_or_remote_adapter",
+  "summary": {
+    "tool_id": "summary_default",
+    "kind": "offline_api",
     "profile_hash": "sha256:...",
     "config_hash": "sha256:..."
   },
-  "summarize": {
-    "tool_id": "summarize_default",
-    "kind": "local_or_remote_adapter",
+  "classification": {
+    "tool_id": "classification_default",
+    "kind": "deterministic_library",
+    "profile_hash": "sha256:...",
+    "config_hash": "sha256:..."
+  },
+  "rerank": {
+    "tool_id": "rerank_default",
+    "kind": "offline_api",
     "profile_hash": "sha256:...",
     "config_hash": "sha256:..."
   }
@@ -298,6 +325,7 @@ patterns = [
 ```text
 dimensions が同じ
 distance が同じ
+modality が同じ
 embedding profile_hash が同じ
 ```
 
@@ -597,7 +625,7 @@ absolute local paths
 ## `~/.config/kcs`
 
 ```text
-どのコマンド/URL/パスでMarkdown処理・Embedding・検索代行Agent・要約Agentを実行するか
+どのコマンド/URL/パスでPrepare・Markdownize・Embedding・Summary・Classification・Rerankを実行するか
 各デバイスごとに保持する
 共有対象にしない
 ```
@@ -605,7 +633,7 @@ absolute local paths
 ## Device-local Adapter
 
 ```text
-実際のMarkdown処理（OCRを含む）・Embedding・検索代行Agent・要約Agent処理
+実際のPrepare・Markdownize（OCRを含む）・Embedding・Summary・Classification・Rerank処理
 各デバイスの設定に従う
 ```
 
@@ -635,6 +663,8 @@ kcs index
 kcs search
 kcs open
 ```
+
+`kcs init` は現在フォルダの `.kcs` を作成します。子フォルダの `.kcs` は、`kcs index` や探索処理が ignore されていない対象を見つけた時点で生成します。KCS は各フォルダに `.kcs` を置く設計ですが、空フォルダや未到達フォルダへ先回りして全生成する必要はありません。
 
 ---
 
