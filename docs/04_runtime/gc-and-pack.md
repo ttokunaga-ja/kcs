@@ -25,6 +25,8 @@ kcs gc --prune-unreachable
 
 `gc --prune-unreachable` が削除できるのは、どの commit / snapshot / tag / protected object からも到達不能な object だけである。過去 snapshot から到達可能な object は、最新状態から削除済みでも GC 対象外とする。
 
+GC の到達可能性判定は、原則として対象 `.kcs/objects` 内で完結する。別 `.kcs/` に同じ raw_hash の object があっても、同一物理 object として共有している前提を置かない。
+
 ## Pack
 
 object 数が増えた場合、pack file にまとめる。
@@ -48,6 +50,8 @@ kcs purge --raw-hash sha256:abc... --all-history
 GUI では、検索結果・履歴ビュー・ファイル詳細画面から **このファイルの履歴を完全削除** を実行できるようにする。
 
 `purge` の保証範囲は KCS 管理下の object store、snapshot DAG、index、pack、cache、tombstone である。OS backup、Time Machine、クラウド同期の過去版、外部 export、ユーザーが手動コピーしたファイル、KCS 外のログまでは KCS 単体では保証しない。UI では「KCS 管理下の履歴から完全削除」という意味で扱う。
+
+`.kcs` がフォルダローカルであるため、path 指定 purge は、その path を所有する `.kcs` の履歴と object store を対象にする。raw_hash 指定 purge を複数 `.kcs` にまたがって実行する場合は、対象 `.kcs` 一覧を preview し、それぞれの object store で独立に削除する。
 
 purge は次を行う。
 

@@ -171,19 +171,21 @@ README.md
 
 ---
 
-# 5. 同じファイルは一度だけ保存する
+# 5. 同じファイルは同一 `.kcs` 内で一度だけ保存する
 
 ここがGit由来の重要な容量対策です。
 
-同じ内容なら、パスが違っても保存は1回。
+ただし、KCSでは各フォルダの `.kcs` が自分のフォルダ直下だけを管理するため、dedup の保証範囲は **同一 `.kcs` の object store 内** に限定します。
+
+同じ `.kcs` 内で同じ内容なら、ファイル名が違っても保存は1回。
 
 ```text
-docs/report.pdf       → sha256:abc
-backup/report.pdf     → sha256:abc
-old/report-copy.pdf   → sha256:abc
+report.pdf            → sha256:abc
+report-copy.pdf       → sha256:abc
+report-final.pdf      → sha256:abc
 ```
 
-保存は1回。
+同じ `.kcs/objects/raw/` 内では保存は1回。
 
 コミット側では、
 
@@ -192,6 +194,27 @@ path → object_hash
 ```
 
 だけを持ちます。
+
+一方で、別フォルダの別 `.kcs` に同一内容のファイルがある場合は、物理的な重複保存を許容します。
+
+```text
+A/
+  .kcs/objects/raw/ab/cd/abc
+  report.pdf        # sha256:abc
+
+B/
+  .kcs/objects/raw/ab/cd/abc
+  report-copy.pdf   # sha256:abc
+```
+
+これは、フォルダローカルな所有権、`.kcs` 単位の export / purge / restore / partial sync を壊さないためです。検索実行側の scope registry は複数 `.kcs` を束ねますが、raw object の所有権や GC 参照管理をグローバルに統合しません。
+
+したがって、KCS の dedup 方針は次のように固定します。
+
+```text
+dedup scope = one .kcs object store
+cross-.kcs dedup = not guaranteed
+```
 
 ---
 
@@ -736,7 +759,7 @@ Gitから学べる容量対策：
 
 ```text
 content-addressing
-deduplication
+deduplication within each .kcs object store
 pack files
 compression
 garbage collection
@@ -750,8 +773,10 @@ KCSでも採用します。
 ```text
 sha256 object store
 zstd compression
-dedup
+dedup within one .kcs
 ```
+
+v0では、別 `.kcs` 間の同一 raw_hash / normalized_hash を物理的に統合しない。重複排除よりも、フォルダ単位の独立性、移動・削除・export・purge の分かりやすさを優先する。
 
 ## v1
 

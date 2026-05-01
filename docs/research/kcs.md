@@ -5,6 +5,8 @@
 `.kcs` は、基本的に **各フォルダに隠しディレクトリとして生成されるフォルダローカルな知識メタデータ**です。macOS の `.DS_Store` に近く、子フォルダや孫フォルダにもそれぞれ `.kcs` が存在する前提です。
 ただし、Prepare・Markdownize（OCRを含む）・マルチモーダル Embedding・optional Summary / Classification / Rerank などの実行方法は `.kcs` に直接持たせません。Adapter の実行設定、コマンドパス、URL、認証情報は各デバイスの `~/.config/kcs/` や OS keychain に保存し、`.kcs` は生成済み artifact の provenance と互換性判定に必要な profile hash だけを保持します。
 
+`.kcs` が分散配置されるため、raw / normalized object の dedup は **各 `.kcs/objects` 内** に限定します。別フォルダの別 `.kcs` に同一内容のファイルがある場合は、フォルダ単位の独立性・部分公開・partial sync・purge の単純さを優先し、物理的な重複保存を許容します。
+
 ---
 
 # 1. 全体構造
@@ -608,6 +610,8 @@ tmp
 private logs
 absolute local paths
 ```
+
+export は対象フォルダ配下の各 `.kcs` が所有する object を、それぞれの `.kcs` 単位で同梱する。別 `.kcs` の object store への参照を前提にしないため、同一 raw_hash が別 `.kcs` に存在していても export 単位では重複を許容する。
 
 ---
 

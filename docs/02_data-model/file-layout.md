@@ -79,6 +79,22 @@ rebuildable:
 
 task state は検索効率と再開性のための運用データであり、喪失を許容する。失われた場合は object store、manifest、tool profile から未完了処理を再検出してキューを再構築する。
 
+## Object Ownership And Dedup Scope
+
+各 `.kcs/objects` は、その `.kcs` が管理するフォルダ直下のファイルと派生 artifact を所有する。
+
+dedup の保証範囲は同一 `.kcs/objects` 内に限定する。
+
+```text
+same .kcs:
+  same raw_hash -> one raw object
+
+different .kcs:
+  same raw_hash -> duplicate raw objects are allowed
+```
+
+別 `.kcs` 間の同一 object を中央 store に集約しない。これにより、フォルダ単位の export、partial sync、restore、purge、GC は、他フォルダの `.kcs` にある object 参照を追わずに完結できる。
+
 ## Scope
 
 各 `.kcs` は自フォルダ直下のファイルと子フォルダリンクを管理する。子フォルダの中身は子フォルダ自身の `.kcs` が管理する。検索のデフォルトは全 indexed scope であり、現在フォルダだけに閉じる場合はコマンド側で scope を制限する。

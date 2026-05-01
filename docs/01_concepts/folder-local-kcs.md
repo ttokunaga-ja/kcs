@@ -39,6 +39,20 @@ folder/child/.kcs:
 
 親フォルダや兄弟フォルダの内容を、個々の `.kcs/` が直接保持しない。
 
+## Dedup Scope
+
+content-addressed object store による dedup は、同一 `.kcs/objects` 内に限定する。
+
+```text
+dedup scope:
+  one .kcs object store
+
+not guaranteed:
+  cross-.kcs object dedup
+```
+
+別フォルダの別 `.kcs/` に同一内容のファイルがある場合、KCS は物理的な重複保存を許容する。これは、フォルダローカルな所有権、`.kcs/` 単位の export、partial sync、purge、restore を単純に保つためである。
+
 ## 検索との関係
 
 デフォルト検索は全 indexed scope を対象にする。これは、検索実行側が scope registry または探索済み `.kcs/` 一覧を束ねることで実現する。
@@ -59,3 +73,5 @@ restricted search:
 ## 設計上の注意
 
 `.kcs/` を「リポジトリルートに1つだけある `.git/`」のように扱わない。KCS は Git の content-addressing や snapshot DAG を参考にするが、物理配置は Git より `.DS_Store` に近い。
+
+scope registry は横断検索のための device-local な一覧であり、複数 `.kcs/` の object ownership や GC 参照を統合するグローバル CAS ではない。

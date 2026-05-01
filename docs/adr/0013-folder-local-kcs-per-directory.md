@@ -40,3 +40,5 @@ Docs and implementation must not assume that child or grandchild folders lack `.
 Default search can still be global across all indexed scopes. Global search is implemented by the search runner using a scope registry or discovered `.kcs/` list, not by making one parent `.kcs/` own all descendants.
 
 Export, purge, restore, and repair must account for multiple `.kcs/` directories across the folder tree.
+
+Content-addressed deduplication is guaranteed only within one `.kcs/objects` store. The same raw hash may be stored separately in different `.kcs/` directories. This duplication is accepted to preserve folder-local ownership and to keep export, partial sync, purge, restore, and GC independent per `.kcs/`.

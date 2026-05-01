@@ -305,20 +305,29 @@ README.md
 
 ---
 
-## 6. 同じファイルは一度だけ保存する
+## 6. 同じファイルは同一 `.kcs` 内で一度だけ保存する
 
-Git 由来の重要な容量対策。同じ内容ならパスが違っても保存は 1 回。
+Git 由来の重要な容量対策。ただし、KCS は `.kcs` を各フォルダに分散配置するため、dedup の保証範囲は同一 `.kcs/objects` 内に限定する。
+
+同じ `.kcs` 内で同じ内容なら保存は 1 回。
 
 ```text
-docs/report.pdf       → sha256:abc
-backup/report.pdf     → sha256:abc
-old/report-copy.pdf   → sha256:abc
+report.pdf            → sha256:abc
+report-copy.pdf       → sha256:abc
+report-final.pdf      → sha256:abc
 ```
 
-保存は 1 回。コミット側では次のみを持ちます。
+同じ `.kcs/objects/raw/` 内では保存は 1 回。コミット側では次のみを持ちます。
 
 ```text
 path → object_hash
+```
+
+別フォルダの別 `.kcs` に同一内容のファイルがある場合は、物理的な重複保存を許容する。これは、フォルダローカルな所有権、`.kcs` 単位の export / purge / restore / partial sync を壊さないためである。
+
+```text
+dedup scope = one .kcs object store
+cross-.kcs dedup = not guaranteed
 ```
 
 ---
@@ -817,7 +826,7 @@ KCS はデフォルト全管理を維持し、除外は `.kcsignore` または�
 
 容量効率よりも、知識を失わず、あとから検索・履歴探索・復元できる利便性を優先する。したがって、動画・巨大PDF・画像・Officeファイルも、ユーザーが明示的に除外しない限り管理対象に含める。
 
-ただし、UI / CLI では、KCS が検索インデックスだけでなく原本ファイルを content-addressed archive に保存すること、初回 index で追加ディスク容量を使うこと、dedup 後の保存見込みを明示する。
+ただし、UI / CLI では、KCS が検索インデックスだけでなく原本ファイルを content-addressed archive に保存すること、初回 index で追加ディスク容量を使うこと、同一 `.kcs` 内 dedup 後の保存見込み、別 `.kcs` 間で重複保存される可能性を明示する。
 
 ---
 

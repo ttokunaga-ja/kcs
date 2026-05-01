@@ -79,7 +79,8 @@ kcs search "query" --scope ./Research --descendants
 ## 完了条件
 
 ```text
-同じ原本hashを重複保存しない
+同一 `.kcs` 内では同じ原本hashを重複保存しない
+別 `.kcs` 間の同一原本hashは重複保存を許容する
 SQLiteが壊れてもobjectsから再構築できる
 normalized objectを直接編集対象にしない
 検索結果にscopeと検索modeを含める
