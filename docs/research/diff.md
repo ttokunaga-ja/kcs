@@ -252,6 +252,114 @@ OK:
 
 これにより、差分更新が可能になります。
 
+## 6.1 Incremental Markdownize (差分前提の再生成) — 要件
+
+ファイルが更新された場合、KCS は **新 raw だけを Adapter に投げ直すのではなく、旧 raw + 旧 Markdown + 新 raw + 変更ヒントをセットで Adapter に渡し、軽微な変更なら部分更新を返させる** 方式を採用します。これは MVP〜v1 のプロダクト要件として確定しています。
+
+### 動機
+
+- LLM API コストの抑制 (移行期、batch.md cost guardrail と整合)。
+- 全文再生成による意図せぬ表記ゆれ・見出し変動を抑え、unit_id と chunk の安定性を高める。
+- §13 の page fingerprint と整合し、変わっていない unit の再 LLM 呼び出しを完全に排除できる。
+
+### 発動条件 (すべて満たす場合のみ incremental)
+
+```text
+1. 同一 file_id に対する既存 done normalization_run がある
+2. raw_hash のみ変化 (tool_profile_hash は不変)
+3. Adapter が capabilities = ["incremental_update"] を宣言
+4. page fingerprint 変化率 < incremental_threshold (デフォルト 0.30)
+5. 直前 N 回 (デフォルト 5) 連続で incremental だった場合は full を強制
+   (style drift / 累積誤差を防ぐため)
+```
+
+いずれかが満たされなければ自動で **full re-Markdownize** にフォールバック。
+
+### Adapter 入力契約
+
+incremental モードで Adapter に渡す入力:
+
+```json
+{
+  "mode": "incremental",
+  "new_raw": { "path": "...", "raw_hash": "sha256:..." },
+  "previous": {
+    "raw": { "path": "...", "raw_hash": "sha256:..." },
+    "normalized_units": [ /* 旧 unit objects (markdown 含む) */ ],
+    "tool_profile_hash": "sha256:..."
+  },
+  "hints": {
+    "changed_unit_keys": ["page:12", "page:13"],
+    "added_unit_keys": ["page:57"],
+    "removed_unit_keys": [],
+    "page_fingerprints": { "page:12": {...}, ... }
+  },
+  "tool_profile_hash": "sha256:..."
+}
+```
+
+Adapter からの出力:
+
+```json
+{
+  "mode_used": "incremental",
+  "updated_units": [ /* 変更が必要だった unit のみ */ ],
+  "unchanged_unit_keys": ["page:01", "page:02", ...],
+  "added_units": [...],
+  "removed_unit_keys": [...],
+  "fallback_to_full": false,
+  "reason": null
+}
+```
+
+Adapter 側が「軽微とは言えない」と判断した場合は `fallback_to_full: true` を返してよい。KCS 側は full を再要求する。
+
+### identity への影響
+
+- 出力 Markdown が incremental/full で異なっても、artifact identity は `(raw_hash, tool_profile_hash)` のまま不変。
+- `tool_profile_hash` の計算入力 (hash.md §9.1) に **incremental flag は含めない**。同じ profile で full と incremental の結果が同等とみなす契約。
+- これにより「過去に full で生成、次回 incremental で更新、その次は再び full」のような mode 混在でも identity 矛盾は起きない。
+
+### 監査記録
+
+`normalization_runs` テーブル / object に次のフィールドを追加する:
+
+```text
+mode                "full" | "incremental"
+parent_run_id       直前の done run の id (incremental 時のみ)
+changed_unit_keys   incremental で書き換えた unit の集合 (JSON array)
+fallback_reason     full に倒した理由 (capability_missing | threshold_exceeded |
+                    forced_refresh | adapter_requested | first_run | null)
+```
+
+これにより「この Markdown はどの incremental chain から来たか」を遡れる。連続 incremental 回数の counter もここから算出。
+
+### Adapter capability 宣言
+
+`tool-lock.json` の markdown adapter に `capabilities` を持たせる ([kcs.md §8](kcs.md))。
+
+```json
+"markdown": {
+  "tool_id": "markdown_default",
+  "kind": "local_adapter",
+  "profile_hash": "sha256:...",
+  "capabilities": ["ocr", "layout_detection", "incremental_update"]
+}
+```
+
+`incremental_update` が含まれない Adapter は常に full モードで呼ばれる。
+
+### 設定
+
+```toml
+# .kcs/config.toml
+[markdownize.incremental]
+enabled = true
+threshold = 0.30           # 変化率の上限。これを超えると full
+max_consecutive = 5        # 連続 incremental の上限。超えると次回 full
+include_neighbors = 1      # 変更 page の前後 N page も hint に含める
+```
+
 ---
 
 # 7. Markdown全文は生成物として組み立てる

@@ -1,10 +1,12 @@
-以下では、**Gitの仕組みをかなり忠実に参考にしながら、KCSを「全ローカルファイルを失わず、AIと人間が探索できる知識アーカイブ」として再定義**します。
+> **NOTE (2026-05 改訂)**: 本書は KCS の **概念モデル (CAS, snapshot DAG, dedup scope)** を Git からの類推で説明する。プロダクト位置づけ・ターゲット・MVP スコープは [positioning.md](positioning.md) を、競合分析は [competitive-landscape.md](competitive-landscape.md) を参照。本書を「KCS とは何か」の正本にしない (= "Git for knowledge" 全部入りに見える表現は positioning.md の言語に倒す)。
 
-KCSの作成意図は、AIを契機としてローカルの知識空間を再定義することです。PDF / PowerPoint / Word / 画像のような検索に向かないファイル空間を、Markdownを主とした統一テキスト表現へ変換し、GoogleがWeb文書にもたらした共通の検索体験をローカルファイル空間にも実現する。さらに、開発者がGitで享受してきた履歴付き知識アーカイブの恩恵を、すべてのユーザーに広げることを副目的とします。
+以下では、Git の仕組みを参考に、KCS の **content-addressed storage と snapshot DAG の概念モデル** を整理する。Git からの類推は理解の補助線として使うが、KCS は Git の汎用拡張ではなく、**Evidence-grounded local knowledge archive** として目的が異なる ([positioning.md §1](positioning.md))。
 
-結論から言うと、KCSは単なる検索ツールではなく、次のように定義するのが最も強いです。
+KCS の核心は「単なる検索ツール」でも「Git の知識管理版」でもなく、次の 3 点に絞られる:
 
-> **KCSは、GitのContent-Addressed StorageとSnapshot管理をローカルファイル全体に拡張し、全ファイルをMarkdown化・索引化・履歴保存して、人間とAI Agentが現在と過去の知識を探索できるローカルファーストの知識アーカイブである。**
+> **(1) Evidence Pointer で根拠が死なない、(2) Markdown 正規化で人間と AI が同じビューを共有、(3) Content-addressed local archive で過去・削除済み・移動済みファイルにも到達できる。**
+
+本書は (3) のメカニズムを Git の語彙で説明する章である。
 
 ---
 

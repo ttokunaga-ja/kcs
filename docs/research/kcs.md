@@ -1,11 +1,13 @@
 ## `.kcs` の最終設計案
 
-> NOTE: この文書は `.kcs` ディレクトリ構造の初期設計案を含む。object store / snapshot DAG / デフォルト検索範囲については、後続の [git_kcs.md](git_kcs.md) と [philosophy.md](philosophy.md) の方針を優先する。
+> NOTE: この文書は `.kcs` ディレクトリ構造の初期設計案を含む。object store / snapshot DAG / デフォルト検索範囲については、後続の [git_kcs.md](git_kcs.md) と [philosophy.md](philosophy.md) の方針を優先する。プロダクト位置づけ・ターゲット・MVP スコープは [positioning.md](positioning.md) を参照。
 
 `.kcs` は、基本的に **各フォルダに隠しディレクトリとして生成されるフォルダローカルな知識メタデータ**です。macOS の `.DS_Store` に近く、子フォルダや孫フォルダにもそれぞれ `.kcs` が存在する前提です。
 ただし、Prepare・Markdownize（OCRを含む）・マルチモーダル Embedding・optional Summary / Classification / Rerank などの実行方法は `.kcs` に直接持たせません。Adapter の実行設定、コマンドパス、URL、認証情報は各デバイスの `~/.config/kcs/` や OS keychain に保存し、`.kcs` は生成済み artifact の provenance と互換性判定に必要な profile hash だけを保持します。
 
-> **スコープ境界 (重要)**: 各 `.kcs` が管理するのは **その `.kcs` が配置されたフォルダ自身が直接保持するファイルのみ** です。サブフォルダに別の `.kcs` が存在する場合、そのサブツリーは独立したスコープとして子 `.kcs` が管理し、親 `.kcs` は子 `.kcs` 配下のファイルを再帰的に取り込んで object 化することはありません。したがって、階層的に `.kcs` が並んでも、親子間で同一ファイルが二重に object 保存されることは発生しません。横断検索は scope registry を通じて複数 `.kcs` を束ねる別レイヤーで実現します (詳細は本文書 §6 と [git_kcs.md](git_kcs.md))。
+> **二層構造 (重要)**: KCS のデータ・所有権・権限の **正本は各フォルダ直下の `.kcs`** に閉じます (truth)。device-local な scope_registry (`~/.local/share/kcs/scope-registry.sqlite`) や将来の global aggregator は **検索キャッシュ・発見補助に過ぎません** (cache)。両者を混同しないでください。scope_registry のみを更新して `.kcs` の状態が変わる実装は禁止です。scope_registry 喪失は再構築可能 (各 `.kcs` を rescan)、`.kcs` 喪失は復旧不能。詳細は [productization_notes.md §3](productization_notes.md), [positioning.md §7](positioning.md)。
+
+> **スコープ境界 (重要)**: 各 `.kcs` が管理するのは **その `.kcs` が配置されたフォルダ自身が直接保持するファイルのみ** です。サブフォルダに別の `.kcs` が存在する場合、そのサブツリーは独立したスコープとして子 `.kcs` が管理し、親 `.kcs` は子 `.kcs` 配下のファイルを再帰的に取り込んで object 化することはありません。したがって、階層的に `.kcs` が並んでも、親子間で同一ファイルが二重に object 保存されることは発生しません。横断検索は scope registry (= cache レイヤー) を通じて複数 `.kcs` を束ねる別レイヤーで実現します (詳細は本文書 §6 と [git_kcs.md](git_kcs.md))。
 
 `.kcs` が分散配置されるため、raw / normalized object の dedup は **各 `.kcs/objects` 内** に限定します。別フォルダの別 `.kcs` に同一内容のファイルがある場合 (= ユーザーが意図的に複数フォルダへ同一ファイルを配置した場合) は、フォルダ単位の独立性・部分公開・partial sync・purge の単純さを優先し、物理的な重複保存を許容します。これは「親 `.kcs` がサブツリーを再帰的に取り込んで生じる重複」ではなく、ユーザーのファイル配置に起因する重複である点に注意してください。
 
@@ -277,7 +279,7 @@ patterns = [
     "tool_id": "markdown_default",
     "kind": "local_adapter",
     "profile_hash": "sha256:...",
-    "capabilities": ["ocr", "layout_detection"],
+    "capabilities": ["ocr", "layout_detection", "incremental_update"],
     "config_hash": "sha256:..."
   },
   "embedding": {

@@ -40,14 +40,38 @@ node生成
 {
   "task_id": "task_01H...",
   "type": "markdownize",
+  "mode": "full",
   "input_path": "docs/report.pdf",
   "input_hash": "sha256:abc...",
-  "output_path": ".kcs/normalized/docs/report.pdf.md",
+  "output_path": ".kcs/objects/normalized/ab/cd/abc.tool1.md",
   "status": "pending",
   "attempts": 0,
   "created_at": "2026-04-25T12:00:00Z"
 }
 ```
+
+`type=markdownize` は `mode` フィールドを持ち、`full` (新規 / フォールバック) と `incremental` (差分更新、要件の詳細は [diff.md §6.1](diff.md)) を区別する。
+
+incremental task の例:
+
+```json
+{
+  "task_id": "task_01H...",
+  "type": "markdownize",
+  "mode": "incremental",
+  "input_path": "docs/report.pdf",
+  "input_hash": "sha256:newraw...",
+  "previous_raw_hash": "sha256:oldraw...",
+  "parent_run_id": "run_01H...",
+  "changed_unit_keys": ["page:12", "page:13"],
+  "output_path": ".kcs/objects/normalized/ab/cd/newraw.tool1.md",
+  "status": "pending",
+  "attempts": 0,
+  "created_at": "2026-05-02T12:00:00Z"
+}
+```
+
+incremental の発動条件・閾値・Adapter capability 要件は [diff.md §6.1](diff.md) を参照。条件を満たさない / Adapter が `incremental_update` capability を持たない / Adapter が `fallback_to_full` を返した場合は、自動で `mode=full` の新タスクを生成して再試行する。フォールバック理由は task 行の `fallback_reason` に記録する。
 
 ---
 

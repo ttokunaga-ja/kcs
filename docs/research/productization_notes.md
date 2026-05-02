@@ -1,8 +1,10 @@
 # プロダクト化に向けた追記メモ
 
-この文書は、既存の正本方針を変更するものではなく、実装・UI・運用へ落とすときに問題になりやすい点を補足する。
+この文書は、実装・UI・運用へ落とすときに問題になりやすい点を補足する。
 
-MVP は、検索体験を削った薄いデモではなく、KCS の基本機能を一通り実装した最小の完全系として扱う。この方針は維持する。
+> **NOTE (2026-05 改訂)**: ポジショニング・ターゲットユーザー・MVP スコープ・Phase plan は **正本を [positioning.md](positioning.md) に移した**。本書はその下位の運用ルールを扱う。競合分析は [competitive-landscape.md](competitive-landscape.md) を参照。
+
+MVP は **「Evidence-grounded local knowledge archive」としての最小完全系** として扱う。「全部入りの Git for knowledge」を目指さない。詳細は [positioning.md §5](positioning.md)。
 
 ---
 
@@ -107,13 +109,22 @@ KCS は検索インデックスだけでなく、原本ファイルを content-a
 
 ---
 
-# 3. Scope Registry
+# 3. Scope Registry (= cache only, NOT truth)
 
-各 `.kcs` は親と子だけを知り、兄弟や全体を直接管理しない。全体検索は、検索実行側が scope registry または探索済み `.kcs` 一覧を束ねることで実現する。
+KCS は **二層構造** をとる。データ・所有権・権限の **正本は各フォルダ直下の `.kcs`** に閉じる。device-local な scope_registry や将来の global aggregator は **検索キャッシュ・発見補助に過ぎない**。両者を混同しない。
 
-実装では、device-local な scope registry を明確に持つことを推奨する。
+```
+truth = folder-local .kcs
+  raw object / normalized / chunks / commits / refs
+  権限境界 / partial sync / purge / export の単位
 
-保存先候補:
+cache = scope_registry / aggregator
+  検索の探索対象一覧、stale 検出、UI 統合
+```
+
+実装では、device-local な scope registry を明確に持つ。
+
+保存先:
 
 ```text
 ~/.local/share/kcs/scope-registry.sqlite
@@ -133,9 +144,18 @@ effective_ignore_hash
 permission_status
 ```
 
-scope registry はデバイスローカルな探索・検索対象管理であり、共有 `.kcs` の正本ではない。フォルダ移動や外部ドライブ切断時は、`folder_id` と `scope.json` を使って再発見または stale 扱いにする。
+### 不変条件 (cache vs truth)
 
-scope registry は横断検索の対象一覧を束ねるためのものであり、raw object の所有権や dedup をグローバル化するためのものではない。dedup は各 `.kcs/objects` 内に限定し、別 `.kcs` 間の同一内容ファイルは重複保存を許容する。
+```text
+1. scope_registry のみを更新して `.kcs` の状態が変わる実装は禁止。
+2. scope_registry 喪失は再構築可能 (各 `.kcs` を rescan)。
+3. `.kcs` 喪失は復旧不能 (registry には正本データがない)。
+4. 検索結果メタには「正本の `.kcs` パス」を必ず含める。
+5. raw object の所有権・dedup は scope_registry でグローバル化しない。
+   各 `.kcs/objects` 内に閉じる (横断 dedup を諦めた帰結、git_kcs.md §5)。
+```
+
+scope registry は共有 `.kcs` の正本ではない。フォルダ移動や外部ドライブ切断時は、`folder_id` と `scope.json` を使って再発見または stale 扱いにする。
 
 ---
 
@@ -294,7 +314,54 @@ secret redaction
 
 ---
 
+# 10.5 Incremental Markdownize (要件)
+
+ファイルが更新された場合、Markdownize (OCR を含む) Adapter には **新 raw だけでなく、旧 raw + 旧 normalized Markdown + 変更ヒント** をセットで渡し、変更が軽微なら Adapter が部分更新を返す方式を採用する。MVP〜v1 のプロダクト要件として確定する。
+
+目的:
+
+```text
+1. LLM API コスト抑制 (cost guardrail と整合、batch.md §Cost guardrail)
+2. 全文再生成による表記ゆれ・見出し変動を抑制
+   → unit_id / chunk / Evidence Pointer の安定性向上
+3. 変わっていない unit の再 LLM 呼び出しを完全排除
+```
+
+実装責務の分担:
+
+```text
+KCS:
+  - 変更検出 (raw_hash 変化 + page fingerprint 変化率算出, diff.md §13)
+  - 発動条件の判定 (capability / 閾値 / 連続回数)
+  - Adapter への入力組み立て (旧 raw, 旧 Markdown, hints)
+  - Adapter からの fallback_to_full 受信時の full 再投入
+  - normalization_run への mode/parent_run_id/changed_unit_keys の記録
+
+Markdownize Adapter:
+  - capabilities = ["incremental_update"] の宣言
+  - incremental 入力を受け取って updated_units / unchanged_unit_keys を返す
+  - 軽微でないと判断したら fallback_to_full=true を返す
+```
+
+Adapter が `incremental_update` capability を宣言しない場合は、KCS は常に full モードで Adapter を呼ぶ。これにより既存 Adapter との後方互換が保たれる。
+
+詳細仕様: [diff.md §6.1](diff.md), [batch.md task type=markdownize, mode](batch.md), [kcs.md §8 capabilities](kcs.md)
+
+設定上書き例 (`.kcs/config.toml`):
+
+```toml
+[markdownize.incremental]
+enabled = true
+threshold = 0.30
+max_consecutive = 5
+include_neighbors = 1
+```
+
+---
+
 # 11. 実装前に埋めるべき仕様
+
+> Phase 1〜3 ([positioning.md §6](positioning.md)) を着手する前に、少なくとも以下を具体化する。Phase 4-5 の仕様は MVP リリース後に着手する。
 
 実装前に、少なくとも以下の空ドキュメントを優先して具体化する。
 
@@ -468,20 +535,22 @@ output_hash (in normalization_runs) | (廃止)                            | hash
 ドキュメント間の依存順は以下を推奨する。新規参加者はこの順で読むことで概念がぶつからない。
 
 ```text
-1. philosophy.md        理念と用語 (Git の翻訳, 忘れない/purge)
-2. git_kcs.md           概念モデル (CAS, snapshot DAG, dedup scope)
-3. kcs.md               .kcs ディレクトリの最終設計案
-4. hash.md              identity と up_to_date 判定 + tool_profile_hash 規約
-5. diff.md              prepared_units / normalized_units と差分判定
-6. db.md                SQLite schema と検索バックエンド
-7. read_only.md         書き込み主体と権限境界
-8. batch.md             非同期ジョブと retry / budget
-9. hybrid.md            検索モードと paging / MMR
-10. commit_snapshot.md  commit_type と GC / purge
-11. auto_organize.md    分類器と評価方針
-12. synchronization.md  共有・修正提案 (v2 以降)
-13. productization_notes.md  プロダクト方針 + 横断規約 (本章)
+0a. positioning.md             プロダクト位置づけ・ターゲット・MVP スコープ・Phase plan (正本)
+0b. competitive-landscape.md   競合分析 / Perkeep 失敗分析 / 差別化の核
+1.  philosophy.md              理念 (Evidence Pointer, Markdown 正規化, 忘れない/purge)
+2.  git_kcs.md                 概念モデル (CAS, snapshot DAG, dedup scope)
+3.  kcs.md                     .kcs ディレクトリの最終設計案
+4.  hash.md                    identity (hash) vs 類似性 (semantic_fingerprint) + tool_profile_hash
+5.  diff.md                    prepared_units / 差分判定 / incremental Markdownize
+6.  db.md                      SQLite schema と検索バックエンド
+7.  read_only.md               書き込み主体と権限境界
+8.  batch.md                   非同期ジョブと retry / budget
+9.  hybrid.md                  検索モードと paging / MMR
+10. commit_snapshot.md         commit_type と GC / purge
+11. auto_organize.md           分類器と評価方針 (Phase 4)
+12. synchronization.md         共有・修正提案 (v2 以降, Phase 5+)
+13. productization_notes.md    プロダクト方針 + 横断規約 (本章)
 ```
 
-各章は前章までの概念を前提にできる。逆順参照は基本的に発生しない。
+各章は前章までの概念を前提にできる。逆順参照は基本的に発生しない。新規参加者は **0a → 0b → 1** の順に読むことで KCS が「Evidence-grounded local knowledge archive」であることを最初に理解できる。
 

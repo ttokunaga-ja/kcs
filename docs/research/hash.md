@@ -7,6 +7,41 @@
 
 ---
 
+# 0. 同一性 (hash) と類似性 (semantic_fingerprint) を分離する
+
+KCS では「同一性」と「類似性」を別レイヤーに分離する。これは設計の根幹なので、本書の最初に固定する。
+
+```
+raw_hash             原文バイト列の同一性。1バイト違えば別 object。
+tool_profile_hash    Adapter capability の identity (§9.1)
+semantic_fingerprint 意味的・視覚的・構造的な近さ
+```
+
+理由: content-addressed identity に「意味同一性」まで担わせると破綻する。PDF 再保存・Office 上書きで意味同じでも 1 バイト変わって hash が変わる。dedup 候補提示・ページ再利用判定・分類提案などの **類似性** は hash ではなく `semantic_fingerprint` で扱う。
+
+```text
+hash は同一性を保証する。
+semantic_fingerprint は類似性を示す。
+混ぜない。命名でも区別する (`*_hash` vs `*_fingerprint`)。
+```
+
+semantic_fingerprint の主な用途:
+
+```text
+- page fingerprint (diff.md §13): PDF ページの perceptual hash + text hash + visual hash
+  → 旧 Markdown unit の再利用判定
+- file-level semantic_fingerprint (Embedding 中心ベクトル等)
+  → 重複候補提示 / 類似ファイル発見 / auto_organize の folder profile マッチ
+- chunk-level semantic_fingerprint
+  → 検索結果の MMR / dedup
+```
+
+semantic_fingerprint は「変わりうる」ものなので **identity 判定や up_to_date 判定には使わない**。逆に、hash は「類似性」を語らない (1 バイト違いは 100% 違う扱い)。両者の責務を混ぜないことが、KCS の決定性と再現性の根拠になる。
+
+なお、KCS は **Markdown 側の content hash (normalized_hash 等) を採用しない** ([hash.md §9.1](#91-tool_profile_hash-の計算規約) 参照、Markdown は LLM ベースの非決定的生成物のため)。Markdown 側の「似ている」は normalized_hash ではなく semantic_fingerprint で扱う。
+
+---
+
 # 1. なぜMarkdownだけでは判定できないか
 
 Markdown化後のファイルだけ見ても、
