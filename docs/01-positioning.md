@@ -1,0 +1,285 @@
+# 01 Positioning
+
+KCS のプロダクト位置づけ・対象ユーザー・差別化・競合分析・MVP スコープ・Phase plan を **正本** として定義する。他ドキュメントが「KCS とは何か」を語る場合、本書を参照する。
+
+> 関連: [02-philosophy.md](02-philosophy.md) (理念) / [09-mvp-scope.md](09-mvp-scope.md) (MVP / Phase / Step) / [productization_notes.md](productization_notes.md) (横断規約)
+
+---
+
+# 1. ポジショニング (一行で)
+
+```
+英: Local-first knowledge archive, powered by frontier AI.
+日: データはローカル、計算は最強の AI を使う。
+```
+
+二次表現 (補助的な言い換え):
+
+```
+英: Evidence-grounded local knowledge archive
+日: 原文根拠付きローカル知識アーカイブ
+```
+
+KCS は次のいずれでもない:
+
+- 全部入りの "Git for knowledge"
+- 個人向け AI 検索ツール (Khoj / AnythingLLM 系)
+- OS 級プロダクト
+- 企業向けナレッジ基盤
+- Knowledge Graph プラットフォーム
+- offline-first 原理主義ツール (everything offline)
+
+KCS は次である:
+
+> **ローカルファイルを、過去も含めて、AI と人間が根拠付きで探索できる知識アーカイブ。データの主権はローカルに置きつつ、計算は frontier AI (Gemini / Claude / GPT) を含む最強の手段を使う。**
+
+## 1.1 なぜ "local-first" であって "offline-first" ではないか
+
+`local-first` は **データの主権がローカルにある** ことを意味する。`offline-first` は **ネット遮断でも動く** ことを含意する。両者は別物である。
+
+KCS の対象ユーザー (開発者・研究者) の現実のワークフローは、Markdownize や Embedding に Gemini / Claude / GPT 等の frontier AI を使うのが既定値である。ここで "everything offline" を強要すると、Perkeep が辿った「思想は近いが日常体験差を出せない」失敗を踏襲する。
+
+KCS の主張は「**データはあなたのマシンから出ない / 計算結果 (Markdown, Embedding) はあなたのマシンに残る / API 呼び出しはユーザーの opt-in で行う**」であり、API 呼び出し自体を禁止することではない。完全オフライン運用はローカル LLM Adapter を選択するユーザーの自由として残るが、それは **デフォルトではない**。
+
+---
+
+# 2. ターゲットユーザー (最初の顧客)
+
+最初のターゲットは明確に絞る。
+
+```text
+- 大量の PDF・Markdown・コード・画像・研究資料を扱う
+- 開発者・研究者・技術者
+- Git や CLI に抵抗がない
+- ローカルファイルが散らかっている
+- AI 検索を試したいが、クラウド丸投げは嫌
+```
+
+**MVP では一般ユーザー向けではない**。GUI も MVP では持たない (CLI + 構造化 API のみ)。広げるのは、上記層で確実に動いてから。
+
+---
+
+# 3. 第一価値命題
+
+最初に売るのは思想ではなく即効的体験差。
+
+> **「探せなかったファイルがすぐ見つかる」**
+> **「根拠が死なない」**
+
+最低ライン:
+
+```bash
+kcs init
+kcs snapshot
+kcs search "あの PDF"
+kcs open
+```
+
+これで価値が成立する状態を MVP の Definition of Done に含める。
+
+---
+
+# 4. 差別化の核 (3 点に絞る)
+
+### 4.1 Evidence Pointer
+
+`commit / tree / raw_hash / chunk_hash / span` で根拠を指す。path ではない。ファイル移動・削除・上書きでも根拠は死なない (CAS object store が原文を保持するため)。
+
+### 4.2 Markdown 正規化を共通中間表現とする
+
+すべてのファイル種別を Normalized Markdown に変換し、人間と AI が同じビューを使う。**Markdown は正本ではなく raw object からの read-only view**。詳細は [03-data-model.md §10](03-data-model.md)。
+
+### 4.3 Content-addressed local archive + time-travel search
+
+全ファイルを CAS object として保存し、snapshot DAG を持つ。削除済み / 過去版 / 移動済みファイルにも検索が届く。
+
+---
+
+# 4.4 競合・近接事例
+
+「自分だけが新しい」という前提で進めると埋もれる。比較は思想ではなく **ユーザー体験差** を基準にする。
+
+| プロダクト | レイヤー | KCS との重なり | KCS との非重複 |
+| --- | --- | --- | --- |
+| **Perkeep** | content-addressed personal storage | content-addressed・ローカル中心・思想 | Markdown 正規化なし、AI 検索なし、Evidence Pointer なし、即効性弱 |
+| **git-annex** | 大容量ファイル × Git | content-addressed の発想、CLI 中心 | 知識検索なし、Markdown化・Embedding なし |
+| **Obsidian + Smart Connections** | ノート vault + ローカル意味検索 | local-first AI 検索、ローカル embedding | vault 内に閉じる。任意ファイル・PDF・履歴 DAG なし |
+| **Khoj** | personal AI / second brain | local-first AI 検索、PDF 含む | content-addressed archive ではない、Evidence Pointer なし、time-travel なし |
+| **AnythingLLM** | local-first AI app | local-first、文書取り込み | チャット中心、CAS や履歴 DAG なし |
+| **DEVONthink** | 文書管理アプリ | ローカル中心、文書管理 | macOS 商用、CAS 中心ではない、Evidence Pointer なし |
+| **Microsoft Recall** | 画面 snapshot 検索 | time-travel 体験 | 画面ベースであってファイルベースではない、ファイル原本に戻れない |
+| **Apple Intelligence** | OS 統合 AI | プライバシー・ローカル処理 | OS ベンダー専属、汎用ローカルアーカイブではない |
+
+参考: Perkeep https://perkeep.org/ / git-annex https://git-annex.branchable.com/ / Khoj https://docs.khoj.dev/ / Smart Connections https://smartconnections.app/smart-connections/ / DEVONthink https://www.devontechnologies.com/apps/devonthink/ai / Recall https://support.microsoft.com/en-us/windows/privacy-and-control-over-your-recall-experience-d404f672-7647-41e5-886c-a3c59680af15 / Apple Intelligence https://www.apple.com/apple-intelligence / AnythingLLM https://anythingllm.com/
+
+# 4.5 Perkeep 失敗分析 (KCS が学ぶべきこと)
+
+Perkeep は思想的に KCS と最も近い (content-addressed、ローカル中心、所有権、永続保存)。にもかかわらず一般化していない。仮説:
+
+```
+- セットアップが技術者向け (server プロセス, blob 概念, importer)
+- ユーザー体験が抽象的 (「保存できる」が日常的な体験差に変換されない)
+- 既存ファイルシステムとの関係が曖昧 (どちらが正本か分かりにくい)
+- 検索・閲覧・整理の即効性が弱い
+- "Why now?" の訴求が時代と噛み合わなかった
+```
+
+KCS が同じ轍を踏まないための行動原則:
+
+1. **最初の体験を即効的にする**: `kcs init → kcs search "あの PDF" → kcs open` で価値が出る状態。「思想」を最初に売らない。
+2. **ファイルシステムとの関係を明示**: 原本は元の場所にある。`.kcs` は隠しメタデータ。Perkeep のように「全部 blob に持っていく」ことはしない。
+3. **content-addressed は手段、Evidence Pointer は目的**: ユーザーに blob/CAS を見せない。見せるのは「根拠が死なない」結果だけ。
+4. **既存ワークフローに乗る**: Obsidian vault / Documents / Downloads を **置き換えず横断する** 外部アーカイブ層として始める (詳細 §8)。
+
+# 4.6 重なる領域 = 相互運用 / 乗らない
+
+| 領域 | 重なる相手 | KCS のスタンス |
+| --- | --- | --- |
+| 個人ノート vault | Obsidian | **置き換えない**。vault を含む親フォルダに `.kcs`。vault 内検索は Smart Connections に任せ、KCS は vault + Documents + Downloads + コードを横断 |
+| AI チャット UX | Khoj, AnythingLLM | **競合しない**。KCS は CLI + 構造化 API を提供し、Khoj/AnythingLLM がそれを呼べる関係を狙う |
+| 大容量ファイル管理 | git-annex | **対象が違う**。git-annex は同期・バックアップ。KCS は知識検索と Evidence。両立可能 |
+| 画面履歴 | Microsoft Recall, Rewind | **競合しない**。レイヤーが違う (画面 vs ファイル) |
+| OS 統合 | Apple Intelligence, Windows Copilot | **競合しない**。OS ベンダーは横断アーカイブ層を提供しない |
+
+---
+
+# 5. MVP スコープ (絞り込み)
+
+KCS は要素が多すぎるので、MVP では **一次・二次** を厳格に分ける。
+
+### 5.1 MVP に含める (Phase 1〜3)
+
+```text
+content-addressed raw object 保存
+Normalized Markdown (incremental Markdownize 含む)
+chunk
+Embedding
+FTS (FTS5 外部 content + trigram tokenizer)
+Hybrid search
+Evidence Pointer
+snapshot DAG (commit / tree)
+restore
+time-travel search (--at)
+```
+
+### 5.2 MVP で捨てる (v2 以降に倒す)
+
+```text
+完全な Knowledge Graph (node/edge 自動生成)
+複雑な Agent navigation (neighbors, beam search 等)
+GUI
+クラウド共有・修正提案・workspace 概念
+pack/delta 圧縮
+高度な分類器の自動移動 (auto_organize は提案表示のみ)
+```
+
+これらが「設計に存在しない」のではなく、**MVP の旗印にしない**ということ。設計検討は research ドキュメント上で続けてよいが、Phase 4-5 のラベルを付ける。
+
+---
+
+# 6. Phase Plan (実装順)
+
+```
+Phase 1: Evidence 基盤
+  - raw object 保存
+  - normalized markdown 生成 (incremental 含む)
+  - chunk 生成
+  - Evidence Pointer
+
+Phase 2: 検索
+  - FTS5
+  - sqlite-vec
+  - hybrid search (paging / MMR)
+
+Phase 3: 履歴
+  - tree
+  - commit / snapshot object
+  - restore
+  - --at / --all-history
+
+Phase 4: 自動化
+  - auto snapshot
+  - Downloads watch
+  - inbox
+  - classification suggestion (提案のみ)
+
+Phase 5: Agent
+  - agent API
+  - navigation
+  - neighbors
+  - node / edge
+```
+
+各 Phase は前 Phase に依存する。Phase 1 が動かないうちに Phase 4-5 を深掘りしない。
+
+---
+
+# 7. 二層構造: truth と cache
+
+データ・所有権・権限の正本は **各フォルダ直下の `.kcs`** に閉じる。device-local な `scope_registry` や将来の global aggregator は **検索キャッシュ・発見補助** に過ぎない。
+
+```
+truth = folder-local .kcs
+  - raw object / normalized / chunks / commits / refs
+  - 権限境界 / partial sync / purge / export の単位
+
+cache = scope_registry / aggregator
+  - 検索の探索対象一覧
+  - stale 検出
+  - UI 統合
+```
+
+ルール:
+
+- aggregator のみを更新して `.kcs` の状態が変わる実装は禁止。
+- aggregator 喪失は再構築可能 (各 `.kcs` を rescan)。`.kcs` 喪失は復旧不能。
+- 検索結果メタには「正本の `.kcs` パス」を必ず含める。
+
+---
+
+# 8. 既存ワークフローとの関係
+
+KCS は既存ツールを置き換えない。**横断する**外部アーカイブ層として始める。
+
+| 既存ワークフロー | KCS の関係 |
+| --- | --- |
+| Obsidian vault | vault を含む親フォルダに `.kcs`。vault 内検索は Smart Connections に任せ、KCS は vault + Documents + Downloads + コードを横断。 |
+| Git リポジトリ | リポジトリ自体には `.kcs` を置かない (Git に管理される)。リポジトリ群を含む親フォルダに `.kcs` で横断検索。 |
+| 既存ファイル整理 | Documents / Downloads など散らかった領域を整理せず、横断検索と Evidence で「整理しなくても見つかる」体験を提供。 |
+| Khoj / AnythingLLM | KCS の構造化 API を呼ぶ関係を狙う。チャット UX は彼らに任せる。 |
+
+---
+
+# 9. ポジショニングを揺さぶる発言禁止リスト
+
+ドキュメント・README・ピッチでは、以下のフレーズを使わない。
+
+```
+✗ "Git for knowledge"
+✗ "全部入りのナレッジ管理"
+✗ "個人 AI アシスタント"
+✗ "OS 級"
+✗ "Knowledge Graph for personal data"
+✗ "Notion / Obsidian キラー"
+✗ "offline-first"           (誤解を招く。"local-first" を使う)
+✗ "private AI" / "機密 AI"  (中心軸ではない)
+```
+
+採用する語:
+
+```
+✓ Local-first knowledge archive, powered by frontier AI.   (core)
+✓ データはローカル、計算は最強の AI を使う。                  (core 日)
+✓ local-first                                                (データ主権の語として)
+✓ Evidence-grounded local knowledge archive                  (二次表現)
+✓ 原文根拠付きローカル知識アーカイブ                            (二次表現)
+✓ time-travel knowledge navigation                           (履歴特性を語るとき)
+✓ Evidence Pointer                                           (技術用語として)
+```
+
+
+---
+
+# 10. このドキュメントの更新方針
+
+ポジショニングは頻繁に変えない。MVP リリース → 一次ユーザー検証 → 拡張判断、の**節目でのみ更新**する。本書は「現時点の確定版」を保つ。揺らぎは git history で追える。
