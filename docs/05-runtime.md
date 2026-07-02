@@ -551,13 +551,14 @@ KCS は **常駐 daemon を持たない**。すべての処理は CLI コマン�
 `.kcs/.lock` を取得するコマンド (書き込み系):
 
 ```text
-kcs index / kcs snapshot (= kcs commit) / kcs gc / kcs purge /
+kcs index / kcs snapshot (= kcs commit) / kcs tag (refs/tags 更新) / kcs gc / kcs purge /
 kcs repair --rebuild-db / kcs move --accept
 ```
 
 規約:
 
-- 読み取り系 (search / log / view / inspect / evidence verify / restore) は `.kcs/.lock` を取得しない。`kcs index` と `kcs search` の同時実行は許容 (SQLite WAL でリーダーは旧スナップショット)
+- 読み取り系 (search / log / view / inspect / evidence verify / restore / status / diff) は `.kcs/.lock` を取得しない。`kcs index` と `kcs search` の同時実行は許容 (SQLite WAL でリーダーは旧スナップショット)
+- `.kcs/.lock` を取得できない場合、書き込み系コマンドは**待機せず即座に失敗する**: error code `KCS-E-STORE-LOCKED-001`、exit code 3 (retryable、[06-cli-spec.md §7](06-cli-spec.md))。lock ファイルには保持プロセスの pid と取得時刻を記録し、保持プロセスが存在しない stale lock は次の取得試行時に回収してよい。待機オプション (`--wait <seconds>`) は Phase 4+ 予約
 - refs (refs/heads/main, refs/tags/*) の更新は `.kcs/.lock` 保持下で、temp file 書き込み + atomic rename により行う (部分書き込みを外部に見せない)
 - `kcs repair --rebuild-db` 実行中の `kcs search` は、再構築完了までの間旧 sqlite.db (存在すれば) を読むか、`KCS-E-INDEX-REBUILDING-001` を返す。再構築の完了も atomic rename (sqlite.db.tmp → sqlite.db) で切り替える
 - scope-registry.sqlite (~/.local/share/kcs/) は WAL モード + busy_timeout (デフォルト 5000ms) で複数プロセスの同時書き込みを直列化する。registry は cache であり ([03-data-model.md §4](03-data-model.md))、破損時は各 `.kcs` の rescan で再構築する

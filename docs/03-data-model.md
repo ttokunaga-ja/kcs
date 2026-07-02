@@ -458,7 +458,12 @@ embedding_hash = "sha256:" + base16(sha256(JCS({
 
 JCS ではキー順は canonical 化時に自動決定されるため、上記の記載順は可読性のためのもの。
 
-tree entry の `gen` は commit 時点で参照していた normalized instance の世代 (§2.1)。フィールド欠落は `gen = 0`
+tree entry の `normalize` ブロックは **optional**。normalized instance が存在しないファイル (未 Markdownize) の
+entry では `normalize` を**省略**する (省略 = 当該ファイルの normalized / chunk は存在しない。`null` は書かない —
+§5.1 の「省略と null を識別しない」に従う)。Step 1 (pipeline 未実装) では全 entry が `normalize` 省略形になり、
+Step 2 で Markdownize されたファイルから順に `normalize` 付き entry へ移行する。
+
+`normalize` が存在する場合、tree entry の `gen` は commit 時点で参照していた normalized instance の世代 (§2.1)。フィールド欠落は `gen = 0`
 と読む (forward compatible)。`kcs reindex --force` 後も過去 commit の tree entry は旧 gen を
 指し続けるため、`kcs view --at` ([05-runtime.md §4.2](05-runtime.md)) と Evidence Pointer の
 不変性保証 ([08-evidence-pointer-spec.md §6](08-evidence-pointer-spec.md)) は gen 保全により成立する。
