@@ -32,41 +32,80 @@ KCS:   commit + raw_hash + chunk_hash   → ファイル移動・リネーム・
 ```json
 {
   "schema_version": 1,
-  "commit": "kcs_01H...",
-  "tree": "tree_abc",
+  "commit": "sha256:9f2c...",
+  "tree": "sha256:3f9a...",
   "raw_hash": "sha256:abc123...",
   "tool_profile_hash": "sha256:tool1...",
   "chunk_hash": "sha256:chunk456...",
-  "path_at_commit": "docs/report.pdf",
+  "path_at_commit": "report.pdf",
   "heading_path": ["認証仕様", "API Token", "有効期限"],
   "section_id": "auth/api-token/expiry",
   "char_start": 1200,
   "char_end": 1500,
+  "scope_id": "scope_01J8ZQ...",
   "scope_path": "/Users/foo/Research/.kcs"
 }
 ```
+
+`path_at_commit` は **commit 時点の scope フォルダ直下でのファイル名** であり、パス区切り (`/`) を含まない ([03-data-model.md §3](03-data-model.md))。フォルダ階層上の位置は `scope_path` が示す。人間向け表示ではこの 2 つを組み合わせて表示する (§7.2)。
 
 ## 2.1 必須フィールド
 
 | フィールド | 役割 | 不変条件 |
 | --- | --- | --- |
 | `schema_version` | Evidence Pointer schema の semver | breaking change で bump |
-| `commit` | snapshot DAG の commit_id | 該当 commit が purge されない限り解決可能 |
+| `commit` | commit object の content hash (commit_hash, [03-data-model.md §8.1](03-data-model.md)) | append-only。GC (shallow 化) でも失われない |
 | `raw_hash` | 原文バイト列の identity | 移動・リネームで不変 |
 | `tool_profile_hash` | Markdownize Adapter capability の identity | tool 変更で別 chunk に飛ばない保証 |
-| `chunk_hash` | chunk object の identity | `(raw_hash, tool_profile_hash, span)` から導出 |
-| `scope_path` | 正本 `.kcs` の絶対パス | truth レイヤーへの直接参照 |
+| `chunk_hash` | chunk object の identity | `(raw_hash, tool_profile_hash, gen, unit_key, heading_path, section_id, char_start, char_end)` から導出 (算出式は [03-data-model.md §8.1](03-data-model.md)) |
+| `scope_id` | 正本 `.kcs` の path 非依存 identity (`.kcs/scope.json` 保持) | `.kcs` の移動・export/import で不変 |
 
 ## 2.2 Optional フィールド
 
 | フィールド | 役割 |
 | --- | --- |
-| `tree` | 当該 commit の tree object id (高速解決用) |
+| `tree` | 当該 commit の tree_hash (高速解決用。shallow 化済み commit では tree object 自体は存在しないことがある) |
 | `path_at_commit` | commit 時点の表示用 path (UI 表示・人間可読性) |
 | `heading_path` / `section_id` | chunk の構造的位置 (UI 表示・semantic retarget 用) |
-| `char_start` / `char_end` | normalized Markdown 内の文字 span |
+| `char_start` / `char_end` | normalized unit 本文内の文字 span (unit-local、[03-data-model.md §8.1](03-data-model.md)) |
+| `scope_path` | 生成時点の正本 `.kcs` の絶対パス (解決の高速ヒント + 表示用。解決の root 信頼は `scope_id`) |
 
 `path_at_commit` は **表示用** であり、解決には使わない。実際の解決は `commit + raw_hash` で行う (path はリネーム履歴をまたいでも追えるが、root 信頼は raw_hash 側)。
+
+`scope_path` も `path_at_commit` と同様 **ヒント** であり、解決の root 信頼にしない。`.kcs` の移動・別マシンへの import 後も、`scope_id` が一致する限り pointer は解決可能である。
+
+## 2.3 正規シリアライズ (canonical serialization)
+
+Evidence Pointer の交換形式は 2 つ。**完全形は §2 の JSON object**、**正規テキスト形は以下の URI** とする。
+
+```text
+kcs://<scope_id>/<commit>/<raw_hash>/<tool_profile_hash>/<chunk_hash>[?sv=<schema_version>]
+
+例:
+kcs://scope_01J8ZQ.../sha256:9f2c.../sha256:abc123.../sha256:tool1.../sha256:chunk456...
+```
+
+規則:
+
+- URI は **必須フィールドのみ** を持つ。optional フィールド (path_at_commit / heading_path / char_start 等) は
+  表示用であり (§2.2)、URI ⇄ JSON の往復で失われてよいのは optional フィールドだけ。
+- `sv` (schema_version) 省略時は `1`。未知の `sv` は KCS-E-CONFIG-SCHEMA 系 error (exit 2)。
+- 各セグメントは §2 の同名フィールド値をそのまま置く (hash は `sha256:` prefix 込み、commit は commit_hash、
+  [03-data-model.md §8.1](03-data-model.md))。percent-encoding は不要 (値域が `[A-Za-z0-9_:.-]` に閉じるため)。
+
+CLI の `<pointer>` 引数はすべて以下の受理規則に従う (優先順位順に prefix で判定):
+
+```text
+1. "-"          stdin から 1 つ読む (JSON object または URI 1 行)
+2. "kcs://"     URI 形
+3. "{"          inline JSON (§2 schema)
+4. "sha256:"    短縮形 (kcs open / kcs view のみ): object store を照会して種別を判別し、
+                chunk_hash なら chunk、raw_hash なら raw として、カレント .kcs + HEAD を
+                文脈に解決する。複数種別に該当し多義なら候補一覧を error で返す
+5. その他       parse 失敗 → exit 2 (invalid usage)
+```
+
+bulk 系 (`kcs evidence verify --batch <pointers.jsonl>`) は従来どおり各行 JSON object。
 
 ---
 
@@ -79,37 +118,54 @@ KCS:   commit + raw_hash + chunk_hash   → ファイル移動・リネーム・
 
 ## 3.1 解決手順
 
-```
-1. scope_path の .kcs を開く
-2. commit を refs / objects/commits/ から取得
-3. tree (commit.tree) を取得
-4. tree から raw_hash で entry を検索
-5. raw_hash が tombstone を持つなら → tombstone を返す (§4)
-6. raw_hash + tool_profile_hash で normalized_unit を解決
-7. chunk_hash で chunk object を解決し char_start/char_end の text を取り出す
+```text
+1.  scope の解決 (2 段):
+    a. scope_path が指定され、その .kcs の scope.json の scope_id が pointer と一致 → それを使う
+    b. 一致しない・存在しない・scope_path 省略 → scope_registry を scope_id で照会し kcs_path を得る
+       (同一 scope_id が複数登録されている場合は last_seen_at 最新を優先。曖昧なら候補一覧 error)
+    c. どちらも失敗 → KCS-E-EVIDENCE-SCOPE-UNREACHABLE-001 (scope_unreachable, §3.2)
+2.  commit を refs / objects/commits/ から取得
+2a. commit が shallow (tree 破棄済み) の場合、手順 3-4 を省略し、手順 5 以降を
+    pointer の raw_hash / tool_profile_hash / chunk_hash で直接行う。
+    chunk object 本体が gen を保持するため、chunk_hash → chunk object → gen で
+    normalized unit instance まで直接解決できる (03-data-model.md §8)。
+    レスポンスに "commit_shallow": true を付す。
+3.  tree (commit.tree) を取得
+4.  tree から raw_hash で entry を検索
+5.  raw_hash が tombstone を持つなら → tombstone を返す (§4)
+6.  tree entry の normalize.(tool_profile_hash, gen) で normalized instance (unit object 群) を解決
+    (gen フィールド欠落は gen=0 と読む)
+7.  chunk_hash で chunk object を解決し char_start/char_end の text を取り出す
 ```
 
 ## 3.2 不変条件
 
-```
+```text
 解決成功条件:
-  - commit が存在
-  - commit が shallow GC されていない (= tree が残っている)
+  - scope (.kcs) に到達できる
+  - commit object が存在 (shallow でもよい。commit object は GC で削除されない)
   - raw object が存在 (purge されていない)
   - chunk object が存在 (= 同一 tool_profile_hash で生成済み)
 
-部分的失敗:
-  - shallow commit:        commit は表示できるが tree なし
-                           → KCS-E-COMMIT-SHALLOW-001
-  - purged raw_hash:       tombstone を返す (§4) または NOT-FOUND
-  - tool_profile_hash 不一致: chunk が存在しない場合は retarget が必要 (§5)
+部分的失敗 (status は 3 値):
+  - purged raw_hash (tombstone あり):   tombstoned — tombstone を返す (§4.1)
+  - tombstone なしで raw object 不在:   not_found — KCS-E-PURGE-NOT-FOUND-001 (§4.2)
+  - scope の .kcs に到達できない:        scope_unreachable — scope_path 不達かつ
+                                        scope_registry に scope_id 未登録
+                                        → KCS-E-EVIDENCE-SCOPE-UNREACHABLE-001
+                                        (.kcs を再接続 / kcs index で registry 再登録すれば回復可能)
+  - tool_profile_hash 不一致:           chunk が存在しない場合は retarget が必要 (§5)
+
+補足: shallow commit は pointer 解決の失敗要因ではない (§3.1 手順 2a)。
+KCS-E-COMMIT-SHALLOW-001 は restore / diff / `--at <shallow-commit>` 検索 /
+cursor 再計算など tree 全体を要する操作に限る ([05-runtime.md §2.2](05-runtime.md))。
 ```
 
 ---
 
 # 4. Dead Evidence Pointer (purge 対応)
 
-「Evidence Pointer の不変性」(§6) と「法務 purge」([05-runtime.md §3](05-runtime.md)) の緊張領域。purge された raw_hash を指す既存 pointer の挙動を以下に固定する (採用案。実装着手後の最終確定は [09-mvp-scope.md §5.3](09-mvp-scope.md))。
+「Evidence Pointer の不変性」(§6) と「法務 purge」([05-runtime.md §3](05-runtime.md)) の緊張領域。purge された raw_hash を指す既存 pointer の挙動を以下に固定する (確定。残未決 2 件は [09-mvp-scope.md §5.3](09-mvp-scope.md))。
 
 ## 4.1 Tombstone レスポンス
 
@@ -120,7 +176,7 @@ raw_hash が tombstone を持つ場合 (= purge 済みだが履歴上は記録):
   "status": "purged",
   "purged_at": "2026-04-25T12:00:00Z",
   "purged_reason": "legal" | "privacy" | "misingest" | "copyright" | "other",
-  "purged_in_commit": "kcs_01H...",
+  "purged_in_commit": "sha256:9f2c...",
   "raw_hash": "sha256:abc...",
   "scope_path": "/Users/foo/Research/.kcs"
 }
@@ -130,11 +186,11 @@ raw_hash が tombstone を持つ場合 (= purge 済みだが履歴上は記録):
 
 ## 4.2 NOT-FOUND レスポンス
 
-raw_hash が完全削除 (履歴書き換え) されている場合:
+raw_hash が tombstone なしで完全削除 (`--erase-tombstone`) されている場合:
 
-```
+```text
 error_code: KCS-E-PURGE-NOT-FOUND-001
-message: "Evidence target was purged with full history rewrite"
+message: "Evidence target was purged without tombstone record"
 context: { raw_hash, scope_path }
 ```
 
@@ -145,7 +201,7 @@ context: { raw_hash, scope_path }
 AI Agent が過去回答で使った Evidence Pointer の生存確認用:
 
 ```bash
-kcs evidence verify <pointer-or-json> [--strict]
+kcs evidence verify <pointer> [--strict]   # <pointer> の受理形式は §2.3
 ```
 
 ```json
@@ -156,6 +212,9 @@ kcs evidence verify <pointer-or-json> [--strict]
 ```
 
 `--strict`: tombstoned と not_found の両方を **error** として扱う (CI / 自動化用)。
+exit code: 全 pointer が alive なら 0、1 件でも tombstoned / not_found があれば **4** (permanent failure)。
+`--strict` なしの verify は検査が完了すれば 0 を返し、生存状態は `status` フィールドで判定する。
+exit code の横断規約は [06-cli-spec.md §7](06-cli-spec.md)。
 
 bulk verify:
 
@@ -164,13 +223,17 @@ kcs evidence verify --batch <pointers.jsonl>
 # 各行が pointer JSON。各行に対する status を返す
 ```
 
+`--batch` の実装は Phase 4+ ([09-mvp-scope.md §3.1](09-mvp-scope.md))。単発 verify は Step 4。
+
 ---
 
 # 5. Retarget (最新版へ pointer を切り替える)
 
 別 LLM で再 Markdownize すると `tool_profile_hash` が変わり chunk が別物になる。既存 Evidence Pointer は古い `tool_profile_hash` の chunk を指し続ける (これは設計として正しい)。
 
-「最新 Markdown へ pointer を切り替える」のは **明示操作** ([09-mvp-scope.md §5.2](09-mvp-scope.md), 設計確定後に本仕様に昇格):
+「最新 Markdown へ pointer を切り替える」のは **明示操作** ([09-mvp-scope.md §5.2](09-mvp-scope.md)):
+
+> retarget の実装は Phase 4+ ([09-mvp-scope.md §3.1](09-mvp-scope.md))。CLI 契約 (以下) は Step 3 以降の Evidence Pointer 契約と整合させて確定済み。
 
 ```bash
 kcs evidence retarget <pointer> [--latest|--at <commit>]
@@ -182,7 +245,7 @@ kcs evidence retarget <pointer> [--latest|--at <commit>]
   "status": "retargeted",
   "new_pointer": { ...更新後... },
   "retargeted_from": "<old_pointer>",
-  "match_method": "heading_path_exact" | "heading_path_fuzzy" | "semantic_fingerprint",
+  "match_method": "heading_path_exact" | "heading_path_fuzzy",
   "confidence": 0.92
 }
 ```
@@ -196,7 +259,9 @@ kcs evidence retarget <pointer> [--latest|--at <commit>]
 }
 ```
 
-retarget は **AI Agent からの呼び出しを前提** にしているため、API 形は 06-cli-spec.md と agent-api と同形を保つ。
+対応付けは `heading_path` の完全一致 (`heading_path_exact`) → 正規化一致 + span 重なり率 (`heading_path_fuzzy`) の順に試みる。**意味ベースの対応付け (semantic_fingerprint) は MVP に含めない**。chunk レベルの fingerprint 実体が未定義であり、embedding は retarget が必要な場面 (tool_profile 変更) で互換性ルール ([03-data-model.md §7](03-data-model.md)) により新旧比較が成立しない恐れがあるため。導入する場合は Phase 4+ で match_method の MINOR 追加 (§8) として行う。
+
+retarget は **AI Agent からの呼び出しを前提** にしているため、レスポンスは [06-cli-spec.md §4](06-cli-spec.md) の `--json` 契約に従う。Phase 5 で構造化 API を導入する際もこの JSON schema を互換性契約として維持する ([06-cli-spec.md §9](06-cli-spec.md))。
 
 ---
 
@@ -206,7 +271,8 @@ retarget は **AI Agent からの呼び出しを前提** にしているため�
 - 既存 Evidence Pointer は KCS によって書き換えられない
 - raw_hash / chunk_hash / tool_profile_hash / commit は append-only
 - pointer の意味する場所 (= 生成時に解決可能だった raw + chunk) は purge されない限り解決可能
-- 解決失敗は schema 上区別される (shallow / tombstoned / not_found)
+- 解決失敗は schema 上区別される (tombstoned / not_found / scope_unreachable)
+- auto commit の GC (shallow 化) は pointer の解決可能性に影響しない (raw / chunk object は GC で削除されない、[05-runtime.md §2.6](05-runtime.md))
 - "古い pointer" を "最新版" に勝手に飛ばさない (retarget は明示操作)
 ```
 
@@ -245,13 +311,13 @@ Agent は `evidence_pointer` を保存し、後続のセッションで以下を
 
 UI / レポートでは Evidence Pointer を以下に整形して表示することを推奨:
 
-```
-[docs/report.pdf @ kcs_01H... > 認証仕様 > API Token > 有効期限]
-                ↑               ↑                       ↑
-                path_at_commit  heading_path            section
+```text
+[report.pdf @ sha256:9f2c1a7b04de… > 認証仕様 > API Token > 有効期限]
+      ↑                              ↑                      ↑
+      path_at_commit                 heading_path           section
 ```
 
-完全な hash は折りたたみ可能。
+commit hash の短縮表示は [03-data-model.md §8.1](03-data-model.md) の規則 (先頭 12 hex) に従う。完全な hash は折りたたみ可能。
 
 ---
 
@@ -268,3 +334,5 @@ PATCH  typo / コメント修正
 `path_at_commit` / `heading_path` 等の optional フィールドは **MINOR 互換** で追加してよい。`raw_hash` / `chunk_hash` / `commit` の意味変更は **MAJOR 扱い** (= migration plan + ユーザー通知)。
 
 新 schema は古い解決ロジックでもエラーなく扱えること (forward compatible) を要件とする (= 未知フィールドは無視)。
+
+本仕様の 2026-07 改訂 (`scope_id` 必須化・`scope_path` の optional 降格) は、実装・pointer 発行前の `schema_version = 1` の定義確定であり、MAJOR bump ではない。公開後に同種の変更を行う場合は上記規約どおり MAJOR (migration plan + ユーザー通知) となる。

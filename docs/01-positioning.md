@@ -2,7 +2,7 @@
 
 KCS のプロダクト位置づけ・対象ユーザー・差別化・競合分析・MVP スコープ・Phase plan を **正本** として定義する。他ドキュメントが「KCS とは何か」を語る場合、本書を参照する。
 
-> 関連: [02-philosophy.md](02-philosophy.md) (理念) / [09-mvp-scope.md](09-mvp-scope.md) (MVP / Phase / Step) / [productization_notes.md](productization_notes.md) (横断規約)
+> 関連: [02-philosophy.md](02-philosophy.md) (理念) / [09-mvp-scope.md](09-mvp-scope.md) (MVP / Phase / Step) / [10-operations.md](10-operations.md) (横断規約)
 
 ---
 
@@ -39,7 +39,9 @@ KCS は次である:
 
 KCS の対象ユーザー (開発者・研究者) の現実のワークフローは、Markdownize や Embedding に Gemini / Claude / GPT 等の frontier AI を使うのが既定値である。ここで "everything offline" を強要すると、Perkeep が辿った「思想は近いが日常体験差を出せない」失敗を踏襲する。
 
-KCS の主張は「**データはあなたのマシンから出ない / 計算結果 (Markdown, Embedding) はあなたのマシンに残る / API 呼び出しはユーザーの opt-in で行う**」であり、API 呼び出し自体を禁止することではない。完全オフライン運用はローカル LLM Adapter を選択するユーザーの自由として残るが、それは **デフォルトではない**。
+KCS の主張は「**原本・履歴・index の保管と主権はあなたのマシンにある / 計算結果 (Markdown, Embedding) もあなたのマシンに残る / 処理のためのファイル内容の送信は明示 opt-in で行い、何を・いつ・どの Adapter へ送ったかを記録する** ([07-adapter-spec.md §3](07-adapter-spec.md))」であり、API 呼び出し自体を禁止することではない。opt-in 後は frontier AI にファイル内容が送信される。これを隠さず、preview で network transmission policy として提示する ([06-cli-spec.md §2](06-cli-spec.md))。完全オフライン運用はローカル LLM Adapter や同梱 deterministic Adapter を選択するユーザーの自由として残るが、それは **デフォルトではない**。
+
+opt-in の単位・寿命・revoke の正本は [07-adapter-spec.md §3](07-adapter-spec.md)。
 
 ---
 
@@ -75,7 +77,12 @@ kcs search "あの PDF"
 kcs open
 ```
 
-これで価値が成立する状態を MVP の Definition of Done に含める。
+これで価値が成立する状態を MVP の Definition of Done に含める。この 4 コマンドは **API キー未設定でも成立する** (同梱 deterministic Adapter によるベースライン index + text 検索。[07-adapter-spec.md §2.1](07-adapter-spec.md))。frontier AI は意味検索・スキャン PDF・画像内テキストへ検索品質を引き上げる推奨 opt-in である。
+
+即効価値と履歴価値は分けて訴求する。
+
+- **初日から効く**: 意味検索 (語彙一致しない言い換え・スキャン PDF・画像内テキストに届く) と Evidence Pointer 表示。OS 全文検索 (Spotlight / ripgrep-all) が失敗するクエリで勝つことを Done 条件に含める ([09-mvp-scope.md §4](09-mvp-scope.md))。
+- **使うほど効く**: リネーム横断 (M3-2)・削除済み再発見 (M3-3) は snapshot 履歴の蓄積とともに立ち上がる価値であり、導入初日の差別化としては訴求しない。
 
 ---
 
@@ -109,8 +116,15 @@ kcs open
 | **DEVONthink** | 文書管理アプリ | ローカル中心、文書管理 | macOS 商用、CAS 中心ではない、Evidence Pointer なし |
 | **Microsoft Recall** | 画面 snapshot 検索 | time-travel 体験 | 画面ベースであってファイルベースではない、ファイル原本に戻れない |
 | **Apple Intelligence** | OS 統合 AI | プライバシー・ローカル処理 | OS ベンダー専属、汎用ローカルアーカイブではない |
+| **OS/ローカル全文検索 (Spotlight, Recoll, ripgrep-all)** | ローカル全文検索 | ローカル・即時・無料。「本文の一部から探す」体験の第一代替 | 語彙一致が前提で、言い換え・意味検索に弱い。削除済み・上書き済み・過去版には届かない (現在のファイルシステムのみ)。根拠が path 依存で、移動・リネームで死ぬ。Evidence Pointer なし |
+| **NotebookLM** | クラウド型 evidence-grounded QA | citation 付き AI 回答、研究者ユーザー層、無料 | アップロード型でデータ主権がクラウド側。ソースは notebook 単位の手動登録で、ファイルシステム横断・履歴なし。citation は notebook 内参照であり、不変性・time-travel・ローカル原本回帰なし (詳細は下記) |
+| **Zotero / Paperless-ngx** | 文書アーカイブ (OCR + 全文検索 + メタデータ) | 研究者の PDF 管理定番、ローカル運用可、OCR 全文検索 | 専用ライブラリへの取り込み型で、任意フォルダの横断ではない。意味検索なし。CAS 履歴なし (削除済み・過去版検索なし)。Evidence Pointer なし |
 
-参考: Perkeep https://perkeep.org/ / git-annex https://git-annex.branchable.com/ / Khoj https://docs.khoj.dev/ / Smart Connections https://smartconnections.app/smart-connections/ / DEVONthink https://www.devontechnologies.com/apps/devonthink/ai / Recall https://support.microsoft.com/en-us/windows/privacy-and-control-over-your-recall-experience-d404f672-7647-41e5-886c-a3c59680af15 / Apple Intelligence https://www.apple.com/apple-intelligence / AnythingLLM https://anythingllm.com/
+参考: Perkeep https://perkeep.org/ / git-annex https://git-annex.branchable.com/ / Khoj https://docs.khoj.dev/ / Smart Connections https://smartconnections.app/smart-connections/ / DEVONthink https://www.devontechnologies.com/apps/devonthink/ai / Recall https://support.microsoft.com/en-us/windows/privacy-and-control-over-your-recall-experience-d404f672-7647-41e5-886c-a3c59680af15 / Apple Intelligence https://www.apple.com/apple-intelligence / AnythingLLM https://anythingllm.com/ / Recoll https://www.recoll.org/ / ripgrep-all https://github.com/phiresky/ripgrep-all / NotebookLM https://notebooklm.google.com/ / Zotero https://www.zotero.org/ / Paperless-ngx https://docs.paperless-ngx.com/
+
+## 4.4.1 NotebookLM との差別化 — citation と Evidence Pointer は別物
+
+NotebookLM の citation は「notebook にアップロード済みのソース内の該当箇所への参照」であり、クラウド上のコーパスに閉じる。Evidence Pointer は `commit / tree / raw_hash / chunk_hash / span` で根拠を不変に固定するため、次の 4 点で体験が異なる: (1) **不変性** — 原本のリネーム・移動・削除・上書き後も pointer は死なない。citation はソースを削除すれば消える。(2) **time-travel** — 過去の任意 snapshot 時点の内容を指せる。(3) **ローカル原本回帰** — `kcs open` で OS 規定アプリの原本そのものに戻れる。citation の終点はクラウド上のビューア。(4) **任意フォルダ横断** — アップロード操作なしに、手元の全 indexed scope (過去版・削除済み含む) を対象にする。NotebookLM は「選んだソースに質問する」体験、KCS は「持っている全ファイルから根拠を掘り出し、その根拠を固定する」体験であり、併用可能 (KCS で見つけた原本を NotebookLM に投入する使い方は妨げない)。
 
 # 4.5 Perkeep 失敗分析 (KCS が学ぶべきこと)
 
@@ -140,6 +154,7 @@ KCS が同じ轍を踏まないための行動原則:
 | 大容量ファイル管理 | git-annex | **対象が違う**。git-annex は同期・バックアップ。KCS は知識検索と Evidence。両立可能 |
 | 画面履歴 | Microsoft Recall, Rewind | **競合しない**。レイヤーが違う (画面 vs ファイル) |
 | OS 統合 | Apple Intelligence, Windows Copilot | **競合しない**。OS ベンダーは横断アーカイブ層を提供しない |
+| 文書アーカイブ | Zotero, Paperless-ngx | **置き換えない**。Zotero ライブラリ等を含む親フォルダに `.kcs` を置き、専用アーカイブの外にあるファイルも含めて横断する |
 
 ---
 
@@ -263,6 +278,7 @@ KCS は既存ツールを置き換えない。**横断する**外部アーカイ
 ✗ "Notion / Obsidian キラー"
 ✗ "offline-first"           (誤解を招く。"local-first" を使う)
 ✗ "private AI" / "機密 AI"  (中心軸ではない)
+✗ "データはあなたのマシンから出ない"  (デフォルト構成 (frontier AI) では偽。「保管と主権はローカル」と言い換える)
 ```
 
 採用する語:

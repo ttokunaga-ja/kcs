@@ -58,7 +58,7 @@ migrated/repaired:
 
 # purge
 
-purge は通常 GC ではない。対象 raw に由来する tree / commit / raw / normalized / chunk / embedding / evidence / index を KCS 管理下から除去する破壊的操作。
+purge は通常 GC ではない。対象 raw の本文と派生 artifact (raw / normalized / chunk / embedding / index エントリ) を KCS 管理下から除去する破壊的操作。tree / commit は書き換えない (正本: [../05-runtime.md §3.5](../05-runtime.md))。
 
 結果 commit の `commit_type` は `purged`。
 

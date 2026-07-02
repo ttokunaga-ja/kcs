@@ -62,6 +62,8 @@ scope registry は横断検索の補助であり、正本ではない。registry
 
 # search scope
 
+> **NOTE**: 本節のフラグ表記 (`--here` / `--below` / `--scope <path>`) は旧案。フラグの正本は [06-cli-spec.md §3](../06-cli-spec.md) (`--scope .` / `--descendants` / `--all-scopes`)。デフォルト scope の定義も 06 §3 を正とする。
+
 ```text
 default:
   scope registry で発見可能な全 `.kcs` を横断検索。

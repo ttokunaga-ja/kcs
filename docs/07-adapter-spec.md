@@ -22,6 +22,25 @@ KCS core:                 Adapter:
 
 Adapter の実行設定 (cmd / args / url / 認証情報) は **`.kcs/` の共有対象に含めない**。各デバイスの `~/.config/kcs/tools.toml` や OS keychain に保存する。`.kcs/` は生成済み artifact の provenance と互換性判定に必要な `profile_hash` だけを保持する。
 
+認証情報の保存規約:
+
+```text
+推奨 (優先順):
+1. OS keychain 参照:   auth = "keychain:<service_name>"
+2. 環境変数参照:       auth = "env:GEMINI_API_KEY"
+
+許容 (非推奨):
+3. tools.toml 直書き:  auth = "plain:<api_key>"
+   - tools.toml の permission が 0600 (owner read/write のみ) でない場合、
+     KCS は起動時に warn を出す (errors.jsonl に level=warn で記録)
+
+禁止 (既定どおり):
+   .kcs/ 配下・tool-lock.json・tool_profile_hash の入力への認証情報の混入
+```
+
+`tools.schema.json` は `auth` フィールドを `^(keychain|env|plain):` にマッチする文字列
+として規定する ([06-cli-spec.md §11](06-cli-spec.md))。
+
 ---
 
 # 2. 実行形態
@@ -47,21 +66,62 @@ KCS core
   → KCS core
 ```
 
+## 2.1 同梱 deterministic Adapter (ベースライン index)
+
+KCS は `deterministic_library` の Prepare / Markdownize Adapter を同梱する。対象: plain text / Markdown / コード (passthrough + fence 正規化)、PDF text layer 抽出。OCR・レイアウト解析・画像理解は行わない。
+
+- online Adapter が未設定または network 未承認のとき、Markdownize タスクは同梱 deterministic Adapter で実行する (タスクを止めない)。Embedding タスクは生成しない (検索は text fallback、[05-runtime.md §1](05-runtime.md))
+- この状態を **ベースライン index** と呼ぶ。`init → snapshot → search → open` の最低体験ライン ([01-positioning.md §3](01-positioning.md)) はベースライン index のみで成立しなければならない
+- online Adapter を承認した後の AI 強化は、別 `tool_profile_hash` の artifact として通常の Markdownize / Embedding タスクで生成する (identity 規約 [03-data-model.md §5](03-data-model.md) のとおり。ベースライン artifact とその Evidence Pointer は不変のまま残る)
+
 ---
 
-# 3. ネットワーク送信原則
+# 3. ネットワーク送信原則と opt-in (正本)
 
 KCS core は、**明示オプトインなしにネットワーク越し API へファイル内容を送信してはならない**。
+本節を network opt-in の正本とし、[06-cli-spec.md §2](06-cli-spec.md) / [10-operations.md §1](10-operations.md) / [01-positioning.md §1.1](01-positioning.md)
+は本節を参照する。
 
-```toml
-default:           no network transmission
-
-explicit opt-in:
-  CLI:           --online
-  config:        adapter.policy.allow_network = true
+```text
+default: no network transmission (opt-in 未成立の scope からはオンライン送信しない)
 ```
 
-オンライン API Adapter を使う場合、ユーザーがどの scope / file / task を送信対象にしたかを記録する。オフライン API / 決定論的ライブラリの場合も `execution_mode` と `profile_hash` は記録する。
+opt-in の単位・成立・寿命:
+
+```text
+単位:   scope × adapter
+        (どの .kcs のファイルを、どの online_api Adapter (tool_id) に送るか)
+
+成立:   (a) 初回スキャン承認フローで network transmission policy を承認
+            (対話承認 または --approve。--yes では成立しない: 06-cli-spec.md §2)
+        (b) 明示設定: .kcs/config.toml の adapter.policy.allow_network = true
+
+寿命:   永続 (revoke まで)。ただし対象 Adapter の tool_id または execution_mode が
+        変わった場合は失効し、再承認を要する。
+
+revoke: adapter.policy.allow_network = false に設定する。
+        以後、当該 scope の新規オンライン送信 task は発行されない
+        (送信済みデータの取り消しは保証しない)。
+
+記録:   承認記録 (10-operations.md §1) に scope_id / tool_id / approved_at /
+        approval_method を残す。
+```
+
+CLI フラグ `--online` は **その 1 回の実行に限る一時 opt-in** で、永続記録を作らない。
+優先関係は次のとおり:
+
+```text
+CLI (--online / --offline)  >  .kcs/config.toml (scope)  >  ~/.config/kcs/config.toml (user)
+```
+
+**01-positioning.md との整合**: デフォルト同梱 Adapter は online_api (frontier AI) だが、
+初回スキャン承認で network transmission policy に同意するまで送信は始まらない。
+"frontier AI default" は同梱・推奨構成を指し、"default: no network transmission" は
+opt-in 未成立状態の既定値を指す。両者は矛盾せず、初回スキャン承認フローが接続する。
+
+オンライン API Adapter を使う場合、ユーザーがどの scope / file / task を送信対象にしたかを
+記録する。オフライン API / 決定論的ライブラリの場合も `execution_mode` と `profile_hash` は
+記録する。
 
 ---
 
@@ -83,7 +143,8 @@ AdapterRun:
   task_id
   input_hashes
   output_hashes
-  status                "pending" | "running" | "done" | "failed"
+  status                "pending" | "running" | "done" | "partial" | "failed"
+                        (partial = unit 単位の部分失敗, 04-pipeline.md §5.2)
   error_kind            error_code (06-cli-spec.md §8)
 ```
 
@@ -146,6 +207,8 @@ metadata:
 
 Text Embedding Adapter / Image Embedding Adapter は**採用しない**。同一 Embedding Adapter が同一 profile で多モダリティを単一 vector space へ写像する。
 
+> **リスク注記 (Step 2 着手前に実地検証)**: 単一 profile で text/image を同一 vector space に写像するマルチモーダル embedding API は提供ベンダーが限られる。Step 2 着手前に候補 API の提供形態・次元数・料金・deprecation ポリシーを実地検証し、採用 profile を `tool-lock.json` に確定する (§6 の `gemini_multimodal_embedding` は例示であり、ベンダー・次元数の裏取り済み値ではない)。検証が通らない場合は、凍結例外 ([09-mvp-scope.md §6.2](09-mvp-scope.md) 条件 1) として「MVP は `modality=text` の単一 Embedding Adapter を許容し、multimodal は interface 予約のみとする」緩和を適用する。北極星シナリオ M3-1〜M3-3 は text 検索のみで完結するため、この緩和は MVP の Done 条件に影響しない。embedding profile の変更は全 re-index を伴う ([03-data-model.md §7](03-data-model.md)) ため、この検証は Step 2 のどの実装より先に行う。
+
 ```sql
 CREATE TABLE embeddings (
   id TEXT PRIMARY KEY,
@@ -164,15 +227,17 @@ sqlite-vec の制約で vector table を物理分割してもよいが、概念�
 ## 5.4 Summary (optional)
 
 ```
-input:   normalized_hashes | chunk_hashes | search_result_ids
+input:   normalized_refs | chunk_hashes | search_result_ids
 output:  summary_hash
 metadata: profile_hash, source_hashes, summary_kind
 ```
 
+`normalized_refs` は normalized instance への参照 `(raw_hash, tool_profile_hash, gen)` ([03-data-model.md §2.1](03-data-model.md))。normalized の content hash は存在しない ([03-data-model.md §5](03-data-model.md))。
+
 ## 5.5 Classification (optional)
 
 ```
-input:   raw_hashes | normalized_hashes | chunk_hashes | image_object_hashes
+input:   raw_hashes | normalized_refs | chunk_hashes | image_object_hashes
 output:  labels, categories, confidence, routing_metadata
 metadata: profile_hash, label_schema_hash
 ```
@@ -254,6 +319,32 @@ started_at, finished_at
 原文本文 / normalized 本文 / API request body / API response body / 秘密情報
 ```
 
+## 7.1 強制モデルと信頼境界 (MVP)
+
+MVP における Adapter の脅威モデルを次のとおり確定する。
+
+```text
+1. Adapter は trusted code として扱う。
+   実行されるのは、ユーザーが明示的にインストールし ~/.config/kcs/tools.toml に
+   設定した Adapter のみ。
+
+2. [adapter.policy] は「KCS 側の入力制御 + 事後監査」の規約であり、
+   sandbox による強制保証ではない。
+   - KCS は allowed_scope 外のファイルを Adapter に渡さない (入力制御)
+   - KCS は allow_network=false の Adapter にオンライン送信前提の task を発行しない
+   - AdapterRun (task_id / input_hashes / output_hashes / status) を監査ログとして残す
+
+3. 悪意ある・侵害された Adapter プロセス自体の挙動 (allowed_scope 外の読み取り、
+   allow_network=false 下での無断送信) は MVP では防御しない。
+   OS レベルのサンドボックス強制は Phase 4+ の再設計論点とする。
+
+4. 第三者 Adapter の配布・署名・検証 (サプライチェーン) は v2 以降のスコープ外。
+   MVP で同梱・文書化するのは KCS 公式 Adapter のみ。
+```
+
+初回実行時の承認 UI はこの前提を反映した文言にする (例: 「この Adapter はあなたの権限で
+実行されます。信頼できる提供元のものだけをインストールしてください」)。
+
 ---
 
 # 8. Incremental Markdownize プロンプト規約
@@ -270,7 +361,11 @@ started_at, finished_at
 4. Adapter が「軽微とは言えない」と判断したら fallback_to_full=true で短絡
    閾値の Adapter 側 hint は KCS 側 hint と衝突したら **KCS 側を優先**
 5. spec_version 不一致なら、Adapter は invalid_input として失敗
+6. 出力は KCS 側の受け入れ検査 (04-pipeline.md §3.2) を通過しなければ persist されない。
+   違反は KCS-E-ADAPTER-CONTRACT-001 として reject され full に fallback する
 ```
+
+`spec_version` の bump 規約は [10-operations.md §12.5](10-operations.md) を正とする。不一致時、KCS は当該 Adapter を capability なし扱いにして full モードで呼び直す (§8.4)。
 
 ## 8.2 推奨プロンプト構造 (frontier AI 系)
 
@@ -303,7 +398,10 @@ USER:
 
 大型 PDF (100+ pages) では TTFB を抑えるためストリーミング出力を許容する。KCS は Adapter からの SSE / chunked JSON を受け取り、unit 完了ごとに persist する。
 
-ストリーミング失敗時は完了済み unit のみ commit し、未完了は `pending` で再開可能にする。
+ストリーミング中の unit は staging 領域に persist し、応答完了後に受け入れ検査
+([04-pipeline.md §3.2](04-pipeline.md)) を通過した時点で manifest へ一括確定する。
+ストリーミング失敗時は staging の完了済み unit のみ確定し、未完了は `pending` で再開可能にする
+(再開後の全体集合に対して受け入れ検査を適用する)。
 
 ## 8.4 Capability 宣言なしの Adapter
 
@@ -318,8 +416,10 @@ Adapter の完全な再実行決定性は要求しない。KCS が保証する�
 ```
 raw_hash 不変                既存 artifact を尊重 (first-instance-wins)
 raw_hash 変化                 新 artifact 候補を作る
-explicit re-normalize         同 raw_hash に対して別 artifact を作る
-                              (kcs reindex --force のみ許可)
+explicit re-normalize         同 (raw_hash, tool_profile_hash) に対して gen+1 の新 normalized
+                              instance を作る (kcs reindex --force のみ許可)。旧 instance は
+                              保全され、既存 commit / Evidence Pointer は旧 gen を参照し続ける
+                              (03-data-model.md §2.1)
 ```
 
 Markdown の content hash は持たない ([03-data-model.md §5](03-data-model.md))。同一 `(raw_hash, tool_profile_hash)` から複数回生成した結果が異なっても、**最初に確定したインスタンスを永続化** し、以後は再生成しない (first-instance-wins)。

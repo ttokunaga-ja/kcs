@@ -2,7 +2,7 @@
 
 この文書は、実装・UI・運用へ落とすときに問題になりやすい点を補足する。
 
-> **NOTE (2026-05 改訂)**: ポジショニング・ターゲットユーザー・MVP スコープ・Phase plan は **正本を [01-positioning.md](01-positioning.md) に移した**。本書はその下位の運用ルールを扱う。競合分析は [competitive-landscape.md](competitive-landscape.md) を参照。
+> **NOTE (2026-05 改訂)**: ポジショニング・ターゲットユーザー・MVP スコープ・Phase plan は **正本を [01-positioning.md](01-positioning.md) に移した**。本書はその下位の運用ルールを扱う。競合分析は [01-positioning.md §4](01-positioning.md) を参照。
 
 MVP は **「Evidence-grounded local knowledge archive」としての最小完全系** として扱う。「全部入りの Git for knowledge」を目指さない。詳細は [01-positioning.md §5](01-positioning.md)。
 
@@ -45,9 +45,29 @@ hidden directories
 build/cache/vendor candidates
 network transmission policy
 adapter execution mode
+estimated markdownize cost (USD)
+estimated embedding cost (USD)
+estimated completion under current budget cap
 ```
 
-除外候補は提案であり、ユーザーの承認なしに自動除外しない。
+コスト概算は、現行 `tool-lock.json` の online Adapter 単価 × 推定ページ数 / トークン数から算出する **桁の目安** であり、保証ではない。概算合計が当月の effective budget cap ([04-pipeline.md §5.4](04-pipeline.md)) を超える場合、preview は承認前に警告し、cap 内での推定完了時期 (月数) とあわせて次の選択肢を提示する。
+
+```text
+Estimated AI enrichment cost: ~$210 (markdownize ~$180, embedding ~$30)
+Current budget cap: $50/month → estimated completion: 5 months
+Options:
+  [1] ベースライン index のみで開始 (コスト $0。AI 強化は後から)
+  [2] 除外 (.kcsignore) を調整して再 preview
+  [3] budget cap を変更
+  [4] このまま続行 (cap 到達時に AI 強化タスクは paused)
+```
+
+ベースライン index ([07-adapter-spec.md §2.1](07-adapter-spec.md)) は選択肢に依らず先に完了するため、どの選択でも初日の検索は成立する。
+
+除外候補は提案であり、ユーザーの承認なしに自動除外しない。唯一の例外は secrets 系パターン
+(§1.1 Tier A) で、これは built-in デフォルト除外として最初から「除外済み」状態で preview に
+表示され、取り込むにはユーザーの明示的な解除操作 (対話承認時の個別選択、または .kcsignore の
+negation 記述) が必要である。`--yes` はこの解除を行えない ([06-cli-spec.md §2](06-cli-spec.md))。
 
 ```text
 Suggested exclusions:
@@ -59,6 +79,19 @@ Suggested exclusions:
   video.mp4         large file: 8.2GB
 ```
 
+secrets 系はデフォルト除外・警告として別枠で表示する。
+
+```text
+Excluded by default (secrets, Tier A):
+  .env              environment file
+  .ssh/             SSH keys directory
+  cert.pem          private key / certificate
+
+Sensitive candidates (Tier B, 取り込み予定・要確認):
+  db_credentials.yaml   filename matches *credentials*
+  api_tokens.md         filename matches *token*
+```
+
 非対話環境では、承認済み scope または `--yes` / `--approve` のような明示オプションがない限り、`kcs index` は失敗させる。
 
 承認記録には、少なくとも次を残す。
@@ -68,10 +101,87 @@ scope_id
 root_path
 approved_at
 actor
+approval_method        # interactive | approve | yes
 kcs_version
 effective_ignore_hash
 estimated_file_count
 estimated_total_bytes
+estimated_markdownize_usd
+estimated_embedding_usd
+```
+
+承認後の index は二段で進む ([04-pipeline.md §5](04-pipeline.md)): ベースライン index が先に完了し、AI 強化 (Markdownize / Embedding) は budget guardrail の管理下で後段として進む。AI 強化が未完了・paused の間、その状態を隠してはならない。
+
+- `kcs status` は AI 強化の進捗 (done / pending / paused 件数) と paused の理由 (budget / auth / rate limit) を表示する
+- 検索レスポンスは index が部分的なとき `index_status` を返す ([05-runtime.md §1.7](05-runtime.md))
+
+## 1.1 Secrets デフォルト除外 (built-in ignore template)
+
+KCS は secrets 系ファイルの取り込み・オンライン送信事故を防ぐため、built-in の除外テンプレート
+を同梱する。パターンは 2 段階に分ける。
+
+**Tier A (デフォルト除外)**: 拡張子・ファイル名から secrets とほぼ確実に判定できるもの。
+初回 preview で「除外済み」として表示され、取り込むには明示解除が必要。
+
+```text
+.env
+.env.*
+*.pem
+*.key
+*.p12
+*.pfx
+id_rsa*
+id_ecdsa*
+id_ed25519*
+*.keystore
+.ssh/
+.gnupg/
+.aws/
+.kube/config
+.docker/config.json
+.netrc
+.npmrc
+.pypirc
+*.tfstate
+*.tfstate.*
+```
+
+**Tier B (警告のみ)**: 名前ベースで機微の可能性があるが誤検出も多いもの。取り込み対象に
+含めるが、初回 preview の「機微ファイル候補」欄に列挙してユーザー確認を促す。
+
+```text
+*credentials*
+*secret*
+*token*
+*apikey*
+*password*
+```
+
+規約:
+
+```text
+1. テンプレートは KCS 本体に同梱し、バージョンを effective_ignore_hash の入力に含める
+2. Tier A の解除は、対話承認時の個別選択 または .kcsignore の negation (!pattern) のみ
+3. --yes は Tier A の解除・Tier B 警告のスキップを行えない (06-cli-spec.md §2)
+4. テンプレートの追加・変更は本節の更新を伴う (破壊的変更扱い)
+```
+
+**承認後に追加されたファイルの扱い**: scope 承認は初回一回だが、承認後にフォルダへ追加された
+ファイルが secrets パターンに一致する場合は自動処理を保留する。
+
+```text
+Tier A 一致の新規ファイル:
+  取り込み自体を保留 (quarantine)。CAS 保存・snapshot への取り込みを行わない。
+  kcs status に「取り込み保留 (secrets 候補)」として表示し、
+  取り込みには対話確認 または .kcsignore の明示編集を要する。
+
+Tier B 一致の新規ファイル:
+  ローカル取り込み (CAS 保存・ローカル index) は行うが、online_api Adapter への
+  送信 task は pending のまま保留し、kcs status に表示する。
+  対話確認 (kcs index の実行時プロンプト) で一括承認できる。
+
+非一致の新規ファイル:
+  従来どおり自動取り込み (デフォルト全管理を維持)。
 ```
 
 ---
@@ -80,14 +190,15 @@ estimated_total_bytes
 
 KCS は、容量効率よりも知識を失わないこと、あとから検索・履歴探索・復元できることを優先する。
 
-したがって、全ファイル管理をデフォルトとする方針は維持する。動画・巨大PDF・画像・Officeファイルも、ユーザーが明示的に ignore しない限り管理対象に含める。
+したがって、全ファイル管理をデフォルトとする方針は維持する。動画・巨大PDF・画像・Officeファイルも、ユーザーが明示的に ignore しない限り管理対象に含める。唯一の例外は secrets 系の built-in デフォルト除外 (§1.1) であり、これは容量ではなく不可逆な漏洩リスクを理由とする。
 
 ただし、プロダクトはこの事実を隠してはならない。
 
 ```text
 KCS は検索インデックスだけでなく、原本ファイルを content-addressed archive に保存します。
-各 `.kcs` が管理するのはその `.kcs` が置かれたフォルダ自身が直接保持するファイルのみで、
-サブフォルダにある別の `.kcs` 配下のファイルを親 `.kcs` が再帰的に取り込むことはありません。
+各 `.kcs` が管理するのはその `.kcs` が置かれたフォルダ直下のファイルのみです。
+サブフォルダのファイルは (そこに `.kcs` があるか否かに関わらず) 親 `.kcs` は取り込みません。
+対象ファイルを含むサブフォルダには子 `.kcs` が作られ、独立したスコープとして管理されます。
 同じ `.kcs` 内では同じ内容を重複保存しません。
 別フォルダの別 `.kcs` に同じ内容のファイルが存在するのは、ユーザーが意図的に複数フォルダへ
 同じファイルを配置した場合に限られ、その場合はフォルダ単位の独立性を優先して重複保存します。
@@ -136,7 +247,6 @@ cache = scope_registry / aggregator
 scope_id
 root_path
 kcs_path
-folder_id
 participates_in_global_search
 approved_at
 last_seen_at
@@ -152,10 +262,10 @@ permission_status
 3. `.kcs` 喪失は復旧不能 (registry には正本データがない)。
 4. 検索結果メタには「正本の `.kcs` パス」を必ず含める。
 5. raw object の所有権・dedup は scope_registry でグローバル化しない。
-   各 `.kcs/objects` 内に閉じる (横断 dedup を諦めた帰結、git_kcs.md §5)。
+   各 `.kcs/objects` 内に閉じる (横断 dedup を諦めた帰結。03-data-model.md §3)。
 ```
 
-scope registry は共有 `.kcs` の正本ではない。フォルダ移動や外部ドライブ切断時は、`folder_id` と `scope.json` を使って再発見または stale 扱いにする。
+scope registry は共有 `.kcs` の正本ではない。フォルダ移動や外部ドライブ切断時は、`scope.json` の `scope_id` を使って再発見または stale 扱いにする (`folder_id` は同概念の旧称であり廃止)。
 
 ---
 
@@ -188,16 +298,21 @@ system directory
 
 # 5. 物理レイアウト統一
 
-内部正本は `.kcs/objects/normalized/` に統一する。
+内部正本は `.kcs/objects/normalized_units/` (unit object 群 + manifest) に統一する
+([03-data-model.md §2.1](03-data-model.md))。全文 Markdown は unit を決定論的に結合した
+view (再生成可能な cache) であり正本ではない。
 
 過去メモにある `.kcs/normalized/` は、bootstrap 時の簡略表記または仮想表示パスとして扱う。実装・契約ドキュメントでは、hash ベースの object store を正とする。
 
 ```text
-internal:
-  .kcs/objects/normalized/ab/cd/<raw_hash>.<tool_profile_hash>.md
+truth:
+  .kcs/objects/normalized_units/ab/cd/<raw_hash>.<tool_profile_hash>.g<gen>/
+
+materialized view (cache):
+  .kcs/objects/normalized/ab/cd/<raw_hash>.<tool_profile_hash>.g<gen>.md
 
 virtual view:
-  docs/report.pdf.md
+  report.pdf.md
 ```
 
 ---
@@ -207,6 +322,8 @@ virtual view:
 MVP の標準全文検索バックエンドは SQLite FTS5 とする。Vector は sqlite-vec を標準とする。
 
 Tantivy など他の BM25 / full-text backend は将来候補として扱い、採用する場合は本書を更新する (破壊的変更扱い)。
+
+> **リスク注記 (sqlite-vec)**: sqlite-vec は v0 系で API 未安定、ANN index を持たない全件 brute-force KNN であり、成熟度リスクがある。M3-1 の性能目標 (20 scopes / 合計 10 万 chunk で p95 < 5 秒、[09-mvp-scope.md §4.1](09-mvp-scope.md)) は brute-force で達成可能な規模であり、text fallback ([05-runtime.md §1.1](05-runtime.md)) と本節の Future 差し替え経路が設計済みのため、MVP では標準として維持する。Step 3 の最初のタスクとして (1) 使用する sqlite-vec のバージョンを pin し、(2) 合計 10 万 chunk 規模での brute-force レイテンシ計測 spike を行う。目標未達の場合も MVP では対応せず、Future バックエンドの採用判断材料として記録する。
 
 ```text
 MVP:
@@ -225,7 +342,13 @@ Future:
 
 # 7. Purge の保証範囲
 
-`purge` は、KCS 管理下の object store、snapshot DAG、index、pack、cache、tombstone から対象ファイル由来の情報を削除する操作である。
+`purge` は、KCS 管理下の object store、snapshot DAG、index、pack、cache、tombstone、
+および KCS 自身のログ (`.kcs/logs/access.jsonl`、`~/.local/share/kcs/logs/` の
+events / errors / metrics) から対象ファイル由来の情報を削除する操作である。
+ログについては、対象の raw_hash / path / query を含む行の削除またはフィールドマスクを行う。
+`redact_logs` デフォルト true (§12.6) の運用では query / path / prompt は元から記録されないため、
+実務上のスクラブ対象は主に raw_hash 参照行に限られ軽量である。
+purge 自体の実行記録 (`commit_type=purged`、tombstone) は監査可能性のため残す ([05-runtime.md §3.2](05-runtime.md))。
 
 ただし、OS backup、Time Machine、クラウド同期の過去版、外部 export、ユーザーが手動コピーしたファイル、KCS 外のログまでは KCS 単体では保証しない。
 
@@ -247,8 +370,63 @@ UI 文言は、過剰な保証を避ける。
 明示確認
 対象 raw / normalized / chunk / embedding / evidence / index の削除
 pack / cache / index rebuild
+KCS 自身のログのスクラブ (該当行の削除またはマスク) と、その完了有無の結果表示
 復元不能な最小 tombstone
 ```
+
+---
+
+# 7.5 `.kcs` の整合性検証とバックアップ
+
+「`.kcs` 喪失は復旧不能」(§3 不変条件 3) である以上、破損の検出手段とバックアップ手順を
+仕様として持つ。
+
+## 7.5.1 kcs repair --verify-objects (fsck 相当)
+
+```bash
+kcs repair --verify-objects
+```
+
+- `objects/` 配下の全 CAS object (raw / chunk / tree / commit) の content hash を再計算し、
+  保存パス・参照 hash と照合する ([03-data-model.md §8.1](03-data-model.md))
+- normalized は content hash を持たない ([03-data-model.md §5](03-data-model.md)) ため hash 検証対象外とし、
+  参照整合 (対応する `(raw_hash, tool_profile_hash)` object の実在) のみ確認する
+- SQLite index は検証対象外 (破損時は `--rebuild-db` で再構築可能なため)
+
+破損検出時の挙動:
+
+```text
+1. working tree に同一ファイルが現存し、再計算 raw_hash が一致
+   → re-ingest で object を復元し、commit_type=repaired の commit を記録
+     (復元した raw object は GC 対象外、05-runtime.md §2.6)
+2. 復元手段なし
+   → missing として errors.jsonl に KCS-E-STORE-CORRUPT-001 を記録し、
+     影響を受ける commit / Evidence Pointer の一覧を表示
+3. exit code: 破損 0 件 または 全件復元 = 0 / missing 残あり = 3
+```
+
+MVP では手動実行のみとする。自動定期検証 (スケジューラ連携) は Phase 4+ の論点。
+
+## 7.5.2 バックアップ運用
+
+正式なバックアップ手段は次の 2 つとし、専用コマンドは MVP では追加しない。
+
+```text
+1. .kcs ディレクトリごとのコピー (MVP の推奨手段)
+   - コピー中に kcs が書き込まないこと (.kcs/.lock 未取得状態) を確認してから行う
+   - sqlite.db は repair --rebuild-db で再構築可能なため、最悪 objects/ と refs/ が
+     保全されていれば復旧できる
+
+2. kcs export <scope> --to <bundle.kcsz>
+   - .kcsz は公開用と同一の bundle 形式で、バックアップにも使える
+   - export の実装は Phase 4+ ([09-mvp-scope.md](09-mvp-scope.md))。MVP のバックアップは
+     lock 未取得確認 + ディレクトリコピー (手段 1) のみを提供する
+   - 復元は kcs import (同じく Phase 4+)
+```
+
+復元後は `kcs repair --verify-objects` で整合性を確認する。外部ドライブ・クラウド
+ストレージの placeholder file 上の `.kcs` は破損リスクが高いため、§4 の境界方針の確定
+までは推奨しない。
 
 ---
 
@@ -310,7 +488,12 @@ command allowlist / confirmation
 secret redaction
 ```
 
-オンライン Adapter は、`--online` 等の明示 opt-in なしにファイル内容を送信してはならない。初回スキャン preview でも、network transmission policy を表示する。
+これらの policy の強制モデル (宣言 + 監査であって sandbox 保証ではないこと) は
+[07-adapter-spec.md §7.1](07-adapter-spec.md) を正本とする。
+
+オンライン Adapter は、明示 opt-in なしにファイル内容を送信してはならない。opt-in の
+単位 (scope × adapter)・寿命・revoke は [07-adapter-spec.md §3](07-adapter-spec.md) を
+正本とする。初回スキャン preview でも、network transmission policy を表示する。
 
 ---
 
@@ -321,17 +504,18 @@ secret redaction
 目的:
 
 ```text
-1. LLM API コスト抑制 (cost guardrail と整合、batch.md §Cost guardrail)
+1. LLM API コスト抑制 (04-pipeline.md §5.4 の cost guardrail と整合)
 2. 全文再生成による表記ゆれ・見出し変動を抑制
-   → unit_id / chunk / Evidence Pointer の安定性向上
-3. 変わっていない unit の再 LLM 呼び出しを完全排除
+   → unit_key / chunk / Evidence Pointer の安定性向上
+3. 変わっていない unit の再 Markdownize 呼び出しを完全排除
+   (embedding は text_hash 一致による再利用で抑制する, 04-pipeline.md §5.5)
 ```
 
 実装責務の分担:
 
 ```text
 KCS:
-  - 変更検出 (raw_hash 変化 + page fingerprint 変化率算出, diff.md §13)
+  - 変更検出 (raw_hash 変化 + unit_mapping による変化率算出, 04-pipeline.md §2.2)
   - 発動条件の判定 (capability / 閾値 / 連続回数)
   - Adapter への入力組み立て (旧 raw, 旧 Markdown, hints)
   - Adapter からの fallback_to_full 受信時の full 再投入
@@ -345,7 +529,7 @@ Markdownize Adapter:
 
 Adapter が `incremental_update` capability を宣言しない場合は、KCS は常に full モードで Adapter を呼ぶ。これにより既存 Adapter との後方互換が保たれる。
 
-詳細仕様: [diff.md §6.1](diff.md), [batch.md task type=markdownize, mode](batch.md), [kcs.md §8 capabilities](kcs.md)
+詳細仕様: [04-pipeline.md §2, §3](04-pipeline.md), [07-adapter-spec.md §8](07-adapter-spec.md)
 
 設定上書き例 (`.kcs/config.toml`):
 
@@ -363,23 +547,23 @@ include_neighbors = 1
 
 > Phase 1〜3 ([01-positioning.md §6](01-positioning.md)) を着手する前に、少なくとも以下を具体化する。Phase 4-5 の仕様は MVP リリース後に着手する。
 
-実装前に、少なくとも以下の空ドキュメントを優先して具体化する。
+以下の仕様は既に正本 spec に統合済みである。着手前に該当節が凍結ゲート ([09-mvp-scope.md §6.2](09-mvp-scope.md)) を通過していることを確認する。
 
 ```text
-02_data-model/object-store.md
-02_data-model/snapshot-dag.md
-02_data-model/evidence-pointer-schema.md
-02_data-model/normalized-markdown-spec.md
-02_data-model/kcsignore-spec.md
-02_data-model/sqlite-schema.sql.md
-03_pipeline/ingest.md
-03_pipeline/markdownization.md
-03_pipeline/snapshot.md
-04_runtime/restore.md
-04_runtime/resume-and-retry.md
-07_implementation/testing-strategy.md
-08_evaluation/metrics-definitions.md
-09_mvp/done-criteria.md
+object store / snapshot DAG      → 03-data-model.md
+Evidence Pointer schema          → 08-evidence-pointer-spec.md
+SQLite schema                    → 03-data-model.md §8
+ingest / markdownize / snapshot  → 04-pipeline.md
+restore / resume-retry           → 05-runtime.md / 04-pipeline.md §5.7
+検索評価規約 / 評価指標定義        → 09-mvp-scope.md §4.3
+done criteria                    → 09-mvp-scope.md
+```
+
+未統合で実装前に具体化が必要なもの:
+
+```text
+.kcsignore spec                  → 03-data-model.md へ追記予定
+Normalized Markdown 形式 spec     → 07-adapter-spec.md へ追記予定
 ```
 
 特に object hash 算出、Evidence Pointer、Normalized Markdown の決定性、purge 後の到達不能性は、実装後に変えると互換性コストが高い。
@@ -402,14 +586,15 @@ DOMAIN:
   COMMIT   commit / snapshot / restore
   GC       garbage collection
   PURGE    purge 操作
-  SYNC     同期・共有
+  EVIDENCE Evidence Pointer 解決 / verify / retarget
+  SYNC     同期・共有 (v2 予約。MVP では発行しない)
   ADAPTER  Adapter ロード・実行
   CONFIG   config / schema / 設定
   STORE    object store / fs IO
   AUTH     認証・認可
 ```
 
-例: `KCS-E-BATCH-NET-001`, `KCS-E-SEARCH-VEC-INCOMPAT`, `KCS-E-COMMIT-SHALLOW-001`.
+例: `KCS-E-BATCH-NET-001`, `KCS-E-SEARCH-VEC-INCOMPAT-001`, `KCS-E-SEARCH-VEC-UNAVAIL-001`, `KCS-E-COMMIT-SHALLOW-001`, `KCS-E-PURGE-NOT-FOUND-001`, `KCS-E-STORE-PATH-001`, `KCS-E-STORE-CORRUPT-001`, `KCS-E-SEARCH-SCOPE-ALL-FAILED-001`, `KCS-E-SEARCH-CURSOR-001`, `KCS-E-INDEX-REBUILDING-001`, `KCS-E-EVIDENCE-SCOPE-UNREACHABLE-001`, `KCS-E-EVIDENCE-RETARGET-AMBIG-001`, `KCS-E-ADAPTER-CONTRACT-001`。各 code の定義箇所は該当 spec (06-cli-spec.md §8 に一覧と参照先) を参照。
 
 各 spec が定義した個別エラー (04-pipeline.md / 05-runtime.md / 06-cli-spec.md 等) はこの namespace に従う。新規 code 追加は本書および該当 spec の更新を伴う (破壊的変更扱い)。
 
@@ -432,6 +617,8 @@ KCS のすべての CLI コマンドは以下の exit code を返す。
 
 スクリプト連携はこれらを参照する。コマンド固有の補足は各 sub-command が docstring に明記する。
 
+dead pointer (tombstoned / not_found / scope_unreachable) は `4`、tool_profile 不一致による chunk 解決不能は `8` に割り当てる (詳細: [06-cli-spec.md §7](06-cli-spec.md))。
+
 ## 12.3 設定ファイル schema validation
 
 すべての設定ファイルは JSON Schema (TOML は JSON 等価表現に変換して同 schema で validate) を持ち、CLI 起動時に schema-driven validation を行う。schema は KCS 本体に同梱する。
@@ -447,6 +634,8 @@ KCS のすべての CLI コマンドは以下の exit code を返す。
 
 validation 失敗は exit code 2 で停止し、`KCS-E-CONFIG-SCHEMA-NNN` を返す。schema は semver で版管理し、breaking change は migration を要求 (§12.5)。
 
+`user-config.schema.json` は device cap (`[budget]`、[04-pipeline.md §5.4](04-pipeline.md)) を含む。
+
 ## 12.4 時刻・タイムゾーン
 
 すべての永続データ (commit timestamps, normalization_runs, access_events, snapshot lineage 等) の時刻は **UTC ISO8601 拡張形式 + suffix `Z`** に固定する。
@@ -458,17 +647,19 @@ validation 失敗は exit code 2 で停止し、`KCS-E-CONFIG-SCHEMA-NNN` を返
 誤:   2026-04-25T12:00:00+09:00 (local 表記)
 ```
 
-ユーザー向け UI 表示時のみ local TZ に変換する。snapshot lineage の順序判定は UTC タイムスタンプを使い、Lamport/HLC 系の論理時計は v0 では採用しない (採用判断は synchronization.md の改訂で別途)。
+ユーザー向け UI 表示時のみ local TZ に変換する。snapshot lineage の順序判定は UTC タイムスタンプを使い、Lamport/HLC 系の論理時計は v0 では採用しない (採用判断は v2 の同期設計で別途。経緯: research/synchronization.md — 正本ではない)。
 
 ## 12.5 semver / 互換性 promise
 
 KCS が公開する識別子は次のいずれかの semver 軸を持つ。
 
 ```text
-kcs_format_version       .kcs ディレクトリ全体のフォーマットバージョン (kcs.md §5)
-tool_lock_spec_version   tool-lock.json の schema バージョン (kcs.md §8.1)
-profile_hash_spec        tool_profile_hash の計算規約バージョン (hash.md §9.1)
+kcs_format_version       .kcs ディレクトリ全体のフォーマットバージョン (03-data-model.md §2)
+tool_lock_spec_version   tool-lock.json の schema バージョン (07-adapter-spec.md)
+profile_hash_spec        tool_profile_hash の計算規約バージョン (03-data-model.md)
 schema_version_<name>    各 config schema の semver
+adapter_io_spec_version  Adapter 入出力 schema (incremental Markdownize 含む) の spec_version
+                         (07-adapter-spec.md §8 / 04-pipeline.md §3.1)
 ```
 
 ルール:
@@ -487,7 +678,9 @@ PATCH bump:
   - typo / コメント修正レベル。意味変更なし。
 ```
 
-`commit_type` の値域 (commit_snapshot.md) のみは「永久に変更しない契約」として MAJOR bump も発動しない約束をしている。これは一般 semver 規約より強い保証である。
+**Adapter 入出力の `spec_version` bump 規約**: `tool-lock.json` の `spec_version` および Adapter 入出力 schema ([04-pipeline.md §3.1](04-pipeline.md)) の `spec_version` は単調増加の整数とする。bump するのは、フィールドの削除・必須化・意味変更など**旧 Adapter が誤動作しうる変更のみ** (MAJOR 相当。該当 spec と CHANGELOG への明示記載必須)。optional フィールドの追加では bump せず、代わりに Adapter は未知フィールドを無視しなければならない (MUST ignore unknown fields)。不一致時の挙動は分業する: Adapter 側は `invalid_input` として失敗し ([07-adapter-spec.md §8.1](07-adapter-spec.md))、KCS 側は当該 Adapter を `incremental_update` capability なしとみなして full モードで呼び直す ([07-adapter-spec.md §8.4](07-adapter-spec.md))。この full fallback により、`spec_version` の bump が index の停止を引き起こさないことを保証する。
+
+`commit_type` の値域 ([05-runtime.md §2](05-runtime.md)) のみは「永久に変更しない契約」として MAJOR bump も発動しない約束をしている。これは一般 semver 規約より強い保証である。
 
 ## 12.6 観測 (observability)
 
@@ -507,10 +700,14 @@ level     debug | info | warn | error
 code      error_code または event_code
 component batch | search | commit | gc | ...
 message   人間可読な短文
-context   任意の JSON object (tool_profile_hash, commit_id, file_id 等)
+context   任意の JSON object (tool_profile_hash, commit_hash, file_id 等)
 ```
 
-ログのローテーションは日次、保持は 30 日 (config 上書き可)。`redact_logs=true` 時は `context` の `query`, `path`, `prompt` 等の機微フィールドをマスク。
+ログのローテーションは日次、保持は 30 日 (config 上書き可)。`redact_logs` の
+デフォルトは **true** であり、`[adapter.policy]` に限らず observability ログ
+(events / metrics / errors) と access.jsonl の全域に適用される。true の場合、
+`context` の `query`, `path`, `prompt` 等の機微フィールドをマスクする。
+false への変更は明示設定のみで行える。
 
 ## 12.7 命名リネーム表 (旧 → 新)
 
@@ -519,38 +716,20 @@ context   任意の JSON object (tool_profile_hash, commit_id, file_id 等)
 ```text
 旧称                            | 現行                                | 出所
 -------------------------------- | ----------------------------------- | ----
-folder.json                      | scope.json                          | kcs.md §6
-normalized_hash                  | (廃止)                               | hash.md §9
-canonical_text_hash              | (廃止)                               | diff.md §8
-canonical_hash                   | (廃止)                               | diff.md §17
-markdown_hash                    | (廃止)                               | diff.md §3
-Normalized-Hash: <Markdown header> | Tool-Profile-Hash: <Markdown header> | read_only.md §2
-.kcs/normalized/<path>.md        | .kcs/objects/normalized/ab/cd/<raw>.<tool>.md | kcs.md §11
-last_indexed_git_commit          | (廃止: Git 連携は持たない)             | kcs.md §10
-output_hash (in normalization_runs) | (廃止)                            | hash.md §3
+folder.json                      | scope.json                          | research/kcs.md §6
+folder_id                        | scope_id                            | 10-operations.md §3
+normalized_hash                  | (廃止)                               | research/hash.md §9
+canonical_text_hash              | (廃止)                               | research/diff.md §8
+canonical_hash                   | (廃止)                               | research/diff.md §17
+markdown_hash                    | (廃止)                               | research/diff.md §3
+Normalized-Hash: <Markdown header> | Tool-Profile-Hash: <Markdown header> | research/read_only.md §2
+.kcs/normalized/<path>.md        | .kcs/objects/normalized_units/ab/cd/<raw>.<tool>.g<gen>/ (正本) | research/kcs.md §11
+unit_id                          | unit_key / unit_ref                 | 03-data-model.md §2.1
+last_indexed_git_commit          | (廃止: Git 連携は持たない)             | research/kcs.md §10
+output_hash (in normalization_runs) | (廃止)                            | research/hash.md §3
 ```
 
 ## 12.8 推奨 Reading Path
 
-ドキュメント間の依存順は以下を推奨する。新規参加者はこの順で読むことで概念がぶつからない。
-
-```text
-0a. 01-positioning.md             プロダクト位置づけ・ターゲット・MVP スコープ・Phase plan (正本)
-0b. competitive-landscape.md   競合分析 / Perkeep 失敗分析 / 差別化の核
-1.  02-philosophy.md              理念 (Evidence Pointer, Markdown 正規化, 忘れない/purge)
-2.  git_kcs.md                 概念モデル (CAS, snapshot DAG, dedup scope)
-3.  kcs.md                     .kcs ディレクトリの最終設計案
-4.  hash.md                    identity (hash) vs 類似性 (semantic_fingerprint) + tool_profile_hash
-5.  diff.md                    prepared_units / 差分判定 / incremental Markdownize
-6.  db.md                      SQLite schema と検索バックエンド
-7.  read_only.md               書き込み主体と権限境界
-8.  batch.md                   非同期ジョブと retry / budget
-9.  hybrid.md                  検索モードと paging / MMR
-10. commit_snapshot.md         commit_type と GC / purge
-11. auto_organize.md           分類器と評価方針 (Phase 4)
-12. synchronization.md         共有・修正提案 (v2 以降, Phase 5+)
-13. productization_notes.md    プロダクト方針 + 横断規約 (本章)
-```
-
-各章は前章までの概念を前提にできる。逆順参照は基本的に発生しない。新規参加者は **0a → 0b → 1** の順に読むことで KCS が「Evidence-grounded local knowledge archive」であることを最初に理解できる。
+Reading Path の正本は [README.md §1](README.md)。docs/ 直下のファイル名の数字プレフィックスがそのまま読む順番であり、本書で別の順序を定義しない。
 

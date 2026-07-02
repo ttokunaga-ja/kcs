@@ -93,7 +93,7 @@ Phase 5: Agent            agent API / navigation / neighbors / node / edge
 Step 計画 (Phase 1-3 を実装):
 
 ```
-Step 1 (1-2ヶ月): kcs-core + kcs-cli (init/status/commit/log)
+Step 1 (1-2ヶ月): kcs-core + kcs-cli (init / status / snapshot (=commit) / log / diff / inspect / tag)
 Step 2 (2-3ヶ月): kcs-pipeline + kcs-adapter (frontier AI default)
 Step 3 (2-3ヶ月): kcs-index + kcs-search (hybrid + Evidence Pointer)
 Step 4 (1ヶ月):   restore + --at + time-travel
@@ -155,6 +155,7 @@ ADR (Architecture Decision Records) フォルダは廃止しました。本プ�
   - ✗ "Git for knowledge" / "個人 AI アシスタント" / "OS 級" / "Knowledge Graph for personal data" / "Notion / Obsidian キラー"
   - ✗ "offline-first" (誤解を招く。"local-first" を使う)
   - ✗ "private AI" / "機密 AI"
+  - ✗ "データはあなたのマシンから出ない" (デフォルト構成では偽。「保管と主権はローカル」と言い換える)
 - **採用する語**:
   - ✓ Local-first knowledge archive, powered by frontier AI. (core)
   - ✓ データはローカル、計算は最強の AI を使う。(core 日)

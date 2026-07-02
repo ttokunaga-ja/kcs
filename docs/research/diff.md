@@ -120,7 +120,7 @@ unit_mapping:
 # 正本へ移した内容
 
 ```text
-pipeline / schema              → 04-pipeline.md
+pipeline / schema / unit_mapping / 変化率定義   → 04-pipeline.md (§2.2)
 Adapter 入出力契約             → 07-adapter-spec.md
 incremental の運用規約         → 10-operations.md
 ```
