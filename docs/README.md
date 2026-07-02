@@ -74,7 +74,7 @@ cache = scope_registry / aggregator      検索キャッシュ: 探索対象一�
 
 | ディレクトリ | 内容 |
 | --- | --- |
-| [research/](research/) | 設計検討メモ 16 本。**正本ではない**。設計判断の出典・経緯参照用 |
+| [research/](research/README.md) | LLM 出力由来の設計検討メモ 16 本を要点版に圧縮。**正本ではない**。設計判断の経緯参照用 |
 
 ---
 
