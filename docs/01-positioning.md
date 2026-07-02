@@ -31,13 +31,13 @@ KCS は次のいずれでもない:
 
 KCS は次である:
 
-> **ローカルファイルを、過去も含めて、AI と人間が根拠付きで探索できる知識アーカイブ。データの主権はローカルに置きつつ、計算は frontier AI (Gemini / Claude / GPT) を含む最強の手段を使う。**
+> **ローカルファイルを、過去も含めて、AI と人間が根拠付きで探索できる知識アーカイブ。データの主権はローカルに置きつつ、計算は frontier AI (Mistral OCR / Gemini / Claude / GPT) を含む最強の手段を使う。**
 
 ## 1.1 なぜ "local-first" であって "offline-first" ではないか
 
 `local-first` は **データの主権がローカルにある** ことを意味する。`offline-first` は **ネット遮断でも動く** ことを含意する。両者は別物である。
 
-KCS の対象ユーザー (開発者・研究者) の現実のワークフローは、Markdownize や Embedding に Gemini / Claude / GPT 等の frontier AI を使うのが既定値である。ここで "everything offline" を強要すると、Perkeep が辿った「思想は近いが日常体験差を出せない」失敗を踏襲する。
+KCS の対象ユーザー (開発者・研究者) の現実のワークフローは、Markdownize や Embedding に Mistral OCR / Gemini / Claude / GPT 等の frontier AI を使うのが既定値である。ここで "everything offline" を強要すると、Perkeep が辿った「思想は近いが日常体験差を出せない」失敗を踏襲する。
 
 KCS の主張は「**原本・履歴・index の保管と主権はあなたのマシンにある / 計算結果 (Markdown, Embedding) もあなたのマシンに残る / 処理のためのファイル内容の送信は明示 opt-in で行い、何を・いつ・どの Adapter へ送ったかを記録する** ([07-adapter-spec.md §3](07-adapter-spec.md))」であり、API 呼び出し自体を禁止することではない。opt-in 後は frontier AI にファイル内容が送信される。これを隠さず、preview で network transmission policy として提示する ([06-cli-spec.md §2](06-cli-spec.md))。完全オフライン運用はローカル LLM Adapter や同梱 deterministic Adapter を選択するユーザーの自由として残るが、それは **デフォルトではない**。
 

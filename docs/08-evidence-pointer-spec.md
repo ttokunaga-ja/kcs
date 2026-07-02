@@ -92,6 +92,11 @@ kcs://scope_01J8ZQ.../sha256:9f2c.../sha256:abc123.../sha256:tool1.../sha256:chu
 - `sv` (schema_version) 省略時は `1`。未知の `sv` は KCS-E-CONFIG-SCHEMA 系 error (exit 2)。
 - 各セグメントは §2 の同名フィールド値をそのまま置く (hash は `sha256:` prefix 込み、commit は commit_hash、
   [03-data-model.md §8.1](03-data-model.md))。percent-encoding は不要 (値域が `[A-Za-z0-9_:.-]` に閉じるため)。
+- 第 2 セグメントがリテラル `object` の URI は **object 参照**であり、Evidence Pointer ではない:
+  `kcs://<scope_id>/object/<type>/<hash>` (例: normalized view 内の画像参照
+  `kcs://<scope_id>/object/image/<image_hash>`、[07-adapter-spec.md §5.2](07-adapter-spec.md))。
+  `kcs open` はこれを受理して該当 object を解決する。Evidence Pointer URI の第 2 セグメント (commit) は
+  常に `sha256:` prefix を持つため、リテラル `object` と衝突しない。
 
 CLI の `<pointer>` 引数はすべて以下の受理規則に従う (優先順位順に prefix で判定):
 

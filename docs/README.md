@@ -3,7 +3,7 @@
 > **Local-first knowledge archive, powered by frontier AI.**
 > **データはローカル、計算は最強の AI を使う。**
 
-KCS は **local-first** な知識アーカイブ。データの主権はあなたのマシンにあり、Markdownize や Embedding には Gemini / Claude / GPT 等の frontier AI を使う。"offline-first 原理主義" ではない。
+KCS は **local-first** な知識アーカイブ。データの主権はあなたのマシンにあり、Markdownize や Embedding には Mistral OCR / Gemini / Claude / GPT 等の frontier AI を使う。"offline-first 原理主義" ではない。
 
 二次表現: **Evidence-grounded local knowledge archive (原文根拠付きローカル知識アーカイブ)**。
 

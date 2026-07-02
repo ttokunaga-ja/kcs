@@ -29,6 +29,7 @@ Research note は「なぜそう決めたか」を短く残す場所です。仕
 | [hash.md](hash.md) | identity、`tool_profile_hash`、up-to-date 判定 | [03-data-model.md](../03-data-model.md), [07-adapter-spec.md](../07-adapter-spec.md) |
 | [read_only.md](read_only.md) | Normalized Markdown の読み取り専用境界 | [03-data-model.md](../03-data-model.md), [08-evidence-pointer-spec.md](../08-evidence-pointer-spec.md) |
 | [diff.md](diff.md) | prepared units、差分、incremental Markdownize | [04-pipeline.md](../04-pipeline.md), [07-adapter-spec.md](../07-adapter-spec.md) |
+| [markdown.md](markdown.md) | Markdownize Adapter 選定 (Mistral OCR vs Gemini) | [07-adapter-spec.md](../07-adapter-spec.md), [04-pipeline.md](../04-pipeline.md) |
 | [db.md](db.md) | SQLite、FTS5、sqlite-vec、検索 backend | [04-pipeline.md](../04-pipeline.md), [05-runtime.md](../05-runtime.md) |
 | [batch.md](batch.md) | task、retry、resume、budget | [04-pipeline.md](../04-pipeline.md), [06-cli-spec.md](../06-cli-spec.md) |
 | [hybrid.md](hybrid.md) | hybrid search、fallback、cursor、MMR | [05-runtime.md](../05-runtime.md) |

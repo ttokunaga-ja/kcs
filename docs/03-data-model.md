@@ -12,6 +12,8 @@ KCS は Git inspired な content-addressed store と snapshot DAG を、ロー�
 Object 種別:
   raw          原本ファイルバイト列
   prepared     Markdownize 前の中間表現 (page image, sheet etc.)
+  image        文書内 embedded image (Markdownize 時に抽出。type は予約済み、実装は Step 2
+               [09-mvp-scope.md §3.1](09-mvp-scope.md))
   normalized_unit  unit 単位の Markdown (read-only artifact, content hash 不採用)。
                    normalized の正本 (§2.1)
   chunk        normalized から見出し単位で切り出し
@@ -20,7 +22,7 @@ Object 種別:
   commit       tree + parents + metadata
 ```
 
-raw / prepared / chunk / embedding / tree / commit は **CAS object** として `objects/<type>/ab/cd/<hash>` に保存。hash の算出は object 種別ごとに §8.1 で規定する: raw / prepared は**バイト列そのものの content hash**、tree / commit は **canonical JSON 保存バイト列の content hash**、chunk / embedding は **identity タプルから導出する identity hash**。normalized_unit は **path-named** で `objects/normalized_units/ab/cd/<raw_hash>.<tool_profile_hash>.g<gen>/` 配下に保存する (content hash 不採用、§5。詳細は §2.1)。ファイル全文の normalized Markdown は unit を決定論的に結合した **view (再生成可能な cache)** であり、正本ではない。
+raw / prepared / image / chunk / embedding / tree / commit は **CAS object** として `objects/<type>/ab/cd/<hash>` に保存。hash の算出は object 種別ごとに §8.1 で規定する: raw / prepared / image は**バイト列そのものの content hash**、tree / commit は **canonical JSON 保存バイト列の content hash**、chunk / embedding は **identity タプルから導出する identity hash**。normalized_unit は **path-named** で `objects/normalized_units/ab/cd/<raw_hash>.<tool_profile_hash>.g<gen>/` 配下に保存する (content hash 不採用、§5。詳細は §2.1)。ファイル全文の normalized Markdown は unit を決定論的に結合した **view (再生成可能な cache)** であり、正本ではない。
 
 # 2. .kcs 物理レイアウト
 
@@ -35,6 +37,8 @@ raw / prepared / chunk / embedding / tree / commit は **CAS object** として 
   objects/
     raw/ab/cd/<raw_hash>
     prepared/ab/cd/<prepared_hash>
+    images/ab/cd/<image_hash>       # 文書内 embedded image (type 予約済み、実装 Step 2。
+                                    # media_type は unit metadata に記録)
     normalized_units/ab/cd/<raw_hash>.<tool_profile_hash>.g<gen>/
       manifest.json                    # 順序付き unit 一覧 + unit status (正本, §2.1)
       <unit_ref>.json                  # unit object (unit_ref = base16(sha256(unit_key))[0:16])
@@ -373,11 +377,12 @@ object hash は artifact identity と Evidence Pointer の永続性 (08 §6) を
 - 人間向け表示は先頭 12 hex への短縮可 (`sha256:9f2c1a7b04de…`)。`--json` は完全 hash ([06-cli-spec.md §4](06-cli-spec.md))。
 - 本規約の変更は `kcs_format_version` の MAJOR bump (migration plan 必須)。
 
-**raw / prepared** — content hash:
+**raw / prepared / image** — content hash:
 
 ```text
 raw_hash      = "sha256:" + base16(sha256(原本ファイルのバイト列))
 prepared_hash = "sha256:" + base16(sha256(prepared object のバイト列))
+image_hash    = "sha256:" + base16(sha256(抽出画像のバイト列))
 ```
 
 **tree / commit** — canonical JSON の content hash:
@@ -522,6 +527,7 @@ per-`.kcs` の prepared/normalized/embedding 重複と purge の `.kcs` 単位�
 原本 (raw)                     | yes  | no*  | propose      | no
 原本の移動 (file system mv)     | yes  | yes* | propose      | user 承認後のみ
 normalized markdown            | no   | yes  | no           | no
+image objects (抽出画像)        | no   | yes  | no           | no
 chunks / embeddings            | no   | yes  | no           | no
 annotations / tags / notes     | yes  | no   | yes          | yes
 nodes / edges (Phase 5)        | yes  | no   | yes          | yes
@@ -552,11 +558,12 @@ Generated-At: 2026-04-25T12:00:00Z
 `~/.config/kcs/tools.toml` (デバイスローカル, 共有 `.kcs` には含まれない):
 
 ```toml
-[markdown.markdown_default]
-kind = "local_adapter"
-cmd = "uvx kcs-markdownize-adapter"
+[markdown.mistral_ocr_markdownize]
+kind = "online_api"
+cmd = "uvx kcs-mistral-ocr-adapter"
+model = "mistral-ocr-latest"        # config では可変 alias 可。tool_profile の pin は解決済み immutable 版 (§5.1)
 profile_hash = "sha256:..."
-capabilities = ["ocr", "layout_detection", "incremental_update"]
+capabilities = ["ocr", "layout_detection", "table_extraction"]
 ```
 
 `.kcs/config.toml`:

@@ -157,7 +157,7 @@ Semantic Diff  chunk 単位の意味的差分 (Phase 4+ で使用、optional)
 
 # 3. Markdownize
 
-raw / prepared → normalized。LLM ベース Adapter が中心 (Gemini / Claude / GPT)。Adapter contract は [07-adapter-spec.md](07-adapter-spec.md) を参照。
+raw / prepared → normalized。非 text-native は文書処理 API 系 Adapter (Mistral OCR、第一候補) または生成 LLM 系 Adapter (Gemini / Claude / GPT)。Adapter contract は [07-adapter-spec.md §5.2](07-adapter-spec.md) を参照。
 
 ## 3.1 Incremental Markdownize (要件)
 

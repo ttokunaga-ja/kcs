@@ -190,7 +190,16 @@ capability_flags:
   ocr, layout_detection, table_extraction, speech_to_text, incremental_update
 ```
 
-incremental の詳細プロンプト規約は §8。
+incremental の詳細プロンプト規約は §8 (生成 LLM 系のみ。§8 冒頭の適用範囲を参照)。
+
+**標準 Adapter (非 text-native)**: PDF / DOCX / PPTX / 画像の Markdownize 第一候補は Mistral OCR 系文書処理 API (`mistral_ocr_markdownize`) とする (経緯: [research/markdown.md](research/markdown.md))。規約:
+
+- 表は Markdown 本文に inline で保持する (`table_format=null` 相当)。独立 table object は作らない。
+- 文書内 embedded image は抽出して image object ([03-data-model.md §2](03-data-model.md)) として保存し、Markdown 内の参照は `kcs://<scope_id>/object/image/<image_hash>` に置換する ([08-evidence-pointer-spec.md §2.3](08-evidence-pointer-spec.md))。実装は Step 2 ([09-mvp-scope.md §3.1](09-mvp-scope.md))。
+- bbox / page / confidence score は unit metadata に記録する。**Evidence Pointer の必須 schema には含めない** (optional フィールドとしての露出は Phase 4+ 判断。forward compatibility は [08-evidence-pointer-spec.md §8](08-evidence-pointer-spec.md))。
+- 生成 LLM (Gemini / Claude / GPT 等) は Markdownize の主処理ではなく、OCR 後の品質検証・図表解釈・summary (§5.4) に使う。
+
+> **リスク注記 (Step 2 着手前に実地検証、設計宿題 #6 [09-mvp-scope.md §5.5](09-mvp-scope.md))**: Mistral OCR の複雑表・日本語・数式の変換品質、Batch API の実挙動・レート制限・単価を、基準データセット D1 のサブセットで検証する (§5.3 の embedding 検証と同時に行う)。検証が通らない場合は生成 LLM 系 Markdownize (§8.2) を第一候補に戻す — Adapter 差し替えは tool_profile 機構で吸収され、設計変更を伴わない。
 
 ## 5.3 Embedding (multimodal)
 
@@ -267,10 +276,10 @@ Rerank Adapter は KCS の検索結果を再順位付けするだけで、**sear
     "profile_hash": "sha256:..."
   },
   "markdown": {
-    "tool_id": "markdown_default",
+    "tool_id": "mistral_ocr_markdownize",
     "kind": "online_api",
     "profile_hash": "sha256:...",
-    "capabilities": ["ocr", "layout_detection", "incremental_update"]
+    "capabilities": ["ocr", "layout_detection", "table_extraction"]
   },
   "embedding": {
     "tool_id": "gemini_multimodal_embedding",
@@ -285,6 +294,8 @@ Rerank Adapter は KCS の検索結果を再順位付けするだけで、**sear
 ```
 
 `tool_lock_hash` は `tool-lock.json` 全体を JCS 畳み込みした identity ([03-data-model.md §5.2](03-data-model.md))。
+
+config (`~/.config/kcs/tools.toml`) では `mistral-ocr-latest` のような可変 alias を指定してよい。ただし `tool_profile_hash` の `model_version_pin` には**実行時に解決した immutable なモデル版**を記録する ([03-data-model.md §5.1](03-data-model.md) — 可変 alias の pin は禁止)。モデル更新は `tool_changed` として扱われ、再 Markdownize は first-instance-wins / gen の既存機構 (§9) に乗る。
 
 ---
 
@@ -350,6 +361,8 @@ MVP における Adapter の脅威モデルを次のとおり確定する。
 # 8. Incremental Markdownize プロンプト規約
 
 [04-pipeline.md §3.1](04-pipeline.md) で発動条件と入出力 schema を定義した。本節は **Adapter 内部のプロンプト規約** を固定する (Adapter ごとの揺れを防ぐため)。
+
+**適用範囲**: 本節のプロンプト規約は**生成 LLM 系 Markdownize Adapter** に適用する。文書処理 API 系 (Mistral OCR 等、§5.2) は unit (page) fingerprint の再利用により変更 unit のみを再処理する経路 ([04-pipeline.md §2.2](04-pipeline.md)) で incremental を実現するため、プロンプト規約は適用されない。ただし §8.1 の 6 (受け入れ検査) と入出力 schema は**全 Markdownize Adapter 共通**。
 
 ## 8.1 Adapter が守るべき規約
 

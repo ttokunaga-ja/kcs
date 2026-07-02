@@ -112,6 +112,7 @@ Step 別の目安 (テスト除く):
 | preview のコスト概算・budget 超過警告 | [06-cli-spec.md §2](06-cli-spec.md) / [10-operations.md §1](10-operations.md) | Step 2 |
 | Prepare / Markdownize (full + incremental) / Adapter 実行 | [07-adapter-spec.md](07-adapter-spec.md) / [04-pipeline.md §3](04-pipeline.md) | Step 2 |
 | 同梱 deterministic Adapter によるベースライン index (キーなしで検索成立) | [07-adapter-spec.md §2.1](07-adapter-spec.md) | Step 2 |
+| Mistral OCR 系標準 Markdownize Adapter + embedded image 抽出・image object 保存 | [07-adapter-spec.md §5.2](07-adapter-spec.md) / [03-data-model.md §2](03-data-model.md) | Step 2 |
 | batch / retry / resume / budget guardrail | [04-pipeline.md §5](04-pipeline.md) | Step 2 |
 | 構造化 task/artifact descriptor (Adapter 境界の内部 API) | [06-cli-spec.md §9](06-cli-spec.md) | Step 2 |
 | secrets Tier A/B 除外 + quarantine + `--yes` 制約 + `approval_method` 記録 | [10-operations.md §1.1](10-operations.md) / [06-cli-spec.md §2](06-cli-spec.md) | Step 2 |
@@ -205,6 +206,8 @@ TTFV (baseline)   kcs init → ベースライン index 完了 → 初回 kcs se
 TTFV (enriched)   online 承認 → 最初の 100 ファイルが AI 強化済みで検索可能
                                        目標: 承認から 15 分以内
 Cost 予実比       preview 概算 vs 実績  目標: 乖離 ±30% 以内 (D1 全量 AI 強化時)
+試算根拠          Markdownize 単価      Mistral OCR 4 Batch $2 / 1,000 pages 前提
+                                       (研究メモ: research/markdown.md。単価改定時は本表を更新)
 ```
 
 ## 4.2 シナリオ凍結規律
@@ -355,6 +358,7 @@ Status: decided
 | 3 | Dead Evidence Pointer | decided (コア) | bulk verify スループット / 二重 purge | Phase 4 着手前 |
 | 4 | Incremental Markdownize プロンプト規約 | decided | なし | Step 1 着手前 (充足済み) |
 | 5 | 検索評価ハーネス (合成コーパス + ゴールデンクエリ、§4.3) | draft | ゴールデンクエリの整備 | Step 3 着手前 |
+| 6 | Markdownize Adapter 選定 = Mistral OCR 系 ([07 §5.2](07-adapter-spec.md)) | partial | 実地検証 (複雑表・日本語・数式の品質 / Batch API 実挙動、07 §5.2 リスク注記) | Step 2 着手前 |
 
 Step N の着手条件は「期日が『Step N 着手前』の行がすべて decided」の機械的チェック (§3.2)。2026-07-02 の本改訂適用後、Step 1 のブロッカーは 0 件。#2/#3 の残未決は実装が Phase 4+ に割当てられた機能 (§3.1) にのみ関わるため、Step 1-4 をブロックしない。
 
