@@ -757,11 +757,19 @@ fn process_is_alive(pid: u32) -> bool {
     if pid == std::process::id() {
         return true;
     }
-    Command::new("kill")
-        .arg("-0")
+    // `kill -0` は EPERM (他ユーザ所有の生存プロセス) と ESRCH (不在) を exit code で
+    // 区別できず、生存 lock を stale 回収する誤判定側に倒れる。`ps -p` は所有者に
+    // 関係なく存在を確認できる。spawn 失敗時は保守的に「生存」と見なし回収しない。
+    match Command::new("ps")
+        .arg("-p")
         .arg(pid.to_string())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
         .status()
-        .is_ok_and(|status| status.success())
+    {
+        Ok(status) => status.success(),
+        Err(_) => true,
+    }
 }
 
 fn new_lock_token(pid: u32) -> String {
