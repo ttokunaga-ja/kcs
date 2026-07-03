@@ -1,0 +1,5 @@
+# 生成物 (run_eval.py の出力)。コーパス本体は /tmp 等へ生成しコミットしない。
+results.json
+report.md
+__pycache__/
+*.pyc
