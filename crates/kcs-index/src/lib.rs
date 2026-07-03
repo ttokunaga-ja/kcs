@@ -7,6 +7,7 @@ pub mod chunking;
 pub mod embedding_store;
 pub mod fts;
 pub mod rebuild;
+pub mod registry;
 pub mod rows;
 pub mod tree_entries;
 
