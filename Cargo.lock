@@ -656,6 +656,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "kcs-index"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "thiserror",
+]
+
+[[package]]
 name = "kcs-pipeline"
 version = "0.1.0"
 dependencies = [
@@ -667,6 +675,14 @@ dependencies = [
  "sha2",
  "thiserror",
  "toml",
+]
+
+[[package]]
+name = "kcs-search"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "thiserror",
 ]
 
 [[package]]
