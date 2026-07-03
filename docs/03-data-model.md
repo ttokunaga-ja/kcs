@@ -232,11 +232,15 @@ null フィールドは hash 入力に含めない (省略と null を識別し�
 
 ```
 1. trim trailing whitespace per line
-2. normalize line endings to \n
+   (行末の ASCII 空白 U+0020 と TAB U+0009 のみ除去。全角空白・\f・\v は除去しない。
+    行区切りは CRLF / LF / 単独 CR のいずれも行区切りとして扱う)
+2. normalize line endings to \n (CRLF → \n、単独 CR → \n)
 3. NFC 正規化
 4. 末尾の空行を削除
 5. sha256, "sha256:" プレフィックス
 ```
+
+手順 1-2 の対象文字集合と単独 CR の扱いは 2026-07-03 に確定 (契約テスト設計 step2a §C-4 の決定性論点解消)。
 
 `spec_version` の bump は breaking change 扱い (migration plan 必須)。
 
@@ -593,3 +597,18 @@ idle_threshold_seconds = 300
 ```
 
 すべての設定は JSON Schema/TOML Schema で validate ([10-operations.md §12.3](10-operations.md))。
+
+## 11.1 .kcsignore 文法 (2026-07-03 追記)
+
+`.kcsignore` は scope ルート (`.kcs` と同階層) に置く。`kcs index` の探索全体 — 直下ファイルの取り込み判定と、サブフォルダへの子 `.kcs` 自動生成の対象判定 ([06-cli-spec.md §1](06-cli-spec.md)) — に適用する。文法は **gitignore 互換サブセット**:
+
+```text
+# で始まる行と空行     無視 (コメント)
+glob                  * (パスセグメント内) / ** (セグメント跨ぎ) / ? (1 文字)
+末尾 /                ディレクトリのみに一致
+!pattern              negation (直前までの除外を解除)
+評価順               上から順に評価し、最後に一致した規則が勝つ (後勝ち)
+パス基準             scope ルート相対
+```
+
+secrets built-in デフォルト除外 (Tier A、[10-operations.md §1.1](10-operations.md)) は `.kcsignore` の**暗黙の先頭**に位置するとみなす。したがって Tier A の解除は明示の `!pattern` でのみ可能で、解除時の確認記録は 10 §1.1 の規約に従う。config (`[scope] ignore`) と `.kcsignore` が両方ある場合は config → `.kcsignore` の順に連結して評価する (後勝ちのため `.kcsignore` が優先)。

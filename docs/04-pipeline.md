@@ -78,6 +78,21 @@ unit object (schema は [03-data-model.md §2.1](03-data-model.md) と同一。u
 normalized 全文 (`report.pdf.md`) は **生成物 (view)** で、unit を決定論的に結合して組み立てる
 (組み立て規則は [03-data-model.md §2.1](03-data-model.md))。正本は unit object 群 (normalized instance)。
 
+**unit_key の正準生成規則** (2026-07-03 確定、step2a §C-3):
+
+```text
+unit_key = "<unit_kind>:<selector>"
+page / slide : 1-based の 10 進数、先頭ゼロ無し (page:1, page:12, slide:3)
+sheet        : シート名 (NFC 正規化のみ。空白・大小文字は保持)。同名重複は 2 つ目以降に
+               "#2", "#3" を付す (sheet:Sheet1, sheet:Sheet1#2 — 出現順)
+doc          : text-native ファイル (Markdown / コード / plain text) は単一 unit "doc:1"。
+               heading 単位の分割は chunk (Step 3) の責務であり unit では行わない
+```
+
+unit_key は `unit_ref` 算出 ([03-data-model.md §2.1](03-data-model.md)) と Evidence Pointer の入力に
+なる determinism-critical な識別子であり、上記以外の形式を Adapter が発行した場合は受け入れ検査
+(§3.2 V5) で reject する。
+
 ## 2.1 page fingerprint と再利用判定
 
 差分判定は **raw 側 + tool_profile_hash** で完結し、Markdown content hash は使わない (Adapter の非決定性ゆえ)。
@@ -95,6 +110,26 @@ tool_profile_hash が変わった
 これらが変わらなければ **既存 Markdown unit をそのまま再利用** (= LLM 再呼び出し不要)。
 
 page fingerprint は `(perceptual hash, text hash, visual hash)` の三つ組。一致時は再 Markdownize 不要を契約として明記する。
+
+**MVP (Step 2) の具体アルゴリズム** (2026-07-03 確定、step2a §C-1):
+
+```text
+text hash       = sha256(unit のテキスト層バイト列)。テキスト層が無い unit は空バイト列の sha256
+perceptual hash = MVP では prepared unit バイト列の sha256 で代替 (= 完全一致のみ)
+visual hash     = MVP では perceptual hash と同値 (フィールドは将来分離のため保持)
+一致判定        = 三つ組の全要素一致
+```
+
+perceptual 近似 (pHash 等) の導入は Phase 4+。完全一致方式の偽陰性 (レンダリング揺れによる不一致) は
+「当該 unit を full 再処理する」側に倒れるだけで、誤った再利用は構造的に起きない。
+
+**prepared のバイト列決定性** (2026-07-03 確定、step2a §C-2): prepared のレンダリングパラメータ
+(renderer 名 / version / DPI / 色空間 / 出力フォーマット) は prepare Adapter の tool_profile
+([07-adapter-spec.md §5.1](07-adapter-spec.md)) に含め、**同一入力ページ × 同一 profile のレンダリングは
+バイト安定であること**を prepare Adapter の採用要件とする (バイト不安定な renderer は perceptual
+fingerprint 導入 (Phase 4+) まで採用しない)。プラットフォーム間のバイト差は許容する
+(cross-.kcs dedup を保証しない [03-data-model.md §9](03-data-model.md) と整合)。同一
+(raw_hash, prepare tool_profile_hash) の再 prepare は first-instance-wins (§5.5) に従い既存 prepared を再利用する。
 
 ## 2.2 unit_mapping — 旧新 unit の対応付け
 
