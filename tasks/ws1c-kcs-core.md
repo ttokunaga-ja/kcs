@@ -21,7 +21,9 @@ KCS Step 1 の本体実装。**契約テスト仕様 `tasks/ws1a-contract-tests.
 
 ```text
 #3  manual snapshot で tree 不変      → no-op (新 commit を作らず exit 0 + 通知)
-#4  Step 1 の status 状態語彙          → new / modified / deleted / up_to_date の 4 値に縮退
+#4  Step 1 の status 状態語彙          → new / modified / deleted / unchanged の 4 値に縮退
+                                         (2026-07-03 監査裁定で up_to_date → unchanged に改訂。
+                                          up_to_date は 03 §6 で normalized instance 前提の意味を持つため)
 #5  init: 既存 .kcs あり              → no-op + "already initialized" exit 0。path 引数不存在は exit 2
 #6  tag: 既存名への再 tag             → exit 2 (上書きは Step 1 対象外)。commit 省略時は HEAD
 #7  diff 出力                         → added / modified / deleted の 3 分類。差分の有無で exit code を変えない (常に 0)
