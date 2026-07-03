@@ -19,6 +19,7 @@ use kcs_adapter::types::{
     MarkdownizeMode as AdapterMarkdownizeMode, MarkdownizeRequest, PreparedUnitHint,
     PreviousMarkdownizeContext, RawInput, UnitKind,
 };
+use kcs_core::cas::is_hash;
 use kcs_core::dag::NormalizeRef;
 use kcs_core::scope::{
     append_error_log, append_event_log, new_ulid, now_utc_seconds, InspectedObject, Repository,
@@ -1536,36 +1537,36 @@ fn resolve_cursor_exec_scopes(cursor: &CursorToken) -> Vec<ExecScope> {
 }
 
 fn run_open(args: UnsupportedArgs) -> Result<Value> {
-    let pointer = parse_pointer_arg(without_json(args.args))?;
-    let resolved = resolve_pointer_for_cli(&pointer)?;
-    if resolved.dead {
-        return Err(dead_pointer_error(
-            &resolved.reason.unwrap_or_else(|| "not_found".to_owned()),
-        ));
+    let raw = read_pointer_input(without_json(args.args))?;
+    if let Some(object) = parse_object_uri(&raw)? {
+        return resolve_object_uri(&object, false);
     }
+    let pointer = parse_pointer_text(&raw)?;
+    let resolved = resolve_pointer_for_cli(&pointer)?;
     Ok(json!({
         "status": "opened",
         "path": resolved.path,
         "raw_hash": pointer.raw_hash,
         "chunk_hash": pointer.chunk_hash,
         "temporary": resolved.temporary,
+        "commit_shallow": resolved.commit_shallow,
     }))
 }
 
 fn run_view(args: UnsupportedArgs) -> Result<Value> {
-    let pointer = parse_pointer_arg(without_json(args.args))?;
-    let resolved = resolve_pointer_for_cli(&pointer)?;
-    if resolved.dead {
-        return Err(dead_pointer_error(
-            &resolved.reason.unwrap_or_else(|| "not_found".to_owned()),
-        ));
+    let raw = read_pointer_input(without_json(args.args))?;
+    if let Some(object) = parse_object_uri(&raw)? {
+        return resolve_object_uri(&object, true);
     }
+    let pointer = parse_pointer_text(&raw)?;
+    let resolved = resolve_pointer_for_cli(&pointer)?;
     Ok(json!({
         "status": "viewed",
         "raw_hash": pointer.raw_hash,
         "chunk_hash": pointer.chunk_hash,
         "text": resolved.text.unwrap_or_default(),
         "path": resolved.path,
+        "commit_shallow": resolved.commit_shallow,
     }))
 }
 
@@ -2140,13 +2141,6 @@ fn scope_id(kcs_dir: &Path) -> Result<String> {
         .ok_or_else(|| KcsError::schema("scope.json missing scope_id"))
 }
 
-/// Registry-based scope enumeration for the Evidence Pointer resolver (K6 path).
-/// Search uses [`enumerate_scope_targets`] directly; this thin wrapper preserves
-/// the resolver's call shape while routing through the same registry source.
-fn discover_scope_targets(repo: &Repository, parsed: &ParsedSearch) -> Result<Vec<ScopeTarget>> {
-    Ok(enumerate_scope_targets(repo, parsed)?.1)
-}
-
 /// Materialize the live chunks of a scope with display metadata (Evidence Pointer
 /// short-hash resolution). Not used for ranking (K2 — ranking reads `sqlite.db`).
 fn load_searchable_chunks(target: &ScopeTarget) -> Result<Vec<SearchableChunk>> {
@@ -2300,25 +2294,29 @@ fn append_jsonl_cli(path: &Path, value: &Value) -> Result<()> {
 }
 
 #[derive(Debug)]
+/// Successful resolution of an Evidence Pointer (08 §3). Failure modes
+/// (scope_unreachable / tombstoned / not_found) are surfaced as `Err(KcsError)`
+/// with the exit-4 codes from 08 §3.2 / §4.
 struct PointerResolution {
-    dead: bool,
-    reason: Option<String>,
     path: Option<PathBuf>,
     text: Option<String>,
     temporary: bool,
+    commit_shallow: bool,
 }
 
-fn parse_pointer_arg(args: Vec<String>) -> Result<EvidencePointer> {
-    let Some(pointer) = args.first() else {
+/// Reads the raw `<pointer>` operand (08 §2.3), resolving `-` from stdin.
+/// Branching into evidence-pointer vs `object` URI happens in the caller.
+fn read_pointer_input(args: Vec<String>) -> Result<String> {
+    let Some(pointer) = args.into_iter().next() else {
         return Err(KcsError::invalid_usage("pointer argument is required"));
     };
     if pointer == "-" {
         let mut input = String::new();
         std::io::Read::read_to_string(&mut std::io::stdin(), &mut input)
             .map_err(|err| KcsError::io(err.to_string(), "stdin"))?;
-        return parse_pointer_text(input.trim());
+        return Ok(input.trim().to_owned());
     }
-    parse_pointer_text(pointer)
+    Ok(pointer)
 }
 
 fn parse_pointer_text(pointer: &str) -> Result<EvidencePointer> {
@@ -2366,101 +2364,178 @@ fn resolve_short_hash(hash: &str) -> Result<EvidencePointer> {
 }
 
 fn resolve_pointer_for_cli(pointer: &EvidencePointer) -> Result<PointerResolution> {
-    let target = resolve_pointer_scope(pointer)?;
-    let chunks = read_stored_chunks(&target.kcs_dir)?;
-    let chunk = chunks
-        .iter()
+    // 08 §3.1 step 1: two-stage scope resolution (scope_path hint -> registry).
+    let target = resolve_scope_target(&pointer.scope_id, pointer.scope_path.as_deref())?;
+    let repo = Repository::open(&target.repo_root)?;
+
+    // 08 §3.1 step 2: fetch the commit object (append-only; never GC'd).
+    let commit = repo.read_commit(&pointer.commit)?;
+
+    // 08 §3.1 step 2a/3-4: a shallow commit (tree object discarded) skips the
+    // tree walk; otherwise the raw_hash must appear in commit.tree for the
+    // pointer to resolve against *this* commit's snapshot (not the working tree
+    // of some later commit).
+    let commit_shallow = match repo.read_tree(&commit.tree) {
+        Ok(tree) => {
+            let in_tree = tree
+                .entries
+                .iter()
+                .any(|entry| entry.raw_hash == pointer.raw_hash);
+            if !in_tree {
+                // step 5 (tombstone) is checked before declaring not_found.
+                if let Some(tombstone) = read_tombstone(&target, &pointer.raw_hash)? {
+                    return Err(tombstone_error(tombstone));
+                }
+                return Err(purge_not_found_error(&target, &pointer.raw_hash));
+            }
+            false
+        }
+        Err(error) if is_store_not_found(&error) => true,
+        Err(error) => return Err(error),
+    };
+
+    // 08 §3.1 step 5: purged raw_hash carrying a tombstone -> tombstone response.
+    if let Some(tombstone) = read_tombstone(&target, &pointer.raw_hash)? {
+        return Err(tombstone_error(tombstone));
+    }
+
+    // 08 §3.1 step 6-7: chunk_hash -> chunk text (the normalized instance is
+    // keyed by (raw_hash, tool_profile_hash, gen); chunk rows carry the span).
+    let text = read_stored_chunks(&target.kcs_dir)?
+        .into_iter()
         .find(|chunk| chunk.row.chunk_id == pointer.chunk_hash)
-        .cloned();
-    let text = chunk.as_ref().map(|chunk| chunk.row.text.clone());
-    if let Some(path) = find_working_tree_raw(&target.repo_root, &pointer.raw_hash)? {
-        return Ok(PointerResolution {
-            dead: false,
-            reason: None,
+        .map(|chunk| chunk.row.text);
+
+    // Raw object resolution: working tree first (rename-tolerant), else CAS
+    // read-only expansion. Absent from both with no tombstone -> not_found.
+    match open_raw_object(
+        &target,
+        &pointer.raw_hash,
+        pointer.path_at_commit.as_deref(),
+    )? {
+        Some((path, temporary)) => Ok(PointerResolution {
             path: Some(path),
             text,
-            temporary: false,
-        });
+            temporary,
+            commit_shallow,
+        }),
+        None => Err(purge_not_found_error(&target, &pointer.raw_hash)),
     }
-    let raw_path = raw_object_path(&target.kcs_dir, &pointer.raw_hash);
-    if raw_path.is_file() {
-        let basename = pointer
-            .path_at_commit
-            .as_deref()
-            .and_then(|path| Path::new(path).file_name())
-            .and_then(|name| name.to_str())
-            .unwrap_or("object");
-        let cache = data_home()
-            .join("kcs/open")
-            .join(
-                pointer
-                    .raw_hash
-                    .trim_start_matches("sha256:")
-                    .chars()
-                    .take(12)
-                    .collect::<String>(),
-            )
-            .join(basename);
-        if let Some(parent) = cache.parent() {
-            fs::create_dir_all(parent)
-                .map_err(|err| KcsError::io(err.to_string(), parent.display().to_string()))?;
-        }
-        fs::copy(&raw_path, &cache)
-            .map_err(|err| KcsError::io(err.to_string(), cache.display().to_string()))?;
-        let mut permissions = fs::metadata(&cache)
-            .map_err(|err| KcsError::io(err.to_string(), cache.display().to_string()))?
-            .permissions();
-        permissions.set_readonly(true);
-        fs::set_permissions(&cache, permissions)
-            .map_err(|err| KcsError::io(err.to_string(), cache.display().to_string()))?;
-        return Ok(PointerResolution {
-            dead: false,
-            reason: None,
-            path: Some(cache),
-            text,
-            temporary: true,
-        });
-    }
-    Ok(PointerResolution {
-        dead: true,
-        reason: Some("not_found".to_owned()),
-        path: None,
-        text,
-        temporary: false,
-    })
 }
 
-fn resolve_pointer_scope(pointer: &EvidencePointer) -> Result<ScopeTarget> {
-    if let Some(scope_path) = &pointer.scope_path {
-        if let Ok(target) = scope_target(Path::new(scope_path)) {
-            if target.scope_id == pointer.scope_id {
+/// Two-stage scope resolution (08 §3.1 step 1). Root trust is `scope_id`; the
+/// `scope_path` hint and the scope-registry are both non-authoritative caches
+/// (05 §1.7 truth vs cache).
+fn resolve_scope_target(scope_id: &str, scope_path_hint: Option<&str>) -> Result<ScopeTarget> {
+    // 1a. scope_path hint whose .kcs/scope.json matches scope_id.
+    if let Some(hint) = scope_path_hint {
+        if let Some(target) = open_scope_from_hint(hint) {
+            if target.scope_id == scope_id {
                 return Ok(target);
             }
         }
     }
-    let repo = Repository::open_current()?;
-    let mut targets = discover_scope_targets(
-        &repo,
-        &ParsedSearch {
-            query: String::new(),
-            requested_mode: SearchMode::Text,
-            scope: None,
-            descendants: false,
-            all_scopes: true,
-            limit: 1,
-            offset: None,
-            cursor: None,
-        },
-    )?;
-    targets.retain(|target| target.scope_id == pointer.scope_id);
-    targets.into_iter().next().ok_or_else(|| {
-        KcsError::new(
-            "KCS-E-EVIDENCE-SCOPE-UNREACHABLE-001",
-            "evidence scope unreachable",
-            json!({ "scope_id": pointer.scope_id }),
-            ExitCode::PermanentFailure,
+    // 1b. scope-registry lookup by scope_id (last_seen_at newest first).
+    if let Ok(registry) = RegistryDb::open_default() {
+        if let Ok(entries) = registry.lookup_scope_id(scope_id) {
+            let mut resolved: Vec<(String, ScopeTarget)> = Vec::new();
+            for entry in &entries {
+                if let Some(target) = open_scope_from_hint(&entry.root_path) {
+                    if target.scope_id == scope_id {
+                        resolved.push((entry.last_seen_at.clone(), target));
+                    }
+                }
+            }
+            if !resolved.is_empty() {
+                // Newest last_seen_at wins; a tie across distinct .kcs is ambiguous.
+                let newest = resolved[0].0.clone();
+                let mut newest_dirs = resolved
+                    .iter()
+                    .filter(|(seen, _)| *seen == newest)
+                    .map(|(_, target)| target.kcs_dir.clone())
+                    .collect::<Vec<_>>();
+                newest_dirs.sort();
+                newest_dirs.dedup();
+                if newest_dirs.len() > 1 {
+                    return Err(scope_ambiguous_error(scope_id, &newest_dirs));
+                }
+                return Ok(resolved.remove(0).1);
+            }
+        }
+    }
+    // Pragmatic fallback: the current working directory when it *is* the scope.
+    // Object URIs carry no scope_path hint, and a freshly-created scope may not
+    // yet be listed in the registry. Still gated on scope_id equality.
+    if let Ok(repo) = Repository::open_current() {
+        if let Ok(target) = scope_target(repo.root()) {
+            if target.scope_id == scope_id {
+                return Ok(target);
+            }
+        }
+    }
+    Err(scope_unreachable_error(scope_id))
+}
+
+/// Opens a `ScopeTarget` from a hint that is either a scope root or a `.kcs`
+/// directory (08 §2.2 permits scope_path to name either). `None` if neither
+/// resolves to a valid scope.
+fn open_scope_from_hint(hint: &str) -> Option<ScopeTarget> {
+    let path = Path::new(hint);
+    if let Ok(target) = scope_target(path) {
+        return Some(target);
+    }
+    if path.file_name() == Some(std::ffi::OsStr::new(".kcs")) {
+        if let Some(parent) = path.parent() {
+            if let Ok(target) = scope_target(parent) {
+                return Some(target);
+            }
+        }
+    }
+    None
+}
+
+/// Working tree first (rename-tolerant), else a read-only expansion of the CAS
+/// raw object under `$XDG_DATA_HOME/kcs/open` (05 §4.2 / 06 §1.1). Returns
+/// `Ok(None)` when the raw object is absent from both.
+fn open_raw_object(
+    target: &ScopeTarget,
+    raw_hash: &str,
+    path_hint: Option<&str>,
+) -> Result<Option<(PathBuf, bool)>> {
+    if let Some(path) = find_working_tree_raw(&target.repo_root, raw_hash)? {
+        return Ok(Some((path, false)));
+    }
+    let raw_path = raw_object_path(&target.kcs_dir, raw_hash);
+    if !raw_path.is_file() {
+        return Ok(None);
+    }
+    let basename = path_hint
+        .and_then(|path| Path::new(path).file_name())
+        .and_then(|name| name.to_str())
+        .unwrap_or("object");
+    let cache = data_home()
+        .join("kcs/open")
+        .join(
+            raw_hash
+                .trim_start_matches("sha256:")
+                .chars()
+                .take(12)
+                .collect::<String>(),
         )
-    })
+        .join(basename);
+    if let Some(parent) = cache.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|err| KcsError::io(err.to_string(), parent.display().to_string()))?;
+    }
+    fs::copy(&raw_path, &cache)
+        .map_err(|err| KcsError::io(err.to_string(), cache.display().to_string()))?;
+    let mut permissions = fs::metadata(&cache)
+        .map_err(|err| KcsError::io(err.to_string(), cache.display().to_string()))?
+        .permissions();
+    permissions.set_readonly(true);
+    fs::set_permissions(&cache, permissions)
+        .map_err(|err| KcsError::io(err.to_string(), cache.display().to_string()))?;
+    Ok(Some((cache, true)))
 }
 
 fn find_working_tree_raw(root: &Path, raw_hash: &str) -> Result<Option<PathBuf>> {
@@ -2498,18 +2573,176 @@ fn raw_object_path(kcs_dir: &Path, raw_hash: &str) -> PathBuf {
         .join(raw_hash)
 }
 
-fn dead_pointer_error(reason: &str) -> KcsError {
-    let code = match reason {
-        "scope_unreachable" => "KCS-E-EVIDENCE-SCOPE-UNREACHABLE-001",
-        "purged" | "tombstoned" => "KCS-E-PURGE-TOMBSTONED-001",
-        _ => "KCS-E-PURGE-NOT-FOUND-001",
+/// `.kcs/tombstones/ab/cd/<raw_hash>` (05 §3.5). `Ok(None)` when no tombstone
+/// exists. The returned value is the on-disk tombstone JSON augmented with the
+/// resolved `scope_path` (08 §4.1 response shape).
+fn read_tombstone(target: &ScopeTarget, raw_hash: &str) -> Result<Option<Value>> {
+    let digest = raw_hash.trim_start_matches("sha256:");
+    if digest.len() < 4 {
+        return Ok(None);
+    }
+    let path = target
+        .kcs_dir
+        .join("tombstones")
+        .join(&digest[0..2])
+        .join(&digest[2..4])
+        .join(raw_hash);
+    let bytes = match fs::read(&path) {
+        Ok(bytes) => bytes,
+        // Only a missing tombstone file means "no tombstone"; an unreadable
+        // tombstones dir must not be misclassified as not_found (08 §3.2).
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => return Err(KcsError::io(err.to_string(), path.display().to_string())),
     };
+    let mut value: Value =
+        serde_json::from_slice(&bytes).map_err(|err| KcsError::schema(err.to_string()))?;
+    if let Some(object) = value.as_object_mut() {
+        object
+            .entry("raw_hash".to_owned())
+            .or_insert_with(|| json!(raw_hash));
+        object.insert(
+            "scope_path".to_owned(),
+            json!(target.kcs_dir.display().to_string()),
+        );
+    }
+    Ok(Some(value))
+}
+
+/// 08 §4.1 tombstone response as an exit-4 error (open/view surface it as a
+/// dead pointer). `context` carries the full `status="purged"` tombstone body.
+fn tombstone_error(mut tombstone: Value) -> KcsError {
+    if let Some(object) = tombstone.as_object_mut() {
+        object.insert("status".to_owned(), json!("purged"));
+    }
     KcsError::new(
-        code,
-        "dead evidence pointer",
-        json!({ "reason": reason }),
+        "KCS-E-PURGE-TOMBSTONED-001",
+        "evidence target was purged (tombstone recorded)",
+        tombstone,
         ExitCode::PermanentFailure,
     )
+}
+
+/// 08 §4.2 — raw object absent with no tombstone record.
+fn purge_not_found_error(target: &ScopeTarget, raw_hash: &str) -> KcsError {
+    KcsError::new(
+        "KCS-E-PURGE-NOT-FOUND-001",
+        "evidence target was purged without tombstone record",
+        json!({
+            "raw_hash": raw_hash,
+            "scope_path": target.kcs_dir.display().to_string(),
+        }),
+        ExitCode::PermanentFailure,
+    )
+}
+
+/// 08 §3.2 — scope `.kcs` unreachable (scope_path unreachable and scope_id not
+/// registered).
+fn scope_unreachable_error(scope_id: &str) -> KcsError {
+    KcsError::new(
+        "KCS-E-EVIDENCE-SCOPE-UNREACHABLE-001",
+        "evidence scope unreachable",
+        json!({ "scope_id": scope_id }),
+        ExitCode::PermanentFailure,
+    )
+}
+
+/// 08 §3.1 step 1b — the scope_id maps to multiple registered scopes that share
+/// the newest `last_seen_at`, so the winner is ambiguous.
+fn scope_ambiguous_error(scope_id: &str, candidates: &[PathBuf]) -> KcsError {
+    KcsError::new(
+        "KCS-E-EVIDENCE-SCOPE-AMBIGUOUS-001",
+        "evidence scope_id maps to multiple registered scopes",
+        json!({
+            "scope_id": scope_id,
+            "candidates": candidates
+                .iter()
+                .map(|path| path.display().to_string())
+                .collect::<Vec<_>>(),
+        }),
+        ExitCode::PermanentFailure,
+    )
+}
+
+fn is_store_not_found(error: &KcsError) -> bool {
+    error.error_code() == "KCS-E-STORE-NOT-FOUND-001"
+}
+
+struct ObjectUri {
+    scope_id: String,
+    object_type: String,
+    hash: String,
+}
+
+/// Parses a `kcs://<scope_id>/object/<type>/<hash>` object-reference URI
+/// (08 §2.3). Returns `Ok(None)` for non-object URIs (Evidence Pointer URIs,
+/// whose second segment is always a `sha256:` commit, never the literal
+/// `object`). A syntactically-`object` URI that is malformed is `Err` (exit 2).
+fn parse_object_uri(input: &str) -> Result<Option<ObjectUri>> {
+    let Some(rest) = input.strip_prefix("kcs://") else {
+        return Ok(None);
+    };
+    let (path, _query) = rest.split_once('?').unwrap_or((rest, ""));
+    let parts = path.split('/').collect::<Vec<_>>();
+    if parts.get(1) != Some(&"object") {
+        return Ok(None);
+    }
+    if parts.len() != 4 {
+        return Err(KcsError::invalid_usage(
+            "object URI must be kcs://<scope_id>/object/<type>/<hash>",
+        ));
+    }
+    let (scope_id, object_type, hash) = (parts[0], parts[2], parts[3]);
+    if scope_id.is_empty() {
+        return Err(KcsError::invalid_usage("object URI is missing scope_id"));
+    }
+    const VALID_TYPES: [&str; 5] = ["raw", "image", "chunk", "normalized", "prepared"];
+    if !VALID_TYPES.contains(&object_type) {
+        return Err(KcsError::invalid_usage(format!(
+            "unknown object type in URI: {object_type}"
+        )));
+    }
+    if !is_hash(hash) {
+        return Err(KcsError::invalid_usage(
+            "object URI hash must be sha256 lowercase hex",
+        ));
+    }
+    Ok(Some(ObjectUri {
+        scope_id: scope_id.to_owned(),
+        object_type: object_type.to_owned(),
+        hash: hash.to_owned(),
+    }))
+}
+
+/// Resolves an `object` reference URI (08 §2.3) for `kcs open` / `kcs view`.
+/// This is a distinct path from Evidence Pointer resolution.
+fn resolve_object_uri(object: &ObjectUri, as_view: bool) -> Result<Value> {
+    let status = if as_view { "viewed" } else { "opened" };
+    let target = resolve_scope_target(&object.scope_id, None)?;
+    if object.object_type == "chunk" {
+        let text = read_stored_chunks(&target.kcs_dir)?
+            .into_iter()
+            .find(|chunk| chunk.row.chunk_id == object.hash)
+            .map(|chunk| chunk.row.text)
+            .ok_or_else(|| KcsError::not_found(object.hash.clone()))?;
+        return Ok(json!({
+            "status": status,
+            "object_type": "chunk",
+            "hash": object.hash,
+            "text": text,
+        }));
+    }
+    // raw / image / normalized / prepared resolve as byte objects in the CAS raw
+    // store (07 §5.2). Only `raw` is materialised as a top-level object in Step 3.
+    match open_raw_object(&target, &object.hash, None)? {
+        Some((path, temporary)) => Ok(json!({
+            "status": status,
+            "object_type": object.object_type,
+            "hash": object.hash,
+            "path": path,
+            "temporary": temporary,
+        })),
+        None => Err(KcsError::not_found(object.hash.clone())),
+    }
 }
 
 fn copy_normalized_instance_gen(
