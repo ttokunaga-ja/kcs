@@ -13,7 +13,11 @@
     "scope": {
       "type": "object",
       "properties": {
-        "participates_in_global_search": { "type": "boolean" }
+        "participates_in_global_search": { "type": "boolean" },
+        "ignore": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
       },
       "additionalProperties": false
     },

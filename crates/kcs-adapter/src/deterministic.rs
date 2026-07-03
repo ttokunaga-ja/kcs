@@ -279,7 +279,15 @@ fn normalize_pdf_page_count(mut pages: Vec<String>, page_count: usize) -> Vec<St
     pages
 }
 
-fn pdf_stream_text_pages(bytes: &[u8]) -> Vec<String> {
+/// Split a PDF's content streams into per-page text.
+///
+/// Canonical implementation shared with `kcs-pipeline` (which depends on this
+/// crate). The stream terminator is located with [`find_endstream_boundary`] so
+/// that a literal occurrence of the word "endstream" inside page text — e.g. a
+/// document that discusses PDF internals — is not mistaken for the real stream
+/// boundary and does not truncate the page to empty markdown (Step2c I3).
+#[must_use]
+pub fn pdf_stream_text_pages(bytes: &[u8]) -> Vec<String> {
     let text = String::from_utf8_lossy(bytes);
     let mut rest = text.as_ref();
     let mut pages = Vec::new();
@@ -290,7 +298,7 @@ fn pdf_stream_text_pages(bytes: &[u8]) -> Vec<String> {
             .or_else(|| after_stream.strip_prefix('\n'))
             .or_else(|| after_stream.strip_prefix('\r'))
             .unwrap_or(after_stream);
-        let Some(stream_end) = after_stream.find("endstream") else {
+        let Some(stream_end) = find_endstream_boundary(after_stream) else {
             break;
         };
         let stream = &after_stream[..stream_end];
@@ -305,12 +313,38 @@ fn pdf_stream_text_pages(bytes: &[u8]) -> Vec<String> {
     pages
 }
 
+/// Offset of the next `endstream` keyword that terminates a PDF content stream:
+/// it must begin a line (immediately preceded by `\n`/`\r`, or sit at the very
+/// start of the slice for an empty stream) and be followed by whitespace or the
+/// end of input. A mid-line "endstream" inside page text is ignored (Step2c I3).
+fn find_endstream_boundary(text: &str) -> Option<usize> {
+    const TOKEN: &str = "endstream";
+    let bytes = text.as_bytes();
+    let mut from = 0;
+    while let Some(offset) = text[from..].find(TOKEN) {
+        let index = from + offset;
+        let at_line_start = index == 0 || matches!(bytes[index - 1], b'\n' | b'\r');
+        // MSRV 1.80: `Option::is_none_or` is 1.82+, so use `map_or(true, …)`.
+        let terminated = bytes
+            .get(index + TOKEN.len())
+            .map_or(true, |byte| byte.is_ascii_whitespace());
+        if at_line_start && terminated {
+            return Some(index);
+        }
+        from = index + TOKEN.len();
+    }
+    None
+}
+
 fn pdf_literal_strings(bytes: &[u8]) -> Vec<String> {
     let text = String::from_utf8_lossy(bytes);
     pdf_literal_strings_in_text(&text)
 }
 
-fn pdf_literal_strings_in_text(text: &str) -> Vec<String> {
+/// Extract PDF literal `( … )` strings from a text slice. Canonical
+/// implementation shared with `kcs-pipeline` (Step2c I3).
+#[must_use]
+pub fn pdf_literal_strings_in_text(text: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut rest = text;
     while let Some(start) = rest.find('(') {
