@@ -761,13 +761,13 @@ fn run_search(args: UnsupportedArgs) -> Result<Value> {
     }
 
     // Per-scope: FTS5 text ranks -> RRF (text-only until K4) -> candidate pool.
-    let escaped = escape_fts_query(&parsed.query);
+    let tiers = build_fts_tiers(&parsed.query);
     let mut searched = Vec::<SearchedScopeInfo>::new();
     let mut excluded = Vec::<Value>::new();
     let mut candidates = Vec::<ScoredCandidate>::new();
 
     for (idx, exec) in exec_scopes.iter().enumerate() {
-        match search_one_scope(exec, idx, &parsed.query, escaped.as_deref()) {
+        match search_one_scope(exec, idx, &tiers) {
             Ok(outcome) => {
                 searched.push(SearchedScopeInfo {
                     scope_id: exec.target.scope_id.clone(),
@@ -960,8 +960,7 @@ struct ScopeOutcome {
 fn search_one_scope(
     exec: &ExecScope,
     scope_index: usize,
-    query: &str,
-    escaped: Option<&str>,
+    tiers: &[String],
 ) -> std::result::Result<ScopeOutcome, ScopeSearchError> {
     let repo = Repository::open(&exec.target.repo_root)
         .map_err(|_| ScopeSearchError::Excluded("unreachable".to_owned()))?;
@@ -1008,19 +1007,14 @@ fn search_one_scope(
         .map_err(ScopeSearchError::Fatal)?;
 
     // FTS5 text ranks (empty when the query has no indexable token).
-    let (_, keywords) = query_units(query);
-    let (text_ranks, meta) = match escaped {
-        Some(expr) => fts_scope_search(
-            &conn,
-            &snapshot_commit,
-            expr,
-            &chunking_config_hash,
-            max_rowid,
-            &keywords,
-        )
-        .map_err(ScopeSearchError::Fatal)?,
-        None => (Vec::new(), BTreeMap::new()),
-    };
+    let (text_ranks, meta) = fts_scope_search(
+        &conn,
+        &snapshot_commit,
+        tiers,
+        &chunking_config_hash,
+        max_rowid,
+    )
+    .map_err(ScopeSearchError::Fatal)?;
 
     let vector_ranks = vector_ranks_for_scope()
         .map_err(ScopeSearchError::Fatal)?
@@ -1062,27 +1056,46 @@ fn search_one_scope(
     })
 }
 
-/// FTS5 MATCH restricted to the live chunk set of `snapshot_commit`: the current
-/// `chunking_config_hash` (04 §4.6, K8b) joined to `tree_entries` (05 §1.6) and
-/// frozen by `rowid <= max_rowid` (CT3-CURSOR-002). Returns ranked text backends
-/// and a chunk_hash -> metadata map for building results.
-///
-/// Text rank is FTS5 BM25 (05 §1.3), refined by the count of distinct query
-/// `keywords` (alphanumeric terms) a chunk contains. Rationale (measured on the
-/// eval corpus): BM25 length-normalization ranks a short *title* chunk that shares
-/// generic CJK trigrams above the *content* chunk that actually holds the query's
-/// distinctive terms (`Recall`, `0.83`, `3600`). Ordering by distinct-keyword hits
-/// first, BM25 second, lifts the content chunk without abandoning BM25 — every
-/// candidate still comes from the FTS5 index. Pure-CJK queries (no keywords) fall
-/// straight through to BM25 order. The `heading_path` column is weighted low (0.3)
-/// so a parent heading that propagates to every child chunk does not dominate.
+/// Per-scope text backend: execute the tiered MATCH queries (see
+/// [`build_fts_tiers`]) in order; the first tier returning any candidate is the
+/// scope's text backend. The candidate list handed to RRF comes from exactly one
+/// executed query, ranked purely by that query's BM25 (05 §1.3 / K2 ruling — no
+/// post-hoc re-ordering by hand-computed features).
 fn fts_scope_search(
+    conn: &Connection,
+    snapshot_commit: &str,
+    tiers: &[String],
+    chunking_config_hash: &str,
+    max_rowid: u64,
+) -> Result<(Vec<BackendRank>, BTreeMap<String, ChunkMeta>)> {
+    for match_expr in tiers {
+        let (ranks, meta) = execute_fts_tier(
+            conn,
+            snapshot_commit,
+            match_expr,
+            chunking_config_hash,
+            max_rowid,
+        )?;
+        if !ranks.is_empty() {
+            return Ok((ranks, meta));
+        }
+    }
+    Ok((Vec::new(), BTreeMap::new()))
+}
+
+/// One FTS5 MATCH restricted to the live chunk set of `snapshot_commit`: the
+/// current `chunking_config_hash` (04 §4.6, K8b) joined to `tree_entries`
+/// (05 §1.6) and frozen by `rowid <= max_rowid` (CT3-CURSOR-002). Rank order is
+/// BM25 with column weighting `bm25(chunk_fts, 1.0, 0.3)` — `heading_path` is
+/// down-weighted so a parent heading that propagates to every child chunk does
+/// not dominate the chunk body (legitimate BM25 configuration per the K2 ruling).
+/// Ties break on chunk_id.
+fn execute_fts_tier(
     conn: &Connection,
     snapshot_commit: &str,
     match_expr: &str,
     chunking_config_hash: &str,
     max_rowid: u64,
-    keywords: &[String],
 ) -> Result<(Vec<BackendRank>, BTreeMap<String, ChunkMeta>)> {
     let sql = "SELECT c.chunk_id, c.raw_hash, c.tool_profile_hash, c.heading_path,
                       c.section_id, c.char_start, c.char_end, c.text, te.path,
@@ -1120,24 +1133,14 @@ fn fts_scope_search(
                     row.get::<_, Option<i64>>(6)?,
                     row.get::<_, String>(7)?,
                     row.get::<_, String>(8)?,
-                    row.get::<_, f64>(9)?,
                 ))
             },
         )
         .map_err(|err| KcsError::schema(err.to_string()))?;
 
-    let lowered_keywords = keywords
-        .iter()
-        .map(|keyword| keyword.to_lowercase())
-        .collect::<Vec<_>>();
-    struct Candidate {
-        chunk_id: String,
-        keyword_hits: usize,
-        bm25: f64,
-        meta: ChunkMeta,
-    }
-    let mut candidates = Vec::new();
-    for row in rows {
+    let mut ranks = Vec::new();
+    let mut meta = BTreeMap::new();
+    for (index, row) in rows.enumerate() {
         let (
             chunk_id,
             raw_hash,
@@ -1148,59 +1151,25 @@ fn fts_scope_search(
             char_end,
             text,
             path,
-            bm25,
         ) = row.map_err(|err| KcsError::schema(err.to_string()))?;
-        let heading_path = heading_path_raw
-            .clone()
-            .and_then(|value| serde_json::from_str::<Vec<String>>(&value).ok());
-        // Count distinct query keywords present in the chunk's searchable text.
-        // Thousands-separator commas are stripped so `3600` matches `3,600`
-        // (display formatting, not a token boundary).
-        let haystack = format!(
-            "{} {} {}",
-            text,
-            section_id.clone().unwrap_or_default(),
-            heading_path_raw.unwrap_or_default()
-        )
-        .to_lowercase()
-        .replace(',', "");
-        let keyword_hits = lowered_keywords
-            .iter()
-            .filter(|keyword| haystack.contains(keyword.as_str()))
-            .count();
-        candidates.push(Candidate {
-            chunk_id: chunk_id.clone(),
-            keyword_hits,
-            bm25,
-            meta: ChunkMeta {
+        ranks.push(BackendRank {
+            chunk_hash: chunk_id.clone(),
+            rank: index as u64 + 1,
+        });
+        meta.insert(
+            chunk_id,
+            ChunkMeta {
                 raw_hash,
                 tool_profile_hash,
-                heading_path,
+                heading_path: heading_path_raw
+                    .and_then(|value| serde_json::from_str::<Vec<String>>(&value).ok()),
                 section_id: section_id.filter(|value| !value.is_empty()),
                 char_start: char_start.map(|value| value as u64),
                 char_end: char_end.map(|value| value as u64),
                 text,
                 path_at_commit: path,
             },
-        });
-    }
-
-    // Distinct-keyword hits first (desc), then BM25 (asc = better), then chunk_id.
-    candidates.sort_by(|a, b| {
-        b.keyword_hits
-            .cmp(&a.keyword_hits)
-            .then_with(|| a.bm25.total_cmp(&b.bm25))
-            .then_with(|| a.chunk_id.cmp(&b.chunk_id))
-    });
-
-    let mut ranks = Vec::new();
-    let mut meta = BTreeMap::new();
-    for (index, candidate) in candidates.into_iter().enumerate() {
-        ranks.push(BackendRank {
-            chunk_hash: candidate.chunk_id.clone(),
-            rank: index as u64 + 1,
-        });
-        meta.insert(candidate.chunk_id, candidate.meta);
+        );
     }
     Ok((ranks, meta))
 }
@@ -1465,30 +1434,104 @@ fn query_units(query: &str) -> (Vec<String>, Vec<String>) {
     (trigrams, keywords)
 }
 
-/// Build an FTS5 MATCH expression from a user query, escaped so arbitrary user
-/// input can never raise an FTS5 syntax error (brief-common #6).
-///
-/// Design note (deviates from brief-common #6's "AND-join"): the trigram index
-/// does substring matching, and Japanese queries carry no whitespace, so ANDing
-/// whole clauses as phrases matches nothing (natural-language recall collapses to
-/// 0 — measured). Instead every indexable unit (CJK trigrams + keyword runs) is
-/// OR-joined; BM25 (refined by [`fts_scope_search`]) ranks by how many units a
-/// document contains. Each unit is quoted (`"` doubled) so `=`, quotes, and
-/// operators are inert. `None` when nothing is indexable (short/empty query).
-fn escape_fts_query(query: &str) -> Option<String> {
-    const MAX_UNITS: usize = 64;
-    let (trigrams, keywords) = query_units(query);
-    let units = trigrams
-        .into_iter()
-        .chain(keywords)
-        .take(MAX_UNITS)
-        .map(|unit| format!("\"{}\"", unit.replace('"', "\"\"")))
-        .collect::<Vec<_>>();
-    if units.is_empty() {
-        None
+/// Quote a unit as an FTS5 phrase (`"` doubled) so `=`, quotes, and operators in
+/// user input are inert — arbitrary input can never raise an FTS5 syntax error
+/// (brief-common #6).
+fn quote_fts_phrase(unit: &str) -> String {
+    format!("\"{}\"", unit.replace('"', "\"\""))
+}
+
+/// One keyword as an FTS5 phrase group. Pure-numeric keywords (>= 4 digits) are
+/// expanded with their thousands-separator variant *inside the executed query*
+/// (`3600` -> `("3600" OR "3,600")`): the same number under display formatting,
+/// legitimate query expansion per the K2 ruling — never post-hoc scoring.
+fn fts_keyword_group(keyword: &str) -> String {
+    let quoted = quote_fts_phrase(keyword);
+    if keyword.len() >= 4 && keyword.bytes().all(|b| b.is_ascii_digit()) {
+        let variant = thousands_separated(keyword);
+        format!("({quoted} OR {})", quote_fts_phrase(&variant))
     } else {
-        Some(units.join(" OR "))
+        quoted
     }
+}
+
+fn thousands_separated(digits: &str) -> String {
+    let bytes = digits.as_bytes();
+    let mut out = String::with_capacity(bytes.len() + bytes.len() / 3);
+    for (index, byte) in bytes.iter().enumerate() {
+        if index > 0 && (bytes.len() - index) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(*byte as char);
+    }
+    out
+}
+
+/// Build the tiered FTS5 MATCH queries for a natural-language query.
+///
+/// Query *construction* is adaptive/tiered (K2 coordinator ruling); *ranking* is
+/// always the executed query's BM25 — see [`fts_scope_search`]. The shape of the
+/// query decides tier 1 deterministically:
+///
+/// * `>= 2` keyword groups — tier 1 = OR of the keyword groups only. BM25's
+///   per-term IDF then favors chunks matching several rare keywords over chunks
+///   matching one common one.
+/// * exactly 1 keyword group and >= 1 CJK trigram — tier 1 = the keyword group
+///   AND an OR-group of the CJK trigrams. A single keyword alone (`6000`) has no
+///   discriminating power; requiring co-occurring CJK query context filters the
+///   numeric look-alikes.
+/// * otherwise no tier 1.
+///
+/// Tier 2 (always, deduplicated against tier 1) = the relaxed OR of every
+/// indexable unit (CJK trigrams + keyword groups). Japanese has no whitespace and
+/// the trigram index does substring matching, so a strict AND of whole clauses
+/// matches nothing (measured: recall collapses to 0) — the relaxed OR is the
+/// floor that keeps natural-language queries answerable.
+///
+/// Per scope, tiers are executed in order and the first one returning any row is
+/// the scope's text backend (fallback trigger: zero candidates — documented,
+/// deterministic). The returned list is empty when nothing is indexable
+/// (short/empty query -> empty result set).
+fn build_fts_tiers(query: &str) -> Vec<String> {
+    const MAX_TRIGRAMS: usize = 64;
+    let (trigrams, keywords) = query_units(query);
+    let trigram_phrases = trigrams
+        .iter()
+        .take(MAX_TRIGRAMS)
+        .map(|trigram| quote_fts_phrase(trigram))
+        .collect::<Vec<_>>();
+    let keyword_groups = keywords
+        .iter()
+        .map(|keyword| fts_keyword_group(keyword))
+        .collect::<Vec<_>>();
+
+    let strict = if keyword_groups.len() >= 2 {
+        Some(keyword_groups.join(" OR "))
+    } else if keyword_groups.len() == 1 && !trigram_phrases.is_empty() {
+        Some(format!(
+            "{} AND ({})",
+            keyword_groups[0],
+            trigram_phrases.join(" OR ")
+        ))
+    } else {
+        None
+    };
+    let relaxed = {
+        let mut units = trigram_phrases;
+        units.extend(keyword_groups);
+        (!units.is_empty()).then(|| units.join(" OR "))
+    };
+
+    let mut tiers = Vec::new();
+    if let Some(strict) = strict {
+        tiers.push(strict);
+    }
+    if let Some(relaxed) = relaxed {
+        if tiers.last() != Some(&relaxed) {
+            tiers.push(relaxed);
+        }
+    }
+    tiers
 }
 
 fn scope_selection_from_cursor(mode: ScopeMode) -> ScopeSelectionMode {
