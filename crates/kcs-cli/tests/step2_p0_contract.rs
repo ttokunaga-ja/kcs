@@ -535,8 +535,13 @@ fn ct2_incr_006_max_consecutive_falls_back_full() {
     assert_eq!(choose_markdownize_mode(&input).mode, MarkdownizeMode::Full);
 }
 
+// §A identity-vector check (Step2c I5): asserts the *pure* identity contract —
+// `normalized_identity` is a function of `(raw_hash, tool_profile_hash)` only and
+// ignores `mode` and `markdown`. The end-to-end behaviour that a light change
+// actually reuses units through the CLI is verified separately by
+// `ct2_incr_009_cli_mock_adapter_uses_incremental_for_light_change`.
 #[test]
-fn ct2_incr_008_identity_ignores_mode() {
+fn ct2_incr_008_identity_vector_ignores_mode() {
     let raw = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     let tool = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
     let full = NormalizedUnitObject {
@@ -992,6 +997,45 @@ fn ct2_ignore_001_double_star_ext_pattern_excludes_nested_file() {
 }
 
 #[test]
+fn ct2_ignore_002_scope_ignore_config_is_accepted_and_applied() {
+    // Step2c I4: `[scope] ignore` must pass config-schema validation (it was
+    // previously rejected by `scope.additionalProperties:false`) and take
+    // effect during scan. `kcs index` validates config.toml against the schema
+    // on every invocation via `Repository::open`, so a schema violation would
+    // fail the `json_success` (exit 0) assertions below.
+    let dir = scope();
+    fs::write(
+        dir.path().join(".kcs/config.toml"),
+        "[scope]\nignore = [\"*.tmp\"]\n",
+    )
+    .unwrap();
+    fs::write(dir.path().join("keep.txt"), "keep me").unwrap();
+    fs::write(dir.path().join("scratch.tmp"), "ignore me").unwrap();
+
+    let preview = json_success(&dir, ["index", "--preview"]);
+    assert!(preview["excluded_candidates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|path| path == "scratch.tmp"));
+    assert!(preview["candidates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|candidate| candidate["input_path"] == "keep.txt"
+            && !candidate["ignored"].as_bool().unwrap()));
+    assert!(preview["candidates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|candidate| candidate["input_path"] == "scratch.tmp"
+            && candidate["ignored"].as_bool().unwrap()));
+
+    // A full index also validates the schema and must succeed.
+    json_success(&dir, ["index", "--approve"]);
+}
+
+#[test]
 fn ct2_scope_001_subfolder_files_do_not_reach_parent_artifacts() {
     let dir = scope();
     fs::create_dir(dir.path().join("child")).unwrap();
@@ -1173,6 +1217,38 @@ fn ct2_pdf_002_uneven_three_page_pdf_preserves_stream_boundaries() {
 }
 
 #[test]
+fn ct2_pdf_003_endstream_keyword_in_page_text_is_not_a_stream_boundary() {
+    // Step2c I3: a page whose text literally contains the word "endstream"
+    // must not truncate to empty markdown. The real boundary is the line-start
+    // `endstream` token, not the mid-line occurrence in the page's prose.
+    let dir = scope();
+    fs::write(
+        dir.path().join("report.pdf"),
+        fake_pdf(&[
+            "this text mentions stream and endstream keywords",
+            "second page body",
+            "third page body",
+        ]),
+    )
+    .unwrap();
+    json_success(&dir, ["index", "--approve"]);
+    let units = normalized_units(&dir);
+    let page1 = units.iter().find(|unit| unit.unit_key == "page:1").unwrap();
+    let page2 = units.iter().find(|unit| unit.unit_key == "page:2").unwrap();
+    let page3 = units.iter().find(|unit| unit.unit_key == "page:3").unwrap();
+    assert!(page1
+        .markdown
+        .contains("this text mentions stream and endstream keywords"));
+    assert!(page2.markdown.contains("second page body"));
+    assert!(page3.markdown.contains("third page body"));
+    // No page collapses to empty, and the boundary did not bleed across pages.
+    assert!(!page1.markdown.trim().is_empty());
+    assert!(!page2.markdown.trim().is_empty());
+    assert!(!page3.markdown.trim().is_empty());
+    assert!(!page2.markdown.contains("second page body\nthird"));
+}
+
+#[test]
 fn ct2_incr_009_cli_mock_adapter_uses_incremental_for_light_change() {
     let dir = scope();
     fs::write(
@@ -1337,6 +1413,151 @@ fn ct2_task_006_partial_online_result_persists_partial_status() {
         task["input_path"] == "report.pdf"
             && task["status"] == "partial"
             && task["fallback_reason"] == "online_adapter_done"
+    }));
+}
+
+#[test]
+fn ct2_task_007_online_task_not_reissued_for_completed_identity() {
+    // Step2c I1: once an online task for an identity is Done, re-indexing the
+    // unchanged file must not enqueue a duplicate task. The bug was a later
+    // `batch resume` re-sending that duplicate and double-charging the ledger.
+    let dir = scope();
+    fs::write(dir.path().join("a.txt"), "hello dedup").unwrap();
+    json_success(&dir, ["index", "--approve"]);
+    json_success_with_env(
+        &dir,
+        ["batch", "resume"],
+        &[("KCS_TEST_MISTRAL_OCR", "mock")],
+    );
+    // A completed online task keeps this fallback_reason even after its
+    // output_ref is rewritten to the normalized-instance path.
+    let completed_online = |status: &Value| -> usize {
+        status["tasks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|task| task["fallback_reason"] == "online_adapter_done")
+            .count()
+    };
+    let done = json_success(&dir, ["status"]);
+    assert_eq!(
+        completed_online(&done),
+        1,
+        "resume should complete exactly one online task"
+    );
+    let tasks_before = done["tasks"].as_array().unwrap().len();
+    let ledger_before = ledger_lines(&dir).len();
+    assert!(ledger_before > 0);
+
+    // Unchanged re-index: the pipeline runs but must not pile a duplicate task.
+    json_success(&dir, ["index", "--yes"]);
+    let after = json_success(&dir, ["status"]);
+    assert_eq!(
+        after["tasks"].as_array().unwrap().len(),
+        tasks_before,
+        "unchanged re-index must not enqueue a duplicate online task"
+    );
+    assert_eq!(completed_online(&after), 1);
+
+    // Resuming again must find nothing to execute and must not re-charge.
+    let second = json_success_with_env(
+        &dir,
+        ["batch", "resume"],
+        &[("KCS_TEST_MISTRAL_OCR", "mock")],
+    );
+    assert_eq!(
+        second["tasks_executed"], 0,
+        "no duplicate online task should remain to execute"
+    );
+    assert_eq!(
+        ledger_lines(&dir).len(),
+        ledger_before,
+        "re-index + resume must not double-charge the ledger"
+    );
+
+    // A changed file yields a new input_hash and does enqueue a fresh task.
+    fs::write(dir.path().join("a.txt"), "hello dedup changed content").unwrap();
+    json_success(&dir, ["index", "--yes"]);
+    let changed = json_success(&dir, ["status"]);
+    let pending_online = changed["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|task| task["output_ref"] == "online:mistral_ocr_markdownize")
+        .count();
+    assert_eq!(
+        pending_online, 1,
+        "a changed file (new input_hash) must enqueue a fresh online task"
+    );
+}
+
+#[test]
+fn ct2_task_008_retryable_failure_defers_until_backoff_elapses() {
+    // Step2c I2: a retryable failure schedules `next_retry_at` in the future
+    // (exp/retry_after backoff). `batch retry` skips the task until that time
+    // is reached, then executes it.
+    let dir = scope();
+    fs::write(dir.path().join("a.txt"), "hello retry backoff").unwrap();
+    json_success(&dir, ["index", "--approve"]);
+
+    // Fail the online task with a rate-limit-like (retryable) error at T0.
+    kcs(&dir, ["batch", "resume"])
+        .env("KCS_TEST_MISTRAL_OCR", "rate_limit")
+        .env("KCS_FIXED_NOW", "2026-07-03T00:00:00Z")
+        .assert()
+        .success();
+    let status = json_success(&dir, ["status"]);
+    let failed = status["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|task| task["output_ref"] == "online:mistral_ocr_markdownize")
+        .unwrap();
+    assert_eq!(failed["status"], "failed");
+    assert_eq!(failed["attempts"], 1);
+    let next_retry_at = failed["next_retry_at"].as_str().unwrap();
+    assert!(
+        next_retry_at > "2026-07-03T00:00:00Z",
+        "backoff must schedule a future retry, got {next_retry_at}"
+    );
+
+    // Retry at the same instant: backoff has not elapsed, nothing runs.
+    let early = json_success_with_env(
+        &dir,
+        ["batch", "retry"],
+        &[
+            ("KCS_TEST_MISTRAL_OCR", "mock"),
+            ("KCS_FIXED_NOW", "2026-07-03T00:00:00Z"),
+        ],
+    );
+    assert_eq!(early["tasks_updated"], 0);
+    assert_eq!(early["tasks_executed"], 0);
+    let still_failed = json_success(&dir, ["status"]);
+    assert!(still_failed["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|task| {
+            task["output_ref"] == "online:mistral_ocr_markdownize" && task["status"] == "failed"
+        }));
+
+    // Advance the clock past the backoff window: the task becomes due and runs.
+    let late = json_success_with_env(
+        &dir,
+        ["batch", "retry"],
+        &[
+            ("KCS_TEST_MISTRAL_OCR", "mock"),
+            ("KCS_FIXED_NOW", "2026-07-03T01:00:00Z"),
+        ],
+    );
+    assert_eq!(late["tasks_updated"], 1);
+    assert_eq!(late["tasks_executed"], 1);
+    let resolved = json_success(&dir, ["status"]);
+    // On success the online task's output_ref is rewritten to the normalized
+    // path but stamped with this fallback_reason.
+    assert!(resolved["tasks"].as_array().unwrap().iter().any(|task| {
+        task["fallback_reason"] == "online_adapter_done"
+            && (task["status"] == "done" || task["status"] == "partial")
     }));
 }
 

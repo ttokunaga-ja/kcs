@@ -1157,9 +1157,63 @@ fn civil_from_days(days: i64) -> (i64, i64, i64) {
     (year, month, day)
 }
 
+/// Inverse of [`civil_from_days`]: days since the Unix epoch for a civil date
+/// (Howard Hinnant's algorithm).
+fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
+    let y = if month <= 2 { year - 1 } else { year };
+    let era = if y >= 0 { y } else { y - 399 }.div_euclid(400);
+    let yoe = y - era * 400;
+    let mp = if month > 2 { month - 3 } else { month + 9 };
+    let doy = (153 * mp + 2).div_euclid(5) + day - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + doe - 719_468
+}
+
+/// Format Unix seconds as an RFC3339 UTC-seconds timestamp (`YYYY-MM-DDTHH:MM:SSZ`),
+/// the shape produced by [`now_utc_seconds`].
+#[must_use]
+pub fn format_utc_seconds(secs: i64) -> String {
+    format_unix_seconds(secs)
+}
+
+/// Parse an RFC3339 UTC-seconds timestamp (`YYYY-MM-DDTHH:MM:SSZ`, the shape
+/// produced by [`now_utc_seconds`]) into Unix seconds. Returns `None` when the
+/// input does not match that fixed-width shape. Used to schedule retry backoff
+/// deadlines relative to the current (possibly `KCS_FIXED_NOW`) time.
+#[must_use]
+pub fn parse_utc_seconds(value: &str) -> Option<i64> {
+    let bytes = value.as_bytes();
+    if bytes.len() != 20
+        || bytes[4] != b'-'
+        || bytes[7] != b'-'
+        || bytes[10] != b'T'
+        || bytes[13] != b':'
+        || bytes[16] != b':'
+        || bytes[19] != b'Z'
+    {
+        return None;
+    }
+    let field = |start: usize, end: usize| value.get(start..end)?.parse::<i64>().ok();
+    let year = field(0, 4)?;
+    let month = field(5, 7)?;
+    let day = field(8, 10)?;
+    let hour = field(11, 13)?;
+    let minute = field(14, 16)?;
+    let second = field(17, 19)?;
+    if !(1..=12).contains(&month)
+        || !(1..=31).contains(&day)
+        || hour > 23
+        || minute > 59
+        || second > 59
+    {
+        return None;
+    }
+    Some(days_from_civil(year, month, day) * 86_400 + hour * 3_600 + minute * 60 + second)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{civil_from_days, format_unix_seconds};
+    use super::{civil_from_days, format_unix_seconds, format_utc_seconds, parse_utc_seconds};
 
     #[test]
     fn format_unix_seconds_known_vectors() {
@@ -1176,6 +1230,28 @@ mod tests {
         // Month / year boundary.
         assert_eq!(format_unix_seconds(1_704_067_199), "2023-12-31T23:59:59Z");
         assert_eq!(format_unix_seconds(1_704_067_200), "2024-01-01T00:00:00Z");
+    }
+
+    #[test]
+    fn parse_utc_seconds_round_trips_and_rejects_bad_shapes() {
+        // Round-trips against the known format vectors.
+        for secs in [
+            0,
+            1_700_000_000,
+            1_709_251_199,
+            4_107_542_400,
+            1_704_067_200,
+        ] {
+            assert_eq!(parse_utc_seconds(&format_utc_seconds(secs)), Some(secs));
+        }
+        // Offset arithmetic used by retry backoff scheduling.
+        let base = parse_utc_seconds("2026-07-03T00:00:00Z").unwrap();
+        assert_eq!(format_utc_seconds(base + 2), "2026-07-03T00:00:02Z");
+        assert_eq!(format_utc_seconds(base + 60), "2026-07-03T00:01:00Z");
+        // Malformed inputs are rejected rather than silently misparsed.
+        assert_eq!(parse_utc_seconds("2026-07-03T00:00:00"), None);
+        assert_eq!(parse_utc_seconds("2026-13-03T00:00:00Z"), None);
+        assert_eq!(parse_utc_seconds("not-a-timestamp"), None);
     }
 
     #[test]

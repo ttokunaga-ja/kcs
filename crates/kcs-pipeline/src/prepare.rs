@@ -257,7 +257,7 @@ pub fn pdf_text_pages(bytes: &[u8]) -> Vec<String> {
         return Vec::new();
     }
     let page_count = pdf_page_count(bytes).max(1);
-    let stream_pages = pdf_stream_text_pages(bytes);
+    let stream_pages = kcs_adapter::deterministic::pdf_stream_text_pages(bytes);
     if !stream_pages.is_empty() {
         return normalize_pdf_page_count(stream_pages, page_count);
     }
@@ -303,58 +303,13 @@ fn normalize_pdf_page_count(mut pages: Vec<String>, page_count: usize) -> Vec<St
     pages
 }
 
-fn pdf_stream_text_pages(bytes: &[u8]) -> Vec<String> {
-    let text = String::from_utf8_lossy(bytes);
-    let mut rest = text.as_ref();
-    let mut pages = Vec::new();
-    while let Some(stream_start) = rest.find("stream") {
-        let mut after_stream = &rest[stream_start + "stream".len()..];
-        after_stream = after_stream
-            .strip_prefix("\r\n")
-            .or_else(|| after_stream.strip_prefix('\n'))
-            .or_else(|| after_stream.strip_prefix('\r'))
-            .unwrap_or(after_stream);
-        let Some(stream_end) = after_stream.find("endstream") else {
-            break;
-        };
-        let stream = &after_stream[..stream_end];
-        let strings = pdf_literal_strings_in_text(stream);
-        if !strings.is_empty() {
-            pages.push(strings.join("\n"));
-        } else if stream.contains("BT") {
-            pages.push(String::new());
-        }
-        rest = &after_stream[stream_end + "endstream".len()..];
-    }
-    pages
-}
-
+// The PDF stream/literal-string extraction helpers live in `kcs-adapter`
+// (`kcs_adapter::deterministic`), the lower crate that this crate already
+// depends on. They were previously duplicated here; unifying on the adapter
+// copy keeps the endstream-boundary logic in one place (Step2c I3).
 fn pdf_literal_strings(bytes: &[u8]) -> Vec<String> {
     let text = String::from_utf8_lossy(bytes);
-    pdf_literal_strings_in_text(&text)
-}
-
-fn pdf_literal_strings_in_text(text: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    let mut rest = text;
-    while let Some(start) = rest.find('(') {
-        rest = &rest[start + 1..];
-        let Some(end) = rest.find(')') else {
-            break;
-        };
-        let candidate = rest[..end]
-            .replace("\\(", "(")
-            .replace("\\)", ")")
-            .replace("\\n", "\n");
-        if candidate
-            .chars()
-            .any(|char| char.is_alphanumeric() || !char.is_ascii())
-        {
-            out.push(candidate);
-        }
-        rest = &rest[end + 1..];
-    }
-    out
+    kcs_adapter::deterministic::pdf_literal_strings_in_text(&text)
 }
 
 fn pdf_text_fallback(bytes: &[u8]) -> String {

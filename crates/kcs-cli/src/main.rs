@@ -501,6 +501,10 @@ fn execute_pending_tasks(repo: &Repository, store: &TaskStore) -> Result<usize> 
             task.status == TaskStatus::Pending
                 && task.task_type == TaskType::Markdownize
                 && task.output_ref == "online:mistral_ocr_markdownize"
+                // Honor an unelapsed retry backoff even for a Pending task
+                // (Step2c I2); `batch retry` already gates on this, so this is
+                // a defensive belt-and-braces guard.
+                && task_retry_due(task)
         })
         .collect::<Vec<_>>();
     let mut executed = 0usize;
@@ -579,12 +583,13 @@ fn execute_pending_tasks(repo: &Repository, store: &TaskStore) -> Result<usize> 
             }
             Err(error) => {
                 let policy = retry_policy(error.retry_kind);
+                let attempts_after = task.attempts.saturating_add(1);
                 let next_retry_at = (policy.retryable
                     && policy
                         .max_attempts
-                        .map(|max| task.attempts.saturating_add(1) < max)
+                        .map(|max| attempts_after < max)
                         .unwrap_or(true))
-                .then(now_utc_seconds);
+                .then(|| scheduled_retry_at(&now_utc_seconds(), &policy.backoff, attempts_after));
                 let reason = retry_reason(error.retry_kind).to_owned();
                 store
                     .update_matching(|candidate| {
@@ -748,13 +753,23 @@ fn run_mistral_adapter(
                 retry_kind: RetryErrorKind::AuthError,
             });
         }
+        Some("rate_limit") => {
+            // Retryable failure injection for backoff scheduling tests (I2).
+            return Err(TaskExecutionFailure {
+                retry_kind: RetryErrorKind::RateLimit,
+            });
+        }
         Some("mock") | Some("partial") | Some("mock_link_image") => {
-            let adapter = MistralOcrMarkdownizeAdapter::new(
-                MockMistralClient,
-                "mistral-ocr-latest",
-                repo.scope_id_for_adapter(),
-            )
-            .with_image_store(repo.kcs_dir());
+            // Mirror the production path: resolve the pin once up front so the
+            // profile (and its tool_profile_hash) reflect the resolved pin,
+            // now that `profile()` no longer resolves internally (Step2c I5).
+            let client = MockMistralClient;
+            let model_pin = client
+                .resolve_model_pin("mistral-ocr-latest")
+                .map_err(task_failure_from_adapter)?;
+            let adapter =
+                MistralOcrMarkdownizeAdapter::new(client, model_pin, repo.scope_id_for_adapter())
+                    .with_image_store(repo.kcs_dir());
             let profile = adapter.profile();
             let mut request = request;
             request.tool_profile_hash = profile.tool_profile_hash.clone();
@@ -908,6 +923,74 @@ fn task_retry_due(task: &TaskDescriptor) -> bool {
         .as_deref()
         .map(|retry_at| retry_at <= now_utc_seconds().as_str())
         .unwrap_or(true)
+}
+
+/// Absolute time a failed task becomes eligible for retry: `now` plus the
+/// backoff derived from its `RetryPolicy.backoff` descriptor (Step2c I2).
+/// `attempts` is the post-increment attempt count (>= 1). Falls back to `now`
+/// when the clock string cannot be parsed.
+fn scheduled_retry_at(now: &str, backoff: &str, attempts: u32) -> String {
+    let delay = retry_backoff_seconds(backoff, attempts);
+    kcs_core::scope::parse_utc_seconds(now)
+        .map(|secs| kcs_core::scope::format_utc_seconds(secs + delay))
+        .unwrap_or_else(|| now.to_owned())
+}
+
+/// Backoff delay (seconds) for a failed task's next retry, derived from the
+/// `RetryPolicy.backoff` descriptor in `crates/kcs-pipeline/src/task.rs`.
+/// Jitter is intentionally omitted for deterministic scheduling / testing
+/// (see `tasks/ws1c-decisions.md` #29). `attempts` is the post-increment
+/// attempt count (>= 1).
+fn retry_backoff_seconds(backoff: &str, attempts: u32) -> i64 {
+    // exp(base=Ns,cap=Ms,...): min(base * 2^(attempts-1), cap).
+    let exponential = |base: i64, cap: i64| {
+        let exponent = attempts.saturating_sub(1).min(16);
+        base.saturating_mul(1_i64 << exponent).clamp(0, cap)
+    };
+    if let Some(inner) = backoff
+        .strip_prefix("exp(")
+        .and_then(|s| s.strip_suffix(')'))
+    {
+        let base = duration_secs_field(inner, "base").unwrap_or(2);
+        let cap = duration_secs_field(inner, "cap").unwrap_or(60);
+        return exponential(base, cap);
+    }
+    if let Some(inner) = backoff
+        .strip_prefix("fixed(")
+        .and_then(|s| s.strip_suffix(')'))
+    {
+        return parse_duration_secs(inner).unwrap_or(3_600);
+    }
+    // "retry_after": the local placeholder has no server `Retry-After` header,
+    // so reuse the exponential schedule (base 2s, cap 60s).
+    if backoff == "retry_after" {
+        return exponential(2, 60);
+    }
+    0
+}
+
+/// Parse a compact duration such as `2s`, `30m`, or `1h` into seconds.
+fn parse_duration_secs(text: &str) -> Option<i64> {
+    let text = text.trim();
+    let split = text.find(|ch: char| !ch.is_ascii_digit())?;
+    let (digits, unit) = text.split_at(split);
+    let value = digits.parse::<i64>().ok()?;
+    let multiplier = match unit {
+        "s" => 1,
+        "m" => 60,
+        "h" => 3_600,
+        _ => return None,
+    };
+    Some(value * multiplier)
+}
+
+/// Extract a `key=<duration>` field (e.g. `base=2s`) from a comma-separated
+/// backoff descriptor body.
+fn duration_secs_field(inner: &str, key: &str) -> Option<i64> {
+    inner.split(',').find_map(|part| {
+        let rest = part.trim().strip_prefix(key)?.strip_prefix('=')?;
+        parse_duration_secs(rest)
+    })
 }
 
 fn estimate_online_markdownize_cost(size_bytes: u64) -> f64 {
@@ -1908,15 +1991,34 @@ fn enqueue_online_placeholder_task(
     month: &str,
 ) -> Result<()> {
     let output_ref = "online:mistral_ocr_markdownize";
+    // Idempotency (Step2c I1, 04 §5.5): never enqueue a second online task for an
+    // identity `(input_path, input_hash)` that already has an online task in any
+    // live lifecycle state. Without the completed-state check, every unchanged
+    // re-index appended a fresh task, and a later `batch resume` re-sent it to
+    // the API and double-charged the ledger. A changed file produces a new
+    // `input_hash`, so it still enqueues.
+    //
+    // The online task is identified differently across its lifecycle:
+    //   * Pending/Paused (not yet executed) still carries the placeholder
+    //     `output_ref`.
+    //   * Done/Partial (executed) has had its `output_ref` rewritten to the
+    //     normalized-instance path, but `execute_online_markdownize_task`
+    //     stamps `fallback_reason = "online_adapter_done"`.
     if let Some(existing) = task_store
         .all()
         .map_err(pipeline_to_kcs)?
         .into_iter()
         .find(|task| {
-            task.input_path == candidate.input_path
-                && task.input_hash == raw_hash
-                && task.output_ref == output_ref
-                && matches!(task.status, TaskStatus::Pending | TaskStatus::Paused)
+            if task.input_path != candidate.input_path || task.input_hash != raw_hash {
+                return false;
+            }
+            match task.status {
+                TaskStatus::Pending | TaskStatus::Paused => task.output_ref == output_ref,
+                TaskStatus::Done | TaskStatus::Partial => {
+                    task.fallback_reason.as_deref() == Some("online_adapter_done")
+                }
+                _ => false,
+            }
         })
     {
         match existing.status {
@@ -2091,9 +2193,10 @@ fn network_allowed(repo: &Repository, args: &IndexArgs) -> Result<bool> {
 }
 
 fn network_revoked(repo: &Repository) -> Result<bool> {
-    if repo.kcs_dir().join("network-revoked").is_file() {
-        return Ok(true);
-    }
+    // Revocation is persisted as `allow_network = false` in config.toml by
+    // `write_network_revoke_record`; the audit trail lives in
+    // `network-revoked.jsonl`. There is no extensionless `network-revoked`
+    // sentinel file, so no such probe here (Step2c I5).
     Ok(read_allow_network_config(&repo.kcs_dir().join("config.toml"))? == Some(false))
 }
 

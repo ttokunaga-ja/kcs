@@ -163,15 +163,22 @@ impl<C> MistralOcrMarkdownizeAdapter<C> {
 
 impl<C: MistralOcrClient> MarkdownizeAdapter for MistralOcrMarkdownizeAdapter<C> {
     fn profile(&self) -> AdapterProfile {
-        let model_pin = self
-            .client
-            .resolve_model_pin(&self.configured_model)
-            .unwrap_or_else(|_| {
-                format!(
-                    "{}-unresolved",
-                    self.configured_model.trim_end_matches("-latest")
-                )
-            });
+        // Network-free: `profile()` never resolves the model pin over HTTP
+        // (Step2c I5). The pin is resolved exactly once at execution time and
+        // the resolved value is passed in as `configured_model`, so the profile
+        // reflects the resolved pin without a second `GET /v1/models`. If the
+        // adapter still holds an unresolved `*-latest` alias (e.g. the `Default`
+        // used in unit tests), fall back to a deterministic immutable
+        // placeholder rather than contacting the network — the identity layer
+        // rejects a mutable alias as a `model_version_pin`.
+        let model_pin = if crate::identity::is_mutable_model_alias(&self.configured_model) {
+            format!(
+                "{}-unresolved",
+                self.configured_model.trim_end_matches("-latest")
+            )
+        } else {
+            self.configured_model.clone()
+        };
         let profile = json!({
             "adapter_kind": "markdownize",
             "adapter_role": "multimodal",
