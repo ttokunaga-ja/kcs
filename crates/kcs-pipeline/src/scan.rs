@@ -57,51 +57,13 @@ pub fn build_scan_preview(request: ScanPreviewRequest) -> Result<ScanPreview> {
     let mut ignore_rules = load_config_ignore(&scope_path)?;
     ignore_rules.extend(load_kcsignore(&scope_path)?);
     let mut candidates = Vec::new();
-    for entry in std::fs::read_dir(&scope_path).pipeline_io(&scope_path)? {
-        let entry = entry.pipeline_io(&scope_path)?;
-        let name = match entry.file_name().into_string() {
-            Ok(name) => name,
-            Err(_) => continue,
-        };
-        if name == ".kcs" || name == ".kcsignore" {
-            continue;
-        }
-        let path = entry.path();
-        let file_type = entry.file_type().pipeline_io(&path)?;
-        if !file_type.is_file() && !file_type.is_dir() {
-            continue;
-        }
-        let size_bytes = if file_type.is_file() {
-            entry.metadata().pipeline_io(&path)?.len()
-        } else {
-            0
-        };
-        let ignored = ignored_by_rules(&name, file_type.is_dir(), &ignore_rules)
-            || classify_secret(&name) == Some(SecretTier::TierA)
-                && !explicitly_unignored(&name, file_type.is_dir(), &ignore_rules);
-        let quarantine_reason = match classify_secret(&name) {
-            Some(SecretTier::TierA) if ignored => Some("secrets_tier_a_excluded".to_owned()),
-            Some(SecretTier::TierB) => Some("secrets_tier_b_warning".to_owned()),
-            _ => None,
-        };
-        let raw_hash = if request.include_raw_hashes && file_type.is_file() && !ignored {
-            Some(hash_bytes(&std::fs::read(&path).pipeline_io(&path)?))
-        } else {
-            None
-        };
-        candidates.push(ScanCandidate {
-            input_path: name.clone(),
-            media_type: if file_type.is_dir() {
-                "inode/directory".to_owned()
-            } else {
-                media_type_for_path(&path).to_owned()
-            },
-            size_bytes,
-            raw_hash,
-            ignored,
-            quarantine_reason,
-        });
-    }
+    collect_candidates(
+        &scope_path,
+        &scope_path,
+        &ignore_rules,
+        request.include_raw_hashes,
+        &mut candidates,
+    )?;
     candidates.sort_by(|a, b| a.input_path.cmp(&b.input_path));
     let estimated_usd = candidates
         .iter()
@@ -118,6 +80,99 @@ pub fn build_scan_preview(request: ScanPreviewRequest) -> Result<ScanPreview> {
         }),
         approval_required: request.require_network_approval,
     })
+}
+
+fn collect_candidates(
+    scope_path: &Path,
+    current: &Path,
+    ignore_rules: &[IgnoreRule],
+    include_raw_hashes: bool,
+    candidates: &mut Vec<ScanCandidate>,
+) -> Result<()> {
+    for entry in std::fs::read_dir(current).pipeline_io(current)? {
+        let entry = entry.pipeline_io(current)?;
+        let name = match entry.file_name().into_string() {
+            Ok(name) => name,
+            Err(_) => continue,
+        };
+        if current == scope_path && (name == ".kcs" || name == ".kcsignore") {
+            continue;
+        }
+        if name == ".kcs" {
+            continue;
+        }
+        let path = entry.path();
+        if is_xdg_state_inside_scope(scope_path, &path) {
+            continue;
+        }
+        let file_type = entry.file_type().pipeline_io(&path)?;
+        if !file_type.is_file() && !file_type.is_dir() {
+            continue;
+        }
+        let relative = path
+            .strip_prefix(scope_path)
+            .unwrap_or(&path)
+            .to_string_lossy()
+            .replace('\\', "/");
+        if relative == ".kcsignore" {
+            continue;
+        }
+        let size_bytes = if file_type.is_file() {
+            entry.metadata().pipeline_io(&path)?.len()
+        } else {
+            0
+        };
+        let secret = classify_secret(&relative);
+        let ignored = ignored_by_rules(&relative, file_type.is_dir(), ignore_rules)
+            || secret == Some(SecretTier::TierA)
+                && !explicitly_unignored(&relative, file_type.is_dir(), ignore_rules);
+        let quarantine_reason = match secret {
+            Some(SecretTier::TierA) if ignored => Some("secrets_tier_a_excluded".to_owned()),
+            Some(SecretTier::TierB) => Some("secrets_tier_b_warning".to_owned()),
+            _ => None,
+        };
+        let raw_hash = if include_raw_hashes && file_type.is_file() && !ignored {
+            Some(hash_bytes(&std::fs::read(&path).pipeline_io(&path)?))
+        } else {
+            None
+        };
+        candidates.push(ScanCandidate {
+            input_path: relative.clone(),
+            media_type: if file_type.is_dir() {
+                "inode/directory".to_owned()
+            } else {
+                media_type_for_path(&path).to_owned()
+            },
+            size_bytes,
+            raw_hash,
+            ignored,
+            quarantine_reason,
+        });
+        if file_type.is_dir() && !ignored {
+            collect_candidates(
+                scope_path,
+                &path,
+                ignore_rules,
+                include_raw_hashes,
+                candidates,
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn is_xdg_state_inside_scope(scope_path: &Path, path: &Path) -> bool {
+    let scope_path = scope_path
+        .canonicalize()
+        .unwrap_or_else(|_| scope_path.to_path_buf());
+    let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    ["XDG_CONFIG_HOME", "XDG_DATA_HOME"]
+        .iter()
+        .filter_map(std::env::var_os)
+        .map(PathBuf::from)
+        .map(|path| path.canonicalize().unwrap_or(path))
+        .filter(|xdg| xdg.starts_with(&scope_path))
+        .any(|xdg| path == xdg || path.starts_with(&xdg))
 }
 
 pub fn load_kcsignore(scope_path: &Path) -> Result<Vec<IgnoreRule>> {
@@ -178,8 +233,17 @@ pub fn load_config_ignore(scope_path: &Path) -> Result<Vec<IgnoreRule>> {
 
 #[must_use]
 pub fn classify_secret(path: &str) -> Option<SecretTier> {
-    let name = path.rsplit('/').next().unwrap_or(path);
+    let normalized = path.trim_start_matches('/').replace('\\', "/");
+    let name = normalized.rsplit('/').next().unwrap_or(&normalized);
     let lower = name.to_ascii_lowercase();
+    let lower_path = normalized.to_ascii_lowercase();
+    let tier_a_path = lower_path == ".kube/config"
+        || lower_path == ".docker/config.json"
+        || lower_path.starts_with(".ssh/")
+        || lower_path.starts_with(".gnupg/")
+        || lower_path.starts_with(".aws/")
+        || lower_path.starts_with(".kube/")
+        || lower_path.starts_with(".docker/");
     let tier_a = lower == ".env"
         || lower.starts_with(".env.")
         || lower == ".ssh"
@@ -199,7 +263,8 @@ pub fn classify_secret(path: &str) -> Option<SecretTier> {
         || lower == ".npmrc"
         || lower == ".pypirc"
         || lower.ends_with(".tfstate")
-        || lower.contains(".tfstate.");
+        || lower.contains(".tfstate.")
+        || tier_a_path;
     if tier_a {
         return Some(SecretTier::TierA);
     }
@@ -231,8 +296,19 @@ fn matches_ignore_pattern(path: &str, is_dir: bool, pattern: &str) -> bool {
     if directory_only && !is_dir {
         return false;
     }
+    let rooted = pattern.starts_with('/');
     let pattern = pattern.trim_start_matches('/').trim_end_matches('/');
-    wildcard_match(pattern, path)
+    let normalized_path = path.trim_start_matches('/').replace('\\', "/");
+    if !rooted && !pattern.contains('/') {
+        return wildcard_match(
+            pattern,
+            normalized_path
+                .rsplit('/')
+                .next()
+                .unwrap_or(&normalized_path),
+        );
+    }
+    wildcard_match(pattern, &normalized_path)
 }
 
 fn wildcard_match(pattern: &str, value: &str) -> bool {
@@ -243,12 +319,29 @@ fn wildcard_match_bytes(pattern: &[u8], value: &[u8]) -> bool {
     if pattern.is_empty() {
         return value.is_empty();
     }
+    if pattern.starts_with(b"**/") {
+        return wildcard_match_bytes(&pattern[3..], value)
+            || value
+                .iter()
+                .position(|byte| *byte == b'/')
+                .map(|slash| wildcard_match_bytes(pattern, &value[slash + 1..]))
+                .unwrap_or(false);
+    }
+    if pattern == b"**" {
+        return true;
+    }
     match pattern[0] {
         b'*' => {
             wildcard_match_bytes(&pattern[1..], value)
-                || !value.is_empty() && wildcard_match_bytes(pattern, &value[1..])
+                || !value.is_empty()
+                    && value[0] != b'/'
+                    && wildcard_match_bytes(pattern, &value[1..])
         }
-        b'?' => !value.is_empty() && wildcard_match_bytes(&pattern[1..], &value[1..]),
+        b'?' => {
+            !value.is_empty()
+                && value[0] != b'/'
+                && wildcard_match_bytes(&pattern[1..], &value[1..])
+        }
         byte => {
             !value.is_empty()
                 && byte == value[0]

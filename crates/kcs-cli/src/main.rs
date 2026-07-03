@@ -5,15 +5,18 @@ use std::path::{Path, PathBuf};
 use std::process;
 
 use clap::{Args, Parser, Subcommand};
-use kcs_adapter::deterministic::{
-    deterministic_markdown_profile_value, deterministic_prepare_profile_value, DeterministicAdapter,
-};
+use kcs_adapter::deterministic::{deterministic_prepare_profile_value, DeterministicAdapter};
 use kcs_adapter::identity::tool_profile_hash;
+use kcs_adapter::mistral_ocr::{
+    EnvMistralOcrClient, MistralOcrClient, MistralOcrMarkdownizeAdapter, OcrImage, OcrPage,
+    OcrResponse,
+};
 use kcs_adapter::tool_lock::{load_tool_lock, validate_tools_toml};
 use kcs_adapter::traits::MarkdownizeAdapter;
 use kcs_adapter::types::{
-    MarkdownizeMode as AdapterMarkdownizeMode, MarkdownizeRequest, PreparedUnitHint, RawInput,
-    UnitKind,
+    AdapterKind, AdapterProfile, ExecutionMode, MarkdownUnit,
+    MarkdownizeMode as AdapterMarkdownizeMode, MarkdownizeRequest, PreparedUnitHint,
+    PreviousMarkdownizeContext, RawInput, UnitKind,
 };
 use kcs_core::dag::NormalizeRef;
 use kcs_core::scope::{
@@ -30,7 +33,8 @@ use kcs_pipeline::markdownize::{
     NormalizedUnitManifestEntry, NormalizedUnitObject, UnitStatus,
 };
 use kcs_pipeline::prepare::{
-    hash_bytes, prepare_units, unit_ref, PrepareStageRequest, PreparedUnit, UnitType,
+    hash_bytes, map_units, pdf_text_pages, prepare_units, unit_ref, PrepareStageRequest,
+    PreparedUnit, UnitFingerprint, UnitType,
 };
 use kcs_pipeline::scan::{build_scan_preview, ScanCandidate, ScanPreview, ScanPreviewRequest};
 use kcs_pipeline::task::{TaskDescriptor, TaskStatus, TaskStore, TaskType};
@@ -346,7 +350,7 @@ fn run_index(args: IndexArgs) -> Result<Value> {
     }
 
     let approved = approval_exists(&repo)?;
-    if !approved && !args.approve && !args.yes && !args.online {
+    if !approved && !args.approve && !args.yes {
         if !std::io::stdin().is_terminal() {
             return Err(KcsError::invalid_usage(
                 "index requires --preview, --approve, or --yes in non-interactive mode",
@@ -368,7 +372,7 @@ fn run_index(args: IndexArgs) -> Result<Value> {
             } else {
                 "interactive"
             },
-            args.approve || args.online,
+            args.approve,
         )?;
     }
     record_quarantine_candidates(&repo, &preview)?;
@@ -431,10 +435,12 @@ fn run_batch(args: BatchArgs) -> Result<Value> {
                     }
                 })
                 .map_err(pipeline_to_kcs)?;
+            let executed = execute_pending_tasks(&repo, &store)?;
             Ok(json!({
                 "status": "resumed",
                 "override_budget": resume.override_budget,
                 "tasks_updated": changed,
+                "tasks_executed": executed,
             }))
         }
         Some(BatchCommand::Retry) => {
@@ -449,9 +455,272 @@ fn run_batch(args: BatchArgs) -> Result<Value> {
                     }
                 })
                 .map_err(pipeline_to_kcs)?;
-            Ok(json!({ "status": "retry scheduled", "tasks_updated": changed }))
+            let executed = execute_pending_tasks(&repo, &store)?;
+            Ok(
+                json!({ "status": "retry scheduled", "tasks_updated": changed, "tasks_executed": executed }),
+            )
         }
         None => Err(KcsError::not_implemented("batch command")),
+    }
+}
+
+fn execute_pending_tasks(repo: &Repository, store: &TaskStore) -> Result<usize> {
+    if !persistent_network_allowed(repo)? {
+        return Ok(0);
+    }
+    let tasks = store
+        .all()
+        .map_err(pipeline_to_kcs)?
+        .into_iter()
+        .filter(|task| {
+            task.status == TaskStatus::Pending
+                && task.task_type == TaskType::Markdownize
+                && task.output_ref == "online:mistral_ocr_markdownize"
+        })
+        .collect::<Vec<_>>();
+    let mut executed = 0usize;
+    for task in tasks {
+        let task_id = task.task_id.clone();
+        store
+            .update_matching(|candidate| {
+                if candidate.task_id == task_id {
+                    candidate.status = TaskStatus::Running;
+                    candidate.heartbeat_at = Some(now_utc_seconds());
+                    true
+                } else {
+                    false
+                }
+            })
+            .map_err(pipeline_to_kcs)?;
+        match execute_online_markdownize_task(repo, &task) {
+            Ok(output_ref) => {
+                store
+                    .update_matching(|candidate| {
+                        if candidate.task_id == task_id {
+                            candidate.status = TaskStatus::Done;
+                            candidate.output_ref = output_ref.clone();
+                            candidate.fallback_reason = Some("online_adapter_done".to_owned());
+                            candidate.heartbeat_at = None;
+                            true
+                        } else {
+                            false
+                        }
+                    })
+                    .map_err(pipeline_to_kcs)?;
+                executed += 1;
+            }
+            Err(error) => {
+                let message = error.message().to_owned();
+                store
+                    .update_matching(|candidate| {
+                        if candidate.task_id == task_id {
+                            candidate.status = TaskStatus::Failed;
+                            candidate.fallback_reason = Some(message.clone());
+                            candidate.heartbeat_at = None;
+                            candidate.attempts = candidate.attempts.saturating_add(1);
+                            true
+                        } else {
+                            false
+                        }
+                    })
+                    .map_err(pipeline_to_kcs)?;
+            }
+        }
+    }
+    Ok(executed)
+}
+
+fn persistent_network_allowed(repo: &Repository) -> Result<bool> {
+    if network_revoked(repo)? {
+        return Ok(false);
+    }
+    let path = repo.kcs_dir().join("approvals.jsonl");
+    let Ok(text) = fs::read_to_string(&path) else {
+        return Ok(false);
+    };
+    Ok(text
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .any(|value| {
+            value.get("tool_id").and_then(Value::as_str) == Some("mistral_ocr_markdownize")
+                && value.get("execution_mode").and_then(Value::as_str) == Some("online_api")
+                && value.get("network_opt_in").and_then(Value::as_bool) == Some(true)
+        }))
+}
+
+fn execute_online_markdownize_task(repo: &Repository, task: &TaskDescriptor) -> Result<String> {
+    let path = repo.root().join(&task.input_path);
+    let media_type = media_type_for_cli_path(&path).to_owned();
+    let prepare_profile_hash =
+        tool_profile_hash(&deterministic_prepare_profile_value()).map_err(adapter_to_kcs)?;
+    let prepare = prepare_units(PrepareStageRequest {
+        raw_hash: task.input_hash.clone(),
+        media_type: media_type.clone(),
+        input_path: path.display().to_string(),
+        tool_profile_hash: prepare_profile_hash,
+    })
+    .map_err(pipeline_to_kcs)?;
+    if prepare.prepared_units.is_empty() {
+        return Err(KcsError::schema(
+            "online adapter task has no prepared units after scan",
+        ));
+    }
+    let (profile, response) =
+        run_mistral_adapter(repo, &task.input_hash, &path, &media_type, &prepare)?;
+    let hints = all_changed_hints(&prepare.prepared_units);
+    validate_markdownize_response(&response, &hints, &prepare.prepared_units)
+        .map_err(pipeline_to_kcs)?;
+    let generated_at = now_utc_seconds();
+    let units = normalized_units_from_response(
+        &response,
+        &prepare.prepared_units,
+        None,
+        &task.input_hash,
+        &profile.tool_profile_hash,
+        MarkdownizeMode::Full,
+        &generated_at,
+    )?;
+    let run_id = format!("run_{}", new_ulid(repo.root()));
+    let manifest = manifest_from_units(
+        &prepare.prepared_units,
+        &units,
+        &task.input_hash,
+        &profile.tool_profile_hash,
+        None,
+        &run_id,
+        &generated_at,
+    );
+    persist_normalized_instance(repo.kcs_dir(), &manifest, &units).map_err(pipeline_to_kcs)?;
+    Ok(normalized_output_ref(
+        repo,
+        &task.input_hash,
+        &profile.tool_profile_hash,
+        0,
+    ))
+}
+
+fn run_mistral_adapter(
+    repo: &Repository,
+    raw_hash: &str,
+    path: &Path,
+    media_type: &str,
+    prepare: &kcs_pipeline::prepare::PrepareStageOutput,
+) -> Result<(AdapterProfile, kcs_adapter::types::MarkdownizeResponse)> {
+    let request = MarkdownizeRequest {
+        raw: RawInput {
+            raw_hash: raw_hash.to_owned(),
+            path: Some(path.display().to_string()),
+        },
+        media_type: media_type.to_owned(),
+        prepared_unit_hint: Some(prepared_unit_hints(&prepare.prepared_units)),
+        mode: AdapterMarkdownizeMode::Full,
+        previous: None,
+        hints: None,
+        tool_profile_hash: String::new(),
+        spec_version: 1,
+    };
+    if std::env::var("KCS_TEST_MISTRAL_OCR").ok().as_deref() == Some("mock") {
+        let adapter = MistralOcrMarkdownizeAdapter::new(
+            MockMistralClient,
+            "mistral-ocr-latest",
+            repo.scope_id_for_adapter(),
+        )
+        .with_image_store(repo.kcs_dir());
+        let profile = adapter.profile();
+        let mut request = request;
+        request.tool_profile_hash = profile.tool_profile_hash.clone();
+        return Ok((
+            profile,
+            adapter.markdownize(request).map_err(adapter_to_kcs)?,
+        ));
+    }
+    let client = EnvMistralOcrClient::new();
+    let model_pin = client
+        .resolve_model_pin("mistral-ocr-latest")
+        .map_err(adapter_to_kcs)?;
+    let adapter = MistralOcrMarkdownizeAdapter::new(client, model_pin, repo.scope_id_for_adapter())
+        .with_image_store(repo.kcs_dir());
+    let profile = adapter.profile();
+    let mut request = request;
+    request.tool_profile_hash = profile.tool_profile_hash.clone();
+    Ok((
+        profile,
+        adapter.markdownize(request).map_err(adapter_to_kcs)?,
+    ))
+}
+
+trait RepositoryScopeId {
+    fn scope_id_for_adapter(&self) -> String;
+}
+
+impl RepositoryScopeId for Repository {
+    fn scope_id_for_adapter(&self) -> String {
+        fs::read_to_string(self.kcs_dir().join("scope.json"))
+            .ok()
+            .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+            .and_then(|value| {
+                value
+                    .get("scope_id")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+            })
+            .unwrap_or_else(|| "unknown".to_owned())
+    }
+}
+
+#[derive(Debug, Clone)]
+struct MockMistralClient;
+
+impl MistralOcrClient for MockMistralClient {
+    fn resolve_model_pin(&self, _configured_model: &str) -> kcs_adapter::Result<String> {
+        Ok("mistral-ocr-2505".to_owned())
+    }
+
+    fn ocr_markdown(
+        &self,
+        request: &MarkdownizeRequest,
+        model_pin: &str,
+    ) -> kcs_adapter::Result<OcrResponse> {
+        let pages = request
+            .prepared_unit_hint
+            .as_deref()
+            .unwrap_or(&[])
+            .iter()
+            .enumerate()
+            .map(|(index, hint)| OcrPage {
+                index,
+                markdown: format!(
+                    "mock ocr {} ![img-{index}](img-{index}.png)\n",
+                    hint.unit_key
+                ),
+                images: vec![OcrImage {
+                    bytes: format!("image-{}", hint.unit_key).into_bytes(),
+                    media_type: "image/png".to_owned(),
+                    bbox: Some([index as i64, 0, index as i64 + 1, 1]),
+                    confidence: Some("0.99".to_owned()),
+                }],
+            })
+            .collect();
+        Ok(OcrResponse {
+            pages,
+            model_version_pin: model_pin.to_owned(),
+        })
+    }
+}
+
+fn media_type_for_cli_path(path: &Path) -> &'static str {
+    match path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .unwrap_or_default()
+    {
+        "md" | "markdown" => "text/markdown",
+        "txt" => "text/plain",
+        "rs" | "py" | "js" | "ts" | "go" | "java" | "c" | "h" | "cpp" => "text/x-code",
+        "pdf" => "application/pdf",
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        _ => "application/octet-stream",
     }
 }
 
@@ -529,6 +798,120 @@ struct IndexPipelineResult {
     pending_files: usize,
 }
 
+fn active_markdown_adapter(_repo: &Repository) -> Box<dyn MarkdownizeAdapter> {
+    match std::env::var("KCS_TEST_MARKDOWNIZE_ADAPTER")
+        .ok()
+        .as_deref()
+    {
+        Some("incremental") => Box::new(TestIncrementalMarkdownizeAdapter {
+            reject_incremental: false,
+        }),
+        Some("reject_incremental") => Box::new(TestIncrementalMarkdownizeAdapter {
+            reject_incremental: true,
+        }),
+        _ => Box::new(DeterministicAdapter),
+    }
+}
+
+#[derive(Debug, Clone)]
+struct TestIncrementalMarkdownizeAdapter {
+    reject_incremental: bool,
+}
+
+impl MarkdownizeAdapter for TestIncrementalMarkdownizeAdapter {
+    fn profile(&self) -> AdapterProfile {
+        let profile = json!({
+            "adapter_kind": "markdownize",
+            "adapter_role": "text",
+            "model_or_tool_family": "kcs-test-incremental",
+            "model_version_pin": "1.0.0",
+            "output_schema": "kcs-markdown-v1",
+            "runtime_kind": "local",
+            "spec_version": 1
+        });
+        AdapterProfile {
+            adapter_kind: AdapterKind::Markdownize,
+            adapter_id: "test_incremental_markdownize".to_owned(),
+            execution_mode: ExecutionMode::DeterministicLibrary,
+            tool_profile_hash: tool_profile_hash(&profile)
+                .expect("built-in test profile should hash"),
+            version: env!("CARGO_PKG_VERSION").to_owned(),
+            capability_flags: vec!["incremental_update".to_owned()],
+            allow_network: false,
+        }
+    }
+
+    fn markdownize(
+        &self,
+        request: MarkdownizeRequest,
+    ) -> kcs_adapter::Result<kcs_adapter::types::MarkdownizeResponse> {
+        let hints = request.prepared_unit_hint.clone().unwrap_or_default();
+        if request.mode == AdapterMarkdownizeMode::Incremental {
+            let incremental =
+                request
+                    .hints
+                    .clone()
+                    .unwrap_or(kcs_adapter::types::IncrementalHints {
+                        changed_unit_keys: hints.iter().map(|hint| hint.unit_key.clone()).collect(),
+                        added_unit_keys: Vec::new(),
+                        removed_unit_keys: Vec::new(),
+                        page_fingerprints: BTreeMap::new(),
+                    });
+            let changed = incremental.changed_unit_keys;
+            let added = incremental.added_unit_keys;
+            let unchanged = hints
+                .iter()
+                .filter(|hint| !changed.contains(&hint.unit_key) && !added.contains(&hint.unit_key))
+                .map(|hint| hint.unit_key.clone())
+                .collect::<Vec<_>>();
+            return Ok(kcs_adapter::types::MarkdownizeResponse {
+                mode_used: AdapterMarkdownizeMode::Incremental,
+                updated_units: hints
+                    .iter()
+                    .filter(|hint| changed.contains(&hint.unit_key))
+                    .map(|hint| test_markdown_unit(hint, "incremental"))
+                    .collect(),
+                unchanged_unit_keys: if self.reject_incremental {
+                    Vec::new()
+                } else {
+                    unchanged
+                },
+                added_units: hints
+                    .iter()
+                    .filter(|hint| added.contains(&hint.unit_key))
+                    .map(|hint| test_markdown_unit(hint, "incremental-added"))
+                    .collect(),
+                removed_unit_keys: incremental.removed_unit_keys,
+                evidence_pointers: Vec::new(),
+                fallback_to_full: false,
+                reason: None,
+            });
+        }
+        Ok(kcs_adapter::types::MarkdownizeResponse {
+            mode_used: AdapterMarkdownizeMode::Full,
+            updated_units: hints
+                .iter()
+                .map(|hint| test_markdown_unit(hint, "full"))
+                .collect(),
+            unchanged_unit_keys: Vec::new(),
+            added_units: Vec::new(),
+            removed_unit_keys: Vec::new(),
+            evidence_pointers: Vec::new(),
+            fallback_to_full: false,
+            reason: None,
+        })
+    }
+}
+
+fn test_markdown_unit(hint: &PreparedUnitHint, prefix: &str) -> MarkdownUnit {
+    MarkdownUnit {
+        unit_key: hint.unit_key.clone(),
+        unit_type: hint.unit_kind,
+        markdown: format!("{prefix} {}\n", hint.unit_key),
+        metadata: BTreeMap::new(),
+    }
+}
+
 fn run_index_pipeline(
     repo: &Repository,
     preview: &ScanPreview,
@@ -539,14 +922,14 @@ fn run_index_pipeline(
     let scope_id = preview.scope_id.clone();
     let prepare_profile_hash =
         tool_profile_hash(&deterministic_prepare_profile_value()).map_err(adapter_to_kcs)?;
-    let markdown_profile_hash =
-        tool_profile_hash(&deterministic_markdown_profile_value()).map_err(adapter_to_kcs)?;
-    let markdown_adapter = DeterministicAdapter;
+    let markdown_adapter = active_markdown_adapter(repo);
     let markdown_profile = markdown_adapter.profile();
+    let markdown_profile_hash = markdown_profile.tool_profile_hash.clone();
     let network_allowed = network_allowed(repo, args)?;
     let cost_ledger = CostLedger::new(data_home().join("kcs/cost-ledger.jsonl"));
     let (device_cap, folder_cap) =
-        read_budget_caps(repo.kcs_dir().join("config.toml")).map_err(pipeline_to_kcs)?;
+        read_budget_caps(user_config_toml_path(), repo.kcs_dir().join("config.toml"))
+            .map_err(pipeline_to_kcs)?;
     let month = utc_month(&now);
     let device_spent = cost_ledger
         .monthly_total(&month, None)
@@ -580,7 +963,13 @@ fn run_index_pipeline(
         })
         .map_err(pipeline_to_kcs)?;
 
-        write_prepared_objects(repo, &prepare.prepared_object_hashes, &bytes)?;
+        write_prepared_objects(
+            repo,
+            &prepare.prepared_units,
+            &prepare.prepared_object_hashes,
+            &bytes,
+            &candidate.media_type,
+        )?;
 
         if prepare.prepared_units.is_empty() {
             let task = task_descriptor(
@@ -631,17 +1020,51 @@ fn run_index_pipeline(
             continue;
         }
 
+        let previous =
+            previous_instance_for_path(&task_store, &candidate.input_path, &markdown_profile_hash)?;
+        let mapping = previous
+            .as_ref()
+            .map(|previous| map_units(&previous.prepared_units, &prepare.prepared_units));
+        let incremental_hints = mapping
+            .as_ref()
+            .map(|mapping| incremental_hints_from_mapping(mapping, &prepare.prepared_units))
+            .unwrap_or_else(|| all_changed_hints(&prepare.prepared_units));
         let mode_decision = choose_markdownize_mode(&IncrementalModeInput {
-            has_previous_done_run: has_previous_done_task(&task_store, &candidate.input_path)?,
+            has_previous_done_run: previous.is_some(),
             raw_hash_only_changed: true,
             adapter_capabilities: markdown_profile.capability_flags.clone(),
-            change_rate: 0.0,
+            change_rate: mapping
+                .as_ref()
+                .map(|mapping| mapping.change_rate)
+                .unwrap_or(1.0),
             threshold: 0.30,
-            consecutive_incremental_count: 0,
+            consecutive_incremental_count: consecutive_incremental_count(
+                &task_store,
+                &candidate.input_path,
+            )?,
             max_consecutive_incremental: 5,
         });
         let mode = mode_decision.mode;
         let hints = prepared_unit_hints(&prepare.prepared_units);
+        let adapter_previous = previous
+            .as_ref()
+            .map(|previous| PreviousMarkdownizeContext {
+                raw: RawInput {
+                    raw_hash: previous.manifest.raw_hash.clone(),
+                    path: Some(
+                        repo.root()
+                            .join(&candidate.input_path)
+                            .display()
+                            .to_string(),
+                    ),
+                },
+                normalized_units: previous
+                    .units
+                    .iter()
+                    .map(normalized_unit_to_adapter_unit)
+                    .collect(),
+                tool_profile_hash: previous.manifest.tool_profile_hash.clone(),
+            });
         let request = MarkdownizeRequest {
             raw: RawInput {
                 raw_hash: raw_hash.clone(),
@@ -650,8 +1073,11 @@ fn run_index_pipeline(
             media_type: candidate.media_type.clone(),
             prepared_unit_hint: Some(hints),
             mode: adapter_mode(mode),
-            previous: None,
-            hints: None,
+            previous: (mode == MarkdownizeMode::Incremental)
+                .then_some(adapter_previous)
+                .flatten(),
+            hints: (mode == MarkdownizeMode::Incremental)
+                .then(|| adapter_hints(&incremental_hints)),
             tool_profile_hash: markdown_profile_hash.clone(),
             spec_version: 1,
         };
@@ -659,34 +1085,42 @@ fn run_index_pipeline(
         let mut response = markdown_adapter
             .markdownize(request.clone())
             .map_err(adapter_to_kcs)?;
-        if response.fallback_to_full {
+        let mut final_mode = mode;
+        let mut fallback_reason = mode_decision.reason.clone();
+        let validation = if response.fallback_to_full {
+            Err(kcs_pipeline::PipelineError::contract(
+                "KCS-E-ADAPTER-CONTRACT-001",
+                "adapter_requested_full_fallback",
+            ))
+        } else {
+            validate_markdownize_response(&response, &incremental_hints, &prepare.prepared_units)
+        };
+        if let Err(error) = validation {
+            if mode != MarkdownizeMode::Incremental {
+                return Err(pipeline_to_kcs(error));
+            }
             let mut full_request = request;
             full_request.mode = AdapterMarkdownizeMode::Full;
+            full_request.previous = None;
+            full_request.hints = None;
             response = markdown_adapter
                 .markdownize(full_request)
                 .map_err(adapter_to_kcs)?;
+            validate_markdownize_response(&response, &incremental_hints, &prepare.prepared_units)
+                .map_err(pipeline_to_kcs)?;
+            final_mode = MarkdownizeMode::Full;
+            fallback_reason = Some("full_fallback_after_incremental_reject".to_owned());
         }
-        let empty_hints = IncrementalHints {
-            changed_unit_keys: prepare
-                .prepared_units
-                .iter()
-                .map(|unit| unit.unit_key.clone())
-                .collect(),
-            added_unit_keys: Vec::new(),
-            removed_unit_keys: Vec::new(),
-            page_fingerprints: BTreeMap::new(),
-        };
-        validate_markdownize_response(&response, &empty_hints, &prepare.prepared_units)
-            .map_err(pipeline_to_kcs)?;
 
         let generated_at = now_utc_seconds();
         let run_id = format!("run_{}", new_ulid(repo.root()));
         let units = normalized_units_from_response(
             &response,
             &prepare.prepared_units,
+            previous.as_ref(),
             &raw_hash,
             &markdown_profile_hash,
-            mode,
+            final_mode,
             &generated_at,
         )?;
         let manifest = manifest_from_units(
@@ -694,6 +1128,7 @@ fn run_index_pipeline(
             &units,
             &raw_hash,
             &markdown_profile_hash,
+            previous.as_ref().map(|previous| previous.manifest.gen),
             &run_id,
             &generated_at,
         );
@@ -706,8 +1141,24 @@ fn run_index_pipeline(
             &raw_hash,
             &output_ref,
             TaskStatus::Done,
-            mode_decision.reason.as_deref(),
+            fallback_reason.as_deref(),
             &generated_at,
+        );
+        let mut task = task;
+        task.mode = Some(final_mode);
+        task.previous_raw_hash = previous
+            .as_ref()
+            .map(|previous| previous.manifest.raw_hash.clone());
+        task.parent_run_id = previous
+            .as_ref()
+            .map(|previous| previous.manifest.run_id.clone());
+        task.changed_unit_keys = incremental_hints.changed_unit_keys.clone();
+        task.unit_keys = Some(
+            prepare
+                .prepared_units
+                .iter()
+                .map(|unit| unit.unit_key.clone())
+                .collect(),
         );
         task_store.append(&task).map_err(pipeline_to_kcs)?;
         result.normalize_by_path.insert(
@@ -747,10 +1198,13 @@ fn run_index_pipeline(
 
 fn write_prepared_objects(
     repo: &Repository,
+    prepared_units: &[PreparedUnit],
     prepared_hashes: &[String],
     bytes: &[u8],
+    media_type: &str,
 ) -> Result<()> {
-    for prepared_hash in prepared_hashes {
+    let pdf_pages = (media_type == "application/pdf").then(|| pdf_text_pages(bytes));
+    for (index, prepared_hash) in prepared_hashes.iter().enumerate() {
         let digest = prepared_hash
             .strip_prefix("sha256:")
             .ok_or_else(|| KcsError::schema("prepared hash must use sha256 prefix"))?;
@@ -765,7 +1219,17 @@ fn write_prepared_objects(
                 .map_err(|err| KcsError::io(err.to_string(), parent.display().to_string()))?;
         }
         if !path.exists() {
-            fs::write(&path, bytes)
+            let object_bytes = pdf_pages
+                .as_ref()
+                .and_then(|pages| pages.get(index))
+                .map(|page| page.as_bytes())
+                .or_else(|| {
+                    prepared_units
+                        .get(index)
+                        .and_then(|unit| (unit.unit_type == UnitType::Page).then_some(b"" as &[u8]))
+                })
+                .unwrap_or(bytes);
+            fs::write(&path, object_bytes)
                 .map_err(|err| KcsError::io(err.to_string(), path.display().to_string()))?;
         }
     }
@@ -852,9 +1316,168 @@ fn adapter_mode(mode: MarkdownizeMode) -> AdapterMarkdownizeMode {
     }
 }
 
+#[derive(Debug, Clone)]
+struct PreviousInstance {
+    manifest: NormalizedInstanceManifest,
+    units: Vec<NormalizedUnitObject>,
+    prepared_units: Vec<PreparedUnit>,
+}
+
+fn previous_instance_for_path(
+    task_store: &TaskStore,
+    input_path: &str,
+    tool_profile_hash: &str,
+) -> Result<Option<PreviousInstance>> {
+    let mut tasks = task_store
+        .all()
+        .map_err(pipeline_to_kcs)?
+        .into_iter()
+        .filter(|task| {
+            task.input_path == input_path
+                && matches!(task.status, TaskStatus::Done | TaskStatus::Partial)
+                && !task.output_ref.starts_with("online:")
+        })
+        .collect::<Vec<_>>();
+    tasks.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+    for task in tasks {
+        let Some(previous) = load_previous_instance(&task.output_ref)? else {
+            continue;
+        };
+        if previous.manifest.tool_profile_hash == tool_profile_hash {
+            return Ok(Some(previous));
+        }
+    }
+    Ok(None)
+}
+
+fn load_previous_instance(output_ref: &str) -> Result<Option<PreviousInstance>> {
+    let dir = PathBuf::from(output_ref);
+    let manifest_path = dir.join("manifest.json");
+    let Ok(bytes) = fs::read(&manifest_path) else {
+        return Ok(None);
+    };
+    let manifest: NormalizedInstanceManifest =
+        serde_json::from_slice(&bytes).map_err(|err| KcsError::schema(err.to_string()))?;
+    let mut units = Vec::new();
+    for entry in &manifest.units {
+        if entry.status != UnitStatus::Done {
+            continue;
+        }
+        let unit_path = dir.join(format!("{}.json", entry.unit_ref));
+        let bytes = fs::read(&unit_path)
+            .map_err(|err| KcsError::io(err.to_string(), unit_path.display().to_string()))?;
+        let unit: NormalizedUnitObject =
+            serde_json::from_slice(&bytes).map_err(|err| KcsError::schema(err.to_string()))?;
+        units.push(unit);
+    }
+    let prepared_units = manifest
+        .units
+        .iter()
+        .map(|entry| PreparedUnit {
+            order: entry.order,
+            unit_key: entry.unit_key.clone(),
+            unit_type: entry.unit_type,
+            prepared_hash: entry.prepared_hash.clone(),
+            fingerprint: UnitFingerprint {
+                perceptual_hash: entry.prepared_hash.clone(),
+                text_hash: entry.prepared_hash.clone(),
+                visual_hash: entry.prepared_hash.clone(),
+            },
+            mime: None,
+            page_number: (entry.unit_type == UnitType::Page).then_some(entry.order + 1),
+        })
+        .collect();
+    Ok(Some(PreviousInstance {
+        manifest,
+        units,
+        prepared_units,
+    }))
+}
+
+fn incremental_hints_from_mapping(
+    mapping: &kcs_pipeline::prepare::UnitMapping,
+    prepared_units: &[PreparedUnit],
+) -> IncrementalHints {
+    IncrementalHints {
+        changed_unit_keys: mapping.changed_unit_keys.clone(),
+        added_unit_keys: mapping.added_unit_keys.clone(),
+        removed_unit_keys: mapping.removed_unit_keys.clone(),
+        page_fingerprints: prepared_units
+            .iter()
+            .map(|unit| (unit.unit_key.clone(), unit.fingerprint.clone()))
+            .collect(),
+    }
+}
+
+fn all_changed_hints(prepared_units: &[PreparedUnit]) -> IncrementalHints {
+    IncrementalHints {
+        changed_unit_keys: prepared_units
+            .iter()
+            .map(|unit| unit.unit_key.clone())
+            .collect(),
+        added_unit_keys: Vec::new(),
+        removed_unit_keys: Vec::new(),
+        page_fingerprints: prepared_units
+            .iter()
+            .map(|unit| (unit.unit_key.clone(), unit.fingerprint.clone()))
+            .collect(),
+    }
+}
+
+fn adapter_hints(hints: &IncrementalHints) -> kcs_adapter::types::IncrementalHints {
+    kcs_adapter::types::IncrementalHints {
+        changed_unit_keys: hints.changed_unit_keys.clone(),
+        added_unit_keys: hints.added_unit_keys.clone(),
+        removed_unit_keys: hints.removed_unit_keys.clone(),
+        page_fingerprints: hints
+            .page_fingerprints
+            .iter()
+            .map(|(key, fingerprint)| {
+                (
+                    key.clone(),
+                    kcs_adapter::types::UnitFingerprint {
+                        perceptual_hash: fingerprint.perceptual_hash.clone(),
+                        text_hash: fingerprint.text_hash.clone(),
+                        visual_hash: fingerprint.visual_hash.clone(),
+                    },
+                )
+            })
+            .collect(),
+    }
+}
+
+fn normalized_unit_to_adapter_unit(unit: &NormalizedUnitObject) -> MarkdownUnit {
+    MarkdownUnit {
+        unit_key: unit.unit_key.clone(),
+        unit_type: adapter_unit_kind(unit.unit_type),
+        markdown: unit.markdown.clone(),
+        metadata: BTreeMap::new(),
+    }
+}
+
+fn consecutive_incremental_count(task_store: &TaskStore, input_path: &str) -> Result<u32> {
+    let mut tasks = task_store
+        .all()
+        .map_err(pipeline_to_kcs)?
+        .into_iter()
+        .filter(|task| task.input_path == input_path && task.status == TaskStatus::Done)
+        .collect::<Vec<_>>();
+    tasks.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+    let mut count = 0u32;
+    for task in tasks {
+        if task.mode == Some(MarkdownizeMode::Incremental) {
+            count = count.saturating_add(1);
+        } else {
+            break;
+        }
+    }
+    Ok(count)
+}
+
 fn normalized_units_from_response(
     response: &kcs_adapter::types::MarkdownizeResponse,
     prepared_units: &[PreparedUnit],
+    previous: Option<&PreviousInstance>,
     raw_hash: &str,
     tool_profile_hash: &str,
     mode: MarkdownizeMode,
@@ -864,7 +1487,16 @@ fn normalized_units_from_response(
         .iter()
         .map(|unit| (unit.unit_key.as_str(), unit))
         .collect::<BTreeMap<_, _>>();
-    response
+    let previous_units = previous
+        .map(|previous| {
+            previous
+                .units
+                .iter()
+                .map(|unit| (unit.unit_key.as_str(), unit))
+                .collect::<BTreeMap<_, _>>()
+        })
+        .unwrap_or_default();
+    let mut units = response
         .updated_units
         .iter()
         .chain(response.added_units.iter())
@@ -885,7 +1517,38 @@ fn normalized_units_from_response(
                 generated_at: generated_at.to_owned(),
             })
         })
-        .collect()
+        .collect::<Result<Vec<_>>>()?;
+    for unit_key in &response.unchanged_unit_keys {
+        let prepared = prepared
+            .get(unit_key.as_str())
+            .ok_or_else(|| KcsError::schema("adapter returned unknown unchanged unit"))?;
+        let previous_unit = previous_units
+            .get(unit_key.as_str())
+            .ok_or_else(|| KcsError::schema("unchanged unit has no previous normalized unit"))?;
+        units.push(NormalizedUnitObject {
+            unit_key: unit_key.clone(),
+            unit_type: prepared.unit_type,
+            raw_hash: raw_hash.to_owned(),
+            prepared_hash: prepared.prepared_hash.clone(),
+            tool_profile_hash: tool_profile_hash.to_owned(),
+            gen: 0,
+            mode,
+            markdown: previous_unit.markdown.clone(),
+            reused_from: Some(kcs_pipeline::markdownize::ReusedFrom {
+                raw_hash: previous_unit.raw_hash.clone(),
+                gen: previous_unit.gen,
+                unit_key: previous_unit.unit_key.clone(),
+            }),
+            generated_at: generated_at.to_owned(),
+        });
+    }
+    units.sort_by_key(|unit| {
+        prepared
+            .get(unit.unit_key.as_str())
+            .map(|unit| unit.order)
+            .unwrap_or(u64::MAX)
+    });
+    Ok(units)
 }
 
 fn manifest_from_units(
@@ -893,6 +1556,7 @@ fn manifest_from_units(
     units: &[NormalizedUnitObject],
     raw_hash: &str,
     tool_profile_hash: &str,
+    parent_gen: Option<u64>,
     run_id: &str,
     generated_at: &str,
 ) -> NormalizedInstanceManifest {
@@ -904,7 +1568,7 @@ fn manifest_from_units(
         raw_hash: raw_hash.to_owned(),
         tool_profile_hash: tool_profile_hash.to_owned(),
         gen: 0,
-        parent_gen: None,
+        parent_gen,
         run_id: run_id.to_owned(),
         units: prepared_units
             .iter()
@@ -925,14 +1589,6 @@ fn manifest_from_units(
             .collect(),
         generated_at: generated_at.to_owned(),
     }
-}
-
-fn has_previous_done_task(task_store: &TaskStore, input_path: &str) -> Result<bool> {
-    Ok(task_store
-        .all()
-        .map_err(pipeline_to_kcs)?
-        .iter()
-        .any(|task| task.input_path == input_path && task.status == TaskStatus::Done))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1019,8 +1675,7 @@ fn matches_batch_override(_args: &IndexArgs) -> bool {
 fn materialize_tool_lock(repo: &Repository) -> Result<()> {
     let prepare_hash =
         tool_profile_hash(&deterministic_prepare_profile_value()).map_err(adapter_to_kcs)?;
-    let markdown_hash =
-        tool_profile_hash(&deterministic_markdown_profile_value()).map_err(adapter_to_kcs)?;
+    let markdown_profile = active_markdown_adapter(repo).profile();
     let value = json!({
         "spec_version": 1,
         "prepare": {
@@ -1029,16 +1684,24 @@ fn materialize_tool_lock(repo: &Repository) -> Result<()> {
             "kind": "deterministic_library"
         },
         "markdown": {
-            "tool_id": "deterministic_builtin",
-            "profile_hash": markdown_hash,
-            "kind": "deterministic_library",
-            "capabilities": ["baseline", "text_passthrough"]
+            "tool_id": markdown_profile.adapter_id,
+            "profile_hash": markdown_profile.tool_profile_hash,
+            "kind": execution_mode_name(markdown_profile.execution_mode),
+            "capabilities": markdown_profile.capability_flags
         }
     });
     let path = repo.kcs_dir().join("tool-lock.json");
     let bytes =
         serde_json::to_vec_pretty(&value).map_err(|err| KcsError::schema(err.to_string()))?;
     fs::write(&path, bytes).map_err(|err| KcsError::io(err.to_string(), path.display().to_string()))
+}
+
+fn execution_mode_name(mode: ExecutionMode) -> &'static str {
+    match mode {
+        ExecutionMode::OnlineApi => "online_api",
+        ExecutionMode::OfflineApi => "offline_api",
+        ExecutionMode::DeterministicLibrary => "deterministic_library",
+    }
 }
 
 fn approval_exists(repo: &Repository) -> Result<bool> {
@@ -1049,11 +1712,11 @@ fn network_allowed(repo: &Repository, args: &IndexArgs) -> Result<bool> {
     if args.offline {
         return Ok(false);
     }
-    if args.online || args.approve {
-        return Ok(true);
-    }
     if network_revoked(repo)? {
         return Ok(false);
+    }
+    if args.online || args.approve {
+        return approval_exists(repo);
     }
     let path = repo.kcs_dir().join("approvals.jsonl");
     let Ok(text) = fs::read_to_string(&path) else {
@@ -1070,17 +1733,93 @@ fn network_allowed(repo: &Repository, args: &IndexArgs) -> Result<bool> {
 }
 
 fn network_revoked(repo: &Repository) -> Result<bool> {
-    Ok(repo.kcs_dir().join("network-revoked").is_file())
+    if repo.kcs_dir().join("network-revoked").is_file() {
+        return Ok(true);
+    }
+    let path = repo.kcs_dir().join("config.toml");
+    let Ok(text) = fs::read_to_string(&path) else {
+        return Ok(false);
+    };
+    let value: toml::Value =
+        toml::from_str(&text).map_err(|err| KcsError::schema(err.to_string()))?;
+    Ok(value
+        .get("adapter")
+        .and_then(|adapter| adapter.get("policy"))
+        .and_then(|policy| policy.get("allow_network"))
+        .and_then(toml::Value::as_bool)
+        == Some(false))
 }
 
 fn write_network_revoke_record(repo: &Repository) -> Result<()> {
-    let path = repo.kcs_dir().join("network-revoked");
-    fs::write(&path, now_utc_seconds())
+    let config_path = repo.kcs_dir().join("config.toml");
+    let mut value = match fs::read_to_string(&config_path) {
+        Ok(text) => {
+            toml::from_str::<toml::Value>(&text).map_err(|err| KcsError::schema(err.to_string()))?
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            toml::Value::Table(toml::map::Map::new())
+        }
+        Err(err) => {
+            return Err(KcsError::io(
+                err.to_string(),
+                config_path.display().to_string(),
+            ));
+        }
+    };
+    set_allow_network_false(&mut value);
+    let text = toml::to_string_pretty(&value).map_err(|err| KcsError::schema(err.to_string()))?;
+    fs::write(&config_path, text)
+        .map_err(|err| KcsError::io(err.to_string(), config_path.display().to_string()))?;
+    let path = repo.kcs_dir().join("network-revoked.jsonl");
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .map_err(|err| KcsError::io(err.to_string(), path.display().to_string()))?;
+    serde_json::to_writer(
+        &mut file,
+        &json!({
+            "recorded_at": now_utc_seconds(),
+            "tool_id": "mistral_ocr_markdownize",
+            "execution_mode": "online_api",
+            "allow_network": false,
+        }),
+    )
+    .map_err(|err| KcsError::io(err.to_string(), path.display().to_string()))?;
+    file.write_all(b"\n")
         .map_err(|err| KcsError::io(err.to_string(), path.display().to_string()))
+}
+
+fn set_allow_network_false(value: &mut toml::Value) {
+    if !value.is_table() {
+        *value = toml::Value::Table(toml::map::Map::new());
+    }
+    let root = value.as_table_mut().expect("value was normalized to table");
+    let adapter = root
+        .entry("adapter".to_owned())
+        .or_insert_with(|| toml::Value::Table(toml::map::Map::new()));
+    if !adapter.is_table() {
+        *adapter = toml::Value::Table(toml::map::Map::new());
+    }
+    let adapter = adapter.as_table_mut().expect("adapter table");
+    let policy = adapter
+        .entry("policy".to_owned())
+        .or_insert_with(|| toml::Value::Table(toml::map::Map::new()));
+    if !policy.is_table() {
+        *policy = toml::Value::Table(toml::map::Map::new());
+    }
+    policy
+        .as_table_mut()
+        .expect("policy table")
+        .insert("allow_network".to_owned(), toml::Value::Boolean(false));
 }
 
 fn record_quarantine_candidates(repo: &Repository, preview: &ScanPreview) -> Result<()> {
     let path = repo.kcs_dir().join("quarantine.jsonl");
+    let existing = read_quarantine_records(repo)?
+        .into_iter()
+        .filter_map(|entry| entry.get("path").and_then(Value::as_str).map(str::to_owned))
+        .collect::<BTreeSet<_>>();
     let mut file = OpenOptions::new()
         .create(true)
         .append(true)
@@ -1089,6 +1828,7 @@ fn record_quarantine_candidates(repo: &Repository, preview: &ScanPreview) -> Res
     for candidate in &preview.candidates {
         if candidate.ignored
             && candidate.quarantine_reason.as_deref() == Some("secrets_tier_a_excluded")
+            && !existing.contains(&candidate.input_path)
         {
             let record = json!({
                 "path": candidate.input_path,
@@ -1175,6 +1915,15 @@ fn user_tools_toml_path() -> Option<PathBuf> {
         return Some(PathBuf::from(path).join("kcs/tools.toml"));
     }
     std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config/kcs/tools.toml"))
+}
+
+fn user_config_toml_path() -> PathBuf {
+    if let Some(path) = std::env::var_os("XDG_CONFIG_HOME") {
+        return PathBuf::from(path).join("kcs/config.toml");
+    }
+    std::env::var_os("HOME")
+        .map(|home| PathBuf::from(home).join(".config/kcs/config.toml"))
+        .unwrap_or_else(|| PathBuf::from(".config/kcs/config.toml"))
 }
 
 fn data_home() -> PathBuf {

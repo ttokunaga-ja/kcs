@@ -6,22 +6,14 @@ use assert_cmd::Command;
 use kcs_adapter::identity::{
     canonical_profile_value, jcs_bytes, prompt_template_hash, tool_profile_hash,
 };
-use kcs_adapter::mistral_ocr::{
-    image_hash, replace_image_placeholders, MistralOcrClient, MistralOcrMarkdownizeAdapter,
-    OcrImage, OcrResponse,
-};
+use kcs_adapter::mistral_ocr::{image_hash, replace_image_placeholders, OcrImage};
 use kcs_adapter::tool_lock::tool_lock_hash;
-use kcs_adapter::traits::MarkdownizeAdapter;
-use kcs_adapter::types::{
-    MarkdownizeMode as AdapterMarkdownizeMode, MarkdownizeRequest, PreparedUnitHint, RawInput,
-    UnitKind,
-};
 use kcs_pipeline::budget::{evaluate_budget_with_caps, BudgetCapKind, BudgetEstimate};
 use kcs_pipeline::markdownize::{
     choose_markdownize_mode, markdownize_units, normalized_identity, normalized_instance_dir,
-    persist_normalized_instance, validate_markdownize_response, IncrementalHints,
-    IncrementalModeInput, MarkdownizeMode, MarkdownizeStageRequest, NormalizedInstanceManifest,
-    NormalizedUnitManifestEntry, NormalizedUnitObject, RawRef, UnitStatus,
+    validate_markdownize_response, IncrementalHints, IncrementalModeInput, MarkdownizeMode,
+    MarkdownizeStageRequest, NormalizedInstanceManifest, NormalizedUnitManifestEntry,
+    NormalizedUnitObject, RawRef, UnitStatus,
 };
 use kcs_pipeline::prepare::{
     change_rate, hash_bytes, map_units, unit_ref, PreparedUnit, UnitFingerprint, UnitType,
@@ -43,27 +35,6 @@ fn profile_mistral() -> Value {
         "runtime_kind": "cloud",
         "spec_version": 1
     })
-}
-
-#[derive(Clone)]
-struct MockMistralClient;
-
-impl MistralOcrClient for MockMistralClient {
-    fn resolve_model_pin(&self, _configured_model: &str) -> kcs_adapter::Result<String> {
-        Ok("mistral-ocr-2505".to_owned())
-    }
-
-    fn ocr_markdown(
-        &self,
-        _request: &MarkdownizeRequest,
-        model_pin: &str,
-    ) -> kcs_adapter::Result<OcrResponse> {
-        Ok(OcrResponse {
-            markdown: format!("ocr via {model_pin}\n"),
-            images: Vec::new(),
-            model_version_pin: model_pin.to_owned(),
-        })
-    }
 }
 
 fn profile_deterministic() -> Value {
@@ -203,6 +174,38 @@ fn inspect(dir: &TempDir, hash: &str) -> Value {
 
 fn head(dir: &TempDir) -> String {
     fs::read_to_string(dir.path().join(".kcs/HEAD")).unwrap()
+}
+
+fn fake_pdf(pages: &[&str]) -> String {
+    let kids = (0..pages.len())
+        .map(|index| format!("{} 0 R", index + 2))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let mut out = format!(
+        "%PDF-1.4\n1 0 obj << /Type /Pages /Kids [{kids}] /Count {} >> endobj\n",
+        pages.len()
+    );
+    for (index, page) in pages.iter().enumerate() {
+        out.push_str(&format!(
+            "{} 0 obj << /Type /Page /Parent 1 0 R >> stream\nBT ({page}) Tj ET\nendstream endobj\n",
+            index + 2
+        ));
+    }
+    out.push_str("%%EOF\n");
+    out
+}
+
+fn normalized_units(dir: &TempDir) -> Vec<NormalizedUnitObject> {
+    let root = dir.path().join(".kcs/objects/normalized_units");
+    collect_files(&root)
+        .into_iter()
+        .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("json"))
+        .filter(|path| path.file_name().and_then(|name| name.to_str()) != Some("manifest.json"))
+        .map(|path| {
+            let bytes = fs::read(root.join(path)).unwrap();
+            serde_json::from_slice::<NormalizedUnitObject>(&bytes).unwrap()
+        })
+        .collect()
 }
 
 #[test]
@@ -566,15 +569,35 @@ fn ct2_accept_006_full_mode_uses_full_contract() {
 
 #[test]
 fn ct2_accept_007_reject_triggers_full_fallback_path() {
-    let (prepared, hints) = acceptance_context();
-    let mut response = response_incremental(
-        vec![markdown_unit("page:1", "x")],
-        vec!["page:2"],
-        Vec::new(),
-        Vec::new(),
-    );
-    response.fallback_to_full = true;
-    assert!(validate_markdownize_response(&response, &hints, &prepared).is_err());
+    let dir = scope();
+    fs::write(
+        dir.path().join("report.pdf"),
+        fake_pdf(&["p1", "p2", "p3", "p4", "p5"]),
+    )
+    .unwrap();
+    kcs(&dir, ["index", "--approve"])
+        .env("KCS_TEST_MARKDOWNIZE_ADAPTER", "reject_incremental")
+        .assert()
+        .success();
+    fs::write(
+        dir.path().join("report.pdf"),
+        fake_pdf(&["p1", "p2 changed", "p3", "p4", "p5"]),
+    )
+    .unwrap();
+    kcs(&dir, ["index", "--yes"])
+        .env("KCS_TEST_MARKDOWNIZE_ADAPTER", "reject_incremental")
+        .assert()
+        .success();
+    let status = json_success(&dir, ["status"]);
+    assert!(status["tasks"].as_array().unwrap().iter().any(|task| {
+        task["input_path"] == "report.pdf"
+            && task["status"] == "done"
+            && task["mode"] == "full"
+            && task["fallback_reason"] == "full_fallback_after_incremental_reject"
+    }));
+    assert!(!normalized_units(&dir)
+        .iter()
+        .any(|unit| unit.markdown.starts_with("incremental ")));
 }
 
 #[test]
@@ -672,6 +695,25 @@ fn ct2_budget_003_override_budget_ignores_caps() {
         adapter_id: None,
     };
     assert!(evaluate_budget_with_caps(&estimate, 0.0, Some(0.0), true).allowed);
+}
+
+#[test]
+fn ct2_budget_004_cli_cap_zero_pauses_online_task() {
+    let dir = scope();
+    fs::write(
+        dir.path().join(".kcs/config.toml"),
+        "[budget]\nmonthly_usd_cap = 0\n",
+    )
+    .unwrap();
+    fs::write(dir.path().join("a.txt"), "hello budget").unwrap();
+    let output = json_success(&dir, ["index", "--approve"]);
+    assert!(output["paused_tasks"].as_u64().unwrap() > 0);
+    let status = json_success(&dir, ["status"]);
+    assert!(status["tasks"].as_array().unwrap().iter().any(|task| {
+        task["input_path"] == "a.txt"
+            && task["status"] == "paused"
+            && task["fallback_reason"] == "budget_exceeded"
+    }));
 }
 
 #[test]
@@ -798,6 +840,27 @@ fn ct2_secrets_004_added_tier_a_is_quarantined() {
 }
 
 #[test]
+fn ct2_ignore_001_double_star_ext_pattern_excludes_nested_file() {
+    let dir = scope();
+    fs::create_dir(dir.path().join("logs")).unwrap();
+    fs::write(dir.path().join("logs/app.log"), "ignore me").unwrap();
+    fs::write(dir.path().join("logs/app.txt"), "keep me").unwrap();
+    fs::write(dir.path().join(".kcsignore"), "**/*.log\n").unwrap();
+    let preview = json_success(&dir, ["index", "--preview"]);
+    assert!(preview["excluded_candidates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|path| path == "logs/app.log"));
+    assert!(preview["candidates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|candidate| candidate["input_path"] == "logs/app.txt"
+            && !candidate["ignored"].as_bool().unwrap()));
+}
+
+#[test]
 fn ct2_network_001_yes_does_not_issue_online_tasks() {
     let dir = scope();
     fs::write(dir.path().join("a.txt"), "hello").unwrap();
@@ -830,11 +893,31 @@ fn ct2_network_002_approve_grants_opt_in_yes_does_not() {
 
     let online_dir = scope();
     fs::write(online_dir.path().join("a.txt"), "hello").unwrap();
+    let error = json_failure(&online_dir, ["index", "--online"], 2);
+    assert_eq!(error["error_code"], "KCS-E-CONFIG-USAGE-001");
     assert_eq!(
-        json_success(&online_dir, ["index", "--online"])["network_opt_in"],
+        json_success(&online_dir, ["index", "--yes", "--online"])["network_opt_in"],
         true
     );
-    assert!(!online_dir.path().join(".kcs/approvals.jsonl").exists());
+    let approvals = fs::read_to_string(online_dir.path().join(".kcs/approvals.jsonl")).unwrap();
+    assert!(approvals.contains(r#""network_opt_in":false"#));
+}
+
+#[test]
+fn ct2_network_003_revoke_blocks_online_one_shot() {
+    let dir = scope();
+    fs::write(dir.path().join("a.txt"), "hello").unwrap();
+    json_success(&dir, ["index", "--approve"]);
+    json_success(&dir, ["index", "--revoke-network"]);
+    fs::write(dir.path().join("b.txt"), "new after revoke").unwrap();
+    let output = json_success(&dir, ["index", "--yes", "--online"]);
+    assert_eq!(output["network_opt_in"], false);
+    let status = json_success(&dir, ["status"]);
+    assert!(status["tasks"].as_array().unwrap().iter().any(|task| {
+        task["input_path"] == "b.txt"
+            && task["status"] == "pending"
+            && task["fallback_reason"] == "network_opt_in_required"
+    }));
 }
 
 #[test]
@@ -855,73 +938,75 @@ fn ct2_adapter_002_no_embedding_without_online_opt_in() {
 }
 
 #[test]
+fn ct2_pdf_001_two_page_pdf_produces_page_specific_markdown() {
+    let dir = scope();
+    fs::write(
+        dir.path().join("report.pdf"),
+        fake_pdf(&["First page text", "Second page text"]),
+    )
+    .unwrap();
+    json_success(&dir, ["index", "--approve"]);
+    let units = normalized_units(&dir);
+    let page1 = units.iter().find(|unit| unit.unit_key == "page:1").unwrap();
+    let page2 = units.iter().find(|unit| unit.unit_key == "page:2").unwrap();
+    assert!(page1.markdown.contains("First page text"));
+    assert!(page2.markdown.contains("Second page text"));
+    assert_ne!(page1.markdown, page2.markdown);
+}
+
+#[test]
+fn ct2_incr_009_cli_mock_adapter_uses_incremental_for_light_change() {
+    let dir = scope();
+    fs::write(
+        dir.path().join("report.pdf"),
+        fake_pdf(&["p1", "p2", "p3", "p4", "p5"]),
+    )
+    .unwrap();
+    kcs(&dir, ["index", "--approve"])
+        .env("KCS_TEST_MARKDOWNIZE_ADAPTER", "incremental")
+        .assert()
+        .success();
+    fs::write(
+        dir.path().join("report.pdf"),
+        fake_pdf(&["p1", "p2 changed", "p3", "p4", "p5"]),
+    )
+    .unwrap();
+    kcs(&dir, ["index", "--yes"])
+        .env("KCS_TEST_MARKDOWNIZE_ADAPTER", "incremental")
+        .assert()
+        .success();
+    let status = json_success(&dir, ["status"]);
+    assert!(status["tasks"].as_array().unwrap().iter().any(|task| {
+        task["input_path"] == "report.pdf"
+            && task["status"] == "done"
+            && task["mode"] == "incremental"
+            && task["changed_unit_keys"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("page:2"))
+    }));
+    assert!(normalized_units(&dir)
+        .iter()
+        .any(|unit| unit.mode == MarkdownizeMode::Incremental && unit.reused_from.is_some()));
+}
+
+#[test]
 fn ct2_adapter_013_baseline_and_ai_artifacts_coexist() {
     let dir = scope();
     fs::write(dir.path().join("a.txt"), "hello").unwrap();
     json_success(&dir, ["index", "--approve"]);
     let baseline_root = dir.path().join(".kcs/objects/normalized_units");
     let before = collect_files(&baseline_root);
-    let raw = hash_bytes(b"hello");
-    let ai_tool = "sha256:24bd9e903241740fc9fe94fb72a6ff3e697b3c0859bd5aef1b49728a207e81ed";
-    let adapter = MistralOcrMarkdownizeAdapter::new(
-        MockMistralClient,
-        "mistral-ocr-latest",
-        "01H00000000000000000000000",
-    );
-    let response = adapter
-        .markdownize(MarkdownizeRequest {
-            raw: RawInput {
-                raw_hash: raw.clone(),
-                path: Some(dir.path().join("a.txt").display().to_string()),
-            },
-            media_type: "application/pdf".to_owned(),
-            prepared_unit_hint: Some(vec![PreparedUnitHint {
-                unit_key: "page:1".to_owned(),
-                prepared_hash: raw.clone(),
-                unit_kind: UnitKind::Page,
-                order: 0,
-            }]),
-            mode: AdapterMarkdownizeMode::Full,
-            previous: None,
-            hints: None,
-            tool_profile_hash: ai_tool.to_owned(),
-            spec_version: 1,
-        })
-        .unwrap();
-    let unit = NormalizedUnitObject {
-        unit_key: "page:1".to_owned(),
-        unit_type: UnitType::Page,
-        raw_hash: raw.clone(),
-        prepared_hash: raw.clone(),
-        tool_profile_hash: ai_tool.to_owned(),
-        gen: 0,
-        mode: MarkdownizeMode::Full,
-        markdown: response.updated_units[0].markdown.clone(),
-        reused_from: None,
-        generated_at: "2026-04-25T12:00:00Z".to_owned(),
-    };
-    let manifest = NormalizedInstanceManifest {
-        raw_hash: raw.clone(),
-        tool_profile_hash: ai_tool.to_owned(),
-        gen: 0,
-        parent_gen: None,
-        run_id: "run_01H00000000000000000000000".to_owned(),
-        units: vec![NormalizedUnitManifestEntry {
-            order: 0,
-            unit_key: "page:1".to_owned(),
-            unit_ref: unit_ref("page:1"),
-            unit_type: UnitType::Page,
-            status: UnitStatus::Done,
-            prepared_hash: raw,
-            error_kind: None,
-        }],
-        generated_at: "2026-04-25T12:00:00Z".to_owned(),
-    };
-    persist_normalized_instance(dir.path().join(".kcs"), &manifest, &[unit]).unwrap();
+    kcs(&dir, ["batch", "resume"])
+        .env("KCS_TEST_MISTRAL_OCR", "mock")
+        .assert()
+        .success();
     assert_eq!(
         collect_files(&baseline_root).intersection(&before).count(),
         before.len()
     );
+    assert!(dir.path().join(".kcs/objects/images").is_dir());
+    assert!(collect_files(&baseline_root).len() > before.len());
 }
 
 #[test]

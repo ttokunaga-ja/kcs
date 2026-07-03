@@ -37,3 +37,4 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
 23. Quarantine release record (Step2a C-9): append one approval-record-shaped JSONL row with `approval_method` to the same approval log used for initial scan approval.
 24. Scanned PDF without text layer (Step2a C-10): deterministic baseline prepare emits no unit and leaves the file pending for AI enhancement.
 25. Image placeholder replacement (Step2a C-11): replace Mistral OCR `images[]` placeholders by occurrence order with `![...](kcs://<scope_id>/object/image/<image_hash>)`.
+26. Step2c G2 test adapter hook: production `kcs index` uses the deterministic markdownize adapter by default. Contract/integration tests may set `KCS_TEST_MARKDOWNIZE_ADAPTER=incremental` or `reject_incremental` to inject a local deterministic adapter that advertises `incremental_update`, allowing CLI-level incremental/fallback validation without external network or mutable production adapter identity.

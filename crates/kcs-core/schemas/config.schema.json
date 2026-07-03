@@ -60,7 +60,20 @@
       },
       "additionalProperties": false
     },
-    "markdownize": { "type": "object" }
+    "markdownize": { "type": "object" },
+    "adapter": {
+      "type": "object",
+      "properties": {
+        "policy": {
+          "type": "object",
+          "properties": {
+            "allow_network": { "type": "boolean" }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    }
   },
   "additionalProperties": false
 }
