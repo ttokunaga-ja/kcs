@@ -24,16 +24,6 @@ pub struct FtsMatch {
     pub bm25_score: f64,
 }
 
-pub trait FtsIndex {
-    fn ensure_schema(&mut self, config: FtsSchemaConfig) -> Result<()>;
-
-    fn index_chunk(&mut self, row: &ChunkRow) -> Result<()>;
-
-    fn delete_chunk(&mut self, chunk_id: &str) -> Result<()>;
-
-    fn search(&self, query: &str, limit: u64) -> Result<Vec<FtsMatch>>;
-}
-
 pub struct SqliteFtsIndex {
     conn: Connection,
 }
@@ -59,14 +49,12 @@ impl SqliteFtsIndex {
     pub fn connection(&self) -> &Connection {
         &self.conn
     }
-}
 
-impl FtsIndex for SqliteFtsIndex {
-    fn ensure_schema(&mut self, config: FtsSchemaConfig) -> Result<()> {
+    pub fn ensure_schema(&mut self, config: FtsSchemaConfig) -> Result<()> {
         ensure_schema_on_connection(&self.conn, config)
     }
 
-    fn index_chunk(&mut self, row: &ChunkRow) -> Result<()> {
+    pub fn index_chunk(&mut self, row: &ChunkRow) -> Result<()> {
         self.conn.execute(
             "INSERT OR IGNORE INTO chunks(
                 chunk_id, raw_hash, tool_profile_hash, gen, unit_key,
@@ -94,13 +82,19 @@ impl FtsIndex for SqliteFtsIndex {
         Ok(())
     }
 
-    fn delete_chunk(&mut self, chunk_id: &str) -> Result<()> {
+    pub fn delete_chunk(&mut self, chunk_id: &str) -> Result<()> {
         self.conn
             .execute("DELETE FROM chunks WHERE chunk_id = ?1", params![chunk_id])?;
         Ok(())
     }
 
-    fn search(&self, query: &str, limit: u64) -> Result<Vec<FtsMatch>> {
+    /// Schema/tokenizer contract probe: a bare `chunk_fts MATCH` over the whole
+    /// table, used by the CT3-FTS unit tests to pin the external-content
+    /// trigger sync and trigram behavior. The production query path is
+    /// kcs-cli's `execute_fts_tier`, which layers the liveness filters
+    /// (tree_entries join, current chunking_config_hash, `rowid <= max_rowid`)
+    /// and column-weighted BM25 on the same index.
+    pub fn search(&self, query: &str, limit: u64) -> Result<Vec<FtsMatch>> {
         if query.chars().count() < 2 {
             return Ok(Vec::new());
         }

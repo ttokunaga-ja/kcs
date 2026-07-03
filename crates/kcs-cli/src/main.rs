@@ -32,9 +32,7 @@ use kcs_index::chunking::{
     chunk_normalized_instance, ChunkingConfig, ChunkingInput, NormalizedUnitInput,
 };
 use kcs_index::embedding_store::{self, adopted_embedding_profile_hash, f32_to_le_bytes};
-use kcs_index::fts::{
-    FtsIndex, FtsSchemaConfig, FtsTokenizer, SqliteFtsIndex, CHUNK_VEC_DIMENSIONS,
-};
+use kcs_index::fts::{FtsSchemaConfig, FtsTokenizer, SqliteFtsIndex, CHUNK_VEC_DIMENSIONS};
 use kcs_index::registry::{RegistryDb, RegistryEntry};
 use kcs_index::{
     ChunkRow, EmbeddingDistance, EmbeddingModality, EmbeddingTargetType, TreeEntryRow,
@@ -570,9 +568,13 @@ enum VectorAvailability {
     /// Every searched scope has a compatible embedding index and a query
     /// embedding is obtainable → hybrid is offered.
     Available,
-    /// No usable embedding index (endpoint not configured, or every scope lacks
-    /// chunk embeddings) → text.
-    Unavailable,
+    /// No usable vector backend → text. `reason` names the actual cause
+    /// (05 §1.7 fallback_reason): `embedding_endpoint_not_configured` (no
+    /// adapter env/config at all), `embedding_index_missing` (endpoint
+    /// configured but no searched scope carries chunk embeddings), or
+    /// `query_embedding_unavailable` (endpoint + index fine, but the query
+    /// embedding could not be computed — short query or adapter failure).
+    Unavailable { reason: &'static str },
     /// Embedding present but the profile is incompatible, or scopes disagree on
     /// embedding profile (03 §7 / 05 §1.8(5)) → text fallback + fallback_reason.
     Incompatible,
@@ -613,16 +615,21 @@ fn scope_embedding_state(kcs_dir: &Path) -> ScopeEmbedState {
 }
 
 /// K4: aggregate embedding availability across the searched scopes. Vector search
-/// is offered only when a query embedding is obtainable AND every searched scope
-/// has a compatible embedding index (03 §7). Any incompatible scope, or a mix of
-/// embedded and un-embedded scopes (cross-scope inconsistency, 05 §1.8(5)),
-/// downgrades to a text fallback that surfaces `fallback_reason`.
+/// is offered only when the endpoint is configured, every searched scope has a
+/// compatible embedding index (03 §7), AND a query embedding is obtainable. Any
+/// incompatible scope, or a mix of embedded and un-embedded scopes (cross-scope
+/// inconsistency, 05 §1.8(5)), downgrades to a text fallback. The `Unavailable`
+/// reason names the first structural cause in precedence order: endpoint →
+/// scope index → query embedding.
 fn resolve_vector_availability(
     exec_scopes: &[ExecScope],
+    endpoint_configured: bool,
     query_embedding_present: bool,
 ) -> VectorAvailability {
-    if !query_embedding_present {
-        return VectorAvailability::Unavailable;
+    if !endpoint_configured {
+        return VectorAvailability::Unavailable {
+            reason: "embedding_endpoint_not_configured",
+        };
     }
     let mut any_compatible = false;
     let mut any_incompatible = false;
@@ -636,10 +643,16 @@ fn resolve_vector_availability(
     }
     if any_incompatible || (any_compatible && any_absent) {
         VectorAvailability::Incompatible
-    } else if any_compatible {
-        VectorAvailability::Available
+    } else if !any_compatible {
+        VectorAvailability::Unavailable {
+            reason: "embedding_index_missing",
+        }
+    } else if !query_embedding_present {
+        VectorAvailability::Unavailable {
+            reason: "query_embedding_unavailable",
+        }
     } else {
-        VectorAvailability::Unavailable
+        VectorAvailability::Available
     }
 }
 
@@ -647,8 +660,8 @@ fn resolve_search_mode(requested: SearchMode, vector: &VectorAvailability) -> Re
     let vector_ok = matches!(vector, VectorAvailability::Available);
     let (reason, error_code) = match vector {
         VectorAvailability::Available => (None, None),
-        VectorAvailability::Unavailable => (
-            Some("embedding_endpoint_not_configured".to_owned()),
+        VectorAvailability::Unavailable { reason } => (
+            Some((*reason).to_owned()),
             Some("KCS-E-SEARCH-VEC-UNAVAIL-001".to_owned()),
         ),
         VectorAvailability::Incompatible => (
@@ -767,11 +780,15 @@ fn run_search(args: UnsupportedArgs) -> Result<Value> {
         Some(token) => Some(decode_cursor_token(token).map_err(search_to_kcs)?),
         None => None,
     };
-    let (scope_mode, exec_scopes) = match &decoded_cursor {
-        Some(cursor) => (
-            scope_selection_from_cursor(cursor.scope_mode),
-            resolve_cursor_exec_scopes(cursor),
-        ),
+    let (scope_mode, exec_scopes, cursor_excluded) = match &decoded_cursor {
+        Some(cursor) => {
+            let (exec, excluded) = resolve_cursor_exec_scopes(cursor);
+            (
+                scope_selection_from_cursor(cursor.scope_mode),
+                exec,
+                excluded,
+            )
+        }
         None => {
             let (scope_mode, targets) = enumerate_scope_targets(&repo, &parsed)?;
             let exec = targets
@@ -783,7 +800,7 @@ fn run_search(args: UnsupportedArgs) -> Result<Value> {
                     from_cursor: false,
                 })
                 .collect::<Vec<_>>();
-            (scope_mode, exec)
+            (scope_mode, exec, Vec::new())
         }
     };
 
@@ -792,7 +809,11 @@ fn run_search(args: UnsupportedArgs) -> Result<Value> {
     // no compatible embedding index is available (with the right INCOMPAT/UNAVAIL
     // code). A short query yields no query embedding → vector unavailable.
     let query_embedding = compute_query_embedding(&parsed.query)?;
-    let vector = resolve_vector_availability(&exec_scopes, query_embedding.is_some());
+    let vector = resolve_vector_availability(
+        &exec_scopes,
+        embedding_seam().is_some(),
+        query_embedding.is_some(),
+    );
     let mode = resolve_search_mode(parsed.requested_mode, &vector)?;
 
     if parsed.query.chars().count() < 2 {
@@ -800,16 +821,37 @@ fn run_search(args: UnsupportedArgs) -> Result<Value> {
     }
 
     if exec_scopes.is_empty() {
+        // Cursor replay where no frozen scope resolves any more → all failed
+        // (exit 4) with the unresolvable scopes disclosed. Fresh search with an
+        // empty registry keeps the guidance message.
+        if !cursor_excluded.is_empty() {
+            return Err(scope_all_failed_error(
+                "no scope in the cursor is resolvable any more; re-run the search without a cursor",
+                cursor_excluded,
+            ));
+        }
         return Err(scope_all_failed_error(
             "no indexed scopes are registered for search; run `kcs index` in a scope first",
             Vec::new(),
         ));
     }
 
-    let mut scope_ids = exec_scopes
-        .iter()
-        .map(|exec| exec.target.scope_id.clone())
-        .collect::<Vec<_>>();
+    // query_hash covers the search's scope set. On a cursor replay that set is
+    // the cursor token's OWN scope_id list (05 §1.8 — the cursor scope set is
+    // truth), not the currently-resolvable subset: a scope that became
+    // unreachable must surface as excluded_scopes/exit 3, never as a misleading
+    // KCS-E-SEARCH-CURSOR-001 mismatch.
+    let mut scope_ids = match &decoded_cursor {
+        Some(cursor) => cursor
+            .scopes
+            .iter()
+            .map(|sub| sub.scope_id.clone())
+            .collect::<Vec<_>>(),
+        None => exec_scopes
+            .iter()
+            .map(|exec| exec.target.scope_id.clone())
+            .collect::<Vec<_>>(),
+    };
     scope_ids.sort();
     let qhash = query_hash(&QueryHashInput {
         query: parsed.query.clone(),
@@ -848,7 +890,9 @@ fn run_search(args: UnsupportedArgs) -> Result<Value> {
         .then_some(query_embedding.as_deref())
         .flatten();
     let mut searched = Vec::<SearchedScopeInfo>::new();
-    let mut excluded = Vec::<Value>::new();
+    // Scopes the cursor froze but the registry can no longer resolve are already
+    // excluded (reason "unreachable") before per-scope execution starts.
+    let mut excluded = cursor_excluded;
     let mut candidates = Vec::<ScoredCandidate>::new();
 
     for (idx, exec) in exec_scopes.iter().enumerate() {
@@ -883,7 +927,28 @@ fn run_search(args: UnsupportedArgs) -> Result<Value> {
     }
 
     if searched.is_empty() {
-        // Every scope failed: permanent all-scope failure (05 §1.8, exit 4).
+        // Every enumerated scope was excluded. When every exclusion reason is
+        // "the scope's sqlite.db is unusable" (missing/corrupt), BOTH backends
+        // are structurally gone — text and vector live in the same index file —
+        // which is CT3-HYBRID-003's "両方不可": KCS-E-SEARCH-VEC-UNAVAIL-001,
+        // exit 1 (05 §1.1). Any other reason (unreachable / not_indexed / stale /
+        // timeout) keeps the multi-scope all-failed contract:
+        // KCS-E-SEARCH-SCOPE-ALL-FAILED-001, exit 4 (05 §1.8 / CT3-MULTI-005(b)).
+        let index_unusable = !excluded.is_empty()
+            && excluded.iter().all(|entry| {
+                matches!(
+                    entry.get("reason").and_then(Value::as_str),
+                    Some("index_missing") | Some("index_corrupt")
+                )
+            });
+        if index_unusable {
+            return Err(KcsError::new(
+                "KCS-E-SEARCH-VEC-UNAVAIL-001",
+                "text and vector search are both unavailable: the search index (sqlite.db) is missing or corrupt in every scope; run `kcs repair --rebuild-db`",
+                json!({ "excluded_scopes": excluded }),
+                ExitCode::Failure,
+            ));
+        }
         return Err(scope_all_failed_error(
             "all searched scopes failed",
             excluded,
@@ -904,12 +969,22 @@ fn run_search(args: UnsupportedArgs) -> Result<Value> {
     let (ordered, diversify_summary) = diversify_merged(&candidates, mode.resolved)?;
 
     // Global skip: cursor consumed (summed across scopes) or --offset (05 §1.5).
+    // Only resolvable scopes count: a dropped (unreachable) scope's candidates are
+    // no longer in the stream, so counting its consumed would silently swallow
+    // results from the surviving scopes.
     let total_skip = match &decoded_cursor {
-        Some(cursor) => cursor
-            .scopes
-            .iter()
-            .map(|scope| scope.consumed)
-            .sum::<u64>() as usize,
+        Some(cursor) => {
+            let resolved = exec_scopes
+                .iter()
+                .map(|exec| exec.target.scope_id.as_str())
+                .collect::<BTreeSet<_>>();
+            cursor
+                .scopes
+                .iter()
+                .filter(|sub| resolved.contains(sub.scope_id.as_str()))
+                .map(|scope| scope.consumed)
+                .sum::<u64>() as usize
+        }
         None => parsed.offset.unwrap_or(0) as usize,
     };
     let limit = parsed.limit as usize;
@@ -1766,31 +1841,40 @@ fn cursor_mode_from_selection(mode: ScopeSelectionMode) -> ScopeMode {
 
 /// Resolve a cursor's frozen per-scope sub-cursors into execution scopes. The
 /// cursor scope set is authoritative (05 §1.8): scope_id -> path is resolved via
-/// the registry; unresolvable scopes are dropped (recorded as excluded later).
-fn resolve_cursor_exec_scopes(cursor: &CursorToken) -> Vec<ExecScope> {
+/// the registry. A scope_id the registry can no longer resolve is returned as an
+/// `excluded_scopes` entry (reason `unreachable`) rather than dropped silently —
+/// the replay then follows partial-failure semantics (exit 3, CT3-MULTI-005),
+/// never a misleading cursor-mismatch error.
+fn resolve_cursor_exec_scopes(cursor: &CursorToken) -> (Vec<ExecScope>, Vec<Value>) {
     let registry = RegistryDb::open_default().ok();
-    cursor
-        .scopes
-        .iter()
-        .filter_map(|sub| {
-            let target = registry.as_ref().and_then(|db| {
-                db.lookup_scope_id(&sub.scope_id)
-                    .ok()
-                    .and_then(|entries| entries.into_iter().next())
-                    .map(|entry| ScopeTarget {
-                        repo_root: PathBuf::from(&entry.root_path),
-                        kcs_dir: PathBuf::from(&entry.kcs_path),
-                        scope_id: entry.scope_id,
-                    })
-            })?;
-            Some(ExecScope {
+    let mut exec = Vec::new();
+    let mut excluded = Vec::new();
+    for sub in &cursor.scopes {
+        let target = registry.as_ref().and_then(|db| {
+            db.lookup_scope_id(&sub.scope_id)
+                .ok()
+                .and_then(|entries| entries.into_iter().next())
+                .map(|entry| ScopeTarget {
+                    repo_root: PathBuf::from(&entry.root_path),
+                    kcs_dir: PathBuf::from(&entry.kcs_path),
+                    scope_id: entry.scope_id,
+                })
+        });
+        match target {
+            Some(target) => exec.push(ExecScope {
                 target,
                 snapshot_commit: Some(sub.snapshot_commit.clone()),
                 max_rowid: Some(sub.max_rowid),
                 from_cursor: true,
-            })
-        })
-        .collect()
+            }),
+            None => excluded.push(json!({
+                "scope_id": sub.scope_id,
+                "scope_path": Value::Null,
+                "reason": "unreachable",
+            })),
+        }
+    }
+    (exec, excluded)
 }
 
 fn run_open(args: UnsupportedArgs) -> Result<Value> {
@@ -2684,10 +2768,27 @@ fn resolve_pointer_for_cli(pointer: &EvidencePointer) -> Result<PointerResolutio
 
     // 08 §3.1 step 6-7: chunk_hash -> chunk text (the normalized instance is
     // keyed by (raw_hash, tool_profile_hash, gen); chunk rows carry the span).
+    // A pointer whose chunk_hash has NO materialized chunk row in this scope
+    // cannot be served under this tool_profile_hash — that is 08 §3.2's
+    // "tool_profile_hash 不一致: chunk が存在しない場合は retarget が必要 (§5)",
+    // exit 8 (06 §7). Applies on the shallow path too: chunk rows outlive tree
+    // discard, so their absence means the profile mismatch, not GC.
     let text = read_stored_chunks(&target.kcs_dir)?
         .into_iter()
         .find(|chunk| chunk.row.chunk_id == pointer.chunk_hash)
         .map(|chunk| chunk.row.text);
+    let Some(text) = text else {
+        return Err(KcsError::new(
+            "KCS-E-EVIDENCE-RETARGET-REQUIRED-001",
+            "chunk not materialized for this tool_profile_hash; retarget required (08 §5)",
+            json!({
+                "chunk_hash": pointer.chunk_hash,
+                "tool_profile_hash": pointer.tool_profile_hash,
+                "raw_hash": pointer.raw_hash,
+            }),
+            ExitCode::IncompatibleProfile,
+        ));
+    };
 
     // Raw object resolution: working tree first (rename-tolerant), else CAS
     // read-only expansion. Absent from both with no tombstone -> not_found.
@@ -2698,7 +2799,7 @@ fn resolve_pointer_for_cli(pointer: &EvidencePointer) -> Result<PointerResolutio
     )? {
         Some((path, temporary)) => Ok(PointerResolution {
             path: Some(path),
-            text,
+            text: Some(text),
             temporary,
             commit_shallow,
         }),

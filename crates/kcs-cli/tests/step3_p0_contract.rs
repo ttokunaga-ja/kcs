@@ -171,18 +171,37 @@ fn ct3_hybrid_001_auto_resolves_to_hybrid_with_rrf_fusion() {
     assert!(text_set.iter().all(|chunk| hybrid_set.contains(chunk)));
 }
 
-// CT3-HYBRID-002 (de-tautologized): the embedding endpoint IS configured at search
-// time (mock), but this scope was indexed offline with no embeddings, so auto
-// resolves to text and reports the fallback visibly.
+// CT3-HYBRID-002 (de-tautologized, pair-discriminating): the fallback_reason names
+// the ACTUAL cause, and the same scope+query flips to hybrid once the cause is
+// removed — so the assertion cannot pass against a permanently-degraded stub.
 #[test]
 fn ct3_hybrid_002_auto_vector_configured_but_absent_falls_back_visibly() {
     let dir = indexed_scope(); // indexed without an embedding adapter → no vectors
+                               // (a) endpoint truly unconfigured → the 05 §1.7 example string.
+                               // "off" is an unrecognized seam value → no adapter, regardless of any
+                               // ambient GEMINI_API_KEY.
+    let unconfigured = json_success_embed(&dir, "off", &["search", "トークン TTL 3600"]);
+    assert_eq!(unconfigured["resolved_mode"], "text");
+    assert_eq!(
+        unconfigured["fallback_reason"],
+        "embedding_endpoint_not_configured"
+    );
+    // (b) endpoint configured (mock) but this scope carries no embeddings →
+    // the precise cause, not the generic endpoint string.
     let search = json_success_embed(&dir, "mock", &["search", "トークン TTL 3600"]);
     assert_eq!(search["requested_mode"], "auto");
     assert_eq!(search["resolved_mode"], "text");
     assert_eq!(search["fallback"], true);
-    assert!(search["fallback_reason"].is_string());
+    assert_eq!(search["fallback_reason"], "embedding_index_missing");
     assert_eq!(search["error_code"], "KCS-E-SEARCH-VEC-UNAVAIL-001");
+    // (c) pair-discrimination: embed the same scope, then the SAME query resolves
+    // hybrid with the fallback gone.
+    json_success_embed(&dir, "mock", &["index", "--approve"]);
+    let hybrid = json_success_embed(&dir, "mock", &["search", "トークン TTL 3600"]);
+    assert_eq!(hybrid["resolved_mode"], "hybrid");
+    assert_eq!(hybrid["fallback"], false);
+    assert!(hybrid["fallback_reason"].is_null());
+    assert!(hybrid["error_code"].is_null());
 }
 
 #[test]
@@ -848,6 +867,78 @@ fn ct3_multi_005_all_failed_returns_exit_4() {
     assert_eq!(err["error_code"], "KCS-E-SEARCH-SCOPE-ALL-FAILED-001");
 }
 
+// Cursor replay when a frozen scope is no longer resolvable via the registry:
+// query_hash is validated against the cursor's OWN scope list, the surviving
+// scope is served, the dropped scope lands in excluded_scopes (reason
+// "unreachable"), and the exit is 3 (CT3-MULTI-005 partial-failure semantics) —
+// never a misleading KCS-E-SEARCH-CURSOR-001.
+#[test]
+fn ct3_multi_005_cursor_replay_with_unresolvable_scope_is_partial() {
+    let parent = tempfile::tempdir().unwrap();
+    let data_home = parent.path().join("xdg");
+    // "a" sorts first → page 1 serves its chunk (RRF tie-break by scope_path),
+    // so the survivor "b" has consumed 0 and still owns results for page 2.
+    let a = parent.path().join("a");
+    let b = parent.path().join("b");
+    fs::create_dir_all(&a).unwrap();
+    fs::create_dir_all(&b).unwrap();
+    fs::write(
+        a.join("a.md"),
+        "# 共通仕様\n\n## Alpha\n共通トピック alpha 版です。\n",
+    )
+    .unwrap();
+    fs::write(
+        b.join("b.md"),
+        "# 共通仕様\n\n## Beta\n共通トピック beta 版です。\n",
+    )
+    .unwrap();
+    json_success_path(&a, &data_home, &["init"]);
+    json_success_path(&b, &data_home, &["init"]);
+    json_success_path(&a, &data_home, &["index", "--approve"]);
+    json_success_path(&b, &data_home, &["index", "--approve"]);
+    let a_scope: Value =
+        serde_json::from_str(&fs::read_to_string(a.join(".kcs/scope.json")).unwrap()).unwrap();
+    let a_scope_id = a_scope["scope_id"].as_str().unwrap().to_owned();
+
+    let first = json_success_path(&b, &data_home, &["search", "共通トピック", "--limit", "1"]);
+    assert_eq!(first["searched_scopes"].as_array().unwrap().len(), 2);
+    let cursor = first["paging"]["next_cursor"].as_str().unwrap().to_owned();
+
+    // Make scope a unresolvable: wipe the registry, re-register b only.
+    fs::remove_file(registry_path(&data_home)).unwrap();
+    json_success_path(&b, &data_home, &["index", "--approve"]);
+
+    let output = Command::cargo_bin("kcs")
+        .unwrap()
+        .current_dir(&b)
+        .env("XDG_CONFIG_HOME", data_home.join("config"))
+        .env("XDG_DATA_HOME", data_home.join("data"))
+        .args([
+            "search",
+            "共通トピック",
+            "--cursor",
+            &cursor,
+            "--limit",
+            "5",
+        ])
+        .arg("--json")
+        .assert()
+        .code(3)
+        .get_output()
+        .stdout
+        .clone();
+    let page2: Value = serde_json::from_slice(&output).unwrap();
+    let excluded = page2["excluded_scopes"].as_array().unwrap();
+    assert_eq!(excluded.len(), 1);
+    assert_eq!(excluded[0]["scope_id"], a_scope_id.as_str());
+    assert_eq!(excluded[0]["reason"], "unreachable");
+    assert_eq!(page2["searched_scopes"].as_array().unwrap().len(), 1);
+    // The surviving scope's results are served on the replayed page.
+    let results = page2["results"].as_array().unwrap();
+    assert!(!results.is_empty());
+    assert!(results[0]["scope_path"].as_str().unwrap().ends_with("/b"));
+}
+
 // CT3-EMBED-003 (de-tautologized): cross-scope embedding profiles disagree — scope
 // a has a compatible embedding index, scope b an incompatible one. The cross-scope
 // search must merge on text only and record the fallback (05 §1.8(5) / 03 §7).
@@ -999,13 +1090,24 @@ fn ct3_obs_001_index_status_reports_partial_enrichment() {
     assert_eq!(status["budget_paused"], false);
 }
 
+// CT3-HYBRID-003: "text も vector も不可 → error" on a PLAIN auto search (no
+// flags). Both backends live in sqlite.db, so deleting it makes them both
+// structurally unavailable → KCS-E-SEARCH-VEC-UNAVAIL-001, exit 1 (05 §1.1).
 #[test]
 fn ct3_hybrid_003_text_and_vector_unavailable_is_an_error() {
     let dir = indexed_scope();
-    // Remove the FTS index (text unavailable) and request vector (also unavailable).
+    // Counter-assertion: the same auto search succeeds while the index exists.
+    let before = json_success(&dir, &["search", "認証仕様"]);
+    assert!(!before["results"].as_array().unwrap().is_empty());
+    // Remove the search index: text (FTS5) and vector (chunk_vec) are both gone.
     fs::remove_file(dir.path().join(".kcs/index/sqlite.db")).unwrap();
-    let err = json_failure(&dir, &["search", "認証仕様", "--vector"], 1);
+    let err = json_failure(&dir, &["search", "認証仕様"], 1);
     assert_eq!(err["error_code"], "KCS-E-SEARCH-VEC-UNAVAIL-001");
+    // The excluded scope list discloses why (index_missing).
+    assert_eq!(
+        err["context"]["excluded_scopes"][0]["reason"],
+        "index_missing"
+    );
 }
 
 #[test]
@@ -1021,15 +1123,16 @@ fn ct3_obs_002_metrics_use_search_namespace_code_and_component() {
     assert!(last["context"]["result_count"].as_u64().is_some());
 }
 
-// K8 / CT3-FTS-004: search is served from sqlite.db; deleting it disables search,
+// K8 / CT3-FTS-004: search is served from sqlite.db; deleting it disables search
+// (both backends unavailable → VEC-UNAVAIL, exit 1 — CT3-HYBRID-003 conformance),
 // and `repair --rebuild-db` re-derives the FTS index from chunks.
 #[test]
 fn ct3_fts_004_rebuild_db_reenables_fts_search() {
     let dir = indexed_scope();
     fs::remove_file(dir.path().join(".kcs/index/sqlite.db")).unwrap();
-    // With the only scope's index gone, search is a permanent all-scope failure.
-    let err = json_failure(&dir, &["search", "認証仕様"], 4);
-    assert_eq!(err["error_code"], "KCS-E-SEARCH-SCOPE-ALL-FAILED-001");
+    // With the only scope's index gone, text and vector are both unavailable.
+    let err = json_failure(&dir, &["search", "認証仕様"], 1);
+    assert_eq!(err["error_code"], "KCS-E-SEARCH-VEC-UNAVAIL-001");
     json_success(&dir, &["repair", "--rebuild-db"]);
     let after = json_success(&dir, &["search", "認証仕様"]);
     assert!(!after["results"].as_array().unwrap().is_empty());
@@ -1193,6 +1296,37 @@ fn ct3_evidence_004_resolves_through_pointer_commit_tree() {
         "raw_hash absent from pointer.commit tree should fail"
     );
     assert_eq!(err["error_code"], "KCS-E-PURGE-NOT-FOUND-001");
+}
+
+// 08 §3.2 step 6/7 failure contract: scope, commit, and raw_hash all resolve but
+// the pointer's chunk_hash has no materialized chunk row in this scope (a
+// different tool_profile_hash produced it) → retarget required (08 §5), exit 8
+// (06 §7), for BOTH view and open. Decision #33 (tasks/ws1c-decisions.md).
+#[test]
+fn ct3_evidence_004_missing_chunk_row_requires_retarget() {
+    let dir = indexed_scope();
+    let search = json_success(&dir, &["search", "トークン TTL 3600"]);
+    let mut pointer = first_result(&search)["evidence_pointer"].clone();
+    // Valid sha256 shape, absent from the scope's chunk rows.
+    pointer["chunk_hash"] = serde_json::json!(
+        "sha256:feedfacefeedfacefeedfacefeedfacefeedfacefeedfacefeedfacefeedface"
+    );
+    let ptr = pointer.to_string();
+    let err_view = json_failure(&dir, &["view", &ptr], 8);
+    assert_eq!(
+        err_view["error_code"],
+        "KCS-E-EVIDENCE-RETARGET-REQUIRED-001"
+    );
+    assert_eq!(err_view["context"]["chunk_hash"], pointer["chunk_hash"]);
+    assert_eq!(
+        err_view["context"]["tool_profile_hash"],
+        pointer["tool_profile_hash"]
+    );
+    let err_open = json_failure(&dir, &["open", &ptr], 8);
+    assert_eq!(
+        err_open["error_code"],
+        "KCS-E-EVIDENCE-RETARGET-REQUIRED-001"
+    );
 }
 
 #[test]
