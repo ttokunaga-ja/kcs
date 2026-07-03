@@ -222,14 +222,20 @@ def run_search(bin_path, corpus_dir, query, flags):
 def recall_at_k(response, expected, k=10):
     """上位 k 件の distinct (raw_hash, section) と expected の一致率.
 
-    docs/05 §1.7 の検索レスポンス schema 確定後に results[].raw_hash /
-    heading_path/section_id を読む。現状はプレースホルダ (Step 3 で実装)。
+    docs/05 §1.7 の検索レスポンス schema に従い、raw_hash / section_id /
+    heading_path は results[].evidence_pointer (docs/08 §2 準拠) から読む
+    (2026-07-03 クロスレビュー裁定で結合点を固定)。
     """
     results = response.get("results", [])[:k]
     hit_keys = set()
     for r in results:
-        raw_hash = r.get("raw_hash")
-        section = (r.get("section_id") or "/".join(r.get("heading_path", [])) or None)
+        pointer = r.get("evidence_pointer") or {}
+        raw_hash = pointer.get("raw_hash")
+        section = (
+            pointer.get("section_id")
+            or "/".join(pointer.get("heading_path", []))
+            or None
+        )
         if raw_hash is not None:
             hit_keys.add((raw_hash, section))
     # expected は {scope,file,section}; raw_hash 解決はハーネスが取り込み時に行う (§4.3)。

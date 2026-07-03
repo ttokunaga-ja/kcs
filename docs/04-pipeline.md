@@ -313,6 +313,24 @@ CREATE INDEX idx_chunks_ident ON chunks(raw_hash, tool_profile_hash, gen);
 
 `chunk_id` (PRIMARY KEY) の値は chunk object の `chunk_hash` と同一文字列とする (算出式は [03-data-model.md §8.1](03-data-model.md))。`gen` / `unit_key` は chunk が由来する normalized instance の世代と unit ([03-data-model.md §2.1](03-data-model.md)。`char_start` / `char_end` は unit-local)。chunk が属する Markdown 全体の content hash (normalized_hash) は持たない。
 
+**chunk 境界の正準規則** (2026-07-03 確定、step3a §C-1 の決定性論点解消。chunk_hash の入力である heading_path / section_id / span を実装非依存にする):
+
+```text
+1. 入力は normalized instance の unit 列 (03 §2.1 の順序)。chunk は unit 境界を跨がない
+2. heading 検出は ATX 形式 (行頭 1-6 個の # + 空白) のみ。setext 見出しは heading と見なさない。
+   コードフェンス内の # は heading と見なさない
+3. heading_path = chunk 先頭位置で有効な ATX 見出しテキストのスタック (階層は # の個数。
+   レベル飛びはそのまま積む)。unit 先頭から見出し未出現の間は heading_path = []
+4. section_id = heading_path の各要素を slug 化し "/" で結合。slug 規則: NFC 正規化 →
+   ASCII 英字は小文字化 → 空白列を "-" に → 英数字・ハイフン・アンダースコア・日本語文字
+   (ひらがな/カタカナ/漢字) 以外を除去 → 連続 "-" を 1 つに → 先頭末尾の "-" を除去。
+   同一 unit 内の重複 slug は 2 つ目以降に "#2", "#3" を付す (出現順)
+5. 分割: 見出し区間が max_chars (03 §11 [chunking]) を超える場合、段落境界 (空行) で
+   貪欲に max_chars 以下へ分割する。単一段落が max_chars を超える場合のみ文字位置で
+   機械分割する。分割片は同一 heading_path / section_id を共有し、unit-local の
+   char_start / char_end で区別する (chunk identity は span を含むため衝突しない)
+```
+
 **chunks 行は append-only**。ファイルの更新・リネーム・削除では既存 chunk 行を削除・変更しない。これが time-travel 検索 (`--at` / `--all-history` / `--include-deleted`、[05-runtime.md §1.6](05-runtime.md)) の実体である。chunk 行を削除する経路は `kcs purge` のみ (対象 raw_hash の chunk 行・FTS エントリ・embeddings を物理削除、[05-runtime.md §3.5](05-runtime.md))。raw / chunk object は GC の削除対象外である ([05-runtime.md §2.6](05-runtime.md))。既存行への UPDATE は `first_seen_commit` の付与のみ許可する。
 
 ## 4.2 chunk_fts (FTS5 外部 content)
