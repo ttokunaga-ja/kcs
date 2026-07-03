@@ -48,8 +48,50 @@ pub struct CostLedgerEntry {
     pub recorded_at: String,
 }
 
-pub fn evaluate_budget(_estimate: BudgetEstimate) -> Result<BudgetDecision> {
-    todo!("implement device and folder budget guardrail in Step 2");
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MonthlyCostLedgerEntry {
+    pub month: String,
+    pub scope_id: String,
+    pub adapter_kind: String,
+    pub usd: f64,
+}
+
+pub fn evaluate_budget(estimate: BudgetEstimate) -> Result<BudgetDecision> {
+    Ok(BudgetDecision {
+        allowed: true,
+        cap_kind: None,
+        remaining_usd: f64::INFINITY,
+        warning: (estimate.estimated_usd > 0.0)
+            .then(|| "budget caps are not configured".to_owned()),
+    })
+}
+
+#[must_use]
+pub fn evaluate_budget_with_caps(
+    estimate: &BudgetEstimate,
+    device_remaining_usd: f64,
+    folder_remaining_usd: Option<f64>,
+    override_budget: bool,
+) -> BudgetDecision {
+    if override_budget {
+        return BudgetDecision {
+            allowed: true,
+            cap_kind: None,
+            remaining_usd: f64::INFINITY,
+            warning: Some("budget override active".to_owned()),
+        };
+    }
+    let (effective_remaining, cap_kind) = match folder_remaining_usd {
+        Some(folder) if folder <= device_remaining_usd => (folder, Some(BudgetCapKind::Folder)),
+        _ => (device_remaining_usd, Some(BudgetCapKind::Device)),
+    };
+    let allowed = estimate.estimated_usd <= effective_remaining;
+    BudgetDecision {
+        allowed,
+        cap_kind: if allowed { None } else { cap_kind },
+        remaining_usd: effective_remaining,
+        warning: (!allowed).then(|| "budget cap exceeded; new tasks are paused".to_owned()),
+    }
 }
 
 #[cfg(test)]
@@ -60,5 +102,23 @@ mod tests {
     fn placeholder_budget_cap_kind_serializes() {
         let value = serde_json::to_value(BudgetCapKind::Folder).expect("serialize cap kind");
         assert_eq!(value, "folder");
+    }
+
+    #[test]
+    fn two_layer_budget_uses_min_remaining_and_override() {
+        let estimate = BudgetEstimate {
+            scope_id: "scope".to_owned(),
+            task_type: TaskType::Markdownize,
+            estimated_usd: 12.0,
+            adapter_id: Some("mistral".to_owned()),
+        };
+        let denied = evaluate_budget_with_caps(&estimate, 50.0, Some(10.0), false);
+        assert!(!denied.allowed);
+        assert_eq!(denied.cap_kind, Some(BudgetCapKind::Folder));
+        assert_eq!(denied.remaining_usd, 10.0);
+
+        let allowed = evaluate_budget_with_caps(&estimate, 50.0, Some(10.0), true);
+        assert!(allowed.allowed);
+        assert_eq!(allowed.cap_kind, None);
     }
 }

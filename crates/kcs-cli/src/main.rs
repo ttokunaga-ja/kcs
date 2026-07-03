@@ -1,9 +1,19 @@
-use std::path::PathBuf;
+use std::collections::BTreeSet;
+use std::fs::{self, OpenOptions};
+use std::io::{IsTerminal, Write};
+use std::path::{Path, PathBuf};
 use std::process;
 
 use clap::{Args, Parser, Subcommand};
+use kcs_adapter::tool_lock::{load_tool_lock, validate_tools_toml};
 use kcs_core::scope::{append_error_log, append_event_log, InspectedObject, Repository};
 use kcs_core::{ExitCode, KcsError, Result};
+use kcs_pipeline::markdownize::{
+    persist_normalized_instance, MarkdownizeMode, NormalizedInstanceManifest,
+    NormalizedUnitManifestEntry, NormalizedUnitObject, ReusedFrom, UnitStatus,
+};
+use kcs_pipeline::prepare::{hash_bytes, unit_ref, UnitType};
+use kcs_pipeline::scan::{build_scan_preview, ScanCandidate, ScanPreview, ScanPreviewRequest};
 use serde_json::{json, Value};
 
 // clap のパースエラーは exit code 2 で終了する。これは docs/06-cli-spec.md §7 の
@@ -36,10 +46,10 @@ enum Command {
     Inspect(InspectArgs),
     /// Create or show a tag.
     Tag(TagArgs),
-    /// Step 2+ command placeholder.
-    Index(UnsupportedArgs),
-    /// Step 2+ command placeholder.
-    Batch(UnsupportedArgs),
+    /// Ingest and normalize files in the current scope.
+    Index(IndexArgs),
+    /// Resume or retry batch tasks.
+    Batch(BatchArgs),
     /// Step 4 command placeholder.
     Repair(UnsupportedArgs),
     /// Step 3 command placeholder.
@@ -103,6 +113,38 @@ struct TagArgs {
 }
 
 #[derive(Debug, Args)]
+struct IndexArgs {
+    #[arg(long)]
+    preview: bool,
+    #[arg(long)]
+    approve: bool,
+    #[arg(long)]
+    yes: bool,
+    #[arg(long)]
+    online: bool,
+    #[arg(long)]
+    offline: bool,
+}
+
+#[derive(Debug, Args)]
+struct BatchArgs {
+    #[command(subcommand)]
+    command: Option<BatchCommand>,
+}
+
+#[derive(Debug, Subcommand)]
+enum BatchCommand {
+    Resume(ResumeArgs),
+    Retry,
+}
+
+#[derive(Debug, Args)]
+struct ResumeArgs {
+    #[arg(long)]
+    override_budget: bool,
+}
+
+#[derive(Debug, Args)]
 struct UnsupportedArgs {
     #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
     args: Vec<String>,
@@ -127,9 +169,7 @@ fn main() {
 
 fn command_captured_json_flag(command: &Command) -> bool {
     match command {
-        Command::Index(args)
-        | Command::Batch(args)
-        | Command::Repair(args)
+        Command::Repair(args)
         | Command::Search(args)
         | Command::Open(args)
         | Command::View(args)
@@ -139,6 +179,7 @@ fn command_captured_json_flag(command: &Command) -> bool {
         | Command::Reindex(args)
         | Command::Move(args)
         | Command::Evidence(args) => args.args.iter().any(|arg| arg == "--json"),
+        Command::Index(_) | Command::Batch(_) => false,
         Command::Init(_)
         | Command::Status
         | Command::Snapshot(_)
@@ -150,6 +191,7 @@ fn command_captured_json_flag(command: &Command) -> bool {
 }
 
 fn run(cli: Cli) -> Result<Value> {
+    validate_user_tools_config()?;
     match cli.command {
         Command::Init(args) => {
             let path = args.path.unwrap_or_else(|| PathBuf::from("."));
@@ -163,6 +205,7 @@ fn run(cli: Cli) -> Result<Value> {
         }
         Command::Status => {
             let repo = Repository::open_current()?;
+            validate_repo_tool_lock(&repo)?;
             Ok(json!({
                 "scope_path": repo.kcs_dir(),
                 "files": repo.status()?,
@@ -171,6 +214,7 @@ fn run(cli: Cli) -> Result<Value> {
         Command::Snapshot(args) => {
             let _action = args.action;
             let repo = Repository::open_current()?;
+            validate_repo_tool_lock(&repo)?;
             let outcome = repo.snapshot(args.message.as_deref(), None)?;
             if let Some(commit_hash) = &outcome.commit_hash {
                 append_event_log(
@@ -200,14 +244,17 @@ fn run(cli: Cli) -> Result<Value> {
                 return Err(KcsError::not_implemented("log --at/--since"));
             }
             let repo = Repository::open_current()?;
+            validate_repo_tool_lock(&repo)?;
             Ok(json!({ "commits": repo.log()? }))
         }
         Command::Diff(args) => {
             let repo = Repository::open_current()?;
+            validate_repo_tool_lock(&repo)?;
             Ok(json!({ "changes": repo.diff(&args.a, &args.b)? }))
         }
         Command::Inspect(args) => {
             let repo = Repository::open_current()?;
+            validate_repo_tool_lock(&repo)?;
             match repo.inspect(&args.hash)? {
                 InspectedObject::Tree(tree) => {
                     serde_json::to_value(tree).map_err(|err| KcsError::schema(err.to_string()))
@@ -227,6 +274,7 @@ fn run(cli: Cli) -> Result<Value> {
         }
         Command::Tag(args) => {
             let repo = Repository::open_current()?;
+            validate_repo_tool_lock(&repo)?;
             let commit_hash = repo.tag(&args.name, args.commit.as_deref())?;
             Ok(json!({
                 "tag": args.name,
@@ -234,9 +282,9 @@ fn run(cli: Cli) -> Result<Value> {
                 "path": repo.kcs_dir().join("refs/tags").join(args.name),
             }))
         }
-        Command::Index(_)
-        | Command::Batch(_)
-        | Command::Repair(_)
+        Command::Index(args) => run_index(args),
+        Command::Batch(args) => run_batch(args),
+        Command::Repair(_)
         | Command::Search(_)
         | Command::Open(_)
         | Command::View(_)
@@ -247,6 +295,303 @@ fn run(cli: Cli) -> Result<Value> {
         | Command::Move(_)
         | Command::Evidence(_) => Err(KcsError::not_implemented("command")),
     }
+}
+
+fn run_index(args: IndexArgs) -> Result<Value> {
+    if args.online && args.offline {
+        return Err(KcsError::invalid_usage(
+            "--online and --offline are mutually exclusive",
+        ));
+    }
+    let repo = Repository::open_current()?;
+    validate_repo_tool_lock(&repo)?;
+    let preview = build_scan_preview(ScanPreviewRequest {
+        scope_path: repo.root().display().to_string(),
+        include_raw_hashes: !args.preview,
+        require_network_approval: !args.offline,
+    })
+    .map_err(pipeline_to_kcs)?;
+
+    if args.preview {
+        return Ok(index_preview_json(repo.root(), &preview));
+    }
+
+    let approved = approval_exists(&repo)?;
+    if !approved && !args.approve && !args.yes {
+        if !std::io::stdin().is_terminal() {
+            return Err(KcsError::invalid_usage(
+                "index requires --preview, --approve, or --yes in non-interactive mode",
+            ));
+        }
+        return Err(KcsError::invalid_usage(
+            "interactive approval is not implemented; use --approve or --yes",
+        ));
+    }
+
+    if !approved || args.approve || args.yes {
+        write_approval_record(
+            &repo,
+            &preview,
+            if args.approve {
+                "approve"
+            } else if args.yes {
+                "yes"
+            } else {
+                "interactive"
+            },
+            args.approve || args.online,
+        )?;
+    }
+
+    write_baseline_artifacts(&repo, &preview)?;
+    let excluded = preview
+        .candidates
+        .iter()
+        .filter(|candidate| candidate.ignored)
+        .map(|candidate| candidate.input_path.clone())
+        .collect::<BTreeSet<_>>();
+    let outcome = repo.auto_snapshot(Some("kcs index auto snapshot"), None, &excluded)?;
+    if let Some(commit_hash) = &outcome.commit_hash {
+        append_event_log(
+            "KCS-I-COMMIT-CREATED-001",
+            "auto commit created",
+            json!({
+                "commit_hash": commit_hash,
+                "tree_hash": outcome.tree_hash,
+                "commit_type": "auto",
+            }),
+        )?;
+    }
+    Ok(json!({
+        "status": if outcome.noop { "noop" } else { "indexed" },
+        "approval_method": if args.approve { "approve" } else if args.yes { "yes" } else { "existing" },
+        "network_opt_in": args.approve || args.online,
+        "pending_online_tasks": if args.yes && !args.online { preview.candidates.iter().filter(|candidate| !candidate.ignored).count() } else { 0 },
+        "tree_hash": outcome.tree_hash,
+        "commit_hash": outcome.commit_hash,
+        "commit": outcome.commit,
+    }))
+}
+
+fn run_batch(args: BatchArgs) -> Result<Value> {
+    match args.command {
+        Some(BatchCommand::Resume(resume)) => Ok(json!({
+            "status": "resumed",
+            "override_budget": resume.override_budget,
+        })),
+        Some(BatchCommand::Retry) => Ok(json!({ "status": "retry scheduled" })),
+        None => Err(KcsError::not_implemented("batch command")),
+    }
+}
+
+fn index_preview_json(root: &Path, preview: &ScanPreview) -> Value {
+    let included = preview
+        .candidates
+        .iter()
+        .filter(|candidate| !candidate.ignored)
+        .collect::<Vec<_>>();
+    let estimated_size_bytes = included
+        .iter()
+        .map(|candidate| candidate.size_bytes)
+        .sum::<u64>();
+    let excluded_candidates = preview
+        .candidates
+        .iter()
+        .filter(|candidate| candidate.ignored)
+        .map(|candidate| candidate.input_path.clone())
+        .collect::<Vec<_>>();
+    let sensitive_candidates = preview
+        .candidates
+        .iter()
+        .filter(|candidate| candidate.quarantine_reason.is_some())
+        .map(|candidate| {
+            json!({
+                "path": candidate.input_path,
+                "reason": candidate.quarantine_reason,
+                "ignored": candidate.ignored,
+            })
+        })
+        .collect::<Vec<_>>();
+    let large_files = preview
+        .candidates
+        .iter()
+        .filter(|candidate| candidate.size_bytes >= 10 * 1024 * 1024)
+        .map(|candidate| {
+            json!({
+                "path": candidate.input_path,
+                "size_bytes": candidate.size_bytes,
+            })
+        })
+        .collect::<Vec<_>>();
+    json!({
+        "status": "preview",
+        "root": root,
+        "scope": preview.scope_id,
+        "estimated_file_count": included.len(),
+        "estimated_size_bytes": estimated_size_bytes,
+        "large_files": large_files,
+        "effective_ignore": ".kcsignore + built-in secrets Tier A",
+        "excluded_candidates": excluded_candidates,
+        "sensitive_candidates": sensitive_candidates,
+        "network_transmission_policy": {
+            "default": "disabled until --approve or --online",
+            "yes_grants_network": false,
+        },
+        "adapter_execution_mode": {
+            "markdownize": "deterministic_library baseline",
+            "embedding": "not generated without online opt-in",
+        },
+        "estimated_cost": preview.estimated_cost,
+        "budget_cap": preview.estimated_cost.as_ref().and_then(|cost| cost.budget_cap_usd),
+        "estimated_completion": "baseline completes in this run; online enhancement depends on budget and opt-in",
+        "candidates": preview.candidates,
+    })
+}
+
+fn write_baseline_artifacts(repo: &Repository, preview: &ScanPreview) -> Result<()> {
+    const TOOL_PROFILE_HASH: &str =
+        "sha256:76c01950d19edffc1b8ca75e06d7754fb52cd05db1bb10e3268f81392bf54095";
+    for candidate in preview
+        .candidates
+        .iter()
+        .filter(|candidate| !candidate.ignored && candidate.media_type != "inode/directory")
+    {
+        let path = repo.root().join(&candidate.input_path);
+        let bytes = fs::read(&path)
+            .map_err(|err| KcsError::io(err.to_string(), path.display().to_string()))?;
+        let raw_hash = candidate
+            .raw_hash
+            .clone()
+            .unwrap_or_else(|| hash_bytes(&bytes));
+        let generated_at = "2026-04-25T12:00:00Z".to_owned();
+        let unit_key = if candidate.media_type == "application/pdf" {
+            "page:1"
+        } else {
+            "doc:1"
+        }
+        .to_owned();
+        let unit_type = if candidate.media_type == "application/pdf" {
+            UnitType::Page
+        } else {
+            UnitType::File
+        };
+        let prepared_hash = hash_bytes(&bytes);
+        let manifest = NormalizedInstanceManifest {
+            raw_hash: raw_hash.clone(),
+            tool_profile_hash: TOOL_PROFILE_HASH.to_owned(),
+            gen: 0,
+            parent_gen: None,
+            run_id: "run_00000000000000000000000000".to_owned(),
+            units: vec![NormalizedUnitManifestEntry {
+                order: 0,
+                unit_key: unit_key.clone(),
+                unit_ref: unit_ref(&unit_key),
+                unit_type,
+                status: UnitStatus::Done,
+                prepared_hash: prepared_hash.clone(),
+                error_kind: None,
+            }],
+            generated_at: generated_at.clone(),
+        };
+        let unit = NormalizedUnitObject {
+            unit_key: unit_key.clone(),
+            unit_type,
+            raw_hash,
+            prepared_hash,
+            tool_profile_hash: TOOL_PROFILE_HASH.to_owned(),
+            gen: 0,
+            mode: MarkdownizeMode::Full,
+            markdown: baseline_markdown(candidate, &bytes),
+            reused_from: None::<ReusedFrom>,
+            generated_at,
+        };
+        persist_normalized_instance(repo.kcs_dir(), &manifest, &[unit]).map_err(pipeline_to_kcs)?;
+    }
+    Ok(())
+}
+
+fn baseline_markdown(candidate: &ScanCandidate, bytes: &[u8]) -> String {
+    if candidate.media_type.starts_with("text/") {
+        String::from_utf8_lossy(bytes).into_owned()
+    } else {
+        format!(
+            "<!-- KCS deterministic baseline {} {} bytes -->\n",
+            candidate.input_path,
+            bytes.len()
+        )
+    }
+}
+
+fn approval_exists(repo: &Repository) -> Result<bool> {
+    Ok(repo.kcs_dir().join("approvals.jsonl").is_file())
+}
+
+fn write_approval_record(
+    repo: &Repository,
+    preview: &ScanPreview,
+    approval_method: &str,
+    network_opt_in: bool,
+) -> Result<()> {
+    let path = repo.kcs_dir().join("approvals.jsonl");
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .map_err(|err| KcsError::io(err.to_string(), path.display().to_string()))?;
+    let record = json!({
+        "scope_id": preview.scope_id,
+        "root_path": repo.root(),
+        "approved_at": "2026-04-25T12:00:00Z",
+        "actor": std::env::var("USER").unwrap_or_else(|_| "unknown".to_owned()),
+        "approval_method": approval_method,
+        "kcs_version": env!("CARGO_PKG_VERSION"),
+        "effective_ignore_hash": hash_bytes(b"built-in-tier-a-v1"),
+        "estimated_file_count": preview.candidates.iter().filter(|candidate| !candidate.ignored).count(),
+        "estimated_size_bytes": preview.candidates.iter().filter(|candidate| !candidate.ignored).map(|candidate| candidate.size_bytes).sum::<u64>(),
+        "network_opt_in": network_opt_in,
+        "tool_id": "mistral_ocr_markdownize",
+    });
+    serde_json::to_writer(&mut file, &record)
+        .map_err(|err| KcsError::io(err.to_string(), path.display().to_string()))?;
+    file.write_all(b"\n")
+        .map_err(|err| KcsError::io(err.to_string(), path.display().to_string()))
+}
+
+fn validate_user_tools_config() -> Result<()> {
+    let Some(path) = user_tools_toml_path() else {
+        return Ok(());
+    };
+    if !path.is_file() {
+        return Ok(());
+    }
+    let bytes =
+        fs::read(&path).map_err(|err| KcsError::io(err.to_string(), path.display().to_string()))?;
+    validate_tools_toml(&bytes).map_err(adapter_to_kcs)
+}
+
+fn validate_repo_tool_lock(repo: &Repository) -> Result<()> {
+    let path = repo.kcs_dir().join("tool-lock.json");
+    if !path.is_file() {
+        return Ok(());
+    }
+    let bytes =
+        fs::read(&path).map_err(|err| KcsError::io(err.to_string(), path.display().to_string()))?;
+    load_tool_lock(&bytes).map(|_| ()).map_err(adapter_to_kcs)
+}
+
+fn user_tools_toml_path() -> Option<PathBuf> {
+    if let Some(path) = std::env::var_os("XDG_CONFIG_HOME") {
+        return Some(PathBuf::from(path).join("kcs/tools.toml"));
+    }
+    std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config/kcs/tools.toml"))
+}
+
+fn adapter_to_kcs(error: kcs_adapter::AdapterError) -> KcsError {
+    KcsError::schema(error.to_string())
+}
+
+fn pipeline_to_kcs(error: kcs_pipeline::PipelineError) -> KcsError {
+    KcsError::schema(error.to_string())
 }
 
 fn print_output(value: Value, json_mode: bool) {

@@ -1,5 +1,8 @@
 //! Batch task descriptor contracts.
 
+use std::collections::VecDeque;
+use std::sync::{Mutex, OnceLock};
+
 use serde::{Deserialize, Serialize};
 
 use crate::markdownize::MarkdownizeMode;
@@ -62,12 +65,124 @@ pub enum RetryErrorKind {
     BudgetExceeded,
 }
 
-pub fn enqueue_task(_descriptor: TaskDescriptor) -> Result<()> {
-    todo!("implement task persistence and scheduling in Step 2");
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RetryPolicy {
+    pub error_kind: RetryErrorKind,
+    pub retryable: bool,
+    pub max_attempts: Option<u32>,
+    pub backoff: String,
+    pub error_code: String,
+    pub paused: bool,
+}
+
+pub fn enqueue_task(descriptor: TaskDescriptor) -> Result<()> {
+    queue()
+        .lock()
+        .expect("task queue mutex poisoned")
+        .push_back(descriptor);
+    Ok(())
 }
 
 pub fn pull_next_task(_scope_id: &str) -> Result<Option<TaskDescriptor>> {
-    todo!("implement task leasing in Step 2");
+    let mut queue = queue().lock().expect("task queue mutex poisoned");
+    let Some(position) = queue
+        .iter()
+        .position(|task| task.status == TaskStatus::Pending)
+    else {
+        return Ok(None);
+    };
+    let mut task = queue.remove(position).expect("position came from queue");
+    task.status = TaskStatus::Running;
+    Ok(Some(task))
+}
+
+#[must_use]
+pub fn task_status_from_unit_counts(
+    done: usize,
+    failed: usize,
+    precondition_failed: bool,
+) -> TaskStatus {
+    if precondition_failed || done == 0 && failed > 0 {
+        TaskStatus::Failed
+    } else if done > 0 && failed > 0 {
+        TaskStatus::Partial
+    } else if done > 0 {
+        TaskStatus::Done
+    } else {
+        TaskStatus::Pending
+    }
+}
+
+#[must_use]
+pub fn retry_policy(error_kind: RetryErrorKind) -> RetryPolicy {
+    match error_kind {
+        RetryErrorKind::NetworkError => RetryPolicy {
+            error_kind,
+            retryable: true,
+            max_attempts: Some(5),
+            backoff: "exp(base=2s,cap=60s,full_jitter)".to_owned(),
+            error_code: "KCS-E-BATCH-NET-001".to_owned(),
+            paused: false,
+        },
+        RetryErrorKind::RateLimit => RetryPolicy {
+            error_kind,
+            retryable: true,
+            max_attempts: None,
+            backoff: "retry_after".to_owned(),
+            error_code: "KCS-E-BATCH-RATE-001".to_owned(),
+            paused: false,
+        },
+        RetryErrorKind::AuthError => RetryPolicy {
+            error_kind,
+            retryable: false,
+            max_attempts: Some(0),
+            backoff: "user_action".to_owned(),
+            error_code: "KCS-E-BATCH-AUTH-001".to_owned(),
+            paused: false,
+        },
+        RetryErrorKind::QuotaExceeded => RetryPolicy {
+            error_kind,
+            retryable: true,
+            max_attempts: Some(3),
+            backoff: "fixed(1h)".to_owned(),
+            error_code: "KCS-E-BATCH-QUOTA-001".to_owned(),
+            paused: false,
+        },
+        RetryErrorKind::InvalidInput => RetryPolicy {
+            error_kind,
+            retryable: false,
+            max_attempts: Some(0),
+            backoff: "none".to_owned(),
+            error_code: "KCS-E-BATCH-INPUT-001".to_owned(),
+            paused: false,
+        },
+        RetryErrorKind::ContractViolation => RetryPolicy {
+            error_kind,
+            retryable: false,
+            max_attempts: Some(0),
+            backoff: "full_fallback_once".to_owned(),
+            error_code: "KCS-E-ADAPTER-CONTRACT-001".to_owned(),
+            paused: false,
+        },
+        RetryErrorKind::BudgetExceeded => RetryPolicy {
+            error_kind,
+            retryable: false,
+            max_attempts: Some(0),
+            backoff: "override_budget_required".to_owned(),
+            error_code: "KCS-E-BATCH-BUDGET-001".to_owned(),
+            paused: true,
+        },
+    }
+}
+
+#[must_use]
+pub fn idempotency_key(input_hash: &str, tool_profile_hash: &str) -> String {
+    crate::prepare::hash_bytes(format!("{input_hash}\0{tool_profile_hash}").as_bytes())
+}
+
+fn queue() -> &'static Mutex<VecDeque<TaskDescriptor>> {
+    static QUEUE: OnceLock<Mutex<VecDeque<TaskDescriptor>>> = OnceLock::new();
+    QUEUE.get_or_init(|| Mutex::new(VecDeque::new()))
 }
 
 #[cfg(test)]
@@ -98,5 +213,32 @@ mod tests {
 
         let value = serde_json::to_value(descriptor).expect("serialize task descriptor");
         assert_eq!(value["type"], "markdownize");
+    }
+
+    #[test]
+    fn task_state_and_retry_policies_match_p0_contract() {
+        assert_eq!(task_status_from_unit_counts(2, 0, false), TaskStatus::Done);
+        assert_eq!(
+            task_status_from_unit_counts(1, 1, false),
+            TaskStatus::Partial
+        );
+        assert_eq!(
+            task_status_from_unit_counts(0, 2, false),
+            TaskStatus::Failed
+        );
+        assert_eq!(
+            retry_policy(RetryErrorKind::NetworkError).error_code,
+            "KCS-E-BATCH-NET-001"
+        );
+        assert_eq!(
+            retry_policy(RetryErrorKind::NetworkError).max_attempts,
+            Some(5)
+        );
+        assert_eq!(retry_policy(RetryErrorKind::RateLimit).max_attempts, None);
+        assert!(retry_policy(RetryErrorKind::BudgetExceeded).paused);
+        assert_eq!(
+            retry_policy(RetryErrorKind::ContractViolation).error_code,
+            "KCS-E-ADAPTER-CONTRACT-001"
+        );
     }
 }
