@@ -5,7 +5,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -177,13 +177,27 @@ impl Repository {
             if entry.file_name() == ".kcs" {
                 continue;
             }
-            if !entry.file_type().kcs_io(&entry.path())?.is_file() {
+            let path = entry.path();
+            let file_type = entry.file_type().kcs_io(&path)?;
+            // Subfolders are out of scope (03 §3: direct children only) and are
+            // skipped silently. Symlinks / other non-regular files are skipped
+            // with a warning so the omission is visible (WS1c S5, 10 §4).
+            if file_type.is_dir() {
                 continue;
             }
-            let path = entry.path();
-            let file_name = entry.file_name().into_string().map_err(|_| {
-                KcsError::path("file name must be UTF-8", path.display().to_string())
-            })?;
+            if !file_type.is_file() {
+                eprintln!("warning: skipping non-regular file: {}", path.display());
+                continue;
+            }
+            // A non-UTF-8 file name cannot be a tree entry path; warn and skip
+            // rather than failing the whole snapshot (WS1c S6).
+            let file_name = match entry.file_name().into_string() {
+                Ok(name) => name,
+                Err(_) => {
+                    eprintln!("warning: skipping non-UTF-8 file name: {}", path.display());
+                    continue;
+                }
+            };
             let bytes = fs::read(&path).kcs_io(&path)?;
             let raw_hash = if store_raw {
                 self.store.write_raw(&bytes)?
@@ -263,7 +277,7 @@ impl Repository {
 
         let created_at = fixed_now
             .map(str::to_owned)
-            .or_else(|| std::env::var("KCS_FIXED_NOW").ok())
+            .or_else(fixed_now_override)
             .unwrap_or_else(now_utc_seconds);
         let message = message
             .map(str::to_owned)
@@ -282,6 +296,13 @@ impl Repository {
             serde_json::to_value(&commit).map_err(|err| KcsError::schema(err.to_string()))?;
         let (commit_hash, _) = self.store.write_json(ObjectKind::Commit, &commit_value)?;
 
+        // Known limitation (WS1c S6, 2026-07-03): refs/heads/main and HEAD are
+        // advanced by two separate atomic renames. Each rename is individually
+        // crash-safe (temp file + rename, never a torn value), but a power loss
+        // *between* them can leave refs/heads/main advanced while HEAD still
+        // points at the parent. The commit object is already durable in the CAS,
+        // so recovery is a matter of re-pointing HEAD; no data is lost. A single
+        // atomic multi-ref transaction is deferred (single-user Step 1 scope).
         atomic_overwrite(
             &self.kcs_dir.join("refs/heads/main"),
             commit_hash.as_bytes(),
@@ -560,18 +581,45 @@ impl Repository {
         Ok(())
     }
 
+    /// Merge the current working tree into `manifest.json`, preserving rows for
+    /// paths that vanished (`03 §8`: never DELETE a files row; set
+    /// `status="deleted"` and keep the last observed `raw_hash`). A path that
+    /// reappears recovers from `deleted` to `modified`/`unchanged`
+    /// (ws1a CT-STATE-003/004).
     fn write_manifest(&self, tree: &TreeObject) -> Result<()> {
-        let files = tree
+        let previous = self.read_manifest_hashes()?;
+        let current: BTreeMap<&str, &str> = tree
             .entries
             .iter()
-            .map(|entry| {
-                json!({
-                    "path": entry.path,
-                    "raw_hash": entry.raw_hash,
-                    "status": "unchanged",
-                })
-            })
-            .collect::<Vec<_>>();
+            .map(|entry| (entry.path.as_str(), entry.raw_hash.as_str()))
+            .collect();
+
+        // BTreeMap keyed by path gives a deterministic, path-sorted file list.
+        let mut rows: BTreeMap<String, Value> = BTreeMap::new();
+
+        for entry in &tree.entries {
+            let status = match previous.get(&entry.path) {
+                None => "new",
+                Some(prev) if *prev != entry.raw_hash => "modified",
+                Some(_) => "unchanged",
+            };
+            rows.insert(
+                entry.path.clone(),
+                json!({ "path": entry.path, "raw_hash": entry.raw_hash, "status": status }),
+            );
+        }
+
+        // Retain vanished paths as deleted rows carrying their last raw_hash.
+        for (path, raw_hash) in &previous {
+            if !current.contains_key(path.as_str()) {
+                rows.insert(
+                    path.clone(),
+                    json!({ "path": path, "raw_hash": raw_hash, "status": "deleted" }),
+                );
+            }
+        }
+
+        let files = rows.into_values().collect::<Vec<_>>();
         let value = json!({
             "schema_version": 1,
             "files": files,
@@ -580,6 +628,30 @@ impl Repository {
         let bytes =
             serde_json::to_vec_pretty(&value).map_err(|err| KcsError::schema(err.to_string()))?;
         atomic_overwrite(&self.kcs_dir.join("manifest.json"), &bytes)
+    }
+
+    /// Read the current `manifest.json` as a `path -> last raw_hash` map.
+    /// Returns an empty map when the manifest is absent. The manifest is schema
+    /// validated before `snapshot` runs, so entries are well formed here.
+    fn read_manifest_hashes(&self) -> Result<BTreeMap<String, String>> {
+        let path = self.kcs_dir.join("manifest.json");
+        let mut map = BTreeMap::new();
+        if !path.is_file() {
+            return Ok(map);
+        }
+        let value: Value = serde_json::from_str(&fs::read_to_string(&path).kcs_io(&path)?)
+            .map_err(|err| KcsError::schema(err.to_string()))?;
+        if let Some(files) = value.get("files").and_then(Value::as_array) {
+            for file in files {
+                if let (Some(entry_path), Some(raw_hash)) = (
+                    file.get("path").and_then(Value::as_str),
+                    file.get("raw_hash").and_then(Value::as_str),
+                ) {
+                    map.insert(entry_path.to_owned(), raw_hash.to_owned());
+                }
+            }
+        }
+        Ok(map)
     }
 
     fn tool_lock_hash(&self) -> Result<String> {
@@ -786,7 +858,7 @@ fn new_lock_token(pid: u32) -> String {
 fn maybe_hold_lock_for_tests() {
     if let Ok(value) = std::env::var("KCS_TEST_HOLD_LOCK_MS") {
         if let Ok(ms) = value.parse::<u64>() {
-            std::thread::sleep(Duration::from_millis(ms));
+            std::thread::sleep(std::time::Duration::from_millis(ms));
         }
     }
 }
@@ -859,7 +931,7 @@ fn is_ulid(value: &str) -> bool {
 }
 
 fn now_utc_seconds() -> String {
-    if let Ok(value) = std::env::var("KCS_FIXED_NOW") {
+    if let Some(value) = fixed_now_override() {
         return value;
     }
     let secs = SystemTime::now()
@@ -867,6 +939,20 @@ fn now_utc_seconds() -> String {
         .unwrap_or_default()
         .as_secs() as i64;
     format_unix_seconds(secs)
+}
+
+/// Debug-only override for the current time via `KCS_FIXED_NOW`. The contract
+/// tests (which build in debug) use it to pin `created_at`. It is compiled out
+/// of release binaries so a production timestamp cannot be forged through the
+/// environment (WS1c S4).
+#[cfg(debug_assertions)]
+fn fixed_now_override() -> Option<String> {
+    std::env::var("KCS_FIXED_NOW").ok()
+}
+
+#[cfg(not(debug_assertions))]
+fn fixed_now_override() -> Option<String> {
+    None
 }
 
 fn format_unix_seconds(secs: i64) -> String {
@@ -891,4 +977,37 @@ fn civil_from_days(days: i64) -> (i64, i64, i64) {
     let month = mp + if mp < 10 { 3 } else { -9 };
     let year = y + if month <= 2 { 1 } else { 0 };
     (year, month, day)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{civil_from_days, format_unix_seconds};
+
+    #[test]
+    fn format_unix_seconds_known_vectors() {
+        // Epoch and known Unix timestamps.
+        assert_eq!(format_unix_seconds(0), "1970-01-01T00:00:00Z");
+        assert_eq!(format_unix_seconds(1_700_000_000), "2023-11-14T22:13:20Z");
+        assert_eq!(format_unix_seconds(1_777_464_000), "2026-04-29T12:00:00Z");
+        // 2024 is a leap year: 02-29 exists and spans a full day.
+        assert_eq!(format_unix_seconds(1_709_164_800), "2024-02-29T00:00:00Z");
+        assert_eq!(format_unix_seconds(1_709_251_199), "2024-02-29T23:59:59Z");
+        // 2100 is NOT a leap year (÷100, not ÷400): 02-28 rolls to 03-01.
+        assert_eq!(format_unix_seconds(4_107_542_399), "2100-02-28T23:59:59Z");
+        assert_eq!(format_unix_seconds(4_107_542_400), "2100-03-01T00:00:00Z");
+        // Month / year boundary.
+        assert_eq!(format_unix_seconds(1_704_067_199), "2023-12-31T23:59:59Z");
+        assert_eq!(format_unix_seconds(1_704_067_200), "2024-01-01T00:00:00Z");
+    }
+
+    #[test]
+    fn civil_from_days_boundaries() {
+        assert_eq!(civil_from_days(0), (1970, 1, 1));
+        assert_eq!(civil_from_days(19_782), (2024, 2, 29));
+        assert_eq!(civil_from_days(19_783), (2024, 3, 1));
+        assert_eq!(civil_from_days(47_540), (2100, 2, 28));
+        assert_eq!(civil_from_days(47_541), (2100, 3, 1));
+        // Negative day index -> proleptic pre-epoch date.
+        assert_eq!(civil_from_days(-1), (1969, 12, 31));
+    }
 }
