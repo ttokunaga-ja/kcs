@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import random
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -97,8 +98,152 @@ FIGURE_SCAN_LINES = [
     "every token is lost to search (north-star M3-1 impact).",
 ]
 
+# ---------------------------------------------------------------------------
+# 系統 A/B/C 拡張 (ユーザー要求): ラスタ化 PDF / 手書き風 / 画像化境界の段階調査。
+# いずれも「全面 raster + text layer なし」の PDF ページ (PIL でレンダリングした
+# PNG を reportlab に drawImage で全面配置し、テキストを一切描かない)。よって
+# メタデータからテキストは抽出できず、OCR が rendered image を読むかどうかを直接
+# 測れる。CJK グリフ描画のため PIL に CJK TrueType/TTC が必要 (無ければ A/B/C は
+# skip し ground_truth からも省く)。全ページ 200DPI 相当 (A4 = 1654x2339px)。
+# 決定論: フォント固定 + seed 固定 Random のみ使用 (グローバル random 非使用)。
+# ---------------------------------------------------------------------------
+RASTER_PAGE_PX = (1654, 2339)  # A4 @ ~200 DPI
 
-def write_ground_truth(pdf_generator: str, include_figures: bool) -> None:
+# CJK 対応 TrueType/TTC の候補 (macOS / Linux Noto 等)。最初に存在するものを使う。
+CJK_FONT_CANDIDATES = [
+    "/System/Library/Fonts/ヒラギノ角ゴシック W4.ttc",
+    "/System/Library/Fonts/ヒラギノ角ゴシック W3.ttc",
+    "/System/Library/Fonts/Hiragino Sans GB.ttc",
+    "/System/Library/Fonts/AppleSDGothicNeo.ttc",
+    "/System/Library/Fonts/STHeiti Medium.ttc",
+    "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+    "/usr/share/fonts/opentype/noto/NotoSansCJKjp-Regular.otf",
+    "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+    "/usr/share/fonts/truetype/fonts-japanese-gothic.ttf",
+    "/Library/Fonts/Arial Unicode.ttf",
+]
+
+# 系統 A — メタデータからテキストが取得できない PDF (text-native ページのラスタ化版)。
+# ground truth は既存 fixture 0-2 の内容を流用。
+RASTER_A_SPECS = [
+    {
+        "page_index": 7,
+        "kind": "raster_table",
+        "source_page_index": 0,
+        "expected_cell_texts": [cell["text"] for cell in TABLE_CELLS],
+        "risk": "Rasterized complex table; no text layer. OCR must re-read cell text from the image.",
+    },
+    {
+        "page_index": 8,
+        "kind": "raster_japanese",
+        "source_page_index": 1,
+        "full_text": JAPANESE_TEXT,
+        "risk": "Rasterized Japanese body; no text layer. Metadata text extraction impossible.",
+    },
+    {
+        "page_index": 9,
+        "kind": "raster_formula",
+        "source_page_index": 2,
+        "expected_tokens": FORMULA_TOKENS,
+        "risk": "Rasterized ASCII formula; no text layer.",
+    },
+]
+
+# 系統 B — 手書き風ページ。フォント依存を避け、PIL で文字ごとに回転/ベースライン
+# ゆらぎ/字間ゆらぎ/線幅ゆらぎを加えて手書きを模す (seed 固定で決定論)。
+HANDWRITING_SPECS = [
+    {
+        "page_index": 10,
+        "kind": "handwriting_shopping",
+        "seed": 20260703,
+        "lines": [
+            "買い物リスト",
+            "牛乳 2本",
+            "卵 10個",
+            "食パン 1斤",
+            "コーヒー豆 200g",
+            "合計 1580円",
+        ],
+        "expected_texts": ["買い物リスト", "牛乳", "卵", "食パン", "コーヒー豆", "200g", "10個", "1580円"],
+    },
+    {
+        "page_index": 11,
+        "kind": "handwriting_memo",
+        "seed": 20260704,
+        "lines": [
+            "会議メモ 6月30日",
+            "出席 田中 佐藤 鈴木",
+            "TODO API設計 レビュー",
+            "次回 7月7日 14時",
+            "予算 案A 3200円",
+        ],
+        "expected_texts": ["会議メモ", "田中", "佐藤", "鈴木", "API設計", "7月7日", "3200円"],
+    },
+]
+
+# 系統 C — 画像化境界の段階調査 (最重要)。ラスタ化テキストページに段階的に表・グラフを
+# 足す C0..C5。図/表/本文それぞれに一意トークン (例: C3-FIG-AXIS-61) を埋め、evaluate.py が
+# 「どのトークンが markdown 本文に出たか / images[] に消えたか」を段階別に判定できるようにする。
+# 各トークン文字列はここが単一の真実源: 描画関数もこのリストをそのまま描くので GT と描画が乖離しない。
+STAGE_C_SPECS = [
+    {
+        "page_index": 12,
+        "stage": "C0",
+        "kind": "raster_text",
+        "chart_kind": None,
+        "body": ["C0-BODY-01", "C0-BODY-02", "C0-BODY-03", "本文ゼロC0"],
+        "table": [],
+        "figure": [],
+    },
+    {
+        "page_index": 13,
+        "stage": "C1",
+        "kind": "text_small_table",
+        "chart_kind": None,
+        "body": ["C1-BODY-11", "C1-BODY-12", "本文C1"],
+        "table": ["C1-TBL-21", "C1-TBL-22", "C1-TBL-23"],
+        "figure": [],
+    },
+    {
+        "page_index": 14,
+        "stage": "C2",
+        "kind": "text_large_table",
+        "chart_kind": None,
+        "body": ["C2-BODY-31", "C2-BODY-32", "本文C2"],
+        "table": ["C2-TBL-41", "C2-TBL-42", "C2-TBL-43", "C2-TBL-44", "C2-TBL-45", "合計C2"],
+        "figure": [],
+    },
+    {
+        "page_index": 15,
+        "stage": "C3",
+        "kind": "text_line_chart",
+        "chart_kind": "line",
+        "body": ["C3-BODY-51", "C3-BODY-52", "本文C3"],
+        "table": [],
+        "figure": ["C3-FIG-AXIS-61", "C3-FIG-AXIS-62", "C3-FIG-LEG-63", "C3-FIG-VAL-64", "凡例C3"],
+    },
+    {
+        "page_index": 16,
+        "stage": "C4",
+        "kind": "dashboard",
+        "chart_kind": "bar",
+        "body": ["C4-BODY-71", "C4-BODY-72", "本文C4"],
+        "table": ["C4-TBL-81", "C4-TBL-82", "C4-TBL-83", "C4-TBL-84"],
+        "figure": ["C4-FIG-AXIS-91", "C4-FIG-LEG-92", "C4-FIG-VAL-93", "C4-FIG-VAL-94", "棒C4"],
+    },
+    {
+        "page_index": 17,
+        "stage": "C5",
+        "kind": "chart_dominant",
+        "chart_kind": "bar",
+        "body": ["C5-BODY-01", "本文C5"],
+        "table": [],
+        "figure": ["C5-FIG-AXIS-11", "C5-FIG-AXIS-12", "C5-FIG-LEG-13", "C5-FIG-VAL-14", "C5-FIG-VAL-15", "図C5"],
+    },
+]
+
+
+def write_ground_truth(pdf_generator: str, include_figures: bool, include_raster: bool = False) -> None:
     page_map = {
         "complex_table": 0,
         "japanese_text": 1,
@@ -106,7 +251,7 @@ def write_ground_truth(pdf_generator: str, include_figures: bool) -> None:
         "embedded_image": 3,
     }
     data = {
-        "schema_version": 2,
+        "schema_version": 3,
         "fixture_pdf": str(PDF_PATH.relative_to(ROOT)),
         "pdf_generator": pdf_generator,
         "page_count": 4,
@@ -169,10 +314,85 @@ def write_ground_truth(pdf_generator: str, include_figures: bool) -> None:
                 },
             ],
         }
+    if include_raster:
+        page_map.update(
+            {
+                "raster_table": 7,
+                "raster_japanese": 8,
+                "raster_formula": 9,
+                "handwriting_shopping": 10,
+                "handwriting_memo": 11,
+                "stage_c0": 12,
+                "stage_c1": 13,
+                "stage_c2": 14,
+                "stage_c3": 15,
+                "stage_c4": 16,
+                "stage_c5": 17,
+            }
+        )
+        data["page_count"] = 18
+        data["rasterized_text"] = {
+            "description": (
+                "系統A: text-native ページを PIL でラスタ画像にし、その画像だけを埋め込んだ PDF ページ "
+                "(text layer なし)。メタデータからテキストは抽出できない。OCR が rendered image から "
+                "元テキスト (表/日本語/数式) を回収できるかを測る。ground truth は元テキストを流用。"
+            ),
+            "acceptance": (
+                "Diagnostic only (no hard threshold). Reuses source text; per page measures "
+                "cell recall / Japanese CER / formula token recall from a full-page raster."
+            ),
+            "pages": [dict(spec) for spec in RASTER_A_SPECS],
+        }
+        data["handwriting"] = {
+            "description": (
+                "系統B: フォント依存を避け、PIL で文字ごとに回転 (±6°)・ベースライン上下ゆらぎ・"
+                "字間ゆらぎ・線の太さゆらぎを加えた手書き風レンダリング (seed 固定で決定論)。"
+                "日本語+英数字の短いメモ (買い物リスト / 会議メモ)。"
+            ),
+            "acceptance": "Diagnostic only; measures OCR token recall on simulated handwriting. No threshold.",
+            "pages": [
+                {
+                    "page_index": spec["page_index"],
+                    "kind": spec["kind"],
+                    "expected_texts": spec["expected_texts"],
+                }
+                for spec in HANDWRITING_SPECS
+            ],
+        }
+        data["staged_boundary"] = {
+            "description": (
+                "系統C (最重要): ラスタ化テキストページに段階的に表・グラフを足す C0..C5。"
+                "図/表/本文それぞれに一意トークン (例: C3-FIG-AXIS-61) を埋め、どのトークンが "
+                "markdown 本文に出たか / images[] に消えたかを段階別に測り、recall が急落する『境界』を機械判定する。"
+            ),
+            "acceptance": (
+                "Boundary study (diagnostic). Per stage: zone (body/table/figure) token recall + images[] "
+                "count; evaluate.py detects the stage where recall collapses and writes boundary-report.md."
+            ),
+            "stages": [
+                {
+                    "stage": spec["stage"],
+                    "page_index": spec["page_index"],
+                    "kind": spec["kind"],
+                    "tokens": {
+                        "body": spec["body"],
+                        "table": spec["table"],
+                        "figure": spec["figure"],
+                    },
+                }
+                for spec in STAGE_C_SPECS
+            ],
+        }
     GROUND_TRUTH_PATH.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
-def try_generate_with_reportlab() -> bool:
+def try_generate_with_reportlab() -> tuple[bool, bool]:
+    """(used_reportlab, raster_cjk_included) を返す。
+
+    raster_cjk_included は「系統 A/B/C (全面 raster + CJK) を PDF に含めたか」。
+    reportlab があっても CJK フォントが見つからなければ A/B/C は skip し (False)、
+    既存 0-6 のみ生成する。
+    """
     try:
         from reportlab.lib import colors
         from reportlab.lib.pagesizes import A4
@@ -181,7 +401,7 @@ def try_generate_with_reportlab() -> bool:
         from reportlab.pdfbase.cidfonts import UnicodeCIDFont
         from reportlab.pdfgen import canvas
     except Exception:
-        return False
+        return False, False
 
     try:
         # invariant=True で CreationDate / doc ID を固定し、PDF をバイト決定論にする
@@ -229,11 +449,20 @@ def try_generate_with_reportlab() -> bool:
         c.showPage()
 
         draw_figure_pages(c, jp_font, width, height)
+
+        # 系統 A/B/C: 全面 raster + text layer なし。CJK フォントが見つかった時のみ。
+        cjk_path = _find_cjk_font()
+        raster_cjk = cjk_path is not None
+        if raster_cjk:
+            draw_rasterized_text_pages(c, cjk_path, width, height)
+            draw_handwriting_pages(c, cjk_path, width, height)
+            draw_staged_boundary_pages(c, cjk_path, width, height)
+
         c.save()
-        return True
+        return True, raster_cjk
     except Exception:
         PDF_PATH.unlink(missing_ok=True)
-        return False
+        return False, False
 
 
 def draw_figure_pages(c, jp_font: str, width: float, height: float) -> None:
@@ -359,6 +588,309 @@ def render_infographic_png() -> bytes:
     buffer = BytesIO()
     img.save(buffer, format="PNG")
     return buffer.getvalue()
+
+
+# ===========================================================================
+# 系統 A/B/C: 全面 raster ページの PIL レンダリング + reportlab への全面埋め込み。
+# ===========================================================================
+
+
+def _find_cjk_font() -> str | None:
+    for candidate in CJK_FONT_CANDIDATES:
+        if Path(candidate).exists():
+            return candidate
+    return None
+
+
+def _cjk_font(path: str, size: int):
+    from PIL import ImageFont
+
+    return ImageFont.truetype(path, size)
+
+
+def _wrap_text(draw, text: str, font, max_width: int) -> list[str]:
+    """max_width(px) に収まるよう折り返す。CJK は文字単位、空白入りは語単位で分割。"""
+    if not text:
+        return [""]
+
+    def width_of(segment: str) -> int:
+        box = draw.textbbox((0, 0), segment, font=font)
+        return box[2] - box[0]
+
+    lines: list[str] = []
+    current = ""
+    for char in text:
+        candidate = current + char
+        if width_of(candidate) > max_width and current:
+            lines.append(current)
+            current = char
+        else:
+            current = candidate
+    if current:
+        lines.append(current)
+    return lines
+
+
+def _new_page_image():
+    from PIL import Image, ImageDraw
+
+    width, height = RASTER_PAGE_PX
+    img = Image.new("RGB", (width, height), (255, 255, 255))
+    return img, ImageDraw.Draw(img), width, height
+
+
+def _png_bytes(img) -> bytes:
+    from io import BytesIO
+
+    buffer = BytesIO()
+    img.save(buffer, format="PNG")
+    return buffer.getvalue()
+
+
+def render_raster_table_png(cjk_path: str) -> bytes:
+    """系統A: 複雑表を全面 raster 化 (text layer なし)。全 expected_cell_texts を描く。決定論。"""
+    img, draw, width, _height = _new_page_image()
+    title_font = _cjk_font(cjk_path, 60)
+    cell_font = _cjk_font(cjk_path, 40)
+    draw.text((70, 60), "複雑表OCR評価 (raster / no text layer)", fill=(0, 0, 0), font=title_font)
+
+    grid = [
+        ["地域", "売上(千円)", "", "備考"],
+        ["", "2025 Q4", "2026 Q1", ""],
+        ["東京", "1,250", "1,430", "前年比+14%"],
+        ["大阪", "980", "1,020", "新規案件2件"],
+        ["合計", "2,230", "2,450", "粗利率31.5%"],
+    ]
+    x0 = 80
+    y0 = 240
+    col_w = [360, 300, 300, 500]
+    row_h = 130
+    x_edges = [x0]
+    for cw in col_w:
+        x_edges.append(x_edges[-1] + cw)
+    for r in range(len(grid) + 1):
+        y = y0 + r * row_h
+        draw.line([x0, y, x_edges[-1], y], fill=(0, 0, 0), width=3)
+    for x in x_edges:
+        draw.line([x, y0, x, y0 + len(grid) * row_h], fill=(0, 0, 0), width=3)
+    for r, row in enumerate(grid):
+        for cindex, cell in enumerate(row):
+            if cell:
+                draw.text((x_edges[cindex] + 20, y0 + r * row_h + 40), cell, fill=(15, 15, 15), font=cell_font)
+    return _png_bytes(img)
+
+
+def render_raster_japanese_png(cjk_path: str) -> bytes:
+    """系統A: 横書き日本語本文を全面 raster 化 (text layer なし)。決定論。"""
+    img, draw, width, _height = _new_page_image()
+    title_font = _cjk_font(cjk_path, 60)
+    body_font = _cjk_font(cjk_path, 44)
+    lines = JAPANESE_TEXT.splitlines()
+    draw.text((70, 60), lines[0], fill=(0, 0, 0), font=title_font)
+    y = 220
+    max_width = width - 160
+    for line in lines[1:]:
+        for wrapped in _wrap_text(draw, line, body_font, max_width):
+            draw.text((80, y), wrapped, fill=(15, 15, 15), font=body_font)
+            y += 66
+        y += 20
+    return _png_bytes(img)
+
+
+def render_raster_formula_png(cjk_path: str) -> bytes:
+    """系統A: ASCII 数式を全面 raster 化 (text layer なし)。決定論。"""
+    img, draw, _width, _height = _new_page_image()
+    title_font = _cjk_font(cjk_path, 60)
+    formula_font = _cjk_font(cjk_path, 56)
+    note_font = _cjk_font(cjk_path, 36)
+    draw.text((70, 60), "Formula OCR Evaluation (raster / no text layer)", fill=(0, 0, 0), font=title_font)
+    draw.text((110, 300), "E = mc^2", fill=(0, 0, 0), font=formula_font)
+    draw.text((110, 440), "int_0^1 x^2 dx = 1/3", fill=(0, 0, 0), font=formula_font)
+    draw.text(
+        (110, 600),
+        "Record whether the equation is extracted as text or represented as an image fallback.",
+        fill=(60, 60, 60),
+        font=note_font,
+    )
+    return _png_bytes(img)
+
+
+def _glyph_advance(font, char: str) -> float:
+    box = font.getbbox(char)
+    return max(box[2] - box[0], 40) + 8
+
+
+def render_handwriting_png(cjk_path: str, lines: list[str], seed: int) -> bytes:
+    """系統B: 手書き風。文字ごとに回転/ベースライン/字間/線幅をゆらす。seed 固定で決定論。"""
+    from PIL import Image, ImageDraw
+
+    width, height = RASTER_PAGE_PX
+    img = Image.new("RGB", (width, height), (252, 251, 247))
+    draw = ImageDraw.Draw(img)
+    draw.rectangle([10, 10, width - 11, height - 11], outline=(205, 200, 185), width=2)
+    rng = random.Random(seed)
+    base_font = _cjk_font(cjk_path, 72)
+    y = 150
+    for line in lines:
+        x = 120.0
+        for char in line:
+            if char == " ":
+                x += 44
+                continue
+            tile = Image.new("RGBA", (150, 150), (0, 0, 0, 0))
+            tile_draw = ImageDraw.Draw(tile)
+            stroke_width = rng.choice([0, 0, 1, 2])  # 線の太さゆらぎ
+            ink = (20, 20, 60, 255)
+            tile_draw.text((32, 22), char, font=base_font, fill=ink, stroke_width=stroke_width, stroke_fill=ink)
+            angle = rng.uniform(-6.0, 6.0)  # 文字ごとの回転
+            rotated = tile.rotate(angle, resample=Image.BICUBIC, expand=True)
+            y_jitter = rng.uniform(-9.0, 9.0)  # ベースラインの上下ゆらぎ
+            img.paste(rotated, (int(x), int(y + y_jitter)), rotated)
+            x += _glyph_advance(base_font, char) + rng.uniform(-4.0, 6.0)  # 字間ゆらぎ
+        y += 152
+    return _png_bytes(img)
+
+
+def _draw_grid_table(draw, x: int, y: int, tokens: list[str], font) -> int:
+    """table トークンを 3 列グリッドのセルとして描く。新しい y を返す。"""
+    headers = ["ITEM", "VALUE", "NOTE"]
+    cols = 3
+    col_w = 460
+    row_h = 96
+    rows = [tokens[i : i + cols] for i in range(0, len(tokens), cols)]
+    cy = y
+    for c in range(cols):
+        draw.rectangle([x + c * col_w, cy, x + (c + 1) * col_w, cy + row_h], outline=(0, 0, 0), width=2, fill=(235, 235, 235))
+        draw.text((x + c * col_w + 18, cy + 26), headers[c], fill=(0, 0, 0), font=font)
+    cy += row_h
+    for row in rows:
+        for c, value in enumerate(row):
+            draw.rectangle([x + c * col_w, cy, x + (c + 1) * col_w, cy + row_h], outline=(0, 0, 0), width=2)
+            draw.text((x + c * col_w + 18, cy + 26), value, fill=(15, 15, 15), font=font)
+        cy += row_h
+    return cy
+
+
+def _draw_line_chart(draw, x: int, y: int, w: int, h: int, tokens: list[str], font) -> int:
+    """折れ線グラフを描き、figure トークンを軸/凡例/値ラベルとして図内に配置。新しい y を返す。"""
+    draw.rectangle([x, y, x + w, y + h], outline=(0, 0, 0), width=2)
+    ax_x = x + 90
+    ax_y_bottom = y + h - 70
+    draw.line([ax_x, y + 30, ax_x, ax_y_bottom], fill=(0, 0, 0), width=3)
+    draw.line([ax_x, ax_y_bottom, x + w - 40, ax_y_bottom], fill=(0, 0, 0), width=3)
+    points = [
+        (ax_x + 60, ax_y_bottom - 120),
+        (ax_x + 260, ax_y_bottom - 240),
+        (ax_x + 460, ax_y_bottom - 170),
+        (ax_x + 700, ax_y_bottom - 300),
+    ]
+    draw.line(points, fill=(40, 90, 170), width=4)
+    for px, py in points:
+        draw.ellipse([px - 7, py - 7, px + 7, py + 7], fill=(40, 90, 170))
+    slots = [
+        (ax_x + 40, ax_y_bottom + 16),   # AXIS
+        (ax_x + 420, ax_y_bottom + 16),  # AXIS
+        (x + w - 360, y + 30),           # LEG
+        (ax_x + 240, ax_y_bottom - 300), # VAL
+        (x + w - 360, y + 80),           # 凡例 (JP)
+    ]
+    for token, slot in zip(tokens, slots):
+        draw.text(slot, token, fill=(0, 0, 0), font=font)
+    return y + h + 24
+
+
+def _draw_bar_chart(draw, x: int, y: int, w: int, h: int, tokens: list[str], font) -> int:
+    """棒グラフを描き、figure トークンを軸/凡例/値ラベルとして図内に配置。新しい y を返す。"""
+    draw.rectangle([x, y, x + w, y + h], outline=(0, 0, 0), width=2)
+    ax_x = x + 90
+    ax_y_bottom = y + h - 70
+    draw.line([ax_x, y + 30, ax_x, ax_y_bottom], fill=(0, 0, 0), width=3)
+    draw.line([ax_x, ax_y_bottom, x + w - 40, ax_y_bottom], fill=(0, 0, 0), width=3)
+    bar_colors = [(40, 90, 170), (200, 110, 40), (60, 150, 90), (150, 60, 150)]
+    heights = [220, 320, 160, 280]
+    for index, bar_h in enumerate(heights):
+        bx0 = ax_x + 40 + index * 200
+        bx1 = bx0 + 120
+        draw.rectangle([bx0, ax_y_bottom - bar_h, bx1, ax_y_bottom], fill=bar_colors[index % len(bar_colors)])
+    slots = [
+        (ax_x + 40, ax_y_bottom + 16),
+        (ax_x + 440, ax_y_bottom + 16),
+        (x + w - 360, y + 30),
+        (ax_x + 40, y + 40),
+        (ax_x + 440, y + 40),
+        (x + w - 360, y + 80),
+    ]
+    for token, slot in zip(tokens, slots):
+        draw.text(slot, token, fill=(0, 0, 0), font=font)
+    return y + h + 24
+
+
+def render_stage_page_png(cjk_path: str, spec: dict) -> bytes:
+    """系統C: 段階ページ (本文 + 任意の表 + 任意のグラフ) を全面 raster 化。決定論。
+
+    body/table/figure の各トークンをそのまま描画するので、GT (STAGE_C_SPECS) と描画が乖離しない。
+    """
+    img, draw, width, _height = _new_page_image()
+    title_font = _cjk_font(cjk_path, 58)
+    label_font = _cjk_font(cjk_path, 40)
+    body_font = _cjk_font(cjk_path, 46)
+    draw.rectangle([10, 10, width - 11, RASTER_PAGE_PX[1] - 11], outline=(180, 180, 180), width=2)
+    draw.text((70, 60), f"{spec['stage']} raster stage ({spec['kind']})", fill=(0, 0, 0), font=title_font)
+    y = 200
+
+    draw.text((70, y), "本文テキスト (body):", fill=(0, 0, 0), font=label_font)
+    y += 66
+    for token in spec["body"]:
+        draw.text((100, y), token, fill=(15, 15, 15), font=body_font)
+        y += 70
+    y += 40
+
+    if spec["table"]:
+        draw.text((70, y), "表 (table):", fill=(0, 0, 0), font=label_font)
+        y += 66
+        y = _draw_grid_table(draw, 100, y, spec["table"], body_font)
+        y += 50
+
+    if spec["figure"]:
+        draw.text((70, y), "図 (figure):", fill=(0, 0, 0), font=label_font)
+        y += 66
+        chart_w = width - 200
+        chart_h = 460
+        if spec["chart_kind"] == "line":
+            y = _draw_line_chart(draw, 100, y, chart_w, chart_h, spec["figure"], label_font)
+        else:
+            y = _draw_bar_chart(draw, 100, y, chart_w, chart_h, spec["figure"], label_font)
+    return _png_bytes(img)
+
+
+def _place_fullpage(c, png_bytes: bytes, width: float, height: float) -> None:
+    """PNG をページ全面 (0,0)-(width,height) に配置し、テキストは一切描かない (text layer なし)。"""
+    from io import BytesIO
+
+    from reportlab.lib.utils import ImageReader
+
+    reader = ImageReader(BytesIO(png_bytes))
+    c.drawImage(reader, 0, 0, width=width, height=height, mask=None)
+    c.showPage()
+
+
+def draw_rasterized_text_pages(c, cjk_path: str, width: float, height: float) -> None:
+    """系統A (index 7-9): text-native ページのラスタ化版 (表/日本語/数式)。"""
+    _place_fullpage(c, render_raster_table_png(cjk_path), width, height)
+    _place_fullpage(c, render_raster_japanese_png(cjk_path), width, height)
+    _place_fullpage(c, render_raster_formula_png(cjk_path), width, height)
+
+
+def draw_handwriting_pages(c, cjk_path: str, width: float, height: float) -> None:
+    """系統B (index 10-11): 手書き風メモ。"""
+    for spec in HANDWRITING_SPECS:
+        _place_fullpage(c, render_handwriting_png(cjk_path, spec["lines"], spec["seed"]), width, height)
+
+
+def draw_staged_boundary_pages(c, cjk_path: str, width: float, height: float) -> None:
+    """系統C (index 12-17): 画像化境界の段階調査 C0..C5。"""
+    for spec in STAGE_C_SPECS:
+        _place_fullpage(c, render_stage_page_png(cjk_path, spec), width, height)
 
 
 def draw_reportlab_table(c, jp_font: str, height: float) -> None:
@@ -641,7 +1173,7 @@ def main() -> None:
     args = parser.parse_args()
 
     GENERATED_DIR.mkdir(parents=True, exist_ok=True)
-    used_reportlab = try_generate_with_reportlab()
+    used_reportlab, raster_cjk = try_generate_with_reportlab()
     if not used_reportlab:
         if not args.allow_fallback:
             raise SystemExit(
@@ -656,12 +1188,20 @@ def main() -> None:
             file=sys.stderr,
         )
         generate_minimal_pdf()
+    if used_reportlab and not raster_cjk:
+        print(
+            "warning: CJK フォントが見つからないため系統 A/B/C (ラスタ化/手書き風/境界調査) を "
+            "skip しました。既存 0-6 のみ生成。系統 A/B/C を含めるには CJK TrueType/TTC を"
+            "利用可能にしてください。",
+            file=sys.stderr,
+        )
     ensure_pdf_has_enough_structure(PDF_PATH)
-    # 図表診断ページ (index 4-6) は reportlab 経路でのみ生成する。minimal writer は
-    # raster 画像内テキストを描けず WS-ocr-figures の懸念を再現できないため。
+    # 図表診断ページ (index 4-6) と系統 A/B/C (index 7-17) は reportlab 経路でのみ生成する。
+    # minimal writer は raster 画像内テキストを描けず懸念を再現できないため。
     write_ground_truth(
         "reportlab" if used_reportlab else "minimal-pdf-writer",
         include_figures=used_reportlab,
+        include_raster=raster_cjk,
     )
     print(f"wrote {PDF_PATH.relative_to(ROOT)}")
     print(f"wrote {GROUND_TRUTH_PATH.relative_to(ROOT)}")

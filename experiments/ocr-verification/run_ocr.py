@@ -291,6 +291,12 @@ def build_mock_response(ground_truth: dict[str, Any]) -> dict[str, Any]:
         ]
     if ground_truth.get("figures"):
         pages.extend(build_mock_figure_pages(ground_truth, tiny_png_base64))
+    if ground_truth.get("rasterized_text"):
+        pages.extend(build_mock_rasterized_pages(ground_truth))
+    if ground_truth.get("handwriting"):
+        pages.extend(build_mock_handwriting_pages(ground_truth))
+    if ground_truth.get("staged_boundary"):
+        pages.extend(build_mock_staged_pages(ground_truth, tiny_png_base64))
     return {
         "model": "mistral-ocr-4-0-dry-run",
         "pages": pages,
@@ -381,6 +387,105 @@ def build_mock_figure_pages(ground_truth: dict[str, Any], tiny_png_base64: str) 
         }
     )
     return result
+
+
+def build_mock_rasterized_pages(ground_truth: dict[str, Any]) -> list[dict[str, Any]]:
+    """系統A の合成応答。実挙動の主張ではなく evaluate.py の rasterized_text 判定を dry-run で通す用。
+
+    3 ページを作り分ける: raster_table=一部セル欠落 (recall<1), raster_japanese=完全, raster_formula=完全。
+    いずれも full-page raster が OCR で本文化された想定なので images[] は付けない。
+    """
+    dims = {"width": 595, "height": 842, "unit": "pt"}
+    specs = {spec["kind"]: spec for spec in ground_truth["rasterized_text"]["pages"]}
+    result: list[dict[str, Any]] = []
+
+    table = specs["raster_table"]
+    # 数値セル 2 つ (1,020 / 2,450) を意図的に欠落させ recall < 1 を作る。
+    table_md = (
+        "# 複雑表OCR評価 (raster)\n\n"
+        "| 地域 | 売上(千円) |  | 備考 |\n"
+        "| --- | --- | --- | --- |\n"
+        "|  | 2025 Q4 | 2026 Q1 |  |\n"
+        "| 東京 | 1,250 | 1,430 | 前年比+14% |\n"
+        "| 大阪 | 980 |  | 新規案件2件 |\n"
+        "| 合計 | 2,230 |  | 粗利率31.5% |"
+    )
+    result.append(_mock_text_page(table["page_index"], table_md, dims, confidence=0.9))
+
+    japanese = specs["raster_japanese"]
+    result.append(_mock_text_page(japanese["page_index"], japanese["full_text"], dims, confidence=0.95))
+
+    formula = specs["raster_formula"]
+    formula_md = "# Formula OCR Evaluation (raster)\n\nE=mc^2\n\nint_0^1 x^2 dx = 1/3"
+    result.append(_mock_text_page(formula["page_index"], formula_md, dims, confidence=0.92))
+    return result
+
+
+def build_mock_handwriting_pages(ground_truth: dict[str, Any]) -> list[dict[str, Any]]:
+    """系統B の合成応答。手書きは一部トークンを落とす想定 (recall < 1) の illustrative なモック。"""
+    dims = {"width": 595, "height": 842, "unit": "pt"}
+    result: list[dict[str, Any]] = []
+    for spec in ground_truth["handwriting"]["pages"]:
+        included = spec["expected_texts"][:5]  # 先頭 5 トークンだけ拾えた想定
+        markdown = f"# {spec['kind']}\n\n" + " ".join(included)
+        result.append(_mock_text_page(spec["page_index"], markdown, dims, confidence=0.78))
+    return result
+
+
+# 系統C dry-run 用の段階別 (body, table, figure, images) 取り込み数。
+# 実挙動の主張ではなく、C2->C3 に明確な急落 (境界) を作って evaluate.py の境界判定を確認する。
+MOCK_C_PLAN = {
+    "C0": (4, 0, 0, 0),
+    "C1": (3, 3, 0, 0),
+    "C2": (3, 5, 0, 0),
+    "C3": (3, 0, 1, 1),
+    "C4": (3, 1, 1, 2),
+    "C5": (1, 0, 1, 1),
+}
+
+
+def build_mock_staged_pages(ground_truth: dict[str, Any], tiny_png_base64: str) -> list[dict[str, Any]]:
+    """系統C の合成応答。段階が進むほど figure/table トークンを落とし images[] を増やす。"""
+    dims = {"width": 595, "height": 842, "unit": "pt"}
+    result: list[dict[str, Any]] = []
+    for spec in ground_truth["staged_boundary"]["stages"]:
+        nb, nt, nf, ni = MOCK_C_PLAN[spec["stage"]]
+        tokens = spec["tokens"]
+        included = tokens["body"][:nb] + tokens["table"][:nt] + tokens["figure"][:nf]
+        parts = [f"# {spec['stage']} raster stage ({spec['kind']})", ""]
+        parts.extend(included)
+        images: list[dict[str, Any]] = []
+        for index in range(ni):
+            image_id = f"img-{spec['stage'].lower()}-{index}.png"
+            parts.append(f"![{image_id}]({image_id})")
+            images.append(
+                {
+                    "id": image_id,
+                    "top_left_x": 90,
+                    "top_left_y": 200 + index * 120,
+                    "bottom_right_x": 520,
+                    "bottom_right_y": 320 + index * 120,
+                    "image_base64": tiny_png_base64,
+                }
+            )
+        page = _mock_text_page(spec["page_index"], "\n\n".join(parts), dims, confidence=0.86)
+        page["images"] = images
+        page["blocks"] = [{"type": "image", "image_id": img["id"]} for img in images] or [{"type": "text"}]
+        result.append(page)
+    return result
+
+
+def _mock_text_page(index: int, markdown: str, dims: dict[str, Any], *, confidence: float) -> dict[str, Any]:
+    return {
+        "index": index,
+        "markdown": markdown,
+        "images": [],
+        "tables": [],
+        "hyperlinks": [],
+        "dimensions": dims,
+        "confidence_scores": {"average_page_confidence_score": confidence},
+        "blocks": [{"type": "text", "content": markdown}],
+    }
 
 
 def markdown_table(cell_texts: list[str]) -> str:
