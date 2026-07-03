@@ -357,7 +357,7 @@ Status: decided
 | 2 | remarkdownize CLI セマンティクス | draft | --latest のデフォルト挙動 | Phase 4 着手前 |
 | 3 | Dead Evidence Pointer | decided (コア) | bulk verify スループット / 二重 purge | Phase 4 着手前 |
 | 4 | Incremental Markdownize プロンプト規約 | decided | なし | Step 1 着手前 (充足済み) |
-| 5 | 検索評価ハーネス (合成コーパス + ゴールデンクエリ、§4.3) | draft | ゴールデンクエリの整備 | Step 3 着手前 |
+| 5 | 検索評価ハーネス (合成コーパス + ゴールデンクエリ、§4.3) | decided | なし (2026-07-03 完了: `eval/` に合成コーパス 305 ファイル / 7 scope + 履歴 fixture + ゴールデンクエリ 50 件 (M3-1: 18 / M3-2: 16 / M3-3: 16)。dry-run 検証済み。以後のクエリ追加・差し替えは §4.2 凍結規律) | Step 3 着手前 (充足済み) |
 | 6 | Markdownize Adapter 選定 = Mistral OCR 系 ([07 §5.2](07-adapter-spec.md)) | decided | なし (実地検証 2026-07-03 完了: sync/batch 両モードで表 1.0 / 日本語 CER 0.0 / 画像 1/1 / 数式 LaTeX 化。`experiments/ocr-verification`) | Step 2 着手前 (充足済み) |
 
 Step N の着手条件は「期日が『Step N 着手前』の行がすべて decided」の機械的チェック (§3.2)。2026-07-02 の本改訂適用後、Step 1 のブロッカーは 0 件。#2/#3 の残未決は実装が Phase 4+ に割当てられた機能 (§3.1) にのみ関わるため、Step 1-4 をブロックしない。
