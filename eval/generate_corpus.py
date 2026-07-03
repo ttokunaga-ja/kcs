@@ -14,6 +14,7 @@
 """
 
 import argparse
+import hashlib
 import json
 import os
 import sys
@@ -22,14 +23,24 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import corpus_spec as spec  # noqa: E402
 
 
+def _raw_sha256(raw_bytes):
+    """ファイル bytes の sha256 hexdigest (run_eval の解決層が raw_hash に使う)."""
+    return hashlib.sha256(raw_bytes).hexdigest()
+
+
 def build_manifest():
     files = []
-    # anchor 文書
+    # anchor 文書: sections は {slug, heading} (実見出しテキスト) を持つ。
+    # run_eval の解決層が heading -> slugify(heading) -> section_id を導くため heading が必須。
+    # raw_sha256 は render_anchor が書き出す bytes の sha256。run_eval が raw_hash に使う。
     for anchor in spec.ANCHORS:
-        files.append(spec.anchor_manifest_entry(anchor))
+        entry = spec.anchor_manifest_entry(anchor)
+        entry["raw_sha256"] = _raw_sha256(spec.render_anchor(anchor).encode("utf-8"))
+        files.append(entry)
     # filler 文書
     for scope in spec.SCOPES:
         for f in spec.filler_files(scope):
+            raw = f["data"] if f["is_binary"] else f["text"].encode("utf-8")
             files.append({
                 "scope": scope,
                 "file": f["file"],
@@ -37,6 +48,7 @@ def build_manifest():
                 "anchor": False,
                 "role": "filler",
                 "sections": f["sections"],
+                "raw_sha256": _raw_sha256(raw),
             })
     files.sort(key=lambda e: (e["scope"], e["file"]))
     return {

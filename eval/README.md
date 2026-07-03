@@ -17,7 +17,8 @@
 | `replay_history.py` | 各 scope で `init → index → snapshot → 編集 → snapshot → リネーム → snapshot → 削除 → snapshot` を決定論再現。`history-manifest.json` を出力 |
 | `golden-queries.jsonl` | ゴールデンクエリ (M3-1 / M3-2 / M3-3 各 16+ 件)。**リポジトリ保持の正本** |
 | `history-manifest.json` | replay がリネーム/編集/削除したファイルの記録 (`replay_history.py` が生成) |
-| `run_eval.py` | 評価ランナー。`kcs search --json` で Recall@10 を集計 (Step 3 実装後に有効)。`--dry-run` は expected 実在チェック |
+| `run_eval.py` | 評価ランナー。`kcs search --json` で Recall@10 を集計。expected のニーモニック → 実 `section_id` の解決層 (docs/04 §4.1 slug) を持つ。`--dry-run` は expected 実在 + 解決チェック。`--scenario` でシナリオ絞り込み |
+| `test_run_eval.py` | `run_eval` の単体テスト (slugify / 解決層 / recall_at_k / exit 分類)。`python3 -m unittest eval.test_run_eval` |
 
 ## 使い方
 
@@ -34,13 +35,27 @@ python3 eval/generate_corpus.py --out /tmp/kcs-eval-corpus
 python3 eval/replay_history.py --corpus /tmp/kcs-eval-corpus --bin target/release/kcs
 
 # 3a. dry-run: golden-queries の expected {scope,file,section} が
-#     corpus-manifest.json / history-manifest.json に実在するか検証 (Step 3 前でも通る)
+#     corpus-manifest.json / history-manifest.json に実在し、かつ
+#     (raw_hash, section_id) へ解決できる (slugify が空でない) か検証 (Step 3 前でも通る)
 python3 eval/run_eval.py --dry-run --corpus /tmp/kcs-eval-corpus
 
-# 3b. 本評価: Recall@10 をシナリオ別に集計 (kcs search 実装後に有効)。
-#     現状は search 未実装のため results.json / report.md をスケルトン出力して完走する
+# 3b. 本評価: Recall@10 をシナリオ別に集計。
+#     kcs search 未実装の間は全クエリ NOT-IMPLEMENTED → exit 2 (未実装を green にしない)。
 python3 eval/run_eval.py --corpus /tmp/kcs-eval-corpus --bin target/release/kcs
+
+# 3c. シナリオ絞り込み (複数指定可)。Step 3 の Done gate は M3-1 のみ (下記)。
+python3 eval/run_eval.py --scenario M3-1 --corpus /tmp/kcs-eval-corpus --bin target/release/kcs
 ```
+
+### exit コード (docs/09 §4.3, 2026-07-03 J2 裁定)
+
+| 状況 | exit | 扱い |
+| --- | --- | --- |
+| 全シナリオ (対象) が Recall@10 >= 0.8 | `0` | PASS |
+| `KCS-E-*-NOT-IMPLEMENTED*` 系のクエリが 1 件以上 | `2` | 未実装。Recall 判定は無効 (green にしない) |
+| Recall 未達 / 実行失敗 (非 0 かつ非 3 exit・不正レスポンス・解決不能) | `1` | FAIL。当該クエリは recall 0 として集計に残す |
+
+exit `3` (部分成功) は stdout の JSON を採点対象にする (実装後の部分成功や実バグを未実装で握り潰さない)。
 
 ## シナリオと評価コーパスの対応 (docs/09 §4)
 
@@ -51,8 +66,31 @@ python3 eval/run_eval.py --corpus /tmp/kcs-eval-corpus --bin target/release/kcs
 | **M3-3** 削除再発見 | `--include-deleted` | 削除された anchor の数値を再発見 | 削除済み file の chunk がヒット |
 
 `expected` は `{scope, file, section}` の分離形式 (docs/09 §4.3、`03-data-model.md` §3
-「直下のみ」規則)。`raw_hash` は取り込み後に確定するため、評価ハーネスが取り込み時に
-`{scope, file}` → raw_hash / chunk へ解決する (Step 3 の `run_eval.recall_at_k` で実装)。
+「直下のみ」規則)。`section` は **英語ニーモニック** (例 `"recall"`) であり、実 `section_id` ではない。
+
+### expected → (raw_hash, section_id) の解決 (J2 裁定, 2026-07-03)
+
+Recall の突き合わせ単位は `(raw_hash, section_id)` (docs/09 §4.3)。`expected` はニーモニックと
+`{scope, file}` の分離形式なので、ハーネスが以下の手順で実値へ解決する:
+
+1. **section (ニーモニック) → heading (実見出しテキスト)**
+   `corpus-manifest.json` / `history-manifest.json` の anchor `sections[]` が
+   `{slug: ニーモニック, heading: 実見出し}` を持つ (正本は `corpus_spec.ANCHORS`)。
+   例: `"recall"` → 見出し `"回収率と精度"`。
+2. **heading → section_id** … `docs/04-pipeline.md §4.1` の slug 規則で `slugify(heading)`。
+   例: `slugify("回収率と精度")` = `"回収率と精度"` (日本語は保持。英語ニーモニックとは一致しない)。
+   これが J2 の核心: `"recall"` を実 `section_id` として突き合わせると必ずミスする。
+3. **{scope, file} → raw_hash** … manifest が記録する `raw_sha256` (ファイル bytes の sha256) から
+   `raw_hash = "sha256:" + raw_sha256`。M3-2 (編集/リネーム) / M3-3 (削除) は
+   `history-manifest.json` が **旧内容** の `raw_sha256` と heading を記録し、そちらを優先する。
+
+突き合わせ時、`evidence_pointer.section_id` (docs/08 §2 では heading_path を "/" 連結した slug) は
+最深 (leaf) セグメントを取り、`slugify(heading)` と比較する (見出し「回収率と精度」→ `"回収率と精度"`)。
+
+### Recall 実測の gate タイミング
+
+- **Step 3 の Done gate は M3-1 のみ** (`--scenario M3-1`)。M3-2 / M3-3 の Recall 実測は
+  `--all-history` / `--include-deleted` が揃う **Step 4 完了時**に判定する。
 
 ## dogfood との関係 (docs/09 §4.3)
 

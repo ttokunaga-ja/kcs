@@ -19,6 +19,7 @@
 """
 
 import argparse
+import hashlib
 import json
 import os
 import subprocess
@@ -27,9 +28,27 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import corpus_spec as spec  # noqa: E402
 
+# anchor の (scope, file) -> 定義 (旧内容の見出し解決に使う)。
+# renamed は old_file、edited/deleted は file が anchor の原名と一致する。
+_ANCHOR_BY_KEY = {(a["scope"], a["file"]): a for a in spec.ANCHORS}
+
 
 class ReplayError(RuntimeError):
     pass
+
+
+def _sha256_file(path):
+    """ファイル bytes の sha256 hexdigest (旧内容 raw_hash 解決用)."""
+    with open(path, "rb") as fh:
+        return hashlib.sha256(fh.read()).hexdigest()
+
+
+def _sections_for(scope, file_):
+    """(scope, file) の anchor 定義から {slug, heading} 列を返す (旧内容の見出し)."""
+    anchor = _ANCHOR_BY_KEY.get((scope, file_))
+    if not anchor:
+        return []
+    return [{"slug": s["slug"], "heading": s["heading"]} for s in anchor["sections"]]
 
 
 def run_kcs(bin_path, scope_dir, args, tolerate_partial=True):
@@ -88,6 +107,9 @@ def replay(corpus_dir, bin_path):
     deletes_by_scope = group_by_scope(spec.HISTORY["deletes"])
 
     per_scope = {}
+    # (scope, file/old_file) -> 操作直前 (旧内容) のファイル bytes の sha256。
+    # rename は bytes 不変、edit は編集前、delete は削除前を採る。
+    old_hashes = {}
     for scope in spec.SCOPES:
         scope_dir = os.path.join(corpus_dir, scope)
         if not os.path.isdir(scope_dir):
@@ -99,30 +121,36 @@ def replay(corpus_dir, bin_path):
 
         steps = ["baseline"]
 
-        # 編集 -> snapshot
+        # 編集 -> snapshot (旧値 raw_hash は編集前の bytes)
         edits = edits_by_scope.get(scope, [])
         if edits:
             for e in edits:
+                old_hashes[(scope, e["file"])] = _sha256_file(
+                    os.path.join(scope_dir, e["file"]))
                 apply_edit(scope_dir, e)
             run_kcs(bin_path, scope_dir, ["index", "--approve"])
             files = ", ".join(e["file"] for e in edits)
             run_kcs(bin_path, scope_dir, ["snapshot", "-m", f"edit: {files}"])
             steps.append("edit")
 
-        # リネーム -> snapshot
+        # リネーム -> snapshot (rename は bytes 不変。旧名時点の bytes を記録)
         renames = renames_by_scope.get(scope, [])
         if renames:
             for r in renames:
+                old_hashes[(scope, r["old_file"])] = _sha256_file(
+                    os.path.join(scope_dir, r["old_file"]))
                 apply_rename(scope_dir, r)
             run_kcs(bin_path, scope_dir, ["index", "--approve"])
             pairs = ", ".join(f"{r['old_file']}->{r['new_file']}" for r in renames)
             run_kcs(bin_path, scope_dir, ["snapshot", "-m", f"rename: {pairs}"])
             steps.append("rename")
 
-        # 削除 -> snapshot
+        # 削除 -> snapshot (削除前の bytes を記録)
         deletes = deletes_by_scope.get(scope, [])
         if deletes:
             for d in deletes:
+                old_hashes[(scope, d["file"])] = _sha256_file(
+                    os.path.join(scope_dir, d["file"]))
                 apply_delete(scope_dir, d)
             run_kcs(bin_path, scope_dir, ["index", "--approve"])
             files = ", ".join(d["file"] for d in deletes)
@@ -138,21 +166,41 @@ def replay(corpus_dir, bin_path):
             "messages": [c.get("message") for c in commits],
         }
 
-    return per_scope
+    return per_scope, old_hashes
 
 
-def build_manifest(per_scope):
+def build_manifest(per_scope, old_hashes):
+    # rename/edit/delete 対象の「旧内容」raw_sha256 と heading を記録する。
+    # run_eval の解決層が expected {scope,file,section} -> (raw_hash, section_id) を導くのに使う。
+    def _renamed(r):
+        return {
+            "scope": r["scope"], "old_file": r["old_file"], "new_file": r["new_file"],
+            "raw_sha256": old_hashes.get((r["scope"], r["old_file"])),
+            "sections": _sections_for(r["scope"], r["old_file"]),
+        }
+
+    def _edited(e):
+        return {
+            "scope": e["scope"], "file": e["file"],
+            "old_value": e["old_value"], "new_value": e["new_value"],
+            "raw_sha256": old_hashes.get((e["scope"], e["file"])),
+            "sections": _sections_for(e["scope"], e["file"]),
+        }
+
+    def _deleted(d):
+        return {
+            "scope": d["scope"], "file": d["file"],
+            "raw_sha256": old_hashes.get((d["scope"], d["file"])),
+            "sections": _sections_for(d["scope"], d["file"]),
+        }
+
     return {
         "replay": "eval/replay_history.py",
         "seed": spec.SEED,
         "scopes": spec.SCOPES,
-        "renamed": spec.HISTORY["renames"],
-        "edited": [
-            {"scope": e["scope"], "file": e["file"],
-             "old_value": e["old_value"], "new_value": e["new_value"]}
-            for e in spec.HISTORY["edits"]
-        ],
-        "deleted": spec.HISTORY["deletes"],
+        "renamed": [_renamed(r) for r in spec.HISTORY["renames"]],
+        "edited": [_edited(e) for e in spec.HISTORY["edits"]],
+        "deleted": [_deleted(d) for d in spec.HISTORY["deletes"]],
         "verified": per_scope,
     }
 
@@ -172,8 +220,8 @@ def main(argv=None):
         raise SystemExit(f"[error] kcs バイナリ不在: {bin_path} "
                          f"(cargo build --release 済みか確認)")
 
-    per_scope = replay(corpus_dir, bin_path)
-    manifest = build_manifest(per_scope)
+    per_scope, old_hashes = replay(corpus_dir, bin_path)
+    manifest = build_manifest(per_scope, old_hashes)
     with open(args.manifest, "w", encoding="utf-8", newline="\n") as fh:
         json.dump(manifest, fh, ensure_ascii=False, indent=2, sort_keys=True)
         fh.write("\n")
