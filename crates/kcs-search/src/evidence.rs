@@ -46,32 +46,6 @@ pub struct EvidencePointerIssueRequest {
     pub char_end: Option<u64>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum EvidenceResolutionKind {
-    RawObject,
-    NormalizedUnit,
-    ChunkText,
-    Tombstone,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct EvidenceResolution {
-    pub pointer: EvidencePointer,
-    pub kind: EvidenceResolutionKind,
-    pub commit_shallow: bool,
-    pub content_hash: Option<String>,
-    pub text: Option<String>,
-}
-
-pub trait EvidencePointerIssuer {
-    fn issue_pointer(&self, request: EvidencePointerIssueRequest) -> Result<EvidencePointer>;
-}
-
-pub trait EvidenceResolver {
-    fn resolve_pointer(&self, pointer: &EvidencePointer) -> Result<EvidenceResolution>;
-}
-
 pub fn issue_evidence_pointer(request: EvidencePointerIssueRequest) -> Result<EvidencePointer> {
     Ok(EvidencePointer {
         schema_version: EVIDENCE_POINTER_SCHEMA_VERSION,
@@ -87,16 +61,6 @@ pub fn issue_evidence_pointer(request: EvidencePointerIssueRequest) -> Result<Ev
         char_end: request.char_end,
         scope_id: request.scope_id,
         scope_path: request.scope_path,
-    })
-}
-
-pub fn resolve_evidence_pointer(pointer: &EvidencePointer) -> Result<EvidenceResolution> {
-    Ok(EvidenceResolution {
-        pointer: pointer.clone(),
-        kind: EvidenceResolutionKind::ChunkText,
-        commit_shallow: false,
-        content_hash: Some(pointer.chunk_hash.clone()),
-        text: None,
     })
 }
 

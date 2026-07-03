@@ -714,3 +714,277 @@ fn ct3_fts_004_rebuild_db_reenables_fts_search() {
 fn line_count(path: impl AsRef<Path>) -> usize {
     fs::read_to_string(path).unwrap().lines().count()
 }
+
+// ---------------------------------------------------------------------------
+// K6 — Evidence Pointer resolver (08 §3 / §4). Helpers below run `kcs` with a
+// caller-chosen cwd + XDG home so scope resolution stages can be isolated, and
+// place fixtures (tombstones, shallow commits) that Step 3 has no generator for.
+// ---------------------------------------------------------------------------
+
+use kcs_index::registry::{RegistryDb, RegistryEntry};
+
+/// Runs `kcs <args> --json` and returns `(exit_code, parsed_json)`, reading
+/// stdout on success and stderr on failure (mirrors `json_success`/`json_failure`).
+fn run_json(cwd: &Path, data_home: &Path, args: &[&str]) -> (i32, Value) {
+    let output = Command::cargo_bin("kcs")
+        .unwrap()
+        .current_dir(cwd)
+        .env("XDG_CONFIG_HOME", data_home.join("config"))
+        .env("XDG_DATA_HOME", data_home.join("data"))
+        .args(args)
+        .arg("--json")
+        .output()
+        .unwrap();
+    let code = output.status.code().unwrap();
+    let stream = if output.status.success() {
+        &output.stdout
+    } else {
+        &output.stderr
+    };
+    (code, serde_json::from_slice(stream).unwrap())
+}
+
+/// CAS object path: `<kcs>/objects/<kind>/ab/cd/<hash>` (kcs_core::cas::fanout).
+fn object_path(kcs_dir: &Path, kind: &str, hash: &str) -> std::path::PathBuf {
+    let digest = hash.strip_prefix("sha256:").unwrap();
+    kcs_dir
+        .join("objects")
+        .join(kind)
+        .join(&digest[0..2])
+        .join(&digest[2..4])
+        .join(hash)
+}
+
+/// Tombstone path: `<kcs>/tombstones/ab/cd/<raw_hash>` (05 §3.5).
+fn tombstone_path(kcs_dir: &Path, raw_hash: &str) -> std::path::PathBuf {
+    let digest = raw_hash.strip_prefix("sha256:").unwrap();
+    kcs_dir
+        .join("tombstones")
+        .join(&digest[0..2])
+        .join(&digest[2..4])
+        .join(raw_hash)
+}
+
+fn registry_path(data_home: &Path) -> std::path::PathBuf {
+    data_home.join("data/kcs/scope-registry.sqlite")
+}
+
+#[test]
+fn ct3_evidence_003_scope_resolves_via_path_then_registry() {
+    let parent = tempfile::tempdir().unwrap();
+    let data_home = parent.path().join("xdg");
+    let scope = parent.path().join("research");
+    let elsewhere = parent.path().join("elsewhere");
+    fs::create_dir_all(&scope).unwrap();
+    fs::create_dir_all(&elsewhere).unwrap();
+    fs::write(
+        scope.join("auth.md"),
+        "# 認証仕様\n\n## API Token\nトークン TTL は 3600 秒です。\n",
+    )
+    .unwrap();
+    json_success_path(&scope, &data_home, &["init"]);
+    json_success_path(&scope, &data_home, &["index", "--approve"]);
+    let search = json_success_path(&scope, &data_home, &["search", "トークン TTL 3600"]);
+    let pointer = first_result(&search)["evidence_pointer"].clone();
+    let scope_id = pointer["scope_id"].as_str().unwrap().to_owned();
+
+    // (a) valid scope_path + matching scope_id resolves. Run from a non-scope
+    //     cwd with an empty registry so *only* stage 1a (scope_path) can succeed.
+    let (code, viewed) = run_json(&elsewhere, &data_home, &["view", &pointer.to_string()]);
+    assert_eq!(code, 0, "scope_path stage failed: {viewed}");
+    assert!(viewed["text"].as_str().unwrap().contains("トークン TTL"));
+
+    // (b) broken scope_path -> registry lookup by scope_id resolves. Register the
+    //     scope directly (index-time registry wiring is Agent A's; §3.1 permits
+    //     the registry as the authoritative kcs_path source).
+    let registry = RegistryDb::open(registry_path(&data_home)).unwrap();
+    registry
+        .upsert(&RegistryEntry {
+            scope_id: scope_id.clone(),
+            kcs_path: scope.join(".kcs").display().to_string(),
+            root_path: scope.display().to_string(),
+            participates_in_global_search: true,
+            indexed: true,
+            last_seen_at: "2026-07-04T00:00:00Z".to_owned(),
+        })
+        .unwrap();
+    let mut broken = pointer.clone();
+    broken["scope_path"] = serde_json::json!(parent.path().join("gone/.kcs").display().to_string());
+    let (code, viewed) = run_json(&elsewhere, &data_home, &["view", &broken.to_string()]);
+    assert_eq!(code, 0, "registry stage failed: {viewed}");
+    assert!(viewed["text"].as_str().unwrap().contains("トークン TTL"));
+
+    // (c) broken scope_path + unknown scope_id + registry miss -> scope_unreachable.
+    let mut orphan = pointer.clone();
+    orphan["scope_path"] = serde_json::json!(parent.path().join("gone/.kcs").display().to_string());
+    orphan["scope_id"] = serde_json::json!("scope_does_not_exist");
+    let (code, err) = run_json(&elsewhere, &data_home, &["view", &orphan.to_string()]);
+    assert_eq!(code, 4);
+    assert_eq!(err["error_code"], "KCS-E-EVIDENCE-SCOPE-UNREACHABLE-001");
+}
+
+#[test]
+fn ct3_evidence_004_resolves_through_pointer_commit_tree() {
+    let parent = tempfile::tempdir().unwrap();
+    let data_home = parent.path().join("xdg");
+    let scope = parent.path().join("research");
+    fs::create_dir_all(&scope).unwrap();
+    fs::write(
+        scope.join("auth.md"),
+        "# 認証仕様\n\n## API Token\nトークン TTL は 3600 秒です。\n",
+    )
+    .unwrap();
+    json_success_path(&scope, &data_home, &["init"]);
+    json_success_path(&scope, &data_home, &["index", "--approve"]);
+    let search1 = json_success_path(&scope, &data_home, &["search", "トークン TTL 3600"]);
+    let p_auth = first_result(&search1)["evidence_pointer"].clone();
+    let commit1 = p_auth["commit"].as_str().unwrap().to_owned();
+
+    // Advance HEAD: add a second file, re-index (new tree -> commit2).
+    fs::write(
+        scope.join("ranking.md"),
+        "# 検索ランキング\n\n## RRF 融合\nRRF の定数 k=60 を使います。\n",
+    )
+    .unwrap();
+    json_success_path(&scope, &data_home, &["index", "--approve"]);
+    let search2 = json_success_path(&scope, &data_home, &["search", "RRF 定数 k 60"]);
+    let p_rank = pointer_for_path(&search2, "ranking.md").clone();
+    let commit2 = p_rank["commit"].as_str().unwrap().to_owned();
+    assert_ne!(commit1, commit2, "HEAD did not advance");
+
+    // The auth pointer (commit1) still resolves after HEAD advanced: resolution
+    // walks pointer.commit's tree, not HEAD's.
+    let (code, viewed) = run_json(&scope, &data_home, &["view", &p_auth.to_string()]);
+    assert_eq!(code, 0, "old-commit pointer stopped resolving: {viewed}");
+    assert!(viewed["text"].as_str().unwrap().contains("トークン TTL"));
+
+    // Discriminator: ranking.md's raw_hash exists in the working tree, in CAS,
+    // and in commit2's tree — but NOT in commit1's tree. Pointing p_rank at
+    // commit1 must fail (a working-tree scan would wrongly succeed).
+    let mut mismatched = p_rank.clone();
+    mismatched["commit"] = serde_json::json!(commit1);
+    let (code, err) = run_json(&scope, &data_home, &["view", &mismatched.to_string()]);
+    assert_eq!(
+        code, 4,
+        "raw_hash absent from pointer.commit tree should fail"
+    );
+    assert_eq!(err["error_code"], "KCS-E-PURGE-NOT-FOUND-001");
+}
+
+#[test]
+fn ct3_evidence_005_shallow_commit_resolves_directly() {
+    let dir = indexed_scope();
+    let search = json_success(&dir, &["search", "トークン TTL 3600"]);
+    let pointer = first_result(&search)["evidence_pointer"].clone();
+    let commit = pointer["commit"].as_str().unwrap();
+    let kcs_dir = dir.path().join(".kcs");
+
+    // Make the commit shallow: discard its tree object (05 §2.2 GC has no Step 3
+    // generator, so hand-place the shallow state).
+    let commit_bytes = fs::read(object_path(&kcs_dir, "commits", commit)).unwrap();
+    let commit_obj: Value = serde_json::from_slice(&commit_bytes).unwrap();
+    let tree = commit_obj["tree"].as_str().unwrap();
+    fs::remove_file(object_path(&kcs_dir, "trees", tree)).unwrap();
+
+    let ptr = pointer.to_string();
+    let viewed = json_success(&dir, &["view", &ptr]);
+    assert_eq!(viewed["commit_shallow"], true);
+    assert!(viewed["text"].as_str().unwrap().contains("トークン TTL"));
+
+    let opened = json_success(&dir, &["open", &ptr]);
+    assert_eq!(opened["commit_shallow"], true);
+    assert_eq!(opened["status"], "opened");
+    assert!(opened["path"].as_str().unwrap().ends_with("auth.md"));
+}
+
+#[test]
+fn ct3_evidence_006_three_valued_resolution_failures() {
+    // (a) tombstoned -> status="purged" response, open exit 4.
+    let dir = indexed_scope();
+    let search = json_success(&dir, &["search", "トークン TTL 3600"]);
+    let pointer = first_result(&search)["evidence_pointer"].clone();
+    let raw_hash = pointer["raw_hash"].as_str().unwrap().to_owned();
+    let commit = pointer["commit"].as_str().unwrap().to_owned();
+    let kcs_dir = dir.path().join(".kcs");
+    let tomb = tombstone_path(&kcs_dir, &raw_hash);
+    fs::create_dir_all(tomb.parent().unwrap()).unwrap();
+    fs::write(
+        &tomb,
+        serde_json::json!({
+            "raw_hash": raw_hash,
+            "purged_at": "2026-04-25T12:00:00Z",
+            "purged_reason": "legal",
+            "purged_in_commit": commit,
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let ptr = pointer.to_string();
+    let err = json_failure(&dir, &["open", &ptr], 4);
+    assert_eq!(err["error_code"], "KCS-E-PURGE-TOMBSTONED-001");
+    assert_eq!(err["context"]["status"], "purged");
+    assert_eq!(err["context"]["purged_reason"], "legal");
+    assert_eq!(err["context"]["raw_hash"], raw_hash);
+
+    // (b) no tombstone but the raw object is gone -> not_found.
+    let dir_b = indexed_scope();
+    let search_b = json_success(&dir_b, &["search", "トークン TTL 3600"]);
+    let pointer_b = first_result(&search_b)["evidence_pointer"].clone();
+    let raw_hash_b = pointer_b["raw_hash"].as_str().unwrap().to_owned();
+    fs::remove_file(dir_b.path().join("auth.md")).unwrap();
+    fs::remove_file(object_path(&dir_b.path().join(".kcs"), "raw", &raw_hash_b)).unwrap();
+    let ptr_b = pointer_b.to_string();
+    let err_b = json_failure(&dir_b, &["open", &ptr_b], 4);
+    assert_eq!(err_b["error_code"], "KCS-E-PURGE-NOT-FOUND-001");
+
+    // (c) scope unreachable.
+    let dir_c = indexed_scope();
+    let bad = "kcs://scope_missing/sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc/sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
+    let err_c = json_failure(&dir_c, &["open", bad], 4);
+    assert_eq!(err_c["error_code"], "KCS-E-EVIDENCE-SCOPE-UNREACHABLE-001");
+}
+
+#[test]
+fn ct3_uri_002_open_resolves_object_raw_uri() {
+    let dir = indexed_scope();
+    let search = json_success(&dir, &["search", "トークン TTL 3600"]);
+    let pointer = &first_result(&search)["evidence_pointer"];
+    let scope_id = pointer["scope_id"].as_str().unwrap();
+    let raw_hash = pointer["raw_hash"].as_str().unwrap();
+    let uri = format!("kcs://{scope_id}/object/raw/{raw_hash}");
+    let opened = json_success(&dir, &["open", &uri]);
+    assert_eq!(opened["status"], "opened");
+    assert_eq!(opened["object_type"], "raw");
+    assert!(opened["path"].as_str().unwrap().ends_with("auth.md"));
+}
+
+#[test]
+fn ct3_uri_002_open_rejects_invalid_object_uri() {
+    let dir = indexed_scope();
+    let search = json_success(&dir, &["search", "トークン TTL 3600"]);
+    let pointer = &first_result(&search)["evidence_pointer"];
+    let scope_id = pointer["scope_id"].as_str().unwrap().to_owned();
+    let raw_hash = pointer["raw_hash"].as_str().unwrap().to_owned();
+    // Unknown object type -> exit 2.
+    json_failure(
+        &dir,
+        &["open", &format!("kcs://{scope_id}/object/bogus/{raw_hash}")],
+        2,
+    );
+    // Malformed hash -> exit 2.
+    json_failure(
+        &dir,
+        &["open", &format!("kcs://{scope_id}/object/raw/not-a-hash")],
+        2,
+    );
+}
+
+fn pointer_for_path<'a>(search: &'a Value, path: &str) -> &'a Value {
+    search["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|result| result["evidence_pointer"]["path_at_commit"] == path)
+        .map(|result| &result["evidence_pointer"])
+        .unwrap_or_else(|| panic!("no search result for {path}"))
+}

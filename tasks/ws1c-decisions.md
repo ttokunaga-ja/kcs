@@ -56,3 +56,11 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     irrelevant to the resolution contract (08 §3); agents consume `--json` anyway. The audit round
     (tasks/step3c-fixes.md) accepted this within Step 3 scope on condition it is recorded here.
     The OS-launch layer is Step 4+.
+32. New error codes for the K6 evidence resolver (Step3c). `KCS-E-PURGE-TOMBSTONED-001` (exit 4)
+    carries the 08 §4.1 tombstone response (`status="purged"` body in `context`) when `kcs open` /
+    `kcs view` hit a tombstoned raw_hash — 08 §4.1 fixes the response shape but names no code, and
+    06 §8's code list is explicitly examples ("例:"), so a PURGE-domain code is minted here.
+    `KCS-E-EVIDENCE-SCOPE-AMBIGUOUS-001` (exit 4) covers 08 §3.1 step 1b "曖昧なら候補一覧 error"
+    (multiple registry entries for one scope_id sharing the newest `last_seen_at`); the candidate
+    list is returned in `context.candidates`. Both codes follow the 06 §8 DOMAIN namespace; adding
+    them to the docs' example list is deferred to the next docs edit window.
