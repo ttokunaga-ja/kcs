@@ -134,3 +134,57 @@ minor (可能なら): markdownize_units 残骸の削除 or 結線、root-relativ
 ページ別 markdown、(c) `**/*.ext` ignore が機能、(d) revoke 後 --online で送信されない、
 (e) 軽微変更の再 index が (mock incremental adapter で) mode=incremental になる — を
 結合テストとして含めること。
+
+---
+
+# 再監査ラウンド 3 の裁定 (2026-07-03、commit 3b50397 に対して)
+
+判定: **fix-required 4/4 (継続)**。解消確認 (実機): G1 骨格 / G2 incremental (4 ページ PDF の
+1 ページ編集で mode=incremental + reused_from を確認) / G5 / G6 基本 / G8 基本 / G9 の 5 シナリオ
+CLI 結合化。**ただし今回も修正が新規 critical 退行を 2 件持ち込んだ。**
+
+## 必須修正 H1-H12
+
+- **H1 [critical] 再帰スキャンのスコープ境界違反** (4/4、Opus/Sonnet 実機立証): `**` ignore 対応で
+  導入された再帰走査が、非 ignore のサブフォルダ配下ファイルを親 scope の markdownize/persist/
+  task/課金に流し込む (03 §3「直下のみ」違反)。commit tree 側は正しく拒否するため orphan
+  normalized instance + phantom cost + **プライバシー越境** (親の承認だけでサブフォルダ内容が
+  online 送信対象になる) が発生。修正: 再帰は ignore 判定と子 .kcs 検出のみに使い、候補化は
+  直下ファイル限定。**回帰ガード**: 「サブフォルダのファイルが親の objects/tasks/ledger に
+  一切現れない」ことを assert する境界契約テストを追加。ct2_ignore_001 が違反挙動を「正」として
+  固定しているので修正
+- **H2 [critical] オンライン費用が cost ledger に未記録** (Sonnet): append_monthly の呼び出しは
+  無料 baseline 側のみで、実際に課金される Mistral 呼び出しのコストが記録されない = budget
+  guardrail が本来の対象に無効。online task 実行成功時に実コストを記帳し、cap 判定に反映
+- **H3 [major] retry_policy 未接続**: AdapterError にエラー種別が無く、batch retry が全 Failed を
+  無条件再試行 (auth_error の max_attempts=0 も無限再試行)。executor/retry の両方で retry_policy
+  (backoff / max_attempts / next_retry_at) を参照
+- **H4 [major] Partial 遷移不在**: executor が Done/Failed のみ。unit 単位の部分失敗から
+  task_status_from_unit_counts で Partial を永続化
+- **H5 [major] allow_network=true の正系未実装**: config による恒久 opt-in (07 §3) を
+  network_allowed へ (優先順位 CLI > scope > user)
+- **H6 [major] --online の opt-in 誤報告** (Sonnet 実機): approvals.jsonl の存在有無だけで判定し
+  内容 (network_opt_in) を見ない。ct2_network_002 が誤挙動を assert しているので修正
+- **H7 [major] 画像 placeholder 置換がハイパーリンクを破壊** (Sonnet 実機): `](` の最初の出現を
+  無差別置換するため、画像より前のリンク URL が kcs:// URI に化け、実 placeholder は dangling。
+  画像構文 `![...](...)` のみをマッチ対象に
+- **H8 [major] PDF 疑似ページ分割の内容漏出** (Sonnet 実機: 3 ページ不均等 PDF で隣接ページへ
+  漏出): 均等分割ヒューリスティックを廃し、content stream 境界とテキストの対応で分割
+- **H9 [major] full 再投入も失敗した場合に index 全体が abort**: per-candidate で catch して
+  TaskStatus::Failed を永続化しループ継続。exit code は部分失敗 (3) 系へ
+- **H10 [major] device cap 既定 $50 未適用** (04 §5.4): 設定欠如時は無制限ではなく既定値
+- **H11 [major] cap_kind (device/folder) が status に出ない** (04 §5.4 要件)
+- **H12 [major] per_adapter cap 未読 + schema が spec 例示 config を拒否**: 実装するか、
+  spec/schema 側の矛盾を発注側へ報告して裁定を仰ぐ
+
+minor: HTTP 実装のテストゼロ (with_base_url 未使用 — ローカル HTTP サーバで実 HTTP テストを追加、
+テスト注入 env var は debug_assertions ゲート)、profile() が環境に API キーがあると実通信し得る
+(hermetic 化)、pin 解決を /v1/models の aliases フィールド利用に、media_type フォールバック、
+死 sentinel (network-revoked 拡張子無し) 削除、markdownize_units 残骸、INCR-008 の常真残存、
+cost ledger の jsonl 実装名 (仕様は sqlite — decisions に記録の上どちらかに寄せる)
+
+## 受け入れ条件 (H ラウンド)
+
+前回条件に加え: (f) サブフォルダ境界の回帰ガードテスト、(g) online task 成功 → ledger 記帳 →
+次回 cap 判定に反映、(h) リンク + 画像混在 markdown の置換正しさ、(i) 不均等 3 ページ PDF の
+ページ忠実性、(j) auth_error task が retry されないこと — を結合テスト化。
