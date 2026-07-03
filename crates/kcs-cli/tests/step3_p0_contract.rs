@@ -1485,3 +1485,31 @@ fn ct3_embed_009_batch_retry_and_resume_execute_pending_embedding_tasks() {
         "all embedding tasks must be done after retry"
     );
 }
+
+#[test]
+fn ct3_embed_010_retry_executes_after_snapshot_advances_head() {
+    // 2026-07-04 実運用バグ #2 の回帰ガード: `kcs snapshot` は tree_entries を
+    // 射影せず HEAD だけ進めるため、enrichment の live-chunk JOIN が 0 件になり
+    // retry/resume が何も実行しなかった (search は lazy 射影するので隠れていた)。
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("a.md"), "# メモ\n射影テスト。\n").unwrap();
+    kcs(&dir, &["init"]).assert().success();
+    json_success_embed(&dir, "rate_limit", &["index", "--approve"]);
+    // snapshot で HEAD を射影なしに前進させる (replay の各 step と同じ形)
+    json_success_embed(&dir, "rate_limit", &["snapshot", "-m", "advance"]);
+
+    let retry = json_success_embed(&dir, "mock", &["batch", "retry"]);
+    assert!(
+        retry["tasks_executed"].as_u64().unwrap() > 0,
+        "retry must project tree_entries lazily and execute, got {retry}"
+    );
+    let status = json_success_embed(&dir, "mock", &["status"]);
+    let emb: Vec<_> = status["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|t| t["type"] == "embedding")
+        .collect();
+    assert!(!emb.is_empty());
+    assert!(emb.iter().all(|t| t["status"] == "done"));
+}
