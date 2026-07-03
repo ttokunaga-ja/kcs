@@ -6,7 +6,7 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
 
 ## Decisions
 
-1. Lock contention: writing commands acquire `.kcs/.lock` with `create_new` and fail fast when it is held by a live process. The loser returns `KCS-E-STORE-LOCKED-001` with exit 3. Lock files include `{pid, token, created_at}`; stale recovery is allowed only when the recorded pid is not alive, and unlock removes the file only if its token still matches the owner.
+1. Lock contention: writing commands acquire `.kcs/.lock` with `create_new` and fail fast when it is held by a live process. The loser returns `KCS-E-STORE-LOCKED-001` with exit 3. Lock files include `{pid, token, created_at}`; stale recovery is allowed only when the recorded pid is not alive (liveness via `ps -p`, chosen over `kill -0` whose EPERM/ESRCH exit codes are indistinguishable; spawn failure counts as alive = no reclaim), and unlock removes the file only if its token still matches the owner. Known limitation (2026-07-03 audit N2): unlink-based reclaim retains a microscopic TOCTOU window between re-validation and `remove_file`; acceptable for Step 1 (single-user, human CLI frequency) — revisit before any multi-writer usage.
 2. Step 1 raw-only tree entries omit `normalize`. This follows `docs/03-data-model.md` §8 optional `normalize`; Step 1 generates only `{path,type,raw_hash}` entries.
 3. Manual snapshot with unchanged tree is a no-op: no commit is created, HEAD remains unchanged, exit 0.
 4. Step 1 status vocabulary is `new`, `modified`, `deleted`, `unchanged`. `up_to_date` is reserved for the normalized-instance meaning in `docs/03-data-model.md` §6.
