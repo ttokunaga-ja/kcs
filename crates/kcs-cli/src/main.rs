@@ -3921,6 +3921,10 @@ fn run_embedding_enrichment(repo: &Repository, online: bool) -> Result<usize> {
     let Some(head) = repo.head_commit_hash()? else {
         return Ok(0);
     };
+    // `kcs snapshot` advances HEAD without projecting tree_entries (search
+    // projects lazily); do the same here or the live-chunk JOIN silently
+    // matches nothing for any scope whose last commit was a snapshot.
+    ensure_snapshot_tree_entries(repo, &conn, &head)?;
     let chunking_config_hash = read_chunking_config(repo)?.chunking_config_hash;
     let pending = live_chunks_without_embedding(&conn, &head, &chunking_config_hash)?;
     if pending.is_empty() {
