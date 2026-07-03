@@ -272,6 +272,41 @@ fn s2_manifest_retains_deleted_rows_and_recovers() {
     assert_eq!(b["raw_hash"].as_str().unwrap(), hash_bytes(b"three"));
 }
 
+#[test]
+fn s2_stale_manifest_cannot_lose_a_deletion() {
+    // WS1d cross-review: the previous state must come from the prior HEAD tree,
+    // not the manifest. A stale manifest that lost b.pdf's live row must not
+    // prevent the deleted row (with the tree's raw_hash) from being recorded.
+    let temp = tempfile::tempdir().unwrap();
+    let repo = Repository::init(temp.path()).unwrap();
+    fs::write(temp.path().join("a.pdf"), b"one").unwrap();
+    fs::write(temp.path().join("b.pdf"), b"two").unwrap();
+    repo.snapshot(Some("first"), Some("2026-04-29T12:00:00Z"))
+        .unwrap();
+
+    // Simulate a stale (schema-valid) manifest missing b.pdf's row entirely.
+    let stale = serde_json::json!({
+        "schema_version": 1,
+        "files": [
+            { "path": "a.pdf", "raw_hash": hash_bytes(b"one"), "status": "unchanged" }
+        ],
+        "updated_at": "2026-04-29T12:00:00Z",
+    });
+    fs::write(
+        repo.kcs_dir().join("manifest.json"),
+        serde_json::to_vec_pretty(&stale).unwrap(),
+    )
+    .unwrap();
+
+    fs::remove_file(temp.path().join("b.pdf")).unwrap();
+    repo.snapshot(Some("second"), Some("2026-04-29T12:00:01Z"))
+        .unwrap();
+    let files = manifest_files(repo.kcs_dir());
+    let b = find_file(&files, "b.pdf");
+    assert_eq!(b["status"], "deleted");
+    assert_eq!(b["raw_hash"].as_str().unwrap(), hash_bytes(b"two"));
+}
+
 fn manifest_files(kcs_dir: &std::path::Path) -> Vec<serde_json::Value> {
     let value: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(kcs_dir.join("manifest.json")).unwrap()).unwrap();

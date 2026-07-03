@@ -262,6 +262,12 @@ impl Repository {
             .as_deref()
             .map(|hash| self.read_commit(hash).map(|commit| commit.tree))
             .transpose()?;
+        // Snapshot the prior HEAD tree now — after the ref updates below,
+        // head_tree() would return the NEW tree (useless as "previous").
+        let prior_tree = head_tree_hash
+            .as_deref()
+            .map(|hash| self.read_tree(hash))
+            .transpose()?;
         let stats = self.stats_against_head(&working)?;
 
         if head_tree_hash.as_deref() == Some(tree_hash.as_str()) {
@@ -308,7 +314,7 @@ impl Repository {
             commit_hash.as_bytes(),
         )?;
         atomic_overwrite(&self.kcs_dir.join("HEAD"), commit_hash.as_bytes())?;
-        self.write_manifest(&working)?;
+        self.write_manifest(&working, prior_tree.as_ref())?;
 
         Ok(SnapshotOutcome {
             noop: false,
@@ -586,8 +592,25 @@ impl Repository {
     /// `status="deleted"` and keep the last observed `raw_hash`). A path that
     /// reappears recovers from `deleted` to `modified`/`unchanged`
     /// (ws1a CT-STATE-003/004).
-    fn write_manifest(&self, tree: &TreeObject) -> Result<()> {
-        let previous = self.read_manifest_hashes()?;
+    ///
+    /// The previous state is sourced from the prior HEAD tree (the durable
+    /// truth, `03 §2`) merged with the prior manifest's `deleted` rows (older
+    /// deletions that no tree carries). The manifest's live rows are never
+    /// trusted: a stale or hand-edited manifest cannot lose a deletion this way
+    /// (WS1d cross-review ruling).
+    fn write_manifest(&self, tree: &TreeObject, prior_tree: Option<&TreeObject>) -> Result<()> {
+        let mut previous: BTreeMap<String, String> = prior_tree
+            .map(|prior| {
+                prior
+                    .entries
+                    .iter()
+                    .map(|entry| (entry.path.clone(), entry.raw_hash.clone()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        for (path, raw_hash) in self.read_manifest_deleted_hashes()? {
+            previous.entry(path).or_insert(raw_hash);
+        }
         let current: BTreeMap<&str, &str> = tree
             .entries
             .iter()
@@ -630,10 +653,13 @@ impl Repository {
         atomic_overwrite(&self.kcs_dir.join("manifest.json"), &bytes)
     }
 
-    /// Read the current `manifest.json` as a `path -> last raw_hash` map.
+    /// Read the current `manifest.json` `deleted` rows as a
+    /// `path -> last raw_hash` map. Live rows are intentionally excluded — the
+    /// prior HEAD tree is the authoritative source for those (see
+    /// `write_manifest`).
     /// Returns an empty map when the manifest is absent. The manifest is schema
     /// validated before `snapshot` runs, so entries are well formed here.
-    fn read_manifest_hashes(&self) -> Result<BTreeMap<String, String>> {
+    fn read_manifest_deleted_hashes(&self) -> Result<BTreeMap<String, String>> {
         let path = self.kcs_dir.join("manifest.json");
         let mut map = BTreeMap::new();
         if !path.is_file() {
@@ -643,6 +669,9 @@ impl Repository {
             .map_err(|err| KcsError::schema(err.to_string()))?;
         if let Some(files) = value.get("files").and_then(Value::as_array) {
             for file in files {
+                if file.get("status").and_then(Value::as_str) != Some("deleted") {
+                    continue;
+                }
                 if let (Some(entry_path), Some(raw_hash)) = (
                     file.get("path").and_then(Value::as_str),
                     file.get("raw_hash").and_then(Value::as_str),
