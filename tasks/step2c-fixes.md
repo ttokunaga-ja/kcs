@@ -188,3 +188,31 @@ cost ledger の jsonl 実装名 (仕様は sqlite — decisions に記録の上�
 前回条件に加え: (f) サブフォルダ境界の回帰ガードテスト、(g) online task 成功 → ledger 記帳 →
 次回 cap 判定に反映、(h) リンク + 画像混在 markdown の置換正しさ、(i) 不均等 3 ページ PDF の
 ページ忠実性、(j) auth_error task が retry されないこと — を結合テスト化。
+
+---
+
+# 再監査ラウンド 4 の裁定 (2026-07-03、commit 240d555 に対して)
+
+判定: fix-required (最終残件 I1-I5)。**H1-H12 のうち 11 項目は実機再現で実質解消を確認** (H1 境界 /
+H2 記帳 / H4 Partial / H5-H6 opt-in / H7 リンク保全 / H8 基本 / H9 per-candidate / H10-H12 budget)。
+H5 の「revoke が --online に優先」は R3 G8a で要求した意図的仕様であり GPT-5.5 の指摘は棄却。
+**残件は発注側 (Claude) が直接修正する** (4 ラウンド継続した退行混入パターンの収束のため)。
+
+## 残件 I1-I5
+
+- I1 [critical] online task 再発行 → 二重課金 (Opus/Sonnet 実機): enqueue_online_placeholder_task の
+  dedup が Pending|Paused のみ照合し Done/Partial を除外しない。未変更再 index ごとに新 task が積まれ、
+  resume で再送信 + ledger 二重記帳 (04 §5.5 の冪等性契約違反)。修正: 同一 input_hash の Done/Partial
+  online task 存在時は再発行しない + 回帰テスト (再 index → task 数・ledger 行数不変)
+- I2 [major] retry backoff 未接続 (4/4): next_retry_at が常に now。RetryPolicy.backoff (exp base 2s
+  cap 60s) から算出し、batch retry/resume は next_retry_at 未到達の task をスキップ
+- I3 [major] PDF 境界検出の endstream 語衝突 (Sonnet 実機): 地の文に "endstream" を含むページが
+  空 markdown 化 → full 検査で Failed。境界判定を「行頭 endstream トークン」に強化し、
+  prepare.rs / deterministic.rs の重複ヘルパを kcs-pipeline に一本化
+- I4 [major] config.schema.json の scope が ignore を拒否 (additionalProperties:false)、loader は読む。
+  schema に ignore: string[] を追加
+- I5 [minor 群]: 死 sentinel (network-revoked 拡張子なし) 削除 / profile() を network-free 化
+  (pin 解決は実行時のみ、二重 GET 解消) / INCR-008 は ct2_incr_009 (CLI 結合) が実体を担うため
+  「§A ベクタ検証」に目的を再定義 / ledger 形式 (jsonl vs spec の sqlite) と hermetic HTTP テストの
+  扱いを decisions に記録 (HTTP 層は experiments/ocr-verification の実 API 検証で担保済みとし、
+  ローカルサーバテストは Step 3 backlog)
