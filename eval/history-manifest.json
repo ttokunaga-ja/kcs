@@ -1,0 +1,231 @@
+{
+  "deleted": [
+    {
+      "file": "deprecated-approach.md",
+      "scope": "research"
+    },
+    {
+      "file": "cancelled-project-osprey.md",
+      "scope": "notes"
+    },
+    {
+      "file": "old-api-limits.md",
+      "scope": "downloads"
+    },
+    {
+      "file": "leaked-draft-pricing.md",
+      "scope": "downloads"
+    },
+    {
+      "file": "falcon-incident-0421.md",
+      "scope": "projects-a"
+    },
+    {
+      "file": "falcon-old-schema.md",
+      "scope": "projects-a"
+    },
+    {
+      "file": "kestrel-poc-metrics.md",
+      "scope": "projects-b"
+    },
+    {
+      "file": "legacy-format-v0.md",
+      "scope": "specs"
+    },
+    {
+      "file": "scratch-numbers.md",
+      "scope": "journal"
+    }
+  ],
+  "edited": [
+    {
+      "file": "model-selection.md",
+      "new_value": "最終選定では Condor を採用、確定スコア 0.79 とした。",
+      "old_value": "一次選定では Harrier を採用、暫定スコア 0.71 とした。",
+      "scope": "research"
+    },
+    {
+      "file": "budget-review.md",
+      "new_value": "改定後の合計予算は 920万円 と報告された。",
+      "old_value": "レビュー時点の合計予算は 750万円 と報告された。",
+      "scope": "notes"
+    },
+    {
+      "file": "benchmark-draft.md",
+      "new_value": "Tsubame 構成の確定スコアは 0.79 だった。",
+      "old_value": "Tsubame 構成の暫定スコアは 0.71 だった。",
+      "scope": "downloads"
+    }
+  ],
+  "renamed": [
+    {
+      "new_file": "authentication-guide.md",
+      "old_file": "auth-spec.md",
+      "scope": "research"
+    },
+    {
+      "new_file": "supplier-assessment.md",
+      "old_file": "vendor-eval.md",
+      "scope": "notes"
+    },
+    {
+      "new_file": "retrieval-pipeline.md",
+      "old_file": "rag-pipeline.md",
+      "scope": "downloads"
+    },
+    {
+      "new_file": "falcon-cutover-plan.md",
+      "old_file": "falcon-migration.md",
+      "scope": "projects-a"
+    },
+    {
+      "new_file": "kestrel-threat-model.md",
+      "old_file": "kestrel-security.md",
+      "scope": "projects-b"
+    },
+    {
+      "new_file": "evidence-pointer-contract.md",
+      "old_file": "evidence-pointer-spec.md",
+      "scope": "specs"
+    },
+    {
+      "new_file": "user-research-summary.md",
+      "old_file": "interview-notes.md",
+      "scope": "journal"
+    }
+  ],
+  "replay": "eval/replay_history.py",
+  "scopes": [
+    "research",
+    "notes",
+    "downloads",
+    "projects-a",
+    "projects-b",
+    "specs",
+    "journal"
+  ],
+  "seed": 20260703,
+  "verified": {
+    "downloads": {
+      "commit_count": 8,
+      "messages": [
+        "delete: old-api-limits.md, leaked-draft-pricing.md",
+        "kcs index auto snapshot",
+        "rename: rag-pipeline.md->retrieval-pipeline.md",
+        "kcs index auto snapshot",
+        "edit: benchmark-draft.md",
+        "kcs index auto snapshot",
+        "baseline",
+        "kcs index auto snapshot"
+      ],
+      "steps": [
+        "baseline",
+        "edit",
+        "rename",
+        "delete"
+      ]
+    },
+    "journal": {
+      "commit_count": 6,
+      "messages": [
+        "delete: scratch-numbers.md",
+        "kcs index auto snapshot",
+        "rename: interview-notes.md->user-research-summary.md",
+        "kcs index auto snapshot",
+        "baseline",
+        "kcs index auto snapshot"
+      ],
+      "steps": [
+        "baseline",
+        "rename",
+        "delete"
+      ]
+    },
+    "notes": {
+      "commit_count": 8,
+      "messages": [
+        "delete: cancelled-project-osprey.md",
+        "kcs index auto snapshot",
+        "rename: vendor-eval.md->supplier-assessment.md",
+        "kcs index auto snapshot",
+        "edit: budget-review.md",
+        "kcs index auto snapshot",
+        "baseline",
+        "kcs index auto snapshot"
+      ],
+      "steps": [
+        "baseline",
+        "edit",
+        "rename",
+        "delete"
+      ]
+    },
+    "projects-a": {
+      "commit_count": 6,
+      "messages": [
+        "delete: falcon-incident-0421.md, falcon-old-schema.md",
+        "kcs index auto snapshot",
+        "rename: falcon-migration.md->falcon-cutover-plan.md",
+        "kcs index auto snapshot",
+        "baseline",
+        "kcs index auto snapshot"
+      ],
+      "steps": [
+        "baseline",
+        "rename",
+        "delete"
+      ]
+    },
+    "projects-b": {
+      "commit_count": 6,
+      "messages": [
+        "delete: kestrel-poc-metrics.md",
+        "kcs index auto snapshot",
+        "rename: kestrel-security.md->kestrel-threat-model.md",
+        "kcs index auto snapshot",
+        "baseline",
+        "kcs index auto snapshot"
+      ],
+      "steps": [
+        "baseline",
+        "rename",
+        "delete"
+      ]
+    },
+    "research": {
+      "commit_count": 8,
+      "messages": [
+        "delete: deprecated-approach.md",
+        "kcs index auto snapshot",
+        "rename: auth-spec.md->authentication-guide.md",
+        "kcs index auto snapshot",
+        "edit: model-selection.md",
+        "kcs index auto snapshot",
+        "baseline",
+        "kcs index auto snapshot"
+      ],
+      "steps": [
+        "baseline",
+        "edit",
+        "rename",
+        "delete"
+      ]
+    },
+    "specs": {
+      "commit_count": 6,
+      "messages": [
+        "delete: legacy-format-v0.md",
+        "kcs index auto snapshot",
+        "rename: evidence-pointer-spec.md->evidence-pointer-contract.md",
+        "kcs index auto snapshot",
+        "baseline",
+        "kcs index auto snapshot"
+      ],
+      "steps": [
+        "baseline",
+        "rename",
+        "delete"
+      ]
+    }
+  }
+}

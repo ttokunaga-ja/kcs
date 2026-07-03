@@ -1,0 +1,50 @@
+{"scenario": "M3-1", "query": "埋め込み検索の Recall が 0.83 くらいだったベンチマークの結果", "flags": [], "expected": [{"scope": "research", "file": "embedding-benchmark.md", "section": "recall"}]}
+{"scenario": "M3-1", "query": "バッチ埋め込みが毎秒 3200 チャンクくらい出たときの常駐メモリ", "flags": [], "expected": [{"scope": "research", "file": "embedding-benchmark.md", "section": "throughput"}]}
+{"scenario": "M3-1", "query": "ハイブリッド検索の p99 が 1200ms を超えていたテールレイテンシ調査", "flags": [], "expected": [{"scope": "research", "file": "latency-report.md", "section": "tail"}]}
+{"scenario": "M3-1", "query": "キャッシュのヒット率が 9 割くらいという数字はどこだったか", "flags": [], "expected": [{"scope": "research", "file": "latency-report.md", "section": "cache"}]}
+{"scenario": "M3-1", "query": "キックオフで決めた初年度予算と専任の人数", "flags": [], "expected": [{"scope": "notes", "file": "kickoff-2026-04.md", "section": "budget"}]}
+{"scenario": "M3-1", "query": "最初のマイルストーンが 5/20 だった予定表", "flags": [], "expected": [{"scope": "notes", "file": "kickoff-2026-04.md", "section": "schedule"}]}
+{"scenario": "M3-1", "query": "四半期のベロシティが 42 ポイントだった振り返り", "flags": [], "expected": [{"scope": "notes", "file": "retrospective-q1.md", "section": "velocity"}]}
+{"scenario": "M3-1", "query": "MTTR が 27 分だった障害の件数メモ", "flags": [], "expected": [{"scope": "notes", "file": "retrospective-q1.md", "section": "incidents"}]}
+{"scenario": "M3-1", "query": "Komodo が 18000 QPS を出したベクトルDBの比較資料", "flags": [], "expected": [{"scope": "downloads", "file": "vector-db-comparison.md", "section": "qps"}]}
+{"scenario": "M3-1", "query": "vector database managed pricing around 0.12 dollars per million vectors", "flags": [], "expected": [{"scope": "downloads", "file": "vector-db-comparison.md", "section": "pricing"}]}
+{"scenario": "M3-1", "query": "Falcon の access token TTL が 3600 秒という認証設定", "flags": [], "expected": [{"scope": "projects-a", "file": "falcon-architecture.md", "section": "auth"}]}
+{"scenario": "M3-1", "query": "Falcon の可用性 SLO が 99.95% でエラーバジェットの記述", "flags": [], "expected": [{"scope": "projects-a", "file": "falcon-slo.md", "section": "availability"}]}
+{"scenario": "M3-1", "query": "Kestrel の rate limit が 2000 req/min だった API 仕様", "flags": [], "expected": [{"scope": "projects-b", "file": "kestrel-api.md", "section": "ratelimit"}]}
+{"scenario": "M3-1", "query": "Kestrel のテーブル数が 40 くらいというデータモデル", "flags": [], "expected": [{"scope": "projects-b", "file": "kestrel-datamodel.md", "section": "schema"}]}
+{"scenario": "M3-1", "query": "RRF の定数 k=60 を使う検索ランキング仕様", "flags": [], "expected": [{"scope": "specs", "file": "search-ranking-spec.md", "section": "rrf"}]}
+{"scenario": "M3-1", "query": "MMR の係数 lambda 0.7 で多様化する再ランク仕様", "flags": [], "expected": [{"scope": "specs", "file": "search-ranking-spec.md", "section": "mmr"}]}
+{"scenario": "M3-1", "query": "チャンクの上限が 6000 文字だった分割仕様", "flags": [], "expected": [{"scope": "specs", "file": "chunking-spec.md", "section": "size"}]}
+{"scenario": "M3-1", "query": "HNSW の ef_search を 128 にした論文読書メモ", "flags": [], "expected": [{"scope": "journal", "file": "reading-2026-05.md", "section": "hnsw"}]}
+{"scenario": "M3-2", "query": "認証仕様のトークン TTL が 3600 秒だった資料。今は名前が変わっているかも", "flags": ["--all-history"], "expected": [{"scope": "research", "file": "auth-spec.md", "section": "api-token"}]}
+{"scenario": "M3-2", "query": "スコープが read/write/admin の 3 種類だった認証メモ", "flags": ["--all-history"], "expected": [{"scope": "research", "file": "auth-spec.md", "section": "scopes"}]}
+{"scenario": "M3-2", "query": "ベンダーの年間見積が 320 万円だった評価メモ", "flags": ["--all-history"], "expected": [{"scope": "notes", "file": "vendor-eval.md", "section": "cost"}]}
+{"scenario": "M3-2", "query": "SLA を 99.9% で提示していたベンダー評価", "flags": ["--all-history"], "expected": [{"scope": "notes", "file": "vendor-eval.md", "section": "sla"}]}
+{"scenario": "M3-2", "query": "RAG パイプラインで再ランクに Merlin を使う 5 段構成の資料", "flags": ["--all-history"], "expected": [{"scope": "downloads", "file": "rag-pipeline.md", "section": "stages"}]}
+{"scenario": "M3-2", "query": "chunk size was 512 tokens in the retrieval pipeline doc", "flags": ["--all-history"], "expected": [{"scope": "downloads", "file": "rag-pipeline.md", "section": "chunks"}]}
+{"scenario": "M3-2", "query": "本番切替が 6/15 の深夜 2 時だった Falcon 移行計画", "flags": ["--all-history"], "expected": [{"scope": "projects-a", "file": "falcon-migration.md", "section": "window"}]}
+{"scenario": "M3-2", "query": "ロールバックが 15 分以内で終わる想定だった移行手順", "flags": ["--all-history"], "expected": [{"scope": "projects-a", "file": "falcon-migration.md", "section": "rollback"}]}
+{"scenario": "M3-2", "query": "保存時暗号に AES-256-GCM を使う Kestrel のセキュリティ資料", "flags": ["--all-history"], "expected": [{"scope": "projects-b", "file": "kestrel-security.md", "section": "encryption"}]}
+{"scenario": "M3-2", "query": "鍵ローテーションが 90 日周期だったセキュリティメモ", "flags": ["--all-history"], "expected": [{"scope": "projects-b", "file": "kestrel-security.md", "section": "keyrotation"}]}
+{"scenario": "M3-2", "query": "Evidence Pointer の必須フィールドに span が含まれる仕様。旧いファイル名で覚えている", "flags": ["--all-history"], "expected": [{"scope": "specs", "file": "evidence-pointer-spec.md", "section": "fields"}]}
+{"scenario": "M3-2", "query": "「3ヶ月前のあの資料が見つからない」というインタビューの声", "flags": ["--all-history"], "expected": [{"scope": "journal", "file": "interview-notes.md", "section": "quote"}]}
+{"scenario": "M3-2", "query": "資料探索に平均 8 分かかるというユーザー調査の課題", "flags": ["--all-history"], "expected": [{"scope": "journal", "file": "interview-notes.md", "section": "pain"}]}
+{"scenario": "M3-2", "query": "一次選定で Harrier を採用してスコア 0.71 だった頃のモデル選定", "flags": ["--all-history"], "expected": [{"scope": "research", "file": "model-selection.md", "section": "chosen"}]}
+{"scenario": "M3-2", "query": "合計予算が 750 万円と報告されていた時点の予算レビュー", "flags": ["--all-history"], "expected": [{"scope": "notes", "file": "budget-review.md", "section": "total"}]}
+{"scenario": "M3-2", "query": "Tsubame 構成の暫定スコアが 0.71 だった頃のベンチマーク下書き", "flags": ["--all-history"], "expected": [{"scope": "downloads", "file": "benchmark-draft.md", "section": "score"}]}
+{"scenario": "M3-3", "query": "削除した資料にあった API リミット 1000 req/min という数字", "flags": ["--include-deleted"], "expected": [{"scope": "downloads", "file": "old-api-limits.md", "section": "limits"}]}
+{"scenario": "M3-3", "query": "消したはずの月間クォータ 200 万コールのメモ", "flags": ["--include-deleted"], "expected": [{"scope": "downloads", "file": "old-api-limits.md", "section": "quota"}]}
+{"scenario": "M3-3", "query": "廃止した TF-IDF 手法で語彙次元が 30000 だった話", "flags": ["--include-deleted"], "expected": [{"scope": "research", "file": "deprecated-approach.md", "section": "method"}]}
+{"scenario": "M3-3", "query": "旧手法の Recall が 0.52 に留まった結果のメモ", "flags": ["--include-deleted"], "expected": [{"scope": "research", "file": "deprecated-approach.md", "section": "result"}]}
+{"scenario": "M3-3", "query": "中止した Osprey の損失が 210 万円だった記録", "flags": ["--include-deleted"], "expected": [{"scope": "notes", "file": "cancelled-project-osprey.md", "section": "loss"}]}
+{"scenario": "M3-3", "query": "需要不足で中止になったプロジェクトの理由", "flags": ["--include-deleted"], "expected": [{"scope": "notes", "file": "cancelled-project-osprey.md", "section": "reason"}]}
+{"scenario": "M3-3", "query": "誤って取り込んだ価格ドラフトの 1000 トークンあたり 0.30 ドル", "flags": ["--include-deleted"], "expected": [{"scope": "downloads", "file": "leaked-draft-pricing.md", "section": "price"}]}
+{"scenario": "M3-3", "query": "年契約割引 40% を提示していた削除済みドラフト", "flags": ["--include-deleted"], "expected": [{"scope": "downloads", "file": "leaked-draft-pricing.md", "section": "discount"}]}
+{"scenario": "M3-3", "query": "Falcon のサービス停止が 47 分だった障害報告", "flags": ["--include-deleted"], "expected": [{"scope": "projects-a", "file": "falcon-incident-0421.md", "section": "outage"}]}
+{"scenario": "M3-3", "query": "a memory leak grew to 3.2GB and caused the Falcon outage", "flags": ["--include-deleted"], "expected": [{"scope": "projects-a", "file": "falcon-incident-0421.md", "section": "rootcause"}]}
+{"scenario": "M3-3", "query": "旧スキーマが 28 テーブルだった頃の削除済み資料", "flags": ["--include-deleted"], "expected": [{"scope": "projects-a", "file": "falcon-old-schema.md", "section": "tables"}]}
+{"scenario": "M3-3", "query": "PoC の p95 が 1900ms と遅かった計測結果", "flags": ["--include-deleted"], "expected": [{"scope": "projects-b", "file": "kestrel-poc-metrics.md", "section": "latency"}]}
+{"scenario": "M3-3", "query": "PoC 期間の月額コストが 68 万円だったメモ", "flags": ["--include-deleted"], "expected": [{"scope": "projects-b", "file": "kestrel-poc-metrics.md", "section": "cost"}]}
+{"scenario": "M3-3", "query": "廃止した旧フォーマット v0.1.0 の仕様書", "flags": ["--include-deleted"], "expected": [{"scope": "specs", "file": "legacy-format-v0.md", "section": "version"}]}
+{"scenario": "M3-3", "query": "旧フィールド tree_id と commit_id が廃止されたという記述", "flags": ["--include-deleted"], "expected": [{"scope": "specs", "file": "legacy-format-v0.md", "section": "field"}]}
+{"scenario": "M3-3", "query": "走り書きの試算で 4096 次元・12 万チャンクと仮定したメモ", "flags": ["--include-deleted"], "expected": [{"scope": "journal", "file": "scratch-numbers.md", "section": "estimate"}]}
