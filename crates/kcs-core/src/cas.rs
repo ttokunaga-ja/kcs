@@ -120,10 +120,12 @@ pub fn hash_json(value: &Value) -> Result<String> {
     canonical_json_bytes(value).map(|bytes| hash_bytes(&bytes))
 }
 
+/// Serialize `value` to RFC 8785 (JCS) canonical JSON bytes.
+///
+/// Backed by the `serde_jcs` crate so the byte output matches RFC 8785
+/// exactly (the object hash contract in `docs/03-data-model.md` §8.1).
 pub fn canonical_json_bytes(value: &Value) -> Result<Vec<u8>> {
-    let mut out = Vec::new();
-    write_canonical_json(value, &mut out)?;
-    Ok(out)
+    serde_jcs::to_vec(value).map_err(|err| KcsError::schema(err.to_string()))
 }
 
 #[must_use]
@@ -198,44 +200,6 @@ pub(crate) fn append_jsonl(path: &Path, value: &Value) -> Result<()> {
     serde_json::to_writer(&mut file, value)
         .map_err(|err| KcsError::io(err.to_string(), path.display().to_string()))?;
     file.write_all(b"\n").kcs_io(path)?;
-    Ok(())
-}
-
-fn write_canonical_json(value: &Value, out: &mut Vec<u8>) -> Result<()> {
-    match value {
-        Value::Null => out.extend_from_slice(b"null"),
-        Value::Bool(true) => out.extend_from_slice(b"true"),
-        Value::Bool(false) => out.extend_from_slice(b"false"),
-        Value::Number(number) => out.extend_from_slice(number.to_string().as_bytes()),
-        Value::String(string) => {
-            serde_json::to_writer(out, string).map_err(|err| KcsError::schema(err.to_string()))?
-        }
-        Value::Array(items) => {
-            out.push(b'[');
-            for (index, item) in items.iter().enumerate() {
-                if index > 0 {
-                    out.push(b',');
-                }
-                write_canonical_json(item, out)?;
-            }
-            out.push(b']');
-        }
-        Value::Object(map) => {
-            out.push(b'{');
-            let mut keys = map.keys().collect::<Vec<_>>();
-            keys.sort();
-            for (index, key) in keys.into_iter().enumerate() {
-                if index > 0 {
-                    out.push(b',');
-                }
-                serde_json::to_writer(&mut *out, key)
-                    .map_err(|err| KcsError::schema(err.to_string()))?;
-                out.push(b':');
-                write_canonical_json(&map[key], out)?;
-            }
-            out.push(b'}');
-        }
-    }
     Ok(())
 }
 
