@@ -1395,6 +1395,42 @@ fn ct2_task_005_auth_error_task_is_not_retried() {
 }
 
 #[test]
+fn ct2_task_009_failed_online_task_is_not_reenqueued_by_reindex() {
+    // I2 クロスレビュー指摘の回帰ガード: retryable Failed task が存在する状態で
+    // 未変更ファイルを再 index しても、新しい Pending online task が積まれて
+    // backoff ゲートを迂回できないこと (Failed の再試行は batch retry の責務)。
+    let dir = scope();
+    fs::write(dir.path().join("a.txt"), "hello dedup").unwrap();
+    json_success(&dir, ["index", "--approve"]);
+    json_success_with_env(
+        &dir,
+        ["batch", "resume"],
+        &[("KCS_TEST_MISTRAL_OCR", "rate_limit")],
+    );
+    let status = json_success(&dir, ["status"]);
+    let tasks_after_fail = status["tasks"].as_array().unwrap().len();
+    let failed = status["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|task| task["status"] == "failed")
+        .expect("rate_limit mock should leave a failed online task");
+    assert!(failed["next_retry_at"].is_string());
+
+    // 未変更で再 index — task 総数が増えない (新規 online task が発行されない)
+    json_success(&dir, ["index", "--yes"]);
+    let status = json_success(&dir, ["status"]);
+    assert_eq!(status["tasks"].as_array().unwrap().len(), tasks_after_fail);
+    let failed_count = status["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|task| task["status"] == "failed")
+        .count();
+    assert_eq!(failed_count, 1);
+}
+
+#[test]
 fn ct2_task_006_partial_online_result_persists_partial_status() {
     let dir = scope();
     fs::write(
