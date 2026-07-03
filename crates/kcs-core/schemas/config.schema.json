@@ -6,6 +6,10 @@
       "type": "string",
       "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$"
     },
+    "ignore": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
     "scope": {
       "type": "object",
       "properties": {

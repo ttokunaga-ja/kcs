@@ -438,6 +438,126 @@ fn ct_obs_001_002_events_and_errors_jsonl() {
     assert_eq!(error["code"], "KCS-E-STORE-NOT-FOUND-001");
 }
 
+#[cfg(unix)]
+#[test]
+fn s5_symlink_is_skipped_with_warning() {
+    let temp = tempfile::tempdir().unwrap();
+    kcs()
+        .arg("init")
+        .current_dir(temp.path())
+        .assert()
+        .success();
+    fs::write(temp.path().join("a.pdf"), b"one").unwrap();
+    std::os::unix::fs::symlink(temp.path().join("a.pdf"), temp.path().join("link.pdf")).unwrap();
+
+    let output = kcs()
+        .args(["status", "--json"])
+        .current_dir(temp.path())
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("warning: skipping non-regular file"),
+        "stderr was: {stderr}"
+    );
+    let json: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let files = json["files"].as_array().unwrap();
+    assert_eq!(files.len(), 1);
+    assert_eq!(files[0]["relative_path"], "a.pdf");
+
+    // Snapshot succeeds and the symlink is absent from the stored tree.
+    let snap = snapshot_json(
+        temp.path(),
+        &["snapshot", "-m", "s"],
+        "2026-04-29T12:00:00Z",
+    );
+    let tree_hash = snap["tree_hash"].as_str().unwrap();
+    let inspect = kcs()
+        .args(["inspect", tree_hash, "--json"])
+        .current_dir(temp.path())
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let tree: Value = serde_json::from_slice(&inspect).unwrap();
+    let entries = tree["entries"].as_array().unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0]["path"], "a.pdf");
+}
+
+// Linux-only: macOS/APFS rejects non-UTF-8 file names at the filesystem level,
+// so the byte sequence cannot even be created there.
+#[cfg(target_os = "linux")]
+#[test]
+fn s6_non_utf8_filename_is_skipped_with_warning() {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+
+    let temp = tempfile::tempdir().unwrap();
+    kcs()
+        .arg("init")
+        .current_dir(temp.path())
+        .assert()
+        .success();
+    fs::write(temp.path().join("a.pdf"), b"ok").unwrap();
+    let bad = temp.path().join(OsStr::from_bytes(b"bad\xff.pdf"));
+    fs::write(&bad, b"x").unwrap();
+
+    let output = kcs()
+        .args(["status", "--json"])
+        .current_dir(temp.path())
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("warning: skipping non-UTF-8 file name"),
+        "stderr was: {stderr}"
+    );
+    let json: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let files = json["files"].as_array().unwrap();
+    assert_eq!(files.len(), 1);
+    assert_eq!(files[0]["relative_path"], "a.pdf");
+}
+
+#[test]
+fn n3_config_ignore_array_validates() {
+    let temp = tempfile::tempdir().unwrap();
+    kcs()
+        .arg("init")
+        .current_dir(temp.path())
+        .assert()
+        .success();
+
+    // A valid top-level `ignore` array of strings is accepted (03 §11).
+    fs::write(
+        temp.path().join(".kcs/config.toml"),
+        "kcs_format_version = \"0.1.0\"\nignore = [\"*.tmp\", \"secret.pdf\"]\n",
+    )
+    .unwrap();
+    kcs()
+        .args(["status", "--json"])
+        .current_dir(temp.path())
+        .assert()
+        .success();
+
+    // A non-array `ignore` is a schema violation (exit 2).
+    fs::write(
+        temp.path().join(".kcs/config.toml"),
+        "kcs_format_version = \"0.1.0\"\nignore = \"not-an-array\"\n",
+    )
+    .unwrap();
+    kcs()
+        .args(["status", "--json"])
+        .current_dir(temp.path())
+        .assert()
+        .code(2);
+}
+
 fn snapshot_json(dir: &std::path::Path, args: &[&str], now: &str) -> Value {
     let out = kcs()
         .args(args)

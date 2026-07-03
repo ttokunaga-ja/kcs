@@ -106,8 +106,11 @@ fn ct_tree_001_002_003_sort_duplicate_and_path_validation() {
         TreeEntry::raw_file("notes.md", RAW_NOTES).unwrap(),
         TreeEntry::raw_file("notes.md", RAW_REPORT).unwrap(),
     ]);
-    assert_eq!(duplicate.unwrap_err().error_code(), "KCS-E-STORE-PATH-001");
+    // CT-TREE-002 mandates rejection but not a specific code; duplicate paths
+    // use KCS-E-STORE-DUP-001, kept distinct from the `/`-in-path violation.
+    assert_eq!(duplicate.unwrap_err().error_code(), "KCS-E-STORE-DUP-001");
 
+    // CT-TREE-003 mandates KCS-E-STORE-PATH-001 for a `/`-containing path.
     let nested = TreeEntry::raw_file("sub/report.pdf", RAW_REPORT);
     assert_eq!(nested.unwrap_err().error_code(), "KCS-E-STORE-PATH-001");
 }
@@ -238,6 +241,83 @@ fn ct_commit_003_005_007_snapshot_parent_refs_and_noop() {
         fs::read_to_string(repo.kcs_dir().join("HEAD")).unwrap(),
         second.commit_hash.unwrap()
     );
+}
+
+#[test]
+fn s2_manifest_retains_deleted_rows_and_recovers() {
+    let temp = tempfile::tempdir().unwrap();
+    let repo = Repository::init(temp.path()).unwrap();
+    fs::write(temp.path().join("a.pdf"), b"one").unwrap();
+    fs::write(temp.path().join("b.pdf"), b"two").unwrap();
+    repo.snapshot(Some("first"), Some("2026-04-29T12:00:00Z"))
+        .unwrap();
+
+    // Deleting b.pdf keeps its manifest row as deleted with its last raw_hash.
+    fs::remove_file(temp.path().join("b.pdf")).unwrap();
+    repo.snapshot(Some("second"), Some("2026-04-29T12:00:01Z"))
+        .unwrap();
+    let files = manifest_files(repo.kcs_dir());
+    let b = find_file(&files, "b.pdf");
+    assert_eq!(b["status"], "deleted");
+    assert_eq!(b["raw_hash"].as_str().unwrap(), hash_bytes(b"two"));
+    assert_eq!(find_file(&files, "a.pdf")["status"], "unchanged");
+
+    // Recreating b.pdf with new content recovers the row from deleted -> modified.
+    fs::write(temp.path().join("b.pdf"), b"three").unwrap();
+    repo.snapshot(Some("third"), Some("2026-04-29T12:00:02Z"))
+        .unwrap();
+    let files = manifest_files(repo.kcs_dir());
+    let b = find_file(&files, "b.pdf");
+    assert_eq!(b["status"], "modified");
+    assert_eq!(b["raw_hash"].as_str().unwrap(), hash_bytes(b"three"));
+}
+
+#[test]
+fn s2_stale_manifest_cannot_lose_a_deletion() {
+    // WS1d cross-review: the previous state must come from the prior HEAD tree,
+    // not the manifest. A stale manifest that lost b.pdf's live row must not
+    // prevent the deleted row (with the tree's raw_hash) from being recorded.
+    let temp = tempfile::tempdir().unwrap();
+    let repo = Repository::init(temp.path()).unwrap();
+    fs::write(temp.path().join("a.pdf"), b"one").unwrap();
+    fs::write(temp.path().join("b.pdf"), b"two").unwrap();
+    repo.snapshot(Some("first"), Some("2026-04-29T12:00:00Z"))
+        .unwrap();
+
+    // Simulate a stale (schema-valid) manifest missing b.pdf's row entirely.
+    let stale = serde_json::json!({
+        "schema_version": 1,
+        "files": [
+            { "path": "a.pdf", "raw_hash": hash_bytes(b"one"), "status": "unchanged" }
+        ],
+        "updated_at": "2026-04-29T12:00:00Z",
+    });
+    fs::write(
+        repo.kcs_dir().join("manifest.json"),
+        serde_json::to_vec_pretty(&stale).unwrap(),
+    )
+    .unwrap();
+
+    fs::remove_file(temp.path().join("b.pdf")).unwrap();
+    repo.snapshot(Some("second"), Some("2026-04-29T12:00:01Z"))
+        .unwrap();
+    let files = manifest_files(repo.kcs_dir());
+    let b = find_file(&files, "b.pdf");
+    assert_eq!(b["status"], "deleted");
+    assert_eq!(b["raw_hash"].as_str().unwrap(), hash_bytes(b"two"));
+}
+
+fn manifest_files(kcs_dir: &std::path::Path) -> Vec<serde_json::Value> {
+    let value: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(kcs_dir.join("manifest.json")).unwrap()).unwrap();
+    value["files"].as_array().unwrap().clone()
+}
+
+fn find_file<'a>(files: &'a [serde_json::Value], path: &str) -> &'a serde_json::Value {
+    files
+        .iter()
+        .find(|file| file["path"] == path)
+        .unwrap_or_else(|| panic!("manifest missing {path}"))
 }
 
 fn vector_tree() -> kcs_core::dag::TreeObject {
