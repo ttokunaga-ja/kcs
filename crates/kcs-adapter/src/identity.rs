@@ -1,0 +1,247 @@
+//! Adapter identity hash helpers from `docs/03-data-model.md` §5.
+
+use serde_json::{Map, Value};
+use sha2::{Digest, Sha256};
+use unicode_normalization::UnicodeNormalization;
+
+use crate::{AdapterError, Result};
+
+const PROFILE_FIELDS: &[&str] = &[
+    "adapter_kind",
+    "adapter_role",
+    "model_or_tool_family",
+    "model_version_pin",
+    "prompt_template_id",
+    "prompt_template_hash",
+    "sampling",
+    "output_schema",
+    "dimensions",
+    "distance",
+    "modality",
+    "runtime_kind",
+    "spec_version",
+];
+
+#[must_use]
+pub fn hash_bytes(bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
+    format!("sha256:{}", lower_hex(&digest))
+}
+
+pub fn jcs_hash(value: &Value) -> Result<String> {
+    let bytes =
+        serde_jcs::to_vec(value).map_err(|err| AdapterError::ConfigSchema(err.to_string()))?;
+    Ok(hash_bytes(&bytes))
+}
+
+pub fn jcs_bytes(value: &Value) -> Result<Vec<u8>> {
+    serde_jcs::to_vec(value).map_err(|err| AdapterError::ConfigSchema(err.to_string()))
+}
+
+pub fn canonical_profile_value(profile: &Value) -> Result<Value> {
+    let object = profile
+        .as_object()
+        .ok_or_else(|| AdapterError::ConfigSchema("profile must be an object".to_owned()))?;
+    let mut canonical = Map::new();
+    for field in PROFILE_FIELDS {
+        if let Some(value) = object.get(*field) {
+            if !value.is_null() {
+                canonical.insert((*field).to_owned(), value.clone());
+            }
+        }
+    }
+    if let Some(pin) = canonical.get("model_version_pin").and_then(Value::as_str) {
+        if is_mutable_model_alias(pin) {
+            return Err(AdapterError::ConfigSchema(
+                "model_version_pin must be an immutable version, not a mutable alias".to_owned(),
+            ));
+        }
+    }
+    Ok(Value::Object(canonical))
+}
+
+pub fn tool_profile_hash(profile: &Value) -> Result<String> {
+    jcs_hash(&canonical_profile_value(profile)?)
+}
+
+pub fn normalize_prompt_template(raw: &str) -> String {
+    let normalized_newlines = raw.replace("\r\n", "\n").replace('\r', "\n");
+    let mut lines: Vec<String> = normalized_newlines
+        .split('\n')
+        .map(|line| line.trim_end_matches([' ', '\t']).to_owned())
+        .collect();
+    while lines.last().is_some_and(|line| line.is_empty()) {
+        lines.pop();
+    }
+    lines.join("\n").nfc().collect()
+}
+
+pub fn prompt_template_hash(raw: &str) -> String {
+    hash_bytes(normalize_prompt_template(raw).as_bytes())
+}
+
+#[must_use]
+pub fn is_mutable_model_alias(pin: &str) -> bool {
+    let lower = pin.to_ascii_lowercase();
+    lower == "latest" || lower.ends_with("-latest") || lower.ends_with("_latest")
+}
+
+fn lower_hex(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        out.push(HEX[(byte >> 4) as usize] as char);
+        out.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+
+    #[test]
+    fn profile_hash_vectors_match_step2a() {
+        let mistral = json!({
+            "adapter_kind": "markdownize",
+            "adapter_role": "multimodal",
+            "model_or_tool_family": "mistral-ocr",
+            "model_version_pin": "mistral-ocr-2505",
+            "output_schema": "kcs-markdown-v1",
+            "runtime_kind": "cloud",
+            "spec_version": 1
+        });
+        assert_eq!(
+            jcs_bytes(&canonical_profile_value(&mistral).unwrap()).unwrap(),
+            br#"{"adapter_kind":"markdownize","adapter_role":"multimodal","model_or_tool_family":"mistral-ocr","model_version_pin":"mistral-ocr-2505","output_schema":"kcs-markdown-v1","runtime_kind":"cloud","spec_version":1}"#
+        );
+        assert_eq!(
+            tool_profile_hash(&mistral).unwrap(),
+            "sha256:24bd9e903241740fc9fe94fb72a6ff3e697b3c0859bd5aef1b49728a207e81ed"
+        );
+
+        let with_nulls = json!({
+            "adapter_kind": "markdownize",
+            "adapter_role": "multimodal",
+            "model_or_tool_family": "mistral-ocr",
+            "model_version_pin": "mistral-ocr-2505",
+            "prompt_template_id": null,
+            "prompt_template_hash": null,
+            "sampling": null,
+            "dimensions": null,
+            "distance": null,
+            "modality": null,
+            "output_schema": "kcs-markdown-v1",
+            "runtime_kind": "cloud",
+            "spec_version": 1
+        });
+        assert_eq!(
+            tool_profile_hash(&with_nulls).unwrap(),
+            tool_profile_hash(&mistral).unwrap()
+        );
+
+        let deterministic = json!({
+            "adapter_kind": "markdownize",
+            "adapter_role": "text",
+            "model_or_tool_family": "kcs-deterministic-text",
+            "model_version_pin": "1.0.0",
+            "output_schema": "kcs-markdown-v1",
+            "runtime_kind": "local",
+            "spec_version": 1
+        });
+        assert_eq!(
+            tool_profile_hash(&deterministic).unwrap(),
+            "sha256:76c01950d19edffc1b8ca75e06d7754fb52cd05db1bb10e3268f81392bf54095"
+        );
+
+        let embedding = json!({
+            "adapter_kind": "embedding",
+            "adapter_role": "multimodal",
+            "dimensions": 1536,
+            "distance": "cosine",
+            "modality": "multimodal",
+            "model_or_tool_family": "gemini-multimodal-embedding",
+            "model_version_pin": "gemini-embedding-001",
+            "runtime_kind": "cloud",
+            "spec_version": 1
+        });
+        assert_eq!(
+            tool_profile_hash(&embedding).unwrap(),
+            "sha256:c2bda78e217e1f9e12cd17ddac6c46e28a50b8060976f533f76f14193a807226"
+        );
+
+        let prepare = json!({
+            "adapter_kind": "prepare",
+            "adapter_role": "text",
+            "model_or_tool_family": "kcs-deterministic-prepare",
+            "model_version_pin": "1.0.0",
+            "runtime_kind": "local",
+            "spec_version": 1
+        });
+        assert_eq!(
+            tool_profile_hash(&prepare).unwrap(),
+            "sha256:20b67a9d7e7e2654379f16f20b445d007e95abac7c8f85d6da65beccff7e6b03"
+        );
+    }
+
+    #[test]
+    fn profile_hash_ignores_execution_and_auth_fields() {
+        let base = json!({
+            "adapter_kind": "markdownize",
+            "adapter_role": "text",
+            "model_or_tool_family": "kcs-deterministic-text",
+            "model_version_pin": "1.0.0",
+            "output_schema": "kcs-markdown-v1",
+            "runtime_kind": "local",
+            "spec_version": 1,
+            "cmd": "/usr/bin/a",
+            "url": "https://one.example",
+            "auth": "env:A"
+        });
+        let changed = json!({
+            "adapter_kind": "markdownize",
+            "adapter_role": "text",
+            "model_or_tool_family": "kcs-deterministic-text",
+            "model_version_pin": "1.0.0",
+            "output_schema": "kcs-markdown-v1",
+            "runtime_kind": "local",
+            "spec_version": 1,
+            "cmd": "/usr/bin/b",
+            "url": "https://two.example",
+            "auth": "plain:not-a-real-key"
+        });
+        assert_eq!(
+            tool_profile_hash(&base).unwrap(),
+            tool_profile_hash(&changed).unwrap()
+        );
+    }
+
+    #[test]
+    fn prompt_template_hash_vector_matches_step2a() {
+        let raw = "You are a markdownize adapter.  \r\nProcess the cafe\u{301} uncha\u{301}nged unit.\t\t\r\n\r\n";
+        let normalized = normalize_prompt_template(raw);
+        assert_eq!(
+            normalized.as_bytes(),
+            b"You are a markdownize adapter.\nProcess the caf\xc3\xa9 unch\xc3\xa1nged unit."
+        );
+        assert_eq!(
+            prompt_template_hash(raw),
+            "sha256:3f5200e929d23e1f113f605fb528b1b7b75e183d226064d319f57fb3e467d238"
+        );
+    }
+
+    #[test]
+    fn mutable_model_alias_is_rejected() {
+        let profile = json!({
+            "adapter_kind": "markdownize",
+            "adapter_role": "multimodal",
+            "model_or_tool_family": "mistral-ocr",
+            "model_version_pin": "mistral-ocr-latest",
+            "runtime_kind": "cloud",
+            "spec_version": 1
+        });
+        assert!(tool_profile_hash(&profile).is_err());
+    }
+}

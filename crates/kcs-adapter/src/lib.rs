@@ -1,10 +1,7 @@
-//! Adapter trait and wire-type skeletons for Step 2.
-//!
-//! The crate defines contracts only. Built-in adapters expose empty
-//! implementations whose methods remain explicit `todo!()` stubs until the
-//! Step 2 implementation work starts.
+//! Adapter trait, identity helpers, and built-in Step 2 adapters.
 
 pub mod deterministic;
+pub mod identity;
 pub mod mistral_ocr;
 pub mod tool_lock;
 pub mod traits;
@@ -20,6 +17,10 @@ pub enum AdapterError {
     NotImplemented(&'static str),
     #[error("adapter contract violation: {0}")]
     ContractViolation(String),
+    #[error("schema validation failed: {0}")]
+    ConfigSchema(String),
+    #[error("io error at {path}: {message}")]
+    Io { path: String, message: String },
 }
 
 pub use traits::{

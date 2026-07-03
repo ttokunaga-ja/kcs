@@ -8,7 +8,7 @@ use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 
 use crate::cas::{
@@ -171,6 +171,14 @@ impl Repository {
     }
 
     pub fn build_working_tree(&self, store_raw: bool) -> Result<WorkingTree> {
+        self.build_working_tree_filtered(store_raw, &BTreeSet::new())
+    }
+
+    pub fn build_working_tree_filtered(
+        &self,
+        store_raw: bool,
+        excluded_paths: &BTreeSet<String>,
+    ) -> Result<WorkingTree> {
         let mut entries = Vec::new();
         for entry in fs::read_dir(&self.root).kcs_io(&self.root)? {
             let entry = entry.kcs_io(&self.root)?;
@@ -198,6 +206,9 @@ impl Repository {
                     continue;
                 }
             };
+            if excluded_paths.contains(&file_name) {
+                continue;
+            }
             let bytes = fs::read(&path).kcs_io(&path)?;
             let raw_hash = if store_raw {
                 self.store.write_raw(&bytes)?
@@ -249,11 +260,30 @@ impl Repository {
         message: Option<&str>,
         fixed_now: Option<&str>,
     ) -> Result<SnapshotOutcome> {
+        self.snapshot_with_type(message, fixed_now, CommitType::Manual, &BTreeSet::new())
+    }
+
+    pub fn auto_snapshot(
+        &self,
+        message: Option<&str>,
+        fixed_now: Option<&str>,
+        excluded_paths: &BTreeSet<String>,
+    ) -> Result<SnapshotOutcome> {
+        self.snapshot_with_type(message, fixed_now, CommitType::Auto, excluded_paths)
+    }
+
+    fn snapshot_with_type(
+        &self,
+        message: Option<&str>,
+        fixed_now: Option<&str>,
+        commit_type: CommitType,
+        excluded_paths: &BTreeSet<String>,
+    ) -> Result<SnapshotOutcome> {
         self.validate()?;
         let _lock = StoreLock::acquire(&self.kcs_dir)?;
         maybe_hold_lock_for_tests();
 
-        let working = self.build_working_tree(true)?.tree;
+        let working = self.build_working_tree_filtered(true, excluded_paths)?.tree;
         let tree_value =
             serde_json::to_value(&working).map_err(|err| KcsError::schema(err.to_string()))?;
         let (tree_hash, _) = self.store.write_json(ObjectKind::Tree, &tree_value)?;
@@ -287,7 +317,10 @@ impl Repository {
             .unwrap_or_else(now_utc_seconds);
         let message = message
             .map(str::to_owned)
-            .unwrap_or_else(|| format!("snapshot at {created_at}"));
+            .unwrap_or_else(|| match commit_type {
+                CommitType::Auto => format!("index auto snapshot at {created_at}"),
+                _ => format!("snapshot at {created_at}"),
+            });
         let parents = head_hash.into_iter().collect::<Vec<_>>();
         let commit = CommitObject::new(
             tree_hash.clone(),
@@ -296,7 +329,7 @@ impl Repository {
             message,
             self.tool_lock_hash()?,
             stats.clone(),
-            CommitType::Manual,
+            commit_type,
         )?;
         let commit_value =
             serde_json::to_value(&commit).map_err(|err| KcsError::schema(err.to_string()))?;
@@ -688,11 +721,88 @@ impl Repository {
         if path.is_file() {
             let value: Value = serde_json::from_str(&fs::read_to_string(&path).kcs_io(&path)?)
                 .map_err(|err| KcsError::schema(err.to_string()))?;
-            hash_json(&value)
+            hash_json(&canonical_tool_lock_value(&value)?)
         } else {
             hash_json(&json!({ "spec_version": 1 }))
         }
     }
+}
+
+fn canonical_tool_lock_value(value: &Value) -> Result<Value> {
+    let object = value
+        .as_object()
+        .ok_or_else(|| KcsError::schema("tool-lock.json must be an object"))?;
+    let spec_version = object
+        .get("spec_version")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| KcsError::schema("tool-lock.json missing spec_version"))?;
+    let mut canonical = Map::new();
+    canonical.insert("spec_version".to_owned(), Value::from(spec_version));
+    for key in ["prepare", "markdown", "summary", "classification", "rerank"] {
+        if let Some(entry) = canonical_tool_entry(object, key, false)? {
+            canonical.insert(key.to_owned(), entry);
+        }
+    }
+    if let Some(entry) = canonical_tool_entry(object, "embedding", true)? {
+        canonical.insert("embedding".to_owned(), entry);
+    }
+    Ok(Value::Object(canonical))
+}
+
+fn canonical_tool_entry(
+    object: &Map<String, Value>,
+    key: &str,
+    embedding: bool,
+) -> Result<Option<Value>> {
+    let Some(entry) = object.get(key) else {
+        return Ok(None);
+    };
+    if entry.is_null() {
+        return Ok(None);
+    }
+    let entry = entry
+        .as_object()
+        .ok_or_else(|| KcsError::schema(format!("{key} must be an object")))?;
+    let mut canonical = Map::new();
+    if embedding {
+        canonical.insert(
+            "dimensions".to_owned(),
+            required_lock_integer(entry, key, "dimensions")?,
+        );
+        canonical.insert(
+            "distance".to_owned(),
+            required_lock_string(entry, key, "distance")?,
+        );
+        canonical.insert(
+            "modality".to_owned(),
+            required_lock_string(entry, key, "modality")?,
+        );
+    }
+    canonical.insert(
+        "profile_hash".to_owned(),
+        required_lock_string(entry, key, "profile_hash")?,
+    );
+    canonical.insert(
+        "tool_id".to_owned(),
+        required_lock_string(entry, key, "tool_id")?,
+    );
+    Ok(Some(Value::Object(canonical)))
+}
+
+fn required_lock_string(object: &Map<String, Value>, key: &str, field: &str) -> Result<Value> {
+    object
+        .get(field)
+        .and_then(Value::as_str)
+        .map(|value| Value::String(value.to_owned()))
+        .ok_or_else(|| KcsError::schema(format!("{key}.{field} must be a string")))
+}
+
+fn required_lock_integer(object: &Map<String, Value>, key: &str, field: &str) -> Result<Value> {
+    object
+        .get(field)
+        .and_then(Value::as_u64)
+        .map(Value::from)
+        .ok_or_else(|| KcsError::schema(format!("{key}.{field} must be an integer")))
 }
 
 pub fn append_event_log(code: &str, message: &str, context: Value) -> Result<()> {
