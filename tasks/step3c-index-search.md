@@ -6,7 +6,7 @@ KCS Step 3 の本体実装。**契約テスト仕様 `tasks/step3a-contract-test
 
 ## 前提 (main に揃っている)
 
-- Step 1-2 実装済み (CAS/DAG/CLI + pipeline/adapter/index、テスト 131)
+- Step 1-2 実装済み (CAS/DAG/CLI + pipeline/adapter/index、テスト 133)
 - スキャフォールド: `crates/kcs-index` / `crates/kcs-search` (型 + trait 骨格)
 - 契約テスト仕様: `tasks/step3a-contract-tests.md` r3 — ベクタ実計算済み・クロスレビュー再計算一致。**期待値の変更禁止**
 - spec 追記済み (2026-07-03): chunk 境界の正準規則 (04 §4.1)、MMR relevance 正規化 (05 §1.4)、query_hash 正準構成 (05 §1.8)、per-search latency 記録 (05 §7)
@@ -30,7 +30,8 @@ KCS Step 3 の本体実装。**契約テスト仕様 `tasks/step3a-contract-test
 
 1. step3a の P0 60 を Rust テストに落とす (ベクタ fixture 一致 assert 含む)。**pipeline 系契約は CLI (kcs search / kcs index) を通る結合テスト** — Step 2 の教訓 (純関数テストのみは完了と見なさない)
 2. 依存追加可 (最小): rusqlite (bundled)、sqlite-vec、既存 ureq。**テストの外部通信ゼロ** (embedding はモック / KCS_TEST_* env フック方式を踏襲)
-3. 実装 green 化 → `eval/` の M3-1 サブセットで実測: `python3 eval/generate_corpus.py` → `replay_history.py` → `run_eval.py --scenario M3-1` で **Recall@10 >= 0.8** を確認 (M3-2/3 は Step 4 完了時)
+3. 実装 green 化 → `eval/` の M3-1 サブセットで実測 (eval/README.md の手順どおり):
+   `python3 eval/generate_corpus.py --out /tmp/kcs-eval-corpus` → `python3 eval/replay_history.py --corpus /tmp/kcs-eval-corpus --bin target/release/kcs` → `python3 eval/run_eval.py --corpus /tmp/kcs-eval-corpus --bin target/release/kcs --scenario M3-1` で **Recall@10 >= 0.8** を確認 (M3-2/3 は Step 4 完了時)
 
 ## spec 未定義部の暫定判断 (step3a §C の実装者判断 5 件。この通り実装し decisions に記録)
 
@@ -51,9 +52,20 @@ KCS Step 3 の本体実装。**契約テスト仕様 `tasks/step3a-contract-test
 ## 受け入れ条件
 
 ```bash
-cargo test --workspace          # P0 60 green + Step 1-2 の既存 131 テスト回帰なし
+cargo test --workspace          # P0 60 green + Step 1-2 の既存 133 テスト回帰なし
 cargo clippy --all-targets -- -D warnings && cargo fmt --check
 eval M3-1: Recall@10 >= 0.8 (実測値を報告に含める)
 ```
 
-ブランチ `step3c-impl` (main から分岐)。完了後、発注側が 4 エンジン監査を実施する。
+## 実装者向け運用ノート (別セッションの Claude Code を想定)
+
+- ブランチ `step3c-impl` (main から分岐) で作業し、意味のある単位で自分でコミットする
+  (コミットメッセージに実装項目番号を含める)
+- ネットワーク可: `cargo add` で依存追加してよい (rusqlite bundled / sqlite-vec / ureq。最小構成)
+- 実装順の推奨: SQLite 層 + chunking (ベクタ green 化) → FTS/embedding (モック) → hybrid/RRF/MMR →
+  cursor/multi-scope → Evidence Pointer/open/view → reindex → 観測ログ → eval M3-1 実測
+- 完了報告に含めること: P0 60 の green 数 / 既存 133 テストの回帰有無 / eval M3-1 の Recall@10 実測値 /
+  **未実装・簡略化した箇所の明記** (「未実装ゼロ」と書く場合は経路レベルで真であること) /
+  spec と矛盾を見つけた場合は docs を変えず tasks/ws1c-decisions.md に記録した旨
+
+完了後、発注側が 4 エンジン監査を実施する。
