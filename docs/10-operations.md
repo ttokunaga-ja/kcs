@@ -562,7 +562,7 @@ done criteria                    → 09-mvp-scope.md
 未統合で実装前に具体化が必要なもの:
 
 ```text
-.kcsignore spec                  → 03-data-model.md へ追記予定
+.kcsignore spec                  → 03-data-model.md §11.1 に追記済み (2026-07-03)
 Normalized Markdown 形式 spec     → 07-adapter-spec.md へ追記予定
 ```
 

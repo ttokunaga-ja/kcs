@@ -13,7 +13,9 @@ KCS の CLI 契約。GUI は MVP 範囲外 (Phase 4+) だが、将来の用語�
 ```bash
 kcs init [<path>]                       # 現在フォルダの .kcs を作成
 kcs status                              # ファイル状態 / pending タスク / budget
-kcs index [--preview|--approve|--yes]   # 取り込み (初回は preview + 承認必須)
+kcs index [--preview|--approve|--yes] [--online|--offline]  # 取り込み (初回は preview + 承認必須)。
+                                        # --online/--offline は当該実行の送信可否を上書き (正本 07-adapter-spec.md §3。
+                                        # 優先順位: CLI > scope config > user config)
 kcs batch resume [--override-budget]    # 中断タスクの再開 (budget 超過 pause は --override-budget 必須。04-pipeline.md §5.4/§5.7)
 kcs batch retry                         # failed タスクの再試行
 kcs repair [--rebuild-db|--verify-objects]  # SQLite 再構築 / CAS 整合性検証 (10-operations.md §7.5)
