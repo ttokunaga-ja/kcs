@@ -3,7 +3,9 @@ members = [
     "crates/kcs-adapter",
     "crates/kcs-cli",
     "crates/kcs-core",
+    "crates/kcs-index",
     "crates/kcs-pipeline",
+    "crates/kcs-search",
 ]
 resolver = "2"
 
