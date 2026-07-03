@@ -1,11 +1,14 @@
 //! Cost guardrail and budget contracts.
 
 use std::collections::BTreeMap;
+use std::fs::{self, OpenOptions};
+use std::io::{BufRead, Write};
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
 use crate::task::TaskType;
-use crate::Result;
+use crate::{IoResultExt, PipelineError, Result};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BudgetConfig {
@@ -56,14 +59,65 @@ pub struct MonthlyCostLedgerEntry {
     pub usd: f64,
 }
 
+#[derive(Debug, Clone)]
+pub struct CostLedger {
+    path: PathBuf,
+}
+
+impl CostLedger {
+    #[must_use]
+    pub fn new(path: impl Into<PathBuf>) -> Self {
+        Self { path: path.into() }
+    }
+
+    pub fn append_monthly(&self, entry: &MonthlyCostLedgerEntry) -> Result<()> {
+        if let Some(parent) = self.path.parent() {
+            fs::create_dir_all(parent).pipeline_io(parent)?;
+        }
+        let mut file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.path)
+            .pipeline_io(&self.path)?;
+        serde_json::to_writer(&mut file, entry)
+            .map_err(|err| PipelineError::Schema(err.to_string()))?;
+        file.write_all(b"\n").pipeline_io(&self.path)
+    }
+
+    pub fn monthly_total(&self, month: &str, scope_id: Option<&str>) -> Result<f64> {
+        let file = match fs::File::open(&self.path) {
+            Ok(file) => file,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(0.0),
+            Err(err) => {
+                return Err(PipelineError::Io {
+                    path: self.path.display().to_string(),
+                    message: err.to_string(),
+                });
+            }
+        };
+        let mut total = 0.0;
+        for line in std::io::BufReader::new(file).lines() {
+            let line = line.pipeline_io(&self.path)?;
+            if line.trim().is_empty() {
+                continue;
+            }
+            let entry: MonthlyCostLedgerEntry = serde_json::from_str(&line)
+                .map_err(|err| PipelineError::Schema(err.to_string()))?;
+            if entry.month == month && scope_id.map_or(true, |scope| scope == entry.scope_id) {
+                total += entry.usd;
+            }
+        }
+        Ok(total)
+    }
+}
+
 pub fn evaluate_budget(estimate: BudgetEstimate) -> Result<BudgetDecision> {
-    Ok(BudgetDecision {
-        allowed: true,
-        cap_kind: None,
-        remaining_usd: f64::INFINITY,
-        warning: (estimate.estimated_usd > 0.0)
-            .then(|| "budget caps are not configured".to_owned()),
-    })
+    Ok(evaluate_budget_with_caps(
+        &estimate,
+        f64::INFINITY,
+        None,
+        false,
+    ))
 }
 
 #[must_use]
@@ -92,6 +146,52 @@ pub fn evaluate_budget_with_caps(
         remaining_usd: effective_remaining,
         warning: (!allowed).then(|| "budget cap exceeded; new tasks are paused".to_owned()),
     }
+}
+
+#[must_use]
+pub fn utc_month(timestamp: &str) -> String {
+    timestamp.get(0..7).unwrap_or("1970-01").to_owned()
+}
+
+#[must_use]
+pub fn estimate_local_baseline_cost(size_bytes: u64) -> f64 {
+    if size_bytes == 0 {
+        0.0
+    } else {
+        size_bytes as f64 / 1_000_000.0 * 0.01
+    }
+}
+
+pub fn read_budget_caps(config_path: impl AsRef<Path>) -> Result<(Option<f64>, Option<f64>)> {
+    let path = config_path.as_ref();
+    let text = match fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok((None, None)),
+        Err(err) => {
+            return Err(PipelineError::Io {
+                path: path.display().to_string(),
+                message: err.to_string(),
+            });
+        }
+    };
+    let value: toml::Value =
+        toml::from_str(&text).map_err(|err| PipelineError::Schema(err.to_string()))?;
+    let budget = value.get("budget");
+    let number = |key: &str| {
+        budget
+            .and_then(|value| value.get(key))
+            .and_then(toml::Value::as_float)
+            .or_else(|| {
+                budget
+                    .and_then(|value| value.get(key))
+                    .and_then(toml::Value::as_integer)
+                    .map(|value| value as f64)
+            })
+    };
+    Ok((
+        number("device_monthly_usd_cap"),
+        number("folder_monthly_usd_cap"),
+    ))
 }
 
 #[cfg(test)]

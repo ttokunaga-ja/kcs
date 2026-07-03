@@ -4,6 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use kcs_adapter::types as adapter_types;
+use kcs_core::scope::{new_ulid, now_utc_seconds};
 use serde::{Deserialize, Serialize};
 
 use crate::prepare::{
@@ -158,7 +159,7 @@ pub struct IncrementalModeDecision {
 }
 
 pub fn markdownize_units(request: MarkdownizeStageRequest) -> Result<MarkdownizeStageOutput> {
-    let generated_at = "2026-04-25T12:00:00Z".to_owned();
+    let generated_at = now_utc_seconds();
     let unit_key = "doc:1".to_owned();
     let prepared_hash = request.new_raw.raw_hash.clone();
     let unit_ref = prepared_unit_ref(&unit_key);
@@ -182,7 +183,7 @@ pub fn markdownize_units(request: MarkdownizeStageRequest) -> Result<Markdownize
         tool_profile_hash: request.tool_profile_hash.clone(),
         gen: 0,
         parent_gen: None,
-        run_id: "run_00000000000000000000000000".to_owned(),
+        run_id: format!("run_{}", new_ulid(Path::new("."))),
         units: vec![NormalizedUnitManifestEntry {
             order: 0,
             unit_key,

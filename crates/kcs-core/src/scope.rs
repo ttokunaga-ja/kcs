@@ -15,7 +15,9 @@ use crate::cas::{
     append_jsonl, atomic_overwrite, atomic_write, hash_bytes, hash_json, is_hash, ObjectKind,
     ObjectStore,
 };
-use crate::dag::{build_tree, CommitObject, CommitStats, CommitType, TreeEntry, TreeObject};
+use crate::dag::{
+    build_tree, CommitObject, CommitStats, CommitType, NormalizeRef, TreeEntry, TreeObject,
+};
 use crate::error::{IoResultExt, KcsError, Result};
 use crate::schema::{validate_json_schema, SchemaKind};
 use crate::ExitCode;
@@ -179,6 +181,15 @@ impl Repository {
         store_raw: bool,
         excluded_paths: &BTreeSet<String>,
     ) -> Result<WorkingTree> {
+        self.build_working_tree_with_normalize(store_raw, excluded_paths, &BTreeMap::new())
+    }
+
+    pub fn build_working_tree_with_normalize(
+        &self,
+        store_raw: bool,
+        excluded_paths: &BTreeSet<String>,
+        normalize_by_path: &BTreeMap<String, NormalizeRef>,
+    ) -> Result<WorkingTree> {
         let mut entries = Vec::new();
         for entry in fs::read_dir(&self.root).kcs_io(&self.root)? {
             let entry = entry.kcs_io(&self.root)?;
@@ -215,7 +226,10 @@ impl Repository {
             } else {
                 hash_bytes(&bytes)
             };
-            entries.push(TreeEntry::raw_file(file_name, raw_hash)?);
+            let mut tree_entry = TreeEntry::raw_file(file_name.clone(), raw_hash)?;
+            tree_entry.normalize = normalize_by_path.get(&file_name).cloned();
+            tree_entry.validate()?;
+            entries.push(tree_entry);
         }
         Ok(WorkingTree {
             tree: build_tree(entries)?,
@@ -260,7 +274,13 @@ impl Repository {
         message: Option<&str>,
         fixed_now: Option<&str>,
     ) -> Result<SnapshotOutcome> {
-        self.snapshot_with_type(message, fixed_now, CommitType::Manual, &BTreeSet::new())
+        self.snapshot_with_type(
+            message,
+            fixed_now,
+            CommitType::Manual,
+            &BTreeSet::new(),
+            &BTreeMap::new(),
+        )
     }
 
     pub fn auto_snapshot(
@@ -269,7 +289,23 @@ impl Repository {
         fixed_now: Option<&str>,
         excluded_paths: &BTreeSet<String>,
     ) -> Result<SnapshotOutcome> {
-        self.snapshot_with_type(message, fixed_now, CommitType::Auto, excluded_paths)
+        self.auto_snapshot_with_normalize(message, fixed_now, excluded_paths, &BTreeMap::new())
+    }
+
+    pub fn auto_snapshot_with_normalize(
+        &self,
+        message: Option<&str>,
+        fixed_now: Option<&str>,
+        excluded_paths: &BTreeSet<String>,
+        normalize_by_path: &BTreeMap<String, NormalizeRef>,
+    ) -> Result<SnapshotOutcome> {
+        self.snapshot_with_type(
+            message,
+            fixed_now,
+            CommitType::Auto,
+            excluded_paths,
+            normalize_by_path,
+        )
     }
 
     fn snapshot_with_type(
@@ -278,12 +314,15 @@ impl Repository {
         fixed_now: Option<&str>,
         commit_type: CommitType,
         excluded_paths: &BTreeSet<String>,
+        normalize_by_path: &BTreeMap<String, NormalizeRef>,
     ) -> Result<SnapshotOutcome> {
         self.validate()?;
         let _lock = StoreLock::acquire(&self.kcs_dir)?;
         maybe_hold_lock_for_tests();
 
-        let working = self.build_working_tree_filtered(true, excluded_paths)?.tree;
+        let working = self
+            .build_working_tree_with_normalize(true, excluded_paths, normalize_by_path)?
+            .tree;
         let tree_value =
             serde_json::to_value(&working).map_err(|err| KcsError::schema(err.to_string()))?;
         let (tree_hash, _) = self.store.write_json(ObjectKind::Tree, &tree_value)?;
@@ -1012,7 +1051,7 @@ fn unix_nanos() -> u128 {
         .unwrap_or_default()
 }
 
-fn new_ulid(path: &Path) -> String {
+pub fn new_ulid(path: &Path) -> String {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default();
@@ -1069,7 +1108,7 @@ fn is_ulid(value: &str) -> bool {
             .all(|byte| matches!(byte, b'0'..=b'9' | b'A'..=b'H' | b'J'..=b'K' | b'M'..=b'N' | b'P'..=b'T' | b'V'..=b'Z'))
 }
 
-fn now_utc_seconds() -> String {
+pub fn now_utc_seconds() -> String {
     if let Some(value) = fixed_now_override() {
         return value;
     }

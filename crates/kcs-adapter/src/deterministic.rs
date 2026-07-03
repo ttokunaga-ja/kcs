@@ -7,36 +7,67 @@ use crate::types::{
     UnitFingerprint, UnitKind,
 };
 use crate::Result;
+use serde_json::json;
 
 #[derive(Debug, Clone, Default)]
 pub struct DeterministicAdapter;
 
 impl DeterministicAdapter {
     fn profile_for(adapter_kind: AdapterKind) -> AdapterProfile {
-        let (tool_profile_hash, capability_flags) = match adapter_kind {
-            AdapterKind::Prepare => (
-                "sha256:20b67a9d7e7e2654379f16f20b445d007e95abac7c8f85d6da65beccff7e6b03",
-                Vec::new(),
-            ),
+        let (profile_input, capability_flags) = match adapter_kind {
+            AdapterKind::Prepare => (deterministic_prepare_profile_value(), Vec::new()),
             AdapterKind::Markdownize => (
-                "sha256:76c01950d19edffc1b8ca75e06d7754fb52cd05db1bb10e3268f81392bf54095",
+                deterministic_markdown_profile_value(),
                 vec!["baseline".to_owned(), "text_passthrough".to_owned()],
             ),
             _ => (
-                "sha256:0000000000000000000000000000000000000000000000000000000000000001",
+                json!({
+                    "adapter_kind": "markdownize",
+                    "adapter_role": "text",
+                    "model_or_tool_family": "kcs-deterministic-text",
+                    "model_version_pin": "1.0.0",
+                    "output_schema": "kcs-markdown-v1",
+                    "runtime_kind": "local",
+                    "spec_version": 1
+                }),
                 Vec::new(),
             ),
         };
+        let tool_profile_hash = crate::identity::tool_profile_hash(&profile_input)
+            .expect("built-in deterministic profile is valid");
         AdapterProfile {
             adapter_kind,
             adapter_id: "deterministic_builtin".to_owned(),
             execution_mode: ExecutionMode::DeterministicLibrary,
-            tool_profile_hash: tool_profile_hash.to_owned(),
+            tool_profile_hash,
             version: env!("CARGO_PKG_VERSION").to_owned(),
             capability_flags,
             allow_network: false,
         }
     }
+}
+
+pub fn deterministic_markdown_profile_value() -> serde_json::Value {
+    json!({
+        "adapter_kind": "markdownize",
+        "adapter_role": "text",
+        "model_or_tool_family": "kcs-deterministic-text",
+        "model_version_pin": "1.0.0",
+        "output_schema": "kcs-markdown-v1",
+        "runtime_kind": "local",
+        "spec_version": 1
+    })
+}
+
+pub fn deterministic_prepare_profile_value() -> serde_json::Value {
+    json!({
+        "adapter_kind": "prepare",
+        "adapter_role": "text",
+        "model_or_tool_family": "kcs-deterministic-prepare",
+        "model_version_pin": "1.0.0",
+        "runtime_kind": "local",
+        "spec_version": 1
+    })
 }
 
 impl PrepareAdapter for DeterministicAdapter {
@@ -84,6 +115,7 @@ impl MarkdownizeAdapter for DeterministicAdapter {
             .prepared_unit_hint
             .clone()
             .unwrap_or_else(|| vec![default_hint(&request.raw.raw_hash)]);
+        let source_text = read_source_text(&request);
         if request.mode == MarkdownizeMode::Incremental {
             let incremental = request.hints.clone();
             let changed = incremental
@@ -99,13 +131,13 @@ impl MarkdownizeAdapter for DeterministicAdapter {
                 updated_units: hints
                     .iter()
                     .filter(|hint| changed.contains(&hint.unit_key))
-                    .map(markdown_unit_from_hint)
+                    .map(|hint| markdown_unit_from_hint(hint, &request, source_text.as_deref()))
                     .collect(),
                 unchanged_unit_keys: Vec::new(),
                 added_units: hints
                     .iter()
                     .filter(|hint| added.contains(&hint.unit_key))
-                    .map(markdown_unit_from_hint)
+                    .map(|hint| markdown_unit_from_hint(hint, &request, source_text.as_deref()))
                     .collect(),
                 removed_unit_keys: incremental
                     .map(|hints| hints.removed_unit_keys)
@@ -118,7 +150,10 @@ impl MarkdownizeAdapter for DeterministicAdapter {
 
         Ok(MarkdownizeResponse {
             mode_used: MarkdownizeMode::Full,
-            updated_units: hints.iter().map(markdown_unit_from_hint).collect(),
+            updated_units: hints
+                .iter()
+                .map(|hint| markdown_unit_from_hint(hint, &request, source_text.as_deref()))
+                .collect(),
             unchanged_unit_keys: Vec::new(),
             added_units: Vec::new(),
             removed_unit_keys: Vec::new(),
@@ -152,15 +187,85 @@ fn default_hint(raw_hash: &str) -> PreparedUnitHint {
     }
 }
 
-fn markdown_unit_from_hint(hint: &PreparedUnitHint) -> MarkdownUnit {
-    MarkdownUnit {
-        unit_key: hint.unit_key.clone(),
-        unit_type: hint.unit_kind,
-        markdown: format!(
+fn markdown_unit_from_hint(
+    hint: &PreparedUnitHint,
+    request: &MarkdownizeRequest,
+    source_text: Option<&str>,
+) -> MarkdownUnit {
+    let markdown = match source_text {
+        Some(text) if request.media_type == "text/markdown" => text.to_owned(),
+        Some(text) if request.media_type == "text/x-code" => {
+            fence_code(text, request.raw.path.as_deref())
+        }
+        Some(text) if request.media_type == "application/pdf" => {
+            format!("{}\n", text.trim())
+        }
+        Some(text) => text.to_owned(),
+        None => format!(
             "<!-- KCS deterministic baseline {} {} -->\n",
             hint.unit_key, hint.prepared_hash
         ),
+    };
+    MarkdownUnit {
+        unit_key: hint.unit_key.clone(),
+        unit_type: hint.unit_kind,
+        markdown: if markdown.trim().is_empty() {
+            format!(
+                "<!-- KCS deterministic baseline {} {} -->\n",
+                hint.unit_key, hint.prepared_hash
+            )
+        } else {
+            markdown
+        },
         metadata: Default::default(),
+    }
+}
+
+fn read_source_text(request: &MarkdownizeRequest) -> Option<String> {
+    let path = request.raw.path.as_ref()?;
+    let bytes = std::fs::read(path).ok()?;
+    if request.media_type == "application/pdf" {
+        return Some(extract_pdf_text_layer(&bytes));
+    }
+    Some(String::from_utf8_lossy(&bytes).into_owned())
+}
+
+fn fence_code(text: &str, path: Option<&str>) -> String {
+    let lang = path
+        .and_then(|path| std::path::Path::new(path).extension())
+        .and_then(|extension| extension.to_str())
+        .unwrap_or("");
+    format!("```{lang}\n{}\n```\n", text.trim_end())
+}
+
+fn extract_pdf_text_layer(bytes: &[u8]) -> String {
+    let text = String::from_utf8_lossy(bytes);
+    let mut out = String::new();
+    let mut rest = text.as_ref();
+    while let Some(start) = rest.find('(') {
+        rest = &rest[start + 1..];
+        let Some(end) = rest.find(')') else {
+            break;
+        };
+        let candidate = &rest[..end];
+        if candidate
+            .chars()
+            .any(|char| char.is_alphanumeric() || !char.is_ascii())
+        {
+            if !out.is_empty() {
+                out.push('\n');
+            }
+            out.push_str(candidate);
+        }
+        rest = &rest[end + 1..];
+    }
+    if out.is_empty() {
+        text.lines()
+            .filter(|line| !line.trim_start().starts_with('%'))
+            .collect::<Vec<_>>()
+            .join("\n")
+    } else {
+        out
     }
 }
 

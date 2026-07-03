@@ -6,14 +6,22 @@ use assert_cmd::Command;
 use kcs_adapter::identity::{
     canonical_profile_value, jcs_bytes, prompt_template_hash, tool_profile_hash,
 };
-use kcs_adapter::mistral_ocr::{image_hash, replace_image_placeholders, OcrImage};
+use kcs_adapter::mistral_ocr::{
+    image_hash, replace_image_placeholders, MistralOcrClient, MistralOcrMarkdownizeAdapter,
+    OcrImage, OcrResponse,
+};
 use kcs_adapter::tool_lock::tool_lock_hash;
+use kcs_adapter::traits::MarkdownizeAdapter;
+use kcs_adapter::types::{
+    MarkdownizeMode as AdapterMarkdownizeMode, MarkdownizeRequest, PreparedUnitHint, RawInput,
+    UnitKind,
+};
 use kcs_pipeline::budget::{evaluate_budget_with_caps, BudgetCapKind, BudgetEstimate};
 use kcs_pipeline::markdownize::{
     choose_markdownize_mode, markdownize_units, normalized_identity, normalized_instance_dir,
-    validate_markdownize_response, IncrementalHints, IncrementalModeInput, MarkdownizeMode,
-    MarkdownizeStageRequest, NormalizedInstanceManifest, NormalizedUnitManifestEntry, RawRef,
-    UnitStatus,
+    persist_normalized_instance, validate_markdownize_response, IncrementalHints,
+    IncrementalModeInput, MarkdownizeMode, MarkdownizeStageRequest, NormalizedInstanceManifest,
+    NormalizedUnitManifestEntry, NormalizedUnitObject, RawRef, UnitStatus,
 };
 use kcs_pipeline::prepare::{
     change_rate, hash_bytes, map_units, unit_ref, PreparedUnit, UnitFingerprint, UnitType,
@@ -35,6 +43,27 @@ fn profile_mistral() -> Value {
         "runtime_kind": "cloud",
         "spec_version": 1
     })
+}
+
+#[derive(Clone)]
+struct MockMistralClient;
+
+impl MistralOcrClient for MockMistralClient {
+    fn resolve_model_pin(&self, _configured_model: &str) -> kcs_adapter::Result<String> {
+        Ok("mistral-ocr-2505".to_owned())
+    }
+
+    fn ocr_markdown(
+        &self,
+        _request: &MarkdownizeRequest,
+        model_pin: &str,
+    ) -> kcs_adapter::Result<OcrResponse> {
+        Ok(OcrResponse {
+            markdown: format!("ocr via {model_pin}\n"),
+            images: Vec::new(),
+            model_version_pin: model_pin.to_owned(),
+        })
+    }
 }
 
 fn profile_deterministic() -> Value {
@@ -435,10 +464,27 @@ fn ct2_incr_006_max_consecutive_falls_back_full() {
 fn ct2_incr_008_identity_ignores_mode() {
     let raw = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     let tool = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    let full = NormalizedUnitObject {
+        unit_key: "page:1".to_owned(),
+        unit_type: UnitType::Page,
+        raw_hash: raw.to_owned(),
+        prepared_hash: "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+            .to_owned(),
+        tool_profile_hash: tool.to_owned(),
+        gen: 0,
+        mode: MarkdownizeMode::Full,
+        markdown: "full".to_owned(),
+        reused_from: None,
+        generated_at: "2026-04-25T12:00:00Z".to_owned(),
+    };
+    let mut incremental = full.clone();
+    incremental.mode = MarkdownizeMode::Incremental;
+    incremental.markdown = "incremental".to_owned();
     assert_eq!(
-        normalized_identity(raw, tool),
-        normalized_identity(raw, tool)
+        normalized_identity(&full.raw_hash, &full.tool_profile_hash),
+        normalized_identity(&incremental.raw_hash, &incremental.tool_profile_hash)
     );
+    assert_ne!(full.markdown, incremental.markdown);
 }
 
 #[test]
@@ -569,6 +615,13 @@ fn ct2_task_002_retry_budget_matrix() {
 
 #[test]
 fn ct2_task_003_idempotency_key_is_stable() {
+    let dir = scope();
+    fs::write(dir.path().join("a.txt"), "hello").unwrap();
+    json_success(&dir, ["index", "--approve"]);
+    let before = collect_files(&dir.path().join(".kcs/objects/normalized_units"));
+    json_success(&dir, ["index", "--yes"]);
+    let after = collect_files(&dir.path().join(".kcs/objects/normalized_units"));
+    assert_eq!(before, after);
     assert_eq!(
         idempotency_key("sha256:a", "sha256:b"),
         idempotency_key("sha256:a", "sha256:b")
@@ -709,6 +762,12 @@ fn ct2_secrets_003_tier_b_local_but_online_pending() {
         .any(|v| v == "api_token.txt"));
     let output = json_success(&dir, ["index", "--yes"]);
     assert!(output["pending_online_tasks"].as_u64().unwrap() > 0);
+    let status = json_success(&dir, ["status"]);
+    assert!(status["tasks"].as_array().unwrap().iter().any(|task| {
+        task["input_path"] == "api_token.txt"
+            && task["status"] == "pending"
+            && task["fallback_reason"] == "network_opt_in_required"
+    }));
 }
 
 #[test]
@@ -717,16 +776,25 @@ fn ct2_secrets_004_added_tier_a_is_quarantined() {
     fs::write(dir.path().join("a.txt"), "hello").unwrap();
     json_success(&dir, ["index", "--approve"]);
     fs::write(dir.path().join(".env"), "TOKEN=x").unwrap();
+    fs::write(dir.path().join("b.txt"), "force commit").unwrap();
     let output = json_success(&dir, ["index", "--yes"]);
-    let commit = output["commit"].as_object();
-    if let Some(commit) = commit {
-        let tree = inspect(&dir, commit["tree"].as_str().unwrap());
-        assert!(!tree["entries"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|entry| entry["path"] == ".env"));
-    }
+    let commit = output["commit"]
+        .as_object()
+        .expect("non-secret addition creates commit");
+    let tree = inspect(&dir, commit["tree"].as_str().unwrap());
+    assert!(!tree["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|entry| entry["path"] == ".env"));
+    let env_hash = hash_bytes(b"TOKEN=x");
+    json_failure(&dir, ["inspect", &env_hash], 4);
+    let status = json_success(&dir, ["status"]);
+    assert!(status["quarantine"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|entry| entry["path"] == ".env"));
 }
 
 #[test]
@@ -736,6 +804,12 @@ fn ct2_network_001_yes_does_not_issue_online_tasks() {
     let output = json_success(&dir, ["index", "--yes"]);
     assert_eq!(output["network_opt_in"], false);
     assert!(output["pending_online_tasks"].as_u64().unwrap() > 0);
+    let status = json_success(&dir, ["status"]);
+    assert!(status["tasks"].as_array().unwrap().iter().any(|task| {
+        task["input_path"] == "a.txt"
+            && task["status"] == "pending"
+            && task["fallback_reason"] == "network_opt_in_required"
+    }));
 }
 
 #[test]
@@ -753,6 +827,14 @@ fn ct2_network_002_approve_grants_opt_in_yes_does_not() {
         json_success(&approve_dir, ["index", "--approve"])["network_opt_in"],
         true
     );
+
+    let online_dir = scope();
+    fs::write(online_dir.path().join("a.txt"), "hello").unwrap();
+    assert_eq!(
+        json_success(&online_dir, ["index", "--online"])["network_opt_in"],
+        true
+    );
+    assert!(!online_dir.path().join(".kcs/approvals.jsonl").exists());
 }
 
 #[test]
@@ -781,9 +863,61 @@ fn ct2_adapter_013_baseline_and_ai_artifacts_coexist() {
     let before = collect_files(&baseline_root);
     let raw = hash_bytes(b"hello");
     let ai_tool = "sha256:24bd9e903241740fc9fe94fb72a6ff3e697b3c0859bd5aef1b49728a207e81ed";
-    let ai_dir = normalized_instance_dir(dir.path().join(".kcs"), &raw, ai_tool, 0);
-    fs::create_dir_all(&ai_dir).unwrap();
-    fs::write(ai_dir.join("manifest.json"), b"{}").unwrap();
+    let adapter = MistralOcrMarkdownizeAdapter::new(
+        MockMistralClient,
+        "mistral-ocr-latest",
+        "01H00000000000000000000000",
+    );
+    let response = adapter
+        .markdownize(MarkdownizeRequest {
+            raw: RawInput {
+                raw_hash: raw.clone(),
+                path: Some(dir.path().join("a.txt").display().to_string()),
+            },
+            media_type: "application/pdf".to_owned(),
+            prepared_unit_hint: Some(vec![PreparedUnitHint {
+                unit_key: "page:1".to_owned(),
+                prepared_hash: raw.clone(),
+                unit_kind: UnitKind::Page,
+                order: 0,
+            }]),
+            mode: AdapterMarkdownizeMode::Full,
+            previous: None,
+            hints: None,
+            tool_profile_hash: ai_tool.to_owned(),
+            spec_version: 1,
+        })
+        .unwrap();
+    let unit = NormalizedUnitObject {
+        unit_key: "page:1".to_owned(),
+        unit_type: UnitType::Page,
+        raw_hash: raw.clone(),
+        prepared_hash: raw.clone(),
+        tool_profile_hash: ai_tool.to_owned(),
+        gen: 0,
+        mode: MarkdownizeMode::Full,
+        markdown: response.updated_units[0].markdown.clone(),
+        reused_from: None,
+        generated_at: "2026-04-25T12:00:00Z".to_owned(),
+    };
+    let manifest = NormalizedInstanceManifest {
+        raw_hash: raw.clone(),
+        tool_profile_hash: ai_tool.to_owned(),
+        gen: 0,
+        parent_gen: None,
+        run_id: "run_01H00000000000000000000000".to_owned(),
+        units: vec![NormalizedUnitManifestEntry {
+            order: 0,
+            unit_key: "page:1".to_owned(),
+            unit_ref: unit_ref("page:1"),
+            unit_type: UnitType::Page,
+            status: UnitStatus::Done,
+            prepared_hash: raw,
+            error_kind: None,
+        }],
+        generated_at: "2026-04-25T12:00:00Z".to_owned(),
+    };
+    persist_normalized_instance(dir.path().join(".kcs"), &manifest, &[unit]).unwrap();
     assert_eq!(
         collect_files(&baseline_root).intersection(&before).count(),
         before.len()
@@ -810,6 +944,8 @@ fn ct2_image_002_markdown_references_object_uri() {
         &[OcrImage {
             bytes: b"image bytes".to_vec(),
             media_type: "image/png".to_owned(),
+            bbox: None,
+            confidence: None,
         }],
     );
     assert!(replaced.contains("kcs://01H00000000000000000000000/object/image/sha256:"));

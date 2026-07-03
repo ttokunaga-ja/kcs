@@ -80,27 +80,42 @@ pub fn prepare_units(request: PrepareStageRequest) -> Result<PrepareStageOutput>
             image_object_hashes: Vec::new(),
         });
     }
-    let unit_key = canonical_unit_key(
-        unit_type,
-        match unit_type {
-            UnitType::Page | UnitType::Slide => "1",
-            UnitType::Sheet => "Sheet1",
-            UnitType::Image => "0",
-            UnitType::File | UnitType::HeadingSection | UnitType::Symbol => "1",
-        },
-    );
-    let fingerprint = fingerprint_for_bytes(&bytes, &bytes);
-    Ok(PrepareStageOutput {
-        prepared_object_hashes: vec![prepared_hash.clone()],
-        prepared_units: vec![PreparedUnit {
-            order: 0,
+    let unit_count = if unit_type == UnitType::Page {
+        pdf_page_count(&bytes).max(1)
+    } else {
+        1
+    };
+    let mut prepared_units = Vec::new();
+    for index in 0..unit_count {
+        let selector = match unit_type {
+            UnitType::Page | UnitType::Slide => (index + 1).to_string(),
+            UnitType::Sheet => "Sheet1".to_owned(),
+            UnitType::Image => index.to_string(),
+            UnitType::File | UnitType::HeadingSection | UnitType::Symbol => "1".to_owned(),
+        };
+        let unit_key = canonical_unit_key(unit_type, &selector);
+        let unit_prepared_hash = if unit_count == 1 {
+            prepared_hash.clone()
+        } else {
+            hash_bytes(format!("{prepared_hash}\0{unit_key}").as_bytes())
+        };
+        let fingerprint = fingerprint_for_bytes(&bytes, unit_prepared_hash.as_bytes());
+        prepared_units.push(PreparedUnit {
+            order: index as u64,
             unit_key,
             unit_type,
-            prepared_hash,
+            prepared_hash: unit_prepared_hash,
             fingerprint,
-            mime: Some(request.media_type),
-            page_number: matches!(unit_type, UnitType::Page).then_some(1),
-        }],
+            mime: Some(request.media_type.clone()),
+            page_number: (unit_type == UnitType::Page).then_some(index as u64 + 1),
+        });
+    }
+    Ok(PrepareStageOutput {
+        prepared_object_hashes: prepared_units
+            .iter()
+            .map(|unit| unit.prepared_hash.clone())
+            .collect(),
+        prepared_units,
         image_object_hashes: Vec::new(),
     })
 }
@@ -208,6 +223,25 @@ fn unit_type_for_media_type(media_type: &str) -> UnitType {
 
 fn pdf_has_text_layer(bytes: &[u8]) -> bool {
     !bytes.starts_with(b"%PDF") || bytes.windows(2).any(|window| window == b"BT")
+}
+
+fn pdf_page_count(bytes: &[u8]) -> usize {
+    let text = String::from_utf8_lossy(bytes);
+    let pages = text
+        .match_indices("/Type")
+        .filter(|(index, _)| {
+            let tail = &text[*index..text.len().min(index + 32)];
+            tail.contains("/Page") && !tail.contains("/Pages")
+        })
+        .count();
+    pages.max(
+        text.match_indices("/Page")
+            .filter(|(index, _)| {
+                let tail = &text[*index..text.len().min(index + 8)];
+                !tail.starts_with("/Pages")
+            })
+            .count(),
+    )
 }
 
 fn align_changed_interval(

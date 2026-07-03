@@ -596,11 +596,13 @@ name = "kcs-pipeline"
 version = "0.1.0"
 dependencies = [
  "kcs-adapter",
+ "kcs-core",
  "serde",
  "serde_jcs",
  "serde_json",
  "sha2",
  "thiserror",
+ "toml",
 ]
 
 [[package]]

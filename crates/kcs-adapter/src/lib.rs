@@ -13,8 +13,6 @@ pub type Result<T> = std::result::Result<T, AdapterError>;
 
 #[derive(Debug, Error)]
 pub enum AdapterError {
-    #[error("not implemented: {0}")]
-    NotImplemented(&'static str),
     #[error("adapter contract violation: {0}")]
     ContractViolation(String),
     #[error("schema validation failed: {0}")]
