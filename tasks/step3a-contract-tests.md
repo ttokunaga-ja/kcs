@@ -8,7 +8,18 @@
 > 手本は `tasks/ws1a-contract-tests.md` (Step 1) と `tasks/step2a-contract-tests.md` (Step 2)。
 > ID 体系・ベクタの書き方・§C の未定義リストの扱い方・§D の除外リストを踏襲する。
 > chunk 段の identity ベクタ (ws1a A.5, step2a §D で P2 参考に据え置かれたもの) は本書で実 Step 3 の
-> 確定契約へ昇格する (CT3-CHUNK-001 が ws1a A.5 と再計算一致することを確認済み)。
+> 確定契約へ昇格する (r3 で slug 規則確定に伴い section_id 正準例を更新 — A.1 冒頭注記参照)。
+>
+> 改訂 r3 (2026-07-03): 4 エンジン監査の裁定反映。(1) A.5 MMR を「生 RRF スコア → min-max 正規化 →
+> MMR」の一貫ベクタに差し替え (`05 §1.4` 確定規則。確定順序は c1,c3,c4,c2 → **c1,c3,c2,c4** に変化、
+> Fraction 厳密再計算で確定)。(2) §C-1〜C-4 は 2026-07-03 の spec 追記 (`04 §4.1` / `05 §1.8` /
+> `05 §1.4` / `05 §7`) で**解消済み**に更新 — 要-spec 残 0 件 (§C-6 も同追記で解消)。(3) A.7 に
+> query_hash 固定ベクタを新設。(4) `04 §4.1` の slug 規則 (翻訳なし・日本語保持) に合わせ CHUNK-1/2 の
+> section_id を `認証仕様/api-token` で再凍結、CHUNK-3 を「見出し未出現 (heading_path=[])」fixture に
+> 再設計。**ws1a A.5 の旧値 `sha256:8fefa482…` (section_id="auth/api-token") は規則確定前の例示値であり
+> 歴史的参照**。(5) text-only 緩和撤回 (WS-embed-2 裁定、`07 §5.3` 更新済み) に伴い EMB 系を
+> `gemini-embedding-2` / 768 (MRL) / cosine / `modality="multimodal"` で再凍結、CT3-EMBED-004 を
+> multimodal 前提に改訂 (旧 gemini-embedding-001 ベクタは削除)。契約・P0 構成 (59 件) は不変。
 >
 > 改訂 r2 (2026-07-03): Codex クロスレビュー反映。既存ベクタは全件再計算一致につき不変 (chunk_hash の
 > ws1a 整合 / RRF 全行 / MMR 算術 / URI 往復)。誤引用・過剰契約 4 件を修正 (CT3-EVIDENCE-001 の
@@ -39,7 +50,7 @@ M3-1 (hybrid + Evidence Pointer + `kcs open`) が担う。根拠と除外リス�
 | 接頭辞 | 対象契約 | 主な根拠 |
 | --- | --- | --- |
 | `CT3-CHUNK-*` | chunking (heading + max_chars) / chunk identity (chunk_hash) / gen 連動 / chunking_config_hash 世代 / append-only / tree_entries HEAD 射影 | `03 §8.1, §5.3` / `04 §4.1, §4.5, §4.6` |
-| `CT3-EMBED-*` | embedding_hash / 互換性ルール (dim/distance/modality/profile) / vector 検索拒否 + text fallback / content 再利用 / text-only 緩和 / embeddings 正・chunk_vec 導出 | `03 §7, §8.1` / `04 §4.3, §5.5` / `07 §5.3` |
+| `CT3-EMBED-*` | embedding_hash / 互換性ルール (dim/distance/modality/profile) / vector 検索拒否 + text fallback / content 再利用 / 採用確定 multimodal profile / embeddings 正・chunk_vec 導出 | `03 §7, §8.1` / `04 §4.3, §5.5` / `07 §5.3` |
 | `CT3-FTS-*` | FTS5 外部 content + trigger 同期 / `chunks_au` 限定 / trigram (CJK) / rebuild-db 再構築 | `04 §4.1, §4.2, §5.7` |
 | `CT3-HYBRID-*` | mode 解決 (auto→hybrid→text fallback) / fail_behavior / fallback_reason / RRF 決定論 (同点 chunk_id 昇順) | `05 §1.1, §1.3, §1.7` |
 | `CT3-MMR-*` | MMR 選択則 / 決定性 / mmr_depth / max_per_raw_hash (ページ跨ぎ) / group_by_raw_hash | `05 §1.4` |
@@ -67,71 +78,78 @@ P0 総数は末尾に集計。
 JCS 近似は `json.dumps(obj, separators=(',',':'), ensure_ascii=False, sort_keys=True).encode('utf-8')`。
 
 > **RFC 8785 との差異について**: 本書 A.1〜A.3 の hash 入力キーはすべて ASCII、数値はすべて整数
-> (`spec_version=1`, `gen`, `char_*`, `dimensions=1536`) である。この条件下では上記 Python 近似は
+> (`spec_version=1`, `gen`, `char_*`, `dimensions=768`) である。この条件下では上記 Python 近似は
 > RFC 8785 JCS と **バイト一致** する (ws1a §A 冒頭注記と同じ論拠)。非 ASCII は `heading_path` /
-> `section_id` の **値** にのみ現れ、UTF-8 リテラル直列化で両者一致する (ws1a CT-HASH-009 で確認済み)。
+> `section_id` / `query` の **値** にのみ現れ、UTF-8 リテラル直列化で両者一致する (ws1a CT-HASH-009 で
+> 確認済み)。**A.7 (query_hash) のみ浮動小数点が入力に現れる**: RFC 8785 (ECMAScript 数値直列化) では
+> 整数値 float は小数点なしで直列化される (`1.0 → "1"`)。`0.7` は最短表現 `"0.7"` で両者一致。A.7 の
+> Python 近似は整数値 float を int へ変換して RFC 8785 に一致させた (canonical バイト列を正とする)。
 > RRF (A.4) / MMR (A.5) は Fraction で有理数厳密計算し、float 値は参考表示。
 
-### A.1 chunk_hash ベクタ (`03 §8.1` chunk identity)
+### A.1 chunk_hash ベクタ (`03 §8.1` chunk identity / `04 §4.1` 正準規則)
 
 入力素材 (ws1a / step2a から流用):
 `raw_hash = sha256:74bcb92d8088c950e45e4c43563332da2ca1e04b25d6d4016aa43f830d4cca8a` (ws1a report.pdf raw)、
 `tool_profile_hash = sha256:e067e42e6634b8043f46a4b7f55257ab10ca6266be80cc47b6a68a5aacd2c8f0` (ws1a placeholder)。
 
-**CHUNK-1 (gen=0, section_id 在) — ws1a A.5 の再計算一致確認**:
+> **旧値の扱い (r3)**: `04 §4.1` の slug 規則 (2026-07-03 確定 — 翻訳なし・日本語保持) では
+> `heading_path ["認証仕様","API Token"]` から導出できる section_id は **`認証仕様/api-token`** であり、
+> 旧例の `auth/api-token` は導出不能。発注側裁定により正準例を更新した。**ws1a A.5 の旧値
+> `sha256:8fefa4825444efb1a120df709f45764a9ac074a9a2c0002ee4307baa7bbfe15a` (section_id="auth/api-token")
+> は規則確定前の例示値であり歴史的参照** (JCS 直列化の検証データとしては今も有効)。`03 §8.1` の
+> chunk object 例・`08 §2` の例示値の section_id 同期は発注側にて実施。
+
+**CHUNK-1 (gen=0, section_id 在)** — section_id は `04 §4.1` 規則 4 の slug 導出
+(`認証仕様` → `認証仕様` / `API Token` → 小文字化 + 空白→`-` → `api-token`):
 
 ```text
-canonical: {"char_end":1500,"char_start":1200,"gen":0,"heading_path":["認証仕様","API Token"],"raw_hash":"sha256:74bcb92d8088c950e45e4c43563332da2ca1e04b25d6d4016aa43f830d4cca8a","section_id":"auth/api-token","spec_version":1,"tool_profile_hash":"sha256:e067e42e6634b8043f46a4b7f55257ab10ca6266be80cc47b6a68a5aacd2c8f0","unit_key":"page:12"}
-chunk_hash = sha256:8fefa4825444efb1a120df709f45764a9ac074a9a2c0002ee4307baa7bbfe15a
+canonical: {"char_end":1500,"char_start":1200,"gen":0,"heading_path":["認証仕様","API Token"],"raw_hash":"sha256:74bcb92d8088c950e45e4c43563332da2ca1e04b25d6d4016aa43f830d4cca8a","section_id":"認証仕様/api-token","spec_version":1,"tool_profile_hash":"sha256:e067e42e6634b8043f46a4b7f55257ab10ca6266be80cc47b6a68a5aacd2c8f0","unit_key":"page:12"}
+chunk_hash = sha256:c5e31f10da04b722769bdbbd60a55b94c177b5f3bf9c64e5341be7281d115c3d
 ```
-
-ws1a A.5 の値と **バイト一致** (再計算確認済み)。Step 1 で P2 参考だった chunk identity を Step 3 の確定契約へ昇格する。
 
 **CHUNK-2 (gen=3, 他は CHUNK-1 と同一) — `kcs reindex --force` の gen+1 で別 identity になることの固定**:
 
 ```text
-canonical: {"char_end":1500,"char_start":1200,"gen":3,"heading_path":["認証仕様","API Token"],"raw_hash":"sha256:74bcb92d8088c950e45e4c43563332da2ca1e04b25d6d4016aa43f830d4cca8a","section_id":"auth/api-token","spec_version":1,"tool_profile_hash":"sha256:e067e42e6634b8043f46a4b7f55257ab10ca6266be80cc47b6a68a5aacd2c8f0","unit_key":"page:12"}
-chunk_hash = sha256:4e170d694a19589e035f95ff0aae4cc0d1c8212a2e873aa10de00d20d65784d9
+canonical: {"char_end":1500,"char_start":1200,"gen":3,"heading_path":["認証仕様","API Token"],"raw_hash":"sha256:74bcb92d8088c950e45e4c43563332da2ca1e04b25d6d4016aa43f830d4cca8a","section_id":"認証仕様/api-token","spec_version":1,"tool_profile_hash":"sha256:e067e42e6634b8043f46a4b7f55257ab10ca6266be80cc47b6a68a5aacd2c8f0","unit_key":"page:12"}
+chunk_hash = sha256:688cc82734bed7cb37ff1e40674dfdf4e48670bfde263962aabaac4f88d75e54
 ```
 
 `gen` のみ 0→3 で chunk_hash が変わる。`(raw_hash, tool_profile_hash)` は不変 (identity は §2.1 のとおり不変、gen は世代の区別)。
 
-**CHUNK-3 (section_id 省略, `unit_key=doc:1`) — null/未設定は hash 入力から落とす**:
+**CHUNK-3 (見出し未出現領域, `unit_key=doc:1`) — heading_path=[] 保持 + section_id 省略**
+(r3 で再設計: `04 §4.1` 規則 3「unit 先頭から見出し未出現の間は heading_path = []」の領域では
+slug の結合対象が無く section_id は**未設定 → 省略**。旧 fixture の「heading_path 在 × section_id 省略」は
+規則 4 で導出不能になったため):
 
 ```text
-canonical: {"char_end":600,"char_start":0,"gen":0,"heading_path":["Overview"],"raw_hash":"sha256:74bcb92d8088c950e45e4c43563332da2ca1e04b25d6d4016aa43f830d4cca8a","spec_version":1,"tool_profile_hash":"sha256:e067e42e6634b8043f46a4b7f55257ab10ca6266be80cc47b6a68a5aacd2c8f0","unit_key":"doc:1"}
-chunk_hash = sha256:ae2198890a11cac4a7853728d1ada4dd95e88086ec094e139ecbc64984504f30
+canonical: {"char_end":600,"char_start":0,"gen":0,"heading_path":[],"raw_hash":"sha256:74bcb92d8088c950e45e4c43563332da2ca1e04b25d6d4016aa43f830d4cca8a","spec_version":1,"tool_profile_hash":"sha256:e067e42e6634b8043f46a4b7f55257ab10ca6266be80cc47b6a68a5aacd2c8f0","unit_key":"doc:1"}
+chunk_hash = sha256:d1fe73cef624a76949293ca550ae305ce8a2c46517a83e7d52b2bcc700b2c8d6
 ```
 
-`section_id` を持たない chunking strategy では入力から**省略**する (`03 §8.1` / `§5.1` の「省略と null を識別しない」)。
-`section_id: null` を明示した入力も canonicalize 時に null キーを落とすため、この値と**完全一致**する (CT3-CHUNK-003 で検証)。
+`heading_path = []` は **null ではなく定義値** なので hash 入力に残す (`04 §4.1` 規則 3)。`section_id` は
+未設定につき入力から**省略** (`03 §8.1` / `§5.1` の「省略と null を識別しない」)。`section_id: null` を
+明示した入力も canonicalize 時に null キーを落とすため、この値と**完全一致**する (CT3-CHUNK-003 で検証)。
 
-### A.2 embedding_hash ベクタ (`03 §8.1` embedding identity)
+### A.2 embedding_hash ベクタ (`03 §8.1` embedding identity / `07 §5.3` 採用確定 profile)
 
-> **fixture と契約の分離 (r2)** (step2a A 節冒頭注記と同じ規約): 本節の profile 値は**算出規約 (hash 公式)
-> を検証するための入力 fixture** であり、実装が採用する実 embedding profile の契約では**ない**。
-> EMB-1 の profile_hash (step2a PROFILE-3、multimodal / 1536 次元) を `modality="text"` と組むのは
-> hash 公式の検証用の流用であり、text-only 緩和 (`07 §5.3`、2026-07-03 適用済み) の**正本 profile 値では
-> ない**。EMB-2 は緩和適用後に近い text profile (gemini-embedding-001 / 768 / cosine / text) の fixture
-> だが、これもベンダー裏取り済み値ではない (`07 §5.3` の例示と同じ扱い)。契約は「この入力ならこの hash」
-> の算出関数固定のみで、実運用 profile がこれらの値と一致することは要求しない。
+> **r3 で再凍結**: text-only 緩和は撤回され (`07 §5.3` 2026-07-03 再検証で確定、WS-embed-2 裁定)、
+> **`gemini-embedding-2` (GA、Adapter が起動時解決して pin) / 768 次元 (MRL 切り詰め — 切り詰め後次元も
+> profile に固定) / cosine / `modality="multimodal"` / `mode="online"`** の単一 multimodal profile 採用が
+> 確定。**MVP で実際に embed するのは text chunk のみ**だが、profile を multimodal にしておくことで
+> Phase 4+ の image/audio embedding を全 re-index なしに追加できる (`07 §5.3`)。旧 r2 の
+> EMB-1 (multimodal 1536 fixture) / EMB-2 (gemini-embedding-001 text) は削除。
+> profile の `model_version_pin` は Adapter が起動時に解決する GA 版付き名 (`07 §6`) であり、本ベクタの
+> `"gemini-embedding-2"` は**算出規約の検証用 fixture 値** — 契約は「この入力ならこの hash」の算出関数固定のみ。
 
-**EMB-1 (step2a PROFILE-3 の profile_hash × modality=text)** — hash 公式 fixture。
-`target_hash` は A.1 CHUNK-1 の chunk_hash:
-
-```text
-canonical: {"dimensions":1536,"distance":"cosine","modality":"text","profile_hash":"sha256:c2bda78e217e1f9e12cd17ddac6c46e28a50b8060976f533f76f14193a807226","spec_version":1,"target_hash":"sha256:8fefa4825444efb1a120df709f45764a9ac074a9a2c0002ee4307baa7bbfe15a","target_type":"chunk"}
-embedding_hash = sha256:4af13668332498f223787967c0f26e2e41d3425bbe5d657a2db1a7d27c56ba8c
-```
-
-**EMB-2 (text-only 緩和ベースの text profile fixture)** — profile も `03 §5.1` の規約で実算出:
+**EMB-1 (採用確定 profile: gemini-embedding-2 / 768 MRL / cosine / multimodal)** —
+profile も `03 §5.1` の規約で実算出。`target_hash` は A.1 CHUNK-1 (r3 値):
 
 ```text
-profile canonical: {"adapter_kind":"embedding","adapter_role":"text","dimensions":768,"distance":"cosine","modality":"text","model_or_tool_family":"gemini-embedding","model_version_pin":"gemini-embedding-001","runtime_kind":"cloud","spec_version":1}
-tool_profile_hash = sha256:08c93195a941c64c82cf3bbc7503583da98e98ed9e524e1f1bb7b35b5b7bb20f
+profile canonical: {"adapter_kind":"embedding","adapter_role":"multimodal","dimensions":768,"distance":"cosine","modality":"multimodal","model_or_tool_family":"gemini-embedding","model_version_pin":"gemini-embedding-2","runtime_kind":"cloud","spec_version":1}
+tool_profile_hash = sha256:66aff638f38a099ff989ca97675ebd3c573a40ee53cc1cdfe05fb06102d2bb09
 
-embedding canonical (target_hash = CHUNK-1): {"dimensions":768,"distance":"cosine","modality":"text","profile_hash":"sha256:08c93195a941c64c82cf3bbc7503583da98e98ed9e524e1f1bb7b35b5b7bb20f","spec_version":1,"target_hash":"sha256:8fefa4825444efb1a120df709f45764a9ac074a9a2c0002ee4307baa7bbfe15a","target_type":"chunk"}
-embedding_hash = sha256:728cd198fba608cc4d559339581446ffab2d4c961e3ebea15cf8c5f4d36ed8c5
+embedding canonical (target_hash = CHUNK-1): {"dimensions":768,"distance":"cosine","modality":"multimodal","profile_hash":"sha256:66aff638f38a099ff989ca97675ebd3c573a40ee53cc1cdfe05fb06102d2bb09","spec_version":1,"target_hash":"sha256:c5e31f10da04b722769bdbbd60a55b94c177b5f3bf9c64e5341be7281d115c3d","target_type":"chunk"}
+embedding_hash = sha256:7bd32d26ad2b721e32c99536513abf58c6aeee626d1edc65e30069abce01a975
 ```
 
 `vector` (BLOB 実体) は identity 入力に含めない (identity は target + profile + modality/dim/distance のみ、`03 §8.1`)。
@@ -176,37 +194,46 @@ chunking_config_hash = sha256:7810328ffa7f0dd9a558294e166f20d8038d8d779809ee5195
 要点: text の 1 位 c1 は融合後 c2 に抜かれる (c2 が vector で 1 位のため)。片側のみの c4/c5 は低スコア。
 c4/c5 の同点は `05 §1.3` の「同点は chunk_id 昇順」で決定論的に確定する。
 
-### A.5 MMR 数値例 (`05 §1.4` 多様化)
+### A.5 MMR 数値例 (`05 §1.4` 多様化 — 生 RRF スコア → min-max 正規化 → MMR の一貫ベクタ)
 
-`score(c) = λ·relevance(c) - (1-λ)·max_{c'∈selected} similarity(c,c')`、`λ=0.7`、`relevance(c)=RRF_score(c)`。
-4 候補、対称類似度行列 (vector cosine 相当)、上位 3 件を選択:
+`05 §1.4` (2026-07-03 確定): `relevance(c)` = **RRF スコアを MMR 候補プール内で min-max 正規化した値**
+([0,1]。全候補が同スコアなら一律 1.0)。`similarity` は embedding の cosine (embedding 無しの text-only
+検索では MMR を適用せず RRF 順のまま)。`score(c) = λ·relevance(c) - (1-λ)·max_{c'∈selected} sim(c,c')`、
+`λ=0.7`。4 候補、Fraction 厳密計算:
+
+**手順 1 — 生 RRF スコア (現実的スケール ~1/61) と min-max 正規化**:
+
+| chunk | 生 RRF_score | float | 正規化 relevance = (raw−min)/(max−min) | float |
+| --- | --- | --- | --- | --- |
+| c1 | 3/100 | 0.030000 | (3/100−1/50)/(1/100) = **1** | 1.000000 |
+| c2 | 2/75 | 0.026667 | (2/75−1/50)/(1/100) = **2/3** | 0.666667 |
+| c3 | 13/500 | 0.026000 | (13/500−1/50)/(1/100) = **3/5** | 0.600000 |
+| c4 | 1/50 | 0.020000 | (1/50−1/50)/(1/100) = **0** | 0.000000 |
+
+(min = 1/50, max = 3/100, range = 1/100)
+
+**手順 2 — MMR 選択 (類似度行列は embedding cosine)**:
 
 ```text
-relevance:  c1=0.90  c2=0.80  c3=0.78  c4=0.60
 similarity: sim(c1,c2)=0.95  sim(c1,c3)=0.30  sim(c1,c4)=0.20
             sim(c2,c3)=0.25  sim(c2,c4)=0.15  sim(c3,c4)=0.40
 ```
 
-| step | selected | 候補ごとの MMR score | 選択 |
+| step | selected | 候補ごとの MMR score (厳密値) | 選択 |
 | --- | --- | --- | --- |
-| 1 | {} | c1=0.630, c2=0.560, c3=0.546, c4=0.420 | **c1** |
-| 2 | {c1} | c2=0.7·0.80−0.3·0.95=**0.275**, c3=0.7·0.78−0.3·0.30=**0.456**, c4=0.7·0.60−0.3·0.20=**0.360** | **c3** |
-| 3 | {c1,c3} | c2=0.7·0.80−0.3·max(0.95,0.25)=**0.275**, c4=0.7·0.60−0.3·max(0.20,0.40)=**0.300** | **c4** |
-| 4 | {c1,c3,c4} | c2=**0.275** | c2 |
+| 1 | {} | c1=0.7·1=**7/10 (0.700)**, c2=0.7·2/3=7/15 (0.46667), c3=0.7·3/5=21/50 (0.420), c4=0 | **c1** |
+| 2 | {c1} | c2=7/15−0.3·0.95=**109/600 (0.18167)**, c3=21/50−0.3·0.30=**33/100 (0.330)**, c4=0−0.3·0.20=−3/50 (−0.060) | **c3** |
+| 3 | {c1,c3} | c2=7/15−0.3·max(0.95,0.25)=**109/600 (0.18167)**, c4=0−0.3·max(0.20,0.40)=−3/25 (−0.120) | **c2** |
+| 4 | {c1,c3,c2} | c4=**−3/25 (−0.120)** | c4 |
 
-**MMR 確定順序: c1, c3, c4, c2**。
+**MMR 確定順序: c1, c3, c2, c4** (r2 の c1,c3,c4,c2 から変化 — min-max 正規化で c4 の relevance が 0 に
+落ち、c2 の罰則後スコア 109/600 を下回るため)。
 
-要点: c2 は relevance 2 位 (0.80) だが c1 との類似度 0.95 (near-duplicate) のため罰則を受け、
-relevance 3 位の c3 (0.78) / 4 位の c4 (0.60) より後ろに落ちる。これが「同一原文の隣接 chunk が
-上位を独占する」問題 (`05 §1.4`) の回避を示す。MMR score の同点は RRF 順、さらに同点は chunk_id 昇順 (`05 §1.4`)。
-
-> **relevance スケールの注記 (r2)**: `05 §1.4` は `relevance(c) = RRF_score(c)` と定めるが、`05 §1.3` の
-> RRF_score は最大 ~2/61 ≈ 0.033 (k=60、両側 1 位) のスケールであり、本表の relevance (0.60〜0.90) を
-> 生の RRF_score が取ることはない。similarity (cosine ∈ [-1,1]) と直接混合するには relevance の正規化が
-> 必要だが、その正規化・スケール規則は spec 未定義 (**§C-3、要-spec — 発注側 spec 追記予定**)。本表は
-> 「正規化後の relevance」と仮定した**算術検証用 fixture** であり、選択則の算術 (λ 混合 / max-sim 罰則 /
-> 決定論 / 同点規則) のみを固定する。生スケールのまま実装すると `(1-λ)·sim` 項が支配して relevance が
-> ほぼ無視される — spec 追記後に実スケールで再ベクタ化する。
+要点: (1) min-max 正規化はスケール・平行移動不変なので、生 RRF スコアの絶対値 (~1/61) に依らず
+`mmr_lambda` の意味 (relevance と diversity の混合比) が保たれる。(2) c2 は正規化 relevance 2 位 (2/3)
+だが c1 との cosine 0.95 (near-duplicate) の罰則で 3 位に後退する — 「同一原文の隣接 chunk が上位を
+独占する」問題 (`05 §1.4`) の回避。(3) MMR score の同点は RRF 順、さらに同点は chunk_id 昇順 (`05 §1.4`)。
+(4) 全候補が同スコアの縮退時は relevance 一律 1.0 (`05 §1.4`)。
 
 ### A.6 Evidence Pointer URI 往復ベクタ (`08 §2.3`)
 
@@ -218,8 +245,8 @@ JSON (完全形, 13 フィールド):
   schema_version, commit, tree, raw_hash, tool_profile_hash, chunk_hash,
   path_at_commit, heading_path, section_id, char_start, char_end, scope_id, scope_path
 
-URI (正規テキスト形):
-kcs://scope_01J8ZQABCDEFGHJKMNPQRS/sha256:9f2c1a7b04dee5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e/sha256:74bcb92d8088c950e45e4c43563332da2ca1e04b25d6d4016aa43f830d4cca8a/sha256:e067e42e6634b8043f46a4b7f55257ab10ca6266be80cc47b6a68a5aacd2c8f0/sha256:8fefa4825444efb1a120df709f45764a9ac074a9a2c0002ee4307baa7bbfe15a
+URI (正規テキスト形。chunk_hash は A.1 CHUNK-1 の r3 値):
+kcs://scope_01J8ZQABCDEFGHJKMNPQRS/sha256:9f2c1a7b04dee5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e/sha256:74bcb92d8088c950e45e4c43563332da2ca1e04b25d6d4016aa43f830d4cca8a/sha256:e067e42e6634b8043f46a4b7f55257ab10ca6266be80cc47b6a68a5aacd2c8f0/sha256:c5e31f10da04b722769bdbbd60a55b94c177b5f3bf9c64e5341be7281d115c3d
 
 URI → JSON (必須フィールドのみ復元, sv 省略 = 1):
   { schema_version=1, scope_id, commit, raw_hash, tool_profile_hash, chunk_hash }
@@ -231,6 +258,34 @@ URI → JSON (必須フィールドのみ復元, sv 省略 = 1):
 全セグメントが `[A-Za-z0-9_:.-]` に閉じるため percent-encoding 不要 (`08 §2.3`)。
 `sv` 省略時は `1`、未知 `sv` は `KCS-E-CONFIG-SCHEMA` 系 error (exit 2) (`08 §2.3`)。
 
+### A.7 query_hash 固定ベクタ (`05 §1.8` 正準構成 — r3 新設)
+
+`05 §1.8` (2026-07-03 確定、§C-2 解消): `query_hash = "sha256:" + base16(sha256(JCS({ query, mode,
+scope_mode, scopes, diversify, time_travel })))`。`query` は NFC 正規化後のクエリ文字列、`mode` は解決後の
+実効 mode、`scopes` は対象 scope_id の**昇順配列**、`diversify` は `[search.diversify]` の実効値、
+`time_travel` は `--at`/`--all-history`/`--include-deleted`/`--since` の実効値 (未指定キーは省略)。
+`limit` / `--offset` / `--cursor` / `--json` は**含めない** (ページング操作で hash が変わってはならない)。
+**`rrf` キー (`[search.rrf]` の実効値 k / candidate_depth / w_text / w_vector) を含める最終形は 2026-07-03
+発注側裁定** (05 §1.8 本文への `rrf` キー同期は発注側にて実施)。
+
+fixture (デフォルト設定 + 2 scope + time-travel フラグ未指定):
+
+```text
+入力: query="認証仕様" (NFC), mode="hybrid", scope_mode="all",
+      scopes=["scope_01J8ZQABCDEFGHJKMNPQRS","scope_01K3ABCDEFGHJKMNPQRSTV"] (昇順),
+      diversify={enabled:true, strategy:"mmr", mmr_lambda:0.7, max_per_raw_hash:3, mmr_depth:100},
+      rrf={k:60, candidate_depth:200, w_text:1.0, w_vector:1.0},
+      time_travel={} (全キー未指定 → 空 object として固定。本 fixture で凍結)
+
+canonical (RFC 8785 — 整数値 float は "1" に直列化される点に注意):
+{"diversify":{"enabled":true,"max_per_raw_hash":3,"mmr_depth":100,"mmr_lambda":0.7,"strategy":"mmr"},"mode":"hybrid","query":"認証仕様","rrf":{"candidate_depth":200,"k":60,"w_text":1,"w_vector":1},"scope_mode":"all","scopes":["scope_01J8ZQABCDEFGHJKMNPQRS","scope_01K3ABCDEFGHJKMNPQRSTV"],"time_travel":{}}
+
+query_hash = sha256:08820fbe38f26821717a56fde4cc1db4e104c5ff1221f62477127c070503d773
+```
+
+同一入力の再計算は常にこの値 (cursor validity の基盤、CT3-CURSOR-003/004)。`w_text=1.0` が `"1"` に
+直列化されることは RFC 8785 準拠 JCS の float 検証を兼ねる (A 節冒頭注記)。
+
 ---
 
 ## B. テストケース
@@ -239,35 +294,46 @@ URI → JSON (必須フィールドのみ復元, sv 省略 = 1):
 
 ### CT3-CHUNK-* — chunking / chunk identity / 世代 / append-only (`03 §8.1, §5.3` / `04 §4.1, §4.5, §4.6`)
 
-**CT3-CHUNK-001** — P0 — chunk_hash: gen=0, section_id 在 (ws1a A.5 一致)
-- Given: A.1 CHUNK-1 の identity タプル。
+**CT3-CHUNK-001** — P0 — chunk_hash: gen=0, section_id 在 (slug 導出整合)
+- Given: A.1 CHUNK-1 の identity タプル (section_id は `04 §4.1` 規則 4 の slug 導出値 `認証仕様/api-token`)。
 - When: `JCS → sha256`。
-- Then: canonical バイト列が A.1 と一致し、`chunk_hash = sha256:8fefa482…e15a`。ws1a A.5 の値とバイト一致。
-- 根拠: `03 §8.1` (chunk identity hash / `text_hash` 非包含 / null 省略) / `08 §2.1` (chunk_hash は
+- Then: canonical バイト列が A.1 と一致し、`chunk_hash = sha256:c5e31f10…5c3d`。
+- 根拠: `03 §8.1` (chunk identity hash / `text_hash` 非包含 / null 省略) / `04 §4.1` 規則 3-4 (heading_path /
+  section_id の正準導出) / `08 §2.1` (chunk_hash は
   `(raw_hash, tool_profile_hash, gen, unit_key, heading_path, section_id, char_start, char_end)` から導出)。
+- 補足 (r3): ws1a A.5 の旧値 `sha256:8fefa482…e15a` (section_id="auth/api-token") は slug 規則確定前の
+  例示値であり歴史的参照 (A.1 冒頭注記)。
 
 **CT3-CHUNK-002** — P0 — chunk_hash は gen に連動 (gen+1 で別 identity)
 - Given: A.1 CHUNK-2 (CHUNK-1 の gen のみ 0→3)。
 - When: `JCS → sha256`。
-- Then: `chunk_hash = sha256:4e170d69…84d9`。CHUNK-1 と異なる。`(raw_hash, tool_profile_hash)` は不変。
+- Then: `chunk_hash = sha256:688cc827…5e54`。CHUNK-1 と異なる。`(raw_hash, tool_profile_hash)` は不変。
 - 根拠: `03 §8.1` (gen は hash 入力) / `03 §2.1` (identity は `(raw_hash, tool_profile_hash)`、gen は世代区別)。
 
-**CT3-CHUNK-003** — P0 — section_id 省略と null を識別しない
-- Given: A.1 CHUNK-3 (section_id 省略) と、同一だが `section_id: null` を明示した入力。
+**CT3-CHUNK-003** — P0 — section_id 省略と null を識別しない (+ heading_path=[] の保持)
+- Given: A.1 CHUNK-3 (見出し未出現領域: heading_path=[], section_id 省略) と、同一だが `section_id: null`
+  を明示した入力。
 - When: canonicalize (null キー除去) → `JCS → sha256`。
-- Then: 両者の canonical・hash が完全一致 (`sha256:ae219889…4f30`)。
+- Then: 両者の canonical・hash が完全一致 (`sha256:d1fe73ce…c8d6`)。`heading_path: []` は定義値として
+  canonical に残る (null 省略の対象ではない)。
 - 根拠: `03 §8.1` (「null / 未設定フィールドは hash 入力に含めない (§5.1 と同じ規則。section_id を持たない
-  chunking strategy では省略)」)。
+  chunking strategy では省略)」) / `04 §4.1` 規則 3 (見出し未出現の間は heading_path = [])。
 
-**CT3-CHUNK-004** — P0 — chunking は heading 単位 + max_chars 上限
-- Given: 複数 heading を持つ normalized unit と `[chunking] strategy="heading" max_chars=6000`。
+**CT3-CHUNK-004** — P0 — chunking の正準規則 (heading 単位 + max_chars + slug)
+- Given: 複数 heading (ATX 形式・コードフェンス内の `#` を含む) を持つ normalized unit と
+  `[chunking] strategy="heading" max_chars=6000`。
 - When: chunk を生成。
-- Then: chunk は heading 単位で切り出され、各 chunk の `heading_path` は当該見出しの階層、`char_start`/`char_end`
-  は当該 unit 本文先頭を 0 とする **unit-local** span。max_chars を超える section は分割される (分割規則は §C-1)。
-- 根拠: `03 §11` (`strategy="heading"`, `max_chars=6000`) / `04 §4.1` (`char_start/char_end` は unit-local) /
+- Then: `04 §4.1` の正準規則 1-5 に従う: (1) chunk は unit 境界を跨がない。(2) heading 検出は ATX
+  (行頭 1-6 個の `#` + 空白) のみ — setext・コードフェンス内 `#` は heading と見なさない。
+  (3) `heading_path` = chunk 先頭位置で有効な ATX 見出しスタック (見出し未出現の間は [])。
+  (4) `section_id` = 各要素の slug (NFC → ASCII 小文字化 → 空白列→`-` → 英数・`-`・`_`・日本語以外を
+  除去 → `-` 連結圧縮 → 先頭末尾 `-` 除去。同一 unit 内重複は `#2` 付番) を `/` 結合。
+  (5) max_chars 超過は段落境界 (空行) で貪欲分割、単一段落超過のみ文字位置で機械分割 — 分割片は同一
+  heading_path / section_id を共有し unit-local span で区別。`char_start`/`char_end` は unit-local。
+- 根拠: `04 §4.1` (chunk 境界の正準規則 1-5、2026-07-03 確定) / `03 §11` (`strategy` / `max_chars`) /
   `03 §8.1` (span は unit-local)。
-- 補足: heading_path 導出規則・section_id 生成規則・max_chars 超過時の分割規則は spec 未定義 (§C-1)。
-  本テストは「heading 単位で切れる」「span が unit-local」「max_chars を超える chunk を生成しない」のみ assert。
+- 補足 (r3): r2 まで §C-1 (未定義) だった heading_path 導出・section_id 生成・分割規則は `04 §4.1` への
+  spec 追記で**解消済み** — 本テストの Then が firm 契約になった。
 
 **CT3-CHUNK-005** — P0 — char_start/char_end は unit-local (全文 view の位置に非依存)
 - Given: 全文 view で末尾側に結合される unit 由来の chunk。
@@ -346,13 +412,14 @@ URI → JSON (必須フィールドのみ復元, sv 省略 = 1):
 ### CT3-EMBED-* — embedding identity / 互換性 / fallback (`03 §7, §8.1` / `04 §4.3, §5.5` / `07 §5.3`)
 
 **CT3-EMBED-001** — P0 — embedding_hash の算出 (vector BLOB 非包含)
-- Given: A.2 EMB-1 / EMB-2 の identity タプル (target_type=chunk, target_hash=CHUNK-1, profile/modality/dim/distance)。
+- Given: A.2 EMB-1 (採用確定 profile: gemini-embedding-2 / 768 MRL / cosine / multimodal) の identity
+  タプル (target_type=chunk, target_hash=CHUNK-1 r3 値)。
 - When: `JCS → sha256`。
-- Then: canonical バイト列が A.2 と一致し、EMB-1 は `embedding_hash = sha256:4af13668…ba8c`、
-  EMB-2 は `sha256:728cd198…d8c5` (profile fixture の `tool_profile_hash = sha256:08c93195…b20f` 込み)。
-  `vector` BLOB 実体は入力外。
-- 根拠: `03 §8.1` (embedding identity hash) / `03 §5.1` (EMB-2 profile fixture の算出規約)。
-- 補足: A.2 冒頭注記のとおり profile 値は算出規約 fixture であり、実運用 profile の契約ではない。
+- Then: canonical バイト列が A.2 と一致し、profile の `tool_profile_hash = sha256:66aff638…bb09`、
+  `embedding_hash = sha256:7bd32d26…a975`。`vector` BLOB 実体は入力外。
+- 根拠: `03 §8.1` (embedding identity hash) / `03 §5.1` (profile hash の算出規約) / `07 §5.3` (採用確定 profile)。
+- 補足: A.2 冒頭注記のとおり `model_version_pin` の具体値は算出規約 fixture (実運用は Adapter が GA 版付き
+  名を起動時解決して pin、`07 §6`)。
 
 **CT3-EMBED-002** — P0 — 互換性不一致で vector 検索拒否 → text fallback
 - Given: query embedding profile と index 側 embedding の `dimensions`/`distance`/`modality`/`profile_hash`
@@ -370,15 +437,20 @@ URI → JSON (必須フィールドのみ復元, sv 省略 = 1):
 - 根拠: `05 §1.8` (5) (「embedding profile が全 scope で一致しない場合、横断部分は text (BM25 rank) のみで
   統合し fallback_reason に記録」) / `03 §7`。
 
-**CT3-EMBED-004** — P0 — text-only 緩和適用時の契約 (modality=text 単一 Embedding)
-- Given: `07 §5.3` の凍結例外が適用され、`modality="text"` の単一 Embedding Adapter を採用。
-- When: chunk の embedding 生成 + vector 検索。
-- Then: `embeddings.modality="text"`、embedding_hash は A.2 と同形 (modality=text) で算出。
-  text chunk の vector 検索が成立し、M3-1〜M3-3 (text 検索で完結) の Done 条件に影響しない。
-- 根拠: `07 §5.3` (「凍結例外 … MVP は modality=text の単一 Embedding Adapter を許容 … 北極星シナリオ
-  M3-1〜M3-3 は text 検索のみで完結するため、この緩和は MVP の Done 条件に影響しない」) / `03 §7`。
-- 補足: 緩和は事前承認済みの凍結例外 (`09 §6.2` 条件1)。本テストは緩和適用**時**の契約であり、
-  multimodal 実採用時は modality=multimodal の embedding_hash を別途固定する。
+**CT3-EMBED-004** — P0 — 採用確定 multimodal profile での embedding 生成と互換判定 (r3 改訂)
+- Given: 採用確定 profile (`07 §5.3` 2026-07-03 再検証で確定: gemini-embedding-2 / 768 次元 MRL 切り詰め /
+  cosine / `modality="multimodal"` / mode="online")。MVP の embedding 対象は **text chunk のみ**。
+- When: chunk の embedding 生成 + vector 検索の互換判定。
+- Then: `embeddings` 行は `modality="multimodal"` / `dimensions=768` / `distance="cosine"` /
+  当該 profile_hash を持ち、embedding_hash は A.2 EMB-1 と同形で算出される。vector 検索の互換判定
+  (`03 §7`) は `dimensions=768 / distance=cosine / modality=multimodal / profile_hash 一致` の全一致で
+  成立する。image/audio embedding は MVP では生成しない (profile 予約のみ — Phase 4+ で全 re-index なしに
+  追加可能)。
+- 根拠: `07 §5.3` (「単一 multimodal profile を採用 (2026-07-03 再検証で確定)」/ text-only 緩和の撤回 /
+  「MVP で実際に embed するのは text chunk のみ」) / `03 §7` (互換性: dimensions/distance/modality/
+  profile_hash 全一致) / `04 §4.3` (単一マルチモーダル Embedding Adapter 前提)。
+- 補足 (r3): r2 の text-only 緩和前提は WS-embed-2 裁定で撤回済み。MRL 切り詰め後次元 (768) も profile に
+  固定されるため、切り詰め次元の変更は profile_hash 変化 = 別 identity (全 re-index) になる。
 
 **CT3-EMBED-005** — P1 — embeddings 正 / chunk_vec 導出 (rebuild 順序)
 - Given: `embeddings` テーブルと `chunk_vec` (vec0) の不整合、または `kcs repair --rebuild-db`。
@@ -485,14 +557,16 @@ URI → JSON (必須フィールドのみ復元, sv 省略 = 1):
 
 ### CT3-MMR-* — 多様化 (`05 §1.4`)
 
-**CT3-MMR-001** — P0 — MMR 選択順 (数値ベクタ)
-- Given: A.5 の relevance + 類似度行列、`λ=0.7`、上位 3 選択。
-- When: MMR を適用。
-- Then: 各 step の MMR score が A.5 と一致し、確定順序 `c1, c3, c4, c2`。relevance 2 位 c2 は c1 との
-  near-duplicate (sim 0.95) 罰則で後退する。
-- 根拠: `05 §1.4` (MMR 選択則 `score(c)=λ·rel-(1-λ)·max sim` / `relevance(c)=RRF_score(c)`)。
-- 補足 (r2): A.5 の relevance は「正規化後」と仮定した算術検証 fixture。生 RRF_score のスケール (~1/61)
-  との正規化規則は §C-3 (要-spec)。similarity の関数選択は §C-6。spec 追記後に実スケールで再ベクタ化する。
+**CT3-MMR-001** — P0 — MMR 選択順 (生 RRF → min-max 正規化 → MMR の一貫ベクタ)
+- Given: A.5 の生 RRF スコア (c1=3/100, c2=2/75, c3=13/500, c4=1/50) + embedding cosine 類似度行列、`λ=0.7`。
+- When: 候補プール内 min-max 正規化 → MMR を適用。
+- Then: 正規化 relevance が A.5 手順 1 (c1=1, c2=2/3, c3=3/5, c4=0)、各 step の MMR score が A.5 手順 2 と
+  一致し、**確定順序 `c1, c3, c2, c4`**。正規化 relevance 2 位の c2 は c1 との near-duplicate (cosine 0.95)
+  罰則で 3 位に後退する。
+- 根拠: `05 §1.4` (MMR 選択則 / 「relevance(c) = RRF スコアを MMR 候補プール内で min-max 正規化した値
+  ([0,1]。全候補が同スコアなら一律 1.0)」— 2026-07-03 確定 / similarity = embedding cosine)。
+- 補足 (r3): r2 の §C-3 (relevance スケール未定義) は `05 §1.4` への spec 追記で解消済み。本ベクタは
+  生スコア → 正規化 → 選択の全経路を固定する。全同点 → 一律 1.0 の縮退分岐も P0 assert に含める。
 
 **CT3-MMR-002** — P0 — MMR 決定性 (同入力で確定順序が常に同一)
 - Given: 同一の候補集合・query・設定。
@@ -513,11 +587,14 @@ URI → JSON (必須フィールドのみ復元, sv 省略 = 1):
 - 根拠: `05 §1.4` (「max_per_raw_hash は確定順序の構築時に結果ストリーム全体へ適用する (ページを跨いで
   raw_hash あたり最大 N 件)」)。
 
-**CT3-MMR-005** — P1 — strategy 切替 (mmr / group_by_raw_hash / off)
-- Given: `[search.diversify] strategy` を各値に設定。
+**CT3-MMR-005** — P1 — strategy 切替 (mmr / group_by_raw_hash / off) + text-only の MMR 非適用
+- Given: `[search.diversify] strategy` を各値に設定。加えて embedding 無し (text-only 検索) × `strategy="mmr"`。
 - When: 検索。
 - Then: `mmr` → MMR、`group_by_raw_hash` → raw_hash グルーピング、`off` → 素の RRF 順。いずれも決定論的。
-- 根拠: `05 §1.4` (`strategy = "mmr" | "group_by_raw_hash" | "off"`)。
+  **embedding が無い場合 (text-only 検索) は `strategy="mmr"` でも MMR を適用せず RRF 順のまま** (similarity
+  の計算基盤である cosine が無いため)。
+- 根拠: `05 §1.4` (`strategy` 3 値 / 「similarity は embedding の cosine。embedding が無い場合 (text-only
+  検索) は MMR を適用せず RRF 順のままとする」— 2026-07-03 確定)。
 
 ### CT3-CURSOR-* — ページング / カーソル (`05 §1.5, §1.8, §2.2`)
 
@@ -536,13 +613,17 @@ URI → JSON (必須フィールドのみ復元, sv 省略 = 1):
   `05 §1.8` (cursor の per-scope sub-cursor に `max_rowid`)。
 
 **CT3-CURSOR-003** — P0 — query_hash 不一致の cursor は `KCS-E-SEARCH-CURSOR-001` で拒否
-- Given: あるクエリ・条件で発行した cursor を、別クエリ (または別 mode/diversify 設定) の検索に渡す。
+- Given: あるクエリ・条件で発行した cursor を、別クエリ (または別 mode/diversify/rrf/time-travel 条件) の
+  検索に渡す。
 - When: cursor を使う。
 - Then: token 全体の `query_hash` 不一致を検出し `KCS-E-SEARCH-CURSOR-001` で拒否 (exit は横断規約)。
+  query_hash の算出は A.7 の正準構成 (`JCS({query, mode, scope_mode, scopes, diversify, rrf, time_travel})`)
+  に一致し、A.7 fixture の入力なら `sha256:08820fbe…d773`。`limit`/`--offset`/`--cursor`/`--json` の違いでは
+  hash は変わらない (拒否しない)。
 - 根拠: `05 §1.5` (「query_hash が不一致の cursor は KCS-E-SEARCH-CURSOR-001 で拒否」) / `05 §1.8`
-  (query_hash = query + mode + diversify 設定の hash、token 全体に 1 つ)。
-- 補足: query_hash の厳密な canonical 入力構成 (含めるキー) は spec 未定義 (§C-2)。本テストは「別クエリの
-  cursor が拒否される」不変条件のみ assert し、hash 値は固定しない。
+  (query_hash の正準構成 — 2026-07-03 確定、§C-2 解消。`rrf` キーを含む最終形は発注側裁定 — A.7 注記)。
+- 補足 (r3): r2 の「canonical 入力構成が未定義につき hash 値は固定しない」は解消 — A.7 の固定ベクタで
+  値まで assert する。
 
 **CT3-CURSOR-004** — P0 — cursor は opaque token (JCS の base64url)
 - Given: multi-scope cursor (`05 §1.8` の per-scope sub-cursor 合成)。
@@ -837,18 +918,18 @@ URI → JSON (必須フィールドのみ復元, sv 省略 = 1):
 - 補足: `enriched_ratio` の分子分母定義 (何を「強化済み」と数えるか) は spec 未定義 (§C-5)。本テストは
   「部分 index 時に index_status を返し done/pending/paused を隠さない」ことのみ assert。
 
-**CT3-OBS-002** — P0 (§C-4 の spec 追記待ち — assert 形は追記後に確定) — metrics.jsonl 経由で検索 latency が M3 計測可能
-- Given: `kcs search` を複数回実行。
+**CT3-OBS-002** — P0 — metrics.jsonl への per-search latency 記録 (M3 計測の一次データ)
+- Given: `kcs search` を複数回実行 (redact_logs 既定 true)。
 - When: `~/.local/share/kcs/logs/metrics.jsonl` を読む。
-- Then: 数値メトリクス行が記録され、各行は JSON 必須フィールド `ts, level, code, component, message, context`
-  を持つ (`ts` は UTC ISO8601+Z)。検索 latency が p50/p95/p99 (`09 §4.1`) を算出可能な形で記録される。
-- 根拠: `05 §7` (metrics.jsonl = 数値メトリクス) / `06 §13` (必須フィールド / timestamp) / `09 §3.1`
-  (「観測ログ metrics.jsonl / access.jsonl (M3 の latency 計測に必要)」= Step 3)。
-- 補足 (r2): `05 §7` の metrics.jsonl は「デフォルト 1h 間隔」の集計メトリクスであり、**per-search の
-  latency 記録は現行 spec に無い** (per-search 記録を firm 契約にするのは過剰契約)。一方 M3 の p95 計測には
-  per-search 粒度 (または全検索を被覆する集計) が必要 — 記録粒度・metric 名・単位は **§C-4 (要-spec、
-  発注側が 05 §7 に追記予定)**。本テストは「latency が metrics.jsonl 経由で M3 計測可能」という存在契約
-  のみ先行して固定し、schema の assert は spec 追記後に確定する。
+- Then: **1 回の検索実行ごとに 1 行**が追記され、各行は envelope 必須フィールド `ts, level, code,
+  component, message, context` (`ts` は UTC ISO8601+Z) に加え **`metric: "search.latency_ms"` /
+  `value: <実測 ms>`** を持ち、`context` に `mode` (実効 mode) / `scope_count` / `result_count` を含む。
+  クエリ本文・path は記録しない (redact_logs 既定)。この一次データから p50/p95/p99 (`09 §4.1`) が算出
+  できる (1h 間隔の集計メトリクスはこの一次データから導出してよい)。
+- 根拠: `05 §7` (「検索 latency の per-search 記録」— 2026-07-03 追記、§C-4 解消。record 形式 / redact 規則 /
+  集計導出) / `06 §13` (envelope 必須フィールド / timestamp) / `09 §3.1` (metrics.jsonl = Step 3、M3 の
+  latency 計測に必要) / `09 §4.1` (Latency p50/p95/p99)。
+- 補足 (r3): r2 の保留マーク (§C-4 要-spec) は `05 §7` への spec 追記で解除。per-search 記録が firm 契約。
 
 **CT3-OBS-003** — P0 — access.jsonl に検索アクセスを記録 (redact_logs 既定 true)
 - Given: `kcs search`。
@@ -872,55 +953,56 @@ URI → JSON (必須フィールドのみ復元, sv 省略 = 1):
 ## C. 未定義事項 (spec に無い挙動 — 実装者判断 + 要 spec 追記)
 
 > これらは **憶測で契約化しない**。各テストは「実装が選んだ挙動を固定し決定論性を assert する」に留め、
-> 値の正本化は spec 追記後に行う。**要-spec は #1〜#4 の 4 件** (#1/#2 は chunk 段の決定性 / cursor validity、
-> #3/#4 は r2 で新設 — MMR relevance スケールと per-search latency 記録。いずれも **2026-07-03 に発注側が
-> spec 追記予定**)。#5 以降は実装者判断で固定し、事後に spec へ反映すれば足りる。
+> 値の正本化は spec 追記後に行う。**r3 現在、要-spec の残は 0 件**: r2 の要-spec 4 件 (#1〜#4) は
+> 2026-07-03 の spec 追記 (`04 §4.1` / `05 §1.8` / `05 §1.4` / `05 §7`) で**解消済み** (#6 も同追記で解消)。
+> 残る #5, #7〜#9 の 4 件は実装者判断で固定し、事後に spec へ反映すれば足りる。
 >
 > (注記: Step 2 で 2026-07-03 に確定した unit_key 正準生成 (`04 §2`)・page fingerprint (`04 §2.1`)・
 > prompt_template_hash step1-2 (`03 §5.1`) は本書では前提として扱い、§C に再掲しない。)
 >
 > (r2 注記: 旧 #4「latency 計測ハーネスと eval コーパス」は stale につき削除 — `eval/` は 2026-07-03 に
 > コミット済み (`eval/golden-queries.jsonl` M3-1: 18 / M3-2: 16 / M3-3: 16 件、合成コーパス 305 ファイル /
-> 7 scopes)、宿題 #5 (`09 §5.5`) は decided。eval 整合は CT3-EVIDENCE-009 / CT3-MULTI-007 補足 / §D の
-> Done gate に移した。旧 #3 の metrics 部分を #4 へ分離昇格し、#3 (MMR relevance) を新設。
-> 旧 #5〜#8 は #6〜#9 へ繰り上げ、#8 に `--all-scopes` 差分を併合。)
+> 7 scopes)、宿題 #5 (`09 §5.5`) は decided。番号は r2 のまま維持し、r3 では各項の解消状態のみ更新。)
 
-1. **chunk 境界の決定性 (要-spec, 決定性。2026-07-03 spec 追記済み (04 §4.1 chunk 境界 / 05 §1.4 MMR relevance / 05 §1.8 query_hash / 05 §7 per-search metrics))** — `03 §11` は
-   `strategy="heading"` / `max_chars=6000` を定めるが、Step 3 の chunk 段で (a) `heading_path` の導出規則
-   (どの heading level を親に積むか / 正規化)、(b) `section_id` の生成規則 (heading_path からの slug 化か /
-   別採番か)、(c) max_chars 超過 section の分割規則 (`char_start`/`char_end` の落ち方 / 分割境界) が未定義。
-   これらは **chunk_hash の入力** (`03 §8.1`) であり、実装ごとに揺れると chunk identity = Evidence Pointer
-   の永続性 (`08 §6`) が崩れる。影響: CT3-CHUNK-004 / CT3-CHUNK-001 (ベクタは与えられた identity タプルには
-   確定するが、**その heading_path / section_id / span をどう作るか**が未定義)。**Step 3 実装の最初の意思決定点**。
+1. **[解消済み r3] chunk 境界の決定性** — `04 §4.1`「chunk 境界の正準規則」(2026-07-03 追記) で確定:
+   (1) chunk は unit 境界を跨がない。(2) heading 検出は ATX のみ (setext・コードフェンス内 `#` は対象外)。
+   (3) `heading_path` = chunk 先頭位置で有効な ATX 見出しスタック (見出し未出現の間は [])。
+   (4) `section_id` = 各要素の slug (NFC → ASCII 小文字化 → 空白列→`-` → 英数・`-`・`_`・日本語以外を
+   除去 → `-` 圧縮 → trim。unit 内重複は `#2` 付番) を `/` 結合。(5) max_chars 超過は段落境界で貪欲分割
+   (分割片は heading_path / section_id を共有し unit-local span で区別)。これらは **chunk_hash の入力**
+   (`03 §8.1`) であり、確定により chunk identity = Evidence Pointer の永続性 (`08 §6`) が実装非依存になった。
+   反映: CT3-CHUNK-001/003/004 を firm 契約に昇格、A.1 を slug 導出整合値で再凍結 (旧 "auth/api-token" 例は
+   歴史的参照)。なお `03 §8.1` chunk object 例・`08 §2` 例の section_id の同期は発注側にて実施。
 
-2. **query_hash の正準入力構成 (要-spec, cursor validity。2026-07-03 spec 追記済み (04 §4.1 chunk 境界 / 05 §1.4 MMR relevance / 05 §1.8 query_hash / 05 §7 per-search metrics))** — `05 §1.8` は
-   query_hash を「query + mode + diversify 設定の hash」と定めるが、厳密な canonical form (含めるキー: `k` /
-   `candidate_depth` / `w_text`/`w_vector` / `mmr_lambda` / `scope_mode` を含むか、JCS か) が未定義。
-   query_hash は cursor の誤用検出 (`KCS-E-SEARCH-CURSOR-001`) の基盤であり、含めるキーが実装で揺れると
-   「同一クエリ扱い」の境界が変わる。影響: CT3-CURSOR-003。
+2. **[解消済み r3] query_hash の正準入力構成** — `05 §1.8` (2026-07-03 追記) で確定:
+   `"sha256:" + base16(sha256(JCS({query (NFC), mode (解決後の実効値), scope_mode, scopes (scope_id 昇順),
+   diversify ([search.diversify] 実効値), time_travel (未指定キー省略)})))`。`limit` / `--offset` /
+   `--cursor` / `--json` は含めない (ページング操作で hash が変わってはならない)。`rrf` ([search.rrf] の
+   実効値 k / candidate_depth / w_text / w_vector) を含める最終形は 2026-07-03 発注側裁定 (05 §1.8 本文への
+   `rrf` キー同期は発注側にて実施 — A.7 注記)。反映: A.7 に固定ベクタを新設、CT3-CURSOR-003 で値まで assert。
 
-3. **MMR relevance の正規化・スケール (要-spec, r2 新設。2026-07-03 spec 追記済み (04 §4.1 chunk 境界 / 05 §1.4 MMR relevance / 05 §1.8 query_hash / 05 §7 per-search metrics))** — `05 §1.4` は
-   `relevance(c) = RRF_score(c)` と定めるが、RRF_score のスケール (~1/61) と similarity (cosine ∈ [-1,1])
-   では桁が 1 桁以上異なり、生のまま `λ·rel - (1-λ)·sim` に代入すると sim 項が支配して relevance がほぼ
-   無視される。relevance の正規化 (min-max / rank ベース等) の規則が未定義。影響: A.5 / CT3-MMR-001
-   (現ベクタは「正規化後の relevance」と仮定した算術検証 fixture — spec 追記後に実スケールで再ベクタ化)。
+3. **[解消済み r3] MMR relevance の正規化・スケール** — `05 §1.4` (2026-07-03 追記) で確定:
+   `relevance(c)` = RRF スコアを **MMR 候補プール内で min-max 正規化した値** ([0,1]。全候補が同スコアなら
+   一律 1.0)。生の RRF スコア (最大 ~1/k) をそのまま使うと mmr_lambda の意味が損なわれるため。
+   反映: A.5 を「生 RRF → min-max 正規化 → MMR」の一貫ベクタで再凍結 (確定順序は c1,c3,c2,c4 に変化)、
+   CT3-MMR-001 同期済み。
 
-4. **per-search latency の metrics.jsonl 記録 schema (要-spec, r2 新設。発注側が 05 §7 に追記予定)** —
-   `05 §7` の metrics.jsonl は「数値メトリクス (デフォルト 1h 間隔)」の集計であり、per-search の latency
-   記録は現行 spec に無い。一方 `09 §3.1` は metrics.jsonl を「M3 の latency 計測に必要」として Step 3 に
-   割り当て、`09 §4.1` は p50/p95/p99 を求める — per-search 粒度 (または全検索を被覆する集計) と
-   metric 名・単位・記録粒度の追記が必要。影響: CT3-OBS-002 (存在契約のみ先行、assert 形は追記後に確定) /
-   CT3-MULTI-007 (性能実測の記録基盤)。
+4. **[解消済み r3] per-search latency の metrics.jsonl 記録 schema** — `05 §7` (2026-07-03 追記) で確定:
+   `kcs search` は 1 回の実行ごとに metrics.jsonl へ 1 行を追記 — envelope 必須フィールド (`ts, level,
+   code, component, message, context`) に加え `metric: "search.latency_ms"` / `value: <実測 ms>` /
+   `context: {mode, scope_count, result_count}`。redact_logs 既定に従いクエリ本文・path は記録しない。
+   1h 間隔の集計メトリクスはこの一次データから導出してよい。反映: CT3-OBS-002 の保留マーク解除、firm 契約化。
 
 5. **index_status / access.jsonl の詳細 schema** — (a) `index_status.enriched_ratio` の分子分母 (何を
    「強化済み」と数えるか: Markdownize done? embedding done? chunk indexed?)、(b) `access.jsonl` の
    記録フィールドと redact 対象の詳細、が未定義 (`05 §1.7` / `06 §13` は行の必須フィールドと存在のみ規定)。
    影響: CT3-OBS-001/003。実装者判断で固定。
 
-6. **MMR similarity 関数の選択規則** — `05 §1.4` は `similarity = vector cosine, または heading_path /
-   section_id の Jaccard` と「または」で列挙するが、vector 利用可能時に cosine を使うか Jaccard を使うか、
-   embedding 不可時の切替が未定義。影響: CT3-MMR-001 (ベクタは与えた類似度行列には確定するが、**実データで
-   どの similarity を使うか**が未定義)。実装者判断で固定 (vector 検索成立時は cosine が自然)。
+6. **[解消済み r3] MMR similarity 関数の選択規則** — `05 §1.4` (2026-07-03 追記) で確定: `similarity` は
+   **embedding の cosine**。embedding が無い場合 (text-only 検索) は **MMR を適用せず RRF 順のまま**とする。
+   反映: CT3-MMR-005 に text-only 非適用分岐を追加、A.5 の類似度行列は embedding cosine と明記。
+   (§1.4 の選択則コードブロックに残る「または heading_path / section_id の Jaccard」の併記は、同日追記の
+   確定規則 (bullet) を正とする。)
 
 7. **trigram の 2 文字 CJK クエリ挙動** — `04 §4.2` は trigram (3-gram) を定めるが、gram 長 (3) 未満の
    2 文字 CJK クエリで索引を使うか linear scan に落ちるかが未定義。影響: CT3-FTS-003。実装者判断
@@ -954,7 +1036,7 @@ URI → JSON (必須フィールドのみ復元, sv 省略 = 1):
 | shallow 化の**生成** (tiered retention / `kcs gc` / tree 破棄) | `05 §2.2`, `09 §3.1` line 130-132: Phase 4+。Step 3 は shallow commit の **解決/失敗契約** (手置きの shallow commit で CT3-EVIDENCE-005 / CT3-CURSOR-005) のみ |
 | GC の**実行** (shallow / prune / tiered / CoW / power-loss sweep) | `05 §2.2`, `09 §3.1`: Phase 4+。Step 1 CT-GC-* の schema 遵守を変えない |
 | chunk レベル semantic_fingerprint / retarget の match_method | `08 §5` / `09 §5.2`: retarget は Phase 4+。Step 3 は chunk identity (hash) のみ扱い、類似性 fingerprint は扱わない (`03 §5` hash vs fingerprint 分離) |
-| multimodal embedding のベンダー実地検証 (次元/料金/deprecation) | `07 §5.3` リスク注記: Step 2 着手前の採用判断。Step 3 は text-only 緩和適用時の契約 (CT3-EMBED-004) を検証し、multimodal 実採用時の embedding_hash は別途固定 |
+| multimodal embedding のベンダー実地検証 (次元/料金/deprecation) | `07 §5.3`: 2026-07-03 再検証で**採用確定済み** (gemini-embedding-2 / 768 MRL / cosine / multimodal — WS-embed-2 裁定、text-only 緩和は撤回)。Step 3 は確定 profile での生成・互換判定契約 (CT3-EMBED-004、A.2) を検証する。image/audio embedding の**実生成**は Phase 4+ (profile 予約のみ) |
 | Summary / Classification / Rerank Adapter の生成本体 | `07 §5.4-5.6` optional。`09 §3.1` の Step 3 行に無い。Rerank の searched_scopes 非隠蔽 (CT3-OBS-004) のみ横断契約として参照 |
 | Prepare / Markdownize / incremental / task / budget / secrets / network opt-in | `09 §3.1`: Step 2。step2a で担保済み。Step 3 は normalized instance (unit object 群) を入力として受け、chunk 以降を担う |
 | CAS / tree / commit / hash 算出 / CLI 7 コマンド / lock | Step 1 (ws1a) で担保。Step 3 は commit の tree entry 射影 (tree_entries) を読むが tree/commit 生成は Step 1 |
@@ -975,9 +1057,10 @@ Recall@10 >= 0.8」+「本書 P0 全緑」** とし、M3-2 / M3-3 の Recall 判
 - **P0 テスト数**: 59 (総テスト数 76: P0 59 / P1 17)
   (CT3-CHUNK 11 / CT3-EMBED 4 / CT3-FTS 4 / CT3-HYBRID 6 / CT3-MMR 4 / CT3-CURSOR 5 / CT3-MULTI 5 /
    CT3-EVIDENCE 7 / CT3-URI 3 / CT3-OPEN 4 / CT3-REINDEX 3 / CT3-OBS 3)
-  (r2: 57 + CT3-EVIDENCE-009 新設 + CT3-CHUNK-012 P1→P0 昇格。CT3-MULTI-008 は P1 新設)
-- **spec 未定義事項**: 9 件 (§C。r2 で stale の「eval/ 未存在」を削除、2 件を新設)。うち **要-spec は 4 件**:
-  §C-1 (chunk 境界の決定性 — heading_path 導出 / section_id 生成 / max_chars 分割。chunk_hash = Evidence
-  Pointer identity の再現性を左右)、§C-2 (query_hash の正準入力構成 — cursor validity の基盤)、
-  §C-3 (MMR relevance の正規化・スケール)、§C-4 (per-search latency の metrics.jsonl 記録 schema) —
-  いずれも **2026-07-03 に発注側が spec 追記予定**。残り 5 件は実装者判断で固定 → 事後 spec 反映で足りる。
+  (r2: 57 + CT3-EVIDENCE-009 新設 + CT3-CHUNK-012 P1→P0 昇格。CT3-MULTI-008 は P1 新設。
+   r3: P0 構成は不変 — ベクタ再凍結と §C 解消状態の同期のみ)
+- **spec 未定義事項**: 9 件 (§C)。うち **#1〜#4 および #6 の 5 件は 2026-07-03 の spec 追記
+  (`04 §4.1` chunk 境界正準規則 / `05 §1.8` query_hash 正準構成 / `05 §1.4` MMR min-max 正規化 +
+  similarity=cosine / `05 §7` per-search latency 記録) で解消済み** — **要-spec の残は 0 件**。
+  残り 4 件 (#5 index_status・access 詳細 schema / #7 trigram 2 文字 / #8 CLI オペランド細部 /
+  #9 vector BLOB 形式) は実装者判断で固定 → 事後 spec 反映で足りる。
