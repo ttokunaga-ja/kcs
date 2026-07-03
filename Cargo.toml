@@ -28,3 +28,8 @@ unicode-normalization = "0.1"
 base64 = "0.22"
 ureq = { version = "2", features = ["json"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
+# Pinned to the stable 0.1.6: the 0.1.7+ alpha releases ship a broken build
+# (`sqlite-vec.c` #includes `sqlite-vec-diskann.c`, which is not packaged in the
+# crate, so cc-rs fails). 0.1.6 compiles cleanly against bundled rusqlite 0.32
+# and provides the `vec0` module used by `chunk_vec` (04 §4.3).
+sqlite-vec = "=0.1.6"
