@@ -13,7 +13,11 @@
     "scope": {
       "type": "object",
       "properties": {
-        "participates_in_global_search": { "type": "boolean" }
+        "participates_in_global_search": { "type": "boolean" },
+        "ignore": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
       },
       "additionalProperties": false
     },
@@ -42,7 +46,13 @@
     "budget": {
       "type": "object",
       "properties": {
-        "monthly_usd_cap": { "type": "number", "minimum": 0 }
+        "monthly_usd_cap": { "type": "number", "minimum": 0 },
+        "warn_at_percent": { "type": "integer", "minimum": 0, "maximum": 100 },
+        "hard_stop": { "type": "boolean" },
+        "per_adapter": {
+          "type": "object",
+          "additionalProperties": { "type": "number", "minimum": 0 }
+        }
       },
       "additionalProperties": false
     },
@@ -60,7 +70,20 @@
       },
       "additionalProperties": false
     },
-    "markdownize": { "type": "object" }
+    "markdownize": { "type": "object" },
+    "adapter": {
+      "type": "object",
+      "properties": {
+        "policy": {
+          "type": "object",
+          "properties": {
+            "allow_network": { "type": "boolean" }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    }
   },
   "additionalProperties": false
 }

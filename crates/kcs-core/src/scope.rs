@@ -8,14 +8,16 @@ use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 
 use crate::cas::{
     append_jsonl, atomic_overwrite, atomic_write, hash_bytes, hash_json, is_hash, ObjectKind,
     ObjectStore,
 };
-use crate::dag::{build_tree, CommitObject, CommitStats, CommitType, TreeEntry, TreeObject};
+use crate::dag::{
+    build_tree, CommitObject, CommitStats, CommitType, NormalizeRef, TreeEntry, TreeObject,
+};
 use crate::error::{IoResultExt, KcsError, Result};
 use crate::schema::{validate_json_schema, SchemaKind};
 use crate::ExitCode;
@@ -171,6 +173,23 @@ impl Repository {
     }
 
     pub fn build_working_tree(&self, store_raw: bool) -> Result<WorkingTree> {
+        self.build_working_tree_filtered(store_raw, &BTreeSet::new())
+    }
+
+    pub fn build_working_tree_filtered(
+        &self,
+        store_raw: bool,
+        excluded_paths: &BTreeSet<String>,
+    ) -> Result<WorkingTree> {
+        self.build_working_tree_with_normalize(store_raw, excluded_paths, &BTreeMap::new())
+    }
+
+    pub fn build_working_tree_with_normalize(
+        &self,
+        store_raw: bool,
+        excluded_paths: &BTreeSet<String>,
+        normalize_by_path: &BTreeMap<String, NormalizeRef>,
+    ) -> Result<WorkingTree> {
         let mut entries = Vec::new();
         for entry in fs::read_dir(&self.root).kcs_io(&self.root)? {
             let entry = entry.kcs_io(&self.root)?;
@@ -198,13 +217,19 @@ impl Repository {
                     continue;
                 }
             };
+            if excluded_paths.contains(&file_name) {
+                continue;
+            }
             let bytes = fs::read(&path).kcs_io(&path)?;
             let raw_hash = if store_raw {
                 self.store.write_raw(&bytes)?
             } else {
                 hash_bytes(&bytes)
             };
-            entries.push(TreeEntry::raw_file(file_name, raw_hash)?);
+            let mut tree_entry = TreeEntry::raw_file(file_name.clone(), raw_hash)?;
+            tree_entry.normalize = normalize_by_path.get(&file_name).cloned();
+            tree_entry.validate()?;
+            entries.push(tree_entry);
         }
         Ok(WorkingTree {
             tree: build_tree(entries)?,
@@ -249,11 +274,55 @@ impl Repository {
         message: Option<&str>,
         fixed_now: Option<&str>,
     ) -> Result<SnapshotOutcome> {
+        self.snapshot_with_type(
+            message,
+            fixed_now,
+            CommitType::Manual,
+            &BTreeSet::new(),
+            &BTreeMap::new(),
+        )
+    }
+
+    pub fn auto_snapshot(
+        &self,
+        message: Option<&str>,
+        fixed_now: Option<&str>,
+        excluded_paths: &BTreeSet<String>,
+    ) -> Result<SnapshotOutcome> {
+        self.auto_snapshot_with_normalize(message, fixed_now, excluded_paths, &BTreeMap::new())
+    }
+
+    pub fn auto_snapshot_with_normalize(
+        &self,
+        message: Option<&str>,
+        fixed_now: Option<&str>,
+        excluded_paths: &BTreeSet<String>,
+        normalize_by_path: &BTreeMap<String, NormalizeRef>,
+    ) -> Result<SnapshotOutcome> {
+        self.snapshot_with_type(
+            message,
+            fixed_now,
+            CommitType::Auto,
+            excluded_paths,
+            normalize_by_path,
+        )
+    }
+
+    fn snapshot_with_type(
+        &self,
+        message: Option<&str>,
+        fixed_now: Option<&str>,
+        commit_type: CommitType,
+        excluded_paths: &BTreeSet<String>,
+        normalize_by_path: &BTreeMap<String, NormalizeRef>,
+    ) -> Result<SnapshotOutcome> {
         self.validate()?;
         let _lock = StoreLock::acquire(&self.kcs_dir)?;
         maybe_hold_lock_for_tests();
 
-        let working = self.build_working_tree(true)?.tree;
+        let working = self
+            .build_working_tree_with_normalize(true, excluded_paths, normalize_by_path)?
+            .tree;
         let tree_value =
             serde_json::to_value(&working).map_err(|err| KcsError::schema(err.to_string()))?;
         let (tree_hash, _) = self.store.write_json(ObjectKind::Tree, &tree_value)?;
@@ -287,7 +356,10 @@ impl Repository {
             .unwrap_or_else(now_utc_seconds);
         let message = message
             .map(str::to_owned)
-            .unwrap_or_else(|| format!("snapshot at {created_at}"));
+            .unwrap_or_else(|| match commit_type {
+                CommitType::Auto => format!("index auto snapshot at {created_at}"),
+                _ => format!("snapshot at {created_at}"),
+            });
         let parents = head_hash.into_iter().collect::<Vec<_>>();
         let commit = CommitObject::new(
             tree_hash.clone(),
@@ -296,7 +368,7 @@ impl Repository {
             message,
             self.tool_lock_hash()?,
             stats.clone(),
-            CommitType::Manual,
+            commit_type,
         )?;
         let commit_value =
             serde_json::to_value(&commit).map_err(|err| KcsError::schema(err.to_string()))?;
@@ -688,11 +760,88 @@ impl Repository {
         if path.is_file() {
             let value: Value = serde_json::from_str(&fs::read_to_string(&path).kcs_io(&path)?)
                 .map_err(|err| KcsError::schema(err.to_string()))?;
-            hash_json(&value)
+            hash_json(&canonical_tool_lock_value(&value)?)
         } else {
             hash_json(&json!({ "spec_version": 1 }))
         }
     }
+}
+
+fn canonical_tool_lock_value(value: &Value) -> Result<Value> {
+    let object = value
+        .as_object()
+        .ok_or_else(|| KcsError::schema("tool-lock.json must be an object"))?;
+    let spec_version = object
+        .get("spec_version")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| KcsError::schema("tool-lock.json missing spec_version"))?;
+    let mut canonical = Map::new();
+    canonical.insert("spec_version".to_owned(), Value::from(spec_version));
+    for key in ["prepare", "markdown", "summary", "classification", "rerank"] {
+        if let Some(entry) = canonical_tool_entry(object, key, false)? {
+            canonical.insert(key.to_owned(), entry);
+        }
+    }
+    if let Some(entry) = canonical_tool_entry(object, "embedding", true)? {
+        canonical.insert("embedding".to_owned(), entry);
+    }
+    Ok(Value::Object(canonical))
+}
+
+fn canonical_tool_entry(
+    object: &Map<String, Value>,
+    key: &str,
+    embedding: bool,
+) -> Result<Option<Value>> {
+    let Some(entry) = object.get(key) else {
+        return Ok(None);
+    };
+    if entry.is_null() {
+        return Ok(None);
+    }
+    let entry = entry
+        .as_object()
+        .ok_or_else(|| KcsError::schema(format!("{key} must be an object")))?;
+    let mut canonical = Map::new();
+    if embedding {
+        canonical.insert(
+            "dimensions".to_owned(),
+            required_lock_integer(entry, key, "dimensions")?,
+        );
+        canonical.insert(
+            "distance".to_owned(),
+            required_lock_string(entry, key, "distance")?,
+        );
+        canonical.insert(
+            "modality".to_owned(),
+            required_lock_string(entry, key, "modality")?,
+        );
+    }
+    canonical.insert(
+        "profile_hash".to_owned(),
+        required_lock_string(entry, key, "profile_hash")?,
+    );
+    canonical.insert(
+        "tool_id".to_owned(),
+        required_lock_string(entry, key, "tool_id")?,
+    );
+    Ok(Some(Value::Object(canonical)))
+}
+
+fn required_lock_string(object: &Map<String, Value>, key: &str, field: &str) -> Result<Value> {
+    object
+        .get(field)
+        .and_then(Value::as_str)
+        .map(|value| Value::String(value.to_owned()))
+        .ok_or_else(|| KcsError::schema(format!("{key}.{field} must be a string")))
+}
+
+fn required_lock_integer(object: &Map<String, Value>, key: &str, field: &str) -> Result<Value> {
+    object
+        .get(field)
+        .and_then(Value::as_u64)
+        .map(Value::from)
+        .ok_or_else(|| KcsError::schema(format!("{key}.{field} must be an integer")))
 }
 
 pub fn append_event_log(code: &str, message: &str, context: Value) -> Result<()> {
@@ -902,7 +1051,7 @@ fn unix_nanos() -> u128 {
         .unwrap_or_default()
 }
 
-fn new_ulid(path: &Path) -> String {
+pub fn new_ulid(path: &Path) -> String {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default();
@@ -959,7 +1108,7 @@ fn is_ulid(value: &str) -> bool {
             .all(|byte| matches!(byte, b'0'..=b'9' | b'A'..=b'H' | b'J'..=b'K' | b'M'..=b'N' | b'P'..=b'T' | b'V'..=b'Z'))
 }
 
-fn now_utc_seconds() -> String {
+pub fn now_utc_seconds() -> String {
     if let Some(value) = fixed_now_override() {
         return value;
     }
@@ -1008,9 +1157,63 @@ fn civil_from_days(days: i64) -> (i64, i64, i64) {
     (year, month, day)
 }
 
+/// Inverse of [`civil_from_days`]: days since the Unix epoch for a civil date
+/// (Howard Hinnant's algorithm).
+fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
+    let y = if month <= 2 { year - 1 } else { year };
+    let era = if y >= 0 { y } else { y - 399 }.div_euclid(400);
+    let yoe = y - era * 400;
+    let mp = if month > 2 { month - 3 } else { month + 9 };
+    let doy = (153 * mp + 2).div_euclid(5) + day - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + doe - 719_468
+}
+
+/// Format Unix seconds as an RFC3339 UTC-seconds timestamp (`YYYY-MM-DDTHH:MM:SSZ`),
+/// the shape produced by [`now_utc_seconds`].
+#[must_use]
+pub fn format_utc_seconds(secs: i64) -> String {
+    format_unix_seconds(secs)
+}
+
+/// Parse an RFC3339 UTC-seconds timestamp (`YYYY-MM-DDTHH:MM:SSZ`, the shape
+/// produced by [`now_utc_seconds`]) into Unix seconds. Returns `None` when the
+/// input does not match that fixed-width shape. Used to schedule retry backoff
+/// deadlines relative to the current (possibly `KCS_FIXED_NOW`) time.
+#[must_use]
+pub fn parse_utc_seconds(value: &str) -> Option<i64> {
+    let bytes = value.as_bytes();
+    if bytes.len() != 20
+        || bytes[4] != b'-'
+        || bytes[7] != b'-'
+        || bytes[10] != b'T'
+        || bytes[13] != b':'
+        || bytes[16] != b':'
+        || bytes[19] != b'Z'
+    {
+        return None;
+    }
+    let field = |start: usize, end: usize| value.get(start..end)?.parse::<i64>().ok();
+    let year = field(0, 4)?;
+    let month = field(5, 7)?;
+    let day = field(8, 10)?;
+    let hour = field(11, 13)?;
+    let minute = field(14, 16)?;
+    let second = field(17, 19)?;
+    if !(1..=12).contains(&month)
+        || !(1..=31).contains(&day)
+        || hour > 23
+        || minute > 59
+        || second > 59
+    {
+        return None;
+    }
+    Some(days_from_civil(year, month, day) * 86_400 + hour * 3_600 + minute * 60 + second)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{civil_from_days, format_unix_seconds};
+    use super::{civil_from_days, format_unix_seconds, format_utc_seconds, parse_utc_seconds};
 
     #[test]
     fn format_unix_seconds_known_vectors() {
@@ -1027,6 +1230,28 @@ mod tests {
         // Month / year boundary.
         assert_eq!(format_unix_seconds(1_704_067_199), "2023-12-31T23:59:59Z");
         assert_eq!(format_unix_seconds(1_704_067_200), "2024-01-01T00:00:00Z");
+    }
+
+    #[test]
+    fn parse_utc_seconds_round_trips_and_rejects_bad_shapes() {
+        // Round-trips against the known format vectors.
+        for secs in [
+            0,
+            1_700_000_000,
+            1_709_251_199,
+            4_107_542_400,
+            1_704_067_200,
+        ] {
+            assert_eq!(parse_utc_seconds(&format_utc_seconds(secs)), Some(secs));
+        }
+        // Offset arithmetic used by retry backoff scheduling.
+        let base = parse_utc_seconds("2026-07-03T00:00:00Z").unwrap();
+        assert_eq!(format_utc_seconds(base + 2), "2026-07-03T00:00:02Z");
+        assert_eq!(format_utc_seconds(base + 60), "2026-07-03T00:01:00Z");
+        // Malformed inputs are rejected rather than silently misparsed.
+        assert_eq!(parse_utc_seconds("2026-07-03T00:00:00"), None);
+        assert_eq!(parse_utc_seconds("2026-13-03T00:00:00Z"), None);
+        assert_eq!(parse_utc_seconds("not-a-timestamp"), None);
     }
 
     #[test]
