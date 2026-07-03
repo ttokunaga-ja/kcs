@@ -8,6 +8,12 @@
 > 手本は `tasks/ws1a-contract-tests.md` (Step 1)。ID 体系・ベクタの書き方・§C の未定義リストの
 > 扱い方を踏襲する。Step 1 から持ち越した **CT-COMMIT-008** (`kcs index` 成功完了時 commit_type=auto)
 > は本書 CT2-INDEX-* に取り込む (2026-07-03 監査裁定で Step 2 ゲートへ移動済み)。
+>
+> 改訂 r2 (2026-07-03): Codex クロスレビュー反映。ベクタ 6 件 + 変化率 4 件は再計算一致につき不変
+> (A.2 のバイト数は NFD 形 78 / NFC 形 76 の両論併記で曖昧性を解消)。過剰契約・誤引用 8 件を修正、
+> カバレッジ 10 件を反映 (新規テスト 8 / 既存拡充 2)。§C から「spec 定義済み」1 件を A 節注記へ移設し、
+> 要-spec を 5 件に再集計 (うち 4 件は 2026-07-03 に発注側が spec 追記予定)。A.1/A.3 の profile ベクタは
+> **計算規約検証用 fixture** であり、実装が採用する実 profile 値の契約ではないことを明記。
 
 対象クレート (Step 2): `kcs-pipeline` + `kcs-adapter`
 実装範囲の正本: `docs/09-mvp-scope.md §3.1` の **Step 2 行** — 初回スキャン preview + 承認 / `.kcsignore` /
@@ -21,7 +27,7 @@ secrets Tier A/B + quarantine + `--yes` 制約。
 
 | 接頭辞 | 対象契約 | 主な根拠 |
 | --- | --- | --- |
-| `CT2-PROFILE-*` | `tool_profile_hash` / `tool_lock_hash` / `prompt_template_hash` 算出規約 (cmd/url/auth 排除・null 省略・alias 禁止) | `03 §5.1, §5.2` / `07 §4, §6` |
+| `CT2-PROFILE-*` | `tool_profile_hash` / `tool_lock_hash` / `prompt_template_hash` 算出規約 (cmd/url/auth 排除・null 省略・alias 禁止) + Step 2 追加 schema validation | `03 §5.1, §5.2` / `07 §4, §6` / `06 §11` |
 | `CT2-UNIT-*` | prepared unit / `unit_ref` / normalized instance レイアウト / manifest / fingerprint 再利用 / unit_mapping / 変化率 | `03 §2, §2.1` / `04 §2, §2.1, §2.2` |
 | `CT2-INCR-*` | incremental 発動条件 (AND 5) と各否定 → full fallback / identity 不変性 | `04 §3.1` / `07 §8.4` |
 | `CT2-ACCEPT-*` | incremental 出力の受け入れ検査 V1〜V6 + `KCS-E-ADAPTER-CONTRACT-001` | `04 §3.2` / `07 §8.1` |
@@ -52,9 +58,18 @@ JCS 近似は `json.dumps(obj, separators=(',',':'), ensure_ascii=False, sort_ke
 > **RFC 8785 との差異について**: 本書の profile ベクタが使うキーはすべて ASCII、数値はすべて整数
 > (`spec_version=1`, `dimensions=1536`) である。この条件下では上記 Python 近似は RFC 8785 JCS と
 > **バイト一致** する。差異が顕在化するのは (a) 非 ASCII のキー名、(b) 浮動小数点の数値 の場合のみ。
-> `sampling` (`temperature` 等の float) を含む生成 LLM 系 profile は本ベクタ集に**含めない** (float の
-> ECMAScript 数値直列化は Python 近似の安全域外のため。§C-6 に切り出す)。実装が本ベクタと不一致に
-> なった場合、まず「実装の JCS が RFC 8785 準拠か」を疑うこと。
+> `sampling` (`temperature` 等の float) を含む生成 LLM 系 profile は本ベクタ集に**含めない**: float の
+> ECMAScript 数値直列化 (RFC 8785 §3.2.2.3) は Python 近似の安全域外のため。これは **spec の未定義では
+> なく本書の計算手段の制約** (`03 §5.1` は RFC 8785 準拠と定義済み)。生成 LLM 系 profile のベクタは
+> 実装の RFC 8785 準拠 JCS で別途固定する。実装が本ベクタと不一致になった場合、まず「実装の JCS が
+> RFC 8785 準拠か」を疑うこと。
+>
+> **fixture と契約の分離 (重要)**: A.1〜A.3 / A.6 の profile 値 (`mistral-ocr-2505` / `kcs-deterministic-text` /
+> `gemini-multimodal-embedding` 等) は**計算規約を検証するための入力 fixture** であり、KCS 公式 Adapter の
+> 実 profile 値・実 tool-lock 値の契約では**ない**。特に `gemini_multimodal_embedding` (1536 次元) は
+> `07 §5.3` が「例示であり、ベンダー・次元数の裏取り済み値ではない」と明記する未確定 profile。
+> 契約は「この入力ならこの hash」という**算出関数の固定**のみで、実装の実運用 profile が
+> これらの値と一致することは要求しない。
 
 ### A.1 tool_profile_hash ベクタ (`03 §5.1`)
 
@@ -98,11 +113,16 @@ canonical バイト列と `tool_profile_hash` は PROFILE-1 と**完全一致**�
 基底文字 + U+0301 結合アキュートで与える):
 
 ```text
-raw (utf-8, 78 bytes):
+raw (NFD 形 utf-8 = 78 bytes / NFC 形 utf-8 = 76 bytes。下記参照):
   "You are a markdownize adapter.␠␠\r\n"        (行末に半角空白 2)
   "Process the café unchánged unit.\t\t\r\n"  (e+U+0301, a+U+0301, 行末タブ 2)
   "\r\n\r\n"                                       (末尾空行)
 ```
+
+> バイト数の注意: fixture 入力は **NFD 形 (78 bytes)** — アクセント文字は基底文字 + U+0301 (2 バイト `cc 81`)。
+> 本文書からアクセント文字を NFC 合成済みでコピーした場合の入力は **76 bytes** になるが、手順 3 (NFC) が
+> 両者を同一文字列に正規化するため **最終 hash はどちらの入力でも同一** (NFC は冪等)。NFD 形を入力に使うと
+> 手順 3 が実際にバイトを変えることまで検証できる。
 
 5 手順 (`03 §5.1`): 1. 各行の行末空白除去 → 2. 改行を `\n` に正規化 → 3. NFC → 4. 末尾空行削除 → 5. sha256。
 
@@ -128,8 +148,10 @@ tool_lock_hash = sha256:e24d8b76742e441e894181f9210453e0da60a6e84c663560214d10ae
 ```
 
 `cmd`/`args`/`url`/`config_hash`/`capabilities` は入力に含めない (`03 §5.2` / `07 §6`)。
-この `tool_lock_hash` は Step 1 の commit object の同名フィールド (WS1a CT-HASH-004 ではダミー値) の
-**実算出値**であり、Step 2 で commit 生成時に注入される。
+本ベクタも A 節冒頭の注記どおり**計算規約検証用 fixture** である (`gemini_multimodal_embedding` は
+`07 §5.3` の例示 profile)。commit object の `tool_lock_hash` (WS1a CT-HASH-004 ではダミー値) は Step 2 で
+**実装の実 tool-lock.json から同じ規約で算出した値**が注入される (CT2-INDEX-002) — 本 fixture 値との
+一致は要求しない。
 
 ### A.4 unit_ref 導出ベクタ (`03 §2.1`: `unit_ref = base16(sha256(unit_key))[0:16]`)
 
@@ -217,8 +239,10 @@ fan-out `ab/cd` は raw_hash の digest 先頭 2/次 2 文字 (`bb`/`e1`、`03 �
 - Then: 正規化後 utf-8 hex が A.2 と一致し、`prompt_template_hash = sha256:3f5200e9…d238`。
   NFC 手順で `e+U+0301` が `é` (`c3 a9`) に合成される。
 - 根拠: `03 §5.1` (prompt_template_hash の 5 手順)。
-- 補足: step1 の「trailing whitespace」の文字集合と CRLF/lone-CR の扱いは spec に明記が無い (§C-4)。
-  本ベクタは半角空白・タブを行末空白とし、CRLF を step2 で `\n` 化する解釈を固定する。
+- 補足: step1 の「trailing whitespace」の文字集合と CRLF/lone-CR の扱いは spec に明記が無い (§C-4、
+  **2026-07-03 に発注側で spec 追記予定**)。本ベクタは「半角空白・タブを行末空白、CRLF を step2 で
+  `\n` 化」の解釈で計算した。spec 追記がこの解釈と一致すれば本ベクタで確定、相違すれば再計算する
+  (追記までは hash 値を確定契約とせず、5 手順の実装のみ先行してよい)。
 
 **CT2-PROFILE-006** — P0 — tool_lock_hash (optional adapter 省略ケース)
 - Given: A.3 の tool-lock.json (prepare/markdown/embedding のみ、summary/classification/rerank 省略)。
@@ -227,6 +251,8 @@ fan-out `ab/cd` は raw_hash の digest 先頭 2/次 2 文字 (`bb`/`e1`、`03 �
   embedding のみ dimensions/distance/modality を含む。
 - 根拠: `03 §5.2` (計算式 / optional adapter は未設定なら省略 / cmd/url/config_hash/capabilities 非包含) /
   `07 §6` (実行可能情報を含めない)。
+- 補足: A.3 は**算出規約の fixture** (A 節冒頭注記)。実装の実 tool-lock.json (embedding profile は
+  `07 §5.3` の実地検証で確定) がこの fixture 値と一致することは要求しない。
 
 **CT2-PROFILE-007** — P1 — model_version_pin は immutable 版、可変 alias は禁止
 - Given: config が `mistral-ocr-latest` (可変 alias) を指定。
@@ -246,6 +272,27 @@ fan-out `ab/cd` は raw_hash の digest 先頭 2/次 2 文字 (`bb`/`e1`、`03 �
 - When: 旧 spec_version の artifact と比較。
 - Then: 別 identity として扱う (migration plan 必須の扱い)。
 - 根拠: `03 §5.1` (「spec_version の bump は breaking change 扱い」) / `10 §12.5`。
+
+**CT2-PROFILE-010** — P0 — Step 2 追加 schema validation (tools.toml / tool-lock.json)
+- Given: (a) schema 違反の `~/.config/kcs/tools.toml` (例: `auth` が `^(keychain|env|plain):` 形式外)、
+  (b) schema 違反の `.kcs/tool-lock.json`。
+- When: CLI 起動 / 当該ファイルを使う操作。
+- Then: いずれも exit 2 + `KCS-E-CONFIG-SCHEMA-NNN`。Step 1 対象 (scope/manifest/config) に加え、
+  Step 2 で tools.toml / tool-lock.json が validation 対象に入る。
+- 根拠: `06 §11` (schema 一覧 / validation 失敗 exit 2 + `KCS-E-CONFIG-SCHEMA-NNN` / `auth` 形式は 07 §1) /
+  `09 §3.1` (「JSON Schema validation (Step 1 は scope / manifest / config。以後各 Step で対象 schema を追加)」) /
+  `10 §12.3`。
+
+**CT2-PROFILE-011** — P1 — tool_lock_hash の hash 対象/除外フィールド分離
+- Given: `07 §6` 例のとおり `kind` / `capabilities` / `mode` フィールドを含む tool-lock.json と、
+  それらを除いた同内容の tool-lock.json。
+- When: それぞれ tool_lock_hash を算出。
+- Then: 同一 hash。入力は `03 §5.2` の式が選択するフィールドのみ
+  (`spec_version` + 各 adapter の `{ tool_id, profile_hash }` + embedding のみ `dimensions/distance/modality`)。
+  `kind` / `capabilities` / `mode` / `cmd` / `url` / `config_hash` の変更で hash は変わらない。
+- 根拠: `03 §5.2` (「cmd/args/url/config_hash/capabilities は入力に含めない」/ フィールド選択式)。
+- 補足: `07 §6` の「tool-lock.json 全体を JCS 畳み込み」という文言と `03 §5.2` のフィールド選択式は、
+  `07 §6` 自身が `03 §5.2` を計算規約として参照しているため **03 §5.2 を正** とする。
 
 ### CT2-UNIT-* — prepared unit / normalized instance / unit_mapping (`03 §2.1` / `04 §2, §2.1, §2.2`)
 
@@ -310,7 +357,7 @@ fan-out `ab/cd` は raw_hash の digest 先頭 2/次 2 文字 (`bb`/`e1`、`03 �
 - Then: `order` 昇順、done は末尾連続改行除去、failed は `<!-- KCS-MISSING-UNIT <unit_key> <error_kind> -->`、
   `"\n\n"` 結合 + 末尾 `"\n"`、§10 ヘッダ付与。view の破損・喪失は `kcs repair` 再生成で解消し、
   up_to_date 判定に view の存在を使わない。
-- 根拠: `03 §2.1` (view 組み立て規則 4 手順 + ヘッダ) / `03 §6` (「全文 view の存在は判定に使わない」)。
+- 根拠: `03 §2.1` (view 組み立て規則 5 手順 + ヘッダ) / `03 §6` (「全文 view の存在は判定に使わない」)。
 
 **CT2-UNIT-010** — P1 — unit object は read-only artifact (直接編集は up_to_date を変えない)
 - Given: 保存済み unit object を直接編集。
@@ -333,6 +380,16 @@ fan-out `ab/cd` は raw_hash の digest 先頭 2/次 2 文字 (`bb`/`e1`、`03 �
 - When: raw object + 決定論的 prepare で再構築。
 - Then: `(raw_hash, unit_key, prepared_hash, unit_type, fingerprint, order_index)` が同一に再生成される。
 - 根拠: `04 §4.7` (「この表は cache。raw object + 決定論的 prepare から再構築可能」) / `04 §5.7`。
+
+**CT2-UNIT-013** — P0 — full Markdownize 初回出力の schema と永続化
+- Given: 未 Markdownize のファイル (done run なし)。full モードで Markdownize が成功。
+- When: 生成された normalized instance を検査。
+- Then: instance `g0` が生成され、manifest は `03 §2.1` schema (CT2-UNIT-003) を満たし全 unit
+  `status="done"`。各 unit object は `unit_key / unit_type / raw_hash / prepared_hash /
+  tool_profile_hash / gen=0 / mode="full" / markdown / reused_from=null / generated_at (UTC ISO8601+Z)`
+  を持つ。以後の up_to_date 判定 (`03 §6`) が `up_to_date` を返す。
+- 根拠: `03 §2.1` (unit object schema / manifest) / `04 §2` (unit 単位 Markdownize) / `03 §6` / `06 §12` (timestamp)。
+- 補足: incremental 偏重を避けるための full 経路の直接検証。V6 (full 出力契約) の正常系に相当。
 
 ### CT2-INCR-* — incremental 発動条件 (AND 5) と否定 (`04 §3.1` / `07 §8.4`)
 
@@ -560,6 +617,16 @@ fan-out `ab/cd` は raw_hash の digest 先頭 2/次 2 文字 (`bb`/`e1`、`03 �
 - Then: Adapter を呼ばず既存 vector を再利用 (incremental 後の unchanged unit 由来 chunk は再生成しない)。
 - 根拠: `04 §5.5` (embedding の content ベース再利用)。**embedding は Step 3 主対象**につき P2。
 
+**CT2-TASK-013** — P1 — task descriptor schema (04 §5.1)
+- Given: markdownize task (full / incremental / partial retry の各ケース)。
+- When: task descriptor を検査。
+- Then: `task_id / type / mode / input_path / input_hash / output_ref / unit_keys / status / attempts /
+  next_retry_at / deadline / heartbeat_at / fallback_reason / created_at` を持ち、incremental 時は
+  `previous_raw_hash / parent_run_id / changed_unit_keys` を持つ。`unit_keys` は **null = 全 unit 対象**、
+  非 null = partial retry の unit スコープ再投入時のみ対象 unit_key の配列。`input_path` は `/` を含まない
+  (`03 §3` 規則3)。
+- 根拠: `04 §5.1` (タスクモデル / unit_keys の意味) / `03 §3`。
+
 ### CT2-BUDGET-* — 二層 cost guardrail (`04 §5.4`)
 
 **CT2-BUDGET-001** — P0 — 二層 cap の判定式 (device と folder の残余 min)
@@ -601,12 +668,16 @@ fan-out `ab/cd` は raw_hash の digest 先頭 2/次 2 文字 (`bb`/`e1`、`03 �
 - Then: 単価 0 として記録 (= cap に効かない)。
 - 根拠: `04 §5.4` (「ローカル LLM 利用時は単価 0」)。
 
-**CT2-BUDGET-007** — P1 — deterministic タスク優先スケジュールで budget pause でも検索成立
-- Given: 初回大量投入。
-- When: スケジュール。
-- Then: deterministic タスク (Prepare / ベースライン抽出 / FTS index) を online タスクより優先し、
-  ベースライン index を先に完了。budget pause が起きても検索の成立自体は阻害されない。
-- 根拠: `04 §5` (優先スケジュール) / `07 §2.1` (ベースライン index)。
+**CT2-BUDGET-007** — P1 — deterministic タスク優先スケジュール (budget pause の影響範囲)
+- Given: 初回大量投入 (deterministic タスクと online Adapter タスクが混在)、途中で budget cap 到達。
+- When: スケジュールと task 状態を検査。
+- Then: deterministic タスク (Prepare / ベースライン抽出) が online Adapter タスク (Markdownize online /
+  Embedding) より優先してスケジュールされ、ベースライン index のタスク群が budget pause 下でも
+  `done` まで完走する (paused になるのは online タスクのみ)。
+- 根拠: `04 §5` (「deterministic なタスク…を online Adapter タスク…より優先してスケジュールし、
+  ベースライン index を先に完了させる」) / `07 §2.1`。
+- 補足: 「検索の成立自体は阻害されない」(`04 §5`) の**検索側の検証は Step 3** (§D)。本テストは
+  その前提となる task 状態のみを assert する。
 
 ### CT2-APPROVE-* — 初回スキャン preview + 承認 (`10 §1` / `06 §2`)
 
@@ -629,6 +700,8 @@ fan-out `ab/cd` は raw_hash の digest 先頭 2/次 2 文字 (`bb`/`e1`、`03 �
   secrets 機微候補警告 (Tier A/B)、network transmission policy、adapter execution mode、
   markdownize/embedding コスト概算、現行 budget cap での推定完了時期 を表示。
 - 根拠: `10 §1` (preview 表示項目リスト) / `06 §2` (preview 内容)。
+- 補足: テスト実装は上記を**項目ごとに個別 assert** する (一括文字列比較にしない)。項目欠落を
+  個別に検出できることが目的。
 
 **CT2-APPROVE-004** — P0 — --approve で承認し index 開始
 - Given: 未承認 scope。
@@ -662,7 +735,8 @@ fan-out `ab/cd` は raw_hash の digest 先頭 2/次 2 文字 (`bb`/`e1`、`03 �
 - When: `kcs status`。
 - Then: done/pending/paused 件数と paused 理由 (budget/auth/rate limit) を表示。検索は部分 index 時 `index_status` を返す
   (返却自体は Step 3)。
-- 根拠: `10 §1` (「AI 強化が未完了・paused の間、その状態を隠してはならない」) / `10 §1.1`。
+- 根拠: `10 §1` (「AI 強化が未完了・paused の間、その状態を隠してはならない」/ status 表示項目) /
+  `05 §1.7` (`index_status` — Step 3)。
 
 ### CT2-SECRETS-* — secrets Tier A/B / quarantine / --yes 制約 (`10 §1.1` / `06 §2`)
 
@@ -741,11 +815,24 @@ fan-out `ab/cd` は raw_hash の digest 先頭 2/次 2 文字 (`bb`/`e1`、`03 �
 - Then: 当該 scope の新規オンライン送信 task を発行しない (送信済みデータの取り消しは保証しない)。
 - 根拠: `07 §3` (revoke)。
 
-**CT2-NETWORK-006** — P2 — --online は 1 回限りの一時 opt-in (永続記録なし)
-- Given: `kcs index --online` (1 回)。
+**CT2-NETWORK-006** — P1 — --online / --offline の一時 override と優先順位
+- Given: (a) opt-in 未成立 scope で `--online` を 1 回指定 / (b) `allow_network=true` の scope で `--offline` を指定。
 - When: 実行。
-- Then: その 1 回に限る一時 opt-in。永続記録を作らない。優先順位 `CLI (--online/--offline) > .kcs/config.toml > ~/.config/kcs/config.toml`。
-- 根拠: `07 §3` (`--online` の一時 opt-in / 優先関係)。
+- Then: (a) その 1 回の実行に限り online task 発行可。**永続記録を作らない** (次回実行は opt-in 未成立に戻る)。
+  (b) その実行では online task を発行しない。優先関係は
+  `CLI (--online/--offline) > .kcs/config.toml (scope) > ~/.config/kcs/config.toml (user)`。
+- 根拠: `07 §3` (`--online` は一時 opt-in / 優先関係)。
+- 補足: `--online`/`--offline` フラグは `06 §1` の正本コマンド一覧 (kcs index 構文) に**未掲載**。
+  `06 §1` は「他 spec が新しいフラグに言及する場合、本節への追加を伴う」と定めるため 06 §1 への
+  同期が必要 (**発注側で追記予定**)。それまで本テストの根拠は `07 §3` (network opt-in の正本) とする。
+
+**CT2-NETWORK-007** — P1 — opt-in 承認記録の readback
+- Given: network opt-in が成立 (対話承認 または `--approve`)。
+- When: 承認記録を読み戻す。
+- Then: 記録に `scope_id / tool_id / approved_at / approval_method` が含まれ、成立した (scope, adapter)
+  の組を事後監査で特定できる。
+- 根拠: `07 §3` (「記録: 承認記録 (10-operations.md §1) に scope_id / tool_id / approved_at /
+  approval_method を残す」) / `10 §1` (承認記録)。
 
 ### CT2-ADAPTER-* — 同梱 deterministic Adapter / Mistral OCR 規約 / 共通メタ (`07 §2.1, §5.2, §4, §7`)
 
@@ -821,6 +908,35 @@ fan-out `ab/cd` は raw_hash の digest 先頭 2/次 2 文字 (`bb`/`e1`、`03 �
   起動時 warn (errors.jsonl level=warn)。
 - 根拠: `07 §1` (認証情報の保存規約 / 禁止) / `06 §11`。
 
+**CT2-ADAPTER-011** — P1 — Prepare trait の入出力
+- Given: `raw_hash` と `media_type` を入力に PDF を Prepare。
+- When: 出力を検査。
+- Then: `prepared_object_hashes` / `prepared_unit_hashes` (page 単位) / `image_object_hashes`
+  (画像抽出があれば) を返し、metadata に `unit_kind / page_number / mime / fingerprint
+  (semantic_fingerprint)` を持つ。prepared object は最初から unit 粒度の CAS object として
+  `objects/prepared/ab/cd/<prepared_hash>` に保存される (prepared_hash = バイト列 content hash)。
+- 根拠: `07 §5.1` (Prepare trait 入出力) / `04 §2` (物理配置 / unit 粒度 CAS) / `03 §8.1` (prepared_hash)。
+
+**CT2-ADAPTER-012** — P1 — 任意コマンド/URL Adapter の初回実行承認
+- Given: 任意コマンド (cmd) / 任意 URL を使う Adapter の初回実行。
+- When: 実行前。
+- Then: command / URL / scope / network policy を preview し、ユーザー承認を得てから実行する
+  (`require_command_confirmation = true`)。承認 UI は信頼境界の前提 (Adapter は trusted code /
+  ユーザー権限で実行) を反映した文言にする。
+- 根拠: `07 §7` (「任意コマンド/任意 URL を使う Adapter は、初回実行時に command / URL / scope /
+  network policy を preview し、ユーザー承認を得る」) / `07 §7.1` (承認 UI 文言)。
+
+**CT2-ADAPTER-013** — P0 — ベースライン artifact と AI 強化 artifact の共存・不変性
+- Given: ベースライン index 済み (deterministic 系 tool_profile_hash の instance が存在) の scope で、
+  online Adapter の network opt-in が成立。
+- When: AI 強化の Markdownize を実行。
+- Then: AI 強化の結果は**別 tool_profile_hash** の新しい normalized instance として生成される。
+  既存のベースライン instance (manifest / unit object) は**バイト不変**のまま残る (上書き・削除しない)。
+- 根拠: `07 §2.1` (「online Adapter を承認した後の AI 強化は、別 tool_profile_hash の artifact として
+  …生成する。ベースライン artifact とその Evidence Pointer は不変のまま残る」) / `03 §5` (identity =
+  `(raw_hash, tool_profile_hash)`) / `03 §2.1` (unit object read-only)。
+- 補足: Evidence Pointer 側の不変性検証は Step 3 (§D)。本テストは artifact (instance) の不変性のみ。
+
 ### CT2-IMAGE-* — embedded image 抽出・保存 / object 参照 (`03 §2` / `07 §5.2` / `08 §2.3`)
 
 **CT2-IMAGE-001** — P0 — 文書内 embedded image を image object として保存
@@ -837,12 +953,16 @@ fan-out `ab/cd` は raw_hash の digest 先頭 2/次 2 文字 (`bb`/`e1`、`03 �
   Evidence Pointer ではない (第 2 セグメントがリテラル `object`)。
 - 根拠: `07 §5.2` (参照置換) / `08 §2.3` (`kcs://<scope_id>/object/image/<image_hash>` / object 参照の区別)。
 
-**CT2-IMAGE-003** — P1 — kcs open は object 参照 URI を受理して image object を解決
-- Given: `kcs://<scope_id>/object/image/<image_hash>`。
-- When: `kcs open` に渡す。
-- Then: object 参照として解決 (Evidence Pointer URI の第 2 セグメント commit は常に `sha256:` prefix を持つため
-  リテラル `object` と衝突しない)。
-- 根拠: `08 §2.3` (「kcs open はこれを受理して該当 object を解決」)。
+**CT2-IMAGE-003** — P1 — 生成する object 参照 URI の形式 (解決は Step 3)
+- Given: Markdownize が生成した Markdown 内の image 参照 URI。
+- When: URI を検査。
+- Then: `kcs://<scope_id>/object/image/<image_hash>` 形式で、`<scope_id>` は当該 scope の scope.json の
+  実値、`<image_hash>` は `sha256:` prefix 込みの実 image_hash (CT2-IMAGE-001 で保存された object と一致)。
+  第 2 セグメントはリテラル `object` (Evidence Pointer URI の第 2 セグメント commit は常に `sha256:`
+  prefix を持つため衝突しない)。
+- 根拠: `08 §2.3` (object 参照 URI の形式 / Evidence Pointer との区別)。
+- 補足: `kcs open` による当該 URI の**解決**は Step 3 (`09 §3.1`: kcs open = Step 3)。Step 2 の契約は
+  **URI 生成まで** (r2 で縮小)。
 
 **CT2-IMAGE-004** — P2 — Mistral OCR の placeholder 形式も §5.2 想定どおり
 - Given: OCR が画像を placeholder として返すケース (2026-07-03 実地検証: placeholder 形式 1/1)。
@@ -863,7 +983,9 @@ fan-out `ab/cd` は raw_hash の digest 先頭 2/次 2 文字 (`bb`/`e1`、`03 �
 - Given: working tree に変更あり (tree_hash が HEAD と異なる)。
 - When: `kcs index` 成功完了。
 - Then: 同一プロセス内で `commit_type=auto` の commit が 1 つ作られる。commit object は Step 1 の schema
-  (`03 §8`) に従い、`tool_lock_hash` は A.3 の実算出値が注入される。
+  (`03 §8`) に従い、`tool_lock_hash` には**実装の実 tool-lock.json から `03 §5.2` の規約で算出した値**が
+  注入される (WS1a CT-HASH-004 のダミー値からの差分。A.3 は算出規約の fixture であり、実運用値が
+  A.3 の値と一致することは要求しない)。
 - 根拠: `05 §8.1` (契機 2) / `09 §1.1` / `03 §8.1` (commit schema) / WS1a CT-COMMIT-008 (Step 2 ゲートへ移動)。
 
 **CT2-INDEX-003** — P0 — tree 不変なら auto snapshot は no-op
@@ -905,59 +1027,61 @@ fan-out `ab/cd` は raw_hash の digest 先頭 2/次 2 文字 (`bb`/`e1`、`03 �
 ## C. 未定義事項 (spec に無い挙動 — 実装者判断 + 要 spec 追記)
 
 > これらは **憶測で契約化しない**。各テストは「実装が選んだ挙動を固定し決定論性を assert する」に留め、
-> 値の正本化は spec 追記後に行う。**要-spec (Step 2 着手前の追記を強く推奨) は #1〜#4 の 4 件**
-> (いずれも fingerprint / prepared / unit_key / .kcsignore の**決定性**に関わり、artifact identity の
-> 再現性を左右する)。#5 以降は実装者判断で固定し、事後に spec へ反映すれば足りる。
+> 値の正本化は spec 追記後に行う。**要-spec は #1〜#5 の 5 件**。#1〜#4 (いずれも fingerprint /
+> prepared / unit_key / prompt 正規化の**決定性**に関わり、artifact identity の再現性を左右する) は
+> **2026-07-03 に発注側が spec 追記予定** (クロスレビューで妥当性確認済み)。#5 (.kcsignore) は
+> `10 §11` が「追記予定」と明記済みの既知 TODO。#6 以降は実装者判断で固定し、事後に spec へ反映すれば足りる。
+>
+> (r2 注記: 旧 #6「sampling float の JCS 直列化」は spec 未定義ではない (`03 §5.1` が RFC 8785 準拠と
+> 定義済み) と再判定し、本書の計算手段の制約として A 節冒頭の注記へ移設した。以降の番号を繰り上げ。)
 
-1. **page fingerprint の具体アルゴリズム (要-spec, 決定性)** — `04 §2.1` は fingerprint を
+1. **page fingerprint の具体アルゴリズム (要-spec, 決定性。2026-07-03 追記予定)** — `04 §2.1` は fingerprint を
    `(perceptual hash, text hash, visual hash)` の三つ組と定義するが、各 hash の**具体アルゴリズム**
    (どの perceptual hash / visual hash / 正規化・量子化パラメータ) が未定義。fingerprint 一致は
    unit 再利用 (LLM 呼び出し省略) と unit_mapping の分岐を左右するため、実装ごとに揺れると
    incremental の再現性が崩れる。影響: CT2-UNIT-004/006/007。**Step 2 実装の最初の意思決定点**。
 
-2. **prepared_hash のバイト列決定性 (要-spec, 決定性)** — `04 §4.7` / `07 §2` は prepared object を
-   「決定論的 prepare から再構築可能」とするが、PDF page image 等の**レンダリング決定性**
+2. **prepared_hash のバイト列決定性 (要-spec, 決定性。2026-07-03 追記予定)** — `04 §4.7` / `07 §2` は
+   prepared object を「決定論的 prepare から再構築可能」とするが、PDF page image 等の**レンダリング決定性**
    (DPI / レンダラ / フォント埋め込み / 色空間) が未定義。prepared_hash 一致は再利用判定条件の一つ
-   (`04 §2.1`) だが、レンダラ差でバイトが変わると prepared_hash が不一致になる。影響: CT2-UNIT-002/004/012。
+   (`04 §2.1`) だが、レンダラ差でバイトが変わると prepared_hash が不一致になる。影響: CT2-UNIT-002/004/012 /
+   CT2-ADAPTER-011。
 
-3. **unit_key の正準生成規則 (要-spec, 決定性)** — `04 §2` は unit_key を `page:12` / `slide:3` /
-   `sheet:Sheet1` 等と例示するが、page の 0/1-index 起点、sheet 名の正規化 (空白・大文字・重複名)、
+3. **unit_key の正準生成規則 (要-spec, 決定性。2026-07-03 追記予定)** — `04 §2` は unit_key を `page:12` /
+   `slide:3` / `sheet:Sheet1` 等と例示するが、page の 0/1-index 起点、sheet 名の正規化 (空白・大文字・重複名)、
    DOCX/Markdown の heading section の unit_key 生成規則が未定義。unit_key は `unit_ref` 算出
    (`03 §2.1`) と Evidence Pointer の入力なので determinism-critical。影響: CT2-UNIT-001 (ベクタは
    与えられた unit_key 文字列に対しては確定するが、**その文字列をどう作るか**が未定義)。
 
-4. **prompt_template_hash step1 の空白定義と CR 単独の扱い (要-spec, 決定性)** — `03 §5.1` の
-   「trim trailing whitespace per line」の**対象文字集合** (半角空白/タブのみか、`\f`/`\v`/全角空白も含むか)
-   と、CRLF 以外の lone CR (`\r`) を step1/step2 のどちらで処理するかが未定義。A.2 ベクタは
-   「半角空白・タブを行末空白、CRLF を step2 で `\n` 化」の解釈を固定した。影響: CT2-PROFILE-005。
+4. **prompt_template_hash step1 の空白定義と CR 単独の扱い (要-spec, 決定性。2026-07-03 追記予定)** —
+   `03 §5.1` の「trim trailing whitespace per line」の**対象文字集合** (半角空白/タブのみか、`\f`/`\v`/
+   全角空白も含むか) と、CRLF 以外の lone CR (`\r`) を step1/step2 のどちらで処理するかが未定義。
+   A.2 ベクタは「半角空白・タブを行末空白、CRLF を step2 で `\n` 化」の解釈で計算した (spec 追記との
+   一致確認後に確定契約とする — CT2-PROFILE-005 補足)。影響: CT2-PROFILE-005。
 
-5. **.kcsignore の文法仕様 (要-spec)** — `10 §11` が「.kcsignore spec → 03-data-model.md へ追記予定」
-   と**明示的に未統合**と認めている。gitignore 互換か、negation `!pattern` の評価順、Tier A 解除の
-   negation との相互作用が未定義。影響: CT2-APPROVE-005 / CT2-SECRETS-001。
+5. **.kcsignore の文法仕様 (要-spec, 既知 TODO)** — `10 §11` が「.kcsignore spec → 03-data-model.md へ
+   追記予定」と**明示的に未統合**と認めている。gitignore 互換か、negation `!pattern` の評価順・文法詳細が
+   未定義 (negation による Tier A 解除という**操作の存在自体**は `10 §1.1` 規約 2 で定義済み — 未定義なのは
+   文法と評価順のみ)。影響: CT2-APPROVE-005 / CT2-SECRETS-001。
 
-6. **sampling を含む生成 LLM 系 profile の JCS 直列化** — `03 §5.1` の `sampling`
-   (`temperature/top_p/top_k/max_tokens/seed`) に float が入ると RFC 8785 の ECMAScript 数値直列化が
-   必要で、本書 Python 近似ベクタの安全域外。生成 LLM 系 profile の tool_profile_hash ベクタは
-   実装確定後に RFC 8785 準拠実装で固定する。影響: A.1 の適用範囲 (本書は document-API / deterministic のみ)。
-
-7. **incremental 連続回数カウンタの数え方** — `04 §3.1` 条件5 / `03 §11` `max_consecutive` の
+6. **incremental 連続回数カウンタの数え方** — `04 §3.1` 条件5 / `03 §11` `max_consecutive` の
    「直前 N 回連続」が file_id 単位か instance chain 単位か、full を挟んだらリセットされるか、が明示なし。
    `04 §5.7` は「復元不能なら full 強制」とのみ。影響: CT2-INCR-006/007。実装者判断で固定。
 
-8. **task_id / run_id の生成形式** — descriptor 例 (`04 §5.1`) は `task_01H...` / `run_01H...` と ULID を
-   示唆するが、生成規約 (ULID か / 一意性保証 / 衝突時挙動) が明記なし。影響: CT2-TASK-*。実装者判断。
+7. **task_id / run_id の生成形式** — descriptor 例 (`04 §5.1`) は `task_01H...` / `run_01H...` と ULID を
+   示唆するが、生成規約 (ULID か / 一意性保証 / 衝突時挙動) が明記なし。影響: CT2-TASK-* / CT2-TASK-013。実装者判断。
 
-9. **cost-ledger.sqlite の schema** — `04 §5.4` は配置とキー (`scope_id` 付与) を定めるが、テーブル schema
+8. **cost-ledger.sqlite の schema** — `04 §5.4` は配置とキー (`scope_id` 付与) を定めるが、テーブル schema
    (期間集計の粒度、月境界の TZ) が未定義。folder/device cap の集計に影響。影響: CT2-BUDGET-004。実装者判断。
 
-10. **quarantine 解除の記録形式** — `10 §1.1` は quarantine 解除に「対話確認 または .kcsignore 明示編集」を
-    要すると定めるが、解除操作の記録 (誰が/いつ/どのファイル) の形式が未定義。影響: CT2-SECRETS-004。実装者判断。
+9. **quarantine 解除の記録形式** — `10 §1.1` は quarantine 解除に「対話確認 または .kcsignore 明示編集」を
+   要すると定めるが、解除操作の記録 (誰が/いつ/どのファイル) の形式が未定義。影響: CT2-SECRETS-004。実装者判断。
 
-11. **scanned PDF (text layer 無し) の deterministic Adapter 挙動** — `07 §2.1` は deterministic Adapter が
+10. **scanned PDF (text layer 無し) の deterministic Adapter 挙動** — `07 §2.1` は deterministic Adapter が
     「PDF text layer 抽出」を行うとするが、text layer が無い scanned PDF で unit をどう作るか
     (空 unit / skip / pending) が未定義。ベースライン index の被覆に影響。影響: CT2-ADAPTER-001。実装者判断。
 
-12. **Mistral OCR image placeholder の正確な token 形式** — `07 §5.2` 実地検証注記は placeholder 形式に触れるが、
+11. **Mistral OCR image placeholder の正確な token 形式** — `07 §5.2` 実地検証注記は placeholder 形式に触れるが、
     Markdown 内の placeholder token の正確な文字列と kcs:// 置換の対応規則が未明記。影響: CT2-IMAGE-004。実装者判断。
 
 ---
@@ -970,7 +1094,7 @@ fan-out `ab/cd` は raw_hash の digest 先頭 2/次 2 文字 (`bb`/`e1`、`03 �
 | --- | --- |
 | chunk / Embedding の**生成本体** / FTS5 / sqlite-vec | `09 §3.1`: Step 3 (`04 §4`)。本書は embedding の再利用短絡 (CT2-TASK-012, CT2-BUDGET) を **P2 参考**に留め、chunk identity・chunking_config_hash・chunk_fts trigger は対象外 |
 | 検索 (text/vector/hybrid/RRF/MMR/cursor/multi-scope) / `kcs search` / `index_status` | `09 §3.1`: Step 3 (`05 §1`)。CT2-ADAPTER-002 の「text fallback で検索成立」は成立可能性の設計前提としてのみ言及し、検索実体は検証しない |
-| Evidence Pointer の**発行・解決** / `kcs open` / `kcs view` / verify / retarget | `09 §3.1`: Step 3-4 (`08`)。本書は image object の `kcs://object` URI 受理 (CT2-IMAGE-003) と、Evidence Pointer に bbox を載せない契約 (CT2-ADAPTER-004) のみ参照。pointer 解決本体は対象外 |
+| Evidence Pointer の**発行・解決** / `kcs open` / `kcs view` / verify / retarget | `09 §3.1`: Step 3-4 (`08`)。本書は image object の `kcs://object` URI の**生成形式** (CT2-IMAGE-002/003) と、Evidence Pointer に bbox を載せない契約 (CT2-ADAPTER-004) のみ参照。`kcs open` による URI 解決・pointer 解決本体は Step 3 |
 | chunking_config_hash の算出・chunk 世代判定・再 chunk task | `09 §3.1`: Step 3 (`04 §4.6` / `03 §5.3`)。Step 2 の identity は `(raw_hash, tool_profile_hash)` に閉じる |
 | `kcs reindex --force` (gen+1 の新 instance 作成) | `09 §3.1`: Step 3 (`07 §9`)。Step 2 は通常 gen=0 のみ。gen フィールドの**保持・読み取り**は CT2-UNIT/INDEX で確認するが `--force` 経路は張らない |
 | restore / `--at` / `--all-history` / `--include-deleted` / time-travel | `09 §3.1`: Step 4 (`05 §4`) |
@@ -979,19 +1103,18 @@ fan-out `ab/cd` は raw_hash の digest 先頭 2/次 2 文字 (`bb`/`e1`、`03 �
 | 定期 auto snapshot / Downloads watch / OS スケジューラ委譲 / on_idle | `05 §8.2`, `09 §3.1`: Phase 4+。Step 2 の auto 契機は **index 完了時のみ** (CT2-INDEX-002) |
 | 観測ログのうち `metrics.jsonl` / `access.jsonl` | `09 §3.1`: Step 3。Step 2 が新規に依存するのは events/errors (Step 1 で担保済み) + cost-ledger のみ |
 | multimodal embedding profile の**ベンダー実地検証** (次元数/料金/deprecation) | `07 §5.3` リスク注記: Step 2 着手**前**の実地検証タスクであり、契約テストではなく採用判断。緩和 (text 単一 Embedding) 適用時も M3 Done 条件に影響しない |
-| Step 1 で担保済みの CAS / tree / commit / hash 算出 / CLI 7 コマンド / lock | WS1a (`tasks/ws1a-contract-tests.md`) で担保。本書は commit の `tool_lock_hash` を **A.3 の実算出値**で注入する点 (CT2-INDEX-002) のみ Step 1 から差分追加 |
+| Step 1 で担保済みの CAS / tree / commit / hash 算出 / CLI 7 コマンド / lock | WS1a (`tasks/ws1a-contract-tests.md`) で担保。本書は commit の `tool_lock_hash` を**実 tool-lock.json からの算出値**で注入する点 (CT2-INDEX-002。A.3 は算出規約の fixture) のみ Step 1 から差分追加 |
 | export / import (`.kcsz`) / `kcs move` / agent API 外部公開 / MCP | `09 §3.1`: Phase 4-5 (`06 §10`, `05 §6`, `06 §9`) |
 
 ---
 
 ## 集計 (報告用)
 
-- **P0 テスト数**: 49
-  (CT2-PROFILE 6 / CT2-UNIT 5 / CT2-INCR 7 / CT2-ACCEPT 7 / CT2-TASK 4 / CT2-BUDGET 3 /
-   CT2-APPROVE 4 / CT2-SECRETS 4 / CT2-NETWORK 2 / CT2-ADAPTER 2 / CT2-IMAGE 2 / CT2-INDEX 3)
-- **spec 未定義事項**: 12 件 (§C)。うち **要-spec (Step 2 着手前追記推奨) は 4 件**:
+- **P0 テスト数**: 52 (r2: 49 + 新規 3 — CT2-PROFILE-010 / CT2-UNIT-013 / CT2-ADAPTER-013)
+  (CT2-PROFILE 7 / CT2-UNIT 6 / CT2-INCR 7 / CT2-ACCEPT 7 / CT2-TASK 4 / CT2-BUDGET 3 /
+   CT2-APPROVE 4 / CT2-SECRETS 4 / CT2-NETWORK 2 / CT2-ADAPTER 3 / CT2-IMAGE 2 / CT2-INDEX 3)
+- **spec 未定義事項**: 11 件 (§C。r2 で旧 #6 を A 節注記へ移設)。うち **要-spec は 5 件**:
   §C-1 (page fingerprint の具体アルゴリズム)、§C-2 (prepared_hash のレンダリング決定性)、
-  §C-3 (unit_key の正準生成規則)、§C-4 (prompt_template_hash step1 の空白定義と lone CR)。
-  加えて §C-5 (.kcsignore 文法) は `10 §11` が未統合と明記済みの既知 TODO。残り 7 件は実装者判断で固定 → 事後 spec 反映で足りる。
-</content>
-</invoke>
+  §C-3 (unit_key の正準生成規則)、§C-4 (prompt_template_hash step1 の空白定義と lone CR) —
+  以上 4 件は **2026-07-03 に発注側が spec 追記予定** — および §C-5 (.kcsignore 文法、`10 §11` が
+  未統合と明記済みの既知 TODO)。残り 6 件は実装者判断で固定 → 事後 spec 反映で足りる。
