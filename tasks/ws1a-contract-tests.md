@@ -362,7 +362,7 @@ chunk_hash = sha256:8fefa4825444efb1a120df709f45764a9ac074a9a2c0002ee4307baa7bbf
   間接形式ではない)。
 - 根拠: `03 §8.1` (「`HEAD` / `refs/heads/*` / `refs/tags/*` の値は commit_hash」— HEAD 含め直値と定義済み)。
 
-**CT-COMMIT-008** — P0 — commit_type=auto は index 成功完了時に生成される
+**CT-COMMIT-008** — P0 (**Step 2 ゲートへ移動** — 2026-07-03 監査裁定: `kcs index` が Step 2 割当のため Step 1 では原理的に検証不能。4 エンジン監査一致) — commit_type=auto は index 成功完了時に生成される
 - Given: working tree に変更あり。
 - When: `kcs index` 成功完了 (Step 1 の取り込み経路)。
 - Then: 同一プロセス内で `commit_type=auto` の commit が 1 つ作られる (tree 変化時)。
@@ -555,6 +555,7 @@ chunk_hash = sha256:8fefa4825444efb1a120df709f45764a9ac074a9a2c0002ee4307baa7bbf
 - Then: exit 0 (受理してエラーにしない)。不正な duration (例 `--since banana`) は exit 2 (invalid usage)。
 - 根拠: `06 §1` (`kcs log [--at <commit>] [--since <dur>]` 構文) / `05 §1.6` (`--since 7d` の duration 形式) / `06 §7` (exit 2)。
 - 補足: log における `--at` / `--since` の絞り込み意味論は未定義 (§C-9 に併記)。受理契約のみ。
+- **2026-07-03 監査裁定**: Step 1 は発注書暫定判断 #9 (受理して "not implemented" exit 1) を正とし、本ケースの exit 0/2 契約は **Step 4 (--at 実装時) に移行**する。文書間矛盾は本注記で解消。
 
 **CT-CLI-018** — P1 — 非互換 `kcs_format_version` は exit 8
 - Given: `kcs_format_version` が実装より MAJOR で新しい `.kcs`。
