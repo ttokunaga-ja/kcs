@@ -2004,6 +2004,10 @@ fn enqueue_online_placeholder_task(
     //   * Done/Partial (executed) has had its `output_ref` rewritten to the
     //     normalized-instance path, but `execute_online_markdownize_task`
     //     stamps `fallback_reason = "online_adapter_done"`.
+    //   * Failed/Running are also deduped: re-enqueueing a fresh Pending task
+    //     (next_retry_at = None) would bypass the retry backoff gate and cause
+    //     an extra API call. Failed tasks are owned by `kcs batch retry`, which
+    //     honors `next_retry_at` and the per-error retry budget.
     if let Some(existing) = task_store
         .all()
         .map_err(pipeline_to_kcs)?
@@ -2017,7 +2021,7 @@ fn enqueue_online_placeholder_task(
                 TaskStatus::Done | TaskStatus::Partial => {
                     task.fallback_reason.as_deref() == Some("online_adapter_done")
                 }
-                _ => false,
+                TaskStatus::Failed | TaskStatus::Running => task.output_ref == output_ref,
             }
         })
     {
