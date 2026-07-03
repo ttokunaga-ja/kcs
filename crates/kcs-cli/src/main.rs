@@ -3383,6 +3383,10 @@ fn execute_pending_tasks(repo: &Repository, store: &TaskStore) -> Result<usize> 
             }
         }
     }
+    // Embedding tasks are executed by the same enrichment pass `kcs index`
+    // uses; without this, rate-limited Pending embedding tasks could never be
+    // completed by `batch resume` / `batch retry` (opt-in already checked above).
+    executed += run_embedding_enrichment(repo, true)?;
     Ok(executed)
 }
 
@@ -3892,36 +3896,45 @@ struct EmbeddableChunk {
 /// Pending (surfaced by `index_status`). No-op when no embedding adapter is
 /// configured (keeps the default index path unchanged).
 fn generate_scope_embeddings(repo: &Repository, args: &IndexArgs) -> Result<()> {
+    let online = network_allowed(repo, args)?;
+    run_embedding_enrichment(repo, online).map(|_| ())
+}
+
+/// Core enrichment pass shared by `kcs index` (inline) and `kcs batch
+/// resume/retry`. Without the resume path, embedding tasks left Pending by a
+/// rate limit could never complete (`batch resume` only executed Markdownize
+/// tasks). Returns the number of chunks embedded in this pass.
+fn run_embedding_enrichment(repo: &Repository, online: bool) -> Result<usize> {
     let Some(seam) = embedding_seam() else {
-        return Ok(());
+        return Ok(0);
     };
     let profile = declared_embedding_profile(seam)?;
     // Non-multimodal is rejected at materialize_tool_lock; never reach embed here.
     if profile.modality != "multimodal" {
-        return Ok(());
+        return Ok(0);
     }
     let db_path = sqlite_path(repo.kcs_dir());
     if !db_path.exists() {
-        return Ok(());
+        return Ok(0);
     }
     let conn = Connection::open(&db_path).map_err(|err| KcsError::schema(err.to_string()))?;
     let Some(head) = repo.head_commit_hash()? else {
-        return Ok(());
+        return Ok(0);
     };
     let chunking_config_hash = read_chunking_config(repo)?.chunking_config_hash;
     let pending = live_chunks_without_embedding(&conn, &head, &chunking_config_hash)?;
     if pending.is_empty() {
-        return Ok(());
+        return Ok(0);
     }
 
     let task_store = TaskStore::new(repo.kcs_dir());
     let now = now_utc_seconds();
-    let online = network_allowed(repo, args)?;
     enqueue_embedding_tasks(&task_store, repo, &pending, online, &now)?;
     if !online {
         // Offline: tasks stay Pending; `index_status` reports them (05 §1.7).
-        return Ok(());
+        return Ok(0);
     }
+    let mut executed = 0usize;
 
     let cost_ledger = CostLedger::new(cost_ledger_path());
     let budget_caps =
@@ -3966,6 +3979,7 @@ fn generate_scope_embeddings(repo: &Repository, args: &IndexArgs) -> Result<()> 
                     })
                     .map_err(pipeline_to_kcs)?;
                 complete_embedding_tasks(&task_store, batch)?;
+                executed += batch.len();
             }
             Err(failure) => {
                 // Enrichment failure is non-fatal: mark the batch failed and stop
@@ -3975,7 +3989,7 @@ fn generate_scope_embeddings(repo: &Repository, args: &IndexArgs) -> Result<()> 
             }
         }
     }
-    Ok(())
+    Ok(executed)
 }
 
 /// Embed one batch: reuse an existing content vector where possible

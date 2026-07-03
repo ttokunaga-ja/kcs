@@ -1446,3 +1446,42 @@ fn pointer_for_path<'a>(search: &'a Value, path: &str) -> &'a Value {
         .map(|result| &result["evidence_pointer"])
         .unwrap_or_else(|| panic!("no search result for {path}"))
 }
+
+#[test]
+fn ct3_embed_009_batch_retry_and_resume_execute_pending_embedding_tasks() {
+    // 2026-07-04 実運用で発見した gap の回帰ガード: rate limit で Pending に
+    // 積まれた embedding タスクは、`batch retry`/`resume` の executor が
+    // Markdownize 専用だったため永遠に実行されなかった。retry → (seam 回復) →
+    // 実行完了までを検証する。
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("a.md"), "# メモ\n回収率のテスト。\n").unwrap();
+    kcs(&dir, &["init"]).assert().success();
+    json_success_embed(&dir, "rate_limit", &["index", "--approve"]);
+
+    let status = json_success_embed(&dir, "rate_limit", &["status"]);
+    let failed = status["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|t| t["type"] == "embedding" && t["status"] == "failed")
+        .count();
+    assert!(
+        failed > 0,
+        "rate_limit seam should leave failed embedding tasks"
+    );
+
+    // seam が回復した状態で retry → executor が embedding を実行し done になる
+    let retry = json_success_embed(&dir, "mock", &["batch", "retry"]);
+    assert!(
+        retry["tasks_executed"].as_u64().unwrap() > 0,
+        "retry must execute pending embedding tasks, got {retry}"
+    );
+    let status = json_success_embed(&dir, "mock", &["status"]);
+    let tasks = status["tasks"].as_array().unwrap();
+    let emb: Vec<_> = tasks.iter().filter(|t| t["type"] == "embedding").collect();
+    assert!(!emb.is_empty());
+    assert!(
+        emb.iter().all(|t| t["status"] == "done"),
+        "all embedding tasks must be done after retry"
+    );
+}
