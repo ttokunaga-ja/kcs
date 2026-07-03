@@ -395,9 +395,7 @@ mod tests {
         assert!(!wrong_dims.matches_adopted().unwrap());
     }
 
-    use crate::fts::{
-        FtsIndex, FtsSchemaConfig, FtsTokenizer, SqliteFtsIndex, CHUNK_VEC_DIMENSIONS,
-    };
+    use crate::fts::{FtsSchemaConfig, FtsTokenizer, SqliteFtsIndex, CHUNK_VEC_DIMENSIONS};
     use crate::ChunkRow;
     use rusqlite::Connection;
 

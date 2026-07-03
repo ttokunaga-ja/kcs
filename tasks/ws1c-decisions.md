@@ -64,3 +64,14 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     (multiple registry entries for one scope_id sharing the newest `last_seen_at`); the candidate
     list is returned in `context.candidates`. Both codes follow the 06 §8 DOMAIN namespace; adding
     them to the docs' example list is deferred to the next docs edit window.
+33. New error code for the 08 §3.2 retarget contract (Step3c re-audit fix).
+    `KCS-E-EVIDENCE-RETARGET-REQUIRED-001` (exit 8, per 06 §7 "tool_profile_hash 不一致で chunk
+    解決不能 (retarget 要) は 8") is returned by `kcs open` / `kcs view` when the pointer's scope,
+    commit, and raw_hash all resolve (and no tombstone applies) but no chunk row exists for the
+    pointer's `chunk_hash` — 08 §3.2: "tool_profile_hash 不一致: chunk が存在しない場合は retarget
+    が必要 (§5)". `context` carries `{chunk_hash, tool_profile_hash, raw_hash}`. The check does not
+    require tree-entry profile equality (Step-1 raw-only trees carry no `normalize` ref; an
+    existing chunk row is self-certifying because `chunk_hash` commits to its `tool_profile_hash`).
+    08 §5 names no code and 06 §8's list is examples ("例:"), so an EVIDENCE-domain code is minted
+    here; docs sync is deferred to the next docs edit window. `kcs evidence retarget` itself
+    remains Step 4.
