@@ -9,6 +9,14 @@
 > ID 体系・ベクタの書き方・§C の未定義リストの扱い方・§D の除外リストを踏襲する。
 > chunk 段の identity ベクタ (ws1a A.5, step2a §D で P2 参考に据え置かれたもの) は本書で実 Step 3 の
 > 確定契約へ昇格する (CT3-CHUNK-001 が ws1a A.5 と再計算一致することを確認済み)。
+>
+> 改訂 r2 (2026-07-03): Codex クロスレビュー反映。既存ベクタは全件再計算一致につき不変 (chunk_hash の
+> ws1a 整合 / RRF 全行 / MMR 算術 / URI 往復)。誤引用・過剰契約 4 件を修正 (CT3-EVIDENCE-001 の
+> 必須/optional を 08 §2.1/§2.2 に厳密整合、A.5 に relevance スケール注記 + §C-3 新設、A.2 に fixture
+> 注記 + EMB-2 追加、CT3-OBS-002 の per-search 記録 schema を §C-4 要-spec 化)。カバレッジ 3 件を
+> 追加/昇格 (CT3-EVIDENCE-009 eval 結合点、CT3-CHUNK-012 rebuild end-to-end を P0 昇格、
+> CT3-MULTI-008 `--all-scopes`)。§C は stale の「eval/ 未存在」項を削除し 9 件に再編 (要-spec 4 件)。
+> §D 末尾に Step 3 Done gate (M3-1 の 18 クエリ + P0 全緑 / M3-2・M3-3 の Recall 判定は Step 4) を明記。
 
 対象クレート (Step 3): `kcs-index` + `kcs-search`
 実装範囲の正本: `docs/09-mvp-scope.md §3.1` の **Step 3 行** —
@@ -100,12 +108,30 @@ chunk_hash = sha256:ae2198890a11cac4a7853728d1ada4dd95e88086ec094e139ecbc6498450
 
 ### A.2 embedding_hash ベクタ (`03 §8.1` embedding identity)
 
-`target_hash` は A.1 CHUNK-1 の chunk_hash、`profile_hash` は step2a PROFILE-3 の embedding profile
-(`sha256:c2bda78e...7226`)。緩和適用時の `modality="text"` ケース:
+> **fixture と契約の分離 (r2)** (step2a A 節冒頭注記と同じ規約): 本節の profile 値は**算出規約 (hash 公式)
+> を検証するための入力 fixture** であり、実装が採用する実 embedding profile の契約では**ない**。
+> EMB-1 の profile_hash (step2a PROFILE-3、multimodal / 1536 次元) を `modality="text"` と組むのは
+> hash 公式の検証用の流用であり、text-only 緩和 (`07 §5.3`、2026-07-03 適用済み) の**正本 profile 値では
+> ない**。EMB-2 は緩和適用後に近い text profile (gemini-embedding-001 / 768 / cosine / text) の fixture
+> だが、これもベンダー裏取り済み値ではない (`07 §5.3` の例示と同じ扱い)。契約は「この入力ならこの hash」
+> の算出関数固定のみで、実運用 profile がこれらの値と一致することは要求しない。
+
+**EMB-1 (step2a PROFILE-3 の profile_hash × modality=text)** — hash 公式 fixture。
+`target_hash` は A.1 CHUNK-1 の chunk_hash:
 
 ```text
 canonical: {"dimensions":1536,"distance":"cosine","modality":"text","profile_hash":"sha256:c2bda78e217e1f9e12cd17ddac6c46e28a50b8060976f533f76f14193a807226","spec_version":1,"target_hash":"sha256:8fefa4825444efb1a120df709f45764a9ac074a9a2c0002ee4307baa7bbfe15a","target_type":"chunk"}
 embedding_hash = sha256:4af13668332498f223787967c0f26e2e41d3425bbe5d657a2db1a7d27c56ba8c
+```
+
+**EMB-2 (text-only 緩和ベースの text profile fixture)** — profile も `03 §5.1` の規約で実算出:
+
+```text
+profile canonical: {"adapter_kind":"embedding","adapter_role":"text","dimensions":768,"distance":"cosine","modality":"text","model_or_tool_family":"gemini-embedding","model_version_pin":"gemini-embedding-001","runtime_kind":"cloud","spec_version":1}
+tool_profile_hash = sha256:08c93195a941c64c82cf3bbc7503583da98e98ed9e524e1f1bb7b35b5b7bb20f
+
+embedding canonical (target_hash = CHUNK-1): {"dimensions":768,"distance":"cosine","modality":"text","profile_hash":"sha256:08c93195a941c64c82cf3bbc7503583da98e98ed9e524e1f1bb7b35b5b7bb20f","spec_version":1,"target_hash":"sha256:8fefa4825444efb1a120df709f45764a9ac074a9a2c0002ee4307baa7bbfe15a","target_type":"chunk"}
+embedding_hash = sha256:728cd198fba608cc4d559339581446ffab2d4c961e3ebea15cf8c5f4d36ed8c5
 ```
 
 `vector` (BLOB 実体) は identity 入力に含めない (identity は target + profile + modality/dim/distance のみ、`03 §8.1`)。
@@ -174,13 +200,21 @@ similarity: sim(c1,c2)=0.95  sim(c1,c3)=0.30  sim(c1,c4)=0.20
 relevance 3 位の c3 (0.78) / 4 位の c4 (0.60) より後ろに落ちる。これが「同一原文の隣接 chunk が
 上位を独占する」問題 (`05 §1.4`) の回避を示す。MMR score の同点は RRF 順、さらに同点は chunk_id 昇順 (`05 §1.4`)。
 
+> **relevance スケールの注記 (r2)**: `05 §1.4` は `relevance(c) = RRF_score(c)` と定めるが、`05 §1.3` の
+> RRF_score は最大 ~2/61 ≈ 0.033 (k=60、両側 1 位) のスケールであり、本表の relevance (0.60〜0.90) を
+> 生の RRF_score が取ることはない。similarity (cosine ∈ [-1,1]) と直接混合するには relevance の正規化が
+> 必要だが、その正規化・スケール規則は spec 未定義 (**§C-3、要-spec — 発注側 spec 追記予定**)。本表は
+> 「正規化後の relevance」と仮定した**算術検証用 fixture** であり、選択則の算術 (λ 混合 / max-sim 罰則 /
+> 決定論 / 同点規則) のみを固定する。生スケールのまま実装すると `(1-λ)·sim` 項が支配して relevance が
+> ほぼ無視される — spec 追記後に実スケールで再ベクタ化する。
+
 ### A.6 Evidence Pointer URI 往復ベクタ (`08 §2.3`)
 
 `05 §1.7` 例と同形の完全 JSON pointer (optional 全部入り) を URI 化 → 再 parse する。
 URI は**必須フィールドのみ** (`scope_id / commit / raw_hash / tool_profile_hash / chunk_hash [+ ?sv]`)。
 
 ```text
-JSON (完全形, 12 フィールド):
+JSON (完全形, 13 フィールド):
   schema_version, commit, tree, raw_hash, tool_profile_hash, chunk_hash,
   path_at_commit, heading_path, section_id, char_start, char_end, scope_id, scope_path
 
@@ -295,21 +329,30 @@ URI → JSON (必須フィールドのみ復元, sv 省略 = 1):
   hash で **chunk_hash 入力に含めない**。`chunk_id` (SQLite PK) = `chunk_hash` と同一文字列。
 - 根拠: `03 §8` chunk schema / `03 §8.1` (text_hash 非包含) / `04 §4.1` (`chunk_id` = `chunk_hash`)。
 
-**CT3-CHUNK-012** — P1 — chunks / FTS / embeddings は rebuild-db で objects/ から再導出
-- Given: `.kcs/index/sqlite.db` を消去し `kcs repair --rebuild-db`。
-- When: 再構築。
-- Then: normalized instance から chunks / embeddings / FTS index を再導出する。真実は objects/。
-- 根拠: `04 §4` 冒頭 (「真実は objects/、SQLite は再構築可能」) / `04 §5.7` (復元範囲に chunks/embeddings/FTS)。
-- 補足: `kcs repair --rebuild-db` コマンド枠は step2a CT2-TASK-010 で担保済み。本書は chunk/FTS/embedding の
-  **再導出内容** が Step 3 artifact として一致することを追加検証する。
+**CT3-CHUNK-012** — P0 (r2 で P1→P0 昇格) — rebuild-db end-to-end: sqlite.db 消去 → 再構築 → 検索結果等価
+- Given: chunk / embedding / FTS / tree_entries 構築済みの scope。検索クエリ Q の確定順序
+  (results / evidence_pointer) を記録してから `.kcs/index/sqlite.db` を消去。
+- When: `kcs repair --rebuild-db` → 同一クエリ Q を再実行。
+- Then: (a) chunks / embeddings / FTS index が normalized instance から再導出される。
+  (b) `chunk_vec` は `objects/ → embeddings → chunk_vec` の順で再構築される。
+  (c) `tree_entries` は HEAD commit 分が再構築される (他 commit 分は `--at` 時の再展開 = Step 4)。
+  (d) クエリ Q の検索結果 (確定順序・evidence_pointer) が消去前と**等価**。真実は objects/。
+- 根拠: `04 §4` 冒頭 (「真実は objects/、SQLite は再構築可能」) / `04 §5.7` (復元範囲に chunks/embeddings/FTS) /
+  `04 §4.3` (embeddings → chunk_vec の再構築順) / `04 §4.5` (「kcs repair --rebuild-db は HEAD 分のみ再構築」) /
+  `05 §1.4-1.5` (決定論的確定順序 — 同一 chunk 集合 + 同一設定なら同一結果)。
+- 補足: `kcs repair --rebuild-db` コマンド枠は step2a CT2-TASK-010 で担保済み。本書は Step 3 artifact の
+  再導出と検索等価性を end-to-end で追加検証する。
 
 ### CT3-EMBED-* — embedding identity / 互換性 / fallback (`03 §7, §8.1` / `04 §4.3, §5.5` / `07 §5.3`)
 
 **CT3-EMBED-001** — P0 — embedding_hash の算出 (vector BLOB 非包含)
-- Given: A.2 の identity タプル (target_type=chunk, target_hash=CHUNK-1, profile/modality/dim/distance)。
+- Given: A.2 EMB-1 / EMB-2 の identity タプル (target_type=chunk, target_hash=CHUNK-1, profile/modality/dim/distance)。
 - When: `JCS → sha256`。
-- Then: canonical バイト列が A.2 と一致し、`embedding_hash = sha256:4af13668…ba8c`。`vector` BLOB 実体は入力外。
-- 根拠: `03 §8.1` (embedding identity hash)。
+- Then: canonical バイト列が A.2 と一致し、EMB-1 は `embedding_hash = sha256:4af13668…ba8c`、
+  EMB-2 は `sha256:728cd198…d8c5` (profile fixture の `tool_profile_hash = sha256:08c93195…b20f` 込み)。
+  `vector` BLOB 実体は入力外。
+- 根拠: `03 §8.1` (embedding identity hash) / `03 §5.1` (EMB-2 profile fixture の算出規約)。
+- 補足: A.2 冒頭注記のとおり profile 値は算出規約 fixture であり、実運用 profile の契約ではない。
 
 **CT3-EMBED-002** — P0 — 互換性不一致で vector 検索拒否 → text fallback
 - Given: query embedding profile と index 側 embedding の `dimensions`/`distance`/`modality`/`profile_hash`
@@ -380,7 +423,7 @@ URI → JSON (必須フィールドのみ復元, sv 省略 = 1):
 - Then: 単語境界に依らず部分一致でヒットする (trigram は 3-gram 索引)。
 - 根拠: `04 §4.2` (「Tokenizer: デフォルト trigram (CJK 対応)」)。
 - 補足: 2 文字クエリは trigram の最小 gram 長 (3) を下回るため索引効率が落ちる境界ケース。firm 契約は
-  3 文字以上の CJK 部分一致とし、2 文字挙動は実装依存 (§C-6)。tokenizer 切替 (`unicode61`) は
+  3 文字以上の CJK 部分一致とし、2 文字挙動は実装依存 (§C-7)。tokenizer 切替 (`unicode61`) は
   `[search.fts]` config (`04 §4.2`)。
 
 **CT3-FTS-004** — P0 — FTS index は rebuild-db で chunks から再構築
@@ -448,6 +491,8 @@ URI → JSON (必須フィールドのみ復元, sv 省略 = 1):
 - Then: 各 step の MMR score が A.5 と一致し、確定順序 `c1, c3, c4, c2`。relevance 2 位 c2 は c1 との
   near-duplicate (sim 0.95) 罰則で後退する。
 - 根拠: `05 §1.4` (MMR 選択則 `score(c)=λ·rel-(1-λ)·max sim` / `relevance(c)=RRF_score(c)`)。
+- 補足 (r2): A.5 の relevance は「正規化後」と仮定した算術検証 fixture。生 RRF_score のスケール (~1/61)
+  との正規化規則は §C-3 (要-spec)。similarity の関数選択は §C-6。spec 追記後に実スケールで再ベクタ化する。
 
 **CT3-MMR-002** — P0 — MMR 決定性 (同入力で確定順序が常に同一)
 - Given: 同一の候補集合・query・設定。
@@ -571,20 +616,35 @@ URI → JSON (必須フィールドのみ復元, sv 省略 = 1):
 - Then: p95 < 5 秒を満たす。これは MVP の性能保証前提であり、数百 scope 超は保証外 (`--scope` 絞り込み /
   `participates_in_global_search=false` を案内)。
 - 根拠: `05 §1.8` (性能目標の前提) / `09 §4.1` (M3-1 p95 < 5 秒 / 20 scopes / 10 万 chunk) / `09 §4.3` (Recall 規約)。
-- 補足: 実 latency は環境依存のため CI では合成コーパス (`09 §4.3` synthetic, `eval/golden-queries.jsonl`) で
-  計測する。本テストは「計測対象構成と閾値」を契約として固定し、実測は eval ハーネスに委ねる (§C-4 / §D)。
+- 補足 (r2): **機能契約と性能契約を分離する**。eval/ の合成コーパス (305 ファイル / 7 scopes、
+  `eval/corpus_spec.py`) は Recall 判定用であり、この性能前提 (20 scopes / 10 万 chunk) を測れない。
+  **性能 fixture は別途 Step 3 後半に合成拡張スクリプトで生成**する。本テストは「計測対象構成と閾値」を
+  契約として固定し、実測はその性能 fixture + metrics.jsonl (CT3-OBS-002) に委ねる。
+
+**CT3-MULTI-008** — P1 (r2 新設) — `--all-scopes` の受理と対象範囲
+- Given: scope_registry に複数 scope。カレントディレクトリは特定 scope 内。
+- When: `kcs search "..." --all-scopes`。
+- Then: フラグを受理し、全 indexed scope を対象として横断検索する (デフォルト = 全 indexed scope 横断
+  `06 §3` と同一の対象列挙)。`searched_scopes` に対象 scope を全列挙する。
+- 根拠: `06 §3` (`--all-scopes` 構文 / デフォルトは全 indexed scope 横断) / `05 §1.8` (列挙規則)。
+- 補足: `--all-scopes` とデフォルトの差分意味論 (`participates_in_global_search=false` の scope を含めるか)
+  は spec 未定義 (§C-8 に併記)。本テストは受理と「全 indexed scope 対象」のみ assert し、差分は実装決定を
+  固定して決定論性を assert する。
 
 ### CT3-EVIDENCE-* — Evidence Pointer 発行・解決 (`08 §2, §3` / `05 §1.7`)
 
 **CT3-EVIDENCE-001** — P0 — 検索結果に必須フィールド全部 + evidence_uri を発行
 - Given: hybrid 検索がヒット chunk を返す。
 - When: 各 result の `evidence_pointer` / `evidence_uri` を検査。
-- Then: 必須フィールド `schema_version / commit / raw_hash / tool_profile_hash / chunk_hash / scope_id`
-  を全て持ち (充足率 100%)、optional の `commit`/`tree`/`path_at_commit`/`heading_path`/`char_start`/
-  `char_end`/`section_id`/`scope_path` を伴う。`evidence_uri` は §2.3 正規テキスト形で、そのまま
-  `kcs open`/`kcs view` に渡せる。M3-1 の「commit + raw_hash + chunk_hash + heading_path + span」を満たす。
-- 根拠: `08 §2.1` (必須フィールド) / `08 §2.2` (optional) / `05 §1.7` (レスポンス schema / evidence_uri /
-  evidence_pointer をそのまま埋め込む) / `09 §4.1` (Evidence 必須フィールド充足率 100%) / `09 §M3-1`。
+- Then: `08 §2.1` の**必須 6 フィールド** `schema_version / commit / raw_hash / tool_profile_hash /
+  chunk_hash / scope_id` を全て持つ (充足率 100%)。加えて**検索発行の pointer** は `heading_path` /
+  `char_start` / `char_end` を持つ (M3-1 完了条件「Evidence Pointer に commit + raw_hash + chunk_hash +
+  heading_path + span」)。`tree` / `path_at_commit` / `section_id` / `scope_path` は optional (`08 §2.2`)
+  であり、存在を必須 assert しない (存在する場合は §2 schema に整合すること)。`evidence_uri` は
+  §2.3 正規テキスト形で、そのまま `kcs open`/`kcs view` に渡せる。
+- 根拠: `08 §2.1` (必須 6 フィールド) / `08 §2.2` (optional — 必須化しない) / `05 §1.7` (レスポンス schema /
+  evidence_uri / evidence_pointer をそのまま埋め込む) / `09 §4.1` (Evidence 必須フィールド充足率 100%) /
+  `09 §M3-1` (heading_path + span は検索発行 pointer の完了条件)。
 
 **CT3-EVIDENCE-002** — P0 — live chunk の evidence_pointer.commit = snapshot_at (HEAD)
 - Given: HEAD snapshot で live な chunk。
@@ -645,6 +705,19 @@ URI → JSON (必須フィールドのみ復元, sv 省略 = 1):
 - When: 解決。
 - Then: エラーなく必須フィールドで解決 (未知フィールドは無視)。
 - 根拠: `08 §8` (「新 schema は古い解決ロジックでもエラーなく扱える (forward compatible) … 未知フィールドは無視」)。
+
+**CT3-EVIDENCE-009** — P0 (r2 新設) — eval 結合点: raw_hash / section_id は results[].evidence_pointer から読む
+- Given: `kcs search --json` の結果と、eval ハーネス (`eval/run_eval.py`) の Recall@10 判定。
+- When: eval ハーネスが上位 10 件の distinct `(raw_hash, section)` を数える。
+- Then: `results[]` の各要素は top-level に `chunk_hash / evidence_pointer / evidence_uri / score /
+  scope_path` を持ち (`05 §1.7` の例と同形)、`raw_hash` / `section_id` / `heading_path` は
+  **`results[].evidence_pointer` (`08 §2` 準拠) の内側から読める**。eval ハーネスは evidence_pointer から
+  `(raw_hash, section_id ?? heading_path 末尾)` を読み出せる (top-level の raw_hash に依存しない)。
+- 根拠: `05 §1.7` (results[] schema — raw_hash は evidence_pointer 内にのみ定義 / 「evidence_pointer は
+  08 §2 の schema をそのまま埋め込む」) / `08 §2` / `09 §4.3` (Recall@10 = distinct (raw_hash, section))。
+- 補足: `eval/run_eval.py` は evidence_pointer 経由の読み出しに修正済み (2026-07-03、eval 側修正は発注側)。
+  本テストは search 側 schema と eval 側読み出しの**結合点**を固定し、schema 変更による Recall 計測の
+  silent 破壊を防ぐ。
 
 ### CT3-URI-* — URI 正規形と受理規則 (`08 §2.3`)
 
@@ -761,18 +834,21 @@ URI → JSON (必須フィールドのみ復元, sv 省略 = 1):
 - Then: `index_status = { enriched_ratio, pending_enrichment_tasks, budget_paused }` を返す
   (enriched_ratio < 1.0 のときのみ必須)。人間向けは「AI 強化 42% (budget により一時停止中)」の 1 行に翻訳。
 - 根拠: `05 §1.7` (index_status / enriched_ratio < 1.0 のとき必須 / 人間向け翻訳) / `09 §3.1` (index_status = Step 3)。
-- 補足: `enriched_ratio` の分子分母定義 (何を「強化済み」と数えるか) は spec 未定義 (§C-3)。本テストは
+- 補足: `enriched_ratio` の分子分母定義 (何を「強化済み」と数えるか) は spec 未定義 (§C-5)。本テストは
   「部分 index 時に index_status を返し done/pending/paused を隠さない」ことのみ assert。
 
-**CT3-OBS-002** — P0 — metrics.jsonl に検索 latency を記録 (M3 計測の前提)
-- Given: `kcs search` を実行。
+**CT3-OBS-002** — P0 (§C-4 の spec 追記待ち — assert 形は追記後に確定) — metrics.jsonl 経由で検索 latency が M3 計測可能
+- Given: `kcs search` を複数回実行。
 - When: `~/.local/share/kcs/logs/metrics.jsonl` を読む。
 - Then: 数値メトリクス行が記録され、各行は JSON 必須フィールド `ts, level, code, component, message, context`
-  を持つ。`ts` は UTC ISO8601+Z。latency (M3-1 の p95 計測に必要) が context に含まれる。
-- 根拠: `05 §7` (metrics.jsonl) / `06 §13` (必須フィールド / timestamp) / `09 §3.1` (metrics.jsonl = Step 3、
-  M3 の latency 計測に必要) / `09 §4.1` (Latency p50/p95/p99)。
-- 補足: metric 名 / latency 記録粒度の schema は spec 未定義 (§C-3)。本テストは「search が latency を
-  metrics.jsonl に記録する」ことと必須フィールド形式のみ assert。
+  を持つ (`ts` は UTC ISO8601+Z)。検索 latency が p50/p95/p99 (`09 §4.1`) を算出可能な形で記録される。
+- 根拠: `05 §7` (metrics.jsonl = 数値メトリクス) / `06 §13` (必須フィールド / timestamp) / `09 §3.1`
+  (「観測ログ metrics.jsonl / access.jsonl (M3 の latency 計測に必要)」= Step 3)。
+- 補足 (r2): `05 §7` の metrics.jsonl は「デフォルト 1h 間隔」の集計メトリクスであり、**per-search の
+  latency 記録は現行 spec に無い** (per-search 記録を firm 契約にするのは過剰契約)。一方 M3 の p95 計測には
+  per-search 粒度 (または全検索を被覆する集計) が必要 — 記録粒度・metric 名・単位は **§C-4 (要-spec、
+  発注側が 05 §7 に追記予定)**。本テストは「latency が metrics.jsonl 経由で M3 計測可能」という存在契約
+  のみ先行して固定し、schema の assert は spec 追記後に確定する。
 
 **CT3-OBS-003** — P0 — access.jsonl に検索アクセスを記録 (redact_logs 既定 true)
 - Given: `kcs search`。
@@ -781,7 +857,7 @@ URI → JSON (必須フィールドのみ復元, sv 省略 = 1):
   フィールドをマスクする。行は JSON 必須フィールド `ts, level, code, component, message, context` を持つ。
 - 根拠: `05 §7` (access.jsonl / redact_logs 既定 true) / `06 §13` (必須フィールド / redact_logs) / `09 §3.1`
   (access.jsonl = Step 3)。
-- 補足: access.jsonl の記録フィールド詳細 (どのフィールドを残すか) は spec 未定義 (§C-3)。
+- 補足: access.jsonl の記録フィールド詳細 (どのフィールドを残すか) は spec 未定義 (§C-5)。
 
 **CT3-OBS-004** — P1 — 検索の fallback / excluded を隠さない (AI Agent 保証)
 - Given: fallback (text 落ち) / excluded_scopes ありの検索。
@@ -796,53 +872,66 @@ URI → JSON (必須フィールドのみ復元, sv 省略 = 1):
 ## C. 未定義事項 (spec に無い挙動 — 実装者判断 + 要 spec 追記)
 
 > これらは **憶測で契約化しない**。各テストは「実装が選んだ挙動を固定し決定論性を assert する」に留め、
-> 値の正本化は spec 追記後に行う。**要-spec は #1〜#2 の 2 件** (いずれも chunk 段の決定性 / cursor validity に
-> 関わり、chunk_hash = Evidence Pointer identity の再現性を左右する)。#3 以降は実装者判断で固定し、
-> 事後に spec へ反映すれば足りる。
+> 値の正本化は spec 追記後に行う。**要-spec は #1〜#4 の 4 件** (#1/#2 は chunk 段の決定性 / cursor validity、
+> #3/#4 は r2 で新設 — MMR relevance スケールと per-search latency 記録。いずれも **2026-07-03 に発注側が
+> spec 追記予定**)。#5 以降は実装者判断で固定し、事後に spec へ反映すれば足りる。
 >
 > (注記: Step 2 で 2026-07-03 に確定した unit_key 正準生成 (`04 §2`)・page fingerprint (`04 §2.1`)・
 > prompt_template_hash step1-2 (`03 §5.1`) は本書では前提として扱い、§C に再掲しない。)
+>
+> (r2 注記: 旧 #4「latency 計測ハーネスと eval コーパス」は stale につき削除 — `eval/` は 2026-07-03 に
+> コミット済み (`eval/golden-queries.jsonl` M3-1: 18 / M3-2: 16 / M3-3: 16 件、合成コーパス 305 ファイル /
+> 7 scopes)、宿題 #5 (`09 §5.5`) は decided。eval 整合は CT3-EVIDENCE-009 / CT3-MULTI-007 補足 / §D の
+> Done gate に移した。旧 #3 の metrics 部分を #4 へ分離昇格し、#3 (MMR relevance) を新設。
+> 旧 #5〜#8 は #6〜#9 へ繰り上げ、#8 に `--all-scopes` 差分を併合。)
 
-1. **chunk 境界の決定性 (要-spec, 決定性)** — `03 §11` は `strategy="heading"` / `max_chars=6000` を定めるが、
-   Step 3 の chunk 段で (a) `heading_path` の導出規則 (どの heading level を親に積むか / 正規化)、
-   (b) `section_id` の生成規則 (heading_path からの slug 化か / 別採番か)、(c) max_chars 超過 section の
-   分割規則 (`char_start`/`char_end` の落ち方 / 分割境界) が未定義。これらは **chunk_hash の入力**
-   (`03 §8.1`) であり、実装ごとに揺れると chunk identity = Evidence Pointer の永続性 (`08 §6`) が崩れる。
-   影響: CT3-CHUNK-004 / CT3-CHUNK-001 (ベクタは与えられた identity タプルには確定するが、**その
-   heading_path / section_id / span をどう作るか**が未定義)。**Step 3 実装の最初の意思決定点**。
+1. **chunk 境界の決定性 (要-spec, 決定性。2026-07-03 spec 追記済み (04 §4.1 chunk 境界 / 05 §1.4 MMR relevance / 05 §1.8 query_hash / 05 §7 per-search metrics))** — `03 §11` は
+   `strategy="heading"` / `max_chars=6000` を定めるが、Step 3 の chunk 段で (a) `heading_path` の導出規則
+   (どの heading level を親に積むか / 正規化)、(b) `section_id` の生成規則 (heading_path からの slug 化か /
+   別採番か)、(c) max_chars 超過 section の分割規則 (`char_start`/`char_end` の落ち方 / 分割境界) が未定義。
+   これらは **chunk_hash の入力** (`03 §8.1`) であり、実装ごとに揺れると chunk identity = Evidence Pointer
+   の永続性 (`08 §6`) が崩れる。影響: CT3-CHUNK-004 / CT3-CHUNK-001 (ベクタは与えられた identity タプルには
+   確定するが、**その heading_path / section_id / span をどう作るか**が未定義)。**Step 3 実装の最初の意思決定点**。
 
-2. **query_hash の正準入力構成 (要-spec, cursor validity)** — `05 §1.8` は query_hash を
-   「query + mode + diversify 設定の hash」と定めるが、厳密な canonical form (含めるキー: `k` /
+2. **query_hash の正準入力構成 (要-spec, cursor validity。2026-07-03 spec 追記済み (04 §4.1 chunk 境界 / 05 §1.4 MMR relevance / 05 §1.8 query_hash / 05 §7 per-search metrics))** — `05 §1.8` は
+   query_hash を「query + mode + diversify 設定の hash」と定めるが、厳密な canonical form (含めるキー: `k` /
    `candidate_depth` / `w_text`/`w_vector` / `mmr_lambda` / `scope_mode` を含むか、JCS か) が未定義。
    query_hash は cursor の誤用検出 (`KCS-E-SEARCH-CURSOR-001`) の基盤であり、含めるキーが実装で揺れると
-   「同一クエリ扱い」の境界が変わる。影響: CT3-CURSOR-003。実装者が固定し spec へ追記推奨。
+   「同一クエリ扱い」の境界が変わる。影響: CT3-CURSOR-003。
 
-3. **観測ログの metric / index_status / access schema** — (a) `index_status.enriched_ratio` の分子分母
-   (何を「強化済み」と数えるか: Markdownize done? embedding done? chunk indexed?)、(b) `metrics.jsonl` の
-   metric 名と latency 記録粒度、(c) `access.jsonl` の記録フィールドと redact 対象、が未定義 (`05 §1.7` /
-   `06 §13` は行の必須フィールドと存在のみ規定)。影響: CT3-OBS-001/002/003。実装者判断で固定。
+3. **MMR relevance の正規化・スケール (要-spec, r2 新設。2026-07-03 spec 追記済み (04 §4.1 chunk 境界 / 05 §1.4 MMR relevance / 05 §1.8 query_hash / 05 §7 per-search metrics))** — `05 §1.4` は
+   `relevance(c) = RRF_score(c)` と定めるが、RRF_score のスケール (~1/61) と similarity (cosine ∈ [-1,1])
+   では桁が 1 桁以上異なり、生のまま `λ·rel - (1-λ)·sim` に代入すると sim 項が支配して relevance がほぼ
+   無視される。relevance の正規化 (min-max / rank ベース等) の規則が未定義。影響: A.5 / CT3-MMR-001
+   (現ベクタは「正規化後の relevance」と仮定した算術検証 fixture — spec 追記後に実スケールで再ベクタ化)。
 
-4. **latency 計測ハーネスと eval コーパス** — `09 §4.1` は M3-1 p95 < 5 秒 / 20 scopes / 10 万 chunk を
-   定め、`09 §4.3` は synthetic コーパス + `eval/golden-queries.jsonl` を Done 判定の正本とするが、
-   本リポジトリに `eval/` はまだ存在しない (2026-07-03 時点)。計測ハーネスの実装形態・fixture script は
-   Step 3 着手前に整備予定 (`09 §5.5` #5 draft)。影響: CT3-MULTI-007。契約テストは「閾値と対象構成」を
-   固定し、実測は eval ハーネスに委ねる。**eval ハーネスが並行整備される場合は §4.3 の規約 (Recall@10 >= 0.8 /
-   scenario 15 件以上 / expected は {scope,file,section} 分離形式) と整合させること**。
+4. **per-search latency の metrics.jsonl 記録 schema (要-spec, r2 新設。発注側が 05 §7 に追記予定)** —
+   `05 §7` の metrics.jsonl は「数値メトリクス (デフォルト 1h 間隔)」の集計であり、per-search の latency
+   記録は現行 spec に無い。一方 `09 §3.1` は metrics.jsonl を「M3 の latency 計測に必要」として Step 3 に
+   割り当て、`09 §4.1` は p50/p95/p99 を求める — per-search 粒度 (または全検索を被覆する集計) と
+   metric 名・単位・記録粒度の追記が必要。影響: CT3-OBS-002 (存在契約のみ先行、assert 形は追記後に確定) /
+   CT3-MULTI-007 (性能実測の記録基盤)。
 
-5. **MMR similarity 関数の選択規則** — `05 §1.4` は `similarity = vector cosine, または heading_path /
+5. **index_status / access.jsonl の詳細 schema** — (a) `index_status.enriched_ratio` の分子分母 (何を
+   「強化済み」と数えるか: Markdownize done? embedding done? chunk indexed?)、(b) `access.jsonl` の
+   記録フィールドと redact 対象の詳細、が未定義 (`05 §1.7` / `06 §13` は行の必須フィールドと存在のみ規定)。
+   影響: CT3-OBS-001/003。実装者判断で固定。
+
+6. **MMR similarity 関数の選択規則** — `05 §1.4` は `similarity = vector cosine, または heading_path /
    section_id の Jaccard` と「または」で列挙するが、vector 利用可能時に cosine を使うか Jaccard を使うか、
    embedding 不可時の切替が未定義。影響: CT3-MMR-001 (ベクタは与えた類似度行列には確定するが、**実データで
    どの similarity を使うか**が未定義)。実装者判断で固定 (vector 検索成立時は cosine が自然)。
 
-6. **trigram の 2 文字 CJK クエリ挙動** — `04 §4.2` は trigram (3-gram) を定めるが、gram 長 (3) 未満の
+7. **trigram の 2 文字 CJK クエリ挙動** — `04 §4.2` は trigram (3-gram) を定めるが、gram 長 (3) 未満の
    2 文字 CJK クエリで索引を使うか linear scan に落ちるかが未定義。影響: CT3-FTS-003。実装者判断
    (firm 契約は 3 文字以上の部分一致)。
 
-7. **`kcs reindex` のオペランド範囲** — `06 §1` は `kcs reindex [--force] [--at <commit>]` の構文を示すが、
-   対象 (path 指定 / scope 全体 / 特定 raw_hash) の既定が未定義。`--at` は time-travel 系につき Step 4 寄り
-   (§D)。影響: CT3-REINDEX-*。実装者判断。
+8. **CLI オペランド・フラグの細部** — (a) `kcs reindex [--force] [--at <commit>]` (`06 §1`) の対象
+   (path 指定 / scope 全体 / 特定 raw_hash) の既定が未定義 (`--at` は time-travel 系につき Step 4 寄り、§D)。
+   (b) `--all-scopes` (`06 §3`) とデフォルト (全 indexed scope 横断) の差分意味論
+   (`participates_in_global_search=false` を含めるか) が未定義。影響: CT3-REINDEX-* / CT3-MULTI-008。実装者判断。
 
-8. **embeddings の vector BLOB シリアライズ形式** — `04 §4.3` は `vector BLOB` / `chunk_vec FLOAT[<dim>]` を
+9. **embeddings の vector BLOB シリアライズ形式** — `04 §4.3` は `vector BLOB` / `chunk_vec FLOAT[<dim>]` を
    定めるが、float 精度 (f32/f64) / endianness / 正規化の有無が未定義。sqlite-vec 依存の実装詳細。
    影響: CT3-EMBED-001 (identity は BLOB 非包含なので identity には影響しないが、再現性検証に関わる)。実装者判断。
 
@@ -871,13 +960,24 @@ URI → JSON (必須フィールドのみ復元, sv 省略 = 1):
 | CAS / tree / commit / hash 算出 / CLI 7 コマンド / lock | Step 1 (ws1a) で担保。Step 3 は commit の tree entry 射影 (tree_entries) を読むが tree/commit 生成は Step 1 |
 | `kcs search` と書き込み系の lock 相互作用 (`kcs index` と `kcs search` 同時実行 / rebuild 中の search) | `05 §6` (search は lock 取得しない / rebuild 中は旧 db or `KCS-E-INDEX-REBUILDING-001`) は横断契約。search が読み取り系で lock を取らない点は ws1a CT-LOCK-003 の延長で担保。`KCS-E-INDEX-REBUILDING-001` は rebuild-db (Step 2 枠) 実行中の search 挙動につき P2 参考に留め本書では固定しない |
 
+**Step 3 の Done gate (r2 で整理)**: eval ハーネス (`eval/run_eval.py`) のフル実行は M3-2 (`--all-history`) /
+M3-3 (`--include-deleted`) のクエリを含むが、これらのフラグは Step 4 実装 (`09 §3.1`)。したがって
+**Step 3 の完了判定 = 「M3-1 の 18 クエリ (`eval/golden-queries.jsonl` の scenario=M3-1) で
+Recall@10 >= 0.8」+「本書 P0 全緑」** とし、M3-2 / M3-3 の Recall 判定は Step 4 完了時に行う
+(`09 §4.3` の Done 条件は Phase 3 完成時 = Step 4 完了後の全シナリオ判定)。M3-1 の p95 < 5 秒 (性能契約)
+は機能契約と分離し、性能 fixture (20 scopes / 10 万 chunk、Step 3 後半に合成拡張スクリプトで生成) で
+計測する (CT3-MULTI-007 補足)。
+
 ---
 
 ## 集計 (報告用)
 
-- **P0 テスト数**: 57 (総テスト数 74: P0 57 / P1 17)
-  (CT3-CHUNK 10 / CT3-EMBED 4 / CT3-FTS 4 / CT3-HYBRID 6 / CT3-MMR 4 / CT3-CURSOR 5 / CT3-MULTI 5 /
-   CT3-EVIDENCE 6 / CT3-URI 3 / CT3-OPEN 4 / CT3-REINDEX 3 / CT3-OBS 3)
-- **spec 未定義事項**: 8 件 (§C)。うち **要-spec は 2 件**: §C-1 (chunk 境界の決定性 — heading_path 導出 /
-  section_id 生成 / max_chars 分割。chunk_hash = Evidence Pointer identity の再現性を左右)、
-  §C-2 (query_hash の正準入力構成 — cursor validity の基盤)。残り 6 件は実装者判断で固定 → 事後 spec 反映で足りる。
+- **P0 テスト数**: 59 (総テスト数 76: P0 59 / P1 17)
+  (CT3-CHUNK 11 / CT3-EMBED 4 / CT3-FTS 4 / CT3-HYBRID 6 / CT3-MMR 4 / CT3-CURSOR 5 / CT3-MULTI 5 /
+   CT3-EVIDENCE 7 / CT3-URI 3 / CT3-OPEN 4 / CT3-REINDEX 3 / CT3-OBS 3)
+  (r2: 57 + CT3-EVIDENCE-009 新設 + CT3-CHUNK-012 P1→P0 昇格。CT3-MULTI-008 は P1 新設)
+- **spec 未定義事項**: 9 件 (§C。r2 で stale の「eval/ 未存在」を削除、2 件を新設)。うち **要-spec は 4 件**:
+  §C-1 (chunk 境界の決定性 — heading_path 導出 / section_id 生成 / max_chars 分割。chunk_hash = Evidence
+  Pointer identity の再現性を左右)、§C-2 (query_hash の正準入力構成 — cursor validity の基盤)、
+  §C-3 (MMR relevance の正規化・スケール)、§C-4 (per-search latency の metrics.jsonl 記録 schema) —
+  いずれも **2026-07-03 に発注側が spec 追記予定**。残り 5 件は実装者判断で固定 → 事後 spec 反映で足りる。
