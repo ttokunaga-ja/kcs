@@ -79,3 +79,58 @@ grep 検証: kcs-pipeline / kcs-adapter の主要関数に非テスト呼び出�
 ```
 
 ブランチ `step2c-impl` に追加コミット。完了後、発注側が再監査 (4 エンジン) を実施する。
+
+---
+
+# 再監査ラウンド 2 の裁定 (2026-07-03、commit 70e9c07 に対して)
+
+判定: **fix-required 4/4 (継続)**。ただし前回と質が異なる — F2 は全会一致で解消、F5/F6/F7 の骨格も
+実機再現で解消確認 (Sonnet は 7 シナリオの実機再現を実施)。前回の根本欠陥 (pipeline 未結線・
+インライン直書き) は解消した。残るのは以下 G1-G9。
+
+## 裁定メモ (報告の誠実性)
+
+`EnvMistralOcrClient` は「intentionally disabled」と書かれた常時エラー実装であり、報告の
+「Mistral OCR adapter seam、model pin、画像 CAS を実装」は**実体を伴わない** (HTTP 依存ゼロ、
+persist_images の呼び出し元ゼロ、pin 解決は "-latest"→"mistral-ocr-2505" の固定文字列置換)。
+前回裁定メモの「NotImplemented 置換による検出回避」がまさに再演された。次回の完了報告では
+**未実装の箇所を未実装と明記**すること。
+
+## 必須修正 G1-G9
+
+- **G1 [critical] budget cap の実効化** (4/4、Sonnet/Opus が実機立証): read_budget_caps の独自キー
+  (device_monthly_usd_cap 等) は schema で拒否され、spec の正キーは読まれない → cap が構造的に無効。
+  修正: device cap = `~/.config/kcs/config.toml` (XDG 対応) の `[budget] monthly_usd_cap`、
+  folder cap = `.kcs/config.toml` の `[budget] monthly_usd_cap` を読む (04 §5.4 / 03 §11 準拠、
+  schema 変更不要)。CLI 経由の cap=0 → pause テストを追加
+- **G2 [critical] incremental の実体化** (4/4): map_units を index 経路に結線し、previous instance の
+  復元・IncrementalHints の実算 (change_rate / consecutive / raw_hash_only_changed) で
+  `MarkdownizeRequest.previous/hints` を充填。deterministic は incremental 非対応で正しいので、
+  検証にはテスト用 incremental 対応 adapter を注入するフックを実装 (方式は decisions に記録)
+- **G3 [critical] mistral HTTP の実装**: ureq (rustls) 等を追加し EnvMistralOcrClient を実装 (キー
+  未設定は明示エラー)。pin はモデル一覧 API で解決 (固定文字列置換の廃止、07 §6)。
+  **persist_images を markdownize 実経路で呼ぶ** (現状 kcs:// URI が全て dangling)。複数画像の
+  bbox/confidence metadata (現状 first() のみ)
+- **G4 [major] task executor の実装** (Sonnet: TaskStatus::Running 使用箇所ゼロ): pending task を
+  実行して Done/Failed/Partial へ遷移させる経路が存在しない。batch resume に executor ループを実装
+- **G5 [major] 受け入れ検査違反 → full 1 回自動再投入** (04 §3.2。validate Err の `?` 伝播を修正)
+- **G6 [major] PDF ページ単位抽出** (Sonnet 実機: 2 ページ PDF で両ページが同一 markdown になる実バグ)
+- **G7 [major] .kcsignore の `**` 対応** (Sonnet 実機: `**/*.log` が no-op)
+- **G8 [major] opt-in の仕上げ**: (a) revoke 後の `--online` が opt-in を復活させる抜け穴 (Sonnet 実機)、
+  (b) revoke 機構を 07 §3 の `adapter.policy.allow_network` config と整合させる (独自 sentinel file を
+  廃止 or 併記)、(c) `--online` が初回スキャン承認を迂回しないことを確認・修正 (GPT-5.5 指摘、
+  承認と opt-in は独立)。`--revoke-network` フラグの 06 §1 正本登録は意味論確定後に発注側が行う
+- **G9 [major] テスト実体化の完遂**: CT2-INCR-008 (G2 後に CLI で full/incremental 両生成し identity
+  実比較 — 現状は同一引数比較の常真)、CT2-ACCEPT-007 (CLI 経由で違反 → persist されない + full
+  再投入を assert)、INCR/ACCEPT/BUDGET 系 P0 の CLI 結合化、CT2-ADAPTER-013 の CLI 経由化、
+  quarantine.jsonl の重複 append 修正
+
+minor (可能なら): markdownize_units 残骸の削除 or 結線、root-relative の secrets 判定
+(.kube/config 等)、device/folder spent のループ内再計算。
+
+## 受け入れ条件 (G ラウンド)
+
+前回条件に加え: 実機シナリオ (a) cap=0 で index → task が paused、(b) 2 ページ PDF で
+ページ別 markdown、(c) `**/*.ext` ignore が機能、(d) revoke 後 --online で送信されない、
+(e) 軽微変更の再 index が (mock incremental adapter で) mode=incremental になる — を
+結合テストとして含めること。
