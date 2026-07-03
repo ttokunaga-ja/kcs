@@ -671,6 +671,7 @@ dependencies = [
  "rusqlite",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
  "toml",
 ]
@@ -698,6 +699,7 @@ dependencies = [
  "serde_jcs",
  "serde_json",
  "sha2",
+ "sqlite-vec",
  "tempfile",
  "thiserror",
  "unicode-normalization",
@@ -1203,6 +1205,15 @@ name = "smallvec"
 version = "1.15.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8ed6a63f02c8539c91a8685a86f4099661ba3da017932f6ebbea6de3f0fa7c90"
+
+[[package]]
+name = "sqlite-vec"
+version = "0.1.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4ec77b84fb8dd5f0f8def127226db83b5d1152c5bf367f09af03998b76ba554a"
+dependencies = [
+ "cc",
+]
 
 [[package]]
 name = "stable_deref_trait"

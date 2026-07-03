@@ -70,17 +70,118 @@ fn indexed_scope() -> TempDir {
     dir
 }
 
+// K4 embedding seam helpers: run `kcs` with the deterministic Gemini mock
+// (`KCS_TEST_GEMINI_EMBED`), the CLI-side counterpart of `KCS_TEST_MISTRAL_OCR`.
+fn json_success_embed(dir: &TempDir, embed: &str, args: &[&str]) -> Value {
+    let output = kcs(dir, args)
+        .env("KCS_TEST_GEMINI_EMBED", embed)
+        .arg("--json")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    serde_json::from_slice(&output).unwrap()
+}
+
+fn json_failure_embed(dir: &TempDir, embed: &str, args: &[&str], code: i32) -> Value {
+    let output = kcs(dir, args)
+        .env("KCS_TEST_GEMINI_EMBED", embed)
+        .arg("--json")
+        .assert()
+        .code(code)
+        .get_output()
+        .stderr
+        .clone();
+    serde_json::from_slice(&output).unwrap()
+}
+
+fn run_embed_path(path: &Path, data_home: &Path, embed: &str, args: &[&str]) -> Value {
+    let output = Command::cargo_bin("kcs")
+        .unwrap()
+        .current_dir(path)
+        .env("XDG_CONFIG_HOME", data_home.join("config"))
+        .env("XDG_DATA_HOME", data_home.join("data"))
+        .env("KCS_TEST_GEMINI_EMBED", embed)
+        .args(args)
+        .arg("--json")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    serde_json::from_slice(&output).unwrap()
+}
+
+/// The `indexed_scope` fixture indexed with a configured embedding adapter.
+fn indexed_scope_embed(embed: &str) -> TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(
+        dir.path().join("auth.md"),
+        "# 認証仕様\n\n## API Token\nトークン TTL は 3600 秒です。\n\n## Scopes\nスコープは read write admin です。\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.path().join("ranking.md"),
+        "# 検索ランキング\n\n## RRF 融合\nRRF の定数 k=60 を使います。\n\n## MMR 多様化\nMMR の係数 lambda 0.7 で多様化します。\n",
+    )
+    .unwrap();
+    kcs(&dir, &["init"]).assert().success();
+    json_success_embed(&dir, embed, &["index", "--approve"]);
+    dir
+}
+
+fn chunk_hash_set(search: &Value) -> std::collections::BTreeSet<String> {
+    search["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|result| result["chunk_hash"].as_str().unwrap().to_owned())
+        .collect()
+}
+
 fn first_result(search: &Value) -> &Value {
     &search["results"].as_array().unwrap()[0]
 }
 
+// CT3-HYBRID-001 (scenario (d)): with a configured, compatible embedding index,
+// auto resolves to hybrid, RRF fuses text+vector, MMR runs on real embeddings, and
+// the fallback fields are clean.
 #[test]
-fn ct3_hybrid_002_auto_vector_unavailable_falls_back_visibly() {
-    let dir = indexed_scope();
-    let search = json_success(&dir, &["search", "トークン TTL 3600"]);
+fn ct3_hybrid_001_auto_resolves_to_hybrid_with_rrf_fusion() {
+    let dir = indexed_scope_embed("mock");
+    let hybrid = json_success_embed(&dir, "mock", &["search", "認証仕様 トークン"]);
+    assert_eq!(hybrid["requested_mode"], "auto");
+    assert_eq!(hybrid["resolved_mode"], "hybrid");
+    assert_eq!(hybrid["fallback"], false);
+    assert!(hybrid["fallback_reason"].is_null());
+    // MMR ran on real embeddings — impossible in text-only, which reports
+    // "group_by_raw_hash" (the K2 honesty fix). This is the vector-supply proof.
+    assert_eq!(hybrid["diversify"]["strategy"], "mmr");
+    // Vector recall contributes candidates the text backend never matched: the
+    // hybrid result set is a strict superset of the text-only set (RRF fusion —
+    // the order/content genuinely changes vs text alone).
+    let text = json_success_embed(&dir, "mock", &["search", "認証仕様 トークン", "--text"]);
+    let hybrid_set = chunk_hash_set(&hybrid);
+    let text_set = chunk_hash_set(&text);
+    assert!(
+        hybrid_set.len() > text_set.len(),
+        "hybrid must add vector-only candidates"
+    );
+    assert!(text_set.iter().all(|chunk| hybrid_set.contains(chunk)));
+}
+
+// CT3-HYBRID-002 (de-tautologized): the embedding endpoint IS configured at search
+// time (mock), but this scope was indexed offline with no embeddings, so auto
+// resolves to text and reports the fallback visibly.
+#[test]
+fn ct3_hybrid_002_auto_vector_configured_but_absent_falls_back_visibly() {
+    let dir = indexed_scope(); // indexed without an embedding adapter → no vectors
+    let search = json_success_embed(&dir, "mock", &["search", "トークン TTL 3600"]);
     assert_eq!(search["requested_mode"], "auto");
     assert_eq!(search["resolved_mode"], "text");
     assert_eq!(search["fallback"], true);
+    assert!(search["fallback_reason"].is_string());
     assert_eq!(search["error_code"], "KCS-E-SEARCH-VEC-UNAVAIL-001");
 }
 
@@ -97,10 +198,35 @@ fn ct3_hybrid_006_text_mode_uses_text_rank_without_fusion() {
     );
 }
 
+// CT3-EMBED-002 (de-tautologized): a genuinely incompatible embedding profile in
+// the index. auto → text fallback with INCOMPAT; --vector → hard error INCOMPAT
+// (does not fall back, distinct from UNAVAIL).
 #[test]
-fn ct3_embed_002_vector_only_without_index_is_an_error() {
+fn ct3_embed_002_incompatible_profile_falls_back_or_errors() {
+    let dir = indexed_scope_embed("incompatible_profile");
+    let auto = json_success_embed(
+        &dir,
+        "incompatible_profile",
+        &["search", "トークン TTL 3600"],
+    );
+    assert_eq!(auto["resolved_mode"], "text");
+    assert_eq!(auto["fallback"], true);
+    assert_eq!(auto["error_code"], "KCS-E-SEARCH-VEC-INCOMPAT-001");
+    let err = json_failure_embed(
+        &dir,
+        "incompatible_profile",
+        &["search", "トークン", "--vector"],
+        1,
+    );
+    assert_eq!(err["error_code"], "KCS-E-SEARCH-VEC-INCOMPAT-001");
+}
+
+// CT3-EMBED-007: --vector with no embedding index at all is a hard error (UNAVAIL,
+// not a fallback). Distinct code from the incompatible case above.
+#[test]
+fn ct3_embed_007_vector_only_without_index_is_an_error() {
     let dir = indexed_scope();
-    let err = json_failure(&dir, &["search", "トークン", "--vector"], 1);
+    let err = json_failure_embed(&dir, "mock", &["search", "トークン", "--vector"], 1);
     assert_eq!(err["error_code"], "KCS-E-SEARCH-VEC-UNAVAIL-001");
 }
 
@@ -570,8 +696,11 @@ fn ct3_multi_005_all_failed_returns_exit_4() {
     assert_eq!(err["error_code"], "KCS-E-SEARCH-SCOPE-ALL-FAILED-001");
 }
 
+// CT3-EMBED-003 (de-tautologized): cross-scope embedding profiles disagree — scope
+// a has a compatible embedding index, scope b an incompatible one. The cross-scope
+// search must merge on text only and record the fallback (05 §1.8(5) / 03 §7).
 #[test]
-fn ct3_embed_003_all_scope_vector_incompatibility_falls_back_to_text_merge() {
+fn ct3_embed_003_cross_scope_incompatibility_falls_back_to_text_merge() {
     let parent = tempfile::tempdir().unwrap();
     let data_home = parent.path().join("xdg");
     let a = parent.path().join("a");
@@ -580,13 +709,54 @@ fn ct3_embed_003_all_scope_vector_incompatibility_falls_back_to_text_merge() {
     fs::create_dir_all(&b).unwrap();
     fs::write(a.join("a.md"), "# A\n\n## One\nalpha 111\n").unwrap();
     fs::write(b.join("b.md"), "# B\n\n## Two\nbeta 222\n").unwrap();
-    json_success_path(&a, &data_home, &["init"]);
-    json_success_path(&b, &data_home, &["init"]);
-    json_success_path(&a, &data_home, &["index", "--approve"]);
-    json_success_path(&b, &data_home, &["index", "--approve"]);
-    let search = json_success_path(&a, &data_home, &["search", "beta 222", "--all-scopes"]);
+    run_embed_path(&a, &data_home, "mock", &["init"]);
+    run_embed_path(&b, &data_home, "mock", &["init"]);
+    // a: compatible embeddings; b: incompatible embeddings.
+    run_embed_path(&a, &data_home, "mock", &["index", "--approve"]);
+    run_embed_path(
+        &b,
+        &data_home,
+        "incompatible_profile",
+        &["index", "--approve"],
+    );
+    let search = run_embed_path(
+        &a,
+        &data_home,
+        "mock",
+        &["search", "beta 222", "--all-scopes"],
+    );
     assert_eq!(search["resolved_mode"], "text");
     assert_eq!(search["fallback"], true);
+    assert!(search["fallback_reason"].is_string());
+    // The cross-scope text merge still returns b's content.
+    assert!(!search["results"].as_array().unwrap().is_empty());
+}
+
+// CT3-EMBED-008 / scenario (e): a non-multimodal embedding profile is rejected at
+// `kcs index` (tool-lock materialize) with KCS-E-EMBED-MODALITY-001 and exit 2 —
+// no embeddings are written.
+#[test]
+fn ct3_embed_modality_non_multimodal_profile_is_rejected_at_index() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("a.md"), "# A\n\n## One\nalpha 111\n").unwrap();
+    kcs(&dir, &["init"]).assert().success();
+    let err = json_failure_embed(&dir, "non_multimodal", &["index", "--approve"], 2);
+    assert_eq!(err["error_code"], "KCS-E-EMBED-MODALITY-001");
+}
+
+// CT3-EMBED-005: `repair --rebuild-db` re-derives chunk_vec from the preserved
+// `embeddings` rows (source of truth), so hybrid vector search survives the
+// rebuild rather than falling back to text.
+#[test]
+fn ct3_embed_005_rebuild_db_preserves_vector_search() {
+    let dir = indexed_scope_embed("mock");
+    let before = json_success_embed(&dir, "mock", &["search", "認証仕様 トークン"]);
+    assert_eq!(before["resolved_mode"], "hybrid");
+    json_success_embed(&dir, "mock", &["repair", "--rebuild-db"]);
+    let after = json_success_embed(&dir, "mock", &["search", "認証仕様 トークン"]);
+    assert_eq!(after["resolved_mode"], "hybrid");
+    assert_eq!(after["fallback"], false);
+    assert_eq!(after["diversify"]["strategy"], "mmr");
 }
 
 #[test]

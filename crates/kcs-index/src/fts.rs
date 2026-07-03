@@ -40,12 +40,16 @@ pub struct SqliteFtsIndex {
 
 impl SqliteFtsIndex {
     pub fn open(path: impl AsRef<std::path::Path>, config: FtsSchemaConfig) -> Result<Self> {
+        // The `vec0` module must be registered before the connection opens, else
+        // the `chunk_vec` virtual table cannot be created or queried (04 §4.3).
+        crate::vec::ensure_registered();
         let conn = Connection::open(path)?;
         ensure_schema_on_connection(&conn, config)?;
         Ok(Self { conn })
     }
 
     pub fn in_memory(config: FtsSchemaConfig) -> Result<Self> {
+        crate::vec::ensure_registered();
         let conn = Connection::open_in_memory()?;
         ensure_schema_on_connection(&conn, config)?;
         Ok(Self { conn })
@@ -158,11 +162,6 @@ pub fn ensure_schema_on_connection(conn: &Connection, config: FtsSchemaConfig) -
             distance TEXT NOT NULL,
             profile_hash TEXT NOT NULL
         );
-        CREATE TABLE IF NOT EXISTS chunk_vec (
-            embedding_id TEXT PRIMARY KEY,
-            chunk_id TEXT NOT NULL,
-            vector BLOB NOT NULL
-        );
         CREATE TABLE IF NOT EXISTS tree_entries (
             commit_hash TEXT NOT NULL,
             path TEXT NOT NULL,
@@ -201,8 +200,24 @@ pub fn ensure_schema_on_connection(conn: &Connection, config: FtsSchemaConfig) -
         END;
         "#
     ))?;
+
+    // `chunk_vec` is a sqlite-vec `vec0` virtual table (04 §4.3): the KNN
+    // acceleration layer derived from the `embeddings` table. Fixed at the adopted
+    // profile's 768 dimensions / cosine distance (07 §5.3). Since our stored and
+    // query vectors are L2-normalized, cosine distance ordering is exact.
+    crate::vec::ensure_registered();
+    conn.execute_batch(&format!(
+        "CREATE VIRTUAL TABLE IF NOT EXISTS chunk_vec USING vec0(
+            chunk_id TEXT PRIMARY KEY,
+            embedding float[{CHUNK_VEC_DIMENSIONS}] distance_metric=cosine
+        );"
+    ))?;
     Ok(())
 }
+
+/// Adopted embedding dimensionality (07 §5.3 / 03 §7). `chunk_vec` is fixed to
+/// this width; incompatible-width embeddings never reach vector search.
+pub const CHUNK_VEC_DIMENSIONS: usize = 768;
 
 #[cfg(test)]
 mod tests {

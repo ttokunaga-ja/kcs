@@ -7,17 +7,20 @@ use std::time::Instant;
 
 use clap::{Args, Parser, Subcommand};
 use kcs_adapter::deterministic::{deterministic_prepare_profile_value, DeterministicAdapter};
+use kcs_adapter::gemini_embedding::{
+    GeminiEmbeddingAdapter, GeminiEmbeddingClient, ADOPTED_DIMENSIONS, ADOPTED_MODEL_PIN,
+};
 use kcs_adapter::identity::tool_profile_hash;
 use kcs_adapter::mistral_ocr::{
     EnvMistralOcrClient, MistralOcrClient, MistralOcrMarkdownizeAdapter, OcrImage, OcrPage,
     OcrResponse,
 };
 use kcs_adapter::tool_lock::{load_tool_lock, validate_tools_toml};
-use kcs_adapter::traits::MarkdownizeAdapter;
+use kcs_adapter::traits::{EmbeddingAdapter, MarkdownizeAdapter};
 use kcs_adapter::types::{
-    AdapterKind, AdapterProfile, ExecutionMode, MarkdownUnit,
-    MarkdownizeMode as AdapterMarkdownizeMode, MarkdownizeRequest, PreparedUnitHint,
-    PreviousMarkdownizeContext, RawInput, UnitKind,
+    AdapterKind, AdapterProfile, EmbeddingInputType, EmbeddingItem, EmbeddingRequest,
+    EmbeddingVector, ExecutionMode, MarkdownUnit, MarkdownizeMode as AdapterMarkdownizeMode,
+    MarkdownizeRequest, PreparedUnitHint, PreviousMarkdownizeContext, RawInput, UnitKind,
 };
 use kcs_core::cas::is_hash;
 use kcs_core::dag::NormalizeRef;
@@ -28,9 +31,14 @@ use kcs_core::{ExitCode, KcsError, Result};
 use kcs_index::chunking::{
     chunk_normalized_instance, ChunkingConfig, ChunkingInput, NormalizedUnitInput,
 };
-use kcs_index::fts::{FtsIndex, FtsSchemaConfig, FtsTokenizer, SqliteFtsIndex};
+use kcs_index::embedding_store::{self, adopted_embedding_profile_hash, f32_to_le_bytes};
+use kcs_index::fts::{
+    FtsIndex, FtsSchemaConfig, FtsTokenizer, SqliteFtsIndex, CHUNK_VEC_DIMENSIONS,
+};
 use kcs_index::registry::{RegistryDb, RegistryEntry};
-use kcs_index::{ChunkRow, TreeEntryRow};
+use kcs_index::{
+    ChunkRow, EmbeddingDistance, EmbeddingModality, EmbeddingTargetType, TreeEntryRow,
+};
 use kcs_pipeline::budget::{
     estimate_local_baseline_cost, evaluate_budget_with_caps, read_budget_policy, utc_month,
     BudgetCapKind, BudgetCaps, BudgetEstimate, CostLedger, MonthlyCostLedgerEntry,
@@ -62,6 +70,7 @@ use kcs_search::rrf::{fuse_rrf, BackendRank, RrfConfig};
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 
 // clap のパースエラーは exit code 2 で終了する。これは docs/06-cli-spec.md §7 の
 // invalid usage (= 2) と一致するため、そのまま採用する。
@@ -200,6 +209,9 @@ struct UnsupportedArgs {
 }
 
 fn main() {
+    // Register the sqlite-vec `vec0` module before any connection opens, so
+    // `chunk_vec` is available process-wide (04 §4.3, K4).
+    kcs_index::vec::ensure_registered();
     let cli = Cli::parse();
     let json = cli.json || command_captured_json_flag(&cli.command);
     let exit_code = match run(cli) {
@@ -448,6 +460,9 @@ fn run_index(args: IndexArgs) -> Result<Value> {
         )?;
     }
     rebuild_step3_index(&repo)?;
+    // Generate chunk embeddings behind the online opt-in / budget / cost-ledger
+    // guardrails (K4). No-op unless an embedding adapter is configured.
+    generate_scope_embeddings(&repo, &args)?;
     // The scope now has a search index; register it as indexed so it participates
     // in default multi-scope search (05 §1.8, K3). Cache write, never fatal.
     register_scope(&repo, true);
@@ -527,10 +542,9 @@ fn run_repair(args: UnsupportedArgs) -> Result<Value> {
     let repo = Repository::open_current()?;
     validate_repo_tool_lock(&repo)?;
     let db = repo.kcs_dir().join("index/sqlite.db");
-    if db.exists() {
-        fs::remove_file(&db)
-            .map_err(|err| KcsError::io(err.to_string(), db.display().to_string()))?;
-    }
+    // `rebuild_sqlite_index` drops and rebuilds chunks/FTS/tree_entries in place
+    // while preserving the `embeddings` rows and re-deriving `chunk_vec` from them
+    // (04 §4.3). It is not pre-deleted here so vector search survives the rebuild.
     let report = rebuild_step3_index(&repo)?;
     Ok(json!({
         "status": "rebuilt",
@@ -549,30 +563,84 @@ struct ResolvedMode {
     error_code: Option<String>,
 }
 
-/// Vector backend availability (the K4 embedding seam). Until embeddings are
-/// wired, this is always `Unavailable` — but the mode-resolution and RRF plumbing
-/// treats it uniformly so K4 only has to change this one function.
-#[allow(dead_code)]
+/// Vector backend availability across the searched scopes (the K4 embedding
+/// seam, now live). Resolved from the actual per-scope embedding state and query
+/// embedding availability (03 §7 / 05 §1.1).
 enum VectorAvailability {
-    /// Every searched scope has a compatible embedding index (K4).
+    /// Every searched scope has a compatible embedding index and a query
+    /// embedding is obtainable → hybrid is offered.
     Available,
-    /// No embedding index present.
+    /// No usable embedding index (endpoint not configured, or every scope lacks
+    /// chunk embeddings) → text.
     Unavailable,
-    /// Embedding present but the profile is incompatible (03 §7).
+    /// Embedding present but the profile is incompatible, or scopes disagree on
+    /// embedding profile (03 §7 / 05 §1.8(5)) → text fallback + fallback_reason.
     Incompatible,
 }
 
-/// K4 seam: aggregate embedding availability across the searched scopes. Vector
-/// search is only offered when every scope has a compatible embedding index
-/// (03 §7). Always `Unavailable` in Step3c.
-fn resolve_vector_availability() -> VectorAvailability {
-    VectorAvailability::Unavailable
+/// One scope's chunk-embedding disposition (03 §7 compat).
+enum ScopeEmbedState {
+    Compatible,
+    Incompatible,
+    Absent,
 }
 
-/// K4 seam: per-scope vector ranks from the chunk_vec KNN backend. Always `None`
-/// (text-only) until embeddings land.
-fn vector_ranks_for_scope() -> Result<Option<Vec<BackendRank>>> {
-    Ok(None)
+/// Inspect a scope's `sqlite.db` for compatible chunk embeddings (03 §7). A read
+/// failure or missing DB is treated as `Absent` (never a vector-search error —
+/// text is always available). The extension is registered in `main`.
+fn scope_embedding_state(kcs_dir: &Path) -> ScopeEmbedState {
+    let db = sqlite_path(kcs_dir);
+    if !db.exists() {
+        return ScopeEmbedState::Absent;
+    }
+    let Ok(conn) = Connection::open(&db) else {
+        return ScopeEmbedState::Absent;
+    };
+    let Ok(profiles) = embedding_store::chunk_embedding_profiles(&conn) else {
+        return ScopeEmbedState::Absent;
+    };
+    if profiles.is_empty() {
+        return ScopeEmbedState::Absent;
+    }
+    if profiles
+        .iter()
+        .all(|profile| profile.matches_adopted().unwrap_or(false))
+    {
+        ScopeEmbedState::Compatible
+    } else {
+        ScopeEmbedState::Incompatible
+    }
+}
+
+/// K4: aggregate embedding availability across the searched scopes. Vector search
+/// is offered only when a query embedding is obtainable AND every searched scope
+/// has a compatible embedding index (03 §7). Any incompatible scope, or a mix of
+/// embedded and un-embedded scopes (cross-scope inconsistency, 05 §1.8(5)),
+/// downgrades to a text fallback that surfaces `fallback_reason`.
+fn resolve_vector_availability(
+    exec_scopes: &[ExecScope],
+    query_embedding_present: bool,
+) -> VectorAvailability {
+    if !query_embedding_present {
+        return VectorAvailability::Unavailable;
+    }
+    let mut any_compatible = false;
+    let mut any_incompatible = false;
+    let mut any_absent = false;
+    for exec in exec_scopes {
+        match scope_embedding_state(&exec.target.kcs_dir) {
+            ScopeEmbedState::Compatible => any_compatible = true,
+            ScopeEmbedState::Incompatible => any_incompatible = true,
+            ScopeEmbedState::Absent => any_absent = true,
+        }
+    }
+    if any_incompatible || (any_compatible && any_absent) {
+        VectorAvailability::Incompatible
+    } else if any_compatible {
+        VectorAvailability::Available
+    } else {
+        VectorAvailability::Unavailable
+    }
 }
 
 fn resolve_search_mode(requested: SearchMode, vector: &VectorAvailability) -> Result<ResolvedMode> {
@@ -606,11 +674,14 @@ fn resolve_search_mode(requested: SearchMode, vector: &VectorAvailability) -> Re
                     error_code: None,
                 })
             } else {
-                // --vector with no vector backend is a hard error (05 §1.2).
+                // --vector with no usable vector backend is a hard error (05 §1.2);
+                // the code distinguishes "unavailable" from "incompatible" (03 §7).
                 Err(KcsError::new(
-                    "KCS-E-SEARCH-VEC-UNAVAIL-001",
+                    error_code
+                        .as_deref()
+                        .unwrap_or("KCS-E-SEARCH-VEC-UNAVAIL-001"),
                     "vector search requested but no compatible embedding index is available",
-                    json!({}),
+                    json!({ "fallback_reason": reason }),
                     ExitCode::Failure,
                 ))
             }
@@ -658,6 +729,9 @@ struct ScoredCandidate {
     chunk_hash: String,
     rrf_score: f64,
     meta: ChunkMeta,
+    /// The chunk's embedding (hybrid/vector mode only), fed into MMR (05 §1.4).
+    /// `None` in text mode, which makes MMR skip and only the raw_hash dedup run.
+    embedding: Option<Vec<f32>>,
 }
 
 #[derive(Clone)]
@@ -685,17 +759,10 @@ fn run_search(args: UnsupportedArgs) -> Result<Value> {
     let repo = Repository::open_current()?;
     validate_repo_tool_lock(&repo)?;
 
-    // Mode resolution up front (05 §1.1). Vector availability does not depend on
-    // the scope set today (always Unavailable), so this errors early for --vector.
-    let vector = resolve_vector_availability();
-    let mode = resolve_search_mode(parsed.requested_mode, &vector)?;
-
-    if parsed.query.chars().count() < 2 {
-        return empty_search_response(&parsed, &repo, started, &mode, &[], &[]);
-    }
-
     // Page 1 enumerates scopes (registry-based, K3); later pages replay the frozen
     // scope set stored in the cursor (05 §1.8 — the cursor scope set is truth).
+    // The scope set must be known before mode resolution (K4), because vector
+    // availability depends on the actual per-scope embedding indexes (03 §7).
     let decoded_cursor = match &parsed.cursor {
         Some(token) => Some(decode_cursor_token(token).map_err(search_to_kcs)?),
         None => None,
@@ -719,6 +786,18 @@ fn run_search(args: UnsupportedArgs) -> Result<Value> {
             (scope_mode, exec)
         }
     };
+
+    // Mode resolution (05 §1.1): compute the query embedding once, then aggregate
+    // vector availability over the searched scopes. `--vector` errors early here if
+    // no compatible embedding index is available (with the right INCOMPAT/UNAVAIL
+    // code). A short query yields no query embedding → vector unavailable.
+    let query_embedding = compute_query_embedding(&parsed.query)?;
+    let vector = resolve_vector_availability(&exec_scopes, query_embedding.is_some());
+    let mode = resolve_search_mode(parsed.requested_mode, &vector)?;
+
+    if parsed.query.chars().count() < 2 {
+        return empty_search_response(&parsed, &repo, started, &mode, &[], &[]);
+    }
 
     if exec_scopes.is_empty() {
         return Err(scope_all_failed_error(
@@ -760,14 +839,20 @@ fn run_search(args: UnsupportedArgs) -> Result<Value> {
         }
     }
 
-    // Per-scope: FTS5 text ranks -> RRF (text-only until K4) -> candidate pool.
+    // Per-scope: FTS5 text ranks + chunk_vec KNN vector ranks -> RRF -> candidate
+    // pool. Vector ranks are supplied only in hybrid/vector mode (K4).
     let tiers = build_fts_tiers(&parsed.query);
+    // Only feed vectors into the KNN when the resolved mode actually uses them;
+    // a text fallback (incompatible/absent) must stay pure text.
+    let scope_query_embedding = matches!(mode.resolved, SearchMode::Hybrid | SearchMode::Vector)
+        .then_some(query_embedding.as_deref())
+        .flatten();
     let mut searched = Vec::<SearchedScopeInfo>::new();
     let mut excluded = Vec::<Value>::new();
     let mut candidates = Vec::<ScoredCandidate>::new();
 
     for (idx, exec) in exec_scopes.iter().enumerate() {
-        match search_one_scope(exec, idx, &tiers) {
+        match search_one_scope(exec, idx, &tiers, mode.resolved, scope_query_embedding) {
             Ok(outcome) => {
                 searched.push(SearchedScopeInfo {
                     scope_id: exec.target.scope_id.clone(),
@@ -961,6 +1046,8 @@ fn search_one_scope(
     exec: &ExecScope,
     scope_index: usize,
     tiers: &[String],
+    resolved_mode: SearchMode,
+    query_embedding: Option<&[f32]>,
 ) -> std::result::Result<ScopeOutcome, ScopeSearchError> {
     let repo = Repository::open(&exec.target.repo_root)
         .map_err(|_| ScopeSearchError::Excluded("unreachable".to_owned()))?;
@@ -1006,19 +1093,44 @@ fn search_one_scope(
         .map(|config| config.chunking_config_hash)
         .map_err(ScopeSearchError::Fatal)?;
 
-    // FTS5 text ranks (empty when the query has no indexable token).
-    let (text_ranks, meta) = fts_scope_search(
-        &conn,
-        &snapshot_commit,
-        tiers,
-        &chunking_config_hash,
-        max_rowid,
-    )
-    .map_err(ScopeSearchError::Fatal)?;
+    let want_vector = matches!(resolved_mode, SearchMode::Hybrid | SearchMode::Vector);
 
-    let vector_ranks = vector_ranks_for_scope()
+    // FTS5 text ranks (empty when the query has no indexable token). Vector-only
+    // mode skips the text backend entirely (05 §1.3: no fusion, use vector order).
+    let (text_ranks, mut meta) = if resolved_mode == SearchMode::Vector {
+        (Vec::new(), BTreeMap::new())
+    } else {
+        fts_scope_search(
+            &conn,
+            &snapshot_commit,
+            tiers,
+            &chunking_config_hash,
+            max_rowid,
+        )
         .map_err(ScopeSearchError::Fatal)?
-        .unwrap_or_default();
+    };
+
+    // chunk_vec KNN vector ranks (hybrid/vector mode with a query embedding).
+    let vector_ranks = if want_vector {
+        if let Some(query_vec) = query_embedding {
+            let (ranks, vmeta) = vector_scope_search(
+                &conn,
+                &snapshot_commit,
+                query_vec,
+                &chunking_config_hash,
+                max_rowid,
+            )
+            .map_err(ScopeSearchError::Fatal)?;
+            for (chunk_id, chunk_meta) in vmeta {
+                meta.entry(chunk_id).or_insert(chunk_meta);
+            }
+            ranks
+        } else {
+            Vec::new()
+        }
+    } else {
+        Vec::new()
+    };
 
     let fused = fuse_rrf(
         &text_ranks,
@@ -1038,6 +1150,15 @@ fn search_one_scope(
         let Some(chunk_meta) = meta.get(&candidate.chunk_hash) else {
             continue;
         };
+        // In hybrid/vector mode, carry the chunk's embedding so MMR can run
+        // (05 §1.4). Text mode leaves this `None` (MMR skips, dedup only).
+        let embedding = if want_vector {
+            embedding_store::read_chunk_vector(&conn, &candidate.chunk_hash)
+                .ok()
+                .flatten()
+        } else {
+            None
+        };
         candidates.push(ScoredCandidate {
             scope_index,
             scope_id: exec.target.scope_id.clone(),
@@ -1046,6 +1167,7 @@ fn search_one_scope(
             chunk_hash: candidate.chunk_hash,
             rrf_score: candidate.rrf_score,
             meta: chunk_meta.clone(),
+            embedding,
         });
     }
 
@@ -1054,6 +1176,125 @@ fn search_one_scope(
         max_rowid,
         candidates,
     })
+}
+
+/// Per-scope vector backend: the query embedding's KNN over `chunk_vec`, filtered
+/// to the same live chunk set as the text backend (current `chunking_config_hash`,
+/// HEAD `tree_entries`, and `rowid <= max_rowid`). Because sqlite-vec applies the
+/// KNN `LIMIT` before the liveness join, we over-fetch every `chunk_vec` row and
+/// filter in Rust (correct at MVP scale; a future optimization is sqlite-vec
+/// metadata partitioning). Ranks are 1-based over the surviving candidates ordered
+/// by (cosine distance, chunk_id) and truncated to `candidate_depth` (05 §1.3).
+fn vector_scope_search(
+    conn: &Connection,
+    snapshot_commit: &str,
+    query_embedding: &[f32],
+    chunking_config_hash: &str,
+    max_rowid: u64,
+) -> Result<(Vec<BackendRank>, BTreeMap<String, ChunkMeta>)> {
+    let total = embedding_store::chunk_vec_count(conn).map_err(index_to_kcs)?;
+    if total == 0 || query_embedding.len() != CHUNK_VEC_DIMENSIONS {
+        return Ok((Vec::new(), BTreeMap::new()));
+    }
+    let query_bytes = f32_to_le_bytes(query_embedding);
+    let knn =
+        embedding_store::knn_chunk_distances(conn, &query_bytes, total).map_err(index_to_kcs)?;
+    let chunk_ids = knn.iter().map(|(id, _)| id.clone()).collect::<Vec<_>>();
+    let meta = fetch_live_meta(
+        conn,
+        snapshot_commit,
+        &chunk_ids,
+        chunking_config_hash,
+        max_rowid,
+    )?;
+    let mut kept = knn
+        .into_iter()
+        .filter(|(id, _)| meta.contains_key(id))
+        .collect::<Vec<_>>();
+    kept.sort_by(|a, b| a.1.total_cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
+    kept.truncate(200);
+    let ranks = kept
+        .iter()
+        .enumerate()
+        .map(|(index, (chunk_id, _))| BackendRank {
+            chunk_hash: chunk_id.clone(),
+            rank: index as u64 + 1,
+        })
+        .collect();
+    Ok((ranks, meta))
+}
+
+/// Fetch [`ChunkMeta`] for `chunk_ids` restricted to the live chunk set of
+/// `snapshot_commit` (same predicates as [`execute_fts_tier`]). Chunk ids not in
+/// the live set are simply absent from the result.
+fn fetch_live_meta(
+    conn: &Connection,
+    snapshot_commit: &str,
+    chunk_ids: &[String],
+    chunking_config_hash: &str,
+    max_rowid: u64,
+) -> Result<BTreeMap<String, ChunkMeta>> {
+    if chunk_ids.is_empty() {
+        return Ok(BTreeMap::new());
+    }
+    let placeholders = chunk_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+    let sql = format!(
+        "SELECT c.chunk_id, c.raw_hash, c.tool_profile_hash, c.heading_path,
+                c.section_id, c.char_start, c.char_end, c.text, te.path
+         FROM chunks c
+         JOIN tree_entries te ON te.commit_hash = ?1
+             AND te.raw_hash = c.raw_hash
+             AND te.tool_profile_hash = c.tool_profile_hash
+             AND te.gen = c.gen
+         WHERE c.chunking_config_hash = ?2 AND c.rowid <= ?3
+             AND c.chunk_id IN ({placeholders})"
+    );
+    let mut params: Vec<Box<dyn rusqlite::ToSql>> = vec![
+        Box::new(snapshot_commit.to_owned()),
+        Box::new(chunking_config_hash.to_owned()),
+        Box::new(max_rowid as i64),
+    ];
+    for chunk_id in chunk_ids {
+        params.push(Box::new(chunk_id.clone()));
+    }
+    let param_refs = params
+        .iter()
+        .map(std::convert::AsRef::as_ref)
+        .collect::<Vec<&dyn rusqlite::ToSql>>();
+    let mut stmt = conn
+        .prepare(&sql)
+        .map_err(|err| KcsError::schema(err.to_string()))?;
+    let rows = stmt
+        .query_map(param_refs.as_slice(), chunk_meta_row)
+        .map_err(|err| KcsError::schema(err.to_string()))?;
+    let mut meta = BTreeMap::new();
+    for row in rows {
+        let (chunk_id, chunk_meta) = row.map_err(|err| KcsError::schema(err.to_string()))?;
+        meta.insert(chunk_id, chunk_meta);
+    }
+    Ok(meta)
+}
+
+/// Parse the shared 9-column chunk-meta projection into `(chunk_id, ChunkMeta)`.
+fn chunk_meta_row(row: &rusqlite::Row) -> rusqlite::Result<(String, ChunkMeta)> {
+    let chunk_id = row.get::<_, String>(0)?;
+    let heading_path_raw = row.get::<_, Option<String>>(3)?;
+    Ok((
+        chunk_id,
+        ChunkMeta {
+            raw_hash: row.get(1)?,
+            tool_profile_hash: row.get(2)?,
+            heading_path: heading_path_raw
+                .and_then(|value| serde_json::from_str::<Vec<String>>(&value).ok()),
+            section_id: row
+                .get::<_, Option<String>>(4)?
+                .filter(|value| !value.is_empty()),
+            char_start: row.get::<_, Option<i64>>(5)?.map(|value| value as u64),
+            char_end: row.get::<_, Option<i64>>(6)?.map(|value| value as u64),
+            text: row.get(7)?,
+            path_at_commit: row.get(8)?,
+        },
+    ))
 }
 
 /// Per-scope text backend: execute the tiered MATCH queries (see
@@ -1122,54 +1363,19 @@ fn execute_fts_tier(
                 chunking_config_hash,
                 max_rowid as i64
             ],
-            |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, Option<String>>(3)?,
-                    row.get::<_, Option<String>>(4)?,
-                    row.get::<_, Option<i64>>(5)?,
-                    row.get::<_, Option<i64>>(6)?,
-                    row.get::<_, String>(7)?,
-                    row.get::<_, String>(8)?,
-                ))
-            },
+            chunk_meta_row,
         )
         .map_err(|err| KcsError::schema(err.to_string()))?;
 
     let mut ranks = Vec::new();
     let mut meta = BTreeMap::new();
     for (index, row) in rows.enumerate() {
-        let (
-            chunk_id,
-            raw_hash,
-            tool_profile_hash,
-            heading_path_raw,
-            section_id,
-            char_start,
-            char_end,
-            text,
-            path,
-        ) = row.map_err(|err| KcsError::schema(err.to_string()))?;
+        let (chunk_id, chunk_meta) = row.map_err(|err| KcsError::schema(err.to_string()))?;
         ranks.push(BackendRank {
             chunk_hash: chunk_id.clone(),
             rank: index as u64 + 1,
         });
-        meta.insert(
-            chunk_id,
-            ChunkMeta {
-                raw_hash,
-                tool_profile_hash,
-                heading_path: heading_path_raw
-                    .and_then(|value| serde_json::from_str::<Vec<String>>(&value).ok()),
-                section_id: section_id.filter(|value| !value.is_empty()),
-                char_start: char_start.map(|value| value as u64),
-                char_end: char_end.map(|value| value as u64),
-                text,
-                path_at_commit: path,
-            },
-        );
+        meta.insert(chunk_id, chunk_meta);
     }
     Ok((ranks, meta))
 }
@@ -1261,7 +1467,9 @@ fn diversify_merged(
             chunk_hash: format!("{index}\u{0}{}", candidate.chunk_hash),
             raw_hash: candidate.meta.raw_hash.clone(),
             relevance: candidate.rrf_score,
-            embedding: None,
+            // Real embedding in hybrid/vector mode (05 §1.4). If any candidate
+            // lacks one, `diversify_candidates` skips MMR and only dedups.
+            embedding: candidate.embedding.clone(),
             heading_path: candidate.meta.heading_path.clone(),
             section_id: candidate.meta.section_id.clone(),
         })
@@ -1288,10 +1496,16 @@ fn diversify_merged(
         })
         .collect::<Vec<_>>();
 
-    // Report the strategy actually applied (05 §1.7). MMR needs embeddings; with
-    // none present only the raw_hash dedup ran.
+    // Report the strategy actually applied (05 §1.7). MMR needs an embedding for
+    // *every* candidate (mmr.rs skips otherwise); text mode carries none, so only
+    // the raw_hash dedup ran — reported honestly, never a phantom "mmr" (K2).
+    let all_have_embeddings = !candidates.is_empty()
+        && candidates
+            .iter()
+            .all(|candidate| candidate.embedding.is_some());
     let mmr_ran = matches!(resolved_mode, SearchMode::Hybrid | SearchMode::Vector)
-        && request.strategy == DiversifyStrategy::Mmr;
+        && request.strategy == DiversifyStrategy::Mmr
+        && all_have_embeddings;
     let summary = match request.strategy {
         DiversifyStrategy::Off => json!({ "strategy": "off" }),
         DiversifyStrategy::Mmr if mmr_ran => {
@@ -1931,10 +2145,20 @@ fn read_tree_entries(kcs_dir: &Path) -> Result<Vec<TreeEntryRow>> {
 
 fn rebuild_sqlite_index(kcs_dir: &Path, tree_entries: &[TreeEntryRow]) -> Result<()> {
     let path = sqlite_path(kcs_dir);
-    if path.exists() {
+    // Embeddings live only in SQLite (objects/ holds no embedding objects in the
+    // MVP), so snapshot them before dropping the DB and replay them afterward,
+    // then rebuild chunk_vec from them (04 §4.3: embeddings → chunk_vec). This
+    // keeps `kcs repair --rebuild-db` from wiping vector search.
+    let preserved = if path.exists() {
+        let existing = Connection::open(&path).map_err(|err| KcsError::schema(err.to_string()))?;
+        let rows = embedding_store::snapshot_chunk_embeddings(&existing).map_err(index_to_kcs)?;
+        drop(existing);
         fs::remove_file(&path)
             .map_err(|err| KcsError::io(err.to_string(), path.display().to_string()))?;
-    }
+        rows
+    } else {
+        Vec::new()
+    };
     let mut fts = SqliteFtsIndex::open(
         &path,
         FtsSchemaConfig {
@@ -1960,6 +2184,22 @@ fn rebuild_sqlite_index(kcs_dir: &Path, tree_entries: &[TreeEntryRow]) -> Result
             )
             .map_err(|err| KcsError::schema(err.to_string()))?;
     }
+    // Replay preserved embeddings (source of truth) and re-derive chunk_vec.
+    for row in &preserved {
+        embedding_store::write_chunk_embedding(
+            fts.connection(),
+            &row.embedding_hash,
+            &row.text_hash,
+            &row.chunk_id,
+            &row.vector,
+            row.dimensions,
+            &row.distance,
+            &row.modality,
+            &row.profile_hash,
+        )
+        .map_err(index_to_kcs)?;
+    }
+    embedding_store::rebuild_chunk_vec(fts.connection()).map_err(index_to_kcs)?;
     Ok(())
 }
 
@@ -3318,6 +3558,570 @@ fn task_failure_from_adapter(error: kcs_adapter::AdapterError) -> TaskExecutionF
     TaskExecutionFailure { retry_kind }
 }
 
+// ===========================================================================
+// K4 — Gemini embedding wiring (adapter selection, mock seam, index generation,
+// query embedding). Mirrors the Mistral markdownize plumbing.
+// ===========================================================================
+
+const EMBEDDING_ADAPTER_ID: &str = "gemini_embedding_2";
+const EMBEDDING_ADAPTER_KIND: &str = "embedding";
+/// Chunks embedded per HTTP `:batchEmbedContents` request (client-side batching;
+/// Vertex has no batch inference, 07 §5.3). Task granularity is per-chunk; API
+/// batch granularity is this.
+const EMBEDDING_BATCH_SIZE: usize = 32;
+
+/// Which embedding backend / mock behavior is active. `KCS_TEST_GEMINI_EMBED`
+/// selects a deterministic mock (Step 2 seam pattern); otherwise a real
+/// `GEMINI_API_KEY` selects the live `Env` client. Absent both → no embeddings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EmbeddingSeam {
+    /// Deterministic compatible multimodal vectors.
+    Mock,
+    /// Multimodal but a mismatched profile_hash → search resolves INCOMPAT.
+    Incompatible,
+    /// `modality="text"` → rejected at tool-lock materialize (exit 2).
+    NonMultimodal,
+    /// Adapter returns an auth failure at embed time.
+    AuthError,
+    /// Adapter returns a 429 at embed time.
+    RateLimit,
+    /// Live Gemini endpoint (`GEMINI_API_KEY` set).
+    Real,
+}
+
+fn embedding_seam() -> Option<EmbeddingSeam> {
+    match std::env::var("KCS_TEST_GEMINI_EMBED").ok().as_deref() {
+        Some("mock") => Some(EmbeddingSeam::Mock),
+        Some("incompatible_profile") => Some(EmbeddingSeam::Incompatible),
+        Some("non_multimodal") => Some(EmbeddingSeam::NonMultimodal),
+        Some("auth_error") => Some(EmbeddingSeam::AuthError),
+        Some("rate_limit") => Some(EmbeddingSeam::RateLimit),
+        Some(_) => None,
+        None => std::env::var("GEMINI_API_KEY")
+            .is_ok()
+            .then_some(EmbeddingSeam::Real),
+    }
+}
+
+/// The embedding profile declared in tool-lock and written into `embeddings` rows
+/// for a given seam. Compatible/real use the adopted profile; the mock variants
+/// deliberately declare incompatible / non-multimodal profiles.
+struct DeclaredEmbeddingProfile {
+    tool_id: String,
+    dimensions: u64,
+    distance: String,
+    modality: String,
+    profile_hash: String,
+}
+
+fn declared_embedding_profile(seam: EmbeddingSeam) -> Result<DeclaredEmbeddingProfile> {
+    let adopted = adopted_embedding_profile_hash().map_err(index_to_kcs)?;
+    Ok(match seam {
+        EmbeddingSeam::Incompatible => DeclaredEmbeddingProfile {
+            tool_id: "gemini_embedding_incompatible".to_owned(),
+            dimensions: CHUNK_VEC_DIMENSIONS as u64,
+            distance: "cosine".to_owned(),
+            modality: "multimodal".to_owned(),
+            // Deliberately not the adopted hash → 03 §7 compat fails.
+            profile_hash: "sha256:00000000000000000000000000000000000000000000000000000000incompat"
+                .to_owned(),
+        },
+        EmbeddingSeam::NonMultimodal => DeclaredEmbeddingProfile {
+            tool_id: "gemini_text_embedding".to_owned(),
+            dimensions: CHUNK_VEC_DIMENSIONS as u64,
+            distance: "cosine".to_owned(),
+            modality: "text".to_owned(),
+            profile_hash: adopted,
+        },
+        _ => DeclaredEmbeddingProfile {
+            tool_id: EMBEDDING_ADAPTER_ID.to_owned(),
+            dimensions: ADOPTED_DIMENSIONS as u64,
+            distance: "cosine".to_owned(),
+            modality: "multimodal".to_owned(),
+            profile_hash: adopted,
+        },
+    })
+}
+
+/// Deterministic, L2-normalized pseudo-vector derived from the input text via
+/// SHA-256 expansion. Reproducible across runs (test determinism, brief item 2).
+fn deterministic_unit_vector(seed: &str, dimensions: usize) -> Vec<f32> {
+    let mut values = Vec::with_capacity(dimensions);
+    let mut counter = 0u32;
+    while values.len() < dimensions {
+        let mut hasher = Sha256::new();
+        hasher.update(seed.as_bytes());
+        hasher.update(counter.to_le_bytes());
+        let digest = hasher.finalize();
+        for chunk in digest.chunks_exact(4) {
+            if values.len() >= dimensions {
+                break;
+            }
+            let bits = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+            values.push((bits as f64 / u32::MAX as f64 * 2.0 - 1.0) as f32);
+        }
+        counter += 1;
+    }
+    let norm = values.iter().map(|value| value * value).sum::<f32>().sqrt();
+    if norm > 0.0 {
+        for value in &mut values {
+            *value /= norm;
+        }
+    }
+    values
+}
+
+#[derive(Debug, Clone, Copy)]
+struct MockGeminiClient {
+    seam: EmbeddingSeam,
+}
+
+impl GeminiEmbeddingClient for MockGeminiClient {
+    fn resolve_model_pin(&self, _configured_model: &str) -> kcs_adapter::Result<String> {
+        Ok(ADOPTED_MODEL_PIN.to_owned())
+    }
+
+    fn embed(
+        &self,
+        items: &[EmbeddingItem],
+        _model_pin: &str,
+        dimensions: u32,
+    ) -> kcs_adapter::Result<Vec<EmbeddingVector>> {
+        match self.seam {
+            EmbeddingSeam::AuthError => {
+                return Err(kcs_adapter::AdapterError::Auth(
+                    "mock auth failure".to_owned(),
+                ))
+            }
+            EmbeddingSeam::RateLimit => {
+                return Err(kcs_adapter::AdapterError::RateLimit("mock 429".to_owned()))
+            }
+            _ => {}
+        }
+        Ok(items
+            .iter()
+            .map(|item| EmbeddingVector {
+                id: item.id.clone(),
+                vector: deterministic_unit_vector(
+                    item.text.as_deref().unwrap_or(""),
+                    dimensions as usize,
+                ),
+            })
+            .collect())
+    }
+}
+
+/// Run the active embedding adapter over a batch of items, returning one vector
+/// per item. Routes to the real `Env` client or the deterministic mock.
+fn run_embedding_adapter(
+    seam: EmbeddingSeam,
+    items: Vec<EmbeddingItem>,
+    input_type: EmbeddingInputType,
+) -> std::result::Result<Vec<EmbeddingVector>, TaskExecutionFailure> {
+    let request = EmbeddingRequest { input_type, items };
+    let response = match seam {
+        EmbeddingSeam::Real => GeminiEmbeddingAdapter::default().embed(request),
+        other => GeminiEmbeddingAdapter::new(
+            MockGeminiClient { seam: other },
+            ADOPTED_MODEL_PIN,
+            ADOPTED_DIMENSIONS,
+        )
+        .embed(request),
+    };
+    response
+        .map(|response| response.vectors)
+        .map_err(task_failure_from_adapter)
+}
+
+/// Compute the query embedding once per search (05 §1.1). Returns `None` when no
+/// adapter is configured or the query is too short to embed. A failing adapter
+/// call (auth/rate) degrades to `None` → text fallback rather than erroring the
+/// whole search. Query-embedding cost is not metered in the MVP (negligible; the
+/// budget guardrails target bulk index enrichment).
+fn compute_query_embedding(query: &str) -> Result<Option<Vec<f32>>> {
+    if query.chars().count() < 2 {
+        return Ok(None);
+    }
+    let Some(seam) = embedding_seam() else {
+        return Ok(None);
+    };
+    let items = vec![EmbeddingItem {
+        id: "query".to_owned(),
+        text: Some(query.to_owned()),
+        path: None,
+        mime: None,
+    }];
+    match run_embedding_adapter(seam, items, EmbeddingInputType::Query) {
+        Ok(vectors) => Ok(vectors.into_iter().next().map(|vector| vector.vector)),
+        Err(_) => Ok(None),
+    }
+}
+
+/// The tool-lock `embedding` entry (07 §6) for the active seam, or `None` when no
+/// embedding adapter is configured.
+fn embedding_tool_lock_entry() -> Result<Option<Value>> {
+    let Some(seam) = embedding_seam() else {
+        return Ok(None);
+    };
+    let profile = declared_embedding_profile(seam)?;
+    Ok(Some(json!({
+        "tool_id": profile.tool_id,
+        "profile_hash": profile.profile_hash,
+        "dimensions": profile.dimensions,
+        "distance": profile.distance,
+        "modality": profile.modality,
+        "kind": "online_api",
+        "mode": "online",
+    })))
+}
+
+/// A live chunk awaiting an embedding (current chunking_config_hash, HEAD-live).
+struct EmbeddableChunk {
+    chunk_id: String,
+    text: String,
+    text_hash: String,
+    raw_path: String,
+}
+
+/// Generate chunk embeddings for the scope after the SQLite index is rebuilt
+/// (04 §4.3 / 07 §5.3). Enqueues one `TaskType::Embedding` task per pending chunk,
+/// then — if the online opt-in and budget allow — embeds them (batched), writing
+/// the `embeddings` rows (source of truth) and `chunk_vec` (derived KNN copy),
+/// charging the cost ledger under `adapter_kind="embedding"`. Offline leaves tasks
+/// Pending (surfaced by `index_status`). No-op when no embedding adapter is
+/// configured (keeps the default index path unchanged).
+fn generate_scope_embeddings(repo: &Repository, args: &IndexArgs) -> Result<()> {
+    let Some(seam) = embedding_seam() else {
+        return Ok(());
+    };
+    let profile = declared_embedding_profile(seam)?;
+    // Non-multimodal is rejected at materialize_tool_lock; never reach embed here.
+    if profile.modality != "multimodal" {
+        return Ok(());
+    }
+    let db_path = sqlite_path(repo.kcs_dir());
+    if !db_path.exists() {
+        return Ok(());
+    }
+    let conn = Connection::open(&db_path).map_err(|err| KcsError::schema(err.to_string()))?;
+    let Some(head) = repo.head_commit_hash()? else {
+        return Ok(());
+    };
+    let chunking_config_hash = read_chunking_config(repo)?.chunking_config_hash;
+    let pending = live_chunks_without_embedding(&conn, &head, &chunking_config_hash)?;
+    if pending.is_empty() {
+        return Ok(());
+    }
+
+    let task_store = TaskStore::new(repo.kcs_dir());
+    let now = now_utc_seconds();
+    let online = network_allowed(repo, args)?;
+    enqueue_embedding_tasks(&task_store, repo, &pending, online, &now)?;
+    if !online {
+        // Offline: tasks stay Pending; `index_status` reports them (05 §1.7).
+        return Ok(());
+    }
+
+    let cost_ledger = CostLedger::new(cost_ledger_path());
+    let budget_caps =
+        read_budget_policy(user_config_toml_path(), repo.kcs_dir().join("config.toml"))
+            .map_err(pipeline_to_kcs)?;
+    let month = utc_month(&now);
+    let scope_id = repo.scope_id_for_adapter();
+
+    for batch in pending.chunks(EMBEDDING_BATCH_SIZE) {
+        let batch_chars: u64 = batch
+            .iter()
+            .map(|chunk| chunk.text.chars().count() as u64)
+            .sum();
+        let estimate = BudgetEstimate {
+            scope_id: scope_id.clone(),
+            task_type: TaskType::Embedding,
+            estimated_usd: estimate_embedding_cost(batch_chars),
+            adapter_id: Some("gemini_multimodal_embedding".to_owned()),
+        };
+        let (device_remaining, folder_remaining) = budget_remaining_for_adapter(
+            &cost_ledger,
+            &budget_caps,
+            &month,
+            &scope_id,
+            EMBEDDING_ADAPTER_KIND,
+        )?;
+        let budget =
+            evaluate_budget_with_caps(&estimate, device_remaining, folder_remaining, false);
+        if !budget.allowed {
+            // Budget exhausted: pause the remaining chunks (index_status.budget_paused).
+            pause_embedding_tasks(&task_store, batch)?;
+            break;
+        }
+        match embed_batch(&conn, seam, &profile, batch) {
+            Ok(()) => {
+                cost_ledger
+                    .append_monthly(&MonthlyCostLedgerEntry {
+                        month: month.clone(),
+                        scope_id: scope_id.clone(),
+                        adapter_kind: EMBEDDING_ADAPTER_KIND.to_owned(),
+                        usd: estimate.estimated_usd,
+                    })
+                    .map_err(pipeline_to_kcs)?;
+                complete_embedding_tasks(&task_store, batch)?;
+            }
+            Err(failure) => {
+                // Enrichment failure is non-fatal: mark the batch failed and stop
+                // (search sees no embeddings → text). Never fails `kcs index`.
+                fail_embedding_tasks(&task_store, batch, retry_reason(failure.retry_kind))?;
+                break;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Embed one batch: reuse an existing content vector where possible
+/// (CT3-EMBED-006), else call the adapter, then write `embeddings` + `chunk_vec`.
+fn embed_batch(
+    conn: &Connection,
+    seam: EmbeddingSeam,
+    profile: &DeclaredEmbeddingProfile,
+    batch: &[EmbeddableChunk],
+) -> std::result::Result<(), TaskExecutionFailure> {
+    let mut to_embed = Vec::new();
+    for chunk in batch {
+        let embedding_hash =
+            chunk_embedding_hash(chunk, profile).map_err(|_| TaskExecutionFailure {
+                retry_kind: RetryErrorKind::ContractViolation,
+            })?;
+        match embedding_store::content_vector(conn, &embedding_hash) {
+            Ok(Some(bytes)) => {
+                // Content-addressed reuse: no adapter call, just link chunk_vec.
+                embedding_store::link_chunk_vec(conn, &chunk.chunk_id, &bytes, profile.dimensions)
+                    .map_err(|_| TaskExecutionFailure {
+                        retry_kind: RetryErrorKind::ContractViolation,
+                    })?;
+            }
+            Ok(None) => to_embed.push((chunk, embedding_hash)),
+            Err(_) => {
+                return Err(TaskExecutionFailure {
+                    retry_kind: RetryErrorKind::ContractViolation,
+                })
+            }
+        }
+    }
+    if to_embed.is_empty() {
+        return Ok(());
+    }
+    let items = to_embed
+        .iter()
+        .map(|(chunk, _)| EmbeddingItem {
+            id: chunk.chunk_id.clone(),
+            text: Some(chunk.text.clone()),
+            path: None,
+            mime: None,
+        })
+        .collect::<Vec<_>>();
+    let vectors = run_embedding_adapter(seam, items, EmbeddingInputType::MarkdownChunk)?;
+    let by_id = vectors
+        .into_iter()
+        .map(|vector| (vector.id, vector.vector))
+        .collect::<BTreeMap<_, _>>();
+    for (chunk, embedding_hash) in &to_embed {
+        let Some(vector) = by_id.get(&chunk.chunk_id) else {
+            return Err(TaskExecutionFailure {
+                retry_kind: RetryErrorKind::ContractViolation,
+            });
+        };
+        let bytes = f32_to_le_bytes(vector);
+        embedding_store::write_chunk_embedding(
+            conn,
+            embedding_hash,
+            &chunk.text_hash,
+            &chunk.chunk_id,
+            &bytes,
+            profile.dimensions,
+            &profile.distance,
+            &profile.modality,
+            &profile.profile_hash,
+        )
+        .map_err(|_| TaskExecutionFailure {
+            retry_kind: RetryErrorKind::ContractViolation,
+        })?;
+    }
+    Ok(())
+}
+
+/// Embedding identity hash (03 §8.1) keyed on the chunk's `text_hash` so identical
+/// content shares one `embeddings` row (content-based reuse).
+fn chunk_embedding_hash(
+    chunk: &EmbeddableChunk,
+    profile: &DeclaredEmbeddingProfile,
+) -> Result<String> {
+    embedding_store::embedding_hash(
+        EmbeddingTargetType::Chunk,
+        &chunk.text_hash,
+        profile.dimensions,
+        EmbeddingDistance::Cosine,
+        EmbeddingModality::Multimodal,
+        &profile.profile_hash,
+    )
+    .map_err(index_to_kcs)
+}
+
+/// Cost estimate for embedding `chars` of text: ~4 chars/token, $0.15 per 1M
+/// tokens (gemini-embedding ballpark; consistent with the 07 §5.3 figure of
+/// ≈$10 for 100k chunks). Fixed here and reported (brief item 2).
+fn estimate_embedding_cost(chars: u64) -> f64 {
+    let tokens = chars as f64 / 4.0;
+    tokens / 1_000_000.0 * 0.15
+}
+
+/// Live chunks (current chunking_config_hash, HEAD tree_entries) that have no
+/// `chunk_vec` row yet.
+fn live_chunks_without_embedding(
+    conn: &Connection,
+    head: &str,
+    chunking_config_hash: &str,
+) -> Result<Vec<EmbeddableChunk>> {
+    let mut existing_stmt = conn
+        .prepare("SELECT chunk_id FROM chunk_vec")
+        .map_err(|err| KcsError::schema(err.to_string()))?;
+    let existing = existing_stmt
+        .query_map([], |row| row.get::<_, String>(0))
+        .map_err(|err| KcsError::schema(err.to_string()))?
+        .collect::<std::result::Result<BTreeSet<String>, _>>()
+        .map_err(|err| KcsError::schema(err.to_string()))?;
+    drop(existing_stmt);
+
+    let mut stmt = conn
+        .prepare(
+            "SELECT c.chunk_id, c.text, c.text_hash, c.raw_path
+             FROM chunks c
+             JOIN tree_entries te ON te.commit_hash = ?1
+                 AND te.raw_hash = c.raw_hash
+                 AND te.tool_profile_hash = c.tool_profile_hash
+                 AND te.gen = c.gen
+             WHERE c.chunking_config_hash = ?2
+             ORDER BY c.rowid",
+        )
+        .map_err(|err| KcsError::schema(err.to_string()))?;
+    let rows = stmt
+        .query_map(rusqlite::params![head, chunking_config_hash], |row| {
+            Ok(EmbeddableChunk {
+                chunk_id: row.get(0)?,
+                text: row.get(1)?,
+                text_hash: row.get(2)?,
+                raw_path: row.get(3)?,
+            })
+        })
+        .map_err(|err| KcsError::schema(err.to_string()))?;
+    let mut pending = Vec::new();
+    for row in rows {
+        let chunk = row.map_err(|err| KcsError::schema(err.to_string()))?;
+        if !existing.contains(&chunk.chunk_id) {
+            pending.push(chunk);
+        }
+    }
+    Ok(pending)
+}
+
+fn embedding_task_output_ref(chunk_id: &str) -> String {
+    format!("embedding:{chunk_id}")
+}
+
+/// Enqueue one Pending `Embedding` task per pending chunk, skipping chunks that
+/// already have any embedding task (idempotent re-index).
+fn enqueue_embedding_tasks(
+    task_store: &TaskStore,
+    repo: &Repository,
+    pending: &[EmbeddableChunk],
+    online: bool,
+    now: &str,
+) -> Result<()> {
+    let existing = task_store
+        .all()
+        .map_err(pipeline_to_kcs)?
+        .into_iter()
+        .filter(|task| task.task_type == TaskType::Embedding)
+        .map(|task| task.output_ref)
+        .collect::<BTreeSet<_>>();
+    let reason = if online {
+        "ready_for_online_adapter"
+    } else {
+        "network_opt_in_required"
+    };
+    for chunk in pending {
+        let output_ref = embedding_task_output_ref(&chunk.chunk_id);
+        if existing.contains(&output_ref) {
+            continue;
+        }
+        let task = TaskDescriptor {
+            task_id: format!("task_{}", new_ulid(repo.root())),
+            task_type: TaskType::Embedding,
+            mode: None,
+            input_path: chunk.raw_path.clone(),
+            input_hash: chunk.text_hash.clone(),
+            previous_raw_hash: None,
+            parent_run_id: None,
+            changed_unit_keys: vec![chunk.chunk_id.clone()],
+            output_ref,
+            unit_keys: None,
+            status: TaskStatus::Pending,
+            attempts: 0,
+            next_retry_at: None,
+            deadline: None,
+            heartbeat_at: None,
+            fallback_reason: Some(reason.to_owned()),
+            created_at: now.to_owned(),
+        };
+        task_store.append(&task).map_err(pipeline_to_kcs)?;
+    }
+    Ok(())
+}
+
+fn update_embedding_tasks(
+    task_store: &TaskStore,
+    batch: &[EmbeddableChunk],
+    status: TaskStatus,
+    reason: &str,
+) -> Result<()> {
+    let refs = batch
+        .iter()
+        .map(|chunk| embedding_task_output_ref(&chunk.chunk_id))
+        .collect::<BTreeSet<_>>();
+    task_store
+        .update_matching(|task| {
+            if task.task_type == TaskType::Embedding && refs.contains(&task.output_ref) {
+                task.status = status;
+                task.fallback_reason = Some(reason.to_owned());
+                true
+            } else {
+                false
+            }
+        })
+        .map_err(pipeline_to_kcs)?;
+    Ok(())
+}
+
+fn complete_embedding_tasks(task_store: &TaskStore, batch: &[EmbeddableChunk]) -> Result<()> {
+    update_embedding_tasks(
+        task_store,
+        batch,
+        TaskStatus::Done,
+        "embedding_adapter_done",
+    )
+}
+
+fn pause_embedding_tasks(task_store: &TaskStore, batch: &[EmbeddableChunk]) -> Result<()> {
+    update_embedding_tasks(task_store, batch, TaskStatus::Paused, "budget_exceeded")
+}
+
+fn fail_embedding_tasks(
+    task_store: &TaskStore,
+    batch: &[EmbeddableChunk],
+    reason: &str,
+) -> Result<()> {
+    update_embedding_tasks(task_store, batch, TaskStatus::Failed, reason)
+}
+
 fn retry_reason(kind: RetryErrorKind) -> &'static str {
     match kind {
         RetryErrorKind::NetworkError => "network_error",
@@ -4566,7 +5370,7 @@ fn materialize_tool_lock(repo: &Repository) -> Result<()> {
     let prepare_hash =
         tool_profile_hash(&deterministic_prepare_profile_value()).map_err(adapter_to_kcs)?;
     let markdown_profile = active_markdown_adapter(repo).profile();
-    let value = json!({
+    let mut value = json!({
         "spec_version": 1,
         "prepare": {
             "tool_id": "prepare_default",
@@ -4580,9 +5384,30 @@ fn materialize_tool_lock(repo: &Repository) -> Result<()> {
             "capabilities": markdown_profile.capability_flags
         }
     });
-    let path = repo.kcs_dir().join("tool-lock.json");
+    // Write the embedding entry (07 §6) when an embedding adapter is configured.
+    // A non-multimodal profile is rejected here (03 §7): `load_tool_lock` fails
+    // with KCS-E-EMBED-MODALITY-001, which we surface as exit 2 (scenario (e))
+    // *before* any indexing happens.
+    if let Some(entry) = embedding_tool_lock_entry()? {
+        if let Some(object) = value.as_object_mut() {
+            object.insert("embedding".to_owned(), entry);
+        }
+    }
     let bytes =
         serde_json::to_vec_pretty(&value).map_err(|err| KcsError::schema(err.to_string()))?;
+    if let Err(error) = load_tool_lock(&bytes) {
+        let message = error.to_string();
+        if message.contains("KCS-E-EMBED-MODALITY-001") {
+            return Err(KcsError::new(
+                "KCS-E-EMBED-MODALITY-001",
+                message,
+                json!({}),
+                ExitCode::InvalidUsage,
+            ));
+        }
+        return Err(adapter_to_kcs(error));
+    }
+    let path = repo.kcs_dir().join("tool-lock.json");
     fs::write(&path, bytes).map_err(|err| KcsError::io(err.to_string(), path.display().to_string()))
 }
 
@@ -4909,7 +5734,19 @@ fn print_error(error: &KcsError, json_mode: bool) {
 mod tests {
     use clap::Parser;
 
-    use super::{command_captured_json_flag, Cli, Command};
+    use super::{command_captured_json_flag, deterministic_unit_vector, Cli, Command};
+
+    #[test]
+    fn mock_embedding_vector_is_deterministic_and_normalized() {
+        let a = deterministic_unit_vector("認証仕様 トークン", 768);
+        let b = deterministic_unit_vector("認証仕様 トークン", 768);
+        assert_eq!(a.len(), 768);
+        assert_eq!(a, b, "same seed must reproduce the same vector");
+        let norm = a.iter().map(|value| value * value).sum::<f32>().sqrt();
+        assert!((norm - 1.0).abs() < 1e-4, "vector must be L2-normalized");
+        let other = deterministic_unit_vector("別のクエリ", 768);
+        assert_ne!(a, other, "different seeds must differ");
+    }
 
     #[test]
     fn parses_global_json_after_command() {
