@@ -57,8 +57,8 @@ what was wrong before and what closed it.
 | ID | Test(s) | Type | Verdict |
 | --- | --- | --- | --- |
 | HYBRID-001 | `ct3_hybrid_001_auto_resolves_to_hybrid_with_rrf_fusion` | CLI | ok — scenario (d). Asserts `resolved_mode=hybrid`, clean fallback fields, `diversify.strategy=mmr` (impossible without real embeddings, since text-only reports `group_by_raw_hash`), and that the hybrid result set is a strict superset of the text-only set (proves vector recall genuinely contributes, not just a relabeled text search) |
-| HYBRID-002 | `ct3_hybrid_002_auto_vector_configured_but_absent_falls_back_visibly` | CLI | ok — **de-tautologized this round**: the embedding endpoint is configured at search time (mock seam active) but the scope was indexed *without* it, so the fallback is a genuine "vectors configured but absent for this index" case, distinguishable from HYBRID-001's opposite outcome |
-| HYBRID-003 | `ct3_hybrid_003_text_and_vector_unavailable_is_an_error` | CLI | ok — deletes sqlite.db (text unavailable) + requests `--vector`, hits `KCS-E-SEARCH-VEC-UNAVAIL-001` |
+| HYBRID-002 | `ct3_hybrid_002_auto_vector_configured_but_absent_falls_back_visibly` (**strengthened in 2d13784**: asserts per-cause fallback_reason strings and in-test pair discrimination — same query resolves hybrid after mock embeddings are generated) | CLI | ok |
+| HYBRID-003 | `ct3_hybrid_003_text_and_vector_unavailable_is_an_error` (**rewritten in re-audit fix 2d13784**: auto mode, no flags, sqlite.db deleted → exit 1 KCS-E-SEARCH-VEC-UNAVAIL-001, with pre-deletion success counter-assertion) | CLI | ok — the original version passed --vector and its deletion step was inert (found by Sonnet/GPT-5.5 in the 4-engine re-audit, tasks/step3c-reaudit-4engine.md) |
 | HYBRID-004 | `rrf::tests::ct3_hybrid_004_rrf_score_and_rank_vector` | unit | ok — exact match against A.4 (`c2,c1,c3,c4,c5` order, `123/3782` score) |
 | HYBRID-005 | `rrf::tests::ct3_hybrid_005_rrf_tie_breaks_by_chunk_id` | unit | ok |
 | HYBRID-006 | `ct3_hybrid_006_text_mode_uses_text_rank_without_fusion` | CLI | ok |
@@ -284,3 +284,13 @@ The implementation doubts above were ACTED ON after this matrix was first writte
 and the kcs-search lib placeholder test were all removed as dead scaffold code
 (same policy as the K6 stub removal). ct3_embed_004 was rewired to the wired
 `matches_adopted` gate. Final totals: 227 workspace tests green / clippy -D warnings / fmt.
+
+## Re-audit amendments (2026-07-04, commit 2d13784)
+
+The 4-engine re-audit (tasks/step3c-reaudit-4engine.md) found the HYBRID-003 row's
+original judgment to be a false positive (inert deletion step) — fixed as noted in the
+row above. Additions: `ct3_evidence_004_missing_chunk_row_requires_retarget`
+(EVIDENCE-004 series; 08 §3.2 retarget contract, exit 8, decisions #33) and
+`ct3_multi_005_cursor_replay_with_unresolvable_scope_is_partial` (MULTI-005 series;
+cursor replay with a vanished scope → excluded + exit 3, not CURSOR-001).
+Final totals after fixes: 229 workspace tests green.

@@ -108,3 +108,13 @@ kcs-search の evidence resolver スタブ (75d0c6d)、EmbeddingStore trait (079
 
 ws1c-decisions #31 (open の JSON 返却) / #32 (新 error code 2 件)。その他は各コミット
 メッセージと tasks/step3c-p0-matrix.md の判定列。
+
+## 追補: 4 エンジン再監査と修正 (2026-07-04、コミット 2d13784)
+
+納品後の 4 エンジン クロスチェック (tasks/step3c-reaudit-4engine.md) で major 2 /
+minor 4 の findings が出た (統合裁定 fix-required)。全件を同日修正済み:
+HYBRID-003 の実装+テスト是正 (auto「両方不可」= VEC-UNAVAIL-001 exit 1)、
+Evidence の retarget 契約 (RETARGET-REQUIRED-001 exit 8、decisions #33)、
+cursor 消失 scope の excluded 化、fallback_reason 実因分岐、FtsIndex trait 解消、
+HYBRID-002 ペア化。本報告の「Evidence resolver 完全化」「P0 60/60」の主張は
+上記修正を織り込んだ現状 (229 green) に対して読み替えること。
