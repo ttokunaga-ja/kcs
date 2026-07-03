@@ -216,7 +216,7 @@ metadata:
 
 Text Embedding Adapter / Image Embedding Adapter は**採用しない**。同一 Embedding Adapter が同一 profile で多モダリティを単一 vector space へ写像する。
 
-> **リスク注記 (Step 2 着手前に実地検証)**: 単一 profile で text/image を同一 vector space に写像するマルチモーダル embedding API は提供ベンダーが限られる。Step 2 着手前に候補 API の提供形態・次元数・料金・deprecation ポリシーを実地検証し、採用 profile を `tool-lock.json` に確定する (§6 の `gemini_multimodal_embedding` は例示であり、ベンダー・次元数の裏取り済み値ではない)。検証が通らない場合は、凍結例外 ([09-mvp-scope.md §6.2](09-mvp-scope.md) 条件 1) として「MVP は `modality=text` の単一 Embedding Adapter を許容し、multimodal は interface 予約のみとする」緩和を適用する。北極星シナリオ M3-1〜M3-3 は text 検索のみで完結するため、この緩和は MVP の Done 条件に影響しない。embedding profile の変更は全 re-index を伴う ([03-data-model.md §7](03-data-model.md)) ため、この検証は Step 2 のどの実装より先に行う。
+> **実地検証済み — text-only 緩和を適用 (2026-07-03、凍結例外 [09-mvp-scope.md §6.2](09-mvp-scope.md) 条件 1)**: ベンダー調査 (`tasks/step3-embedding-verify.md`) の結果、「版ピン留め可能」かつ「日本語 text 品質を犠牲にしない」multimodal embedding API は現存しない (pin 可能な voyage-multimodal-3 / cohere embed-v4.0 は text 品質が text 専用モデルに劣後、text 品質最上位の Gemini Embedding 2 multimodal は preview で pin 不可)。image embedding は北極星 M3-1〜M3-3 の Done 条件に寄与しないため、**MVP は `modality=text` の単一 Embedding Adapter とし、multimodal (`input_type`/`modality` の schema) は interface 予約のみ** とする。第一候補 profile: `gemini-embedding-001` (768 次元 / cosine / batch)。fallback: `text-embedding-3-large`。将来 multimodal 有効化時の先頭候補は cohere embed-v4.0 (profile 変更 = 全 re-index [03-data-model.md §7](03-data-model.md) を伴う点は変わらない)。
 
 ```sql
 CREATE TABLE embeddings (
@@ -282,12 +282,12 @@ Rerank Adapter は KCS の検索結果を再順位付けするだけで、**sear
     "capabilities": ["ocr", "layout_detection", "table_extraction"]
   },
   "embedding": {
-    "tool_id": "gemini_multimodal_embedding",
+    "tool_id": "gemini_text_embedding",
     "kind": "online_api",
     "mode": "batch",
-    "dimensions": 1536,
+    "dimensions": 768,
     "distance": "cosine",
-    "modality": "multimodal",
+    "modality": "text",
     "profile_hash": "sha256:..."
   }
 }
