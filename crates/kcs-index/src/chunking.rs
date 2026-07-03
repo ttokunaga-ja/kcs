@@ -489,6 +489,106 @@ mod tests {
         assert_eq!(rows[1].char_start, Some(4));
     }
 
+    // CT3-CHUNK-005 (gap fill): the spec's Given is explicitly a unit "combined at
+    // the tail side of a full-text view" — a single-unit fixture can't distinguish
+    // "span is unit-local" from "span happens to start at 0 because there's only
+    // one unit". A second, later unit must restart char_start at 0 rather than
+    // continuing from the first unit's end, and its heading stack must not inherit
+    // the first unit's headings (chunk does not cross the unit boundary, 04 §4.1
+    // rule 1 / A.1 offset independence).
+    #[test]
+    fn ct3_chunk_005_second_unit_span_and_heading_path_do_not_inherit_from_first() {
+        let config = default_chunking_config().unwrap();
+        let input = ChunkingInput {
+            raw_path: "a.md".to_owned(),
+            units: vec![
+                NormalizedUnitInput {
+                    raw_hash: RAW.to_owned(),
+                    tool_profile_hash: TOOL.to_owned(),
+                    gen: 0,
+                    unit_key: "doc:1".to_owned(),
+                    markdown: "# First\nfirst body of some length".to_owned(),
+                },
+                NormalizedUnitInput {
+                    raw_hash: RAW.to_owned(),
+                    tool_profile_hash: TOOL.to_owned(),
+                    gen: 0,
+                    unit_key: "doc:2".to_owned(),
+                    markdown: "second body, no heading here".to_owned(),
+                },
+            ],
+            config,
+            created_at: "2026-07-03T00:00:00Z".to_owned(),
+        };
+        let rows = chunk_normalized_instance(input).unwrap();
+        let second_unit_row = rows
+            .iter()
+            .find(|row| row.unit_key == "doc:2")
+            .expect("second unit must produce a chunk");
+        // Restarted at 0, not continuing from the first unit's ~34-char length.
+        assert_eq!(second_unit_row.char_start, Some(0));
+        // No heading appears before it in doc:2, so heading_path must be empty —
+        // not `["First"]` leaked across the unit boundary.
+        assert_eq!(second_unit_row.heading_path, Some(Vec::new()));
+        assert_eq!(second_unit_row.section_id, None);
+    }
+
+    // CT3-CHUNK-004 (gap fill): the existing ct3_chunk_004 test never exceeds
+    // max_chars, so rule 5 (paragraph-boundary greedy split, single-paragraph-only
+    // falls back to a hard character split; split pieces share heading_path /
+    // section_id and are distinguished by unit-local span) was unverified.
+    #[test]
+    fn ct3_chunk_004_max_chars_splits_at_paragraph_boundary_and_shares_section() {
+        let config = ChunkingConfig {
+            chunking_config_hash: chunking_config_hash("heading", 20).unwrap(),
+            strategy: "heading".to_owned(),
+            max_chars: 20,
+        };
+        let input = ChunkingInput {
+            raw_path: "a.md".to_owned(),
+            units: vec![NormalizedUnitInput {
+                raw_hash: RAW.to_owned(),
+                tool_profile_hash: TOOL.to_owned(),
+                gen: 0,
+                unit_key: "doc:1".to_owned(),
+                // Section body ("paragraph one long enough\n\nparagraph two also
+                // long enough") is well over max_chars=20 and has a paragraph
+                // boundary (blank line) to split on.
+                markdown: "# Heading\nparagraph one long enough\n\nparagraph two also long enough"
+                    .to_owned(),
+            }],
+            config,
+            created_at: "2026-07-03T00:00:00Z".to_owned(),
+        };
+        let rows = chunk_normalized_instance(input).unwrap();
+        let section_rows = rows
+            .iter()
+            .filter(|row| row.section_id.as_deref() == Some("heading"))
+            .collect::<Vec<_>>();
+        // The over-long section must be split into more than one chunk.
+        assert!(
+            section_rows.len() > 1,
+            "expected max_chars to force a split, got {} chunk(s)",
+            section_rows.len()
+        );
+        // Every char span stays within max_chars, and split pieces share
+        // heading_path / section_id but are distinguished by span.
+        for row in &section_rows {
+            let span = row.char_end.unwrap() - row.char_start.unwrap();
+            assert!(span <= 20, "split chunk exceeds max_chars: {span}");
+            assert_eq!(row.heading_path, Some(vec!["Heading".to_owned()]));
+        }
+        let mut spans = section_rows
+            .iter()
+            .map(|row| (row.char_start.unwrap(), row.char_end.unwrap()))
+            .collect::<Vec<_>>();
+        spans.sort_unstable();
+        // Contiguous, non-overlapping coverage (greedy split, no gaps beyond the
+        // whitespace consumed between pieces).
+        assert_eq!(spans[0].0, 0);
+        assert!(spans.windows(2).all(|pair| pair[0].1 <= pair[1].0));
+    }
+
     #[test]
     fn ct3_chunk_006_chunking_config_hash_vector() {
         assert_eq!(

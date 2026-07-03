@@ -45,28 +45,6 @@ pub fn embedding_hash(
     hash_jcs(&value)
 }
 
-pub fn validate_embedding_profile(
-    dimensions: u64,
-    distance: EmbeddingDistance,
-    modality: EmbeddingModality,
-    profile_hash: &str,
-) -> Result<()> {
-    if modality != EmbeddingModality::Multimodal {
-        return Err(IndexError::Contract(
-            "KCS-E-EMBED-MODALITY-001: embedding modality must be multimodal".to_owned(),
-        ));
-    }
-    if dimensions != 768
-        || distance != EmbeddingDistance::Cosine
-        || profile_hash != adopted_embedding_profile_hash()?
-    {
-        return Err(IndexError::Contract(
-            "KCS-E-SEARCH-VEC-INCOMPAT-001: embedding profile incompatible".to_owned(),
-        ));
-    }
-    Ok(())
-}
-
 /// A distinct embedding profile observed in the `embeddings` table (compat check
 /// input, 03 §7).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -395,26 +373,26 @@ mod tests {
 
     #[test]
     fn ct3_embed_004_adopted_profile_is_multimodal_768_cosine() {
+        // The wired compat gate (search-time, 03 §7): the adopted profile matches
+        // itself, and any deviation in modality / dimensions / hash does not.
         let profile_hash = adopted_embedding_profile_hash().unwrap();
-        validate_embedding_profile(
-            768,
-            EmbeddingDistance::Cosine,
-            EmbeddingModality::Multimodal,
-            &profile_hash,
-        )
-        .unwrap();
-    }
-
-    #[test]
-    fn ct3_embed_008_non_multimodal_profile_is_rejected() {
-        let err = validate_embedding_profile(
-            768,
-            EmbeddingDistance::Cosine,
-            EmbeddingModality::Text,
-            "sha256:66aff638f38a099ff989ca97675ebd3c573a40ee53cc1cdfe05fb06102d2bb09",
-        )
-        .unwrap_err();
-        assert!(err.to_string().contains("KCS-E-EMBED-MODALITY-001"));
+        let adopted = EmbeddingProfileSummary {
+            dimensions: 768,
+            distance: "cosine".to_owned(),
+            modality: "multimodal".to_owned(),
+            profile_hash,
+        };
+        assert!(adopted.matches_adopted().unwrap());
+        let text_modality = EmbeddingProfileSummary {
+            modality: "text".to_owned(),
+            ..adopted.clone()
+        };
+        assert!(!text_modality.matches_adopted().unwrap());
+        let wrong_dims = EmbeddingProfileSummary {
+            dimensions: 512,
+            ..adopted
+        };
+        assert!(!wrong_dims.matches_adopted().unwrap());
     }
 
     use crate::fts::{
