@@ -20,6 +20,10 @@ DEFAULT_OUT_DIR = ROOT / "out"
 
 TABLE_THRESHOLD = 0.95
 JAPANESE_CER_THRESHOLD = 0.02
+# WS-ocr-figures: label recall がこの値未満 & images[] が付くページは
+# 「画像内テキストが image 化されて検索対象から落ちた疑い」として警告する
+# (診断のみ。overall passed には影響させない)。
+FIGURE_TEXT_LOSS_WARN = 0.5
 
 
 def parse_args() -> argparse.Namespace:
@@ -43,12 +47,31 @@ def main() -> None:
     japanese_metric = evaluate_japanese(response, ground_truth)
     image_metric = evaluate_image_count(response, ground_truth)
     formula_metric = evaluate_formula(response, ground_truth)
+    figures_metric = evaluate_figures(response, ground_truth)
 
     passed = (
         table_metric["passed"]
         and japanese_metric["passed"]
         and image_metric["passed"]
     )
+    criteria = {
+        "table_cell_match_rate": f">= {TABLE_THRESHOLD}",
+        "japanese_cer": f"<= {JAPANESE_CER_THRESHOLD}",
+        "image_count_match": "100%",
+        "formula": "record textized vs image fallback; no pass threshold",
+    }
+    metrics: dict[str, Any] = {
+        "table": table_metric,
+        "japanese": japanese_metric,
+        "images": image_metric,
+        "formula": formula_metric,
+    }
+    if figures_metric is not None:
+        criteria["figures"] = (
+            "diagnostic only (no pass threshold): images[]/placeholder correspondence, "
+            "in-figure label recall, aggregate body-text loss rate"
+        )
+        metrics["figures"] = figures_metric
     results = {
         "schema_version": 1,
         "created_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
@@ -60,18 +83,8 @@ def main() -> None:
         "estimated_cost_usd": run_record.get("estimated_cost_usd"),
         "latency_seconds": run_record.get("latency_seconds"),
         "passed": passed,
-        "criteria": {
-            "table_cell_match_rate": f">= {TABLE_THRESHOLD}",
-            "japanese_cer": f"<= {JAPANESE_CER_THRESHOLD}",
-            "image_count_match": "100%",
-            "formula": "record textized vs image fallback; no pass threshold",
-        },
-        "metrics": {
-            "table": table_metric,
-            "japanese": japanese_metric,
-            "images": image_metric,
-            "formula": formula_metric,
-        },
+        "criteria": criteria,
+        "metrics": metrics,
     }
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
@@ -171,6 +184,77 @@ def evaluate_formula(response: dict[str, Any], ground_truth: dict[str, Any]) -> 
         "passed": None,
         "note": "No pass threshold; human review required.",
     }
+
+
+def evaluate_figures(response: dict[str, Any], ground_truth: dict[str, Any]) -> dict[str, Any] | None:
+    """WS-ocr-figures 診断: raster 図表の画像内テキストが検索対象から落ちていないか測る。
+
+    ground_truth に `figures` が無い fixture (minimal writer フォールバック等) では None を返す。
+    """
+    figures_truth = ground_truth.get("figures")
+    if not figures_truth:
+        return None
+
+    per_page: list[dict[str, Any]] = []
+    total_labels = 0
+    total_matched = 0
+    for spec in figures_truth["pages"]:
+        page = page_by_index(response, spec["page_index"])
+        markdown = page.get("markdown", "")
+        images_count = images_list_count(page)
+        placeholder_count = markdown_placeholder_count(markdown)
+        labels = spec.get("expected_label_texts", [])
+        haystack = normalize_label(markdown)
+        matched = [label for label in labels if normalize_label(label) in haystack]
+        missing = [label for label in labels if label not in matched]
+        recall = len(matched) / len(labels) if labels else 1.0
+        total_labels += len(labels)
+        total_matched += len(matched)
+        # 画像化疑い: label をほぼ拾えていないのに images[] が付いている
+        # (= 本文へ OCR されず placeholder + image に押し込まれた兆候)。
+        loss_suspected = recall < FIGURE_TEXT_LOSS_WARN and images_count > 0
+        per_page.append(
+            {
+                "page_index": spec["page_index"],
+                "kind": spec.get("kind"),
+                "images_count": images_count,
+                "placeholder_count": placeholder_count,
+                "placeholder_matches_images": placeholder_count == images_count,
+                "expected_label_count": len(labels),
+                "matched_label_count": len(matched),
+                "label_recall": round(recall, 6),
+                "missing_labels": missing,
+                "text_loss_suspected": loss_suspected,
+                "risk": spec.get("risk"),
+            }
+        )
+
+    aggregate_recall = total_matched / total_labels if total_labels else 1.0
+    return {
+        "page_count": len(per_page),
+        "aggregate_label_recall": round(aggregate_recall, 6),
+        "body_text_loss_rate": round(1.0 - aggregate_recall, 6),
+        "pages_with_text_loss_suspected": sum(1 for entry in per_page if entry["text_loss_suspected"]),
+        "pages": per_page,
+        "passed": None,
+        "note": "Diagnostic only; human review required. Measures whether in-figure text stays searchable.",
+    }
+
+
+def images_list_count(page: dict[str, Any]) -> int:
+    images = page.get("images")
+    return len(images) if isinstance(images, list) else 0
+
+
+def markdown_placeholder_count(markdown: str) -> int:
+    return len(re.findall(r"!\[[^\]]*]\([^)]+\)", markdown))
+
+
+def normalize_label(text: str) -> str:
+    # ASCII ラベルの緩い一致: NFKC, 小文字化, markdown 記号除去, 空白全除去。
+    normalized = unicodedata.normalize("NFKC", text).lower()
+    normalized = re.sub(r"[#*_`>|!\[\]()]", "", normalized)
+    return re.sub(r"\s+", "", normalized)
 
 
 def page_by_index(response: dict[str, Any], index: int) -> dict[str, Any]:
@@ -288,6 +372,48 @@ def render_report(results: dict[str, Any]) -> str:
     if table["missing_cells"]:
         lines.extend(["", "## Missing table cells", ""])
         lines.extend(f"- `{cell}`" for cell in table["missing_cells"])
+
+    figures = results["metrics"].get("figures")
+    if figures is not None:
+        lines.extend(
+            [
+                "",
+                "## Figures (WS-ocr-figures diagnostic)",
+                "",
+                "Diagnostic only; no pass/fail. Measures whether raster in-figure text stays searchable.",
+                "",
+                f"- Aggregate in-figure label recall: `{figures['aggregate_label_recall']}`",
+                f"- Body-text loss rate: `{figures['body_text_loss_rate']}`",
+                f"- Pages with text-loss suspected: `{figures['pages_with_text_loss_suspected']}/{figures['page_count']}`",
+                "",
+                "| page | kind | images[] | placeholders | match | label recall | loss? |",
+                "| ---: | --- | ---: | ---: | :---: | ---: | :---: |",
+            ]
+        )
+        for entry in figures["pages"]:
+            lines.append(
+                "| {page_index} | {kind} | {images_count} | {placeholder_count} | {match} | "
+                "{recall} ({matched}/{total}) | {loss} |".format(
+                    page_index=entry["page_index"],
+                    kind=entry["kind"],
+                    images_count=entry["images_count"],
+                    placeholder_count=entry["placeholder_count"],
+                    match="yes" if entry["placeholder_matches_images"] else "NO",
+                    recall=entry["label_recall"],
+                    matched=entry["matched_label_count"],
+                    total=entry["expected_label_count"],
+                    loss="YES" if entry["text_loss_suspected"] else "no",
+                )
+            )
+        missing_any = [
+            (entry["page_index"], entry["missing_labels"])
+            for entry in figures["pages"]
+            if entry["missing_labels"]
+        ]
+        if missing_any:
+            lines.extend(["", "### Missing in-figure labels", ""])
+            for page_index, missing in missing_any:
+                lines.append(f"- page {page_index}: " + ", ".join(f"`{label}`" for label in missing))
     return "\n".join(lines) + "\n"
 
 

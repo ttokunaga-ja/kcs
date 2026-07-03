@@ -48,19 +48,69 @@ JAPANESE_TEXT = (
 
 FORMULA_TOKENS = ["E=mc^2", "int_0^1 x^2 dx = 1/3"]
 
+# ---------------------------------------------------------------------------
+# WS-ocr-figures: raster 図表を「画像内テキスト」として埋め込んだ診断ページ。
+# ラベルはすべて ASCII (PIL 同梱の default TrueType のみに依存し、CJK フォント
+# 不在でも決定論的・可搬に生成できる)。Mistral OCR がラスタ内テキストを
+# markdown 本文へ OCR するか、それとも images[] + placeholder として画像化して
+# 検索対象から落とすかを測るための既知ラベル集合。
+# ---------------------------------------------------------------------------
+FIGURE_CHART_LABELS = [
+    "REVENUE BY DEPT 2026Q1",
+    "Tokyo",
+    "Osaka",
+    "Nagoya",
+    "1250",
+    "980",
+    "760",
+    "Total 2990",
+]
+FIGURE_SCAN_LABELS = [
+    "KCS SCAN FIXTURE PAGE",
+    "ALPHA-7731",
+    "BRAVO-2048",
+    "CHARLIE-9152",
+    "returned only as an image",
+]
+FIGURE_INFOGRAPHIC_LABELS = [
+    "KCS PIPELINE OVERVIEW",
+    "Ingest",
+    "Markdownize",
+    "Embed",
+    "Index",
+    "Search",
+    "42 percent uplift",
+]
+FIGURE_SCAN_LINES = [
+    "KCS SCAN FIXTURE PAGE FIVE",
+    "",
+    "This entire page is rendered as a single raster image, a",
+    "simulated scan of text-native content.",
+    "",
+    "Anchor tokens for retrieval checks:",
+    "  ALPHA-7731   BRAVO-2048   CHARLIE-9152",
+    "",
+    "If OCR reads this raster, these tokens appear in the markdown",
+    "body and stay searchable (FTS / embedding).",
+    "",
+    "If the page is returned only as an image with a placeholder,",
+    "every token is lost to search (north-star M3-1 impact).",
+]
 
-def write_ground_truth(pdf_generator: str) -> None:
+
+def write_ground_truth(pdf_generator: str, include_figures: bool) -> None:
+    page_map = {
+        "complex_table": 0,
+        "japanese_text": 1,
+        "formula": 2,
+        "embedded_image": 3,
+    }
     data = {
-        "schema_version": 1,
+        "schema_version": 2,
         "fixture_pdf": str(PDF_PATH.relative_to(ROOT)),
         "pdf_generator": pdf_generator,
         "page_count": 4,
-        "pages": {
-            "complex_table": 0,
-            "japanese_text": 1,
-            "formula": 2,
-            "embedded_image": 3,
-        },
+        "pages": page_map,
         "table": {
             "page_index": 0,
             "cells": TABLE_CELLS,
@@ -83,6 +133,42 @@ def write_ground_truth(pdf_generator: str) -> None:
             "description": "One embedded RGB image XObject representing a simple chart.",
         },
     }
+    if include_figures:
+        page_map.update({"raster_chart": 4, "scan_page": 5, "infographic": 6})
+        data["page_count"] = 7
+        data["figures"] = {
+            "description": (
+                "WS-ocr-figures 診断ページ。text-native ではなく raster として埋め込んだ図表・"
+                "スキャン風ページ・インフォグラフィックで、画像内テキストが image 化されて "
+                "markdown 本文から欠落する (= FTS/embedding の検索対象外になる) 懸念を測る。"
+            ),
+            "acceptance": (
+                "Diagnostic only, no hard pass threshold (human review). 記録する観点: "
+                "(a) images[] 数と markdown placeholder 数の対応, "
+                "(b) 画像内既知ラベルが markdown 本文に現れる割合 (label recall), "
+                "(c) ページ横断の本文テキスト欠落率 (1 - aggregate label recall)。"
+            ),
+            "pages": [
+                {
+                    "page_index": 4,
+                    "kind": "raster_chart",
+                    "expected_label_texts": FIGURE_CHART_LABELS,
+                    "risk": "Chart exported as a raster PNG; axis / legend / value text may stay locked inside the image.",
+                },
+                {
+                    "page_index": 5,
+                    "kind": "scan_page",
+                    "expected_label_texts": FIGURE_SCAN_LABELS,
+                    "risk": "Whole page is one raster (simulated scan); body text may be returned as an image, not markdown.",
+                },
+                {
+                    "page_index": 6,
+                    "kind": "infographic",
+                    "expected_label_texts": FIGURE_INFOGRAPHIC_LABELS,
+                    "risk": "Complex infographic layout; text callouts inside shapes may be dropped or image-ized.",
+                },
+            ],
+        }
     GROUND_TRUTH_PATH.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
@@ -98,7 +184,9 @@ def try_generate_with_reportlab() -> bool:
         return False
 
     try:
-        c = canvas.Canvas(str(PDF_PATH), pagesize=A4)
+        # invariant=True で CreationDate / doc ID を固定し、PDF をバイト決定論にする
+        # (raster 図表の再現性検証 = fixture 生成の決定論性ローカル検証の前提)。
+        c = canvas.Canvas(str(PDF_PATH), pagesize=A4, invariant=True)
         width, height = A4
         # CID フォントが無いと日本語グリフが描画されず、OCR 品質評価の fixture として無効になる。
         # Helvetica への silent fallback は行わない (登録失敗 = reportlab 経路の失敗として扱う)。
@@ -139,11 +227,138 @@ def try_generate_with_reportlab() -> bool:
         c.setFont(jp_font, 11)
         c.drawString(160, height - 350, "図1: 部門別の概略推移を示す埋め込み画像")
         c.showPage()
+
+        draw_figure_pages(c, jp_font, width, height)
         c.save()
         return True
     except Exception:
         PDF_PATH.unlink(missing_ok=True)
         return False
+
+
+def draw_figure_pages(c, jp_font: str, width: float, height: float) -> None:
+    """WS-ocr-figures: 画像内テキストを持つ raster 図表ページ (index 4-6) を描く。"""
+    from io import BytesIO
+
+    from reportlab.lib.utils import ImageReader
+
+    def place(png_bytes: bytes, heading: str, caption: str | None) -> None:
+        reader = ImageReader(BytesIO(png_bytes))
+        px_w, px_h = reader.getSize()
+        draw_w = 487.0
+        draw_h = draw_w * px_h / px_w
+        c.setFont(jp_font, 18)
+        c.drawString(54, height - 60, heading)
+        # レンダリング画像なので mask/透過は無効化 (mask=None)。
+        c.drawImage(reader, 54, height - 90 - draw_h, width=draw_w, height=draw_h, mask=None)
+        if caption:
+            c.setFont(jp_font, 11)
+            c.drawString(54, height - 110 - draw_h, caption)
+        c.showPage()
+
+    place(
+        render_bar_chart_png(),
+        "ラスタ図表OCR評価",
+        "図2: ラスタ画像として埋め込んだ棒グラフ。軸・凡例・数値ラベルは画像内テキスト。",
+    )
+    place(
+        render_scan_page_png(),
+        "スキャン風ページOCR評価",
+        None,
+    )
+    place(
+        render_infographic_png(),
+        "インフォグラフィックOCR評価",
+        "図3: パイプライン概要のインフォグラフィック。ボックス内テキストは画像内テキスト。",
+    )
+
+
+def _figure_font(size: int):
+    from PIL import ImageFont
+
+    try:
+        return ImageFont.load_default(size=size)
+    except TypeError:  # 古い Pillow は size 引数非対応 (bitmap 固定)
+        return ImageFont.load_default()
+
+
+def render_bar_chart_png() -> bytes:
+    """棒グラフ raster (画像内テキスト = タイトル/カテゴリ/数値ラベル)。決定論。"""
+    from io import BytesIO
+
+    from PIL import Image, ImageDraw
+
+    width, height = 1000, 600
+    img = Image.new("RGB", (width, height), (255, 255, 255))
+    draw = ImageDraw.Draw(img)
+    draw.rectangle([2, 2, width - 3, height - 3], outline=(0, 0, 0), width=2)
+    draw.text((40, 24), "REVENUE BY DEPT 2026Q1", fill=(0, 0, 0), font=_figure_font(40))
+
+    baseline = 500
+    bars = [("Tokyo", 1250), ("Osaka", 980), ("Nagoya", 760)]
+    colors = [(40, 90, 170), (200, 110, 40), (60, 150, 90)]
+    for index, (label, value) in enumerate(bars):
+        bar_h = int(value / 1400 * 360)
+        x0 = 120 + index * 280
+        x1 = x0 + 170
+        top = baseline - bar_h
+        draw.rectangle([x0, top, x1, baseline], fill=colors[index])
+        draw.text((x0 + 20, baseline + 12), label, fill=(0, 0, 0), font=_figure_font(34))
+        draw.text((x0 + 30, top - 44), str(value), fill=(0, 0, 0), font=_figure_font(32))
+    draw.text((40, height - 60), "Total 2990 kJPY", fill=(0, 0, 0), font=_figure_font(30))
+
+    buffer = BytesIO()
+    img.save(buffer, format="PNG")
+    return buffer.getvalue()
+
+
+def render_scan_page_png() -> bytes:
+    """ページ全体を 1 枚の raster にした scan 風テキスト。決定論。"""
+    from io import BytesIO
+
+    from PIL import Image, ImageDraw
+
+    width, height = 1000, 1320
+    img = Image.new("RGB", (width, height), (247, 246, 242))
+    draw = ImageDraw.Draw(img)
+    draw.rectangle([6, 6, width - 7, height - 7], outline=(150, 150, 150), width=2)
+    y = 70
+    for line in FIGURE_SCAN_LINES:
+        size = 46 if line == FIGURE_SCAN_LINES[0] else 34
+        if line:
+            draw.text((70, y), line, fill=(15, 15, 15), font=_figure_font(size))
+        y += 62 if size == 46 else 52
+    buffer = BytesIO()
+    img.save(buffer, format="PNG")
+    return buffer.getvalue()
+
+
+def render_infographic_png() -> bytes:
+    """パイプライン概要のインフォグラフィック raster (ボックス内テキスト)。決定論。"""
+    from io import BytesIO
+
+    from PIL import Image, ImageDraw
+
+    width, height = 1000, 560
+    img = Image.new("RGB", (width, height), (255, 255, 255))
+    draw = ImageDraw.Draw(img)
+    draw.rectangle([2, 2, width - 3, height - 3], outline=(0, 0, 0), width=2)
+    draw.text((40, 26), "KCS PIPELINE OVERVIEW", fill=(0, 0, 0), font=_figure_font(40))
+
+    stages = ["Ingest", "Markdownize", "Embed", "Index", "Search"]
+    box_w, box_h = 150, 90
+    y0 = 200
+    for index, stage in enumerate(stages):
+        x0 = 40 + index * 190
+        x1 = x0 + box_w
+        draw.rectangle([x0, y0, x1, y0 + box_h], outline=(0, 0, 0), width=3, fill=(230, 238, 250))
+        draw.text((x0 + 12, y0 + 32), stage, fill=(0, 0, 0), font=_figure_font(26))
+        if index < len(stages) - 1:
+            draw.line([x1, y0 + box_h // 2, x1 + 40, y0 + box_h // 2], fill=(0, 0, 0), width=3)
+    draw.text((40, 380), "42 percent uplift", fill=(160, 40, 40), font=_figure_font(34))
+    buffer = BytesIO()
+    img.save(buffer, format="PNG")
+    return buffer.getvalue()
 
 
 def draw_reportlab_table(c, jp_font: str, height: float) -> None:
@@ -442,7 +657,12 @@ def main() -> None:
         )
         generate_minimal_pdf()
     ensure_pdf_has_enough_structure(PDF_PATH)
-    write_ground_truth("reportlab" if used_reportlab else "minimal-pdf-writer")
+    # 図表診断ページ (index 4-6) は reportlab 経路でのみ生成する。minimal writer は
+    # raster 画像内テキストを描けず WS-ocr-figures の懸念を再現できないため。
+    write_ground_truth(
+        "reportlab" if used_reportlab else "minimal-pdf-writer",
+        include_figures=used_reportlab,
+    )
     print(f"wrote {PDF_PATH.relative_to(ROOT)}")
     print(f"wrote {GROUND_TRUTH_PATH.relative_to(ROOT)}")
 

@@ -39,7 +39,7 @@ KCS:   commit + raw_hash + chunk_hash   → ファイル移動・リネーム・
   "chunk_hash": "sha256:chunk456...",
   "path_at_commit": "report.pdf",
   "heading_path": ["認証仕様", "API Token", "有効期限"],
-  "section_id": "auth/api-token/expiry",
+  "section_id": "認証仕様/api-token/有効期限",
   "char_start": 1200,
   "char_end": 1500,
   "scope_id": "scope_01J8ZQ...",

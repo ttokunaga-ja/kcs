@@ -508,7 +508,7 @@ tree は entries を単一の flat 配列で持つ。スコープ境界規則 (�
   "gen": 3,
   "unit_key": "page:12",
   "heading_path": ["認証仕様", "API Token"],
-  "section_id": "auth/api-token",
+  "section_id": "認証仕様/api-token",
   "char_start": 1200,
   "char_end": 1500,
   "chunking_config_hash": "sha256:cfg1",
