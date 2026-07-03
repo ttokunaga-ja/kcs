@@ -12,8 +12,6 @@ pub type Result<T> = std::result::Result<T, PipelineError>;
 
 #[derive(Debug, Error)]
 pub enum PipelineError {
-    #[error("not implemented: {0}")]
-    NotImplemented(&'static str),
     #[error("{code}: {message}")]
     Contract { code: &'static str, message: String },
     #[error("io error at {path}: {message}")]

@@ -54,7 +54,8 @@ pub struct IgnoreRule {
 
 pub fn build_scan_preview(request: ScanPreviewRequest) -> Result<ScanPreview> {
     let scope_path = PathBuf::from(&request.scope_path);
-    let ignore_rules = load_kcsignore(&scope_path)?;
+    let mut ignore_rules = load_config_ignore(&scope_path)?;
+    ignore_rules.extend(load_kcsignore(&scope_path)?);
     let mut candidates = Vec::new();
     for entry in std::fs::read_dir(&scope_path).pipeline_io(&scope_path)? {
         let entry = entry.pipeline_io(&scope_path)?;
@@ -144,12 +145,48 @@ pub fn load_kcsignore(scope_path: &Path) -> Result<Vec<IgnoreRule>> {
         .collect())
 }
 
+pub fn load_config_ignore(scope_path: &Path) -> Result<Vec<IgnoreRule>> {
+    let path = scope_path.join(".kcs/config.toml");
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(err) => {
+            return Err(crate::PipelineError::Io {
+                path: path.display().to_string(),
+                message: err.to_string(),
+            });
+        }
+    };
+    let value: toml::Value =
+        toml::from_str(&text).map_err(|err| crate::PipelineError::Schema(err.to_string()))?;
+    let Some(ignore) = value
+        .get("scope")
+        .and_then(|scope| scope.get("ignore"))
+        .and_then(toml::Value::as_array)
+    else {
+        return Ok(Vec::new());
+    };
+    Ok(ignore
+        .iter()
+        .filter_map(toml::Value::as_str)
+        .map(|pattern| IgnoreRule {
+            pattern: pattern.trim_start_matches('!').to_owned(),
+            negated: pattern.starts_with('!'),
+        })
+        .collect())
+}
+
 #[must_use]
 pub fn classify_secret(path: &str) -> Option<SecretTier> {
     let name = path.rsplit('/').next().unwrap_or(path);
     let lower = name.to_ascii_lowercase();
     let tier_a = lower == ".env"
         || lower.starts_with(".env.")
+        || lower == ".ssh"
+        || lower == ".gnupg"
+        || lower == ".aws"
+        || lower == ".kube"
+        || lower == ".docker"
         || lower.ends_with(".pem")
         || lower.ends_with(".key")
         || lower.ends_with(".p12")
@@ -194,7 +231,7 @@ fn matches_ignore_pattern(path: &str, is_dir: bool, pattern: &str) -> bool {
     if directory_only && !is_dir {
         return false;
     }
-    let pattern = pattern.trim_end_matches('/');
+    let pattern = pattern.trim_start_matches('/').trim_end_matches('/');
     wildcard_match(pattern, path)
 }
 

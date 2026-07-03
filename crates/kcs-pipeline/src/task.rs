@@ -1,12 +1,14 @@
 //! Batch task descriptor contracts.
 
-use std::collections::VecDeque;
-use std::sync::{Mutex, OnceLock};
+use std::collections::BTreeMap;
+use std::fs::{self, OpenOptions};
+use std::io::{BufRead, Write};
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
 use crate::markdownize::MarkdownizeMode;
-use crate::Result;
+use crate::{IoResultExt, PipelineError, Result};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -75,25 +77,107 @@ pub struct RetryPolicy {
     pub paused: bool,
 }
 
-pub fn enqueue_task(descriptor: TaskDescriptor) -> Result<()> {
-    queue()
-        .lock()
-        .expect("task queue mutex poisoned")
-        .push_back(descriptor);
-    Ok(())
+#[derive(Debug, Clone)]
+pub struct TaskStore {
+    path: PathBuf,
 }
 
-pub fn pull_next_task(_scope_id: &str) -> Result<Option<TaskDescriptor>> {
-    let mut queue = queue().lock().expect("task queue mutex poisoned");
-    let Some(position) = queue
-        .iter()
-        .position(|task| task.status == TaskStatus::Pending)
-    else {
-        return Ok(None);
-    };
-    let mut task = queue.remove(position).expect("position came from queue");
-    task.status = TaskStatus::Running;
-    Ok(Some(task))
+impl TaskStore {
+    #[must_use]
+    pub fn new(kcs_dir: impl AsRef<Path>) -> Self {
+        Self {
+            path: kcs_dir.as_ref().join("tasks.jsonl"),
+        }
+    }
+
+    pub fn append(&self, descriptor: &TaskDescriptor) -> Result<()> {
+        if let Some(parent) = self.path.parent() {
+            fs::create_dir_all(parent).pipeline_io(parent)?;
+        }
+        let mut file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.path)
+            .pipeline_io(&self.path)?;
+        serde_json::to_writer(&mut file, descriptor)
+            .map_err(|err| PipelineError::Schema(err.to_string()))?;
+        file.write_all(b"\n").pipeline_io(&self.path)
+    }
+
+    pub fn all(&self) -> Result<Vec<TaskDescriptor>> {
+        let file = match fs::File::open(&self.path) {
+            Ok(file) => file,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(err) => {
+                return Err(PipelineError::Io {
+                    path: self.path.display().to_string(),
+                    message: err.to_string(),
+                });
+            }
+        };
+        let mut by_id = BTreeMap::new();
+        for line in std::io::BufReader::new(file).lines() {
+            let line = line.pipeline_io(&self.path)?;
+            if line.trim().is_empty() {
+                continue;
+            }
+            let descriptor: TaskDescriptor = serde_json::from_str(&line)
+                .map_err(|err| PipelineError::Schema(err.to_string()))?;
+            by_id.insert(descriptor.task_id.clone(), descriptor);
+        }
+        Ok(by_id.into_values().collect())
+    }
+
+    pub fn replace_all(&self, descriptors: &[TaskDescriptor]) -> Result<()> {
+        if let Some(parent) = self.path.parent() {
+            fs::create_dir_all(parent).pipeline_io(parent)?;
+        }
+        let temp = self.path.with_extension("jsonl.tmp");
+        {
+            let mut file = fs::File::create(&temp).pipeline_io(&temp)?;
+            for descriptor in descriptors {
+                serde_json::to_writer(&mut file, descriptor)
+                    .map_err(|err| PipelineError::Schema(err.to_string()))?;
+                file.write_all(b"\n").pipeline_io(&temp)?;
+            }
+        }
+        fs::rename(&temp, &self.path).pipeline_io(&self.path)
+    }
+
+    pub fn update_matching(
+        &self,
+        mut update: impl FnMut(&mut TaskDescriptor) -> bool,
+    ) -> Result<usize> {
+        let mut descriptors = self.all()?;
+        let mut changed = 0;
+        for descriptor in &mut descriptors {
+            if update(descriptor) {
+                changed += 1;
+            }
+        }
+        self.replace_all(&descriptors)?;
+        Ok(changed)
+    }
+
+    pub fn pending_count(&self) -> Result<usize> {
+        Ok(self
+            .all()?
+            .iter()
+            .filter(|task| task.status == TaskStatus::Pending)
+            .count())
+    }
+
+    pub fn done_output_for(
+        &self,
+        input_hash: &str,
+        output_ref: &str,
+    ) -> Result<Option<TaskDescriptor>> {
+        Ok(self.all()?.into_iter().find(|task| {
+            task.input_hash == input_hash
+                && task.output_ref == output_ref
+                && matches!(task.status, TaskStatus::Done | TaskStatus::Partial)
+        }))
+    }
 }
 
 #[must_use]
@@ -178,11 +262,6 @@ pub fn retry_policy(error_kind: RetryErrorKind) -> RetryPolicy {
 #[must_use]
 pub fn idempotency_key(input_hash: &str, tool_profile_hash: &str) -> String {
     crate::prepare::hash_bytes(format!("{input_hash}\0{tool_profile_hash}").as_bytes())
-}
-
-fn queue() -> &'static Mutex<VecDeque<TaskDescriptor>> {
-    static QUEUE: OnceLock<Mutex<VecDeque<TaskDescriptor>>> = OnceLock::new();
-    QUEUE.get_or_init(|| Mutex::new(VecDeque::new()))
 }
 
 #[cfg(test)]
