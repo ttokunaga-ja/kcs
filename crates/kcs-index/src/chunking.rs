@@ -7,8 +7,10 @@ use crate::{ChunkRow, Result};
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChunkingConfig {
     pub chunking_config_hash: String,
-    pub target_chars: u64,
-    pub overlap_chars: u64,
+    /// 03 §11 `[chunking] strategy` (MVP は "heading" のみ)
+    pub strategy: String,
+    /// 03 §11 `[chunking] max_chars` (04 §4.1 の分割規則の閾値)
+    pub max_chars: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

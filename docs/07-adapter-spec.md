@@ -216,7 +216,7 @@ metadata:
 
 Text Embedding Adapter / Image Embedding Adapter は**採用しない**。同一 Embedding Adapter が同一 profile で多モダリティを単一 vector space へ写像する。
 
-> **実地検証済み — text-only 緩和を適用 (2026-07-03、凍結例外 [09-mvp-scope.md §6.2](09-mvp-scope.md) 条件 1)**: ベンダー調査 (`tasks/step3-embedding-verify.md`) の結果、「版ピン留め可能」かつ「日本語 text 品質を犠牲にしない」multimodal embedding API は現存しない (pin 可能な voyage-multimodal-3 / cohere embed-v4.0 は text 品質が text 専用モデルに劣後、text 品質最上位の Gemini Embedding 2 multimodal は preview で pin 不可)。image embedding は北極星 M3-1〜M3-3 の Done 条件に寄与しないため、**MVP は `modality=text` の単一 Embedding Adapter とし、multimodal (`input_type`/`modality` の schema) は interface 予約のみ** とする。第一候補 profile: `gemini-embedding-001` (768 次元 / cosine / batch)。fallback: `text-embedding-3-large`。将来 multimodal 有効化時の先頭候補は cohere embed-v4.0 (profile 変更 = 全 re-index [03-data-model.md §7](03-data-model.md) を伴う点は変わらない)。
+> **実地検証済み — 単一 multimodal profile を採用 (2026-07-03 再検証で確定)**: 初回調査は「Gemini Embedding 2 multimodal は preview で pin 不可」を根拠に text-only 緩和を適用したが、事実誤認 (`gemini-embedding-2` は 2026-04-22 に GA、pinned stable 版あり) が判明し**撤回**。再検証 (`tasks/step3-embedding-verify.md` の再検証節) により本節冒頭の本来の契約どおり **単一マルチモーダル Embedding Adapter** を採用する。確定 profile: **`gemini-embedding-2` (GA 版を Adapter が起動時解決して pin、§6) / 768 次元 (MRL 切り詰め — 切り詰め後次元も profile に固定) / cosine / `modality="multimodal"` / `mode="online"`** (Vertex はバッチ推論非対応のため client 側で並列 + 429 backoff)。MVP で実際に embed するのは text chunk のみだが、profile を multimodal にしておくことで Phase 4+ の image/audio embedding を [03-data-model.md §7](03-data-model.md) の全 re-index なしに追加できる。text 品質は MTEB で `gemini-embedding-001` を上回り日本語も同格 (再検証節)。コスト: 10 万 chunk 初回 ≈ $10 (単月 budget 内)。
 
 ```sql
 CREATE TABLE embeddings (
@@ -282,12 +282,12 @@ Rerank Adapter は KCS の検索結果を再順位付けするだけで、**sear
     "capabilities": ["ocr", "layout_detection", "table_extraction"]
   },
   "embedding": {
-    "tool_id": "gemini_text_embedding",
+    "tool_id": "gemini_embedding_2",
     "kind": "online_api",
-    "mode": "batch",
+    "mode": "online",
     "dimensions": 768,
     "distance": "cosine",
-    "modality": "text",
+    "modality": "multimodal",
     "profile_hash": "sha256:..."
   }
 }

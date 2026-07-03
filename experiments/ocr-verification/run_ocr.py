@@ -236,9 +236,7 @@ def build_mock_response(ground_truth: dict[str, Any]) -> dict[str, Any]:
     tiny_png_base64 = (
         "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII="
     )
-    return {
-        "model": "mistral-ocr-4-0-dry-run",
-        "pages": [
+    pages = [
             {
                 "index": 0,
                 "markdown": "# 複雑表OCR評価\n\n" + table,
@@ -290,10 +288,99 @@ def build_mock_response(ground_truth: dict[str, Any]) -> dict[str, Any]:
                 "confidence_scores": {"average_page_confidence_score": 0.99},
                 "blocks": [{"type": "image", "image_id": "img-0.png"}],
             },
-        ],
+        ]
+    if ground_truth.get("figures"):
+        pages.extend(build_mock_figure_pages(ground_truth, tiny_png_base64))
+    return {
+        "model": "mistral-ocr-4-0-dry-run",
+        "pages": pages,
         "document_annotation": None,
         "usage_info": {"pages_processed": ground_truth["page_count"]},
     }
+
+
+def build_mock_figure_pages(ground_truth: dict[str, Any], tiny_png_base64: str) -> list[dict[str, Any]]:
+    """WS-ocr-figures 診断ページの合成応答。
+
+    実 OCR 挙動の主張ではなく、evaluate.py の figures 判定を dry-run で通すための
+    illustrative なモック。3 段階 (欠落 / 完全 / 部分) を意図的に作り分けている:
+      - raster_chart : placeholder + image のみ、画像内テキストは本文に無し (最悪ケース, recall 0)
+      - scan_page    : raster を OCR して本文化、image 無し (最良ケース, recall 1.0)
+      - infographic  : placeholder + image + 一部ラベルのみ (部分欠落, recall < 1.0)
+    """
+    dims = {"width": 595, "height": 842, "unit": "pt"}
+    specs = {page["kind"]: page for page in ground_truth["figures"]["pages"]}
+    result: list[dict[str, Any]] = []
+
+    chart = specs["raster_chart"]
+    result.append(
+        {
+            "index": chart["page_index"],
+            "markdown": "# ラスタ図表OCR評価\n\n![img-1.png](img-1.png)\n\n図2: ラスタ画像として埋め込んだ棒グラフ",
+            "images": [
+                {
+                    "id": "img-1.png",
+                    "top_left_x": 54,
+                    "top_left_y": 90,
+                    "bottom_right_x": 541,
+                    "bottom_right_y": 382,
+                    "image_base64": tiny_png_base64,
+                }
+            ],
+            "tables": [],
+            "hyperlinks": [],
+            "dimensions": dims,
+            "confidence_scores": {"average_page_confidence_score": 0.83},
+            "blocks": [{"type": "image", "image_id": "img-1.png"}],
+        }
+    )
+
+    scan = specs["scan_page"]
+    scan_body = (
+        "KCS SCAN FIXTURE PAGE FIVE\n\n"
+        "This entire page is rendered as a single raster image, a simulated scan of text-native content.\n\n"
+        "Anchor tokens for retrieval checks: ALPHA-7731 BRAVO-2048 CHARLIE-9152\n\n"
+        "If the page is returned only as an image with a placeholder, every token is lost to search."
+    )
+    result.append(
+        {
+            "index": scan["page_index"],
+            "markdown": "# スキャン風ページOCR評価\n\n" + scan_body,
+            "images": [],
+            "tables": [],
+            "hyperlinks": [],
+            "dimensions": dims,
+            "confidence_scores": {"average_page_confidence_score": 0.9},
+            "blocks": [{"type": "text", "content": scan_body}],
+        }
+    )
+
+    info = specs["infographic"]
+    result.append(
+        {
+            "index": info["page_index"],
+            "markdown": (
+                "# インフォグラフィックOCR評価\n\n![img-2.png](img-2.png)\n\n"
+                "KCS PIPELINE OVERVIEW\n\nIngest Markdownize Embed"
+            ),
+            "images": [
+                {
+                    "id": "img-2.png",
+                    "top_left_x": 54,
+                    "top_left_y": 90,
+                    "bottom_right_x": 541,
+                    "bottom_right_y": 363,
+                    "image_base64": tiny_png_base64,
+                }
+            ],
+            "tables": [],
+            "hyperlinks": [],
+            "dimensions": dims,
+            "confidence_scores": {"average_page_confidence_score": 0.85},
+            "blocks": [{"type": "image", "image_id": "img-2.png"}],
+        }
+    )
+    return result
 
 
 def markdown_table(cell_texts: list[str]) -> str:

@@ -10,18 +10,18 @@ KCS Step 3 の本体実装。**契約テスト仕様 `tasks/step3a-contract-test
 - スキャフォールド: `crates/kcs-index` / `crates/kcs-search` (型 + trait 骨格)
 - 契約テスト仕様: `tasks/step3a-contract-tests.md` r2 — ベクタ実計算済み・クロスレビュー再計算一致。**期待値の変更禁止**
 - spec 追記済み (2026-07-03): chunk 境界の正準規則 (04 §4.1)、MMR relevance 正規化 (05 §1.4)、query_hash 正準構成 (05 §1.8)、per-search latency 記録 (05 §7)
-- embedding は **text-only 緩和適用済み** (07 §5.3、tasks/step3-embedding-verify.md): 第一候補 `gemini-embedding-001` (768 / cosine / batch)。multimodal は interface 予約のみ
+- embedding は **単一 multimodal profile 採用** (07 §5.3 再検証で確定、tasks/step3-embedding-verify.md 再検証節): `gemini-embedding-2` (GA) / 768 次元 (MRL 切り詰め、profile 固定) / cosine / modality=multimodal / mode=online (バッチ非対応 — client 側並列 + 429 backoff)。**MVP で embed するのは text chunk のみ**
 - 検索評価ハーネス: `eval/` (コーパス生成・履歴再現・golden queries 50・run_eval.py)
 
 ## 実装範囲 (正本: docs/09-mvp-scope.md §3.1 の Step 3 行)
 
 1. chunking (04 §4.1 の正準規則: ATX heading / heading_path / section_id slug / max_chars 分割、unit-local span、chunk_hash = 03 §8.1)
 2. SQLite 層: chunks / embeddings (+ chunk_vec sqlite-vec) / chunk_fts (FTS5 外部 content + trigger + trigram) / tree_entries (HEAD 射影、04 §4.5) / chunk 世代 (04 §4.6、chunking_config_hash)
-3. embedding: Gemini embedding adapter (text、batch mode、版ピン留め = 数値版名)、互換性ルール (03 §7: 不一致で vector 拒否 + text fallback)。**テストはモック** (Step 2 の Mistral と同じ trait seam 方式)
+3. embedding: Gemini embedding adapter (`gemini-embedding-2`、multimodal profile、768/MRL、mode=online + 429 backoff、GA 版を起動時解決して pin = 07 §6)、互換性ルール (03 §7: dimensions/distance/modality/profile_hash 不一致で vector 拒否 + text fallback)。**テストはモック** (Step 2 の Mistral と同じ trait seam 方式)
 4. hybrid search: mode 解決 auto→hybrid→text fallback + fallback_reason 可視化 (05 §1.1)、weighted RRF (k=60、candidate_depth 200、同点 chunk_id 昇順)、MMR (正規化 relevance、mmr_depth 100、text-only 時は不適用)
 5. paging / cursor: 決定論的再計算 (05 §1.5)、query_hash (正準構成)、multi-scope 合成 token (05 §1.8)、CURSOR-001 / SHALLOW-001
 6. multi-scope search: scope 列挙 (registry)、並列 min(4,N)、per-scope timeout、rank ベース統合 (raw スコア比較禁止)、searched_scopes / excluded_scopes、部分失敗 exit 3 / 全失敗 exit 4
-7. Evidence Pointer: 検索結果への発行 (08 §2 必須フィールド + evidence_uri)、解決 (scope_id 2 段 / gen / working tree / CAS / tombstoned / not_found / scope_unreachable)、`kcs open` (06 §1.1)、`kcs view`、`kcs evidence verify` 単発
+7. Evidence Pointer: 検索結果への発行 (08 §2 必須フィールド + evidence_uri)、解決 (scope_id 2 段 / gen / working tree / CAS / tombstoned / not_found / scope_unreachable)、`kcs open` (06 §1.1)、`kcs view`。**`kcs evidence verify` CLI は Step 4** (09 §3.1) — resolver 内部関数までが Step 3 範囲
 8. `kcs search` CLI (06 §3: --scope/--descendants/--all-scopes/--text/--vector/--hybrid/--no-vector/--limit/--offset/--cursor/--json)。time-travel フラグ (--at 等) は**受理して "Step 4" エラー** (§D の境界判定どおり)
 9. `kcs reindex [--force]` (gen+1、旧 gen 残置、pointer 不変、確認プロンプト)
 10. index_status (05 §1.7)、metrics.jsonl per-search latency (05 §7)、access.jsonl
