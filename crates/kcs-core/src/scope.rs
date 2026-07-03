@@ -1,12 +1,13 @@
 //! Folder-scope repository operations for Step 1.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs::{self, OpenOptions};
+use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
@@ -16,11 +17,10 @@ use crate::cas::{
 };
 use crate::dag::{build_tree, CommitObject, CommitStats, CommitType, TreeEntry, TreeObject};
 use crate::error::{IoResultExt, KcsError, Result};
+use crate::schema::{validate_json_schema, SchemaKind};
 use crate::ExitCode;
 
 const FORMAT_VERSION: &str = "0.1.0";
-const LOCK_STALE_AFTER: Duration = Duration::from_secs(30 * 60);
-
 #[derive(Debug, Clone)]
 pub struct Repository {
     root: PathBuf,
@@ -212,7 +212,7 @@ impl Repository {
         for path in paths {
             let status = match (head_map.get(&path), current_map.get(&path)) {
                 (None, Some(_)) => "new",
-                (Some(old), Some(new)) if old == new => "up_to_date",
+                (Some(old), Some(new)) if old == new => "unchanged",
                 (Some(_), Some(_)) => "modified",
                 (Some(_), None) => "deleted",
                 (None, None) => continue,
@@ -237,6 +237,7 @@ impl Repository {
     ) -> Result<SnapshotOutcome> {
         self.validate()?;
         let _lock = StoreLock::acquire(&self.kcs_dir)?;
+        maybe_hold_lock_for_tests();
 
         let working = self.build_working_tree(true)?.tree;
         let tree_value =
@@ -478,25 +479,15 @@ impl Repository {
         let value = fs::read_to_string(&path).kcs_io(&path)?;
         let toml: toml::Value =
             toml::from_str(&value).map_err(|err| KcsError::schema(err.to_string()))?;
-        let version = match toml.get("kcs_format_version") {
+        let json_value =
+            serde_json::to_value(&toml).map_err(|err| KcsError::schema(err.to_string()))?;
+        validate_json_schema(SchemaKind::Config, &json_value)?;
+        let version = match json_value.get("kcs_format_version") {
             Some(value) => value
                 .as_str()
                 .ok_or_else(|| KcsError::schema("kcs_format_version must be a string"))?,
             None => FORMAT_VERSION,
         };
-        if let Some(gc) = toml.get("gc") {
-            let table = gc
-                .as_table()
-                .ok_or_else(|| KcsError::schema("gc must be a table"))?;
-            if let Some(mode) = table.get("mode") {
-                let mode = mode
-                    .as_str()
-                    .ok_or_else(|| KcsError::schema("gc.mode must be a string"))?;
-                if !matches!(mode, "manual_only" | "after_index" | "on_idle") {
-                    return Err(KcsError::schema("gc.mode has invalid value"));
-                }
-            }
-        }
         validate_format_version(version)
     }
 
@@ -504,6 +495,7 @@ impl Repository {
         let path = self.kcs_dir.join("scope.json");
         let value: Value = serde_json::from_str(&fs::read_to_string(&path).kcs_io(&path)?)
             .map_err(|err| KcsError::schema(err.to_string()))?;
+        validate_json_schema(SchemaKind::Scope, &value)?;
         let Some(scope_id) = value.get("scope_id").and_then(Value::as_str) else {
             return Err(KcsError::schema("scope.json missing scope_id"));
         };
@@ -526,6 +518,7 @@ impl Repository {
         let path = self.kcs_dir.join("manifest.json");
         let value: Value = serde_json::from_str(&fs::read_to_string(&path).kcs_io(&path)?)
             .map_err(|err| KcsError::schema(err.to_string()))?;
+        validate_json_schema(SchemaKind::Manifest, &value)?;
         if !value.is_object() {
             return Err(KcsError::schema("manifest.json must be an object"));
         }
@@ -560,7 +553,7 @@ impl Repository {
                 .get("status")
                 .and_then(Value::as_str)
                 .ok_or_else(|| KcsError::schema("manifest file entry missing status"))?;
-            if !matches!(status, "new" | "modified" | "deleted" | "up_to_date") {
+            if !matches!(status, "new" | "modified" | "deleted" | "unchanged") {
                 return Err(KcsError::schema("manifest status has invalid value"));
             }
         }
@@ -575,7 +568,7 @@ impl Repository {
                 json!({
                     "path": entry.path,
                     "raw_hash": entry.raw_hash,
-                    "status": "up_to_date",
+                    "status": "unchanged",
                 })
             })
             .collect::<Vec<_>>();
@@ -668,49 +661,136 @@ fn validate_format_version(version: &str) -> Result<()> {
 
 struct StoreLock {
     path: PathBuf,
+    pid: u32,
+    token: String,
 }
 
 impl StoreLock {
     fn acquire(kcs_dir: &Path) -> Result<Self> {
         let path = kcs_dir.join(".lock");
-        if is_stale_lock(&path)? {
-            let _ = fs::remove_file(&path);
+        let pid = std::process::id();
+        let token = new_lock_token(pid);
+
+        for _ in 0..2 {
+            match OpenOptions::new().write(true).create_new(true).open(&path) {
+                Ok(mut file) => {
+                    write_lock_file(&path, &mut file, pid, &token)?;
+                    return Ok(Self { path, pid, token });
+                }
+                Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
+                    if reclaim_stale_lock(&path)? {
+                        continue;
+                    }
+                    return Err(KcsError::locked(path.display().to_string()));
+                }
+                Err(err) => return Err(KcsError::io(err.to_string(), path.display().to_string())),
+            }
         }
 
-        match OpenOptions::new().write(true).create_new(true).open(&path) {
-            Ok(mut file) => {
-                let body = json!({
-                    "pid": std::process::id(),
-                    "created_at": now_utc_seconds(),
-                })
-                .to_string();
-                file.write_all(body.as_bytes()).kcs_io(&path)?;
-                Ok(Self { path })
-            }
-            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
-                Err(KcsError::locked(path.display().to_string()))
-            }
-            Err(err) => Err(KcsError::io(err.to_string(), path.display().to_string())),
-        }
+        Err(KcsError::locked(path.display().to_string()))
     }
 }
 
 impl Drop for StoreLock {
     fn drop(&mut self) {
-        let _ = fs::remove_file(&self.path);
+        if lock_file_matches(&self.path, self.pid, &self.token).unwrap_or(false) {
+            let _ = fs::remove_file(&self.path);
+        }
     }
 }
 
-fn is_stale_lock(path: &Path) -> Result<bool> {
-    if !path.exists() {
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+struct LockFile {
+    pid: u32,
+    token: String,
+    created_at: String,
+}
+
+fn write_lock_file(path: &Path, file: &mut File, pid: u32, token: &str) -> Result<()> {
+    let lock = LockFile {
+        pid,
+        token: token.to_owned(),
+        created_at: now_utc_seconds(),
+    };
+    let body = serde_json::to_vec(&lock)
+        .map_err(|err| KcsError::io(err.to_string(), path.display().to_string()))?;
+    file.write_all(&body).kcs_io(path)?;
+    file.sync_all().kcs_io(path)
+}
+
+fn reclaim_stale_lock(path: &Path) -> Result<bool> {
+    let Some(lock) = read_lock_file(path)? else {
+        return Ok(true);
+    };
+    if process_is_alive(lock.pid) {
         return Ok(false);
     }
-    let metadata = fs::metadata(path).kcs_io(path)?;
-    let modified = metadata.modified().unwrap_or(SystemTime::now());
-    Ok(SystemTime::now()
-        .duration_since(modified)
-        .map(|age| age > LOCK_STALE_AFTER)
-        .unwrap_or(false))
+
+    let Some(current) = read_lock_file(path)? else {
+        return Ok(true);
+    };
+    if current != lock || process_is_alive(current.pid) {
+        return Ok(false);
+    }
+    match fs::remove_file(path) {
+        Ok(()) => Ok(true),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(true),
+        Err(err) => Err(KcsError::io(err.to_string(), path.display().to_string())),
+    }
+}
+
+fn read_lock_file(path: &Path) -> Result<Option<LockFile>> {
+    match fs::read_to_string(path) {
+        Ok(value) => serde_json::from_str(&value)
+            .map(Some)
+            .map_err(|_| KcsError::locked(path.display().to_string())),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(err) => Err(KcsError::io(err.to_string(), path.display().to_string())),
+    }
+}
+
+fn lock_file_matches(path: &Path, pid: u32, token: &str) -> Result<bool> {
+    Ok(read_lock_file(path)?.is_some_and(|lock| lock.pid == pid && lock.token == token))
+}
+
+fn process_is_alive(pid: u32) -> bool {
+    if pid == std::process::id() {
+        return true;
+    }
+    Command::new("kill")
+        .arg("-0")
+        .arg(pid.to_string())
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
+fn new_lock_token(pid: u32) -> String {
+    let seed = format!(
+        "{pid}:{}:{}",
+        unix_nanos(),
+        std::thread::current().name().unwrap_or("")
+    );
+    let digest = Sha256::digest(seed.as_bytes());
+    hex_prefix(&digest, 32)
+}
+
+#[cfg(debug_assertions)]
+fn maybe_hold_lock_for_tests() {
+    if let Ok(value) = std::env::var("KCS_TEST_HOLD_LOCK_MS") {
+        if let Ok(ms) = value.parse::<u64>() {
+            std::thread::sleep(Duration::from_millis(ms));
+        }
+    }
+}
+
+#[cfg(not(debug_assertions))]
+fn maybe_hold_lock_for_tests() {}
+
+fn unix_nanos() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default()
 }
 
 fn new_ulid(path: &Path) -> String {
@@ -746,6 +826,21 @@ fn encode_crockford_base32(bytes: &[u8; 16]) -> String {
         value >>= 5;
     }
     String::from_utf8(chars.to_vec()).expect("base32 alphabet is UTF-8")
+}
+
+fn hex_prefix(bytes: &[u8], chars: usize) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(chars);
+    for byte in bytes {
+        if out.len() >= chars {
+            break;
+        }
+        out.push(HEX[(byte >> 4) as usize] as char);
+        if out.len() < chars {
+            out.push(HEX[(byte & 0x0f) as usize] as char);
+        }
+    }
+    out
 }
 
 fn is_ulid(value: &str) -> bool {

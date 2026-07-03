@@ -1,6 +1,8 @@
 use std::fs;
 
-use kcs_core::cas::{canonical_json_bytes, fanout_path, hash_bytes, hash_json};
+use kcs_core::cas::{
+    canonical_json_bytes, fanout_path, hash_bytes, hash_json, ObjectKind, ObjectStore,
+};
 use kcs_core::dag::{
     build_tree, commit_hash, gc_policy, protected, CommitObject, CommitStats, CommitType, GcPolicy,
     NormalizeRef, TreeEntry,
@@ -74,9 +76,20 @@ fn ct_hash_006_007_008_hash_shape_round_trip_and_key_order() {
     let a = json!({"object_type":"tree","entries":[{"path":"a.pdf","type":"file","raw_hash":RAW_EMPTY}]});
     let b = json!({"entries":[{"raw_hash":RAW_EMPTY,"type":"file","path":"a.pdf"}],"object_type":"tree"});
     assert_eq!(hash_json(&a).unwrap(), hash_json(&b).unwrap());
-    assert!(!String::from_utf8(canonical_json_bytes(&a).unwrap())
-        .unwrap()
-        .contains("tree_hash"));
+
+    let temp = tempfile::tempdir().unwrap();
+    let repo = Repository::init(temp.path()).unwrap();
+    let store = ObjectStore::new(repo.kcs_dir());
+    let (stored_hash, stored_bytes) = store.write_json(ObjectKind::Tree, &a).unwrap();
+    let read = store.read_by_hash(&stored_hash).unwrap();
+    assert_eq!(hash_bytes(&read.bytes), stored_hash);
+    assert_eq!(read.bytes, stored_bytes);
+
+    let stored = String::from_utf8(read.bytes).unwrap();
+    assert!(!stored.contains("tree_hash"));
+    assert!(!stored.contains("tree_id"));
+    assert!(!stored.contains("commit_hash"));
+    assert!(!stored.contains("commit_id"));
 }
 
 #[test]
