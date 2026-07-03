@@ -24,8 +24,8 @@ use kcs_core::scope::{
 };
 use kcs_core::{ExitCode, KcsError, Result};
 use kcs_pipeline::budget::{
-    estimate_local_baseline_cost, evaluate_budget_with_caps, read_budget_caps, utc_month,
-    BudgetEstimate, CostLedger, MonthlyCostLedgerEntry,
+    estimate_local_baseline_cost, evaluate_budget_with_caps, read_budget_policy, utc_month,
+    BudgetCapKind, BudgetCaps, BudgetEstimate, CostLedger, MonthlyCostLedgerEntry,
 };
 use kcs_pipeline::markdownize::{
     choose_markdownize_mode, persist_normalized_instance, validate_markdownize_response,
@@ -37,6 +37,7 @@ use kcs_pipeline::prepare::{
     PreparedUnit, UnitFingerprint, UnitType,
 };
 use kcs_pipeline::scan::{build_scan_preview, ScanCandidate, ScanPreview, ScanPreviewRequest};
+use kcs_pipeline::task::{retry_policy, task_status_from_unit_counts, RetryErrorKind};
 use kcs_pipeline::task::{TaskDescriptor, TaskStatus, TaskStore, TaskType};
 use serde_json::{json, Value};
 
@@ -238,6 +239,7 @@ fn run(cli: Cli) -> Result<Value> {
                 "files": repo.status()?,
                 "tasks": task_store.all().map_err(pipeline_to_kcs)?,
                 "quarantine": read_quarantine_records(&repo)?,
+                "budget": budget_status_json(&repo)?,
             }))
         }
         Command::Snapshot(args) => {
@@ -402,18 +404,32 @@ fn run_index(args: IndexArgs) -> Result<Value> {
             }),
         )?;
     }
-    Ok(json!({
+    let output = json!({
         "status": if outcome.noop { "noop" } else { "indexed" },
         "approval_method": if args.approve { "approve" } else if args.yes { "yes" } else { "existing" },
-        "network_opt_in": index_result.network_allowed,
+        "network_allowed": index_result.network_allowed,
+        "network_opt_in": persistent_network_allowed(&repo)?,
         "pending_online_tasks": index_result.pending_online_tasks,
         "paused_tasks": index_result.paused_tasks,
+        "failed_files": index_result.failed_files,
         "normalized_files": index_result.normalized_files,
         "pending_files": index_result.pending_files,
         "tree_hash": outcome.tree_hash,
         "commit_hash": outcome.commit_hash,
         "commit": outcome.commit,
-    }))
+    });
+    if index_result.failed_files > 0 {
+        return Err(KcsError::new(
+            "KCS-E-INDEX-PARTIAL-001",
+            "index completed with failed candidates",
+            json!({
+                "failed_files": index_result.failed_files,
+                "output": output.clone(),
+            }),
+            ExitCode::PartialFailure,
+        ));
+    }
+    Ok(output)
 }
 
 fn run_batch(args: BatchArgs) -> Result<Value> {
@@ -446,9 +462,12 @@ fn run_batch(args: BatchArgs) -> Result<Value> {
         Some(BatchCommand::Retry) => {
             let changed = store
                 .update_matching(|task| {
-                    if task.status == TaskStatus::Failed {
+                    if task.status == TaskStatus::Failed
+                        && task_retry_allowed(task)
+                        && task_retry_due(task)
+                    {
                         task.status = TaskStatus::Pending;
-                        task.attempts = task.attempts.saturating_add(1);
+                        task.next_retry_at = None;
                         true
                     } else {
                         false
@@ -468,6 +487,12 @@ fn execute_pending_tasks(repo: &Repository, store: &TaskStore) -> Result<usize> 
     if !persistent_network_allowed(repo)? {
         return Ok(0);
     }
+    let budget_caps =
+        read_budget_policy(user_config_toml_path(), repo.kcs_dir().join("config.toml"))
+            .map_err(pipeline_to_kcs)?;
+    let cost_ledger = CostLedger::new(cost_ledger_path());
+    let month = utc_month(&now_utc_seconds());
+    let scope_id = repo.scope_id_for_adapter();
     let tasks = store
         .all()
         .map_err(pipeline_to_kcs)?
@@ -481,6 +506,41 @@ fn execute_pending_tasks(repo: &Repository, store: &TaskStore) -> Result<usize> 
     let mut executed = 0usize;
     for task in tasks {
         let task_id = task.task_id.clone();
+        let file_size = repo
+            .root()
+            .join(&task.input_path)
+            .metadata()
+            .map(|metadata| metadata.len())
+            .unwrap_or(0);
+        let estimate = BudgetEstimate {
+            scope_id: scope_id.clone(),
+            task_type: TaskType::Markdownize,
+            estimated_usd: estimate_online_markdownize_cost(file_size),
+            adapter_id: Some("mistral_ocr_markdownize".to_owned()),
+        };
+        let (device_remaining, folder_remaining) = budget_remaining_for_adapter(
+            &cost_ledger,
+            &budget_caps,
+            &month,
+            &scope_id,
+            adapter_kind_for_budget(estimate.adapter_id.as_deref()),
+        )?;
+        let budget =
+            evaluate_budget_with_caps(&estimate, device_remaining, folder_remaining, false);
+        if !budget.allowed {
+            store
+                .update_matching(|candidate| {
+                    if candidate.task_id == task_id {
+                        candidate.status = TaskStatus::Paused;
+                        candidate.fallback_reason = Some("budget_exceeded".to_owned());
+                        true
+                    } else {
+                        false
+                    }
+                })
+                .map_err(pipeline_to_kcs)?;
+            continue;
+        }
         store
             .update_matching(|candidate| {
                 if candidate.task_id == task_id {
@@ -493,12 +553,20 @@ fn execute_pending_tasks(repo: &Repository, store: &TaskStore) -> Result<usize> 
             })
             .map_err(pipeline_to_kcs)?;
         match execute_online_markdownize_task(repo, &task) {
-            Ok(output_ref) => {
+            Ok(outcome) => {
+                cost_ledger
+                    .append_monthly(&MonthlyCostLedgerEntry {
+                        month: month.clone(),
+                        scope_id: scope_id.clone(),
+                        adapter_kind: outcome.adapter_kind.clone(),
+                        usd: outcome.cost_usd,
+                    })
+                    .map_err(pipeline_to_kcs)?;
                 store
                     .update_matching(|candidate| {
                         if candidate.task_id == task_id {
-                            candidate.status = TaskStatus::Done;
-                            candidate.output_ref = output_ref.clone();
+                            candidate.status = outcome.status;
+                            candidate.output_ref = outcome.output_ref.clone();
                             candidate.fallback_reason = Some("online_adapter_done".to_owned());
                             candidate.heartbeat_at = None;
                             true
@@ -510,14 +578,22 @@ fn execute_pending_tasks(repo: &Repository, store: &TaskStore) -> Result<usize> 
                 executed += 1;
             }
             Err(error) => {
-                let message = error.message().to_owned();
+                let policy = retry_policy(error.retry_kind);
+                let next_retry_at = (policy.retryable
+                    && policy
+                        .max_attempts
+                        .map(|max| task.attempts.saturating_add(1) < max)
+                        .unwrap_or(true))
+                .then(now_utc_seconds);
+                let reason = retry_reason(error.retry_kind).to_owned();
                 store
                     .update_matching(|candidate| {
                         if candidate.task_id == task_id {
                             candidate.status = TaskStatus::Failed;
-                            candidate.fallback_reason = Some(message.clone());
+                            candidate.fallback_reason = Some(reason.clone());
                             candidate.heartbeat_at = None;
                             candidate.attempts = candidate.attempts.saturating_add(1);
+                            candidate.next_retry_at = next_retry_at.clone();
                             true
                         } else {
                             false
@@ -534,6 +610,11 @@ fn persistent_network_allowed(repo: &Repository) -> Result<bool> {
     if network_revoked(repo)? {
         return Ok(false);
     }
+    if read_allow_network_config(&repo.kcs_dir().join("config.toml"))? == Some(true)
+        || read_allow_network_config(&user_config_toml_path())? == Some(true)
+    {
+        return Ok(true);
+    }
     let path = repo.kcs_dir().join("approvals.jsonl");
     let Ok(text) = fs::read_to_string(&path) else {
         return Ok(false);
@@ -548,28 +629,46 @@ fn persistent_network_allowed(repo: &Repository) -> Result<bool> {
         }))
 }
 
-fn execute_online_markdownize_task(repo: &Repository, task: &TaskDescriptor) -> Result<String> {
+#[derive(Debug, Clone)]
+struct OnlineExecutionOutcome {
+    output_ref: String,
+    status: TaskStatus,
+    cost_usd: f64,
+    adapter_kind: String,
+}
+
+#[derive(Debug, Clone)]
+struct TaskExecutionFailure {
+    retry_kind: RetryErrorKind,
+}
+
+fn execute_online_markdownize_task(
+    repo: &Repository,
+    task: &TaskDescriptor,
+) -> std::result::Result<OnlineExecutionOutcome, TaskExecutionFailure> {
     let path = repo.root().join(&task.input_path);
     let media_type = media_type_for_cli_path(&path).to_owned();
-    let prepare_profile_hash =
-        tool_profile_hash(&deterministic_prepare_profile_value()).map_err(adapter_to_kcs)?;
+    let prepare_profile_hash = tool_profile_hash(&deterministic_prepare_profile_value())
+        .map_err(task_failure_from_adapter)?;
     let prepare = prepare_units(PrepareStageRequest {
         raw_hash: task.input_hash.clone(),
         media_type: media_type.clone(),
         input_path: path.display().to_string(),
         tool_profile_hash: prepare_profile_hash,
     })
-    .map_err(pipeline_to_kcs)?;
+    .map_err(|_| TaskExecutionFailure {
+        retry_kind: RetryErrorKind::InvalidInput,
+    })?;
     if prepare.prepared_units.is_empty() {
-        return Err(KcsError::schema(
-            "online adapter task has no prepared units after scan",
-        ));
+        return Err(TaskExecutionFailure {
+            retry_kind: RetryErrorKind::InvalidInput,
+        });
     }
     let (profile, response) =
         run_mistral_adapter(repo, &task.input_hash, &path, &media_type, &prepare)?;
     let hints = all_changed_hints(&prepare.prepared_units);
-    validate_markdownize_response(&response, &hints, &prepare.prepared_units)
-        .map_err(pipeline_to_kcs)?;
+    let strict_valid =
+        validate_markdownize_response(&response, &hints, &prepare.prepared_units).is_ok();
     let generated_at = now_utc_seconds();
     let units = normalized_units_from_response(
         &response,
@@ -579,7 +678,22 @@ fn execute_online_markdownize_task(repo: &Repository, task: &TaskDescriptor) -> 
         &profile.tool_profile_hash,
         MarkdownizeMode::Full,
         &generated_at,
-    )?;
+    )
+    .map_err(|_| TaskExecutionFailure {
+        retry_kind: RetryErrorKind::ContractViolation,
+    })?;
+    if units.is_empty() {
+        return Err(TaskExecutionFailure {
+            retry_kind: RetryErrorKind::ContractViolation,
+        });
+    }
+    let done = units.len();
+    let failed = prepare.prepared_units.len().saturating_sub(done);
+    let status = if strict_valid {
+        TaskStatus::Done
+    } else {
+        task_status_from_unit_counts(done, failed, false)
+    };
     let run_id = format!("run_{}", new_ulid(repo.root()));
     let manifest = manifest_from_units(
         &prepare.prepared_units,
@@ -590,13 +704,19 @@ fn execute_online_markdownize_task(repo: &Repository, task: &TaskDescriptor) -> 
         &run_id,
         &generated_at,
     );
-    persist_normalized_instance(repo.kcs_dir(), &manifest, &units).map_err(pipeline_to_kcs)?;
-    Ok(normalized_output_ref(
-        repo,
-        &task.input_hash,
-        &profile.tool_profile_hash,
-        0,
-    ))
+    persist_normalized_instance(repo.kcs_dir(), &manifest, &units).map_err(|_| {
+        TaskExecutionFailure {
+            retry_kind: RetryErrorKind::InvalidInput,
+        }
+    })?;
+    Ok(OnlineExecutionOutcome {
+        output_ref: normalized_output_ref(repo, &task.input_hash, &profile.tool_profile_hash, 0),
+        status,
+        cost_usd: estimate_online_markdownize_cost(
+            path.metadata().map(|metadata| metadata.len()).unwrap_or(0),
+        ),
+        adapter_kind: "markdown".to_owned(),
+    })
 }
 
 fn run_mistral_adapter(
@@ -605,7 +725,10 @@ fn run_mistral_adapter(
     path: &Path,
     media_type: &str,
     prepare: &kcs_pipeline::prepare::PrepareStageOutput,
-) -> Result<(AdapterProfile, kcs_adapter::types::MarkdownizeResponse)> {
+) -> std::result::Result<
+    (AdapterProfile, kcs_adapter::types::MarkdownizeResponse),
+    TaskExecutionFailure,
+> {
     let request = MarkdownizeRequest {
         raw: RawInput {
             raw_hash: raw_hash.to_owned(),
@@ -619,25 +742,35 @@ fn run_mistral_adapter(
         tool_profile_hash: String::new(),
         spec_version: 1,
     };
-    if std::env::var("KCS_TEST_MISTRAL_OCR").ok().as_deref() == Some("mock") {
-        let adapter = MistralOcrMarkdownizeAdapter::new(
-            MockMistralClient,
-            "mistral-ocr-latest",
-            repo.scope_id_for_adapter(),
-        )
-        .with_image_store(repo.kcs_dir());
-        let profile = adapter.profile();
-        let mut request = request;
-        request.tool_profile_hash = profile.tool_profile_hash.clone();
-        return Ok((
-            profile,
-            adapter.markdownize(request).map_err(adapter_to_kcs)?,
-        ));
+    match std::env::var("KCS_TEST_MISTRAL_OCR").ok().as_deref() {
+        Some("auth_error") => {
+            return Err(TaskExecutionFailure {
+                retry_kind: RetryErrorKind::AuthError,
+            });
+        }
+        Some("mock") | Some("partial") | Some("mock_link_image") => {
+            let adapter = MistralOcrMarkdownizeAdapter::new(
+                MockMistralClient,
+                "mistral-ocr-latest",
+                repo.scope_id_for_adapter(),
+            )
+            .with_image_store(repo.kcs_dir());
+            let profile = adapter.profile();
+            let mut request = request;
+            request.tool_profile_hash = profile.tool_profile_hash.clone();
+            return Ok((
+                profile,
+                adapter
+                    .markdownize(request)
+                    .map_err(task_failure_from_adapter)?,
+            ));
+        }
+        _ => {}
     }
     let client = EnvMistralOcrClient::new();
     let model_pin = client
         .resolve_model_pin("mistral-ocr-latest")
-        .map_err(adapter_to_kcs)?;
+        .map_err(task_failure_from_adapter)?;
     let adapter = MistralOcrMarkdownizeAdapter::new(client, model_pin, repo.scope_id_for_adapter())
         .with_image_store(repo.kcs_dir());
     let profile = adapter.profile();
@@ -645,7 +778,9 @@ fn run_mistral_adapter(
     request.tool_profile_hash = profile.tool_profile_hash.clone();
     Ok((
         profile,
-        adapter.markdownize(request).map_err(adapter_to_kcs)?,
+        adapter
+            .markdownize(request)
+            .map_err(task_failure_from_adapter)?,
     ))
 }
 
@@ -681,7 +816,7 @@ impl MistralOcrClient for MockMistralClient {
         request: &MarkdownizeRequest,
         model_pin: &str,
     ) -> kcs_adapter::Result<OcrResponse> {
-        let pages = request
+        let mut pages: Vec<OcrPage> = request
             .prepared_unit_hint
             .as_deref()
             .unwrap_or(&[])
@@ -689,10 +824,19 @@ impl MistralOcrClient for MockMistralClient {
             .enumerate()
             .map(|(index, hint)| OcrPage {
                 index,
-                markdown: format!(
-                    "mock ocr {} ![img-{index}](img-{index}.png)\n",
-                    hint.unit_key
-                ),
+                markdown: if std::env::var("KCS_TEST_MISTRAL_OCR").ok().as_deref()
+                    == Some("mock_link_image")
+                {
+                    format!(
+                        "[source](https://example.com/{index}) mock ocr {} ![img-{index}](img-{index}.png)\n",
+                        hint.unit_key
+                    )
+                } else {
+                    format!(
+                        "mock ocr {} ![img-{index}](img-{index}.png)\n",
+                        hint.unit_key
+                    )
+                },
                 images: vec![OcrImage {
                     bytes: format!("image-{}", hint.unit_key).into_bytes(),
                     media_type: "image/png".to_owned(),
@@ -701,11 +845,73 @@ impl MistralOcrClient for MockMistralClient {
                 }],
             })
             .collect();
+        if std::env::var("KCS_TEST_MISTRAL_OCR").ok().as_deref() == Some("partial") {
+            pages.pop();
+        }
         Ok(OcrResponse {
             pages,
             model_version_pin: model_pin.to_owned(),
         })
     }
+}
+
+fn task_failure_from_adapter(error: kcs_adapter::AdapterError) -> TaskExecutionFailure {
+    let retry_kind = match error {
+        kcs_adapter::AdapterError::Auth(_) => RetryErrorKind::AuthError,
+        kcs_adapter::AdapterError::RateLimit(_) => RetryErrorKind::RateLimit,
+        kcs_adapter::AdapterError::QuotaExceeded(_) => RetryErrorKind::QuotaExceeded,
+        kcs_adapter::AdapterError::Network(_) | kcs_adapter::AdapterError::Io { .. } => {
+            RetryErrorKind::NetworkError
+        }
+        kcs_adapter::AdapterError::ContractViolation(_)
+        | kcs_adapter::AdapterError::ConfigSchema(_) => RetryErrorKind::ContractViolation,
+    };
+    TaskExecutionFailure { retry_kind }
+}
+
+fn retry_reason(kind: RetryErrorKind) -> &'static str {
+    match kind {
+        RetryErrorKind::NetworkError => "network_error",
+        RetryErrorKind::RateLimit => "rate_limit",
+        RetryErrorKind::AuthError => "auth_error",
+        RetryErrorKind::QuotaExceeded => "quota_exceeded",
+        RetryErrorKind::InvalidInput => "invalid_input",
+        RetryErrorKind::ContractViolation => "contract_violation",
+        RetryErrorKind::BudgetExceeded => "budget_exceeded",
+    }
+}
+
+fn retry_kind_from_reason(reason: Option<&str>) -> RetryErrorKind {
+    match reason {
+        Some("network_error") => RetryErrorKind::NetworkError,
+        Some("rate_limit") => RetryErrorKind::RateLimit,
+        Some("auth_error") => RetryErrorKind::AuthError,
+        Some("quota_exceeded") => RetryErrorKind::QuotaExceeded,
+        Some("invalid_input") => RetryErrorKind::InvalidInput,
+        Some("budget_exceeded") => RetryErrorKind::BudgetExceeded,
+        _ => RetryErrorKind::ContractViolation,
+    }
+}
+
+fn task_retry_allowed(task: &TaskDescriptor) -> bool {
+    let kind = retry_kind_from_reason(task.fallback_reason.as_deref());
+    let policy = retry_policy(kind);
+    policy.retryable
+        && policy
+            .max_attempts
+            .map(|max| task.attempts < max)
+            .unwrap_or(true)
+}
+
+fn task_retry_due(task: &TaskDescriptor) -> bool {
+    task.next_retry_at
+        .as_deref()
+        .map(|retry_at| retry_at <= now_utc_seconds().as_str())
+        .unwrap_or(true)
+}
+
+fn estimate_online_markdownize_cost(size_bytes: u64) -> f64 {
+    estimate_local_baseline_cost(size_bytes) * 10.0
 }
 
 fn media_type_for_cli_path(path: &Path) -> &'static str {
@@ -722,6 +928,42 @@ fn media_type_for_cli_path(path: &Path) -> &'static str {
         "jpg" | "jpeg" => "image/jpeg",
         _ => "application/octet-stream",
     }
+}
+
+fn budget_status_json(repo: &Repository) -> Result<Value> {
+    let caps = read_budget_policy(user_config_toml_path(), repo.kcs_dir().join("config.toml"))
+        .map_err(pipeline_to_kcs)?;
+    let now = now_utc_seconds();
+    let month = utc_month(&now);
+    let ledger = CostLedger::new(cost_ledger_path());
+    let scope_id = repo.scope_id_for_adapter();
+    let device_spent = ledger
+        .monthly_total(&month, None)
+        .map_err(pipeline_to_kcs)?;
+    let folder_spent = ledger
+        .monthly_total(&month, Some(&scope_id))
+        .map_err(pipeline_to_kcs)?;
+    let device_remaining = caps.device_monthly_usd_cap - device_spent;
+    let folder_remaining = caps.folder_monthly_usd_cap.map(|cap| cap - folder_spent);
+    let cap_kind = match folder_remaining {
+        Some(folder) if folder <= device_remaining => BudgetCapKind::Folder,
+        _ => BudgetCapKind::Device,
+    };
+    Ok(json!({
+        "month": month,
+        "device_monthly_usd_cap": caps.device_monthly_usd_cap,
+        "folder_monthly_usd_cap": caps.folder_monthly_usd_cap,
+        "device_spent_usd": device_spent,
+        "folder_spent_usd": folder_spent,
+        "device_remaining_usd": device_remaining,
+        "folder_remaining_usd": folder_remaining,
+        "cap_kind": match cap_kind {
+            BudgetCapKind::Device => "device",
+            BudgetCapKind::Folder => "folder",
+        },
+        "device_per_adapter": caps.device_per_adapter,
+        "folder_per_adapter": caps.folder_per_adapter,
+    }))
 }
 
 fn index_preview_json(root: &Path, preview: &ScanPreview) -> Value {
@@ -796,6 +1038,7 @@ struct IndexPipelineResult {
     paused_tasks: usize,
     normalized_files: usize,
     pending_files: usize,
+    failed_files: usize,
 }
 
 fn active_markdown_adapter(_repo: &Repository) -> Box<dyn MarkdownizeAdapter> {
@@ -805,9 +1048,15 @@ fn active_markdown_adapter(_repo: &Repository) -> Box<dyn MarkdownizeAdapter> {
     {
         Some("incremental") => Box::new(TestIncrementalMarkdownizeAdapter {
             reject_incremental: false,
+            reject_full: false,
         }),
         Some("reject_incremental") => Box::new(TestIncrementalMarkdownizeAdapter {
             reject_incremental: true,
+            reject_full: false,
+        }),
+        Some("reject_incremental_and_full") => Box::new(TestIncrementalMarkdownizeAdapter {
+            reject_incremental: true,
+            reject_full: true,
         }),
         _ => Box::new(DeterministicAdapter),
     }
@@ -816,6 +1065,7 @@ fn active_markdown_adapter(_repo: &Repository) -> Box<dyn MarkdownizeAdapter> {
 #[derive(Debug, Clone)]
 struct TestIncrementalMarkdownizeAdapter {
     reject_incremental: bool,
+    reject_full: bool,
 }
 
 impl MarkdownizeAdapter for TestIncrementalMarkdownizeAdapter {
@@ -889,10 +1139,14 @@ impl MarkdownizeAdapter for TestIncrementalMarkdownizeAdapter {
         }
         Ok(kcs_adapter::types::MarkdownizeResponse {
             mode_used: AdapterMarkdownizeMode::Full,
-            updated_units: hints
-                .iter()
-                .map(|hint| test_markdown_unit(hint, "full"))
-                .collect(),
+            updated_units: if self.reject_full {
+                Vec::new()
+            } else {
+                hints
+                    .iter()
+                    .map(|hint| test_markdown_unit(hint, "full"))
+                    .collect()
+            },
             unchanged_unit_keys: Vec::new(),
             added_units: Vec::new(),
             removed_unit_keys: Vec::new(),
@@ -926,17 +1180,11 @@ fn run_index_pipeline(
     let markdown_profile = markdown_adapter.profile();
     let markdown_profile_hash = markdown_profile.tool_profile_hash.clone();
     let network_allowed = network_allowed(repo, args)?;
-    let cost_ledger = CostLedger::new(data_home().join("kcs/cost-ledger.jsonl"));
-    let (device_cap, folder_cap) =
-        read_budget_caps(user_config_toml_path(), repo.kcs_dir().join("config.toml"))
+    let cost_ledger = CostLedger::new(cost_ledger_path());
+    let budget_caps =
+        read_budget_policy(user_config_toml_path(), repo.kcs_dir().join("config.toml"))
             .map_err(pipeline_to_kcs)?;
     let month = utc_month(&now);
-    let device_spent = cost_ledger
-        .monthly_total(&month, None)
-        .map_err(pipeline_to_kcs)?;
-    let folder_spent = cost_ledger
-        .monthly_total(&month, Some(&scope_id))
-        .map_err(pipeline_to_kcs)?;
 
     let mut result = IndexPipelineResult {
         network_allowed,
@@ -1012,10 +1260,9 @@ fn run_index_pipeline(
                 args,
                 &now,
                 &mut result,
-                device_cap,
-                folder_cap,
-                device_spent,
-                folder_spent,
+                &cost_ledger,
+                &budget_caps,
+                &month,
             )?;
             continue;
         }
@@ -1097,17 +1344,49 @@ fn run_index_pipeline(
         };
         if let Err(error) = validation {
             if mode != MarkdownizeMode::Incremental {
-                return Err(pipeline_to_kcs(error));
+                append_failed_markdownize_task(
+                    repo,
+                    &task_store,
+                    candidate,
+                    &raw_hash,
+                    &output_ref,
+                    "contract_violation",
+                    &now,
+                )?;
+                result.failed_files += 1;
+                let _ = error;
+                continue;
             }
             let mut full_request = request;
             full_request.mode = AdapterMarkdownizeMode::Full;
             full_request.previous = None;
             full_request.hints = None;
-            response = markdown_adapter
+            let fallback_response = markdown_adapter
                 .markdownize(full_request)
-                .map_err(adapter_to_kcs)?;
-            validate_markdownize_response(&response, &incremental_hints, &prepare.prepared_units)
-                .map_err(pipeline_to_kcs)?;
+                .map_err(adapter_to_kcs)
+                .and_then(|response| {
+                    validate_markdownize_response(
+                        &response,
+                        &incremental_hints,
+                        &prepare.prepared_units,
+                    )
+                    .map_err(pipeline_to_kcs)?;
+                    Ok(response)
+                });
+            let Ok(fallback_response) = fallback_response else {
+                append_failed_markdownize_task(
+                    repo,
+                    &task_store,
+                    candidate,
+                    &raw_hash,
+                    &output_ref,
+                    "full_fallback_failed",
+                    &now,
+                )?;
+                result.failed_files += 1;
+                continue;
+            };
+            response = fallback_response;
             final_mode = MarkdownizeMode::Full;
             fallback_reason = Some("full_fallback_after_incremental_reject".to_owned());
         }
@@ -1187,10 +1466,9 @@ fn run_index_pipeline(
             args,
             &now,
             &mut result,
-            device_cap,
-            folder_cap,
-            device_spent,
-            folder_spent,
+            &cost_ledger,
+            &budget_caps,
+            &month,
         )?;
     }
     Ok(result)
@@ -1283,6 +1561,29 @@ fn task_descriptor(
         fallback_reason: fallback_reason.map(str::to_owned),
         created_at: created_at.to_owned(),
     }
+}
+
+fn append_failed_markdownize_task(
+    repo: &Repository,
+    task_store: &TaskStore,
+    candidate: &ScanCandidate,
+    input_hash: &str,
+    output_ref: &str,
+    fallback_reason: &str,
+    created_at: &str,
+) -> Result<()> {
+    let task = task_descriptor(
+        repo,
+        TaskType::Markdownize,
+        Some(MarkdownizeMode::Full),
+        candidate,
+        input_hash,
+        output_ref,
+        TaskStatus::Failed,
+        Some(fallback_reason),
+        created_at,
+    );
+    task_store.append(&task).map_err(pipeline_to_kcs)
 }
 
 fn prepared_unit_hints(prepared_units: &[PreparedUnit]) -> Vec<PreparedUnitHint> {
@@ -1602,10 +1903,9 @@ fn enqueue_online_placeholder_task(
     args: &IndexArgs,
     created_at: &str,
     result: &mut IndexPipelineResult,
-    device_cap: Option<f64>,
-    folder_cap: Option<f64>,
-    device_spent: f64,
-    folder_spent: f64,
+    cost_ledger: &CostLedger,
+    budget_caps: &BudgetCaps,
+    month: &str,
 ) -> Result<()> {
     let output_ref = "online:mistral_ocr_markdownize";
     if let Some(existing) = task_store
@@ -1630,11 +1930,16 @@ fn enqueue_online_placeholder_task(
     let estimate = BudgetEstimate {
         scope_id: scope_id.to_owned(),
         task_type: TaskType::Markdownize,
-        estimated_usd: estimate_local_baseline_cost(candidate.size_bytes) * 10.0,
+        estimated_usd: estimate_online_markdownize_cost(candidate.size_bytes),
         adapter_id: Some("mistral_ocr_markdownize".to_owned()),
     };
-    let device_remaining = device_cap.map_or(f64::INFINITY, |cap| cap - device_spent);
-    let folder_remaining = folder_cap.map(|cap| cap - folder_spent);
+    let (device_remaining, folder_remaining) = budget_remaining_for_adapter(
+        cost_ledger,
+        budget_caps,
+        month,
+        scope_id,
+        adapter_kind_for_budget(estimate.adapter_id.as_deref()),
+    )?;
     let budget = evaluate_budget_with_caps(
         &estimate,
         device_remaining,
@@ -1670,6 +1975,51 @@ fn enqueue_online_placeholder_task(
 
 fn matches_batch_override(_args: &IndexArgs) -> bool {
     false
+}
+
+fn budget_remaining_for_adapter(
+    cost_ledger: &CostLedger,
+    budget_caps: &BudgetCaps,
+    month: &str,
+    scope_id: &str,
+    adapter_kind: &str,
+) -> Result<(f64, Option<f64>)> {
+    let device_spent = cost_ledger
+        .monthly_total(month, None)
+        .map_err(pipeline_to_kcs)?;
+    let folder_spent = cost_ledger
+        .monthly_total(month, Some(scope_id))
+        .map_err(pipeline_to_kcs)?;
+    let device_adapter_spent = cost_ledger
+        .monthly_total_for_adapter(month, None, Some(adapter_kind))
+        .map_err(pipeline_to_kcs)?;
+    let folder_adapter_spent = cost_ledger
+        .monthly_total_for_adapter(month, Some(scope_id), Some(adapter_kind))
+        .map_err(pipeline_to_kcs)?;
+    let mut device_remaining = budget_caps.device_monthly_usd_cap - device_spent;
+    if let Some(adapter_cap) = budget_caps.device_per_adapter.get(adapter_kind) {
+        device_remaining = device_remaining.min(adapter_cap - device_adapter_spent);
+    }
+    let mut folder_remaining = budget_caps
+        .folder_monthly_usd_cap
+        .map(|cap| cap - folder_spent);
+    if let Some(adapter_cap) = budget_caps.folder_per_adapter.get(adapter_kind) {
+        let adapter_remaining = adapter_cap - folder_adapter_spent;
+        folder_remaining = Some(
+            folder_remaining
+                .map(|remaining| remaining.min(adapter_remaining))
+                .unwrap_or(adapter_remaining),
+        );
+    }
+    Ok((device_remaining, folder_remaining))
+}
+
+fn adapter_kind_for_budget(adapter_id: Option<&str>) -> &'static str {
+    match adapter_id {
+        Some("mistral_ocr_markdownize") | Some("deterministic_builtin") => "markdown",
+        Some("gemini_multimodal_embedding") => "embedding",
+        _ => "markdown",
+    }
 }
 
 fn materialize_tool_lock(repo: &Repository) -> Result<()> {
@@ -1715,8 +2065,16 @@ fn network_allowed(repo: &Repository, args: &IndexArgs) -> Result<bool> {
     if network_revoked(repo)? {
         return Ok(false);
     }
-    if args.online || args.approve {
+    if args.online {
         return approval_exists(repo);
+    }
+    if args.approve {
+        return Ok(true);
+    }
+    if read_allow_network_config(&repo.kcs_dir().join("config.toml"))? == Some(true)
+        || read_allow_network_config(&user_config_toml_path())? == Some(true)
+    {
+        return Ok(true);
     }
     let path = repo.kcs_dir().join("approvals.jsonl");
     let Ok(text) = fs::read_to_string(&path) else {
@@ -1736,9 +2094,12 @@ fn network_revoked(repo: &Repository) -> Result<bool> {
     if repo.kcs_dir().join("network-revoked").is_file() {
         return Ok(true);
     }
-    let path = repo.kcs_dir().join("config.toml");
-    let Ok(text) = fs::read_to_string(&path) else {
-        return Ok(false);
+    Ok(read_allow_network_config(&repo.kcs_dir().join("config.toml"))? == Some(false))
+}
+
+fn read_allow_network_config(path: &Path) -> Result<Option<bool>> {
+    let Ok(text) = fs::read_to_string(path) else {
+        return Ok(None);
     };
     let value: toml::Value =
         toml::from_str(&text).map_err(|err| KcsError::schema(err.to_string()))?;
@@ -1746,8 +2107,7 @@ fn network_revoked(repo: &Repository) -> Result<bool> {
         .get("adapter")
         .and_then(|adapter| adapter.get("policy"))
         .and_then(|policy| policy.get("allow_network"))
-        .and_then(toml::Value::as_bool)
-        == Some(false))
+        .and_then(toml::Value::as_bool))
 }
 
 fn write_network_revoke_record(repo: &Repository) -> Result<()> {
@@ -1934,6 +2294,10 @@ fn data_home() -> PathBuf {
         return PathBuf::from(home).join(".local/share");
     }
     PathBuf::from(".")
+}
+
+fn cost_ledger_path() -> PathBuf {
+    data_home().join("kcs/cost-ledger.jsonl")
 }
 
 fn adapter_to_kcs(error: kcs_adapter::AdapterError) -> KcsError {

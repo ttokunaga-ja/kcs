@@ -57,8 +57,7 @@ pub fn build_scan_preview(request: ScanPreviewRequest) -> Result<ScanPreview> {
     let mut ignore_rules = load_config_ignore(&scope_path)?;
     ignore_rules.extend(load_kcsignore(&scope_path)?);
     let mut candidates = Vec::new();
-    collect_candidates(
-        &scope_path,
+    collect_direct_candidates(
         &scope_path,
         &ignore_rules,
         request.include_raw_hashes,
@@ -82,23 +81,19 @@ pub fn build_scan_preview(request: ScanPreviewRequest) -> Result<ScanPreview> {
     })
 }
 
-fn collect_candidates(
+fn collect_direct_candidates(
     scope_path: &Path,
-    current: &Path,
     ignore_rules: &[IgnoreRule],
     include_raw_hashes: bool,
     candidates: &mut Vec<ScanCandidate>,
 ) -> Result<()> {
-    for entry in std::fs::read_dir(current).pipeline_io(current)? {
-        let entry = entry.pipeline_io(current)?;
+    for entry in std::fs::read_dir(scope_path).pipeline_io(scope_path)? {
+        let entry = entry.pipeline_io(scope_path)?;
         let name = match entry.file_name().into_string() {
             Ok(name) => name,
             Err(_) => continue,
         };
-        if current == scope_path && (name == ".kcs" || name == ".kcsignore") {
-            continue;
-        }
-        if name == ".kcs" {
+        if name == ".kcs" || name == ".kcsignore" {
             continue;
         }
         let path = entry.path();
@@ -106,7 +101,7 @@ fn collect_candidates(
             continue;
         }
         let file_type = entry.file_type().pipeline_io(&path)?;
-        if !file_type.is_file() && !file_type.is_dir() {
+        if !file_type.is_file() {
             continue;
         }
         let relative = path
@@ -117,11 +112,7 @@ fn collect_candidates(
         if relative == ".kcsignore" {
             continue;
         }
-        let size_bytes = if file_type.is_file() {
-            entry.metadata().pipeline_io(&path)?.len()
-        } else {
-            0
-        };
+        let size_bytes = entry.metadata().pipeline_io(&path)?.len();
         let secret = classify_secret(&relative);
         let ignored = ignored_by_rules(&relative, file_type.is_dir(), ignore_rules)
             || secret == Some(SecretTier::TierA)
@@ -131,32 +122,19 @@ fn collect_candidates(
             Some(SecretTier::TierB) => Some("secrets_tier_b_warning".to_owned()),
             _ => None,
         };
-        let raw_hash = if include_raw_hashes && file_type.is_file() && !ignored {
+        let raw_hash = if include_raw_hashes && !ignored {
             Some(hash_bytes(&std::fs::read(&path).pipeline_io(&path)?))
         } else {
             None
         };
         candidates.push(ScanCandidate {
             input_path: relative.clone(),
-            media_type: if file_type.is_dir() {
-                "inode/directory".to_owned()
-            } else {
-                media_type_for_path(&path).to_owned()
-            },
+            media_type: media_type_for_path(&path).to_owned(),
             size_bytes,
             raw_hash,
             ignored,
             quarantine_reason,
         });
-        if file_type.is_dir() && !ignored {
-            collect_candidates(
-                scope_path,
-                &path,
-                ignore_rules,
-                include_raw_hashes,
-                candidates,
-            )?;
-        }
     }
     Ok(())
 }

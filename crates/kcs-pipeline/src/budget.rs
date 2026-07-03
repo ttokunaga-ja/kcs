@@ -10,6 +10,8 @@ use serde::{Deserialize, Serialize};
 use crate::task::TaskType;
 use crate::{IoResultExt, PipelineError, Result};
 
+pub const DEFAULT_DEVICE_MONTHLY_USD_CAP: f64 = 50.0;
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BudgetConfig {
     pub monthly_usd_cap: f64,
@@ -59,6 +61,14 @@ pub struct MonthlyCostLedgerEntry {
     pub usd: f64,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BudgetCaps {
+    pub device_monthly_usd_cap: f64,
+    pub folder_monthly_usd_cap: Option<f64>,
+    pub device_per_adapter: BTreeMap<String, f64>,
+    pub folder_per_adapter: BTreeMap<String, f64>,
+}
+
 #[derive(Debug, Clone)]
 pub struct CostLedger {
     path: PathBuf,
@@ -85,6 +95,15 @@ impl CostLedger {
     }
 
     pub fn monthly_total(&self, month: &str, scope_id: Option<&str>) -> Result<f64> {
+        self.monthly_total_for_adapter(month, scope_id, None)
+    }
+
+    pub fn monthly_total_for_adapter(
+        &self,
+        month: &str,
+        scope_id: Option<&str>,
+        adapter_kind: Option<&str>,
+    ) -> Result<f64> {
         let file = match fs::File::open(&self.path) {
             Ok(file) => file,
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(0.0),
@@ -103,7 +122,10 @@ impl CostLedger {
             }
             let entry: MonthlyCostLedgerEntry = serde_json::from_str(&line)
                 .map_err(|err| PipelineError::Schema(err.to_string()))?;
-            if entry.month == month && scope_id.map_or(true, |scope| scope == entry.scope_id) {
+            if entry.month == month
+                && scope_id.map_or(true, |scope| scope == entry.scope_id)
+                && adapter_kind.map_or(true, |kind| kind == entry.adapter_kind)
+            {
                 total += entry.usd;
             }
         }
@@ -163,6 +185,85 @@ pub fn estimate_local_baseline_cost(size_bytes: u64) -> f64 {
 }
 
 pub fn read_budget_caps(
+    device_config_path: impl AsRef<Path>,
+    folder_config_path: impl AsRef<Path>,
+) -> Result<(Option<f64>, Option<f64>)> {
+    let policy = read_budget_policy(device_config_path, folder_config_path)?;
+    Ok((
+        Some(policy.device_monthly_usd_cap),
+        policy.folder_monthly_usd_cap,
+    ))
+}
+
+pub fn read_budget_policy(
+    device_config_path: impl AsRef<Path>,
+    folder_config_path: impl AsRef<Path>,
+) -> Result<BudgetCaps> {
+    let device = read_budget_config(device_config_path)?;
+    let folder = read_budget_config(folder_config_path)?;
+    Ok(BudgetCaps {
+        device_monthly_usd_cap: device
+            .monthly_usd_cap
+            .unwrap_or(DEFAULT_DEVICE_MONTHLY_USD_CAP),
+        folder_monthly_usd_cap: folder.monthly_usd_cap,
+        device_per_adapter: device.per_adapter,
+        folder_per_adapter: folder.per_adapter,
+    })
+}
+
+#[derive(Debug, Default)]
+struct ParsedBudgetConfig {
+    monthly_usd_cap: Option<f64>,
+    per_adapter: BTreeMap<String, f64>,
+}
+
+fn read_budget_config(config_path: impl AsRef<Path>) -> Result<ParsedBudgetConfig> {
+    let path = config_path.as_ref();
+    let text = match fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(ParsedBudgetConfig::default())
+        }
+        Err(err) => {
+            return Err(PipelineError::Io {
+                path: path.display().to_string(),
+                message: err.to_string(),
+            });
+        }
+    };
+    let value: toml::Value =
+        toml::from_str(&text).map_err(|err| PipelineError::Schema(err.to_string()))?;
+    let budget = value.get("budget");
+    let per_adapter = budget
+        .and_then(|value| value.get("per_adapter"))
+        .and_then(toml::Value::as_table)
+        .map(|table| {
+            table
+                .iter()
+                .filter_map(|(key, value)| {
+                    value
+                        .as_float()
+                        .or_else(|| value.as_integer().map(|value| value as f64))
+                        .map(|cap| (key.clone(), cap))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    Ok(ParsedBudgetConfig {
+        monthly_usd_cap: budget
+            .and_then(|value| value.get("monthly_usd_cap"))
+            .and_then(toml::Value::as_float)
+            .or_else(|| {
+                budget
+                    .and_then(|value| value.get("monthly_usd_cap"))
+                    .and_then(toml::Value::as_integer)
+                    .map(|value| value as f64)
+            }),
+        per_adapter,
+    })
+}
+
+pub fn read_budget_caps_legacy(
     device_config_path: impl AsRef<Path>,
     folder_config_path: impl AsRef<Path>,
 ) -> Result<(Option<f64>, Option<f64>)> {
