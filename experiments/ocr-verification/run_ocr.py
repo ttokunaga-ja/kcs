@@ -17,6 +17,9 @@ from typing import Any
 ROOT = Path(__file__).resolve().parent
 DEFAULT_GROUND_TRUTH = ROOT / "fixtures" / "generated" / "ground_truth.json"
 DEFAULT_OUT_DIR = ROOT / "out"
+# 生成画像 (Codex APP 納品の曖昧画像 15 枚) 用の別 fixture / 別出力先。
+GENERATED_IMAGES_GROUND_TRUTH = ROOT / "fixtures" / "generated" / "generated_images_ground_truth.json"
+GENERATED_IMAGES_OUT_DIR = ROOT / "out" / "generated-images"
 REQUESTED_MODEL = "mistral-ocr-latest"
 SYNC_PRICE_PER_1000_PAGES = 4.0
 BATCH_PRICE_PER_1000_PAGES = 2.0
@@ -26,11 +29,29 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--mode", choices=["sync", "batch"], default="sync", help="OCR execution mode.")
     parser.add_argument("--dry-run", action="store_true", help="Use a mock Mistral-style response. No API key or network.")
-    parser.add_argument("--ground-truth", type=Path, default=DEFAULT_GROUND_TRUTH)
-    parser.add_argument("--out-dir", type=Path, default=DEFAULT_OUT_DIR)
+    parser.add_argument(
+        "--fixture",
+        choices=["default", "generated-images"],
+        default="default",
+        help="default = 18-page synthetic fixture; generated-images = 15 delivered ambiguous images "
+        "(sets --ground-truth / --out-dir defaults unless overridden).",
+    )
+    parser.add_argument("--ground-truth", type=Path, default=None)
+    parser.add_argument("--out-dir", type=Path, default=None)
     parser.add_argument("--poll-interval-seconds", type=float, default=5.0)
     parser.add_argument("--timeout-seconds", type=float, default=900.0)
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.fixture == "generated-images":
+        if args.ground_truth is None:
+            args.ground_truth = GENERATED_IMAGES_GROUND_TRUTH
+        if args.out_dir is None:
+            args.out_dir = GENERATED_IMAGES_OUT_DIR
+    else:
+        if args.ground_truth is None:
+            args.ground_truth = DEFAULT_GROUND_TRUTH
+        if args.out_dir is None:
+            args.out_dir = DEFAULT_OUT_DIR
+    return args
 
 
 def load_ground_truth(path: Path) -> dict[str, Any]:
@@ -49,7 +70,10 @@ def main() -> None:
     args.out_dir.mkdir(parents=True, exist_ok=True)
     started = time.perf_counter()
     if args.dry_run:
-        response = build_mock_response(ground_truth)
+        if ground_truth.get("dataset") == "generated-images":
+            response = build_mock_response_generated_images(ground_truth)
+        else:
+            response = build_mock_response(ground_truth)
         batch_metadata: dict[str, Any] | None = None
     elif args.mode == "sync":
         response = run_sync_ocr(fixture_pdf)
@@ -297,6 +321,68 @@ def build_mock_response(ground_truth: dict[str, Any]) -> dict[str, Any]:
         pages.extend(build_mock_handwriting_pages(ground_truth))
     if ground_truth.get("staged_boundary"):
         pages.extend(build_mock_staged_pages(ground_truth, tiny_png_base64))
+    return {
+        "model": "mistral-ocr-4-0-dry-run",
+        "pages": pages,
+        "document_annotation": None,
+        "usage_info": {"pages_processed": ground_truth["page_count"]},
+    }
+
+
+def build_mock_response_generated_images(ground_truth: dict[str, Any]) -> dict[str, Any]:
+    """生成画像 fixture 用の合成応答。実 OCR 挙動の主張ではなく、evaluate.py の
+    generated-images 評価を dry-run で最後まで走らせるための illustrative なモック。
+
+    expect 別に「本文化の度合い」と images[] を作り分ける:
+      - text-dominant : token あり / visible_text 全 segment を本文化 / images[] 無し (高 recall)
+      - mixed         : token あり / visible_text の約 6 割を本文化 / images[] 1 (中 recall)
+      - image-dominant: token 無し / visible_text の約 15% のみ / images[] 1 (低 recall, 画像落ち想定)
+    """
+    import math
+
+    tiny_png_base64 = (
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII="
+    )
+    plan = {
+        "text-dominant": (1.0, False, True),
+        "mixed": (0.6, True, True),
+        "image-dominant": (0.15, True, False),
+    }
+    pages: list[dict[str, Any]] = []
+    for entry in ground_truth["pages"]:
+        frac, with_image, include_token = plan.get(entry.get("expect"), (0.6, True, True))
+        segments = [seg.strip() for seg in entry.get("visible_text", "").split(";") if seg.strip()]
+        keep = max(1, math.ceil(len(segments) * frac)) if segments else 0
+        body_parts: list[str] = [f"# {entry['family']} {entry['file']}"]
+        if include_token:
+            body_parts.extend(entry.get("tokens", []))
+        body_parts.extend(segments[:keep])
+        images: list[dict[str, Any]] = []
+        if with_image:
+            image_id = f"img-{entry['page_index']}.png"
+            body_parts.append(f"![{image_id}]({image_id})")
+            images.append(
+                {
+                    "id": image_id,
+                    "top_left_x": 40,
+                    "top_left_y": 60,
+                    "bottom_right_x": 560,
+                    "bottom_right_y": 720,
+                    "image_base64": tiny_png_base64,
+                }
+            )
+        pages.append(
+            {
+                "index": entry["page_index"],
+                "markdown": "\n\n".join(body_parts),
+                "images": images,
+                "tables": [],
+                "hyperlinks": [],
+                "dimensions": {"width": 612, "height": 792, "unit": "pt"},
+                "confidence_scores": {"average_page_confidence_score": 0.9},
+                "blocks": [{"type": "image", "image_id": img["id"]} for img in images] or [{"type": "text"}],
+            }
+        )
     return {
         "model": "mistral-ocr-4-0-dry-run",
         "pages": pages,

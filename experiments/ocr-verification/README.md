@@ -84,6 +84,68 @@ python evaluate.py
 
 境界判定: 段階間で stage token recall が `BOUNDARY_DROP_DELTA` (0.25) 以上落ちた最大の段階を境界 (`sharp_drop`)、急落が無ければ recall が `BOUNDARY_RECALL_FLOOR` (0.5) を最初に割った段階 (`below_floor`) とします。
 
+## 生成画像検証 (Codex APP 納品の曖昧画像 15 枚)
+
+`fixtures/generated-images/` に納品された曖昧画像 15 枚 (`g1_*.png`〜`g5_*.png`) と
+`ground-truth.json` を、実 API OCR で採点できるようにハーネスへ統合したものです。上記の
+合成 fixture (18 ページ) とは **別 PDF・別 ground truth・別出力先** で、評価は混ざりません。
+
+- 系統 (family): G1 UI/エディタ, G2 スライド, G3 ホワイトボード, G4 写真書類, G5 インフォグラフィック
+- 各画像は `tokens` (一意トークン)・`visible_text`・`expect` (`text-dominant` / `mixed` / `image-dominant`) を持つ
+
+### 1. PDF と ground truth を生成
+
+```bash
+cd experiments/ocr-verification
+python fixtures/build_images_pdf.py
+```
+
+`generated-images/*.png` を **ファイル名昇順で 1 ページ 1 画像** の PDF
+(`fixtures/generated/generated_images.pdf`) にまとめ、ハーネス互換の ground truth
+(`fixtures/generated/generated_images_ground_truth.json`, `schema_version 1`, `dataset: generated-images`)
+を書き出します。reportlab `invariant=True` + 納品 PNG のみ埋め込みで **2 回生成しても byte 一致** します。
+
+### 2. Dry-run (API キー不要)
+
+```bash
+python run_ocr.py --fixture generated-images --dry-run
+python evaluate.py --fixture generated-images --dry-run
+```
+
+### 3. 実 API 実行
+
+```bash
+# 同期 (15 ページ ≈ $0.06)
+python run_ocr.py --fixture generated-images --mode sync
+python evaluate.py --fixture generated-images
+
+# Batch (15 ページ ≈ $0.03)
+python run_ocr.py --fixture generated-images --mode batch --poll-interval-seconds 10 --timeout-seconds 1800
+python evaluate.py --fixture generated-images
+```
+
+`--fixture generated-images` は ground truth を `generated_images_ground_truth.json`、出力先を
+`out/generated-images/` に自動設定します (`--ground-truth` / `--out-dir` で個別上書き可)。
+
+### 評価内容
+
+`out/generated-images/report.md` に、画像 (=ページ) ごとに (i) 埋め込みトークンが markdown
+本文に出たか、(ii) `visible_text` の正規化トークン回収率、(iii) `images[]` として返ったか、を測り、
+**family 別集計**と **`expect` との突合表 (expect × observed のクロス集計)** を出力します。観測分類は
+visible recall による診断ヒューリスティック (recall ≥ 0.7 → text-dominant, < 0.3 → image-dominant,
+それ以外 mixed) で、合格閾値ではありません (`passed: null`)。
+
+出力:
+
+```text
+fixtures/generated/generated_images.pdf
+fixtures/generated/generated_images_ground_truth.json
+out/generated-images/raw_response.json
+out/generated-images/ocr_response.json
+out/generated-images/results.json
+out/generated-images/report.md
+```
+
 ## 出力
 
 ```text

@@ -45,3 +45,33 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
 28. Hermetic HTTP tests are Step 3 backlog (Step2c I5). The online adapter's HTTP layer (`EnvMistralOcrClient` model-pin resolution + OCR POST) is exercised for real against the live API under `experiments/ocr-verification`, which is where correctness of the wire format is guaranteed. In-process contract/integration tests inject failures and successes through the `KCS_TEST_MISTRAL_OCR` hook (`mock`/`partial`/`mock_link_image`/`auth_error`/`rate_limit`) and never open a socket. A hermetic local HTTP server test (spinning a fake Mistral endpoint) is deferred to Step 3 backlog; it adds a test-server dependency for coverage that the live-API experiment already provides.
 29. Retry backoff jitter is omitted (Step2c I2). `RetryPolicy.backoff` descriptors advertise `full_jitter`, but `retry_backoff_seconds` computes the deterministic schedule only — exponential `min(base * 2^(attempts-1), cap)` for `exp(...)`, the parsed fixed duration for `fixed(...)`, and (absent a server `Retry-After` header locally) the same exponential schedule for `retry_after`. Jitter is intentionally dropped so `next_retry_at` is reproducible under `KCS_FIXED_NOW` and testable without flakiness. Real jitter (to avoid thundering-herd on shared endpoints) is a Step 3 concern once concurrent batch execution exists; single-user serial CLI retries do not need it.
 30. `MistralOcrMarkdownizeAdapter::profile()` is network-free (Step2c I5). `profile()` no longer calls `resolve_model_pin` (which issues `GET /v1/models` for `*-latest` aliases); the pin is resolved exactly once at execution time in `run_mistral_adapter` and passed in as `configured_model`, so the profile reflects the resolved pin without a second GET. When the adapter still holds an unresolved `*-latest` alias (only the `Default`/unit-test construction), `profile()` derives a deterministic immutable placeholder (`<family>-unresolved`) instead of contacting the network — identical to the prior no-API-key fallback and accepted by the identity layer (a mutable alias is rejected as a `model_version_pin`). tool_profile_hash impact: for the production and mock paths the pin is resolved before construction, so their `tool_profile_hash` is unchanged; only the network-free `Default` adapter (used solely by `placeholder_mistral_profile_declares_ocr`, which asserts capability flags/id, not the hash) sees the same `mistral-ocr-unresolved` pin it already produced when no API key was present. Chosen because it keeps identity stable for real runs while removing the only networked path out of `profile()`.
+
+## Step3c K round additions (2026-07-03)
+
+31. `kcs open` returns resolution JSON instead of launching an OS opener (Step3c 裁定 (c) の記録).
+    `docs/06-cli-spec.md` §1 describes `open` as "原本をアプリで開く"; the Step 3 implementation
+    resolves the pointer and returns `{path, ...}` JSON (working tree path, or a CAS temporary
+    expansion under `$XDG_DATA_HOME/kcs/open/`), leaving the actual OS launch (`open`/`xdg-open`)
+    to the caller. Rationale: the OS launch is a final thin layer that is untestable in CI and
+    irrelevant to the resolution contract (08 §3); agents consume `--json` anyway. The audit round
+    (tasks/step3c-fixes.md) accepted this within Step 3 scope on condition it is recorded here.
+    The OS-launch layer is Step 4+.
+32. New error codes for the K6 evidence resolver (Step3c). `KCS-E-PURGE-TOMBSTONED-001` (exit 4)
+    carries the 08 §4.1 tombstone response (`status="purged"` body in `context`) when `kcs open` /
+    `kcs view` hit a tombstoned raw_hash — 08 §4.1 fixes the response shape but names no code, and
+    06 §8's code list is explicitly examples ("例:"), so a PURGE-domain code is minted here.
+    `KCS-E-EVIDENCE-SCOPE-AMBIGUOUS-001` (exit 4) covers 08 §3.1 step 1b "曖昧なら候補一覧 error"
+    (multiple registry entries for one scope_id sharing the newest `last_seen_at`); the candidate
+    list is returned in `context.candidates`. Both codes follow the 06 §8 DOMAIN namespace; adding
+    them to the docs' example list is deferred to the next docs edit window.
+33. New error code for the 08 §3.2 retarget contract (Step3c re-audit fix).
+    `KCS-E-EVIDENCE-RETARGET-REQUIRED-001` (exit 8, per 06 §7 "tool_profile_hash 不一致で chunk
+    解決不能 (retarget 要) は 8") is returned by `kcs open` / `kcs view` when the pointer's scope,
+    commit, and raw_hash all resolve (and no tombstone applies) but no chunk row exists for the
+    pointer's `chunk_hash` — 08 §3.2: "tool_profile_hash 不一致: chunk が存在しない場合は retarget
+    が必要 (§5)". `context` carries `{chunk_hash, tool_profile_hash, raw_hash}`. The check does not
+    require tree-entry profile equality (Step-1 raw-only trees carry no `normalize` ref; an
+    existing chunk row is self-certifying because `chunk_hash` commits to its `tool_profile_hash`).
+    08 §5 names no code and 06 §8's list is examples ("例:"), so an EVIDENCE-domain code is minted
+    here; docs sync is deferred to the next docs edit window. `kcs evidence retarget` itself
+    remains Step 4.
