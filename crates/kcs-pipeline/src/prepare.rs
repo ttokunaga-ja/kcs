@@ -73,6 +73,19 @@ pub fn prepare_units(request: PrepareStageRequest) -> Result<PrepareStageOutput>
     let bytes = std::fs::read(&request.input_path).pipeline_io(Path::new(&request.input_path))?;
     let prepared_hash = hash_bytes(&bytes);
     let unit_type = unit_type_for_media_type(&request.media_type);
+    let pdf_pages = if request.media_type == "application/pdf" {
+        let pages = pdf_text_pages(&bytes);
+        if pages.is_empty() {
+            return Ok(PrepareStageOutput {
+                prepared_object_hashes: Vec::new(),
+                prepared_units: Vec::new(),
+                image_object_hashes: Vec::new(),
+            });
+        }
+        pages
+    } else {
+        Vec::new()
+    };
     if request.media_type == "application/pdf" && !pdf_has_text_layer(&bytes) {
         return Ok(PrepareStageOutput {
             prepared_object_hashes: Vec::new(),
@@ -81,7 +94,7 @@ pub fn prepare_units(request: PrepareStageRequest) -> Result<PrepareStageOutput>
         });
     }
     let unit_count = if unit_type == UnitType::Page {
-        pdf_page_count(&bytes).max(1)
+        pdf_pages.len().max(1)
     } else {
         1
     };
@@ -94,12 +107,22 @@ pub fn prepare_units(request: PrepareStageRequest) -> Result<PrepareStageOutput>
             UnitType::File | UnitType::HeadingSection | UnitType::Symbol => "1".to_owned(),
         };
         let unit_key = canonical_unit_key(unit_type, &selector);
-        let unit_prepared_hash = if unit_count == 1 {
+        let page_bytes = pdf_pages
+            .get(index)
+            .map(|page| page.as_bytes())
+            .unwrap_or(bytes.as_slice());
+        let unit_prepared_hash = if unit_type == UnitType::Page {
+            hash_bytes(page_bytes)
+        } else if unit_count == 1 {
             prepared_hash.clone()
         } else {
             hash_bytes(format!("{prepared_hash}\0{unit_key}").as_bytes())
         };
-        let fingerprint = fingerprint_for_bytes(&bytes, unit_prepared_hash.as_bytes());
+        let fingerprint = if unit_type == UnitType::Page {
+            fingerprint_for_bytes(page_bytes, page_bytes)
+        } else {
+            fingerprint_for_bytes(&bytes, unit_prepared_hash.as_bytes())
+        };
         prepared_units.push(PreparedUnit {
             order: index as u64,
             unit_key,
@@ -225,6 +248,34 @@ fn pdf_has_text_layer(bytes: &[u8]) -> bool {
     !bytes.starts_with(b"%PDF") || bytes.windows(2).any(|window| window == b"BT")
 }
 
+#[must_use]
+pub fn pdf_text_pages(bytes: &[u8]) -> Vec<String> {
+    if !bytes.starts_with(b"%PDF") {
+        return vec![String::from_utf8_lossy(bytes).into_owned()];
+    }
+    if !pdf_has_text_layer(bytes) {
+        return Vec::new();
+    }
+    let page_count = pdf_page_count(bytes).max(1);
+    let strings = pdf_literal_strings(bytes);
+    if strings.is_empty() {
+        return vec![pdf_text_fallback(bytes)];
+    }
+    if strings.len() == page_count {
+        return strings;
+    }
+    let chunk_size = strings.len().div_ceil(page_count);
+    let mut pages = strings
+        .chunks(chunk_size.max(1))
+        .map(|chunk| chunk.join("\n"))
+        .collect::<Vec<_>>();
+    while pages.len() < page_count {
+        pages.push(String::new());
+    }
+    pages.truncate(page_count);
+    pages
+}
+
 fn pdf_page_count(bytes: &[u8]) -> usize {
     let text = String::from_utf8_lossy(bytes);
     let pages = text
@@ -242,6 +293,38 @@ fn pdf_page_count(bytes: &[u8]) -> usize {
             })
             .count(),
     )
+}
+
+fn pdf_literal_strings(bytes: &[u8]) -> Vec<String> {
+    let text = String::from_utf8_lossy(bytes);
+    let mut out = Vec::new();
+    let mut rest = text.as_ref();
+    while let Some(start) = rest.find('(') {
+        rest = &rest[start + 1..];
+        let Some(end) = rest.find(')') else {
+            break;
+        };
+        let candidate = rest[..end]
+            .replace("\\(", "(")
+            .replace("\\)", ")")
+            .replace("\\n", "\n");
+        if candidate
+            .chars()
+            .any(|char| char.is_alphanumeric() || !char.is_ascii())
+        {
+            out.push(candidate);
+        }
+        rest = &rest[end + 1..];
+    }
+    out
+}
+
+fn pdf_text_fallback(bytes: &[u8]) -> String {
+    String::from_utf8_lossy(bytes)
+        .lines()
+        .filter(|line| !line.trim_start().starts_with('%'))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn align_changed_interval(

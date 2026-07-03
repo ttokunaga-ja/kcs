@@ -162,11 +162,21 @@ pub fn estimate_local_baseline_cost(size_bytes: u64) -> f64 {
     }
 }
 
-pub fn read_budget_caps(config_path: impl AsRef<Path>) -> Result<(Option<f64>, Option<f64>)> {
+pub fn read_budget_caps(
+    device_config_path: impl AsRef<Path>,
+    folder_config_path: impl AsRef<Path>,
+) -> Result<(Option<f64>, Option<f64>)> {
+    Ok((
+        read_monthly_cap(device_config_path)?,
+        read_monthly_cap(folder_config_path)?,
+    ))
+}
+
+fn read_monthly_cap(config_path: impl AsRef<Path>) -> Result<Option<f64>> {
     let path = config_path.as_ref();
     let text = match fs::read_to_string(path) {
         Ok(text) => text,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok((None, None)),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(err) => {
             return Err(PipelineError::Io {
                 path: path.display().to_string(),
@@ -177,21 +187,15 @@ pub fn read_budget_caps(config_path: impl AsRef<Path>) -> Result<(Option<f64>, O
     let value: toml::Value =
         toml::from_str(&text).map_err(|err| PipelineError::Schema(err.to_string()))?;
     let budget = value.get("budget");
-    let number = |key: &str| {
-        budget
-            .and_then(|value| value.get(key))
-            .and_then(toml::Value::as_float)
-            .or_else(|| {
-                budget
-                    .and_then(|value| value.get(key))
-                    .and_then(toml::Value::as_integer)
-                    .map(|value| value as f64)
-            })
-    };
-    Ok((
-        number("device_monthly_usd_cap"),
-        number("folder_monthly_usd_cap"),
-    ))
+    Ok(budget
+        .and_then(|value| value.get("monthly_usd_cap"))
+        .and_then(toml::Value::as_float)
+        .or_else(|| {
+            budget
+                .and_then(|value| value.get("monthly_usd_cap"))
+                .and_then(toml::Value::as_integer)
+                .map(|value| value as f64)
+        }))
 }
 
 #[cfg(test)]

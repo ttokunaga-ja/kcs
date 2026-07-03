@@ -198,7 +198,8 @@ fn markdown_unit_from_hint(
             fence_code(text, request.raw.path.as_deref())
         }
         Some(text) if request.media_type == "application/pdf" => {
-            format!("{}\n", text.trim())
+            let page_text = read_pdf_page_text(request, hint).unwrap_or_else(|| text.to_owned());
+            format!("{}\n", page_text.trim())
         }
         Some(text) => text.to_owned(),
         None => format!(
@@ -225,9 +226,17 @@ fn read_source_text(request: &MarkdownizeRequest) -> Option<String> {
     let path = request.raw.path.as_ref()?;
     let bytes = std::fs::read(path).ok()?;
     if request.media_type == "application/pdf" {
-        return Some(extract_pdf_text_layer(&bytes));
+        return Some(extract_pdf_text_pages(&bytes).join("\n\n"));
     }
     Some(String::from_utf8_lossy(&bytes).into_owned())
+}
+
+fn read_pdf_page_text(request: &MarkdownizeRequest, hint: &PreparedUnitHint) -> Option<String> {
+    let path = request.raw.path.as_ref()?;
+    let bytes = std::fs::read(path).ok()?;
+    let pages = extract_pdf_text_pages(&bytes);
+    let page_index = page_index_from_unit_key(&hint.unit_key).unwrap_or(hint.order as usize);
+    pages.get(page_index).cloned()
 }
 
 fn fence_code(text: &str, path: Option<&str>) -> String {
@@ -238,9 +247,33 @@ fn fence_code(text: &str, path: Option<&str>) -> String {
     format!("```{lang}\n{}\n```\n", text.trim_end())
 }
 
-fn extract_pdf_text_layer(bytes: &[u8]) -> String {
+fn extract_pdf_text_pages(bytes: &[u8]) -> Vec<String> {
+    if !bytes.starts_with(b"%PDF") {
+        return vec![String::from_utf8_lossy(bytes).into_owned()];
+    }
+    let page_count = pdf_page_count(bytes).max(1);
+    let strings = pdf_literal_strings(bytes);
+    if strings.is_empty() {
+        return vec![pdf_text_fallback(bytes)];
+    }
+    if strings.len() == page_count {
+        return strings;
+    }
+    let chunk_size = strings.len().div_ceil(page_count);
+    let mut pages = strings
+        .chunks(chunk_size.max(1))
+        .map(|chunk| chunk.join("\n"))
+        .collect::<Vec<_>>();
+    while pages.len() < page_count {
+        pages.push(String::new());
+    }
+    pages.truncate(page_count);
+    pages
+}
+
+fn pdf_literal_strings(bytes: &[u8]) -> Vec<String> {
     let text = String::from_utf8_lossy(bytes);
-    let mut out = String::new();
+    let mut out = Vec::new();
     let mut rest = text.as_ref();
     while let Some(start) = rest.find('(') {
         rest = &rest[start + 1..];
@@ -252,21 +285,46 @@ fn extract_pdf_text_layer(bytes: &[u8]) -> String {
             .chars()
             .any(|char| char.is_alphanumeric() || !char.is_ascii())
         {
-            if !out.is_empty() {
-                out.push('\n');
-            }
-            out.push_str(candidate);
+            out.push(candidate.to_owned());
         }
         rest = &rest[end + 1..];
     }
-    if out.is_empty() {
-        text.lines()
-            .filter(|line| !line.trim_start().starts_with('%'))
-            .collect::<Vec<_>>()
-            .join("\n")
-    } else {
-        out
-    }
+    out
+}
+
+fn pdf_text_fallback(bytes: &[u8]) -> String {
+    String::from_utf8_lossy(bytes)
+        .lines()
+        .filter(|line| !line.trim_start().starts_with('%'))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn pdf_page_count(bytes: &[u8]) -> usize {
+    let text = String::from_utf8_lossy(bytes);
+    let pages = text
+        .match_indices("/Type")
+        .filter(|(index, _)| {
+            let tail = &text[*index..text.len().min(index + 32)];
+            tail.contains("/Page") && !tail.contains("/Pages")
+        })
+        .count();
+    pages.max(
+        text.match_indices("/Page")
+            .filter(|(index, _)| {
+                let tail = &text[*index..text.len().min(index + 8)];
+                !tail.starts_with("/Pages")
+            })
+            .count(),
+    )
+}
+
+fn page_index_from_unit_key(unit_key: &str) -> Option<usize> {
+    unit_key
+        .strip_prefix("page:")?
+        .parse::<usize>()
+        .ok()
+        .and_then(|page| page.checked_sub(1))
 }
 
 #[cfg(test)]

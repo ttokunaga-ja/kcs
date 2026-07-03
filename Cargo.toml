@@ -23,3 +23,5 @@ sha2 = "0.10"
 thiserror = "1"
 toml = "0.8"
 unicode-normalization = "0.1"
+base64 = "0.22"
+ureq = { version = "2", features = ["json"] }
