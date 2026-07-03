@@ -19,7 +19,7 @@
 > 再設計。**ws1a A.5 の旧値 `sha256:8fefa482…` (section_id="auth/api-token") は規則確定前の例示値であり
 > 歴史的参照**。(5) text-only 緩和撤回 (WS-embed-2 裁定、`07 §5.3` 更新済み) に伴い EMB 系を
 > `gemini-embedding-2` / 768 (MRL) / cosine / `modality="multimodal"` で再凍結、CT3-EMBED-004 を
-> multimodal 前提に改訂 (旧 gemini-embedding-001 ベクタは削除)。契約・P0 構成 (59 件) は不変。
+> multimodal 前提に改訂 (旧 gemini-embedding-001 ベクタは削除)。契約は不変、P0 は CT3-EMBED-008 追加で 59→60。
 >
 > 改訂 r2 (2026-07-03): Codex クロスレビュー反映。既存ベクタは全件再計算一致につき不変 (chunk_hash の
 > ws1a 整合 / RRF 全行 / MMR 算術 / URI 往復)。誤引用・過剰契約 4 件を修正 (CT3-EVIDENCE-001 の
@@ -1063,10 +1063,10 @@ Recall@10 >= 0.8」+「本書 P0 全緑」** とし、M3-2 / M3-3 の Recall 判
 ## 集計 (報告用)
 
 - **P0 テスト数**: 60 (総テスト数 77: P0 60 / P1 17。CT3-EMBED-008 = 非 multimodal profile 拒否を 2026-07-03 追加)
-  (CT3-CHUNK 11 / CT3-EMBED 4 / CT3-FTS 4 / CT3-HYBRID 6 / CT3-MMR 4 / CT3-CURSOR 5 / CT3-MULTI 5 /
+  (CT3-CHUNK 11 / CT3-EMBED 5 / CT3-FTS 4 / CT3-HYBRID 6 / CT3-MMR 4 / CT3-CURSOR 5 / CT3-MULTI 5 /
    CT3-EVIDENCE 7 / CT3-URI 3 / CT3-OPEN 4 / CT3-REINDEX 3 / CT3-OBS 3)
   (r2: 57 + CT3-EVIDENCE-009 新設 + CT3-CHUNK-012 P1→P0 昇格。CT3-MULTI-008 は P1 新設。
-   r3: P0 構成は不変 — ベクタ再凍結と §C 解消状態の同期のみ)
+   r3: CT3-EMBED-008 追加で P0 59→60。ベクタ再凍結と §C 解消状態の同期)
 - **spec 未定義事項**: 9 件 (§C)。うち **#1〜#4 および #6 の 5 件は 2026-07-03 の spec 追記
   (`04 §4.1` chunk 境界正準規則 / `05 §1.8` query_hash 正準構成 / `05 §1.4` MMR min-max 正規化 +
   similarity=cosine / `05 §7` per-search latency 記録) で解消済み** — **要-spec の残は 0 件**。

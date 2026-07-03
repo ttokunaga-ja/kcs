@@ -201,7 +201,15 @@ fn validate_embedding_entry(value: &Value) -> Result<()> {
     required_string(object, "embedding", "profile_hash")?;
     required_u64(object, "embedding", "dimensions")?;
     required_string(object, "embedding", "distance")?;
-    required_string(object, "embedding", "modality")?;
+    let modality = required_string(object, "embedding", "modality")?;
+    // 03 §7: modality は "multimodal" に固定。別ベクトル空間 (text 専用等) の
+    // embedding profile は tool-lock materialize の時点で採用拒否する。
+    if modality.as_str() != Some("multimodal") {
+        return Err(AdapterError::ConfigSchema(format!(
+            "KCS-E-EMBED-MODALITY-001: embedding.modality must be \"multimodal\" \
+             (got {modality}); non-multimodal embedding profiles are not adoptable"
+        )));
+    }
     Ok(())
 }
 
@@ -278,6 +286,36 @@ fn valid_auth_value(value: &str) -> bool {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn non_multimodal_embedding_entry_is_rejected() {
+        // 03 §7: 別ベクトル空間 (modality != "multimodal") の embedding profile は
+        // tool-lock materialize の時点で採用拒否 (KCS-E-EMBED-MODALITY-001)。
+        let value = json!({
+            "spec_version": 1,
+            "embedding": {
+                "tool_id": "some_text_embedding",
+                "profile_hash": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+                "dimensions": 768,
+                "distance": "cosine",
+                "modality": "text"
+            }
+        });
+        let err = validate_tool_lock_value(&value).expect_err("text modality must be rejected");
+        assert!(err.to_string().contains("KCS-E-EMBED-MODALITY-001"));
+
+        let ok = json!({
+            "spec_version": 1,
+            "embedding": {
+                "tool_id": "gemini_embedding_2",
+                "profile_hash": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+                "dimensions": 768,
+                "distance": "cosine",
+                "modality": "multimodal"
+            }
+        });
+        validate_tool_lock_value(&ok).expect("multimodal modality must be accepted");
+    }
 
     #[test]
     fn placeholder_tool_lock_serializes_spec_version() {

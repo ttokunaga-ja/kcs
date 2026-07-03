@@ -79,7 +79,8 @@ MMR 選択則:
 
 ```
 score(c) = λ * relevance(c) - (1-λ) * max_{c' ∈ selected} similarity(c, c')
-similarity = vector cosine, または heading_path / section_id の Jaccard
+similarity = embedding の vector cosine (これのみ。2026-07-03 確定 — embedding が無い場合は
+             MMR 自体を適用しないため、代替 similarity は定義しない)
 ```
 
 適用範囲と決定性:
@@ -574,7 +575,7 @@ kcs repair --rebuild-db / kcs move --accept
   access.jsonl       検索アクセスログ (redact_logs はデフォルト true、10-operations.md §12.6)
 ```
 
-**検索 latency の per-search 記録** (2026-07-03 追記、step3a §C の解消。北極星 §4.1 の p50/p95/p99 計測の一次データ): `kcs search` は 1 回の実行ごとに metrics.jsonl へ 1 行を追記する。行はログ共通 envelope (必須 `ts, level, code, component, message, context`) に従い、metric 固有フィールドを加える — `{ "ts": <UTC>, "level": "info", "code": "KCS-M-SEARCH-001", "component": "search", "message": "search completed", "metric": "search.latency_ms", "value": <実測 ms>, "context": { "mode": <実効 mode>, "scope_count": <検索した scope 数>, "result_count": <返却件数> } }`。redact_logs 既定 (クエリ本文・path は記録しない) に従う。1h 間隔の集計メトリクスはこの一次データから導出してよい。
+**検索 latency の per-search 記録** (2026-07-03 追記、step3a §C の解消。北極星 §4.1 の p50/p95/p99 計測の一次データ): `kcs search` は 1 回の実行ごとに metrics.jsonl へ 1 行を追記する。行はログ共通 envelope (必須 `ts, level, code, component, message, context`) に従い、metric 固有フィールドを加える — `{ "ts": <UTC>, "level": "info", "code": "KCS-M-SEARCH-001", "component": "search", "message": "search completed", "metric": "search.latency_ms", "value": <実測 ms>, "context": { "mode": <実効 mode>, "scope_count": <検索した scope 数>, "result_count": <返却件数> } }`。redact_logs 既定 (クエリ本文・path は記録しない) に従う。1h 間隔の集計メトリクスはこの一次データから導出してよい。非エラー行の `code` は `KCS-M-<DOMAIN>-<NNN>` (metric) / `KCS-EV-<DOMAIN>-<NNN>` (event) の名前空間を使う — 形式は [06-cli-spec.md §8](06-cli-spec.md) の error_code と同じ規約 (`KCS-E-` は error 専用)。
 
 各行 JSON 必須フィールド: `ts, level, code, component, message, context`。詳細は [10-operations.md §12.6](10-operations.md)。
 

@@ -223,7 +223,7 @@ CREATE TABLE embeddings (
   id TEXT PRIMARY KEY,
   target_type TEXT NOT NULL,    -- chunk | image | node | query_cache
   target_id TEXT NOT NULL,
-  modality TEXT NOT NULL,       -- text | image | multimodal
+  modality TEXT NOT NULL,       -- "multimodal" のみ (非 multimodal は KCS-E-EMBED-MODALITY-001 で採用不可、07 §5.3)
   vector BLOB NOT NULL,
   dimensions INTEGER NOT NULL,
   distance TEXT NOT NULL,

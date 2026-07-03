@@ -17,7 +17,11 @@ pub struct MmrConfig {
 pub struct MmrCandidate {
     pub chunk_hash: String,
     pub raw_hash: String,
+    /// RRF スコアの候補プール内 min-max 正規化値 (05 §1.4)
     pub relevance: f64,
+    /// similarity は embedding の cosine のみ (05 §1.4)。None (text-only) の候補が
+    /// 含まれる場合、呼び出し側は MMR を適用しない
+    pub embedding: Option<Vec<f32>>,
     pub heading_path: Option<Vec<String>>,
     pub section_id: Option<String>,
 }
