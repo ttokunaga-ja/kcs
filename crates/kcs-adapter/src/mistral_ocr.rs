@@ -68,7 +68,7 @@ impl EnvMistralOcrClient {
 
     fn api_key() -> Result<String> {
         std::env::var("MISTRAL_API_KEY")
-            .map_err(|_| AdapterError::ContractViolation("MISTRAL_API_KEY is not set".to_owned()))
+            .map_err(|_| AdapterError::Auth("MISTRAL_API_KEY is not set".to_owned()))
     }
 }
 
@@ -226,27 +226,23 @@ impl<C: MistralOcrClient> MarkdownizeAdapter for MistralOcrMarkdownizeAdapter<C>
             mode_used: request.mode,
             updated_units: hints
                 .iter()
-                .map(|hint| {
+                .filter_map(|hint| {
                     let page_index = hint.order as usize;
                     let page = pages_by_index
                         .get(&page_index)
                         .copied()
-                        .or_else(|| ocr.pages.get(page_index))
-                        .or_else(|| ocr.pages.first());
-                    let markdown = page
-                        .map(|page| {
-                            replace_image_placeholders(&page.markdown, &self.scope_id, &page.images)
-                        })
-                        .unwrap_or_else(|| "<!-- KCS OCR returned no page -->\n".to_owned());
-                    MarkdownUnit {
+                        .or_else(|| ocr.pages.get(page_index))?;
+                    let markdown =
+                        replace_image_placeholders(&page.markdown, &self.scope_id, &page.images);
+                    Some(MarkdownUnit {
                         unit_key: hint.unit_key.clone(),
                         unit_type: hint.unit_kind,
                         markdown,
                         metadata: page_metadata(
                             &ocr.model_version_pin,
-                            page.map(|page| page.images.as_slice()),
+                            Some(page.images.as_slice()),
                         ),
-                    }
+                    })
                 })
                 .collect(),
             unchanged_unit_keys: Vec::new(),
@@ -408,11 +404,21 @@ fn page_metadata(model_version_pin: &str, images: Option<&[OcrImage]>) -> BTreeM
 
 fn http_error(error: ureq::Error) -> AdapterError {
     match error {
-        ureq::Error::Status(code, response) => AdapterError::ContractViolation(format!(
+        ureq::Error::Status(401 | 403, response) => {
+            AdapterError::Auth(format!("Mistral OCR HTTP auth: {}", response.status_text()))
+        }
+        ureq::Error::Status(429, response) => {
+            AdapterError::RateLimit(format!("Mistral OCR HTTP 429: {}", response.status_text()))
+        }
+        ureq::Error::Status(402, response) => AdapterError::QuotaExceeded(format!(
+            "Mistral OCR HTTP quota: {}",
+            response.status_text()
+        )),
+        ureq::Error::Status(code, response) => AdapterError::Network(format!(
             "Mistral OCR HTTP {code}: {}",
             response.status_text()
         )),
-        ureq::Error::Transport(transport) => AdapterError::ContractViolation(transport.to_string()),
+        ureq::Error::Transport(transport) => AdapterError::Network(transport.to_string()),
     }
 }
 
@@ -471,8 +477,9 @@ pub fn replace_image_placeholders(markdown: &str, scope_id: &str, images: &[OcrI
 }
 
 fn next_markdown_image_target(markdown: &str, cursor: usize) -> Option<(usize, usize)> {
-    let start = markdown[cursor..].find("](")? + cursor;
-    let target_start = start + 2;
+    let image_start = markdown[cursor..].find("![")? + cursor;
+    let label_end = markdown[image_start + 2..].find("](")? + image_start + 2;
+    let target_start = label_end + 2;
     let relative_end = markdown[target_start..].find(')')?;
     let target_end = target_start + relative_end;
     Some((target_start, target_end))

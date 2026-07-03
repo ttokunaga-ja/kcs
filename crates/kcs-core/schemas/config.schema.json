@@ -42,7 +42,13 @@
     "budget": {
       "type": "object",
       "properties": {
-        "monthly_usd_cap": { "type": "number", "minimum": 0 }
+        "monthly_usd_cap": { "type": "number", "minimum": 0 },
+        "warn_at_percent": { "type": "integer", "minimum": 0, "maximum": 100 },
+        "hard_stop": { "type": "boolean" },
+        "per_adapter": {
+          "type": "object",
+          "additionalProperties": { "type": "number", "minimum": 0 }
+        }
       },
       "additionalProperties": false
     },

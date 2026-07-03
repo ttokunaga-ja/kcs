@@ -157,8 +157,47 @@ fn json_success<const N: usize>(dir: &TempDir, args: [&str; N]) -> Value {
     serde_json::from_slice(&output).unwrap()
 }
 
+fn json_success_with_env<const N: usize>(
+    dir: &TempDir,
+    args: [&str; N],
+    envs: &[(&str, &str)],
+) -> Value {
+    let mut command = kcs(dir, args);
+    for (key, value) in envs {
+        command.env(key, value);
+    }
+    let output = command
+        .arg("--json")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    serde_json::from_slice(&output).unwrap()
+}
+
 fn json_failure<const N: usize>(dir: &TempDir, args: [&str; N], code: i32) -> Value {
     let output = kcs(dir, args)
+        .arg("--json")
+        .assert()
+        .code(code)
+        .get_output()
+        .stderr
+        .clone();
+    serde_json::from_slice(&output).unwrap()
+}
+
+fn json_failure_with_env<const N: usize>(
+    dir: &TempDir,
+    args: [&str; N],
+    code: i32,
+    envs: &[(&str, &str)],
+) -> Value {
+    let mut command = kcs(dir, args);
+    for (key, value) in envs {
+        command.env(key, value);
+    }
+    let output = command
         .arg("--json")
         .assert()
         .code(code)
@@ -195,6 +234,30 @@ fn fake_pdf(pages: &[&str]) -> String {
     out
 }
 
+fn fake_pdf_stream_strings(pages: Vec<Vec<&str>>) -> String {
+    let kids = (0..pages.len())
+        .map(|index| format!("{} 0 R", index + 2))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let mut out = format!(
+        "%PDF-1.4\n1 0 obj << /Type /Pages /Kids [{kids}] /Count {} >> endobj\n",
+        pages.len()
+    );
+    for (index, strings) in pages.iter().enumerate() {
+        let ops = strings
+            .iter()
+            .map(|text| format!("({text}) Tj"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        out.push_str(&format!(
+            "{} 0 obj << /Type /Page /Parent 1 0 R >> stream\nBT {ops} ET\nendstream endobj\n",
+            index + 2
+        ));
+    }
+    out.push_str("%%EOF\n");
+    out
+}
+
 fn normalized_units(dir: &TempDir) -> Vec<NormalizedUnitObject> {
     let root = dir.path().join(".kcs/objects/normalized_units");
     collect_files(&root)
@@ -205,6 +268,15 @@ fn normalized_units(dir: &TempDir) -> Vec<NormalizedUnitObject> {
             let bytes = fs::read(root.join(path)).unwrap();
             serde_json::from_slice::<NormalizedUnitObject>(&bytes).unwrap()
         })
+        .collect()
+}
+
+fn ledger_lines(dir: &TempDir) -> Vec<Value> {
+    let path = dir.path().join(".test-data/kcs/cost-ledger.jsonl");
+    let text = fs::read_to_string(path).unwrap_or_default();
+    text.lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| serde_json::from_str(line).unwrap())
         .collect()
 }
 
@@ -601,6 +673,51 @@ fn ct2_accept_007_reject_triggers_full_fallback_path() {
 }
 
 #[test]
+fn ct2_accept_008_full_fallback_failure_is_per_candidate_partial_exit() {
+    let dir = scope();
+    fs::write(
+        dir.path().join("a_report.pdf"),
+        fake_pdf(&["p1", "p2", "p3", "p4"]),
+    )
+    .unwrap();
+    fs::write(dir.path().join("z.txt"), "stable").unwrap();
+    json_success_with_env(
+        &dir,
+        ["index", "--approve"],
+        &[("KCS_TEST_MARKDOWNIZE_ADAPTER", "incremental")],
+    );
+
+    fs::write(
+        dir.path().join("a_report.pdf"),
+        fake_pdf(&["p1 changed", "p2", "p3", "p4"]),
+    )
+    .unwrap();
+    let error = json_failure_with_env(
+        &dir,
+        ["index", "--yes"],
+        3,
+        &[(
+            "KCS_TEST_MARKDOWNIZE_ADAPTER",
+            "reject_incremental_and_full",
+        )],
+    );
+    assert_eq!(error["error_code"], "KCS-E-INDEX-PARTIAL-001");
+    assert_eq!(error["context"]["output"]["failed_files"], 1);
+    assert!(
+        error["context"]["output"]["normalized_files"]
+            .as_u64()
+            .unwrap()
+            > 0
+    );
+    let status = json_success(&dir, ["status"]);
+    assert!(status["tasks"].as_array().unwrap().iter().any(|task| {
+        task["input_path"] == "a_report.pdf"
+            && task["status"] == "failed"
+            && task["fallback_reason"] == "full_fallback_failed"
+    }));
+}
+
+#[test]
 fn ct2_task_001_state_transitions() {
     assert_eq!(task_status_from_unit_counts(2, 0, false), TaskStatus::Done);
     assert_eq!(
@@ -845,19 +962,67 @@ fn ct2_ignore_001_double_star_ext_pattern_excludes_nested_file() {
     fs::create_dir(dir.path().join("logs")).unwrap();
     fs::write(dir.path().join("logs/app.log"), "ignore me").unwrap();
     fs::write(dir.path().join("logs/app.txt"), "keep me").unwrap();
+    fs::write(dir.path().join("debug.log"), "ignore direct").unwrap();
+    fs::write(dir.path().join("keep.txt"), "keep direct").unwrap();
     fs::write(dir.path().join(".kcsignore"), "**/*.log\n").unwrap();
     let preview = json_success(&dir, ["index", "--preview"]);
     assert!(preview["excluded_candidates"]
         .as_array()
         .unwrap()
         .iter()
-        .any(|path| path == "logs/app.log"));
+        .any(|path| path == "debug.log"));
     assert!(preview["candidates"]
         .as_array()
         .unwrap()
         .iter()
-        .any(|candidate| candidate["input_path"] == "logs/app.txt"
+        .any(|candidate| candidate["input_path"] == "keep.txt"
             && !candidate["ignored"].as_bool().unwrap()));
+    assert!(!preview["candidates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|candidate| candidate["input_path"]
+            .as_str()
+            .is_some_and(|path| path.starts_with("logs/"))));
+    assert!(!preview["excluded_candidates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|path| path == "logs/app.log"));
+}
+
+#[test]
+fn ct2_scope_001_subfolder_files_do_not_reach_parent_artifacts() {
+    let dir = scope();
+    fs::create_dir(dir.path().join("child")).unwrap();
+    fs::write(dir.path().join("a.txt"), "parent public").unwrap();
+    fs::write(dir.path().join("child/secret.txt"), "child private").unwrap();
+    let child_hash = hash_bytes(b"child private");
+
+    json_success(&dir, ["index", "--approve"]);
+
+    let status = json_success(&dir, ["status"]);
+    assert!(!status["tasks"].as_array().unwrap().iter().any(|task| {
+        task["input_path"]
+            .as_str()
+            .is_some_and(|path| path == "child/secret.txt" || path.starts_with("child/"))
+    }));
+
+    let object_root = dir.path().join(".kcs/objects");
+    let object_text = collect_files(&object_root)
+        .into_iter()
+        .filter_map(|path| fs::read(object_root.join(path)).ok())
+        .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(!object_text.contains(&child_hash));
+    assert!(!object_text.contains("child private"));
+
+    let ledger = ledger_lines(&dir);
+    assert_eq!(ledger.len(), 1);
+    assert!(!serde_json::to_string(&ledger)
+        .unwrap()
+        .contains(&child_hash));
 }
 
 #[test]
@@ -897,10 +1062,35 @@ fn ct2_network_002_approve_grants_opt_in_yes_does_not() {
     assert_eq!(error["error_code"], "KCS-E-CONFIG-USAGE-001");
     assert_eq!(
         json_success(&online_dir, ["index", "--yes", "--online"])["network_opt_in"],
-        true
+        false
     );
+    assert!(json_success(&online_dir, ["status"])["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|task| task["fallback_reason"] == "ready_for_online_adapter"));
     let approvals = fs::read_to_string(online_dir.path().join(".kcs/approvals.jsonl")).unwrap();
     assert!(approvals.contains(r#""network_opt_in":false"#));
+}
+
+#[test]
+fn ct2_network_004_config_allow_network_enables_online() {
+    let dir = scope();
+    fs::write(
+        dir.path().join(".kcs/config.toml"),
+        "[adapter.policy]\nallow_network = true\n",
+    )
+    .unwrap();
+    fs::write(dir.path().join("a.txt"), "hello").unwrap();
+    let output = json_success(&dir, ["index", "--yes"]);
+    assert_eq!(output["network_allowed"], true);
+    assert_eq!(output["network_opt_in"], true);
+    let status = json_success(&dir, ["status"]);
+    assert!(status["tasks"].as_array().unwrap().iter().any(|task| {
+        task["input_path"] == "a.txt"
+            && task["status"] == "pending"
+            && task["fallback_reason"] == "ready_for_online_adapter"
+    }));
 }
 
 #[test]
@@ -952,6 +1142,34 @@ fn ct2_pdf_001_two_page_pdf_produces_page_specific_markdown() {
     assert!(page1.markdown.contains("First page text"));
     assert!(page2.markdown.contains("Second page text"));
     assert_ne!(page1.markdown, page2.markdown);
+}
+
+#[test]
+fn ct2_pdf_002_uneven_three_page_pdf_preserves_stream_boundaries() {
+    let dir = scope();
+    fs::write(
+        dir.path().join("report.pdf"),
+        fake_pdf_stream_strings(vec![
+            vec!["p1a", "p1b"],
+            vec!["p2"],
+            vec!["p3a", "p3b", "p3c"],
+        ]),
+    )
+    .unwrap();
+    json_success(&dir, ["index", "--approve"]);
+    let units = normalized_units(&dir);
+    let page1 = units.iter().find(|unit| unit.unit_key == "page:1").unwrap();
+    let page2 = units.iter().find(|unit| unit.unit_key == "page:2").unwrap();
+    let page3 = units.iter().find(|unit| unit.unit_key == "page:3").unwrap();
+    assert!(page1.markdown.contains("p1a"));
+    assert!(page1.markdown.contains("p1b"));
+    assert!(!page1.markdown.contains("p2"));
+    assert_eq!(page2.markdown.trim(), "p2");
+    assert!(!page2.markdown.contains("p1b"));
+    assert!(!page2.markdown.contains("p3a"));
+    assert!(page3.markdown.contains("p3a"));
+    assert!(page3.markdown.contains("p3c"));
+    assert!(!page3.markdown.contains("p2"));
 }
 
 #[test]
@@ -1007,6 +1225,119 @@ fn ct2_adapter_013_baseline_and_ai_artifacts_coexist() {
     );
     assert!(dir.path().join(".kcs/objects/images").is_dir());
     assert!(collect_files(&baseline_root).len() > before.len());
+}
+
+#[test]
+fn ct2_budget_005_online_success_records_ledger_and_caps_next_task() {
+    let dir = scope();
+    fs::write(dir.path().join("a.txt"), "hello online cost").unwrap();
+    json_success(&dir, ["index", "--approve"]);
+    json_success_with_env(
+        &dir,
+        ["batch", "resume"],
+        &[("KCS_TEST_MISTRAL_OCR", "mock")],
+    );
+
+    let online_entry = ledger_lines(&dir).into_iter().find(|entry| {
+        entry["adapter_kind"] == "markdown" && entry["usd"].as_f64().unwrap_or_default() > 0.0
+    });
+    assert!(online_entry.is_some());
+
+    fs::write(
+        dir.path().join(".kcs/config.toml"),
+        "[budget]\nmonthly_usd_cap = 50\n[budget.per_adapter]\nmarkdown = 0.0\n",
+    )
+    .unwrap();
+    fs::write(dir.path().join("b.txt"), "second online cost").unwrap();
+    let output = json_success(&dir, ["index", "--yes"]);
+    assert!(output["paused_tasks"].as_u64().unwrap() > 0);
+    let status = json_success(&dir, ["status"]);
+    assert!(status["tasks"].as_array().unwrap().iter().any(|task| {
+        task["input_path"] == "b.txt"
+            && task["status"] == "paused"
+            && task["fallback_reason"] == "budget_exceeded"
+    }));
+    assert!(status["budget"]["cap_kind"].as_str().is_some());
+    assert_eq!(status["budget"]["folder_per_adapter"]["markdown"], 0.0);
+}
+
+#[test]
+fn ct2_image_003_cli_mock_preserves_links_when_replacing_images() {
+    let dir = scope();
+    fs::write(dir.path().join("a.txt"), "hello image link").unwrap();
+    json_success(&dir, ["index", "--approve"]);
+    json_success_with_env(
+        &dir,
+        ["batch", "resume"],
+        &[("KCS_TEST_MISTRAL_OCR", "mock_link_image")],
+    );
+    let unit = normalized_units(&dir)
+        .into_iter()
+        .find(|unit| unit.markdown.contains("mock ocr"))
+        .unwrap();
+    assert!(unit.markdown.contains("[source](https://example.com/0)"));
+    assert!(unit.markdown.contains("![img-0](kcs://"));
+    assert!(!unit.markdown.contains("](img-0.png)"));
+}
+
+#[test]
+fn ct2_task_005_auth_error_task_is_not_retried() {
+    let dir = scope();
+    fs::write(dir.path().join("a.txt"), "hello auth").unwrap();
+    json_success(&dir, ["index", "--approve"]);
+    json_success_with_env(
+        &dir,
+        ["batch", "resume"],
+        &[("KCS_TEST_MISTRAL_OCR", "auth_error")],
+    );
+    let status = json_success(&dir, ["status"]);
+    let online_task = status["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|task| task["output_ref"] == "online:mistral_ocr_markdownize")
+        .unwrap();
+    assert_eq!(online_task["status"], "failed");
+    assert_eq!(online_task["fallback_reason"], "auth_error");
+    assert_eq!(online_task["attempts"], 1);
+
+    let retry = json_success_with_env(
+        &dir,
+        ["batch", "retry"],
+        &[("KCS_TEST_MISTRAL_OCR", "mock")],
+    );
+    assert_eq!(retry["tasks_updated"], 0);
+    let status = json_success(&dir, ["status"]);
+    let online_task = status["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|task| task["output_ref"] == "online:mistral_ocr_markdownize")
+        .unwrap();
+    assert_eq!(online_task["status"], "failed");
+    assert_eq!(online_task["attempts"], 1);
+}
+
+#[test]
+fn ct2_task_006_partial_online_result_persists_partial_status() {
+    let dir = scope();
+    fs::write(
+        dir.path().join("report.pdf"),
+        fake_pdf(&["partial one", "partial two"]),
+    )
+    .unwrap();
+    json_success(&dir, ["index", "--approve"]);
+    json_success_with_env(
+        &dir,
+        ["batch", "resume"],
+        &[("KCS_TEST_MISTRAL_OCR", "partial")],
+    );
+    let status = json_success(&dir, ["status"]);
+    assert!(status["tasks"].as_array().unwrap().iter().any(|task| {
+        task["input_path"] == "report.pdf"
+            && task["status"] == "partial"
+            && task["fallback_reason"] == "online_adapter_done"
+    }));
 }
 
 #[test]
