@@ -236,13 +236,31 @@ fn ct3_evidence_001_search_results_include_pointer_and_uri() {
     let search = json_success(&dir, &["search", "トークン TTL 3600"]);
     let result = first_result(&search);
     let pointer = &result["evidence_pointer"];
+    // 08 §2.1 required 6: schema_version / commit / raw_hash / tool_profile_hash /
+    // chunk_hash / scope_id — all 6, not a subset, at the actual `--json` output
+    // level (the response is hand-assembled JSON in the CLI, not a struct
+    // serialization, so field presence must be checked here and not assumed from
+    // the kcs-search type definitions).
+    assert_eq!(pointer["schema_version"], 1);
     assert!(pointer["commit"].as_str().unwrap().starts_with("sha256:"));
     assert!(pointer["raw_hash"].as_str().unwrap().starts_with("sha256:"));
+    assert!(pointer["tool_profile_hash"]
+        .as_str()
+        .unwrap()
+        .starts_with("sha256:"));
     assert!(pointer["chunk_hash"]
         .as_str()
         .unwrap()
         .starts_with("sha256:"));
+    // scope_id is a bare 26-char Crockford-base32 ULID (kcs-core::scope::is_ulid),
+    // not "scope_"-prefixed — that prefix only appears in the spec doc's
+    // illustrative fixture strings.
+    assert_eq!(pointer["scope_id"].as_str().unwrap().len(), 26);
+    // M3-1 completion condition: search-issued pointers additionally carry
+    // heading_path + span.
     assert_eq!(pointer["heading_path"][1], "API Token");
+    assert!(pointer["char_start"].as_u64().is_some());
+    assert!(pointer["char_end"].as_u64().is_some());
     assert!(result["evidence_uri"]
         .as_str()
         .unwrap()
@@ -343,8 +361,18 @@ fn ct3_cursor_003_mismatched_cursor_is_rejected() {
 fn ct3_multi_004_single_scope_response_lists_searched_scopes() {
     let dir = indexed_scope();
     let search = json_success(&dir, &["search", "トークン"]);
-    assert_eq!(search["searched_scopes"].as_array().unwrap().len(), 1);
+    let searched = search["searched_scopes"].as_array().unwrap();
+    assert_eq!(searched.len(), 1);
     assert!(search["excluded_scopes"].as_array().unwrap().is_empty());
+    // 05 §1.8: searched_scopes[] = {scope_id, scope_path, snapshot_at}, same
+    // shape for a single-scope search as for multi-scope.
+    // Bare 26-char ULID, see the ct3_evidence_001 scope_id note above.
+    assert_eq!(searched[0]["scope_id"].as_str().unwrap().len(), 26);
+    assert!(!searched[0]["scope_path"].as_str().unwrap().is_empty());
+    assert!(searched[0]["snapshot_at"]
+        .as_str()
+        .unwrap()
+        .starts_with("sha256:"));
 }
 
 #[test]
@@ -404,6 +432,49 @@ fn ct3_chunk_009_chunks_have_first_seen_commit_after_index() {
         .starts_with("sha256:"));
 }
 
+// CT3-CHUNK-010: the tree_entries projection is asserted against the real
+// `sqlite.db` written by `kcs index` (the CLI projects tree_entries with its
+// own SQL — `ensure_snapshot_tree_entries` / `write_tree_entries` /
+// `rebuild_sqlite_index`; the former kcs-index::tree_entries scaffold module
+// was dead code and has been removed).
+#[test]
+fn ct3_chunk_010_head_tree_entries_are_populated_with_gen_after_index() {
+    let dir = indexed_scope();
+    let conn = rusqlite::Connection::open(dir.path().join(".kcs/index/sqlite.db")).unwrap();
+    let mut stmt = conn
+        .prepare("SELECT commit_hash, path, raw_hash, gen FROM tree_entries")
+        .unwrap();
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, i64>(3)?,
+            ))
+        })
+        .unwrap()
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .unwrap();
+    assert!(!rows.is_empty(), "tree_entries must be populated for HEAD");
+    // All rows belong to the single HEAD commit (the `indexed_scope` fixture
+    // never reindexes), and gen defaults to 0 (04 §4.5 gen projection).
+    let head_commit = rows[0].0.clone();
+    assert!(rows.iter().all(|(commit, _, _, _)| *commit == head_commit));
+    assert!(rows.iter().any(|(_, path, _, _)| path == "auth.md"));
+    assert!(rows.iter().any(|(_, path, _, _)| path == "ranking.md"));
+    assert!(rows.iter().all(|(_, _, _, gen)| *gen == 0));
+    // The projection is what actually gates search (chunks ⨝ tree_entries(HEAD),
+    // 05 §1.6): cross-check a live search result's raw_hash is one of the
+    // projected rows, proving this table (not just the unused pure function) is
+    // what search reads.
+    let search = json_success(&dir, &["search", "トークン TTL 3600"]);
+    let raw_hash = first_result(&search)["evidence_pointer"]["raw_hash"]
+        .as_str()
+        .unwrap();
+    assert!(rows.iter().any(|(_, _, rh, _)| rh == raw_hash));
+}
+
 #[test]
 fn ct3_chunk_012_repair_rebuild_db_preserves_search_result() {
     let dir = indexed_scope();
@@ -425,6 +496,37 @@ fn ct3_uri_003_inline_json_pointer_is_accepted_by_view() {
     let pointer = first_result(&search)["evidence_pointer"].to_string();
     let viewed = json_success(&dir, &["view", &pointer]);
     assert!(viewed["text"].as_str().unwrap().contains("3600"));
+}
+
+// CT3-URI-003 (gap fill): the `<pointer>` receiver has 5 prefix branches
+// (`-` stdin / `kcs://` / `{` inline JSON / `sha256:` short form / other ->
+// exit 2). Only the `kcs://` (ct3_open_001 etc.) and `{` (above) branches had
+// a dedicated P0 test; `-` stdin and the exit-2 fallback were untested.
+#[test]
+fn ct3_uri_003_stdin_dash_prefix_is_accepted_by_view() {
+    let dir = indexed_scope();
+    let search = json_success(&dir, &["search", "トークン TTL 3600"]);
+    let uri = first_result(&search)["evidence_uri"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let output = kcs(&dir, &["view", "-"])
+        .arg("--json")
+        .write_stdin(uri)
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let viewed: Value = serde_json::from_slice(&output).unwrap();
+    assert!(viewed["text"].as_str().unwrap().contains("3600"));
+}
+
+#[test]
+fn ct3_uri_003_unrecognized_pointer_prefix_is_invalid_usage_exit_2() {
+    let dir = indexed_scope();
+    let err = json_failure(&dir, &["view", "not-a-pointer-at-all"], 2);
+    assert_eq!(err["error_code"], "KCS-E-CONFIG-USAGE-001");
 }
 
 #[test]
@@ -465,6 +567,49 @@ fn ct3_chunk_007_chunking_config_change_appends_new_generation_chunks() {
     assert!(after > before);
 }
 
+// CT3-CHUNK-007 (gap fill): the test above only checks that chunks.jsonl grew
+// (append-only), never the "検索対象は現行 chunking_config_hash の chunk のみ"
+// clause (04 §4.4/§4.6, K8). The stale-generation chunk row must survive on
+// disk but stop being served by search once a newer chunking_config_hash
+// generation exists for the same content.
+#[test]
+fn ct3_chunk_007_search_only_serves_current_chunking_config_generation() {
+    let dir = indexed_scope();
+    let before = json_success(&dir, &["search", "トークン TTL 3600"]);
+    let stale_chunk_hash = first_result(&before)["chunk_hash"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    // A much smaller max_chars forces this section to actually re-split, so the
+    // new generation's chunk_hash (char_start/char_end shift) differs from the
+    // stale one — this isn't a same-hash no-op reindex.
+    fs::write(
+        dir.path().join(".kcs/config.toml"),
+        "kcs_format_version = \"0.1.0\"\n[chunking]\nstrategy = \"heading\"\nmax_chars = 10\n",
+    )
+    .unwrap();
+    json_success(&dir, &["index", "--approve"]);
+
+    let after = json_success(&dir, &["search", "トークン TTL 3600"]);
+    let after_hashes = chunk_hash_set(&after);
+    assert!(
+        !after_hashes.is_empty(),
+        "new-generation chunks must remain searchable"
+    );
+    assert!(
+        !after_hashes.contains(&stale_chunk_hash),
+        "stale chunking_config_hash generation leaked into search results"
+    );
+    // The stale row genuinely still exists on disk (append-only, CT3-CHUNK-008),
+    // it just must not be served by search.
+    let jsonl = fs::read_to_string(dir.path().join(".kcs/index/chunks.jsonl")).unwrap();
+    assert!(
+        jsonl.contains(&stale_chunk_hash),
+        "stale chunk row must not be deleted from disk"
+    );
+}
+
 #[test]
 fn ct3_cursor_006_offset_matches_cursor_page() {
     let dir = indexed_scope();
@@ -481,8 +626,12 @@ fn ct3_cursor_006_offset_matches_cursor_page() {
     assert_eq!(by_cursor["results"], by_offset["results"]);
 }
 
+// Label fix: this is CT3-CURSOR-006 ("--offset は cursor の糖衣 ... 末尾を超え
+// たら next_cursor: null で終端"), not a second instance of CT3-CURSOR-001
+// (determinism of cursor recompute, already covered above). Renamed off the
+// ct3_cursor_001_* prefix to stop misclaiming CURSOR-001 coverage.
 #[test]
-fn ct3_cursor_001_end_of_stream_has_null_next_cursor() {
+fn ct3_cursor_006_end_of_stream_has_null_next_cursor() {
     let dir = indexed_scope();
     let search = json_success(&dir, &["search", "認証仕様", "--limit", "100"]);
     assert!(!search["results"].as_array().unwrap().is_empty());
@@ -681,6 +830,9 @@ fn ct3_multi_005_partial_failure_returns_results_with_exit_3() {
     let excluded = search["excluded_scopes"].as_array().unwrap();
     assert_eq!(excluded.len(), 1);
     assert!(excluded[0]["scope_path"].as_str().unwrap().ends_with("/b"));
+    // 05 §1.8: excluded_scopes[] = {scope_id, scope_path, reason} — the reason
+    // must be recorded, not just the fact of exclusion.
+    assert!(!excluded[0]["reason"].as_str().unwrap().is_empty());
     // The private exit marker never leaks into the payload.
     assert!(search.get("__exit_code").is_none());
 }
@@ -735,8 +887,10 @@ fn ct3_embed_003_cross_scope_incompatibility_falls_back_to_text_merge() {
 // CT3-EMBED-008 / scenario (e): a non-multimodal embedding profile is rejected at
 // `kcs index` (tool-lock materialize) with KCS-E-EMBED-MODALITY-001 and exit 2 —
 // no embeddings are written.
+// Naming convention fix (ct3_<domain>_<nnn>_<description>): was
+// ct3_embed_modality_..., missing the CT3-EMBED-008 number.
 #[test]
-fn ct3_embed_modality_non_multimodal_profile_is_rejected_at_index() {
+fn ct3_embed_008_non_multimodal_profile_is_rejected_at_index() {
     let dir = tempfile::tempdir().unwrap();
     fs::write(dir.path().join("a.md"), "# A\n\n## One\nalpha 111\n").unwrap();
     kcs(&dir, &["init"]).assert().success();
