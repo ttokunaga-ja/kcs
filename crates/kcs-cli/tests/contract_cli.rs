@@ -1,10 +1,15 @@
 use std::fs;
+use std::path::Path;
+use std::process::{Command as ProcessCommand, Stdio};
+use std::thread;
+use std::time::{Duration, Instant};
 
-use assert_cmd::Command;
+use assert_cmd::Command as AssertCommand;
+use kcs_core::cas::{canonical_json_bytes, fanout_path, hash_bytes};
 use serde_json::Value;
 
-fn kcs() -> Command {
-    Command::cargo_bin("kcs").unwrap()
+fn kcs() -> AssertCommand {
+    AssertCommand::cargo_bin("kcs").unwrap()
 }
 
 #[test]
@@ -39,7 +44,7 @@ fn ct_cli_001_init_layout_and_idempotent_noop() {
 }
 
 #[test]
-fn ct_cli_003_state_001_002_status_reports_new_modified_up_to_date() {
+fn ct_cli_003_state_001_002_status_reports_new_modified_unchanged() {
     let temp = tempfile::tempdir().unwrap();
     kcs()
         .arg("init")
@@ -75,7 +80,7 @@ fn ct_cli_003_state_001_002_status_reports_new_modified_up_to_date() {
         .stdout
         .clone();
     let json: Value = serde_json::from_slice(&out).unwrap();
-    assert_eq!(json["files"][0]["status"], "up_to_date");
+    assert_eq!(json["files"][0]["status"], "unchanged");
 
     fs::write(temp.path().join("a.pdf"), b"two").unwrap();
     let out = kcs()
@@ -178,6 +183,93 @@ fn ct_cli_snapshot_commit_alias_log_inspect_tag_diff() {
 }
 
 #[test]
+fn ct_lock_001_concurrent_snapshots_fail_fast() {
+    let temp = tempfile::tempdir().unwrap();
+    kcs()
+        .arg("init")
+        .current_dir(temp.path())
+        .assert()
+        .success();
+    fs::write(temp.path().join("a.pdf"), b"one").unwrap();
+
+    let bin = assert_cmd::cargo::cargo_bin("kcs");
+    let first = ProcessCommand::new(&bin)
+        .args(["snapshot", "-m", "first", "--json"])
+        .env("KCS_FIXED_NOW", "2026-04-29T12:00:00Z")
+        .env("KCS_TEST_HOLD_LOCK_MS", "800")
+        .current_dir(temp.path())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    wait_for_path(temp.path().join(".kcs/.lock").as_path());
+
+    let second = ProcessCommand::new(&bin)
+        .args(["snapshot", "-m", "second", "--json"])
+        .env("KCS_FIXED_NOW", "2026-04-29T12:00:01Z")
+        .current_dir(temp.path())
+        .output()
+        .unwrap();
+    let first = first.wait_with_output().unwrap();
+
+    assert!(first.status.success());
+    assert_eq!(second.status.code(), Some(3));
+    let error: Value = serde_json::from_slice(&second.stderr).unwrap();
+    assert_eq!(error["error_code"], "KCS-E-STORE-LOCKED-001");
+}
+
+#[test]
+fn ct_lock_003_read_commands_do_not_acquire_lock() {
+    let temp = tempfile::tempdir().unwrap();
+    kcs()
+        .arg("init")
+        .current_dir(temp.path())
+        .assert()
+        .success();
+    fs::write(temp.path().join("a.pdf"), b"one").unwrap();
+    let first = snapshot_json(
+        temp.path(),
+        &["snapshot", "-m", "first"],
+        "2026-04-29T12:00:00Z",
+    );
+    fs::write(temp.path().join("a.pdf"), b"two").unwrap();
+    let second = snapshot_json(
+        temp.path(),
+        &["snapshot", "-m", "second"],
+        "2026-04-29T12:00:01Z",
+    );
+
+    write_active_lock(temp.path());
+
+    kcs()
+        .args(["log", "--json"])
+        .current_dir(temp.path())
+        .assert()
+        .success();
+    kcs()
+        .args(["inspect", second["commit_hash"].as_str().unwrap(), "--json"])
+        .current_dir(temp.path())
+        .assert()
+        .success();
+    kcs()
+        .args(["status", "--json"])
+        .current_dir(temp.path())
+        .assert()
+        .success();
+    kcs()
+        .args([
+            "diff",
+            first["commit_hash"].as_str().unwrap(),
+            second["commit_hash"].as_str().unwrap(),
+            "--json",
+        ])
+        .current_dir(temp.path())
+        .assert()
+        .success();
+}
+
+#[test]
 fn ct_cli_011_012_013_lock_and_schema_errors_are_structured() {
     let temp = tempfile::tempdir().unwrap();
     kcs()
@@ -186,6 +278,12 @@ fn ct_cli_011_012_013_lock_and_schema_errors_are_structured() {
         .assert()
         .success();
     let scope_json = fs::read_to_string(temp.path().join(".kcs/scope.json")).unwrap();
+    kcs()
+        .args(["status", "--bogus"])
+        .current_dir(temp.path())
+        .assert()
+        .code(2);
+
     fs::write(temp.path().join(".kcs/config.toml"), "not = [").unwrap();
 
     let out = kcs()
@@ -204,6 +302,32 @@ fn ct_cli_011_012_013_lock_and_schema_errors_are_structured() {
         "kcs_format_version = \"0.1.0\"\n",
     )
     .unwrap();
+    fs::write(
+        temp.path().join(".kcs/config.toml"),
+        "kcs_format_version = \"0.1.0\"\n[chunking]\nstrategy = \"heading\"\nmax_chars = 0\n",
+    )
+    .unwrap();
+    kcs()
+        .args(["status", "--json"])
+        .current_dir(temp.path())
+        .assert()
+        .code(2);
+    fs::write(
+        temp.path().join(".kcs/config.toml"),
+        "kcs_format_version = \"0.1.0\"\n[budget]\nmonthly_usd_cap = -1\n",
+    )
+    .unwrap();
+    kcs()
+        .args(["status", "--json"])
+        .current_dir(temp.path())
+        .assert()
+        .code(2);
+    fs::write(
+        temp.path().join(".kcs/config.toml"),
+        "kcs_format_version = \"0.1.0\"\n",
+    )
+    .unwrap();
+
     fs::write(temp.path().join(".kcs/scope.json"), "{}").unwrap();
     kcs()
         .args(["status", "--json"])
@@ -236,6 +360,22 @@ fn ct_cli_011_012_013_lock_and_schema_errors_are_structured() {
     let err: Value = serde_json::from_slice(&out).unwrap();
     assert_eq!(err["error_code"], "KCS-E-STORE-NOT-FOUND-001");
 
+    let bad_commit = write_invalid_commit_type(temp.path());
+    fs::write(temp.path().join(".kcs/HEAD"), &bad_commit).unwrap();
+    fs::write(temp.path().join(".kcs/refs/heads/main"), bad_commit).unwrap();
+    let out = kcs()
+        .args(["log", "--json"])
+        .current_dir(temp.path())
+        .assert()
+        .code(2)
+        .get_output()
+        .stderr
+        .clone();
+    let err: Value = serde_json::from_slice(&out).unwrap();
+    assert_eq!(err["error_code"], "KCS-E-CONFIG-SCHEMA-001");
+    fs::write(temp.path().join(".kcs/HEAD"), "").unwrap();
+    fs::write(temp.path().join(".kcs/refs/heads/main"), "").unwrap();
+
     fs::write(temp.path().join(".kcs/.lock"), "{}").unwrap();
     fs::write(temp.path().join("a.pdf"), b"a").unwrap();
     let out = kcs()
@@ -248,6 +388,19 @@ fn ct_cli_011_012_013_lock_and_schema_errors_are_structured() {
         .clone();
     let err: Value = serde_json::from_slice(&out).unwrap();
     assert_eq!(err["error_code"], "KCS-E-STORE-LOCKED-001");
+
+    fs::write(
+        temp.path().join(".kcs/.lock"),
+        r#"{"pid":99999999,"token":"stale","created_at":"2026-04-29T12:00:00Z"}"#,
+    )
+    .unwrap();
+    kcs()
+        .args(["snapshot", "-m", "stale recovered", "--json"])
+        .env("KCS_FIXED_NOW", "2026-04-29T12:00:02Z")
+        .current_dir(temp.path())
+        .assert()
+        .success();
+    assert!(!temp.path().join(".kcs/.lock").exists());
 }
 
 #[test]
@@ -297,4 +450,47 @@ fn snapshot_json(dir: &std::path::Path, args: &[&str], now: &str) -> Value {
         .stdout
         .clone();
     serde_json::from_slice(&out).unwrap()
+}
+
+fn wait_for_path(path: &Path) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline {
+        if path.exists() {
+            return;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    panic!("timed out waiting for {}", path.display());
+}
+
+fn write_active_lock(root: &Path) {
+    fs::write(
+        root.join(".kcs/.lock"),
+        serde_json::json!({
+            "pid": std::process::id(),
+            "token": "read-lock-test",
+            "created_at": "2026-04-29T12:00:00Z"
+        })
+        .to_string(),
+    )
+    .unwrap();
+}
+
+fn write_invalid_commit_type(root: &Path) -> String {
+    let commit = serde_json::json!({
+        "commit_type": "snapshot",
+        "created_at": "2026-04-29T12:00:00Z",
+        "message": "bad commit type",
+        "object_type": "commit",
+        "parents": [],
+        "stats": { "files_added": 0, "files_deleted": 0, "files_modified": 0 },
+        "tool_lock_hash": "sha256:8a32a740871b1dd9db1bda186dce07e8e6c60d2cd316f21683ea2bd857c16ffb",
+        "tree": "sha256:849dc4fa25bc1a7b09b74dba30c0bb85224fb8f659c3b2b177b7189b0327a967"
+    });
+    let bytes = canonical_json_bytes(&commit).unwrap();
+    let hash = hash_bytes(&bytes);
+    let path = fanout_path(root.join(".kcs/objects/commits"), &hash).unwrap();
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(path, bytes).unwrap();
+    hash
 }

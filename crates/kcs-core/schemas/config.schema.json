@@ -1,0 +1,62 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "kcs_format_version": {
+      "type": "string",
+      "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$"
+    },
+    "scope": {
+      "type": "object",
+      "properties": {
+        "participates_in_global_search": { "type": "boolean" }
+      },
+      "additionalProperties": false
+    },
+    "chunking": {
+      "type": "object",
+      "properties": {
+        "strategy": { "type": "string", "enum": ["heading"] },
+        "max_chars": { "type": "integer", "minimum": 1 }
+      },
+      "additionalProperties": false
+    },
+    "search": {
+      "type": "object",
+      "properties": {
+        "default_mode": {
+          "type": "string",
+          "enum": ["auto", "text", "vector", "hybrid"]
+        },
+        "fail_behavior": {
+          "type": "string",
+          "enum": ["fallback", "error", "warn"]
+        }
+      },
+      "additionalProperties": true
+    },
+    "budget": {
+      "type": "object",
+      "properties": {
+        "monthly_usd_cap": { "type": "number", "minimum": 0 }
+      },
+      "additionalProperties": false
+    },
+    "gc": {
+      "type": "object",
+      "properties": {
+        "mode": {
+          "type": "string",
+          "enum": ["manual_only", "after_index", "on_idle"]
+        },
+        "idle_threshold_seconds": { "type": "integer", "minimum": 0 },
+        "max_runtime_seconds": { "type": "integer", "minimum": 1 },
+        "auto_retention": { "type": "object" },
+        "derived_retention": { "type": "object" }
+      },
+      "additionalProperties": false
+    },
+    "markdownize": { "type": "object" }
+  },
+  "additionalProperties": false
+}
