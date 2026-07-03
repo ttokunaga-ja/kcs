@@ -178,27 +178,36 @@ fn ct3_open_003_dead_pointer_returns_exit_4() {
 #[test]
 fn ct3_cursor_001_same_cursor_recomputes_same_second_page() {
     let dir = indexed_scope();
-    let first = json_success(&dir, &["search", "検索", "--limit", "1"]);
+    let first = json_success(&dir, &["search", "認証仕様", "--limit", "1"]);
     let cursor = first["paging"]["next_cursor"].as_str().unwrap();
     let second_a = json_success(
         &dir,
-        &["search", "検索", "--cursor", cursor, "--limit", "1"],
+        &["search", "認証仕様", "--cursor", cursor, "--limit", "1"],
     );
     let second_b = json_success(
         &dir,
-        &["search", "検索", "--cursor", cursor, "--limit", "1"],
+        &["search", "認証仕様", "--cursor", cursor, "--limit", "1"],
     );
     assert_eq!(second_a["results"], second_b["results"]);
+    // Page 2 is a distinct chunk from page 1 (deterministic recompute + skip).
+    assert_ne!(first["results"], second_a["results"]);
 }
 
 #[test]
 fn ct3_cursor_003_mismatched_cursor_is_rejected() {
     let dir = indexed_scope();
-    let first = json_success(&dir, &["search", "検索", "--limit", "1"]);
+    let first = json_success(&dir, &["search", "認証仕様", "--limit", "1"]);
     let cursor = first["paging"]["next_cursor"].as_str().unwrap();
     let err = json_failure(
         &dir,
-        &["search", "別クエリ", "--cursor", cursor, "--limit", "1"],
+        &[
+            "search",
+            "検索ランキング",
+            "--cursor",
+            cursor,
+            "--limit",
+            "1",
+        ],
         2,
     );
     assert_eq!(err["error_code"], "KCS-E-SEARCH-CURSOR-001");
@@ -333,20 +342,24 @@ fn ct3_chunk_007_chunking_config_change_appends_new_generation_chunks() {
 #[test]
 fn ct3_cursor_006_offset_matches_cursor_page() {
     let dir = indexed_scope();
-    let first = json_success(&dir, &["search", "検索", "--limit", "1"]);
+    let first = json_success(&dir, &["search", "認証仕様", "--limit", "1"]);
     let cursor = first["paging"]["next_cursor"].as_str().unwrap();
     let by_cursor = json_success(
         &dir,
-        &["search", "検索", "--cursor", cursor, "--limit", "1"],
+        &["search", "認証仕様", "--cursor", cursor, "--limit", "1"],
     );
-    let by_offset = json_success(&dir, &["search", "検索", "--offset", "1", "--limit", "1"]);
+    let by_offset = json_success(
+        &dir,
+        &["search", "認証仕様", "--offset", "1", "--limit", "1"],
+    );
     assert_eq!(by_cursor["results"], by_offset["results"]);
 }
 
 #[test]
 fn ct3_cursor_001_end_of_stream_has_null_next_cursor() {
     let dir = indexed_scope();
-    let search = json_success(&dir, &["search", "検索", "--limit", "100"]);
+    let search = json_success(&dir, &["search", "認証仕様", "--limit", "100"]);
+    assert!(!search["results"].as_array().unwrap().is_empty());
     assert!(search["paging"]["next_cursor"].is_null());
 }
 
@@ -357,8 +370,56 @@ fn ct3_fts_003_two_character_query_is_skipped_with_zero_results() {
     assert!(search["results"].as_array().unwrap().is_empty());
 }
 
+// Real-machine scenario (a): default (no flag) search crosses sibling scopes via
+// the registry, and a `participates_in_global_search=false` scope is excluded.
 #[test]
-fn ct3_multi_001_and_008_all_scopes_discovers_sibling_indexed_scopes() {
+fn ct3_multi_001_default_searches_participating_indexed_scopes() {
+    let parent = tempfile::tempdir().unwrap();
+    let data_home = parent.path().join("xdg");
+    let a = parent.path().join("a");
+    let b = parent.path().join("b");
+    let c = parent.path().join("c");
+    for dir in [&a, &b, &c] {
+        fs::create_dir_all(dir).unwrap();
+    }
+    fs::write(a.join("a.md"), "# A\n\n## Local\nalpha only\n").unwrap();
+    fs::write(
+        b.join("b.md"),
+        "# B\n\n## Remote\nunique sibling token 4242\n",
+    )
+    .unwrap();
+    fs::write(
+        c.join("c.md"),
+        "# C\n\n## Hidden\nunique sibling token 4242 private\n",
+    )
+    .unwrap();
+    for dir in [&a, &b, &c] {
+        json_success_path(dir, &data_home, &["init"]);
+    }
+    // Scope c opts out of global search.
+    fs::write(
+        c.join(".kcs/config.toml"),
+        "kcs_format_version = \"0.1.0\"\n[scope]\nparticipates_in_global_search = false\n",
+    )
+    .unwrap();
+    for dir in [&a, &b, &c] {
+        json_success_path(dir, &data_home, &["index", "--approve"]);
+    }
+    // Default search (no --all-scopes) from scope a still reaches sibling b.
+    let search = json_success_path(&a, &data_home, &["search", "unique sibling 4242"]);
+    assert!(first_result(&search)["scope_path"]
+        .as_str()
+        .unwrap()
+        .ends_with("/b"));
+    let searched = search["searched_scopes"].as_array().unwrap();
+    assert_eq!(searched.len(), 2, "c (participates=false) must be excluded");
+    assert!(searched
+        .iter()
+        .all(|scope| !scope["scope_path"].as_str().unwrap().ends_with("/c")));
+}
+
+#[test]
+fn ct3_multi_008_all_scopes_flag_targets_all_indexed_scopes() {
     let parent = tempfile::tempdir().unwrap();
     let data_home = parent.path().join("xdg");
     let a = parent.path().join("a");
@@ -385,6 +446,128 @@ fn ct3_multi_001_and_008_all_scopes_discovers_sibling_indexed_scopes() {
         .unwrap()
         .ends_with("/b"));
     assert_eq!(search["searched_scopes"].as_array().unwrap().len(), 2);
+}
+
+// scope-cross merge is rank-based: both scopes' rank-1 hits get the SAME RRF score
+// (1/(60+1)) despite skewed corpus statistics, and tie-break is (scope_path, ...).
+#[test]
+fn ct3_multi_002_cross_scope_merge_is_rank_based() {
+    let parent = tempfile::tempdir().unwrap();
+    let data_home = parent.path().join("xdg");
+    let a = parent.path().join("a");
+    let b = parent.path().join("b");
+    fs::create_dir_all(&a).unwrap();
+    fs::create_dir_all(&b).unwrap();
+    // Scope a: the term sits in a long, filler-heavy chunk (low BM25); scope b: a
+    // short chunk (high BM25). Raw BM25 differs; RRF (rank-only) does not.
+    let filler = "filler ".repeat(60);
+    fs::write(
+        a.join("a.md"),
+        format!("# A\n\n## Sec\nzephyrterm {filler}\n"),
+    )
+    .unwrap();
+    fs::write(b.join("b.md"), "# B\n\n## Sec\nzephyrterm\n").unwrap();
+    json_success_path(&a, &data_home, &["init"]);
+    json_success_path(&b, &data_home, &["init"]);
+    json_success_path(&a, &data_home, &["index", "--approve"]);
+    json_success_path(&b, &data_home, &["index", "--approve"]);
+    let search = json_success_path(&a, &data_home, &["search", "zephyrterm"]);
+    let results = search["results"].as_array().unwrap();
+    assert_eq!(results.len(), 2);
+    // Identical RRF score proves the merge compares ranks, not raw BM25.
+    assert_eq!(results[0]["score"], results[1]["score"]);
+    let expected = 1.0f64 / 61.0;
+    assert!((results[0]["score"].as_f64().unwrap() - expected).abs() < 1e-12);
+    // Deterministic tie-break by scope_path: /a before /b.
+    assert!(results[0]["scope_path"].as_str().unwrap().ends_with("/a"));
+    assert!(results[1]["scope_path"].as_str().unwrap().ends_with("/b"));
+}
+
+// diversify runs on the merged pool: max_per_raw_hash caps a raw_hash across scopes.
+#[test]
+fn ct3_multi_003_diversify_caps_raw_hash_across_scopes() {
+    let parent = tempfile::tempdir().unwrap();
+    let data_home = parent.path().join("xdg");
+    let dirs = ["s0", "s1", "s2", "s3"]
+        .iter()
+        .map(|name| parent.path().join(name))
+        .collect::<Vec<_>>();
+    for dir in &dirs {
+        fs::create_dir_all(dir).unwrap();
+        // Identical content across scopes -> identical raw_hash.
+        fs::write(
+            dir.join("dup.md"),
+            "# Dup\n\n## Section\nsharedtoken body\n",
+        )
+        .unwrap();
+        json_success_path(dir, &data_home, &["init"]);
+        json_success_path(dir, &data_home, &["index", "--approve"]);
+    }
+    let search = json_success_path(&dirs[0], &data_home, &["search", "sharedtoken"]);
+    assert_eq!(search["searched_scopes"].as_array().unwrap().len(), 4);
+    // 4 scopes match the same raw_hash; max_per_raw_hash=3 caps the stream at 3.
+    assert_eq!(search["results"].as_array().unwrap().len(), 3);
+}
+
+// Real-machine scenario (b): one scope unreachable (chmod 000) -> results + exit 3.
+#[test]
+fn ct3_multi_005_partial_failure_returns_results_with_exit_3() {
+    let parent = tempfile::tempdir().unwrap();
+    let data_home = parent.path().join("xdg");
+    let a = parent.path().join("a");
+    let b = parent.path().join("b");
+    fs::create_dir_all(&a).unwrap();
+    fs::create_dir_all(&b).unwrap();
+    fs::write(a.join("a.md"), "# A\n\n## Sec\nalphaunique token\n").unwrap();
+    fs::write(b.join("b.md"), "# B\n\n## Sec\nbetaunique token\n").unwrap();
+    json_success_path(&a, &data_home, &["init"]);
+    json_success_path(&b, &data_home, &["init"]);
+    json_success_path(&a, &data_home, &["index", "--approve"]);
+    json_success_path(&b, &data_home, &["index", "--approve"]);
+
+    // Make scope b unreachable at discovery (its .kcs is unreadable).
+    let b_kcs = b.join(".kcs");
+    let mut perms = fs::metadata(&b_kcs).unwrap().permissions();
+    use std::os::unix::fs::PermissionsExt;
+    perms.set_mode(0o000);
+    fs::set_permissions(&b_kcs, perms).unwrap();
+
+    let output = Command::cargo_bin("kcs")
+        .unwrap()
+        .current_dir(&a)
+        .env("XDG_CONFIG_HOME", data_home.join("config"))
+        .env("XDG_DATA_HOME", data_home.join("data"))
+        .args(["search", "alphaunique", "--json"])
+        .assert()
+        .code(3)
+        .get_output()
+        .stdout
+        .clone();
+
+    // Restore permissions so the tempdir can be cleaned up.
+    let mut restore = fs::metadata(&b_kcs).unwrap().permissions();
+    restore.set_mode(0o755);
+    fs::set_permissions(&b_kcs, restore).unwrap();
+
+    let search: Value = serde_json::from_slice(&output).unwrap();
+    assert!(!search["results"].as_array().unwrap().is_empty());
+    assert_eq!(search["searched_scopes"].as_array().unwrap().len(), 1);
+    let excluded = search["excluded_scopes"].as_array().unwrap();
+    assert_eq!(excluded.len(), 1);
+    assert!(excluded[0]["scope_path"].as_str().unwrap().ends_with("/b"));
+    // The private exit marker never leaks into the payload.
+    assert!(search.get("__exit_code").is_none());
+}
+
+#[test]
+fn ct3_multi_005_all_failed_returns_exit_4() {
+    // A scope that is init'd but not indexed is not a search target; with no other
+    // indexed scope the search is a permanent all-scope failure.
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("a.md"), "# A\n\n## Sec\nalpha\n").unwrap();
+    kcs(&dir, &["init"]).assert().success();
+    let err = json_failure(&dir, &["search", "alpha"], 4);
+    assert_eq!(err["error_code"], "KCS-E-SEARCH-SCOPE-ALL-FAILED-001");
 }
 
 #[test]
@@ -423,6 +606,109 @@ fn ct3_obs_003_access_log_has_required_envelope_fields() {
     for key in ["ts", "level", "code", "component", "message", "context"] {
         assert!(last.get(key).is_some(), "missing {key}");
     }
+}
+
+// Real-machine scenario (c): a cursor freezes the chunk set by max_rowid; chunks
+// indexed after the cursor was issued do not leak into page 2.
+#[test]
+fn ct3_cursor_002_max_rowid_excludes_post_cursor_chunks() {
+    let dir = indexed_scope();
+    let first = json_success(&dir, &["search", "認証仕様", "--limit", "1"]);
+    let cursor = first["paging"]["next_cursor"].as_str().unwrap().to_owned();
+
+    // Append a new file that also matches the query, then re-index (HEAD advances,
+    // new chunk rows get rowid > the cursor's max_rowid).
+    fs::write(
+        dir.path().join("addendum.md"),
+        "# 認証仕様の追補\n\n## 追補\nposttoken マーカー を追加しました。\n",
+    )
+    .unwrap();
+    json_success(&dir, &["index", "--approve"]);
+
+    // A fresh search sees the new chunk (proves the setup is live)...
+    let fresh = json_success(&dir, &["search", "認証仕様", "--limit", "100"]);
+    let fresh_has_new = fresh["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|r| r["snippet"].as_str().unwrap_or("").contains("posttoken"));
+    assert!(fresh_has_new, "fresh search must include the new chunk");
+
+    // ...but page 2 via the frozen cursor must not.
+    let page2 = json_success(
+        &dir,
+        &["search", "認証仕様", "--cursor", &cursor, "--limit", "100"],
+    );
+    let leaked = page2["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|r| r["snippet"].as_str().unwrap_or("").contains("posttoken"));
+    assert!(!leaked, "post-cursor chunk must not appear on page 2");
+}
+
+#[test]
+fn ct3_cursor_005_shallow_snapshot_cursor_is_rejected() {
+    let dir = indexed_scope();
+    let first = json_success(&dir, &["search", "認証仕様", "--limit", "1"]);
+    let cursor = first["paging"]["next_cursor"].as_str().unwrap().to_owned();
+    // Discard the snapshot's tree objects, emulating a shallow (tiered-retention)
+    // commit. The cursor can no longer be replayed.
+    fs::remove_dir_all(dir.path().join(".kcs/objects/trees")).unwrap();
+    let err = json_failure(
+        &dir,
+        &["search", "認証仕様", "--cursor", &cursor, "--limit", "100"],
+        1,
+    );
+    assert_eq!(err["error_code"], "KCS-E-COMMIT-SHALLOW-001");
+}
+
+#[test]
+fn ct3_obs_001_index_status_reports_partial_enrichment() {
+    let dir = indexed_scope();
+    let search = json_success(&dir, &["search", "認証仕様"]);
+    let status = &search["index_status"];
+    assert!(status.is_object());
+    // Offline index leaves online markdownize enhancement pending.
+    assert!(status["enriched_ratio"].as_f64().unwrap() < 1.0);
+    assert!(status["pending_enrichment_tasks"].as_u64().unwrap() > 0);
+    assert_eq!(status["budget_paused"], false);
+}
+
+#[test]
+fn ct3_hybrid_003_text_and_vector_unavailable_is_an_error() {
+    let dir = indexed_scope();
+    // Remove the FTS index (text unavailable) and request vector (also unavailable).
+    fs::remove_file(dir.path().join(".kcs/index/sqlite.db")).unwrap();
+    let err = json_failure(&dir, &["search", "認証仕様", "--vector"], 1);
+    assert_eq!(err["error_code"], "KCS-E-SEARCH-VEC-UNAVAIL-001");
+}
+
+#[test]
+fn ct3_obs_002_metrics_use_search_namespace_code_and_component() {
+    let dir = indexed_scope();
+    json_success(&dir, &["search", "認証仕様"]);
+    let metrics = fs::read_to_string(dir.path().join(".test-data/kcs/logs/metrics.jsonl")).unwrap();
+    let last: Value = serde_json::from_str(metrics.lines().last().unwrap()).unwrap();
+    assert_eq!(last["code"], "KCS-M-SEARCH-001");
+    assert_eq!(last["component"], "search");
+    assert_eq!(last["metric"], "search.latency_ms");
+    assert!(last["value"].as_f64().is_some());
+    assert!(last["context"]["result_count"].as_u64().is_some());
+}
+
+// K8 / CT3-FTS-004: search is served from sqlite.db; deleting it disables search,
+// and `repair --rebuild-db` re-derives the FTS index from chunks.
+#[test]
+fn ct3_fts_004_rebuild_db_reenables_fts_search() {
+    let dir = indexed_scope();
+    fs::remove_file(dir.path().join(".kcs/index/sqlite.db")).unwrap();
+    // With the only scope's index gone, search is a permanent all-scope failure.
+    let err = json_failure(&dir, &["search", "認証仕様"], 4);
+    assert_eq!(err["error_code"], "KCS-E-SEARCH-SCOPE-ALL-FAILED-001");
+    json_success(&dir, &["repair", "--rebuild-db"]);
+    let after = json_success(&dir, &["search", "認証仕様"]);
+    assert!(!after["results"].as_array().unwrap().is_empty());
 }
 
 fn line_count(path: impl AsRef<Path>) -> usize {
