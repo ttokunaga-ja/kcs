@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::cursor::ScopeMode;
 use crate::query::{SearchRequest, SearchResponse};
-use crate::Result;
+use crate::{Result, SearchError};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MultiScopeConfig {
@@ -45,5 +45,7 @@ pub fn search_multi_scope(
     _request: SearchRequest,
     _config: MultiScopeConfig,
 ) -> Result<SearchResponse> {
-    todo!("Step 3c will execute and merge multi-scope search")
+    Err(SearchError::Contract(
+        "multi-scope search engine backend must be supplied by the CLI".to_owned(),
+    ))
 }

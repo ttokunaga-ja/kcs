@@ -10,6 +10,7 @@ pub mod rebuild;
 pub mod rows;
 pub mod tree_entries;
 
+use rusqlite::Error as SqliteError;
 use thiserror::Error;
 
 pub use rows::{
@@ -22,8 +23,18 @@ pub type Result<T> = std::result::Result<T, IndexError>;
 pub enum IndexError {
     #[error("index contract error: {0}")]
     Contract(String),
+    #[error("index schema error: {0}")]
+    Schema(String),
+    #[error("index sqlite error: {0}")]
+    Sqlite(#[from] SqliteError),
     #[error("index feature not implemented: {0}")]
     NotImplemented(&'static str),
+}
+
+impl From<serde_json::Error> for IndexError {
+    fn from(value: serde_json::Error) -> Self {
+        Self::Schema(value.to_string())
+    }
 }
 
 #[cfg(test)]

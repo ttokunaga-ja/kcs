@@ -3,6 +3,7 @@ use std::fs::{self, OpenOptions};
 use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process;
+use std::time::Instant;
 
 use clap::{Args, Parser, Subcommand};
 use kcs_adapter::deterministic::{deterministic_prepare_profile_value, DeterministicAdapter};
@@ -23,6 +24,11 @@ use kcs_core::scope::{
     append_error_log, append_event_log, new_ulid, now_utc_seconds, InspectedObject, Repository,
 };
 use kcs_core::{ExitCode, KcsError, Result};
+use kcs_index::chunking::{
+    chunk_normalized_instance, ChunkingConfig, ChunkingInput, NormalizedUnitInput,
+};
+use kcs_index::fts::{FtsIndex, FtsSchemaConfig, FtsTokenizer, SqliteFtsIndex};
+use kcs_index::{ChunkRow, TreeEntryRow};
 use kcs_pipeline::budget::{
     estimate_local_baseline_cost, evaluate_budget_with_caps, read_budget_policy, utc_month,
     BudgetCapKind, BudgetCaps, BudgetEstimate, CostLedger, MonthlyCostLedgerEntry,
@@ -39,6 +45,15 @@ use kcs_pipeline::prepare::{
 use kcs_pipeline::scan::{build_scan_preview, ScanCandidate, ScanPreview, ScanPreviewRequest};
 use kcs_pipeline::task::{retry_policy, task_status_from_unit_counts, RetryErrorKind};
 use kcs_pipeline::task::{TaskDescriptor, TaskStatus, TaskStore, TaskType};
+use kcs_search::cursor::{decode_cursor_token, encode_cursor_token, CursorToken, ScopeCursor};
+use kcs_search::evidence::{
+    evidence_pointer_to_uri, issue_evidence_pointer, parse_evidence_pointer_uri, EvidencePointer,
+    EvidencePointerIssueRequest,
+};
+use kcs_search::query::{
+    query_hash, DiversifyRequest, DiversifyStrategy, QueryHashInput, ScopeSelectionMode, SearchMode,
+};
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 // clap のパースエラーは exit code 2 で終了する。これは docs/06-cli-spec.md §7 の
@@ -75,13 +90,13 @@ enum Command {
     Index(IndexArgs),
     /// Resume or retry batch tasks.
     Batch(BatchArgs),
-    /// Step 4 command placeholder.
+    /// Rebuild local acceleration tables.
     Repair(UnsupportedArgs),
-    /// Step 3 command placeholder.
+    /// Search indexed chunks.
     Search(UnsupportedArgs),
-    /// Step 3 command placeholder.
+    /// Open an Evidence Pointer target.
     Open(UnsupportedArgs),
-    /// Step 3 command placeholder.
+    /// View an Evidence Pointer target.
     View(UnsupportedArgs),
     /// Step 4 command placeholder.
     Restore(UnsupportedArgs),
@@ -89,7 +104,7 @@ enum Command {
     Gc(UnsupportedArgs),
     /// Step 4 command placeholder.
     Purge(UnsupportedArgs),
-    /// Step 3 command placeholder.
+    /// Reindex normalized instances.
     Reindex(UnsupportedArgs),
     /// Phase 4+ command placeholder.
     Move(UnsupportedArgs),
@@ -315,14 +330,14 @@ fn run(cli: Cli) -> Result<Value> {
         }
         Command::Index(args) => run_index(args),
         Command::Batch(args) => run_batch(args),
-        Command::Repair(_)
-        | Command::Search(_)
-        | Command::Open(_)
-        | Command::View(_)
-        | Command::Restore(_)
+        Command::Repair(args) => run_repair(args),
+        Command::Search(args) => run_search(args),
+        Command::Open(args) => run_open(args),
+        Command::View(args) => run_view(args),
+        Command::Reindex(args) => run_reindex(args),
+        Command::Restore(_)
         | Command::Gc(_)
         | Command::Purge(_)
-        | Command::Reindex(_)
         | Command::Move(_)
         | Command::Evidence(_) => Err(KcsError::not_implemented("command")),
     }
@@ -404,6 +419,7 @@ fn run_index(args: IndexArgs) -> Result<Value> {
             }),
         )?;
     }
+    rebuild_step3_index(&repo)?;
     let output = json!({
         "status": if outcome.noop { "noop" } else { "indexed" },
         "approval_method": if args.approve { "approve" } else if args.yes { "yes" } else { "existing" },
@@ -430,6 +446,1385 @@ fn run_index(args: IndexArgs) -> Result<Value> {
         ));
     }
     Ok(output)
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct StoredChunk {
+    rowid: u64,
+    #[serde(flatten)]
+    row: ChunkRow,
+}
+
+#[derive(Debug, Clone)]
+struct SearchableChunk {
+    rowid: u64,
+    row: ChunkRow,
+    scope_id: String,
+    scope_path: PathBuf,
+    snapshot_at: String,
+    path_at_commit: String,
+}
+
+#[derive(Debug, Clone)]
+struct ScopeTarget {
+    repo_root: PathBuf,
+    kcs_dir: PathBuf,
+    scope_id: String,
+}
+
+#[derive(Debug, Clone)]
+struct ParsedSearch {
+    query: String,
+    requested_mode: SearchMode,
+    scope: Option<PathBuf>,
+    descendants: bool,
+    all_scopes: bool,
+    limit: u64,
+    offset: Option<u64>,
+    cursor: Option<String>,
+}
+
+fn run_repair(args: UnsupportedArgs) -> Result<Value> {
+    let args = without_json(args.args);
+    if !args.iter().any(|arg| arg == "--rebuild-db") {
+        return Err(KcsError::invalid_usage(
+            "repair currently supports --rebuild-db",
+        ));
+    }
+    let repo = Repository::open_current()?;
+    validate_repo_tool_lock(&repo)?;
+    let db = repo.kcs_dir().join("index/sqlite.db");
+    if db.exists() {
+        fs::remove_file(&db)
+            .map_err(|err| KcsError::io(err.to_string(), db.display().to_string()))?;
+    }
+    let report = rebuild_step3_index(&repo)?;
+    Ok(json!({
+        "status": "rebuilt",
+        "rebuilt_chunks": report.rebuilt_chunks,
+        "rebuilt_tree_entries": report.rebuilt_tree_entries,
+        "sqlite_db": db,
+    }))
+}
+
+fn run_search(args: UnsupportedArgs) -> Result<Value> {
+    let started = Instant::now();
+    let parsed = parse_search_args(without_json(args.args))?;
+    let repo = Repository::open_current()?;
+    validate_repo_tool_lock(&repo)?;
+    if parsed.query.chars().count() < 2 {
+        return empty_search_response(&parsed, &repo, started, Vec::new(), Vec::new());
+    }
+
+    let targets = discover_scope_targets(&repo, &parsed)?;
+    if targets.is_empty() {
+        return Err(KcsError::new(
+            "KCS-E-SEARCH-SCOPE-ALL-FAILED-001",
+            "no searchable scopes found",
+            json!({}),
+            ExitCode::PermanentFailure,
+        ));
+    }
+
+    let mut excluded = Vec::<Value>::new();
+    let mut chunks = Vec::<SearchableChunk>::new();
+    let mut searched_scopes = Vec::<Value>::new();
+    for target in targets {
+        match load_searchable_chunks(&target) {
+            Ok(scope_chunks) => {
+                let snapshot_at = scope_chunks
+                    .first()
+                    .map(|chunk| chunk.snapshot_at.clone())
+                    .or_else(|| {
+                        Repository::open(&target.repo_root)
+                            .ok()
+                            .and_then(|r| r.head_commit_hash().ok().flatten())
+                    })
+                    .unwrap_or_default();
+                searched_scopes.push(json!({
+                    "scope_id": target.scope_id,
+                    "scope_path": target.repo_root,
+                    "snapshot_at": snapshot_at,
+                }));
+                chunks.extend(scope_chunks);
+            }
+            Err(err) => excluded.push(json!({
+                "scope_id": target.scope_id,
+                "scope_path": target.repo_root,
+                "reason": err.message(),
+            })),
+        }
+    }
+    if searched_scopes.is_empty() {
+        return Err(KcsError::new(
+            "KCS-E-SEARCH-SCOPE-ALL-FAILED-001",
+            "all scopes failed",
+            json!({ "excluded_scopes": excluded }),
+            ExitCode::PermanentFailure,
+        ));
+    }
+
+    let resolved_mode = match parsed.requested_mode {
+        SearchMode::Auto | SearchMode::Hybrid => SearchMode::Text,
+        mode => mode,
+    };
+    if parsed.requested_mode == SearchMode::Vector {
+        return Err(KcsError::new(
+            "KCS-E-SEARCH-VEC-UNAVAIL-001",
+            "vector index is unavailable",
+            json!({}),
+            ExitCode::Failure,
+        ));
+    }
+
+    let scope_ids = searched_scopes
+        .iter()
+        .filter_map(|scope| {
+            scope
+                .get("scope_id")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        })
+        .collect::<Vec<_>>();
+    let qhash = query_hash(&QueryHashInput {
+        query: parsed.query.clone(),
+        mode: resolved_mode,
+        scope_mode: ScopeSelectionMode::All,
+        scopes: scope_ids,
+        diversify: default_diversify_request(),
+        rrf_k: 60,
+        rrf_candidate_depth: 200,
+        rrf_w_text: 1.0,
+        rrf_w_vector: 1.0,
+        at: None,
+        all_history: false,
+        include_deleted: false,
+        since: None,
+    })
+    .map_err(search_to_kcs)?;
+
+    let cursor_consumed = if let Some(cursor) = &parsed.cursor {
+        let token = decode_cursor_token(cursor).map_err(search_to_kcs)?;
+        if token.query_hash != qhash {
+            return Err(KcsError::new(
+                "KCS-E-SEARCH-CURSOR-001",
+                "search cursor query_hash mismatch",
+                json!({ "expected": qhash, "actual": token.query_hash }),
+                ExitCode::InvalidUsage,
+            ));
+        }
+        token
+            .scopes
+            .iter()
+            .map(|scope| scope.consumed)
+            .max()
+            .unwrap_or(0)
+    } else {
+        parsed.offset.unwrap_or(0)
+    };
+
+    let mut scored = chunks
+        .into_iter()
+        .filter_map(|chunk| {
+            let score = score_chunk(&parsed.query, &chunk);
+            (score > 0.0).then_some((score, chunk))
+        })
+        .collect::<Vec<_>>();
+    scored.sort_by(|a, b| {
+        b.0.total_cmp(&a.0)
+            .then_with(|| a.1.scope_path.cmp(&b.1.scope_path))
+            .then_with(|| a.1.row.chunk_id.cmp(&b.1.row.chunk_id))
+    });
+
+    let start = cursor_consumed as usize;
+    let end = start
+        .saturating_add(parsed.limit as usize)
+        .min(scored.len());
+    let page = if start < scored.len() {
+        &scored[start..end]
+    } else {
+        &[]
+    };
+    let next_cursor = if end < scored.len() {
+        let max_rowid = scored
+            .iter()
+            .map(|(_, chunk)| chunk.rowid)
+            .max()
+            .unwrap_or_default();
+        Some(
+            encode_cursor_token(&CursorToken {
+                version: 1,
+                scope_mode: kcs_search::cursor::ScopeMode::All,
+                query_hash: qhash,
+                scopes: vec![ScopeCursor {
+                    scope_id: "all".to_owned(),
+                    snapshot_commit: searched_scopes
+                        .first()
+                        .and_then(|scope| scope.get("snapshot_at"))
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_owned(),
+                    max_rowid,
+                    consumed: end as u64,
+                }],
+            })
+            .map_err(search_to_kcs)?,
+        )
+    } else {
+        None
+    };
+
+    let mut results = Vec::new();
+    for (score, chunk) in page {
+        let pointer = issue_evidence_pointer(EvidencePointerIssueRequest {
+            scope_id: chunk.scope_id.clone(),
+            scope_path: Some(chunk.scope_path.display().to_string()),
+            commit: chunk.snapshot_at.clone(),
+            tree: None,
+            raw_hash: chunk.row.raw_hash.clone(),
+            tool_profile_hash: chunk.row.tool_profile_hash.clone(),
+            chunk_hash: chunk.row.chunk_id.clone(),
+            path_at_commit: Some(chunk.path_at_commit.clone()),
+            heading_path: chunk.row.heading_path.clone(),
+            section_id: chunk.row.section_id.clone(),
+            char_start: chunk.row.char_start,
+            char_end: chunk.row.char_end,
+        })
+        .map_err(search_to_kcs)?;
+        let uri = evidence_pointer_to_uri(&pointer).map_err(search_to_kcs)?;
+        results.push(json!({
+            "chunk_hash": chunk.row.chunk_id,
+            "evidence_pointer": pointer,
+            "evidence_uri": uri,
+            "score": score,
+            "scope_path": chunk.scope_path,
+            "title": chunk.path_at_commit,
+            "snippet": chunk.row.text.chars().take(200).collect::<String>(),
+        }));
+    }
+
+    let response = json!({
+        "query": parsed.query,
+        "requested_mode": search_mode_json(parsed.requested_mode),
+        "resolved_mode": search_mode_json(resolved_mode),
+        "fallback": parsed.requested_mode == SearchMode::Auto || parsed.requested_mode == SearchMode::Hybrid,
+        "fallback_reason": if parsed.requested_mode == SearchMode::Text { Value::Null } else { json!("embedding_endpoint_not_configured") },
+        "error_code": if parsed.requested_mode == SearchMode::Text { Value::Null } else { json!("KCS-E-SEARCH-VEC-UNAVAIL-001") },
+        "diversify": { "strategy": "mmr", "mmr_lambda": 0.7 },
+        "paging": { "limit": parsed.limit, "next_cursor": next_cursor },
+        "searched_scopes": searched_scopes,
+        "excluded_scopes": excluded,
+        "results": results,
+    });
+    append_search_logs(&repo, &response, started)?;
+    Ok(response)
+}
+
+fn run_open(args: UnsupportedArgs) -> Result<Value> {
+    let pointer = parse_pointer_arg(without_json(args.args))?;
+    let resolved = resolve_pointer_for_cli(&pointer)?;
+    if resolved.dead {
+        return Err(dead_pointer_error(
+            &resolved.reason.unwrap_or_else(|| "not_found".to_owned()),
+        ));
+    }
+    Ok(json!({
+        "status": "opened",
+        "path": resolved.path,
+        "raw_hash": pointer.raw_hash,
+        "chunk_hash": pointer.chunk_hash,
+        "temporary": resolved.temporary,
+    }))
+}
+
+fn run_view(args: UnsupportedArgs) -> Result<Value> {
+    let pointer = parse_pointer_arg(without_json(args.args))?;
+    let resolved = resolve_pointer_for_cli(&pointer)?;
+    if resolved.dead {
+        return Err(dead_pointer_error(
+            &resolved.reason.unwrap_or_else(|| "not_found".to_owned()),
+        ));
+    }
+    Ok(json!({
+        "status": "viewed",
+        "raw_hash": pointer.raw_hash,
+        "chunk_hash": pointer.chunk_hash,
+        "text": resolved.text.unwrap_or_default(),
+        "path": resolved.path,
+    }))
+}
+
+fn run_reindex(args: UnsupportedArgs) -> Result<Value> {
+    let args = without_json(args.args);
+    if !args.iter().any(|arg| arg == "--force") {
+        return Err(KcsError::invalid_usage(
+            "reindex requires --force in Step 3",
+        ));
+    }
+    if !args.iter().any(|arg| arg == "--yes") {
+        return Err(KcsError::new(
+            "KCS-E-CONFIRM-REJECTED-001",
+            "reindex --force requires confirmation; pass --yes in non-interactive mode",
+            json!({}),
+            ExitCode::ConfirmationRejected,
+        ));
+    }
+    let repo = Repository::open_current()?;
+    validate_repo_tool_lock(&repo)?;
+    let head = repo
+        .head_commit_hash()?
+        .ok_or_else(|| KcsError::not_found("HEAD"))?;
+    let tree = repo.read_tree(&repo.read_commit(&head)?.tree)?;
+    let mut normalize_by_path = BTreeMap::new();
+    let mut reindexed = 0u64;
+    for entry in &tree.entries {
+        let Some(normalize) = &entry.normalize else {
+            continue;
+        };
+        let new_gen = normalize.gen + 1;
+        copy_normalized_instance_gen(
+            repo.kcs_dir(),
+            &entry.raw_hash,
+            &normalize.tool_profile_hash,
+            normalize.gen,
+            new_gen,
+        )?;
+        normalize_by_path.insert(
+            entry.path.clone(),
+            NormalizeRef {
+                tool_profile_hash: normalize.tool_profile_hash.clone(),
+                gen: new_gen,
+            },
+        );
+        reindexed += 1;
+    }
+    let excluded = BTreeSet::new();
+    let outcome = repo.auto_snapshot_with_normalize(
+        Some("kcs reindex --force"),
+        None,
+        &excluded,
+        &normalize_by_path,
+    )?;
+    let report = rebuild_step3_index(&repo)?;
+    Ok(json!({
+        "status": "reindexed",
+        "reindexed_files": reindexed,
+        "commit_hash": outcome.commit_hash,
+        "rebuilt_chunks": report.rebuilt_chunks,
+    }))
+}
+
+fn rebuild_step3_index(repo: &Repository) -> Result<Step3RebuildReport> {
+    let Some(head) = repo.head_commit_hash()? else {
+        return Ok(Step3RebuildReport::default());
+    };
+    let commit = repo.read_commit(&head)?;
+    let tree = repo.read_tree(&commit.tree)?;
+    let config = read_chunking_config(repo)?;
+    let existing = read_stored_chunks(repo.kcs_dir())?;
+    let mut known = existing
+        .iter()
+        .map(|chunk| chunk.row.chunk_id.clone())
+        .collect::<BTreeSet<_>>();
+    let mut next_rowid = existing.iter().map(|chunk| chunk.rowid).max().unwrap_or(0) + 1;
+    let mut appended = Vec::<StoredChunk>::new();
+    let mut tree_entries = Vec::<TreeEntryRow>::new();
+
+    for entry in &tree.entries {
+        let normalize = match &entry.normalize {
+            Some(normalize) => normalize.clone(),
+            None => match latest_normalize_ref(repo.kcs_dir(), &entry.raw_hash)? {
+                Some(normalize) => normalize,
+                None => continue,
+            },
+        };
+        tree_entries.push(TreeEntryRow {
+            commit_hash: head.clone(),
+            path: entry.path.clone(),
+            raw_hash: entry.raw_hash.clone(),
+            tool_profile_hash: Some(normalize.tool_profile_hash.clone()),
+            gen: normalize.gen,
+        });
+        let units = load_normalized_units(
+            repo.kcs_dir(),
+            &entry.raw_hash,
+            &normalize.tool_profile_hash,
+            normalize.gen,
+        )?;
+        let input = ChunkingInput {
+            raw_path: entry.path.clone(),
+            units,
+            config: config.clone(),
+            created_at: now_utc_seconds(),
+        };
+        for mut row in chunk_normalized_instance(input).map_err(index_to_kcs)? {
+            row.first_seen_commit = Some(head.clone());
+            if known.insert(row.chunk_id.clone()) {
+                appended.push(StoredChunk {
+                    rowid: next_rowid,
+                    row,
+                });
+                next_rowid += 1;
+            }
+        }
+    }
+
+    append_stored_chunks(repo.kcs_dir(), &appended)?;
+    write_tree_entries(repo.kcs_dir(), &tree_entries)?;
+    rebuild_sqlite_index(repo.kcs_dir(), &tree_entries)?;
+    Ok(Step3RebuildReport {
+        rebuilt_chunks: appended.len() as u64,
+        rebuilt_tree_entries: tree_entries.len() as u64,
+    })
+}
+
+fn latest_normalize_ref(kcs_dir: &Path, raw_hash: &str) -> Result<Option<NormalizeRef>> {
+    let digest = raw_hash.trim_start_matches("sha256:");
+    if digest.len() < 4 {
+        return Ok(None);
+    }
+    let dir = kcs_dir
+        .join("objects/normalized_units")
+        .join(&digest[0..2])
+        .join(&digest[2..4]);
+    let Ok(entries) = fs::read_dir(&dir) else {
+        return Ok(None);
+    };
+    let mut best: Option<NormalizeRef> = None;
+    for entry in entries {
+        let entry =
+            entry.map_err(|err| KcsError::io(err.to_string(), dir.display().to_string()))?;
+        if !entry.file_type().map(|kind| kind.is_dir()).unwrap_or(false) {
+            continue;
+        }
+        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        let Some(rest) = name
+            .strip_prefix(raw_hash)
+            .and_then(|value| value.strip_prefix('.'))
+        else {
+            continue;
+        };
+        let Some((tool_profile_hash, gen_part)) = rest.rsplit_once(".g") else {
+            continue;
+        };
+        let Ok(gen) = gen_part.parse::<u64>() else {
+            continue;
+        };
+        if best
+            .as_ref()
+            .map(|current| gen > current.gen)
+            .unwrap_or(true)
+        {
+            best = Some(NormalizeRef {
+                tool_profile_hash: tool_profile_hash.to_owned(),
+                gen,
+            });
+        }
+    }
+    Ok(best)
+}
+
+#[derive(Debug, Default)]
+struct Step3RebuildReport {
+    rebuilt_chunks: u64,
+    rebuilt_tree_entries: u64,
+}
+
+fn read_chunking_config(repo: &Repository) -> Result<ChunkingConfig> {
+    let path = repo.kcs_dir().join("config.toml");
+    let text = fs::read_to_string(&path)
+        .map_err(|err| KcsError::io(err.to_string(), path.display().to_string()))?;
+    let value: toml::Value =
+        toml::from_str(&text).map_err(|err| KcsError::schema(err.to_string()))?;
+    let max_chars = value
+        .get("chunking")
+        .and_then(|chunking| chunking.get("max_chars"))
+        .and_then(toml::Value::as_integer)
+        .filter(|value| *value > 0)
+        .map(|value| value as u64)
+        .unwrap_or(6000);
+    let strategy = value
+        .get("chunking")
+        .and_then(|chunking| chunking.get("strategy"))
+        .and_then(toml::Value::as_str)
+        .unwrap_or("heading");
+    let hash =
+        kcs_index::chunking::chunking_config_hash(strategy, max_chars).map_err(index_to_kcs)?;
+    Ok(ChunkingConfig {
+        chunking_config_hash: hash,
+        strategy: strategy.to_owned(),
+        max_chars,
+    })
+}
+
+fn load_normalized_units(
+    kcs_dir: &Path,
+    raw_hash: &str,
+    tool_profile_hash: &str,
+    gen: u64,
+) -> Result<Vec<NormalizedUnitInput>> {
+    let dir = kcs_pipeline::markdownize::normalized_instance_dir(
+        kcs_dir,
+        raw_hash,
+        tool_profile_hash,
+        gen,
+    );
+    let manifest_path = dir.join("manifest.json");
+    let manifest: NormalizedInstanceManifest = serde_json::from_slice(
+        &fs::read(&manifest_path)
+            .map_err(|err| KcsError::io(err.to_string(), manifest_path.display().to_string()))?,
+    )
+    .map_err(|err| KcsError::schema(err.to_string()))?;
+    let mut units = Vec::new();
+    for entry in &manifest.units {
+        if entry.status != UnitStatus::Done {
+            continue;
+        }
+        let unit_path = dir.join(format!("{}.json", entry.unit_ref));
+        let unit: NormalizedUnitObject = serde_json::from_slice(
+            &fs::read(&unit_path)
+                .map_err(|err| KcsError::io(err.to_string(), unit_path.display().to_string()))?,
+        )
+        .map_err(|err| KcsError::schema(err.to_string()))?;
+        units.push(NormalizedUnitInput {
+            raw_hash: unit.raw_hash,
+            tool_profile_hash: unit.tool_profile_hash,
+            gen: unit.gen,
+            unit_key: unit.unit_key,
+            markdown: unit.markdown,
+        });
+    }
+    Ok(units)
+}
+
+fn index_dir(kcs_dir: &Path) -> PathBuf {
+    kcs_dir.join("index")
+}
+
+fn chunks_jsonl_path(kcs_dir: &Path) -> PathBuf {
+    index_dir(kcs_dir).join("chunks.jsonl")
+}
+
+fn tree_entries_path(kcs_dir: &Path) -> PathBuf {
+    index_dir(kcs_dir).join("tree_entries.json")
+}
+
+fn sqlite_path(kcs_dir: &Path) -> PathBuf {
+    index_dir(kcs_dir).join("sqlite.db")
+}
+
+fn read_stored_chunks(kcs_dir: &Path) -> Result<Vec<StoredChunk>> {
+    let path = chunks_jsonl_path(kcs_dir);
+    let Ok(text) = fs::read_to_string(&path) else {
+        return Ok(Vec::new());
+    };
+    text.lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| serde_json::from_str(line).map_err(|err| KcsError::schema(err.to_string())))
+        .collect()
+}
+
+fn append_stored_chunks(kcs_dir: &Path, chunks: &[StoredChunk]) -> Result<()> {
+    if chunks.is_empty() {
+        return Ok(());
+    }
+    let path = chunks_jsonl_path(kcs_dir);
+    let parent = path
+        .parent()
+        .ok_or_else(|| KcsError::io("path has no parent", path.display().to_string()))?;
+    fs::create_dir_all(parent)
+        .map_err(|err| KcsError::io(err.to_string(), parent.display().to_string()))?;
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .map_err(|err| KcsError::io(err.to_string(), path.display().to_string()))?;
+    for chunk in chunks {
+        serde_json::to_writer(&mut file, chunk)
+            .map_err(|err| KcsError::io(err.to_string(), path.display().to_string()))?;
+        file.write_all(b"\n")
+            .map_err(|err| KcsError::io(err.to_string(), path.display().to_string()))?;
+    }
+    Ok(())
+}
+
+fn write_tree_entries(kcs_dir: &Path, entries: &[TreeEntryRow]) -> Result<()> {
+    let path = tree_entries_path(kcs_dir);
+    let parent = path
+        .parent()
+        .ok_or_else(|| KcsError::io("path has no parent", path.display().to_string()))?;
+    fs::create_dir_all(parent)
+        .map_err(|err| KcsError::io(err.to_string(), parent.display().to_string()))?;
+    let bytes =
+        serde_json::to_vec_pretty(entries).map_err(|err| KcsError::schema(err.to_string()))?;
+    fs::write(&path, bytes).map_err(|err| KcsError::io(err.to_string(), path.display().to_string()))
+}
+
+fn read_tree_entries(kcs_dir: &Path) -> Result<Vec<TreeEntryRow>> {
+    let path = tree_entries_path(kcs_dir);
+    let Ok(bytes) = fs::read(&path) else {
+        return Ok(Vec::new());
+    };
+    serde_json::from_slice(&bytes).map_err(|err| KcsError::schema(err.to_string()))
+}
+
+fn rebuild_sqlite_index(kcs_dir: &Path, tree_entries: &[TreeEntryRow]) -> Result<()> {
+    let path = sqlite_path(kcs_dir);
+    if path.exists() {
+        fs::remove_file(&path)
+            .map_err(|err| KcsError::io(err.to_string(), path.display().to_string()))?;
+    }
+    let mut fts = SqliteFtsIndex::open(
+        &path,
+        FtsSchemaConfig {
+            tokenizer: FtsTokenizer::Trigram,
+        },
+    )
+    .map_err(index_to_kcs)?;
+    for chunk in read_stored_chunks(kcs_dir)? {
+        fts.index_chunk(&chunk.row).map_err(index_to_kcs)?;
+    }
+    for entry in tree_entries {
+        fts.connection()
+            .execute(
+                "INSERT OR REPLACE INTO tree_entries(commit_hash, path, raw_hash, tool_profile_hash, gen)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                rusqlite::params![
+                    entry.commit_hash,
+                    entry.path,
+                    entry.raw_hash,
+                    entry.tool_profile_hash,
+                    entry.gen
+                ],
+            )
+            .map_err(|err| KcsError::schema(err.to_string()))?;
+    }
+    Ok(())
+}
+
+fn parse_search_args(args: Vec<String>) -> Result<ParsedSearch> {
+    let mut query = None;
+    let mut requested_mode = SearchMode::Auto;
+    let mut scope = None;
+    let mut descendants = false;
+    let mut all_scopes = false;
+    let mut limit = 20u64;
+    let mut offset = None;
+    let mut cursor = None;
+    let mut i = 0usize;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--at" | "--all-history" | "--include-deleted" | "--since" => {
+                return Err(KcsError::new(
+                    "KCS-E-CONFIG-NOT-IMPLEMENTED-001",
+                    "time-travel search flags are Step 4",
+                    json!({ "flag": args[i] }),
+                    ExitCode::InvalidUsage,
+                ));
+            }
+            "--text" | "--no-vector" => requested_mode = SearchMode::Text,
+            "--vector" => requested_mode = SearchMode::Vector,
+            "--hybrid" => requested_mode = SearchMode::Hybrid,
+            "--all-scopes" => all_scopes = true,
+            "--descendants" => descendants = true,
+            "--scope" => {
+                i += 1;
+                let Some(value) = args.get(i) else {
+                    return Err(KcsError::invalid_usage("--scope requires a value"));
+                };
+                scope = Some(PathBuf::from(value));
+            }
+            "--limit" => {
+                i += 1;
+                let Some(value) = args.get(i) else {
+                    return Err(KcsError::invalid_usage("--limit requires a value"));
+                };
+                limit = value
+                    .parse::<u64>()
+                    .map_err(|_| KcsError::invalid_usage("--limit must be an integer"))?
+                    .clamp(1, 100);
+            }
+            "--offset" => {
+                i += 1;
+                let Some(value) = args.get(i) else {
+                    return Err(KcsError::invalid_usage("--offset requires a value"));
+                };
+                offset = Some(
+                    value
+                        .parse::<u64>()
+                        .map_err(|_| KcsError::invalid_usage("--offset must be an integer"))?,
+                );
+            }
+            "--cursor" => {
+                i += 1;
+                let Some(value) = args.get(i) else {
+                    return Err(KcsError::invalid_usage("--cursor requires a value"));
+                };
+                cursor = Some(value.clone());
+            }
+            value if value.starts_with('-') => {
+                return Err(KcsError::invalid_usage(format!(
+                    "unknown search flag: {value}"
+                )));
+            }
+            value => {
+                if query.is_some() {
+                    return Err(KcsError::invalid_usage("search accepts one query string"));
+                }
+                query = Some(value.to_owned());
+            }
+        }
+        i += 1;
+    }
+    Ok(ParsedSearch {
+        query: query.ok_or_else(|| KcsError::invalid_usage("search query is required"))?,
+        requested_mode,
+        scope,
+        descendants,
+        all_scopes,
+        limit,
+        offset,
+        cursor,
+    })
+}
+
+fn without_json(args: Vec<String>) -> Vec<String> {
+    args.into_iter().filter(|arg| arg != "--json").collect()
+}
+
+fn discover_scope_targets(repo: &Repository, parsed: &ParsedSearch) -> Result<Vec<ScopeTarget>> {
+    if let Some(scope) = &parsed.scope {
+        let root = if scope.is_absolute() {
+            scope.clone()
+        } else {
+            repo.root().join(scope)
+        };
+        if parsed.descendants {
+            return discover_descendant_scopes(&root);
+        }
+        return scope_target(&root).map(|target| vec![target]);
+    }
+    if parsed.all_scopes {
+        let parent = repo.root().parent().unwrap_or(repo.root());
+        let mut targets = Vec::new();
+        for entry in fs::read_dir(parent)
+            .map_err(|err| KcsError::io(err.to_string(), parent.display().to_string()))?
+        {
+            let entry =
+                entry.map_err(|err| KcsError::io(err.to_string(), parent.display().to_string()))?;
+            let path = entry.path();
+            if path.join(".kcs").is_dir() {
+                if let Ok(target) = scope_target(&path) {
+                    targets.push(target);
+                }
+            }
+        }
+        if targets.is_empty() {
+            targets.push(scope_target(repo.root())?);
+        }
+        targets.sort_by(|a, b| a.repo_root.cmp(&b.repo_root));
+        return Ok(targets);
+    }
+    Ok(vec![scope_target(repo.root())?])
+}
+
+fn discover_descendant_scopes(root: &Path) -> Result<Vec<ScopeTarget>> {
+    let mut targets = Vec::new();
+    if root.join(".kcs").is_dir() {
+        targets.push(scope_target(root)?);
+    }
+    for entry in fs::read_dir(root)
+        .map_err(|err| KcsError::io(err.to_string(), root.display().to_string()))?
+    {
+        let entry =
+            entry.map_err(|err| KcsError::io(err.to_string(), root.display().to_string()))?;
+        if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+            targets.extend(discover_descendant_scopes(&entry.path())?);
+        }
+    }
+    Ok(targets)
+}
+
+fn scope_target(root: &Path) -> Result<ScopeTarget> {
+    let repo = Repository::open(root)?;
+    Ok(ScopeTarget {
+        repo_root: repo.root().to_path_buf(),
+        kcs_dir: repo.kcs_dir().to_path_buf(),
+        scope_id: scope_id(repo.kcs_dir())?,
+    })
+}
+
+fn scope_id(kcs_dir: &Path) -> Result<String> {
+    let path = kcs_dir.join("scope.json");
+    let value: Value = serde_json::from_slice(
+        &fs::read(&path)
+            .map_err(|err| KcsError::io(err.to_string(), path.display().to_string()))?,
+    )
+    .map_err(|err| KcsError::schema(err.to_string()))?;
+    value
+        .get("scope_id")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .ok_or_else(|| KcsError::schema("scope.json missing scope_id"))
+}
+
+fn load_searchable_chunks(target: &ScopeTarget) -> Result<Vec<SearchableChunk>> {
+    let repo = Repository::open(&target.repo_root)?;
+    rebuild_step3_index(&repo)?;
+    let head = repo.head_commit_hash()?.unwrap_or_default();
+    let tree_entries = read_tree_entries(&target.kcs_dir)?;
+    let live = tree_entries
+        .iter()
+        .filter(|entry| entry.commit_hash == head)
+        .filter_map(|entry| {
+            entry.tool_profile_hash.as_ref().map(|tool| {
+                (
+                    (entry.raw_hash.clone(), tool.clone(), entry.gen),
+                    entry.path.clone(),
+                )
+            })
+        })
+        .collect::<BTreeMap<_, _>>();
+    Ok(read_stored_chunks(&target.kcs_dir)?
+        .into_iter()
+        .filter_map(|stored| {
+            let key = (
+                stored.row.raw_hash.clone(),
+                stored.row.tool_profile_hash.clone(),
+                stored.row.gen,
+            );
+            live.get(&key).map(|path| SearchableChunk {
+                rowid: stored.rowid,
+                row: stored.row,
+                scope_id: target.scope_id.clone(),
+                scope_path: target.repo_root.clone(),
+                snapshot_at: head.clone(),
+                path_at_commit: path.clone(),
+            })
+        })
+        .collect())
+}
+
+fn score_chunk(query: &str, chunk: &SearchableChunk) -> f64 {
+    let haystack = normalize_search_text(&format!(
+        "{}\n{}\n{}\n{}",
+        chunk.path_at_commit,
+        chunk.row.section_id.as_deref().unwrap_or_default(),
+        chunk
+            .row
+            .heading_path
+            .as_ref()
+            .map(|path| path.join(" "))
+            .unwrap_or_default(),
+        chunk.row.text
+    ));
+    let query_norm = normalize_search_text(query);
+    let mut score = 0.0;
+    if haystack.contains(&query_norm) {
+        score += 100.0;
+    }
+    for number in extract_numbers(&query_norm) {
+        if !number.is_empty() && haystack.contains(&number) {
+            score += 30.0 + number.len() as f64;
+        }
+    }
+    for token in search_tokens(&query_norm) {
+        let len = token.chars().count();
+        if len < 2 {
+            continue;
+        }
+        if haystack.contains(&token) {
+            score += (len * len) as f64;
+        } else if len >= 4 && token.chars().any(is_japanese_char) {
+            let grams = char_ngrams(&token, 2);
+            let hits = grams.iter().filter(|gram| haystack.contains(*gram)).count();
+            if hits > 0 {
+                score += hits as f64 * 2.0;
+            }
+        }
+    }
+    score
+}
+
+fn normalize_search_text(text: &str) -> String {
+    text.chars()
+        .flat_map(|ch| {
+            if ch == ',' || ch == '_' {
+                None
+            } else if ch.is_ascii_uppercase() {
+                Some(ch.to_ascii_lowercase())
+            } else {
+                Some(ch)
+            }
+        })
+        .collect()
+}
+
+fn search_tokens(text: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut buf = String::new();
+    let mut kind = TokenKind::Other;
+    for ch in text.chars() {
+        let next = if ch.is_ascii_alphanumeric() || ch == '.' {
+            TokenKind::Ascii
+        } else if is_japanese_char(ch) {
+            TokenKind::Japanese
+        } else {
+            TokenKind::Other
+        };
+        if next == TokenKind::Other {
+            if !buf.is_empty() {
+                tokens.push(std::mem::take(&mut buf));
+            }
+            kind = TokenKind::Other;
+            continue;
+        }
+        if kind != TokenKind::Other && kind != next && !buf.is_empty() {
+            tokens.push(std::mem::take(&mut buf));
+        }
+        buf.push(ch);
+        kind = next;
+    }
+    if !buf.is_empty() {
+        tokens.push(buf);
+    }
+    tokens
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TokenKind {
+    Ascii,
+    Japanese,
+    Other,
+}
+
+fn extract_numbers(text: &str) -> Vec<String> {
+    let mut numbers = Vec::new();
+    let mut buf = String::new();
+    for ch in text.chars() {
+        if ch.is_ascii_digit() || ch == '.' {
+            buf.push(ch);
+        } else if !buf.is_empty() {
+            numbers.push(std::mem::take(&mut buf));
+        }
+    }
+    if !buf.is_empty() {
+        numbers.push(buf);
+    }
+    numbers
+}
+
+fn char_ngrams(text: &str, n: usize) -> Vec<String> {
+    let chars = text.chars().collect::<Vec<_>>();
+    chars
+        .windows(n)
+        .map(|window| window.iter().collect())
+        .collect()
+}
+
+fn is_japanese_char(ch: char) -> bool {
+    matches!(
+        ch as u32,
+        0x3040..=0x309f | 0x30a0..=0x30ff | 0x4e00..=0x9fff
+    )
+}
+
+fn default_diversify_request() -> DiversifyRequest {
+    DiversifyRequest {
+        strategy: DiversifyStrategy::Mmr,
+        mmr_lambda: Some(0.7),
+        max_per_raw_hash: Some(3),
+        mmr_depth: Some(100),
+    }
+}
+
+fn search_mode_json(mode: SearchMode) -> &'static str {
+    match mode {
+        SearchMode::Auto => "auto",
+        SearchMode::Text => "text",
+        SearchMode::Vector => "vector",
+        SearchMode::Hybrid => "hybrid",
+    }
+}
+
+fn empty_search_response(
+    parsed: &ParsedSearch,
+    repo: &Repository,
+    started: Instant,
+    searched_scopes: Vec<Value>,
+    excluded_scopes: Vec<Value>,
+) -> Result<Value> {
+    let response = json!({
+        "query": parsed.query,
+        "requested_mode": search_mode_json(parsed.requested_mode),
+        "resolved_mode": "text",
+        "fallback": true,
+        "fallback_reason": "query_too_short",
+        "error_code": "KCS-E-SEARCH-QUERY-TOO-SHORT-001",
+        "diversify": { "strategy": "mmr", "mmr_lambda": 0.7 },
+        "paging": { "limit": parsed.limit, "next_cursor": Value::Null },
+        "searched_scopes": searched_scopes,
+        "excluded_scopes": excluded_scopes,
+        "results": [],
+    });
+    append_search_logs(repo, &response, started)?;
+    Ok(response)
+}
+
+fn append_search_logs(repo: &Repository, response: &Value, started: Instant) -> Result<()> {
+    let latency_ms = started.elapsed().as_secs_f64() * 1000.0;
+    let scope_count = response
+        .get("searched_scopes")
+        .and_then(Value::as_array)
+        .map(Vec::len)
+        .unwrap_or(0);
+    let result_count = response
+        .get("results")
+        .and_then(Value::as_array)
+        .map(Vec::len)
+        .unwrap_or(0);
+    append_jsonl_cli(
+        &data_home().join("kcs/logs/metrics.jsonl"),
+        &json!({
+            "ts": now_utc_seconds(),
+            "level": "info",
+            "code": "KCS-I-SEARCH-LATENCY-001",
+            "component": "kcs-cli",
+            "message": "search latency",
+            "metric": "search.latency_ms",
+            "value": latency_ms,
+            "context": {
+                "mode": response.get("resolved_mode").and_then(Value::as_str).unwrap_or("text"),
+                "scope_count": scope_count,
+                "result_count": result_count,
+            },
+        }),
+    )?;
+    append_jsonl_cli(
+        &repo.kcs_dir().join("logs/access.jsonl"),
+        &json!({
+            "ts": now_utc_seconds(),
+            "level": "info",
+            "code": "KCS-I-SEARCH-ACCESS-001",
+            "component": "kcs-cli",
+            "message": "search access",
+            "context": {
+                "query": "[redacted]",
+                "mode": response.get("resolved_mode").and_then(Value::as_str).unwrap_or("text"),
+                "result_count": result_count,
+            },
+        }),
+    )
+}
+
+fn append_jsonl_cli(path: &Path, value: &Value) -> Result<()> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| KcsError::io("path has no parent", path.display().to_string()))?;
+    fs::create_dir_all(parent)
+        .map_err(|err| KcsError::io(err.to_string(), parent.display().to_string()))?;
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .map_err(|err| KcsError::io(err.to_string(), path.display().to_string()))?;
+    serde_json::to_writer(&mut file, value)
+        .map_err(|err| KcsError::io(err.to_string(), path.display().to_string()))?;
+    file.write_all(b"\n")
+        .map_err(|err| KcsError::io(err.to_string(), path.display().to_string()))
+}
+
+#[derive(Debug)]
+struct PointerResolution {
+    dead: bool,
+    reason: Option<String>,
+    path: Option<PathBuf>,
+    text: Option<String>,
+    temporary: bool,
+}
+
+fn parse_pointer_arg(args: Vec<String>) -> Result<EvidencePointer> {
+    let Some(pointer) = args.first() else {
+        return Err(KcsError::invalid_usage("pointer argument is required"));
+    };
+    if pointer == "-" {
+        let mut input = String::new();
+        std::io::Read::read_to_string(&mut std::io::stdin(), &mut input)
+            .map_err(|err| KcsError::io(err.to_string(), "stdin"))?;
+        return parse_pointer_text(input.trim());
+    }
+    parse_pointer_text(pointer)
+}
+
+fn parse_pointer_text(pointer: &str) -> Result<EvidencePointer> {
+    if pointer.starts_with("kcs://") {
+        return parse_evidence_pointer_uri(pointer).map_err(search_to_kcs);
+    }
+    if pointer.trim_start().starts_with('{') {
+        return serde_json::from_str(pointer).map_err(|err| KcsError::schema(err.to_string()));
+    }
+    if pointer.starts_with("sha256:") {
+        return resolve_short_hash(pointer);
+    }
+    Err(KcsError::invalid_usage("invalid pointer argument"))
+}
+
+fn resolve_short_hash(hash: &str) -> Result<EvidencePointer> {
+    let repo = Repository::open_current()?;
+    let target = scope_target(repo.root())?;
+    let chunks = load_searchable_chunks(&target)?;
+    let matches = chunks
+        .into_iter()
+        .filter(|chunk| chunk.row.chunk_id == hash || chunk.row.raw_hash == hash)
+        .collect::<Vec<_>>();
+    if matches.len() != 1 {
+        return Err(KcsError::invalid_usage(
+            "short hash is ambiguous or not found",
+        ));
+    }
+    let chunk = &matches[0];
+    issue_evidence_pointer(EvidencePointerIssueRequest {
+        scope_id: chunk.scope_id.clone(),
+        scope_path: Some(chunk.scope_path.display().to_string()),
+        commit: chunk.snapshot_at.clone(),
+        tree: None,
+        raw_hash: chunk.row.raw_hash.clone(),
+        tool_profile_hash: chunk.row.tool_profile_hash.clone(),
+        chunk_hash: chunk.row.chunk_id.clone(),
+        path_at_commit: Some(chunk.path_at_commit.clone()),
+        heading_path: chunk.row.heading_path.clone(),
+        section_id: chunk.row.section_id.clone(),
+        char_start: chunk.row.char_start,
+        char_end: chunk.row.char_end,
+    })
+    .map_err(search_to_kcs)
+}
+
+fn resolve_pointer_for_cli(pointer: &EvidencePointer) -> Result<PointerResolution> {
+    let target = resolve_pointer_scope(pointer)?;
+    let chunks = read_stored_chunks(&target.kcs_dir)?;
+    let chunk = chunks
+        .iter()
+        .find(|chunk| chunk.row.chunk_id == pointer.chunk_hash)
+        .cloned();
+    let text = chunk.as_ref().map(|chunk| chunk.row.text.clone());
+    if let Some(path) = find_working_tree_raw(&target.repo_root, &pointer.raw_hash)? {
+        return Ok(PointerResolution {
+            dead: false,
+            reason: None,
+            path: Some(path),
+            text,
+            temporary: false,
+        });
+    }
+    let raw_path = raw_object_path(&target.kcs_dir, &pointer.raw_hash);
+    if raw_path.is_file() {
+        let basename = pointer
+            .path_at_commit
+            .as_deref()
+            .and_then(|path| Path::new(path).file_name())
+            .and_then(|name| name.to_str())
+            .unwrap_or("object");
+        let cache = data_home()
+            .join("kcs/open")
+            .join(
+                pointer
+                    .raw_hash
+                    .trim_start_matches("sha256:")
+                    .chars()
+                    .take(12)
+                    .collect::<String>(),
+            )
+            .join(basename);
+        if let Some(parent) = cache.parent() {
+            fs::create_dir_all(parent)
+                .map_err(|err| KcsError::io(err.to_string(), parent.display().to_string()))?;
+        }
+        fs::copy(&raw_path, &cache)
+            .map_err(|err| KcsError::io(err.to_string(), cache.display().to_string()))?;
+        let mut permissions = fs::metadata(&cache)
+            .map_err(|err| KcsError::io(err.to_string(), cache.display().to_string()))?
+            .permissions();
+        permissions.set_readonly(true);
+        fs::set_permissions(&cache, permissions)
+            .map_err(|err| KcsError::io(err.to_string(), cache.display().to_string()))?;
+        return Ok(PointerResolution {
+            dead: false,
+            reason: None,
+            path: Some(cache),
+            text,
+            temporary: true,
+        });
+    }
+    Ok(PointerResolution {
+        dead: true,
+        reason: Some("not_found".to_owned()),
+        path: None,
+        text,
+        temporary: false,
+    })
+}
+
+fn resolve_pointer_scope(pointer: &EvidencePointer) -> Result<ScopeTarget> {
+    if let Some(scope_path) = &pointer.scope_path {
+        if let Ok(target) = scope_target(Path::new(scope_path)) {
+            if target.scope_id == pointer.scope_id {
+                return Ok(target);
+            }
+        }
+    }
+    let repo = Repository::open_current()?;
+    let mut targets = discover_scope_targets(
+        &repo,
+        &ParsedSearch {
+            query: String::new(),
+            requested_mode: SearchMode::Text,
+            scope: None,
+            descendants: false,
+            all_scopes: true,
+            limit: 1,
+            offset: None,
+            cursor: None,
+        },
+    )?;
+    targets.retain(|target| target.scope_id == pointer.scope_id);
+    targets.into_iter().next().ok_or_else(|| {
+        KcsError::new(
+            "KCS-E-EVIDENCE-SCOPE-UNREACHABLE-001",
+            "evidence scope unreachable",
+            json!({ "scope_id": pointer.scope_id }),
+            ExitCode::PermanentFailure,
+        )
+    })
+}
+
+fn find_working_tree_raw(root: &Path, raw_hash: &str) -> Result<Option<PathBuf>> {
+    for entry in fs::read_dir(root)
+        .map_err(|err| KcsError::io(err.to_string(), root.display().to_string()))?
+    {
+        let entry =
+            entry.map_err(|err| KcsError::io(err.to_string(), root.display().to_string()))?;
+        if entry.file_name() == ".kcs" {
+            continue;
+        }
+        if !entry
+            .file_type()
+            .map(|kind| kind.is_file())
+            .unwrap_or(false)
+        {
+            continue;
+        }
+        let path = entry.path();
+        let bytes = fs::read(&path)
+            .map_err(|err| KcsError::io(err.to_string(), path.display().to_string()))?;
+        if hash_bytes(&bytes) == raw_hash {
+            return Ok(Some(path));
+        }
+    }
+    Ok(None)
+}
+
+fn raw_object_path(kcs_dir: &Path, raw_hash: &str) -> PathBuf {
+    let digest = raw_hash.trim_start_matches("sha256:");
+    kcs_dir
+        .join("objects/raw")
+        .join(&digest[0..2])
+        .join(&digest[2..4])
+        .join(raw_hash)
+}
+
+fn dead_pointer_error(reason: &str) -> KcsError {
+    let code = match reason {
+        "scope_unreachable" => "KCS-E-EVIDENCE-SCOPE-UNREACHABLE-001",
+        "purged" | "tombstoned" => "KCS-E-PURGE-TOMBSTONED-001",
+        _ => "KCS-E-PURGE-NOT-FOUND-001",
+    };
+    KcsError::new(
+        code,
+        "dead evidence pointer",
+        json!({ "reason": reason }),
+        ExitCode::PermanentFailure,
+    )
+}
+
+fn copy_normalized_instance_gen(
+    kcs_dir: &Path,
+    raw_hash: &str,
+    tool_profile_hash: &str,
+    old_gen: u64,
+    new_gen: u64,
+) -> Result<()> {
+    let old_dir = kcs_pipeline::markdownize::normalized_instance_dir(
+        kcs_dir,
+        raw_hash,
+        tool_profile_hash,
+        old_gen,
+    );
+    let new_dir = kcs_pipeline::markdownize::normalized_instance_dir(
+        kcs_dir,
+        raw_hash,
+        tool_profile_hash,
+        new_gen,
+    );
+    fs::create_dir_all(&new_dir)
+        .map_err(|err| KcsError::io(err.to_string(), new_dir.display().to_string()))?;
+    let manifest_path = old_dir.join("manifest.json");
+    let mut manifest: Value = serde_json::from_slice(
+        &fs::read(&manifest_path)
+            .map_err(|err| KcsError::io(err.to_string(), manifest_path.display().to_string()))?,
+    )
+    .map_err(|err| KcsError::schema(err.to_string()))?;
+    manifest["parent_gen"] = json!(old_gen);
+    manifest["gen"] = json!(new_gen);
+    manifest["run_id"] = json!(format!("run_{}", new_ulid(kcs_dir)));
+    manifest["generated_at"] = json!(now_utc_seconds());
+    fs::write(
+        new_dir.join("manifest.json"),
+        serde_json::to_vec_pretty(&manifest).map_err(|err| KcsError::schema(err.to_string()))?,
+    )
+    .map_err(|err| KcsError::io(err.to_string(), new_dir.display().to_string()))?;
+    for entry in fs::read_dir(&old_dir)
+        .map_err(|err| KcsError::io(err.to_string(), old_dir.display().to_string()))?
+    {
+        let entry =
+            entry.map_err(|err| KcsError::io(err.to_string(), old_dir.display().to_string()))?;
+        if entry.file_name() == "manifest.json" {
+            continue;
+        }
+        let mut unit: Value =
+            serde_json::from_slice(&fs::read(entry.path()).map_err(|err| {
+                KcsError::io(err.to_string(), entry.path().display().to_string())
+            })?)
+            .map_err(|err| KcsError::schema(err.to_string()))?;
+        unit["gen"] = json!(new_gen);
+        unit["generated_at"] = json!(now_utc_seconds());
+        fs::write(
+            new_dir.join(entry.file_name()),
+            serde_json::to_vec_pretty(&unit).map_err(|err| KcsError::schema(err.to_string()))?,
+        )
+        .map_err(|err| KcsError::io(err.to_string(), new_dir.display().to_string()))?;
+    }
+    Ok(())
+}
+
+fn index_to_kcs(error: kcs_index::IndexError) -> KcsError {
+    KcsError::schema(error.to_string())
+}
+
+fn search_to_kcs(error: kcs_search::SearchError) -> KcsError {
+    match error {
+        kcs_search::SearchError::Cursor(message) => KcsError::new(
+            "KCS-E-SEARCH-CURSOR-001",
+            message,
+            json!({}),
+            ExitCode::InvalidUsage,
+        ),
+        kcs_search::SearchError::Evidence(message) => KcsError::schema(message),
+        kcs_search::SearchError::Contract(message) => KcsError::schema(message),
+        kcs_search::SearchError::NotImplemented(feature) => KcsError::not_implemented(feature),
+    }
 }
 
 fn run_batch(args: BatchArgs) -> Result<Value> {
