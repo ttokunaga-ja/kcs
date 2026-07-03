@@ -324,6 +324,11 @@ dimensions / distance / modality / embedding profile_hash がすべて一致
 
 不一致なら BM25 のみ横断検索、または再 index 要求。
 
+**modality は `"multimodal"` に固定する (2026-07-03 確定)**。text と image 等を別ベクトル空間に埋め込む
+構成 (`modality="text"` 等の非 multimodal profile) は**採用不可**であり、tool-lock への materialize /
+adapter 登録の時点で `KCS-E-EMBED-MODALITY-001` (exit 2、[06-cli-spec.md §8](06-cli-spec.md)) として
+拒否する。採用 profile は [07-adapter-spec.md §5.3](07-adapter-spec.md) の単一マルチモーダル profile のみ。
+
 # 8. 主要テーブル / object スキーマ
 
 ## files (working state)

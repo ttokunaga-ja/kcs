@@ -452,6 +452,14 @@ query_hash = sha256:08820fbe38f26821717a56fde4cc1db4e104c5ff1221f62477127c070503
 - 補足 (r3): r2 の text-only 緩和前提は WS-embed-2 裁定で撤回済み。MRL 切り詰め後次元 (768) も profile に
   固定されるため、切り詰め次元の変更は profile_hash 変化 = 別 identity (全 re-index) になる。
 
+**CT3-EMBED-008** — P0 — 非 multimodal embedding profile の採用拒否 (2026-07-03 追加)
+- Given: `modality != "multimodal"` の embedding adapter profile (例: `modality="text"`)。
+- When: tool-lock への materialize / adapter 登録 / embedding 生成のいずれかの経路で当該 profile を使おうとする。
+- Then: `KCS-E-EMBED-MODALITY-001` (exit 2) で**拒否**され、embeddings 行も chunk_vec 行も生成されない。
+  エラーメッセージは採用可能な modality が "multimodal" のみであることを示す。
+- 根拠: `03 §7` (modality="multimodal" 固定の強制) / `07 §5.3` (単一 multimodal profile 採用) /
+  `06 §8` (`KCS-E-EMBED-MODALITY-001`)。別ベクトル空間 (text 専用等) の profile 採用を構造的に不可能にする。
+
 **CT3-EMBED-005** — P1 — embeddings 正 / chunk_vec 導出 (rebuild 順序)
 - Given: `embeddings` テーブルと `chunk_vec` (vec0) の不整合、または `kcs repair --rebuild-db`。
 - When: 再構築。
@@ -1054,7 +1062,7 @@ Recall@10 >= 0.8」+「本書 P0 全緑」** とし、M3-2 / M3-3 の Recall 判
 
 ## 集計 (報告用)
 
-- **P0 テスト数**: 59 (総テスト数 76: P0 59 / P1 17)
+- **P0 テスト数**: 60 (総テスト数 77: P0 60 / P1 17。CT3-EMBED-008 = 非 multimodal profile 拒否を 2026-07-03 追加)
   (CT3-CHUNK 11 / CT3-EMBED 4 / CT3-FTS 4 / CT3-HYBRID 6 / CT3-MMR 4 / CT3-CURSOR 5 / CT3-MULTI 5 /
    CT3-EVIDENCE 7 / CT3-URI 3 / CT3-OPEN 4 / CT3-REINDEX 3 / CT3-OBS 3)
   (r2: 57 + CT3-EVIDENCE-009 新設 + CT3-CHUNK-012 P1→P0 昇格。CT3-MULTI-008 は P1 新設。
