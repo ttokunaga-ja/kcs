@@ -79,11 +79,20 @@ def main() -> None:
     report_path = args.out_dir / "report.md"
     write_json(results_path, results)
     report_path.write_text(render_report(results), encoding="utf-8")
-    print(f"wrote {results_path.relative_to(ROOT)}")
-    print(f"wrote {report_path.relative_to(ROOT)}")
+    print(f"wrote {display_path(results_path)}")
+    print(f"wrote {display_path(report_path)}")
     print(f"passed={passed}")
     if not passed:
         sys.exit(1)
+
+
+def display_path(path: Path) -> str:
+    # 相対 --out-dir (例: out-sync) でも ROOT 外の絶対パスでも落ちない表示用変換。
+    resolved = path.resolve()
+    try:
+        return str(resolved.relative_to(ROOT))
+    except ValueError:
+        return str(resolved)
 
 
 def load_json(path: Path, label: str) -> dict[str, Any]:
@@ -202,7 +211,10 @@ def normalize_formula(text: str) -> str:
     normalized = unicodedata.normalize("NFKC", text).lower()
     normalized = normalized.replace("∫", "int")
     normalized = normalized.replace("²", "^2")
-    normalized = normalized.replace("=", "=")
+    # LaTeX 表記 ($$\int_{0}^{1} 等) と素朴表記 (int_0^1) を同一視する:
+    # コマンドのバックスラッシュ、グルーピング braces、数式デリミタ $ を除去。
+    normalized = re.sub(r"\\([a-z]+)", r"\1", normalized)
+    normalized = normalized.translate(str.maketrans("", "", "{}$"))
     return re.sub(r"\s+", "", normalized)
 
 

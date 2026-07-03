@@ -1,4 +1,6 @@
 out/
+out-*/
 fixtures/generated/
 __pycache__/
 .venv/
+*.egg-info/
