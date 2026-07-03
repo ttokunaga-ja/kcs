@@ -41,6 +41,14 @@ lock 保持中に `kcs log` / `kcs inspect` / `status` / `diff` が成功する�
 - **CT-COMMIT-008 (auto commit)**: Step 1 で原理的に検証不能 (4/4 一致)。ws1a 側を Step 2 ゲートへ移動する (裁定側で ws1a を改訂)
 - **CT-CLI-017 (--at/--since)**: ws1a (P1: 受理して exit 0) と発注書 #9 (exit 1) の文書間矛盾。実装は発注書に忠実。裁定: Step 1 は #9 を正とし、ws1a に「Step 4 で exit 0/2 契約へ移行」と注記 (裁定側で改訂)
 
+## WS1d 完了記録 (2026-07-03)
+
+should-fix S1-S6 + N3 を実装 (Claude Opus) し、Codex クロスレビューの major 2 件を裁定修正:
+- S2 の merge 元を「旧 manifest」→「旧 HEAD tree (正) + 旧 manifest の deleted 行のみ」に変更 (stale manifest で削除記録を失わない)
+- created_at に月別日数 + うるう年判定を追加、leap second (:60) は不許可 (KCS は発行し得ない)
+
+**backlog (minor、Step 2 以降)**: error code のヘルパ境界での文脈喪失 — ユーザーオペランド不正 (`read_commit` に非 commit hash 等) が `KCS-E-CONFIG-SCHEMA-001` を、on-disk 異常が `KCS-E-CONFIG-USAGE-001` を返すケースが残る。CLI オペランド解決経路での call-site mapping で解消予定。
+
 ## 監査で確認された健全事項 (修正不要)
 
 - §A テストベクタ: Opus / Sonnet が独立再計算し spec・テスト定数とバイト一致。改変なし

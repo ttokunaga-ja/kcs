@@ -163,8 +163,10 @@ pub fn commit_hash(commit: &CommitObject) -> Result<String> {
 /// Strictly validate a `created_at` timestamp as `YYYY-MM-DDTHH:MM:SSZ`
 /// (UTC ISO8601, `06 §12`). An optional fractional-second suffix `.NNN…` before
 /// the trailing `Z` is accepted (`06 §12` permits microsecond precision). Checks
-/// digit positions, separators, and the value ranges of month/day/hour/min/sec —
-/// far stricter than the previous "contains T and ends with Z" test (WS1c S6).
+/// digit positions, separators, and calendar validity (month-aware day count
+/// including leap years). Leap seconds (`:60`) are rejected — KCS only emits
+/// second-precision timestamps derived from Unix time, which never produce
+/// `:60` (WS1d cross-review ruling).
 fn is_valid_created_at(value: &str) -> bool {
     let Some(body) = value.strip_suffix('Z') else {
         return false;
@@ -197,16 +199,28 @@ fn is_valid_created_at(value: &str) -> bool {
         }
     }
     let field = |lo: usize, hi: usize| datetime[lo..hi].parse::<u32>().unwrap_or(u32::MAX);
+    let year = field(0, 4);
     let month = field(5, 7);
     let day = field(8, 10);
     let hour = field(11, 13);
     let minute = field(14, 16);
     let second = field(17, 19);
-    (1..=12).contains(&month)
-        && (1..=31).contains(&day)
-        && hour <= 23
-        && minute <= 59
-        && second <= 60 // allow a leap second (:60)
+    if !(1..=12).contains(&month) {
+        return false;
+    }
+    let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+    let max_day = match month {
+        4 | 6 | 9 | 11 => 30,
+        2 => {
+            if leap {
+                29
+            } else {
+                28
+            }
+        }
+        _ => 31,
+    };
+    (1..=max_day).contains(&day) && hour <= 23 && minute <= 59 && second <= 59
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -303,6 +317,8 @@ mod tests {
         assert!(is_valid_created_at("2026-04-29T12:00:00Z"));
         assert!(is_valid_created_at("1970-01-01T00:00:00Z"));
         assert!(is_valid_created_at("2026-04-29T12:00:00.123456Z"));
+        assert!(is_valid_created_at("2024-02-29T00:00:00Z")); // leap day
+        assert!(is_valid_created_at("2000-02-29T00:00:00Z")); // %400 leap
         assert!(commit_with_created_at("2026-04-29T12:00:00Z").is_ok());
     }
 
@@ -316,6 +332,11 @@ mod tests {
             "2026-04-32T00:00:00Z",  // day 32
             "2026-04-29T24:00:00Z",  // hour 24
             "2026-04-29T12:60:00Z",  // minute 60
+            "2026-04-29T12:00:60Z",  // leap second not emitted by KCS
+            "2026-02-30T00:00:00Z",  // Feb 30
+            "2026-04-31T00:00:00Z",  // Apr 31
+            "2023-02-29T00:00:00Z",  // non-leap Feb 29
+            "2100-02-29T00:00:00Z",  // %100 non-leap Feb 29
             "2026/04/29T12:00:00Z",  // wrong separators
             "2026-04-29T12:00:00.Z", // empty fraction
             "hello Z",               // garbage ending in Z
