@@ -552,6 +552,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "kcs-adapter"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
 name = "kcs-cli"
 version = "0.1.0"
 dependencies = [
@@ -574,6 +583,15 @@ dependencies = [
  "tempfile",
  "thiserror",
  "toml",
+]
+
+[[package]]
+name = "kcs-pipeline"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror",
 ]
 
 [[package]]

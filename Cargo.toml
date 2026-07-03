@@ -1,7 +1,9 @@
 [workspace]
 members = [
+    "crates/kcs-adapter",
     "crates/kcs-cli",
     "crates/kcs-core",
+    "crates/kcs-pipeline",
 ]
 resolver = "2"
 
