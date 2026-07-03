@@ -40,11 +40,26 @@ impl KcsError {
         )
     }
 
+    /// Path schema violation: a tree/pointer `path` that contains the path
+    /// separator `/` (`docs/03-data-model.md` §3, `docs/06-cli-spec.md` §8).
     #[must_use]
     pub fn path(message: impl Into<String>, path: impl Into<String>) -> Self {
         Self::new(
             "KCS-E-STORE-PATH-001",
             message,
+            json!({ "path": path.into() }),
+            ExitCode::InvalidUsage,
+        )
+    }
+
+    /// Duplicate `path` among the entries of a single tree
+    /// (`docs/03-data-model.md` §8.1). Kept distinct from the `/`-in-path
+    /// violation (`KCS-E-STORE-PATH-001`).
+    #[must_use]
+    pub fn duplicate_path(path: impl Into<String>) -> Self {
+        Self::new(
+            "KCS-E-STORE-DUP-001",
+            "duplicate tree entry path",
             json!({ "path": path.into() }),
             ExitCode::InvalidUsage,
         )
@@ -80,10 +95,13 @@ impl KcsError {
         )
     }
 
+    /// Invalid CLI usage / operand: a nonexistent `init` path, a directory that
+    /// is not a `.kcs` scope, a malformed hash argument, etc. Distinct from a
+    /// JSON Schema violation (`KCS-E-CONFIG-SCHEMA-001`). Exit code stays 2.
     #[must_use]
     pub fn invalid_usage(message: impl Into<String>) -> Self {
         Self::new(
-            "KCS-E-CONFIG-SCHEMA-001",
+            "KCS-E-CONFIG-USAGE-001",
             message,
             json!({}),
             ExitCode::InvalidUsage,
