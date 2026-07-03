@@ -8,8 +8,22 @@ use assert_cmd::Command as AssertCommand;
 use kcs_core::cas::{canonical_json_bytes, fanout_path, hash_bytes};
 use serde_json::Value;
 
+/// A process-wide isolated XDG home so `init` / `index` never touch the developer's
+/// real `~/.local/share/kcs/scope-registry.sqlite` (K3 — init/index now register
+/// scopes). Tests that need to read the data home set `XDG_DATA_HOME` explicitly,
+/// which overrides this default.
+fn isolated_home() -> &'static std::path::Path {
+    use std::sync::OnceLock;
+    static HOME: OnceLock<tempfile::TempDir> = OnceLock::new();
+    HOME.get_or_init(|| tempfile::tempdir().unwrap()).path()
+}
+
 fn kcs() -> AssertCommand {
-    AssertCommand::cargo_bin("kcs").unwrap()
+    let mut command = AssertCommand::cargo_bin("kcs").unwrap();
+    command
+        .env("XDG_DATA_HOME", isolated_home().join("data"))
+        .env("XDG_CONFIG_HOME", isolated_home().join("config"));
+    command
 }
 
 #[test]

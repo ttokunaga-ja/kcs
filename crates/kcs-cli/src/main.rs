@@ -3,26 +3,40 @@ use std::fs::{self, OpenOptions};
 use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process;
+use std::time::Instant;
 
 use clap::{Args, Parser, Subcommand};
 use kcs_adapter::deterministic::{deterministic_prepare_profile_value, DeterministicAdapter};
+use kcs_adapter::gemini_embedding::{
+    GeminiEmbeddingAdapter, GeminiEmbeddingClient, ADOPTED_DIMENSIONS, ADOPTED_MODEL_PIN,
+};
 use kcs_adapter::identity::tool_profile_hash;
 use kcs_adapter::mistral_ocr::{
     EnvMistralOcrClient, MistralOcrClient, MistralOcrMarkdownizeAdapter, OcrImage, OcrPage,
     OcrResponse,
 };
 use kcs_adapter::tool_lock::{load_tool_lock, validate_tools_toml};
-use kcs_adapter::traits::MarkdownizeAdapter;
+use kcs_adapter::traits::{EmbeddingAdapter, MarkdownizeAdapter};
 use kcs_adapter::types::{
-    AdapterKind, AdapterProfile, ExecutionMode, MarkdownUnit,
-    MarkdownizeMode as AdapterMarkdownizeMode, MarkdownizeRequest, PreparedUnitHint,
-    PreviousMarkdownizeContext, RawInput, UnitKind,
+    AdapterKind, AdapterProfile, EmbeddingInputType, EmbeddingItem, EmbeddingRequest,
+    EmbeddingVector, ExecutionMode, MarkdownUnit, MarkdownizeMode as AdapterMarkdownizeMode,
+    MarkdownizeRequest, PreparedUnitHint, PreviousMarkdownizeContext, RawInput, UnitKind,
 };
+use kcs_core::cas::is_hash;
 use kcs_core::dag::NormalizeRef;
 use kcs_core::scope::{
     append_error_log, append_event_log, new_ulid, now_utc_seconds, InspectedObject, Repository,
 };
 use kcs_core::{ExitCode, KcsError, Result};
+use kcs_index::chunking::{
+    chunk_normalized_instance, ChunkingConfig, ChunkingInput, NormalizedUnitInput,
+};
+use kcs_index::embedding_store::{self, adopted_embedding_profile_hash, f32_to_le_bytes};
+use kcs_index::fts::{FtsSchemaConfig, FtsTokenizer, SqliteFtsIndex, CHUNK_VEC_DIMENSIONS};
+use kcs_index::registry::{RegistryDb, RegistryEntry};
+use kcs_index::{
+    ChunkRow, EmbeddingDistance, EmbeddingModality, EmbeddingTargetType, TreeEntryRow,
+};
 use kcs_pipeline::budget::{
     estimate_local_baseline_cost, evaluate_budget_with_caps, read_budget_policy, utc_month,
     BudgetCapKind, BudgetCaps, BudgetEstimate, CostLedger, MonthlyCostLedgerEntry,
@@ -39,7 +53,22 @@ use kcs_pipeline::prepare::{
 use kcs_pipeline::scan::{build_scan_preview, ScanCandidate, ScanPreview, ScanPreviewRequest};
 use kcs_pipeline::task::{retry_policy, task_status_from_unit_counts, RetryErrorKind};
 use kcs_pipeline::task::{TaskDescriptor, TaskStatus, TaskStore, TaskType};
+use kcs_search::cursor::{
+    decode_cursor_token, encode_cursor_token, CursorToken, ScopeCursor, ScopeMode,
+};
+use kcs_search::evidence::{
+    evidence_pointer_to_uri, issue_evidence_pointer, parse_evidence_pointer_uri, EvidencePointer,
+    EvidencePointerIssueRequest,
+};
+use kcs_search::mmr::{diversify_candidates, MmrCandidate, MmrConfig};
+use kcs_search::query::{
+    query_hash, DiversifyRequest, DiversifyStrategy, QueryHashInput, ScopeSelectionMode, SearchMode,
+};
+use kcs_search::rrf::{fuse_rrf, BackendRank, RrfConfig};
+use rusqlite::Connection;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 
 // clap のパースエラーは exit code 2 で終了する。これは docs/06-cli-spec.md §7 の
 // invalid usage (= 2) と一致するため、そのまま採用する。
@@ -75,13 +104,13 @@ enum Command {
     Index(IndexArgs),
     /// Resume or retry batch tasks.
     Batch(BatchArgs),
-    /// Step 4 command placeholder.
+    /// Rebuild local acceleration tables.
     Repair(UnsupportedArgs),
-    /// Step 3 command placeholder.
+    /// Search indexed chunks.
     Search(UnsupportedArgs),
-    /// Step 3 command placeholder.
+    /// Open an Evidence Pointer target.
     Open(UnsupportedArgs),
-    /// Step 3 command placeholder.
+    /// View an Evidence Pointer target.
     View(UnsupportedArgs),
     /// Step 4 command placeholder.
     Restore(UnsupportedArgs),
@@ -89,7 +118,7 @@ enum Command {
     Gc(UnsupportedArgs),
     /// Step 4 command placeholder.
     Purge(UnsupportedArgs),
-    /// Step 3 command placeholder.
+    /// Reindex normalized instances.
     Reindex(UnsupportedArgs),
     /// Phase 4+ command placeholder.
     Move(UnsupportedArgs),
@@ -178,12 +207,19 @@ struct UnsupportedArgs {
 }
 
 fn main() {
+    // Register the sqlite-vec `vec0` module before any connection opens, so
+    // `chunk_vec` is available process-wide (04 §4.3, K4).
+    kcs_index::vec::ensure_registered();
     let cli = Cli::parse();
     let json = cli.json || command_captured_json_flag(&cli.command);
     let exit_code = match run(cli) {
-        Ok(output) => {
+        Ok(mut output) => {
+            // A command may request a non-zero success exit code (e.g. multi-scope
+            // search partial failure returns its result JSON on stdout with exit 3,
+            // 05 §1.8). The private `__exit_code` marker is stripped before printing.
+            let code = take_exit_override(&mut output).unwrap_or(ExitCode::Success);
             print_output(output, json);
-            ExitCode::Success
+            code
         }
         Err(error) => {
             let _ = append_error_log(&error);
@@ -192,6 +228,18 @@ fn main() {
         }
     };
     process::exit(exit_code.code());
+}
+
+/// Remove and interpret the private `__exit_code` marker a command may embed in
+/// its success output to request a non-zero process exit while still printing the
+/// payload to stdout (multi-scope search partial failure, 05 §1.8).
+fn take_exit_override(output: &mut Value) -> Option<ExitCode> {
+    let code = output.as_object_mut()?.remove("__exit_code")?.as_u64()?;
+    match code {
+        3 => Some(ExitCode::PartialFailure),
+        4 => Some(ExitCode::PermanentFailure),
+        _ => None,
+    }
 }
 
 fn command_captured_json_flag(command: &Command) -> bool {
@@ -224,6 +272,11 @@ fn run(cli: Cli) -> Result<Value> {
             let path = args.path.unwrap_or_else(|| PathBuf::from("."));
             let existed = path.join(".kcs").exists();
             let repo = Repository::init(&path)?;
+            // Register the scope in the device-local registry so multi-scope search
+            // can enumerate it (05 §1.8). `indexed=false` until `kcs index` runs.
+            // The registry is a cache, never truth (03 §4): a write failure is a
+            // warning, never a hard error.
+            register_scope(&repo, false);
             Ok(json!({
                 "status": if existed { "already initialized" } else { "initialized" },
                 "path": repo.root(),
@@ -315,14 +368,14 @@ fn run(cli: Cli) -> Result<Value> {
         }
         Command::Index(args) => run_index(args),
         Command::Batch(args) => run_batch(args),
-        Command::Repair(_)
-        | Command::Search(_)
-        | Command::Open(_)
-        | Command::View(_)
-        | Command::Restore(_)
+        Command::Repair(args) => run_repair(args),
+        Command::Search(args) => run_search(args),
+        Command::Open(args) => run_open(args),
+        Command::View(args) => run_view(args),
+        Command::Reindex(args) => run_reindex(args),
+        Command::Restore(_)
         | Command::Gc(_)
         | Command::Purge(_)
-        | Command::Reindex(_)
         | Command::Move(_)
         | Command::Evidence(_) => Err(KcsError::not_implemented("command")),
     }
@@ -404,6 +457,13 @@ fn run_index(args: IndexArgs) -> Result<Value> {
             }),
         )?;
     }
+    rebuild_step3_index(&repo)?;
+    // Generate chunk embeddings behind the online opt-in / budget / cost-ledger
+    // guardrails (K4). No-op unless an embedding adapter is configured.
+    generate_scope_embeddings(&repo, &args)?;
+    // The scope now has a search index; register it as indexed so it participates
+    // in default multi-scope search (05 §1.8, K3). Cache write, never fatal.
+    register_scope(&repo, true);
     let output = json!({
         "status": if outcome.noop { "noop" } else { "indexed" },
         "approval_method": if args.approve { "approve" } else if args.yes { "yes" } else { "existing" },
@@ -430,6 +490,2721 @@ fn run_index(args: IndexArgs) -> Result<Value> {
         ));
     }
     Ok(output)
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct StoredChunk {
+    rowid: u64,
+    #[serde(flatten)]
+    row: ChunkRow,
+}
+
+#[derive(Debug, Clone)]
+struct ScopeTarget {
+    repo_root: PathBuf,
+    kcs_dir: PathBuf,
+    scope_id: String,
+}
+
+/// A live chunk plus its scope/snapshot metadata. Used by the Evidence Pointer
+/// resolution path (short-hash lookup). Search itself no longer materializes
+/// these — it reads ranked chunks directly from `sqlite.db` (K2).
+#[derive(Debug, Clone)]
+struct SearchableChunk {
+    row: ChunkRow,
+    scope_id: String,
+    scope_path: PathBuf,
+    snapshot_at: String,
+    path_at_commit: String,
+}
+
+#[derive(Debug, Clone)]
+struct ParsedSearch {
+    query: String,
+    requested_mode: SearchMode,
+    scope: Option<PathBuf>,
+    descendants: bool,
+    all_scopes: bool,
+    limit: u64,
+    offset: Option<u64>,
+    cursor: Option<String>,
+}
+
+fn run_repair(args: UnsupportedArgs) -> Result<Value> {
+    let args = without_json(args.args);
+    if !args.iter().any(|arg| arg == "--rebuild-db") {
+        return Err(KcsError::invalid_usage(
+            "repair currently supports --rebuild-db",
+        ));
+    }
+    let repo = Repository::open_current()?;
+    validate_repo_tool_lock(&repo)?;
+    let db = repo.kcs_dir().join("index/sqlite.db");
+    // `rebuild_sqlite_index` drops and rebuilds chunks/FTS/tree_entries in place
+    // while preserving the `embeddings` rows and re-deriving `chunk_vec` from them
+    // (04 §4.3). It is not pre-deleted here so vector search survives the rebuild.
+    let report = rebuild_step3_index(&repo)?;
+    Ok(json!({
+        "status": "rebuilt",
+        "rebuilt_chunks": report.rebuilt_chunks,
+        "rebuilt_tree_entries": report.rebuilt_tree_entries,
+        "sqlite_db": db,
+    }))
+}
+
+/// Resolved search mode plus the honest fallback reporting fields (05 §1.1/§1.7).
+struct ResolvedMode {
+    requested: SearchMode,
+    resolved: SearchMode,
+    fallback: bool,
+    fallback_reason: Option<String>,
+    error_code: Option<String>,
+}
+
+/// Vector backend availability across the searched scopes (the K4 embedding
+/// seam, now live). Resolved from the actual per-scope embedding state and query
+/// embedding availability (03 §7 / 05 §1.1).
+enum VectorAvailability {
+    /// Every searched scope has a compatible embedding index and a query
+    /// embedding is obtainable → hybrid is offered.
+    Available,
+    /// No usable vector backend → text. `reason` names the actual cause
+    /// (05 §1.7 fallback_reason): `embedding_endpoint_not_configured` (no
+    /// adapter env/config at all), `embedding_index_missing` (endpoint
+    /// configured but no searched scope carries chunk embeddings), or
+    /// `query_embedding_unavailable` (endpoint + index fine, but the query
+    /// embedding could not be computed — short query or adapter failure).
+    Unavailable { reason: &'static str },
+    /// Embedding present but the profile is incompatible, or scopes disagree on
+    /// embedding profile (03 §7 / 05 §1.8(5)) → text fallback + fallback_reason.
+    Incompatible,
+}
+
+/// One scope's chunk-embedding disposition (03 §7 compat).
+enum ScopeEmbedState {
+    Compatible,
+    Incompatible,
+    Absent,
+}
+
+/// Inspect a scope's `sqlite.db` for compatible chunk embeddings (03 §7). A read
+/// failure or missing DB is treated as `Absent` (never a vector-search error —
+/// text is always available). The extension is registered in `main`.
+fn scope_embedding_state(kcs_dir: &Path) -> ScopeEmbedState {
+    let db = sqlite_path(kcs_dir);
+    if !db.exists() {
+        return ScopeEmbedState::Absent;
+    }
+    let Ok(conn) = Connection::open(&db) else {
+        return ScopeEmbedState::Absent;
+    };
+    let Ok(profiles) = embedding_store::chunk_embedding_profiles(&conn) else {
+        return ScopeEmbedState::Absent;
+    };
+    if profiles.is_empty() {
+        return ScopeEmbedState::Absent;
+    }
+    if profiles
+        .iter()
+        .all(|profile| profile.matches_adopted().unwrap_or(false))
+    {
+        ScopeEmbedState::Compatible
+    } else {
+        ScopeEmbedState::Incompatible
+    }
+}
+
+/// K4: aggregate embedding availability across the searched scopes. Vector search
+/// is offered only when the endpoint is configured, every searched scope has a
+/// compatible embedding index (03 §7), AND a query embedding is obtainable. Any
+/// incompatible scope, or a mix of embedded and un-embedded scopes (cross-scope
+/// inconsistency, 05 §1.8(5)), downgrades to a text fallback. The `Unavailable`
+/// reason names the first structural cause in precedence order: endpoint →
+/// scope index → query embedding.
+fn resolve_vector_availability(
+    exec_scopes: &[ExecScope],
+    endpoint_configured: bool,
+    query_embedding_present: bool,
+) -> VectorAvailability {
+    if !endpoint_configured {
+        return VectorAvailability::Unavailable {
+            reason: "embedding_endpoint_not_configured",
+        };
+    }
+    let mut any_compatible = false;
+    let mut any_incompatible = false;
+    let mut any_absent = false;
+    for exec in exec_scopes {
+        match scope_embedding_state(&exec.target.kcs_dir) {
+            ScopeEmbedState::Compatible => any_compatible = true,
+            ScopeEmbedState::Incompatible => any_incompatible = true,
+            ScopeEmbedState::Absent => any_absent = true,
+        }
+    }
+    if any_incompatible || (any_compatible && any_absent) {
+        VectorAvailability::Incompatible
+    } else if !any_compatible {
+        VectorAvailability::Unavailable {
+            reason: "embedding_index_missing",
+        }
+    } else if !query_embedding_present {
+        VectorAvailability::Unavailable {
+            reason: "query_embedding_unavailable",
+        }
+    } else {
+        VectorAvailability::Available
+    }
+}
+
+fn resolve_search_mode(requested: SearchMode, vector: &VectorAvailability) -> Result<ResolvedMode> {
+    let vector_ok = matches!(vector, VectorAvailability::Available);
+    let (reason, error_code) = match vector {
+        VectorAvailability::Available => (None, None),
+        VectorAvailability::Unavailable { reason } => (
+            Some((*reason).to_owned()),
+            Some("KCS-E-SEARCH-VEC-UNAVAIL-001".to_owned()),
+        ),
+        VectorAvailability::Incompatible => (
+            Some("embedding_profile_incompatible".to_owned()),
+            Some("KCS-E-SEARCH-VEC-INCOMPAT-001".to_owned()),
+        ),
+    };
+    match requested {
+        SearchMode::Text => Ok(ResolvedMode {
+            requested,
+            resolved: SearchMode::Text,
+            fallback: false,
+            fallback_reason: None,
+            error_code: None,
+        }),
+        SearchMode::Vector => {
+            if vector_ok {
+                Ok(ResolvedMode {
+                    requested,
+                    resolved: SearchMode::Vector,
+                    fallback: false,
+                    fallback_reason: None,
+                    error_code: None,
+                })
+            } else {
+                // --vector with no usable vector backend is a hard error (05 §1.2);
+                // the code distinguishes "unavailable" from "incompatible" (03 §7).
+                Err(KcsError::new(
+                    error_code
+                        .as_deref()
+                        .unwrap_or("KCS-E-SEARCH-VEC-UNAVAIL-001"),
+                    "vector search requested but no compatible embedding index is available",
+                    json!({ "fallback_reason": reason }),
+                    ExitCode::Failure,
+                ))
+            }
+        }
+        SearchMode::Auto | SearchMode::Hybrid => {
+            if vector_ok {
+                Ok(ResolvedMode {
+                    requested,
+                    resolved: SearchMode::Hybrid,
+                    fallback: false,
+                    fallback_reason: None,
+                    error_code: None,
+                })
+            } else {
+                // auto / --hybrid fall back to text (fail_behavior default = fallback).
+                Ok(ResolvedMode {
+                    requested,
+                    resolved: SearchMode::Text,
+                    fallback: true,
+                    fallback_reason: reason,
+                    error_code,
+                })
+            }
+        }
+    }
+}
+
+/// One scope's live search state for a single page of a query.
+struct ExecScope {
+    target: ScopeTarget,
+    /// Commit whose tree fixes the live chunk set (05 §1.5). HEAD on page 1,
+    /// the frozen sub-cursor commit on later pages.
+    snapshot_commit: Option<String>,
+    /// `rowid <= max_rowid` freezes the chunk set across pages (CT3-CURSOR-002).
+    max_rowid: Option<u64>,
+    from_cursor: bool,
+}
+
+/// A candidate that survived per-scope RRF, carried into the cross-scope merge.
+struct ScoredCandidate {
+    scope_index: usize,
+    scope_id: String,
+    scope_path: PathBuf,
+    snapshot_commit: String,
+    chunk_hash: String,
+    rrf_score: f64,
+    meta: ChunkMeta,
+    /// The chunk's embedding (hybrid/vector mode only), fed into MMR (05 §1.4).
+    /// `None` in text mode, which makes MMR skip and only the raw_hash dedup run.
+    embedding: Option<Vec<f32>>,
+}
+
+#[derive(Clone)]
+struct ChunkMeta {
+    raw_hash: String,
+    tool_profile_hash: String,
+    heading_path: Option<Vec<String>>,
+    section_id: Option<String>,
+    char_start: Option<u64>,
+    char_end: Option<u64>,
+    text: String,
+    path_at_commit: String,
+}
+
+struct SearchedScopeInfo {
+    scope_id: String,
+    scope_path: PathBuf,
+    snapshot_at: String,
+    max_rowid: u64,
+}
+
+fn run_search(args: UnsupportedArgs) -> Result<Value> {
+    let started = Instant::now();
+    let parsed = parse_search_args(without_json(args.args))?;
+    let repo = Repository::open_current()?;
+    validate_repo_tool_lock(&repo)?;
+
+    // Page 1 enumerates scopes (registry-based, K3); later pages replay the frozen
+    // scope set stored in the cursor (05 §1.8 — the cursor scope set is truth).
+    // The scope set must be known before mode resolution (K4), because vector
+    // availability depends on the actual per-scope embedding indexes (03 §7).
+    let decoded_cursor = match &parsed.cursor {
+        Some(token) => Some(decode_cursor_token(token).map_err(search_to_kcs)?),
+        None => None,
+    };
+    let (scope_mode, exec_scopes, cursor_excluded) = match &decoded_cursor {
+        Some(cursor) => {
+            let (exec, excluded) = resolve_cursor_exec_scopes(cursor);
+            (
+                scope_selection_from_cursor(cursor.scope_mode),
+                exec,
+                excluded,
+            )
+        }
+        None => {
+            let (scope_mode, targets) = enumerate_scope_targets(&repo, &parsed)?;
+            let exec = targets
+                .into_iter()
+                .map(|target| ExecScope {
+                    target,
+                    snapshot_commit: None,
+                    max_rowid: None,
+                    from_cursor: false,
+                })
+                .collect::<Vec<_>>();
+            (scope_mode, exec, Vec::new())
+        }
+    };
+
+    // Mode resolution (05 §1.1): compute the query embedding once, then aggregate
+    // vector availability over the searched scopes. `--vector` errors early here if
+    // no compatible embedding index is available (with the right INCOMPAT/UNAVAIL
+    // code). A short query yields no query embedding → vector unavailable.
+    let query_embedding = compute_query_embedding(&parsed.query)?;
+    let vector = resolve_vector_availability(
+        &exec_scopes,
+        embedding_seam().is_some(),
+        query_embedding.is_some(),
+    );
+    let mode = resolve_search_mode(parsed.requested_mode, &vector)?;
+
+    if parsed.query.chars().count() < 2 {
+        return empty_search_response(&parsed, &repo, started, &mode, &[], &[]);
+    }
+
+    if exec_scopes.is_empty() {
+        // Cursor replay where no frozen scope resolves any more → all failed
+        // (exit 4) with the unresolvable scopes disclosed. Fresh search with an
+        // empty registry keeps the guidance message.
+        if !cursor_excluded.is_empty() {
+            return Err(scope_all_failed_error(
+                "no scope in the cursor is resolvable any more; re-run the search without a cursor",
+                cursor_excluded,
+            ));
+        }
+        return Err(scope_all_failed_error(
+            "no indexed scopes are registered for search; run `kcs index` in a scope first",
+            Vec::new(),
+        ));
+    }
+
+    // query_hash covers the search's scope set. On a cursor replay that set is
+    // the cursor token's OWN scope_id list (05 §1.8 — the cursor scope set is
+    // truth), not the currently-resolvable subset: a scope that became
+    // unreachable must surface as excluded_scopes/exit 3, never as a misleading
+    // KCS-E-SEARCH-CURSOR-001 mismatch.
+    let mut scope_ids = match &decoded_cursor {
+        Some(cursor) => cursor
+            .scopes
+            .iter()
+            .map(|sub| sub.scope_id.clone())
+            .collect::<Vec<_>>(),
+        None => exec_scopes
+            .iter()
+            .map(|exec| exec.target.scope_id.clone())
+            .collect::<Vec<_>>(),
+    };
+    scope_ids.sort();
+    let qhash = query_hash(&QueryHashInput {
+        query: parsed.query.clone(),
+        mode: mode.resolved,
+        scope_mode,
+        scopes: scope_ids,
+        diversify: default_diversify_request(),
+        rrf_k: 60,
+        rrf_candidate_depth: 200,
+        rrf_w_text: 1.0,
+        rrf_w_vector: 1.0,
+        at: None,
+        all_history: false,
+        include_deleted: false,
+        since: None,
+    })
+    .map_err(search_to_kcs)?;
+
+    if let Some(cursor) = &decoded_cursor {
+        if cursor.query_hash != qhash {
+            return Err(KcsError::new(
+                "KCS-E-SEARCH-CURSOR-001",
+                "search cursor query_hash mismatch",
+                json!({ "expected": qhash, "actual": cursor.query_hash }),
+                ExitCode::InvalidUsage,
+            ));
+        }
+    }
+
+    // Per-scope: FTS5 text ranks + chunk_vec KNN vector ranks -> RRF -> candidate
+    // pool. Vector ranks are supplied only in hybrid/vector mode (K4).
+    let tiers = build_fts_tiers(&parsed.query);
+    // Only feed vectors into the KNN when the resolved mode actually uses them;
+    // a text fallback (incompatible/absent) must stay pure text.
+    let scope_query_embedding = matches!(mode.resolved, SearchMode::Hybrid | SearchMode::Vector)
+        .then_some(query_embedding.as_deref())
+        .flatten();
+    let mut searched = Vec::<SearchedScopeInfo>::new();
+    // Scopes the cursor froze but the registry can no longer resolve are already
+    // excluded (reason "unreachable") before per-scope execution starts.
+    let mut excluded = cursor_excluded;
+    let mut candidates = Vec::<ScoredCandidate>::new();
+
+    for (idx, exec) in exec_scopes.iter().enumerate() {
+        match search_one_scope(exec, idx, &tiers, mode.resolved, scope_query_embedding) {
+            Ok(outcome) => {
+                searched.push(SearchedScopeInfo {
+                    scope_id: exec.target.scope_id.clone(),
+                    scope_path: exec.target.repo_root.clone(),
+                    snapshot_at: outcome.snapshot_commit.clone(),
+                    max_rowid: outcome.max_rowid,
+                });
+                candidates.extend(outcome.candidates);
+            }
+            Err(ScopeSearchError::Shallow) => {
+                // Any shallow snapshot on a cursor replay is a hard failure
+                // (05 §2.2 / CT3-CURSOR-005): the tree needed to reproduce the
+                // page is gone. Only reachable on the cursor path.
+                return Err(KcsError::new(
+                    "KCS-E-COMMIT-SHALLOW-001",
+                    "cursor snapshot commit is shallow (tree discarded); re-run the search without a cursor",
+                    json!({ "scope_id": exec.target.scope_id }),
+                    ExitCode::Failure,
+                ));
+            }
+            Err(ScopeSearchError::Excluded(reason)) => excluded.push(json!({
+                "scope_id": exec.target.scope_id,
+                "scope_path": exec.target.repo_root,
+                "reason": reason,
+            })),
+            Err(ScopeSearchError::Fatal(error)) => return Err(error),
+        }
+    }
+
+    if searched.is_empty() {
+        // Every enumerated scope was excluded. When every exclusion reason is
+        // "the scope's sqlite.db is unusable" (missing/corrupt), BOTH backends
+        // are structurally gone — text and vector live in the same index file —
+        // which is CT3-HYBRID-003's "両方不可": KCS-E-SEARCH-VEC-UNAVAIL-001,
+        // exit 1 (05 §1.1). Any other reason (unreachable / not_indexed / stale /
+        // timeout) keeps the multi-scope all-failed contract:
+        // KCS-E-SEARCH-SCOPE-ALL-FAILED-001, exit 4 (05 §1.8 / CT3-MULTI-005(b)).
+        let index_unusable = !excluded.is_empty()
+            && excluded.iter().all(|entry| {
+                matches!(
+                    entry.get("reason").and_then(Value::as_str),
+                    Some("index_missing") | Some("index_corrupt")
+                )
+            });
+        if index_unusable {
+            return Err(KcsError::new(
+                "KCS-E-SEARCH-VEC-UNAVAIL-001",
+                "text and vector search are both unavailable: the search index (sqlite.db) is missing or corrupt in every scope; run `kcs repair --rebuild-db`",
+                json!({ "excluded_scopes": excluded }),
+                ExitCode::Failure,
+            ));
+        }
+        return Err(scope_all_failed_error(
+            "all searched scopes failed",
+            excluded,
+        ));
+    }
+
+    // Cross-scope merge is rank-based: RRF score desc, tie-break (scope_path,
+    // chunk_hash) — never compare raw BM25 across corpora (05 §1.8 / CT3-MULTI-002).
+    candidates.sort_by(|a, b| {
+        b.rrf_score
+            .total_cmp(&a.rrf_score)
+            .then_with(|| a.scope_path.cmp(&b.scope_path))
+            .then_with(|| a.chunk_hash.cmp(&b.chunk_hash))
+    });
+
+    // Diversify the merged pool once (05 §1.8 step 4). Text-only -> MMR is skipped;
+    // only the raw_hash dedup runs (spanning scopes and pages, CT3-MULTI-003).
+    let (ordered, diversify_summary) = diversify_merged(&candidates, mode.resolved)?;
+
+    // Global skip: cursor consumed (summed across scopes) or --offset (05 §1.5).
+    // Only resolvable scopes count: a dropped (unreachable) scope's candidates are
+    // no longer in the stream, so counting its consumed would silently swallow
+    // results from the surviving scopes.
+    let total_skip = match &decoded_cursor {
+        Some(cursor) => {
+            let resolved = exec_scopes
+                .iter()
+                .map(|exec| exec.target.scope_id.as_str())
+                .collect::<BTreeSet<_>>();
+            cursor
+                .scopes
+                .iter()
+                .filter(|sub| resolved.contains(sub.scope_id.as_str()))
+                .map(|scope| scope.consumed)
+                .sum::<u64>() as usize
+        }
+        None => parsed.offset.unwrap_or(0) as usize,
+    };
+    let limit = parsed.limit as usize;
+    let slice_start = total_skip.min(ordered.len());
+    let slice_end = slice_start.saturating_add(limit).min(ordered.len());
+    let page = &ordered[slice_start..slice_end];
+
+    // Per-scope consumed = candidates from that scope within the first `slice_end`
+    // positions of the deterministic stream (uniform for cursor and --offset,
+    // CT3-CURSOR-006). Preserves the frozen scope set even at 0 consumed.
+    let next_cursor = if slice_end < ordered.len() {
+        let mut consumed = vec![0u64; exec_scopes.len()];
+        for candidate in &ordered[..slice_end] {
+            consumed[candidate.scope_index] += 1;
+        }
+        let sub_cursors = exec_scopes
+            .iter()
+            .enumerate()
+            .map(|(idx, exec)| {
+                let searched_scope = searched
+                    .iter()
+                    .find(|scope| scope.scope_id == exec.target.scope_id);
+                ScopeCursor {
+                    scope_id: exec.target.scope_id.clone(),
+                    snapshot_commit: searched_scope
+                        .map(|scope| scope.snapshot_at.clone())
+                        .or_else(|| exec.snapshot_commit.clone())
+                        .unwrap_or_default(),
+                    max_rowid: searched_scope
+                        .map(|scope| scope.max_rowid)
+                        .or(exec.max_rowid)
+                        .unwrap_or_default(),
+                    consumed: consumed[idx],
+                }
+            })
+            .collect::<Vec<_>>();
+        Some(
+            encode_cursor_token(&CursorToken {
+                version: 1,
+                scope_mode: cursor_mode_from_selection(scope_mode),
+                query_hash: qhash,
+                scopes: sub_cursors,
+            })
+            .map_err(search_to_kcs)?,
+        )
+    } else {
+        None
+    };
+
+    let mut results = Vec::new();
+    for candidate in page {
+        let pointer = issue_evidence_pointer(EvidencePointerIssueRequest {
+            scope_id: candidate.scope_id.clone(),
+            scope_path: Some(candidate.scope_path.display().to_string()),
+            commit: candidate.snapshot_commit.clone(),
+            tree: None,
+            raw_hash: candidate.meta.raw_hash.clone(),
+            tool_profile_hash: candidate.meta.tool_profile_hash.clone(),
+            chunk_hash: candidate.chunk_hash.clone(),
+            path_at_commit: Some(candidate.meta.path_at_commit.clone()),
+            heading_path: candidate.meta.heading_path.clone(),
+            section_id: candidate.meta.section_id.clone(),
+            char_start: candidate.meta.char_start,
+            char_end: candidate.meta.char_end,
+        })
+        .map_err(search_to_kcs)?;
+        let uri = evidence_pointer_to_uri(&pointer).map_err(search_to_kcs)?;
+        results.push(json!({
+            "chunk_hash": candidate.chunk_hash,
+            "evidence_pointer": pointer,
+            "evidence_uri": uri,
+            "score": candidate.rrf_score,
+            "scope_path": candidate.scope_path,
+            "title": candidate.meta.path_at_commit,
+            "snippet": candidate.meta.text.chars().take(200).collect::<String>(),
+        }));
+    }
+
+    let searched_scopes = searched
+        .iter()
+        .map(|scope| {
+            json!({
+                "scope_id": scope.scope_id,
+                "scope_path": scope.scope_path,
+                "snapshot_at": scope.snapshot_at,
+            })
+        })
+        .collect::<Vec<_>>();
+    let index_status = compute_index_status(&searched);
+    let partial_failure = !excluded.is_empty();
+
+    let mut response = json!({
+        "query": parsed.query,
+        "requested_mode": search_mode_json(mode.requested),
+        "resolved_mode": search_mode_json(mode.resolved),
+        "fallback": mode.fallback,
+        "fallback_reason": mode.fallback_reason.clone().map(Value::from).unwrap_or(Value::Null),
+        "error_code": mode.error_code.clone().map(Value::from).unwrap_or(Value::Null),
+        "diversify": diversify_summary,
+        "paging": { "limit": parsed.limit, "next_cursor": next_cursor },
+        "searched_scopes": searched_scopes,
+        "excluded_scopes": excluded,
+        "index_status": index_status,
+        "results": results,
+    });
+    append_search_logs(&repo, &response, started)?;
+    if partial_failure {
+        // Some scopes were excluded but others succeeded: emit results on stdout
+        // and exit 3 (05 §1.8 partial-failure row, CT3-MULTI-005).
+        if let Some(object) = response.as_object_mut() {
+            object.insert("__exit_code".to_owned(), json!(3));
+        }
+    }
+    Ok(response)
+}
+
+/// Per-scope search failure disposition.
+enum ScopeSearchError {
+    /// Cursor snapshot's tree is gone (shallow) — hard fail the whole search.
+    Shallow,
+    /// Recorded in `excluded_scopes`; the overall search may still succeed.
+    Excluded(String),
+    /// An unexpected error that must abort the command.
+    Fatal(KcsError),
+}
+
+struct ScopeOutcome {
+    snapshot_commit: String,
+    max_rowid: u64,
+    candidates: Vec<ScoredCandidate>,
+}
+
+fn search_one_scope(
+    exec: &ExecScope,
+    scope_index: usize,
+    tiers: &[String],
+    resolved_mode: SearchMode,
+    query_embedding: Option<&[f32]>,
+) -> std::result::Result<ScopeOutcome, ScopeSearchError> {
+    let repo = Repository::open(&exec.target.repo_root)
+        .map_err(|_| ScopeSearchError::Excluded("unreachable".to_owned()))?;
+
+    // Resolve the search snapshot: frozen commit on a cursor replay, else HEAD.
+    let snapshot_commit = match &exec.snapshot_commit {
+        Some(commit) => commit.clone(),
+        None => repo
+            .head_commit_hash()
+            .map_err(|_| ScopeSearchError::Excluded("unreachable".to_owned()))?
+            .ok_or_else(|| ScopeSearchError::Excluded("not_indexed".to_owned()))?,
+    };
+
+    let db_path = sqlite_path(&exec.target.kcs_dir);
+    if !db_path.exists() {
+        return Err(ScopeSearchError::Excluded("index_missing".to_owned()));
+    }
+    let conn = Connection::open(&db_path)
+        .map_err(|_| ScopeSearchError::Excluded("index_corrupt".to_owned()))?;
+
+    // On a cursor replay, the snapshot's tree must still exist to reproduce the
+    // page. A shallow (tree-discarded) snapshot fails hard (05 §2.2).
+    if exec.from_cursor {
+        match ensure_snapshot_tree_entries(&repo, &conn, &snapshot_commit) {
+            Ok(true) => {}
+            Ok(false) => return Err(ScopeSearchError::Shallow),
+            Err(error) => return Err(ScopeSearchError::Fatal(error)),
+        }
+    } else {
+        // HEAD tree_entries are written by `kcs index`; project defensively in
+        // case the caller points at a non-HEAD snapshot in future.
+        if let Err(error) = ensure_snapshot_tree_entries(&repo, &conn, &snapshot_commit) {
+            return Err(ScopeSearchError::Fatal(error));
+        }
+    }
+
+    let max_rowid = match exec.max_rowid {
+        Some(value) => value,
+        None => current_max_rowid(&conn).map_err(ScopeSearchError::Fatal)?,
+    };
+
+    let chunking_config_hash = read_chunking_config(&repo)
+        .map(|config| config.chunking_config_hash)
+        .map_err(ScopeSearchError::Fatal)?;
+
+    let want_vector = matches!(resolved_mode, SearchMode::Hybrid | SearchMode::Vector);
+
+    // FTS5 text ranks (empty when the query has no indexable token). Vector-only
+    // mode skips the text backend entirely (05 §1.3: no fusion, use vector order).
+    let (text_ranks, mut meta) = if resolved_mode == SearchMode::Vector {
+        (Vec::new(), BTreeMap::new())
+    } else {
+        fts_scope_search(
+            &conn,
+            &snapshot_commit,
+            tiers,
+            &chunking_config_hash,
+            max_rowid,
+        )
+        .map_err(ScopeSearchError::Fatal)?
+    };
+
+    // chunk_vec KNN vector ranks (hybrid/vector mode with a query embedding).
+    let vector_ranks = if want_vector {
+        if let Some(query_vec) = query_embedding {
+            let (ranks, vmeta) = vector_scope_search(
+                &conn,
+                &snapshot_commit,
+                query_vec,
+                &chunking_config_hash,
+                max_rowid,
+            )
+            .map_err(ScopeSearchError::Fatal)?;
+            for (chunk_id, chunk_meta) in vmeta {
+                meta.entry(chunk_id).or_insert(chunk_meta);
+            }
+            ranks
+        } else {
+            Vec::new()
+        }
+    } else {
+        Vec::new()
+    };
+
+    let fused = fuse_rrf(
+        &text_ranks,
+        &vector_ranks,
+        RrfConfig {
+            k: 60,
+            w_text: 1.0,
+            w_vector: 1.0,
+            candidate_depth: 200,
+        },
+    )
+    .map_err(search_to_kcs)
+    .map_err(ScopeSearchError::Fatal)?;
+
+    let mut candidates = Vec::new();
+    for candidate in fused {
+        let Some(chunk_meta) = meta.get(&candidate.chunk_hash) else {
+            continue;
+        };
+        // In hybrid/vector mode, carry the chunk's embedding so MMR can run
+        // (05 §1.4). Text mode leaves this `None` (MMR skips, dedup only).
+        let embedding = if want_vector {
+            embedding_store::read_chunk_vector(&conn, &candidate.chunk_hash)
+                .ok()
+                .flatten()
+        } else {
+            None
+        };
+        candidates.push(ScoredCandidate {
+            scope_index,
+            scope_id: exec.target.scope_id.clone(),
+            scope_path: exec.target.repo_root.clone(),
+            snapshot_commit: snapshot_commit.clone(),
+            chunk_hash: candidate.chunk_hash,
+            rrf_score: candidate.rrf_score,
+            meta: chunk_meta.clone(),
+            embedding,
+        });
+    }
+
+    Ok(ScopeOutcome {
+        snapshot_commit,
+        max_rowid,
+        candidates,
+    })
+}
+
+/// Per-scope vector backend: the query embedding's KNN over `chunk_vec`, filtered
+/// to the same live chunk set as the text backend (current `chunking_config_hash`,
+/// HEAD `tree_entries`, and `rowid <= max_rowid`). Because sqlite-vec applies the
+/// KNN `LIMIT` before the liveness join, we over-fetch every `chunk_vec` row and
+/// filter in Rust (correct at MVP scale; a future optimization is sqlite-vec
+/// metadata partitioning). Ranks are 1-based over the surviving candidates ordered
+/// by (cosine distance, chunk_id) and truncated to `candidate_depth` (05 §1.3).
+fn vector_scope_search(
+    conn: &Connection,
+    snapshot_commit: &str,
+    query_embedding: &[f32],
+    chunking_config_hash: &str,
+    max_rowid: u64,
+) -> Result<(Vec<BackendRank>, BTreeMap<String, ChunkMeta>)> {
+    let total = embedding_store::chunk_vec_count(conn).map_err(index_to_kcs)?;
+    if total == 0 || query_embedding.len() != CHUNK_VEC_DIMENSIONS {
+        return Ok((Vec::new(), BTreeMap::new()));
+    }
+    let query_bytes = f32_to_le_bytes(query_embedding);
+    let knn =
+        embedding_store::knn_chunk_distances(conn, &query_bytes, total).map_err(index_to_kcs)?;
+    let chunk_ids = knn.iter().map(|(id, _)| id.clone()).collect::<Vec<_>>();
+    let meta = fetch_live_meta(
+        conn,
+        snapshot_commit,
+        &chunk_ids,
+        chunking_config_hash,
+        max_rowid,
+    )?;
+    let mut kept = knn
+        .into_iter()
+        .filter(|(id, _)| meta.contains_key(id))
+        .collect::<Vec<_>>();
+    kept.sort_by(|a, b| a.1.total_cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
+    kept.truncate(200);
+    let ranks = kept
+        .iter()
+        .enumerate()
+        .map(|(index, (chunk_id, _))| BackendRank {
+            chunk_hash: chunk_id.clone(),
+            rank: index as u64 + 1,
+        })
+        .collect();
+    Ok((ranks, meta))
+}
+
+/// Fetch [`ChunkMeta`] for `chunk_ids` restricted to the live chunk set of
+/// `snapshot_commit` (same predicates as [`execute_fts_tier`]). Chunk ids not in
+/// the live set are simply absent from the result.
+fn fetch_live_meta(
+    conn: &Connection,
+    snapshot_commit: &str,
+    chunk_ids: &[String],
+    chunking_config_hash: &str,
+    max_rowid: u64,
+) -> Result<BTreeMap<String, ChunkMeta>> {
+    if chunk_ids.is_empty() {
+        return Ok(BTreeMap::new());
+    }
+    let placeholders = chunk_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+    let sql = format!(
+        "SELECT c.chunk_id, c.raw_hash, c.tool_profile_hash, c.heading_path,
+                c.section_id, c.char_start, c.char_end, c.text, te.path
+         FROM chunks c
+         JOIN tree_entries te ON te.commit_hash = ?1
+             AND te.raw_hash = c.raw_hash
+             AND te.tool_profile_hash = c.tool_profile_hash
+             AND te.gen = c.gen
+         WHERE c.chunking_config_hash = ?2 AND c.rowid <= ?3
+             AND c.chunk_id IN ({placeholders})"
+    );
+    let mut params: Vec<Box<dyn rusqlite::ToSql>> = vec![
+        Box::new(snapshot_commit.to_owned()),
+        Box::new(chunking_config_hash.to_owned()),
+        Box::new(max_rowid as i64),
+    ];
+    for chunk_id in chunk_ids {
+        params.push(Box::new(chunk_id.clone()));
+    }
+    let param_refs = params
+        .iter()
+        .map(std::convert::AsRef::as_ref)
+        .collect::<Vec<&dyn rusqlite::ToSql>>();
+    let mut stmt = conn
+        .prepare(&sql)
+        .map_err(|err| KcsError::schema(err.to_string()))?;
+    let rows = stmt
+        .query_map(param_refs.as_slice(), chunk_meta_row)
+        .map_err(|err| KcsError::schema(err.to_string()))?;
+    let mut meta = BTreeMap::new();
+    for row in rows {
+        let (chunk_id, chunk_meta) = row.map_err(|err| KcsError::schema(err.to_string()))?;
+        meta.insert(chunk_id, chunk_meta);
+    }
+    Ok(meta)
+}
+
+/// Parse the shared 9-column chunk-meta projection into `(chunk_id, ChunkMeta)`.
+fn chunk_meta_row(row: &rusqlite::Row) -> rusqlite::Result<(String, ChunkMeta)> {
+    let chunk_id = row.get::<_, String>(0)?;
+    let heading_path_raw = row.get::<_, Option<String>>(3)?;
+    Ok((
+        chunk_id,
+        ChunkMeta {
+            raw_hash: row.get(1)?,
+            tool_profile_hash: row.get(2)?,
+            heading_path: heading_path_raw
+                .and_then(|value| serde_json::from_str::<Vec<String>>(&value).ok()),
+            section_id: row
+                .get::<_, Option<String>>(4)?
+                .filter(|value| !value.is_empty()),
+            char_start: row.get::<_, Option<i64>>(5)?.map(|value| value as u64),
+            char_end: row.get::<_, Option<i64>>(6)?.map(|value| value as u64),
+            text: row.get(7)?,
+            path_at_commit: row.get(8)?,
+        },
+    ))
+}
+
+/// Per-scope text backend: execute the tiered MATCH queries (see
+/// [`build_fts_tiers`]) in order; the first tier returning any candidate is the
+/// scope's text backend. The candidate list handed to RRF comes from exactly one
+/// executed query, ranked purely by that query's BM25 (05 §1.3 / K2 ruling — no
+/// post-hoc re-ordering by hand-computed features).
+fn fts_scope_search(
+    conn: &Connection,
+    snapshot_commit: &str,
+    tiers: &[String],
+    chunking_config_hash: &str,
+    max_rowid: u64,
+) -> Result<(Vec<BackendRank>, BTreeMap<String, ChunkMeta>)> {
+    for match_expr in tiers {
+        let (ranks, meta) = execute_fts_tier(
+            conn,
+            snapshot_commit,
+            match_expr,
+            chunking_config_hash,
+            max_rowid,
+        )?;
+        if !ranks.is_empty() {
+            return Ok((ranks, meta));
+        }
+    }
+    Ok((Vec::new(), BTreeMap::new()))
+}
+
+/// One FTS5 MATCH restricted to the live chunk set of `snapshot_commit`: the
+/// current `chunking_config_hash` (04 §4.6, K8b) joined to `tree_entries`
+/// (05 §1.6) and frozen by `rowid <= max_rowid` (CT3-CURSOR-002). Rank order is
+/// BM25 with column weighting `bm25(chunk_fts, 1.0, 0.3)` — `heading_path` is
+/// down-weighted so a parent heading that propagates to every child chunk does
+/// not dominate the chunk body (legitimate BM25 configuration per the K2 ruling).
+/// Ties break on chunk_id.
+fn execute_fts_tier(
+    conn: &Connection,
+    snapshot_commit: &str,
+    match_expr: &str,
+    chunking_config_hash: &str,
+    max_rowid: u64,
+) -> Result<(Vec<BackendRank>, BTreeMap<String, ChunkMeta>)> {
+    let sql = "SELECT c.chunk_id, c.raw_hash, c.tool_profile_hash, c.heading_path,
+                      c.section_id, c.char_start, c.char_end, c.text, te.path,
+                      bm25(chunk_fts, 1.0, 0.3) AS score
+               FROM chunk_fts f
+               JOIN chunks c ON c.rowid = f.rowid
+               JOIN tree_entries te ON te.commit_hash = ?1
+                   AND te.raw_hash = c.raw_hash
+                   AND te.tool_profile_hash = c.tool_profile_hash
+                   AND te.gen = c.gen
+               WHERE chunk_fts MATCH ?2
+                   AND c.chunking_config_hash = ?3
+                   AND c.rowid <= ?4
+               ORDER BY score, c.chunk_id
+               LIMIT 200";
+    let mut stmt = conn
+        .prepare(sql)
+        .map_err(|err| KcsError::schema(err.to_string()))?;
+    let rows = stmt
+        .query_map(
+            rusqlite::params![
+                snapshot_commit,
+                match_expr,
+                chunking_config_hash,
+                max_rowid as i64
+            ],
+            chunk_meta_row,
+        )
+        .map_err(|err| KcsError::schema(err.to_string()))?;
+
+    let mut ranks = Vec::new();
+    let mut meta = BTreeMap::new();
+    for (index, row) in rows.enumerate() {
+        let (chunk_id, chunk_meta) = row.map_err(|err| KcsError::schema(err.to_string()))?;
+        ranks.push(BackendRank {
+            chunk_hash: chunk_id.clone(),
+            rank: index as u64 + 1,
+        });
+        meta.insert(chunk_id, chunk_meta);
+    }
+    Ok((ranks, meta))
+}
+
+fn current_max_rowid(conn: &Connection) -> Result<u64> {
+    let value: i64 = conn
+        .query_row("SELECT COALESCE(MAX(rowid), 0) FROM chunks", [], |row| {
+            row.get(0)
+        })
+        .map_err(|err| KcsError::schema(err.to_string()))?;
+    Ok(value as u64)
+}
+
+/// Ensure `tree_entries` rows for `commit_hash` exist in `conn`, projecting them
+/// from the commit's tree object when absent (04 §4.5). Returns `Ok(false)` when
+/// the commit is shallow (its tree object is gone).
+fn ensure_snapshot_tree_entries(
+    repo: &Repository,
+    conn: &Connection,
+    commit_hash: &str,
+) -> Result<bool> {
+    let existing: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM tree_entries WHERE commit_hash = ?1",
+            rusqlite::params![commit_hash],
+            |row| row.get(0),
+        )
+        .map_err(|err| KcsError::schema(err.to_string()))?;
+    if existing > 0 {
+        // Cached — but a cursor replay still needs the tree object to prove the
+        // snapshot is not shallow, so verify object presence regardless.
+        let commit = repo.read_commit(commit_hash)?;
+        return tree_object_present(repo, &commit.tree);
+    }
+    let commit = repo.read_commit(commit_hash)?;
+    let tree = match repo.read_tree(&commit.tree) {
+        Ok(tree) => tree,
+        Err(error) if error.error_code() == "KCS-E-STORE-NOT-FOUND-001" => return Ok(false),
+        Err(error) => return Err(error),
+    };
+    for entry in &tree.entries {
+        let normalize = match &entry.normalize {
+            Some(normalize) => normalize.clone(),
+            None => match latest_normalize_ref(repo.kcs_dir(), &entry.raw_hash)? {
+                Some(normalize) => normalize,
+                None => continue,
+            },
+        };
+        conn.execute(
+            "INSERT OR REPLACE INTO tree_entries(commit_hash, path, raw_hash, tool_profile_hash, gen)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            rusqlite::params![
+                commit_hash,
+                entry.path,
+                entry.raw_hash,
+                Some(normalize.tool_profile_hash.clone()),
+                normalize.gen
+            ],
+        )
+        .map_err(|err| KcsError::schema(err.to_string()))?;
+    }
+    Ok(true)
+}
+
+fn tree_object_present(repo: &Repository, tree_hash: &str) -> Result<bool> {
+    match repo.read_tree(tree_hash) {
+        Ok(_) => Ok(true),
+        Err(error) if error.error_code() == "KCS-E-STORE-NOT-FOUND-001" => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
+/// Apply diversify (05 §1.4/§1.8) to the merged candidate pool and report the
+/// strategy actually applied. Text-only (no embeddings) means MMR is skipped and
+/// only the `max_per_raw_hash` dedup runs — reported honestly as
+/// `group_by_raw_hash`, never a phantom "mmr" (K2 fix for the false report).
+fn diversify_merged(
+    candidates: &[ScoredCandidate],
+    resolved_mode: SearchMode,
+) -> Result<(Vec<&ScoredCandidate>, Value)> {
+    let request = default_diversify_request();
+    let mmr_candidates = candidates
+        .iter()
+        .enumerate()
+        .map(|(index, candidate)| MmrCandidate {
+            // Composite id keeps candidates distinct even if two scopes carry the
+            // same chunk_hash; raw_hash stays real so cross-scope dedup counts them
+            // together (CT3-MULTI-003).
+            chunk_hash: format!("{index}\u{0}{}", candidate.chunk_hash),
+            raw_hash: candidate.meta.raw_hash.clone(),
+            relevance: candidate.rrf_score,
+            // Real embedding in hybrid/vector mode (05 §1.4). If any candidate
+            // lacks one, `diversify_candidates` skips MMR and only dedups.
+            embedding: candidate.embedding.clone(),
+            heading_path: candidate.meta.heading_path.clone(),
+            section_id: candidate.meta.section_id.clone(),
+        })
+        .collect::<Vec<_>>();
+
+    let diversified = diversify_candidates(
+        &mmr_candidates,
+        MmrConfig {
+            strategy: request.strategy,
+            mmr_lambda: request.mmr_lambda.unwrap_or(0.7),
+            max_per_raw_hash: request.max_per_raw_hash.unwrap_or(3),
+            mmr_depth: request.mmr_depth.unwrap_or(100),
+        },
+    )
+    .map_err(search_to_kcs)?;
+
+    let ordered = diversified
+        .iter()
+        .filter_map(|item| {
+            item.chunk_hash
+                .split_once('\u{0}')
+                .and_then(|(index, _)| index.parse::<usize>().ok())
+                .and_then(|index| candidates.get(index))
+        })
+        .collect::<Vec<_>>();
+
+    // Report the strategy actually applied (05 §1.7). MMR needs an embedding for
+    // *every* candidate (mmr.rs skips otherwise); text mode carries none, so only
+    // the raw_hash dedup ran — reported honestly, never a phantom "mmr" (K2).
+    let all_have_embeddings = !candidates.is_empty()
+        && candidates
+            .iter()
+            .all(|candidate| candidate.embedding.is_some());
+    let mmr_ran = matches!(resolved_mode, SearchMode::Hybrid | SearchMode::Vector)
+        && request.strategy == DiversifyStrategy::Mmr
+        && all_have_embeddings;
+    let summary = match request.strategy {
+        DiversifyStrategy::Off => json!({ "strategy": "off" }),
+        DiversifyStrategy::Mmr if mmr_ran => {
+            json!({ "strategy": "mmr", "mmr_lambda": request.mmr_lambda.unwrap_or(0.7) })
+        }
+        _ => json!({ "strategy": "group_by_raw_hash" }),
+    };
+    Ok((ordered, summary))
+}
+
+/// Aggregate `index_status` (05 §1.7, CT3-OBS-001) over the searched scopes.
+/// `enriched_ratio` = done AI-enrichment tasks / all AI-enrichment tasks pooled
+/// across scopes (count-weighted average). Enrichment tasks are Markdownize +
+/// Embedding; "done" is `Done`/`Partial`. `budget_paused` is any paused task or
+/// an exhausted monthly budget.
+fn compute_index_status(searched: &[SearchedScopeInfo]) -> Value {
+    let mut total = 0u64;
+    let mut done = 0u64;
+    let mut pending = 0u64;
+    let mut budget_paused = false;
+
+    for scope in searched {
+        let kcs_dir = scope.scope_path.join(".kcs");
+        let store = TaskStore::new(&kcs_dir);
+        let Ok(tasks) = store.all() else {
+            continue;
+        };
+        for task in tasks {
+            if !matches!(task.task_type, TaskType::Markdownize | TaskType::Embedding) {
+                continue;
+            }
+            total += 1;
+            match task.status {
+                TaskStatus::Done | TaskStatus::Partial => done += 1,
+                TaskStatus::Pending | TaskStatus::Running => pending += 1,
+                TaskStatus::Paused => {
+                    pending += 1;
+                    budget_paused = true;
+                }
+                TaskStatus::Failed => {}
+            }
+        }
+        if let Ok(repo) = Repository::open(&scope.scope_path) {
+            if let Ok(budget) = budget_status_json(&repo) {
+                let device = budget
+                    .get("device_remaining_usd")
+                    .and_then(Value::as_f64)
+                    .unwrap_or(f64::INFINITY);
+                let folder = budget
+                    .get("folder_remaining_usd")
+                    .and_then(Value::as_f64)
+                    .unwrap_or(f64::INFINITY);
+                if device <= 0.0 || folder <= 0.0 {
+                    budget_paused = true;
+                }
+            }
+        }
+    }
+
+    let enriched_ratio = if total == 0 {
+        1.0
+    } else {
+        done as f64 / total as f64
+    };
+    json!({
+        "enriched_ratio": enriched_ratio,
+        "pending_enrichment_tasks": pending,
+        "budget_paused": budget_paused,
+    })
+}
+
+fn scope_all_failed_error(message: &str, excluded: Vec<Value>) -> KcsError {
+    KcsError::new(
+        "KCS-E-SEARCH-SCOPE-ALL-FAILED-001",
+        message,
+        json!({ "excluded_scopes": excluded }),
+        ExitCode::PermanentFailure,
+    )
+}
+
+/// Whether `ch` is a CJK character KCS treats as space-less script (Hiragana,
+/// Katakana, CJK Unified Ideographs) — the same ranges as the chunker's slug rule.
+fn is_cjk(ch: char) -> bool {
+    matches!(
+        ch as u32,
+        0x3040..=0x309f | 0x30a0..=0x30ff | 0x4e00..=0x9fff
+    )
+}
+
+/// Split a query into its two kinds of indexable units (deterministic,
+/// first-occurrence order, deduplicated; runs shorter than 3 chars are dropped
+/// below the trigram floor):
+///
+/// * `cjk_trigrams` — character 3-grams of each maximal CJK run (>= 3 chars).
+///   Japanese carries no whitespace, so substring trigrams are the only way the
+///   trigram index can do partial matching.
+/// * `keywords` — maximal ASCII/alphanumeric runs (>= 3 chars, edge `.-_`
+///   trimmed) such as `Recall`, `0.83`, `TTL`, `Kestrel`. These are the
+///   distinctive, high-IDF part of a query.
+fn query_units(query: &str) -> (Vec<String>, Vec<String>) {
+    let mut trigrams = Vec::<String>::new();
+    let mut keywords = Vec::<String>::new();
+    let mut seen_tri = std::collections::BTreeSet::<String>::new();
+    let mut seen_kw = std::collections::BTreeSet::<String>::new();
+    let is_word = |ch: char| !is_cjk(ch) && (ch.is_alphanumeric() || matches!(ch, '.' | '-' | '_'));
+    let chars = query.chars().collect::<Vec<_>>();
+    let mut i = 0;
+    while i < chars.len() {
+        if is_cjk(chars[i]) {
+            let start = i;
+            while i < chars.len() && is_cjk(chars[i]) {
+                i += 1;
+            }
+            let run = &chars[start..i];
+            if run.len() >= 3 {
+                for window in run.windows(3) {
+                    let gram = window.iter().collect::<String>();
+                    if seen_tri.insert(gram.clone()) {
+                        trigrams.push(gram);
+                    }
+                }
+            }
+        } else if is_word(chars[i]) {
+            let start = i;
+            while i < chars.len() && is_word(chars[i]) {
+                i += 1;
+            }
+            let run = chars[start..i]
+                .iter()
+                .collect::<String>()
+                .trim_matches(|ch| matches!(ch, '.' | '-' | '_'))
+                .to_owned();
+            if run.chars().count() >= 3 && seen_kw.insert(run.clone()) {
+                keywords.push(run);
+            }
+        } else {
+            i += 1;
+        }
+    }
+    (trigrams, keywords)
+}
+
+/// Quote a unit as an FTS5 phrase (`"` doubled) so `=`, quotes, and operators in
+/// user input are inert — arbitrary input can never raise an FTS5 syntax error
+/// (brief-common #6).
+fn quote_fts_phrase(unit: &str) -> String {
+    format!("\"{}\"", unit.replace('"', "\"\""))
+}
+
+/// One keyword as an FTS5 phrase group. Pure-numeric keywords (>= 4 digits) are
+/// expanded with their thousands-separator variant *inside the executed query*
+/// (`3600` -> `("3600" OR "3,600")`): the same number under display formatting,
+/// legitimate query expansion per the K2 ruling — never post-hoc scoring.
+fn fts_keyword_group(keyword: &str) -> String {
+    let quoted = quote_fts_phrase(keyword);
+    if keyword.len() >= 4 && keyword.bytes().all(|b| b.is_ascii_digit()) {
+        let variant = thousands_separated(keyword);
+        format!("({quoted} OR {})", quote_fts_phrase(&variant))
+    } else {
+        quoted
+    }
+}
+
+fn thousands_separated(digits: &str) -> String {
+    let bytes = digits.as_bytes();
+    let mut out = String::with_capacity(bytes.len() + bytes.len() / 3);
+    for (index, byte) in bytes.iter().enumerate() {
+        if index > 0 && (bytes.len() - index) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(*byte as char);
+    }
+    out
+}
+
+/// Build the tiered FTS5 MATCH queries for a natural-language query.
+///
+/// Query *construction* is adaptive/tiered (K2 coordinator ruling); *ranking* is
+/// always the executed query's BM25 — see [`fts_scope_search`]. The shape of the
+/// query decides tier 1 deterministically:
+///
+/// * `>= 2` keyword groups — tier 1 = OR of the keyword groups only. BM25's
+///   per-term IDF then favors chunks matching several rare keywords over chunks
+///   matching one common one.
+/// * exactly 1 keyword group and >= 1 CJK trigram — tier 1 = the keyword group
+///   AND an OR-group of the CJK trigrams. A single keyword alone (`6000`) has no
+///   discriminating power; requiring co-occurring CJK query context filters the
+///   numeric look-alikes.
+/// * otherwise no tier 1.
+///
+/// Tier 2 (always, deduplicated against tier 1) = the relaxed OR of every
+/// indexable unit (CJK trigrams + keyword groups). Japanese has no whitespace and
+/// the trigram index does substring matching, so a strict AND of whole clauses
+/// matches nothing (measured: recall collapses to 0) — the relaxed OR is the
+/// floor that keeps natural-language queries answerable.
+///
+/// Per scope, tiers are executed in order and the first one returning any row is
+/// the scope's text backend (fallback trigger: zero candidates — documented,
+/// deterministic). The returned list is empty when nothing is indexable
+/// (short/empty query -> empty result set).
+fn build_fts_tiers(query: &str) -> Vec<String> {
+    const MAX_TRIGRAMS: usize = 64;
+    let (trigrams, keywords) = query_units(query);
+    let trigram_phrases = trigrams
+        .iter()
+        .take(MAX_TRIGRAMS)
+        .map(|trigram| quote_fts_phrase(trigram))
+        .collect::<Vec<_>>();
+    let keyword_groups = keywords
+        .iter()
+        .map(|keyword| fts_keyword_group(keyword))
+        .collect::<Vec<_>>();
+
+    let strict = if keyword_groups.len() >= 2 {
+        Some(keyword_groups.join(" OR "))
+    } else if keyword_groups.len() == 1 && !trigram_phrases.is_empty() {
+        Some(format!(
+            "{} AND ({})",
+            keyword_groups[0],
+            trigram_phrases.join(" OR ")
+        ))
+    } else {
+        None
+    };
+    let relaxed = {
+        let mut units = trigram_phrases;
+        units.extend(keyword_groups);
+        (!units.is_empty()).then(|| units.join(" OR "))
+    };
+
+    let mut tiers = Vec::new();
+    if let Some(strict) = strict {
+        tiers.push(strict);
+    }
+    if let Some(relaxed) = relaxed {
+        if tiers.last() != Some(&relaxed) {
+            tiers.push(relaxed);
+        }
+    }
+    tiers
+}
+
+fn scope_selection_from_cursor(mode: ScopeMode) -> ScopeSelectionMode {
+    match mode {
+        ScopeMode::All => ScopeSelectionMode::All,
+        ScopeMode::Scope => ScopeSelectionMode::Scope,
+        ScopeMode::Descendants => ScopeSelectionMode::Descendants,
+    }
+}
+
+fn cursor_mode_from_selection(mode: ScopeSelectionMode) -> ScopeMode {
+    match mode {
+        ScopeSelectionMode::All => ScopeMode::All,
+        ScopeSelectionMode::Scope => ScopeMode::Scope,
+        ScopeSelectionMode::Descendants => ScopeMode::Descendants,
+    }
+}
+
+/// Resolve a cursor's frozen per-scope sub-cursors into execution scopes. The
+/// cursor scope set is authoritative (05 §1.8): scope_id -> path is resolved via
+/// the registry. A scope_id the registry can no longer resolve is returned as an
+/// `excluded_scopes` entry (reason `unreachable`) rather than dropped silently —
+/// the replay then follows partial-failure semantics (exit 3, CT3-MULTI-005),
+/// never a misleading cursor-mismatch error.
+fn resolve_cursor_exec_scopes(cursor: &CursorToken) -> (Vec<ExecScope>, Vec<Value>) {
+    let registry = RegistryDb::open_default().ok();
+    let mut exec = Vec::new();
+    let mut excluded = Vec::new();
+    for sub in &cursor.scopes {
+        let target = registry.as_ref().and_then(|db| {
+            db.lookup_scope_id(&sub.scope_id)
+                .ok()
+                .and_then(|entries| entries.into_iter().next())
+                .map(|entry| ScopeTarget {
+                    repo_root: PathBuf::from(&entry.root_path),
+                    kcs_dir: PathBuf::from(&entry.kcs_path),
+                    scope_id: entry.scope_id,
+                })
+        });
+        match target {
+            Some(target) => exec.push(ExecScope {
+                target,
+                snapshot_commit: Some(sub.snapshot_commit.clone()),
+                max_rowid: Some(sub.max_rowid),
+                from_cursor: true,
+            }),
+            None => excluded.push(json!({
+                "scope_id": sub.scope_id,
+                "scope_path": Value::Null,
+                "reason": "unreachable",
+            })),
+        }
+    }
+    (exec, excluded)
+}
+
+fn run_open(args: UnsupportedArgs) -> Result<Value> {
+    let raw = read_pointer_input(without_json(args.args))?;
+    if let Some(object) = parse_object_uri(&raw)? {
+        return resolve_object_uri(&object, false);
+    }
+    let pointer = parse_pointer_text(&raw)?;
+    let resolved = resolve_pointer_for_cli(&pointer)?;
+    Ok(json!({
+        "status": "opened",
+        "path": resolved.path,
+        "raw_hash": pointer.raw_hash,
+        "chunk_hash": pointer.chunk_hash,
+        "temporary": resolved.temporary,
+        "commit_shallow": resolved.commit_shallow,
+    }))
+}
+
+fn run_view(args: UnsupportedArgs) -> Result<Value> {
+    let raw = read_pointer_input(without_json(args.args))?;
+    if let Some(object) = parse_object_uri(&raw)? {
+        return resolve_object_uri(&object, true);
+    }
+    let pointer = parse_pointer_text(&raw)?;
+    let resolved = resolve_pointer_for_cli(&pointer)?;
+    Ok(json!({
+        "status": "viewed",
+        "raw_hash": pointer.raw_hash,
+        "chunk_hash": pointer.chunk_hash,
+        "text": resolved.text.unwrap_or_default(),
+        "path": resolved.path,
+        "commit_shallow": resolved.commit_shallow,
+    }))
+}
+
+fn run_reindex(args: UnsupportedArgs) -> Result<Value> {
+    let args = without_json(args.args);
+    if !args.iter().any(|arg| arg == "--force") {
+        return Err(KcsError::invalid_usage(
+            "reindex requires --force in Step 3",
+        ));
+    }
+    if !args.iter().any(|arg| arg == "--yes") {
+        return Err(KcsError::new(
+            "KCS-E-CONFIRM-REJECTED-001",
+            "reindex --force requires confirmation; pass --yes in non-interactive mode",
+            json!({}),
+            ExitCode::ConfirmationRejected,
+        ));
+    }
+    let repo = Repository::open_current()?;
+    validate_repo_tool_lock(&repo)?;
+    let head = repo
+        .head_commit_hash()?
+        .ok_or_else(|| KcsError::not_found("HEAD"))?;
+    let tree = repo.read_tree(&repo.read_commit(&head)?.tree)?;
+    let mut normalize_by_path = BTreeMap::new();
+    let mut reindexed = 0u64;
+    for entry in &tree.entries {
+        let Some(normalize) = &entry.normalize else {
+            continue;
+        };
+        let new_gen = normalize.gen + 1;
+        copy_normalized_instance_gen(
+            repo.kcs_dir(),
+            &entry.raw_hash,
+            &normalize.tool_profile_hash,
+            normalize.gen,
+            new_gen,
+        )?;
+        normalize_by_path.insert(
+            entry.path.clone(),
+            NormalizeRef {
+                tool_profile_hash: normalize.tool_profile_hash.clone(),
+                gen: new_gen,
+            },
+        );
+        reindexed += 1;
+    }
+    let excluded = BTreeSet::new();
+    let outcome = repo.auto_snapshot_with_normalize(
+        Some("kcs reindex --force"),
+        None,
+        &excluded,
+        &normalize_by_path,
+    )?;
+    let report = rebuild_step3_index(&repo)?;
+    Ok(json!({
+        "status": "reindexed",
+        "reindexed_files": reindexed,
+        "commit_hash": outcome.commit_hash,
+        "rebuilt_chunks": report.rebuilt_chunks,
+    }))
+}
+
+fn rebuild_step3_index(repo: &Repository) -> Result<Step3RebuildReport> {
+    let Some(head) = repo.head_commit_hash()? else {
+        return Ok(Step3RebuildReport::default());
+    };
+    let commit = repo.read_commit(&head)?;
+    let tree = repo.read_tree(&commit.tree)?;
+    let config = read_chunking_config(repo)?;
+    let existing = read_stored_chunks(repo.kcs_dir())?;
+    let mut known = existing
+        .iter()
+        .map(|chunk| chunk.row.chunk_id.clone())
+        .collect::<BTreeSet<_>>();
+    let mut next_rowid = existing.iter().map(|chunk| chunk.rowid).max().unwrap_or(0) + 1;
+    let mut appended = Vec::<StoredChunk>::new();
+    let mut tree_entries = Vec::<TreeEntryRow>::new();
+
+    for entry in &tree.entries {
+        let normalize = match &entry.normalize {
+            Some(normalize) => normalize.clone(),
+            None => match latest_normalize_ref(repo.kcs_dir(), &entry.raw_hash)? {
+                Some(normalize) => normalize,
+                None => continue,
+            },
+        };
+        tree_entries.push(TreeEntryRow {
+            commit_hash: head.clone(),
+            path: entry.path.clone(),
+            raw_hash: entry.raw_hash.clone(),
+            tool_profile_hash: Some(normalize.tool_profile_hash.clone()),
+            gen: normalize.gen,
+        });
+        let units = load_normalized_units(
+            repo.kcs_dir(),
+            &entry.raw_hash,
+            &normalize.tool_profile_hash,
+            normalize.gen,
+        )?;
+        let input = ChunkingInput {
+            raw_path: entry.path.clone(),
+            units,
+            config: config.clone(),
+            created_at: now_utc_seconds(),
+        };
+        for mut row in chunk_normalized_instance(input).map_err(index_to_kcs)? {
+            row.first_seen_commit = Some(head.clone());
+            if known.insert(row.chunk_id.clone()) {
+                appended.push(StoredChunk {
+                    rowid: next_rowid,
+                    row,
+                });
+                next_rowid += 1;
+            }
+        }
+    }
+
+    append_stored_chunks(repo.kcs_dir(), &appended)?;
+    write_tree_entries(repo.kcs_dir(), &tree_entries)?;
+    rebuild_sqlite_index(repo.kcs_dir(), &tree_entries)?;
+    Ok(Step3RebuildReport {
+        rebuilt_chunks: appended.len() as u64,
+        rebuilt_tree_entries: tree_entries.len() as u64,
+    })
+}
+
+fn latest_normalize_ref(kcs_dir: &Path, raw_hash: &str) -> Result<Option<NormalizeRef>> {
+    let digest = raw_hash.trim_start_matches("sha256:");
+    if digest.len() < 4 {
+        return Ok(None);
+    }
+    let dir = kcs_dir
+        .join("objects/normalized_units")
+        .join(&digest[0..2])
+        .join(&digest[2..4]);
+    let Ok(entries) = fs::read_dir(&dir) else {
+        return Ok(None);
+    };
+    let mut best: Option<NormalizeRef> = None;
+    for entry in entries {
+        let entry =
+            entry.map_err(|err| KcsError::io(err.to_string(), dir.display().to_string()))?;
+        if !entry.file_type().map(|kind| kind.is_dir()).unwrap_or(false) {
+            continue;
+        }
+        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        let Some(rest) = name
+            .strip_prefix(raw_hash)
+            .and_then(|value| value.strip_prefix('.'))
+        else {
+            continue;
+        };
+        let Some((tool_profile_hash, gen_part)) = rest.rsplit_once(".g") else {
+            continue;
+        };
+        let Ok(gen) = gen_part.parse::<u64>() else {
+            continue;
+        };
+        if best
+            .as_ref()
+            .map(|current| gen > current.gen)
+            .unwrap_or(true)
+        {
+            best = Some(NormalizeRef {
+                tool_profile_hash: tool_profile_hash.to_owned(),
+                gen,
+            });
+        }
+    }
+    Ok(best)
+}
+
+#[derive(Debug, Default)]
+struct Step3RebuildReport {
+    rebuilt_chunks: u64,
+    rebuilt_tree_entries: u64,
+}
+
+fn read_chunking_config(repo: &Repository) -> Result<ChunkingConfig> {
+    let path = repo.kcs_dir().join("config.toml");
+    let text = fs::read_to_string(&path)
+        .map_err(|err| KcsError::io(err.to_string(), path.display().to_string()))?;
+    let value: toml::Value =
+        toml::from_str(&text).map_err(|err| KcsError::schema(err.to_string()))?;
+    let max_chars = value
+        .get("chunking")
+        .and_then(|chunking| chunking.get("max_chars"))
+        .and_then(toml::Value::as_integer)
+        .filter(|value| *value > 0)
+        .map(|value| value as u64)
+        .unwrap_or(6000);
+    let strategy = value
+        .get("chunking")
+        .and_then(|chunking| chunking.get("strategy"))
+        .and_then(toml::Value::as_str)
+        .unwrap_or("heading");
+    let hash =
+        kcs_index::chunking::chunking_config_hash(strategy, max_chars).map_err(index_to_kcs)?;
+    Ok(ChunkingConfig {
+        chunking_config_hash: hash,
+        strategy: strategy.to_owned(),
+        max_chars,
+    })
+}
+
+fn load_normalized_units(
+    kcs_dir: &Path,
+    raw_hash: &str,
+    tool_profile_hash: &str,
+    gen: u64,
+) -> Result<Vec<NormalizedUnitInput>> {
+    let dir = kcs_pipeline::markdownize::normalized_instance_dir(
+        kcs_dir,
+        raw_hash,
+        tool_profile_hash,
+        gen,
+    );
+    let manifest_path = dir.join("manifest.json");
+    let manifest: NormalizedInstanceManifest = serde_json::from_slice(
+        &fs::read(&manifest_path)
+            .map_err(|err| KcsError::io(err.to_string(), manifest_path.display().to_string()))?,
+    )
+    .map_err(|err| KcsError::schema(err.to_string()))?;
+    let mut units = Vec::new();
+    for entry in &manifest.units {
+        if entry.status != UnitStatus::Done {
+            continue;
+        }
+        let unit_path = dir.join(format!("{}.json", entry.unit_ref));
+        let unit: NormalizedUnitObject = serde_json::from_slice(
+            &fs::read(&unit_path)
+                .map_err(|err| KcsError::io(err.to_string(), unit_path.display().to_string()))?,
+        )
+        .map_err(|err| KcsError::schema(err.to_string()))?;
+        units.push(NormalizedUnitInput {
+            raw_hash: unit.raw_hash,
+            tool_profile_hash: unit.tool_profile_hash,
+            gen: unit.gen,
+            unit_key: unit.unit_key,
+            markdown: unit.markdown,
+        });
+    }
+    Ok(units)
+}
+
+fn index_dir(kcs_dir: &Path) -> PathBuf {
+    kcs_dir.join("index")
+}
+
+fn chunks_jsonl_path(kcs_dir: &Path) -> PathBuf {
+    index_dir(kcs_dir).join("chunks.jsonl")
+}
+
+fn tree_entries_path(kcs_dir: &Path) -> PathBuf {
+    index_dir(kcs_dir).join("tree_entries.json")
+}
+
+fn sqlite_path(kcs_dir: &Path) -> PathBuf {
+    index_dir(kcs_dir).join("sqlite.db")
+}
+
+fn read_stored_chunks(kcs_dir: &Path) -> Result<Vec<StoredChunk>> {
+    let path = chunks_jsonl_path(kcs_dir);
+    let Ok(text) = fs::read_to_string(&path) else {
+        return Ok(Vec::new());
+    };
+    text.lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| serde_json::from_str(line).map_err(|err| KcsError::schema(err.to_string())))
+        .collect()
+}
+
+fn append_stored_chunks(kcs_dir: &Path, chunks: &[StoredChunk]) -> Result<()> {
+    if chunks.is_empty() {
+        return Ok(());
+    }
+    let path = chunks_jsonl_path(kcs_dir);
+    let parent = path
+        .parent()
+        .ok_or_else(|| KcsError::io("path has no parent", path.display().to_string()))?;
+    fs::create_dir_all(parent)
+        .map_err(|err| KcsError::io(err.to_string(), parent.display().to_string()))?;
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .map_err(|err| KcsError::io(err.to_string(), path.display().to_string()))?;
+    for chunk in chunks {
+        serde_json::to_writer(&mut file, chunk)
+            .map_err(|err| KcsError::io(err.to_string(), path.display().to_string()))?;
+        file.write_all(b"\n")
+            .map_err(|err| KcsError::io(err.to_string(), path.display().to_string()))?;
+    }
+    Ok(())
+}
+
+fn write_tree_entries(kcs_dir: &Path, entries: &[TreeEntryRow]) -> Result<()> {
+    let path = tree_entries_path(kcs_dir);
+    let parent = path
+        .parent()
+        .ok_or_else(|| KcsError::io("path has no parent", path.display().to_string()))?;
+    fs::create_dir_all(parent)
+        .map_err(|err| KcsError::io(err.to_string(), parent.display().to_string()))?;
+    let bytes =
+        serde_json::to_vec_pretty(entries).map_err(|err| KcsError::schema(err.to_string()))?;
+    fs::write(&path, bytes).map_err(|err| KcsError::io(err.to_string(), path.display().to_string()))
+}
+
+fn read_tree_entries(kcs_dir: &Path) -> Result<Vec<TreeEntryRow>> {
+    let path = tree_entries_path(kcs_dir);
+    let Ok(bytes) = fs::read(&path) else {
+        return Ok(Vec::new());
+    };
+    serde_json::from_slice(&bytes).map_err(|err| KcsError::schema(err.to_string()))
+}
+
+fn rebuild_sqlite_index(kcs_dir: &Path, tree_entries: &[TreeEntryRow]) -> Result<()> {
+    let path = sqlite_path(kcs_dir);
+    // Embeddings live only in SQLite (objects/ holds no embedding objects in the
+    // MVP), so snapshot them before dropping the DB and replay them afterward,
+    // then rebuild chunk_vec from them (04 §4.3: embeddings → chunk_vec). This
+    // keeps `kcs repair --rebuild-db` from wiping vector search.
+    let preserved = if path.exists() {
+        let existing = Connection::open(&path).map_err(|err| KcsError::schema(err.to_string()))?;
+        let rows = embedding_store::snapshot_chunk_embeddings(&existing).map_err(index_to_kcs)?;
+        drop(existing);
+        fs::remove_file(&path)
+            .map_err(|err| KcsError::io(err.to_string(), path.display().to_string()))?;
+        rows
+    } else {
+        Vec::new()
+    };
+    let mut fts = SqliteFtsIndex::open(
+        &path,
+        FtsSchemaConfig {
+            tokenizer: FtsTokenizer::Trigram,
+        },
+    )
+    .map_err(index_to_kcs)?;
+    for chunk in read_stored_chunks(kcs_dir)? {
+        fts.index_chunk(&chunk.row).map_err(index_to_kcs)?;
+    }
+    for entry in tree_entries {
+        fts.connection()
+            .execute(
+                "INSERT OR REPLACE INTO tree_entries(commit_hash, path, raw_hash, tool_profile_hash, gen)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                rusqlite::params![
+                    entry.commit_hash,
+                    entry.path,
+                    entry.raw_hash,
+                    entry.tool_profile_hash,
+                    entry.gen
+                ],
+            )
+            .map_err(|err| KcsError::schema(err.to_string()))?;
+    }
+    // Replay preserved embeddings (source of truth) and re-derive chunk_vec.
+    for row in &preserved {
+        embedding_store::write_chunk_embedding(
+            fts.connection(),
+            &row.embedding_hash,
+            &row.text_hash,
+            &row.chunk_id,
+            &row.vector,
+            row.dimensions,
+            &row.distance,
+            &row.modality,
+            &row.profile_hash,
+        )
+        .map_err(index_to_kcs)?;
+    }
+    embedding_store::rebuild_chunk_vec(fts.connection()).map_err(index_to_kcs)?;
+    Ok(())
+}
+
+fn parse_search_args(args: Vec<String>) -> Result<ParsedSearch> {
+    let mut query = None;
+    let mut requested_mode = SearchMode::Auto;
+    let mut scope = None;
+    let mut descendants = false;
+    let mut all_scopes = false;
+    let mut limit = 20u64;
+    let mut offset = None;
+    let mut cursor = None;
+    let mut i = 0usize;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--at" | "--all-history" | "--include-deleted" | "--since" => {
+                return Err(KcsError::new(
+                    "KCS-E-CONFIG-NOT-IMPLEMENTED-001",
+                    "time-travel search flags are Step 4",
+                    json!({ "flag": args[i] }),
+                    ExitCode::InvalidUsage,
+                ));
+            }
+            "--text" | "--no-vector" => requested_mode = SearchMode::Text,
+            "--vector" => requested_mode = SearchMode::Vector,
+            "--hybrid" => requested_mode = SearchMode::Hybrid,
+            "--all-scopes" => all_scopes = true,
+            "--descendants" => descendants = true,
+            "--scope" => {
+                i += 1;
+                let Some(value) = args.get(i) else {
+                    return Err(KcsError::invalid_usage("--scope requires a value"));
+                };
+                scope = Some(PathBuf::from(value));
+            }
+            "--limit" => {
+                i += 1;
+                let Some(value) = args.get(i) else {
+                    return Err(KcsError::invalid_usage("--limit requires a value"));
+                };
+                limit = value
+                    .parse::<u64>()
+                    .map_err(|_| KcsError::invalid_usage("--limit must be an integer"))?
+                    .clamp(1, 100);
+            }
+            "--offset" => {
+                i += 1;
+                let Some(value) = args.get(i) else {
+                    return Err(KcsError::invalid_usage("--offset requires a value"));
+                };
+                offset = Some(
+                    value
+                        .parse::<u64>()
+                        .map_err(|_| KcsError::invalid_usage("--offset must be an integer"))?,
+                );
+            }
+            "--cursor" => {
+                i += 1;
+                let Some(value) = args.get(i) else {
+                    return Err(KcsError::invalid_usage("--cursor requires a value"));
+                };
+                cursor = Some(value.clone());
+            }
+            value if value.starts_with('-') => {
+                return Err(KcsError::invalid_usage(format!(
+                    "unknown search flag: {value}"
+                )));
+            }
+            value => {
+                if query.is_some() {
+                    return Err(KcsError::invalid_usage("search accepts one query string"));
+                }
+                query = Some(value.to_owned());
+            }
+        }
+        i += 1;
+    }
+    Ok(ParsedSearch {
+        query: query.ok_or_else(|| KcsError::invalid_usage("search query is required"))?,
+        requested_mode,
+        scope,
+        descendants,
+        all_scopes,
+        limit,
+        offset,
+        cursor,
+    })
+}
+
+fn without_json(args: Vec<String>) -> Vec<String> {
+    args.into_iter().filter(|arg| arg != "--json").collect()
+}
+
+/// Enumerate the scopes a search targets (K3, 05 §1.8). Default and `--all-scopes`
+/// enumerate the device-local registry (all indexed, `participates_in_global_search`);
+/// `--scope <path>` targets exactly that scope (filesystem, even if unregistered);
+/// `--descendants` filters the registry by root-path prefix.
+fn enumerate_scope_targets(
+    repo: &Repository,
+    parsed: &ParsedSearch,
+) -> Result<(ScopeSelectionMode, Vec<ScopeTarget>)> {
+    if let Some(scope) = &parsed.scope {
+        let root = if scope.is_absolute() {
+            scope.clone()
+        } else {
+            repo.root().join(scope)
+        };
+        if parsed.descendants {
+            let root = root.canonicalize().unwrap_or(root);
+            return Ok((
+                ScopeSelectionMode::Descendants,
+                registry_targets_under(&root)?,
+            ));
+        }
+        return Ok((ScopeSelectionMode::Scope, vec![scope_target(&root)?]));
+    }
+    if parsed.descendants {
+        return Ok((
+            ScopeSelectionMode::Descendants,
+            registry_targets_under(repo.root())?,
+        ));
+    }
+    // Default and `--all-scopes` share the same enumeration: every indexed,
+    // participating scope in the registry (05 §1.8 / 06 §3, CT3-MULTI-008). The
+    // difference between the two is spec-undefined (§C-8) and intentionally none.
+    let _all_scopes = parsed.all_scopes;
+    Ok((ScopeSelectionMode::All, registry_all_targets()?))
+}
+
+/// All indexed, participating scopes from the registry (deterministic order).
+fn registry_all_targets() -> Result<Vec<ScopeTarget>> {
+    let Ok(db) = RegistryDb::open_default() else {
+        return Ok(Vec::new());
+    };
+    let entries = db.search_targets().map_err(index_to_kcs)?;
+    Ok(entries.into_iter().map(registry_entry_target).collect())
+}
+
+/// Registered scopes whose root path is at or below `root` (05 §1.8 prefix filter).
+fn registry_targets_under(root: &Path) -> Result<Vec<ScopeTarget>> {
+    Ok(registry_all_targets()?
+        .into_iter()
+        .filter(|target| target.repo_root.starts_with(root))
+        .collect())
+}
+
+fn registry_entry_target(entry: RegistryEntry) -> ScopeTarget {
+    ScopeTarget {
+        repo_root: PathBuf::from(entry.root_path),
+        kcs_dir: PathBuf::from(entry.kcs_path),
+        scope_id: entry.scope_id,
+    }
+}
+
+/// Upsert the scope into the device-local registry (03 §4 cache, K3). Best-effort:
+/// a registry write never fails `init` / `index`.
+fn register_scope(repo: &Repository, indexed: bool) {
+    let Ok(scope_id) = scope_id(repo.kcs_dir()) else {
+        return;
+    };
+    let entry = RegistryEntry {
+        scope_id,
+        kcs_path: repo.kcs_dir().display().to_string(),
+        root_path: repo.root().display().to_string(),
+        participates_in_global_search: participates_in_global_search(repo.kcs_dir()),
+        indexed,
+        last_seen_at: now_utc_seconds(),
+    };
+    if let Ok(db) = RegistryDb::open_default() {
+        if let Err(error) = db.upsert(&entry) {
+            eprintln!(
+                "warning: scope registry write failed (search cache; recover with `kcs index`): {}",
+                error
+            );
+        }
+    }
+}
+
+/// `participates_in_global_search` (defaults to true, 05 §1.8). The config schema
+/// (config.schema.json) puts this under `[scope]`; `[search]` is also accepted for
+/// robustness. Either way, absence means "participates".
+fn participates_in_global_search(kcs_dir: &Path) -> bool {
+    let path = kcs_dir.join("config.toml");
+    let Ok(text) = fs::read_to_string(&path) else {
+        return true;
+    };
+    let Ok(value) = toml::from_str::<toml::Value>(&text) else {
+        return true;
+    };
+    for section in ["scope", "search"] {
+        if let Some(flag) = value
+            .get(section)
+            .and_then(|table| table.get("participates_in_global_search"))
+            .and_then(toml::Value::as_bool)
+        {
+            return flag;
+        }
+    }
+    true
+}
+
+fn scope_target(root: &Path) -> Result<ScopeTarget> {
+    let repo = Repository::open(root)?;
+    Ok(ScopeTarget {
+        repo_root: repo.root().to_path_buf(),
+        kcs_dir: repo.kcs_dir().to_path_buf(),
+        scope_id: scope_id(repo.kcs_dir())?,
+    })
+}
+
+fn scope_id(kcs_dir: &Path) -> Result<String> {
+    let path = kcs_dir.join("scope.json");
+    let value: Value = serde_json::from_slice(
+        &fs::read(&path)
+            .map_err(|err| KcsError::io(err.to_string(), path.display().to_string()))?,
+    )
+    .map_err(|err| KcsError::schema(err.to_string()))?;
+    value
+        .get("scope_id")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .ok_or_else(|| KcsError::schema("scope.json missing scope_id"))
+}
+
+/// Materialize the live chunks of a scope with display metadata (Evidence Pointer
+/// short-hash resolution). Not used for ranking (K2 — ranking reads `sqlite.db`).
+fn load_searchable_chunks(target: &ScopeTarget) -> Result<Vec<SearchableChunk>> {
+    let repo = Repository::open(&target.repo_root)?;
+    let head = repo.head_commit_hash()?.unwrap_or_default();
+    let tree_entries = read_tree_entries(&target.kcs_dir)?;
+    let live = tree_entries
+        .iter()
+        .filter(|entry| entry.commit_hash == head)
+        .filter_map(|entry| {
+            entry.tool_profile_hash.as_ref().map(|tool| {
+                (
+                    (entry.raw_hash.clone(), tool.clone(), entry.gen),
+                    entry.path.clone(),
+                )
+            })
+        })
+        .collect::<BTreeMap<_, _>>();
+    Ok(read_stored_chunks(&target.kcs_dir)?
+        .into_iter()
+        .filter_map(|stored| {
+            let key = (
+                stored.row.raw_hash.clone(),
+                stored.row.tool_profile_hash.clone(),
+                stored.row.gen,
+            );
+            live.get(&key).map(|path| SearchableChunk {
+                row: stored.row,
+                scope_id: target.scope_id.clone(),
+                scope_path: target.repo_root.clone(),
+                snapshot_at: head.clone(),
+                path_at_commit: path.clone(),
+            })
+        })
+        .collect())
+}
+
+fn default_diversify_request() -> DiversifyRequest {
+    DiversifyRequest {
+        strategy: DiversifyStrategy::Mmr,
+        mmr_lambda: Some(0.7),
+        max_per_raw_hash: Some(3),
+        mmr_depth: Some(100),
+    }
+}
+
+fn search_mode_json(mode: SearchMode) -> &'static str {
+    match mode {
+        SearchMode::Auto => "auto",
+        SearchMode::Text => "text",
+        SearchMode::Vector => "vector",
+        SearchMode::Hybrid => "hybrid",
+    }
+}
+
+fn empty_search_response(
+    parsed: &ParsedSearch,
+    repo: &Repository,
+    started: Instant,
+    mode: &ResolvedMode,
+    searched_scopes: &[Value],
+    excluded_scopes: &[Value],
+) -> Result<Value> {
+    // Short queries still report the resolved mode honestly (auto -> text with the
+    // vector-unavailable fallback) plus index_status (K7).
+    let response = json!({
+        "query": parsed.query,
+        "requested_mode": search_mode_json(mode.requested),
+        "resolved_mode": search_mode_json(mode.resolved),
+        "fallback": mode.fallback,
+        "fallback_reason": mode.fallback_reason.clone().map(Value::from).unwrap_or(Value::Null),
+        "error_code": mode.error_code.clone().map(Value::from).unwrap_or(Value::Null),
+        "diversify": { "strategy": "group_by_raw_hash" },
+        "paging": { "limit": parsed.limit, "next_cursor": Value::Null },
+        "searched_scopes": searched_scopes,
+        "excluded_scopes": excluded_scopes,
+        "index_status": json!({
+            "enriched_ratio": 1.0,
+            "pending_enrichment_tasks": 0,
+            "budget_paused": false,
+        }),
+        "results": [],
+    });
+    append_search_logs(repo, &response, started)?;
+    Ok(response)
+}
+
+fn append_search_logs(repo: &Repository, response: &Value, started: Instant) -> Result<()> {
+    let latency_ms = started.elapsed().as_secs_f64() * 1000.0;
+    let scope_count = response
+        .get("searched_scopes")
+        .and_then(Value::as_array)
+        .map(Vec::len)
+        .unwrap_or(0);
+    let result_count = response
+        .get("results")
+        .and_then(Value::as_array)
+        .map(Vec::len)
+        .unwrap_or(0);
+    // Per-search latency record (05 §7, K8a): code KCS-M-SEARCH-001 / component
+    // "search" / metric search.latency_ms. redact_logs default omits query & path.
+    append_jsonl_cli(
+        &data_home().join("kcs/logs/metrics.jsonl"),
+        &json!({
+            "ts": now_utc_seconds(),
+            "level": "info",
+            "code": "KCS-M-SEARCH-001",
+            "component": "search",
+            "message": "search completed",
+            "metric": "search.latency_ms",
+            "value": latency_ms,
+            "context": {
+                "mode": response.get("resolved_mode").and_then(Value::as_str).unwrap_or("text"),
+                "scope_count": scope_count,
+                "result_count": result_count,
+            },
+        }),
+    )?;
+    append_jsonl_cli(
+        &repo.kcs_dir().join("logs/access.jsonl"),
+        &json!({
+            "ts": now_utc_seconds(),
+            "level": "info",
+            "code": "KCS-I-SEARCH-ACCESS-001",
+            "component": "kcs-cli",
+            "message": "search access",
+            "context": {
+                "query": "[redacted]",
+                "mode": response.get("resolved_mode").and_then(Value::as_str).unwrap_or("text"),
+                "result_count": result_count,
+            },
+        }),
+    )
+}
+
+fn append_jsonl_cli(path: &Path, value: &Value) -> Result<()> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| KcsError::io("path has no parent", path.display().to_string()))?;
+    fs::create_dir_all(parent)
+        .map_err(|err| KcsError::io(err.to_string(), parent.display().to_string()))?;
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .map_err(|err| KcsError::io(err.to_string(), path.display().to_string()))?;
+    serde_json::to_writer(&mut file, value)
+        .map_err(|err| KcsError::io(err.to_string(), path.display().to_string()))?;
+    file.write_all(b"\n")
+        .map_err(|err| KcsError::io(err.to_string(), path.display().to_string()))
+}
+
+#[derive(Debug)]
+/// Successful resolution of an Evidence Pointer (08 §3). Failure modes
+/// (scope_unreachable / tombstoned / not_found) are surfaced as `Err(KcsError)`
+/// with the exit-4 codes from 08 §3.2 / §4.
+struct PointerResolution {
+    path: Option<PathBuf>,
+    text: Option<String>,
+    temporary: bool,
+    commit_shallow: bool,
+}
+
+/// Reads the raw `<pointer>` operand (08 §2.3), resolving `-` from stdin.
+/// Branching into evidence-pointer vs `object` URI happens in the caller.
+fn read_pointer_input(args: Vec<String>) -> Result<String> {
+    let Some(pointer) = args.into_iter().next() else {
+        return Err(KcsError::invalid_usage("pointer argument is required"));
+    };
+    if pointer == "-" {
+        let mut input = String::new();
+        std::io::Read::read_to_string(&mut std::io::stdin(), &mut input)
+            .map_err(|err| KcsError::io(err.to_string(), "stdin"))?;
+        return Ok(input.trim().to_owned());
+    }
+    Ok(pointer)
+}
+
+fn parse_pointer_text(pointer: &str) -> Result<EvidencePointer> {
+    if pointer.starts_with("kcs://") {
+        return parse_evidence_pointer_uri(pointer).map_err(search_to_kcs);
+    }
+    if pointer.trim_start().starts_with('{') {
+        return serde_json::from_str(pointer).map_err(|err| KcsError::schema(err.to_string()));
+    }
+    if pointer.starts_with("sha256:") {
+        return resolve_short_hash(pointer);
+    }
+    Err(KcsError::invalid_usage("invalid pointer argument"))
+}
+
+fn resolve_short_hash(hash: &str) -> Result<EvidencePointer> {
+    let repo = Repository::open_current()?;
+    let target = scope_target(repo.root())?;
+    let chunks = load_searchable_chunks(&target)?;
+    let matches = chunks
+        .into_iter()
+        .filter(|chunk| chunk.row.chunk_id == hash || chunk.row.raw_hash == hash)
+        .collect::<Vec<_>>();
+    if matches.len() != 1 {
+        return Err(KcsError::invalid_usage(
+            "short hash is ambiguous or not found",
+        ));
+    }
+    let chunk = &matches[0];
+    issue_evidence_pointer(EvidencePointerIssueRequest {
+        scope_id: chunk.scope_id.clone(),
+        scope_path: Some(chunk.scope_path.display().to_string()),
+        commit: chunk.snapshot_at.clone(),
+        tree: None,
+        raw_hash: chunk.row.raw_hash.clone(),
+        tool_profile_hash: chunk.row.tool_profile_hash.clone(),
+        chunk_hash: chunk.row.chunk_id.clone(),
+        path_at_commit: Some(chunk.path_at_commit.clone()),
+        heading_path: chunk.row.heading_path.clone(),
+        section_id: chunk.row.section_id.clone(),
+        char_start: chunk.row.char_start,
+        char_end: chunk.row.char_end,
+    })
+    .map_err(search_to_kcs)
+}
+
+fn resolve_pointer_for_cli(pointer: &EvidencePointer) -> Result<PointerResolution> {
+    // 08 §3.1 step 1: two-stage scope resolution (scope_path hint -> registry).
+    let target = resolve_scope_target(&pointer.scope_id, pointer.scope_path.as_deref())?;
+    let repo = Repository::open(&target.repo_root)?;
+
+    // 08 §3.1 step 2: fetch the commit object (append-only; never GC'd).
+    let commit = repo.read_commit(&pointer.commit)?;
+
+    // 08 §3.1 step 2a/3-4: a shallow commit (tree object discarded) skips the
+    // tree walk; otherwise the raw_hash must appear in commit.tree for the
+    // pointer to resolve against *this* commit's snapshot (not the working tree
+    // of some later commit).
+    let commit_shallow = match repo.read_tree(&commit.tree) {
+        Ok(tree) => {
+            let in_tree = tree
+                .entries
+                .iter()
+                .any(|entry| entry.raw_hash == pointer.raw_hash);
+            if !in_tree {
+                // step 5 (tombstone) is checked before declaring not_found.
+                if let Some(tombstone) = read_tombstone(&target, &pointer.raw_hash)? {
+                    return Err(tombstone_error(tombstone));
+                }
+                return Err(purge_not_found_error(&target, &pointer.raw_hash));
+            }
+            false
+        }
+        Err(error) if is_store_not_found(&error) => true,
+        Err(error) => return Err(error),
+    };
+
+    // 08 §3.1 step 5: purged raw_hash carrying a tombstone -> tombstone response.
+    if let Some(tombstone) = read_tombstone(&target, &pointer.raw_hash)? {
+        return Err(tombstone_error(tombstone));
+    }
+
+    // 08 §3.1 step 6-7: chunk_hash -> chunk text (the normalized instance is
+    // keyed by (raw_hash, tool_profile_hash, gen); chunk rows carry the span).
+    // A pointer whose chunk_hash has NO materialized chunk row in this scope
+    // cannot be served under this tool_profile_hash — that is 08 §3.2's
+    // "tool_profile_hash 不一致: chunk が存在しない場合は retarget が必要 (§5)",
+    // exit 8 (06 §7). Applies on the shallow path too: chunk rows outlive tree
+    // discard, so their absence means the profile mismatch, not GC.
+    let text = read_stored_chunks(&target.kcs_dir)?
+        .into_iter()
+        .find(|chunk| chunk.row.chunk_id == pointer.chunk_hash)
+        .map(|chunk| chunk.row.text);
+    let Some(text) = text else {
+        return Err(KcsError::new(
+            "KCS-E-EVIDENCE-RETARGET-REQUIRED-001",
+            "chunk not materialized for this tool_profile_hash; retarget required (08 §5)",
+            json!({
+                "chunk_hash": pointer.chunk_hash,
+                "tool_profile_hash": pointer.tool_profile_hash,
+                "raw_hash": pointer.raw_hash,
+            }),
+            ExitCode::IncompatibleProfile,
+        ));
+    };
+
+    // Raw object resolution: working tree first (rename-tolerant), else CAS
+    // read-only expansion. Absent from both with no tombstone -> not_found.
+    match open_raw_object(
+        &target,
+        &pointer.raw_hash,
+        pointer.path_at_commit.as_deref(),
+    )? {
+        Some((path, temporary)) => Ok(PointerResolution {
+            path: Some(path),
+            text: Some(text),
+            temporary,
+            commit_shallow,
+        }),
+        None => Err(purge_not_found_error(&target, &pointer.raw_hash)),
+    }
+}
+
+/// Two-stage scope resolution (08 §3.1 step 1). Root trust is `scope_id`; the
+/// `scope_path` hint and the scope-registry are both non-authoritative caches
+/// (05 §1.7 truth vs cache).
+fn resolve_scope_target(scope_id: &str, scope_path_hint: Option<&str>) -> Result<ScopeTarget> {
+    // 1a. scope_path hint whose .kcs/scope.json matches scope_id.
+    if let Some(hint) = scope_path_hint {
+        if let Some(target) = open_scope_from_hint(hint) {
+            if target.scope_id == scope_id {
+                return Ok(target);
+            }
+        }
+    }
+    // 1b. scope-registry lookup by scope_id (last_seen_at newest first).
+    if let Ok(registry) = RegistryDb::open_default() {
+        if let Ok(entries) = registry.lookup_scope_id(scope_id) {
+            let mut resolved: Vec<(String, ScopeTarget)> = Vec::new();
+            for entry in &entries {
+                if let Some(target) = open_scope_from_hint(&entry.root_path) {
+                    if target.scope_id == scope_id {
+                        resolved.push((entry.last_seen_at.clone(), target));
+                    }
+                }
+            }
+            if !resolved.is_empty() {
+                // Newest last_seen_at wins; a tie across distinct .kcs is ambiguous.
+                let newest = resolved[0].0.clone();
+                let mut newest_dirs = resolved
+                    .iter()
+                    .filter(|(seen, _)| *seen == newest)
+                    .map(|(_, target)| target.kcs_dir.clone())
+                    .collect::<Vec<_>>();
+                newest_dirs.sort();
+                newest_dirs.dedup();
+                if newest_dirs.len() > 1 {
+                    return Err(scope_ambiguous_error(scope_id, &newest_dirs));
+                }
+                return Ok(resolved.remove(0).1);
+            }
+        }
+    }
+    // Pragmatic fallback: the current working directory when it *is* the scope.
+    // Object URIs carry no scope_path hint, and a freshly-created scope may not
+    // yet be listed in the registry. Still gated on scope_id equality.
+    if let Ok(repo) = Repository::open_current() {
+        if let Ok(target) = scope_target(repo.root()) {
+            if target.scope_id == scope_id {
+                return Ok(target);
+            }
+        }
+    }
+    Err(scope_unreachable_error(scope_id))
+}
+
+/// Opens a `ScopeTarget` from a hint that is either a scope root or a `.kcs`
+/// directory (08 §2.2 permits scope_path to name either). `None` if neither
+/// resolves to a valid scope.
+fn open_scope_from_hint(hint: &str) -> Option<ScopeTarget> {
+    let path = Path::new(hint);
+    if let Ok(target) = scope_target(path) {
+        return Some(target);
+    }
+    if path.file_name() == Some(std::ffi::OsStr::new(".kcs")) {
+        if let Some(parent) = path.parent() {
+            if let Ok(target) = scope_target(parent) {
+                return Some(target);
+            }
+        }
+    }
+    None
+}
+
+/// Working tree first (rename-tolerant), else a read-only expansion of the CAS
+/// raw object under `$XDG_DATA_HOME/kcs/open` (05 §4.2 / 06 §1.1). Returns
+/// `Ok(None)` when the raw object is absent from both.
+fn open_raw_object(
+    target: &ScopeTarget,
+    raw_hash: &str,
+    path_hint: Option<&str>,
+) -> Result<Option<(PathBuf, bool)>> {
+    if let Some(path) = find_working_tree_raw(&target.repo_root, raw_hash)? {
+        return Ok(Some((path, false)));
+    }
+    let raw_path = raw_object_path(&target.kcs_dir, raw_hash);
+    if !raw_path.is_file() {
+        return Ok(None);
+    }
+    let basename = path_hint
+        .and_then(|path| Path::new(path).file_name())
+        .and_then(|name| name.to_str())
+        .unwrap_or("object");
+    let cache = data_home()
+        .join("kcs/open")
+        .join(
+            raw_hash
+                .trim_start_matches("sha256:")
+                .chars()
+                .take(12)
+                .collect::<String>(),
+        )
+        .join(basename);
+    if let Some(parent) = cache.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|err| KcsError::io(err.to_string(), parent.display().to_string()))?;
+    }
+    fs::copy(&raw_path, &cache)
+        .map_err(|err| KcsError::io(err.to_string(), cache.display().to_string()))?;
+    let mut permissions = fs::metadata(&cache)
+        .map_err(|err| KcsError::io(err.to_string(), cache.display().to_string()))?
+        .permissions();
+    permissions.set_readonly(true);
+    fs::set_permissions(&cache, permissions)
+        .map_err(|err| KcsError::io(err.to_string(), cache.display().to_string()))?;
+    Ok(Some((cache, true)))
+}
+
+fn find_working_tree_raw(root: &Path, raw_hash: &str) -> Result<Option<PathBuf>> {
+    for entry in fs::read_dir(root)
+        .map_err(|err| KcsError::io(err.to_string(), root.display().to_string()))?
+    {
+        let entry =
+            entry.map_err(|err| KcsError::io(err.to_string(), root.display().to_string()))?;
+        if entry.file_name() == ".kcs" {
+            continue;
+        }
+        if !entry
+            .file_type()
+            .map(|kind| kind.is_file())
+            .unwrap_or(false)
+        {
+            continue;
+        }
+        let path = entry.path();
+        let bytes = fs::read(&path)
+            .map_err(|err| KcsError::io(err.to_string(), path.display().to_string()))?;
+        if hash_bytes(&bytes) == raw_hash {
+            return Ok(Some(path));
+        }
+    }
+    Ok(None)
+}
+
+fn raw_object_path(kcs_dir: &Path, raw_hash: &str) -> PathBuf {
+    let digest = raw_hash.trim_start_matches("sha256:");
+    kcs_dir
+        .join("objects/raw")
+        .join(&digest[0..2])
+        .join(&digest[2..4])
+        .join(raw_hash)
+}
+
+/// `.kcs/tombstones/ab/cd/<raw_hash>` (05 §3.5). `Ok(None)` when no tombstone
+/// exists. The returned value is the on-disk tombstone JSON augmented with the
+/// resolved `scope_path` (08 §4.1 response shape).
+fn read_tombstone(target: &ScopeTarget, raw_hash: &str) -> Result<Option<Value>> {
+    let digest = raw_hash.trim_start_matches("sha256:");
+    if digest.len() < 4 {
+        return Ok(None);
+    }
+    let path = target
+        .kcs_dir
+        .join("tombstones")
+        .join(&digest[0..2])
+        .join(&digest[2..4])
+        .join(raw_hash);
+    let bytes = match fs::read(&path) {
+        Ok(bytes) => bytes,
+        // Only a missing tombstone file means "no tombstone"; an unreadable
+        // tombstones dir must not be misclassified as not_found (08 §3.2).
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => return Err(KcsError::io(err.to_string(), path.display().to_string())),
+    };
+    let mut value: Value =
+        serde_json::from_slice(&bytes).map_err(|err| KcsError::schema(err.to_string()))?;
+    if let Some(object) = value.as_object_mut() {
+        object
+            .entry("raw_hash".to_owned())
+            .or_insert_with(|| json!(raw_hash));
+        object.insert(
+            "scope_path".to_owned(),
+            json!(target.kcs_dir.display().to_string()),
+        );
+    }
+    Ok(Some(value))
+}
+
+/// 08 §4.1 tombstone response as an exit-4 error (open/view surface it as a
+/// dead pointer). `context` carries the full `status="purged"` tombstone body.
+fn tombstone_error(mut tombstone: Value) -> KcsError {
+    if let Some(object) = tombstone.as_object_mut() {
+        object.insert("status".to_owned(), json!("purged"));
+    }
+    KcsError::new(
+        "KCS-E-PURGE-TOMBSTONED-001",
+        "evidence target was purged (tombstone recorded)",
+        tombstone,
+        ExitCode::PermanentFailure,
+    )
+}
+
+/// 08 §4.2 — raw object absent with no tombstone record.
+fn purge_not_found_error(target: &ScopeTarget, raw_hash: &str) -> KcsError {
+    KcsError::new(
+        "KCS-E-PURGE-NOT-FOUND-001",
+        "evidence target was purged without tombstone record",
+        json!({
+            "raw_hash": raw_hash,
+            "scope_path": target.kcs_dir.display().to_string(),
+        }),
+        ExitCode::PermanentFailure,
+    )
+}
+
+/// 08 §3.2 — scope `.kcs` unreachable (scope_path unreachable and scope_id not
+/// registered).
+fn scope_unreachable_error(scope_id: &str) -> KcsError {
+    KcsError::new(
+        "KCS-E-EVIDENCE-SCOPE-UNREACHABLE-001",
+        "evidence scope unreachable",
+        json!({ "scope_id": scope_id }),
+        ExitCode::PermanentFailure,
+    )
+}
+
+/// 08 §3.1 step 1b — the scope_id maps to multiple registered scopes that share
+/// the newest `last_seen_at`, so the winner is ambiguous.
+fn scope_ambiguous_error(scope_id: &str, candidates: &[PathBuf]) -> KcsError {
+    KcsError::new(
+        "KCS-E-EVIDENCE-SCOPE-AMBIGUOUS-001",
+        "evidence scope_id maps to multiple registered scopes",
+        json!({
+            "scope_id": scope_id,
+            "candidates": candidates
+                .iter()
+                .map(|path| path.display().to_string())
+                .collect::<Vec<_>>(),
+        }),
+        ExitCode::PermanentFailure,
+    )
+}
+
+fn is_store_not_found(error: &KcsError) -> bool {
+    error.error_code() == "KCS-E-STORE-NOT-FOUND-001"
+}
+
+struct ObjectUri {
+    scope_id: String,
+    object_type: String,
+    hash: String,
+}
+
+/// Parses a `kcs://<scope_id>/object/<type>/<hash>` object-reference URI
+/// (08 §2.3). Returns `Ok(None)` for non-object URIs (Evidence Pointer URIs,
+/// whose second segment is always a `sha256:` commit, never the literal
+/// `object`). A syntactically-`object` URI that is malformed is `Err` (exit 2).
+fn parse_object_uri(input: &str) -> Result<Option<ObjectUri>> {
+    let Some(rest) = input.strip_prefix("kcs://") else {
+        return Ok(None);
+    };
+    let (path, _query) = rest.split_once('?').unwrap_or((rest, ""));
+    let parts = path.split('/').collect::<Vec<_>>();
+    if parts.get(1) != Some(&"object") {
+        return Ok(None);
+    }
+    if parts.len() != 4 {
+        return Err(KcsError::invalid_usage(
+            "object URI must be kcs://<scope_id>/object/<type>/<hash>",
+        ));
+    }
+    let (scope_id, object_type, hash) = (parts[0], parts[2], parts[3]);
+    if scope_id.is_empty() {
+        return Err(KcsError::invalid_usage("object URI is missing scope_id"));
+    }
+    const VALID_TYPES: [&str; 5] = ["raw", "image", "chunk", "normalized", "prepared"];
+    if !VALID_TYPES.contains(&object_type) {
+        return Err(KcsError::invalid_usage(format!(
+            "unknown object type in URI: {object_type}"
+        )));
+    }
+    if !is_hash(hash) {
+        return Err(KcsError::invalid_usage(
+            "object URI hash must be sha256 lowercase hex",
+        ));
+    }
+    Ok(Some(ObjectUri {
+        scope_id: scope_id.to_owned(),
+        object_type: object_type.to_owned(),
+        hash: hash.to_owned(),
+    }))
+}
+
+/// Resolves an `object` reference URI (08 §2.3) for `kcs open` / `kcs view`.
+/// This is a distinct path from Evidence Pointer resolution.
+fn resolve_object_uri(object: &ObjectUri, as_view: bool) -> Result<Value> {
+    let status = if as_view { "viewed" } else { "opened" };
+    let target = resolve_scope_target(&object.scope_id, None)?;
+    if object.object_type == "chunk" {
+        let text = read_stored_chunks(&target.kcs_dir)?
+            .into_iter()
+            .find(|chunk| chunk.row.chunk_id == object.hash)
+            .map(|chunk| chunk.row.text)
+            .ok_or_else(|| KcsError::not_found(object.hash.clone()))?;
+        return Ok(json!({
+            "status": status,
+            "object_type": "chunk",
+            "hash": object.hash,
+            "text": text,
+        }));
+    }
+    // raw / image / normalized / prepared resolve as byte objects in the CAS raw
+    // store (07 §5.2). Only `raw` is materialised as a top-level object in Step 3.
+    match open_raw_object(&target, &object.hash, None)? {
+        Some((path, temporary)) => Ok(json!({
+            "status": status,
+            "object_type": object.object_type,
+            "hash": object.hash,
+            "path": path,
+            "temporary": temporary,
+        })),
+        None => Err(KcsError::not_found(object.hash.clone())),
+    }
+}
+
+fn copy_normalized_instance_gen(
+    kcs_dir: &Path,
+    raw_hash: &str,
+    tool_profile_hash: &str,
+    old_gen: u64,
+    new_gen: u64,
+) -> Result<()> {
+    let old_dir = kcs_pipeline::markdownize::normalized_instance_dir(
+        kcs_dir,
+        raw_hash,
+        tool_profile_hash,
+        old_gen,
+    );
+    let new_dir = kcs_pipeline::markdownize::normalized_instance_dir(
+        kcs_dir,
+        raw_hash,
+        tool_profile_hash,
+        new_gen,
+    );
+    fs::create_dir_all(&new_dir)
+        .map_err(|err| KcsError::io(err.to_string(), new_dir.display().to_string()))?;
+    let manifest_path = old_dir.join("manifest.json");
+    let mut manifest: Value = serde_json::from_slice(
+        &fs::read(&manifest_path)
+            .map_err(|err| KcsError::io(err.to_string(), manifest_path.display().to_string()))?,
+    )
+    .map_err(|err| KcsError::schema(err.to_string()))?;
+    manifest["parent_gen"] = json!(old_gen);
+    manifest["gen"] = json!(new_gen);
+    manifest["run_id"] = json!(format!("run_{}", new_ulid(kcs_dir)));
+    manifest["generated_at"] = json!(now_utc_seconds());
+    fs::write(
+        new_dir.join("manifest.json"),
+        serde_json::to_vec_pretty(&manifest).map_err(|err| KcsError::schema(err.to_string()))?,
+    )
+    .map_err(|err| KcsError::io(err.to_string(), new_dir.display().to_string()))?;
+    for entry in fs::read_dir(&old_dir)
+        .map_err(|err| KcsError::io(err.to_string(), old_dir.display().to_string()))?
+    {
+        let entry =
+            entry.map_err(|err| KcsError::io(err.to_string(), old_dir.display().to_string()))?;
+        if entry.file_name() == "manifest.json" {
+            continue;
+        }
+        let mut unit: Value =
+            serde_json::from_slice(&fs::read(entry.path()).map_err(|err| {
+                KcsError::io(err.to_string(), entry.path().display().to_string())
+            })?)
+            .map_err(|err| KcsError::schema(err.to_string()))?;
+        unit["gen"] = json!(new_gen);
+        unit["generated_at"] = json!(now_utc_seconds());
+        fs::write(
+            new_dir.join(entry.file_name()),
+            serde_json::to_vec_pretty(&unit).map_err(|err| KcsError::schema(err.to_string()))?,
+        )
+        .map_err(|err| KcsError::io(err.to_string(), new_dir.display().to_string()))?;
+    }
+    Ok(())
+}
+
+fn index_to_kcs(error: kcs_index::IndexError) -> KcsError {
+    KcsError::schema(error.to_string())
+}
+
+fn search_to_kcs(error: kcs_search::SearchError) -> KcsError {
+    match error {
+        kcs_search::SearchError::Cursor(message) => KcsError::new(
+            "KCS-E-SEARCH-CURSOR-001",
+            message,
+            json!({}),
+            ExitCode::InvalidUsage,
+        ),
+        kcs_search::SearchError::Evidence(message) => KcsError::schema(message),
+        kcs_search::SearchError::Contract(message) => KcsError::schema(message),
+        kcs_search::SearchError::NotImplemented(feature) => KcsError::not_implemented(feature),
+    }
 }
 
 fn run_batch(args: BatchArgs) -> Result<Value> {
@@ -882,6 +3657,570 @@ fn task_failure_from_adapter(error: kcs_adapter::AdapterError) -> TaskExecutionF
         | kcs_adapter::AdapterError::ConfigSchema(_) => RetryErrorKind::ContractViolation,
     };
     TaskExecutionFailure { retry_kind }
+}
+
+// ===========================================================================
+// K4 — Gemini embedding wiring (adapter selection, mock seam, index generation,
+// query embedding). Mirrors the Mistral markdownize plumbing.
+// ===========================================================================
+
+const EMBEDDING_ADAPTER_ID: &str = "gemini_embedding_2";
+const EMBEDDING_ADAPTER_KIND: &str = "embedding";
+/// Chunks embedded per HTTP `:batchEmbedContents` request (client-side batching;
+/// Vertex has no batch inference, 07 §5.3). Task granularity is per-chunk; API
+/// batch granularity is this.
+const EMBEDDING_BATCH_SIZE: usize = 32;
+
+/// Which embedding backend / mock behavior is active. `KCS_TEST_GEMINI_EMBED`
+/// selects a deterministic mock (Step 2 seam pattern); otherwise a real
+/// `GEMINI_API_KEY` selects the live `Env` client. Absent both → no embeddings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EmbeddingSeam {
+    /// Deterministic compatible multimodal vectors.
+    Mock,
+    /// Multimodal but a mismatched profile_hash → search resolves INCOMPAT.
+    Incompatible,
+    /// `modality="text"` → rejected at tool-lock materialize (exit 2).
+    NonMultimodal,
+    /// Adapter returns an auth failure at embed time.
+    AuthError,
+    /// Adapter returns a 429 at embed time.
+    RateLimit,
+    /// Live Gemini endpoint (`GEMINI_API_KEY` set).
+    Real,
+}
+
+fn embedding_seam() -> Option<EmbeddingSeam> {
+    match std::env::var("KCS_TEST_GEMINI_EMBED").ok().as_deref() {
+        Some("mock") => Some(EmbeddingSeam::Mock),
+        Some("incompatible_profile") => Some(EmbeddingSeam::Incompatible),
+        Some("non_multimodal") => Some(EmbeddingSeam::NonMultimodal),
+        Some("auth_error") => Some(EmbeddingSeam::AuthError),
+        Some("rate_limit") => Some(EmbeddingSeam::RateLimit),
+        Some(_) => None,
+        None => std::env::var("GEMINI_API_KEY")
+            .is_ok()
+            .then_some(EmbeddingSeam::Real),
+    }
+}
+
+/// The embedding profile declared in tool-lock and written into `embeddings` rows
+/// for a given seam. Compatible/real use the adopted profile; the mock variants
+/// deliberately declare incompatible / non-multimodal profiles.
+struct DeclaredEmbeddingProfile {
+    tool_id: String,
+    dimensions: u64,
+    distance: String,
+    modality: String,
+    profile_hash: String,
+}
+
+fn declared_embedding_profile(seam: EmbeddingSeam) -> Result<DeclaredEmbeddingProfile> {
+    let adopted = adopted_embedding_profile_hash().map_err(index_to_kcs)?;
+    Ok(match seam {
+        EmbeddingSeam::Incompatible => DeclaredEmbeddingProfile {
+            tool_id: "gemini_embedding_incompatible".to_owned(),
+            dimensions: CHUNK_VEC_DIMENSIONS as u64,
+            distance: "cosine".to_owned(),
+            modality: "multimodal".to_owned(),
+            // Deliberately not the adopted hash → 03 §7 compat fails.
+            profile_hash: "sha256:00000000000000000000000000000000000000000000000000000000incompat"
+                .to_owned(),
+        },
+        EmbeddingSeam::NonMultimodal => DeclaredEmbeddingProfile {
+            tool_id: "gemini_text_embedding".to_owned(),
+            dimensions: CHUNK_VEC_DIMENSIONS as u64,
+            distance: "cosine".to_owned(),
+            modality: "text".to_owned(),
+            profile_hash: adopted,
+        },
+        _ => DeclaredEmbeddingProfile {
+            tool_id: EMBEDDING_ADAPTER_ID.to_owned(),
+            dimensions: ADOPTED_DIMENSIONS as u64,
+            distance: "cosine".to_owned(),
+            modality: "multimodal".to_owned(),
+            profile_hash: adopted,
+        },
+    })
+}
+
+/// Deterministic, L2-normalized pseudo-vector derived from the input text via
+/// SHA-256 expansion. Reproducible across runs (test determinism, brief item 2).
+fn deterministic_unit_vector(seed: &str, dimensions: usize) -> Vec<f32> {
+    let mut values = Vec::with_capacity(dimensions);
+    let mut counter = 0u32;
+    while values.len() < dimensions {
+        let mut hasher = Sha256::new();
+        hasher.update(seed.as_bytes());
+        hasher.update(counter.to_le_bytes());
+        let digest = hasher.finalize();
+        for chunk in digest.chunks_exact(4) {
+            if values.len() >= dimensions {
+                break;
+            }
+            let bits = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+            values.push((bits as f64 / u32::MAX as f64 * 2.0 - 1.0) as f32);
+        }
+        counter += 1;
+    }
+    let norm = values.iter().map(|value| value * value).sum::<f32>().sqrt();
+    if norm > 0.0 {
+        for value in &mut values {
+            *value /= norm;
+        }
+    }
+    values
+}
+
+#[derive(Debug, Clone, Copy)]
+struct MockGeminiClient {
+    seam: EmbeddingSeam,
+}
+
+impl GeminiEmbeddingClient for MockGeminiClient {
+    fn resolve_model_pin(&self, _configured_model: &str) -> kcs_adapter::Result<String> {
+        Ok(ADOPTED_MODEL_PIN.to_owned())
+    }
+
+    fn embed(
+        &self,
+        items: &[EmbeddingItem],
+        _model_pin: &str,
+        dimensions: u32,
+    ) -> kcs_adapter::Result<Vec<EmbeddingVector>> {
+        match self.seam {
+            EmbeddingSeam::AuthError => {
+                return Err(kcs_adapter::AdapterError::Auth(
+                    "mock auth failure".to_owned(),
+                ))
+            }
+            EmbeddingSeam::RateLimit => {
+                return Err(kcs_adapter::AdapterError::RateLimit("mock 429".to_owned()))
+            }
+            _ => {}
+        }
+        Ok(items
+            .iter()
+            .map(|item| EmbeddingVector {
+                id: item.id.clone(),
+                vector: deterministic_unit_vector(
+                    item.text.as_deref().unwrap_or(""),
+                    dimensions as usize,
+                ),
+            })
+            .collect())
+    }
+}
+
+/// Run the active embedding adapter over a batch of items, returning one vector
+/// per item. Routes to the real `Env` client or the deterministic mock.
+fn run_embedding_adapter(
+    seam: EmbeddingSeam,
+    items: Vec<EmbeddingItem>,
+    input_type: EmbeddingInputType,
+) -> std::result::Result<Vec<EmbeddingVector>, TaskExecutionFailure> {
+    let request = EmbeddingRequest { input_type, items };
+    let response = match seam {
+        EmbeddingSeam::Real => GeminiEmbeddingAdapter::default().embed(request),
+        other => GeminiEmbeddingAdapter::new(
+            MockGeminiClient { seam: other },
+            ADOPTED_MODEL_PIN,
+            ADOPTED_DIMENSIONS,
+        )
+        .embed(request),
+    };
+    response
+        .map(|response| response.vectors)
+        .map_err(task_failure_from_adapter)
+}
+
+/// Compute the query embedding once per search (05 §1.1). Returns `None` when no
+/// adapter is configured or the query is too short to embed. A failing adapter
+/// call (auth/rate) degrades to `None` → text fallback rather than erroring the
+/// whole search. Query-embedding cost is not metered in the MVP (negligible; the
+/// budget guardrails target bulk index enrichment).
+fn compute_query_embedding(query: &str) -> Result<Option<Vec<f32>>> {
+    if query.chars().count() < 2 {
+        return Ok(None);
+    }
+    let Some(seam) = embedding_seam() else {
+        return Ok(None);
+    };
+    let items = vec![EmbeddingItem {
+        id: "query".to_owned(),
+        text: Some(query.to_owned()),
+        path: None,
+        mime: None,
+    }];
+    match run_embedding_adapter(seam, items, EmbeddingInputType::Query) {
+        Ok(vectors) => Ok(vectors.into_iter().next().map(|vector| vector.vector)),
+        Err(_) => Ok(None),
+    }
+}
+
+/// The tool-lock `embedding` entry (07 §6) for the active seam, or `None` when no
+/// embedding adapter is configured.
+fn embedding_tool_lock_entry() -> Result<Option<Value>> {
+    let Some(seam) = embedding_seam() else {
+        return Ok(None);
+    };
+    let profile = declared_embedding_profile(seam)?;
+    Ok(Some(json!({
+        "tool_id": profile.tool_id,
+        "profile_hash": profile.profile_hash,
+        "dimensions": profile.dimensions,
+        "distance": profile.distance,
+        "modality": profile.modality,
+        "kind": "online_api",
+        "mode": "online",
+    })))
+}
+
+/// A live chunk awaiting an embedding (current chunking_config_hash, HEAD-live).
+struct EmbeddableChunk {
+    chunk_id: String,
+    text: String,
+    text_hash: String,
+    raw_path: String,
+}
+
+/// Generate chunk embeddings for the scope after the SQLite index is rebuilt
+/// (04 §4.3 / 07 §5.3). Enqueues one `TaskType::Embedding` task per pending chunk,
+/// then — if the online opt-in and budget allow — embeds them (batched), writing
+/// the `embeddings` rows (source of truth) and `chunk_vec` (derived KNN copy),
+/// charging the cost ledger under `adapter_kind="embedding"`. Offline leaves tasks
+/// Pending (surfaced by `index_status`). No-op when no embedding adapter is
+/// configured (keeps the default index path unchanged).
+fn generate_scope_embeddings(repo: &Repository, args: &IndexArgs) -> Result<()> {
+    let Some(seam) = embedding_seam() else {
+        return Ok(());
+    };
+    let profile = declared_embedding_profile(seam)?;
+    // Non-multimodal is rejected at materialize_tool_lock; never reach embed here.
+    if profile.modality != "multimodal" {
+        return Ok(());
+    }
+    let db_path = sqlite_path(repo.kcs_dir());
+    if !db_path.exists() {
+        return Ok(());
+    }
+    let conn = Connection::open(&db_path).map_err(|err| KcsError::schema(err.to_string()))?;
+    let Some(head) = repo.head_commit_hash()? else {
+        return Ok(());
+    };
+    let chunking_config_hash = read_chunking_config(repo)?.chunking_config_hash;
+    let pending = live_chunks_without_embedding(&conn, &head, &chunking_config_hash)?;
+    if pending.is_empty() {
+        return Ok(());
+    }
+
+    let task_store = TaskStore::new(repo.kcs_dir());
+    let now = now_utc_seconds();
+    let online = network_allowed(repo, args)?;
+    enqueue_embedding_tasks(&task_store, repo, &pending, online, &now)?;
+    if !online {
+        // Offline: tasks stay Pending; `index_status` reports them (05 §1.7).
+        return Ok(());
+    }
+
+    let cost_ledger = CostLedger::new(cost_ledger_path());
+    let budget_caps =
+        read_budget_policy(user_config_toml_path(), repo.kcs_dir().join("config.toml"))
+            .map_err(pipeline_to_kcs)?;
+    let month = utc_month(&now);
+    let scope_id = repo.scope_id_for_adapter();
+
+    for batch in pending.chunks(EMBEDDING_BATCH_SIZE) {
+        let batch_chars: u64 = batch
+            .iter()
+            .map(|chunk| chunk.text.chars().count() as u64)
+            .sum();
+        let estimate = BudgetEstimate {
+            scope_id: scope_id.clone(),
+            task_type: TaskType::Embedding,
+            estimated_usd: estimate_embedding_cost(batch_chars),
+            adapter_id: Some("gemini_multimodal_embedding".to_owned()),
+        };
+        let (device_remaining, folder_remaining) = budget_remaining_for_adapter(
+            &cost_ledger,
+            &budget_caps,
+            &month,
+            &scope_id,
+            EMBEDDING_ADAPTER_KIND,
+        )?;
+        let budget =
+            evaluate_budget_with_caps(&estimate, device_remaining, folder_remaining, false);
+        if !budget.allowed {
+            // Budget exhausted: pause the remaining chunks (index_status.budget_paused).
+            pause_embedding_tasks(&task_store, batch)?;
+            break;
+        }
+        match embed_batch(&conn, seam, &profile, batch) {
+            Ok(()) => {
+                cost_ledger
+                    .append_monthly(&MonthlyCostLedgerEntry {
+                        month: month.clone(),
+                        scope_id: scope_id.clone(),
+                        adapter_kind: EMBEDDING_ADAPTER_KIND.to_owned(),
+                        usd: estimate.estimated_usd,
+                    })
+                    .map_err(pipeline_to_kcs)?;
+                complete_embedding_tasks(&task_store, batch)?;
+            }
+            Err(failure) => {
+                // Enrichment failure is non-fatal: mark the batch failed and stop
+                // (search sees no embeddings → text). Never fails `kcs index`.
+                fail_embedding_tasks(&task_store, batch, retry_reason(failure.retry_kind))?;
+                break;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Embed one batch: reuse an existing content vector where possible
+/// (CT3-EMBED-006), else call the adapter, then write `embeddings` + `chunk_vec`.
+fn embed_batch(
+    conn: &Connection,
+    seam: EmbeddingSeam,
+    profile: &DeclaredEmbeddingProfile,
+    batch: &[EmbeddableChunk],
+) -> std::result::Result<(), TaskExecutionFailure> {
+    let mut to_embed = Vec::new();
+    for chunk in batch {
+        let embedding_hash =
+            chunk_embedding_hash(chunk, profile).map_err(|_| TaskExecutionFailure {
+                retry_kind: RetryErrorKind::ContractViolation,
+            })?;
+        match embedding_store::content_vector(conn, &embedding_hash) {
+            Ok(Some(bytes)) => {
+                // Content-addressed reuse: no adapter call, just link chunk_vec.
+                embedding_store::link_chunk_vec(conn, &chunk.chunk_id, &bytes, profile.dimensions)
+                    .map_err(|_| TaskExecutionFailure {
+                        retry_kind: RetryErrorKind::ContractViolation,
+                    })?;
+            }
+            Ok(None) => to_embed.push((chunk, embedding_hash)),
+            Err(_) => {
+                return Err(TaskExecutionFailure {
+                    retry_kind: RetryErrorKind::ContractViolation,
+                })
+            }
+        }
+    }
+    if to_embed.is_empty() {
+        return Ok(());
+    }
+    let items = to_embed
+        .iter()
+        .map(|(chunk, _)| EmbeddingItem {
+            id: chunk.chunk_id.clone(),
+            text: Some(chunk.text.clone()),
+            path: None,
+            mime: None,
+        })
+        .collect::<Vec<_>>();
+    let vectors = run_embedding_adapter(seam, items, EmbeddingInputType::MarkdownChunk)?;
+    let by_id = vectors
+        .into_iter()
+        .map(|vector| (vector.id, vector.vector))
+        .collect::<BTreeMap<_, _>>();
+    for (chunk, embedding_hash) in &to_embed {
+        let Some(vector) = by_id.get(&chunk.chunk_id) else {
+            return Err(TaskExecutionFailure {
+                retry_kind: RetryErrorKind::ContractViolation,
+            });
+        };
+        let bytes = f32_to_le_bytes(vector);
+        embedding_store::write_chunk_embedding(
+            conn,
+            embedding_hash,
+            &chunk.text_hash,
+            &chunk.chunk_id,
+            &bytes,
+            profile.dimensions,
+            &profile.distance,
+            &profile.modality,
+            &profile.profile_hash,
+        )
+        .map_err(|_| TaskExecutionFailure {
+            retry_kind: RetryErrorKind::ContractViolation,
+        })?;
+    }
+    Ok(())
+}
+
+/// Embedding identity hash (03 §8.1) keyed on the chunk's `text_hash` so identical
+/// content shares one `embeddings` row (content-based reuse).
+fn chunk_embedding_hash(
+    chunk: &EmbeddableChunk,
+    profile: &DeclaredEmbeddingProfile,
+) -> Result<String> {
+    embedding_store::embedding_hash(
+        EmbeddingTargetType::Chunk,
+        &chunk.text_hash,
+        profile.dimensions,
+        EmbeddingDistance::Cosine,
+        EmbeddingModality::Multimodal,
+        &profile.profile_hash,
+    )
+    .map_err(index_to_kcs)
+}
+
+/// Cost estimate for embedding `chars` of text: ~4 chars/token, $0.15 per 1M
+/// tokens (gemini-embedding ballpark; consistent with the 07 §5.3 figure of
+/// ≈$10 for 100k chunks). Fixed here and reported (brief item 2).
+fn estimate_embedding_cost(chars: u64) -> f64 {
+    let tokens = chars as f64 / 4.0;
+    tokens / 1_000_000.0 * 0.15
+}
+
+/// Live chunks (current chunking_config_hash, HEAD tree_entries) that have no
+/// `chunk_vec` row yet.
+fn live_chunks_without_embedding(
+    conn: &Connection,
+    head: &str,
+    chunking_config_hash: &str,
+) -> Result<Vec<EmbeddableChunk>> {
+    let mut existing_stmt = conn
+        .prepare("SELECT chunk_id FROM chunk_vec")
+        .map_err(|err| KcsError::schema(err.to_string()))?;
+    let existing = existing_stmt
+        .query_map([], |row| row.get::<_, String>(0))
+        .map_err(|err| KcsError::schema(err.to_string()))?
+        .collect::<std::result::Result<BTreeSet<String>, _>>()
+        .map_err(|err| KcsError::schema(err.to_string()))?;
+    drop(existing_stmt);
+
+    let mut stmt = conn
+        .prepare(
+            "SELECT c.chunk_id, c.text, c.text_hash, c.raw_path
+             FROM chunks c
+             JOIN tree_entries te ON te.commit_hash = ?1
+                 AND te.raw_hash = c.raw_hash
+                 AND te.tool_profile_hash = c.tool_profile_hash
+                 AND te.gen = c.gen
+             WHERE c.chunking_config_hash = ?2
+             ORDER BY c.rowid",
+        )
+        .map_err(|err| KcsError::schema(err.to_string()))?;
+    let rows = stmt
+        .query_map(rusqlite::params![head, chunking_config_hash], |row| {
+            Ok(EmbeddableChunk {
+                chunk_id: row.get(0)?,
+                text: row.get(1)?,
+                text_hash: row.get(2)?,
+                raw_path: row.get(3)?,
+            })
+        })
+        .map_err(|err| KcsError::schema(err.to_string()))?;
+    let mut pending = Vec::new();
+    for row in rows {
+        let chunk = row.map_err(|err| KcsError::schema(err.to_string()))?;
+        if !existing.contains(&chunk.chunk_id) {
+            pending.push(chunk);
+        }
+    }
+    Ok(pending)
+}
+
+fn embedding_task_output_ref(chunk_id: &str) -> String {
+    format!("embedding:{chunk_id}")
+}
+
+/// Enqueue one Pending `Embedding` task per pending chunk, skipping chunks that
+/// already have any embedding task (idempotent re-index).
+fn enqueue_embedding_tasks(
+    task_store: &TaskStore,
+    repo: &Repository,
+    pending: &[EmbeddableChunk],
+    online: bool,
+    now: &str,
+) -> Result<()> {
+    let existing = task_store
+        .all()
+        .map_err(pipeline_to_kcs)?
+        .into_iter()
+        .filter(|task| task.task_type == TaskType::Embedding)
+        .map(|task| task.output_ref)
+        .collect::<BTreeSet<_>>();
+    let reason = if online {
+        "ready_for_online_adapter"
+    } else {
+        "network_opt_in_required"
+    };
+    for chunk in pending {
+        let output_ref = embedding_task_output_ref(&chunk.chunk_id);
+        if existing.contains(&output_ref) {
+            continue;
+        }
+        let task = TaskDescriptor {
+            task_id: format!("task_{}", new_ulid(repo.root())),
+            task_type: TaskType::Embedding,
+            mode: None,
+            input_path: chunk.raw_path.clone(),
+            input_hash: chunk.text_hash.clone(),
+            previous_raw_hash: None,
+            parent_run_id: None,
+            changed_unit_keys: vec![chunk.chunk_id.clone()],
+            output_ref,
+            unit_keys: None,
+            status: TaskStatus::Pending,
+            attempts: 0,
+            next_retry_at: None,
+            deadline: None,
+            heartbeat_at: None,
+            fallback_reason: Some(reason.to_owned()),
+            created_at: now.to_owned(),
+        };
+        task_store.append(&task).map_err(pipeline_to_kcs)?;
+    }
+    Ok(())
+}
+
+fn update_embedding_tasks(
+    task_store: &TaskStore,
+    batch: &[EmbeddableChunk],
+    status: TaskStatus,
+    reason: &str,
+) -> Result<()> {
+    let refs = batch
+        .iter()
+        .map(|chunk| embedding_task_output_ref(&chunk.chunk_id))
+        .collect::<BTreeSet<_>>();
+    task_store
+        .update_matching(|task| {
+            if task.task_type == TaskType::Embedding && refs.contains(&task.output_ref) {
+                task.status = status;
+                task.fallback_reason = Some(reason.to_owned());
+                true
+            } else {
+                false
+            }
+        })
+        .map_err(pipeline_to_kcs)?;
+    Ok(())
+}
+
+fn complete_embedding_tasks(task_store: &TaskStore, batch: &[EmbeddableChunk]) -> Result<()> {
+    update_embedding_tasks(
+        task_store,
+        batch,
+        TaskStatus::Done,
+        "embedding_adapter_done",
+    )
+}
+
+fn pause_embedding_tasks(task_store: &TaskStore, batch: &[EmbeddableChunk]) -> Result<()> {
+    update_embedding_tasks(task_store, batch, TaskStatus::Paused, "budget_exceeded")
+}
+
+fn fail_embedding_tasks(
+    task_store: &TaskStore,
+    batch: &[EmbeddableChunk],
+    reason: &str,
+) -> Result<()> {
+    update_embedding_tasks(task_store, batch, TaskStatus::Failed, reason)
 }
 
 fn retry_reason(kind: RetryErrorKind) -> &'static str {
@@ -2132,7 +5471,7 @@ fn materialize_tool_lock(repo: &Repository) -> Result<()> {
     let prepare_hash =
         tool_profile_hash(&deterministic_prepare_profile_value()).map_err(adapter_to_kcs)?;
     let markdown_profile = active_markdown_adapter(repo).profile();
-    let value = json!({
+    let mut value = json!({
         "spec_version": 1,
         "prepare": {
             "tool_id": "prepare_default",
@@ -2146,9 +5485,30 @@ fn materialize_tool_lock(repo: &Repository) -> Result<()> {
             "capabilities": markdown_profile.capability_flags
         }
     });
-    let path = repo.kcs_dir().join("tool-lock.json");
+    // Write the embedding entry (07 §6) when an embedding adapter is configured.
+    // A non-multimodal profile is rejected here (03 §7): `load_tool_lock` fails
+    // with KCS-E-EMBED-MODALITY-001, which we surface as exit 2 (scenario (e))
+    // *before* any indexing happens.
+    if let Some(entry) = embedding_tool_lock_entry()? {
+        if let Some(object) = value.as_object_mut() {
+            object.insert("embedding".to_owned(), entry);
+        }
+    }
     let bytes =
         serde_json::to_vec_pretty(&value).map_err(|err| KcsError::schema(err.to_string()))?;
+    if let Err(error) = load_tool_lock(&bytes) {
+        let message = error.to_string();
+        if message.contains("KCS-E-EMBED-MODALITY-001") {
+            return Err(KcsError::new(
+                "KCS-E-EMBED-MODALITY-001",
+                message,
+                json!({}),
+                ExitCode::InvalidUsage,
+            ));
+        }
+        return Err(adapter_to_kcs(error));
+    }
+    let path = repo.kcs_dir().join("tool-lock.json");
     fs::write(&path, bytes).map_err(|err| KcsError::io(err.to_string(), path.display().to_string()))
 }
 
@@ -2475,7 +5835,19 @@ fn print_error(error: &KcsError, json_mode: bool) {
 mod tests {
     use clap::Parser;
 
-    use super::{command_captured_json_flag, Cli, Command};
+    use super::{command_captured_json_flag, deterministic_unit_vector, Cli, Command};
+
+    #[test]
+    fn mock_embedding_vector_is_deterministic_and_normalized() {
+        let a = deterministic_unit_vector("認証仕様 トークン", 768);
+        let b = deterministic_unit_vector("認証仕様 トークン", 768);
+        assert_eq!(a.len(), 768);
+        assert_eq!(a, b, "same seed must reproduce the same vector");
+        let norm = a.iter().map(|value| value * value).sum::<f32>().sqrt();
+        assert!((norm - 1.0).abs() < 1e-4, "vector must be L2-normalized");
+        let other = deterministic_unit_vector("別のクエリ", 768);
+        assert_ne!(a, other, "different seeds must differ");
+    }
 
     #[test]
     fn parses_global_json_after_command() {
