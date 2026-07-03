@@ -17,6 +17,9 @@ ROOT = Path(__file__).resolve().parent
 DEFAULT_GROUND_TRUTH = ROOT / "fixtures" / "generated" / "ground_truth.json"
 DEFAULT_RUN_RESPONSE = ROOT / "out" / "ocr_response.json"
 DEFAULT_OUT_DIR = ROOT / "out"
+# 生成画像 fixture 用の別 ground truth / 別出力先 (run_ocr.py --fixture generated-images と対応)。
+GENERATED_IMAGES_GROUND_TRUTH = ROOT / "fixtures" / "generated" / "generated_images_ground_truth.json"
+GENERATED_IMAGES_OUT_DIR = ROOT / "out" / "generated-images"
 
 TABLE_THRESHOLD = 0.95
 JAPANESE_CER_THRESHOLD = 0.02
@@ -30,15 +33,40 @@ BOUNDARY_DROP_DELTA = 0.25
 BOUNDARY_RECALL_FLOOR = 0.5
 # 系統A/B: recall がこの値未満なら「ラスタからのテキスト回収に失敗した疑い」を診断表示。
 RASTER_RECALL_WARN = 0.5
+# 生成画像: visible_text の正規化トークン回収率から観測分類を付ける診断閾値。
+GENERATED_TEXT_RECALL_HIGH = 0.7
+GENERATED_IMAGE_RECALL_LOW = 0.3
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dry-run", action="store_true", help="Assert that the input OCR run was produced with --dry-run.")
-    parser.add_argument("--ground-truth", type=Path, default=DEFAULT_GROUND_TRUTH)
-    parser.add_argument("--ocr-response", type=Path, default=DEFAULT_RUN_RESPONSE)
-    parser.add_argument("--out-dir", type=Path, default=DEFAULT_OUT_DIR)
-    return parser.parse_args()
+    parser.add_argument(
+        "--fixture",
+        choices=["default", "generated-images"],
+        default="default",
+        help="default = 18-page synthetic fixture; generated-images = 15 delivered ambiguous images "
+        "(sets --ground-truth / --ocr-response / --out-dir defaults unless overridden).",
+    )
+    parser.add_argument("--ground-truth", type=Path, default=None)
+    parser.add_argument("--ocr-response", type=Path, default=None)
+    parser.add_argument("--out-dir", type=Path, default=None)
+    args = parser.parse_args()
+    if args.fixture == "generated-images":
+        if args.ground_truth is None:
+            args.ground_truth = GENERATED_IMAGES_GROUND_TRUTH
+        if args.out_dir is None:
+            args.out_dir = GENERATED_IMAGES_OUT_DIR
+        if args.ocr_response is None:
+            args.ocr_response = GENERATED_IMAGES_OUT_DIR / "ocr_response.json"
+    else:
+        if args.ground_truth is None:
+            args.ground_truth = DEFAULT_GROUND_TRUTH
+        if args.out_dir is None:
+            args.out_dir = DEFAULT_OUT_DIR
+        if args.ocr_response is None:
+            args.ocr_response = DEFAULT_RUN_RESPONSE
+    return args
 
 
 def main() -> None:
@@ -47,6 +75,12 @@ def main() -> None:
     run_record = load_json(args.ocr_response, "OCR response")
     if args.dry_run and not run_record.get("dry_run"):
         raise SystemExit(f"{args.ocr_response} was not produced by run_ocr.py --dry-run")
+
+    # 生成画像 fixture は別スキーマ・別レポート。既存 18 ページ fixture の評価と混ざらないよう
+    # ここで完全に分岐する (out/generated-images/ 配下だけに出力し、overall pass に絡めない)。
+    if ground_truth.get("dataset") == "generated-images":
+        run_generated_images(args, ground_truth, run_record)
+        return
 
     response = run_record.get("response", run_record)
     table_metric = evaluate_table(response, ground_truth)
@@ -832,6 +866,312 @@ def render_boundary_report(staged: dict[str, Any], results: dict[str, Any]) -> s
             lines.append(
                 f"- {stage_name} / {zone_name}: " + ", ".join(f"`{token}`" for token in missing)
             )
+    return "\n".join(lines) + "\n"
+
+
+# ===========================================================================
+# 生成画像 fixture (Codex APP 納品の曖昧画像 15 枚) の評価。
+# 既存 18 ページ fixture とはスキーマ・レポートともに独立。
+# ===========================================================================
+
+
+def run_generated_images(args: argparse.Namespace, ground_truth: dict[str, Any], run_record: dict[str, Any]) -> None:
+    response = run_record.get("response", run_record)
+    metric = evaluate_generated_images(response, ground_truth)
+    results = {
+        "schema_version": 1,
+        "dataset": "generated-images",
+        "created_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+        "dry_run": bool(run_record.get("dry_run")),
+        "mode": run_record.get("mode"),
+        "requested_model": run_record.get("requested_model"),
+        "resolved_model": run_record.get("resolved_model"),
+        "page_count": run_record.get("page_count"),
+        "estimated_cost_usd": run_record.get("estimated_cost_usd"),
+        "latency_seconds": run_record.get("latency_seconds"),
+        "passed": None,
+        "criteria": {
+            "generated_images": (
+                "diagnostic only (no pass threshold): per image (i) embedded token in markdown body, "
+                "(ii) visible_text normalized-token recall, (iii) returned as images[]; "
+                f"observed class = text-dominant if recall>={GENERATED_TEXT_RECALL_HIGH}, "
+                f"image-dominant if recall<{GENERATED_IMAGE_RECALL_LOW}, else mixed"
+            )
+        },
+        "metrics": {"generated_images": metric},
+    }
+    args.out_dir.mkdir(parents=True, exist_ok=True)
+    results_path = args.out_dir / "results.json"
+    report_path = args.out_dir / "report.md"
+    write_json(results_path, results)
+    report_path.write_text(render_generated_images_report(results), encoding="utf-8")
+    print(f"wrote {display_path(results_path)}")
+    print(f"wrote {display_path(report_path)}")
+    summary = metric["summary"]
+    print(
+        f"generated-images pages={metric['page_count']} "
+        f"aggregate_visible_recall={summary['aggregate_visible_recall']} "
+        f"token_hit={summary['token_hit_pages']}/{metric['page_count']} "
+        f"expect_match={summary['expect_match_pages']}/{metric['page_count']}"
+    )
+
+
+def tokenize_visible_text(text: str) -> list[str]:
+    """visible_text を正規化トークン列に分解する。
+
+    `;` (segment 区切り) と空白で分割し、normalize_token 後に空になるもの・1 文字のものは
+    ノイズ (単一数字/記号) として捨てる。CJK 句 (例: 牛乳) は空白で分かれた語単位で残る。
+    """
+    tokens: list[str] = []
+    for segment in text.split(";"):
+        for word in segment.split():
+            normalized = normalize_token(word)
+            if len(normalized) >= 2:
+                tokens.append(word.strip())
+    return tokens
+
+
+def classify_generated_observed(visible_recall: float, images_count: int) -> str:
+    if visible_recall >= GENERATED_TEXT_RECALL_HIGH:
+        return "text-dominant"
+    if visible_recall < GENERATED_IMAGE_RECALL_LOW:
+        return "image-dominant"
+    return "mixed"
+
+
+def evaluate_generated_images(response: dict[str, Any], ground_truth: dict[str, Any]) -> dict[str, Any]:
+    """画像 (=ページ) ごとに token 本文出現 / visible_text 回収率 / images[] を測り、
+    family 別集計と expect (text-dominant/mixed/image-dominant) との突合を返す。
+    """
+    expect_classes = ["text-dominant", "mixed", "image-dominant"]
+    pages: list[dict[str, Any]] = []
+    for entry in ground_truth["pages"]:
+        page = page_by_index(response, entry["page_index"])
+        markdown = page.get("markdown", "")
+        haystack = normalize_token(markdown)
+
+        # (i) 埋め込みトークンが markdown 本文に出たか。
+        tokens = entry.get("tokens", [])
+        token_hits = [tok for tok in tokens if normalize_token(tok) in haystack]
+        token_hit = bool(tokens) and len(token_hits) == len(tokens)
+
+        # (ii) visible_text の正規化トークン回収率。
+        vis_tokens = tokenize_visible_text(entry.get("visible_text", ""))
+        matched = [tok for tok in vis_tokens if normalize_token(tok) in haystack]
+        recall = len(matched) / len(vis_tokens) if vis_tokens else 1.0
+
+        # (iii) images[] として返ったか。
+        images_count = images_list_count(page)
+
+        observed = classify_generated_observed(recall, images_count)
+        pages.append(
+            {
+                "page_index": entry["page_index"],
+                "file": entry["file"],
+                "family": entry["family"],
+                "expect": entry["expect"],
+                "observed": observed,
+                "expect_match": observed == entry["expect"],
+                "token_count": len(tokens),
+                "token_hit_count": len(token_hits),
+                "token_hit": token_hit,
+                "visible_token_count": len(vis_tokens),
+                "visible_matched_count": len(matched),
+                "visible_recall": round(recall, 6),
+                "images_count": images_count,
+                "returned_as_image": images_count > 0,
+            }
+        )
+
+    families: dict[str, dict[str, Any]] = {}
+    for entry in pages:
+        fam = families.setdefault(
+            entry["family"],
+            {"family": entry["family"], "pages": 0, "recall_sum": 0.0, "token_hit": 0, "returned_as_image": 0, "expect_match": 0},
+        )
+        fam["pages"] += 1
+        fam["recall_sum"] += entry["visible_recall"]
+        fam["token_hit"] += int(entry["token_hit"])
+        fam["returned_as_image"] += int(entry["returned_as_image"])
+        fam["expect_match"] += int(entry["expect_match"])
+    family_rows = []
+    for fam in sorted(families.values(), key=lambda item: item["family"]):
+        family_rows.append(
+            {
+                "family": fam["family"],
+                "pages": fam["pages"],
+                "mean_visible_recall": round(fam["recall_sum"] / fam["pages"], 6) if fam["pages"] else None,
+                "token_hit_pages": fam["token_hit"],
+                "returned_as_image_pages": fam["returned_as_image"],
+                "expect_match_pages": fam["expect_match"],
+            }
+        )
+
+    # expect x observed の突合 (crosstab) と expect 別集計。
+    crosstab = {exp: {obs: 0 for obs in expect_classes} for exp in expect_classes}
+    expect_agg: dict[str, dict[str, Any]] = {
+        exp: {"expect": exp, "pages": 0, "recall_sum": 0.0, "returned_as_image": 0, "match": 0} for exp in expect_classes
+    }
+    for entry in pages:
+        exp = entry["expect"]
+        obs = entry["observed"]
+        if exp in crosstab and obs in crosstab[exp]:
+            crosstab[exp][obs] += 1
+        bucket = expect_agg.setdefault(
+            exp, {"expect": exp, "pages": 0, "recall_sum": 0.0, "returned_as_image": 0, "match": 0}
+        )
+        bucket["pages"] += 1
+        bucket["recall_sum"] += entry["visible_recall"]
+        bucket["returned_as_image"] += int(entry["returned_as_image"])
+        bucket["match"] += int(entry["expect_match"])
+    expect_rows = []
+    for exp in expect_classes:
+        bucket = expect_agg[exp]
+        expect_rows.append(
+            {
+                "expect": exp,
+                "pages": bucket["pages"],
+                "mean_visible_recall": round(bucket["recall_sum"] / bucket["pages"], 6) if bucket["pages"] else None,
+                "returned_as_image_pages": bucket["returned_as_image"],
+                "expect_match_pages": bucket["match"],
+            }
+        )
+
+    total = len(pages)
+    recall_sum = sum(entry["visible_recall"] for entry in pages)
+    summary = {
+        "aggregate_visible_recall": round(recall_sum / total, 6) if total else None,
+        "token_hit_pages": sum(1 for entry in pages if entry["token_hit"]),
+        "returned_as_image_pages": sum(1 for entry in pages if entry["returned_as_image"]),
+        "expect_match_pages": sum(1 for entry in pages if entry["expect_match"]),
+    }
+    return {
+        "page_count": total,
+        "expect_classes": expect_classes,
+        "summary": summary,
+        "pages": pages,
+        "by_family": family_rows,
+        "by_expect": expect_rows,
+        "expect_vs_observed": crosstab,
+        "passed": None,
+        "note": (
+            "Diagnostic only; no pass/fail. Measures whether ambiguous images stay searchable "
+            "(token + visible-text recall in markdown) vs. get returned as images[]."
+        ),
+    }
+
+
+def render_generated_images_report(results: dict[str, Any]) -> str:
+    metric = results["metrics"]["generated_images"]
+    summary = metric["summary"]
+    total = metric["page_count"]
+    lines = [
+        "# Generated-images OCR report",
+        "",
+        "Codex APP 納品の曖昧画像 15 枚 (g1_*..g5_*) を 1 ページ 1 画像で OCR にかけ、画像内テキストが "
+        "markdown 本文として検索可能に残るか (= token / visible_text recall) / images[] に落ちるかを測る。",
+        "Diagnostic only (no pass/fail).",
+        "",
+        "## Run",
+        "",
+        f"- Mode: `{results.get('mode')}`",
+        f"- Dry-run: `{results.get('dry_run')}`",
+        f"- Requested model: `{results.get('requested_model')}`",
+        f"- Resolved model from response: `{results.get('resolved_model')}`",
+        f"- Pages: `{results.get('page_count')}`",
+        f"- Latency seconds: `{results.get('latency_seconds')}`",
+        f"- Estimated cost USD: `{results.get('estimated_cost_usd')}`",
+        "",
+        "## Diagnostic classification",
+        "",
+        f"- Observed class: text-dominant if visible recall >= {GENERATED_TEXT_RECALL_HIGH}, "
+        f"image-dominant if < {GENERATED_IMAGE_RECALL_LOW}, else mixed (heuristic; not a pass threshold).",
+        "",
+        "## Summary",
+        "",
+        f"- Aggregate visible-text recall: `{summary['aggregate_visible_recall']}`",
+        f"- Pages with embedded token in body: `{summary['token_hit_pages']}/{total}`",
+        f"- Pages returned as images[]: `{summary['returned_as_image_pages']}/{total}`",
+        f"- Pages where observed == expect: `{summary['expect_match_pages']}/{total}`",
+        "",
+        "## Per image",
+        "",
+        "| page | file | family | expect | observed | token | visible recall | images[] |",
+        "| ---: | --- | --- | --- | --- | :---: | ---: | ---: |",
+    ]
+    for entry in metric["pages"]:
+        lines.append(
+            "| {page} | {file} | {family} | {expect} | {observed} | {token} | {recall} ({m}/{t}) | {images} |".format(
+                page=entry["page_index"],
+                file=entry["file"],
+                family=entry["family"],
+                expect=entry["expect"],
+                observed=entry["observed"],
+                token="yes" if entry["token_hit"] else "NO",
+                recall=entry["visible_recall"],
+                m=entry["visible_matched_count"],
+                t=entry["visible_token_count"],
+                images=entry["images_count"],
+            )
+        )
+
+    lines.extend(
+        [
+            "",
+            "## By family",
+            "",
+            "| family | pages | mean visible recall | token hit | returned as image | expect match |",
+            "| --- | ---: | ---: | ---: | ---: | ---: |",
+        ]
+    )
+    for row in metric["by_family"]:
+        lines.append(
+            "| {family} | {pages} | {recall} | {token}/{pages} | {img}/{pages} | {match}/{pages} |".format(
+                family=row["family"],
+                pages=row["pages"],
+                recall=row["mean_visible_recall"],
+                token=row["token_hit_pages"],
+                img=row["returned_as_image_pages"],
+                match=row["expect_match_pages"],
+            )
+        )
+
+    lines.extend(
+        [
+            "",
+            "## By expect",
+            "",
+            "| expect | pages | mean visible recall | returned as image | observed == expect |",
+            "| --- | ---: | ---: | ---: | ---: |",
+        ]
+    )
+    for row in metric["by_expect"]:
+        lines.append(
+            "| {expect} | {pages} | {recall} | {img}/{pages} | {match}/{pages} |".format(
+                expect=row["expect"],
+                pages=row["pages"],
+                recall=row["mean_visible_recall"],
+                img=row["returned_as_image_pages"],
+                match=row["expect_match_pages"],
+            )
+        )
+
+    classes = metric["expect_classes"]
+    crosstab = metric["expect_vs_observed"]
+    lines.extend(
+        [
+            "",
+            "## expect vs observed (counts)",
+            "",
+            "行 = 納品時の expect、列 = 観測分類。対角線が一致。",
+            "",
+            "| expect \\ observed | " + " | ".join(classes) + " |",
+            "| --- | " + " | ".join("---:" for _ in classes) + " |",
+        ]
+    )
+    for exp in classes:
+        row_cells = " | ".join(str(crosstab[exp][obs]) for obs in classes)
+        lines.append(f"| {exp} | {row_cells} |")
     return "\n".join(lines) + "\n"
 
 
