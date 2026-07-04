@@ -16,8 +16,9 @@ kcs status                              # ファイル状態 / pending タスク
 kcs index [--preview|--approve|--yes] [--online|--offline]  # 取り込み (初回は preview + 承認必須)。
                                         # --online/--offline は当該実行の送信可否を上書き (正本 07-adapter-spec.md §3。
                                         # 優先順位: CLI > scope config > user config)
-kcs batch resume [--override-budget]    # 中断タスクの再開 (budget 超過 pause は --override-budget 必須。04-pipeline.md §5.4/§5.7)
-kcs batch retry                         # failed タスクの再試行
+kcs batch resume [--override-budget]    # 中断タスクの再開 (budget 超過 pause は --override-budget 必須。04-pipeline.md §5.4/§5.7)。
+                                        # markdownize online タスクと embedding enrichment パスを両方駆動 (04-pipeline.md §5.4)
+kcs batch retry                         # failed タスクの再試行 (markdownize + embedding。backoff/retry 予算を尊重)
 kcs repair [--rebuild-db|--verify-objects]  # SQLite 再構築 / CAS 整合性検証 (10-operations.md §7.5)
 kcs commit -m "<message>"               # = kcs snapshot create -m
 kcs snapshot [create] [-m "<message>"]  # create 省略可。-m 省略時は自動 message ("snapshot at <UTC timestamp>")

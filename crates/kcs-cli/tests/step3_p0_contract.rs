@@ -1513,3 +1513,240 @@ fn ct3_embed_010_retry_executes_after_snapshot_advances_head() {
     assert!(!emb.is_empty());
     assert!(emb.iter().all(|t| t["status"] == "done"));
 }
+
+// ---------------------------------------------------------------------------
+// Step 4 checkpoint fixes L1-L7 — real-machine acceptance scenarios (a)-(d).
+// ---------------------------------------------------------------------------
+
+/// Run `kcs <args> --json` with BOTH online mock seams (markdownize + embedding)
+/// so `batch resume`/index can execute both adapters deterministically offline.
+fn json_both_mock(dir: &TempDir, args: &[&str]) -> Value {
+    let output = kcs(dir, args)
+        .env("KCS_TEST_GEMINI_EMBED", "mock")
+        .env("KCS_TEST_MISTRAL_OCR", "mock")
+        .arg("--json")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    serde_json::from_slice(&output).unwrap()
+}
+
+fn tasks_of_type<'a>(status: &'a Value, ty: &str) -> Vec<&'a Value> {
+    status["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|task| task["type"] == ty)
+        .collect()
+}
+
+fn is_budget_paused(status: &Value, ty: &str) -> bool {
+    tasks_of_type(status, ty)
+        .iter()
+        .any(|task| task["status"] == "paused" && task["fallback_reason"] == "budget_exceeded")
+}
+
+// Scenario (a) — L1: a chunking-config change + `reindex --force` re-embeds the
+// new generation (docs/06 "reindex = 再 normalize / 再 embedding"). The smaller
+// max_chars re-splits sections into chunks with fresh text (new text_hash), so
+// no content vector can be reused — the enrichment must issue real embeddings.
+// Before L1 the rebuild never called enrichment, so the new generation carried
+// no embeddings and `index_status` falsely read fully enriched.
+#[test]
+fn ct3_l1_reindex_enriches_new_generation_embeddings() {
+    let dir = indexed_scope_embed("mock");
+    let before = tasks_of_type(&json_success_embed(&dir, "mock", &["status"]), "embedding").len();
+    assert!(before > 0, "initial index must have embedding tasks");
+
+    // Force a genuine re-split so the new chunks have text unseen by the embedding
+    // store (otherwise the DB rebuild would reuse content vectors by text_hash).
+    fs::write(
+        dir.path().join(".kcs/config.toml"),
+        "kcs_format_version = \"0.1.0\"\n[chunking]\nstrategy = \"heading\"\nmax_chars = 10\n",
+    )
+    .unwrap();
+    let out = json_success_embed(&dir, "mock", &["reindex", "--force", "--yes"]);
+    assert_eq!(out["status"], "reindexed");
+
+    let status = json_success_embed(&dir, "mock", &["status"]);
+    let emb = tasks_of_type(&status, "embedding");
+    assert!(
+        emb.len() > before,
+        "reindex must enqueue embeddings for the new generation (L1): {status}"
+    );
+    assert!(
+        emb.iter().all(|task| task["status"] == "done"),
+        "opted-in reindex must embed the new generation, not leave it pending: {status}"
+    );
+}
+
+// Scenario (a) — L1 offline: with the embedding adapter configured but NOT
+// opted-in, `reindex` must still enqueue the new generation's embedding tasks so
+// `index_status` surfaces them as pending. Before L1 no tasks were created and
+// `index_status` reported enriched_ratio = 1.0 / pending = 0 for them.
+#[test]
+fn ct3_l1_reindex_offline_surfaces_pending_embeddings_in_index_status() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(
+        dir.path().join("note.md"),
+        "# ノート\n\n## 本文\n埋め込み保留の可視化テストです。\n",
+    )
+    .unwrap();
+    kcs(&dir, &["init"]).assert().success();
+    // `--yes` records the opt-in rows with network_opt_in=false → embedding stays
+    // offline (enqueue-only), the same as the markdownize online task.
+    json_success_embed(&dir, "mock", &["index", "--yes"]);
+    let before = tasks_of_type(&json_success_embed(&dir, "mock", &["status"]), "embedding").len();
+
+    json_success_embed(&dir, "mock", &["reindex", "--force", "--yes"]);
+    let status = json_success_embed(&dir, "mock", &["status"]);
+    let emb = tasks_of_type(&status, "embedding");
+    assert!(
+        emb.len() > before,
+        "offline reindex must still enqueue new-generation embedding tasks (L1)"
+    );
+    assert!(
+        emb.iter().any(|task| task["status"] == "pending"),
+        "offline reindex must leave embedding tasks pending: {status}"
+    );
+    let search = json_success_embed(&dir, "mock", &["search", "本文 埋め込み"]);
+    assert!(
+        search["index_status"]["pending_enrichment_tasks"]
+            .as_u64()
+            .unwrap()
+            > 0
+    );
+    assert!(search["index_status"]["enriched_ratio"].as_f64().unwrap() < 1.0);
+}
+
+// Scenario (b) — L2: budget-exceeded Paused tasks are sticky under `batch resume`
+// and only run under `--override-budget`, SYMMETRICALLY for markdownize and
+// embedding. Before L2, `resume --override-budget` re-paused markdownize (the
+// override never reached the executor's budget judgement) while embedding, being
+// DB-driven, ran even a Paused task without any override.
+#[test]
+fn ct3_l2_budget_paused_resume_symmetry_across_adapters() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(
+        dir.path().join("budget.md"),
+        "# 予算\n\n## 本文\nスティッキー一時停止の対称性テスト本文です。\n",
+    )
+    .unwrap();
+    kcs(&dir, &["init"]).assert().success();
+    // A zero folder cap pauses BOTH adapters on budget.
+    fs::write(
+        dir.path().join(".kcs/config.toml"),
+        "kcs_format_version = \"0.1.0\"\n[budget]\nmonthly_usd_cap = 0\n",
+    )
+    .unwrap();
+    json_both_mock(&dir, &["index", "--approve"]);
+    let status = json_both_mock(&dir, &["status"]);
+    assert!(
+        is_budget_paused(&status, "markdownize"),
+        "markdownize must be budget-paused: {status}"
+    );
+    assert!(
+        is_budget_paused(&status, "embedding"),
+        "embedding must be budget-paused: {status}"
+    );
+
+    // resume WITHOUT override → both remain sticky-Paused (symmetry).
+    json_both_mock(&dir, &["batch", "resume"]);
+    let status = json_both_mock(&dir, &["status"]);
+    assert!(
+        is_budget_paused(&status, "markdownize"),
+        "markdownize must stay paused without override: {status}"
+    );
+    assert!(
+        is_budget_paused(&status, "embedding"),
+        "embedding must stay paused without override (L2 ii): {status}"
+    );
+
+    // resume WITH override → both execute to done (symmetry).
+    json_both_mock(&dir, &["batch", "resume", "--override-budget"]);
+    let status = json_both_mock(&dir, &["status"]);
+    assert!(
+        tasks_of_type(&status, "markdownize")
+            .iter()
+            .all(|task| task["status"] == "done"),
+        "override must run markdownize (L2 i): {status}"
+    );
+    assert!(
+        tasks_of_type(&status, "embedding")
+            .iter()
+            .all(|task| task["status"] == "done"),
+        "override must run embedding: {status}"
+    );
+}
+
+// Scenario (c) — L3: a short-hash `view` still resolves after a bare `kcs
+// snapshot` advanced HEAD. The manual snapshot writes a raw-only tree (differs
+// from the index's normalized tree, so HEAD genuinely advances) without
+// refreshing the tree_entries projection; before L3 the short-hash resolver read
+// a stale JSON projection filtered by the new HEAD and returned CONFIG-USAGE,
+// while search (SQLite lazy projection) still succeeded — the asymmetry.
+#[test]
+fn ct3_l3_short_hash_resolves_after_bare_snapshot() {
+    let dir = indexed_scope();
+    let search = json_success(&dir, &["search", "トークン TTL 3600"]);
+    let chunk_hash = first_result(&search)["chunk_hash"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    // Sanity: resolves before the snapshot.
+    assert!(json_success(&dir, &["view", &chunk_hash])["text"]
+        .as_str()
+        .unwrap()
+        .contains("3600"));
+    // Advance HEAD via a bare snapshot (proves it is not a no-op).
+    let snap = json_success(&dir, &["snapshot", "-m", "advance"]);
+    assert_eq!(
+        snap["status"], "created",
+        "snapshot must advance HEAD: {snap}"
+    );
+    // L3: the same short-hash view still resolves.
+    let viewed = json_success(&dir, &["view", &chunk_hash]);
+    assert!(
+        viewed["text"].as_str().unwrap().contains("3600"),
+        "short-hash view must survive a bare snapshot (L3): {viewed}"
+    );
+}
+
+// Scenario (d) — L4: an embedding adapter rides on its OWN opt-in, not the
+// markdownize approval. A scope approved for markdownize only (backward-compat:
+// no embedding approval row) must enqueue embedding tasks without ever calling
+// the adapter; granting the embedding opt-in then embeds them.
+#[test]
+fn ct3_l4_embedding_without_own_optin_is_enqueue_only() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(
+        dir.path().join("adapter.md"),
+        "# アダプタ\n\n## 本文\nアダプタ単位 opt-in のテスト本文です。\n",
+    )
+    .unwrap();
+    kcs(&dir, &["init"]).assert().success();
+    // Approve WITHOUT the embedding seam → only the markdownize opt-in row exists.
+    json_success(&dir, &["index", "--approve"]);
+    // Now configure the embedding adapter (mock) and re-drive enrichment via
+    // reindex. The scope has no embedding opt-in row → enqueue-only.
+    json_success_embed(&dir, "mock", &["reindex", "--force", "--yes"]);
+    let status = json_success_embed(&dir, "mock", &["status"]);
+    let emb = tasks_of_type(&status, "embedding");
+    assert!(!emb.is_empty(), "embedding tasks must be enqueued");
+    assert!(
+        emb.iter().all(|task| task["status"] == "pending"),
+        "embedding without its own opt-in must stay enqueue-only (L4): {status}"
+    );
+
+    // Grant the embedding opt-in explicitly → the same chunks now embed.
+    json_success_embed(&dir, "mock", &["index", "--approve"]);
+    let status = json_success_embed(&dir, "mock", &["status"]);
+    assert!(
+        tasks_of_type(&status, "embedding")
+            .iter()
+            .any(|task| task["status"] == "done"),
+        "granting the embedding opt-in must embed the pending tasks (L4): {status}"
+    );
+}

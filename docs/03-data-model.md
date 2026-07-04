@@ -430,11 +430,13 @@ chunk_hash = "sha256:" + base16(sha256(JCS({
 embedding_hash = "sha256:" + base16(sha256(JCS({
   "spec_version": 1,
   "target_type": "chunk",
-  "target_hash": <chunk_hash>,
+  "target_hash": <text_hash>,
   "profile_hash": <embedding profile_hash>,
   "modality": "...", "dimensions": <int>, "distance": "..."
 })))
 ```
+
+- `target_hash` は対象 chunk の **`text_hash`** (chunk 抽出範囲のみの content hash、§6) であって `chunk_hash` ではない。embedding は Markdown 本文そのものの関数なので、同一本文を持つ複数 chunk (別世代・別ファイルの同一断片) は 1 本の `embeddings` 行を共有する — これが **content ベース再利用** ([04-pipeline.md §4.3 / §5.4](04-pipeline.md)) の identity 基盤である。`chunk_vec` (vec0) は `chunk_hash → embedding` の写像として `embeddings` から導出する。
 
 ## tree / commit object
 
