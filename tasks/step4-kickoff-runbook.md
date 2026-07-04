@@ -37,6 +37,12 @@ green ~267、clippy/fmt clean)。北極星シナリオ M3-1 は実 Gemini hybrid
 7. **eval M3-2 / M3-3 の結線と Done 判定**: golden-queries.jsonl に M3-2 (16 件、`--all-history`) /
    M3-3 (16 件、`--include-deleted`) が凍結済み。time-travel 実装後に `run_eval.py --scenario M3-2/M3-3`
    で Recall@10 >= 0.8 を実測 (text-only 0.8889 / hybrid 1.0 が M3-1 の実績)
+8. **online Markdownize 成果物の HEAD/search への昇格** (R8 F6、2026-07-05 裁定で Step 4 保留):
+   現状 online markdownize task は Done まで走り `objects/normalized_units` に成果物を生成 (課金) するが、
+   その resolved profile の normalized ref が commit tree/tree_entries へ昇格せず、`reindex` 後も検索不可
+   (tree は offline deterministic profile のまま)。Step 4 で「Done 時に resolved profile の normalized ref を
+   tree commit へ昇格 + SQLite rebuild + tool-lock に resolved Mistral profile を記録」を実装する
+   (裁定 = `tasks/step3-bughunt8-fixes.md` §design F6)。実装まで online markdownize は課金しても成果物未使用。
 
 **範囲外 (やらない)**: 定期 auto snapshot / on_idle GC / tiered retention は Phase 4+ (09 §2)。
 purge の完全な履歴書き換えは v2+。docs 09 §3.1 で `Phase 4+` / `v2+` と明記のもの全て。
