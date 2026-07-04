@@ -7,24 +7,6 @@ use sha2::{Digest, Sha256};
 use crate::fts::CHUNK_VEC_DIMENSIONS;
 use crate::{EmbeddingDistance, EmbeddingModality, EmbeddingTargetType, IndexError, Result};
 
-pub fn adopted_embedding_profile_value() -> Value {
-    json!({
-        "adapter_kind": "embedding",
-        "adapter_role": "multimodal",
-        "dimensions": 768,
-        "distance": "cosine",
-        "modality": "multimodal",
-        "model_or_tool_family": "gemini-embedding",
-        "model_version_pin": "gemini-embedding-2",
-        "runtime_kind": "cloud",
-        "spec_version": 1
-    })
-}
-
-pub fn adopted_embedding_profile_hash() -> Result<String> {
-    hash_jcs(&adopted_embedding_profile_value())
-}
-
 pub fn embedding_hash(
     target_type: EmbeddingTargetType,
     target_hash: &str,
@@ -56,13 +38,14 @@ pub struct EmbeddingProfileSummary {
 }
 
 impl EmbeddingProfileSummary {
-    /// Whether this stored profile is compatible with the adopted query profile
+    /// Whether this stored profile is compatible with the expected query profile
     /// (03 §7: dimensions / distance / modality / profile_hash all match).
-    pub fn matches_adopted(&self) -> Result<bool> {
-        Ok(self.dimensions == CHUNK_VEC_DIMENSIONS as u64
-            && self.distance == "cosine"
-            && self.modality == "multimodal"
-            && self.profile_hash == adopted_embedding_profile_hash()?)
+    #[must_use]
+    pub fn matches_profile(&self, expected: &EmbeddingProfileSummary) -> bool {
+        self.dimensions == expected.dimensions
+            && self.distance == expected.distance
+            && self.modality == expected.modality
+            && self.profile_hash == expected.profile_hash
     }
 }
 
@@ -351,12 +334,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn ct3_embed_001_embedding_profile_and_hash_vector() {
-        let profile_hash = adopted_embedding_profile_hash().unwrap();
-        assert_eq!(
-            profile_hash,
-            "sha256:66aff638f38a099ff989ca97675ebd3c573a40ee53cc1cdfe05fb06102d2bb09"
-        );
+    fn ct3_embed_001_embedding_hash_vector() {
+        let profile_hash =
+            "sha256:66aff638f38a099ff989ca97675ebd3c573a40ee53cc1cdfe05fb06102d2bb09";
         assert_eq!(
             embedding_hash(
                 EmbeddingTargetType::Chunk,
@@ -364,7 +344,7 @@ mod tests {
                 768,
                 EmbeddingDistance::Cosine,
                 EmbeddingModality::Multimodal,
-                &profile_hash,
+                profile_hash,
             )
             .unwrap(),
             "sha256:7bd32d26ad2b721e32c99536513abf58c6aeee626d1edc65e30069abce01a975"
@@ -372,27 +352,24 @@ mod tests {
     }
 
     #[test]
-    fn ct3_embed_004_adopted_profile_is_multimodal_768_cosine() {
-        // The wired compat gate (search-time, 03 §7): the adopted profile matches
-        // itself, and any deviation in modality / dimensions / hash does not.
-        let profile_hash = adopted_embedding_profile_hash().unwrap();
-        let adopted = EmbeddingProfileSummary {
+    fn ct3_embed_004_profile_compat_requires_exact_summary_match() {
+        let expected = EmbeddingProfileSummary {
             dimensions: 768,
             distance: "cosine".to_owned(),
             modality: "multimodal".to_owned(),
-            profile_hash,
+            profile_hash: "sha256:profile".to_owned(),
         };
-        assert!(adopted.matches_adopted().unwrap());
+        assert!(expected.matches_profile(&expected));
         let text_modality = EmbeddingProfileSummary {
             modality: "text".to_owned(),
-            ..adopted.clone()
+            ..expected.clone()
         };
-        assert!(!text_modality.matches_adopted().unwrap());
+        assert!(!text_modality.matches_profile(&expected));
         let wrong_dims = EmbeddingProfileSummary {
             dimensions: 512,
-            ..adopted
+            ..expected.clone()
         };
-        assert!(!wrong_dims.matches_adopted().unwrap());
+        assert!(!wrong_dims.matches_profile(&expected));
     }
 
     use crate::fts::{FtsSchemaConfig, FtsTokenizer, SqliteFtsIndex, CHUNK_VEC_DIMENSIONS};
@@ -443,7 +420,7 @@ mod tests {
             CHUNK_VEC_DIMENSIONS as u64,
             "cosine",
             "multimodal",
-            &adopted_embedding_profile_hash().unwrap(),
+            "sha256:profile",
         )
         .unwrap();
     }

@@ -2,6 +2,7 @@ use std::fs;
 use std::path::Path;
 
 use assert_cmd::Command;
+use kcs_adapter::catalog::{TEST_ADOPTED_EMBEDDING_ENV, TEST_STANDARD_ONLINE_MARKDOWNIZE_ENV};
 use serde_json::Value;
 use tempfile::TempDir;
 
@@ -72,11 +73,10 @@ fn indexed_scope() -> TempDir {
     dir
 }
 
-// K4 embedding seam helpers: run `kcs` with the deterministic Gemini mock
-// (`KCS_TEST_GEMINI_EMBED`), the CLI-side counterpart of `KCS_TEST_MISTRAL_OCR`.
+// K4 embedding seam helpers: run `kcs` with the deterministic adapter mock.
 fn json_success_embed(dir: &TempDir, embed: &str, args: &[&str]) -> Value {
     let output = kcs(dir, args)
-        .env("KCS_TEST_GEMINI_EMBED", embed)
+        .env(TEST_ADOPTED_EMBEDDING_ENV, embed)
         .arg("--json")
         .assert()
         .success()
@@ -88,7 +88,7 @@ fn json_success_embed(dir: &TempDir, embed: &str, args: &[&str]) -> Value {
 
 fn json_failure_embed(dir: &TempDir, embed: &str, args: &[&str], code: i32) -> Value {
     let output = kcs(dir, args)
-        .env("KCS_TEST_GEMINI_EMBED", embed)
+        .env(TEST_ADOPTED_EMBEDDING_ENV, embed)
         .arg("--json")
         .assert()
         .code(code)
@@ -105,7 +105,7 @@ fn run_embed_path(path: &Path, data_home: &Path, embed: &str, args: &[&str]) -> 
         .env("XDG_CONFIG_HOME", data_home.join("config"))
         .env("XDG_DATA_HOME", data_home.join("data"))
         .env("XDG_CACHE_HOME", data_home.join("cache"))
-        .env("KCS_TEST_GEMINI_EMBED", embed)
+        .env(TEST_ADOPTED_EMBEDDING_ENV, embed)
         .args(args)
         .arg("--json")
         .assert()
@@ -1528,8 +1528,8 @@ fn ct3_embed_010_retry_executes_after_snapshot_advances_head() {
 /// so `batch resume`/index can execute both adapters deterministically offline.
 fn json_both_mock(dir: &TempDir, args: &[&str]) -> Value {
     let output = kcs(dir, args)
-        .env("KCS_TEST_GEMINI_EMBED", "mock")
-        .env("KCS_TEST_MISTRAL_OCR", "mock")
+        .env(TEST_ADOPTED_EMBEDDING_ENV, "mock")
+        .env(TEST_STANDARD_ONLINE_MARKDOWNIZE_ENV, "mock")
         .arg("--json")
         .assert()
         .success()
@@ -1546,6 +1546,20 @@ fn tasks_of_type<'a>(status: &'a Value, ty: &str) -> Vec<&'a Value> {
         .iter()
         .filter(|task| task["type"] == ty)
         .collect()
+}
+
+fn first_online_output_ref(status: &Value) -> String {
+    status["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find_map(|task| {
+            let output_ref = task["output_ref"].as_str()?;
+            output_ref
+                .starts_with("online:")
+                .then(|| output_ref.to_owned())
+        })
+        .expect("online task output_ref")
 }
 
 fn is_budget_paused(status: &Value, ty: &str) -> bool {
@@ -2371,7 +2385,7 @@ fn o2_text_search_never_sends_query_embedding() {
         .env("XDG_CONFIG_HOME", dir.path().join(".test-config"))
         .env("XDG_DATA_HOME", dir.path().join(".test-data"))
         .env("XDG_CACHE_HOME", dir.path().join(".test-cache"))
-        .env("KCS_TEST_GEMINI_EMBED", "mock")
+        .env(TEST_ADOPTED_EMBEDDING_ENV, "mock")
         .env("KCS_TEST_QUERY_EMBED_TRACE", &trace)
         .args(["search", "認証仕様 トークン", "--text", "--json"])
         .assert()
@@ -2388,7 +2402,7 @@ fn o2_text_search_never_sends_query_embedding() {
         .env("XDG_CONFIG_HOME", dir.path().join(".test-config"))
         .env("XDG_DATA_HOME", dir.path().join(".test-data"))
         .env("XDG_CACHE_HOME", dir.path().join(".test-cache"))
-        .env("KCS_TEST_GEMINI_EMBED", "mock")
+        .env(TEST_ADOPTED_EMBEDDING_ENV, "mock")
         .env("KCS_TEST_QUERY_EMBED_TRACE", &trace)
         .args(["search", "認証仕様 トークン", "--json"])
         .assert()
@@ -2544,6 +2558,7 @@ fn p1_batch_resume_rejects_out_of_scope_task_input_path() {
         kcs(&dir, &["init"]).assert().success();
         // Records the online opt-in and enqueues legitimate tasks.
         json_success(&dir, &["index", "--approve"]);
+        let online_output_ref = first_online_output_ref(&json_success(&dir, &["status"]));
         // Append a pending online markdownize task escaping the scope.
         let tasks = dir.path().join(".kcs/tasks.jsonl");
         let poison = serde_json::json!({
@@ -2555,7 +2570,7 @@ fn p1_batch_resume_rejects_out_of_scope_task_input_path() {
             "previous_raw_hash": null,
             "parent_run_id": null,
             "changed_unit_keys": [],
-            "output_ref": "online:mistral_ocr_markdownize",
+            "output_ref": online_output_ref,
             "unit_keys": null,
             "status": "pending",
             "attempts": 0,
@@ -2572,10 +2587,10 @@ fn p1_batch_resume_rejects_out_of_scope_task_input_path() {
         fs::write(&tasks, existing).unwrap();
 
         // `batch resume` must reject before reading the external file. The mock
-        // Mistral seam is set so that *if* the guard were missing the task would
-        // actually execute — proving the guard, not a missing adapter, blocks it.
+        // The online markdownize seam is set so that if the guard were missing
+        // the task would execute, proving the guard blocks it.
         let err = kcs(&dir, &["batch", "resume"])
-            .env("KCS_TEST_MISTRAL_OCR", "mock")
+            .env(TEST_STANDARD_ONLINE_MARKDOWNIZE_ENV, "mock")
             .arg("--json")
             .assert()
             .code(2)
@@ -3020,8 +3035,8 @@ fn p10_concurrent_search_during_reindex_is_never_silently_empty() {
             .env("XDG_DATA_HOME", &data)
             .env("XDG_CONFIG_HOME", &config)
             .env("XDG_CACHE_HOME", &cache)
-            .env("KCS_TEST_MISTRAL_OCR", "mock")
-            .env("KCS_TEST_GEMINI_EMBED", "mock")
+            .env(TEST_STANDARD_ONLINE_MARKDOWNIZE_ENV, "mock")
+            .env(TEST_ADOPTED_EMBEDDING_ENV, "mock")
             .output()
             .unwrap()
     };
@@ -3047,8 +3062,8 @@ fn p10_concurrent_search_during_reindex_is_never_silently_empty() {
                     .env("XDG_DATA_HOME", &data)
                     .env("XDG_CONFIG_HOME", &config)
                     .env("XDG_CACHE_HOME", &cache)
-                    .env("KCS_TEST_MISTRAL_OCR", "mock")
-                    .env("KCS_TEST_GEMINI_EMBED", "mock")
+                    .env(TEST_STANDARD_ONLINE_MARKDOWNIZE_ENV, "mock")
+                    .env(TEST_ADOPTED_EMBEDDING_ENV, "mock")
                     .output();
                 spins += 1;
             }
@@ -3160,13 +3175,12 @@ fn r6_foreign_approval_rows_do_not_grant_online_embedding() {
     )
     .unwrap();
     kcs(&dir, &["init"]).assert().success();
-    fs::write(
-        dir.path().join(".kcs/approvals.jsonl"),
-        r#"{"scope_id":"01J00000000000000000000000","tool_id":"mistral_ocr_markdownize","execution_mode":"online_api","network_opt_in":true,"approval_method":"approve"}
-{"scope_id":"01J00000000000000000000000","tool_id":"gemini_embedding_2","execution_mode":"online_api","network_opt_in":true,"approval_method":"approve"}
-"#,
-    )
-    .unwrap();
+    let other = tempfile::tempdir().unwrap();
+    fs::write(other.path().join("other.md"), "# Other\napproval source\n").unwrap();
+    kcs(&other, &["init"]).assert().success();
+    json_success_embed(&other, "mock", &["index", "--approve"]);
+    let foreign_approvals = fs::read_to_string(other.path().join(".kcs/approvals.jsonl")).unwrap();
+    fs::write(dir.path().join(".kcs/approvals.jsonl"), foreign_approvals).unwrap();
 
     let out = json_success_embed(&dir, "mock", &["index", "--yes"]);
     assert_eq!(out["network_allowed"], false);

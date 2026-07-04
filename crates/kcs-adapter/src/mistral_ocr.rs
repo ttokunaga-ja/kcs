@@ -50,6 +50,7 @@ impl EnvMistralOcrClient {
         Self { base_url: None }
     }
 
+    #[allow(dead_code)]
     #[must_use]
     pub fn with_base_url(base_url: impl Into<String>) -> Self {
         Self {
@@ -539,6 +540,52 @@ fn next_markdown_image_target(markdown: &str, cursor: usize) -> Option<(usize, u
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::identity::{canonical_profile_value, jcs_bytes, tool_profile_hash};
+    use serde_json::Value;
+    use std::path::PathBuf;
+
+    fn frozen_profile_value() -> Value {
+        json!({
+            "adapter_kind": "markdownize",
+            "adapter_role": "multimodal",
+            "model_or_tool_family": "mistral-ocr",
+            "model_version_pin": "mistral-ocr-2505",
+            "output_schema": "kcs-markdown-v1",
+            "runtime_kind": "cloud",
+            "spec_version": 1
+        })
+    }
+
+    #[test]
+    fn ct2_profile_001_tool_profile_hash_mistral() {
+        assert_eq!(
+            jcs_bytes(&canonical_profile_value(&frozen_profile_value()).unwrap()).unwrap(),
+            br#"{"adapter_kind":"markdownize","adapter_role":"multimodal","model_or_tool_family":"mistral-ocr","model_version_pin":"mistral-ocr-2505","output_schema":"kcs-markdown-v1","runtime_kind":"cloud","spec_version":1}"#
+        );
+        assert_eq!(
+            tool_profile_hash(&frozen_profile_value()).unwrap(),
+            "sha256:24bd9e903241740fc9fe94fb72a6ff3e697b3c0859bd5aef1b49728a207e81ed"
+        );
+    }
+
+    #[test]
+    fn ct2_profile_003_null_fields_are_omitted() {
+        let mut with_nulls = frozen_profile_value();
+        for key in [
+            "prompt_template_id",
+            "prompt_template_hash",
+            "sampling",
+            "dimensions",
+            "distance",
+            "modality",
+        ] {
+            with_nulls[key] = Value::Null;
+        }
+        assert_eq!(
+            tool_profile_hash(&with_nulls).unwrap(),
+            tool_profile_hash(&frozen_profile_value()).unwrap()
+        );
+    }
 
     #[test]
     fn placeholder_mistral_profile_declares_ocr() {
@@ -573,6 +620,18 @@ mod tests {
         assert!(replaced.contains("kcs://01H00000000000000000000000/object/image/sha256:"));
         assert!(!replaced.contains("placeholder-1"));
         assert!(!replaced.contains("placeholder-2"));
+    }
+
+    #[test]
+    fn ct2_image_001_embedded_image_hash_and_fanout() {
+        let hash = image_hash(b"image bytes");
+        assert!(hash.starts_with("sha256:"));
+        let digest = hash.strip_prefix("sha256:").unwrap();
+        let path = PathBuf::from(".kcs/objects/images")
+            .join(&digest[0..2])
+            .join(&digest[2..4])
+            .join(&hash);
+        assert!(path.ends_with(&hash));
     }
 
     // Q2: `persist_images` must write the image CAS object atomically so its bytes

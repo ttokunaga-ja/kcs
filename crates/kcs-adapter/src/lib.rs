@@ -1,9 +1,10 @@
 //! Adapter trait, identity helpers, and built-in Step 2 adapters.
 
+pub mod catalog;
 pub mod deterministic;
-pub mod gemini_embedding;
+mod gemini_embedding;
 pub mod identity;
-pub mod mistral_ocr;
+mod mistral_ocr;
 pub mod tool_lock;
 pub mod traits;
 pub mod types;

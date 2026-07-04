@@ -6,21 +6,20 @@ use std::process;
 use std::time::Instant;
 
 use clap::{Args, Parser, Subcommand};
-use kcs_adapter::deterministic::{deterministic_prepare_profile_value, DeterministicAdapter};
-use kcs_adapter::gemini_embedding::{
-    GeminiEmbeddingAdapter, GeminiEmbeddingClient, ADOPTED_DIMENSIONS, ADOPTED_MODEL_PIN,
+use kcs_adapter::catalog::{
+    active_adopted_embedding_execution, adopted_embedding_profile,
+    builtin_offline_markdownize_adapter, builtin_prepare_profile,
+    declared_adopted_embedding_profile, run_adopted_embedding, run_standard_online_markdownize,
+    standard_online_markdownize_profile, AdoptedEmbeddingExecution, DeclaredEmbeddingProfile,
+    StandardOnlineMarkdownizeRequest,
 };
 use kcs_adapter::identity::tool_profile_hash;
-use kcs_adapter::mistral_ocr::{
-    EnvMistralOcrClient, MistralOcrClient, MistralOcrMarkdownizeAdapter, OcrImage, OcrPage,
-    OcrResponse,
-};
 use kcs_adapter::tool_lock::{load_tool_lock, validate_tools_toml};
-use kcs_adapter::traits::{EmbeddingAdapter, MarkdownizeAdapter};
+use kcs_adapter::traits::MarkdownizeAdapter;
 use kcs_adapter::types::{
-    AdapterKind, AdapterProfile, EmbeddingInputType, EmbeddingItem, EmbeddingRequest,
-    EmbeddingVector, ExecutionMode, MarkdownUnit, MarkdownizeMode as AdapterMarkdownizeMode,
-    MarkdownizeRequest, PreparedUnitHint, PreviousMarkdownizeContext, RawInput, UnitKind,
+    AdapterKind, AdapterProfile, EmbeddingInputType, EmbeddingItem, ExecutionMode, MarkdownUnit,
+    MarkdownizeMode as AdapterMarkdownizeMode, MarkdownizeRequest, PreparedUnitHint,
+    PreviousMarkdownizeContext, RawInput, UnitKind,
 };
 use kcs_core::cas::is_hash;
 use kcs_core::dag::NormalizeRef;
@@ -33,7 +32,7 @@ use kcs_core::{ExitCode, KcsError, Result};
 use kcs_index::chunking::{
     chunk_normalized_instance, ChunkingConfig, ChunkingInput, NormalizedUnitInput,
 };
-use kcs_index::embedding_store::{self, adopted_embedding_profile_hash, f32_to_le_bytes};
+use kcs_index::embedding_store::{self, f32_to_le_bytes};
 use kcs_index::fts::{FtsSchemaConfig, FtsTokenizer, SqliteFtsIndex, CHUNK_VEC_DIMENSIONS};
 use kcs_index::registry::{RegistryDb, RegistryEntry};
 use kcs_index::{
@@ -72,7 +71,6 @@ use kcs_search::rrf::{fuse_rrf, BackendRank, RrfConfig};
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use sha2::{Digest, Sha256};
 
 // clap のパースエラーは exit code 2 で終了する。これは docs/06-cli-spec.md §7 の
 // invalid usage (= 2) と一致するため、そのまま採用する。
@@ -637,6 +635,16 @@ enum ScopeEmbedState {
     Absent,
 }
 
+fn adopted_embedding_profile_summary() -> embedding_store::EmbeddingProfileSummary {
+    let profile = adopted_embedding_profile();
+    embedding_store::EmbeddingProfileSummary {
+        dimensions: CHUNK_VEC_DIMENSIONS as u64,
+        distance: "cosine".to_owned(),
+        modality: "multimodal".to_owned(),
+        profile_hash: profile.tool_profile_hash,
+    }
+}
+
 /// Inspect a scope's `sqlite.db` for compatible chunk embeddings (03 §7). A read
 /// failure or missing DB is treated as `Absent` (never a vector-search error —
 /// text is always available). The extension is registered in `main`.
@@ -654,9 +662,10 @@ fn scope_embedding_state(kcs_dir: &Path) -> ScopeEmbedState {
     if profiles.is_empty() {
         return ScopeEmbedState::Absent;
     }
+    let expected = adopted_embedding_profile_summary();
     if profiles
         .iter()
-        .all(|profile| profile.matches_adopted().unwrap_or(false))
+        .all(|profile| profile.matches_profile(&expected))
     {
         ScopeEmbedState::Compatible
     } else {
@@ -891,11 +900,14 @@ fn run_search(args: UnsupportedArgs) -> Result<Value> {
     // actually uses vectors AND the scope's embedding opt-in (07 §3) is granted.
     // Judge vector availability from cheap predicates (endpoint + opt-in + query
     // length + per-scope compat) — never by eagerly calling the adapter.
-    let embedding_opt_in = persistent_network_allowed_for(&repo, EMBEDDING_ADAPTER_ID)?;
+    let embedding_opt_in = active_embedding_adapter_id()?
+        .map(|adapter_id| persistent_network_allowed_for(&repo, &adapter_id))
+        .transpose()?
+        .unwrap_or(false);
     let query_embeddable = parsed.query.chars().count() >= 2;
     let vector_precheck = resolve_vector_availability(
         &exec_scopes,
-        embedding_seam().is_some(),
+        embedding_execution().is_some(),
         embedding_opt_in,
         query_embeddable,
     );
@@ -4120,6 +4132,8 @@ fn execute_pending_markdownize_tasks(
     // sent when its input is a Tier B (candidate-secret) file and the scope is not
     // `--send-secrets`-approved — in case the hold was cleared by some other path.
     let secrets_approved = secrets_send_approved(repo);
+    let online_profile = online_markdownize_profile();
+    let output_ref = online_output_ref(&online_profile.adapter_id);
     let tasks = store
         .all()
         .map_err(pipeline_to_kcs)?
@@ -4127,7 +4141,7 @@ fn execute_pending_markdownize_tasks(
         .filter(|task| {
             task.status == TaskStatus::Pending
                 && task.task_type == TaskType::Markdownize
-                && task.output_ref == "online:mistral_ocr_markdownize"
+                && task.output_ref == output_ref
                 // Honor an unelapsed retry backoff even for a Pending task
                 // (Step2c I2); `batch retry` already gates on this, so this is
                 // a defensive belt-and-braces guard.
@@ -4149,14 +4163,14 @@ fn execute_pending_markdownize_tasks(
             scope_id: scope_id.clone(),
             task_type: TaskType::Markdownize,
             estimated_usd: estimate_online_markdownize_cost(file_size),
-            adapter_id: Some("mistral_ocr_markdownize".to_owned()),
+            adapter_id: Some(online_profile.adapter_id.clone()),
         };
         let (device_remaining, folder_remaining) = budget_remaining_for_adapter(
             &cost_ledger,
             &budget_caps,
             &month,
             &scope_id,
-            adapter_kind_for_budget(estimate.adapter_id.as_deref()),
+            adapter_kind_budget_key(online_profile.adapter_kind),
         )?;
         let budget = evaluate_budget_with_caps(
             &estimate,
@@ -4245,7 +4259,7 @@ fn execute_pending_markdownize_tasks(
 }
 
 fn persistent_network_allowed(repo: &Repository) -> Result<bool> {
-    persistent_network_allowed_for(repo, "mistral_ocr_markdownize")
+    persistent_network_allowed_for(repo, &online_markdownize_profile().adapter_id)
 }
 
 /// Persistent (config / approvals.jsonl) network opt-in for one specific online
@@ -4253,7 +4267,7 @@ fn persistent_network_allowed(repo: &Repository) -> Result<bool> {
 /// `allow_network = true` covers every adapter; a network revocation gates every
 /// adapter off. Otherwise the scope must carry an approval row for *this*
 /// `tool_id` (L4). Backward compatibility: a scope approved before per-adapter
-/// rows existed carries only the `mistral_ocr_markdownize` row, so an embedding
+/// rows existed carries only the then-active markdownize row, so an embedding
 /// adapter reads no matching row and stays enqueue-only (decision #35).
 fn persistent_network_allowed_for(repo: &Repository, tool_id: &str) -> Result<bool> {
     if network_revoked(repo)? {
@@ -4292,9 +4306,8 @@ fn approval_row_present_for_scope(repo: &Repository, tool_id: Option<&str>) -> R
 }
 
 /// Whether the embedding adapter may call the network in this pass (L4). Gated
-/// on the embedding adapter's own opt-in (`gemini_embedding_2`), not the
-/// markdownize approval it used to ride on. `offline` (the `--offline` flag)
-/// forces it off regardless of any recorded approval.
+/// on the embedding adapter's own opt-in, not the markdownize approval it used
+/// to ride on. `offline` forces it off regardless of any recorded approval.
 fn embedding_online_allowed(
     repo: &Repository,
     offline: bool,
@@ -4310,6 +4323,9 @@ fn embedding_online_allowed(
     if offline {
         return Ok(false);
     }
+    let Some(adapter_id) = active_embedding_adapter_id()? else {
+        return Ok(false);
+    };
     if online {
         if network_revoked(repo)? {
             return Ok(false);
@@ -4317,10 +4333,10 @@ fn embedding_online_allowed(
         return if online_confirmed {
             Ok(true)
         } else {
-            approval_row_present(repo, EMBEDDING_ADAPTER_ID)
+            approval_row_present(repo, &adapter_id)
         };
     }
-    persistent_network_allowed_for(repo, EMBEDDING_ADAPTER_ID)
+    persistent_network_allowed_for(repo, &adapter_id)
 }
 
 #[derive(Debug, Clone)]
@@ -4342,8 +4358,7 @@ fn execute_online_markdownize_task(
 ) -> std::result::Result<OnlineExecutionOutcome, TaskExecutionFailure> {
     let path = repo.root().join(&task.input_path);
     let media_type = media_type_for_cli_path(&path).to_owned();
-    let prepare_profile_hash = tool_profile_hash(&deterministic_prepare_profile_value())
-        .map_err(task_failure_from_adapter)?;
+    let prepare_profile_hash = builtin_prepare_profile().tool_profile_hash;
     let prepare = prepare_units(PrepareStageRequest {
         raw_hash: task.input_hash.clone(),
         media_type: media_type.clone(),
@@ -4358,8 +4373,18 @@ fn execute_online_markdownize_task(
             retry_kind: RetryErrorKind::InvalidInput,
         });
     }
-    let (profile, response) =
-        run_mistral_adapter(repo, &task.input_hash, &path, &media_type, &prepare)?;
+    let scope_id = repo.scope_id_for_adapter();
+    let outcome = run_standard_online_markdownize(StandardOnlineMarkdownizeRequest {
+        scope_id: &scope_id,
+        kcs_dir: repo.kcs_dir(),
+        raw_hash: &task.input_hash,
+        path: &path,
+        media_type: &media_type,
+        prepared_unit_hints: prepared_unit_hints(&prepare.prepared_units),
+    })
+    .map_err(task_failure_from_adapter)?;
+    let profile = outcome.profile;
+    let response = outcome.response;
     let hints = all_changed_hints(&prepare.prepared_units);
     let strict_valid =
         validate_markdownize_response(&response, &hints, &prepare.prepared_units).is_ok();
@@ -4413,81 +4438,6 @@ fn execute_online_markdownize_task(
     })
 }
 
-fn run_mistral_adapter(
-    repo: &Repository,
-    raw_hash: &str,
-    path: &Path,
-    media_type: &str,
-    prepare: &kcs_pipeline::prepare::PrepareStageOutput,
-) -> std::result::Result<
-    (AdapterProfile, kcs_adapter::types::MarkdownizeResponse),
-    TaskExecutionFailure,
-> {
-    let request = MarkdownizeRequest {
-        raw: RawInput {
-            raw_hash: raw_hash.to_owned(),
-            path: Some(path.display().to_string()),
-        },
-        media_type: media_type.to_owned(),
-        prepared_unit_hint: Some(prepared_unit_hints(&prepare.prepared_units)),
-        mode: AdapterMarkdownizeMode::Full,
-        previous: None,
-        hints: None,
-        tool_profile_hash: String::new(),
-        spec_version: 1,
-    };
-    match std::env::var("KCS_TEST_MISTRAL_OCR").ok().as_deref() {
-        Some("auth_error") => {
-            return Err(TaskExecutionFailure {
-                retry_kind: RetryErrorKind::AuthError,
-            });
-        }
-        Some("rate_limit") => {
-            // Retryable failure injection for backoff scheduling tests (I2).
-            return Err(TaskExecutionFailure {
-                retry_kind: RetryErrorKind::RateLimit,
-            });
-        }
-        Some("mock") | Some("partial") | Some("mock_link_image") => {
-            // Mirror the production path: resolve the pin once up front so the
-            // profile (and its tool_profile_hash) reflect the resolved pin,
-            // now that `profile()` no longer resolves internally (Step2c I5).
-            let client = MockMistralClient;
-            let model_pin = client
-                .resolve_model_pin("mistral-ocr-latest")
-                .map_err(task_failure_from_adapter)?;
-            let adapter =
-                MistralOcrMarkdownizeAdapter::new(client, model_pin, repo.scope_id_for_adapter())
-                    .with_image_store(repo.kcs_dir());
-            let profile = adapter.profile();
-            let mut request = request;
-            request.tool_profile_hash = profile.tool_profile_hash.clone();
-            return Ok((
-                profile,
-                adapter
-                    .markdownize(request)
-                    .map_err(task_failure_from_adapter)?,
-            ));
-        }
-        _ => {}
-    }
-    let client = EnvMistralOcrClient::new();
-    let model_pin = client
-        .resolve_model_pin("mistral-ocr-latest")
-        .map_err(task_failure_from_adapter)?;
-    let adapter = MistralOcrMarkdownizeAdapter::new(client, model_pin, repo.scope_id_for_adapter())
-        .with_image_store(repo.kcs_dir());
-    let profile = adapter.profile();
-    let mut request = request;
-    request.tool_profile_hash = profile.tool_profile_hash.clone();
-    Ok((
-        profile,
-        adapter
-            .markdownize(request)
-            .map_err(task_failure_from_adapter)?,
-    ))
-}
-
 trait RepositoryScopeId {
     fn scope_id_for_adapter(&self) -> String;
 }
@@ -4507,58 +4457,6 @@ impl RepositoryScopeId for Repository {
     }
 }
 
-#[derive(Debug, Clone)]
-struct MockMistralClient;
-
-impl MistralOcrClient for MockMistralClient {
-    fn resolve_model_pin(&self, _configured_model: &str) -> kcs_adapter::Result<String> {
-        Ok("mistral-ocr-2505".to_owned())
-    }
-
-    fn ocr_markdown(
-        &self,
-        request: &MarkdownizeRequest,
-        model_pin: &str,
-    ) -> kcs_adapter::Result<OcrResponse> {
-        let mut pages: Vec<OcrPage> = request
-            .prepared_unit_hint
-            .as_deref()
-            .unwrap_or(&[])
-            .iter()
-            .enumerate()
-            .map(|(index, hint)| OcrPage {
-                index,
-                markdown: if std::env::var("KCS_TEST_MISTRAL_OCR").ok().as_deref()
-                    == Some("mock_link_image")
-                {
-                    format!(
-                        "[source](https://example.com/{index}) mock ocr {} ![img-{index}](img-{index}.png)\n",
-                        hint.unit_key
-                    )
-                } else {
-                    format!(
-                        "mock ocr {} ![img-{index}](img-{index}.png)\n",
-                        hint.unit_key
-                    )
-                },
-                images: vec![OcrImage {
-                    bytes: format!("image-{}", hint.unit_key).into_bytes(),
-                    media_type: "image/png".to_owned(),
-                    bbox: Some([index as i64, 0, index as i64 + 1, 1]),
-                    confidence: Some("0.99".to_owned()),
-                }],
-            })
-            .collect();
-        if std::env::var("KCS_TEST_MISTRAL_OCR").ok().as_deref() == Some("partial") {
-            pages.pop();
-        }
-        Ok(OcrResponse {
-            pages,
-            model_version_pin: model_pin.to_owned(),
-        })
-    }
-}
-
 fn task_failure_from_adapter(error: kcs_adapter::AdapterError) -> TaskExecutionFailure {
     let retry_kind = match error {
         kcs_adapter::AdapterError::Auth(_) => RetryErrorKind::AuthError,
@@ -4574,178 +4472,38 @@ fn task_failure_from_adapter(error: kcs_adapter::AdapterError) -> TaskExecutionF
 }
 
 // ===========================================================================
-// K4 — Gemini embedding wiring (adapter selection, mock seam, index generation,
-// query embedding). Mirrors the Mistral markdownize plumbing.
+// K4 — embedding catalog wiring (adapter selection, index generation, query
+// embedding).
 // ===========================================================================
 
-const EMBEDDING_ADAPTER_ID: &str = "gemini_embedding_2";
 const EMBEDDING_ADAPTER_KIND: &str = "embedding";
-/// Chunks embedded per HTTP `:batchEmbedContents` request (client-side batching;
-/// Vertex has no batch inference, 07 §5.3). Task granularity is per-chunk; API
-/// batch granularity is this.
+/// Chunks embedded per adapter batch. Task granularity is per-chunk; adapter
+/// call granularity is this.
 const EMBEDDING_BATCH_SIZE: usize = 32;
 
-/// Which embedding backend / mock behavior is active. `KCS_TEST_GEMINI_EMBED`
-/// selects a deterministic mock (Step 2 seam pattern); otherwise a real
-/// `GEMINI_API_KEY` selects the live `Env` client. Absent both → no embeddings.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum EmbeddingSeam {
-    /// Deterministic compatible multimodal vectors.
-    Mock,
-    /// Multimodal but a mismatched profile_hash → search resolves INCOMPAT.
-    Incompatible,
-    /// `modality="text"` → rejected at tool-lock materialize (exit 2).
-    NonMultimodal,
-    /// Adapter returns an auth failure at embed time.
-    AuthError,
-    /// Adapter returns a 429 at embed time.
-    RateLimit,
-    /// Live Gemini endpoint (`GEMINI_API_KEY` set).
-    Real,
+fn embedding_execution() -> Option<AdoptedEmbeddingExecution> {
+    active_adopted_embedding_execution()
 }
 
-fn embedding_seam() -> Option<EmbeddingSeam> {
-    match std::env::var("KCS_TEST_GEMINI_EMBED").ok().as_deref() {
-        Some("mock") => Some(EmbeddingSeam::Mock),
-        Some("incompatible_profile") => Some(EmbeddingSeam::Incompatible),
-        Some("non_multimodal") => Some(EmbeddingSeam::NonMultimodal),
-        Some("auth_error") => Some(EmbeddingSeam::AuthError),
-        Some("rate_limit") => Some(EmbeddingSeam::RateLimit),
-        Some(_) => None,
-        None => std::env::var("GEMINI_API_KEY")
-            .is_ok()
-            .then_some(EmbeddingSeam::Real),
-    }
+fn declared_embedding_profile(execution: AdoptedEmbeddingExecution) -> DeclaredEmbeddingProfile {
+    declared_adopted_embedding_profile(execution)
 }
 
-/// The embedding profile declared in tool-lock and written into `embeddings` rows
-/// for a given seam. Compatible/real use the adopted profile; the mock variants
-/// deliberately declare incompatible / non-multimodal profiles.
-struct DeclaredEmbeddingProfile {
-    tool_id: String,
-    dimensions: u64,
-    distance: String,
-    modality: String,
-    profile_hash: String,
-}
-
-fn declared_embedding_profile(seam: EmbeddingSeam) -> Result<DeclaredEmbeddingProfile> {
-    let adopted = adopted_embedding_profile_hash().map_err(index_to_kcs)?;
-    Ok(match seam {
-        EmbeddingSeam::Incompatible => DeclaredEmbeddingProfile {
-            tool_id: "gemini_embedding_incompatible".to_owned(),
-            dimensions: CHUNK_VEC_DIMENSIONS as u64,
-            distance: "cosine".to_owned(),
-            modality: "multimodal".to_owned(),
-            // Deliberately not the adopted hash → 03 §7 compat fails.
-            profile_hash: "sha256:00000000000000000000000000000000000000000000000000000000incompat"
-                .to_owned(),
-        },
-        EmbeddingSeam::NonMultimodal => DeclaredEmbeddingProfile {
-            tool_id: "gemini_text_embedding".to_owned(),
-            dimensions: CHUNK_VEC_DIMENSIONS as u64,
-            distance: "cosine".to_owned(),
-            modality: "text".to_owned(),
-            profile_hash: adopted,
-        },
-        _ => DeclaredEmbeddingProfile {
-            tool_id: EMBEDDING_ADAPTER_ID.to_owned(),
-            dimensions: ADOPTED_DIMENSIONS as u64,
-            distance: "cosine".to_owned(),
-            modality: "multimodal".to_owned(),
-            profile_hash: adopted,
-        },
-    })
-}
-
-/// Deterministic, L2-normalized pseudo-vector derived from the input text via
-/// SHA-256 expansion. Reproducible across runs (test determinism, brief item 2).
-fn deterministic_unit_vector(seed: &str, dimensions: usize) -> Vec<f32> {
-    let mut values = Vec::with_capacity(dimensions);
-    let mut counter = 0u32;
-    while values.len() < dimensions {
-        let mut hasher = Sha256::new();
-        hasher.update(seed.as_bytes());
-        hasher.update(counter.to_le_bytes());
-        let digest = hasher.finalize();
-        for chunk in digest.chunks_exact(4) {
-            if values.len() >= dimensions {
-                break;
-            }
-            let bits = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
-            values.push((bits as f64 / u32::MAX as f64 * 2.0 - 1.0) as f32);
-        }
-        counter += 1;
-    }
-    let norm = values.iter().map(|value| value * value).sum::<f32>().sqrt();
-    if norm > 0.0 {
-        for value in &mut values {
-            *value /= norm;
-        }
-    }
-    values
-}
-
-#[derive(Debug, Clone, Copy)]
-struct MockGeminiClient {
-    seam: EmbeddingSeam,
-}
-
-impl GeminiEmbeddingClient for MockGeminiClient {
-    fn resolve_model_pin(&self, _configured_model: &str) -> kcs_adapter::Result<String> {
-        Ok(ADOPTED_MODEL_PIN.to_owned())
-    }
-
-    fn embed(
-        &self,
-        items: &[EmbeddingItem],
-        _model_pin: &str,
-        dimensions: u32,
-    ) -> kcs_adapter::Result<Vec<EmbeddingVector>> {
-        match self.seam {
-            EmbeddingSeam::AuthError => {
-                return Err(kcs_adapter::AdapterError::Auth(
-                    "mock auth failure".to_owned(),
-                ))
-            }
-            EmbeddingSeam::RateLimit => {
-                return Err(kcs_adapter::AdapterError::RateLimit("mock 429".to_owned()))
-            }
-            _ => {}
-        }
-        Ok(items
-            .iter()
-            .map(|item| EmbeddingVector {
-                id: item.id.clone(),
-                vector: deterministic_unit_vector(
-                    item.text.as_deref().unwrap_or(""),
-                    dimensions as usize,
-                ),
-            })
-            .collect())
-    }
+fn active_embedding_adapter_id() -> Result<Option<String>> {
+    let Some(execution) = embedding_execution() else {
+        return Ok(None);
+    };
+    Ok(Some(declared_embedding_profile(execution).tool_id))
 }
 
 /// Run the active embedding adapter over a batch of items, returning one vector
-/// per item. Routes to the real `Env` client or the deterministic mock.
+/// per item.
 fn run_embedding_adapter(
-    seam: EmbeddingSeam,
+    execution: AdoptedEmbeddingExecution,
     items: Vec<EmbeddingItem>,
     input_type: EmbeddingInputType,
-) -> std::result::Result<Vec<EmbeddingVector>, TaskExecutionFailure> {
-    let request = EmbeddingRequest { input_type, items };
-    let response = match seam {
-        EmbeddingSeam::Real => GeminiEmbeddingAdapter::default().embed(request),
-        other => GeminiEmbeddingAdapter::new(
-            MockGeminiClient { seam: other },
-            ADOPTED_MODEL_PIN,
-            ADOPTED_DIMENSIONS,
-        )
-        .embed(request),
-    };
-    response
-        .map(|response| response.vectors)
-        .map_err(task_failure_from_adapter)
+) -> std::result::Result<Vec<kcs_adapter::types::EmbeddingVector>, TaskExecutionFailure> {
+    run_adopted_embedding(execution, items, input_type).map_err(task_failure_from_adapter)
 }
 
 /// Compute the query embedding once per search (05 §1.1). Returns `None` when no
@@ -4757,7 +4515,7 @@ fn compute_query_embedding(query: &str) -> Result<Option<Vec<f32>>> {
     if query.chars().count() < 2 {
         return Ok(None);
     }
-    let Some(seam) = embedding_seam() else {
+    let Some(execution) = embedding_execution() else {
         return Ok(None);
     };
     // O2 regression seam: mark that the query is about to be SENT to the embedding
@@ -4770,7 +4528,7 @@ fn compute_query_embedding(query: &str) -> Result<Option<Vec<f32>>> {
         path: None,
         mime: None,
     }];
-    match run_embedding_adapter(seam, items, EmbeddingInputType::Query) {
+    match run_embedding_adapter(execution, items, EmbeddingInputType::Query) {
         Ok(vectors) => Ok(vectors.into_iter().next().map(|vector| vector.vector)),
         Err(_) => Ok(None),
     }
@@ -4793,10 +4551,10 @@ fn record_query_embed_trace(query: &str) {
 /// The tool-lock `embedding` entry (07 §6) for the active seam, or `None` when no
 /// embedding adapter is configured.
 fn embedding_tool_lock_entry() -> Result<Option<Value>> {
-    let Some(seam) = embedding_seam() else {
+    let Some(execution) = embedding_execution() else {
         return Ok(None);
     };
-    let profile = declared_embedding_profile(seam)?;
+    let profile = declared_embedding_profile(execution);
     Ok(Some(json!({
         "tool_id": profile.tool_id,
         "profile_hash": profile.profile_hash,
@@ -4841,10 +4599,10 @@ fn run_embedding_enrichment(
     online: bool,
     override_budget: bool,
 ) -> Result<usize> {
-    let Some(seam) = embedding_seam() else {
+    let Some(execution) = embedding_execution() else {
         return Ok(0);
     };
-    let profile = declared_embedding_profile(seam)?;
+    let profile = declared_embedding_profile(execution);
     // Non-multimodal is rejected at materialize_tool_lock; never reach embed here.
     if profile.modality != "multimodal" {
         return Ok(0);
@@ -4951,7 +4709,7 @@ fn run_embedding_enrichment(
             scope_id: scope_id.clone(),
             task_type: TaskType::Embedding,
             estimated_usd: estimate_embedding_cost(sent_chars),
-            adapter_id: Some("gemini_multimodal_embedding".to_owned()),
+            adapter_id: Some(profile.tool_id.clone()),
         };
         let (device_remaining, folder_remaining) = budget_remaining_for_adapter(
             &cost_ledger,
@@ -4972,7 +4730,7 @@ fn run_embedding_enrichment(
             pause_embedding_tasks(&task_store, plan.to_send.iter().map(|(chunk, _)| *chunk))?;
             break;
         }
-        match send_embed_batch(&conn, seam, &profile, &plan.to_send) {
+        match send_embed_batch(&conn, execution, &profile, &plan.to_send) {
             Ok(()) => {
                 cost_ledger
                     .append_monthly(&MonthlyCostLedgerEntry {
@@ -5057,7 +4815,7 @@ fn link_reused_chunks(
 /// Call the adapter for the to-send chunks and write `embeddings` + `chunk_vec`.
 fn send_embed_batch(
     conn: &Connection,
-    seam: EmbeddingSeam,
+    execution: AdoptedEmbeddingExecution,
     profile: &DeclaredEmbeddingProfile,
     to_send: &[(&EmbeddableChunk, String)],
 ) -> std::result::Result<(), TaskExecutionFailure> {
@@ -5070,7 +4828,7 @@ fn send_embed_batch(
             mime: None,
         })
         .collect::<Vec<_>>();
-    let vectors = run_embedding_adapter(seam, items, EmbeddingInputType::MarkdownChunk)?;
+    let vectors = run_embedding_adapter(execution, items, EmbeddingInputType::MarkdownChunk)?;
     let by_id = vectors
         .into_iter()
         .map(|vector| (vector.id, vector.vector))
@@ -5162,8 +4920,7 @@ fn chunk_embedding_hash(
 }
 
 /// Cost estimate for embedding `chars` of text: ~4 chars/token, $0.15 per 1M
-/// tokens (gemini-embedding ballpark; consistent with the 07 §5.3 figure of
-/// ≈$10 for 100k chunks). Fixed here and reported (brief item 2).
+/// tokens, consistent with the 07 §5.3 fixed adopted-profile budget figure.
 fn estimate_embedding_cost(chars: u64) -> f64 {
     let tokens = chars as f64 / 4.0;
     tokens / 1_000_000.0 * 0.15
@@ -5615,6 +5372,25 @@ struct IndexPipelineResult {
     failed_files: usize,
 }
 
+fn online_output_ref(adapter_id: &str) -> String {
+    format!("online:{adapter_id}")
+}
+
+fn online_markdownize_profile() -> AdapterProfile {
+    standard_online_markdownize_profile()
+}
+
+fn adapter_kind_budget_key(kind: AdapterKind) -> &'static str {
+    match kind {
+        AdapterKind::Prepare => "prepare",
+        AdapterKind::Markdownize => "markdown",
+        AdapterKind::Embedding => "embedding",
+        AdapterKind::Summary => "summary",
+        AdapterKind::Classification => "classification",
+        AdapterKind::Rerank => "rerank",
+    }
+}
+
 fn active_markdown_adapter(_repo: &Repository) -> Box<dyn MarkdownizeAdapter> {
     match std::env::var("KCS_TEST_MARKDOWNIZE_ADAPTER")
         .ok()
@@ -5632,7 +5408,7 @@ fn active_markdown_adapter(_repo: &Repository) -> Box<dyn MarkdownizeAdapter> {
             reject_incremental: true,
             reject_full: true,
         }),
-        _ => Box::new(DeterministicAdapter),
+        _ => builtin_offline_markdownize_adapter(),
     }
 }
 
@@ -5754,8 +5530,7 @@ fn run_index_pipeline(
     reclaim_orphaned_running_tasks(&task_store)?;
     let now = now_utc_seconds();
     let scope_id = preview.scope_id.clone();
-    let prepare_profile_hash =
-        tool_profile_hash(&deterministic_prepare_profile_value()).map_err(adapter_to_kcs)?;
+    let prepare_profile_hash = builtin_prepare_profile().tool_profile_hash;
     let markdown_adapter = active_markdown_adapter(repo);
     let markdown_profile = markdown_adapter.profile();
     let markdown_profile_hash = markdown_profile.tool_profile_hash.clone();
@@ -6527,7 +6302,8 @@ fn enqueue_online_placeholder_task(
     budget_caps: &BudgetCaps,
     month: &str,
 ) -> Result<()> {
-    let output_ref = "online:mistral_ocr_markdownize";
+    let online_profile = online_markdownize_profile();
+    let output_ref = online_output_ref(&online_profile.adapter_id);
     // Idempotency (Step2c I1, 04 §5.5): never enqueue a second online task for an
     // identity `(input_path, input_hash)` that already has an online task in any
     // live lifecycle state. Without the completed-state check, every unchanged
@@ -6574,14 +6350,14 @@ fn enqueue_online_placeholder_task(
         scope_id: scope_id.to_owned(),
         task_type: TaskType::Markdownize,
         estimated_usd: estimate_online_markdownize_cost(candidate.size_bytes),
-        adapter_id: Some("mistral_ocr_markdownize".to_owned()),
+        adapter_id: Some(online_profile.adapter_id.clone()),
     };
     let (device_remaining, folder_remaining) = budget_remaining_for_adapter(
         cost_ledger,
         budget_caps,
         month,
         scope_id,
-        adapter_kind_for_budget(estimate.adapter_id.as_deref()),
+        adapter_kind_budget_key(online_profile.adapter_kind),
     )?;
     let budget = evaluate_budget_with_caps(
         &estimate,
@@ -6608,7 +6384,7 @@ fn enqueue_online_placeholder_task(
         Some(MarkdownizeMode::Full),
         candidate,
         raw_hash,
-        output_ref,
+        &output_ref,
         status,
         reason,
         created_at,
@@ -6663,23 +6439,14 @@ fn budget_remaining_for_adapter(
     Ok((device_remaining, folder_remaining))
 }
 
-fn adapter_kind_for_budget(adapter_id: Option<&str>) -> &'static str {
-    match adapter_id {
-        Some("mistral_ocr_markdownize") | Some("deterministic_builtin") => "markdown",
-        Some("gemini_multimodal_embedding") => "embedding",
-        _ => "markdown",
-    }
-}
-
 fn materialize_tool_lock(repo: &Repository) -> Result<()> {
-    let prepare_hash =
-        tool_profile_hash(&deterministic_prepare_profile_value()).map_err(adapter_to_kcs)?;
+    let prepare_profile = builtin_prepare_profile();
     let markdown_profile = active_markdown_adapter(repo).profile();
     let mut value = json!({
         "spec_version": 1,
         "prepare": {
-            "tool_id": "prepare_default",
-            "profile_hash": prepare_hash,
+            "tool_id": prepare_profile.adapter_id,
+            "profile_hash": prepare_profile.tool_profile_hash,
             "kind": "deterministic_library"
         },
         "markdown": {
@@ -6739,7 +6506,7 @@ fn network_allowed(repo: &Repository, args: &IndexArgs) -> Result<bool> {
         return if args.yes || args.approve {
             Ok(true)
         } else {
-            approval_row_present(repo, "mistral_ocr_markdownize")
+            approval_row_present(repo, &online_markdownize_profile().adapter_id)
         };
     }
     if args.approve {
@@ -6750,7 +6517,7 @@ fn network_allowed(repo: &Repository, args: &IndexArgs) -> Result<bool> {
     {
         return Ok(true);
     }
-    approval_row_present(repo, "mistral_ocr_markdownize")
+    approval_row_present(repo, &online_markdownize_profile().adapter_id)
 }
 
 fn network_revoked(repo: &Repository) -> Result<bool> {
@@ -6800,9 +6567,10 @@ fn write_network_revoke_record(repo: &Repository) -> Result<()> {
         .open(&path)
         .map_err(|err| KcsError::io(err.to_string(), path.display().to_string()))?;
     // M1(b): frame the record and emit it with one write_all (no interleaving).
+    let tool_id = online_markdownize_profile().adapter_id;
     let mut line = serde_json::to_string(&json!({
         "recorded_at": now_utc_seconds(),
-        "tool_id": "mistral_ocr_markdownize",
+        "tool_id": tool_id,
         "execution_mode": "online_api",
         "allow_network": false,
     }))
@@ -6964,13 +6732,11 @@ fn write_approval_record(
 ) -> Result<()> {
     let path = repo.kcs_dir().join("approvals.jsonl");
     // One approval row per configured online adapter (07 §3: opt-in unit is
-    // scope × adapter, L4). The markdownize opt-in marker is written
-    // unconditionally (its online path is always available); the embedding row is
-    // written only when an embedding adapter is configured so its network gate is
-    // its own, not a ride-along on the markdownize approval.
-    let mut tool_ids = vec!["mistral_ocr_markdownize".to_owned()];
-    if embedding_seam().is_some() {
-        tool_ids.push(EMBEDDING_ADAPTER_ID.to_owned());
+    // scope × adapter, L4). Adapter IDs are sourced from AdapterProfile rather
+    // than hard-coded in the CLI.
+    let mut tool_ids = vec![online_markdownize_profile().adapter_id];
+    if let Some(adapter_id) = active_embedding_adapter_id()? {
+        tool_ids.push(adapter_id);
     }
     // P7: the opt-in is a persistent, idempotent marker. Every `index` used to
     // append a fresh row per adapter, so approvals.jsonl grew unbounded (and the
@@ -7333,18 +7099,19 @@ fn print_error(error: &KcsError, json_mode: bool) {
 #[cfg(test)]
 mod tests {
     use clap::Parser;
+    use kcs_adapter::catalog::deterministic_embedding_vector;
 
-    use super::{command_captured_json_flag, deterministic_unit_vector, Cli, Command};
+    use super::{command_captured_json_flag, Cli, Command};
 
     #[test]
     fn mock_embedding_vector_is_deterministic_and_normalized() {
-        let a = deterministic_unit_vector("認証仕様 トークン", 768);
-        let b = deterministic_unit_vector("認証仕様 トークン", 768);
+        let a = deterministic_embedding_vector("認証仕様 トークン", 768);
+        let b = deterministic_embedding_vector("認証仕様 トークン", 768);
         assert_eq!(a.len(), 768);
         assert_eq!(a, b, "same seed must reproduce the same vector");
         let norm = a.iter().map(|value| value * value).sum::<f32>().sqrt();
         assert!((norm - 1.0).abs() < 1e-4, "vector must be L2-normalized");
-        let other = deterministic_unit_vector("別のクエリ", 768);
+        let other = deterministic_embedding_vector("別のクエリ", 768);
         assert_ne!(a, other, "different seeds must differ");
     }
 
@@ -7495,7 +7262,7 @@ mod tests {
             previous_raw_hash: None,
             parent_run_id: None,
             changed_unit_keys: Vec::new(),
-            output_ref: "online:mistral_ocr_markdownize".to_owned(),
+            output_ref: super::online_output_ref("test_markdownize_adapter"),
             unit_keys: None,
             // A task stuck Running is bit-identical to a crash between the
             // Running-persist and the Done-persist.
