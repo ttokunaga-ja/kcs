@@ -499,6 +499,18 @@ impl Repository {
     pub fn tag(&self, name: &str, commit: Option<&str>) -> Result<String> {
         self.validate()?;
         validate_ref_operand(name)?;
+        // F4: `resolve_commit` resolves the literal `HEAD` and any `sha256:` hash
+        // form BEFORE it ever consults `refs/tags` (see below), so a tag created
+        // under such a name is written to disk but permanently shadowed — a dead
+        // ref that `diff`/`log` can never reach. Reject it at creation rather than
+        // returning a success that silently does nothing. (This check is specific
+        // to tag *names*; `validate_ref_operand` stays shared with `resolve_commit`,
+        // which must still accept `HEAD`/hash as commit operands.)
+        if name == "HEAD" || is_hash(name) {
+            return Err(KcsError::invalid_usage(
+                "tag name must not be `HEAD` or a commit hash (it would be unreachable)",
+            ));
+        }
         let _lock = StoreLock::acquire(&self.kcs_dir)?;
         let commit_hash = match commit {
             Some(value) => self.resolve_commit(value)?,
@@ -1139,7 +1151,19 @@ pub struct StoreLock {
 
 impl StoreLock {
     pub fn acquire(kcs_dir: &Path) -> Result<Self> {
-        let path = kcs_dir.join(".lock");
+        Self::acquire_path(kcs_dir.join(".lock"))
+    }
+
+    /// Acquire a lock at an explicit file path. Used for device-global locks that
+    /// live outside any single `.kcs` store — notably the cost-ledger lock
+    /// (`$XDG_DATA_HOME/kcs/cost-ledger.lock`, F8), which must serialize the
+    /// budget read-check-append across every scope on the device. Same reentrancy
+    /// (thread-local depth, keyed by the lock path) and stale-reclaim semantics as
+    /// [`acquire`]; the parent directory is created if missing.
+    pub fn acquire_path(path: PathBuf) -> Result<Self> {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).kcs_io(parent)?;
+        }
         let pid = std::process::id();
 
         // Reentrant fast path: this thread already holds the lock for `path`.
@@ -1478,9 +1502,39 @@ pub fn parse_utc_seconds(value: &str) -> Option<i64> {
 mod tests {
     use super::{
         civil_from_days, format_unix_seconds, format_utc_seconds, parse_utc_seconds,
-        redact_context, redact_message_paths,
+        redact_context, redact_message_paths, StoreLock,
     };
     use serde_json::json;
+    use std::fs;
+
+    // F8: the device-global cost-ledger lock is acquired via `acquire_path` at an
+    // arbitrary path outside any `.kcs`. It must create the parent dir, remove the
+    // lock on drop, and refuse to acquire while a lock file already holds the path.
+    #[test]
+    fn f8_acquire_path_is_device_global_and_excludes_a_held_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        // Nested path whose parent does not exist yet — acquire_path must create it.
+        let lock_path = dir.path().join("kcs/cost-ledger.lock");
+        {
+            let _guard = StoreLock::acquire_path(lock_path.clone()).unwrap();
+            assert!(
+                lock_path.exists(),
+                "lock file must be created under a fresh dir"
+            );
+        }
+        assert!(
+            !lock_path.exists(),
+            "lock file must be removed when the guard drops"
+        );
+
+        // A pre-existing lock file at the path blocks a fresh acquisition with
+        // STORE-LOCKED, proving acquire_path honors a held device-global lock.
+        fs::write(&lock_path, b"held by another charge").unwrap();
+        match StoreLock::acquire_path(lock_path.clone()) {
+            Ok(_) => panic!("a held device-global lock must block acquisition"),
+            Err(err) => assert_eq!(err.error_code(), "KCS-E-STORE-LOCKED-001"),
+        }
+    }
 
     #[test]
     fn redact_message_paths_masks_absolute_paths_only() {

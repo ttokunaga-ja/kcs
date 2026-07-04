@@ -26,7 +26,7 @@ use kcs_core::dag::NormalizeRef;
 use kcs_core::schema::{validate_json_schema, SchemaKind};
 use kcs_core::scope::{
     append_error_log, append_event_log, append_warn_log, new_ulid, now_utc_seconds,
-    InspectedObject, Repository,
+    InspectedObject, Repository, StoreLock,
 };
 use kcs_core::{ExitCode, KcsError, Result};
 use kcs_index::chunking::{
@@ -39,8 +39,8 @@ use kcs_index::{
     ChunkRow, EmbeddingDistance, EmbeddingModality, EmbeddingTargetType, TreeEntryRow,
 };
 use kcs_pipeline::budget::{
-    estimate_local_baseline_cost, evaluate_budget_with_caps, read_budget_policy, utc_month,
-    BudgetCapKind, BudgetCaps, BudgetEstimate, CostLedger, MonthlyCostLedgerEntry,
+    budget_warning, estimate_local_baseline_cost, evaluate_budget_with_caps, read_budget_policy,
+    utc_month, BudgetCapKind, BudgetCaps, BudgetEstimate, CostLedger, MonthlyCostLedgerEntry,
 };
 use kcs_pipeline::markdownize::{
     choose_markdownize_mode, persist_normalized_instance, validate_markdownize_response,
@@ -71,6 +71,7 @@ use kcs_search::rrf::{fuse_rrf, BackendRank, RrfConfig};
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use unicode_normalization::UnicodeNormalization;
 
 // clap のパースエラーは exit code 2 で終了する。これは docs/06-cli-spec.md §7 の
 // invalid usage (= 2) と一致するため、そのまま採用する。
@@ -516,6 +517,8 @@ fn run_index(args: IndexArgs) -> Result<Value> {
         "tree_hash": outcome.tree_hash,
         "commit_hash": outcome.commit_hash,
         "commit": outcome.commit,
+        // F5: non-blocking budget warning (null unless a cap crossed warn_at_percent).
+        "budget_warning": scope_budget_warning(&repo)?,
     });
     if index_result.failed_files > 0 {
         return Err(KcsError::new(
@@ -959,8 +962,14 @@ fn run_search(args: UnsupportedArgs) -> Result<Value> {
         precheck_mode.resolved,
         SearchMode::Hybrid | SearchMode::Vector
     );
+    // F2: the FTS index projection is NFC-normalized (kcs-index `index_chunk`), so
+    // the FTS query and the embedded query must use the same normal form or NFD
+    // content is a silent false negative (and vice versa). `query_hash` already
+    // normalizes internally, so the cursor hash is unaffected; only the MATCH /
+    // vector inputs need this. Display fields keep the caller's original `query`.
+    let query_nfc = parsed.query.nfc().collect::<String>();
     let query_embedding = if uses_vectors {
-        compute_query_embedding(&parsed.query)?
+        compute_query_embedding(&query_nfc)?
     } else {
         None
     };
@@ -1041,8 +1050,10 @@ fn run_search(args: UnsupportedArgs) -> Result<Value> {
     }
 
     // Per-scope: FTS5 text ranks + chunk_vec KNN vector ranks -> RRF -> candidate
-    // pool. Vector ranks are supplied only in hybrid/vector mode (K4).
-    let tiers = build_fts_tiers(&parsed.query);
+    // pool. Vector ranks are supplied only in hybrid/vector mode (K4). F2: build
+    // the FTS tiers from the NFC-normalized query to match the NFC index
+    // projection.
+    let tiers = build_fts_tiers(&query_nfc);
     // Only feed vectors into the KNN when the resolved mode actually uses them;
     // a text fallback (incompatible/absent) must stay pure text.
     let scope_query_embedding = matches!(mode.resolved, SearchMode::Hybrid | SearchMode::Vector)
@@ -4205,20 +4216,22 @@ fn execute_pending_markdownize_tasks(
             estimated_usd: estimate_online_markdownize_cost(file_size),
             adapter_id: Some(online_profile.adapter_id.clone()),
         };
-        let (device_remaining, folder_remaining) = budget_remaining_for_adapter(
+        // F8: reserve the charge under the device-global cost-ledger lock BEFORE
+        // execution, serializing the budget read-check-append against every other
+        // scope. The executor bills exactly this estimate under the "markdown" key
+        // (the previous post-execution append recomputed the same value), so the
+        // reserved row is identical. The adapter call runs outside the lock; a
+        // failure keeps the reservation (see helper docs).
+        let charge = charge_cost_ledger_under_lock(
             &cost_ledger,
+            cost_ledger_lock_path(),
             &budget_caps,
             &month,
-            &scope_id,
             adapter_kind_budget_key(online_profile.adapter_kind),
-        )?;
-        let budget = evaluate_budget_with_caps(
             &estimate,
-            device_remaining,
-            folder_remaining,
             override_budget,
-        );
-        if !budget.allowed {
+        )?;
+        if matches!(charge, ChargeOutcome::BudgetExceeded) {
             store
                 .update_matching(|candidate| {
                     if candidate.task_id == task_id {
@@ -4245,14 +4258,7 @@ fn execute_pending_markdownize_tasks(
             .map_err(pipeline_to_kcs)?;
         match execute_online_markdownize_task(repo, &task) {
             Ok(outcome) => {
-                cost_ledger
-                    .append_monthly(&MonthlyCostLedgerEntry {
-                        month: month.clone(),
-                        scope_id: scope_id.clone(),
-                        adapter_kind: outcome.adapter_kind.clone(),
-                        usd: outcome.cost_usd,
-                    })
-                    .map_err(pipeline_to_kcs)?;
+                // Charge already reserved under the device-global lock above (F8).
                 store
                     .update_matching(|candidate| {
                         if candidate.task_id == task_id {
@@ -4400,8 +4406,6 @@ fn embedding_online_allowed(
 struct OnlineExecutionOutcome {
     output_ref: String,
     status: TaskStatus,
-    cost_usd: f64,
-    adapter_kind: String,
 }
 
 #[derive(Debug, Clone)]
@@ -4488,10 +4492,6 @@ fn execute_online_markdownize_task(
     Ok(OnlineExecutionOutcome {
         output_ref: normalized_output_ref(repo, &task.input_hash, &profile.tool_profile_hash, 0),
         status,
-        cost_usd: estimate_online_markdownize_cost(
-            path.metadata().map(|metadata| metadata.len()).unwrap_or(0),
-        ),
-        adapter_kind: "markdown".to_owned(),
     })
 }
 
@@ -4769,20 +4769,19 @@ fn run_embedding_enrichment(
             estimated_usd: estimate_embedding_cost(sent_chars),
             adapter_id: Some(profile.tool_id.clone()),
         };
-        let (device_remaining, folder_remaining) = budget_remaining_for_adapter(
+        // F8: reserve the charge under the device-global cost-ledger lock BEFORE
+        // sending, so a concurrent scope observes this spend and cannot also pass
+        // the cap (TOCTOU). The adapter call stays outside the lock.
+        let charge = charge_cost_ledger_under_lock(
             &cost_ledger,
+            cost_ledger_lock_path(),
             &budget_caps,
             &month,
-            &scope_id,
             EMBEDDING_ADAPTER_KIND,
-        )?;
-        let budget = evaluate_budget_with_caps(
             &estimate,
-            device_remaining,
-            folder_remaining,
             override_budget,
-        );
-        if !budget.allowed {
+        )?;
+        if matches!(charge, ChargeOutcome::BudgetExceeded) {
             // Budget exhausted: pause the remaining to-send chunks
             // (index_status.budget_paused). Already-linked reuse stays done.
             pause_embedding_tasks(&task_store, plan.to_send.iter().map(|(chunk, _)| *chunk))?;
@@ -4790,14 +4789,7 @@ fn run_embedding_enrichment(
         }
         match send_embed_batch(&conn, execution, &profile, &plan.to_send) {
             Ok(()) => {
-                cost_ledger
-                    .append_monthly(&MonthlyCostLedgerEntry {
-                        month: month.clone(),
-                        scope_id: scope_id.clone(),
-                        adapter_kind: EMBEDDING_ADAPTER_KIND.to_owned(),
-                        usd: estimate.estimated_usd,
-                    })
-                    .map_err(pipeline_to_kcs)?;
+                // Charge already reserved under the lock above (F8).
                 complete_embedding_tasks(
                     &task_store,
                     plan.to_send.iter().map(|(chunk, _)| *chunk),
@@ -5376,6 +5368,9 @@ fn budget_status_json(repo: &Repository) -> Result<Value> {
         Some(folder) if folder <= device_remaining => BudgetCapKind::Folder,
         _ => BudgetCapKind::Device,
     };
+    // F5: surface the non-blocking `warn_at_percent` warning and the active
+    // policy (hard_stop / warn_at_percent) alongside the numbers.
+    let warning = budget_warning(&caps, device_spent, folder_spent);
     Ok(json!({
         "month": month,
         "device_monthly_usd_cap": caps.device_monthly_usd_cap,
@@ -5390,7 +5385,28 @@ fn budget_status_json(repo: &Repository) -> Result<Value> {
         },
         "device_per_adapter": caps.device_per_adapter,
         "folder_per_adapter": caps.folder_per_adapter,
+        "hard_stop": caps.hard_stop,
+        "warn_at_percent": caps.warn_at_percent,
+        "warned": warning.is_some(),
+        "warning": warning,
     }))
+}
+
+/// F5: the current scope's non-blocking budget warning (or `None`), for embedding
+/// in `index` / `batch` result JSON. Reads the caps and this month's ledger totals.
+fn scope_budget_warning(repo: &Repository) -> Result<Option<String>> {
+    let caps = read_budget_policy(user_config_toml_path(), repo.kcs_dir().join("config.toml"))
+        .map_err(pipeline_to_kcs)?;
+    let month = utc_month(&now_utc_seconds());
+    let ledger = CostLedger::new(cost_ledger_path());
+    let scope_id = repo.scope_id_for_adapter();
+    let device_spent = ledger
+        .monthly_total(&month, None)
+        .map_err(pipeline_to_kcs)?;
+    let folder_spent = ledger
+        .monthly_total(&month, Some(&scope_id))
+        .map_err(pipeline_to_kcs)?;
+    Ok(budget_warning(&caps, device_spent, folder_spent))
 }
 
 fn index_preview_json(root: &Path, preview: &ScanPreview) -> Value {
@@ -5910,7 +5926,13 @@ fn run_index_pipeline(
                 month: month.clone(),
                 scope_id: scope_id.clone(),
                 adapter_kind: "deterministic_baseline".to_owned(),
-                usd: estimate_local_baseline_cost(candidate.size_bytes),
+                // F1 (04 §5.4): local deterministic markdownize is recorded at unit
+                // price 0, so free local indexing never consumes the device/folder
+                // USD cap. `device_spent = monthly_total(None)` sums every
+                // adapter_kind, so a non-zero baseline cost here would silently pause
+                // paid enrichment and inflate `status.budget.device_spent`. The row is
+                // still appended (provenance of the baseline work), just at usd = 0.
+                usd: 0.0,
             })
             .map_err(pipeline_to_kcs)?;
         enqueue_online_placeholder_task(
@@ -6467,7 +6489,9 @@ fn enqueue_online_placeholder_task(
     // not send. The hold takes precedence over budget/network reasons.
     let (status, reason) = if secrets_hold {
         (TaskStatus::Paused, Some(SECRETS_TIER_B_HOLD))
-    } else if !budget.allowed {
+    } else if !budget.allowed && budget_caps.hard_stop {
+        // F5: only a hard-stop cap pauses the task. Under soft-stop the online task
+        // is enqueued normally and its over-cap charge is recorded at execution.
         (TaskStatus::Paused, Some("budget_exceeded"))
     } else if !network_allowed {
         (TaskStatus::Pending, Some("network_opt_in_required"))
@@ -6533,6 +6557,73 @@ fn budget_remaining_for_adapter(
         );
     }
     Ok((device_remaining, folder_remaining))
+}
+
+/// Result of an atomic (device-globally-serialized) cost-ledger charge attempt.
+#[derive(Debug)]
+enum ChargeOutcome {
+    /// The estimate fit the cap under the lock and was appended (reserved).
+    Charged,
+    /// The re-read under the lock showed the cap would be exceeded; nothing was
+    /// appended. The caller must not send.
+    BudgetExceeded,
+}
+
+/// F8: atomically reserve a charge against the device-global cost-ledger.
+///
+/// The ledger is device-global while `StoreLock` (`.kcs/.lock`) is scope-scoped,
+/// so before this the budget read-check and the append were not serialized across
+/// scopes: two concurrent `index` runs could each pass the cap check and both
+/// append, exceeding the monthly cap (TOCTOU). This takes a single device-global
+/// lock (`cost-ledger.lock`), RE-READS the ledger under it to re-evaluate the cap
+/// against any spend a concurrent scope just committed, and only then appends the
+/// estimate — so the reservation is visible to the next charger before its check.
+///
+/// The reservation is taken BEFORE the adapter call (which the caller issues only
+/// on `Charged`, OUTSIDE this lock) so the device is not serialized on network
+/// I/O. A send failure intentionally keeps the reservation: a hard safety cap must
+/// never be exceeded, and F3 forbids negative compensating entries. Lock
+/// contention surfaces as `KCS-E-STORE-LOCKED-001` (fail-closed), never an
+/// unrecorded charge.
+fn charge_cost_ledger_under_lock(
+    cost_ledger: &CostLedger,
+    lock_path: PathBuf,
+    budget_caps: &BudgetCaps,
+    month: &str,
+    adapter_kind: &str,
+    estimate: &BudgetEstimate,
+    override_budget: bool,
+) -> Result<ChargeOutcome> {
+    // The reserved row is derived from the same `(month, estimate.scope_id,
+    // adapter_kind, estimate.estimated_usd)` used for the cap check, so the
+    // checked and appended `adapter_kind`/amount can never diverge.
+    let scope_id = estimate.scope_id.as_str();
+    let _ledger_lock = StoreLock::acquire_path(lock_path)?;
+    let (device_remaining, folder_remaining) =
+        budget_remaining_for_adapter(cost_ledger, budget_caps, month, scope_id, adapter_kind)?;
+    let budget = evaluate_budget_with_caps(
+        estimate,
+        device_remaining,
+        folder_remaining,
+        override_budget,
+    );
+    // F5: `hard_stop` (default true) pauses at the cap as before. `hard_stop=false`
+    // is a soft-stop: over cap we still append the real charge and continue, so the
+    // ledger reflects actual spend and `warn_at_percent` can surface it. The append
+    // stays inside the F8 lock region either way.
+    if !budget.allowed && budget_caps.hard_stop {
+        return Ok(ChargeOutcome::BudgetExceeded);
+    }
+    cost_ledger
+        .append_monthly(&MonthlyCostLedgerEntry {
+            month: month.to_owned(),
+            scope_id: scope_id.to_owned(),
+            adapter_kind: adapter_kind.to_owned(),
+            usd: estimate.estimated_usd,
+        })
+        .map_err(pipeline_to_kcs)?;
+    Ok(ChargeOutcome::Charged)
+    // `_ledger_lock` drops here, releasing the device-global lock.
 }
 
 fn materialize_tool_lock(repo: &Repository) -> Result<()> {
@@ -7057,6 +7148,14 @@ fn cost_ledger_path() -> PathBuf {
     data_home().join("kcs/cost-ledger.jsonl")
 }
 
+/// F8: the device-global lock guarding the cost-ledger budget read-check-append.
+/// The ledger is shared by every scope on the device, so its own `.kcs/.lock`
+/// (scope-scoped) cannot serialize two scopes charging concurrently. This single
+/// file lock does.
+fn cost_ledger_lock_path() -> PathBuf {
+    data_home().join("kcs/cost-ledger.lock")
+}
+
 /// Device-local HMAC key that signs search cursors (O1(b)). Stored at
 /// `$XDG_DATA_HOME/kcs/cursor-key` (0600), generated from `/dev/urandom` on first
 /// use. Signing binds a cursor to this device so a caller cannot forge or tamper
@@ -7224,6 +7323,109 @@ mod tests {
         assert!((norm - 1.0).abs() < 1e-4, "vector must be L2-normalized");
         let other = deterministic_embedding_vector("別のクエリ", 768);
         assert_ne!(a, other, "different seeds must differ");
+    }
+
+    // F8: two serial charges must re-read the ledger under the device-global lock,
+    // so the second sees the first's reservation and is denied when it would
+    // exceed the cap — the cap is never breached even without concurrency, and the
+    // ledger is not double-appended.
+    #[test]
+    fn f8_charge_serializes_reread_and_enforces_cap() {
+        use super::{
+            charge_cost_ledger_under_lock, BudgetCaps, BudgetEstimate, ChargeOutcome, CostLedger,
+            TaskType,
+        };
+        use std::collections::BTreeMap;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let ledger = CostLedger::new(tmp.path().join("kcs/cost-ledger.jsonl"));
+        let lock_path = tmp.path().join("kcs/cost-ledger.lock");
+        let caps = BudgetCaps {
+            device_monthly_usd_cap: 1.0,
+            folder_monthly_usd_cap: None,
+            device_per_adapter: BTreeMap::new(),
+            folder_per_adapter: BTreeMap::new(),
+            hard_stop: true,
+            warn_at_percent: 80,
+        };
+        let estimate = BudgetEstimate {
+            scope_id: "scope".to_owned(),
+            task_type: TaskType::Embedding,
+            estimated_usd: 0.6,
+            adapter_id: Some("gemini".to_owned()),
+        };
+
+        // First charge: 0.6 <= 1.0 remaining → Charged and appended.
+        let first = charge_cost_ledger_under_lock(
+            &ledger,
+            lock_path.clone(),
+            &caps,
+            "2026-07",
+            "embedding",
+            &estimate,
+            false,
+        )
+        .unwrap();
+        assert!(matches!(first, ChargeOutcome::Charged));
+
+        // Second charge re-reads under the lock: spent=0.6, remaining=0.4 < 0.6 →
+        // BudgetExceeded, nothing appended (serial charges cannot exceed the cap).
+        let second = charge_cost_ledger_under_lock(
+            &ledger,
+            lock_path.clone(),
+            &caps,
+            "2026-07",
+            "embedding",
+            &estimate,
+            false,
+        )
+        .unwrap();
+        assert!(matches!(second, ChargeOutcome::BudgetExceeded));
+        assert_eq!(ledger.monthly_total("2026-07", None).unwrap(), 0.6);
+    }
+
+    // F8: the charge path is gated by the device-global ledger lock. A held lock
+    // (here an existing lock file) makes the charge fail-closed (STORE-LOCKED)
+    // rather than appending while another charger holds the ledger.
+    #[test]
+    fn f8_charge_is_gated_by_the_device_global_lock() {
+        use super::{
+            charge_cost_ledger_under_lock, BudgetCaps, BudgetEstimate, CostLedger, TaskType,
+        };
+        use std::collections::BTreeMap;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let ledger = CostLedger::new(tmp.path().join("kcs/cost-ledger.jsonl"));
+        let lock_path = tmp.path().join("kcs/cost-ledger.lock");
+        std::fs::create_dir_all(lock_path.parent().unwrap()).unwrap();
+        std::fs::write(&lock_path, b"held by a concurrent charge").unwrap();
+        let caps = BudgetCaps {
+            device_monthly_usd_cap: 50.0,
+            folder_monthly_usd_cap: None,
+            device_per_adapter: BTreeMap::new(),
+            folder_per_adapter: BTreeMap::new(),
+            hard_stop: true,
+            warn_at_percent: 80,
+        };
+        let estimate = BudgetEstimate {
+            scope_id: "scope".to_owned(),
+            task_type: TaskType::Embedding,
+            estimated_usd: 0.01,
+            adapter_id: Some("gemini".to_owned()),
+        };
+        let err = charge_cost_ledger_under_lock(
+            &ledger,
+            lock_path.clone(),
+            &caps,
+            "2026-07",
+            "embedding",
+            &estimate,
+            false,
+        )
+        .unwrap_err();
+        assert_eq!(err.error_code(), "KCS-E-STORE-LOCKED-001");
+        // Nothing was charged while the lock was held.
+        assert_eq!(ledger.monthly_total("2026-07", None).unwrap(), 0.0);
     }
 
     #[test]

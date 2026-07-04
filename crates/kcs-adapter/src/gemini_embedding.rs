@@ -139,11 +139,15 @@ impl GeminiEmbeddingClient for EnvGeminiEmbeddingClient {
         .map_err(http_error)?
         .into_json()
         .map_err(|err| AdapterError::ContractViolation(err.to_string()))?;
-        parse_embeddings(&response, items)
+        parse_embeddings(&response, items, dimensions)
     }
 }
 
-fn parse_embeddings(response: &Value, items: &[EmbeddingItem]) -> Result<Vec<EmbeddingVector>> {
+fn parse_embeddings(
+    response: &Value,
+    items: &[EmbeddingItem],
+    dimensions: u32,
+) -> Result<Vec<EmbeddingVector>> {
     let embeddings = response
         .get("embeddings")
         .and_then(Value::as_array)
@@ -171,6 +175,19 @@ fn parse_embeddings(response: &Value, items: &[EmbeddingItem]) -> Result<Vec<Emb
                 .ok_or_else(|| {
                     AdapterError::ContractViolation("embedding values must be numeric".to_owned())
                 })?;
+            // F7: the response vector must have exactly the requested
+            // `outputDimensionality`. A wrong-width vector would otherwise be
+            // persisted with the declared `dimensions` (768) but a mismatched
+            // byte length, so `link_chunk_vec` silently drops it from `chunk_vec`
+            // (permanent KNN exclusion) even though the chunk is billed and marked
+            // done, with no self-repair path. Reject it as a contract violation so
+            // the batch fails (retryable/reportable) instead of being charged.
+            if vector.len() != dimensions as usize {
+                return Err(AdapterError::ContractViolation(format!(
+                    "embedding dimension mismatch: expected {dimensions}, got {}",
+                    vector.len()
+                )));
+            }
             Ok(EmbeddingVector {
                 id: item.id.clone(),
                 vector,
@@ -375,9 +392,33 @@ mod tests {
                 { "values": [3.0, 4.0] }
             ]
         });
-        let vectors = parse_embeddings(&response, &items).unwrap();
+        let vectors = parse_embeddings(&response, &items, 2).unwrap();
         assert_eq!(vectors[0].id, "x");
         assert_eq!(vectors[0].vector, vec![1.0, 2.0]);
         assert_eq!(vectors[1].id, "y");
+    }
+
+    // F7: a response whose vector length disagrees with the requested dimension
+    // must be rejected as a contract violation, not persisted (which would make
+    // the chunk permanently invisible to KNN yet billed and marked done).
+    #[test]
+    fn embedding_wrong_dimension_is_contract_violation() {
+        let items = vec![EmbeddingItem {
+            id: "x".to_owned(),
+            text: Some("a".to_owned()),
+            path: None,
+            mime: None,
+        }];
+        // 768 requested, but the backend returns a 5-element vector.
+        let response = json!({
+            "embeddings": [
+                { "values": [0.0, 0.1, 0.2, 0.3, 0.4] }
+            ]
+        });
+        let err = parse_embeddings(&response, &items, ADOPTED_DIMENSIONS).unwrap_err();
+        assert!(
+            matches!(err, AdapterError::ContractViolation(_)),
+            "expected ContractViolation, got {err:?}"
+        );
     }
 }

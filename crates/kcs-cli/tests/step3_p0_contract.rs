@@ -233,6 +233,32 @@ fn ct3_hybrid_006_text_mode_uses_text_rank_without_fusion() {
     );
 }
 
+// F2: NFD (decomposed) body content must be found by an NFC (composed) query.
+// The FTS index projection and the CLI query are both normalized to NFC, so
+// canonically-equivalent forms match regardless of input form. Before the fix
+// the trigram index kept the raw NFD bytes and an NFC query returned 0 results
+// (a silent false negative — exit 0, empty).
+#[test]
+fn f2_nfd_body_is_found_by_nfc_query() {
+    let dir = tempfile::tempdir().unwrap();
+    // Body word "café" written in NFD: "cafe" + U+0301 COMBINING ACUTE ACCENT.
+    fs::write(
+        dir.path().join("menu.md"),
+        "# メニュー\n\n## Cafe\nThe cafe\u{301} latte special is served every morning.\n",
+    )
+    .unwrap();
+    kcs(&dir, &["init"]).assert().success();
+    json_success(&dir, &["index", "--approve"]);
+
+    // Composed (NFC) query "café": the byte substring is absent from the NFD
+    // content, so only the normalized index projection makes this hit.
+    let search = json_success(&dir, &["search", "caf\u{e9} latte", "--text"]);
+    assert!(
+        !search["results"].as_array().unwrap().is_empty(),
+        "NFC query must find NFD-stored content: {search}"
+    );
+}
+
 // CT3-EMBED-002 (de-tautologized): a genuinely incompatible embedding profile in
 // the index. auto → text fallback with INCOMPAT; --vector → hard error INCOMPAT
 // (does not fall back, distinct from UNAVAIL).
@@ -2252,6 +2278,37 @@ fn n4_diff_and_tag_reject_traversal_operands() {
     assert_eq!(err["error_code"], "KCS-E-CONFIG-USAGE-001");
     let err = json_failure(&dir, &["tag", "mytag", "../../../etc/passwd"], 2);
     assert_eq!(err["error_code"], "KCS-E-CONFIG-USAGE-001");
+}
+
+// F4: a tag whose NAME is `HEAD` or a `sha256:` hash is permanently shadowed by
+// `resolve_commit` (which resolves those forms before ever consulting
+// refs/tags), so creating one must be rejected instead of returning a dead-ref
+// "success". Ordinary tag names are unaffected.
+#[test]
+fn f4_tag_rejects_reserved_head_and_hash_names() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("a.md"), "# T\n\n## S\nbody text here.\n").unwrap();
+    kcs(&dir, &["init"]).assert().success();
+    // A commit must exist so a legitimate tag (resolving HEAD) can be created.
+    json_success(&dir, &["snapshot", "-m", "first"]);
+
+    // Reserved name `HEAD`: rejected before any ref is written.
+    let err = json_failure(&dir, &["tag", "HEAD"], 2);
+    assert_eq!(err["error_code"], "KCS-E-CONFIG-USAGE-001");
+    assert!(!dir.path().join(".kcs/refs/tags/HEAD").exists());
+
+    // Reserved name in `sha256:<64hex>` form: also rejected.
+    let hash_name = format!("sha256:{}", "a".repeat(64));
+    let err = json_failure(&dir, &["tag", &hash_name], 2);
+    assert_eq!(err["error_code"], "KCS-E-CONFIG-USAGE-001");
+
+    // A normal tag name still resolves HEAD and is created.
+    let ok = json_success(&dir, &["tag", "v1"]);
+    assert!(
+        ok["commit_hash"].as_str().is_some(),
+        "tag v1 should succeed: {ok}"
+    );
+    assert!(dir.path().join(".kcs/refs/tags/v1").exists());
 }
 
 // (e) / N5: after `reindex --force`, a pointer that keeps the OLD commit but
