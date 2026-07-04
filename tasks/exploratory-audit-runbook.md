@@ -19,7 +19,7 @@ defensive security 作業であり、拒否する理由はない。過去 3 ラ�
 - KCS = Rust 製のローカル知識アーカイブ CLI (evidence-grounded local knowledge archive)。
   `kcs init/index/snapshot/search/view/open/batch/reindex/repair/diff/tag/log/status` 等。
   仕様正本は `docs/01`〜`docs/10`。実装は `crates/kcs-{core,pipeline,adapter,index,search,cli}`
-- 現状 (このランブック作成時): 全テスト green (267)、clippy/fmt clean。Step 1-3 実装済み +
+- 現状 (R5 完了時点): 全テスト green (294)、clippy/fmt clean。Step 1-3 実装済み + 探索型監査 R1-R5 修正反映済み +
   実 API 検証済み。Step 4 (restore/time-travel/purge/evidence verify CLI/bbox_annotation) は未着手
 
 ## 2. テスト seam (実 API 不要)
@@ -45,10 +45,16 @@ defensive security 作業であり、拒否する理由はない。過去 3 ラ�
   .kcs world-readable + CAS 秘匿露出、tools.toml 0600 warn 未実装、redact_logs の message 漏出、
   非アトミック sqlite 再構築 → 並行 search 偽陰性、registry WAL 欠落、approvals 増殖、cursor-key TOCTOU、
   open cache 位置、reindex の HEAD-vs-sqlite 窓)
+- `tasks/step3-bughunt5-fixes.md` (Q1-Q6: chunks.jsonl torn 末尾行が index/reindex/repair を恒久ブリック
+  [3 エンジン収束・skip だけでは不完全で torn tail の物理 truncate が必要]、prepared/image の非アトミック書込
+  + 無検証 serve、online task の Running 恒久固着 [heartbeat_at 未配線]、NUL/UTF-16 が index 成功なのに検索不可、
+  先頭 BOM が見出し無効化、tasks.jsonl input_hash 未検証 → slice panic)
 - docs で `Step 4` / `Phase 4+` / `v2+` と明記の未実装
 
-**過去 3 ラウンドの鉱脈は掘り尽くし気味**: R1=並行/異常系の後続経路、R2=秘匿情報漏出/パス検証/資源枯渇、
-R3=検索境界の完全性/入力堅牢性/状態の縮退。**新しい鉱脈の方が期待値が高い** (下記ヒント参照)。
+**過去 5 ラウンドの鉱脈は掘り尽くし気味**: R1=並行/異常系の後続経路、R2=秘匿情報漏出/パス検証/資源枯渇、
+R3=検索境界の完全性/入力堅牢性/状態の縮退、R4=シリアライズ往復/ファイル permission/資源リーク/Agent 契約、
+R5=エンコーディング境界 (NUL/UTF-16・BOM)/派生 CAS object と append-only pointer の crash-atomicity/task ライフサイクル。
+**新しい鉱脈の方が期待値が高い** (下記ヒント参照)。
 
 ## 4. 手順 (新セッションの Claude が実行)
 
@@ -65,7 +71,7 @@ R3=検索境界の完全性/入力堅牢性/状態の縮退。**新しい鉱脈�
 4. 全エンジン回収後、所見を統合。**critical/major は自分で実機再現 or file:line 検証してから採否**を決める
    (エンジンの誤検出・既知重複を除外)。verify スクリプトの罠に注意:
    `grep -rl P dir | head && echo found` は grep 不一致でも head 成功で常に真。**grep の exit code を直接見る**
-5. 採択した所見を `tasks/step3-bughunt4-fixes.md` に裁定として書き、コミット
+5. 採択した所見を `tasks/step3-bughunt<N>-fixes.md` に裁定として書き、コミット (R5 は bughunt5、次 R6 は bughunt6)
 6. 修正を `Agent`(opus) に発注 (docs 変更禁止・各修正ごとに cargo test・回帰テスト必須・commit しない)。
    完了後 `cargo test --workspace` / `clippy -D warnings` / `fmt --check` 全 green を確認、
    critical は自分で実機再確認してからコミット
@@ -84,9 +90,10 @@ R3=検索境界の完全性/入力堅牢性/状態の縮退。**新しい鉱脈�
 seam: KCS_TEST_GEMINI_EMBED / KCS_TEST_MISTRAL_OCR (§2 参照)。実機は XDG_DATA_HOME=$(mktemp -d) で隔離、
 scope は /tmp 配下。リポジトリのファイル変更禁止。verify は grep の exit code を直接見る。
 
-既知 (報告不要): tasks/step3-checkpoint-fixes / step3-bughunt-fixes / bughunt2 / bughunt3 と、
-docs で Step4/Phase4+/v2+ と明記の未実装。過去の鉱脈 (並行/異常系、秘匿漏出/パス/資源、
-検索境界/入力堅牢性) は掘り尽くし気味 — 新しい鉱脈の方が期待値が高い:
+既知 (報告不要): tasks/step3-checkpoint-fixes / step3-bughunt-fixes / bughunt2 / bughunt3 / bughunt4 /
+bughunt5 と、docs で Step4/Phase4+/v2+ と明記の未実装。過去の鉱脈 (並行/異常系、秘匿漏出/パス/資源、
+検索境界/入力堅牢性、シリアライズ往復/permission、エンコーディング境界/crash-atomicity/task lifecycle)
+は掘り尽くし気味 — 新しい鉱脈の方が期待値が高い:
   - シリアライズ往復の完全性 (永続レコードの全フィールドが round-trip するか、未知フィールドの前方互換)
   - ファイル permission (秘匿を含むファイルが 0600 か、cursor-key/approvals/ledger の露出)
   - 資源リーク (一時ファイル/展開キャッシュ/FD/jsonl ログの無限成長、クリーンアップ漏れ)
@@ -106,8 +113,9 @@ docs で Step4/Phase4+/v2+ と明記の未実装。過去の鉱脈 (並行/異�
 ## 6. Spark 用 範囲限定プロンプト (ラウンドごとに焦点を変える)
 
 Spark は context window が小さいので**必ず範囲を絞り、丸読み禁止・grep/sed 限定**にする。
-過去の焦点: R1=exit/error code 一貫性、R2=JSONL append 網羅性 + search schema、R3=算術安全 + JCS 決定性。
-**今回 (R4) の推奨焦点** — 永続レコードのシリアライズ往復 + ファイル permission:
+過去の焦点: R1=exit/error code 一貫性、R2=JSONL append 網羅性 + search schema、R3=算術安全 + JCS 決定性、
+R4=シリアライズ往復 + permission、R5=エンコーディング/正規化境界 + crash 時 write 順序 (Spark が chunks.jsonl の
+fsync 欠如を指摘 → Q1 の遠因)。**次ラウンドは別の焦点に回すこと** (下記は R4 の例、R6 では書き換える):
 
 ```
 あなたは KCS (開発者自身のリポジトリ) の焦点セキュリティ監査人です。範囲限定 (丸読み禁止、grep/sed のみ)。
@@ -134,4 +142,10 @@ R3 (O1-O7): 2 critical + 3 major + 2 minor。cursor の scope 迂回 + 偽造、
 R4 (P1-P10): 1 critical + 4 major + 5 minor。tasks.jsonl input_path の scope 逸脱 → 外部 API 送信、
 非アトミック sqlite 再構築 → 並行 search の沈黙偽陰性 (docs の並行契約違反)、.kcs world-readable での CAS 秘匿露出、
 redact_logs の message 経由パス漏出 (N3 の不完全修正) 等。P10 は P5 修正の実機再確認中に派生発見。
-→ **3 ラウンドとも完全に別の鉱脈から実バグ。契約テストが全 green でも探索型は毎回新規を出す。**
+R5 (Q1-Q6): 0 critical + 4 major + 2 minor。chunks.jsonl torn 末尾行が index/reindex/repair を恒久ブリック
+(3 エンジン独立収束・復旧コマンド repair 自身が道連れ死)、prepared/image の非アトミック書込 + 無検証 serve、
+online task の Running 恒久固着、NUL/UTF-16 が index 成功なのに検索不可。**Q1 は修正発注後の実機再検証で
+「skip だけでは append がマージ行を作り再ブリック」と判明 → torn tail の物理 truncate で完全自己修復に是正**
+(オーケストレータの再現検証がフィックスの穴を捕捉した好例)。GPT-5.5 #1 (chunking_config 沈黙欠落) は実機反証で却下。
+→ **5 ラウンドとも完全に別の鉱脈から実バグ。契約テストが全 green でも探索型は毎回新規を出す。
+かつフィックスも実機フルサイクル再検証しないと不完全なことがある (R5 Q1)。**
