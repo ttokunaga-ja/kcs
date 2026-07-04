@@ -915,23 +915,53 @@ fn ct2_secrets_002_yes_cannot_unexclude_tier_a() {
 }
 
 #[test]
-fn ct2_secrets_003_tier_b_local_but_online_pending() {
+fn ct2_secrets_003_tier_b_local_but_online_held() {
+    // N1: a Tier B (candidate-secret) file is ingested locally but its online task
+    // is HELD (not a ready-to-send pending task) until `--send-secrets`. This test
+    // previously asserted the pre-fix behavior (a `pending`/`network_opt_in_required`
+    // task that a network opt-in would ship) — the very leak N1 closes.
     let dir = scope();
     fs::write(dir.path().join("api_token.txt"), "not actually secret").unwrap();
     let preview = json_success(&dir, ["index", "--preview"]);
+    // Still ingested (not hard-excluded like Tier A), but flagged sensitive.
     assert!(!preview["excluded_candidates"]
         .as_array()
         .unwrap()
         .iter()
         .any(|v| v == "api_token.txt"));
-    let output = json_success(&dir, ["index", "--yes"]);
-    assert!(output["pending_online_tasks"].as_u64().unwrap() > 0);
+    assert!(preview["sensitive_candidates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|c| c["path"] == "api_token.txt" && c["reason"] == "secrets_tier_b_warning"));
+    json_success(&dir, ["index", "--yes"]);
     let status = json_success(&dir, ["status"]);
-    assert!(status["tasks"].as_array().unwrap().iter().any(|task| {
-        task["input_path"] == "api_token.txt"
-            && task["status"] == "pending"
-            && task["fallback_reason"] == "network_opt_in_required"
-    }));
+    // The online task is held, not sendable.
+    assert!(
+        status["tasks"].as_array().unwrap().iter().any(|task| {
+            task["input_path"] == "api_token.txt"
+                && task["status"] == "paused"
+                && task["fallback_reason"] == "secrets_tier_b_hold"
+        }),
+        "Tier B online task must be held (secrets_tier_b_hold): {status}"
+    );
+    assert!(
+        !status["tasks"].as_array().unwrap().iter().any(|task| {
+            task["input_path"] == "api_token.txt"
+                && task["status"] == "pending"
+                && task["fallback_reason"] == "network_opt_in_required"
+        }),
+        "Tier B online task must NOT be a ready-to-send pending task: {status}"
+    );
+    // Quarantine-visible for the operator.
+    assert!(
+        status["quarantine"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|q| q["path"] == "api_token.txt" && q["reason"] == "secrets_tier_b"),
+        "Tier B must be recorded in quarantine: {status}"
+    );
 }
 
 #[test]
