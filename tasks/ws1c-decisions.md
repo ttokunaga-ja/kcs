@@ -228,3 +228,60 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     returns before scope enumeration/all-failed detection/index_status aggregation, so it can no
     longer mask a scope failure (exit 4) or pin `index_status` to a fixed `1.0`. `empty_search_response`
     now reports the real searched scopes + aggregated `index_status` and honors partial-failure exit 3.
+
+## Third exploratory-audit round (O1-O7, tasks/step3-bughunt3-fixes.md)
+
+53. Cursor cannot bypass a scope restriction, and cursors are signed (O1). (a) On a cursor replay
+    `run_search` now also calls `enumerate_scope_targets` to compute the scopes the caller's
+    `--scope`/`--descendants` permit, and **intersects** the cursor's frozen scope set with that
+    allowed set; a cursor scope outside it is excluded with reason `scope_restriction_mismatch`
+    (not searched). For a plain page-2 replay (no `--scope`) the allowed set is every registered
+    scope, so this is a no-op. Previously the cursor branch trusted `resolve_cursor_exec_scopes`
+    alone, so `--scope . --cursor <other-scope's cursor>` read straight out of the other scope
+    (Agent-API sandbox break, 05 §1.7 / 06 §9). (b) Cursors are now HMAC-SHA256-signed with a
+    device-local key at `$XDG_DATA_HOME/kcs/cursor-key` (0600, generated from `/dev/urandom` on
+    first use). The wire form is `base64url(JCS(token)).base64url(HMAC)` — the inner payload is the
+    exact prior encoding, so it stays URL-safe/pad-free. `encode_cursor_token`/`decode_cursor_token`
+    took a `key: &[u8]` parameter (kcs-search stays filesystem-free; the CLI owns the key); decode
+    verifies the signature (constant-time) and a forged/tampered token is `KCS-E-SEARCH-CURSOR-001`
+    (exit 2) before its scope set is ever trusted. `query_hash` (public inputs only) is no longer the
+    sole integrity check. HMAC is implemented over the existing `sha2` dep (no new crate).
+54. Query embedding is sent only for a vector-resolving, opted-in search (O2). `compute_query_embedding`
+    (a real Gemini send) was called **unconditionally** before mode resolution, so `--text` /
+    non-opted-in searches with a live `GEMINI_API_KEY` shipped the query text out (07 §3 opt-in
+    violation). It now runs only after `resolve_search_mode`, and only when the resolved mode is
+    vector/hybrid. `resolve_vector_availability` gained an `embedding_opt_in` input (persistent
+    embedding opt-in, `gemini_embedding_2`) and judges availability from cheap predicates
+    (endpoint → per-scope compat → **opt-in** → query length ≥ 2) instead of an eager adapter call;
+    a compatible index without the opt-in reports `embedding_opt_in_required`. A live adapter failure
+    after the (now-gated) send still degrades vector→text (`--vector` errors, auto/hybrid falls back),
+    preserving the pre-O2 fallback. Precedence keeps `embedding_index_missing` ahead of the opt-in
+    reason so an unembedded scope's message is unchanged. Test seam: `KCS_TEST_QUERY_EMBED_TRACE`
+    marks the send point so `--text` can be proven to never reach it.
+55. `batch resume`/`batch retry` hold the store lock; `replace_all` uses a unique temp (O3). `run_batch`
+    now acquires `repo.lock_store()` end-to-end (the same M1 lock on index/repair/reindex; reentrant
+    with the inner auto-snapshot; losers get `KCS-E-STORE-LOCKED-001` exit 3), so two concurrent
+    resumes can no longer interleave `tasks.jsonl` + the device cost-ledger into a double send.
+    `TaskStore::replace_all` also stopped using the fixed `tasks.jsonl.tmp`; it now writes through a
+    pid+nanos+seq unique temp created `O_CREAT|O_EXCL` (defense in depth for any other caller).
+56. PDF page-count lookahead is char-boundary safe and unified (O4). `pdf_page_count`'s
+    `&text[index..index+N]` windows around `/Type`/`/Page` panicked (`char boundary`, exit 101, body
+    dumped to stderr) when a multibyte char straddled the window. The four sites (prepare.rs +
+    deterministic.rs) collapse onto one shared `kcs_adapter::deterministic::pdf_page_count_in_text`,
+    which clamps each window back to the nearest char boundary (`bounded_str_window`). prepare.rs now
+    delegates to the adapter copy (pipeline already depends on adapter), removing the duplication.
+57. `rebuild_sqlite_index` creates the index dir unconditionally (O5). A 0-chunk scope (empty folder /
+    secrets-only / text-less PDF) skipped `append_stored_chunks` and never created `.kcs/index/`, but
+    the auto-snapshot advanced HEAD; the rebuild then failed opening a missing `sqlite.db` (exit 2)
+    and re-index stayed stuck at "commit but no index". The rebuild now `create_dir_all`s the index
+    dir first, so an empty scope indexes cleanly (exit 0).
+58. Short `sha256:` operand is validated (O6). `open`/`view` sent a `sha256:` operand straight into
+    `cas_object_path`'s `digest[0..2]`/`[2..4]` slices, so `sha256:a` panicked out of range. A new
+    `validate_short_hash_operand` at the entry of `classify_short_hash` requires a lowercase-hex
+    digest ≥ 4 chars, rejecting malformed operands with `KCS-E-CONFIG-USAGE-001` (exit 2).
+59. Cursor scope resolution detects scope_id collisions like Evidence (O7). `resolve_cursor_exec_scopes`
+    took `lookup_scope_id().next()` unconditionally, silently pinning a `.kcs`-copy collision to one
+    winner. It now shares `resolve_scope_id_in_registry` with the Evidence path (`resolve_scope_target`),
+    so two distinct `.kcs` at the newest `last_seen_at` are ambiguous
+    (`KCS-E-EVIDENCE-SCOPE-AMBIGUOUS-001`, exit 4); an unresolvable scope stays `unreachable`
+    (partial failure), unchanged.

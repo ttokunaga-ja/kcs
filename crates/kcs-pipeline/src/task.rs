@@ -4,6 +4,7 @@ use std::collections::BTreeMap;
 use std::fs::{self, OpenOptions};
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::{Deserialize, Serialize};
 
@@ -138,16 +139,55 @@ impl TaskStore {
         if let Some(parent) = self.path.parent() {
             fs::create_dir_all(parent).pipeline_io(parent)?;
         }
-        let temp = self.path.with_extension("jsonl.tmp");
-        {
-            let mut file = fs::File::create(&temp).pipeline_io(&temp)?;
-            for descriptor in descriptors {
-                serde_json::to_writer(&mut file, descriptor)
-                    .map_err(|err| PipelineError::Schema(err.to_string()))?;
-                file.write_all(b"\n").pipeline_io(&temp)?;
+        // O3: write through a unique, exclusively-created temp file instead of the
+        // fixed `tasks.jsonl.tmp`, so two concurrent writers can never share one
+        // temp and clobber each other's half-written content before the rename.
+        // (The `batch` folder store lock is the primary serialization guard; this
+        // is defense in depth for any other `replace_all` caller.)
+        let (mut file, temp_path) = self.create_unique_temp()?;
+        for descriptor in descriptors {
+            serde_json::to_writer(&mut file, descriptor)
+                .map_err(|err| PipelineError::Schema(err.to_string()))?;
+            file.write_all(b"\n").pipeline_io(&temp_path)?;
+        }
+        drop(file);
+        fs::rename(&temp_path, &self.path).pipeline_io(&self.path)
+    }
+
+    /// Create (`O_CREAT | O_EXCL`) a uniquely-named temp file next to the store
+    /// and return it with its path. The pid + monotonic-nanos + per-process
+    /// sequence make collisions vanishingly unlikely; `create_new` turns any
+    /// residual clash into a hard error rather than a silent overwrite.
+    fn create_unique_temp(&self) -> Result<(fs::File, PathBuf)> {
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let parent = self.path.parent().unwrap_or_else(|| Path::new("."));
+        let stem = self
+            .path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("tasks.jsonl");
+        for _ in 0..8 {
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|elapsed| elapsed.as_nanos())
+                .unwrap_or(0);
+            let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+            let temp = parent.join(format!(".{stem}.{}.{nanos}.{seq}.tmp", std::process::id()));
+            match OpenOptions::new().write(true).create_new(true).open(&temp) {
+                Ok(file) => return Ok((file, temp)),
+                Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(err) => {
+                    return Err(PipelineError::Io {
+                        path: temp.display().to_string(),
+                        message: err.to_string(),
+                    })
+                }
             }
         }
-        fs::rename(&temp, &self.path).pipeline_io(&self.path)
+        Err(PipelineError::Io {
+            path: parent.display().to_string(),
+            message: "could not create a unique temp file for tasks.jsonl".to_owned(),
+        })
     }
 
     pub fn update_matching(
