@@ -62,7 +62,7 @@ use kcs_search::cursor::{
 };
 use kcs_search::evidence::{
     evidence_pointer_to_uri, issue_evidence_pointer, parse_evidence_pointer_uri, EvidencePointer,
-    EvidencePointerIssueRequest,
+    EvidencePointerIssueRequest, EVIDENCE_POINTER_SCHEMA_VERSION,
 };
 use kcs_search::mmr::{diversify_candidates, MmrCandidate, MmrConfig};
 use kcs_search::query::{
@@ -592,7 +592,7 @@ fn run_repair(args: UnsupportedArgs) -> Result<Value> {
     // enrichment never ran) is enqueued/embedded rather than silently reported as
     // fully enriched. `rebuild_sqlite_index` already preserved existing
     // embeddings, so reuse keeps this near-free; offline it only enqueues.
-    let embedding_online = embedding_online_allowed(&repo, false, false)?;
+    let embedding_online = embedding_online_allowed(&repo, false, false, false)?;
     run_embedding_enrichment(&repo, embedding_online, false)?;
     Ok(json!({
         "status": "rebuilt",
@@ -2132,13 +2132,13 @@ fn run_view(args: UnsupportedArgs) -> Result<Value> {
 }
 
 fn run_reindex(args: UnsupportedArgs) -> Result<Value> {
-    let args = without_json(args.args);
-    if !args.iter().any(|arg| arg == "--force") {
+    let parsed = parse_reindex_args(without_json(args.args))?;
+    if !parsed.force {
         return Err(KcsError::invalid_usage(
             "reindex requires --force in Step 3",
         ));
     }
-    if !args.iter().any(|arg| arg == "--yes") {
+    if !parsed.yes {
         return Err(KcsError::new(
             "KCS-E-CONFIRM-REJECTED-001",
             "reindex --force requires confirmation; pass --yes in non-interactive mode",
@@ -2192,7 +2192,7 @@ fn run_reindex(args: UnsupportedArgs) -> Result<Value> {
     // embedding adapter's opt-in; offline this enqueues Embedding tasks so
     // `index_status` reports the pending enrichment instead of falsely showing
     // enriched_ratio = 1.0 (the tasks would otherwise never be created).
-    let embedding_online = embedding_online_allowed(&repo, false, false)?;
+    let embedding_online = embedding_online_allowed(&repo, false, false, false)?;
     run_embedding_enrichment(&repo, embedding_online, false)?;
     Ok(json!({
         "status": "reindexed",
@@ -2200,6 +2200,46 @@ fn run_reindex(args: UnsupportedArgs) -> Result<Value> {
         "commit_hash": outcome.commit_hash,
         "rebuilt_chunks": report.rebuilt_chunks,
     }))
+}
+
+#[derive(Debug, Default)]
+struct ParsedReindex {
+    force: bool,
+    yes: bool,
+}
+
+fn parse_reindex_args(args: Vec<String>) -> Result<ParsedReindex> {
+    let mut parsed = ParsedReindex::default();
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--force" => parsed.force = true,
+            "--yes" => parsed.yes = true,
+            "--at" => {
+                if i + 1 >= args.len() {
+                    return Err(KcsError::invalid_usage("--at requires a commit argument"));
+                }
+                return Err(KcsError::new(
+                    "KCS-E-CONFIG-NOT-IMPLEMENTED-001",
+                    "reindex --at is not implemented in Step 3",
+                    json!({ "flag": "--at" }),
+                    ExitCode::InvalidUsage,
+                ));
+            }
+            value if value.starts_with('-') => {
+                return Err(KcsError::invalid_usage(format!(
+                    "unknown reindex flag: {value}"
+                )));
+            }
+            value => {
+                return Err(KcsError::invalid_usage(format!(
+                    "unexpected reindex argument: {value}"
+                )));
+            }
+        }
+        i += 1;
+    }
+    Ok(parsed)
 }
 
 fn rebuild_step3_index(repo: &Repository) -> Result<Step3RebuildReport> {
@@ -2373,7 +2413,7 @@ fn load_normalized_units(
         &fs::read(&manifest_path)
             .map_err(|err| KcsError::io(err.to_string(), manifest_path.display().to_string()))?,
     )
-    .map_err(|err| KcsError::schema(err.to_string()))?;
+    .map_err(|err| store_corrupt_error(&manifest_path, err.to_string()))?;
     let mut units = Vec::new();
     for entry in &manifest.units {
         if entry.status != UnitStatus::Done {
@@ -2384,7 +2424,7 @@ fn load_normalized_units(
             &fs::read(&unit_path)
                 .map_err(|err| KcsError::io(err.to_string(), unit_path.display().to_string()))?,
         )
-        .map_err(|err| KcsError::schema(err.to_string()))?;
+        .map_err(|err| store_corrupt_error(&unit_path, err.to_string()))?;
         units.push(NormalizedUnitInput {
             raw_hash: unit.raw_hash,
             tool_profile_hash: unit.tool_profile_hash,
@@ -2394,6 +2434,16 @@ fn load_normalized_units(
         });
     }
     Ok(units)
+}
+
+fn store_corrupt_error(path: &Path, message: impl Into<String>) -> KcsError {
+    let path_string = path.display().to_string();
+    KcsError::new(
+        "KCS-E-STORE-CORRUPT-001",
+        format!("corrupt store file at {path_string}: {}", message.into()),
+        json!({ "path": path_string }),
+        ExitCode::PermanentFailure,
+    )
 }
 
 fn index_dir(kcs_dir: &Path) -> PathBuf {
@@ -2776,7 +2826,11 @@ fn registry_all_targets() -> Result<Option<Vec<ScopeTarget>>> {
     };
     let entries = db.search_targets().map_err(index_to_kcs)?;
     Ok(Some(
-        entries.into_iter().map(registry_entry_target).collect(),
+        entries
+            .into_iter()
+            .map(registry_entry_target)
+            .filter(|target| participates_in_global_search(&target.kcs_dir))
+            .collect(),
     ))
 }
 
@@ -3090,6 +3144,35 @@ fn append_jsonl_cli(path: &Path, value: &Value) -> Result<()> {
         .map_err(|err| KcsError::io(err.to_string(), path.display().to_string()))
 }
 
+fn atomic_overwrite_file(path: &Path, bytes: &[u8]) -> Result<()> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| KcsError::io("path has no parent", path.display().to_string()))?;
+    fs::create_dir_all(parent)
+        .map_err(|err| KcsError::io(err.to_string(), parent.display().to_string()))?;
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("file");
+    let tmp = parent.join(format!(
+        ".{name}.tmp-{}-{}",
+        process::id(),
+        new_ulid(parent)
+    ));
+    let result = (|| -> std::io::Result<()> {
+        let mut file = OpenOptions::new().write(true).create_new(true).open(&tmp)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        fs::rename(&tmp, path)?;
+        Ok(())
+    })();
+    if let Err(err) = result {
+        let _ = fs::remove_file(&tmp);
+        return Err(KcsError::io(err.to_string(), path.display().to_string()));
+    }
+    Ok(())
+}
+
 #[derive(Debug)]
 /// Successful resolution of an Evidence Pointer (08 §3). Failure modes
 /// (scope_unreachable / tombstoned / not_found) are surfaced as `Err(KcsError)`
@@ -3104,9 +3187,15 @@ struct PointerResolution {
 /// Reads the raw `<pointer>` operand (08 §2.3), resolving `-` from stdin.
 /// Branching into evidence-pointer vs `object` URI happens in the caller.
 fn read_pointer_input(args: Vec<String>) -> Result<String> {
-    let Some(pointer) = args.into_iter().next() else {
+    let mut args = args.into_iter();
+    let Some(pointer) = args.next() else {
         return Err(KcsError::invalid_usage("pointer argument is required"));
     };
+    if let Some(extra) = args.next() {
+        return Err(KcsError::invalid_usage(format!(
+            "unexpected pointer argument: {extra}"
+        )));
+    }
     if pointer == "-" {
         let mut input = String::new();
         std::io::Read::read_to_string(&mut std::io::stdin(), &mut input)
@@ -3125,7 +3214,12 @@ fn parse_pointer_text(pointer: &str) -> Result<EvidencePointer> {
         return parse_evidence_pointer_uri(pointer).map_err(search_to_kcs);
     }
     if pointer.trim_start().starts_with('{') {
-        return serde_json::from_str(pointer).map_err(|err| KcsError::schema(err.to_string()));
+        let pointer: EvidencePointer =
+            serde_json::from_str(pointer).map_err(|err| KcsError::schema(err.to_string()))?;
+        if pointer.schema_version != EVIDENCE_POINTER_SCHEMA_VERSION {
+            return Err(KcsError::schema("unsupported evidence schema version"));
+        }
+        return Ok(pointer);
     }
     Err(KcsError::invalid_usage("invalid pointer argument"))
 }
@@ -3851,16 +3945,14 @@ fn copy_normalized_instance_gen(
         &fs::read(&manifest_path)
             .map_err(|err| KcsError::io(err.to_string(), manifest_path.display().to_string()))?,
     )
-    .map_err(|err| KcsError::schema(err.to_string()))?;
+    .map_err(|err| store_corrupt_error(&manifest_path, err.to_string()))?;
     manifest["parent_gen"] = json!(old_gen);
     manifest["gen"] = json!(new_gen);
     manifest["run_id"] = json!(format!("run_{}", new_ulid(kcs_dir)));
     manifest["generated_at"] = json!(now_utc_seconds());
-    fs::write(
-        new_dir.join("manifest.json"),
-        serde_json::to_vec_pretty(&manifest).map_err(|err| KcsError::schema(err.to_string()))?,
-    )
-    .map_err(|err| KcsError::io(err.to_string(), new_dir.display().to_string()))?;
+    let manifest_bytes =
+        serde_json::to_vec_pretty(&manifest).map_err(|err| KcsError::schema(err.to_string()))?;
+    atomic_overwrite_file(&new_dir.join("manifest.json"), &manifest_bytes)?;
     for entry in fs::read_dir(&old_dir)
         .map_err(|err| KcsError::io(err.to_string(), old_dir.display().to_string()))?
     {
@@ -3873,14 +3965,12 @@ fn copy_normalized_instance_gen(
             serde_json::from_slice(&fs::read(entry.path()).map_err(|err| {
                 KcsError::io(err.to_string(), entry.path().display().to_string())
             })?)
-            .map_err(|err| KcsError::schema(err.to_string()))?;
+            .map_err(|err| store_corrupt_error(&entry.path(), err.to_string()))?;
         unit["gen"] = json!(new_gen);
         unit["generated_at"] = json!(now_utc_seconds());
-        fs::write(
-            new_dir.join(entry.file_name()),
-            serde_json::to_vec_pretty(&unit).map_err(|err| KcsError::schema(err.to_string()))?,
-        )
-        .map_err(|err| KcsError::io(err.to_string(), new_dir.display().to_string()))?;
+        let unit_bytes =
+            serde_json::to_vec_pretty(&unit).map_err(|err| KcsError::schema(err.to_string()))?;
+        atomic_overwrite_file(&new_dir.join(entry.file_name()), &unit_bytes)?;
     }
     Ok(())
 }
@@ -4009,7 +4099,7 @@ fn execute_pending_tasks(
     // without this, rate-limited Pending embedding tasks could never be completed
     // by `batch resume` / `batch retry`. `override_budget` reaches the budget
     // judgement (L2) and the embedding opt-in is the embedding adapter's own (L4).
-    let embedding_online = embedding_online_allowed(repo, false, false)?;
+    let embedding_online = embedding_online_allowed(repo, false, false, false)?;
     executed += run_embedding_enrichment(repo, embedding_online, override_budget)?;
     Ok(executed)
 }
@@ -4174,35 +4264,49 @@ fn persistent_network_allowed_for(repo: &Repository, tool_id: &str) -> Result<bo
     {
         return Ok(true);
     }
-    Ok(approval_row_present(repo, tool_id))
+    approval_row_present(repo, tool_id)
 }
 
 /// True when `approvals.jsonl` carries an online opt-in row for `tool_id`.
-fn approval_row_present(repo: &Repository, tool_id: &str) -> bool {
+fn approval_row_present(repo: &Repository, tool_id: &str) -> Result<bool> {
+    approval_row_present_for_scope(repo, Some(tool_id))
+}
+
+fn approval_row_present_for_scope(repo: &Repository, tool_id: Option<&str>) -> Result<bool> {
+    let expected_scope_id = scope_id(repo.kcs_dir())?;
     let path = repo.kcs_dir().join("approvals.jsonl");
     let Ok(text) = fs::read_to_string(&path) else {
-        return false;
+        return Ok(false);
     };
-    text.lines()
+    Ok(text
+        .lines()
         .filter_map(|line| serde_json::from_str::<Value>(line).ok())
         .any(|value| {
-            value.get("tool_id").and_then(Value::as_str) == Some(tool_id)
+            value.get("scope_id").and_then(Value::as_str) == Some(expected_scope_id.as_str())
+                && tool_id
+                    .map(|tool_id| value.get("tool_id").and_then(Value::as_str) == Some(tool_id))
+                    .unwrap_or(true)
                 && value.get("execution_mode").and_then(Value::as_str) == Some("online_api")
                 && value.get("network_opt_in").and_then(Value::as_bool) == Some(true)
-        })
+        }))
 }
 
 /// Whether the embedding adapter may call the network in this pass (L4). Gated
 /// on the embedding adapter's own opt-in (`gemini_embedding_2`), not the
 /// markdownize approval it used to ride on. `offline` (the `--offline` flag)
 /// forces it off regardless of any recorded approval.
-fn embedding_online_allowed(repo: &Repository, offline: bool, online: bool) -> Result<bool> {
+fn embedding_online_allowed(
+    repo: &Repository,
+    offline: bool,
+    online: bool,
+    online_confirmed: bool,
+) -> Result<bool> {
     // Precedence (N7): `--offline` forces enqueue-only; then the per-invocation
     // `--online` temporary opt-in; then the persistent embedding opt-in row. The
     // `online` arm was missing, so `index --online` left embedding Pending even
-    // though markdownize honored the same flag. `--online` mirrors markdownize's
-    // `network_allowed`: it enables sending only when the scope carries an approval
-    // record (and is not network-revoked), without needing the persistent opt-in.
+    // though markdownize honored the same flag. The caller rejects bare `--online`
+    // before reaching this point unless the current scope already has a valid
+    // approval row, so this branch represents an explicit one-shot send.
     if offline {
         return Ok(false);
     }
@@ -4210,7 +4314,11 @@ fn embedding_online_allowed(repo: &Repository, offline: bool, online: bool) -> R
         if network_revoked(repo)? {
             return Ok(false);
         }
-        return approval_exists(repo);
+        return if online_confirmed {
+            Ok(true)
+        } else {
+            approval_row_present(repo, EMBEDDING_ADAPTER_ID)
+        };
     }
     persistent_network_allowed_for(repo, EMBEDDING_ADAPTER_ID)
 }
@@ -4719,7 +4827,8 @@ fn generate_scope_embeddings(repo: &Repository, args: &IndexArgs) -> Result<()> 
     // Embedding online opt-in is the embedding adapter's own (L4), not a
     // ride-along on the markdownize approval. `--offline` forces enqueue-only;
     // N7: `--online` now reaches the embedding adapter too (was ignored).
-    let online = embedding_online_allowed(repo, args.offline, args.online)?;
+    let online =
+        embedding_online_allowed(repo, args.offline, args.online, args.yes || args.approve)?;
     run_embedding_enrichment(repo, online, false).map(|_| ())
 }
 
@@ -6604,7 +6713,7 @@ fn materialize_tool_lock(repo: &Repository) -> Result<()> {
         return Err(adapter_to_kcs(error));
     }
     let path = repo.kcs_dir().join("tool-lock.json");
-    fs::write(&path, bytes).map_err(|err| KcsError::io(err.to_string(), path.display().to_string()))
+    atomic_overwrite_file(&path, &bytes)
 }
 
 fn execution_mode_name(mode: ExecutionMode) -> &'static str {
@@ -6616,7 +6725,7 @@ fn execution_mode_name(mode: ExecutionMode) -> &'static str {
 }
 
 fn approval_exists(repo: &Repository) -> Result<bool> {
-    Ok(repo.kcs_dir().join("approvals.jsonl").is_file())
+    approval_row_present_for_scope(repo, None)
 }
 
 fn network_allowed(repo: &Repository, args: &IndexArgs) -> Result<bool> {
@@ -6627,7 +6736,11 @@ fn network_allowed(repo: &Repository, args: &IndexArgs) -> Result<bool> {
         return Ok(false);
     }
     if args.online {
-        return approval_exists(repo);
+        return if args.yes || args.approve {
+            Ok(true)
+        } else {
+            approval_row_present(repo, "mistral_ocr_markdownize")
+        };
     }
     if args.approve {
         return Ok(true);
@@ -6637,18 +6750,7 @@ fn network_allowed(repo: &Repository, args: &IndexArgs) -> Result<bool> {
     {
         return Ok(true);
     }
-    let path = repo.kcs_dir().join("approvals.jsonl");
-    let Ok(text) = fs::read_to_string(&path) else {
-        return Ok(false);
-    };
-    Ok(text
-        .lines()
-        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
-        .any(|value| {
-            value.get("tool_id").and_then(Value::as_str) == Some("mistral_ocr_markdownize")
-                && value.get("execution_mode").and_then(Value::as_str) == Some("online_api")
-                && value.get("network_opt_in").and_then(Value::as_bool) == Some(true)
-        }))
+    approval_row_present(repo, "mistral_ocr_markdownize")
 }
 
 fn network_revoked(repo: &Repository) -> Result<bool> {
@@ -6690,8 +6792,7 @@ fn write_network_revoke_record(repo: &Repository) -> Result<()> {
     };
     set_allow_network_false(&mut value);
     let text = toml::to_string_pretty(&value).map_err(|err| KcsError::schema(err.to_string()))?;
-    fs::write(&config_path, text)
-        .map_err(|err| KcsError::io(err.to_string(), config_path.display().to_string()))?;
+    atomic_overwrite_file(&config_path, text.as_bytes())?;
     let path = repo.kcs_dir().join("network-revoked.jsonl");
     let mut file = OpenOptions::new()
         .create(true)
@@ -7160,6 +7261,10 @@ fn pipeline_to_kcs(error: kcs_pipeline::PipelineError) -> KcsError {
             json!({ "path": path }),
             ExitCode::InvalidUsage,
         ),
+        kcs_pipeline::PipelineError::Io { path, message } => KcsError::io(message, path),
+        kcs_pipeline::PipelineError::Contract { code, message } => {
+            KcsError::new(code, message, json!({}), ExitCode::Failure)
+        }
         other => KcsError::schema(other.to_string()),
     }
 }
