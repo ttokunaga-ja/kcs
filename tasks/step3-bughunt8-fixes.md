@@ -125,7 +125,9 @@ NFC/NFD 検索 (F2、**4 エンジン収束**)。catalog.rs の adapter identity
   `per_adapter` のみ抽出し両キーを参照しない。80% 警告は未実装、`hard_stop=false` も効かず常に hard pause。
 - **期待 vs 実際**: 期待 = doc 通り 80% 警告 / soft-stop。実際 = 無視。
 - **修正 (design 判断)**: (a) 両キーを parse して budget 判定に反映する (機能実装) か、(b) doc/struct から削除して
-  仕様と実装を一致させる (doc-sync)。Phase 後回し候補でもあるため**ユーザー判断を仰ぐ** (下記 §design)。
+  仕様と実装を一致させる (doc-sync)。
+- **→ ユーザー裁定 (2026-07-05): (a) 配線する**。`warn_at_percent` (80% 警告) と `hard_stop=false` (soft-stop)
+  を実装し docs 通りに効かせる。docs は変更不要 (既に正しく記載)。実装は budget.rs の parse + budget 判定/pause ロジック。
 
 ---
 
@@ -147,6 +149,9 @@ NFC/NFD 検索 (F2、**4 エンジン収束**)。catalog.rs の adapter identity
   アーキ変更。「そもそも online markdownize task を Step 3 で走らせるべきか (課金するのに使えない)」も含め設計判断。
 - **選択肢**: (A) 昇格ロジックを実装 (online 成果物を検索可能に)、(B) 昇格が Step 4 なら Step 3 では online
   markdownize task を作らない/走らせない (無駄な課金を止める)、(C) 既知の Step 4 保留として明文化し今回は非対応。
+- **→ ユーザー裁定 (2026-07-05): (C) Step 4 保留として明文化**。今回は code 変更せず、Step 4 の既知項目として記録
+  (`tasks/step4-kickoff-runbook.md` に追記)。online 成果物は Step 4 の promotion 実装まで検索不可のまま
+  (それまで online markdownize task は走るが成果物は未使用=課金には注意)。
 
 ---
 
