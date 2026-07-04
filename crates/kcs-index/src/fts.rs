@@ -55,6 +55,15 @@ impl SqliteFtsIndex {
     }
 
     pub fn index_chunk(&mut self, row: &ChunkRow) -> Result<()> {
+        // Q4: the trigram tokenizer stops at a NUL byte, so any text after a
+        // U+0000 (e.g. a UTF-16-LE `.txt` decoded lossily keeps interleaved NULs)
+        // would be silently unsearchable even though `index` reported success.
+        // Strip NULs from the value bound into the external-content `text` column
+        // (which feeds `chunk_fts`) so the whole chunk is tokenizable. Identity /
+        // evidence are untouched: `chunk_id`, `text_hash`, `char_start/end` and the
+        // persisted `chunks.jsonl` / normalized markdown all still carry the
+        // original bytes — only this derived search index projection is sanitized.
+        let indexed_text = row.text.replace('\u{0}', "");
         self.conn.execute(
             "INSERT OR IGNORE INTO chunks(
                 chunk_id, raw_hash, tool_profile_hash, gen, unit_key,
@@ -74,7 +83,7 @@ impl SqliteFtsIndex {
                 row.char_start,
                 row.char_end,
                 row.text_hash,
-                row.text,
+                indexed_text,
                 row.first_seen_commit,
                 row.created_at,
             ],
@@ -286,5 +295,22 @@ mod tests {
             tokenizer: FtsTokenizer::Trigram,
         })
         .unwrap();
+    }
+
+    #[test]
+    fn q4_nul_bytes_are_stripped_from_the_fts_index() {
+        let mut fts = SqliteFtsIndex::in_memory(FtsSchemaConfig {
+            tokenizer: FtsTokenizer::Trigram,
+        })
+        .unwrap();
+        // A UTF-16-LE ".txt" decoded lossily keeps a NUL after every ASCII char.
+        // The trigram tokenizer stops at the first NUL, so before the fix every
+        // word after the leading `d` ("distinctword") was silently unsearchable
+        // even though `index` reported success.
+        let nul_text = "d\u{0}i\u{0}s\u{0}t\u{0}i\u{0}n\u{0}c\u{0}t\u{0}w\u{0}o\u{0}r\u{0}d\u{0}";
+        fts.index_chunk(&row("c1", nul_text)).unwrap();
+        let hits = fts.search("distinct", 10).unwrap();
+        assert_eq!(hits.len(), 1, "NUL-suffixed word must be searchable");
+        assert_eq!(hits[0].chunk_id, "c1");
     }
 }

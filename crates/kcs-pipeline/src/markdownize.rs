@@ -309,11 +309,16 @@ pub fn normalized_instance_dir(
     gen: u64,
 ) -> PathBuf {
     let digest = raw_hash.strip_prefix("sha256:").unwrap_or(raw_hash);
+    // Q6 (defense in depth): never slice-panic on a malformed short digest. The
+    // authoritative validation lives at `TaskStore::all` (`is_hash`); this keeps
+    // any other caller from aborting with exit 101 on a stray hash.
+    let fanout_a = digest.get(0..2).unwrap_or(digest);
+    let fanout_b = digest.get(2..4).unwrap_or("");
     kcs_dir
         .as_ref()
         .join("objects/normalized_units")
-        .join(&digest[0..2])
-        .join(&digest[2..4])
+        .join(fanout_a)
+        .join(fanout_b)
         .join(format!("{raw_hash}.{tool_profile_hash}.g{gen}"))
 }
 
@@ -500,6 +505,15 @@ mod tests {
             normalized_view_path(".kcs", raw, tool, 0),
             PathBuf::from(".kcs/objects/normalized/bb/e1/sha256:bbe1da2edd1819b58ce32163144923f850fc7f2c7b4fe130635c6b54a8e7ac59.sha256:24bd9e903241740fc9fe94fb72a6ff3e697b3c0859bd5aef1b49728a207e81ed.g0.md")
         );
+    }
+
+    #[test]
+    fn q6_normalized_instance_dir_does_not_panic_on_short_digest() {
+        // Defense in depth: a stray short hash must degrade to a deterministic path
+        // instead of a `digest[0..2]` slice panic (exit 101). Authoritative
+        // validation is at `TaskStore::all`; this only guarantees no panic here.
+        let dir = normalized_instance_dir(".kcs", "sha256:ab", "sha256:tool", 0);
+        assert!(dir.to_string_lossy().contains("objects/normalized_units"));
     }
 
     #[test]

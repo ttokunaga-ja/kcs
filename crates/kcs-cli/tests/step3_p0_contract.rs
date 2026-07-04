@@ -3075,3 +3075,74 @@ fn p10_concurrent_search_during_reindex_is_never_silently_empty() {
         "expected at least one exit-0 search across the concurrent run"
     );
 }
+
+// Q1 (full cycle): a torn trailing record in `chunks.jsonl` (crash / ENOSPC
+// post-state, no trailing '\n') must fully self-heal. Skipping it on read alone
+// welds the next append onto the torn bytes, producing a permanently-skipped
+// malformed line that re-bricks `repair --rebuild-db` on exit 4 and re-appends the
+// same chunk forever. After the fix the torn tail is physically truncated before
+// the append, so index -> repair -> index all exit 0 and the file stays valid with
+// no duplicate chunk_id.
+#[test]
+fn q1_torn_chunk_tail_fully_self_heals_across_index_repair_index() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(
+        dir.path().join("auth.md"),
+        "# 認証仕様\n\n## API Token\nトークン TTL は 3600 秒です。\n\n## Scopes\nスコープは read write admin です。\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.path().join("ranking.md"),
+        "# 検索ランキング\n\n## RRF 融合\nRRF の定数 k=60 を使います。\n\n## MMR 多様化\nMMR の係数 lambda 0.7 で多様化します。\n",
+    )
+    .unwrap();
+    kcs(&dir, &["init"]).assert().success();
+    json_success(&dir, &["index", "--yes"]);
+
+    let chunks_path = dir.path().join(".kcs/index/chunks.jsonl");
+    let bytes = fs::read(&chunks_path).unwrap();
+    assert_eq!(
+        bytes.last(),
+        Some(&b'\n'),
+        "a fresh index must be newline-terminated"
+    );
+    // Cut the final record in half: leaves the earlier records intact and a torn
+    // tail with no trailing '\n' (== crash between two `write_all`s).
+    let last_nl = bytes.iter().rposition(|&byte| byte == b'\n').unwrap();
+    let prev_nl = bytes[..last_nl]
+        .iter()
+        .rposition(|&byte| byte == b'\n')
+        .expect("need at least two records so the final one can be torn");
+    let record_start = prev_nl + 1;
+    let cut = record_start + (last_nl - record_start) / 2;
+    fs::write(&chunks_path, &bytes[..cut]).unwrap();
+    assert_ne!(
+        fs::read(&chunks_path).unwrap().last(),
+        Some(&b'\n'),
+        "torn tail must not end in a newline"
+    );
+
+    // Full self-heal cycle. Every step must exit 0 — the middle `repair` was the
+    // one that used to exit 4 (KCS-E-STORE-CORRUPT-001).
+    json_success(&dir, &["index", "--yes"]);
+    json_success(&dir, &["repair", "--rebuild-db", "--yes"]);
+    json_success(&dir, &["index", "--yes"]);
+
+    // chunks.jsonl is now fully valid with no duplicated chunk_id (no torn-line
+    // skip -> re-append loop, no permanently-skipped welded line).
+    let text = fs::read_to_string(&chunks_path).unwrap();
+    let mut ids = std::collections::BTreeSet::new();
+    let mut count = 0usize;
+    for line in text.lines().filter(|line| !line.trim().is_empty()) {
+        let value: Value = serde_json::from_str(line).unwrap_or_else(|err| {
+            panic!("every chunks.jsonl line must be valid JSON ({err}): {line}")
+        });
+        let id = value["chunk_id"].as_str().unwrap().to_owned();
+        assert!(ids.insert(id), "chunk_id must not be duplicated: {line}");
+        count += 1;
+    }
+    assert!(
+        count >= 2,
+        "regenerated chunks must be present, got {count}"
+    );
+}

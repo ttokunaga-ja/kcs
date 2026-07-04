@@ -56,6 +56,13 @@ docs で Step4/Phase4+/v2+ 明記) との重複はゼロを確認。
 - **修正案**: `read_stored_chunks` を (a) **最終非空行**の parse 失敗のみ torn crash-artifact として破棄
   (skip)、(b) 非末尾行の破損は `KCS-E-STORE-CORRUPT-001` + `chunks_jsonl_path` で分類、にする。
   これで index も repair も自己修復し、破損分類も task.rs/budget.rs と整合する。
+- **実装上の注意 (実機再検証で判明)**: read 時の skip **だけでは不完全**。torn 行は末尾 `'\n'` が無いため、
+  次の `append_stored_chunks` が torn バイト列に新レコードを溶接して「改行終端の不正 JSON 行」を生成し、
+  以後その行が read で常に skip され対応 chunk が `known` に入らず毎回再生成・再 append され、中間行に
+  押し出された瞬間 STORE-CORRUPT (exit 4) で再ブリック + 重複行が発生する。**append より前に torn 末尾行を
+  物理 truncate** すること (well-formed な chunks.jsonl は必ず `'\n'` 終端なので「最後のバイトが `'\n'` でない」
+  が torn の確実な指標。`truncate_torn_chunk_tail` を rebuild_step3_index で read 直後・append 直前に実行)。
+  フルサイクル (torn → index → **repair** → index が全 exit 0、重複無し) を回帰テストで固定。
 
 ### Q2 [major] prepared/image CAS object が非アトミック書込 (fs::write + exists-skip) かつ無検証 serve → torn/破損 object を真正 evidence として恒久提供
 発見: GPT-5.5 #2 / file:line 立証: オーケストレータ
