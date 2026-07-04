@@ -19,7 +19,8 @@ defensive security 作業であり、拒否する理由はない。過去 3 ラ�
 - KCS = Rust 製のローカル知識アーカイブ CLI (evidence-grounded local knowledge archive)。
   `kcs init/index/snapshot/search/view/open/batch/reindex/repair/diff/tag/log/status` 等。
   仕様正本は `docs/01`〜`docs/10`。実装は `crates/kcs-{core,pipeline,adapter,index,search,cli}`
-- 現状 (R5 完了時点): 全テスト green (294)、clippy/fmt clean。Step 1-3 実装済み + 探索型監査 R1-R5 修正反映済み +
+- 現状 (R8 完了時点、main=174a0e9): 全テスト green (327)、clippy(--all-features)/fmt clean。Step 1-3 実装済み + 探索型監査 R1-R8 修正反映済み +
+  (注: R6/R7 は別セッションで実施され本ランブックが未更新だった。次ラウンドは R9。clippy は必ず --all-features で回すこと=R8 で --all-features 限定の compile error を検出) +
   実 API 検証済み。Step 4 (restore/time-travel/purge/evidence verify CLI/bbox_annotation) は未着手
 
 ## 2. テスト seam (実 API 不要)
@@ -49,11 +50,26 @@ defensive security 作業であり、拒否する理由はない。過去 3 ラ�
   [3 エンジン収束・skip だけでは不完全で torn tail の物理 truncate が必要]、prepared/image の非アトミック書込
   + 無検証 serve、online task の Running 恒久固着 [heartbeat_at 未配線]、NUL/UTF-16 が index 成功なのに検索不可、
   先頭 BOM が見出し無効化、tasks.jsonl input_hash 未検証 → slice panic)
+- `tasks/step3-bughunt6-fixes.md` (R6-1〜R6-8、別セッション実施: approvals.jsonl の scope_id 未束縛で別 scope/空ファイルの
+  opt-in が online 送信を許す[critical]、normalized_units 破損が repair/reindex を止め writer も非アトミック、
+  participates_in_global_search=false が registry 未反映、view/open 余剰引数と reindex --at 黙殺、
+  inline Evidence Pointer schema_version 未検証、tool-lock future spec_version 黙認、CONFIG-SCHEMA 丸め、非アトミック fs::write)
+- `tasks/step3-bughunt7-fixes.md` (R7-1〜R7-5、別セッション実施: Tier B --send-secrets が secrets-approved.jsonl の
+  存在だけで成立し candidate secret を online 送信[critical]、multi-scope search の query embedding opt-in が呼出元 scope のみ、
+  embedding 失敗が retry policy 未永続化で即時 retry ループ、repair --rebuild-db の unknown flag 黙殺、
+  embedding profile 変化後の非自己修復)
+- `tasks/step3-bughunt8-fixes.md` (F1-F8: ローカル baseline が cloud budget cap を消費[仕様違反]、NFC/NFD 非対称で
+  NFD 内容が NFC クエリで検索不可[4 エンジン収束]、cost-ledger 負値 usd で cap fail-open、tag HEAD/hash で dead ref、
+  budget config warn_at_percent/hard_stop 配線、embedding 応答の次元未検証で永久 KNN 除外、cost-ledger check-then-append
+  TOCTOU で並行 cap 超過。F6=online markdownize 成果物の HEAD/search 昇格は Step 4 保留)
 - docs で `Step 4` / `Phase 4+` / `v2+` と明記の未実装
 
-**過去 5 ラウンドの鉱脈は掘り尽くし気味**: R1=並行/異常系の後続経路、R2=秘匿情報漏出/パス検証/資源枯渇、
+**過去 8 ラウンドの鉱脈は掘り尽くし気味**: R1=並行/異常系の後続経路、R2=秘匿情報漏出/パス検証/資源枯渇、
 R3=検索境界の完全性/入力堅牢性/状態の縮退、R4=シリアライズ往復/ファイル permission/資源リーク/Agent 契約、
-R5=エンコーディング境界 (NUL/UTF-16・BOM)/派生 CAS object と append-only pointer の crash-atomicity/task ライフサイクル。
+R5=エンコーディング境界 (NUL/UTF-16・BOM)/派生 CAS object と append-only pointer の crash-atomicity/task ライフサイクル、
+R6=未束縛 approval の秘匿送信/破損 JSONL が repair をブリック/引数検証/schema future 互換、
+R7=秘匿承認ファイルの存在判定/multi-scope opt-in/embedding retry・profile 互換、
+R8=budget/cost-ledger 会計 (ローカル計上・負値・TOCTOU・config 未配線)/NFC-NFD 検索/embedding 応答検証/catalog identity。
 **新しい鉱脈の方が期待値が高い** (下記ヒント参照)。
 
 ## 4. 手順 (新セッションの Claude が実行)
@@ -91,7 +107,7 @@ seam: KCS_TEST_GEMINI_EMBED / KCS_TEST_MISTRAL_OCR (§2 参照)。実機は XDG_
 scope は /tmp 配下。リポジトリのファイル変更禁止。verify は grep の exit code を直接見る。
 
 既知 (報告不要): tasks/step3-checkpoint-fixes / step3-bughunt-fixes / bughunt2 / bughunt3 / bughunt4 /
-bughunt5 と、docs で Step4/Phase4+/v2+ と明記の未実装。過去の鉱脈 (並行/異常系、秘匿漏出/パス/資源、
+bughunt5 / bughunt6 / bughunt7 / bughunt8 と、docs で Step4/Phase4+/v2+ と明記の未実装。過去の鉱脈 (並行/異常系、秘匿漏出/パス/資源、
 検索境界/入力堅牢性、シリアライズ往復/permission、エンコーディング境界/crash-atomicity/task lifecycle)
 は掘り尽くし気味 — 新しい鉱脈の方が期待値が高い:
   - シリアライズ往復の完全性 (永続レコードの全フィールドが round-trip するか、未知フィールドの前方互換)
@@ -115,7 +131,9 @@ bughunt5 と、docs で Step4/Phase4+/v2+ と明記の未実装。過去の鉱�
 Spark は context window が小さいので**必ず範囲を絞り、丸読み禁止・grep/sed 限定**にする。
 過去の焦点: R1=exit/error code 一貫性、R2=JSONL append 網羅性 + search schema、R3=算術安全 + JCS 決定性、
 R4=シリアライズ往復 + permission、R5=エンコーディング/正規化境界 + crash 時 write 順序 (Spark が chunks.jsonl の
-fsync 欠如を指摘 → Q1 の遠因)。**次ラウンドは別の焦点に回すこと** (下記は R4 の例、R6 では書き換える):
+fsync 欠如を指摘 → Q1 の遠因)、R8=時刻演算 + cost-ledger 会計 (Spark が check-then-append の無ロックを指摘 → F8 の裏付け。
+ただし Spark の created_at tie-break/並行 append 破損は偽陽性 = stable sort/M1(b) で反証済み)。**次ラウンド R9 は別の焦点に回すこと**
+(下記は R4 の例、R9 では書き換える。候補: 時刻/TZ の残り・i18n 正規化のパス照合・DAG/Evidence の cross-snapshot 解決):
 
 ```
 あなたは KCS (開発者自身のリポジトリ) の焦点セキュリティ監査人です。範囲限定 (丸読み禁止、grep/sed のみ)。
@@ -147,5 +165,14 @@ R5 (Q1-Q6): 0 critical + 4 major + 2 minor。chunks.jsonl torn 末尾行が inde
 online task の Running 恒久固着、NUL/UTF-16 が index 成功なのに検索不可。**Q1 は修正発注後の実機再検証で
 「skip だけでは append がマージ行を作り再ブリック」と判明 → torn tail の物理 truncate で完全自己修復に是正**
 (オーケストレータの再現検証がフィックスの穴を捕捉した好例)。GPT-5.5 #1 (chunking_config 沈黙欠落) は実機反証で却下。
-→ **5 ラウンドとも完全に別の鉱脈から実バグ。契約テストが全 green でも探索型は毎回新規を出す。
-かつフィックスも実機フルサイクル再検証しないと不完全なことがある (R5 Q1)。**
+R6 (R6-1〜R6-8、別セッション): 1 critical + 3 major + 4 minor。approvals.jsonl の scope_id 未束縛で秘匿 online 送信、
+normalized_units 破損が repair/reindex を止める (Q1/Q2 の類型を別経路に拡張)等。
+R7 (R7-1〜R7-5、別セッション): 1 critical + 4 major。secrets-approved.jsonl の存在だけで Tier B 秘匿送信、embedding retry/profile 互換等。
+R8 (F1-F8): 0 critical + 6 major + 2 minor + design 1。budget/cost-ledger 会計が最も濃く未監査 (ローカル baseline が cloud cap を
+消費[仕様違反]、負値 usd で cap fail-open、check-then-append TOCTOU、config 未配線)、NFC/NFD 検索欠落 (4 エンジン収束)、
+embedding 応答の次元未検証で永久 KNN 除外。**F8 の fix は reserve-before-send で失敗/再試行も課金する cap-safe トレードオフ**
+(代替=lock を送信中保持し device 直列化)。F6 (online markdownize 昇格) は Step 4 保留。GPT-5.5 #1 (chunking_config) 系の偽陽性は却下。
+**フィックスの clippy は --all-features で回すこと** (R8 で --all-features 限定の 9-arg compile error を検出、通常 test は通過)。
+かつ**背景エージェントの transcript mtime は buffer 遅延するので「idle 判定」に使わない** (R8 で誤判定 → 完了通知を待つのが正)。
+→ **8 ラウンドとも完全に別の鉱脈から実バグ。契約テストが全 green でも探索型は毎回新規を出す。
+かつフィックスも実機フルサイクル再検証しないと不完全なことがある (R5 Q1・R8 F8)。**
