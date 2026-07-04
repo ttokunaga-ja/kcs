@@ -233,6 +233,138 @@ fn ct_lock_001_concurrent_snapshots_fail_fast() {
     assert_eq!(error["error_code"], "KCS-E-STORE-LOCKED-001");
 }
 
+// M1(a) + acceptance (a): the whole `kcs index` command holds the store lock
+// end-to-end (not just its snapshot sub-step), so two concurrent index processes
+// on the same scope cannot interleave. The loser fails fast with
+// KCS-E-STORE-LOCKED-001 (exit 3) and the persisted store files remain valid
+// JSONL. Two REAL processes (not threads) so the O_EXCL contention is genuine.
+#[test]
+fn m1_concurrent_index_loser_is_locked_and_store_intact() {
+    let temp = tempfile::tempdir().unwrap();
+    let xdg = tempfile::tempdir().unwrap();
+    let bin = assert_cmd::cargo::cargo_bin("kcs");
+
+    ProcessCommand::new(&bin)
+        .arg("init")
+        .env("XDG_DATA_HOME", xdg.path().join("data"))
+        .env("XDG_CONFIG_HOME", xdg.path().join("config"))
+        .current_dir(temp.path())
+        .output()
+        .unwrap();
+    fs::write(
+        temp.path().join("a.md"),
+        "# Title\n\n## Section\nbody text\n",
+    )
+    .unwrap();
+
+    // Process A holds the lock across its snapshot sub-step for 1.2s, guaranteeing
+    // the contention window (the outer command lock is held the whole time).
+    let first = ProcessCommand::new(&bin)
+        .args(["index", "--approve", "--json"])
+        .env("XDG_DATA_HOME", xdg.path().join("data"))
+        .env("XDG_CONFIG_HOME", xdg.path().join("config"))
+        .env("KCS_TEST_HOLD_LOCK_MS", "1200")
+        .current_dir(temp.path())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    wait_for_path(temp.path().join(".kcs/.lock").as_path());
+
+    let second = ProcessCommand::new(&bin)
+        .args(["index", "--approve", "--json"])
+        .env("XDG_DATA_HOME", xdg.path().join("data"))
+        .env("XDG_CONFIG_HOME", xdg.path().join("config"))
+        .current_dir(temp.path())
+        .output()
+        .unwrap();
+    let first = first.wait_with_output().unwrap();
+
+    assert!(first.status.success(), "winner index must succeed");
+    assert_eq!(second.status.code(), Some(3), "loser must exit 3 (locked)");
+    let error: Value = serde_json::from_slice(&second.stderr).unwrap();
+    assert_eq!(error["error_code"], "KCS-E-STORE-LOCKED-001");
+
+    // Store intact: every persisted JSONL record still parses as one line.
+    for rel in [".kcs/tasks.jsonl"] {
+        let path = temp.path().join(rel);
+        if let Ok(text) = fs::read_to_string(&path) {
+            for line in text.lines().filter(|line| !line.trim().is_empty()) {
+                serde_json::from_str::<Value>(line)
+                    .unwrap_or_else(|_| panic!("corrupt JSONL line in {rel}: {line}"));
+            }
+        }
+    }
+    let ledger = xdg.path().join("data/kcs/cost-ledger.jsonl");
+    if let Ok(text) = fs::read_to_string(&ledger) {
+        for line in text.lines().filter(|line| !line.trim().is_empty()) {
+            serde_json::from_str::<Value>(line).expect("corrupt cost-ledger JSONL line");
+        }
+    }
+}
+
+// M1(c): a malformed persisted store file (tasks.jsonl) is classified as
+// KCS-E-STORE-CORRUPT-001 (exit 4) carrying the file path, not misreported as a
+// config/schema error (KCS-E-CONFIG-SCHEMA-001, exit 2).
+#[test]
+fn m1c_corrupt_tasks_jsonl_is_store_corrupt_not_schema() {
+    let temp = tempfile::tempdir().unwrap();
+    kcs()
+        .arg("init")
+        .current_dir(temp.path())
+        .assert()
+        .success();
+    fs::write(temp.path().join(".kcs/tasks.jsonl"), "{ not json\n").unwrap();
+    let out = kcs()
+        .args(["status", "--json"])
+        .current_dir(temp.path())
+        .assert()
+        .code(4)
+        .get_output()
+        .stderr
+        .clone();
+    let err: Value = serde_json::from_slice(&out).unwrap();
+    assert_eq!(err["error_code"], "KCS-E-STORE-CORRUPT-001");
+    assert!(err["context"]["path"]
+        .as_str()
+        .unwrap()
+        .ends_with("tasks.jsonl"));
+}
+
+// M1(c): the same for the device-global cost-ledger.jsonl (read via budget
+// status). Uses a dedicated XDG home so the shared test data home is untouched.
+#[test]
+fn m1c_corrupt_cost_ledger_is_store_corrupt_not_schema() {
+    let temp = tempfile::tempdir().unwrap();
+    let xdg = tempfile::tempdir().unwrap();
+    let mk = || {
+        let mut command = AssertCommand::cargo_bin("kcs").unwrap();
+        command
+            .env("XDG_DATA_HOME", xdg.path().join("data"))
+            .env("XDG_CONFIG_HOME", xdg.path().join("config"));
+        command
+    };
+    mk().arg("init").current_dir(temp.path()).assert().success();
+    let ledger = xdg.path().join("data/kcs/cost-ledger.jsonl");
+    fs::create_dir_all(ledger.parent().unwrap()).unwrap();
+    fs::write(&ledger, "garbage not json\n").unwrap();
+    let out = mk()
+        .args(["status", "--json"])
+        .current_dir(temp.path())
+        .assert()
+        .code(4)
+        .get_output()
+        .stderr
+        .clone();
+    let err: Value = serde_json::from_slice(&out).unwrap();
+    assert_eq!(err["error_code"], "KCS-E-STORE-CORRUPT-001");
+    assert!(err["context"]["path"]
+        .as_str()
+        .unwrap()
+        .ends_with("cost-ledger.jsonl"));
+}
+
 #[test]
 fn ct_lock_003_read_commands_do_not_acquire_lock() {
     let temp = tempfile::tempdir().unwrap();

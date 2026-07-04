@@ -197,9 +197,15 @@ pub(crate) fn append_jsonl(path: &Path, value: &Value) -> Result<()> {
         .append(true)
         .open(path)
         .kcs_io(path)?;
-    serde_json::to_writer(&mut file, value)
+    // Serialize the whole record (line + newline) into one buffer and emit it in a
+    // single `write_all` on the O_APPEND handle. A multi-write sequence
+    // (`to_writer` then a separate newline write) can interleave byte-wise with a
+    // concurrent process's record even under O_APPEND, corrupting the JSONL
+    // (M1(b)). One `write_all` of the framed record is atomic per append.
+    let mut line = serde_json::to_string(value)
         .map_err(|err| KcsError::io(err.to_string(), path.display().to_string()))?;
-    file.write_all(b"\n").kcs_io(path)?;
+    line.push('\n');
+    file.write_all(line.as_bytes()).kcs_io(path)?;
     Ok(())
 }
 

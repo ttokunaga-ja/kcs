@@ -89,9 +89,13 @@ impl CostLedger {
             .append(true)
             .open(&self.path)
             .pipeline_io(&self.path)?;
-        serde_json::to_writer(&mut file, entry)
-            .map_err(|err| PipelineError::Schema(err.to_string()))?;
-        file.write_all(b"\n").pipeline_io(&self.path)
+        // M1(b): frame the record and emit it with one write_all. This is the
+        // device-global cost-ledger.jsonl, appended cross-scope, so byte-wise
+        // interleaving under O_APPEND is the acute case (M1(b)).
+        let mut line =
+            serde_json::to_string(entry).map_err(|err| PipelineError::Schema(err.to_string()))?;
+        line.push('\n');
+        file.write_all(line.as_bytes()).pipeline_io(&self.path)
     }
 
     pub fn monthly_total(&self, month: &str, scope_id: Option<&str>) -> Result<f64> {
@@ -120,8 +124,11 @@ impl CostLedger {
             if line.trim().is_empty() {
                 continue;
             }
-            let entry: MonthlyCostLedgerEntry = serde_json::from_str(&line)
-                .map_err(|err| PipelineError::Schema(err.to_string()))?;
+            // M1(c): a malformed ledger line is a corrupt store file, not a
+            // schema/config error — classify it as KCS-E-STORE-CORRUPT-001.
+            let entry: MonthlyCostLedgerEntry = serde_json::from_str(&line).map_err(|err| {
+                PipelineError::corrupt(self.path.display().to_string(), err.to_string())
+            })?;
             if entry.month == month
                 && scope_id.map_or(true, |scope| scope == entry.scope_id)
                 && adapter_kind.map_or(true, |kind| kind == entry.adapter_kind)
@@ -234,7 +241,7 @@ fn read_budget_config(config_path: impl AsRef<Path>) -> Result<ParsedBudgetConfi
     let value: toml::Value =
         toml::from_str(&text).map_err(|err| PipelineError::Schema(err.to_string()))?;
     let budget = value.get("budget");
-    let per_adapter = budget
+    let per_adapter: BTreeMap<String, f64> = budget
         .and_then(|value| value.get("per_adapter"))
         .and_then(toml::Value::as_table)
         .map(|table| {
@@ -249,16 +256,37 @@ fn read_budget_config(config_path: impl AsRef<Path>) -> Result<ParsedBudgetConfi
                 .collect()
         })
         .unwrap_or_default();
+    let monthly_usd_cap = budget
+        .and_then(|value| value.get("monthly_usd_cap"))
+        .and_then(toml::Value::as_float)
+        .or_else(|| {
+            budget
+                .and_then(|value| value.get("monthly_usd_cap"))
+                .and_then(toml::Value::as_integer)
+                .map(|value| value as f64)
+        });
+    // M8: non-negative guard on budget caps (defense-in-depth behind the
+    // config.schema.json `minimum: 0` constraint, 10 §12 / 06 §11). A negative cap
+    // is nonsensical and would silently invert the budget arithmetic; reject it
+    // (exit 2 KCS-E-CONFIG-SCHEMA-001 via `pipeline_to_kcs`).
+    if let Some(cap) = monthly_usd_cap {
+        if cap < 0.0 {
+            return Err(PipelineError::Schema(format!(
+                "budget.monthly_usd_cap must be non-negative at {}: {cap}",
+                path.display()
+            )));
+        }
+    }
+    for (adapter, cap) in &per_adapter {
+        if *cap < 0.0 {
+            return Err(PipelineError::Schema(format!(
+                "budget.per_adapter.{adapter} must be non-negative at {}: {cap}",
+                path.display()
+            )));
+        }
+    }
     Ok(ParsedBudgetConfig {
-        monthly_usd_cap: budget
-            .and_then(|value| value.get("monthly_usd_cap"))
-            .and_then(toml::Value::as_float)
-            .or_else(|| {
-                budget
-                    .and_then(|value| value.get("monthly_usd_cap"))
-                    .and_then(toml::Value::as_integer)
-                    .map(|value| value as f64)
-            }),
+        monthly_usd_cap,
         per_adapter,
     })
 }

@@ -18,6 +18,12 @@ pub enum PipelineError {
     Io { path: String, message: String },
     #[error("schema error: {0}")]
     Schema(String),
+    /// A persisted store file (tasks.jsonl / cost-ledger.jsonl) could not be
+    /// parsed — the on-disk record is corrupt, not a config/schema error
+    /// (M1(c)). Surfaced as `KCS-E-STORE-CORRUPT-001` (exit 4), carrying the
+    /// offending file path.
+    #[error("KCS-E-STORE-CORRUPT-001: corrupt store file at {path}: {message}")]
+    Corrupt { path: String, message: String },
 }
 
 impl PipelineError {
@@ -25,6 +31,14 @@ impl PipelineError {
     pub fn contract(code: &'static str, message: impl Into<String>) -> Self {
         Self::Contract {
             code,
+            message: message.into(),
+        }
+    }
+
+    #[must_use]
+    pub fn corrupt(path: impl Into<String>, message: impl Into<String>) -> Self {
+        Self::Corrupt {
+            path: path.into(),
             message: message.into(),
         }
     }
