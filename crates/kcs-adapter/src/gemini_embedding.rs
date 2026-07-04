@@ -19,9 +19,8 @@ use crate::types::{
 use crate::{AdapterError, Result};
 use serde_json::{json, Value};
 
-/// Adopted embedding profile constants (must stay in lockstep with
-/// `kcs_index::embedding_store::adopted_embedding_profile_value`; a unit test
-/// pins the resulting `tool_profile_hash`).
+/// Adopted embedding profile constants. Non-adapter crates access this profile
+/// through `crate::catalog`, not by naming this adapter directly.
 pub const ADOPTED_MODEL_FAMILY: &str = "gemini-embedding";
 pub const ADOPTED_MODEL_PIN: &str = "gemini-embedding-2";
 pub const ADOPTED_DIMENSIONS: u32 = 768;
@@ -52,6 +51,7 @@ impl EnvGeminiEmbeddingClient {
         Self { base_url: None }
     }
 
+    #[allow(dead_code)]
     #[must_use]
     pub fn with_base_url(base_url: impl Into<String>) -> Self {
         Self {
@@ -205,8 +205,7 @@ impl<C> GeminiEmbeddingAdapter<C> {
         }
     }
 
-    /// The adopted profile JSON value (07 §5.3). Kept in lockstep with
-    /// `kcs_index::embedding_store::adopted_embedding_profile_value`.
+    /// The adopted profile JSON value (07 §5.3).
     #[must_use]
     pub fn profile_value(&self) -> Value {
         // Network-free (like Mistral): if an unresolved mutable alias is still
@@ -315,7 +314,6 @@ mod tests {
 
     #[test]
     fn adopted_profile_hash_matches_frozen_vector() {
-        // Must equal `kcs_index::embedding_store::adopted_embedding_profile_hash()`.
         let adapter =
             GeminiEmbeddingAdapter::new(StubClient, ADOPTED_MODEL_PIN, ADOPTED_DIMENSIONS);
         assert_eq!(

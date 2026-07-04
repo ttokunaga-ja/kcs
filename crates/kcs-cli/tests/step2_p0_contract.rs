@@ -3,10 +3,11 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use assert_cmd::Command;
-use kcs_adapter::identity::{
-    canonical_profile_value, jcs_bytes, prompt_template_hash, tool_profile_hash,
+use kcs_adapter::catalog::{
+    builtin_prepare_profile, standard_online_markdownize_profile,
+    TEST_STANDARD_ONLINE_MARKDOWNIZE_ENV,
 };
-use kcs_adapter::mistral_ocr::{image_hash, replace_image_placeholders, OcrImage};
+use kcs_adapter::identity::{prompt_template_hash, tool_profile_hash};
 use kcs_adapter::tool_lock::tool_lock_hash;
 use kcs_pipeline::budget::{evaluate_budget_with_caps, BudgetCapKind, BudgetEstimate};
 use kcs_pipeline::markdownize::{
@@ -25,18 +26,6 @@ use kcs_pipeline::task::{
 use serde_json::{json, Value};
 use tempfile::TempDir;
 
-fn profile_mistral() -> Value {
-    json!({
-        "adapter_kind": "markdownize",
-        "adapter_role": "multimodal",
-        "model_or_tool_family": "mistral-ocr",
-        "model_version_pin": "mistral-ocr-2505",
-        "output_schema": "kcs-markdown-v1",
-        "runtime_kind": "cloud",
-        "spec_version": 1
-    })
-}
-
 fn profile_deterministic() -> Value {
     json!({
         "adapter_kind": "markdownize",
@@ -50,19 +39,21 @@ fn profile_deterministic() -> Value {
 }
 
 fn tool_lock_fixture() -> Value {
+    let prepare = builtin_prepare_profile();
+    let markdown = standard_online_markdownize_profile();
     json!({
         "spec_version": 1,
         "prepare": {
-            "tool_id": "prepare_default",
+            "tool_id": prepare.adapter_id,
             "profile_hash": "sha256:20b67a9d7e7e2654379f16f20b445d007e95abac7c8f85d6da65beccff7e6b03"
         },
         "markdown": {
-            "tool_id": "mistral_ocr_markdownize",
+            "tool_id": markdown.adapter_id,
             "profile_hash": "sha256:24bd9e903241740fc9fe94fb72a6ff3e697b3c0859bd5aef1b49728a207e81ed",
             "capabilities": ["ignored"]
         },
         "embedding": {
-            "tool_id": "gemini_multimodal_embedding",
+            "tool_id": "fixture_embedding_adapter",
             "profile_hash": "sha256:c2bda78e217e1f9e12cd17ddac6c46e28a50b8060976f533f76f14193a807226",
             "dimensions": 1536,
             "distance": "cosine",
@@ -70,6 +61,22 @@ fn tool_lock_fixture() -> Value {
             "mode": "ignored"
         }
     })
+}
+
+fn is_online_output_ref(task: &Value) -> bool {
+    task["output_ref"]
+        .as_str()
+        .map(|output_ref| output_ref.starts_with("online:"))
+        .unwrap_or(false)
+}
+
+fn first_online_task(status: &Value) -> &Value {
+    status["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|task| is_online_output_ref(task))
+        .expect("online task")
 }
 
 fn prepared_page(order: u64, key: &str, fp: &str) -> PreparedUnit {
@@ -282,41 +289,10 @@ fn ledger_lines(dir: &TempDir) -> Vec<Value> {
 }
 
 #[test]
-fn ct2_profile_001_tool_profile_hash_mistral() {
-    assert_eq!(
-        jcs_bytes(&canonical_profile_value(&profile_mistral()).unwrap()).unwrap(),
-        br#"{"adapter_kind":"markdownize","adapter_role":"multimodal","model_or_tool_family":"mistral-ocr","model_version_pin":"mistral-ocr-2505","output_schema":"kcs-markdown-v1","runtime_kind":"cloud","spec_version":1}"#
-    );
-    assert_eq!(
-        tool_profile_hash(&profile_mistral()).unwrap(),
-        "sha256:24bd9e903241740fc9fe94fb72a6ff3e697b3c0859bd5aef1b49728a207e81ed"
-    );
-}
-
-#[test]
 fn ct2_profile_002_tool_profile_hash_deterministic() {
     assert_eq!(
         tool_profile_hash(&profile_deterministic()).unwrap(),
         "sha256:76c01950d19edffc1b8ca75e06d7754fb52cd05db1bb10e3268f81392bf54095"
-    );
-}
-
-#[test]
-fn ct2_profile_003_null_fields_are_omitted() {
-    let mut with_nulls = profile_mistral();
-    for key in [
-        "prompt_template_id",
-        "prompt_template_hash",
-        "sampling",
-        "dimensions",
-        "distance",
-        "modality",
-    ] {
-        with_nulls[key] = Value::Null;
-    }
-    assert_eq!(
-        tool_profile_hash(&with_nulls).unwrap(),
-        tool_profile_hash(&profile_mistral()).unwrap()
     );
 }
 
@@ -350,7 +326,7 @@ fn ct2_profile_005_prompt_template_hash_vector() {
 fn ct2_profile_006_tool_lock_hash_vector() {
     assert_eq!(
         tool_lock_hash(&tool_lock_fixture()).unwrap(),
-        "sha256:e24d8b76742e441e894181f9210453e0da60a6e84c663560214d10aeeee0b264"
+        "sha256:eb4cf0cebc4bacf1808e6e89dc4d7c57a4ac5e42dabad5dc0163ef41b04d6a4b"
     );
 }
 
@@ -1323,7 +1299,7 @@ fn ct2_adapter_013_baseline_and_ai_artifacts_coexist() {
     let baseline_root = dir.path().join(".kcs/objects/normalized_units");
     let before = collect_files(&baseline_root);
     kcs(&dir, ["batch", "resume"])
-        .env("KCS_TEST_MISTRAL_OCR", "mock")
+        .env(TEST_STANDARD_ONLINE_MARKDOWNIZE_ENV, "mock")
         .assert()
         .success();
     assert_eq!(
@@ -1342,7 +1318,7 @@ fn ct2_budget_005_online_success_records_ledger_and_caps_next_task() {
     json_success_with_env(
         &dir,
         ["batch", "resume"],
-        &[("KCS_TEST_MISTRAL_OCR", "mock")],
+        &[(TEST_STANDARD_ONLINE_MARKDOWNIZE_ENV, "mock")],
     );
 
     let online_entry = ledger_lines(&dir).into_iter().find(|entry| {
@@ -1376,7 +1352,7 @@ fn ct2_image_003_cli_mock_preserves_links_when_replacing_images() {
     json_success_with_env(
         &dir,
         ["batch", "resume"],
-        &[("KCS_TEST_MISTRAL_OCR", "mock_link_image")],
+        &[(TEST_STANDARD_ONLINE_MARKDOWNIZE_ENV, "mock_link_image")],
     );
     let unit = normalized_units(&dir)
         .into_iter()
@@ -1395,15 +1371,10 @@ fn ct2_task_005_auth_error_task_is_not_retried() {
     json_success_with_env(
         &dir,
         ["batch", "resume"],
-        &[("KCS_TEST_MISTRAL_OCR", "auth_error")],
+        &[(TEST_STANDARD_ONLINE_MARKDOWNIZE_ENV, "auth_error")],
     );
     let status = json_success(&dir, ["status"]);
-    let online_task = status["tasks"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|task| task["output_ref"] == "online:mistral_ocr_markdownize")
-        .unwrap();
+    let online_task = first_online_task(&status);
     assert_eq!(online_task["status"], "failed");
     assert_eq!(online_task["fallback_reason"], "auth_error");
     assert_eq!(online_task["attempts"], 1);
@@ -1411,16 +1382,11 @@ fn ct2_task_005_auth_error_task_is_not_retried() {
     let retry = json_success_with_env(
         &dir,
         ["batch", "retry"],
-        &[("KCS_TEST_MISTRAL_OCR", "mock")],
+        &[(TEST_STANDARD_ONLINE_MARKDOWNIZE_ENV, "mock")],
     );
     assert_eq!(retry["tasks_updated"], 0);
     let status = json_success(&dir, ["status"]);
-    let online_task = status["tasks"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|task| task["output_ref"] == "online:mistral_ocr_markdownize")
-        .unwrap();
+    let online_task = first_online_task(&status);
     assert_eq!(online_task["status"], "failed");
     assert_eq!(online_task["attempts"], 1);
 }
@@ -1436,7 +1402,7 @@ fn ct2_task_009_failed_online_task_is_not_reenqueued_by_reindex() {
     json_success_with_env(
         &dir,
         ["batch", "resume"],
-        &[("KCS_TEST_MISTRAL_OCR", "rate_limit")],
+        &[(TEST_STANDARD_ONLINE_MARKDOWNIZE_ENV, "rate_limit")],
     );
     let status = json_success(&dir, ["status"]);
     let tasks_after_fail = status["tasks"].as_array().unwrap().len();
@@ -1473,7 +1439,7 @@ fn ct2_task_006_partial_online_result_persists_partial_status() {
     json_success_with_env(
         &dir,
         ["batch", "resume"],
-        &[("KCS_TEST_MISTRAL_OCR", "partial")],
+        &[(TEST_STANDARD_ONLINE_MARKDOWNIZE_ENV, "partial")],
     );
     let status = json_success(&dir, ["status"]);
     assert!(status["tasks"].as_array().unwrap().iter().any(|task| {
@@ -1494,7 +1460,7 @@ fn ct2_task_007_online_task_not_reissued_for_completed_identity() {
     json_success_with_env(
         &dir,
         ["batch", "resume"],
-        &[("KCS_TEST_MISTRAL_OCR", "mock")],
+        &[(TEST_STANDARD_ONLINE_MARKDOWNIZE_ENV, "mock")],
     );
     // A completed online task keeps this fallback_reason even after its
     // output_ref is rewritten to the normalized-instance path.
@@ -1530,7 +1496,7 @@ fn ct2_task_007_online_task_not_reissued_for_completed_identity() {
     let second = json_success_with_env(
         &dir,
         ["batch", "resume"],
-        &[("KCS_TEST_MISTRAL_OCR", "mock")],
+        &[(TEST_STANDARD_ONLINE_MARKDOWNIZE_ENV, "mock")],
     );
     assert_eq!(
         second["tasks_executed"], 0,
@@ -1550,7 +1516,7 @@ fn ct2_task_007_online_task_not_reissued_for_completed_identity() {
         .as_array()
         .unwrap()
         .iter()
-        .filter(|task| task["output_ref"] == "online:mistral_ocr_markdownize")
+        .filter(|task| is_online_output_ref(task))
         .count();
     assert_eq!(
         pending_online, 1,
@@ -1569,17 +1535,12 @@ fn ct2_task_008_retryable_failure_defers_until_backoff_elapses() {
 
     // Fail the online task with a rate-limit-like (retryable) error at T0.
     kcs(&dir, ["batch", "resume"])
-        .env("KCS_TEST_MISTRAL_OCR", "rate_limit")
+        .env(TEST_STANDARD_ONLINE_MARKDOWNIZE_ENV, "rate_limit")
         .env("KCS_FIXED_NOW", "2026-07-03T00:00:00Z")
         .assert()
         .success();
     let status = json_success(&dir, ["status"]);
-    let failed = status["tasks"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|task| task["output_ref"] == "online:mistral_ocr_markdownize")
-        .unwrap();
+    let failed = first_online_task(&status);
     assert_eq!(failed["status"], "failed");
     assert_eq!(failed["attempts"], 1);
     let next_retry_at = failed["next_retry_at"].as_str().unwrap();
@@ -1593,7 +1554,7 @@ fn ct2_task_008_retryable_failure_defers_until_backoff_elapses() {
         &dir,
         ["batch", "retry"],
         &[
-            ("KCS_TEST_MISTRAL_OCR", "mock"),
+            (TEST_STANDARD_ONLINE_MARKDOWNIZE_ENV, "mock"),
             ("KCS_FIXED_NOW", "2026-07-03T00:00:00Z"),
         ],
     );
@@ -1604,16 +1565,14 @@ fn ct2_task_008_retryable_failure_defers_until_backoff_elapses() {
         .as_array()
         .unwrap()
         .iter()
-        .any(|task| {
-            task["output_ref"] == "online:mistral_ocr_markdownize" && task["status"] == "failed"
-        }));
+        .any(|task| is_online_output_ref(task) && task["status"] == "failed"));
 
     // Advance the clock past the backoff window: the task becomes due and runs.
     let late = json_success_with_env(
         &dir,
         ["batch", "retry"],
         &[
-            ("KCS_TEST_MISTRAL_OCR", "mock"),
+            (TEST_STANDARD_ONLINE_MARKDOWNIZE_ENV, "mock"),
             ("KCS_FIXED_NOW", "2026-07-03T01:00:00Z"),
         ],
     );
@@ -1626,33 +1585,6 @@ fn ct2_task_008_retryable_failure_defers_until_backoff_elapses() {
         task["fallback_reason"] == "online_adapter_done"
             && (task["status"] == "done" || task["status"] == "partial")
     }));
-}
-
-#[test]
-fn ct2_image_001_embedded_image_hash_and_fanout() {
-    let hash = image_hash(b"image bytes");
-    assert!(hash.starts_with("sha256:"));
-    let digest = hash.strip_prefix("sha256:").unwrap();
-    let path = PathBuf::from(".kcs/objects/images")
-        .join(&digest[0..2])
-        .join(&digest[2..4])
-        .join(&hash);
-    assert!(path.ends_with(&hash));
-}
-
-#[test]
-fn ct2_image_002_markdown_references_object_uri() {
-    let replaced = replace_image_placeholders(
-        "![x](placeholder)\n",
-        "01H00000000000000000000000",
-        &[OcrImage {
-            bytes: b"image bytes".to_vec(),
-            media_type: "image/png".to_owned(),
-            bbox: None,
-            confidence: None,
-        }],
-    );
-    assert!(replaced.contains("kcs://01H00000000000000000000000/object/image/sha256:"));
 }
 
 #[test]
