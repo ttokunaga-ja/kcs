@@ -75,3 +75,54 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     08 §5 names no code and 06 §8's list is examples ("例:"), so an EVIDENCE-domain code is minted
     here; docs sync is deferred to the next docs edit window. `kcs evidence retarget` itself
     remains Step 4.
+
+## Step 4 checkpoint fixes (L1-L8) additions (2026-07-04)
+
+34. Per-adapter network opt-in (L4). `kcs index --approve` / `--yes` records **one approval row
+    per configured online adapter**: the markdownize marker `mistral_ocr_markdownize` always, plus
+    the embedding adapter `gemini_embedding_2` when an embedding adapter is configured
+    (`KCS_TEST_GEMINI_EMBED` / `GEMINI_API_KEY`). Each row's `network_opt_in` mirrors the method
+    (`--approve` → true, `--yes` → false), unchanged from before. The embedding network gate reads
+    its **own** `tool_id` row (`persistent_network_allowed_for` / `embedding_online_allowed`), not
+    the markdownize approval it used to ride on (07 §3: opt-in unit is scope × adapter). The
+    index-path embedding online decision now also flows through this per-adapter check rather than
+    the transient `network_allowed` (markdownize) result.
+35. L4 backward compatibility + revoke scope. A scope approved before per-adapter rows existed
+    carries only the `mistral_ocr_markdownize` row, so a later run with an embedding adapter finds
+    no embedding opt-in row → embedding stays **enqueue-only** (tasks Pending, surfaced by
+    `index_status`), never silently calling the embedding API. Revocation stays **global**:
+    `kcs index --revoke-network` writes `allow_network = false` in config.toml, and the per-adapter
+    gate checks `network_revoked` first, so a revoke gates *every* online adapter (embedding
+    included). Selective per-adapter revoke is intentionally not exposed (no CLI surface for it) and
+    deferred; a global network revoke stopping the embedding adapter is the desired conservative
+    default.
+36. reindex / repair enrichment (L1). `kcs reindex --force` and `kcs repair --rebuild-db` run the
+    embedding enrichment pass after the SQLite rebuild (docs/06 "再 normalize / 再 embedding"),
+    symmetric with `kcs index`. Online only under the embedding opt-in (#34); offline it enqueues
+    Embedding tasks so `index_status` reports them pending instead of the prior false
+    enriched_ratio = 1.0 / pending = 0 (the tasks were never created). Note: `rebuild_chunk_vec`
+    already re-derives `chunk_vec` from `embeddings` by `text_hash`, so an unchanged-content
+    reindex needs no new embedding work (content reuse); only a chunking-config change (new
+    `text_hash`) forces real re-embedding — the acceptance test uses a smaller `max_chars` to
+    exercise that path.
+37. Short-hash resolution unified on SQLite tree_entries (L3). `resolve_short_hash` /
+    `load_searchable_chunks` read the live tree_entries from `index/sqlite.db` via
+    `ensure_snapshot_tree_entries` (the same lazy HEAD projection search uses), and the JSON
+    `index/tree_entries.json` projection is **removed entirely** (`write_tree_entries` /
+    `read_tree_entries` / `tree_entries_path` deleted). The JSON went stale right after a bare
+    `kcs snapshot` (which advances HEAD without refreshing it), so short-hash `view`/`open` failed
+    with KCS-E-CONFIG-USAGE-001 while search succeeded — the asymmetry L3 fixes. SQLite
+    tree_entries is now the single projection source.
+38. Embedding billing/failure on the sent portion only (L5/L6). `run_embedding_enrichment` splits
+    each batch into content-addressed reuse (free, no adapter call) and to-send chunks. Budget
+    judgement and the cost-ledger charge use only the actually-sent chars (reuse is never billed).
+    Reuse links are written and their tasks completed **before** the send, so an adapter failure on
+    the sent portion cannot flip an already-materialized (chunk_vec written) reuse chunk into a
+    stuck Failed task. Failed embedding tasks are owned by `batch retry` (L7): a chunk whose
+    embedding task is Failed with an unelapsed `next_retry_at` or a non-retryable error is skipped
+    by the enrichment target selection, mirroring markdownize.
+39. L8 docs sync applied in this round (not deferred): 03 §8.1 embedding identity documents
+    `target_hash = <text_hash>` (the content-based-reuse basis, consistent with 04 §4.3/§5.4);
+    04 §5.4 adds the resume/retry/reindex enrichment-execution + `--override-budget` symmetry note;
+    04 §5.5 adds the sent-only billing / reuse-not-contaminated note; 06's `batch resume`/`retry`
+    lines note they drive both markdownize and embedding.

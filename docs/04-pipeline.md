@@ -563,8 +563,10 @@ monthly_usd_cap = 10.0
 - 判定式: scope S の新規タスクを起動できるのは `ledger(S, 当月) < folder_cap(S)` **かつ** `ledger(device, 当月) < device_cap` のとき (= effective cap は両者の残余の min)。`per_adapter` の下限も同様に両層で判定する
 - 累積コストは Adapter 報告値 (input/output token × 単価) を `~/.local/share/kcs/cost-ledger.sqlite` (デバイスグローバル 1 個) に記録し、各記録に `scope_id` を付与する。folder cap の判定はこの ledger の scope 別集計で行う (`.kcs` 内に ledger は置かない。cache/truth 規約上、課金台帳はデバイスローカルの運用データであり `.kcs` の truth ではない)
 - いずれかの cap 超過時、走行中タスクは完了させ、新規タスクは `paused` 状態へ。`kcs status` は超過した cap の種別 (`device` | `folder`) と scope を表示する
-- `kcs batch resume --override-budget` で明示的に再開可能 (当月の device cap / folder cap の両方を無視して再開する)
+- `kcs batch resume --override-budget` で明示的に再開可能 (当月の device cap / folder cap の両方を無視して再開する)。override は markdownize / embedding **両 Adapter の budget 判定に対称に**効く。override 無しの `kcs batch resume` は budget 超過 pause タスクを markdownize / embedding いずれも据え置き (sticky)、他要因の pause のみ再開する
 - ローカル LLM 利用時は単価 0 として記録 (= cap に効かない)
+
+**resume / retry / reindex が駆動する enrichment**: `kcs batch resume` / `kcs batch retry` は online markdownize タスクに加え、**embedding enrichment パスも駆動する** (embedding タスクは現行世代の live chunk 集合から DB 駆動で再検出される。opt-in は Adapter 単位 = embedding は自身の承認行を見る、[07-adapter-spec.md §3](07-adapter-spec.md))。同様に `kcs reindex --force` / `kcs repair --rebuild-db` は rebuild 後に enrichment を実行し、新世代 chunk の embedding を追随させる (§4.6)。offline なら embedding タスクを enqueue のみとし `index_status` ([05-runtime.md §1.7](05-runtime.md)) に pending として可視化する。retry の失敗タスクは backoff / retry 予算 (§5.3) を尊重し、`next_retry_at` 未来または非 retryable の embedding タスクを持つ chunk は enrichment 対象から除外する
 
 ## 5.5 冪等性
 
@@ -575,7 +577,10 @@ monthly_usd_cap = 10.0
 同一 `.kcs` 内にあれば、Adapter を呼ばず既存 vector を再利用する。`text_hash` は chunk 抽出範囲のみの
 hash ([03-data-model.md §8](03-data-model.md)) であり、normalized_hash (不採用) ではない。
 これにより incremental Markdownize 後、unchanged unit 由来で本文が変わらない chunk は
-embedding を再生成しない。
+embedding を再生成しない。budget 判定と cost ledger 記帳は **実際に Adapter へ送信した (再利用でない)
+chunk の文字数のみ**を対象とし、再利用 chunk (API 非呼出) は課金しない。バッチ内で再利用と実送信が
+混在し実送信側が失敗した場合も、再利用で既に `chunk_vec` を確定した chunk は done を保持する
+(送信失敗が再利用済み chunk に波及しない)。
 
 ## 5.6 CLI exit code (batch 系)
 

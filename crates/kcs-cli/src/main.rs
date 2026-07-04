@@ -544,6 +544,13 @@ fn run_repair(args: UnsupportedArgs) -> Result<Value> {
     // while preserving the `embeddings` rows and re-deriving `chunk_vec` from them
     // (04 §4.3). It is not pre-deleted here so vector search survives the rebuild.
     let report = rebuild_step3_index(&repo)?;
+    // L1: after a DB rebuild, re-drive enrichment so any chunk lacking an
+    // embedding (e.g. a rebuild that produced new chunk rows, or a scope whose
+    // enrichment never ran) is enqueued/embedded rather than silently reported as
+    // fully enriched. `rebuild_sqlite_index` already preserved existing
+    // embeddings, so reuse keeps this near-free; offline it only enqueues.
+    let embedding_online = embedding_online_allowed(&repo, false)?;
+    run_embedding_enrichment(&repo, embedding_online, false)?;
     Ok(json!({
         "status": "rebuilt",
         "rebuilt_chunks": report.rebuilt_chunks,
@@ -1963,6 +1970,14 @@ fn run_reindex(args: UnsupportedArgs) -> Result<Value> {
         &normalize_by_path,
     )?;
     let report = rebuild_step3_index(&repo)?;
+    // L1: reindex = re-normalize + re-embedding (docs/06). The rebuild appends
+    // fresh chunk rows; enrich them symmetrically with the `kcs index` path so
+    // the embedding index tracks the new generation. Online only under the
+    // embedding adapter's opt-in; offline this enqueues Embedding tasks so
+    // `index_status` reports the pending enrichment instead of falsely showing
+    // enriched_ratio = 1.0 (the tasks would otherwise never be created).
+    let embedding_online = embedding_online_allowed(&repo, false)?;
+    run_embedding_enrichment(&repo, embedding_online, false)?;
     Ok(json!({
         "status": "reindexed",
         "reindexed_files": reindexed,
@@ -2027,7 +2042,10 @@ fn rebuild_step3_index(repo: &Repository) -> Result<Step3RebuildReport> {
     }
 
     append_stored_chunks(repo.kcs_dir(), &appended)?;
-    write_tree_entries(repo.kcs_dir(), &tree_entries)?;
+    // The SQLite `tree_entries` table (below) is the single source of truth for
+    // live-chunk resolution (search and short-hash resolution both read it via
+    // `ensure_snapshot_tree_entries`). The former JSON projection went stale after
+    // a bare snapshot and is no longer written (L3).
     rebuild_sqlite_index(repo.kcs_dir(), &tree_entries)?;
     Ok(Step3RebuildReport {
         rebuilt_chunks: appended.len() as u64,
@@ -2164,10 +2182,6 @@ fn chunks_jsonl_path(kcs_dir: &Path) -> PathBuf {
     index_dir(kcs_dir).join("chunks.jsonl")
 }
 
-fn tree_entries_path(kcs_dir: &Path) -> PathBuf {
-    index_dir(kcs_dir).join("tree_entries.json")
-}
-
 fn sqlite_path(kcs_dir: &Path) -> PathBuf {
     index_dir(kcs_dir).join("sqlite.db")
 }
@@ -2205,26 +2219,6 @@ fn append_stored_chunks(kcs_dir: &Path, chunks: &[StoredChunk]) -> Result<()> {
             .map_err(|err| KcsError::io(err.to_string(), path.display().to_string()))?;
     }
     Ok(())
-}
-
-fn write_tree_entries(kcs_dir: &Path, entries: &[TreeEntryRow]) -> Result<()> {
-    let path = tree_entries_path(kcs_dir);
-    let parent = path
-        .parent()
-        .ok_or_else(|| KcsError::io("path has no parent", path.display().to_string()))?;
-    fs::create_dir_all(parent)
-        .map_err(|err| KcsError::io(err.to_string(), parent.display().to_string()))?;
-    let bytes =
-        serde_json::to_vec_pretty(entries).map_err(|err| KcsError::schema(err.to_string()))?;
-    fs::write(&path, bytes).map_err(|err| KcsError::io(err.to_string(), path.display().to_string()))
-}
-
-fn read_tree_entries(kcs_dir: &Path) -> Result<Vec<TreeEntryRow>> {
-    let path = tree_entries_path(kcs_dir);
-    let Ok(bytes) = fs::read(&path) else {
-        return Ok(Vec::new());
-    };
-    serde_json::from_slice(&bytes).map_err(|err| KcsError::schema(err.to_string()))
 }
 
 fn rebuild_sqlite_index(kcs_dir: &Path, tree_entries: &[TreeEntryRow]) -> Result<()> {
@@ -2513,19 +2507,21 @@ fn scope_id(kcs_dir: &Path) -> Result<String> {
 fn load_searchable_chunks(target: &ScopeTarget) -> Result<Vec<SearchableChunk>> {
     let repo = Repository::open(&target.repo_root)?;
     let head = repo.head_commit_hash()?.unwrap_or_default();
-    let tree_entries = read_tree_entries(&target.kcs_dir)?;
-    let live = tree_entries
-        .iter()
-        .filter(|entry| entry.commit_hash == head)
-        .filter_map(|entry| {
-            entry.tool_profile_hash.as_ref().map(|tool| {
-                (
-                    (entry.raw_hash.clone(), tool.clone(), entry.gen),
-                    entry.path.clone(),
-                )
-            })
-        })
-        .collect::<BTreeMap<_, _>>();
+    if head.is_empty() {
+        return Ok(Vec::new());
+    }
+    // L3: short-hash / pointer resolution must survive a bare `kcs snapshot` that
+    // advances HEAD without refreshing the JSON tree_entries projection. Read the
+    // live entries from SQLite and project the current HEAD lazily, exactly as
+    // search does (`ensure_snapshot_tree_entries`); the old JSON path went stale
+    // right after a snapshot (search succeeded on the same input — the asymmetry).
+    let db_path = sqlite_path(&target.kcs_dir);
+    if !db_path.exists() {
+        return Ok(Vec::new());
+    }
+    let conn = Connection::open(&db_path).map_err(|err| KcsError::schema(err.to_string()))?;
+    ensure_snapshot_tree_entries(&repo, &conn, &head)?;
+    let live = live_tree_entries_at(&conn, &head)?;
     Ok(read_stored_chunks(&target.kcs_dir)?
         .into_iter()
         .filter_map(|stored| {
@@ -2543,6 +2539,40 @@ fn load_searchable_chunks(target: &ScopeTarget) -> Result<Vec<SearchableChunk>> 
             })
         })
         .collect())
+}
+
+/// Live tree-entry map for `head` read from SQLite: (raw_hash, tool_profile_hash,
+/// gen) -> path_at_commit. Rows without a `tool_profile_hash` (raw-only) carry no
+/// chunk and are skipped.
+fn live_tree_entries_at(
+    conn: &Connection,
+    head: &str,
+) -> Result<BTreeMap<(String, String, u64), String>> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT raw_hash, tool_profile_hash, gen, path
+             FROM tree_entries WHERE commit_hash = ?1",
+        )
+        .map_err(|err| KcsError::schema(err.to_string()))?;
+    let rows = stmt
+        .query_map(rusqlite::params![head], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, Option<String>>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        })
+        .map_err(|err| KcsError::schema(err.to_string()))?;
+    let mut map = BTreeMap::new();
+    for row in rows {
+        let (raw_hash, tool_profile_hash, gen, path) =
+            row.map_err(|err| KcsError::schema(err.to_string()))?;
+        if let Some(tool) = tool_profile_hash {
+            map.insert((raw_hash, tool, gen as u64), path);
+        }
+    }
+    Ok(map)
 }
 
 fn default_diversify_request() -> DiversifyRequest {
@@ -3226,7 +3256,7 @@ fn run_batch(args: BatchArgs) -> Result<Value> {
                     }
                 })
                 .map_err(pipeline_to_kcs)?;
-            let executed = execute_pending_tasks(&repo, &store)?;
+            let executed = execute_pending_tasks(&repo, &store, resume.override_budget)?;
             Ok(json!({
                 "status": "resumed",
                 "override_budget": resume.override_budget,
@@ -3249,7 +3279,9 @@ fn run_batch(args: BatchArgs) -> Result<Value> {
                     }
                 })
                 .map_err(pipeline_to_kcs)?;
-            let executed = execute_pending_tasks(&repo, &store)?;
+            // `batch retry` never overrides the budget cap (retry re-schedules,
+            // it does not bypass caps — `batch resume --override-budget` does).
+            let executed = execute_pending_tasks(&repo, &store, false)?;
             Ok(
                 json!({ "status": "retry scheduled", "tasks_updated": changed, "tasks_executed": executed }),
             )
@@ -3258,10 +3290,32 @@ fn run_batch(args: BatchArgs) -> Result<Value> {
     }
 }
 
-fn execute_pending_tasks(repo: &Repository, store: &TaskStore) -> Result<usize> {
-    if !persistent_network_allowed(repo)? {
-        return Ok(0);
+fn execute_pending_tasks(
+    repo: &Repository,
+    store: &TaskStore,
+    override_budget: bool,
+) -> Result<usize> {
+    let mut executed = 0usize;
+    // Markdownize and embedding opt-ins are per-adapter (07 §3, L4): gate each
+    // adapter on its own approval rather than one blanket check.
+    if persistent_network_allowed(repo)? {
+        executed += execute_pending_markdownize_tasks(repo, store, override_budget)?;
     }
+    // Embedding tasks are executed by the same enrichment pass `kcs index` uses;
+    // without this, rate-limited Pending embedding tasks could never be completed
+    // by `batch resume` / `batch retry`. `override_budget` reaches the budget
+    // judgement (L2) and the embedding opt-in is the embedding adapter's own (L4).
+    let embedding_online = embedding_online_allowed(repo, false)?;
+    executed += run_embedding_enrichment(repo, embedding_online, override_budget)?;
+    Ok(executed)
+}
+
+/// Execute Pending online markdownize tasks, honoring `override_budget` (L2 i).
+fn execute_pending_markdownize_tasks(
+    repo: &Repository,
+    store: &TaskStore,
+    override_budget: bool,
+) -> Result<usize> {
     let budget_caps =
         read_budget_policy(user_config_toml_path(), repo.kcs_dir().join("config.toml"))
             .map_err(pipeline_to_kcs)?;
@@ -3304,8 +3358,12 @@ fn execute_pending_tasks(repo: &Repository, store: &TaskStore) -> Result<usize> 
             &scope_id,
             adapter_kind_for_budget(estimate.adapter_id.as_deref()),
         )?;
-        let budget =
-            evaluate_budget_with_caps(&estimate, device_remaining, folder_remaining, false);
+        let budget = evaluate_budget_with_caps(
+            &estimate,
+            device_remaining,
+            folder_remaining,
+            override_budget,
+        );
         if !budget.allowed {
             store
                 .update_matching(|candidate| {
@@ -3383,14 +3441,21 @@ fn execute_pending_tasks(repo: &Repository, store: &TaskStore) -> Result<usize> 
             }
         }
     }
-    // Embedding tasks are executed by the same enrichment pass `kcs index`
-    // uses; without this, rate-limited Pending embedding tasks could never be
-    // completed by `batch resume` / `batch retry` (opt-in already checked above).
-    executed += run_embedding_enrichment(repo, true)?;
     Ok(executed)
 }
 
 fn persistent_network_allowed(repo: &Repository) -> Result<bool> {
+    persistent_network_allowed_for(repo, "mistral_ocr_markdownize")
+}
+
+/// Persistent (config / approvals.jsonl) network opt-in for one specific online
+/// adapter, keyed by `tool_id` (07 §3: opt-in unit is scope × adapter). A global
+/// `allow_network = true` covers every adapter; a network revocation gates every
+/// adapter off. Otherwise the scope must carry an approval row for *this*
+/// `tool_id` (L4). Backward compatibility: a scope approved before per-adapter
+/// rows existed carries only the `mistral_ocr_markdownize` row, so an embedding
+/// adapter reads no matching row and stays enqueue-only (decision #35).
+fn persistent_network_allowed_for(repo: &Repository, tool_id: &str) -> Result<bool> {
     if network_revoked(repo)? {
         return Ok(false);
     }
@@ -3399,18 +3464,33 @@ fn persistent_network_allowed(repo: &Repository) -> Result<bool> {
     {
         return Ok(true);
     }
+    Ok(approval_row_present(repo, tool_id))
+}
+
+/// True when `approvals.jsonl` carries an online opt-in row for `tool_id`.
+fn approval_row_present(repo: &Repository, tool_id: &str) -> bool {
     let path = repo.kcs_dir().join("approvals.jsonl");
     let Ok(text) = fs::read_to_string(&path) else {
-        return Ok(false);
+        return false;
     };
-    Ok(text
-        .lines()
+    text.lines()
         .filter_map(|line| serde_json::from_str::<Value>(line).ok())
         .any(|value| {
-            value.get("tool_id").and_then(Value::as_str) == Some("mistral_ocr_markdownize")
+            value.get("tool_id").and_then(Value::as_str) == Some(tool_id)
                 && value.get("execution_mode").and_then(Value::as_str) == Some("online_api")
                 && value.get("network_opt_in").and_then(Value::as_bool) == Some(true)
-        }))
+        })
+}
+
+/// Whether the embedding adapter may call the network in this pass (L4). Gated
+/// on the embedding adapter's own opt-in (`gemini_embedding_2`), not the
+/// markdownize approval it used to ride on. `offline` (the `--offline` flag)
+/// forces it off regardless of any recorded approval.
+fn embedding_online_allowed(repo: &Repository, offline: bool) -> Result<bool> {
+    if offline {
+        return Ok(false);
+    }
+    persistent_network_allowed_for(repo, EMBEDDING_ADAPTER_ID)
 }
 
 #[derive(Debug, Clone)]
@@ -3896,15 +3976,21 @@ struct EmbeddableChunk {
 /// Pending (surfaced by `index_status`). No-op when no embedding adapter is
 /// configured (keeps the default index path unchanged).
 fn generate_scope_embeddings(repo: &Repository, args: &IndexArgs) -> Result<()> {
-    let online = network_allowed(repo, args)?;
-    run_embedding_enrichment(repo, online).map(|_| ())
+    // Embedding online opt-in is the embedding adapter's own (L4), not a
+    // ride-along on the markdownize approval. `--offline` forces enqueue-only.
+    let online = embedding_online_allowed(repo, args.offline)?;
+    run_embedding_enrichment(repo, online, false).map(|_| ())
 }
 
 /// Core enrichment pass shared by `kcs index` (inline) and `kcs batch
 /// resume/retry`. Without the resume path, embedding tasks left Pending by a
 /// rate limit could never complete (`batch resume` only executed Markdownize
 /// tasks). Returns the number of chunks embedded in this pass.
-fn run_embedding_enrichment(repo: &Repository, online: bool) -> Result<usize> {
+fn run_embedding_enrichment(
+    repo: &Repository,
+    online: bool,
+    override_budget: bool,
+) -> Result<usize> {
     let Some(seam) = embedding_seam() else {
         return Ok(0);
     };
@@ -3938,8 +4024,16 @@ fn run_embedding_enrichment(repo: &Repository, online: bool) -> Result<usize> {
         // Offline: tasks stay Pending; `index_status` reports them (05 §1.7).
         return Ok(0);
     }
-    let mut executed = 0usize;
 
+    // L2(ii)/L7: skip chunks whose embedding task is sticky budget-Paused (unless
+    // override) or a Failed task that is not retry-eligible (unelapsed backoff or
+    // non-retryable) — the same lifecycle semantics markdownize already honors.
+    let embeddable = filter_embeddable_by_task_state(&task_store, pending, override_budget)?;
+    if embeddable.is_empty() {
+        return Ok(0);
+    }
+
+    let mut executed = 0usize;
     let cost_ledger = CostLedger::new(cost_ledger_path());
     let budget_caps =
         read_budget_policy(user_config_toml_path(), repo.kcs_dir().join("config.toml"))
@@ -3947,15 +4041,52 @@ fn run_embedding_enrichment(repo: &Repository, online: bool) -> Result<usize> {
     let month = utc_month(&now);
     let scope_id = repo.scope_id_for_adapter();
 
-    for batch in pending.chunks(EMBEDDING_BATCH_SIZE) {
-        let batch_chars: u64 = batch
+    for batch in embeddable.chunks(EMBEDDING_BATCH_SIZE) {
+        // Split content-addressed reuse (no API call, free) from chunks that
+        // require a live adapter call (CT3-EMBED-006).
+        let plan = match plan_embed_batch(&conn, &profile, batch) {
+            Ok(plan) => plan,
+            Err(failure) => {
+                fail_embedding_tasks(&task_store, batch, retry_reason(failure.retry_kind))?;
+                break;
+            }
+        };
+        // L6: reuse links are free and always succeed → link + complete them up
+        // front so an API failure on the *sent* portion can never contaminate an
+        // already-materialized (chunk_vec written) chunk into a stuck Failed task.
+        if !plan.reuse.is_empty() {
+            match link_reused_chunks(&conn, &profile, &plan.reuse) {
+                Ok(()) => {
+                    complete_embedding_tasks(
+                        &task_store,
+                        plan.reuse.iter().map(|(chunk, _)| *chunk),
+                    )?;
+                    executed += plan.reuse.len();
+                }
+                Err(failure) => {
+                    fail_embedding_tasks(
+                        &task_store,
+                        plan.reuse.iter().map(|(chunk, _)| *chunk),
+                        retry_reason(failure.retry_kind),
+                    )?;
+                    break;
+                }
+            }
+        }
+        if plan.to_send.is_empty() {
+            continue;
+        }
+        // L5: budget judgement and ledger charge only the chars actually sent to
+        // the API — reused chunks issue no request and must not be billed.
+        let sent_chars: u64 = plan
+            .to_send
             .iter()
-            .map(|chunk| chunk.text.chars().count() as u64)
+            .map(|(chunk, _)| chunk.text.chars().count() as u64)
             .sum();
         let estimate = BudgetEstimate {
             scope_id: scope_id.clone(),
             task_type: TaskType::Embedding,
-            estimated_usd: estimate_embedding_cost(batch_chars),
+            estimated_usd: estimate_embedding_cost(sent_chars),
             adapter_id: Some("gemini_multimodal_embedding".to_owned()),
         };
         let (device_remaining, folder_remaining) = budget_remaining_for_adapter(
@@ -3965,14 +4096,19 @@ fn run_embedding_enrichment(repo: &Repository, online: bool) -> Result<usize> {
             &scope_id,
             EMBEDDING_ADAPTER_KIND,
         )?;
-        let budget =
-            evaluate_budget_with_caps(&estimate, device_remaining, folder_remaining, false);
+        let budget = evaluate_budget_with_caps(
+            &estimate,
+            device_remaining,
+            folder_remaining,
+            override_budget,
+        );
         if !budget.allowed {
-            // Budget exhausted: pause the remaining chunks (index_status.budget_paused).
-            pause_embedding_tasks(&task_store, batch)?;
+            // Budget exhausted: pause the remaining to-send chunks
+            // (index_status.budget_paused). Already-linked reuse stays done.
+            pause_embedding_tasks(&task_store, plan.to_send.iter().map(|(chunk, _)| *chunk))?;
             break;
         }
-        match embed_batch(&conn, seam, &profile, batch) {
+        match send_embed_batch(&conn, seam, &profile, &plan.to_send) {
             Ok(()) => {
                 cost_ledger
                     .append_monthly(&MonthlyCostLedgerEntry {
@@ -3982,13 +4118,20 @@ fn run_embedding_enrichment(repo: &Repository, online: bool) -> Result<usize> {
                         usd: estimate.estimated_usd,
                     })
                     .map_err(pipeline_to_kcs)?;
-                complete_embedding_tasks(&task_store, batch)?;
-                executed += batch.len();
+                complete_embedding_tasks(
+                    &task_store,
+                    plan.to_send.iter().map(|(chunk, _)| *chunk),
+                )?;
+                executed += plan.to_send.len();
             }
             Err(failure) => {
-                // Enrichment failure is non-fatal: mark the batch failed and stop
-                // (search sees no embeddings → text). Never fails `kcs index`.
-                fail_embedding_tasks(&task_store, batch, retry_reason(failure.retry_kind))?;
+                // Enrichment failure is non-fatal: mark the sent chunks failed and
+                // stop (search sees no embeddings → text). Never fails `kcs index`.
+                fail_embedding_tasks(
+                    &task_store,
+                    plan.to_send.iter().map(|(chunk, _)| *chunk),
+                    retry_reason(failure.retry_kind),
+                )?;
                 break;
             }
         }
@@ -3996,29 +4139,31 @@ fn run_embedding_enrichment(repo: &Repository, online: bool) -> Result<usize> {
     Ok(executed)
 }
 
-/// Embed one batch: reuse an existing content vector where possible
-/// (CT3-EMBED-006), else call the adapter, then write `embeddings` + `chunk_vec`.
-fn embed_batch(
+/// A batch split into free content-addressed reuse and chunks needing an API call.
+struct EmbedBatchPlan<'a> {
+    /// (chunk, existing content-vector bytes) — link `chunk_vec`, no adapter call.
+    reuse: Vec<(&'a EmbeddableChunk, Vec<u8>)>,
+    /// (chunk, embedding_hash) — must be sent to the adapter.
+    to_send: Vec<(&'a EmbeddableChunk, String)>,
+}
+
+/// Classify a batch into reuse vs. to-send by probing the content-addressed
+/// `embeddings` store (CT3-EMBED-006). No writes, no adapter calls.
+fn plan_embed_batch<'a>(
     conn: &Connection,
-    seam: EmbeddingSeam,
     profile: &DeclaredEmbeddingProfile,
-    batch: &[EmbeddableChunk],
-) -> std::result::Result<(), TaskExecutionFailure> {
-    let mut to_embed = Vec::new();
+    batch: &'a [EmbeddableChunk],
+) -> std::result::Result<EmbedBatchPlan<'a>, TaskExecutionFailure> {
+    let mut reuse = Vec::new();
+    let mut to_send = Vec::new();
     for chunk in batch {
         let embedding_hash =
             chunk_embedding_hash(chunk, profile).map_err(|_| TaskExecutionFailure {
                 retry_kind: RetryErrorKind::ContractViolation,
             })?;
         match embedding_store::content_vector(conn, &embedding_hash) {
-            Ok(Some(bytes)) => {
-                // Content-addressed reuse: no adapter call, just link chunk_vec.
-                embedding_store::link_chunk_vec(conn, &chunk.chunk_id, &bytes, profile.dimensions)
-                    .map_err(|_| TaskExecutionFailure {
-                        retry_kind: RetryErrorKind::ContractViolation,
-                    })?;
-            }
-            Ok(None) => to_embed.push((chunk, embedding_hash)),
+            Ok(Some(bytes)) => reuse.push((chunk, bytes)),
+            Ok(None) => to_send.push((chunk, embedding_hash)),
             Err(_) => {
                 return Err(TaskExecutionFailure {
                     retry_kind: RetryErrorKind::ContractViolation,
@@ -4026,10 +4171,33 @@ fn embed_batch(
             }
         }
     }
-    if to_embed.is_empty() {
-        return Ok(());
+    Ok(EmbedBatchPlan { reuse, to_send })
+}
+
+/// Link `chunk_vec` for reuse hits (content vector already stored, no adapter).
+fn link_reused_chunks(
+    conn: &Connection,
+    profile: &DeclaredEmbeddingProfile,
+    reuse: &[(&EmbeddableChunk, Vec<u8>)],
+) -> std::result::Result<(), TaskExecutionFailure> {
+    for (chunk, bytes) in reuse {
+        embedding_store::link_chunk_vec(conn, &chunk.chunk_id, bytes, profile.dimensions).map_err(
+            |_| TaskExecutionFailure {
+                retry_kind: RetryErrorKind::ContractViolation,
+            },
+        )?;
     }
-    let items = to_embed
+    Ok(())
+}
+
+/// Call the adapter for the to-send chunks and write `embeddings` + `chunk_vec`.
+fn send_embed_batch(
+    conn: &Connection,
+    seam: EmbeddingSeam,
+    profile: &DeclaredEmbeddingProfile,
+    to_send: &[(&EmbeddableChunk, String)],
+) -> std::result::Result<(), TaskExecutionFailure> {
+    let items = to_send
         .iter()
         .map(|(chunk, _)| EmbeddingItem {
             id: chunk.chunk_id.clone(),
@@ -4043,7 +4211,7 @@ fn embed_batch(
         .into_iter()
         .map(|vector| (vector.id, vector.vector))
         .collect::<BTreeMap<_, _>>();
-    for (chunk, embedding_hash) in &to_embed {
+    for (chunk, embedding_hash) in to_send {
         let Some(vector) = by_id.get(&chunk.chunk_id) else {
             return Err(TaskExecutionFailure {
                 retry_kind: RetryErrorKind::ContractViolation,
@@ -4066,6 +4234,50 @@ fn embed_batch(
         })?;
     }
     Ok(())
+}
+
+/// L2(ii)/L7 target selection: drop chunks whose embedding task must not run in
+/// this pass — a sticky budget-Paused task (unless `override_budget`), or a Failed
+/// task that is not retry-eligible (unelapsed `next_retry_at`, or non-retryable /
+/// attempts exhausted). Failed retry-eligible tasks are left in; `batch retry`
+/// resets them to Pending before the pass so they flow through normally.
+fn filter_embeddable_by_task_state(
+    task_store: &TaskStore,
+    pending: Vec<EmbeddableChunk>,
+    override_budget: bool,
+) -> Result<Vec<EmbeddableChunk>> {
+    let tasks = task_store.all().map_err(pipeline_to_kcs)?;
+    let by_ref = tasks
+        .iter()
+        .filter(|task| task.task_type == TaskType::Embedding)
+        .map(|task| (task.output_ref.clone(), task))
+        .collect::<BTreeMap<_, _>>();
+    Ok(pending
+        .into_iter()
+        .filter(|chunk| {
+            let output_ref = embedding_task_output_ref(&chunk.chunk_id);
+            match by_ref.get(&output_ref) {
+                Some(task) => embeddable_task_state(task, override_budget),
+                // No task row yet (should not happen post-enqueue): embed it.
+                None => true,
+            }
+        })
+        .collect())
+}
+
+/// Whether an embedding task's current state permits embedding its chunk now.
+fn embeddable_task_state(task: &TaskDescriptor, override_budget: bool) -> bool {
+    match task.status {
+        // Sticky budget pause (L2 ii): only an explicit override re-includes it;
+        // any other Paused reason is safe to re-drive.
+        TaskStatus::Paused => {
+            override_budget || task.fallback_reason.as_deref() != Some("budget_exceeded")
+        }
+        // Failed embeddings are owned by `batch retry` (L7): skip unless the
+        // backoff has elapsed AND the error is still retryable.
+        TaskStatus::Failed => task_retry_due(task) && task_retry_allowed(task),
+        _ => true,
+    }
 }
 
 /// Embedding identity hash (03 §8.1) keyed on the chunk's `text_hash` so identical
@@ -4196,16 +4408,19 @@ fn enqueue_embedding_tasks(
     Ok(())
 }
 
-fn update_embedding_tasks(
+fn update_embedding_tasks<'a>(
     task_store: &TaskStore,
-    batch: &[EmbeddableChunk],
+    chunks: impl IntoIterator<Item = &'a EmbeddableChunk>,
     status: TaskStatus,
     reason: &str,
 ) -> Result<()> {
-    let refs = batch
-        .iter()
+    let refs = chunks
+        .into_iter()
         .map(|chunk| embedding_task_output_ref(&chunk.chunk_id))
         .collect::<BTreeSet<_>>();
+    if refs.is_empty() {
+        return Ok(());
+    }
     task_store
         .update_matching(|task| {
             if task.task_type == TaskType::Embedding && refs.contains(&task.output_ref) {
@@ -4220,25 +4435,31 @@ fn update_embedding_tasks(
     Ok(())
 }
 
-fn complete_embedding_tasks(task_store: &TaskStore, batch: &[EmbeddableChunk]) -> Result<()> {
+fn complete_embedding_tasks<'a>(
+    task_store: &TaskStore,
+    chunks: impl IntoIterator<Item = &'a EmbeddableChunk>,
+) -> Result<()> {
     update_embedding_tasks(
         task_store,
-        batch,
+        chunks,
         TaskStatus::Done,
         "embedding_adapter_done",
     )
 }
 
-fn pause_embedding_tasks(task_store: &TaskStore, batch: &[EmbeddableChunk]) -> Result<()> {
-    update_embedding_tasks(task_store, batch, TaskStatus::Paused, "budget_exceeded")
+fn pause_embedding_tasks<'a>(
+    task_store: &TaskStore,
+    chunks: impl IntoIterator<Item = &'a EmbeddableChunk>,
+) -> Result<()> {
+    update_embedding_tasks(task_store, chunks, TaskStatus::Paused, "budget_exceeded")
 }
 
-fn fail_embedding_tasks(
+fn fail_embedding_tasks<'a>(
     task_store: &TaskStore,
-    batch: &[EmbeddableChunk],
+    chunks: impl IntoIterator<Item = &'a EmbeddableChunk>,
     reason: &str,
 ) -> Result<()> {
-    update_embedding_tasks(task_store, batch, TaskStatus::Failed, reason)
+    update_embedding_tasks(task_store, chunks, TaskStatus::Failed, reason)
 }
 
 fn retry_reason(kind: RetryErrorKind) -> &'static str {
@@ -5713,7 +5934,16 @@ fn write_approval_record(
         .append(true)
         .open(&path)
         .map_err(|err| KcsError::io(err.to_string(), path.display().to_string()))?;
-    let record = json!({
+    // One approval row per configured online adapter (07 §3: opt-in unit is
+    // scope × adapter, L4). The markdownize opt-in marker is written
+    // unconditionally (its online path is always available); the embedding row is
+    // written only when an embedding adapter is configured so its network gate is
+    // its own, not a ride-along on the markdownize approval.
+    let mut tool_ids = vec!["mistral_ocr_markdownize".to_owned()];
+    if embedding_seam().is_some() {
+        tool_ids.push(EMBEDDING_ADAPTER_ID.to_owned());
+    }
+    let base = json!({
         "scope_id": preview.scope_id,
         "root_path": repo.root(),
         "approved_at": now_utc_seconds(),
@@ -5724,13 +5954,17 @@ fn write_approval_record(
         "estimated_file_count": preview.candidates.iter().filter(|candidate| !candidate.ignored).count(),
         "estimated_size_bytes": preview.candidates.iter().filter(|candidate| !candidate.ignored).map(|candidate| candidate.size_bytes).sum::<u64>(),
         "network_opt_in": network_opt_in,
-        "tool_id": "mistral_ocr_markdownize",
         "execution_mode": "online_api",
     });
-    serde_json::to_writer(&mut file, &record)
-        .map_err(|err| KcsError::io(err.to_string(), path.display().to_string()))?;
-    file.write_all(b"\n")
-        .map_err(|err| KcsError::io(err.to_string(), path.display().to_string()))
+    for tool_id in tool_ids {
+        let mut record = base.clone();
+        record["tool_id"] = json!(tool_id);
+        serde_json::to_writer(&mut file, &record)
+            .map_err(|err| KcsError::io(err.to_string(), path.display().to_string()))?;
+        file.write_all(b"\n")
+            .map_err(|err| KcsError::io(err.to_string(), path.display().to_string()))?;
+    }
+    Ok(())
 }
 
 fn validate_user_tools_config() -> Result<()> {
