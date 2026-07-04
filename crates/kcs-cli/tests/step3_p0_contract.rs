@@ -1750,3 +1750,321 @@ fn ct3_l4_embedding_without_own_optin_is_enqueue_only() {
         "granting the embedding opt-in must embed the pending tasks (L4): {status}"
     );
 }
+
+// ===========================================================================
+// Exploratory-audit fix regression tests (tasks/step3-bughunt-fixes.md, M2-M8
+// + acceptance scenarios (b)-(f) and the two previously-untested error codes).
+// ===========================================================================
+
+// M2 + acceptance (b): `kcs view` without --json prints the chunk BODY, not just
+// the "viewed" status line.
+#[test]
+fn m2_view_non_json_prints_chunk_body() {
+    let dir = indexed_scope();
+    let search = json_success(&dir, &["search", "トークン TTL 3600"]);
+    let uri = first_result(&search)["evidence_uri"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let stdout = kcs(&dir, &["view", &uri])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let text = String::from_utf8(stdout).unwrap();
+    assert!(
+        text.contains("トークン TTL"),
+        "view (non --json) must print the body, got: {text}"
+    );
+    assert_ne!(text.trim(), "viewed");
+}
+
+// M3 + acceptance (c): a raw_hash short form for a normal multi-heading file
+// (auth.md has two `##` sections → two chunks sharing one raw_hash) resolves as
+// raw instead of failing "ambiguous". `open` uses the raw path directly.
+#[test]
+fn m3_short_raw_hash_open_succeeds_for_multi_heading_file() {
+    let dir = indexed_scope();
+    let search = json_success(&dir, &["search", "トークン TTL 3600"]);
+    let raw_hash = first_result(&search)["evidence_pointer"]["raw_hash"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    // Two chunks share this raw_hash; the old code counted chunk matches and
+    // rejected this as ambiguous.
+    let opened = json_success(&dir, &["open", &raw_hash]);
+    assert_eq!(opened["status"], "opened");
+    assert_eq!(opened["object_type"], "raw");
+    assert!(opened["path"].as_str().unwrap().ends_with("auth.md"));
+}
+
+// M3: a chunk_hash short form still resolves to that chunk (the other kind).
+#[test]
+fn m3_short_chunk_hash_view_resolves_chunk() {
+    let dir = indexed_scope();
+    let search = json_success(&dir, &["search", "トークン TTL 3600"]);
+    let chunk_hash = first_result(&search)["chunk_hash"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let viewed = json_success(&dir, &["view", &chunk_hash]);
+    assert!(viewed["text"].as_str().unwrap().contains("トークン TTL"));
+}
+
+// M4 + acceptance (d): a scope whose sqlite.db is corrupt (garbage bytes, which
+// `Connection::open` accepts lazily) is excluded from a multi-scope search with
+// reason "index_corrupt" while the healthy scope's results survive (exit 3), not
+// exploded into an exit-2 that drops everything.
+#[test]
+fn m4_corrupt_sqlite_scope_excluded_multiscope_exit_3() {
+    let parent = tempfile::tempdir().unwrap();
+    let data_home = parent.path().join("xdg");
+    let a = parent.path().join("a");
+    let b = parent.path().join("b");
+    fs::create_dir_all(&a).unwrap();
+    fs::create_dir_all(&b).unwrap();
+    fs::write(a.join("a.md"), "# A\n\n## Sec\nalphaunique token\n").unwrap();
+    fs::write(b.join("b.md"), "# B\n\n## Sec\nbetaunique token\n").unwrap();
+    json_success_path(&a, &data_home, &["init"]);
+    json_success_path(&b, &data_home, &["init"]);
+    json_success_path(&a, &data_home, &["index", "--approve"]);
+    json_success_path(&b, &data_home, &["index", "--approve"]);
+
+    // Corrupt scope b's index in place (still a readable file, so b is discovered).
+    fs::write(
+        b.join(".kcs/index/sqlite.db"),
+        b"this is not a sqlite database",
+    )
+    .unwrap();
+
+    // A partial-failure search writes results to STDOUT with exit 3.
+    let output = Command::cargo_bin("kcs")
+        .unwrap()
+        .current_dir(&a)
+        .env("XDG_CONFIG_HOME", data_home.join("config"))
+        .env("XDG_DATA_HOME", data_home.join("data"))
+        .args(["search", "alphaunique", "--json"])
+        .assert()
+        .code(3)
+        .get_output()
+        .stdout
+        .clone();
+    let search: Value = serde_json::from_slice(&output).unwrap();
+    assert!(!search["results"].as_array().unwrap().is_empty());
+    assert_eq!(search["searched_scopes"].as_array().unwrap().len(), 1);
+    let excluded = search["excluded_scopes"].as_array().unwrap();
+    assert_eq!(excluded.len(), 1);
+    assert!(excluded[0]["scope_path"].as_str().unwrap().ends_with("/b"));
+    assert_eq!(excluded[0]["reason"], "index_corrupt");
+}
+
+// M4: a single corrupt-index scope lands on the existing VEC-UNAVAIL branch
+// (exit 1) rather than an exit-2 config-schema lie, with reason "index_corrupt".
+#[test]
+fn m4_single_corrupt_sqlite_is_vec_unavailable() {
+    let dir = indexed_scope();
+    fs::write(
+        dir.path().join(".kcs/index/sqlite.db"),
+        b"not a sqlite database at all",
+    )
+    .unwrap();
+    let err = json_failure(&dir, &["search", "認証仕様"], 1);
+    assert_eq!(err["error_code"], "KCS-E-SEARCH-VEC-UNAVAIL-001");
+    assert_eq!(
+        err["context"]["excluded_scopes"][0]["reason"],
+        "index_corrupt"
+    );
+}
+
+// M5 + acceptance (e): two consecutive `view`s (and opens) that fall back to the
+// read-only CAS open-cache both succeed — the second must reuse the cache, not
+// `fs::copy` onto the read-only file (EACCES).
+#[test]
+fn m5_repeated_view_via_cas_cache_is_idempotent() {
+    let dir = indexed_scope();
+    let search = json_success(&dir, &["search", "トークン TTL 3600"]);
+    let uri = first_result(&search)["evidence_uri"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    // Remove the working-tree file so resolution must expand the CAS raw object
+    // into the read-only open cache.
+    fs::remove_file(dir.path().join("auth.md")).unwrap();
+
+    let first = json_success(&dir, &["view", &uri]);
+    assert!(first["text"].as_str().unwrap().contains("トークン TTL"));
+    // The second view previously failed with EACCES (fs::copy onto read-only cache).
+    let second = json_success(&dir, &["view", &uri]);
+    assert!(second["text"].as_str().unwrap().contains("トークン TTL"));
+    // open twice as well.
+    let opened1 = json_success(&dir, &["open", &uri]);
+    assert_eq!(opened1["temporary"], true);
+    let opened2 = json_success(&dir, &["open", &uri]);
+    assert_eq!(opened2["temporary"], true);
+    assert!(Path::new(opened2["path"].as_str().unwrap()).is_file());
+}
+
+// M6: a tampered Evidence Pointer whose raw_hash names file B but whose
+// chunk_hash resolves to file A's chunk is rejected — the resolver requires the
+// chunk row to bind to the pointer's (raw_hash, tool_profile_hash) identity.
+#[test]
+fn m6_tampered_pointer_identity_mismatch_is_rejected() {
+    let dir = indexed_scope();
+    let auth = json_success(&dir, &["search", "トークン TTL 3600"]);
+    let pointer_a = first_result(&auth)["evidence_pointer"].clone();
+    let ranking = json_success(&dir, &["search", "RRF 定数 k 60"]);
+    let raw_hash_b = first_result(&ranking)["evidence_pointer"]["raw_hash"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert_ne!(pointer_a["raw_hash"].as_str().unwrap(), raw_hash_b);
+
+    // Keep A's chunk_hash / commit, but claim B's raw_hash: "raw is B, body is A".
+    let mut tampered = pointer_a.clone();
+    tampered["raw_hash"] = serde_json::json!(raw_hash_b);
+    let err = json_failure(&dir, &["view", &tampered.to_string()], 4);
+    assert_eq!(err["error_code"], "KCS-E-EVIDENCE-POINTER-INVALID-001");
+    // The unmodified pointer still resolves (no over-rejection of valid pointers).
+    let ok = json_success(&dir, &["view", &pointer_a.to_string()]);
+    assert!(ok["text"].as_str().unwrap().contains("トークン TTL"));
+}
+
+// M7: an `object` URI dispatches to the CORRECT CAS type directory. An image
+// object lives only under objects/images; it resolves via object/image/<hash>
+// and is NOT found via object/raw/<hash> (which previously mis-served all types).
+#[test]
+fn m7_object_uri_dispatches_by_type_directory() {
+    use kcs_core::cas::hash_bytes;
+    let dir = indexed_scope();
+    let search = json_success(&dir, &["search", "トークン TTL 3600"]);
+    let scope_id = first_result(&search)["evidence_pointer"]["scope_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let kcs_dir = dir.path().join(".kcs");
+    let bytes = b"fake-embedded-image-bytes";
+    let image_hash = hash_bytes(bytes);
+    let image_obj = object_path(&kcs_dir, "images", &image_hash);
+    fs::create_dir_all(image_obj.parent().unwrap()).unwrap();
+    fs::write(&image_obj, bytes).unwrap();
+
+    // Correct dispatch: image resolves from objects/images.
+    let opened = json_success(
+        &dir,
+        &[
+            "open",
+            &format!("kcs://{scope_id}/object/image/{image_hash}"),
+        ],
+    );
+    assert_eq!(opened["object_type"], "image");
+    assert!(Path::new(opened["path"].as_str().unwrap()).is_file());
+    // Same hash under object/raw must NOT resolve (the bytes live only in images).
+    json_failure(
+        &dir,
+        &["open", &format!("kcs://{scope_id}/object/raw/{image_hash}")],
+        4,
+    );
+    // `normalized` is path-named (not single-hash addressable) -> invalid usage.
+    json_failure(
+        &dir,
+        &[
+            "open",
+            &format!("kcs://{scope_id}/object/normalized/{image_hash}"),
+        ],
+        2,
+    );
+}
+
+// M8 + acceptance (f): a negative budget cap in the USER (device) config.toml is
+// rejected at startup with exit 2, exactly like the folder config already was.
+#[test]
+fn m8_user_config_negative_budget_cap_rejected() {
+    let dir = tempfile::tempdir().unwrap();
+    kcs(&dir, &["init"]).assert().success();
+    let user_config = dir.path().join(".test-config/kcs/config.toml");
+    fs::create_dir_all(user_config.parent().unwrap()).unwrap();
+    fs::write(&user_config, "[budget]\nmonthly_usd_cap = -5\n").unwrap();
+    let err = json_failure(&dir, &["status"], 2);
+    assert_eq!(err["error_code"], "KCS-E-CONFIG-SCHEMA-001");
+}
+
+// M8: a valid user config with a non-negative cap passes (no over-rejection).
+#[test]
+fn m8_user_config_valid_budget_cap_accepted() {
+    let dir = tempfile::tempdir().unwrap();
+    kcs(&dir, &["init"]).assert().success();
+    let user_config = dir.path().join(".test-config/kcs/config.toml");
+    fs::create_dir_all(user_config.parent().unwrap()).unwrap();
+    fs::write(&user_config, "[budget]\nmonthly_usd_cap = 25\n").unwrap();
+    json_success(&dir, &["status"]);
+}
+
+// Minor: previously-untested error code KCS-E-CONFIG-NOT-IMPLEMENTED-001
+// (time-travel search flags are a later step).
+#[test]
+fn minor_not_implemented_error_code_is_emitted() {
+    let dir = indexed_scope();
+    let err = json_failure(&dir, &["search", "認証仕様", "--at", "HEAD"], 2);
+    assert_eq!(err["error_code"], "KCS-E-CONFIG-NOT-IMPLEMENTED-001");
+}
+
+// Minor: previously-untested error code KCS-E-EVIDENCE-SCOPE-AMBIGUOUS-001 — a
+// scope_id registered against two distinct .kcs with the same last_seen_at.
+#[test]
+fn minor_evidence_scope_ambiguous_error_code_is_emitted() {
+    let parent = tempfile::tempdir().unwrap();
+    let data_home = parent.path().join("xdg");
+    let a = parent.path().join("a");
+    let b = parent.path().join("b");
+    let elsewhere = parent.path().join("elsewhere");
+    fs::create_dir_all(&a).unwrap();
+    fs::create_dir_all(&b).unwrap();
+    fs::create_dir_all(&elsewhere).unwrap();
+    fs::write(
+        a.join("auth.md"),
+        "# 認証仕様\n\n## API Token\nトークン TTL は 3600 秒です。\n",
+    )
+    .unwrap();
+    json_success_path(&a, &data_home, &["init"]);
+    json_success_path(&a, &data_home, &["index", "--approve"]);
+    let search = json_success_path(&a, &data_home, &["search", "トークン TTL 3600"]);
+    let pointer = first_result(&search)["evidence_pointer"].clone();
+    let scope_id = pointer["scope_id"].as_str().unwrap().to_owned();
+
+    // Init b, then give its scope.json the SAME scope_id as a (a duplicate正本).
+    json_success_path(&b, &data_home, &["init"]);
+    let b_scope_path = b.join(".kcs/scope.json");
+    let mut b_scope: Value =
+        serde_json::from_str(&fs::read_to_string(&b_scope_path).unwrap()).unwrap();
+    b_scope["scope_id"] = serde_json::json!(scope_id);
+    fs::write(
+        &b_scope_path,
+        serde_json::to_string_pretty(&b_scope).unwrap(),
+    )
+    .unwrap();
+
+    // Register both .kcs under the shared scope_id with the SAME last_seen_at,
+    // newer than the index-time registration so they form the unique newest set
+    // (both resolve to distinct .kcs -> ambiguous winner).
+    let registry = RegistryDb::open(registry_path(&data_home)).unwrap();
+    for root in [&a, &b] {
+        registry
+            .upsert(&RegistryEntry {
+                scope_id: scope_id.clone(),
+                kcs_path: root.join(".kcs").display().to_string(),
+                root_path: root.display().to_string(),
+                participates_in_global_search: true,
+                indexed: true,
+                last_seen_at: "2099-01-01T00:00:00Z".to_owned(),
+            })
+            .unwrap();
+    }
+
+    // Force registry resolution (broken scope_path hint) from a neutral cwd.
+    let mut orphan = pointer.clone();
+    orphan["scope_path"] = serde_json::json!(parent.path().join("gone/.kcs").display().to_string());
+    let (code, err) = run_json(&elsewhere, &data_home, &["view", &orphan.to_string()]);
+    assert_eq!(code, 4, "ambiguous scope must fail: {err}");
+    assert_eq!(err["error_code"], "KCS-E-EVIDENCE-SCOPE-AMBIGUOUS-001");
+}

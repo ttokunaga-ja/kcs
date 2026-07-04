@@ -99,9 +99,12 @@ impl TaskStore {
             .append(true)
             .open(&self.path)
             .pipeline_io(&self.path)?;
-        serde_json::to_writer(&mut file, descriptor)
+        // M1(b): frame the record and emit it with one write_all so concurrent
+        // appends cannot interleave byte-wise under O_APPEND.
+        let mut line = serde_json::to_string(descriptor)
             .map_err(|err| PipelineError::Schema(err.to_string()))?;
-        file.write_all(b"\n").pipeline_io(&self.path)
+        line.push('\n');
+        file.write_all(line.as_bytes()).pipeline_io(&self.path)
     }
 
     pub fn all(&self) -> Result<Vec<TaskDescriptor>> {
@@ -121,8 +124,11 @@ impl TaskStore {
             if line.trim().is_empty() {
                 continue;
             }
-            let descriptor: TaskDescriptor = serde_json::from_str(&line)
-                .map_err(|err| PipelineError::Schema(err.to_string()))?;
+            // M1(c): a malformed line is a corrupt store file, not a schema/config
+            // error — classify it as KCS-E-STORE-CORRUPT-001 with the file path.
+            let descriptor: TaskDescriptor = serde_json::from_str(&line).map_err(|err| {
+                PipelineError::corrupt(self.path.display().to_string(), err.to_string())
+            })?;
             by_id.insert(descriptor.task_id.clone(), descriptor);
         }
         Ok(by_id.into_values().collect())

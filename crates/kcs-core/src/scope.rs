@@ -1,6 +1,7 @@
 //! Folder-scope repository operations for Step 1.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::cell::RefCell;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -163,6 +164,17 @@ impl Repository {
     #[must_use]
     pub fn kcs_dir(&self) -> &Path {
         &self.kcs_dir
+    }
+
+    /// Acquire the exclusive `.kcs/.lock` store lock (05 §6) and return an RAII
+    /// guard held for the caller's lifetime. Used to serialize whole mutating
+    /// commands (`kcs index` / `repair` / `reindex`) end-to-end, not just their
+    /// snapshot sub-step. The lock is reentrant within a single process, so a
+    /// held guard does not deadlock when `snapshot` re-acquires it internally.
+    /// The loser of a concurrent acquisition gets `KCS-E-STORE-LOCKED-001`
+    /// (exit 3), the same contract as `snapshot` / `tag`.
+    pub fn lock_store(&self) -> Result<StoreLock> {
+        StoreLock::acquire(&self.kcs_dir)
     }
 
     pub fn validate(&self) -> Result<()> {
@@ -909,23 +921,62 @@ fn validate_format_version(version: &str) -> Result<()> {
     }
 }
 
-struct StoreLock {
+thread_local! {
+    /// Reentrancy depth per `.lock` path for the current thread. A whole-command
+    /// lock held by `kcs index`/`repair`/`reindex` must not deadlock against the
+    /// `snapshot` sub-step re-acquiring the same lock inside the same process.
+    static LOCK_DEPTH: RefCell<HashMap<PathBuf, u32>> = RefCell::new(HashMap::new());
+}
+
+/// RAII guard over the `.kcs/.lock` store lock (05 §6). Reentrant within a
+/// process/thread: nested acquisitions increment a depth counter instead of
+/// contending on the same `O_EXCL` file; the on-disk lock is removed only when
+/// the outermost guard drops.
+pub struct StoreLock {
     path: PathBuf,
     pid: u32,
     token: String,
+    /// A nested (reentrant) acquisition owns no on-disk lock and must not remove
+    /// the file on drop.
+    reentrant: bool,
 }
 
 impl StoreLock {
-    fn acquire(kcs_dir: &Path) -> Result<Self> {
+    pub fn acquire(kcs_dir: &Path) -> Result<Self> {
         let path = kcs_dir.join(".lock");
         let pid = std::process::id();
-        let token = new_lock_token(pid);
 
+        // Reentrant fast path: this thread already holds the lock for `path`.
+        let already_held = LOCK_DEPTH.with(|depth| {
+            let mut depth = depth.borrow_mut();
+            if let Some(count) = depth.get_mut(&path) {
+                *count += 1;
+                true
+            } else {
+                false
+            }
+        });
+        if already_held {
+            return Ok(Self {
+                path,
+                pid,
+                token: String::new(),
+                reentrant: true,
+            });
+        }
+
+        let token = new_lock_token(pid);
         for _ in 0..2 {
             match OpenOptions::new().write(true).create_new(true).open(&path) {
                 Ok(mut file) => {
                     write_lock_file(&path, &mut file, pid, &token)?;
-                    return Ok(Self { path, pid, token });
+                    LOCK_DEPTH.with(|depth| depth.borrow_mut().insert(path.clone(), 1));
+                    return Ok(Self {
+                        path,
+                        pid,
+                        token,
+                        reentrant: false,
+                    });
                 }
                 Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
                     if reclaim_stale_lock(&path)? {
@@ -943,7 +994,23 @@ impl StoreLock {
 
 impl Drop for StoreLock {
     fn drop(&mut self) {
-        if lock_file_matches(&self.path, self.pid, &self.token).unwrap_or(false) {
+        let released = LOCK_DEPTH.with(|depth| {
+            let mut depth = depth.borrow_mut();
+            if let Some(count) = depth.get_mut(&self.path) {
+                *count -= 1;
+                if *count == 0 {
+                    depth.remove(&self.path);
+                    return true;
+                }
+            }
+            false
+        });
+        // Only the outermost (non-reentrant) guard owns the on-disk lock; remove
+        // it exactly once, and only if it is still ours (token match).
+        if released
+            && !self.reentrant
+            && lock_file_matches(&self.path, self.pid, &self.token).unwrap_or(false)
+        {
             let _ = fs::remove_file(&self.path);
         }
     }

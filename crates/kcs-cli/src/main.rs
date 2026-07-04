@@ -24,6 +24,7 @@ use kcs_adapter::types::{
 };
 use kcs_core::cas::is_hash;
 use kcs_core::dag::NormalizeRef;
+use kcs_core::schema::{validate_json_schema, SchemaKind};
 use kcs_core::scope::{
     append_error_log, append_event_log, new_ulid, now_utc_seconds, InspectedObject, Repository,
 };
@@ -267,6 +268,7 @@ fn command_captured_json_flag(command: &Command) -> bool {
 
 fn run(cli: Cli) -> Result<Value> {
     validate_user_tools_config()?;
+    validate_user_config()?;
     match cli.command {
         Command::Init(args) => {
             let path = args.path.unwrap_or_else(|| PathBuf::from("."));
@@ -388,6 +390,11 @@ fn run_index(args: IndexArgs) -> Result<Value> {
         ));
     }
     let repo = Repository::open_current()?;
+    // M1(a): serialize the whole index command against concurrent index/repair/
+    // reindex (05 §6). Held end-to-end, not just across the snapshot sub-step, so
+    // two processes cannot interleave chunk writes / sqlite rebuilds. The lock is
+    // reentrant, so the internal auto-snapshot re-acquisition does not deadlock.
+    let _lock = repo.lock_store()?;
     validate_repo_tool_lock(&repo)?;
     if args.revoke_network {
         write_network_revoke_record(&repo)?;
@@ -538,6 +545,8 @@ fn run_repair(args: UnsupportedArgs) -> Result<Value> {
         ));
     }
     let repo = Repository::open_current()?;
+    // M1(a): serialize the DB rebuild against concurrent index/repair/reindex.
+    let _lock = repo.lock_store()?;
     validate_repo_tool_lock(&repo)?;
     let db = repo.kcs_dir().join("index/sqlite.db");
     // `rebuild_sqlite_index` drops and rebuilds chunks/FTS/tree_entries in place
@@ -1149,6 +1158,17 @@ fn search_one_scope(
     }
     let conn = Connection::open(&db_path)
         .map_err(|_| ScopeSearchError::Excluded("index_corrupt".to_owned()))?;
+
+    // M4: `Connection::open` is lazy — it succeeds on an empty or garbage file and
+    // only fails when the DB is first read. Probe the index eagerly so a corrupt
+    // sqlite.db is classified as Excluded("index_corrupt") here (partial failure)
+    // instead of exploding into a Fatal later that would exit 2 and drop the
+    // healthy scopes' results too (05 §1.8 part-failure contract). An empty but
+    // structurally-valid table (no rows) is healthy.
+    match conn.query_row("SELECT 1 FROM tree_entries LIMIT 1", [], |_| Ok(())) {
+        Ok(()) | Err(rusqlite::Error::QueryReturnedNoRows) => {}
+        Err(_) => return Err(ScopeSearchError::Excluded("index_corrupt".to_owned())),
+    }
 
     // On a cursor replay, the snapshot's tree must still exist to reproduce the
     // page. A shallow (tree-discarded) snapshot fails hard (05 §2.2).
@@ -1889,6 +1909,9 @@ fn run_open(args: UnsupportedArgs) -> Result<Value> {
     if let Some(object) = parse_object_uri(&raw)? {
         return resolve_object_uri(&object, false);
     }
+    if raw.starts_with("sha256:") {
+        return resolve_short_hash_command(&raw, false);
+    }
     let pointer = parse_pointer_text(&raw)?;
     let resolved = resolve_pointer_for_cli(&pointer)?;
     Ok(json!({
@@ -1905,6 +1928,9 @@ fn run_view(args: UnsupportedArgs) -> Result<Value> {
     let raw = read_pointer_input(without_json(args.args))?;
     if let Some(object) = parse_object_uri(&raw)? {
         return resolve_object_uri(&object, true);
+    }
+    if raw.starts_with("sha256:") {
+        return resolve_short_hash_command(&raw, true);
     }
     let pointer = parse_pointer_text(&raw)?;
     let resolved = resolve_pointer_for_cli(&pointer)?;
@@ -1934,6 +1960,9 @@ fn run_reindex(args: UnsupportedArgs) -> Result<Value> {
         ));
     }
     let repo = Repository::open_current()?;
+    // M1(a): serialize reindex (re-normalize + rebuild) against concurrent
+    // index/repair/reindex. Reentrant with the internal auto-snapshot.
+    let _lock = repo.lock_store()?;
     validate_repo_tool_lock(&repo)?;
     let head = repo
         .head_commit_hash()?
@@ -2213,9 +2242,11 @@ fn append_stored_chunks(kcs_dir: &Path, chunks: &[StoredChunk]) -> Result<()> {
         .open(&path)
         .map_err(|err| KcsError::io(err.to_string(), path.display().to_string()))?;
     for chunk in chunks {
-        serde_json::to_writer(&mut file, chunk)
+        // M1(b): one framed record per single write_all (no interleaving).
+        let mut line = serde_json::to_string(chunk)
             .map_err(|err| KcsError::io(err.to_string(), path.display().to_string()))?;
-        file.write_all(b"\n")
+        line.push('\n');
+        file.write_all(line.as_bytes())
             .map_err(|err| KcsError::io(err.to_string(), path.display().to_string()))?;
     }
     Ok(())
@@ -2684,9 +2715,12 @@ fn append_jsonl_cli(path: &Path, value: &Value) -> Result<()> {
         .append(true)
         .open(path)
         .map_err(|err| KcsError::io(err.to_string(), path.display().to_string()))?;
-    serde_json::to_writer(&mut file, value)
+    // M1(b): frame the record as one buffer and emit it with a single write_all so
+    // concurrent appends cannot interleave byte-wise under O_APPEND.
+    let mut line = serde_json::to_string(value)
         .map_err(|err| KcsError::io(err.to_string(), path.display().to_string()))?;
-    file.write_all(b"\n")
+    line.push('\n');
+    file.write_all(line.as_bytes())
         .map_err(|err| KcsError::io(err.to_string(), path.display().to_string()))
 }
 
@@ -2716,6 +2750,10 @@ fn read_pointer_input(args: Vec<String>) -> Result<String> {
     Ok(pointer)
 }
 
+/// Parses the non-short `<pointer>` operand forms (08 §2.3): a `kcs://` evidence
+/// URI or inline JSON. The `sha256:` short form is resolved separately by
+/// [`resolve_short_hash_command`] (it may be a raw *or* a chunk hash and needs
+/// open/view context), and object URIs are handled before this is reached.
 fn parse_pointer_text(pointer: &str) -> Result<EvidencePointer> {
     if pointer.starts_with("kcs://") {
         return parse_evidence_pointer_uri(pointer).map_err(search_to_kcs);
@@ -2723,41 +2761,134 @@ fn parse_pointer_text(pointer: &str) -> Result<EvidencePointer> {
     if pointer.trim_start().starts_with('{') {
         return serde_json::from_str(pointer).map_err(|err| KcsError::schema(err.to_string()));
     }
-    if pointer.starts_with("sha256:") {
-        return resolve_short_hash(pointer);
-    }
     Err(KcsError::invalid_usage("invalid pointer argument"))
 }
 
-fn resolve_short_hash(hash: &str) -> Result<EvidencePointer> {
+/// Resolution of a `sha256:` short-form operand (08 §2.3 rule 4).
+enum ShortHash {
+    /// The short hash is a `chunk_hash` — resolve as a full Evidence Pointer.
+    Chunk(Box<EvidencePointer>),
+    /// The short hash is a `raw_hash` — resolve the raw object directly. Multiple
+    /// chunks sharing this raw_hash (a normal multi-heading file) are the *same*
+    /// file, so this is unambiguous per rule 4 ("raw_hash 名前空間の一致は
+    /// ファイル単位で一意なら OK").
+    Raw {
+        target: ScopeTarget,
+        raw_hash: String,
+        path_hint: Option<String>,
+    },
+}
+
+/// Classify a `sha256:` short hash against the current `.kcs` + HEAD (08 §2.3
+/// rule 4). Ambiguity is only *across kinds* (the hash is simultaneously a
+/// chunk_hash and a raw_hash) — never among the several chunks of one file.
+fn classify_short_hash(hash: &str) -> Result<ShortHash> {
     let repo = Repository::open_current()?;
     let target = scope_target(repo.root())?;
     let chunks = load_searchable_chunks(&target)?;
-    let matches = chunks
-        .into_iter()
-        .filter(|chunk| chunk.row.chunk_id == hash || chunk.row.raw_hash == hash)
-        .collect::<Vec<_>>();
-    if matches.len() != 1 {
-        return Err(KcsError::invalid_usage(
-            "short hash is ambiguous or not found",
-        ));
+
+    let chunk_match = chunks.iter().find(|chunk| chunk.row.chunk_id == hash);
+    let raw_path_hint = chunks
+        .iter()
+        .find(|chunk| chunk.row.raw_hash == hash)
+        .map(|chunk| chunk.path_at_commit.clone());
+    // A raw_hash may name a file with no chunks (raw-only entry); fall back to the
+    // working tree / CAS raw object for existence.
+    let is_raw = raw_path_hint.is_some() || raw_object_present(&target, hash)?;
+    let is_chunk = chunk_match.is_some();
+
+    match (is_chunk, is_raw) {
+        (true, true) => Err(KcsError::new(
+            "KCS-E-EVIDENCE-SCOPE-AMBIGUOUS-001",
+            "short hash matches both a chunk_hash and a raw_hash; disambiguate with a full pointer",
+            json!({ "hash": hash, "kinds": ["chunk", "raw"] }),
+            ExitCode::InvalidUsage,
+        )),
+        (true, false) => {
+            let chunk = chunk_match.expect("chunk_match is Some");
+            let pointer = issue_evidence_pointer(EvidencePointerIssueRequest {
+                scope_id: chunk.scope_id.clone(),
+                scope_path: Some(chunk.scope_path.display().to_string()),
+                commit: chunk.snapshot_at.clone(),
+                tree: None,
+                raw_hash: chunk.row.raw_hash.clone(),
+                tool_profile_hash: chunk.row.tool_profile_hash.clone(),
+                chunk_hash: chunk.row.chunk_id.clone(),
+                path_at_commit: Some(chunk.path_at_commit.clone()),
+                heading_path: chunk.row.heading_path.clone(),
+                section_id: chunk.row.section_id.clone(),
+                char_start: chunk.row.char_start,
+                char_end: chunk.row.char_end,
+            })
+            .map_err(search_to_kcs)?;
+            Ok(ShortHash::Chunk(Box::new(pointer)))
+        }
+        (false, true) => Ok(ShortHash::Raw {
+            target,
+            raw_hash: hash.to_owned(),
+            path_hint: raw_path_hint,
+        }),
+        (false, false) => Err(KcsError::invalid_usage(
+            "short hash is not found in the current scope",
+        )),
     }
-    let chunk = &matches[0];
-    issue_evidence_pointer(EvidencePointerIssueRequest {
-        scope_id: chunk.scope_id.clone(),
-        scope_path: Some(chunk.scope_path.display().to_string()),
-        commit: chunk.snapshot_at.clone(),
-        tree: None,
-        raw_hash: chunk.row.raw_hash.clone(),
-        tool_profile_hash: chunk.row.tool_profile_hash.clone(),
-        chunk_hash: chunk.row.chunk_id.clone(),
-        path_at_commit: Some(chunk.path_at_commit.clone()),
-        heading_path: chunk.row.heading_path.clone(),
-        section_id: chunk.row.section_id.clone(),
-        char_start: chunk.row.char_start,
-        char_end: chunk.row.char_end,
-    })
-    .map_err(search_to_kcs)
+}
+
+/// True when a raw object with `raw_hash` is present in the working tree or the
+/// CAS raw store (08 §2.3 rule 4 raw resolution). Used only for the raw-only
+/// short-hash case (no chunk carries the raw_hash).
+fn raw_object_present(target: &ScopeTarget, raw_hash: &str) -> Result<bool> {
+    if cas_object_path(&target.kcs_dir, "raw", raw_hash).is_file() {
+        return Ok(true);
+    }
+    Ok(find_working_tree_raw(&target.repo_root, raw_hash)?.is_some())
+}
+
+/// Resolve a `sha256:` short-form operand for `kcs open` / `kcs view`
+/// (08 §2.3 rule 4). Handles both the chunk_hash and raw_hash kinds.
+fn resolve_short_hash_command(hash: &str, as_view: bool) -> Result<Value> {
+    match classify_short_hash(hash)? {
+        ShortHash::Chunk(pointer) => {
+            let resolved = resolve_pointer_for_cli(&pointer)?;
+            if as_view {
+                Ok(json!({
+                    "status": "viewed",
+                    "raw_hash": pointer.raw_hash,
+                    "chunk_hash": pointer.chunk_hash,
+                    "text": resolved.text.unwrap_or_default(),
+                    "path": resolved.path,
+                    "commit_shallow": resolved.commit_shallow,
+                }))
+            } else {
+                Ok(json!({
+                    "status": "opened",
+                    "path": resolved.path,
+                    "raw_hash": pointer.raw_hash,
+                    "chunk_hash": pointer.chunk_hash,
+                    "temporary": resolved.temporary,
+                    "commit_shallow": resolved.commit_shallow,
+                }))
+            }
+        }
+        ShortHash::Raw {
+            target,
+            raw_hash,
+            path_hint,
+        } => match open_raw_object(&target, &raw_hash, path_hint.as_deref())? {
+            // A raw object has no chunk text; open/view surface only its path.
+            Some((path, temporary)) => {
+                let status = if as_view { "viewed" } else { "opened" };
+                Ok(json!({
+                    "status": status,
+                    "object_type": "raw",
+                    "raw_hash": raw_hash,
+                    "path": path,
+                    "temporary": temporary,
+                }))
+            }
+            None => Err(purge_not_found_error(&target, &raw_hash)),
+        },
+    }
 }
 
 fn resolve_pointer_for_cli(pointer: &EvidencePointer) -> Result<PointerResolution> {
@@ -2774,16 +2905,26 @@ fn resolve_pointer_for_cli(pointer: &EvidencePointer) -> Result<PointerResolutio
     // of some later commit).
     let commit_shallow = match repo.read_tree(&commit.tree) {
         Ok(tree) => {
-            let in_tree = tree
+            let entry = tree
                 .entries
                 .iter()
-                .any(|entry| entry.raw_hash == pointer.raw_hash);
-            if !in_tree {
+                .find(|entry| entry.raw_hash == pointer.raw_hash);
+            let Some(entry) = entry else {
                 // step 5 (tombstone) is checked before declaring not_found.
                 if let Some(tombstone) = read_tombstone(&target, &pointer.raw_hash)? {
                     return Err(tombstone_error(tombstone));
                 }
                 return Err(purge_not_found_error(&target, &pointer.raw_hash));
+            };
+            // M6: the tree entry's normalization must bind to the pointer's
+            // tool_profile_hash. A pointer that pairs this raw_hash with a
+            // different tool profile than the commit normalized it under is
+            // internally inconsistent (a tampered pointer) — refuse it rather than
+            // resolve "raw is B but body is A".
+            if let Some(normalize) = &entry.normalize {
+                if normalize.tool_profile_hash != pointer.tool_profile_hash {
+                    return Err(invalid_pointer_identity_error(pointer));
+                }
             }
             false
         }
@@ -2803,11 +2944,10 @@ fn resolve_pointer_for_cli(pointer: &EvidencePointer) -> Result<PointerResolutio
     // "tool_profile_hash 不一致: chunk が存在しない場合は retarget が必要 (§5)",
     // exit 8 (06 §7). Applies on the shallow path too: chunk rows outlive tree
     // discard, so their absence means the profile mismatch, not GC.
-    let text = read_stored_chunks(&target.kcs_dir)?
+    let chunk = read_stored_chunks(&target.kcs_dir)?
         .into_iter()
-        .find(|chunk| chunk.row.chunk_id == pointer.chunk_hash)
-        .map(|chunk| chunk.row.text);
-    let Some(text) = text else {
+        .find(|chunk| chunk.row.chunk_id == pointer.chunk_hash);
+    let Some(chunk) = chunk else {
         return Err(KcsError::new(
             "KCS-E-EVIDENCE-RETARGET-REQUIRED-001",
             "chunk not materialized for this tool_profile_hash; retarget required (08 §5)",
@@ -2819,6 +2959,16 @@ fn resolve_pointer_for_cli(pointer: &EvidencePointer) -> Result<PointerResolutio
             ExitCode::IncompatibleProfile,
         ));
     };
+    // M6: the resolved chunk row must bind to the pointer's (raw_hash,
+    // tool_profile_hash). A chunk_hash that materializes under a *different* raw
+    // or tool identity than the pointer claims is a tampered pointer — reject it
+    // rather than serve inconsistent evidence (body from A, raw from B).
+    if chunk.row.raw_hash != pointer.raw_hash
+        || chunk.row.tool_profile_hash != pointer.tool_profile_hash
+    {
+        return Err(invalid_pointer_identity_error(pointer));
+    }
+    let text = chunk.row.text;
 
     // Raw object resolution: working tree first (rename-tolerant), else CAS
     // read-only expansion. Absent from both with no tombstone -> not_found.
@@ -2916,11 +3066,28 @@ fn open_raw_object(
     raw_hash: &str,
     path_hint: Option<&str>,
 ) -> Result<Option<(PathBuf, bool)>> {
-    if let Some(path) = find_working_tree_raw(&target.repo_root, raw_hash)? {
-        return Ok(Some((path, false)));
+    open_cas_byte_object(target, "raw", true, raw_hash, path_hint)
+}
+
+/// Open a CAS byte object (03 §2: raw / prepared / image), expanding it read-only
+/// under `$XDG_DATA_HOME/kcs/open` when it lives only in the store. `subdir`
+/// selects the CAS type directory ("raw" / "prepared" / "images"). For `raw` the
+/// working tree is checked first (rename tolerant, 05 §4.2); derived byte objects
+/// live only in the CAS. Returns `Ok(None)` when the object is absent.
+fn open_cas_byte_object(
+    target: &ScopeTarget,
+    subdir: &str,
+    scan_working_tree: bool,
+    hash: &str,
+    path_hint: Option<&str>,
+) -> Result<Option<(PathBuf, bool)>> {
+    if scan_working_tree {
+        if let Some(path) = find_working_tree_raw(&target.repo_root, hash)? {
+            return Ok(Some((path, false)));
+        }
     }
-    let raw_path = raw_object_path(&target.kcs_dir, raw_hash);
-    if !raw_path.is_file() {
+    let object_path = cas_object_path(&target.kcs_dir, subdir, hash);
+    if !object_path.is_file() {
         return Ok(None);
     }
     let basename = path_hint
@@ -2930,18 +3097,24 @@ fn open_raw_object(
     let cache = data_home()
         .join("kcs/open")
         .join(
-            raw_hash
-                .trim_start_matches("sha256:")
+            hash.trim_start_matches("sha256:")
                 .chars()
                 .take(12)
                 .collect::<String>(),
         )
         .join(basename);
+    // M5: the open cache is idempotent. A prior open already materialized this
+    // object read-only; a second open must reuse it, not `fs::copy` onto a
+    // read-only destination (EACCES). Reuse the cached file when it already
+    // exists (the CAS object is immutable, so the content is identical).
+    if cache.is_file() {
+        return Ok(Some((cache, true)));
+    }
     if let Some(parent) = cache.parent() {
         fs::create_dir_all(parent)
             .map_err(|err| KcsError::io(err.to_string(), parent.display().to_string()))?;
     }
-    fs::copy(&raw_path, &cache)
+    fs::copy(&object_path, &cache)
         .map_err(|err| KcsError::io(err.to_string(), cache.display().to_string()))?;
     let mut permissions = fs::metadata(&cache)
         .map_err(|err| KcsError::io(err.to_string(), cache.display().to_string()))?
@@ -2978,13 +3151,17 @@ fn find_working_tree_raw(root: &Path, raw_hash: &str) -> Result<Option<PathBuf>>
     Ok(None)
 }
 
-fn raw_object_path(kcs_dir: &Path, raw_hash: &str) -> PathBuf {
-    let digest = raw_hash.trim_start_matches("sha256:");
+/// Fan-out path of a content-hashed CAS byte object: `objects/<subdir>/ab/cd/<hash>`
+/// (03 §2 / §8.1). `subdir` is the object-type directory ("raw" / "prepared" /
+/// "images").
+fn cas_object_path(kcs_dir: &Path, subdir: &str, hash: &str) -> PathBuf {
+    let digest = hash.trim_start_matches("sha256:");
     kcs_dir
-        .join("objects/raw")
+        .join("objects")
+        .join(subdir)
         .join(&digest[0..2])
         .join(&digest[2..4])
-        .join(raw_hash)
+        .join(hash)
 }
 
 /// `.kcs/tombstones/ab/cd/<raw_hash>` (05 §3.5). `Ok(None)` when no tombstone
@@ -3044,6 +3221,24 @@ fn purge_not_found_error(target: &ScopeTarget, raw_hash: &str) -> KcsError {
         json!({
             "raw_hash": raw_hash,
             "scope_path": target.kcs_dir.display().to_string(),
+        }),
+        ExitCode::PermanentFailure,
+    )
+}
+
+/// M6 — the Evidence Pointer's (raw_hash, tool_profile_hash, chunk_hash) do not
+/// mutually bind: the chunk row or tree entry it resolves to carries a different
+/// identity than the pointer claims. This is a tampered / internally inconsistent
+/// pointer; refuse it rather than serve mismatched evidence. Exit 4 (a dead
+/// pointer that will never resolve consistently, like the purge family).
+fn invalid_pointer_identity_error(pointer: &EvidencePointer) -> KcsError {
+    KcsError::new(
+        "KCS-E-EVIDENCE-POINTER-INVALID-001",
+        "evidence pointer identity mismatch: raw_hash / tool_profile_hash / chunk_hash do not bind to the same chunk",
+        json!({
+            "raw_hash": pointer.raw_hash,
+            "tool_profile_hash": pointer.tool_profile_hash,
+            "chunk_hash": pointer.chunk_hash,
         }),
         ExitCode::PermanentFailure,
     )
@@ -3145,9 +3340,25 @@ fn resolve_object_uri(object: &ObjectUri, as_view: bool) -> Result<Value> {
             "text": text,
         }));
     }
-    // raw / image / normalized / prepared resolve as byte objects in the CAS raw
-    // store (07 §5.2). Only `raw` is materialised as a top-level object in Step 3.
-    match open_raw_object(&target, &object.hash, None)? {
+    // M7: dispatch each object_type to its correct CAS directory (03 §2 / 07 §5.2)
+    // instead of routing every byte object through objects/raw:
+    //   raw      -> objects/raw       (working-tree-first, rename tolerant)
+    //   image    -> objects/images    (embedded document images, 07 §5.2)
+    //   prepared -> objects/prepared  (pre-Markdownize intermediate)
+    // `normalized` is the full-text view, path-named by
+    // `<raw_hash>.<tool_profile_hash>.g<gen>` (03 §2.1) and not addressable by a
+    // single content hash, so it is not resolvable through an object URI.
+    let (subdir, scan_working_tree) = match object.object_type.as_str() {
+        "raw" => ("raw", true),
+        "image" => ("images", false),
+        "prepared" => ("prepared", false),
+        other => {
+            return Err(KcsError::invalid_usage(format!(
+                "object type '{other}' is not resolvable by a single-hash object URI"
+            )));
+        }
+    };
+    match open_cas_byte_object(&target, subdir, scan_working_tree, &object.hash, None)? {
         Some((path, temporary)) => Ok(json!({
             "status": status,
             "object_type": object.object_type,
@@ -5842,17 +6053,16 @@ fn write_network_revoke_record(repo: &Repository) -> Result<()> {
         .append(true)
         .open(&path)
         .map_err(|err| KcsError::io(err.to_string(), path.display().to_string()))?;
-    serde_json::to_writer(
-        &mut file,
-        &json!({
-            "recorded_at": now_utc_seconds(),
-            "tool_id": "mistral_ocr_markdownize",
-            "execution_mode": "online_api",
-            "allow_network": false,
-        }),
-    )
+    // M1(b): frame the record and emit it with one write_all (no interleaving).
+    let mut line = serde_json::to_string(&json!({
+        "recorded_at": now_utc_seconds(),
+        "tool_id": "mistral_ocr_markdownize",
+        "execution_mode": "online_api",
+        "allow_network": false,
+    }))
     .map_err(|err| KcsError::io(err.to_string(), path.display().to_string()))?;
-    file.write_all(b"\n")
+    line.push('\n');
+    file.write_all(line.as_bytes())
         .map_err(|err| KcsError::io(err.to_string(), path.display().to_string()))
 }
 
@@ -5902,9 +6112,11 @@ fn record_quarantine_candidates(repo: &Repository, preview: &ScanPreview) -> Res
                 "recorded_at": now_utc_seconds(),
                 "approval_method": "quarantine",
             });
-            serde_json::to_writer(&mut file, &record)
+            // M1(b): one framed record per single write_all (no interleaving).
+            let mut line = serde_json::to_string(&record)
                 .map_err(|err| KcsError::io(err.to_string(), path.display().to_string()))?;
-            file.write_all(b"\n")
+            line.push('\n');
+            file.write_all(line.as_bytes())
                 .map_err(|err| KcsError::io(err.to_string(), path.display().to_string()))?;
         }
     }
@@ -5959,9 +6171,11 @@ fn write_approval_record(
     for tool_id in tool_ids {
         let mut record = base.clone();
         record["tool_id"] = json!(tool_id);
-        serde_json::to_writer(&mut file, &record)
+        // M1(b): one framed record per single write_all (no interleaving).
+        let mut line = serde_json::to_string(&record)
             .map_err(|err| KcsError::io(err.to_string(), path.display().to_string()))?;
-        file.write_all(b"\n")
+        line.push('\n');
+        file.write_all(line.as_bytes())
             .map_err(|err| KcsError::io(err.to_string(), path.display().to_string()))?;
     }
     Ok(())
@@ -5977,6 +6191,25 @@ fn validate_user_tools_config() -> Result<()> {
     let bytes =
         fs::read(&path).map_err(|err| KcsError::io(err.to_string(), path.display().to_string()))?;
     validate_tools_toml(&bytes).map_err(adapter_to_kcs)
+}
+
+/// M8: validate the user (device) `config.toml` against `config.schema.json`
+/// before dispatch (10 §12 / 06 §11). The folder `.kcs/config.toml` is already
+/// validated on `Repository::open` (scope.rs `validate_config`); the user config
+/// took no such path, so a negative budget cap etc. slipped through. Schema
+/// failures are `KCS-E-CONFIG-SCHEMA-001` (exit 2).
+fn validate_user_config() -> Result<()> {
+    let path = user_config_toml_path();
+    if !path.is_file() {
+        return Ok(());
+    }
+    let text = fs::read_to_string(&path)
+        .map_err(|err| KcsError::io(err.to_string(), path.display().to_string()))?;
+    let toml_value: toml::Value =
+        toml::from_str(&text).map_err(|err| KcsError::schema(err.to_string()))?;
+    let json_value =
+        serde_json::to_value(&toml_value).map_err(|err| KcsError::schema(err.to_string()))?;
+    validate_json_schema(SchemaKind::Config, &json_value)
 }
 
 fn validate_repo_tool_lock(repo: &Repository) -> Result<()> {
@@ -6024,7 +6257,17 @@ fn adapter_to_kcs(error: kcs_adapter::AdapterError) -> KcsError {
 }
 
 fn pipeline_to_kcs(error: kcs_pipeline::PipelineError) -> KcsError {
-    KcsError::schema(error.to_string())
+    match error {
+        // M1(c): a corrupt persisted store file is exit 4 (KCS-E-STORE-CORRUPT-001),
+        // not a schema/config error (exit 2). The path is preserved in context.
+        kcs_pipeline::PipelineError::Corrupt { path, message } => KcsError::new(
+            "KCS-E-STORE-CORRUPT-001",
+            format!("corrupt store file at {path}: {message}"),
+            json!({ "path": path }),
+            ExitCode::PermanentFailure,
+        ),
+        other => KcsError::schema(other.to_string()),
+    }
 }
 
 fn print_output(value: Value, json_mode: bool) {
@@ -6036,7 +6279,12 @@ fn print_output(value: Value, json_mode: bool) {
         return;
     }
 
-    if let Some(status) = value.get("status").and_then(Value::as_str) {
+    // M2: `kcs view` (non --json) must print the chunk body, not just the
+    // "viewed" status. When the payload carries a `text` field (view / chunk
+    // object resolution), print the body — that is the point of `view`.
+    if let Some(text) = value.get("text").and_then(Value::as_str) {
+        println!("{text}");
+    } else if let Some(status) = value.get("status").and_then(Value::as_str) {
         println!("{status}");
     } else if let Some(commits) = value.get("commits").and_then(Value::as_array) {
         for commit in commits {

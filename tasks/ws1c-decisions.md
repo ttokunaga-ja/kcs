@@ -126,3 +126,44 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     04 §5.4 adds the resume/retry/reindex enrichment-execution + `--override-budget` symmetry note;
     04 §5.5 adds the sent-only billing / reuse-not-contaminated note; 06's `batch resume`/`retry`
     lines note they drive both markdownize and embedding.
+
+## Exploratory-audit fixes (M1-M8) additions (2026-07-04)
+
+40. New error code `KCS-E-EVIDENCE-POINTER-INVALID-001` (M6). The Evidence Pointer resolver now
+    binds identity: the tree entry for `pointer.raw_hash` must carry the same
+    `normalize.tool_profile_hash` as the pointer, and the chunk row selected by `chunk_hash` must
+    match the pointer's `(raw_hash, tool_profile_hash)`. A pointer that pairs raw_hash B with a
+    chunk_hash materialized under raw_hash A ("raw is B, body is A") is a tampered/internally
+    inconsistent pointer and is rejected with this code (exit 4, a dead-pointer failure like the
+    purge family). The code is **not** in the 06 §8 / 10 §7.5 catalog yet (docs frozen this round);
+    it slots beside `KCS-E-EVIDENCE-RETARGET-REQUIRED-001` (also code-only). Distinct from
+    RETARGET-REQUIRED, which means "chunk not materialized under this tool_profile_hash" (a
+    legitimate retarget), whereas POINTER-INVALID means the pointer's own fields don't mutually bind.
+41. `object` URI CAS dispatch by type (M7). `kcs open/view kcs://<scope>/object/<type>/<hash>` now
+    routes to the correct CAS directory (03 §2): `raw` → `objects/raw` (working-tree-first, rename
+    tolerant), `image` → `objects/images`, `prepared` → `objects/prepared`. Previously every type
+    fell through to `objects/raw`, so an image object (which only lives under `objects/images`) was
+    never found. `normalized` is intentionally **not** resolvable via a single-hash object URI: the
+    full-text view is path-named `<raw_hash>.<tool_profile_hash>.g<gen>.md` (03 §2.1, content hash
+    not adopted), so one `sha256:` segment cannot address it — it returns invalid usage (exit 2)
+    rather than silently mis-routing.
+42. Store lock is now reentrant and wraps whole mutating commands (M1a). `StoreLock` (05 §6) is made
+    reentrant within a process/thread via a thread-local depth counter, and `kcs index` / `repair` /
+    `reindex` acquire it end-to-end (`Repository::lock_store`) instead of only across the snapshot
+    sub-step. The reentrancy is required because the internal auto-snapshot re-acquires the same
+    lock; without it the whole-command lock would self-deadlock. Losers of a concurrent acquisition
+    still fail fast with `KCS-E-STORE-LOCKED-001` (exit 3), unchanged. search/status/view/open stay
+    lock-free (read-only, 05 §6).
+43. JSONL append atomicity + corrupt classification (M1b/M1c). Every O_APPEND JSONL writer now frames
+    one record (`serde_json::to_string` + `\n`) into a single `write_all`, so concurrent appends
+    (notably the device-global `cost-ledger.jsonl` written cross-scope, which no per-`.kcs` lock
+    covers) cannot interleave byte-wise. Parse failures reading `tasks.jsonl` /
+    `cost-ledger.jsonl` are now `KCS-E-STORE-CORRUPT-001` (exit 4, carrying the file path) via a new
+    `PipelineError::Corrupt` variant, instead of being misreported as `KCS-E-CONFIG-SCHEMA-001`
+    (exit 2).
+44. User config schema validation + budget non-negative guard (M8). The device `config.toml`
+    (`$XDG_CONFIG_HOME/kcs/config.toml`) is now validated against `config.schema.json` before
+    dispatch (`validate_user_config`), closing the gap where only the folder `.kcs/config.toml`
+    (validated on `Repository::open`) and `tools.toml` were checked — a negative user budget cap now
+    fails with exit 2. `read_budget_config` also rejects negative `monthly_usd_cap` / per-adapter
+    caps as defense-in-depth behind the schema's `minimum: 0`.
