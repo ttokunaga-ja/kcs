@@ -376,22 +376,41 @@ fn pdf_text_fallback(bytes: &[u8]) -> String {
 }
 
 fn pdf_page_count(bytes: &[u8]) -> usize {
-    let text = String::from_utf8_lossy(bytes);
+    pdf_page_count_in_text(&String::from_utf8_lossy(bytes))
+}
+
+/// Count PDF page objects from the (lossy-decoded) file text. Shared by the
+/// pipeline crate so the char-boundary-safe lookahead lives in one place (O4).
+pub fn pdf_page_count_in_text(text: &str) -> usize {
     let pages = text
         .match_indices("/Type")
         .filter(|(index, _)| {
-            let tail = &text[*index..text.len().min(index + 32)];
+            let tail = bounded_str_window(text, *index, 32);
             tail.contains("/Page") && !tail.contains("/Pages")
         })
         .count();
     pages.max(
         text.match_indices("/Page")
             .filter(|(index, _)| {
-                let tail = &text[*index..text.len().min(index + 8)];
+                let tail = bounded_str_window(text, *index, 8);
                 !tail.starts_with("/Pages")
             })
             .count(),
     )
+}
+
+/// A `start..start+max_len` byte-slice of `text` clamped so it never splits a
+/// multibyte UTF-8 character (O4). `start` is always a char boundary here (it
+/// comes from `match_indices`); the end is clamped to `text.len()` and walked
+/// back to the nearest boundary, so a crafted multibyte char straddling the
+/// lookahead window can never trigger a `char boundary` slice panic (which used
+/// to abort `kcs index` with exit 101 and dump the body to stderr).
+fn bounded_str_window(text: &str, start: usize, max_len: usize) -> &str {
+    let mut end = start.saturating_add(max_len).min(text.len());
+    while end > start && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    text.get(start..end).unwrap_or("")
 }
 
 fn page_index_from_unit_key(unit_key: &str) -> Option<usize> {
@@ -414,5 +433,23 @@ mod tests {
 
         assert!(!profile.allow_network);
         assert_eq!(profile.adapter_id, "deterministic_builtin");
+    }
+
+    // O4: a multibyte char straddling the fixed lookahead window from a `/Page`
+    // or `/Type` token used to panic on the str slice's char boundary (aborting
+    // `kcs index` with exit 101 and dumping the body to stderr). It must now be
+    // counted cleanly without panicking.
+    #[test]
+    fn o4_pdf_page_count_survives_multibyte_char_boundary() {
+        // "あ" occupies the +8 byte window measured from "/Page".
+        assert_eq!(
+            pdf_page_count_in_text("/PageXあ padding to extend length"),
+            1
+        );
+        // "あ" straddles the +32 byte window measured from "/Type" (no panic).
+        let type_case = format!("/Type{}あ/Pages", "y".repeat(26));
+        let _ = pdf_page_count_in_text(&type_case);
+        // Genuine /Pages still suppresses the count.
+        assert_eq!(pdf_page_count_in_text("/Type /Pages catalog"), 0);
     }
 }

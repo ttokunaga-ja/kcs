@@ -2244,3 +2244,273 @@ fn n7_online_flag_drives_embedding_enrichment() {
         "single-shot --online must execute embedding (N7): {status}"
     );
 }
+
+// ===========================================================================
+// Third exploratory-audit round (tasks/step3-bughunt3-fixes.md, O1-O7):
+// acceptance scenarios (a)-(f).
+// ===========================================================================
+
+// (a) / O1: a cursor minted for another scope cannot bypass a --scope restriction
+// (no secret leak; the frozen vault scope is excluded scope_restriction_mismatch),
+// and a tampered/forged cursor fails HMAC verification (KCS-E-SEARCH-CURSOR-001).
+#[test]
+fn o1_cursor_scope_restriction_and_signature() {
+    let parent = tempfile::tempdir().unwrap();
+    let data_home = parent.path().join("xdg");
+    let safe = parent.path().join("safe");
+    let vault = parent.path().join("vault");
+    fs::create_dir_all(&safe).unwrap();
+    fs::create_dir_all(&vault).unwrap();
+    fs::write(
+        safe.join("safe.md"),
+        "# 公開\n\n## Body\n公開情報の本文です。十分な長さの段落を含みます。\n",
+    )
+    .unwrap();
+    // Same query terms as CT3-CURSOR (認証仕様) so one query yields several chunks
+    // (=> a paging cursor), plus a secret marker in the body.
+    fs::write(
+        vault.join("auth.md"),
+        "# 認証仕様\n\n## API Token\nトークン TTL は 3600 秒です。秘密鍵 TOP-SECRET-KEY-XYZ を含みます。\n\n## Scopes\nスコープは read write admin です。\n",
+    )
+    .unwrap();
+    fs::write(
+        vault.join("ranking.md"),
+        "# 検索ランキング\n\n## RRF 融合\nRRF の定数 k=60 を使います。\n\n## MMR 多様化\nMMR の係数 lambda 0.7 で多様化します。\n",
+    )
+    .unwrap();
+    json_success_path(&safe, &data_home, &["init"]);
+    json_success_path(&vault, &data_home, &["init"]);
+    json_success_path(&safe, &data_home, &["index", "--approve"]);
+    json_success_path(&vault, &data_home, &["index", "--approve"]);
+
+    // Legitimate owner pages their own vault: --scope <vault> freezes the cursor's
+    // scope set to the vault.
+    let first = json_success_path(
+        &vault,
+        &data_home,
+        &[
+            "search",
+            "認証仕様",
+            "--scope",
+            vault.to_str().unwrap(),
+            "--limit",
+            "1",
+        ],
+    );
+    let cursor = first["paging"]["next_cursor"]
+        .as_str()
+        .expect("vault page 1 must yield a cursor")
+        .to_owned();
+
+    // Attacker in the safe scope replays the vault cursor but restricts --scope .
+    // (their own scope). O1(a): the vault scope is intersected out — no leak.
+    let (code, resp) = run_json(
+        &safe,
+        &data_home,
+        &[
+            "search",
+            "認証仕様",
+            "--scope",
+            ".",
+            "--cursor",
+            &cursor,
+            "--limit",
+            "5",
+        ],
+    );
+    let dump = resp.to_string();
+    assert!(
+        !dump.contains("TOP-SECRET-KEY-XYZ"),
+        "a cursor must not leak another scope's content across a --scope restriction: {dump}"
+    );
+    assert_eq!(
+        code, 4,
+        "every cursor scope excluded => all-failed exit 4: {resp}"
+    );
+    let excluded = resp["context"]["excluded_scopes"].as_array().unwrap();
+    assert!(
+        excluded
+            .iter()
+            .any(|entry| entry["reason"] == "scope_restriction_mismatch"),
+        "the restricted vault scope must be excluded with scope_restriction_mismatch: {resp}"
+    );
+
+    // O1(b): a forged cursor (payload byte flipped) fails signature verification.
+    let (payload, signature) = cursor.rsplit_once('.').unwrap();
+    let mut forged = payload.to_owned();
+    let last = forged.pop().unwrap();
+    forged.push(if last == 'A' { 'B' } else { 'A' });
+    let forged = format!("{forged}.{signature}");
+    let (code, err) = run_json(
+        &vault,
+        &data_home,
+        &["search", "認証仕様", "--cursor", &forged, "--limit", "5"],
+    );
+    assert_eq!(code, 2, "a forged cursor is a usage error: {err}");
+    assert_eq!(err["error_code"], "KCS-E-SEARCH-CURSOR-001");
+}
+
+// (b) / O2: `--text` must never send the query to the embedding endpoint, while a
+// vector-resolving search does (proving the send seam works — pair-discriminated).
+#[test]
+fn o2_text_search_never_sends_query_embedding() {
+    let dir = indexed_scope_embed("mock");
+    let trace = dir.path().join("query-embed-trace.log");
+
+    // --text: the query embedding must NOT be computed/sent.
+    Command::cargo_bin("kcs")
+        .unwrap()
+        .current_dir(dir.path())
+        .env("XDG_CONFIG_HOME", dir.path().join(".test-config"))
+        .env("XDG_DATA_HOME", dir.path().join(".test-data"))
+        .env("KCS_TEST_GEMINI_EMBED", "mock")
+        .env("KCS_TEST_QUERY_EMBED_TRACE", &trace)
+        .args(["search", "認証仕様 トークン", "--text", "--json"])
+        .assert()
+        .success();
+    assert!(
+        !trace.exists(),
+        "--text must not reach the embedding send path (trace file was written)"
+    );
+
+    // auto → hybrid: the same seam DOES send, so the trace appears (discriminator).
+    Command::cargo_bin("kcs")
+        .unwrap()
+        .current_dir(dir.path())
+        .env("XDG_CONFIG_HOME", dir.path().join(".test-config"))
+        .env("XDG_DATA_HOME", dir.path().join(".test-data"))
+        .env("KCS_TEST_GEMINI_EMBED", "mock")
+        .env("KCS_TEST_QUERY_EMBED_TRACE", &trace)
+        .args(["search", "認証仕様 トークン", "--json"])
+        .assert()
+        .success();
+    assert!(
+        trace.exists() && fs::read_to_string(&trace).unwrap().contains("認証仕様"),
+        "a vector-resolving search must send the query embedding"
+    );
+}
+
+// (c) / O3: `batch resume` now holds the folder store lock end-to-end, so a
+// concurrent holder makes it fail fast (KCS-E-STORE-LOCKED-001, exit 3) rather
+// than racing tasks.jsonl / the ledger into a double send.
+#[test]
+fn o3_batch_resume_takes_the_store_lock() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("a.md"), "# A\n\n## B\n本文です。\n").unwrap();
+    kcs(&dir, &["init"]).assert().success();
+    // A live (non-stale) lock held by "another process".
+    fs::write(dir.path().join(".kcs/.lock"), "{}").unwrap();
+    let err = json_failure(&dir, &["batch", "resume"], 3);
+    assert_eq!(err["error_code"], "KCS-E-STORE-LOCKED-001");
+}
+
+// (d) / O4: a crafted PDF whose multibyte char straddles the /Page lookahead
+// window indexes cleanly (no char-boundary panic / exit 101, no body dump).
+#[test]
+fn o4_crafted_multibyte_pdf_does_not_panic() {
+    let dir = tempfile::tempdir().unwrap();
+    // "/PageXあ": the 3-byte あ sits across the +8 byte window from "/Page"; the
+    // old str slice panicked here. `BT` gives the file a text layer.
+    let mut pdf = Vec::new();
+    pdf.extend_from_slice(b"%PDF-1.4\nBT (hi) Tj ET\n");
+    pdf.extend_from_slice(
+        "/PageXあ /Type /Page trailing padding to extend the length\n".as_bytes(),
+    );
+    pdf.extend_from_slice(b"%%EOF\n");
+    fs::write(dir.path().join("crafted.pdf"), &pdf).unwrap();
+    kcs(&dir, &["init"]).assert().success();
+    let assert = kcs(&dir, &["index", "--approve", "--json"]).assert();
+    let code = assert.get_output().status.code().unwrap();
+    assert_ne!(code, 101, "crafted PDF must not panic (exit 101)");
+    assert_eq!(code, 0, "crafted PDF must index cleanly (exit 0)");
+}
+
+// (e) / O5: a 0-chunk scope (empty folder) indexes cleanly (exit 0), instead of a
+// half-initialized "commit but no index" that fails every re-index with exit 2.
+#[test]
+fn o5_empty_scope_indexes_with_exit_0() {
+    let dir = tempfile::tempdir().unwrap();
+    kcs(&dir, &["init"]).assert().success();
+    kcs(&dir, &["index", "--approve", "--json"])
+        .assert()
+        .success();
+    // Re-index is also clean (no stuck "commit, no index" state).
+    kcs(&dir, &["index", "--approve", "--json"])
+        .assert()
+        .success();
+}
+
+// (f) / O6: a too-short `sha256:` operand is a usage error (exit 2), not a slice
+// panic in cas_object_path's digest[0..2].
+#[test]
+fn o6_short_sha256_operand_is_usage_error() {
+    let dir = indexed_scope();
+    let err = json_failure(&dir, &["open", "sha256:a"], 2);
+    assert_eq!(err["error_code"], "KCS-E-CONFIG-USAGE-001");
+    let err = json_failure(&dir, &["view", "sha256:ZZZZ"], 2);
+    assert_eq!(err["error_code"], "KCS-E-CONFIG-USAGE-001");
+}
+
+// (g) / O7: a scope_id collision (a wholesale `.kcs` copy) makes a cursor replay
+// ambiguous — detected the same way the Evidence path is
+// (KCS-E-EVIDENCE-SCOPE-AMBIGUOUS-001), not silently pinned to one copy.
+#[test]
+fn o7_cursor_replay_detects_scope_id_collision() {
+    let parent = tempfile::tempdir().unwrap();
+    let data_home = parent.path().join("xdg");
+    let a = parent.path().join("a");
+    let b = parent.path().join("b");
+    fs::create_dir_all(&a).unwrap();
+    fs::create_dir_all(&b).unwrap();
+    fs::write(
+        a.join("auth.md"),
+        "# 認証仕様\n\n## API Token\nトークン TTL は 3600 秒です。\n\n## Scopes\nスコープは read write admin です。\n",
+    )
+    .unwrap();
+    fs::write(
+        a.join("ranking.md"),
+        "# 検索ランキング\n\n## RRF 融合\nRRF の定数 k=60 を使います。\n\n## MMR 多様化\nMMR の係数 lambda 0.7 で多様化します。\n",
+    )
+    .unwrap();
+    json_success_path(&a, &data_home, &["init"]);
+    json_success_path(&a, &data_home, &["index", "--approve"]);
+    let first = json_success_path(&a, &data_home, &["search", "認証仕様", "--limit", "1"]);
+    let cursor = first["paging"]["next_cursor"]
+        .as_str()
+        .expect("page 1 must yield a cursor")
+        .to_owned();
+    let scope_id = first["searched_scopes"].as_array().unwrap()[0]["scope_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    // Copy a's identity into b and register both under the shared scope_id with the
+    // SAME newest last_seen_at → the cursor's scope_id now resolves to two .kcs.
+    json_success_path(&b, &data_home, &["init"]);
+    let b_scope_path = b.join(".kcs/scope.json");
+    let mut b_scope: Value =
+        serde_json::from_str(&fs::read_to_string(&b_scope_path).unwrap()).unwrap();
+    b_scope["scope_id"] = serde_json::json!(scope_id);
+    fs::write(
+        &b_scope_path,
+        serde_json::to_string_pretty(&b_scope).unwrap(),
+    )
+    .unwrap();
+    let registry = RegistryDb::open(registry_path(&data_home)).unwrap();
+    for root in [&a, &b] {
+        registry
+            .upsert(&RegistryEntry {
+                scope_id: scope_id.clone(),
+                kcs_path: root.join(".kcs").display().to_string(),
+                root_path: root.display().to_string(),
+                participates_in_global_search: true,
+                indexed: true,
+                last_seen_at: "2099-01-01T00:00:00Z".to_owned(),
+            })
+            .unwrap();
+    }
+
+    let (code, err) = run_json(&a, &data_home, &["search", "認証仕様", "--cursor", &cursor]);
+    assert_eq!(code, 4, "ambiguous cursor scope must fail: {err}");
+    assert_eq!(err["error_code"], "KCS-E-EVIDENCE-SCOPE-AMBIGUOUS-001");
+}

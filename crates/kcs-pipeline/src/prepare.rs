@@ -256,7 +256,8 @@ pub fn pdf_text_pages(bytes: &[u8]) -> Vec<String> {
     if !pdf_has_text_layer(bytes) {
         return Vec::new();
     }
-    let page_count = pdf_page_count(bytes).max(1);
+    let page_count =
+        kcs_adapter::deterministic::pdf_page_count_in_text(&String::from_utf8_lossy(bytes)).max(1);
     let stream_pages = kcs_adapter::deterministic::pdf_stream_text_pages(bytes);
     if !stream_pages.is_empty() {
         return normalize_pdf_page_count(stream_pages, page_count);
@@ -274,25 +275,6 @@ pub fn pdf_text_pages(bytes: &[u8]) -> Vec<String> {
     }
     pages.truncate(page_count);
     pages
-}
-
-fn pdf_page_count(bytes: &[u8]) -> usize {
-    let text = String::from_utf8_lossy(bytes);
-    let pages = text
-        .match_indices("/Type")
-        .filter(|(index, _)| {
-            let tail = &text[*index..text.len().min(index + 32)];
-            tail.contains("/Page") && !tail.contains("/Pages")
-        })
-        .count();
-    pages.max(
-        text.match_indices("/Page")
-            .filter(|(index, _)| {
-                let tail = &text[*index..text.len().min(index + 8)];
-                !tail.starts_with("/Pages")
-            })
-            .count(),
-    )
 }
 
 fn normalize_pdf_page_count(mut pages: Vec<String>, page_count: usize) -> Vec<String> {

@@ -673,7 +673,8 @@ fn scope_embedding_state(kcs_dir: &Path) -> ScopeEmbedState {
 fn resolve_vector_availability(
     exec_scopes: &[ExecScope],
     endpoint_configured: bool,
-    query_embedding_present: bool,
+    embedding_opt_in: bool,
+    query_embeddable: bool,
 ) -> VectorAvailability {
     if !endpoint_configured {
         return VectorAvailability::Unavailable {
@@ -696,7 +697,13 @@ fn resolve_vector_availability(
         VectorAvailability::Unavailable {
             reason: "embedding_index_missing",
         }
-    } else if !query_embedding_present {
+    } else if !embedding_opt_in {
+        // O2: a compatible index exists, but sending the query embedding needs the
+        // scope's embedding opt-in (07 §3). Without it, offer text, never a send.
+        VectorAvailability::Unavailable {
+            reason: "embedding_opt_in_required",
+        }
+    } else if !query_embeddable {
         VectorAvailability::Unavailable {
             reason: "query_embedding_unavailable",
         }
@@ -825,16 +832,41 @@ fn run_search(args: UnsupportedArgs) -> Result<Value> {
     // scope set stored in the cursor (05 §1.8 — the cursor scope set is truth).
     // The scope set must be known before mode resolution (K4), because vector
     // availability depends on the actual per-scope embedding indexes (03 §7).
+    // O1(b): cursors are HMAC-signed with a device-local key; decode verifies the
+    // signature, so a forged / tampered token is rejected (KCS-E-SEARCH-CURSOR-001)
+    // before its frozen scope set is ever trusted.
+    let cursor_key = cursor_signing_key()?;
     let decoded_cursor = match &parsed.cursor {
-        Some(token) => Some(decode_cursor_token(token).map_err(search_to_kcs)?),
+        Some(token) => Some(decode_cursor_token(token, &cursor_key).map_err(search_to_kcs)?),
         None => None,
     };
     let (scope_mode, exec_scopes, cursor_excluded) = match &decoded_cursor {
         Some(cursor) => {
-            let (exec, excluded) = resolve_cursor_exec_scopes(cursor);
+            let (exec, mut excluded) = resolve_cursor_exec_scopes(cursor)?;
+            // O1(a): a cursor must not bypass the caller's --scope/--descendants
+            // restriction. Compute the scopes this invocation is allowed to reach
+            // and intersect the cursor's frozen scope set with it; a cursor scope
+            // outside the allowed set is excluded (scope_restriction_mismatch),
+            // never searched. For a plain page-2 replay (no --scope) the allowed
+            // set is every registered scope, so this is a no-op.
+            let (_allowed_mode, allowed_targets) = enumerate_scope_targets(&repo, &parsed)?;
+            let allowed_ids: BTreeSet<String> = allowed_targets
+                .iter()
+                .map(|target| target.scope_id.clone())
+                .collect();
+            let (permitted, restricted): (Vec<ExecScope>, Vec<ExecScope>) = exec
+                .into_iter()
+                .partition(|exec| allowed_ids.contains(&exec.target.scope_id));
+            for exec in restricted {
+                excluded.push(json!({
+                    "scope_id": exec.target.scope_id,
+                    "scope_path": exec.target.repo_root,
+                    "reason": "scope_restriction_mismatch",
+                }));
+            }
             (
                 scope_selection_from_cursor(cursor.scope_mode),
-                exec,
+                permitted,
                 excluded,
             )
         }
@@ -853,16 +885,41 @@ fn run_search(args: UnsupportedArgs) -> Result<Value> {
         }
     };
 
-    // Mode resolution (05 §1.1): compute the query embedding once, then aggregate
-    // vector availability over the searched scopes. `--vector` errors early here if
-    // no compatible embedding index is available (with the right INCOMPAT/UNAVAIL
-    // code). A short query yields no query embedding → vector unavailable.
-    let query_embedding = compute_query_embedding(&parsed.query)?;
-    let vector = resolve_vector_availability(
+    // Mode resolution (05 §1.1). O2: the query embedding is SENT to the online
+    // embedding endpoint, so it must not be computed until the resolved mode
+    // actually uses vectors AND the scope's embedding opt-in (07 §3) is granted.
+    // Judge vector availability from cheap predicates (endpoint + opt-in + query
+    // length + per-scope compat) — never by eagerly calling the adapter.
+    let embedding_opt_in = persistent_network_allowed_for(&repo, EMBEDDING_ADAPTER_ID)?;
+    let query_embeddable = parsed.query.chars().count() >= 2;
+    let vector_precheck = resolve_vector_availability(
         &exec_scopes,
         embedding_seam().is_some(),
-        query_embedding.is_some(),
+        embedding_opt_in,
+        query_embeddable,
     );
+    let precheck_mode = resolve_search_mode(parsed.requested_mode, &vector_precheck)?;
+    // Only now, and only when the pre-resolved mode uses vectors, compute (send)
+    // the query embedding. In --text this branch is never taken, so the query is
+    // never sent.
+    let uses_vectors = matches!(
+        precheck_mode.resolved,
+        SearchMode::Hybrid | SearchMode::Vector
+    );
+    let query_embedding = if uses_vectors {
+        compute_query_embedding(&parsed.query)?
+    } else {
+        None
+    };
+    // A live adapter failure (auth/rate) after the send still degrades vector→text
+    // so `--vector` errors and auto/hybrid falls back, exactly as before O2.
+    let vector = if uses_vectors && query_embedding.is_none() {
+        VectorAvailability::Unavailable {
+            reason: "query_embedding_unavailable",
+        }
+    } else {
+        vector_precheck
+    };
     let mode = resolve_search_mode(parsed.requested_mode, &vector)?;
 
     // N8: the short-query short-circuit is NOT taken here — it must run after scope
@@ -1079,12 +1136,15 @@ fn run_search(args: UnsupportedArgs) -> Result<Value> {
             })
             .collect::<Vec<_>>();
         Some(
-            encode_cursor_token(&CursorToken {
-                version: 1,
-                scope_mode: cursor_mode_from_selection(scope_mode),
-                query_hash: qhash,
-                scopes: sub_cursors,
-            })
+            encode_cursor_token(
+                &CursorToken {
+                    version: 1,
+                    scope_mode: cursor_mode_from_selection(scope_mode),
+                    query_hash: qhash,
+                    scopes: sub_cursors,
+                },
+                &cursor_key,
+            )
             .map_err(search_to_kcs)?,
         )
     } else {
@@ -1913,22 +1973,14 @@ fn cursor_mode_from_selection(mode: ScopeSelectionMode) -> ScopeMode {
 /// `excluded_scopes` entry (reason `unreachable`) rather than dropped silently —
 /// the replay then follows partial-failure semantics (exit 3, CT3-MULTI-005),
 /// never a misleading cursor-mismatch error.
-fn resolve_cursor_exec_scopes(cursor: &CursorToken) -> (Vec<ExecScope>, Vec<Value>) {
-    let registry = RegistryDb::open_default().ok();
+fn resolve_cursor_exec_scopes(cursor: &CursorToken) -> Result<(Vec<ExecScope>, Vec<Value>)> {
     let mut exec = Vec::new();
     let mut excluded = Vec::new();
     for sub in &cursor.scopes {
-        let target = registry.as_ref().and_then(|db| {
-            db.lookup_scope_id(&sub.scope_id)
-                .ok()
-                .and_then(|entries| entries.into_iter().next())
-                .map(|entry| ScopeTarget {
-                    repo_root: PathBuf::from(&entry.root_path),
-                    kcs_dir: PathBuf::from(&entry.kcs_path),
-                    scope_id: entry.scope_id,
-                })
-        });
-        match target {
+        // O7: resolve through the shared registry resolver so a scope_id that a
+        // `.kcs` copy made ambiguous is reported KCS-E-EVIDENCE-SCOPE-AMBIGUOUS-001
+        // (like Evidence), not silently pinned to whichever row sorted first.
+        match resolve_scope_id_in_registry(&sub.scope_id)? {
             Some(target) => exec.push(ExecScope {
                 target,
                 snapshot_commit: Some(sub.snapshot_commit.clone()),
@@ -1942,7 +1994,7 @@ fn resolve_cursor_exec_scopes(cursor: &CursorToken) -> (Vec<ExecScope>, Vec<Valu
             })),
         }
     }
-    (exec, excluded)
+    Ok((exec, excluded))
 }
 
 fn run_open(args: UnsupportedArgs) -> Result<Value> {
@@ -2295,6 +2347,15 @@ fn append_stored_chunks(kcs_dir: &Path, chunks: &[StoredChunk]) -> Result<()> {
 
 fn rebuild_sqlite_index(kcs_dir: &Path, tree_entries: &[TreeEntryRow]) -> Result<()> {
     let path = sqlite_path(kcs_dir);
+    // O5: a 0-chunk scope (empty folder / secrets-only / text-less PDF) skips
+    // `append_stored_chunks` and so never creates `.kcs/index/`, but the auto-
+    // snapshot still advances HEAD. Create the index dir unconditionally here so
+    // opening `sqlite.db` cannot fail with a half-initialized "commit, no index"
+    // state that makes every re-index exit 2.
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|err| KcsError::io(err.to_string(), parent.display().to_string()))?;
+    }
     // Embeddings live only in SQLite (objects/ holds no embedding objects in the
     // MVP), so snapshot them before dropping the DB and replay them afterward,
     // then rebuild chunk_vec from them (04 §4.3: embeddings → chunk_vec). This
@@ -2836,7 +2897,26 @@ enum ShortHash {
 /// Classify a `sha256:` short hash against the current `.kcs` + HEAD (08 §2.3
 /// rule 4). Ambiguity is only *across kinds* (the hash is simultaneously a
 /// chunk_hash and a raw_hash) — never among the several chunks of one file.
+/// O6: a `sha256:` short-hash operand must carry a lowercase-hex digest of at
+/// least 4 chars before it can reach `cas_object_path`'s `digest[0..2]`/`[2..4]`
+/// slices (which panic out of range on `sha256:a`) or any lookup. A malformed
+/// operand is a usage error (KCS-E-CONFIG-USAGE-001, exit 2), never a crash.
+fn validate_short_hash_operand(hash: &str) -> Result<()> {
+    let digest = hash.strip_prefix("sha256:").unwrap_or(hash);
+    if digest.len() < 4
+        || !digest
+            .bytes()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+    {
+        return Err(KcsError::invalid_usage(
+            "short hash must be `sha256:` followed by at least 4 lowercase hex characters",
+        ));
+    }
+    Ok(())
+}
+
 fn classify_short_hash(hash: &str) -> Result<ShortHash> {
+    validate_short_hash_operand(hash)?;
     let repo = Repository::open_current()?;
     let target = scope_target(repo.root())?;
     let chunks = load_searchable_chunks(&target)?;
@@ -3066,6 +3146,47 @@ fn resolve_pointer_for_cli(pointer: &EvidencePointer) -> Result<PointerResolutio
 /// Two-stage scope resolution (08 §3.1 step 1). Root trust is `scope_id`; the
 /// `scope_path` hint and the scope-registry are both non-authoritative caches
 /// (05 §1.7 truth vs cache).
+/// Registry lookup of a `scope_id` with the same tie-detection the Evidence path
+/// uses (08 §3.1 step 1b): the newest `last_seen_at` wins, but two distinct
+/// `.kcs` sharing that newest timestamp are ambiguous
+/// (KCS-E-EVIDENCE-SCOPE-AMBIGUOUS-001). `Ok(None)` when no registered `.kcs`
+/// still resolves to this scope_id. Shared by `resolve_scope_target` (Evidence)
+/// and `resolve_cursor_exec_scopes` (search cursor) so a `.kcs`-copy collision is
+/// detected identically on both paths (O7).
+fn resolve_scope_id_in_registry(scope_id: &str) -> Result<Option<ScopeTarget>> {
+    let Ok(registry) = RegistryDb::open_default() else {
+        return Ok(None);
+    };
+    let Ok(entries) = registry.lookup_scope_id(scope_id) else {
+        return Ok(None);
+    };
+    let mut resolved: Vec<(String, ScopeTarget)> = Vec::new();
+    for entry in &entries {
+        if let Some(target) = open_scope_from_hint(&entry.root_path) {
+            if target.scope_id == scope_id {
+                resolved.push((entry.last_seen_at.clone(), target));
+            }
+        }
+    }
+    if resolved.is_empty() {
+        return Ok(None);
+    }
+    // Entries arrive newest-first (ORDER BY last_seen_at DESC); a tie across
+    // distinct .kcs at that newest timestamp is ambiguous.
+    let newest = resolved[0].0.clone();
+    let mut newest_dirs = resolved
+        .iter()
+        .filter(|(seen, _)| *seen == newest)
+        .map(|(_, target)| target.kcs_dir.clone())
+        .collect::<Vec<_>>();
+    newest_dirs.sort();
+    newest_dirs.dedup();
+    if newest_dirs.len() > 1 {
+        return Err(scope_ambiguous_error(scope_id, &newest_dirs));
+    }
+    Ok(Some(resolved.remove(0).1))
+}
+
 fn resolve_scope_target(scope_id: &str, scope_path_hint: Option<&str>) -> Result<ScopeTarget> {
     // 1a. scope_path hint whose .kcs/scope.json matches scope_id.
     if let Some(hint) = scope_path_hint {
@@ -3076,32 +3197,8 @@ fn resolve_scope_target(scope_id: &str, scope_path_hint: Option<&str>) -> Result
         }
     }
     // 1b. scope-registry lookup by scope_id (last_seen_at newest first).
-    if let Ok(registry) = RegistryDb::open_default() {
-        if let Ok(entries) = registry.lookup_scope_id(scope_id) {
-            let mut resolved: Vec<(String, ScopeTarget)> = Vec::new();
-            for entry in &entries {
-                if let Some(target) = open_scope_from_hint(&entry.root_path) {
-                    if target.scope_id == scope_id {
-                        resolved.push((entry.last_seen_at.clone(), target));
-                    }
-                }
-            }
-            if !resolved.is_empty() {
-                // Newest last_seen_at wins; a tie across distinct .kcs is ambiguous.
-                let newest = resolved[0].0.clone();
-                let mut newest_dirs = resolved
-                    .iter()
-                    .filter(|(seen, _)| *seen == newest)
-                    .map(|(_, target)| target.kcs_dir.clone())
-                    .collect::<Vec<_>>();
-                newest_dirs.sort();
-                newest_dirs.dedup();
-                if newest_dirs.len() > 1 {
-                    return Err(scope_ambiguous_error(scope_id, &newest_dirs));
-                }
-                return Ok(resolved.remove(0).1);
-            }
-        }
+    if let Some(target) = resolve_scope_id_in_registry(scope_id)? {
+        return Ok(target);
     }
     // Pragmatic fallback: the current working directory when it *is* the scope.
     // Object URIs carry no scope_path hint, and a freshly-created scope may not
@@ -3526,6 +3623,12 @@ fn search_to_kcs(error: kcs_search::SearchError) -> KcsError {
 
 fn run_batch(args: BatchArgs) -> Result<Value> {
     let repo = Repository::open_current()?;
+    // O3: `batch resume` / `batch retry` read-modify-write `tasks.jsonl` and drive
+    // online sends, so hold the folder store lock end-to-end — the same guard M1
+    // wired onto index/repair/reindex. Without it two concurrent `batch resume`
+    // runs interleave the ledger and double-send held tasks. Reentrant with any
+    // inner auto-snapshot; losers fail fast with KCS-E-STORE-LOCKED-001 (exit 3).
+    let _lock = repo.lock_store()?;
     let store = TaskStore::new(repo.kcs_dir());
     // N1: a Tier B online hold is only lifted by an explicit `--send-secrets`
     // approval, never by a plain `batch resume`. Without this, resume's
@@ -4241,6 +4344,10 @@ fn compute_query_embedding(query: &str) -> Result<Option<Vec<f32>>> {
     let Some(seam) = embedding_seam() else {
         return Ok(None);
     };
+    // O2 regression seam: mark that the query is about to be SENT to the embedding
+    // endpoint, so a test can prove `--text` never reaches this path. No-op unless
+    // the env var is set (mirrors the KCS_TEST_* adapter seams).
+    record_query_embed_trace(query);
     let items = vec![EmbeddingItem {
         id: "query".to_owned(),
         text: Some(query.to_owned()),
@@ -4250,6 +4357,20 @@ fn compute_query_embedding(query: &str) -> Result<Option<Vec<f32>>> {
     match run_embedding_adapter(seam, items, EmbeddingInputType::Query) {
         Ok(vectors) => Ok(vectors.into_iter().next().map(|vector| vector.vector)),
         Err(_) => Ok(None),
+    }
+}
+
+/// Append the query to the file named by `KCS_TEST_QUERY_EMBED_TRACE`, if set, at
+/// the point the query embedding is sent (O2 test seam only; no-op in production).
+fn record_query_embed_trace(query: &str) {
+    if let Some(path) = std::env::var_os("KCS_TEST_QUERY_EMBED_TRACE") {
+        let mut line = query.to_owned();
+        line.push('\n');
+        let _ = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(PathBuf::from(path))
+            .and_then(|mut file| file.write_all(line.as_bytes()));
     }
 }
 
@@ -6504,6 +6625,65 @@ fn data_home() -> PathBuf {
 
 fn cost_ledger_path() -> PathBuf {
     data_home().join("kcs/cost-ledger.jsonl")
+}
+
+/// Device-local HMAC key that signs search cursors (O1(b)). Stored at
+/// `$XDG_DATA_HOME/kcs/cursor-key` (0600), generated from `/dev/urandom` on first
+/// use. Signing binds a cursor to this device so a caller cannot forge or tamper
+/// a token to jump scope or page — `query_hash` alone covers only public inputs.
+fn cursor_signing_key() -> Result<Vec<u8>> {
+    let path = data_home().join("kcs/cursor-key");
+    if let Ok(bytes) = fs::read(&path) {
+        if !bytes.is_empty() {
+            return Ok(bytes);
+        }
+    }
+    let key = random_key_32()?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|err| KcsError::io(err.to_string(), parent.display().to_string()))?;
+    }
+    // `create_new` so a concurrent generator does not clobber; on a lost race read
+    // the winner's key so both processes agree.
+    match OpenOptions::new().write(true).create_new(true).open(&path) {
+        Ok(mut file) => {
+            file.write_all(&key)
+                .map_err(|err| KcsError::io(err.to_string(), path.display().to_string()))?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mut perms = file
+                    .metadata()
+                    .map_err(|err| KcsError::io(err.to_string(), path.display().to_string()))?
+                    .permissions();
+                perms.set_mode(0o600);
+                fs::set_permissions(&path, perms)
+                    .map_err(|err| KcsError::io(err.to_string(), path.display().to_string()))?;
+            }
+            Ok(key)
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => fs::read(&path)
+            .map_err(|read_err| KcsError::io(read_err.to_string(), path.display().to_string()))
+            .and_then(|bytes| {
+                if bytes.is_empty() {
+                    Err(KcsError::io(err.to_string(), path.display().to_string()))
+                } else {
+                    Ok(bytes)
+                }
+            }),
+        Err(err) => Err(KcsError::io(err.to_string(), path.display().to_string())),
+    }
+}
+
+/// 32 fresh random bytes from `/dev/urandom` (available on the supported
+/// unix-like targets); the cursor key needs no CSPRNG crate.
+fn random_key_32() -> Result<Vec<u8>> {
+    use std::io::Read;
+    let mut buf = vec![0u8; 32];
+    fs::File::open("/dev/urandom")
+        .and_then(|mut file| file.read_exact(&mut buf))
+        .map_err(|err| KcsError::io(err.to_string(), "/dev/urandom".to_owned()))?;
+    Ok(buf)
 }
 
 fn adapter_to_kcs(error: kcs_adapter::AdapterError) -> KcsError {
