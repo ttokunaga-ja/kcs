@@ -100,6 +100,11 @@ pub fn write_chunk_embedding(
     profile_hash: &str,
 ) -> Result<()> {
     conn.execute(
+        "DELETE FROM embeddings
+         WHERE target_type = 'chunk' AND target_id = ?1 AND profile_hash <> ?2",
+        params![text_hash, profile_hash],
+    )?;
+    conn.execute(
         "INSERT INTO embeddings(id, target_type, target_id, modality, vector, dimensions, distance, profile_hash)
          VALUES (?1, 'chunk', ?2, ?3, ?4, ?5, ?6, ?7)
          ON CONFLICT(id) DO NOTHING",
