@@ -571,11 +571,7 @@ struct ParsedSearch {
 
 fn run_repair(args: UnsupportedArgs) -> Result<Value> {
     let args = without_json(args.args);
-    if !args.iter().any(|arg| arg == "--rebuild-db") {
-        return Err(KcsError::invalid_usage(
-            "repair currently supports --rebuild-db",
-        ));
-    }
+    parse_repair_args(args)?;
     let repo = Repository::open_current()?;
     // M1(a): serialize the DB rebuild against concurrent index/repair/reindex.
     let _lock = repo.lock_store()?;
@@ -598,6 +594,50 @@ fn run_repair(args: UnsupportedArgs) -> Result<Value> {
         "rebuilt_tree_entries": report.rebuilt_tree_entries,
         "sqlite_db": db,
     }))
+}
+
+fn parse_repair_args(args: Vec<String>) -> Result<()> {
+    if args.is_empty() {
+        return Err(KcsError::invalid_usage(
+            "repair currently supports --rebuild-db",
+        ));
+    }
+    let mut rebuild_db = false;
+    for arg in args {
+        match arg.as_str() {
+            "--rebuild-db" if !rebuild_db => rebuild_db = true,
+            "--rebuild-db" => {
+                return Err(KcsError::invalid_usage(
+                    "repair accepts --rebuild-db only once",
+                ))
+            }
+            "--yes" => {}
+            "--verify-objects" => {
+                return Err(KcsError::new(
+                    "KCS-E-CONFIG-NOT-IMPLEMENTED-001",
+                    "repair --verify-objects is Step 4",
+                    json!({ "flag": arg }),
+                    ExitCode::InvalidUsage,
+                ))
+            }
+            value if value.starts_with('-') => {
+                return Err(KcsError::invalid_usage(format!(
+                    "unknown repair flag: {value}"
+                )))
+            }
+            _ => {
+                return Err(KcsError::invalid_usage(
+                    "repair accepts no positional arguments",
+                ))
+            }
+        }
+    }
+    if !rebuild_db {
+        return Err(KcsError::invalid_usage(
+            "repair currently supports --rebuild-db",
+        ));
+    }
+    Ok(())
 }
 
 /// Resolved search mode plus the honest fallback reporting fields (05 §1.1/§1.7).
@@ -901,7 +941,7 @@ fn run_search(args: UnsupportedArgs) -> Result<Value> {
     // Judge vector availability from cheap predicates (endpoint + opt-in + query
     // length + per-scope compat) — never by eagerly calling the adapter.
     let embedding_opt_in = active_embedding_adapter_id()?
-        .map(|adapter_id| persistent_network_allowed_for(&repo, &adapter_id))
+        .map(|adapter_id| embedding_opt_in_for_scopes(&exec_scopes, &adapter_id))
         .transpose()?
         .unwrap_or(false);
     let query_embeddable = parsed.query.chars().count() >= 2;
@@ -4270,15 +4310,19 @@ fn persistent_network_allowed(repo: &Repository) -> Result<bool> {
 /// rows existed carries only the then-active markdownize row, so an embedding
 /// adapter reads no matching row and stays enqueue-only (decision #35).
 fn persistent_network_allowed_for(repo: &Repository, tool_id: &str) -> Result<bool> {
-    if network_revoked(repo)? {
+    persistent_network_allowed_for_kcs_dir(repo.kcs_dir(), tool_id)
+}
+
+fn persistent_network_allowed_for_kcs_dir(kcs_dir: &Path, tool_id: &str) -> Result<bool> {
+    if network_revoked_kcs_dir(kcs_dir)? {
         return Ok(false);
     }
-    if read_allow_network_config(&repo.kcs_dir().join("config.toml"))? == Some(true)
+    if read_allow_network_config(&kcs_dir.join("config.toml"))? == Some(true)
         || read_allow_network_config(&user_config_toml_path())? == Some(true)
     {
         return Ok(true);
     }
-    approval_row_present(repo, tool_id)
+    approval_row_present_in_kcs_dir(kcs_dir, Some(tool_id))
 }
 
 /// True when `approvals.jsonl` carries an online opt-in row for `tool_id`.
@@ -4287,8 +4331,12 @@ fn approval_row_present(repo: &Repository, tool_id: &str) -> Result<bool> {
 }
 
 fn approval_row_present_for_scope(repo: &Repository, tool_id: Option<&str>) -> Result<bool> {
-    let expected_scope_id = scope_id(repo.kcs_dir())?;
-    let path = repo.kcs_dir().join("approvals.jsonl");
+    approval_row_present_in_kcs_dir(repo.kcs_dir(), tool_id)
+}
+
+fn approval_row_present_in_kcs_dir(kcs_dir: &Path, tool_id: Option<&str>) -> Result<bool> {
+    let expected_scope_id = scope_id(kcs_dir)?;
+    let path = kcs_dir.join("approvals.jsonl");
     let Ok(text) = fs::read_to_string(&path) else {
         return Ok(false);
     };
@@ -4303,6 +4351,15 @@ fn approval_row_present_for_scope(repo: &Repository, tool_id: Option<&str>) -> R
                 && value.get("execution_mode").and_then(Value::as_str) == Some("online_api")
                 && value.get("network_opt_in").and_then(Value::as_bool) == Some(true)
         }))
+}
+
+fn embedding_opt_in_for_scopes(exec_scopes: &[ExecScope], tool_id: &str) -> Result<bool> {
+    for exec in exec_scopes {
+        if !persistent_network_allowed_for_kcs_dir(&exec.target.kcs_dir, tool_id)? {
+            return Ok(false);
+        }
+    }
+    Ok(!exec_scopes.is_empty())
 }
 
 /// Whether the embedding adapter may call the network in this pass (L4). Gated
@@ -4620,7 +4677,7 @@ fn run_embedding_enrichment(
     // matches nothing for any scope whose last commit was a snapshot.
     ensure_snapshot_tree_entries(repo, &conn, &head)?;
     let chunking_config_hash = read_chunking_config(repo)?.chunking_config_hash;
-    let pending = live_chunks_without_embedding(&conn, &head, &chunking_config_hash)?;
+    let pending = live_chunks_without_embedding(&conn, &head, &chunking_config_hash, &profile)?;
     if pending.is_empty() {
         return Ok(0);
     }
@@ -4669,7 +4726,7 @@ fn run_embedding_enrichment(
         let plan = match plan_embed_batch(&conn, &profile, batch) {
             Ok(plan) => plan,
             Err(failure) => {
-                fail_embedding_tasks(&task_store, batch, retry_reason(failure.retry_kind))?;
+                fail_embedding_tasks(&task_store, batch, failure.retry_kind, &now)?;
                 break;
             }
         };
@@ -4689,7 +4746,8 @@ fn run_embedding_enrichment(
                     fail_embedding_tasks(
                         &task_store,
                         plan.reuse.iter().map(|(chunk, _)| *chunk),
-                        retry_reason(failure.retry_kind),
+                        failure.retry_kind,
+                        &now,
                     )?;
                     break;
                 }
@@ -4752,7 +4810,8 @@ fn run_embedding_enrichment(
                 fail_embedding_tasks(
                     &task_store,
                     plan.to_send.iter().map(|(chunk, _)| *chunk),
-                    retry_reason(failure.retry_kind),
+                    failure.retry_kind,
+                    &now,
                 )?;
                 break;
             }
@@ -4932,6 +4991,7 @@ fn live_chunks_without_embedding(
     conn: &Connection,
     head: &str,
     chunking_config_hash: &str,
+    profile: &DeclaredEmbeddingProfile,
 ) -> Result<Vec<EmbeddableChunk>> {
     let mut existing_stmt = conn
         .prepare("SELECT chunk_id FROM chunk_vec")
@@ -4968,7 +5028,11 @@ fn live_chunks_without_embedding(
     let mut pending = Vec::new();
     for row in rows {
         let chunk = row.map_err(|err| KcsError::schema(err.to_string()))?;
-        if !existing.contains(&chunk.chunk_id) {
+        let embedding_hash = chunk_embedding_hash(&chunk, profile)?;
+        let has_current_profile = embedding_store::content_vector(conn, &embedding_hash)
+            .map_err(index_to_kcs)?
+            .is_some();
+        if !(has_current_profile && existing.contains(&chunk.chunk_id)) {
             pending.push(chunk);
         }
     }
@@ -5083,6 +5147,8 @@ fn update_embedding_tasks<'a>(
     chunks: impl IntoIterator<Item = &'a EmbeddableChunk>,
     status: TaskStatus,
     reason: &str,
+    failure_kind: Option<RetryErrorKind>,
+    now: Option<&str>,
 ) -> Result<()> {
     let refs = chunks
         .into_iter()
@@ -5096,6 +5162,19 @@ fn update_embedding_tasks<'a>(
             if task.task_type == TaskType::Embedding && refs.contains(&task.output_ref) {
                 task.status = status;
                 task.fallback_reason = Some(reason.to_owned());
+                if let Some(kind) = failure_kind {
+                    let attempts_after = task.attempts.saturating_add(1);
+                    let policy = retry_policy(kind);
+                    let retryable = policy.retryable
+                        && policy
+                            .max_attempts
+                            .map(|max| attempts_after < max)
+                            .unwrap_or(true);
+                    task.attempts = attempts_after;
+                    task.next_retry_at = retryable.then(|| {
+                        scheduled_retry_at(now.unwrap_or(""), &policy.backoff, attempts_after)
+                    });
+                }
                 true
             } else {
                 false
@@ -5114,6 +5193,8 @@ fn complete_embedding_tasks<'a>(
         chunks,
         TaskStatus::Done,
         "embedding_adapter_done",
+        None,
+        None,
     )
 }
 
@@ -5121,15 +5202,30 @@ fn pause_embedding_tasks<'a>(
     task_store: &TaskStore,
     chunks: impl IntoIterator<Item = &'a EmbeddableChunk>,
 ) -> Result<()> {
-    update_embedding_tasks(task_store, chunks, TaskStatus::Paused, "budget_exceeded")
+    update_embedding_tasks(
+        task_store,
+        chunks,
+        TaskStatus::Paused,
+        "budget_exceeded",
+        None,
+        None,
+    )
 }
 
 fn fail_embedding_tasks<'a>(
     task_store: &TaskStore,
     chunks: impl IntoIterator<Item = &'a EmbeddableChunk>,
-    reason: &str,
+    kind: RetryErrorKind,
+    now: &str,
 ) -> Result<()> {
-    update_embedding_tasks(task_store, chunks, TaskStatus::Failed, reason)
+    update_embedding_tasks(
+        task_store,
+        chunks,
+        TaskStatus::Failed,
+        retry_reason(kind),
+        Some(kind),
+        Some(now),
+    )
 }
 
 fn retry_reason(kind: RetryErrorKind) -> &'static str {
@@ -6521,11 +6617,15 @@ fn network_allowed(repo: &Repository, args: &IndexArgs) -> Result<bool> {
 }
 
 fn network_revoked(repo: &Repository) -> Result<bool> {
+    network_revoked_kcs_dir(repo.kcs_dir())
+}
+
+fn network_revoked_kcs_dir(kcs_dir: &Path) -> Result<bool> {
     // Revocation is persisted as `allow_network = false` in config.toml by
     // `write_network_revoke_record`; the audit trail lives in
     // `network-revoked.jsonl`. There is no extensionless `network-revoked`
     // sentinel file, so no such probe here (Step2c I5).
-    Ok(read_allow_network_config(&repo.kcs_dir().join("config.toml"))? == Some(false))
+    Ok(read_allow_network_config(&kcs_dir.join("config.toml"))? == Some(false))
 }
 
 fn read_allow_network_config(path: &Path) -> Result<Option<bool>> {
@@ -6613,11 +6713,22 @@ const SECRETS_APPROVAL_FILE: &str = "secrets-approved.jsonl";
 /// Whether Tier B (candidate-secret) files may be sent to online adapters for
 /// this scope, i.e. `--send-secrets` was recorded at least once (N1c).
 fn secrets_send_approved(repo: &Repository) -> bool {
-    repo.kcs_dir().join(SECRETS_APPROVAL_FILE).is_file()
+    let Ok(expected_scope_id) = scope_id(repo.kcs_dir()) else {
+        return false;
+    };
+    let Ok(text) = fs::read_to_string(repo.kcs_dir().join(SECRETS_APPROVAL_FILE)) else {
+        return false;
+    };
+    text.lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .any(|value| {
+            value.get("scope_id").and_then(Value::as_str) == Some(expected_scope_id.as_str())
+                && value.get("approval_method").and_then(Value::as_str) == Some("send_secrets")
+        })
 }
 
 /// Record the explicit `--send-secrets` approval (N1c). Idempotent: appended as
-/// an audit trail; presence is what `secrets_send_approved` checks.
+/// an audit trail; `secrets_send_approved` accepts only a row bound to this scope.
 fn write_secrets_approval(repo: &Repository, preview: &ScanPreview) -> Result<()> {
     let path = repo.kcs_dir().join(SECRETS_APPROVAL_FILE);
     let mut file = OpenOptions::new()

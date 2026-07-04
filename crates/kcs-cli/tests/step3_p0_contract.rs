@@ -98,6 +98,19 @@ fn json_failure_embed(dir: &TempDir, embed: &str, args: &[&str], code: i32) -> V
     serde_json::from_slice(&output).unwrap()
 }
 
+fn json_success_embed_at(dir: &TempDir, embed: &str, fixed_now: &str, args: &[&str]) -> Value {
+    let output = kcs(dir, args)
+        .env(TEST_ADOPTED_EMBEDDING_ENV, embed)
+        .env("KCS_FIXED_NOW", fixed_now)
+        .arg("--json")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    serde_json::from_slice(&output).unwrap()
+}
+
 fn run_embed_path(path: &Path, data_home: &Path, embed: &str, args: &[&str]) -> Value {
     let output = Command::cargo_bin("kcs")
         .unwrap()
@@ -1462,22 +1475,36 @@ fn ct3_embed_009_batch_retry_and_resume_execute_pending_embedding_tasks() {
     let dir = tempfile::tempdir().unwrap();
     fs::write(dir.path().join("a.md"), "# メモ\n回収率のテスト。\n").unwrap();
     kcs(&dir, &["init"]).assert().success();
-    json_success_embed(&dir, "rate_limit", &["index", "--approve"]);
+    let base_now = "2026-07-03T00:00:00Z";
+    json_success_embed_at(&dir, "rate_limit", base_now, &["index", "--approve"]);
 
     let status = json_success_embed(&dir, "rate_limit", &["status"]);
-    let failed = status["tasks"]
+    let failed: Vec<_> = status["tasks"]
         .as_array()
         .unwrap()
         .iter()
         .filter(|t| t["type"] == "embedding" && t["status"] == "failed")
-        .count();
+        .collect();
     assert!(
-        failed > 0,
+        !failed.is_empty(),
         "rate_limit seam should leave failed embedding tasks"
+    );
+    assert!(
+        failed
+            .iter()
+            .all(|t| t["attempts"].as_u64().unwrap() > 0 && t["next_retry_at"].is_string()),
+        "rate_limit failures must persist retry backoff: {status}"
+    );
+    let retry_at = failed[0]["next_retry_at"].as_str().unwrap();
+
+    let early = json_success_embed_at(&dir, "mock", base_now, &["batch", "retry"]);
+    assert_eq!(
+        early["tasks_executed"], 0,
+        "retry before next_retry_at must honor backoff: {early}"
     );
 
     // seam が回復した状態で retry → executor が embedding を実行し done になる
-    let retry = json_success_embed(&dir, "mock", &["batch", "retry"]);
+    let retry = json_success_embed_at(&dir, "mock", retry_at, &["batch", "retry"]);
     assert!(
         retry["tasks_executed"].as_u64().unwrap() > 0,
         "retry must execute pending embedding tasks, got {retry}"
@@ -1500,11 +1527,19 @@ fn ct3_embed_010_retry_executes_after_snapshot_advances_head() {
     let dir = tempfile::tempdir().unwrap();
     fs::write(dir.path().join("a.md"), "# メモ\n射影テスト。\n").unwrap();
     kcs(&dir, &["init"]).assert().success();
-    json_success_embed(&dir, "rate_limit", &["index", "--approve"]);
+    let base_now = "2026-07-03T00:00:00Z";
+    json_success_embed_at(&dir, "rate_limit", base_now, &["index", "--approve"]);
+    let status = json_success_embed(&dir, "rate_limit", &["status"]);
+    let retry_at = tasks_of_type(&status, "embedding")
+        .into_iter()
+        .find(|t| t["status"] == "failed")
+        .and_then(|t| t["next_retry_at"].as_str())
+        .unwrap()
+        .to_owned();
     // snapshot で HEAD を射影なしに前進させる (replay の各 step と同じ形)
-    json_success_embed(&dir, "rate_limit", &["snapshot", "-m", "advance"]);
+    json_success_embed_at(&dir, "rate_limit", base_now, &["snapshot", "-m", "advance"]);
 
-    let retry = json_success_embed(&dir, "mock", &["batch", "retry"]);
+    let retry = json_success_embed_at(&dir, "mock", &retry_at, &["batch", "retry"]);
     assert!(
         retry["tasks_executed"].as_u64().unwrap() > 0,
         "retry must project tree_entries lazily and execute, got {retry}"
@@ -3305,6 +3340,118 @@ fn r6_corrupt_normalized_unit_is_store_corrupt_not_config_schema() {
         .canonicalize()
         .unwrap();
     assert_eq!(reported, unit_path.canonicalize().unwrap());
+}
+
+// ---------------------------------------------------------------------------
+// R7 exploratory audit fixes.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn r7_empty_secrets_approval_file_does_not_lift_tier_b_hold() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(
+        dir.path().join("api_secret.md"),
+        "# Secret\nprobable secret body\n",
+    )
+    .unwrap();
+    kcs(&dir, &["init"]).assert().success();
+    fs::write(dir.path().join(".kcs/secrets-approved.jsonl"), "").unwrap();
+
+    json_success_embed(&dir, "mock", &["index", "--approve", "--online"]);
+    let status = json_success_embed(&dir, "mock", &["status"]);
+    assert!(
+        status["quarantine"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| {
+                entry["path"] == "api_secret.md"
+                    && entry["reason"] == "secrets_tier_b"
+                    && entry["approval_method"] == "hold"
+            }),
+        "empty secrets approval file must not mark Tier B as send-approved: {status}"
+    );
+    assert!(
+        tasks_of_type(&status, "embedding").iter().any(|task| {
+            task["input_path"] == "api_secret.md"
+                && task["status"] == "paused"
+                && task["fallback_reason"] == "secrets_tier_b_hold"
+        }),
+        "Tier B embedding must stay held without a scoped send-secrets row: {status}"
+    );
+}
+
+#[test]
+fn r7_multiscope_query_embedding_requires_every_target_scope_opt_in() {
+    let data_home = tempfile::tempdir().unwrap();
+    let a = tempfile::tempdir().unwrap();
+    let b = tempfile::tempdir().unwrap();
+    fs::write(a.path().join("a.md"), "# A\nsharedterm alpha\n").unwrap();
+    fs::write(b.path().join("b.md"), "# B\nsharedterm beta\n").unwrap();
+    run_embed_path(a.path(), data_home.path(), "mock", &["init"]);
+    run_embed_path(b.path(), data_home.path(), "mock", &["init"]);
+    run_embed_path(
+        a.path(),
+        data_home.path(),
+        "mock",
+        &["index", "--approve", "--online"],
+    );
+    // B has embeddings from a one-shot send, but no persistent embedding opt-in.
+    run_embed_path(
+        b.path(),
+        data_home.path(),
+        "mock",
+        &["index", "--yes", "--online"],
+    );
+
+    let trace = data_home.path().join("query.trace");
+    let output = Command::cargo_bin("kcs")
+        .unwrap()
+        .current_dir(a.path())
+        .env("XDG_CONFIG_HOME", data_home.path().join("config"))
+        .env("XDG_DATA_HOME", data_home.path().join("data"))
+        .env("XDG_CACHE_HOME", data_home.path().join("cache"))
+        .env(TEST_ADOPTED_EMBEDDING_ENV, "mock")
+        .env("KCS_TEST_QUERY_EMBED_TRACE", &trace)
+        .args(["search", "sharedterm", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let search: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(search["resolved_mode"], "text");
+    assert_eq!(search["fallback_reason"], "embedding_opt_in_required");
+    assert!(
+        !trace.exists(),
+        "query embedding must not be sent when any searched scope lacks opt-in"
+    );
+}
+
+#[test]
+fn r7_repair_rejects_unknown_flags_extra_operands_and_step4_verify() {
+    let dir = indexed_scope();
+    let unknown = json_failure(
+        &dir,
+        &["repair", "--rebuild-db", "--definitely-invalid", "EXTRA"],
+        2,
+    );
+    assert_eq!(unknown["error_code"], "KCS-E-CONFIG-USAGE-001");
+
+    let verify = json_failure(&dir, &["repair", "--verify-objects"], 2);
+    assert_eq!(verify["error_code"], "KCS-E-CONFIG-NOT-IMPLEMENTED-001");
+}
+
+#[test]
+fn r7_embedding_profile_change_reembeds_current_profile() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("doc.md"), "# Doc\nalpha profile flip\n").unwrap();
+    kcs(&dir, &["init"]).assert().success();
+    json_success_embed(&dir, "incompatible_profile", &["index", "--approve"]);
+    json_success_embed(&dir, "mock", &["index", "--approve"]);
+    let after = json_success_embed(&dir, "mock", &["search", "alpha"]);
+    assert_eq!(after["resolved_mode"], "hybrid", "{after}");
+    assert_eq!(after["fallback"], false, "{after}");
 }
 
 fn first_normalized_unit_json(root: &Path) -> std::path::PathBuf {
