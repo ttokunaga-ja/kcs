@@ -78,6 +78,11 @@ pub fn canonical_tool_lock_value(value: &Value) -> Result<Value> {
         .ok_or_else(|| {
             AdapterError::ConfigSchema("tool-lock.json missing spec_version".to_owned())
         })?;
+    if spec_version != 1 {
+        return Err(AdapterError::ConfigSchema(format!(
+            "unsupported tool-lock spec_version: {spec_version}"
+        )));
+    }
     canonical.insert("spec_version".to_owned(), Value::from(spec_version));
     for key in ["prepare", "markdown", "summary", "classification", "rerank"] {
         if let Some(entry) = canonical_simple_entry(object, key)? {
@@ -106,10 +111,15 @@ fn validate_tool_lock_value(value: &Value) -> Result<()> {
     let object = value
         .as_object()
         .ok_or_else(|| AdapterError::ConfigSchema("tool-lock.json must be an object".to_owned()))?;
-    if object.get("spec_version").and_then(Value::as_u64).is_none() {
+    let Some(spec_version) = object.get("spec_version").and_then(Value::as_u64) else {
         return Err(AdapterError::ConfigSchema(
             "tool-lock.json spec_version must be an integer".to_owned(),
         ));
+    };
+    if spec_version != 1 {
+        return Err(AdapterError::ConfigSchema(format!(
+            "unsupported tool-lock spec_version: {spec_version}"
+        )));
     }
     for key in ["prepare", "markdown", "summary", "classification", "rerank"] {
         if let Some(entry) = object.get(key) {

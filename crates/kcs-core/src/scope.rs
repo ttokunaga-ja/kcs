@@ -813,6 +813,11 @@ fn canonical_tool_lock_value(value: &Value) -> Result<Value> {
         .get("spec_version")
         .and_then(Value::as_u64)
         .ok_or_else(|| KcsError::schema("tool-lock.json missing spec_version"))?;
+    if spec_version != 1 {
+        return Err(KcsError::schema(format!(
+            "unsupported tool-lock spec_version: {spec_version}"
+        )));
+    }
     let mut canonical = Map::new();
     canonical.insert("spec_version".to_owned(), Value::from(spec_version));
     for key in ["prepare", "markdown", "summary", "classification", "rerank"] {

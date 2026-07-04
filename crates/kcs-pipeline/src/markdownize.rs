@@ -1,7 +1,11 @@
 //! Markdownize and normalized-unit contracts.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::fs::{self, OpenOptions};
+use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use kcs_adapter::types as adapter_types;
 use kcs_core::scope::{new_ulid, now_utc_seconds};
@@ -11,6 +15,8 @@ use crate::prepare::{
     hash_bytes, unit_ref as prepared_unit_ref, PreparedUnit, UnitFingerprint, UnitType,
 };
 use crate::{IoResultExt, PipelineError, Result};
+
+static ATOMIC_WRITE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -349,26 +355,82 @@ pub fn persist_normalized_instance(
         &manifest.tool_profile_hash,
         manifest.gen,
     );
-    std::fs::create_dir_all(&dir).pipeline_io(&dir)?;
-    let manifest_bytes = serde_json::to_vec_pretty(manifest)
-        .map_err(|err| PipelineError::Schema(err.to_string()))?;
-    std::fs::write(dir.join("manifest.json"), manifest_bytes).pipeline_io(&dir)?;
-    for unit in units {
-        let path = dir.join(format!("{}.json", prepared_unit_ref(&unit.unit_key)));
-        let bytes = serde_json::to_vec_pretty(unit)
+    let parent = dir
+        .parent()
+        .ok_or_else(|| PipelineError::Io {
+            path: dir.display().to_string(),
+            message: "normalized instance path has no parent".to_owned(),
+        })?
+        .to_path_buf();
+    fs::create_dir_all(&parent).pipeline_io(&parent)?;
+    let tmp_dir = atomic_temp_path(&dir);
+    let result = (|| -> Result<()> {
+        fs::create_dir(&tmp_dir).pipeline_io(&tmp_dir)?;
+        let manifest_bytes = serde_json::to_vec_pretty(manifest)
             .map_err(|err| PipelineError::Schema(err.to_string()))?;
-        std::fs::write(&path, bytes).pipeline_io(&path)?;
+        write_synced_file(&tmp_dir.join("manifest.json"), &manifest_bytes)?;
+        for unit in units {
+            let path = tmp_dir.join(format!("{}.json", prepared_unit_ref(&unit.unit_key)));
+            let bytes = serde_json::to_vec_pretty(unit)
+                .map_err(|err| PipelineError::Schema(err.to_string()))?;
+            write_synced_file(&path, &bytes)?;
+        }
+        Ok(())
+    })();
+    if let Err(err) = result {
+        let _ = fs::remove_dir_all(&tmp_dir);
+        return Err(err);
     }
+    if dir.exists() {
+        fs::remove_dir_all(&dir).pipeline_io(&dir)?;
+    }
+    fs::rename(&tmp_dir, &dir).pipeline_io(&dir)?;
     let view_path = normalized_view_path(
         kcs_dir,
         &manifest.raw_hash,
         &manifest.tool_profile_hash,
         manifest.gen,
     );
-    if let Some(parent) = view_path.parent() {
-        std::fs::create_dir_all(parent).pipeline_io(parent)?;
+    let view = build_normalized_view(manifest, units);
+    atomic_overwrite_file(&view_path, view.as_bytes())
+}
+
+fn atomic_temp_path(path: &Path) -> PathBuf {
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("normalized");
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default();
+    let seq = ATOMIC_WRITE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    parent.join(format!(".{name}.tmp-{}-{now}-{seq}", std::process::id()))
+}
+
+fn write_synced_file(path: &Path, bytes: &[u8]) -> Result<()> {
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .pipeline_io(path)?;
+    file.write_all(bytes).pipeline_io(path)?;
+    file.sync_all().pipeline_io(path)
+}
+
+fn atomic_overwrite_file(path: &Path, bytes: &[u8]) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).pipeline_io(parent)?;
     }
-    std::fs::write(&view_path, build_normalized_view(manifest, units)).pipeline_io(&view_path)
+    let tmp = atomic_temp_path(path);
+    let result =
+        write_synced_file(&tmp, bytes).and_then(|_| fs::rename(&tmp, path).pipeline_io(path));
+    if let Err(err) = result {
+        let _ = fs::remove_file(&tmp);
+        return Err(err);
+    }
+    Ok(())
 }
 
 #[must_use]

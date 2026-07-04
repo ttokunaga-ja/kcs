@@ -3146,3 +3146,169 @@ fn q1_torn_chunk_tail_fully_self_heals_across_index_repair_index() {
         "regenerated chunks must be present, got {count}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// R6 exploratory audit fixes.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn r6_foreign_approval_rows_do_not_grant_online_embedding() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(
+        dir.path().join("note.md"),
+        "# Note\nforeign approval probe\n",
+    )
+    .unwrap();
+    kcs(&dir, &["init"]).assert().success();
+    fs::write(
+        dir.path().join(".kcs/approvals.jsonl"),
+        r#"{"scope_id":"01J00000000000000000000000","tool_id":"mistral_ocr_markdownize","execution_mode":"online_api","network_opt_in":true,"approval_method":"approve"}
+{"scope_id":"01J00000000000000000000000","tool_id":"gemini_embedding_2","execution_mode":"online_api","network_opt_in":true,"approval_method":"approve"}
+"#,
+    )
+    .unwrap();
+
+    let out = json_success_embed(&dir, "mock", &["index", "--yes"]);
+    assert_eq!(out["network_allowed"], false);
+    assert_eq!(out["network_opt_in"], false);
+    let status = json_success_embed(&dir, "mock", &["status"]);
+    let embedding = tasks_of_type(&status, "embedding");
+    assert!(
+        !embedding.is_empty(),
+        "embedding task should be enqueued: {status}"
+    );
+    assert!(
+        embedding.iter().all(|task| {
+            task["status"] == "pending" && task["fallback_reason"] == "network_opt_in_required"
+        }),
+        "foreign approvals must not execute embedding tasks: {status}"
+    );
+}
+
+#[test]
+fn r6_empty_approvals_file_does_not_satisfy_online_flag() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("note.md"), "# Note\nempty approval probe\n").unwrap();
+    kcs(&dir, &["init"]).assert().success();
+    fs::write(dir.path().join(".kcs/approvals.jsonl"), "").unwrap();
+
+    let err = json_failure_embed(&dir, "mock", &["index", "--online"], 2);
+    assert_eq!(err["error_code"], "KCS-E-CONFIG-USAGE-001");
+}
+
+#[test]
+fn r6_view_open_reject_extra_pointer_arguments() {
+    let dir = indexed_scope();
+    let search = json_success(&dir, &["search", "トークン TTL 3600"]);
+    let uri = first_result(&search)["evidence_uri"].as_str().unwrap();
+
+    let view_err = json_failure(&dir, &["view", uri, "EXTRA"], 2);
+    assert_eq!(view_err["error_code"], "KCS-E-CONFIG-USAGE-001");
+    let open_err = json_failure(&dir, &["open", uri, "--definitely-invalid"], 2);
+    assert_eq!(open_err["error_code"], "KCS-E-CONFIG-USAGE-001");
+}
+
+#[test]
+fn r6_reindex_rejects_unimplemented_at_and_extra_operands() {
+    let dir = indexed_scope();
+    let at = json_failure(&dir, &["reindex", "--force", "--yes", "--at", "HEAD"], 2);
+    assert_eq!(at["error_code"], "KCS-E-CONFIG-NOT-IMPLEMENTED-001");
+    let extra = json_failure(&dir, &["reindex", "--force", "--yes", "HEAD"], 2);
+    assert_eq!(extra["error_code"], "KCS-E-CONFIG-USAGE-001");
+}
+
+#[test]
+fn r6_inline_json_pointer_rejects_unsupported_schema_version() {
+    let dir = indexed_scope();
+    let search = json_success(&dir, &["search", "トークン TTL 3600"]);
+    let mut pointer = first_result(&search)["evidence_pointer"].clone();
+    pointer["schema_version"] = Value::from(999);
+
+    let err = json_failure(&dir, &["view", &pointer.to_string()], 2);
+    assert_eq!(err["error_code"], "KCS-E-CONFIG-SCHEMA-001");
+}
+
+#[test]
+fn r6_default_search_rereads_current_global_opt_out() {
+    let data_home = tempfile::tempdir().unwrap();
+    let a = tempfile::tempdir().unwrap();
+    let b = tempfile::tempdir().unwrap();
+    fs::write(a.path().join("a.md"), "# A\nalphaonly optout leak\n").unwrap();
+    fs::write(b.path().join("b.md"), "# B\nbetapublic\n").unwrap();
+    json_success_path(a.path(), data_home.path(), &["init"]);
+    json_success_path(b.path(), data_home.path(), &["init"]);
+    json_success_path(a.path(), data_home.path(), &["index", "--approve"]);
+    json_success_path(b.path(), data_home.path(), &["index", "--approve"]);
+    fs::write(
+        a.path().join(".kcs/config.toml"),
+        "kcs_format_version = \"0.1.0\"\n[scope]\nparticipates_in_global_search = false\n",
+    )
+    .unwrap();
+
+    let search = json_success_path(
+        b.path(),
+        data_home.path(),
+        &["search", "alphaonly", "--text"],
+    );
+    assert!(
+        search["results"].as_array().unwrap().is_empty(),
+        "stale registry opt-in must not leak opted-out scope results: {search}"
+    );
+}
+
+#[test]
+fn r6_tool_lock_rejects_future_spec_version() {
+    let dir = indexed_scope();
+    let path = dir.path().join(".kcs/tool-lock.json");
+    let mut value: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    value["spec_version"] = Value::from(999);
+    fs::write(&path, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
+
+    let err = json_failure(&dir, &["status"], 2);
+    assert_eq!(err["error_code"], "KCS-E-CONFIG-SCHEMA-001");
+    assert!(err["message"]
+        .as_str()
+        .unwrap()
+        .contains("unsupported tool-lock spec_version"));
+}
+
+#[test]
+fn r6_corrupt_normalized_unit_is_store_corrupt_not_config_schema() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(
+        dir.path().join("note.md"),
+        "# Note\nnormalized corruption searchable\n",
+    )
+    .unwrap();
+    kcs(&dir, &["init"]).assert().success();
+    json_success(&dir, &["index", "--yes"]);
+    let unit_path = first_normalized_unit_json(&dir.path().join(".kcs/objects/normalized_units"));
+    fs::write(&unit_path, r#"{"torn":"#).unwrap();
+
+    let err = json_failure(&dir, &["repair", "--rebuild-db"], 4);
+    assert_eq!(err["error_code"], "KCS-E-STORE-CORRUPT-001");
+    let reported = std::path::PathBuf::from(err["context"]["path"].as_str().unwrap())
+        .canonicalize()
+        .unwrap();
+    assert_eq!(reported, unit_path.canonicalize().unwrap());
+}
+
+fn first_normalized_unit_json(root: &Path) -> std::path::PathBuf {
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(path) = stack.pop() {
+        for entry in fs::read_dir(&path).unwrap() {
+            let entry = entry.unwrap();
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            if path.extension().and_then(|ext| ext.to_str()) == Some("json")
+                && path.file_name().and_then(|name| name.to_str()) != Some("manifest.json")
+            {
+                return path;
+            }
+        }
+    }
+    panic!("normalized unit json not found under {}", root.display());
+}
