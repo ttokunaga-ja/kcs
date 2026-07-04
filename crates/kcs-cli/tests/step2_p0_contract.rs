@@ -1344,6 +1344,171 @@ fn ct2_budget_005_online_success_records_ledger_and_caps_next_task() {
     assert_eq!(status["budget"]["folder_per_adapter"]["markdown"], 0.0);
 }
 
+// F1 (04 §5.4): offline/deterministic markdownize is billed at unit price 0, so
+// free local indexing never consumes the device USD budget cap. Before the fix
+// the baseline row carried `usd = $0.01/MB`; because `device_spent` sums every
+// adapter_kind, that counted against the device cap and could silently pause
+// paid enrichment (and inflate `status.budget.device_spent_usd`).
+#[test]
+fn f1_offline_baseline_records_zero_usd_and_does_not_consume_budget() {
+    let dir = scope();
+    fs::write(dir.path().join("a.txt"), "hello offline baseline cost").unwrap();
+    json_success(&dir, ["index", "--offline", "--yes"]);
+
+    let baseline: Vec<_> = ledger_lines(&dir)
+        .into_iter()
+        .filter(|entry| entry["adapter_kind"] == "deterministic_baseline")
+        .collect();
+    assert!(
+        !baseline.is_empty(),
+        "offline index must still record a deterministic_baseline row (provenance)"
+    );
+    assert!(
+        baseline
+            .iter()
+            .all(|entry| entry["usd"].as_f64() == Some(0.0)),
+        "deterministic_baseline usd must be 0.0: {baseline:?}"
+    );
+
+    // Free local work must not lower the remaining device budget.
+    let status = json_success(&dir, ["status"]);
+    assert_eq!(status["budget"]["device_spent_usd"].as_f64(), Some(0.0));
+    assert_eq!(
+        status["budget"]["device_remaining_usd"].as_f64(),
+        status["budget"]["device_monthly_usd_cap"].as_f64(),
+        "device remaining must equal the full cap after free local indexing"
+    );
+}
+
+// F5: `hard_stop = false` is a soft-stop — an over-cap online task is NOT paused;
+// it runs and its real charge is appended to the ledger (so spend is visible to
+// `warn_at_percent`) instead of pausing at the cap.
+#[test]
+fn f5_soft_stop_runs_over_cap_and_records_charge() {
+    let dir = scope();
+    fs::write(
+        dir.path().join("a.md"),
+        "# 予算\n\n## 本文\nソフトストップのテスト本文です。\n",
+    )
+    .unwrap();
+    // Folder cap 0 with soft-stop: any charge is over cap, but must not pause.
+    fs::write(
+        dir.path().join(".kcs/config.toml"),
+        "[budget]\nmonthly_usd_cap = 0\nhard_stop = false\n",
+    )
+    .unwrap();
+    json_success(&dir, ["index", "--approve"]);
+    let after_index = json_success(&dir, ["status"]);
+    assert!(
+        !after_index["tasks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|task| task["type"] == "markdownize" && task["status"] == "paused"),
+        "soft-stop must not pause the over-cap online task: {after_index}"
+    );
+
+    json_success_with_env(
+        &dir,
+        ["batch", "resume"],
+        &[(TEST_STANDARD_ONLINE_MARKDOWNIZE_ENV, "mock")],
+    );
+    let charged = ledger_lines(&dir).into_iter().any(|entry| {
+        entry["adapter_kind"] == "markdown" && entry["usd"].as_f64().unwrap_or_default() > 0.0
+    });
+    assert!(
+        charged,
+        "soft-stop must append the over-cap charge to the ledger"
+    );
+    let done = json_success(&dir, ["status"]);
+    assert!(
+        done["tasks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|task| task["type"] == "markdownize" && task["status"] == "done"),
+        "soft-stop online task must run to done: {done}"
+    );
+}
+
+// F5: crossing `warn_at_percent` surfaces a non-blocking warning in the status and
+// index result JSON, without pausing (spend is still under the cap).
+#[test]
+fn f5_warn_at_percent_surfaces_non_blocking_warning() {
+    let dir = scope();
+    let fixed_now = "2026-07-15T00:00:00Z";
+    // Device (user) cap 1.0, warn at 80%.
+    let cfg_dir = dir.path().join(".test-config/kcs");
+    fs::create_dir_all(&cfg_dir).unwrap();
+    fs::write(
+        cfg_dir.join("config.toml"),
+        "[budget]\nmonthly_usd_cap = 1.0\nwarn_at_percent = 80\n",
+    )
+    .unwrap();
+    // Seed 0.9 spent this month → 90% of cap (>= 80%, but < 100% so not over cap).
+    let ledger = dir.path().join(".test-data/kcs/cost-ledger.jsonl");
+    fs::create_dir_all(ledger.parent().unwrap()).unwrap();
+    fs::write(
+        &ledger,
+        "{\"month\":\"2026-07\",\"scope_id\":\"seed\",\"adapter_kind\":\"embedding\",\"usd\":0.9}\n",
+    )
+    .unwrap();
+
+    let status = json_success_with_env(&dir, ["status"], &[("KCS_FIXED_NOW", fixed_now)]);
+    assert_eq!(
+        status["budget"]["warned"], true,
+        "status must warn at 90% of cap: {status}"
+    );
+    assert!(status["budget"]["warning"]
+        .as_str()
+        .unwrap()
+        .contains("device budget"));
+    assert_eq!(status["budget"]["warn_at_percent"], 80);
+    // Non-blocking: budget still remains (not over cap).
+    assert!(
+        status["budget"]["device_remaining_usd"].as_f64().unwrap() > 0.0,
+        "warning must not imply over-cap: {status}"
+    );
+
+    // The index result JSON also carries the warning; processing continues.
+    let index = json_success_with_env(&dir, ["index", "--yes"], &[("KCS_FIXED_NOW", fixed_now)]);
+    assert_eq!(index["status"], "indexed");
+    assert!(index["budget_warning"]
+        .as_str()
+        .unwrap()
+        .contains("device budget"));
+}
+
+// F5: with `hard_stop` unspecified (default true) and `warn_at_percent` unspecified
+// (default 80), the historical behavior holds — an over-cap online task is paused.
+#[test]
+fn f5_default_hard_stop_pauses_over_cap() {
+    let dir = scope();
+    fs::write(
+        dir.path().join("a.md"),
+        "# 予算\n\n## 本文\nデフォルトは hard stop です。\n",
+    )
+    .unwrap();
+    // Folder cap 0, no hard_stop key → default hard_stop=true → pause at the cap.
+    fs::write(
+        dir.path().join(".kcs/config.toml"),
+        "[budget]\nmonthly_usd_cap = 0\n",
+    )
+    .unwrap();
+    json_success(&dir, ["index", "--approve"]);
+    let status = json_success(&dir, ["status"]);
+    assert!(
+        status["tasks"].as_array().unwrap().iter().any(|task| {
+            task["type"] == "markdownize"
+                && task["status"] == "paused"
+                && task["fallback_reason"] == "budget_exceeded"
+        }),
+        "default hard_stop must pause the over-cap online task: {status}"
+    );
+    assert_eq!(status["budget"]["hard_stop"], true);
+    assert_eq!(status["budget"]["warn_at_percent"], 80);
+}
+
 #[test]
 fn ct2_image_003_cli_mock_preserves_links_when_replacing_images() {
     let dir = scope();

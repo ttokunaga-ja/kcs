@@ -2,6 +2,7 @@
 
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
+use unicode_normalization::UnicodeNormalization;
 
 use crate::{ChunkRow, Result};
 
@@ -63,7 +64,15 @@ impl SqliteFtsIndex {
         // evidence are untouched: `chunk_id`, `text_hash`, `char_start/end` and the
         // persisted `chunks.jsonl` / normalized markdown all still carry the
         // original bytes — only this derived search index projection is sanitized.
-        let indexed_text = row.text.replace('\u{0}', "");
+        //
+        // F2: normalize the projection to NFC first. The trigram tokenizer is not
+        // Unicode-normalizing, so NFD content (common on macOS/APFS, some IMEs, and
+        // OCR/PDF extraction) would be silently unsearchable by an NFC query and
+        // vice versa. The CLI query path is normalized to the same NFC form, so
+        // canonically-equivalent content and queries match regardless of input
+        // form. This is a derived-index projection only; the char offsets that
+        // evidence resolves against remain over the original `row.text`.
+        let indexed_text = row.text.nfc().collect::<String>().replace('\u{0}', "");
         self.conn.execute(
             "INSERT OR IGNORE INTO chunks(
                 chunk_id, raw_hash, tool_profile_hash, gen, unit_key,
@@ -311,6 +320,24 @@ mod tests {
         fts.index_chunk(&row("c1", nul_text)).unwrap();
         let hits = fts.search("distinct", 10).unwrap();
         assert_eq!(hits.len(), 1, "NUL-suffixed word must be searchable");
+        assert_eq!(hits[0].chunk_id, "c1");
+    }
+
+    #[test]
+    fn f2_nfd_content_is_searchable_by_nfc_query() {
+        let mut fts = SqliteFtsIndex::in_memory(FtsSchemaConfig {
+            tokenizer: FtsTokenizer::Trigram,
+        })
+        .unwrap();
+        // Body carries the DECOMPOSED (NFD) form: "cafe" + U+0301 COMBINING ACUTE.
+        // The index projection normalizes it to NFC, so the trigram tokenizer sees
+        // the same bytes a composed query produces.
+        let nfd_body = "cafe\u{301} latte menu";
+        assert!(nfd_body.contains('\u{301}'), "test body must be NFD");
+        fts.index_chunk(&row("c1", nfd_body)).unwrap();
+        // Composed (NFC) query "café" must hit the NFD-stored content.
+        let hits = fts.search("caf\u{e9}", 10).unwrap();
+        assert_eq!(hits.len(), 1, "NFC query must match NFD-stored content");
         assert_eq!(hits[0].chunk_id, "c1");
     }
 }
