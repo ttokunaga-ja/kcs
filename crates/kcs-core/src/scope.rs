@@ -107,6 +107,14 @@ impl Repository {
             fs::create_dir_all(&dir).kcs_io(&dir)?;
         }
 
+        // P2: restrict the `.kcs` tree to the owner (0700). objects/raw holds the
+        // verbatim document bytes (secrets included, even unclassified ones), and
+        // approvals/tasks/quarantine logs plus sqlite.db carry actor names and
+        // usage patterns — none of it should be world/group-readable on a
+        // multi-user host (07 §1 secrecy posture). A 0700 parent blocks traversal
+        // into the whole subtree regardless of child file modes; no-op on non-unix.
+        restrict_dir_to_owner(&kcs_dir)?;
+
         atomic_write(&kcs_dir.join("HEAD"), b"")?;
         atomic_write(&kcs_dir.join("refs/heads/main"), b"")?;
         atomic_write(
@@ -888,6 +896,13 @@ pub fn append_error_log(error: &KcsError) -> Result<()> {
     )
 }
 
+/// Record a `level=warn` observation to `errors.jsonl` (P3, CT2-ADAPTER-010).
+/// Non-fatal: callers use it for warnings that must be observable but must not
+/// stop startup (e.g. a world-readable plaintext `plain:` API key in tools.toml).
+pub fn append_warn_log(code: &str, message: &str, context: Value) -> Result<()> {
+    append_observation("errors.jsonl", "warn", code, message, context)
+}
+
 fn append_observation(
     file_name: &str,
     level: &str,
@@ -901,9 +916,21 @@ fn append_observation(
     // and defeats purge, whose scrubber assumes "path is never recorded". Mask the
     // sensitive keys recursively so nested contexts (e.g. an index partial-failure
     // `output`) are covered too.
-    if redact_logs_enabled() {
+    let redact = redact_logs_enabled();
+    if redact {
         redact_context(&mut context);
     }
+    // P4: several error Displays embed an absolute path in their *message*
+    // (`io error at {path}`, `corrupt store file at {path}`), which N3's
+    // context-only masking missed — the path then landed verbatim in
+    // errors.jsonl, breaking the "path is never recorded" premise (10 §12.6) and,
+    // combined with a group-readable errors.jsonl, leaking scope paths to other
+    // local users. Mask absolute-path tokens in the message too under redact_logs.
+    let message: Value = if redact {
+        Value::String(redact_message_paths(message))
+    } else {
+        Value::String(message.to_owned())
+    };
     let path = data_home().join("kcs/logs").join(file_name);
     append_jsonl(
         &path,
@@ -916,6 +943,34 @@ fn append_observation(
             "context": context,
         }),
     )
+}
+
+/// Replace every absolute-path-looking token (a whitespace-delimited run that
+/// starts with `/`) in a log message with `[redacted]` (P4). Whitespace is
+/// preserved exactly. This is deliberately conservative: relative tokens are
+/// left alone; the leak sources all emit absolute paths via `path.display()`.
+fn redact_message_paths(message: &str) -> String {
+    let mut out = String::with_capacity(message.len());
+    let mut token = String::new();
+    for ch in message.chars() {
+        if ch.is_whitespace() {
+            push_redacted_token(&token, &mut out);
+            token.clear();
+            out.push(ch);
+        } else {
+            token.push(ch);
+        }
+    }
+    push_redacted_token(&token, &mut out);
+    out
+}
+
+fn push_redacted_token(token: &str, out: &mut String) {
+    if token.starts_with('/') && token.len() > 1 {
+        out.push_str("[redacted]");
+    } else {
+        out.push_str(token);
+    }
 }
 
 /// Whether `redact_logs` is in effect (06 §8 default true). Read from the user
@@ -937,13 +992,25 @@ fn redact_logs_enabled() -> bool {
         .unwrap_or(true)
 }
 
-/// Recursively replace the values of sensitive keys (`path`, `query`, `prompt`)
-/// with `[redacted]` anywhere they appear in a log `context` object/array (N3).
+/// Recursively replace the values of sensitive keys with `[redacted]` anywhere
+/// they appear in a log `context` object/array (N3). The allowlist covers the
+/// path-carrying keys other error contexts use: `scope_path`
+/// (`purge_not_found_error`), `candidates` (`scope_ambiguous_error`, an array of
+/// absolute paths), and `root_path`/`kcs_path` (registry/scope contexts) — P4.
 fn redact_context(value: &mut Value) {
     match value {
         Value::Object(map) => {
             for (key, entry) in map.iter_mut() {
-                if matches!(key.as_str(), "path" | "query" | "prompt") {
+                if matches!(
+                    key.as_str(),
+                    "path"
+                        | "query"
+                        | "prompt"
+                        | "scope_path"
+                        | "candidates"
+                        | "root_path"
+                        | "kcs_path"
+                ) {
                     *entry = Value::String("[redacted]".to_owned());
                 } else {
                     redact_context(entry);
@@ -1005,6 +1072,24 @@ fn data_home() -> PathBuf {
         return PathBuf::from(home).join(".local/share");
     }
     PathBuf::from(".")
+}
+
+/// Restrict a directory that may hold document bytes / secrets / usage data to
+/// owner-only access (0700) on unix (P2). Applied to the `.kcs` tree and the
+/// device data dir (`~/.local/share/kcs`) at creation so a multi-user host
+/// cannot read another user's archive. A 0700 parent blocks traversal into the
+/// whole subtree regardless of child modes. No-op on non-unix.
+pub fn restrict_dir_to_owner(dir: &Path) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(dir, fs::Permissions::from_mode(0o700)).kcs_io(dir)?;
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = dir;
+    }
+    Ok(())
 }
 
 fn tree_map(tree: &TreeObject) -> BTreeMap<String, String> {
@@ -1386,7 +1471,53 @@ pub fn parse_utc_seconds(value: &str) -> Option<i64> {
 
 #[cfg(test)]
 mod tests {
-    use super::{civil_from_days, format_unix_seconds, format_utc_seconds, parse_utc_seconds};
+    use super::{
+        civil_from_days, format_unix_seconds, format_utc_seconds, parse_utc_seconds,
+        redact_context, redact_message_paths,
+    };
+    use serde_json::json;
+
+    #[test]
+    fn redact_message_paths_masks_absolute_paths_only() {
+        // P4: the exact leak shapes — `io error at {path}` and
+        // `corrupt store file at {path}` — must lose the absolute path.
+        assert_eq!(
+            redact_message_paths("io error at /private/var/x/.kcs/tasks.jsonl: Permission denied"),
+            "io error at [redacted] Permission denied"
+        );
+        assert_eq!(
+            redact_message_paths(
+                "corrupt store file at /home/u/.kcs/tasks.jsonl: expected value at line 1"
+            ),
+            "corrupt store file at [redacted] expected value at line 1"
+        );
+        // Relative tokens and plain prose are untouched (no false positives).
+        assert_eq!(
+            redact_message_paths("scope registry write failed (recover with index)"),
+            "scope registry write failed (recover with index)"
+        );
+        assert!(!redact_message_paths("read /etc/hosts now").contains("/etc/hosts"));
+    }
+
+    #[test]
+    fn redact_context_masks_scope_path_and_candidates() {
+        // P4: the extended allowlist covers the path-bearing keys used by the
+        // purge / scope-ambiguous / registry error contexts.
+        let mut context = json!({
+            "scope_path": "/private/var/x/.kcs",
+            "candidates": ["/a/.kcs", "/b/.kcs"],
+            "root_path": "/private/var/x",
+            "kcs_path": "/private/var/x/.kcs",
+            "raw_hash": "sha256:abc",
+        });
+        redact_context(&mut context);
+        assert_eq!(context["scope_path"], "[redacted]");
+        assert_eq!(context["candidates"], "[redacted]");
+        assert_eq!(context["root_path"], "[redacted]");
+        assert_eq!(context["kcs_path"], "[redacted]");
+        // Non-sensitive keys are preserved.
+        assert_eq!(context["raw_hash"], "sha256:abc");
+    }
 
     #[test]
     fn format_unix_seconds_known_vectors() {

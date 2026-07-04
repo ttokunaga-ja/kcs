@@ -7,6 +7,7 @@
 //! in each scope.
 
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use rusqlite::{params, Connection, OptionalExtension};
 
@@ -48,8 +49,27 @@ impl RegistryDb {
         if let Some(parent) = path.as_ref().parent() {
             std::fs::create_dir_all(parent)
                 .map_err(|err| crate::IndexError::Schema(err.to_string()))?;
+            // P2: the device data dir (`~/.local/share/kcs`) that holds this
+            // registry, the cost ledger, logs and the open-cache carries usage
+            // patterns and the scope map — restrict it to the owner (0700) so a
+            // multi-user host cannot read another user's data. Best-effort (the
+            // registry is a recoverable cache); no-op on non-unix.
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700));
+            }
         }
         let conn = Connection::open(path)?;
+        // P6 (05 §1.8 / docs/05:565): serialize concurrent writers with WAL +
+        // busy_timeout so a parallel `kcs init`/`index` upsert waits (up to 5s)
+        // for the write lock instead of hitting SQLITE_BUSY and silently dropping
+        // the scope registration, and so a concurrent reader sees the last
+        // committed snapshot rather than a transient open failure. WAL is a
+        // persistent DB property; busy_timeout is per-connection.
+        conn.busy_timeout(Duration::from_millis(5000))?;
+        let _journal_mode: String =
+            conn.query_row("PRAGMA journal_mode=WAL", [], |row| row.get(0))?;
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS scopes (
                 scope_id TEXT NOT NULL,
@@ -177,6 +197,23 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let db = RegistryDb::open(dir.path().join("scope-registry.sqlite")).unwrap();
         (dir, db)
+    }
+
+    #[test]
+    fn open_sets_wal_and_busy_timeout() {
+        // P6: the registry must open with WAL + a 5000ms busy_timeout so parallel
+        // init/index writers serialize instead of silently dropping registrations.
+        let (_dir, db) = open_temp();
+        let journal: String = db
+            .conn
+            .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(journal.to_lowercase(), "wal");
+        let timeout: i64 = db
+            .conn
+            .query_row("PRAGMA busy_timeout", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(timeout, 5000);
     }
 
     #[test]
