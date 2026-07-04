@@ -173,3 +173,24 @@ python evaluate.py
 - [Cohorte — Mistral OCR deep dive (図中テキスト保持傾向・スキャン品質)](https://cohorte.co/blog/mistral-ocr-a-deep-dive-into-next-generation-document-understanding)
 - [derperdoing (Medium) — image clippings 実測 (ラベルは抽出、画像片取りこぼし)](https://derperdoing.medium.com/ocr-with-image-clippings-embedded-in-the-output-using-mistral-ai-61882b4163cd)
 - [Reducto — Mistral OCR vs Gemini Flash 精度ベンチ (複雑文書で VLM 優位)](https://reducto.ai/blog/lvm-ocr-accuracy-mistral-gemini)
+
+---
+
+# 実 API 検証結果と裁定 (2026-07-04)
+
+sync 実測 (18 ページ fixture $0.072 + 曖昧画像 15 枚 $0.06、resolved_model=mistral-ocr-latest):
+
+| 内容 | 回収率 | 判定 |
+| --- | --- | --- |
+| ラスタ化 text/表/数式 (text layer なし) | **100%** (cell/CER/formula とも) | 安全 |
+| 手書き風 (合成、回転・ゆらぎ) | **100%** | 安全 |
+| 段階境界 C0-C2 (テキスト+表、複雑表含む) | **100%** | 安全 |
+| **C3-C5 (チャート/グラフ)** | **figure zone 0%** (16 トークン全滅、images[] 行き) | **境界 = C3 (sharp_drop 0.625)** |
+| G1 スクショ風 / G4 文書写真 (領収書・斜め撮影) | **100%** | 安全 |
+| G2 スライド | 83% (フロー図入りは 59%) | 図形内のみ損失 |
+| G5 インフォグラフィック | 84% | 高密度でも大半回収 |
+| **G3 ホワイトボード写真風** | **45%** | 図形+手書き実写風が最弱 |
+
+**裁定**: 懸念は「図 (チャート/グラフ/図形) 内テキスト」に精密に限定して実在。表・スキャン・写真・
+スクショは安全。対策として **bbox_annotation (+25%) を既定 ON で採用** (07 §5.2 に反映済み)。
+生成 LLM fallback は Phase 4+ 保留。実装と契約テストは Step 4 (step4a) で確定する。
