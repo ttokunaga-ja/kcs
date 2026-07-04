@@ -181,3 +181,36 @@ docs で Step4/Phase4+/v2+ 明記) との重複はゼロを確認。
 - P9: open/view の展開キャッシュが `$XDG_CACHE_HOME/kcs/open` (or `~/.cache/kcs/open`) に作られる。
 - 全 267+ テスト green、`clippy -D warnings`、`fmt --check` clean を維持。各修正に回帰テストを追加。
 - docs は変更しない (実装を docs に合わせる)。P1/P5 は critical/中核につきオーケストレータが実機再確認してからコミット。
+
+---
+
+## 追加検証で判明した P10 [major] — reindex の HEAD-vs-sqlite 整合窓 (P5 修正の実機再確認中に確定)
+
+P5 の修正 (`rebuild_sqlite_index` の temp+rename 原子置換) を実機再確認したところ、`repair --rebuild-db`
+中の並行 search は完全にクリーン (80 search / silent-empty 0) になった一方、**`reindex --force` 中の
+並行 search は依然として 46% が exit 0 + results=0 (沈黙偽陰性)** を返すことが判明した。これは P5 が対象と
+した sqlite 再構築の非アトミック性とは**別機構**であり、P5 修正のリグレッションではなく既存の欠陥。
+
+- **機構**: `run_reindex` (`crates/kcs-cli/src/main.rs:2041`) は store lock 下で
+  (1) 全 doc の正規化を gen N→N+1 にコピー → (2) `auto_snapshot_with_normalize` (`main.rs:2089`) で
+  **HEAD を新 commit C_new (gen N+1) に前進** → (3) `rebuild_step3_index`→`rebuild_sqlite_index` で
+  gen N+1 chunk を append し sqlite を temp+rename。HEAD 前進 (2) と sqlite 完成 (3) の窓で、並行 search は
+  「HEAD=C_new + 旧 sqlite (gen N chunk のみ、C_new の live chunk が 1 件も無い)」を読む。
+  reindex は**全 doc を一斉に再 gen** するため C_new の tree_entries (gen N+1) に一致する chunk が旧 sqlite に
+  皆無 → JOIN 全 0 → 沈黙 0 件。
+- **index/repair が無事な理由**: `kcs index` は変更 doc のみ再 gen するため残り doc の chunk が一致し
+  `ensure_snapshot_tree_entries` (`main.rs:1599`) の self-heal で救われる (実測 silent-empty 0)。
+  `repair --rebuild-db` は HEAD 不動なので P5 の原子 rename だけで完全一貫 (実測 0)。
+- **実測**: 同一環境で repair=15/15 full・0 empty、reindex=19 full・**17 silent-empty**・1 err (37 中)。
+- **期待 vs 実際**: docs/05:561/564 は並行 search が完全な旧 index を読むか REBUILDING を返すと規定。実際は
+  reindex 窓で沈黙 0 件 (正当な該当なしと区別不能)。証拠グラウンディング製品の中核 search が偽陰性を返す。
+- **修正方針 (approach B、reader 側・低リスク)**: `search_one_scope` (`main.rs:1238`) で
+  `ensure_snapshot_tree_entries` 後に「**HEAD の tree_entries が非空なのに live chunk 集合 (chunks JOIN
+  tree_entries ON commit_hash=HEAD) が完全に空**」を検出したら、silent 0 でなく `KCS-E-INDEX-REBUILDING-001`
+  (docs/05:564) を返す。index の部分更新では live chunk が非空なので誤発火せず、空 scope では tree_entries
+  自体が空なので該当せず、genuine な該当なし (chunk はあるが query 不一致) とも区別できる精密な検出。
+  代替 (approach A): `run_reindex` を「gen N+1 chunk を含む sqlite を先に temp+rename → 後で HEAD 前進」に
+  並べ替え、self-heal と併せて窓を消す (reindex/snapshot 結合の追跡が必要でリスクやや高)。
+- **受け入れ条件 (P10)**: `reindex --force` 実行中の並行 search が exit 0 の空/部分結果を返さない
+  (完全な旧結果 or 明示 REBUILDING)。`index`/`repair`/静止時の search は誤って REBUILDING を返さない
+  (誤発火ゼロ)。空 scope の search は従来どおり exit 0 で 0 件。並行回帰テストを追加。全ゲート green・docs 不変。

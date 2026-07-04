@@ -2849,3 +2849,229 @@ fn p9_open_expansion_cache_is_under_xdg_cache_home() {
     // It must NOT be under the data home any more.
     assert!(!Path::new(path).starts_with(dir.path().join(".test-data/kcs/open")));
 }
+
+/// P10 (deterministic): `run_reindex` advances HEAD to a new generation and only
+/// afterwards swaps in the rebuilt sqlite (P5's temp+rename). A concurrent search
+/// in that window reads HEAD=C_new against the old-generation sqlite, whose chunks
+/// join to none of C_new's tree_entries — pre-P10 that was a silent exit-0 empty
+/// page. This reproduces the exact window without a race: back up the generation-N
+/// sqlite, `reindex` to N+1 (HEAD moves), then restore the generation-N sqlite while
+/// HEAD stays at N+1. The search must surface KCS-E-INDEX-REBUILDING-001 (docs/05
+/// §6, retryable exit 3), never a silent empty. It also asserts a *completed*
+/// reindex still returns the full set (no false positive) and that the state is
+/// transient (a fresh reindex recovers).
+#[test]
+fn p10_reindex_window_returns_rebuilding_not_silent_empty() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(
+        dir.path().join("a.md"),
+        "# Alpha\n\n## S\nalphaunique alphaunique content here\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.path().join("b.md"),
+        "# Beta\n\n## T\nalphaunique betaword more\n",
+    )
+    .unwrap();
+    kcs(&dir, &["init"]).assert().success();
+    json_success(&dir, &["index", "--approve"]);
+
+    let baseline = json_success(&dir, &["search", "alphaunique", "--text"]);
+    let expected = baseline["results"].as_array().unwrap().len();
+    assert!(expected > 0);
+
+    let db = dir.path().join(".kcs/index/sqlite.db");
+    let backup = dir.path().join("sqlite_gen_n.db");
+    fs::copy(&db, &backup).unwrap();
+
+    // A completed reindex advances HEAD and atomically swaps in a fresh sqlite; the
+    // search still returns the full set — no false REBUILDING.
+    json_success(&dir, &["reindex", "--force", "--yes"]);
+    let after = json_success(&dir, &["search", "alphaunique", "--text"]);
+    assert_eq!(after["results"].as_array().unwrap().len(), expected);
+
+    // Restore the generation-N sqlite while HEAD is at generation N+1 — the exact
+    // state a concurrent search observes inside the reindex window (HEAD=C_new,
+    // on-disk sqlite still the old generation, no live chunk for C_new).
+    fs::copy(&backup, &db).unwrap();
+    let err = json_failure(&dir, &["search", "alphaunique", "--text"], 3);
+    assert_eq!(err["error_code"], "KCS-E-INDEX-REBUILDING-001");
+    // The offending scope is reported as a part-failure exclusion, not dropped.
+    assert_eq!(
+        err["context"]["excluded_scopes"][0]["reason"],
+        "index_rebuilding"
+    );
+
+    // The state is transient: rebuilding the index recovers the full result set.
+    json_success(&dir, &["reindex", "--force", "--yes"]);
+    let recovered = json_success(&dir, &["search", "alphaunique", "--text"]);
+    assert_eq!(recovered["results"].as_array().unwrap().len(), expected);
+}
+
+/// P10 false-positive guard: the `kcs index` window must NOT be flagged REBUILDING.
+/// `kcs index` re-generates only the changed documents, so an unchanged document's
+/// chunk stays live for the new HEAD — the index is serviceable, not rebuilding.
+/// Reproduce that window (change one doc, re-index, restore the pre-change sqlite
+/// with HEAD at the new commit) and assert a query for the unchanged doc still
+/// returns its hit at exit 0, never a spurious REBUILDING.
+#[test]
+fn p10_partial_index_window_does_not_false_rebuilding() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(
+        dir.path().join("a.md"),
+        "# Alpha\n\n## S\nalphaword alphaword\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.path().join("b.md"),
+        "# Beta\n\n## T\nbetaword betaword betaword\n",
+    )
+    .unwrap();
+    kcs(&dir, &["init"]).assert().success();
+    json_success(&dir, &["index", "--approve"]);
+
+    let db = dir.path().join(".kcs/index/sqlite.db");
+    let backup = dir.path().join("sqlite_c0.db");
+    fs::copy(&db, &backup).unwrap();
+
+    // Change ONLY a.md and re-index: HEAD advances to a commit where a.md is a new
+    // generation but b.md is unchanged.
+    fs::write(
+        dir.path().join("a.md"),
+        "# Alpha\n\n## S\nalphaword alphaword changed newtext\n",
+    )
+    .unwrap();
+    json_success(&dir, &["index", "--approve"]);
+
+    // Restore the pre-change sqlite while HEAD is the post-change commit. Unlike
+    // reindex, b.md's chunk is still live for HEAD, so a query for the unchanged
+    // doc must return its hit (exit 0) — never a spurious REBUILDING.
+    fs::copy(&backup, &db).unwrap();
+    let search = json_success(&dir, &["search", "betaword", "--text"]);
+    assert!(
+        !search["results"].as_array().unwrap().is_empty(),
+        "unchanged doc must stay searchable in the index window (not REBUILDING)"
+    );
+    assert!(search["excluded_scopes"].as_array().unwrap().is_empty());
+}
+
+/// P10 non-regression: a genuine no-hit on a healthy index and a query on an empty
+/// scope both stay exit-0 empty — the rebuilding detector must not fire when live
+/// chunks exist (genuine miss) or when the scope has no tree_entries (empty scope).
+#[test]
+fn p10_genuine_no_hit_and_empty_scope_stay_exit_zero() {
+    // Healthy indexed scope: a matching query has hits; a non-matching query is an
+    // honest exit-0 empty page (live chunks exist -> fast-path returns not-rebuilding).
+    let dir = indexed_scope();
+    assert!(
+        !json_success(&dir, &["search", "認証仕様", "--text"])["results"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    let miss = json_success(&dir, &["search", "zzznotpresentquery", "--text"]);
+    assert!(miss["results"].as_array().unwrap().is_empty());
+    assert!(miss["excluded_scopes"].as_array().unwrap().is_empty());
+
+    // Empty scope (no documents): exit-0 empty page (no tree_entries for HEAD).
+    let empty = tempfile::tempdir().unwrap();
+    kcs(&empty, &["init"]).assert().success();
+    kcs(&empty, &["index", "--approve"]).assert().success();
+    let search = json_success(&empty, &["search", "anything", "--text"]);
+    assert!(search["results"].as_array().unwrap().is_empty());
+    assert!(search["excluded_scopes"].as_array().unwrap().is_empty());
+}
+
+/// P10 (concurrent, end-to-end): a `kcs search` running while `reindex --force`
+/// spins must never silently return exit 0 with an empty/partial page — every
+/// exit-0 search returns the complete result set (old or new generation, both the
+/// same content). Non-zero exits are the honest transient (REBUILDING, docs/05:564
+/// — proven exactly by `p10_reindex_window_returns_rebuilding_not_silent_empty`)
+/// and are tolerated. Mirrors the P5 concurrency harness but drives `reindex`,
+/// which re-generates every document and so exposes the HEAD-vs-sqlite window P5's
+/// atomic rebuild alone does not close.
+#[test]
+fn p10_concurrent_search_during_reindex_is_never_silently_empty() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    let dir = tempfile::tempdir().unwrap();
+    // Enough documents that the all-document re-generation + rebuild spans a window
+    // a concurrent search can land in.
+    for i in 0..12 {
+        fs::write(
+            dir.path().join(format!("doc{i}.md")),
+            format!("# Doc {i}\n\n## S\nalphaunique alphaunique body {i} filler filler filler\n"),
+        )
+        .unwrap();
+    }
+    let data = dir.path().join(".test-data");
+    let config = dir.path().join(".test-config");
+    let cache = dir.path().join(".test-cache");
+    let bin = assert_cmd::cargo::cargo_bin("kcs");
+    let root = dir.path().to_path_buf();
+
+    // Hermetic adapter seams (no network); text search does not exercise them, but
+    // set them so any accidental adapter call is a mock.
+    let run = |args: &[&str]| -> std::process::Output {
+        std::process::Command::new(&bin)
+            .args(args)
+            .current_dir(&root)
+            .env("XDG_DATA_HOME", &data)
+            .env("XDG_CONFIG_HOME", &config)
+            .env("XDG_CACHE_HOME", &cache)
+            .env("KCS_TEST_MISTRAL_OCR", "mock")
+            .env("KCS_TEST_GEMINI_EMBED", "mock")
+            .output()
+            .unwrap()
+    };
+    assert!(run(&["init"]).status.success());
+    assert!(run(&["index", "--approve"]).status.success());
+    let baseline = run(&["search", "alphaunique", "--text", "--json"]);
+    assert!(baseline.status.success());
+    let baseline: Value = serde_json::from_slice(&baseline.stdout).unwrap();
+    let expected = baseline["results"].as_array().unwrap().len();
+    assert!(expected > 0);
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let handle = {
+        let (bin, root) = (bin.clone(), root.clone());
+        let (data, config, cache) = (data.clone(), config.clone(), cache.clone());
+        let stop = stop.clone();
+        std::thread::spawn(move || {
+            let mut spins = 0;
+            while !stop.load(Ordering::Relaxed) && spins < 50 {
+                let _ = std::process::Command::new(&bin)
+                    .args(["reindex", "--force", "--yes"])
+                    .current_dir(&root)
+                    .env("XDG_DATA_HOME", &data)
+                    .env("XDG_CONFIG_HOME", &config)
+                    .env("XDG_CACHE_HOME", &cache)
+                    .env("KCS_TEST_MISTRAL_OCR", "mock")
+                    .env("KCS_TEST_GEMINI_EMBED", "mock")
+                    .output();
+                spins += 1;
+            }
+        })
+    };
+
+    let mut saw_success = false;
+    for _ in 0..150 {
+        let out = run(&["search", "alphaunique", "--text", "--json"]);
+        if out.status.success() {
+            saw_success = true;
+            let json: Value = serde_json::from_slice(&out.stdout).unwrap();
+            let n = json["results"].as_array().unwrap().len();
+            assert_eq!(
+                n, expected,
+                "search returned {n} results during reindex (expected {expected}): P10 silent false negative"
+            );
+        }
+    }
+    stop.store(true, Ordering::Relaxed);
+    handle.join().unwrap();
+    assert!(
+        saw_success,
+        "expected at least one exit-0 search across the concurrent run"
+    );
+}

@@ -1034,6 +1034,24 @@ fn run_search(args: UnsupportedArgs) -> Result<Value> {
     }
 
     if searched.is_empty() {
+        // P10: every enumerated scope is mid-reindex (HEAD advanced, rebuilt sqlite
+        // not yet swapped in). This is transient — the complete result set returns
+        // on retry once the atomic rename lands — so surface the honest
+        // KCS-E-INDEX-REBUILDING-001 (docs/05:564) with the retryable exit 3
+        // (05 §6, as KCS-E-STORE-LOCKED-001 does), never a false permanent
+        // all-failed or a silent empty page.
+        let all_rebuilding = !excluded.is_empty()
+            && excluded.iter().all(|entry| {
+                entry.get("reason").and_then(Value::as_str) == Some(INDEX_REBUILDING_REASON)
+            });
+        if all_rebuilding {
+            return Err(KcsError::new(
+                "KCS-E-INDEX-REBUILDING-001",
+                "the search index is being rebuilt (reindex in progress); retry the search",
+                json!({ "excluded_scopes": excluded }),
+                ExitCode::PartialFailure,
+            ));
+        }
         // Every enumerated scope was excluded. When every exclusion reason is
         // "the scope's sqlite.db is unusable" (missing/corrupt), BOTH backends
         // are structurally gone — text and vector live in the same index file —
@@ -1229,6 +1247,11 @@ enum ScopeSearchError {
     Fatal(KcsError),
 }
 
+/// Exclusion reason for a scope observed mid-reindex (P10): HEAD has advanced to a
+/// new generation but the rebuilt sqlite is not yet swapped in, so not one chunk is
+/// live. Surfaced as `KCS-E-INDEX-REBUILDING-001` when it is the sole failure mode.
+const INDEX_REBUILDING_REASON: &str = "index_rebuilding";
+
 struct ScopeOutcome {
     snapshot_commit: String,
     max_rowid: u64,
@@ -1286,6 +1309,24 @@ fn search_one_scope(
         if let Err(error) = ensure_snapshot_tree_entries(&repo, &conn, &snapshot_commit) {
             return Err(ScopeSearchError::Fatal(error));
         }
+    }
+
+    // P10: `run_reindex` advances HEAD to a new generation and only afterwards
+    // swaps in the rebuilt sqlite (P5's temp+rename). A concurrent search in that
+    // window reads HEAD=C_new against the pre-swap db, whose chunks are all the
+    // previous generation and join to none of C_new's freshly projected
+    // `tree_entries` — every backend returns empty and the search would emit a
+    // silent exit-0 no-hit indistinguishable from a genuine miss. Detect that
+    // precise state and exclude the scope with `KCS-E-INDEX-REBUILDING-001`
+    // (docs/05:564) so the honest transient surfaces instead. `kcs index` re-gens
+    // only the changed docs (unchanged docs stay live → never fires); an empty or
+    // text-less scope has no chunks (never fires); a genuine miss still has live
+    // chunks (never fires) — see `index_is_rebuilding`. 05 §1.8 part-failure keeps
+    // the other, healthy scopes' results.
+    if index_is_rebuilding(&conn, &snapshot_commit).map_err(ScopeSearchError::Fatal)? {
+        return Err(ScopeSearchError::Excluded(
+            INDEX_REBUILDING_REASON.to_owned(),
+        ));
     }
 
     let max_rowid = match exec.max_rowid {
@@ -1650,6 +1691,58 @@ fn tree_object_present(repo: &Repository, tree_hash: &str) -> Result<bool> {
         Err(error) if error.error_code() == "KCS-E-STORE-NOT-FOUND-001" => Ok(false),
         Err(error) => Err(error),
     }
+}
+
+/// P10: is the search index caught in the reindex HEAD-advance window? `run_reindex`
+/// advances HEAD to a new generation and only afterwards rebuilds sqlite (temp+
+/// rename, P5). In that window a concurrent search reads HEAD=C_new against the
+/// pre-swap db, whose chunks are all the *previous* generation and so join to none
+/// of C_new's projected `tree_entries` — the search would return an exit-0 empty
+/// page indistinguishable from a genuine no-hit. Detect it precisely: HEAD has
+/// `tree_entries`, not one chunk is live for HEAD, yet the db still holds chunks (an
+/// older generation). Three cases stay false, by construction:
+/// - a genuine miss / any healthy search has a live chunk (fast-path return);
+/// - an empty / text-less scope has no `tree_entries` for HEAD (or no chunks);
+/// - `kcs index` re-gens only changed docs, so the unchanged docs' chunks stay live.
+///
+/// Only the all-docs re-gen of `reindex` empties the live set while chunks remain.
+fn index_is_rebuilding(conn: &Connection, snapshot_commit: &str) -> Result<bool> {
+    // Fast path (the common, healthy case): any chunk live for HEAD means the index
+    // is serviceable, so it is not rebuilding — one EXISTS and we are done.
+    let live_exists: i64 = conn
+        .query_row(
+            "SELECT EXISTS(
+                 SELECT 1 FROM chunks c
+                 JOIN tree_entries te ON te.commit_hash = ?1
+                     AND te.raw_hash = c.raw_hash
+                     AND te.tool_profile_hash = c.tool_profile_hash
+                     AND te.gen = c.gen)",
+            rusqlite::params![snapshot_commit],
+            |row| row.get(0),
+        )
+        .map_err(|err| KcsError::schema(err.to_string()))?;
+    if live_exists != 0 {
+        return Ok(false);
+    }
+    // No live chunk. A legitimately empty or text-less scope has no `tree_entries`
+    // for HEAD; an exit-0 empty page is correct there, not rebuilding.
+    let head_has_tree_entries: i64 = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM tree_entries WHERE commit_hash = ?1)",
+            rusqlite::params![snapshot_commit],
+            |row| row.get(0),
+        )
+        .map_err(|err| KcsError::schema(err.to_string()))?;
+    if head_has_tree_entries == 0 {
+        return Ok(false);
+    }
+    // HEAD has `tree_entries` yet not one live chunk. If the db still holds chunks
+    // of an older generation, reindex advanced HEAD before swapping in the rebuilt
+    // sqlite — the exact HEAD-vs-sqlite window. (A never-chunked scope has none.)
+    let any_chunk: i64 = conn
+        .query_row("SELECT EXISTS(SELECT 1 FROM chunks)", [], |row| row.get(0))
+        .map_err(|err| KcsError::schema(err.to_string()))?;
+    Ok(any_chunk != 0)
 }
 
 /// Apply diversify (05 §1.4/§1.8) to the merged candidate pool and report the
