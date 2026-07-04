@@ -139,6 +139,30 @@ impl TaskStore {
             if !is_scope_local_file_name(&descriptor.input_path) {
                 return Err(PipelineError::path(descriptor.input_path));
             }
+            // Q6: validate every hash-shaped ref has the CAS hash form before any
+            // consumer slices its digest. A poisoned tasks.jsonl with a short
+            // `input_hash` (e.g. "sha256:ab") would otherwise panic (slice out of
+            // bounds) deep in the online markdownize path
+            // (`normalized_instance_dir` does `digest[0..2]` / `[2..4]`). Reject it
+            // here at the single read choke point as STORE-CORRUPT — same guard,
+            // same place P1 rejects an out-of-scope input_path.
+            if !kcs_core::cas::is_hash(&descriptor.input_hash) {
+                return Err(PipelineError::corrupt(
+                    self.path.display().to_string(),
+                    format!(
+                        "task input_hash is not a valid hash: {}",
+                        descriptor.input_hash
+                    ),
+                ));
+            }
+            if let Some(previous) = &descriptor.previous_raw_hash {
+                if !kcs_core::cas::is_hash(previous) {
+                    return Err(PipelineError::corrupt(
+                        self.path.display().to_string(),
+                        format!("task previous_raw_hash is not a valid hash: {previous}"),
+                    ));
+                }
+            }
             by_id.insert(descriptor.task_id.clone(), descriptor);
         }
         Ok(by_id.into_values().collect())
@@ -394,7 +418,9 @@ mod tests {
             task_type: TaskType::Markdownize,
             mode: Some(MarkdownizeMode::Full),
             input_path: "report.pdf".to_owned(),
-            input_hash: "sha256:abc".to_owned(),
+            // Q6: a valid CAS-shaped hash so this test exercises the input_path
+            // guard (P1), not the input_hash guard added in Q6.
+            input_hash: format!("sha256:{}", "a".repeat(64)),
             previous_raw_hash: None,
             parent_run_id: None,
             changed_unit_keys: Vec::new(),
@@ -421,6 +447,42 @@ mod tests {
             "expected KCS-E-STORE-PATH-001, got {err:?}"
         );
         assert!(err.to_string().contains("KCS-E-STORE-PATH-001"));
+    }
+
+    #[test]
+    fn q6_all_rejects_task_with_malformed_input_hash() {
+        // Q6: a poisoned tasks.jsonl whose input_hash is not a CAS hash (here a
+        // short "sha256:ab", digest length 2) must be rejected at the single read
+        // choke point as STORE-CORRUPT — not slice-panic later in
+        // `normalized_instance_dir` (`digest[0..2]` / `[2..4]`, exit 101).
+        let dir = tempfile::tempdir().unwrap();
+        let store = TaskStore::new(dir.path());
+        let task = TaskDescriptor {
+            task_id: "task_01H".to_owned(),
+            task_type: TaskType::Markdownize,
+            mode: Some(MarkdownizeMode::Full),
+            input_path: "report.pdf".to_owned(),
+            input_hash: "sha256:ab".to_owned(),
+            previous_raw_hash: None,
+            parent_run_id: None,
+            changed_unit_keys: Vec::new(),
+            output_ref: "online:mistral_ocr_markdownize".to_owned(),
+            unit_keys: None,
+            status: TaskStatus::Pending,
+            attempts: 0,
+            next_retry_at: None,
+            deadline: None,
+            heartbeat_at: None,
+            fallback_reason: None,
+            created_at: "2026-04-25T12:00:00Z".to_owned(),
+        };
+        store.append(&task).unwrap();
+        let err = store.all().unwrap_err();
+        assert!(
+            matches!(err, PipelineError::Corrupt { .. }),
+            "expected KCS-E-STORE-CORRUPT-001, got {err:?}"
+        );
+        assert!(err.to_string().contains("KCS-E-STORE-CORRUPT-001"));
     }
 
     #[test]

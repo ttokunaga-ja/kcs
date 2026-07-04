@@ -228,7 +228,17 @@ fn read_source_text(request: &MarkdownizeRequest) -> Option<String> {
     if request.media_type == "application/pdf" {
         return Some(extract_pdf_text_pages(&bytes).join("\n\n"));
     }
-    Some(String::from_utf8_lossy(&bytes).into_owned())
+    let text = String::from_utf8_lossy(&bytes).into_owned();
+    // Q5: a leading UTF-8 BOM (EF BB BF -> U+FEFF, the default for Windows
+    // Notepad / Excel / PowerShell output) would otherwise sit in front of the
+    // first ATX heading's `#`, so `parse_atx_heading` sees `\u{feff}#`, fails the
+    // level check, and drops that heading (empty heading_path / null section_id).
+    // Strip a single leading BOM so BOM and non-BOM files with identical visible
+    // text produce identical headings. Non-BOM input is unaffected.
+    match text.strip_prefix('\u{feff}') {
+        Some(stripped) => Some(stripped.to_owned()),
+        None => Some(text),
+    }
 }
 
 fn read_pdf_page_text(request: &MarkdownizeRequest, hint: &PreparedUnitHint) -> Option<String> {
@@ -451,5 +461,37 @@ mod tests {
         let _ = pdf_page_count_in_text(&type_case);
         // Genuine /Pages still suppresses the count.
         assert_eq!(pdf_page_count_in_text("/Type /Pages catalog"), 0);
+    }
+
+    // Q5: a leading UTF-8 BOM (Windows Notepad / Excel / PowerShell default) used
+    // to sit in front of the first ATX heading's `#`, so the chunker dropped that
+    // heading. `read_source_text` must strip one leading BOM so the produced
+    // markdown starts at the heading.
+    #[test]
+    fn q5_leading_bom_does_not_hide_first_heading() {
+        use crate::types::{MarkdownizeMode, MarkdownizeRequest, RawInput};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bom.md");
+        std::fs::write(&path, b"\xef\xbb\xbf# Heading One\n\nbody\n").unwrap();
+        let request = MarkdownizeRequest {
+            raw: RawInput {
+                raw_hash: format!("sha256:{}", "0".repeat(64)),
+                path: Some(path.display().to_string()),
+            },
+            media_type: "text/markdown".to_owned(),
+            prepared_unit_hint: None,
+            mode: MarkdownizeMode::Full,
+            previous: None,
+            hints: None,
+            tool_profile_hash: format!("sha256:{}", "1".repeat(64)),
+            spec_version: 1,
+        };
+        let response = MarkdownizeAdapter::markdownize(&DeterministicAdapter, request).unwrap();
+        let markdown = &response.updated_units[0].markdown;
+        assert!(
+            markdown.starts_with("# Heading One"),
+            "BOM must be stripped so the heading sits at column 0: {markdown:?}"
+        );
+        assert!(!markdown.contains('\u{feff}'), "no BOM should remain");
     }
 }

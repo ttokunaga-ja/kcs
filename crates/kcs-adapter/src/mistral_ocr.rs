@@ -439,6 +439,51 @@ pub fn image_hash(bytes: &[u8]) -> String {
     hash_bytes(bytes)
 }
 
+/// Q2: crash-atomic write of an image CAS object. Writes to a uniquely-named temp
+/// file in the destination directory, fsyncs it, then renames into place, so a
+/// crash / ENOSPC mid-write can never leave a partial file under the final
+/// `sha256:` name (which `if !path.exists()` would then adopt forever). The CLI's
+/// `open`/`view` serve path verifies the object hash before serving, but the CAS
+/// object itself must be written atomically so it is never partial in the first
+/// place.
+fn atomic_write_image_object(path: &Path, bytes: &[u8]) -> Result<()> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let parent = path.parent().ok_or_else(|| AdapterError::Io {
+        path: path.display().to_string(),
+        message: "path has no parent".to_owned(),
+    })?;
+    std::fs::create_dir_all(parent).map_err(|err| AdapterError::Io {
+        path: parent.display().to_string(),
+        message: err.to_string(),
+    })?;
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_nanos())
+        .unwrap_or_default();
+    let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+    let temp = parent.join(format!(".tmp-{}-{}-{}", std::process::id(), nanos, seq));
+    {
+        use std::io::Write as _;
+        let mut file = std::fs::File::create(&temp).map_err(|err| AdapterError::Io {
+            path: temp.display().to_string(),
+            message: err.to_string(),
+        })?;
+        file.write_all(bytes).map_err(|err| AdapterError::Io {
+            path: temp.display().to_string(),
+            message: err.to_string(),
+        })?;
+        file.sync_all().map_err(|err| AdapterError::Io {
+            path: temp.display().to_string(),
+            message: err.to_string(),
+        })?;
+    }
+    std::fs::rename(&temp, path).map_err(|err| AdapterError::Io {
+        path: path.display().to_string(),
+        message: err.to_string(),
+    })
+}
+
 pub fn persist_images(kcs_dir: impl AsRef<Path>, images: &[OcrImage]) -> Result<Vec<String>> {
     let mut hashes = Vec::new();
     for image in images {
@@ -457,10 +502,9 @@ pub fn persist_images(kcs_dir: impl AsRef<Path>, images: &[OcrImage]) -> Result<
             })?;
         }
         if !path.exists() {
-            std::fs::write(&path, &image.bytes).map_err(|err| AdapterError::Io {
-                path: path.display().to_string(),
-                message: err.to_string(),
-            })?;
+            // Q2: crash-atomic (temp + fsync + rename) so a torn write cannot leave
+            // a partial image object under the final `sha256:` name.
+            atomic_write_image_object(&path, &image.bytes)?;
         }
         hashes.push(hash);
     }
@@ -529,5 +573,35 @@ mod tests {
         assert!(replaced.contains("kcs://01H00000000000000000000000/object/image/sha256:"));
         assert!(!replaced.contains("placeholder-1"));
         assert!(!replaced.contains("placeholder-2"));
+    }
+
+    // Q2: `persist_images` must write the image CAS object atomically so its bytes
+    // always hash back to its `sha256:` filename (no torn / partial object under a
+    // correct name).
+    #[test]
+    fn q2_persist_images_writes_hash_consistent_object() {
+        let dir = tempfile::tempdir().unwrap();
+        let kcs_dir = dir.path().join(".kcs");
+        let images = vec![OcrImage {
+            bytes: b"\x89PNG image payload bytes".to_vec(),
+            media_type: "image/png".to_owned(),
+            bbox: None,
+            confidence: None,
+        }];
+        let hashes = persist_images(&kcs_dir, &images).unwrap();
+        assert_eq!(hashes.len(), 1);
+        let digest = hashes[0].strip_prefix("sha256:").unwrap();
+        let path = kcs_dir
+            .join("objects/images")
+            .join(&digest[0..2])
+            .join(&digest[2..4])
+            .join(&hashes[0]);
+        let written = std::fs::read(&path).unwrap();
+        assert_eq!(written, images[0].bytes, "object bytes must be complete");
+        assert_eq!(
+            image_hash(&written),
+            hashes[0],
+            "object must hash back to its filename"
+        );
     }
 }

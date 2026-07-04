@@ -2210,6 +2210,12 @@ fn rebuild_step3_index(repo: &Repository) -> Result<Step3RebuildReport> {
     let tree = repo.read_tree(&commit.tree)?;
     let config = read_chunking_config(repo)?;
     let existing = read_stored_chunks(repo.kcs_dir())?;
+    // Q1: physically remove any torn trailing record from `chunks.jsonl` before the
+    // append below, so the new records land on a clean `'\n'`-terminated boundary
+    // instead of being welded onto the torn bytes (which would create a
+    // permanently-skipped malformed line and re-brick every later rebuild).
+    // read/skip alone is not self-healing; this truncation is what makes it so.
+    truncate_torn_chunk_tail(repo.kcs_dir())?;
     let mut known = existing
         .iter()
         .map(|chunk| chunk.row.chunk_id.clone())
@@ -2407,10 +2413,85 @@ fn read_stored_chunks(kcs_dir: &Path) -> Result<Vec<StoredChunk>> {
     let Ok(text) = fs::read_to_string(&path) else {
         return Ok(Vec::new());
     };
-    text.lines()
+    // Q1: `chunks.jsonl` is append-only and never fsync'd (`append_stored_chunks`
+    // / `cas::append_jsonl`), so a crash / ENOSPC mid-`write_all` can leave the
+    // FINAL line torn. That chunk is regenerated from normalized_units /
+    // tree_entries on the next rebuild, so tolerate a torn tail (skip it) and let
+    // `index` / `reindex` / `repair --rebuild-db` self-heal — rather than bricking
+    // every write path (and the sole recovery command) on exit 2.
+    //
+    // A corrupt NON-final line cannot be a torn tail, so the store file is
+    // genuinely corrupt: classify it as `KCS-E-STORE-CORRUPT-001` (exit 4) with
+    // the file path, matching `TaskStore::all` (M1(c)) / cost-ledger — not the
+    // misleading `KCS-E-CONFIG-SCHEMA-001` (exit 2, no path) it used to emit.
+    let lines: Vec<&str> = text
+        .lines()
         .filter(|line| !line.trim().is_empty())
-        .map(|line| serde_json::from_str(line).map_err(|err| KcsError::schema(err.to_string())))
-        .collect()
+        .collect();
+    let last_index = lines.len().saturating_sub(1);
+    let mut chunks = Vec::with_capacity(lines.len());
+    for (index, line) in lines.iter().enumerate() {
+        match serde_json::from_str::<StoredChunk>(line) {
+            Ok(chunk) => chunks.push(chunk),
+            Err(_) if index == last_index => break,
+            Err(err) => {
+                return Err(KcsError::new(
+                    "KCS-E-STORE-CORRUPT-001",
+                    "corrupt chunks.jsonl record",
+                    json!({
+                        "path": path.display().to_string(),
+                        "line": index + 1,
+                        "message": err.to_string(),
+                    }),
+                    ExitCode::PermanentFailure,
+                ));
+            }
+        }
+    }
+    Ok(chunks)
+}
+
+/// Q1: physically drop a torn trailing record from `chunks.jsonl` before the next
+/// append. `read_stored_chunks` already tolerates a torn LAST line at read time,
+/// but read-skip alone is not self-healing: a torn line has no trailing `'\n'`, so
+/// the next `append_stored_chunks` welds its record onto the torn bytes, forming a
+/// newline-terminated *malformed* line that is then skipped forever — its chunk
+/// re-generated and re-appended on every rebuild, and reclassified as
+/// `KCS-E-STORE-CORRUPT-001` the instant that welded line stops being last (which
+/// re-bricks `index` / `reindex` / `repair`).
+///
+/// A well-formed `chunks.jsonl` always ends in `'\n'`, so "file exists and its last
+/// byte is not `'\n'`" is a reliable torn-tail signal. Truncate to just after the
+/// last `'\n'` (or to 0 when none exists) so the append lands on a clean record
+/// boundary and the whole index / reindex / repair path fully self-heals.
+///
+/// Only reached after `read_stored_chunks` returned `Ok`: a genuinely corrupt
+/// NON-final line surfaces as `KCS-E-STORE-CORRUPT-001` there and never reaches
+/// here, so real corruption is never silently truncated (multi-layer defense).
+fn truncate_torn_chunk_tail(kcs_dir: &Path) -> Result<()> {
+    let path = chunks_jsonl_path(kcs_dir);
+    let bytes = match fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => return Err(KcsError::io(err.to_string(), path.display().to_string())),
+    };
+    if bytes.is_empty() || bytes.last() == Some(&b'\n') {
+        return Ok(());
+    }
+    // Keep everything up to and including the last newline (0 when none exists).
+    let keep = bytes
+        .iter()
+        .rposition(|&byte| byte == b'\n')
+        .map_or(0, |index| index + 1);
+    let file = OpenOptions::new()
+        .write(true)
+        .open(&path)
+        .map_err(|err| KcsError::io(err.to_string(), path.display().to_string()))?;
+    file.set_len(keep as u64)
+        .map_err(|err| KcsError::io(err.to_string(), path.display().to_string()))?;
+    file.sync_all()
+        .map_err(|err| KcsError::io(err.to_string(), path.display().to_string()))?;
+    Ok(())
 }
 
 fn append_stored_chunks(kcs_dir: &Path, chunks: &[StoredChunk]) -> Result<()> {
@@ -3466,11 +3547,29 @@ fn open_cas_byte_object(
     if cache.is_file() {
         return Ok(Some((cache, true)));
     }
+    // Q2: prepared / image CAS objects were historically written non-atomically
+    // (`fs::write` straight to the final path), so a crash / ENOSPC could leave a
+    // partial file under a correct `sha256:` name that `if !path.exists()` then
+    // adopts forever. Verify the object's bytes hash to their filename before
+    // serving — mirroring `ObjectStore::read_by_hash` (cas.rs) — so a torn /
+    // corrupt object is rejected as STORE-CORRUPT instead of returned as authentic
+    // evidence. The immutable object is verified once here at first
+    // materialization; the read-only open cache is reused as-is thereafter (M5).
+    let bytes = fs::read(&object_path)
+        .map_err(|err| KcsError::io(err.to_string(), object_path.display().to_string()))?;
+    if hash_bytes(&bytes) != hash {
+        return Err(KcsError::new(
+            "KCS-E-STORE-CORRUPT-001",
+            "CAS object hash mismatch",
+            json!({ "path": object_path.display().to_string(), "expected": hash }),
+            ExitCode::PermanentFailure,
+        ));
+    }
     if let Some(parent) = cache.parent() {
         fs::create_dir_all(parent)
             .map_err(|err| KcsError::io(err.to_string(), parent.display().to_string()))?;
     }
-    fs::copy(&object_path, &cache)
+    fs::write(&cache, &bytes)
         .map_err(|err| KcsError::io(err.to_string(), cache.display().to_string()))?;
     let mut permissions = fs::metadata(&cache)
         .map_err(|err| KcsError::io(err.to_string(), cache.display().to_string()))?
@@ -3869,12 +3968,38 @@ fn run_batch(args: BatchArgs) -> Result<Value> {
     }
 }
 
+/// Q3: reclaim orphaned `Running` tasks back to `Pending`. A task is flipped to
+/// `Running` only by `execute_pending_markdownize_tasks`, immediately before an
+/// online send, and back to Done/Partial/Failed once it returns. KCS is
+/// single-user and every executor (`batch resume` / `batch retry` / index
+/// enrichment) holds the folder store lock end-to-end, so any `Running` task
+/// observed while holding that lock is necessarily an orphan from a process that
+/// died mid-send (`Running` had no outbound transition, an absorbing state).
+/// Reclaim it to `Pending` — clearing the stale `heartbeat_at` — so it is retried
+/// instead of being stuck forever and dragging `enriched_ratio` below 1.0.
+fn reclaim_orphaned_running_tasks(store: &TaskStore) -> Result<usize> {
+    store
+        .update_matching(|task| {
+            if task.status == TaskStatus::Running {
+                task.status = TaskStatus::Pending;
+                task.heartbeat_at = None;
+                true
+            } else {
+                false
+            }
+        })
+        .map_err(pipeline_to_kcs)
+}
+
 fn execute_pending_tasks(
     repo: &Repository,
     store: &TaskStore,
     override_budget: bool,
 ) -> Result<usize> {
     let mut executed = 0usize;
+    // Q3: under the folder store lock, any Running task is an orphan from a crashed
+    // run — reclaim it to Pending so this pass re-executes it.
+    reclaim_orphaned_running_tasks(store)?;
     // Markdownize and embedding opt-ins are per-adapter (07 §3, L4): gate each
     // adapter on its own approval rather than one blanket check.
     if persistent_network_allowed(repo)? {
@@ -5512,6 +5637,12 @@ fn run_index_pipeline(
     args: &IndexArgs,
 ) -> Result<IndexPipelineResult> {
     let task_store = TaskStore::new(repo.kcs_dir());
+    // Q3: index holds the folder store lock end-to-end, so any Running online task
+    // is an orphan from a crashed run. Reclaim it to Pending before the enqueue /
+    // dedup pass so it is re-counted as pending_online_tasks (and later re-sent by
+    // `batch resume`) rather than being stuck forever in the Running absorbing
+    // state — invisible to the pending counter and unrecoverable by any command.
+    reclaim_orphaned_running_tasks(&task_store)?;
     let now = now_utc_seconds();
     let scope_id = preview.scope_id.clone();
     let prepare_profile_hash =
@@ -5821,6 +5952,37 @@ fn run_index_pipeline(
     Ok(result)
 }
 
+/// Q2: crash-atomic write of a derived CAS byte object (prepared / image). Writes
+/// to a uniquely-named temp file in the destination directory, fsyncs it, then
+/// renames into place, so a crash / ENOSPC mid-write can never leave a partial
+/// file under the final `sha256:` name. `cas::atomic_write` is `pub(crate)` and
+/// unreachable from here, so this mirrors it locally. The caller keeps its
+/// `if !path.exists()` dedup skip before calling this.
+fn atomic_write_cas_object(path: &Path, bytes: &[u8]) -> Result<()> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let parent = path
+        .parent()
+        .ok_or_else(|| KcsError::io("path has no parent", path.display().to_string()))?;
+    fs::create_dir_all(parent)
+        .map_err(|err| KcsError::io(err.to_string(), parent.display().to_string()))?;
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_nanos())
+        .unwrap_or_default();
+    let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+    let temp = parent.join(format!(".tmp-{}-{}-{}", process::id(), nanos, seq));
+    {
+        let mut file = fs::File::create(&temp)
+            .map_err(|err| KcsError::io(err.to_string(), temp.display().to_string()))?;
+        file.write_all(bytes)
+            .map_err(|err| KcsError::io(err.to_string(), temp.display().to_string()))?;
+        file.sync_all()
+            .map_err(|err| KcsError::io(err.to_string(), temp.display().to_string()))?;
+    }
+    fs::rename(&temp, path).map_err(|err| KcsError::io(err.to_string(), path.display().to_string()))
+}
+
 fn write_prepared_objects(
     repo: &Repository,
     prepared_units: &[PreparedUnit],
@@ -5854,8 +6016,9 @@ fn write_prepared_objects(
                         .and_then(|unit| (unit.unit_type == UnitType::Page).then_some(b"" as &[u8]))
                 })
                 .unwrap_or(bytes);
-            fs::write(&path, object_bytes)
-                .map_err(|err| KcsError::io(err.to_string(), path.display().to_string()))?;
+            // Q2: crash-atomic (temp + fsync + rename) so a torn write cannot
+            // leave a partial prepared object under the final `sha256:` name.
+            atomic_write_cas_object(&path, object_bytes)?;
         }
     }
     Ok(())
@@ -7119,5 +7282,134 @@ mod tests {
         let cli = Cli::try_parse_from(["kcs", "search", "query", "--json"]).unwrap();
         assert!(command_captured_json_flag(&cli.command));
         assert!(Cli::try_parse_from(["kcs", "index", "--preview"]).is_ok());
+    }
+
+    fn stored_chunk_line(rowid: u64, id: &str) -> String {
+        serde_json::json!({
+            "rowid": rowid,
+            "chunk_id": id,
+            "raw_hash": format!("sha256:{}", "a".repeat(64)),
+            "tool_profile_hash": format!("sha256:{}", "b".repeat(64)),
+            "gen": 0,
+            "unit_key": "doc:1",
+            "chunking_config_hash": format!("sha256:{}", "c".repeat(64)),
+            "raw_path": "a.md",
+            "heading_path": ["H"],
+            "section_id": "h",
+            "char_start": 0,
+            "char_end": 4,
+            "text_hash": format!("sha256:{}", "d".repeat(64)),
+            "text": "body",
+            "first_seen_commit": null,
+            "created_at": "2026-07-04T00:00:00Z"
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn q1_read_stored_chunks_tolerates_torn_tail() {
+        use super::{chunks_jsonl_path, read_stored_chunks};
+        let dir = tempfile::tempdir().unwrap();
+        let kcs_dir = dir.path().join(".kcs");
+        let path = chunks_jsonl_path(&kcs_dir);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        // Two intact rows, then a torn final line (crash / ENOSPC mid-write_all,
+        // no trailing newline).
+        let mut contents = format!(
+            "{}\n{}\n",
+            stored_chunk_line(1, "c1"),
+            stored_chunk_line(2, "c2")
+        );
+        contents.push_str(r#"{"rowid":3,"chunk_id":"c3","raw_hash":"sha256:"#);
+        std::fs::write(&path, contents).unwrap();
+        let chunks = read_stored_chunks(&kcs_dir).unwrap();
+        assert_eq!(
+            chunks.len(),
+            2,
+            "torn tail must be dropped so index/repair self-heal"
+        );
+    }
+
+    #[test]
+    fn q1_read_stored_chunks_flags_mid_file_corruption() {
+        use super::{chunks_jsonl_path, read_stored_chunks};
+        let dir = tempfile::tempdir().unwrap();
+        let kcs_dir = dir.path().join(".kcs");
+        let path = chunks_jsonl_path(&kcs_dir);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        // A broken NON-final line cannot be a torn tail -> STORE-CORRUPT (exit 4),
+        // not the old CONFIG-SCHEMA (exit 2) misclassification.
+        let contents = format!(
+            "{}\n{}\n{}\n",
+            stored_chunk_line(1, "c1"),
+            r#"{"rowid":2,"chunk_id":BROKEN"#,
+            stored_chunk_line(3, "c3")
+        );
+        std::fs::write(&path, contents).unwrap();
+        let err = read_stored_chunks(&kcs_dir).unwrap_err();
+        assert_eq!(err.error_code(), "KCS-E-STORE-CORRUPT-001");
+    }
+
+    #[test]
+    fn q2_open_cas_byte_object_rejects_corrupt_object() {
+        use super::{cas_object_path, hash_bytes, open_cas_byte_object, ScopeTarget};
+        let dir = tempfile::tempdir().unwrap();
+        let kcs_dir = dir.path().join(".kcs");
+        // The correct `sha256:` filename for the AUTHENTIC bytes...
+        let hash = hash_bytes(b"authentic prepared object");
+        let object_path = cas_object_path(&kcs_dir, "prepared", &hash);
+        std::fs::create_dir_all(object_path.parent().unwrap()).unwrap();
+        // ...but the file under it holds corrupt/torn bytes (non-atomic write).
+        std::fs::write(&object_path, b"corrupt partial bytes").unwrap();
+        let target = ScopeTarget {
+            repo_root: dir.path().to_path_buf(),
+            kcs_dir,
+            scope_id: "01H00000000000000000000000".to_owned(),
+        };
+        let err = open_cas_byte_object(&target, "prepared", false, &hash, None).unwrap_err();
+        assert_eq!(
+            err.error_code(),
+            "KCS-E-STORE-CORRUPT-001",
+            "a corrupt CAS object must not be served as authentic evidence"
+        );
+    }
+
+    #[test]
+    fn q3_reclaims_orphaned_running_task_to_pending() {
+        use super::reclaim_orphaned_running_tasks;
+        use kcs_pipeline::markdownize::MarkdownizeMode;
+        use kcs_pipeline::task::{TaskDescriptor, TaskStatus, TaskStore, TaskType};
+        let dir = tempfile::tempdir().unwrap();
+        let store = TaskStore::new(dir.path());
+        let task = TaskDescriptor {
+            task_id: "t1".to_owned(),
+            task_type: TaskType::Markdownize,
+            mode: Some(MarkdownizeMode::Full),
+            input_path: "notes.txt".to_owned(),
+            input_hash: format!("sha256:{}", "a".repeat(64)),
+            previous_raw_hash: None,
+            parent_run_id: None,
+            changed_unit_keys: Vec::new(),
+            output_ref: "online:mistral_ocr_markdownize".to_owned(),
+            unit_keys: None,
+            // A task stuck Running is bit-identical to a crash between the
+            // Running-persist and the Done-persist.
+            status: TaskStatus::Running,
+            attempts: 0,
+            next_retry_at: None,
+            deadline: None,
+            heartbeat_at: Some("2020-01-01T00:00:00Z".to_owned()),
+            fallback_reason: Some("ready_for_online_adapter".to_owned()),
+            created_at: "2026-07-04T00:00:00Z".to_owned(),
+        };
+        store.append(&task).unwrap();
+        let reclaimed = reclaim_orphaned_running_tasks(&store).unwrap();
+        assert_eq!(reclaimed, 1, "the orphaned Running task must be reclaimed");
+        let tasks = store.all().unwrap();
+        assert_eq!(tasks[0].status, TaskStatus::Pending);
+        assert!(
+            tasks[0].heartbeat_at.is_none(),
+            "stale heartbeat must be cleared on reclaim"
+        );
     }
 }
