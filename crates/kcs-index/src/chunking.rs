@@ -120,6 +120,12 @@ pub fn chunk_normalized_instance(input: ChunkingInput) -> Result<Vec<ChunkRow>> 
 
     let mut rows = Vec::new();
     for unit in &input.units {
+        // N6: materialize the unit's chars once so every span slice is an O(1)
+        // index range instead of an O(offset) `chars().skip(start)` rescan. The
+        // section/heading scan stays &str-based (already a single linear pass);
+        // only the quadratic span slicing moves to the Vec<char>. Output bytes are
+        // unchanged — `unit_chars[a..b]` collects the same String as before.
+        let unit_chars: Vec<char> = unit.markdown.chars().collect();
         let sections = section_ranges(&unit.markdown);
         let mut duplicate_counts = BTreeMap::<String, u64>::new();
         for section in sections {
@@ -149,7 +155,7 @@ pub fn chunk_normalized_instance(input: ChunkingInput) -> Result<Vec<ChunkRow>> 
                 }
             });
             for (start, end) in split_range_by_max_chars(
-                &unit.markdown,
+                &unit_chars,
                 section.start,
                 section.end,
                 input.config.max_chars as usize,
@@ -157,7 +163,7 @@ pub fn chunk_normalized_instance(input: ChunkingInput) -> Result<Vec<ChunkRow>> 
                 if start >= end {
                     continue;
                 }
-                let text = slice_chars(&unit.markdown, start, end);
+                let text = slice_chars(&unit_chars, start, end);
                 let mut row = ChunkRow {
                     chunk_id: String::new(),
                     raw_hash: unit.raw_hash.clone(),
@@ -278,7 +284,7 @@ fn parse_atx_heading(line: &str) -> Option<(usize, String)> {
 }
 
 fn split_range_by_max_chars(
-    text: &str,
+    chars: &[char],
     start: usize,
     end: usize,
     max_chars: usize,
@@ -294,20 +300,17 @@ fn split_range_by_max_chars(
             ranges.push((cursor, end));
             break;
         }
-        let window = slice_chars(text, cursor, limit);
+        let window = slice_chars(chars, cursor, limit);
         let split_at = last_paragraph_boundary(&window)
             .filter(|boundary| *boundary > 0)
             .map(|boundary| cursor + boundary)
             .unwrap_or(limit);
         ranges.push((cursor, split_at));
         cursor = split_at;
-        while cursor < end {
-            let ch = slice_chars(text, cursor, cursor + 1);
-            if ch.trim().is_empty() {
-                cursor += 1;
-            } else {
-                break;
-            }
+        // Consume run-leading whitespace by direct index (was an O(cursor) slice
+        // per single char advance — the dominant term of the old O(N²) cost).
+        while cursor < end && chars[cursor].is_whitespace() {
+            cursor += 1;
         }
     }
     ranges
@@ -331,8 +334,8 @@ fn last_paragraph_boundary(window: &str) -> Option<usize> {
     last
 }
 
-fn slice_chars(text: &str, start: usize, end: usize) -> String {
-    text.chars().skip(start).take(end - start).collect()
+fn slice_chars(chars: &[char], start: usize, end: usize) -> String {
+    chars[start..end].iter().collect()
 }
 
 fn hash_jcs(value: &Value) -> Result<String> {
@@ -594,6 +597,56 @@ mod tests {
         assert_eq!(
             chunking_config_hash("heading", 6000).unwrap(),
             "sha256:7810328ffa7f0dd9a558294e166f20d8038d8d779809ee519582e3d6ba1b98ea"
+        );
+    }
+
+    fn time_chunk(n: usize) -> std::time::Duration {
+        // A single large unit with no paragraph boundaries forces one hard split
+        // every `max_chars`; the old `slice_chars` rescanned from the unit head on
+        // every split (O(N²)). Small `max_chars` amplifies the split count so the
+        // quadratic term dominates if present.
+        let config = ChunkingConfig {
+            chunking_config_hash: chunking_config_hash("heading", 200).unwrap(),
+            strategy: "heading".to_owned(),
+            max_chars: 200,
+        };
+        let input = ChunkingInput {
+            raw_path: "big.md".to_owned(),
+            units: vec![NormalizedUnitInput {
+                raw_hash: RAW.to_owned(),
+                tool_profile_hash: TOOL.to_owned(),
+                gen: 0,
+                unit_key: "doc:1".to_owned(),
+                markdown: "a".repeat(n),
+            }],
+            config,
+            created_at: "2026-07-04T00:00:00Z".to_owned(),
+        };
+        let start = std::time::Instant::now();
+        let rows = chunk_normalized_instance(input).expect("chunking must succeed");
+        assert!(!rows.is_empty());
+        start.elapsed()
+    }
+
+    // N6: chunking a single large document must be linear, not O(N²). Doubling the
+    // input should ~double the time (~2x), not quadruple it (~4x, the bug). The
+    // ratio is invariant to the debug/release constant factor; the absolute
+    // backstop separates the fixed sub-second path from the old multi-second one.
+    #[test]
+    fn n6_chunking_scales_linearly_not_quadratically() {
+        // Warm up (allocator/branch predictor) so the first measurement is not
+        // penalized and the ratio stays honest.
+        let _ = time_chunk(200_000);
+        let t1 = time_chunk(1_000_000).min(time_chunk(1_000_000));
+        let t2 = time_chunk(2_000_000).min(time_chunk(2_000_000));
+        assert!(
+            t2.as_secs_f64() < 10.0,
+            "2MB chunking took {t2:?}; O(N²) slicing not eliminated"
+        );
+        assert!(
+            t2.as_secs_f64() < t1.as_secs_f64() * 3.0 + 0.02,
+            "chunking scaled super-linearly (O(N²)): 1MB={t1:?} 2MB={t2:?} (ratio {:.2})",
+            t2.as_secs_f64() / t1.as_secs_f64().max(f64::MIN_POSITIVE)
         );
     }
 }

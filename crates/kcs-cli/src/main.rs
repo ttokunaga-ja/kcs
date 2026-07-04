@@ -51,7 +51,9 @@ use kcs_pipeline::prepare::{
     hash_bytes, map_units, pdf_text_pages, prepare_units, unit_ref, PrepareStageRequest,
     PreparedUnit, UnitFingerprint, UnitType,
 };
-use kcs_pipeline::scan::{build_scan_preview, ScanCandidate, ScanPreview, ScanPreviewRequest};
+use kcs_pipeline::scan::{
+    build_scan_preview, classify_secret, ScanCandidate, ScanPreview, ScanPreviewRequest, SecretTier,
+};
 use kcs_pipeline::task::{retry_policy, task_status_from_unit_counts, RetryErrorKind};
 use kcs_pipeline::task::{TaskDescriptor, TaskStatus, TaskStore, TaskType};
 use kcs_search::cursor::{
@@ -181,6 +183,13 @@ struct IndexArgs {
     offline: bool,
     #[arg(long)]
     revoke_network: bool,
+    /// N1: explicit approval to lift the Tier B (secrets_tier_b_warning) online
+    /// hold for this scope, allowing candidate-secret files to be sent to online
+    /// adapters (markdownize + embedding). Distinct from `--approve` (which is the
+    /// scan/network opt-in) — sending a probable-secret file needs its own
+    /// consent. Persisted so `batch resume` honors it (decisions #45).
+    #[arg(long)]
+    send_secrets: bool,
 }
 
 #[derive(Debug, Args)]
@@ -301,7 +310,23 @@ fn run(cli: Cli) -> Result<Value> {
             let _action = args.action;
             let repo = Repository::open_current()?;
             validate_repo_tool_lock(&repo)?;
-            let outcome = repo.snapshot(args.message.as_deref(), None)?;
+            // N2: a manual snapshot must exclude the same Tier A secrets `kcs index`
+            // does, or `.env`/`*.pem` plaintext lands irreversibly in objects/raw and
+            // the latest tree. Compute the exclusion set from the scan preview (the
+            // shared classifier) and pass it through the filtered snapshot path.
+            let preview = build_scan_preview(ScanPreviewRequest {
+                scope_path: repo.root().display().to_string(),
+                include_raw_hashes: false,
+                require_network_approval: false,
+            })
+            .map_err(pipeline_to_kcs)?;
+            let excluded = preview
+                .candidates
+                .iter()
+                .filter(|candidate| candidate.ignored)
+                .map(|candidate| candidate.input_path.clone())
+                .collect::<BTreeSet<_>>();
+            let outcome = repo.snapshot_filtered(args.message.as_deref(), None, &excluded)?;
             if let Some(commit_hash) = &outcome.commit_hash {
                 append_event_log(
                     "KCS-I-COMMIT-CREATED-001",
@@ -437,7 +462,15 @@ fn run_index(args: IndexArgs) -> Result<Value> {
             args.approve,
         )?;
     }
-    record_quarantine_candidates(&repo, &preview)?;
+    // N1c: `--send-secrets` records the explicit Tier B online approval and lifts
+    // any existing hold. Recorded BEFORE the pipeline so this run's Tier B online
+    // tasks/embeddings are enqueued ready rather than held.
+    if args.send_secrets {
+        write_secrets_approval(&repo, &preview)?;
+        release_secret_holds(&repo)?;
+    }
+    let secrets_approved = secrets_send_approved(&repo);
+    record_quarantine_candidates(&repo, &preview, secrets_approved)?;
 
     materialize_tool_lock(&repo)?;
     let index_result = run_index_pipeline(&repo, &preview, &args)?;
@@ -558,7 +591,7 @@ fn run_repair(args: UnsupportedArgs) -> Result<Value> {
     // enrichment never ran) is enqueued/embedded rather than silently reported as
     // fully enriched. `rebuild_sqlite_index` already preserved existing
     // embeddings, so reuse keeps this near-free; offline it only enqueues.
-    let embedding_online = embedding_online_allowed(&repo, false)?;
+    let embedding_online = embedding_online_allowed(&repo, false, false)?;
     run_embedding_enrichment(&repo, embedding_online, false)?;
     Ok(json!({
         "status": "rebuilt",
@@ -832,9 +865,9 @@ fn run_search(args: UnsupportedArgs) -> Result<Value> {
     );
     let mode = resolve_search_mode(parsed.requested_mode, &vector)?;
 
-    if parsed.query.chars().count() < 2 {
-        return empty_search_response(&parsed, &repo, started, &mode, &[], &[]);
-    }
+    // N8: the short-query short-circuit is NOT taken here — it must run after scope
+    // resolution, the all-failed check, and index_status aggregation below, or a
+    // 1-char query would mask a scope failure and pin index_status to a fixed 1.0.
 
     if exec_scopes.is_empty() {
         // Cursor replay where no frozen scope resolves any more → all failed
@@ -969,6 +1002,14 @@ fn run_search(args: UnsupportedArgs) -> Result<Value> {
             "all searched scopes failed",
             excluded,
         ));
+    }
+
+    // N8: now that scope resolution, the all-failed check, and (below) index_status
+    // are honored, a short (< 2 char) query — which produces no indexable token —
+    // short-circuits the ranking/paging with an honest empty page that still
+    // reports the real searched scopes and index_status.
+    if parsed.query.chars().count() < 2 {
+        return empty_search_response(&parsed, &repo, started, &mode, &searched, &excluded);
     }
 
     // Cross-scope merge is rank-based: RRF score desc, tie-break (scope_path,
@@ -2005,7 +2046,7 @@ fn run_reindex(args: UnsupportedArgs) -> Result<Value> {
     // embedding adapter's opt-in; offline this enqueues Embedding tasks so
     // `index_status` reports the pending enrichment instead of falsely showing
     // enriched_ratio = 1.0 (the tasks would otherwise never be created).
-    let embedding_online = embedding_online_allowed(&repo, false)?;
+    let embedding_online = embedding_online_allowed(&repo, false, false)?;
     run_embedding_enrichment(&repo, embedding_online, false)?;
     Ok(json!({
         "status": "reindexed",
@@ -2629,12 +2670,24 @@ fn empty_search_response(
     repo: &Repository,
     started: Instant,
     mode: &ResolvedMode,
-    searched_scopes: &[Value],
+    searched: &[SearchedScopeInfo],
     excluded_scopes: &[Value],
 ) -> Result<Value> {
     // Short queries still report the resolved mode honestly (auto -> text with the
-    // vector-unavailable fallback) plus index_status (K7).
-    let response = json!({
+    // vector-unavailable fallback). N8: index_status is now aggregated from the
+    // actually-searched scopes (not a fixed 1.0), and a partial scope failure is
+    // surfaced as exit 3 just like a ranked search.
+    let searched_scopes = searched
+        .iter()
+        .map(|scope| {
+            json!({
+                "scope_id": scope.scope_id,
+                "scope_path": scope.scope_path,
+                "snapshot_at": scope.snapshot_at,
+            })
+        })
+        .collect::<Vec<_>>();
+    let mut response = json!({
         "query": parsed.query,
         "requested_mode": search_mode_json(mode.requested),
         "resolved_mode": search_mode_json(mode.resolved),
@@ -2645,14 +2698,15 @@ fn empty_search_response(
         "paging": { "limit": parsed.limit, "next_cursor": Value::Null },
         "searched_scopes": searched_scopes,
         "excluded_scopes": excluded_scopes,
-        "index_status": json!({
-            "enriched_ratio": 1.0,
-            "pending_enrichment_tasks": 0,
-            "budget_paused": false,
-        }),
+        "index_status": compute_index_status(searched),
         "results": [],
     });
     append_search_logs(repo, &response, started)?;
+    if !excluded_scopes.is_empty() {
+        if let Some(object) = response.as_object_mut() {
+            object.insert("__exit_code".to_owned(), json!(3));
+        }
+    }
     Ok(response)
 }
 
@@ -2903,7 +2957,10 @@ fn resolve_pointer_for_cli(pointer: &EvidencePointer) -> Result<PointerResolutio
     // tree walk; otherwise the raw_hash must appear in commit.tree for the
     // pointer to resolve against *this* commit's snapshot (not the working tree
     // of some later commit).
-    let commit_shallow = match repo.read_tree(&commit.tree) {
+    // `entry_gen` is the tree entry's normalization generation on a non-shallow
+    // commit; `None` on the shallow path (no tree to read). It binds the chunk's
+    // gen below (N5).
+    let (commit_shallow, entry_gen) = match repo.read_tree(&commit.tree) {
         Ok(tree) => {
             let entry = tree
                 .entries
@@ -2917,18 +2974,26 @@ fn resolve_pointer_for_cli(pointer: &EvidencePointer) -> Result<PointerResolutio
                 return Err(purge_not_found_error(&target, &pointer.raw_hash));
             };
             // M6: the tree entry's normalization must bind to the pointer's
-            // tool_profile_hash. A pointer that pairs this raw_hash with a
-            // different tool profile than the commit normalized it under is
-            // internally inconsistent (a tampered pointer) — refuse it rather than
-            // resolve "raw is B but body is A".
-            if let Some(normalize) = &entry.normalize {
-                if normalize.tool_profile_hash != pointer.tool_profile_hash {
-                    return Err(invalid_pointer_identity_error(pointer));
+            // tool_profile_hash. N5: it must ALSO bind `gen` (checked below against
+            // the resolved chunk), so a pointer that keeps an old commit but swaps
+            // in a newer-generation chunk_hash produced by `reindex --force` cannot
+            // resolve (the gen axis M6 missed, 08 §3). A tree entry with no explicit
+            // normalization (e.g. a bare `kcs snapshot` that advanced HEAD without
+            // re-recording normalize refs, L3) carries no gen to bind, so it keeps
+            // the pre-existing behavior — the chunk (raw, tool) identity check below
+            // is the available guard. `entry_gen` stays `None` there.
+            let entry_gen = match &entry.normalize {
+                Some(normalize) => {
+                    if normalize.tool_profile_hash != pointer.tool_profile_hash {
+                        return Err(invalid_pointer_identity_error(pointer));
+                    }
+                    Some(normalize.gen)
                 }
-            }
-            false
+                None => None,
+            };
+            (false, entry_gen)
         }
-        Err(error) if is_store_not_found(&error) => true,
+        Err(error) if is_store_not_found(&error) => (true, None),
         Err(error) => return Err(error),
     };
 
@@ -2967,6 +3032,17 @@ fn resolve_pointer_for_cli(pointer: &EvidencePointer) -> Result<PointerResolutio
         || chunk.row.tool_profile_hash != pointer.tool_profile_hash
     {
         return Err(invalid_pointer_identity_error(pointer));
+    }
+    // N5: on a non-shallow commit, the chunk's generation must equal the tree
+    // entry's normalize.gen. Otherwise a pointer to an old commit could resolve a
+    // chunk_hash from a *newer* generation (post `reindex --force`), serving body
+    // from gen N+1 under a commit that only ever normalized gen N. The shallow
+    // path has no tree entry, so gen stays unbound there (chunk (raw, tool)
+    // identity is the only available check).
+    if let Some(entry_gen) = entry_gen {
+        if chunk.row.gen != entry_gen {
+            return Err(invalid_pointer_identity_error(pointer));
+        }
     }
     let text = chunk.row.text;
 
@@ -3451,13 +3527,19 @@ fn search_to_kcs(error: kcs_search::SearchError) -> KcsError {
 fn run_batch(args: BatchArgs) -> Result<Value> {
     let repo = Repository::open_current()?;
     let store = TaskStore::new(repo.kcs_dir());
+    // N1: a Tier B online hold is only lifted by an explicit `--send-secrets`
+    // approval, never by a plain `batch resume`. Without this, resume's
+    // Paused -> Pending flip would silently un-hold the candidate-secret task.
+    let secrets_approved = secrets_send_approved(&repo);
     match args.command {
         Some(BatchCommand::Resume(resume)) => {
             let changed = store
                 .update_matching(|task| {
+                    let held_secret = task.fallback_reason.as_deref() == Some(SECRETS_TIER_B_HOLD);
                     if task.status == TaskStatus::Paused
                         && (resume.override_budget
                             || task.fallback_reason.as_deref() != Some("budget_exceeded"))
+                        && (!held_secret || secrets_approved)
                     {
                         task.status = TaskStatus::Pending;
                         task.fallback_reason = None;
@@ -3516,7 +3598,7 @@ fn execute_pending_tasks(
     // without this, rate-limited Pending embedding tasks could never be completed
     // by `batch resume` / `batch retry`. `override_budget` reaches the budget
     // judgement (L2) and the embedding opt-in is the embedding adapter's own (L4).
-    let embedding_online = embedding_online_allowed(repo, false)?;
+    let embedding_online = embedding_online_allowed(repo, false, false)?;
     executed += run_embedding_enrichment(repo, embedding_online, override_budget)?;
     Ok(executed)
 }
@@ -3533,6 +3615,10 @@ fn execute_pending_markdownize_tasks(
     let cost_ledger = CostLedger::new(cost_ledger_path());
     let month = utc_month(&now_utc_seconds());
     let scope_id = repo.scope_id_for_adapter();
+    // N1a (defense in depth): even a Pending online markdownize task must not be
+    // sent when its input is a Tier B (candidate-secret) file and the scope is not
+    // `--send-secrets`-approved — in case the hold was cleared by some other path.
+    let secrets_approved = secrets_send_approved(repo);
     let tasks = store
         .all()
         .map_err(pipeline_to_kcs)?
@@ -3545,6 +3631,8 @@ fn execute_pending_markdownize_tasks(
                 // (Step2c I2); `batch retry` already gates on this, so this is
                 // a defensive belt-and-braces guard.
                 && task_retry_due(task)
+                && (secrets_approved
+                    || classify_secret(&task.input_path) != Some(SecretTier::TierB))
         })
         .collect::<Vec<_>>();
     let mut executed = 0usize;
@@ -3697,9 +3785,21 @@ fn approval_row_present(repo: &Repository, tool_id: &str) -> bool {
 /// on the embedding adapter's own opt-in (`gemini_embedding_2`), not the
 /// markdownize approval it used to ride on. `offline` (the `--offline` flag)
 /// forces it off regardless of any recorded approval.
-fn embedding_online_allowed(repo: &Repository, offline: bool) -> Result<bool> {
+fn embedding_online_allowed(repo: &Repository, offline: bool, online: bool) -> Result<bool> {
+    // Precedence (N7): `--offline` forces enqueue-only; then the per-invocation
+    // `--online` temporary opt-in; then the persistent embedding opt-in row. The
+    // `online` arm was missing, so `index --online` left embedding Pending even
+    // though markdownize honored the same flag. `--online` mirrors markdownize's
+    // `network_allowed`: it enables sending only when the scope carries an approval
+    // record (and is not network-revoked), without needing the persistent opt-in.
     if offline {
         return Ok(false);
+    }
+    if online {
+        if network_revoked(repo)? {
+            return Ok(false);
+        }
+        return approval_exists(repo);
     }
     persistent_network_allowed_for(repo, EMBEDDING_ADAPTER_ID)
 }
@@ -4188,8 +4288,9 @@ struct EmbeddableChunk {
 /// configured (keeps the default index path unchanged).
 fn generate_scope_embeddings(repo: &Repository, args: &IndexArgs) -> Result<()> {
     // Embedding online opt-in is the embedding adapter's own (L4), not a
-    // ride-along on the markdownize approval. `--offline` forces enqueue-only.
-    let online = embedding_online_allowed(repo, args.offline)?;
+    // ride-along on the markdownize approval. `--offline` forces enqueue-only;
+    // N7: `--online` now reaches the embedding adapter too (was ignored).
+    let online = embedding_online_allowed(repo, args.offline, args.online)?;
     run_embedding_enrichment(repo, online, false).map(|_| ())
 }
 
@@ -4230,7 +4331,21 @@ fn run_embedding_enrichment(
 
     let task_store = TaskStore::new(repo.kcs_dir());
     let now = now_utc_seconds();
-    enqueue_embedding_tasks(&task_store, repo, &pending, online, &now)?;
+    // N1a: partition off chunks whose raw file is a Tier B (candidate-secret)
+    // document without a `--send-secrets` approval. Their embedding tasks are held
+    // (Paused `secrets_tier_b_hold`, visible in `kcs status`) and never enter the
+    // send pipeline, so `index --online` / `batch resume` cannot ship their text
+    // to the embedding API. Approval moves them back into `sendable`.
+    let secrets_approved = secrets_send_approved(repo);
+    let (held, sendable): (Vec<EmbeddableChunk>, Vec<EmbeddableChunk>) =
+        pending.into_iter().partition(|chunk| {
+            !secrets_approved && classify_secret(&chunk.raw_path) == Some(SecretTier::TierB)
+        });
+    hold_secret_embedding_tasks(&task_store, repo, &held, &now)?;
+    if sendable.is_empty() {
+        return Ok(0);
+    }
+    enqueue_embedding_tasks(&task_store, repo, &sendable, online, &now)?;
     if !online {
         // Offline: tasks stay Pending; `index_status` reports them (05 §1.7).
         return Ok(0);
@@ -4239,7 +4354,7 @@ fn run_embedding_enrichment(
     // L2(ii)/L7: skip chunks whose embedding task is sticky budget-Paused (unless
     // override) or a Failed task that is not retry-eligible (unelapsed backoff or
     // non-retryable) — the same lifecycle semantics markdownize already honors.
-    let embeddable = filter_embeddable_by_task_state(&task_store, pending, override_budget)?;
+    let embeddable = filter_embeddable_by_task_state(&task_store, sendable, override_budget)?;
     if embeddable.is_empty() {
         return Ok(0);
     }
@@ -4567,6 +4682,55 @@ fn live_chunks_without_embedding(
 
 fn embedding_task_output_ref(chunk_id: &str) -> String {
     format!("embedding:{chunk_id}")
+}
+
+/// N1a: enqueue a held `Embedding` task (Paused `secrets_tier_b_hold`) per Tier B
+/// chunk that lacks one, so the hold is visible in `kcs status` without ever
+/// entering the send pipeline. Idempotent — a chunk that already has an embedding
+/// task (held or otherwise) is left untouched.
+fn hold_secret_embedding_tasks(
+    task_store: &TaskStore,
+    repo: &Repository,
+    held: &[EmbeddableChunk],
+    now: &str,
+) -> Result<()> {
+    if held.is_empty() {
+        return Ok(());
+    }
+    let existing = task_store
+        .all()
+        .map_err(pipeline_to_kcs)?
+        .into_iter()
+        .filter(|task| task.task_type == TaskType::Embedding)
+        .map(|task| task.output_ref)
+        .collect::<BTreeSet<_>>();
+    for chunk in held {
+        let output_ref = embedding_task_output_ref(&chunk.chunk_id);
+        if existing.contains(&output_ref) {
+            continue;
+        }
+        let task = TaskDescriptor {
+            task_id: format!("task_{}", new_ulid(repo.root())),
+            task_type: TaskType::Embedding,
+            mode: None,
+            input_path: chunk.raw_path.clone(),
+            input_hash: chunk.text_hash.clone(),
+            previous_raw_hash: None,
+            parent_run_id: None,
+            changed_unit_keys: vec![chunk.chunk_id.clone()],
+            output_ref,
+            unit_keys: None,
+            status: TaskStatus::Paused,
+            attempts: 0,
+            next_retry_at: None,
+            deadline: None,
+            heartbeat_at: None,
+            fallback_reason: Some(SECRETS_TIER_B_HOLD.to_owned()),
+            created_at: now.to_owned(),
+        };
+        task_store.append(&task).map_err(pipeline_to_kcs)?;
+    }
+    Ok(())
 }
 
 /// Enqueue one Pending `Embedding` task per pending chunk, skipping chunks that
@@ -5062,12 +5226,17 @@ fn run_index_pipeline(
         network_allowed,
         ..IndexPipelineResult::default()
     };
+    // N1a: a Tier B (candidate-secret) file is ingested locally but its online
+    // task is held unless the scope carries an explicit `--send-secrets` approval.
+    let secrets_approved = secrets_send_approved(repo);
 
     for candidate in preview
         .candidates
         .iter()
         .filter(|candidate| !candidate.ignored && candidate.media_type != "inode/directory")
     {
+        let secrets_hold = candidate.quarantine_reason.as_deref() == Some("secrets_tier_b_warning")
+            && !secrets_approved;
         let path = repo.root().join(&candidate.input_path);
         let bytes = fs::read(&path)
             .map_err(|err| KcsError::io(err.to_string(), path.display().to_string()))?;
@@ -5129,6 +5298,7 @@ fn run_index_pipeline(
                 &raw_hash,
                 &scope_id,
                 network_allowed,
+                secrets_hold,
                 args,
                 &now,
                 &mut result,
@@ -5335,6 +5505,7 @@ fn run_index_pipeline(
             &raw_hash,
             &scope_id,
             network_allowed,
+            secrets_hold,
             args,
             &now,
             &mut result,
@@ -5772,6 +5943,7 @@ fn enqueue_online_placeholder_task(
     raw_hash: &str,
     scope_id: &str,
     network_allowed: bool,
+    secrets_hold: bool,
     args: &IndexArgs,
     created_at: &str,
     result: &mut IndexPipelineResult,
@@ -5841,7 +6013,13 @@ fn enqueue_online_placeholder_task(
         folder_remaining,
         matches_batch_override(args),
     );
-    let (status, reason) = if !budget.allowed {
+    // N1a: a Tier B (candidate-secret) file without `--send-secrets` is held here
+    // — a Paused task with `secrets_tier_b_hold`, visible in `kcs status`, that
+    // `batch resume` will not un-hold and `execute_pending_markdownize_tasks` will
+    // not send. The hold takes precedence over budget/network reasons.
+    let (status, reason) = if secrets_hold {
+        (TaskStatus::Paused, Some(SECRETS_TIER_B_HOLD))
+    } else if !budget.allowed {
         (TaskStatus::Paused, Some("budget_exceeded"))
     } else if !network_allowed {
         (TaskStatus::Pending, Some("network_opt_in_required"))
@@ -6090,7 +6268,68 @@ fn set_allow_network_false(value: &mut toml::Value) {
         .insert("allow_network".to_owned(), toml::Value::Boolean(false));
 }
 
-fn record_quarantine_candidates(repo: &Repository, preview: &ScanPreview) -> Result<()> {
+/// N1: the marker file whose presence records an explicit `--send-secrets`
+/// approval for this scope. It lifts the Tier B online hold for every subsequent
+/// pass (index inline + `batch resume`), so it must be a persistent, per-scope
+/// signal (decisions #45).
+const SECRETS_APPROVAL_FILE: &str = "secrets-approved.jsonl";
+
+/// Whether Tier B (candidate-secret) files may be sent to online adapters for
+/// this scope, i.e. `--send-secrets` was recorded at least once (N1c).
+fn secrets_send_approved(repo: &Repository) -> bool {
+    repo.kcs_dir().join(SECRETS_APPROVAL_FILE).is_file()
+}
+
+/// Record the explicit `--send-secrets` approval (N1c). Idempotent: appended as
+/// an audit trail; presence is what `secrets_send_approved` checks.
+fn write_secrets_approval(repo: &Repository, preview: &ScanPreview) -> Result<()> {
+    let path = repo.kcs_dir().join(SECRETS_APPROVAL_FILE);
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .map_err(|err| KcsError::io(err.to_string(), path.display().to_string()))?;
+    let mut line = serde_json::to_string(&json!({
+        "scope_id": preview.scope_id,
+        "approved_at": now_utc_seconds(),
+        "actor": std::env::var("USER").unwrap_or_else(|_| "unknown".to_owned()),
+        "approval_method": "send_secrets",
+    }))
+    .map_err(|err| KcsError::io(err.to_string(), path.display().to_string()))?;
+    line.push('\n');
+    file.write_all(line.as_bytes())
+        .map_err(|err| KcsError::io(err.to_string(), path.display().to_string()))
+}
+
+/// Release any online tasks held for Tier B secrets (`secrets_tier_b_hold`) back
+/// to Pending once the scope is approved (N1c). Markdownize holds then flow to
+/// `batch resume`; embedding holds are re-driven by the enrichment pass.
+fn release_secret_holds(repo: &Repository) -> Result<usize> {
+    let store = TaskStore::new(repo.kcs_dir());
+    store
+        .update_matching(|task| {
+            if task.status == TaskStatus::Paused
+                && task.fallback_reason.as_deref() == Some(SECRETS_TIER_B_HOLD)
+            {
+                task.status = TaskStatus::Pending;
+                task.fallback_reason = None;
+                true
+            } else {
+                false
+            }
+        })
+        .map_err(pipeline_to_kcs)
+}
+
+/// Fallback reason marking an online task held because its input is a Tier B
+/// (candidate-secret) file awaiting `--send-secrets` (N1a).
+const SECRETS_TIER_B_HOLD: &str = "secrets_tier_b_hold";
+
+fn record_quarantine_candidates(
+    repo: &Repository,
+    preview: &ScanPreview,
+    secrets_approved: bool,
+) -> Result<()> {
     let path = repo.kcs_dir().join("quarantine.jsonl");
     let existing = read_quarantine_records(repo)?
         .into_iter()
@@ -6102,23 +6341,38 @@ fn record_quarantine_candidates(repo: &Repository, preview: &ScanPreview) -> Res
         .open(&path)
         .map_err(|err| KcsError::io(err.to_string(), path.display().to_string()))?;
     for candidate in &preview.candidates {
-        if candidate.ignored
-            && candidate.quarantine_reason.as_deref() == Some("secrets_tier_a_excluded")
-            && !existing.contains(&candidate.input_path)
-        {
-            let record = json!({
-                "path": candidate.input_path,
-                "reason": "secrets_tier_a",
-                "recorded_at": now_utc_seconds(),
-                "approval_method": "quarantine",
-            });
-            // M1(b): one framed record per single write_all (no interleaving).
-            let mut line = serde_json::to_string(&record)
-                .map_err(|err| KcsError::io(err.to_string(), path.display().to_string()))?;
-            line.push('\n');
-            file.write_all(line.as_bytes())
-                .map_err(|err| KcsError::io(err.to_string(), path.display().to_string()))?;
+        // N1b: record Tier A (excluded from ingest) AND Tier B (ingested locally
+        // but held from online send) so `kcs status` surfaces both. Tier B carries
+        // its live disposition — "hold" until `--send-secrets`, then "send_approved".
+        let (reason, approval_method) = match candidate.quarantine_reason.as_deref() {
+            Some("secrets_tier_a_excluded") if candidate.ignored => {
+                ("secrets_tier_a", "quarantine")
+            }
+            Some("secrets_tier_b_warning") => (
+                "secrets_tier_b",
+                if secrets_approved {
+                    "send_approved"
+                } else {
+                    "hold"
+                },
+            ),
+            _ => continue,
+        };
+        if existing.contains(&candidate.input_path) {
+            continue;
         }
+        let record = json!({
+            "path": candidate.input_path,
+            "reason": reason,
+            "recorded_at": now_utc_seconds(),
+            "approval_method": approval_method,
+        });
+        // M1(b): one framed record per single write_all (no interleaving).
+        let mut line = serde_json::to_string(&record)
+            .map_err(|err| KcsError::io(err.to_string(), path.display().to_string()))?;
+        line.push('\n');
+        file.write_all(line.as_bytes())
+            .map_err(|err| KcsError::io(err.to_string(), path.display().to_string()))?;
     }
     Ok(())
 }

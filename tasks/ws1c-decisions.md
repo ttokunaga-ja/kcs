@@ -167,3 +167,64 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     (validated on `Repository::open`) and `tools.toml` were checked — a negative user budget cap now
     fails with exit 2. `read_budget_config` also rejects negative `monthly_usd_cap` / per-adapter
     caps as defense-in-depth behind the schema's `minimum: 0`.
+
+## Second exploratory-audit round (N1-N8, tasks/step3-bughunt2-fixes.md)
+
+45. Tier B online hold + explicit `--send-secrets` approval (N1). A candidate-secret file
+    (`secrets_tier_b_warning`: name contains credentials/secret/token/apikey/password) is still
+    ingested locally, but its **online** work is now HELD instead of being enqueued like a normal
+    file (the leak: `ignored=false` produced ordinary online markdownize/embedding tasks that
+    `index --online`/`batch resume` shipped). Hold mechanics: the online markdownize placeholder and
+    each Tier B embedding task are written `Paused` with `fallback_reason = "secrets_tier_b_hold"`
+    (visible in `kcs status`); `batch resume` does not un-hold them and
+    `execute_pending_markdownize_tasks` / the embedding send-partition skip them (defense in depth).
+    Release is an explicit, persistent, per-scope approval recorded by the new `index --send-secrets`
+    flag (marker `.kcs/secrets-approved.jsonl`, checked by `secrets_send_approved`), distinct from
+    `--approve` (scan/network opt-in) because shipping a probable secret needs its own consent. This
+    build implements **hold + explicit-flag approval only**; the 10 §1.1 interactive confirmation
+    prompt is not implemented. `record_quarantine_candidates` now also records Tier B (reason
+    `secrets_tier_b`, `approval_method` `hold`/`send_approved`); the append-only dedup by path means
+    a file first recorded as `hold` keeps that first record even after later approval (audit trail,
+    not current-state — the live disposition is the task state).
+46. Manual snapshot honors the Tier A exclusion set (N2). `kcs snapshot` was `repo.snapshot(msg,
+    None)` with no filter, baking `.env`/`*.pem` plaintext into `objects/raw` + the latest tree
+    (irreversible, 10 §1.1). The CLI now computes the excluded Tier A set from `build_scan_preview`
+    (the same classifier `kcs index` uses) and passes it through a new
+    `Repository::snapshot_filtered`; kcs-core still has no notion of secrets (the CLI owns the
+    exclusion set), preserving the layer boundary.
+47. Observation-log redaction (N3). `append_observation` (events/errors.jsonl) now masks the
+    `path`/`query`/`prompt` fields of `context` recursively to `[redacted]` when `redact_logs` is in
+    effect (06 §8 default true; read from the device `[adapter.policy]` config, secure-default when
+    absent). This fixes `KcsError` contexts writing paths verbatim into `errors.jsonl` and the purge
+    scrubber's "path is never recorded" assumption. Only the log files are redacted; the stdout error
+    JSON (`to_error_json`) is unchanged.
+48. Commit-ref path-traversal guard (N4). `resolve_commit` (and `tag`) validate the operand up front
+    via a shared `validate_ref_operand`: a ref is only ever `HEAD`, a hash, or a tag name, so `/`,
+    `\`, `.`, `..`, an absolute path, or any `ParentDir`/`RootDir`/`Prefix` component is rejected
+    (`KCS-E-CONFIG-USAGE-001`, exit 2) before any `refs/tags`.join. Closes the `kcs diff`/`kcs tag
+    <commit>` existence-oracle for out-of-scope files (03 §3).
+49. Evidence Pointer generation binding (N5). `resolve_pointer_for_cli` now binds the resolved
+    chunk's `gen` to the tree entry's `normalize.gen` on a **non-shallow** commit, rejecting a
+    pointer that keeps an old commit but splices in a newer-generation chunk_hash produced by
+    `reindex --force`. Scope decision: the gen binding applies **only when the tree entry carries an
+    explicit `normalize`** (the reindex-tampering target — the index commit — always does). A tree
+    entry with `normalize = None` (e.g. a bare `kcs snapshot` that advanced HEAD without re-recording
+    normalize refs, L3) has no gen to bind and keeps the pre-existing chunk (raw, tool) identity
+    check; requiring `normalize` there would break `ct3_l3_short_hash_resolves_after_bare_snapshot`.
+    This is "the commit's tree-entry gen == chunk gen", never "always the latest gen"
+    (`ct3_reindex_002` — an old pointer to a commit whose entry is gen N still resolves its gen-N
+    chunk). The `None`-normalize gen gap is pre-existing (M6-era), separate from the N5-cited attack.
+50. Chunking is O(N) per unit, not O(N²) (N6). `slice_chars` / `split_range_by_max_chars` now index a
+    once-built `Vec<char>` per unit instead of re-running `chars().skip(start)` on every span/split
+    (the old dominant cost was the per-single-char whitespace-skip slice during splitting). Output
+    bytes are unchanged — the frozen chunk_hash vectors (CT3-CHUNK-001/002/003) and the split tests
+    stay green; only wall-time improves.
+51. `--online` reaches embedding enrichment (N7). `embedding_online_allowed` gained an `online`
+    argument with precedence offline → online (per-invocation, mirrors markdownize's `network_allowed`:
+    enabled only when the scope carries an approval record and is not network-revoked) → persistent
+    embedding opt-in. Previously `index --online` embedded nothing because only markdownize honored
+    the flag.
+52. Short-query search short-circuit moved after scope resolution (N8). A `< 2`-char query no longer
+    returns before scope enumeration/all-failed detection/index_status aggregation, so it can no
+    longer mask a scope failure (exit 4) or pin `index_status` to a fixed `1.0`. `empty_search_response`
+    now reports the real searched scopes + aggregated `index_status` and honors partial-failure exit 3.

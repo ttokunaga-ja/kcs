@@ -2068,3 +2068,179 @@ fn minor_evidence_scope_ambiguous_error_code_is_emitted() {
     assert_eq!(code, 4, "ambiguous scope must fail: {err}");
     assert_eq!(err["error_code"], "KCS-E-EVIDENCE-SCOPE-AMBIGUOUS-001");
 }
+
+// ===========================================================================
+// Second exploratory-audit round (tasks/step3-bughunt2-fixes.md, N1-N8):
+// acceptance scenarios (a)-(f). Scenario (g) (O(N²) chunking) lives as a timing
+// proxy in kcs-index/src/chunking.rs (n6_chunking_scales_linearly...).
+// ===========================================================================
+
+// (a) / N1: a Tier B (candidate-secret) file is ingested locally but its online
+// send (embedding here) is HELD until an explicit `--send-secrets` approval, and
+// stays visible in `kcs status` quarantine + as a held task the whole time.
+#[test]
+fn n1_tier_b_online_send_held_until_send_secrets() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(
+        dir.path().join("notes.md"),
+        "# Notes\n\n## Body\n通常の本文です。十分な長さの段落を含みます。\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.path().join("api_secret.md"),
+        "# 秘密メモ\n\n## Body\n秘匿候補ファイルの本文です。十分な長さの段落。\n",
+    )
+    .unwrap();
+    kcs(&dir, &["init"]).assert().success();
+    json_success_embed(&dir, "mock", &["index", "--approve", "--online"]);
+
+    let status = json_success_embed(&dir, "mock", &["status"]);
+    let secret_embed: Vec<_> = tasks_of_type(&status, "embedding")
+        .into_iter()
+        .filter(|task| task["input_path"] == "api_secret.md")
+        .collect();
+    assert!(
+        !secret_embed.is_empty(),
+        "Tier B file must produce an embedding task: {status}"
+    );
+    assert!(
+        secret_embed
+            .iter()
+            .all(|task| task["status"] == "paused"
+                && task["fallback_reason"] == "secrets_tier_b_hold"),
+        "Tier B embedding must be held, not sent: {status}"
+    );
+    assert!(
+        tasks_of_type(&status, "embedding")
+            .iter()
+            .any(|task| { task["input_path"] == "notes.md" && task["status"] == "done" }),
+        "non-secret embedding must still execute: {status}"
+    );
+    assert!(
+        status["quarantine"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|q| { q["path"] == "api_secret.md" && q["reason"] == "secrets_tier_b" }),
+        "Tier B must be recorded in quarantine: {status}"
+    );
+
+    // Explicit approval lifts the hold → the Tier B chunks now embed.
+    json_success_embed(
+        &dir,
+        "mock",
+        &["index", "--approve", "--online", "--send-secrets"],
+    );
+    let status = json_success_embed(&dir, "mock", &["status"]);
+    assert!(
+        tasks_of_type(&status, "embedding")
+            .iter()
+            .any(|task| { task["input_path"] == "api_secret.md" && task["status"] == "done" }),
+        "--send-secrets must release and embed the Tier B chunks: {status}"
+    );
+}
+
+// (b) / N2: a manual `kcs snapshot` must not bake Tier A secrets into the CAS or
+// the latest tree.
+#[test]
+fn n2_manual_snapshot_excludes_tier_a() {
+    use kcs_core::cas::hash_bytes;
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("a.txt"), "hello").unwrap();
+    fs::write(dir.path().join(".env"), "TOKEN=supersecret").unwrap();
+    kcs(&dir, &["init"]).assert().success();
+
+    let snap = json_success(&dir, &["snapshot", "-m", "manual"]);
+    assert_eq!(
+        snap["status"], "created",
+        "snapshot must commit a.txt: {snap}"
+    );
+    let tree = json_success(&dir, &["inspect", snap["tree_hash"].as_str().unwrap()]);
+    assert!(
+        !tree["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry["path"] == ".env"),
+        "manual snapshot must not put .env in the tree: {tree}"
+    );
+    let env_hash = hash_bytes(b"TOKEN=supersecret");
+    assert!(
+        !object_path(&dir.path().join(".kcs"), "raw", &env_hash).exists(),
+        "manual snapshot must not write .env plaintext to objects/raw"
+    );
+}
+
+// (c) / N3: errors.jsonl must mask the `path` field under redact_logs (default on).
+#[test]
+fn n3_errors_jsonl_redacts_path() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("a.txt"), "hello").unwrap();
+    kcs(&dir, &["init"]).assert().success();
+    fs::write(dir.path().join(".kcs/tasks.jsonl"), "{ not json\n").unwrap();
+    json_failure(&dir, &["status"], 4);
+    let errors = fs::read_to_string(dir.path().join(".test-data/kcs/logs/errors.jsonl")).unwrap();
+    let last: Value = serde_json::from_str(errors.lines().last().unwrap()).unwrap();
+    assert_eq!(
+        last["context"]["path"], "[redacted]",
+        "errors.jsonl must redact path under redact_logs: {last}"
+    );
+}
+
+// (d) / N4: `diff` / `tag <commit>` reject path-traversal operands with exit 2
+// instead of turning `refs/tags`.join into an out-of-scope existence oracle.
+#[test]
+fn n4_diff_and_tag_reject_traversal_operands() {
+    let dir = indexed_scope();
+    let err = json_failure(&dir, &["diff", "../../../etc/passwd", "HEAD"], 2);
+    assert_eq!(err["error_code"], "KCS-E-CONFIG-USAGE-001");
+    let err = json_failure(&dir, &["tag", "mytag", "../../../etc/passwd"], 2);
+    assert_eq!(err["error_code"], "KCS-E-CONFIG-USAGE-001");
+}
+
+// (e) / N5: after `reindex --force`, a pointer that keeps the OLD commit but
+// splices in a NEW-generation chunk_hash is rejected (gen binding), while the
+// untampered old pointer still resolves.
+#[test]
+fn n5_pointer_rejects_generation_mixing_after_reindex() {
+    let dir = indexed_scope();
+    let before = json_success(&dir, &["search", "トークン TTL 3600"]);
+    let old_pointer = first_result(&before)["evidence_pointer"].clone();
+    json_success(&dir, &["reindex", "--force", "--yes"]);
+    let after = json_success(&dir, &["search", "トークン TTL 3600"]);
+    let new_chunk_hash = first_result(&after)["evidence_pointer"]["chunk_hash"].clone();
+    assert_ne!(
+        old_pointer["chunk_hash"], new_chunk_hash,
+        "reindex --force must produce a new-generation chunk_hash"
+    );
+    let mut tampered = old_pointer.clone();
+    tampered["chunk_hash"] = new_chunk_hash;
+    let err = json_failure(&dir, &["view", &tampered.to_string()], 4);
+    assert_eq!(
+        err["error_code"], "KCS-E-EVIDENCE-POINTER-INVALID-001",
+        "generation-mixing pointer must be rejected (N5)"
+    );
+    let ok = json_success(&dir, &["view", &old_pointer.to_string()]);
+    assert!(ok["text"].as_str().unwrap().contains("トークン TTL"));
+}
+
+// (f) / N7: a single-shot `--online` drives embedding enrichment (previously only
+// markdownize honored the flag; embedding stayed Pending).
+#[test]
+fn n7_online_flag_drives_embedding_enrichment() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(
+        dir.path().join("notes.md"),
+        "# Notes\n\n## Body\n通常本文の十分な長さのテキストです。\n",
+    )
+    .unwrap();
+    kcs(&dir, &["init"]).assert().success();
+    json_success_embed(&dir, "mock", &["index", "--yes", "--online"]);
+    let status = json_success_embed(&dir, "mock", &["status"]);
+    assert!(
+        tasks_of_type(&status, "embedding")
+            .iter()
+            .any(|task| task["status"] == "done"),
+        "single-shot --online must execute embedding (N7): {status}"
+    );
+}

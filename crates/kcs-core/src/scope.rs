@@ -286,11 +286,25 @@ impl Repository {
         message: Option<&str>,
         fixed_now: Option<&str>,
     ) -> Result<SnapshotOutcome> {
+        self.snapshot_filtered(message, fixed_now, &BTreeSet::new())
+    }
+
+    /// Manual snapshot that honors an `excluded_paths` filter (N2). `kcs core`
+    /// has no notion of secrets; the CLI computes the Tier A exclusion set from
+    /// `build_scan_preview` and passes it here so a manual `kcs snapshot` cannot
+    /// bake `.env`/`*.pem` plaintext into the CAS + tree (10 §1.1 "CAS 保存・
+    /// snapshot 取り込みを行わない"). Same exclusion channel `kcs index` uses.
+    pub fn snapshot_filtered(
+        &self,
+        message: Option<&str>,
+        fixed_now: Option<&str>,
+        excluded_paths: &BTreeSet<String>,
+    ) -> Result<SnapshotOutcome> {
         self.snapshot_with_type(
             message,
             fixed_now,
             CommitType::Manual,
-            &BTreeSet::new(),
+            excluded_paths,
             &BTreeMap::new(),
         )
     }
@@ -476,9 +490,7 @@ impl Repository {
 
     pub fn tag(&self, name: &str, commit: Option<&str>) -> Result<String> {
         self.validate()?;
-        if name.is_empty() || name.contains('/') {
-            return Err(KcsError::invalid_usage("tag name must not contain /"));
-        }
+        validate_ref_operand(name)?;
         let _lock = StoreLock::acquire(&self.kcs_dir)?;
         let commit_hash = match commit {
             Some(value) => self.resolve_commit(value)?,
@@ -501,6 +513,12 @@ impl Repository {
     }
 
     pub fn resolve_commit(&self, value: &str) -> Result<String> {
+        // N4 (03 §3 scope boundary): a commit-ref operand is only ever `HEAD`, a
+        // hash, or a tag name — none legitimately carry a path separator or a
+        // `.`/`..` component. Without this guard `refs/tags`.join(value) treats
+        // `../../..` as a filesystem escape, turning `kcs diff`/`kcs tag <commit>`
+        // into an out-of-scope file-existence oracle. Validate before any join.
+        validate_ref_operand(value)?;
         if value == "HEAD" {
             return self
                 .head_commit_hash()?
@@ -875,8 +893,17 @@ fn append_observation(
     level: &str,
     code: &str,
     message: &str,
-    context: Value,
+    mut context: Value,
 ) -> Result<()> {
+    // N3: honor `redact_logs` (06 §8 / 10 §12.6, default true) before writing. The
+    // KcsError context routinely carries a `path` (and search/adapter contexts a
+    // `query`/`prompt`); writing them verbatim both violates the redaction policy
+    // and defeats purge, whose scrubber assumes "path is never recorded". Mask the
+    // sensitive keys recursively so nested contexts (e.g. an index partial-failure
+    // `output`) are covered too.
+    if redact_logs_enabled() {
+        redact_context(&mut context);
+    }
     let path = data_home().join("kcs/logs").join(file_name);
     append_jsonl(
         &path,
@@ -889,6 +916,85 @@ fn append_observation(
             "context": context,
         }),
     )
+}
+
+/// Whether `redact_logs` is in effect (06 §8 default true). Read from the user
+/// config's `[adapter.policy]`; the observation logs are device-global so the
+/// device-level config governs them. Absent config / key -> the secure default.
+fn redact_logs_enabled() -> bool {
+    let path = config_home().join("kcs/config.toml");
+    let Ok(text) = fs::read_to_string(&path) else {
+        return true;
+    };
+    let Ok(value) = toml::from_str::<toml::Value>(&text) else {
+        return true;
+    };
+    value
+        .get("adapter")
+        .and_then(|adapter| adapter.get("policy"))
+        .and_then(|policy| policy.get("redact_logs"))
+        .and_then(toml::Value::as_bool)
+        .unwrap_or(true)
+}
+
+/// Recursively replace the values of sensitive keys (`path`, `query`, `prompt`)
+/// with `[redacted]` anywhere they appear in a log `context` object/array (N3).
+fn redact_context(value: &mut Value) {
+    match value {
+        Value::Object(map) => {
+            for (key, entry) in map.iter_mut() {
+                if matches!(key.as_str(), "path" | "query" | "prompt") {
+                    *entry = Value::String("[redacted]".to_owned());
+                } else {
+                    redact_context(entry);
+                }
+            }
+        }
+        Value::Array(items) => {
+            for item in items.iter_mut() {
+                redact_context(item);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn config_home() -> PathBuf {
+    if let Some(path) = std::env::var_os("XDG_CONFIG_HOME") {
+        return PathBuf::from(path);
+    }
+    if let Some(home) = std::env::var_os("HOME") {
+        return PathBuf::from(home).join(".config");
+    }
+    PathBuf::from(".")
+}
+
+/// Reject a tag-name / commit-ref operand that could escape `refs/tags` when
+/// joined onto the store path (N4, 03 §3 scope boundary). A ref is only ever
+/// `HEAD`, a hash, or a tag name, so a path separator (`/` or `\`), `.`/`..`,
+/// an absolute path, or any `ParentDir`/`RootDir`/`Prefix` component is always
+/// a traversal attempt. Shared by `tag()` and `resolve_commit()`.
+fn validate_ref_operand(value: &str) -> Result<()> {
+    let traversal = value.is_empty()
+        || value == "."
+        || value == ".."
+        || value.contains('/')
+        || value.contains('\\')
+        || Path::new(value).is_absolute()
+        || Path::new(value).components().any(|component| {
+            matches!(
+                component,
+                std::path::Component::ParentDir
+                    | std::path::Component::RootDir
+                    | std::path::Component::Prefix(_)
+            )
+        });
+    if traversal {
+        return Err(KcsError::invalid_usage(
+            "commit reference must not contain path separators or `.`/`..` traversal",
+        ));
+    }
+    Ok(())
 }
 
 fn data_home() -> PathBuf {
