@@ -142,6 +142,7 @@ fn kcs<const N: usize>(dir: &TempDir, args: [&str; N]) -> Command {
         .current_dir(dir.path())
         .env("XDG_CONFIG_HOME", dir.path().join(".test-config"))
         .env("XDG_DATA_HOME", dir.path().join(".test-data"))
+        .env("XDG_CACHE_HOME", dir.path().join(".test-cache"))
         .args(args);
     command
 }

@@ -24,6 +24,14 @@ pub enum PipelineError {
     /// offending file path.
     #[error("KCS-E-STORE-CORRUPT-001: corrupt store file at {path}: {message}")]
     Corrupt { path: String, message: String },
+    /// A persisted task's `input_path` escapes the scope: it is absolute, carries
+    /// a path separator, or contains a `..`/`.` traversal component rather than
+    /// naming a direct child of the scope root (03 §3.3; the same rule dag.rs
+    /// enforces for tree entries). Surfaced as `KCS-E-STORE-PATH-001` (exit 2).
+    /// A poisoned / shared `tasks.jsonl` must not let a resume read an arbitrary
+    /// file and send it to an online adapter (P1).
+    #[error("KCS-E-STORE-PATH-001: task input_path is not a scope-local file name: {path}")]
+    Path { path: String },
 }
 
 impl PipelineError {
@@ -41,6 +49,11 @@ impl PipelineError {
             path: path.into(),
             message: message.into(),
         }
+    }
+
+    #[must_use]
+    pub fn path(path: impl Into<String>) -> Self {
+        Self::Path { path: path.into() }
     }
 }
 

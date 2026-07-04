@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 use std::fs::{self, OpenOptions};
 use std::io::{BufRead, Write};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::{Deserialize, Serialize};
@@ -130,6 +130,15 @@ impl TaskStore {
             let descriptor: TaskDescriptor = serde_json::from_str(&line).map_err(|err| {
                 PipelineError::corrupt(self.path.display().to_string(), err.to_string())
             })?;
+            // P1: reject any task whose `input_path` escapes the scope before any
+            // consumer joins it onto the scope root and reads / sends the file.
+            // Validating here (the single read path) guards every consumer at once
+            // (`batch resume`, `status`, enrichment) so a poisoned / shared
+            // tasks.jsonl cannot exfiltrate `/etc/*` or `../../id_rsa` to an online
+            // adapter (03 §3.3, same rule dag.rs enforces for tree entries).
+            if !is_scope_local_file_name(&descriptor.input_path) {
+                return Err(PipelineError::path(descriptor.input_path));
+            }
             by_id.insert(descriptor.task_id.clone(), descriptor);
         }
         Ok(by_id.into_values().collect())
@@ -224,6 +233,18 @@ impl TaskStore {
                 && matches!(task.status, TaskStatus::Done | TaskStatus::Partial)
         }))
     }
+}
+
+/// Whether `input_path` names a direct child of the scope root: a single
+/// `Component::Normal` — not absolute, no path separator, no `.`/`..` traversal
+/// (03 §3.3). Rejects `""`, `/etc/hosts`, `../x`, `a/b`, `.`, `..` (P1).
+#[must_use]
+pub fn is_scope_local_file_name(input_path: &str) -> bool {
+    if input_path.is_empty() || input_path.contains('/') || input_path.contains('\\') {
+        return false;
+    }
+    let mut components = Path::new(input_path).components();
+    matches!(components.next(), Some(Component::Normal(_))) && components.next().is_none()
 }
 
 #[must_use]
@@ -338,6 +359,68 @@ mod tests {
 
         let value = serde_json::to_value(descriptor).expect("serialize task descriptor");
         assert_eq!(value["type"], "markdownize");
+    }
+
+    #[test]
+    fn is_scope_local_file_name_rejects_traversal_and_absolute() {
+        // P1: bare direct-child file names are accepted.
+        assert!(is_scope_local_file_name("report.pdf"));
+        assert!(is_scope_local_file_name("認証仕様.md"));
+        // Absolute paths, separators, and `..`/`.` traversal are rejected.
+        for bad in [
+            "",
+            "/etc/hosts",
+            "../../../../etc/hosts",
+            "a/b.pdf",
+            "sub/report.pdf",
+            "..",
+            ".",
+            "./report.pdf",
+            "dir\\report.pdf",
+        ] {
+            assert!(!is_scope_local_file_name(bad), "should reject {bad:?}");
+        }
+    }
+
+    #[test]
+    fn all_rejects_task_with_out_of_scope_input_path() {
+        // P1: a poisoned tasks.jsonl line whose input_path escapes the scope is
+        // rejected at read time with KCS-E-STORE-PATH-001, before any consumer can
+        // read/send the file.
+        let dir = tempfile::tempdir().unwrap();
+        let store = TaskStore::new(dir.path());
+        let mut task = TaskDescriptor {
+            task_id: "task_01H".to_owned(),
+            task_type: TaskType::Markdownize,
+            mode: Some(MarkdownizeMode::Full),
+            input_path: "report.pdf".to_owned(),
+            input_hash: "sha256:abc".to_owned(),
+            previous_raw_hash: None,
+            parent_run_id: None,
+            changed_unit_keys: Vec::new(),
+            output_ref: "online:mistral_ocr_markdownize".to_owned(),
+            unit_keys: None,
+            status: TaskStatus::Pending,
+            attempts: 0,
+            next_retry_at: None,
+            deadline: None,
+            heartbeat_at: None,
+            fallback_reason: None,
+            created_at: "2026-04-25T12:00:00Z".to_owned(),
+        };
+        store.append(&task).unwrap();
+        // A bare-name task reads back fine.
+        assert_eq!(store.all().unwrap().len(), 1);
+        // Append a poison line with an absolute input_path.
+        task.task_id = "task_02H".to_owned();
+        task.input_path = "/etc/hosts".to_owned();
+        store.append(&task).unwrap();
+        let err = store.all().unwrap_err();
+        assert!(
+            matches!(err, PipelineError::Path { .. }),
+            "expected KCS-E-STORE-PATH-001, got {err:?}"
+        );
+        assert!(err.to_string().contains("KCS-E-STORE-PATH-001"));
     }
 
     #[test]

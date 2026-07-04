@@ -22,7 +22,8 @@ fn kcs() -> AssertCommand {
     let mut command = AssertCommand::cargo_bin("kcs").unwrap();
     command
         .env("XDG_DATA_HOME", isolated_home().join("data"))
-        .env("XDG_CONFIG_HOME", isolated_home().join("config"));
+        .env("XDG_CONFIG_HOME", isolated_home().join("config"))
+        .env("XDG_CACHE_HOME", isolated_home().join("cache"));
     command
 }
 

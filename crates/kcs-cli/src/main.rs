@@ -26,7 +26,8 @@ use kcs_core::cas::is_hash;
 use kcs_core::dag::NormalizeRef;
 use kcs_core::schema::{validate_json_schema, SchemaKind};
 use kcs_core::scope::{
-    append_error_log, append_event_log, new_ulid, now_utc_seconds, InspectedObject, Repository,
+    append_error_log, append_event_log, append_warn_log, new_ulid, now_utc_seconds,
+    InspectedObject, Repository,
 };
 use kcs_core::{ExitCode, KcsError, Result};
 use kcs_index::chunking::{
@@ -2357,21 +2358,68 @@ fn rebuild_sqlite_index(kcs_dir: &Path, tree_entries: &[TreeEntryRow]) -> Result
             .map_err(|err| KcsError::io(err.to_string(), parent.display().to_string()))?;
     }
     // Embeddings live only in SQLite (objects/ holds no embedding objects in the
-    // MVP), so snapshot them before dropping the DB and replay them afterward,
-    // then rebuild chunk_vec from them (04 §4.3: embeddings → chunk_vec). This
-    // keeps `kcs repair --rebuild-db` from wiping vector search.
+    // MVP), so snapshot them from the CURRENT db (without removing it) and replay
+    // them into the fresh db, then rebuild chunk_vec from them (04 §4.3). This
+    // keeps `kcs repair --rebuild-db` / reindex from wiping vector search.
     let preserved = if path.exists() {
         let existing = Connection::open(&path).map_err(|err| KcsError::schema(err.to_string()))?;
         let rows = embedding_store::snapshot_chunk_embeddings(&existing).map_err(index_to_kcs)?;
         drop(existing);
-        fs::remove_file(&path)
-            .map_err(|err| KcsError::io(err.to_string(), path.display().to_string()))?;
         rows
     } else {
         Vec::new()
     };
+    // P5 (docs/05:564): build the new index in a unique temp db and atomically
+    // rename it over sqlite.db. `kcs search` takes no store lock and opens
+    // sqlite.db by path, so it must always see a complete db — the old one until
+    // the rename, the new one after. The previous remove_file + in-place rebuild
+    // exposed an empty/half-built window in which a concurrent search returned
+    // exit 0 with 0 results (a silent false negative). The unique temp name also
+    // stops two rebuilders from clobbering one shared `sqlite.db.tmp`.
+    let temp_path = unique_sqlite_temp_path(&path);
+    // A residual temp from a crashed rebuild would be reused (and corrupt the new
+    // index) by `Connection::open`; start from a clean slate.
+    if temp_path.exists() {
+        fs::remove_file(&temp_path)
+            .map_err(|err| KcsError::io(err.to_string(), temp_path.display().to_string()))?;
+    }
+    match build_sqlite_index_at(&temp_path, kcs_dir, tree_entries, &preserved) {
+        Ok(()) => fs::rename(&temp_path, &path)
+            .map_err(|err| KcsError::io(err.to_string(), path.display().to_string())),
+        Err(error) => {
+            let _ = fs::remove_file(&temp_path);
+            Err(error)
+        }
+    }
+}
+
+/// A unique sibling temp path for the atomic sqlite rebuild
+/// (`sqlite.db.<pid>-<nanos>.tmp`, P5). Unique per attempt so concurrent
+/// rebuilders never share a temp.
+fn unique_sqlite_temp_path(path: &Path) -> PathBuf {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_nanos())
+        .unwrap_or_default();
+    let file_name = format!("sqlite.db.{}-{nanos}.tmp", process::id());
+    match path.parent() {
+        Some(parent) => parent.join(file_name),
+        None => PathBuf::from(file_name),
+    }
+}
+
+/// Populate a fresh sqlite index at `temp_path` (chunks + FTS, tree_entries,
+/// preserved embeddings, chunk_vec) and close it. The caller renames it over
+/// sqlite.db (P5); the connection is dropped here so the rename sees no open
+/// handle / leftover journal.
+fn build_sqlite_index_at(
+    temp_path: &Path,
+    kcs_dir: &Path,
+    tree_entries: &[TreeEntryRow],
+    preserved: &[embedding_store::ChunkEmbeddingSnapshotRow],
+) -> Result<()> {
     let mut fts = SqliteFtsIndex::open(
-        &path,
+        temp_path,
         FtsSchemaConfig {
             tokenizer: FtsTokenizer::Trigram,
         },
@@ -2396,7 +2444,7 @@ fn rebuild_sqlite_index(kcs_dir: &Path, tree_entries: &[TreeEntryRow]) -> Result
             .map_err(|err| KcsError::schema(err.to_string()))?;
     }
     // Replay preserved embeddings (source of truth) and re-derive chunk_vec.
-    for row in &preserved {
+    for row in preserved {
         embedding_store::write_chunk_embedding(
             fts.connection(),
             &row.embedding_hash,
@@ -2411,6 +2459,7 @@ fn rebuild_sqlite_index(kcs_dir: &Path, tree_entries: &[TreeEntryRow]) -> Result
         .map_err(index_to_kcs)?;
     }
     embedding_store::rebuild_chunk_vec(fts.connection()).map_err(index_to_kcs)?;
+    drop(fts);
     Ok(())
 }
 
@@ -2520,41 +2569,69 @@ fn enumerate_scope_targets(
         };
         if parsed.descendants {
             let root = root.canonicalize().unwrap_or(root);
-            return Ok((
-                ScopeSelectionMode::Descendants,
-                registry_targets_under(&root)?,
-            ));
+            let targets = registry_targets_under(&root)?
+                .unwrap_or_else(|| registry_unavailable_fallback(&root));
+            return Ok((ScopeSelectionMode::Descendants, targets));
         }
         return Ok((ScopeSelectionMode::Scope, vec![scope_target(&root)?]));
     }
     if parsed.descendants {
-        return Ok((
-            ScopeSelectionMode::Descendants,
-            registry_targets_under(repo.root())?,
-        ));
+        let targets = registry_targets_under(repo.root())?
+            .unwrap_or_else(|| registry_unavailable_fallback(repo.root()));
+        return Ok((ScopeSelectionMode::Descendants, targets));
     }
     // Default and `--all-scopes` share the same enumeration: every indexed,
     // participating scope in the registry (05 §1.8 / 06 §3, CT3-MULTI-008). The
     // difference between the two is spec-undefined (§C-8) and intentionally none.
     let _all_scopes = parsed.all_scopes;
-    Ok((ScopeSelectionMode::All, registry_all_targets()?))
+    let targets =
+        registry_all_targets()?.unwrap_or_else(|| registry_unavailable_fallback(repo.root()));
+    Ok((ScopeSelectionMode::All, targets))
 }
 
 /// All indexed, participating scopes from the registry (deterministic order).
-fn registry_all_targets() -> Result<Vec<ScopeTarget>> {
+/// `Ok(None)` when the registry could not be *opened* (transient lock or real
+/// error) — deliberately distinct from `Ok(Some(vec![]))` (registry opened, no
+/// eligible scopes). The caller degrades an open failure to the current scope
+/// instead of a misleading "no indexed scopes registered" that would erase the
+/// healthy scope the user is standing in (P6, Opus F2); an empty registry keeps
+/// the exit-4 guidance.
+fn registry_all_targets() -> Result<Option<Vec<ScopeTarget>>> {
     let Ok(db) = RegistryDb::open_default() else {
-        return Ok(Vec::new());
+        return Ok(None);
     };
     let entries = db.search_targets().map_err(index_to_kcs)?;
-    Ok(entries.into_iter().map(registry_entry_target).collect())
+    Ok(Some(
+        entries.into_iter().map(registry_entry_target).collect(),
+    ))
 }
 
-/// Registered scopes whose root path is at or below `root` (05 §1.8 prefix filter).
-fn registry_targets_under(root: &Path) -> Result<Vec<ScopeTarget>> {
-    Ok(registry_all_targets()?
-        .into_iter()
-        .filter(|target| target.repo_root.starts_with(root))
-        .collect())
+/// Registered scopes whose root path is at or below `root` (05 §1.8 prefix
+/// filter). `Ok(None)` propagates a registry open failure (see
+/// [`registry_all_targets`]).
+fn registry_targets_under(root: &Path) -> Result<Option<Vec<ScopeTarget>>> {
+    Ok(registry_all_targets()?.map(|targets| {
+        targets
+            .into_iter()
+            .filter(|target| target.repo_root.starts_with(root))
+            .collect()
+    }))
+}
+
+/// P6: when the registry cannot be opened (distinct from an empty registry),
+/// degrade a default / `--all-scopes` / `--descendants` search to `root`'s own
+/// scope — already held open and known reachable — rather than returning a
+/// misleading KCS-E-SEARCH-SCOPE-ALL-FAILED-001. Empty when `root` is not itself
+/// a scope (then the search is a genuine all-failed, exit 4, as before).
+fn registry_unavailable_fallback(root: &Path) -> Vec<ScopeTarget> {
+    eprintln!(
+        "warning: scope registry unavailable (search cache; recover with `kcs index`); \
+         searching the current scope only"
+    );
+    match scope_target(root) {
+        Ok(target) => vec![target],
+        Err(_) => Vec::new(),
+    }
 }
 
 fn registry_entry_target(entry: RegistryEntry) -> ScopeTarget {
@@ -3154,8 +3231,19 @@ fn resolve_pointer_for_cli(pointer: &EvidencePointer) -> Result<PointerResolutio
 /// and `resolve_cursor_exec_scopes` (search cursor) so a `.kcs`-copy collision is
 /// detected identically on both paths (O7).
 fn resolve_scope_id_in_registry(scope_id: &str) -> Result<Option<ScopeTarget>> {
-    let Ok(registry) = RegistryDb::open_default() else {
-        return Ok(None);
+    let registry = match RegistryDb::open_default() {
+        Ok(registry) => registry,
+        // P6: a registry *open* failure is not "scope_id absent". Surface it (the
+        // caller still falls back to the scope_path hint) instead of silently
+        // conflating it with a genuine registry miss; WAL + busy_timeout makes the
+        // transient case rare, and a real failure is now observable.
+        Err(_) => {
+            eprintln!(
+                "warning: scope registry unavailable (search cache); \
+                 resolving evidence scope via the scope_path hint only"
+            );
+            return Ok(None);
+        }
     };
     let Ok(entries) = registry.lookup_scope_id(scope_id) else {
         return Ok(None);
@@ -3232,7 +3320,7 @@ fn open_scope_from_hint(hint: &str) -> Option<ScopeTarget> {
 }
 
 /// Working tree first (rename-tolerant), else a read-only expansion of the CAS
-/// raw object under `$XDG_DATA_HOME/kcs/open` (05 §4.2 / 06 §1.1). Returns
+/// raw object under `$XDG_CACHE_HOME/kcs/open` (05 §4.2 / 06 §1.1). Returns
 /// `Ok(None)` when the raw object is absent from both.
 fn open_raw_object(
     target: &ScopeTarget,
@@ -3243,7 +3331,7 @@ fn open_raw_object(
 }
 
 /// Open a CAS byte object (03 §2: raw / prepared / image), expanding it read-only
-/// under `$XDG_DATA_HOME/kcs/open` when it lives only in the store. `subdir`
+/// under `$XDG_CACHE_HOME/kcs/open` when it lives only in the store. `subdir`
 /// selects the CAS type directory ("raw" / "prepared" / "images"). For `raw` the
 /// working tree is checked first (rename tolerant, 05 §4.2); derived byte objects
 /// live only in the CAS. Returns `Ok(None)` when the object is absent.
@@ -3267,7 +3355,9 @@ fn open_cas_byte_object(
         .and_then(|path| Path::new(path).file_name())
         .and_then(|name| name.to_str())
         .unwrap_or("object");
-    let cache = data_home()
+    // P9 (06 §1.1): the read-only expansion cache belongs under $XDG_CACHE_HOME
+    // (regenerable, safe to purge), not $XDG_DATA_HOME (durable truth/state).
+    let cache = cache_home()
         .join("kcs/open")
         .join(
             hash.trim_start_matches("sha256:")
@@ -6516,11 +6606,6 @@ fn write_approval_record(
     network_opt_in: bool,
 ) -> Result<()> {
     let path = repo.kcs_dir().join("approvals.jsonl");
-    let mut file = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&path)
-        .map_err(|err| KcsError::io(err.to_string(), path.display().to_string()))?;
     // One approval row per configured online adapter (07 §3: opt-in unit is
     // scope × adapter, L4). The markdownize opt-in marker is written
     // unconditionally (its online path is always available); the embedding row is
@@ -6529,6 +6614,25 @@ fn write_approval_record(
     let mut tool_ids = vec!["mistral_ocr_markdownize".to_owned()];
     if embedding_seam().is_some() {
         tool_ids.push(EMBEDDING_ADAPTER_ID.to_owned());
+    }
+    // P7: the opt-in is a persistent, idempotent marker. Every `index` used to
+    // append a fresh row per adapter, so approvals.jsonl grew unbounded (and the
+    // O(n) opt-in scan with it). Skip any adapter whose equivalent
+    // (scope_id, tool_id, network_opt_in, execution_mode) row is already present.
+    let existing = read_existing_approval_keys(&path);
+    let pending: Vec<String> = tool_ids
+        .into_iter()
+        .filter(|tool_id| {
+            !existing.contains(&approval_dedup_key(
+                &preview.scope_id,
+                tool_id,
+                network_opt_in,
+                "online_api",
+            ))
+        })
+        .collect();
+    if pending.is_empty() {
+        return Ok(());
     }
     let base = json!({
         "scope_id": preview.scope_id,
@@ -6543,7 +6647,12 @@ fn write_approval_record(
         "network_opt_in": network_opt_in,
         "execution_mode": "online_api",
     });
-    for tool_id in tool_ids {
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .map_err(|err| KcsError::io(err.to_string(), path.display().to_string()))?;
+    for tool_id in pending {
         let mut record = base.clone();
         record["tool_id"] = json!(tool_id);
         // M1(b): one framed record per single write_all (no interleaving).
@@ -6556,6 +6665,36 @@ fn write_approval_record(
     Ok(())
 }
 
+/// The idempotency key for an approval row (P7): the tuple that makes two opt-in
+/// records equivalent — `(scope_id, tool_id, network_opt_in, execution_mode)`.
+fn approval_dedup_key(
+    scope_id: &str,
+    tool_id: &str,
+    network_opt_in: bool,
+    execution_mode: &str,
+) -> String {
+    format!("{scope_id}\0{tool_id}\0{network_opt_in}\0{execution_mode}")
+}
+
+/// Dedup keys for the approval rows already recorded in `approvals.jsonl` (P7).
+/// A missing / unreadable file yields an empty set (nothing to dedup against).
+fn read_existing_approval_keys(path: &Path) -> BTreeSet<String> {
+    let Ok(text) = fs::read_to_string(path) else {
+        return BTreeSet::new();
+    };
+    text.lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .filter_map(|value| {
+            Some(approval_dedup_key(
+                value.get("scope_id").and_then(Value::as_str)?,
+                value.get("tool_id").and_then(Value::as_str)?,
+                value.get("network_opt_in").and_then(Value::as_bool)?,
+                value.get("execution_mode").and_then(Value::as_str)?,
+            ))
+        })
+        .collect()
+}
+
 fn validate_user_tools_config() -> Result<()> {
     let Some(path) = user_tools_toml_path() else {
         return Ok(());
@@ -6565,7 +6704,51 @@ fn validate_user_tools_config() -> Result<()> {
     }
     let bytes =
         fs::read(&path).map_err(|err| KcsError::io(err.to_string(), path.display().to_string()))?;
+    // P3 (CT2-ADAPTER-010 / 07 §1): a plaintext `plain:<api_key>` in tools.toml
+    // must be owner-only (0600). If it is group/world-readable, record a warning
+    // to errors.jsonl (level=warn) — never block startup, this is advisory.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if tools_toml_contains_plain_auth(&bytes) {
+            if let Ok(metadata) = fs::metadata(&path) {
+                let mode = metadata.permissions().mode();
+                if mode & 0o077 != 0 {
+                    let _ = append_warn_log(
+                        "KCS-E-ADAPTER-TOOLS-PERM-001",
+                        "tools.toml holds a plaintext `plain:` API key but is group/world-readable; restrict it to 0600",
+                        json!({
+                            "path": path.display().to_string(),
+                            "mode": format!("{:o}", mode & 0o7777),
+                        }),
+                    );
+                }
+            }
+        }
+    }
     validate_tools_toml(&bytes).map_err(adapter_to_kcs)
+}
+
+/// Whether a tools.toml carries any `auth = "plain:<...>"` value (P3). Walks the
+/// parsed TOML rather than substring-matching so a comment mentioning `plain:`
+/// does not trigger a false warning.
+fn tools_toml_contains_plain_auth(bytes: &[u8]) -> bool {
+    let Ok(text) = std::str::from_utf8(bytes) else {
+        return false;
+    };
+    let Ok(value) = toml::from_str::<toml::Value>(text) else {
+        return false;
+    };
+    toml_value_has_plain_auth(&value)
+}
+
+fn toml_value_has_plain_auth(value: &toml::Value) -> bool {
+    match value {
+        toml::Value::String(text) => text.starts_with("plain:"),
+        toml::Value::Table(table) => table.values().any(toml_value_has_plain_auth),
+        toml::Value::Array(items) => items.iter().any(toml_value_has_plain_auth),
+        _ => false,
+    }
 }
 
 /// M8: validate the user (device) `config.toml` against `config.schema.json`
@@ -6623,6 +6806,19 @@ fn data_home() -> PathBuf {
     PathBuf::from(".")
 }
 
+/// `$XDG_CACHE_HOME`, else `$HOME/.cache` (06 §1.1). The device cache root for
+/// disposable, regenerable data such as the open/view read-only expansion of CAS
+/// objects — deliberately separate from the durable `$XDG_DATA_HOME` (P9).
+fn cache_home() -> PathBuf {
+    if let Some(path) = std::env::var_os("XDG_CACHE_HOME") {
+        return PathBuf::from(path);
+    }
+    if let Some(home) = std::env::var_os("HOME") {
+        return PathBuf::from(home).join(".cache");
+    }
+    PathBuf::from(".")
+}
+
 fn cost_ledger_path() -> PathBuf {
     data_home().join("kcs/cost-ledger.jsonl")
 }
@@ -6644,22 +6840,21 @@ fn cursor_signing_key() -> Result<Vec<u8>> {
             .map_err(|err| KcsError::io(err.to_string(), parent.display().to_string()))?;
     }
     // `create_new` so a concurrent generator does not clobber; on a lost race read
-    // the winner's key so both processes agree.
-    match OpenOptions::new().write(true).create_new(true).open(&path) {
+    // the winner's key so both processes agree. P8: create the file 0600 *before*
+    // any bytes are written (via `OpenOptionsExt::mode`) rather than chmod-ing
+    // after `write_all`, which left a window where the 32-byte HMAC signing key
+    // was readable at the umask default (0644).
+    let mut open_options = OpenOptions::new();
+    open_options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        open_options.mode(0o600);
+    }
+    match open_options.open(&path) {
         Ok(mut file) => {
             file.write_all(&key)
                 .map_err(|err| KcsError::io(err.to_string(), path.display().to_string()))?;
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                let mut perms = file
-                    .metadata()
-                    .map_err(|err| KcsError::io(err.to_string(), path.display().to_string()))?
-                    .permissions();
-                perms.set_mode(0o600);
-                fs::set_permissions(&path, perms)
-                    .map_err(|err| KcsError::io(err.to_string(), path.display().to_string()))?;
-            }
             Ok(key)
         }
         Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => fs::read(&path)
@@ -6699,6 +6894,15 @@ fn pipeline_to_kcs(error: kcs_pipeline::PipelineError) -> KcsError {
             format!("corrupt store file at {path}: {message}"),
             json!({ "path": path }),
             ExitCode::PermanentFailure,
+        ),
+        // P1: a task whose input_path escapes the scope is KCS-E-STORE-PATH-001
+        // (exit 2), the same contract as an out-of-scope tree entry path. The
+        // offending path stays in context (redacted in logs), never in the message.
+        kcs_pipeline::PipelineError::Path { path } => KcsError::new(
+            "KCS-E-STORE-PATH-001",
+            "task input_path must be a scope-local file name (no separators or `..` traversal)",
+            json!({ "path": path }),
+            ExitCode::InvalidUsage,
         ),
         other => KcsError::schema(other.to_string()),
     }

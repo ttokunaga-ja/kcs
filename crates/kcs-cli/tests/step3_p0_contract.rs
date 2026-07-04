@@ -11,6 +11,7 @@ fn kcs(dir: &TempDir, args: &[&str]) -> Command {
         .current_dir(dir.path())
         .env("XDG_CONFIG_HOME", dir.path().join(".test-config"))
         .env("XDG_DATA_HOME", dir.path().join(".test-data"))
+        .env("XDG_CACHE_HOME", dir.path().join(".test-cache"))
         .args(args);
     command
 }
@@ -43,6 +44,7 @@ fn json_success_path(path: &Path, data_home: &Path, args: &[&str]) -> Value {
         .current_dir(path)
         .env("XDG_CONFIG_HOME", data_home.join("config"))
         .env("XDG_DATA_HOME", data_home.join("data"))
+        .env("XDG_CACHE_HOME", data_home.join("cache"))
         .args(args)
         .arg("--json")
         .assert()
@@ -102,6 +104,7 @@ fn run_embed_path(path: &Path, data_home: &Path, embed: &str, args: &[&str]) -> 
         .current_dir(path)
         .env("XDG_CONFIG_HOME", data_home.join("config"))
         .env("XDG_DATA_HOME", data_home.join("data"))
+        .env("XDG_CACHE_HOME", data_home.join("cache"))
         .env("KCS_TEST_GEMINI_EMBED", embed)
         .args(args)
         .arg("--json")
@@ -831,6 +834,7 @@ fn ct3_multi_005_partial_failure_returns_results_with_exit_3() {
         .current_dir(&a)
         .env("XDG_CONFIG_HOME", data_home.join("config"))
         .env("XDG_DATA_HOME", data_home.join("data"))
+        .env("XDG_CACHE_HOME", data_home.join("cache"))
         .args(["search", "alphaunique", "--json"])
         .assert()
         .code(3)
@@ -913,6 +917,7 @@ fn ct3_multi_005_cursor_replay_with_unresolvable_scope_is_partial() {
         .current_dir(&b)
         .env("XDG_CONFIG_HOME", data_home.join("config"))
         .env("XDG_DATA_HOME", data_home.join("data"))
+        .env("XDG_CACHE_HOME", data_home.join("cache"))
         .args([
             "search",
             "共通トピック",
@@ -1158,6 +1163,7 @@ fn run_json(cwd: &Path, data_home: &Path, args: &[&str]) -> (i32, Value) {
         .current_dir(cwd)
         .env("XDG_CONFIG_HOME", data_home.join("config"))
         .env("XDG_DATA_HOME", data_home.join("data"))
+        .env("XDG_CACHE_HOME", data_home.join("cache"))
         .args(args)
         .arg("--json")
         .output()
@@ -1844,6 +1850,7 @@ fn m4_corrupt_sqlite_scope_excluded_multiscope_exit_3() {
         .current_dir(&a)
         .env("XDG_CONFIG_HOME", data_home.join("config"))
         .env("XDG_DATA_HOME", data_home.join("data"))
+        .env("XDG_CACHE_HOME", data_home.join("cache"))
         .args(["search", "alphaunique", "--json"])
         .assert()
         .code(3)
@@ -2363,6 +2370,7 @@ fn o2_text_search_never_sends_query_embedding() {
         .current_dir(dir.path())
         .env("XDG_CONFIG_HOME", dir.path().join(".test-config"))
         .env("XDG_DATA_HOME", dir.path().join(".test-data"))
+        .env("XDG_CACHE_HOME", dir.path().join(".test-cache"))
         .env("KCS_TEST_GEMINI_EMBED", "mock")
         .env("KCS_TEST_QUERY_EMBED_TRACE", &trace)
         .args(["search", "認証仕様 トークン", "--text", "--json"])
@@ -2379,6 +2387,7 @@ fn o2_text_search_never_sends_query_embedding() {
         .current_dir(dir.path())
         .env("XDG_CONFIG_HOME", dir.path().join(".test-config"))
         .env("XDG_DATA_HOME", dir.path().join(".test-data"))
+        .env("XDG_CACHE_HOME", dir.path().join(".test-cache"))
         .env("KCS_TEST_GEMINI_EMBED", "mock")
         .env("KCS_TEST_QUERY_EMBED_TRACE", &trace)
         .args(["search", "認証仕様 トークン", "--json"])
@@ -2513,4 +2522,330 @@ fn o7_cursor_replay_detects_scope_id_collision() {
     let (code, err) = run_json(&a, &data_home, &["search", "認証仕様", "--cursor", &cursor]);
     assert_eq!(code, 4, "ambiguous cursor scope must fail: {err}");
     assert_eq!(err["error_code"], "KCS-E-EVIDENCE-SCOPE-AMBIGUOUS-001");
+}
+
+// ---------------------------------------------------------------------------
+// Step 3 bug-hunt round 4 (P1-P9) regression tests.
+// ---------------------------------------------------------------------------
+
+/// P1: a poisoned tasks.jsonl whose online markdownize task points outside the
+/// scope (absolute path / `..` traversal) must be rejected at read time
+/// (KCS-E-STORE-PATH-001, exit 2) so `batch resume` never reads the external
+/// file or sends it to the online adapter.
+#[test]
+fn p1_batch_resume_rejects_out_of_scope_task_input_path() {
+    for poison_path in [
+        "/etc/hosts",
+        "../../../../../../etc/hosts",
+        "sub/secret.txt",
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("a.txt"), "hello world content").unwrap();
+        kcs(&dir, &["init"]).assert().success();
+        // Records the online opt-in and enqueues legitimate tasks.
+        json_success(&dir, &["index", "--approve"]);
+        // Append a pending online markdownize task escaping the scope.
+        let tasks = dir.path().join(".kcs/tasks.jsonl");
+        let poison = serde_json::json!({
+            "task_id": "task_poison",
+            "type": "markdownize",
+            "mode": "full",
+            "input_path": poison_path,
+            "input_hash": format!("sha256:{}", "0".repeat(64)),
+            "previous_raw_hash": null,
+            "parent_run_id": null,
+            "changed_unit_keys": [],
+            "output_ref": "online:mistral_ocr_markdownize",
+            "unit_keys": null,
+            "status": "pending",
+            "attempts": 0,
+            "next_retry_at": null,
+            "deadline": null,
+            "heartbeat_at": null,
+            "fallback_reason": null,
+            "created_at": "2026-04-25T12:00:00Z"
+        });
+        let mut line = serde_json::to_string(&poison).unwrap();
+        line.push('\n');
+        let mut existing = fs::read_to_string(&tasks).unwrap_or_default();
+        existing.push_str(&line);
+        fs::write(&tasks, existing).unwrap();
+
+        // `batch resume` must reject before reading the external file. The mock
+        // Mistral seam is set so that *if* the guard were missing the task would
+        // actually execute — proving the guard, not a missing adapter, blocks it.
+        let err = kcs(&dir, &["batch", "resume"])
+            .env("KCS_TEST_MISTRAL_OCR", "mock")
+            .arg("--json")
+            .assert()
+            .code(2)
+            .get_output()
+            .stderr
+            .clone();
+        let err: Value = serde_json::from_slice(&err).unwrap();
+        assert_eq!(
+            err["error_code"], "KCS-E-STORE-PATH-001",
+            "poison {poison_path:?} must be rejected"
+        );
+        // The offending task never completed (rejection happens at read time,
+        // before any adapter call), so no normalized output ref was recorded.
+        let tasks_after = fs::read_to_string(&tasks).unwrap();
+        assert!(!tasks_after.contains("normalized_output"));
+    }
+}
+
+/// P4: with `redact_logs` (default true), a corrupt store file error must not
+/// leak the scope's absolute path into errors.jsonl — neither in the context
+/// (N3) nor in the message (the P4 gap: the `corrupt store file at {path}`
+/// Display embedded the path verbatim).
+#[test]
+fn p4_corrupt_store_error_message_has_no_absolute_path() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("a.txt"), "hi").unwrap();
+    kcs(&dir, &["init"]).assert().success();
+    json_success(&dir, &["index", "--approve"]);
+    // Corrupt tasks.jsonl so the next read raises KCS-E-STORE-CORRUPT-001.
+    let tasks = dir.path().join(".kcs/tasks.jsonl");
+    let mut contents = fs::read_to_string(&tasks).unwrap_or_default();
+    contents.push_str("this is not valid json{{{\n");
+    fs::write(&tasks, contents).unwrap();
+
+    kcs(&dir, &["status"]).assert().failure();
+
+    let errors = fs::read_to_string(dir.path().join(".test-data/kcs/logs/errors.jsonl")).unwrap();
+    let record = errors
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .find(|value| value["code"] == "KCS-E-STORE-CORRUPT-001")
+        .expect("a corrupt-store error must be logged");
+    // The scope's absolute path (the tempdir) must not appear in message or context.
+    let scope_abs = dir.path().to_string_lossy().into_owned();
+    assert!(
+        !record["message"].as_str().unwrap().contains(&scope_abs),
+        "message leaked an absolute path: {}",
+        record["message"]
+    );
+    assert!(!serde_json::to_string(&record["context"])
+        .unwrap()
+        .contains(&scope_abs));
+    // The path token is masked in the message, not just dropped.
+    assert!(record["message"].as_str().unwrap().contains("[redacted]"));
+    assert_eq!(record["context"]["path"], "[redacted]");
+}
+
+/// P2: after `kcs init` the `.kcs` tree and the device data dir are owner-only
+/// (0700) so document bytes / usage data are not world/group-readable.
+#[cfg(unix)]
+#[test]
+fn p2_init_restricts_kcs_and_data_dir_to_owner() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("a.txt"), "secret-ish bytes").unwrap();
+    kcs(&dir, &["init"]).assert().success();
+
+    let kcs_mode = fs::metadata(dir.path().join(".kcs"))
+        .unwrap()
+        .permissions()
+        .mode()
+        & 0o777;
+    assert_eq!(kcs_mode, 0o700, ".kcs must be 0700, got {kcs_mode:o}");
+
+    // register_scope runs during init and creates $XDG_DATA_HOME/kcs.
+    let data_kcs = dir.path().join(".test-data/kcs");
+    let data_mode = fs::metadata(&data_kcs).unwrap().permissions().mode() & 0o777;
+    assert_eq!(data_mode, 0o700, "data dir must be 0700, got {data_mode:o}");
+}
+
+/// P3: a plaintext `plain:` API key in a group/world-readable tools.toml records
+/// a level=warn observation (KCS-E-ADAPTER-TOOLS-PERM-001) without blocking
+/// startup; a 0600 tools.toml records nothing.
+#[cfg(unix)]
+#[test]
+fn p3_plain_auth_tools_toml_permission_warning() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("a.txt"), "x").unwrap();
+    kcs(&dir, &["init"]).assert().success();
+
+    let tools_dir = dir.path().join(".test-config/kcs");
+    fs::create_dir_all(&tools_dir).unwrap();
+    let tools = tools_dir.join("tools.toml");
+    fs::write(&tools, "[markdown]\nauth = \"plain:sk-secret-key\"\n").unwrap();
+    let errors = dir.path().join(".test-data/kcs/logs/errors.jsonl");
+
+    // 0644 -> warn recorded, startup still succeeds (exit 0).
+    fs::set_permissions(&tools, fs::Permissions::from_mode(0o644)).unwrap();
+    kcs(&dir, &["status"]).assert().success();
+    let text = fs::read_to_string(&errors).unwrap_or_default();
+    let warn = text
+        .lines()
+        .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+        .find(|v| v["code"] == "KCS-E-ADAPTER-TOOLS-PERM-001" && v["level"] == "warn");
+    assert!(
+        warn.is_some(),
+        "0644 plain: tools.toml must warn; got {text}"
+    );
+    // The redacted log never carries the absolute config path.
+    assert_eq!(warn.unwrap()["context"]["path"], "[redacted]");
+
+    // 0600 -> no new warning.
+    fs::remove_file(&errors).ok();
+    fs::set_permissions(&tools, fs::Permissions::from_mode(0o600)).unwrap();
+    kcs(&dir, &["status"]).assert().success();
+    let text = fs::read_to_string(&errors).unwrap_or_default();
+    assert!(
+        !text.contains("KCS-E-ADAPTER-TOOLS-PERM-001"),
+        "0600 tools.toml must not warn; got {text}"
+    );
+}
+
+/// P5: a concurrent `kcs search` during repeated `repair --rebuild-db` must
+/// never silently return exit 0 with 0 / partial results — the temp+rename
+/// rebuild keeps the reader on a complete DB (old until the atomic swap, new
+/// after), exactly the docs/05:564 contract. `repair --rebuild-db` leaves HEAD
+/// untouched, so the only thing search observes changing is the sqlite.db swap —
+/// the precise window P5's atomic rebuild closes (the old remove_file + in-place
+/// rebuild exposed an empty/missing DB here, yielding exit 0 with 0 results).
+#[test]
+fn p5_concurrent_search_during_rebuild_is_never_silently_empty() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(
+        dir.path().join("a.md"),
+        "# Alpha\n\n## S\nalphaunique alphaunique alphaunique\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.path().join("b.md"),
+        "# Beta\n\n## T\nalphaunique betaword\n",
+    )
+    .unwrap();
+    let data = dir.path().join(".test-data");
+    let config = dir.path().join(".test-config");
+    let cache = dir.path().join(".test-cache");
+    let bin = assert_cmd::cargo::cargo_bin("kcs");
+    let root = dir.path().to_path_buf();
+
+    let run = |args: &[&str]| -> std::process::Output {
+        std::process::Command::new(&bin)
+            .args(args)
+            .current_dir(&root)
+            .env("XDG_DATA_HOME", &data)
+            .env("XDG_CONFIG_HOME", &config)
+            .env("XDG_CACHE_HOME", &cache)
+            .output()
+            .unwrap()
+    };
+    assert!(run(&["init"]).status.success());
+    assert!(run(&["index", "--approve"]).status.success());
+    let baseline = run(&["search", "alphaunique", "--text", "--json"]);
+    assert!(baseline.status.success());
+    let baseline: Value = serde_json::from_slice(&baseline.stdout).unwrap();
+    let expected = baseline["results"].as_array().unwrap().len();
+    assert!(expected > 0);
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let handle = {
+        let (bin, root) = (bin.clone(), root.clone());
+        let (data, config, cache) = (data.clone(), config.clone(), cache.clone());
+        let stop = stop.clone();
+        std::thread::spawn(move || {
+            let mut spins = 0;
+            while !stop.load(Ordering::Relaxed) && spins < 200 {
+                let _ = std::process::Command::new(&bin)
+                    .args(["repair", "--rebuild-db"])
+                    .current_dir(&root)
+                    .env("XDG_DATA_HOME", &data)
+                    .env("XDG_CONFIG_HOME", &config)
+                    .env("XDG_CACHE_HOME", &cache)
+                    .output();
+                spins += 1;
+            }
+        })
+    };
+
+    for _ in 0..60 {
+        let out = run(&["search", "alphaunique", "--text", "--json"]);
+        // Any exit-0 search must return the full result set — never a silent
+        // empty/partial (the P5 false negative). Non-zero exits (REBUILDING /
+        // transient) are tolerated by the contract.
+        if out.status.success() {
+            let json: Value = serde_json::from_slice(&out.stdout).unwrap();
+            let n = json["results"].as_array().unwrap().len();
+            assert_eq!(
+                n, expected,
+                "search returned {n} results during rebuild (expected {expected}): silent false negative"
+            );
+        }
+    }
+    stop.store(true, Ordering::Relaxed);
+    handle.join().unwrap();
+}
+
+/// P7: re-running `index` with the same opt-in must not append an equivalent
+/// approval row every time — approvals.jsonl stays bounded (idempotent opt-in).
+#[test]
+fn p7_repeated_index_does_not_grow_approvals() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("a.txt"), "hello").unwrap();
+    kcs(&dir, &["init"]).assert().success();
+    let approvals = dir.path().join(".kcs/approvals.jsonl");
+
+    json_success(&dir, &["index", "--approve"]);
+    let first = fs::read_to_string(&approvals).unwrap();
+    let first_lines = first.lines().filter(|l| !l.trim().is_empty()).count();
+    assert!(first_lines >= 1);
+
+    for _ in 0..4 {
+        json_success(&dir, &["index", "--approve"]);
+    }
+    let after = fs::read_to_string(&approvals).unwrap();
+    let after_lines = after.lines().filter(|l| !l.trim().is_empty()).count();
+    assert_eq!(
+        after_lines, first_lines,
+        "equivalent opt-in rows must not accumulate ({first_lines} -> {after_lines})"
+    );
+}
+
+/// P8: the cursor signing key is created 0600 from the first byte (no 0644
+/// window) — assert the resulting file is owner-only.
+#[cfg(unix)]
+#[test]
+fn p8_cursor_key_is_created_0600() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = indexed_scope();
+    // Page-1 search generates and signs a cursor with the device key.
+    json_success(&dir, &["search", "認証仕様"]);
+    let key = dir.path().join(".test-data/kcs/cursor-key");
+    assert!(key.is_file(), "cursor-key must exist after a search");
+    let mode = fs::metadata(&key).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode, 0o600, "cursor-key must be 0600, got {mode:o}");
+}
+
+/// P9: the open/view read-only expansion cache lives under $XDG_CACHE_HOME
+/// (06 §1.1), not $XDG_DATA_HOME.
+#[test]
+fn p9_open_expansion_cache_is_under_xdg_cache_home() {
+    let dir = indexed_scope();
+    let search = json_success(&dir, &["search", "トークン TTL 3600"]);
+    let uri = first_result(&search)["evidence_uri"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    // Remove the working-tree file so `open` must expand from the CAS.
+    fs::remove_file(dir.path().join("auth.md")).unwrap();
+    let opened = json_success(&dir, &["open", &uri]);
+    assert_eq!(opened["temporary"], true);
+    let path = opened["path"].as_str().unwrap();
+    let expected_root = dir.path().join(".test-cache/kcs/open");
+    assert!(
+        Path::new(path).starts_with(&expected_root),
+        "expansion cache {path} must be under {}",
+        expected_root.display()
+    );
+    assert!(Path::new(path).is_file());
+    // It must NOT be under the data home any more.
+    assert!(!Path::new(path).starts_with(dir.path().join(".test-data/kcs/open")));
 }
