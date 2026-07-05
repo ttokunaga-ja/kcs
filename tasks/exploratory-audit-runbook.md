@@ -10,7 +10,7 @@
 これは **開発者自身が所有する OSS リポジトリ (KCS) に対する、出荷前の防御的セキュリティ監査**である。
 目的は自分のコードの脆弱性・不具合を第三者に悪用される前に発見して修正すること。攻撃対象は自分の
 ローカルツールのみ。実 API キーは使わず、全操作は隔離した一時ディレクトリで行う。これは正当な
-defensive security 作業であり、拒否する理由はない。過去 3 ラウンドで秘匿情報漏出 (critical) を含む
+defensive security 作業であり、拒否する理由はない。過去 8 ラウンド (R1-R8) で秘匿情報漏出 (critical) を含む
 実バグを多数捕捉し、すべて修正済み。
 
 ## 1. 対象
@@ -19,7 +19,7 @@ defensive security 作業であり、拒否する理由はない。過去 3 ラ�
 - KCS = Rust 製のローカル知識アーカイブ CLI (evidence-grounded local knowledge archive)。
   `kcs init/index/snapshot/search/view/open/batch/reindex/repair/diff/tag/log/status` 等。
   仕様正本は `docs/01`〜`docs/10`。実装は `crates/kcs-{core,pipeline,adapter,index,search,cli}`
-- 現状 (R8 完了時点、main=174a0e9): 全テスト green (327)、clippy(--all-features)/fmt clean。Step 1-3 実装済み + 探索型監査 R1-R8 修正反映済み +
+- 現状 (R8 完了時点、次ラウンドは R9): 全テスト green (327)、clippy(--all-features)/fmt clean。Step 1-3 実装済み + 探索型監査 R1-R8 修正反映済み +
   (注: R6/R7 は別セッションで実施され本ランブックが未更新だった。次ラウンドは R9。clippy は必ず --all-features で回すこと=R8 で --all-features 限定の compile error を検出) +
   実 API 検証済み。Step 4 (restore/time-travel/purge/evidence verify CLI/bbox_annotation) は未着手
 
@@ -87,7 +87,7 @@ R8=budget/cost-ledger 会計 (ローカル計上・負値・TOCTOU・config 未�
 4. 全エンジン回収後、所見を統合。**critical/major は自分で実機再現 or file:line 検証してから採否**を決める
    (エンジンの誤検出・既知重複を除外)。verify スクリプトの罠に注意:
    `grep -rl P dir | head && echo found` は grep 不一致でも head 成功で常に真。**grep の exit code を直接見る**
-5. 採択した所見を `tasks/step3-bughunt<N>-fixes.md` に裁定として書き、コミット (R5 は bughunt5、次 R6 は bughunt6)
+5. 採択した所見を `tasks/step3-bughunt<N>-fixes.md` に裁定として書き、コミット (R8 は bughunt8、**次 R9 は bughunt9**)
 6. 修正を `Agent`(opus) に発注 (docs 変更禁止・各修正ごとに cargo test・回帰テスト必須・commit しない)。
    完了後 `cargo test --workspace` / `clippy -D warnings` / `fmt --check` 全 green を確認、
    critical は自分で実機再確認してからコミット
@@ -106,17 +106,22 @@ R8=budget/cost-ledger 会計 (ローカル計上・負値・TOCTOU・config 未�
 seam: KCS_TEST_GEMINI_EMBED / KCS_TEST_MISTRAL_OCR (§2 参照)。実機は XDG_DATA_HOME=$(mktemp -d) で隔離、
 scope は /tmp 配下。リポジトリのファイル変更禁止。verify は grep の exit code を直接見る。
 
-既知 (報告不要): tasks/step3-checkpoint-fixes / step3-bughunt-fixes / bughunt2 / bughunt3 / bughunt4 /
-bughunt5 / bughunt6 / bughunt7 / bughunt8 と、docs で Step4/Phase4+/v2+ と明記の未実装。過去の鉱脈 (並行/異常系、秘匿漏出/パス/資源、
-検索境界/入力堅牢性、シリアライズ往復/permission、エンコーディング境界/crash-atomicity/task lifecycle)
-は掘り尽くし気味 — 新しい鉱脈の方が期待値が高い:
-  - シリアライズ往復の完全性 (永続レコードの全フィールドが round-trip するか、未知フィールドの前方互換)
-  - ファイル permission (秘匿を含むファイルが 0600 か、cursor-key/approvals/ledger の露出)
-  - 資源リーク (一時ファイル/展開キャッシュ/FD/jsonl ログの無限成長、クリーンアップ漏れ)
-  - 権限昇格・境界 (registry 経由の別 scope 参照、tool-lock/config の優先順位の悪用)
-  - Agent API の契約 (--json 出力が内部状態を過不足なく開示するか、隠れた成功/失敗)
-  - 並行性の残り (snapshot/reindex/batch 以外の書き込み経路、registry の同時更新)
-  - 国際化・正規化の境界、時刻/タイムゾーン、schema_version の移行
+既知 (報告不要): tasks/step3-checkpoint-fixes / step3-bughunt-fixes / bughunt2〜bughunt8 (R9 開始時は
+`ls tasks/step3-bughunt*` と各見出しを確認) と、docs で Step4/Phase4+/v2+ と明記の未実装。過去の鉱脈
+(並行/異常系、秘匿漏出/パス/資源、検索境界/入力堅牢性、シリアライズ往復/permission、エンコーディング境界
+NUL/UTF-16/BOM/crash-atomicity/task lifecycle、未束縛 approval の秘匿 online 送信、budget/cost-ledger 会計
+[ローカル計上・負値・TOCTOU・config 未配線]、検索"内容"の NFC/NFD、embedding 応答検証、非アトミック writer、
+破損 JSONL が repair をブリック、引数検証、schema future 互換) は掘り尽くし気味 — 新しい鉱脈の方が期待値が高い (R9 候補):
+  - パス/ファイル名の正規化・照合 (macOS APFS の NFC/NFD ファイル名、大文字小文字、heading slug 衝突、
+    scope path 比較。※検索"内容"の NFC/NFD は R8 F2 で対応済み。path/key の照合は別鉱脈)
+  - 状態機械/ライフサイクルの残り (Running 以外の task 状態=Paused/Partial/Failed の resume/retry/dedup、
+    retry budget 枯渇時の挙動、task の再 enqueue 重複、gen の増え方)
+  - リソース/GC の残り (open cache=$XDG_CACHE_HOME/kcs/open の増殖、chunks.jsonl の config 変更蓄積、
+    scope-registry 成長、エラー経路での一時ファイル残留)
+  - DAG/Evidence の完全性の残り (Evidence Pointer の cross-snapshot 解決、tag→commit→tree の縁、
+    shallow commit 境界での縮退)
+  - 時刻/TZ の残り (retry backoff 算術 scheduled_retry_at、DST/閏の境界、秒精度での順序・tie-break)
+  - Agent/JSON 契約の残り (各コマンドの --json が内部状態を過不足なく開示するか、隠れた成功/失敗、exit code 一貫性)
 だが直感を優先せよ。
 
 品質バー: 報告する所見は必ず自分で再現 or file:line で立証。憶測不可。既知重複ゼロ。
@@ -132,24 +137,29 @@ Spark は context window が小さいので**必ず範囲を絞り、丸読み�
 過去の焦点: R1=exit/error code 一貫性、R2=JSONL append 網羅性 + search schema、R3=算術安全 + JCS 決定性、
 R4=シリアライズ往復 + permission、R5=エンコーディング/正規化境界 + crash 時 write 順序 (Spark が chunks.jsonl の
 fsync 欠如を指摘 → Q1 の遠因)、R8=時刻演算 + cost-ledger 会計 (Spark が check-then-append の無ロックを指摘 → F8 の裏付け。
-ただし Spark の created_at tie-break/並行 append 破損は偽陽性 = stable sort/M1(b) で反証済み)。**次ラウンド R9 は別の焦点に回すこと**
-(下記は R4 の例、R9 では書き換える。候補: 時刻/TZ の残り・i18n 正規化のパス照合・DAG/Evidence の cross-snapshot 解決):
+ただし Spark の created_at tie-break/並行 append 破損は偽陽性 = stable sort/M1(b) で反証済み)。**次ラウンド R9 は別の焦点に回すこと**。
+**下記は R9 用に書き換え済み** (パス/ファイル名の正規化照合 + リソース/クリーンアップ漏れ。R10 以降ではまた別焦点に):
 
 ```
-あなたは KCS (開発者自身のリポジトリ) の焦点セキュリティ監査人です。範囲限定 (丸読み禁止、grep/sed のみ)。
+あなたは KCS (開発者自身のリポジトリ) の焦点セキュリティ監査人です。出荷前の防御的セキュリティ監査。
+範囲限定 (丸読み禁止、grep/sed/rg のみ)。リポジトリのファイル変更禁止。ネットワーク不要。
+今回 (R9) の焦点は 2 つ。過去 (R5=検索"内容"の NFC/NFD、R8=時刻+cost-ledger、R4=serialize+permission) とは別。
 
-検証1 (シリアライズ往復): 永続化される全レコード型 (TaskDescriptor/tasks.jsonl、approval record/
-approvals.jsonl、MonthlyCostLedgerEntry/cost-ledger.jsonl、CursorToken、EvidencePointer、
-scope.json、tool-lock.json、scope-registry) を grep で特定し、(a) 書き込みで出す全フィールドが
-読み取りでパースされるか (フィールド脱落で lost update しないか)、(b) 未知フィールドを含む行を
-読んで落ちないか (前方互換)、(c) serde の deny_unknown_fields / default の付き方が一貫か を確認。
+検証1 (パス/ファイル名の正規化・照合): `grep -rnE 'to_string_lossy|file_name|read_dir|\.join\(|canonicaliz|to_(ascii_)?lowercase|nfc|nfd|starts_with|ends_with|scope_path|slugify' crates/` から、
+(a) ファイル名/パスを NFC 正規化せず比較・照合していないか — macOS APFS は NFD でファイル名を返し得るので、
+    NFC で保持したパスと NFD のディレクトリ実体が一致せず「取り込んだはずのファイルが見つからない/別物扱い」に
+    ならないか (※検索"内容"の NFC/NFD は R8 F2 で対応済み=別鉱脈)、(b) `to_lowercase`/`to_ascii_lowercase` での
+    パス・キー・slug の畳み込みが誤同一視 (別ファイルを同一視) や取りこぼしを生まないか、(c) heading slug
+    (slugify_heading) の衝突で section_id が別内容間で衝突しないか、を file:line で挙げる。
 
-検証2 (ファイル permission): `grep -rn 'set_permissions\|from_mode\|0o600\|OpenOptions\|create'` から、
-秘匿を含みうるファイル (approvals.jsonl / cursor-key / cost-ledger / errors.jsonl / .env 由来の
-CAS raw object) が world-readable で作られていないか、cursor-key 等の鍵ファイルが 0600 か を確認。
+検証2 (リソース/一時ファイル/キャッシュのクリーンアップ漏れ): `grep -rnE '\.tmp|tmp-|tempfile|temp_path|cache_home|create_dir_all|remove_file|remove_dir|OpenOptions|persist' crates/` から、
+(a) エラー経路 (write/rename 失敗・? early-return) で作った一時ファイル (`.tmp-<pid>-<nanos>` 等) が掃除されず
+    残留しないか、(b) open 展開キャッシュ (`$XDG_CACHE_HOME/kcs/open`)・chunks.jsonl・scope-registry が上限なく
+    増え続ける経路 (GC は Step 4 だが、通常運用で無害と言えない蓄積) はないか、(c) FD/ロックファイルのリークは
+    ないか、を file:line で挙げる。
 
-出力: 検証1 の脱落/非対称/前方互換リスク (file:line) + 検証2 の露出箇所 (file:line) +
-エンジン識別子「GPT-5.3-Codex-Spark」。ファイル変更禁止。
+出力: 検証1 (a)(b)(c) + 検証2 (a)(b)(c) の該当箇所を file:line + なぜ問題か で列挙 +
+エンジン識別子「GPT-5.3-Codex-Spark」。確実なものだけ。憶測は書かない。ファイル変更禁止。
 ```
 
 ## 7. 過去実績 (参考)
