@@ -195,7 +195,11 @@ fn json_failure<const N: usize>(dir: &TempDir, args: [&str; N], code: i32) -> Va
     serde_json::from_slice(&output).unwrap()
 }
 
-fn json_failure_with_env<const N: usize>(
+/// R11-2/R11-3: a command that prints its full result JSON to STDOUT yet exits
+/// non-zero (batch 3/4/5/6, index partial 3) — the "result + nonzero exit" shape
+/// (05 §1.8 search parity), distinct from an Err envelope (stderr). Asserts the
+/// exit code and returns the stdout payload (with `__exit_code` already stripped).
+fn json_code_stdout_with_env<const N: usize>(
     dir: &TempDir,
     args: [&str; N],
     code: i32,
@@ -210,7 +214,7 @@ fn json_failure_with_env<const N: usize>(
         .assert()
         .code(code)
         .get_output()
-        .stderr
+        .stdout
         .clone();
     serde_json::from_slice(&output).unwrap()
 }
@@ -674,7 +678,10 @@ fn ct2_accept_008_full_fallback_failure_is_per_candidate_partial_exit() {
         fake_pdf(&["p1 changed", "p2", "p3", "p4"]),
     )
     .unwrap();
-    let error = json_failure_with_env(
+    // R11-3: a partial index now prints its full result JSON to stdout with a
+    // top-level `error_code` + `__exit_code:3` (search parity), not an Err envelope
+    // that buried `failed_files`/`commit_hash` inside a private `context.output`.
+    let output = json_code_stdout_with_env(
         &dir,
         ["index", "--yes"],
         3,
@@ -683,13 +690,13 @@ fn ct2_accept_008_full_fallback_failure_is_per_candidate_partial_exit() {
             "reject_incremental_and_full",
         )],
     );
-    assert_eq!(error["error_code"], "KCS-E-INDEX-PARTIAL-001");
-    assert_eq!(error["context"]["output"]["failed_files"], 1);
+    assert_eq!(output["error_code"], "KCS-E-INDEX-PARTIAL-001");
+    assert_eq!(output["failed_files"], 1);
+    assert!(output["normalized_files"].as_u64().unwrap() > 0);
+    // The index result (commit_hash/tree_hash) is now visible on stdout, not hidden.
     assert!(
-        error["context"]["output"]["normalized_files"]
-            .as_u64()
-            .unwrap()
-            > 0
+        output["commit_hash"].is_string(),
+        "commit_hash must survive on stdout for a partial index: {output}"
     );
     let status = json_success(&dir, ["status"]);
     assert!(status["tasks"].as_array().unwrap().iter().any(|task| {
@@ -824,6 +831,60 @@ fn ct2_approve_001_noninteractive_index_without_approval_exits_2() {
     fs::write(dir.path().join("a.txt"), "hello").unwrap();
     let error = json_failure(&dir, ["index"], 2);
     assert_eq!(error["error_code"], "KCS-E-CONFIG-USAGE-001");
+}
+
+// R11-1: derive-path (`#[derive(Args)]`) commands routed clap's usage error
+// straight to `process::exit(2)` with plaintext, bypassing the `--json` contract.
+// `diff` requires two positionals; `kcs diff --json` must now emit the standard
+// KCS-E-CONFIG-USAGE-001 envelope on stderr with clap's exit code (2).
+#[test]
+fn r11_1_derive_usage_error_honors_json_envelope() {
+    let dir = tempfile::tempdir().unwrap();
+    let error = json_failure(&dir, ["diff"], 2);
+    assert_eq!(error["error_code"], "KCS-E-CONFIG-USAGE-001");
+    assert!(error["message"].as_str().is_some_and(|m| !m.is_empty()));
+    assert_eq!(error["context"], serde_json::json!({}));
+}
+
+// An unknown subcommand and an unexpected derive-command flag are both usage
+// errors that must honor the machine contract under `--json`.
+#[test]
+fn r11_1_unknown_subcommand_and_flag_return_json_envelope() {
+    let dir = tempfile::tempdir().unwrap();
+    let bogus = json_failure(&dir, ["bogus"], 2);
+    assert_eq!(bogus["error_code"], "KCS-E-CONFIG-USAGE-001");
+    let flag = json_failure(&dir, ["index", "--nope"], 2);
+    assert_eq!(flag["error_code"], "KCS-E-CONFIG-USAGE-001");
+}
+
+// Without `--json`, clap's native plaintext error + exit 2 must be preserved
+// verbatim (the envelope is a machine-mode-only affordance).
+#[test]
+fn r11_1_usage_error_without_json_stays_plaintext() {
+    let dir = tempfile::tempdir().unwrap();
+    let stderr = kcs(&dir, ["diff"])
+        .assert()
+        .code(2)
+        .get_output()
+        .stderr
+        .clone();
+    assert!(
+        String::from_utf8_lossy(&stderr).contains("error:"),
+        "expected clap plaintext error"
+    );
+    assert!(
+        serde_json::from_slice::<Value>(&stderr).is_err(),
+        "plaintext error must not be JSON"
+    );
+}
+
+// `--help` / `--version` are clap "errors" that must still render to stdout and
+// exit 0 — the try_parse wrapper must not regress them into the error path.
+#[test]
+fn r11_1_help_and_version_still_exit_zero() {
+    let dir = tempfile::tempdir().unwrap();
+    kcs(&dir, ["--help"]).assert().success();
+    kcs(&dir, ["--version"]).assert().success();
 }
 
 #[test]
@@ -1375,6 +1436,41 @@ fn ct2_budget_005_online_success_records_ledger_and_caps_next_task() {
     assert_eq!(status["budget"]["folder_per_adapter"]["markdown"], 0.0);
 }
 
+// R11-2: the batch-side Then of CT2-BUDGET-005 (tasks/step2a-contract-tests.md) —
+// finally verified. A `batch resume` that drives a Pending online task straight into
+// a budget pause THIS pass must exit 6 (docs/04 §5.6), print its full result JSON to
+// stdout (tasks_paused > 0), and leave the task Paused/budget_exceeded. Before R11-2
+// resume returned exit 0 with tasks_updated:0 while the store silently flipped.
+#[test]
+fn r11_2_batch_resume_budget_pause_exits_6() {
+    let dir = scope();
+    fs::write(dir.path().join("a.pdf"), fake_pdf(&["budget pause body"])).unwrap();
+    // `--approve` records a persistent opt-in, so the online task is Pending-ready.
+    json_success(&dir, ["index", "--approve"]);
+    // Zero the markdown cap so the pending online send is over budget on resume.
+    fs::write(
+        dir.path().join(".kcs/config.toml"),
+        "[budget]\nmonthly_usd_cap = 50\n[budget.per_adapter]\nmarkdown = 0.0\n",
+    )
+    .unwrap();
+    let resumed = json_code_stdout_with_env(
+        &dir,
+        ["batch", "resume"],
+        6,
+        &[(TEST_STANDARD_ONLINE_MARKDOWNIZE_ENV, "mock")],
+    );
+    assert!(
+        resumed["tasks_paused"].as_u64().unwrap() > 0,
+        "resume must disclose the budget pause it caused: {resumed}"
+    );
+    let status = json_success(&dir, ["status"]);
+    assert!(status["tasks"].as_array().unwrap().iter().any(|task| {
+        task["input_path"] == "a.pdf"
+            && task["status"] == "paused"
+            && task["fallback_reason"] == "budget_exceeded"
+    }));
+}
+
 // F1 (04 §5.4): offline/deterministic markdownize is billed at unit price 0, so
 // free local indexing never consumes the device USD budget cap. Before the fix
 // the baseline row carried `usd = $0.01/MB`; because `device_spent` sums every
@@ -1563,11 +1659,14 @@ fn ct2_task_005_auth_error_task_is_not_retried() {
     // R9-2: online-task retry lifecycle uses a PDF fixture (non-text-native).
     fs::write(dir.path().join("a.pdf"), fake_pdf(&["hello auth"])).unwrap();
     json_success(&dir, ["index", "--approve"]);
-    json_success_with_env(
+    // R11-2: an auth failure driven this pass → docs/04 §5.6 exit 5, result on stdout.
+    let resumed = json_code_stdout_with_env(
         &dir,
         ["batch", "resume"],
+        5,
         &[(TEST_STANDARD_ONLINE_MARKDOWNIZE_ENV, "auth_error")],
     );
+    assert_eq!(resumed["tasks_failed"], 1);
     let status = json_success(&dir, ["status"]);
     let online_task = first_online_task(&status);
     assert_eq!(online_task["status"], "failed");
@@ -1596,9 +1695,12 @@ fn ct2_task_009_failed_online_task_is_not_reenqueued_by_reindex() {
     // re-enqueue.
     fs::write(dir.path().join("a.pdf"), fake_pdf(&["hello dedup"])).unwrap();
     json_success(&dir, ["index", "--approve"]);
-    json_success_with_env(
+    // R11-2: a retryable (rate_limit) failure driven this pass → exit 3 (some
+    // retryable work remains), result on stdout.
+    json_code_stdout_with_env(
         &dir,
         ["batch", "resume"],
+        3,
         &[(TEST_STANDARD_ONLINE_MARKDOWNIZE_ENV, "rate_limit")],
     );
     let status = json_success(&dir, ["status"]);
@@ -1817,6 +1919,80 @@ fn r10_4_partial_retry_respects_budget_and_stops_resending() {
     );
 }
 
+// R11-6: a unit-scoped retry re-sends and re-bills ONLY the still-failed units, not
+// the whole document, and keeps the already-done units' output verbatim
+// (first-instance-wins). Before R11-6 `unit_keys` was written but never read: every
+// retry re-sent the full document (a full-price ledger row) and regenerated the done
+// units (fingerprint churn → needless re-embedding).
+#[test]
+fn r11_6_unit_scoped_retry_prorates_cost_and_preserves_done_units() {
+    let dir = scope();
+    // 3-page PDF: the `partial` seam drops the last page → page:3 fails, page:1/2 done.
+    fs::write(
+        dir.path().join("report.pdf"),
+        fake_pdf(&["page one alpha", "page two beta", "page three gamma"]),
+    )
+    .unwrap();
+    json_success(&dir, ["index", "--approve"]);
+    json_success_with_env(
+        &dir,
+        ["batch", "resume"],
+        &[(TEST_STANDARD_ONLINE_MARKDOWNIZE_ENV, "partial")],
+    );
+
+    let markdown_costs = |dir: &TempDir| -> Vec<f64> {
+        ledger_lines(dir)
+            .iter()
+            .filter(|entry| {
+                entry["adapter_kind"] == "markdown" && entry["usd"].as_f64().unwrap_or(0.0) > 0.0
+            })
+            .map(|entry| entry["usd"].as_f64().unwrap())
+            .collect()
+    };
+    let first = markdown_costs(&dir);
+    assert_eq!(
+        first.len(),
+        1,
+        "the first send bills exactly one full-document row: {first:?}"
+    );
+    let full_cost = first[0];
+
+    // The online (mock) done unit for page:1 before the retry.
+    let online_page1 = |dir: &TempDir| -> NormalizedUnitObject {
+        normalized_units(dir)
+            .into_iter()
+            .find(|unit| unit.unit_key == "page:1" && unit.markdown.contains("mock ocr"))
+            .expect("online page:1 normalized unit")
+    };
+    let before = online_page1(&dir);
+
+    // Unit-scoped retry: re-sends ONLY the still-failing page:3 → a smaller ledger row.
+    json_success_with_env(
+        &dir,
+        ["batch", "retry"],
+        &[(TEST_STANDARD_ONLINE_MARKDOWNIZE_ENV, "partial")],
+    );
+
+    let after_costs = markdown_costs(&dir);
+    assert!(
+        after_costs.len() >= 2,
+        "the retry appends its own markdown row: {after_costs:?}"
+    );
+    let retry_cost = *after_costs.last().unwrap();
+    assert!(
+        retry_cost < full_cost,
+        "unit-scoped retry ({retry_cost}) must bill less than the full document ({full_cost})"
+    );
+
+    // First-instance-wins: the already-done page:1 output is unchanged across the retry
+    // (regenerating it under Markdown non-determinism would churn its fingerprint).
+    let after = online_page1(&dir);
+    assert_eq!(
+        before.markdown, after.markdown,
+        "a done unit's output must not change across a retry"
+    );
+}
+
 /// R9-7: `batch retry`/`resume` must report driven online-send attempts and
 /// failures in their JSON, not just successes. Pre-fix a Pending online task that
 /// failed on send left `{tasks_executed:0, tasks_updated:0}` — the attempt (rate
@@ -1828,9 +2004,11 @@ fn r9_7_batch_retry_reports_failed_attempts_in_json() {
     // Approve network so the Pending online task is ready to send.
     json_success(&dir, ["index", "--approve"]);
     // Retry drives the Pending online task; the auth_error mock fails the send.
-    let retry = json_success_with_env(
+    // R11-2: the auth failure this pass exits 5, with the full result JSON on stdout.
+    let retry = json_code_stdout_with_env(
         &dir,
         ["batch", "retry"],
+        5,
         &[(TEST_STANDARD_ONLINE_MARKDOWNIZE_ENV, "auth_error")],
     );
     assert_eq!(
@@ -1992,11 +2170,13 @@ fn ct2_task_008_retryable_failure_defers_until_backoff_elapses() {
     json_success(&dir, ["index", "--approve"]);
 
     // Fail the online task with a rate-limit-like (retryable) error at T0.
+    // R11-2: a retryable failure driven this pass exits 3 (result on stdout).
     kcs(&dir, ["batch", "resume"])
         .env(TEST_STANDARD_ONLINE_MARKDOWNIZE_ENV, "rate_limit")
         .env("KCS_FIXED_NOW", "2026-07-03T00:00:00Z")
+        .arg("--json")
         .assert()
-        .success();
+        .code(3);
     let status = json_success(&dir, ["status"]);
     let failed = first_online_task(&status);
     assert_eq!(failed["status"], "failed");

@@ -120,30 +120,38 @@ impl MistralOcrClient for MockStandardOnlineMarkdownizeClient {
             .as_deref()
             .unwrap_or(&[])
             .iter()
-            .enumerate()
-            .map(|(index, hint)| OcrPage {
-                index,
-                markdown: if std::env::var(TEST_STANDARD_ONLINE_MARKDOWNIZE_ENV)
-                    .ok()
-                    .as_deref()
-                    == Some("mock_link_image")
-                {
-                    format!(
-                        "[source](https://example.com/{index}) mock ocr {} ![img-{index}](img-{index}.png)\n",
-                        hint.unit_key
-                    )
-                } else {
-                    format!(
-                        "mock ocr {} ![img-{index}](img-{index}.png)\n",
-                        hint.unit_key
-                    )
-                },
-                images: vec![OcrImage {
-                    bytes: format!("image-{}", hint.unit_key).into_bytes(),
-                    media_type: "image/png".to_owned(),
-                    bbox: Some([index as i64, 0, index as i64 + 1, 1]),
-                    confidence: Some("0.99".to_owned()),
-                }],
+            .map(|hint| {
+                // R11-6: index each returned page by the unit's DOCUMENT order
+                // (`hint.order`), not its position in the hint list, so a
+                // unit-scoped retry (a subset of hints) maps back correctly — the
+                // adapter looks pages up by `hint.order` (mistral_ocr.rs). The real
+                // OCR API likewise returns pages at their document indices. For a
+                // full send `order` == list position, so this is unchanged.
+                let index = hint.order as usize;
+                OcrPage {
+                    index,
+                    markdown: if std::env::var(TEST_STANDARD_ONLINE_MARKDOWNIZE_ENV)
+                        .ok()
+                        .as_deref()
+                        == Some("mock_link_image")
+                    {
+                        format!(
+                            "[source](https://example.com/{index}) mock ocr {} ![img-{index}](img-{index}.png)\n",
+                            hint.unit_key
+                        )
+                    } else {
+                        format!(
+                            "mock ocr {} ![img-{index}](img-{index}.png)\n",
+                            hint.unit_key
+                        )
+                    },
+                    images: vec![OcrImage {
+                        bytes: format!("image-{}", hint.unit_key).into_bytes(),
+                        media_type: "image/png".to_owned(),
+                        bbox: Some([index as i64, 0, index as i64 + 1, 1]),
+                        confidence: Some("0.99".to_owned()),
+                    }],
+                }
             })
             .collect();
         if std::env::var(TEST_STANDARD_ONLINE_MARKDOWNIZE_ENV)

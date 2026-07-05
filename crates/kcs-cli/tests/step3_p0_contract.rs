@@ -98,6 +98,21 @@ fn json_failure_embed(dir: &TempDir, embed: &str, args: &[&str], code: i32) -> V
     serde_json::from_slice(&output).unwrap()
 }
 
+/// R11-2: an embedding-adapter run that exits non-zero (auth 5 / budget 6) while
+/// still printing its full result JSON to stdout (the search "result + nonzero"
+/// shape). Asserts the exit code and returns the stdout payload.
+fn json_code_stdout_embed(dir: &TempDir, embed: &str, code: i32, args: &[&str]) -> Value {
+    let output = kcs(dir, args)
+        .env(TEST_ADOPTED_EMBEDDING_ENV, embed)
+        .arg("--json")
+        .assert()
+        .code(code)
+        .get_output()
+        .stdout
+        .clone();
+    serde_json::from_slice(&output).unwrap()
+}
+
 fn json_success_embed_at(dir: &TempDir, embed: &str, fixed_now: &str, args: &[&str]) -> Value {
     let output = kcs(dir, args)
         .env(TEST_ADOPTED_EMBEDDING_ENV, embed)
@@ -291,6 +306,55 @@ fn ct3_embed_007_vector_only_without_index_is_an_error() {
     assert_eq!(err["error_code"], "KCS-E-SEARCH-VEC-UNAVAIL-001");
 }
 
+// R11-7: the `[search]` config (default_mode / fail_behavior) was schema-valid and
+// documented but entirely unwired (the [search] version of R10-2 config drift). A
+// text-only scope (no embedding adapter → vector unavailable) exercises all three.
+fn write_search_config(dir: &TempDir, body: &str) {
+    fs::write(
+        dir.path().join(".kcs/config.toml"),
+        format!("kcs_format_version = \"0.1.0\"\n[search]\n{body}"),
+    )
+    .unwrap();
+}
+
+#[test]
+fn r11_7_default_mode_config_seeds_requested_mode() {
+    let dir = indexed_scope();
+    write_search_config(&dir, "default_mode = \"hybrid\"\n");
+    // No CLI mode flag → the config default_mode is adopted as requested_mode
+    // (previously ignored: requested_mode was always the hardcoded "auto").
+    let search = json_success(&dir, &["search", "トークン TTL"]);
+    assert_eq!(search["requested_mode"], "hybrid");
+    // An explicit flag still wins over the config default.
+    let text = json_success(&dir, &["search", "トークン TTL", "--text"]);
+    assert_eq!(text["requested_mode"], "text");
+}
+
+#[test]
+fn r11_7_fail_behavior_error_makes_hybrid_hard_error() {
+    let dir = indexed_scope();
+    write_search_config(&dir, "fail_behavior = \"error\"\n");
+    // --hybrid with no vector backend + fail_behavior=error is now the same hard
+    // error the explicit --vector path returns, not a silent exit-0 text fallback.
+    let err = json_failure(&dir, &["search", "トークン TTL", "--hybrid"], 1);
+    assert_eq!(err["error_code"], "KCS-E-SEARCH-VEC-UNAVAIL-001");
+}
+
+#[test]
+fn r11_7_fail_behavior_warn_falls_back_with_warning() {
+    let dir = indexed_scope();
+    write_search_config(&dir, "fail_behavior = \"warn\"\n");
+    let search = json_success(&dir, &["search", "トークン TTL", "--hybrid"]);
+    assert_eq!(search["resolved_mode"], "text");
+    assert_eq!(search["fallback"], true);
+    assert!(
+        search["warning"]
+            .as_str()
+            .is_some_and(|w| w.contains("vector search unavailable")),
+        "warn must surface a warning field: {search}"
+    );
+}
+
 #[test]
 fn ct3_evidence_001_search_results_include_pointer_and_uri() {
     let dir = indexed_scope();
@@ -370,6 +434,26 @@ fn ct3_open_004_view_returns_chunk_text_without_regeneration() {
     let uri = first_result(&search)["evidence_uri"].as_str().unwrap();
     let viewed = json_success(&dir, &["view", uri]);
     assert!(viewed["text"].as_str().unwrap().contains("トークン TTL"));
+}
+
+// R11-9: `view --json` must expose the same `temporary` field as `open --json`,
+// since both resolve the identical pointer and Agents branch on it.
+#[test]
+fn r11_9_view_json_exposes_temporary_field() {
+    let dir = indexed_scope();
+    let search = json_success(&dir, &["search", "トークン TTL 3600"]);
+    let uri = first_result(&search)["evidence_uri"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    // Working-tree file present -> resolves from raw, not a temporary copy.
+    let viewed = json_success(&dir, &["view", &uri]);
+    assert_eq!(viewed["temporary"], false);
+    // Removing the working-tree file forces a temporary expansion, and `view`
+    // must surface it just like `open` does (ct3_open_002).
+    fs::remove_file(dir.path().join("auth.md")).unwrap();
+    let viewed_temp = json_success(&dir, &["view", &uri]);
+    assert_eq!(viewed_temp["temporary"], true);
 }
 
 #[test]
@@ -548,6 +632,23 @@ fn ct3_chunk_012_repair_rebuild_db_preserves_search_result() {
         first_result(&after)["evidence_uri"]
     );
     assert!(dir.path().join(".kcs/index/sqlite.db").is_file());
+}
+
+// R11-4: `build_sqlite_index_at` now wraps all three rebuild loops (chunks,
+// tree_entries, preserved embeddings) in one transaction. The rebuild must stay
+// functionally identical — the FULL result set (every chunk, not just the top
+// hit) must be byte-identical before and after a from-scratch rebuild.
+#[test]
+fn r11_4_transactional_rebuild_preserves_full_result_set() {
+    let dir = indexed_scope();
+    let before = json_success(&dir, &["search", "認証仕様", "--limit", "20"]);
+    let before_set = chunk_hash_set(&before);
+    assert!(!before_set.is_empty(), "fixture must return chunks");
+    fs::remove_file(dir.path().join(".kcs/index/sqlite.db")).unwrap();
+    json_success(&dir, &["repair", "--rebuild-db"]);
+    let after = json_success(&dir, &["search", "認証仕様", "--limit", "20"]);
+    assert_eq!(before_set, chunk_hash_set(&after));
+    assert_eq!(before["results"], after["results"]);
 }
 
 #[test]
@@ -1555,6 +1656,67 @@ fn ct3_embed_009_batch_retry_and_resume_execute_pending_embedding_tasks() {
     );
 }
 
+// R11-5: the enrichment pass now aggregates every embedding task-store update into
+// ONE write-back at the end (was a full all()+replace_all per 32-chunk batch =
+// O(N²)). The aggregation must not lose per-chunk `fallback_reason`: a rate_limit
+// failure must still land the task Failed with reason "rate_limit" and a scheduled
+// retry (the paused-side reason "budget_exceeded" is covered by ct3_l2).
+#[test]
+fn r11_5_aggregated_writeback_preserves_embedding_fallback_reason() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(
+        dir.path().join("a.md"),
+        "# メモ\n\n## 本文\n集約書き戻しの回帰テスト本文です。\n",
+    )
+    .unwrap();
+    kcs(&dir, &["init"]).assert().success();
+    json_success_embed_at(
+        &dir,
+        "rate_limit",
+        "2026-07-03T00:00:00Z",
+        &["index", "--approve"],
+    );
+    let status = json_success_embed(&dir, "rate_limit", &["status"]);
+    let emb = tasks_of_type(&status, "embedding");
+    assert!(!emb.is_empty(), "must enqueue embedding tasks: {status}");
+    assert!(
+        emb.iter().all(|task| task["status"] == "failed"
+            && task["fallback_reason"] == "rate_limit"
+            && task["next_retry_at"].is_string()),
+        "aggregated write-back must preserve each task's rate_limit reason + retry: {status}"
+    );
+}
+
+// R11-8: a retryable Failed enrichment task (rate_limit, recoverable by `batch
+// retry`) must count toward `index_status.pending_enrichment_tasks` — otherwise the
+// scope reports enriched_ratio<1.0 with pending=0 and budget_paused=false, a dead
+// end an Agent can't act on (the dual of R9-4's "Partial counts as incomplete").
+#[test]
+fn r11_8_retryable_failed_enrichment_counts_as_pending_in_index_status() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(
+        dir.path().join("a.md"),
+        "# メモ\n\n## 本文\n再試行可能な失敗の可視化テスト本文です。\n",
+    )
+    .unwrap();
+    kcs(&dir, &["init"]).assert().success();
+    json_success_embed_at(
+        &dir,
+        "rate_limit",
+        "2026-07-03T00:00:00Z",
+        &["index", "--approve"],
+    );
+    let search = json_success_embed(&dir, "rate_limit", &["search", "本文 再試行"]);
+    let index_status = &search["index_status"];
+    assert!(
+        index_status["pending_enrichment_tasks"].as_u64().unwrap() > 0,
+        "retryable failed embedding must surface as pending: {index_status}"
+    );
+    assert!(index_status["enriched_ratio"].as_f64().unwrap() < 1.0);
+    // The dead end this closes: ratio<1.0 must no longer coincide with pending=0.
+    assert_eq!(index_status["budget_paused"], false);
+}
+
 #[test]
 fn ct3_embed_010_retry_executes_after_snapshot_advances_head() {
     // 2026-07-04 実運用バグ #2 の回帰ガード: `kcs snapshot` は tree_entries を
@@ -1598,12 +1760,19 @@ fn ct3_embed_010_retry_executes_after_snapshot_advances_head() {
 /// Run `kcs <args> --json` with BOTH online mock seams (markdownize + embedding)
 /// so `batch resume`/index can execute both adapters deterministically offline.
 fn json_both_mock(dir: &TempDir, args: &[&str]) -> Value {
+    json_both_mock_code(dir, args, 0)
+}
+
+/// `json_both_mock` asserting a specific exit code and reading STDOUT. R11-2: an
+/// `index`/`batch` run whose inline enrichment budget-pauses prints its full result
+/// JSON to stdout with a non-zero exit (6), the search "result + nonzero" shape.
+fn json_both_mock_code(dir: &TempDir, args: &[&str], code: i32) -> Value {
     let output = kcs(dir, args)
         .env(TEST_ADOPTED_EMBEDDING_ENV, "mock")
         .env(TEST_STANDARD_ONLINE_MARKDOWNIZE_ENV, "mock")
         .arg("--json")
         .assert()
-        .success()
+        .code(code)
         .get_output()
         .stdout
         .clone();
@@ -1712,6 +1881,38 @@ fn ct3_l1_reindex_offline_surfaces_pending_embeddings_in_index_status() {
     assert!(search["index_status"]["enriched_ratio"].as_f64().unwrap() < 1.0);
 }
 
+// R11-2: the embedding enrichment DRIVEN inline by `index` auth-failed but the run
+// reported exit 0 with no embedding keys — a silent enrichment failure. It must now
+// exit 5 (docs/04 §5.6, user re-auth) with the full result JSON on stdout: local
+// index succeeded (`status: indexed`), embedding failures disclosed, and the failure
+// visible in `status` as well.
+#[test]
+fn r11_2_index_embedding_auth_error_exits_5() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(
+        dir.path().join("note.md"),
+        "# ノート\n\n## 本文\n認証失敗の可視化テスト本文です。\n",
+    )
+    .unwrap();
+    kcs(&dir, &["init"]).assert().success();
+    let indexed = json_code_stdout_embed(&dir, "auth_error", 5, &["index", "--approve"]);
+    assert_eq!(
+        indexed["status"], "indexed",
+        "the local index still succeeds: {indexed}"
+    );
+    assert!(
+        indexed["embedding_tasks_failed"].as_u64().unwrap() > 0,
+        "the embedding auth failure must be disclosed on stdout: {indexed}"
+    );
+    let status = json_success_embed(&dir, "auth_error", &["status"]);
+    assert!(
+        tasks_of_type(&status, "embedding")
+            .iter()
+            .any(|task| task["status"] == "failed" && task["fallback_reason"] == "auth_error"),
+        "status must show the failed embedding task: {status}"
+    );
+}
+
 // Scenario (b) — L2: budget-exceeded Paused tasks are sticky under `batch resume`
 // and only run under `--override-budget`, SYMMETRICALLY for markdownize and
 // embedding. Before L2, `resume --override-budget` re-paused markdownize (the
@@ -1735,7 +1936,13 @@ fn ct3_l2_budget_paused_resume_symmetry_across_adapters() {
         "kcs_format_version = \"0.1.0\"\n[budget]\nmonthly_usd_cap = 0\n",
     )
     .unwrap();
-    json_both_mock(&dir, &["index", "--approve"]);
+    // R11-2: the embedding enrichment DRIVEN inline by index budget-pauses here, so
+    // index reports exit 6 (docs/04 §5.6) with its full result JSON still on stdout.
+    let indexed = json_both_mock_code(&dir, &["index", "--approve"], 6);
+    assert!(
+        indexed["paused_tasks"].as_u64().unwrap() > 0,
+        "index must disclose the budget-paused work: {indexed}"
+    );
     let status = json_both_mock(&dir, &["status"]);
     assert!(
         is_budget_paused(&status, "markdownize"),
