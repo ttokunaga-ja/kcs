@@ -616,12 +616,12 @@ fn parse_repair_args(args: Vec<String>) -> Result<()> {
             }
             "--yes" => {}
             "--verify-objects" => {
-                return Err(KcsError::new(
-                    "KCS-E-CONFIG-NOT-IMPLEMENTED-001",
-                    "repair --verify-objects is Step 4",
-                    json!({ "flag": arg }),
-                    ExitCode::InvalidUsage,
-                ))
+                // R9-6: route not-implemented through the canonical
+                // `KcsError::not_implemented` (exit 1) so the same error_code
+                // (KCS-E-CONFIG-NOT-IMPLEMENTED-001) never maps to two exit
+                // classes — the hand-rolled variant returned exit 2, which broke
+                // an agent's error classification (`log --at` already exits 1).
+                return Err(KcsError::not_implemented("repair --verify-objects"));
             }
             value if value.starts_with('-') => {
                 return Err(KcsError::invalid_usage(format!(
@@ -1899,8 +1899,14 @@ fn compute_index_status(searched: &[SearchedScopeInfo]) -> Value {
             }
             total += 1;
             match task.status {
-                TaskStatus::Done | TaskStatus::Partial => done += 1,
-                TaskStatus::Pending | TaskStatus::Running => pending += 1,
+                TaskStatus::Done => done += 1,
+                // R9-4: a Partial task has Failed units still awaiting completion —
+                // count it as incomplete (pending), not done. Counting it as done
+                // made `index_status` report enriched_ratio = 1.0 with
+                // pending_enrichment_tasks = 0 while units were permanently missing
+                // (a silent data gap on text-layer-less scans). `batch retry` now
+                // drives it to Done (docs/04 §5.2).
+                TaskStatus::Partial | TaskStatus::Pending | TaskStatus::Running => pending += 1,
                 TaskStatus::Paused => {
                     pending += 1;
                     budget_paused = true;
@@ -2282,12 +2288,9 @@ fn parse_reindex_args(args: Vec<String>) -> Result<ParsedReindex> {
                 if i + 1 >= args.len() {
                     return Err(KcsError::invalid_usage("--at requires a commit argument"));
                 }
-                return Err(KcsError::new(
-                    "KCS-E-CONFIG-NOT-IMPLEMENTED-001",
-                    "reindex --at is not implemented in Step 3",
-                    json!({ "flag": "--at" }),
-                    ExitCode::InvalidUsage,
-                ));
+                // R9-6: exit 1 via the canonical not_implemented (was exit 2) so
+                // KCS-E-CONFIG-NOT-IMPLEMENTED-001 maps to a single exit class.
+                return Err(KcsError::not_implemented("reindex --at"));
             }
             value if value.starts_with('-') => {
                 return Err(KcsError::invalid_usage(format!(
@@ -2763,12 +2766,12 @@ fn parse_search_args(args: Vec<String>) -> Result<ParsedSearch> {
     while i < args.len() {
         match args[i].as_str() {
             "--at" | "--all-history" | "--include-deleted" | "--since" => {
-                return Err(KcsError::new(
-                    "KCS-E-CONFIG-NOT-IMPLEMENTED-001",
-                    "time-travel search flags are Step 4",
-                    json!({ "flag": args[i] }),
-                    ExitCode::InvalidUsage,
-                ));
+                // R9-6: exit 1 via the canonical not_implemented (was exit 2) so
+                // KCS-E-CONFIG-NOT-IMPLEMENTED-001 maps to a single exit class.
+                return Err(KcsError::not_implemented(format!(
+                    "search {} flag",
+                    args[i]
+                )));
             }
             "--text" | "--no-vector" => requested_mode = SearchMode::Text,
             "--vector" => requested_mode = SearchMode::Vector,
@@ -3702,6 +3705,18 @@ fn open_cas_byte_object(
     // read-only destination (EACCES). Reuse the cached file when it already
     // exists (the CAS object is immutable, so the content is identical).
     if cache.is_file() {
+        // R9-3: a cache dir/file materialized by an earlier (world-readable) build
+        // is corrected in place on reuse — harden the subtree to 0700 and the file
+        // to 0400 so document bytes written before this fix stop leaking to
+        // group/other on a multi-user host.
+        if let Some(parent) = cache.parent() {
+            harden_open_cache_subtree(parent);
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = fs::set_permissions(&cache, fs::Permissions::from_mode(0o400));
+        }
         return Ok(Some((cache, true)));
     }
     // Q2: prepared / image CAS objects were historically written non-atomically
@@ -3725,9 +3740,30 @@ fn open_cas_byte_object(
     if let Some(parent) = cache.parent() {
         fs::create_dir_all(parent)
             .map_err(|err| KcsError::io(err.to_string(), parent.display().to_string()))?;
+        // R9-3: the open/view expansion cache holds document bytes / images /
+        // pre-OCR raw data, so — like the CAS it mirrors (P2, 0600) — its whole
+        // `$XDG_CACHE_HOME/kcs` subtree must be owner-only (0700), not the umask
+        // default (0755, world-readable).
+        harden_open_cache_subtree(parent);
     }
-    fs::write(&cache, &bytes)
-        .map_err(|err| KcsError::io(err.to_string(), cache.display().to_string()))?;
+    // R9-3: create the cache file 0600 *before* writing bytes (via
+    // OpenOptionsExt::mode) rather than `fs::write` at the umask default (0644),
+    // then drop write to 0400. Mirrors the P8 cursor-key hardening — the object
+    // body must never exist even briefly at a world-readable mode.
+    {
+        let mut open_options = OpenOptions::new();
+        open_options.write(true).create(true).truncate(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            open_options.mode(0o600);
+        }
+        let mut file = open_options
+            .open(&cache)
+            .map_err(|err| KcsError::io(err.to_string(), cache.display().to_string()))?;
+        file.write_all(&bytes)
+            .map_err(|err| KcsError::io(err.to_string(), cache.display().to_string()))?;
+    }
     let mut permissions = fs::metadata(&cache)
         .map_err(|err| KcsError::io(err.to_string(), cache.display().to_string()))?
         .permissions();
@@ -3735,6 +3771,39 @@ fn open_cas_byte_object(
     fs::set_permissions(&cache, permissions)
         .map_err(|err| KcsError::io(err.to_string(), cache.display().to_string()))?;
     Ok(Some((cache, true)))
+}
+
+/// R9-3: restrict the open/view expansion cache subtree to owner-only (0700) on
+/// unix, walking from `leaf` up to `$XDG_CACHE_HOME/kcs` inclusive. The cache
+/// materializes raw / prepared / image CAS bytes, so it must carry the same
+/// 0700/0600 hardening as the CAS itself (P2) rather than inherit the umask
+/// default (0755). Best-effort (the cache is regenerable); the `starts_with`
+/// guard keeps the walk from ever chmod-ing anything above the cache root
+/// (e.g. `$XDG_CACHE_HOME` itself). No-op on non-unix.
+fn harden_open_cache_subtree(leaf: &Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let root = cache_home().join("kcs");
+        if !leaf.starts_with(&root) {
+            return;
+        }
+        let mut current = leaf.to_path_buf();
+        loop {
+            let _ = fs::set_permissions(&current, fs::Permissions::from_mode(0o700));
+            if current == root {
+                break;
+            }
+            match current.parent() {
+                Some(parent) => current = parent.to_path_buf(),
+                None => break,
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = leaf;
+    }
 }
 
 fn find_working_tree_raw(root: &Path, raw_hash: &str) -> Result<Option<PathBuf>> {
@@ -4003,39 +4072,98 @@ fn copy_normalized_instance_gen(
     );
     fs::create_dir_all(&new_dir)
         .map_err(|err| KcsError::io(err.to_string(), new_dir.display().to_string()))?;
-    let manifest_path = old_dir.join("manifest.json");
-    let mut manifest: Value = serde_json::from_slice(
-        &fs::read(&manifest_path)
-            .map_err(|err| KcsError::io(err.to_string(), manifest_path.display().to_string()))?,
-    )
-    .map_err(|err| store_corrupt_error(&manifest_path, err.to_string()))?;
-    manifest["parent_gen"] = json!(old_gen);
-    manifest["gen"] = json!(new_gen);
-    manifest["run_id"] = json!(format!("run_{}", new_ulid(kcs_dir)));
-    manifest["generated_at"] = json!(now_utc_seconds());
-    let manifest_bytes =
-        serde_json::to_vec_pretty(&manifest).map_err(|err| KcsError::schema(err.to_string()))?;
-    atomic_overwrite_file(&new_dir.join("manifest.json"), &manifest_bytes)?;
-    for entry in fs::read_dir(&old_dir)
-        .map_err(|err| KcsError::io(err.to_string(), old_dir.display().to_string()))?
-    {
-        let entry =
-            entry.map_err(|err| KcsError::io(err.to_string(), old_dir.display().to_string()))?;
-        if entry.file_name() == "manifest.json" {
-            continue;
-        }
-        let mut unit: Value =
-            serde_json::from_slice(&fs::read(entry.path()).map_err(|err| {
-                KcsError::io(err.to_string(), entry.path().display().to_string())
+    // R9-5: roll the new gen dir back on any failure so a partially-copied
+    // `.g<N+1>` does not remain as secondary residue for a later reindex to
+    // reconcile.
+    let result = (|| -> Result<()> {
+        let manifest_path = old_dir.join("manifest.json");
+        let mut manifest: Value =
+            serde_json::from_slice(&fs::read(&manifest_path).map_err(|err| {
+                KcsError::io(err.to_string(), manifest_path.display().to_string())
             })?)
-            .map_err(|err| store_corrupt_error(&entry.path(), err.to_string()))?;
-        unit["gen"] = json!(new_gen);
-        unit["generated_at"] = json!(now_utc_seconds());
-        let unit_bytes =
-            serde_json::to_vec_pretty(&unit).map_err(|err| KcsError::schema(err.to_string()))?;
-        atomic_overwrite_file(&new_dir.join(entry.file_name()), &unit_bytes)?;
+            .map_err(|err| store_corrupt_error(&manifest_path, err.to_string()))?;
+        manifest["parent_gen"] = json!(old_gen);
+        manifest["gen"] = json!(new_gen);
+        manifest["run_id"] = json!(format!("run_{}", new_ulid(kcs_dir)));
+        manifest["generated_at"] = json!(now_utc_seconds());
+        let manifest_bytes = serde_json::to_vec_pretty(&manifest)
+            .map_err(|err| KcsError::schema(err.to_string()))?;
+        atomic_overwrite_file(&new_dir.join("manifest.json"), &manifest_bytes)?;
+        for entry in fs::read_dir(&old_dir)
+            .map_err(|err| KcsError::io(err.to_string(), old_dir.display().to_string()))?
+        {
+            let entry = entry
+                .map_err(|err| KcsError::io(err.to_string(), old_dir.display().to_string()))?;
+            let file_name = entry.file_name();
+            if file_name == "manifest.json" {
+                continue;
+            }
+            let name = file_name.to_string_lossy();
+            // R9-5: a gen dir can hold OS/crash junk beside the `<unit_ref>.json`
+            // unit files — a torn `.{name}.tmp-<pid>-<ulid>` left by a killed
+            // `atomic_overwrite_file` writer (its temps land in this very dir), a
+            // `.DS_Store`, a stray subdir. Never parse those as a unit: doing so
+            // made `reindex` / `repair --rebuild-db` fail permanently with
+            // STORE-CORRUPT (junk is not JSON) and re-emit a partial next-gen dir.
+            // Copy only real unit files; best-effort GC our own orphan `.tmp-*`
+            // (Q1-style self-heal), and leave anything else (e.g. `.DS_Store`)
+            // untouched but unread.
+            if !is_normalized_unit_file(&name) {
+                if is_orphan_temp_name(&name)
+                    && entry
+                        .file_type()
+                        .map(|kind| kind.is_file())
+                        .unwrap_or(false)
+                {
+                    let _ = fs::remove_file(entry.path());
+                }
+                continue;
+            }
+            if !entry
+                .file_type()
+                .map(|kind| kind.is_file())
+                .unwrap_or(false)
+            {
+                continue;
+            }
+            let mut unit: Value =
+                serde_json::from_slice(&fs::read(entry.path()).map_err(|err| {
+                    KcsError::io(err.to_string(), entry.path().display().to_string())
+                })?)
+                .map_err(|err| store_corrupt_error(&entry.path(), err.to_string()))?;
+            unit["gen"] = json!(new_gen);
+            unit["generated_at"] = json!(now_utc_seconds());
+            let unit_bytes = serde_json::to_vec_pretty(&unit)
+                .map_err(|err| KcsError::schema(err.to_string()))?;
+            atomic_overwrite_file(&new_dir.join(entry.file_name()), &unit_bytes)?;
+        }
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_dir_all(&new_dir);
     }
-    Ok(())
+    result
+}
+
+/// Whether `name` matches the normalized-unit file naming convention written by
+/// `persist_normalized_instance`: a 16-hex-char `unit_ref` digest plus `.json`
+/// (e.g. `1a2b3c4d5e6f7089.json`). Anything else in a gen dir is not store truth
+/// (R9-5) — `manifest.json`, a crashed writer's `.tmp-*`, a `.DS_Store`.
+fn is_normalized_unit_file(name: &str) -> bool {
+    let Some(stem) = name.strip_suffix(".json") else {
+        return false;
+    };
+    stem.len() == 16
+        && stem
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+}
+
+/// Whether `name` looks like one of KCS's own atomic-write temp files
+/// (`.tmp-<pid>-...` or `.<name>.tmp-<pid>-...`). Used by R9-5 to GC a
+/// crash-orphaned temp left inside a gen dir by a killed writer.
+fn is_orphan_temp_name(name: &str) -> bool {
+    name.starts_with('.') && name.contains(".tmp-")
 }
 
 fn index_to_kcs(error: kcs_index::IndexError) -> KcsError {
@@ -4087,15 +4215,28 @@ fn run_batch(args: BatchArgs) -> Result<Value> {
                     }
                 })
                 .map_err(pipeline_to_kcs)?;
-            let executed = execute_pending_tasks(&repo, &store, resume.override_budget)?;
+            let outcome = execute_pending_tasks(&repo, &store, resume.override_budget)?;
             Ok(json!({
                 "status": "resumed",
                 "override_budget": resume.override_budget,
                 "tasks_updated": changed,
-                "tasks_executed": executed,
+                "tasks_executed": outcome.executed,
+                // R9-7: surface driven online-send attempts and failures, not just
+                // successes, so an orchestrator sees rate-limit / auth / charge
+                // consumption even when nothing completed.
+                "tasks_attempted": outcome.attempted(),
+                "tasks_failed": outcome.failed,
             }))
         }
         Some(BatchCommand::Retry) => {
+            // R9-4: `batch retry` also recovers Partial online markdownize tasks
+            // (docs/04 §5.2 `partial -> done`). A Partial task has some Done and
+            // some Failed units; re-drive it (Pending) with `unit_keys` scoped to
+            // the still-Failed units and the placeholder output_ref restored so
+            // execute_pending_markdownize_tasks selects it. On full success it
+            // becomes Done, ending the silent data gap index_status showed as
+            // fully enriched.
+            let partial_reenqueued = reenqueue_partial_markdownize_tasks(&store)?;
             let changed = store
                 .update_matching(|task| {
                     if task.status == TaskStatus::Failed
@@ -4112,10 +4253,15 @@ fn run_batch(args: BatchArgs) -> Result<Value> {
                 .map_err(pipeline_to_kcs)?;
             // `batch retry` never overrides the budget cap (retry re-schedules,
             // it does not bypass caps — `batch resume --override-budget` does).
-            let executed = execute_pending_tasks(&repo, &store, false)?;
-            Ok(
-                json!({ "status": "retry scheduled", "tasks_updated": changed, "tasks_executed": executed }),
-            )
+            let outcome = execute_pending_tasks(&repo, &store, false)?;
+            Ok(json!({
+                "status": "retry scheduled",
+                "tasks_updated": changed + partial_reenqueued,
+                "tasks_executed": outcome.executed,
+                // R9-7: surface driven online-send attempts and failures.
+                "tasks_attempted": outcome.attempted(),
+                "tasks_failed": outcome.failed,
+            }))
         }
         None => Err(KcsError::not_implemented("batch command")),
     }
@@ -4144,35 +4290,129 @@ fn reclaim_orphaned_running_tasks(store: &TaskStore) -> Result<usize> {
         .map_err(pipeline_to_kcs)
 }
 
+/// R9-4: convert Partial online-markdownize tasks back into retryable Pending
+/// tasks so `batch retry` can complete their still-Failed units (docs/04 §5.2
+/// `partial -> done`). Reads each Partial task's normalized manifest for the
+/// Failed unit_keys, sets `unit_keys` to that scope, restores the placeholder
+/// `output_ref` (so `execute_pending_markdownize_tasks` selects it) and clears the
+/// retry gate. Returns the number re-enqueued. Only touches task lifecycle — it
+/// does not promote online output to HEAD/search (F6, deferred to Step 4).
+fn reenqueue_partial_markdownize_tasks(store: &TaskStore) -> Result<usize> {
+    let online_ref = online_output_ref(&online_markdownize_profile().adapter_id);
+    // Collect the still-Failed unit_keys per Partial task first — this needs
+    // manifest I/O, so it is done outside the `update_matching` closure.
+    let mut failed_by_id: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for task in store.all().map_err(pipeline_to_kcs)? {
+        if task.status != TaskStatus::Partial
+            || task.task_type != TaskType::Markdownize
+            || task.output_ref.starts_with("online:")
+        {
+            continue;
+        }
+        let failed = failed_unit_keys_from_instance(&task.output_ref)?;
+        if !failed.is_empty() {
+            failed_by_id.insert(task.task_id.clone(), failed);
+        }
+    }
+    if failed_by_id.is_empty() {
+        return Ok(0);
+    }
+    store
+        .update_matching(|task| {
+            let Some(failed) = failed_by_id.get(&task.task_id) else {
+                return false;
+            };
+            task.status = TaskStatus::Pending;
+            task.unit_keys = Some(failed.clone());
+            task.output_ref = online_ref.clone();
+            task.fallback_reason = None;
+            task.next_retry_at = None;
+            true
+        })
+        .map_err(pipeline_to_kcs)
+}
+
+/// The unit_keys still marked Failed in a normalized instance's manifest
+/// (`output_ref/manifest.json`). Empty when the manifest is missing or fully Done.
+/// Used by R9-4 partial recovery.
+fn failed_unit_keys_from_instance(output_ref: &str) -> Result<Vec<String>> {
+    let manifest_path = PathBuf::from(output_ref).join("manifest.json");
+    let Ok(bytes) = fs::read(&manifest_path) else {
+        return Ok(Vec::new());
+    };
+    let manifest: NormalizedInstanceManifest =
+        serde_json::from_slice(&bytes).map_err(|err| KcsError::schema(err.to_string()))?;
+    Ok(manifest
+        .units
+        .iter()
+        .filter(|entry| entry.status != UnitStatus::Done)
+        .map(|entry| entry.unit_key.clone())
+        .collect())
+}
+
+/// R9-7: outcome counts from an enrichment pass. `batch retry`/`resume` need more
+/// than the success count to be honest: a driven task can fail (an online send was
+/// attempted, rate-limit / auth consumed) yet the old JSON reported only
+/// `tasks_executed`, so an orchestrator could not see the attempt. `executed`
+/// keeps its meaning (tasks completed OK == `tasks_executed`); `failed` is tasks
+/// that transitioned to Failed this pass; `attempted()` = executed + failed
+/// (budget-paused / held tasks that issued no adapter call are excluded).
+#[derive(Debug, Default, Clone, Copy)]
+struct ExecOutcome {
+    executed: usize,
+    failed: usize,
+}
+
+impl ExecOutcome {
+    fn attempted(self) -> usize {
+        self.executed + self.failed
+    }
+
+    fn add(&mut self, other: ExecOutcome) {
+        self.executed += other.executed;
+        self.failed += other.failed;
+    }
+}
+
 fn execute_pending_tasks(
     repo: &Repository,
     store: &TaskStore,
     override_budget: bool,
-) -> Result<usize> {
-    let mut executed = 0usize;
+) -> Result<ExecOutcome> {
+    let mut outcome = ExecOutcome::default();
     // Q3: under the folder store lock, any Running task is an orphan from a crashed
     // run — reclaim it to Pending so this pass re-executes it.
     reclaim_orphaned_running_tasks(store)?;
     // Markdownize and embedding opt-ins are per-adapter (07 §3, L4): gate each
     // adapter on its own approval rather than one blanket check.
     if persistent_network_allowed(repo)? {
-        executed += execute_pending_markdownize_tasks(repo, store, override_budget)?;
+        outcome.add(execute_pending_markdownize_tasks(
+            repo,
+            store,
+            override_budget,
+        )?);
     }
     // Embedding tasks are executed by the same enrichment pass `kcs index` uses;
     // without this, rate-limited Pending embedding tasks could never be completed
     // by `batch resume` / `batch retry`. `override_budget` reaches the budget
     // judgement (L2) and the embedding opt-in is the embedding adapter's own (L4).
     let embedding_online = embedding_online_allowed(repo, false, false, false)?;
-    executed += run_embedding_enrichment(repo, embedding_online, override_budget)?;
-    Ok(executed)
+    outcome.add(run_embedding_enrichment(
+        repo,
+        embedding_online,
+        override_budget,
+    )?);
+    Ok(outcome)
 }
 
 /// Execute Pending online markdownize tasks, honoring `override_budget` (L2 i).
+/// R9-7: returns success + failure counts so `batch` JSON can report driven
+/// attempts, not only successes.
 fn execute_pending_markdownize_tasks(
     repo: &Repository,
     store: &TaskStore,
     override_budget: bool,
-) -> Result<usize> {
+) -> Result<ExecOutcome> {
     let budget_caps =
         read_budget_policy(user_config_toml_path(), repo.kcs_dir().join("config.toml"))
             .map_err(pipeline_to_kcs)?;
@@ -4201,7 +4441,7 @@ fn execute_pending_markdownize_tasks(
                     || classify_secret(&task.input_path) != Some(SecretTier::TierB))
         })
         .collect::<Vec<_>>();
-    let mut executed = 0usize;
+    let mut counts = ExecOutcome::default();
     for task in tasks {
         let task_id = task.task_id.clone();
         let file_size = repo
@@ -4272,7 +4512,7 @@ fn execute_pending_markdownize_tasks(
                         }
                     })
                     .map_err(pipeline_to_kcs)?;
-                executed += 1;
+                counts.executed += 1;
             }
             Err(error) => {
                 let policy = retry_policy(error.retry_kind);
@@ -4298,10 +4538,14 @@ fn execute_pending_markdownize_tasks(
                         }
                     })
                     .map_err(pipeline_to_kcs)?;
+                // R9-7: a driven task that failed still attempted an online send
+                // (rate-limit / auth / charge consumed) — count it so `batch` JSON
+                // surfaces the attempt instead of reporting only successes.
+                counts.failed += 1;
             }
         }
     }
-    Ok(executed)
+    Ok(counts)
 }
 
 fn persistent_network_allowed(repo: &Repository) -> Result<bool> {
@@ -4419,6 +4663,15 @@ fn execute_online_markdownize_task(
 ) -> std::result::Result<OnlineExecutionOutcome, TaskExecutionFailure> {
     let path = repo.root().join(&task.input_path);
     let media_type = media_type_for_cli_path(&path).to_owned();
+    // R9-2 (defense in depth): never send a text-native file to online OCR even if
+    // a task for it already exists (e.g. enqueued by a pre-fix build or a poisoned
+    // tasks.jsonl). Fail fast as a non-retryable input error instead of a silent,
+    // billed send.
+    if is_text_native_media(&media_type) {
+        return Err(TaskExecutionFailure {
+            retry_kind: RetryErrorKind::InvalidInput,
+        });
+    }
     let prepare_profile_hash = builtin_prepare_profile().tool_profile_hash;
     let prepare = prepare_units(PrepareStageRequest {
         raw_hash: task.input_hash.clone(),
@@ -4650,27 +4903,27 @@ fn generate_scope_embeddings(repo: &Repository, args: &IndexArgs) -> Result<()> 
 /// Core enrichment pass shared by `kcs index` (inline) and `kcs batch
 /// resume/retry`. Without the resume path, embedding tasks left Pending by a
 /// rate limit could never complete (`batch resume` only executed Markdownize
-/// tasks). Returns the number of chunks embedded in this pass.
+/// tasks). Returns the chunks embedded (executed) and failed this pass (R9-7).
 fn run_embedding_enrichment(
     repo: &Repository,
     online: bool,
     override_budget: bool,
-) -> Result<usize> {
+) -> Result<ExecOutcome> {
     let Some(execution) = embedding_execution() else {
-        return Ok(0);
+        return Ok(ExecOutcome::default());
     };
     let profile = declared_embedding_profile(execution);
     // Non-multimodal is rejected at materialize_tool_lock; never reach embed here.
     if profile.modality != "multimodal" {
-        return Ok(0);
+        return Ok(ExecOutcome::default());
     }
     let db_path = sqlite_path(repo.kcs_dir());
     if !db_path.exists() {
-        return Ok(0);
+        return Ok(ExecOutcome::default());
     }
     let conn = Connection::open(&db_path).map_err(|err| KcsError::schema(err.to_string()))?;
     let Some(head) = repo.head_commit_hash()? else {
-        return Ok(0);
+        return Ok(ExecOutcome::default());
     };
     // `kcs snapshot` advances HEAD without projecting tree_entries (search
     // projects lazily); do the same here or the live-chunk JOIN silently
@@ -4679,7 +4932,7 @@ fn run_embedding_enrichment(
     let chunking_config_hash = read_chunking_config(repo)?.chunking_config_hash;
     let pending = live_chunks_without_embedding(&conn, &head, &chunking_config_hash, &profile)?;
     if pending.is_empty() {
-        return Ok(0);
+        return Ok(ExecOutcome::default());
     }
 
     let task_store = TaskStore::new(repo.kcs_dir());
@@ -4696,12 +4949,12 @@ fn run_embedding_enrichment(
         });
     hold_secret_embedding_tasks(&task_store, repo, &held, &now)?;
     if sendable.is_empty() {
-        return Ok(0);
+        return Ok(ExecOutcome::default());
     }
     enqueue_embedding_tasks(&task_store, repo, &sendable, online, &now)?;
     if !online {
         // Offline: tasks stay Pending; `index_status` reports them (05 §1.7).
-        return Ok(0);
+        return Ok(ExecOutcome::default());
     }
 
     // L2(ii)/L7: skip chunks whose embedding task is sticky budget-Paused (unless
@@ -4709,10 +4962,10 @@ fn run_embedding_enrichment(
     // non-retryable) — the same lifecycle semantics markdownize already honors.
     let embeddable = filter_embeddable_by_task_state(&task_store, sendable, override_budget)?;
     if embeddable.is_empty() {
-        return Ok(0);
+        return Ok(ExecOutcome::default());
     }
 
-    let mut executed = 0usize;
+    let mut outcome = ExecOutcome::default();
     let cost_ledger = CostLedger::new(cost_ledger_path());
     let budget_caps =
         read_budget_policy(user_config_toml_path(), repo.kcs_dir().join("config.toml"))
@@ -4727,6 +4980,7 @@ fn run_embedding_enrichment(
             Ok(plan) => plan,
             Err(failure) => {
                 fail_embedding_tasks(&task_store, batch, failure.retry_kind, &now)?;
+                outcome.failed += batch.len(); // R9-7
                 break;
             }
         };
@@ -4740,7 +4994,7 @@ fn run_embedding_enrichment(
                         &task_store,
                         plan.reuse.iter().map(|(chunk, _)| *chunk),
                     )?;
-                    executed += plan.reuse.len();
+                    outcome.executed += plan.reuse.len();
                 }
                 Err(failure) => {
                     fail_embedding_tasks(
@@ -4749,6 +5003,7 @@ fn run_embedding_enrichment(
                         failure.retry_kind,
                         &now,
                     )?;
+                    outcome.failed += plan.reuse.len(); // R9-7
                     break;
                 }
             }
@@ -4794,7 +5049,7 @@ fn run_embedding_enrichment(
                     &task_store,
                     plan.to_send.iter().map(|(chunk, _)| *chunk),
                 )?;
-                executed += plan.to_send.len();
+                outcome.executed += plan.to_send.len();
             }
             Err(failure) => {
                 // Enrichment failure is non-fatal: mark the sent chunks failed and
@@ -4805,11 +5060,12 @@ fn run_embedding_enrichment(
                     failure.retry_kind,
                     &now,
                 )?;
+                outcome.failed += plan.to_send.len(); // R9-7
                 break;
             }
         }
     }
-    Ok(executed)
+    Ok(outcome)
 }
 
 /// A batch split into free content-addressed reuse and chunks needing an API call.
@@ -5347,6 +5603,17 @@ fn media_type_for_cli_path(path: &Path) -> &'static str {
         "jpg" | "jpeg" => "image/jpeg",
         _ => "application/octet-stream",
     }
+}
+
+/// R9-2: whether `media_type` is text-native (Markdown / plain text / code) — the
+/// deterministic Adapter's domain (docs/07 §2.1). Text-native files are
+/// markdownized locally and must never enqueue an online Mistral-OCR task: docs/07
+/// §5.2 scopes the standard online Adapter to *non*-text-native PDF / DOCX / PPTX /
+/// images. Sending a text file to OCR shipped its raw bytes to a third-party API
+/// (privacy) and billed ~10x the baseline for work the deterministic pass already
+/// did (redundant, and orphaned by F6).
+fn is_text_native_media(media_type: &str) -> bool {
+    matches!(media_type, "text/markdown" | "text/plain" | "text/x-code")
 }
 
 fn budget_status_json(repo: &Repository) -> Result<Value> {
@@ -5974,15 +6241,24 @@ fn atomic_write_cas_object(path: &Path, bytes: &[u8]) -> Result<()> {
         .unwrap_or_default();
     let seq = SEQ.fetch_add(1, Ordering::Relaxed);
     let temp = parent.join(format!(".tmp-{}-{}-{}", process::id(), nanos, seq));
-    {
+    // R9-8: remove the temp on any write/sync/rename failure so a torn write does
+    // not leave an orphan `.tmp-*` in the CAS fanout dir (no GC before Step 4).
+    // Same cleanup idiom as `cas::atomic_write`, which this mirrors.
+    let result = (|| -> Result<()> {
         let mut file = fs::File::create(&temp)
             .map_err(|err| KcsError::io(err.to_string(), temp.display().to_string()))?;
         file.write_all(bytes)
             .map_err(|err| KcsError::io(err.to_string(), temp.display().to_string()))?;
         file.sync_all()
             .map_err(|err| KcsError::io(err.to_string(), temp.display().to_string()))?;
+        drop(file);
+        fs::rename(&temp, path)
+            .map_err(|err| KcsError::io(err.to_string(), path.display().to_string()))
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temp);
     }
-    fs::rename(&temp, path).map_err(|err| KcsError::io(err.to_string(), path.display().to_string()))
+    result
 }
 
 fn write_prepared_objects(
@@ -6420,6 +6696,14 @@ fn enqueue_online_placeholder_task(
     budget_caps: &BudgetCaps,
     month: &str,
 ) -> Result<()> {
+    // R9-2: text-native files (Markdown / plain text / code) are fully handled by
+    // the deterministic Adapter (07 §2.1) and must never enqueue an online OCR task
+    // (07 §5.2 scopes Mistral OCR to non-text-native PDF/DOCX/PPTX/images). Gate at
+    // enqueue so a routine `index` never creates a redundant, privacy-leaking,
+    // billed task for a `.md` / `.txt` / code file.
+    if is_text_native_media(&candidate.media_type) {
+        return Ok(());
+    }
     let online_profile = online_markdownize_profile();
     let output_ref = online_output_ref(&online_profile.adapter_id);
     // Idempotency (Step2c I1, 04 §5.5): never enqueue a second online task for an
@@ -7312,6 +7596,50 @@ mod tests {
     use kcs_adapter::catalog::deterministic_embedding_vector;
 
     use super::{command_captured_json_flag, Cli, Command};
+
+    #[test]
+    fn r9_8_atomic_write_cas_object_removes_temp_on_failure() {
+        use super::atomic_write_cas_object;
+        // R9-8: a torn derived-CAS write must not leave an orphan `.tmp-*` in the
+        // fanout dir. Force the rename to fail deterministically by making the
+        // destination an existing directory after the temp is created + fsynced.
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("obj");
+        std::fs::create_dir(&dest).unwrap();
+        let result = atomic_write_cas_object(&dest, b"derived-bytes");
+        assert!(result.is_err(), "write onto a directory must fail");
+        let stray: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(std::result::Result::ok)
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.starts_with(".tmp-"))
+            .collect();
+        assert!(
+            stray.is_empty(),
+            "temp not cleaned up on failure: {stray:?}"
+        );
+    }
+
+    #[test]
+    fn r9_5_unit_file_and_orphan_temp_classification() {
+        use super::{is_normalized_unit_file, is_orphan_temp_name};
+        // Real unit files: 16 lowercase-hex chars + `.json`.
+        assert!(is_normalized_unit_file("1a2b3c4d5e6f7089.json"));
+        assert!(is_normalized_unit_file("0000000000000000.json"));
+        // Not unit files — must be skipped by copy_normalized_instance_gen.
+        assert!(!is_normalized_unit_file("manifest.json"));
+        assert!(!is_normalized_unit_file(".DS_Store"));
+        assert!(!is_normalized_unit_file(".tmp-99999-0000abcd"));
+        assert!(!is_normalized_unit_file("1a2b3c4d5e6f7089.md")); // wrong ext
+        assert!(!is_normalized_unit_file("1A2B3C4D5E6F7089.json")); // uppercase hex
+        assert!(!is_normalized_unit_file("1a2b.json")); // too short
+        assert!(!is_normalized_unit_file("1a2b3c4d5e6f7089z.json")); // 17 chars / non-hex
+                                                                     // Orphan-temp detection (GC'd on reindex).
+        assert!(is_orphan_temp_name(".tmp-99999-0000abcd"));
+        assert!(is_orphan_temp_name(".1a2b3c4d5e6f7089.json.tmp-123-456"));
+        assert!(!is_orphan_temp_name(".DS_Store"));
+        assert!(!is_orphan_temp_name("manifest.json"));
+    }
 
     #[test]
     fn mock_embedding_vector_is_deterministic_and_normalized() {

@@ -178,13 +178,23 @@ impl TaskStore {
         // (The `batch` folder store lock is the primary serialization guard; this
         // is defense in depth for any other `replace_all` caller.)
         let (mut file, temp_path) = self.create_unique_temp()?;
-        for descriptor in descriptors {
-            serde_json::to_writer(&mut file, descriptor)
-                .map_err(|err| PipelineError::Schema(err.to_string()))?;
-            file.write_all(b"\n").pipeline_io(&temp_path)?;
+        // R9-8: remove the temp on any serialize/write/rename failure so an
+        // ENOSPC/EIO error does not leave an orphan `.tasks.jsonl.*.tmp` in the
+        // tasks dir (no GC before Step 4). Same cleanup idiom as the CAS /
+        // normalized-instance writers.
+        let result = (|| -> Result<()> {
+            for descriptor in descriptors {
+                serde_json::to_writer(&mut file, descriptor)
+                    .map_err(|err| PipelineError::Schema(err.to_string()))?;
+                file.write_all(b"\n").pipeline_io(&temp_path)?;
+            }
+            drop(file);
+            fs::rename(&temp_path, &self.path).pipeline_io(&self.path)
+        })();
+        if result.is_err() {
+            let _ = fs::remove_file(&temp_path);
         }
-        drop(file);
-        fs::rename(&temp_path, &self.path).pipeline_io(&self.path)
+        result
     }
 
     /// Create (`O_CREAT | O_EXCL`) a uniquely-named temp file next to the store
@@ -483,6 +493,29 @@ mod tests {
             "expected KCS-E-STORE-CORRUPT-001, got {err:?}"
         );
         assert!(err.to_string().contains("KCS-E-STORE-CORRUPT-001"));
+    }
+
+    #[test]
+    fn r9_8_replace_all_removes_temp_on_rename_failure() {
+        // R9-8: a failed `replace_all` must not leave an orphan
+        // `.tasks.jsonl.*.tmp` in the tasks dir. Force the final rename to fail
+        // deterministically by making the destination `tasks.jsonl` a directory
+        // (`rename(temp_file, dir)` errors) after the temp is created.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("tasks.jsonl")).unwrap();
+        let store = TaskStore::new(dir.path());
+        let result = store.replace_all(&[]);
+        assert!(result.is_err(), "rename onto a directory must fail");
+        let stray: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(std::result::Result::ok)
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.starts_with(".tasks.jsonl.") && name.ends_with(".tmp"))
+            .collect();
+        assert!(
+            stray.is_empty(),
+            "R9-8: temp not cleaned up on failure: {stray:?}"
+        );
     }
 
     #[test]

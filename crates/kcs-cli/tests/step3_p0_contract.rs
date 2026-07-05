@@ -1124,7 +1124,17 @@ fn ct3_cursor_005_shallow_snapshot_cursor_is_rejected() {
 
 #[test]
 fn ct3_obs_001_index_status_reports_partial_enrichment() {
-    let dir = indexed_scope();
+    // R9-2: text-native files no longer enqueue an online task, so the pending
+    // enrichment CT3-OBS-001 measures comes from a PDF whose online markdownize
+    // stays Pending after an offline index (the deterministic baseline is Done).
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(
+        dir.path().join("report.pdf"),
+        fake_pdf(&["認証仕様 トークン TTL 3600 のテスト本文"]),
+    )
+    .unwrap();
+    kcs(&dir, &["init"]).assert().success();
+    json_success(&dir, &["index", "--approve"]);
     let search = json_success(&dir, &["search", "認証仕様"]);
     let status = &search["index_status"];
     assert!(status.is_object());
@@ -1710,9 +1720,12 @@ fn ct3_l1_reindex_offline_surfaces_pending_embeddings_in_index_status() {
 #[test]
 fn ct3_l2_budget_paused_resume_symmetry_across_adapters() {
     let dir = tempfile::tempdir().unwrap();
+    // R9-2: the markdownize online task only exists for a non-text-native file, so
+    // the both-adapters budget-pause symmetry is exercised with a PDF (its
+    // deterministic baseline still produces chunks for the embedding adapter).
     fs::write(
-        dir.path().join("budget.md"),
-        "# 予算\n\n## 本文\nスティッキー一時停止の対称性テスト本文です。\n",
+        dir.path().join("budget.pdf"),
+        fake_pdf(&["スティッキー一時停止の対称性テスト本文です。"]),
     )
     .unwrap();
     kcs(&dir, &["init"]).assert().success();
@@ -2087,8 +2100,31 @@ fn m8_user_config_valid_budget_cap_accepted() {
 #[test]
 fn minor_not_implemented_error_code_is_emitted() {
     let dir = indexed_scope();
-    let err = json_failure(&dir, &["search", "認証仕様", "--at", "HEAD"], 2);
+    // R9-6: KCS-E-CONFIG-NOT-IMPLEMENTED-001 exits 1 (canonical
+    // `KcsError::not_implemented`), unified across every not-implemented path.
+    let err = json_failure(&dir, &["search", "認証仕様", "--at", "HEAD"], 1);
     assert_eq!(err["error_code"], "KCS-E-CONFIG-NOT-IMPLEMENTED-001");
+}
+
+/// R9-6: every KCS-E-CONFIG-NOT-IMPLEMENTED-001 path exits with the SAME class
+/// (1, canonical `KcsError::not_implemented`). Before the fix `log --at` exited 1
+/// while `search --at`, `reindex --at` and `repair --verify-objects` exited 2, so
+/// an agent classifying by exit code saw one error_code split across two classes.
+#[test]
+fn r9_6_not_implemented_exit_code_is_uniform() {
+    let dir = indexed_scope();
+    for args in [
+        vec!["search", "認証仕様", "--at", "HEAD"],
+        vec!["reindex", "--force", "--yes", "--at", "HEAD"],
+        vec!["repair", "--verify-objects"],
+        vec!["log", "--at", "HEAD"],
+    ] {
+        let err = json_failure(&dir, &args, 1);
+        assert_eq!(
+            err["error_code"], "KCS-E-CONFIG-NOT-IMPLEMENTED-001",
+            "args {args:?} must map to the not-implemented code at exit 1"
+        );
+    }
 }
 
 // Minor: previously-untested error code KCS-E-EVIDENCE-SCOPE-AMBIGUOUS-001 — a
@@ -2646,7 +2682,9 @@ fn p1_batch_resume_rejects_out_of_scope_task_input_path() {
         "sub/secret.txt",
     ] {
         let dir = tempfile::tempdir().unwrap();
-        fs::write(dir.path().join("a.txt"), "hello world content").unwrap();
+        // R9-2: a PDF so `index --approve` enqueues a real online task whose
+        // output_ref the poison row reuses (text-native files enqueue none).
+        fs::write(dir.path().join("a.pdf"), fake_pdf(&["hello world content"])).unwrap();
         kcs(&dir, &["init"]).assert().success();
         // Records the online opt-in and enqueues legitimate tasks.
         json_success(&dir, &["index", "--approve"]);
@@ -2955,6 +2993,90 @@ fn p9_open_expansion_cache_is_under_xdg_cache_home() {
     assert!(Path::new(path).is_file());
     // It must NOT be under the data home any more.
     assert!(!Path::new(path).starts_with(dir.path().join(".test-data/kcs/open")));
+}
+
+/// R9-3: the open/view expansion cache must be owner-only (dir 0700, file 0600 or
+/// 0400) like the CAS it mirrors (P2), not world-readable at the umask default
+/// (dir 0755 / file 0444). It materializes document bytes / images / pre-OCR raw
+/// data, which must not be readable by group/other on a multi-user host.
+#[cfg(unix)]
+#[test]
+fn r9_3_open_expansion_cache_is_owner_only() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = indexed_scope();
+    let search = json_success(&dir, &["search", "トークン TTL 3600"]);
+    let uri = first_result(&search)["evidence_uri"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    // Remove the working-tree file so `open` must expand from the CAS.
+    fs::remove_file(dir.path().join("auth.md")).unwrap();
+    let opened = json_success(&dir, &["open", &uri]);
+    let path = std::path::PathBuf::from(opened["path"].as_str().unwrap());
+
+    // The cache file must be owner-only (created 0600, then 0400 readonly) — never
+    // group/other-readable (pre-fix it was 0444).
+    let file_mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+    assert_eq!(
+        file_mode & 0o077,
+        0,
+        "cache file must not be group/other-readable, got {file_mode:o}"
+    );
+
+    // Every dir from $XDG_CACHE_HOME/kcs down to the leaf must be 0700 (pre-fix
+    // they were 0755, exposing the whole subtree to traversal).
+    let cache_root = dir.path().join(".test-cache/kcs");
+    let mut current = path.parent().unwrap().to_path_buf();
+    loop {
+        let mode = fs::metadata(&current).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            mode,
+            0o700,
+            "cache dir {} must be 0700, got {mode:o}",
+            current.display()
+        );
+        if current == cache_root {
+            break;
+        }
+        current = current.parent().unwrap().to_path_buf();
+    }
+}
+
+/// R9-3 (reuse path): a cache dir/file left world-readable by an earlier (pre-fix)
+/// build must be re-hardened on the next `open`, not served as-is.
+#[cfg(unix)]
+#[test]
+fn r9_3_open_reuse_rehardens_stale_permissions() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = indexed_scope();
+    let search = json_success(&dir, &["search", "トークン TTL 3600"]);
+    let uri = first_result(&search)["evidence_uri"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    fs::remove_file(dir.path().join("auth.md")).unwrap();
+    let opened = json_success(&dir, &["open", &uri]);
+    let path = std::path::PathBuf::from(opened["path"].as_str().unwrap());
+    let leaf = path.parent().unwrap().to_path_buf();
+
+    // Simulate a cache materialized by the pre-fix, world-readable code path.
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o444)).unwrap();
+    fs::set_permissions(&leaf, fs::Permissions::from_mode(0o755)).unwrap();
+
+    // A second open reuses the cache (M5) and must correct the permissions.
+    let reopened = json_success(&dir, &["open", &uri]);
+    assert_eq!(reopened["path"].as_str().unwrap(), path.to_str().unwrap());
+    let file_mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+    assert_eq!(
+        file_mode & 0o077,
+        0,
+        "reused cache file must be re-hardened, got {file_mode:o}"
+    );
+    let dir_mode = fs::metadata(&leaf).unwrap().permissions().mode() & 0o777;
+    assert_eq!(
+        dir_mode, 0o700,
+        "reused cache dir must be re-hardened, got {dir_mode:o}"
+    );
 }
 
 /// P10 (deterministic): `run_reindex` advances HEAD to a new generation and only
@@ -3317,7 +3439,9 @@ fn r6_view_open_reject_extra_pointer_arguments() {
 #[test]
 fn r6_reindex_rejects_unimplemented_at_and_extra_operands() {
     let dir = indexed_scope();
-    let at = json_failure(&dir, &["reindex", "--force", "--yes", "--at", "HEAD"], 2);
+    // R9-6: not-implemented `--at` exits 1 (canonical not_implemented); the extra
+    // positional stays a usage error (exit 2).
+    let at = json_failure(&dir, &["reindex", "--force", "--yes", "--at", "HEAD"], 1);
     assert_eq!(at["error_code"], "KCS-E-CONFIG-NOT-IMPLEMENTED-001");
     let extra = json_failure(&dir, &["reindex", "--force", "--yes", "HEAD"], 2);
     assert_eq!(extra["error_code"], "KCS-E-CONFIG-USAGE-001");
@@ -3495,7 +3619,8 @@ fn r7_repair_rejects_unknown_flags_extra_operands_and_step4_verify() {
     );
     assert_eq!(unknown["error_code"], "KCS-E-CONFIG-USAGE-001");
 
-    let verify = json_failure(&dir, &["repair", "--verify-objects"], 2);
+    // R9-6: not-implemented `--verify-objects` exits 1 (canonical not_implemented).
+    let verify = json_failure(&dir, &["repair", "--verify-objects"], 1);
     assert_eq!(verify["error_code"], "KCS-E-CONFIG-NOT-IMPLEMENTED-001");
 }
 
@@ -3529,4 +3654,87 @@ fn first_normalized_unit_json(root: &Path) -> std::path::PathBuf {
         }
     }
     panic!("normalized unit json not found under {}", root.display());
+}
+
+/// R9-5: a normalized gen dir polluted with crash/OS junk — a torn `.tmp-*` left
+/// by a killed atomic writer and a `.DS_Store` — must not brick `reindex`. Before
+/// the fix, `copy_normalized_instance_gen` read every non-manifest entry as a unit
+/// and failed with KCS-E-STORE-CORRUPT-001 (exit 4), which `repair --rebuild-db`
+/// could not heal. After: junk is skipped, the orphan `.tmp-*` is GC'd from the
+/// old gen dir, and reindex succeeds and the index still resolves the document.
+#[test]
+fn r9_5_reindex_survives_junk_in_gen_dir() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(
+        dir.path().join("doc.md"),
+        "# Title\n\n## Section\nr9five unique body text here\n",
+    )
+    .unwrap();
+    kcs(&dir, &["init"]).assert().success();
+    json_success(&dir, &["index", "--approve"]);
+
+    let units_root = dir.path().join(".kcs/objects/normalized_units");
+    let gen_dir = gen_dir_under(&units_root).expect("a .g0 gen dir exists after index");
+    let torn = gen_dir.join(".tmp-99999-0000abcd");
+    fs::write(&torn, b"torn partial write, not json").unwrap();
+    fs::write(gen_dir.join(".DS_Store"), b"\0\0mac junk").unwrap();
+
+    // Before the fix this exited 4 (STORE-CORRUPT); now it succeeds.
+    json_success(&dir, &["reindex", "--force", "--yes"]);
+
+    // The orphan temp was GC'd from the old gen dir (Q1-style self-heal).
+    assert!(
+        !torn.exists(),
+        "orphan .tmp-* must be cleaned up by reindex"
+    );
+    // Search still resolves the document (index rebuilt cleanly).
+    let search = json_success(&dir, &["search", "r9five", "--text"]);
+    assert!(!search["results"].as_array().unwrap().is_empty());
+}
+
+/// A minimal fake PDF with one text-bearing page per string (mirrors the step2
+/// helper). Used where a non-text-native fixture is needed so an online
+/// markdownize task is enqueued (R9-2 gates text-native files out of online OCR).
+fn fake_pdf(pages: &[&str]) -> String {
+    let kids = (0..pages.len())
+        .map(|index| format!("{} 0 R", index + 2))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let mut out = format!(
+        "%PDF-1.4\n1 0 obj << /Type /Pages /Kids [{kids}] /Count {} >> endobj\n",
+        pages.len()
+    );
+    for (index, page) in pages.iter().enumerate() {
+        out.push_str(&format!(
+            "{} 0 obj << /Type /Page /Parent 1 0 R >> stream\nBT ({page}) Tj ET\nendstream endobj\n",
+            index + 2
+        ));
+    }
+    out.push_str("%%EOF\n");
+    out
+}
+
+fn gen_dir_under(units_root: &Path) -> Option<std::path::PathBuf> {
+    let mut stack = vec![units_root.to_path_buf()];
+    while let Some(current) = stack.pop() {
+        let Ok(entries) = fs::read_dir(&current) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            if path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .map(|name| name.ends_with(".g0"))
+                .unwrap_or(false)
+            {
+                return Some(path);
+            }
+            stack.push(path);
+        }
+    }
+    None
 }
