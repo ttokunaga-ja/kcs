@@ -1421,14 +1421,24 @@ fn search_one_scope(
     // chunk_vec KNN vector ranks (hybrid/vector mode with a query embedding).
     let vector_ranks = if want_vector {
         if let Some(query_vec) = query_embedding {
-            let (ranks, vmeta) = vector_scope_search(
+            let (ranks, vmeta) = match vector_scope_search(
                 &conn,
                 &snapshot_commit,
                 query_vec,
                 &chunking_config_hash,
                 max_rowid,
-            )
-            .map_err(ScopeSearchError::Fatal)?;
+            ) {
+                Ok(result) => result,
+                // R10-1(a): a sqlite-vec capacity limit degrades THIS scope's vector
+                // backend to text-only (05 §1.8 per-scope isolation) instead of a
+                // device-wide Fatal misreported as CONFIG-SCHEMA. The text ranks
+                // computed above still stand; pure-vector mode simply contributes
+                // nothing from this scope rather than aborting the whole search.
+                Err(error) if error.error_code() == VECTOR_CAPACITY_ERROR_CODE => {
+                    (Vec::new(), BTreeMap::new())
+                }
+                Err(error) => return Err(ScopeSearchError::Fatal(error)),
+            };
             for (chunk_id, chunk_meta) in vmeta {
                 meta.entry(chunk_id).or_insert(chunk_meta);
             }
@@ -1486,6 +1496,40 @@ fn search_one_scope(
     })
 }
 
+/// sqlite-vec's hard upper bound on a KNN `LIMIT ?` (`k`). A query above it fails
+/// the whole statement; R10-1 caps the over-fetch here.
+const VECTOR_KNN_MAX_K: u64 = 4096;
+
+/// Error code for a per-scope vector-backend capacity limit (R10-1(a)). Never
+/// surfaced to the user: `search_one_scope` intercepts it and degrades that scope
+/// to text-only so one scope's limit can't abort the device-wide search.
+const VECTOR_CAPACITY_ERROR_CODE: &str = "KCS-E-SEARCH-VEC-CAPACITY-001";
+
+/// Whether an index error is a sqlite-vec / SQLite capacity limit (KNN `k` ceiling
+/// or bound-variable ceiling) rather than a genuine schema/contract fault.
+fn is_vector_capacity_error(error: &kcs_index::IndexError) -> bool {
+    is_vector_capacity_message(&error.to_string())
+}
+
+/// Message classifier for [`is_vector_capacity_error`], split out for unit testing.
+fn is_vector_capacity_message(message: &str) -> bool {
+    // sqlite-vec: "k value in knn query too large, provided N and the limit is 4096".
+    // SQLite:     "too many SQL variables".
+    message.contains("knn query too large") || message.contains("too many SQL variables")
+}
+
+/// Internal marker error the vector backend returns on a capacity limit so the
+/// caller can degrade the scope (R10-1(a)); its exit code is irrelevant because it
+/// is always intercepted before it can surface.
+fn vector_capacity_error() -> KcsError {
+    KcsError::new(
+        VECTOR_CAPACITY_ERROR_CODE,
+        "vector backend capacity limit exceeded for this scope",
+        json!({}),
+        ExitCode::Failure,
+    )
+}
+
 /// Per-scope vector backend: the query embedding's KNN over `chunk_vec`, filtered
 /// to the same live chunk set as the text backend (current `chunking_config_hash`,
 /// HEAD `tree_entries`, and `rowid <= max_rowid`). Because sqlite-vec applies the
@@ -1505,8 +1549,23 @@ fn vector_scope_search(
         return Ok((Vec::new(), BTreeMap::new()));
     }
     let query_bytes = f32_to_le_bytes(query_embedding);
-    let knn =
-        embedding_store::knn_chunk_distances(conn, &query_bytes, total).map_err(index_to_kcs)?;
+    // R10-1: sqlite-vec rejects a KNN `k` above its hard 4096 ceiling, so a scope
+    // that embedded >4096 chunks would explode the whole (multi-scope) search with a
+    // spurious `KCS-E-CONFIG-SCHEMA-001` exit 2 — taking every healthy scope down
+    // with it. Cap `k` at the ceiling: only `candidate_depth` (200) rows survive
+    // downstream anyway, and the 4096 window keeps recall high even when stale-gen
+    // rows pad the table (paging is the eventual real fix). `chunk_ids <= k <= 4096`
+    // also keeps `fetch_live_meta` well under SQLite's 32 766 bound-variable limit.
+    let k = total.min(VECTOR_KNN_MAX_K);
+    let knn = match embedding_store::knn_chunk_distances(conn, &query_bytes, k) {
+        Ok(knn) => knn,
+        // R10-1(a): any residual sqlite-vec capacity limit (a corrupt vec index, a
+        // future call path) is a per-scope degradation, not a device-wide Fatal —
+        // surface a recognizable code the caller maps to a text-only fallback so the
+        // 05 §1.8 isolation contract holds and no false CONFIG-SCHEMA is emitted.
+        Err(err) if is_vector_capacity_error(&err) => return Err(vector_capacity_error()),
+        Err(err) => return Err(index_to_kcs(err)),
+    };
     let chunk_ids = knn.iter().map(|(id, _)| id.clone()).collect::<Vec<_>>();
     let meta = fetch_live_meta(
         conn,
@@ -1724,6 +1783,9 @@ fn ensure_snapshot_tree_entries(
         Err(error) if error.error_code() == "KCS-E-STORE-NOT-FOUND-001" => return Ok(false),
         Err(error) => return Err(error),
     };
+    // Resolve every row first (the `latest_normalize_ref` lookups do file I/O) so the
+    // insert transaction below stays tight and holds no I/O.
+    let mut rows: Vec<TreeEntryProjection> = Vec::new();
     for entry in &tree.entries {
         let normalize = match &entry.normalize {
             Some(normalize) => normalize.clone(),
@@ -1732,20 +1794,57 @@ fn ensure_snapshot_tree_entries(
                 None => continue,
             },
         };
-        conn.execute(
+        rows.push(TreeEntryProjection {
+            path: entry.path.clone(),
+            raw_hash: entry.raw_hash.clone(),
+            tool_profile_hash: Some(normalize.tool_profile_hash.clone()),
+            gen: normalize.gen,
+        });
+    }
+    insert_snapshot_tree_entries(conn, commit_hash, &rows)?;
+    Ok(true)
+}
+
+/// One projected `tree_entries` row for [`insert_snapshot_tree_entries`].
+struct TreeEntryProjection {
+    path: String,
+    raw_hash: String,
+    tool_profile_hash: Option<String>,
+    gen: u64,
+}
+
+/// R10-8: insert a commit's projected `tree_entries` rows in ONE transaction. The
+/// lazy projection is read-triggered (search/cursor/short-hash), and the caller
+/// short-circuits when `existing > 0`; a non-transactional loop that crashed
+/// mid-way left a partial row set that `existing > 0` then refused to complete, so
+/// some paths of that commit stayed unresolvable until the next full reindex.
+/// Wrapping the inserts makes the projection all-or-nothing: an interruption rolls
+/// every row back, keeping `existing = 0` so the next read reprojects cleanly.
+fn insert_snapshot_tree_entries(
+    conn: &Connection,
+    commit_hash: &str,
+    rows: &[TreeEntryProjection],
+) -> Result<()> {
+    let tx = conn
+        .unchecked_transaction()
+        .map_err(|err| KcsError::schema(err.to_string()))?;
+    for row in rows {
+        tx.execute(
             "INSERT OR REPLACE INTO tree_entries(commit_hash, path, raw_hash, tool_profile_hash, gen)
              VALUES (?1, ?2, ?3, ?4, ?5)",
             rusqlite::params![
                 commit_hash,
-                entry.path,
-                entry.raw_hash,
-                Some(normalize.tool_profile_hash.clone()),
-                normalize.gen
+                row.path,
+                row.raw_hash,
+                row.tool_profile_hash,
+                row.gen
             ],
         )
         .map_err(|err| KcsError::schema(err.to_string()))?;
     }
-    Ok(true)
+    tx.commit()
+        .map_err(|err| KcsError::schema(err.to_string()))?;
+    Ok(())
 }
 
 fn tree_object_present(repo: &Repository, tree_hash: &str) -> Result<bool> {
@@ -3691,15 +3790,7 @@ fn open_cas_byte_object(
         .unwrap_or("object");
     // P9 (06 §1.1): the read-only expansion cache belongs under $XDG_CACHE_HOME
     // (regenerable, safe to purge), not $XDG_DATA_HOME (durable truth/state).
-    let cache = cache_home()
-        .join("kcs/open")
-        .join(
-            hash.trim_start_matches("sha256:")
-                .chars()
-                .take(12)
-                .collect::<String>(),
-        )
-        .join(basename);
+    let cache = open_cache_path(basename, hash);
     // M5: the open cache is idempotent. A prior open already materialized this
     // object read-only; a second open must reuse it, not `fs::copy` onto a
     // read-only destination (EACCES). Reuse the cached file when it already
@@ -3746,11 +3837,44 @@ fn open_cas_byte_object(
         // default (0755, world-readable).
         harden_open_cache_subtree(parent);
     }
-    // R9-3: create the cache file 0600 *before* writing bytes (via
-    // OpenOptionsExt::mode) rather than `fs::write` at the umask default (0644),
-    // then drop write to 0400. Mirrors the P8 cursor-key hardening — the object
-    // body must never exist even briefly at a world-readable mode.
-    {
+    // R10-6: write the cache file atomically (temp in the same dir -> fsync -> 0400
+    // -> rename) so a crash / ENOSPC / SIGKILL mid-write can never leave a torn
+    // partial under the final cache name that the M5 cache-hit path (which does NOT
+    // re-verify bytes) would later serve as authentic Evidence.
+    write_open_cache_atomic(&cache, &bytes)?;
+    Ok(Some((cache, true)))
+}
+
+/// The read-only open/view expansion cache path for a CAS object. R10-6: the
+/// per-object directory is the FULL `sha256` hex (not a 12-char/48-bit prefix), so
+/// two objects that share a 12-hex prefix and a basename can no longer collide onto
+/// one cache file.
+fn open_cache_path(basename: &str, hash: &str) -> PathBuf {
+    cache_home()
+        .join("kcs/open")
+        .join(hash.trim_start_matches("sha256:"))
+        .join(basename)
+}
+
+/// R10-6: crash-atomic write of the open/view expansion cache file. Writes bytes to
+/// a uniquely-named temp in the SAME directory (created 0600 so the body never
+/// exists world-readable, R9-3), fsyncs, drops the temp to 0400 (read-only), then
+/// renames into the final path. A crash before the rename leaves only the temp,
+/// never a torn file at the served name; the temp is removed on any failure. Mirrors
+/// `atomic_write_cas_object`.
+fn write_open_cache_atomic(cache: &Path, bytes: &[u8]) -> Result<()> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let parent = cache
+        .parent()
+        .ok_or_else(|| KcsError::io("cache path has no parent", cache.display().to_string()))?;
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_nanos())
+        .unwrap_or_default();
+    let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+    let temp = parent.join(format!(".tmp-{}-{}-{}", process::id(), nanos, seq));
+    let result = (|| -> Result<()> {
         let mut open_options = OpenOptions::new();
         open_options.write(true).create(true).truncate(true);
         #[cfg(unix)]
@@ -3759,18 +3883,28 @@ fn open_cas_byte_object(
             open_options.mode(0o600);
         }
         let mut file = open_options
-            .open(&cache)
-            .map_err(|err| KcsError::io(err.to_string(), cache.display().to_string()))?;
-        file.write_all(&bytes)
-            .map_err(|err| KcsError::io(err.to_string(), cache.display().to_string()))?;
+            .open(&temp)
+            .map_err(|err| KcsError::io(err.to_string(), temp.display().to_string()))?;
+        file.write_all(bytes)
+            .map_err(|err| KcsError::io(err.to_string(), temp.display().to_string()))?;
+        file.sync_all()
+            .map_err(|err| KcsError::io(err.to_string(), temp.display().to_string()))?;
+        drop(file);
+        // Drop the temp to read-only BEFORE publishing so the served file is never
+        // writable (mirrors the pre-fix final-path 0400 hardening).
+        let mut permissions = fs::metadata(&temp)
+            .map_err(|err| KcsError::io(err.to_string(), temp.display().to_string()))?
+            .permissions();
+        permissions.set_readonly(true);
+        fs::set_permissions(&temp, permissions)
+            .map_err(|err| KcsError::io(err.to_string(), temp.display().to_string()))?;
+        fs::rename(&temp, cache)
+            .map_err(|err| KcsError::io(err.to_string(), cache.display().to_string()))
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temp);
     }
-    let mut permissions = fs::metadata(&cache)
-        .map_err(|err| KcsError::io(err.to_string(), cache.display().to_string()))?
-        .permissions();
-    permissions.set_readonly(true);
-    fs::set_permissions(&cache, permissions)
-        .map_err(|err| KcsError::io(err.to_string(), cache.display().to_string()))?;
-    Ok(Some((cache, true)))
+    result
 }
 
 /// R9-3: restrict the open/view expansion cache subtree to owner-only (0700) on
@@ -4290,18 +4424,22 @@ fn reclaim_orphaned_running_tasks(store: &TaskStore) -> Result<usize> {
         .map_err(pipeline_to_kcs)
 }
 
-/// R9-4: convert Partial online-markdownize tasks back into retryable Pending
-/// tasks so `batch retry` can complete their still-Failed units (docs/04 §5.2
-/// `partial -> done`). Reads each Partial task's normalized manifest for the
-/// Failed unit_keys, sets `unit_keys` to that scope, restores the placeholder
-/// `output_ref` (so `execute_pending_markdownize_tasks` selects it) and clears the
-/// retry gate. Returns the number re-enqueued. Only touches task lifecycle — it
-/// does not promote online output to HEAD/search (F6, deferred to Step 4).
+/// R9-4 / R10-4: convert Partial online-markdownize tasks back into retryable
+/// Pending tasks so `batch retry` can complete their still-Failed units (docs/04
+/// §5.2 `partial -> done`) — but ONLY the RETRYABLE ones, and only within the retry
+/// budget. Reads each Partial task's manifest for its Failed units and their real
+/// `error_kind` (R10-4). A unit whose kind is non-retryable (docs/04 §5.2 permanent:
+/// invalid_input / contract_violation / ...) is never re-sent; a task whose Failed
+/// units are ALL non-retryable, or whose `attempts` have reached the governing
+/// `max_attempts`, is left Partial (static, still counted by `kcs status`). Each
+/// re-enqueue increments `attempts` so an orchestrator can see the retry count and
+/// the loop stops instead of re-sending & re-billing a permanently-failing unit
+/// forever. Only touches task lifecycle — no HEAD/search promotion (F6, Step 4).
 fn reenqueue_partial_markdownize_tasks(store: &TaskStore) -> Result<usize> {
     let online_ref = online_output_ref(&online_markdownize_profile().adapter_id);
-    // Collect the still-Failed unit_keys per Partial task first — this needs
-    // manifest I/O, so it is done outside the `update_matching` closure.
-    let mut failed_by_id: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    // Collect each Partial task's retry plan first — this needs manifest I/O, so it
+    // is done outside the `update_matching` closure.
+    let mut plan_by_id: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for task in store.all().map_err(pipeline_to_kcs)? {
         if task.status != TaskStatus::Partial
             || task.task_type != TaskType::Markdownize
@@ -4309,45 +4447,93 @@ fn reenqueue_partial_markdownize_tasks(store: &TaskStore) -> Result<usize> {
         {
             continue;
         }
-        let failed = failed_unit_keys_from_instance(&task.output_ref)?;
-        if !failed.is_empty() {
-            failed_by_id.insert(task.task_id.clone(), failed);
+        let plan = partial_retry_plan_from_instance(&task.output_ref)?;
+        // Gate 1 (R10-4): no retryable Failed unit -> leave the task Partial.
+        if plan.retryable_units.is_empty() {
+            continue;
         }
+        // Gate 2 (R10-4): the retry budget for the governing kind is spent -> leave
+        // the task Partial (static). `None` means at least one retryable unit has an
+        // unlimited budget, so the cap never trips.
+        if plan.max_attempts.is_some_and(|max| task.attempts >= max) {
+            continue;
+        }
+        plan_by_id.insert(task.task_id.clone(), plan.retryable_units);
     }
-    if failed_by_id.is_empty() {
+    if plan_by_id.is_empty() {
         return Ok(0);
     }
     store
         .update_matching(|task| {
-            let Some(failed) = failed_by_id.get(&task.task_id) else {
+            let Some(retryable) = plan_by_id.get(&task.task_id) else {
                 return false;
             };
             task.status = TaskStatus::Pending;
-            task.unit_keys = Some(failed.clone());
+            task.unit_keys = Some(retryable.clone());
             task.output_ref = online_ref.clone();
             task.fallback_reason = None;
             task.next_retry_at = None;
+            // R10-4: charge this re-drive against the retry budget so a persistently
+            // failing unit converges on `max_attempts` instead of looping forever.
+            task.attempts = task.attempts.saturating_add(1);
             true
         })
         .map_err(pipeline_to_kcs)
 }
 
-/// The unit_keys still marked Failed in a normalized instance's manifest
-/// (`output_ref/manifest.json`). Empty when the manifest is missing or fully Done.
-/// Used by R9-4 partial recovery.
-fn failed_unit_keys_from_instance(output_ref: &str) -> Result<Vec<String>> {
+/// The retryable subset of a Partial normalized instance's Failed units plus the
+/// governing retry budget (R10-4). Used by `reenqueue_partial_markdownize_tasks`.
+struct PartialRetryPlan {
+    /// Failed unit_keys whose recorded `error_kind` is retryable (docs/04 §5.2).
+    retryable_units: Vec<String>,
+    /// The smallest finite `max_attempts` among those units' kinds, or `None` when at
+    /// least one kind has an unlimited retry budget.
+    max_attempts: Option<u32>,
+}
+
+/// Read a normalized instance's manifest (`output_ref/manifest.json`) and build its
+/// [`PartialRetryPlan`]: the still-Failed units filtered to the retryable ones (by
+/// their recorded `error_kind`) and the retry-budget cap. A missing manifest or a
+/// fully-Done instance yields an empty plan.
+fn partial_retry_plan_from_instance(output_ref: &str) -> Result<PartialRetryPlan> {
+    let empty = PartialRetryPlan {
+        retryable_units: Vec::new(),
+        max_attempts: Some(0),
+    };
     let manifest_path = PathBuf::from(output_ref).join("manifest.json");
     let Ok(bytes) = fs::read(&manifest_path) else {
-        return Ok(Vec::new());
+        return Ok(empty);
     };
     let manifest: NormalizedInstanceManifest =
         serde_json::from_slice(&bytes).map_err(|err| KcsError::schema(err.to_string()))?;
-    Ok(manifest
-        .units
-        .iter()
-        .filter(|entry| entry.status != UnitStatus::Done)
-        .map(|entry| entry.unit_key.clone())
-        .collect())
+    let mut retryable_units = Vec::new();
+    let mut finite_max: Option<u32> = None;
+    let mut saw_unlimited = false;
+    for entry in &manifest.units {
+        if entry.status == UnitStatus::Done {
+            continue;
+        }
+        let policy = retry_policy(retry_kind_from_reason(entry.error_kind.as_deref()));
+        if !policy.retryable {
+            continue;
+        }
+        retryable_units.push(entry.unit_key.clone());
+        match policy.max_attempts {
+            None => saw_unlimited = true,
+            Some(max) => finite_max = Some(finite_max.map_or(max, |current| current.min(max))),
+        }
+    }
+    let max_attempts = if retryable_units.is_empty() {
+        Some(0)
+    } else if saw_unlimited {
+        None
+    } else {
+        finite_max
+    };
+    Ok(PartialRetryPlan {
+        retryable_units,
+        max_attempts,
+    })
 }
 
 /// R9-7: outcome counts from an enrichment pass. `batch retry`/`resume` need more
@@ -4736,10 +4922,15 @@ fn execute_online_markdownize_task(
         None,
         &run_id,
         &generated_at,
+        // R10-4: a unit missing from an online OCR response is a retryable transient
+        // (a healthy adapter returns it — see R9-4 partial->done recovery), so record
+        // it as NetworkError. The re-enqueue path then respects the retry budget
+        // (max_attempts) instead of re-sending & re-billing it forever.
+        RetryErrorKind::NetworkError,
     );
     persist_normalized_instance(repo.kcs_dir(), &manifest, &units).map_err(|_| {
         TaskExecutionFailure {
-            retry_kind: RetryErrorKind::InvalidInput,
+            retry_kind: persist_failure_retry_kind(),
         }
     })?;
     Ok(OnlineExecutionOutcome {
@@ -4765,6 +4956,16 @@ impl RepositoryScopeId for Repository {
             })
             .unwrap_or_else(|| "unknown".to_owned())
     }
+}
+
+/// R10-5: a `persist_normalized_instance` failure occurs AFTER a successful (and
+/// already-billed, F8) OCR call, so it is a write-side I/O fault (ENOSPC / EIO /
+/// interrupted fsync / a transient permission glitch), never bad input. Classify it
+/// as a retryable `NetworkError` (retryable I/O) so `batch retry` can re-drive it
+/// once the disk condition clears, instead of a non-retryable `InvalidInput` that
+/// strands the billed, normalized output forever (retry & re-index both refuse it).
+fn persist_failure_retry_kind() -> RetryErrorKind {
+    RetryErrorKind::NetworkError
 }
 
 fn task_failure_from_adapter(error: kcs_adapter::AdapterError) -> TaskExecutionFailure {
@@ -6150,6 +6351,10 @@ fn run_index_pipeline(
             previous.as_ref().map(|previous| previous.manifest.gen),
             &run_id,
             &generated_at,
+            // The local deterministic markdownize always returns every unit, so this
+            // kind is inert here; a hypothetical missing unit would be a
+            // non-retryable library/contract fault rather than a transient.
+            RetryErrorKind::ContractViolation,
         );
         persist_normalized_instance(repo.kcs_dir(), &manifest, &units).map_err(pipeline_to_kcs)?;
         let task = task_descriptor(
@@ -6640,6 +6845,7 @@ fn normalized_units_from_response(
     Ok(units)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn manifest_from_units(
     prepared_units: &[PreparedUnit],
     units: &[NormalizedUnitObject],
@@ -6648,6 +6854,7 @@ fn manifest_from_units(
     parent_gen: Option<u64>,
     run_id: &str,
     generated_at: &str,
+    failed_kind: RetryErrorKind,
 ) -> NormalizedInstanceManifest {
     let done = units
         .iter()
@@ -6672,8 +6879,12 @@ fn manifest_from_units(
                     UnitStatus::Failed
                 },
                 prepared_hash: unit.prepared_hash.clone(),
+                // R10-4: record the REAL retry kind for a failed unit (a fixed
+                // "missing_output" string is not a `RetryErrorKind`, so the §5.2
+                // permanent-vs-retryable gate could not be applied downstream). The
+                // caller passes the kind appropriate to its failure mode.
                 error_kind: (!done.contains(unit.unit_key.as_str()))
-                    .then(|| "missing_output".to_owned()),
+                    .then(|| retry_reason(failed_kind).to_owned()),
             })
             .collect(),
         generated_at: generated_at.to_owned(),
@@ -6767,6 +6978,14 @@ fn enqueue_online_placeholder_task(
         folder_remaining,
         matches_batch_override(args),
     );
+    // R10-7: an online markdownize task can only ever be DRIVEN by `batch`, whose
+    // gate is the persistent per-adapter opt-in (`persistent_network_allowed`). A
+    // one-shot `--online --yes` sets per-invocation `network_allowed = true` but
+    // leaves no persistent opt-in, so the task can never be sent — a silent dead-end.
+    // Report the honest state (`network_opt_in_required`) rather than a false
+    // `ready_for_online_adapter`. (Inline `--yes` sending, to match embedding, is
+    // deferred with the F6 promotion wiring.)
+    let markdownize_drivable = network_allowed && persistent_network_allowed(repo)?;
     // N1a: a Tier B (candidate-secret) file without `--send-secrets` is held here
     // — a Paused task with `secrets_tier_b_hold`, visible in `kcs status`, that
     // `batch resume` will not un-hold and `execute_pending_markdownize_tasks` will
@@ -6777,7 +6996,7 @@ fn enqueue_online_placeholder_task(
         // F5: only a hard-stop cap pauses the task. Under soft-stop the online task
         // is enqueued normally and its over-cap charge is recorded at execution.
         (TaskStatus::Paused, Some("budget_exceeded"))
-    } else if !network_allowed {
+    } else if !markdownize_drivable {
         (TaskStatus::Pending, Some("network_opt_in_required"))
     } else {
         (TaskStatus::Pending, Some("ready_for_online_adapter"))
@@ -7596,6 +7815,203 @@ mod tests {
     use kcs_adapter::catalog::deterministic_embedding_vector;
 
     use super::{command_captured_json_flag, Cli, Command};
+
+    #[test]
+    fn r10_1_vector_capacity_message_classifier() {
+        use super::is_vector_capacity_message;
+        // R10-1(a): sqlite-vec's KNN k-ceiling and SQLite's bound-variable ceiling are
+        // capacity limits (degrade the scope), not schema faults.
+        assert!(is_vector_capacity_message(
+            "index sqlite error: k value in knn query too large, provided 4200 and the limit is 4096"
+        ));
+        assert!(is_vector_capacity_message(
+            "index sqlite error: too many SQL variables"
+        ));
+        // A genuine schema/contract error is NOT a capacity limit.
+        assert!(!is_vector_capacity_message(
+            "index schema error: no such column"
+        ));
+        assert!(!is_vector_capacity_message("some other failure"));
+    }
+
+    #[test]
+    fn r10_4_partial_retry_plan_gates_on_retryability_and_budget() {
+        use super::partial_retry_plan_from_instance;
+        let dir = tempfile::tempdir().unwrap();
+        let write_manifest = |units: serde_json::Value| {
+            let manifest = serde_json::json!({
+                "raw_hash": "sha256:r",
+                "tool_profile_hash": "sha256:t",
+                "gen": 0,
+                "parent_gen": null,
+                "run_id": "run_x",
+                "units": units,
+                "generated_at": "2026-07-05T00:00:00Z",
+            });
+            std::fs::write(
+                dir.path().join("manifest.json"),
+                serde_json::to_vec(&manifest).unwrap(),
+            )
+            .unwrap();
+        };
+        let output_ref = dir.path().to_string_lossy().into_owned();
+
+        // A Failed unit with a RETRYABLE kind is re-enqueued, with a finite budget.
+        write_manifest(serde_json::json!([
+            {"order":0,"unit_key":"page:1","unit_ref":"u0","unit_type":"page","status":"done","prepared_hash":"sha256:p0","error_kind":null},
+            {"order":1,"unit_key":"page:2","unit_ref":"u1","unit_type":"page","status":"failed","prepared_hash":"sha256:p1","error_kind":"network_error"},
+        ]));
+        let plan = partial_retry_plan_from_instance(&output_ref).unwrap();
+        assert_eq!(plan.retryable_units, vec!["page:2".to_owned()]);
+        assert_eq!(plan.max_attempts, Some(5));
+
+        // A Failed unit with a NON-retryable (permanent) kind is never re-enqueued.
+        write_manifest(serde_json::json!([
+            {"order":0,"unit_key":"page:1","unit_ref":"u0","unit_type":"page","status":"done","prepared_hash":"sha256:p0","error_kind":null},
+            {"order":1,"unit_key":"page:2","unit_ref":"u1","unit_type":"page","status":"failed","prepared_hash":"sha256:p1","error_kind":"invalid_input"},
+        ]));
+        let plan = partial_retry_plan_from_instance(&output_ref).unwrap();
+        assert!(plan.retryable_units.is_empty());
+
+        // Mixed: only the retryable unit survives; a contract_violation is dropped.
+        write_manifest(serde_json::json!([
+            {"order":0,"unit_key":"page:1","unit_ref":"u0","unit_type":"page","status":"failed","prepared_hash":"sha256:p0","error_kind":"contract_violation"},
+            {"order":1,"unit_key":"page:2","unit_ref":"u1","unit_type":"page","status":"failed","prepared_hash":"sha256:p1","error_kind":"network_error"},
+        ]));
+        let plan = partial_retry_plan_from_instance(&output_ref).unwrap();
+        assert_eq!(plan.retryable_units, vec!["page:2".to_owned()]);
+    }
+
+    #[test]
+    fn r10_5_persist_failure_is_retryable() {
+        use super::{persist_failure_retry_kind, retry_policy};
+        // R10-5: a post-OCR persist I/O fault must be retryable so `batch retry` can
+        // recover the already-billed normalized output.
+        assert!(retry_policy(persist_failure_retry_kind()).retryable);
+    }
+
+    #[test]
+    fn r10_6_open_cache_path_uses_full_hash() {
+        use super::open_cache_path;
+        // R10-6: the per-object cache dir is the FULL 64-hex sha256, not a 12-char
+        // prefix, so a prefix+basename collision can't serve the wrong object.
+        let hash = format!("sha256:{}", "a".repeat(64));
+        let path = open_cache_path("doc.md", &hash);
+        let dir = path
+            .parent()
+            .unwrap()
+            .file_name()
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert_eq!(dir.len(), 64, "cache dir must be the full 64-hex hash");
+        assert_eq!(dir, "a".repeat(64));
+        assert_eq!(path.file_name().unwrap(), "doc.md");
+    }
+
+    #[test]
+    fn r10_6_open_cache_write_is_atomic_readonly_and_cleans_temp() {
+        use super::write_open_cache_atomic;
+        let dir = tempfile::tempdir().unwrap();
+        let cache = dir.path().join("obj").join("doc.md");
+        std::fs::create_dir_all(cache.parent().unwrap()).unwrap();
+        write_open_cache_atomic(&cache, b"evidence bytes").unwrap();
+        assert_eq!(std::fs::read(&cache).unwrap(), b"evidence bytes");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&cache).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o400, "published cache file must be read-only 0400");
+        }
+        let stray: Vec<_> = std::fs::read_dir(cache.parent().unwrap())
+            .unwrap()
+            .filter_map(std::result::Result::ok)
+            .filter(|entry| entry.file_name().to_string_lossy().starts_with(".tmp-"))
+            .collect();
+        assert!(stray.is_empty(), "no temp may remain: {stray:?}");
+    }
+
+    #[test]
+    fn r10_6_open_cache_torn_write_leaves_no_temp() {
+        use super::write_open_cache_atomic;
+        // Force the rename to fail (destination is an existing directory) — a torn
+        // write must clean its temp and never publish a partial file.
+        let dir = tempfile::tempdir().unwrap();
+        let cache = dir.path().join("doc.md");
+        std::fs::create_dir(&cache).unwrap();
+        let result = write_open_cache_atomic(&cache, b"bytes");
+        assert!(result.is_err(), "write onto a directory must fail");
+        let stray: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(std::result::Result::ok)
+            .filter(|entry| entry.file_name().to_string_lossy().starts_with(".tmp-"))
+            .collect();
+        assert!(
+            stray.is_empty(),
+            "torn write must clean its temp: {stray:?}"
+        );
+    }
+
+    #[test]
+    fn r10_8_snapshot_tree_entries_insert_is_atomic() {
+        use super::{insert_snapshot_tree_entries, TreeEntryProjection};
+        use rusqlite::Connection;
+        let conn = Connection::open_in_memory().unwrap();
+        // A CHECK lets the test force a mid-batch failure deterministically.
+        conn.execute_batch(
+            "CREATE TABLE tree_entries (
+                 commit_hash TEXT NOT NULL,
+                 path TEXT NOT NULL,
+                 raw_hash TEXT NOT NULL CHECK(raw_hash <> 'BAD'),
+                 tool_profile_hash TEXT,
+                 gen INTEGER NOT NULL DEFAULT 0,
+                 PRIMARY KEY (commit_hash, path));",
+        )
+        .unwrap();
+        let count = |conn: &Connection| -> i64 {
+            conn.query_row(
+                "SELECT COUNT(*) FROM tree_entries WHERE commit_hash='c1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap()
+        };
+        // R10-8: a failing 2nd row rolls the 1st row back — the projection stays
+        // all-or-nothing so `existing` remains 0 and the next read reprojects.
+        let torn = vec![
+            TreeEntryProjection {
+                path: "a.md".to_owned(),
+                raw_hash: "sha256:aa".to_owned(),
+                tool_profile_hash: Some("sha256:tool".to_owned()),
+                gen: 0,
+            },
+            TreeEntryProjection {
+                path: "b.md".to_owned(),
+                raw_hash: "BAD".to_owned(),
+                tool_profile_hash: Some("sha256:tool".to_owned()),
+                gen: 0,
+            },
+        ];
+        assert!(insert_snapshot_tree_entries(&conn, "c1", &torn).is_err());
+        assert_eq!(count(&conn), 0, "partial inserts must be rolled back");
+        // A clean batch commits every row atomically.
+        let good = vec![
+            TreeEntryProjection {
+                path: "a.md".to_owned(),
+                raw_hash: "sha256:aa".to_owned(),
+                tool_profile_hash: Some("sha256:tool".to_owned()),
+                gen: 0,
+            },
+            TreeEntryProjection {
+                path: "b.md".to_owned(),
+                raw_hash: "sha256:bb".to_owned(),
+                tool_profile_hash: None,
+                gen: 1,
+            },
+        ];
+        insert_snapshot_tree_entries(&conn, "c1", &good).unwrap();
+        assert_eq!(count(&conn), 2);
+    }
 
     #[test]
     fn r9_8_atomic_write_cas_object_removes_temp_on_failure() {

@@ -467,6 +467,33 @@ mod tests {
     }
 
     #[test]
+    fn r10_1_knn_k_ceiling_is_4096_and_capped_k_works_over_large_table() {
+        // R10-1: sqlite-vec rejects a KNN `k` above its hard 4096 ceiling. Pre-fix the
+        // CLI passed the FULL chunk_vec row count as `k`, so a scope with >4096
+        // embedded chunks exploded the whole (multi-scope) search with a spurious
+        // CONFIG-SCHEMA exit 2. The fix caps `k` at 4096; this proves both halves —
+        // the raw ceiling AND that a capped query still succeeds over a >4096 table.
+        let store = schema_conn();
+        let conn = store.connection();
+        let total: u64 = 4200;
+        for i in 0..total {
+            let axis = (i as usize) % CHUNK_VEC_DIMENSIONS;
+            write_basis(conn, &format!("c{i}"), &format!("sha256:t{i}"), axis);
+        }
+        assert_eq!(chunk_vec_count(conn).unwrap(), total);
+        let query = basis_vector(0);
+        // Asking for k == total (> 4096) is rejected: this is the crash the CLI hit.
+        assert!(
+            knn_chunk_distances(conn, &query, total).is_err(),
+            "sqlite-vec must reject a k above its 4096 ceiling"
+        );
+        // The R10-1 cap (`total.min(4096)`) succeeds and returns the ceiling of rows.
+        let capped = total.min(4096);
+        let knn = knn_chunk_distances(conn, &query, capped).unwrap();
+        assert_eq!(knn.len() as u64, capped);
+    }
+
+    #[test]
     fn ct3_embed_005_rebuild_chunk_vec_from_embeddings() {
         let mut store = schema_conn();
         // chunks feed chunk_vec on rebuild via the text_hash join.
