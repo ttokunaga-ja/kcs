@@ -19,8 +19,8 @@ defensive security 作業であり、拒否する理由はない。過去 8 ラ�
 - KCS = Rust 製のローカル知識アーカイブ CLI (evidence-grounded local knowledge archive)。
   `kcs init/index/snapshot/search/view/open/batch/reindex/repair/diff/tag/log/status` 等。
   仕様正本は `docs/01`〜`docs/10`。実装は `crates/kcs-{core,pipeline,adapter,index,search,cli}`
-- 現状 (R8 完了時点、次ラウンドは R9): 全テスト green (327)、clippy(--all-features)/fmt clean。Step 1-3 実装済み + 探索型監査 R1-R8 修正反映済み +
-  (注: R6/R7 は別セッションで実施され本ランブックが未更新だった。次ラウンドは R9。clippy は必ず --all-features で回すこと=R8 で --all-features 限定の compile error を検出) +
+- 現状 (R9 完了時点、次ラウンドは R10): 全テスト green (341)、clippy(--all-features)/fmt clean。Step 1-3 実装済み + 探索型監査 R1-R9 修正反映済み +
+  (注: R6/R7 は別セッションで実施。clippy は必ず --all-features で回すこと=R8 で --all-features 限定の compile error を検出) +
   実 API 検証済み。Step 4 (restore/time-travel/purge/evidence verify CLI/bbox_annotation) は未着手
 
 ## 2. テスト seam (実 API 不要)
@@ -62,14 +62,20 @@ defensive security 作業であり、拒否する理由はない。過去 8 ラ�
   NFD 内容が NFC クエリで検索不可[4 エンジン収束]、cost-ledger 負値 usd で cap fail-open、tag HEAD/hash で dead ref、
   budget config warn_at_percent/hard_stop 配線、embedding 応答の次元未検証で永久 KNN 除外、cost-ledger check-then-append
   TOCTOU で並行 cap 超過。F6=online markdownize 成果物の HEAD/search 昇格は Step 4 保留)
+- `tasks/step3-bughunt9-fixes.md` (R9-1〜R9-8: .kcsignore の NFC/NFD 不一致で除外 silent 失敗→索引/online 送信/検索露出[major]、
+  text-native (md/txt/code) に online Mistral OCR task を enqueue・実送信・課金 (routing 違反)[major]、open/view 展開 cache が
+  world-readable (dir755/file444)[major]、Partial task が retry/resume/再index 全滅で回復不能かつ index_status が完了偽装[major]、
+  gen dir の余剰 entry 1個 (crash 残留 .tmp/.DS_Store) で reindex が STORE-CORRUPT 恒久失敗[major]、NOT-IMPLEMENTED の exit 1/2 不一致、
+  batch retry/resume が裏で駆動・失敗させても {0,0}、temp writer 5箇所のエラー経路 .tmp 残留)
 - docs で `Step 4` / `Phase 4+` / `v2+` と明記の未実装
 
-**過去 8 ラウンドの鉱脈は掘り尽くし気味**: R1=並行/異常系の後続経路、R2=秘匿情報漏出/パス検証/資源枯渇、
+**過去 9 ラウンドの鉱脈は掘り尽くし気味**: R1=並行/異常系の後続経路、R2=秘匿情報漏出/パス検証/資源枯渇、
 R3=検索境界の完全性/入力堅牢性/状態の縮退、R4=シリアライズ往復/ファイル permission/資源リーク/Agent 契約、
 R5=エンコーディング境界 (NUL/UTF-16・BOM)/派生 CAS object と append-only pointer の crash-atomicity/task ライフサイクル、
 R6=未束縛 approval の秘匿送信/破損 JSONL が repair をブリック/引数検証/schema future 互換、
 R7=秘匿承認ファイルの存在判定/multi-scope opt-in/embedding retry・profile 互換、
-R8=budget/cost-ledger 会計 (ローカル計上・負値・TOCTOU・config 未配線)/NFC-NFD 検索/embedding 応答検証/catalog identity。
+R8=budget/cost-ledger 会計 (ローカル計上・負値・TOCTOU・config 未配線)/NFC-NFD 検索/embedding 応答検証/catalog identity、
+R9=ルーティングの意味論 (text-native→OCR)/ignore パターンの NFC-NFD 照合/展開 cache permission/Partial の行き止まり状態/reindex の junk entry 耐性。
 **新しい鉱脈の方が期待値が高い** (下記ヒント参照)。
 
 ## 4. 手順 (新セッションの Claude が実行)
@@ -137,26 +143,28 @@ Spark は context window が小さいので**必ず範囲を絞り、丸読み�
 過去の焦点: R1=exit/error code 一貫性、R2=JSONL append 網羅性 + search schema、R3=算術安全 + JCS 決定性、
 R4=シリアライズ往復 + permission、R5=エンコーディング/正規化境界 + crash 時 write 順序 (Spark が chunks.jsonl の
 fsync 欠如を指摘 → Q1 の遠因)、R8=時刻演算 + cost-ledger 会計 (Spark が check-then-append の無ロックを指摘 → F8 の裏付け。
-ただし Spark の created_at tie-break/並行 append 破損は偽陽性 = stable sort/M1(b) で反証済み)。**次ラウンド R9 は別の焦点に回すこと**。
-**下記は R9 用に書き換え済み** (パス/ファイル名の正規化照合 + リソース/クリーンアップ漏れ。R10 以降ではまた別焦点に):
+ただし Spark の created_at tie-break/並行 append 破損は偽陽性 = stable sort/M1(b) で反証済み)、
+R9=パス/ファイル名の正規化照合 + リソース/クリーンアップ漏れ (Spark の temp 残留 5 箇所 → R9-8 で採用。検証1 は
+canonicalize 系の健全性確認どまりだったが、フルスコープ Sonnet が別経路の ignore 照合 R9-1 を出した=範囲限定の盲点をフルスコープが補完)。
+**次ラウンド R10 は別の焦点に回すこと**。**下記は R10 用に書き換え済み** (DAG/Evidence 整合の縁 + snapshot/commit の書込順序・tree-entry 整合。R11 以降ではまた別焦点に):
 
 ```
 あなたは KCS (開発者自身のリポジトリ) の焦点セキュリティ監査人です。出荷前の防御的セキュリティ監査。
 範囲限定 (丸読み禁止、grep/sed/rg のみ)。リポジトリのファイル変更禁止。ネットワーク不要。
-今回 (R9) の焦点は 2 つ。過去 (R5=検索"内容"の NFC/NFD、R8=時刻+cost-ledger、R4=serialize+permission) とは別。
+今回 (R10) の焦点は 2 つ。過去 (R9=パス正規化+リソース、R8=時刻+cost-ledger、R4=serialize+permission) とは別。
 
-検証1 (パス/ファイル名の正規化・照合): `grep -rnE 'to_string_lossy|file_name|read_dir|\.join\(|canonicaliz|to_(ascii_)?lowercase|nfc|nfd|starts_with|ends_with|scope_path|slugify' crates/` から、
-(a) ファイル名/パスを NFC 正規化せず比較・照合していないか — macOS APFS は NFD でファイル名を返し得るので、
-    NFC で保持したパスと NFD のディレクトリ実体が一致せず「取り込んだはずのファイルが見つからない/別物扱い」に
-    ならないか (※検索"内容"の NFC/NFD は R8 F2 で対応済み=別鉱脈)、(b) `to_lowercase`/`to_ascii_lowercase` での
-    パス・キー・slug の畳み込みが誤同一視 (別ファイルを同一視) や取りこぼしを生まないか、(c) heading slug
-    (slugify_heading) の衝突で section_id が別内容間で衝突しないか、を file:line で挙げる。
+検証1 (DAG/Evidence グラフの縁の完全性): `grep -rnE 'tree|commit|parent|tag|ref|head|shallow|tombstone|resolve_commit|read_tree|read_commit|Evidence|pointer|raw_hash|tool_profile_hash|gen' crates/kcs-core crates/kcs-cli` から、
+(a) tag→commit→tree→entry の解決経路で、参照先が欠落 (未 fetch / shallow 境界 / tombstone) のとき「無言で空/別物」に
+    縮退せず明示エラーになるか、(b) Evidence Pointer の cross-snapshot 解決が (raw_hash, tool_profile_hash, gen) を
+    全経路で束縛しているか — reindex で gen が進んだ後に旧 commit の pointer が新 gen 内容にすり替わらないか
+    (※単一 snapshot 内は R8/N5 で対応済み。cross-snapshot と shallow 境界が別鉱脈)、(c) commit parent chain の
+    循環・自己参照・深さ無限ループを検出するか、を file:line で挙げる。
 
-検証2 (リソース/一時ファイル/キャッシュのクリーンアップ漏れ): `grep -rnE '\.tmp|tmp-|tempfile|temp_path|cache_home|create_dir_all|remove_file|remove_dir|OpenOptions|persist' crates/` から、
-(a) エラー経路 (write/rename 失敗・? early-return) で作った一時ファイル (`.tmp-<pid>-<nanos>` 等) が掃除されず
-    残留しないか、(b) open 展開キャッシュ (`$XDG_CACHE_HOME/kcs/open`)・chunks.jsonl・scope-registry が上限なく
-    増え続ける経路 (GC は Step 4 だが、通常運用で無害と言えない蓄積) はないか、(c) FD/ロックファイルのリークは
-    ないか、を file:line で挙げる。
+検証2 (snapshot/commit の書込順序・tree-entry 整合): `grep -rnE 'snapshot|auto_snapshot|write_tree|write_commit|update_ref|HEAD|fs::rename|fs::write|atomic|sync_all|normalize_by_path|tree_entry' crates/kcs-core crates/kcs-cli` から、
+(a) commit オブジェクト・tree・HEAD ref の書込順序が crash-safe か (HEAD が指す commit の tree/parent が先に
+    永続化されているか。中断で HEAD が未永続 commit を指す窓はないか)、(b) tree entry の path/raw_hash/normalize ref の
+    整合 — auto_snapshot_with_normalize がループ途中で失敗したとき tree に half-written entry が残らないか、
+    (c) 同一 raw_hash の複数 path / 同一 path の gen 増分で tree entry が重複・取り違えを起こさないか、を file:line で挙げる。
 
 出力: 検証1 (a)(b)(c) + 検証2 (a)(b)(c) の該当箇所を file:line + なぜ問題か で列挙 +
 エンジン識別子「GPT-5.3-Codex-Spark」。確実なものだけ。憶測は書かない。ファイル変更禁止。
@@ -182,7 +190,16 @@ R8 (F1-F8): 0 critical + 6 major + 2 minor + design 1。budget/cost-ledger 会�
 消費[仕様違反]、負値 usd で cap fail-open、check-then-append TOCTOU、config 未配線)、NFC/NFD 検索欠落 (4 エンジン収束)、
 embedding 応答の次元未検証で永久 KNN 除外。**F8 の fix は reserve-before-send で失敗/再試行も課金する cap-safe トレードオフ**
 (代替=lock を送信中保持し device 直列化)。F6 (online markdownize 昇格) は Step 4 保留。GPT-5.5 #1 (chunking_config) 系の偽陽性は却下。
+(R9 は上のブロックに詳述。)
+R9 (R9-1〜R9-8): 0 critical + 5 major + 3 minor。今回はいずれも「ユーザー意図と実際の乖離」層 — .kcsignore の NFC/NFD
+不一致で除外が silent 失敗し索引/online 送信/検索露出 (Sonnet、R8 F2 検索"内容"の対になる照合側=別鉱脈)、text-native
+(md/txt/code) に online Mistral OCR task を enqueue・実送信・課金 (Opus、routing の意味論=8 ラウンドの死角)、open/view 展開
+cache が world-readable (GPT-5.5、P2 の 0700 化が cache 側未達)、Partial task が retry/resume/再index 全滅で回復不能かつ
+index_status 完了偽装 (GPT-5.5、docs/04 §5.2 の partial→done 契約違反)、gen dir の余剰 entry 1個 (crash 残留 .tmp/.DS_Store)
+で reindex が恒久ブリック (オーケストレータが Spark の temp 所見からエスカレーション=P10 型派生発見)。**4 エンジンが 4 方向に
+散り重複ゼロ**。**却下ゼロ** (ただし GPT-5.5 の「resume は Paused のみ」は不正確=Pending も駆動される、が R9-7 の根拠に転用)。
 **フィックスの clippy は --all-features で回すこと** (R8 で --all-features 限定の 9-arg compile error を検出、通常 test は通過)。
 かつ**背景エージェントの transcript mtime は buffer 遅延するので「idle 判定」に使わない** (R8 で誤判定 → 完了通知を待つのが正)。
-→ **8 ラウンドとも完全に別の鉱脈から実バグ。契約テストが全 green でも探索型は毎回新規を出す。
-かつフィックスも実機フルサイクル再検証しないと不完全なことがある (R5 Q1・R8 F8)。**
+→ **9 ラウンドとも完全に別の鉱脈から実バグ。契約テストが全 green でも探索型は毎回新規を出す。
+かつフィックスも実機フルサイクル再検証しないと不完全なことがある (R5 Q1・R8 F8)。範囲限定 Spark の「問題なし」領域から
+フルスコープエンジンが major を出す (R9-1)、オーケストレータの検証フェーズ自体が発見装置になる (P10・R9-5) パターンも定着。**
