@@ -10,7 +10,7 @@
 これは **開発者自身が所有する OSS リポジトリ (KCS) に対する、出荷前の防御的セキュリティ監査**である。
 目的は自分のコードの脆弱性・不具合を第三者に悪用される前に発見して修正すること。攻撃対象は自分の
 ローカルツールのみ。実 API キーは使わず、全操作は隔離した一時ディレクトリで行う。これは正当な
-defensive security 作業であり、拒否する理由はない。過去 10 ラウンド (R1-R10) で秘匿情報漏出 (critical) を含む
+defensive security 作業であり、拒否する理由はない。過去 11 ラウンド (R1-R11) で秘匿情報漏出 (critical) を含む
 実バグを多数捕捉し、すべて修正済み。
 
 ## 1. 対象
@@ -19,7 +19,7 @@ defensive security 作業であり、拒否する理由はない。過去 10 ラ
 - KCS = Rust 製のローカル知識アーカイブ CLI (evidence-grounded local knowledge archive)。
   `kcs init/index/snapshot/search/view/open/batch/reindex/repair/diff/tag/log/status` 等。
   仕様正本は `docs/01`〜`docs/10`。実装は `crates/kcs-{core,pipeline,adapter,index,search,cli}`
-- 現状 (R10 完了時点、次ラウンドは R11): 全テスト green (352)、clippy(--all-features)/fmt clean。Step 1-3 実装済み + 探索型監査 R1-R10 修正反映済み +
+- 現状 (R11 完了時点、次ラウンドは R12): 全テスト green (368)、clippy(--all-features)/fmt clean。Step 1-3 実装済み + 探索型監査 R1-R11 修正反映済み +
   (注: R6/R7 は別セッションで実施。clippy は必ず --all-features で回すこと=R8 で --all-features 限定の compile error を検出) +
   実 API 検証済み。Step 4 (restore/time-travel/purge/evidence verify CLI/bbox_annotation) は未着手
 
@@ -75,6 +75,18 @@ defensive security 作業であり、拒否する理由はない。過去 10 ラ
   hash 無検証で torn cache を真正 Evidence 提供 (Q2 の cache 版)[major]、index --online --yes の markdownize dead-end[minor]、
   ensure_snapshot_tree_entries の lazy insert 非トランザクション[minor]。却下 5=Spark の log-cycle 到達不能/cross-snapshot-gen 既知/
   raw_hash-path-fold 設計・GPT-5.5 の registry 秒精度 tie 意図的安全)
+- `tasks/step3-bughunt11-fixes.md` (R11-1〜R11-11: typed コマンドの clap usage エラーが --json 契約 bypass[major]、
+  enrichment 失敗/pause が exit・JSON 不可視 — batch exit 3/4/5/6 (docs/04 §5.6) 未実装・index/repair/reindex の
+  ExecOutcome 破棄で auth_error/budget pause も exit 0 完全成功・CT2-BUDGET-005 実装テストが Then(exit 6) を検証しない流用
+  [major・Sonnet+GPT-5.5 収束]、index と search で exit 3 の JSON 所在が非互換 (stderr envelope vs stdout 本体)[major]、
+  build_sqlite_index_at 非トランザクション全件再構築で noop 再index が初回同コスト (R10-8 sibling)[major]、
+  embedding task 更新が 32 件バッチ毎 tasks.jsonl 全読み書き O(N²)[major]、Partial retry が unit_keys を読まず全文書
+  Full 再送・全額再課金 + previous=None で first-instance-wins 未実装 (R10-4 fix の unit-scope 側の穴)[major]、
+  [search].default_mode/fail_behavior が schema 有効+docs 記載で完全未配線 — fail_behavior=error が silent text fallback
+  (R10-2 の [search] 版)[major]、index_status が retryable Failed を pending 未計上/view --json に temporary 欠落/
+  keyword cap 非対称/COUNT(*) 存在 probe[minor]。却下 3=GPT-5.5 の FTS fatal 主張 (実測 3 本で反証・minor 降格)/
+  Spark chunk_vec COUNT (R10-1 設計上必要)/NetworkError 固定 (R10-4 既決・コードコメントに rationale 記録済みが決め手)。
+  multi_scope parallelism/per_scope_timeout 未配線は MULTI-006 既知として据え置き継続)
 - docs で `Step 4` / `Phase 4+` / `v2+` と明記の未実装
 
 **過去 10 ラウンドの鉱脈は掘り尽くし気味**: R1=並行/異常系の後続経路、R2=秘匿情報漏出/パス検証/資源枯渇、
@@ -84,9 +96,10 @@ R6=未束縛 approval の秘匿送信/破損 JSONL が repair をブリック/�
 R7=秘匿承認ファイルの存在判定/multi-scope opt-in/embedding retry・profile 互換、
 R8=budget/cost-ledger 会計 (ローカル計上・負値・TOCTOU・config 未配線)/NFC-NFD 検索/embedding 応答検証/catalog identity、
 R9=ルーティングの意味論 (text-native→OCR)/ignore パターンの NFC-NFD 照合/展開 cache permission/Partial の行き止まり状態/reindex の junk entry 耐性、
-R10=規模境界がコア機能を壊す (ベクトル KNN の sqlite-vec k≤4096 上限で >4096 chunk scope が device 全域 search を墜落)/ignore の config-key drift (top-level 無配線) と case 照合/task 状態機械の retry 予算・error kind 会計 (Partial 無制限再送・persist 誤分類)/派生 cache の crash-atomicity (open cache 非アトミック + hit 無検証)。
-**新しい鉱脈の方が期待値が高い** (下記ヒント参照)。ただし R10 で開いた 2 脈=「SQL/バックエンドの規模境界 (LIMIT/COUNT/IN 変数上限)」と
-「task 状態機械の遷移・retry/課金 会計」は sibling が残っている可能性が高く、R11 Spark はここを系統 grep で掃く (§6)。
+R10=規模境界がコア機能を壊す (ベクトル KNN の sqlite-vec k≤4096 上限で >4096 chunk scope が device 全域 search を墜落)/ignore の config-key drift (top-level 無配線) と case 照合/task 状態機械の retry 予算・error kind 会計 (Partial 無制限再送・persist 誤分類)/派生 cache の crash-atomicity (open cache 非アトミック + hit 無検証)、
+R11=Agent/JSON 契約の正面監査 (10 ラウンドの死角=clap bypass・exit 5/6 未実装・exit 3 非対称・index_status/temporary 開示、5 件集中)/アルゴリズム的規模劣化 (ハード上限とは別型: 非トランザクション全件再構築・O(N²) task 更新)/R10-4 fix の unit-scope 穴 (全文書再送・全額再課金)/config-key drift の [search] 版。
+**新しい鉱脈の方が期待値が高い** (下記ヒント参照)。R11 で「Agent/JSON 契約」と「規模境界の 2 型 (ハード上限 + アルゴリズム劣化)」は
+正面から掘って一巡した。R12 Spark は「config 全 key の配線突合」(R10-2/R11-7 型の系統掃討) と「observability JSONL の網羅性」を掃く (§6)。
 
 ## 4. 手順 (新セッションの Claude が実行)
 
@@ -103,7 +116,7 @@ R10=規模境界がコア機能を壊す (ベクトル KNN の sqlite-vec k≤40
 4. 全エンジン回収後、所見を統合。**critical/major は自分で実機再現 or file:line 検証してから採否**を決める
    (エンジンの誤検出・既知重複を除外)。verify スクリプトの罠に注意:
    `grep -rl P dir | head && echo found` は grep 不一致でも head 成功で常に真。**grep の exit code を直接見る**
-5. 採択した所見を `tasks/step3-bughunt<N>-fixes.md` に裁定として書き、コミット (R10 は bughunt10、**次 R11 は bughunt11**)
+5. 採択した所見を `tasks/step3-bughunt<N>-fixes.md` に裁定として書き、コミット (R11 は bughunt11、**次 R12 は bughunt12**)
 6. 修正を `Agent`(opus) に発注 (docs 変更禁止・各修正ごとに cargo test・回帰テスト必須・commit しない)。
    完了後 `cargo test --workspace` / `clippy -D warnings` / `fmt --check` 全 green を確認、
    critical は自分で実機再確認してからコミット
@@ -122,26 +135,26 @@ R10=規模境界がコア機能を壊す (ベクトル KNN の sqlite-vec k≤40
 seam: KCS_TEST_GEMINI_EMBED / KCS_TEST_MISTRAL_OCR (§2 参照)。実機は XDG_DATA_HOME=$(mktemp -d) で隔離、
 scope は /tmp 配下。リポジトリのファイル変更禁止。verify は grep の exit code を直接見る。
 
-既知 (報告不要): tasks/step3-checkpoint-fixes / step3-bughunt-fixes / bughunt2〜bughunt10 (R11 開始時は
+既知 (報告不要): tasks/step3-checkpoint-fixes / step3-bughunt-fixes / bughunt2〜bughunt11 (R12 開始時は
 `ls tasks/step3-bughunt*` と各見出しを確認) と、docs で Step4/Phase4+/v2+ と明記の未実装。過去の鉱脈
 (並行/異常系、秘匿漏出/パス/資源、検索境界/入力堅牢性、シリアライズ往復/permission、エンコーディング境界
-NUL/UTF-16/BOM/crash-atomicity/task lifecycle、未束縛 approval の秘匿 online 送信、budget/cost-ledger 会計
-[ローカル計上・負値・TOCTOU・config 未配線]、検索"内容"の NFC/NFD、embedding 応答検証、非アトミック writer、
-破損 JSONL が repair をブリック、引数検証、schema future 互換、ルーティング意味論、ignore の NFC/NFD・case・top-level config-key 照合、
-ベクトル KNN の sqlite-vec 規模上限、task retry 予算・error kind 会計、派生 cache の crash-atomicity) は掘り尽くし気味 —
-新しい鉱脈の方が期待値が高い (R11 候補):
-  - SQL/バックエンドの規模境界 (R10-1 の類型: unbounded COUNT/id 集合を LIMIT/k/IN(?,…) に渡し sqlite-vec k≤4096・
-    SQLite host parameter ≤32766・式ツリー深さ等のハード上限を超える箇所。single-scope 失敗が per-scope isolation に
-    degrade せず全体 abort する箇所。※KNN k=R10-1・fetch_live_meta 変数上限=R10-1 latent は既知、sibling を掃く)
-  - task 状態機械の遷移・retry/課金 会計の残り (R10-4/5 の類型: attempts を増やさず budget を bypass する遷移、
-    error kind の誤分類で retryable が逆転、dedup/再 enqueue が恒久 strand or 無制限駆動、cost-ledger の二重/漏れ計上。
-    ※Partial reenqueue=R10-4・persist=R10-5 は既知、Paused/Running/Pending 経路を掃く)
-  - リソース/GC の残り (open cache 増殖、chunks.jsonl / chunk_vec の config 変更・旧 gen 蓄積、scope-registry 成長、
-    エラー経路の一時ファイル残留。※cache permission=R9-3・cache atomicity=R10-6 は既知)
-  - パス/ファイル名の照合の残り (heading slug 衝突、scope path 比較。※NFC/NFD=R9-1・case=R10-3・top-level config-key=R10-2 は既知)
+NUL/UTF-16/BOM/crash-atomicity/task lifecycle、未束縛 approval の秘匿 online 送信、budget/cost-ledger 会計、
+検索"内容"の NFC/NFD、embedding 応答検証、非アトミック writer、破損 JSONL が repair をブリック、引数検証、
+schema future 互換、ルーティング意味論、ignore の NFC/NFD・case・config-key drift ([scope]/top-level/[search])、
+ベクトル KNN の sqlite-vec 規模上限、task retry 予算・error kind・unit-scope 会計、派生 cache の crash-atomicity、
+Agent/JSON 契約 (clap bypass・exit 5/6・exit 3 対称性・index_status 開示)、非トランザクション/O(N²) の規模劣化) は
+掘り尽くし気味 — 新しい鉱脈の方が期待値が高い (R12 候補):
+  - config/schema 全 key の配線突合 (R10-2/R11-7 の型の残り: config.schema.json・docs/05 に有効な key で
+    実装が読まないもの。※top-level ignore=R10-2・[search] default_mode/fail_behavior=R11-7・
+    multi_scope parallelism/timeout=MULTI-006 既知据え置き — それ以外の全 key)
+  - observability JSONL の網羅性 (events.jsonl / errors.jsonl / search log が全コマンドの成功/失敗/partial 経路で
+    append されるか、redaction が message/context 両面で一貫か。※N3/P4/R9-7 の個別修正は既知、系統監査は未)
+  - リソース/GC の残り (open cache 増殖、chunks.jsonl / chunk_vec の config 変更・旧 gen 蓄積、scope-registry 成長。
+    ※cache permission=R9-3・cache atomicity=R10-6・.tmp 残留=R9-8 は既知)
+  - 検索品質の縁 (RRF/MMR の tie-break 決定性、cursor 再開の順序安定性、limit/offset 境界の重複/欠落)
   - DAG/Evidence の残り (tag→commit→tree の縁、shallow 境界での縮退。※cross-snapshot 解決・書込順は R10 Spark で健全確認済み)
   - 時刻/TZ の残り (DST/閏の境界、秒精度での順序・tie-break)
-  - Agent/JSON 契約の残り (各 --json が内部状態を過不足なく開示するか、隠れた成功/失敗、exit code 一貫性)
+  - 並行性の残り (R11 で入った集約 writeback (R11-5)・tx 化 (R11-4)・exit override 経路と並行 batch/search の相互作用)
 だが直感を優先せよ。
 
 品質バー: 報告する所見は必ず自分で再現 or file:line で立証。憶測不可。既知重複ゼロ。
@@ -161,30 +174,34 @@ fsync 欠如を指摘 → Q1 の遠因)、R8=時刻演算 + cost-ledger 会計 (
 R9=パス/ファイル名の正規化照合 + リソース/クリーンアップ漏れ (Spark の temp 残留 5 箇所 → R9-8 で採用。検証1 は
 canonicalize 系の健全性確認どまりだったが、フルスコープ Sonnet が別経路の ignore 照合 R9-1 を出した=範囲限定の盲点をフルスコープが補完)、
 R10=DAG/Evidence 整合の縁 + snapshot/commit 書込順序 (既存ガード M6/N5/L3・tree→commit→refs 順・CAS hash 検証が正しく成立と確認=実質 0 新規。
-Spark の log-cycle 無限ループは content-addressing で到達不能、cross-snapshot-gen 欠落は L3/N5 既知として却下)。
-**次ラウンド R11 は別の焦点に回すこと**。**下記は R11 用に書き換え済み** (SQL/バックエンドの規模境界 + task 状態機械の遷移・会計。
-R10 で開いた 2 脈の sibling を系統 grep で掃く。R12 以降ではまた別焦点に):
+Spark の log-cycle 無限ループは content-addressing で到達不能、cross-snapshot-gen 欠落は L3/N5 既知として却下)、
+R11=SQL/バックエンド規模境界 + task 状態機械会計 (R10-1 の k cap・per-scope 降格・R10-4/5 の attempts/error-kind/charge が
+成立と確認=2 ラウンド連続の健全性確認着地。新規は COUNT(*) 存在 probe → R11-11 minor 採用。同ラウンドでフルスコープ勢が
+別脈 (Agent/JSON 契約) から major 7 件=範囲限定の盲点をフルスコープが補完する R9-1 パターンの再現)。
+**次ラウンド R12 は別の焦点に回すこと**。**下記は R12 用に書き換え済み** (config 全 key 配線突合 + observability JSONL 網羅性。
+R10-2/R11-7 で 2 連続した config-key drift の型を系統掃討で締め、未正面監査の observability を掘る。R13 以降ではまた別焦点に):
 
 ```
 あなたは KCS (開発者自身のリポジトリ) の焦点セキュリティ監査人です。出荷前の防御的セキュリティ監査。
 範囲限定 (丸読み禁止、grep/sed/rg のみ)。リポジトリのファイル変更禁止。ネットワーク不要。
-今回 (R11) の焦点は 2 つ。過去 (R10=DAG/Evidence+snapshot 書込順、R9=パス正規化+リソース、R8=時刻+cost-ledger) とは別。
-R10 で開いた 2 脈の sibling を系統的に掃く。
+今回 (R12) の焦点は 2 つ。過去 (R11=SQL規模境界+task会計、R10=DAG/Evidence、R9=パス正規化+リソース) とは別。
 
-検証1 (SQL/index の規模境界とバックエンド上限): `grep -rnE 'LIMIT|COUNT\(|IN \(| k |knn|params!\[|query_map|\.take\(|chunk_vec|32766|4096|candidate_depth|MATCH' crates/kcs-index crates/kcs-cli` から、
-(a) 無制限の COUNT / id 集合を LIMIT・k・`IN (?,…)` としてバックエンドに渡し、ハード上限 (sqlite-vec の k≤4096、
-    SQLite の host parameter ≤32766、式ツリー深さ) を超えて Fatal 化しうる箇所 (※KNN k は R10-1、fetch_live_meta の
-    `chunk_id IN (?,…)` は R10-1 latent で既知 — それ以外の sibling)、(b) 大規模 scope で single-scope の失敗が
-    per-scope isolation (docs/05 §1.8) に degrade せず全体 abort する箇所、(c) COUNT(*) / 全件 sort / 全件 fetch など
-    O(N) 以上がクエリ毎に走り数百文書規模で破綻する箇所、を file:line で挙げる。
+検証1 (config/schema 全 key の配線突合 — R10-2/R11-7 型の系統掃討): まず
+`sed -n '1,200p' crates/kcs-core/schemas/config.schema.json` と `grep -n '^[a-z_]* =\|^\[' docs/05-runtime.md` で
+schema/docs 上有効な全 config key を列挙し、各 key ごとに `rg -n '"<key>"|\.<key>\b' crates/` で実装の読取箇所を突合せよ。
+(a) schema/docs に存在するが実装がどこからも読まない key (silent 受理→無視。※top-level ignore=R10-2、
+    [search] default_mode/fail_behavior=R11-7、[search.multi_scope] parallelism/per_scope_timeout_seconds=MULTI-006
+    既知据え置き — それ以外の全 key)、(b) 読むが片側のみ (scope config は読むが user config を読まない等、
+    優先順位 docs/05 §2 との不一致)、(c) 値検証が schema と実装で食い違う key (enum 範囲・型・default)、を
+    key 名 + file:line で挙げる。
 
-検証2 (task 状態機械の遷移と retry/課金 会計の完全性): `grep -rnE 'TaskStatus|attempts|max_attempts|retry_policy|reenqueue|dedup|Paused|Running|Pending|Partial|Failed|heartbeat|retryable|cost.?ledger|charge' crates/kcs-cli crates/kcs-pipeline` から、
-(a) 状態遷移で attempts を増分せず retry_policy の max_attempts 予算を bypass する経路 (※Partial reenqueue は R10-4 で修正、
-    それ以外の Paused/Running/Pending/再 index 経路)、(b) error kind の誤分類で retryable/非 retryable が逆転する箇所
-    (※persist=InvalidInput は R10-5 で修正、それ以外の I/O・adapter 経路)、(c) dedup/再 enqueue が task を恒久 strand
-    または無制限駆動する箇所、(d) online 送信・課金 (cost-ledger) が状態遷移のたびに二重計上・漏れ計上しないか、を file:line で挙げる。
+検証2 (observability JSONL の記録網羅性と redaction 一貫性): `rg -n 'events\.jsonl|errors\.jsonl|append_search_logs|append_event|append_error|redact' crates/kcs-cli crates/kcs-core` から、
+(a) コマンド成功/失敗/partial の各経路で events/errors への append が漏れる箇所 (特に R11 で追加された
+    __exit_code 3/5/6 経路・clap try_parse エラー経路・enrichment 失敗経路)、(b) redaction (N3/P4 で修正済みの
+    message/path) が新規フィールド (context 内・warning・embedding_tasks_* 等) に及んでいない箇所、
+    (c) append 失敗自体がコマンドを fail させる/黙殺される非一貫、を file:line で挙げる。
 
-出力: 検証1 (a)(b)(c) + 検証2 (a)(b)(c)(d) の該当箇所を file:line + なぜ問題か で列挙 +
+出力: 検証1 (a)(b)(c) + 検証2 (a)(b)(c) の該当箇所を file:line + なぜ問題か で列挙 +
 エンジン識別子「GPT-5.3-Codex-Spark」。確実なものだけ。憶測は書かない。ファイル変更禁止。
 ```
 
@@ -228,7 +245,25 @@ crash-atomicity (GPT-5.5 open cache 非アトミック + hit 無検証=Q2 の ca
 task-lifecycle の両側 (無制限再送 R10-4 と恒久固着 R10-5) を別々に捕捉**=状態機械の会計は sibling が残る脈 (R11 Spark 焦点に転用)。
 **フィックスの clippy は --all-features で回すこと** (R8 で --all-features 限定の 9-arg compile error を検出、通常 test は通過)。
 かつ**背景エージェントの transcript mtime は buffer 遅延するので「idle 判定」に使わない** (R8 で誤判定 → 完了通知を待つのが正)。
-→ **10 ラウンドとも完全に別の鉱脈から実バグ。契約テストが全 green でも探索型は毎回新規を出す。
+R11 (R11-1〜R11-11): 0 critical + 7 major + 4 minor (major 数は R1 と並ぶ最多)。3 脈 — (a) **Agent/JSON 契約の正面監査が
+10 ラウンドの死角**で 5 件集中 (Sonnet clap `Cli::parse()` が --json を bypass、Sonnet+GPT-5.5 が独立収束した
+「enrichment 失敗/pause が exit 0 完全成功」= ExitCode::AuthError/BudgetExceeded がデッド定義・CT2-BUDGET-005 実装テストが
+Then(exit 6) を検証しない流用と判明、exit 3 の stdout/stderr 非対称、index_status の retryable Failed 不可視、view の
+temporary 欠落)、(b) **規模劣化の第 2 型=アルゴリズム的** (Sonnet: 非トランザクション全件再構築で noop 再index が初回同コスト
+[R10-8 sibling、fix 後 1.01s→0.34s]、32 件バッチ毎の tasks.jsonl 全読み書き O(N²) [fix 後 14.7s→3.6s・線形化])、
+(c) **R10-4 fix の unit-scope 側の穴** (Sonnet: unit_keys が全 crate で読まれない死にフィールド、retry が全文書 Full 再送・
+全額再課金 [fix 後 retry 課金 1/3 按分を実測]、previous=None で first-instance-wins 未実装) + **config-key drift の [search] 版**
+(Opus: default_mode/fail_behavior 完全未配線、fail_behavior=error が silent text fallback)。
+**Sonnet が単独セッション内でエージェント委任の分業を自発再現し c2+M4+m2 の最大収穫** (critical 2 はオーケストレータが
+major に降格採択: loud だが形式違反 / silent success 偽装は R9-4 と同 class の major が先例)。**却下 3 の学び**:
+GPT-5.5 の「FTS 無制限 keyword で fatal」は Opus 5 万 term + オーケストレータ 2 万 term の実測で反証 (静的 only エンジンの
+規模主張は必ず実測で裁定)、「NetworkError 固定」は R10-4 fix がコードコメントに rationale を記録していたことで既決と即断
+(**fix 時に裁定理由をコードコメントへ残すと後続ラウンドの却下が高速化する**)。オーケストレータ側の新罠 2 つ:
+**検証スクリプトのリダイレクト先を scope 内に作ると索引対象になり偽異常を生む** (idx.json/idx.err で 2 回発生 → 出力は
+/tmp 直下か scope 外へ)、**XDG_DATA_HOME を複数 scope で共有すると search の横断集計が「規模異常」に見える** (正しい動作。
+1 検証 1 XDG が正)。フィックス再検証は全 major 8/8 repro クローズ (exit 5/6/3 実機、性能 2 件は数値で確認、ct3_l2 の
+期待値変更 [index budget pause→exit 6] は docs/06 §7 のスクリプト連携意図と整合を確認して受理)。
+→ **11 ラウンドとも完全に別の鉱脈から実バグ。契約テストが全 green でも探索型は毎回新規を出す。
 かつフィックスも実機フルサイクル再検証しないと不完全なことがある (R5 Q1・R8 F8・R10-1 の e2e 置換をオーケストレータが再実行)。範囲限定 Spark の
-「問題なし」領域からフルスコープエンジンが major を出す (R9-1)、オーケストレータの検証フェーズ自体が発見装置になる (P10・R9-5) パターンも定着。
-かつ Spark の焦点が「掘り尽くした脈の健全性確認」に着地しても (R10 の DAG/Evidence)、フルスコープが別脈で major を出せば全体は前進する。**
+「問題なし」領域からフルスコープエンジンが major を出す (R9-1・R11 で再現)、オーケストレータの検証フェーズ自体が発見装置になる (P10・R9-5) パターンも定着。
+かつ Spark の焦点が「掘り尽くした脈の健全性確認」に着地しても (R10 の DAG/Evidence、R11 の規模境界+task会計)、フルスコープが別脈で major を出せば全体は前進する。**
