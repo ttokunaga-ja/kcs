@@ -631,6 +631,10 @@ impl Repository {
         let json_value =
             serde_json::to_value(&toml).map_err(|err| KcsError::schema(err.to_string()))?;
         validate_json_schema(SchemaKind::Config, &json_value)?;
+        // R12-2 / R12-1: reject documented-but-unwired values the schema can only
+        // type-check (e.g. `allowed_scope != "."`) LOUDLY, so a scope config never
+        // silently ignores a policy the user set.
+        enforce_config_semantics(&json_value)?;
         let version = match json_value.get("kcs_format_version") {
             Some(value) => value
                 .as_str()
@@ -1044,13 +1048,90 @@ fn redact_context(value: &mut Value) {
 }
 
 fn config_home() -> PathBuf {
-    if let Some(path) = std::env::var_os("XDG_CONFIG_HOME") {
-        return PathBuf::from(path);
+    // R12-6: empty/relative `XDG_CONFIG_HOME` is invalid per the XDG spec — fall
+    // back to `$HOME/.config` rather than a CWD-relative dir.
+    crate::xdg::xdg_dir("XDG_CONFIG_HOME")
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))
+        .unwrap_or_else(|| PathBuf::from("."))
+}
+
+/// R12-2 / R12-1: enforce the *semantics* of documented config keys that the JSON
+/// Schema can only type-check. A key whose value selects behavior KCS has not
+/// implemented is rejected LOUDLY (`KCS-E-CONFIG-NOT-IMPLEMENTED-001`, exit 1 —
+/// R9-6 convention) rather than silently ignored, but the documented DEFAULT value
+/// is always accepted as a harmless no-op so pasting the docs/07 §7 `[adapter.policy]`
+/// block (all defaults) never bricks a scope (the R12-2 failure mode). Called on
+/// every scope-config load (`validate_config`) and on the user-config load.
+///
+/// Wired keys (`allow_network`, `redact_logs`, `max_input_bytes`, the
+/// `markdownize.incremental` enabled/threshold/max_consecutive, and the whole
+/// `[search]` block) are NOT checked here — they change behavior, they are not
+/// rejected.
+pub fn enforce_config_semantics(config: &Value) -> Result<()> {
+    if let Some(policy) = config
+        .get("adapter")
+        .and_then(|adapter| adapter.get("policy"))
+    {
+        // allowed_scope: only "." (scope containment, 07 §7.1.2 P1) is implemented.
+        if let Some(scope) = policy.get("allowed_scope").and_then(Value::as_str) {
+            if scope != "." {
+                return Err(KcsError::not_implemented(
+                    "adapter.policy.allowed_scope other than \".\"",
+                ));
+            }
+        }
+        // Request/response body persistence is never done (07 §7 "ログ本文禁止" —
+        // only hashes are logged), so a `true` request is unimplemented.
+        if policy.get("store_request_body").and_then(Value::as_bool) == Some(true) {
+            return Err(KcsError::not_implemented(
+                "adapter.policy.store_request_body = true",
+            ));
+        }
+        if policy.get("store_response_body").and_then(Value::as_bool) == Some(true) {
+            return Err(KcsError::not_implemented(
+                "adapter.policy.store_response_body = true",
+            ));
+        }
+        // The first-run command/URL approval flow (07 §7) is mandatory and cannot
+        // be turned off.
+        if policy
+            .get("require_command_confirmation")
+            .and_then(Value::as_bool)
+            == Some(false)
+        {
+            return Err(KcsError::not_implemented(
+                "adapter.policy.require_command_confirmation = false",
+            ));
+        }
+        // timeout_seconds: a per-adapter execution timeout is not threaded through
+        // the adapter HTTP path (it would touch every adapter's transport). Accept
+        // the documented default (300); reject any other value loudly rather than
+        // silently ignore it. (R12-2 decision: real wiring is a large change.)
+        if let Some(timeout) = policy.get("timeout_seconds").and_then(Value::as_i64) {
+            if timeout != 300 {
+                return Err(KcsError::not_implemented(
+                    "adapter.policy.timeout_seconds other than 300",
+                ));
+            }
+        }
     }
-    if let Some(home) = std::env::var_os("HOME") {
-        return PathBuf::from(home).join(".config");
+    // markdownize.incremental.include_neighbors has no implementation concept
+    // (R12-1); only the documented default (1) is a no-op — anything else is
+    // rejected loudly. `enabled`/`threshold`/`max_consecutive` ARE wired at index
+    // time, so they are not checked here.
+    if let Some(incremental) = config
+        .get("markdownize")
+        .and_then(|markdownize| markdownize.get("incremental"))
+    {
+        if let Some(neighbors) = incremental.get("include_neighbors").and_then(Value::as_i64) {
+            if neighbors != 1 {
+                return Err(KcsError::not_implemented(
+                    "markdownize.incremental.include_neighbors other than 1",
+                ));
+            }
+        }
     }
-    PathBuf::from(".")
+    Ok(())
 }
 
 /// Reject a tag-name / commit-ref operand that could escape `refs/tags` when
@@ -1082,13 +1163,11 @@ fn validate_ref_operand(value: &str) -> Result<()> {
 }
 
 fn data_home() -> PathBuf {
-    if let Some(path) = std::env::var_os("XDG_DATA_HOME") {
-        return PathBuf::from(path);
-    }
-    if let Some(home) = std::env::var_os("HOME") {
-        return PathBuf::from(home).join(".local/share");
-    }
-    PathBuf::from(".")
+    // R12-6: empty/relative `XDG_DATA_HOME` is invalid per the XDG spec — fall
+    // back to `$HOME/.local/share` rather than a CWD-relative dir.
+    crate::xdg::xdg_dir("XDG_DATA_HOME")
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/share")))
+        .unwrap_or_else(|| PathBuf::from("."))
 }
 
 /// Restrict a directory that may hold document bytes / secrets / usage data to

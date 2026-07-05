@@ -6,6 +6,7 @@ pub mod error;
 pub mod exit_code;
 pub mod schema;
 pub mod scope;
+pub mod xdg;
 
 pub use error::{KcsError, Result};
 pub use exit_code::ExitCode;

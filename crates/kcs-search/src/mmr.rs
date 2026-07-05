@@ -45,7 +45,21 @@ pub fn diversify_candidates(
     config: MmrConfig,
 ) -> Result<Vec<DiversifiedCandidate>> {
     let ordered = match config.strategy {
-        DiversifyStrategy::Off => candidates.iter().collect::<Vec<_>>(),
+        // R12-1: "off" disables diversification ENTIRELY — no MMR reorder AND no
+        // `max_per_raw_hash` dedup. It must be a true no-op so the documented escape
+        // hatch (05 §1.4) lets every candidate through; the diversify summary already
+        // reports "off", so deduping here contradicted the report. "group_by_raw_hash"
+        // and "mmr" are the two strategies that apply the dedup cap.
+        DiversifyStrategy::Off => {
+            return Ok(candidates
+                .iter()
+                .enumerate()
+                .map(|(index, candidate)| DiversifiedCandidate {
+                    chunk_hash: candidate.chunk_hash.clone(),
+                    final_rank: index as u64 + 1,
+                })
+                .collect());
+        }
         DiversifyStrategy::GroupByRawHash => candidates.iter().collect::<Vec<_>>(),
         DiversifyStrategy::Mmr => {
             if candidates
@@ -250,6 +264,30 @@ mod tests {
 
     #[test]
     fn ct3_mmr_004_max_per_raw_hash_applies_to_stream() {
+        // R12-1: max_per_raw_hash is the `group_by_raw_hash` dedup cap (and applies
+        // under `mmr` too). This asserts the stream-wide cap; it must NOT use `off`
+        // — `off` is now a true no-op that applies no dedup at all (see
+        // `off_is_a_true_no_op_no_dedup`).
+        let candidates = (0..5)
+            .map(|i| candidate(&format!("c{i}"), "same", 10.0 - i as f64, vec![1.0, 0.0]))
+            .collect::<Vec<_>>();
+        let out = diversify_candidates(
+            &candidates,
+            MmrConfig {
+                strategy: DiversifyStrategy::GroupByRawHash,
+                mmr_lambda: 0.7,
+                max_per_raw_hash: 3,
+                mmr_depth: 100,
+            },
+        )
+        .unwrap();
+        assert_eq!(out.len(), 3);
+    }
+
+    #[test]
+    fn off_is_a_true_no_op_no_dedup() {
+        // R12-1: `strategy = "off"` returns every candidate in RRF order regardless
+        // of max_per_raw_hash — the documented escape hatch is a real no-op.
         let candidates = (0..5)
             .map(|i| candidate(&format!("c{i}"), "same", 10.0 - i as f64, vec![1.0, 0.0]))
             .collect::<Vec<_>>();
@@ -263,7 +301,13 @@ mod tests {
             },
         )
         .unwrap();
-        assert_eq!(out.len(), 3);
+        assert_eq!(out.len(), 5);
+        assert_eq!(
+            out.iter()
+                .map(|c| c.chunk_hash.as_str())
+                .collect::<Vec<_>>(),
+            vec!["c0", "c1", "c2", "c3", "c4"]
+        );
     }
 
     #[test]

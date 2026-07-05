@@ -9,6 +9,7 @@ license.workspace = true
 path = "src/lib.rs"
 
 [dependencies]
+kcs-core.workspace = true
 rusqlite.workspace = true
 sqlite-vec.workspace = true
 serde.workspace = true
