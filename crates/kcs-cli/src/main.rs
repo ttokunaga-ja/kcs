@@ -44,8 +44,8 @@ use kcs_pipeline::budget::{
 };
 use kcs_pipeline::markdownize::{
     choose_markdownize_mode, persist_normalized_instance, validate_markdownize_response,
-    IncrementalHints, IncrementalModeInput, MarkdownizeMode, NormalizedInstanceManifest,
-    NormalizedUnitManifestEntry, NormalizedUnitObject, UnitStatus,
+    IncrementalHints, IncrementalModeDecision, IncrementalModeInput, MarkdownizeMode,
+    NormalizedInstanceManifest, NormalizedUnitManifestEntry, NormalizedUnitObject, UnitStatus,
 };
 use kcs_pipeline::prepare::{
     hash_bytes, map_units, pdf_text_pages, prepare_units, unit_ref, PrepareStageRequest,
@@ -231,6 +231,15 @@ fn main() {
             // search partial failure returns its result JSON on stdout with exit 3,
             // 05 §1.8). The private `__exit_code` marker is stripped before printing.
             let code = take_exit_override(&mut output).unwrap_or(ExitCode::Success);
+            // R12-4: a non-success exit that still prints result JSON (index/search
+            // partial exit 3, enrichment auth exit 5, budget pause exit 6) went
+            // through this Ok arm and so bypassed the Err arm's append_error_log —
+            // auth failures / budget stops / scope exclusions never reached
+            // errors.jsonl (docs/05:573 "all errors"). Reconstruct the reason from
+            // the output and append it (append_error_log redacts).
+            if code != ExitCode::Success {
+                append_exit_override_error(&output, code);
+            }
             print_output(output, json);
             code
         }
@@ -263,6 +272,10 @@ fn exit_from_clap_error(err: clap::Error) -> ! {
     }
     // A genuine usage error. clap's exit code is 2 for every non-help/version kind.
     let exit_code = err.exit_code();
+    // R12-4: a clap usage error is still an error (docs/05:573 "all errors" belong
+    // in errors.jsonl). append_error_log writes to the device data_home directly, so
+    // it works even though `run()` (and its repo) never started.
+    let _ = append_error_log(&KcsError::invalid_usage(clap_error_reason(&err)));
     let wants_json = std::env::args().skip(1).any(|arg| arg == "--json");
     if wants_json {
         print_error(&KcsError::invalid_usage(clap_error_reason(&err)), true);
@@ -301,6 +314,46 @@ fn take_exit_override(output: &mut Value) -> Option<ExitCode> {
         5 => Some(ExitCode::AuthError),
         6 => Some(ExitCode::BudgetExceeded),
         _ => None,
+    }
+}
+
+/// R12-4: append the errors.jsonl line for a command that printed result JSON yet
+/// requested a non-success exit via `__exit_code`. Reconstruct the error_code from
+/// the output (explicit `error_code` for index partial; otherwise mapped from the
+/// exit class) and carry `excluded_scopes` in context. `append_error_log` applies
+/// redaction, so scope paths inside `excluded_scopes` are masked by default.
+fn append_exit_override_error(output: &Value, code: ExitCode) {
+    let error_code = output
+        .get("error_code")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .unwrap_or_else(|| exit_override_error_code(code).to_owned());
+    let mut context = json!({ "exit_code": code.code() });
+    if let Some(excluded) = output.get("excluded_scopes") {
+        if excluded.as_array().is_some_and(|array| !array.is_empty()) {
+            if let Some(object) = context.as_object_mut() {
+                object.insert("excluded_scopes".to_owned(), excluded.clone());
+            }
+        }
+    }
+    let _ = append_error_log(&KcsError::new(
+        error_code,
+        "command completed with a non-success exit code",
+        context,
+        code,
+    ));
+}
+
+/// The observability error_code for a non-success exit override that carries no
+/// explicit `error_code` field (auth/budget/partial). Used only for the log line;
+/// the exit code itself is the machine contract.
+fn exit_override_error_code(code: ExitCode) -> &'static str {
+    match code {
+        ExitCode::AuthError => "KCS-E-ADAPTER-AUTH-001",
+        ExitCode::BudgetExceeded => "KCS-E-BUDGET-EXCEEDED-001",
+        ExitCode::PartialFailure => "KCS-E-SEARCH-PARTIAL-001",
+        ExitCode::PermanentFailure => "KCS-E-SEARCH-SCOPE-ALL-FAILED-001",
+        _ => "KCS-E-INTERNAL-001",
     }
 }
 
@@ -570,6 +623,8 @@ fn run_index(args: IndexArgs) -> Result<Value> {
         "failed_files": index_result.failed_files,
         "normalized_files": index_result.normalized_files,
         "pending_files": index_result.pending_files,
+        // R12-2: files skipped for adapter processing by the max_input_bytes gate.
+        "skipped_oversized_files": index_result.skipped_oversized_files,
         // R11-2: disclose the inline embedding enrichment (was entirely absent, so an
         // auth/rate failure during index was invisible in the result JSON).
         "embedding_tasks_executed": enrichment.executed,
@@ -681,8 +736,12 @@ fn parse_repair_args(args: Vec<String>) -> Result<()> {
         ));
     }
     let mut rebuild_db = false;
-    for arg in args {
-        match arg.as_str() {
+    for arg in &args {
+        // R12-7: accept `--flag=value` before matching (repair flags are boolean, so
+        // any inline value is ignored — the point is not to misreport `--yes=1` etc.
+        // as an unknown flag).
+        let (flag, _inline) = split_flag_value(arg);
+        match flag {
             "--rebuild-db" if !rebuild_db => rebuild_db = true,
             "--rebuild-db" => {
                 return Err(KcsError::invalid_usage(
@@ -1003,7 +1062,20 @@ struct SearchedScopeInfo {
 }
 
 fn run_search(args: UnsupportedArgs) -> Result<Value> {
+    // R12-4: a FAILED search (cursor mismatch, all-scope-failed, …) returns before
+    // `append_search_logs`, so it never wrote a per-search metrics line and dropped
+    // out of the p50/p95/p99 latency population (docs/05:578). Emit that line here on
+    // the error path (result_count 0 + error_code). The errors.jsonl line for a hard
+    // Err is still written by main()'s Err arm.
     let started = Instant::now();
+    let result = run_search_inner(args, started);
+    if let Err(error) = &result {
+        append_failed_search_metrics(started, error);
+    }
+    result
+}
+
+fn run_search_inner(args: UnsupportedArgs, started: Instant) -> Result<Value> {
     let parsed = parse_search_args(without_json(args.args))?;
     let repo = Repository::open_current()?;
     validate_repo_tool_lock(&repo)?;
@@ -1014,6 +1086,12 @@ fn run_search(args: UnsupportedArgs) -> Result<Value> {
     // when no vector backend is available. Both were schema-valid + documented but
     // entirely unwired before (the [search] version of the R10-2 config drift).
     let (config_default_mode, config_fail_behavior) = effective_search_config(&repo)?;
+    // R12-1: effective `[search.rrf]` / `[search.diversify]` (05 §1.3/§1.4). These
+    // were documented + schema-valid but hardcoded at every call site (RRF fuse,
+    // diversify, query_hash) — the tuning keys were dead. Read them once and thread
+    // them through so config actually changes ranking/dedup AND invalidates a stale
+    // cursor via query_hash.
+    let (rrf_config, diversify_request) = effective_search_tuning(&repo)?;
     let requested_mode = if parsed.explicit_mode {
         parsed.requested_mode
     } else {
@@ -1166,11 +1244,13 @@ fn run_search(args: UnsupportedArgs) -> Result<Value> {
         mode: mode.resolved,
         scope_mode,
         scopes: scope_ids,
-        diversify: default_diversify_request(),
-        rrf_k: 60,
-        rrf_candidate_depth: 200,
-        rrf_w_text: 1.0,
-        rrf_w_vector: 1.0,
+        // R12-1: the effective tuning (not fixed literals), so a config change to
+        // rrf/diversify correctly invalidates an in-flight cursor (05 §1.8:280).
+        diversify: diversify_request.clone(),
+        rrf_k: rrf_config.k,
+        rrf_candidate_depth: rrf_config.candidate_depth,
+        rrf_w_text: rrf_config.w_text,
+        rrf_w_vector: rrf_config.w_vector,
         at: None,
         all_history: false,
         include_deleted: false,
@@ -1206,7 +1286,14 @@ fn run_search(args: UnsupportedArgs) -> Result<Value> {
     let mut candidates = Vec::<ScoredCandidate>::new();
 
     for (idx, exec) in exec_scopes.iter().enumerate() {
-        match search_one_scope(exec, idx, &tiers, mode.resolved, scope_query_embedding) {
+        match search_one_scope(
+            exec,
+            idx,
+            &tiers,
+            mode.resolved,
+            scope_query_embedding,
+            rrf_config,
+        ) {
             Ok(outcome) => {
                 searched.push(SearchedScopeInfo {
                     scope_id: exec.target.scope_id.clone(),
@@ -1302,7 +1389,9 @@ fn run_search(args: UnsupportedArgs) -> Result<Value> {
 
     // Diversify the merged pool once (05 §1.8 step 4). Text-only -> MMR is skipped;
     // only the raw_hash dedup runs (spanning scopes and pages, CT3-MULTI-003).
-    let (ordered, diversify_summary) = diversify_merged(&candidates, mode.resolved)?;
+    // R12-1: the effective `[search.diversify]` request drives it (was a fixed literal).
+    let (ordered, diversify_summary) =
+        diversify_merged(&candidates, mode.resolved, &diversify_request)?;
 
     // Global skip: cursor consumed (summed across scopes) or --offset (05 §1.5).
     // Only resolvable scopes count: a dropped (unreachable) scope's candidates are
@@ -1431,7 +1520,7 @@ fn run_search(args: UnsupportedArgs) -> Result<Value> {
         "index_status": index_status,
         "results": results,
     });
-    append_search_logs(&repo, &response, started)?;
+    append_search_logs(&repo, &response, started);
     if partial_failure {
         // Some scopes were excluded but others succeeded: emit results on stdout
         // and exit 3 (05 §1.8 partial-failure row, CT3-MULTI-005).
@@ -1469,6 +1558,7 @@ fn search_one_scope(
     tiers: &[String],
     resolved_mode: SearchMode,
     query_embedding: Option<&[f32]>,
+    rrf_config: RrfConfig,
 ) -> std::result::Result<ScopeOutcome, ScopeSearchError> {
     let repo = Repository::open(&exec.target.repo_root)
         .map_err(|_| ScopeSearchError::Excluded("unreachable".to_owned()))?;
@@ -1592,18 +1682,10 @@ fn search_one_scope(
         Vec::new()
     };
 
-    let fused = fuse_rrf(
-        &text_ranks,
-        &vector_ranks,
-        RrfConfig {
-            k: 60,
-            w_text: 1.0,
-            w_vector: 1.0,
-            candidate_depth: 200,
-        },
-    )
-    .map_err(search_to_kcs)
-    .map_err(ScopeSearchError::Fatal)?;
+    // R12-1: fuse with the effective `[search.rrf]` (was hardcoded 60/1/1/200).
+    let fused = fuse_rrf(&text_ranks, &vector_ranks, rrf_config)
+        .map_err(search_to_kcs)
+        .map_err(ScopeSearchError::Fatal)?;
 
     let mut candidates = Vec::new();
     for candidate in fused {
@@ -2056,11 +2138,11 @@ fn index_is_rebuilding(conn: &Connection, snapshot_commit: &str) -> Result<bool>
 /// strategy actually applied. Text-only (no embeddings) means MMR is skipped and
 /// only the `max_per_raw_hash` dedup runs — reported honestly as
 /// `group_by_raw_hash`, never a phantom "mmr" (K2 fix for the false report).
-fn diversify_merged(
-    candidates: &[ScoredCandidate],
+fn diversify_merged<'a>(
+    candidates: &'a [ScoredCandidate],
     resolved_mode: SearchMode,
-) -> Result<(Vec<&ScoredCandidate>, Value)> {
-    let request = default_diversify_request();
+    request: &DiversifyRequest,
+) -> Result<(Vec<&'a ScoredCandidate>, Value)> {
     let mmr_candidates = candidates
         .iter()
         .enumerate()
@@ -2551,15 +2633,15 @@ fn parse_reindex_args(args: Vec<String>) -> Result<ParsedReindex> {
     let mut parsed = ParsedReindex::default();
     let mut i = 0;
     while i < args.len() {
-        match args[i].as_str() {
+        // R12-7: accept `--flag=value` before matching.
+        let (flag, inline) = split_flag_value(&args[i]);
+        match flag {
             "--force" => parsed.force = true,
             "--yes" => parsed.yes = true,
             "--at" => {
-                if i + 1 >= args.len() {
-                    return Err(KcsError::invalid_usage("--at requires a commit argument"));
-                }
-                // R9-6: exit 1 via the canonical not_implemented (was exit 2) so
-                // KCS-E-CONFIG-NOT-IMPLEMENTED-001 maps to a single exit class.
+                // A bare `--at` is a usage error (requires a value); with a value it
+                // is R9-6 not_implemented (exit 1, single error class).
+                flag_value(&args, &mut i, inline, "--at")?;
                 return Err(KcsError::not_implemented("reindex --at"));
             }
             value if value.starts_with('-') => {
@@ -2567,9 +2649,10 @@ fn parse_reindex_args(args: Vec<String>) -> Result<ParsedReindex> {
                     "unknown reindex flag: {value}"
                 )));
             }
-            value => {
+            _ => {
                 return Err(KcsError::invalid_usage(format!(
-                    "unexpected reindex argument: {value}"
+                    "unexpected reindex argument: {}",
+                    args[i]
                 )));
             }
         }
@@ -3040,6 +3123,31 @@ fn build_sqlite_index_at(
     Ok(())
 }
 
+/// R12-7: split a long option into `(flag, inline_value)`. `--limit=5` becomes
+/// `("--limit", Some("5"))` — the `--flag=value` form clap-derive commands already
+/// accept. Only `--`-prefixed tokens are split, so a positional operand containing
+/// `=` (e.g. a query `key=value`) is returned intact and never mangled.
+fn split_flag_value(arg: &str) -> (&str, Option<&str>) {
+    if arg.starts_with("--") {
+        if let Some((flag, value)) = arg.split_once('=') {
+            return (flag, Some(value));
+        }
+    }
+    (arg, None)
+}
+
+/// R12-7: the value for a value-taking flag — the inline `--flag=value` value if
+/// present, else the next argv token (advancing `i`).
+fn flag_value(args: &[String], i: &mut usize, inline: Option<&str>, flag: &str) -> Result<String> {
+    if let Some(value) = inline {
+        return Ok(value.to_owned());
+    }
+    *i += 1;
+    args.get(*i)
+        .cloned()
+        .ok_or_else(|| KcsError::invalid_usage(format!("{flag} requires a value")))
+}
+
 fn parse_search_args(args: Vec<String>) -> Result<ParsedSearch> {
     let mut query = None;
     let mut requested_mode = SearchMode::Auto;
@@ -3052,14 +3160,14 @@ fn parse_search_args(args: Vec<String>) -> Result<ParsedSearch> {
     let mut cursor = None;
     let mut i = 0usize;
     while i < args.len() {
-        match args[i].as_str() {
+        // R12-7: accept `--flag=value` before matching (the manual parser used to
+        // reject it as "unknown flag" even though the flag exists).
+        let (flag, inline) = split_flag_value(&args[i]);
+        match flag {
             "--at" | "--all-history" | "--include-deleted" | "--since" => {
                 // R9-6: exit 1 via the canonical not_implemented (was exit 2) so
                 // KCS-E-CONFIG-NOT-IMPLEMENTED-001 maps to a single exit class.
-                return Err(KcsError::not_implemented(format!(
-                    "search {} flag",
-                    args[i]
-                )));
+                return Err(KcsError::not_implemented(format!("search {flag} flag")));
             }
             "--text" | "--no-vector" => {
                 requested_mode = SearchMode::Text;
@@ -3076,27 +3184,22 @@ fn parse_search_args(args: Vec<String>) -> Result<ParsedSearch> {
             "--all-scopes" => all_scopes = true,
             "--descendants" => descendants = true,
             "--scope" => {
-                i += 1;
-                let Some(value) = args.get(i) else {
-                    return Err(KcsError::invalid_usage("--scope requires a value"));
-                };
-                scope = Some(PathBuf::from(value));
+                scope = Some(PathBuf::from(flag_value(&args, &mut i, inline, "--scope")?));
             }
             "--limit" => {
-                i += 1;
-                let Some(value) = args.get(i) else {
-                    return Err(KcsError::invalid_usage("--limit requires a value"));
-                };
-                limit = value
+                let value = flag_value(&args, &mut i, inline, "--limit")?;
+                let parsed = value
                     .parse::<u64>()
-                    .map_err(|_| KcsError::invalid_usage("--limit must be an integer"))?
-                    .clamp(1, 100);
+                    .map_err(|_| KcsError::invalid_usage("--limit must be an integer"))?;
+                // R12-7: `--limit 0` is a meaningless value, not a silent clamp-to-1
+                // (which faked success). The upper 100 cap is unchanged (docs-silent).
+                if parsed == 0 {
+                    return Err(KcsError::invalid_usage("--limit must be at least 1"));
+                }
+                limit = parsed.min(100);
             }
             "--offset" => {
-                i += 1;
-                let Some(value) = args.get(i) else {
-                    return Err(KcsError::invalid_usage("--offset requires a value"));
-                };
+                let value = flag_value(&args, &mut i, inline, "--offset")?;
                 offset = Some(
                     value
                         .parse::<u64>()
@@ -3104,22 +3207,19 @@ fn parse_search_args(args: Vec<String>) -> Result<ParsedSearch> {
                 );
             }
             "--cursor" => {
-                i += 1;
-                let Some(value) = args.get(i) else {
-                    return Err(KcsError::invalid_usage("--cursor requires a value"));
-                };
-                cursor = Some(value.clone());
+                cursor = Some(flag_value(&args, &mut i, inline, "--cursor")?);
             }
             value if value.starts_with('-') => {
                 return Err(KcsError::invalid_usage(format!(
                     "unknown search flag: {value}"
                 )));
             }
-            value => {
+            _ => {
                 if query.is_some() {
                     return Err(KcsError::invalid_usage("search accepts one query string"));
                 }
-                query = Some(value.to_owned());
+                // A positional query is never split, so use the original token.
+                query = Some(args[i].clone());
             }
         }
         i += 1;
@@ -3179,6 +3279,119 @@ fn parse_search_mode_name(name: &str) -> Option<SearchMode> {
         "hybrid" => Some(SearchMode::Hybrid),
         _ => None,
     }
+}
+
+/// R12-1: the tuning half of `[search]` parsed from ONE config file. Every key is
+/// independent and optional (schema-validated at repo open, so an out-of-range /
+/// unknown key is already rejected). `None` means "not set in this file".
+#[derive(Default)]
+struct SearchTuning {
+    rrf_k: Option<u64>,
+    rrf_w_text: Option<f64>,
+    rrf_w_vector: Option<f64>,
+    rrf_candidate_depth: Option<u64>,
+    div_enabled: Option<bool>,
+    div_strategy: Option<DiversifyStrategy>,
+    div_mmr_lambda: Option<f64>,
+    div_max_per_raw_hash: Option<u64>,
+    div_mmr_depth: Option<u64>,
+}
+
+fn toml_u64(value: Option<&toml::Value>) -> Option<u64> {
+    value
+        .and_then(toml::Value::as_integer)
+        .and_then(|integer| u64::try_from(integer).ok())
+}
+
+/// TOML distinguishes `1` (integer) from `1.0` (float); the schema types these as
+/// `number`, so accept either as f64.
+fn toml_f64(value: Option<&toml::Value>) -> Option<f64> {
+    value.and_then(|value| {
+        value
+            .as_float()
+            .or_else(|| value.as_integer().map(|integer| integer as f64))
+    })
+}
+
+fn parse_diversify_strategy(name: &str) -> Option<DiversifyStrategy> {
+    match name {
+        "mmr" => Some(DiversifyStrategy::Mmr),
+        "group_by_raw_hash" => Some(DiversifyStrategy::GroupByRawHash),
+        "off" => Some(DiversifyStrategy::Off),
+        _ => None,
+    }
+}
+
+fn read_search_tuning(path: &Path) -> Result<SearchTuning> {
+    let Ok(text) = fs::read_to_string(path) else {
+        return Ok(SearchTuning::default());
+    };
+    let value: toml::Value =
+        toml::from_str(&text).map_err(|err| KcsError::schema(err.to_string()))?;
+    let search = value.get("search");
+    let rrf = search.and_then(|section| section.get("rrf"));
+    let diversify = search.and_then(|section| section.get("diversify"));
+    Ok(SearchTuning {
+        rrf_k: toml_u64(rrf.and_then(|rrf| rrf.get("k"))),
+        rrf_w_text: toml_f64(rrf.and_then(|rrf| rrf.get("w_text"))),
+        rrf_w_vector: toml_f64(rrf.and_then(|rrf| rrf.get("w_vector"))),
+        rrf_candidate_depth: toml_u64(rrf.and_then(|rrf| rrf.get("candidate_depth"))),
+        div_enabled: diversify
+            .and_then(|diversify| diversify.get("enabled"))
+            .and_then(toml::Value::as_bool),
+        div_strategy: diversify
+            .and_then(|diversify| diversify.get("strategy"))
+            .and_then(toml::Value::as_str)
+            .and_then(parse_diversify_strategy),
+        div_mmr_lambda: toml_f64(diversify.and_then(|diversify| diversify.get("mmr_lambda"))),
+        div_max_per_raw_hash: toml_u64(
+            diversify.and_then(|diversify| diversify.get("max_per_raw_hash")),
+        ),
+        div_mmr_depth: toml_u64(diversify.and_then(|diversify| diversify.get("mmr_depth"))),
+    })
+}
+
+/// R12-1: effective `[search.rrf]` + `[search.diversify]` (05 §1.3/§1.4). Scope
+/// config wins over user config per key (same precedence as `effective_search_config`),
+/// each falling back to the documented default. These feed BOTH the ranking/dedup
+/// call sites AND the cursor `query_hash` (05 §1.8 requires the effective values, so
+/// a tuning change invalidates a stale cursor).
+fn effective_search_tuning(repo: &Repository) -> Result<(RrfConfig, DiversifyRequest)> {
+    let scope = read_search_tuning(&repo.kcs_dir().join("config.toml"))?;
+    let user = read_search_tuning(&user_config_toml_path())?;
+    let rrf = RrfConfig {
+        k: scope.rrf_k.or(user.rrf_k).unwrap_or(60),
+        w_text: scope.rrf_w_text.or(user.rrf_w_text).unwrap_or(1.0),
+        w_vector: scope.rrf_w_vector.or(user.rrf_w_vector).unwrap_or(1.0),
+        candidate_depth: scope
+            .rrf_candidate_depth
+            .or(user.rrf_candidate_depth)
+            .unwrap_or(200),
+    };
+    // `enabled = false` means diversification is off entirely (05 §1.4); it maps to
+    // the Off strategy, which is a TRUE no-op (no MMR, no dedup — R12-1). Otherwise
+    // use the configured strategy, default MMR.
+    let enabled = scope.div_enabled.or(user.div_enabled).unwrap_or(true);
+    let strategy = if enabled {
+        scope
+            .div_strategy
+            .or(user.div_strategy)
+            .unwrap_or(DiversifyStrategy::Mmr)
+    } else {
+        DiversifyStrategy::Off
+    };
+    let diversify = DiversifyRequest {
+        strategy,
+        mmr_lambda: Some(scope.div_mmr_lambda.or(user.div_mmr_lambda).unwrap_or(0.7)),
+        max_per_raw_hash: Some(
+            scope
+                .div_max_per_raw_hash
+                .or(user.div_max_per_raw_hash)
+                .unwrap_or(3),
+        ),
+        mmr_depth: Some(scope.div_mmr_depth.or(user.div_mmr_depth).unwrap_or(100)),
+    };
+    Ok((rrf, diversify))
 }
 
 fn parse_fail_behavior_name(name: &str) -> Option<SearchFailBehavior> {
@@ -3430,15 +3643,6 @@ fn live_tree_entries_at(
     Ok(map)
 }
 
-fn default_diversify_request() -> DiversifyRequest {
-    DiversifyRequest {
-        strategy: DiversifyStrategy::Mmr,
-        mmr_lambda: Some(0.7),
-        max_per_raw_hash: Some(3),
-        mmr_depth: Some(100),
-    }
-}
-
 fn search_mode_json(mode: SearchMode) -> &'static str {
     match mode {
         SearchMode::Auto => "auto",
@@ -3486,7 +3690,7 @@ fn empty_search_response(
         "index_status": compute_index_status(searched),
         "results": [],
     });
-    append_search_logs(repo, &response, started)?;
+    append_search_logs(repo, &response, started);
     if !excluded_scopes.is_empty() {
         if let Some(object) = response.as_object_mut() {
             object.insert("__exit_code".to_owned(), json!(3));
@@ -3495,7 +3699,14 @@ fn empty_search_response(
     Ok(response)
 }
 
-fn append_search_logs(repo: &Repository, response: &Value, started: Instant) -> Result<()> {
+/// R12-5: observability logging must never break the search result. A metrics.jsonl
+/// or access.jsonl append failure (read-only file, disk full — both device-global,
+/// so one bad file would otherwise stop EVERY scope's search with exit 1 and discard
+/// the results it had already computed) is downgraded to a stderr warning; the
+/// result still returns. This makes the search logs symmetric with errors.jsonl,
+/// which already ignores its own write failure (`let _ =` in main()). Success and
+/// failure of the append are otherwise identical, so this returns `()`.
+fn append_search_logs(repo: &Repository, response: &Value, started: Instant) {
     let latency_ms = started.elapsed().as_secs_f64() * 1000.0;
     let scope_count = response
         .get("searched_scopes")
@@ -3509,7 +3720,7 @@ fn append_search_logs(repo: &Repository, response: &Value, started: Instant) -> 
         .unwrap_or(0);
     // Per-search latency record (05 §7, K8a): code KCS-M-SEARCH-001 / component
     // "search" / metric search.latency_ms. redact_logs default omits query & path.
-    append_jsonl_cli(
+    if let Err(error) = append_jsonl_cli(
         &data_home().join("kcs/logs/metrics.jsonl"),
         &json!({
             "ts": now_utc_seconds(),
@@ -3525,8 +3736,22 @@ fn append_search_logs(repo: &Repository, response: &Value, started: Instant) -> 
                 "result_count": result_count,
             },
         }),
-    )?;
-    append_jsonl_cli(
+    ) {
+        eprintln!("warning: failed to append search metrics log: {error}");
+    }
+    // R12-2: access.jsonl is scope-local, so its redact_logs is governed by the
+    // scope config first, falling back to the device-global user config, then the
+    // secure default (true). Under redaction (the default) the query is masked;
+    // with an explicit `redact_logs = false` the real query text is recorded.
+    let query_field = if access_log_redact(repo) {
+        json!("[redacted]")
+    } else {
+        response
+            .get("query")
+            .cloned()
+            .unwrap_or_else(|| json!("[redacted]"))
+    };
+    if let Err(error) = append_jsonl_cli(
         &repo.kcs_dir().join("logs/access.jsonl"),
         &json!({
             "ts": now_utc_seconds(),
@@ -3535,12 +3760,120 @@ fn append_search_logs(repo: &Repository, response: &Value, started: Instant) -> 
             "component": "kcs-cli",
             "message": "search access",
             "context": {
-                "query": "[redacted]",
+                "query": query_field,
                 "mode": response.get("resolved_mode").and_then(Value::as_str).unwrap_or("text"),
                 "result_count": result_count,
             },
         }),
-    )
+    ) {
+        eprintln!("warning: failed to append search access log: {error}");
+    }
+}
+
+/// R12-4: the per-search metrics.jsonl line for a FAILED search (result_count 0 +
+/// the failure's error_code). Best-effort — a metrics write failure must never turn
+/// a search error into a different one (R12-5), so the result is discarded.
+fn append_failed_search_metrics(started: Instant, error: &KcsError) {
+    let latency_ms = started.elapsed().as_secs_f64() * 1000.0;
+    let _ = append_jsonl_cli(
+        &data_home().join("kcs/logs/metrics.jsonl"),
+        &json!({
+            "ts": now_utc_seconds(),
+            "level": "info",
+            "code": "KCS-M-SEARCH-001",
+            "component": "search",
+            "message": "search failed",
+            "metric": "search.latency_ms",
+            "value": latency_ms,
+            "context": {
+                "result_count": 0,
+                "error_code": error.error_code(),
+            },
+        }),
+    );
+}
+
+/// R12-2: effective `redact_logs` for the scope-local `access.jsonl`. The scope
+/// config wins over the user config (the log lives in `.kcs/`, and 07 §7 attributes
+/// `[adapter.policy]` to `.kcs/config.toml`); the device-global events/metrics/
+/// errors logs stay user-config-governed via `redact_logs_enabled` in kcs-core.
+/// Absent everywhere → the secure default (true).
+fn access_log_redact(repo: &Repository) -> bool {
+    read_redact_logs_config(&repo.kcs_dir().join("config.toml"))
+        .or_else(|| read_redact_logs_config(&user_config_toml_path()))
+        .unwrap_or(true)
+}
+
+fn read_redact_logs_config(path: &Path) -> Option<bool> {
+    let text = fs::read_to_string(path).ok()?;
+    let value: toml::Value = toml::from_str(&text).ok()?;
+    value
+        .get("adapter")
+        .and_then(|adapter| adapter.get("policy"))
+        .and_then(|policy| policy.get("redact_logs"))
+        .and_then(toml::Value::as_bool)
+}
+
+/// Documented default for `adapter.policy.max_input_bytes` (07 §7): 100 MB.
+const DEFAULT_MAX_INPUT_BYTES: u64 = 104_857_600;
+
+/// R12-2: effective `adapter.policy.max_input_bytes` — scope config wins over user
+/// config, default 100 MB (07 §7). Enforced as an input gate in `run_index_pipeline`.
+fn effective_max_input_bytes(repo: &Repository) -> u64 {
+    read_max_input_bytes_config(&repo.kcs_dir().join("config.toml"))
+        .or_else(|| read_max_input_bytes_config(&user_config_toml_path()))
+        .unwrap_or(DEFAULT_MAX_INPUT_BYTES)
+}
+
+fn read_max_input_bytes_config(path: &Path) -> Option<u64> {
+    let text = fs::read_to_string(path).ok()?;
+    let value: toml::Value = toml::from_str(&text).ok()?;
+    value
+        .get("adapter")
+        .and_then(|adapter| adapter.get("policy"))
+        .and_then(|policy| policy.get("max_input_bytes"))
+        .and_then(toml::Value::as_integer)
+        .and_then(|bytes| u64::try_from(bytes).ok())
+}
+
+/// R12-1: effective `[markdownize.incremental]` (docs/10:537, docs/03:595). `enabled`
+/// / `threshold` / `max_consecutive` were documented `.kcs/config.toml` overrides but
+/// hardcoded (0.30 / 5) in the mode decision. `include_neighbors` is enforced
+/// separately (no implementation concept → non-default rejected in
+/// `enforce_config_semantics`).
+struct IncrementalConfig {
+    enabled: bool,
+    threshold: f64,
+    max_consecutive: u32,
+}
+
+fn effective_incremental_config(repo: &Repository) -> Result<IncrementalConfig> {
+    let scope = read_incremental_tuning(&repo.kcs_dir().join("config.toml"))?;
+    let user = read_incremental_tuning(&user_config_toml_path())?;
+    Ok(IncrementalConfig {
+        enabled: scope.0.or(user.0).unwrap_or(true),
+        threshold: scope.1.or(user.1).unwrap_or(0.30),
+        max_consecutive: scope.2.or(user.2).unwrap_or(5),
+    })
+}
+
+fn read_incremental_tuning(path: &Path) -> Result<(Option<bool>, Option<f64>, Option<u32>)> {
+    let Ok(text) = fs::read_to_string(path) else {
+        return Ok((None, None, None));
+    };
+    let value: toml::Value =
+        toml::from_str(&text).map_err(|err| KcsError::schema(err.to_string()))?;
+    let incremental = value
+        .get("markdownize")
+        .and_then(|markdownize| markdownize.get("incremental"));
+    let enabled = incremental
+        .and_then(|incremental| incremental.get("enabled"))
+        .and_then(toml::Value::as_bool);
+    let threshold = toml_f64(incremental.and_then(|incremental| incremental.get("threshold")));
+    let max_consecutive =
+        toml_u64(incremental.and_then(|incremental| incremental.get("max_consecutive")))
+            .and_then(|value| u32::try_from(value).ok());
+    Ok((enabled, threshold, max_consecutive))
 }
 
 fn append_jsonl_cli(path: &Path, value: &Value) -> Result<()> {
@@ -5582,12 +5915,26 @@ fn run_embedding_enrichment(
     ensure_snapshot_tree_entries(repo, &conn, &head)?;
     let chunking_config_hash = read_chunking_config(repo)?.chunking_config_hash;
     let pending = live_chunks_without_embedding(&conn, &head, &chunking_config_hash, &profile)?;
-    if pending.is_empty() {
-        return Ok(ExecOutcome::default());
-    }
 
     let task_store = TaskStore::new(repo.kcs_dir());
     let now = now_utc_seconds();
+    // R12-3: reconcile task accounting for chunks that ARE embedded but whose task a
+    // crash stranded Pending/Running (chunk_vec committed per batch, the task Done
+    // write-back deferred to after the loop — R11-5). Must run BEFORE the
+    // empty-`pending` early return: the r12k crash left every chunk embedded with 64
+    // tasks still Pending, so `pending` is empty yet index_status reported phantom
+    // pending enrichment forever. Idempotent; no adapter call, no re-charge.
+    reconcile_committed_embedding_tasks(
+        &conn,
+        &task_store,
+        &head,
+        &chunking_config_hash,
+        &pending,
+        &now,
+    )?;
+    if pending.is_empty() {
+        return Ok(ExecOutcome::default());
+    }
     // N1a: partition off chunks whose raw file is a Tier B (candidate-secret)
     // document without a `--send-secrets` approval. Their embedding tasks are held
     // (Paused `secrets_tier_b_hold`, visible in `kcs status`) and never enter the
@@ -6065,6 +6412,79 @@ fn embedding_task_output_ref(chunk_id: &str) -> String {
     format!("embedding:{chunk_id}")
 }
 
+/// R12-3: complete embedding tasks stranded `Pending`/`Running` by a crash between
+/// the per-batch `chunk_vec` commit and the deferred task-store write-back (R11-5).
+/// A chunk that already carries its embedding is "live but not in `pending`" — so
+/// `live_chunks_without_embedding` never revisits it and no recovery command
+/// (index / batch resume/retry / repair) ever reconciles its task, leaving
+/// `index_status` reporting phantom pending enrichment permanently. Mark such tasks
+/// `Done` (idempotent, no adapter call, no re-charge — the vector is already stored,
+/// so search/data are unaffected; only task accounting + the Agent contract heal).
+fn reconcile_committed_embedding_tasks(
+    conn: &Connection,
+    task_store: &TaskStore,
+    head: &str,
+    chunking_config_hash: &str,
+    pending: &[EmbeddableChunk],
+    now: &str,
+) -> Result<()> {
+    let pending_ids: BTreeSet<&str> = pending
+        .iter()
+        .map(|chunk| chunk.chunk_id.as_str())
+        .collect();
+    let live_ids = live_chunk_ids(conn, head, chunking_config_hash)?;
+    let mut transitions: BTreeMap<String, EmbeddingTransition> = BTreeMap::new();
+    for task in task_store.all().map_err(pipeline_to_kcs)? {
+        if task.task_type != TaskType::Embedding {
+            continue;
+        }
+        if !matches!(task.status, TaskStatus::Pending | TaskStatus::Running) {
+            continue;
+        }
+        let Some(chunk_id) = task.output_ref.strip_prefix("embedding:") else {
+            continue;
+        };
+        // Complete only a task whose chunk is live AND already embedded (live but
+        // NOT pending). A genuinely un-embedded chunk stays pending; a stale/deleted
+        // chunk's task is left untouched (a different, out-of-scope case).
+        if pending_ids.contains(chunk_id) || !live_ids.contains(chunk_id) {
+            continue;
+        }
+        transitions.insert(task.output_ref.clone(), embedding_done_transition());
+    }
+    apply_embedding_transitions(task_store, &transitions, now)?;
+    Ok(())
+}
+
+/// R12-3: all live chunk_ids for the given HEAD snapshot (the same liveness JOIN
+/// `live_chunks_without_embedding` uses, minus the embedding filter). The embedded
+/// set is then "live minus pending".
+fn live_chunk_ids(
+    conn: &Connection,
+    head: &str,
+    chunking_config_hash: &str,
+) -> Result<BTreeSet<String>> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT c.chunk_id
+             FROM chunks c
+             JOIN tree_entries te ON te.commit_hash = ?1
+                 AND te.raw_hash = c.raw_hash
+                 AND te.tool_profile_hash = c.tool_profile_hash
+                 AND te.gen = c.gen
+             WHERE c.chunking_config_hash = ?2",
+        )
+        .map_err(|err| KcsError::schema(err.to_string()))?;
+    let ids = stmt
+        .query_map(rusqlite::params![head, chunking_config_hash], |row| {
+            row.get::<_, String>(0)
+        })
+        .map_err(|err| KcsError::schema(err.to_string()))?
+        .collect::<std::result::Result<BTreeSet<String>, _>>()
+        .map_err(|err| KcsError::schema(err.to_string()))?;
+    Ok(ids)
+}
+
 /// N1a: enqueue a held `Embedding` task (Paused `secrets_tier_b_hold`) per Tier B
 /// chunk that lacks one, so the hold is visible in `kcs status` without ever
 /// entering the send pipeline. Idempotent — a chunk that already has an embedding
@@ -6443,6 +6863,9 @@ struct IndexPipelineResult {
     normalized_files: usize,
     pending_files: usize,
     failed_files: usize,
+    // R12-2: files larger than adapter.policy.max_input_bytes, skipped for adapter
+    // processing (input gate, 07 §7.1.2) but still archived.
+    skipped_oversized_files: usize,
 }
 
 fn online_output_ref(adapter_id: &str) -> String {
@@ -6621,12 +7044,31 @@ fn run_index_pipeline(
     // N1a: a Tier B (candidate-secret) file is ingested locally but its online
     // task is held unless the scope carries an explicit `--send-secrets` approval.
     let secrets_approved = secrets_send_approved(repo);
+    // R12-2: the documented `adapter.policy.max_input_bytes` input gate (07 §7.1.2 —
+    // "KCS 側の入力制御" is an MVP contract). Scope config wins over user config,
+    // default 100 MB. A file larger than the cap is never handed to the Markdownize
+    // adapter (below); it stays archived but unenriched, and the count is disclosed.
+    let max_input_bytes = effective_max_input_bytes(repo);
+    // R12-1: the documented `[markdownize.incremental]` overrides (were hardcoded).
+    let incremental_config = effective_incremental_config(repo)?;
 
     for candidate in preview
         .candidates
         .iter()
         .filter(|candidate| !candidate.ignored && candidate.media_type != "inode/directory")
     {
+        if candidate.size_bytes > max_input_bytes {
+            result.skipped_oversized_files += 1;
+            append_event_log(
+                "KCS-I-INDEX-INPUT-OVERSIZED-001",
+                "input file exceeds adapter.policy.max_input_bytes; skipped adapter processing",
+                json!({
+                    "size_bytes": candidate.size_bytes,
+                    "max_input_bytes": max_input_bytes,
+                }),
+            )?;
+            continue;
+        }
         let secrets_hold = candidate.quarantine_reason.as_deref() == Some("secrets_tier_b_warning")
             && !secrets_approved;
         let path = repo.root().join(&candidate.input_path);
@@ -6710,21 +7152,31 @@ fn run_index_pipeline(
             .as_ref()
             .map(|mapping| incremental_hints_from_mapping(mapping, &prepare.prepared_units))
             .unwrap_or_else(|| all_changed_hints(&prepare.prepared_units));
-        let mode_decision = choose_markdownize_mode(&IncrementalModeInput {
-            has_previous_done_run: previous.is_some(),
-            raw_hash_only_changed: true,
-            adapter_capabilities: markdown_profile.capability_flags.clone(),
-            change_rate: mapping
-                .as_ref()
-                .map(|mapping| mapping.change_rate)
-                .unwrap_or(1.0),
-            threshold: 0.30,
-            consecutive_incremental_count: consecutive_incremental_count(
-                &task_store,
-                &candidate.input_path,
-            )?,
-            max_consecutive_incremental: 5,
-        });
+        // R12-1: `enabled = false` disables incremental entirely — always full mode
+        // (05 / docs/10:537). Otherwise the effective threshold / max_consecutive
+        // (were hardcoded 0.30 / 5) drive the documented decision.
+        let mode_decision = if incremental_config.enabled {
+            choose_markdownize_mode(&IncrementalModeInput {
+                has_previous_done_run: previous.is_some(),
+                raw_hash_only_changed: true,
+                adapter_capabilities: markdown_profile.capability_flags.clone(),
+                change_rate: mapping
+                    .as_ref()
+                    .map(|mapping| mapping.change_rate)
+                    .unwrap_or(1.0),
+                threshold: incremental_config.threshold,
+                consecutive_incremental_count: consecutive_incremental_count(
+                    &task_store,
+                    &candidate.input_path,
+                )?,
+                max_consecutive_incremental: incremental_config.max_consecutive,
+            })
+        } else {
+            IncrementalModeDecision {
+                mode: MarkdownizeMode::Full,
+                reason: Some("incremental_disabled".to_owned()),
+            }
+        };
         let mode = mode_decision.mode;
         let hints = prepared_unit_hints(&prepare.prepared_units);
         let adapter_previous = previous
@@ -8088,7 +8540,12 @@ fn validate_user_config() -> Result<()> {
         toml::from_str(&text).map_err(|err| KcsError::schema(err.to_string()))?;
     let json_value =
         serde_json::to_value(&toml_value).map_err(|err| KcsError::schema(err.to_string()))?;
-    validate_json_schema(SchemaKind::Config, &json_value)
+    validate_json_schema(SchemaKind::Config, &json_value)?;
+    // R12-2: apply the same documented-but-unwired value enforcement to the user
+    // config (device-global) as scope config gets in `validate_config`, so e.g.
+    // `store_request_body = true` there is a loud NOT-IMPLEMENTED, not a silent
+    // accept.
+    kcs_core::scope::enforce_config_semantics(&json_value)
 }
 
 fn validate_repo_tool_lock(repo: &Repository) -> Result<()> {
@@ -8102,15 +8559,17 @@ fn validate_repo_tool_lock(repo: &Repository) -> Result<()> {
 }
 
 fn user_tools_toml_path() -> Option<PathBuf> {
-    if let Some(path) = std::env::var_os("XDG_CONFIG_HOME") {
-        return Some(PathBuf::from(path).join("kcs/tools.toml"));
+    // R12-6: empty/relative `XDG_CONFIG_HOME` is invalid per the XDG spec.
+    if let Some(path) = kcs_core::xdg::xdg_dir("XDG_CONFIG_HOME") {
+        return Some(path.join("kcs/tools.toml"));
     }
     std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config/kcs/tools.toml"))
 }
 
 fn user_config_toml_path() -> PathBuf {
-    if let Some(path) = std::env::var_os("XDG_CONFIG_HOME") {
-        return PathBuf::from(path).join("kcs/config.toml");
+    // R12-6: empty/relative `XDG_CONFIG_HOME` is invalid per the XDG spec.
+    if let Some(path) = kcs_core::xdg::xdg_dir("XDG_CONFIG_HOME") {
+        return path.join("kcs/config.toml");
     }
     std::env::var_os("HOME")
         .map(|home| PathBuf::from(home).join(".config/kcs/config.toml"))
@@ -8118,8 +8577,11 @@ fn user_config_toml_path() -> PathBuf {
 }
 
 fn data_home() -> PathBuf {
-    if let Some(path) = std::env::var_os("XDG_DATA_HOME") {
-        return PathBuf::from(path);
+    // R12-6: empty/relative `XDG_DATA_HOME` is invalid per the XDG spec — the
+    // device data dir (registry, cost ledger, logs, 0600 cursor-key) must never
+    // resolve to a CWD-relative `kcs/` that the next index could archive.
+    if let Some(path) = kcs_core::xdg::xdg_dir("XDG_DATA_HOME") {
+        return path;
     }
     if let Some(home) = std::env::var_os("HOME") {
         return PathBuf::from(home).join(".local/share");
@@ -8131,8 +8593,9 @@ fn data_home() -> PathBuf {
 /// disposable, regenerable data such as the open/view read-only expansion of CAS
 /// objects — deliberately separate from the durable `$XDG_DATA_HOME` (P9).
 fn cache_home() -> PathBuf {
-    if let Some(path) = std::env::var_os("XDG_CACHE_HOME") {
-        return PathBuf::from(path);
+    // R12-6: empty/relative `XDG_CACHE_HOME` is invalid per the XDG spec.
+    if let Some(path) = kcs_core::xdg::xdg_dir("XDG_CACHE_HOME") {
+        return path;
     }
     if let Some(home) = std::env::var_os("HOME") {
         return PathBuf::from(home).join(".cache");
@@ -8308,6 +8771,49 @@ mod tests {
     use kcs_adapter::catalog::deterministic_embedding_vector;
 
     use super::{command_captured_json_flag, Cli, Command};
+
+    #[test]
+    fn r12_1_read_search_tuning_parses_documented_keys() {
+        use super::{read_search_tuning, DiversifyStrategy};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "[search.rrf]\nk = 5\nw_text = 0.0\nw_vector = 2.0\ncandidate_depth = 7\n\
+             [search.diversify]\nenabled = true\nstrategy = \"off\"\nmax_per_raw_hash = 1\n",
+        )
+        .unwrap();
+        let tuning = read_search_tuning(&path).unwrap();
+        assert_eq!(tuning.rrf_k, Some(5));
+        assert_eq!(tuning.rrf_w_text, Some(0.0));
+        assert_eq!(tuning.rrf_w_vector, Some(2.0));
+        assert_eq!(tuning.rrf_candidate_depth, Some(7));
+        assert_eq!(tuning.div_enabled, Some(true));
+        assert_eq!(tuning.div_strategy, Some(DiversifyStrategy::Off));
+        assert_eq!(tuning.div_max_per_raw_hash, Some(1));
+        // Absent file -> every field None (falls back to defaults at resolution).
+        let empty = read_search_tuning(&dir.path().join("nope.toml")).unwrap();
+        assert!(empty.rrf_k.is_none() && empty.div_strategy.is_none());
+    }
+
+    #[test]
+    fn r12_1_read_incremental_tuning_parses_documented_keys() {
+        use super::read_incremental_tuning;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "[markdownize.incremental]\nenabled = false\nthreshold = 0.5\nmax_consecutive = 9\n",
+        )
+        .unwrap();
+        let (enabled, threshold, max_consecutive) = read_incremental_tuning(&path).unwrap();
+        assert_eq!(enabled, Some(false));
+        assert_eq!(threshold, Some(0.5));
+        assert_eq!(max_consecutive, Some(9));
+        // Absent file -> all None.
+        let (e, t, m) = read_incremental_tuning(&dir.path().join("nope.toml")).unwrap();
+        assert!(e.is_none() && t.is_none() && m.is_none());
+    }
 
     #[test]
     fn r10_1_vector_capacity_message_classifier() {

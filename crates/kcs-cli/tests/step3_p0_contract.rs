@@ -3945,3 +3945,512 @@ fn gen_dir_under(units_root: &Path) -> Option<std::path::PathBuf> {
     }
     None
 }
+
+// ===========================================================================
+// R12-2: [adapter.policy] documented keys — schema accepts the 8 documented keys
+// (was: 7 of 8 rejected -> scope/device brick), non-default UNIMPLEMENTED values
+// are loudly rejected, redact_logs is actually wired, max_input_bytes gates input.
+// ===========================================================================
+
+// docs/07 §7 block (every key at its documented default) must let ALL commands run
+// (exit 0) instead of bricking the scope with KCS-E-CONFIG-SCHEMA-001.
+#[test]
+fn r12_2_adapter_policy_full_default_block_all_commands_ok() {
+    let dir = indexed_scope();
+    fs::write(
+        dir.path().join(".kcs/config.toml"),
+        "kcs_format_version = \"0.1.0\"\n\
+         [adapter.policy]\n\
+         allow_network = false\n\
+         allowed_scope = \".\"\n\
+         max_input_bytes = 104857600\n\
+         timeout_seconds = 300\n\
+         redact_logs = true\n\
+         store_request_body = false\n\
+         store_response_body = false\n\
+         require_command_confirmation = true\n",
+    )
+    .unwrap();
+    // status and search both open the repo (schema + semantic validation) — both
+    // succeed with the full default block present.
+    let status = json_success(&dir, &["status"]);
+    assert!(status.get("scope_path").is_some());
+    let search = json_success(&dir, &["search", "トークン TTL"]);
+    assert_eq!(search["results"].as_array().unwrap().len() >= 1, true);
+}
+
+// A non-default value for an UNIMPLEMENTED enforcement key is a loud
+// KCS-E-CONFIG-NOT-IMPLEMENTED-001 (exit 1), not a silent accept.
+#[test]
+fn r12_2_allowed_scope_non_default_is_loud_rejected() {
+    let dir = indexed_scope();
+    fs::write(
+        dir.path().join(".kcs/config.toml"),
+        "kcs_format_version = \"0.1.0\"\n[adapter.policy]\nallowed_scope = \"sub\"\n",
+    )
+    .unwrap();
+    let err = json_failure(&dir, &["status"], 1);
+    assert_eq!(err["error_code"], "KCS-E-CONFIG-NOT-IMPLEMENTED-001");
+}
+
+#[test]
+fn r12_2_store_request_body_true_is_loud_rejected() {
+    let dir = indexed_scope();
+    fs::write(
+        dir.path().join(".kcs/config.toml"),
+        "kcs_format_version = \"0.1.0\"\n[adapter.policy]\nstore_request_body = true\n",
+    )
+    .unwrap();
+    let err = json_failure(&dir, &["status"], 1);
+    assert_eq!(err["error_code"], "KCS-E-CONFIG-NOT-IMPLEMENTED-001");
+}
+
+#[test]
+fn r12_2_timeout_seconds_non_default_is_loud_rejected() {
+    let dir = indexed_scope();
+    fs::write(
+        dir.path().join(".kcs/config.toml"),
+        "kcs_format_version = \"0.1.0\"\n[adapter.policy]\ntimeout_seconds = 30\n",
+    )
+    .unwrap();
+    let err = json_failure(&dir, &["status"], 1);
+    assert_eq!(err["error_code"], "KCS-E-CONFIG-NOT-IMPLEMENTED-001");
+    // The documented default (300) is accepted.
+    fs::write(
+        dir.path().join(".kcs/config.toml"),
+        "kcs_format_version = \"0.1.0\"\n[adapter.policy]\ntimeout_seconds = 300\n",
+    )
+    .unwrap();
+    json_success(&dir, &["status"]);
+}
+
+// A typo / unknown key under [adapter.policy] is a schema error (exit 2), distinct
+// from the semantic NOT-IMPLEMENTED (exit 1) above.
+#[test]
+fn r12_2_unknown_policy_key_is_schema_error() {
+    let dir = indexed_scope();
+    fs::write(
+        dir.path().join(".kcs/config.toml"),
+        "kcs_format_version = \"0.1.0\"\n[adapter.policy]\nallow_netwrok = false\n",
+    )
+    .unwrap();
+    let err = json_failure(&dir, &["status"], 2);
+    assert_eq!(err["error_code"], "KCS-E-CONFIG-SCHEMA-001");
+}
+
+// redact_logs is finally reachable: user config `redact_logs = false` turns off the
+// errors.jsonl path masking (was permanently pinned to redacted because the schema
+// rejected the key before it could ever be read).
+#[test]
+fn r12_2_user_config_redact_logs_false_records_path() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("a.txt"), "hello").unwrap();
+    kcs(&dir, &["init"]).assert().success();
+    // Device-global user config (XDG_CONFIG_HOME/kcs/config.toml).
+    let user_cfg = dir.path().join(".test-config/kcs");
+    fs::create_dir_all(&user_cfg).unwrap();
+    fs::write(
+        user_cfg.join("config.toml"),
+        "[adapter.policy]\nredact_logs = false\n",
+    )
+    .unwrap();
+    // Same corrupt-tasks trigger as n3_errors_jsonl_redacts_path -> errors.jsonl.
+    fs::write(dir.path().join(".kcs/tasks.jsonl"), "{ not json\n").unwrap();
+    json_failure(&dir, &["status"], 4);
+    let errors = fs::read_to_string(dir.path().join(".test-data/kcs/logs/errors.jsonl")).unwrap();
+    let last: Value = serde_json::from_str(errors.lines().last().unwrap()).unwrap();
+    assert_ne!(
+        last["context"]["path"], "[redacted]",
+        "redact_logs = false must record the real path: {last}"
+    );
+    assert!(
+        last["context"]["path"]
+            .as_str()
+            .is_some_and(|path| path.contains("tasks.jsonl")),
+        "path must be the real tasks.jsonl path: {last}"
+    );
+}
+
+// max_input_bytes is a real input gate: a file larger than the cap is skipped for
+// adapter processing (never normalized) but the index still succeeds.
+#[test]
+fn r12_2_max_input_bytes_gates_oversized_input() {
+    let dir = tempfile::tempdir().unwrap();
+    kcs(&dir, &["init"]).assert().success();
+    // Cap at 50 bytes; write a markdown file well over that.
+    fs::write(
+        dir.path().join(".kcs/config.toml"),
+        "kcs_format_version = \"0.1.0\"\n[adapter.policy]\nmax_input_bytes = 50\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.path().join("big.md"),
+        "# Big\n\n## Section\nthis body is definitely longer than fifty bytes in total.\n",
+    )
+    .unwrap();
+    let index = json_success(&dir, &["index", "--approve"]);
+    assert_eq!(index["skipped_oversized_files"], 1);
+    assert_eq!(index["normalized_files"], 0);
+}
+
+// ===========================================================================
+// R12-1: [search.rrf] / [search.diversify] / [markdownize.incremental] were
+// documented + schema-valid but hardcoded at every call site (dead tuning knobs).
+// ===========================================================================
+
+/// A single-file scope whose file has 5 heading sections all sharing one token
+/// (so one raw_hash, 5 chunks) — the fixture for diversify dedup behavior.
+fn multi_chunk_scope() -> TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(
+        dir.path().join("doc.md"),
+        "# Doc\n\n\
+         ## S1\nsharedtoken alpha section body text.\n\n\
+         ## S2\nsharedtoken beta section body text.\n\n\
+         ## S3\nsharedtoken gamma section body text.\n\n\
+         ## S4\nsharedtoken delta section body text.\n\n\
+         ## S5\nsharedtoken epsilon section body text.\n",
+    )
+    .unwrap();
+    kcs(&dir, &["init"]).assert().success();
+    json_success(&dir, &["index", "--approve"]);
+    dir
+}
+
+fn write_scope_config(dir: &TempDir, body: &str) {
+    fs::write(
+        dir.path().join(".kcs/config.toml"),
+        format!("kcs_format_version = \"0.1.0\"\n{body}"),
+    )
+    .unwrap();
+}
+
+// strategy = "off" is a real no-op (no dedup); max_per_raw_hash caps the stream —
+// both were dead before R12-1 (default MMR/3 applied regardless of config).
+#[test]
+fn r12_1_diversify_config_controls_dedup() {
+    let dir = multi_chunk_scope();
+
+    // Default (no config): text-only -> MMR skipped -> max_per_raw_hash=3 cap.
+    let default = json_success(&dir, &["search", "sharedtoken"]);
+    assert_eq!(default["results"].as_array().unwrap().len(), 3);
+
+    // strategy = "off": diversification disabled entirely -> every matching chunk.
+    write_scope_config(&dir, "[search.diversify]\nstrategy = \"off\"\n");
+    let off = json_success(&dir, &["search", "sharedtoken"]);
+    assert!(
+        off["results"].as_array().unwrap().len() >= 4,
+        "off must return more than the default cap of 3: {}",
+        off["results"].as_array().unwrap().len()
+    );
+    assert_eq!(off["diversify"]["strategy"], "off");
+
+    // max_per_raw_hash = 1: cap the raw_hash to a single chunk.
+    write_scope_config(&dir, "[search.diversify]\nmax_per_raw_hash = 1\n");
+    let capped = json_success(&dir, &["search", "sharedtoken"]);
+    assert_eq!(capped["results"].as_array().unwrap().len(), 1);
+}
+
+// The cursor query_hash embeds the EFFECTIVE rrf/diversify (05 §1.8:280): changing
+// [search.rrf] between pages invalidates an in-flight cursor instead of silently
+// replaying a differently-ranked page.
+#[test]
+fn r12_1_query_hash_depends_on_rrf_config() {
+    let dir = multi_chunk_scope();
+    let page1 = json_success(&dir, &["search", "sharedtoken", "--limit", "1"]);
+    let cursor = page1["paging"]["next_cursor"]
+        .as_str()
+        .expect("cursor present");
+    // Same config -> the cursor replays fine (sanity).
+    json_success(
+        &dir,
+        &["search", "sharedtoken", "--limit", "1", "--cursor", cursor],
+    );
+    // Change the effective rrf -> query_hash changes -> the old cursor is rejected.
+    write_scope_config(&dir, "[search.rrf]\nk = 1\n");
+    let err = json_failure(
+        &dir,
+        &["search", "sharedtoken", "--limit", "1", "--cursor", cursor],
+        2,
+    );
+    assert_eq!(err["error_code"], "KCS-E-SEARCH-CURSOR-001");
+}
+
+// An unknown key under the now-typed [search.rrf] is a schema error (exit 2) — the
+// [search] block is `additionalProperties: false` after R12-1 (typo detection).
+#[test]
+fn r12_1_unknown_search_rrf_key_is_schema_error() {
+    let dir = multi_chunk_scope();
+    write_scope_config(&dir, "[search.rrf]\nnonsense_key = 1\n");
+    let err = json_failure(&dir, &["search", "sharedtoken"], 2);
+    assert_eq!(err["error_code"], "KCS-E-CONFIG-SCHEMA-001");
+}
+
+// [search.multi_scope] stays typed-but-accepted (MULTI-006 defer): a documented
+// key must not brick, even though it is unwired.
+#[test]
+fn r12_1_multi_scope_config_is_accepted_not_bricked() {
+    let dir = multi_chunk_scope();
+    write_scope_config(&dir, "[search.multi_scope]\nparallelism = 4\n");
+    json_success(&dir, &["search", "sharedtoken"]);
+}
+
+// include_neighbors has no implementation concept: a non-default value is a loud
+// NOT-IMPLEMENTED (exit 1), the documented default (1) is a no-op accept.
+#[test]
+fn r12_1_incremental_include_neighbors_non_default_rejected() {
+    let dir = multi_chunk_scope();
+    write_scope_config(&dir, "[markdownize.incremental]\ninclude_neighbors = 2\n");
+    let err = json_failure(&dir, &["status"], 1);
+    assert_eq!(err["error_code"], "KCS-E-CONFIG-NOT-IMPLEMENTED-001");
+    // The documented default (1) is accepted.
+    write_scope_config(&dir, "[markdownize.incremental]\ninclude_neighbors = 1\n");
+    json_success(&dir, &["status"]);
+}
+
+// ===========================================================================
+// R12-3: R11-5's deferred embedding write-back opened a crash window — a chunk's
+// chunk_vec commits per batch but the task Done transition is deferred to after the
+// loop. A crash between leaves the chunk embedded yet its task stuck Pending
+// forever (no recovery command reconciles it), so index_status reports phantom
+// pending enrichment. The reconcile step on the shared enrichment path heals it.
+// ===========================================================================
+#[test]
+fn r12_3_reconcile_completes_committed_embedding_tasks() {
+    let dir = indexed_scope_embed("mock");
+    let tasks_path = dir.path().join(".kcs/tasks.jsonl");
+
+    // Reproduce the crash window: chunk_vec/embeddings are committed (from the mock
+    // index above) but the Done write-back was lost -> flip every Done embedding
+    // task back to Pending.
+    let original = fs::read_to_string(&tasks_path).unwrap();
+    let mut flipped = String::new();
+    let mut embedding_pending = 0u64;
+    for line in original.lines() {
+        let mut task: Value = serde_json::from_str(line).unwrap();
+        if task["type"] == "embedding" && task["status"] == "done" {
+            task["status"] = Value::from("pending");
+            task["attempts"] = Value::from(0);
+            task["next_retry_at"] = Value::Null;
+            embedding_pending += 1;
+        }
+        flipped.push_str(&serde_json::to_string(&task).unwrap());
+        flipped.push('\n');
+    }
+    assert!(embedding_pending > 0, "fixture must have embedding tasks");
+    fs::write(&tasks_path, flipped).unwrap();
+
+    // The phantom: index_status reports the stranded tasks as pending enrichment.
+    let before = json_success_embed(&dir, "mock", &["search", "トークン TTL", "--hybrid"]);
+    assert_eq!(
+        before["index_status"]["pending_enrichment_tasks"], embedding_pending,
+        "flipped tasks must read as pending before reconcile"
+    );
+
+    // A single recovery command (index) reconciles the accounting WITHOUT re-sending:
+    // every chunk is already embedded, so `pending` is empty and nothing is executed.
+    let reindex = json_success_embed(&dir, "mock", &["index", "--approve"]);
+    assert_eq!(
+        reindex["embedding_tasks_executed"], 0,
+        "reconcile must not re-send embeddings: {reindex}"
+    );
+
+    // Tasks converge to Done and index_status reports zero pending.
+    let after = json_success_embed(&dir, "mock", &["search", "トークン TTL", "--hybrid"]);
+    assert_eq!(after["index_status"]["pending_enrichment_tasks"], 0);
+    let final_tasks = fs::read_to_string(&tasks_path).unwrap();
+    for line in final_tasks.lines() {
+        let task: Value = serde_json::from_str(line).unwrap();
+        if task["type"] == "embedding" {
+            assert_eq!(
+                task["status"], "done",
+                "every embedding task must reconcile to done: {task}"
+            );
+        }
+    }
+}
+
+// ===========================================================================
+// R12-4: exit 3/5/6 __exit_code overrides and clap usage errors bypassed
+// errors.jsonl, and a failed search dropped its per-search metrics.jsonl line —
+// the whole failure surface was invisible to the observability logs.
+// ===========================================================================
+
+// Enrichment auth failure (exit 5 via __exit_code) must now reach errors.jsonl.
+#[test]
+fn r12_4_enrichment_auth_failure_reaches_errors_jsonl() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(
+        dir.path().join("note.md"),
+        "# ノート\n\n## 本文\n認証失敗の可視化テスト本文です。\n",
+    )
+    .unwrap();
+    kcs(&dir, &["init"]).assert().success();
+    let indexed = json_code_stdout_embed(&dir, "auth_error", 5, &["index", "--approve"]);
+    assert!(indexed["embedding_tasks_failed"].as_u64().unwrap() > 0);
+    let errors = fs::read_to_string(dir.path().join(".test-data/kcs/logs/errors.jsonl")).unwrap();
+    assert!(
+        errors.lines().any(|line| {
+            serde_json::from_str::<Value>(line).unwrap()["code"]
+                .as_str()
+                .is_some_and(|code| code.contains("AUTH"))
+        }),
+        "the enrichment auth failure must reach errors.jsonl: {errors}"
+    );
+}
+
+// Multi-scope partial failure (exit 3 via __exit_code) must record the exclusion.
+#[test]
+fn r12_4_multi_scope_partial_records_exclusion_in_errors_jsonl() {
+    let parent = tempfile::tempdir().unwrap();
+    let data_home = parent.path().join("xdg");
+    let a = parent.path().join("a");
+    let b = parent.path().join("b");
+    fs::create_dir_all(&a).unwrap();
+    fs::create_dir_all(&b).unwrap();
+    fs::write(a.join("a.md"), "# A\n\n## Sec\nalphaunique token\n").unwrap();
+    fs::write(b.join("b.md"), "# B\n\n## Sec\nbetaunique token\n").unwrap();
+    json_success_path(&a, &data_home, &["init"]);
+    json_success_path(&b, &data_home, &["init"]);
+    json_success_path(&a, &data_home, &["index", "--approve"]);
+    json_success_path(&b, &data_home, &["index", "--approve"]);
+    let b_kcs = b.join(".kcs");
+    use std::os::unix::fs::PermissionsExt;
+    let mut perms = fs::metadata(&b_kcs).unwrap().permissions();
+    perms.set_mode(0o000);
+    fs::set_permissions(&b_kcs, perms).unwrap();
+    Command::cargo_bin("kcs")
+        .unwrap()
+        .current_dir(&a)
+        .env("XDG_CONFIG_HOME", data_home.join("config"))
+        .env("XDG_DATA_HOME", data_home.join("data"))
+        .env("XDG_CACHE_HOME", data_home.join("cache"))
+        .args(["search", "alphaunique", "--json"])
+        .assert()
+        .code(3);
+    let mut restore = fs::metadata(&b_kcs).unwrap().permissions();
+    restore.set_mode(0o755);
+    fs::set_permissions(&b_kcs, restore).unwrap();
+    let errors = fs::read_to_string(data_home.join("data/kcs/logs/errors.jsonl")).unwrap();
+    assert!(
+        errors.lines().any(|line| {
+            let value: Value = serde_json::from_str(line).unwrap();
+            value["context"]["excluded_scopes"].is_array()
+        }),
+        "the multi-scope exclusion must reach errors.jsonl: {errors}"
+    );
+}
+
+// A failed search still emits a per-search metrics.jsonl line (result_count 0 +
+// error_code) so it is not silently dropped from the latency population, and the
+// errors.jsonl line (main Err arm) is present too.
+#[test]
+fn r12_4_failed_search_writes_metrics_and_errors() {
+    let dir = indexed_scope();
+    json_failure(
+        &dir,
+        &["search", "トークン", "--cursor", "not-a-real-cursor"],
+        2,
+    );
+    let metrics = fs::read_to_string(dir.path().join(".test-data/kcs/logs/metrics.jsonl")).unwrap();
+    assert!(
+        metrics.lines().any(|line| {
+            let value: Value = serde_json::from_str(line).unwrap();
+            value["message"] == "search failed" && value["context"]["result_count"] == 0
+        }),
+        "a failed search must emit a metrics line: {metrics}"
+    );
+    let errors = fs::read_to_string(dir.path().join(".test-data/kcs/logs/errors.jsonl")).unwrap();
+    assert!(
+        errors.lines().any(|line| {
+            serde_json::from_str::<Value>(line).unwrap()["code"]
+                .as_str()
+                .is_some_and(|code| code.contains("CURSOR"))
+        }),
+        "a failed search must record errors.jsonl: {errors}"
+    );
+}
+
+// A clap usage error belongs in the device-global errors.jsonl too (it bypassed
+// run() entirely, exiting inside exit_from_clap_error).
+#[test]
+fn r12_4_clap_usage_error_reaches_errors_jsonl() {
+    let dir = tempfile::tempdir().unwrap();
+    kcs(&dir, &["index", "--this-flag-does-not-exist"])
+        .assert()
+        .code(2);
+    let errors_path = dir.path().join(".test-data/kcs/logs/errors.jsonl");
+    let errors = fs::read_to_string(&errors_path).unwrap();
+    assert!(
+        errors.lines().any(|line| {
+            serde_json::from_str::<Value>(line).unwrap()["code"] == "KCS-E-CONFIG-USAGE-001"
+        }),
+        "a clap usage error must record errors.jsonl: {errors}"
+    );
+}
+
+// ===========================================================================
+// R12-5: a metrics.jsonl / access.jsonl append failure must NOT kill the search —
+// observability logging must not destroy an already-computed result (device-global
+// files would otherwise stop every scope's search on disk-full).
+// ===========================================================================
+#[test]
+fn r12_5_search_survives_unwritable_metrics_log() {
+    let dir = indexed_scope();
+    let metrics = dir.path().join(".test-data/kcs/logs/metrics.jsonl");
+    fs::create_dir_all(metrics.parent().unwrap()).unwrap();
+    fs::write(&metrics, "").unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    let mut perms = fs::metadata(&metrics).unwrap().permissions();
+    perms.set_mode(0o444);
+    fs::set_permissions(&metrics, perms).unwrap();
+    // The search still succeeds with results (was exit 1 KCS-E-STORE-IO-001).
+    let search = json_success(&dir, &["search", "トークン TTL"]);
+    assert!(!search["results"].as_array().unwrap().is_empty());
+    let mut restore = fs::metadata(&metrics).unwrap().permissions();
+    restore.set_mode(0o644);
+    fs::set_permissions(&metrics, restore).unwrap();
+}
+
+// ===========================================================================
+// R12-7: the manual arg parsers (search/repair/reindex) rejected `--flag=value` as
+// an unknown flag even though the flag exists, and `--limit 0` was silently clamped
+// to 1 (faking success on a meaningless value).
+// ===========================================================================
+#[test]
+fn r12_7_search_accepts_flag_equals_value_syntax() {
+    let dir = indexed_scope();
+    // `--limit=5` == `--limit 5`.
+    let eq = json_success(&dir, &["search", "トークン TTL", "--limit=5"]);
+    assert_eq!(eq["paging"]["limit"], 5);
+    let space = json_success(&dir, &["search", "トークン TTL", "--limit", "5"]);
+    assert_eq!(eq["paging"]["limit"], space["paging"]["limit"]);
+
+    // `--offset=N` and `--scope=.` are accepted (were "unknown search flag").
+    let off_eq = json_success(&dir, &["search", "トークン TTL", "--offset=1"]);
+    let off_space = json_success(&dir, &["search", "トークン TTL", "--offset", "1"]);
+    assert_eq!(off_eq["results"], off_space["results"]);
+    let scoped = json_success(&dir, &["search", "トークン TTL", "--scope=."]);
+    assert_eq!(scoped["searched_scopes"].as_array().unwrap().len(), 1);
+}
+
+// A positional query containing `=` must NOT be split into a flag.
+#[test]
+fn r12_7_positional_query_with_equals_is_preserved() {
+    let dir = indexed_scope();
+    let search = json_success(&dir, &["search", "ranking=test"]);
+    assert_eq!(search["query"], "ranking=test");
+}
+
+// `--limit 0` (and `--limit=0`) is a usage error, not a silent clamp to 1.
+#[test]
+fn r12_7_limit_zero_is_a_usage_error() {
+    let dir = indexed_scope();
+    let err = json_failure(&dir, &["search", "トークン TTL", "--limit", "0"], 2);
+    assert_eq!(err["error_code"], "KCS-E-CONFIG-USAGE-001");
+    let err_eq = json_failure(&dir, &["search", "トークン TTL", "--limit=0"], 2);
+    assert_eq!(err_eq["error_code"], "KCS-E-CONFIG-USAGE-001");
+    // The upper clamp (100) is unchanged: a large value still succeeds.
+    let big = json_success(&dir, &["search", "トークン TTL", "--limit=500"]);
+    assert_eq!(big["paging"]["limit"], 100);
+}

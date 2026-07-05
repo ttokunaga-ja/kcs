@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::Result;
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct RrfConfig {
     pub k: u64,
     pub w_text: f64,
@@ -125,6 +125,47 @@ mod tests {
             vec!["c2", "c1", "c3", "c4", "c5"]
         );
         assert!((fused[0].rrf_score - 123.0 / 3782.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn r12_1_rrf_weights_change_order() {
+        // Same inputs as ct3_hybrid_004, but weighting the vector backend only
+        // (w_text=0) yields the vector order, not the balanced fusion order — proof
+        // the `[search.rrf]` weights are honored (were hardcoded before R12-1).
+        let text = ["c1", "c2", "c3", "c4"]
+            .into_iter()
+            .enumerate()
+            .map(|(i, chunk)| BackendRank {
+                chunk_hash: chunk.to_owned(),
+                rank: i as u64 + 1,
+            })
+            .collect::<Vec<_>>();
+        let vector = ["c2", "c3", "c1", "c5"]
+            .into_iter()
+            .enumerate()
+            .map(|(i, chunk)| BackendRank {
+                chunk_hash: chunk.to_owned(),
+                rank: i as u64 + 1,
+            })
+            .collect::<Vec<_>>();
+        let fused = fuse_rrf(
+            &text,
+            &vector,
+            RrfConfig {
+                k: 60,
+                w_text: 0.0,
+                w_vector: 1.0,
+                candidate_depth: 200,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            fused
+                .iter()
+                .map(|c| c.chunk_hash.as_str())
+                .collect::<Vec<_>>(),
+            vec!["c2", "c3", "c1", "c5", "c4"]
+        );
     }
 
     #[test]

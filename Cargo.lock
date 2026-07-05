@@ -696,6 +696,7 @@ dependencies = [
 name = "kcs-index"
 version = "0.1.0"
 dependencies = [
+ "kcs-core",
  "rusqlite",
  "serde",
  "serde_jcs",
