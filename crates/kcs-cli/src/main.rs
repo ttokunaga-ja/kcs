@@ -220,7 +220,10 @@ fn main() {
     // Register the sqlite-vec `vec0` module before any connection opens, so
     // `chunk_vec` is available process-wide (04 §4.3, K4).
     kcs_index::vec::ensure_registered();
-    let cli = Cli::parse();
+    let cli = match Cli::try_parse() {
+        Ok(cli) => cli,
+        Err(err) => exit_from_clap_error(err),
+    };
     let json = cli.json || command_captured_json_flag(&cli.command);
     let exit_code = match run(cli) {
         Ok(mut output) => {
@@ -240,6 +243,52 @@ fn main() {
     process::exit(exit_code.code());
 }
 
+/// R11-1: `clap::Parser::parse()` calls `process::exit()` itself on a usage error,
+/// bypassing the `--json` contract (docs/06 §4: *every* CLI has `--json` and errors
+/// return `{error_code, message, context}`). Roughly half the commands take the
+/// derive path (index/batch/diff/tag/snapshot/log/inspect…), so `kcs diff --json`
+/// emitted plaintext + exit 2 with an empty stdout — invisible to a machine caller.
+/// Route clap errors through `try_parse` instead: preserve clap's own exit code
+/// (usage = 2, matching docs/06 §7), but when the raw argv requested `--json`, wrap
+/// the reason in the same `KCS-E-CONFIG-USAGE-001` envelope the manual-parse
+/// commands (repair/search/open/view/reindex) already emit. `--help` / `--version`
+/// are clap "errors" that must still render to stdout and exit 0, so defer to clap.
+fn exit_from_clap_error(err: clap::Error) -> ! {
+    use clap::error::ErrorKind;
+    if matches!(
+        err.kind(),
+        ErrorKind::DisplayHelp | ErrorKind::DisplayVersion
+    ) {
+        err.exit();
+    }
+    // A genuine usage error. clap's exit code is 2 for every non-help/version kind.
+    let exit_code = err.exit_code();
+    let wants_json = std::env::args().skip(1).any(|arg| arg == "--json");
+    if wants_json {
+        print_error(&KcsError::invalid_usage(clap_error_reason(&err)), true);
+        process::exit(exit_code);
+    }
+    // No --json: keep clap's native plaintext-to-stderr behavior unchanged.
+    err.exit();
+}
+
+/// Extract a concise one-line reason from a clap error for the JSON envelope's
+/// `message` field. clap's full render appends the usage block and help hints,
+/// which do not belong in a machine `message`; take the first non-empty line and
+/// drop the leading `error: ` prefix so it reads like the manual-parse messages.
+fn clap_error_reason(err: &clap::Error) -> String {
+    let rendered = err.to_string();
+    let first_line = rendered
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or("invalid usage");
+    first_line
+        .strip_prefix("error: ")
+        .unwrap_or(first_line)
+        .to_string()
+}
+
 /// Remove and interpret the private `__exit_code` marker a command may embed in
 /// its success output to request a non-zero process exit while still printing the
 /// payload to stdout (multi-scope search partial failure, 05 §1.8).
@@ -248,6 +297,9 @@ fn take_exit_override(output: &mut Value) -> Option<ExitCode> {
     match code {
         3 => Some(ExitCode::PartialFailure),
         4 => Some(ExitCode::PermanentFailure),
+        // R11-2: enrichment auth (5) / budget-pause (6) for index/repair/reindex/batch.
+        5 => Some(ExitCode::AuthError),
+        6 => Some(ExitCode::BudgetExceeded),
         _ => None,
     }
 }
@@ -499,37 +551,48 @@ fn run_index(args: IndexArgs) -> Result<Value> {
     }
     rebuild_step3_index(&repo)?;
     // Generate chunk embeddings behind the online opt-in / budget / cost-ledger
-    // guardrails (K4). No-op unless an embedding adapter is configured.
-    generate_scope_embeddings(&repo, &args)?;
+    // guardrails (K4). No-op unless an embedding adapter is configured. R11-2: keep
+    // the ExecOutcome (was discarded) so the embedding enrichment result is disclosed
+    // and can raise the exit code (auth/budget) instead of a silent exit 0.
+    let enrichment = generate_scope_embeddings(&repo, &args)?;
     // The scope now has a search index; register it as indexed so it participates
     // in default multi-scope search (05 §1.8, K3). Cache write, never fatal.
     register_scope(&repo, true);
-    let output = json!({
+    let mut output = json!({
         "status": if outcome.noop { "noop" } else { "indexed" },
         "approval_method": if args.approve { "approve" } else if args.yes { "yes" } else { "existing" },
         "network_allowed": index_result.network_allowed,
         "network_opt_in": persistent_network_allowed(&repo)?,
         "pending_online_tasks": index_result.pending_online_tasks,
-        "paused_tasks": index_result.paused_tasks,
+        // R11-2: fold enrichment's budget pauses in with the enqueue-paused markdownize
+        // tasks so `paused_tasks` reflects everything the run left paused.
+        "paused_tasks": index_result.paused_tasks + enrichment.paused,
         "failed_files": index_result.failed_files,
         "normalized_files": index_result.normalized_files,
         "pending_files": index_result.pending_files,
+        // R11-2: disclose the inline embedding enrichment (was entirely absent, so an
+        // auth/rate failure during index was invisible in the result JSON).
+        "embedding_tasks_executed": enrichment.executed,
+        "embedding_tasks_failed": enrichment.failed,
         "tree_hash": outcome.tree_hash,
         "commit_hash": outcome.commit_hash,
         "commit": outcome.commit,
         // F5: non-blocking budget warning (null unless a cap crossed warn_at_percent).
         "budget_warning": scope_budget_warning(&repo)?,
     });
+    // R11-3: an index that partially failed to normalize local files keeps its full
+    // result JSON on stdout (commit_hash, tree_hash, …) with `error_code` +
+    // `__exit_code:3`, matching search's "result + nonzero exit" shape — instead of
+    // the old Err envelope that buried commit_hash inside a private `context.output`.
     if index_result.failed_files > 0 {
-        return Err(KcsError::new(
-            "KCS-E-INDEX-PARTIAL-001",
-            "index completed with failed candidates",
-            json!({
-                "failed_files": index_result.failed_files,
-                "output": output.clone(),
-            }),
-            ExitCode::PartialFailure,
-        ));
+        output["error_code"] = json!("KCS-E-INDEX-PARTIAL-001");
+    }
+    // Exit priority (docs/04 §5.6 / §7): enrichment auth (5) > budget pause (6) >
+    // local partial (3). All still print the full result JSON to stdout.
+    let exit_override = enrichment_exit_override(&enrichment)
+        .or_else(|| (index_result.failed_files > 0).then_some(ExitCode::PartialFailure));
+    if let Some(code) = exit_override {
+        set_exit_override(&mut output, code);
     }
     Ok(output)
 }
@@ -564,6 +627,9 @@ struct SearchableChunk {
 struct ParsedSearch {
     query: String,
     requested_mode: SearchMode,
+    /// R11-7: whether a `--text`/`--vector`/`--hybrid` flag set `requested_mode`
+    /// explicitly. When false, `[search].default_mode` supplies the mode instead.
+    explicit_mode: bool,
     scope: Option<PathBuf>,
     descendants: bool,
     all_scopes: bool,
@@ -590,13 +656,22 @@ fn run_repair(args: UnsupportedArgs) -> Result<Value> {
     // fully enriched. `rebuild_sqlite_index` already preserved existing
     // embeddings, so reuse keeps this near-free; offline it only enqueues.
     let embedding_online = embedding_online_allowed(&repo, false, false, false)?;
-    run_embedding_enrichment(&repo, embedding_online, false)?;
-    Ok(json!({
+    // R11-2: keep the enrichment ExecOutcome (was discarded) — disclose it and let an
+    // auth/budget-pause raise the exit while the rebuild JSON still prints to stdout.
+    let enrichment = run_embedding_enrichment(&repo, embedding_online, false)?;
+    let mut output = json!({
         "status": "rebuilt",
         "rebuilt_chunks": report.rebuilt_chunks,
         "rebuilt_tree_entries": report.rebuilt_tree_entries,
         "sqlite_db": db,
-    }))
+        "embedding_tasks_executed": enrichment.executed,
+        "embedding_tasks_failed": enrichment.failed,
+        "paused_tasks": enrichment.paused,
+    });
+    if let Some(code) = enrichment_exit_override(&enrichment) {
+        set_exit_override(&mut output, code);
+    }
+    Ok(output)
 }
 
 fn parse_repair_args(args: Vec<String>) -> Result<()> {
@@ -650,6 +725,22 @@ struct ResolvedMode {
     fallback: bool,
     fallback_reason: Option<String>,
     error_code: Option<String>,
+    /// R11-7: a non-null human warning when `[search].fail_behavior = "warn"` turned
+    /// an auto/--hybrid vector-unavailable case into a text fallback. `None` for the
+    /// silent default (`fallback`) and when no fallback occurred.
+    warning: Option<String>,
+}
+
+/// R11-7: `[search].fail_behavior` (config.schema.json §search) — what an auto or
+/// `--hybrid` search does when no compatible vector backend is available.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SearchFailBehavior {
+    /// Default (05 §1.7): silently fall back to text.
+    Fallback,
+    /// Fall back to text but surface a `warning` field in the response.
+    Warn,
+    /// Hard error, identical to the explicit `--vector` path (KCS-E-SEARCH-VEC-*).
+    Error,
 }
 
 /// Vector backend availability across the searched scopes (the K4 embedding
@@ -765,7 +856,11 @@ fn resolve_vector_availability(
     }
 }
 
-fn resolve_search_mode(requested: SearchMode, vector: &VectorAvailability) -> Result<ResolvedMode> {
+fn resolve_search_mode(
+    requested: SearchMode,
+    vector: &VectorAvailability,
+    fail_behavior: SearchFailBehavior,
+) -> Result<ResolvedMode> {
     let vector_ok = matches!(vector, VectorAvailability::Available);
     let (reason, error_code) = match vector {
         VectorAvailability::Available => (None, None),
@@ -778,6 +873,18 @@ fn resolve_search_mode(requested: SearchMode, vector: &VectorAvailability) -> Re
             Some("KCS-E-SEARCH-VEC-INCOMPAT-001".to_owned()),
         ),
     };
+    // The hard-error envelope shared by explicit `--vector` and R11-7's
+    // `fail_behavior = "error"` (same error_code taxonomy, 03 §7 / 05 §1.2).
+    let vector_unavailable_error = || {
+        KcsError::new(
+            error_code
+                .as_deref()
+                .unwrap_or("KCS-E-SEARCH-VEC-UNAVAIL-001"),
+            "vector search requested but no compatible embedding index is available",
+            json!({ "fallback_reason": reason }),
+            ExitCode::Failure,
+        )
+    };
     match requested {
         SearchMode::Text => Ok(ResolvedMode {
             requested,
@@ -785,6 +892,7 @@ fn resolve_search_mode(requested: SearchMode, vector: &VectorAvailability) -> Re
             fallback: false,
             fallback_reason: None,
             error_code: None,
+            warning: None,
         }),
         SearchMode::Vector => {
             if vector_ok {
@@ -794,18 +902,12 @@ fn resolve_search_mode(requested: SearchMode, vector: &VectorAvailability) -> Re
                     fallback: false,
                     fallback_reason: None,
                     error_code: None,
+                    warning: None,
                 })
             } else {
                 // --vector with no usable vector backend is a hard error (05 §1.2);
                 // the code distinguishes "unavailable" from "incompatible" (03 §7).
-                Err(KcsError::new(
-                    error_code
-                        .as_deref()
-                        .unwrap_or("KCS-E-SEARCH-VEC-UNAVAIL-001"),
-                    "vector search requested but no compatible embedding index is available",
-                    json!({ "fallback_reason": reason }),
-                    ExitCode::Failure,
-                ))
+                Err(vector_unavailable_error())
             }
         }
         SearchMode::Auto | SearchMode::Hybrid => {
@@ -816,16 +918,41 @@ fn resolve_search_mode(requested: SearchMode, vector: &VectorAvailability) -> Re
                     fallback: false,
                     fallback_reason: None,
                     error_code: None,
+                    warning: None,
                 })
             } else {
-                // auto / --hybrid fall back to text (fail_behavior default = fallback).
-                Ok(ResolvedMode {
-                    requested,
-                    resolved: SearchMode::Text,
-                    fallback: true,
-                    fallback_reason: reason,
-                    error_code,
-                })
+                // R11-7: auto / --hybrid vector-unavailable behavior is governed by
+                // `[search].fail_behavior` (default = silent text fallback).
+                match fail_behavior {
+                    // The user asked for vectors and declared "error on failure" — make
+                    // it the same hard error the explicit --vector path already returns,
+                    // instead of a silent exit-0 text result.
+                    SearchFailBehavior::Error => Err(vector_unavailable_error()),
+                    // Fall back to text but surface a loud warning field in the response.
+                    SearchFailBehavior::Warn => {
+                        let warning = Some(format!(
+                            "vector search unavailable ({}); fell back to text",
+                            reason.as_deref().unwrap_or("unknown")
+                        ));
+                        Ok(ResolvedMode {
+                            requested,
+                            resolved: SearchMode::Text,
+                            fallback: true,
+                            fallback_reason: reason,
+                            error_code,
+                            warning,
+                        })
+                    }
+                    // Default: silent text fallback (05 §1.7), warning stays null.
+                    SearchFailBehavior::Fallback => Ok(ResolvedMode {
+                        requested,
+                        resolved: SearchMode::Text,
+                        fallback: true,
+                        fallback_reason: reason,
+                        error_code,
+                        warning: None,
+                    }),
+                }
             }
         }
     }
@@ -880,6 +1007,19 @@ fn run_search(args: UnsupportedArgs) -> Result<Value> {
     let parsed = parse_search_args(without_json(args.args))?;
     let repo = Repository::open_current()?;
     validate_repo_tool_lock(&repo)?;
+
+    // R11-7: apply the `[search]` config (config.schema.json §search). `default_mode`
+    // seeds the requested mode ONLY when no CLI `--text`/`--vector`/`--hybrid` was
+    // given (the flag always wins); `fail_behavior` governs what auto/--hybrid does
+    // when no vector backend is available. Both were schema-valid + documented but
+    // entirely unwired before (the [search] version of the R10-2 config drift).
+    let (config_default_mode, config_fail_behavior) = effective_search_config(&repo)?;
+    let requested_mode = if parsed.explicit_mode {
+        parsed.requested_mode
+    } else {
+        config_default_mode.unwrap_or(parsed.requested_mode)
+    };
+    let fail_behavior = config_fail_behavior.unwrap_or(SearchFailBehavior::Fallback);
 
     // Page 1 enumerates scopes (registry-based, K3); later pages replay the frozen
     // scope set stored in the cursor (05 §1.8 — the cursor scope set is truth).
@@ -954,7 +1094,7 @@ fn run_search(args: UnsupportedArgs) -> Result<Value> {
         embedding_opt_in,
         query_embeddable,
     );
-    let precheck_mode = resolve_search_mode(parsed.requested_mode, &vector_precheck)?;
+    let precheck_mode = resolve_search_mode(requested_mode, &vector_precheck, fail_behavior)?;
     // Only now, and only when the pre-resolved mode uses vectors, compute (send)
     // the query embedding. In --text this branch is never taken, so the query is
     // never sent.
@@ -982,7 +1122,7 @@ fn run_search(args: UnsupportedArgs) -> Result<Value> {
     } else {
         vector_precheck
     };
-    let mode = resolve_search_mode(parsed.requested_mode, &vector)?;
+    let mode = resolve_search_mode(requested_mode, &vector, fail_behavior)?;
 
     // N8: the short-query short-circuit is NOT taken here — it must run after scope
     // resolution, the all-failed check, and index_status aggregation below, or a
@@ -1282,6 +1422,8 @@ fn run_search(args: UnsupportedArgs) -> Result<Value> {
         "fallback": mode.fallback,
         "fallback_reason": mode.fallback_reason.clone().map(Value::from).unwrap_or(Value::Null),
         "error_code": mode.error_code.clone().map(Value::from).unwrap_or(Value::Null),
+        // R11-7: non-null only under [search].fail_behavior = "warn" text fallback.
+        "warning": mode.warning.clone().map(Value::from).unwrap_or(Value::Null),
         "diversify": diversify_summary,
         "paging": { "limit": parsed.limit, "next_cursor": next_cursor },
         "searched_scopes": searched_scopes,
@@ -1764,14 +1906,17 @@ fn ensure_snapshot_tree_entries(
     conn: &Connection,
     commit_hash: &str,
 ) -> Result<bool> {
-    let existing: i64 = conn
+    // R11-11 (Spark): existence probe only — an EXISTS/LIMIT-1 stops at the first
+    // matching row instead of a `COUNT(*)` PK-prefix scan over every tree_entries
+    // row of the commit (wasteful for large commits). Functionally equivalent.
+    let existing: bool = conn
         .query_row(
-            "SELECT COUNT(*) FROM tree_entries WHERE commit_hash = ?1",
+            "SELECT EXISTS(SELECT 1 FROM tree_entries WHERE commit_hash = ?1)",
             rusqlite::params![commit_hash],
             |row| row.get(0),
         )
         .map_err(|err| KcsError::schema(err.to_string()))?;
-    if existing > 0 {
+    if existing {
         // Cached — but a cursor replay still needs the tree object to prove the
         // snapshot is not shallow, so verify object presence regardless.
         let commit = repo.read_commit(commit_hash)?;
@@ -2010,6 +2155,14 @@ fn compute_index_status(searched: &[SearchedScopeInfo]) -> Value {
                     pending += 1;
                     budget_paused = true;
                 }
+                // R11-8: a RETRYABLE Failed enrichment task (rate_limit etc., holding
+                // next_retry_at, recoverable by `batch retry`) is outstanding work —
+                // count it as pending. Otherwise the scope reads enriched_ratio<1.0
+                // with pending_enrichment_tasks=0 and budget_paused=false, an
+                // impossible-looking dead end an Agent cannot act on (the dual of
+                // R9-4). A NON-retryable Failed task (permanent gap) stays excluded:
+                // it surfaces only as ratio<1.0, never as actionable pending work.
+                TaskStatus::Failed if task_retry_allowed(&task) => pending += 1,
                 TaskStatus::Failed => {}
             }
         }
@@ -2179,8 +2332,14 @@ fn build_fts_tiers(query: &str) -> Vec<String> {
         .take(MAX_TRIGRAMS)
         .map(|trigram| quote_fts_phrase(trigram))
         .collect::<Vec<_>>();
+    // R11-10: cap the keyword OR-groups at MAX_TRIGRAMS too (they were unbounded
+    // while CJK trigrams were already capped — an asymmetric hardening). `keywords`
+    // is dedup'd upstream (query_units), so this is "first 64 after dedup". A
+    // multi-thousand-word query no longer builds a multi-thousand-clause OR (linear
+    // FTS cost of seconds); SQLite FTS5 tolerates it, but the cost is pointless.
     let keyword_groups = keywords
         .iter()
+        .take(MAX_TRIGRAMS)
         .map(|keyword| fts_keyword_group(keyword))
         .collect::<Vec<_>>();
 
@@ -2295,6 +2454,9 @@ fn run_view(args: UnsupportedArgs) -> Result<Value> {
         "chunk_hash": pointer.chunk_hash,
         "text": resolved.text.unwrap_or_default(),
         "path": resolved.path,
+        // R11-9: mirror `kcs open --json`, which exposes `temporary` from the same
+        // resolved pointer — `view` resolves identically and Agents branch on it.
+        "temporary": resolved.temporary,
         "commit_shallow": resolved.commit_shallow,
     }))
 }
@@ -2361,13 +2523,22 @@ fn run_reindex(args: UnsupportedArgs) -> Result<Value> {
     // `index_status` reports the pending enrichment instead of falsely showing
     // enriched_ratio = 1.0 (the tasks would otherwise never be created).
     let embedding_online = embedding_online_allowed(&repo, false, false, false)?;
-    run_embedding_enrichment(&repo, embedding_online, false)?;
-    Ok(json!({
+    // R11-2: keep the enrichment ExecOutcome (was discarded) so a new-generation
+    // embedding auth/budget-pause is disclosed and raises the exit (result on stdout).
+    let enrichment = run_embedding_enrichment(&repo, embedding_online, false)?;
+    let mut output = json!({
         "status": "reindexed",
         "reindexed_files": reindexed,
         "commit_hash": outcome.commit_hash,
         "rebuilt_chunks": report.rebuilt_chunks,
-    }))
+        "embedding_tasks_executed": enrichment.executed,
+        "embedding_tasks_failed": enrichment.failed,
+        "paused_tasks": enrichment.paused,
+    });
+    if let Some(code) = enrichment_exit_override(&enrichment) {
+        set_exit_override(&mut output, code);
+    }
+    Ok(output)
 }
 
 #[derive(Debug, Default)]
@@ -2814,6 +2985,20 @@ fn build_sqlite_index_at(
         },
     )
     .map_err(index_to_kcs)?;
+    // R11-4 (sibling of R10-8's `insert_snapshot_tree_entries`): wrap the whole
+    // rebuild — every stored chunk, every tree_entries row, and every preserved
+    // embedding — in ONE transaction. Without it each INSERT autocommits with its
+    // own fsync, so even a no-op reindex re-pays the full-corpus write cost, which
+    // grows without bound because `chunks.jsonl` is append-only (docs/04:334, the
+    // time-travel substrate). A manual BEGIN/COMMIT is used rather than an
+    // `unchecked_transaction()` guard because `index_chunk` takes `&mut self`; a
+    // held guard would keep `fts` immutably borrowed for its lifetime (E0502).
+    // Crash safety is unchanged: the caller builds into a unique temp db and
+    // removes it on ANY Err (P5, line ~2779), and dropping `fts` rolls back an
+    // uncommitted transaction, so a partial/rolled-back temp is never renamed in.
+    fts.connection()
+        .execute_batch("BEGIN")
+        .map_err(|err| KcsError::schema(err.to_string()))?;
     for chunk in read_stored_chunks(kcs_dir)? {
         fts.index_chunk(&chunk.row).map_err(index_to_kcs)?;
     }
@@ -2848,6 +3033,9 @@ fn build_sqlite_index_at(
         .map_err(index_to_kcs)?;
     }
     embedding_store::rebuild_chunk_vec(fts.connection()).map_err(index_to_kcs)?;
+    fts.connection()
+        .execute_batch("COMMIT")
+        .map_err(|err| KcsError::schema(err.to_string()))?;
     drop(fts);
     Ok(())
 }
@@ -2855,6 +3043,7 @@ fn build_sqlite_index_at(
 fn parse_search_args(args: Vec<String>) -> Result<ParsedSearch> {
     let mut query = None;
     let mut requested_mode = SearchMode::Auto;
+    let mut explicit_mode = false;
     let mut scope = None;
     let mut descendants = false;
     let mut all_scopes = false;
@@ -2872,9 +3061,18 @@ fn parse_search_args(args: Vec<String>) -> Result<ParsedSearch> {
                     args[i]
                 )));
             }
-            "--text" | "--no-vector" => requested_mode = SearchMode::Text,
-            "--vector" => requested_mode = SearchMode::Vector,
-            "--hybrid" => requested_mode = SearchMode::Hybrid,
+            "--text" | "--no-vector" => {
+                requested_mode = SearchMode::Text;
+                explicit_mode = true;
+            }
+            "--vector" => {
+                requested_mode = SearchMode::Vector;
+                explicit_mode = true;
+            }
+            "--hybrid" => {
+                requested_mode = SearchMode::Hybrid;
+                explicit_mode = true;
+            }
             "--all-scopes" => all_scopes = true,
             "--descendants" => descendants = true,
             "--scope" => {
@@ -2929,6 +3127,7 @@ fn parse_search_args(args: Vec<String>) -> Result<ParsedSearch> {
     Ok(ParsedSearch {
         query: query.ok_or_else(|| KcsError::invalid_usage("search query is required"))?,
         requested_mode,
+        explicit_mode,
         scope,
         descendants,
         all_scopes,
@@ -2936,6 +3135,59 @@ fn parse_search_args(args: Vec<String>) -> Result<ParsedSearch> {
         offset,
         cursor,
     })
+}
+
+/// R11-7: `[search].default_mode` / `fail_behavior` from one config file
+/// (config.schema.json §search). Both are independent and optional; an unknown or
+/// absent value yields `None` (the config is schema-validated at startup, so an
+/// out-of-enum value is already rejected before search runs).
+fn read_search_config(path: &Path) -> Result<(Option<SearchMode>, Option<SearchFailBehavior>)> {
+    let Ok(text) = fs::read_to_string(path) else {
+        return Ok((None, None));
+    };
+    let value: toml::Value =
+        toml::from_str(&text).map_err(|err| KcsError::schema(err.to_string()))?;
+    let search = value.get("search");
+    let default_mode = search
+        .and_then(|section| section.get("default_mode"))
+        .and_then(toml::Value::as_str)
+        .and_then(parse_search_mode_name);
+    let fail_behavior = search
+        .and_then(|section| section.get("fail_behavior"))
+        .and_then(toml::Value::as_str)
+        .and_then(parse_fail_behavior_name);
+    Ok((default_mode, fail_behavior))
+}
+
+/// R11-7: effective `[search]` settings — the scope config.toml takes precedence
+/// over the user config.toml (same precedence direction the acceptance uses for
+/// other scoped overrides). `[search.multi_scope]` is intentionally untouched
+/// (R11-7 defer / MULTI-006).
+fn effective_search_config(
+    repo: &Repository,
+) -> Result<(Option<SearchMode>, Option<SearchFailBehavior>)> {
+    let (scope_mode, scope_fail) = read_search_config(&repo.kcs_dir().join("config.toml"))?;
+    let (user_mode, user_fail) = read_search_config(&user_config_toml_path())?;
+    Ok((scope_mode.or(user_mode), scope_fail.or(user_fail)))
+}
+
+fn parse_search_mode_name(name: &str) -> Option<SearchMode> {
+    match name {
+        "auto" => Some(SearchMode::Auto),
+        "text" => Some(SearchMode::Text),
+        "vector" => Some(SearchMode::Vector),
+        "hybrid" => Some(SearchMode::Hybrid),
+        _ => None,
+    }
+}
+
+fn parse_fail_behavior_name(name: &str) -> Option<SearchFailBehavior> {
+    match name {
+        "fallback" => Some(SearchFailBehavior::Fallback),
+        "warn" => Some(SearchFailBehavior::Warn),
+        "error" => Some(SearchFailBehavior::Error),
+        _ => None,
+    }
 }
 
 fn without_json(args: Vec<String>) -> Vec<String> {
@@ -3225,6 +3477,8 @@ fn empty_search_response(
         "fallback": mode.fallback,
         "fallback_reason": mode.fallback_reason.clone().map(Value::from).unwrap_or(Value::Null),
         "error_code": mode.error_code.clone().map(Value::from).unwrap_or(Value::Null),
+        // R11-7: non-null only under [search].fail_behavior = "warn" text fallback.
+        "warning": mode.warning.clone().map(Value::from).unwrap_or(Value::Null),
         "diversify": { "strategy": "group_by_raw_hash" },
         "paging": { "limit": parsed.limit, "next_cursor": Value::Null },
         "searched_scopes": searched_scopes,
@@ -4350,7 +4604,7 @@ fn run_batch(args: BatchArgs) -> Result<Value> {
                 })
                 .map_err(pipeline_to_kcs)?;
             let outcome = execute_pending_tasks(&repo, &store, resume.override_budget)?;
-            Ok(json!({
+            let mut output = json!({
                 "status": "resumed",
                 "override_budget": resume.override_budget,
                 "tasks_updated": changed,
@@ -4360,7 +4614,17 @@ fn run_batch(args: BatchArgs) -> Result<Value> {
                 // consumption even when nothing completed.
                 "tasks_attempted": outcome.attempted(),
                 "tasks_failed": outcome.failed,
-            }))
+                // R11-2: pauses this pass are a real state change (previously invisible
+                // — `tasks_updated` reported 0 while the store flipped to paused).
+                "tasks_paused": outcome.paused,
+            });
+            // R11-2: report the batch exit code (docs/04 §5.6) from what this pass did
+            // — auth (5) / budget-paused (6) / partial (3) / all-permanent (4) — while
+            // the full result JSON still prints to stdout.
+            if let Some(code) = batch_exit_override(&outcome) {
+                set_exit_override(&mut output, code);
+            }
+            Ok(output)
         }
         Some(BatchCommand::Retry) => {
             // R9-4: `batch retry` also recovers Partial online markdownize tasks
@@ -4388,14 +4652,20 @@ fn run_batch(args: BatchArgs) -> Result<Value> {
             // `batch retry` never overrides the budget cap (retry re-schedules,
             // it does not bypass caps — `batch resume --override-budget` does).
             let outcome = execute_pending_tasks(&repo, &store, false)?;
-            Ok(json!({
+            let mut output = json!({
                 "status": "retry scheduled",
                 "tasks_updated": changed + partial_reenqueued,
                 "tasks_executed": outcome.executed,
                 // R9-7: surface driven online-send attempts and failures.
                 "tasks_attempted": outcome.attempted(),
                 "tasks_failed": outcome.failed,
-            }))
+                // R11-2: pause transitions this pass (docs/04 §5.6 visibility).
+                "tasks_paused": outcome.paused,
+            });
+            if let Some(code) = batch_exit_override(&outcome) {
+                set_exit_override(&mut output, code);
+            }
+            Ok(output)
         }
         None => Err(KcsError::not_implemented("batch command")),
     }
@@ -4547,6 +4817,17 @@ fn partial_retry_plan_from_instance(output_ref: &str) -> Result<PartialRetryPlan
 struct ExecOutcome {
     executed: usize,
     failed: usize,
+    /// R11-2: tasks whose online send this pass was halted by the budget cap
+    /// (transitioned to Paused/budget_exceeded). Excluded from `attempted()` — no
+    /// adapter call was issued. Drives docs/04 §5.6 exit 6.
+    paused: usize,
+    /// R11-2: subset of `failed` whose error was auth/authorization (docs/04 §5.6
+    /// exit 5 — needs user re-auth, distinct from a retryable transient).
+    auth_failed: usize,
+    /// R11-2: subset of `failed` that is retry-eligible (retryable kind + attempts
+    /// left). `failed - failed_retryable` is the permanently-failed remainder; the
+    /// split drives the batch exit-code choice 3 (some retryable) vs 4 (all permanent).
+    failed_retryable: usize,
 }
 
 impl ExecOutcome {
@@ -4557,6 +4838,56 @@ impl ExecOutcome {
     fn add(&mut self, other: ExecOutcome) {
         self.executed += other.executed;
         self.failed += other.failed;
+        self.paused += other.paused;
+        self.auth_failed += other.auth_failed;
+        self.failed_retryable += other.failed_retryable;
+    }
+}
+
+/// R11-2: the batch exit code (docs/04 §5.6 / docs/06 §7) a `batch resume`/`retry`
+/// pass reports, computed from the tasks it TOUCHED this pass (its `ExecOutcome`,
+/// not the whole store — a pass that leaves a pre-existing paused/failed task
+/// untouched changed nothing and exits 0, preserving the L2 sticky-pause symmetry).
+/// Priority, highest first: auth (5, user re-auth), then budget-paused (6, needs
+/// `--override-budget`), then some-retryable-failed (3, `batch retry` can recover),
+/// then all-permanent-failed (4). A clean pass returns `None` = exit 0.
+fn batch_exit_override(outcome: &ExecOutcome) -> Option<ExitCode> {
+    if outcome.auth_failed > 0 {
+        Some(ExitCode::AuthError)
+    } else if outcome.paused > 0 {
+        Some(ExitCode::BudgetExceeded)
+    } else if outcome.failed_retryable > 0 {
+        Some(ExitCode::PartialFailure)
+    } else if outcome.failed > 0 {
+        Some(ExitCode::PermanentFailure)
+    } else {
+        None
+    }
+}
+
+/// R11-2: the exit code `index`/`repair`/`reindex` reports for its inline enrichment
+/// (embedding) outcome. Unlike `batch`, a retryable/permanent embedding failure does
+/// NOT override the exit — docs/05 says enrichment failure never aborts the local
+/// index; it is disclosed in the result JSON and left for `batch resume` (exit 0).
+/// Only the two states that need user intervention override the exit while the full
+/// result JSON still prints to stdout (the search-exit-3 "result + nonzero" pattern):
+/// auth (5) and budget-pause (6).
+fn enrichment_exit_override(outcome: &ExecOutcome) -> Option<ExitCode> {
+    if outcome.auth_failed > 0 {
+        Some(ExitCode::AuthError)
+    } else if outcome.paused > 0 {
+        Some(ExitCode::BudgetExceeded)
+    } else {
+        None
+    }
+}
+
+/// Embed the private `__exit_code` marker (stripped by `take_exit_override` before
+/// printing) so a command prints its full result JSON to stdout yet exits non-zero
+/// (05 §1.8 search pattern, extended by R11-2/R11-3 to index/repair/reindex/batch).
+fn set_exit_override(output: &mut Value, code: ExitCode) {
+    if let Some(object) = output.as_object_mut() {
+        object.insert("__exit_code".to_owned(), json!(code.code()));
     }
 }
 
@@ -4636,10 +4967,16 @@ fn execute_pending_markdownize_tasks(
             .metadata()
             .map(|metadata| metadata.len())
             .unwrap_or(0);
+        // R11-6: prorate the reserved (== billed, F8) cost of a UNIT-SCOPED retry by
+        // the fraction of the document actually re-sent — `unit_keys` names the still-
+        // failed units, and `execute_online_markdownize_task` requests only those. A
+        // full send (`unit_keys == None`) still bills the whole document. Without this,
+        // a 1-page retry of a 500-page PDF re-billed all 500 pages every attempt.
+        let estimated_usd = prorated_markdownize_cost(repo, &task, file_size);
         let estimate = BudgetEstimate {
             scope_id: scope_id.clone(),
             task_type: TaskType::Markdownize,
-            estimated_usd: estimate_online_markdownize_cost(file_size),
+            estimated_usd,
             adapter_id: Some(online_profile.adapter_id.clone()),
         };
         // F8: reserve the charge under the device-global cost-ledger lock BEFORE
@@ -4669,6 +5006,8 @@ fn execute_pending_markdownize_tasks(
                     }
                 })
                 .map_err(pipeline_to_kcs)?;
+            // R11-2: a Pending task budget-paused THIS pass → docs/04 §5.6 exit 6.
+            counts.paused += 1;
             continue;
         }
         store
@@ -4728,6 +5067,15 @@ fn execute_pending_markdownize_tasks(
                 // (rate-limit / auth / charge consumed) — count it so `batch` JSON
                 // surfaces the attempt instead of reporting only successes.
                 counts.failed += 1;
+                // R11-2: classify the failure for the batch exit code. Auth needs
+                // user action (exit 5); a scheduled `next_retry_at` marks the task
+                // retry-eligible (exit 3, else it counts toward all-permanent = 4).
+                if error.retry_kind == RetryErrorKind::AuthError {
+                    counts.auth_failed += 1;
+                }
+                if next_retry_at.is_some() {
+                    counts.failed_retryable += 1;
+                }
             }
         }
     }
@@ -4843,6 +5191,41 @@ struct TaskExecutionFailure {
     retry_kind: RetryErrorKind,
 }
 
+/// R11-6: the online-markdownize cost to reserve/bill for `task`. A full send bills
+/// the whole document; a unit-scoped retry (`task.unit_keys` = the still-failed
+/// units) bills only its share = full × (retried units / total prepared units),
+/// with a floor of one unit's worth. `total` is recomputed by preparing the input
+/// (deterministic, so it matches `execute_online_markdownize_task`'s own prepare);
+/// if the input can't be prepared it falls back to the full estimate.
+fn prorated_markdownize_cost(repo: &Repository, task: &TaskDescriptor, file_size: u64) -> f64 {
+    let full = estimate_online_markdownize_cost(file_size);
+    let Some(unit_keys) = task.unit_keys.as_ref().filter(|keys| !keys.is_empty()) else {
+        return full;
+    };
+    let Some(total) = task_prepared_unit_count(repo, task).filter(|count| *count > 0) else {
+        return full;
+    };
+    let sent = unit_keys.len().min(total).max(1);
+    full * (sent as f64 / total as f64)
+}
+
+/// R11-6: number of prepared units (pages/sections/…) the task's whole document
+/// splits into. `None` when the input can't be prepared. Deterministic, so it
+/// agrees with the prepare inside `execute_online_markdownize_task`.
+fn task_prepared_unit_count(repo: &Repository, task: &TaskDescriptor) -> Option<usize> {
+    let path = repo.root().join(&task.input_path);
+    let media_type = media_type_for_cli_path(&path).to_owned();
+    let prepare_profile_hash = builtin_prepare_profile().tool_profile_hash;
+    prepare_units(PrepareStageRequest {
+        raw_hash: task.input_hash.clone(),
+        media_type,
+        input_path: path.display().to_string(),
+        tool_profile_hash: prepare_profile_hash,
+    })
+    .ok()
+    .map(|prepare| prepare.prepared_units.len())
+}
+
 fn execute_online_markdownize_task(
     repo: &Repository,
     task: &TaskDescriptor,
@@ -4874,13 +5257,30 @@ fn execute_online_markdownize_task(
         });
     }
     let scope_id = repo.scope_id_for_adapter();
+    // R11-6: on a UNIT-SCOPED retry, `task.unit_keys` names the still-failed units.
+    // Request ONLY those from the adapter (re-OCR + re-bill just the failed subset,
+    // not the whole document); the full prepared set still drives the manifest so
+    // done/failed accounting covers every unit. `unit_keys == None` = a full send.
+    let retry_units: Option<BTreeSet<String>> = task
+        .unit_keys
+        .as_ref()
+        .map(|keys| keys.iter().cloned().collect());
+    let request_units: Vec<PreparedUnit> = match &retry_units {
+        Some(keys) => prepare
+            .prepared_units
+            .iter()
+            .filter(|unit| keys.contains(&unit.unit_key))
+            .cloned()
+            .collect(),
+        None => prepare.prepared_units.clone(),
+    };
     let outcome = run_standard_online_markdownize(StandardOnlineMarkdownizeRequest {
         scope_id: &scope_id,
         kcs_dir: repo.kcs_dir(),
         raw_hash: &task.input_hash,
         path: &path,
         media_type: &media_type,
-        prepared_unit_hints: prepared_unit_hints(&prepare.prepared_units),
+        prepared_unit_hints: prepared_unit_hints(&request_units),
     })
     .map_err(task_failure_from_adapter)?;
     let profile = outcome.profile;
@@ -4889,10 +5289,26 @@ fn execute_online_markdownize_task(
     let strict_valid =
         validate_markdownize_response(&response, &hints, &prepare.prepared_units).is_ok();
     let generated_at = now_utc_seconds();
-    let units = normalized_units_from_response(
+    // R11-6: preserve previously-done units (first-instance-wins). Load the prior
+    // instance this run overwrites (same raw_hash + resolved tool_profile_hash +
+    // gen 0). Regenerating a done unit under Markdown non-determinism would churn its
+    // fingerprint → needless re-embedding + Evidence churn (docs/04 §5.2).
+    let previous = if retry_units.is_some() {
+        load_previous_instance(&normalized_output_ref(
+            repo,
+            &task.input_hash,
+            &profile.tool_profile_hash,
+            0,
+        ))
+        .ok()
+        .flatten()
+    } else {
+        None
+    };
+    let mut units = normalized_units_from_response(
         &response,
         &prepare.prepared_units,
-        None,
+        previous.as_ref(),
         &task.input_hash,
         &profile.tool_profile_hash,
         MarkdownizeMode::Full,
@@ -4901,6 +5317,35 @@ fn execute_online_markdownize_task(
     .map_err(|_| TaskExecutionFailure {
         retry_kind: RetryErrorKind::ContractViolation,
     })?;
+    // R11-6: merge in the previously-done units the retry did not target. The retry
+    // request omitted them, so the adapter never returned them — keep the FIRST
+    // instance's output verbatim (first-instance-wins).
+    if let Some(prev) = &previous {
+        let produced: BTreeSet<String> = units.iter().map(|unit| unit.unit_key.clone()).collect();
+        for prev_unit in &prev.units {
+            if !produced.contains(&prev_unit.unit_key) {
+                units.push(prev_unit.clone());
+            }
+        }
+        // Re-establish document order after appending the preserved units.
+        let order_of: BTreeMap<&str, u64> = prepare
+            .prepared_units
+            .iter()
+            .map(|unit| (unit.unit_key.as_str(), unit.order))
+            .collect();
+        units.sort_by_key(|unit| {
+            order_of
+                .get(unit.unit_key.as_str())
+                .copied()
+                .unwrap_or(u64::MAX)
+        });
+    }
+    // R11-6: with the merge, `units` is empty only for a full send that returned
+    // nothing (a genuine contract violation). A unit-scoped retry where the adapter
+    // dropped every requested unit still carries the preserved previously-done units,
+    // so it is NOT a ContractViolation — it stays Partial and `attempts` advances (the
+    // mock `partial` seam drops the last requested unit, so a single-unit retry
+    // legitimately returns nothing).
     if units.is_empty() {
         return Err(TaskExecutionFailure {
             retry_kind: RetryErrorKind::ContractViolation,
@@ -4908,7 +5353,10 @@ fn execute_online_markdownize_task(
     }
     let done = units.len();
     let failed = prepare.prepared_units.len().saturating_sub(done);
-    let status = if strict_valid {
+    // R11-6: a unit-scoped retry's status is a pure function of merged done vs total.
+    // `strict_valid` checks the response covered ALL changed units, which a retry
+    // deliberately does not — so only a full send takes the strict Done shortcut.
+    let status = if retry_units.is_none() && strict_valid {
         TaskStatus::Done
     } else {
         task_status_from_unit_counts(done, failed, false)
@@ -5092,13 +5540,15 @@ struct EmbeddableChunk {
 /// charging the cost ledger under `adapter_kind="embedding"`. Offline leaves tasks
 /// Pending (surfaced by `index_status`). No-op when no embedding adapter is
 /// configured (keeps the default index path unchanged).
-fn generate_scope_embeddings(repo: &Repository, args: &IndexArgs) -> Result<()> {
+fn generate_scope_embeddings(repo: &Repository, args: &IndexArgs) -> Result<ExecOutcome> {
     // Embedding online opt-in is the embedding adapter's own (L4), not a
     // ride-along on the markdownize approval. `--offline` forces enqueue-only;
     // N7: `--online` now reaches the embedding adapter too (was ignored).
     let online =
         embedding_online_allowed(repo, args.offline, args.online, args.yes || args.approve)?;
-    run_embedding_enrichment(repo, online, false).map(|_| ())
+    // R11-2: return the enrichment outcome (was discarded) so `run_index` can disclose
+    // it and raise the exit code on auth/budget-pause.
+    run_embedding_enrichment(repo, online, false)
 }
 
 /// Core enrichment pass shared by `kcs index` (inline) and `kcs batch
@@ -5174,14 +5624,31 @@ fn run_embedding_enrichment(
     let month = utc_month(&now);
     let scope_id = repo.scope_id_for_adapter();
 
+    // R11-5: accumulate every chunk's task-store transition in memory and write it
+    // back in ONE `update_matching` after the loop, instead of a full all()+
+    // replace_all per 32-chunk batch. The per-batch form cost O(T) each × T/32
+    // batches = O(T²/32), turning a few-thousand-chunk initial embedding into a
+    // multi-minute hang. Crash safety is unchanged: `send_embed_batch` writes the
+    // embeddings row + chunk_vec and F8 reserves the ledger charge, both BEFORE this
+    // deferred completion — so a crash before the final write just re-drives the
+    // chunk through the free content-addressed reuse path (§5.5: text_hash hit → no
+    // API call, no re-charge). No unrecorded completion is double-billed, and the
+    // per-chunk map keeps a reuse "done" from being contaminated by a sibling send
+    // "failed" (L6). R11-2: the loop also tallies paused / auth / failed outcomes.
+    let mut transitions: BTreeMap<String, EmbeddingTransition> = BTreeMap::new();
+
     for batch in embeddable.chunks(EMBEDDING_BATCH_SIZE) {
         // Split content-addressed reuse (no API call, free) from chunks that
         // require a live adapter call (CT3-EMBED-006).
         let plan = match plan_embed_batch(&conn, &profile, batch) {
             Ok(plan) => plan,
             Err(failure) => {
-                fail_embedding_tasks(&task_store, batch, failure.retry_kind, &now)?;
-                outcome.failed += batch.len(); // R9-7
+                record_embedding_transitions(
+                    &mut transitions,
+                    batch.iter(),
+                    embedding_fail_transition(failure.retry_kind),
+                );
+                count_embedding_failure(&mut outcome, failure.retry_kind, batch.len());
                 break;
             }
         };
@@ -5191,20 +5658,20 @@ fn run_embedding_enrichment(
         if !plan.reuse.is_empty() {
             match link_reused_chunks(&conn, &profile, &plan.reuse) {
                 Ok(()) => {
-                    complete_embedding_tasks(
-                        &task_store,
+                    record_embedding_transitions(
+                        &mut transitions,
                         plan.reuse.iter().map(|(chunk, _)| *chunk),
-                    )?;
+                        embedding_done_transition(),
+                    );
                     outcome.executed += plan.reuse.len();
                 }
                 Err(failure) => {
-                    fail_embedding_tasks(
-                        &task_store,
+                    record_embedding_transitions(
+                        &mut transitions,
                         plan.reuse.iter().map(|(chunk, _)| *chunk),
-                        failure.retry_kind,
-                        &now,
-                    )?;
-                    outcome.failed += plan.reuse.len(); // R9-7
+                        embedding_fail_transition(failure.retry_kind),
+                    );
+                    count_embedding_failure(&mut outcome, failure.retry_kind, plan.reuse.len());
                     break;
                 }
             }
@@ -5240,33 +5707,139 @@ fn run_embedding_enrichment(
         if matches!(charge, ChargeOutcome::BudgetExceeded) {
             // Budget exhausted: pause the remaining to-send chunks
             // (index_status.budget_paused). Already-linked reuse stays done.
-            pause_embedding_tasks(&task_store, plan.to_send.iter().map(|(chunk, _)| *chunk))?;
+            record_embedding_transitions(
+                &mut transitions,
+                plan.to_send.iter().map(|(chunk, _)| *chunk),
+                embedding_pause_transition(),
+            );
+            // R11-2: budget-paused this pass → docs/04 §5.6 exit 6.
+            outcome.paused += plan.to_send.len();
             break;
         }
         match send_embed_batch(&conn, execution, &profile, &plan.to_send) {
             Ok(()) => {
                 // Charge already reserved under the lock above (F8).
-                complete_embedding_tasks(
-                    &task_store,
+                record_embedding_transitions(
+                    &mut transitions,
                     plan.to_send.iter().map(|(chunk, _)| *chunk),
-                )?;
+                    embedding_done_transition(),
+                );
                 outcome.executed += plan.to_send.len();
             }
             Err(failure) => {
                 // Enrichment failure is non-fatal: mark the sent chunks failed and
                 // stop (search sees no embeddings → text). Never fails `kcs index`.
-                fail_embedding_tasks(
-                    &task_store,
+                record_embedding_transitions(
+                    &mut transitions,
                     plan.to_send.iter().map(|(chunk, _)| *chunk),
-                    failure.retry_kind,
-                    &now,
-                )?;
-                outcome.failed += plan.to_send.len(); // R9-7
+                    embedding_fail_transition(failure.retry_kind),
+                );
+                count_embedding_failure(&mut outcome, failure.retry_kind, plan.to_send.len());
                 break;
             }
         }
     }
+    // R11-5: single write-back for the whole pass. Its return is the retry-eligible
+    // failed count (needs per-task `attempts`), feeding the batch exit-code 3-vs-4
+    // split (R11-2). `fallback_reason` per chunk (done/paused/failed) is preserved.
+    outcome.failed_retryable += apply_embedding_transitions(&task_store, &transitions, &now)?;
     Ok(outcome)
+}
+
+/// R11-5: one deferred task-store transition for an embedding chunk, applied in a
+/// single pass by [`apply_embedding_transitions`].
+#[derive(Clone, Copy)]
+struct EmbeddingTransition {
+    status: TaskStatus,
+    reason: &'static str,
+    failure_kind: Option<RetryErrorKind>,
+}
+
+fn embedding_done_transition() -> EmbeddingTransition {
+    EmbeddingTransition {
+        status: TaskStatus::Done,
+        reason: "embedding_adapter_done",
+        failure_kind: None,
+    }
+}
+
+fn embedding_pause_transition() -> EmbeddingTransition {
+    EmbeddingTransition {
+        status: TaskStatus::Paused,
+        reason: "budget_exceeded",
+        failure_kind: None,
+    }
+}
+
+fn embedding_fail_transition(kind: RetryErrorKind) -> EmbeddingTransition {
+    EmbeddingTransition {
+        status: TaskStatus::Failed,
+        reason: retry_reason(kind),
+        failure_kind: Some(kind),
+    }
+}
+
+/// R11-2: tally one failed embedding batch into the pass outcome — `failed` always,
+/// and `auth_failed` when the error needs user re-auth (exit 5). `failed_retryable`
+/// is finalized later in [`apply_embedding_transitions`] (it needs per-task attempts).
+fn count_embedding_failure(outcome: &mut ExecOutcome, kind: RetryErrorKind, count: usize) {
+    outcome.failed += count;
+    if kind == RetryErrorKind::AuthError {
+        outcome.auth_failed += count;
+    }
+}
+
+fn record_embedding_transitions<'a>(
+    transitions: &mut BTreeMap<String, EmbeddingTransition>,
+    chunks: impl IntoIterator<Item = &'a EmbeddableChunk>,
+    transition: EmbeddingTransition,
+) {
+    for chunk in chunks {
+        transitions.insert(embedding_task_output_ref(&chunk.chunk_id), transition);
+    }
+}
+
+/// R11-5: apply all accumulated embedding-task transitions in ONE `update_matching`.
+/// Returns the count of failures recorded retry-eligible (retryable kind with
+/// `attempts` remaining) so the caller can split the batch exit code 3 vs 4 (R11-2).
+fn apply_embedding_transitions(
+    task_store: &TaskStore,
+    transitions: &BTreeMap<String, EmbeddingTransition>,
+    now: &str,
+) -> Result<usize> {
+    if transitions.is_empty() {
+        return Ok(0);
+    }
+    let mut failed_retryable = 0usize;
+    task_store
+        .update_matching(|task| {
+            if task.task_type != TaskType::Embedding {
+                return false;
+            }
+            let Some(transition) = transitions.get(&task.output_ref) else {
+                return false;
+            };
+            task.status = transition.status;
+            task.fallback_reason = Some(transition.reason.to_owned());
+            if let Some(kind) = transition.failure_kind {
+                let attempts_after = task.attempts.saturating_add(1);
+                let policy = retry_policy(kind);
+                let retryable = policy.retryable
+                    && policy
+                        .max_attempts
+                        .map(|max| attempts_after < max)
+                        .unwrap_or(true);
+                task.attempts = attempts_after;
+                task.next_retry_at =
+                    retryable.then(|| scheduled_retry_at(now, &policy.backoff, attempts_after));
+                if retryable {
+                    failed_retryable += 1;
+                }
+            }
+            true
+        })
+        .map_err(pipeline_to_kcs)?;
+    Ok(failed_retryable)
 }
 
 /// A batch split into free content-addressed reuse and chunks needing an API call.
@@ -5591,91 +6164,11 @@ fn enqueue_embedding_tasks(
     Ok(())
 }
 
-fn update_embedding_tasks<'a>(
-    task_store: &TaskStore,
-    chunks: impl IntoIterator<Item = &'a EmbeddableChunk>,
-    status: TaskStatus,
-    reason: &str,
-    failure_kind: Option<RetryErrorKind>,
-    now: Option<&str>,
-) -> Result<()> {
-    let refs = chunks
-        .into_iter()
-        .map(|chunk| embedding_task_output_ref(&chunk.chunk_id))
-        .collect::<BTreeSet<_>>();
-    if refs.is_empty() {
-        return Ok(());
-    }
-    task_store
-        .update_matching(|task| {
-            if task.task_type == TaskType::Embedding && refs.contains(&task.output_ref) {
-                task.status = status;
-                task.fallback_reason = Some(reason.to_owned());
-                if let Some(kind) = failure_kind {
-                    let attempts_after = task.attempts.saturating_add(1);
-                    let policy = retry_policy(kind);
-                    let retryable = policy.retryable
-                        && policy
-                            .max_attempts
-                            .map(|max| attempts_after < max)
-                            .unwrap_or(true);
-                    task.attempts = attempts_after;
-                    task.next_retry_at = retryable.then(|| {
-                        scheduled_retry_at(now.unwrap_or(""), &policy.backoff, attempts_after)
-                    });
-                }
-                true
-            } else {
-                false
-            }
-        })
-        .map_err(pipeline_to_kcs)?;
-    Ok(())
-}
-
-fn complete_embedding_tasks<'a>(
-    task_store: &TaskStore,
-    chunks: impl IntoIterator<Item = &'a EmbeddableChunk>,
-) -> Result<()> {
-    update_embedding_tasks(
-        task_store,
-        chunks,
-        TaskStatus::Done,
-        "embedding_adapter_done",
-        None,
-        None,
-    )
-}
-
-fn pause_embedding_tasks<'a>(
-    task_store: &TaskStore,
-    chunks: impl IntoIterator<Item = &'a EmbeddableChunk>,
-) -> Result<()> {
-    update_embedding_tasks(
-        task_store,
-        chunks,
-        TaskStatus::Paused,
-        "budget_exceeded",
-        None,
-        None,
-    )
-}
-
-fn fail_embedding_tasks<'a>(
-    task_store: &TaskStore,
-    chunks: impl IntoIterator<Item = &'a EmbeddableChunk>,
-    kind: RetryErrorKind,
-    now: &str,
-) -> Result<()> {
-    update_embedding_tasks(
-        task_store,
-        chunks,
-        TaskStatus::Failed,
-        retry_reason(kind),
-        Some(kind),
-        Some(now),
-    )
-}
+// R11-5: the per-batch `update_embedding_tasks` / `complete_` / `pause_` /
+// `fail_embedding_tasks` helpers were removed — each did a full tasks.jsonl
+// all()+replace_all, and calling them once per 32-chunk batch was the O(N²) hang.
+// The enrichment loop now accumulates `EmbeddingTransition`s and writes them back
+// once via `apply_embedding_transitions`.
 
 fn retry_reason(kind: RetryErrorKind) -> &'static str {
     match kind {
@@ -7832,6 +8325,98 @@ mod tests {
             "index schema error: no such column"
         ));
         assert!(!is_vector_capacity_message("some other failure"));
+    }
+
+    #[test]
+    fn r11_10_keyword_groups_are_capped_at_64() {
+        use super::build_fts_tiers;
+        // 200 distinct ASCII keywords (>= 3 chars). Before R11-10 every one became an
+        // OR clause; now the keyword groups are capped at 64 like the CJK trigrams.
+        let query = (0..200)
+            .map(|i| format!("kw{i:04}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let tiers = build_fts_tiers(&query);
+        assert!(
+            !tiers.is_empty(),
+            "a long keyword query must still build a tier"
+        );
+        // No CJK → no trigram phrases, so each tier is purely keyword OR-groups.
+        // Every tier must be capped (group count = " OR " separators + 1).
+        for tier in &tiers {
+            let group_count = tier.matches(" OR ").count() + 1;
+            assert!(
+                group_count <= 64,
+                "keyword groups must be capped at 64, got {group_count}: {tier}"
+            );
+        }
+    }
+
+    #[test]
+    fn r11_2_exit_override_priority_batch_vs_enrichment() {
+        use super::{batch_exit_override, enrichment_exit_override, ExecOutcome};
+        use kcs_core::ExitCode;
+
+        // A clean pass overrides nothing (exit 0).
+        assert!(batch_exit_override(&ExecOutcome::default()).is_none());
+        assert!(enrichment_exit_override(&ExecOutcome::default()).is_none());
+
+        // Batch priority: auth (5) > budget-paused (6) > some-retryable (3) >
+        // all-permanent (4).
+        let all = ExecOutcome {
+            executed: 1,
+            failed: 3,
+            paused: 1,
+            auth_failed: 1,
+            failed_retryable: 1,
+        };
+        assert_eq!(batch_exit_override(&all), Some(ExitCode::AuthError));
+        assert_eq!(
+            batch_exit_override(&ExecOutcome {
+                auth_failed: 0,
+                ..all
+            }),
+            Some(ExitCode::BudgetExceeded)
+        );
+        assert_eq!(
+            batch_exit_override(&ExecOutcome {
+                auth_failed: 0,
+                paused: 0,
+                ..all
+            }),
+            Some(ExitCode::PartialFailure)
+        );
+        // Failures present but none retryable / auth / paused → all permanent (4).
+        assert_eq!(
+            batch_exit_override(&ExecOutcome {
+                failed: 2,
+                ..ExecOutcome::default()
+            }),
+            Some(ExitCode::PermanentFailure)
+        );
+
+        // Enrichment (index/repair/reindex) overrides ONLY on auth (5) / budget (6);
+        // a retryable/permanent embedding failure stays exit 0 (disclosed in JSON).
+        assert_eq!(
+            enrichment_exit_override(&ExecOutcome {
+                auth_failed: 1,
+                ..ExecOutcome::default()
+            }),
+            Some(ExitCode::AuthError)
+        );
+        assert_eq!(
+            enrichment_exit_override(&ExecOutcome {
+                paused: 1,
+                ..ExecOutcome::default()
+            }),
+            Some(ExitCode::BudgetExceeded)
+        );
+        assert!(enrichment_exit_override(&ExecOutcome {
+            failed: 2,
+            failed_retryable: 2,
+            ..ExecOutcome::default()
+        })
+        .is_none());
     }
 
     #[test]
