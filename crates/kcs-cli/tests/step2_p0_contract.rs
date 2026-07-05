@@ -804,12 +804,15 @@ fn ct2_budget_004_cli_cap_zero_pauses_online_task() {
         "[budget]\nmonthly_usd_cap = 0\n",
     )
     .unwrap();
-    fs::write(dir.path().join("a.txt"), "hello budget").unwrap();
+    // R9-2: online tasks are only enqueued for non-text-native files, so the
+    // online-lifecycle fixture is a PDF (the test's intent is budget/pause, not
+    // media routing).
+    fs::write(dir.path().join("a.pdf"), fake_pdf(&["hello budget"])).unwrap();
     let output = json_success(&dir, ["index", "--approve"]);
     assert!(output["paused_tasks"].as_u64().unwrap() > 0);
     let status = json_success(&dir, ["status"]);
     assert!(status["tasks"].as_array().unwrap().iter().any(|task| {
-        task["input_path"] == "a.txt"
+        task["input_path"] == "a.pdf"
             && task["status"] == "paused"
             && task["fallback_reason"] == "budget_exceeded"
     }));
@@ -898,25 +901,32 @@ fn ct2_secrets_003_tier_b_local_but_online_held() {
     // previously asserted the pre-fix behavior (a `pending`/`network_opt_in_required`
     // task that a network opt-in would ship) — the very leak N1 closes.
     let dir = scope();
-    fs::write(dir.path().join("api_token.txt"), "not actually secret").unwrap();
+    // R9-2: online tasks are only enqueued for non-text-native files. Use a PDF
+    // whose name still classifies as Tier B (`token`) so the online hold is
+    // exercised (the test's intent is the secrets hold, not media routing).
+    fs::write(
+        dir.path().join("api_token.pdf"),
+        fake_pdf(&["not actually secret"]),
+    )
+    .unwrap();
     let preview = json_success(&dir, ["index", "--preview"]);
     // Still ingested (not hard-excluded like Tier A), but flagged sensitive.
     assert!(!preview["excluded_candidates"]
         .as_array()
         .unwrap()
         .iter()
-        .any(|v| v == "api_token.txt"));
+        .any(|v| v == "api_token.pdf"));
     assert!(preview["sensitive_candidates"]
         .as_array()
         .unwrap()
         .iter()
-        .any(|c| c["path"] == "api_token.txt" && c["reason"] == "secrets_tier_b_warning"));
+        .any(|c| c["path"] == "api_token.pdf" && c["reason"] == "secrets_tier_b_warning"));
     json_success(&dir, ["index", "--yes"]);
     let status = json_success(&dir, ["status"]);
     // The online task is held, not sendable.
     assert!(
         status["tasks"].as_array().unwrap().iter().any(|task| {
-            task["input_path"] == "api_token.txt"
+            task["input_path"] == "api_token.pdf"
                 && task["status"] == "paused"
                 && task["fallback_reason"] == "secrets_tier_b_hold"
         }),
@@ -924,7 +934,7 @@ fn ct2_secrets_003_tier_b_local_but_online_held() {
     );
     assert!(
         !status["tasks"].as_array().unwrap().iter().any(|task| {
-            task["input_path"] == "api_token.txt"
+            task["input_path"] == "api_token.pdf"
                 && task["status"] == "pending"
                 && task["fallback_reason"] == "network_opt_in_required"
         }),
@@ -936,7 +946,7 @@ fn ct2_secrets_003_tier_b_local_but_online_held() {
             .as_array()
             .unwrap()
             .iter()
-            .any(|q| q["path"] == "api_token.txt" && q["reason"] == "secrets_tier_b"),
+            .any(|q| q["path"] == "api_token.pdf" && q["reason"] == "secrets_tier_b"),
         "Tier B must be recorded in quarantine: {status}"
     );
 }
@@ -1079,13 +1089,15 @@ fn ct2_scope_001_subfolder_files_do_not_reach_parent_artifacts() {
 #[test]
 fn ct2_network_001_yes_does_not_issue_online_tasks() {
     let dir = scope();
-    fs::write(dir.path().join("a.txt"), "hello").unwrap();
+    // R9-2: only non-text-native files enqueue online tasks; PDF fixture keeps the
+    // network-opt-in lifecycle intent.
+    fs::write(dir.path().join("a.pdf"), fake_pdf(&["hello"])).unwrap();
     let output = json_success(&dir, ["index", "--yes"]);
     assert_eq!(output["network_opt_in"], false);
     assert!(output["pending_online_tasks"].as_u64().unwrap() > 0);
     let status = json_success(&dir, ["status"]);
     assert!(status["tasks"].as_array().unwrap().iter().any(|task| {
-        task["input_path"] == "a.txt"
+        task["input_path"] == "a.pdf"
             && task["status"] == "pending"
             && task["fallback_reason"] == "network_opt_in_required"
     }));
@@ -1093,22 +1105,24 @@ fn ct2_network_001_yes_does_not_issue_online_tasks() {
 
 #[test]
 fn ct2_network_002_approve_grants_opt_in_yes_does_not() {
+    // R9-2: PDF fixtures so the online opt-in / ready_for_online_adapter task path
+    // is exercised (text-native files no longer enqueue online tasks).
     let yes_dir = scope();
-    fs::write(yes_dir.path().join("a.txt"), "hello").unwrap();
+    fs::write(yes_dir.path().join("a.pdf"), fake_pdf(&["hello"])).unwrap();
     assert_eq!(
         json_success(&yes_dir, ["index", "--yes"])["network_opt_in"],
         false
     );
 
     let approve_dir = scope();
-    fs::write(approve_dir.path().join("a.txt"), "hello").unwrap();
+    fs::write(approve_dir.path().join("a.pdf"), fake_pdf(&["hello"])).unwrap();
     assert_eq!(
         json_success(&approve_dir, ["index", "--approve"])["network_opt_in"],
         true
     );
 
     let online_dir = scope();
-    fs::write(online_dir.path().join("a.txt"), "hello").unwrap();
+    fs::write(online_dir.path().join("a.pdf"), fake_pdf(&["hello"])).unwrap();
     let error = json_failure(&online_dir, ["index", "--online"], 2);
     assert_eq!(error["error_code"], "KCS-E-CONFIG-USAGE-001");
     assert_eq!(
@@ -1132,13 +1146,15 @@ fn ct2_network_004_config_allow_network_enables_online() {
         "[adapter.policy]\nallow_network = true\n",
     )
     .unwrap();
-    fs::write(dir.path().join("a.txt"), "hello").unwrap();
+    // R9-2: PDF fixture keeps the online-adapter enqueue path (text-native files
+    // no longer enqueue online tasks).
+    fs::write(dir.path().join("a.pdf"), fake_pdf(&["hello"])).unwrap();
     let output = json_success(&dir, ["index", "--yes"]);
     assert_eq!(output["network_allowed"], true);
     assert_eq!(output["network_opt_in"], true);
     let status = json_success(&dir, ["status"]);
     assert!(status["tasks"].as_array().unwrap().iter().any(|task| {
-        task["input_path"] == "a.txt"
+        task["input_path"] == "a.pdf"
             && task["status"] == "pending"
             && task["fallback_reason"] == "ready_for_online_adapter"
     }));
@@ -1147,15 +1163,16 @@ fn ct2_network_004_config_allow_network_enables_online() {
 #[test]
 fn ct2_network_003_revoke_blocks_online_one_shot() {
     let dir = scope();
-    fs::write(dir.path().join("a.txt"), "hello").unwrap();
+    fs::write(dir.path().join("a.pdf"), fake_pdf(&["hello"])).unwrap();
     json_success(&dir, ["index", "--approve"]);
     json_success(&dir, ["index", "--revoke-network"]);
-    fs::write(dir.path().join("b.txt"), "new after revoke").unwrap();
+    // R9-2: the post-revoke online-task subject is a PDF (non-text-native).
+    fs::write(dir.path().join("b.pdf"), fake_pdf(&["new after revoke"])).unwrap();
     let output = json_success(&dir, ["index", "--yes", "--online"]);
     assert_eq!(output["network_opt_in"], false);
     let status = json_success(&dir, ["status"]);
     assert!(status["tasks"].as_array().unwrap().iter().any(|task| {
-        task["input_path"] == "b.txt"
+        task["input_path"] == "b.pdf"
             && task["status"] == "pending"
             && task["fallback_reason"] == "network_opt_in_required"
     }));
@@ -1294,7 +1311,9 @@ fn ct2_incr_009_cli_mock_adapter_uses_incremental_for_light_change() {
 #[test]
 fn ct2_adapter_013_baseline_and_ai_artifacts_coexist() {
     let dir = scope();
-    fs::write(dir.path().join("a.txt"), "hello").unwrap();
+    // R9-2: only non-text-native files enqueue an online task, so the coexistence
+    // fixture (baseline + online-AI artifacts) is a PDF.
+    fs::write(dir.path().join("a.pdf"), fake_pdf(&["hello"])).unwrap();
     json_success(&dir, ["index", "--approve"]);
     let baseline_root = dir.path().join(".kcs/objects/normalized_units");
     let before = collect_files(&baseline_root);
@@ -1313,7 +1332,9 @@ fn ct2_adapter_013_baseline_and_ai_artifacts_coexist() {
 #[test]
 fn ct2_budget_005_online_success_records_ledger_and_caps_next_task() {
     let dir = scope();
-    fs::write(dir.path().join("a.txt"), "hello online cost").unwrap();
+    // R9-2: online-cost lifecycle uses PDF fixtures (text-native files are baseline
+    // only, no online task).
+    fs::write(dir.path().join("a.pdf"), fake_pdf(&["hello online cost"])).unwrap();
     json_success(&dir, ["index", "--approve"]);
     json_success_with_env(
         &dir,
@@ -1331,12 +1352,12 @@ fn ct2_budget_005_online_success_records_ledger_and_caps_next_task() {
         "[budget]\nmonthly_usd_cap = 50\n[budget.per_adapter]\nmarkdown = 0.0\n",
     )
     .unwrap();
-    fs::write(dir.path().join("b.txt"), "second online cost").unwrap();
+    fs::write(dir.path().join("b.pdf"), fake_pdf(&["second online cost"])).unwrap();
     let output = json_success(&dir, ["index", "--yes"]);
     assert!(output["paused_tasks"].as_u64().unwrap() > 0);
     let status = json_success(&dir, ["status"]);
     assert!(status["tasks"].as_array().unwrap().iter().any(|task| {
-        task["input_path"] == "b.txt"
+        task["input_path"] == "b.pdf"
             && task["status"] == "paused"
             && task["fallback_reason"] == "budget_exceeded"
     }));
@@ -1386,11 +1407,9 @@ fn f1_offline_baseline_records_zero_usd_and_does_not_consume_budget() {
 #[test]
 fn f5_soft_stop_runs_over_cap_and_records_charge() {
     let dir = scope();
-    fs::write(
-        dir.path().join("a.md"),
-        "# 予算\n\n## 本文\nソフトストップのテスト本文です。\n",
-    )
-    .unwrap();
+    // R9-2: the over-cap online-task fixture is a PDF (text-native files enqueue no
+    // online task, so there would be nothing to soft-stop).
+    fs::write(dir.path().join("a.pdf"), fake_pdf(&["soft stop body"])).unwrap();
     // Folder cap 0 with soft-stop: any charge is over cap, but must not pause.
     fs::write(
         dir.path().join(".kcs/config.toml"),
@@ -1484,11 +1503,9 @@ fn f5_warn_at_percent_surfaces_non_blocking_warning() {
 #[test]
 fn f5_default_hard_stop_pauses_over_cap() {
     let dir = scope();
-    fs::write(
-        dir.path().join("a.md"),
-        "# 予算\n\n## 本文\nデフォルトは hard stop です。\n",
-    )
-    .unwrap();
+    // R9-2: the over-cap online-task fixture is a PDF (text-native files enqueue no
+    // online task, so there would be nothing to pause).
+    fs::write(dir.path().join("a.pdf"), fake_pdf(&["hard stop body"])).unwrap();
     // Folder cap 0, no hard_stop key → default hard_stop=true → pause at the cap.
     fs::write(
         dir.path().join(".kcs/config.toml"),
@@ -1512,7 +1529,9 @@ fn f5_default_hard_stop_pauses_over_cap() {
 #[test]
 fn ct2_image_003_cli_mock_preserves_links_when_replacing_images() {
     let dir = scope();
-    fs::write(dir.path().join("a.txt"), "hello image link").unwrap();
+    // R9-2: image-link replacement happens on the online OCR path, only reached by
+    // non-text-native files → PDF fixture.
+    fs::write(dir.path().join("a.pdf"), fake_pdf(&["hello image link"])).unwrap();
     json_success(&dir, ["index", "--approve"]);
     json_success_with_env(
         &dir,
@@ -1531,7 +1550,8 @@ fn ct2_image_003_cli_mock_preserves_links_when_replacing_images() {
 #[test]
 fn ct2_task_005_auth_error_task_is_not_retried() {
     let dir = scope();
-    fs::write(dir.path().join("a.txt"), "hello auth").unwrap();
+    // R9-2: online-task retry lifecycle uses a PDF fixture (non-text-native).
+    fs::write(dir.path().join("a.pdf"), fake_pdf(&["hello auth"])).unwrap();
     json_success(&dir, ["index", "--approve"]);
     json_success_with_env(
         &dir,
@@ -1562,7 +1582,9 @@ fn ct2_task_009_failed_online_task_is_not_reenqueued_by_reindex() {
     // 未変更ファイルを再 index しても、新しい Pending online task が積まれて
     // backoff ゲートを迂回できないこと (Failed の再試行は batch retry の責務)。
     let dir = scope();
-    fs::write(dir.path().join("a.txt"), "hello dedup").unwrap();
+    // R9-2: PDF fixture so a retryable online task exists to guard against reindex
+    // re-enqueue.
+    fs::write(dir.path().join("a.pdf"), fake_pdf(&["hello dedup"])).unwrap();
     json_success(&dir, ["index", "--approve"]);
     json_success_with_env(
         &dir,
@@ -1614,13 +1636,169 @@ fn ct2_task_006_partial_online_result_persists_partial_status() {
     }));
 }
 
+/// R9-4: a Partial online markdownize task must be recoverable — `batch retry`
+/// completes its Failed units and drives it to Done (docs/04 §5.2 `partial ->
+/// done`), and `index_status` counts a Partial as incomplete rather than falsely
+/// reporting 100% enrichment. Pre-fix Partial was a dead-end (retry/resume/reindex
+/// all ignored it) and `index_status` showed enriched_ratio 1.0 / pending 0 — a
+/// silent data gap.
+#[test]
+fn r9_4_partial_task_recovers_via_retry_and_status_counts_it() {
+    let dir = scope();
+    fs::write(
+        dir.path().join("report.pdf"),
+        fake_pdf(&["page one alpha", "page two beta"]),
+    )
+    .unwrap();
+    json_success(&dir, ["index", "--approve"]);
+    // The `partial` seam drops the last page → a Partial online task.
+    json_success_with_env(
+        &dir,
+        ["batch", "resume"],
+        &[(TEST_STANDARD_ONLINE_MARKDOWNIZE_ENV, "partial")],
+    );
+    let has_partial = |status: &Value| {
+        status["tasks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|task| task["input_path"] == "report.pdf" && task["status"] == "partial")
+    };
+    assert!(has_partial(&json_success(&dir, ["status"])));
+    // index_status (surfaced by search) must NOT claim full enrichment while a unit
+    // is still missing.
+    let search = json_success(&dir, ["search", "alpha"]);
+    assert!(
+        search["index_status"]["enriched_ratio"].as_f64().unwrap() < 1.0,
+        "a Partial task must lower enriched_ratio: {search}"
+    );
+    assert!(
+        search["index_status"]["pending_enrichment_tasks"]
+            .as_u64()
+            .unwrap()
+            > 0,
+        "a Partial task must count as pending enrichment: {search}"
+    );
+
+    // Retry with the full mock: the failed unit completes → the task reaches Done.
+    let retry = json_success_with_env(
+        &dir,
+        ["batch", "retry"],
+        &[(TEST_STANDARD_ONLINE_MARKDOWNIZE_ENV, "mock")],
+    );
+    assert!(
+        retry["tasks_updated"].as_u64().unwrap() >= 1,
+        "the Partial task must be re-enqueued: {retry}"
+    );
+    assert!(
+        retry["tasks_executed"].as_u64().unwrap() >= 1,
+        "the re-driven task must complete: {retry}"
+    );
+    let status = json_success(&dir, ["status"]);
+    assert!(
+        !has_partial(&status),
+        "no Partial task may remain: {status}"
+    );
+    let search = json_success(&dir, ["search", "alpha"]);
+    assert_eq!(
+        search["index_status"]["enriched_ratio"].as_f64().unwrap(),
+        1.0,
+        "the recovered scope must report full enrichment: {search}"
+    );
+}
+
+/// R9-7: `batch retry`/`resume` must report driven online-send attempts and
+/// failures in their JSON, not just successes. Pre-fix a Pending online task that
+/// failed on send left `{tasks_executed:0, tasks_updated:0}` — the attempt (rate
+/// limit / auth / charge consumed) was invisible to an orchestrator.
+#[test]
+fn r9_7_batch_retry_reports_failed_attempts_in_json() {
+    let dir = scope();
+    fs::write(dir.path().join("report.pdf"), fake_pdf(&["body text"])).unwrap();
+    // Approve network so the Pending online task is ready to send.
+    json_success(&dir, ["index", "--approve"]);
+    // Retry drives the Pending online task; the auth_error mock fails the send.
+    let retry = json_success_with_env(
+        &dir,
+        ["batch", "retry"],
+        &[(TEST_STANDARD_ONLINE_MARKDOWNIZE_ENV, "auth_error")],
+    );
+    assert_eq!(
+        retry["tasks_executed"], 0,
+        "the send failed, nothing completed: {retry}"
+    );
+    assert_eq!(
+        retry["tasks_attempted"], 1,
+        "the failed send must appear as an attempt: {retry}"
+    );
+    assert_eq!(
+        retry["tasks_failed"], 1,
+        "the failure must be reported: {retry}"
+    );
+    // The task really transitioned Pending -> Failed (the send was attempted).
+    let status = json_success(&dir, ["status"]);
+    assert_eq!(first_online_task(&status)["status"], "failed");
+}
+
+/// R9-2: text-native files (Markdown / plain text / code) must NOT enqueue an
+/// online Mistral-OCR task — they are fully handled by the deterministic Adapter
+/// (07 §2.1 / §5.2). A non-text-native PDF still does (routing preserved). Pre-fix
+/// every text file's raw bytes were queued for a third-party OCR API and billed
+/// ~10x the baseline for redundant, orphaned work.
+#[test]
+fn r9_2_text_native_files_do_not_enqueue_online_ocr_task() {
+    let dir = scope();
+    // Standing network opt-in so the media gate is the ONLY thing that could stop
+    // the enqueue.
+    fs::write(
+        dir.path().join(".kcs/config.toml"),
+        "[adapter.policy]\nallow_network = true\n",
+    )
+    .unwrap();
+    fs::write(dir.path().join("note.md"), "# Note\n\nbody text here\n").unwrap();
+    fs::write(dir.path().join("main.rs"), "fn main() { let _x = 1; }\n").unwrap();
+    fs::write(dir.path().join("plain.txt"), "just some plain text\n").unwrap();
+    let output = json_success(&dir, ["index", "--yes"]);
+    assert_eq!(
+        output["pending_online_tasks"].as_u64().unwrap(),
+        0,
+        "text-native files must not enqueue online tasks: {output}"
+    );
+    let status = json_success(&dir, ["status"]);
+    assert!(
+        !status["tasks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(is_online_output_ref),
+        "no online-output-ref task may exist for text-native files: {status}"
+    );
+
+    // A PDF in the same scope still enqueues an online task (routing preserved).
+    fs::write(dir.path().join("scan.pdf"), fake_pdf(&["scanned page"])).unwrap();
+    let output = json_success(&dir, ["index", "--yes"]);
+    assert!(
+        output["pending_online_tasks"].as_u64().unwrap() > 0,
+        "a PDF must still enqueue an online task: {output}"
+    );
+    assert!(
+        json_success(&dir, ["status"])["tasks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|task| task["input_path"] == "scan.pdf" && is_online_output_ref(task)),
+        "the PDF's online task must be present"
+    );
+}
+
 #[test]
 fn ct2_task_007_online_task_not_reissued_for_completed_identity() {
     // Step2c I1: once an online task for an identity is Done, re-indexing the
     // unchanged file must not enqueue a duplicate task. The bug was a later
     // `batch resume` re-sending that duplicate and double-charging the ledger.
     let dir = scope();
-    fs::write(dir.path().join("a.txt"), "hello dedup").unwrap();
+    // R9-2: PDF fixture so a real online task is enqueued for the dedup guard.
+    fs::write(dir.path().join("a.pdf"), fake_pdf(&["hello dedup"])).unwrap();
     json_success(&dir, ["index", "--approve"]);
     json_success_with_env(
         &dir,
@@ -1674,7 +1852,11 @@ fn ct2_task_007_online_task_not_reissued_for_completed_identity() {
     );
 
     // A changed file yields a new input_hash and does enqueue a fresh task.
-    fs::write(dir.path().join("a.txt"), "hello dedup changed content").unwrap();
+    fs::write(
+        dir.path().join("a.pdf"),
+        fake_pdf(&["hello dedup changed content"]),
+    )
+    .unwrap();
     json_success(&dir, ["index", "--yes"]);
     let changed = json_success(&dir, ["status"]);
     let pending_online = changed["tasks"]
@@ -1695,7 +1877,8 @@ fn ct2_task_008_retryable_failure_defers_until_backoff_elapses() {
     // (exp/retry_after backoff). `batch retry` skips the task until that time
     // is reached, then executes it.
     let dir = scope();
-    fs::write(dir.path().join("a.txt"), "hello retry backoff").unwrap();
+    // R9-2: PDF fixture so a real online task exists to fail and retry.
+    fs::write(dir.path().join("a.pdf"), fake_pdf(&["hello retry backoff"])).unwrap();
     json_success(&dir, ["index", "--approve"]);
 
     // Fail the online task with a rate-limit-like (retryable) error at T0.

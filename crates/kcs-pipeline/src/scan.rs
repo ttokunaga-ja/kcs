@@ -3,6 +3,7 @@
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
+use unicode_normalization::UnicodeNormalization;
 
 use crate::prepare::hash_bytes;
 use crate::{IoResultExt, Result};
@@ -270,6 +271,14 @@ fn explicitly_unignored(path: &str, is_dir: bool, rules: &[IgnoreRule]) -> bool 
 }
 
 fn matches_ignore_pattern(path: &str, is_dir: bool, pattern: &str) -> bool {
+    // R9-1: match on the NFC projection of BOTH sides so a Unicode canonically
+    // equivalent `.kcsignore` / `[scope] ignore` pattern reliably excludes a file
+    // whose on-disk name uses a different normal form (NFD names are routine on
+    // macOS/APFS via Finder/iCloud/zip/IME). This normalizes only the *matching*
+    // projection — `ScanCandidate.input_path` and the CAS/identity raw bytes stay
+    // the original bytes (R8 F2: normalize the comparison, never the identity).
+    let path = path.nfc().collect::<String>();
+    let pattern = pattern.nfc().collect::<String>();
     let directory_only = pattern.ends_with('/');
     if directory_only && !is_dir {
         return false;
@@ -385,5 +394,37 @@ mod tests {
         assert_eq!(classify_secret("api_token.txt"), Some(SecretTier::TierB));
         assert!(ignored_by_rules("debug.log", false, &rules));
         assert!(!ignored_by_rules("keep.log", false, &rules));
+    }
+
+    #[test]
+    fn r9_1_ignore_matches_across_unicode_normal_forms() {
+        // R9-1: a canonically-equivalent ignore pattern must exclude a file whose
+        // on-disk name uses a different Unicode normal form. Pre-fix the byte-wise
+        // comparison missed this, so an NFD file name (routine on macOS/APFS)
+        // slipped past an NFC `.kcsignore` pattern and was indexed / sent online.
+        let nfc_name = "café.md"; // é = U+00E9 (precomposed)
+        let nfd_name = "cafe\u{0301}.md"; // e + U+0301 combining acute
+        assert_ne!(
+            nfc_name.as_bytes(),
+            nfd_name.as_bytes(),
+            "the two normal forms must differ byte-wise"
+        );
+
+        let nfc_rule = vec![IgnoreRule {
+            pattern: nfc_name.to_owned(),
+            negated: false,
+        }];
+        let nfd_rule = vec![IgnoreRule {
+            pattern: nfd_name.to_owned(),
+            negated: false,
+        }];
+
+        // NFC pattern excludes an NFD on-disk name, and vice versa.
+        assert!(ignored_by_rules(nfd_name, false, &nfc_rule));
+        assert!(ignored_by_rules(nfc_name, false, &nfd_rule));
+        // The same-form case still works.
+        assert!(ignored_by_rules(nfc_name, false, &nfc_rule));
+        // A genuinely different name is still not excluded.
+        assert!(!ignored_by_rules("other.md", false, &nfc_rule));
     }
 }

@@ -163,13 +163,22 @@ pub(crate) fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
     }
 
     let temp = parent.join(format!(".tmp-{}-{}", std::process::id(), unix_nanos()));
-    {
+    // R9-8: drop the temp on any write/sync/rename failure so an ENOSPC/EIO error
+    // never leaves an orphan `.tmp-*` in the CAS fanout dir (there is no GC before
+    // Step 4, and such residue also feeds R9-5's junk-in-gen-dir failure). Same
+    // cleanup idiom as `atomic_overwrite` below and the `markdownize.rs`/`main.rs`
+    // writers.
+    let result = (|| -> Result<()> {
         let mut file = File::create(&temp).kcs_io(&temp)?;
         file.write_all(bytes).kcs_io(&temp)?;
         file.sync_all().kcs_io(&temp)?;
+        drop(file);
+        fs::rename(&temp, path).kcs_io(path)
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temp);
     }
-    fs::rename(&temp, path).kcs_io(path)?;
-    Ok(())
+    result
 }
 
 pub(crate) fn atomic_overwrite(path: &Path, bytes: &[u8]) -> Result<()> {
@@ -178,13 +187,19 @@ pub(crate) fn atomic_overwrite(path: &Path, bytes: &[u8]) -> Result<()> {
         .ok_or_else(|| KcsError::io("path has no parent", path.display().to_string()))?;
     fs::create_dir_all(parent).kcs_io(parent)?;
     let temp = parent.join(format!(".tmp-{}-{}", std::process::id(), unix_nanos()));
-    {
+    // R9-8: see `atomic_write` — remove the temp on any failure so a torn write
+    // does not leave an orphan `.tmp-*` behind.
+    let result = (|| -> Result<()> {
         let mut file = File::create(&temp).kcs_io(&temp)?;
         file.write_all(bytes).kcs_io(&temp)?;
         file.sync_all().kcs_io(&temp)?;
+        drop(file);
+        fs::rename(&temp, path).kcs_io(path)
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temp);
     }
-    fs::rename(&temp, path).kcs_io(path)?;
-    Ok(())
+    result
 }
 
 pub(crate) fn append_jsonl(path: &Path, value: &Value) -> Result<()> {
@@ -224,4 +239,46 @@ fn unix_nanos() -> u128 {
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_nanos())
         .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn stray_temp_files(dir: &Path) -> Vec<String> {
+        fs::read_dir(dir)
+            .unwrap()
+            .filter_map(std::result::Result::ok)
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.starts_with(".tmp-"))
+            .collect()
+    }
+
+    #[test]
+    fn atomic_overwrite_removes_temp_on_rename_failure() {
+        // R9-8: `atomic_overwrite` (and its twin `atomic_write`, which shares this
+        // cleanup idiom) must remove its temp on any failure so an ENOSPC/EIO error
+        // never leaves an orphan `.tmp-*` in the CAS fanout dir. Force the rename to
+        // fail deterministically by making the destination an existing directory
+        // (`rename(file, dir)` → EISDIR) after the temp is created + fsynced.
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("target");
+        fs::create_dir(&dest).unwrap();
+        let result = atomic_overwrite(&dest, b"payload");
+        assert!(result.is_err(), "overwrite onto a directory must fail");
+        assert!(
+            stray_temp_files(dir.path()).is_empty(),
+            "R9-8: temp must be cleaned up on failure, found {:?}",
+            stray_temp_files(dir.path())
+        );
+    }
+
+    #[test]
+    fn atomic_overwrite_succeeds_and_leaves_no_temp() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("obj");
+        atomic_overwrite(&dest, b"hello").unwrap();
+        assert_eq!(fs::read(&dest).unwrap(), b"hello");
+        assert!(stray_temp_files(dir.path()).is_empty());
+    }
 }

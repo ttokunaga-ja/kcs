@@ -464,7 +464,10 @@ fn atomic_write_image_object(path: &Path, bytes: &[u8]) -> Result<()> {
         .unwrap_or_default();
     let seq = SEQ.fetch_add(1, Ordering::Relaxed);
     let temp = parent.join(format!(".tmp-{}-{}-{}", std::process::id(), nanos, seq));
-    {
+    // R9-8: remove the temp on any write/sync/rename failure so a torn write does
+    // not leave an orphan `.tmp-*` in the image CAS fanout dir (no GC before Step
+    // 4). Same cleanup idiom as the core CAS writers.
+    let result = (|| -> Result<()> {
         use std::io::Write as _;
         let mut file = std::fs::File::create(&temp).map_err(|err| AdapterError::Io {
             path: temp.display().to_string(),
@@ -478,11 +481,16 @@ fn atomic_write_image_object(path: &Path, bytes: &[u8]) -> Result<()> {
             path: temp.display().to_string(),
             message: err.to_string(),
         })?;
+        drop(file);
+        std::fs::rename(&temp, path).map_err(|err| AdapterError::Io {
+            path: path.display().to_string(),
+            message: err.to_string(),
+        })
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temp);
     }
-    std::fs::rename(&temp, path).map_err(|err| AdapterError::Io {
-        path: path.display().to_string(),
-        message: err.to_string(),
-    })
+    result
 }
 
 pub fn persist_images(kcs_dir: impl AsRef<Path>, images: &[OcrImage]) -> Result<Vec<String>> {
@@ -565,6 +573,29 @@ mod tests {
         assert_eq!(
             tool_profile_hash(&frozen_profile_value()).unwrap(),
             "sha256:24bd9e903241740fc9fe94fb72a6ff3e697b3c0859bd5aef1b49728a207e81ed"
+        );
+    }
+
+    #[test]
+    fn r9_8_atomic_write_image_object_removes_temp_on_failure() {
+        // R9-8: a torn image-object write must not leave an orphan `.tmp-*` in the
+        // image CAS fanout dir. Force the rename to fail deterministically by
+        // making the destination an existing directory (`rename(file, dir)` errors)
+        // after the temp is created + fsynced.
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("obj");
+        std::fs::create_dir(&dest).unwrap();
+        let result = atomic_write_image_object(&dest, b"image-bytes");
+        assert!(result.is_err(), "write onto a directory must fail");
+        let stray: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(std::result::Result::ok)
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.starts_with(".tmp-"))
+            .collect();
+        assert!(
+            stray.is_empty(),
+            "temp not cleaned up on failure: {stray:?}"
         );
     }
 
