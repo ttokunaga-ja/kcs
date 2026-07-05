@@ -1129,7 +1129,17 @@ fn ct2_network_002_approve_grants_opt_in_yes_does_not() {
         json_success(&online_dir, ["index", "--yes", "--online"])["network_opt_in"],
         false
     );
+    // R10-7: `--yes --online` grants NO persistent opt-in, and online markdownize can
+    // only be driven by `batch` (which gates on the persistent opt-in). So the task
+    // is NOT actually sendable — it must report `network_opt_in_required`, not a false
+    // `ready_for_online_adapter` that no `batch resume` could ever fulfill.
     assert!(json_success(&online_dir, ["status"])["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|task| task["input_path"] == "a.pdf"
+            && task["fallback_reason"] == "network_opt_in_required"));
+    assert!(!json_success(&online_dir, ["status"])["tasks"]
         .as_array()
         .unwrap()
         .iter()
@@ -1704,6 +1714,106 @@ fn r9_4_partial_task_recovers_via_retry_and_status_counts_it() {
         search["index_status"]["enriched_ratio"].as_f64().unwrap(),
         1.0,
         "the recovered scope must report full enrichment: {search}"
+    );
+}
+
+/// R10-4: a Partial online markdownize task whose unit keeps failing must NOT be
+/// re-sent & re-billed forever. Each `batch retry` charges the retry budget
+/// (`attempts`++) and, once `max_attempts` is reached, the task is left Partial and
+/// no further online send is issued (`tasks_updated`/`tasks_executed` == 0). Pre-fix
+/// `attempts` stayed 0 and every retry re-sent (a fresh cost-ledger markdown row),
+/// bounded only by the monthly budget cap.
+#[test]
+fn r10_4_partial_retry_respects_budget_and_stops_resending() {
+    let dir = scope();
+    fs::write(
+        dir.path().join("report.pdf"),
+        fake_pdf(&["page one alpha", "page two beta"]),
+    )
+    .unwrap();
+    json_success(&dir, ["index", "--approve"]);
+    // The `partial` seam drops the last page -> a Partial online task (attempts 0).
+    json_success_with_env(
+        &dir,
+        ["batch", "resume"],
+        &[(TEST_STANDARD_ONLINE_MARKDOWNIZE_ENV, "partial")],
+    );
+    // A text-layer PDF has TWO markdownize tasks: the Done local baseline and the
+    // online OCR task. Track the online one — at rest it is the Partial task.
+    let online_task = |status: &Value| -> Value {
+        status["tasks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|task| {
+                task["input_path"] == "report.pdf"
+                    && task["type"] == "markdownize"
+                    && task["status"] == "partial"
+            })
+            .cloned()
+            .expect("partial online markdownize task present")
+    };
+    let task0 = online_task(&json_success(&dir, ["status"]));
+    assert_eq!(task0["status"], "partial");
+    let attempts0 = task0["attempts"].as_u64().unwrap();
+
+    // Keep retrying under the SAME still-failing (partial) seam. Attempts must climb
+    // while budget remains, then the loop must halt (no further re-enqueue / re-send).
+    let mut progressed = false;
+    let mut halted = false;
+    for _ in 0..12 {
+        let retry = json_success_with_env(
+            &dir,
+            ["batch", "retry"],
+            &[(TEST_STANDARD_ONLINE_MARKDOWNIZE_ENV, "partial")],
+        );
+        if retry["tasks_updated"].as_u64().unwrap() >= 1 {
+            progressed = true;
+        }
+        if retry["tasks_updated"].as_u64().unwrap() == 0
+            && retry["tasks_executed"].as_u64().unwrap() == 0
+        {
+            halted = true;
+            break;
+        }
+    }
+    assert!(
+        progressed,
+        "retries must progress attempts while the retry budget remains"
+    );
+    assert!(
+        halted,
+        "retries must eventually stop re-sending a permanently-failing unit"
+    );
+
+    // The task is still Partial (never falsely Done) and attempts advanced then froze.
+    let task1 = online_task(&json_success(&dir, ["status"]));
+    assert_eq!(
+        task1["status"], "partial",
+        "a persistently-failing unit stays Partial: {task1}"
+    );
+    let attempts1 = task1["attempts"].as_u64().unwrap();
+    assert!(
+        attempts1 > attempts0,
+        "attempts must have progressed: {attempts0} -> {attempts1}"
+    );
+
+    // Once halted, a further retry issues no work at all — the re-billing loop is
+    // closed.
+    let again = json_success_with_env(
+        &dir,
+        ["batch", "retry"],
+        &[(TEST_STANDARD_ONLINE_MARKDOWNIZE_ENV, "partial")],
+    );
+    assert_eq!(
+        again["tasks_updated"].as_u64().unwrap(),
+        0,
+        "halted task must not re-enqueue: {again}"
+    );
+    assert_eq!(
+        again["tasks_executed"].as_u64().unwrap(),
+        0,
+        "halted task must not re-send: {again}"
     );
 }
 

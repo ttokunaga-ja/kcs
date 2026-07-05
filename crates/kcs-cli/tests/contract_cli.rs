@@ -680,7 +680,24 @@ fn n3_config_ignore_array_validates() {
         .assert()
         .success();
 
-    // A valid top-level `ignore` array of strings is accepted (03 §11).
+    // R10-2: the ignore key lives under `[scope]` (03 §11); a `[scope] ignore` array
+    // of strings is the valid form and is accepted.
+    fs::write(
+        temp.path().join(".kcs/config.toml"),
+        "kcs_format_version = \"0.1.0\"\n[scope]\nignore = [\"*.tmp\", \"secret.pdf\"]\n",
+    )
+    .unwrap();
+    kcs()
+        .args(["status", "--json"])
+        .current_dir(temp.path())
+        .assert()
+        .success();
+
+    // R10-2: a TOP-LEVEL `ignore` is NOT part of the schema. It was silently ignored
+    // by the pipeline (which only reads `[scope] ignore`), leaking would-be-excluded
+    // files into the index / search / online sends. Top-level `additionalProperties:
+    // false` now rejects it loudly with a schema error (exit 2) rather than a silent
+    // no-op.
     fs::write(
         temp.path().join(".kcs/config.toml"),
         "kcs_format_version = \"0.1.0\"\nignore = [\"*.tmp\", \"secret.pdf\"]\n",
@@ -690,12 +707,12 @@ fn n3_config_ignore_array_validates() {
         .args(["status", "--json"])
         .current_dir(temp.path())
         .assert()
-        .success();
+        .code(2);
 
-    // A non-array `ignore` is a schema violation (exit 2).
+    // A non-array `[scope] ignore` is a schema violation (exit 2).
     fs::write(
         temp.path().join(".kcs/config.toml"),
-        "kcs_format_version = \"0.1.0\"\nignore = \"not-an-array\"\n",
+        "kcs_format_version = \"0.1.0\"\n[scope]\nignore = \"not-an-array\"\n",
     )
     .unwrap();
     kcs()
