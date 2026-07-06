@@ -3976,7 +3976,7 @@ fn r12_2_adapter_policy_full_default_block_all_commands_ok() {
     let status = json_success(&dir, &["status"]);
     assert!(status.get("scope_path").is_some());
     let search = json_success(&dir, &["search", "トークン TTL"]);
-    assert_eq!(search["results"].as_array().unwrap().len() >= 1, true);
+    assert!(!search["results"].as_array().unwrap().is_empty());
 }
 
 // A non-default value for an UNIMPLEMENTED enforcement key is a loud
@@ -4453,4 +4453,157 @@ fn r12_7_limit_zero_is_a_usage_error() {
     // The upper clamp (100) is unchanged: a large value still succeeds.
     let big = json_success(&dir, &["search", "トークン TTL", "--limit=500"]);
     assert_eq!(big["paging"]["limit"], 100);
+}
+
+/// R13-3: `[logs] retention_days` is a real, schema-validated config key. Before
+/// the fix docs/06 §13 / docs/10 §12.6 documented "日次ローテ・保持 30 日 (config
+/// 上書き可)" but no such key existed, so pasting `[logs] retention_days = 7` into
+/// a config bricked EVERY command with exit 2 (additionalProperties:false). Both
+/// scope and user config must now accept it (exit 0).
+#[test]
+fn r13_3_logs_retention_days_accepted_in_scope_config() {
+    let dir = indexed_scope();
+    write_scope_config(&dir, "[logs]\nretention_days = 7\n");
+    // A previously-bricking config now runs cleanly end-to-end.
+    json_success(&dir, &["status"]);
+    json_success(&dir, &["search", "トークン"]);
+}
+
+#[test]
+fn r13_3_logs_retention_days_accepted_in_user_config() {
+    let dir = indexed_scope();
+    let user_cfg = dir.path().join(".test-config/kcs");
+    fs::create_dir_all(&user_cfg).unwrap();
+    fs::write(
+        user_cfg.join("config.toml"),
+        "kcs_format_version = \"0.1.0\"\n[logs]\nretention_days = 7\n",
+    )
+    .unwrap();
+    json_success(&dir, &["status"]);
+    json_success(&dir, &["search", "トークン"]);
+}
+
+/// R13-3 (d) / R12-5: a log write that cannot land (here the device metrics path is
+/// occupied by a directory, so both rotation and append fail) must NOT fail the
+/// command body — the search result still returns exit 0.
+#[test]
+fn r13_3_unwritable_log_path_does_not_fail_the_search() {
+    let dir = indexed_scope();
+    let logs = dir.path().join(".test-data/kcs/logs");
+    fs::create_dir_all(&logs).unwrap();
+    // Occupy metrics.jsonl with a directory so the append (and any rotation) fails.
+    let metrics = logs.join("metrics.jsonl");
+    if metrics.exists() {
+        fs::remove_file(&metrics).ok();
+    }
+    fs::create_dir_all(&metrics).unwrap();
+    // Search still succeeds despite the broken device log path.
+    json_success(&dir, &["search", "トークン"]);
+}
+
+/// R13-2(4)/(f): an online embedding adapter that activates via the legacy
+/// GEMINI_API_KEY env var with NO tools.toml declaration is env-only drift
+/// (docs/07 §7.1). It must be recorded once per run (undeclared-adapter warn),
+/// not silently. A bad API base keeps any actual embed attempt hermetic (fast
+/// connection refusal → graceful text fallback), so the search still succeeds.
+#[test]
+fn r13_2_undeclared_env_only_embedding_activation_warns_once() {
+    let dir = indexed_scope();
+    kcs(&dir, &["search", "トークン"])
+        .env("GEMINI_API_KEY", "fake-key-not-used-for-real-http")
+        .env("GEMINI_API_BASE", "http://127.0.0.1:1")
+        .arg("--json")
+        .assert()
+        .success();
+    let errors =
+        fs::read_to_string(dir.path().join(".test-data/kcs/logs/errors.jsonl")).unwrap_or_default();
+    let warns = errors
+        .lines()
+        .filter(|line| line.contains("KCS-W-ADAPTER-UNDECLARED-001"))
+        .count();
+    assert_eq!(
+        warns, 1,
+        "env-only (undeclared) activation must warn exactly once per run: {errors}"
+    );
+}
+
+/// R13-2: write a user tools.toml under the test's XDG_CONFIG_HOME.
+fn write_tools_toml(dir: &TempDir, body: &str) {
+    let cfg = dir.path().join(".test-config/kcs");
+    fs::create_dir_all(&cfg).unwrap();
+    fs::write(cfg.join("tools.toml"), body).unwrap();
+}
+
+/// R13-2(a): a bogus key / type-mismatch in tools.toml is exit 2 (schema),
+/// symmetric with config.toml — before, tools.toml silently accepted it at exit 0.
+#[test]
+fn r13_2_cli_tools_toml_bogus_key_and_type_are_exit_2() {
+    let dir = indexed_scope();
+    write_tools_toml(&dir, "[markdown]\ntotally_bogus_key = \"xyz\"\n");
+    let err = json_failure(&dir, &["status"], 2);
+    assert_eq!(err["error_code"], "KCS-E-CONFIG-SCHEMA-001");
+
+    write_tools_toml(&dir, "[markdown.x]\ncmd = 12345\n");
+    let err = json_failure(&dir, &["status"], 2);
+    assert_eq!(err["error_code"], "KCS-E-CONFIG-SCHEMA-001");
+}
+
+/// R13-2(b): the docs/03 §11 + docs/07 §1 copy-paste passes (exit 0) — a
+/// documented config must never brick the device (R12-2 lesson).
+#[test]
+fn r13_2_cli_documented_tools_toml_is_accepted() {
+    let dir = indexed_scope();
+    write_tools_toml(
+        &dir,
+        "[markdown.mistral_ocr_markdownize]\n\
+         kind = \"online_api\"\n\
+         cmd = \"uvx kcs-mistral-ocr-adapter\"\n\
+         model = \"mistral-ocr-latest\"\n\
+         profile_hash = \"sha256:...\"\n\
+         capabilities = [\"ocr\", \"layout_detection\", \"table_extraction\"]\n\
+         \n\
+         [embedding.gemini_embedding_2]\n\
+         auth = \"env:GEMINI_API_KEY\"\n",
+    );
+    json_success(&dir, &["status"]);
+}
+
+/// R13-2(c)/(e): the auth-prefix check is scoped to the `auth` field, so a
+/// documented `url = "plain:"` no longer bricks every command (exit 0).
+#[test]
+fn r13_2_cli_url_plain_prefix_does_not_brick() {
+    let dir = indexed_scope();
+    write_tools_toml(&dir, "[markdown.x]\nurl = \"plain:\"\n");
+    json_success(&dir, &["status"]);
+}
+
+/// R13-2(e): a declared `auth = "keychain:<svc>"` is not implemented — when the
+/// embedding adapter activates from it (the finding: a declared auth used to be a
+/// silent noop), the misconfig must be LOUD (recorded to errors.jsonl as
+/// KCS-E-NOT-IMPLEMENTED-001), never silently swallowed.
+#[test]
+fn r13_2_keychain_auth_is_loud_not_silent() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(
+        dir.path().join("note.md"),
+        "# 認証\n\nトークン TTL は 3600 秒。スコープは read write admin。\n",
+    )
+    .unwrap();
+    // Declare the embedding adapter with an (unimplemented) keychain auth BEFORE
+    // indexing, so `index` activates it and the enrichment pass resolves the auth.
+    write_tools_toml(&dir, "[embedding.g]\nauth = \"keychain:login\"\n");
+    kcs(&dir, &["init"]).assert().success();
+    // The index itself still succeeds (the failed embedding is a counted task), but
+    // the keychain misconfig must be recorded loudly.
+    let out = json_success(&dir, &["index", "--approve"]);
+    assert!(
+        out["embedding_tasks_failed"].as_u64().unwrap_or(0) >= 1,
+        "the declared keychain adapter must ACTIVATE (fail visibly), not be ignored: {out}"
+    );
+    let errors =
+        fs::read_to_string(dir.path().join(".test-data/kcs/logs/errors.jsonl")).unwrap_or_default();
+    assert!(
+        errors.contains("KCS-E-NOT-IMPLEMENTED-001"),
+        "keychain auth must be recorded loudly, not silently ignored: {errors}"
+    );
 }

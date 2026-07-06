@@ -2277,3 +2277,366 @@ fn collect_files_inner(root: &Path, current: &Path, out: &mut BTreeSet<PathBuf>)
         }
     }
 }
+
+/// R13-4: an empty or missing `.kcs/HEAD` with a healthy `refs/heads/main` is a
+/// CORRUPT HEAD, not an unborn branch. Before the fix `head_commit_hash` returned
+/// `None`, so `log` showed nothing and `snapshot` orphaned all history under a
+/// fresh `parents=[]` root commit (silent data loss, exit 0). Now HEAD is
+/// self-repaired from refs on `open`, so `log` shows C1 and the next `snapshot`
+/// extends it. A genuinely unborn branch (both empty) still root-commits.
+fn events_log(dir: &TempDir) -> String {
+    let path = dir.path().join(".test-data/kcs/logs/events.jsonl");
+    fs::read_to_string(path).unwrap_or_default()
+}
+
+#[test]
+fn r13_4_empty_head_with_healthy_refs_is_repaired_not_orphaned() {
+    let dir = scope();
+    fs::write(dir.path().join("doc.txt"), "v1").unwrap();
+    let c1 = json_success(&dir, ["snapshot", "-m", "first"]);
+    let c1_hash = c1["commit_hash"].as_str().unwrap().to_owned();
+
+    // Corrupt HEAD to empty; refs/heads/main still names C1.
+    fs::write(dir.path().join(".kcs/HEAD"), "").unwrap();
+    assert_eq!(
+        fs::read_to_string(dir.path().join(".kcs/refs/heads/main")).unwrap(),
+        c1_hash,
+        "precondition: refs still names C1"
+    );
+
+    // (a) `log` must surface C1 (HEAD self-heals on open).
+    let log = json_success(&dir, ["log"]);
+    assert!(
+        log["commits"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|commit| commit["commit_hash"] == c1_hash),
+        "log must show the recovered C1: {log}"
+    );
+
+    // (a) the next snapshot must extend C1, not orphan it under a root commit.
+    fs::write(dir.path().join("doc.txt"), "v2").unwrap();
+    let c2 = json_success(&dir, ["snapshot", "-m", "after"]);
+    assert_eq!(c2["status"], "created");
+    assert_eq!(
+        c2["commit"]["parents"].as_array().unwrap(),
+        &vec![json!(c1_hash)],
+        "C2 must have C1 as its parent (history preserved): {c2}"
+    );
+
+    // (d) the recovery is recorded (never silent).
+    assert!(
+        events_log(&dir).contains("KCS-I-STORE-HEAD-REPAIRED-001"),
+        "HEAD repair must be logged to events.jsonl"
+    );
+}
+
+#[test]
+fn r13_4_missing_head_with_healthy_refs_is_repaired() {
+    let dir = scope();
+    fs::write(dir.path().join("doc.txt"), "v1").unwrap();
+    let c1 = json_success(&dir, ["snapshot", "-m", "first"]);
+    let c1_hash = c1["commit_hash"].as_str().unwrap().to_owned();
+
+    // (b) delete HEAD entirely; refs/heads/main still healthy.
+    fs::remove_file(dir.path().join(".kcs/HEAD")).unwrap();
+    let log = json_success(&dir, ["log"]);
+    assert!(log["commits"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|commit| commit["commit_hash"] == c1_hash));
+    assert_eq!(
+        fs::read_to_string(dir.path().join(".kcs/HEAD"))
+            .unwrap()
+            .trim(),
+        c1_hash,
+        "HEAD file must be restored on disk"
+    );
+}
+
+#[test]
+fn r13_4_fresh_init_both_empty_still_root_commits() {
+    // (c) a genuinely unborn branch (HEAD and refs both empty at fresh init) must
+    // NOT be treated as corrupt — the first snapshot is still a root commit and no
+    // repair event is emitted.
+    let dir = scope();
+    fs::write(dir.path().join("doc.txt"), "v1").unwrap();
+    let first = json_success(&dir, ["snapshot", "-m", "first"]);
+    assert_eq!(first["status"], "created");
+    assert!(
+        first["commit"]["parents"].as_array().unwrap().is_empty(),
+        "the first snapshot on a fresh scope is a root commit"
+    );
+    assert!(
+        !events_log(&dir).contains("KCS-I-STORE-HEAD-REPAIRED-001"),
+        "fresh init must not emit a spurious HEAD-repair event"
+    );
+}
+
+/// R13-5: re-`init` on a broken store used to report "already initialized" exit 0
+/// without verifying or repairing anything, leaving the store broken for the very
+/// next command. Now a recoverable HEAD is repaired (via the R13-4 self-heal path)
+/// and reported; unrecoverable corruption (bad scope.json) exits non-zero.
+#[test]
+fn r13_5_reinit_repairs_missing_head_and_status_recovers() {
+    let dir = scope();
+    fs::write(dir.path().join("doc.txt"), "v1").unwrap();
+    json_success(&dir, ["snapshot", "-m", "first"]);
+
+    fs::remove_file(dir.path().join(".kcs/HEAD")).unwrap();
+    let reinit = json_success(&dir, ["init", "."]);
+    assert_eq!(
+        reinit["status"], "repaired",
+        "re-init must report the repair"
+    );
+    assert_eq!(reinit["repaired"], json!(["HEAD"]));
+
+    // The natural recovery worked: the next command succeeds (exit 0) instead of
+    // KCS-E-STORE-IO-001.
+    json_success(&dir, ["status"]);
+}
+
+#[test]
+fn r13_5_reinit_reports_already_initialized_when_healthy() {
+    let dir = scope();
+    fs::write(dir.path().join("doc.txt"), "v1").unwrap();
+    json_success(&dir, ["snapshot", "-m", "first"]);
+    let reinit = json_success(&dir, ["init", "."]);
+    assert_eq!(reinit["status"], "already initialized");
+    assert_eq!(reinit["repaired"], json!([]));
+}
+
+#[test]
+fn r13_5_reinit_on_unrecoverable_corruption_exits_nonzero() {
+    let dir = scope();
+    // Corrupt scope.json (unrecoverable) → re-init must NOT swallow it as
+    // "already initialized"; open()'s validate rejects it with a non-zero exit.
+    fs::write(dir.path().join(".kcs/scope.json"), "{ not valid json").unwrap();
+    let err = json_failure(&dir, ["init", "."], 2);
+    assert_eq!(err["error_code"], "KCS-E-CONFIG-SCHEMA-001");
+}
+
+/// R13-6: with no absolute `$HOME` and no `$XDG_*` override, device-global state
+/// used to scatter into a CWD-relative `kcs/` (registry, cost ledger, logs, the
+/// 0600 cursor-signing key) and the device budget cap silently split per working
+/// directory. Now the startup guard refuses to run and writes nothing under CWD.
+fn kcs_no_base<const N: usize>(work: &Path, home: Option<&str>, args: [&str; N]) -> Command {
+    let mut command = Command::cargo_bin("kcs").unwrap();
+    command
+        .current_dir(work)
+        .env_remove("XDG_CONFIG_HOME")
+        .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CACHE_HOME")
+        .args(args);
+    match home {
+        Some(value) => command.env("HOME", value),
+        None => command.env_remove("HOME"),
+    };
+    command
+}
+
+#[test]
+fn r13_6_unset_home_no_xdg_errors_and_writes_nothing_under_cwd() {
+    for (label, home) in [
+        ("unset", None),
+        ("empty", Some("")),
+        ("relative", Some("rel/path")),
+    ] {
+        let work = tempfile::tempdir().unwrap();
+        let output = kcs_no_base(work.path(), home, ["init", ".", "--json"])
+            .assert()
+            .code(2)
+            .get_output()
+            .stderr
+            .clone();
+        let err: Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(
+            err["error_code"], "KCS-E-CONFIG-USAGE-001",
+            "HOME={label}: must be a loud usage error"
+        );
+        // Nothing device-global may be written under the working directory.
+        assert!(
+            !work.path().join("kcs").exists(),
+            "HOME={label}: device-global `kcs/` must not be created under CWD"
+        );
+    }
+}
+
+#[test]
+fn r13_6_absolute_xdg_lets_commands_run_even_without_home() {
+    // An absolute XDG override is a valid base even when HOME is unset — the guard
+    // must NOT block that case (XDG takes precedence over HOME).
+    let work = tempfile::tempdir().unwrap();
+    let xdg = tempfile::tempdir().unwrap();
+    let mut command = Command::cargo_bin("kcs").unwrap();
+    command
+        .current_dir(work.path())
+        .env_remove("HOME")
+        .env("XDG_CONFIG_HOME", xdg.path().join("config"))
+        .env("XDG_DATA_HOME", xdg.path().join("data"))
+        .env("XDG_CACHE_HOME", xdg.path().join("cache"))
+        .args(["init", ".", "--json"]);
+    command.assert().success();
+    assert!(!work.path().join("kcs").exists());
+}
+
+// R13-1: incremental Markdownize on the ONLINE (Mistral OCR) route. Before the fix
+// the online adapter never declared `incremental_update` and the request path
+// hard-coded mode=Full, so every light revision re-sent (and re-billed) the whole
+// document. These exercise the mock OCR seam across a v1→v2 revision.
+fn online_incremental_task(status: &Value) -> Option<&Value> {
+    status["tasks"].as_array().unwrap().iter().find(|task| {
+        task["input_path"] == "report.pdf"
+            && task["fallback_reason"] == "online_adapter_done"
+            && task["status"] == "done"
+            && task["mode"] == "incremental"
+    })
+}
+
+#[test]
+fn r13_1_online_incremental_fires_on_light_revision_and_reuses_unchanged() {
+    let dir = scope();
+    fs::write(
+        dir.path().join("report.pdf"),
+        fake_pdf(&["p1", "p2", "p3", "p4", "p5"]),
+    )
+    .unwrap();
+    json_success(&dir, ["index", "--approve"]);
+    json_success_with_env(
+        &dir,
+        ["batch", "resume"],
+        &[(TEST_STANDARD_ONLINE_MARKDOWNIZE_ENV, "mock")],
+    );
+
+    // v2: a light revision — only page 2 changes (change_rate 1/5 = 0.2 < 0.30).
+    fs::write(
+        dir.path().join("report.pdf"),
+        fake_pdf(&["p1", "p2 changed", "p3", "p4", "p5"]),
+    )
+    .unwrap();
+    json_success(&dir, ["index", "--yes"]);
+    json_success_with_env(
+        &dir,
+        ["batch", "resume"],
+        &[(TEST_STANDARD_ONLINE_MARKDOWNIZE_ENV, "mock")],
+    );
+
+    // (a) the v2 online task fired incremental and named the changed unit.
+    let status = json_success(&dir, ["status"]);
+    let online = online_incremental_task(&status)
+        .unwrap_or_else(|| panic!("expected an online incremental task: {status}"));
+    assert!(
+        online["changed_unit_keys"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("page:2")),
+        "changed_unit_keys must name page:2: {online}"
+    );
+
+    // (b) the 4 unchanged pages were reused from the prior online instance
+    // (mode=incremental + reused_from). The offline deterministic adapter never
+    // declares incremental_update, so these can only come from the online route.
+    let reused = normalized_units(&dir)
+        .into_iter()
+        .filter(|unit| unit.mode == MarkdownizeMode::Incremental && unit.reused_from.is_some())
+        .count();
+    assert_eq!(
+        reused, 4,
+        "4 unchanged pages must be reused from the prior run"
+    );
+}
+
+#[test]
+fn r13_1_online_full_when_change_rate_exceeds_threshold() {
+    let dir = scope();
+    fs::write(dir.path().join("report.pdf"), fake_pdf(&["a1", "a2", "a3"])).unwrap();
+    json_success(&dir, ["index", "--approve"]);
+    json_success_with_env(
+        &dir,
+        ["batch", "resume"],
+        &[(TEST_STANDARD_ONLINE_MARKDOWNIZE_ENV, "mock")],
+    );
+
+    // v2: every page changes (change_rate 3/3 = 1.0 >= 0.30) → stays Full.
+    fs::write(dir.path().join("report.pdf"), fake_pdf(&["b1", "b2", "b3"])).unwrap();
+    json_success(&dir, ["index", "--yes"]);
+    json_success_with_env(
+        &dir,
+        ["batch", "resume"],
+        &[(TEST_STANDARD_ONLINE_MARKDOWNIZE_ENV, "mock")],
+    );
+
+    let status = json_success(&dir, ["status"]);
+    assert!(
+        online_incremental_task(&status).is_none(),
+        "a full-document change must NOT use incremental: {status}"
+    );
+    // Both v1 and v2 online tasks completed as Full sends.
+    let online_done = status["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|task| {
+            task["input_path"] == "report.pdf"
+                && task["fallback_reason"] == "online_adapter_done"
+                && task["status"] == "done"
+        })
+        .count();
+    assert_eq!(
+        online_done, 2,
+        "v1 + v2 online tasks both done (Full): {status}"
+    );
+}
+
+#[test]
+fn r13_1_online_incremental_acceptance_fail_falls_back_to_full() {
+    let dir = scope();
+    // 7 pages so a 2-page change is light (2/7 ≈ 0.29 < 0.30) → incremental fires,
+    // but the `incr_incomplete` seam drops a requested unit so acceptance fails.
+    fs::write(
+        dir.path().join("report.pdf"),
+        fake_pdf(&["p1", "p2", "p3", "p4", "p5", "p6", "p7"]),
+    )
+    .unwrap();
+    json_success(&dir, ["index", "--approve"]);
+    json_success_with_env(
+        &dir,
+        ["batch", "resume"],
+        &[(TEST_STANDARD_ONLINE_MARKDOWNIZE_ENV, "mock")],
+    );
+
+    fs::write(
+        dir.path().join("report.pdf"),
+        fake_pdf(&["p1", "p2 X", "p3", "p4 X", "p5", "p6", "p7"]),
+    )
+    .unwrap();
+    json_success(&dir, ["index", "--yes"]);
+    // incr_incomplete: the incremental response drops a requested page → the KCS
+    // acceptance check fails → the online route re-sends Full (which returns every
+    // page) → the task completes as Full, not incremental.
+    json_success_with_env(
+        &dir,
+        ["batch", "resume"],
+        &[(TEST_STANDARD_ONLINE_MARKDOWNIZE_ENV, "incr_incomplete")],
+    );
+
+    let status = json_success(&dir, ["status"]);
+    assert!(
+        online_incremental_task(&status).is_none(),
+        "acceptance failure must fall back to Full (no incremental task): {status}"
+    );
+    // The Full fallback succeeded: 2 online done tasks (v1 + v2), no failure.
+    let online_done = status["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|task| {
+            task["input_path"] == "report.pdf"
+                && task["fallback_reason"] == "online_adapter_done"
+                && task["status"] == "done"
+        })
+        .count();
+    assert_eq!(online_done, 2, "both online tasks done via Full: {status}");
+}

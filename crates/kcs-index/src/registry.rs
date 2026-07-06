@@ -34,10 +34,11 @@ pub struct RegistryDb {
 /// `$HOME/.local/share/kcs/scope-registry.sqlite` (03-data-model.md §4).
 #[must_use]
 pub fn default_registry_path() -> PathBuf {
-    // R12-6: honor the XDG validity rules (empty/relative treated as unset) so a
-    // bad `XDG_DATA_HOME` never lands the registry in a CWD-relative `kcs/`.
+    // R12-6 / R13-6: honor the XDG validity rules AND require an absolute `HOME`
+    // for the fallback (empty/relative treated as unset), so neither a bad
+    // `XDG_DATA_HOME` nor a bad `HOME` lands the registry in a CWD-relative `kcs/`.
     let data_home = kcs_core::xdg::xdg_dir("XDG_DATA_HOME")
-        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/share")))
+        .or_else(|| kcs_core::xdg::home_dir().map(|home| home.join(".local/share")))
         .unwrap_or_else(|| PathBuf::from("."));
     data_home.join("kcs/scope-registry.sqlite")
 }

@@ -27,6 +27,10 @@ pub enum AdapterError {
     Network(String),
     #[error("schema validation failed: {0}")]
     ConfigSchema(String),
+    /// R13-2: a documented-but-unimplemented capability (currently `keychain:`
+    /// auth resolution) surfaced LOUDLY rather than silently ignored.
+    #[error("not implemented: {0}")]
+    NotImplemented(String),
     #[error("io error at {path}: {message}")]
     Io { path: String, message: String },
 }

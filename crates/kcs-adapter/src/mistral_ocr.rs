@@ -68,8 +68,15 @@ impl EnvMistralOcrClient {
     }
 
     fn api_key() -> Result<String> {
-        std::env::var("MISTRAL_API_KEY")
-            .map_err(|_| AdapterError::Auth("MISTRAL_API_KEY is not set".to_owned()))
+        // R13-2: honor a declared `tools.toml` `[markdown] auth` (env:/plain:, with
+        // keychain: a loud not-implemented error) instead of the previous hard-coded
+        // `MISTRAL_API_KEY`; fall back to that env var when nothing is declared.
+        crate::tool_lock::resolve_role_api_key("markdown", "MISTRAL_API_KEY")?.ok_or_else(|| {
+            AdapterError::Auth(
+                "no Mistral OCR API key: set MISTRAL_API_KEY or a tools.toml `[markdown] auth`"
+                    .to_owned(),
+            )
+        })
     }
 }
 
@@ -200,6 +207,15 @@ impl<C: MistralOcrClient> MarkdownizeAdapter for MistralOcrMarkdownizeAdapter<C>
                 "ocr".to_owned(),
                 "layout_detection".to_owned(),
                 "table_extraction".to_owned(),
+                // R13-1: the standard document-processing adapter DOES support
+                // incremental Markdownize — via unit (page) fingerprint reuse
+                // (docs/04 §2.2, docs/07 §8 note), not the generative-LLM prompt
+                // path. Declaring it lets `choose_markdownize_mode` reach the
+                // incremental gate on the online route (previously it always fell
+                // to `full("adapter_lacks_incremental_update")`). capability_flags
+                // is NOT a `tool_profile_hash` input (see identity::PROFILE_FIELDS),
+                // so this does not change any adapter identity / fixture hash.
+                "incremental_update".to_owned(),
             ],
             allow_network: true,
         }
