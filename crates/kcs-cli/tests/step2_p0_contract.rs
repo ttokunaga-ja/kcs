@@ -2640,3 +2640,551 @@ fn r13_1_online_incremental_acceptance_fail_falls_back_to_full() {
         .count();
     assert_eq!(online_done, 2, "both online tasks done via Full: {status}");
 }
+
+// R14-1: a partially-corrupt previous instance (`manifest.json` still claims a unit
+// is `done` but the unit's `<unit_ref>.json` is missing/unreadable) must degrade to
+// "no usable previous" and re-send Full — never a hard Err. Before the fix
+// `load_previous_instance` returned a non-retryable Err for the missing unit, which
+// permanently bricked the document's online markdownize (every run read the same
+// corrupt previous and failed identically) and, on the offline route, aborted the
+// whole `kcs index`, silently skipping alphabetically-later files.
+
+/// The instance directory (`output_ref`) of the DONE offline markdownize task for a
+/// path — used to plant a corruption inside a prior normalized instance.
+fn offline_instance_output_ref(dir: &TempDir, input_path: &str) -> String {
+    let status = json_success(dir, ["status"]);
+    status["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|task| {
+            task["input_path"] == input_path
+                && task["type"] == "markdownize"
+                && task["status"] == "done"
+                && !task["output_ref"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .starts_with("online:")
+        })
+        .and_then(|task| task["output_ref"].as_str())
+        .unwrap_or_else(|| panic!("offline instance output_ref for {input_path}: {status}"))
+        .to_owned()
+}
+
+/// Delete one unit `<unit_ref>.json` inside a normalized instance dir, leaving
+/// `manifest.json` (which still marks the unit `done`) intact.
+fn corrupt_one_unit_json(instance_dir: &Path) {
+    let unit_json = fs::read_dir(instance_dir)
+        .unwrap()
+        .flatten()
+        .map(|entry| entry.path())
+        .find(|path| {
+            path.extension().and_then(|ext| ext.to_str()) == Some("json")
+                && path.file_name().and_then(|name| name.to_str()) != Some("manifest.json")
+        })
+        .unwrap_or_else(|| panic!("a unit json to corrupt under {}", instance_dir.display()));
+    fs::remove_file(&unit_json).unwrap();
+}
+
+// (a)+(d): online route — a deleted unit in the v1 online instance must not brick the
+// document; v2 re-sends Full and completes (self-heal), never a stuck failed task.
+#[test]
+fn r14_1_online_previous_partial_corruption_recovers_via_full() {
+    let dir = scope();
+    fs::write(
+        dir.path().join("report.pdf"),
+        fake_pdf(&["p1", "p2", "p3", "p4", "p5"]),
+    )
+    .unwrap();
+    json_success(&dir, ["index", "--approve"]);
+    json_success_with_env(
+        &dir,
+        ["batch", "resume"],
+        &[(TEST_STANDARD_ONLINE_MARKDOWNIZE_ENV, "mock")],
+    );
+
+    // Corrupt the v1 online instance: delete ONE unit json (manifest untouched).
+    let status = json_success(&dir, ["status"]);
+    let output_ref = status["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|task| {
+            task["input_path"] == "report.pdf"
+                && task["fallback_reason"] == "online_adapter_done"
+                && task["status"] == "done"
+        })
+        .and_then(|task| task["output_ref"].as_str())
+        .unwrap_or_else(|| panic!("v1 online done task with instance output_ref: {status}"))
+        .to_owned();
+    corrupt_one_unit_json(Path::new(&output_ref));
+
+    // v2 light revision (would be incremental if the previous were intact).
+    fs::write(
+        dir.path().join("report.pdf"),
+        fake_pdf(&["p1", "p2 changed", "p3", "p4", "p5"]),
+    )
+    .unwrap();
+    json_success(&dir, ["index", "--yes"]);
+    let resume = json_success_with_env(
+        &dir,
+        ["batch", "resume"],
+        &[(TEST_STANDARD_ONLINE_MARKDOWNIZE_ENV, "mock")],
+    );
+    // The corrupt previous is bypassed (Full re-send), not a hard non-retryable fail.
+    assert_eq!(
+        resume["tasks_failed"], 0,
+        "corrupt previous must degrade to Full, not fail the task: {resume}"
+    );
+
+    // v1 + v2 online tasks are both done; v2 could NOT reuse the corrupt previous, so
+    // it is a Full send, not incremental.
+    let status = json_success(&dir, ["status"]);
+    let done_online = status["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|task| {
+            task["input_path"] == "report.pdf"
+                && task["fallback_reason"] == "online_adapter_done"
+                && task["status"] == "done"
+        })
+        .count();
+    assert!(
+        done_online >= 2,
+        "v2 online task must recover via a Full re-send: {status}"
+    );
+    assert!(
+        online_incremental_task(&status).is_none(),
+        "a corrupt previous cannot drive incremental — v2 must be Full: {status}"
+    );
+}
+
+// (b): offline route — a corrupt prior instance for one file must not abort the whole
+// index and skip alphabetically-later candidates.
+#[test]
+fn r14_1_offline_previous_corruption_does_not_abort_index() {
+    let dir = scope();
+    // `report.pdf` sorts before `zzz.pdf`; report.pdf gets the corrupt previous.
+    fs::write(dir.path().join("report.pdf"), fake_pdf(&["a1", "a2", "a3"])).unwrap();
+    fs::write(dir.path().join("zzz.pdf"), fake_pdf(&["z1", "z2"])).unwrap();
+    json_success(&dir, ["index", "--approve"]);
+
+    corrupt_one_unit_json(Path::new(&offline_instance_output_ref(&dir, "report.pdf")));
+
+    // Change report.pdf so re-index reaches `previous_instance_for_path` (a new
+    // raw_hash bypasses the done-output early return).
+    fs::write(
+        dir.path().join("report.pdf"),
+        fake_pdf(&["a1 X", "a2", "a3"]),
+    )
+    .unwrap();
+    // Before the fix this aborted the whole index (exit 1); now report.pdf
+    // re-normalizes as Full and the run continues — `json_success` asserts exit 0.
+    let reindex = json_success(&dir, ["index", "--yes"]);
+    assert!(
+        reindex["normalized_files"].as_u64().unwrap() >= 1,
+        "report.pdf must re-normalize (Full), not abort the index: {reindex}"
+    );
+
+    // zzz.pdf (sorts after report.pdf) is still tracked — the index did not abort
+    // before reaching it.
+    let status = json_success(&dir, ["status"]);
+    assert!(
+        status["tasks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|task| task["input_path"] == "zzz.pdf" && task["status"] == "done"),
+        "zzz.pdf must remain indexed (not skipped by an aborted run): {status}"
+    );
+}
+
+// (c): the pre-existing missing-`manifest.json` degradation (Ok(None) → Full) is
+// unchanged by the unit-corruption fix that now sits beside it.
+#[test]
+fn r14_1_offline_previous_missing_manifest_still_degrades_to_full() {
+    let dir = scope();
+    fs::write(dir.path().join("report.pdf"), fake_pdf(&["a1", "a2"])).unwrap();
+    json_success(&dir, ["index", "--approve"]);
+
+    let output_ref = offline_instance_output_ref(&dir, "report.pdf");
+    fs::remove_file(Path::new(&output_ref).join("manifest.json")).unwrap();
+
+    fs::write(dir.path().join("report.pdf"), fake_pdf(&["a1 X", "a2"])).unwrap();
+    let reindex = json_success(&dir, ["index", "--yes"]);
+    assert!(
+        reindex["normalized_files"].as_u64().unwrap() >= 1,
+        "missing manifest must still degrade to a Full re-normalize: {reindex}"
+    );
+}
+
+// R14-2: an online markdownize task is deferred (enqueued by `index`, executed by a
+// later `batch resume`), so the file can change in between. Executing the stale task
+// would read the CURRENT bytes yet persist them under the enqueue-time `input_hash`
+// (= v2 content stored under v1 identity), breaking content-addressing, mis-billing,
+// and poisoning the next incremental baseline. The fix supersedes a task whose current
+// file no longer hashes to `input_hash`, without persisting anything under the old hash.
+
+/// Number of persisted normalized instances (one `manifest.json` each).
+fn instance_manifest_count(dir: &TempDir) -> usize {
+    let root = dir.path().join(".kcs/objects/normalized_units");
+    collect_files(&root)
+        .iter()
+        .filter(|path| path.file_name().and_then(|name| name.to_str()) == Some("manifest.json"))
+        .count()
+}
+
+// (a)+(c)+(d): a file edited AFTER enqueue but BEFORE execution supersedes the stale
+// task (no instance under the old hash), and a re-index recovers the current content.
+#[test]
+fn r14_2_stale_online_task_superseded_then_recovers_on_reindex() {
+    let dir = scope();
+    fs::write(dir.path().join("report.pdf"), fake_pdf(&["p1", "p2"])).unwrap();
+    // `index` enqueues the online task for H(v1) but does NOT run it.
+    json_success(&dir, ["index", "--approve"]);
+    let instances_before = instance_manifest_count(&dir);
+
+    // (a) Edit to v2 WITHOUT re-indexing → the online task's input_hash is now stale.
+    fs::write(
+        dir.path().join("report.pdf"),
+        fake_pdf(&["p1", "p2 changed"]),
+    )
+    .unwrap();
+    let resume = json_code_stdout_with_env(
+        &dir,
+        ["batch", "resume"],
+        4,
+        &[(TEST_STANDARD_ONLINE_MARKDOWNIZE_ENV, "mock")],
+    );
+    assert_eq!(
+        resume["tasks_executed"], 0,
+        "a stale task must not execute: {resume}"
+    );
+    assert!(
+        resume["tasks_failed"].as_u64().unwrap() >= 1,
+        "a stale task is superseded (failed), not executed: {resume}"
+    );
+    // No new normalized instance was persisted → v2 bytes are NOT stored under the v1
+    // raw_hash identity (content-addressing invariant preserved).
+    assert_eq!(
+        instance_manifest_count(&dir),
+        instances_before,
+        "a superseded stale task must not persist any normalized instance"
+    );
+    let status = json_success(&dir, ["status"]);
+    assert!(
+        !status["tasks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|task| task["input_path"] == "report.pdf"
+                && task["fallback_reason"] == "online_adapter_done"),
+        "no online done instance for the superseded task: {status}"
+    );
+
+    // (c)+(d) recovery: re-index enqueues a fresh online task for the CURRENT (v2)
+    // content; batch resume completes it under its own correct identity. Since no v1
+    // online instance was poisoned, the next enrichment is a clean send.
+    json_success(&dir, ["index", "--yes"]);
+    let recover = json_success_with_env(
+        &dir,
+        ["batch", "resume"],
+        &[(TEST_STANDARD_ONLINE_MARKDOWNIZE_ENV, "mock")],
+    );
+    assert_eq!(
+        recover["tasks_failed"], 0,
+        "the recovery send must succeed: {recover}"
+    );
+    let status = json_success(&dir, ["status"]);
+    assert!(
+        status["tasks"].as_array().unwrap().iter().any(|task| {
+            task["input_path"] == "report.pdf"
+                && task["fallback_reason"] == "online_adapter_done"
+                && task["status"] == "done"
+        }),
+        "the current (v2) content is enriched under its own identity: {status}"
+    );
+}
+
+// (b): an unchanged file (current bytes still hash to `input_hash`) executes normally.
+#[test]
+fn r14_2_unchanged_online_task_executes_normally() {
+    let dir = scope();
+    fs::write(dir.path().join("report.pdf"), fake_pdf(&["p1", "p2"])).unwrap();
+    json_success(&dir, ["index", "--approve"]);
+    // No edit between enqueue and execution.
+    let resume = json_success_with_env(
+        &dir,
+        ["batch", "resume"],
+        &[(TEST_STANDARD_ONLINE_MARKDOWNIZE_ENV, "mock")],
+    );
+    assert!(
+        resume["tasks_executed"].as_u64().unwrap() >= 1,
+        "an unchanged task must execute: {resume}"
+    );
+    assert_eq!(
+        resume["tasks_failed"], 0,
+        "an unchanged task must not be superseded: {resume}"
+    );
+    let status = json_success(&dir, ["status"]);
+    assert!(
+        status["tasks"].as_array().unwrap().iter().any(|task| {
+            task["input_path"] == "report.pdf"
+                && task["fallback_reason"] == "online_adapter_done"
+                && task["status"] == "done"
+        }),
+        "an unchanged online task completes: {status}"
+    );
+}
+
+// R14-3: R13-4's HEAD self-heal runs on the common `Repository::open` path and used to
+// unconditionally take the store lock and overwrite HEAD. On a read-only `.kcs` (archive
+// / forensic mount) with a corrupt (empty) HEAD, the `.lock` create failed with
+// PermissionDenied and bricked even pure-read commands (KCS-E-STORE-IO-001). The fix
+// makes the repair best-effort (defer on a read-only/contended lock) while still healing
+// a writable scope and recording the repair.
+
+fn errors_log(dir: &TempDir) -> String {
+    let path = dir.path().join(".test-data/kcs/logs/errors.jsonl");
+    fs::read_to_string(path).unwrap_or_default()
+}
+
+// (a): corrupt HEAD + read-only `.kcs` → pure-read commands still run (exit 0), the heal
+// is deferred (not performed, not silent), and a later WRITABLE open completes it.
+#[cfg(unix)]
+#[test]
+fn r14_3_corrupt_head_read_only_scope_reads_run_and_defer_heal() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = scope();
+    fs::write(dir.path().join("doc.txt"), "v1").unwrap();
+    let c1 = json_success(&dir, ["snapshot", "-m", "first"]);
+    let c1_hash = c1["commit_hash"].as_str().unwrap().to_owned();
+
+    // Corrupt HEAD to empty (refs still names C1), then make `.kcs` read-only so the
+    // self-heal can neither create `.lock` nor overwrite HEAD.
+    fs::write(dir.path().join(".kcs/HEAD"), "").unwrap();
+    let kcs_dir = dir.path().join(".kcs");
+    fs::set_permissions(&kcs_dir, fs::Permissions::from_mode(0o555)).unwrap();
+
+    // Pure-read commands must succeed (exit 0). Before R14-3 the self-heal's `.lock`
+    // create failed with PermissionDenied → KCS-E-STORE-IO-001, exit 1.
+    // The requirement (docs/04 §3.2 spirit) is that these read commands exit 0, not
+    // that they reconstruct history — `json_success` asserts exit 0. `log` traverses
+    // from HEAD, which stays empty while unhealed, so it legitimately returns an empty
+    // (but well-formed) commit list rather than bricking.
+    let status = json_success(&dir, ["status"]);
+    assert!(status.is_object(), "status must run read-only: {status}");
+    let log = json_success(&dir, ["log"]);
+    assert!(
+        log["commits"].is_array(),
+        "log must run read-only and return structured output: {log}"
+    );
+    // `inspect <hash>` resolves the object directly (not via HEAD), so it still returns
+    // the commit object — proving the open path itself no longer bricks.
+    let inspect = json_success(&dir, ["inspect", &c1_hash]);
+    assert!(
+        inspect.is_object(),
+        "inspect must resolve the commit read-only: {inspect}"
+    );
+
+    // The heal was deferred (best-effort warn), not silently performed: HEAD is still
+    // empty and no repair event was written.
+    assert!(
+        fs::read_to_string(dir.path().join(".kcs/HEAD"))
+            .unwrap()
+            .trim()
+            .is_empty(),
+        "a read-only scope's HEAD stays unhealed (deferred)"
+    );
+    assert!(
+        !events_log(&dir).contains("KCS-I-STORE-HEAD-REPAIRED-001"),
+        "no repair may be claimed while the scope is read-only"
+    );
+    assert!(
+        errors_log(&dir).contains("KCS-W-STORE-HEAD-HEAL-DEFERRED-001"),
+        "the deferred heal must be observable as a warn"
+    );
+
+    // A later WRITABLE open completes the heal (never lost): HEAD is restored and the
+    // repair is now recorded.
+    fs::set_permissions(&kcs_dir, fs::Permissions::from_mode(0o755)).unwrap();
+    json_success(&dir, ["log"]);
+    assert_eq!(
+        fs::read_to_string(dir.path().join(".kcs/HEAD"))
+            .unwrap()
+            .trim(),
+        c1_hash,
+        "a writable open must complete the deferred heal"
+    );
+    assert!(
+        events_log(&dir).contains("KCS-I-STORE-HEAD-REPAIRED-001"),
+        "the completed repair must be recorded (never silent)"
+    );
+}
+
+// (c): a HEALTHY HEAD + read-only `.kcs` is unchanged — reads run and nothing is healed
+// (the fast path never touches the lock).
+#[cfg(unix)]
+#[test]
+fn r14_3_healthy_head_read_only_scope_unchanged() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = scope();
+    fs::write(dir.path().join("doc.txt"), "v1").unwrap();
+    let c1 = json_success(&dir, ["snapshot", "-m", "first"]);
+    let c1_hash = c1["commit_hash"].as_str().unwrap().to_owned();
+
+    let kcs_dir = dir.path().join(".kcs");
+    fs::set_permissions(&kcs_dir, fs::Permissions::from_mode(0o555)).unwrap();
+
+    let status = json_success(&dir, ["status"]);
+    assert!(
+        status.is_object(),
+        "healthy read-only status runs: {status}"
+    );
+    let log = json_success(&dir, ["log"]);
+    assert!(
+        log["commits"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|commit| commit["commit_hash"] == c1_hash),
+        "healthy read-only log runs: {log}"
+    );
+    assert!(
+        !events_log(&dir).contains("KCS-I-STORE-HEAD-REPAIRED-001")
+            && !errors_log(&dir).contains("KCS-W-STORE-HEAD-HEAL-DEFERRED-001"),
+        "a healthy HEAD triggers neither a repair nor a deferred-heal warn"
+    );
+
+    fs::set_permissions(&kcs_dir, fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+// R14-5: `batch resume`/`retry` exit 3 (partial) / 4 (permanent) previously logged a
+// SEARCH error_code to errors.jsonl (`KCS-E-SEARCH-PARTIAL-001` — not even catalogued —
+// and `KCS-E-SEARCH-SCOPE-ALL-FAILED-001`, the multi-scope-search all-failed code),
+// mis-classifying a batch task failure as a search failure. The fix gives batch its own
+// error_code, like `index` self-sets `KCS-E-INDEX-PARTIAL-001`.
+
+// Exit 4 (all-permanent): a superseded stale online task (non-retryable InvalidInput).
+#[test]
+fn r14_5_batch_permanent_failure_logs_batch_error_code() {
+    let dir = scope();
+    fs::write(dir.path().join("report.pdf"), fake_pdf(&["p1", "p2"])).unwrap();
+    json_success(&dir, ["index", "--approve"]);
+    // Edit without re-indexing → the online task is stale (permanent failure) → exit 4.
+    fs::write(
+        dir.path().join("report.pdf"),
+        fake_pdf(&["p1", "p2 changed"]),
+    )
+    .unwrap();
+    json_code_stdout_with_env(
+        &dir,
+        ["batch", "resume"],
+        4,
+        &[(TEST_STANDARD_ONLINE_MARKDOWNIZE_ENV, "mock")],
+    );
+
+    let errors = errors_log(&dir);
+    assert!(
+        errors.contains("KCS-E-BATCH-TASK-FAILED-001"),
+        "the exit-4 batch failure must log a batch-owned error_code: {errors}"
+    );
+    assert!(
+        !errors.contains("KCS-E-SEARCH-SCOPE-ALL-FAILED-001"),
+        "batch must not borrow the multi-scope-search all-failed code: {errors}"
+    );
+}
+
+// Exit 3 (some retryable): a rate-limited online task (retryable) with the file
+// unchanged (so it passes the staleness guard and actually reaches the adapter).
+#[test]
+fn r14_5_batch_partial_failure_logs_batch_error_code() {
+    let dir = scope();
+    fs::write(dir.path().join("report.pdf"), fake_pdf(&["p1", "p2"])).unwrap();
+    json_success(&dir, ["index", "--approve"]);
+    json_code_stdout_with_env(
+        &dir,
+        ["batch", "resume"],
+        3,
+        &[(TEST_STANDARD_ONLINE_MARKDOWNIZE_ENV, "rate_limit")],
+    );
+
+    let errors = errors_log(&dir);
+    assert!(
+        errors.contains("KCS-E-BATCH-PARTIAL-001"),
+        "the exit-3 batch failure must log a batch-owned error_code: {errors}"
+    );
+    assert!(
+        !errors.contains("KCS-E-SEARCH-PARTIAL-001"),
+        "batch must not borrow the search partial code: {errors}"
+    );
+}
+
+// R14-6: the incremental `tool_profile_hash` mismatch check used to run AFTER the OCR
+// send, so a model-pin change wasted an incremental send (and, with R14-4, a whole-doc
+// upload) before falling back to Full. The gate now runs BEFORE the send. The
+// `pin_changed` mock seam resolves a different pin AND errors on any incremental send, so
+// the task can only complete if the gate fires before sending.
+#[test]
+fn r14_6_pin_change_gates_incremental_before_send() {
+    let dir = scope();
+    fs::write(
+        dir.path().join("report.pdf"),
+        fake_pdf(&["p1", "p2", "p3", "p4", "p5"]),
+    )
+    .unwrap();
+    json_success(&dir, ["index", "--approve"]);
+    // v1 online instance under the default pin (mistral-ocr-2505).
+    json_success_with_env(
+        &dir,
+        ["batch", "resume"],
+        &[(TEST_STANDARD_ONLINE_MARKDOWNIZE_ENV, "mock")],
+    );
+
+    // v2 light revision (change_rate 1/5 < 0.30 → would be incremental if the pin held).
+    fs::write(
+        dir.path().join("report.pdf"),
+        fake_pdf(&["p1", "p2 changed", "p3", "p4", "p5"]),
+    )
+    .unwrap();
+    json_success(&dir, ["index", "--yes"]);
+
+    // pin_changed: the resolved profile differs from the v1 instance, so the gate must
+    // fire BEFORE any send. If an incremental send is attempted (the old post-send order),
+    // the mock errors and the task fails — `json_success_with_env` asserts exit 0.
+    let resume = json_success_with_env(
+        &dir,
+        ["batch", "resume"],
+        &[(TEST_STANDARD_ONLINE_MARKDOWNIZE_ENV, "pin_changed")],
+    );
+    assert_eq!(
+        resume["tasks_failed"], 0,
+        "a pin change must gate incremental before sending (no failing wasted send): {resume}"
+    );
+    assert!(
+        resume["tasks_executed"].as_u64().unwrap() >= 1,
+        "the v2 task completes via a single Full send: {resume}"
+    );
+
+    // The v2 task is a Full send (not incremental) under the new pin.
+    let status = json_success(&dir, ["status"]);
+    assert!(
+        online_incremental_task(&status).is_none(),
+        "a pin change must NOT produce an incremental task: {status}"
+    );
+    let done = status["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|task| {
+            task["input_path"] == "report.pdf"
+                && task["fallback_reason"] == "online_adapter_done"
+                && task["status"] == "done"
+        })
+        .count();
+    assert!(
+        done >= 2,
+        "v1 + v2 online tasks both done (v2 via Full after the gate): {status}"
+    );
+}

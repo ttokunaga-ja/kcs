@@ -602,23 +602,55 @@ impl Repository {
     /// Idempotent no-op when HEAD is populated or the branch is genuinely unborn
     /// (HEAD and refs both empty). Returns the restored commit hash on a repair.
     pub fn self_heal_head(&self) -> Result<Option<String>> {
-        // Fast path (no lock, no side effect): nothing to repair.
+        // Fast path (no lock, no side effect): nothing to repair. Reads succeed on a
+        // read-only `.kcs`, so a healthy scope is completely unaffected below.
         if empty_head_recovery_hash(&self.kcs_dir)?.is_none() {
             return Ok(None);
         }
-        // Serialize the HEAD write against a concurrent `snapshot` (which also
-        // advances HEAD) via the reentrant store lock. Re-check under the lock in
-        // case another process healed it first.
-        let _lock = StoreLock::acquire(&self.kcs_dir)?;
+        // R14-3: the repair below is a best-effort *write* on the common `open()`
+        // entrypoint. A read-only `.kcs` (archive / forensic mount) cannot take the
+        // store lock or overwrite HEAD; before R14-3 those permission errors propagated
+        // out of `open()` (the `?`) and bricked even pure-read commands
+        // (status/log/search/inspect) on a scope with a corrupt (empty) HEAD — an R13-4
+        // regression. Follow the R12-5/R13-3 rule that observation/repair writes are
+        // non-fatal: if we cannot take the lock (read-only permission, or a live
+        // concurrent holder), defer the heal (warn + `Ok(None)`) so reads still run; a
+        // later *writable* open completes it. R13-4's guarantee is preserved because a
+        // writable scope still heals here — before any `snapshot` advances HEAD — so no
+        // snapshot can orphan history under a fresh `parents=[]` root.
+        let Ok(_lock) = StoreLock::acquire(&self.kcs_dir) else {
+            let _ = append_warn_log(
+                "KCS-W-STORE-HEAD-HEAL-DEFERRED-001",
+                "corrupt HEAD detected but the store lock is unavailable (read-only scope or a \
+                 concurrent holder); deferring self-heal so read-only commands still run",
+                json!({ "kcs_dir": self.kcs_dir.display().to_string() }),
+            );
+            return Ok(None);
+        };
+        // Re-check under the lock in case another process healed it first.
         let Some(hash) = empty_head_recovery_hash(&self.kcs_dir)? else {
             return Ok(None);
         };
-        atomic_overwrite(&self.kcs_dir.join("HEAD"), hash.as_bytes())?;
-        append_event_log(
+        // R14-3: a read-only scope can hold the lock (it existed before the mount went
+        // read-only, or the `.lock` create raced) yet still reject the HEAD overwrite.
+        // Treat a write failure the same way — defer, do not brick reads.
+        if atomic_overwrite(&self.kcs_dir.join("HEAD"), hash.as_bytes()).is_err() {
+            let _ = append_warn_log(
+                "KCS-W-STORE-HEAD-HEAL-DEFERRED-001",
+                "corrupt HEAD detected but HEAD is not writable (read-only scope); deferring \
+                 self-heal so read-only commands still run",
+                json!({ "kcs_dir": self.kcs_dir.display().to_string() }),
+            );
+            return Ok(None);
+        }
+        // A successful repair is never silent (R13-4): record it to events.jsonl. The
+        // record is itself best-effort — a logging failure must not undo a completed
+        // HEAD repair.
+        let _ = append_event_log(
             "KCS-I-STORE-HEAD-REPAIRED-001",
             "restored empty/missing HEAD from refs/heads/main (corrupt HEAD, not unborn)",
             json!({ "commit_hash": hash }),
-        )?;
+        );
         Ok(Some(hash))
     }
 

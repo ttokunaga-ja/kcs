@@ -54,11 +54,16 @@ pub struct StandardOnlineMarkdownizeRequest<'a> {
     pub path: &'a Path,
     pub media_type: &'a str,
     pub prepared_unit_hints: Vec<PreparedUnitHint>,
-    // R13-1: incremental Markdownize on the online route. When `mode =
-    // Incremental`, `prepared_unit_hints` carries ONLY the changed+added units
-    // (so only those pages are re-sent/re-billed to the OCR API) and `previous` /
-    // `hints` carry the prior instance + unit_mapping result. `Full` sends every
-    // unit (`previous`/`hints` are `None`), the pre-R13-1 behavior.
+    // R13-1 + R14-4: incremental Markdownize on the online route. When `mode =
+    // Incremental`, `prepared_unit_hints` carries ONLY the changed+added units and
+    // `previous` / `hints` carry the prior instance + unit_mapping result. The Mistral
+    // client turns those hints' 0-based `order`s into the OCR `pages` parameter so only
+    // those pages are processed — before R14-4 the hint was IGNORED by the real client
+    // and the whole document was re-sent/re-billed every revision (the "changed only"
+    // claim held only under the mock seam). `Full` sends every unit and no `pages`
+    // (`previous`/`hints` are `None`), the pre-R13-1 behavior. (Whether the `pages`
+    // parameter actually lowers Mistral billing is confirmed by real-API verification,
+    // a user-gated step; the code-side hint-ignoring defect is fixed here.)
     pub mode: MarkdownizeMode,
     pub previous: Option<PreviousMarkdownizeContext>,
     pub hints: Option<IncrementalHints>,
@@ -96,7 +101,11 @@ pub fn run_standard_online_markdownize(
         // R13-1: `incr_incomplete` simulates an OCR response that drops a requested
         // unit ONLY in incremental mode (a full re-send returns everything), so the
         // KCS-side acceptance check fails and the online route falls back to Full.
-        Some("mock") | Some("partial") | Some("mock_link_image") | Some("incr_incomplete") => {
+        Some("mock")
+        | Some("partial")
+        | Some("mock_link_image")
+        | Some("incr_incomplete")
+        | Some("pin_changed") => {
             let client = MockStandardOnlineMarkdownizeClient;
             let model_pin = client.resolve_model_pin("mistral-ocr-latest")?;
             let adapter = MistralOcrMarkdownizeAdapter::new(client, model_pin, request.scope_id)
@@ -114,9 +123,7 @@ pub fn run_standard_online_markdownize(
     // (docs/03 §11: config may carry a mutable alias, resolved to an immutable pin
     // at execution — §5.1/§6), rather than the previously hard-coded
     // `"mistral-ocr-latest"`.
-    let configured_model = crate::tool_lock::registered_declared_adapter("markdown")
-        .and_then(|declared| declared.model)
-        .unwrap_or_else(|| "mistral-ocr-latest".to_owned());
+    let configured_model = declared_markdown_model();
     let model_pin = client.resolve_model_pin(&configured_model)?;
     let adapter = MistralOcrMarkdownizeAdapter::new(client, model_pin, request.scope_id)
         .with_image_store(request.kcs_dir);
@@ -127,15 +134,79 @@ pub fn run_standard_online_markdownize(
     Ok(StandardOnlineMarkdownizeOutcome { profile, response })
 }
 
+/// R13-2: the configured `[markdown] model` alias (or the built-in `mistral-ocr-latest`),
+/// resolved to an immutable pin at execution. Shared by the send path and the
+/// resolve-only profile path (R14-6) so both agree on the model.
+fn declared_markdown_model() -> String {
+    crate::tool_lock::registered_declared_adapter("markdown")
+        .and_then(|declared| declared.model)
+        .unwrap_or_else(|| "mistral-ocr-latest".to_owned())
+}
+
+/// R14-6: resolve the online markdownize adapter's profile (its `tool_profile_hash`)
+/// WITHOUT sending an OCR request. Resolving the model pin may hit the network (a
+/// `GET /v1/models` to expand a `*-latest` alias) but never uploads the document or bills
+/// OCR. The incremental gate compares this *resolved* profile against the prior instance
+/// BEFORE deciding to send: a changed pin is a different tool_profile, which is not an
+/// eligible incremental (docs/04 §3.1 condition 2), so KCS must fall straight to a Full
+/// send instead of wasting an incremental send (and, post-R14-4, a full-document upload)
+/// only to discard it. Keep the seam arms in sync with `run_standard_online_markdownize`.
+pub fn resolve_standard_online_markdownize_profile(scope_id: &str) -> Result<AdapterProfile> {
+    match std::env::var(TEST_STANDARD_ONLINE_MARKDOWNIZE_ENV)
+        .ok()
+        .as_deref()
+    {
+        Some("auth_error") => return Err(AdapterError::Auth("mock auth failure".to_owned())),
+        Some("rate_limit") => return Err(AdapterError::RateLimit("mock 429".to_owned())),
+        Some("mock")
+        | Some("partial")
+        | Some("mock_link_image")
+        | Some("incr_incomplete")
+        | Some("pin_changed") => {
+            let client = MockStandardOnlineMarkdownizeClient;
+            let model_pin = client.resolve_model_pin("mistral-ocr-latest")?;
+            return Ok(MistralOcrMarkdownizeAdapter::new(client, model_pin, scope_id).profile());
+        }
+        _ => {}
+    }
+    let client = EnvMistralOcrClient::new();
+    let model_pin = client.resolve_model_pin(&declared_markdown_model())?;
+    Ok(MistralOcrMarkdownizeAdapter::new(client, model_pin, scope_id).profile())
+}
+
 #[derive(Debug, Clone)]
 struct MockStandardOnlineMarkdownizeClient;
 
 impl MistralOcrClient for MockStandardOnlineMarkdownizeClient {
     fn resolve_model_pin(&self, _configured_model: &str) -> Result<String> {
+        // R14-6: the `pin_changed` seam simulates a model-pin change between runs so the
+        // incremental gate sees a resolved tool_profile different from the prior instance
+        // (which was created under the default `mistral-ocr-2505`).
+        if std::env::var(TEST_STANDARD_ONLINE_MARKDOWNIZE_ENV)
+            .ok()
+            .as_deref()
+            == Some("pin_changed")
+        {
+            return Ok("mistral-ocr-2599".to_owned());
+        }
         Ok("mistral-ocr-2505".to_owned())
     }
 
     fn ocr_markdown(&self, request: &MarkdownizeRequest, model_pin: &str) -> Result<OcrResponse> {
+        // R14-6: under `pin_changed`, an INCREMENTAL send must never reach the adapter —
+        // the gate resolves the changed pin first and falls back to Full. If one is
+        // attempted (a regression that sends before gating), fail loudly so the test
+        // catches it. A Full send under the same seam is the expected fallback and works.
+        if std::env::var(TEST_STANDARD_ONLINE_MARKDOWNIZE_ENV)
+            .ok()
+            .as_deref()
+            == Some("pin_changed")
+            && request.mode == crate::types::MarkdownizeMode::Incremental
+        {
+            return Err(AdapterError::ContractViolation(
+                "R14-6: incremental OCR sent after a model-pin change (gate missing)".to_owned(),
+            ));
+        }
         let mut pages: Vec<OcrPage> = request
             .prepared_unit_hint
             .as_deref()
