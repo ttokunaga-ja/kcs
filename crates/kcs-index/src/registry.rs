@@ -87,6 +87,23 @@ impl RegistryDb {
         Self::open(default_registry_path())
     }
 
+    /// R15-3: retire every registration for `kcs_path` whose `scope_id` differs
+    /// from `current_scope_id`, returning the number of rows removed. A deleted-
+    /// then-re-`init`ed `.kcs` mints a FRESH `scope_id` at the SAME path; because
+    /// the primary key is `(scope_id, kcs_path)`, the stale row otherwise survives
+    /// forever and multi-scope search returns the same document twice — once via the
+    /// dead `scope_id` whose Evidence Pointers can no longer resolve
+    /// (`KCS-E-EVIDENCE-SCOPE-UNREACHABLE-001`). The registry is a recoverable search
+    /// cache (03 §4), so dropping a stale row is always safe: the live scope re-adds
+    /// itself here. Call this immediately before [`upsert`](Self::upsert).
+    pub fn retire_stale_kcs_path(&self, kcs_path: &str, current_scope_id: &str) -> Result<usize> {
+        let removed = self.conn.execute(
+            "DELETE FROM scopes WHERE kcs_path = ?1 AND scope_id != ?2",
+            params![kcs_path, current_scope_id],
+        )?;
+        Ok(removed)
+    }
+
     pub fn upsert(&self, entry: &RegistryEntry) -> Result<()> {
         self.conn.execute(
             "INSERT INTO scopes (
@@ -245,6 +262,43 @@ mod tests {
         db.upsert(&entry("scope_a", "/tmp/a", true, true)).unwrap();
         db.upsert(&entry("scope_a", "/tmp/a", true, false)).unwrap();
         assert!(db.get("scope_a", "/tmp/a/.kcs").unwrap().unwrap().indexed);
+    }
+
+    // R15-3: a deleted-then-re-`init`ed `.kcs` mints a fresh scope_id at the same
+    // path. Retiring the stale row before re-registering leaves exactly one row for
+    // that path (no duplicate search target, no dead-pointer scope_id).
+    #[test]
+    fn retire_stale_kcs_path_removes_only_other_scope_ids_at_same_path() {
+        let (_dir, db) = open_temp();
+        // Old scope_id registered + indexed at /tmp/a.
+        db.upsert(&entry("scope_old", "/tmp/a", true, true))
+            .unwrap();
+        // An unrelated path must be untouched.
+        db.upsert(&entry("scope_x", "/tmp/other", true, true))
+            .unwrap();
+
+        // Re-init: fresh scope_id at the SAME `.kcs` path. Retire, then re-register.
+        let removed = db
+            .retire_stale_kcs_path("/tmp/a/.kcs", "scope_new")
+            .unwrap();
+        assert_eq!(removed, 1, "exactly the stale same-path row is retired");
+        db.upsert(&entry("scope_new", "/tmp/a", true, true))
+            .unwrap();
+
+        // Only the fresh registration survives at /tmp/a.
+        assert!(db.lookup_scope_id("scope_old").unwrap().is_empty());
+        assert_eq!(db.lookup_scope_id("scope_new").unwrap().len(), 1);
+        // The unrelated path is untouched.
+        assert_eq!(db.lookup_scope_id("scope_x").unwrap().len(), 1);
+        // Exactly one search target remains for the re-init'd path.
+        let targets = db.search_targets().unwrap();
+        assert_eq!(
+            targets
+                .iter()
+                .filter(|t| t.kcs_path == "/tmp/a/.kcs")
+                .count(),
+            1
+        );
     }
 
     #[test]

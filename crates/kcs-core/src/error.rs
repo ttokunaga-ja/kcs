@@ -75,6 +75,22 @@ impl KcsError {
         )
     }
 
+    /// R15-4: the HEAD (or a named) commit is shallow — its tree object has been
+    /// discarded (GC / manual deletion / corruption), so an operation that needs the
+    /// full prior tree (snapshot / index / reindex, or a cursor replay) cannot
+    /// proceed. Distinct from a raw `KCS-E-STORE-NOT-FOUND-001` so the caller gets a
+    /// clear "shallow commit" signal plus recovery guidance instead of an opaque
+    /// missing-object error (`docs/05-runtime.md` §2.2, `docs/06-cli-spec.md` §8).
+    #[must_use]
+    pub fn commit_shallow(message: impl Into<String>, commit_hash: impl Into<String>) -> Self {
+        Self::new(
+            "KCS-E-COMMIT-SHALLOW-001",
+            message,
+            json!({ "commit_hash": commit_hash.into() }),
+            ExitCode::Failure,
+        )
+    }
+
     #[must_use]
     pub fn locked(path: impl Into<String>) -> Self {
         Self::new(

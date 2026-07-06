@@ -436,9 +436,14 @@ fn run(cli: Cli) -> Result<Value> {
             let repo = Repository::open_current()?;
             validate_repo_tool_lock(&repo)?;
             let task_store = TaskStore::new(repo.kcs_dir());
+            // R15-4: `status` is a pure read — a shallow HEAD (tree object gone)
+            // degrades to listing files without a classification (`head_shallow`)
+            // instead of dying on a raw KCS-E-STORE-NOT-FOUND-001.
+            let status = repo.status()?;
             Ok(json!({
                 "scope_path": repo.kcs_dir(),
-                "files": repo.status()?,
+                "files": status.files,
+                "head_shallow": status.head_shallow,
                 "tasks": task_store.all().map_err(pipeline_to_kcs)?,
                 "quarantine": read_quarantine_records(&repo)?,
                 "budget": budget_status_json(&repo)?,
@@ -2599,7 +2604,22 @@ fn run_reindex(args: UnsupportedArgs) -> Result<Value> {
     let head = repo
         .head_commit_hash()?
         .ok_or_else(|| KcsError::not_found("HEAD"))?;
-    let tree = repo.read_tree(&repo.read_commit(&head)?.tree)?;
+    let commit = repo.read_commit(&head)?;
+    // R15-4: reindex re-normalizes the HEAD tree, so it needs the full tree object.
+    // If it is gone (shallow: GC'd / deleted / corrupt), fail with a clear
+    // KCS-E-COMMIT-SHALLOW-001 + recovery guidance rather than a raw
+    // KCS-E-STORE-NOT-FOUND-001 whose hash is opaque to the user.
+    let tree = match repo.read_tree(&commit.tree) {
+        Ok(tree) => tree,
+        Err(error) if error.error_code() == "KCS-E-STORE-NOT-FOUND-001" => {
+            return Err(KcsError::commit_shallow(
+                "HEAD commit is shallow (tree object discarded); \
+                 cannot reindex — restore the tree object or re-create the scope",
+                head,
+            ));
+        }
+        Err(error) => return Err(error),
+    };
     let mut normalize_by_path = BTreeMap::new();
     let mut reindexed = 0u64;
     for entry in &tree.entries {
@@ -3491,10 +3511,33 @@ fn registry_all_targets() -> Result<Option<Vec<ScopeTarget>>> {
     Ok(Some(
         entries
             .into_iter()
+            // R15-3 (defense in depth): a registry row is a valid search target only
+            // when the on-disk `.kcs` still carries the SAME scope_id. `register_scope`
+            // retires stale same-path rows on the next init/index, but a search that
+            // runs BEFORE that re-registration must not trust them — otherwise a
+            // deleted-then-re-init'd folder double-returns its doc via a dead scope_id.
+            // Mirrors the on-disk verification `resolve_scope_id_in_registry` already
+            // does on the Evidence-resolution side (removing the search/resolve
+            // asymmetry).
+            .filter(registry_entry_is_live)
             .map(registry_entry_target)
             .filter(|target| participates_in_global_search(&target.kcs_dir))
             .collect(),
     ))
+}
+
+/// R15-3: reject a registry row ONLY when the on-disk `.kcs` at `entry.root_path` opens
+/// and carries a DIFFERENT `scope_id` — i.e. a delete-and-re-`init` minted a fresh
+/// scope_id at the same path (the stale-duplicate case). An open/read failure
+/// (unreadable/locked/absent `.kcs`) is deliberately KEPT as a target: it is not a
+/// confirmed stale row, and silently dropping it would hide a genuinely unreachable
+/// scope that the search must instead surface as an `excluded_scopes` partial failure
+/// (05 §1.8). Only a positively-confirmed scope_id mismatch is filtered here.
+fn registry_entry_is_live(entry: &RegistryEntry) -> bool {
+    match scope_target(Path::new(&entry.root_path)) {
+        Ok(target) => target.scope_id == entry.scope_id,
+        Err(_) => true,
+    }
 }
 
 /// Registered scopes whose root path is at or below `root` (05 §1.8 prefix
@@ -3548,6 +3591,17 @@ fn register_scope(repo: &Repository, indexed: bool) {
         last_seen_at: now_utc_seconds(),
     };
     if let Ok(db) = RegistryDb::open_default() {
+        // R15-3: retire any stale registration for THIS `.kcs` path under a DIFFERENT
+        // scope_id first. A deleted-then-re-`init`ed folder mints a fresh scope_id at
+        // the same path; the composite PK `(scope_id, kcs_path)` would otherwise leave
+        // the old row forever, double-returning the doc in multi-scope search with a
+        // dead-pointer (unresolvable) scope_id. Best-effort like the upsert itself.
+        if let Err(error) = db.retire_stale_kcs_path(&entry.kcs_path, &entry.scope_id) {
+            eprintln!(
+                "warning: scope registry cleanup failed (search cache; recover with `kcs index`): {}",
+                error
+            );
+        }
         if let Err(error) = db.upsert(&entry) {
             eprintln!(
                 "warning: scope registry write failed (search cache; recover with `kcs index`): {}",
@@ -5360,6 +5414,36 @@ fn execute_pending_markdownize_tasks(
     let mut counts = ExecOutcome::default();
     for task in tasks {
         let task_id = task.task_id.clone();
+        // R15-2: verify the network-free preconditions BEFORE reserving the cost. F8
+        // charges under the device-global lock BEFORE the send, but a stale (edited-
+        // after-enqueue), text-native, or unpreparable task is superseded by R14-2
+        // inside the executor WITHOUT ever calling the adapter — so charging first is a
+        // phantom charge that double-bills and can exhaust the markdownize cap, falsely
+        // pausing the valid task. Fail the task here (non-retryable invalid_input; the
+        // recovery is a re-index, not a retry) instead of charging + entering the
+        // executor. This mirrors the executor's own R14-2/R9-2 guards, hoisted ahead of
+        // the charge.
+        if !online_markdownize_precondition_ok(repo, &task) {
+            store
+                .update_matching(|candidate| {
+                    if candidate.task_id == task_id {
+                        candidate.status = TaskStatus::Failed;
+                        candidate.fallback_reason =
+                            Some(retry_reason(RetryErrorKind::InvalidInput).to_owned());
+                        candidate.next_retry_at = None;
+                        candidate.heartbeat_at = None;
+                        candidate.attempts = candidate.attempts.saturating_add(1);
+                        true
+                    } else {
+                        false
+                    }
+                })
+                .map_err(pipeline_to_kcs)?;
+            // Count it as a (permanent) failure so `batch` JSON reports the attempt,
+            // matching the executor's InvalidInput path — but no charge was reserved.
+            counts.failed += 1;
+            continue;
+        }
         let file_size = repo
             .root()
             .join(&task.input_path)
@@ -5655,6 +5739,39 @@ fn task_prepared_unit_count(repo: &Repository, task: &TaskDescriptor) -> Option<
     .map(|prepare| prepare.prepared_units.len())
 }
 
+/// R15-2 (+ R14-2 / R9-2): the NETWORK-FREE preconditions an online markdownize task
+/// must satisfy before it is charged/executed. Returns `false` when the task can never
+/// reach the adapter: the current file no longer hashes to `input_hash` (edited after
+/// enqueue → superseded by R14-2 inside the executor), the file is text-native (R9-2
+/// rejects it), or its input can't be prepared into any unit. In every case the adapter
+/// is never called, so reserving the cost first (F8 charges before the send) would be a
+/// phantom charge against a send that never happens — it double-bills and can exhaust the
+/// markdownize cap, falsely pausing the valid task (R15-2). The executor re-checks the
+/// same conditions as defense in depth; this is the loop's pre-charge gate.
+fn online_markdownize_precondition_ok(repo: &Repository, task: &TaskDescriptor) -> bool {
+    let path = repo.root().join(&task.input_path);
+    let media_type = media_type_for_cli_path(&path).to_owned();
+    let Ok(current_bytes) = fs::read(&path) else {
+        return false;
+    };
+    if hash_bytes(&current_bytes) != task.input_hash {
+        return false;
+    }
+    if is_text_native_media(&media_type) {
+        return false;
+    }
+    let prepare_profile_hash = builtin_prepare_profile().tool_profile_hash;
+    let Ok(prepare) = prepare_units(PrepareStageRequest {
+        raw_hash: task.input_hash.clone(),
+        media_type,
+        input_path: path.display().to_string(),
+        tool_profile_hash: prepare_profile_hash,
+    }) else {
+        return false;
+    };
+    !prepare.prepared_units.is_empty()
+}
+
 fn execute_online_markdownize_task(
     repo: &Repository,
     task: &TaskDescriptor,
@@ -5756,6 +5873,11 @@ fn execute_online_markdownize_task(
         mode: AdapterMarkdownizeMode::Full,
         previous: None,
         hints: None,
+        // R15-5: a unit-scoped retry (`retry_units.is_some()`) re-sends ONLY the failed
+        // subset — scope the real OCR send/bill to those pages instead of the whole
+        // document (the ledger already prorated the reserve to the subset). A fresh full
+        // send (`retry_units.is_none()`) leaves this false → whole document, no `pages`.
+        restrict_to_hint_pages: retry_units.is_some(),
     })
     .map_err(task_failure_from_adapter)?;
     let profile = outcome.profile;
@@ -5938,57 +6060,83 @@ fn try_online_incremental_markdownize(
         })
         .cloned()
         .collect();
-    let adapter_previous = PreviousMarkdownizeContext {
-        raw: RawInput {
-            raw_hash: previous.manifest.raw_hash.clone(),
-            path: Some(path.display().to_string()),
-        },
-        normalized_units: previous
-            .units
+    // R15-6: a 0-change incremental (`requested` empty — nothing changed or added; only
+    // unchanged units, possibly with pure removals) must NOT touch the adapter. There is
+    // no page to OCR, so reuse every current unit from the prior instance directly.
+    // Before this, an empty `requested` still issued an Incremental request whose empty
+    // `pages` the real Mistral client paired with the WHOLE base64 document (all-pages
+    // OCR/bill), contradicting docs/04 §3.2 / 04-pipeline "unchanged units are reused
+    // KCS-side, not sent". The resolved profile was gated equal to `previous` above, so
+    // no send is needed to learn the tool_profile_hash.
+    let (mut response, profile_tool_hash) = if requested.is_empty() {
+        (
+            kcs_adapter::types::MarkdownizeResponse {
+                mode_used: AdapterMarkdownizeMode::Incremental,
+                updated_units: Vec::new(),
+                unchanged_unit_keys: Vec::new(),
+                added_units: Vec::new(),
+                removed_unit_keys: Vec::new(),
+                evidence_pointers: Vec::new(),
+                fallback_to_full: false,
+                reason: None,
+            },
+            resolved_profile.tool_profile_hash.clone(),
+        )
+    } else {
+        let adapter_previous = PreviousMarkdownizeContext {
+            raw: RawInput {
+                raw_hash: previous.manifest.raw_hash.clone(),
+                path: Some(path.display().to_string()),
+            },
+            normalized_units: previous
+                .units
+                .iter()
+                .map(normalized_unit_to_adapter_unit)
+                .collect(),
+            tool_profile_hash: previous.manifest.tool_profile_hash.clone(),
+        };
+        let outcome = run_standard_online_markdownize(StandardOnlineMarkdownizeRequest {
+            scope_id,
+            kcs_dir: repo.kcs_dir(),
+            raw_hash: &task.input_hash,
+            path,
+            media_type,
+            prepared_unit_hints: prepared_unit_hints(&requested),
+            mode: AdapterMarkdownizeMode::Incremental,
+            previous: Some(adapter_previous),
+            hints: Some(adapter_hints(&incremental_hints)),
+            // Incremental already scopes pages via `mode`; the retry-only signal stays off.
+            restrict_to_hint_pages: false,
+        })
+        .map_err(task_failure_from_adapter)?;
+        let response = outcome.response;
+        // R14-6: the pin/profile mismatch was gated BEFORE the send above, so
+        // `outcome.profile` matches `previous` here (same resolution) — no post-send
+        // re-check is needed. Acceptance (docs/04 §3.2): the OCR response must cover
+        // every requested (changed+added) unit, and the adapter must not have declined.
+        // Otherwise fall back to a Full re-send (fallback_reason = contract/coverage).
+        if response.fallback_to_full {
+            return Ok(None);
+        }
+        let produced: BTreeSet<String> = response
+            .updated_units
             .iter()
-            .map(normalized_unit_to_adapter_unit)
-            .collect(),
-        tool_profile_hash: previous.manifest.tool_profile_hash.clone(),
+            .chain(response.added_units.iter())
+            .map(|unit| unit.unit_key.clone())
+            .collect();
+        if !requested
+            .iter()
+            .all(|unit| produced.contains(&unit.unit_key))
+        {
+            return Ok(None);
+        }
+        (response, outcome.profile.tool_profile_hash)
     };
-    let outcome = run_standard_online_markdownize(StandardOnlineMarkdownizeRequest {
-        scope_id,
-        kcs_dir: repo.kcs_dir(),
-        raw_hash: &task.input_hash,
-        path,
-        media_type,
-        prepared_unit_hints: prepared_unit_hints(&requested),
-        mode: AdapterMarkdownizeMode::Incremental,
-        previous: Some(adapter_previous),
-        hints: Some(adapter_hints(&incremental_hints)),
-    })
-    .map_err(task_failure_from_adapter)?;
-    let response = outcome.response;
-    let profile = outcome.profile;
-    // R14-6: the pin/profile mismatch was gated BEFORE the send above, so `outcome.profile`
-    // matches `previous` here (same resolution) — no post-send re-check is needed.
-    // Acceptance (docs/04 §3.2): the OCR response must cover every requested
-    // (changed+added) unit, and the adapter must not have declined. Otherwise fall
-    // back to a Full re-send (fallback_reason = contract/coverage).
-    if response.fallback_to_full {
-        return Ok(None);
-    }
-    let produced: BTreeSet<String> = response
-        .updated_units
-        .iter()
-        .chain(response.added_units.iter())
-        .map(|unit| unit.unit_key.clone())
-        .collect();
-    if !requested
-        .iter()
-        .all(|unit| produced.contains(&unit.unit_key))
-    {
-        return Ok(None);
-    }
     // KCS orchestrates the unchanged reuse (docs/07 §8: the document-processing
     // route reuses unchanged units KCS-side rather than via the adapter). Inject the
     // unchanged new keys so `normalized_units_from_response` copies their markdown
-    // from the prior instance with `reused_from` set.
-    let mut response = response;
+    // from the prior instance with `reused_from` set. In the 0-change path this is
+    // EVERY current unit.
     response.unchanged_unit_keys = mapping
         .unchanged
         .iter()
@@ -6000,7 +6148,7 @@ fn try_online_incremental_markdownize(
         prepared_units,
         Some(&previous),
         &task.input_hash,
-        &profile.tool_profile_hash,
+        &profile_tool_hash,
         MarkdownizeMode::Incremental,
         &generated_at,
     ) {
@@ -6022,7 +6170,7 @@ fn try_online_incremental_markdownize(
         prepared_units,
         &units,
         &task.input_hash,
-        &profile.tool_profile_hash,
+        &profile_tool_hash,
         Some(previous.manifest.gen),
         &run_id,
         &generated_at,
@@ -6034,7 +6182,7 @@ fn try_online_incremental_markdownize(
         }
     })?;
     Ok(Some(OnlineExecutionOutcome {
-        output_ref: normalized_output_ref(repo, &task.input_hash, &profile.tool_profile_hash, 0),
+        output_ref: normalized_output_ref(repo, &task.input_hash, &profile_tool_hash, 0),
         status: TaskStatus::Done,
         mode: MarkdownizeMode::Incremental,
         previous_raw_hash: Some(previous.manifest.raw_hash.clone()),
@@ -6865,12 +7013,25 @@ fn reconcile_committed_embedding_tasks(
         let Some(chunk_id) = task.output_ref.strip_prefix("embedding:") else {
             continue;
         };
-        // Complete only a task whose chunk is live AND already embedded (live but
-        // NOT pending). A genuinely un-embedded chunk stays pending; a stale/deleted
-        // chunk's task is left untouched (a different, out-of-scope case).
-        if pending_ids.contains(chunk_id) || !live_ids.contains(chunk_id) {
+        // A genuinely un-embedded LIVE chunk stays pending (real outstanding work).
+        if pending_ids.contains(chunk_id) {
             continue;
         }
+        // R15-7: the chunk is NOT live at HEAD — the file was deleted or re-chunked
+        // (a new gen), so this task's chunk no longer exists. It can never be driven to
+        // completion (`live_chunks_without_embedding` never revisits it), so leaving it
+        // Pending/Running permanently pollutes `index_status`/`status.tasks` with phantom
+        // pending enrichment. Terminalize it as a NON-retryable failure (invalid_input):
+        // no adapter call, no re-charge, and a live re-chunk already has its OWN fresh
+        // task — so search/data are unaffected; only the phantom accounting heals.
+        if !live_ids.contains(chunk_id) {
+            transitions.insert(
+                task.output_ref.clone(),
+                embedding_fail_transition(RetryErrorKind::InvalidInput),
+            );
+            continue;
+        }
+        // Live AND already embedded (live but NOT pending) → complete it (R12-3).
         transitions.insert(task.output_ref.clone(), embedding_done_transition());
     }
     apply_embedding_transitions(task_store, &transitions, now)?;
@@ -7495,10 +7656,30 @@ fn run_index_pipeline(
         let path = repo.root().join(&candidate.input_path);
         let bytes = fs::read(&path)
             .map_err(|err| KcsError::io(err.to_string(), path.display().to_string()))?;
-        let raw_hash = candidate
-            .raw_hash
-            .clone()
-            .unwrap_or_else(|| hash_bytes(&bytes));
+        // R15-8: `candidate.raw_hash` was computed at SCAN time; `bytes` is read HERE. If
+        // the file was externally edited in that window, persisting the normalized
+        // instance under the stale SCAN hash while the closing snapshot hashes the CURRENT
+        // bytes for the tree entry would diverge their identities (the offline twin of
+        // R14-2). Re-hash what we actually read and, on a mismatch, SKIP this candidate —
+        // the next clean index re-scans and normalizes it under its correct identity. The
+        // window is one store-lock-held `kcs index` plus an external write, so this is a
+        // rare defensive guard. (No deterministic test: reproducing it needs an external
+        // edit landing inside the lock-held critical section between the scan and this
+        // read, which no public seam exposes.)
+        let current_hash = hash_bytes(&bytes);
+        if let Some(scan_hash) = &candidate.raw_hash {
+            if scan_hash != &current_hash {
+                append_event_log(
+                    "KCS-I-INDEX-INPUT-CHANGED-001",
+                    "input file changed between scan and normalize; skipped to preserve \
+                     content-addressing (re-run index)",
+                    json!({ "input_path": candidate.input_path }),
+                )?;
+                result.failed_files += 1;
+                continue;
+            }
+        }
+        let raw_hash = current_hash;
         let prepare = prepare_units(PrepareStageRequest {
             raw_hash: raw_hash.clone(),
             media_type: candidate.media_type.clone(),
@@ -7645,6 +7826,9 @@ fn run_index_pipeline(
                 .flatten(),
             hints: (mode == MarkdownizeMode::Incremental)
                 .then(|| adapter_hints(&incremental_hints)),
+            // Offline (deterministic) markdownize path: the builtin adapter ignores
+            // page scoping (R15-5 concerns only the real Mistral client).
+            restrict_to_hint_pages: false,
             tool_profile_hash: markdown_profile_hash.clone(),
             spec_version: 1,
         };
@@ -8306,6 +8490,33 @@ fn enqueue_online_placeholder_task(
     }
     let online_profile = online_markdownize_profile();
     let output_ref = online_output_ref(&online_profile.adapter_id);
+    // R15-2: supersede any still-Pending/Paused online markdownize task for THIS path
+    // whose `input_hash` differs from the current content. The file was edited after
+    // that task was enqueued, so it is stale: `batch resume` would R14-2-supersede it
+    // at send time (adapter never called) but only AFTER the F8 pre-send charge already
+    // landed (the phantom charge), and left unretired these stale tasks accumulate and
+    // eat the per-adapter markdownize cap, falsely pausing the current (valid) task.
+    // Retire them here (non-retryable `invalid_input`; the state machine has no
+    // "superseded" state and the recovery is this fresh re-index, not a retry). Runs
+    // before the idempotency check so it fires even when a same-hash task also exists.
+    task_store
+        .update_matching(|task| {
+            if task.task_type == TaskType::Markdownize
+                && task.output_ref == output_ref
+                && matches!(task.status, TaskStatus::Pending | TaskStatus::Paused)
+                && task.input_path == candidate.input_path
+                && task.input_hash != raw_hash
+            {
+                task.status = TaskStatus::Failed;
+                task.fallback_reason = Some(retry_reason(RetryErrorKind::InvalidInput).to_owned());
+                task.next_retry_at = None;
+                task.heartbeat_at = None;
+                true
+            } else {
+                false
+            }
+        })
+        .map_err(pipeline_to_kcs)?;
     // Idempotency (Step2c I1, 04 §5.5): never enqueue a second online task for an
     // identity `(input_path, input_hash)` that already has an online task in any
     // live lifecycle state. Without the completed-state check, every unchanged
