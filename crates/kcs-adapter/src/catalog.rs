@@ -67,6 +67,11 @@ pub struct StandardOnlineMarkdownizeRequest<'a> {
     pub mode: MarkdownizeMode,
     pub previous: Option<PreviousMarkdownizeContext>,
     pub hints: Option<IncrementalHints>,
+    /// R15-5: set on a UNIT-SCOPED retry (the `prepared_unit_hints` carry only the
+    /// failed subset, but `mode` is `Full` with no previous/hints). Forwarded to the
+    /// Mistral client so it OCRs/bills only those pages instead of the whole document.
+    /// A fresh full send leaves this `false`.
+    pub restrict_to_hint_pages: bool,
 }
 
 pub struct StandardOnlineMarkdownizeOutcome {
@@ -89,6 +94,8 @@ pub fn run_standard_online_markdownize(
         mode: request.mode,
         previous: request.previous,
         hints: request.hints,
+        // R15-5: forward the retry page-scoping signal to the real client.
+        restrict_to_hint_pages: request.restrict_to_hint_pages,
         tool_profile_hash: String::new(),
         spec_version: 1,
     };
@@ -105,7 +112,8 @@ pub fn run_standard_online_markdownize(
         | Some("partial")
         | Some("mock_link_image")
         | Some("incr_incomplete")
-        | Some("pin_changed") => {
+        | Some("pin_changed")
+        | Some("no_change_no_send") => {
             let client = MockStandardOnlineMarkdownizeClient;
             let model_pin = client.resolve_model_pin("mistral-ocr-latest")?;
             let adapter = MistralOcrMarkdownizeAdapter::new(client, model_pin, request.scope_id)
@@ -162,7 +170,8 @@ pub fn resolve_standard_online_markdownize_profile(scope_id: &str) -> Result<Ada
         | Some("partial")
         | Some("mock_link_image")
         | Some("incr_incomplete")
-        | Some("pin_changed") => {
+        | Some("pin_changed")
+        | Some("no_change_no_send") => {
             let client = MockStandardOnlineMarkdownizeClient;
             let model_pin = client.resolve_model_pin("mistral-ocr-latest")?;
             return Ok(MistralOcrMarkdownizeAdapter::new(client, model_pin, scope_id).profile());
@@ -205,6 +214,22 @@ impl MistralOcrClient for MockStandardOnlineMarkdownizeClient {
         {
             return Err(AdapterError::ContractViolation(
                 "R14-6: incremental OCR sent after a model-pin change (gate missing)".to_owned(),
+            ));
+        }
+        // R15-6: under `no_change_no_send`, a 0-change incremental must reuse every unit
+        // KCS-side WITHOUT reaching the adapter (there is no page to OCR). Unlike
+        // `pin_changed`, the model pin is left stable so incremental actually FIRES (the
+        // gate passes) — the only incremental send this seam sees is the regression it
+        // guards. Fail loudly so the test catches any send.
+        if std::env::var(TEST_STANDARD_ONLINE_MARKDOWNIZE_ENV)
+            .ok()
+            .as_deref()
+            == Some("no_change_no_send")
+            && request.mode == crate::types::MarkdownizeMode::Incremental
+        {
+            return Err(AdapterError::ContractViolation(
+                "R15-6: a 0-change incremental reached the adapter (should reuse without sending)"
+                    .to_owned(),
             ));
         }
         let mut pages: Vec<OcrPage> = request
@@ -560,6 +585,7 @@ mod tests {
             mode: MarkdownizeMode::Full,
             previous: None,
             hints: None,
+            restrict_to_hint_pages: false,
         })
         .unwrap();
         std::env::remove_var(TEST_STANDARD_ONLINE_MARKDOWNIZE_ENV);

@@ -483,6 +483,7 @@ mod tests {
             mode: MarkdownizeMode::Full,
             previous: None,
             hints: None,
+            restrict_to_hint_pages: false,
             tool_profile_hash: format!("sha256:{}", "1".repeat(64)),
             spec_version: 1,
         };

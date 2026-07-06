@@ -40,9 +40,38 @@ pub struct WorkingTree {
 pub struct FileStatus {
     pub path: PathBuf,
     pub relative_path: String,
-    pub status: String,
+    /// The working-tree-vs-HEAD classification (`new`/`modified`/`deleted`/
+    /// `unchanged`). R15-4: `None` (field omitted) when HEAD is shallow — the prior
+    /// tree needed to classify is gone, so a pure `kcs status` degrades to listing
+    /// current files without a classification rather than dying.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub raw_hash: Option<String>,
+}
+
+/// The result of [`Repository::status`]: the per-file statuses plus a degradation
+/// flag. R15-4: when HEAD names a commit whose tree object is gone (shallow), the
+/// per-file `status` classification cannot be computed — `head_shallow` is `true`,
+/// each file's `status` is omitted, and the command still succeeds (exit 0) so the
+/// scope stays inspectable instead of bricking on a raw `KCS-E-STORE-NOT-FOUND-001`.
+#[derive(Debug, Clone, Serialize)]
+pub struct StatusReport {
+    pub files: Vec<FileStatus>,
+    pub head_shallow: bool,
+}
+
+/// R15-4: the availability of the HEAD commit's tree object.
+enum HeadTreeState {
+    /// No HEAD commit — an unborn branch (a first snapshot creates the root).
+    Unborn,
+    /// HEAD names a commit whose TREE object is gone (shallow: GC'd / manually
+    /// deleted / corrupt CAS). Pure reads degrade; writes must fail loudly. (The
+    /// write paths carry their own HEAD hash for the error context, so this variant
+    /// needs no payload.)
+    Shallow,
+    /// HEAD's commit and tree object are both present.
+    Present(TreeObject),
 }
 
 #[derive(Debug, Clone)]
@@ -261,12 +290,18 @@ impl Repository {
         })
     }
 
-    pub fn status(&self) -> Result<Vec<FileStatus>> {
+    pub fn status(&self) -> Result<StatusReport> {
         self.validate()?;
         let current = self.build_working_tree(false)?.tree;
         let current_map = tree_map(&current);
-        let head_tree = self.head_tree()?;
-        let head_map = head_tree.as_ref().map(tree_map).unwrap_or_default();
+        // R15-4: a shallow HEAD (tree object discarded) must NOT brick a pure read.
+        // Degrade to listing the current files without a classification instead of
+        // propagating the raw KCS-E-STORE-NOT-FOUND-001 from `read_tree`.
+        let (head_map, head_shallow) = match self.head_tree_state()? {
+            HeadTreeState::Unborn => (BTreeMap::new(), false),
+            HeadTreeState::Present(tree) => (tree_map(&tree), false),
+            HeadTreeState::Shallow => (BTreeMap::new(), true),
+        };
 
         let mut paths = BTreeSet::new();
         paths.extend(current_map.keys().cloned());
@@ -274,24 +309,39 @@ impl Repository {
 
         let mut statuses = Vec::new();
         for path in paths {
-            let status = match (head_map.get(&path), current_map.get(&path)) {
-                (None, Some(_)) => "new",
-                (Some(old), Some(new)) if old == new => "unchanged",
-                (Some(_), Some(_)) => "modified",
-                (Some(_), None) => "deleted",
-                (None, None) => continue,
+            // Omit the tree-derived classification when HEAD is shallow — the prior
+            // tree needed to compute it is gone.
+            let status = if head_shallow {
+                if !current_map.contains_key(&path) {
+                    continue;
+                }
+                None
+            } else {
+                Some(
+                    match (head_map.get(&path), current_map.get(&path)) {
+                        (None, Some(_)) => "new",
+                        (Some(old), Some(new)) if old == new => "unchanged",
+                        (Some(_), Some(_)) => "modified",
+                        (Some(_), None) => "deleted",
+                        (None, None) => continue,
+                    }
+                    .to_owned(),
+                )
             };
             statuses.push(FileStatus {
                 path: self.root.join(&path),
                 relative_path: path.clone(),
-                status: status.to_owned(),
+                status,
                 raw_hash: current_map
                     .get(&path)
                     .or_else(|| head_map.get(&path))
                     .cloned(),
             });
         }
-        Ok(statuses)
+        Ok(StatusReport {
+            files: statuses,
+            head_shallow,
+        })
     }
 
     pub fn snapshot(
@@ -371,12 +421,26 @@ impl Repository {
             .map(|hash| self.read_commit(hash).map(|commit| commit.tree))
             .transpose()?;
         // Snapshot the prior HEAD tree now — after the ref updates below,
-        // head_tree() would return the NEW tree (useless as "previous").
-        let prior_tree = head_tree_hash
-            .as_deref()
-            .map(|hash| self.read_tree(hash))
-            .transpose()?;
-        let stats = self.stats_against_head(&working)?;
+        // head_tree_state() would return the NEW tree (useless as "previous").
+        // R15-4: if HEAD names a commit whose tree object is gone (shallow: GC'd /
+        // deleted / corrupt), fail loudly with KCS-E-COMMIT-SHALLOW-001 rather than a
+        // raw KCS-E-STORE-NOT-FOUND-001, and never advance refs onto an unverifiable
+        // base (05 §2.2: snapshot/index need the full prior tree).
+        let prior_tree = match head_tree_hash.as_deref() {
+            None => None,
+            Some(hash) => match self.read_tree(hash) {
+                Ok(tree) => Some(tree),
+                Err(error) if is_store_not_found(&error) => {
+                    return Err(KcsError::commit_shallow(
+                        "HEAD commit is shallow (tree object discarded); \
+                         restore the tree object or re-create the scope before snapshotting",
+                        head_hash.clone().unwrap_or_default(),
+                    ));
+                }
+                Err(error) => return Err(error),
+            },
+        };
+        let stats = commit_stats(prior_tree.as_ref(), &working);
 
         if head_tree_hash.as_deref() == Some(tree_hash.as_str()) {
             return Ok(SnapshotOutcome {
@@ -584,7 +648,18 @@ impl Repository {
         let value = fs::read_to_string(&path).kcs_io(&path)?;
         let value = value.trim();
         if value.is_empty() {
-            Ok(None)
+            // R15-1 / R15-1b: an empty HEAD is EITHER a corrupt HEAD (a crash
+            // truncated it while `refs/heads/main` still names a real commit) OR a
+            // genuinely unborn branch (both HEAD and refs empty). Recover the commit
+            // from refs in the corrupt case so a `snapshot` extends the real history
+            // instead of orphaning it under a fresh `parents=[]` root (R15-1), and so
+            // a pure read (`log`/`status`/`search`) does not misreport an indexed
+            // scope as unindexed (R15-1b). `empty_head_recovery_hash` is side-effect-
+            // free — it only reads and validates the ref against the store — so it is
+            // safe to call while holding the store lock (e.g. inside `snapshot`) and
+            // on a read-only `.kcs`. A genuinely unborn branch still returns `None`
+            // (refs empty too), preserving the first-`snapshot`-creates-root path.
+            empty_head_recovery_hash(&self.kcs_dir)
         } else if is_hash(value) {
             Ok(Some(value.to_owned()))
         } else {
@@ -654,40 +729,20 @@ impl Repository {
         Ok(Some(hash))
     }
 
-    fn head_tree(&self) -> Result<Option<TreeObject>> {
-        self.head_commit_hash()?
-            .map(|hash| {
-                self.read_commit(&hash)
-                    .and_then(|commit| self.read_tree(&commit.tree))
-            })
-            .transpose()
-    }
-
-    fn stats_against_head(&self, working: &TreeObject) -> Result<CommitStats> {
-        let current = tree_map(working);
-        let head = self.head_tree()?;
-        let old = head.as_ref().map(tree_map).unwrap_or_default();
-        let mut added = 0;
-        let mut modified = 0;
-        let mut deleted = 0;
-
-        let mut paths = BTreeSet::new();
-        paths.extend(current.keys().cloned());
-        paths.extend(old.keys().cloned());
-        for path in paths {
-            match (old.get(&path), current.get(&path)) {
-                (None, Some(_)) => added += 1,
-                (Some(_), None) => deleted += 1,
-                (Some(a), Some(b)) if a != b => modified += 1,
-                _ => {}
-            }
+    /// R15-4: read the HEAD commit's tree object, distinguishing an unborn branch
+    /// (no HEAD) from a shallow HEAD (tree object gone) from a present tree. A raw
+    /// `KCS-E-STORE-NOT-FOUND-001` from the tree read is folded into the `Shallow`
+    /// variant so callers decide the policy: pure reads degrade, writes fail loudly.
+    fn head_tree_state(&self) -> Result<HeadTreeState> {
+        let Some(commit_hash) = self.head_commit_hash()? else {
+            return Ok(HeadTreeState::Unborn);
+        };
+        let tree_hash = self.read_commit(&commit_hash)?.tree;
+        match self.read_tree(&tree_hash) {
+            Ok(tree) => Ok(HeadTreeState::Present(tree)),
+            Err(error) if is_store_not_found(&error) => Ok(HeadTreeState::Shallow),
+            Err(error) => Err(error),
         }
-
-        Ok(CommitStats {
-            files_added: added,
-            files_modified: modified,
-            files_deleted: deleted,
-        })
     }
 
     fn validate_config(&self) -> Result<()> {
@@ -1459,6 +1514,41 @@ fn tree_map(tree: &TreeObject) -> BTreeMap<String, String> {
         .collect()
 }
 
+/// Commit stats of `working` against an optional prior tree (`None` = unborn: all
+/// files count as added). R15-4: pure (no I/O) — the caller reads the prior tree
+/// once (and rejects a shallow HEAD) rather than re-reading it here.
+fn commit_stats(prior: Option<&TreeObject>, working: &TreeObject) -> CommitStats {
+    let current = tree_map(working);
+    let old = prior.map(tree_map).unwrap_or_default();
+    let mut added = 0;
+    let mut modified = 0;
+    let mut deleted = 0;
+
+    let mut paths = BTreeSet::new();
+    paths.extend(current.keys().cloned());
+    paths.extend(old.keys().cloned());
+    for path in paths {
+        match (old.get(&path), current.get(&path)) {
+            (None, Some(_)) => added += 1,
+            (Some(_), None) => deleted += 1,
+            (Some(a), Some(b)) if a != b => modified += 1,
+            _ => {}
+        }
+    }
+
+    CommitStats {
+        files_added: added,
+        files_modified: modified,
+        files_deleted: deleted,
+    }
+}
+
+/// R15-4: is `error` a raw missing-CAS-object error? Used to fold a missing tree
+/// object into the shallow-commit policy (degrade reads / fail writes loudly).
+fn is_store_not_found(error: &KcsError) -> bool {
+    error.error_code() == "KCS-E-STORE-NOT-FOUND-001"
+}
+
 fn validate_format_version(version: &str) -> Result<()> {
     let major = version
         .split('.')
@@ -2055,5 +2145,68 @@ mod tests {
         assert_eq!(civil_from_days(47_541), (2100, 3, 1));
         // Negative day index -> proleptic pre-epoch date.
         assert_eq!(civil_from_days(-1), (1969, 12, 31));
+    }
+
+    // R15-1 / R15-1b: an empty HEAD whose `refs/heads/main` still names a real commit
+    // is CORRUPT, not unborn. `head_commit_hash` must recover the commit from refs
+    // (side-effect-free) so a `snapshot` extends real history instead of orphaning it
+    // under a fresh `parents=[]` root, and so a pure read does not misreport. This
+    // exercises the fallback DIRECTLY, without `open()` (whose `self_heal_head` would
+    // otherwise repair HEAD first) — i.e. the exact window R15-1 found (heal deferred).
+    #[test]
+    fn r15_1_empty_head_recovers_from_refs_and_snapshot_does_not_orphan() {
+        use super::Repository;
+        use crate::cas::ObjectStore;
+
+        let dir = tempfile::tempdir().unwrap();
+        let repo = Repository::init(dir.path()).unwrap();
+        let kcs_dir = repo.kcs_dir().to_path_buf();
+        let root = repo.root().to_path_buf();
+
+        fs::write(root.join("doc.txt"), "v1").unwrap();
+        let c1_hash = repo
+            .snapshot(Some("c1"), None)
+            .unwrap()
+            .commit_hash
+            .unwrap();
+
+        // Corrupt HEAD to empty (crash truncation); refs still names C1.
+        fs::write(kcs_dir.join("HEAD"), "").unwrap();
+
+        // A Repository built WITHOUT `open()` (so `self_heal_head` never runs) still
+        // recovers the real HEAD from refs.
+        let direct = Repository {
+            root: root.clone(),
+            kcs_dir: kcs_dir.clone(),
+            store: ObjectStore::new(kcs_dir.clone()),
+        };
+        assert_eq!(
+            direct.head_commit_hash().unwrap(),
+            Some(c1_hash.clone()),
+            "empty HEAD + healthy refs must recover the refs commit"
+        );
+
+        // A snapshot taken while HEAD is still physically empty must PARENT on C1,
+        // not orphan under a fresh root.
+        fs::write(root.join("doc.txt"), "v2").unwrap();
+        let c2_hash = direct
+            .snapshot(Some("c2"), None)
+            .unwrap()
+            .commit_hash
+            .unwrap();
+        assert_eq!(
+            direct.read_commit(&c2_hash).unwrap().parents,
+            vec![c1_hash],
+            "snapshot under a corrupt (empty) HEAD must extend the recovered history"
+        );
+
+        // Genuinely unborn (HEAD and refs both empty) still returns None.
+        fs::write(kcs_dir.join("HEAD"), "").unwrap();
+        fs::write(kcs_dir.join("refs/heads/main"), "").unwrap();
+        assert_eq!(
+            direct.head_commit_hash().unwrap(),
+            None,
+            "both HEAD and refs empty is a genuinely unborn branch"
+        );
     }
 }

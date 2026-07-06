@@ -2938,6 +2938,137 @@ fn r14_2_unchanged_online_task_executes_normally() {
     );
 }
 
+// R15-2: a stale online markdownize task (current bytes no longer hash to `input_hash`)
+// is superseded inside the executor WITHOUT ever calling the adapter (R14-2). Before
+// R15-2, `execute_pending_markdownize_tasks` reserved the markdownize cost (F8 charges
+// under the device-global cost-ledger lock BEFORE the send) and only THEN entered the
+// executor, which immediately superseded the task — leaving a PHANTOM markdown row for a
+// send that never happened. That double-bills and can exhaust the per-adapter markdownize
+// cap, falsely pausing the valid task. The pre-charge gate must verify the network-free
+// preconditions first: a stale task fails WITHOUT any markdown charge landing.
+#[test]
+fn r15_2_stale_online_task_supersede_does_not_phantom_charge() {
+    let dir = scope();
+    fs::write(dir.path().join("report.pdf"), fake_pdf(&["p1", "p2"])).unwrap();
+    // `index` enqueues the online task for H(v1) but does NOT run it — so no markdown
+    // charge has landed yet (the send is what bills).
+    json_success(&dir, ["index", "--approve"]);
+
+    let markdown_rows = |dir: &TempDir| -> usize {
+        ledger_lines(dir)
+            .iter()
+            .filter(|entry| {
+                entry["adapter_kind"] == "markdown" && entry["usd"].as_f64().unwrap_or(0.0) > 0.0
+            })
+            .count()
+    };
+    assert_eq!(
+        markdown_rows(&dir),
+        0,
+        "index alone must not charge markdown before any send"
+    );
+
+    // Edit to v2 WITHOUT re-indexing → the task's input_hash is now stale.
+    fs::write(
+        dir.path().join("report.pdf"),
+        fake_pdf(&["p1", "p2 changed"]),
+    )
+    .unwrap();
+    let resume = json_code_stdout_with_env(
+        &dir,
+        ["batch", "resume"],
+        4,
+        &[(TEST_STANDARD_ONLINE_MARKDOWNIZE_ENV, "mock")],
+    );
+    assert_eq!(
+        resume["tasks_executed"], 0,
+        "a stale task must not execute (adapter never called): {resume}"
+    );
+    assert!(
+        resume["tasks_failed"].as_u64().unwrap() >= 1,
+        "a stale task is superseded (failed): {resume}"
+    );
+
+    // The phantom charge is gone: the pre-charge gate failed the task before reserving
+    // the cost, so no markdown row exists for a send that never happened.
+    assert_eq!(
+        markdown_rows(&dir),
+        0,
+        "a superseded stale task must not phantom-charge the cost-ledger"
+    );
+}
+
+// R15-6: a 0-change incremental (metadata-only edit → new raw_hash but every page's
+// content byte-identical, change_rate 0) must NOT call the adapter — with nothing
+// changed/added there is no page to OCR. Before this, the empty `requested` still issued
+// an Incremental request whose empty `pages` the real Mistral client paired with the
+// WHOLE base64 document (all-pages upload/bill); the plain `mock` seam hid this by
+// composing only from the (empty) hints. The `no_change_no_send` seam keeps the pin
+// stable (so incremental fires) but fails loudly on ANY incremental send — so a resume
+// that reaches the adapter fails, while the fix completes `done` by reuse (exit 0).
+#[test]
+fn r15_6_zero_change_incremental_reuses_without_calling_adapter() {
+    let dir = scope();
+    let v1 = fake_pdf(&["stable page body content"]);
+    fs::write(dir.path().join("report.pdf"), &v1).unwrap();
+    // v1: enqueue + run the online task (mock) → the prior online instance.
+    json_success(&dir, ["index", "--approve"]);
+    json_success_with_env(
+        &dir,
+        ["batch", "resume"],
+        &[(TEST_STANDARD_ONLINE_MARKDOWNIZE_ENV, "mock")],
+    );
+
+    // v2: append a trailing PDF comment. The raw bytes (raw_hash) change — so re-index
+    // enqueues a fresh online task — but the page stream text is byte-identical, so every
+    // unit maps `unchanged` (change_rate 0). `pdf_text_pages` ignores bytes after %%EOF.
+    let v2 = format!("{v1}%kcs-metadata-only-change\n");
+    assert_ne!(hash_bytes(v2.as_bytes()), hash_bytes(v1.as_bytes()));
+    fs::write(dir.path().join("report.pdf"), &v2).unwrap();
+    json_success(&dir, ["index", "--yes"]);
+
+    // Resume under `no_change_no_send`: an incremental send would fail loudly (the seam's
+    // guard). With the fix the 0-change task never calls the adapter, so it completes
+    // `done` purely by reuse → exit 0, no failure.
+    let resume = json_success_with_env(
+        &dir,
+        ["batch", "resume"],
+        &[(TEST_STANDARD_ONLINE_MARKDOWNIZE_ENV, "no_change_no_send")],
+    );
+    assert_eq!(
+        resume["tasks_failed"], 0,
+        "a 0-change incremental must not call the adapter (the seam fails any send): {resume}"
+    );
+    let status = json_success(&dir, ["status"]);
+    assert!(
+        status["tasks"].as_array().unwrap().iter().any(|task| {
+            task["input_path"] == "report.pdf"
+                && task["fallback_reason"] == "online_adapter_done"
+                && task["status"] == "done"
+                && task["changed_unit_keys"]
+                    .as_array()
+                    .is_some_and(|keys| keys.is_empty())
+        }),
+        "the 0-change task completes done with no changed units: {status}"
+    );
+
+    // Every unit of the current (v2) online instance was reused from the prior instance
+    // (reused_from set) — no page was freshly OCR'd.
+    let v2_hash = hash_bytes(v2.as_bytes());
+    let reused: Vec<_> = normalized_units(&dir)
+        .into_iter()
+        .filter(|unit| unit.raw_hash == v2_hash && unit.markdown.contains("mock ocr"))
+        .collect();
+    assert!(
+        !reused.is_empty(),
+        "the v2 instance must have reused units carrying the prior markdown"
+    );
+    assert!(
+        reused.iter().all(|unit| unit.reused_from.is_some()),
+        "every v2 unit must be reused_from the prior instance (no fresh OCR)"
+    );
+}
+
 // R14-3: R13-4's HEAD self-heal runs on the common `Repository::open` path and used to
 // unconditionally take the store lock and overwrite HEAD. On a read-only `.kcs` (archive
 // / forensic mount) with a corrupt (empty) HEAD, the `.lock` create failed with
@@ -2969,17 +3100,20 @@ fn r14_3_corrupt_head_read_only_scope_reads_run_and_defer_heal() {
 
     // Pure-read commands must succeed (exit 0). Before R14-3 the self-heal's `.lock`
     // create failed with PermissionDenied → KCS-E-STORE-IO-001, exit 1.
-    // The requirement (docs/04 §3.2 spirit) is that these read commands exit 0, not
-    // that they reconstruct history — `json_success` asserts exit 0. `log` traverses
-    // from HEAD, which stays empty while unhealed, so it legitimately returns an empty
-    // (but well-formed) commit list rather than bricking.
     let status = json_success(&dir, ["status"]);
     assert!(status.is_object(), "status must run read-only: {status}");
+    // R15-1b: even though the physical HEAD file stays empty while the heal is
+    // deferred, `head_commit_hash` now recovers the real commit from `refs/heads/main`
+    // (side-effect-free), so `log` returns the true history (C1) instead of the former
+    // misreport of an empty commit list on an indexed scope.
     let log = json_success(&dir, ["log"]);
-    assert!(
-        log["commits"].is_array(),
-        "log must run read-only and return structured output: {log}"
+    let commits = log["commits"].as_array().expect("log commits array");
+    assert_eq!(
+        commits.len(),
+        1,
+        "log must recover the real commit from refs even while HEAD is unhealed: {log}"
     );
+    assert_eq!(commits[0]["commit_hash"], c1_hash);
     // `inspect <hash>` resolves the object directly (not via HEAD), so it still returns
     // the commit object — proving the open path itself no longer bricks.
     let inspect = json_success(&dir, ["inspect", &c1_hash]);
@@ -3058,6 +3192,73 @@ fn r14_3_healthy_head_read_only_scope_unchanged() {
     );
 
     fs::set_permissions(&kcs_dir, fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+// R15-4: a HEAD commit whose TREE object is gone (shallow: GC'd / manually deleted /
+// corrupt CAS) must NOT brick the scope. `status` is a pure read → it degrades
+// (head_shallow, no per-file classification) and exits 0. Writes that need the prior
+// tree — `index` / `snapshot` / `reindex` — fail with a clear KCS-E-COMMIT-SHALLOW-001
+// (recovery guidance) instead of a raw KCS-E-STORE-NOT-FOUND-001 whose hash is opaque.
+#[test]
+fn r15_4_shallow_head_degrades_reads_and_rejects_writes() {
+    let dir = scope();
+    fs::write(dir.path().join("doc.md"), "# Doc\n\nbody one\n").unwrap();
+    json_success(&dir, ["index", "--yes"]);
+
+    // Delete the HEAD commit's tree object(s), leaving the commit reachable — exactly
+    // the shallow state (05 §2.2: tree discarded, commit retained).
+    let trees_dir = dir.path().join(".kcs/objects/trees");
+    fs::remove_dir_all(&trees_dir).unwrap();
+
+    // (a) `status` degrades: exit 0, head_shallow = true, files listed WITHOUT a
+    // tree-derived classification (the prior tree needed to classify is gone).
+    let status = json_success(&dir, ["status"]);
+    assert_eq!(
+        status["head_shallow"], true,
+        "status must flag the shallow HEAD: {status}"
+    );
+    let files = status["files"].as_array().unwrap();
+    assert!(
+        !files.is_empty(),
+        "status still lists the working files: {status}"
+    );
+    assert!(
+        files.iter().all(|file| file.get("status").is_none()),
+        "a shallow HEAD omits the per-file classification: {status}"
+    );
+
+    // Edit the file so `index` has a change to snapshot (its no-change short-circuit
+    // uses the sqlite cache, not the tree object; snapshot/reindex read the tree
+    // unconditionally). The write must then extend the shallow HEAD → rejected.
+    fs::write(dir.path().join("doc.md"), "# Doc\n\nbody two\n").unwrap();
+
+    // (b) `index` / `snapshot` reject the shallow commit with the clear error code,
+    // not a raw KCS-E-STORE-NOT-FOUND-001.
+    let index_err = json_failure(&dir, ["index", "--yes"], 1);
+    assert_eq!(
+        index_err["error_code"], "KCS-E-COMMIT-SHALLOW-001",
+        "{index_err}"
+    );
+    let snap_err = json_failure(&dir, ["snapshot", "-m", "x"], 1);
+    assert_eq!(
+        snap_err["error_code"], "KCS-E-COMMIT-SHALLOW-001",
+        "{snap_err}"
+    );
+
+    // (c) `reindex --force --yes` likewise fails with the shallow error.
+    let reindex_err = json_failure(&dir, ["reindex", "--force", "--yes"], 1);
+    assert_eq!(
+        reindex_err["error_code"], "KCS-E-COMMIT-SHALLOW-001",
+        "{reindex_err}"
+    );
+
+    // (control) `log` stays healthy — it traverses commits, not trees.
+    let log = json_success(&dir, ["log"]);
+    assert_eq!(
+        log["commits"].as_array().unwrap().len(),
+        1,
+        "log still reads the (tree-less) commit: {log}"
+    );
 }
 
 // R14-5: `batch resume`/`retry` exit 3 (partial) / 4 (permanent) previously logged a

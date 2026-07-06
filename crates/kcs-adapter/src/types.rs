@@ -170,6 +170,14 @@ pub struct MarkdownizeRequest {
     pub mode: MarkdownizeMode,
     pub previous: Option<PreviousMarkdownizeContext>,
     pub hints: Option<IncrementalHints>,
+    /// R15-5: restrict the real OCR send to the pages named by `prepared_unit_hint`
+    /// (their 0-based `order`) REGARDLESS of `mode`. A unit-scoped retry re-sends only
+    /// the failed subset but with `mode = Full` (no previous/hints), so keying page
+    /// scoping on `mode == Incremental` alone let the real Mistral client OCR/bill the
+    /// whole document while the ledger reserved just the subset. A FRESH full send
+    /// leaves this `false` (whole document, no `pages`); the retry sets it `true`.
+    #[serde(default)]
+    pub restrict_to_hint_pages: bool,
     pub tool_profile_hash: String,
     pub spec_version: u64,
 }
@@ -285,6 +293,7 @@ mod tests {
             mode: MarkdownizeMode::Incremental,
             previous: None,
             hints: None,
+            restrict_to_hint_pages: false,
             tool_profile_hash: "sha256:tool".to_owned(),
             spec_version: 1,
         };

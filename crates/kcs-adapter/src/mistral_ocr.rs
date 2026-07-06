@@ -300,13 +300,17 @@ fn document_payload(media_type: &str, bytes: &[u8]) -> Value {
     }
 }
 
-/// R14-4: the 0-indexed pages an OCR request should process. Incremental mode restricts
-/// the OCR to the changed+added units carried in `prepared_unit_hint` (each unit's
-/// `order`, which `prepare` assigns 0-based — page:1 → 0, page:2 → 1, …); Full mode
-/// returns `None` (process every page). Before R14-4 the real client ignored the hint
-/// and always sent the whole document, so a light revision re-OCR'd/re-billed all pages.
+/// R14-4 / R15-5: the 0-indexed pages an OCR request should process. Page scoping
+/// applies when EITHER the mode is `Incremental` (changed+added units, R14-4) OR
+/// `restrict_to_hint_pages` is set (a unit-scoped retry re-sending only the failed
+/// subset with `mode = Full`, R15-5). In both cases the pages are the `order`s carried
+/// in `prepared_unit_hint` (`prepare` assigns them 0-based — page:1 → 0, page:2 → 1, …).
+/// A FRESH full send (neither flag) returns `None` = process every page. Before R14-4
+/// the real client ignored the hint and always sent the whole document; before R15-5 a
+/// unit-scoped retry did too (its `mode` is `Full`), so the ledger's prorated reserve
+/// diverged from the real all-pages bill.
 fn request_pages(request: &MarkdownizeRequest) -> Option<Vec<usize>> {
-    if request.mode != MarkdownizeMode::Incremental {
+    if request.mode != MarkdownizeMode::Incremental && !request.restrict_to_hint_pages {
         return None;
     }
     Some(
@@ -794,6 +798,7 @@ mod tests {
             mode,
             previous: None,
             hints: None,
+            restrict_to_hint_pages: false,
             tool_profile_hash: String::new(),
             spec_version: 1,
         }
@@ -845,6 +850,35 @@ mod tests {
         assert!(
             body.get("pages").is_none(),
             "Full must send no `pages` parameter (process the whole document)"
+        );
+    }
+
+    // R15-5: a unit-scoped retry re-sends ONLY the failed subset (here page:3, order 2)
+    // but with `mode = Full` (previous/hints are None). Keying page scoping on
+    // Incremental alone (R14-4) let the real client send NO `pages` → whole-document
+    // OCR/billing while the ledger reserved just the subset. `restrict_to_hint_pages`
+    // scopes the real send to the hinted orders regardless of mode. A FRESH full send
+    // (the test above) leaves the flag false and still sends no `pages`.
+    #[test]
+    fn r15_5_unit_scoped_retry_scopes_pages_despite_full_mode() {
+        let mut request = markdownize_request(MarkdownizeMode::Full, vec![hint("page:3", 2)]);
+        request.restrict_to_hint_pages = true;
+        let pages = request_pages(&request);
+        assert_eq!(
+            pages,
+            Some(vec![2]),
+            "a restricted retry must scope pages to the failed subset even in Full mode"
+        );
+        let body = ocr_request_body(
+            "application/pdf",
+            b"pdf-bytes",
+            "mistral-ocr-2505",
+            pages.as_deref(),
+        );
+        assert_eq!(
+            body["pages"],
+            json!([2]),
+            "the retry request body must carry exactly the failed subset's pages"
         );
     }
 }

@@ -885,6 +885,50 @@ fn ct3_multi_008_all_scopes_flag_targets_all_indexed_scopes() {
     assert_eq!(search["searched_scopes"].as_array().unwrap().len(), 2);
 }
 
+// R15-3: a `.kcs` deleted and re-`init`ed at the SAME path mints a fresh scope_id.
+// The device registry keyed the old row by `(scope_id, kcs_path)`, so it survived — and
+// multi-scope search then enumerated the SAME `.kcs` twice (once per scope_id), double-
+// returning every document, the stale copy carrying a dead-pointer scope_id whose
+// Evidence can no longer resolve. `register_scope` now retires the stale same-path row on
+// re-init, and the search enumeration additionally drops any row whose on-disk scope_id
+// no longer matches — a re-init'd scope is searched exactly once.
+#[test]
+fn r15_3_reinit_same_path_does_not_duplicate_registry_target() {
+    let parent = tempfile::tempdir().unwrap();
+    let data_home = parent.path().join("xdg");
+    let b = parent.path().join("b");
+    fs::create_dir_all(&b).unwrap();
+    fs::write(b.join("b.md"), "# B\n\n## Sec\nunique reinit token 7331\n").unwrap();
+
+    // Scope A: init + index at `b` (registers (scope_A, b/.kcs), indexed).
+    json_success_path(&b, &data_home, &["init"]);
+    json_success_path(&b, &data_home, &["index", "--approve"]);
+
+    // Delete `.kcs` and re-init + index → scope B (fresh scope_id) at the SAME path.
+    fs::remove_dir_all(b.join(".kcs")).unwrap();
+    json_success_path(&b, &data_home, &["init"]);
+    json_success_path(&b, &data_home, &["index", "--approve"]);
+
+    // `--all-scopes` enumerates the registry. The stale (scope_A) row must be gone:
+    // exactly one scope target, and the document returned exactly once (no dead-pointer
+    // duplicate). Pre-fix this was 2 searched scopes and 2 identical results.
+    let search = json_success_path(
+        &b,
+        &data_home,
+        &["search", "unique reinit token 7331", "--all-scopes"],
+    );
+    assert_eq!(
+        search["searched_scopes"].as_array().unwrap().len(),
+        1,
+        "a re-init'd scope must be searched exactly once (stale scope_id retired): {search}"
+    );
+    assert_eq!(
+        search["results"].as_array().unwrap().len(),
+        1,
+        "the document must not be double-returned via a dead scope_id: {search}"
+    );
+}
+
 // scope-cross merge is rank-based: both scopes' rank-1 hits get the SAME RRF score
 // (1/(60+1)) despite skewed corpus statistics, and tie-break is (scope_path, ...).
 #[test]
@@ -1879,6 +1923,70 @@ fn ct3_l1_reindex_offline_surfaces_pending_embeddings_in_index_status() {
             > 0
     );
     assert!(search["index_status"]["enriched_ratio"].as_f64().unwrap() < 1.0);
+}
+
+// R15-7: an embedding task whose chunk is DELETED (file removed / re-chunked) is no
+// longer live at HEAD, so it can never be driven to completion
+// (`live_chunks_without_embedding` never revisits it). Left Pending it permanently
+// pollutes `index_status.pending_enrichment_tasks` / `status.tasks` with phantom pending
+// work. On the next index the reconciler now terminalizes it (non-retryable Failed), so
+// it drops out of the pending count while the surviving file's task stays pending.
+#[test]
+fn r15_7_deleted_chunk_embedding_task_not_counted_pending() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(
+        dir.path().join("keep.md"),
+        "# Keep\n\n## Body\n生き残るチャンクの本文です。\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.path().join("drop.md"),
+        "# Drop\n\n## Body\n削除されるチャンクの本文です。\n",
+    )
+    .unwrap();
+    kcs(&dir, &["init"]).assert().success();
+    // Offline embedding (opt-in recorded, network_opt_in=false) → tasks stay Pending.
+    json_success_embed(&dir, "mock", &["index", "--yes"]);
+
+    let before = json_success_embed(&dir, "mock", &["status"]);
+    let pending_before = tasks_of_type(&before, "embedding")
+        .iter()
+        .filter(|task| task["status"] == "pending")
+        .count();
+    assert!(
+        pending_before >= 2,
+        "both files' chunks start pending: {before}"
+    );
+    let count_before = json_success_embed(&dir, "mock", &["search", "本文"])["index_status"]
+        ["pending_enrichment_tasks"]
+        .as_u64()
+        .unwrap();
+
+    // Delete drop.md and re-index: its chunk is no longer live at the new HEAD.
+    fs::remove_file(dir.path().join("drop.md")).unwrap();
+    json_success_embed(&dir, "mock", &["index", "--yes"]);
+
+    let after = json_success_embed(&dir, "mock", &["status"]);
+    let emb_after = tasks_of_type(&after, "embedding");
+    // The deleted chunk's task is terminalized (non-retryable Failed), not pending.
+    assert!(
+        emb_after.iter().any(|task| task["status"] == "failed"),
+        "the deleted chunk's embedding task must be terminalized: {after}"
+    );
+    // The surviving file still has a pending embedding task (no over-terminalization).
+    assert!(
+        emb_after.iter().any(|task| task["status"] == "pending"),
+        "the live file's embedding task must stay pending: {after}"
+    );
+    // index_status no longer counts the deleted chunk as pending enrichment.
+    let count_after = json_success_embed(&dir, "mock", &["search", "本文"])["index_status"]
+        ["pending_enrichment_tasks"]
+        .as_u64()
+        .unwrap();
+    assert!(
+        count_after < count_before,
+        "the deleted chunk must drop out of pending_enrichment_tasks: {count_before} -> {count_after}"
+    );
 }
 
 // R11-2: the embedding enrichment DRIVEN inline by `index` auth-failed but the run
