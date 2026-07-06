@@ -69,8 +69,15 @@ impl EnvGeminiEmbeddingClient {
     }
 
     fn api_key() -> Result<String> {
-        std::env::var("GEMINI_API_KEY")
-            .map_err(|_| AdapterError::Auth("GEMINI_API_KEY is not set".to_owned()))
+        // R13-2: honor a declared `tools.toml` `[embedding] auth` (env:/plain:, with
+        // keychain: a loud not-implemented error) instead of the previous hard-coded
+        // `GEMINI_API_KEY`; fall back to that env var when nothing is declared.
+        crate::tool_lock::resolve_role_api_key("embedding", "GEMINI_API_KEY")?.ok_or_else(|| {
+            AdapterError::Auth(
+                "no Gemini embedding API key: set GEMINI_API_KEY or a tools.toml `[embedding] auth`"
+                    .to_owned(),
+            )
+        })
     }
 }
 

@@ -381,20 +381,53 @@ fn command_captured_json_flag(command: &Command) -> bool {
 }
 
 fn run(cli: Cli) -> Result<Value> {
+    // R13-6: refuse to run if device-global state cannot resolve to an absolute
+    // base dir (no absolute $HOME and no absolute $XDG_*), before any command
+    // reads or writes the registry / logs / cost ledger / cursor-key.
+    ensure_device_dirs_resolvable()?;
     validate_user_tools_config()?;
     validate_user_config()?;
+    // R13-2: publish the declared `tools.toml` adapters so the online clients
+    // resolve the declared `auth`/`model` (rather than hard-coded env vars) at
+    // execution time. Done once, after validation, before any command dispatch.
+    register_declared_adapters_from_tools_config();
     match cli.command {
         Command::Init(args) => {
             let path = args.path.unwrap_or_else(|| PathBuf::from("."));
-            let existed = path.join(".kcs").exists();
+            let kcs_dir = path.join(".kcs");
+            let existed = kcs_dir.exists();
+            // R13-5: a re-`init` on a broken store used to short-circuit to a bare
+            // "already initialized" exit 0 without verifying or repairing anything —
+            // e.g. a missing `.kcs/HEAD` stayed missing and the very next command
+            // failed. Detect the recoverable damage BEFORE `init`→`open` self-heals
+            // it (R13-4) so the user's natural recovery action reports the repair.
+            // Unrecoverable corruption (bad scope.json/config) is surfaced by
+            // `open`'s `validate` as a non-zero exit that points at `kcs repair`.
+            let repaired = if existed {
+                kcs_core::scope::empty_head_recovery_hash(&kcs_dir)
+                    .ok()
+                    .flatten()
+                    .map(|_| vec!["HEAD".to_owned()])
+                    .unwrap_or_default()
+            } else {
+                Vec::new()
+            };
             let repo = Repository::init(&path)?;
             // Register the scope in the device-local registry so multi-scope search
             // can enumerate it (05 §1.8). `indexed=false` until `kcs index` runs.
             // The registry is a cache, never truth (03 §4): a write failure is a
             // warning, never a hard error.
             register_scope(&repo, false);
+            let status = if !existed {
+                "initialized"
+            } else if repaired.is_empty() {
+                "already initialized"
+            } else {
+                "repaired"
+            };
             Ok(json!({
-                "status": if existed { "already initialized" } else { "initialized" },
+                "status": status,
+                "repaired": repaired,
                 "path": repo.root(),
                 "kcs_path": repo.kcs_dir(),
             }))
@@ -3736,6 +3769,7 @@ fn append_search_logs(repo: &Repository, response: &Value, started: Instant) {
                 "result_count": result_count,
             },
         }),
+        device_logs_retention_days(),
     ) {
         eprintln!("warning: failed to append search metrics log: {error}");
     }
@@ -3765,6 +3799,7 @@ fn append_search_logs(repo: &Repository, response: &Value, started: Instant) {
                 "result_count": result_count,
             },
         }),
+        scope_logs_retention_days(repo),
     ) {
         eprintln!("warning: failed to append search access log: {error}");
     }
@@ -3790,6 +3825,7 @@ fn append_failed_search_metrics(started: Instant, error: &KcsError) {
                 "error_code": error.error_code(),
             },
         }),
+        device_logs_retention_days(),
     );
 }
 
@@ -3876,24 +3912,28 @@ fn read_incremental_tuning(path: &Path) -> Result<(Option<bool>, Option<f64>, Op
     Ok((enabled, threshold, max_consecutive))
 }
 
-fn append_jsonl_cli(path: &Path, value: &Value) -> Result<()> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| KcsError::io("path has no parent", path.display().to_string()))?;
-    fs::create_dir_all(parent)
-        .map_err(|err| KcsError::io(err.to_string(), parent.display().to_string()))?;
-    let mut file = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
-        .map_err(|err| KcsError::io(err.to_string(), path.display().to_string()))?;
-    // M1(b): frame the record as one buffer and emit it with a single write_all so
-    // concurrent appends cannot interleave byte-wise under O_APPEND.
-    let mut line = serde_json::to_string(value)
-        .map_err(|err| KcsError::io(err.to_string(), path.display().to_string()))?;
-    line.push('\n');
-    file.write_all(line.as_bytes())
-        .map_err(|err| KcsError::io(err.to_string(), path.display().to_string()))
+/// R13-3: the observability logs (metrics device-global, access scope-local) go
+/// through the shared rotating writer so they get the documented daily rotation +
+/// retention prune (docs/06 §13 / docs/10 §12.6), same as events/errors. Rotation
+/// is best-effort; only the final append can fail (R12-5).
+fn append_jsonl_cli(path: &Path, value: &Value, retention_days: u32) -> Result<()> {
+    kcs_core::scope::append_jsonl_rotating(path, value, retention_days)
+}
+
+/// R13-3: `[logs] retention_days` for the device-global logs (metrics), read from
+/// the user config, default 30.
+fn device_logs_retention_days() -> u32 {
+    kcs_core::scope::read_logs_retention_days(&user_config_toml_path())
+        .unwrap_or(kcs_core::scope::DEFAULT_LOG_RETENTION_DAYS)
+}
+
+/// R13-3: `[logs] retention_days` for the scope-local `access.jsonl` — the scope
+/// config wins over the user config (the log lives in `.kcs/`), then the 30-day
+/// default. Mirrors `access_log_redact`'s precedence.
+fn scope_logs_retention_days(repo: &Repository) -> u32 {
+    kcs_core::scope::read_logs_retention_days(&repo.kcs_dir().join("config.toml"))
+        .or_else(|| kcs_core::scope::read_logs_retention_days(&user_config_toml_path()))
+        .unwrap_or(kcs_core::scope::DEFAULT_LOG_RETENTION_DAYS)
 }
 
 fn atomic_overwrite_file(path: &Path, bytes: &[u8]) -> Result<()> {
@@ -5364,6 +5404,14 @@ fn execute_pending_markdownize_tasks(
                             candidate.output_ref = outcome.output_ref.clone();
                             candidate.fallback_reason = Some("online_adapter_done".to_owned());
                             candidate.heartbeat_at = None;
+                            // R13-1: record the normalization-run provenance
+                            // (docs/04:474-479) so `status` and the next incremental
+                            // decision (consecutive count) can see mode / previous /
+                            // changed units. `Full` clears any prior incremental mark.
+                            candidate.mode = Some(outcome.mode);
+                            candidate.previous_raw_hash = outcome.previous_raw_hash.clone();
+                            candidate.parent_run_id = outcome.parent_run_id.clone();
+                            candidate.changed_unit_keys = outcome.changed_unit_keys.clone();
                             true
                         } else {
                             false
@@ -5517,6 +5565,28 @@ fn embedding_online_allowed(
 struct OnlineExecutionOutcome {
     output_ref: String,
     status: TaskStatus,
+    // R13-1: normalization-run provenance (docs/04:474-479) so the caller records
+    // mode / previous_raw_hash / parent_run_id / changed_unit_keys on the task.
+    // `Full` with empty/None for a full or unit-scoped-retry send.
+    mode: MarkdownizeMode,
+    previous_raw_hash: Option<String>,
+    parent_run_id: Option<String>,
+    changed_unit_keys: Vec<String>,
+}
+
+impl OnlineExecutionOutcome {
+    /// A `Full`-mode outcome (full send or unit-scoped retry) with no incremental
+    /// provenance.
+    fn full(output_ref: String, status: TaskStatus) -> Self {
+        Self {
+            output_ref,
+            status,
+            mode: MarkdownizeMode::Full,
+            previous_raw_hash: None,
+            parent_run_id: None,
+            changed_unit_keys: Vec::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -5598,6 +5668,24 @@ fn execute_online_markdownize_task(
         .unit_keys
         .as_ref()
         .map(|keys| keys.iter().cloned().collect());
+    // R13-1: for a FRESH send (not a unit-scoped retry), try incremental Markdownize
+    // first — re-OCR only the changed/added pages and reuse the unchanged pages'
+    // markdown from the prior online instance (docs/04 §2.2/§3.1, docs/07 §8 note).
+    // Returns Some on success; None when it doesn't apply or the acceptance check
+    // fails (fall through to the Full send below); Err on an adapter auth/rate error
+    // (a Full re-send would hit the same error, so propagate).
+    if retry_units.is_none() {
+        if let Some(outcome) = try_online_incremental_markdownize(
+            repo,
+            task,
+            &prepare.prepared_units,
+            &scope_id,
+            &media_type,
+            &path,
+        )? {
+            return Ok(outcome);
+        }
+    }
     let request_units: Vec<PreparedUnit> = match &retry_units {
         Some(keys) => prepare
             .prepared_units
@@ -5614,6 +5702,10 @@ fn execute_online_markdownize_task(
         path: &path,
         media_type: &media_type,
         prepared_unit_hints: prepared_unit_hints(&request_units),
+        // Full send (or unit-scoped retry): every requested unit, no previous/hints.
+        mode: AdapterMarkdownizeMode::Full,
+        previous: None,
+        hints: None,
     })
     .map_err(task_failure_from_adapter)?;
     let profile = outcome.profile;
@@ -5714,10 +5806,234 @@ fn execute_online_markdownize_task(
             retry_kind: persist_failure_retry_kind(),
         }
     })?;
-    Ok(OnlineExecutionOutcome {
-        output_ref: normalized_output_ref(repo, &task.input_hash, &profile.tool_profile_hash, 0),
+    Ok(OnlineExecutionOutcome::full(
+        normalized_output_ref(repo, &task.input_hash, &profile.tool_profile_hash, 0),
         status,
+    ))
+}
+
+/// R13-1: attempt incremental Markdownize on the online (Mistral OCR) route.
+/// `Ok(Some(outcome))` = incremental fired and passed the KCS-side acceptance
+/// check (docs/04 §3.2). `Ok(None)` = it does not apply (no prior online instance,
+/// change too large / consecutive cap, or the prior tool_profile differs) OR the
+/// incremental output failed acceptance — the caller then does a Full re-send.
+/// `Err` = an adapter auth/rate/etc. error (a Full re-send would hit the same
+/// error and re-bill, so propagate). Only the changed+added pages are sent to the
+/// API; unchanged pages are reused from the prior instance (`reused_from`), which
+/// is the cost fix (a light revision no longer re-sends/re-bills every page).
+fn try_online_incremental_markdownize(
+    repo: &Repository,
+    task: &TaskDescriptor,
+    prepared_units: &[PreparedUnit],
+    scope_id: &str,
+    media_type: &str,
+    path: &Path,
+) -> std::result::Result<Option<OnlineExecutionOutcome>, TaskExecutionFailure> {
+    let invalid = || TaskExecutionFailure {
+        retry_kind: RetryErrorKind::InvalidInput,
+    };
+    let incremental_config = effective_incremental_config(repo).map_err(|_| invalid())?;
+    if !incremental_config.enabled {
+        return Ok(None);
+    }
+    let task_store = TaskStore::new(repo.kcs_dir());
+    // The prior online instance for this path (its own resolved tool_profile_hash).
+    let Some(previous) =
+        latest_online_instance_for_path(&task_store, &task.input_path).map_err(|_| invalid())?
+    else {
+        return Ok(None);
+    };
+    // unit_mapping (docs/04 §2.2) between the prior and current prepared units, then
+    // the documented 5-condition decision (R12-1's `choose_markdownize_mode`, which
+    // now reaches the incremental gate because the adapter declares the capability).
+    let mapping = map_units(&previous.prepared_units, prepared_units);
+    let profile = online_markdownize_profile();
+    let decision = choose_markdownize_mode(&IncrementalModeInput {
+        has_previous_done_run: true,
+        raw_hash_only_changed: true,
+        adapter_capabilities: profile.capability_flags.clone(),
+        change_rate: mapping.change_rate,
+        threshold: incremental_config.threshold,
+        consecutive_incremental_count: consecutive_online_incremental_count(
+            &task_store,
+            &task.input_path,
+        )
+        .map_err(|_| invalid())?,
+        max_consecutive_incremental: incremental_config.max_consecutive,
+    });
+    if decision.mode != MarkdownizeMode::Incremental {
+        return Ok(None);
+    }
+    let incremental_hints = incremental_hints_from_mapping(&mapping, prepared_units);
+    // Send ONLY the changed+added units to the OCR API (the cost fix).
+    let requested: Vec<PreparedUnit> = prepared_units
+        .iter()
+        .filter(|unit| {
+            incremental_hints.changed_unit_keys.contains(&unit.unit_key)
+                || incremental_hints.added_unit_keys.contains(&unit.unit_key)
+        })
+        .cloned()
+        .collect();
+    let adapter_previous = PreviousMarkdownizeContext {
+        raw: RawInput {
+            raw_hash: previous.manifest.raw_hash.clone(),
+            path: Some(path.display().to_string()),
+        },
+        normalized_units: previous
+            .units
+            .iter()
+            .map(normalized_unit_to_adapter_unit)
+            .collect(),
+        tool_profile_hash: previous.manifest.tool_profile_hash.clone(),
+    };
+    let outcome = run_standard_online_markdownize(StandardOnlineMarkdownizeRequest {
+        scope_id,
+        kcs_dir: repo.kcs_dir(),
+        raw_hash: &task.input_hash,
+        path,
+        media_type,
+        prepared_unit_hints: prepared_unit_hints(&requested),
+        mode: AdapterMarkdownizeMode::Incremental,
+        previous: Some(adapter_previous),
+        hints: Some(adapter_hints(&incremental_hints)),
     })
+    .map_err(task_failure_from_adapter)?;
+    let response = outcome.response;
+    let profile = outcome.profile;
+    // A model update (resolved pin changed) means a different tool_profile → not an
+    // eligible incremental (docs/04 §3.1 condition 2). Fall back to a Full send.
+    if profile.tool_profile_hash != previous.manifest.tool_profile_hash {
+        return Ok(None);
+    }
+    // Acceptance (docs/04 §3.2): the OCR response must cover every requested
+    // (changed+added) unit, and the adapter must not have declined. Otherwise fall
+    // back to a Full re-send (fallback_reason = contract/coverage).
+    if response.fallback_to_full {
+        return Ok(None);
+    }
+    let produced: BTreeSet<String> = response
+        .updated_units
+        .iter()
+        .chain(response.added_units.iter())
+        .map(|unit| unit.unit_key.clone())
+        .collect();
+    if !requested
+        .iter()
+        .all(|unit| produced.contains(&unit.unit_key))
+    {
+        return Ok(None);
+    }
+    // KCS orchestrates the unchanged reuse (docs/07 §8: the document-processing
+    // route reuses unchanged units KCS-side rather than via the adapter). Inject the
+    // unchanged new keys so `normalized_units_from_response` copies their markdown
+    // from the prior instance with `reused_from` set.
+    let mut response = response;
+    response.unchanged_unit_keys = mapping
+        .unchanged
+        .iter()
+        .map(|reuse| reuse.new_unit_key.clone())
+        .collect();
+    let generated_at = now_utc_seconds();
+    let units = match normalized_units_from_response(
+        &response,
+        prepared_units,
+        Some(&previous),
+        &task.input_hash,
+        &profile.tool_profile_hash,
+        MarkdownizeMode::Incremental,
+        &generated_at,
+    ) {
+        Ok(units) => units,
+        // A unit mapping that shifts keys (page insert/delete) can leave an
+        // unchanged new key without a prior unit — degrade to a Full re-send rather
+        // than fail the task.
+        Err(_) => return Ok(None),
+    };
+    let produced_all: BTreeSet<&str> = units.iter().map(|unit| unit.unit_key.as_str()).collect();
+    if !prepared_units
+        .iter()
+        .all(|unit| produced_all.contains(unit.unit_key.as_str()))
+    {
+        return Ok(None);
+    }
+    let run_id = format!("run_{}", new_ulid(repo.root()));
+    let manifest = manifest_from_units(
+        prepared_units,
+        &units,
+        &task.input_hash,
+        &profile.tool_profile_hash,
+        Some(previous.manifest.gen),
+        &run_id,
+        &generated_at,
+        RetryErrorKind::NetworkError,
+    );
+    persist_normalized_instance(repo.kcs_dir(), &manifest, &units).map_err(|_| {
+        TaskExecutionFailure {
+            retry_kind: persist_failure_retry_kind(),
+        }
+    })?;
+    Ok(Some(OnlineExecutionOutcome {
+        output_ref: normalized_output_ref(repo, &task.input_hash, &profile.tool_profile_hash, 0),
+        status: TaskStatus::Done,
+        mode: MarkdownizeMode::Incremental,
+        previous_raw_hash: Some(previous.manifest.raw_hash.clone()),
+        parent_run_id: Some(previous.manifest.run_id.clone()),
+        changed_unit_keys: incremental_hints.changed_unit_keys.clone(),
+    }))
+}
+
+/// R13-1: the latest prior online-markdownize instance for `input_path` (the DONE
+/// online task carries `fallback_reason = "online_adapter_done"` and an output_ref
+/// pointing at its normalized instance). Distinct from `previous_instance_for_path`
+/// (which the offline route uses, filtering out online refs) — here we WANT the
+/// online instance and its own resolved `tool_profile_hash`.
+fn latest_online_instance_for_path(
+    task_store: &TaskStore,
+    input_path: &str,
+) -> Result<Option<PreviousInstance>> {
+    let mut tasks = task_store
+        .all()
+        .map_err(pipeline_to_kcs)?
+        .into_iter()
+        .filter(|task| {
+            task.input_path == input_path
+                && matches!(task.status, TaskStatus::Done | TaskStatus::Partial)
+                && task.fallback_reason.as_deref() == Some("online_adapter_done")
+        })
+        .collect::<Vec<_>>();
+    tasks.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+    for task in tasks {
+        if let Some(previous) = load_previous_instance(&task.output_ref)? {
+            return Ok(Some(previous));
+        }
+    }
+    Ok(None)
+}
+
+/// R13-1: consecutive prior online incremental runs for `input_path` (docs/04
+/// §3.1 condition 5 — force Full after N to bound style drift). Counts back from
+/// the most recent DONE online task while it was `mode = Incremental`.
+fn consecutive_online_incremental_count(task_store: &TaskStore, input_path: &str) -> Result<u32> {
+    let mut tasks = task_store
+        .all()
+        .map_err(pipeline_to_kcs)?
+        .into_iter()
+        .filter(|task| {
+            task.input_path == input_path
+                && task.status == TaskStatus::Done
+                && task.fallback_reason.as_deref() == Some("online_adapter_done")
+        })
+        .collect::<Vec<_>>();
+    tasks.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+    let mut count = 0u32;
+    for task in tasks {
+        if task.mode == Some(MarkdownizeMode::Incremental) {
+            count = count.saturating_add(1);
+        } else {
+            break;
+        }
+    }
+    Ok(count)
 }
 
 trait RepositoryScopeId {
@@ -5759,6 +6075,9 @@ fn task_failure_from_adapter(error: kcs_adapter::AdapterError) -> TaskExecutionF
         }
         kcs_adapter::AdapterError::ContractViolation(_)
         | kcs_adapter::AdapterError::ConfigSchema(_) => RetryErrorKind::ContractViolation,
+        // R13-2: a `keychain:` not-implemented auth is a permanent config gap, not a
+        // transient — never retry/re-bill it.
+        kcs_adapter::AdapterError::NotImplemented(_) => RetryErrorKind::InvalidInput,
     };
     TaskExecutionFailure { retry_kind }
 }
@@ -5774,7 +6093,16 @@ const EMBEDDING_ADAPTER_KIND: &str = "embedding";
 const EMBEDDING_BATCH_SIZE: usize = 32;
 
 fn embedding_execution() -> Option<AdoptedEmbeddingExecution> {
-    active_adopted_embedding_execution()
+    let execution = active_adopted_embedding_execution();
+    // R13-2(4): a Real activation with no tools.toml `[embedding]` declaration is
+    // env-only drift (GEMINI_API_KEY alone). Record it once per run. Test seams
+    // (Mock/AuthError/…) are not Real, so hermetic tests never trip this.
+    if execution == Some(AdoptedEmbeddingExecution::Real)
+        && kcs_adapter::tool_lock::registered_declared_adapter("embedding").is_none()
+    {
+        warn_undeclared_adapter_once("embedding");
+    }
+    execution
 }
 
 fn declared_embedding_profile(execution: AdoptedEmbeddingExecution) -> DeclaredEmbeddingProfile {
@@ -5795,7 +6123,39 @@ fn run_embedding_adapter(
     items: Vec<EmbeddingItem>,
     input_type: EmbeddingInputType,
 ) -> std::result::Result<Vec<kcs_adapter::types::EmbeddingVector>, TaskExecutionFailure> {
-    run_adopted_embedding(execution, items, input_type).map_err(task_failure_from_adapter)
+    run_adopted_embedding(execution, items, input_type).map_err(|error| {
+        // R13-2(e): a `keychain:` (not-implemented) auth must be LOUD — the query
+        // path degrades to text fallback and the index path only counts a failed
+        // task, so without this the specific misconfig never reaches any log. Record
+        // it to errors.jsonl (once per run) so it is never silently swallowed.
+        if matches!(error, kcs_adapter::AdapterError::NotImplemented(_)) {
+            log_embedding_not_implemented_once(&adapter_to_kcs(clone_adapter_error(&error)));
+        }
+        task_failure_from_adapter(error)
+    })
+}
+
+/// R13-2(e): record a `keychain:` not-implemented embedding auth to errors.jsonl,
+/// deduped to once per run (the same misconfig fails every batch).
+fn log_embedding_not_implemented_once(error: &KcsError) {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static LOGGED: AtomicBool = AtomicBool::new(false);
+    if LOGGED.swap(true, Ordering::Relaxed) {
+        return;
+    }
+    let _ = append_error_log(error);
+}
+
+/// Clone the subset of `AdapterError` this path can see (only `NotImplemented`
+/// reaches [`log_embedding_not_implemented_once`]; other variants keep their
+/// message via `to_string`).
+fn clone_adapter_error(error: &kcs_adapter::AdapterError) -> kcs_adapter::AdapterError {
+    match error {
+        kcs_adapter::AdapterError::NotImplemented(message) => {
+            kcs_adapter::AdapterError::NotImplemented(message.clone())
+        }
+        other => kcs_adapter::AdapterError::ContractViolation(other.to_string()),
+    }
 }
 
 /// Compute the query embedding once per search (05 §1.1). Returns `None` when no
@@ -8468,6 +8828,56 @@ fn read_existing_approval_keys(path: &Path) -> BTreeSet<String> {
         .collect()
 }
 
+/// R13-2: parse the (already schema-validated) user `tools.toml` and publish its
+/// declared adapters to the process-global registry so the online clients honor a
+/// declared `auth`/`model`. Best-effort: a missing/unreadable file registers an
+/// empty map (legacy env-var behavior preserved).
+fn register_declared_adapters_from_tools_config() {
+    use kcs_adapter::tool_lock::{declared_adapter_for_role, register_declared_adapters};
+    let mut map = std::collections::HashMap::new();
+    if let Some(path) = user_tools_toml_path() {
+        if let Ok(text) = fs::read_to_string(&path) {
+            if let Ok(value) = toml::from_str::<toml::Value>(&text) {
+                for role in [
+                    "prepare",
+                    "markdown",
+                    "embedding",
+                    "summary",
+                    "classification",
+                    "rerank",
+                ] {
+                    if let Some(declared) = declared_adapter_for_role(&value, role) {
+                        map.insert(role.to_owned(), declared);
+                    }
+                }
+            }
+        }
+    }
+    register_declared_adapters(map);
+}
+
+/// R13-2(4): record a one-per-run `level=warn` to errors.jsonl when an online
+/// adapter activates via the legacy env var with NO `tools.toml` declaration
+/// (docs/07 §7.1 drift made visible). Deduped per role for the whole process so it
+/// is 1 execution / 1 record, never per task.
+fn warn_undeclared_adapter_once(role: &str) {
+    use std::sync::{Mutex, OnceLock};
+    static WARNED: OnceLock<Mutex<std::collections::HashSet<String>>> = OnceLock::new();
+    let warned = WARNED.get_or_init(|| Mutex::new(std::collections::HashSet::new()));
+    let mut guard = warned
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if !guard.insert(role.to_owned()) {
+        return;
+    }
+    drop(guard);
+    let _ = append_warn_log(
+        "KCS-W-ADAPTER-UNDECLARED-001",
+        "online adapter active via env var without a tools.toml declaration (undeclared-adapter)",
+        json!({ "adapter_role": role }),
+    );
+}
+
 fn validate_user_tools_config() -> Result<()> {
     let Some(path) = user_tools_toml_path() else {
         return Ok(());
@@ -8559,32 +8969,35 @@ fn validate_repo_tool_lock(repo: &Repository) -> Result<()> {
 }
 
 fn user_tools_toml_path() -> Option<PathBuf> {
-    // R12-6: empty/relative `XDG_CONFIG_HOME` is invalid per the XDG spec.
+    // R12-6 / R13-6: empty/relative `XDG_CONFIG_HOME` or `HOME` are invalid.
     if let Some(path) = kcs_core::xdg::xdg_dir("XDG_CONFIG_HOME") {
         return Some(path.join("kcs/tools.toml"));
     }
-    std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config/kcs/tools.toml"))
+    kcs_core::xdg::home_dir().map(|home| home.join(".config/kcs/tools.toml"))
 }
 
 fn user_config_toml_path() -> PathBuf {
-    // R12-6: empty/relative `XDG_CONFIG_HOME` is invalid per the XDG spec.
+    // R12-6 / R13-6: empty/relative `XDG_CONFIG_HOME` or `HOME` are invalid. The
+    // `ensure_device_dirs_resolvable` startup guard rejects the no-absolute-base
+    // case loudly, so the relative last resort is never reached in practice.
     if let Some(path) = kcs_core::xdg::xdg_dir("XDG_CONFIG_HOME") {
         return path.join("kcs/config.toml");
     }
-    std::env::var_os("HOME")
-        .map(|home| PathBuf::from(home).join(".config/kcs/config.toml"))
+    kcs_core::xdg::home_dir()
+        .map(|home| home.join(".config/kcs/config.toml"))
         .unwrap_or_else(|| PathBuf::from(".config/kcs/config.toml"))
 }
 
 fn data_home() -> PathBuf {
-    // R12-6: empty/relative `XDG_DATA_HOME` is invalid per the XDG spec — the
+    // R12-6 / R13-6: empty/relative `XDG_DATA_HOME` or `HOME` are invalid — the
     // device data dir (registry, cost ledger, logs, 0600 cursor-key) must never
-    // resolve to a CWD-relative `kcs/` that the next index could archive.
+    // resolve to a CWD-relative `kcs/` that the next index could archive. The
+    // startup guard rejects the no-absolute-base case before the `"."` last resort.
     if let Some(path) = kcs_core::xdg::xdg_dir("XDG_DATA_HOME") {
         return path;
     }
-    if let Some(home) = std::env::var_os("HOME") {
-        return PathBuf::from(home).join(".local/share");
+    if let Some(home) = kcs_core::xdg::home_dir() {
+        return home.join(".local/share");
     }
     PathBuf::from(".")
 }
@@ -8593,14 +9006,37 @@ fn data_home() -> PathBuf {
 /// disposable, regenerable data such as the open/view read-only expansion of CAS
 /// objects — deliberately separate from the durable `$XDG_DATA_HOME` (P9).
 fn cache_home() -> PathBuf {
-    // R12-6: empty/relative `XDG_CACHE_HOME` is invalid per the XDG spec.
+    // R12-6 / R13-6: empty/relative `XDG_CACHE_HOME` or `HOME` are invalid.
     if let Some(path) = kcs_core::xdg::xdg_dir("XDG_CACHE_HOME") {
         return path;
     }
-    if let Some(home) = std::env::var_os("HOME") {
-        return PathBuf::from(home).join(".cache");
+    if let Some(home) = kcs_core::xdg::home_dir() {
+        return home.join(".cache");
     }
     PathBuf::from(".")
+}
+
+/// R13-6: fail loudly at startup when neither `XDG_*` nor an absolute `HOME` can
+/// anchor the device-global directories, instead of silently scattering
+/// device-global state (registry, cost ledger, logs, the 0600 cursor-key) and the
+/// device budget cap into a CWD-relative `kcs/`. R12-6 fixed the `XDG_*` side; the
+/// `HOME` fallback still degraded to `PathBuf::from(".")`. Checked once per command
+/// (every command touches at least logs/registry), so `env -u HOME` with no XDG
+/// override errors rather than writing under the working directory.
+fn ensure_device_dirs_resolvable() -> Result<()> {
+    if kcs_core::xdg::home_dir().is_some() {
+        return Ok(());
+    }
+    for var in ["XDG_DATA_HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME"] {
+        if kcs_core::xdg::xdg_dir(var).is_none() {
+            return Err(KcsError::invalid_usage(format!(
+                "cannot resolve an absolute base directory for device-global state: \
+                 set $HOME to an absolute path or export an absolute ${var} \
+                 (KCS refuses to write device-global state under the working directory)"
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn cost_ledger_path() -> PathBuf {
@@ -8674,7 +9110,18 @@ fn random_key_32() -> Result<Vec<u8>> {
 }
 
 fn adapter_to_kcs(error: kcs_adapter::AdapterError) -> KcsError {
-    KcsError::schema(error.to_string())
+    match error {
+        // R13-2: `keychain:` auth is a LOUD not-implemented error (never a silent
+        // noop), surfaced with its own code + a non-zero exit rather than folded
+        // into the generic schema error.
+        kcs_adapter::AdapterError::NotImplemented(message) => KcsError::new(
+            "KCS-E-NOT-IMPLEMENTED-001",
+            message,
+            json!({}),
+            ExitCode::Failure,
+        ),
+        other => KcsError::schema(other.to_string()),
+    }
 }
 
 fn pipeline_to_kcs(error: kcs_pipeline::PipelineError) -> KcsError {

@@ -35,6 +35,31 @@ fn xdg_dir_from(value: Option<OsString>) -> Option<PathBuf> {
     path.is_absolute().then_some(path)
 }
 
+/// R13-6: the `$HOME`-based fallback base dir, honoring the same absolute-path
+/// rule `xdg_dir` applies to `XDG_*`. R12-6 closed the XDG side; the `$HOME`
+/// fallback at every call site still passed a raw `var_os("HOME")` into
+/// `PathBuf::from`, so an unset/empty/relative `HOME` (with no `XDG_*` override)
+/// resolved device-global state — the scope registry, cost ledger, logs and the
+/// 0600 cursor-signing key — against the current working directory (`./kcs/…`),
+/// breaking device-global isolation and the device budget cap. Returns
+/// `Some(abs_path)` only for a set, non-empty, absolute value; callers append
+/// their conventional suffix (`.local/share`, `.config`, `.cache`).
+#[must_use]
+pub fn home_dir() -> Option<PathBuf> {
+    home_dir_from(std::env::var_os("HOME"))
+}
+
+/// Pure core of [`home_dir`], unit-testable without mutating the environment.
+#[must_use]
+fn home_dir_from(value: Option<OsString>) -> Option<PathBuf> {
+    let value = value?;
+    if value.is_empty() {
+        return None;
+    }
+    let path = PathBuf::from(value);
+    path.is_absolute().then_some(path)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -62,6 +87,20 @@ mod tests {
         assert_eq!(
             xdg_dir_from(Some(OsString::from("/abs/data"))),
             Some(PathBuf::from("/abs/data"))
+        );
+    }
+
+    #[test]
+    fn home_dir_applies_the_same_absolute_rule() {
+        // R13-6: unset / empty / relative HOME must all yield None (no CWD-relative
+        // device-global state); only an absolute HOME is kept.
+        assert_eq!(home_dir_from(None), None);
+        assert_eq!(home_dir_from(Some(OsString::from(""))), None);
+        assert_eq!(home_dir_from(Some(OsString::from("rel/home"))), None);
+        assert_eq!(home_dir_from(Some(OsString::from("./rel"))), None);
+        assert_eq!(
+            home_dir_from(Some(OsString::from("/home/u"))),
+            Some(PathBuf::from("/home/u"))
         );
     }
 }

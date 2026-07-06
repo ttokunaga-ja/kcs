@@ -156,6 +156,11 @@ impl Repository {
             store: ObjectStore::new(kcs_dir),
         };
         repo.validate()?;
+        // R13-4: repair a corrupt (empty/missing) HEAD from refs/heads/main before
+        // any command reads or advances HEAD. Done on every `open` so `log`/`status`
+        // display the real history and `snapshot` extends it (rather than orphaning
+        // it under a fresh root commit). A healthy HEAD is an untouched no-op.
+        repo.self_heal_head()?;
         Ok(repo)
     }
 
@@ -587,6 +592,36 @@ impl Repository {
         }
     }
 
+    /// R13-4 / R13-5: restore an empty or missing `HEAD` from a healthy
+    /// `refs/heads/main`, recording the repair to `events.jsonl` (never silent).
+    /// HEAD is the durable truth and refs is derived, so the *only* time this
+    /// fires is the corruption asymmetry Opus found: `head_commit_hash` returns
+    /// `None` for an empty HEAD, which `snapshot` reads as "unborn" and then
+    /// orphans all history under a fresh `parents=[]` root commit. When refs still
+    /// names a real commit, HEAD is corrupt (not unborn) and is repaired from it.
+    /// Idempotent no-op when HEAD is populated or the branch is genuinely unborn
+    /// (HEAD and refs both empty). Returns the restored commit hash on a repair.
+    pub fn self_heal_head(&self) -> Result<Option<String>> {
+        // Fast path (no lock, no side effect): nothing to repair.
+        if empty_head_recovery_hash(&self.kcs_dir)?.is_none() {
+            return Ok(None);
+        }
+        // Serialize the HEAD write against a concurrent `snapshot` (which also
+        // advances HEAD) via the reentrant store lock. Re-check under the lock in
+        // case another process healed it first.
+        let _lock = StoreLock::acquire(&self.kcs_dir)?;
+        let Some(hash) = empty_head_recovery_hash(&self.kcs_dir)? else {
+            return Ok(None);
+        };
+        atomic_overwrite(&self.kcs_dir.join("HEAD"), hash.as_bytes())?;
+        append_event_log(
+            "KCS-I-STORE-HEAD-REPAIRED-001",
+            "restored empty/missing HEAD from refs/heads/main (corrupt HEAD, not unborn)",
+            json!({ "commit_hash": hash }),
+        )?;
+        Ok(Some(hash))
+    }
+
     fn head_tree(&self) -> Result<Option<TreeObject>> {
         self.head_commit_hash()?
             .map(|hash| {
@@ -903,6 +938,183 @@ fn required_lock_integer(object: &Map<String, Value>, key: &str, field: &str) ->
         .ok_or_else(|| KcsError::schema(format!("{key}.{field} must be an integer")))
 }
 
+/// R13-4: the commit hash an empty/missing `HEAD` should be restored to, or
+/// `None` when there is nothing to repair. Returns `Some(hash)` only when HEAD is
+/// empty/missing AND `refs/heads/main` names a commit object that actually exists
+/// in the store — never adopts a dangling ref (that would move corruption into
+/// HEAD instead of fixing it). Both HEAD and refs empty = a legitimately unborn
+/// branch (fresh `init`), which stays `None` so a first `snapshot` still creates
+/// the root commit. Shared by `Repository::self_heal_head` (the repair) and the
+/// CLI re-`init` path (R13-5 damage detection before the repair runs).
+pub fn empty_head_recovery_hash(kcs_dir: &Path) -> Result<Option<String>> {
+    let head_path = kcs_dir.join("HEAD");
+    let head_present_nonempty = match fs::read_to_string(&head_path) {
+        Ok(value) => !value.trim().is_empty(),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => false,
+        Err(err) => {
+            return Err(KcsError::io(
+                err.to_string(),
+                head_path.display().to_string(),
+            ))
+        }
+    };
+    if head_present_nonempty {
+        return Ok(None);
+    }
+    let refs_path = kcs_dir.join("refs/heads/main");
+    let refs_value = match fs::read_to_string(&refs_path) {
+        Ok(value) => value.trim().to_owned(),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => {
+            return Err(KcsError::io(
+                err.to_string(),
+                refs_path.display().to_string(),
+            ))
+        }
+    };
+    if refs_value.is_empty() || !is_hash(&refs_value) {
+        return Ok(None);
+    }
+    // Only restore from a ref that resolves to a real commit object.
+    let store = ObjectStore::new(kcs_dir.to_path_buf());
+    match store.read_by_hash(&refs_value) {
+        Ok(object) if object.kind == ObjectKind::Commit => Ok(Some(refs_value)),
+        _ => Ok(None),
+    }
+}
+
+/// R13-3: default log retention when `[logs] retention_days` is unset (docs/06
+/// §13 / docs/10 §12.6: "保持 30 日 (config 上書き可)").
+pub const DEFAULT_LOG_RETENTION_DAYS: u32 = 30;
+
+/// R13-3: read `[logs] retention_days` (integer ≥ 1) from a `config.toml`.
+/// `None` when the file/key is absent or malformed, so the caller applies the
+/// 30-day default. The key is schema-validated (`config.schema.json`) at startup,
+/// so a bad value would already have been rejected; this read is defensive.
+#[must_use]
+pub fn read_logs_retention_days(config_toml_path: &Path) -> Option<u32> {
+    let text = fs::read_to_string(config_toml_path).ok()?;
+    let value: toml::Value = toml::from_str(&text).ok()?;
+    value
+        .get("logs")
+        .and_then(|logs| logs.get("retention_days"))
+        .and_then(toml::Value::as_integer)
+        .and_then(|days| u32::try_from(days).ok())
+        .filter(|days| *days >= 1)
+}
+
+/// R13-3: append `value` to the fixed-name JSONL at `path`, first performing a
+/// best-effort daily rotation + retention prune (docs/06 §13 / docs/10 §12.6:
+/// "日次ローテーション、保持 30 日 (config 上書き可)"). logrotate style: when the
+/// live file's last-written day differs from today it is renamed to
+/// `<stem>-YYYY-MM-DD.jsonl` and a fresh fixed-name file starts, so the documented
+/// fixed names (events.jsonl / errors.jsonl / metrics.jsonl / access.jsonl) stay
+/// current. Dated files older than `retention_days` are pruned. Rotation/prune
+/// failures are non-fatal (R12-5 / R13-3 ruling): only the final append can fail
+/// the caller, so a read-only log dir never kills the command it belongs to. A
+/// concurrent process's `O_APPEND` handle on the renamed inode loses no lines —
+/// rename is atomic and its bytes land in the dated file.
+pub fn append_jsonl_rotating(path: &Path, value: &Value, retention_days: u32) -> Result<()> {
+    let today = today_utc_date();
+    let _ = rotate_stale_log(path, &today);
+    let _ = prune_rotated_logs(path, &today, retention_days);
+    append_jsonl(path, value)
+}
+
+fn today_utc_date() -> String {
+    now_utc_seconds().get(..10).unwrap_or_default().to_owned()
+}
+
+fn rotate_stale_log(path: &Path, today: &str) -> Result<()> {
+    let Ok(metadata) = fs::metadata(path) else {
+        // No live file yet → nothing to rotate.
+        return Ok(());
+    };
+    let modified = metadata.modified().kcs_io(path)?;
+    let file_date = date_of_system_time(modified);
+    // Same day (or a backwards clock) → keep appending to the live file.
+    if file_date.is_empty() || file_date.as_str() >= today {
+        return Ok(());
+    }
+    let dated = dated_log_path(path, &file_date);
+    // Never clobber an already-rotated dated file (rename is skipped, the live
+    // file keeps growing until the next distinct day — harmless).
+    if !dated.exists() {
+        fs::rename(path, &dated).kcs_io(&dated)?;
+    }
+    Ok(())
+}
+
+fn prune_rotated_logs(path: &Path, today: &str, retention_days: u32) -> Result<()> {
+    let (Some(stem), Some(ext), Some(parent)) = (
+        path.file_stem().and_then(|s| s.to_str()),
+        path.extension().and_then(|s| s.to_str()),
+        path.parent(),
+    ) else {
+        return Ok(());
+    };
+    let Some(today_days) = date_to_days(today) else {
+        return Ok(());
+    };
+    let prefix = format!("{stem}-");
+    let suffix = format!(".{ext}");
+    for entry in fs::read_dir(parent).kcs_io(parent)? {
+        let entry = entry.kcs_io(parent)?;
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        let Some(date) = name
+            .strip_prefix(&prefix)
+            .and_then(|rest| rest.strip_suffix(&suffix))
+        else {
+            continue;
+        };
+        let Some(file_days) = date_to_days(date) else {
+            continue;
+        };
+        if today_days - file_days > i64::from(retention_days) {
+            let _ = fs::remove_file(entry.path());
+        }
+    }
+    Ok(())
+}
+
+/// `events.jsonl` + `2026-07-05` → `events-2026-07-05.jsonl`.
+fn dated_log_path(path: &Path, date: &str) -> PathBuf {
+    let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("log");
+    let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("jsonl");
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    parent.join(format!("{stem}-{date}.{ext}"))
+}
+
+fn date_of_system_time(time: SystemTime) -> String {
+    let secs = time
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs() as i64)
+        .unwrap_or_default();
+    format_unix_seconds(secs)
+        .get(..10)
+        .unwrap_or_default()
+        .to_owned()
+}
+
+/// Parse a `YYYY-MM-DD` date into days since the Unix epoch, or `None` when the
+/// shape is malformed. Reuses the civil-date algorithm the timestamp formatter uses.
+fn date_to_days(date: &str) -> Option<i64> {
+    let bytes = date.as_bytes();
+    if bytes.len() != 10 || bytes[4] != b'-' || bytes[7] != b'-' {
+        return None;
+    }
+    let year = date.get(0..4)?.parse::<i64>().ok()?;
+    let month = date.get(5..7)?.parse::<i64>().ok()?;
+    let day = date.get(8..10)?.parse::<i64>().ok()?;
+    if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+        return None;
+    }
+    Some(days_from_civil(year, month, day))
+}
+
 pub fn append_event_log(code: &str, message: &str, context: Value) -> Result<()> {
     append_observation("events.jsonl", "info", code, message, context)
 }
@@ -931,6 +1143,16 @@ fn append_observation(
     message: &str,
     mut context: Value,
 ) -> Result<()> {
+    // R13-6: never write the device-global log under a CWD-relative path. When
+    // neither an absolute `XDG_DATA_HOME` nor an absolute `HOME` resolves,
+    // `data_home()` degrades to `"."`; the CLI's startup guard rejects such an
+    // invocation, but its OWN error would still be logged here first and scatter
+    // `./kcs/logs/errors.jsonl` under the working directory. Skip silently (logging
+    // is best-effort) rather than create it.
+    let log_dir = data_home().join("kcs/logs");
+    if !log_dir.is_absolute() {
+        return Ok(());
+    }
     // N3: honor `redact_logs` (06 §8 / 10 §12.6, default true) before writing. The
     // KcsError context routinely carries a `path` (and search/adapter contexts a
     // `query`/`prompt`); writing them verbatim both violates the redaction policy
@@ -952,8 +1174,13 @@ fn append_observation(
     } else {
         Value::String(message.to_owned())
     };
-    let path = data_home().join("kcs/logs").join(file_name);
-    append_jsonl(
+    let path = log_dir.join(file_name);
+    // R13-3: the device-global logs (events/errors/metrics) are governed by the
+    // device-level `[logs] retention_days` (default 30). Rotation/prune is
+    // best-effort inside `append_jsonl_rotating`.
+    let retention = read_logs_retention_days(&config_home().join("kcs/config.toml"))
+        .unwrap_or(DEFAULT_LOG_RETENTION_DAYS);
+    append_jsonl_rotating(
         &path,
         &json!({
             "ts": now_utc_seconds(),
@@ -963,6 +1190,7 @@ fn append_observation(
             "message": message,
             "context": context,
         }),
+        retention,
     )
 }
 
@@ -1048,10 +1276,12 @@ fn redact_context(value: &mut Value) {
 }
 
 fn config_home() -> PathBuf {
-    // R12-6: empty/relative `XDG_CONFIG_HOME` is invalid per the XDG spec — fall
-    // back to `$HOME/.config` rather than a CWD-relative dir.
+    // R12-6 / R13-6: empty/relative `XDG_CONFIG_HOME` AND empty/relative `HOME` are
+    // both invalid — fall back to `$HOME/.config` only for an absolute `HOME`,
+    // never to a CWD-relative dir. The CLI startup guard rejects the no-absolute-
+    // base case loudly before we reach the `"."` last resort.
     crate::xdg::xdg_dir("XDG_CONFIG_HOME")
-        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))
+        .or_else(|| crate::xdg::home_dir().map(|home| home.join(".config")))
         .unwrap_or_else(|| PathBuf::from("."))
 }
 
@@ -1163,10 +1393,12 @@ fn validate_ref_operand(value: &str) -> Result<()> {
 }
 
 fn data_home() -> PathBuf {
-    // R12-6: empty/relative `XDG_DATA_HOME` is invalid per the XDG spec — fall
-    // back to `$HOME/.local/share` rather than a CWD-relative dir.
+    // R12-6 / R13-6: empty/relative `XDG_DATA_HOME` AND empty/relative `HOME` are
+    // both invalid — fall back to `$HOME/.local/share` only for an absolute `HOME`,
+    // never to a CWD-relative dir. The CLI startup guard rejects the no-absolute-
+    // base case loudly before we reach the `"."` last resort.
     crate::xdg::xdg_dir("XDG_DATA_HOME")
-        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/share")))
+        .or_else(|| crate::xdg::home_dir().map(|home| home.join(".local/share")))
         .unwrap_or_else(|| PathBuf::from("."))
 }
 
@@ -1580,8 +1812,9 @@ pub fn parse_utc_seconds(value: &str) -> Option<i64> {
 #[cfg(test)]
 mod tests {
     use super::{
-        civil_from_days, format_unix_seconds, format_utc_seconds, parse_utc_seconds,
-        redact_context, redact_message_paths, StoreLock,
+        append_jsonl_rotating, civil_from_days, format_unix_seconds, format_utc_seconds,
+        parse_utc_seconds, prune_rotated_logs, read_logs_retention_days, redact_context,
+        redact_message_paths, rotate_stale_log, StoreLock,
     };
     use serde_json::json;
     use std::fs;
@@ -1694,6 +1927,91 @@ mod tests {
         assert_eq!(parse_utc_seconds("2026-07-03T00:00:00"), None);
         assert_eq!(parse_utc_seconds("2026-13-03T00:00:00Z"), None);
         assert_eq!(parse_utc_seconds("not-a-timestamp"), None);
+    }
+
+    // R13-3: a live log whose last-written day differs from "today" is rotated to
+    // a dated name and the fixed name starts fresh (logrotate style); dated files
+    // older than retention_days are pruned.
+    #[test]
+    fn r13_3_rotate_renames_stale_log_and_prune_drops_old_dated_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("events.jsonl");
+        fs::write(&log, "line1\n").unwrap(); // mtime = real today
+
+        // A far-future "today" makes the live file stale → rotate it away.
+        rotate_stale_log(&log, "2099-01-02").unwrap();
+        assert!(!log.exists(), "the stale live file must be renamed away");
+        let dated: Vec<String> = fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(std::result::Result::ok)
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.starts_with("events-") && name.ends_with(".jsonl"))
+            .collect();
+        assert_eq!(dated.len(), 1, "exactly one dated file created: {dated:?}");
+
+        // Prune: a dated file older than retention_days goes; a recent one stays.
+        fs::write(dir.path().join("events-2000-01-01.jsonl"), "old\n").unwrap();
+        fs::write(dir.path().join("events-2099-01-01.jsonl"), "recent\n").unwrap();
+        prune_rotated_logs(&log, "2099-01-02", 30).unwrap();
+        assert!(
+            !dir.path().join("events-2000-01-01.jsonl").exists(),
+            "a dated file older than retention_days must be pruned"
+        );
+        assert!(
+            dir.path().join("events-2099-01-01.jsonl").exists(),
+            "a dated file within retention_days must be kept"
+        );
+    }
+
+    #[test]
+    fn r13_3_append_rotating_keeps_same_day_writes_in_the_live_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("events.jsonl");
+        append_jsonl_rotating(&log, &json!({ "a": 1 }), 30).unwrap();
+        append_jsonl_rotating(&log, &json!({ "a": 2 }), 30).unwrap();
+        let content = fs::read_to_string(&log).unwrap();
+        assert_eq!(
+            content.lines().count(),
+            2,
+            "same-day appends stay in the live fixed-name file"
+        );
+        let rotated = fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(std::result::Result::ok)
+            .any(|entry| entry.file_name().to_string_lossy().starts_with("events-"));
+        assert!(!rotated, "no rotation may happen within the same day");
+    }
+
+    #[test]
+    fn r13_3_prune_skips_unparseable_dated_files_and_append_still_lands() {
+        // R13-3 / R12-5: rotation/prune are best-effort — a garbage file that looks
+        // like a dated log but has no parseable date must be skipped (not error),
+        // and the append must still succeed regardless.
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("events.jsonl");
+        fs::write(dir.path().join("events-not-a-date.jsonl"), "junk\n").unwrap();
+        prune_rotated_logs(&log, "2099-01-02", 30).unwrap();
+        assert!(
+            dir.path().join("events-not-a-date.jsonl").exists(),
+            "an unparseable dated name must be skipped, not deleted or errored"
+        );
+        append_jsonl_rotating(&log, &json!({ "b": 2 }), 30).unwrap();
+        assert!(log.exists(), "the append must land in the live file");
+    }
+
+    #[test]
+    fn r13_3_read_logs_retention_days_parses_and_rejects_out_of_range() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = dir.path().join("config.toml");
+        fs::write(&cfg, "[logs]\nretention_days = 7\n").unwrap();
+        assert_eq!(read_logs_retention_days(&cfg), Some(7));
+        // < 1 is rejected by the schema too; the reader falls back to the default.
+        fs::write(&cfg, "[logs]\nretention_days = 0\n").unwrap();
+        assert_eq!(read_logs_retention_days(&cfg), None);
+        assert_eq!(
+            read_logs_retention_days(&dir.path().join("missing.toml")),
+            None
+        );
     }
 
     #[test]

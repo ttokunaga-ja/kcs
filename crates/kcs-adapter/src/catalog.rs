@@ -18,7 +18,8 @@ use crate::mistral_ocr::{
 use crate::traits::{EmbeddingAdapter, MarkdownizeAdapter, PrepareAdapter};
 use crate::types::{
     AdapterProfile, EmbeddingInputType, EmbeddingItem, EmbeddingRequest, EmbeddingVector,
-    MarkdownizeMode, MarkdownizeRequest, MarkdownizeResponse, PreparedUnitHint, RawInput,
+    IncrementalHints, MarkdownizeMode, MarkdownizeRequest, MarkdownizeResponse, PreparedUnitHint,
+    PreviousMarkdownizeContext, RawInput,
 };
 use crate::{AdapterError, Result};
 
@@ -53,6 +54,14 @@ pub struct StandardOnlineMarkdownizeRequest<'a> {
     pub path: &'a Path,
     pub media_type: &'a str,
     pub prepared_unit_hints: Vec<PreparedUnitHint>,
+    // R13-1: incremental Markdownize on the online route. When `mode =
+    // Incremental`, `prepared_unit_hints` carries ONLY the changed+added units
+    // (so only those pages are re-sent/re-billed to the OCR API) and `previous` /
+    // `hints` carry the prior instance + unit_mapping result. `Full` sends every
+    // unit (`previous`/`hints` are `None`), the pre-R13-1 behavior.
+    pub mode: MarkdownizeMode,
+    pub previous: Option<PreviousMarkdownizeContext>,
+    pub hints: Option<IncrementalHints>,
 }
 
 pub struct StandardOnlineMarkdownizeOutcome {
@@ -70,9 +79,11 @@ pub fn run_standard_online_markdownize(
         },
         media_type: request.media_type.to_owned(),
         prepared_unit_hint: Some(request.prepared_unit_hints),
-        mode: MarkdownizeMode::Full,
-        previous: None,
-        hints: None,
+        // R13-1: forward the caller-computed mode/previous/hints (was hard-coded
+        // Full/None/None, which is why incremental never fired on the online route).
+        mode: request.mode,
+        previous: request.previous,
+        hints: request.hints,
         tool_profile_hash: String::new(),
         spec_version: 1,
     };
@@ -82,7 +93,10 @@ pub fn run_standard_online_markdownize(
     {
         Some("auth_error") => return Err(AdapterError::Auth("mock auth failure".to_owned())),
         Some("rate_limit") => return Err(AdapterError::RateLimit("mock 429".to_owned())),
-        Some("mock") | Some("partial") | Some("mock_link_image") => {
+        // R13-1: `incr_incomplete` simulates an OCR response that drops a requested
+        // unit ONLY in incremental mode (a full re-send returns everything), so the
+        // KCS-side acceptance check fails and the online route falls back to Full.
+        Some("mock") | Some("partial") | Some("mock_link_image") | Some("incr_incomplete") => {
             let client = MockStandardOnlineMarkdownizeClient;
             let model_pin = client.resolve_model_pin("mistral-ocr-latest")?;
             let adapter = MistralOcrMarkdownizeAdapter::new(client, model_pin, request.scope_id)
@@ -96,7 +110,14 @@ pub fn run_standard_online_markdownize(
         _ => {}
     }
     let client = EnvMistralOcrClient::new();
-    let model_pin = client.resolve_model_pin("mistral-ocr-latest")?;
+    // R13-2: use the declared `tools.toml` `[markdown] model` alias when present
+    // (docs/03 §11: config may carry a mutable alias, resolved to an immutable pin
+    // at execution — §5.1/§6), rather than the previously hard-coded
+    // `"mistral-ocr-latest"`.
+    let configured_model = crate::tool_lock::registered_declared_adapter("markdown")
+        .and_then(|declared| declared.model)
+        .unwrap_or_else(|| "mistral-ocr-latest".to_owned());
+    let model_pin = client.resolve_model_pin(&configured_model)?;
     let adapter = MistralOcrMarkdownizeAdapter::new(client, model_pin, request.scope_id)
         .with_image_store(request.kcs_dir);
     let profile = adapter.profile();
@@ -154,10 +175,16 @@ impl MistralOcrClient for MockStandardOnlineMarkdownizeClient {
                 }
             })
             .collect();
-        if std::env::var(TEST_STANDARD_ONLINE_MARKDOWNIZE_ENV)
-            .ok()
-            .as_deref()
-            == Some("partial")
+        let seam = std::env::var(TEST_STANDARD_ONLINE_MARKDOWNIZE_ENV).ok();
+        if seam.as_deref() == Some("partial") {
+            pages.pop();
+        }
+        // R13-1: drop a page in incremental mode only, to exercise the acceptance
+        // check → Full fallback path. A full re-send (mode != incremental) returns
+        // every requested page, so the fallback succeeds.
+        if seam.as_deref() == Some("incr_incomplete")
+            && request.mode == crate::types::MarkdownizeMode::Incremental
+            && pages.len() > 1
         {
             pages.pop();
         }
@@ -187,10 +214,28 @@ pub fn active_adopted_embedding_execution() -> Option<AdoptedEmbeddingExecution>
         Some("auth_error") => Some(AdoptedEmbeddingExecution::AuthError),
         Some("rate_limit") => Some(AdoptedEmbeddingExecution::RateLimit),
         Some(_) => None,
-        None => std::env::var("GEMINI_API_KEY")
-            .is_ok()
-            .then_some(AdoptedEmbeddingExecution::Real),
+        // R13-2: activate the Real path when EITHER a `tools.toml` `[embedding]`
+        // adapter is declared (its auth is resolved at execution — keychain there
+        // is a loud error) OR the legacy `GEMINI_API_KEY` env var is set. Before
+        // this a declared `auth = "env:MY_KEY"` was ignored (silent noop) because
+        // only `GEMINI_API_KEY` was checked.
+        None => real_embedding_activation(
+            crate::tool_lock::registered_declared_adapter("embedding")
+                .and_then(|declared| declared.auth)
+                .is_some(),
+            std::env::var("GEMINI_API_KEY").is_ok(),
+        ),
     }
+}
+
+/// R13-2: pure activation rule for the adopted embedding adapter (unit-testable).
+/// Real when the adapter is declared in `tools.toml` OR the legacy env key is set.
+#[must_use]
+pub fn real_embedding_activation(
+    declared: bool,
+    env_key_present: bool,
+) -> Option<AdoptedEmbeddingExecution> {
+    (declared || env_key_present).then_some(AdoptedEmbeddingExecution::Real)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -331,6 +376,28 @@ mod tests {
         assert_eq!(adopted_embedding_profile().adapter_id, "gemini_embedding_2");
     }
 
+    // R13-2(d): a declared `[embedding]` adapter activates the Real path even
+    // without GEMINI_API_KEY (the finding: a declared `auth = "env:MY_KEY"` used to
+    // be ignored). The legacy env-only activation still works too.
+    #[test]
+    fn r13_2_real_embedding_activation_honors_declaration_or_env() {
+        assert_eq!(
+            real_embedding_activation(true, false),
+            Some(AdoptedEmbeddingExecution::Real),
+            "a declared adapter activates without the env key"
+        );
+        assert_eq!(
+            real_embedding_activation(false, true),
+            Some(AdoptedEmbeddingExecution::Real),
+            "the legacy env-only activation still works"
+        );
+        assert_eq!(
+            real_embedding_activation(false, false),
+            None,
+            "neither declared nor env → inactive"
+        );
+    }
+
     #[test]
     fn deterministic_embedding_vector_is_stable_and_normalized() {
         let a = deterministic_embedding_vector("認証仕様 トークン", 768);
@@ -419,6 +486,9 @@ mod tests {
                 unit_kind: crate::types::UnitKind::Page,
                 order: 0,
             }],
+            mode: MarkdownizeMode::Full,
+            previous: None,
+            hints: None,
         })
         .unwrap();
         std::env::remove_var(TEST_STANDARD_ONLINE_MARKDOWNIZE_ENV);

@@ -218,6 +218,30 @@ cursor-key も同経路)。R12-6 fix は XDG_* 変数のみ検証し、HOME フ�
   既知据え置き、gc.* は Phase 4+ — いずれも意図的 silent 受理と確認 (Opus)。
 - P3 の tools.toml 0600 warn: plain: + 0644 で発火 / 0600 で非発火を実機再確認 (Sonnet)。
 
+## フィックス完了メモ (2026-07-06、オーケストレータ検証済み)
+
+- 6/6 修正完了。428 テスト (+31) / clippy --all-features -D warnings / fmt 全 green。
+- 全 major をオーケストレータが実機 repro クローズ: R13-1 (v1→v2 軽微改版で mode=incremental +
+  changed_unit_keys=[page:2] + unchanged 4 unit を reused_from で再利用、送信は変更ページのみ)、
+  R13-2 (bogus key exit 2 / docs/03 §11+07 §1 コピペ exit 0 / url="plain:" exit 0 /
+  keychain 宣言で embedding_tasks_failed:1 開示 + errors.jsonl に KCS-E-NOT-IMPLEMENTED-001 ×1)、
+  R13-3 ([logs] retention_days=7 受理 / 日付跨ぎで events-YYYY-MM-DD.jsonl へローテ /
+  retention 超 dated ファイル prune、全て非致死)、R13-4 (空 HEAD 自己修復で C1 温存・無変更
+  snapshot が正しく noop・変更ありで C1 を親にチェーン伸長・KCS-I-STORE-HEAD-REPAIRED-001 記録)、
+  R13-5 (repaired:["HEAD"] 報告 + status 復帰)、R13-6 (HOME/XDG 不在で exit 2 + CWD 非散乱)。
+- **裁定前提の訂正**: R13-1 の「capability_flags 追加で tool_profile_hash が変わる」は誤り —
+  identity::PROFILE_FIELDS に capability_flags は含まれず tool-lock 正準化も capabilities を
+  除外するため hash 不変、frozen fixture は無変更で pass (裁定時の波及予測は fix 実地で訂正されうる)。
+- **残置 (R14 以降の裁定候補)**:
+  1. incremental 時の cost-ledger が full 見積のまま予約 (過大予約側で cap-safe。判定の enqueue 側
+     移行 + R11-6 の prorated 経路流用で按分可能)。
+  2. keychain auth はコマンド exit 0 のまま (開示 + errors.jsonl 記録。search 耐性優先の意図的裁定)。
+  3. R13-1 の新配線 (mode/previous/hints の task 伝播、reused_from、受け入れ検査 fallback) は
+     crash 面の監査が未 (「fix が開ける穴」3 例目 R11-5→R12-3 の教訓により R14 で掃くこと)。
+- 期待値変更 2 件: tools_toml_auth_prefix テストの fixture を documented section 名に変更
+  (typed loader が非 documented トップレベルを拒否するようになったため)、r12_2 テストの
+  assert を clippy 1.95 lint (bool_assert_comparison/len_zero) 対応に書き換え (挙動不変)。
+
 ## フィックス発注条件 (ランブック §4-6 準拠)
 
 - docs/ 変更禁止。各修正ごとに `cargo test --workspace`。回帰テスト必須。commit しない。
