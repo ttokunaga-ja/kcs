@@ -9,9 +9,9 @@ use clap::{Args, Parser, Subcommand};
 use kcs_adapter::catalog::{
     active_adopted_embedding_execution, adopted_embedding_profile,
     builtin_offline_markdownize_adapter, builtin_prepare_profile,
-    declared_adopted_embedding_profile, run_adopted_embedding, run_standard_online_markdownize,
-    standard_online_markdownize_profile, AdoptedEmbeddingExecution, DeclaredEmbeddingProfile,
-    StandardOnlineMarkdownizeRequest,
+    declared_adopted_embedding_profile, resolve_standard_online_markdownize_profile,
+    run_adopted_embedding, run_standard_online_markdownize, standard_online_markdownize_profile,
+    AdoptedEmbeddingExecution, DeclaredEmbeddingProfile, StandardOnlineMarkdownizeRequest,
 };
 use kcs_adapter::identity::tool_profile_hash;
 use kcs_adapter::tool_lock::{load_tool_lock, validate_tools_toml};
@@ -4993,10 +4993,9 @@ fn run_batch(args: BatchArgs) -> Result<Value> {
             });
             // R11-2: report the batch exit code (docs/04 §5.6) from what this pass did
             // — auth (5) / budget-paused (6) / partial (3) / all-permanent (4) — while
-            // the full result JSON still prints to stdout.
-            if let Some(code) = batch_exit_override(&outcome) {
-                set_exit_override(&mut output, code);
-            }
+            // the full result JSON still prints to stdout. R14-5: with a batch-owned
+            // error_code so errors.jsonl does not borrow a search code.
+            apply_batch_exit_override(&mut output, &outcome);
             Ok(output)
         }
         Some(BatchCommand::Retry) => {
@@ -5035,9 +5034,8 @@ fn run_batch(args: BatchArgs) -> Result<Value> {
                 // R11-2: pause transitions this pass (docs/04 §5.6 visibility).
                 "tasks_paused": outcome.paused,
             });
-            if let Some(code) = batch_exit_override(&outcome) {
-                set_exit_override(&mut output, code);
-            }
+            // R14-5: batch-owned error_code on the Partial(3)/Permanent(4) override.
+            apply_batch_exit_override(&mut output, &outcome);
             Ok(output)
         }
         None => Err(KcsError::not_implemented("batch command")),
@@ -5235,6 +5233,34 @@ fn batch_exit_override(outcome: &ExecOutcome) -> Option<ExitCode> {
         Some(ExitCode::PermanentFailure)
     } else {
         None
+    }
+}
+
+/// R14-5: the batch-owned observability `error_code` for a Partial(3)/Permanent(4) batch
+/// exit, mirroring how `index` self-sets `KCS-E-INDEX-PARTIAL-001` on its partial exit.
+/// Without it, `append_exit_override_error` fell back to `exit_override_error_code`, which
+/// labels 3/4 with SEARCH codes (`KCS-E-SEARCH-PARTIAL-001` — not even in the catalog —
+/// and `KCS-E-SEARCH-SCOPE-ALL-FAILED-001`, the multi-scope-search all-failed code), so a
+/// batch task failure was mis-classified as a search failure in errors.jsonl. Auth(5) /
+/// budget(6) keep their shared codes (`KCS-E-ADAPTER-AUTH-001` / `KCS-E-BUDGET-EXCEEDED-001`),
+/// which are correct for batch too, so they return `None` and use the shared fallback.
+fn batch_error_code(code: ExitCode) -> Option<&'static str> {
+    match code {
+        ExitCode::PartialFailure => Some("KCS-E-BATCH-PARTIAL-001"),
+        ExitCode::PermanentFailure => Some("KCS-E-BATCH-TASK-FAILED-001"),
+        _ => None,
+    }
+}
+
+/// R14-5: apply the batch exit override to `output`, carrying a batch-owned `error_code`
+/// (so errors.jsonl classifies the failure as batch, not search) before embedding the
+/// `__exit_code` marker. Shared by `batch resume` and `batch retry`.
+fn apply_batch_exit_override(output: &mut Value, outcome: &ExecOutcome) {
+    if let Some(code) = batch_exit_override(outcome) {
+        if let Some(error_code) = batch_error_code(code) {
+            output["error_code"] = json!(error_code);
+        }
+        set_exit_override(output, code);
     }
 }
 
@@ -5635,6 +5661,30 @@ fn execute_online_markdownize_task(
 ) -> std::result::Result<OnlineExecutionOutcome, TaskExecutionFailure> {
     let path = repo.root().join(&task.input_path);
     let media_type = media_type_for_cli_path(&path).to_owned();
+    // R14-2: an online markdownize task is always deferred — one pass enqueues it and
+    // a later `batch resume` / `index --online` executes it — so the file may have been
+    // edited in between. Executing a stale task reads the CURRENT bytes yet persists
+    // them under the enqueue-time `input_hash` (identity = raw_hash), i.e. it stores v2
+    // content under v1 identity. That breaks the content-addressing invariant, is
+    // sticky (CAS idempotency never re-OCRs H(v1) again), mis-bills the v2 OCR under
+    // v1, and poisons the next incremental's baseline (`latest_online_instance_for_path`
+    // reads the tainted instance as "previous"). If the current file no longer hashes
+    // to `task.input_hash`, supersede this task: do NOT execute or persist. The next
+    // `index` enqueues a fresh task for the new content (the recovery is a re-index, not
+    // a retry of this obsolete task — hence non-retryable InvalidInput; the task state
+    // machine has no dedicated "superseded" state). Distinct from R14-1 (which degrades
+    // an unreadable PREVIOUS instance to a Full re-send of the CURRENT content): here the
+    // CURRENT content itself no longer matches the task, so there is nothing to send.
+    let Ok(current_bytes) = fs::read(&path) else {
+        return Err(TaskExecutionFailure {
+            retry_kind: RetryErrorKind::InvalidInput,
+        });
+    };
+    if hash_bytes(&current_bytes) != task.input_hash {
+        return Err(TaskExecutionFailure {
+            retry_kind: RetryErrorKind::InvalidInput,
+        });
+    }
     // R9-2 (defense in depth): never send a text-native file to online OCR even if
     // a task for it already exists (e.g. enqueued by a pre-fix build or a poisoned
     // tasks.jsonl). Fail fast as a non-retryable input error instead of a silent,
@@ -5847,11 +5897,18 @@ fn try_online_incremental_markdownize(
     // the documented 5-condition decision (R12-1's `choose_markdownize_mode`, which
     // now reaches the incremental gate because the adapter declares the capability).
     let mapping = map_units(&previous.prepared_units, prepared_units);
-    let profile = online_markdownize_profile();
+    // R14-6: resolve the online adapter's profile NOW (this resolves the model pin — a
+    // `GET /v1/models` for a `*-latest` alias, never an OCR upload/bill) so the pin/profile
+    // gate below runs BEFORE any incremental send. Previously the mismatch was only checked
+    // AFTER the incremental request had been sent (and, post-R14-4, the whole document
+    // uploaded), wasting a send + bill and then re-sending Full. `capability_flags` are
+    // pin-independent, so the mode decision is unchanged.
+    let resolved_profile =
+        resolve_standard_online_markdownize_profile(scope_id).map_err(task_failure_from_adapter)?;
     let decision = choose_markdownize_mode(&IncrementalModeInput {
         has_previous_done_run: true,
         raw_hash_only_changed: true,
-        adapter_capabilities: profile.capability_flags.clone(),
+        adapter_capabilities: resolved_profile.capability_flags.clone(),
         change_rate: mapping.change_rate,
         threshold: incremental_config.threshold,
         consecutive_incremental_count: consecutive_online_incremental_count(
@@ -5862,6 +5919,13 @@ fn try_online_incremental_markdownize(
         max_consecutive_incremental: incremental_config.max_consecutive,
     });
     if decision.mode != MarkdownizeMode::Incremental {
+        return Ok(None);
+    }
+    // R14-6 gate (docs/04 §3.1 condition 2): a changed resolved pin is a different
+    // tool_profile → NOT an eligible incremental. Fall back to a Full send BEFORE sending
+    // (and, post-R14-4, before uploading) anything. This replaces the former post-send
+    // re-check.
+    if resolved_profile.tool_profile_hash != previous.manifest.tool_profile_hash {
         return Ok(None);
     }
     let incremental_hints = incremental_hints_from_mapping(&mapping, prepared_units);
@@ -5900,11 +5964,8 @@ fn try_online_incremental_markdownize(
     .map_err(task_failure_from_adapter)?;
     let response = outcome.response;
     let profile = outcome.profile;
-    // A model update (resolved pin changed) means a different tool_profile → not an
-    // eligible incremental (docs/04 §3.1 condition 2). Fall back to a Full send.
-    if profile.tool_profile_hash != previous.manifest.tool_profile_hash {
-        return Ok(None);
-    }
+    // R14-6: the pin/profile mismatch was gated BEFORE the send above, so `outcome.profile`
+    // matches `previous` here (same resolution) — no post-send re-check is needed.
     // Acceptance (docs/04 §3.2): the OCR response must cover every requested
     // (changed+added) unit, and the adapter must not have declined. Otherwise fall
     // back to a Full re-send (fallback_reason = contract/coverage).
@@ -7503,8 +7564,21 @@ fn run_index_pipeline(
             continue;
         }
 
+        // R14-1 (defense in depth): loading the prior instance for THIS candidate must
+        // not abort the whole index and silently skip alphabetically-later files. On any
+        // error (a store read fault, an unreadable prior instance the `Ok(None)` fix
+        // above did not already absorb), degrade to no-previous = a Full re-send for this
+        // candidate only, keeping the blast radius to the one file.
         let previous =
-            previous_instance_for_path(&task_store, &candidate.input_path, &markdown_profile_hash)?;
+            previous_instance_for_path(&task_store, &candidate.input_path, &markdown_profile_hash)
+                .unwrap_or_else(|_err| {
+                    let _ = append_event_log(
+                        "KCS-I-INDEX-PREVIOUS-UNREADABLE-001",
+                        "prior normalized instance unreadable; indexing this file as Full",
+                        json!({ "input_path": candidate.input_path }),
+                    );
+                    None
+                });
         let mapping = previous
             .as_ref()
             .map(|previous| map_units(&previous.prepared_units, &prepare.prepared_units));
@@ -7963,10 +8037,20 @@ fn load_previous_instance(output_ref: &str) -> Result<Option<PreviousInstance>> 
             continue;
         }
         let unit_path = dir.join(format!("{}.json", entry.unit_ref));
-        let bytes = fs::read(&unit_path)
-            .map_err(|err| KcsError::io(err.to_string(), unit_path.display().to_string()))?;
-        let unit: NormalizedUnitObject =
-            serde_json::from_slice(&bytes).map_err(|err| KcsError::schema(err.to_string()))?;
+        // R14-1: a partially-corrupt previous instance (manifest claims `done` but the
+        // unit `<unit_ref>.json` is unreadable or malformed) must degrade to "no usable
+        // previous" — exactly like a missing manifest.json above (`Ok(None)`) — so the
+        // caller falls back to a Full re-send and self-heals. The prior asymmetric hard
+        // `Err` here bricked online markdownize for the document permanently (the same
+        // corrupt previous was read every run, never re-OCR'd) and, on the offline
+        // route, propagated out of `run_index_pipeline`'s candidate loop and aborted the
+        // whole `kcs index`, silently skipping alphabetically-later files.
+        let Ok(bytes) = fs::read(&unit_path) else {
+            return Ok(None);
+        };
+        let Ok(unit) = serde_json::from_slice::<NormalizedUnitObject>(&bytes) else {
+            return Ok(None);
+        };
         units.push(unit);
     }
     let prepared_units = manifest

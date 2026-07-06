@@ -3,7 +3,7 @@
 use crate::identity::hash_bytes;
 use crate::traits::MarkdownizeAdapter;
 use crate::types::{
-    AdapterKind, AdapterProfile, ExecutionMode, MarkdownUnit, MarkdownizeRequest,
+    AdapterKind, AdapterProfile, ExecutionMode, MarkdownUnit, MarkdownizeMode, MarkdownizeRequest,
     MarkdownizeResponse, PreparedUnitHint,
 };
 use crate::{AdapterError, Result};
@@ -118,15 +118,20 @@ impl MistralOcrClient for EnvMistralOcrClient {
             path: path.to_owned(),
             message: err.to_string(),
         })?;
-        let document = document_payload(&request.media_type, &bytes);
+        // R14-4: in incremental mode, restrict the OCR request to the changed+added
+        // pages via the `pages` parameter (built from `prepared_unit_hint`), instead of
+        // silently sending — and re-billing — the whole document every revision. Full
+        // mode sends no `pages` (process the entire document).
+        let pages = request_pages(request);
         let value: Value = ureq::post(&format!("{}/v1/ocr", self.base_url()))
             .set("Authorization", &format!("Bearer {api_key}"))
             .set("Content-Type", "application/json")
-            .send_json(json!({
-                "model": model_pin,
-                "document": document,
-                "include_image_base64": true,
-            }))
+            .send_json(ocr_request_body(
+                &request.media_type,
+                &bytes,
+                model_pin,
+                pages.as_deref(),
+            ))
             .map_err(http_error)?
             .into_json()
             .map_err(|err| AdapterError::ContractViolation(err.to_string()))?;
@@ -293,6 +298,55 @@ fn document_payload(media_type: &str, bytes: &[u8]) -> Value {
             "image_url": format!("data:{data_uri}")
         })
     }
+}
+
+/// R14-4: the 0-indexed pages an OCR request should process. Incremental mode restricts
+/// the OCR to the changed+added units carried in `prepared_unit_hint` (each unit's
+/// `order`, which `prepare` assigns 0-based — page:1 → 0, page:2 → 1, …); Full mode
+/// returns `None` (process every page). Before R14-4 the real client ignored the hint
+/// and always sent the whole document, so a light revision re-OCR'd/re-billed all pages.
+fn request_pages(request: &MarkdownizeRequest) -> Option<Vec<usize>> {
+    if request.mode != MarkdownizeMode::Incremental {
+        return None;
+    }
+    Some(
+        request
+            .prepared_unit_hint
+            .as_deref()
+            .unwrap_or(&[])
+            .iter()
+            .map(|hint| hint.order as usize)
+            .collect(),
+    )
+}
+
+/// R14-4: build the Mistral `/v1/ocr` request body. `pages = Some(..)` scopes the OCR to
+/// exactly those 0-indexed pages (the incremental cost fix, docs/07 §8: KCS re-processes
+/// only the changed+added units and reuses the rest); `pages = None` processes the whole
+/// document (Full send). Pure + HTTP-free so the page scoping is unit-testable.
+///
+/// NOTE: whether Mistral's `pages` parameter actually reduces billing is confirmed only
+/// by real-API verification (a user-gated step, as with the prior Mistral/Gemini checks).
+/// The code-side defect this closes is definite: incremental previously ignored the hint
+/// and sent every page. The `pages` indices are 0-based to stay consistent with the
+/// adapter's page indexing everywhere else (the mock and `parse_ocr_response` map pages by
+/// the same 0-based `order`); if real-API verification shows Mistral expects 1-based
+/// indices, this is the single place to add `+ 1`.
+fn ocr_request_body(
+    media_type: &str,
+    bytes: &[u8],
+    model_pin: &str,
+    pages: Option<&[usize]>,
+) -> Value {
+    let mut body = json!({
+        "model": model_pin,
+        "document": document_payload(media_type, bytes),
+        "include_image_base64": true,
+    });
+    if let (Some(pages), Some(object)) = (pages, body.as_object_mut()) {
+        object.insert("pages".to_owned(), json!(pages));
+    }
+    body
 }
 
 fn parse_ocr_response(value: Value, model_pin: &str) -> Result<OcrResponse> {
@@ -708,6 +762,89 @@ mod tests {
             image_hash(&written),
             hashes[0],
             "object must hash back to its filename"
+        );
+    }
+
+    // R14-4: incremental must restrict the OCR request to the changed+added pages (the
+    // 0-based `order` from `prepared_unit_hint`) via the `pages` parameter, so only those
+    // pages are processed/billed. Full sends no `pages` (whole document). Before R14-4 the
+    // real client ignored the hint and always sent every page (the mock seam hid it).
+    use crate::types::{RawInput, UnitKind};
+
+    fn hint(unit_key: &str, order: u64) -> PreparedUnitHint {
+        PreparedUnitHint {
+            unit_key: unit_key.to_owned(),
+            prepared_hash: format!("sha256:{order:0>64}"),
+            unit_kind: UnitKind::Page,
+            order,
+        }
+    }
+
+    fn markdownize_request(
+        mode: MarkdownizeMode,
+        hints: Vec<PreparedUnitHint>,
+    ) -> MarkdownizeRequest {
+        MarkdownizeRequest {
+            raw: RawInput {
+                raw_hash: "sha256:raw".to_owned(),
+                path: Some("/tmp/doc.pdf".to_owned()),
+            },
+            media_type: "application/pdf".to_owned(),
+            prepared_unit_hint: Some(hints),
+            mode,
+            previous: None,
+            hints: None,
+            tool_profile_hash: String::new(),
+            spec_version: 1,
+        }
+    }
+
+    #[test]
+    fn r14_4_incremental_scopes_pages_to_changed_units() {
+        // Changed+added units are page:2 (order 1) and page:4 (order 3).
+        let request = markdownize_request(
+            MarkdownizeMode::Incremental,
+            vec![hint("page:2", 1), hint("page:4", 3)],
+        );
+        let pages = request_pages(&request);
+        assert_eq!(
+            pages,
+            Some(vec![1, 3]),
+            "incremental must scope the OCR to the hinted 0-based page orders"
+        );
+        let body = ocr_request_body(
+            "application/pdf",
+            b"pdf-bytes",
+            "mistral-ocr-2505",
+            pages.as_deref(),
+        );
+        assert_eq!(
+            body["pages"],
+            json!([1, 3]),
+            "the request body must carry exactly the scoped pages"
+        );
+        assert_eq!(body["model"], "mistral-ocr-2505");
+        assert!(
+            body.get("document").is_some(),
+            "the document payload is always present"
+        );
+    }
+
+    #[test]
+    fn r14_4_full_send_has_no_pages_parameter() {
+        let request = markdownize_request(
+            MarkdownizeMode::Full,
+            vec![hint("page:1", 0), hint("page:2", 1)],
+        );
+        assert_eq!(
+            request_pages(&request),
+            None,
+            "Full must not restrict the pages"
+        );
+        let body = ocr_request_body("application/pdf", b"pdf-bytes", "mistral-ocr-2505", None);
+        assert!(
+            body.get("pages").is_none(),
+            "Full must send no `pages` parameter (process the whole document)"
         );
     }
 }
