@@ -180,6 +180,25 @@ impl CostLedger {
         }
         Ok(total)
     }
+
+    /// R17-3: the device-global phantom-reservation RECLAIM ledger — a sibling of
+    /// the charge ledger (`cost-ledger-reclaimed.jsonl`). When a stale online task
+    /// whose F8 reservation was a NON-billable rejection (RateLimit / Quota, which
+    /// R16-7 established never bills) is superseded at re-index, its exact reserved
+    /// amount is appended here and SUBTRACTED from spend in
+    /// `budget_remaining_for_adapter`. It is a SEPARATE, positive-only file on
+    /// purpose: F3 forbids a negative compensating row in the charge ledger (a
+    /// negative `usd` would fail-open the cap), so instead of poisoning the charge
+    /// ledger we record the reclaim positively elsewhere and net it at read time.
+    /// Reuses the same `MonthlyCostLedgerEntry` schema, so `append_monthly` /
+    /// `monthly_total*` here inherit the identical F3 finite-and-non-negative guard.
+    /// The cap-safe invariant (`effective_spent = charges - reclaimed >= real
+    /// spend`) holds because only true phantoms are reclaimed, each by at most its
+    /// own reservation.
+    #[must_use]
+    pub fn reclaim_ledger(&self) -> CostLedger {
+        CostLedger::new(self.path.with_file_name("cost-ledger-reclaimed.jsonl"))
+    }
 }
 
 pub fn evaluate_budget(estimate: BudgetEstimate) -> Result<BudgetDecision> {
