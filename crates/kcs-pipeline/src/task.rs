@@ -34,7 +34,11 @@ pub enum TaskStatus {
     Paused,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+// R17-3: `Eq` is intentionally NOT derived — `reserved_usd` is an `f64`, which
+// only implements `PartialEq`. Nothing uses `TaskDescriptor` in an `Eq`-bound
+// context (no Hash/BTreeSet/HashMap key, no `Eq`-deriving container holds it), so
+// dropping it is inert; `PartialEq` (`==` in tests and dedup) is retained.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TaskDescriptor {
     pub task_id: String,
     #[serde(rename = "type")]
@@ -54,6 +58,20 @@ pub struct TaskDescriptor {
     pub heartbeat_at: Option<String>,
     pub fallback_reason: Option<String>,
     pub created_at: String,
+    // R17-3: the exact F8 reservation this task currently holds (amount + the
+    // ledger `month` it landed in), stamped when a FRESH charge is reserved in the
+    // batch send path and left untouched on the RateLimit/Quota re-reservation-skip
+    // (R16-7) so it always names the single live reservation the skip gate relies
+    // on. When a stale task is superseded at re-index, a non-billable (RateLimit/
+    // Quota) reservation is reclaimed by exactly this (usd, month) into the sibling
+    // reclaim ledger — canceling the phantom precisely even though the edited file
+    // is gone. Absent (None) on fresh/legacy tasks and after a reclaim (cleared, so
+    // it can never be reclaimed twice). Serialized only when present so untouched
+    // tasks stay byte-identical to pre-R17-3 records.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reserved_usd: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reserved_month: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -389,6 +407,8 @@ mod tests {
             heartbeat_at: None,
             fallback_reason: None,
             created_at: "2026-04-25T12:00:00Z".to_owned(),
+            reserved_usd: None,
+            reserved_month: None,
         };
 
         let value = serde_json::to_value(descriptor).expect("serialize task descriptor");
@@ -443,6 +463,8 @@ mod tests {
             heartbeat_at: None,
             fallback_reason: None,
             created_at: "2026-04-25T12:00:00Z".to_owned(),
+            reserved_usd: None,
+            reserved_month: None,
         };
         store.append(&task).unwrap();
         // A bare-name task reads back fine.
@@ -485,6 +507,8 @@ mod tests {
             heartbeat_at: None,
             fallback_reason: None,
             created_at: "2026-04-25T12:00:00Z".to_owned(),
+            reserved_usd: None,
+            reserved_month: None,
         };
         store.append(&task).unwrap();
         let err = store.all().unwrap_err();

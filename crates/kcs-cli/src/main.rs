@@ -679,7 +679,7 @@ fn run_index(args: IndexArgs) -> Result<Value> {
     });
     // R16-4: disclose any documents skipped for missing/corrupt units (empty on a
     // clean index — the units were just written, so this normally stays empty).
-    attach_skipped_units(&mut output, &rebuild_report);
+    attach_skipped_units(&mut output, &rebuild_report, repo.kcs_dir());
     // R11-3: an index that partially failed to normalize local files keeps its full
     // result JSON on stdout (commit_hash, tree_hash, …) with `error_code` +
     // `__exit_code:3`, matching search's "result + nonzero exit" shape — instead of
@@ -769,7 +769,7 @@ fn run_repair(args: UnsupportedArgs) -> Result<Value> {
         "paused_tasks": enrichment.paused,
     });
     // R16-4: disclose any documents skipped for missing/corrupt units (partial recovery).
-    attach_skipped_units(&mut output, &report);
+    attach_skipped_units(&mut output, &report, repo.kcs_dir());
     if let Some(code) = enrichment_exit_override(&enrichment) {
         set_exit_override(&mut output, code);
     }
@@ -1433,6 +1433,59 @@ fn run_search_inner(args: UnsupportedArgs, started: Instant) -> Result<Value> {
                 "text and vector search are both unavailable: the search index (sqlite.db) is missing or corrupt in every scope; run `kcs repair --rebuild-db`",
                 json!({ "excluded_scopes": excluded }),
                 ExitCode::Failure,
+            ));
+        }
+        // R17-4: when every scope was excluded for a store-corruption class (R16-2's
+        // `store_corrupt` — a tampered/corrupt commit-or-tree object — or R16-3's
+        // `snapshot_shallow` — a discarded HEAD tree with no cached rows), the generic
+        // SCOPE-ALL-FAILED (exit 4, no guidance) left the operator/agent with no
+        // recovery path (the R16-2/R16-3 exclusion reasons were never taught to this
+        // aggregation, unlike `index_missing`/`index_corrupt` above). Attach
+        // class-specific recovery guidance to the SCOPE-ALL-FAILED response (message +
+        // `context.recovery`); the error CODE stays the docs-registered
+        // SCOPE-ALL-FAILED-001 (the code registry in docs/06 §8 / docs/10 §7.5 is
+        // normative and docs are frozen — no new code). Deliberately NOT unified with
+        // `index_missing`'s exit-1 + "run repair" push: `repair --rebuild-db` rebuilds
+        // the sqlite index FROM the store, so it does not heal a corrupt/absent
+        // commit-or-tree object (it re-hits the same corruption) — the real recovery is
+        // restoring the object from objects/refs or re-indexing. Exit stays 4 (manual
+        // intervention required), the honest current semantics; the `recovery` context
+        // is what makes the path agent-detectable.
+        let store_corruption = !excluded.is_empty()
+            && excluded.iter().all(|entry| {
+                matches!(
+                    entry.get("reason").and_then(Value::as_str),
+                    Some("store_corrupt") | Some("snapshot_shallow")
+                )
+            });
+        if store_corruption {
+            let reason_is = |want: &str| {
+                excluded
+                    .iter()
+                    .any(|entry| entry.get("reason").and_then(Value::as_str) == Some(want))
+            };
+            let mut recovery = Vec::<&str>::new();
+            if reason_is("store_corrupt") {
+                recovery.push(
+                    "store_corrupt: try `kcs repair --rebuild-db`; if it still fails, restore \
+                     the corrupt commit/tree object from objects/refs",
+                );
+            }
+            if reason_is("snapshot_shallow") {
+                recovery.push(
+                    "snapshot_shallow: restore the discarded HEAD commit/tree object, or \
+                     re-run `kcs index` to rebuild the snapshot from the working tree",
+                );
+            }
+            return Err(KcsError::new(
+                "KCS-E-SEARCH-SCOPE-ALL-FAILED-001",
+                format!(
+                    "every searched scope's store is corrupt or shallow, so search cannot \
+                     run — {}",
+                    recovery.join("; ")
+                ),
+                json!({ "excluded_scopes": excluded, "recovery": recovery }),
+                ExitCode::PermanentFailure,
             ));
         }
         return Err(scope_all_failed_error(
@@ -2692,26 +2745,56 @@ fn run_reindex(args: UnsupportedArgs) -> Result<Value> {
     let tree = read_head_tree_for_rebuild(&repo, &head)?;
     let mut normalize_by_path = BTreeMap::new();
     let mut reindexed = 0u64;
+    // R17-2: a single document's missing/corrupt normalized unit must not abort the
+    // whole re-normalization — the same docs/10 §7.2 resilience R16-4 gave the shared
+    // `rebuild_step3_index`, which this pre-rebuild copy loop never inherited (R16-4
+    // shared only the *tree* read via `read_head_tree_for_rebuild`, not this per-unit
+    // copy). A skippable failure keeps the document's PREVIOUS gen (so the snapshot
+    // still points at its last-good normalized instance and search keeps serving that
+    // gen's cached chunks) and is recorded; healthy documents still re-normalize.
+    let mut reindex_skipped = Vec::<Value>::new();
     for entry in &tree.entries {
         let Some(normalize) = &entry.normalize else {
             continue;
         };
         let new_gen = normalize.gen + 1;
-        copy_normalized_instance_gen(
+        match copy_normalized_instance_gen(
             repo.kcs_dir(),
             &entry.raw_hash,
             &normalize.tool_profile_hash,
             normalize.gen,
             new_gen,
-        )?;
-        normalize_by_path.insert(
-            entry.path.clone(),
-            NormalizeRef {
-                tool_profile_hash: normalize.tool_profile_hash.clone(),
-                gen: new_gen,
-            },
-        );
-        reindexed += 1;
+        ) {
+            Ok(()) => {
+                normalize_by_path.insert(
+                    entry.path.clone(),
+                    NormalizeRef {
+                        tool_profile_hash: normalize.tool_profile_hash.clone(),
+                        gen: new_gen,
+                    },
+                );
+                reindexed += 1;
+            }
+            // STORE-IO (missing unit) / STORE-CORRUPT (malformed manifest/unit) are
+            // localized to one document; keep the previous gen and continue. Any other
+            // class is not a localized unit fault and still aborts (mirrors R16-4).
+            Err(error) if is_rebuild_skippable_unit_error(&error) => {
+                normalize_by_path.insert(
+                    entry.path.clone(),
+                    NormalizeRef {
+                        tool_profile_hash: normalize.tool_profile_hash.clone(),
+                        gen: normalize.gen,
+                    },
+                );
+                reindex_skipped.push(json!({
+                    "raw_hash": entry.raw_hash,
+                    "path": entry.path,
+                    "gen": normalize.gen,
+                    "reason": error.error_code(),
+                }));
+            }
+            Err(error) => return Err(error),
+        }
     }
     let excluded = BTreeSet::new();
     let outcome = repo.auto_snapshot_with_normalize(
@@ -2720,7 +2803,13 @@ fn run_reindex(args: UnsupportedArgs) -> Result<Value> {
         &excluded,
         &normalize_by_path,
     )?;
-    let report = rebuild_step3_index(&repo)?;
+    let mut report = rebuild_step3_index(&repo)?;
+    // R17-2: fold the re-normalization loop's skips into the rebuild report so the one
+    // `attach_skipped_units` disclosure below covers both phases. Dedup by raw_hash: a
+    // skipped document whose kept previous gen is ALSO unloadable is already reported by
+    // the rebuild above; this appends only reindex-only skips (e.g. a corrupt non-`Done`
+    // unit whose healthy `Done` units still let the rebuild serve the document).
+    merge_reindex_skips(&mut report, reindex_skipped);
     // L1: reindex = re-normalize + re-embedding (docs/06). The rebuild appends
     // fresh chunk rows; enrich them symmetrically with the `kcs index` path so
     // the embedding index tracks the new generation. Online only under the
@@ -2741,7 +2830,7 @@ fn run_reindex(args: UnsupportedArgs) -> Result<Value> {
         "paused_tasks": enrichment.paused,
     });
     // R16-4: disclose any documents skipped for missing/corrupt units.
-    attach_skipped_units(&mut output, &report);
+    attach_skipped_units(&mut output, &report, repo.kcs_dir());
     if let Some(code) = enrichment_exit_override(&enrichment) {
         set_exit_override(&mut output, code);
     }
@@ -2857,6 +2946,10 @@ fn rebuild_step3_index(repo: &Repository) -> Result<Step3RebuildReport> {
                 skipped_units.push(json!({
                     "raw_hash": entry.raw_hash,
                     "path": entry.path,
+                    // R17-6: carry the tree entry's gen so `attach_skipped_units` can
+                    // tell a stale-but-searchable document (its cached chunks at this
+                    // gen survive in chunks.jsonl) from a genuinely unserveable one.
+                    "gen": normalize.gen,
                     "reason": error.error_code(),
                 }));
                 continue;
@@ -2941,19 +3034,92 @@ fn is_rebuild_skippable_unit_error(error: &KcsError) -> bool {
 /// the JSON (never a silent shrink, per R16-4), and there is no store-namespaced
 /// partial code to reuse — inventing/borrowing one (a repeat of the R14-5 anti-pattern)
 /// would be worse than a self-describing `skipped_units` array.
-fn attach_skipped_units(output: &mut Value, report: &Step3RebuildReport) {
+///
+/// R17-6: a skipped normalized-unit does NOT imply the document is unsearchable.
+/// `build_sqlite_index_at`/the rebuild re-serve any chunk rows already persisted in
+/// `chunks.jsonl`, so a document whose live chunks survive stays fully searchable — only
+/// its normalized *source* is stale. Matching each skip's `(raw_hash, gen)` against the
+/// persisted chunks separates a stale-but-searchable document (a soft "re-normalize when
+/// convenient" note) from one with no live chunks (the genuine "re-normalize now" push),
+/// so the emergency guidance — which pointed users at the `reindex --force` R17-2 just
+/// un-bricked — no longer false-alarms on a searchable document. Matching on gen too is
+/// load-bearing: a reindex may advance a document's gen and then fail to chunk the new
+/// gen, leaving only DEAD old-gen chunks that must NOT read as live.
+fn attach_skipped_units(output: &mut Value, report: &Step3RebuildReport, kcs_dir: &Path) {
     let Some(object) = output.as_object_mut() else {
         return;
     };
-    object.insert("skipped_units".to_owned(), json!(report.skipped_units));
-    if !report.skipped_units.is_empty() {
+    // Best-effort: if chunks.jsonl cannot be read, treat every skip as unsearchable
+    // (the conservative "emergency" side) rather than falsely reassuring the user.
+    let live: BTreeSet<(String, u64)> = read_stored_chunks(kcs_dir)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|chunk| (chunk.row.raw_hash, chunk.row.gen))
+        .collect();
+    let mut entries = report.skipped_units.clone();
+    let mut any_unsearchable = false;
+    for entry in &mut entries {
+        let raw_hash = entry
+            .get("raw_hash")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned();
+        let gen = entry.get("gen").and_then(Value::as_u64);
+        let searchable = gen.is_some_and(|gen| live.contains(&(raw_hash.clone(), gen)));
+        if !searchable {
+            any_unsearchable = true;
+        }
+        if let Some(object) = entry.as_object_mut() {
+            object.insert("searchable".to_owned(), json!(searchable));
+            object.insert(
+                "guidance".to_owned(),
+                json!(if searchable {
+                    "re-serving cached chunks; the normalized source is stale — \
+                     re-normalize with `kcs reindex --force` when convenient"
+                } else {
+                    "no live chunks remain for this document; run `kcs reindex --force` \
+                     to re-normalize it from the raw objects"
+                }),
+            );
+        }
+    }
+    let non_empty = !entries.is_empty();
+    object.insert("skipped_units".to_owned(), json!(entries));
+    if non_empty {
         object.insert(
             "skipped_units_guidance".to_owned(),
-            json!(
-                "some documents' normalized units are missing or corrupt and were skipped; \
-                 run `kcs reindex --force` to re-normalize them from the raw objects"
-            ),
+            json!(if any_unsearchable {
+                "some documents' normalized units are missing or corrupt and have no live \
+                 chunks; run `kcs reindex --force` to re-normalize them from the raw objects"
+            } else {
+                "some documents' normalized sources are stale but their cached chunks are \
+                 still served; re-normalize with `kcs reindex --force` when convenient"
+            }),
         );
+    }
+}
+
+/// R17-2: merge the reindex copy-loop's per-document skips into the rebuild report,
+/// deduplicated by raw_hash so a document reported by BOTH phases surfaces once.
+fn merge_reindex_skips(report: &mut Step3RebuildReport, reindex_skipped: Vec<Value>) {
+    let seen: BTreeSet<String> = report
+        .skipped_units
+        .iter()
+        .filter_map(|entry| {
+            entry
+                .get("raw_hash")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        })
+        .collect();
+    for skip in reindex_skipped {
+        let already = skip
+            .get("raw_hash")
+            .and_then(Value::as_str)
+            .is_some_and(|raw_hash| seen.contains(raw_hash));
+        if !already {
+            report.skipped_units.push(skip);
+        }
     }
 }
 
@@ -4425,66 +4591,75 @@ fn resolve_pointer_for_cli(pointer: &EvidencePointer) -> Result<PointerResolutio
     let target = resolve_scope_target(&pointer.scope_id, pointer.scope_path.as_deref())?;
     let repo = Repository::open(&target.repo_root)?;
 
-    // 08 §3.1 step 2: fetch the commit object. R16-1: the commit object being GONE
-    // (external corruption / partial restore) is treated EXACTLY like a shallow
-    // commit — docs/05 §3.6 guarantees Evidence Pointer resolution never fails on a
-    // shallow commit because it falls back to raw_hash/chunk_hash direct resolution,
-    // the core evidence-grounded value. So the read is best-effort: on
-    // STORE-NOT-FOUND we skip the tree walk and resolve the chunk directly rather
-    // than bricking `view`/`open` on a raw KCS-E-STORE-NOT-FOUND-001.
+    // 08 §3.1 step 2: fetch the commit object. R17-1: a MISSING commit object
+    // (never existed / externally deleted — e.g. a `view`/`open` pointer whose
+    // `commit` field is a forged hash) is an Evidence-resolution FAILURE, NOT a
+    // shallow commit. docs/08 §3.2:150 makes commit-object *existence* the resolution
+    // precondition ("shallow でもよい" tolerates tree GC precisely *because the commit
+    // still exists*); docs/05 §3.6's "resolution never fails on a shallow commit"
+    // guarantee is therefore scoped to a genuine shallow commit (commit present, tree
+    // GC'd) and does NOT extend to a missing commit object. R16-1 best-effort'd this
+    // read for status/log/search and that stays — those are pure reads with no
+    // authenticity gate to bypass — but resolve_pointer_for_cli is the ONE Evidence-
+    // authenticity entry point. Folding a missing commit into the shallow path sets
+    // entry_gen=None, which skips BOTH the tree-membership check (raw_hash ∈
+    // commit.tree) and the N5 gen binding below — letting a forged `commit` splice a
+    // newer-generation chunk (post `reindex --force`) under a commit that never
+    // normalized it. So a missing commit is rejected here, not resolved best-effort.
     let commit = match repo.read_commit(&pointer.commit) {
-        Ok(commit) => Some(commit),
-        Err(error) if is_store_not_found(&error) => None,
+        Ok(commit) => commit,
+        Err(error) if is_store_not_found(&error) => {
+            return Err(unresolvable_commit_pointer_error(pointer));
+        }
         Err(error) => return Err(error),
     };
 
-    // 08 §3.1 step 2a/3-4: a shallow commit (tree object discarded) OR a missing
-    // commit object (R16-1) skips the tree walk; otherwise the raw_hash must appear
-    // in commit.tree for the pointer to resolve against *this* commit's snapshot
-    // (not the working tree of some later commit).
+    // 08 §3.1 step 2a/3-4: a genuine shallow commit (commit object present, its tree
+    // object discarded/GC'd) skips the tree walk and resolves the chunk directly;
+    // otherwise the raw_hash must appear in commit.tree for the pointer to resolve
+    // against *this* commit's snapshot (not the working tree of some later commit).
+    // A missing commit object never reaches here — R17-1 rejected it above.
     // `entry_gen` is the tree entry's normalization generation on a non-shallow
     // commit; `None` on the shallow path (no tree to read). It binds the chunk's
     // gen below (N5).
-    let (commit_shallow, entry_gen) =
-        match commit.as_ref().map(|commit| repo.read_tree(&commit.tree)) {
-            Some(Ok(tree)) => {
-                let entry = tree
-                    .entries
-                    .iter()
-                    .find(|entry| entry.raw_hash == pointer.raw_hash);
-                let Some(entry) = entry else {
-                    // step 5 (tombstone) is checked before declaring not_found.
-                    if let Some(tombstone) = read_tombstone(&target, &pointer.raw_hash)? {
-                        return Err(tombstone_error(tombstone));
+    let (commit_shallow, entry_gen) = match repo.read_tree(&commit.tree) {
+        Ok(tree) => {
+            let entry = tree
+                .entries
+                .iter()
+                .find(|entry| entry.raw_hash == pointer.raw_hash);
+            let Some(entry) = entry else {
+                // step 5 (tombstone) is checked before declaring not_found.
+                if let Some(tombstone) = read_tombstone(&target, &pointer.raw_hash)? {
+                    return Err(tombstone_error(tombstone));
+                }
+                return Err(purge_not_found_error(&target, &pointer.raw_hash));
+            };
+            // M6: the tree entry's normalization must bind to the pointer's
+            // tool_profile_hash. N5: it must ALSO bind `gen` (checked below against
+            // the resolved chunk), so a pointer that keeps an old commit but swaps
+            // in a newer-generation chunk_hash produced by `reindex --force` cannot
+            // resolve (the gen axis M6 missed, 08 §3). A tree entry with no explicit
+            // normalization (e.g. a bare `kcs snapshot` that advanced HEAD without
+            // re-recording normalize refs, L3) carries no gen to bind, so it keeps
+            // the pre-existing behavior — the chunk (raw, tool) identity check below
+            // is the available guard. `entry_gen` stays `None` there.
+            let entry_gen = match &entry.normalize {
+                Some(normalize) => {
+                    if normalize.tool_profile_hash != pointer.tool_profile_hash {
+                        return Err(invalid_pointer_identity_error(pointer));
                     }
-                    return Err(purge_not_found_error(&target, &pointer.raw_hash));
-                };
-                // M6: the tree entry's normalization must bind to the pointer's
-                // tool_profile_hash. N5: it must ALSO bind `gen` (checked below against
-                // the resolved chunk), so a pointer that keeps an old commit but swaps
-                // in a newer-generation chunk_hash produced by `reindex --force` cannot
-                // resolve (the gen axis M6 missed, 08 §3). A tree entry with no explicit
-                // normalization (e.g. a bare `kcs snapshot` that advanced HEAD without
-                // re-recording normalize refs, L3) carries no gen to bind, so it keeps
-                // the pre-existing behavior — the chunk (raw, tool) identity check below
-                // is the available guard. `entry_gen` stays `None` there.
-                let entry_gen = match &entry.normalize {
-                    Some(normalize) => {
-                        if normalize.tool_profile_hash != pointer.tool_profile_hash {
-                            return Err(invalid_pointer_identity_error(pointer));
-                        }
-                        Some(normalize.gen)
-                    }
-                    None => None,
-                };
-                (false, entry_gen)
-            }
-            // Tree object gone (shallow), OR the commit object itself gone (R16-1, the
-            // `None` arm) — both resolve the chunk directly, with gen unbound.
-            Some(Err(error)) if is_store_not_found(&error) => (true, None),
-            Some(Err(error)) => return Err(error),
-            None => (true, None),
-        };
+                    Some(normalize.gen)
+                }
+                None => None,
+            };
+            (false, entry_gen)
+        }
+        // Tree object gone (genuine shallow: commit present, tree GC'd) — resolve the
+        // chunk directly, with gen unbound.
+        Err(error) if is_store_not_found(&error) => (true, None),
+        Err(error) => return Err(error),
+    };
 
     // 08 §3.1 step 5: purged raw_hash carrying a tombstone -> tombstone response.
     if let Some(tombstone) = read_tombstone(&target, &pointer.raw_hash)? {
@@ -4952,6 +5127,31 @@ fn invalid_pointer_identity_error(pointer: &EvidencePointer) -> KcsError {
         json!({
             "raw_hash": pointer.raw_hash,
             "tool_profile_hash": pointer.tool_profile_hash,
+            "chunk_hash": pointer.chunk_hash,
+        }),
+        ExitCode::PermanentFailure,
+    )
+}
+
+/// R17-1: the pointer's `commit` object cannot be resolved (missing / never existed
+/// — e.g. a forged `commit` hash on a `view`/`open` operand). Distinct from a genuine
+/// shallow commit (commit present, tree GC'd), whose resolution docs/05 §3.6
+/// guarantees never fails; that guarantee is limited to commit *existence* (docs/08
+/// §3.2:150) and does not extend to a missing commit. A pointer whose commit does not
+/// exist cannot bind the raw_hash to a snapshot tree or the chunk to a normalization
+/// generation (N5), so it is rejected as an invalid pointer rather than served
+/// best-effort. Same code / exit as `invalid_pointer_identity_error`
+/// (EVIDENCE-POINTER-INVALID, exit 4): both mean "this pointer does not name a
+/// resolvable, self-consistent piece of evidence".
+fn unresolvable_commit_pointer_error(pointer: &EvidencePointer) -> KcsError {
+    KcsError::new(
+        "KCS-E-EVIDENCE-POINTER-INVALID-001",
+        "evidence pointer references a commit object that does not exist (missing or forged); \
+         a resolvable commit is required to bind the raw_hash to its snapshot tree and the chunk \
+         to its normalization generation",
+        json!({
+            "commit": pointer.commit,
+            "raw_hash": pointer.raw_hash,
             "chunk_hash": pointer.chunk_hash,
         }),
         ExitCode::PermanentFailure,
@@ -5706,6 +5906,11 @@ fn execute_pending_markdownize_tasks(
             previous_failure_kind,
             RetryErrorKind::RateLimit | RetryErrorKind::QuotaExceeded
         );
+        // R17-3: the exact amount of a FRESH reservation made this pass (None on the
+        // RateLimit/Quota skip, which reuses the prior reservation). Stamped onto the
+        // task below so that, if this task later fails RateLimit/Quota and is then
+        // superseded by an edit, the supersede can reclaim precisely this phantom.
+        let mut fresh_reserved: Option<f64> = None;
         let charge = if reservation_already_covers_resend {
             // The previous attempt's reservation stands in for this send's charge.
             ChargeOutcome::Charged
@@ -5734,7 +5939,7 @@ fn execute_pending_markdownize_tasks(
             // (the previous post-execution append recomputed the same value), so the
             // reserved row is identical. The adapter call runs outside the lock; a
             // failure keeps the reservation (see helper docs).
-            charge_cost_ledger_under_lock(
+            let outcome = charge_cost_ledger_under_lock(
                 &cost_ledger,
                 cost_ledger_lock_path(),
                 &budget_caps,
@@ -5742,7 +5947,15 @@ fn execute_pending_markdownize_tasks(
                 adapter_kind_budget_key(online_profile.adapter_kind),
                 &estimate,
                 override_budget,
-            )?
+            )?;
+            // R17-3: record the fresh reservation amount ONLY when it actually landed
+            // (a BudgetExceeded outcome appended nothing, so there is no phantom to
+            // reclaim). Equals the exact `estimated_usd` row so the future reclaim
+            // cancels it precisely.
+            if matches!(outcome, ChargeOutcome::Charged) {
+                fresh_reserved = Some(estimated_usd);
+            }
+            outcome
         };
         if matches!(charge, ChargeOutcome::BudgetExceeded) {
             store
@@ -5773,6 +5986,16 @@ fn execute_pending_markdownize_tasks(
                     // recorded failure the reason is re-set below, so the skip gate still
                     // sees it for a normal (non-crash) retry.
                     candidate.fallback_reason = None;
+                    // R17-3: stamp the live reservation (amount + its ledger month) so a
+                    // later supersede can reclaim this phantom if the send fails
+                    // RateLimit/Quota. Only overwrite on a FRESH charge; the RateLimit/
+                    // Quota skip keeps the original stamp (the single reservation the
+                    // R16-7 skip gate still relies on). Persisted here, alongside the
+                    // Running flip, so it survives the subsequent Failed transition.
+                    if let Some(usd) = fresh_reserved {
+                        candidate.reserved_usd = Some(usd);
+                        candidate.reserved_month = Some(month.clone());
+                    }
                     true
                 } else {
                     false
@@ -6819,13 +7042,29 @@ fn run_embedding_enrichment(
     // back in ONE `update_matching` after the loop, instead of a full all()+
     // replace_all per 32-chunk batch. The per-batch form cost O(T) each × T/32
     // batches = O(T²/32), turning a few-thousand-chunk initial embedding into a
-    // multi-minute hang. Crash safety is unchanged: `send_embed_batch` writes the
-    // embeddings row + chunk_vec and F8 reserves the ledger charge, both BEFORE this
-    // deferred completion — so a crash before the final write just re-drives the
-    // chunk through the free content-addressed reuse path (§5.5: text_hash hit → no
-    // API call, no re-charge). No unrecorded completion is double-billed, and the
-    // per-chunk map keeps a reuse "done" from being contaminated by a sibling send
-    // "failed" (L6). R11-2: the loop also tallies paused / auth / failed outcomes.
+    // multi-minute hang.
+    //
+    // R17-7: the reuse-based crash safety here is precise about WHICH crash window it
+    // covers. A crash AFTER `send_embed_batch` COMPLETES but before this deferred
+    // write-back is fully absorbed: `send_embed_batch` already wrote the embeddings
+    // row + chunk_vec and F8 already reserved the charge, so re-driving the chunk hits
+    // the free content-addressed reuse path (§5.5: text_hash hit → no API call, no
+    // re-charge), no unrecorded completion is double-billed, and the per-chunk map
+    // keeps a reuse "done" from being contaminated by a sibling send "failed" (L6).
+    // This does NOT extend to a crash INTERNAL to `send_embed_batch`, in the narrow
+    // window AFTER the API bills but BEFORE the embeddings row / chunk_vec commit:
+    // there the embeddings are unwritten, so §5.5 reuse misses and the chunk re-enters
+    // `to_send`, yet its stale RateLimit/Quota `fallback_reason` makes
+    // `reservation_covers_resend` skip the re-charge — so the resend double-bills the
+    // API while the reservation stays at 1× = a BOUNDED per-chunk under-charge. That is
+    // exactly the triple-fault R16 DEFERRED (window = bill→chunk_vec commit; damage =
+    // one chunk's cost), left standing on purpose: closing it would need a per-chunk
+    // pre-send persisted marker, re-introducing R11-5's O(T²) full-tasks.jsonl write.
+    // The asymmetry with markdownize is deliberate: markdownize persists status=Running
+    // + `fallback_reason=None` BEFORE its send, so a crash makes it re-reserve; embedding
+    // keeps the per-batch write-back (O(T²) avoidance) and instead absorbs the NORMAL
+    // (post-completion) crash via content-addressed reuse. R11-2: the loop also tallies
+    // paused / auth / failed outcomes.
     let mut transitions: BTreeMap<String, EmbeddingTransition> = BTreeMap::new();
 
     // R16-7: embedding tasks whose PREVIOUS recorded failure was a non-billable
@@ -7428,6 +7667,8 @@ fn hold_secret_embedding_tasks(
             heartbeat_at: None,
             fallback_reason: Some(SECRETS_TIER_B_HOLD.to_owned()),
             created_at: now.to_owned(),
+            reserved_usd: None,
+            reserved_month: None,
         };
         task_store.append(&task).map_err(pipeline_to_kcs)?;
     }
@@ -7478,6 +7719,8 @@ fn enqueue_embedding_tasks(
             heartbeat_at: None,
             fallback_reason: Some(reason.to_owned()),
             created_at: now.to_owned(),
+            reserved_usd: None,
+            reserved_month: None,
         };
         task_store.append(&task).map_err(pipeline_to_kcs)?;
     }
@@ -8434,6 +8677,8 @@ fn task_descriptor(
         heartbeat_at: None,
         fallback_reason: fallback_reason.map(str::to_owned),
         created_at: created_at.to_owned(),
+        reserved_usd: None,
+        reserved_month: None,
     }
 }
 
@@ -8808,33 +9053,92 @@ fn enqueue_online_placeholder_task(
     }
     let online_profile = online_markdownize_profile();
     let output_ref = online_output_ref(&online_profile.adapter_id);
-    // R15-2: supersede any still-Pending/Paused online markdownize task for THIS path
-    // whose `input_hash` differs from the current content. The file was edited after
-    // that task was enqueued, so it is stale: `batch resume` would R14-2-supersede it
-    // at send time (adapter never called) but only AFTER the F8 pre-send charge already
-    // landed (the phantom charge), and left unretired these stale tasks accumulate and
-    // eat the per-adapter markdownize cap, falsely pausing the current (valid) task.
-    // Retire them here (non-retryable `invalid_input`; the state machine has no
-    // "superseded" state and the recovery is this fresh re-index, not a retry). Runs
-    // before the idempotency check so it fires even when a same-hash task also exists.
+    // R15-2: supersede any stale online markdownize task for THIS path whose
+    // `input_hash` differs from the current content. The file was edited after that
+    // task was enqueued, so it is stale: `batch resume` would R14-2-supersede a
+    // Pending/Paused one at send time (adapter never called) but only AFTER the F8
+    // pre-send charge already landed (the phantom charge), and left unretired these
+    // stale tasks accumulate and eat the per-adapter markdownize cap, falsely pausing
+    // the current (valid) task. Retire them here (non-retryable `invalid_input`; the
+    // state machine has no "superseded" state and the recovery is this fresh re-index,
+    // not a retry). Runs before the idempotency check so it fires even when a same-hash
+    // task also exists.
+    //
+    // R17-3: extend the retirement to a RETRYABLE `Failed` task (gated by
+    // `task_retry_allowed`, so a permanently-failed task is left alone). A task that
+    // FAILED RateLimit/Quota already sent and KEPT its F8 reservation, which R16-7
+    // established is a phantom (those errors are refused before the backend bills). The
+    // original R15-2 retired only Pending/Paused, so this Failed(rate_limit) phantom
+    // lingered after an edit and budget-paused the new task (R15-2 × R16-7 confluence).
+    // When we retire such a task we also RECLAIM its phantom: a NON-billable
+    // (RateLimit/Quota) reservation is canceled by appending its exact stamped
+    // (usd, month) to the sibling reclaim ledger — F3-compatible (no negative row in
+    // the charge ledger; the positive reclaim is netted out in
+    // `budget_remaining_for_adapter`). NetworkError reservations are deliberately NOT
+    // reclaimed: a NetworkError send may have been billed server-side, so keeping the
+    // reservation preserves the cap-safe invariant (guarding the R15-5 silent-cap-
+    // bypass, the opposite failure) — the same asymmetry R16-7's re-reservation gate
+    // maintains. The reclaim is recorded AFTER the retirement is durably written (the
+    // flip clears the stamp and makes the task non-retryable, so it can never match
+    // again): if the reclaim-append then fails we leave the phantom conservatively in
+    // place rather than risk double-reclaiming.
+    let markdown_adapter_kind = adapter_kind_budget_key(online_profile.adapter_kind);
+    // Reclaim under the SAME scope_id source the batch send path reserves with
+    // (`repo.scope_id_for_adapter()`), so the reclaim cancels the phantom at the
+    // folder-scoped totals too, not just the device total.
+    let reservation_scope_id = repo.scope_id_for_adapter();
+    let mut reclaims: Vec<MonthlyCostLedgerEntry> = Vec::new();
     task_store
         .update_matching(|task| {
-            if task.task_type == TaskType::Markdownize
+            let stale = task.task_type == TaskType::Markdownize
                 && task.output_ref == output_ref
-                && matches!(task.status, TaskStatus::Pending | TaskStatus::Paused)
                 && task.input_path == candidate.input_path
                 && task.input_hash != raw_hash
-            {
-                task.status = TaskStatus::Failed;
-                task.fallback_reason = Some(retry_reason(RetryErrorKind::InvalidInput).to_owned());
-                task.next_retry_at = None;
-                task.heartbeat_at = None;
-                true
-            } else {
-                false
+                && (matches!(task.status, TaskStatus::Pending | TaskStatus::Paused)
+                    || (task.status == TaskStatus::Failed && task_retry_allowed(task)));
+            if !stale {
+                return false;
             }
+            // R17-3: reclaim ONLY a non-billable (RateLimit/Quota) phantom, and only
+            // when the exact reservation was stamped (usd + its ledger month). A billed
+            // or NetworkError reservation is left standing in the charge ledger.
+            if matches!(
+                retry_kind_from_reason(task.fallback_reason.as_deref()),
+                RetryErrorKind::RateLimit | RetryErrorKind::QuotaExceeded
+            ) {
+                if let (Some(usd), Some(month)) = (task.reserved_usd, task.reserved_month.clone()) {
+                    reclaims.push(MonthlyCostLedgerEntry {
+                        month,
+                        scope_id: reservation_scope_id.clone(),
+                        adapter_kind: markdown_adapter_kind.to_owned(),
+                        usd,
+                    });
+                }
+            }
+            task.status = TaskStatus::Failed;
+            task.fallback_reason = Some(retry_reason(RetryErrorKind::InvalidInput).to_owned());
+            task.next_retry_at = None;
+            task.heartbeat_at = None;
+            // Clear the reservation stamp on every retirement (reclaimed, or kept for
+            // NetworkError) so a superseded task can never be reclaimed a second time —
+            // belt-and-braces atop the non-retryable `invalid_input` status change.
+            task.reserved_usd = None;
+            task.reserved_month = None;
+            true
         })
         .map_err(pipeline_to_kcs)?;
+    // Record the reclaims positively in the sibling reclaim ledger AFTER the durable
+    // retirement above. F3-safe: the charge ledger is never given a negative row; each
+    // reclaim row is positive and is subtracted in `budget_remaining_for_adapter`,
+    // clamped at 0 there.
+    if !reclaims.is_empty() {
+        let reclaim_ledger = cost_ledger.reclaim_ledger();
+        for entry in &reclaims {
+            reclaim_ledger
+                .append_monthly(entry)
+                .map_err(pipeline_to_kcs)?;
+        }
+    }
     // Idempotency (Step2c I1, 04 §5.5): never enqueue a second online task for an
     // identity `(input_path, input_hash)` that already has an online task in any
     // live lifecycle state. Without the completed-state check, every unchanged
@@ -8950,18 +9254,43 @@ fn budget_remaining_for_adapter(
     scope_id: &str,
     adapter_kind: &str,
 ) -> Result<(f64, Option<f64>)> {
-    let device_spent = cost_ledger
+    // R17-3: net out reclaimed phantom reservations. A stale online task whose F8
+    // reservation was a non-billable rejection (RateLimit / Quota) had that amount
+    // recorded in the sibling reclaim ledger when it was superseded; subtract it so
+    // the phantom no longer eats the (per-adapter or monthly) cap. Positive-only
+    // reclaim rows keep the charge ledger F3-clean; the `.max(0.0)` clamp is pure
+    // defense against a corrupt reclaim ledger — in correct operation reclaimed
+    // never exceeds the phantom charges it cancels, so `spent >= real spend` holds
+    // (never fail-open).
+    let reclaim_ledger = cost_ledger.reclaim_ledger();
+    let device_spent = (cost_ledger
         .monthly_total(month, None)
-        .map_err(pipeline_to_kcs)?;
-    let folder_spent = cost_ledger
+        .map_err(pipeline_to_kcs)?
+        - reclaim_ledger
+            .monthly_total(month, None)
+            .map_err(pipeline_to_kcs)?)
+    .max(0.0);
+    let folder_spent = (cost_ledger
         .monthly_total(month, Some(scope_id))
-        .map_err(pipeline_to_kcs)?;
-    let device_adapter_spent = cost_ledger
+        .map_err(pipeline_to_kcs)?
+        - reclaim_ledger
+            .monthly_total(month, Some(scope_id))
+            .map_err(pipeline_to_kcs)?)
+    .max(0.0);
+    let device_adapter_spent = (cost_ledger
         .monthly_total_for_adapter(month, None, Some(adapter_kind))
-        .map_err(pipeline_to_kcs)?;
-    let folder_adapter_spent = cost_ledger
+        .map_err(pipeline_to_kcs)?
+        - reclaim_ledger
+            .monthly_total_for_adapter(month, None, Some(adapter_kind))
+            .map_err(pipeline_to_kcs)?)
+    .max(0.0);
+    let folder_adapter_spent = (cost_ledger
         .monthly_total_for_adapter(month, Some(scope_id), Some(adapter_kind))
-        .map_err(pipeline_to_kcs)?;
+        .map_err(pipeline_to_kcs)?
+        - reclaim_ledger
+            .monthly_total_for_adapter(month, Some(scope_id), Some(adapter_kind))
+            .map_err(pipeline_to_kcs)?)
+    .max(0.0);
     let mut device_remaining = budget_caps.device_monthly_usd_cap - device_spent;
     if let Some(adapter_cap) = budget_caps.device_per_adapter.get(adapter_kind) {
         device_remaining = device_remaining.min(adapter_cap - device_adapter_spent);
@@ -10481,6 +10810,8 @@ mod tests {
             heartbeat_at: Some("2020-01-01T00:00:00Z".to_owned()),
             fallback_reason: Some("ready_for_online_adapter".to_owned()),
             created_at: "2026-07-04T00:00:00Z".to_owned(),
+            reserved_usd: None,
+            reserved_month: None,
         };
         store.append(&task).unwrap();
         let reclaimed = reclaim_orphaned_running_tasks(&store).unwrap();

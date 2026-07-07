@@ -3979,6 +3979,28 @@ fn first_normalized_unit_json(root: &Path) -> std::path::PathBuf {
     panic!("normalized unit json not found under {}", root.display());
 }
 
+// R17-2/R17-6: locate a normalized-instance `manifest.json` (one per document per gen).
+fn first_manifest_json(root: &Path) -> std::path::PathBuf {
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(path) = stack.pop() {
+        for entry in fs::read_dir(&path).unwrap() {
+            let entry = entry.unwrap();
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            if path.file_name().and_then(|name| name.to_str()) == Some("manifest.json") {
+                return path;
+            }
+        }
+    }
+    panic!(
+        "normalized instance manifest not found under {}",
+        root.display()
+    );
+}
+
 /// R9-5: a normalized gen dir polluted with crash/OS junk — a torn `.tmp-*` left
 /// by a killed atomic writer and a `.DS_Store` — must not brick `reindex`. Before
 /// the fix, `copy_normalized_instance_gen` read every non-manifest entry as a unit
@@ -4741,10 +4763,15 @@ fn head_commit(kcs_dir: &Path) -> String {
 
 // R16-1: a missing HEAD *commit* object (not merely its tree) is the same shallow
 // corruption class R13-4/R15-4 defend against, but every `read_commit` call site was
-// an unconditional `?`. Pure reads (status/log/search/view) must degrade to exit 0;
+// an unconditional `?`. Pure reads (status/log/search) must degrade to exit 0;
 // writes (snapshot/index/reindex/repair) must reject with a clear COMMIT-SHALLOW;
 // restoring the object heals everything. Before the fix all of these bricked exit 4
 // on a raw KCS-E-STORE-NOT-FOUND-001.
+// R17-1: `view`/`open` are the Evidence-*authenticity* entry point, NOT pure reads —
+// a missing commit object there is rejected as EVIDENCE-POINTER-INVALID (exit 4), not
+// degraded, because a forged/absent commit must not bypass the tree-membership + N5
+// gen checks. See r17_1_* below; this test asserts the read-degrade + write-reject
+// halves and the (now rejecting) view.
 #[test]
 fn r16_1_missing_commit_object_degrades_reads_and_rejects_writes() {
     let dir = indexed_scope();
@@ -4782,12 +4809,20 @@ fn r16_1_missing_commit_object_degrades_reads_and_rejects_writes() {
         !search["results"].as_array().unwrap().is_empty(),
         "search must degrade to cached results, not brick: {search}"
     );
-    let viewed = json_success(&dir, &["view", &ptr]);
+    // R17-1: view/open are the Evidence-authenticity gate, so a missing commit object
+    // is REJECTED (EVIDENCE-POINTER-INVALID exit 4), not degraded like the pure reads
+    // above — a missing/forged commit must not skip the tree-membership + N5 gen
+    // checks. (Before R17-1 this returned commit_shallow:true exit 0.)
+    let view_err = json_failure(&dir, &["view", &ptr], 4);
     assert_eq!(
-        viewed["commit_shallow"], true,
-        "view must resolve directly on the missing commit: {viewed}"
+        view_err["error_code"], "KCS-E-EVIDENCE-POINTER-INVALID-001",
+        "view must reject a missing commit object, not degrade: {view_err}"
     );
-    assert!(viewed["text"].as_str().unwrap().contains("トークン TTL"));
+    let open_err = json_failure(&dir, &["open", &ptr], 4);
+    assert_eq!(
+        open_err["error_code"], "KCS-E-EVIDENCE-POINTER-INVALID-001",
+        "open must reject a missing commit object, not degrade: {open_err}"
+    );
 
     // (b) writes reject with COMMIT-SHALLOW (exit 1), not a raw STORE-NOT-FOUND. Edit a
     // file first so `index`'s unchanged-scope short-circuit still reaches the snapshot.
@@ -4819,6 +4854,101 @@ fn r16_1_missing_commit_object_degrades_reads_and_rejects_writes() {
     let log2 = json_success(&dir, &["log"]);
     assert_eq!(log2["truncated"], false);
     assert!(!log2["commits"].as_array().unwrap().is_empty());
+}
+
+// R17-1: `view`/`open` are the Evidence-authenticity entry point. A pointer whose
+// `commit` is a FORGED hash (a well-formed sha256 naming no object) must be rejected
+// as EVIDENCE-POINTER-INVALID (exit 4), NOT resolved best-effort as if it were a
+// shallow commit — otherwise the tree-membership + N5 gen checks are both skipped and
+// forged evidence resolves. A GENUINE shallow commit (commit present, tree GC'd) must
+// still resolve directly (R17-1 narrows the best-effort path, it does not remove it).
+#[test]
+fn r17_1_forged_commit_pointer_rejected_while_true_shallow_resolves() {
+    // (a) forged commit hash → view/open reject.
+    let dir = indexed_scope();
+    let search = json_success(&dir, &["search", "トークン TTL 3600"]);
+    let genuine = first_result(&search)["evidence_pointer"].clone();
+    // Control: the untampered pointer resolves, non-shallow.
+    let ok = json_success(&dir, &["view", &genuine.to_string()]);
+    assert_eq!(ok["commit_shallow"], false, "control must resolve: {ok}");
+
+    let forged_commit = format!("sha256:{}", "0".repeat(64));
+    let mut forged = genuine.clone();
+    forged["commit"] = serde_json::json!(forged_commit);
+    let view_err = json_failure(&dir, &["view", &forged.to_string()], 4);
+    assert_eq!(
+        view_err["error_code"], "KCS-E-EVIDENCE-POINTER-INVALID-001",
+        "a forged commit hash must be rejected by view: {view_err}"
+    );
+    let open_err = json_failure(&dir, &["open", &forged.to_string()], 4);
+    assert_eq!(
+        open_err["error_code"], "KCS-E-EVIDENCE-POINTER-INVALID-001",
+        "a forged commit hash must be rejected by open: {open_err}"
+    );
+
+    // (b) genuine shallow commit (tree object GC'd, commit present) → still resolves
+    // directly, commit_shallow:true exit 0. Fresh scope so (a) cannot mask a regression.
+    let dir2 = indexed_scope();
+    let search2 = json_success(&dir2, &["search", "トークン TTL 3600"]);
+    let pointer2 = first_result(&search2)["evidence_pointer"].clone();
+    let kcs_dir2 = dir2.path().join(".kcs");
+    let commit2 = pointer2["commit"].as_str().unwrap();
+    let commit_obj: Value =
+        serde_json::from_slice(&fs::read(object_path(&kcs_dir2, "commits", commit2)).unwrap())
+            .unwrap();
+    let tree2 = commit_obj["tree"].as_str().unwrap();
+    fs::remove_file(object_path(&kcs_dir2, "trees", tree2)).unwrap();
+    let viewed = json_success(&dir2, &["view", &pointer2.to_string()]);
+    assert_eq!(
+        viewed["commit_shallow"], true,
+        "a genuine shallow commit must still resolve directly: {viewed}"
+    );
+    assert!(viewed["text"].as_str().unwrap().contains("トークン TTL"));
+    let opened = json_success(&dir2, &["open", &pointer2.to_string()]);
+    assert_eq!(
+        opened["commit_shallow"], true,
+        "genuine shallow open must resolve: {opened}"
+    );
+}
+
+// R17-1 / N5 contrast (the core harm): after `reindex --force` advances the
+// normalization generation, a pointer that keeps a REAL old commit but splices in a
+// gen-1 chunk_hash is rejected by the N5 gen binding (Attack A). Attack B — the SAME
+// gen-1 chunk under a FORGED commit — must be rejected TOO (identically), instead of
+// resolving best-effort with the gen check skipped. The only difference between the
+// two attacks is the truthful-vs-forged commit field.
+#[test]
+fn r17_1_n5_forged_commit_cannot_bypass_generation_binding() {
+    let dir = indexed_scope();
+    let before = json_success(&dir, &["search", "トークン TTL 3600"]);
+    let old_pointer = first_result(&before)["evidence_pointer"].clone();
+    json_success(&dir, &["reindex", "--force", "--yes"]);
+    let after = json_success(&dir, &["search", "トークン TTL 3600"]);
+    let new_chunk_hash = first_result(&after)["evidence_pointer"]["chunk_hash"].clone();
+    assert_ne!(
+        old_pointer["chunk_hash"], new_chunk_hash,
+        "reindex --force must produce a new-generation chunk_hash"
+    );
+
+    // Attack A: real old commit + gen-1 chunk → rejected by the N5 gen binding.
+    let mut attack_a = old_pointer.clone();
+    attack_a["chunk_hash"] = new_chunk_hash;
+    let err_a = json_failure(&dir, &["view", &attack_a.to_string()], 4);
+    assert_eq!(
+        err_a["error_code"], "KCS-E-EVIDENCE-POINTER-INVALID-001",
+        "old commit + new-gen chunk must be rejected (N5): {err_a}"
+    );
+
+    // Attack B: forged commit + gen-1 chunk → BEFORE R17-1 this resolved exit 0
+    // (commit_shallow:true), because the missing commit collapsed onto the shallow
+    // path and skipped the gen binding. Now it is rejected identically to Attack A.
+    let mut attack_b = attack_a.clone();
+    attack_b["commit"] = serde_json::json!(format!("sha256:{}", "0".repeat(64)));
+    let err_b = json_failure(&dir, &["view", &attack_b.to_string()], 4);
+    assert_eq!(
+        err_b["error_code"], "KCS-E-EVIDENCE-POINTER-INVALID-001",
+        "forged commit + new-gen chunk must NOT bypass the gen binding (R17-1): {err_b}"
+    );
 }
 
 // R16-1: `log` truncates at a missing ANCESTOR commit and returns the healthy prefix
@@ -5096,6 +5226,336 @@ fn r16_5_diff_with_shallow_side_names_the_side() {
     assert_eq!(err_a["context"]["side"], "a", "{err_a}");
 }
 
+// R17-5: `resolve_commit` (hash-literal + tag-name branches) and `tag`'s implicit-HEAD
+// verification read were the 3 read_commit sites R16-1's COMMIT-SHALLOW sweep missed.
+// A shallow commit (its whole commit object gone, not merely its tree — the case that
+// fails INSIDE resolve_commit, before diff_side_tree's R16-5 absorption) reached via a
+// hash literal, a tag name, or the implicit HEAD must fold into KCS-E-COMMIT-SHALLOW-001
+// (exit 1) — the same contract the `HEAD` *string* operand already reached — not
+// escape as a raw KCS-E-STORE-NOT-FOUND-001 (exit 4).
+#[test]
+fn r17_5_shallow_commit_via_hash_tag_and_implicit_head_folds_to_commit_shallow() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("d.md"), "# D\n\n## S\nv1 body\n").unwrap();
+    kcs(&dir, &["init"]).assert().success();
+    let c1 = json_success(&dir, &["snapshot", "-m", "first"]);
+    let c1_hash = c1["commit_hash"].as_str().unwrap().to_owned();
+    // A tag pointing at C1, created while C1 is healthy (control + tag-name coverage).
+    json_success(&dir, &["tag", "tagc1", &c1_hash]);
+    fs::write(dir.path().join("d.md"), "# D\n\n## S\nv2 body\n").unwrap();
+    let c2 = json_success(&dir, &["snapshot", "-m", "second"]);
+    let c2_hash = c2["commit_hash"].as_str().unwrap().to_owned();
+
+    // (control) a healthy diff of the two hash literals works.
+    let ok = json_success(&dir, &["diff", &c1_hash, &c2_hash]);
+    assert!(!ok["changes"].as_array().unwrap().is_empty());
+
+    // Make C1 shallow by deleting its whole COMMIT object (not merely its tree).
+    let kcs_dir = dir.path().join(".kcs");
+    fs::remove_file(object_path(&kcs_dir, "commits", &c1_hash)).unwrap();
+
+    // hash literal as diff side a, then side b (resolve_commit hash branch, scope.rs:689).
+    let err_a = json_failure(&dir, &["diff", &c1_hash, "HEAD"], 1);
+    assert_eq!(err_a["error_code"], "KCS-E-COMMIT-SHALLOW-001", "{err_a}");
+    let err_b = json_failure(&dir, &["diff", "HEAD", &c1_hash], 1);
+    assert_eq!(err_b["error_code"], "KCS-E-COMMIT-SHALLOW-001", "{err_b}");
+    // tag creation with a shallow hash-literal operand (tag -> resolve_commit).
+    let err_tag = json_failure(&dir, &["tag", "newtag", &c1_hash], 1);
+    assert_eq!(
+        err_tag["error_code"], "KCS-E-COMMIT-SHALLOW-001",
+        "{err_tag}"
+    );
+    // tag-NAME target now shallow (resolve_commit tag-name branch, scope.rs:696).
+    let err_tagname = json_failure(&dir, &["diff", "tagc1", "HEAD"], 1);
+    assert_eq!(
+        err_tagname["error_code"], "KCS-E-COMMIT-SHALLOW-001",
+        "{err_tagname}"
+    );
+
+    // Implicit HEAD: make HEAD (C2) shallow too, then `tag` with no operand resolves
+    // the implicit HEAD via head_commit_hash() and verifies it (scope.rs:662).
+    fs::remove_file(object_path(&kcs_dir, "commits", &c2_hash)).unwrap();
+    let err_head = json_failure(&dir, &["tag", "headtag"], 1);
+    assert_eq!(
+        err_head["error_code"], "KCS-E-COMMIT-SHALLOW-001",
+        "{err_head}"
+    );
+}
+
+// R17-2: `reindex --force` must not let ONE document's corrupt normalized unit abort the
+// whole scope's re-normalization (docs/10 §7.2). R16-4 gave `rebuild_step3_index` this
+// skip-continue resilience, but the pre-rebuild copy loop in `run_reindex` never inherited
+// it — a single STORE-CORRUPT unit killed the reindex (exit 4) and the healthy documents
+// were never re-normalized, while `repair`'s guidance still pointed users AT this broken
+// command. Now the corrupt document is skipped (its previous gen kept) and reported under
+// skipped_units; the healthy document is re-normalized and the scope stays searchable.
+#[test]
+fn r17_2_reindex_force_skips_corrupt_unit_and_renormalizes_healthy() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(
+        dir.path().join("healthy.md"),
+        "# Healthy\n\n## Body\nhealthytoken alpha content here\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.path().join("corrupt.md"),
+        "# Corrupt\n\n## Body\ncorrupttoken beta content here\n",
+    )
+    .unwrap();
+    kcs(&dir, &["init"]).assert().success();
+    json_success(&dir, &["index", "--yes"]);
+
+    // Corrupt ONE document's normalized-instance manifest → copy_normalized_instance_gen
+    // raises KCS-E-STORE-CORRUPT-001 for that raw_hash during re-normalization.
+    let units_root = dir.path().join(".kcs/objects/normalized_units");
+    let manifest = first_manifest_json(&units_root);
+    let corrupt_raw_hash = {
+        let value: Value = serde_json::from_slice(&fs::read(&manifest).unwrap()).unwrap();
+        value["raw_hash"].as_str().unwrap().to_owned()
+    };
+    fs::write(&manifest, r#"{"torn":"#).unwrap();
+
+    // Before the fix: exit 4 (KCS-E-STORE-CORRUPT-001), no re-normalization at all.
+    let out = json_success(&dir, &["reindex", "--force", "--yes"]);
+    // The healthy document IS re-normalized (the loop no longer dies on the corrupt one).
+    assert_eq!(
+        out["reindexed_files"].as_u64().unwrap(),
+        1,
+        "the healthy document is re-normalized: {out}"
+    );
+    let skipped = out["skipped_units"].as_array().unwrap();
+    assert_eq!(
+        skipped.len(),
+        1,
+        "exactly the corrupt document is skipped (deduped across both phases): {out}"
+    );
+    assert_eq!(skipped[0]["reason"], "KCS-E-STORE-CORRUPT-001");
+    assert_eq!(
+        skipped[0]["raw_hash"], corrupt_raw_hash,
+        "the skip names the corrupted document: {out}"
+    );
+    assert!(
+        out["skipped_units_guidance"].as_str().is_some(),
+        "the skip is loudly disclosed: {out}"
+    );
+    // The scope is not bricked — the healthy document still searches after the reindex.
+    let search = json_success(&dir, &["search", "healthytoken"]);
+    assert!(
+        !search["results"].as_array().unwrap().is_empty(),
+        "healthy document searchable after reindex: {search}"
+    );
+}
+
+// R17-4: when EVERY searched scope is excluded for a store-corruption class the search
+// must not fall through to the bare KCS-E-SEARCH-SCOPE-ALL-FAILED-001 (exit 4, no
+// guidance) — that left an operator/agent with no recovery path, unlike the
+// index_missing/index_corrupt case which points at `repair`. A store_corrupt (tampered
+// HEAD commit object) all-scope failure keeps the docs-registered
+// KCS-E-SEARCH-SCOPE-ALL-FAILED-001 code but now carries class-specific recovery
+// guidance in `context.recovery` + the message. Exit stays 4: `repair --rebuild-db`
+// rebuilds the index FROM the store, so it does not heal a corrupt commit object.
+#[test]
+fn r17_4_store_corrupt_all_scopes_returns_recovery_guidance() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(
+        dir.path().join("a.md"),
+        "# A\n\n## Sec\nalphacorrupt token\n",
+    )
+    .unwrap();
+    kcs(&dir, &["init"]).assert().success();
+    json_success(&dir, &["index", "--yes"]);
+
+    // Corrupt the single scope's HEAD commit object (garbage → content-hash mismatch →
+    // STORE-CORRUPT → Excluded("store_corrupt")); with no healthy scope, every searched
+    // scope failed for the store-corruption class.
+    let kcs_dir = dir.path().join(".kcs");
+    let head = head_commit(&kcs_dir);
+    fs::write(
+        object_path(&kcs_dir, "commits", &head),
+        b"this is not a valid commit object",
+    )
+    .unwrap();
+
+    let err = json_failure(&dir, &["search", "alphacorrupt"], 4);
+    assert_eq!(
+        err["error_code"], "KCS-E-SEARCH-SCOPE-ALL-FAILED-001",
+        "store corruption keeps the docs-registered all-failed code (no new code): {err}"
+    );
+    // Distinguished from the BARE all-failed not by a new code but by carrying
+    // class-specific `context.recovery` guidance (asserted below).
+    let recovery = err["context"]["recovery"].as_array().unwrap();
+    assert!(
+        recovery
+            .iter()
+            .any(|line| line.as_str().unwrap().contains("store_corrupt")),
+        "store_corrupt-specific recovery guidance is present: {err}"
+    );
+    assert!(
+        err["message"]
+            .as_str()
+            .unwrap()
+            .contains("repair --rebuild-db"),
+        "guidance names the recovery command: {err}"
+    );
+}
+
+// R17-4: the snapshot_shallow class (R16-3: a bare-snapshot HEAD whose tree object was
+// discarded, no cached rows) gets its OWN recovery guidance — deliberately NOT the
+// index_missing "run repair" push, because repair cannot restore a discarded object.
+#[test]
+fn r17_4_snapshot_shallow_all_scopes_returns_recovery_guidance() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(
+        dir.path().join("a.md"),
+        "# A\n\n## Sec\nalphashallow token\n",
+    )
+    .unwrap();
+    kcs(&dir, &["init"]).assert().success();
+    json_success(&dir, &["index", "--yes"]);
+
+    // Advance HEAD with a bare snapshot (tree_entries NOT projected) then discard its
+    // tree object → the fresh search sees ShallowNoRows → Excluded("snapshot_shallow").
+    fs::write(
+        dir.path().join("a.md"),
+        "# A\n\n## Sec\nalphashallow token v2\n",
+    )
+    .unwrap();
+    let snap = json_success(&dir, &["snapshot", "-m", "advance"]);
+    let c2 = snap["commit_hash"].as_str().unwrap().to_owned();
+    let kcs_dir = dir.path().join(".kcs");
+    let c2_obj: Value =
+        serde_json::from_slice(&fs::read(object_path(&kcs_dir, "commits", &c2)).unwrap()).unwrap();
+    fs::remove_file(object_path(
+        &kcs_dir,
+        "trees",
+        c2_obj["tree"].as_str().unwrap(),
+    ))
+    .unwrap();
+
+    let err = json_failure(&dir, &["search", "alphashallow"], 4);
+    assert_eq!(
+        err["error_code"], "KCS-E-SEARCH-SCOPE-ALL-FAILED-001",
+        "{err}"
+    );
+    let recovery = err["context"]["recovery"].as_array().unwrap();
+    assert!(
+        recovery
+            .iter()
+            .any(|line| line.as_str().unwrap().contains("snapshot_shallow")),
+        "snapshot_shallow-specific recovery guidance is present: {err}"
+    );
+    assert!(
+        err["message"]
+            .as_str()
+            .unwrap()
+            .contains("re-run `kcs index`")
+            || err["message"]
+                .as_str()
+                .unwrap()
+                .contains("restore the discarded"),
+        "guidance names object restore / re-index (NOT `repair --rebuild-db` alone): {err}"
+    );
+}
+
+// R17-6: a document whose normalized unit is corrupt but whose persisted chunks survive
+// in chunks.jsonl is STILL searchable — `build_sqlite_index_at` re-serves the cached
+// chunks. Its skipped_units entry must be flagged searchable with a soft "stale source"
+// note, not the emergency "re-normalize now" push (which points at the reindex --force
+// R17-2 just un-bricked). Before the fix every skip got the emergency guidance.
+#[test]
+fn r17_6_repair_softens_guidance_for_searchable_cached_document() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(
+        dir.path().join("a.md"),
+        "# A\n\n## Body\ncachedserving unique token\n",
+    )
+    .unwrap();
+    kcs(&dir, &["init"]).assert().success();
+    json_success(&dir, &["index", "--yes"]);
+
+    // Corrupt the normalized unit (→ skipped during rebuild) AND delete sqlite so repair
+    // must rebuild. The cached chunks in chunks.jsonl survive → the document stays
+    // searchable and its skip is a stale-source note, not an emergency.
+    let unit = first_normalized_unit_json(&dir.path().join(".kcs/objects/normalized_units"));
+    fs::write(&unit, r#"{"torn":"#).unwrap();
+    fs::remove_file(dir.path().join(".kcs/index/sqlite.db")).unwrap();
+
+    let out = json_success(&dir, &["repair", "--rebuild-db"]);
+    let skipped = out["skipped_units"].as_array().unwrap();
+    assert_eq!(skipped.len(), 1, "{out}");
+    assert_eq!(
+        skipped[0]["searchable"],
+        Value::Bool(true),
+        "the cached document is flagged still-searchable: {out}"
+    );
+    assert!(
+        skipped[0]["guidance"]
+            .as_str()
+            .unwrap()
+            .to_lowercase()
+            .contains("stale"),
+        "the searchable document's per-entry guidance is a stale note: {out}"
+    );
+    // Top-level guidance is the softened (non-emergency) form.
+    assert!(
+        out["skipped_units_guidance"]
+            .as_str()
+            .unwrap()
+            .contains("when convenient"),
+        "top-level guidance is softened, not the emergency push: {out}"
+    );
+    // The document is genuinely searchable after the rebuild (the false alarm was false).
+    let search = json_success(&dir, &["search", "cachedserving"]);
+    assert!(
+        !search["results"].as_array().unwrap().is_empty(),
+        "cached document still searches after repair: {search}"
+    );
+}
+
+// R17-6 discriminator: a skipped document with NO surviving chunks (chunks.jsonl gone) is
+// genuinely unsearchable and MUST keep the emergency re-normalization guidance — softening
+// is scoped to documents that are actually still being served.
+#[test]
+fn r17_6_repair_keeps_emergency_guidance_when_no_cached_chunks_survive() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(
+        dir.path().join("only.md"),
+        "# Only\n\n## Body\nonlydoc unique token\n",
+    )
+    .unwrap();
+    kcs(&dir, &["init"]).assert().success();
+    json_success(&dir, &["index", "--yes"]);
+
+    // Corrupt the unit AND remove the persisted chunks — nothing can be re-served, so the
+    // document is genuinely unsearchable.
+    let unit = first_normalized_unit_json(&dir.path().join(".kcs/objects/normalized_units"));
+    fs::write(&unit, r#"{"torn":"#).unwrap();
+    fs::remove_file(dir.path().join(".kcs/index/chunks.jsonl")).unwrap();
+
+    let out = json_success(&dir, &["repair", "--rebuild-db"]);
+    let skipped = out["skipped_units"].as_array().unwrap();
+    assert_eq!(skipped.len(), 1, "{out}");
+    assert_eq!(
+        skipped[0]["searchable"],
+        Value::Bool(false),
+        "no live chunks → not searchable: {out}"
+    );
+    assert!(
+        !skipped[0]["guidance"]
+            .as_str()
+            .unwrap()
+            .to_lowercase()
+            .contains("stale"),
+        "an unsearchable document keeps the emergency guidance, not the stale note: {out}"
+    );
+    // The document truly cannot be served — the emergency guidance is warranted.
+    let search = json_success(&dir, &["search", "onlydoc"]);
+    assert!(
+        search["results"].as_array().unwrap().is_empty(),
+        "no chunks remain → no results: {search}"
+    );
+}
+
 // ===========================================================================
 // R16-6: the hand-rolled arg parsers coerced `--flag=<value>` on a value-LESS
 // (boolean / SetTrue) flag into `true`, silently dropping the inline value — so
@@ -5281,4 +5741,226 @@ fn r16_7_network_error_retry_reaccrues_charge() {
             "network_error retry #{minute} must reserve a fresh charge (not skipped)"
         );
     }
+}
+
+// ===========================================================================
+// R17-3: a rate_limit-Failed online markdownize task keeps its F8 reservation, which
+// R16-7 established is a phantom (rate_limit/quota never bill). R15-2's enqueue-time
+// supersede retired only Pending/Paused, so after the file was edited the stale
+// Failed(rate_limit) task lingered and its phantom reservation exhausted the per-
+// adapter markdownize cap, falsely pausing the re-indexed (valid) task. The fix
+// retires the retryable-Failed task AND reclaims the phantom into a sibling positive-
+// only reclaim ledger (F3: the charge ledger is never negatively amended). The
+// discriminator pair below proves the reclaim is error-kind-aware: a rate_limit
+// phantom is reclaimed (the edited doc is Pending), a NetworkError reservation is
+// conservatively kept (the edited doc is budget-Paused, cap-safe) — the same
+// asymmetry R16-7 maintains, because a NetworkError send may have billed server-side.
+// ===========================================================================
+
+/// Sum the usd of the online-markdownize (`adapter_kind = "markdown"`) rows in the
+/// device-global CHARGE ledger — the exact per-document reservation cost, used to
+/// size a per-adapter cap between one and two documents.
+fn markdown_ledger_usd(dir: &TempDir) -> f64 {
+    markdown_rows_usd_at(&dir.path().join(".test-data/kcs/cost-ledger.jsonl"))
+}
+
+/// Sum the usd of the markdown rows in the device-global RECLAIM ledger (R17-3).
+/// Zero when no phantom has been reclaimed (or the file does not yet exist).
+fn markdown_reclaim_usd(dir: &TempDir) -> f64 {
+    markdown_rows_usd_at(
+        &dir.path()
+            .join(".test-data/kcs/cost-ledger-reclaimed.jsonl"),
+    )
+}
+
+fn markdown_rows_usd_at(path: &Path) -> f64 {
+    let Ok(text) = fs::read_to_string(path) else {
+        return 0.0;
+    };
+    text.lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .filter(|row| row["adapter_kind"] == "markdown")
+        .filter_map(|row| row["usd"].as_f64())
+        .sum()
+}
+
+/// Pin a DEVICE per-adapter markdown cap sized to fit exactly ONE document cost but
+/// not two (1.5×), with a generous overall monthly cap so only the per-adapter cap
+/// binds. Written to the user (device) config the m8 tests already exercise.
+fn set_markdown_adapter_cap(dir: &TempDir, cap: f64) {
+    let config = dir.path().join(".test-config/kcs/config.toml");
+    fs::create_dir_all(config.parent().unwrap()).unwrap();
+    fs::write(
+        &config,
+        format!("[budget]\nmonthly_usd_cap = 1000\n[budget.per_adapter]\nmarkdown = {cap}\n"),
+    )
+    .unwrap();
+}
+
+/// Two page bodies of EQUAL byte length (they differ only in one trailing ASCII
+/// char), so editing `v1 -> v2` changes `raw_hash` while keeping the document size —
+/// and therefore the reservation cost — identical. This lets a cap of `1.5 × cost`
+/// discriminate "one reservation fits" from "two reservations exceed".
+const R17_3_BODY_V1: &str = "R17-3 phantom reclaim regression 本文あいうえお A";
+const R17_3_BODY_V2: &str = "R17-3 phantom reclaim regression 本文あいうえお B";
+
+// Discriminator (a): rate_limit phantom → edit → re-index. The phantom is reclaimed,
+// so the edited doc's online task is Pending (matches the control where rate_limit
+// never happened), NOT budget-Paused. The charge ledger is untouched (F3); the
+// reclaim ledger carries the exact canceling amount.
+#[test]
+fn r17_3_rate_limit_phantom_reclaimed_frees_cap_for_edited_doc() {
+    let dir = tempfile::tempdir().unwrap();
+    assert_eq!(
+        R17_3_BODY_V1.len(),
+        R17_3_BODY_V2.len(),
+        "the two doc bodies must be equal byte length so the cost is identical"
+    );
+    fs::write(dir.path().join("doc.pdf"), fake_pdf(&[R17_3_BODY_V1])).unwrap();
+    kcs(&dir, &["init"]).assert().success();
+    run_markdownize_seam(&dir, "mock", None, &["index", "--approve"]);
+
+    // First real send under rate_limit: v1 -> Failed(rate_limit), one phantom row.
+    run_markdownize_seam(
+        &dir,
+        "rate_limit",
+        Some("2026-07-03T00:00:00Z"),
+        &["batch", "resume"],
+    );
+    assert_eq!(
+        markdown_ledger_rows(&dir),
+        1,
+        "the rate_limit send reserves exactly one (phantom) charge"
+    );
+    let doc_cost = markdown_ledger_usd(&dir);
+    assert!(doc_cost > 0.0, "the reservation must be a positive cost");
+
+    // Cap fits ONE document but not two: phantom (1×) + edited doc (1×) would exceed.
+    set_markdown_adapter_cap(&dir, doc_cost * 1.5);
+
+    // Edit (new raw_hash, identical size) and re-index in the SAME ledger month.
+    fs::write(dir.path().join("doc.pdf"), fake_pdf(&[R17_3_BODY_V2])).unwrap();
+    run_markdownize_seam(
+        &dir,
+        "mock",
+        Some("2026-07-05T00:00:00Z"),
+        &["index", "--approve"],
+    );
+
+    // The phantom is reclaimed by exactly its reserved cost (F3-safe positive row).
+    assert!(
+        (markdown_reclaim_usd(&dir) - doc_cost).abs() < 1e-12,
+        "the rate_limit phantom must be reclaimed by exactly its reserved cost"
+    );
+    // F3: the charge ledger is never negatively amended — the phantom row still stands
+    // and the reclaim nets it out at read time instead.
+    assert_eq!(
+        markdown_ledger_rows(&dir),
+        1,
+        "the charge ledger keeps the phantom row (no negative compensating entry, F3)"
+    );
+
+    let status = run_markdownize_seam(&dir, "mock", Some("2026-07-05T00:00:00Z"), &["status"]);
+    let markdownize = tasks_of_type(&status, "markdownize");
+    let pending = markdownize
+        .iter()
+        .filter(|task| task["status"] == "pending")
+        .count();
+    let paused_budget = markdownize
+        .iter()
+        .filter(|task| task["status"] == "paused" && task["fallback_reason"] == "budget_exceeded")
+        .count();
+    assert_eq!(
+        pending, 1,
+        "the edited doc's online task must be Pending (phantom reclaimed): {status}"
+    );
+    assert_eq!(
+        paused_budget, 0,
+        "no online task may be budget-paused after the reclaim: {status}"
+    );
+    // The stale v1 task is retired (non-retryable invalid_input), not left rate_limit.
+    let still_rate_limited = markdownize
+        .iter()
+        .filter(|task| task["fallback_reason"] == "rate_limit")
+        .count();
+    assert_eq!(
+        still_rate_limited, 0,
+        "the stale rate_limit task must be superseded: {status}"
+    );
+    let retired = markdownize
+        .iter()
+        .filter(|task| task["status"] == "failed" && task["fallback_reason"] == "invalid_input")
+        .count();
+    assert_eq!(
+        retired, 1,
+        "the stale online task must be retired as invalid_input: {status}"
+    );
+}
+
+// Discriminator (b): NetworkError phantom → edit → re-index. A NetworkError send may
+// have billed server-side, so its reservation is NOT reclaimed (keeping the cap-safe
+// invariant, the R15-5 silent-bypass guard). The stale task is still retired, but the
+// reservation stands, so the edited doc's online task is budget-Paused — the contrast
+// that proves the reclaim is error-kind-aware, not a blanket "reclaim on supersede".
+#[test]
+fn r17_3_network_error_reservation_kept_pauses_edited_doc() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("doc.pdf"), fake_pdf(&[R17_3_BODY_V1])).unwrap();
+    kcs(&dir, &["init"]).assert().success();
+    run_markdownize_seam(&dir, "mock", None, &["index", "--approve"]);
+
+    // First real send under network_error: v1 -> Failed(network_error), one reserved row.
+    run_markdownize_seam(
+        &dir,
+        "network_error",
+        Some("2026-07-03T00:00:00Z"),
+        &["batch", "resume"],
+    );
+    assert_eq!(
+        markdown_ledger_rows(&dir),
+        1,
+        "the send reserves one charge"
+    );
+    let doc_cost = markdown_ledger_usd(&dir);
+    assert!(doc_cost > 0.0, "the reservation must be a positive cost");
+    set_markdown_adapter_cap(&dir, doc_cost * 1.5);
+
+    // Edit and re-index in the same ledger month.
+    fs::write(dir.path().join("doc.pdf"), fake_pdf(&[R17_3_BODY_V2])).unwrap();
+    run_markdownize_seam(
+        &dir,
+        "mock",
+        Some("2026-07-05T00:00:00Z"),
+        &["index", "--approve"],
+    );
+
+    // The NetworkError reservation is conservatively KEPT (not reclaimed).
+    assert_eq!(
+        markdown_reclaim_usd(&dir),
+        0.0,
+        "a NetworkError reservation must NOT be reclaimed (may have billed server-side)"
+    );
+    assert_eq!(
+        markdown_ledger_rows(&dir),
+        1,
+        "the reservation stands in the charge ledger (cap-safe)"
+    );
+
+    let status = run_markdownize_seam(&dir, "mock", Some("2026-07-05T00:00:00Z"), &["status"]);
+    let markdownize = tasks_of_type(&status, "markdownize");
+    // The stale v1 is still retired (retryable-Failed supersede), but its reservation
+    // is not reclaimed, so the edited doc's online task is budget-Paused.
+    let retired = markdownize
+        .iter()
+        .filter(|task| task["status"] == "failed" && task["fallback_reason"] == "invalid_input")
+        .count();
+    assert_eq!(retired, 1, "the stale task is still retired: {status}");
+    let paused_budget = markdownize
+        .iter()
+        .filter(|task| task["status"] == "paused" && task["fallback_reason"] == "budget_exceeded")
+        .count();
+    assert_eq!(
+        paused_budget, 1,
+        "the edited doc must be budget-paused (phantom kept, cap-safe): {status}"
+    );
 }

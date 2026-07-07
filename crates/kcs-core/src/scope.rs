@@ -659,7 +659,25 @@ impl Repository {
                 .head_commit_hash()?
                 .ok_or_else(|| KcsError::not_found("HEAD"))?,
         };
-        self.read_commit(&commit_hash)?;
+        // R17-5: with no explicit operand the implicit HEAD is resolved via
+        // head_commit_hash() (which never reads the commit object), so this is the
+        // first existence check. A shallow (missing / corrupt) HEAD commit folds into
+        // KCS-E-COMMIT-SHALLOW-001 with tag-write context, matching every other
+        // shallow-commit site (R16-1), not a raw, opaque KCS-E-STORE-NOT-FOUND-001.
+        // (When `commit_hash` came from `resolve_commit`, existence was already
+        // verified there, so this read only surfaces the implicit-HEAD case.)
+        match self.read_commit(&commit_hash) {
+            Ok(_) => {}
+            Err(error) if is_store_not_found(&error) => {
+                return Err(KcsError::commit_shallow(
+                    "cannot create a tag on a shallow commit: the HEAD commit object is \
+                     missing (discarded / corrupt); restore the commit object or tag a \
+                     non-shallow commit",
+                    commit_hash.clone(),
+                ));
+            }
+            Err(error) => return Err(error),
+        }
         let path = self.kcs_dir.join("refs/tags").join(name);
         if path.exists() {
             return Err(KcsError::new(
@@ -686,14 +704,36 @@ impl Repository {
                 .ok_or_else(|| KcsError::not_found("HEAD"));
         }
         if is_hash(value) {
-            self.read_commit(value)?;
+            // R17-5: `resolve_commit` runs before `diff_side_tree`'s R16-5 shallow
+            // absorption (and before `tag`'s own verification read), so a hash-literal
+            // shallow commit (commit object discarded / corrupt) must fold into
+            // KCS-E-COMMIT-SHALLOW-001 HERE — otherwise it escapes as a raw, opaque
+            // KCS-E-STORE-NOT-FOUND-001 while the `HEAD` operand (which skips
+            // read_commit) correctly reaches COMMIT-SHALLOW. Matches the other 8
+            // read_commit sites hardened in R16-1.
+            match self.read_commit(value) {
+                Ok(_) => {}
+                Err(error) if is_store_not_found(&error) => {
+                    return Err(resolve_commit_shallow_error(value));
+                }
+                Err(error) => return Err(error),
+            }
             return Ok(value.to_owned());
         }
         let tag = self.kcs_dir.join("refs/tags").join(value);
         if tag.is_file() {
             let hash = fs::read_to_string(&tag).kcs_io(&tag)?;
             let hash = hash.trim().to_owned();
-            self.read_commit(&hash)?;
+            // R17-5: a tag whose target commit object is shallow (discarded / corrupt)
+            // folds into COMMIT-SHALLOW too, for the same reason as the hash-literal
+            // branch above.
+            match self.read_commit(&hash) {
+                Ok(_) => {}
+                Err(error) if is_store_not_found(&error) => {
+                    return Err(resolve_commit_shallow_error(&hash));
+                }
+                Err(error) => return Err(error),
+            }
             return Ok(hash);
         }
         Err(KcsError::not_found(value))
@@ -1627,6 +1667,23 @@ fn commit_stats(prior: Option<&TreeObject>, working: &TreeObject) -> CommitStats
 /// object into the shallow-commit policy (degrade reads / fail writes loudly).
 fn is_store_not_found(error: &KcsError) -> bool {
     error.error_code() == "KCS-E-STORE-NOT-FOUND-001"
+}
+
+/// R17-5: a commit operand (`diff`/`tag` hash literal, or a tag-name target) whose
+/// commit object is gone (shallow: discarded / corrupt) folds into
+/// KCS-E-COMMIT-SHALLOW-001 — the same class every other shallow-commit site raises
+/// (R16-1 / R16-5) — instead of a raw, opaque KCS-E-STORE-NOT-FOUND-001. Used by
+/// `resolve_commit`, which runs before `diff_side_tree`'s R16-5 absorption, so
+/// without this a hash-literal / tag-name shallow commit would bypass the
+/// COMMIT-SHALLOW contract that the `HEAD` operand already reaches. Kept generic (no
+/// diff side) because `resolve_commit` is shared by `diff` and `tag`; the diff side
+/// is still named for the tree-GC case that reaches `diff_side_tree`.
+fn resolve_commit_shallow_error(commit_hash: &str) -> KcsError {
+    KcsError::commit_shallow(
+        "referenced commit object is missing (shallow: discarded / corrupt); \
+         restore the commit object or reference a non-shallow commit",
+        commit_hash.to_owned(),
+    )
 }
 
 /// R16-5: the `diff` shallow-side error, naming which operand (`a`/`b`) is shallow.
