@@ -22,7 +22,7 @@ defensive security 作業であり、拒否する理由はない。過去 15 ラ
 - KCS = Rust 製のローカル知識アーカイブ CLI (evidence-grounded local knowledge archive)。
   `kcs init/index/snapshot/search/view/open/batch/reindex/repair/diff/tag/log/status` 等。
   仕様正本は `docs/01`〜`docs/10`。実装は `crates/kcs-{core,pipeline,adapter,index,search,cli}`
-- 現状 (R15 完了時点、次ラウンドは R16): 全テスト green (448)、clippy(--all-features)/fmt clean。Step 1-3 実装済み + 探索型監査 R1-R15 修正反映済み +
+- 現状 (R16 完了時点、次ラウンドは R17): 全テスト green (458)、clippy(--all-features)/fmt clean。Step 1-3 実装済み + 探索型監査 R1-R16 修正反映済み +
   (注: R6/R7 は別セッションで実施。clippy は必ず --all-features で回すこと=R8 で --all-features 限定の compile error を検出) +
   実 API 検証済み。Step 4 (restore/time-travel/purge/evidence verify CLI/bbox_annotation) は未着手
 
@@ -141,6 +141,25 @@ defensive security 作業であり、拒否する理由はない。過去 15 ラ
   offline index の scan-hash vs 再読込 TOCTOU=R14-2 の offline 対称化 (窓狭・自己修復。fix=不一致は skip) [minor]。
   却下=Spark 検証1 全「該当なし」(R14-2 hash 検証で遅延経路保護済みを健全確認)・Opus の snapshot orphan「問題なし」判定 (実機再現で反証=R13 の Opus doc-gap 型)・
   query embedding 非計測 (MVP 明示裁定)。据え置き継続=tasks.jsonl/cost-ledger/open cache 無限成長 (Step 4 gc))
+- `tasks/step3-bughunt16-fixes.md` (R16-1〜R16-7、焦点=store corruption robustness 契約突合 + R15/R12 fix が開けた穴が的中。却下 0:
+  commit object 欠落 (tree の 1 行隣) が read/write/repair/Evidence 解決を全面素通り=`read_commit` 無条件 `?` の系統穴 (9 call site) で
+  status/log/search/view 全滅・唯一の回復コマンドも道連れ・docs/05:345 の Evidence 保証破れ (fix=is_store_not_found 吸収の系統適用、
+  read は degrade [log は truncated 明示・resolve_pointer は best-effort 化で chunk 直接解決]、write は COMMIT-SHALLOW) [major・4/4 Sonnet 収束=史上最強]、
+  multi-scope search の store 破損 Fatal 増幅で健全 scope 巻き添え exit 4=05 §1.8 違反・R10-1(a) の未全称化 (fix=store 破損クラスのみ
+  Excluded("store_corrupt") 降格、Fatal 全般は fail-fast 維持) [major・Sonnet-A+D 対照]、fresh search が shallow (tree 欠落+cache 行なし) で
+  silent 空 exit 0=cursor 経路だけ loud・index_is_rebuilding も 0 行では不発 (fix=SnapshotTreeEntries tri-state + Excluded("snapshot_shallow")、
+  cache 行あり shallow は継続=読み degrade) [major・GPT-5.5 静的単独]、repair --rebuild-db が shallow で生 STORE-NOT-FOUND・normalized unit
+  1 個欠落で scope 全体 abort=R15-4 が名指しした問題が fix/テスト適用範囲から漏れ (fix=共有 read_head_tree_for_rebuild で index/reindex/repair
+  一括 COMMIT-SHALLOW + unit 欠落は skip 続行 + skipped_units/guidance 報告・exit 0) [major・Spark+A+D 収束]、diff の shallow 生エラー
+  =docs/05:341「明示」契約乖離 (fix=COMMIT-SHALLOW + side a/b 明示) [minor・Spark+A+D+Opus 4 エンジン]、手書きパーサ 3 本の no-value flag が
+  `--force=false --yes=false` を true 化し確認ゲート bypass 実行=R12-7 の split_flag_value が開けた穴 7 例目 (fix=inline 値一律拒否
+  KCS-E-CONFIG-USAGE-001) [major・GPT-5.5]、retry 可能失敗 (RateLimit=無制限リトライ) が送信試行ごと満額再予約=phantom charge 無制限累積で
+  device 月次 cap 枯渇→他の正規タスク誤 Paused (fix=直前失敗が RateLimit/QuotaExceeded [429 系=課金され得ない] なら charge skip、
+  NetworkError は従来通り試行ごと予約=F8/R15-5 の cap-safe 不変条件維持。Opus 提案の「生涯 1 予約」は NetworkError 二重課金の
+  cap silent bypass を開けるため不採用) [major・Opus 単独・cap 枯渇→誤 Paused まで control 付き実機]。
+  据え置き=registry is_live false 行の無言 drop (excluded 理由未記録・severity 不足)、embedding の triple-fault 残余
+  (RateLimit 失敗→retry 送信が server 課金後 commit 前に crash した 1 chunk の有界 under-charge — 塞ぐには per-chunk 永続 marker が必要で
+  R11-5 の O(N²) を再導入するため見送り、R17 で再評価))
 - docs で `Step 4` / `Phase 4+` / `v2+` と明記の未実装
 
 **過去 15 ラウンドの鉱脈は掘り尽くし気味**: R1=並行/異常系の後続経路、R2=秘匿情報漏出/パス検証/資源枯渇、
@@ -157,8 +176,9 @@ R12=config-key drift の系統掃討で完結 (silent ignore 型=[search.rrf]/[s
 R13=documented-unimplemented の大物 2 面 (tools.toml 全面未配線・ログローテ/保持) + 要件確定事項の実装未達 (incremental Markdownize 本番不達=正実装が未配線という step3c r1 型の再来) + store 破損処理の非対称 (空 HEAD の silent orphan=部分破損掃引が浮かび上がらせた)、
 R14=「fix が開ける穴」脈が R13-1/R13-4 で的中 (R9-4→R10-4、R11-5→R12-3 に続く 4/5 例目) — 4 本の穴が共通して「正常系 (Ok(None)/フォールバック) のすぐ隣で異常系だけ `?` でハード伝播する非対称」(previous unit 部分破損の恒久ブリック・遅延 online task の stale hash 保存・self-heal の read-only 致死化) + mock seam が実挙動を隠す型 (incremental 実 Mistral 全文送信=mock でしか差分に見えない・step3c r1/R13-1 と同型で GPT-5.5 静的のみ検出可)、
 R15=「fix が開ける穴」脈が 5/6 例目 (R15-1=R13-4/R14-3 self-heal 合流の snapshot orphan、R15-2=R11-6 実行前 charge と R14-2 実行前 supersede 合流の phantom charge、R15-5=R11-6 retry 按分と R14-4 incremental pages の未接続、R15-6=R14-4 空 hint 境界) — 3 つの独立多エンジン収束 (snapshot orphan=Sonnet-B/C、phantom charge=Sonnet-A/C/Opus、registry stale=GPT-5.5/Sonnet-B) + store 破損 robustness の第 2 面 (R13-4 空 HEAD・R15-4 tree 欠落=HEAD/tree の 2 破損を掘った・docs/05 shallow 契約と実装の非対称) + mock seam 隠蔽型が R15-5/R15-6 で 2 本 (静的エンジンのみ検出=GPT-5.5/Spark 枠が必須)。オーケストレータの「charge/execute 非対称」統合裁定 (supersede=過剰・retry=過少の両方向) と Opus の「問題なし」誤判定を実機で反証。
-**新しい鉱脈の方が期待値が高い** (下記ヒント参照)。R15 で「R14 fix の新配線 (遅延実行×identity の全経路・mock seam 乖離) + self-heal 非致死化の縁」は掘って修正済み。
-R16 Spark は別焦点へ (§6 は R16 用に書き換え済み: R15 fix の新配線の網羅性 (head_commit_hash fallback の波及・pre-charge gate/enqueue supersede/registry retirement の並行窓・shallow 分岐の網羅・restrict_to_hint_pages 伝播) + store corruption robustness の契約突合 (HEAD/tree 以外の CAS object 欠落と docs/05 破損契約の一貫性)。いずれも静的読解が効く)。
+R16=store corruption robustness 契約突合が本命的中 — R13-4/R15-4 が `read_tree` にだけ吸収を適用し**同じ関数・隣接行の `read_commit` を全箇所素通し**にした構造穴 (4/4 Sonnet 独立収束=史上最強。「fix が適用範囲を絞った際の相似形の隣」も掃く対象という新しい学び) + そこから multi-scope Fatal 増幅 (05 §1.8)・repair の部分回復力ゼロ・diff 契約乖離が芋づる + R12-7 の split_flag_value が開けた確認ゲート bypass (7 例目・GPT-5.5) + fresh search の shallow silent 空 (GPT-5.5 静的単独=silent 型は静的枠) + retry phantom charge 無制限累積 (Opus 単独・cost-ledger 脈の残りが直撃)。
+**新しい鉱脈の方が期待値が高い** (下記ヒント参照)。R16 で「R15 fix の新配線 + HEAD/tree 以外の store 破損」は掘って修正済み。
+R17 Spark は別焦点へ (§6 は R17 用に書き換え済み: R16 fix の新配線の網羅性 (read_commit 吸収の全 caller 一貫性・SnapshotTreeEntries tri-state の fresh/cursor 分岐・store_corrupt 降格が真の Fatal を隠さないか・resolve_pointer best-effort 化の検証弱化・reject_inline_value の網羅・charge gate の kind 判定と Q3 reclaim の相互作用) + cost-ledger 残余 (embedding triple-fault の据え置き再評価・charge/refund の別経路)。いずれも静的読解が効く)。
 
 ## 4. 手順 (新セッションの Claude が実行)
 
@@ -189,7 +209,7 @@ R16 Spark は別焦点へ (§6 は R16 用に書き換え済み: R15 fix の新�
    同一根拠の重複は 1 件に畳み、異なる再現コマンド・異なる file:line・別経路の立証がある場合だけ収束証拠として扱う。
    verify スクリプトの罠に注意:
    `grep -rl P dir | head && echo found` は grep 不一致でも head 成功で常に真。**grep の exit code を直接見る**
-5. 採択した所見を `tasks/step3-bughunt<N>-fixes.md` に裁定として書き、コミット (R15 は bughunt15、**次 R16 は bughunt16**)
+5. 採択した所見を `tasks/step3-bughunt<N>-fixes.md` に裁定として書き、コミット (R16 は bughunt16、**次 R17 は bughunt17**)
 6. 修正を `Agent`(opus) に発注 (docs 変更禁止・各修正ごとに cargo test・回帰テスト必須・commit しない)。
    完了後 `cargo test --workspace` / `clippy --all-features -D warnings` / `fmt --check` 全 green を確認、
    critical/major は自分で実機 repro クローズしてからコミット (R10-R13 で定着した運用)
@@ -210,7 +230,7 @@ R16 Spark は別焦点へ (§6 は R16 用に書き換え済み: R15 fix の新�
 seam: KCS_TEST_GEMINI_EMBED / KCS_TEST_MISTRAL_OCR (§2 参照)。実機は XDG_DATA_HOME=$(mktemp -d) で隔離、
 scope は /tmp 配下。リポジトリのファイル変更禁止。verify は grep の exit code を直接見る。
 
-既知 (報告不要): tasks/step3-checkpoint-fixes / step3-bughunt-fixes / bughunt2〜bughunt14 (R15 開始時は
+既知 (報告不要): tasks/step3-checkpoint-fixes / step3-bughunt-fixes / bughunt2〜bughunt16 (R17 開始時は
 `ls tasks/step3-bughunt*` と各見出しを確認) と、docs で Step4/Phase4+/v2+ と明記の未実装。過去の鉱脈
 (並行/異常系、秘匿漏出/パス/資源、検索境界/入力堅牢性、シリアライズ往復/permission、エンコーディング境界
 NUL/UTF-16/BOM/crash-atomicity/task lifecycle、未束縛 approval の秘匿 online 送信、budget/cost-ledger 会計、
@@ -229,20 +249,25 @@ batch の自前 error_code (R14-5)、incremental profile 判定の送信前 gate
 supersede/陳腐化 markdownize task の phantom charge (R15-2、charge 前 network-free gate + enqueue stale supersede)、
 再 init の registry 旧 scope_id 退役 + 検索列挙の scope_id 検証 (R15-3)、HEAD tree 欠落の shallow degrade/error (R15-4)、
 unit-scoped retry の pages 絞り (R15-5、restrict_to_hint_pages)、0-change incremental の adapter 非呼出 (R15-6)、
-削除 chunk の embedding task 終端化 (R15-7)、offline scan-hash 突合 (R15-8)、tasks.jsonl・cost-ledger・open cache の
-無限成長は据え置き裁定済み (Step 4 gc 設計マター)) は掘り尽くし気味 — 新しい鉱脈の方が期待値が高い (R16 候補):
-  - **R15 fix が開ける穴** (定番脈 6 例目候補): R15-1 の head_commit_hash が空 HEAD で refs から復元する新挙動が、
-    None を前提していた呼出 (unborn 判定・first-snapshot) を壊さないか。R15-2 の pre-charge gate/enqueue supersede と
-    R15-3 の registry retirement が並行 (batch resume 並走・concurrent init/index) で race しないか。R15-4 の shallow 分岐
-    (status degrade / write の SHALLOW エラー) が全コマンドで一貫し漏れがないか。R15-5 の restrict_to_hint_pages が
-    fresh full send に誤伝播しないか。R15-6 の空 hint short-circuit の reused_from 生成が identity 正しいか
-  - **store corruption robustness の契約突合** (R13-4 空 HEAD・R15-4 tree 欠落で 2 破損を掘った脈): HEAD/tree 以外の
-    CAS object 欠落 (commit object・chunk object・refs 破損・normalized/prepared instance 破損) に対する各コマンドの
-    degrade/error 一貫性を docs/05 の破損・shallow 契約と静的突合。純読取り (status/log/search/inspect) は生き、
-    write は明確なエラーコードで拒否されるべきという原則の網羅性 (R14-3/R15-1/R15-4 で確立した read 耐性の穴残り)
-  - **cost-ledger 会計の残り** (R15-2 が開いた脈): charge/execute の非対称は supersede (過剰) と retry (過少) の両方向を
-    R15 で潰したが、embedding enrichment 側・budget cap 判定・並行 charge の残る非対称。reserve/refund の一貫性
-  - multi-scope 並列の縁 (MULTI-006 周辺: per-scope 降格・除外理由の一貫性、registry と実 .kcs の乖離=R15-3 が触れた脈の残り)
+削除 chunk の embedding task 終端化 (R15-7)、offline scan-hash 突合 (R15-8)、
+commit object 欠落の read degrade/write 拒否の系統適用 (R16-1、read_commit の is_store_not_found 吸収・log truncated・
+resolve_pointer best-effort)、multi-scope search の store 破損 Fatal→Excluded("store_corrupt") 降格 (R16-2)、
+fresh search shallow の tri-state (R16-3、SnapshotTreeEntries + Excluded("snapshot_shallow"))、repair の COMMIT-SHALLOW +
+skipped_units 部分回復 (R16-4)、diff の COMMIT-SHALLOW + side 明示 (R16-5)、手書きパーサの inline 値一律拒否 (R16-6)、
+retry 再送の error-kind-aware charge gate (R16-7、RateLimit/Quota は skip・NetworkError は従来通り)、
+tasks.jsonl・cost-ledger・open cache の無限成長は据え置き裁定済み (Step 4 gc 設計マター)) は掘り尽くし気味 —
+新しい鉱脈の方が期待値が高い (R17 候補):
+  - **R16 fix が開ける穴** (定番脈 7 例目候補): read_commit 吸収の新配線が全 caller で一貫するか —
+    log truncated の呼出側/JSON 契約、resolve_pointer best-effort 化が Evidence 検証を弱めないか (偽 pointer・別 scope
+    pointer が通らないか)、SnapshotTreeEntries tri-state の ShallowCachedRows 継続が cursor 再現・Evidence 解決と
+    整合するか、store_corrupt 降格 (Excluded) が真の Fatal (プログラミングエラー・schema 破損) まで握りつぶさないか、
+    repair の skipped_units 部分回復後の search 整合 (skip 文書の chunk が sqlite にどう残るか)、reject_inline_value の
+    適用漏れ、R16-7 charge gate の fallback_reason クリアと Q3 reclaim の相互作用
+  - **cost-ledger/budget の残り**: embedding triple-fault の据え置き再評価 (R16 裁定ファイル末尾)、cap 判定と charge の
+    並行窓、月跨ぎ境界、baseline 行 (usd 0.0) の扱い
+  - **Tier B / approval 周辺の再掃** (R6/R7 以来正面から触っていない脈: R15-3/R16 で registry・scope_id が動いた後の
+    secrets-approved 束縛・approval と再 init の相互作用)
+  - multi-scope 並列の縁 (継続: per-scope 降格理由の網羅 — R16-2 で store_corrupt が加わった直後の一貫性)
   - 時刻/TZ の残り (DST/閏の境界、rotation の日付判定と UTC/local の縁)
 だが直感を優先せよ。
 
@@ -285,38 +310,45 @@ R15=遅延実行 × identity 突合 + mock seam 乖離の網羅 (R14-2/R14-4 が
 (mock は失敗ユニットのみページ合成で隠蔽=Spark/GPT-5.5 のみ検出可能な型)。同ラウンドでフルスコープ勢が snapshot orphan・
 phantom charge・registry stale・tree 欠落から major 5 本 (3 つが多エンジン収束)=Spark の焦点が「健全確認 + 1 骨格」でも
 フルスコープが別脈で大量 major=R9-1 パターン 5 回目、かつ mock 隠蔽型 (R15-5/R15-6) は静的枠の独自価値を再確認。
-**次ラウンド R16 は別の焦点に回すこと**。**下記は R16 用に書き換え済み** (R15 fix が開ける穴の新配線網羅=
-head_commit_hash fallback の波及・pre-charge gate/enqueue supersede/registry retirement の並行窓・shallow 分岐の網羅・
-restrict_to_hint_pages 伝播 + store corruption robustness の契約突合=HEAD/tree 以外の CAS object 欠落と docs/05 破損契約の一貫性。
-いずれも静的読解が効く。R17 以降ではまた別焦点に):
+R16=R15 fix の新配線網羅 + store 破損契約突合 (検証1 (a)(b) は「該当なし」の健全確認、(c) で **diff の read_tree raw 透過を
+docs/05:341 対照付きで特定=R16-5 の初動立証**。検証2 で **repair --rebuild-db の read_tree 未変換を reindex L2608 の
+対照付きで特定=R16-4 の骨格立証**。フルスコープ 2 本 (Sonnet-A/D) と収束した R12 型の噛み合いラウンド。同ラウンドで
+フルスコープ勢が commit object 欠落 (4/4 Sonnet)・Fatal 増幅・parser bypass・phantom retry charge から major 6 本)。
+**次ラウンド R17 は別の焦点に回すこと**。**下記は R17 用に書き換え済み** (R16 fix が開ける穴の新配線網羅=
+read_commit 吸収の全 caller 一貫性・tri-state 分岐・store_corrupt 降格の過剰適用・charge gate×Q3 の相互作用 +
+cost-ledger/budget 会計の残余=cap 判定の並行窓・月跨ぎ・triple-fault 据え置き再評価。いずれも静的読解が効く。
+R18 以降ではまた別焦点に):
 
 ```
 あなたは KCS (開発者自身のリポジトリ) の焦点セキュリティ監査人です。出荷前の防御的セキュリティ監査。
 範囲限定 (丸読み禁止、grep/sed/rg のみ)。リポジトリのファイル変更禁止。ネットワーク不要。
-今回 (R16) の焦点は 2 つ。過去 (R15=遅延実行×identity/mock 乖離、R14=R13 fix 網羅性、R13=ログローテ) とは別で、
-R15 fix が開ける穴 (定番脈) と store 破損 robustness の契約突合を静的に掃討する。
+今回 (R17) の焦点は 2 つ。過去 (R16=R15 fix 網羅+store 破損契約、R15=遅延実行×identity/mock 乖離、R14=R13 fix 網羅性)
+とは別で、R16 fix が開ける穴 (定番脈 7 例目候補) と cost-ledger/budget 会計の残余を静的に掃討する。
 
-検証1 (R15 fix の新配線が開ける穴): R15 で 8 件の fix が入った。その新配線が別の穴を開けていないか。
-`rg -n 'empty_head_recovery_hash|head_commit_hash|online_markdownize_precondition_ok|retire_stale_kcs_path|registry_entry_is_live|restrict_to_hint_pages|head_tree_state|HeadTreeState|commit_shallow' crates/kcs-core/src crates/kcs-cli/src crates/kcs-index/src crates/kcs-adapter/src --type rust` で
-(a) R15-1: `head_commit_hash` が空 HEAD で `empty_head_recovery_hash` から復元する新挙動。従来 `Ok(None)` (unborn) を
-    前提していた呼出 (unborn 判定・first-snapshot・空スコープ扱い) が、復元 hash を受けて誤動作しない箇所、
-(b) R15-2/R15-3: `online_markdownize_precondition_ok` の pre-charge gate、`enqueue_online_placeholder_task` の stale
-    supersede、`retire_stale_kcs_path` の DELETE が、並行実行 (batch resume 並走・concurrent init/index・search 列挙中の
-    registry 変更) で race・TOCTOU を起こす窓、
-(c) R15-4/R15-5/R15-6: shallow 分岐 (`head_tree_state`/`commit_shallow`) が全コマンドで一貫せず生 STORE-NOT-FOUND が
-    残る経路、`restrict_to_hint_pages` が fresh full send に誤伝播する経路、0-change short-circuit の reused_from が
-    identity を誤る経路、
+検証1 (R16 fix の新配線が開ける穴): R16 で 7 件の fix が入った。その新配線が別の穴を開けていないか。
+`rg -n 'is_store_not_found|is_store_corrupt_class|SnapshotTreeEntries|ShallowCachedRows|ShallowNoRows|snapshot_shallow|store_corrupt|skipped_units|read_head_tree_for_rebuild|reject_inline_value|reservation_covers_resend|retry_kind_from_reason|truncated' crates/kcs-core/src crates/kcs-cli/src --type rust` で
+(a) R16-1: read_commit の is_store_not_found 吸収が入った各 caller (head_tree_state/log/snapshot_with_type/
+    ensure_snapshot_tree_entries/resolve_pointer_for_cli/read_head_tree_for_rebuild) で、吸収後の degrade 値
+    (None/truncated/tri-state) を受けた上位が誤動作しないか。特に resolve_pointer_for_cli の best-effort 化が
+    Evidence 検証 (scope 束縛・chunk hash 検証・cursor 署名) を弱めて偽 pointer を通さないか、
+(b) R16-2/R16-3: `is_store_corrupt_class` の Excluded("store_corrupt") 降格が真の Fatal (schema 破損・プログラミング
+    エラー) まで握りつぶして観測不能にしないか。`SnapshotTreeEntries` tri-state の fresh/cursor 分岐で
+    ShallowCachedRows 継続が cursor 再現 (05 §2.2)・Evidence 解決と矛盾しないか、
+(c) R16-4/R16-6/R16-7: skipped_units で skip された文書の chunk が sqlite にどう残り search 結果と整合するか
+    (skip 文書が検索にどう見えるか)。`reject_inline_value` の適用漏れ flag が残っていないか。charge gate
+    (直前失敗 RateLimit/Quota で skip) が fallback_reason のクリア・Q3 reclaim と競合して「予約なし送信」
+    (cap 超過側の逆穴) を作らないか、
 を file:line で挙げる。
 
-検証2 (store corruption robustness の契約突合): R13-4 (空 HEAD) と R15-4 (tree 欠落) で HEAD/tree の 2 破損を掘った。
-HEAD/tree 以外の CAS object 欠落・破損に対する各コマンドの degrade/error 一貫性が docs/05 の破損・shallow 契約と
-合っているか。
-`rg -n 'read_tree|read_commit|read_object|STORE-NOT-FOUND|STORE-CORRUPT|refs/heads|KcsError::store|\.transpose\(\)|\?;' crates/kcs-core/src crates/kcs-cli/src --type rust` で
-(a) commit object 欠落・chunk object 欠落・refs 破損・normalized/prepared instance 破損で、純読取り (status/log/search/
-    inspect) が生きるべきなのに `?` でハード伝播して全滅する経路 (R14-3/R15-1/R15-4 で確立した read 耐性の穴残り)、
-(b) write 系 (index/snapshot/reindex/repair) が生 STORE-NOT-FOUND/STORE-CORRUPT ではなく明確なエラーコードで拒否
-    すべきなのに生エラーが漏れる経路、
-(c) docs/05 の破損・shallow 契約 (どのコマンドが degrade し、どれが明示エラーになるべきか) と実装が乖離している箇所、
+検証2 (cost-ledger/budget 会計の残余): charge 側は R8 F8 (reserve-before-send)・R11-6 (按分)・R15-2 (pre-charge gate)・
+R16-7 (error-kind gate) で 4 巡した。残る非対称を突合する。
+`rg -n 'charge_cost_ledger_under_lock|monthly_usd_cap|budget_exceeded|cost_ledger|deterministic_baseline|warn_at_percent' crates/kcs-cli/src crates/kcs-core/src --type rust` で
+(a) cap 判定 (読み) と charge (書き) の並行窓が device-global lock で本当に閉じているか (lock 外の cap 読み・
+    warn 判定がないか)、
+(b) 月跨ぎ境界 (月末 enqueue→翌月 execute・月替わり中の batch resume) で month キーの決定箇所が一貫し、
+    charge の二重/欠落・cap 判定の月ズレがないか、
+(c) baseline 行 (usd 0.0) の扱いと、embedding triple-fault 据え置き (tasks/step3-bughunt16-fixes.md 末尾) の再評価 —
+    有界 under-charge が実害になる条件が本当に triple-fault だけか、
 を file:line で挙げる。
 
 出力: 検証1 (a)(b)(c) + 検証2 (a)(b)(c) の該当箇所を file:line + なぜ問題か で列挙 +
@@ -465,8 +497,34 @@ index が sqlite cache 経由 noop で短絡して穴が見えない (未編集�
 フィックス再検証は 4 major を control 付き実機 repro クローズ (R15-1 orphan せず履歴保持、R15-2 supersede で markdown 課金 0 行、
 R15-3 再 init で search 1 件・registry 1 行、R15-4 status exit 0 degrade + index/snapshot/reindex が SHALLOW エラー)、
 R15-5/R15-6 は discriminator テスト (fix 無効化で fail)。
-→ **15 ラウンドとも完全に別の鉱脈から実バグ。契約テストが全 green でも探索型は毎回新規を出す。
+R16 (R16-1〜R16-7): 0 critical + 6 major + 1 minor。7 エンジン。**却下 0 の 2 回目 (R9 以来)、うち自己取り下げ 1**
+(Sonnet-C がハーネス artifact を自分で切り分け不採用=品質バーの内面化)。**commit object 欠落に 4/4 Sonnet が完全独立収束
+(史上最強)** — R13-4/R15-4 が `read_tree` にだけ吸収を適用し同じ関数・隣接行の `read_commit` を素通しにした構造穴。
+R15-4 の fix は run_reindex では「10 行差で tree は処理・commit は素通し」という極端な非対称だった=**「fix が適用範囲を
+絞った際の相似形の隣」も掃く対象** (「fix が開ける穴」の変種)。3 脈 — (a) store 破損掃討の本命 (R16-1 の read/write/
+Evidence 全滅 [Sonnet-C が docs/05:345 の Evidence 保証破れ=中核価値直撃を特定・Sonnet-B が履歴奥 log 全滅・Sonnet-D が
+sqlite 欠落は正しく part-failure する対照実験で一意切り分け]、R16-2 の multi-scope Fatal 増幅 [Sonnet-A 単独・05 §1.8 違反・
+R10-1(a) が 1 エラーコード限定で塞いだ穴の未全称化]、R16-4 の repair 部分回復力ゼロ [R15-4 裁定文が名指しした repair が
+fix/テスト適用範囲から漏れた=fix 網羅性の穴・Spark が reindex 対照で骨格立証]、R16-5 の diff 契約乖離 [4 エンジン収束で
+severity は 2:1 で minor])、(b) silent 型 2 本は GPT-5.5 静的単独 (R16-3 fresh search の shallow silent 空=cursor だけ loud で
+fresh が Ok(false) 黙殺・index_is_rebuilding も 0 行不発、R16-6 の `--force=false` 確認ゲート bypass=R12-7 の
+split_flag_value が開けた穴 7 例目) — **3 ラウンド連続で「silent/mock 隠蔽型は静的枠のみ検出」**、(c) cost-ledger 脈の
+残りに Opus 単独 major (R16-7 retry phantom charge 無制限累積=RateLimit max_attempts None × 試行ごと満額再予約で cap 枯渇→
+他 scope 正規タスク誤 Paused。**F8「失敗でも予約維持」の既知トレードオフとの境界を裁定で明文化** — 429 系は課金され得ない
+から skip・NetworkError は二重課金があり得るから従来通り、Opus 提案の「生涯 1 予約」は cap silent bypass を開けるため不採用
+=fix 設計の却下理由もコードコメントに残す)。**フィックス側の学び**: 7 件を 2 エージェント分割 (クラスタ 5 + 独立 2) で
+順次発注し R15 の watchdog ストールを回避 (1 本目が 4.6 秒 0 tool で異常終了 → git status で無傷確認して再発注=空振り
+検知の手順化)。R16-3 の commit 欠落マッピングは fix 実地で「cache 行の有無で分岐」に訂正 (裁定の単純 Excluded 案は R16-1 の
+read degrade と矛盾했)、R16-4 の skipped_units は exit 0 + JSON 開示 (partial exit 3 案は error code 新設/借用の
+両難で回避=R14-5 の教訓)。**オーケストレータ側の学び 3 つ**: 実験台 scope を pre-fix/post-fix で使い回すと
+index_rebuilding 等の正直な遷移状態が偽 regression に見える (repro クローズは使い回し scope でなくクリーン scope で)、
+restore 時に tree/commit の hash を取り違えると junk object を作る (backup は `shasum -a 256` で実 hash からパス再導出)、
+`cmd | head; echo exit=$?` は head の 0 を拾う (R13 の変種・exit はパイプなし別実行で取る)。フィックス再検証は全 7 件
+repro クローズ (R16-1 read 4 コマンド exit 0 degrade + write 拒否 + 復元、R16-2 破損 exit 3 + 健全結果保持 + 欠落は cache
+継続、R16-3 excluded snapshot_shallow 明示、R16-4 COMMIT-SHALLOW + skipped_units 部分回復、R16-5 side 明示、
+R16-6 全パターン exit 2 + bare control 正常、R16-7 rate_limit×3 で charge 1 行のまま attempts 3)。
+→ **16 ラウンドとも完全に別の鉱脈から実バグ。契約テストが全 green でも探索型は毎回新規を出す。
 かつフィックスも実機フルサイクル再検証しないと不完全なことがある (R5 Q1・R8 F8・R10-1 の e2e 置換をオーケストレータが再実行、R11-5 → R12-3 は crash 面の再検証漏れが翌ラウンドの major)。範囲限定 Spark の
 「問題なし」領域からフルスコープエンジンが major を出す (R9-1・R11・R13・R14・R15 で再現)、オーケストレータの検証フェーズ自体が発見装置になる (P10・R9-5・R12-6) パターンも定着。
-かつ Spark の焦点が「掘り尽くした脈の健全性確認」に着地しても (R10 の DAG/Evidence、R11 の規模境界+task会計、R14 の R13 fix 網羅性)、フルスコープが別脈で major を出せば全体は前進する (R12 は焦点がフルスコープと噛み合い 4/4 収束、R13 は焦点立証 + フルスコープ 3 本、R14 は健全確認着地でもフルスコープ 4 major の二毛作、R15 は Spark が検証2 で R15-5 の骨格を出しつつフルスコープが別脈で major 5 本)。
-かつ「fix が開ける穴」は R9-4→R10-4、R11-5→R12-3、R13-1/R13-4→R14、R11-6/R13-4/R14-2/R14-3/R14-4→R15 と定番化 (5/6 例目) — 前ラウンド fix の新配線を必ず次ラウンドで掃く。しかも R15 では複数の過去 fix の**合流点** (R11-6+R14-2、R13-4+R14-3) が新しい非対称を生んだ=単一 fix だけでなく「独立した過去 fix の組み合わせ」も掃く対象。かつ mock seam が実挙動を隠す型 (R14-4・R15-5・R15-6) は静的エンジンだけが捕捉できる=7 エンジン構成の GPT-5.5/Spark 枠は必須。かつ多エンジン収束 (R15 で 3 件) は同一 fix 領域を別角度で立証し severity 裁定を固める。**
+かつ Spark の焦点が「掘り尽くした脈の健全性確認」に着地しても (R10 の DAG/Evidence、R11 の規模境界+task会計、R14 の R13 fix 網羅性)、フルスコープが別脈で major を出せば全体は前進する (R12 は焦点がフルスコープと噛み合い 4/4 収束、R13 は焦点立証 + フルスコープ 3 本、R14 は健全確認着地でもフルスコープ 4 major の二毛作、R15 は Spark が検証2 で R15-5 の骨格を出しつつフルスコープが別脈で major 5 本、R16 は焦点が R16-4/R16-5 の初動立証でフルスコープと噛み合い)。
+かつ「fix が開ける穴」は R9-4→R10-4、R11-5→R12-3、R13-1/R13-4→R14、R11-6/R13-4/R14-2/R14-3/R14-4→R15、R15-4/R12-7→R16 と定番化 (6/7 例目) — 前ラウンド fix の新配線を必ず次ラウンドで掃く。しかも R15 では複数の過去 fix の**合流点** (R11-6+R14-2、R13-4+R14-3) が、R16 では「fix が適用範囲を絞った際の**相似形の隣**」(read_tree だけ吸収し read_commit 素通し) が新しい非対称を生んだ=単一 fix・fix の組み合わせに加え「同型コードの隣」も掃く対象。かつ mock seam/silent 型 (R14-4・R15-5・R15-6・R16-3・R16-6) は静的エンジンだけが捕捉できる=7 エンジン構成の GPT-5.5/Spark 枠は必須。かつ多エンジン収束 (R15 で 3 件、R16 は 4/4 Sonnet の史上最強収束) は同一 fix 領域を別角度で立証し severity 裁定を固める。**
