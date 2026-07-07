@@ -22,7 +22,7 @@ use kcs_adapter::types::{
     PreviousMarkdownizeContext, RawInput, UnitKind,
 };
 use kcs_core::cas::is_hash;
-use kcs_core::dag::NormalizeRef;
+use kcs_core::dag::{NormalizeRef, TreeObject};
 use kcs_core::schema::{validate_json_schema, SchemaKind};
 use kcs_core::scope::{
     append_error_log, append_event_log, append_warn_log, new_ulid, now_utc_seconds,
@@ -499,7 +499,11 @@ fn run(cli: Cli) -> Result<Value> {
             }
             let repo = Repository::open_current()?;
             validate_repo_tool_lock(&repo)?;
-            Ok(json!({ "commits": repo.log()? }))
+            // R16-1: `log` degrades on a missing ancestor commit — it returns the
+            // healthy prefix from HEAD plus `truncated` rather than dying on a raw
+            // KCS-E-STORE-NOT-FOUND-001.
+            let report = repo.log()?;
+            Ok(json!({ "commits": report.entries, "truncated": report.truncated }))
         }
         Command::Diff(args) => {
             let repo = Repository::open_current()?;
@@ -640,7 +644,7 @@ fn run_index(args: IndexArgs) -> Result<Value> {
             }),
         )?;
     }
-    rebuild_step3_index(&repo)?;
+    let rebuild_report = rebuild_step3_index(&repo)?;
     // Generate chunk embeddings behind the online opt-in / budget / cost-ledger
     // guardrails (K4). No-op unless an embedding adapter is configured. R11-2: keep
     // the ExecOutcome (was discarded) so the embedding enrichment result is disclosed
@@ -673,6 +677,9 @@ fn run_index(args: IndexArgs) -> Result<Value> {
         // F5: non-blocking budget warning (null unless a cap crossed warn_at_percent).
         "budget_warning": scope_budget_warning(&repo)?,
     });
+    // R16-4: disclose any documents skipped for missing/corrupt units (empty on a
+    // clean index — the units were just written, so this normally stays empty).
+    attach_skipped_units(&mut output, &rebuild_report);
     // R11-3: an index that partially failed to normalize local files keeps its full
     // result JSON on stdout (commit_hash, tree_hash, …) with `error_code` +
     // `__exit_code:3`, matching search's "result + nonzero exit" shape — instead of
@@ -761,6 +768,8 @@ fn run_repair(args: UnsupportedArgs) -> Result<Value> {
         "embedding_tasks_failed": enrichment.failed,
         "paused_tasks": enrichment.paused,
     });
+    // R16-4: disclose any documents skipped for missing/corrupt units (partial recovery).
+    attach_skipped_units(&mut output, &report);
     if let Some(code) = enrichment_exit_override(&enrichment) {
         set_exit_override(&mut output, code);
     }
@@ -775,18 +784,23 @@ fn parse_repair_args(args: Vec<String>) -> Result<()> {
     }
     let mut rebuild_db = false;
     for arg in &args {
-        // R12-7: accept `--flag=value` before matching (repair flags are boolean, so
-        // any inline value is ignored — the point is not to misreport `--yes=1` etc.
-        // as an unknown flag).
-        let (flag, _inline) = split_flag_value(arg);
+        // R12-7: accept `--flag=value` before matching so an existing flag is not
+        // misreported as unknown. R16-6: every repair flag is boolean, so an inline
+        // value is a usage error, NOT silently dropped — `--rebuild-db=false` must
+        // not still rebuild the DB.
+        let (flag, inline) = split_flag_value(arg);
         match flag {
-            "--rebuild-db" if !rebuild_db => rebuild_db = true,
+            "--rebuild-db" if !rebuild_db => {
+                reject_inline_value(flag, inline)?;
+                rebuild_db = true;
+            }
             "--rebuild-db" => {
+                reject_inline_value(flag, inline)?;
                 return Err(KcsError::invalid_usage(
                     "repair accepts --rebuild-db only once",
-                ))
+                ));
             }
-            "--yes" => {}
+            "--yes" => reject_inline_value(flag, inline)?,
             "--verify-objects" => {
                 // R9-6: route not-implemented through the canonical
                 // `KcsError::not_implemented` (exit 1) so the same error_code
@@ -1357,7 +1371,26 @@ fn run_search_inner(args: UnsupportedArgs, started: Instant) -> Result<Value> {
                 "scope_path": exec.target.repo_root,
                 "reason": reason,
             })),
-            Err(ScopeSearchError::Fatal(error)) => return Err(error),
+            Err(ScopeSearchError::Fatal(error)) => {
+                // R16-2: a store-corruption Fatal from ONE scope must not discard the
+                // healthy scopes' already-collected results — that violated the 05 §1.8
+                // per-scope isolation contract that `index_corrupt` / `index_missing` /
+                // vector-capacity already honor. Downgrade the store-corruption class to
+                // an `Excluded("store_corrupt")` so healthy scopes still return and the
+                // "every scope failed → SCOPE-ALL-FAILED exit 4" aggregation still fires
+                // only when EVERY scope failed. This is deliberately NOT a blanket
+                // Fatal→Excluded generalization: a genuine programming error / unexpected
+                // Fatal must stay fail-fast, so only the explicit store class is caught.
+                if is_store_corrupt_class(&error) {
+                    excluded.push(json!({
+                        "scope_id": exec.target.scope_id,
+                        "scope_path": exec.target.repo_root,
+                        "reason": "store_corrupt",
+                    }));
+                } else {
+                    return Err(error);
+                }
+            }
         }
     }
 
@@ -1629,19 +1662,28 @@ fn search_one_scope(
     }
 
     // On a cursor replay, the snapshot's tree must still exist to reproduce the
-    // page. A shallow (tree-discarded) snapshot fails hard (05 §2.2).
-    if exec.from_cursor {
-        match ensure_snapshot_tree_entries(&repo, &conn, &snapshot_commit) {
-            Ok(true) => {}
-            Ok(false) => return Err(ScopeSearchError::Shallow),
-            Err(error) => return Err(ScopeSearchError::Fatal(error)),
+    // page. Any shallow snapshot (tree OR commit object discarded, cached rows or
+    // not) fails hard (05 §2.2 / CT3-CURSOR-005) — the frozen page cannot be
+    // faithfully reproduced from a shallow base.
+    match ensure_snapshot_tree_entries(&repo, &conn, &snapshot_commit) {
+        Ok(SnapshotTreeEntries::Projected) => {}
+        Ok(SnapshotTreeEntries::ShallowCachedRows) if exec.from_cursor => {
+            return Err(ScopeSearchError::Shallow);
         }
-    } else {
-        // HEAD tree_entries are written by `kcs index`; project defensively in
-        // case the caller points at a non-HEAD snapshot in future.
-        if let Err(error) = ensure_snapshot_tree_entries(&repo, &conn, &snapshot_commit) {
-            return Err(ScopeSearchError::Fatal(error));
+        // R16-3: fresh path — a shallow snapshot WITH cached rows still serves real
+        // results (read degrade); Evidence resolves via raw_hash direct resolution.
+        Ok(SnapshotTreeEntries::ShallowCachedRows) => {}
+        // R16-3: fresh path — a shallow snapshot with NO cached rows has nothing to
+        // serve. Exclude the scope loudly (`snapshot_shallow`) instead of the former
+        // silent exit-0 empty page (the `Ok(false)` the fresh path used to drop on
+        // the floor). On a cursor replay it is a hard failure.
+        Ok(SnapshotTreeEntries::ShallowNoRows) if exec.from_cursor => {
+            return Err(ScopeSearchError::Shallow);
         }
+        Ok(SnapshotTreeEntries::ShallowNoRows) => {
+            return Err(ScopeSearchError::Excluded("snapshot_shallow".to_owned()));
+        }
+        Err(error) => return Err(ScopeSearchError::Fatal(error)),
     }
 
     // P10: `run_reindex` advances HEAD to a new generation and only afterwards
@@ -2018,14 +2060,42 @@ fn current_max_rowid(conn: &Connection) -> Result<u64> {
     Ok(value as u64)
 }
 
+/// R16-3: the tri-state disposition of a commit's `tree_entries` availability for a
+/// search. Distinguishing "shallow but serviceable from cache" from "shallow with
+/// nothing to serve" is what turns the former `bool` (which silently swallowed a
+/// missing tree on the fresh path into an exit-0 empty page) into a loud, honest
+/// exclusion. "Shallow" here covers BOTH a missing tree object AND a missing commit
+/// object (R16-1): a *deleted* object (KCS-E-STORE-NOT-FOUND-001). A *corrupt*
+/// object (hash mismatch, KCS-E-STORE-CORRUPT-001) is NOT folded in here — it
+/// propagates as `Err` so the search loop's R16-2 per-scope isolation records it as
+/// `store_corrupt` instead.
+enum SnapshotTreeEntries {
+    /// Rows are present (freshly projected or already cached) AND the backing commit
+    /// and tree objects are present. A normal, healthy search proceeds.
+    Projected,
+    /// The commit or tree object is gone, BUT `tree_entries` rows are already cached
+    /// in sqlite. A fresh search can still run against those rows — results are real
+    /// and Evidence resolves via raw_hash/chunk_hash direct resolution (docs/05 §3.6:
+    /// resolving a shallow-commit pointer never fails). A cursor replay still hard-fails.
+    ShallowCachedRows,
+    /// The commit or tree object is gone AND no `tree_entries` rows are cached — there
+    /// is nothing to search. A fresh search excludes the scope (`snapshot_shallow`)
+    /// rather than emitting a silent exit-0 empty page (R16-3); a cursor replay
+    /// hard-fails (05 §2.2).
+    ShallowNoRows,
+}
+
 /// Ensure `tree_entries` rows for `commit_hash` exist in `conn`, projecting them
-/// from the commit's tree object when absent (04 §4.5). Returns `Ok(false)` when
-/// the commit is shallow (its tree object is gone).
+/// from the commit's tree object when absent (04 §4.5). Returns the tri-state
+/// [`SnapshotTreeEntries`] disposition: `Projected` when the snapshot is fully
+/// backed, or a `Shallow*` variant when the commit/tree object is gone (the caller
+/// decides fresh-vs-cursor policy). A *corrupt* (not merely missing) object still
+/// propagates as `Err`.
 fn ensure_snapshot_tree_entries(
     repo: &Repository,
     conn: &Connection,
     commit_hash: &str,
-) -> Result<bool> {
+) -> Result<SnapshotTreeEntries> {
     // R11-11 (Spark): existence probe only — an EXISTS/LIMIT-1 stops at the first
     // matching row instead of a `COUNT(*)` PK-prefix scan over every tree_entries
     // row of the commit (wasteful for large commits). Functionally equivalent.
@@ -2036,16 +2106,33 @@ fn ensure_snapshot_tree_entries(
             |row| row.get(0),
         )
         .map_err(|err| KcsError::schema(err.to_string()))?;
+    // The shallow disposition when the commit/tree object is gone depends on whether
+    // rows are cached: with cache we can still serve (ShallowCachedRows), without it
+    // there is nothing to serve (ShallowNoRows). R16-1: a missing *commit* object is
+    // handled symmetrically to a missing tree — both are absorbed here (only when
+    // STORE-NOT-FOUND; a corrupt object propagates as Err for R16-2).
+    let shallow = if existing {
+        SnapshotTreeEntries::ShallowCachedRows
+    } else {
+        SnapshotTreeEntries::ShallowNoRows
+    };
+    let commit = match repo.read_commit(commit_hash) {
+        Ok(commit) => commit,
+        Err(error) if is_store_not_found(&error) => return Ok(shallow),
+        Err(error) => return Err(error),
+    };
     if existing {
         // Cached — but a cursor replay still needs the tree object to prove the
         // snapshot is not shallow, so verify object presence regardless.
-        let commit = repo.read_commit(commit_hash)?;
-        return tree_object_present(repo, &commit.tree);
+        return match repo.read_tree(&commit.tree) {
+            Ok(_) => Ok(SnapshotTreeEntries::Projected),
+            Err(error) if is_store_not_found(&error) => Ok(SnapshotTreeEntries::ShallowCachedRows),
+            Err(error) => Err(error),
+        };
     }
-    let commit = repo.read_commit(commit_hash)?;
     let tree = match repo.read_tree(&commit.tree) {
         Ok(tree) => tree,
-        Err(error) if error.error_code() == "KCS-E-STORE-NOT-FOUND-001" => return Ok(false),
+        Err(error) if is_store_not_found(&error) => return Ok(SnapshotTreeEntries::ShallowNoRows),
         Err(error) => return Err(error),
     };
     // Resolve every row first (the `latest_normalize_ref` lookups do file I/O) so the
@@ -2067,7 +2154,7 @@ fn ensure_snapshot_tree_entries(
         });
     }
     insert_snapshot_tree_entries(conn, commit_hash, &rows)?;
-    Ok(true)
+    Ok(SnapshotTreeEntries::Projected)
 }
 
 /// One projected `tree_entries` row for [`insert_snapshot_tree_entries`].
@@ -2110,14 +2197,6 @@ fn insert_snapshot_tree_entries(
     tx.commit()
         .map_err(|err| KcsError::schema(err.to_string()))?;
     Ok(())
-}
-
-fn tree_object_present(repo: &Repository, tree_hash: &str) -> Result<bool> {
-    match repo.read_tree(tree_hash) {
-        Ok(_) => Ok(true),
-        Err(error) if error.error_code() == "KCS-E-STORE-NOT-FOUND-001" => Ok(false),
-        Err(error) => Err(error),
-    }
 }
 
 /// P10: is the search index caught in the reindex HEAD-advance window? `run_reindex`
@@ -2604,22 +2683,13 @@ fn run_reindex(args: UnsupportedArgs) -> Result<Value> {
     let head = repo
         .head_commit_hash()?
         .ok_or_else(|| KcsError::not_found("HEAD"))?;
-    let commit = repo.read_commit(&head)?;
-    // R15-4: reindex re-normalizes the HEAD tree, so it needs the full tree object.
-    // If it is gone (shallow: GC'd / deleted / corrupt), fail with a clear
-    // KCS-E-COMMIT-SHALLOW-001 + recovery guidance rather than a raw
-    // KCS-E-STORE-NOT-FOUND-001 whose hash is opaque to the user.
-    let tree = match repo.read_tree(&commit.tree) {
-        Ok(tree) => tree,
-        Err(error) if error.error_code() == "KCS-E-STORE-NOT-FOUND-001" => {
-            return Err(KcsError::commit_shallow(
-                "HEAD commit is shallow (tree object discarded); \
-                 cannot reindex — restore the tree object or re-create the scope",
-                head,
-            ));
-        }
-        Err(error) => return Err(error),
-    };
+    // R15-4/R16-1: reindex re-normalizes the HEAD tree, so it needs the full commit
+    // AND tree objects. If either is gone (shallow: GC'd / deleted / corrupt), fail
+    // with a clear KCS-E-COMMIT-SHALLOW-001 + recovery guidance rather than a raw,
+    // opaque KCS-E-STORE-NOT-FOUND-001. `read_head_tree_for_rebuild` folds both the
+    // missing-commit and missing-tree cases (the same conversion the shared
+    // `rebuild_step3_index` below applies, so reindex's two tree reads stay symmetric).
+    let tree = read_head_tree_for_rebuild(&repo, &head)?;
     let mut normalize_by_path = BTreeMap::new();
     let mut reindexed = 0u64;
     for entry in &tree.entries {
@@ -2670,6 +2740,8 @@ fn run_reindex(args: UnsupportedArgs) -> Result<Value> {
         "embedding_tasks_failed": enrichment.failed,
         "paused_tasks": enrichment.paused,
     });
+    // R16-4: disclose any documents skipped for missing/corrupt units.
+    attach_skipped_units(&mut output, &report);
     if let Some(code) = enrichment_exit_override(&enrichment) {
         set_exit_override(&mut output, code);
     }
@@ -2689,8 +2761,15 @@ fn parse_reindex_args(args: Vec<String>) -> Result<ParsedReindex> {
         // R12-7: accept `--flag=value` before matching.
         let (flag, inline) = split_flag_value(&args[i]);
         match flag {
-            "--force" => parsed.force = true,
-            "--yes" => parsed.yes = true,
+            "--force" => {
+                // R16-6: `--force=false` must not be silently coerced to `true`.
+                reject_inline_value(flag, inline)?;
+                parsed.force = true;
+            }
+            "--yes" => {
+                reject_inline_value(flag, inline)?;
+                parsed.yes = true;
+            }
             "--at" => {
                 // A bare `--at` is a usage error (requires a value); with a value it
                 // is R9-6 not_implemented (exit 1, single error class).
@@ -2718,8 +2797,14 @@ fn rebuild_step3_index(repo: &Repository) -> Result<Step3RebuildReport> {
     let Some(head) = repo.head_commit_hash()? else {
         return Ok(Step3RebuildReport::default());
     };
-    let commit = repo.read_commit(&head)?;
-    let tree = repo.read_tree(&commit.tree)?;
+    // R16-1/R16-4: `repair --rebuild-db` (the only implemented recovery command),
+    // `index`, and `reindex` all rebuild through here. A shallow HEAD (commit OR tree
+    // object gone) must fail with a clear KCS-E-COMMIT-SHALLOW-001 + recovery guidance
+    // — NOT the raw KCS-E-STORE-NOT-FOUND-001 that let `repair` die on the very
+    // corruption it exists to recover from (R15-4 fixed reindex but missed the shared
+    // rebuilder that repair uses). Placing the conversion in this shared function
+    // covers all three commands at once.
+    let tree = read_head_tree_for_rebuild(repo, &head)?;
     let config = read_chunking_config(repo)?;
     let existing = read_stored_chunks(repo.kcs_dir())?;
     // Q1: physically remove any torn trailing record from `chunks.jsonl` before the
@@ -2735,6 +2820,11 @@ fn rebuild_step3_index(repo: &Repository) -> Result<Step3RebuildReport> {
     let mut next_rowid = existing.iter().map(|chunk| chunk.rowid).max().unwrap_or(0) + 1;
     let mut appended = Vec::<StoredChunk>::new();
     let mut tree_entries = Vec::<TreeEntryRow>::new();
+    // R16-4: documents whose normalized units are missing/corrupt are skipped and
+    // reported here rather than aborting the whole rebuild (docs/10 §7.2: "最悪
+    // objects/ と refs/ が保全されていれば復旧できる" — one bad unit must not veto
+    // the recovery of every healthy document). Never silent: the caller surfaces this.
+    let mut skipped_units = Vec::<Value>::new();
 
     for entry in &tree.entries {
         let normalize = match &entry.normalize {
@@ -2751,12 +2841,28 @@ fn rebuild_step3_index(repo: &Repository) -> Result<Step3RebuildReport> {
             tool_profile_hash: Some(normalize.tool_profile_hash.clone()),
             gen: normalize.gen,
         });
-        let units = load_normalized_units(
+        let units = match load_normalized_units(
             repo.kcs_dir(),
             &entry.raw_hash,
             &normalize.tool_profile_hash,
             normalize.gen,
-        )?;
+        ) {
+            Ok(units) => units,
+            // A single document's missing/corrupt normalized instance (STORE-IO /
+            // STORE-CORRUPT) is skipped so the rest of the scope still rebuilds; its
+            // tree_entries row is kept (the tree structure is faithful — the document
+            // simply has no live chunks until re-normalized). Any other error class is
+            // not a localized unit fault and still aborts.
+            Err(error) if is_rebuild_skippable_unit_error(&error) => {
+                skipped_units.push(json!({
+                    "raw_hash": entry.raw_hash,
+                    "path": entry.path,
+                    "reason": error.error_code(),
+                }));
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
         let input = ChunkingInput {
             raw_path: entry.path.clone(),
             units,
@@ -2784,7 +2890,71 @@ fn rebuild_step3_index(repo: &Repository) -> Result<Step3RebuildReport> {
     Ok(Step3RebuildReport {
         rebuilt_chunks: appended.len() as u64,
         rebuilt_tree_entries: tree_entries.len() as u64,
+        skipped_units,
     })
+}
+
+/// R16-1/R16-4: read the HEAD commit's tree object for a *write* / rebuild path
+/// (index / reindex / repair --rebuild-db), folding a missing commit OR tree object
+/// (shallow: GC'd / deleted / corrupt CAS) into a clear KCS-E-COMMIT-SHALLOW-001 with
+/// recovery guidance instead of a raw, opaque KCS-E-STORE-NOT-FOUND-001. Shared so
+/// every rebuild caller gets the same conversion (rationale: the recovery — restore
+/// the object or re-create the scope — and semantics are identical to every other
+/// shallow-commit site, so no new error code is warranted).
+fn read_head_tree_for_rebuild(repo: &Repository, head: &str) -> Result<TreeObject> {
+    let commit = match repo.read_commit(head) {
+        Ok(commit) => commit,
+        Err(error) if is_store_not_found(&error) => return Err(commit_shallow_for_rebuild(head)),
+        Err(error) => return Err(error),
+    };
+    match repo.read_tree(&commit.tree) {
+        Ok(tree) => Ok(tree),
+        Err(error) if is_store_not_found(&error) => Err(commit_shallow_for_rebuild(head)),
+        Err(error) => Err(error),
+    }
+}
+
+fn commit_shallow_for_rebuild(head: &str) -> KcsError {
+    KcsError::commit_shallow(
+        "HEAD commit is shallow (commit or tree object discarded); cannot rebuild the \
+         index — restore the missing object or re-create the scope",
+        head.to_owned(),
+    )
+}
+
+/// R16-4: which `load_normalized_units` failures are per-document skippable during a
+/// rebuild. A missing unit file surfaces as KCS-E-STORE-IO-001 and a malformed
+/// manifest/unit as KCS-E-STORE-CORRUPT-001; both are localized to one document's
+/// normalized instance, so the rebuild skips that raw_hash and recovers the rest.
+fn is_rebuild_skippable_unit_error(error: &KcsError) -> bool {
+    matches!(
+        error.error_code(),
+        "KCS-E-STORE-IO-001" | "KCS-E-STORE-CORRUPT-001"
+    )
+}
+
+/// R16-4: disclose a rebuild's skipped documents on the command output. `skipped_units`
+/// is always present (empty on a clean rebuild) so callers can rely on the field; when
+/// non-empty it is accompanied by `skipped_units_guidance` pointing at the recovery
+/// path. Rationale for keeping the exit code at 0 (rather than a partial-failure exit):
+/// the rebuild genuinely succeeded for every recoverable document, the skip is loud in
+/// the JSON (never a silent shrink, per R16-4), and there is no store-namespaced
+/// partial code to reuse — inventing/borrowing one (a repeat of the R14-5 anti-pattern)
+/// would be worse than a self-describing `skipped_units` array.
+fn attach_skipped_units(output: &mut Value, report: &Step3RebuildReport) {
+    let Some(object) = output.as_object_mut() else {
+        return;
+    };
+    object.insert("skipped_units".to_owned(), json!(report.skipped_units));
+    if !report.skipped_units.is_empty() {
+        object.insert(
+            "skipped_units_guidance".to_owned(),
+            json!(
+                "some documents' normalized units are missing or corrupt and were skipped; \
+                 run `kcs reindex --force` to re-normalize them from the raw objects"
+            ),
+        );
+    }
 }
 
 fn latest_normalize_ref(kcs_dir: &Path, raw_hash: &str) -> Result<Option<NormalizeRef>> {
@@ -2839,6 +3009,9 @@ fn latest_normalize_ref(kcs_dir: &Path, raw_hash: &str) -> Result<Option<Normali
 struct Step3RebuildReport {
     rebuilt_chunks: u64,
     rebuilt_tree_entries: u64,
+    /// R16-4: documents skipped because their normalized units are missing/corrupt,
+    /// each `{raw_hash, path, reason}`. Empty on a clean rebuild.
+    skipped_units: Vec<Value>,
 }
 
 fn read_chunking_config(repo: &Repository) -> Result<ChunkingConfig> {
@@ -3189,6 +3362,25 @@ fn split_flag_value(arg: &str) -> (&str, Option<&str>) {
     (arg, None)
 }
 
+/// R16-6: a value-LESS (boolean / SetTrue) flag must reject an inline
+/// `--flag=<value>` outright — including `--flag=false` and `--flag=true`. The
+/// R12-7 `split_flag_value` rewrite made the hand-rolled parsers accept `--flag=x`
+/// for EVERY flag, but the value-less arms then silently DROPPED the inline value
+/// and set the flag `true`, so `reindex --force=false --yes=false` (an explicit
+/// negation) bypassed the confirmation gate and ran a full reindex (exit 0). Reject
+/// any inline value here so the manual parsers match clap's derived bool flags,
+/// which already reject `--json=false` (KCS-E-CONFIG-USAGE-001, exit 2). Value-taking
+/// flags (`--at` / `--scope` / `--limit` / `--offset` / `--cursor`) keep consuming the
+/// inline value via `flag_value` and never call this.
+fn reject_inline_value(flag: &str, inline: Option<&str>) -> Result<()> {
+    if inline.is_some() {
+        return Err(KcsError::invalid_usage(format!(
+            "flag {flag} does not take a value"
+        )));
+    }
+    Ok(())
+}
+
 /// R12-7: the value for a value-taking flag — the inline `--flag=value` value if
 /// present, else the next argv token (advancing `i`).
 fn flag_value(args: &[String], i: &mut usize, inline: Option<&str>, flag: &str) -> Result<String> {
@@ -3223,19 +3415,31 @@ fn parse_search_args(args: Vec<String>) -> Result<ParsedSearch> {
                 return Err(KcsError::not_implemented(format!("search {flag} flag")));
             }
             "--text" | "--no-vector" => {
+                // R16-6: these are value-less mode selectors — `--text=false` must be
+                // a usage error, not a silent "text mode requested" (the inline value
+                // was previously dropped and the flag set anyway).
+                reject_inline_value(flag, inline)?;
                 requested_mode = SearchMode::Text;
                 explicit_mode = true;
             }
             "--vector" => {
+                reject_inline_value(flag, inline)?;
                 requested_mode = SearchMode::Vector;
                 explicit_mode = true;
             }
             "--hybrid" => {
+                reject_inline_value(flag, inline)?;
                 requested_mode = SearchMode::Hybrid;
                 explicit_mode = true;
             }
-            "--all-scopes" => all_scopes = true,
-            "--descendants" => descendants = true,
+            "--all-scopes" => {
+                reject_inline_value(flag, inline)?;
+                all_scopes = true;
+            }
+            "--descendants" => {
+                reject_inline_value(flag, inline)?;
+                descendants = true;
+            }
             "--scope" => {
                 scope = Some(PathBuf::from(flag_value(&args, &mut i, inline, "--scope")?));
             }
@@ -4221,52 +4425,66 @@ fn resolve_pointer_for_cli(pointer: &EvidencePointer) -> Result<PointerResolutio
     let target = resolve_scope_target(&pointer.scope_id, pointer.scope_path.as_deref())?;
     let repo = Repository::open(&target.repo_root)?;
 
-    // 08 §3.1 step 2: fetch the commit object (append-only; never GC'd).
-    let commit = repo.read_commit(&pointer.commit)?;
+    // 08 §3.1 step 2: fetch the commit object. R16-1: the commit object being GONE
+    // (external corruption / partial restore) is treated EXACTLY like a shallow
+    // commit — docs/05 §3.6 guarantees Evidence Pointer resolution never fails on a
+    // shallow commit because it falls back to raw_hash/chunk_hash direct resolution,
+    // the core evidence-grounded value. So the read is best-effort: on
+    // STORE-NOT-FOUND we skip the tree walk and resolve the chunk directly rather
+    // than bricking `view`/`open` on a raw KCS-E-STORE-NOT-FOUND-001.
+    let commit = match repo.read_commit(&pointer.commit) {
+        Ok(commit) => Some(commit),
+        Err(error) if is_store_not_found(&error) => None,
+        Err(error) => return Err(error),
+    };
 
-    // 08 §3.1 step 2a/3-4: a shallow commit (tree object discarded) skips the
-    // tree walk; otherwise the raw_hash must appear in commit.tree for the
-    // pointer to resolve against *this* commit's snapshot (not the working tree
-    // of some later commit).
+    // 08 §3.1 step 2a/3-4: a shallow commit (tree object discarded) OR a missing
+    // commit object (R16-1) skips the tree walk; otherwise the raw_hash must appear
+    // in commit.tree for the pointer to resolve against *this* commit's snapshot
+    // (not the working tree of some later commit).
     // `entry_gen` is the tree entry's normalization generation on a non-shallow
     // commit; `None` on the shallow path (no tree to read). It binds the chunk's
     // gen below (N5).
-    let (commit_shallow, entry_gen) = match repo.read_tree(&commit.tree) {
-        Ok(tree) => {
-            let entry = tree
-                .entries
-                .iter()
-                .find(|entry| entry.raw_hash == pointer.raw_hash);
-            let Some(entry) = entry else {
-                // step 5 (tombstone) is checked before declaring not_found.
-                if let Some(tombstone) = read_tombstone(&target, &pointer.raw_hash)? {
-                    return Err(tombstone_error(tombstone));
-                }
-                return Err(purge_not_found_error(&target, &pointer.raw_hash));
-            };
-            // M6: the tree entry's normalization must bind to the pointer's
-            // tool_profile_hash. N5: it must ALSO bind `gen` (checked below against
-            // the resolved chunk), so a pointer that keeps an old commit but swaps
-            // in a newer-generation chunk_hash produced by `reindex --force` cannot
-            // resolve (the gen axis M6 missed, 08 §3). A tree entry with no explicit
-            // normalization (e.g. a bare `kcs snapshot` that advanced HEAD without
-            // re-recording normalize refs, L3) carries no gen to bind, so it keeps
-            // the pre-existing behavior — the chunk (raw, tool) identity check below
-            // is the available guard. `entry_gen` stays `None` there.
-            let entry_gen = match &entry.normalize {
-                Some(normalize) => {
-                    if normalize.tool_profile_hash != pointer.tool_profile_hash {
-                        return Err(invalid_pointer_identity_error(pointer));
+    let (commit_shallow, entry_gen) =
+        match commit.as_ref().map(|commit| repo.read_tree(&commit.tree)) {
+            Some(Ok(tree)) => {
+                let entry = tree
+                    .entries
+                    .iter()
+                    .find(|entry| entry.raw_hash == pointer.raw_hash);
+                let Some(entry) = entry else {
+                    // step 5 (tombstone) is checked before declaring not_found.
+                    if let Some(tombstone) = read_tombstone(&target, &pointer.raw_hash)? {
+                        return Err(tombstone_error(tombstone));
                     }
-                    Some(normalize.gen)
-                }
-                None => None,
-            };
-            (false, entry_gen)
-        }
-        Err(error) if is_store_not_found(&error) => (true, None),
-        Err(error) => return Err(error),
-    };
+                    return Err(purge_not_found_error(&target, &pointer.raw_hash));
+                };
+                // M6: the tree entry's normalization must bind to the pointer's
+                // tool_profile_hash. N5: it must ALSO bind `gen` (checked below against
+                // the resolved chunk), so a pointer that keeps an old commit but swaps
+                // in a newer-generation chunk_hash produced by `reindex --force` cannot
+                // resolve (the gen axis M6 missed, 08 §3). A tree entry with no explicit
+                // normalization (e.g. a bare `kcs snapshot` that advanced HEAD without
+                // re-recording normalize refs, L3) carries no gen to bind, so it keeps
+                // the pre-existing behavior — the chunk (raw, tool) identity check below
+                // is the available guard. `entry_gen` stays `None` there.
+                let entry_gen = match &entry.normalize {
+                    Some(normalize) => {
+                        if normalize.tool_profile_hash != pointer.tool_profile_hash {
+                            return Err(invalid_pointer_identity_error(pointer));
+                        }
+                        Some(normalize.gen)
+                    }
+                    None => None,
+                };
+                (false, entry_gen)
+            }
+            // Tree object gone (shallow), OR the commit object itself gone (R16-1, the
+            // `None` arm) — both resolve the chunk directly, with gen unbound.
+            Some(Err(error)) if is_store_not_found(&error) => (true, None),
+            Some(Err(error)) => return Err(error),
+            None => (true, None),
+        };
 
     // 08 §3.1 step 5: purged raw_hash carrying a tombstone -> tombstone response.
     if let Some(tombstone) = read_tombstone(&target, &pointer.raw_hash)? {
@@ -4770,6 +4988,24 @@ fn scope_ambiguous_error(scope_id: &str, candidates: &[PathBuf]) -> KcsError {
 
 fn is_store_not_found(error: &KcsError) -> bool {
     error.error_code() == "KCS-E-STORE-NOT-FOUND-001"
+}
+
+/// R16-2: the store-corruption error classes that a single scope may raise mid-search
+/// and that must NOT abort a multi-scope search (05 §1.8 per-scope isolation). A
+/// missing object (STORE-NOT-FOUND), a corrupt object (STORE-CORRUPT, e.g. a CAS
+/// hash mismatch), a store I/O failure (STORE-IO), and a shallow commit
+/// (COMMIT-SHALLOW) are all localized to one scope's store; the search loop
+/// downgrades them to `Excluded("store_corrupt")` so healthy scopes still return.
+/// Deliberately narrow: it does not catch schema / programming errors, which stay
+/// fail-fast.
+fn is_store_corrupt_class(error: &KcsError) -> bool {
+    matches!(
+        error.error_code(),
+        "KCS-E-STORE-NOT-FOUND-001"
+            | "KCS-E-STORE-CORRUPT-001"
+            | "KCS-E-STORE-IO-001"
+            | "KCS-E-COMMIT-SHALLOW-001"
+    )
 }
 
 struct ObjectUri {
@@ -5444,39 +5680,70 @@ fn execute_pending_markdownize_tasks(
             counts.failed += 1;
             continue;
         }
-        let file_size = repo
-            .root()
-            .join(&task.input_path)
-            .metadata()
-            .map(|metadata| metadata.len())
-            .unwrap_or(0);
-        // R11-6: prorate the reserved (== billed, F8) cost of a UNIT-SCOPED retry by
-        // the fraction of the document actually re-sent — `unit_keys` names the still-
-        // failed units, and `execute_online_markdownize_task` requests only those. A
-        // full send (`unit_keys == None`) still bills the whole document. Without this,
-        // a 1-page retry of a 500-page PDF re-billed all 500 pages every attempt.
-        let estimated_usd = prorated_markdownize_cost(repo, &task, file_size);
-        let estimate = BudgetEstimate {
-            scope_id: scope_id.clone(),
-            task_type: TaskType::Markdownize,
-            estimated_usd,
-            adapter_id: Some(online_profile.adapter_id.clone()),
+        // R16-7: error-kind-aware re-reservation gate. When THIS task instance is a
+        // re-send whose PREVIOUS recorded failure was a non-billable rejection
+        // (RateLimit / QuotaExceeded — the backend refuses the request before it
+        // processes or bills anything), skip the reservation: the prior attempt's F8
+        // reservation (kept on failure) already covers this send. Without the gate a
+        // RateLimit retry (task.rs `retry_policy`: max_attempts = None, unbounded)
+        // re-reserves the FULL document cost on every attempt, so one logical operation
+        // bills N times and can exhaust the device month cap — falsely pausing unrelated
+        // tasks in other scopes (R15-2's harm, reproduced on the retry path).
+        //
+        // Only RateLimit/QuotaExceeded skip — deliberately NOT "reserve once for the
+        // task's lifetime" (Opus's rejected `cost_reserved` proposal): a NetworkError
+        // re-send may have been billed server-side (the request can reach the backend
+        // before the socket drops), so it reserves afresh each attempt, bounded by
+        // max_attempts = 5. Reserving once would let real spend exceed the reserved cap
+        // on server-side-billed retries — the silent cap bypass R15-5 flagged as major,
+        // the opposite failure. A crash mid-send (Q3 reclaim, Running -> Pending) also
+        // re-reserves: the Running flip below clears `fallback_reason` so a reclaimed
+        // task reaches the charge path here rather than inheriting this attempt's
+        // "rate_limit" skip — its send's billing outcome is unknown after a crash, so we
+        // stay conservative (bounded by the attempts policy).
+        let previous_failure_kind = retry_kind_from_reason(task.fallback_reason.as_deref());
+        let reservation_already_covers_resend = matches!(
+            previous_failure_kind,
+            RetryErrorKind::RateLimit | RetryErrorKind::QuotaExceeded
+        );
+        let charge = if reservation_already_covers_resend {
+            // The previous attempt's reservation stands in for this send's charge.
+            ChargeOutcome::Charged
+        } else {
+            let file_size = repo
+                .root()
+                .join(&task.input_path)
+                .metadata()
+                .map(|metadata| metadata.len())
+                .unwrap_or(0);
+            // R11-6: prorate the reserved (== billed, F8) cost of a UNIT-SCOPED retry by
+            // the fraction of the document actually re-sent — `unit_keys` names the
+            // still-failed units, and `execute_online_markdownize_task` requests only
+            // those. A full send (`unit_keys == None`) still bills the whole document.
+            // Without this, a 1-page retry of a 500-page PDF re-billed all 500 pages.
+            let estimated_usd = prorated_markdownize_cost(repo, &task, file_size);
+            let estimate = BudgetEstimate {
+                scope_id: scope_id.clone(),
+                task_type: TaskType::Markdownize,
+                estimated_usd,
+                adapter_id: Some(online_profile.adapter_id.clone()),
+            };
+            // F8: reserve the charge under the device-global cost-ledger lock BEFORE
+            // execution, serializing the budget read-check-append against every other
+            // scope. The executor bills exactly this estimate under the "markdown" key
+            // (the previous post-execution append recomputed the same value), so the
+            // reserved row is identical. The adapter call runs outside the lock; a
+            // failure keeps the reservation (see helper docs).
+            charge_cost_ledger_under_lock(
+                &cost_ledger,
+                cost_ledger_lock_path(),
+                &budget_caps,
+                &month,
+                adapter_kind_budget_key(online_profile.adapter_kind),
+                &estimate,
+                override_budget,
+            )?
         };
-        // F8: reserve the charge under the device-global cost-ledger lock BEFORE
-        // execution, serializing the budget read-check-append against every other
-        // scope. The executor bills exactly this estimate under the "markdown" key
-        // (the previous post-execution append recomputed the same value), so the
-        // reserved row is identical. The adapter call runs outside the lock; a
-        // failure keeps the reservation (see helper docs).
-        let charge = charge_cost_ledger_under_lock(
-            &cost_ledger,
-            cost_ledger_lock_path(),
-            &budget_caps,
-            &month,
-            adapter_kind_budget_key(online_profile.adapter_kind),
-            &estimate,
-            override_budget,
-        )?;
         if matches!(charge, ChargeOutcome::BudgetExceeded) {
             store
                 .update_matching(|candidate| {
@@ -5498,6 +5765,14 @@ fn execute_pending_markdownize_tasks(
                 if candidate.task_id == task_id {
                     candidate.status = TaskStatus::Running;
                     candidate.heartbeat_at = Some(now_utc_seconds());
+                    // R16-7: entering the send clears the retry-kind marker so a crash
+                    // mid-send (reclaimed by Q3 to Pending) re-reserves on the next pass
+                    // rather than inheriting this attempt's "rate_limit"/"quota_exceeded"
+                    // skip — a crashed send's billing outcome is unknown, so the earlier
+                    // reservation may already be consumed and we must charge afresh. On a
+                    // recorded failure the reason is re-set below, so the skip gate still
+                    // sees it for a normal (non-crash) retry.
+                    candidate.fallback_reason = None;
                     true
                 } else {
                     false
@@ -6553,6 +6828,37 @@ fn run_embedding_enrichment(
     // "failed" (L6). R11-2: the loop also tallies paused / auth / failed outcomes.
     let mut transitions: BTreeMap<String, EmbeddingTransition> = BTreeMap::new();
 
+    // R16-7: embedding tasks whose PREVIOUS recorded failure was a non-billable
+    // rejection (RateLimit / QuotaExceeded — refused before the backend processes or
+    // bills the request). Their earlier F8 reservation already covers this resend, so
+    // the per-batch charge below excludes their chars. Without this a rate-limited
+    // chunk (RateLimit = unbounded retries) re-reserves its chars on every `batch
+    // retry`, and one logical enrichment bills N times, exhausting the device month cap
+    // and falsely pausing unrelated tasks (R15-2's harm on the retry path). Loaded once
+    // at pass start (transitions are written back only after the loop), so it reflects
+    // the PREVIOUS pass's outcome — exactly the "prior failure" the gate needs.
+    //
+    // Fresh / NetworkError / crash-stranded chunks are absent from this set and charge
+    // afresh: a NetworkError send may have been billed server-side, and a crash mid-send
+    // leaves the task Pending with its embedding uncommitted, so re-driving re-reserves
+    // conservatively (bounded by max_attempts; a succeeded-but-uncommitted chunk instead
+    // re-drives through §5.5 content-addressed reuse with NO re-charge). Reserving once
+    // for the task's lifetime is deliberately NOT done — it would let real spend exceed
+    // the reserved cap on server-side-billed retries (the R15-5 silent cap bypass).
+    let reservation_covers_resend: BTreeSet<String> = task_store
+        .all()
+        .map_err(pipeline_to_kcs)?
+        .into_iter()
+        .filter(|task| {
+            task.task_type == TaskType::Embedding
+                && matches!(
+                    retry_kind_from_reason(task.fallback_reason.as_deref()),
+                    RetryErrorKind::RateLimit | RetryErrorKind::QuotaExceeded
+                )
+        })
+        .map(|task| task.output_ref)
+        .collect();
+
     for batch in embeddable.chunks(EMBEDDING_BATCH_SIZE) {
         // Split content-addressed reuse (no API call, free) from chunks that
         // require a live adapter call (CT3-EMBED-006).
@@ -6595,31 +6901,43 @@ fn run_embedding_enrichment(
         if plan.to_send.is_empty() {
             continue;
         }
-        // L5: budget judgement and ledger charge only the chars actually sent to
-        // the API — reused chunks issue no request and must not be billed.
+        // L5 + R16-7: bill only the chars of chunks that need a FRESH reservation —
+        // reused chunks issue no request, and a chunk whose task's previous failure was
+        // a non-billable rejection (RateLimit / QuotaExceeded) is already covered by
+        // that attempt's F8 reservation. The whole `to_send` batch is still sent below
+        // (both subsets need embedding); only the charged char count is reduced.
         let sent_chars: u64 = plan
             .to_send
             .iter()
+            .filter(|(chunk, _)| {
+                !reservation_covers_resend.contains(&embedding_task_output_ref(&chunk.chunk_id))
+            })
             .map(|(chunk, _)| chunk.text.chars().count() as u64)
             .sum();
-        let estimate = BudgetEstimate {
-            scope_id: scope_id.clone(),
-            task_type: TaskType::Embedding,
-            estimated_usd: estimate_embedding_cost(sent_chars),
-            adapter_id: Some(profile.tool_id.clone()),
+        let charge = if sent_chars == 0 {
+            // Every to-send chunk is a RateLimit/Quota resend already reserved by its
+            // prior attempt — skip the reservation entirely (no $0 ledger row).
+            ChargeOutcome::Charged
+        } else {
+            let estimate = BudgetEstimate {
+                scope_id: scope_id.clone(),
+                task_type: TaskType::Embedding,
+                estimated_usd: estimate_embedding_cost(sent_chars),
+                adapter_id: Some(profile.tool_id.clone()),
+            };
+            // F8: reserve the charge under the device-global cost-ledger lock BEFORE
+            // sending, so a concurrent scope observes this spend and cannot also pass
+            // the cap (TOCTOU). The adapter call stays outside the lock.
+            charge_cost_ledger_under_lock(
+                &cost_ledger,
+                cost_ledger_lock_path(),
+                &budget_caps,
+                &month,
+                EMBEDDING_ADAPTER_KIND,
+                &estimate,
+                override_budget,
+            )?
         };
-        // F8: reserve the charge under the device-global cost-ledger lock BEFORE
-        // sending, so a concurrent scope observes this spend and cannot also pass
-        // the cap (TOCTOU). The adapter call stays outside the lock.
-        let charge = charge_cost_ledger_under_lock(
-            &cost_ledger,
-            cost_ledger_lock_path(),
-            &budget_caps,
-            &month,
-            EMBEDDING_ADAPTER_KIND,
-            &estimate,
-            override_budget,
-        )?;
         if matches!(charge, ChargeOutcome::BudgetExceeded) {
             // Budget exhausted: pause the remaining to-send chunks
             // (index_status.budget_paused). Already-linked reuse stays done.

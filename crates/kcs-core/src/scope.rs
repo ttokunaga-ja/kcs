@@ -65,8 +65,10 @@ pub struct StatusReport {
 enum HeadTreeState {
     /// No HEAD commit — an unborn branch (a first snapshot creates the root).
     Unborn,
-    /// HEAD names a commit whose TREE object is gone (shallow: GC'd / manually
-    /// deleted / corrupt CAS). Pure reads degrade; writes must fail loudly. (The
+    /// HEAD names a commit whose TREE object is gone, OR whose COMMIT object itself
+    /// is gone (shallow: GC'd / manually deleted / corrupt CAS). R16-1 folds the
+    /// missing-commit case in here too: it is the same corruption class as a missing
+    /// tree, with the same policy — pure reads degrade; writes must fail loudly. (The
     /// write paths carry their own HEAD hash for the error context, so this variant
     /// needs no payload.)
     Shallow,
@@ -89,6 +91,17 @@ pub struct LogEntry {
     pub commit_hash: String,
     #[serde(flatten)]
     pub commit: CommitObject,
+}
+
+/// The result of [`Repository::log`]: the reachable history plus a truncation flag.
+/// R16-1: when an ancestor commit object is gone (shallow / external corruption),
+/// history traversal stops at that point and returns the healthy prefix from HEAD
+/// with `truncated = true`, rather than bricking the whole `log` on a raw
+/// `KCS-E-STORE-NOT-FOUND-001`. The omission is always explicit, never silent.
+#[derive(Debug, Clone, Serialize)]
+pub struct LogReport {
+    pub entries: Vec<LogEntry>,
+    pub truncated: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -416,10 +429,25 @@ impl Repository {
             serde_json::to_value(&working).map_err(|err| KcsError::schema(err.to_string()))?;
         let (tree_hash, _) = self.store.write_json(ObjectKind::Tree, &tree_value)?;
         let head_hash = self.head_commit_hash()?;
-        let head_tree_hash = head_hash
-            .as_deref()
-            .map(|hash| self.read_commit(hash).map(|commit| commit.tree))
-            .transpose()?;
+        // R16-1: a missing HEAD *commit* object is the same shallow-corruption class
+        // as a missing tree (handled just below) — a write must fail loudly with
+        // KCS-E-COMMIT-SHALLOW-001 and never advance refs onto an unverifiable base,
+        // rather than surface a raw, opaque KCS-E-STORE-NOT-FOUND-001. Was an
+        // unconditional `?` that only the tree case was guarded against.
+        let head_tree_hash = match head_hash.as_deref() {
+            None => None,
+            Some(hash) => match self.read_commit(hash) {
+                Ok(commit) => Some(commit.tree),
+                Err(error) if is_store_not_found(&error) => {
+                    return Err(KcsError::commit_shallow(
+                        "HEAD commit object is missing (shallow: discarded / corrupt); \
+                         restore the commit object or re-create the scope before snapshotting",
+                        hash.to_owned(),
+                    ));
+                }
+                Err(error) => return Err(error),
+            },
+        };
         // Snapshot the prior HEAD tree now — after the ref updates below,
         // head_tree_state() would return the NEW tree (useless as "previous").
         // R15-4: if HEAD names a commit whose tree object is gone (shallow: GC'd /
@@ -501,27 +529,46 @@ impl Repository {
         })
     }
 
-    pub fn log(&self) -> Result<Vec<LogEntry>> {
+    pub fn log(&self) -> Result<LogReport> {
         self.validate()?;
         let mut entries = Vec::new();
         let mut next = self.head_commit_hash()?;
+        let mut truncated = false;
         while let Some(hash) = next {
-            let commit = self.read_commit(&hash)?;
+            // R16-1: a missing ancestor commit object (shallow / external corruption)
+            // truncates the history at that point instead of bricking the whole `log`
+            // on a raw KCS-E-STORE-NOT-FOUND-001. The healthy prefix from HEAD is
+            // returned with `truncated = true` so the loss is explicit — Sonnet-B's
+            // repro (a missing root commit swallowing the healthy recent commits too)
+            // is exactly what this prevents.
+            let commit = match self.read_commit(&hash) {
+                Ok(commit) => commit,
+                Err(error) if is_store_not_found(&error) => {
+                    truncated = true;
+                    break;
+                }
+                Err(error) => return Err(error),
+            };
             next = commit.parents.first().cloned();
             entries.push(LogEntry {
                 commit_hash: hash,
                 commit,
             });
         }
-        Ok(entries)
+        Ok(LogReport { entries, truncated })
     }
 
     pub fn diff(&self, a: &str, b: &str) -> Result<Vec<DiffEntry>> {
         self.validate()?;
         let a_hash = self.resolve_commit(a)?;
         let b_hash = self.resolve_commit(b)?;
-        let a_tree = self.read_tree(&self.read_commit(&a_hash)?.tree)?;
-        let b_tree = self.read_tree(&self.read_commit(&b_hash)?.tree)?;
+        // R16-5: if either side's commit or tree object is gone (shallow), a
+        // full-file diff is impossible — surface a clear KCS-E-COMMIT-SHALLOW-001
+        // that names WHICH side (a/b) is shallow, not a raw opaque
+        // KCS-E-STORE-NOT-FOUND-001 whose hash the user cannot map to an operand
+        // (docs/05 §3.4.1: "片方が shallow なら全ファイル差分は不能と明示").
+        let a_tree = self.diff_side_tree("a", &a_hash)?;
+        let b_tree = self.diff_side_tree("b", &b_hash)?;
         let a_map = tree_map(&a_tree);
         let b_map = tree_map(&b_tree);
 
@@ -546,6 +593,31 @@ impl Repository {
             });
         }
         Ok(changes)
+    }
+
+    /// R16-5: read one `diff` side's tree, folding a missing commit OR tree object
+    /// (shallow: discarded / corrupt) into a KCS-E-COMMIT-SHALLOW-001 that names
+    /// which side (`side` = "a"/"b") is shallow. The rationale for reusing
+    /// COMMIT-SHALLOW rather than minting a diff-specific code: the recovery
+    /// (restore the object or diff a non-shallow pair) and semantics are identical
+    /// to every other shallow-commit site (R16-1). `resolve_commit` already ran, so
+    /// a genuinely absent operand is a distinct not_found — only a resolved commit
+    /// whose backing objects are gone reaches here.
+    fn diff_side_tree(&self, side: &str, commit_hash: &str) -> Result<TreeObject> {
+        let commit = match self.read_commit(commit_hash) {
+            Ok(commit) => commit,
+            Err(error) if is_store_not_found(&error) => {
+                return Err(diff_side_shallow_error(side, commit_hash));
+            }
+            Err(error) => return Err(error),
+        };
+        match self.read_tree(&commit.tree) {
+            Ok(tree) => Ok(tree),
+            Err(error) if is_store_not_found(&error) => {
+                Err(diff_side_shallow_error(side, commit_hash))
+            }
+            Err(error) => Err(error),
+        }
     }
 
     pub fn inspect(&self, hash: &str) -> Result<InspectedObject> {
@@ -737,7 +809,15 @@ impl Repository {
         let Some(commit_hash) = self.head_commit_hash()? else {
             return Ok(HeadTreeState::Unborn);
         };
-        let tree_hash = self.read_commit(&commit_hash)?.tree;
+        // R16-1: fold a missing *commit* object into `Shallow` too (was an
+        // unconditional `?` that bricked pure reads on a raw KCS-E-STORE-NOT-FOUND-001
+        // when the commit — not just its tree — was gone). Same corruption class, same
+        // degrade-vs-fail-loudly policy the tree case already had.
+        let tree_hash = match self.read_commit(&commit_hash) {
+            Ok(commit) => commit.tree,
+            Err(error) if is_store_not_found(&error) => return Ok(HeadTreeState::Shallow),
+            Err(error) => return Err(error),
+        };
         match self.read_tree(&tree_hash) {
             Ok(tree) => Ok(HeadTreeState::Present(tree)),
             Err(error) if is_store_not_found(&error) => Ok(HeadTreeState::Shallow),
@@ -1547,6 +1627,20 @@ fn commit_stats(prior: Option<&TreeObject>, working: &TreeObject) -> CommitStats
 /// object into the shallow-commit policy (degrade reads / fail writes loudly).
 fn is_store_not_found(error: &KcsError) -> bool {
     error.error_code() == "KCS-E-STORE-NOT-FOUND-001"
+}
+
+/// R16-5: the `diff` shallow-side error, naming which operand (`a`/`b`) is shallow.
+fn diff_side_shallow_error(side: &str, commit_hash: &str) -> KcsError {
+    KcsError::new(
+        "KCS-E-COMMIT-SHALLOW-001",
+        format!(
+            "diff side `{side}` is shallow (its commit or tree object is discarded); \
+             a full-file diff is not possible when either side is shallow — diff a \
+             non-shallow commit pair or restore the missing object"
+        ),
+        json!({ "commit_hash": commit_hash, "side": side }),
+        ExitCode::Failure,
+    )
 }
 
 fn validate_format_version(version: &str) -> Result<()> {
