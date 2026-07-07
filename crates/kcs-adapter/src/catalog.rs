@@ -105,6 +105,11 @@ pub fn run_standard_online_markdownize(
     {
         Some("auth_error") => return Err(AdapterError::Auth("mock auth failure".to_owned())),
         Some("rate_limit") => return Err(AdapterError::RateLimit("mock 429".to_owned())),
+        // R16-7: a retryable NetworkError (mapped from `AdapterError::Network`) — unlike
+        // rate_limit it may have been billed server-side, so each retry re-reserves.
+        Some("network_error") => {
+            return Err(AdapterError::Network("mock network failure".to_owned()))
+        }
         // R13-1: `incr_incomplete` simulates an OCR response that drops a requested
         // unit ONLY in incremental mode (a full re-send returns everything), so the
         // KCS-side acceptance check fails and the online route falls back to Full.
@@ -166,6 +171,10 @@ pub fn resolve_standard_online_markdownize_profile(scope_id: &str) -> Result<Ada
     {
         Some("auth_error") => return Err(AdapterError::Auth("mock auth failure".to_owned())),
         Some("rate_limit") => return Err(AdapterError::RateLimit("mock 429".to_owned())),
+        // R16-7: keep the seam arms in sync with `run_standard_online_markdownize`.
+        Some("network_error") => {
+            return Err(AdapterError::Network("mock network failure".to_owned()))
+        }
         Some("mock")
         | Some("partial")
         | Some("mock_link_image")

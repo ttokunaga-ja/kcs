@@ -3830,12 +3830,20 @@ fn r6_corrupt_normalized_unit_is_store_corrupt_not_config_schema() {
     let unit_path = first_normalized_unit_json(&dir.path().join(".kcs/objects/normalized_units"));
     fs::write(&unit_path, r#"{"torn":"#).unwrap();
 
-    let err = json_failure(&dir, &["repair", "--rebuild-db"], 4);
-    assert_eq!(err["error_code"], "KCS-E-STORE-CORRUPT-001");
-    let reported = std::path::PathBuf::from(err["context"]["path"].as_str().unwrap())
-        .canonicalize()
-        .unwrap();
-    assert_eq!(reported, unit_path.canonicalize().unwrap());
+    // R16-4: a corrupt normalized unit no longer aborts the whole rebuild — repair
+    // SKIPS that document, recording it under KCS-E-STORE-CORRUPT-001 (the original R6
+    // concern: NOT a CONFIG-SCHEMA misclassification) with recovery guidance, instead
+    // of the former whole-scope exit-4 failure.
+    let out = json_success(&dir, &["repair", "--rebuild-db"]);
+    let skipped = out["skipped_units"].as_array().unwrap();
+    assert_eq!(
+        skipped.len(),
+        1,
+        "the corrupt unit's document is skipped: {out}"
+    );
+    assert_eq!(skipped[0]["reason"], "KCS-E-STORE-CORRUPT-001");
+    assert_ne!(skipped[0]["reason"], "KCS-E-CONFIG-SCHEMA-001");
+    assert_eq!(skipped[0]["path"], "note.md");
 }
 
 // ---------------------------------------------------------------------------
@@ -4714,4 +4722,563 @@ fn r13_2_keychain_auth_is_loud_not_silent() {
         errors.contains("KCS-E-NOT-IMPLEMENTED-001"),
         "keychain auth must be recorded loudly, not silently ignored: {errors}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// R16 exploratory audit fixes — store-corruption / shallow-consistency cluster.
+// A *deleted* CAS object (KCS-E-STORE-NOT-FOUND-001) is the shallow class these
+// tests place by hand (05 §2.2 has no Step 3 GC generator); a *corrupted* object
+// (hash mismatch → KCS-E-STORE-CORRUPT-001) is a distinct class exercised by R16-2.
+// ---------------------------------------------------------------------------
+
+/// Read a scope's HEAD commit hash from its `.kcs/HEAD`.
+fn head_commit(kcs_dir: &Path) -> String {
+    fs::read_to_string(kcs_dir.join("HEAD"))
+        .unwrap()
+        .trim()
+        .to_owned()
+}
+
+// R16-1: a missing HEAD *commit* object (not merely its tree) is the same shallow
+// corruption class R13-4/R15-4 defend against, but every `read_commit` call site was
+// an unconditional `?`. Pure reads (status/log/search/view) must degrade to exit 0;
+// writes (snapshot/index/reindex/repair) must reject with a clear COMMIT-SHALLOW;
+// restoring the object heals everything. Before the fix all of these bricked exit 4
+// on a raw KCS-E-STORE-NOT-FOUND-001.
+#[test]
+fn r16_1_missing_commit_object_degrades_reads_and_rejects_writes() {
+    let dir = indexed_scope();
+    // Capture a valid Evidence pointer while the scope is healthy.
+    let search0 = json_success(&dir, &["search", "トークン TTL 3600"]);
+    let ptr = first_result(&search0)["evidence_pointer"].to_string();
+
+    let kcs_dir = dir.path().join(".kcs");
+    let head = head_commit(&kcs_dir);
+    let commit_path = object_path(&kcs_dir, "commits", &head);
+    let commit_bytes = fs::read(&commit_path).unwrap();
+
+    // Delete the HEAD COMMIT object; its tree survives — exactly the R16-1 corruption.
+    fs::remove_file(&commit_path).unwrap();
+
+    // (a) pure reads degrade to exit 0, never a raw KCS-E-STORE-NOT-FOUND-001.
+    let status = json_success(&dir, &["status"]);
+    assert_eq!(
+        status["head_shallow"], true,
+        "status must flag the shallow HEAD: {status}"
+    );
+    let log = json_success(&dir, &["log"]);
+    assert_eq!(
+        log["truncated"], true,
+        "log must flag truncation at the missing HEAD commit: {log}"
+    );
+    assert!(
+        log["commits"].as_array().unwrap().is_empty(),
+        "no commit is readable from the missing HEAD: {log}"
+    );
+    // search degrades via the cached tree_entries rows (ShallowCachedRows) — real
+    // results, exit 0 — rather than dying or silently emptying (R16-1 × R16-3 seam).
+    let search = json_success(&dir, &["search", "トークン TTL 3600"]);
+    assert!(
+        !search["results"].as_array().unwrap().is_empty(),
+        "search must degrade to cached results, not brick: {search}"
+    );
+    let viewed = json_success(&dir, &["view", &ptr]);
+    assert_eq!(
+        viewed["commit_shallow"], true,
+        "view must resolve directly on the missing commit: {viewed}"
+    );
+    assert!(viewed["text"].as_str().unwrap().contains("トークン TTL"));
+
+    // (b) writes reject with COMMIT-SHALLOW (exit 1), not a raw STORE-NOT-FOUND. Edit a
+    // file first so `index`'s unchanged-scope short-circuit still reaches the snapshot.
+    fs::write(
+        dir.path().join("auth.md"),
+        "# 認証仕様\n\n## API\n更新された本文です。\n",
+    )
+    .unwrap();
+    for (args, label) in [
+        (vec!["snapshot", "-m", "x"], "snapshot"),
+        (vec!["index", "--yes"], "index"),
+        (vec!["reindex", "--force", "--yes"], "reindex"),
+        (vec!["repair", "--rebuild-db"], "repair"),
+    ] {
+        let err = json_failure(&dir, &args, 1);
+        assert_eq!(
+            err["error_code"], "KCS-E-COMMIT-SHALLOW-001",
+            "{label} must reject the missing commit with COMMIT-SHALLOW: {err}"
+        );
+    }
+
+    // (c) restore the commit object → reads are healthy again.
+    fs::write(&commit_path, &commit_bytes).unwrap();
+    let status2 = json_success(&dir, &["status"]);
+    assert_eq!(
+        status2["head_shallow"], false,
+        "restore must clear the shallow flag: {status2}"
+    );
+    let log2 = json_success(&dir, &["log"]);
+    assert_eq!(log2["truncated"], false);
+    assert!(!log2["commits"].as_array().unwrap().is_empty());
+}
+
+// R16-1: `log` truncates at a missing ANCESTOR commit and returns the healthy prefix
+// from HEAD (Sonnet-B's repro: a missing root commit must not swallow the healthy
+// recent commits too). Reads that only need HEAD stay fully healthy.
+#[test]
+fn r16_1_log_truncates_at_missing_ancestor_commit() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("d.md"), "# D\n\n## S\nv1 body\n").unwrap();
+    kcs(&dir, &["init"]).assert().success();
+    let c1 = json_success(&dir, &["snapshot", "-m", "first"]);
+    let c1_hash = c1["commit_hash"].as_str().unwrap().to_owned();
+    fs::write(dir.path().join("d.md"), "# D\n\n## S\nv2 body\n").unwrap();
+    let c2 = json_success(&dir, &["snapshot", "-m", "second"]);
+    let c2_hash = c2["commit_hash"].as_str().unwrap().to_owned();
+
+    // (control) a healthy log returns both commits, HEAD-first, not truncated.
+    let full = json_success(&dir, &["log"]);
+    assert_eq!(full["truncated"], false);
+    assert_eq!(full["commits"].as_array().unwrap().len(), 2);
+
+    // Delete the ROOT commit object (c1); HEAD (c2) survives.
+    let kcs_dir = dir.path().join(".kcs");
+    fs::remove_file(object_path(&kcs_dir, "commits", &c1_hash)).unwrap();
+
+    let log = json_success(&dir, &["log"]);
+    assert_eq!(
+        log["truncated"], true,
+        "a missing ancestor must flag truncation: {log}"
+    );
+    let commits = log["commits"].as_array().unwrap();
+    assert_eq!(
+        commits.len(),
+        1,
+        "the healthy HEAD prefix must still return: {log}"
+    );
+    assert_eq!(commits[0]["commit_hash"], c2_hash);
+    // status only needs HEAD (c2), which is present → not shallow.
+    let status = json_success(&dir, &["status"]);
+    assert_eq!(
+        status["head_shallow"], false,
+        "HEAD present → status is not shallow: {status}"
+    );
+}
+
+// R16-2: a store-corruption failure in ONE scope must not abort a multi-scope search
+// and discard the healthy scopes' already-collected results (05 §1.8 per-scope
+// isolation). A CORRUPTED (hash-mismatch) HEAD commit object in scope B surfaces a
+// KCS-E-STORE-CORRUPT-001 Fatal (a class NOT absorbed as shallow); the loop downgrades
+// it to Excluded("store_corrupt") so scope A still returns → exit 3. Before the fix the
+// whole search died exit 4.
+#[test]
+fn r16_2_one_scope_store_corruption_is_partial_not_all_failed() {
+    let parent = tempfile::tempdir().unwrap();
+    let data_home = parent.path().join("xdg");
+    let a = parent.path().join("a");
+    let b = parent.path().join("b");
+    fs::create_dir_all(&a).unwrap();
+    fs::create_dir_all(&b).unwrap();
+    fs::write(a.join("a.md"), "# A\n\n## Sec\nalphaunique survivor\n").unwrap();
+    fs::write(b.join("b.md"), "# B\n\n## Sec\nbetaunique other\n").unwrap();
+    json_success_path(&a, &data_home, &["init"]);
+    json_success_path(&b, &data_home, &["init"]);
+    json_success_path(&a, &data_home, &["index", "--approve"]);
+    json_success_path(&b, &data_home, &["index", "--approve"]);
+
+    // (control) both scopes healthy → the search reaches both.
+    let healthy = json_success_path(&a, &data_home, &["search", "alphaunique", "--all-scopes"]);
+    assert_eq!(healthy["searched_scopes"].as_array().unwrap().len(), 2);
+
+    // Corrupt scope B's HEAD commit object: garbage bytes → content hash mismatch →
+    // read_by_hash returns KCS-E-STORE-CORRUPT-001 (distinct from the shallow /
+    // STORE-NOT-FOUND class, so only R16-2's Fatal downgrade can catch it).
+    let b_kcs = b.join(".kcs");
+    let b_head = head_commit(&b_kcs);
+    fs::write(
+        object_path(&b_kcs, "commits", &b_head),
+        b"this is not a valid commit object",
+    )
+    .unwrap();
+
+    let output = Command::cargo_bin("kcs")
+        .unwrap()
+        .current_dir(&a)
+        .env("XDG_CONFIG_HOME", data_home.join("config"))
+        .env("XDG_DATA_HOME", data_home.join("data"))
+        .env("XDG_CACHE_HOME", data_home.join("cache"))
+        .args(["search", "alphaunique", "--all-scopes", "--json"])
+        .assert()
+        .code(3)
+        .get_output()
+        .stdout
+        .clone();
+    let search: Value = serde_json::from_slice(&output).unwrap();
+    assert!(
+        !search["results"].as_array().unwrap().is_empty(),
+        "healthy scope A must still return results: {search}"
+    );
+    assert_eq!(search["searched_scopes"].as_array().unwrap().len(), 1);
+    let excluded = search["excluded_scopes"].as_array().unwrap();
+    assert_eq!(excluded.len(), 1);
+    assert_eq!(excluded[0]["reason"], "store_corrupt");
+    assert!(excluded[0]["scope_path"].as_str().unwrap().ends_with("/b"));
+}
+
+// R16-3: a fresh search against a scope whose HEAD advanced via a bare `snapshot`
+// (tree_entries NOT projected) and whose new tree object was then discarded must
+// EXCLUDE that scope with reason "snapshot_shallow" — not silently place it in
+// searched_scopes with an empty result set (exit 0), the P10-type silent
+// false-negative GPT-5.5 found in the fresh path's dropped `Ok(false)`.
+#[test]
+fn r16_3_fresh_search_shallow_no_rows_excludes_not_silent_empty() {
+    let parent = tempfile::tempdir().unwrap();
+    let data_home = parent.path().join("xdg");
+    let a = parent.path().join("a");
+    let b = parent.path().join("b");
+    fs::create_dir_all(&a).unwrap();
+    fs::create_dir_all(&b).unwrap();
+    fs::write(a.join("a.md"), "# A\n\n## Sec\nalphaunique survivor\n").unwrap();
+    fs::write(b.join("b.md"), "# B\n\n## Sec\nbetashared token\n").unwrap();
+    json_success_path(&a, &data_home, &["init"]);
+    json_success_path(&b, &data_home, &["init"]);
+    json_success_path(&a, &data_home, &["index", "--approve"]);
+    json_success_path(&b, &data_home, &["index", "--approve"]);
+
+    // Advance scope B's HEAD with a bare snapshot — the new commit's tree_entries are
+    // NOT projected (only index/reindex project) — then discard its tree object. B's
+    // HEAD is now shallow with NO cached rows for the new commit (ShallowNoRows).
+    fs::write(b.join("b.md"), "# B\n\n## Sec\nbetashared token v2\n").unwrap();
+    let snap = json_success_path(&b, &data_home, &["snapshot", "-m", "advance"]);
+    let b2 = snap["commit_hash"].as_str().unwrap().to_owned();
+    let b_kcs = b.join(".kcs");
+    let b2_obj: Value =
+        serde_json::from_slice(&fs::read(object_path(&b_kcs, "commits", &b2)).unwrap()).unwrap();
+    fs::remove_file(object_path(
+        &b_kcs,
+        "trees",
+        b2_obj["tree"].as_str().unwrap(),
+    ))
+    .unwrap();
+
+    let output = Command::cargo_bin("kcs")
+        .unwrap()
+        .current_dir(&a)
+        .env("XDG_CONFIG_HOME", data_home.join("config"))
+        .env("XDG_DATA_HOME", data_home.join("data"))
+        .env("XDG_CACHE_HOME", data_home.join("cache"))
+        .args(["search", "alphaunique", "--all-scopes", "--json"])
+        .assert()
+        .code(3)
+        .get_output()
+        .stdout
+        .clone();
+    let search: Value = serde_json::from_slice(&output).unwrap();
+    assert!(
+        !search["results"].as_array().unwrap().is_empty(),
+        "healthy scope A must still return results: {search}"
+    );
+    // Scope B is EXCLUDED loudly, not silently searched-with-empty-results.
+    assert_eq!(search["searched_scopes"].as_array().unwrap().len(), 1);
+    let excluded = search["excluded_scopes"].as_array().unwrap();
+    assert_eq!(excluded.len(), 1);
+    assert_eq!(excluded[0]["reason"], "snapshot_shallow");
+    assert!(excluded[0]["scope_path"].as_str().unwrap().ends_with("/b"));
+}
+
+// R16-4(a): `repair --rebuild-db` — the only implemented recovery command — must not
+// die on the very shallow-HEAD corruption it exists to recover from. A discarded HEAD
+// tree object yields a clear COMMIT-SHALLOW (via the shared rebuilder), not a raw
+// KCS-E-STORE-NOT-FOUND-001 (R15-4 fixed reindex but its fix skipped repair).
+#[test]
+fn r16_4_repair_on_shallow_head_reports_commit_shallow() {
+    let dir = indexed_scope();
+    let kcs_dir = dir.path().join(".kcs");
+    let head = head_commit(&kcs_dir);
+    let commit_obj: Value =
+        serde_json::from_slice(&fs::read(object_path(&kcs_dir, "commits", &head)).unwrap())
+            .unwrap();
+    fs::remove_file(object_path(
+        &kcs_dir,
+        "trees",
+        commit_obj["tree"].as_str().unwrap(),
+    ))
+    .unwrap();
+
+    let err = json_failure(&dir, &["repair", "--rebuild-db"], 1);
+    assert_eq!(
+        err["error_code"], "KCS-E-COMMIT-SHALLOW-001",
+        "repair must report the shallow HEAD, not a raw STORE-NOT-FOUND: {err}"
+    );
+}
+
+// R16-4(b): a single document's missing normalized unit must not abort the whole
+// rebuild. `repair --rebuild-db` skips that document (reporting it under skipped_units
+// with KCS-E-STORE-IO-001 + recovery guidance) and rebuilds the rest. Before the fix
+// one missing unit failed the entire scope (STORE-IO exit 1).
+#[test]
+fn r16_4_repair_skips_missing_unit_and_rebuilds_the_rest() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(
+        dir.path().join("keep.md"),
+        "# Keep\n\n## Body\nkeepsurvivor token here\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.path().join("drop.md"),
+        "# Drop\n\n## Body\ndropskipped token here\n",
+    )
+    .unwrap();
+    kcs(&dir, &["init"]).assert().success();
+    json_success(&dir, &["index", "--yes"]);
+
+    // Delete ONE document's normalized unit file (a missing unit → KCS-E-STORE-IO-001).
+    let unit_path = first_normalized_unit_json(&dir.path().join(".kcs/objects/normalized_units"));
+    fs::remove_file(&unit_path).unwrap();
+
+    // repair completes (exit 0): it rebuilds the healthy document and reports the
+    // skipped one loudly, rather than aborting the whole scope.
+    let out = json_success(&dir, &["repair", "--rebuild-db"]);
+    let skipped = out["skipped_units"].as_array().unwrap();
+    assert_eq!(skipped.len(), 1, "exactly one document is skipped: {out}");
+    assert_eq!(skipped[0]["reason"], "KCS-E-STORE-IO-001");
+    assert!(
+        out["skipped_units_guidance"]
+            .as_str()
+            .unwrap()
+            .contains("reindex --force"),
+        "the recovery guidance must be surfaced: {out}"
+    );
+    // The scope still searches — the rebuild completed rather than bricking.
+    let search = json_success(&dir, &["search", "token"]);
+    assert!(
+        !search["results"].as_array().unwrap().is_empty(),
+        "the rebuilt scope must still search: {search}"
+    );
+}
+
+// R16-5: `kcs diff` with a shallow side (its commit or tree object discarded) must
+// surface a clear COMMIT-SHALLOW that names WHICH side (a/b) is shallow, not a raw
+// opaque KCS-E-STORE-NOT-FOUND-001 whose hash the user cannot map to an operand.
+#[test]
+fn r16_5_diff_with_shallow_side_names_the_side() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("d.md"), "# D\n\n## S\nv1 body\n").unwrap();
+    kcs(&dir, &["init"]).assert().success();
+    let c1 = json_success(&dir, &["snapshot", "-m", "first"]);
+    let c1_hash = c1["commit_hash"].as_str().unwrap().to_owned();
+    fs::write(dir.path().join("d.md"), "# D\n\n## S\nv2 body\n").unwrap();
+    let c2 = json_success(&dir, &["snapshot", "-m", "second"]);
+    let c2_hash = c2["commit_hash"].as_str().unwrap().to_owned();
+
+    // (control) a healthy diff of the two commits works.
+    let ok = json_success(&dir, &["diff", &c1_hash, &c2_hash]);
+    assert!(!ok["changes"].as_array().unwrap().is_empty());
+
+    // Make C2 shallow: discard its tree object (its commit survives).
+    let kcs_dir = dir.path().join(".kcs");
+    let c2_obj: Value =
+        serde_json::from_slice(&fs::read(object_path(&kcs_dir, "commits", &c2_hash)).unwrap())
+            .unwrap();
+    fs::remove_file(object_path(
+        &kcs_dir,
+        "trees",
+        c2_obj["tree"].as_str().unwrap(),
+    ))
+    .unwrap();
+
+    // Naming C2 as operand b → COMMIT-SHALLOW, context side="b".
+    let err_b = json_failure(&dir, &["diff", &c1_hash, &c2_hash], 1);
+    assert_eq!(err_b["error_code"], "KCS-E-COMMIT-SHALLOW-001", "{err_b}");
+    assert_eq!(err_b["context"]["side"], "b", "{err_b}");
+    // Naming C2 as operand a → COMMIT-SHALLOW, context side="a".
+    let err_a = json_failure(&dir, &["diff", &c2_hash, &c1_hash], 1);
+    assert_eq!(err_a["error_code"], "KCS-E-COMMIT-SHALLOW-001", "{err_a}");
+    assert_eq!(err_a["context"]["side"], "a", "{err_a}");
+}
+
+// ===========================================================================
+// R16-6: the hand-rolled arg parsers coerced `--flag=<value>` on a value-LESS
+// (boolean / SetTrue) flag into `true`, silently dropping the inline value — so
+// `reindex --force=false --yes=false` (an explicit negation) bypassed the
+// confirmation gate and ran a full reindex (exit 0). Every value-less flag must
+// now reject an inline value with KCS-E-CONFIG-USAGE-001 (exit 2), matching clap's
+// derived bool flags (which already reject `--json=false`). Value-TAKING flags keep
+// consuming their inline value.
+// ===========================================================================
+#[test]
+fn r16_6_valueless_flag_inline_value_is_a_usage_error() {
+    let dir = indexed_scope();
+
+    // reindex: the reported gate bypass. `--force=false` must not be coerced to true.
+    let err = json_failure(&dir, &["reindex", "--force=false"], 2);
+    assert_eq!(err["error_code"], "KCS-E-CONFIG-USAGE-001", "{err}");
+    assert!(
+        err["message"]
+            .as_str()
+            .unwrap()
+            .contains("--force does not take a value"),
+        "{err}"
+    );
+    // The negated confirmation flag is equally rejected (would have bypassed --yes).
+    let err = json_failure(&dir, &["reindex", "--force", "--yes=false"], 2);
+    assert_eq!(err["error_code"], "KCS-E-CONFIG-USAGE-001", "{err}");
+
+    // repair: `--rebuild-db=false` must not still rebuild the DB.
+    let err = json_failure(&dir, &["repair", "--rebuild-db=false"], 2);
+    assert_eq!(err["error_code"], "KCS-E-CONFIG-USAGE-001", "{err}");
+
+    // search: `--text=false` must not be read as "text mode requested".
+    let err = json_failure(&dir, &["search", "トークン", "--text=false"], 2);
+    assert_eq!(err["error_code"], "KCS-E-CONFIG-USAGE-001", "{err}");
+    // A second boolean search flag, for good measure.
+    let err = json_failure(&dir, &["search", "トークン", "--all-scopes=false"], 2);
+    assert_eq!(err["error_code"], "KCS-E-CONFIG-USAGE-001", "{err}");
+
+    // Controls: a value-TAKING flag still accepts its inline value, and the real
+    // reindex confirmation path (no inline value) still runs.
+    let search = json_success(&dir, &["search", "トークン", "--limit=1"]);
+    assert!(
+        search["results"].as_array().unwrap().len() <= 1,
+        "value-taking --limit=1 must be honored, not rejected: {search}"
+    );
+    let reindexed = json_success(&dir, &["reindex", "--force", "--yes"]);
+    assert_eq!(reindexed["status"], "reindexed", "{reindexed}");
+}
+
+// ===========================================================================
+// R16-7: a retry-able failure re-reserved the FULL cost on every send attempt, so a
+// phantom charge accumulated without bound (RateLimit retries are unbounded) and
+// could exhaust the device month cap, falsely pausing unrelated tasks in other
+// scopes. The gate is error-kind-aware: a resend whose PREVIOUS failure was a
+// non-billable rejection (RateLimit / QuotaExceeded) reuses the prior reservation
+// and does NOT re-charge; a NetworkError resend (possibly billed server-side,
+// bounded by max_attempts) still does.
+// ===========================================================================
+
+/// Run `kcs <args> --json` with the online markdownize seam pinned to `seam` and an
+/// optional frozen clock, tolerating ANY exit (batch resume/retry return non-zero on
+/// a retry-able failure while still printing their JSON result to stdout).
+fn run_markdownize_seam(
+    dir: &TempDir,
+    seam: &str,
+    fixed_now: Option<&str>,
+    args: &[&str],
+) -> Value {
+    let mut command = kcs(dir, args);
+    command.env(TEST_STANDARD_ONLINE_MARKDOWNIZE_ENV, seam);
+    if let Some(now) = fixed_now {
+        command.env("KCS_FIXED_NOW", now);
+    }
+    let output = command.arg("--json").assert().get_output().stdout.clone();
+    serde_json::from_slice(&output).unwrap_or(Value::Null)
+}
+
+/// Count the online-markdownize (`adapter_kind = "markdown"`) reservation rows in the
+/// device-global cost ledger. The harness roots `$XDG_DATA_HOME` at `.test-data`.
+fn markdown_ledger_rows(dir: &TempDir) -> usize {
+    let path = dir.path().join(".test-data/kcs/cost-ledger.jsonl");
+    let Ok(text) = fs::read_to_string(&path) else {
+        return 0;
+    };
+    text.lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .filter(|row| row["adapter_kind"] == "markdown")
+        .count()
+}
+
+// Discriminator (a): rate_limit ×N retry keeps the online markdownize charge row at 1
+// (attempts still advance). Before R16-7 each resend re-reserved the full cost.
+#[test]
+fn r16_7_rate_limit_retry_does_not_reaccrue_charge() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(
+        dir.path().join("doc.pdf"),
+        fake_pdf(&["レート制限リトライの課金累積回帰テスト本文です。"]),
+    )
+    .unwrap();
+    kcs(&dir, &["init"]).assert().success();
+    // index only ENQUEUES the online markdownize task (Pending); no send, no charge.
+    run_markdownize_seam(&dir, "mock", None, &["index", "--approve"]);
+    assert_eq!(
+        markdown_ledger_rows(&dir),
+        0,
+        "index must not reserve a markdownize charge before any send"
+    );
+
+    // First real send under the rate_limit seam: one charge reserved, task -> Failed.
+    run_markdownize_seam(
+        &dir,
+        "rate_limit",
+        Some("2026-07-03T00:00:00Z"),
+        &["batch", "resume"],
+    );
+    assert_eq!(
+        markdown_ledger_rows(&dir),
+        1,
+        "the first online send reserves exactly one charge"
+    );
+
+    // Retry past the backoff repeatedly. RateLimit is refused before billing, so the
+    // prior reservation covers each resend — the charge count must stay 1 (the fix).
+    for minute in 1..=4 {
+        let now = format!("2026-07-03T00:0{minute}:30Z");
+        run_markdownize_seam(&dir, "rate_limit", Some(&now), &["batch", "retry"]);
+        assert_eq!(
+            markdown_ledger_rows(&dir),
+            1,
+            "rate_limit retry #{minute} must not re-accrue a phantom charge"
+        );
+    }
+
+    // The attempts counter still advanced (retries happened; only the charge is gated).
+    let status = run_markdownize_seam(&dir, "rate_limit", None, &["status"]);
+    let online = tasks_of_type(&status, "markdownize")
+        .into_iter()
+        .find(|task| task["fallback_reason"] == "rate_limit")
+        .expect("a rate-limited online markdownize task");
+    assert!(
+        online["attempts"].as_u64().unwrap() >= 2,
+        "retries must advance attempts even while the charge stays 1: {status}"
+    );
+}
+
+// Discriminator (b): a NetworkError resend re-reserves each attempt (it may have been
+// billed server-side; bounded by max_attempts=5). The charge row count must GROW —
+// the contrast that proves the gate is error-kind-aware, not a blanket "reserve once".
+#[test]
+fn r16_7_network_error_retry_reaccrues_charge() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(
+        dir.path().join("doc.pdf"),
+        fake_pdf(&["ネットワークエラーリトライの課金回帰テスト本文です。"]),
+    )
+    .unwrap();
+    kcs(&dir, &["init"]).assert().success();
+    run_markdownize_seam(&dir, "mock", None, &["index", "--approve"]);
+
+    // First send fails NetworkError: one charge.
+    run_markdownize_seam(
+        &dir,
+        "network_error",
+        Some("2026-07-03T00:00:00Z"),
+        &["batch", "resume"],
+    );
+    assert_eq!(
+        markdown_ledger_rows(&dir),
+        1,
+        "the first online send reserves one charge"
+    );
+
+    // Each retry reserves afresh → the charge count grows one per attempt.
+    let mut expected = 1;
+    for minute in 1..=3 {
+        let now = format!("2026-07-03T00:0{minute}:30Z");
+        run_markdownize_seam(&dir, "network_error", Some(&now), &["batch", "retry"]);
+        expected += 1;
+        assert_eq!(
+            markdown_ledger_rows(&dir),
+            expected,
+            "network_error retry #{minute} must reserve a fresh charge (not skipped)"
+        );
+    }
 }
