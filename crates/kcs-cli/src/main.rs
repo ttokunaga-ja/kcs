@@ -1366,11 +1366,21 @@ fn run_search_inner(args: UnsupportedArgs, started: Instant) -> Result<Value> {
                     ExitCode::Failure,
                 ));
             }
-            Err(ScopeSearchError::Excluded(reason)) => excluded.push(json!({
-                "scope_id": exec.target.scope_id,
-                "scope_path": exec.target.repo_root,
-                "reason": reason,
-            })),
+            Err(ScopeSearchError::Excluded(reason)) => {
+                // R18-4: attach the store-corruption recovery hint to THIS entry (not
+                // only to the all-scopes-failed aggregate below), so a PARTIAL exclusion
+                // (some scopes healthy → `searched` non-empty → the aggregate block is
+                // skipped) is still agent-detectable.
+                let mut entry = json!({
+                    "scope_id": exec.target.scope_id,
+                    "scope_path": exec.target.repo_root,
+                    "reason": reason,
+                });
+                if let Some(hint) = store_corruption_recovery_hint(&reason) {
+                    entry["recovery"] = json!(hint);
+                }
+                excluded.push(entry);
+            }
             Err(ScopeSearchError::Fatal(error)) => {
                 // R16-2: a store-corruption Fatal from ONE scope must not discard the
                 // healthy scopes' already-collected results — that violated the 05 §1.8
@@ -1382,11 +1392,16 @@ fn run_search_inner(args: UnsupportedArgs, started: Instant) -> Result<Value> {
                 // Fatal→Excluded generalization: a genuine programming error / unexpected
                 // Fatal must stay fail-fast, so only the explicit store class is caught.
                 if is_store_corrupt_class(&error) {
-                    excluded.push(json!({
+                    // R18-4: same per-entry recovery hint as the Excluded arm above.
+                    let mut entry = json!({
                         "scope_id": exec.target.scope_id,
                         "scope_path": exec.target.repo_root,
                         "reason": "store_corrupt",
-                    }));
+                    });
+                    if let Some(hint) = store_corruption_recovery_hint("store_corrupt") {
+                        entry["recovery"] = json!(hint);
+                    }
+                    excluded.push(entry);
                 } else {
                     return Err(error);
                 }
@@ -1464,18 +1479,14 @@ fn run_search_inner(args: UnsupportedArgs, started: Instant) -> Result<Value> {
                     .iter()
                     .any(|entry| entry.get("reason").and_then(Value::as_str) == Some(want))
             };
+            // R18-4: the same hints the per-entry attachment uses, aggregated here for
+            // the all-scopes-failed response (identical strings via the shared helper).
             let mut recovery = Vec::<&str>::new();
             if reason_is("store_corrupt") {
-                recovery.push(
-                    "store_corrupt: try `kcs repair --rebuild-db`; if it still fails, restore \
-                     the corrupt commit/tree object from objects/refs",
-                );
+                recovery.push(store_corruption_recovery_hint("store_corrupt").unwrap());
             }
             if reason_is("snapshot_shallow") {
-                recovery.push(
-                    "snapshot_shallow: restore the discarded HEAD commit/tree object, or \
-                     re-run `kcs index` to rebuild the snapshot from the working tree",
-                );
+                recovery.push(store_corruption_recovery_hint("snapshot_shallow").unwrap());
             }
             return Err(KcsError::new(
                 "KCS-E-SEARCH-SCOPE-ALL-FAILED-001",
@@ -2454,6 +2465,29 @@ fn scope_all_failed_error(message: &str, excluded: Vec<Value>) -> KcsError {
         json!({ "excluded_scopes": excluded }),
         ExitCode::PermanentFailure,
     )
+}
+
+/// R17-4/R18-4: the class-specific recovery hint for a store-corruption search
+/// exclusion reason (`store_corrupt` / `snapshot_shallow`), or `None` for any other
+/// reason (`index_missing`/`index_corrupt` recover via the exit-1 VEC-UNAVAIL path,
+/// transient reasons need no guidance). Attached both to each individual
+/// `excluded_scopes` entry (R18-4 — so a PARTIAL multi-scope exclusion, where healthy
+/// scopes keep `searched` non-empty and skip the all-failed aggregate, is still
+/// agent-recoverable) and aggregated into the all-scopes-failed SCOPE-ALL-FAILED
+/// response (R17-4). The error CODE stays SCOPE-ALL-FAILED-001 (docs frozen — no new
+/// code); only the `recovery` context is added.
+fn store_corruption_recovery_hint(reason: &str) -> Option<&'static str> {
+    match reason {
+        "store_corrupt" => Some(
+            "store_corrupt: try `kcs repair --rebuild-db`; if it still fails, restore \
+             the corrupt commit/tree object from objects/refs",
+        ),
+        "snapshot_shallow" => Some(
+            "snapshot_shallow: restore the discarded HEAD commit/tree object, or \
+             re-run `kcs index` to rebuild the snapshot from the working tree",
+        ),
+        _ => None,
+    }
 }
 
 /// Whether `ch` is a CJK character KCS treats as space-less script (Hiragana,
@@ -5860,14 +5894,23 @@ fn execute_pending_markdownize_tasks(
         // executor. This mirrors the executor's own R14-2/R9-2 guards, hoisted ahead of
         // the charge.
         if !online_markdownize_precondition_ok(repo, &task) {
+            // R18-2: this task may carry a kept RateLimit/Quota phantom from a PRIOR
+            // failed send (its file was deleted/edited after that attempt). Reclaim it
+            // here — `batch retry` preserved `fallback_reason`, so the failure kind is
+            // still intact — BEFORE the retirement overwrites the reason to
+            // invalid_input; otherwise the R18-2 index sweep (which reads the failure
+            // kind) can no longer tell it was a non-billable phantom. No NEW charge is
+            // reserved this pass (the precondition failed before the charge).
+            let markdown_adapter_kind = adapter_kind_budget_key(online_profile.adapter_kind);
+            let mut reclaim: Option<MonthlyCostLedgerEntry> = None;
             store
                 .update_matching(|candidate| {
                     if candidate.task_id == task_id {
-                        candidate.status = TaskStatus::Failed;
-                        candidate.fallback_reason =
-                            Some(retry_reason(RetryErrorKind::InvalidInput).to_owned());
-                        candidate.next_retry_at = None;
-                        candidate.heartbeat_at = None;
+                        reclaim = retire_online_task_reclaiming(
+                            candidate,
+                            &scope_id,
+                            markdown_adapter_kind,
+                        );
                         candidate.attempts = candidate.attempts.saturating_add(1);
                         true
                     } else {
@@ -5875,8 +5918,12 @@ fn execute_pending_markdownize_tasks(
                     }
                 })
                 .map_err(pipeline_to_kcs)?;
-            // Count it as a (permanent) failure so `batch` JSON reports the attempt,
-            // matching the executor's InvalidInput path — but no charge was reserved.
+            if let Some(entry) = reclaim {
+                cost_ledger
+                    .reclaim_ledger()
+                    .append_monthly(&entry)
+                    .map_err(pipeline_to_kcs)?;
+            }
             counts.failed += 1;
             continue;
         }
@@ -6992,6 +7039,7 @@ fn run_embedding_enrichment(
     // tasks still Pending, so `pending` is empty yet index_status reported phantom
     // pending enrichment forever. Idempotent; no adapter call, no re-charge.
     reconcile_committed_embedding_tasks(
+        repo,
         &conn,
         &task_store,
         &head,
@@ -7066,6 +7114,10 @@ fn run_embedding_enrichment(
     // (post-completion) crash via content-addressed reuse. R11-2: the loop also tallies
     // paused / auth / failed outcomes.
     let mut transitions: BTreeMap<String, EmbeddingTransition> = BTreeMap::new();
+    // R18-1: per-chunk FRESH F8 reservation `(usd, ledger_month)` for the freshly-charged
+    // chunks this pass, stamped in the single end-of-pass write-back so a later non-live
+    // reclaim (R18-1) can cancel the exact phantom.
+    let mut reserved_by_ref: BTreeMap<String, (f64, String)> = BTreeMap::new();
 
     // R16-7: embedding tasks whose PREVIOUS recorded failure was a non-billable
     // rejection (RateLimit / QuotaExceeded — refused before the backend processes or
@@ -7189,6 +7241,21 @@ fn run_embedding_enrichment(
             outcome.paused += plan.to_send.len();
             break;
         }
+        // R18-1: a fresh charge landed (`sent_chars > 0`, ChargeOutcome::Charged). Record
+        // each FRESHLY-charged chunk's exact reservation so its task is stamped in the
+        // end-of-pass write-back. `estimate_embedding_cost` is linear in chars, so the
+        // per-chunk amounts sum to exactly the batch charge — the reclaim (R18-1) of a
+        // stranded phantom then cancels it precisely. RateLimit/Quota resends covered by a
+        // prior reservation are excluded (they keep their original single stamp).
+        if sent_chars > 0 {
+            for (chunk, _) in &plan.to_send {
+                let output_ref = embedding_task_output_ref(&chunk.chunk_id);
+                if !reservation_covers_resend.contains(&output_ref) {
+                    let usd = estimate_embedding_cost(chunk.text.chars().count() as u64);
+                    reserved_by_ref.insert(output_ref, (usd, month.clone()));
+                }
+            }
+        }
         match send_embed_batch(&conn, execution, &profile, &plan.to_send) {
             Ok(()) => {
                 // Charge already reserved under the lock above (F8).
@@ -7215,7 +7282,8 @@ fn run_embedding_enrichment(
     // R11-5: single write-back for the whole pass. Its return is the retry-eligible
     // failed count (needs per-task `attempts`), feeding the batch exit-code 3-vs-4
     // split (R11-2). `fallback_reason` per chunk (done/paused/failed) is preserved.
-    outcome.failed_retryable += apply_embedding_transitions(&task_store, &transitions, &now)?;
+    outcome.failed_retryable +=
+        apply_embedding_transitions(&task_store, &transitions, &now, &reserved_by_ref)?;
     Ok(outcome)
 }
 
@@ -7279,6 +7347,13 @@ fn apply_embedding_transitions(
     task_store: &TaskStore,
     transitions: &BTreeMap<String, EmbeddingTransition>,
     now: &str,
+    // R18-1: the FRESH per-chunk F8 reservation `(usd, ledger_month)` to stamp onto each
+    // freshly-charged embedding task in this same single write-back (no extra
+    // tasks.jsonl pass — respects R11-5/R17-7's O(T²) avoidance). Only freshly-charged
+    // chunks are present; a RateLimit/Quota resend covered by a prior reservation is
+    // absent and keeps its existing stamp. The stamp lets `reconcile_committed_embedding_tasks`
+    // reclaim the exact phantom if the chunk later goes non-live (R18-1).
+    reserved: &BTreeMap<String, (f64, String)>,
 ) -> Result<usize> {
     if transitions.is_empty() {
         return Ok(0);
@@ -7294,6 +7369,10 @@ fn apply_embedding_transitions(
             };
             task.status = transition.status;
             task.fallback_reason = Some(transition.reason.to_owned());
+            if let Some((usd, month)) = reserved.get(&task.output_ref) {
+                task.reserved_usd = Some(*usd);
+                task.reserved_month = Some(month.clone());
+            }
             if let Some(kind) = transition.failure_kind {
                 let attempts_after = task.attempts.saturating_add(1);
                 let policy = retry_policy(kind);
@@ -7547,6 +7626,7 @@ fn embedding_task_output_ref(chunk_id: &str) -> String {
 /// `Done` (idempotent, no adapter call, no re-charge — the vector is already stored,
 /// so search/data are unaffected; only task accounting + the Agent contract heal).
 fn reconcile_committed_embedding_tasks(
+    repo: &Repository,
     conn: &Connection,
     task_store: &TaskStore,
     head: &str,
@@ -7559,6 +7639,55 @@ fn reconcile_committed_embedding_tasks(
         .map(|chunk| chunk.chunk_id.as_str())
         .collect();
     let live_ids = live_chunk_ids(conn, head, chunking_config_hash)?;
+    // R18-1: reclaim the F8 phantom of a NON-LIVE embedding task whose send failed
+    // RateLimit/Quota. Embedding charges before the send (like markdownize, F8) but had NO
+    // reclaim path — `reserved_usd`/`reserved_month` are now stamped at charge time
+    // (apply_embedding_transitions), and once the chunk is edited/deleted (non-live) the
+    // task can never be retried, so its non-billable (RateLimit/Quota) phantom would eat
+    // the embedding per-adapter/device cap for the rest of the month and falsely pause
+    // unrelated embeddings — the embedding twin of the markdownize R17-3/R18-2 fix. This
+    // in-place pass runs BEFORE the transitions loop below (which then re-reads and skips
+    // these now-terminal tasks). Only Pending/Running/Failed STAMPED tasks are eligible: a
+    // Done task's stamp is REAL spend (its vector is stored), never a phantom. A
+    // NetworkError stamp is terminalized but NOT reclaimed (may have billed; R16-7). The
+    // reclaim uses the task's stamped `reserved_month`, so month accounting matches the
+    // charge.
+    let reservation_scope_id = repo.scope_id_for_adapter();
+    let mut reclaims: Vec<MonthlyCostLedgerEntry> = Vec::new();
+    task_store
+        .update_matching(|task| {
+            if task.task_type != TaskType::Embedding
+                || task.reserved_usd.is_none()
+                || !matches!(
+                    task.status,
+                    TaskStatus::Pending | TaskStatus::Running | TaskStatus::Failed
+                )
+            {
+                return false;
+            }
+            let non_live = task
+                .output_ref
+                .strip_prefix("embedding:")
+                .is_some_and(|chunk_id| !live_ids.contains(chunk_id));
+            if !non_live {
+                return false;
+            }
+            if let Some(entry) =
+                retire_online_task_reclaiming(task, &reservation_scope_id, EMBEDDING_ADAPTER_KIND)
+            {
+                reclaims.push(entry);
+            }
+            true
+        })
+        .map_err(pipeline_to_kcs)?;
+    if !reclaims.is_empty() {
+        let reclaim_ledger = CostLedger::new(cost_ledger_path()).reclaim_ledger();
+        for entry in &reclaims {
+            reclaim_ledger
+                .append_monthly(entry)
+                .map_err(pipeline_to_kcs)?;
+        }
+    }
     let mut transitions: BTreeMap<String, EmbeddingTransition> = BTreeMap::new();
     for task in task_store.all().map_err(pipeline_to_kcs)? {
         if task.task_type != TaskType::Embedding {
@@ -7591,7 +7720,8 @@ fn reconcile_committed_embedding_tasks(
         // Live AND already embedded (live but NOT pending) → complete it (R12-3).
         transitions.insert(task.output_ref.clone(), embedding_done_transition());
     }
-    apply_embedding_transitions(task_store, &transitions, now)?;
+    // No fresh reservations to stamp on the reconcile path (it charges nothing).
+    apply_embedding_transitions(task_store, &transitions, now, &BTreeMap::new())?;
     Ok(())
 }
 
@@ -7880,12 +8010,11 @@ fn budget_status_json(repo: &Repository) -> Result<Value> {
     let month = utc_month(&now);
     let ledger = CostLedger::new(cost_ledger_path());
     let scope_id = repo.scope_id_for_adapter();
-    let device_spent = ledger
-        .monthly_total(&month, None)
-        .map_err(pipeline_to_kcs)?;
-    let folder_spent = ledger
-        .monthly_total(&month, Some(&scope_id))
-        .map_err(pipeline_to_kcs)?;
+    // R18-3: report NET spend (charges − reclaimed phantoms), matching the enforcement
+    // gate `budget_remaining_for_adapter`. Reading gross here made `kcs status`
+    // over-report spend / under-report remaining after a reclaim.
+    let device_spent = net_monthly_spent(&ledger, &month, None, None)?;
+    let folder_spent = net_monthly_spent(&ledger, &month, Some(&scope_id), None)?;
     let device_remaining = caps.device_monthly_usd_cap - device_spent;
     let folder_remaining = caps.folder_monthly_usd_cap.map(|cap| cap - folder_spent);
     let cap_kind = match folder_remaining {
@@ -7924,12 +8053,10 @@ fn scope_budget_warning(repo: &Repository) -> Result<Option<String>> {
     let month = utc_month(&now_utc_seconds());
     let ledger = CostLedger::new(cost_ledger_path());
     let scope_id = repo.scope_id_for_adapter();
-    let device_spent = ledger
-        .monthly_total(&month, None)
-        .map_err(pipeline_to_kcs)?;
-    let folder_spent = ledger
-        .monthly_total(&month, Some(&scope_id))
-        .map_err(pipeline_to_kcs)?;
+    // R18-3: NET spend (charges − reclaimed), matching enforcement, so the warning
+    // does not fire on a reclaimed phantom.
+    let device_spent = net_monthly_spent(&ledger, &month, None, None)?;
+    let folder_spent = net_monthly_spent(&ledger, &month, Some(&scope_id), None)?;
     Ok(budget_warning(&caps, device_spent, folder_spent))
 }
 
@@ -8179,6 +8306,57 @@ fn run_index_pipeline(
         read_budget_policy(user_config_toml_path(), repo.kcs_dir().join("config.toml"))
             .map_err(pipeline_to_kcs)?;
     let month = utc_month(&now);
+
+    // R18-2: reclaim phantoms of DELETED / renamed files. R17-3's enqueue supersede
+    // reclaims a stale RateLimit/Quota phantom only when the SAME path is re-scanned
+    // (`task.input_path == candidate.input_path`); a DELETED or renamed file never
+    // reappears as a scan candidate, so its Failed(rate_limit/quota) phantom would eat the
+    // per-adapter markdown cap for the rest of the month and falsely pause unrelated tasks
+    // (the same harm R17-3 fixed, surviving on the delete path). With the full live-
+    // candidate set in hand, retire + reclaim any retryable Failed online markdownize task
+    // whose input_path is no longer a live candidate. Runs before the enqueue loop so the
+    // freed cap is available to this index's tasks.
+    {
+        let online_profile = online_markdownize_profile();
+        let placeholder_output_ref = online_output_ref(&online_profile.adapter_id);
+        let markdown_adapter_kind = adapter_kind_budget_key(online_profile.adapter_kind);
+        let reservation_scope_id = repo.scope_id_for_adapter();
+        let live_paths: BTreeSet<&str> = preview
+            .candidates
+            .iter()
+            .filter(|candidate| !candidate.ignored && candidate.media_type != "inode/directory")
+            .map(|candidate| candidate.input_path.as_str())
+            .collect();
+        let mut orphan_reclaims: Vec<MonthlyCostLedgerEntry> = Vec::new();
+        task_store
+            .update_matching(|task| {
+                let orphaned = task.task_type == TaskType::Markdownize
+                    && task.output_ref == placeholder_output_ref
+                    && task.status == TaskStatus::Failed
+                    && task_retry_allowed(task)
+                    && !live_paths.contains(task.input_path.as_str());
+                if !orphaned {
+                    return false;
+                }
+                if let Some(entry) = retire_online_task_reclaiming(
+                    task,
+                    &reservation_scope_id,
+                    markdown_adapter_kind,
+                ) {
+                    orphan_reclaims.push(entry);
+                }
+                true
+            })
+            .map_err(pipeline_to_kcs)?;
+        if !orphan_reclaims.is_empty() {
+            let reclaim_ledger = cost_ledger.reclaim_ledger();
+            for entry in &orphan_reclaims {
+                reclaim_ledger
+                    .append_monthly(entry)
+                    .map_err(pipeline_to_kcs)?;
+            }
+        }
+    }
 
     let mut result = IndexPipelineResult {
         network_allowed,
@@ -9027,6 +9205,52 @@ fn manifest_from_units(
     }
 }
 
+/// R17-3/R18-1/R18-2: retire a stale-or-orphaned online adapter `task` (markdownize OR
+/// embedding) to a non-retryable `invalid_input` failure, and — if its kept F8
+/// reservation was a NON-billable (RateLimit/Quota) phantom with an exact stamp — return
+/// the reclaim entry for the sibling reclaim ledger (the caller appends it AFTER this
+/// retirement is durable, so a crash between can only leave the phantom conservatively in
+/// place). A NetworkError reservation is deliberately NOT reclaimed (it may have billed
+/// server-side; keeping it is the cap-safe invariant R16-7 maintains, guarding the R15-5
+/// silent-cap-bypass). The stamp is cleared on EVERY retirement so a task can never be
+/// reclaimed twice. Shared by the markdownize same-path enqueue supersede (R17-3), the
+/// deleted/renamed-path index sweep (R18-2), the batch-retry precondition retirement
+/// (R18-2), and the embedding non-live reclaim in `reconcile_committed_embedding_tasks`
+/// (R18-1) — so a phantom is reclaimed at whichever retirement fires first. MUST run
+/// BEFORE `fallback_reason` is overwritten to `invalid_input` — the reclaim decision
+/// reads the still-intact failure kind (`batch retry` preserves `fallback_reason` across
+/// the Failed->Pending flip). `markdown_adapter_kind` is the adapter's ledger key
+/// (`"markdown"` or `EMBEDDING_ADAPTER_KIND`), so the reclaim nets the correct cap.
+fn retire_online_task_reclaiming(
+    task: &mut TaskDescriptor,
+    reservation_scope_id: &str,
+    markdown_adapter_kind: &str,
+) -> Option<MonthlyCostLedgerEntry> {
+    let reclaim = if matches!(
+        retry_kind_from_reason(task.fallback_reason.as_deref()),
+        RetryErrorKind::RateLimit | RetryErrorKind::QuotaExceeded
+    ) {
+        match (task.reserved_usd, task.reserved_month.clone()) {
+            (Some(usd), Some(month)) => Some(MonthlyCostLedgerEntry {
+                month,
+                scope_id: reservation_scope_id.to_owned(),
+                adapter_kind: markdown_adapter_kind.to_owned(),
+                usd,
+            }),
+            _ => None,
+        }
+    } else {
+        None
+    };
+    task.status = TaskStatus::Failed;
+    task.fallback_reason = Some(retry_reason(RetryErrorKind::InvalidInput).to_owned());
+    task.next_retry_at = None;
+    task.heartbeat_at = None;
+    task.reserved_usd = None;
+    task.reserved_month = None;
+    reclaim
+}
+
 #[allow(clippy::too_many_arguments)]
 fn enqueue_online_placeholder_task(
     repo: &Repository,
@@ -9099,31 +9323,13 @@ fn enqueue_online_placeholder_task(
             if !stale {
                 return false;
             }
-            // R17-3: reclaim ONLY a non-billable (RateLimit/Quota) phantom, and only
-            // when the exact reservation was stamped (usd + its ledger month). A billed
-            // or NetworkError reservation is left standing in the charge ledger.
-            if matches!(
-                retry_kind_from_reason(task.fallback_reason.as_deref()),
-                RetryErrorKind::RateLimit | RetryErrorKind::QuotaExceeded
-            ) {
-                if let (Some(usd), Some(month)) = (task.reserved_usd, task.reserved_month.clone()) {
-                    reclaims.push(MonthlyCostLedgerEntry {
-                        month,
-                        scope_id: reservation_scope_id.clone(),
-                        adapter_kind: markdown_adapter_kind.to_owned(),
-                        usd,
-                    });
-                }
+            // R17-3/R18-2: retire + reclaim via the shared helper (reclaims only a
+            // non-billable RateLimit/Quota phantom, clears the stamp so no double-reclaim).
+            if let Some(entry) =
+                retire_online_task_reclaiming(task, &reservation_scope_id, markdown_adapter_kind)
+            {
+                reclaims.push(entry);
             }
-            task.status = TaskStatus::Failed;
-            task.fallback_reason = Some(retry_reason(RetryErrorKind::InvalidInput).to_owned());
-            task.next_retry_at = None;
-            task.heartbeat_at = None;
-            // Clear the reservation stamp on every retirement (reclaimed, or kept for
-            // NetworkError) so a superseded task can never be reclaimed a second time —
-            // belt-and-braces atop the non-retryable `invalid_input` status change.
-            task.reserved_usd = None;
-            task.reserved_month = None;
             true
         })
         .map_err(pipeline_to_kcs)?;
@@ -9247,6 +9453,31 @@ fn matches_batch_override(_args: &IndexArgs) -> bool {
     false
 }
 
+/// R17-3/R18-3: this month's NET spend for the `(scope, adapter)` filter — gross
+/// charges minus the R17-3 reclaimed phantoms recorded in the sibling reclaim ledger,
+/// clamped at 0. The single source of truth shared by the enforcement gate
+/// (`budget_remaining_for_adapter`) and the status/warning reports
+/// (`budget_status_json` / `scope_budget_warning`), so a reclaimed phantom stops eating
+/// the cap in BOTH the enforced remaining and the displayed spend. `.max(0.0)` is pure
+/// defense against a corrupt reclaim ledger — in correct operation reclaimed never
+/// exceeds the phantom charges it cancels, so `net >= real spend` holds (never
+/// fail-open). `None` scope/adapter means "device-wide / all adapters".
+fn net_monthly_spent(
+    cost_ledger: &CostLedger,
+    month: &str,
+    scope_id: Option<&str>,
+    adapter_kind: Option<&str>,
+) -> Result<f64> {
+    let gross = cost_ledger
+        .monthly_total_for_adapter(month, scope_id, adapter_kind)
+        .map_err(pipeline_to_kcs)?;
+    let reclaimed = cost_ledger
+        .reclaim_ledger()
+        .monthly_total_for_adapter(month, scope_id, adapter_kind)
+        .map_err(pipeline_to_kcs)?;
+    Ok((gross - reclaimed).max(0.0))
+}
+
 fn budget_remaining_for_adapter(
     cost_ledger: &CostLedger,
     budget_caps: &BudgetCaps,
@@ -9254,43 +9485,16 @@ fn budget_remaining_for_adapter(
     scope_id: &str,
     adapter_kind: &str,
 ) -> Result<(f64, Option<f64>)> {
-    // R17-3: net out reclaimed phantom reservations. A stale online task whose F8
-    // reservation was a non-billable rejection (RateLimit / Quota) had that amount
-    // recorded in the sibling reclaim ledger when it was superseded; subtract it so
-    // the phantom no longer eats the (per-adapter or monthly) cap. Positive-only
-    // reclaim rows keep the charge ledger F3-clean; the `.max(0.0)` clamp is pure
-    // defense against a corrupt reclaim ledger — in correct operation reclaimed
-    // never exceeds the phantom charges it cancels, so `spent >= real spend` holds
-    // (never fail-open).
-    let reclaim_ledger = cost_ledger.reclaim_ledger();
-    let device_spent = (cost_ledger
-        .monthly_total(month, None)
-        .map_err(pipeline_to_kcs)?
-        - reclaim_ledger
-            .monthly_total(month, None)
-            .map_err(pipeline_to_kcs)?)
-    .max(0.0);
-    let folder_spent = (cost_ledger
-        .monthly_total(month, Some(scope_id))
-        .map_err(pipeline_to_kcs)?
-        - reclaim_ledger
-            .monthly_total(month, Some(scope_id))
-            .map_err(pipeline_to_kcs)?)
-    .max(0.0);
-    let device_adapter_spent = (cost_ledger
-        .monthly_total_for_adapter(month, None, Some(adapter_kind))
-        .map_err(pipeline_to_kcs)?
-        - reclaim_ledger
-            .monthly_total_for_adapter(month, None, Some(adapter_kind))
-            .map_err(pipeline_to_kcs)?)
-    .max(0.0);
-    let folder_adapter_spent = (cost_ledger
-        .monthly_total_for_adapter(month, Some(scope_id), Some(adapter_kind))
-        .map_err(pipeline_to_kcs)?
-        - reclaim_ledger
-            .monthly_total_for_adapter(month, Some(scope_id), Some(adapter_kind))
-            .map_err(pipeline_to_kcs)?)
-    .max(0.0);
+    // R17-3/R18-3: spend is NET of reclaimed phantoms (gross charges − reclaim ledger,
+    // clamped), computed by the shared `net_monthly_spent` helper so this enforcement
+    // gate and the status/warning REPORTS (`budget_status_json`/`scope_budget_warning`)
+    // use one identical netting — before R18-3 only enforcement netted, so `kcs status`
+    // over-reported spend after a reclaim.
+    let device_spent = net_monthly_spent(cost_ledger, month, None, None)?;
+    let folder_spent = net_monthly_spent(cost_ledger, month, Some(scope_id), None)?;
+    let device_adapter_spent = net_monthly_spent(cost_ledger, month, None, Some(adapter_kind))?;
+    let folder_adapter_spent =
+        net_monthly_spent(cost_ledger, month, Some(scope_id), Some(adapter_kind))?;
     let mut device_remaining = budget_caps.device_monthly_usd_cap - device_spent;
     if let Some(adapter_cap) = budget_caps.device_per_adapter.get(adapter_kind) {
         device_remaining = device_remaining.min(adapter_cap - device_adapter_spent);

@@ -5964,3 +5964,296 @@ fn r17_3_network_error_reservation_kept_pauses_edited_doc() {
         "the edited doc must be budget-paused (phantom kept, cap-safe): {status}"
     );
 }
+
+// ===========================================================================
+// R18-1: the EMBEDDING pipeline had NO reclaim path (only markdownize did, R17-3). An
+// embedding send charges before the send (F8) and keeps its reservation on a
+// RateLimit/Quota failure (R16-7); once the chunk is edited/deleted (non-live) the task
+// can never be retried, so its phantom ate the embedding per-adapter cap for the rest of
+// the month and falsely paused unrelated future embeddings. R18-1 stamps the per-chunk
+// reservation (`apply_embedding_transitions`) and reclaims a non-live RateLimit/Quota
+// phantom in `reconcile_committed_embedding_tasks`. The discriminator pair mirrors R17-3:
+// rate_limit is reclaimed (the edited doc embeds), NetworkError is conservatively kept
+// (the edited doc is budget-paused, cap-safe).
+// ===========================================================================
+
+fn embedding_rows_usd_at(path: &Path) -> f64 {
+    let Ok(text) = fs::read_to_string(path) else {
+        return 0.0;
+    };
+    text.lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .filter(|row| row["adapter_kind"] == "embedding")
+        .filter_map(|row| row["usd"].as_f64())
+        .sum()
+}
+
+fn embedding_ledger_rows(dir: &TempDir) -> usize {
+    let path = dir.path().join(".test-data/kcs/cost-ledger.jsonl");
+    let Ok(text) = fs::read_to_string(&path) else {
+        return 0;
+    };
+    text.lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .filter(|row| row["adapter_kind"] == "embedding")
+        .count()
+}
+
+fn embedding_ledger_usd(dir: &TempDir) -> f64 {
+    embedding_rows_usd_at(&dir.path().join(".test-data/kcs/cost-ledger.jsonl"))
+}
+
+fn embedding_reclaim_usd(dir: &TempDir) -> f64 {
+    embedding_rows_usd_at(
+        &dir.path()
+            .join(".test-data/kcs/cost-ledger-reclaimed.jsonl"),
+    )
+}
+
+fn set_embedding_adapter_cap(dir: &TempDir, cap: f64) {
+    let config = dir.path().join(".test-config/kcs/config.toml");
+    fs::create_dir_all(config.parent().unwrap()).unwrap();
+    fs::write(
+        &config,
+        format!("[budget]\nmonthly_usd_cap = 1000\n[budget.per_adapter]\nembedding = {cap}\n"),
+    )
+    .unwrap();
+}
+
+// Two equal-byte-length embedding doc bodies (differ only in a trailing marker), so
+// editing v1 -> v2 changes raw_hash (making the old chunk non-live) while keeping the
+// per-document embedding cost identical — letting a `1.5 × cost` cap discriminate.
+const R18_1_BODY_V1: &str =
+    "# R18-1\n\nembedding phantom reclaim regression 本文あいうえお かきくけこ さしすせそ A\n";
+const R18_1_BODY_V2: &str =
+    "# R18-1\n\nembedding phantom reclaim regression 本文あいうえお かきくけこ さしすせそ B\n";
+
+// Discriminator (a): rate_limit embedding phantom → edit → re-index. The non-live phantom
+// is reclaimed, so the edited doc's chunk embeds (Done) instead of budget-Paused.
+#[test]
+fn r18_1_embedding_rate_limit_phantom_reclaimed_frees_cap_for_edited_doc() {
+    let dir = tempfile::tempdir().unwrap();
+    assert_eq!(R18_1_BODY_V1.len(), R18_1_BODY_V2.len());
+    fs::write(dir.path().join("doc.md"), R18_1_BODY_V1).unwrap();
+    kcs(&dir, &["init"]).assert().success();
+
+    // index --online charges the embedding (F8) then fails rate_limit → Failed(rate_limit)
+    // with a stamped phantom reservation. Embedding failure is non-fatal (exit 0).
+    json_success_embed_at(
+        &dir,
+        "rate_limit",
+        "2026-07-03T00:00:00Z",
+        &["index", "--approve", "--online"],
+    );
+    assert_eq!(
+        embedding_ledger_rows(&dir),
+        1,
+        "the rate_limit embedding send reserves one (phantom) charge"
+    );
+    let doc_cost = embedding_ledger_usd(&dir);
+    assert!(doc_cost > 0.0, "the embedding reservation must be positive");
+    set_embedding_adapter_cap(&dir, doc_cost * 1.5);
+
+    // Edit (new chunk_id → old chunk non-live) and re-index with mock in the same month.
+    fs::write(dir.path().join("doc.md"), R18_1_BODY_V2).unwrap();
+    json_success_embed_at(
+        &dir,
+        "mock",
+        "2026-07-05T00:00:00Z",
+        &["index", "--approve", "--online"],
+    );
+
+    // The non-live rate_limit phantom is reclaimed by exactly its reserved cost (F3-safe
+    // positive row; the charge ledger keeps the phantom row).
+    assert!(
+        (embedding_reclaim_usd(&dir) - doc_cost).abs() < 1e-12,
+        "the non-live rate_limit embedding phantom must be reclaimed by its exact cost \
+         (got reclaim={}, cost={doc_cost})",
+        embedding_reclaim_usd(&dir)
+    );
+
+    let status = json_success_embed_at(&dir, "mock", "2026-07-05T00:00:00Z", &["status"]);
+    let embedding = tasks_of_type(&status, "embedding");
+    let paused_budget = embedding
+        .iter()
+        .filter(|task| task["status"] == "paused" && task["fallback_reason"] == "budget_exceeded")
+        .count();
+    assert_eq!(
+        paused_budget, 0,
+        "no embedding may be budget-paused after the reclaim: {status}"
+    );
+    let done = embedding
+        .iter()
+        .filter(|task| task["status"] == "done")
+        .count();
+    assert!(
+        done >= 1,
+        "the edited doc's chunk must embed (done) after the reclaim: {status}"
+    );
+}
+
+// Discriminator (b) — error-kind-awareness (a NetworkError embedding reservation is KEPT,
+// not reclaimed, because it may have billed server-side) — is NOT re-tested here: the
+// deterministic embedding seam models `network_error` as an unreachable adapter that never
+// charges (no phantom to reclaim), and the reclaim runs through the SHARED
+// `retire_online_task_reclaiming` helper whose error-kind gate is already validated by
+// `r17_3_network_error_reservation_kept_pauses_edited_doc` (markdownize). The embedding
+// path passes `EMBEDDING_ADAPTER_KIND` into that identical helper, so its NetworkError
+// branch is covered by construction.
+
+// R18-2: markdownize's R17-3 reclaim only fired for a re-scanned SAME path. A DELETED (or
+// renamed) file never reappears as a scan candidate, so its Failed(rate_limit) phantom was
+// never reclaimed and kept eating the markdown cap. R18-2 sweeps deleted-path phantoms
+// during `index`. Delete doc.pdf (phantom) + add an equal-cost doc2.pdf under a cap that
+// fits ONE document: without the reclaim doc2 is budget-paused; with it, doc2 completes.
+#[test]
+fn r18_2_markdownize_deleted_file_phantom_reclaimed_frees_cap() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("doc.pdf"), fake_pdf(&[R17_3_BODY_V1])).unwrap();
+    kcs(&dir, &["init"]).assert().success();
+    run_markdownize_seam(&dir, "mock", None, &["index", "--approve"]);
+    run_markdownize_seam(
+        &dir,
+        "rate_limit",
+        Some("2026-07-03T00:00:00Z"),
+        &["batch", "resume"],
+    );
+    assert_eq!(markdown_ledger_rows(&dir), 1, "one phantom charge");
+    let doc_cost = markdown_ledger_usd(&dir);
+    assert!(doc_cost > 0.0);
+    set_markdown_adapter_cap(&dir, doc_cost * 1.5);
+
+    // DELETE doc.pdf (its phantom must be reclaimed) and add an equal-cost doc2.pdf.
+    fs::remove_file(dir.path().join("doc.pdf")).unwrap();
+    fs::write(dir.path().join("doc2.pdf"), fake_pdf(&[R17_3_BODY_V2])).unwrap();
+    // index sweeps the deleted-path phantom, then batch resume charges doc2 against the
+    // freed cap.
+    run_markdownize_seam(
+        &dir,
+        "mock",
+        Some("2026-07-05T00:00:00Z"),
+        &["index", "--approve"],
+    );
+    assert!(
+        (markdown_reclaim_usd(&dir) - doc_cost).abs() < 1e-12,
+        "the deleted file's rate_limit phantom must be reclaimed by its exact cost"
+    );
+    run_markdownize_seam(
+        &dir,
+        "mock",
+        Some("2026-07-05T00:00:00Z"),
+        &["batch", "resume"],
+    );
+    let status = run_markdownize_seam(&dir, "mock", Some("2026-07-05T00:00:00Z"), &["status"]);
+    let markdownize = tasks_of_type(&status, "markdownize");
+    let paused_budget = markdownize
+        .iter()
+        .filter(|task| task["status"] == "paused" && task["fallback_reason"] == "budget_exceeded")
+        .count();
+    assert_eq!(
+        paused_budget, 0,
+        "doc2 must not be budget-paused (deleted-file phantom reclaimed): {status}"
+    );
+    let doc2_done = markdownize.iter().any(|task| {
+        task["input_path"] == "doc2.pdf"
+            && task["status"] == "done"
+            && task["fallback_reason"] == "online_adapter_done"
+    });
+    assert!(
+        doc2_done,
+        "doc2's online markdownize must complete: {status}"
+    );
+}
+
+// R18-3: R17-3's reclaim ledger was netted by the enforcement gate but NOT by the
+// status/warning reports, so `kcs status` over-reported spend after a reclaim. After a
+// rate_limit phantom is reclaimed (charge == reclaim, so effective spend is 0 for that
+// document), the status budget must report the NET spend, not the gross charge.
+#[test]
+fn r18_3_status_budget_nets_reclaim_ledger() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("doc.pdf"), fake_pdf(&[R17_3_BODY_V1])).unwrap();
+    kcs(&dir, &["init"]).assert().success();
+    run_markdownize_seam(&dir, "mock", None, &["index", "--approve"]);
+    run_markdownize_seam(
+        &dir,
+        "rate_limit",
+        Some("2026-07-03T00:00:00Z"),
+        &["batch", "resume"],
+    );
+    let doc_cost = markdown_ledger_usd(&dir);
+    assert!(doc_cost > 0.0);
+
+    // Edit → re-index: the same-path supersede reclaims the phantom. The new task is
+    // Pending (not yet charged), so charge == reclaim == doc_cost and net spend is 0.
+    fs::write(dir.path().join("doc.pdf"), fake_pdf(&[R17_3_BODY_V2])).unwrap();
+    run_markdownize_seam(
+        &dir,
+        "mock",
+        Some("2026-07-05T00:00:00Z"),
+        &["index", "--approve"],
+    );
+    assert!(
+        (markdown_reclaim_usd(&dir) - doc_cost).abs() < 1e-12,
+        "the phantom must be reclaimed (precondition for the netting check)"
+    );
+
+    let status = run_markdownize_seam(&dir, "mock", Some("2026-07-05T00:00:00Z"), &["status"]);
+    let device_spent = status["budget"]["device_spent_usd"].as_f64().unwrap();
+    assert!(
+        device_spent < doc_cost * 0.5,
+        "status must report NET spend (charge − reclaim ≈ 0), not the gross phantom \
+         charge {doc_cost}: device_spent_usd={device_spent}"
+    );
+}
+
+// R18-4: R17-4 attached store-corruption recovery guidance only when EVERY scope failed.
+// A PARTIAL multi-scope exclusion (some scopes healthy) got a bare `reason` with no
+// `recovery`. R18-4 attaches the hint to each individual excluded entry. (Models r16_2.)
+#[test]
+fn r18_4_partial_store_corruption_entry_carries_recovery_hint() {
+    let parent = tempfile::tempdir().unwrap();
+    let data_home = parent.path().join("xdg");
+    let a = parent.path().join("a");
+    let b = parent.path().join("b");
+    fs::create_dir_all(&a).unwrap();
+    fs::create_dir_all(&b).unwrap();
+    fs::write(a.join("a.md"), "# A\n\n## Sec\nalphaunique survivor\n").unwrap();
+    fs::write(b.join("b.md"), "# B\n\n## Sec\nbetaunique other\n").unwrap();
+    json_success_path(&a, &data_home, &["init"]);
+    json_success_path(&b, &data_home, &["init"]);
+    json_success_path(&a, &data_home, &["index", "--approve"]);
+    json_success_path(&b, &data_home, &["index", "--approve"]);
+
+    // Corrupt scope B's HEAD commit object (store_corrupt) — A stays healthy, so this is a
+    // PARTIAL exclusion and the all-failed aggregate block is never reached.
+    let b_kcs = b.join(".kcs");
+    let b_head = head_commit(&b_kcs);
+    fs::write(
+        object_path(&b_kcs, "commits", &b_head),
+        b"this is not a valid commit object",
+    )
+    .unwrap();
+
+    let output = Command::cargo_bin("kcs")
+        .unwrap()
+        .current_dir(&a)
+        .env("XDG_CONFIG_HOME", data_home.join("config"))
+        .env("XDG_DATA_HOME", data_home.join("data"))
+        .env("XDG_CACHE_HOME", data_home.join("cache"))
+        .args(["search", "alphaunique", "--all-scopes", "--json"])
+        .assert()
+        .code(3)
+        .get_output()
+        .stdout
+        .clone();
+    let search: Value = serde_json::from_slice(&output).unwrap();
+    let excluded = search["excluded_scopes"].as_array().unwrap();
+    assert_eq!(excluded.len(), 1);
+    assert_eq!(excluded[0]["reason"], "store_corrupt");
+    let recovery = excluded[0]["recovery"].as_str().unwrap_or_default();
+    assert!(
+        recovery.contains("store_corrupt") && recovery.contains("repair --rebuild-db"),
+        "the partial-exclusion entry must carry the store_corrupt recovery hint: {search}"
+    );
+}
