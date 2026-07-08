@@ -70,12 +70,44 @@ pub struct UnitReuse {
 }
 
 pub fn prepare_units(request: PrepareStageRequest) -> Result<PrepareStageOutput> {
+    // R20-6: the local deterministic adapter only parses text (Markdown / plain text /
+    // code) and PDF text layers (docs/07 §7.1). A RECOGNIZED non-text-native binary (image
+    // / OOXML office document) is never locally parseable — a raw-bytes "passthrough" unit
+    // evidences its bytes (a ZIP's PK header, an image's pixels) as searchable garbage.
+    // Route it to online OCR (empty prepared_units → the R20-5 path). `octet-stream`
+    // (unrecognized extension) is content-sniffed below: it may be a TEXT file with an
+    // unknown extension (`.env`, `.cfg`) — still passthrough'd locally — or a binary blob.
+    let media_type = request.media_type.as_str();
+    let is_text_native = matches!(media_type, "text/markdown" | "text/plain" | "text/x-code");
+    let is_pdf = media_type == "application/pdf";
+    if !is_text_native && !is_pdf && media_type != "application/octet-stream" {
+        return Ok(PrepareStageOutput {
+            prepared_object_hashes: Vec::new(),
+            prepared_units: Vec::new(),
+            image_object_hashes: Vec::new(),
+        });
+    }
     let bytes = std::fs::read(&request.input_path).pipeline_io(Path::new(&request.input_path))?;
+    if !is_text_native && !is_pdf && !bytes_are_text(&bytes) {
+        // Binary octet-stream (a DOCX-as-unknown-ext, a compiled blob): do NOT evidence its
+        // raw bytes as text — route to OCR like the other non-text-native media above.
+        return Ok(PrepareStageOutput {
+            prepared_object_hashes: Vec::new(),
+            prepared_units: Vec::new(),
+            image_object_hashes: Vec::new(),
+        });
+    }
     let prepared_hash = hash_bytes(&bytes);
     let unit_type = unit_type_for_media_type(&request.media_type);
     let pdf_pages = if request.media_type == "application/pdf" {
         let pages = pdf_text_pages(&bytes);
-        if pages.is_empty() {
+        // R20-4: `pdf_has_text_layer` and the stream/literal extractors match on raw
+        // (undecompressed) bytes, so a scanned PDF's compressed image streams yield garbage
+        // "text" (a chance `BT` plus random `(...)` literals). If every recovered page is
+        // empty or mostly non-printable, there is no real text layer — treat it as scanned
+        // and route to OCR rather than persisting the garbage as a searchable unit. (An
+        // empty `pages` — the honest no-text-layer result — also lands here vacuously.)
+        if pages.iter().all(|page| !is_probably_real_text(page)) {
             return Ok(PrepareStageOutput {
                 prepared_object_hashes: Vec::new(),
                 prepared_units: Vec::new(),
@@ -86,13 +118,6 @@ pub fn prepare_units(request: PrepareStageRequest) -> Result<PrepareStageOutput>
     } else {
         Vec::new()
     };
-    if request.media_type == "application/pdf" && !pdf_has_text_layer(&bytes) {
-        return Ok(PrepareStageOutput {
-            prepared_object_hashes: Vec::new(),
-            prepared_units: Vec::new(),
-            image_object_hashes: Vec::new(),
-        });
-    }
     let unit_count = if unit_type == UnitType::Page {
         pdf_pages.len().max(1)
     } else {
@@ -246,6 +271,40 @@ fn unit_type_for_media_type(media_type: &str) -> UnitType {
 
 fn pdf_has_text_layer(bytes: &[u8]) -> bool {
     !bytes.starts_with(b"%PDF") || bytes.windows(2).any(|window| window == b"BT")
+}
+
+/// R20-4: heuristic for whether extracted PDF text is REAL text vs binary garbage
+/// lossy-decoded from a scanned PDF's compressed streams. Real text is overwhelmingly
+/// printable; garbage is dense with U+FFFD replacement characters and control bytes.
+/// Requires a strong printable majority (non-control-or-whitespace, non-replacement) over
+/// a non-empty length. Legitimate text extracted from real `(text)` literals passes; the
+/// random-`(...)` / whole-binary fallback of a scanned page does not.
+fn is_probably_real_text(text: &str) -> bool {
+    let trimmed = text.trim();
+    let total = trimmed.chars().count();
+    if total == 0 {
+        return false;
+    }
+    let printable = trimmed
+        .chars()
+        .filter(|ch| *ch != '\u{fffd}' && (!ch.is_control() || ch.is_whitespace()))
+        .count();
+    printable * 100 >= total * 85
+}
+
+/// R20-6: whether an `application/octet-stream` (unrecognized-extension) file is TEXT that
+/// the local adapter should passthrough (a `.env` / `.cfg` / extensionless text file),
+/// versus a binary blob (a DOCX ZIP, a compiled artifact) that must route to OCR rather
+/// than have its raw bytes evidenced as searchable text. Text decodes as UTF-8, has no NUL
+/// byte, and is overwhelmingly printable.
+fn bytes_are_text(bytes: &[u8]) -> bool {
+    if bytes.contains(&0) {
+        return false;
+    }
+    match std::str::from_utf8(bytes) {
+        Ok(text) => is_probably_real_text(text),
+        Err(_) => false,
+    }
 }
 
 #[must_use]

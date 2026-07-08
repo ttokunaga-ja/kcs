@@ -6412,10 +6412,15 @@ fn r19_3_reverted_chunk_re_embeds_after_non_live_retirement() {
     );
     let status = json_success_embed_at(&dir, "mock", "2026-07-07T00:00:00Z", &["status"]);
     let tasks_after = tasks_of_type(&status, "embedding").len();
-    assert!(
-        tasks_after > tasks_before,
-        "R19-3: reverting to the exact bytes must create a FRESH embedding task for the \
-         reappeared chunk (before={tasks_before}, after={tasks_after}): {status}"
+    // R20-2: reverting REVIVES the retired-non-live task in place (Failed -> Pending),
+    // reusing its slot rather than appending a duplicate `output_ref` task. A duplicate
+    // would be double-stamped by `apply_embedding_transitions` (keyed on output_ref) and
+    // then double-reclaimed (silent cap fail-open). So the task count must NOT grow; the
+    // reappeared chunk still re-embeds (asserted below via `reverted_done`).
+    assert_eq!(
+        tasks_after, tasks_before,
+        "R20-2: reverting must REVIVE the retired task in place, not append a duplicate \
+         output_ref task (before={tasks_before}, after={tasks_after}): {status}"
     );
     let reverted_done = tasks_of_type(&status, "embedding")
         .iter()
