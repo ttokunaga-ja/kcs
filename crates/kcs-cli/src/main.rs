@@ -445,7 +445,7 @@ fn run(cli: Cli) -> Result<Value> {
                 "files": status.files,
                 "head_shallow": status.head_shallow,
                 "tasks": task_store.all().map_err(pipeline_to_kcs)?,
-                "quarantine": read_quarantine_records(&repo)?,
+                "quarantine": quarantine_status_records(&repo)?,
                 "budget": budget_status_json(&repo)?,
             }))
         }
@@ -1443,10 +1443,13 @@ fn run_search_inner(args: UnsupportedArgs, started: Instant) -> Result<Value> {
                 )
             });
         if index_unusable {
+            // R20-8: attach a top-level `context.recovery` (not only the per-entry hints),
+            // so the exit-1 index-unusable response is structurally consistent with the
+            // store-corruption aggregate below.
             return Err(KcsError::new(
                 "KCS-E-SEARCH-VEC-UNAVAIL-001",
                 "text and vector search are both unavailable: the search index (sqlite.db) is missing or corrupt in every scope; run `kcs repair --rebuild-db`",
-                json!({ "excluded_scopes": excluded }),
+                json!({ "excluded_scopes": excluded, "recovery": aggregate_store_recovery_hints(&excluded) }),
                 ExitCode::Failure,
             ));
         }
@@ -1493,6 +1496,32 @@ fn run_search_inner(args: UnsupportedArgs, started: Instant) -> Result<Value> {
                 format!(
                     "every searched scope's store is corrupt or shallow, so search cannot \
                      run — {}",
+                    recovery.join("; ")
+                ),
+                json!({ "excluded_scopes": excluded, "recovery": recovery }),
+                ExitCode::PermanentFailure,
+            ));
+        }
+        // R20-8: a HETEROGENEOUS all-failed mix (e.g. one index_corrupt + one store_corrupt)
+        // matches neither homogeneous aggregation above, yet every scope has a known
+        // recovery. R18-4 left it falling through to the bare "all searched scopes failed"
+        // with no guidance. Attach aggregate recovery (message + context.recovery); the code
+        // stays SCOPE-ALL-FAILED-001 (docs frozen — no new code) and exit 4 (a store_corrupt
+        // member needs manual object restore, so not the exit-1 VEC-UNAVAIL rebuild path).
+        let all_recoverable = !excluded.is_empty()
+            && excluded.iter().all(|e| {
+                matches!(
+                    e.get("reason").and_then(Value::as_str),
+                    Some(reason) if store_corruption_recovery_hint(reason).is_some()
+                )
+            });
+        if all_recoverable {
+            let recovery = aggregate_store_recovery_hints(&excluded);
+            return Err(KcsError::new(
+                "KCS-E-SEARCH-SCOPE-ALL-FAILED-001",
+                format!(
+                    "every searched scope failed with a recoverable store/index error, so \
+                     search cannot run — {}",
                     recovery.join("; ")
                 ),
                 json!({ "excluded_scopes": excluded, "recovery": recovery }),
@@ -2404,6 +2433,15 @@ fn compute_index_status(searched: &[SearchedScopeInfo]) -> Value {
             if !matches!(task.task_type, TaskType::Markdownize | TaskType::Embedding) {
                 continue;
             }
+            // R20-7: a `retired_non_live` task's chunk went non-live (deleted / re-chunked /
+            // superseded), so it is NOT an enrichment gap in the CURRENT corpus and must not
+            // deflate enriched_ratio. R11-8 deliberately keeps a LIVE permanent-gap Failed
+            // (invalid_input/contract) in the denominator; this excludes only the non-live
+            // subset, which R19-3's dedicated reason makes unambiguous. Without this, a
+            // deleted/reverted chunk left enriched_ratio < 1.0 with pending == 0 forever.
+            if task.fallback_reason.as_deref() == Some(RETIRED_NON_LIVE) {
+                continue;
+            }
             total += 1;
             match task.status {
                 TaskStatus::Done => done += 1,
@@ -2502,6 +2540,33 @@ fn store_corruption_recovery_hint(reason: &str) -> Option<&'static str> {
         ),
         _ => None,
     }
+}
+
+/// R20-8: the deduplicated recovery hints for a set of excluded scopes, in a stable reason
+/// order. Aggregates the per-entry `store_corruption_recovery_hint`s into the
+/// all-scopes-failed response's top-level `context.recovery` — so the `index_unusable`
+/// exit and a HETEROGENEOUS all-failed mix (which R18-4 left hintless) both surface
+/// guidance, matching the homogeneous store-corruption branch.
+fn aggregate_store_recovery_hints(excluded: &[Value]) -> Vec<&'static str> {
+    let mut out: Vec<&'static str> = Vec::new();
+    for reason in [
+        "store_corrupt",
+        "snapshot_shallow",
+        "index_missing",
+        "index_corrupt",
+    ] {
+        let present = excluded
+            .iter()
+            .any(|e| e.get("reason").and_then(Value::as_str) == Some(reason));
+        if present {
+            if let Some(hint) = store_corruption_recovery_hint(reason) {
+                if !out.contains(&hint) {
+                    out.push(hint);
+                }
+            }
+        }
+    }
+    out
 }
 
 /// Whether `ch` is a CJK character KCS treats as space-less script (Hiragana,
@@ -2928,6 +2993,28 @@ fn parse_reindex_args(args: Vec<String>) -> Result<ParsedReindex> {
         i += 1;
     }
     Ok(parsed)
+}
+
+/// R20-10: chunk_ids whose embedding task is currently on a secrets hold (Paused
+/// `secrets_tier_b_hold`). `rebuild_chunk_vec` excludes them so a content-hash twin's
+/// online embedding cannot expose a held file in vector search before `--send-secrets`.
+fn held_secret_embedding_chunk_ids(kcs_dir: &Path) -> Result<BTreeSet<String>> {
+    let task_store = TaskStore::new(kcs_dir);
+    Ok(task_store
+        .all()
+        .map_err(pipeline_to_kcs)?
+        .into_iter()
+        .filter(|task| {
+            task.task_type == TaskType::Embedding
+                && task.status == TaskStatus::Paused
+                && task.fallback_reason.as_deref() == Some(SECRETS_TIER_B_HOLD)
+        })
+        .filter_map(|task| {
+            task.output_ref
+                .strip_prefix("embedding:")
+                .map(str::to_owned)
+        })
+        .collect())
 }
 
 fn rebuild_step3_index(repo: &Repository) -> Result<Step3RebuildReport> {
@@ -3555,7 +3642,10 @@ fn build_sqlite_index_at(
         )
         .map_err(index_to_kcs)?;
     }
-    embedding_store::rebuild_chunk_vec(fts.connection()).map_err(index_to_kcs)?;
+    // R20-10: exclude secret-held chunks so the content-hash rebuild can't link a held
+    // (Tier B) chunk to a non-secret content-twin's vector and expose it in vector search.
+    let held_chunk_ids = held_secret_embedding_chunk_ids(kcs_dir)?;
+    embedding_store::rebuild_chunk_vec(fts.connection(), &held_chunk_ids).map_err(index_to_kcs)?;
     fts.connection()
         .execute_batch("COMMIT")
         .map_err(|err| KcsError::schema(err.to_string()))?;
@@ -7625,9 +7715,18 @@ fn live_chunks_without_embedding(
         .map_err(|err| KcsError::schema(err.to_string()))?;
     drop(existing_stmt);
 
+    // R20-1: select the CURRENT path (`te.path`) from the joined HEAD tree, NOT the
+    // append-only `chunks.raw_path` (the chunk's first-seen path, kept for display /
+    // time-travel per docs/04-pipeline.md:301). `EmbeddableChunk.raw_path` feeds the
+    // secret online-send hold gate (`classify_secret`, main.rs:7098) and the enqueued
+    // task's `input_path`; reading the STALE first-seen path let a file renamed INTO a
+    // secret-matching name (after it was indexed but before its embedding was sent) slip
+    // the hold and be sent online with a falsely-"hold" audit record. `te.path` is the
+    // live name, so the gate classifies the file as it exists now. (`chunks.raw_path`
+    // itself stays append-only; only what embedding sees changes.)
     let mut stmt = conn
         .prepare(
-            "SELECT c.chunk_id, c.text, c.text_hash, c.raw_path
+            "SELECT c.chunk_id, c.text, c.text_hash, te.path
              FROM chunks c
              JOIN tree_entries te ON te.commit_hash = ?1
                  AND te.raw_hash = c.raw_hash
@@ -7892,26 +7991,44 @@ fn enqueue_embedding_tasks(
     online: bool,
     now: &str,
 ) -> Result<()> {
-    let existing = task_store
-        .all()
-        .map_err(pipeline_to_kcs)?
-        .into_iter()
+    let all_tasks = task_store.all().map_err(pipeline_to_kcs)?;
+    let existing = all_tasks
+        .iter()
         .filter(|task| task.task_type == TaskType::Embedding)
         // R19-3: a task retired because its chunk went non-live must NOT block a fresh
         // enqueue when the content-addressed chunk_id reappears (git revert / restore of
         // the exact bytes). Excluding it here lets a genuinely-live-again chunk be
         // re-embedded instead of being silently stuck out of vector search forever.
         .filter(|task| task.fallback_reason.as_deref() != Some(RETIRED_NON_LIVE))
-        .map(|task| task.output_ref)
+        .map(|task| task.output_ref.clone())
+        .collect::<BTreeSet<_>>();
+    // R20-2: output_refs of retired-non-live tasks eligible to be REVIVED IN PLACE. R19-3
+    // let a reappearing chunk enqueue past its retired task, but appending a NEW task left
+    // the old retired one behind — TWO tasks sharing one `output_ref`. Because
+    // `apply_embedding_transitions` and `reconcile_committed_embedding_tasks` key on
+    // `output_ref` (not `task_id`), a later rate_limit send re-stamped BOTH and reconcile
+    // then reclaimed the single phantom TWICE — a silent per-adapter cap under-count
+    // (fail-open) that accumulated each revert cycle. Reviving the existing retired task in
+    // place keeps exactly one task per output_ref, so no double-stamp / double-reclaim.
+    let revivable = all_tasks
+        .iter()
+        .filter(|task| task.task_type == TaskType::Embedding)
+        .filter(|task| task.fallback_reason.as_deref() == Some(RETIRED_NON_LIVE))
+        .map(|task| task.output_ref.clone())
         .collect::<BTreeSet<_>>();
     let reason = if online {
         "ready_for_online_adapter"
     } else {
         "network_opt_in_required"
     };
+    let mut to_revive: BTreeSet<String> = BTreeSet::new();
     for chunk in pending {
         let output_ref = embedding_task_output_ref(&chunk.chunk_id);
         if existing.contains(&output_ref) {
+            continue;
+        }
+        if revivable.contains(&output_ref) {
+            to_revive.insert(output_ref);
             continue;
         }
         let task = TaskDescriptor {
@@ -7936,6 +8053,30 @@ fn enqueue_embedding_tasks(
             reserved_month: None,
         };
         task_store.append(&task).map_err(pipeline_to_kcs)?;
+    }
+    // Revive retired-non-live tasks in place (Failed -> Pending), reusing their slot so no
+    // duplicate output_ref is created. Their `reserved_*` were cleared at retirement, so
+    // the revived task carries no phantom reservation.
+    if !to_revive.is_empty() {
+        task_store
+            .update_matching(|task| {
+                if task.task_type == TaskType::Embedding
+                    && task.fallback_reason.as_deref() == Some(RETIRED_NON_LIVE)
+                    && to_revive.contains(&task.output_ref)
+                {
+                    task.status = TaskStatus::Pending;
+                    task.fallback_reason = Some(reason.to_owned());
+                    task.attempts = 0;
+                    task.next_retry_at = None;
+                    task.heartbeat_at = None;
+                    task.reserved_usd = None;
+                    task.reserved_month = None;
+                    true
+                } else {
+                    false
+                }
+            })
+            .map_err(pipeline_to_kcs)?;
     }
     Ok(())
 }
@@ -7985,17 +8126,24 @@ fn task_retry_allowed(task: &TaskDescriptor) -> bool {
 }
 
 /// R19-2: an online-send failure carrying an F8 reservation (a NON-billable phantom for
-/// RateLimit/Quota, possibly-billed for NetworkError). A retire+reclaim supersede/sweep
+/// RateLimit/Quota/Auth, possibly-billed for NetworkError). A retire+reclaim supersede/sweep
 /// must target these REGARDLESS of retry-attempt exhaustion: QuotaExceeded exhausts its
 /// finite `max_attempts` (unlike RateLimit's unlimited), so gating on `task_retry_allowed`
 /// left an exhausted-quota phantom reservation stuck for the month — never reclaimed,
-/// starving the per-adapter cap and falsely pausing legitimate tasks. The reclaim itself
-/// stays error-kind-aware inside `retire_online_task_reclaiming` (only RateLimit/Quota).
-/// A `retired_non_live` task maps to InvalidInput here, so it is excluded (idempotent).
+/// starving the per-adapter cap and falsely pausing legitimate tasks. R20-3: AuthError is
+/// included for the same reason — it is non-retryable (`max_attempts:0`) so `task_retry_allowed`
+/// excluded it, leaving its (non-billable, 401/403) phantom orphaned; the sweep must retire it
+/// so `reclaim_entry_for` can cancel the phantom. The reclaim itself stays error-kind-aware
+/// inside `reclaim_entry_for` (RateLimit/Quota/Auth reclaim; NetworkError retires but keeps
+/// its reservation as it may have billed). A `retired_non_live` task maps to InvalidInput
+/// here, so it is excluded (idempotent).
 fn is_reservation_bearing_send_failure(task: &TaskDescriptor) -> bool {
     matches!(
         retry_kind_from_reason(task.fallback_reason.as_deref()),
-        RetryErrorKind::RateLimit | RetryErrorKind::QuotaExceeded | RetryErrorKind::NetworkError
+        RetryErrorKind::RateLimit
+            | RetryErrorKind::QuotaExceeded
+            | RetryErrorKind::NetworkError
+            | RetryErrorKind::AuthError
     )
 }
 
@@ -8090,6 +8238,14 @@ fn media_type_for_cli_path(path: &Path) -> &'static str {
         "pdf" => "application/pdf",
         "png" => "image/png",
         "jpg" | "jpeg" => "image/jpeg",
+        "webp" => "image/webp",
+        "gif" => "image/gif",
+        // R20-6: recognize OOXML office documents by their real MIME so they are treated as
+        // non-text-native (routed to online OCR), not folded into octet-stream and given a
+        // raw-bytes local passthrough that evidences the ZIP bytes as searchable text.
+        "docx" => "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "xlsx" => "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "pptx" => "application/vnd.openxmlformats-officedocument.presentationml.presentation",
         _ => "application/octet-stream",
     }
 }
@@ -8543,19 +8699,30 @@ fn run_index_pipeline(
         )?;
 
         if prepare.prepared_units.is_empty() {
-            let task = task_descriptor(
+            // R20-5: this media has no locally-extractable text — a text-layer-less/scanned
+            // PDF, or (after R20-6) an image / OOXML / unrecognized binary. It needs ONLINE
+            // OCR, so route it through the SAME enqueue path as a text-layer PDF's online
+            // enhancement: an idempotent task carrying the executable online output_ref,
+            // gated by secret / budget / network opt-in. The old branch appended a fixed
+            // "pending:scanned_pdf_without_text_layer" output_ref that NO executor consumed
+            // (`execute_pending_markdownize_tasks` filters on the online output_ref) and had
+            // no idempotency guard (04 §5.5), so it silently duplicated on every idle
+            // re-index and the file never reached OCR.
+            enqueue_online_placeholder_task(
                 repo,
-                TaskType::Markdownize,
-                Some(MarkdownizeMode::Full),
+                &task_store,
                 candidate,
                 &raw_hash,
-                "pending:scanned_pdf_without_text_layer",
-                TaskStatus::Pending,
-                Some("ai_enhancement_required"),
+                &scope_id,
+                network_allowed,
+                secrets_hold,
+                args,
                 &now,
-            );
-            task_store.append(&task).map_err(pipeline_to_kcs)?;
-            result.pending_files += 1;
+                &mut result,
+                &cost_ledger,
+                &budget_caps,
+                &month,
+            )?;
             continue;
         }
 
@@ -9338,8 +9505,13 @@ const RETIRED_NON_LIVE: &str = "retired_non_live";
 /// the Failed->Pending flip). `markdown_adapter_kind` is the adapter's ledger key
 /// (`"markdown"` or `EMBEDDING_ADAPTER_KIND`), so the reclaim nets the correct cap.
 /// R19-4: compute the reclaim ledger entry for a task's F8 reservation WITHOUT mutating
-/// the task. A NON-billable (RateLimit/Quota) reservation with an exact stamp is
+/// the task. A NON-billable (RateLimit/Quota/Auth) reservation with an exact stamp is
 /// reclaimable; NetworkError (may have billed server-side) and all other kinds are not.
+/// R20-3: AuthError (401/403) is refused at the auth layer BEFORE the backend processes
+/// or bills the request — even earlier than a 429 RateLimit — so its F8 phantom is
+/// non-billable exactly like RateLimit/Quota and must be reclaimed when the task goes
+/// non-live; the reclaim series (R16-7→R19-2) had never included it, so an auth phantom
+/// ate the per-adapter cap for the month. NetworkError stays out (it may have billed).
 /// Shared by `retire_online_task_reclaiming` (which then retires the task) and the
 /// embedding live-embedded convergence (which then completes the task as Done).
 fn reclaim_entry_for(
@@ -9349,7 +9521,7 @@ fn reclaim_entry_for(
 ) -> Option<MonthlyCostLedgerEntry> {
     if !matches!(
         retry_kind_from_reason(task.fallback_reason.as_deref()),
-        RetryErrorKind::RateLimit | RetryErrorKind::QuotaExceeded
+        RetryErrorKind::RateLimit | RetryErrorKind::QuotaExceeded | RetryErrorKind::AuthError
     ) {
         return None;
     }
@@ -9613,7 +9785,20 @@ fn net_monthly_spent(
         .reclaim_ledger()
         .monthly_total_for_adapter(month, scope_id, adapter_kind)
         .map_err(pipeline_to_kcs)?;
-    Ok((gross - reclaimed).max(0.0))
+    let net = gross - reclaimed;
+    // R20-11: `reclaimed > gross` is impossible in normal operation — every reclaim row
+    // corresponds to a kept charge, and stamps are cleared on retirement so a reservation
+    // is reclaimed at most once. A meaningfully-negative net therefore signals an anomaly
+    // (reclaim-ledger corruption, or an over-reclaim bug like R20-2's duplicate-output_ref
+    // double-reclaim). The old `.max(0.0)` clamp fail-OPENED the cap (net=0 → the full cap
+    // reads as available); fail CLOSED instead by ignoring the untrustworthy reclaim credit
+    // and charging the honest gross — the same fail-closed posture F1/F3 gave the charge
+    // ledger. The −1e-9 threshold is far below a single (~1e-6) charge yet far above f64
+    // summation noise, so only a real over-reclaim (>= one charge) trips it.
+    if net < -1e-9 {
+        return Ok(gross.max(0.0));
+    }
+    Ok(net.max(0.0))
 }
 
 fn budget_remaining_for_adapter(
@@ -10039,6 +10224,34 @@ fn read_quarantine_records(repo: &Repository) -> Result<Vec<Value>> {
     Ok(text
         .lines()
         .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .collect())
+}
+
+/// R20-9: quarantine records collapsed to the LATEST disposition per path, for `kcs status`
+/// display. `record_quarantine_candidates` appends a `hold` row, then (after
+/// `--send-secrets`) a `send_approved` row — R19-7's `(path, approval_method)` dedup lets
+/// both land. The raw `read_quarantine_records` returns BOTH, so status reported a file as
+/// simultaneously "hold" and "send_approved". quarantine.jsonl is append-only in
+/// chronological order, so the last row per path is the current disposition — the reader
+/// behavior R19-7's fix comment assumed but never implemented. The raw reader is left
+/// untouched (the writer's own `(path, method)` dedup set needs every row).
+fn quarantine_status_records(repo: &Repository) -> Result<Vec<Value>> {
+    let mut order: Vec<String> = Vec::new();
+    let mut latest: BTreeMap<String, Value> = BTreeMap::new();
+    for row in read_quarantine_records(repo)? {
+        let key = row
+            .get("path")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned();
+        if !latest.contains_key(&key) {
+            order.push(key.clone());
+        }
+        latest.insert(key, row);
+    }
+    Ok(order
+        .into_iter()
+        .filter_map(|key| latest.remove(&key))
         .collect())
 }
 

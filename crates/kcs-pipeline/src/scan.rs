@@ -427,6 +427,14 @@ fn media_type_for_path(path: &Path) -> &'static str {
         "pdf" => "application/pdf",
         "png" => "image/png",
         "jpg" | "jpeg" => "image/jpeg",
+        "webp" => "image/webp",
+        "gif" => "image/gif",
+        // R20-6: recognize OOXML office documents by their real MIME so they are treated as
+        // non-text-native (routed to online OCR), not folded into octet-stream and given a
+        // raw-bytes local passthrough that evidences the ZIP bytes as searchable text.
+        "docx" => "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "xlsx" => "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "pptx" => "application/vnd.openxmlformats-officedocument.presentationml.presentation",
         _ => "application/octet-stream",
     }
 }

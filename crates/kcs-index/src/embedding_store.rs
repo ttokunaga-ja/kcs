@@ -149,7 +149,18 @@ pub fn link_chunk_vec(
 /// Rebuild `chunk_vec` from `embeddings` joined to `chunks` on `text_hash`
 /// (04 §4.3 rebuild order objects → embeddings → chunk_vec; `embeddings` is the
 /// source of truth). Only adopted-width chunk embeddings are re-linked.
-pub fn rebuild_chunk_vec(conn: &Connection) -> Result<()> {
+///
+/// R20-10: `held_chunk_ids` are chunks whose embedding is currently on a secrets hold.
+/// They are excluded from `chunk_vec` because the content-hash JOIN below would otherwise
+/// link a held (Tier B) chunk to a vector produced by a NON-secret content-twin's online
+/// send — exposing the held file in vector/semantic search without `--send-secrets`.
+/// R19-4's Failed(retryable) content-twin convergence is unaffected: only Paused
+/// secret-holds are passed here, never Failed tasks. Releasing the hold (`--send-secrets`)
+/// drops the chunk from this set, so the next rebuild re-links it.
+pub fn rebuild_chunk_vec(
+    conn: &Connection,
+    held_chunk_ids: &std::collections::BTreeSet<String>,
+) -> Result<()> {
     conn.execute_batch("DELETE FROM chunk_vec;")?;
     let mut stmt = conn.prepare(
         "SELECT c.chunk_id, e.vector, e.dimensions
@@ -166,6 +177,9 @@ pub fn rebuild_chunk_vec(conn: &Connection) -> Result<()> {
         })?
         .collect::<std::result::Result<Vec<_>, _>>()?;
     for (chunk_id, vector, dimensions) in rows {
+        if held_chunk_ids.contains(&chunk_id) {
+            continue;
+        }
         link_chunk_vec(conn, &chunk_id, &vector, dimensions)?;
     }
     Ok(())
@@ -506,7 +520,7 @@ mod tests {
         // Drop the derived table, then rebuild it from embeddings (source of truth).
         conn.execute_batch("DELETE FROM chunk_vec;").unwrap();
         assert_eq!(chunk_vec_count(conn).unwrap(), 0);
-        rebuild_chunk_vec(conn).unwrap();
+        rebuild_chunk_vec(conn, &std::collections::BTreeSet::new()).unwrap();
         assert_eq!(chunk_vec_count(conn).unwrap(), 2);
         let knn = knn_chunk_distances(conn, &basis_vector(1), 10).unwrap();
         assert_eq!(knn[0].0, "c2");
