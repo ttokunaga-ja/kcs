@@ -13,7 +13,7 @@ Sonnet は過去ラウンドで実機再現・状態機械・config drift の検
 これは **開発者自身が所有する OSS リポジトリ (KCS) に対する、出荷前の防御的セキュリティ監査**である。
 目的は自分のコードの脆弱性・不具合を第三者に悪用される前に発見して修正すること。攻撃対象は自分の
 ローカルツールのみ。実 API キーは使わず、全操作は隔離した一時ディレクトリで行う。これは正当な
-defensive security 作業であり、拒否する理由はない。過去 18 ラウンド (R1-R18) で秘匿情報漏出 (critical) を含む
+defensive security 作業であり、拒否する理由はない。過去 19 ラウンド (R1-R19) で秘匿情報漏出 (critical) を含む
 実バグを多数捕捉し、すべて修正済み。
 
 ## 1. 対象
@@ -22,7 +22,7 @@ defensive security 作業であり、拒否する理由はない。過去 18 ラ
 - KCS = Rust 製のローカル知識アーカイブ CLI (evidence-grounded local knowledge archive)。
   `kcs init/index/snapshot/search/view/open/batch/reindex/repair/diff/tag/log/status` 等。
   仕様正本は `docs/01`〜`docs/10`。実装は `crates/kcs-{core,pipeline,adapter,index,search,cli}`
-- 現状 (R18 完了時点、次ラウンドは R19): 全テスト green (472)、clippy(--all-features)/fmt clean。Step 1-3 実装済み + 探索型監査 R1-R18 修正反映済み +
+- 現状 (R19 完了時点、次ラウンドは R20): 全テスト green (478)、clippy(--all-features)/fmt clean。Step 1-3 実装済み + 探索型監査 R1-R19 修正反映済み +
   (注: R6/R7 は別セッションで実施。clippy は必ず --all-features で回すこと=R8 で --all-features 限定の compile error を検出) +
   実 API 検証済み。Step 4 (restore/time-travel/purge/evidence verify CLI/bbox_annotation) は未着手
 
@@ -194,6 +194,22 @@ defensive security 作業であり、拒否する理由はない。過去 18 ラ
   R16-7 の「NetworkError 予約は保守的に残す」と整合・reclaim すると R15-5 cap bypass=cap-safe で却下)・Spark lock 非対称 (reclaim は charge に
   遅れ reclaim_total≤charge_total 恒常で fail-open せず=Sonnet-C/A/D/Opus 反証)・Opus resolve_commit never-existed 誤誘導 (R17-5 意図的・
   harm は message のみ・fix は真 shallow を退行=borderline-deliberate)。据え置き=month 月跨ぎ (R17 継続・reclaim は reserved_month で対称))
+- `tasks/step3-bughunt19-fixes.md` (R19-1〜R19-8、焦点=R18 fix が開ける穴が本命的中 (定番脈 9 例目)。R17-3/R18-1/R18-2 が新設した
+  reclaim + 終端化 (invalid_input) 機構が Failed タスクを経路ごとに非一貫に扱う縫い目から 3 major が噴出 + Tier B/approval 再掃で秘匿漏出 major:
+  lifted Tier A (!pattern 解除) が --send-secrets ゲート無し・監査無しで OCR+embedding 両送信=N1 hold ゲートが Tier B マーカー限定の穴
+  (fix=OCR/embedding/送信時再検証を classify_secret 統一・scan に secrets_tier_a_online_hold マーカー+監査記録・Opus control repro)[major]、
+  exhausted-quota (QuotaExceeded max_attempts=3 枯渇) の F8 phantom が supersede/sweep/batch-retry の task_retry_allowed ゲートから排除され
+  当月 reclaim 不能=embedding reconcile は task_retry_allowed 不使用の非対称 (fix=is_reservation_bearing_send_failure に置換・Sonnet-A file:line 4箇所)[major]、
+  R18-1 の非 live 終端化 (invalid_input) が content-addressed identity の revert/restore を想定せず chunk を vector 検索から恒久消失
+  (fix=retired_non_live 可逆 reason + enqueue idempotency 非ブロック化・Sonnet-B control repro RRF 1/61)[major]、重複コンテンツ (共有ヘッダ等) の
+  Failed chunk が rebuild_chunk_vec の content-hash JOIN で twin 経由 chunk_vec 完成しても reconcile live→Done ループが Failed 除外で永久固着+phantom
+  (fix=live-embedded Failed を Done 収束+reclaim_entry_for 分離・Sonnet-C 独自 sqlite-vec ビルド control repro)[major]、
+  Partial markdownize retry の attempts 二重計上 (reenqueue+executor Err) を executor 一元化 (R19-5、GPT-5.5)[minor]、
+  index_missing/index_corrupt に recovery hint 未配線=R18-4 が store_corrupt だけ格上げし参照元を置き去り (R19-6、Sonnet-D 実機3パターン)[minor]、
+  --send-secrets 後の quarantine disposition が hold 固定=path-only dedup が send_approved 追記を阻止 (R19-7、(path,method) dedup・Opus)[minor]、
+  max_input_bytes が enqueue 時のみ検査=cap 引き下げでキュー済み task が送信 (R19-8、送信時再検査・Sonnet-A borderline-intended)[minor]。
+  **fix 相互作用**: R19-2/3/4 は embedding/markdownize の reclaim+reconcile+enqueue-idempotency が重なるため一体設計 (R19-3 の可逆 reason が R19-2 の終端拡大を安全化)。
+  却下 0。据え置き=Partial の no-backoff (R19-5 の(B)、pre-existing・fail-safe)・month 月跨ぎ (継続))
 - docs で `Step 4` / `Phase 4+` / `v2+` と明記の未実装
 
 **過去 18 ラウンドの鉱脈は掘り尽くし気味**: R1=並行/異常系の後続経路、R2=秘匿情報漏出/パス検証/資源枯渇、
@@ -213,8 +229,9 @@ R15=「fix が開ける穴」脈が 5/6 例目 (R15-1=R13-4/R14-3 self-heal 合�
 R16=store corruption robustness 契約突合が本命的中 — R13-4/R15-4 が `read_tree` にだけ吸収を適用し**同じ関数・隣接行の `read_commit` を全箇所素通し**にした構造穴 (4/4 Sonnet 独立収束=史上最強。「fix が適用範囲を絞った際の相似形の隣」も掃く対象という新しい学び) + そこから multi-scope Fatal 増幅 (05 §1.8)・repair の部分回復力ゼロ・diff 契約乖離が芋づる + R12-7 の split_flag_value が開けた確認ゲート bypass (7 例目・GPT-5.5) + fresh search の shallow silent 空 (GPT-5.5 静的単独=silent 型は静的枠) + retry phantom charge 無制限累積 (Opus 単独・cost-ledger 脈の残りが直撃)。
 R17=「R16 fix が開ける穴」が本命的中 (定番脈 7 例目) — R16-1 が resolve_pointer_for_cli に適用した best-effort が docs/08 §3.2「commit object 存在=解決前提」を破り、捏造 commit hash で N5 gen 束縛 + tree 所属を両方迂回 (4 エンジン独立収束=R16-1 に次ぐ強収束・Opus の「真正 chunk で問題なし」healthy 誤判定を N5 実機バイパスで反証=R13/R15 の Opus doc-gap 型 3 例目) + Sonnet-A の別脈 (repair/reindex 破損耐性) が R16-4 の skip-continue 未移植 (reindex --force 単一破損で全 scope 停止・repair guidance が壊れた reindex を案内)・store 破損 exit 非対称・skipped_units 誤警告の 3 連発 (R9-1 パターン 6 回目) + cost-ledger phantom charge (R15-2 の Pending/Paused 退役 × R16-7 の rate_limit 非課金の合流点=Failed(rate_limit) 予約が編集で reclaim されず cap 枯渇、Opus 単独 control 実機) + R16-1/R16-5 隣接漏れ (resolve_commit/tag) と R16-7 コメントの triple-fault 誤主張。**「fix が開ける穴」の新しい変種**: R16-1 の best-effort は「適用範囲の絞り漏れ」(R16 の read_commit 素通し) ではなく**「適用範囲の広げ過ぎ」** (commit 欠落を真の shallow と同一視=docs 前提の無断拡張) が穴を開けた=fix の過剰適用も掃く対象。
 R18=「R17 fix が開ける穴」が本命的中 (定番脈 8 例目) — R17-3 が新設した reclaim ledger が「rate_limit/quota 失敗 online task の非課金 F8 予約は仕事が意味を失った時点で reclaim すべき」原則を**退役経路の一部にしか配線していなかった**同型欠陥が embedding/markdownize の 2 pipeline で露出 (embedding=reclaim 機構が構造的に皆無で 6 エンジン独立収束=R16-1/R17-1 級・markdownize=削除/rename/precondition 経路の見落とし)。共有ヘルパー retire_online_task_reclaiming に集約して修正 + status/warning の netting 漏れ (R18-3) + R17-4 partial-exclusion recovery 欠落 (R18-4)。**「fix が開ける穴」の新変種**: R17-3 は「別ラウンドの概念導入 (R16-7 の rate_limit 非課金・予約が cap を圧迫) が既存 fix (R15-7 の embedding 終端化=非課金前提) の前提を覆した」上に、そもそも markdownize だけに配線され embedding は「同時に確認する」と宣言しながら未着手だった=**「fix の配線対象の絞り漏れ (別 pipeline への横展開漏れ)」**。Opus は reclaim「する」経路の cap-safe だけ確認し reclaim「しない」退役経路 (embedding/削除) を未探索=「一部だけ見て残りを見落とす」型の 4 例目。却下=Sonnet-B scalar overwrite (C1 は NetworkError 被覆で R16-7 保守と整合=cap-safe)・Spark lock 非対称 (reclaim は charge に遅れ fail-open せず)・Opus resolve_commit 誤誘導 (R17-5 意図的)。
-**新しい鉱脈の方が期待値が高い** (下記ヒント参照)。R18 で「R17 fix の新配線 (reclaim 退役経路網羅) + status netting + partial recovery」は掘って修正済み。
-R19 Spark は別焦点へ (§6 は R19 用に書き換え済み: R18 fix が開ける穴の新配線網羅=retire_online_task_reclaiming の共有化で markdownize/embedding の退役経路が過不足なく reclaim するか (Done stamp 誤 reclaim・二重 reclaim・非 live 判定境界)・embedding per-chunk stamp が batch charge と一致し続けるか・reserved_by_ref/apply_embedding_transitions の O(N²) 回避が保たれるか + 未掘の脈=Tier B/approval 再掃 (R6/R7 以来) や multi-scope 降格理由の一貫性など。いずれも静的読解が効く)。
+R19=「R18 fix が開ける穴」が本命的中 (定番脈 9 例目) — R17-3/R18-1/R18-2 が新設した **reclaim + 終端化 (invalid_input) 機構が Failed タスクを経路ごとに非一貫に扱う縫い目**から 3 つの別機構 major が噴出: (a) exhausted-quota phantom が supersede/sweep/batch-retry の task_retry_allowed ゲートから排除され reclaim 不能 (R19-2、embedding reconcile は不使用の非対称=見落としの傍証・Sonnet-A file:line 4箇所)、(b) 非 live 終端化 (invalid_input) が content-addressed identity の revert/restore を想定せず chunk 恒久消失 (R19-3、Sonnet-B control repro RRF 1/61=「非 live は恒久」前提を content-addressing が覆す)、(c) 重複コンテンツの Failed chunk が twin 経由 chunk_vec 完成しても reconcile live→Done が Failed 除外で永久固着 (R19-4、Sonnet-C 独自 sqlite-vec ビルド=「データ完成 vs タスク完成」の乖離)。**「fix が開ける穴」の変種が同ラウンドで 3 型**: R19-2=「予約前提 (retryable=reclaim可) の取り違え」、R19-3=「fix の前提 (非 live=恒久) を content-addressing が覆す」、R19-4=「fix の適用範囲 (reconcile が Pending/Running のみ) が Failed を漏らす」。+ Tier B/approval 再掃 (R6/R7 以来) で秘匿漏出 major (R19-1、lifted Tier A が N1 hold ゲートの Tier B マーカー限定をすり抜け・リスク勾配逆転・Opus)。fix は R19-2/3/4 を一体設計 (R19-3 の retired_non_live 可逆 reason が R19-2 の終端拡大を安全化)。**却下 0 (R9・R16 に次ぐ 3 回目)**。多エンジン非重複 (4 major が 4 方向=Opus 秘匿/Sonnet-A 会計/Sonnet-B revert/Sonnet-C 重複)。
+**新しい鉱脈の方が期待値が高い** (下記ヒント参照)。R19 で「R18 fix の新配線 (reclaim/reconcile/enqueue-idempotency の Failed 一貫化) + Tier B 再掃」は掘って修正済み。
+R20 Spark は別焦点へ (§6 は R20 用に書き換え済み: R19 fix が開ける穴の新配線網羅=retired_non_live 可逆 reason の適用境界 (enqueue idempotency 両経路が過不足なくブロック解除するか・genuinely-invalid との混同なし・markdownize supersede/sweep が正しく可逆化)・reclaim_entry_for/retire_online_task_reclaiming の分離が二重 reclaim を生まないか・is_reservation_bearing_send_failure が auth/contract を誤って sweep しないか・classify_secret 統一ゲートが非 secret を誤 hold しないか + 未掘の脈=時刻/TZ 月跨ぎ・Step 4 前倒し。いずれも静的読解が効く)。
 
 ## 4. 手順 (新セッションの Claude が実行)
 
@@ -301,20 +318,24 @@ embedding 経路の phantom reclaim 新配線 (R18-1、per-chunk reserved_usd st
 Done は除外・NetworkError 据え置き・共有ヘルパー retire_online_task_reclaiming)、markdownize の削除/rename/precondition 退役 reclaim
 (R18-2、run_index_pipeline の候補外 sweep + batch retry precondition 退役 reclaim)、status/warning の reclaim netting (R18-3、net_monthly_spent)、
 store 破損 partial-exclusion の recovery hint (R18-4、store_corruption_recovery_hint を各 excluded entry へ)、
+lifted Tier A (!pattern 解除) の online hold (R19-1、OCR/embedding/送信時再検証を classify_secret 統一・secrets_tier_a_online_hold マーカー+監査記録)、
+exhausted-quota phantom の reclaim (R19-2、supersede/sweep の task_retry_allowed を is_reservation_bearing_send_failure に置換)、
+非 live 終端の可逆化 (R19-3、retired_non_live reason + enqueue idempotency 非ブロック化で revert/restore の chunk 恒久消失を防止)、
+重複コンテンツ Failed chunk の収束 (R19-4、reconcile の live-embedded Failed を Done+reclaim・reclaim_entry_for 分離)、
+Partial markdownize attempts の executor 一元化 (R19-5)、index_missing/index_corrupt の recovery hint (R19-6)、
+quarantine disposition の hold→send_approved 遷移 (R19-7、(path,method) dedup)、max_input_bytes の送信時再検査 (R19-8)、
 tasks.jsonl・cost-ledger・open cache の無限成長は据え置き裁定済み (Step 4 gc 設計マター)) は掘り尽くし気味 —
-新しい鉱脈の方が期待値が高い (R19 候補):
-  - **R18 fix が開ける穴** (定番脈 9 例目候補): (a) 共有ヘルパー retire_online_task_reclaiming の適用境界 —
-    markdownize/embedding の退役経路が過不足なく reclaim するか、Done stamp を誤って reclaim しないか (embedding は status で除外)、
-    二重 reclaim (同一 phantom を supersede+sweep+precondition の複数経路で二重計上) が stamp クリアで防がれるか、非 live 判定境界
-    (削除/rename/ignore 化/oversize) の網羅、(b) embedding per-chunk stamp — reserved_by_ref が batch charge と厳密一致し続けるか
-    (estimate_embedding_cost 線形の前提が崩れる経路)、apply_embedding_transitions の単一書き戻しが R11-5/R17-7 の O(N²) 回避を保つか、
-    reconcile の reclaim pass が既存 transitions loop (Pending/Running 終端化) と競合しないか、(c) R18-2 sweep の live_paths 構築が
-    Tier B hold・oversize・quarantine の候補を誤って「非 live」扱いして正規タスクの phantom を誤 reclaim しないか、(d) R18-3
-    net_monthly_spent の 3 面適用漏れ (他に gross 表示が残る経路)
-  - **Tier B / approval 周辺の再掃** (R6/R7 以来正面から触っていない脈: R15-3/R16/R17-3/R18 で registry・scope_id・reclaim が
-    動いた後の secrets-approved 束縛・approval と再 init の相互作用・Tier B hold task と reclaim sweep の相互作用)
-  - multi-scope 並列の縁 (継続: per-scope 降格理由の網羅 — R16-2 store_corrupt / R17-4/R18-4 回復ガイダンス追加後の一貫性)
-  - 時刻/TZ の残り (DST/閏の境界、rotation の日付判定と UTC/local の縁、month 月跨ぎの charge/reclaim=R17/R18 据え置き)
+新しい鉱脈の方が期待値が高い (R20 候補):
+  - **R19 fix が開ける穴** (定番脈 10 例目候補): (a) retired_non_live 可逆 reason の適用境界 — enqueue_embedding_tasks と
+    enqueue_online_placeholder_task の両 idempotency が retired_non_live を正しくブロック解除するか、genuinely-invalid (dimension/contract 違反)
+    の invalid_input と混同して再課金ループを生まないか、markdownize supersede/sweep の retire も可逆化された結果 oversize/precondition-fail の
+    churn (再 enqueue→再 retire) が enqueue-time gate 8381 で確実に止まるか、(b) reclaim_entry_for と retire_online_task_reclaiming の分離が
+    二重 reclaim (reconcile の live-embedded 分岐と非 live 分岐で同一 stamp を二度) を生まないか・NetworkError stamp 保持の非対称が保たれるか、
+    (c) is_reservation_bearing_send_failure が auth_error/invalid_input/contract の Failed を誤って sweep/supersede しないか (rate_limit/quota/network 限定)、
+    (d) classify_secret 統一ゲート (embedding 7061/markdownize 8393/送信時 5881) が非 secret を誤 hold しないか・lifted Tier A の hold reason が
+    secrets_tier_b_hold 流用でも release/status が正しく動くか
+  - **時刻/TZ の残り** (継続据え置き: month 月跨ぎの charge/reclaim=reserved_month 対称だが月末開始 pass の再評価・DST/閏・rotation の UTC/local 縁)
+  - multi-scope 並列の縁 (継続: per-scope 降格理由の網羅 — store_corrupt/snapshot_shallow/index_corrupt/index_missing の recovery hint 一貫性 R19-6 後)
   - Step 4 未着手領域の設計前倒し監査 (restore/purge/time-travel/evidence verify の契約と現行実装の gap — ただし未実装は既知なので
     「未実装そのもの」は成果にならない・現行コードが Step 4 前提で開けている穴のみ)
 だが直感を優先せよ。
@@ -366,42 +387,41 @@ R17=R16 fix の新配線 (resolve_pointer best-effort 分離) + cost-ledger 残�
 (R17-1 境界・R17-2 skip 整合・R17-3 二重 reclaim/effective_spent が堅牢と file:line 確認)、検証2(c) で **embedding 経路の
 reclaim 非対応 (reserved_* stamp なし・reconcile が Failed 素通し) を静的特定=R18-1 の骨格立証** (フルスコープ 5 本と 6 エンジン収束)。
 lock 非対称 (検証2a) は却下・month (検証2b) 据え置き=R14/R16 型の「健全確認 + 1 骨格」着地でフルスコープと噛み合い。
-R18=R17 fix の新配線 + cost-ledger reclaim 残余 (上記 R17 の検証2c が R18-1 の本命に直結)。
-**次ラウンド R19 は別の焦点に回すこと**。**下記は R19 用に書き換え済み** (R18 fix が開ける穴の新配線網羅=
-共有ヘルパー retire_online_task_reclaiming の適用境界 (markdownize/embedding 退役経路の過不足・Done 誤 reclaim・二重 reclaim・
-非 live 判定境界)・embedding per-chunk stamp の batch charge 一致と O(N²) 回避・R18-2 sweep の live_paths 構築境界・R18-3 netting
-適用漏れ。いずれも静的読解が効く。R20 以降ではまた別焦点に):
+R18=R17 fix の新配線 + cost-ledger reclaim 残余 (上記 R17 の検証2c が R18-1 の本命に直結)。検証2c で embedding 経路の
+reclaim 非対応を静的特定=R18-1 の骨格立証。R19=R18 fix の新配線網羅 — 検証は「健全確認 + 1 骨格」型着地でフルスコープ (Opus 秘匿/
+Sonnet-A 会計/Sonnet-B revert/Sonnet-C 重複) が別脈で major 4=R9-1 パターン 7 回目。
+**次ラウンド R20 は別の焦点に回すこと**。**下記は R20 用に書き換え済み** (R19 fix が開ける穴の新配線網羅=
+retired_non_live 可逆 reason の適用境界・reclaim_entry_for/retire の分離・is_reservation_bearing_send_failure 述語・classify_secret 統一ゲート。
+いずれも静的読解が効く。R21 以降ではまた別焦点に):
 
 ```
 あなたは KCS (開発者自身のリポジトリ) の焦点セキュリティ監査人です。出荷前の防御的セキュリティ監査。
 範囲限定 (丸読み禁止、grep/sed/rg のみ)。リポジトリのファイル変更禁止。ネットワーク不要。
-今回 (R19) の焦点は 2 つ。過去 (R18=R17 fix 網羅+reclaim 残余、R17=R16 fix 網羅+cost-ledger 残余、R16=R15 fix 網羅+store 破損契約)
-とは別で、R18 fix が開ける穴 (定番脈 9 例目候補) を静的に掃討する。
+今回 (R20) の焦点は 2 つ。過去 (R19=R18 fix 網羅+reclaim/reconcile Failed 一貫化、R18=R17 fix 網羅+reclaim 残余、R17=R16 fix 網羅)
+とは別で、R19 fix が開ける穴 (定番脈 10 例目候補) を静的に掃討する。
 
-検証1 (R18 fix の新配線が開ける穴): R18 で共有ヘルパー retire_online_task_reclaiming に reclaim を集約し、embedding にも
-配線した。その新配線が別の穴を開けていないか。
-`rg -n 'retire_online_task_reclaiming|reserved_usd|reserved_month|reserved_by_ref|reclaim|reconcile_committed_embedding_tasks|apply_embedding_transitions|live_paths|is_non_live|non_live|net_monthly_spent' crates/kcs-cli/src --type rust` で
-(a) 共有ヘルパー retire_online_task_reclaiming が markdownize (supersede/sweep/precondition の 3 経路) と embedding (reconcile)
-    の 4 呼出で (i) Done stamp を誤って reclaim しないか (embedding は status ∈ {Pending,Running,Failed} で除外・markdownize は
-    output_ref placeholder 判定で Done を除外)、(ii) 同一 phantom が複数経路で二重 reclaim されないか (helper が reserved_* を
-    clear + status を非 retryable invalid_input 化するので次経路でマッチしない、が全経路で成立するか)、(iii) NetworkError を
-    reclaim しない不変条件 (fallback_reason 判定) が退役前に reason が上書きされて崩れないか、
-(b) embedding per-chunk stamp — reserved_by_ref が sent_chars>0 の freshly-charged chunk のみに入り batch charge と厳密一致
-    (estimate_embedding_cost 線形) するか、apply_embedding_transitions の単一書き戻しが R11-5/R17-7 の O(N²) (per-batch
-    tasks.jsonl 全書き) 回避を保つか (reserved マップ経由で追加 write を増やしていないか)、reconcile の reclaim update_matching が
-    既存 transitions loop (Pending/Running 終端化) の後読み前 mutate と競合しないか、
-(c) R18-2 sweep の live_paths 構築 (preview.candidates の !ignored && media_type!="inode/directory") が Tier B hold・oversize
-    (max_input_bytes 超過で continue)・quarantine の候補を誤って「非 live」扱いし、正規タスクの phantom を誤 reclaim しないか、
+検証1 (R19 fix の新配線が開ける穴 — retired_non_live 可逆化 + reclaim 分離): R19 は非 live 終端を invalid_input から
+retired_non_live (再 enqueue 可能な可逆 reason) に変え、reclaim 計算を reclaim_entry_for に分離、markdownize sweep/supersede の
+ゲートを task_retry_allowed から is_reservation_bearing_send_failure に置換した。その新配線が別の穴を開けていないか。
+`rg -n 'RETIRED_NON_LIVE|retired_non_live|reclaim_entry_for|retire_online_task_reclaiming|is_reservation_bearing_send_failure|embedding_retired_non_live_transition|enqueue_embedding_tasks|enqueue_online_placeholder_task' crates/kcs-cli/src --type rust` で
+(a) retired_non_live のブロック解除が両 enqueue idempotency (enqueue_embedding_tasks の existing set / enqueue_online_placeholder_task の
+    Failed arm) で対称に効くか、genuinely-invalid (dimension/contract 違反=invalid_input) を誤って再 enqueue 可能にして再課金ループを
+    生まないか (retry_kind_from_reason が retired_non_live→InvalidInput=非 retryable にマップしているか)、
+(b) reclaim_entry_for と retire_online_task_reclaiming の分離で reconcile の live-embedded 分岐 (reclaim_entry_for 直呼び+Done) と
+    非 live 分岐 (retire 経由) が同一 stamp を二重 reclaim しないか (live_embedded/非 live が排他か)・NetworkError stamp 保持
+    (live-embedded は reclaim 可能時のみ stamp clear) が保たれるか、
+(c) is_reservation_bearing_send_failure (rate_limit/quota/network 限定) が auth_error/invalid_input/contract の Failed を
+    sweep/supersede から正しく除外するか (退役過剰で reservation を持たない task を誤 retire しないか)、
 を file:line で挙げる。
 
-検証2 (R18-3 netting + reclaim 会計の残余): net_monthly_spent が enforcement と report の両面に適用されたが取り残しがないか。
-`rg -n 'net_monthly_spent|monthly_total|reclaim_ledger|budget_status_json|scope_budget_warning|device_spent|folder_spent|budget_warning' crates/kcs-cli/src crates/kcs-pipeline/src --type rust` で
-(a) reclaim ledger を netting すべき全ての spend 読み出し (status/index/repair/batch の budget 表示・warn_at_percent 判定) が
-    net_monthly_spent 経由になったか、gross monthly_total を直接読む残余がないか、
-(b) month 月跨ぎ (R17/R18 据え置き=ループ前 1 回計算) の再評価 — reclaim は reserved_month (charge 月) で記帳され charge と
-    対称だが、月末開始の長時間 pass で reclaim が翌月分を前月から引く非対称が生じないか、
-(c) store_corruption_recovery_hint (R18-4) が partial exclusion の全経路 (Excluded arm + Fatal→store_corrupt downgrade arm) に
-    付き、snapshot_shallow の partial exclusion にも付くか、全滅集約との文言二重定義がないか、
+検証2 (R19 秘匿ゲート統一 + minor 残余): R19-1 は 3 つの online 送信ゲートを classify_secret ベースに統一した。
+`rg -n 'classify_secret|secrets_tier_a_online_hold|secrets_tier_b_hold|secrets_hold|secrets_approved|SecretTier|max_input_bytes|store_corruption_recovery_hint' crates/kcs-cli/src crates/kcs-pipeline/src --type rust` で
+(a) classify_secret 統一ゲート (embedding 7061/markdownize enqueue 8393/送信時再検証 5881) が非 secret を誤 hold しないか・
+    lifted Tier A の hold reason が secrets_tier_b_hold 流用でも release_secret_holds/status/--send-secrets が正しく解放するか、
+(b) R19-8 の online_markdownize_precondition_ok の size 再検査が cap 引き下げ→retire→再 index の churn を enqueue-time gate
+    (run_index_pipeline の skipped_oversized_files) で確実に止めるか (retired_non_live 化で再 enqueue されないか)、
+(c) R19-6 の store_corruption_recovery_hint に index_missing/index_corrupt arm が付き、per-entry (partial exclusion) と
+    同種全滅集約 (index_unusable) の両方で recovery が開示されるか・異種混在全滅の残穴、
 を file:line で挙げる。
 
 出力: 検証1 (a)(b)(c) + 検証2 (a)(b)(c) の該当箇所を file:line + なぜ問題か で列挙 +
@@ -625,8 +645,28 @@ store_corruption_recovery_hint ヘルパーで新コード導入を回避 (R17-4
 回帰テスト 4 本 (r18_1 embedding reclaim discriminator・r18_2 削除 phantom・r18_3 status netting・r18_4 partial recovery)。
 **network_error embedding は seam が「adapter 到達不能」でモデル化され課金しない=discriminator 不能→共有ヘルパーの
 error-kind-aware 性は r17_3_network_error テスト (markdownize) が担保**。
-→ **18 ラウンドとも完全に別の鉱脈から実バグ。契約テストが全 green でも探索型は毎回新規を出す。
+R19 (R19-1〜R19-8): 0 critical + 4 major + 4 minor。7 エンジン。**「R18 fix が開ける穴」が本命的中 (定番脈 9 例目)** — R17-3/R18-1/R18-2 が
+新設した **reclaim + 終端化 (invalid_input) 機構が Failed タスクを経路ごとに非一貫に扱う縫い目**から 3 major が別機構で噴出 (却下 0=R9/R16 に次ぐ 3 回目)。
+3 脈 — (a) **Tier B/approval 再掃で秘匿漏出** (R19-1、Opus control repro): lifted Tier A (!pattern 解除) が --send-secrets ゲート無し・監査無しで
+OCR+embedding 両送信=N1 hold ゲートが Tier B マーカー限定をすり抜け・**リスク勾配逆転** (低リスク Tier B は保留されるのに最高機微 Tier A が素通り)。
+fix=OCR/embedding/送信時再検証を classify_secret 統一・scan に secrets_tier_a_online_hold マーカー+監査記録。(b) **embedding/markdownize の reclaim+reconcile が
+Failed を非一貫に扱う 3 型**: exhausted-quota phantom が supersede/sweep/batch-retry の task_retry_allowed ゲートから排除され reclaim 不能
+(R19-2、Sonnet-A file:line 4箇所=embedding reconcile が task_retry_allowed 不使用の非対称が見落としの傍証。fix=is_reservation_bearing_send_failure)、
+R18-1 の非 live 終端化 (invalid_input) が content-addressed identity の revert/restore を想定せず chunk が vector 検索から恒久消失
+(R19-3、Sonnet-B control repro RRF 1/61=「非 live は恒久」前提を content-addressing が覆す。fix=retired_non_live 可逆 reason + enqueue idempotency 非ブロック化)、
+重複コンテンツ (共有ヘッダ等) の Failed chunk が rebuild_chunk_vec の content-hash JOIN で twin 経由 chunk_vec 完成しても reconcile live→Done が
+Failed 除外で永久固着+phantom (R19-4、Sonnet-C 独自 sqlite-vec ビルド control repro=「データ完成 vs タスク完成」の乖離。fix=live-embedded Failed を Done 収束+reclaim_entry_for 分離)。
+(c) **minor 4**: Partial markdownize attempts 二重計上を executor 一元化 (R19-5、GPT-5.5)、index_missing/index_corrupt の recovery hint (R19-6、Sonnet-D 実機3パターン)、
+quarantine disposition hold→send_approved 遷移 (R19-7、Opus・(path,method) dedup)、max_input_bytes 送信時再検査 (R19-8、Sonnet-A borderline-intended)。
+**「fix が開ける穴」の変種が同ラウンドで 3 型**: R19-2=予約前提の取り違え・R19-3=fix 前提を後続概念が覆す・R19-4=適用範囲が Failed を漏らす。
+**フィックス側の学び**: R19-2/3/4 は embedding/markdownize の reclaim+reconcile+enqueue-idempotency が重なるため一体設計 (R19-3 の retired_non_live が
+R19-2 の終端拡大を安全化=「fix の相互作用を先に裁定文へ明記」)、reclaim_entry_for を分離し live-embedded は reclaim 可能時のみ stamp clear (NetworkError は real spend 保持)、
+lifted Tier A の hold reason は secrets_tier_b_hold 流用 (behavior 正で cosmetic 許容・docs 凍結下で新 status 文字列を避ける)、R19-6 は既存ヘルパーに arm 追加で新コード回避 (R17-4/R18-4 の教訓)。
+**オーケストレータ側の学び**: rate_limit chunk の twin 収束テストは全 index を同一 KCS_FIXED_NOW に固定して backoff 未経過を保ち「通常 retry で成功」を排除しないと bug を再現しない (r19_4)、
+rebuild_chunk_vec は enrichment の前に走るため twin 収束は「次の index」で self-heal (同一 pass では未リンク)。フィックス再検証は 4 major を control 付き実機 repro クローズ (R19-1 両経路 hold+勾配、
+R19-2 quota phantom reclaim、R19-3 revert 再埋め込み RRF 復活、R19-4 shared chunk Done 収束+reclaim)、回帰テスト 6 本 (r19_1〜r19_8、全 discriminator)。
+→ **19 ラウンドとも完全に別の鉱脈から実バグ。契約テストが全 green でも探索型は毎回新規を出す。
 かつフィックスも実機フルサイクル再検証しないと不完全なことがある (R5 Q1・R8 F8・R10-1 の e2e 置換をオーケストレータが再実行、R11-5 → R12-3 は crash 面の再検証漏れが翌ラウンドの major)。範囲限定 Spark の
 「問題なし」領域からフルスコープエンジンが major を出す (R9-1・R11・R13・R14・R15 で再現)、オーケストレータの検証フェーズ自体が発見装置になる (P10・R9-5・R12-6) パターンも定着。
 かつ Spark の焦点が「掘り尽くした脈の健全性確認」に着地しても (R10 の DAG/Evidence、R11 の規模境界+task会計、R14 の R13 fix 網羅性)、フルスコープが別脈で major を出せば全体は前進する (R12 は焦点がフルスコープと噛み合い 4/4 収束、R13 は焦点立証 + フルスコープ 3 本、R14 は健全確認着地でもフルスコープ 4 major の二毛作、R15 は Spark が検証2 で R15-5 の骨格を出しつつフルスコープが別脈で major 5 本、R16 は焦点が R16-4/R16-5 の初動立証でフルスコープと噛み合い)。
-かつ「fix が開ける穴」は R9-4→R10-4、R11-5→R12-3、R13-1/R13-4→R14、R11-6/R13-4/R14-2/R14-3/R14-4→R15、R15-4/R12-7→R16、R16-1/R16-4/R15-2×R16-7→R17、R17-3→R18 (embedding/削除の reclaim 横展開漏れ) と定番化 (8/8 例目) — 前ラウンド fix の新配線を必ず次ラウンドで掃く。しかも R15 では複数の過去 fix の**合流点** (R11-6+R14-2、R13-4+R14-3、R17 では R15-2+R16-7 の phantom charge)、R16 では「fix が適用範囲を絞った際の**相似形の隣**」(read_tree だけ吸収し read_commit 素通し)、R17 では「fix の**適用範囲の広げ過ぎ**」(R16-1 が commit 欠落を真の shallow と同一視=docs 前提の無断拡張)、R18 では「fix の**横展開漏れ**」(reclaim を markdownize だけに配線し embedding は未着手) と「**別ラウンドの概念導入が既存 fix の前提を覆す**」(R16-7 の予約=cap 圧迫が R15-7 の embedding 終端化=非課金前提を無効化) が新しい非対称を生んだ=単一 fix・fix の組み合わせ・「同型コードの隣」・「fix の過剰適用」に加え「別 pipeline への配線漏れ」「後続ラウンドが覆す前提」も掃く対象。かつ mock seam/silent 型 (R14-4・R15-5・R15-6・R16-3・R16-6) は静的エンジンだけが捕捉できる=7 エンジン構成の GPT-5.5/Spark 枠は必須。かつ多エンジン収束 (R15 で 3 件、R16 は 4/4 Sonnet の史上最強収束、R17 は resolve_pointer に 4 エンジン、R18 は embedding orphan に 6 エンジン=Opus 以外全員) は同一 fix 領域を別角度で立証し severity 裁定を固める。かつ Opus の「問題なし/未探索」型 (R13 doc-gap・R15 snapshot orphan・R17 resolve_pointer の N5 バイパス・R18 は reclaim「する」経路の cap-safe だけ見て「しない」退役経路=embedding/削除を未探索) は 4 例目=エンジンの不採択判断・探索範囲の偏りも裁定対象。**
+かつ「fix が開ける穴」は R9-4→R10-4、R11-5→R12-3、R13-1/R13-4→R14、R11-6/R13-4/R14-2/R14-3/R14-4→R15、R15-4/R12-7→R16、R16-1/R16-4/R15-2×R16-7→R17、R17-3→R18 (embedding/削除の reclaim 横展開漏れ)、R17-3/R18-1/R18-2→R19 (reclaim+終端化が Failed を経路ごとに非一貫に扱う縫い目=同ラウンドで 3 型) と定番化 (9/9 例目) — 前ラウンド fix の新配線を必ず次ラウンドで掃く。しかも R15 では複数の過去 fix の**合流点** (R11-6+R14-2、R13-4+R14-3、R17 では R15-2+R16-7 の phantom charge)、R16 では「fix が適用範囲を絞った際の**相似形の隣**」(read_tree だけ吸収し read_commit 素通し)、R17 では「fix の**適用範囲の広げ過ぎ**」(R16-1 が commit 欠落を真の shallow と同一視=docs 前提の無断拡張)、R18 では「fix の**横展開漏れ**」(reclaim を markdownize だけに配線し embedding は未着手) と「**別ラウンドの概念導入が既存 fix の前提を覆す**」(R16-7 の予約=cap 圧迫が R15-7 の embedding 終端化=非課金前提を無効化)、R19 では同ラウンドで 3 型が同時 (**予約前提の取り違え** R19-2・**fix 前提を content-addressing が覆す** R19-3 [非 live=恒久 が revert で崩れる]・**適用範囲が Failed を漏らす** R19-4 [reconcile が Pending/Running のみ]) が新しい非対称を生んだ=単一 fix・fix の組み合わせ・「同型コードの隣」・「fix の過剰適用」・「別 pipeline への配線漏れ」・「後続ラウンドが覆す前提」に加え「**content-addressed identity は可逆 (非 live≠恒久)**」も掃く対象。かつ mock seam/silent 型 (R14-4・R15-5・R15-6・R16-3・R16-6) は静的エンジンだけが捕捉できる=7 エンジン構成の GPT-5.5/Spark 枠は必須。かつ多エンジン収束 (R15 で 3 件、R16 は 4/4 Sonnet の史上最強収束、R17 は resolve_pointer に 4 エンジン、R18 は embedding orphan に 6 エンジン=Opus 以外全員) は同一 fix 領域を別角度で立証し severity 裁定を固める (R19 は 4 major が 4 方向に非重複=収束でなく網羅で前進)。かつ Opus の「問題なし/未探索」型 (R13 doc-gap・R15 snapshot orphan・R17 resolve_pointer の N5 バイパス・R18 は reclaim「する」経路の cap-safe だけ見て「しない」退役経路=embedding/削除を未探索) は 4 例目=エンジンの不採択判断・探索範囲の偏りも裁定対象。R19 では逆に Opus が Tier B/approval 再掃で秘匿漏出 major を単独発見=固定的な役割ではない。**
