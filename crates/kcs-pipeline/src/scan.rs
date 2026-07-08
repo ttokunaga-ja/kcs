@@ -135,6 +135,12 @@ fn collect_direct_candidates(
             );
         let quarantine_reason = match secret {
             Some(SecretTier::TierA) if ignored => Some("secrets_tier_a_excluded".to_owned()),
+            // R19-1: a Tier A secret explicitly un-ignored (`!pattern`) is ingested
+            // locally but MUST still be held from online send like Tier B — the lift
+            // approves local management, not cloud upload (10 §1.1: the mechanism
+            // prevents "オンライン送信事故"). This marker drives the audit record; the
+            // send-blocking gates key on `classify_secret` directly.
+            Some(SecretTier::TierA) => Some("secrets_tier_a_online_hold".to_owned()),
             Some(SecretTier::TierB) => Some("secrets_tier_b_warning".to_owned()),
             _ => None,
         };

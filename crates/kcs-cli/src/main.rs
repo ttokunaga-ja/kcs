@@ -52,7 +52,7 @@ use kcs_pipeline::prepare::{
     PreparedUnit, UnitFingerprint, UnitType,
 };
 use kcs_pipeline::scan::{
-    build_scan_preview, classify_secret, ScanCandidate, ScanPreview, ScanPreviewRequest, SecretTier,
+    build_scan_preview, classify_secret, ScanCandidate, ScanPreview, ScanPreviewRequest,
 };
 use kcs_pipeline::task::{retry_policy, task_status_from_unit_counts, RetryErrorKind};
 use kcs_pipeline::task::{TaskDescriptor, TaskStatus, TaskStore, TaskType};
@@ -2485,6 +2485,20 @@ fn store_corruption_recovery_hint(reason: &str) -> Option<&'static str> {
         "snapshot_shallow" => Some(
             "snapshot_shallow: restore the discarded HEAD commit/tree object, or \
              re-run `kcs index` to rebuild the snapshot from the working tree",
+        ),
+        // R19-6: index_missing/index_corrupt (sqlite.db absent/damaged) are the most
+        // common store-corruption class, yet R18-4 only wired the recovery hint for
+        // store_corrupt/snapshot_shallow — so a partial exclusion (a healthy scope
+        // survives) surfaced these reasons bare, and a heterogeneous all-failed mix
+        // fell through both homogeneous aggregations to a hintless message. Same
+        // repair path as the others.
+        "index_missing" => Some(
+            "index_missing: run `kcs repair --rebuild-db` to rebuild the search index \
+             from the store",
+        ),
+        "index_corrupt" => Some(
+            "index_corrupt: run `kcs repair --rebuild-db` to rebuild the search index \
+             from the store",
         ),
         _ => None,
     }
@@ -5638,9 +5652,10 @@ fn reenqueue_partial_markdownize_tasks(store: &TaskStore) -> Result<usize> {
             task.output_ref = online_ref.clone();
             task.fallback_reason = None;
             task.next_retry_at = None;
-            // R10-4: charge this re-drive against the retry budget so a persistently
-            // failing unit converges on `max_attempts` instead of looping forever.
-            task.attempts = task.attempts.saturating_add(1);
+            // R10-4/R19-5: the re-drive is charged against the retry budget in the
+            // executor's result handling (a single accounting point) — on `Err` (full
+            // send failure) OR `Ok(Partial)` (units still missing). Pre-incrementing here
+            // double-counted with the `Err` path, exhausting `max_attempts` twice as fast.
             true
         })
         .map_err(pipeline_to_kcs)
@@ -5877,8 +5892,10 @@ fn execute_pending_markdownize_tasks(
                 // (Step2c I2); `batch retry` already gates on this, so this is
                 // a defensive belt-and-braces guard.
                 && task_retry_due(task)
+                // R19-1: the send-time defensive re-check must exclude ANY unapproved
+                // secret (Tier B or a lifted Tier A), not just Tier B.
                 && (secrets_approved
-                    || classify_secret(&task.input_path) != Some(SecretTier::TierB))
+                    || classify_secret(&task.input_path).is_none())
         })
         .collect::<Vec<_>>();
     let mut counts = ExecOutcome::default();
@@ -6059,6 +6076,15 @@ fn execute_pending_markdownize_tasks(
                             candidate.output_ref = outcome.output_ref.clone();
                             candidate.fallback_reason = Some("online_adapter_done".to_owned());
                             candidate.heartbeat_at = None;
+                            // R19-5: a unit-scoped retry that still returns Partial (units
+                            // missing) consumed one re-drive of the retry budget — advance
+                            // `attempts` HERE, the single accounting point, so it converges
+                            // on `max_attempts` (the Err arm below does the same). Pre-R19-5
+                            // this lived in `reenqueue_partial_markdownize_tasks` and
+                            // double-counted with the Err arm.
+                            if outcome.status == TaskStatus::Partial {
+                                candidate.attempts = candidate.attempts.saturating_add(1);
+                            }
                             // R13-1: record the normalization-run provenance
                             // (docs/04:474-479) so `status` and the next incremental
                             // decision (consecutive count) can see mode / previous /
@@ -6300,6 +6326,14 @@ fn online_markdownize_precondition_ok(repo: &Repository, task: &TaskDescriptor) 
         return false;
     };
     if hash_bytes(&current_bytes) != task.input_hash {
+        return false;
+    }
+    // R19-8: honor a `max_input_bytes` cap that was tightened AFTER this task was
+    // enqueued. The enqueue-time gate (run_index_pipeline) only checked the cap in effect
+    // then; a Pending task must not be sent to the online adapter if the operator has
+    // since lowered the cap below the file's size — the same live re-check the sibling
+    // `[adapter.policy]` key `allow_network` already gets at send time.
+    if current_bytes.len() as u64 > effective_max_input_bytes(repo) {
         return false;
     }
     if is_text_native_media(&media_type) {
@@ -7058,7 +7092,10 @@ fn run_embedding_enrichment(
     let secrets_approved = secrets_send_approved(repo);
     let (held, sendable): (Vec<EmbeddableChunk>, Vec<EmbeddableChunk>) =
         pending.into_iter().partition(|chunk| {
-            !secrets_approved && classify_secret(&chunk.raw_path) == Some(SecretTier::TierB)
+            // R19-1: hold ANY secret (Tier B, or a lifted Tier A) from the embedding
+            // API unless `--send-secrets`. Non-lifted Tier A never produces chunks
+            // (excluded at ingest), so `.is_some()` newly gates only lifted Tier A.
+            !secrets_approved && classify_secret(&chunk.raw_path).is_some()
         });
     hold_secret_embedding_tasks(&task_store, repo, &held, &now)?;
     if sendable.is_empty() {
@@ -7317,6 +7354,17 @@ fn embedding_fail_transition(kind: RetryErrorKind) -> EmbeddingTransition {
         status: TaskStatus::Failed,
         reason: retry_reason(kind),
         failure_kind: Some(kind),
+    }
+}
+
+/// R19-3: terminalize a non-live embedding task REVERSIBLY — non-retryable (no
+/// `failure_kind`, so no backoff/attempt bump), but `retired_non_live` so the enqueue
+/// guard re-creates a fresh task if the exact chunk_id reappears (revert/restore).
+fn embedding_retired_non_live_transition() -> EmbeddingTransition {
+    EmbeddingTransition {
+        status: TaskStatus::Failed,
+        reason: RETIRED_NON_LIVE,
+        failure_kind: None,
     }
 }
 
@@ -7665,15 +7713,44 @@ fn reconcile_committed_embedding_tasks(
             {
                 return false;
             }
-            let non_live = task
-                .output_ref
-                .strip_prefix("embedding:")
-                .is_some_and(|chunk_id| !live_ids.contains(chunk_id));
-            if !non_live {
+            let Some(chunk_id) = task.output_ref.strip_prefix("embedding:") else {
+                return false;
+            };
+            let live = live_ids.contains(chunk_id);
+            // R19-4: the chunk is live AND already has a vector (its content-hash twin
+            // was embedded and `rebuild_chunk_vec` linked THIS chunk_id) — the task's own
+            // send failed (e.g. RateLimit) but the work is genuinely done. Without this,
+            // such a Failed task is never converged by `kcs index` (the transitions loop
+            // below only visits Pending/Running), so it stays Failed forever, keeps its
+            // phantom reservation eating the cap, and reports pending enrichment == 1.
+            let live_embedded = live && !pending_ids.contains(chunk_id);
+            // Live AND un-embedded is genuine outstanding work — leave it (a retryable
+            // Failed awaits `batch retry`; Pending/Running is driven normally).
+            if live && !live_embedded {
                 return false;
             }
-            if let Some(entry) =
-                retire_online_task_reclaiming(task, &reservation_scope_id, EMBEDDING_ADAPTER_KIND)
+            if live_embedded {
+                // Reclaim + clear ONLY a non-billable RateLimit/Quota phantom; a
+                // NetworkError stamp may have billed server-side, so keep it as real
+                // spend on the completed task (R16-7's conservative asymmetry).
+                if let Some(entry) =
+                    reclaim_entry_for(task, &reservation_scope_id, EMBEDDING_ADAPTER_KIND)
+                {
+                    reclaims.push(entry);
+                    task.reserved_usd = None;
+                    task.reserved_month = None;
+                }
+                task.status = TaskStatus::Done;
+                task.fallback_reason = Some("embedding_adapter_done".to_owned());
+                task.next_retry_at = None;
+                task.heartbeat_at = None;
+            } else if let Some(entry) =
+                // Non-live: R18-1 + R19-3 reversible retire + reclaim.
+                retire_online_task_reclaiming(
+                    task,
+                    &reservation_scope_id,
+                    EMBEDDING_ADAPTER_KIND,
+                )
             {
                 reclaims.push(entry);
             }
@@ -7707,13 +7784,14 @@ fn reconcile_committed_embedding_tasks(
         // (a new gen), so this task's chunk no longer exists. It can never be driven to
         // completion (`live_chunks_without_embedding` never revisits it), so leaving it
         // Pending/Running permanently pollutes `index_status`/`status.tasks` with phantom
-        // pending enrichment. Terminalize it as a NON-retryable failure (invalid_input):
-        // no adapter call, no re-charge, and a live re-chunk already has its OWN fresh
-        // task — so search/data are unaffected; only the phantom accounting heals.
+        // pending enrichment. Terminalize it — but REVERSIBLY (R19-3 `retired_non_live`):
+        // no adapter call, no re-charge; and if the exact chunk_id later reappears
+        // (git revert / restore), the enqueue guard re-creates a fresh task instead of
+        // this being a permanent silent hole in vector search.
         if !live_ids.contains(chunk_id) {
             transitions.insert(
                 task.output_ref.clone(),
-                embedding_fail_transition(RetryErrorKind::InvalidInput),
+                embedding_retired_non_live_transition(),
             );
             continue;
         }
@@ -7819,6 +7897,11 @@ fn enqueue_embedding_tasks(
         .map_err(pipeline_to_kcs)?
         .into_iter()
         .filter(|task| task.task_type == TaskType::Embedding)
+        // R19-3: a task retired because its chunk went non-live must NOT block a fresh
+        // enqueue when the content-addressed chunk_id reappears (git revert / restore of
+        // the exact bytes). Excluding it here lets a genuinely-live-again chunk be
+        // re-embedded instead of being silently stuck out of vector search forever.
+        .filter(|task| task.fallback_reason.as_deref() != Some(RETIRED_NON_LIVE))
         .map(|task| task.output_ref)
         .collect::<BTreeSet<_>>();
     let reason = if online {
@@ -7882,6 +7965,10 @@ fn retry_kind_from_reason(reason: Option<&str>) -> RetryErrorKind {
         Some("auth_error") => RetryErrorKind::AuthError,
         Some("quota_exceeded") => RetryErrorKind::QuotaExceeded,
         Some("invalid_input") => RetryErrorKind::InvalidInput,
+        // R19-3: a non-live retirement is non-retryable as the old task (like
+        // invalid_input), but the enqueue guards treat it as non-blocking so the
+        // content-addressed identity can be re-enqueued if it reappears.
+        Some(RETIRED_NON_LIVE) => RetryErrorKind::InvalidInput,
         Some("budget_exceeded") => RetryErrorKind::BudgetExceeded,
         _ => RetryErrorKind::ContractViolation,
     }
@@ -7895,6 +7982,21 @@ fn task_retry_allowed(task: &TaskDescriptor) -> bool {
             .max_attempts
             .map(|max| task.attempts < max)
             .unwrap_or(true)
+}
+
+/// R19-2: an online-send failure carrying an F8 reservation (a NON-billable phantom for
+/// RateLimit/Quota, possibly-billed for NetworkError). A retire+reclaim supersede/sweep
+/// must target these REGARDLESS of retry-attempt exhaustion: QuotaExceeded exhausts its
+/// finite `max_attempts` (unlike RateLimit's unlimited), so gating on `task_retry_allowed`
+/// left an exhausted-quota phantom reservation stuck for the month — never reclaimed,
+/// starving the per-adapter cap and falsely pausing legitimate tasks. The reclaim itself
+/// stays error-kind-aware inside `retire_online_task_reclaiming` (only RateLimit/Quota).
+/// A `retired_non_live` task maps to InvalidInput here, so it is excluded (idempotent).
+fn is_reservation_bearing_send_failure(task: &TaskDescriptor) -> bool {
+    matches!(
+        retry_kind_from_reason(task.fallback_reason.as_deref()),
+        RetryErrorKind::RateLimit | RetryErrorKind::QuotaExceeded | RetryErrorKind::NetworkError
+    )
 }
 
 fn task_retry_due(task: &TaskDescriptor) -> bool {
@@ -8333,7 +8435,9 @@ fn run_index_pipeline(
                 let orphaned = task.task_type == TaskType::Markdownize
                     && task.output_ref == placeholder_output_ref
                     && task.status == TaskStatus::Failed
-                    && task_retry_allowed(task)
+                    // R19-2: include exhausted-quota phantoms (was `task_retry_allowed`,
+                    // which excluded them and left the reservation stuck).
+                    && is_reservation_bearing_send_failure(task)
                     && !live_paths.contains(task.input_path.as_str());
                 if !orphaned {
                     return false;
@@ -8390,8 +8494,11 @@ fn run_index_pipeline(
             )?;
             continue;
         }
-        let secrets_hold = candidate.quarantine_reason.as_deref() == Some("secrets_tier_b_warning")
-            && !secrets_approved;
+        // R19-1: hold ANY secret (Tier B, or a lifted Tier A) from online markdownize
+        // unless `--send-secrets`. Non-lifted Tier A never reaches this loop (the
+        // `!candidate.ignored` filter above skips it), so `.is_some()` newly gates only
+        // lifted Tier A.
+        let secrets_hold = !secrets_approved && classify_secret(&candidate.input_path).is_some();
         let path = repo.root().join(&candidate.input_path);
         let bytes = fs::read(&path)
             .map_err(|err| KcsError::io(err.to_string(), path.display().to_string()))?;
@@ -9205,8 +9312,17 @@ fn manifest_from_units(
     }
 }
 
+/// R19-3: terminal `fallback_reason` for a task retired because its content-addressed
+/// target (chunk_id or (path,hash)) is currently NON-LIVE. Unlike `invalid_input`
+/// (a permanent, genuinely-bad-input failure), this retirement is REVERSIBLE: the
+/// identity can reappear (git revert / undo / restore of the exact bytes), so the
+/// `enqueue_*` idempotency guards treat it as non-blocking and let a fresh task be
+/// created. It is still non-retryable AS THE OLD TASK (`retry_kind_from_reason` maps it
+/// to InvalidInput), so it is never re-driven and never counts as pending work.
+const RETIRED_NON_LIVE: &str = "retired_non_live";
+
 /// R17-3/R18-1/R18-2: retire a stale-or-orphaned online adapter `task` (markdownize OR
-/// embedding) to a non-retryable `invalid_input` failure, and — if its kept F8
+/// embedding) to a non-retryable `retired_non_live` failure, and — if its kept F8
 /// reservation was a NON-billable (RateLimit/Quota) phantom with an exact stamp — return
 /// the reclaim entry for the sibling reclaim ledger (the caller appends it AFTER this
 /// retirement is durable, so a crash between can only leave the phantom conservatively in
@@ -9221,29 +9337,41 @@ fn manifest_from_units(
 /// reads the still-intact failure kind (`batch retry` preserves `fallback_reason` across
 /// the Failed->Pending flip). `markdown_adapter_kind` is the adapter's ledger key
 /// (`"markdown"` or `EMBEDDING_ADAPTER_KIND`), so the reclaim nets the correct cap.
+/// R19-4: compute the reclaim ledger entry for a task's F8 reservation WITHOUT mutating
+/// the task. A NON-billable (RateLimit/Quota) reservation with an exact stamp is
+/// reclaimable; NetworkError (may have billed server-side) and all other kinds are not.
+/// Shared by `retire_online_task_reclaiming` (which then retires the task) and the
+/// embedding live-embedded convergence (which then completes the task as Done).
+fn reclaim_entry_for(
+    task: &TaskDescriptor,
+    reservation_scope_id: &str,
+    adapter_kind: &str,
+) -> Option<MonthlyCostLedgerEntry> {
+    if !matches!(
+        retry_kind_from_reason(task.fallback_reason.as_deref()),
+        RetryErrorKind::RateLimit | RetryErrorKind::QuotaExceeded
+    ) {
+        return None;
+    }
+    match (task.reserved_usd, task.reserved_month.clone()) {
+        (Some(usd), Some(month)) => Some(MonthlyCostLedgerEntry {
+            month,
+            scope_id: reservation_scope_id.to_owned(),
+            adapter_kind: adapter_kind.to_owned(),
+            usd,
+        }),
+        _ => None,
+    }
+}
+
 fn retire_online_task_reclaiming(
     task: &mut TaskDescriptor,
     reservation_scope_id: &str,
     markdown_adapter_kind: &str,
 ) -> Option<MonthlyCostLedgerEntry> {
-    let reclaim = if matches!(
-        retry_kind_from_reason(task.fallback_reason.as_deref()),
-        RetryErrorKind::RateLimit | RetryErrorKind::QuotaExceeded
-    ) {
-        match (task.reserved_usd, task.reserved_month.clone()) {
-            (Some(usd), Some(month)) => Some(MonthlyCostLedgerEntry {
-                month,
-                scope_id: reservation_scope_id.to_owned(),
-                adapter_kind: markdown_adapter_kind.to_owned(),
-                usd,
-            }),
-            _ => None,
-        }
-    } else {
-        None
-    };
+    let reclaim = reclaim_entry_for(task, reservation_scope_id, markdown_adapter_kind);
     task.status = TaskStatus::Failed;
-    task.fallback_reason = Some(retry_reason(RetryErrorKind::InvalidInput).to_owned());
+    task.fallback_reason = Some(RETIRED_NON_LIVE.to_owned());
     task.next_retry_at = None;
     task.heartbeat_at = None;
     task.reserved_usd = None;
@@ -9319,7 +9447,10 @@ fn enqueue_online_placeholder_task(
                 && task.input_path == candidate.input_path
                 && task.input_hash != raw_hash
                 && (matches!(task.status, TaskStatus::Pending | TaskStatus::Paused)
-                    || (task.status == TaskStatus::Failed && task_retry_allowed(task)));
+                    // R19-2: include exhausted-quota phantoms (was `task_retry_allowed`,
+                    // which excluded them and left the reservation stuck).
+                    || (task.status == TaskStatus::Failed
+                        && is_reservation_bearing_send_failure(task)));
             if !stale {
                 return false;
             }
@@ -9375,7 +9506,14 @@ fn enqueue_online_placeholder_task(
                 TaskStatus::Done | TaskStatus::Partial => {
                     task.fallback_reason.as_deref() == Some("online_adapter_done")
                 }
-                TaskStatus::Failed | TaskStatus::Running => task.output_ref == output_ref,
+                // R19-3: a `retired_non_live` Failed task must NOT block a fresh enqueue
+                // when the (path,hash) identity reappears (revert/restore). Other Failed
+                // tasks stay deduped (owned by `batch retry`, which honors backoff).
+                TaskStatus::Failed => {
+                    task.output_ref == output_ref
+                        && task.fallback_reason.as_deref() != Some(RETIRED_NON_LIVE)
+                }
+                TaskStatus::Running => task.output_ref == output_ref,
             }
         })
     {
@@ -9823,9 +9961,22 @@ fn record_quarantine_candidates(
     secrets_approved: bool,
 ) -> Result<()> {
     let path = repo.kcs_dir().join("quarantine.jsonl");
+    // R19-7: dedup on (path, approval_method), not path alone — otherwise a
+    // `hold` record permanently blocks the later `send_approved` transition
+    // (after `--send-secrets`), leaving `kcs status` reporting an approved,
+    // already-sent file as still pending-hold. The reader takes the latest row
+    // per path, so appending the transition row corrects the disposition.
     let existing = read_quarantine_records(repo)?
         .into_iter()
-        .filter_map(|entry| entry.get("path").and_then(Value::as_str).map(str::to_owned))
+        .filter_map(|entry| {
+            let path = entry.get("path").and_then(Value::as_str)?.to_owned();
+            let method = entry
+                .get("approval_method")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned();
+            Some((path, method))
+        })
         .collect::<BTreeSet<_>>();
     let mut file = OpenOptions::new()
         .create(true)
@@ -9840,6 +9991,17 @@ fn record_quarantine_candidates(
             Some("secrets_tier_a_excluded") if candidate.ignored => {
                 ("secrets_tier_a", "quarantine")
             }
+            // R19-1: a lifted (ingested) Tier A secret held from online send — record it
+            // with its live disposition so `kcs status` surfaces the pending online hold
+            // and the eventual approval (audit trail; 07 §122).
+            Some("secrets_tier_a_online_hold") => (
+                "secrets_tier_a",
+                if secrets_approved {
+                    "send_approved"
+                } else {
+                    "hold"
+                },
+            ),
             Some("secrets_tier_b_warning") => (
                 "secrets_tier_b",
                 if secrets_approved {
@@ -9850,7 +10012,7 @@ fn record_quarantine_candidates(
             ),
             _ => continue,
         };
-        if existing.contains(&candidate.input_path) {
+        if existing.contains(&(candidate.input_path.clone(), approval_method.to_owned())) {
             continue;
         }
         let record = json!({

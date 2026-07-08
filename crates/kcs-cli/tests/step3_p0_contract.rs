@@ -5878,7 +5878,7 @@ fn r17_3_rate_limit_phantom_reclaimed_frees_cap_for_edited_doc() {
         paused_budget, 0,
         "no online task may be budget-paused after the reclaim: {status}"
     );
-    // The stale v1 task is retired (non-retryable invalid_input), not left rate_limit.
+    // The stale v1 task is retired (non-retryable retired_non_live), not left rate_limit.
     let still_rate_limited = markdownize
         .iter()
         .filter(|task| task["fallback_reason"] == "rate_limit")
@@ -5887,13 +5887,15 @@ fn r17_3_rate_limit_phantom_reclaimed_frees_cap_for_edited_doc() {
         still_rate_limited, 0,
         "the stale rate_limit task must be superseded: {status}"
     );
+    // R19-3: the retirement uses the reversible `retired_non_live` reason (still
+    // non-retryable, but re-enqueueable if the exact bytes reappear).
     let retired = markdownize
         .iter()
-        .filter(|task| task["status"] == "failed" && task["fallback_reason"] == "invalid_input")
+        .filter(|task| task["status"] == "failed" && task["fallback_reason"] == "retired_non_live")
         .count();
     assert_eq!(
         retired, 1,
-        "the stale online task must be retired as invalid_input: {status}"
+        "the stale online task must be retired as retired_non_live: {status}"
     );
 }
 
@@ -5952,7 +5954,7 @@ fn r17_3_network_error_reservation_kept_pauses_edited_doc() {
     // is not reclaimed, so the edited doc's online task is budget-Paused.
     let retired = markdownize
         .iter()
-        .filter(|task| task["status"] == "failed" && task["fallback_reason"] == "invalid_input")
+        .filter(|task| task["status"] == "failed" && task["fallback_reason"] == "retired_non_live")
         .count();
     assert_eq!(retired, 1, "the stale task is still retired: {status}");
     let paused_budget = markdownize
@@ -6255,5 +6257,372 @@ fn r18_4_partial_store_corruption_entry_carries_recovery_hint() {
     assert!(
         recovery.contains("store_corrupt") && recovery.contains("repair --rebuild-db"),
         "the partial-exclusion entry must carry the store_corrupt recovery hint: {search}"
+    );
+}
+
+// ===========================================================================
+// R19 探索型監査 第19ラウンド 回帰テスト
+// ===========================================================================
+
+fn json_online_both_seams(dir: &TempDir, ocr: &str, embed: &str, args: &[&str]) -> Value {
+    let output = kcs(dir, args)
+        .env(TEST_STANDARD_ONLINE_MARKDOWNIZE_ENV, ocr)
+        .env(TEST_ADOPTED_EMBEDDING_ENV, embed)
+        .arg("--json")
+        .assert()
+        .get_output()
+        .stdout
+        .clone();
+    serde_json::from_slice(&output).unwrap_or(Value::Null)
+}
+
+fn env_online_tasks<'a>(status: &'a Value, path: &str) -> Vec<&'a Value> {
+    tasks_of_type(status, "markdownize")
+        .into_iter()
+        .chain(tasks_of_type(status, "embedding"))
+        .filter(|t| t["input_path"] == path)
+        .collect()
+}
+
+// R19-1: a Tier A secret explicitly un-ignored (`!pattern`) is ingested locally but its
+// ONLINE send (OCR + embedding) must be HELD until `--send-secrets` — exactly like a
+// (lower-risk) Tier B file. Before R19-1 the lifted Tier A slipped BOTH online gates
+// (a risk-gradient inversion) and left no quarantine audit record.
+#[test]
+fn r19_1_lifted_tier_a_secret_held_from_online_send() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(
+        dir.path().join(".env"),
+        "AWS_SECRET_ACCESS_KEY=FAKE_TESTKEY_abcdefghijklmnop\n",
+    )
+    .unwrap();
+    fs::write(dir.path().join(".kcsignore"), "!.env\n").unwrap();
+    kcs(&dir, &["init"]).assert().success();
+    json_online_both_seams(&dir, "mock", "mock", &["index", "--approve", "--online"]);
+    json_online_both_seams(&dir, "mock", "mock", &["batch", "resume"]);
+    let status = json_online_both_seams(&dir, "mock", "mock", &["status"]);
+
+    let held = env_online_tasks(&status, ".env")
+        .iter()
+        .filter(|t| t["fallback_reason"] == "secrets_tier_b_hold")
+        .count();
+    assert!(
+        held >= 1,
+        "lifted Tier A online task(s) must be HELD from send: {status}"
+    );
+    let sent = env_online_tasks(&status, ".env")
+        .iter()
+        .filter(|t| {
+            t["fallback_reason"] == "online_adapter_done"
+                || t["fallback_reason"] == "embedding_adapter_done"
+        })
+        .count();
+    assert_eq!(
+        sent, 0,
+        "no lifted Tier A online task may be SENT without --send-secrets: {status}"
+    );
+    assert!(
+        status["quarantine"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|q| q["path"] == ".env" && q["reason"] == "secrets_tier_a"),
+        "lifted Tier A must be recorded in quarantine as secrets_tier_a: {status}"
+    );
+
+    // --send-secrets releases and sends BOTH online paths.
+    json_online_both_seams(
+        &dir,
+        "mock",
+        "mock",
+        &["index", "--approve", "--online", "--send-secrets"],
+    );
+    json_online_both_seams(&dir, "mock", "mock", &["batch", "resume"]);
+    let status = json_online_both_seams(&dir, "mock", "mock", &["status"]);
+    let sent = env_online_tasks(&status, ".env")
+        .iter()
+        .filter(|t| {
+            t["fallback_reason"] == "online_adapter_done"
+                || t["fallback_reason"] == "embedding_adapter_done"
+        })
+        .count();
+    assert!(
+        sent >= 1,
+        "--send-secrets must release + send the lifted Tier A online tasks: {status}"
+    );
+    // R19-7: the quarantine disposition must transition hold -> send_approved (a path-only
+    // dedup previously froze it at "hold", misreporting an approved+sent file as pending).
+    let dispositions: Vec<&str> = status["quarantine"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|q| q["path"] == ".env")
+        .filter_map(|q| q["approval_method"].as_str())
+        .collect();
+    assert!(
+        dispositions.contains(&"send_approved"),
+        "R19-7: quarantine disposition must reach send_approved after --send-secrets: {status}"
+    );
+}
+
+// R19-3: a non-live embedding retirement is REVERSIBLE (`retired_non_live`, not the
+// permanent `invalid_input`) — when the exact content-addressed chunk reappears
+// (revert/restore), the enqueue guard creates a FRESH task instead of the chunk being
+// silently stuck out of vector search forever.
+#[test]
+fn r19_3_reverted_chunk_re_embeds_after_non_live_retirement() {
+    let dir = tempfile::tempdir().unwrap();
+    assert_eq!(R18_1_BODY_V1.len(), R18_1_BODY_V2.len());
+    fs::write(dir.path().join("doc.md"), R18_1_BODY_V1).unwrap();
+    kcs(&dir, &["init"]).assert().success();
+    // v1 embedding fails rate_limit -> Failed(rate_limit) phantom.
+    json_success_embed_at(
+        &dir,
+        "rate_limit",
+        "2026-07-03T00:00:00Z",
+        &["index", "--approve", "--online"],
+    );
+    // Edit to v2 -> v1 chunk non-live -> retired REVERSIBLY.
+    fs::write(dir.path().join("doc.md"), R18_1_BODY_V2).unwrap();
+    json_success_embed_at(
+        &dir,
+        "mock",
+        "2026-07-05T00:00:00Z",
+        &["index", "--approve", "--online"],
+    );
+    let status = json_success_embed_at(&dir, "mock", "2026-07-05T00:00:00Z", &["status"]);
+    let retired = tasks_of_type(&status, "embedding")
+        .iter()
+        .filter(|t| t["fallback_reason"] == "retired_non_live")
+        .count();
+    assert!(
+        retired >= 1,
+        "R19-3: the non-live chunk must be retired REVERSIBLY (retired_non_live), \
+         not the blocking invalid_input: {status}"
+    );
+    let tasks_before = tasks_of_type(&status, "embedding").len();
+
+    // Revert to the EXACT v1 bytes -> the v1 chunk_id reappears; it must re-embed.
+    fs::write(dir.path().join("doc.md"), R18_1_BODY_V1).unwrap();
+    json_success_embed_at(
+        &dir,
+        "mock",
+        "2026-07-07T00:00:00Z",
+        &["index", "--approve", "--online"],
+    );
+    let status = json_success_embed_at(&dir, "mock", "2026-07-07T00:00:00Z", &["status"]);
+    let tasks_after = tasks_of_type(&status, "embedding").len();
+    assert!(
+        tasks_after > tasks_before,
+        "R19-3: reverting to the exact bytes must create a FRESH embedding task for the \
+         reappeared chunk (before={tasks_before}, after={tasks_after}): {status}"
+    );
+    let reverted_done = tasks_of_type(&status, "embedding")
+        .iter()
+        .filter(|t| t["status"] == "done")
+        .count();
+    assert!(
+        reverted_done >= 1,
+        "R19-3: the reverted chunk must embed (Done): {status}"
+    );
+}
+
+// R19-4: when two docs share an identical section (same text_hash, different chunk_id),
+// and one's embedding fails rate_limit while the other succeeds, `rebuild_chunk_vec`
+// links the failed chunk's vector via the content-hash twin. The reconcile must then
+// CONVERGE that live-and-embedded Failed task to Done and reclaim its phantom — before
+// R19-4 it stayed Failed forever (reconcile's live->Done loop skipped Failed), stuck at
+// pending_enrichment == 1 with a phantom reservation eating the cap.
+#[test]
+fn r19_4_duplicate_content_failed_chunk_converges_via_twin() {
+    let dir = tempfile::tempdir().unwrap();
+    let shared =
+        "## 共有セクション\n\n共有される段落です。十分な長さの本文をここに置きます。あいうえお かきくけこ さしすせそ。\n";
+    fs::write(
+        dir.path().join("a.md"),
+        format!("# 見出し AAAA\n\n{shared}"),
+    )
+    .unwrap();
+    kcs(&dir, &["init"]).assert().success();
+    // Pin ALL passes to one instant so a.md's rate_limit chunks are never retry-DUE (their
+    // 2s backoff never elapses) — the ONLY way its shared chunk can complete is the R19-4
+    // twin convergence, not a normal mock retry. (A later wall-clock would just re-embed it
+    // via retry and never exercise the bug.)
+    let now = "2026-07-03T00:00:00Z";
+    // a.md's chunks fail rate_limit (phantom reservations).
+    json_success_embed_at(&dir, "rate_limit", now, &["index", "--approve", "--online"]);
+    // b.md carries the IDENTICAL section (same text_hash, different chunk_id). Indexing it
+    // with mock embeds the shared text into the `embeddings` table.
+    fs::write(
+        dir.path().join("b.md"),
+        format!("# 見出し BBBB\n\n{shared}"),
+    )
+    .unwrap();
+    json_success_embed_at(&dir, "mock", now, &["index", "--approve", "--online"]);
+    // `rebuild_chunk_vec` runs BEFORE embedding enrichment in a given index pass, so it is
+    // the NEXT pass that links a.md's shared chunk_id to the twin's now-persisted vector —
+    // and the reconcile then converges a.md's stuck Failed chunk (self-heal on re-index).
+    json_success_embed_at(&dir, "mock", now, &["index", "--approve", "--online"]);
+    assert!(
+        embedding_reclaim_usd(&dir) > 0.0,
+        "R19-4: the twin-embedded rate_limit phantom must be reclaimed (got {})",
+        embedding_reclaim_usd(&dir)
+    );
+    let status = json_success_embed_at(&dir, "mock", now, &["status"]);
+    let a_done = tasks_of_type(&status, "embedding")
+        .iter()
+        .filter(|t| t["input_path"] == "a.md" && t["status"] == "done")
+        .count();
+    assert!(
+        a_done >= 1,
+        "R19-4: a.md's twin-embedded chunk must CONVERGE to Done, not stay Failed: {status}"
+    );
+}
+
+// R19-2: an exhausted-quota (QuotaExceeded, attempts >= max) online markdownize phantom
+// must still be reclaimed by the deleted/renamed sweep. Before R19-2 the sweep gated on
+// `task_retry_allowed` (false once the finite quota budget is spent), stranding the
+// phantom reservation for the month. Quota has no test seam, so the terminal state is
+// crafted directly (as the round's control repro did).
+#[test]
+fn r19_2_exhausted_quota_phantom_reclaimed_on_sweep() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("doc.pdf"), fake_pdf(&[R17_3_BODY_V1])).unwrap();
+    kcs(&dir, &["init"]).assert().success();
+    run_markdownize_seam(&dir, "mock", None, &["index", "--approve"]);
+    // Fail the online send under rate_limit -> Failed(rate_limit) with a phantom reservation.
+    run_markdownize_seam(
+        &dir,
+        "rate_limit",
+        Some("2026-07-03T00:00:00Z"),
+        &["batch", "resume"],
+    );
+    assert_eq!(
+        markdown_ledger_rows(&dir),
+        1,
+        "one phantom charge is reserved"
+    );
+
+    // Rewrite the reserved online markdownize task's terminal state to an EXHAUSTED quota
+    // failure (quota_exceeded, attempts = 3 = its max). Last-write-wins jsonl.
+    let tasks_path = dir.path().join(".kcs/tasks.jsonl");
+    let text = fs::read_to_string(&tasks_path).unwrap();
+    let mut crafted: Option<String> = None;
+    for line in text.lines() {
+        let t: Value = serde_json::from_str(line).unwrap();
+        if t["type"] == "markdownize" && t.get("reserved_usd").and_then(Value::as_f64).is_some() {
+            let mut row = t.clone();
+            row["fallback_reason"] = Value::from("quota_exceeded");
+            row["attempts"] = Value::from(3);
+            row["status"] = Value::from("failed");
+            row["next_retry_at"] = Value::Null;
+            crafted = Some(serde_json::to_string(&row).unwrap());
+        }
+    }
+    let crafted = crafted.expect("a reserved markdownize task must exist to craft");
+    let mut appended = text.clone();
+    appended.push_str(&crafted);
+    appended.push('\n');
+    fs::write(&tasks_path, appended).unwrap();
+
+    // Delete the file (non-live) + add another, then re-index: the R18-2 sweep runs.
+    fs::remove_file(dir.path().join("doc.pdf")).unwrap();
+    fs::write(dir.path().join("doc2.pdf"), fake_pdf(&[R17_3_BODY_V2])).unwrap();
+    run_markdownize_seam(
+        &dir,
+        "mock",
+        Some("2026-07-05T00:00:00Z"),
+        &["index", "--approve"],
+    );
+
+    assert!(
+        markdown_reclaim_usd(&dir) > 0.0,
+        "R19-2: the exhausted-quota phantom must be reclaimed by the sweep (got {})",
+        markdown_reclaim_usd(&dir)
+    );
+}
+
+// R19-6: R18-4 wired the store-corruption recovery hint only for store_corrupt/
+// snapshot_shallow. The most common class — index_missing/index_corrupt (sqlite.db
+// absent/damaged) — surfaced bare in a partial exclusion. Mirrors r18_4 with a corrupt
+// sqlite.db instead of a corrupt commit object.
+#[test]
+fn r19_6_partial_index_corrupt_entry_carries_recovery_hint() {
+    let parent = tempfile::tempdir().unwrap();
+    let data_home = parent.path().join("xdg");
+    let a = parent.path().join("a");
+    let b = parent.path().join("b");
+    fs::create_dir_all(&a).unwrap();
+    fs::create_dir_all(&b).unwrap();
+    fs::write(a.join("a.md"), "# A\n\n## Sec\nalphaunique survivor\n").unwrap();
+    fs::write(b.join("b.md"), "# B\n\n## Sec\nbetaunique other\n").unwrap();
+    json_success_path(&a, &data_home, &["init"]);
+    json_success_path(&b, &data_home, &["init"]);
+    json_success_path(&a, &data_home, &["index", "--approve"]);
+    json_success_path(&b, &data_home, &["index", "--approve"]);
+
+    // Corrupt scope B's sqlite.db (index_corrupt) — A stays healthy (partial exclusion).
+    fs::write(b.join(".kcs/index/sqlite.db"), b"GARBAGE not a sqlite db").unwrap();
+
+    let output = Command::cargo_bin("kcs")
+        .unwrap()
+        .current_dir(&a)
+        .env("XDG_CONFIG_HOME", data_home.join("config"))
+        .env("XDG_DATA_HOME", data_home.join("data"))
+        .env("XDG_CACHE_HOME", data_home.join("cache"))
+        .args(["search", "alphaunique", "--all-scopes", "--json"])
+        .assert()
+        .code(3)
+        .get_output()
+        .stdout
+        .clone();
+    let search: Value = serde_json::from_slice(&output).unwrap();
+    let excluded = search["excluded_scopes"].as_array().unwrap();
+    assert_eq!(excluded.len(), 1);
+    assert_eq!(excluded[0]["reason"], "index_corrupt");
+    let recovery = excluded[0]["recovery"].as_str().unwrap_or_default();
+    assert!(
+        recovery.contains("index_corrupt") && recovery.contains("repair --rebuild-db"),
+        "R19-6: the partial index_corrupt entry must carry a recovery hint: {search}"
+    );
+}
+
+// R19-8: a `max_input_bytes` cap tightened AFTER a task is enqueued must be honored at
+// send time — a Pending online task is not shipped if the file now exceeds the cap
+// (the sibling `allow_network` key is likewise re-checked at send).
+#[test]
+fn r19_8_lowered_max_input_bytes_blocks_queued_online_send() {
+    let dir = tempfile::tempdir().unwrap();
+    let pdf = fake_pdf(&[R17_3_BODY_V1]);
+    fs::write(dir.path().join("doc.pdf"), &pdf).unwrap();
+    kcs(&dir, &["init"]).assert().success();
+    // Enqueue the online markdownize task under the default (generous) cap.
+    run_markdownize_seam(&dir, "mock", None, &["index", "--approve"]);
+    // Tighten the cap below the file size in the scope config.
+    let cap = pdf.len() - 5;
+    let cfg = dir.path().join(".kcs/config.toml");
+    let mut content = fs::read_to_string(&cfg).unwrap_or_default();
+    content.push_str(&format!("\n[adapter.policy]\nmax_input_bytes = {cap}\n"));
+    fs::write(&cfg, content).unwrap();
+    // batch resume must NOT send the now-oversized task (no online charge).
+    run_markdownize_seam(
+        &dir,
+        "mock",
+        Some("2026-07-05T00:00:00Z"),
+        &["batch", "resume"],
+    );
+    assert_eq!(
+        markdown_ledger_rows(&dir),
+        0,
+        "R19-8: the oversized queued task must not be sent/charged"
+    );
+    let status = run_markdownize_seam(&dir, "mock", None, &["status"]);
+    let sent = tasks_of_type(&status, "markdownize")
+        .iter()
+        .filter(|t| t["fallback_reason"] == "online_adapter_done")
+        .count();
+    assert_eq!(
+        sent, 0,
+        "R19-8: no online markdownize may complete under the lowered cap: {status}"
     );
 }
