@@ -6000,39 +6000,51 @@ fn execute_pending_markdownize_tasks(
         // recovery is a re-index, not a retry) instead of charging + entering the
         // executor. This mirrors the executor's own R14-2/R9-2 guards, hoisted ahead of
         // the charge.
-        if !online_markdownize_precondition_ok(repo, &task) {
-            // R18-2: this task may carry a kept RateLimit/Quota phantom from a PRIOR
-            // failed send (its file was deleted/edited after that attempt). Reclaim it
-            // here — `batch retry` preserved `fallback_reason`, so the failure kind is
-            // still intact — BEFORE the retirement overwrites the reason to
-            // invalid_input; otherwise the R18-2 index sweep (which reads the failure
-            // kind) can no longer tell it was a non-billable phantom. No NEW charge is
-            // reserved this pass (the precondition failed before the charge).
-            let markdown_adapter_kind = adapter_kind_budget_key(online_profile.adapter_kind);
-            let mut reclaim: Option<MonthlyCostLedgerEntry> = None;
-            store
-                .update_matching(|candidate| {
-                    if candidate.task_id == task_id {
-                        reclaim = retire_online_task_reclaiming(
-                            candidate,
-                            &scope_id,
-                            markdown_adapter_kind,
-                        );
-                        candidate.attempts = candidate.attempts.saturating_add(1);
-                        true
-                    } else {
-                        false
-                    }
-                })
-                .map_err(pipeline_to_kcs)?;
-            if let Some(entry) = reclaim {
-                cost_ledger
-                    .reclaim_ledger()
-                    .append_monthly(&entry)
-                    .map_err(pipeline_to_kcs)?;
+        match classify_online_markdownize_precondition(repo, &task) {
+            OnlineMarkdownizePrecondition::Send => {}
+            OnlineMarkdownizePrecondition::AwaitOcr => {
+                // R21-3: a valid non-text-native file with no locally-extractable text
+                // (scanned PDF / image / OOXML) needs OCR-from-scratch, which the
+                // hint-driven send cannot do yet. Leave the task Pending — it stays honest
+                // pending enrichment and is deduped by the next re-index — rather than
+                // retiring it (which mislabels a live file, churns, and hides it via R20-7).
+                // Not counted as attempted/failed/paused: nothing was sent.
+                continue;
             }
-            counts.failed += 1;
-            continue;
+            OnlineMarkdownizePrecondition::Retire => {
+                // R18-2: this task may carry a kept RateLimit/Quota phantom from a PRIOR
+                // failed send (its file was deleted/edited after that attempt). Reclaim it
+                // here — `batch retry` preserved `fallback_reason`, so the failure kind is
+                // still intact — BEFORE the retirement overwrites the reason to
+                // invalid_input; otherwise the R18-2 index sweep (which reads the failure
+                // kind) can no longer tell it was a non-billable phantom. No NEW charge is
+                // reserved this pass (the precondition failed before the charge).
+                let markdown_adapter_kind = adapter_kind_budget_key(online_profile.adapter_kind);
+                let mut reclaim: Option<MonthlyCostLedgerEntry> = None;
+                store
+                    .update_matching(|candidate| {
+                        if candidate.task_id == task_id {
+                            reclaim = retire_online_task_reclaiming(
+                                candidate,
+                                &scope_id,
+                                markdown_adapter_kind,
+                            );
+                            candidate.attempts = candidate.attempts.saturating_add(1);
+                            true
+                        } else {
+                            false
+                        }
+                    })
+                    .map_err(pipeline_to_kcs)?;
+                if let Some(entry) = reclaim {
+                    cost_ledger
+                        .reclaim_ledger()
+                        .append_monthly(&entry)
+                        .map_err(pipeline_to_kcs)?;
+                }
+                counts.failed += 1;
+                continue;
+            }
         }
         // R16-7: error-kind-aware re-reservation gate. When THIS task instance is a
         // re-send whose PREVIOUS recorded failure was a non-billable rejection
@@ -6409,14 +6421,35 @@ fn task_prepared_unit_count(repo: &Repository, task: &TaskDescriptor) -> Option<
 /// phantom charge against a send that never happens — it double-bills and can exhaust the
 /// markdownize cap, falsely pausing the valid task (R15-2). The executor re-checks the
 /// same conditions as defense in depth; this is the loop's pre-charge gate.
-fn online_markdownize_precondition_ok(repo: &Repository, task: &TaskDescriptor) -> bool {
+/// R21-3: outcome of the send-time online-markdownize precondition check.
+enum OnlineMarkdownizePrecondition {
+    /// File present, unchanged, within the input cap, non-text-native, with locally
+    /// extracted units to enhance — ready to send.
+    Send,
+    /// Genuine failure — retire the task (file gone / edited-since-enqueue / text-native /
+    /// oversize). The recovery is a fresh re-index, not a retry.
+    Retire,
+    /// Valid non-text-native media with NO locally-extractable text (a scanned/text-layer-
+    /// less PDF, image, or OOXML doc). The OCR send is driven by prepared-unit hints, so
+    /// with zero units it would return zero pages — genuine OCR-from-scratch is not yet
+    /// implemented. Leave the task Pending (honest pending enrichment counted by
+    /// `index_status`) instead of retiring it as `retired_non_live`, which mislabels a
+    /// LIVE file, churns a new task on every re-index, and (via R20-7) hides it as
+    /// enriched_ratio 1.0.
+    AwaitOcr,
+}
+
+fn classify_online_markdownize_precondition(
+    repo: &Repository,
+    task: &TaskDescriptor,
+) -> OnlineMarkdownizePrecondition {
     let path = repo.root().join(&task.input_path);
     let media_type = media_type_for_cli_path(&path).to_owned();
     let Ok(current_bytes) = fs::read(&path) else {
-        return false;
+        return OnlineMarkdownizePrecondition::Retire;
     };
     if hash_bytes(&current_bytes) != task.input_hash {
-        return false;
+        return OnlineMarkdownizePrecondition::Retire;
     }
     // R19-8: honor a `max_input_bytes` cap that was tightened AFTER this task was
     // enqueued. The enqueue-time gate (run_index_pipeline) only checked the cap in effect
@@ -6424,10 +6457,10 @@ fn online_markdownize_precondition_ok(repo: &Repository, task: &TaskDescriptor) 
     // since lowered the cap below the file's size — the same live re-check the sibling
     // `[adapter.policy]` key `allow_network` already gets at send time.
     if current_bytes.len() as u64 > effective_max_input_bytes(repo) {
-        return false;
+        return OnlineMarkdownizePrecondition::Retire;
     }
     if is_text_native_media(&media_type) {
-        return false;
+        return OnlineMarkdownizePrecondition::Retire;
     }
     let prepare_profile_hash = builtin_prepare_profile().tool_profile_hash;
     let Ok(prepare) = prepare_units(PrepareStageRequest {
@@ -6436,9 +6469,12 @@ fn online_markdownize_precondition_ok(repo: &Repository, task: &TaskDescriptor) 
         input_path: path.display().to_string(),
         tool_profile_hash: prepare_profile_hash,
     }) else {
-        return false;
+        return OnlineMarkdownizePrecondition::Retire;
     };
-    !prepare.prepared_units.is_empty()
+    if prepare.prepared_units.is_empty() {
+        return OnlineMarkdownizePrecondition::AwaitOcr;
+    }
+    OnlineMarkdownizePrecondition::Send
 }
 
 fn execute_online_markdownize_task(
@@ -7661,11 +7697,19 @@ fn filter_embeddable_by_task_state(
 /// Whether an embedding task's current state permits embedding its chunk now.
 fn embeddable_task_state(task: &TaskDescriptor, override_budget: bool) -> bool {
     match task.status {
-        // Sticky budget pause (L2 ii): only an explicit override re-includes it;
-        // any other Paused reason is safe to re-drive.
-        TaskStatus::Paused => {
-            override_budget || task.fallback_reason.as_deref() != Some("budget_exceeded")
-        }
+        TaskStatus::Paused => match task.fallback_reason.as_deref() {
+            // Sticky budget pause (L2 ii): only an explicit override re-includes it.
+            Some("budget_exceeded") => override_budget,
+            // R21-1: a secrets hold must NEVER be re-driven into the send pipeline by a
+            // sendable chunk (e.g. a non-secret content-twin whose JOIN fan-out shares
+            // this held task's output_ref) — only `--send-secrets` (which flips the task
+            // back to Pending via `release_secret_holds`) may. Defense-in-depth behind
+            // the R21-1 JOIN dedup so the hold cannot be bypassed even if a same
+            // output_ref collision re-appears from another source.
+            Some(SECRETS_TIER_B_HOLD) => false,
+            // Any other Paused reason is safe to re-drive.
+            _ => true,
+        },
         // Failed embeddings are owned by `batch retry` (L7): skip unless the
         // backoff has elapsed AND the error is still retryable.
         TaskStatus::Failed => task_retry_due(task) && task_retry_allowed(task),
@@ -7746,15 +7790,43 @@ fn live_chunks_without_embedding(
             })
         })
         .map_err(|err| KcsError::schema(err.to_string()))?;
-    let mut pending = Vec::new();
+    // R21-1/R21-2: a content-addressed `chunk_id` is path-independent (chunking.rs
+    // omits path from the hash), so the tree_entries JOIN fans out ONE chunk into N
+    // rows when N byte-identical files are live (a vendored LICENSE, a backup copy).
+    // Left un-deduped this made `enqueue_embedding_tasks` create N tasks under one
+    // `output_ref` — double send + double charge, the R20-2 invariant broken from a
+    // second source (R21-2) — and, worse, let a non-secret twin's instance land in
+    // `sendable` while the secret twin's landed in `held`, so the send loop drove the
+    // shared held task Done and shipped a Tier B file's text online with no
+    // `--send-secrets` (R21-1). Collapse to one instance per chunk_id, PREFERRING a
+    // secret path so the survivor is held (conservative, matching R20-1's live-path
+    // secret classification).
+    let mut pending: Vec<EmbeddableChunk> = Vec::new();
+    let mut index_of: BTreeMap<String, usize> = BTreeMap::new();
     for row in rows {
         let chunk = row.map_err(|err| KcsError::schema(err.to_string()))?;
         let embedding_hash = chunk_embedding_hash(&chunk, profile)?;
         let has_current_profile = embedding_store::content_vector(conn, &embedding_hash)
             .map_err(index_to_kcs)?
             .is_some();
-        if !(has_current_profile && existing.contains(&chunk.chunk_id)) {
-            pending.push(chunk);
+        if has_current_profile && existing.contains(&chunk.chunk_id) {
+            continue;
+        }
+        match index_of.get(&chunk.chunk_id) {
+            Some(&i) => {
+                // Duplicate live path for one content-addressed chunk: keep a single
+                // instance, swapping in a secret-path one if the kept instance is not
+                // secret (so the survivor is held, never sent unapproved).
+                if classify_secret(&pending[i].raw_path).is_none()
+                    && classify_secret(&chunk.raw_path).is_some()
+                {
+                    pending[i] = chunk;
+                }
+            }
+            None => {
+                index_of.insert(chunk.chunk_id.clone(), pending.len());
+                pending.push(chunk);
+            }
         }
     }
     Ok(pending)
@@ -7826,6 +7898,34 @@ fn reconcile_committed_embedding_tasks(
             // Live AND un-embedded is genuine outstanding work — leave it (a retryable
             // Failed awaits `batch retry`; Pending/Running is driven normally).
             if live && !live_embedded {
+                // R21-6: EXCEPT a Failed AuthError task. It is non-retryable
+                // (`max_attempts:0`, so `batch retry` / `filter_embeddable_by_task_state`
+                // skip it) yet the file is unchanged, so no non-live retire ever fires —
+                // it stays Failed forever, its non-billable (401/403, refused before
+                // billing — R20-3) phantom eating the cap, and fixing the credentials
+                // resumes nothing. The reclaim series (R16-7→R19-2→R20-3) only handled the
+                // NON-LIVE case. Revive in place (Failed→Pending) so a re-index after
+                // fixing credentials re-attempts the send, reclaiming the phantom first so
+                // it stops eating the cap (and is not double-counted when the retry bills).
+                // RateLimit self-heals via `batch retry`; NetworkError may have billed, so
+                // neither is revived here.
+                if retry_kind_from_reason(task.fallback_reason.as_deref())
+                    == RetryErrorKind::AuthError
+                {
+                    if let Some(entry) =
+                        reclaim_entry_for(task, &reservation_scope_id, EMBEDDING_ADAPTER_KIND)
+                    {
+                        reclaims.push(entry);
+                    }
+                    task.status = TaskStatus::Pending;
+                    task.fallback_reason = None;
+                    task.attempts = 0;
+                    task.reserved_usd = None;
+                    task.reserved_month = None;
+                    task.next_retry_at = None;
+                    task.heartbeat_at = None;
+                    return true;
+                }
                 return false;
             }
             if live_embedded {
@@ -7944,16 +8044,34 @@ fn hold_secret_embedding_tasks(
     if held.is_empty() {
         return Ok(());
     }
-    let existing = task_store
-        .all()
-        .map_err(pipeline_to_kcs)?
-        .into_iter()
+    let all_tasks = task_store.all().map_err(pipeline_to_kcs)?;
+    // R21-7: a task retired because its chunk went non-live must NOT block a fresh HOLD
+    // when the content-addressed chunk_id reappears under a Tier B name (git revert /
+    // restore of the exact bytes). `enqueue_embedding_tasks` (the sendable sibling) got
+    // this R19-3/R20-2 revive; the held branch was left behind, so a restored-under-a-
+    // secret-name chunk got no hold task — invisible in `index_status` (R20-7 excludes
+    // retired_non_live) and re-embeddable only via `--send-secrets`. Exclude retired
+    // tasks from `existing` and revive them in place to a Paused hold below.
+    let existing = all_tasks
+        .iter()
         .filter(|task| task.task_type == TaskType::Embedding)
-        .map(|task| task.output_ref)
+        .filter(|task| task.fallback_reason.as_deref() != Some(RETIRED_NON_LIVE))
+        .map(|task| task.output_ref.clone())
         .collect::<BTreeSet<_>>();
+    let revivable = all_tasks
+        .iter()
+        .filter(|task| task.task_type == TaskType::Embedding)
+        .filter(|task| task.fallback_reason.as_deref() == Some(RETIRED_NON_LIVE))
+        .map(|task| task.output_ref.clone())
+        .collect::<BTreeSet<_>>();
+    let mut to_revive: BTreeSet<String> = BTreeSet::new();
     for chunk in held {
         let output_ref = embedding_task_output_ref(&chunk.chunk_id);
         if existing.contains(&output_ref) {
+            continue;
+        }
+        if revivable.contains(&output_ref) {
+            to_revive.insert(output_ref);
             continue;
         }
         let task = TaskDescriptor {
@@ -7978,6 +8096,29 @@ fn hold_secret_embedding_tasks(
             reserved_month: None,
         };
         task_store.append(&task).map_err(pipeline_to_kcs)?;
+    }
+    // Revive retired-non-live tasks in place to a Paused hold, reusing their slot so no
+    // duplicate output_ref is created. Their `reserved_*` were cleared at retirement.
+    if !to_revive.is_empty() {
+        task_store
+            .update_matching(|task| {
+                if task.task_type == TaskType::Embedding
+                    && task.fallback_reason.as_deref() == Some(RETIRED_NON_LIVE)
+                    && to_revive.contains(&task.output_ref)
+                {
+                    task.status = TaskStatus::Paused;
+                    task.fallback_reason = Some(SECRETS_TIER_B_HOLD.to_owned());
+                    task.attempts = 0;
+                    task.next_retry_at = None;
+                    task.heartbeat_at = None;
+                    task.reserved_usd = None;
+                    task.reserved_month = None;
+                    true
+                } else {
+                    false
+                }
+            })
+            .map_err(pipeline_to_kcs)?;
     }
     Ok(())
 }
@@ -8227,10 +8368,15 @@ fn estimate_online_markdownize_cost(size_bytes: u64) -> f64 {
 }
 
 fn media_type_for_cli_path(path: &Path) -> &'static str {
+    // R21-4: lowercase the extension so an uppercase-extension text-native file
+    // (`README.MD`, `NOTE.TXT`, `MAIN.RS`) is recognized as text/markdown/plain/code and
+    // handled locally — not folded to octet-stream and shipped to online OCR (R9-2).
     match path
         .extension()
         .and_then(|ext| ext.to_str())
         .unwrap_or_default()
+        .to_ascii_lowercase()
+        .as_str()
     {
         "md" | "markdown" => "text/markdown",
         "txt" => "text/plain",
@@ -8708,21 +8854,28 @@ fn run_index_pipeline(
             // (`execute_pending_markdownize_tasks` filters on the online output_ref) and had
             // no idempotency guard (04 §5.5), so it silently duplicated on every idle
             // re-index and the file never reached OCR.
-            enqueue_online_placeholder_task(
-                repo,
-                &task_store,
-                candidate,
-                &raw_hash,
-                &scope_id,
-                network_allowed,
-                secrets_hold,
-                args,
-                &now,
-                &mut result,
-                &cost_ledger,
-                &budget_caps,
-                &month,
-            )?;
+            //
+            // R21-4: only a RECOGNIZED OCR-able medium (PDF / image / OOXML — docs/07 §5.2)
+            // is worth an online OCR task. An unrecognized `application/octet-stream` binary
+            // (a .sqlite, a .zip, a compiled blob) is not a document and can never be OCR'd,
+            // so enqueuing one only pollutes pending enrichment forever. Skip it.
+            if candidate.media_type != "application/octet-stream" {
+                enqueue_online_placeholder_task(
+                    repo,
+                    &task_store,
+                    candidate,
+                    &raw_hash,
+                    &scope_id,
+                    network_allowed,
+                    secrets_hold,
+                    args,
+                    &now,
+                    &mut result,
+                    &cost_ledger,
+                    &budget_caps,
+                    &month,
+                )?;
+            }
             continue;
         }
 
@@ -8740,21 +8893,30 @@ fn run_index_pipeline(
                 },
             );
             result.normalized_files += 1;
-            enqueue_online_placeholder_task(
-                repo,
-                &task_store,
-                candidate,
-                &raw_hash,
-                &scope_id,
-                network_allowed,
-                secrets_hold,
-                args,
-                &now,
-                &mut result,
-                &cost_ledger,
-                &budget_caps,
-                &month,
-            )?;
+            // R21-4: an online OCR "enhancement" task after a SUCCESSFUL local markdownize
+            // is only meaningful for a real text-layer PDF (docs/07 §8). A non-`.md`/non-
+            // code TEXT file folded to `application/octet-stream` (a `.yaml` / `.json` /
+            // `Dockerfile`, or an uppercase-extension text-native file) is already fully and
+            // finally handled by the local passthrough — enqueuing an OCR task shipped its
+            // bytes to the external API under `--online` (R9-2 routing violation) and, when
+            // offline, left a permanent phantom pending that deflated enriched_ratio.
+            if candidate.media_type == "application/pdf" {
+                enqueue_online_placeholder_task(
+                    repo,
+                    &task_store,
+                    candidate,
+                    &raw_hash,
+                    &scope_id,
+                    network_allowed,
+                    secrets_hold,
+                    args,
+                    &now,
+                    &mut result,
+                    &cost_ledger,
+                    &budget_caps,
+                    &month,
+                )?;
+            }
             continue;
         }
 
@@ -8983,21 +9145,28 @@ fn run_index_pipeline(
                 usd: 0.0,
             })
             .map_err(pipeline_to_kcs)?;
-        enqueue_online_placeholder_task(
-            repo,
-            &task_store,
-            candidate,
-            &raw_hash,
-            &scope_id,
-            network_allowed,
-            secrets_hold,
-            args,
-            &now,
-            &mut result,
-            &cost_ledger,
-            &budget_caps,
-            &month,
-        )?;
+        // R21-4: only a real text-layer PDF warrants an online OCR "enhancement" task after
+        // a successful local markdownize. A TEXT file folded to `application/octet-stream`
+        // (`.yaml`/`.json`/`Dockerfile`/uppercase-extension text-native) is fully handled
+        // locally; enqueuing OCR sent its bytes online (R9-2 violation) or left an offline
+        // phantom pending.
+        if candidate.media_type == "application/pdf" {
+            enqueue_online_placeholder_task(
+                repo,
+                &task_store,
+                candidate,
+                &raw_hash,
+                &scope_id,
+                network_allowed,
+                secrets_hold,
+                args,
+                &now,
+                &mut result,
+                &cost_ledger,
+                &budget_caps,
+                &month,
+            )?;
+        }
     }
     Ok(result)
 }

@@ -6631,3 +6631,263 @@ fn r19_8_lowered_max_input_bytes_blocks_queued_online_send() {
         "R19-8: no online markdownize may complete under the lowered cap: {status}"
     );
 }
+
+// ===========================================================================
+// R21 — exploratory audit round 21 regression tests.
+// ===========================================================================
+
+const R21_TWIN_BODY: &str =
+    "# Notes\n\n## Body\nSome plain readable content for indexing purposes here alpha bravo.\n";
+
+/// R21-1 [critical]: a byte-identical NON-secret twin of a Tier B file must NOT let the
+/// secret file's chunk slip the embedding hold. The content-addressed `chunk_id` fans out
+/// across both live paths; before the fix the non-secret instance landed in `sendable`
+/// while the secret instance landed in `held`, and the send loop drove the shared held
+/// task Done — shipping the Tier B file's text online with no `--send-secrets`.
+#[test]
+fn r21_1_byte_identical_twin_does_not_bypass_tier_b_hold() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("notes.md"), R21_TWIN_BODY).unwrap();
+    fs::write(dir.path().join("password_backup.md"), R21_TWIN_BODY).unwrap();
+    kcs(&dir, &["init"]).assert().success();
+    // No `--send-secrets`.
+    json_success_embed(&dir, "mock", &["index", "--approve", "--online"]);
+    let status = json_success_embed(&dir, "mock", &["status"]);
+    let embedding = tasks_of_type(&status, "embedding");
+    assert!(
+        !embedding.is_empty(),
+        "R21-1: expected embedding tasks: {status}"
+    );
+    for task in &embedding {
+        assert_eq!(
+            task["status"], "paused",
+            "R21-1: every embedding task for a Tier B twin must stay held (paused), \
+             not be driven Done by the non-secret twin: {status}"
+        );
+        assert_eq!(
+            task["fallback_reason"], "secrets_tier_b_hold",
+            "R21-1: held reason must be secrets_tier_b_hold: {status}"
+        );
+    }
+}
+
+/// R21-2: two byte-identical NON-secret files share one content-addressed `chunk_id`, so
+/// they must produce exactly ONE embedding task per `output_ref` — not a duplicate that is
+/// double-sent and double-charged (the R20-2 one-task-per-output_ref invariant, broken here
+/// from a second source: the `tree_entries` JOIN fan-out).
+#[test]
+fn r21_2_byte_identical_twins_share_single_embedding_task() {
+    let dir = tempfile::tempdir().unwrap();
+    let body = "# Shared\nalpha bravo charlie delta echo foxtrot golf hotel india.\n";
+    fs::write(dir.path().join("a.md"), body).unwrap();
+    fs::write(dir.path().join("b.md"), body).unwrap();
+    kcs(&dir, &["init"]).assert().success();
+    json_success_embed(&dir, "mock", &["index", "--approve", "--online"]);
+    let status = json_success_embed(&dir, "mock", &["status"]);
+    let embedding = tasks_of_type(&status, "embedding");
+    let distinct: std::collections::BTreeSet<&str> = embedding
+        .iter()
+        .map(|t| t["output_ref"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        embedding.len(),
+        distinct.len(),
+        "R21-2: byte-identical twins must not create duplicate output_ref tasks \
+         (tasks={}, distinct={}): {status}",
+        embedding.len(),
+        distinct.len()
+    );
+}
+
+/// R21-4: a TEXT file the extension table folds to `application/octet-stream` — an
+/// uppercase-extension text-native file (`README.MD`) or an unknown-extension config file
+/// (`.yaml`) — is fully handled by the local passthrough and must NOT also enqueue an
+/// online OCR task (R9-2: shipping its bytes to Mistral OCR is a routing violation).
+#[test]
+fn r21_4_uppercase_and_octet_stream_text_enqueue_no_online_ocr() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(
+        dir.path().join("README.MD"),
+        "# Upper\nreadme text body here.\n",
+    )
+    .unwrap();
+    fs::write(dir.path().join("config.yaml"), "name: acme\nvalue: 42\n").unwrap();
+    fs::write(dir.path().join("Dockerfile"), "FROM alpine\nRUN echo hi\n").unwrap();
+    kcs(&dir, &["init"]).assert().success();
+    json_success(&dir, &["index", "--approve"]);
+    let status = json_success(&dir, &["status"]);
+    let online: Vec<_> = status["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|t| {
+            t["output_ref"]
+                .as_str()
+                .is_some_and(|r| r.starts_with("online:"))
+        })
+        .collect();
+    assert!(
+        online.is_empty(),
+        "R21-4: text files must not enqueue online OCR tasks: {online:?} in {status}"
+    );
+    // The text is still locally searchable.
+    let search = json_success(&dir, &["search", "acme", "--text"]);
+    assert!(
+        !search["results"].as_array().unwrap().is_empty(),
+        "R21-4: octet-stream text must still be indexed locally: {search}"
+    );
+}
+
+/// R21-6: an embedding task that failed AuthError on a LIVE, unchanged file must recover
+/// after the credentials are fixed — a plain re-index revives it (Failed -> Pending) and it
+/// embeds. Before the fix it was non-retryable and never non-live, so it stayed Failed
+/// forever with its phantom reservation eating the cap.
+#[test]
+fn r21_6_auth_error_live_task_recovers_after_credentials_fixed() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(
+        dir.path().join("notes.txt"),
+        "plain readable content alpha bravo charlie delta echo.\n",
+    )
+    .unwrap();
+    kcs(&dir, &["init"]).assert().success();
+    // Credentials bad -> AuthError. `index` still exits 0 (enrichment failure is reported,
+    // not fatal); read the resulting task state from `status`.
+    let _ = kcs(&dir, &["index", "--approve", "--online"])
+        .env(TEST_ADOPTED_EMBEDDING_ENV, "auth_error")
+        .assert();
+    let status = json_success_embed(&dir, "mock", &["status"]);
+    assert!(
+        tasks_of_type(&status, "embedding")
+            .iter()
+            .any(|t| t["status"] == "failed" && t["fallback_reason"] == "auth_error"),
+        "R21-6: precondition — an AuthError embedding task must exist: {status}"
+    );
+    // Credentials fixed (mock succeeds) -> a plain re-index must recover it.
+    json_success_embed(&dir, "mock", &["index", "--approve", "--online"]);
+    let status = json_success_embed(&dir, "mock", &["status"]);
+    let embedding = tasks_of_type(&status, "embedding");
+    assert!(
+        embedding.iter().any(|t| t["status"] == "done"),
+        "R21-6: fixing credentials + re-index must recover the AuthError task to Done: {status}"
+    );
+    assert!(
+        !embedding
+            .iter()
+            .any(|t| t["fallback_reason"] == "auth_error"),
+        "R21-6: no AuthError task may remain stuck after recovery: {status}"
+    );
+}
+
+/// R21-7: a `retired_non_live` embedding task whose exact bytes reappear under a Tier B
+/// name must get a fresh HOLD (Paused `secrets_tier_b_hold`) — the R20-2 revive pattern,
+/// cross-wired to the held branch. Before the fix the stale retired task blocked the hold,
+/// so the restored chunk was frozen and invisible in `index_status`.
+#[test]
+fn r21_7_retired_non_live_restored_under_secret_name_gets_hold() {
+    let dir = tempfile::tempdir().unwrap();
+    let v1 = "# Notes\n\nordinary paragraph alpha bravo charlie delta echo foxtrot.\n";
+    let v2 = "# Notes\n\nCOMPLETELY different body xray yankee zulu whiskey victor.\n";
+    fs::write(dir.path().join("notes.md"), v1).unwrap();
+    kcs(&dir, &["init"]).assert().success();
+    json_success_embed_at(
+        &dir,
+        "rate_limit",
+        "2026-07-03T00:00:00Z",
+        &["index", "--approve", "--online"],
+    );
+    // Edit -> v1 chunk goes non-live -> retired_non_live.
+    fs::write(dir.path().join("notes.md"), v2).unwrap();
+    json_success_embed_at(
+        &dir,
+        "mock",
+        "2026-07-05T00:00:00Z",
+        &["index", "--approve", "--online"],
+    );
+    // Delete and restore the EXACT v1 bytes under a Tier B name.
+    fs::remove_file(dir.path().join("notes.md")).unwrap();
+    fs::write(dir.path().join("password_notes.md"), v1).unwrap();
+    json_success_embed_at(
+        &dir,
+        "mock",
+        "2026-07-06T00:00:00Z",
+        &["index", "--approve", "--online"],
+    );
+    let status = json_success_embed_at(&dir, "mock", "2026-07-06T00:00:00Z", &["status"]);
+    assert!(
+        tasks_of_type(&status, "embedding")
+            .iter()
+            .any(|t| t["status"] == "paused" && t["fallback_reason"] == "secrets_tier_b_hold"),
+        "R21-7: the chunk restored under a Tier B name must get a fresh secrets hold, \
+         not stay stuck retired_non_live: {status}"
+    );
+}
+
+/// R21-3: a scanned/text-layer-less PDF (empty `prepared_units`, needs OCR-from-scratch)
+/// must be left a stable Pending online task — not retired `retired_non_live` and churned
+/// on every re-index (which R20-7 then hid as enriched_ratio 1.0). Assert the online task
+/// stays Pending across a `batch resume` and an idle re-index, with no duplicate rows.
+#[test]
+fn r21_3_scanned_pdf_stays_pending_no_churn() {
+    let dir = tempfile::tempdir().unwrap();
+    // %PDF header but no text layer (no `BT`): prepare_units returns empty.
+    let mut scan = b"%PDF-1.4\n".to_vec();
+    scan.extend((0u32..4000).map(|i| (i.wrapping_mul(97) & 0x7f) as u8 | 0x80));
+    fs::write(dir.path().join("scan.pdf"), &scan).unwrap();
+    kcs(&dir, &["init"]).assert().success();
+    // Persistent network opt-in so `batch resume` can drive the online adapter.
+    fs::write(
+        dir.path().join(".kcs/config.toml"),
+        "kcs_format_version = \"0.1.0\"\n[adapter.policy]\nallow_network = true\n",
+    )
+    .unwrap();
+    let online_count = |status: &Value| -> usize {
+        status["tasks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|t| {
+                t["output_ref"]
+                    .as_str()
+                    .is_some_and(|r| r.starts_with("online:"))
+            })
+            .count()
+    };
+    let retired_count = |status: &Value| -> usize {
+        status["tasks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|t| {
+                t["output_ref"]
+                    .as_str()
+                    .is_some_and(|r| r.starts_with("online:"))
+                    && t["fallback_reason"] == "retired_non_live"
+            })
+            .count()
+    };
+    json_both_mock(&dir, &["index", "--online", "--yes"]);
+    json_both_mock(&dir, &["batch", "resume"]);
+    json_both_mock(&dir, &["index", "--online", "--yes"]);
+    json_both_mock(&dir, &["batch", "resume"]);
+    let status = json_both_mock(&dir, &["status"]);
+    assert_eq!(
+        online_count(&status),
+        1,
+        "R21-3: the scanned-PDF online task must not churn (exactly one row): {status}"
+    );
+    assert_eq!(
+        retired_count(&status),
+        0,
+        "R21-3: a live scanned PDF must not be mislabeled retired_non_live: {status}"
+    );
+    let pending = status["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|t| t["type"] == "markdownize" && t["status"] == "pending");
+    assert!(
+        pending,
+        "R21-3: the scanned-PDF task must stay honestly Pending: {status}"
+    );
+}

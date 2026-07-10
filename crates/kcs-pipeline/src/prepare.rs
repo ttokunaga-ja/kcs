@@ -114,6 +114,10 @@ pub fn prepare_units(request: PrepareStageRequest) -> Result<PrepareStageOutput>
                 image_object_hashes: Vec::new(),
             });
         }
+        // R21-5: for a MIXED PDF (a real text page + a scanned image page) the per-page
+        // suppression of a scanned page's garbage is applied in the deterministic
+        // markdownize adapter (`read_pdf_page_text`), which is what actually produces the
+        // page markdown / chunk text — `prepare_units` only builds the unit skeleton.
         pages
     } else {
         Vec::new()

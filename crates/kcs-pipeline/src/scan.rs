@@ -416,10 +416,15 @@ fn wildcard_match_bytes(pattern: &[u8], value: &[u8]) -> bool {
 }
 
 fn media_type_for_path(path: &Path) -> &'static str {
+    // R21-4: lowercase the extension so an uppercase-extension text-native file
+    // (`README.MD`, `NOTE.TXT`, `MAIN.RS`) is recognized as text/markdown/plain/code and
+    // handled locally — not folded to octet-stream and shipped to online OCR (R9-2).
     match path
         .extension()
         .and_then(|ext| ext.to_str())
         .unwrap_or_default()
+        .to_ascii_lowercase()
+        .as_str()
     {
         "md" | "markdown" => "text/markdown",
         "txt" => "text/plain",

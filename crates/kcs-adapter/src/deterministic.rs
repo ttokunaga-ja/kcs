@@ -246,7 +246,34 @@ fn read_pdf_page_text(request: &MarkdownizeRequest, hint: &PreparedUnitHint) -> 
     let bytes = std::fs::read(path).ok()?;
     let pages = extract_pdf_text_pages(&bytes);
     let page_index = page_index_from_unit_key(&hint.unit_key).unwrap_or(hint.order as usize);
-    pages.get(page_index).cloned()
+    let page = pages.get(page_index).cloned()?;
+    // R21-5: a MIXED PDF (a real text page + a scanned image page) yields garbage "text"
+    // for the scanned page — the stream extractor lossy-decodes its compressed image bytes.
+    // `prepare_units` (R20-4) only routes a WHOLLY-garbage doc to OCR; a mixed doc reaches
+    // here per page, so suppress a non-real-text page so its binary is never persisted as a
+    // searchable chunk (it becomes the empty deterministic-baseline placeholder instead).
+    if is_probably_real_text(&page) {
+        Some(page)
+    } else {
+        Some(String::new())
+    }
+}
+
+/// R21-5: whether extracted PDF page text is REAL text vs binary garbage lossy-decoded
+/// from a scanned page's compressed stream. Real text is overwhelmingly printable; garbage
+/// is dense with U+FFFD replacement characters and control bytes. Mirrors the pipeline's
+/// `prepare::is_probably_real_text` (kept local to avoid a kcs-pipeline dependency).
+fn is_probably_real_text(text: &str) -> bool {
+    let trimmed = text.trim();
+    let total = trimmed.chars().count();
+    if total == 0 {
+        return false;
+    }
+    let printable = trimmed
+        .chars()
+        .filter(|ch| *ch != '\u{fffd}' && (!ch.is_control() || ch.is_whitespace()))
+        .count();
+    printable * 100 >= total * 85
 }
 
 fn fence_code(text: &str, path: Option<&str>) -> String {
@@ -435,6 +462,31 @@ fn page_index_from_unit_key(unit_key: &str) -> Option<usize> {
 mod tests {
     use super::*;
     use crate::traits::MarkdownizeAdapter;
+
+    // R21-5: a mixed PDF's real text page passes `is_probably_real_text`; a scanned page's
+    // lossy-decoded binary (dense with U+FFFD / control bytes) does not. `read_pdf_page_text`
+    // uses this to suppress the garbage page so it is never persisted as a searchable chunk,
+    // while the R20-4 all-pages-garbage gate keeps routing a wholly-scanned doc to OCR.
+    #[test]
+    fn r21_5_is_probably_real_text_rejects_binary_garbage_page() {
+        assert!(is_probably_real_text(
+            "This is a genuine first page paragraph with real readable words."
+        ));
+        assert!(is_probably_real_text(
+            "日本語のテキストレイヤーも本物として扱う。"
+        ));
+        let garbage: String = (0u32..600)
+            .map(|i| {
+                if i % 2 == 0 {
+                    '\u{fffd}'
+                } else {
+                    char::from_u32(i % 0x1f + 1).unwrap_or('\u{1}')
+                }
+            })
+            .collect();
+        assert!(!is_probably_real_text(&garbage));
+        assert!(!is_probably_real_text(""));
+    }
 
     #[test]
     fn placeholder_deterministic_profile_disallows_network() {
