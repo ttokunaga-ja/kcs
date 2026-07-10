@@ -667,6 +667,8 @@ fn run_index(args: IndexArgs) -> Result<Value> {
         "pending_files": index_result.pending_files,
         // R12-2: files skipped for adapter processing by the max_input_bytes gate.
         "skipped_oversized_files": index_result.skipped_oversized_files,
+        // R22-4: archived binaries that no local pass and no online OCR can enrich.
+        "skipped_unrecognized_binary_files": index_result.skipped_unrecognized_binary_files,
         // R11-2: disclose the inline embedding enrichment (was entirely absent, so an
         // auth/rate failure during index was invisible in the result JSON).
         "embedding_tasks_executed": enrichment.executed,
@@ -2415,8 +2417,8 @@ fn diversify_merged<'a>(
 /// Aggregate `index_status` (05 §1.7, CT3-OBS-001) over the searched scopes.
 /// `enriched_ratio` = done AI-enrichment tasks / all AI-enrichment tasks pooled
 /// across scopes (count-weighted average). Enrichment tasks are Markdownize +
-/// Embedding; "done" is `Done`/`Partial`. `budget_paused` is any paused task or
-/// an exhausted monthly budget.
+/// Embedding; "done" is `Done`/`Partial`. `budget_paused` is a budget-paused task or
+/// an exhausted monthly budget (R22-7 — a secrets hold pauses work but not for budget).
 fn compute_index_status(searched: &[SearchedScopeInfo]) -> Value {
     let mut total = 0u64;
     let mut done = 0u64;
@@ -2452,9 +2454,17 @@ fn compute_index_status(searched: &[SearchedScopeInfo]) -> Value {
                 // (a silent data gap on text-layer-less scans). `batch retry` now
                 // drives it to Done (docs/04 §5.2).
                 TaskStatus::Partial | TaskStatus::Pending | TaskStatus::Running => pending += 1,
+                // R22-7: only a BUDGET pause may set `budget_paused`. docs/05-runtime.md:200
+                // has agents render this flag as "(budget により一時停止中)", so a Tier B
+                // `secrets_tier_b_hold` — which costs nothing and is cleared by
+                // `--send-secrets`, never by raising a cap — was steering them to
+                // `--override-budget` while `device_remaining_usd` sat untouched at its full
+                // cap. It is still outstanding work, so it stays in `pending`.
                 TaskStatus::Paused => {
                     pending += 1;
-                    budget_paused = true;
+                    if task.fallback_reason.as_deref() == Some("budget_exceeded") {
+                        budget_paused = true;
+                    }
                 }
                 // R11-8: a RETRYABLE Failed enrichment task (rate_limit etc., holding
                 // next_retry_at, recoverable by `batch retry`) is outstanding work —
@@ -5604,7 +5614,7 @@ fn run_batch(args: BatchArgs) -> Result<Value> {
                     }
                 })
                 .map_err(pipeline_to_kcs)?;
-            let outcome = execute_pending_tasks(&repo, &store, resume.override_budget)?;
+            let outcome = execute_pending_tasks(&repo, &store, resume.override_budget, true)?;
             let mut output = json!({
                 "status": "resumed",
                 "override_budget": resume.override_budget,
@@ -5650,8 +5660,10 @@ fn run_batch(args: BatchArgs) -> Result<Value> {
                 })
                 .map_err(pipeline_to_kcs)?;
             // `batch retry` never overrides the budget cap (retry re-schedules,
-            // it does not bypass caps — `batch resume --override-budget` does).
-            let outcome = execute_pending_tasks(&repo, &store, false)?;
+            // it does not bypass caps — `batch resume --override-budget` does), and never
+            // revives an auth_error task (CT2-TASK-005: `max_attempts=0` is this command's
+            // contract; `batch resume` is where repaired credentials take effect).
+            let outcome = execute_pending_tasks(&repo, &store, false, false)?;
             let mut output = json!({
                 "status": "retry scheduled",
                 "tasks_updated": changed + partial_reenqueued,
@@ -5923,6 +5935,11 @@ fn execute_pending_tasks(
     repo: &Repository,
     store: &TaskStore,
     override_budget: bool,
+    // R22-6(a): `batch resume` means "carry on with the work", so it may revive a task the
+    // operator has since unblocked by fixing credentials. `batch retry` may NOT — CT2-TASK-005
+    // (docs/04 §5.6, `auth_error: max_attempts=0`) makes non-retryability of an auth failure a
+    // contract of that command specifically.
+    allow_auth_revive: bool,
 ) -> Result<ExecOutcome> {
     let mut outcome = ExecOutcome::default();
     // Q3: under the folder store lock, any Running task is an orphan from a crashed
@@ -5935,6 +5952,7 @@ fn execute_pending_tasks(
             repo,
             store,
             override_budget,
+            allow_auth_revive,
         )?);
     }
     // Embedding tasks are executed by the same enrichment pass `kcs index` uses;
@@ -5957,6 +5975,7 @@ fn execute_pending_markdownize_tasks(
     repo: &Repository,
     store: &TaskStore,
     override_budget: bool,
+    allow_auth_revive: bool,
 ) -> Result<ExecOutcome> {
     let budget_caps =
         read_budget_policy(user_config_toml_path(), repo.kcs_dir().join("config.toml"))
@@ -5970,6 +5989,64 @@ fn execute_pending_markdownize_tasks(
     let secrets_approved = secrets_send_approved(repo);
     let online_profile = online_markdownize_profile();
     let output_ref = online_output_ref(&online_profile.adapter_id);
+    // R22-6(a): R21-6 gave the embedding pipeline a live-AuthError revive but never wired
+    // the markdownize twin, so a 401/403 left its task Failed(`auth_error`) — non-retryable
+    // (`max_attempts:0`), hence invisible to `batch retry` and to this Pending filter — with
+    // its F8 phantom reservation eating the month's cap. Fixing the credentials resumed
+    // nothing. Revive here, BEFORE the Pending set is built, so the repaired credentials are
+    // used on this very pass. Only a task whose precondition is not `Retire` (file present,
+    // unedited, within the cap) is revived; a genuinely stale one is retired by the loop
+    // below as before. 401/403 is refused before billing (R20-3), so its reservation is a
+    // reclaimable phantom.
+    let markdown_adapter_kind = adapter_kind_budget_key(online_profile.adapter_kind);
+    let auth_revivable = if allow_auth_revive {
+        store
+            .all()
+            .map_err(pipeline_to_kcs)?
+            .into_iter()
+            .filter(|task| {
+                task.task_type == TaskType::Markdownize
+                    && task.output_ref == output_ref
+                    && task.status == TaskStatus::Failed
+                    && retry_kind_from_reason(task.fallback_reason.as_deref())
+                        == RetryErrorKind::AuthError
+                    && !matches!(
+                        classify_online_markdownize_precondition(repo, task),
+                        OnlineMarkdownizePrecondition::Retire
+                    )
+            })
+            .map(|task| task.task_id)
+            .collect::<BTreeSet<_>>()
+    } else {
+        BTreeSet::new()
+    };
+    if !auth_revivable.is_empty() {
+        let mut reclaims: Vec<MonthlyCostLedgerEntry> = Vec::new();
+        store
+            .update_matching(|task| {
+                if !auth_revivable.contains(&task.task_id) {
+                    return false;
+                }
+                if let Some(entry) = reclaim_entry_for(task, &scope_id, markdown_adapter_kind) {
+                    reclaims.push(entry);
+                    task.reserved_usd = None;
+                    task.reserved_month = None;
+                }
+                task.status = TaskStatus::Pending;
+                task.fallback_reason = Some("ready_for_online_adapter".to_owned());
+                task.attempts = 0;
+                task.next_retry_at = None;
+                task.heartbeat_at = None;
+                true
+            })
+            .map_err(pipeline_to_kcs)?;
+        let reclaim_ledger = cost_ledger.reclaim_ledger();
+        for entry in &reclaims {
+            reclaim_ledger
+                .append_monthly(entry)
+                .map_err(pipeline_to_kcs)?;
+        }
+    }
     let tasks = store
         .all()
         .map_err(pipeline_to_kcs)?
@@ -6439,6 +6516,20 @@ enum OnlineMarkdownizePrecondition {
     AwaitOcr,
 }
 
+/// R22-5: whether a locally-preparable input is really a TEXT file that only landed in
+/// `application/octet-stream` because its extension is absent from the MIME table
+/// (`.yaml`, `.json`, `.toml`, `.sh`, `Dockerfile`, …). `prepare_units` sniffs the bytes and
+/// emits exactly one `File` unit for such input (`prepare.rs:90`), whereas a true binary
+/// yields no units at all. R21-4 stopped *enqueueing* these for online OCR, but the send
+/// gates still classified them by canonical MIME only — so a task an older build had already
+/// enqueued survived the upgrade and `batch resume` shipped the raw bytes to the OCR API and
+/// billed for it. This is the send-side mirror of R21-4's enqueue guard.
+fn is_local_passthrough_text(media_type: &str, prepared_units: &[PreparedUnit]) -> bool {
+    media_type == "application/octet-stream"
+        && prepared_units.len() == 1
+        && prepared_units[0].unit_type == UnitType::File
+}
+
 fn classify_online_markdownize_precondition(
     repo: &Repository,
     task: &TaskDescriptor,
@@ -6465,7 +6556,7 @@ fn classify_online_markdownize_precondition(
     let prepare_profile_hash = builtin_prepare_profile().tool_profile_hash;
     let Ok(prepare) = prepare_units(PrepareStageRequest {
         raw_hash: task.input_hash.clone(),
-        media_type,
+        media_type: media_type.clone(),
         input_path: path.display().to_string(),
         tool_profile_hash: prepare_profile_hash,
     }) else {
@@ -6473,6 +6564,11 @@ fn classify_online_markdownize_precondition(
     };
     if prepare.prepared_units.is_empty() {
         return OnlineMarkdownizePrecondition::AwaitOcr;
+    }
+    // R22-5: retire a legacy task for octet-stream TEXT. The recovery is a re-index (which
+    // no longer enqueues it), not a retry — the deterministic pass already handled the file.
+    if is_local_passthrough_text(&media_type, &prepare.prepared_units) {
+        return OnlineMarkdownizePrecondition::Retire;
     }
     OnlineMarkdownizePrecondition::Send
 }
@@ -6527,6 +6623,14 @@ fn execute_online_markdownize_task(
         retry_kind: RetryErrorKind::InvalidInput,
     })?;
     if prepare.prepared_units.is_empty() {
+        return Err(TaskExecutionFailure {
+            retry_kind: RetryErrorKind::InvalidInput,
+        });
+    }
+    // R22-5 (defense in depth, mirroring the R9-2 guard above): never ship octet-stream TEXT
+    // to online OCR even if a task for it exists (enqueued by a pre-R21-4 build, or a
+    // poisoned tasks.jsonl). Fail fast as a non-retryable input error, never a billed send.
+    if is_local_passthrough_text(&media_type, &prepare.prepared_units) {
         return Err(TaskExecutionFailure {
             retry_kind: RetryErrorKind::InvalidInput,
         });
@@ -7876,12 +7980,24 @@ fn reconcile_committed_embedding_tasks(
     task_store
         .update_matching(|task| {
             if task.task_type != TaskType::Embedding
-                || task.reserved_usd.is_none()
                 || !matches!(
                     task.status,
                     TaskStatus::Pending | TaskStatus::Running | TaskStatus::Failed
                 )
             {
+                return false;
+            }
+            // R22-6(b): STATE revival must not depend on carrying a reservation. `reserved_*`
+            // only exists on tasks charged by an R18-1-or-later build, so a Failed(AuthError)
+            // task written by an older build was skipped here and could never resume — the
+            // very stuck state R21-6 set out to fix. Admit an un-stamped task when it is a
+            // live-AuthError revive candidate; `reclaim_entry_for` returns None without a
+            // stamp, so the reclaim half is simply a no-op. Everything else still requires a
+            // stamp (there is nothing to reclaim or terminalize otherwise).
+            let auth_revive_candidate = matches!(task.status, TaskStatus::Failed)
+                && retry_kind_from_reason(task.fallback_reason.as_deref())
+                    == RetryErrorKind::AuthError;
+            if task.reserved_usd.is_none() && !auth_revive_candidate {
                 return false;
             }
             let Some(chunk_id) = task.output_ref.strip_prefix("embedding:") else {
@@ -7969,7 +8085,18 @@ fn reconcile_committed_embedding_tasks(
         if task.task_type != TaskType::Embedding {
             continue;
         }
-        if !matches!(task.status, TaskStatus::Pending | TaskStatus::Running) {
+        // R22-3: `Paused` (a `secrets_tier_b_hold`, or a sticky `budget_exceeded`) was the
+        // ONE status this non-live sweep never visited, so a held chunk that was later
+        // edited or deleted left its task Paused forever — `compute_index_status` counts it
+        // as pending enrichment, so editing a Tier B file N times accreted N orphan holds
+        // and monotonically decayed `enriched_ratio`. Admit Paused here; the `paused` guard
+        // below keeps it out of the Done arm (a hold was never sent, so it must never be
+        // reported as embedded).
+        let paused = matches!(task.status, TaskStatus::Paused);
+        if !matches!(
+            task.status,
+            TaskStatus::Pending | TaskStatus::Running | TaskStatus::Paused
+        ) {
             continue;
         }
         let Some(chunk_id) = task.output_ref.strip_prefix("embedding:") else {
@@ -7992,6 +8119,13 @@ fn reconcile_committed_embedding_tasks(
                 task.output_ref.clone(),
                 embedding_retired_non_live_transition(),
             );
+            continue;
+        }
+        // R22-3: a LIVE Paused task keeps its pause. Reaching here means the chunk is live
+        // and already has a vector (its content-hash twin was embedded), but a held chunk's
+        // text was never sent — marking it `embedding_adapter_done` would both fake the
+        // audit trail and let `release_secret_holds` find nothing to release.
+        if paused {
             continue;
         }
         // Live AND already embedded (live but NOT pending) → complete it (R12-3).
@@ -8045,33 +8179,71 @@ fn hold_secret_embedding_tasks(
         return Ok(());
     }
     let all_tasks = task_store.all().map_err(pipeline_to_kcs)?;
+    // R22-2: `existing` used to mean "any non-retired task ⇒ already classified", which
+    // silently assumed a chunk's secret classification never changes after its task is
+    // created. It does: renaming a plain file INTO a Tier B name (`notes.md` →
+    // `credentials_backup.md`) re-partitions the chunk into `held` on the very next index
+    // (the partition reads the live `te.path`, R20-1), yet this guard skipped the demotion,
+    // so the task stayed Pending/`network_opt_in_required` forever while `quarantine.jsonl`
+    // recorded a "hold". Nothing was ever sent (the send set is recomputed from content each
+    // pass), but the N1a disclosure contract broke and no recovery command converged.
+    // Only an ALREADY-HELD task means "correctly classified"; everything else is demoted.
+    let already_held = all_tasks
+        .iter()
+        .filter(|task| task.task_type == TaskType::Embedding)
+        .filter(|task| {
+            task.status == TaskStatus::Paused
+                && task.fallback_reason.as_deref() == Some(SECRETS_TIER_B_HOLD)
+        })
+        .map(|task| task.output_ref.clone())
+        .collect::<BTreeSet<_>>();
+    // A `Done` task's vector is real spend that already exists in `embeddings`; demoting it
+    // to a hold would fake outstanding work and strand the stored vector. R20-10 keeps the
+    // held chunk out of `chunk_vec`, which is the disclosure that matters here.
+    let done = all_tasks
+        .iter()
+        .filter(|task| task.task_type == TaskType::Embedding)
+        .filter(|task| task.status == TaskStatus::Done)
+        .map(|task| task.output_ref.clone())
+        .collect::<BTreeSet<_>>();
     // R21-7: a task retired because its chunk went non-live must NOT block a fresh HOLD
     // when the content-addressed chunk_id reappears under a Tier B name (git revert /
     // restore of the exact bytes). `enqueue_embedding_tasks` (the sendable sibling) got
     // this R19-3/R20-2 revive; the held branch was left behind, so a restored-under-a-
     // secret-name chunk got no hold task — invisible in `index_status` (R20-7 excludes
-    // retired_non_live) and re-embeddable only via `--send-secrets`. Exclude retired
-    // tasks from `existing` and revive them in place to a Paused hold below.
-    let existing = all_tasks
-        .iter()
-        .filter(|task| task.task_type == TaskType::Embedding)
-        .filter(|task| task.fallback_reason.as_deref() != Some(RETIRED_NON_LIVE))
-        .map(|task| task.output_ref.clone())
-        .collect::<BTreeSet<_>>();
+    // retired_non_live) and re-embeddable only via `--send-secrets`.
     let revivable = all_tasks
         .iter()
         .filter(|task| task.task_type == TaskType::Embedding)
         .filter(|task| task.fallback_reason.as_deref() == Some(RETIRED_NON_LIVE))
         .map(|task| task.output_ref.clone())
         .collect::<BTreeSet<_>>();
+    // Live, non-retired, not-yet-held, not Done → demote in place to a Paused hold.
+    let demotable = all_tasks
+        .iter()
+        .filter(|task| task.task_type == TaskType::Embedding)
+        .filter(|task| {
+            !already_held.contains(&task.output_ref)
+                && !done.contains(&task.output_ref)
+                && task.fallback_reason.as_deref() != Some(RETIRED_NON_LIVE)
+        })
+        .map(|task| task.output_ref.clone())
+        .collect::<BTreeSet<_>>();
     let mut to_revive: BTreeSet<String> = BTreeSet::new();
+    // Demoted holds carry the chunk's CURRENT (secret) path, so `kcs status` names the file
+    // that is actually being held rather than whatever it was called when first indexed.
+    let mut to_demote: BTreeMap<String, String> = BTreeMap::new();
     for chunk in held {
         let output_ref = embedding_task_output_ref(&chunk.chunk_id);
-        if existing.contains(&output_ref) {
+        if already_held.contains(&output_ref) || done.contains(&output_ref) {
             continue;
         }
         if revivable.contains(&output_ref) {
             to_revive.insert(output_ref);
+            continue;
+        }
+        if demotable.contains(&output_ref) {
+            to_demote.insert(output_ref, chunk.raw_path.clone());
             continue;
         }
         let task = TaskDescriptor {
@@ -8120,6 +8292,49 @@ fn hold_secret_embedding_tasks(
             })
             .map_err(pipeline_to_kcs)?;
     }
+    // R22-2: demote an existing non-held task (Pending / Running / Failed / budget-Paused)
+    // whose chunk is now classified secret. The hold takes precedence over budget and
+    // network reasons (the same precedence `enqueue_online_placeholder_task` applies at
+    // creation). A demoted task's kept F8 reservation now buys nothing — its send is
+    // blocked by the hold — so reclaim it under the established error-kind policy
+    // (RateLimit/Quota/Auth are non-billable ⇒ reclaimable; a NetworkError stamp may have
+    // billed server-side, so it is conservatively retained: R16-7).
+    if !to_demote.is_empty() {
+        let reservation_scope_id = repo.scope_id_for_adapter();
+        let mut reclaims: Vec<MonthlyCostLedgerEntry> = Vec::new();
+        task_store
+            .update_matching(|task| {
+                if task.task_type != TaskType::Embedding {
+                    return false;
+                }
+                let Some(current_path) = to_demote.get(&task.output_ref) else {
+                    return false;
+                };
+                if let Some(entry) =
+                    reclaim_entry_for(task, &reservation_scope_id, EMBEDDING_ADAPTER_KIND)
+                {
+                    reclaims.push(entry);
+                    task.reserved_usd = None;
+                    task.reserved_month = None;
+                }
+                task.status = TaskStatus::Paused;
+                task.fallback_reason = Some(SECRETS_TIER_B_HOLD.to_owned());
+                task.input_path = current_path.clone();
+                task.attempts = 0;
+                task.next_retry_at = None;
+                task.heartbeat_at = None;
+                true
+            })
+            .map_err(pipeline_to_kcs)?;
+        if !reclaims.is_empty() {
+            let reclaim_ledger = CostLedger::new(cost_ledger_path()).reclaim_ledger();
+            for entry in &reclaims {
+                reclaim_ledger
+                    .append_monthly(entry)
+                    .map_err(pipeline_to_kcs)?;
+            }
+        }
+    }
     Ok(())
 }
 
@@ -8133,6 +8348,24 @@ fn enqueue_embedding_tasks(
     now: &str,
 ) -> Result<()> {
     let all_tasks = task_store.all().map_err(pipeline_to_kcs)?;
+    // R22-1: a Paused `secrets_tier_b_hold` must not block this enqueue either. Reaching
+    // `enqueue_embedding_tasks` means the chunk landed in `sendable`, i.e. NO live path of
+    // it is secret (the R21-1 dedup prefers a secret path, so one live secret path would
+    // have kept the survivor in `held`) or the scope is `--send-secrets`-approved. The hold
+    // is therefore stale: the file was renamed out of a Tier B name, or its secret twin was
+    // deleted. Before this, `existing` swallowed the hold and `embeddable_task_state`
+    // (R21-1's defense-in-depth) refused to re-drive it, so the chunk fell out of vector
+    // search permanently — recoverable only via `--send-secrets`, which persists a
+    // scope-wide approval to send every candidate secret. Release it in place instead.
+    let hold_revivable = all_tasks
+        .iter()
+        .filter(|task| task.task_type == TaskType::Embedding)
+        .filter(|task| {
+            task.status == TaskStatus::Paused
+                && task.fallback_reason.as_deref() == Some(SECRETS_TIER_B_HOLD)
+        })
+        .map(|task| task.output_ref.clone())
+        .collect::<BTreeSet<_>>();
     let existing = all_tasks
         .iter()
         .filter(|task| task.task_type == TaskType::Embedding)
@@ -8141,6 +8374,7 @@ fn enqueue_embedding_tasks(
         // the exact bytes). Excluding it here lets a genuinely-live-again chunk be
         // re-embedded instead of being silently stuck out of vector search forever.
         .filter(|task| task.fallback_reason.as_deref() != Some(RETIRED_NON_LIVE))
+        .filter(|task| !hold_revivable.contains(&task.output_ref))
         .map(|task| task.output_ref.clone())
         .collect::<BTreeSet<_>>();
     // R20-2: output_refs of retired-non-live tasks eligible to be REVIVED IN PLACE. R19-3
@@ -8163,9 +8397,16 @@ fn enqueue_embedding_tasks(
         "network_opt_in_required"
     };
     let mut to_revive: BTreeSet<String> = BTreeSet::new();
+    // R22-1: released holds, mapped to the chunk's CURRENT (non-secret) path so the task's
+    // `input_path` stops naming the file it was held under.
+    let mut to_unhold: BTreeMap<String, String> = BTreeMap::new();
     for chunk in pending {
         let output_ref = embedding_task_output_ref(&chunk.chunk_id);
         if existing.contains(&output_ref) {
+            continue;
+        }
+        if hold_revivable.contains(&output_ref) {
+            to_unhold.insert(output_ref, chunk.raw_path.clone());
             continue;
         }
         if revivable.contains(&output_ref) {
@@ -8212,6 +8453,34 @@ fn enqueue_embedding_tasks(
                     task.heartbeat_at = None;
                     task.reserved_usd = None;
                     task.reserved_month = None;
+                    true
+                } else {
+                    false
+                }
+            })
+            .map_err(pipeline_to_kcs)?;
+    }
+    // R22-1: release stale secrets holds in place (Paused -> Pending). The hold carried no
+    // reservation (`main.rs` hold creation stamps none), so there is nothing to reclaim.
+    // `embeddable_task_state`'s `SECRETS_TIER_B_HOLD => false` guard stays untouched: a hold
+    // is still never re-driven while it IS a hold — it is cleared here only because the
+    // content-addressed partition just proved the chunk has no live secret path.
+    if !to_unhold.is_empty() {
+        task_store
+            .update_matching(|task| {
+                if task.task_type == TaskType::Embedding
+                    && task.status == TaskStatus::Paused
+                    && task.fallback_reason.as_deref() == Some(SECRETS_TIER_B_HOLD)
+                {
+                    let Some(current_path) = to_unhold.get(&task.output_ref) else {
+                        return false;
+                    };
+                    task.status = TaskStatus::Pending;
+                    task.fallback_reason = Some(reason.to_owned());
+                    task.input_path = current_path.clone();
+                    task.attempts = 0;
+                    task.next_retry_at = None;
+                    task.heartbeat_at = None;
                     true
                 } else {
                     false
@@ -8540,6 +8809,10 @@ struct IndexPipelineResult {
     // R12-2: files larger than adapter.policy.max_input_bytes, skipped for adapter
     // processing (input gate, 07 §7.1.2) but still archived.
     skipped_oversized_files: usize,
+    // R22-4: binary inputs with no locally-extractable text whose media type is not an
+    // OCR-able one (R21-4 skips their online task). Archived, but never enriched — surfaced
+    // so `enriched_ratio: 1.0` cannot silently mean "this file does not exist".
+    skipped_unrecognized_binary_files: usize,
 }
 
 fn online_output_ref(adapter_id: &str) -> String {
@@ -8874,6 +9147,24 @@ fn run_index_pipeline(
                     &cost_ledger,
                     &budget_caps,
                     &month,
+                )?;
+            } else {
+                // R22-4: the R21-4 skip left NO trace — no task, no counter, no event — so a
+                // real document whose extension is merely missing from the MIME table (a
+                // `.bmp` / `.tiff` / `.heic` image, a legacy `.doc` / `.xls`, an `.epub`)
+                // vanished from enrichment while `index_status` still reported
+                // `enriched_ratio: 1.0` and `kcs status` showed the file as `unchanged`. The
+                // bytes are archived, but nothing is searchable and no recovery command has
+                // anything to act on. Disclose it exactly the way the sibling oversized-input
+                // gate does: a counter plus an INFO event (no new error code — docs frozen).
+                result.skipped_unrecognized_binary_files += 1;
+                append_event_log(
+                    "KCS-I-INDEX-INPUT-UNRECOGNIZED-BINARY-001",
+                    "binary input has no locally-extractable text and no OCR-able media type; archived but not enriched",
+                    json!({
+                        "media_type": candidate.media_type,
+                        "size_bytes": candidate.size_bytes,
+                    }),
                 )?;
             }
             continue;

@@ -1223,9 +1223,47 @@ pub fn read_logs_retention_days(config_toml_path: &Path) -> Option<u32> {
 /// rename is atomic and its bytes land in the dated file.
 pub fn append_jsonl_rotating(path: &Path, value: &Value, retention_days: u32) -> Result<()> {
     let today = today_utc_date();
-    let _ = rotate_stale_log(path, &today);
+    // R22-8: `rotate_stale_log` is a check-then-rename (`!dated.exists()` then `fs::rename`),
+    // which two processes crossing the first append after midnight can both enter. P1 renames
+    // yesterday's live file to the dated name and appends a line to the fresh live file; P2
+    // then renames THAT file over the same dated name, and since `rename(2)` replaces its
+    // destination, yesterday's entire history is unlinked. Hold a per-log lock across the
+    // `exists()` check and the rename so they are one critical section. Only taken on the day
+    // a rotation is actually due — every other append stays lock-free. `acquire_path` never
+    // blocks (a contended lock is an immediate `Err`), so the loser simply skips this
+    // rotation and the next append performs it; the lock is best-effort like the rotation
+    // itself (R12-5/R13-3: a read-only log dir must never kill the command), and only the
+    // final append can fail the caller.
+    if rotation_due(path, &today) {
+        if let Ok(_rotate_lock) = StoreLock::acquire_path(rotate_lock_path(path)) {
+            let _ = rotate_stale_log(path, &today);
+        }
+    }
     let _ = prune_rotated_logs(path, &today, retention_days);
     append_jsonl(path, value)
+}
+
+/// Cheap pre-check for [`append_jsonl_rotating`]: is the live log's last-written day older
+/// than today? `rotate_stale_log` re-checks this under the lock, so this is only a hint that
+/// keeps the common (same-day) append off the lock path.
+fn rotation_due(path: &Path, today: &str) -> bool {
+    let Ok(metadata) = fs::metadata(path) else {
+        return false;
+    };
+    let Ok(modified) = metadata.modified() else {
+        return false;
+    };
+    let file_date = date_of_system_time(modified);
+    !file_date.is_empty() && file_date.as_str() < today
+}
+
+/// Per-log rotation lock, e.g. `.../logs/events.jsonl` → `.../logs/events.rotate.lock`.
+fn rotate_lock_path(path: &Path) -> PathBuf {
+    let stem = path
+        .file_stem()
+        .map(|stem| stem.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "log".to_owned());
+    path.with_file_name(format!("{stem}.rotate.lock"))
 }
 
 fn today_utc_date() -> String {
