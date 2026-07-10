@@ -6891,3 +6891,437 @@ fn r21_3_scanned_pdf_stays_pending_no_churn() {
         "R21-3: the scanned-PDF task must stay honestly Pending: {status}"
     );
 }
+
+// ===========================================================================
+// R22: exploratory-audit round 22 fixes (tasks/step3-bughunt22-fixes.md).
+// ===========================================================================
+
+/// R22-1 [major]: a Tier B embedding hold must be RELEASED when the chunk's live path is
+/// no longer secret (renamed out of a Tier B name, or its secret twin deleted). Before the
+/// fix the R21-1 defense-in-depth froze the hold forever — the (often false-positive) file
+/// fell out of vector search with no recovery short of `--send-secrets`, which permanently
+/// lowers the whole scope's security posture.
+#[test]
+fn r22_1_secret_hold_released_when_path_no_longer_secret() {
+    let dir = tempfile::tempdir().unwrap();
+    let body = "# Notes\n\nalpha bravo charlie delta echo foxtrot golf hotel india juliet.\n";
+    fs::write(dir.path().join("password_notes.md"), body).unwrap();
+    kcs(&dir, &["init"]).assert().success();
+    // Tier B name + online + no --send-secrets → the embedding task is HELD.
+    json_success_embed(&dir, "mock", &["index", "--approve", "--online"]);
+    let status = json_success_embed(&dir, "mock", &["status"]);
+    let embedding = tasks_of_type(&status, "embedding");
+    assert!(
+        !embedding.is_empty()
+            && embedding
+                .iter()
+                .all(|t| t["status"] == "paused" && t["fallback_reason"] == "secrets_tier_b_hold"),
+        "R22-1 precondition: the Tier B embedding task must be held: {status}"
+    );
+    // Rename to a NON-secret name (identical bytes → same content-addressed chunk) and
+    // re-index online: the hold must release in place and the chunk must embed.
+    fs::rename(
+        dir.path().join("password_notes.md"),
+        dir.path().join("notes.md"),
+    )
+    .unwrap();
+    json_success_embed(&dir, "mock", &["index", "--approve", "--online"]);
+    let status = json_success_embed(&dir, "mock", &["status"]);
+    let embedding = tasks_of_type(&status, "embedding");
+    let done = embedding
+        .iter()
+        .find(|t| t["status"] == "done" && t["fallback_reason"] == "embedding_adapter_done");
+    assert!(
+        done.is_some(),
+        "R22-1: the released hold must embed to Done/embedding_adapter_done: {status}"
+    );
+    let input_path = done.unwrap()["input_path"].as_str().unwrap();
+    assert!(
+        input_path.ends_with("notes.md") && !input_path.contains("password"),
+        "R22-1: the released task's input_path must be the current non-secret path: {status}"
+    );
+    assert!(
+        !embedding
+            .iter()
+            .any(|t| t["fallback_reason"] == "secrets_tier_b_hold"),
+        "R22-1: no embedding task may remain held after the rename-out: {status}"
+    );
+}
+
+/// R22-1 NEGATIVE control: while a secret twin is STILL live, the hold must NOT release.
+/// The content-addressed dedup keeps the secret path as the survivor, so the single shared
+/// task stays held even though a byte-identical non-secret twin is also live — and a plain
+/// `batch resume` must not un-hold it either (only `--send-secrets` may).
+#[test]
+fn r22_1b_secret_hold_survives_while_a_secret_twin_is_live() {
+    let dir = tempfile::tempdir().unwrap();
+    let body = "# Notes\n\nalpha bravo charlie delta echo foxtrot golf hotel india juliet.\n";
+    fs::write(dir.path().join("notes.md"), body).unwrap();
+    fs::write(dir.path().join("password_backup.md"), body).unwrap();
+    kcs(&dir, &["init"]).assert().success();
+    json_success_embed(&dir, "mock", &["index", "--approve", "--online"]);
+    let assert_single_hold = |status: &Value, when: &str| {
+        let embedding = tasks_of_type(status, "embedding");
+        assert_eq!(
+            embedding.len(),
+            1,
+            "R22-1b ({when}): byte-identical twins must share exactly one embedding task: {status}"
+        );
+        assert!(
+            embedding
+                .iter()
+                .all(|t| t["status"] == "paused" && t["fallback_reason"] == "secrets_tier_b_hold"),
+            "R22-1b ({when}): the shared task must stay held while a secret twin is live: {status}"
+        );
+    };
+    assert_single_hold(
+        &json_success_embed(&dir, "mock", &["status"]),
+        "after index",
+    );
+    // A plain `batch resume` must not release the hold (N1: only --send-secrets lifts it).
+    json_success_embed(&dir, "mock", &["batch", "resume"]);
+    assert_single_hold(
+        &json_success_embed(&dir, "mock", &["status"]),
+        "after batch resume",
+    );
+}
+
+/// R22-2 [major]: an existing NON-held embedding task (here Pending/`network_opt_in_required`)
+/// must be DEMOTED to a `secrets_tier_b_hold` when the chunk's current path becomes a Tier B
+/// secret name. Before the fix the "existing task ⇒ skip" idempotency guard left it Pending
+/// forever, so `kcs status` and the quarantine record permanently disagreed about the hold.
+#[test]
+fn r22_2_existing_task_is_demoted_to_hold_when_path_becomes_secret() {
+    let dir = tempfile::tempdir().unwrap();
+    let body = "# Plain\n\nalpha bravo charlie delta echo foxtrot golf hotel india juliet.\n";
+    fs::write(dir.path().join("plain.md"), body).unwrap();
+    kcs(&dir, &["init"]).assert().success();
+    // Offline index with the embedding adapter configured but no opt-in (`--yes` ⇒
+    // network_opt_in=false) → the task is Pending/network_opt_in_required (enqueue-only).
+    json_success_embed(&dir, "mock", &["index", "--yes"]);
+    let status = json_success_embed(&dir, "mock", &["status"]);
+    assert!(
+        tasks_of_type(&status, "embedding")
+            .iter()
+            .any(|t| t["status"] == "pending" && t["fallback_reason"] == "network_opt_in_required"),
+        "R22-2 precondition: a Pending/network_opt_in_required embedding task must exist: {status}"
+    );
+    // Rename INTO a Tier B name and re-index: the existing task must demote to a hold.
+    fs::rename(
+        dir.path().join("plain.md"),
+        dir.path().join("credentials_backup.md"),
+    )
+    .unwrap();
+    json_success_embed(&dir, "mock", &["index", "--yes"]);
+    let status = json_success_embed(&dir, "mock", &["status"]);
+    let embedding = tasks_of_type(&status, "embedding");
+    let held = embedding
+        .iter()
+        .find(|t| t["status"] == "paused" && t["fallback_reason"] == "secrets_tier_b_hold");
+    assert!(
+        held.is_some(),
+        "R22-2: the existing task must be demoted to a secrets hold: {status}"
+    );
+    assert!(
+        held.unwrap()["input_path"]
+            .as_str()
+            .unwrap()
+            .ends_with("credentials_backup.md"),
+        "R22-2: the demoted hold must name the current secret path: {status}"
+    );
+    assert!(
+        !embedding
+            .iter()
+            .any(|t| t["fallback_reason"] == "network_opt_in_required"),
+        "R22-2: no task may remain Pending/network_opt_in_required after the demotion: {status}"
+    );
+}
+
+/// R22-2 NEGATIVE control: a DONE embedding task must NOT be demoted when the path later
+/// becomes a Tier B secret name — its vector is real spend that already exists, so demoting
+/// it would fake outstanding work and strand the stored vector.
+#[test]
+fn r22_2b_done_task_is_not_demoted_when_path_becomes_secret() {
+    let dir = tempfile::tempdir().unwrap();
+    let body = "# Plain\n\nalpha bravo charlie delta echo foxtrot golf hotel india juliet.\n";
+    fs::write(dir.path().join("plain.md"), body).unwrap();
+    kcs(&dir, &["init"]).assert().success();
+    // Online mock index → the embedding is sent and Done.
+    json_success_embed(&dir, "mock", &["index", "--approve", "--online"]);
+    let status = json_success_embed(&dir, "mock", &["status"]);
+    assert!(
+        tasks_of_type(&status, "embedding")
+            .iter()
+            .any(|t| t["status"] == "done"),
+        "R22-2b precondition: the embedding task must be Done: {status}"
+    );
+    // Rename into a Tier B name and re-index: the Done task must stay Done.
+    fs::rename(
+        dir.path().join("plain.md"),
+        dir.path().join("credentials_backup.md"),
+    )
+    .unwrap();
+    json_success_embed(&dir, "mock", &["index", "--approve", "--online"]);
+    let status = json_success_embed(&dir, "mock", &["status"]);
+    let embedding = tasks_of_type(&status, "embedding");
+    assert!(
+        embedding.iter().any(|t| t["status"] == "done"),
+        "R22-2b: the Done embedding task must remain Done after the rename-in: {status}"
+    );
+    assert!(
+        !embedding
+            .iter()
+            .any(|t| t["fallback_reason"] == "secrets_tier_b_hold"),
+        "R22-2b: a Done task must never be demoted to a secrets hold: {status}"
+    );
+}
+
+/// R22-3 [major]: a Paused `secrets_tier_b_hold` whose chunk goes non-live (the Tier B file
+/// is edited) must be RETIRED (`retired_non_live`), not left to accrete orphan holds that
+/// permanently inflate `pending_enrichment_tasks` / deflate `enriched_ratio`. Only the
+/// latest live chunk stays held; `index_status` counts exactly that one.
+#[test]
+fn r22_3_paused_hold_retires_when_chunk_goes_non_live() {
+    let dir = tempfile::tempdir().unwrap();
+    let v1 = "# Secret\n\nalpha bravo charlie delta echo foxtrot golf hotel india.\n";
+    let v2 = "# Secret\n\nkilo lima mike november oscar papa quebec romeo sierra.\n";
+    let v3 = "# Secret\n\ntango uniform victor whiskey xray yankee zulu juliet.\n";
+    fs::write(dir.path().join("password_notes.md"), v1).unwrap();
+    kcs(&dir, &["init"]).assert().success();
+    json_success_embed_at(
+        &dir,
+        "mock",
+        "2026-07-03T00:00:00Z",
+        &["index", "--approve", "--online"],
+    );
+    // Edit twice; each edit sends the previous chunk non-live under the same Tier B name.
+    fs::write(dir.path().join("password_notes.md"), v2).unwrap();
+    json_success_embed_at(
+        &dir,
+        "mock",
+        "2026-07-05T00:00:00Z",
+        &["index", "--approve", "--online"],
+    );
+    fs::write(dir.path().join("password_notes.md"), v3).unwrap();
+    json_success_embed_at(
+        &dir,
+        "mock",
+        "2026-07-07T00:00:00Z",
+        &["index", "--approve", "--online"],
+    );
+    let status = json_success_embed_at(&dir, "mock", "2026-07-07T00:00:00Z", &["status"]);
+    let embedding = tasks_of_type(&status, "embedding");
+    let held = embedding
+        .iter()
+        .filter(|t| t["status"] == "paused" && t["fallback_reason"] == "secrets_tier_b_hold")
+        .count();
+    let retired = embedding
+        .iter()
+        .filter(|t| t["status"] == "failed" && t["fallback_reason"] == "retired_non_live")
+        .count();
+    assert_eq!(
+        held, 1,
+        "R22-3: exactly one (latest) chunk may stay held; the stale holds must retire: {status}"
+    );
+    assert!(
+        retired >= 1,
+        "R22-3: the non-live held chunks must be retired retired_non_live: {status}"
+    );
+    // `index_status` must count only the single live hold as pending enrichment.
+    let search = json_success_embed(&dir, "mock", &["search", "juliet"]);
+    assert_eq!(
+        search["index_status"]["pending_enrichment_tasks"], 1,
+        "R22-3: only the latest live hold may count as pending enrichment: {search}"
+    );
+}
+
+/// R22-4 [major]: a real binary DOCUMENT whose extension is merely absent from the MIME
+/// table (a `.bmp`/`.tiff`/`.heic`/legacy `.doc`) must be DISCLOSED via the
+/// `skipped_unrecognized_binary_files` counter (the oversized-input visibility pattern),
+/// not silently dropped with a false `enriched_ratio: 1.0`. An all-text scope reports 0.
+#[test]
+fn r22_4_unrecognized_binary_is_disclosed_not_silently_dropped() {
+    let dir = tempfile::tempdir().unwrap();
+    // `BM` header + high-bit bytes → a genuine binary (no text layer; folds to
+    // application/octet-stream because `.bmp` is not in the MIME table).
+    let mut bmp = b"BM".to_vec();
+    bmp.extend((0u32..2000).map(|i| (i.wrapping_mul(97) & 0x7f) as u8 | 0x80));
+    fs::write(dir.path().join("photo.bmp"), &bmp).unwrap();
+    fs::write(
+        dir.path().join("ok.md"),
+        "# OK\n\nplain readable body alpha bravo charlie.\n",
+    )
+    .unwrap();
+    kcs(&dir, &["init"]).assert().success();
+    let index = json_success(&dir, &["index", "--yes"]);
+    assert_eq!(
+        index["skipped_unrecognized_binary_files"], 1,
+        "R22-4: the unrecognized binary document must be disclosed, not silently dropped: {index}"
+    );
+    // NEGATIVE control: a scope of only recognized text reports zero.
+    let clean = tempfile::tempdir().unwrap();
+    fs::write(
+        clean.path().join("ok.md"),
+        "# OK\n\nplain readable body charlie delta echo.\n",
+    )
+    .unwrap();
+    kcs(&clean, &["init"]).assert().success();
+    let clean_index = json_success(&clean, &["index", "--yes"]);
+    assert_eq!(
+        clean_index["skipped_unrecognized_binary_files"], 0,
+        "R22-4 control: an all-text scope must report zero unrecognized binaries: {clean_index}"
+    );
+}
+
+/// R22-5 [major]: a legacy `online:mistral_ocr_markdownize` task an OLDER build enqueued for
+/// an octet-stream TEXT file (`.yaml`/`.json`/`Dockerfile`) must be RETIRED at send time, not
+/// shipped to the OCR API and billed. R21-4 only stopped fresh enqueues; the send gate is the
+/// migration path for tasks already sitting in `tasks.jsonl` after an upgrade.
+#[test]
+fn r22_5_legacy_octet_stream_text_task_is_retired_not_sent() {
+    use kcs_pipeline::prepare::hash_bytes;
+    use kcs_pipeline::task::{TaskDescriptor, TaskStatus, TaskStore, TaskType};
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(
+        dir.path().join("config.yaml"),
+        "name: acme\nvalue: 42\nnested:\n  key: value\n",
+    )
+    .unwrap();
+    kcs(&dir, &["init"]).assert().success();
+    // `index --approve` records the markdownize network opt-in and (R21-4) enqueues NO
+    // online task for the octet-stream text file.
+    json_success(&dir, &["index", "--approve"]);
+    assert_eq!(
+        markdown_ledger_rows(&dir),
+        0,
+        "R22-5 precondition: index must not charge markdownize for octet-stream text"
+    );
+    // Inject the legacy online task an older build would have enqueued (input_hash matches
+    // the current bytes so the only reason it can retire is the octet-stream-text gate).
+    let input_hash = hash_bytes(&fs::read(dir.path().join("config.yaml")).unwrap());
+    let legacy = TaskDescriptor {
+        task_id: "r22-5-legacy-markdownize".to_owned(),
+        task_type: TaskType::Markdownize,
+        mode: None,
+        input_path: "config.yaml".to_owned(),
+        input_hash,
+        previous_raw_hash: None,
+        parent_run_id: None,
+        changed_unit_keys: Vec::new(),
+        output_ref: "online:mistral_ocr_markdownize".to_owned(),
+        unit_keys: None,
+        status: TaskStatus::Pending,
+        attempts: 0,
+        next_retry_at: None,
+        deadline: None,
+        heartbeat_at: None,
+        fallback_reason: Some("ready_for_online_adapter".to_owned()),
+        created_at: "2026-07-01T00:00:00Z".to_owned(),
+        reserved_usd: None,
+        reserved_month: None,
+    };
+    TaskStore::new(dir.path().join(".kcs"))
+        .append(&legacy)
+        .unwrap();
+    // `batch resume` (with the OCR seam mocked) must RETIRE the legacy task without a send.
+    run_markdownize_seam(&dir, "mock", None, &["batch", "resume"]);
+    let status = run_markdownize_seam(&dir, "mock", None, &["status"]);
+    assert!(
+        tasks_of_type(&status, "markdownize").iter().any(|t| {
+            t["output_ref"] == "online:mistral_ocr_markdownize"
+                && t["status"] == "failed"
+                && t["fallback_reason"] == "retired_non_live"
+        }),
+        "R22-5: the legacy octet-stream-text online task must be retired, not sent: {status}"
+    );
+    assert_eq!(
+        markdown_ledger_rows(&dir),
+        0,
+        "R22-5: retiring the legacy task must add no markdownize charge row: {status}"
+    );
+}
+
+/// R22-6 [major]: R21-6's AuthError live-stuck revive must extend to the MARKDOWNIZE
+/// pipeline. A 401/403 leaves the online task Failed(`auth_error`) — non-retryable, so
+/// `batch retry` (CT2-TASK-005: `max_attempts=0` is that command's contract) must NOT revive
+/// it; only `batch resume` ("carry on, credentials fixed") may revive and execute it.
+#[test]
+fn r22_6_auth_error_markdownize_revives_on_resume_not_retry() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(
+        dir.path().join("doc.pdf"),
+        fake_pdf(&["認証エラー markdownize 復活の回帰テスト本文です。"]),
+    )
+    .unwrap();
+    kcs(&dir, &["init"]).assert().success();
+    // Enqueue the online markdownize task (Pending) and grant the network opt-in.
+    run_markdownize_seam(&dir, "mock", None, &["index", "--online", "--approve"]);
+    // Send under the auth_error seam → the online task fails auth_error.
+    run_markdownize_seam(
+        &dir,
+        "auth_error",
+        Some("2026-07-03T00:00:00Z"),
+        &["batch", "resume"],
+    );
+    let has_auth_error = |status: &Value| {
+        tasks_of_type(status, "markdownize")
+            .iter()
+            .any(|t| t["status"] == "failed" && t["fallback_reason"] == "auth_error")
+    };
+    assert!(
+        has_auth_error(&run_markdownize_seam(&dir, "mock", None, &["status"])),
+        "R22-6 precondition: the online markdownize task must be Failed(auth_error)"
+    );
+    // `batch retry` must NOT revive an auth_error task (CT2-TASK-005).
+    let retry = run_markdownize_seam(
+        &dir,
+        "mock",
+        Some("2026-07-03T01:00:00Z"),
+        &["batch", "retry"],
+    );
+    assert_eq!(
+        retry["tasks_executed"], 0,
+        "R22-6: batch retry must not execute the auth_error task: {retry}"
+    );
+    assert!(
+        has_auth_error(&run_markdownize_seam(&dir, "mock", None, &["status"])),
+        "R22-6: batch retry must leave the auth_error task Failed (contract of that command)"
+    );
+    // `batch resume` with fixed credentials (mock) must revive AND execute it.
+    let resumed = run_markdownize_seam(
+        &dir,
+        "mock",
+        Some("2026-07-03T02:00:00Z"),
+        &["batch", "resume"],
+    );
+    assert_eq!(
+        resumed["tasks_executed"], 1,
+        "R22-6: batch resume must revive the auth_error markdownize task and execute it: {resumed}"
+    );
+}
+
+/// R22-7 [minor]: a scope holding only a Tier B `secrets_tier_b_hold` (with budget to spare)
+/// must report `budget_paused: false` — a hold is not a budget pause. Before the fix
+/// `compute_index_status` mapped every Paused task to `budget_paused: true`, misdirecting the
+/// operator to "raise the budget" instead of `--send-secrets`.
+#[test]
+fn r22_7_budget_paused_false_for_secrets_hold() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(
+        dir.path().join("password_reset_flow.md"),
+        "# Reset\n\nalpha bravo charlie delta echo foxtrot golf hotel india juliet.\n",
+    )
+    .unwrap();
+    kcs(&dir, &["init"]).assert().success();
+    json_success_embed(&dir, "mock", &["index", "--approve", "--online"]);
+    let search = json_success_embed(&dir, "mock", &["search", "juliet"]);
+    let index_status = &search["index_status"];
+    assert_eq!(
+        index_status["budget_paused"], false,
+        "R22-7: a secrets hold must not report budget_paused=true: {search}"
+    );
+    assert_eq!(
+        index_status["pending_enrichment_tasks"], 1,
+        "R22-7: the single secrets hold must count as pending enrichment: {search}"
+    );
+}
