@@ -117,7 +117,11 @@ pub(crate) fn open_path_no_follow(path: &std::path::Path) -> std::io::Result<std
 mod tests {
     use super::*;
 
-    fn information(identity_low: u32, size_low: u32, write_low: u32) -> WindowsFileInformation {
+    fn synthetic_information(
+        identity_low: u32,
+        size_low: u32,
+        write_low: u32,
+    ) -> WindowsFileInformation {
         WindowsFileInformation::from_components(
             7,
             (0, identity_low),
@@ -131,9 +135,9 @@ mod tests {
 
     #[test]
     fn identity_requires_volume_and_full_file_index_to_match() {
-        let base = information(11, 20, 30);
-        assert!(base.same_identity(information(11, 99, 99)));
-        assert!(!base.same_identity(information(12, 20, 30)));
+        let base = synthetic_information(11, 20, 30);
+        assert!(base.same_identity(synthetic_information(11, 99, 99)));
+        assert!(!base.same_identity(synthetic_information(12, 20, 30)));
 
         let other_volume =
             WindowsFileInformation::from_components(8, (0, 11), (0, 20), 1, (0, 30), false, false);
@@ -142,16 +146,16 @@ mod tests {
 
     #[test]
     fn state_requires_identity_size_and_last_write_time_to_match() {
-        let base = information(11, 20, 30);
+        let base = synthetic_information(11, 20, 30);
         assert!(base.same_file_state(base));
-        assert!(!base.same_file_state(information(12, 20, 30)));
-        assert!(!base.same_file_state(information(11, 21, 30)));
-        assert!(!base.same_file_state(information(11, 20, 31)));
+        assert!(!base.same_file_state(synthetic_information(12, 20, 30)));
+        assert!(!base.same_file_state(synthetic_information(11, 21, 30)));
+        assert!(!base.same_file_state(synthetic_information(11, 20, 31)));
     }
 
     #[test]
     fn type_and_link_checks_fail_closed() {
-        let regular = information(11, 20, 30);
+        let regular = synthetic_information(11, 20, 30);
         assert!(regular.is_regular_file());
         assert!(regular.has_single_link());
 
