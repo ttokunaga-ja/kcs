@@ -399,8 +399,10 @@ KCS 自身のログのスクラブ (該当行の削除またはマスク) と、
 kcs repair --verify-objects
 ```
 
-- `objects/` 配下の全 CAS object (raw / chunk / tree / commit) の content hash を再計算し、
-  保存パス・参照 hash と照合する ([03-data-model.md §8.1](03-data-model.md))
+- `objects/` 配下の全 CAS object (raw / chunk / tree / commit) を §8.1 の per-type algorithm で検証し、
+  保存パス・参照 hash と照合する。chunk は object bytes の content hash ではなく semantic identity hash
+  と fan-out key、さらに exact `text` / `text_hash` / normalized span を照合する
+  ([03-data-model.md §8.1](03-data-model.md))
 - normalized は content hash を持たない ([03-data-model.md §5](03-data-model.md)) ため hash 検証対象外とし、
   参照整合 (対応する `(raw_hash, tool_profile_hash)` object の実在) のみ確認する
 - SQLite index は検証対象外 (破損時は `--rebuild-db` で再構築可能なため)
@@ -413,9 +415,22 @@ kcs repair --verify-objects
      (復元した raw object は GC 対象外、05-runtime.md §2.6)
 2. 復元手段なし
    → missing として errors.jsonl に KCS-E-STORE-CORRUPT-001 を記録し、
-     影響を受ける commit / Evidence Pointer の一覧を表示
+     影響を受ける commit hash の bounded 一覧と
+     `external_pointers_may_be_affected=true` を表示する。Evidence Pointer は self-contained で
+     registry がないため、存在しない pointer 一覧を推測・捏造しない
 3. exit code: 破損 0 件 または 全件復元 = 0 / missing 残あり = 3
 ```
+
+purge との整合: validated tombstone または fsck-only erase receipt が説明する missing raw とその derived
+chunk は正常な dead terminal として数え、corruption にしない。receipt-covered bytes は working copy から
+自動復元しない。receipt は public pointer API と re-ingest barrier には使わない。purge journal が active
+なら incomplete exit 3。marker 無し missing は ordinary store corruption、malformed / identity-conflicting
+receipt も corruption とする。verified raw と stale receipt が共存する場合は raw を正として locked repair
+完了時に receipt を除去する。
+
+erase receipt の validation は strict schema/leaf identity に加え、`purged_in_commit` が bounded verified
+CAS で ref-reachable な `commit_type=purged` commit を指すこと、`erased_at` が canonical UTC でその
+commit の `created_at` と一致し、invocation の fixed now より未来でないことを必須とする。
 
 MVP では手動実行のみとする。自動定期検証 (スケジューラ連携) は Phase 4+ の論点。
 

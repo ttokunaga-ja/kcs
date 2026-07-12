@@ -29,7 +29,7 @@ kcs search "<query>" [options]          # 詳細 §3
 kcs open <pointer|chunk_hash|raw_hash>  # OS 規定アプリで原本を開く。解決規則は §1.1
 kcs view <pointer|path> [--at <commit>]
 kcs inspect <hash>                      # object を JSON で表示
-kcs restore <pointer|commit> --to <dir> # 詳細 §5
+kcs restore <evidence|path|commit> --to <dir> # 詳細 §5
 kcs tag <name> [<commit>]
 kcs gc [--dry-run|--prune-unreachable] # prune 対象は 05-runtime.md §2.6 (raw/chunk/commit は対象外)
 kcs purge <path|--raw-hash <h>> --reason <reason> [--erase-tombstone]  # 詳細 §6
@@ -167,7 +167,7 @@ kcs <command> --json
 過去 commit 状態の復元。**現実ファイルを直接上書きしない**:
 
 ```bash
-kcs restore <pointer|commit|raw_hash> --to <dir>
+kcs restore <evidence|path|commit> --to <dir>
 kcs restore <commit> --to ~/Recovered/<commit>     # 通常
 kcs restore <pointer> --to ./recovered/ --force    # 既存上書き許可 (確認 prompt)
 ```
@@ -178,6 +178,7 @@ kcs restore <pointer> --to ./recovered/ --force    # 既存上書き許可 (確�
 - --to <dir> は必須
 - 既存ファイル上書きは --force + 確認 prompt
 - restore は raw object をそのまま展開 (再 Markdownize しない)
+- evidence は pointer URI / inline JSON / stdin、path は論理 direct-child 名、commit は HEAD / tag / full commit hash。tag と同名の path は tag を優先する。raw_hash shorthand は restore では受理しない
 - shallow commit からの restore は KCS-E-COMMIT-SHALLOW-001 で拒否
 - purged 対象は KCS-E-PURGE-NOT-FOUND-001 / tombstone
 ```
@@ -193,7 +194,7 @@ kcs purge <path> --reason <legal|privacy|misingest|copyright|...>
 kcs purge --raw-hash sha256:abc... --reason misingest --erase-tombstone
 ```
 
-purge は常に**全履歴**の raw 本文・派生 artifact を対象とする (commit / tree object は書き換えない。[05-runtime.md §3.5](05-runtime.md))。デフォルトでは tombstone を記録し、`--erase-tombstone` は tombstone 記録も残さない (Evidence Pointer は not_found になる)。
+purge は常に**全履歴**の raw 本文・派生 artifact を対象とする (commit / tree object は書き換えない。[05-runtime.md §3.5](05-runtime.md))。デフォルトでは tombstone を記録し、`--erase-tombstone` は public tombstone を残さない (Evidence Pointer は not_found)。後者の fsck-only non-content erase receipt は pointer state や re-ingest を阻止しない。
 
 - `--reason` は必須引数 (`enum`)
 - 確認 prompt 必須 (`--yes` でスキップ可)
@@ -258,7 +259,7 @@ DOMAIN:
   AUTH     認証・認可
 ```
 
-例: `KCS-E-BATCH-NET-001`, `KCS-E-SEARCH-VEC-INCOMPAT-001`, `KCS-E-COMMIT-SHALLOW-001`, `KCS-E-PURGE-NOT-FOUND-001`, `KCS-E-STORE-PATH-001` (パス区切りを含む path の schema violation、[03-data-model.md §3](03-data-model.md)), `KCS-E-SEARCH-SCOPE-ALL-FAILED-001` (multi-scope search の全 scope 失敗、[05-runtime.md §1.8](05-runtime.md)), `KCS-E-SEARCH-CURSOR-001` (別クエリ・別条件の cursor 誤用、[05-runtime.md §1.5](05-runtime.md)), `KCS-E-INDEX-REBUILDING-001` (index 再構築中、[05-runtime.md §6](05-runtime.md)), `KCS-E-EVIDENCE-SCOPE-UNREACHABLE-001` (pointer の scope が scope_path・registry のどちらでも解決不能、[08-evidence-pointer-spec.md §3.2](08-evidence-pointer-spec.md)), `KCS-E-EVIDENCE-RETARGET-AMBIG-001` (retarget 候補が複数で一意に定まらない、[08-evidence-pointer-spec.md §5](08-evidence-pointer-spec.md))、`KCS-E-STORE-CORRUPT-001` (CAS object の content hash 不一致・欠落、`kcs repair --verify-objects`、[10-operations.md §7.5](10-operations.md))、`KCS-E-STORE-LOCKED-001` (`.kcs/.lock` 取得失敗 — 待機せず即失敗、exit 3、[05-runtime.md §6](05-runtime.md))、`KCS-E-STORE-DUP-001` (単一 tree 内の重複 `path`、[03-data-model.md §8.1](03-data-model.md)。`/` 入り path の `KCS-E-STORE-PATH-001` とは区別する)、`KCS-E-CONFIG-USAGE-001` (invalid usage / 不正オペランド — 例: `init` path 不存在、`.kcs` scope 外での実行、不正 hash 引数。schema violation の `KCS-E-CONFIG-SCHEMA-001` とは区別。exit 2)、`KCS-E-EMBED-MODALITY-001` (`modality != "multimodal"` の embedding profile の採用拒否 — tool-lock materialize / adapter 登録時に検証、[03-data-model.md §7](03-data-model.md)。exit 2)。
+例: `KCS-E-BATCH-NET-001`, `KCS-E-SEARCH-VEC-INCOMPAT-001`, `KCS-E-COMMIT-SHALLOW-001`, `KCS-E-COMMIT-HISTORY-LIMIT-001` (bounded history walk の aggregate cap 超過、単独操作 exit 4 / multi-scope は既存 partial 規則、[05-runtime.md §1.6](05-runtime.md)), `KCS-E-PURGE-NOT-FOUND-001`, `KCS-E-STORE-PATH-001` (パス区切りを含む path の schema violation、[03-data-model.md §3](03-data-model.md)), `KCS-E-SEARCH-SCOPE-ALL-FAILED-001` (multi-scope search の全 scope 失敗、[05-runtime.md §1.8](05-runtime.md)), `KCS-E-SEARCH-CURSOR-001` (別クエリ・別条件の cursor 誤用、[05-runtime.md §1.5](05-runtime.md)), `KCS-E-INDEX-REBUILDING-001` (index 再構築中、[05-runtime.md §6](05-runtime.md)), `KCS-E-EVIDENCE-SCOPE-UNREACHABLE-001` (pointer の scope が scope_path・registry のどちらでも解決不能、[08-evidence-pointer-spec.md §3.2](08-evidence-pointer-spec.md)), `KCS-E-EVIDENCE-RETARGET-AMBIG-001` (retarget 候補が複数で一意に定まらない、[08-evidence-pointer-spec.md §5](08-evidence-pointer-spec.md))、`KCS-E-STORE-CORRUPT-001` (CAS object の content hash 不一致・欠落、`kcs repair --verify-objects`、[10-operations.md §7.5](10-operations.md))、`KCS-E-STORE-LOCKED-001` (`.kcs/.lock` 取得失敗 — 待機せず即失敗、exit 3、[05-runtime.md §6](05-runtime.md))、`KCS-E-STORE-DUP-001` (単一 tree 内の重複 `path`、[03-data-model.md §8.1](03-data-model.md)。`/` 入り path の `KCS-E-STORE-PATH-001` とは区別する)、`KCS-E-CONFIG-USAGE-001` (invalid usage / 不正オペランド — 例: `init` path 不存在、`.kcs` scope 外での実行、不正 hash 引数。schema violation の `KCS-E-CONFIG-SCHEMA-001` とは区別。exit 2)、`KCS-E-EMBED-MODALITY-001` (`modality != "multimodal"` の embedding profile の採用拒否 — tool-lock materialize / adapter 登録時に検証、[03-data-model.md §7](03-data-model.md)。exit 2)。
 
 新規 code 追加は本書および各 spec の更新を伴う (破壊的変更扱い)。
 

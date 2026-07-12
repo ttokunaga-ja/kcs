@@ -191,7 +191,7 @@ raw_hash が tombstone を持つ場合 (= purge 済みだが履歴上は記録):
 
 ## 4.2 NOT-FOUND レスポンス
 
-raw_hash が tombstone なしで完全削除 (`--erase-tombstone`) されている場合:
+raw_hash が public tombstone なしで完全削除 (`--erase-tombstone`) されている場合:
 
 ```text
 error_code: KCS-E-PURGE-NOT-FOUND-001
@@ -200,6 +200,9 @@ context: { raw_hash, scope_path }
 ```
 
 完全削除は法的要件上必要な場合のみ。デフォルトは tombstone。
+`.kcs/purge/erase-receipts/` の bounded non-content receipt は fsck 専用であり、本 API は参照しない。
+receipt は pointer state を tombstoned にせず、re-ingest も阻止しないため、レスポンスは常に上記
+`not_found` のままである ([05-runtime.md §3.5](05-runtime.md))。
 
 ## 4.3 検証 API
 

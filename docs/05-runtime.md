@@ -43,7 +43,11 @@ kcs search "..." --no-vector # 明示無効
 
 ## 1.3 RRF (Reciprocal Rank Fusion)
 
-候補取得: text / vector 各バックエンドから検索対象集合 (§1.6) 内の上位 `candidate_depth` 件 (デフォルト 200) を取得し、和集合を候補プールとする。1 クエリで返しうる結果の上限は候補プール件数 (ページングしても超えない)。
+候補取得: text / vector 各バックエンドから検索対象集合 (§1.6) 内の上位 `candidate_depth` 件 (デフォルト
+200) を **unique semantic chunk (`scope_id,chunk_hash`) 単位**で取得し、和集合を候補プールとする。
+default / `--at` / `--include-deleted` の結果上限は候補プール件数。`--all-history` / `--since` は
+MMR/dedup 後に historical aliases を展開するため、最終 hit 数は retained semantic chunks の distinct
+`(chunk_hash,path)` binding 数 (history-walk aggregate cap 内) まで増えうる。
 
 ```text
 RRF_score(c) = w_text / (k + rank_text(c)) + w_vector / (k + rank_vector(c))
@@ -86,8 +90,10 @@ similarity = embedding の vector cosine (これのみ。2026-07-03 確定 — e
 適用範囲と決定性:
 
 - MMR は候補プールの RRF 上位 `mmr_depth` 件 (デフォルト 100、`candidate_depth` 以下) に対して **1 回だけ** 適用し、並べ替え済みの**確定順序**を得る。`mmr_depth` 以降の候補は RRF 順のまま末尾に接続する
-- `relevance(c)` = RRF スコアを **MMR 候補プール内で min-max 正規化した値** ([0,1]。全候補が同スコアなら一律 1.0。2026-07-03 確定、step3a §C の決定性論点解消 — 生の RRF スコア (最大 ~1/k) をそのまま使うと mmr_lambda の意味が損なわれるため)。`similarity` は embedding の cosine。embedding が無い場合 (text-only 検索) は MMR を適用せず RRF 順のままとする (ただし `max_per_raw_hash` の dedup は embedding 非依存であり text-only でも適用する)。MMR score の同点は RRF 順、さらに同点は chunk_id 昇順
-- `max_per_raw_hash` は確定順序の構築時に結果ストリーム全体へ適用する (ページを跨いで raw_hash あたり最大 N 件)
+- `relevance(c)` = RRF スコアを **MMR 候補プール内で min-max 正規化した値** ([0,1]。全候補が同スコアなら一律 1.0。2026-07-03 確定、step3a §C の決定性論点解消 — 生の RRF スコア (最大 ~1/k) をそのまま使うと mmr_lambda の意味が損なわれるため)。`similarity` は embedding の cosine。embedding が無い場合 (text-only 検索) は MMR を適用せず RRF 順のままとする (ただし `max_per_raw_hash` の dedup は embedding 非依存であり text-only でも適用する)。MMR score の同点は RRF 順、さらに同点は immutable `(scope_id,chunk_hash)` の UTF-8 byte order
+- `max_per_raw_hash` は alias 展開**前**の unique semantic chunk stream に適用する (ページを跨いで
+  raw_hash あたり最大 N semantic chunks)。retained chunk の historical path aliases は provenance 行で
+  あり、この上限へ再カウントせず全件を返す
 - 入力 (chunk 集合・query・設定) が同じなら確定順序は常に同一 (決定論)。これがページング (§1.5) の前提
 
 ```toml
@@ -106,11 +112,21 @@ kcs search "..." --limit 20 --cursor <token>    # snapshot 越し安全
 
 ページングは「確定順序 (§1.4) の決定論的再計算」で実現する。cursor に MMR の selected 集合や score は持たない。レスポンスに `next_cursor` を含める。本節の定義は単一 scope 内の sub-cursor であり、複数 scope 横断時の cursor 全体構造 (opaque token、`scope_mode` / `query_hash`) は §1.8 で定義する。
 
-scope ごとの sub-cursor は `{scope_id, snapshot_commit, max_rowid, consumed}`:
+scope ごとの sub-cursor は
+`{scope_id, snapshot_commit, max_rowid, max_association_rowid, chunking_config_hash, consumed}`。
+token 全体には canonical `time_travel` selector を、`--since` ではさらに
+page 1 の `since_cutoff` (UTC ISO8601 + `Z`) も保持する:
 
 - `snapshot_commit`: 当該 scope の検索対象 commit (§1.7 snapshot_at)。2 ページ目以降も同じ commit の tree_entries ([04-pipeline.md §4.5](04-pipeline.md)) で絞る
 - `max_rowid`: cursor 発行時点の chunks 最大 rowid。`--all-history` / `--include-deleted` では `rowid <= max_rowid` で chunk 集合を固定する (chunks 行は append-only ([04-pipeline.md §4.1](04-pipeline.md)) なので単調増加)
-- `consumed`: 当該 scope から既に返した件数
+- `max_association_rowid`: cursor 発行時点の `chunk_config_generations` 最大 association rowid。
+  現行 config association も `association_rowid <= max_association_rowid` に固定し、page 1 後に追加された
+  association が page 2 の候補へ混入することを防ぐ
+- `chunking_config_hash`: page 1 の当該 scope effective config。current value が変われば replay を拒否する
+- `consumed`: alias expansion 後の final result stream で当該 scope から既に返した hit 数 (semantic chunk
+  数ではない)。replay は grouped final stream を完全再計算し、scope ごとにこの件数だけ先頭 hit を skip
+  するため、page boundary が 1 chunk の alias group 内でも重複/欠落しない
+- `since_cutoff`: `--since` の page 1 で一度だけ計算した下限。page 2 以降は現在時刻から再計算しない
 - `query_hash` (token 全体に 1 つ、§1.8) が不一致の cursor は `KCS-E-SEARCH-CURSOR-001` で拒否する
 
 2 ページ目以降は同一の候補取得 → RRF (§1.3) → MMR (§1.4) を再計算し、consumed 件を skip して続きを返す。順序安定性の根拠は SQLite WAL のスナップショット分離**ではなく**、「commit 単位で固定された chunk 集合 + 決定論的な順位計算」である。CLI 呼び出しを跨いでも成立する。
@@ -134,17 +150,50 @@ scope ごとの sub-cursor は `{scope_id, snapshot_commit, max_rowid, consumed}
 ```text
 デフォルト          chunks ⨝ tree_entries(HEAD)     on (raw_hash, tool_profile_hash, gen)
 --at <commit>       chunks ⨝ tree_entries(<commit>) on (raw_hash, tool_profile_hash, gen)
---include-deleted   デフォルト集合 ∪ (chunks ⨝ files[status='deleted'] on raw_hash。
-                    tool_profile_hash / gen は当該 raw_hash の最新 normalized instance)
---all-history       全 chunk 行 (絞らない)
+--include-deleted   デフォルト集合 ∪ page-1 snapshot tree に存在しない各 logical path について、
+                    snapshot の first-parent ancestry でその path を含む newest commit の
+                    exact (raw_hash, tool_profile_hash, gen) binding
+--all-history       page 1 snapshot HEAD から全 parent edge で到達可能な全 commit の tree binding
+                    に現れる chunk 行
 --since <duration>  --all-history 集合を chunks.created_at >= now - <duration> で絞る
 ```
 
-共通フィルタ: `chunking_config_hash` が現行値の chunk のみ ([04-pipeline.md §4.6](04-pipeline.md))。purge 済み raw_hash の chunk 行は物理削除済みのため自然に除外される。
+共通フィルタ: `chunk_config_generations` に現行 `chunking_config_hash` association がある chunk のみ
+([04-pipeline.md §4.1, §4.6](04-pipeline.md))。purge 済み raw_hash の chunk 行は物理削除済みのため自然に除外される。
 
-- `--include-deleted` が加えるのは「現在 working tree に存在しないファイルの**最終版**」のみ (files 行が保持する最後の raw_hash、[03-data-model.md §8](03-data-model.md))。途中版まで遡るのは `--all-history` の役割
+tree entry の `normalize` が省略された commit では、その entry に eligible chunk は 0 件。`--at` /
+history projection / include-deleted のいずれも later `latest_normalize_ref` を補完せず、SQLite cached row が
+あっても CAS tree の省略を上書きしない ([03-data-model.md §8])。
+
+- `--include-deleted` が加えるのは page-1 snapshot に path が存在しないファイルの**最終版**のみ。
+  snapshot HEAD の first-parent を newest-first に辿り、その path を初めて含む tree entry の persisted
+  normalize ref を使う。manifest / `files[status=deleted]` は acceleration/cache に限り、page 1 後の
+  mutable manifest 変更は cursor の集合を変えない。途中版まで遡るのは `--all-history` の役割
+- `--include-deleted` で同じ semantic chunk に snapshot-live binding が 1 件以上あれば live が勝ち、
+  その chunk の旧 deleted-path alias は返さない (rename aliases は `--all-history`)。live twins の
+  `path_at_commit` は UTF-8 byte order 最小を使う。live binding が 0 件なら、同じ chunk に対応する
+  distinct final-deleted `(path,binding_commit)` を §1.7 の post-ranking group expansion で全件返す
+- `--all-history` / `--since` の「全 commit」は page 1 の `snapshot_commit` から全 parent edge で
+  到達可能な commit に限る。orphan / disconnected tag-only commit は `--at` で明示する。visited set で
+  全 parent を辿り、side parent にだけ存在して merge 結果から消えた binding も対象にする
 - chunk 行が検索対象になるのは `kcs index` 成功完了時の auto snapshot (§8.1) 作成後。indexing 途中の chunk はどのモードでも返さない。auto snapshot 作成時に新規 chunk 行へ `first_seen_commit` を刻む ([04-pipeline.md §4.1](04-pipeline.md))
 - shallow 化済み commit への `--at` の失敗規則は §2.2
+
+History walk の aggregate security bound は exact に次とする (per-object caps に加算):
+
+```text
+all-parent DAG walk:   100,000 unique commits / 10,000,000 total tree entries /
+                       4 GiB verified commit+tree bytes
+first-parent walk:     100,000 commits / 10,000,000 total tree entries /
+                       4 GiB verified commit+tree bytes
+```
+
+各 walk は counters を独立に持ち、次の object/entry で 1 つでも超える前に停止する。
+`--all-history` / `--since` の scope は candidate/alias を部分返却せず
+`KCS-E-COMMIT-HISTORY-LIMIT-001` (`excluded_scopes[].reason=history_limit_exceeded`) で失敗し、既存の
+multi-scope partial exit 3 / all-failed exit 4 に従う。purge-by-path は all-parent cap、restore-by-path は
+first-parent cap を同じ error code で fail-before-mutation/publication する。raw-hash purge と explicit
+commit/evidence restore は ancestry walk を必要としない。
 
 過去 snapshot の embedding 再生成は別操作 (`kcs reindex --at`)。
 
@@ -202,10 +251,31 @@ scope ごとの sub-cursor は `{scope_id, snapshot_commit, max_rowid, consumed}
 `snapshot_at` と `evidence_pointer.commit` の決定規則:
 
 - `searched_scopes[].snapshot_at` = 当該 scope の検索対象 commit。デフォルト / `--all-history` / `--include-deleted` では検索時の HEAD commit、`--at` では指定 commit
-- `evidence_pointer.commit`: chunk が当該 scope の `snapshot_at` の tree に live ならその commit。live でない chunk (`--all-history` の旧版、`--include-deleted` の削除済み分) は当該 chunk の `first_seen_commit` ([04-pipeline.md §4.1](04-pipeline.md))
+- `evidence_pointer.commit`: デフォルト / `--at` では検索対象 commit。`--include-deleted` の live chunk は
+  snapshot HEAD、削除済み分は final binding を選んだ newest first-parent commit。これにより
+  `path_at_commit` は pointer commit の tree に必ず実在する。`--all-history` / `--since` は distinct
+  `(chunk_hash,path)` ごとに、全 parent DAG 上の canonical introduction commit を使う。introduction は
+ 「その commit に binding が存在し、利用可能な全 parent に存在しない」commit。delete/re-add を含む
+  複数 introduction のうち別 introduction の descendant でない ancestor-most 集合を作り、1 件ならそれ、
+  複数の incomparable 候補なら full commit hash の bytewise 辞書順最小を使う
 - `path_at_commit` = `evidence_pointer.commit` の tree における path
 
-これにより M3-2 の「path_at_commit と現在 path を併記」([09-mvp-scope.md §4](09-mvp-scope.md)) は、pointer.commit の tree と HEAD の tree_entries の 2 join で実装できる。
+`--all-history` / `--since` は同じ chunk の同じ path が複数 commit に現れても 1 hit に畳む一方、rename
+で生じた distinct path は別 hit として返す。各 historical alias result は、同じ raw_hash を持つ page-1
+snapshot HEAD entry の distinct path を UTF-8 byte order で整列した `current_paths` として持つ
+(空なら field を省略)。
+raw identity から rename lineage は推測しない。`current_paths` がちょうど 1 件のときだけ compatibility
+field `current_path` に同じ値を入れ、identical-byte twins では singular field を省略する。chunk 行自体は
+path 非依存で 1 行のまま、path alias は snapshot HEAD から全 parent DAG の tree と snapshot HEAD tree
+から導出する。
+
+実装 pipeline は固定する: scope ごとに text/vector を rank → scope 内 RRF し、その rank を cross-scope
+merge → global MMR/`max_per_raw_hash` する。pre-alias tie は immutable `(scope_id,chunk_hash)` の UTF-8
+byte order とする。その確定 semantic position ごとに historical/deleted aliases を展開し、parent
+score/rank をコピーして、group 内を
+`(scope_id,chunk_hash,path_at_commit,evidence_pointer.commit)` の UTF-8 byte order で整列してから paginate
+する。`scope_path` は display hint なので順序に使わない。alias は MMR cosine competition や
+`max_per_raw_hash` へ再投入せず、distinct alias は path/commit により comparator equality にならない。
 
 ## 1.8 複数 scope 横断検索 (multi-scope search)
 
@@ -220,8 +290,9 @@ scope ごとの sub-cursor は `{scope_id, snapshot_commit, max_rowid, consumed}
 ### 実行とマージ
 
 1. scope ごとに独立にクエリを実行する。並列度は min(4, scope 数)、per-scope timeout は 2 秒 (いずれも config で上書き可)
-2. scope 内では §1.1〜§1.4 の単一 scope 検索をそのまま実行し、RRF 済み上位 candidate_depth 件 (§1.3) を候補として返す
-3. scope 間の統合は **rank ベース** で行う。各 scope の RRF スコア (rank のみから決まる) をそのまま比較して降順マージする。**BM25 / vector の raw スコアを scope 間で比較・正規化してはならない** (コーパス統計が index ごとに異なり比較不能)。同点は (scope_path, chunk_hash) の辞書順で安定化する
+2. scope 内では §1.1〜§1.3 までを実行し、RRF 済み unique semantic chunk 上位 candidate_depth 件を
+   候補として返す。§1.4 の MMR/dedup は scope 内でまだ適用しない
+3. scope 間の統合は **rank ベース** で行う。各 scope の RRF スコア (rank のみから決まる) をそのまま比較して降順マージする。**BM25 / vector の raw スコアを scope 間で比較・正規化してはならない** (コーパス統計が index ごとに異なり比較不能)。pre-alias 同点は immutable `(scope_id,chunk_hash)` で安定化する
 4. diversify (MMR / group_by_raw_hash, §1.4) は統合後の候補列に対して適用する
 5. vector / hybrid の横断条件は [03-data-model.md §7](03-data-model.md) に従う。embedding profile が全 scope で一致しない場合、横断部分は text (BM25 rank) のみで統合し、`fallback_reason` に記録する
 
@@ -266,19 +337,46 @@ per_scope_timeout_seconds = 2   # 超過 scope は excluded_scopes (reason=timeo
 
 ```json
 {
-  "v": 1,
+  "v": 2,
   "scope_mode": "all",
   "query_hash": "sha256:...",
+  "time_travel": { "all_history": true, "since": "604800s" },
+  "since_cutoff": "2026-07-13T00:00:00Z",
+  "excluded_scopes": [],
   "scopes": [
-    { "scope_id": "...", "snapshot_commit": "sha256:9f2c...", "max_rowid": 18234, "consumed": 40 }
+    { "scope_id": "...", "snapshot_commit": "sha256:9f2c...", "max_rowid": 18234,
+      "max_association_rowid": 20117,
+      "chunking_config_hash": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "consumed": 40 }
   ]
 }
 ```
 
-cursor はこの JSON の JCS を base64url した opaque token として返す。
+`time_travel` は query hash に入る canonical selector object (default のみ field 省略)、`since_cutoff` は
+`--since` のときだけ存在する。cursor はこの JSON の JCS と認証 tag を含む signed
+base64url opaque token として返す。Step 4 cursor schema は `v=2`; 必須 config/association/selector
+binding を持たない legacy `v=1` は `KCS-E-SEARCH-CURSOR-001` で拒否する (cursor は durable artifact ではない)。
 
-- `scope_mode` は検索対象 scope の指定方法 (all / `--scope` / `--descendants`)、`query_hash` は次の正準構成 (2026-07-03 確定、step3a §C-2): `"sha256:" + base16(sha256(JCS({ query: <NFC 正規化後のクエリ文字列>, mode: <解決後の実効 mode (text|vector|hybrid)>, scope_mode, scopes: <対象 scope_id の昇順配列>, rrf: <[search.rrf] の実効値 (k / candidate_depth / w_text / w_vector — 変更は確定順序を変えるため cursor 誤用検出の対象)>, diversify: <[search.diversify] の実効値>, time_travel: <--at/--all-history/--include-deleted/--since の実効値 (未指定キーは省略)> })))`。`limit` / `--offset` / `--cursor` / `--json` は**含めない** (ページング操作で hash が変わってはならない)。いずれも token 全体に 1 つで、別クエリ・別条件での cursor 誤用検出に使う (不一致は `KCS-E-SEARCH-CURSOR-001` で拒否、§1.5)
-- `snapshot_commit` は当該 scope の検索時点 snapshot (commit_hash)、`max_rowid` は snapshot 時点で index に取り込まれていた chunk 行の上限 (snapshot 固定の再クエリに使う)、`consumed` は当該 scope から既に返した件数
+- `scope_mode` は検索対象 scope の指定方法 (all / `--scope` / `--descendants`)、`query_hash` は次の正準構成 (Step 4 で per-scope current chunk config binding を追加): `"sha256:" + base16(sha256(JCS({ query: <NFC 正規化後のクエリ文字列>, mode: <解決後の実効 mode (text|vector|hybrid)>, chunking_configs: <{scope_id,chunking_config_hash} の scope_id UTF-8 byte order 配列>, scope_mode, scopes: <page 1 または直前 replay で実際に参加する active scope_id の昇順配列>, rrf: <[search.rrf] の実効値 (k / candidate_depth / w_text / w_vector — 変更は確定順序を変えるため cursor 誤用検出の対象)>, diversify: <[search.diversify] の実効値>, time_travel: <--at/--all-history/--include-deleted/--since の実効値 (未指定キーは省略)> })))`。`limit` / `--offset` / `--cursor` / `--json` は**含めない** (ページング操作で hash が変わってはならない)。いずれも token 全体に 1 つで、別クエリ・別条件・いずれかの scope の別 chunking config での cursor 誤用検出に使う (不一致は `KCS-E-SEARCH-CURSOR-001` で拒否、§1.5)
+- page 1 の `scopes` / `chunking_configs` は成功して実際に ranking へ参加した scope だけを含む。
+  page-1 `excluded_scopes` は bounded `{scope_id,reason}` として signed token に保持するが active scope や
+  query hash の config mapping には入れず、その cursor stream へ後から再参加させない。registry に後から
+  現れた scope も入れない
+- `snapshot_commit` は当該 scope の検索時点 snapshot (commit_hash)、`max_rowid` / `max_association_rowid`
+  は snapshot 時点で index に取り込まれていた chunk / association の上限、`chunking_config_hash` は
+  page 1 の当該 scope effective config、`consumed` は当該 scope から既に返した件数。page 2 で current
+  config mapping が 1 件でも違えば query hash mismatch として cursor を拒否する。署名検証後も
+  いずれかの field 欠落・型違い・範囲外は cursor error
+- cursor 付き呼び出しで selector flag を省略した場合は signed `time_travel` を継承する。1 つでも selector
+  flag を再指定した場合は canonicalize 後に token object と完全一致しなければ
+  `KCS-E-SEARCH-CURSOR-001`。これにより既存の `search QUERY --cursor TOKEN` は履歴 mode と canonical
+  `--since` duration を失わず、同じ selector を明示してもよい
+- replay は token の active `scopes` だけを解決する。active scope が unreachable/corrupt/shallow に
+  なった場合、global merge/MMR stream を安全に縮退再計算できないため、部分結果や next cursor を返さず
+  cause-specific に hard-fail する (unreachable は `KCS-E-SEARCH-CURSOR-001` reason
+  `active_scope_unavailable`、shallow は `KCS-E-COMMIT-SHALLOW-001`、store damage は
+  `KCS-E-STORE-CORRUPT-001`)。cursor なしの fresh search を案内する。scope move は同じ `scope_id` として
+  継続し、config drift も cursor error とする
 - 次ページは各 scope を `snapshot_commit` に固定して再クエリし、consumed 件を skip してマージを継続する。マージは決定的 (RRF スコア降順 + 辞書順 tie-break) なのでページを跨いで再現可能
 - cursor 中の `snapshot_commit` が shallow 化済み (tree 破棄) の場合、cursor の再計算は `KCS-E-COMMIT-SHALLOW-001` で失敗する (§2.2)。この場合は cursor なしの再検索を案内する
 
@@ -454,7 +552,7 @@ purge 後の pointer 解決:
      "purged_in_commit": "sha256:9f2c...",
      "raw_hash": "sha256:..."
    }
-2. raw_hash が完全削除 (--erase-tombstone: tombstone 記録も残さない) → not_found
+2. raw_hash が完全削除 (--erase-tombstone: public tombstone 記録を残さない) → not_found
    error_code: KCS-E-PURGE-NOT-FOUND-001
 
 検出 API:
@@ -468,7 +566,8 @@ kcs evidence verify <pointer> [--strict]
 
 ## 3.5 purge の機構 (何を消し、何を残すか)
 
-purge は **object の物理削除 + tombstone 記録** であり、**履歴 DAG の書き換えではない**。
+purge は **object の物理削除 + default tombstone または内部 erase receipt** であり、
+**履歴 DAG の書き換えではない**。
 
 消すもの (対象 raw_hash について、全履歴にわたり):
 
@@ -486,6 +585,8 @@ purge は **object の物理削除 + tombstone 記録** であり、**履歴 DAG
   DAG の再結線・tree entry の削除・連鎖再 hash は行わない。
 - tree entry のメタデータ (path, raw_hash)。raw_hash から原文は復元できない。
 - tombstone (.kcs/tombstones/ab/cd/<raw64>)。--erase-tombstone 指定時を除く。
+- `--erase-tombstone` では fsck 専用の non-content erase receipt
+  (`.kcs/purge/erase-receipts/ab/cd/<raw64>`)。public pointer API からは不可視。
 ```
 
 追加されるもの:
@@ -508,6 +609,27 @@ canonical / legacy の両 variant が存在する場合に両方を検証し、�
   "purged_in_commit": "sha256:9f2c..."
 }
 ```
+
+`--erase-tombstone` は public tombstone を残さない一方、markerless absence と後発 store corruption を
+fsck が区別できるよう、同じ digest-only fan-out に次の exact bounded receipt を atomically 保存する。
+
+```json
+{
+  "schema_version": 1,
+  "raw_hash": "sha256:abc...",
+  "purged_in_commit": "sha256:9f2c...",
+  "erased_at": "2026-04-25T12:00:00Z"
+}
+```
+
+receipt は path / reason / actor / query / prompt / content を持たず、raw_hash は immutable tree に既に残る。
+validity は leaf/raw_hash 一致だけでなく、`purged_in_commit` が bounded verified CAS 上で ref-reachable な
+`commit_type=purged` commit を指し、`erased_at` が canonical UTC かつ commit `created_at` と一致し、
+fsck invocation の fixed now より未来でないことを要求する。不一致・extra field は store corruption。
+open / view / search / restore / evidence verify / index の resurrection barrier には使わず、fsck だけが
+intentional absence の説明に使う。したがって Evidence verify は従来どおり `not_found` で、同一 bytes の
+明示的な後日 ingest は許可する。raw object の publication 成功後に receipt を除去し、crash で両方が
+残った場合は verified raw object を優先して次の locked mutation で stale receipt を除去する。
 
 **制約 (明記)**: tree entry の `path` 文字列と `raw_hash` は履歴に残る。ファイル名そのものが秘匿対象であるケース (履歴書き換えが必要) は MVP 非対応。commit / tree の書き換えは content hash の連鎖再計算と無関係ファイルの Evidence Pointer 無効化を伴うため、対応する場合も v2+ の再設計事項とする。
 
@@ -557,7 +679,7 @@ KCS は **常駐 daemon を持たない**。すべての処理は CLI コマン�
 
 ```text
 kcs index / kcs snapshot (= kcs commit) / kcs tag (refs/tags-v1 更新) / kcs gc / kcs purge /
-kcs repair --rebuild-db / kcs move --accept
+kcs repair --rebuild-db / kcs repair --verify-objects / kcs move --accept
 ```
 
 規約:
@@ -565,8 +687,10 @@ kcs repair --rebuild-db / kcs move --accept
 - 読み取り系 (search / log / view / inspect / evidence verify / restore / status / diff) は `.kcs/.lock` を取得しない。`kcs index` と `kcs search` の同時実行は許容 (SQLite WAL でリーダーは旧スナップショット)
 - `.kcs/.lock` を取得できない場合、書き込み系コマンドは**待機せず即座に失敗する**: error code `KCS-E-STORE-LOCKED-001`、exit code 3 (retryable、[06-cli-spec.md §7](06-cli-spec.md))。lock ファイルには保持プロセスの pid と取得時刻を記録し、保持プロセスが存在しない stale lock は次の取得試行時に回収してよい。待機オプション (`--wait <seconds>`) は Phase 4+ 予約
 - refs (refs/heads/main, canonical refs/tags-v1/*) の更新は `.kcs/.lock` 保持下で、temp file 書き込み + atomic rename により行う (部分書き込みを外部に見せない)。legacy refs/tags/* は read-only compatibility とする
+- `kcs repair --verify-objects` の raw object 復旧と repaired commit publication も、同じ lock の下で private temp + hash 再検証 + atomic publish を使う
 - `kcs repair --rebuild-db` 実行中の `kcs search` は、再構築完了までの間旧 sqlite.db (存在すれば) を読むか、`KCS-E-INDEX-REBUILDING-001` を返す。再構築の完了も atomic rename (sqlite.db.tmp → sqlite.db) で切り替える
 - scope-registry.sqlite (~/.local/share/kcs/) は WAL モード + busy_timeout (デフォルト 5000ms) で複数プロセスの同時書き込みを直列化する。registry は cache であり ([03-data-model.md §4](03-data-model.md))、破損時は各 `.kcs` の rescan で再構築する
+- purge の log scrub と通常 append/rotation は、device logs では `$XDG_DATA_HOME/kcs/logs/scrub.lock`、scope access logs では `.kcs/logs/access.scrub.lock` を共有する。複合 lock 順序は scope store → reservation/cost ledger → device observability → scope access とし、逆順取得を禁止する
 
 # 7. 観測 (Observability)
 

@@ -143,6 +143,10 @@ unit object schema (`<unit_ref>.json`):
   "gen": 0,
   "mode": "full",
   "markdown": "## 3.2 認証仕様\n...",
+  "metadata": {
+    "page": 12,
+    "bbox_annotations": []
+  },
   "reused_from": null,
   "generated_at": "2026-04-25T12:00:00Z"
 }
@@ -151,6 +155,9 @@ unit object schema (`<unit_ref>.json`):
 `reused_from` は unit_mapping ([04-pipeline.md §2.2](04-pipeline.md)) による再利用の provenance:
 `{ "raw_hash": "sha256:old...", "gen": 0, "unit_key": "page:11" }`。再利用時は unit object 本体を
 新 instance へ **複製** する (per-.kcs 重複容認、§9)。
+`metadata` は optional (旧 object は `{}` と読む) で、page/bbox/confidence と Step 4 の bounded
+`bbox_annotations` を保持する。検索用 annotation block は同じ unit の `markdown` にも決定論的に
+materialize されるため、chunk span と Evidence 解決元がずれない。
 
 不変条件:
 
@@ -379,7 +386,10 @@ CREATE TABLE files (
 );
 ```
 
-ファイル削除を検出しても files 行は **DELETE しない**。`status = 'deleted'` に更新し、最後に観測した raw_hash を保持する (`--include-deleted` 検索の判定に使う、[05-runtime.md §1.6](05-runtime.md))。同一 path が再作成されたら status を戻す。
+ファイル削除を検出しても files 行は **DELETE しない**。`status = 'deleted'` に更新し、最後に観測した
+raw_hash を保持する。同一 path が再作成されたら status を戻す。この行は working-state cache であり、
+cursor-stable `--include-deleted` の truth は page-1 snapshot の first-parent trees から導出する
+([05-runtime.md §1.6](05-runtime.md)); manifest/files の後発変更は paging 集合を変えない。
 
 ## normalization_runs
 
@@ -414,7 +424,9 @@ object hash は artifact identity と Evidence Pointer の永続性 (08 §6) を
 
 - 論理 hash 表記は `"sha256:" + base16(sha256(...))` (小文字 hex)。JSON、SQLite、refs、CLI、URI ではこの完全表記を使う。
 - canonical fan-out パスは `objects/<type>/ab/cd/<digest64>`。`digest64` は論理 hash から `sha256:` を除いた 64 文字の小文字 hex で、`ab` / `cd` はその先頭 2 文字 / 続く 2 文字。normalized basename と tombstone leaf も §2 の digest-only 規則に従う。
-- object 本体は**自身の hash を含めない** (Git 同様、保存キーが ID。旧 `tree_id` / `commit_id` フィールドは廃止)。
+- object 本体は**自身の hash を含めない** (Git 同様、保存キーが ID。旧 `tree_id` / `commit_id` /
+  chunk object 内の `chunk_hash` フィールドは廃止)。raw / prepared / image は保存 byte の content key、
+  tree / commit は canonical JSON の content key、chunk は保存 path の key と §8.1 identity tuple を照合する。
 - 人間向け表示は先頭 12 hex への短縮可 (`sha256:9f2c1a7b04de…`)。`--json` は完全 hash ([06-cli-spec.md §4](06-cli-spec.md))。
 - hash 算出または論理 identity 規約の変更は `kcs_format_version` の MAJOR bump (migration plan 必須)。§2 の digest-only 物理名は、論理 hash を変えず Windows を含む filesystem で同じ object を表現する portability correction であり、identity の変更ではない。旧物理名は §2 の検証付き fallback で読み取る。
 
@@ -541,7 +553,7 @@ tree は entries を単一の flat 配列で持つ。スコープ境界規則 (�
 
 ```json
 {
-  "chunk_hash": "sha256:chunk",
+  "spec_version": 1,
   "raw_hash": "sha256:abc",
   "tool_profile_hash": "sha256:tool1",
   "gen": 3,
@@ -550,12 +562,19 @@ tree は entries を単一の flat 配列で持つ。スコープ境界規則 (�
   "section_id": "認証仕様/api-token",
   "char_start": 1200,
   "char_end": 1500,
-  "chunking_config_hash": "sha256:cfg1",
-  "text_hash": "sha256:text"
+  "text_hash": "sha256:text",
+  "text": "chunk の exact normalized text"
 }
 ```
 
 chunk identity は `(raw_hash, tool_profile_hash, gen, unit_key, heading_path, section_id, char_start, char_end)` で決まり、chunk_hash の算出式は §8.1 に定める (heading_path と section_id は両方 hash 入力。未設定フィールドは省略。`char_start` / `char_end` は unit-local)。`text_hash` は **chunk 抽出範囲のみ** の hash であり、Markdown 全体の hash ではない。`chunking_config_hash` は chunk の**世代**を表すメタデータであり、identity には含めない (§5.3)。chunk object 本体が `gen` を保持するため、tree を失った shallow commit からでも chunk_hash → chunk object → gen で normalized unit instance まで直接解決できる ([08-evidence-pointer-spec.md §3.1](08-evidence-pointer-spec.md))。
+
+chunk object の永続 JSON は上記の `spec_version` + identity fields + `text_hash` + exact `text` に固定し、
+自身の `chunk_hash`、path、`first_seen_commit`、`created_at`、`chunking_config_hash` は含めない。
+`chunking_config_hash` は同一 chunk identity に複数値が対応しうる generation association として
+append-only index ledger / SQLite の別 relation に保持する。fsck は object bytes の content hash ではなく
+§8.1 の identity hash を再計算して保存 fan-out key と照合し、`text_hash` を object 内の `text` と
+対応 normalized unit の exact span の両方に照合する。
 
 # 9. Dedup スコープ
 

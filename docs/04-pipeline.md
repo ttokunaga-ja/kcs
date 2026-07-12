@@ -302,7 +302,6 @@ CREATE TABLE chunks (
   tool_profile_hash TEXT NOT NULL,
   gen INTEGER NOT NULL DEFAULT 0,
   unit_key TEXT NOT NULL,
-  chunking_config_hash TEXT NOT NULL,  -- chunk 世代 (03-data-model.md §5.3)。identity には含めない
   raw_path TEXT NOT NULL,              -- chunk 生成時点の path (表示用)。現在 path は tree_entries join で得る
   heading_path TEXT,
   section_id TEXT,
@@ -314,6 +313,14 @@ CREATE TABLE chunks (
   created_at TEXT NOT NULL
 );
 CREATE INDEX idx_chunks_ident ON chunks(raw_hash, tool_profile_hash, gen);
+
+CREATE TABLE chunk_config_generations (
+  association_rowid INTEGER PRIMARY KEY AUTOINCREMENT,
+  chunk_id TEXT NOT NULL,
+  chunking_config_hash TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  UNIQUE(chunk_id, chunking_config_hash)
+);
 ```
 
 `chunk_id` (PRIMARY KEY) の値は chunk object の `chunk_hash` と同一文字列とする (算出式は [03-data-model.md §8.1](03-data-model.md))。`gen` / `unit_key` は chunk が由来する normalized instance の世代と unit ([03-data-model.md §2.1](03-data-model.md)。`char_start` / `char_end` は unit-local)。chunk が属する Markdown 全体の content hash (normalized_hash) は持たない。
@@ -337,6 +344,12 @@ CREATE INDEX idx_chunks_ident ON chunks(raw_hash, tool_profile_hash, gen);
 ```
 
 **chunks 行は append-only**。ファイルの更新・リネーム・削除では既存 chunk 行を削除・変更しない。これが time-travel 検索 (`--at` / `--all-history` / `--include-deleted`、[05-runtime.md §1.6](05-runtime.md)) の実体である。chunk 行を削除する経路は `kcs purge` のみ (対象 raw_hash の chunk 行・FTS エントリ・embeddings を物理削除、[05-runtime.md §3.5](05-runtime.md))。raw / chunk object は GC の削除対象外である ([05-runtime.md §2.6](05-runtime.md))。既存行への UPDATE は `first_seen_commit` の付与のみ許可する。
+
+同じ chunk identity が複数の chunking config で同じ境界を生む場合、`chunks` の 1 行を複製・上書きせず
+`chunk_config_generations` に association を追記する。検索の「現行 `chunking_config_hash`」filter は
+この relation と join し、cursor は page 1 の最大 `association_rowid` も固定する。append-only
+`chunks.jsonl` は同じ chunk_id の別 config association record を保持でき、SQLite rebuild はそこから
+この relation を再構築する。
 
 ## 4.2 chunk_fts (FTS5 外部 content)
 
