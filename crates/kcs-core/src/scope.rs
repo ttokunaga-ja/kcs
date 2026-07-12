@@ -1703,10 +1703,10 @@ fn append_observation(
     )
 }
 
-/// Replace every absolute-path-looking token (a whitespace-delimited run that
-/// starts with `/`) in a log message with `[redacted]` (P4). Whitespace is
-/// preserved exactly. This is deliberately conservative: relative tokens are
-/// left alone; the leak sources all emit absolute paths via `path.display()`.
+/// Replace every absolute-path-looking token (a whitespace-delimited run) in a
+/// log message with `[redacted]` (P4). Whitespace is preserved exactly. This is
+/// deliberately conservative: relative tokens are left alone; the leak sources
+/// all emit absolute paths via `path.display()`.
 fn redact_message_paths(message: &str) -> String {
     let mut out = String::with_capacity(message.len());
     let mut token = String::new();
@@ -1724,11 +1724,22 @@ fn redact_message_paths(message: &str) -> String {
 }
 
 fn push_redacted_token(token: &str, out: &mut String) {
-    if token.starts_with('/') && token.len() > 1 {
+    if looks_like_absolute_path_token(token) {
         out.push_str("[redacted]");
     } else {
         out.push_str(token);
     }
+}
+
+fn looks_like_absolute_path_token(token: &str) -> bool {
+    let bytes = token.as_bytes();
+    let windows_drive_absolute = bytes.len() >= 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && matches!(bytes[2], b'\\' | b'/');
+    let windows_unc_absolute = token.len() > 2 && token.starts_with(r"\\");
+
+    (token.len() > 1 && token.starts_with('/')) || windows_drive_absolute || windows_unc_absolute
 }
 
 /// Whether `redact_logs` is in effect (06 §8 default true). Read from the user
@@ -2759,6 +2770,28 @@ mod tests {
             "scope registry write failed (recover with index)"
         );
         assert!(!redact_message_paths("read /etc/hosts now").contains("/etc/hosts"));
+        assert_eq!(
+            redact_message_paths(
+                r"corrupt store file at C:\Users\runner\.kcs\tasks.jsonl: expected value"
+            ),
+            "corrupt store file at [redacted] expected value"
+        );
+        assert_eq!(
+            redact_message_paths("read C:/Users/runner/.kcs/tasks.jsonl now"),
+            "read [redacted] now"
+        );
+        assert_eq!(
+            redact_message_paths(r"io error at \\server\share\scope\.kcs\tasks.jsonl: denied"),
+            "io error at [redacted] denied"
+        );
+        assert_eq!(
+            redact_message_paths(r"read \\?\C:\scope\.kcs\tasks.jsonl now"),
+            "read [redacted] now"
+        );
+        assert_eq!(
+            redact_message_paths(r"relative C:scope\.kcs\tasks.jsonl is unchanged"),
+            r"relative C:scope\.kcs\tasks.jsonl is unchanged"
+        );
     }
 
     #[test]
