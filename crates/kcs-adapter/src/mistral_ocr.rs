@@ -875,7 +875,7 @@ pub fn image_hash(bytes: &[u8]) -> String {
 /// Q2: crash-atomic write of an image CAS object. Writes to a uniquely-named temp
 /// file in the destination directory, fsyncs it, then renames into place, so a
 /// crash / ENOSPC mid-write can never leave a partial file under the final
-/// `sha256:` name (which `if !path.exists()` would then adopt forever). The CLI's
+/// digest leaf (which an existence check would then adopt forever). The CLI's
 /// `open`/`view` serve path verifies the object hash before serving, but the CAS
 /// object itself must be written atomically so it is never partial in the first
 /// place.
@@ -935,20 +935,131 @@ fn persist_images(kcs_dir: impl AsRef<Path>, images: &[OcrImage]) -> Result<Vec<
     )
 }
 
-fn image_object_path(kcs_dir: &Path, hash: &str) -> Result<PathBuf> {
+fn image_hash_digest(hash: &str) -> Result<&str> {
     let digest = hash
         .strip_prefix("sha256:")
         .ok_or_else(|| AdapterError::ContractViolation("image hash must use sha256".to_owned()))?;
-    if digest.len() != 64 || !digest.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+    if digest.len() != 64
+        || !digest
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    {
         return Err(AdapterError::ContractViolation(
             "image hash must contain a complete SHA-256 digest".to_owned(),
         ));
     }
+    Ok(digest)
+}
+
+fn image_object_path(kcs_dir: &Path, hash: &str) -> Result<PathBuf> {
+    let digest = image_hash_digest(hash)?;
+    Ok(kcs_dir
+        .join("objects/images")
+        .join(&digest[0..2])
+        .join(&digest[2..4])
+        .join(digest))
+}
+
+#[cfg(not(windows))]
+fn legacy_image_object_path(kcs_dir: &Path, hash: &str) -> Result<PathBuf> {
+    let digest = image_hash_digest(hash)?;
     Ok(kcs_dir
         .join("objects/images")
         .join(&digest[0..2])
         .join(&digest[2..4])
         .join(hash))
+}
+
+fn image_object_slot_exists(path: &Path) -> Result<bool> {
+    match std::fs::symlink_metadata(path) {
+        Ok(_) => Ok(true),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(err) => Err(AdapterError::Io {
+            path: path.display().to_string(),
+            message: err.to_string(),
+        }),
+    }
+}
+
+fn existing_image_object_paths(kcs_dir: &Path, hash: &str) -> Result<Vec<PathBuf>> {
+    let canonical = image_object_path(kcs_dir, hash)?;
+    let mut paths = Vec::with_capacity(2);
+    if image_object_slot_exists(&canonical)? {
+        paths.push(canonical);
+    }
+    #[cfg(not(windows))]
+    {
+        let legacy = legacy_image_object_path(kcs_dir, hash)?;
+        if image_object_slot_exists(&legacy)? {
+            paths.push(legacy);
+        }
+    }
+    Ok(paths)
+}
+
+fn verify_existing_image_object(path: &Path, hash: &str, max_bytes: usize) -> Result<()> {
+    use std::io::Read as _;
+
+    let listed = std::fs::symlink_metadata(path).map_err(|err| AdapterError::Io {
+        path: path.display().to_string(),
+        message: err.to_string(),
+    })?;
+    if !listed.file_type().is_file() {
+        return Err(AdapterError::ContractViolation(format!(
+            "existing image object is not a regular file: {}",
+            path.display()
+        )));
+    }
+    let max_bytes_u64 = u64::try_from(max_bytes).unwrap_or(u64::MAX);
+    if listed.len() > max_bytes_u64 {
+        return Err(AdapterError::ContractViolation(format!(
+            "existing image object exceeds verification limit: {}",
+            path.display()
+        )));
+    }
+
+    let mut file = std::fs::File::open(path).map_err(|err| AdapterError::Io {
+        path: path.display().to_string(),
+        message: err.to_string(),
+    })?;
+    let opened = file.metadata().map_err(|err| AdapterError::Io {
+        path: path.display().to_string(),
+        message: err.to_string(),
+    })?;
+    if !opened.is_file() {
+        return Err(AdapterError::ContractViolation(format!(
+            "existing image object is not a regular file: {}",
+            path.display()
+        )));
+    }
+    if opened.len() > max_bytes_u64 {
+        return Err(AdapterError::ContractViolation(format!(
+            "existing image object exceeds verification limit: {}",
+            path.display()
+        )));
+    }
+
+    let mut existing = Vec::new();
+    (&mut file)
+        .take(max_bytes_u64.saturating_add(1))
+        .read_to_end(&mut existing)
+        .map_err(|err| AdapterError::Io {
+            path: path.display().to_string(),
+            message: err.to_string(),
+        })?;
+    if existing.len() > max_bytes {
+        return Err(AdapterError::ContractViolation(format!(
+            "existing image object exceeds verification limit: {}",
+            path.display()
+        )));
+    }
+    if image_hash(&existing) != hash {
+        return Err(AdapterError::ContractViolation(format!(
+            "existing image object does not match its hash: {}",
+            path.display()
+        )));
+    }
+    Ok(())
 }
 
 fn persist_image_refs_bounded(
@@ -964,32 +1075,10 @@ fn persist_image_refs_bounded(
     }
 
     let mut new_bytes = 0_usize;
+    let mut hashes_to_write = BTreeSet::new();
     for (hash, bytes) in &unique {
-        let path = image_object_path(kcs_dir, hash)?;
-        if path.exists() {
-            let length = std::fs::metadata(&path)
-                .map_err(|err| AdapterError::Io {
-                    path: path.display().to_string(),
-                    message: err.to_string(),
-                })?
-                .len();
-            if length > max_new_bytes as u64 {
-                return Err(AdapterError::ContractViolation(format!(
-                    "existing image object exceeds verification limit: {}",
-                    path.display()
-                )));
-            }
-            let existing = std::fs::read(&path).map_err(|err| AdapterError::Io {
-                path: path.display().to_string(),
-                message: err.to_string(),
-            })?;
-            if image_hash(&existing) != *hash {
-                return Err(AdapterError::ContractViolation(format!(
-                    "existing image object does not match its hash: {}",
-                    path.display()
-                )));
-            }
-        } else {
+        let existing_paths = existing_image_object_paths(kcs_dir, hash)?;
+        if existing_paths.is_empty() {
             new_bytes = new_bytes.checked_add(bytes.len()).ok_or_else(|| {
                 AdapterError::ContractViolation("image persistence byte count overflow".to_owned())
             })?;
@@ -998,10 +1087,27 @@ fn persist_image_refs_bounded(
                     "OCR images require {new_bytes} new bytes, limit is {max_new_bytes}"
                 )));
             }
+            hashes_to_write.insert(hash.clone());
+        } else {
+            // Verify every occupied representation. A valid canonical object must not
+            // shadow a corrupt legacy object, or vice versa.
+            for path in existing_paths {
+                verify_existing_image_object(&path, hash, max_new_bytes)?;
+            }
         }
     }
 
     for (hash, bytes) in unique {
+        if !hashes_to_write.contains(&hash) {
+            continue;
+        }
+        let raced_paths = existing_image_object_paths(kcs_dir, &hash)?;
+        if !raced_paths.is_empty() {
+            for path in raced_paths {
+                verify_existing_image_object(&path, &hash, max_new_bytes)?;
+            }
+            continue;
+        }
         let path = image_object_path(kcs_dir, &hash)?;
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(|err| AdapterError::Io {
@@ -1009,10 +1115,18 @@ fn persist_image_refs_bounded(
                 message: err.to_string(),
             })?;
         }
-        if !path.exists() {
-            // Q2: crash-atomic (temp + fsync + rename) so a torn write cannot leave
-            // a partial image object under the final `sha256:` name.
-            atomic_write_image_object(&path, bytes)?;
+        // Q2: crash-atomic (temp + fsync + rename) so a torn write cannot leave
+        // a partial image object under the final digest leaf.
+        atomic_write_image_object(&path, bytes)?;
+        let published_paths = existing_image_object_paths(kcs_dir, &hash)?;
+        if published_paths.is_empty() {
+            return Err(AdapterError::ContractViolation(format!(
+                "published image object is missing: {}",
+                path.display()
+            )));
+        }
+        for published_path in published_paths {
+            verify_existing_image_object(&published_path, &hash, max_new_bytes)?;
         }
     }
     Ok(images
@@ -1159,16 +1273,23 @@ mod tests {
         let hash = image_hash(b"image bytes");
         assert!(hash.starts_with("sha256:"));
         let digest = hash.strip_prefix("sha256:").unwrap();
-        let path = PathBuf::from(".kcs/objects/images")
-            .join(&digest[0..2])
-            .join(&digest[2..4])
-            .join(&hash);
-        assert!(path.ends_with(&hash));
+        let path = image_object_path(Path::new(".kcs"), &hash).unwrap();
+        assert_eq!(
+            path,
+            PathBuf::from(".kcs/objects/images")
+                .join(&digest[0..2])
+                .join(&digest[2..4])
+                .join(digest)
+        );
+        assert!(!path.file_name().unwrap().to_string_lossy().contains(':'));
+        assert!(
+            image_object_path(Path::new(".kcs"), &format!("sha256:{}", "A".repeat(64))).is_err()
+        );
     }
 
     // Q2: `persist_images` must write the image CAS object atomically so its bytes
-    // always hash back to its `sha256:` filename (no torn / partial object under a
-    // correct name).
+    // always hash back to the logical `sha256:` identity encoded by its digest leaf
+    // (no torn / partial object under a correct name).
     #[test]
     fn q2_persist_images_writes_hash_consistent_object() {
         let dir = tempfile::tempdir().unwrap();
@@ -1182,17 +1303,115 @@ mod tests {
         let hashes = persist_images(&kcs_dir, &images).unwrap();
         assert_eq!(hashes.len(), 1);
         let digest = hashes[0].strip_prefix("sha256:").unwrap();
-        let path = kcs_dir
-            .join("objects/images")
-            .join(&digest[0..2])
-            .join(&digest[2..4])
-            .join(&hashes[0]);
+        let path = image_object_path(&kcs_dir, &hashes[0]).unwrap();
+        assert_eq!(path.file_name().unwrap(), digest);
         let written = std::fs::read(&path).unwrap();
         assert_eq!(written, images[0].bytes, "object bytes must be complete");
         assert_eq!(
             image_hash(&written),
             hashes[0],
             "object must hash back to its filename"
+        );
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn legacy_image_object_is_verified_and_reused() {
+        let dir = tempfile::tempdir().unwrap();
+        let image = OcrImage {
+            bytes: b"legacy image bytes".to_vec(),
+            media_type: "image/png".to_owned(),
+            bbox: None,
+            confidence: None,
+        };
+        let hash = image_hash(&image.bytes);
+        let canonical = image_object_path(dir.path(), &hash).unwrap();
+        let legacy = legacy_image_object_path(dir.path(), &hash).unwrap();
+        std::fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+        std::fs::write(&legacy, &image.bytes).unwrap();
+
+        let hashes = persist_image_refs_bounded(dir.path(), &[&image], 1024).unwrap();
+        assert_eq!(hashes, vec![hash]);
+        assert_eq!(std::fs::read(&legacy).unwrap(), image.bytes);
+        assert!(
+            !canonical.exists(),
+            "a verified legacy object must be reused without an unbudgeted migration write"
+        );
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn canonical_and_legacy_image_objects_must_both_verify() {
+        let image = OcrImage {
+            bytes: b"authentic image bytes".to_vec(),
+            media_type: "image/png".to_owned(),
+            bbox: None,
+            confidence: None,
+        };
+        let hash = image_hash(&image.bytes);
+
+        let valid_dir = tempfile::tempdir().unwrap();
+        let valid_canonical = image_object_path(valid_dir.path(), &hash).unwrap();
+        let valid_legacy = legacy_image_object_path(valid_dir.path(), &hash).unwrap();
+        std::fs::create_dir_all(valid_canonical.parent().unwrap()).unwrap();
+        std::fs::write(&valid_canonical, &image.bytes).unwrap();
+        std::fs::write(&valid_legacy, &image.bytes).unwrap();
+        assert_eq!(
+            persist_image_refs_bounded(valid_dir.path(), &[&image], image.bytes.len()).unwrap(),
+            vec![hash.clone()]
+        );
+
+        for corrupt_canonical in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let canonical = image_object_path(dir.path(), &hash).unwrap();
+            let legacy = legacy_image_object_path(dir.path(), &hash).unwrap();
+            std::fs::create_dir_all(canonical.parent().unwrap()).unwrap();
+            let canonical_bytes: &[u8] = if corrupt_canonical {
+                b"corrupt canonical"
+            } else {
+                image.bytes.as_slice()
+            };
+            let legacy_bytes: &[u8] = if corrupt_canonical {
+                image.bytes.as_slice()
+            } else {
+                b"corrupt legacy"
+            };
+            std::fs::write(&canonical, canonical_bytes).unwrap();
+            std::fs::write(&legacy, legacy_bytes).unwrap();
+
+            let error = persist_image_refs_bounded(dir.path(), &[&image], 1024).unwrap_err();
+            assert!(matches!(error, AdapterError::ContractViolation(message)
+                if message.contains("does not match its hash")));
+        }
+    }
+
+    #[test]
+    fn existing_image_object_type_and_size_are_checked_before_hashing() {
+        let image = OcrImage {
+            bytes: b"eight123".to_vec(),
+            media_type: "image/png".to_owned(),
+            bbox: None,
+            confidence: None,
+        };
+        let hash = image_hash(&image.bytes);
+
+        let type_dir = tempfile::tempdir().unwrap();
+        let type_path = image_object_path(type_dir.path(), &hash).unwrap();
+        std::fs::create_dir_all(&type_path).unwrap();
+        let type_error = persist_image_refs_bounded(type_dir.path(), &[&image], 1024).unwrap_err();
+        assert!(
+            matches!(type_error, AdapterError::ContractViolation(message)
+            if message.contains("not a regular file"))
+        );
+
+        let size_dir = tempfile::tempdir().unwrap();
+        let size_path = image_object_path(size_dir.path(), &hash).unwrap();
+        std::fs::create_dir_all(size_path.parent().unwrap()).unwrap();
+        std::fs::write(&size_path, &image.bytes).unwrap();
+        let size_error = persist_image_refs_bounded(size_dir.path(), &[&image], 7).unwrap_err();
+        assert!(
+            matches!(size_error, AdapterError::ContractViolation(message)
+            if message.contains("exceeds verification limit"))
         );
     }
 

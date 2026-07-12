@@ -104,14 +104,16 @@ impl ObjectStore {
                 "CAS object hash does not match the supplied bytes",
             ));
         }
-        let path = self.object_path(kind, hash)?;
         self.ensure_object_parent(kind, hash)?;
-        match fs::symlink_metadata(&path) {
-            Ok(_) => return verify_existing_bytes(&path, hash, bytes),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(KcsError::io(error.to_string(), path.display().to_string())),
+        let existing = self.existing_object_paths(kind, hash)?;
+        if !existing.is_empty() {
+            for path in existing {
+                verify_existing_bytes(&path, hash, bytes)?;
+            }
+            return Ok(());
         }
 
+        let path = self.object_path(kind, hash)?;
         let (temp_path, mut temp) = create_private_temp(
             path.parent()
                 .ok_or_else(|| KcsError::io("path has no parent", path.display().to_string()))?,
@@ -120,7 +122,19 @@ impl ObjectStore {
             temp.write_all(bytes).kcs_io(&temp_path)?;
             temp.sync_all().kcs_io(&temp_path)?;
             drop(temp);
-            publish_temp_object(&temp_path, &path, hash, bytes.len() as u64, Some(bytes))
+            publish_temp_object(&temp_path, &path, hash, bytes.len() as u64, Some(bytes))?;
+
+            // A legacy writer can race the portable publication. Verify every
+            // representation that exists before reporting success so a conflicting
+            // prefixed leaf never becomes an ignored shadow object.
+            let published = self.existing_object_paths(kind, hash)?;
+            if published.is_empty() {
+                return Err(KcsError::not_found(hash));
+            }
+            for published_path in published {
+                verify_existing_bytes(&published_path, hash, bytes)?;
+            }
+            Ok(())
         })();
         if result.is_err() {
             let _ = fs::remove_file(&temp_path);
@@ -171,7 +185,21 @@ impl ObjectStore {
             let hash = format!("sha256:{}", lower_hex(&hasher.finalize()));
             let path = self.object_path(ObjectKind::Raw, &hash)?;
             self.ensure_object_parent(ObjectKind::Raw, &hash)?;
+            let existing = self.existing_object_paths(ObjectKind::Raw, &hash)?;
+            if !existing.is_empty() {
+                for existing_path in existing {
+                    verify_existing_matches_file(&existing_path, &temp_path, &hash, total)?;
+                }
+                fs::remove_file(&temp_path).kcs_io(&temp_path)?;
+                return Ok((hash, total));
+            }
+
             publish_temp_object(&temp_path, &path, &hash, total, None)?;
+            let published = self.existing_object_paths(ObjectKind::Raw, &hash)?;
+            if published.is_empty() {
+                return Err(KcsError::not_found(&hash));
+            }
+            verify_object_path_variants(&published, ObjectKind::Raw, &hash, false)?;
             Ok((hash, total))
         })();
         if result.is_err() {
@@ -181,8 +209,8 @@ impl ObjectStore {
     }
 
     pub fn read_by_hash(&self, hash: &str) -> Result<StoredObject> {
-        let (kind, path) = self.locate_object(hash)?;
-        let (_, bytes) = read_verified_object(&path, kind, hash, true)?;
+        let (kind, paths) = self.locate_object(hash)?;
+        let (_, bytes) = verify_object_path_variants(&paths, kind, hash, true)?;
         Ok(StoredObject {
             kind,
             hash: hash.to_owned(),
@@ -193,8 +221,8 @@ impl ObjectStore {
     /// Verify and count an object through a fixed-size buffer. This is the
     /// metadata-only path used by raw `inspect`; it does not retain the body.
     pub fn inspect_by_hash(&self, hash: &str) -> Result<StoredObjectMetadata> {
-        let (kind, path) = self.locate_object(hash)?;
-        let (size_bytes, _) = read_verified_object(&path, kind, hash, false)?;
+        let (kind, paths) = self.locate_object(hash)?;
+        let (size_bytes, _) = verify_object_path_variants(&paths, kind, hash, false)?;
         Ok(StoredObjectMetadata {
             kind,
             hash: hash.to_owned(),
@@ -207,7 +235,7 @@ impl ObjectStore {
         fanout_path(base, hash)
     }
 
-    fn locate_object(&self, hash: &str) -> Result<(ObjectKind, PathBuf)> {
+    fn locate_object(&self, hash: &str) -> Result<(ObjectKind, Vec<PathBuf>)> {
         if !is_hash(hash) {
             return Err(KcsError::invalid_usage("invalid hash"));
         }
@@ -215,16 +243,39 @@ impl ObjectStore {
             if !self.validate_object_parent(kind, hash)? {
                 continue;
             }
-            let path = self.object_path(kind, hash)?;
+            let paths = self.existing_object_paths(kind, hash)?;
+            if !paths.is_empty() {
+                return Ok((kind, paths));
+            }
+        }
+        Err(KcsError::not_found(hash))
+    }
+
+    fn object_path_candidates(&self, kind: ObjectKind, hash: &str) -> Result<Vec<PathBuf>> {
+        let canonical = self.object_path(kind, hash)?;
+        #[cfg(windows)]
+        {
+            Ok(vec![canonical])
+        }
+        #[cfg(not(windows))]
+        {
+            let base = self.kcs_dir.join("objects").join(kind.directory());
+            Ok(vec![canonical, legacy_fanout_path(base, hash)?])
+        }
+    }
+
+    fn existing_object_paths(&self, kind: ObjectKind, hash: &str) -> Result<Vec<PathBuf>> {
+        let mut existing = Vec::new();
+        for path in self.object_path_candidates(kind, hash)? {
             match fs::symlink_metadata(&path) {
-                Ok(_) => return Ok((kind, path)),
+                Ok(_) => existing.push(path),
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
                 Err(error) => {
                     return Err(KcsError::io(error.to_string(), path.display().to_string()))
                 }
             }
         }
-        Err(KcsError::not_found(hash))
+        Ok(existing)
     }
 
     fn ensure_kind_base(&self, kind: ObjectKind) -> Result<()> {
@@ -235,10 +286,7 @@ impl ObjectStore {
 
     fn ensure_object_parent(&self, kind: ObjectKind, hash: &str) -> Result<()> {
         self.ensure_kind_base(kind)?;
-        let digest = hash
-            .strip_prefix("sha256:")
-            .filter(|digest| digest.len() == 64)
-            .ok_or_else(|| KcsError::invalid_usage("invalid hash"))?;
+        let digest = hash_path_component(hash)?;
         let kind_base = self.kcs_dir.join("objects").join(kind.directory());
         let first = kind_base.join(&digest[0..2]);
         let second = first.join(&digest[2..4]);
@@ -247,10 +295,7 @@ impl ObjectStore {
     }
 
     fn validate_object_parent(&self, kind: ObjectKind, hash: &str) -> Result<bool> {
-        let digest = hash
-            .strip_prefix("sha256:")
-            .filter(|digest| digest.len() == 64)
-            .ok_or_else(|| KcsError::invalid_usage("invalid hash"))?;
+        let digest = hash_path_component(hash)?;
         let objects = self.kcs_dir.join("objects");
         let kind_base = objects.join(kind.directory());
         let first = kind_base.join(&digest[0..2]);
@@ -320,6 +365,22 @@ fn read_verified_object(
         ));
     }
     Ok((total, bytes))
+}
+
+fn verify_object_path_variants(
+    paths: &[PathBuf],
+    kind: ObjectKind,
+    expected_hash: &str,
+    materialize: bool,
+) -> Result<(u64, Vec<u8>)> {
+    let primary = paths
+        .first()
+        .ok_or_else(|| KcsError::not_found(expected_hash))?;
+    let (size_bytes, bytes) = read_verified_object(primary, kind, expected_hash, materialize)?;
+    for duplicate in &paths[1..] {
+        read_verified_object(duplicate, kind, expected_hash, false)?;
+    }
+    Ok((size_bytes, bytes))
 }
 
 fn verify_existing_bytes(path: &Path, expected_hash: &str, expected: &[u8]) -> Result<()> {
@@ -753,12 +814,26 @@ pub fn is_hash(value: &str) -> bool {
             .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
 }
 
-pub fn fanout_path(base: impl AsRef<Path>, hash: &str) -> Result<PathBuf> {
+/// Map a logical `sha256:<hex>` identifier to its portable digest-only leaf.
+pub fn hash_path_component(hash: &str) -> Result<&str> {
     if !is_hash(hash) {
         return Err(KcsError::invalid_usage("invalid hash"));
     }
+    Ok(&hash["sha256:".len()..])
+}
 
-    let digest = &hash["sha256:".len()..];
+pub fn fanout_path(base: impl AsRef<Path>, hash: &str) -> Result<PathBuf> {
+    let digest = hash_path_component(hash)?;
+    Ok(base
+        .as_ref()
+        .join(&digest[0..2])
+        .join(&digest[2..4])
+        .join(digest))
+}
+
+#[cfg(not(windows))]
+fn legacy_fanout_path(base: impl AsRef<Path>, hash: &str) -> Result<PathBuf> {
+    let digest = hash_path_component(hash)?;
     Ok(base
         .as_ref()
         .join(&digest[0..2])
@@ -1119,5 +1194,107 @@ mod tests {
 
         let error = store.inspect_by_hash(&hash).unwrap_err();
         assert_eq!(error.error_code(), "KCS-E-STORE-CORRUPT-001");
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn legacy_prefixed_leaf_remains_readable_and_idempotent() {
+        let (_dir, store) = object_store();
+        let expected = b"legacy payload";
+        let hash = hash_bytes(expected);
+        store.ensure_object_parent(ObjectKind::Raw, &hash).unwrap();
+        let candidates = store
+            .object_path_candidates(ObjectKind::Raw, &hash)
+            .unwrap();
+        let canonical = &candidates[0];
+        let legacy = &candidates[1];
+        fs::write(legacy, expected).unwrap();
+
+        let read = store.read_by_hash(&hash).unwrap();
+        assert_eq!(read.bytes, expected);
+        let inspected = store.inspect_by_hash(&hash).unwrap();
+        assert_eq!(inspected.size_bytes, expected.len() as u64);
+
+        assert_eq!(store.write_raw(expected).unwrap(), hash);
+        let (streamed_hash, streamed_size) = store
+            .write_raw_reader(&mut Cursor::new(expected), expected.len() as u64)
+            .unwrap();
+        assert_eq!(streamed_hash, hash);
+        assert_eq!(streamed_size, expected.len() as u64);
+        assert!(!canonical.exists());
+        assert_eq!(fs::read(legacy).unwrap(), expected);
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn legacy_prefixed_leaves_resolve_for_every_object_kind() {
+        let (_dir, store) = object_store();
+        let cases: [(ObjectKind, &[u8]); 3] = [
+            (ObjectKind::Raw, b"legacy raw"),
+            (ObjectKind::Tree, b"legacy tree"),
+            (ObjectKind::Commit, b"legacy commit"),
+        ];
+
+        for (kind, expected) in cases {
+            let hash = hash_bytes(expected);
+            store.ensure_object_parent(kind, &hash).unwrap();
+            let candidates = store.object_path_candidates(kind, &hash).unwrap();
+            fs::write(&candidates[1], expected).unwrap();
+
+            let read = store.read_by_hash(&hash).unwrap();
+            assert_eq!(read.kind, kind);
+            assert_eq!(read.bytes, expected);
+            store.write_object_bytes(kind, &hash, expected).unwrap();
+            assert!(!candidates[0].exists());
+        }
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn matching_portable_and_legacy_leaves_are_accepted() {
+        let (_dir, store) = object_store();
+        let expected = b"duplicate payload";
+        let hash = hash_bytes(expected);
+        store.ensure_object_parent(ObjectKind::Raw, &hash).unwrap();
+        let candidates = store
+            .object_path_candidates(ObjectKind::Raw, &hash)
+            .unwrap();
+        fs::write(&candidates[0], expected).unwrap();
+        fs::write(&candidates[1], expected).unwrap();
+
+        assert_eq!(store.read_by_hash(&hash).unwrap().bytes, expected);
+        assert_eq!(
+            store.inspect_by_hash(&hash).unwrap().size_bytes,
+            expected.len() as u64
+        );
+        store.write_raw(expected).unwrap();
+        store
+            .write_raw_reader(&mut Cursor::new(expected), expected.len() as u64)
+            .unwrap();
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn conflicting_portable_and_legacy_leaves_fail_closed() {
+        let (_dir, store) = object_store();
+        let expected = b"expected";
+        let hash = hash_bytes(expected);
+        store.ensure_object_parent(ObjectKind::Raw, &hash).unwrap();
+        let candidates = store
+            .object_path_candidates(ObjectKind::Raw, &hash)
+            .unwrap();
+        fs::write(&candidates[0], expected).unwrap();
+        fs::write(&candidates[1], b"poisoned").unwrap();
+
+        for error in [
+            store.read_by_hash(&hash).unwrap_err(),
+            store.inspect_by_hash(&hash).unwrap_err(),
+            store.write_raw(expected).unwrap_err(),
+            store
+                .write_raw_reader(&mut Cursor::new(expected), expected.len() as u64)
+                .unwrap_err(),
+        ] {
+            assert_eq!(error.error_code(), "KCS-E-STORE-CORRUPT-001");
+        }
     }
 }

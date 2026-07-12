@@ -306,14 +306,26 @@ view (再生成可能な cache) であり正本ではない。
 
 ```text
 truth:
-  .kcs/objects/normalized_units/ab/cd/<raw_hash>.<tool_profile_hash>.g<gen>/
+  .kcs/objects/normalized_units/ab/cd/<raw64>.<tool64>.g<gen>/
 
 materialized view (cache):
-  .kcs/objects/normalized/ab/cd/<raw_hash>.<tool_profile_hash>.g<gen>.md
+  .kcs/objects/normalized/ab/cd/<raw64>.<tool64>.g<gen>.md
 
 virtual view:
   report.pdf.md
 ```
+
+`<raw64>` / `<tool64>` は論理 hash (`sha256:<64 lowercase hex>`) の digest 部分のみを使う
+canonical physical basename である。Windows で無効な `:` を物理名に含めず、論理 hash、JSON、refs、
+Evidence URI の identity は変更しない。新規の物理 object は canonical 名で作成する。
+
+旧 Unix store にある `sha256:` 付き physical leaf/basename は、内容 hash または manifest identity を
+照合した compatibility fallback として扱う。要求内容と完全一致すればその場で再利用し、通常の read/index は
+canonical への eager migration を行わない。normalized の同一 gen を更新する partial retry は、選択済みの
+legacy layout 内で instance/view を置き換えられる。事前の一括変換は不要。canonical / legacy の両方が存在する
+場合は両方を検証し、いずれかの不一致または競合を store corruption として fail closed する。これは物理ファイル名の portability correction であり、
+object hash 算出・論理 identity の変更や `kcs_format_version` の MAJOR bump ではない
+([03-data-model.md §2 / §8.1](03-data-model.md))。
 
 ---
 
@@ -728,7 +740,7 @@ canonical_text_hash              | (廃止)                               | rese
 canonical_hash                   | (廃止)                               | research/diff.md §17
 markdown_hash                    | (廃止)                               | research/diff.md §3
 Normalized-Hash: <Markdown header> | Tool-Profile-Hash: <Markdown header> | research/read_only.md §2
-.kcs/normalized/<path>.md        | .kcs/objects/normalized_units/ab/cd/<raw>.<tool>.g<gen>/ (正本) | research/kcs.md §11
+.kcs/normalized/<path>.md        | .kcs/objects/normalized_units/ab/cd/<raw64>.<tool64>.g<gen>/ (正本) | research/kcs.md §11
 unit_id                          | unit_key / unit_ref                 | 03-data-model.md §2.1
 last_indexed_git_commit          | (廃止: Git 連携は持たない)             | research/kcs.md §10
 output_hash (in normalization_runs) | (廃止)                            | research/hash.md §3
