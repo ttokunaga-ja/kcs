@@ -84,9 +84,11 @@ mod tests {
 
     #[test]
     fn absolute_is_kept() {
+        let absolute = std::env::temp_dir().join("kcs-xdg-absolute");
+        assert!(absolute.is_absolute());
         assert_eq!(
-            xdg_dir_from(Some(OsString::from("/abs/data"))),
-            Some(PathBuf::from("/abs/data"))
+            xdg_dir_from(Some(absolute.clone().into_os_string())),
+            Some(absolute)
         );
     }
 
@@ -98,9 +100,11 @@ mod tests {
         assert_eq!(home_dir_from(Some(OsString::from(""))), None);
         assert_eq!(home_dir_from(Some(OsString::from("rel/home"))), None);
         assert_eq!(home_dir_from(Some(OsString::from("./rel"))), None);
+        let absolute = std::env::temp_dir().join("kcs-home-absolute");
+        assert!(absolute.is_absolute());
         assert_eq!(
-            home_dir_from(Some(OsString::from("/home/u"))),
-            Some(PathBuf::from("/home/u"))
+            home_dir_from(Some(absolute.clone().into_os_string())),
+            Some(absolute)
         );
     }
 }
