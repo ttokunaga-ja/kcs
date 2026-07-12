@@ -12216,9 +12216,10 @@ fn cost_ledger_lock_path() -> PathBuf {
 }
 
 /// Device-local HMAC key that signs search cursors (O1(b)). Stored at
-/// `$XDG_DATA_HOME/kcs/cursor-key` (0600), generated from `/dev/urandom` on first
-/// use. Signing binds a cursor to this device so a caller cannot forge or tamper
-/// a token to jump scope or page — `query_hash` alone covers only public inputs.
+/// `$XDG_DATA_HOME/kcs/cursor-key` (0600), generated from the operating system's
+/// cryptographically secure random source on first use. Signing binds a cursor
+/// to this device so a caller cannot forge or tamper a token to jump scope or
+/// page — `query_hash` alone covers only public inputs.
 fn cursor_signing_key() -> Result<Vec<u8>> {
     let path = data_home().join("kcs/cursor-key");
     if let Ok(bytes) = fs::read(&path) {
@@ -12262,14 +12263,16 @@ fn cursor_signing_key() -> Result<Vec<u8>> {
     }
 }
 
-/// 32 fresh random bytes from `/dev/urandom` (available on the supported
-/// unix-like targets); the cursor key needs no CSPRNG crate.
+/// 32 fresh bytes from the operating system's cryptographically secure random
+/// source. `getrandom` selects the native source on each supported platform.
 fn random_key_32() -> Result<Vec<u8>> {
-    use std::io::Read;
     let mut buf = vec![0u8; 32];
-    fs::File::open("/dev/urandom")
-        .and_then(|mut file| file.read_exact(&mut buf))
-        .map_err(|err| KcsError::io(err.to_string(), "/dev/urandom".to_owned()))?;
+    getrandom::fill(&mut buf).map_err(|err| {
+        KcsError::io(
+            format!("operating system random source failed: {err}"),
+            "operating system random source",
+        )
+    })?;
     Ok(buf)
 }
 
