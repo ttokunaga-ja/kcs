@@ -676,9 +676,14 @@ impl WindowsFileInformation {
     fn is_regular_file(self) -> bool {
         self.file_attributes & (Self::DIRECTORY_ATTRIBUTE | Self::REPARSE_POINT_ATTRIBUTE) == 0
     }
+
+    fn is_real_directory(self) -> bool {
+        self.file_attributes & Self::DIRECTORY_ATTRIBUTE != 0
+            && self.file_attributes & Self::REPARSE_POINT_ATTRIBUTE == 0
+    }
 }
 
-#[cfg(any(test, windows))]
+#[cfg(test)]
 pub(crate) fn same_windows_file_identity_components(
     left: Option<WindowsFileInformation>,
     right: Option<WindowsFileInformation>,
@@ -743,6 +748,27 @@ fn windows_file_information(file: &File) -> Option<WindowsFileInformation> {
         information.nNumberOfLinks,
         information.dwFileAttributes,
     ))
+}
+
+/// Open a Windows directory without traversing its final reparse point and
+/// verify its handle attributes. `symlink_metadata().is_symlink()` alone does
+/// not cover every directory reparse-point kind (notably junctions).
+#[cfg(windows)]
+pub(crate) fn windows_directory_is_real(path: &Path) -> std::io::Result<bool> {
+    use std::os::windows::fs::OpenOptionsExt;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES,
+        FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+    };
+
+    let mut options = OpenOptions::new();
+    options
+        .read(true)
+        .access_mode(FILE_READ_ATTRIBUTES)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS);
+    let directory = options.open(path)?;
+    Ok(windows_file_information(&directory).is_some_and(WindowsFileInformation::is_real_directory))
 }
 
 fn corrupt_object_error(
@@ -1017,6 +1043,9 @@ mod tests {
             Some(reparse_point)
         ));
         assert!(!same_windows_cas_file_components(Some(single_link), None));
+        assert!(directory.is_real_directory());
+        assert!(!reparse_point.is_real_directory());
+        assert!(!single_link.is_real_directory());
     }
 
     #[cfg(windows)]

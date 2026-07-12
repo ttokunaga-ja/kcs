@@ -18,6 +18,7 @@ const KCS_CHILD_ENV_DENYLIST: &[&str] = &[
     "KCS_TEST_R13_2_AUTH",
     "KCS_TEST_R13_2_DECLARED",
     "KCS_TEST_R13_2_FALLBACK",
+    "KCS_TEST_WINDOWS_PROFILE",
 ];
 
 fn hermetic_kcs_command() -> Command {
@@ -2684,13 +2685,21 @@ fn f4_tag_rejects_reserved_head_and_hash_names() {
     let err = json_failure(&dir, &["tag", &hash_name], 2);
     assert_eq!(err["error_code"], "KCS-E-CONFIG-USAGE-001");
 
+    // Case variants normalize to the same reserved hash operand. This must be
+    // rejected semantically as a hash collision, not merely because `:` is an
+    // invalid portable-leaf character.
+    let uppercase_hash_name = format!("SHA256:{}", "A".repeat(64));
+    let err = json_failure(&dir, &["tag", &uppercase_hash_name], 2);
+    assert_eq!(err["error_code"], "KCS-E-CONFIG-USAGE-001");
+    assert!(err["message"].as_str().unwrap().contains("commit hash"));
+
     // A normal tag name still resolves HEAD and is created.
     let ok = json_success(&dir, &["tag", "v1"]);
     assert!(
         ok["commit_hash"].as_str().is_some(),
         "tag v1 should succeed: {ok}"
     );
-    assert!(dir.path().join(".kcs/refs/tags/v1").exists());
+    assert!(Path::new(ok["path"].as_str().unwrap()).is_file());
 }
 
 // (e) / N5: after `reindex --force`, a pointer that keeps the OLD commit but

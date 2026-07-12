@@ -34,14 +34,20 @@ impl TreeEntry {
             raw_hash: raw_hash.into(),
             normalize: None,
         };
-        entry.validate()?;
+        entry.validate_materialization_path()?;
         Ok(entry)
     }
 
     pub fn validate(&self) -> Result<()> {
-        if !is_platform_safe_direct_child(&self.path) {
+        // Persisted tree paths are logical names. Validate their immutable schema
+        // independently of the host that happens to read the history: a Unix tree
+        // containing `:` / `?` / `CON` must remain inspectable on Windows. Any
+        // operation that materializes a logical name (new snapshot / restore) must
+        // additionally apply the destination platform rule before constructing a
+        // physical path.
+        if !is_logical_direct_child(&self.path) {
             return Err(KcsError::path(
-                "tree entry path must be a platform-safe direct child file name",
+                "tree entry path must be a logical direct child file name",
                 self.path.clone(),
             ));
         }
@@ -60,29 +66,54 @@ impl TreeEntry {
         }
         Ok(())
     }
+
+    /// Validate this logical entry before using `path` as a physical leaf on the
+    /// current host. Historical reads use [`Self::validate`] only; new snapshots
+    /// and restore destinations must call this stricter boundary before joining.
+    pub fn validate_materialization_path(&self) -> Result<()> {
+        self.validate()?;
+        if !is_platform_safe_direct_child(&self.path) {
+            return Err(KcsError::path(
+                "tree entry path is not safe on the current scope filesystem",
+                self.path.clone(),
+            ));
+        }
+        Ok(())
+    }
 }
 
 /// Preserve names valid on the current scope filesystem while rejecting every
 /// component that can escape a direct child on that platform. In particular,
 /// `:` and `\` remain legitimate Unix filename bytes, but are path/ADS syntax on
 /// Windows and are rejected there.
+fn is_logical_direct_child(path: &str) -> bool {
+    if path.is_empty() || path == "." || path == ".." || path.contains('/') || path.contains('\0') {
+        return false;
+    }
+
+    true
+}
+
 fn is_platform_safe_direct_child(path: &str) -> bool {
-    if path.is_empty()
-        || path == "."
-        || path == ".."
-        || path.contains('/')
-        || Path::new(path).is_absolute()
-    {
+    if !is_logical_direct_child(path) || Path::new(path).is_absolute() {
         return false;
     }
 
     #[cfg(windows)]
-    if path.contains('\\') || path.contains(':') {
+    if crate::portable::portable_leaf_error(path).is_some() {
         return false;
     }
 
     let mut components = Path::new(path).components();
     matches!(components.next(), Some(Component::Normal(_))) && components.next().is_none()
+}
+
+/// Whether a persisted logical tree path can safely become a direct physical
+/// child on the current host. Read-only callers use this to avoid interpreting a
+/// Unix-only historical name as Windows path syntax.
+#[must_use]
+pub fn is_materializable_direct_child(path: &str) -> bool {
+    is_platform_safe_direct_child(path)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -125,6 +156,9 @@ impl TreeObject {
 }
 
 pub fn build_tree(mut entries: Vec<TreeEntry>) -> Result<TreeObject> {
+    for entry in &entries {
+        entry.validate_materialization_path()?;
+    }
     entries.sort_by(|a, b| a.path.as_bytes().cmp(b.path.as_bytes()));
     let tree = TreeObject {
         entries,
@@ -447,6 +481,27 @@ mod tests {
         #[cfg(not(windows))]
         for path in ["report:2026.md", r"a\b.md"] {
             assert!(TreeEntry::raw_file(path, RAW_HASH).is_ok(), "{path:?}");
+        }
+
+        // Persisted Unix history is logical data and remains readable on every
+        // host, even when the original name cannot be materialized on Windows.
+        for path in [
+            "CON",
+            "AUX.txt",
+            "question?.md",
+            "report:2026.md",
+            "trailing.",
+            "trailing ",
+            r"a\b.md",
+        ] {
+            let historical: TreeObject = serde_json::from_value(json!({
+                "object_type": "tree",
+                "entries": [{"path":path,"type":"file","raw_hash":RAW_HASH}]
+            }))
+            .unwrap();
+            assert!(historical.validate().is_ok(), "{path:?}");
+            #[cfg(windows)]
+            assert!(!is_materializable_direct_child(path), "{path:?}");
         }
     }
 

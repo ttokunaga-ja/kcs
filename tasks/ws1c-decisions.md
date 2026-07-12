@@ -285,3 +285,29 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     so two distinct `.kcs` at the newest `last_seen_at` are ambiguous
     (`KCS-E-EVIDENCE-SCOPE-AMBIGUOUS-001`, exit 4); an unresolvable scope stays `unreachable`
     (partial failure), unchanged.
+
+## Windows portability closure (2026-07-13)
+
+60. Windows user-directory fallback. Absolute `XDG_*` overrides remain highest priority and relative
+    values remain invalid. An absolute `HOME` is next. On Windows only, missing/invalid `HOME` falls
+    back to `SHGetKnownFolderPath(FOLDERID_Profile)` and keeps the documented `.config`,
+    `.local/share`, and `.cache` suffixes. Unix keeps the existing fail-closed contract. A registry
+    path that has no absolute base is now an error even through the library API; it never degrades
+    to the current directory.
+61. Open/view cache leaves are derived, not copied. The physical leaf is fixed ASCII
+    `open-<sha256(logical basename)>` with only a separately validated short ASCII extension kept for
+    OS association. This handles reserved devices, ADS colon, forbidden punctuation, and trailing
+    dot/space without placing the logical basename on disk.
+62. New tags require one host-independent portable logical-leaf rule and use
+    `refs/tags-v1/tag-<sha256(NFC + Unicode lowercase)>` as the canonical physical ref. The
+    versioned directory is disjoint from legacy `refs/tags/<logical-name>`, so an old raw tag that
+    looks like `tag-<digest64>` cannot alias another tag's canonical ref. Case/normalization variants
+    collide on every OS and `HEAD` case variants remain reserved. Existing raw-name Unix refs remain
+    a bounded, validated read fallback; multiple canonical/legacy representations must agree or the
+    store fails closed.
+63. Persisted tree-entry paths are validated as logical direct-child names independently of the
+    reader OS. New snapshots and future restore destinations apply the current filesystem's stricter
+    materialization rule before constructing a path. This preserves Windows reads of Unix history
+    containing names such as `CON`, `?`, `:`, trailing dot/space, or a literal backslash without
+    permitting those names to escape or materialize unsafely. Read-only status/diff retains the
+    logical `relative_path` but omits the absolute physical `path` when the host cannot materialize it.

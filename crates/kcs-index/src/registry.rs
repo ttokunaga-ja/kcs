@@ -32,15 +32,19 @@ pub struct RegistryDb {
 
 /// `$XDG_DATA_HOME/kcs/scope-registry.sqlite`, falling back to
 /// `$HOME/.local/share/kcs/scope-registry.sqlite` (03-data-model.md §4).
-#[must_use]
-pub fn default_registry_path() -> PathBuf {
+pub fn default_registry_path() -> Result<PathBuf> {
     // R12-6 / R13-6: honor the XDG validity rules AND require an absolute `HOME`
     // for the fallback (empty/relative treated as unset), so neither a bad
     // `XDG_DATA_HOME` nor a bad `HOME` lands the registry in a CWD-relative `kcs/`.
     let data_home = kcs_core::xdg::xdg_dir("XDG_DATA_HOME")
         .or_else(|| kcs_core::xdg::home_dir().map(|home| home.join(".local/share")))
-        .unwrap_or_else(|| PathBuf::from("."));
-    data_home.join("kcs/scope-registry.sqlite")
+        .ok_or_else(|| {
+            crate::IndexError::Schema(
+                "cannot resolve an absolute user data directory; refusing a CWD-relative registry"
+                    .to_owned(),
+            )
+        })?;
+    Ok(data_home.join("kcs/scope-registry.sqlite"))
 }
 
 impl RegistryDb {
@@ -84,7 +88,7 @@ impl RegistryDb {
     }
 
     pub fn open_default() -> Result<Self> {
-        Self::open(default_registry_path())
+        Self::open(default_registry_path()?)
     }
 
     /// R15-3: retire every registration for `kcs_path` whose `scope_id` differs

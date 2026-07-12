@@ -38,6 +38,7 @@ const KCS_CHILD_ENV_DENYLIST: &[&str] = &[
     "KCS_TEST_R13_2_AUTH",
     "KCS_TEST_R13_2_DECLARED",
     "KCS_TEST_R13_2_FALLBACK",
+    "KCS_TEST_WINDOWS_PROFILE",
 ];
 
 fn hermetic_kcs_command() -> Command {
@@ -2444,6 +2445,7 @@ fn r13_5_reinit_on_unrecoverable_corruption_exits_nonzero() {
 /// used to scatter into a CWD-relative `kcs/` (registry, cost ledger, logs, the
 /// 0600 cursor-signing key) and the device budget cap silently split per working
 /// directory. Now the startup guard refuses to run and writes nothing under CWD.
+#[cfg(not(windows))]
 fn kcs_no_base<const N: usize>(work: &Path, home: Option<&str>, args: [&str; N]) -> Command {
     let mut command = hermetic_kcs_command();
     command
@@ -2460,6 +2462,7 @@ fn kcs_no_base<const N: usize>(work: &Path, home: Option<&str>, args: [&str; N])
 }
 
 #[test]
+#[cfg(not(windows))]
 fn r13_6_unset_home_no_xdg_errors_and_writes_nothing_under_cwd() {
     for (label, home) in [
         ("unset", None),

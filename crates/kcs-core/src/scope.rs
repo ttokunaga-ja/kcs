@@ -18,9 +18,13 @@ use crate::cas::{
     CAS_STREAM_BUFFER_BYTES, MAX_RAW_OBJECT_BYTES,
 };
 use crate::dag::{
-    build_tree, CommitObject, CommitStats, CommitType, NormalizeRef, TreeEntry, TreeObject,
+    build_tree, is_materializable_direct_child, CommitObject, CommitStats, CommitType,
+    NormalizeRef, TreeEntry, TreeObject,
 };
 use crate::error::{IoResultExt, KcsError, Result};
+use crate::portable::{
+    portable_collision_key, portable_leaf_error, portable_tag_leaf, PORTABLE_TAGS_DIRECTORY,
+};
 use crate::schema::{validate_json_schema, SchemaKind};
 use crate::ExitCode;
 
@@ -29,6 +33,8 @@ pub const DEFAULT_MAX_ARCHIVE_FILE_BYTES: u64 = MAX_RAW_OBJECT_BYTES;
 pub const DEFAULT_MAX_ARCHIVE_SCOPE_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 pub const MAX_TREE_ENTRIES: usize = 10_000;
 pub const MAX_COMMIT_PARENTS: usize = 64;
+const MAX_TAG_REFS: usize = 100_000;
+const MAX_TAG_REF_BYTES: u64 = 128;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ArchiveLimits {
@@ -87,7 +93,8 @@ pub struct WorkingTree {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct FileStatus {
-    pub path: PathBuf,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<PathBuf>,
     pub relative_path: String,
     /// The working-tree-vs-HEAD classification (`new`/`modified`/`deleted`/
     /// `unchanged`). R15-4: `None` (field omitted) when HEAD is shallow — the prior
@@ -155,7 +162,8 @@ pub struct LogReport {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct DiffEntry {
-    pub path: PathBuf,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<PathBuf>,
     pub relative_path: String,
     pub change: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -200,6 +208,7 @@ impl Repository {
             kcs_dir.join("objects/commits"),
             kcs_dir.join("refs/heads"),
             kcs_dir.join("refs/tags"),
+            kcs_dir.join("refs").join(PORTABLE_TAGS_DIRECTORY),
             kcs_dir.join("logs"),
         ] {
             fs::create_dir_all(&dir).kcs_io(&dir)?;
@@ -544,7 +553,7 @@ impl Repository {
                 )
             };
             statuses.push(FileStatus {
-                path: self.root.join(&path),
+                path: is_materializable_direct_child(&path).then(|| self.root.join(&path)),
                 relative_path: path.clone(),
                 status,
                 raw_hash: current_map
@@ -833,7 +842,7 @@ impl Repository {
                 _ => continue,
             };
             changes.push(DiffEntry {
-                path: self.root.join(&path),
+                path: is_materializable_direct_child(&path).then(|| self.root.join(&path)),
                 relative_path: path.clone(),
                 change: change.to_owned(),
                 old_raw_hash: a_map.get(&path).cloned(),
@@ -891,10 +900,16 @@ impl Repository {
         // returning a success that silently does nothing. (This check is specific
         // to tag *names*; `validate_ref_operand` stays shared with `resolve_commit`,
         // which must still accept `HEAD`/hash as commit operands.)
-        if name == "HEAD" || is_hash(name) {
+        let collision_key = portable_collision_key(name);
+        if collision_key == "head" || is_hash(&collision_key) {
             return Err(KcsError::invalid_usage(
-                "tag name must not be `HEAD` or a commit hash (it would be unreachable)",
+                "tag name collides with `HEAD` or a commit hash",
             ));
+        }
+        if let Some(reason) = portable_leaf_error(name) {
+            return Err(KcsError::invalid_usage(format!(
+                "tag name is not a portable filesystem leaf: {reason}"
+            )));
         }
         let _lock = StoreLock::acquire(&self.kcs_dir)?;
         let commit_hash = match commit {
@@ -922,15 +937,17 @@ impl Repository {
             }
             Err(error) => return Err(error),
         }
-        let path = self.kcs_dir.join("refs/tags").join(name);
-        if path.exists() {
+        let legacy_tags_dir = self.kcs_dir.join("refs/tags");
+        let canonical_tags_dir = ensure_portable_tags_directory(&self.kcs_dir)?;
+        if !matching_tag_ref_paths(&legacy_tags_dir, &canonical_tags_dir, name)?.is_empty() {
             return Err(KcsError::new(
                 "KCS-E-COMMIT-TAG-001",
-                "tag already exists",
+                "tag already exists (tag names collide case-insensitively)",
                 json!({ "tag": name }),
                 ExitCode::InvalidUsage,
             ));
         }
+        let path = canonical_tags_dir.join(portable_tag_leaf(name));
         atomic_write(&path, commit_hash.as_bytes())?;
         Ok(commit_hash)
     }
@@ -964,10 +981,24 @@ impl Repository {
             }
             return Ok(value.to_owned());
         }
-        let tag = self.kcs_dir.join("refs/tags").join(value);
-        if tag.is_file() {
-            let hash = fs::read_to_string(&tag).kcs_io(&tag)?;
-            let hash = hash.trim().to_owned();
+        let normalized_operand = portable_collision_key(value);
+        if normalized_operand == "head" || is_hash(&normalized_operand) {
+            return Err(KcsError::invalid_usage(
+                "commit reference collides with a reserved operand",
+            ));
+        }
+        let legacy_tags_dir = self.kcs_dir.join("refs/tags");
+        let canonical_tags_dir = self.kcs_dir.join("refs").join(PORTABLE_TAGS_DIRECTORY);
+        let tag_paths = matching_tag_ref_paths(&legacy_tags_dir, &canonical_tags_dir, value)?;
+        if !tag_paths.is_empty() {
+            let mut hashes = BTreeSet::new();
+            for tag in tag_paths {
+                hashes.insert(read_tag_ref(&tag)?);
+            }
+            if hashes.len() != 1 {
+                return Err(tag_ref_conflict(value));
+            }
+            let hash = hashes.into_iter().next().expect("one tag hash");
             // R17-5: a tag whose target commit object is shallow (discarded / corrupt)
             // folds into COMMIT-SHALLOW too, for the same reason as the hash-literal
             // branch above.
@@ -1910,6 +1941,189 @@ fn validate_ref_operand(value: &str) -> Result<()> {
         ));
     }
     Ok(())
+}
+
+/// Canonical hashed refs and legacy raw-name refs are both accepted on read.
+/// They live in disjoint directories so a legacy raw name can never alias a
+/// canonical physical leaf. New names collide by NFC + Unicode lowercase on
+/// every host. Legacy enumeration is bounded so a hostile refs directory cannot
+/// amplify work.
+fn matching_tag_ref_paths(
+    legacy_tags_dir: &Path,
+    canonical_tags_dir: &Path,
+    logical_name: &str,
+) -> Result<Vec<PathBuf>> {
+    let canonical = portable_tag_leaf(logical_name);
+    let collision_key = portable_collision_key(logical_name);
+    let mut matches = Vec::new();
+
+    if validate_tag_refs_directory(canonical_tags_dir, true)? {
+        let canonical_path = canonical_tags_dir.join(&canonical);
+        match fs::symlink_metadata(&canonical_path) {
+            Ok(_) => matches.push(canonical_path),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(KcsError::io(
+                    error.to_string(),
+                    canonical_path.display().to_string(),
+                ))
+            }
+        }
+    }
+
+    validate_tag_refs_directory(legacy_tags_dir, false)?;
+    let entries = fs::read_dir(legacy_tags_dir).kcs_io(legacy_tags_dir)?;
+    for (index, entry) in entries.enumerate() {
+        if index >= MAX_TAG_REFS {
+            return Err(KcsError::new(
+                "KCS-E-STORE-CORRUPT-001",
+                "tag ref count exceeds the bounded store limit",
+                json!({ "path": legacy_tags_dir }),
+                ExitCode::PermanentFailure,
+            ));
+        }
+        let entry = entry.kcs_io(legacy_tags_dir)?;
+        let file_name = entry.file_name();
+        let Some(file_name) = file_name.to_str() else {
+            return Err(KcsError::new(
+                "KCS-E-STORE-CORRUPT-001",
+                "tag ref has a non-UTF-8 physical name",
+                json!({ "path": entry.path() }),
+                ExitCode::PermanentFailure,
+            ));
+        };
+        if portable_collision_key(file_name) == collision_key {
+            matches.push(entry.path());
+        }
+    }
+    matches.sort();
+    matches.dedup();
+    Ok(matches)
+}
+
+fn ensure_portable_tags_directory(kcs_dir: &Path) -> Result<PathBuf> {
+    let refs_dir = kcs_dir.join("refs");
+    validate_tag_refs_directory(&refs_dir, false)?;
+    let legacy_tags_dir = refs_dir.join("tags");
+    validate_tag_refs_directory(&legacy_tags_dir, false)?;
+    let canonical_tags_dir = refs_dir.join(PORTABLE_TAGS_DIRECTORY);
+    if !validate_tag_refs_directory(&canonical_tags_dir, true)? {
+        match fs::create_dir(&canonical_tags_dir) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => {
+                return Err(KcsError::io(
+                    error.to_string(),
+                    canonical_tags_dir.display().to_string(),
+                ))
+            }
+        }
+        validate_tag_refs_directory(&canonical_tags_dir, false)?;
+    }
+    Ok(canonical_tags_dir)
+}
+
+/// Validate a store-owned tag directory without following a symlink/junction.
+/// `allow_missing` supports opening pre-portability stores that do not yet have
+/// the versioned canonical directory; the first tag write creates it under the
+/// store lock and validates it again.
+fn validate_tag_refs_directory(path: &Path, allow_missing: bool) -> Result<bool> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound && allow_missing => {
+            return Ok(false)
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Err(tag_ref_corrupt(path, "tag refs directory is missing"))
+        }
+        Err(error) => return Err(KcsError::io(error.to_string(), path.display().to_string())),
+    };
+    if metadata.file_type().is_symlink() || !metadata.file_type().is_dir() {
+        return Err(unsafe_store_error(
+            path,
+            "tag refs path must be a real directory inside the store",
+        ));
+    }
+    #[cfg(windows)]
+    if !crate::cas::windows_directory_is_real(path)
+        .map_err(|error| KcsError::io(error.to_string(), path.display().to_string()))?
+    {
+        return Err(unsafe_store_error(
+            path,
+            "tag refs path must not be a Windows reparse point",
+        ));
+    }
+    let resolved = path.canonicalize().kcs_io(path)?;
+    if resolved != path {
+        return Err(unsafe_store_error(
+            path,
+            "tag refs directory resolves outside its store path",
+        ));
+    }
+    Ok(true)
+}
+
+fn read_tag_ref(path: &Path) -> Result<String> {
+    let listed = fs::symlink_metadata(path).kcs_io(path)?;
+    if !listed.file_type().is_file() || listed.len() > MAX_TAG_REF_BYTES {
+        return Err(tag_ref_corrupt(
+            path,
+            "tag ref is not a bounded regular file",
+        ));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if listed.nlink() != 1 {
+            return Err(tag_ref_corrupt(
+                path,
+                "tag ref has an unexpected hard-link count",
+            ));
+        }
+    }
+    let file = open_scope_file_nofollow(path)?;
+    let opened = file.metadata().kcs_io(path)?;
+    if !opened.is_file() || opened.len() != listed.len() || opened.len() > MAX_TAG_REF_BYTES {
+        return Err(tag_ref_corrupt(path, "tag ref changed while opening"));
+    }
+    let mut bytes = Vec::new();
+    file.take(MAX_TAG_REF_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .kcs_io(path)?;
+    if bytes.len() as u64 > MAX_TAG_REF_BYTES {
+        return Err(tag_ref_corrupt(
+            path,
+            "tag ref exceeds the bounded size limit",
+        ));
+    }
+    let text =
+        std::str::from_utf8(&bytes).map_err(|_| tag_ref_corrupt(path, "tag ref is not UTF-8"))?;
+    let hash = text.trim();
+    if !is_hash(hash) {
+        return Err(tag_ref_corrupt(
+            path,
+            "tag ref target is not a canonical commit hash",
+        ));
+    }
+    Ok(hash.to_owned())
+}
+
+fn tag_ref_corrupt(path: &Path, message: &str) -> KcsError {
+    KcsError::new(
+        "KCS-E-STORE-CORRUPT-001",
+        message,
+        json!({ "path": path }),
+        ExitCode::PermanentFailure,
+    )
+}
+
+fn tag_ref_conflict(logical_name: &str) -> KcsError {
+    KcsError::new(
+        "KCS-E-STORE-CORRUPT-001",
+        "canonical and legacy tag refs disagree",
+        json!({ "tag": logical_name }),
+        ExitCode::PermanentFailure,
+    )
 }
 
 fn data_home() -> PathBuf {

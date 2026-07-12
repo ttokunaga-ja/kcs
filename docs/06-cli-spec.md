@@ -48,6 +48,12 @@ kcs evidence retarget <pointer> [--latest|--at <commit>]  # 設計確定後 (09-
 
 本節が CLI コマンドの **正本一覧** である。他 spec が新しいコマンド・フラグに言及する場合、本節への追加を伴う (破壊的変更扱い)。
 
+`kcs tag` の新規 `<name>` は OS 非依存の portable leaf 規則に従い、Windows 予約名・禁止文字・
+末尾 dot/space を拒否する。NFC 正規化 + Unicode lowercase が同じ tag は case-insensitive collision
+として重複作成を拒否し、`HEAD` の case variant は予約する。canonical ref は legacy raw-name ref と
+分離した `refs/tags-v1/tag-<digest64>` に保存する。
+物理 ref leaf と legacy read 規則は [03-data-model.md §2](03-data-model.md) を正本とする。
+
 ## 1.1 open の原本解決
 
 `kcs open <pointer|chunk_hash|raw_hash>` は以下の順で「開く対象」を決める:
@@ -58,9 +64,10 @@ kcs evidence retarget <pointer> [--latest|--at <commit>]  # 設計確定後 (09-
    現在の working tree に同一 raw_hash を持つファイルが存在すれば (path_at_commit と
    異なる path でもよい。リネーム済みケース)、その実ファイルを OS 規定アプリで開く
 3. 一時展開 (working tree に存在しない = 削除済み・過去版・raw_hash 直指定):
-   raw object を ~/.cache/kcs/open/<raw_hash 先頭 12 桁>/<path_at_commit の basename> に
+   raw object を ~/.cache/kcs/open/<raw_hash digest64>/<basename から導出した portable leaf> に
    read-only で展開し、それを OS 規定アプリで開く。basename の拡張子により OS の
-   アプリ関連付けを機能させる (path_at_commit が無い場合は kind から推定した拡張子)
+   アプリ関連付けを機能させるが、元 basename 自体は物理名に使用しない
+   (path_at_commit が無い場合は kind から推定した拡張子)
 4. raw object が tombstoned / not_found → §7 の規約どおり exit 4
 ```
 
