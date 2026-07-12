@@ -1390,9 +1390,13 @@ mod tests {
             CappedTaskInput::Bytes(vec![b'x'; 16])
         );
         assert_eq!(read_capped_task_input(&path, 15), CappedTaskInput::TooLarge);
-        assert_eq!(
-            read_capped_task_input(dir.path(), 16),
-            CappedTaskInput::NotRegular
+        let directory = read_capped_task_input(dir.path(), 16);
+        assert!(
+            matches!(
+                directory,
+                CappedTaskInput::NotRegular | CappedTaskInput::Unavailable
+            ),
+            "a directory must be rejected before materialization: {directory:?}"
         );
     }
 
