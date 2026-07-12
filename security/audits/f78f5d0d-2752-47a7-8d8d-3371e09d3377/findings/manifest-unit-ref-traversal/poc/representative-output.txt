@@ -1,0 +1,14 @@
+python3 manifest_unit_ref_regression.py --case all
+[absolute] unit_ref=<tmp>/other-scope/victim-unit
+[absolute] selected=<tmp>/other-scope/victim-unit.json
+[absolute] contained_in_instance=false
+[absolute] vulnerable_loader_marker=True
+[absolute] fixed_loader_rejected=non-canonical or mismatched unit_ref
+[parent] unit_ref=../../../../../../other-scope/victim-unit
+[parent] selected=<tmp>/other-scope/victim-unit.json
+[parent] contained_in_instance=false
+[parent] vulnerable_loader_marker=True
+[parent] fixed_loader_rejected=non-canonical or mismatched unit_ref
+[control] canonical_unit_ref=a2a5535cfd14b3dd
+[control] fixed_loader_accepted=true
+[+] all bounded regression checks passed

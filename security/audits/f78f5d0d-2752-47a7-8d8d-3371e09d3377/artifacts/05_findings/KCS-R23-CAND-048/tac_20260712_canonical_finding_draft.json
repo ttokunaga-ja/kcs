@@ -1,0 +1,231 @@
+{
+  "affected_locations": [
+    {
+      "label": "task reservation fields",
+      "lines": "41-74,129-186",
+      "path": "crates/kcs-pipeline/src/task.rs"
+    },
+    {
+      "label": "reclaim trigger",
+      "lines": "8987-9037",
+      "path": "crates/kcs-cli/src/main.rs"
+    },
+    {
+      "label": "credit construction",
+      "lines": "9977-9996",
+      "path": "crates/kcs-cli/src/main.rs"
+    },
+    {
+      "label": "accounting sink",
+      "lines": "10226-10261",
+      "path": "crates/kcs-cli/src/main.rs"
+    },
+    {
+      "label": "ledger validation",
+      "lines": "96-200",
+      "path": "crates/kcs-pipeline/src/budget.rs"
+    }
+  ],
+  "attackPath": {
+    "dataflow": {
+      "evidenceRefs": [
+        "task-reservation-fields",
+        "task-loader-shape-only",
+        "orphan-reclaim-sweep",
+        "credit-construction",
+        "net-spend-subtraction"
+      ],
+      "outcome": "real current-month spend is understated, reopening capacity for later operator-authorized paid work",
+      "sink": "device-global reclaim ledger and budget netting calculation",
+      "source": "caller-shaped `reserved_usd` and `reserved_month` in adopted task state",
+      "summary": "persisted task reservation fields -> `TaskStore::all()` -> orphan sweep -> `reclaim_entry_for()` -> reclaim ledger -> `net_monthly_spent()`"
+    },
+    "evidenceRefs": [
+      "orphan-reclaim-sweep",
+      "credit-construction",
+      "net-spend-subtraction"
+    ],
+    "impact": {
+      "level": "high",
+      "why": "The accounting bypass can weaken device or adapter monetary caps and permit additional billable operations under the victim user context."
+    },
+    "likelihood": {
+      "level": "medium",
+      "why": "Adoption of lower-trust state, suitable orphan shape, existing gross spend, and later authorized online execution are all required."
+    },
+    "limitations": [
+      "A reclaim larger than gross spend triggers the existing fail-closed fallback.",
+      "The credit does not itself disclose secrets or send network traffic.",
+      "Independent folder, adapter, network, and secret controls can still block later work."
+    ],
+    "reachability": {
+      "attacker": "lower-trust contributor to copied, shared, or preseeded KCS task state",
+      "entrypoint": "scope-local `tasks.jsonl` consumed by ordinary indexing",
+      "outcome": "budget capacity can be reopened without a matching authentic reservation",
+      "summary": "The attacker needs a supplied-state adoption path, a reclaimable failed online task shape, existing matching or device-wide gross spend, and later victim-authorized online work."
+    },
+    "summary": "A lower-trust contributor supplies an adopted store with a schema-valid failed online task carrying forged reservation fields. The victim runs indexing, KCS retires the orphan, appends a reclaim row, and later budget checks subtract the unsupported credit from genuine spend."
+  },
+  "candidate_id": "KCS-R23-CAND-048",
+  "codeEvidence": [
+    {
+      "code": "#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]\npub struct TaskDescriptor {\n    pub task_id: String,\n    #[serde(rename = \"type\")]\n    pub task_type: TaskType,\n    pub input_path: String,\n    pub input_hash: String,\n    pub output_ref: String,\n    pub status: TaskStatus,\n    pub fallback_reason: Option<String>,\n    #[serde(default, skip_serializing_if = \"Option::is_none\")]\n    pub reserved_usd: Option<f64>,\n    #[serde(default, skip_serializing_if = \"Option::is_none\")]\n    pub reserved_month: Option<String>,\n}",
+      "endLine": 74,
+      "explanation": "A supplied task record can carry `reserved_usd` and `reserved_month` as ordinary serialized fields alongside attacker-shaped task metadata.",
+      "id": "task-reservation-fields",
+      "label": "Task records carry mutable reservation stamps",
+      "language": "rust",
+      "path": "crates/kcs-pipeline/src/task.rs",
+      "role": "user_input",
+      "startLine": 41
+    },
+    {
+      "code": "let descriptor: TaskDescriptor = serde_json::from_str(&line).map_err(|err| {\n    PipelineError::corrupt(self.path.display().to_string(), err.to_string())\n})?;\nif !is_scope_local_file_name(&descriptor.input_path) {\n    return Err(PipelineError::path(descriptor.input_path));\n}\nif !kcs_core::cas::is_hash(&descriptor.input_hash) {\n    return Err(PipelineError::corrupt(\n        self.path.display().to_string(),\n        format!(\"task input_hash is not a valid hash: {}\", descriptor.input_hash),\n    ));\n}\nby_id.insert(descriptor.task_id.clone(), descriptor);",
+      "endLine": 186,
+      "explanation": "`TaskStore::all()` rejects out-of-scope paths and malformed hashes, but it does not bind reservation stamps to a trusted charge or reservation identity.",
+      "id": "task-loader-shape-only",
+      "label": "Task loading checks path and hash shape only",
+      "language": "rust",
+      "path": "crates/kcs-pipeline/src/task.rs",
+      "role": "entrypoint",
+      "startLine": 129
+    },
+    {
+      "code": "let orphaned = task.task_type == TaskType::Markdownize\n    && task.output_ref == placeholder_output_ref\n    && task.status == TaskStatus::Failed\n    && is_reservation_bearing_send_failure(task)\n    && !live_paths.contains(task.input_path.as_str());\nif let Some(entry) = retire_online_task_reclaiming(\n    task,\n    &reservation_scope_id,\n    markdown_adapter_kind,\n) {\n    orphan_reclaims.push(entry);\n}",
+      "endLine": 9037,
+      "explanation": "A schema-valid failed online task whose path is no longer live reaches `retire_online_task_reclaiming()` and can contribute a reclaim row.",
+      "id": "orphan-reclaim-sweep",
+      "label": "Index orphan sweep selects failed online tasks",
+      "language": "rust",
+      "path": "crates/kcs-cli/src/main.rs",
+      "role": "propagation",
+      "startLine": 8987
+    },
+    {
+      "code": "match (task.reserved_usd, task.reserved_month.clone()) {\n    (Some(usd), Some(month)) => Some(MonthlyCostLedgerEntry {\n        month,\n        scope_id: reservation_scope_id.to_owned(),\n        adapter_kind: adapter_kind.to_owned(),\n        usd,\n    }),\n    _ => None,\n}",
+      "endLine": 9996,
+      "explanation": "`reclaim_entry_for()` creates a positive reclaim credit from task-supplied amount and month without checking charge identity, provenance, or once-only consumption.",
+      "id": "credit-construction",
+      "label": "Reclaim row copies amount and month from the task",
+      "language": "rust",
+      "path": "crates/kcs-cli/src/main.rs",
+      "role": "root_control",
+      "startLine": 9977
+    },
+    {
+      "code": "if !entry.usd.is_finite() || entry.usd < 0.0 {\n    return Err(PipelineError::corrupt(\n        self.path.display().to_string(),\n        format!(\n            \"cost-ledger usd must be finite and non-negative: {}\",\n            entry.usd\n        ),\n    ));\n}\nlet mut file = OpenOptions::new()\n    .create(true)\n    .append(true)\n    .open(&self.path)?;",
+      "endLine": 126,
+      "explanation": "A forged reclaim amount that is finite and non-negative satisfies the shared ledger validation.",
+      "id": "positive-row-acceptance",
+      "label": "Ledger validation accepts finite non-negative credits",
+      "language": "rust",
+      "path": "crates/kcs-pipeline/src/budget.rs",
+      "role": "sink",
+      "startLine": 96
+    },
+    {
+      "code": "let gross = cost_ledger\n    .monthly_total_for_adapter(month, scope_id, adapter_kind)?;\nlet reclaimed = cost_ledger\n    .reclaim_ledger()\n    .monthly_total_for_adapter(month, scope_id, adapter_kind)?;\nlet net = gross - reclaimed;\nif net < -1e-9 {\n    return Ok(gross.max(0.0));\n}\nOk(net.max(0.0))",
+      "endLine": 10261,
+      "explanation": "When the forged credit is smaller than unrelated gross spend, net spend remains non-negative and the credit lowers enforced spend.",
+      "id": "net-spend-subtraction",
+      "label": "Budget enforcement subtracts reclaim credits from gross spend",
+      "language": "rust",
+      "path": "crates/kcs-cli/src/main.rs",
+      "role": "outcome",
+      "startLine": 10235
+    }
+  ],
+  "confidence": "high",
+  "confidence_score": 0.96,
+  "coordinator_review": {
+    "notes": "Awaiting parent coordinator acceptance.",
+    "reviewer": null,
+    "status": "pending"
+  },
+  "coordinator_review_state": "pending",
+  "disposition": "reportable",
+  "extensions": {
+    "attackPathReport": "artifacts/05_findings/KCS-R23-CAND-048/attack_path_analysis_report.md",
+    "attackPathReportSha256": "f705a8fb9caf8af141aba5918d54089c91a43db786327e53c9cd849fe7f4c989",
+    "attemptId": "tac_20260712",
+    "candidateId": "KCS-R23-CAND-048",
+    "ledgerRowId": "KCS-R23-CAND-048",
+    "reportId": "KCS-R23-CAND-048",
+    "reportPath": "findings/tac-kcs-r23-cand-048-forged-reclaim-credit/forged-reclaim-credit.md",
+    "reportSha256": "bb62c4fb8a7545cbeedf607d03c939503adda8dbea844b07e33398bc3e22e55e",
+    "sourceRevision": "0e19f3c6489da458e93a982a333c308d92d0a0ae",
+    "validationReport": "artifacts/05_findings/KCS-R23-CAND-048/validation_report.md",
+    "validationReportSha256": "846ff0121b86e54f034bd4fa407ea3cef27aba989f1ff58b761794cd213844db"
+  },
+  "final_policy": "reportable",
+  "final_severity": "medium",
+  "instance_key": "KCS-R23-CAND-048",
+  "ledger_row_id": "KCS-R23-CAND-048",
+  "priority": "P2",
+  "remediation": {
+    "summary": "Bind every reclaim to one authentic prior reservation or charge identity and atomically consume that identity under the cost lock. Reject reservation-bearing task stamps that cannot be verified against the trusted ledger.",
+    "tests": [
+      "Adopt a synthetic task with forged amount/month but no trusted reservation ID and assert no reclaim row is appended.",
+      "Verify one valid reservation can be reclaimed exactly once.",
+      "Reject duplicate, cross-scope, cross-adapter, and cross-month reservation claims.",
+      "Preserve the gross-spend fallback when reclaim exceeds gross spend."
+    ]
+  },
+  "rootCause": {
+    "evidenceRefs": [
+      "task-reservation-fields",
+      "task-loader-shape-only",
+      "orphan-reclaim-sweep",
+      "credit-construction",
+      "positive-row-acceptance",
+      "net-spend-subtraction"
+    ],
+    "summary": "The violated invariant is that only KCS-issued, previously unmatched reservations may create reclaim credit. `TaskStore::all()` accepts serialized reservation stamps from task state after path and hash checks, and `reclaim_entry_for()` later copies those stamps into a positive device-global reclaim row without proving charge provenance or once-only use."
+  },
+  "scan_id": "f78f5d0d-2752-47a7-8d8d-3371e09d3377",
+  "schema_version": 1,
+  "source_revision": "0e19f3c6489da458e93a982a333c308d92d0a0ae",
+  "summary": "KCS accepts reservation amount and month fields from persisted task records, converts selected failed orphan tasks into positive reclaim credits, and subtracts those credits from device-global spend without binding them to an authentic prior charge.",
+  "target_revision": "0e19f3c6489da458e93a982a333c308d92d0a0ae",
+  "title": "unbound reservation stamps can forge budget-reclaim credits",
+  "validation": {
+    "assertions": [
+      "The task loader does not authenticate `reserved_usd` or `reserved_month` against a charge identity.",
+      "`reclaim_entry_for()` copies task amount and month into `MonthlyCostLedgerEntry` for eligible non-billable failures.",
+      "A forged credit below applicable gross spend lowers net spend and can reopen budget capacity."
+    ],
+    "evidenceRefs": [
+      "task-loader-shape-only",
+      "credit-construction",
+      "positive-row-acceptance",
+      "net-spend-subtraction"
+    ],
+    "limitations": [
+      "No live adapter request or credential use was performed.",
+      "The attack requires lower-trust adopted or preseeded task state plus existing gross spend."
+    ],
+    "method": "static source trace plus local synthetic accounting probe",
+    "summary": "The source trace confirms that adopted task fields can carry reservation stamps, the orphan-reclaim path converts them into reclaim rows, and net spend subtracts accepted credits. The local PoC reproduced the accounting effect with synthetic rows only."
+  },
+  "writeup": {
+    "attemptId": "tac_20260712",
+    "reportPath": "findings/tac-kcs-r23-cand-048-forged-reclaim-credit/forged-reclaim-credit.md",
+    "reportSha256": "bb62c4fb8a7545cbeedf607d03c939503adda8dbea844b07e33398bc3e22e55e",
+    "report_sha256": "bb62c4fb8a7545cbeedf607d03c939503adda8dbea844b07e33398bc3e22e55e",
+    "supporting_artifacts": [
+      {
+        "path": "findings/tac-kcs-r23-cand-048-forged-reclaim-credit/poc/forged_reclaim_credit_probe.py",
+        "sha256": "26fdb89dc404cf6a3dc3bbded5c624a92f33529e54dae856b42d73ae927b9ee5"
+      },
+      {
+        "path": "findings/tac-kcs-r23-cand-048-forged-reclaim-credit/poc/Makefile",
+        "sha256": "846f0e4737526f6eda8d2897d7dfdfc9bcaf5dcd73b0383e1036e27008b16c27"
+      },
+      {
+        "path": "findings/tac-kcs-r23-cand-048-forged-reclaim-credit/poc/README.md",
+        "sha256": "0452647f87b35c05db0c64498ed9b248685d7f212957169abe1a9eddc9827a3e"
+      }
+    ],
+    "pocDirectory": "findings/tac-kcs-r23-cand-048-forged-reclaim-credit/poc"
+  }
+}

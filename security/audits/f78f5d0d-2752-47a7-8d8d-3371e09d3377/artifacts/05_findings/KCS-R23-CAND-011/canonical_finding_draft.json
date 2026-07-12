@@ -1,0 +1,200 @@
+{
+  "ruleId": "kcs.r23.cand-011",
+  "identity": {
+    "anchor": "kcs-r23-cand-011",
+    "instance": "secret-twin-prehold-vector-link"
+  },
+  "title": "Secret-labeled content twins can be vector-linked before their hold exists",
+  "summary": "A rebuild performed before secret-hold creation can associate a newly classified secret chunk with an existing public twin's vector. Later enrichment treats the linked chunk as complete, leaving the hold absent and exposing the secret document's path and provenance without `--send-secrets`.",
+  "severity": {
+    "level": "medium",
+    "rationale": "A realistic lower-trust path exists: an ordinary content contributor controls names and bytes, and deterministic normal indexing crosses that content into trusted vector/search state without store tampering. Impact is bounded because the text is already public and no send occurs. Medium impact plus high likelihood maps mechanically to medium.",
+    "changeConditions": "Severity would rise if the derived link exposes unique secret bytes or drives privileged downstream automation; it would fall if rebuild exclusion is derived from current secret classification or holds are created before content-hash relinking."
+  },
+  "confidence": {
+    "level": "high",
+    "rationale": "V1+V10. Preserved isolated same-revision reproduction closed the lifecycle and search sink. Exact rebuild/enrichment ordering explains why the hold never appears."
+  },
+  "taxonomy": {
+    "category": "secret-policy and search-identity bypass",
+    "cwe": [
+      "CWE-863"
+    ]
+  },
+  "locations": [
+    {
+      "path": "crates/kcs-cli/src/main.rs",
+      "startLine": 620,
+      "endLine": 653,
+      "role": "rebuild-before-enrichment ordering"
+    },
+    {
+      "path": "crates/kcs-cli/src/main.rs",
+      "startLine": 3008,
+      "endLine": 3027,
+      "role": "task-derived hold denylist"
+    },
+    {
+      "path": "crates/kcs-index/src/embedding_store.rs",
+      "startLine": 149,
+      "endLine": 185,
+      "role": "content-twin relink"
+    },
+    {
+      "path": "crates/kcs-cli/src/main.rs",
+      "startLine": 7848,
+      "endLine": 7936,
+      "role": "already-linked filtering"
+    }
+  ],
+  "writeup": {
+    "reportPath": "findings/secret-twin-prehold-vector-link/secret-twin-prehold-vector-link.md"
+  },
+  "codeEvidence": [
+    {
+      "id": "index-order",
+      "label": "Rebuild precedes enrichment",
+      "path": "crates/kcs-cli/src/main.rs",
+      "startLine": 647,
+      "endLine": 652,
+      "language": "rust",
+      "role": "entrypoint",
+      "code": "    let rebuild_report = rebuild_step3_index(&repo)?;\n    // Generate chunk embeddings behind the online opt-in / budget / cost-ledger\n    // guardrails (K4). No-op unless an embedding adapter is configured. R11-2: keep\n    // the ExecOutcome (was discarded) so the embedding enrichment result is disclosed\n    // and can raise the exit code (auth/budget) instead of a silent exit 0.\n    let enrichment = generate_scope_embeddings(&repo, &args)?;",
+      "explanation": "`run_index` rebuilds the search index before `generate_scope_embeddings()` can classify new chunks and create secret holds."
+    },
+    {
+      "id": "persisted-hold-denylist",
+      "label": "Denylist uses only persisted holds",
+      "path": "crates/kcs-cli/src/main.rs",
+      "startLine": 3008,
+      "endLine": 3027,
+      "language": "rust",
+      "role": "root_control",
+      "code": "/// R20-10: chunk_ids whose embedding task is currently on a secrets hold (Paused\n/// `secrets_tier_b_hold`). `rebuild_chunk_vec` excludes them so a content-hash twin's\n/// online embedding cannot expose a held file in vector search before `--send-secrets`.\nfn held_secret_embedding_chunk_ids(kcs_dir: &Path) -> Result<BTreeSet<String>> {\n    let task_store = TaskStore::new(kcs_dir);\n    Ok(task_store\n        .all()\n        .map_err(pipeline_to_kcs)?\n        .into_iter()\n        .filter(|task| {\n            task.task_type == TaskType::Embedding\n                && task.status == TaskStatus::Paused\n                && task.fallback_reason.as_deref() == Some(SECRETS_TIER_B_HOLD)\n        })\n        .filter_map(|task| {\n            task.output_ref\n                .strip_prefix(\"embedding:\")\n                .map(str::to_owned)\n        })\n        .collect())",
+      "explanation": "The exclusion set is built only from already persisted paused `secrets_tier_b_hold` tasks, so a newly classified secret twin is not present."
+    },
+    {
+      "id": "text-hash-relink",
+      "label": "Content hash relinks chunks",
+      "path": "crates/kcs-index/src/embedding_store.rs",
+      "startLine": 160,
+      "endLine": 184,
+      "language": "rust",
+      "role": "sink",
+      "code": "pub fn rebuild_chunk_vec(\n    conn: &Connection,\n    held_chunk_ids: &std::collections::BTreeSet<String>,\n) -> Result<()> {\n    conn.execute_batch(\"DELETE FROM chunk_vec;\")?;\n    let mut stmt = conn.prepare(\n        \"SELECT c.chunk_id, e.vector, e.dimensions\n         FROM chunks c\n         JOIN embeddings e ON e.target_type = 'chunk' AND e.target_id = c.text_hash\",\n    )?;\n    let rows = stmt\n        .query_map([], |row| {\n            Ok((\n                row.get::<_, String>(0)?,\n                row.get::<_, Vec<u8>>(1)?,\n                row.get::<_, i64>(2)? as u64,\n            ))\n        })?\n        .collect::<std::result::Result<Vec<_>, _>>()?;\n    for (chunk_id, vector, dimensions) in rows {\n        if held_chunk_ids.contains(&chunk_id) {\n            continue;\n        }\n        link_chunk_vec(conn, &chunk_id, &vector, dimensions)?;\n    }",
+      "explanation": "The rebuild joins chunks to embeddings by `text_hash` and skips only IDs in the persisted hold set, allowing an unheld secret twin to inherit an existing public vector."
+    },
+    {
+      "id": "linked-chunk-skip",
+      "label": "Linked chunks skip later enrichment",
+      "path": "crates/kcs-cli/src/main.rs",
+      "startLine": 7908,
+      "endLine": 7918,
+      "language": "rust",
+      "role": "outcome",
+      "code": "    let mut pending: Vec<EmbeddableChunk> = Vec::new();\n    let mut index_of: BTreeMap<String, usize> = BTreeMap::new();\n    for row in rows {\n        let chunk = row.map_err(|err| KcsError::schema(err.to_string()))?;\n        let embedding_hash = chunk_embedding_hash(&chunk, profile)?;\n        let has_current_profile = embedding_store::content_vector(conn, &embedding_hash)\n            .map_err(index_to_kcs)?\n            .is_some();\n        if has_current_profile && existing.contains(&chunk.chunk_id) {\n            continue;\n        }",
+      "explanation": "After the premature link exists, the later enrichment pass recognizes a current-profile embedding and skips the chunk before it can create the missing hold."
+    }
+  ],
+  "rootCause": {
+    "summary": "The rebuild runs before current secret classification can create a hold, while its denylist is derived only from already persisted hold tasks. A same-text public embedding therefore links the new secret chunk, and the later enrichment pass skips the now-linked chunk before it can create the missing hold.",
+    "evidenceRefs": [
+      "index-order",
+      "persisted-hold-denylist",
+      "text-hash-relink",
+      "linked-chunk-skip"
+    ]
+  },
+  "remediation": "Exclude currently classified live secret chunks before content-hash relinking or create holds first.",
+  "validation": {
+    "method": "V1+V10",
+    "summary": "Preserved isolated same-revision reproduction closed the lifecycle and search sink. Exact rebuild/enrichment ordering explains why the hold never appears.",
+    "evidenceRefs": [
+      "index-order",
+      "persisted-hold-denylist",
+      "text-hash-relink",
+      "linked-chunk-skip"
+    ],
+    "assertions": [
+      "Preserved isolated same-revision reproduction closed the lifecycle and search sink.",
+      "Exact rebuild/enrichment ordering explains why the hold never appears."
+    ],
+    "counterevidence": [
+      "Identical text already exists in a public twin.",
+      "No unauthorized network send occurs in this path.",
+      "Leak is limited to secret path/provenance and policy visibility."
+    ],
+    "limitations": [
+      "The permitted artifacts do not quantify downstream reliance on secret-path search results.",
+      "A contributor may already know the file it supplied, though other search consumers need not."
+    ]
+  },
+  "attackPath": {
+    "summary": "A public chunk is embedded under the active profile. A lower-trust scope contributor adds a Tier-B secret-labeled file containing the same chunk text. Index rebuild runs before secret-hold creation and links the new chunk to the existing embedding by text_hash. Because no hold task yet exists, the task-derived denylist does not exclude the new secret chunk. Later enrichment treats the linked chunk as complete, so no hold is created. Vector search exposes the secret file's path, provenance, and policy-visible presence.",
+    "dataflow": {
+      "summary": "A public chunk is embedded under the active profile. A lower-trust scope contributor adds a Tier-B secret-labeled file containing the same chunk text. Index rebuild runs before secret-hold creation and links the new chunk to the existing embedding by text_hash. Because no hold task yet exists, the task-derived denylist does not exclude the new secret chunk. Later enrichment treats the linked chunk as complete, so no hold is created. Vector search exposes the secret file's path, provenance, and policy-visible presence.",
+      "source": "A public chunk is embedded under the active profile.",
+      "sink": "the `chunk_vec` link and later vector-search projection for the secret-labeled chunk",
+      "outcome": "Secret twin chunks in the indexed scope that share text with an existing embedding.",
+      "evidenceRefs": [
+        "index-order",
+        "persisted-hold-denylist",
+        "text-hash-relink",
+        "linked-chunk-skip"
+      ]
+    },
+    "reachability": {
+      "summary": "Untrusted local scope content enters trusted vector-index and search state through ordinary indexing; no network listener or unauthorized outbound send is involved.",
+      "attacker": "A local content contributor or shared/synced archive contributor controls the new file, while the operator and its automation consume trusted search state.",
+      "entrypoint": "A public chunk is embedded under the active profile.",
+      "preconditions": [
+        "An existing public embedded twin.",
+        "A new secret-labeled content twin.",
+        "An ordinary index command without --send-secrets."
+      ],
+      "outcome": "data: secret path/provenance visibility and durable vector-search policy integrity"
+    },
+    "evidenceRefs": [
+      "index-order",
+      "persisted-hold-denylist",
+      "text-hash-relink",
+      "linked-chunk-skip"
+    ],
+    "impact": {
+      "level": "medium",
+      "why": "A realistic lower-trust path exists: an ordinary content contributor controls names and bytes, and deterministic normal indexing crosses that content into trusted vector/search state without store tampering. Impact is bounded because the text is already public and no send occurs. Medium impact plus high likelihood maps mechanically to medium."
+    },
+    "likelihood": {
+      "level": "high",
+      "why": "The scope accepts files from a local or shared/synced lower-trust contributor. An identical public text twin already has a current-profile embedding. The new file receives Tier-B classification and the operator has not approved sending secrets."
+    },
+    "counterevidence": [
+      "The identical text is already present in a public twin.",
+      "No secret bytes are newly transmitted.",
+      "Disclosure is limited to secret path/provenance and policy visibility."
+    ],
+    "limitations": [
+      "The permitted artifacts do not quantify downstream reliance on secret-path search results.",
+      "A contributor may already know the file it supplied, though other search consumers need not."
+    ]
+  },
+  "remediationTests": [
+    "Index a public chunk, then an equal-text secret-labeled twin without `--send-secrets`; assert the secret chunk has a hold before rebuild and is absent from vector results.",
+    "Release the hold through the supported consent path and assert the chunk becomes linkable only after that transition."
+  ],
+  "preventiveControls": [
+    "The rebuild denylist uses already persisted hold-task IDs.",
+    "Secret partitioning is present but is skipped after the premature content link.",
+    "Already-linked completion filtering prevents the missing hold from catching up.",
+    "Exclude currently classified live secret chunks before content-hash relinking or create holds first."
+  ],
+  "provenance": {
+    "source": "Codex Security deep-scan validation, attack-path closure, and an accepted dedicated one-finding vulnerability write-up"
+  },
+  "extensions": {
+    "candidateId": "KCS-R23-CAND-011",
+    "ledgerRowId": "KCS-R23-CAND-011",
+    "reportId": "KCS-R23-011"
+  }
+}
+

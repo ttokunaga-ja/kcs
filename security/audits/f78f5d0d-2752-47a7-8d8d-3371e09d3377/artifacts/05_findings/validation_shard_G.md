@@ -1,0 +1,6 @@
+# Validation shard G closure
+
+| Ledger row id | Instance key | Advisory/source reference | Seed anchor | Root-control file:line | Entrypoint/source | Sink/control | Disposition | Counterevidence or proof gap | Survives |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| KCS-R23-CAND-037 | ocr-experiment:ground-truth-fixture-path-escape | Repository source | experiments/ocr-verification/run_ocr.py:66 | experiments/ocr-verification/run_ocr.py:66-68 | Selected ground-truth fixture_pdf at run_ocr.py:39,57-66 | Live dispatch at 72-87 reaches full-file payload at 128-165,214-219 before late line 104 check | reportable | Explicit developer-only non-dry run; SDK, configured key, and readable target required; no production or automatic caller demonstrated | yes |
+| KCS-R23-CAND-063 | ocr_artifact_permissions::batch_input | Repository source | experiments/ocr-verification/run_ocr.py:158 | experiments/ocr-verification/run_ocr.py:70,157-158 | Selected batch --out-dir and document at run_ocr.py:40-53,82-87 | Default mkdir/write_text persist full document from 149-158,214-219; umask 0022 yielded 0755/0644 | reportable | No second principal invoked; access requires traversable ancestry, and umask 0077 yielded safe 0700/0600 modes | yes |

@@ -1,0 +1,210 @@
+{
+  "ruleId": "kcs.r23.cand-022",
+  "identity": {
+    "anchor": "kcs-r23-cand-022",
+    "instance": "mistral-model-resolution-bounds"
+  },
+  "title": "Mistral model resolution lacks response-body and read-time bounds",
+  "summary": "The default mutable Mistral model alias triggers an authenticated model-list request whose response has no effective read or overall deadline and no body ceiling before JSON materialization. A connected service or intermediary can hang the command or consume substantial transient resources before OCR begins.",
+  "severity": {
+    "level": "medium",
+    "rationale": "The connected remote peer is a realistic in-scope attacker source on the default approved path. Impact is local availability rather than compromise, and the required matrix maps medium impact plus high likelihood to medium.",
+    "changeConditions": "Severity would rise if the default path produces persistent or broader service loss; it would fall after the configured deadline and response-byte ceilings are enforced or if supported configurations always use immutable model pins."
+  },
+  "confidence": {
+    "level": "high",
+    "rationale": "bounded configuration test+V10. Exact default-alias-to-GET-to-into_json source trace. Cargo.lock pins ureq 2.12.1; local primary source shows connect=30s, read/write/overall=None and unbounded serde_json::from_reader. Bounded network-free r12_2_timeout_seconds_non_default_is_loud_rejected test passed, confirming 30 is rejected and the unwired default 300 accepted."
+  },
+  "taxonomy": {
+    "category": "remote response resource exhaustion / missing deadline (CWE-400, CWE-770)",
+    "cwe": [
+      "CWE-400",
+      "CWE-770"
+    ]
+  },
+  "locations": [
+    {
+      "path": "crates/kcs-adapter/src/catalog.rs",
+      "startLine": 150,
+      "endLine": 157,
+      "role": "default mutable model alias"
+    },
+    {
+      "path": "crates/kcs-adapter/src/catalog.rs",
+      "startLine": 134,
+      "endLine": 146,
+      "role": "normal and resolve-only wrappers"
+    },
+    {
+      "path": "crates/kcs-adapter/src/catalog.rs",
+      "startLine": 159,
+      "endLine": 192,
+      "role": "normal and resolve-only wrappers"
+    },
+    {
+      "path": "crates/kcs-adapter/src/mistral_ocr.rs",
+      "startLine": 83,
+      "endLine": 110,
+      "role": "model-list GET and full JSON materialization"
+    },
+    {
+      "path": "crates/kcs-core/src/scope.rs",
+      "startLine": 1581,
+      "endLine": 1590,
+      "role": "unwired timeout control"
+    },
+    {
+      "path": "crates/kcs-core/schemas/config.schema.json",
+      "startLine": 124,
+      "endLine": 139,
+      "role": "documented timeout policy"
+    }
+  ],
+  "writeup": {
+    "reportPath": "findings/mistral-model-resolution-bounds/mistral-model-resolution-bounds.md"
+  },
+  "codeEvidence": [
+    {
+      "id": "mutable-alias-entry",
+      "label": "Default mutable alias reaches model resolution",
+      "path": "crates/kcs-adapter/src/catalog.rs",
+      "startLine": 134,
+      "endLine": 156,
+      "language": "rust",
+      "role": "entrypoint",
+      "code": "    let client = EnvMistralOcrClient::new();\n    // R13-2: use the declared `tools.toml` `[markdown] model` alias when present\n    // (docs/03 §11: config may carry a mutable alias, resolved to an immutable pin\n    // at execution — §5.1/§6), rather than the previously hard-coded\n    // `\"mistral-ocr-latest\"`.\n    let configured_model = declared_markdown_model();\n    let model_pin = client.resolve_model_pin(&configured_model)?;\n    let adapter = MistralOcrMarkdownizeAdapter::new(client, model_pin, request.scope_id)\n        .with_image_store(request.kcs_dir);\n    let profile = adapter.profile();\n    let mut adapter_request = adapter_request;\n    adapter_request.tool_profile_hash = profile.tool_profile_hash.clone();\n    let response = adapter.markdownize(adapter_request)?;\n    Ok(StandardOnlineMarkdownizeOutcome { profile, response })\n}\n\n/// R13-2: the configured `[markdown] model` alias (or the built-in `mistral-ocr-latest`),\n/// resolved to an immutable pin at execution. Shared by the send path and the\n/// resolve-only profile path (R14-6) so both agree on the model.\nfn declared_markdown_model() -> String {\n    crate::tool_lock::registered_declared_adapter(\"markdown\")\n        .and_then(|declared| declared.model)\n        .unwrap_or_else(|| \"mistral-ocr-latest\".to_owned())",
+      "explanation": "The normal online path resolves the configured alias before OCR, and the built-in default is the mutable `mistral-ocr-latest` value."
+    },
+    {
+      "id": "model-catalog-materialization",
+      "label": "Model catalog is read without bounds",
+      "path": "crates/kcs-adapter/src/mistral_ocr.rs",
+      "startLine": 83,
+      "endLine": 110,
+      "language": "rust",
+      "role": "root_control",
+      "code": "impl MistralOcrClient for EnvMistralOcrClient {\n    fn resolve_model_pin(&self, configured_model: &str) -> Result<String> {\n        if !configured_model.ends_with(\"-latest\") {\n            return Ok(configured_model.to_owned());\n        }\n        let api_key = Self::api_key()?;\n        let value: Value = ureq::get(&format!(\"{}/v1/models\", self.base_url()))\n            .set(\"Authorization\", &format!(\"Bearer {api_key}\"))\n            .call()\n            .map_err(http_error)?\n            .into_json()\n            .map_err(|err| AdapterError::ContractViolation(err.to_string()))?;\n        let family = configured_model.trim_end_matches(\"-latest\");\n        value\n            .get(\"data\")\n            .and_then(Value::as_array)\n            .into_iter()\n            .flatten()\n            .filter_map(|model| model.get(\"id\").and_then(Value::as_str))\n            .filter(|id| id.starts_with(family) && !id.ends_with(\"-latest\"))\n            .max()\n            .map(str::to_owned)\n            .ok_or_else(|| {\n                AdapterError::ContractViolation(format!(\n                    \"no versioned model found for {configured_model}\"\n                ))\n            })\n    }",
+      "explanation": "Mutable aliases trigger an authenticated `GET /v1/models`; unrestricted `into_json()` completes before family and stability filtering."
+    },
+    {
+      "id": "unwired-timeout",
+      "label": "Timeout policy is not connected to HTTP",
+      "path": "crates/kcs-core/src/scope.rs",
+      "startLine": 1581,
+      "endLine": 1590,
+      "language": "rust",
+      "role": "root_control",
+      "code": "        // timeout_seconds: a per-adapter execution timeout is not threaded through\n        // the adapter HTTP path (it would touch every adapter's transport). Accept\n        // the documented default (300); reject any other value loudly rather than\n        // silently ignore it. (R12-2 decision: real wiring is a large change.)\n        if let Some(timeout) = policy.get(\"timeout_seconds\").and_then(Value::as_i64) {\n            if timeout != 300 {\n                return Err(KcsError::not_implemented(\n                    \"adapter.policy.timeout_seconds other than 300\",\n                ));\n            }",
+      "explanation": "The configuration path accepts the default timeout but explicitly leaves adapter transports unwired, so it does not bound a connected peer's response."
+    },
+    {
+      "id": "documented-timeout-control",
+      "label": "Schema declares a timeout control",
+      "path": "crates/kcs-core/schemas/config.schema.json",
+      "startLine": 127,
+      "endLine": 137,
+      "language": "json",
+      "role": "expected_control",
+      "code": "        \"policy\": {\n          \"type\": \"object\",\n          \"properties\": {\n            \"allow_network\": { \"type\": \"boolean\" },\n            \"allowed_scope\": { \"type\": \"string\" },\n            \"max_input_bytes\": { \"type\": \"integer\", \"minimum\": 1 },\n            \"timeout_seconds\": { \"type\": \"integer\", \"minimum\": 1 },\n            \"redact_logs\": { \"type\": \"boolean\" },\n            \"store_request_body\": { \"type\": \"boolean\" },\n            \"store_response_body\": { \"type\": \"boolean\" },\n            \"require_command_confirmation\": { \"type\": \"boolean\" }",
+      "explanation": "The public configuration schema declares `timeout_seconds`, establishing the expected operator-controlled deadline that the transport does not enforce."
+    }
+  ],
+  "rootCause": {
+    "summary": "The default `mistral-ocr-latest` alias is resolved by calling `GET /v1/models` and then unrestricted `into_json()`. The documented timeout setting is not wired into the HTTP path, and no compressed or decompressed response limit precedes parsing and model filtering.",
+    "evidenceRefs": [
+      "mutable-alias-entry",
+      "model-catalog-materialization",
+      "unwired-timeout",
+      "documented-timeout-control"
+    ]
+  },
+  "remediation": "Thread the configured timeout into a shared HTTP client and enforce compressed/decompressed response byte ceilings before parsing the model catalog.",
+  "validation": {
+    "method": "bounded configuration test+V10",
+    "summary": "Exact default-alias-to-GET-to-into_json source trace. Cargo.lock pins ureq 2.12.1; local primary source shows connect=30s, read/write/overall=None and unbounded serde_json::from_reader. Bounded network-free r12_2_timeout_seconds_non_default_is_loud_rejected test passed, confirming 30 is rejected and the unwired default 300 accepted.",
+    "evidenceRefs": [
+      "mutable-alias-entry",
+      "model-catalog-materialization",
+      "unwired-timeout",
+      "documented-timeout-control"
+    ],
+    "assertions": [
+      "Exact default-alias-to-GET-to-into_json source trace.",
+      "Cargo.lock pins ureq 2.12.1; local primary source shows connect=30s, read/write/overall=None and unbounded serde_json::from_reader.",
+      "Bounded network-free r12_2_timeout_seconds_non_default_is_loud_rejected test passed, confirming 30 is rejected and the unwired default 300 accepted."
+    ],
+    "counterevidence": [
+      "A fixed immutable model bypasses model-list resolution.",
+      "Connection establishment has a 30-second timeout.",
+      "Credentials, HTTP status mapping, JSON validity, and post-parse family/stability filtering remain enforced."
+    ],
+    "limitations": [
+      "No loopback delay/body measurement was run under the read-only/no-network constraint; exact callsite, explicit configuration comment, and dependency defaults make this non-material to disposition.",
+      "No loopback timing or body-size measurement was retained; exact resource thresholds remain unknown."
+    ]
+  },
+  "attackPath": {
+    "summary": "The operator uses the default mutable Mistral model alias in an approved online workflow. KCS performs the authenticated model-list request before OCR. The configured remote endpoint, proxy, or intermediary slow-streams or returns an oversized or compressed model-list body. KCS reads, decompresses, and fully materializes the JSON without a read or overall deadline or byte ceiling before family and stability filtering, hanging the command or consuming substantial memory.",
+    "dataflow": {
+      "summary": "The operator uses the default mutable Mistral model alias in an approved online workflow. KCS performs the authenticated model-list request before OCR. The configured remote endpoint, proxy, or intermediary slow-streams or returns an oversized or compressed model-list body. KCS reads, decompresses, and fully materializes the JSON without a read or overall deadline or byte ceiling before family and stability filtering, hanging the command or consuming substantial memory.",
+      "source": "The operator uses the default mutable Mistral model alias in an approved online workflow.",
+      "sink": "the unrestricted model-catalog HTTP read, decompression, and JSON materialization",
+      "outcome": "one online Mistral command and selected scope per malicious catalog response",
+      "evidenceRefs": [
+        "mutable-alias-entry",
+        "model-catalog-materialization",
+        "unwired-timeout",
+        "documented-timeout-control"
+      ]
+    },
+    "reachability": {
+      "summary": "outbound remote model-list request after online-adapter authorization; no inbound listener",
+      "attacker": "KCS uses the victim OS identity and configured Mistral credential; the connected peer controls response timing and bytes",
+      "entrypoint": "The operator uses the default mutable Mistral model alias in an approved online workflow.",
+      "preconditions": "plausible: default mutable alias, approved online use, and a malicious, compromised, or faulty connected endpoint or intermediary",
+      "outcome": "command availability and transient process memory/CPU before OCR"
+    },
+    "evidenceRefs": [
+      "mutable-alias-entry",
+      "model-catalog-materialization",
+      "unwired-timeout",
+      "documented-timeout-control"
+    ],
+    "impact": {
+      "level": "medium",
+      "why": "The connected remote peer is a realistic in-scope attacker source on the default approved path. Impact is local availability rather than compromise, and the required matrix maps medium impact plus high likelihood to medium."
+    },
+    "likelihood": {
+      "level": "high",
+      "why": "The mutable default alias is used rather than a fixed immutable model. An online Mistral operation is authorized and a connected remote peer behaves maliciously or incorrectly."
+    },
+    "counterevidence": [
+      "Fixed model pins avoid the vulnerable request.",
+      "Connect time is bounded and semantic model filtering prevents adoption of unrelated IDs, but both controls fail to bound a connected peer's read or body."
+    ],
+    "limitations": [
+      "No loopback delay/body measurement was run under the read-only/no-network constraint; exact callsite, explicit configuration comment, and dependency defaults make this non-material to disposition.",
+      "No loopback timing or body-size measurement was retained; exact resource thresholds remain unknown."
+    ]
+  },
+  "remediationTests": [
+    "Drive model resolution through a bounded local fake transport and assert slow reads and oversized compressed/decompressed catalogs fail at configured limits.",
+    "Verify immutable model pins bypass catalog retrieval while valid bounded mutable-alias catalogs still resolve correctly."
+  ],
+  "preventiveControls": [
+    "fixed-model bypass",
+    "30-second connect timeout",
+    "authenticated request",
+    "HTTP, JSON, model-family, and stability validation after materialization",
+    "Thread the configured timeout into a shared HTTP client and enforce compressed/decompressed response byte ceilings before parsing the model catalog."
+  ],
+  "provenance": {
+    "source": "Codex Security deep-scan validation, attack-path closure, and an accepted dedicated one-finding vulnerability write-up"
+  },
+  "extensions": {
+    "candidateId": "KCS-R23-CAND-022",
+    "ledgerRowId": "KCS-R23-CAND-022",
+    "reportId": "KCS-R23-022"
+  }
+}
+

@@ -1,0 +1,7 @@
+[+] expected object hash: sha256:080a7a8cf0b4fe37ff7a2924a65be479af879b449a36605434b4fd4713e81c23
+[+] preseeded slot hash: sha256:360bec7c1bc6e57af1739a2b1c351502afb3b41cd67f52485a27a143d7b034d7
+[+] vulnerable write result: ok-existing-without-verification
+[+] slot still contains preseeded bytes: yes
+[+] later read detects mismatch: expected sha256:080a7a8cf0b4fe37ff7a2924a65be479af879b449a36605434b4fd4713e81c23 actual sha256:360bec7c1bc6e57af1739a2b1c351502afb3b41cd67f52485a27a143d7b034d7
+[+] fixed write rejects mismatch: occupied slot does not match expected CAS object
+[+] synthetic regression check complete

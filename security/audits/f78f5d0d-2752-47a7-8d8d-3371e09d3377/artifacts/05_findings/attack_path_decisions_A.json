@@ -1,0 +1,749 @@
+[
+  {
+    "candidate_id": "KCS-R23-CAND-001",
+    "title": "secret-hold cycles erase terminal embedding failure state",
+    "ledger_row_id": "KCS-R23-CAND-001",
+    "instance_key": "KCS-R23-CAND-001",
+    "affected_locations": [
+      {
+        "label": "demotion selector",
+        "path": "crates/kcs-cli/src/main.rs",
+        "lines": "8221-8231"
+      },
+      {
+        "label": "destructive hold",
+        "path": "crates/kcs-cli/src/main.rs",
+        "lines": "8295-8325"
+      },
+      {
+        "label": "fresh unhold",
+        "path": "crates/kcs-cli/src/main.rs",
+        "lines": "8360-8368,8463-8484"
+      },
+      {
+        "label": "retry contract",
+        "path": "crates/kcs-pipeline/src/task.rs",
+        "lines": "320-378"
+      },
+      {
+        "label": "send sink",
+        "path": "crates/kcs-cli/src/main.rs",
+        "lines": "7340-7345,7727-7768"
+      }
+    ],
+    "attack_steps": [
+      "A lower-trust scope revision leaves an embedding task in a terminal or retry-exhausted Failed state.",
+      "The file name or classification changes to Tier B and a later index cycle demotes the failed task to a secrets_tier_b_hold state, overwriting its reason, attempts, and retry timing.",
+      "A subsequent non-secret revision is indexed and unhold converts the row to fresh Pending work with attempts reset to zero.",
+      "Normal enrichment reserves budget and invokes the configured embedding adapter again despite the original non-retryable or exhausted failure."
+    ],
+    "assumptions": [
+      "A local content contributor can control names or revisions in a scope the operator continues to index.",
+      "An online embedding adapter was already approved and configured.",
+      "A terminal or retry-exhausted task exists before the secret/non-secret classification cycle."
+    ],
+    "context": "KCS is a local CLI with no listener. The relevant boundary is destructive task-state reauthorization: lower-trust file revisions can combine with ordinary operator indexing to revive work that the retry contract made terminal.",
+    "in_scope": true,
+    "exposure": "Operator-mediated local filesystem workflow; the eventual adapter call is outbound only.",
+    "identity": "The KCS OS user performs the call with the already configured adapter identity and budget authority; the lower-trust contributor controls file naming/revisions, not credentials or commands.",
+    "cross_boundary": true,
+    "vector": "none",
+    "preconditions": [
+      "A failed embedding task must already exist.",
+      "The same content must cycle into and out of Tier-B secret classification.",
+      "The operator must run the relevant index/enrichment cycles with online processing enabled."
+    ],
+    "attacker_control": "plausible: an in-scope local content contributor can control the name and revision sequence, while operator invocations remain required",
+    "category": "task lifecycle, retry-policy bypass, and bounded budget/network re-execution",
+    "mitigations": [
+      "Done tasks and retired non-live tasks are excluded from hold demotion.",
+      "Adapter approval, tool, credential, and budget checks still apply to the revived send.",
+      "The issue does not grant a new destination or credential."
+    ],
+    "auth_scope": "local operator-mediated workflow with prior online-adapter authorization",
+    "impact_surface": "task-state integrity, outbound adapter execution, and bounded cost",
+    "target_reach": "one affected embedding task at a time within the indexed scope",
+    "secrets_references": [
+      "The configured adapter credential may be used for the revived request, but the evidence shows no credential disclosure or destination change."
+    ],
+    "counterevidence": [
+      "The reproduced sequence required content/name reclassification and repeated operator indexing.",
+      "Done and retired-non-live tasks do not enter the destructive transition.",
+      "Existing approval and budget controls bound the revived execution."
+    ],
+    "blindspots": [
+      "The receipts do not establish how frequently attacker-controlled shared/synced revisions produce the full lifecycle.",
+      "Actual provider billing for the revived failure mode is adapter-dependent."
+    ],
+    "controls": [
+      "Typed retry policy marks AuthError, InvalidInput, and ContractViolation non-retryable and caps NetworkError retries.",
+      "The hold selector excludes Done and retired non-live tasks, but not terminal or exhausted failures.",
+      "Pre-send approval and budget enforcement remain present."
+    ],
+    "confidence": "high",
+    "impact": "medium",
+    "likelihood": "medium",
+    "final_policy": "reportable",
+    "final_severity": "low",
+    "priority": "P3",
+    "rationale": "The lower-trust file-revision path is realistic enough to avoid hard suppression, and the revived send/cost plus terminal-state loss is material but bounded. Medium impact with medium likelihood maps mechanically to Low/P3."
+  },
+  {
+    "candidate_id": "KCS-R23-CAND-002",
+    "title": "stale-lock compare/unlink race can remove a live replacement",
+    "ledger_row_id": "KCS-R23-CAND-002",
+    "instance_key": "KCS-R23-CAND-002",
+    "affected_locations": [
+      {
+        "label": "acquisition",
+        "path": "crates/kcs-core/src/scope.rs",
+        "lines": "1811-1827"
+      },
+      {
+        "label": "stale checks",
+        "path": "crates/kcs-core/src/scope.rs",
+        "lines": "1880-1893"
+      },
+      {
+        "label": "unbound unlink",
+        "path": "crates/kcs-core/src/scope.rs",
+        "lines": "1894-1897"
+      },
+      {
+        "label": "budget consumer",
+        "path": "crates/kcs-cli/src/main.rs",
+        "lines": "10325-10363"
+      }
+    ],
+    "attack_steps": [
+      "A crash or prior process leaves a syntactically valid stale lock with a dead PID.",
+      "Two same-user KCS contenders both complete the stale-record equality and dead-PID checks.",
+      "The first contender unlinks the stale path and creates replacement lock L1.",
+      "The second contender resumes and executes its previously authorized pathname unlink, deleting L1, then creates L2.",
+      "Both same-user guards can remain live while a protected store, task, budget, or log operation proceeds."
+    ],
+    "assumptions": [
+      "Two cooperating KCS processes race under the same OS identity.",
+      "A valid dead-process lock exists.",
+      "The scheduler produces the narrow proven interleaving."
+    ],
+    "context": "The lock race is a real mutual-exclusion correctness defect, but the validated path involves only same-user cooperating KCS processes and an untrusted schedule/fault source, not a realistic lower-trust attacker who gains new authority.",
+    "in_scope": true,
+    "exposure": "Local same-user process concurrency only; no listener, remote input, or local-network entry point.",
+    "identity": "Both contenders execute with the same KCS user's existing filesystem and budget privileges.",
+    "cross_boundary": false,
+    "vector": "none",
+    "preconditions": [
+      "A valid stale lock with a dead PID must be present.",
+      "Two KCS contenders must enter recovery concurrently.",
+      "Both second checks must finish before the first replacement is created, followed by the exact delayed unlink schedule."
+    ],
+    "attacker_control": "no realistic lower-trust control is established; only crash state and scheduler timing drive the path",
+    "category": "same-user lock reclamation race and mutual-exclusion failure",
+    "mitigations": [
+      "create_new handles ordinary live-lock contention.",
+      "A second record comparison and dead-PID check narrow the race.",
+      "Token-checked guard Drop prevents a stale guard from deleting a different replacement later."
+    ],
+    "auth_scope": "same-user local processes with pre-existing authority over the protected resources",
+    "impact_surface": "potential store, task, budget, or log integrity under concurrent mutation",
+    "target_reach": "shared StoreLock consumers, with concrete downstream corruption not reproduced",
+    "secrets_references": [],
+    "counterevidence": [
+      "The path requires a valid stale record, two contenders, and a narrow schedule.",
+      "No arbitrary foreign process or lower-privileged principal is involved.",
+      "No barrier-controlled downstream invariant break was demonstrated."
+    ],
+    "blindspots": [
+      "The final validation proves overlapping guards by happens-before reasoning but does not quantify real-world race frequency.",
+      "The concrete consequence for each protected consumer remains unmeasured."
+    ],
+    "controls": [
+      "Exclusive create for normal acquisition.",
+      "Stale-record reread/equality and dead-PID checks.",
+      "Owner-token check during guard cleanup."
+    ],
+    "confidence": "high",
+    "impact": "medium",
+    "likelihood": "low",
+    "final_policy": "ignore",
+    "final_severity": "none",
+    "priority": null,
+    "rationale": "Although the race is mechanically credible, it has no realistic lower-trust attacker path and requires a narrow same-user schedule. Hard suppression applies; independently, Medium impact with Low likelihood also maps to ignore."
+  },
+  {
+    "candidate_id": "KCS-R23-CAND-003",
+    "title": "Gemini vectors lack numeric-domain and positive-norm validation",
+    "ledger_row_id": "KCS-R23-CAND-003",
+    "instance_key": "KCS-R23-CAND-003",
+    "affected_locations": [
+      {
+        "label": "remote response parser",
+        "path": "crates/kcs-adapter/src/gemini_embedding.rs",
+        "lines": "153-203"
+      },
+      {
+        "label": "persistence caller",
+        "path": "crates/kcs-cli/src/main.rs",
+        "lines": "7727-7768"
+      },
+      {
+        "label": "vector store and KNN",
+        "path": "crates/kcs-index/src/embedding_store.rs",
+        "lines": "91-146,240-264"
+      }
+    ],
+    "attack_steps": [
+      "The operator authorizes an outbound Gemini embedding operation.",
+      "The remote adapter returns a shape- and width-correct JSON vector containing a finite f64 value outside the f32 range or an exact-width zero vector.",
+      "The parser casts values to f32 and performs no finite-range or positive-norm validation.",
+      "The malformed vector is used as a query vector or persisted as authoritative embedding state.",
+      "KNN distance decoding fails, and a persisted malformed vector continues to disable vector search for the scope."
+    ],
+    "assumptions": [
+      "Online embedding is enabled and the configured service returns attacker-controlled or faulty response data.",
+      "The response satisfies existing count, numeric-JSON, and width checks."
+    ],
+    "context": "Remote adapter responses are explicitly untrusted in the threat model. This path crosses from an approved remote response into authoritative local vector state and native SQLite/vector processing.",
+    "in_scope": true,
+    "exposure": "Outbound client workflow reachable by the configured remote service; KCS itself has no inbound listener.",
+    "identity": "The KCS user makes an approved request with the configured adapter identity; the remote service controls the returned numeric values.",
+    "cross_boundary": true,
+    "vector": "remote",
+    "preconditions": [
+      "The operator must approve and invoke online embedding.",
+      "The remote service must return width-correct but non-f32-finite or zero-norm numeric values."
+    ],
+    "attacker_control": "yes: the in-scope remote response actor directly controls vector elements",
+    "category": "remote numeric-domain validation failure causing persistent vector-index denial of service",
+    "mitigations": [
+      "JSON syntax rejects literal NaN and Infinity.",
+      "Response count and vector width are checked.",
+      "Online adapter approval is required.",
+      "Text search remains an online-independent fallback."
+    ],
+    "auth_scope": "remote response to a previously approved outbound adapter call",
+    "impact_surface": "authoritative embedding data, native vector query runtime, and search availability",
+    "target_reach": "the affected scope's vector index and later vector searches/rebuilds",
+    "secrets_references": [
+      "The configured Gemini credential is used for the approved request; the defect does not redirect or disclose it."
+    ],
+    "counterevidence": [
+      "Literal JSON NaN/Infinity is rejected and ordinary provider vectors are normalized.",
+      "The operator must first approve the remote adapter.",
+      "The demonstrated failure disables vector KNN, not baseline text search or the whole local archive."
+    ],
+    "blindspots": [
+      "The receipts do not quantify how readily the official configured service can emit these values absent compromise or fault.",
+      "Recovery effort for already persisted malformed vectors is not measured."
+    ],
+    "controls": [
+      "JSON numeric parsing.",
+      "Response count and dimension validation.",
+      "Transactional authoritative embedding persistence and profile-aware identity."
+    ],
+    "confidence": "high",
+    "impact": "medium",
+    "likelihood": "high",
+    "final_policy": "reportable",
+    "final_severity": "medium",
+    "priority": "P2",
+    "rationale": "A single approved call gives the in-scope remote response actor direct control over the missing predicate, while persistence extends impact beyond one response. Scope-limited vector-search denial is Medium impact; remote direct control supports High likelihood, mapping to Medium/P2."
+  },
+  {
+    "candidate_id": "KCS-R23-CAND-004",
+    "title": "OCR bounding-box arithmetic can overflow",
+    "ledger_row_id": "KCS-R23-CAND-004",
+    "instance_key": "KCS-R23-CAND-004",
+    "affected_locations": [
+      {
+        "label": "bbox parser",
+        "path": "crates/kcs-adapter/src/mistral_ocr.rs",
+        "lines": "434-463"
+      },
+      {
+        "label": "metadata sink",
+        "path": "crates/kcs-adapter/src/mistral_ocr.rs",
+        "lines": "398-422,466-480"
+      }
+    ],
+    "attack_steps": [
+      "The operator invokes an approved OCR operation.",
+      "The remote OCR service returns the accepted array bounding-box form with extreme signed 64-bit coordinates.",
+      "KCS computes x+w or y+h without checked arithmetic or geometry validation.",
+      "A debug build panics and aborts the operation, while a release build can wrap the values and persist invalid extracted-image metadata."
+    ],
+    "assumptions": [
+      "Online OCR is enabled and the remote response actor can choose bounding-box coordinates.",
+      "The response uses the array form that reaches the unchecked additions."
+    ],
+    "context": "The remote response is an in-scope untrusted source. The missing arithmetic check lets that source affect process availability or derived metadata beyond a normal rejected OCR response, but it does not bypass authorization.",
+    "in_scope": true,
+    "exposure": "Outbound OCR client workflow controlled by the configured remote service; no inbound KCS listener exists.",
+    "identity": "The KCS user performs an approved OCR call; the remote service controls the response coordinates but gains no KCS credential or filesystem identity.",
+    "cross_boundary": true,
+    "vector": "remote",
+    "preconditions": [
+      "An approved OCR request must reach the configured service.",
+      "The response must include the accepted array bounding-box representation.",
+      "Coordinates must overflow signed 64-bit addition or otherwise form unreasonable geometry."
+    ],
+    "attacker_control": "yes: the in-scope remote response actor directly controls x, y, width, and height",
+    "category": "remote-response integer overflow causing process availability or metadata-integrity failure",
+    "mitigations": [
+      "Only the accepted array form reaches the addition; other forms are unaffected.",
+      "Adapter approval is required before the request.",
+      "The failure is confined to OCR processing and does not authorize a different destination or read."
+    ],
+    "auth_scope": "remote response to a previously approved OCR call",
+    "impact_surface": "OCR runtime availability and extracted-image metadata integrity",
+    "target_reach": "the active OCR operation and its process/batch; no cross-scope persistence was shown",
+    "secrets_references": [
+      "The configured OCR credential is used for the approved request, with no demonstrated disclosure or forwarding."
+    ],
+    "counterevidence": [
+      "The remote service already can fail its own OCR response, and this issue adds no authorization bypass.",
+      "Only one response representation reaches the overflow.",
+      "The report shows panic or invalid coordinates, not durable cross-scope corruption."
+    ],
+    "blindspots": [
+      "The final receipt does not demonstrate end-to-end release-build persistence or downstream use of wrapped coordinates.",
+      "Batch-wide recovery effects after a panic are not measured."
+    ],
+    "controls": [
+      "Typed response deserialization.",
+      "Accepted response-shape checks.",
+      "Prior adapter authorization."
+    ],
+    "confidence": "high",
+    "impact": "medium",
+    "likelihood": "high",
+    "final_policy": "reportable",
+    "final_severity": "medium",
+    "priority": "P2",
+    "rationale": "The remote response actor directly controls the unchecked operands during an ordinary approved call. The resulting availability/metadata harm is bounded to OCR and carries no auth bypass, so impact is Medium; remote direct control makes likelihood High, mapping to Medium/P2."
+  },
+  {
+    "candidate_id": "KCS-R23-CAND-005",
+    "title": "byte-oriented question-mark globs bypass Unicode names",
+    "ledger_row_id": "KCS-R23-CAND-005",
+    "instance_key": "KCS-R23-CAND-005",
+    "affected_locations": [
+      {
+        "label": "normalization and byte projection",
+        "path": "crates/kcs-pipeline/src/scan.rs",
+        "lines": "341-380"
+      },
+      {
+        "label": "question wildcard",
+        "path": "crates/kcs-pipeline/src/scan.rs",
+        "lines": "383-415"
+      },
+      {
+        "label": "ingest decision",
+        "path": "crates/kcs-pipeline/src/scan.rs",
+        "lines": "97-159"
+      },
+      {
+        "label": "processing sink",
+        "path": "crates/kcs-cli/src/main.rs",
+        "lines": "9044-9118"
+      }
+    ],
+    "attack_steps": [
+      "The operator defines a one-character .kcsignore rule such as ?.txt and relies on it as an exclusion boundary.",
+      "A lower-trust scope contributor supplies a direct child whose one visible character occupies multiple UTF-8 bytes.",
+      "The question-mark matcher advances one byte, so the Unicode path does not match while an ASCII peer does.",
+      "The file becomes eligible for archive ingestion, normalization, and—when separately approved—online OCR or embedding despite the declared exclusion."
+    ],
+    "assumptions": [
+      "A local content contributor can control direct-child filenames in a scope the operator indexes.",
+      "The operator reasonably interprets ? as one Unicode character.",
+      "For network impact, online processing is enabled and no independent secret/offline gate blocks the file."
+    ],
+    "context": "The scope contributor is explicitly untrusted, and .kcsignore participates in scope and send eligibility. The bypass crosses the operator's declared exclusion boundary before durable archive or approved remote processing.",
+    "in_scope": true,
+    "exposure": "Operator-mediated local filesystem input; any later network transfer is outbound and separately adapter-approved.",
+    "identity": "The lower-trust contributor controls the pathname and bytes; KCS consumes them with the operator's archive and optional adapter authority.",
+    "cross_boundary": true,
+    "vector": "none",
+    "preconditions": [
+      "The relevant ignore rule uses ?.",
+      "The attacker chooses a precomposed, decomposed, or non-BMP Unicode filename that should satisfy the one-character policy.",
+      "The operator runs indexing; a remote sink additionally requires existing online authorization."
+    ],
+    "attacker_control": "yes: an in-scope local content contributor directly controls the Unicode filename and file bytes",
+    "category": "Unicode ignore-policy bypass and unintended scope/network eligibility",
+    "mitigations": [
+      "Literal and star rules can independently exclude a file.",
+      "Secret classification, offline mode, and adapter approval can prevent a particular network send.",
+      "The operator must invoke indexing."
+    ],
+    "auth_scope": "local untrusted scope content; optional outbound processing under prior adapter approval",
+    "impact_surface": "scope confidentiality/policy, archive contents, and potential remote data egress",
+    "target_reach": "each crafted direct-child filename within the selected scope",
+    "secrets_references": [
+      "A bypassed file could contain document secrets, but independent secret classification may still hold it.",
+      "Adapter credentials are used only if online processing was already authorized."
+    ],
+    "counterevidence": [
+      "The bypass does not defeat literal rules, star rules, secret classification, offline mode, or adapter consent.",
+      "The contributor generally knows content it supplies, limiting attacker-centric confidentiality impact.",
+      "Operator invocation remains necessary."
+    ],
+    "blindspots": [
+      "The receipts demonstrate eligibility and scan inclusion, but not an end-to-end transmission of a sensitive victim-owned file.",
+      "Documented intended semantics for ? are inferred from ordinary character-glob expectations rather than an explicit Unicode contract."
+    ],
+    "controls": [
+      "Direct-child scope policy.",
+      "Other ignore rule forms.",
+      "Secret Tier A/B classification.",
+      "Offline and per-adapter authorization gates."
+    ],
+    "confidence": "high",
+    "impact": "high",
+    "likelihood": "medium",
+    "final_policy": "reportable",
+    "final_severity": "medium",
+    "priority": "P2",
+    "rationale": "A realistic lower-trust filename bypasses an operator-declared scope boundary and can make excluded bytes durable or remotely eligible. The potential confidentiality/policy impact is High, but the specific ? rule, Unicode name, operator action, and independent gates make likelihood Medium; the matrix yields Medium/P2."
+  },
+  {
+    "candidate_id": "KCS-R23-CAND-006",
+    "title": "lexical PDF page markers amplify derived work without a cardinality bound",
+    "ledger_row_id": "KCS-R23-CAND-006",
+    "instance_key": "KCS-R23-CAND-006",
+    "affected_locations": [
+      {
+        "label": "lexical page counter",
+        "path": "crates/kcs-adapter/src/deterministic.rs",
+        "lines": "415-437"
+      },
+      {
+        "label": "page-vector expansion",
+        "path": "crates/kcs-pipeline/src/prepare.rs",
+        "lines": "315-349"
+      },
+      {
+        "label": "unit materialization",
+        "path": "crates/kcs-pipeline/src/prepare.rs",
+        "lines": "102-170"
+      },
+      {
+        "label": "input-size-only control",
+        "path": "crates/kcs-cli/src/main.rs",
+        "lines": "9047-9061"
+      }
+    ],
+    "attack_steps": [
+      "A lower-trust scope contributor supplies a PDF containing one printable stream and many compact lexical /Page prefixes that are not structural page objects.",
+      "Normal indexing accepts the file under the raw-byte cap and the deterministic helper counts each prefix as a page.",
+      "Preparation pads the page vector to that attacker-controlled count and allocates an owned PreparedUnit for every synthetic page.",
+      "Derived allocation and processing exhaust process resources, and the persistent file retriggers the condition on later indexing."
+    ],
+    "assumptions": [
+      "A local content contributor can place or revise a PDF in an indexed scope.",
+      "The PDF stays on the deterministic path by retaining printable content.",
+      "The operator runs normal indexing."
+    ],
+    "context": "Ordinary untrusted local content is an explicit attack surface, and the threat model treats persistent application-wide denial of service from such content as material. The missing derived-cardinality bound is after the raw-byte control.",
+    "in_scope": true,
+    "exposure": "Operator-mediated local file ingestion; no listener or network prerequisite.",
+    "identity": "The lower-trust contributor controls the PDF bytes; parsing and allocation occur with the KCS user's process resources.",
+    "cross_boundary": true,
+    "vector": "none",
+    "preconditions": [
+      "A crafted PDF must contain enough compact /Page-like tokens while remaining under the input cap.",
+      "The deterministic preparation path must be selected.",
+      "The operator must index the scope."
+    ],
+    "attacker_control": "yes: the in-scope local content contributor directly controls the marker count and PDF persistence",
+    "category": "derived-cardinality amplification and persistent local denial of service",
+    "mitigations": [
+      "A default 100 MiB raw input cap exists.",
+      "Some wholly non-text PDFs take an OCR fallback path.",
+      "Validation avoided actually exhausting memory and computed the unsafe upper range."
+    ],
+    "auth_scope": "untrusted direct-child content processed by a local operator command",
+    "impact_surface": "CPU/memory availability and preparation/indexing liveness",
+    "target_reach": "the KCS indexing process for any scope containing the persistent crafted PDF",
+    "secrets_references": [],
+    "counterevidence": [
+      "The raw file is capped at 100 MiB.",
+      "Non-text inputs may route away from deterministic preparation.",
+      "No cross-scope corruption or code execution is shown."
+    ],
+    "blindspots": [
+      "The unsafe upper bound was calculated rather than allocated, so the exact failure threshold depends on host resources.",
+      "The receipt does not measure whether partial derived artifacts survive an out-of-memory termination."
+    ],
+    "controls": [
+      "Raw input byte cap.",
+      "Scanned-PDF/OCR fallback selection.",
+      "Normal direct-child scope filtering."
+    ],
+    "confidence": "high",
+    "impact": "high",
+    "likelihood": "medium",
+    "final_policy": "reportable",
+    "final_severity": "medium",
+    "priority": "P2",
+    "rationale": "A realistic untrusted PDF deterministically controls millions of derived units and can repeatedly exhaust the local application. That supports High availability impact, while crafted content plus operator indexing and path selection make likelihood Medium; the matrix yields Medium/P2."
+  },
+  {
+    "candidate_id": "KCS-R23-CAND-007",
+    "title": "incremental unit mapping allocates a quadratic LCS matrix",
+    "ledger_row_id": "KCS-R23-CAND-007",
+    "instance_key": "KCS-R23-CAND-007",
+    "affected_locations": [
+      {
+        "label": "mapping entrypoint",
+        "path": "crates/kcs-pipeline/src/prepare.rs",
+        "lines": "208-253"
+      },
+      {
+        "label": "quadratic LCS",
+        "path": "crates/kcs-pipeline/src/prepare.rs",
+        "lines": "387-416"
+      },
+      {
+        "label": "index reachability",
+        "path": "crates/kcs-cli/src/main.rs",
+        "lines": "9219-9235"
+      }
+    ],
+    "attack_steps": [
+      "A lower-trust contributor supplies an indexed document revision with many prepared units and later supplies another large revision.",
+      "Incremental indexing passes the old and new unit lists to map_units.",
+      "The LCS implementation allocates and fills an (m+1) by (n+1) usize matrix without a unit-count or work budget.",
+      "The allocation reaches hundreds of megabytes or gigabytes at feasible derived unit counts and can repeatedly terminate or wedge indexing while the crafted revisions remain."
+    ],
+    "assumptions": [
+      "A local content contributor can control successive revisions in a scope the operator reindexes.",
+      "Both old and new prepared representations contain sufficiently many units.",
+      "The incremental mapping path is reached."
+    ],
+    "context": "The lower-trust revision source is in scope and the full matrix is allocated before any similarity shortcut can help. Derived unit amplification can make the required cardinality practical under existing byte limits.",
+    "in_scope": true,
+    "exposure": "Operator-mediated local revision/index workflow; no network or listener is required.",
+    "identity": "The contributor controls document revisions; the KCS user bears the allocation and indexing failure.",
+    "cross_boundary": true,
+    "vector": "none",
+    "preconditions": [
+      "Two indexed revisions must each generate a large unit list.",
+      "The operator must run incremental index or reindex.",
+      "Unit cardinality must be high enough to exceed available memory or acceptable work."
+    ],
+    "attacker_control": "yes: an in-scope local content contributor controls both revision contents and therefore both matrix dimensions",
+    "category": "quadratic algorithmic complexity and persistent local denial of service",
+    "mitigations": [
+      "Small ordinary documents complete quickly.",
+      "Raw input size is capped elsewhere.",
+      "Fingerprint matches may reduce later work, but not matrix allocation."
+    ],
+    "auth_scope": "untrusted local document revisions processed by an operator command",
+    "impact_surface": "memory/CPU availability and incremental indexing liveness",
+    "target_reach": "the KCS process handling the crafted scope/revisions",
+    "secrets_references": [],
+    "counterevidence": [
+      "The path requires two large revisions and incremental mapping rather than a single ordinary small file.",
+      "Large failure cases were computed rather than allocated.",
+      "No confidentiality, authorization, or cross-scope integrity effect is shown."
+    ],
+    "blindspots": [
+      "The minimum document size and unit-generation pattern needed for a reliable host-specific denial are not fully measured.",
+      "Interaction with operating-system memory limits is environment-dependent."
+    ],
+    "controls": [
+      "Existing raw-byte limits.",
+      "Fingerprint-based mapping semantics.",
+      "Normal scope and direct-child controls."
+    ],
+    "confidence": "high",
+    "impact": "high",
+    "likelihood": "medium",
+    "final_policy": "reportable",
+    "final_severity": "medium",
+    "priority": "P2",
+    "rationale": "A realistic lower-trust revision source can drive both dimensions of an unbounded quadratic matrix and persistently deny indexing. High availability impact with the multi-revision/operator/cardinality prerequisites gives Medium likelihood, mapping to Medium/P2."
+  },
+  {
+    "candidate_id": "KCS-R23-CAND-008",
+    "title": "A symlinked `.kcs` binds one working root to another scope's live store",
+    "ledger_row_id": "KCS-R23-CAND-008",
+    "instance_key": "KCS-R23-CAND-008",
+    "affected_locations": [
+      {
+        "label": "entrypoint",
+        "path": "crates/kcs-core/src/scope.rs",
+        "lines": "126-139",
+        "detail": "Init delegates any existing root/.kcs entry, including a symlink to a valid directory, to Repository::open."
+      },
+      {
+        "label": "root_control",
+        "path": "crates/kcs-core/src/scope.rs",
+        "lines": "188-200",
+        "detail": "Only the selected root is canonicalized; lexical root/.kcs is accepted with link-following is_dir and installed as Repository.kcs_dir/ObjectStore root."
+      },
+      {
+        "label": "closest_control",
+        "path": "crates/kcs-core/src/scope.rs",
+        "lines": "889-909",
+        "detail": "Scope validation checks schema, ULID syntax, and format version but does not bind the physical store or stored scope_path to Repository.root."
+      },
+      {
+        "label": "working_tree_source",
+        "path": "crates/kcs-core/src/scope.rs",
+        "lines": "254-303",
+        "detail": "Snapshot enumeration and raw reads use direct children of self.root while raw objects are written through self.store."
+      },
+      {
+        "label": "mutation_sink",
+        "path": "crates/kcs-core/src/scope.rs",
+        "lines": "421-430,504-520",
+        "detail": "Snapshot locks and writes the substituted kcs_dir/ObjectStore, then advances its commit, refs, HEAD, and manifest."
+      },
+      {
+        "label": "product_entrypoints",
+        "path": "crates/kcs-cli/src/main.rs",
+        "lines": "435-472,558-580,622-635",
+        "detail": "Status, snapshot, and index reach the mixed root/store repository through normal CLI commands."
+      }
+    ],
+    "attack_steps": [
+      "A lower-trust shared/archive contributor supplies a working root whose .kcs entry is a symlink or live alias to another structurally valid KCS store reachable in the victim filesystem namespace.",
+      "The operator invokes status, snapshot, or index in the supplied root.",
+      "Repository::open canonicalizes only the selected root, follows the lexical .kcs path, and does not bind the resolved store to that root.",
+      "KCS reads working files from root A while reading or writing objects and refs through store B.",
+      "A mutating command archives root-A bytes and advances store B's HEAD, refs, and manifest, producing cross-scope false history/evidence."
+    ],
+    "assumptions": [
+      "A lower-trust contributor can supply a root containing the live .kcs symlink or alias.",
+      "The target is a valid KCS store readable and writable by the victim KCS process.",
+      "The target path resolves in the victim's filesystem namespace and the operator runs a normal command."
+    ],
+    "context": "Copied/preseeded/shared store adoption is explicitly in scope. This exact symlink/alias instance crosses the folder-local authoritative-store boundary and was corroborated by preserved same-revision two-scope reproductions.",
+    "in_scope": true,
+    "exposure": "Local supplied/shared filesystem root consumed through ordinary CLI commands; no listener or network is involved.",
+    "identity": "The lower-trust contributor chooses the root/.kcs link, while KCS follows it with the victim user's permissions and mutates the target store as that user.",
+    "cross_boundary": true,
+    "vector": "none",
+    "preconditions": [
+      "The supplied root must contain a live .kcs symlink or equivalent alias.",
+      "The link target must be a structurally valid accessible KCS store.",
+      "The operator must invoke a read or mutating KCS command in the supplied root."
+    ],
+    "attacker_control": "yes: an in-scope shared/archive contributor controls the supplied root and .kcs link target",
+    "category": "scope/store confused deputy and cross-scope archive/ref mutation",
+    "mitigations": [
+      "The target must pass KCS structural validation and be accessible to the victim user.",
+      "New stores are created with owner-only permissions.",
+      "Append-only objects generally leave prior commits recoverable."
+    ],
+    "auth_scope": "local operator command against a lower-trust supplied/shared root",
+    "impact_surface": "authoritative archive history, refs, derived index state, and evidence integrity",
+    "target_reach": "one reachable foreign KCS store per crafted root/link; prior history is usually recoverable",
+    "secrets_references": [],
+    "counterevidence": [
+      "This is not arbitrary-directory write: the target must be a valid readable/writable KCS store.",
+      "KCS has no listener and the victim must invoke a command.",
+      "The attacker must know or arrange a target path available in the victim namespace.",
+      "Plain detached copies and supported moves are not part of the proven instance."
+    ],
+    "blindspots": [
+      "Deployment-specific symlink preservation and target-path availability affect exploit frequency.",
+      "The evidence does not establish an approval-replay extension, which is unnecessary for this decision."
+    ],
+    "controls": [
+      "Canonicalization of the selected root.",
+      "Scope schema, scope_id syntax, and format-version validation.",
+      "Owner-only creation for newly initialized .kcs directories.",
+      "Content-addressed objects and generally recoverable prior commits."
+    ],
+    "confidence": "high",
+    "impact": "high",
+    "likelihood": "medium",
+    "final_policy": "reportable",
+    "final_severity": "medium",
+    "priority": "P2",
+    "rationale": "The supplied-root contributor is a realistic lower-trust actor, and normal commands deterministically cross from root A into authoritative store B. Cross-scope false history/evidence is High impact; the valid-target, namespace, and user-invocation prerequisites make likelihood Medium, yielding Medium/P2."
+  },
+  {
+    "candidate_id": "KCS-R23-CAND-009",
+    "title": "legacy unrecognized-binary OCR tasks remain permanently Pending",
+    "ledger_row_id": "KCS-R23-CAND-009",
+    "instance_key": "KCS-R23-CAND-009",
+    "affected_locations": [
+      {
+        "label": "AwaitOcr no-op",
+        "path": "crates/kcs-cli/src/main.rs",
+        "lines": "6080-6089"
+      },
+      {
+        "label": "zero-unit classifier",
+        "path": "crates/kcs-cli/src/main.rs",
+        "lines": "6533-6573"
+      },
+      {
+        "label": "current skip visibility",
+        "path": "crates/kcs-cli/src/main.rs",
+        "lines": "9131-9169"
+      }
+    ],
+    "attack_steps": [
+      "An upgraded or lower-trust preseeded store contains a schema-valid legacy Pending markdownize task for an unrecognized binary with zero prepared units.",
+      "The operator runs batch resume or an equivalent current executor path.",
+      "The current classifier returns AwaitOcr for the legacy row.",
+      "The AwaitOcr executor arm continues without attempt, failure, retirement, or migration.",
+      "Repeated runs leave the task Pending and keep status/recovery automation incomplete."
+    ],
+    "assumptions": [
+      "A legacy task survives upgrade or is supplied in an adopted/preseeded store.",
+      "The task is schema-valid, same-hash, non-text-native, and has zero prepared units.",
+      "The operator invokes batch recovery."
+    ],
+    "context": "Legacy/preseeded state is in scope, but this path produces only task/status nonconvergence. It performs no send, grants no authority, and fresh indexing no longer creates the affected task.",
+    "in_scope": true,
+    "exposure": "Local adopted/legacy store state reached through operator-invoked batch commands.",
+    "identity": "The task is processed with the KCS user's existing local authority; no adapter credential or lower-privileged identity is exercised because execution never sends.",
+    "cross_boundary": false,
+    "vector": "none",
+    "preconditions": [
+      "A legacy or preseeded task row with the exact unsupported-media state must exist.",
+      "The operator must adopt the store and invoke recovery/status workflows."
+    ],
+    "attacker_control": "plausible for a shared/preseeded store contributor, but the only controlled effect is a stuck row and misleading completeness state",
+    "category": "legacy task migration, liveness, and observability defect",
+    "mitigations": [
+      "Fresh indexing skips the unsupported binary and emits current visibility.",
+      "The stuck executor path makes no network request and consumes no adapter attempt.",
+      "Impact is confined to legacy/preseeded records."
+    ],
+    "auth_scope": "local operator adoption/recovery workflow; no online authorization is exercised",
+    "impact_surface": "task liveness, status accuracy, and recovery automation",
+    "target_reach": "the specific legacy task and its scope's completeness reporting",
+    "secrets_references": [],
+    "counterevidence": [
+      "Current indexing does not create the affected task and reports the skipped input.",
+      "No send, credential use, budget charge, or content disclosure occurs.",
+      "The defect only leaves a legacy/preseeded row Pending."
+    ],
+    "blindspots": [
+      "The receipts do not demonstrate material downstream decisions made by automation because of the false Pending state.",
+      "The prevalence of surviving legacy rows is unknown."
+    ],
+    "controls": [
+      "Current unsupported-binary skip behavior and visibility.",
+      "Schema validation for persisted tasks.",
+      "The executor's no-send AwaitOcr behavior."
+    ],
+    "confidence": "high",
+    "impact": "low",
+    "likelihood": "medium",
+    "final_policy": "ignore",
+    "final_severity": "none",
+    "priority": null,
+    "rationale": "A preseeded contributor can plausibly supply the row, but the only effect is recoverable legacy status/liveness degradation with no boundary crossing or send. Low impact is mechanically ignored regardless of likelihood."
+  }
+]

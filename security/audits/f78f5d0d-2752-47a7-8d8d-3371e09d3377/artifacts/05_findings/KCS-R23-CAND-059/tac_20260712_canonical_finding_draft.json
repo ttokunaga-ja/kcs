@@ -1,0 +1,238 @@
+{
+  "affectedLocations": [
+    {
+      "label": "view_entrypoint",
+      "lines": "2816-2835",
+      "path": "crates/kcs-cli/src/main.rs"
+    },
+    {
+      "label": "stored_text_source",
+      "lines": "4823-4859",
+      "path": "crates/kcs-cli/src/main.rs"
+    },
+    {
+      "label": "human_output_sink",
+      "lines": "11135-11176",
+      "path": "crates/kcs-cli/src/main.rs"
+    },
+    {
+      "label": "human_error_sink",
+      "lines": "11184-11193",
+      "path": "crates/kcs-cli/src/main.rs"
+    }
+  ],
+  "attackPath": {
+    "dataflow": {
+      "evidenceRefs": [
+        "view-response-text",
+        "stored-chunk-text",
+        "human-text-sink",
+        "human-metadata-sinks"
+      ],
+      "outcome": "trusted-output spoofing and emulator-dependent terminal actions",
+      "sink": "human-readable terminal output",
+      "source": "hostile document text, OCR text, commit message, or filename stored in a scope the operator inspects",
+      "summary": "stored text/metadata/path -> command response `Value` -> `print_output(..., json_mode=false)` -> raw `println!` or `eprintln!` -> interactive terminal"
+    },
+    "evidenceRefs": [
+      "json-output-control",
+      "human-text-sink",
+      "human-metadata-sinks",
+      "human-error-sink"
+    ],
+    "impact": {
+      "level": "medium",
+      "why": "The bug can spoof trusted CLI output, rewrite terminal display/title, create deceptive hyperlinks, and potentially request terminal-supported clipboard or control actions, but it does not itself execute shell commands or cross OS-user permissions."
+    },
+    "likelihood": {
+      "level": "high",
+      "why": "The trigger is a routine one-command human workflow once hostile content is present; there is no race or privileged prerequisite."
+    },
+    "limitations": [
+      "`--json` output is protected by JSON serialization.",
+      "Non-terminal sinks generally prevent terminal interpretation at command execution time.",
+      "High-impact OSC behavior depends on terminal policy."
+    ],
+    "reachability": {
+      "attacker": "lower-trust content or scope contributor",
+      "entrypoint": "default human-readable `kcs view`, `kcs log`, `kcs diff`, or `kcs status` output",
+      "outcome": "operator-interface integrity loss in one terminal session",
+      "preconditions": [
+        "The hostile string reaches one of the documented human-output fields.",
+        "The operator uses default human output in a control-sequence-aware terminal.",
+        "Terminal-specific actions stronger than display spoofing must be enabled by that emulator."
+      ]
+    },
+    "summary": "A lower-trust contributor places terminal-active bytes in a direct-child filename, indexed text or OCR output, or persisted commit message. The operator runs a routine human-readable command on that scope. KCS prints the string without terminal-safe escaping, so the interactive terminal interprets the bytes."
+  },
+  "candidate_id": "KCS-R23-CAND-059",
+  "category": "terminal control-sequence injection and output spoofing",
+  "codeEvidence": [
+    {
+      "code": "fn run_view(args: UnsupportedArgs) -> Result<Value> {\n    let raw = read_pointer_input(without_json(args.args))?;\n    if let Some(object) = parse_object_uri(&raw)? {\n        return resolve_object_uri(&object, true);\n    }\n    if raw.starts_with(\"sha256:\") {\n        return resolve_short_hash_command(&raw, true);\n    }\n    let pointer = parse_pointer_text(&raw)?;\n    let resolved = resolve_pointer_for_cli(&pointer)?;\n    Ok(json!({\n        \"status\": \"viewed\",\n        \"raw_hash\": pointer.raw_hash,\n        \"chunk_hash\": pointer.chunk_hash,\n        \"text\": resolved.text.unwrap_or_default(),\n        \"path\": resolved.path,\n        \"temporary\": resolved.temporary,\n        \"commit_shallow\": resolved.commit_shallow,\n    }))\n}",
+      "endLine": 2836,
+      "explanation": "`run_view()` resolves an operator-supplied pointer and copies the selected stored chunk into the `text` field that the generic printer later renders.",
+      "id": "view-response-text",
+      "label": "view places stored chunk text in command output",
+      "language": "rust",
+      "path": "crates/kcs-cli/src/main.rs",
+      "role": "entrypoint",
+      "startLine": 2816
+    },
+    {
+      "code": "let chunk = read_stored_chunks(&target.kcs_dir)?\n    .into_iter()\n    .find(|chunk| chunk.row.chunk_id == pointer.chunk_hash);\nlet Some(chunk) = chunk else {\n    return Err(KcsError::new(\n        \"KCS-E-EVIDENCE-RETARGET-REQUIRED-001\",\n        \"chunk not materialized for this tool_profile_hash; retarget required (08 \u00a75)\",\n        json!({\n            \"chunk_hash\": pointer.chunk_hash,\n            \"tool_profile_hash\": pointer.tool_profile_hash,\n            \"raw_hash\": pointer.raw_hash,\n        }),\n        ExitCode::IncompatibleProfile,\n    ));\n};\nif chunk.row.raw_hash != pointer.raw_hash\n    || chunk.row.tool_profile_hash != pointer.tool_profile_hash\n{\n    return Err(invalid_pointer_identity_error(pointer));\n}\nif let Some(entry_gen) = entry_gen {\n    if chunk.row.gen != entry_gen {\n        return Err(invalid_pointer_identity_error(pointer));\n    }\n}\nlet text = chunk.row.text;",
+      "endLine": 4859,
+      "explanation": "The code validates chunk identity but then carries the stored `chunk.row.text` forward as ordinary text; it does not remove terminal-active controls.",
+      "id": "stored-chunk-text",
+      "label": "resolved chunk text is loaded from stored scope data",
+      "language": "rust",
+      "path": "crates/kcs-cli/src/main.rs",
+      "role": "propagation",
+      "startLine": 4824
+    },
+    {
+      "code": "fn print_output(value: Value, json_mode: bool) {\n    if json_mode {\n        println!(\n            \"{}\",\n            serde_json::to_string(&value).expect(\"serializing command output cannot fail\")\n        );\n        return;\n    }",
+      "endLine": 11142,
+      "explanation": "`--json` output is the closest safe branch: JSON serialization emits escaped text instead of raw ESC/C0 bytes.",
+      "id": "json-output-control",
+      "label": "JSON mode serializes and escapes control bytes",
+      "language": "rust",
+      "path": "crates/kcs-cli/src/main.rs",
+      "role": "expected_control",
+      "startLine": 11135
+    },
+    {
+      "code": "if let Some(text) = value.get(\"text\").and_then(Value::as_str) {\n    println!(\"{text}\");\n} else if let Some(status) = value.get(\"status\").and_then(Value::as_str) {\n    println!(\"{status}\");\n}",
+      "endLine": 11149,
+      "explanation": "Human `view` output forwards the lower-trust `text` string directly into `println!`, allowing terminal controls to reach the operator's terminal.",
+      "id": "human-text-sink",
+      "label": "human view output prints text verbatim",
+      "language": "rust",
+      "path": "crates/kcs-cli/src/main.rs",
+      "role": "sink",
+      "startLine": 11144
+    },
+    {
+      "code": "} else if let Some(commits) = value.get(\"commits\").and_then(Value::as_array) {\n    for commit in commits {\n        println!(\n            \"{} {} {}\",\n            commit[\"commit_hash\"].as_str().unwrap_or_default(),\n            commit[\"created_at\"].as_str().unwrap_or_default(),\n            commit[\"message\"].as_str().unwrap_or_default()\n        );\n    }\n} else if let Some(changes) = value.get(\"changes\").and_then(Value::as_array) {\n    for change in changes {\n        println!(\n            \"{} {}\",\n            change[\"change\"].as_str().unwrap_or_default(),\n            change[\"relative_path\"].as_str().unwrap_or_default()\n        );\n    }\n} else if let Some(files) = value.get(\"files\").and_then(Value::as_array) {\n    for file in files {\n        println!(\n            \"{} {}\",\n            file[\"status\"].as_str().unwrap_or_default(),\n            file[\"relative_path\"].as_str().unwrap_or_default()\n        );\n    }\n}",
+      "endLine": 11176,
+      "explanation": "Commit messages and repository relative paths receive the same direct terminal sink, so the renderer gap covers routine log, diff, and status views.",
+      "id": "human-metadata-sinks",
+      "label": "human log, diff, and status output print metadata verbatim",
+      "language": "rust",
+      "path": "crates/kcs-cli/src/main.rs",
+      "role": "sink",
+      "startLine": 11151
+    },
+    {
+      "code": "fn print_error(error: &KcsError, json_mode: bool) {\n    if json_mode {\n        eprintln!(\n            \"{}\",\n            serde_json::to_string(&error.to_error_json())\n                .expect(\"serializing command error cannot fail\")\n        );\n    } else {\n        eprintln!(\"{}: {}\", error.error_code(), error.message());\n    }\n}",
+      "endLine": 11193,
+      "explanation": "Any future lower-trust component embedded in `error.message()` would also bypass terminal-safe rendering in human mode.",
+      "id": "human-error-sink",
+      "label": "human error output has the same raw rendering shape",
+      "language": "rust",
+      "path": "crates/kcs-cli/src/main.rs",
+      "role": "sink",
+      "startLine": 11184
+    }
+  ],
+  "confidence": "high",
+  "extensions": {
+    "attackPathReport": "artifacts/05_findings/KCS-R23-CAND-059/attack_path_analysis_report.md",
+    "attackPathReportSha256": "5513a5d233ab5c7d2dfd67298a7fea93384f49ad8d8de2a1de6feac22f612a0c",
+    "candidateId": "KCS-R23-CAND-059",
+    "ledgerRowId": "KCS-R23-CAND-059",
+    "reportId": "KCS-R23-CAND-059",
+    "reportPath": "findings/tac-kcs-r23-cand-059-terminal-control-human-output/tac-kcs-r23-cand-059-terminal-control-human-output.md",
+    "reportSha256": "ce02ed03c47b04eeb8f8e20e0e1dddd401e8a9a397aaae11a04d173e02d1efbf",
+    "validationReport": "artifacts/05_findings/KCS-R23-CAND-059/validation_report.md",
+    "validationReportSha256": "911ea7e173072baa8fcc75a7af7c1686cfe180d6f7ae5b713a9cf2e5a6b1c6f8"
+  },
+  "final_policy": "reportable",
+  "final_severity": "medium",
+  "instance_key": "KCS-R23-CAND-059:terminal-control-human-output",
+  "ledger_row_id": "KCS-R23-CAND-059",
+  "priority": "P2",
+  "remediation": {
+    "minimalFix": "Replace direct `println!` and `eprintln!` interpolation for untrusted human fields with a shared `terminal_safe_text()` helper.",
+    "regressionTests": [
+      "Assert that human output for `text`, `commits[*].message`, `changes[*].relative_path`, and `files[*].relative_path` contains no raw ESC, BEL, CSI, OSC, or bidi controls for synthetic inputs.",
+      "Assert that `--json` output remains valid JSON and round-trips the original logical strings.",
+      "Add a sibling test for human error messages that contain lower-trust components."
+    ],
+    "summary": "Route every lower-trust human-output string through one terminal-safe renderer that visibly escapes C0 controls, ESC, CSI/OSC introducers, DEL, bidi controls, and hyperlink delimiters while preserving JSON semantics."
+  },
+  "rootCause": {
+    "evidenceRefs": [
+      "view-response-text",
+      "stored-chunk-text",
+      "human-text-sink",
+      "human-metadata-sinks",
+      "human-error-sink",
+      "json-output-control"
+    ],
+    "summary": "The violated invariant is that lower-trust strings displayed to a terminal must be visibly encoded before reaching `println!` or `eprintln!`. KCS applies JSON escaping for machine output, but the human renderer prints stored text, commit messages, relative paths, and sibling error text without an equivalent terminal-safe renderer."
+  },
+  "scan_id": "f78f5d0d-2752-47a7-8d8d-3371e09d3377",
+  "schema_version": 1,
+  "severity": "medium",
+  "sourceRevision": "0e19f3c6489da458e93a982a333c308d92d0a0ae",
+  "source_revision": "0e19f3c6489da458e93a982a333c308d92d0a0ae",
+  "summary": "KCS serializes --json output safely, but default human-readable view, log, diff, status, and sibling error output paths print lower-trust text, commit messages, and relative paths directly to stdout or stderr. A hostile scope can therefore pass ESC/C0 or other terminal-active bytes into the operator's interactive terminal.",
+  "target_revision": "0e19f3c6489da458e93a982a333c308d92d0a0ae",
+  "title": "Human-readable CLI output emits untrusted terminal control sequences",
+  "validation": {
+    "assertions": [
+      "The `--json` branch serializes responses with `serde_json::to_string()`.",
+      "Human `text`, `commit.message`, and `relative_path` branches interpolate strings directly into `println!`.",
+      "The safe synthetic observation found a raw ESC byte in the modeled human byte stream and no raw ESC byte in the JSON-encoded stream."
+    ],
+    "evidenceRefs": [
+      "view-response-text",
+      "stored-chunk-text",
+      "json-output-control",
+      "human-text-sink",
+      "human-metadata-sinks"
+    ],
+    "limitations": [
+      "No live terminal control sequence was emitted.",
+      "Exact title, hyperlink, or clipboard effects vary by terminal emulator and policy.",
+      "No shell execution, OS permission crossing, or credential theft was established."
+    ],
+    "method": "V10 complete static untrusted-string-to-terminal trace plus non-emitting byte/JSON encoding control",
+    "summary": "Saved validation traced stored text, commit metadata, and relative paths into human output and confirmed that only JSON mode escapes control bytes. A synthetic ESC/BEL-bearing value was compared as hex and JSON escaped text without emitting the raw controls."
+  },
+  "writeup": {
+    "attemptId": "tac_20260712",
+    "poc": [
+      {
+        "path": "findings/tac-kcs-r23-cand-059-terminal-control-human-output/poc/Makefile",
+        "sha256": "fa5bf7554fc159f1a0d48c4702a35891554d1d947aed7bc1fb5a61f5869fa29e"
+      },
+      {
+        "path": "findings/tac-kcs-r23-cand-059-terminal-control-human-output/poc/README.md",
+        "sha256": "e2547cce53fca5848cab2c5e2461ca3d16d1fa916603d7f7d5e64084375394cc"
+      },
+      {
+        "path": "findings/tac-kcs-r23-cand-059-terminal-control-human-output/poc/terminal_control_probe.py",
+        "sha256": "0e6d94196d945d2b68cb56e90c0ffb20d5c8d6edcca4cfab3b1d03dd4402d2ef"
+      }
+    ],
+    "reportPath": "findings/tac-kcs-r23-cand-059-terminal-control-human-output/tac-kcs-r23-cand-059-terminal-control-human-output.md",
+    "reportSha256": "ce02ed03c47b04eeb8f8e20e0e1dddd401e8a9a397aaae11a04d173e02d1efbf",
+    "supportingArtifacts": [
+      {
+        "path": "findings/tac-kcs-r23-cand-059-terminal-control-human-output/poc/Makefile",
+        "sha256": "fa5bf7554fc159f1a0d48c4702a35891554d1d947aed7bc1fb5a61f5869fa29e"
+      },
+      {
+        "path": "findings/tac-kcs-r23-cand-059-terminal-control-human-output/poc/README.md",
+        "sha256": "e2547cce53fca5848cab2c5e2461ca3d16d1fa916603d7f7d5e64084375394cc"
+      },
+      {
+        "path": "findings/tac-kcs-r23-cand-059-terminal-control-human-output/poc/terminal_control_probe.py",
+        "sha256": "0e6d94196d945d2b68cb56e90c0ffb20d5c8d6edcca4cfab3b1d03dd4402d2ef"
+      }
+    ],
+    "pocDirectory": "findings/tac-kcs-r23-cand-059-terminal-control-human-output/poc"
+  }
+}

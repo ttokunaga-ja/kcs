@@ -6,8 +6,44 @@ use kcs_adapter::catalog::{TEST_ADOPTED_EMBEDDING_ENV, TEST_STANDARD_ONLINE_MARK
 use serde_json::Value;
 use tempfile::TempDir;
 
-fn kcs(dir: &TempDir, args: &[&str]) -> Command {
+const KCS_CHILD_ENV_DENYLIST: &[&str] = &[
+    "GEMINI_API_KEY",
+    "MISTRAL_API_KEY",
+    "KCS_FIXED_NOW",
+    "KCS_TEST_GEMINI_EMBED",
+    "KCS_TEST_MISTRAL_OCR",
+    "KCS_TEST_MARKDOWNIZE_ADAPTER",
+    "KCS_TEST_QUERY_EMBED_TRACE",
+    "KCS_TEST_HOLD_LOCK_MS",
+    "KCS_TEST_R13_2_AUTH",
+    "KCS_TEST_R13_2_DECLARED",
+    "KCS_TEST_R13_2_FALLBACK",
+];
+
+fn hermetic_kcs_command() -> Command {
     let mut command = Command::cargo_bin("kcs").unwrap();
+    for name in KCS_CHILD_ENV_DENYLIST {
+        command.env_remove(name);
+    }
+    command
+}
+
+fn hermetic_process_command(bin: &Path) -> std::process::Command {
+    let mut command = std::process::Command::new(bin);
+    for name in KCS_CHILD_ENV_DENYLIST {
+        command.env_remove(name);
+    }
+    command
+}
+
+fn value_path_ends_with(value: &Value, suffix: &str) -> bool {
+    value
+        .as_str()
+        .is_some_and(|path| Path::new(path).ends_with(suffix))
+}
+
+fn kcs(dir: &TempDir, args: &[&str]) -> Command {
+    let mut command = hermetic_kcs_command();
     command
         .current_dir(dir.path())
         .env("XDG_CONFIG_HOME", dir.path().join(".test-config"))
@@ -40,8 +76,7 @@ fn json_failure(dir: &TempDir, args: &[&str], code: i32) -> Value {
 }
 
 fn json_success_path(path: &Path, data_home: &Path, args: &[&str]) -> Value {
-    let output = Command::cargo_bin("kcs")
-        .unwrap()
+    let output = hermetic_kcs_command()
         .current_dir(path)
         .env("XDG_CONFIG_HOME", data_home.join("config"))
         .env("XDG_DATA_HOME", data_home.join("data"))
@@ -127,8 +162,7 @@ fn json_success_embed_at(dir: &TempDir, embed: &str, fixed_now: &str, args: &[&s
 }
 
 fn run_embed_path(path: &Path, data_home: &Path, embed: &str, args: &[&str]) -> Value {
-    let output = Command::cargo_bin("kcs")
-        .unwrap()
+    let output = hermetic_kcs_command()
         .current_dir(path)
         .env("XDG_CONFIG_HOME", data_home.join("config"))
         .env("XDG_DATA_HOME", data_home.join("data"))
@@ -844,15 +878,15 @@ fn ct3_multi_001_default_searches_participating_indexed_scopes() {
     }
     // Default search (no --all-scopes) from scope a still reaches sibling b.
     let search = json_success_path(&a, &data_home, &["search", "unique sibling 4242"]);
-    assert!(first_result(&search)["scope_path"]
-        .as_str()
-        .unwrap()
-        .ends_with("/b"));
+    assert!(value_path_ends_with(
+        &first_result(&search)["scope_path"],
+        "b"
+    ));
     let searched = search["searched_scopes"].as_array().unwrap();
     assert_eq!(searched.len(), 2, "c (participates=false) must be excluded");
     assert!(searched
         .iter()
-        .all(|scope| !scope["scope_path"].as_str().unwrap().ends_with("/c")));
+        .all(|scope| !value_path_ends_with(&scope["scope_path"], "c")));
 }
 
 #[test]
@@ -878,10 +912,10 @@ fn ct3_multi_008_all_scopes_flag_targets_all_indexed_scopes() {
         &data_home,
         &["search", "unique sibling 4242", "--all-scopes"],
     );
-    assert!(first_result(&search)["scope_path"]
-        .as_str()
-        .unwrap()
-        .ends_with("/b"));
+    assert!(value_path_ends_with(
+        &first_result(&search)["scope_path"],
+        "b"
+    ));
     assert_eq!(search["searched_scopes"].as_array().unwrap().len(), 2);
 }
 
@@ -960,8 +994,8 @@ fn ct3_multi_002_cross_scope_merge_is_rank_based() {
     let expected = 1.0f64 / 61.0;
     assert!((results[0]["score"].as_f64().unwrap() - expected).abs() < 1e-12);
     // Deterministic tie-break by scope_path: /a before /b.
-    assert!(results[0]["scope_path"].as_str().unwrap().ends_with("/a"));
-    assert!(results[1]["scope_path"].as_str().unwrap().ends_with("/b"));
+    assert!(value_path_ends_with(&results[0]["scope_path"], "a"));
+    assert!(value_path_ends_with(&results[1]["scope_path"], "b"));
 }
 
 // diversify runs on the merged pool: max_per_raw_hash caps a raw_hash across scopes.
@@ -991,6 +1025,7 @@ fn ct3_multi_003_diversify_caps_raw_hash_across_scopes() {
 }
 
 // Real-machine scenario (b): one scope unreachable (chmod 000) -> results + exit 3.
+#[cfg(unix)]
 #[test]
 fn ct3_multi_005_partial_failure_returns_results_with_exit_3() {
     let parent = tempfile::tempdir().unwrap();
@@ -1013,8 +1048,7 @@ fn ct3_multi_005_partial_failure_returns_results_with_exit_3() {
     perms.set_mode(0o000);
     fs::set_permissions(&b_kcs, perms).unwrap();
 
-    let output = Command::cargo_bin("kcs")
-        .unwrap()
+    let output = hermetic_kcs_command()
         .current_dir(&a)
         .env("XDG_CONFIG_HOME", data_home.join("config"))
         .env("XDG_DATA_HOME", data_home.join("data"))
@@ -1036,7 +1070,7 @@ fn ct3_multi_005_partial_failure_returns_results_with_exit_3() {
     assert_eq!(search["searched_scopes"].as_array().unwrap().len(), 1);
     let excluded = search["excluded_scopes"].as_array().unwrap();
     assert_eq!(excluded.len(), 1);
-    assert!(excluded[0]["scope_path"].as_str().unwrap().ends_with("/b"));
+    assert!(value_path_ends_with(&excluded[0]["scope_path"], "b"));
     // 05 §1.8: excluded_scopes[] = {scope_id, scope_path, reason} — the reason
     // must be recorded, not just the fact of exclusion.
     assert!(!excluded[0]["reason"].as_str().unwrap().is_empty());
@@ -1096,8 +1130,7 @@ fn ct3_multi_005_cursor_replay_with_unresolvable_scope_is_partial() {
     fs::remove_file(registry_path(&data_home)).unwrap();
     json_success_path(&b, &data_home, &["index", "--approve"]);
 
-    let output = Command::cargo_bin("kcs")
-        .unwrap()
+    let output = hermetic_kcs_command()
         .current_dir(&b)
         .env("XDG_CONFIG_HOME", data_home.join("config"))
         .env("XDG_DATA_HOME", data_home.join("data"))
@@ -1125,7 +1158,7 @@ fn ct3_multi_005_cursor_replay_with_unresolvable_scope_is_partial() {
     // The surviving scope's results are served on the replayed page.
     let results = page2["results"].as_array().unwrap();
     assert!(!results.is_empty());
-    assert!(results[0]["scope_path"].as_str().unwrap().ends_with("/b"));
+    assert!(value_path_ends_with(&results[0]["scope_path"], "b"));
 }
 
 // CT3-EMBED-003 (de-tautologized): cross-scope embedding profiles disagree — scope
@@ -1352,8 +1385,7 @@ use kcs_index::registry::{RegistryDb, RegistryEntry};
 /// Runs `kcs <args> --json` and returns `(exit_code, parsed_json)`, reading
 /// stdout on success and stderr on failure (mirrors `json_success`/`json_failure`).
 fn run_json(cwd: &Path, data_home: &Path, args: &[&str]) -> (i32, Value) {
-    let output = Command::cargo_bin("kcs")
-        .unwrap()
+    let output = hermetic_kcs_command()
         .current_dir(cwd)
         .env("XDG_CONFIG_HOME", data_home.join("config"))
         .env("XDG_DATA_HOME", data_home.join("data"))
@@ -1371,7 +1403,7 @@ fn run_json(cwd: &Path, data_home: &Path, args: &[&str]) -> (i32, Value) {
     (code, serde_json::from_slice(stream).unwrap())
 }
 
-/// CAS object path: `<kcs>/objects/<kind>/ab/cd/<hash>` (kcs_core::cas::fanout).
+/// CAS object path: `<kcs>/objects/<kind>/ab/cd/<digest>` (kcs_core::cas::fanout).
 fn object_path(kcs_dir: &Path, kind: &str, hash: &str) -> std::path::PathBuf {
     let digest = hash.strip_prefix("sha256:").unwrap();
     kcs_dir
@@ -1379,17 +1411,17 @@ fn object_path(kcs_dir: &Path, kind: &str, hash: &str) -> std::path::PathBuf {
         .join(kind)
         .join(&digest[0..2])
         .join(&digest[2..4])
-        .join(hash)
+        .join(digest)
 }
 
-/// Tombstone path: `<kcs>/tombstones/ab/cd/<raw_hash>` (05 §3.5).
+/// Tombstone path: `<kcs>/tombstones/ab/cd/<raw-digest>` (05 §3.5).
 fn tombstone_path(kcs_dir: &Path, raw_hash: &str) -> std::path::PathBuf {
     let digest = raw_hash.strip_prefix("sha256:").unwrap();
     kcs_dir
         .join("tombstones")
         .join(&digest[0..2])
         .join(&digest[2..4])
-        .join(raw_hash)
+        .join(digest)
 }
 
 fn registry_path(data_home: &Path) -> std::path::PathBuf {
@@ -2248,8 +2280,7 @@ fn m4_corrupt_sqlite_scope_excluded_multiscope_exit_3() {
     .unwrap();
 
     // A partial-failure search writes results to STDOUT with exit 3.
-    let output = Command::cargo_bin("kcs")
-        .unwrap()
+    let output = hermetic_kcs_command()
         .current_dir(&a)
         .env("XDG_CONFIG_HOME", data_home.join("config"))
         .env("XDG_DATA_HOME", data_home.join("data"))
@@ -2265,7 +2296,7 @@ fn m4_corrupt_sqlite_scope_excluded_multiscope_exit_3() {
     assert_eq!(search["searched_scopes"].as_array().unwrap().len(), 1);
     let excluded = search["excluded_scopes"].as_array().unwrap();
     assert_eq!(excluded.len(), 1);
-    assert!(excluded[0]["scope_path"].as_str().unwrap().ends_with("/b"));
+    assert!(value_path_ends_with(&excluded[0]["scope_path"], "b"));
     assert_eq!(excluded[0]["reason"], "index_corrupt");
 }
 
@@ -2822,8 +2853,7 @@ fn o2_text_search_never_sends_query_embedding() {
     let trace = dir.path().join("query-embed-trace.log");
 
     // --text: the query embedding must NOT be computed/sent.
-    Command::cargo_bin("kcs")
-        .unwrap()
+    hermetic_kcs_command()
         .current_dir(dir.path())
         .env("XDG_CONFIG_HOME", dir.path().join(".test-config"))
         .env("XDG_DATA_HOME", dir.path().join(".test-data"))
@@ -2839,8 +2869,7 @@ fn o2_text_search_never_sends_query_embedding() {
     );
 
     // auto → hybrid: the same seam DOES send, so the trace appears (discriminator).
-    Command::cargo_bin("kcs")
-        .unwrap()
+    hermetic_kcs_command()
         .current_dir(dir.path())
         .env("XDG_CONFIG_HOME", dir.path().join(".test-config"))
         .env("XDG_DATA_HOME", dir.path().join(".test-data"))
@@ -3189,7 +3218,7 @@ fn p5_concurrent_search_during_rebuild_is_never_silently_empty() {
     let root = dir.path().to_path_buf();
 
     let run = |args: &[&str]| -> std::process::Output {
-        std::process::Command::new(&bin)
+        hermetic_process_command(&bin)
             .args(args)
             .current_dir(&root)
             .env("XDG_DATA_HOME", &data)
@@ -3214,7 +3243,7 @@ fn p5_concurrent_search_during_rebuild_is_never_silently_empty() {
         std::thread::spawn(move || {
             let mut spins = 0;
             while !stop.load(Ordering::Relaxed) && spins < 200 {
-                let _ = std::process::Command::new(&bin)
+                let _ = hermetic_process_command(&bin)
                     .args(["repair", "--rebuild-db"])
                     .current_dir(&root)
                     .env("XDG_DATA_HOME", &data)
@@ -3558,7 +3587,7 @@ fn p10_concurrent_search_during_reindex_is_never_silently_empty() {
     // Hermetic adapter seams (no network); text search does not exercise them, but
     // set them so any accidental adapter call is a mock.
     let run = |args: &[&str]| -> std::process::Output {
-        std::process::Command::new(&bin)
+        hermetic_process_command(&bin)
             .args(args)
             .current_dir(&root)
             .env("XDG_DATA_HOME", &data)
@@ -3585,7 +3614,7 @@ fn p10_concurrent_search_during_reindex_is_never_silently_empty() {
         std::thread::spawn(move || {
             let mut spins = 0;
             while !stop.load(Ordering::Relaxed) && spins < 50 {
-                let _ = std::process::Command::new(&bin)
+                let _ = hermetic_process_command(&bin)
                     .args(["reindex", "--force", "--yes"])
                     .current_dir(&root)
                     .env("XDG_DATA_HOME", &data)
@@ -3909,8 +3938,7 @@ fn r7_multiscope_query_embedding_requires_every_target_scope_opt_in() {
     );
 
     let trace = data_home.path().join("query.trace");
-    let output = Command::cargo_bin("kcs")
-        .unwrap()
+    let output = hermetic_kcs_command()
         .current_dir(a.path())
         .env("XDG_CONFIG_HOME", data_home.path().join("config"))
         .env("XDG_DATA_HOME", data_home.path().join("data"))
@@ -4408,6 +4436,46 @@ fn r12_3_reconcile_completes_committed_embedding_tasks() {
     }
 }
 
+#[test]
+fn r23_materialized_embedding_completes_legacy_failed_task_without_charge() {
+    let dir = indexed_scope_embed("mock");
+    let tasks_path = dir.path().join(".kcs/tasks.jsonl");
+    let original = fs::read_to_string(&tasks_path).unwrap();
+    let mut rewritten = String::new();
+    let mut changed_task_id = None;
+    for line in original.lines() {
+        let mut task: Value = serde_json::from_str(line).unwrap();
+        if changed_task_id.is_none() && task["type"] == "embedding" && task["status"] == "done" {
+            changed_task_id = task["task_id"].as_str().map(str::to_owned);
+            task["status"] = Value::from("failed");
+            task["fallback_reason"] = Value::from("contract_violation");
+            task["attempts"] = Value::from(1);
+            let object = task.as_object_mut().unwrap();
+            object.remove("reservation_id");
+            object.remove("reserved_month");
+            object.remove("reserved_usd");
+        }
+        rewritten.push_str(&serde_json::to_string(&task).unwrap());
+        rewritten.push('\n');
+    }
+    let changed_task_id = changed_task_id.expect("fixture must have a done embedding task");
+    fs::write(&tasks_path, rewritten).unwrap();
+    let ledger_before = embedding_ledger_rows(&dir);
+
+    let reindex = json_success_embed(&dir, "mock", &["index", "--approve"]);
+    assert_eq!(reindex["embedding_tasks_executed"], 0);
+    assert_eq!(embedding_ledger_rows(&dir), ledger_before);
+
+    let tasks = fs::read_to_string(&tasks_path).unwrap();
+    let recovered = tasks
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .find(|task| task["task_id"] == changed_task_id)
+        .unwrap();
+    assert_eq!(recovered["status"], "done");
+    assert_eq!(recovered["fallback_reason"], "embedding_adapter_done");
+}
+
 // ===========================================================================
 // R12-4: exit 3/5/6 __exit_code overrides and clap usage errors bypassed
 // errors.jsonl, and a failed search dropped its per-search metrics.jsonl line —
@@ -4438,6 +4506,7 @@ fn r12_4_enrichment_auth_failure_reaches_errors_jsonl() {
 }
 
 // Multi-scope partial failure (exit 3 via __exit_code) must record the exclusion.
+#[cfg(unix)]
 #[test]
 fn r12_4_multi_scope_partial_records_exclusion_in_errors_jsonl() {
     let parent = tempfile::tempdir().unwrap();
@@ -4457,8 +4526,7 @@ fn r12_4_multi_scope_partial_records_exclusion_in_errors_jsonl() {
     let mut perms = fs::metadata(&b_kcs).unwrap().permissions();
     perms.set_mode(0o000);
     fs::set_permissions(&b_kcs, perms).unwrap();
-    Command::cargo_bin("kcs")
-        .unwrap()
+    hermetic_kcs_command()
         .current_dir(&a)
         .env("XDG_CONFIG_HOME", data_home.join("config"))
         .env("XDG_DATA_HOME", data_home.join("data"))
@@ -4532,6 +4600,7 @@ fn r12_4_clap_usage_error_reaches_errors_jsonl() {
 // observability logging must not destroy an already-computed result (device-global
 // files would otherwise stop every scope's search on disk-full).
 // ===========================================================================
+#[cfg(unix)]
 #[test]
 fn r12_5_search_survives_unwritable_metrics_log() {
     let dir = indexed_scope();
@@ -4686,10 +4755,9 @@ fn r13_2_cli_tools_toml_bogus_key_and_type_are_exit_2() {
     assert_eq!(err["error_code"], "KCS-E-CONFIG-SCHEMA-001");
 }
 
-/// R13-2(b): the docs/03 §11 + docs/07 §1 copy-paste passes (exit 0) — a
-/// documented config must never brick the device (R12-2 lesson).
+/// CAND-038/039: executable targets unsupported by the built-in runtime fail closed.
 #[test]
-fn r13_2_cli_documented_tools_toml_is_accepted() {
+fn r13_2_cli_unsupported_documented_targets_are_rejected() {
     let dir = indexed_scope();
     write_tools_toml(
         &dir,
@@ -4703,16 +4771,17 @@ fn r13_2_cli_documented_tools_toml_is_accepted() {
          [embedding.gemini_embedding_2]\n\
          auth = \"env:GEMINI_API_KEY\"\n",
     );
-    json_success(&dir, &["status"]);
+    let err = json_failure(&dir, &["status"], 2);
+    assert_eq!(err["error_code"], "KCS-E-CONFIG-SCHEMA-001");
 }
 
-/// R13-2(c)/(e): the auth-prefix check is scoped to the `auth` field, so a
-/// documented `url = "plain:"` no longer bricks every command (exit 0).
+/// CAND-038: a URL on an unknown/custom markdown target is never silently ignored.
 #[test]
-fn r13_2_cli_url_plain_prefix_does_not_brick() {
+fn r13_2_cli_custom_url_is_rejected() {
     let dir = indexed_scope();
     write_tools_toml(&dir, "[markdown.x]\nurl = \"plain:\"\n");
-    json_success(&dir, &["status"]);
+    let err = json_failure(&dir, &["status"], 2);
+    assert_eq!(err["error_code"], "KCS-E-CONFIG-SCHEMA-001");
 }
 
 /// R13-2(e): a declared `auth = "keychain:<svc>"` is not implemented — when the
@@ -4729,7 +4798,10 @@ fn r13_2_keychain_auth_is_loud_not_silent() {
     .unwrap();
     // Declare the embedding adapter with an (unimplemented) keychain auth BEFORE
     // indexing, so `index` activates it and the enrichment pass resolves the auth.
-    write_tools_toml(&dir, "[embedding.g]\nauth = \"keychain:login\"\n");
+    write_tools_toml(
+        &dir,
+        "[embedding.gemini_embedding_2]\nauth = \"keychain:login\"\n",
+    );
     kcs(&dir, &["init"]).assert().success();
     // The index itself still succeeds (the failed embedding is a counted task), but
     // the keychain misconfig must be recorded loudly.
@@ -5030,8 +5102,7 @@ fn r16_2_one_scope_store_corruption_is_partial_not_all_failed() {
     )
     .unwrap();
 
-    let output = Command::cargo_bin("kcs")
-        .unwrap()
+    let output = hermetic_kcs_command()
         .current_dir(&a)
         .env("XDG_CONFIG_HOME", data_home.join("config"))
         .env("XDG_DATA_HOME", data_home.join("data"))
@@ -5051,7 +5122,7 @@ fn r16_2_one_scope_store_corruption_is_partial_not_all_failed() {
     let excluded = search["excluded_scopes"].as_array().unwrap();
     assert_eq!(excluded.len(), 1);
     assert_eq!(excluded[0]["reason"], "store_corrupt");
-    assert!(excluded[0]["scope_path"].as_str().unwrap().ends_with("/b"));
+    assert!(value_path_ends_with(&excluded[0]["scope_path"], "b"));
 }
 
 // R16-3: a fresh search against a scope whose HEAD advanced via a bare `snapshot`
@@ -5090,8 +5161,7 @@ fn r16_3_fresh_search_shallow_no_rows_excludes_not_silent_empty() {
     ))
     .unwrap();
 
-    let output = Command::cargo_bin("kcs")
-        .unwrap()
+    let output = hermetic_kcs_command()
         .current_dir(&a)
         .env("XDG_CONFIG_HOME", data_home.join("config"))
         .env("XDG_DATA_HOME", data_home.join("data"))
@@ -5112,7 +5182,7 @@ fn r16_3_fresh_search_shallow_no_rows_excludes_not_silent_empty() {
     let excluded = search["excluded_scopes"].as_array().unwrap();
     assert_eq!(excluded.len(), 1);
     assert_eq!(excluded[0]["reason"], "snapshot_shallow");
-    assert!(excluded[0]["scope_path"].as_str().unwrap().ends_with("/b"));
+    assert!(value_path_ends_with(&excluded[0]["scope_path"], "b"));
 }
 
 // R16-4(a): `repair --rebuild-db` — the only implemented recovery command — must not
@@ -6237,8 +6307,7 @@ fn r18_4_partial_store_corruption_entry_carries_recovery_hint() {
     )
     .unwrap();
 
-    let output = Command::cargo_bin("kcs")
-        .unwrap()
+    let output = hermetic_kcs_command()
         .current_dir(&a)
         .env("XDG_CONFIG_HOME", data_home.join("config"))
         .env("XDG_DATA_HOME", data_home.join("data"))
@@ -6569,8 +6638,7 @@ fn r19_6_partial_index_corrupt_entry_carries_recovery_hint() {
     // Corrupt scope B's sqlite.db (index_corrupt) — A stays healthy (partial exclusion).
     fs::write(b.join(".kcs/index/sqlite.db"), b"GARBAGE not a sqlite db").unwrap();
 
-    let output = Command::cargo_bin("kcs")
-        .unwrap()
+    let output = hermetic_kcs_command()
         .current_dir(&a)
         .env("XDG_CONFIG_HOME", data_home.join("config"))
         .env("XDG_DATA_HOME", data_home.join("data"))
@@ -6738,10 +6806,8 @@ fn r21_4_uppercase_and_octet_stream_text_enqueue_no_online_ocr() {
     );
 }
 
-/// R21-6: an embedding task that failed AuthError on a LIVE, unchanged file must recover
-/// after the credentials are fixed — a plain re-index revives it (Failed -> Pending) and it
-/// embeds. Before the fix it was non-retryable and never non-live, so it stayed Failed
-/// forever with its phantom reservation eating the cap.
+/// CAND-013/R21-6: AuthError revival requires explicit `batch resume`; ordinary indexing
+/// must not silently revive a failed online operation.
 #[test]
 fn r21_6_auth_error_live_task_recovers_after_credentials_fixed() {
     let dir = tempfile::tempdir().unwrap();
@@ -6763,13 +6829,13 @@ fn r21_6_auth_error_live_task_recovers_after_credentials_fixed() {
             .any(|t| t["status"] == "failed" && t["fallback_reason"] == "auth_error"),
         "R21-6: precondition — an AuthError embedding task must exist: {status}"
     );
-    // Credentials fixed (mock succeeds) -> a plain re-index must recover it.
-    json_success_embed(&dir, "mock", &["index", "--approve", "--online"]);
+    // Credentials fixed (mock succeeds) -> explicit resume recovers it.
+    json_success_embed(&dir, "mock", &["batch", "resume"]);
     let status = json_success_embed(&dir, "mock", &["status"]);
     let embedding = tasks_of_type(&status, "embedding");
     assert!(
         embedding.iter().any(|t| t["status"] == "done"),
-        "R21-6: fixing credentials + re-index must recover the AuthError task to Done: {status}"
+        "R21-6: fixing credentials + explicit resume must recover AuthError to Done: {status}"
     );
     assert!(
         !embedding
@@ -7158,6 +7224,17 @@ fn r22_4_unrecognized_binary_is_disclosed_not_silently_dropped() {
         index["skipped_unrecognized_binary_files"], 1,
         "R22-4: the unrecognized binary document must be disclosed, not silently dropped: {index}"
     );
+    let unsupported_store = dir.path().join(".kcs/unsupported-inputs.jsonl");
+    let first_len = fs::metadata(&unsupported_store).unwrap().len();
+    let repeated = json_success(&dir, &["index", "--yes"]);
+    assert_eq!(repeated["skipped_unrecognized_binary_files"], 1);
+    assert_eq!(
+        fs::metadata(&unsupported_store).unwrap().len(),
+        first_len,
+        "R23 CAND-014: an unchanged disposition must not grow the durable store"
+    );
+    let status = json_success(&dir, &["status"]);
+    assert_eq!(status["unsupported_inputs"].as_array().unwrap().len(), 1);
     // NEGATIVE control: a scope of only recognized text reports zero.
     let clean = tempfile::tempdir().unwrap();
     fs::write(
@@ -7170,6 +7247,28 @@ fn r22_4_unrecognized_binary_is_disclosed_not_silently_dropped() {
     assert_eq!(
         clean_index["skipped_unrecognized_binary_files"], 0,
         "R22-4 control: an all-text scope must report zero unrecognized binaries: {clean_index}"
+    );
+}
+
+#[test]
+fn r23_cand_014_status_fails_closed_on_corrupt_unsupported_store() {
+    let dir = tempfile::tempdir().unwrap();
+    kcs(&dir, &["init"]).assert().success();
+    fs::write(
+        dir.path().join(".kcs/unsupported-inputs.jsonl"),
+        b"{not-json}\n",
+    )
+    .unwrap();
+
+    let stderr = kcs(&dir, &["status"])
+        .assert()
+        .failure()
+        .get_output()
+        .stderr
+        .clone();
+    assert!(
+        String::from_utf8_lossy(&stderr).contains("KCS-E-STORE-CORRUPT-001"),
+        "corrupt unsupported-input state must be surfaced"
     );
 }
 
@@ -7219,6 +7318,7 @@ fn r22_5_legacy_octet_stream_text_task_is_retired_not_sent() {
         created_at: "2026-07-01T00:00:00Z".to_owned(),
         reserved_usd: None,
         reserved_month: None,
+        reservation_id: None,
     };
     TaskStore::new(dir.path().join(".kcs"))
         .append(&legacy)

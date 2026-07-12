@@ -1,0 +1,217 @@
+{
+  "schema_version": 1,
+  "candidate_id": "KCS-R23-CAND-024",
+  "title": "Opening an existing permissive `.kcs` exposes future private archive bytes",
+  "ledger_row_id": "KCS-R23-CAND-024",
+  "instance_key": "KCS-R23-CAND-024",
+  "scan_scope": ".",
+  "target_revision": "0e19f3c6489da458e93a982a333c308d92d0a0ae",
+  "final_policy": "reportable",
+  "severity": "medium",
+  "priority": "P2",
+  "confidence": {
+    "level": "high",
+    "score": 0.97,
+    "rationale": "The Unix mechanism was validated by direct source review and a local/offline synthetic PoC. Deployment reachability remains medium-high because it depends on supplied or pre-existing store adoption in a multi-principal filesystem setting."
+  },
+  "summary": "KCS hardens newly created `.kcs` directories to 0700 because raw CAS objects contain verbatim document bytes, but `Repository::init()` returns through `Repository::open()` when `.kcs` already exists. `open()` validates logical store contents without rejecting or repairing unsafe owner, type, or mode state. A victim who later snapshots private direct-child files can publish those bytes into raw CAS objects whose permissions come from the process umask under a traversable store.",
+  "codeEvidence": [
+    {
+      "id": "init-existing-shortcut",
+      "label": "Existing `.kcs` bypasses new-store hardening",
+      "path": "crates/kcs-core/src/scope.rs",
+      "startLine": 135,
+      "endLine": 158,
+      "language": "rust",
+      "role": "entrypoint",
+      "code": "let root = root.canonicalize().kcs_io(root)?;\nlet kcs_dir = root.join(\".kcs\");\nif kcs_dir.exists() {\n    return Self::open(root);\n}\n\nfor dir in [\n    kcs_dir.join(\"objects/raw\"),\n    kcs_dir.join(\"objects/trees\"),\n    kcs_dir.join(\"objects/commits\"),\n    kcs_dir.join(\"refs/heads\"),\n    kcs_dir.join(\"refs/tags\"),\n    kcs_dir.join(\"logs\"),\n] {\n    fs::create_dir_all(&dir).kcs_io(&dir)?;\n}\n\nrestrict_dir_to_owner(&kcs_dir)?;",
+      "explanation": "`Repository::init()` applies the owner-only hardening only after creating a new archive layout. If `.kcs` already exists, the path returns to `open()` before that control runs."
+    },
+    {
+      "id": "open-logical-only",
+      "label": "`open()` accepts a directory and validates logical files only",
+      "path": "crates/kcs-core/src/scope.rs",
+      "startLine": 188,
+      "endLine": 206,
+      "language": "rust",
+      "role": "root_control",
+      "code": "pub fn open(path: impl AsRef<Path>) -> Result<Self> {\n    let root = path.as_ref().canonicalize().kcs_io(path.as_ref())?;\n    let kcs_dir = root.join(\".kcs\");\n    if !kcs_dir.is_dir() {\n        return Err(KcsError::invalid_usage(\"not a kcs scope\"));\n    }\n\n    let repo = Self {\n        root,\n        kcs_dir: kcs_dir.clone(),\n        store: ObjectStore::new(kcs_dir),\n    };\n    repo.validate()?;\n    repo.self_heal_head()?;\n    Ok(repo)\n}",
+      "explanation": "`open()` follows the existing path into `Path::is_dir()` and store validation. It does not use `symlink_metadata()`, inspect UID or mode bits, call `restrict_dir_to_owner()`, or distinguish read-only from mutating adoption."
+    },
+    {
+      "id": "validate-shape-only",
+      "label": "Validation checks schema state, not filesystem ownership",
+      "path": "crates/kcs-core/src/scope.rs",
+      "startLine": 235,
+      "endLine": 239,
+      "language": "rust",
+      "role": "propagation",
+      "code": "pub fn validate(&self) -> Result<()> {\n    self.validate_config()?;\n    self.validate_scope()?;\n    self.validate_manifest()?;\n    Ok(())\n}",
+      "explanation": "The accepted existing store is carried into logical validation. These checks prove that KCS files are parseable, but they do not restore the archive confidentiality boundary."
+    },
+    {
+      "id": "expected-owner-hardening",
+      "label": "New-store control sets owner-only mode",
+      "path": "crates/kcs-core/src/scope.rs",
+      "startLine": 1650,
+      "endLine": 1660,
+      "language": "rust",
+      "role": "expected_control",
+      "code": "pub fn restrict_dir_to_owner(dir: &Path) -> Result<()> {\n    #[cfg(unix)]\n    {\n        use std::os::unix::fs::PermissionsExt;\n        fs::set_permissions(dir, fs::Permissions::from_mode(0o700)).kcs_io(dir)?;\n    }\n    Ok(())\n}",
+      "explanation": "The available Unix control sets the archive directory to 0700. The missing invariant is that existing stores used for mutation must already satisfy or be repaired to this owner-only boundary."
+    },
+    {
+      "id": "snapshot-reads-private-bytes",
+      "label": "Snapshot reads direct-child bytes and writes raw objects",
+      "path": "crates/kcs-core/src/scope.rs",
+      "startLine": 261,
+      "endLine": 292,
+      "language": "rust",
+      "role": "sink",
+      "code": "for entry in fs::read_dir(&self.root).kcs_io(&self.root)? {\n    let entry = entry.kcs_io(&self.root)?;\n    if entry.file_name() == \".kcs\" {\n        continue;\n    }\n    let path = entry.path();\n    let file_type = entry.file_type().kcs_io(&path)?;\n    if file_type.is_dir() {\n        continue;\n    }\n    if !file_type.is_file() {\n        eprintln!(\"warning: skipping non-regular file: {}\", path.display());\n        continue;\n    }\n    let bytes = fs::read(&path).kcs_io(&path)?;\n    let raw_hash = if store_raw {\n        self.store.write_raw(&bytes)?\n    } else {\n        hash_bytes(&bytes)\n    };",
+      "explanation": "A victim snapshot reads regular direct-child files with the victim's OS permissions. With `store_raw` set, those bytes flow into the raw CAS store."
+    },
+    {
+      "id": "cas-umask-write",
+      "label": "Raw CAS publication uses umask-derived file modes",
+      "path": "crates/kcs-core/src/cas.rs",
+      "startLine": 60,
+      "endLine": 75,
+      "language": "rust",
+      "role": "outcome",
+      "code": "pub fn write_raw(&self, bytes: &[u8]) -> Result<String> {\n    let hash = hash_bytes(bytes);\n    self.write_object_bytes(ObjectKind::Raw, &hash, bytes)?;\n    Ok(hash)\n}\n\npub fn write_object_bytes(&self, kind: ObjectKind, hash: &str, bytes: &[u8]) -> Result<()> {\n    let path = self.object_path(kind, hash)?;\n    atomic_write(&path, bytes)\n}",
+      "explanation": "`write_raw()` sends verbatim bytes to `atomic_write()` under `.kcs/objects/raw`. The object writer relies on parent directory privacy rather than setting each object owner-only."
+    },
+    {
+      "id": "atomic-file-create",
+      "label": "`File::create()` inherits the process umask",
+      "path": "crates/kcs-core/src/cas.rs",
+      "startLine": 155,
+      "endLine": 176,
+      "language": "rust",
+      "role": "outcome",
+      "code": "pub(crate) fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {\n    let parent = path\n        .parent()\n        .ok_or_else(|| KcsError::io(\"path has no parent\", path.display().to_string()))?;\n    fs::create_dir_all(parent).kcs_io(parent)?;\n\n    if path.exists() {\n        return Ok(());\n    }\n\n    let temp = parent.join(format!(\".tmp-{}-{}\", std::process::id(), unix_nanos()));\n    let result = (|| -> Result<()> {\n        let mut file = File::create(&temp).kcs_io(&temp)?;\n        file.write_all(bytes).kcs_io(&temp)?;\n        file.sync_all().kcs_io(&temp)?;\n        drop(file);\n        fs::rename(&temp, path).kcs_io(path)\n    })();",
+      "explanation": "The final raw object is created through a temporary file and rename. With a common umask such as 022 and a traversable `.kcs`, the archived copy can become group/world-readable even when the source file is 0600."
+    }
+  ],
+  "rootCause": {
+    "summary": "The violated invariant is that mutating use of `.kcs` must be owner-only before raw document bytes are written. New-store creation enforces this with `restrict_dir_to_owner()`, but existing-store adoption returns through `open()` before that control and `open()` performs only logical store validation.",
+    "evidenceRefs": [
+      "init-existing-shortcut",
+      "open-logical-only",
+      "validate-shape-only",
+      "snapshot-reads-private-bytes",
+      "cas-umask-write",
+      "atomic-file-create",
+      "expected-owner-hardening"
+    ]
+  },
+  "validation": {
+    "method": "static source trace plus local/offline synthetic PoC",
+    "summary": "The source trace confirms that existing `.kcs` stores bypass owner hardening and that later snapshots write victim-readable bytes through the raw CAS path. The PoC reproduced the Unix mode pattern on the reviewed checkout.",
+    "evidenceRefs": [
+      "init-existing-shortcut",
+      "open-logical-only",
+      "snapshot-reads-private-bytes",
+      "cas-umask-write",
+      "atomic-file-create"
+    ],
+    "assertions": [
+      "`Repository::init()` returns through `Self::open(root)` before `restrict_dir_to_owner()` when `.kcs` already exists.",
+      "`Repository::open()` checks `is_dir()` and logical repository files but does not reject or repair unsafe owner or permission state.",
+      "`snapshot` reads regular direct-child files with the victim process identity and stores raw bytes when building the working tree.",
+      "`ObjectStore::write_raw()` publishes raw objects using `File::create()` and therefore depends on the process umask and parent directory privacy."
+    ],
+    "observations": [
+      "The local PoC observed fresh `.kcs` mode 700.",
+      "After `chmod 0755 .kcs`, re-running `kcs --json init` reported `already initialized` and retained mode 755.",
+      "A synthetic 0600 `notes.txt` produced a 0644 raw object containing the exact synthetic bytes."
+    ],
+    "limitations": [
+      "No second OS account was created; Unix DAC behavior follows from the observed modes.",
+      "Non-Unix ACL and ownership behavior was not assessed.",
+      "A 0077 umask can make new raw objects owner-only, but KCS does not enforce that invariant."
+    ]
+  },
+  "attackPath": {
+    "summary": "A lower-trust local or shared-filesystem participant supplies, precreates, or preserves a valid but permissive `.kcs` store. The victim adopts it through `init` or later opens it. A subsequent snapshot writes private direct-child bytes into raw CAS objects under that traversable store.",
+    "dataflow": {
+      "summary": "existing permissive `.kcs` -> `Repository::init()` shortcut -> `Repository::open()` logical validation -> `snapshot` direct-child read -> `ObjectStore::write_raw()` -> umask-derived raw CAS object",
+      "source": "victim-readable regular direct-child file bytes",
+      "sink": "raw CAS object under the accepted existing `.kcs`",
+      "outcome": "future private source bytes become readable to another Unix principal through the archive copy",
+      "evidenceRefs": [
+        "init-existing-shortcut",
+        "open-logical-only",
+        "snapshot-reads-private-bytes",
+        "cas-umask-write",
+        "atomic-file-create"
+      ]
+    },
+    "reachability": {
+      "attacker": "lower-trust local filesystem principal or supplied-store contributor",
+      "entrypoint": "normal `kcs init` or repository-opening commands against a scope with an existing `.kcs`",
+      "access_requirements": "ability to supply, precreate, influence, or preserve a structurally valid `.kcs` that the victim later adopts",
+      "preconditions": [
+        "multi-principal Unix host or shared filesystem",
+        "victim adopts a valid existing store",
+        "victim later performs a mutating operation such as `snapshot` or `index`",
+        "process umask does not independently force owner-only raw objects"
+      ],
+      "outcome": "archive confidentiality crosses an OS-principal boundary"
+    },
+    "impact": {
+      "level": "high",
+      "why": "Raw CAS objects contain verbatim document bytes, so a private source file can receive a newly readable archive copy."
+    },
+    "likelihood": {
+      "level": "medium",
+      "why": "The path is realistic for supplied or pre-existing stores on shared systems but requires local setup, victim adoption, later mutation, and Unix DAC-like semantics."
+    },
+    "limitations": [
+      "Bytes already present before adoption are not attributed to this trigger; the validated impact is new bytes written after unsafe adoption.",
+      "A securely permissioned trusted store or a 0077 umask defeats the demonstrated confidentiality result.",
+      "Read-only trusted archive use should be handled separately from mutating adoption."
+    ],
+    "evidenceRefs": [
+      "open-logical-only",
+      "snapshot-reads-private-bytes",
+      "atomic-file-create"
+    ]
+  },
+  "remediation": {
+    "summary": "Before any mutating use of an existing `.kcs`, reject symlink/non-directory, wrong-owner, or group/world-accessible stores, or securely repair an owner-controlled store before continuing.",
+    "minimal_invariant": "A mutable `.kcs` store must be a real directory owned by the effective user and inaccessible to group and other principals on Unix.",
+    "recommendations": [
+      "Introduce a mutating-open path that validates filesystem owner, type, and mode before `snapshot`, `index`, repair, task updates, ref updates, and existing-store `init` success.",
+      "Use `symlink_metadata()` for the `.kcs` boundary and compare owner/mode before following store children.",
+      "Keep trusted read-only archive inspection explicit so remediation does not silently chmod or mutate archives that should only be observed.",
+      "Add object-level defensive chmod or private fanout-directory creation if KCS wants defense in depth beyond the parent 0700 boundary."
+    ],
+    "regression_tests": [
+      "Fresh `init` creates `.kcs` mode 0700 on Unix.",
+      "Re-running `init` on a valid 0755 `.kcs` rejects or repairs before reporting success.",
+      "`snapshot` refuses to write when an existing `.kcs` is group/world accessible.",
+      "A 0600 source file does not produce a group/world-readable raw object beneath a traversable store.",
+      "Symlink and wrong-owner `.kcs` cases are rejected."
+    ]
+  },
+  "cwe": [
+    "CWE-276",
+    "CWE-732"
+  ],
+  "writeup": {
+    "attempt_id": "tac_20260712",
+    "reportPath": "findings/tac-kcs-r23-cand-024-permissive-existing-store/tac-kcs-r23-cand-024-permissive-existing-store.md",
+    "pocPath": "findings/tac-kcs-r23-cand-024-permissive-existing-store/poc"
+  },
+  "source_files": [
+    "crates/kcs-core/src/scope.rs",
+    "crates/kcs-core/src/cas.rs"
+  ],
+  "extensions": {
+    "candidateId": "KCS-R23-CAND-024",
+    "ledgerRowId": "KCS-R23-CAND-024",
+    "reportId": "KCS-R23-CAND-024"
+  }
+}

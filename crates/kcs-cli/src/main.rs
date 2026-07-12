@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, OpenOptions};
-use std::io::{IsTerminal, Write};
+use std::io::{IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process;
 use std::time::Instant;
@@ -10,8 +10,9 @@ use kcs_adapter::catalog::{
     active_adopted_embedding_execution, adopted_embedding_profile,
     builtin_offline_markdownize_adapter, builtin_prepare_profile,
     declared_adopted_embedding_profile, resolve_standard_online_markdownize_profile,
-    run_adopted_embedding, run_standard_online_markdownize, standard_online_markdownize_profile,
-    AdoptedEmbeddingExecution, DeclaredEmbeddingProfile, StandardOnlineMarkdownizeRequest,
+    run_adopted_embedding, run_standard_online_markdownize_with_bytes,
+    standard_online_markdownize_profile, AdoptedEmbeddingExecution, DeclaredEmbeddingProfile,
+    StandardOnlineMarkdownizeRequest,
 };
 use kcs_adapter::identity::tool_profile_hash;
 use kcs_adapter::tool_lock::{load_tool_lock, validate_tools_toml};
@@ -21,12 +22,12 @@ use kcs_adapter::types::{
     MarkdownizeMode as AdapterMarkdownizeMode, MarkdownizeRequest, PreparedUnitHint,
     PreviousMarkdownizeContext, RawInput, UnitKind,
 };
-use kcs_core::cas::is_hash;
+use kcs_core::cas::{fanout_path, hash_path_component, is_hash, MAX_RAW_OBJECT_BYTES};
 use kcs_core::dag::{NormalizeRef, TreeObject};
 use kcs_core::schema::{validate_json_schema, SchemaKind};
 use kcs_core::scope::{
     append_error_log, append_event_log, append_warn_log, new_ulid, now_utc_seconds,
-    InspectedObject, Repository, StoreLock,
+    InspectedObject, PendingNormalizeRef, Repository, StoreLock, DEFAULT_MAX_ARCHIVE_SCOPE_BYTES,
 };
 use kcs_core::{ExitCode, KcsError, Result};
 use kcs_index::chunking::{
@@ -41,21 +42,34 @@ use kcs_index::{
 use kcs_pipeline::budget::{
     budget_warning, estimate_local_baseline_cost, evaluate_budget_with_caps, read_budget_policy,
     utc_month, BudgetCapKind, BudgetCaps, BudgetEstimate, CostLedger, MonthlyCostLedgerEntry,
+    ReservationRecord,
 };
 use kcs_pipeline::markdownize::{
-    choose_markdownize_mode, persist_normalized_instance, validate_markdownize_response,
-    IncrementalHints, IncrementalModeDecision, IncrementalModeInput, MarkdownizeMode,
-    NormalizedInstanceManifest, NormalizedUnitManifestEntry, NormalizedUnitObject, UnitStatus,
+    choose_markdownize_mode, load_validated_normalized_instance, persist_normalized_instance,
+    validate_markdownize_response, IncrementalHints, IncrementalModeDecision, IncrementalModeInput,
+    MarkdownizeMode, NormalizedInstanceManifest, NormalizedUnitManifestEntry, NormalizedUnitObject,
+    UnitStatus,
 };
 use kcs_pipeline::prepare::{
-    hash_bytes, map_units, pdf_text_pages, prepare_units, unit_ref, PrepareStageRequest,
-    PreparedUnit, UnitFingerprint, UnitType,
+    hash_bytes, map_units, pdf_text_pages_bounded, prepare_units_from_bytes, unit_ref,
+    PrepareStageBytesRequest, PreparedUnit, UnitFingerprint, UnitType,
 };
 use kcs_pipeline::scan::{
-    build_scan_preview, classify_secret, ScanCandidate, ScanPreview, ScanPreviewRequest,
+    build_scan_preview, classify_secret, current_scan_policy_allows_file, hash_verified_scan_input,
+    read_verified_scan_input, ScanCandidate, ScanPreview, ScanPreviewRequest,
 };
-use kcs_pipeline::task::{retry_policy, task_status_from_unit_counts, RetryErrorKind};
-use kcs_pipeline::task::{TaskDescriptor, TaskStatus, TaskStore, TaskType};
+use kcs_pipeline::task::{
+    retry_policy, task_can_complete_from_materialized_output, task_can_enter_secret_hold,
+    task_status_from_unit_counts, RetryErrorKind,
+};
+use kcs_pipeline::task::{
+    validate_task_output_ref, TaskDescriptor, TaskOutputRef, TaskReservationClaim, TaskStatus,
+    TaskStore, TaskType,
+};
+use kcs_pipeline::unsupported::{
+    UnsupportedInputDisposition, UnsupportedInputStore, UNSUPPORTED_REASON_RESOLVED,
+    UNSUPPORTED_REASON_UNRECOGNIZED_BINARY,
+};
 use kcs_search::cursor::{
     decode_cursor_token, encode_cursor_token, CursorToken, ScopeCursor, ScopeMode,
 };
@@ -71,6 +85,7 @@ use kcs_search::rrf::{fuse_rrf, BackendRank, RrfConfig};
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use unicode_normalization::UnicodeNormalization;
 
 // clap のパースエラーは exit code 2 で終了する。これは docs/06-cli-spec.md §7 の
@@ -440,12 +455,22 @@ fn run(cli: Cli) -> Result<Value> {
             // degrades to listing files without a classification (`head_shallow`)
             // instead of dying on a raw KCS-E-STORE-NOT-FOUND-001.
             let status = repo.status()?;
+            let (unsupported_inputs, unsupported_inputs_complete) = if status.head_shallow {
+                UnsupportedInputStore::new(repo.kcs_dir())
+                    .latest_by_path()
+                    .map_err(pipeline_to_kcs)?;
+                (Vec::new(), false)
+            } else {
+                (current_unsupported_inputs(&repo)?, true)
+            };
             Ok(json!({
                 "scope_path": repo.kcs_dir(),
                 "files": status.files,
                 "head_shallow": status.head_shallow,
                 "tasks": task_store.all().map_err(pipeline_to_kcs)?,
                 "quarantine": quarantine_status_records(&repo)?,
+                "unsupported_inputs": unsupported_inputs,
+                "unsupported_inputs_complete": unsupported_inputs_complete,
                 "budget": budget_status_json(&repo)?,
             }))
         }
@@ -469,7 +494,13 @@ fn run(cli: Cli) -> Result<Value> {
                 .filter(|candidate| candidate.ignored)
                 .map(|candidate| candidate.input_path.clone())
                 .collect::<BTreeSet<_>>();
-            let outcome = repo.snapshot_filtered(args.message.as_deref(), None, &excluded)?;
+            let explicitly_allowed_tier_a = explicitly_allowed_tier_a_paths(&preview);
+            let outcome = repo.snapshot_filtered_with_policy(
+                args.message.as_deref(),
+                None,
+                &excluded,
+                &explicitly_allowed_tier_a,
+            )?;
             if let Some(commit_hash) = &outcome.commit_hash {
                 append_event_log(
                     "KCS-I-COMMIT-CREATED-001",
@@ -627,11 +658,13 @@ fn run_index(args: IndexArgs) -> Result<Value> {
         .filter(|candidate| candidate.ignored)
         .map(|candidate| candidate.input_path.clone())
         .collect::<BTreeSet<_>>();
-    let outcome = repo.auto_snapshot_with_normalize(
+    let explicitly_allowed_tier_a = explicitly_allowed_tier_a_paths(&preview);
+    let outcome = repo.auto_snapshot_with_bound_normalize(
         Some("kcs index auto snapshot"),
         None,
         &excluded,
         &index_result.normalize_by_path,
+        &explicitly_allowed_tier_a,
     )?;
     if let Some(commit_hash) = &outcome.commit_hash {
         append_event_log(
@@ -760,7 +793,7 @@ fn run_repair(args: UnsupportedArgs) -> Result<Value> {
     let embedding_online = embedding_online_allowed(&repo, false, false, false)?;
     // R11-2: keep the enrichment ExecOutcome (was discarded) — disclose it and let an
     // auth/budget-pause raise the exit while the rebuild JSON still prints to stdout.
-    let enrichment = run_embedding_enrichment(&repo, embedding_online, false)?;
+    let enrichment = run_embedding_enrichment(&repo, embedding_online, false, false)?;
     let mut output = json!({
         "status": "rebuilt",
         "rebuilt_chunks": report.rebuilt_chunks,
@@ -2424,12 +2457,24 @@ fn compute_index_status(searched: &[SearchedScopeInfo]) -> Value {
     let mut done = 0u64;
     let mut pending = 0u64;
     let mut budget_paused = false;
+    let mut unsupported_inputs = Vec::new();
+    let mut unsupported_input_errors = Vec::new();
+    let mut task_errors = Vec::new();
 
     for scope in searched {
         let kcs_dir = scope.scope_path.join(".kcs");
         let store = TaskStore::new(&kcs_dir);
-        let Ok(tasks) = store.all() else {
-            continue;
+        let tasks = match store.all() {
+            Ok(tasks) => tasks,
+            Err(error) => {
+                let error = pipeline_to_kcs(error);
+                task_errors.push(json!({
+                    "scope_path": scope.scope_path,
+                    "error_code": error.error_code(),
+                    "message": error.message(),
+                }));
+                Vec::new()
+            }
         };
         for task in tasks {
             if !matches!(task.task_type, TaskType::Markdownize | TaskType::Embedding) {
@@ -2477,19 +2522,50 @@ fn compute_index_status(searched: &[SearchedScopeInfo]) -> Value {
                 TaskStatus::Failed => {}
             }
         }
-        if let Ok(repo) = Repository::open(&scope.scope_path) {
-            if let Ok(budget) = budget_status_json(&repo) {
-                let device = budget
-                    .get("device_remaining_usd")
-                    .and_then(Value::as_f64)
-                    .unwrap_or(f64::INFINITY);
-                let folder = budget
-                    .get("folder_remaining_usd")
-                    .and_then(Value::as_f64)
-                    .unwrap_or(f64::INFINITY);
-                if device <= 0.0 || folder <= 0.0 {
-                    budget_paused = true;
+        match Repository::open(&scope.scope_path) {
+            Ok(repo) => {
+                match current_unsupported_inputs(&repo) {
+                    Ok(dispositions) => {
+                        total = total.saturating_add(dispositions.len() as u64);
+                        unsupported_inputs.extend(dispositions.into_iter().map(|disposition| {
+                            json!({
+                                "scope_path": scope.scope_path,
+                                "path": disposition.path,
+                                "raw_hash": disposition.raw_hash,
+                                "media_type": disposition.media_type,
+                                "size_bytes": disposition.size_bytes,
+                                "reason": disposition.reason,
+                            })
+                        }));
+                    }
+                    Err(error) => unsupported_input_errors.push(json!({
+                        "scope_path": scope.scope_path,
+                        "error_code": error.error_code(),
+                        "message": error.message(),
+                    })),
                 }
+                if let Ok(budget) = budget_status_json(&repo) {
+                    let device = budget
+                        .get("device_remaining_usd")
+                        .and_then(Value::as_f64)
+                        .unwrap_or(f64::INFINITY);
+                    let folder = budget
+                        .get("folder_remaining_usd")
+                        .and_then(Value::as_f64)
+                        .unwrap_or(f64::INFINITY);
+                    if device <= 0.0 || folder <= 0.0 {
+                        budget_paused = true;
+                    }
+                }
+            }
+            Err(error) => {
+                let error = json!({
+                    "scope_path": scope.scope_path,
+                    "error_code": error.error_code(),
+                    "message": error.message(),
+                });
+                task_errors.push(error.clone());
+                unsupported_input_errors.push(error);
             }
         }
     }
@@ -2499,11 +2575,53 @@ fn compute_index_status(searched: &[SearchedScopeInfo]) -> Value {
     } else {
         done as f64 / total as f64
     };
+    let unsupported_inputs_complete = unsupported_input_errors.is_empty();
+    let tasks_complete = task_errors.is_empty();
     json!({
         "enriched_ratio": enriched_ratio,
         "pending_enrichment_tasks": pending,
         "budget_paused": budget_paused,
+        "unsupported_inputs": unsupported_inputs,
+        "unsupported_input_errors": unsupported_input_errors,
+        "unsupported_inputs_complete": unsupported_inputs_complete,
+        "task_errors": task_errors,
+        "tasks_complete": tasks_complete,
     })
+}
+
+fn current_unsupported_inputs(repo: &Repository) -> Result<Vec<UnsupportedInputDisposition>> {
+    let store = UnsupportedInputStore::new(repo.kcs_dir());
+    let dispositions = store.latest_by_path().map_err(pipeline_to_kcs)?;
+    let Some(head) = repo.head_commit_hash()? else {
+        return Ok(Vec::new());
+    };
+    let commit = repo.read_commit(&head)?;
+    let tree = repo.read_tree(&commit.tree)?;
+    let live = tree
+        .entries
+        .into_iter()
+        .map(|entry| (entry.path, entry.raw_hash))
+        .collect::<BTreeMap<_, _>>();
+    Ok(dispositions
+        .into_iter()
+        .filter(|disposition| {
+            disposition.reason == UNSUPPORTED_REASON_UNRECOGNIZED_BINARY
+                && live.get(&disposition.path) == Some(&disposition.raw_hash)
+        })
+        .collect())
+}
+
+fn record_unsupported_if_changed(
+    store: &UnsupportedInputStore,
+    latest_by_path: &mut BTreeMap<String, UnsupportedInputDisposition>,
+    disposition: UnsupportedInputDisposition,
+) -> Result<bool> {
+    if latest_by_path.get(&disposition.path) == Some(&disposition) {
+        return Ok(false);
+    }
+    store.record(&disposition).map_err(pipeline_to_kcs)?;
+    latest_by_path.insert(disposition.path.clone(), disposition);
+    Ok(true)
 }
 
 fn scope_all_failed_error(message: &str, excluded: Vec<Value>) -> KcsError {
@@ -2891,9 +3009,12 @@ fn run_reindex(args: UnsupportedArgs) -> Result<Value> {
             Ok(()) => {
                 normalize_by_path.insert(
                     entry.path.clone(),
-                    NormalizeRef {
-                        tool_profile_hash: normalize.tool_profile_hash.clone(),
-                        gen: new_gen,
+                    PendingNormalizeRef {
+                        expected_raw_hash: entry.raw_hash.clone(),
+                        normalize: NormalizeRef {
+                            tool_profile_hash: normalize.tool_profile_hash.clone(),
+                            gen: new_gen,
+                        },
                     },
                 );
                 reindexed += 1;
@@ -2904,9 +3025,12 @@ fn run_reindex(args: UnsupportedArgs) -> Result<Value> {
             Err(error) if is_rebuild_skippable_unit_error(&error) => {
                 normalize_by_path.insert(
                     entry.path.clone(),
-                    NormalizeRef {
-                        tool_profile_hash: normalize.tool_profile_hash.clone(),
-                        gen: normalize.gen,
+                    PendingNormalizeRef {
+                        expected_raw_hash: entry.raw_hash.clone(),
+                        normalize: NormalizeRef {
+                            tool_profile_hash: normalize.tool_profile_hash.clone(),
+                            gen: normalize.gen,
+                        },
                     },
                 );
                 reindex_skipped.push(json!({
@@ -2919,12 +3043,25 @@ fn run_reindex(args: UnsupportedArgs) -> Result<Value> {
             Err(error) => return Err(error),
         }
     }
-    let excluded = BTreeSet::new();
-    let outcome = repo.auto_snapshot_with_normalize(
+    let closing_preview = build_scan_preview(ScanPreviewRequest {
+        scope_path: repo.root().display().to_string(),
+        include_raw_hashes: false,
+        require_network_approval: false,
+    })
+    .map_err(pipeline_to_kcs)?;
+    let excluded = closing_preview
+        .candidates
+        .iter()
+        .filter(|candidate| candidate.ignored)
+        .map(|candidate| candidate.input_path.clone())
+        .collect::<BTreeSet<_>>();
+    let explicitly_allowed_tier_a = explicitly_allowed_tier_a_paths(&closing_preview);
+    let outcome = repo.auto_snapshot_with_bound_normalize(
         Some("kcs reindex --force"),
         None,
         &excluded,
         &normalize_by_path,
+        &explicitly_allowed_tier_a,
     )?;
     let mut report = rebuild_step3_index(&repo)?;
     // R17-2: fold the re-normalization loop's skips into the rebuild report so the one
@@ -2942,7 +3079,7 @@ fn run_reindex(args: UnsupportedArgs) -> Result<Value> {
     let embedding_online = embedding_online_allowed(&repo, false, false, false)?;
     // R11-2: keep the enrichment ExecOutcome (was discarded) so a new-generation
     // embedding auth/budget-pause is disclosed and raises the exit (result on stdout).
-    let enrichment = run_embedding_enrichment(&repo, embedding_online, false)?;
+    let enrichment = run_embedding_enrichment(&repo, embedding_online, false, false)?;
     let mut output = json!({
         "status": "reindexed",
         "reindexed_files": reindexed,
@@ -3025,6 +3162,36 @@ fn held_secret_embedding_chunk_ids(kcs_dir: &Path) -> Result<BTreeSet<String>> {
                 .map(str::to_owned)
         })
         .collect())
+}
+
+/// Current live secret classification is authoritative even before its durable hold
+/// task has been materialized. A content-identical public twin may already have an
+/// embedding, so rebuilding `chunk_vec` must exclude any chunk identity with at least
+/// one unapproved live secret path directly from the freshly projected tree.
+fn current_live_secret_chunk_ids(conn: &Connection) -> Result<BTreeSet<String>> {
+    let mut statement = conn
+        .prepare(
+            "SELECT DISTINCT c.chunk_id, te.path
+             FROM chunks c
+             JOIN tree_entries te
+               ON te.raw_hash = c.raw_hash
+              AND te.tool_profile_hash = c.tool_profile_hash
+              AND te.gen = c.gen",
+        )
+        .map_err(|err| KcsError::schema(err.to_string()))?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .map_err(|err| KcsError::schema(err.to_string()))?;
+    let mut blocked = BTreeSet::new();
+    for row in rows {
+        let (chunk_id, path) = row.map_err(|err| KcsError::schema(err.to_string()))?;
+        if classify_secret(&path).is_some() {
+            blocked.insert(chunk_id);
+        }
+    }
+    Ok(blocked)
 }
 
 fn rebuild_step3_index(repo: &Repository) -> Result<Step3RebuildReport> {
@@ -3269,10 +3436,7 @@ fn merge_reindex_skips(report: &mut Step3RebuildReport, reindex_skipped: Vec<Val
 }
 
 fn latest_normalize_ref(kcs_dir: &Path, raw_hash: &str) -> Result<Option<NormalizeRef>> {
-    let digest = raw_hash.trim_start_matches("sha256:");
-    if digest.len() < 4 {
-        return Ok(None);
-    }
+    let digest = hash_path_component(raw_hash)?;
     let dir = kcs_dir
         .join("objects/normalized_units")
         .join(&digest[0..2])
@@ -3290,25 +3454,39 @@ fn latest_normalize_ref(kcs_dir: &Path, raw_hash: &str) -> Result<Option<Normali
         let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
             continue;
         };
-        let Some(rest) = name
-            .strip_prefix(raw_hash)
+        let parsed = name
+            .strip_prefix(digest)
             .and_then(|value| value.strip_prefix('.'))
-        else {
+            .map(|rest| (rest, true))
+            .or_else(|| {
+                name.strip_prefix(raw_hash)
+                    .and_then(|value| value.strip_prefix('.'))
+                    .map(|rest| (rest, false))
+            });
+        let Some((rest, portable)) = parsed else {
             continue;
         };
-        let Some((tool_profile_hash, gen_part)) = rest.rsplit_once(".g") else {
+        let Some((tool_component, gen_part)) = rest.rsplit_once(".g") else {
             continue;
         };
         let Ok(gen) = gen_part.parse::<u64>() else {
             continue;
         };
+        let tool_profile_hash = if portable {
+            format!("sha256:{tool_component}")
+        } else {
+            tool_component.to_owned()
+        };
+        if !is_hash(&tool_profile_hash) {
+            continue;
+        }
         if best
             .as_ref()
             .map(|current| gen > current.gen)
             .unwrap_or(true)
         {
             best = Some(NormalizeRef {
-                tool_profile_hash: tool_profile_hash.to_owned(),
+                tool_profile_hash,
                 gen,
             });
         }
@@ -3358,38 +3536,19 @@ fn load_normalized_units(
     tool_profile_hash: &str,
     gen: u64,
 ) -> Result<Vec<NormalizedUnitInput>> {
-    let dir = kcs_pipeline::markdownize::normalized_instance_dir(
-        kcs_dir,
-        raw_hash,
-        tool_profile_hash,
-        gen,
-    );
-    let manifest_path = dir.join("manifest.json");
-    let manifest: NormalizedInstanceManifest = serde_json::from_slice(
-        &fs::read(&manifest_path)
-            .map_err(|err| KcsError::io(err.to_string(), manifest_path.display().to_string()))?,
-    )
-    .map_err(|err| store_corrupt_error(&manifest_path, err.to_string()))?;
-    let mut units = Vec::new();
-    for entry in &manifest.units {
-        if entry.status != UnitStatus::Done {
-            continue;
-        }
-        let unit_path = dir.join(format!("{}.json", entry.unit_ref));
-        let unit: NormalizedUnitObject = serde_json::from_slice(
-            &fs::read(&unit_path)
-                .map_err(|err| KcsError::io(err.to_string(), unit_path.display().to_string()))?,
-        )
-        .map_err(|err| store_corrupt_error(&unit_path, err.to_string()))?;
-        units.push(NormalizedUnitInput {
+    let instance = load_validated_normalized_instance(kcs_dir, raw_hash, tool_profile_hash, gen)
+        .map_err(pipeline_to_kcs)?;
+    Ok(instance
+        .units
+        .into_iter()
+        .map(|unit| NormalizedUnitInput {
             raw_hash: unit.raw_hash,
             tool_profile_hash: unit.tool_profile_hash,
             gen: unit.gen,
             unit_key: unit.unit_key,
             markdown: unit.markdown,
-        });
-    }
-    Ok(units)
+        })
+        .collect())
 }
 
 fn store_corrupt_error(path: &Path, message: impl Into<String>) -> KcsError {
@@ -3654,7 +3813,10 @@ fn build_sqlite_index_at(
     }
     // R20-10: exclude secret-held chunks so the content-hash rebuild can't link a held
     // (Tier B) chunk to a non-secret content-twin's vector and expose it in vector search.
-    let held_chunk_ids = held_secret_embedding_chunk_ids(kcs_dir)?;
+    let mut held_chunk_ids = held_secret_embedding_chunk_ids(kcs_dir)?;
+    if !secrets_send_approved_in_kcs_dir(kcs_dir) {
+        held_chunk_ids.extend(current_live_secret_chunk_ids(fts.connection())?);
+    }
     embedding_store::rebuild_chunk_vec(fts.connection(), &held_chunk_ids).map_err(index_to_kcs)?;
     fts.connection()
         .execute_batch("COMMIT")
@@ -4117,13 +4279,13 @@ fn register_scope(repo: &Repository, indexed: bool) {
         if let Err(error) = db.retire_stale_kcs_path(&entry.kcs_path, &entry.scope_id) {
             eprintln!(
                 "warning: scope registry cleanup failed (search cache; recover with `kcs index`): {}",
-                error
+                terminal_safe_text(&error.to_string(), false)
             );
         }
         if let Err(error) = db.upsert(&entry) {
             eprintln!(
                 "warning: scope registry write failed (search cache; recover with `kcs index`): {}",
-                error
+                terminal_safe_text(&error.to_string(), false)
             );
         }
     }
@@ -4343,7 +4505,10 @@ fn append_search_logs(repo: &Repository, response: &Value, started: Instant) {
         }),
         device_logs_retention_days(),
     ) {
-        eprintln!("warning: failed to append search metrics log: {error}");
+        eprintln!(
+            "warning: failed to append search metrics log: {}",
+            terminal_safe_text(&error.to_string(), false)
+        );
     }
     // R12-2: access.jsonl is scope-local, so its redact_logs is governed by the
     // scope config first, falling back to the device-global user config, then the
@@ -4373,7 +4538,10 @@ fn append_search_logs(repo: &Repository, response: &Value, started: Instant) {
         }),
         scope_logs_retention_days(repo),
     ) {
-        eprintln!("warning: failed to append search access log: {error}");
+        eprintln!(
+            "warning: failed to append search access log: {}",
+            terminal_safe_text(&error.to_string(), false)
+        );
     }
 }
 
@@ -4681,7 +4849,7 @@ fn classify_short_hash(hash: &str) -> Result<ShortHash> {
 /// CAS raw store (08 §2.3 rule 4 raw resolution). Used only for the raw-only
 /// short-hash case (no chunk carries the raw_hash).
 fn raw_object_present(target: &ScopeTarget, raw_hash: &str) -> Result<bool> {
-    if cas_object_path(&target.kcs_dir, "raw", raw_hash).is_file() {
+    if cas_object_present(&target.kcs_dir, "raw", raw_hash, MAX_RAW_OBJECT_BYTES)? {
         return Ok(true);
     }
     Ok(find_working_tree_raw(&target.repo_root, raw_hash)?.is_some())
@@ -4997,15 +5165,19 @@ fn open_cas_byte_object(
     hash: &str,
     path_hint: Option<&str>,
 ) -> Result<Option<(PathBuf, bool)>> {
+    if !is_hash(hash) {
+        return Err(KcsError::invalid_usage("CAS object hash is invalid"));
+    }
     if scan_working_tree {
         if let Some(path) = find_working_tree_raw(&target.repo_root, hash)? {
             return Ok(Some((path, false)));
         }
     }
-    let object_path = cas_object_path(&target.kcs_dir, subdir, hash);
-    if !object_path.is_file() {
+    let Some((_object_path, bytes)) =
+        read_cas_byte_object(&target.kcs_dir, subdir, hash, MAX_RAW_OBJECT_BYTES)?
+    else {
         return Ok(None);
-    }
+    };
     let basename = path_hint
         .and_then(|path| Path::new(path).file_name())
         .and_then(|name| name.to_str())
@@ -5040,16 +5212,6 @@ fn open_cas_byte_object(
     // corrupt object is rejected as STORE-CORRUPT instead of returned as authentic
     // evidence. The immutable object is verified once here at first
     // materialization; the read-only open cache is reused as-is thereafter (M5).
-    let bytes = fs::read(&object_path)
-        .map_err(|err| KcsError::io(err.to_string(), object_path.display().to_string()))?;
-    if hash_bytes(&bytes) != hash {
-        return Err(KcsError::new(
-            "KCS-E-STORE-CORRUPT-001",
-            "CAS object hash mismatch",
-            json!({ "path": object_path.display().to_string(), "expected": hash }),
-            ExitCode::PermanentFailure,
-        ));
-    }
     if let Some(parent) = cache.parent() {
         fs::create_dir_all(parent)
             .map_err(|err| KcsError::io(err.to_string(), parent.display().to_string()))?;
@@ -5065,6 +5227,93 @@ fn open_cas_byte_object(
     // re-verify bytes) would later serve as authentic Evidence.
     write_open_cache_atomic(&cache, &bytes)?;
     Ok(Some((cache, true)))
+}
+
+fn read_bounded_cas_object(path: &Path, expected_hash: &str, max_bytes: u64) -> Result<Vec<u8>> {
+    read_or_verify_bounded_cas_object(path, expected_hash, max_bytes, true)
+}
+
+fn verify_bounded_cas_object(path: &Path, expected_hash: &str, max_bytes: u64) -> Result<()> {
+    read_or_verify_bounded_cas_object(path, expected_hash, max_bytes, false).map(|_| ())
+}
+
+fn read_or_verify_bounded_cas_object(
+    path: &Path,
+    expected_hash: &str,
+    max_bytes: u64,
+    materialize: bool,
+) -> Result<Vec<u8>> {
+    let listed = fs::symlink_metadata(path)
+        .map_err(|err| KcsError::io(err.to_string(), path.display().to_string()))?;
+    if !listed.file_type().is_file() || listed.len() > max_bytes {
+        return Err(store_corrupt_error(
+            path,
+            format!("CAS object is not a regular file within the {max_bytes} byte limit"),
+        ));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if listed.nlink() != 1 {
+            return Err(store_corrupt_error(
+                path,
+                "CAS object has an unexpected hard-link count",
+            ));
+        }
+    }
+    let mut file = fs::File::open(path)
+        .map_err(|err| KcsError::io(err.to_string(), path.display().to_string()))?;
+    let opened = file
+        .metadata()
+        .map_err(|err| KcsError::io(err.to_string(), path.display().to_string()))?;
+    if !opened.is_file() || opened.len() != listed.len() || opened.len() > max_bytes {
+        return Err(store_corrupt_error(
+            path,
+            "CAS object changed while it was opened",
+        ));
+    }
+    let mut bytes = Vec::new();
+    if materialize {
+        let capacity = usize::try_from(opened.len()).map_err(|_| {
+            store_corrupt_error(
+                path,
+                "CAS object size cannot be represented by this process",
+            )
+        })?;
+        bytes.try_reserve_exact(capacity).map_err(|_| {
+            store_corrupt_error(
+                path,
+                "CAS object cannot fit within the process memory limit",
+            )
+        })?;
+    }
+    let mut hasher = Sha256::new();
+    let mut total = 0_u64;
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let count = file
+            .read(&mut buffer)
+            .map_err(|err| KcsError::io(err.to_string(), path.display().to_string()))?;
+        if count == 0 {
+            break;
+        }
+        total = total.saturating_add(count as u64);
+        if total > max_bytes {
+            return Err(store_corrupt_error(
+                path,
+                format!("CAS object exceeds the {max_bytes} byte limit while being read"),
+            ));
+        }
+        hasher.update(&buffer[..count]);
+        if materialize {
+            bytes.extend_from_slice(&buffer[..count]);
+        }
+    }
+    let actual_hash = format!("sha256:{:x}", hasher.finalize());
+    if actual_hash != expected_hash {
+        return Err(store_corrupt_error(path, "CAS object hash mismatch"));
+    }
+    Ok(bytes)
 }
 
 /// The read-only open/view expansion cache path for a CAS object. R10-6: the
@@ -5162,12 +5411,67 @@ fn harden_open_cache_subtree(leaf: &Path) {
     }
 }
 
+const MAX_WORKING_TREE_SCAN_ENTRIES: usize = 100_000;
+
+#[derive(Debug)]
+struct WorkingTreeScanBudget {
+    remaining_bytes: u64,
+    remaining_entries: usize,
+}
+
+#[derive(Debug)]
+struct WorkingTreeScanAttempt {
+    max_bytes: u64,
+    reserved_bytes: u64,
+}
+
+impl WorkingTreeScanBudget {
+    fn new() -> Self {
+        Self {
+            remaining_bytes: DEFAULT_MAX_ARCHIVE_SCOPE_BYTES,
+            remaining_entries: MAX_WORKING_TREE_SCAN_ENTRIES,
+        }
+    }
+
+    fn consume_entry(&mut self) -> bool {
+        if self.remaining_entries == 0 {
+            return false;
+        }
+        self.remaining_entries -= 1;
+        true
+    }
+
+    fn reserve_file(&mut self, declared_size: u64) -> Option<WorkingTreeScanAttempt> {
+        if self.remaining_bytes == 0 {
+            return None;
+        }
+        let max_bytes = declared_size
+            .min(MAX_RAW_OBJECT_BYTES)
+            .min(self.remaining_bytes.saturating_sub(1));
+        let reserved_bytes = max_bytes.saturating_add(1).min(self.remaining_bytes);
+        self.remaining_bytes -= reserved_bytes;
+        Some(WorkingTreeScanAttempt {
+            max_bytes,
+            reserved_bytes,
+        })
+    }
+
+    fn finish_success(&mut self, attempt: &WorkingTreeScanAttempt, actual_size: u64) {
+        let unused = attempt.reserved_bytes.saturating_sub(actual_size);
+        self.remaining_bytes = self.remaining_bytes.saturating_add(unused);
+    }
+}
+
 fn find_working_tree_raw(root: &Path, raw_hash: &str) -> Result<Option<PathBuf>> {
+    let mut budget = WorkingTreeScanBudget::new();
     for entry in fs::read_dir(root)
         .map_err(|err| KcsError::io(err.to_string(), root.display().to_string()))?
     {
         let entry =
             entry.map_err(|err| KcsError::io(err.to_string(), root.display().to_string()))?;
+        if !budget.consume_entry() {
+            break;
+        }
         if entry.file_name() == ".kcs" {
             continue;
         }
@@ -5178,62 +5482,218 @@ fn find_working_tree_raw(root: &Path, raw_hash: &str) -> Result<Option<PathBuf>>
         {
             continue;
         }
+        let declared_size = entry.metadata().map(|metadata| metadata.len()).unwrap_or(0);
+        let Some(attempt) = budget.reserve_file(declared_size) else {
+            break;
+        };
         let path = entry.path();
-        let bytes = fs::read(&path)
-            .map_err(|err| KcsError::io(err.to_string(), path.display().to_string()))?;
-        if hash_bytes(&bytes) == raw_hash {
+        let Some(input_path) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        let identity = match hash_verified_scan_input(root, &input_path, attempt.max_bytes) {
+            Ok(identity) => identity,
+            Err(_) => continue,
+        };
+        budget.finish_success(&attempt, identity.size_bytes);
+        if identity.raw_hash == raw_hash {
             return Ok(Some(path));
         }
     }
     Ok(None)
 }
 
-/// Fan-out path of a content-hashed CAS byte object: `objects/<subdir>/ab/cd/<hash>`
-/// (03 §2 / §8.1). `subdir` is the object-type directory ("raw" / "prepared" /
-/// "images").
-fn cas_object_path(kcs_dir: &Path, subdir: &str, hash: &str) -> PathBuf {
-    let digest = hash.trim_start_matches("sha256:");
-    kcs_dir
+/// Portable fan-out path for a content-hashed byte object. Logical identities retain
+/// `sha256:<digest>`; only the physical leaf omits the Windows-invalid colon.
+fn cas_object_path(kcs_dir: &Path, subdir: &str, hash: &str) -> Result<PathBuf> {
+    fanout_path(kcs_dir.join("objects").join(subdir), hash)
+}
+
+#[cfg(not(windows))]
+fn legacy_cas_object_path(kcs_dir: &Path, subdir: &str, hash: &str) -> Result<PathBuf> {
+    let digest = hash_path_component(hash)?;
+    Ok(kcs_dir
         .join("objects")
         .join(subdir)
         .join(&digest[0..2])
         .join(&digest[2..4])
-        .join(hash)
+        .join(hash))
 }
 
-/// `.kcs/tombstones/ab/cd/<raw_hash>` (05 §3.5). `Ok(None)` when no tombstone
-/// exists. The returned value is the on-disk tombstone JSON augmented with the
-/// resolved `scope_path` (08 §4.1 response shape).
-fn read_tombstone(target: &ScopeTarget, raw_hash: &str) -> Result<Option<Value>> {
-    let digest = raw_hash.trim_start_matches("sha256:");
-    if digest.len() < 4 {
-        return Ok(None);
+fn path_entry_exists(path: &Path) -> Result<bool> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(KcsError::io(error.to_string(), path.display().to_string())),
     }
-    let path = target
-        .kcs_dir
+}
+
+fn existing_cas_object_paths(kcs_dir: &Path, subdir: &str, hash: &str) -> Result<Vec<PathBuf>> {
+    let canonical = cas_object_path(kcs_dir, subdir, hash)?;
+    let mut paths = Vec::with_capacity(2);
+    if path_entry_exists(&canonical)? {
+        paths.push(canonical);
+    }
+    #[cfg(not(windows))]
+    {
+        let legacy = legacy_cas_object_path(kcs_dir, subdir, hash)?;
+        if path_entry_exists(&legacy)? {
+            paths.push(legacy);
+        }
+    }
+    Ok(paths)
+}
+
+fn cas_object_present(kcs_dir: &Path, subdir: &str, hash: &str, max_bytes: u64) -> Result<bool> {
+    let canonical = cas_object_path(kcs_dir, subdir, hash)?;
+    let canonical_present = path_entry_exists(&canonical)?;
+
+    #[cfg(not(windows))]
+    {
+        let legacy = legacy_cas_object_path(kcs_dir, subdir, hash)?;
+        let legacy_present = path_entry_exists(&legacy)?;
+        if canonical_present && legacy_present {
+            verify_bounded_cas_object(&canonical, hash, max_bytes)?;
+            verify_bounded_cas_object(&legacy, hash, max_bytes)?;
+        } else if canonical_present {
+            verify_bounded_cas_object(&canonical, hash, max_bytes)?;
+        } else if legacy_present {
+            verify_bounded_cas_object(&legacy, hash, max_bytes)?;
+        }
+        Ok(canonical_present || legacy_present)
+    }
+
+    #[cfg(windows)]
+    {
+        if canonical_present {
+            verify_bounded_cas_object(&canonical, hash, max_bytes)?;
+        }
+        Ok(canonical_present)
+    }
+}
+
+fn read_cas_byte_object(
+    kcs_dir: &Path,
+    subdir: &str,
+    hash: &str,
+    max_bytes: u64,
+) -> Result<Option<(PathBuf, Vec<u8>)>> {
+    let canonical = cas_object_path(kcs_dir, subdir, hash)?;
+    if path_entry_exists(&canonical)? {
+        let bytes = read_bounded_cas_object(&canonical, hash, max_bytes)?;
+        #[cfg(not(windows))]
+        {
+            let legacy = legacy_cas_object_path(kcs_dir, subdir, hash)?;
+            if path_entry_exists(&legacy)? {
+                verify_bounded_cas_object(&legacy, hash, max_bytes)?;
+            }
+        }
+        return Ok(Some((canonical, bytes)));
+    }
+
+    #[cfg(not(windows))]
+    {
+        let legacy = legacy_cas_object_path(kcs_dir, subdir, hash)?;
+        if path_entry_exists(&legacy)? {
+            let bytes = read_bounded_cas_object(&legacy, hash, max_bytes)?;
+            return Ok(Some((legacy, bytes)));
+        }
+    }
+    Ok(None)
+}
+
+fn tombstone_path(kcs_dir: &Path, raw_hash: &str) -> Result<PathBuf> {
+    fanout_path(kcs_dir.join("tombstones"), raw_hash)
+}
+
+#[cfg(not(windows))]
+fn legacy_tombstone_path(kcs_dir: &Path, raw_hash: &str) -> Result<PathBuf> {
+    let digest = hash_path_component(raw_hash)?;
+    Ok(kcs_dir
         .join("tombstones")
         .join(&digest[0..2])
         .join(&digest[2..4])
-        .join(raw_hash);
-    let bytes = match fs::read(&path) {
-        Ok(bytes) => bytes,
-        // Only a missing tombstone file means "no tombstone"; an unreadable
-        // tombstones dir must not be misclassified as not_found (08 §3.2).
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(err) => return Err(KcsError::io(err.to_string(), path.display().to_string())),
-    };
-    let mut value: Value =
-        serde_json::from_slice(&bytes).map_err(|err| KcsError::schema(err.to_string()))?;
-    if let Some(object) = value.as_object_mut() {
-        object
-            .entry("raw_hash".to_owned())
-            .or_insert_with(|| json!(raw_hash));
-        object.insert(
-            "scope_path".to_owned(),
-            json!(target.kcs_dir.display().to_string()),
-        );
+        .join(raw_hash))
+}
+
+fn read_optional_file(path: &Path) -> Result<Option<Vec<u8>>> {
+    match fs::read(path) {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(KcsError::io(error.to_string(), path.display().to_string())),
     }
-    Ok(Some(value))
+}
+
+fn parse_tombstone(
+    bytes: &[u8],
+    path: &Path,
+    raw_hash: &str,
+    require_identity: bool,
+) -> Result<Value> {
+    let mut value: Value =
+        serde_json::from_slice(bytes).map_err(|err| KcsError::schema(err.to_string()))?;
+    let object = value
+        .as_object_mut()
+        .ok_or_else(|| KcsError::schema("tombstone must be a JSON object"))?;
+    match object.get("raw_hash") {
+        Some(Value::String(stored)) if stored == raw_hash => {}
+        Some(_) => {
+            return Err(store_corrupt_error(
+                path,
+                "tombstone identity does not match its storage key",
+            ))
+        }
+        None if require_identity => {
+            return Err(store_corrupt_error(
+                path,
+                "legacy tombstone is missing its raw_hash identity",
+            ))
+        }
+        None => {
+            object.insert("raw_hash".to_owned(), json!(raw_hash));
+        }
+    }
+    Ok(value)
+}
+
+/// `.kcs/tombstones/ab/cd/<raw-digest>` (05 §3.5). `Ok(None)` when no tombstone
+/// exists. The returned value is the on-disk tombstone JSON augmented with the
+/// resolved `scope_path` (08 §4.1 response shape).
+fn read_tombstone(target: &ScopeTarget, raw_hash: &str) -> Result<Option<Value>> {
+    let canonical = tombstone_path(&target.kcs_dir, raw_hash)?;
+    let canonical_value = read_optional_file(&canonical)?
+        .map(|bytes| parse_tombstone(&bytes, &canonical, raw_hash, false))
+        .transpose()?;
+
+    #[cfg(not(windows))]
+    let legacy_value = {
+        let legacy = legacy_tombstone_path(&target.kcs_dir, raw_hash)?;
+        read_optional_file(&legacy)?
+            .map(|bytes| parse_tombstone(&bytes, &legacy, raw_hash, true))
+            .transpose()?
+    };
+
+    #[cfg(not(windows))]
+    if let (Some(portable), Some(legacy)) = (&canonical_value, &legacy_value) {
+        if portable != legacy {
+            return Err(store_corrupt_error(
+                &canonical,
+                "portable and legacy tombstones disagree",
+            ));
+        }
+    }
+
+    #[cfg(not(windows))]
+    let mut value = canonical_value.or(legacy_value);
+    #[cfg(windows)]
+    let mut value = canonical_value;
+    let Some(value) = value.as_mut() else {
+        return Ok(None);
+    };
+    value.as_object_mut().expect("validated above").insert(
+        "scope_path".to_owned(),
+        json!(target.kcs_dir.display().to_string()),
+    );
+    Ok(Some(value.take()))
 }
 
 /// 08 §4.1 tombstone response as an exit-4 error (open/view surface it as a
@@ -5463,91 +5923,40 @@ fn copy_normalized_instance_gen(
         tool_profile_hash,
         old_gen,
     );
-    let new_dir = kcs_pipeline::markdownize::normalized_instance_dir(
-        kcs_dir,
-        raw_hash,
-        tool_profile_hash,
-        new_gen,
-    );
-    fs::create_dir_all(&new_dir)
-        .map_err(|err| KcsError::io(err.to_string(), new_dir.display().to_string()))?;
-    // R9-5: roll the new gen dir back on any failure so a partially-copied
-    // `.g<N+1>` does not remain as secondary residue for a later reindex to
-    // reconcile.
-    let result = (|| -> Result<()> {
-        let manifest_path = old_dir.join("manifest.json");
-        let mut manifest: Value =
-            serde_json::from_slice(&fs::read(&manifest_path).map_err(|err| {
-                KcsError::io(err.to_string(), manifest_path.display().to_string())
-            })?)
-            .map_err(|err| store_corrupt_error(&manifest_path, err.to_string()))?;
-        manifest["parent_gen"] = json!(old_gen);
-        manifest["gen"] = json!(new_gen);
-        manifest["run_id"] = json!(format!("run_{}", new_ulid(kcs_dir)));
-        manifest["generated_at"] = json!(now_utc_seconds());
-        let manifest_bytes = serde_json::to_vec_pretty(&manifest)
-            .map_err(|err| KcsError::schema(err.to_string()))?;
-        atomic_overwrite_file(&new_dir.join("manifest.json"), &manifest_bytes)?;
-        for entry in fs::read_dir(&old_dir)
-            .map_err(|err| KcsError::io(err.to_string(), old_dir.display().to_string()))?
-        {
-            let entry = entry
-                .map_err(|err| KcsError::io(err.to_string(), old_dir.display().to_string()))?;
-            let file_name = entry.file_name();
-            if file_name == "manifest.json" {
-                continue;
-            }
-            let name = file_name.to_string_lossy();
-            // R9-5: a gen dir can hold OS/crash junk beside the `<unit_ref>.json`
-            // unit files — a torn `.{name}.tmp-<pid>-<ulid>` left by a killed
-            // `atomic_overwrite_file` writer (its temps land in this very dir), a
-            // `.DS_Store`, a stray subdir. Never parse those as a unit: doing so
-            // made `reindex` / `repair --rebuild-db` fail permanently with
-            // STORE-CORRUPT (junk is not JSON) and re-emit a partial next-gen dir.
-            // Copy only real unit files; best-effort GC our own orphan `.tmp-*`
-            // (Q1-style self-heal), and leave anything else (e.g. `.DS_Store`)
-            // untouched but unread.
-            if !is_normalized_unit_file(&name) {
-                if is_orphan_temp_name(&name)
-                    && entry
-                        .file_type()
-                        .map(|kind| kind.is_file())
-                        .unwrap_or(false)
-                {
-                    let _ = fs::remove_file(entry.path());
-                }
-                continue;
-            }
-            if !entry
-                .file_type()
-                .map(|kind| kind.is_file())
-                .unwrap_or(false)
+    if let Ok(entries) = fs::read_dir(&old_dir) {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            if name.to_str().is_some_and(is_orphan_temp_name)
+                && entry
+                    .file_type()
+                    .map(|file_type| file_type.is_file())
+                    .unwrap_or(false)
             {
-                continue;
+                let _ = fs::remove_file(entry.path());
             }
-            let mut unit: Value =
-                serde_json::from_slice(&fs::read(entry.path()).map_err(|err| {
-                    KcsError::io(err.to_string(), entry.path().display().to_string())
-                })?)
-                .map_err(|err| store_corrupt_error(&entry.path(), err.to_string()))?;
-            unit["gen"] = json!(new_gen);
-            unit["generated_at"] = json!(now_utc_seconds());
-            let unit_bytes = serde_json::to_vec_pretty(&unit)
-                .map_err(|err| KcsError::schema(err.to_string()))?;
-            atomic_overwrite_file(&new_dir.join(entry.file_name()), &unit_bytes)?;
         }
-        Ok(())
-    })();
-    if result.is_err() {
-        let _ = fs::remove_dir_all(&new_dir);
     }
-    result
+    let mut instance =
+        load_validated_normalized_instance(kcs_dir, raw_hash, tool_profile_hash, old_gen)
+            .map_err(pipeline_to_kcs)?;
+    let generated_at = now_utc_seconds();
+    instance.manifest.parent_gen = Some(old_gen);
+    instance.manifest.gen = new_gen;
+    instance.manifest.run_id = format!("run_{}", new_ulid(kcs_dir));
+    instance.manifest.generated_at = generated_at.clone();
+    for unit in &mut instance.units {
+        unit.gen = new_gen;
+        unit.generated_at.clone_from(&generated_at);
+    }
+    persist_normalized_instance(kcs_dir, &instance.manifest, &instance.units)
+        .map_err(pipeline_to_kcs)
 }
 
 /// Whether `name` matches the normalized-unit file naming convention written by
 /// `persist_normalized_instance`: a 16-hex-char `unit_ref` digest plus `.json`
 /// (e.g. `1a2b3c4d5e6f7089.json`). Anything else in a gen dir is not store truth
 /// (R9-5) — `manifest.json`, a crashed writer's `.tmp-*`, a `.DS_Store`.
+#[cfg(test)]
 fn is_normalized_unit_file(name: &str) -> bool {
     let Some(stem) = name.strip_suffix(".json") else {
         return false;
@@ -5591,6 +6000,11 @@ fn run_batch(args: BatchArgs) -> Result<Value> {
     // runs interleave the ledger and double-send held tasks. Reentrant with any
     // inner auto-snapshot; losers fail fast with KCS-E-STORE-LOCKED-001 (exit 3).
     let _lock = repo.lock_store()?;
+    // Persisted recovery work is executable authority. Revalidate the repository's
+    // current tool lock after acquiring the store lock and before reading or
+    // mutating tasks, so resume/retry cannot bypass the same adapter policy used by
+    // index and repair paths.
+    require_repo_tool_lock(&repo)?;
     let store = TaskStore::new(repo.kcs_dir());
     // N1: a Tier B online hold is only lifted by an explicit `--send-secrets`
     // approval, never by a plain `batch resume`. Without this, resume's
@@ -5728,7 +6142,7 @@ fn reenqueue_partial_markdownize_tasks(store: &TaskStore) -> Result<usize> {
         {
             continue;
         }
-        let plan = partial_retry_plan_from_instance(&task.output_ref)?;
+        let plan = partial_retry_plan_from_instance(store, &task)?;
         // Gate 1 (R10-4): no retryable Failed unit -> leave the task Partial.
         if plan.retryable_units.is_empty() {
             continue;
@@ -5777,17 +6191,36 @@ struct PartialRetryPlan {
 /// [`PartialRetryPlan`]: the still-Failed units filtered to the retryable ones (by
 /// their recorded `error_kind`) and the retry-budget cap. A missing manifest or a
 /// fully-Done instance yields an empty plan.
-fn partial_retry_plan_from_instance(output_ref: &str) -> Result<PartialRetryPlan> {
+fn partial_retry_plan_from_instance(
+    task_store: &TaskStore,
+    task: &TaskDescriptor,
+) -> Result<PartialRetryPlan> {
     let empty = PartialRetryPlan {
         retryable_units: Vec::new(),
         max_attempts: Some(0),
     };
-    let manifest_path = PathBuf::from(output_ref).join("manifest.json");
-    let Ok(bytes) = fs::read(&manifest_path) else {
+    let identity = validate_task_output_ref(task_store.kcs_dir(), task).map_err(pipeline_to_kcs)?;
+    let TaskOutputRef::NormalizedInstance {
+        raw_hash,
+        tool_profile_hash,
+        gen,
+        ..
+    } = identity
+    else {
         return Ok(empty);
     };
-    let manifest: NormalizedInstanceManifest =
-        serde_json::from_slice(&bytes).map_err(|err| KcsError::schema(err.to_string()))?;
+    let manifest = load_validated_normalized_instance(
+        task_store.kcs_dir(),
+        &raw_hash,
+        &tool_profile_hash,
+        gen,
+    )
+    .map_err(pipeline_to_kcs)?
+    .manifest;
+    Ok(partial_retry_plan_from_manifest(&manifest))
+}
+
+fn partial_retry_plan_from_manifest(manifest: &NormalizedInstanceManifest) -> PartialRetryPlan {
     let mut retryable_units = Vec::new();
     let mut finite_max: Option<u32> = None;
     let mut saw_unlimited = false;
@@ -5812,10 +6245,10 @@ fn partial_retry_plan_from_instance(output_ref: &str) -> Result<PartialRetryPlan
     } else {
         finite_max
     };
-    Ok(PartialRetryPlan {
+    PartialRetryPlan {
         retryable_units,
         max_attempts,
-    })
+    }
 }
 
 /// R9-7: outcome counts from an enrichment pass. `batch retry`/`resume` need more
@@ -5964,6 +6397,7 @@ fn execute_pending_tasks(
         repo,
         embedding_online,
         override_budget,
+        allow_auth_revive,
     )?);
     Ok(outcome)
 }
@@ -6022,16 +6456,21 @@ fn execute_pending_markdownize_tasks(
     };
     if !auth_revivable.is_empty() {
         let mut reclaims: Vec<MonthlyCostLedgerEntry> = Vec::new();
+        for task in store.all().map_err(pipeline_to_kcs)? {
+            if auth_revivable.contains(&task.task_id) {
+                if let Some(entry) =
+                    settle_task_reservation(&cost_ledger, &task, &scope_id, markdown_adapter_kind)?
+                {
+                    reclaims.push(entry);
+                }
+            }
+        }
         store
             .update_matching(|task| {
                 if !auth_revivable.contains(&task.task_id) {
                     return false;
                 }
-                if let Some(entry) = reclaim_entry_for(task, &scope_id, markdown_adapter_kind) {
-                    reclaims.push(entry);
-                    task.reserved_usd = None;
-                    task.reserved_month = None;
-                }
+                task.clear_reservation();
                 task.status = TaskStatus::Pending;
                 task.fallback_reason = Some("ready_for_online_adapter".to_owned());
                 task.attempts = 0;
@@ -6077,8 +6516,8 @@ fn execute_pending_markdownize_tasks(
         // recovery is a re-index, not a retry) instead of charging + entering the
         // executor. This mirrors the executor's own R14-2/R9-2 guards, hoisted ahead of
         // the charge.
-        match classify_online_markdownize_precondition(repo, &task) {
-            OnlineMarkdownizePrecondition::Send => {}
+        let prepared_input = match classify_online_markdownize_precondition(repo, &task) {
+            OnlineMarkdownizePrecondition::Send(prepared_input) => prepared_input,
             OnlineMarkdownizePrecondition::AwaitOcr => {
                 // R21-3: a valid non-text-native file with no locally-extractable text
                 // (scanned PDF / image / OOXML) needs OCR-from-scratch, which the
@@ -6097,15 +6536,12 @@ fn execute_pending_markdownize_tasks(
                 // kind) can no longer tell it was a non-billable phantom. No NEW charge is
                 // reserved this pass (the precondition failed before the charge).
                 let markdown_adapter_kind = adapter_kind_budget_key(online_profile.adapter_kind);
-                let mut reclaim: Option<MonthlyCostLedgerEntry> = None;
+                let reclaim =
+                    settle_task_reservation(&cost_ledger, &task, &scope_id, markdown_adapter_kind)?;
                 store
                     .update_matching(|candidate| {
                         if candidate.task_id == task_id {
-                            reclaim = retire_online_task_reclaiming(
-                                candidate,
-                                &scope_id,
-                                markdown_adapter_kind,
-                            );
+                            retire_online_task(candidate);
                             candidate.attempts = candidate.attempts.saturating_add(1);
                             true
                         } else {
@@ -6122,7 +6558,7 @@ fn execute_pending_markdownize_tasks(
                 counts.failed += 1;
                 continue;
             }
-        }
+        };
         // R16-7: error-kind-aware re-reservation gate. When THIS task instance is a
         // re-send whose PREVIOUS recorded failure was a non-billable rejection
         // (RateLimit / QuotaExceeded — the backend refuses the request before it
@@ -6145,36 +6581,51 @@ fn execute_pending_markdownize_tasks(
         // "rate_limit" skip — its send's billing outcome is unknown after a crash, so we
         // stay conservative (bounded by the attempts policy).
         let previous_failure_kind = retry_kind_from_reason(task.fallback_reason.as_deref());
-        let reservation_already_covers_resend = matches!(
+        let reservation_already_covers_resend = if matches!(
             previous_failure_kind,
             RetryErrorKind::RateLimit | RetryErrorKind::QuotaExceeded
-        );
+        ) {
+            match task.reservation_claim() {
+                Some(claim) => cost_ledger
+                    .reservation_ledger()
+                    .activate_for_retry(claim, &scope_id, markdown_adapter_kind)
+                    .map_err(pipeline_to_kcs)?,
+                None => false,
+            }
+        } else {
+            false
+        };
         // R17-3: the exact amount of a FRESH reservation made this pass (None on the
         // RateLimit/Quota skip, which reuses the prior reservation). Stamped onto the
         // task below so that, if this task later fails RateLimit/Quota and is then
         // superseded by an edit, the supersede can reclaim precisely this phantom.
-        let mut fresh_reserved: Option<f64> = None;
+        let mut fresh_reserved: Option<ReservationRecord> = None;
         let charge = if reservation_already_covers_resend {
             // The previous attempt's reservation stands in for this send's charge.
             ChargeOutcome::Charged
         } else {
-            let file_size = repo
-                .root()
-                .join(&task.input_path)
-                .metadata()
-                .map(|metadata| metadata.len())
-                .unwrap_or(0);
+            let file_size = prepared_input.bytes.len() as u64;
             // R11-6: prorate the reserved (== billed, F8) cost of a UNIT-SCOPED retry by
             // the fraction of the document actually re-sent — `unit_keys` names the
             // still-failed units, and `execute_online_markdownize_task` requests only
             // those. A full send (`unit_keys == None`) still bills the whole document.
             // Without this, a 1-page retry of a 500-page PDF re-billed all 500 pages.
-            let estimated_usd = prorated_markdownize_cost(repo, &task, file_size);
+            let estimated_usd =
+                prorated_markdownize_cost(&task, file_size, prepared_input.prepared_units.len());
             let estimate = BudgetEstimate {
                 scope_id: scope_id.clone(),
                 task_type: TaskType::Markdownize,
                 estimated_usd,
                 adapter_id: Some(online_profile.adapter_id.clone()),
+            };
+            let adapter_kind = adapter_kind_budget_key(online_profile.adapter_kind);
+            let reservation = ReservationRecord {
+                reservation_id: format!("res_{}", new_ulid(repo.root())),
+                task_id: task_id.clone(),
+                month: month.clone(),
+                scope_id: scope_id.clone(),
+                adapter_kind: adapter_kind.to_owned(),
+                usd: estimated_usd,
             };
             // F8: reserve the charge under the device-global cost-ledger lock BEFORE
             // execution, serializing the budget read-check-append against every other
@@ -6186,17 +6637,20 @@ fn execute_pending_markdownize_tasks(
                 &cost_ledger,
                 cost_ledger_lock_path(),
                 &budget_caps,
-                &month,
-                adapter_kind_budget_key(online_profile.adapter_kind),
-                &estimate,
-                override_budget,
+                CostChargeRequest {
+                    month: &month,
+                    adapter_kind,
+                    estimate: &estimate,
+                    override_budget,
+                    reservations: std::slice::from_ref(&reservation),
+                },
             )?;
             // R17-3: record the fresh reservation amount ONLY when it actually landed
             // (a BudgetExceeded outcome appended nothing, so there is no phantom to
             // reclaim). Equals the exact `estimated_usd` row so the future reclaim
             // cancels it precisely.
             if matches!(outcome, ChargeOutcome::Charged) {
-                fresh_reserved = Some(estimated_usd);
+                fresh_reserved = Some(reservation);
             }
             outcome
         };
@@ -6235,9 +6689,10 @@ fn execute_pending_markdownize_tasks(
                     // Quota skip keeps the original stamp (the single reservation the
                     // R16-7 skip gate still relies on). Persisted here, alongside the
                     // Running flip, so it survives the subsequent Failed transition.
-                    if let Some(usd) = fresh_reserved {
-                        candidate.reserved_usd = Some(usd);
-                        candidate.reserved_month = Some(month.clone());
+                    if let Some(reservation) = &fresh_reserved {
+                        candidate.reserved_usd = Some(reservation.usd);
+                        candidate.reserved_month = Some(reservation.month.clone());
+                        candidate.reservation_id = Some(reservation.reservation_id.clone());
                     }
                     true
                 } else {
@@ -6245,9 +6700,21 @@ fn execute_pending_markdownize_tasks(
                 }
             })
             .map_err(pipeline_to_kcs)?;
-        match execute_online_markdownize_task(repo, &task) {
+        let active_claim = fresh_reserved
+            .as_ref()
+            .map(ReservationRecord::claim)
+            .or_else(|| task.reservation_claim())
+            .ok_or_else(|| KcsError::schema("charged markdownize task has no reservation"))?;
+        match execute_online_markdownize_task(repo, &task, prepared_input) {
             Ok(outcome) => {
                 // Charge already reserved under the device-global lock above (F8).
+                transition_reservation_after_outcome(
+                    &cost_ledger,
+                    active_claim,
+                    &scope_id,
+                    markdown_adapter_kind,
+                    None,
+                )?;
                 store
                     .update_matching(|candidate| {
                         if candidate.task_id == task_id {
@@ -6281,6 +6748,13 @@ fn execute_pending_markdownize_tasks(
                 counts.executed += 1;
             }
             Err(error) => {
+                transition_reservation_after_outcome(
+                    &cost_ledger,
+                    active_claim,
+                    &scope_id,
+                    markdown_adapter_kind,
+                    Some(error.retry_kind),
+                )?;
                 let policy = retry_policy(error.retry_kind);
                 let attempts_after = task.attempts.saturating_add(1);
                 let next_retry_at = (policy.retryable
@@ -6342,9 +6816,9 @@ fn persistent_network_allowed_for_kcs_dir(kcs_dir: &Path, tool_id: &str) -> Resu
     if network_revoked_kcs_dir(kcs_dir)? {
         return Ok(false);
     }
-    if read_allow_network_config(&kcs_dir.join("config.toml"))? == Some(true)
-        || read_allow_network_config(&user_config_toml_path())? == Some(true)
-    {
+    // Scope-local config is portable content and therefore cannot grant network
+    // authority. A device-local user config may intentionally grant it globally.
+    if read_allow_network_config(&user_config_toml_path())? == Some(true) {
         return Ok(true);
     }
     approval_row_present_in_kcs_dir(kcs_dir, Some(tool_id))
@@ -6360,22 +6834,7 @@ fn approval_row_present_for_scope(repo: &Repository, tool_id: Option<&str>) -> R
 }
 
 fn approval_row_present_in_kcs_dir(kcs_dir: &Path, tool_id: Option<&str>) -> Result<bool> {
-    let expected_scope_id = scope_id(kcs_dir)?;
-    let path = kcs_dir.join("approvals.jsonl");
-    let Ok(text) = fs::read_to_string(&path) else {
-        return Ok(false);
-    };
-    Ok(text
-        .lines()
-        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
-        .any(|value| {
-            value.get("scope_id").and_then(Value::as_str) == Some(expected_scope_id.as_str())
-                && tool_id
-                    .map(|tool_id| value.get("tool_id").and_then(Value::as_str) == Some(tool_id))
-                    .unwrap_or(true)
-                && value.get("execution_mode").and_then(Value::as_str) == Some("online_api")
-                && value.get("network_opt_in").and_then(Value::as_bool) == Some(true)
-        }))
+    trusted_consent_present(kcs_dir, tool_id, ConsentOperation::Network)
 }
 
 fn embedding_opt_in_for_scopes(exec_scopes: &[ExecScope], tool_id: &str) -> Result<bool> {
@@ -6457,36 +6916,22 @@ struct TaskExecutionFailure {
 /// R11-6: the online-markdownize cost to reserve/bill for `task`. A full send bills
 /// the whole document; a unit-scoped retry (`task.unit_keys` = the still-failed
 /// units) bills only its share = full × (retried units / total prepared units),
-/// with a floor of one unit's worth. `total` is recomputed by preparing the input
-/// (deterministic, so it matches `execute_online_markdownize_task`'s own prepare);
-/// if the input can't be prepared it falls back to the full estimate.
-fn prorated_markdownize_cost(repo: &Repository, task: &TaskDescriptor, file_size: u64) -> f64 {
+/// with a floor of one unit's worth. `total` comes from the same verified buffer and
+/// prepare result that is later sent, so charge and request cardinality cannot race.
+fn prorated_markdownize_cost(
+    task: &TaskDescriptor,
+    file_size: u64,
+    prepared_unit_count: usize,
+) -> f64 {
     let full = estimate_online_markdownize_cost(file_size);
     let Some(unit_keys) = task.unit_keys.as_ref().filter(|keys| !keys.is_empty()) else {
         return full;
     };
-    let Some(total) = task_prepared_unit_count(repo, task).filter(|count| *count > 0) else {
+    if prepared_unit_count == 0 {
         return full;
-    };
-    let sent = unit_keys.len().min(total).max(1);
-    full * (sent as f64 / total as f64)
-}
-
-/// R11-6: number of prepared units (pages/sections/…) the task's whole document
-/// splits into. `None` when the input can't be prepared. Deterministic, so it
-/// agrees with the prepare inside `execute_online_markdownize_task`.
-fn task_prepared_unit_count(repo: &Repository, task: &TaskDescriptor) -> Option<usize> {
-    let path = repo.root().join(&task.input_path);
-    let media_type = media_type_for_cli_path(&path).to_owned();
-    let prepare_profile_hash = builtin_prepare_profile().tool_profile_hash;
-    prepare_units(PrepareStageRequest {
-        raw_hash: task.input_hash.clone(),
-        media_type,
-        input_path: path.display().to_string(),
-        tool_profile_hash: prepare_profile_hash,
-    })
-    .ok()
-    .map(|prepare| prepare.prepared_units.len())
+    }
+    let sent = unit_keys.len().min(prepared_unit_count).max(1);
+    full * (sent as f64 / prepared_unit_count as f64)
 }
 
 /// R15-2 (+ R14-2 / R9-2): the NETWORK-FREE preconditions an online markdownize task
@@ -6502,7 +6947,7 @@ fn task_prepared_unit_count(repo: &Repository, task: &TaskDescriptor) -> Option<
 enum OnlineMarkdownizePrecondition {
     /// File present, unchanged, within the input cap, non-text-native, with locally
     /// extracted units to enhance — ready to send.
-    Send,
+    Send(PreparedOnlineMarkdownizeInput),
     /// Genuine failure — retire the task (file gone / edited-since-enqueue / text-native /
     /// oversize). The recovery is a fresh re-index, not a retry.
     Retire,
@@ -6514,6 +6959,13 @@ enum OnlineMarkdownizePrecondition {
     /// LIVE file, churns a new task on every re-index, and (via R20-7) hides it as
     /// enriched_ratio 1.0.
     AwaitOcr,
+}
+
+struct PreparedOnlineMarkdownizeInput {
+    path: PathBuf,
+    media_type: String,
+    bytes: Vec<u8>,
+    prepared_units: Vec<PreparedUnit>,
 }
 
 /// R22-5: whether a locally-preparable input is really a TEXT file that only landed in
@@ -6530,16 +6982,41 @@ fn is_local_passthrough_text(media_type: &str, prepared_units: &[PreparedUnit]) 
         && prepared_units[0].unit_type == UnitType::File
 }
 
+fn retry_unit_subset_is_valid(task: &TaskDescriptor, prepared_units: &[PreparedUnit]) -> bool {
+    let Some(unit_keys) = &task.unit_keys else {
+        return true;
+    };
+    if unit_keys.is_empty() {
+        return false;
+    }
+    let requested = unit_keys
+        .iter()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    if requested.len() != unit_keys.len() {
+        return false;
+    }
+    let prepared = prepared_units
+        .iter()
+        .map(|unit| unit.unit_key.as_str())
+        .collect::<BTreeSet<_>>();
+    requested.is_subset(&prepared)
+}
+
 fn classify_online_markdownize_precondition(
     repo: &Repository,
     task: &TaskDescriptor,
 ) -> OnlineMarkdownizePrecondition {
     let path = repo.root().join(&task.input_path);
     let media_type = media_type_for_cli_path(&path).to_owned();
-    let Ok(current_bytes) = fs::read(&path) else {
+    let Ok(verified) = read_verified_scan_input(
+        repo.root(),
+        &task.input_path,
+        effective_max_input_bytes(repo),
+    ) else {
         return OnlineMarkdownizePrecondition::Retire;
     };
-    if hash_bytes(&current_bytes) != task.input_hash {
+    if verified.raw_hash != task.input_hash {
         return OnlineMarkdownizePrecondition::Retire;
     }
     // R19-8: honor a `max_input_bytes` cap that was tightened AFTER this task was
@@ -6547,18 +7024,20 @@ fn classify_online_markdownize_precondition(
     // then; a Pending task must not be sent to the online adapter if the operator has
     // since lowered the cap below the file's size — the same live re-check the sibling
     // `[adapter.policy]` key `allow_network` already gets at send time.
-    if current_bytes.len() as u64 > effective_max_input_bytes(repo) {
+    if !current_scan_policy_allows_file(repo.root(), &task.input_path).unwrap_or(false) {
         return OnlineMarkdownizePrecondition::Retire;
     }
     if is_text_native_media(&media_type) {
         return OnlineMarkdownizePrecondition::Retire;
     }
     let prepare_profile_hash = builtin_prepare_profile().tool_profile_hash;
-    let Ok(prepare) = prepare_units(PrepareStageRequest {
-        raw_hash: task.input_hash.clone(),
-        media_type: media_type.clone(),
-        input_path: path.display().to_string(),
-        tool_profile_hash: prepare_profile_hash,
+    let input_path = path.display().to_string();
+    let Ok(prepare) = prepare_units_from_bytes(PrepareStageBytesRequest {
+        raw_hash: &task.input_hash,
+        media_type: &media_type,
+        input_path: &input_path,
+        tool_profile_hash: &prepare_profile_hash,
+        bytes: &verified.bytes,
     }) else {
         return OnlineMarkdownizePrecondition::Retire;
     };
@@ -6570,15 +7049,28 @@ fn classify_online_markdownize_precondition(
     if is_local_passthrough_text(&media_type, &prepare.prepared_units) {
         return OnlineMarkdownizePrecondition::Retire;
     }
-    OnlineMarkdownizePrecondition::Send
+    if !retry_unit_subset_is_valid(task, &prepare.prepared_units) {
+        return OnlineMarkdownizePrecondition::Retire;
+    }
+    OnlineMarkdownizePrecondition::Send(PreparedOnlineMarkdownizeInput {
+        path,
+        media_type,
+        bytes: verified.bytes,
+        prepared_units: prepare.prepared_units,
+    })
 }
 
 fn execute_online_markdownize_task(
     repo: &Repository,
     task: &TaskDescriptor,
+    prepared_input: PreparedOnlineMarkdownizeInput,
 ) -> std::result::Result<OnlineExecutionOutcome, TaskExecutionFailure> {
-    let path = repo.root().join(&task.input_path);
-    let media_type = media_type_for_cli_path(&path).to_owned();
+    let PreparedOnlineMarkdownizeInput {
+        path,
+        media_type,
+        bytes,
+        prepared_units,
+    } = prepared_input;
     // R14-2: an online markdownize task is always deferred — one pass enqueues it and
     // a later `batch resume` / `index --online` executes it — so the file may have been
     // edited in between. Executing a stale task reads the CURRENT bytes yet persists
@@ -6593,12 +7085,7 @@ fn execute_online_markdownize_task(
     // machine has no dedicated "superseded" state). Distinct from R14-1 (which degrades
     // an unreadable PREVIOUS instance to a Full re-send of the CURRENT content): here the
     // CURRENT content itself no longer matches the task, so there is nothing to send.
-    let Ok(current_bytes) = fs::read(&path) else {
-        return Err(TaskExecutionFailure {
-            retry_kind: RetryErrorKind::InvalidInput,
-        });
-    };
-    if hash_bytes(&current_bytes) != task.input_hash {
+    if !current_scan_policy_allows_file(repo.root(), &task.input_path).unwrap_or(false) {
         return Err(TaskExecutionFailure {
             retry_kind: RetryErrorKind::InvalidInput,
         });
@@ -6612,25 +7099,10 @@ fn execute_online_markdownize_task(
             retry_kind: RetryErrorKind::InvalidInput,
         });
     }
-    let prepare_profile_hash = builtin_prepare_profile().tool_profile_hash;
-    let prepare = prepare_units(PrepareStageRequest {
-        raw_hash: task.input_hash.clone(),
-        media_type: media_type.clone(),
-        input_path: path.display().to_string(),
-        tool_profile_hash: prepare_profile_hash,
-    })
-    .map_err(|_| TaskExecutionFailure {
-        retry_kind: RetryErrorKind::InvalidInput,
-    })?;
-    if prepare.prepared_units.is_empty() {
-        return Err(TaskExecutionFailure {
-            retry_kind: RetryErrorKind::InvalidInput,
-        });
-    }
     // R22-5 (defense in depth, mirroring the R9-2 guard above): never ship octet-stream TEXT
     // to online OCR even if a task for it exists (enqueued by a pre-R21-4 build, or a
     // poisoned tasks.jsonl). Fail fast as a non-retryable input error, never a billed send.
-    if is_local_passthrough_text(&media_type, &prepare.prepared_units) {
+    if is_local_passthrough_text(&media_type, &prepared_units) {
         return Err(TaskExecutionFailure {
             retry_kind: RetryErrorKind::InvalidInput,
         });
@@ -6654,66 +7126,67 @@ fn execute_online_markdownize_task(
         if let Some(outcome) = try_online_incremental_markdownize(
             repo,
             task,
-            &prepare.prepared_units,
+            &prepared_units,
             &scope_id,
             &media_type,
             &path,
+            &bytes,
         )? {
             return Ok(outcome);
         }
     }
     let request_units: Vec<PreparedUnit> = match &retry_units {
-        Some(keys) => prepare
-            .prepared_units
+        Some(keys) => prepared_units
             .iter()
             .filter(|unit| keys.contains(&unit.unit_key))
             .cloned()
             .collect(),
-        None => prepare.prepared_units.clone(),
+        None => prepared_units.clone(),
     };
-    let outcome = run_standard_online_markdownize(StandardOnlineMarkdownizeRequest {
-        scope_id: &scope_id,
-        kcs_dir: repo.kcs_dir(),
-        raw_hash: &task.input_hash,
-        path: &path,
-        media_type: &media_type,
-        prepared_unit_hints: prepared_unit_hints(&request_units),
-        // Full send (or unit-scoped retry): every requested unit, no previous/hints.
-        mode: AdapterMarkdownizeMode::Full,
-        previous: None,
-        hints: None,
-        // R15-5: a unit-scoped retry (`retry_units.is_some()`) re-sends ONLY the failed
-        // subset — scope the real OCR send/bill to those pages instead of the whole
-        // document (the ledger already prorated the reserve to the subset). A fresh full
-        // send (`retry_units.is_none()`) leaves this false → whole document, no `pages`.
-        restrict_to_hint_pages: retry_units.is_some(),
-    })
+    let outcome = run_standard_online_markdownize_with_bytes(
+        StandardOnlineMarkdownizeRequest {
+            scope_id: &scope_id,
+            kcs_dir: repo.kcs_dir(),
+            raw_hash: &task.input_hash,
+            path: &path,
+            media_type: &media_type,
+            prepared_unit_hints: prepared_unit_hints(&request_units),
+            // Full send (or unit-scoped retry): every requested unit, no previous/hints.
+            mode: AdapterMarkdownizeMode::Full,
+            previous: None,
+            hints: None,
+            // R15-5: a unit-scoped retry (`retry_units.is_some()`) re-sends ONLY the failed
+            // subset — scope the real OCR send/bill to those pages instead of the whole
+            // document (the ledger already prorated the reserve to the subset). A fresh full
+            // send (`retry_units.is_none()`) leaves this false → whole document, no `pages`.
+            restrict_to_hint_pages: retry_units.is_some(),
+        },
+        &bytes,
+    )
     .map_err(task_failure_from_adapter)?;
     let profile = outcome.profile;
     let response = outcome.response;
-    let hints = all_changed_hints(&prepare.prepared_units);
-    let strict_valid =
-        validate_markdownize_response(&response, &hints, &prepare.prepared_units).is_ok();
+    let hints = all_changed_hints(&prepared_units);
+    let strict_valid = validate_markdownize_response(&response, &hints, &prepared_units).is_ok();
     let generated_at = now_utc_seconds();
     // R11-6: preserve previously-done units (first-instance-wins). Load the prior
     // instance this run overwrites (same raw_hash + resolved tool_profile_hash +
     // gen 0). Regenerating a done unit under Markdown non-determinism would churn its
     // fingerprint → needless re-embedding + Evidence churn (docs/04 §5.2).
     let previous = if retry_units.is_some() {
-        load_previous_instance(&normalized_output_ref(
-            repo,
+        load_previous_instance_identity(
+            repo.kcs_dir(),
             &task.input_hash,
             &profile.tool_profile_hash,
             0,
-        ))
+        )
         .ok()
-        .flatten()
     } else {
         None
     };
     let mut units = normalized_units_from_response(
         &response,
-        &prepare.prepared_units,
+        &prepared_units,
         previous.as_ref(),
         &task.input_hash,
         &profile.tool_profile_hash,
@@ -6734,8 +7207,7 @@ fn execute_online_markdownize_task(
             }
         }
         // Re-establish document order after appending the preserved units.
-        let order_of: BTreeMap<&str, u64> = prepare
-            .prepared_units
+        let order_of: BTreeMap<&str, u64> = prepared_units
             .iter()
             .map(|unit| (unit.unit_key.as_str(), unit.order))
             .collect();
@@ -6758,7 +7230,7 @@ fn execute_online_markdownize_task(
         });
     }
     let done = units.len();
-    let failed = prepare.prepared_units.len().saturating_sub(done);
+    let failed = prepared_units.len().saturating_sub(done);
     // R11-6: a unit-scoped retry's status is a pure function of merged done vs total.
     // `strict_valid` checks the response covered ALL changed units, which a retry
     // deliberately does not — so only a full send takes the strict Done shortcut.
@@ -6769,7 +7241,7 @@ fn execute_online_markdownize_task(
     };
     let run_id = format!("run_{}", new_ulid(repo.root()));
     let manifest = manifest_from_units(
-        &prepare.prepared_units,
+        &prepared_units,
         &units,
         &task.input_hash,
         &profile.tool_profile_hash,
@@ -6809,6 +7281,7 @@ fn try_online_incremental_markdownize(
     scope_id: &str,
     media_type: &str,
     path: &Path,
+    verified_raw_bytes: &[u8],
 ) -> std::result::Result<Option<OnlineExecutionOutcome>, TaskExecutionFailure> {
     let invalid = || TaskExecutionFailure {
         retry_kind: RetryErrorKind::InvalidInput,
@@ -6904,19 +7377,22 @@ fn try_online_incremental_markdownize(
                 .collect(),
             tool_profile_hash: previous.manifest.tool_profile_hash.clone(),
         };
-        let outcome = run_standard_online_markdownize(StandardOnlineMarkdownizeRequest {
-            scope_id,
-            kcs_dir: repo.kcs_dir(),
-            raw_hash: &task.input_hash,
-            path,
-            media_type,
-            prepared_unit_hints: prepared_unit_hints(&requested),
-            mode: AdapterMarkdownizeMode::Incremental,
-            previous: Some(adapter_previous),
-            hints: Some(adapter_hints(&incremental_hints)),
-            // Incremental already scopes pages via `mode`; the retry-only signal stays off.
-            restrict_to_hint_pages: false,
-        })
+        let outcome = run_standard_online_markdownize_with_bytes(
+            StandardOnlineMarkdownizeRequest {
+                scope_id,
+                kcs_dir: repo.kcs_dir(),
+                raw_hash: &task.input_hash,
+                path,
+                media_type,
+                prepared_unit_hints: prepared_unit_hints(&requested),
+                mode: AdapterMarkdownizeMode::Incremental,
+                previous: Some(adapter_previous),
+                hints: Some(adapter_hints(&incremental_hints)),
+                // Incremental already scopes pages via `mode`; the retry-only signal stays off.
+                restrict_to_hint_pages: false,
+            },
+            verified_raw_bytes,
+        )
         .map_err(task_failure_from_adapter)?;
         let response = outcome.response;
         // R14-6: the pin/profile mismatch was gated BEFORE the send above, so
@@ -7021,7 +7497,7 @@ fn latest_online_instance_for_path(
         .collect::<Vec<_>>();
     tasks.sort_by(|a, b| b.created_at.cmp(&a.created_at));
     for task in tasks {
-        if let Some(previous) = load_previous_instance(&task.output_ref)? {
+        if let Some(previous) = load_previous_instance_for_task(task_store, &task)? {
             return Ok(Some(previous));
         }
     }
@@ -7259,7 +7735,7 @@ fn generate_scope_embeddings(repo: &Repository, args: &IndexArgs) -> Result<Exec
         embedding_online_allowed(repo, args.offline, args.online, args.yes || args.approve)?;
     // R11-2: return the enrichment outcome (was discarded) so `run_index` can disclose
     // it and raise the exit code on auth/budget-pause.
-    run_embedding_enrichment(repo, online, false)
+    run_embedding_enrichment(repo, online, false, false)
 }
 
 /// Core enrichment pass shared by `kcs index` (inline) and `kcs batch
@@ -7270,6 +7746,7 @@ fn run_embedding_enrichment(
     repo: &Repository,
     online: bool,
     override_budget: bool,
+    allow_auth_revive: bool,
 ) -> Result<ExecOutcome> {
     let Some(execution) = embedding_execution() else {
         return Ok(ExecOutcome::default());
@@ -7306,10 +7783,13 @@ fn run_embedding_enrichment(
         repo,
         &conn,
         &task_store,
-        &head,
-        &chunking_config_hash,
-        &pending,
-        &now,
+        EmbeddingReconcileContext {
+            head: &head,
+            chunking_config_hash: &chunking_config_hash,
+            pending: &pending,
+            now: &now,
+            allow_auth_revive,
+        },
     )?;
     if pending.is_empty() {
         return Ok(ExecOutcome::default());
@@ -7384,7 +7864,7 @@ fn run_embedding_enrichment(
     // R18-1: per-chunk FRESH F8 reservation `(usd, ledger_month)` for the freshly-charged
     // chunks this pass, stamped in the single end-of-pass write-back so a later non-live
     // reclaim (R18-1) can cancel the exact phantom.
-    let mut reserved_by_ref: BTreeMap<String, (f64, String)> = BTreeMap::new();
+    let mut reserved_by_ref: BTreeMap<String, (f64, String, String)> = BTreeMap::new();
 
     // R16-7: embedding tasks whose PREVIOUS recorded failure was a non-billable
     // rejection (RateLimit / QuotaExceeded — refused before the backend processes or
@@ -7403,19 +7883,13 @@ fn run_embedding_enrichment(
     // re-drives through §5.5 content-addressed reuse with NO re-charge). Reserving once
     // for the task's lifetime is deliberately NOT done — it would let real spend exceed
     // the reserved cap on server-side-billed retries (the R15-5 silent cap bypass).
-    let reservation_covers_resend: BTreeSet<String> = task_store
+    let embedding_tasks_by_ref = task_store
         .all()
         .map_err(pipeline_to_kcs)?
         .into_iter()
-        .filter(|task| {
-            task.task_type == TaskType::Embedding
-                && matches!(
-                    retry_kind_from_reason(task.fallback_reason.as_deref()),
-                    RetryErrorKind::RateLimit | RetryErrorKind::QuotaExceeded
-                )
-        })
-        .map(|task| task.output_ref)
-        .collect();
+        .filter(|task| task.task_type == TaskType::Embedding)
+        .map(|task| (task.output_ref.clone(), task))
+        .collect::<BTreeMap<_, _>>();
 
     for batch in embeddable.chunks(EMBEDDING_BATCH_SIZE) {
         // Split content-addressed reuse (no API call, free) from chunks that
@@ -7459,19 +7933,69 @@ fn run_embedding_enrichment(
         if plan.to_send.is_empty() {
             continue;
         }
-        // L5 + R16-7: bill only the chars of chunks that need a FRESH reservation —
-        // reused chunks issue no request, and a chunk whose task's previous failure was
-        // a non-billable rejection (RateLimit / QuotaExceeded) is already covered by
-        // that attempt's F8 reservation. The whole `to_send` batch is still sent below
-        // (both subsets need embedding); only the charged char count is reduced.
+        let reservation_ledger = cost_ledger.reservation_ledger();
+        let mut covered_groups = BTreeSet::new();
+        let mut activated_claims = Vec::<TaskReservationClaim<'_>>::new();
+        for (group_index, group) in plan.to_send.iter().enumerate() {
+            let mut covered = false;
+            for chunk in &group.members {
+                let output_ref = embedding_task_output_ref(&chunk.chunk_id);
+                let Some(task) = embedding_tasks_by_ref.get(&output_ref) else {
+                    continue;
+                };
+                if !matches!(
+                    retry_kind_from_reason(task.fallback_reason.as_deref()),
+                    RetryErrorKind::RateLimit | RetryErrorKind::QuotaExceeded
+                ) {
+                    continue;
+                }
+                let Some(claim) = task.reservation_claim() else {
+                    continue;
+                };
+                if reservation_ledger
+                    .activate_for_retry(claim, &scope_id, EMBEDDING_ADAPTER_KIND)
+                    .map_err(pipeline_to_kcs)?
+                {
+                    activated_claims.push(claim);
+                    covered = true;
+                }
+            }
+            if covered {
+                covered_groups.insert(group_index);
+            }
+        }
+
+        // L5 + R16-7: bill only identities that do not carry a trusted, atomically
+        // reactivated reservation from a prior non-billable response.
         let sent_chars: u64 = plan
             .to_send
             .iter()
-            .filter(|(chunk, _)| {
-                !reservation_covers_resend.contains(&embedding_task_output_ref(&chunk.chunk_id))
-            })
-            .map(|(chunk, _)| chunk.text.chars().count() as u64)
+            .enumerate()
+            .filter(|(index, _)| !covered_groups.contains(index))
+            .map(|(_, group)| group.representative.text.chars().count() as u64)
             .sum();
+        let mut fresh_by_ref = BTreeMap::<String, ReservationRecord>::new();
+        for (group_index, group) in plan.to_send.iter().enumerate() {
+            if covered_groups.contains(&group_index) {
+                continue;
+            }
+            let output_ref = embedding_task_output_ref(&group.representative.chunk_id);
+            let task = embedding_tasks_by_ref.get(&output_ref).ok_or_else(|| {
+                KcsError::schema("embedding send has no matching task reservation owner")
+            })?;
+            fresh_by_ref.insert(
+                output_ref,
+                ReservationRecord {
+                    reservation_id: format!("res_{}", new_ulid(repo.root())),
+                    task_id: task.task_id.clone(),
+                    month: month.clone(),
+                    scope_id: scope_id.clone(),
+                    adapter_kind: EMBEDDING_ADAPTER_KIND.to_owned(),
+                    usd: estimate_embedding_cost(group.representative.text.chars().count() as u64),
+                },
+            );
+        }
+        let fresh_reservations = fresh_by_ref.values().cloned().collect::<Vec<_>>();
         let charge = if sent_chars == 0 {
             // Every to-send chunk is a RateLimit/Quota resend already reserved by its
             // prior attempt — skip the reservation entirely (no $0 ledger row).
@@ -7490,22 +8014,30 @@ fn run_embedding_enrichment(
                 &cost_ledger,
                 cost_ledger_lock_path(),
                 &budget_caps,
-                &month,
-                EMBEDDING_ADAPTER_KIND,
-                &estimate,
-                override_budget,
+                CostChargeRequest {
+                    month: &month,
+                    adapter_kind: EMBEDDING_ADAPTER_KIND,
+                    estimate: &estimate,
+                    override_budget,
+                    reservations: &fresh_reservations,
+                },
             )?
         };
         if matches!(charge, ChargeOutcome::BudgetExceeded) {
+            for claim in &activated_claims {
+                reservation_ledger
+                    .mark_reclaimable(*claim, &scope_id, EMBEDDING_ADAPTER_KIND)
+                    .map_err(pipeline_to_kcs)?;
+            }
             // Budget exhausted: pause the remaining to-send chunks
             // (index_status.budget_paused). Already-linked reuse stays done.
             record_embedding_transitions(
                 &mut transitions,
-                plan.to_send.iter().map(|(chunk, _)| *chunk),
+                plan.send_chunks(),
                 embedding_pause_transition(),
             );
             // R11-2: budget-paused this pass → docs/04 §5.6 exit 6.
-            outcome.paused += plan.to_send.len();
+            outcome.paused += plan.send_count();
             break;
         }
         // R18-1: a fresh charge landed (`sent_chars > 0`, ChargeOutcome::Charged). Record
@@ -7514,34 +8046,61 @@ fn run_embedding_enrichment(
         // per-chunk amounts sum to exactly the batch charge — the reclaim (R18-1) of a
         // stranded phantom then cancels it precisely. RateLimit/Quota resends covered by a
         // prior reservation are excluded (they keep their original single stamp).
-        if sent_chars > 0 {
-            for (chunk, _) in &plan.to_send {
-                let output_ref = embedding_task_output_ref(&chunk.chunk_id);
-                if !reservation_covers_resend.contains(&output_ref) {
-                    let usd = estimate_embedding_cost(chunk.text.chars().count() as u64);
-                    reserved_by_ref.insert(output_ref, (usd, month.clone()));
-                }
-            }
+        for (output_ref, reservation) in &fresh_by_ref {
+            reserved_by_ref.insert(
+                output_ref.clone(),
+                (
+                    reservation.usd,
+                    reservation.month.clone(),
+                    reservation.reservation_id.clone(),
+                ),
+            );
         }
         match send_embed_batch(&conn, execution, &profile, &plan.to_send) {
             Ok(()) => {
                 // Charge already reserved under the lock above (F8).
+                for claim in activated_claims
+                    .iter()
+                    .copied()
+                    .chain(fresh_reservations.iter().map(ReservationRecord::claim))
+                {
+                    transition_reservation_after_outcome(
+                        &cost_ledger,
+                        claim,
+                        &scope_id,
+                        EMBEDDING_ADAPTER_KIND,
+                        None,
+                    )?;
+                }
                 record_embedding_transitions(
                     &mut transitions,
-                    plan.to_send.iter().map(|(chunk, _)| *chunk),
+                    plan.send_chunks(),
                     embedding_done_transition(),
                 );
-                outcome.executed += plan.to_send.len();
+                outcome.executed += plan.send_count();
             }
             Err(failure) => {
+                for claim in activated_claims
+                    .iter()
+                    .copied()
+                    .chain(fresh_reservations.iter().map(ReservationRecord::claim))
+                {
+                    transition_reservation_after_outcome(
+                        &cost_ledger,
+                        claim,
+                        &scope_id,
+                        EMBEDDING_ADAPTER_KIND,
+                        Some(failure.retry_kind),
+                    )?;
+                }
                 // Enrichment failure is non-fatal: mark the sent chunks failed and
                 // stop (search sees no embeddings → text). Never fails `kcs index`.
                 record_embedding_transitions(
                     &mut transitions,
-                    plan.to_send.iter().map(|(chunk, _)| *chunk),
+                    plan.send_chunks(),
                     embedding_fail_transition(failure.retry_kind),
                 );
-                count_embedding_failure(&mut outcome, failure.retry_kind, plan.to_send.len());
+                count_embedding_failure(&mut outcome, failure.retry_kind, plan.send_count());
                 break;
             }
         }
@@ -7631,7 +8190,7 @@ fn apply_embedding_transitions(
     // chunks are present; a RateLimit/Quota resend covered by a prior reservation is
     // absent and keeps its existing stamp. The stamp lets `reconcile_committed_embedding_tasks`
     // reclaim the exact phantom if the chunk later goes non-live (R18-1).
-    reserved: &BTreeMap<String, (f64, String)>,
+    reserved: &BTreeMap<String, (f64, String, String)>,
 ) -> Result<usize> {
     if transitions.is_empty() {
         return Ok(0);
@@ -7647,9 +8206,10 @@ fn apply_embedding_transitions(
             };
             task.status = transition.status;
             task.fallback_reason = Some(transition.reason.to_owned());
-            if let Some((usd, month)) = reserved.get(&task.output_ref) {
+            if let Some((usd, month, reservation_id)) = reserved.get(&task.output_ref) {
                 task.reserved_usd = Some(*usd);
                 task.reserved_month = Some(month.clone());
+                task.reservation_id = Some(reservation_id.clone());
             }
             if let Some(kind) = transition.failure_kind {
                 let attempts_after = task.attempts.saturating_add(1);
@@ -7676,8 +8236,26 @@ fn apply_embedding_transitions(
 struct EmbedBatchPlan<'a> {
     /// (chunk, existing content-vector bytes) — link `chunk_vec`, no adapter call.
     reuse: Vec<(&'a EmbeddableChunk, Vec<u8>)>,
-    /// (chunk, embedding_hash) — must be sent to the adapter.
-    to_send: Vec<(&'a EmbeddableChunk, String)>,
+    /// One adapter item per content identity, fanned out to every member chunk.
+    to_send: Vec<EmbeddingSendGroup<'a>>,
+}
+
+struct EmbeddingSendGroup<'a> {
+    embedding_hash: String,
+    representative: &'a EmbeddableChunk,
+    members: Vec<&'a EmbeddableChunk>,
+}
+
+impl<'a> EmbedBatchPlan<'a> {
+    fn send_chunks(&'a self) -> impl Iterator<Item = &'a EmbeddableChunk> + 'a {
+        self.to_send
+            .iter()
+            .flat_map(|group| group.members.iter().copied())
+    }
+
+    fn send_count(&self) -> usize {
+        self.to_send.iter().map(|group| group.members.len()).sum()
+    }
 }
 
 /// Classify a batch into reuse vs. to-send by probing the content-addressed
@@ -7688,7 +8266,7 @@ fn plan_embed_batch<'a>(
     batch: &'a [EmbeddableChunk],
 ) -> std::result::Result<EmbedBatchPlan<'a>, TaskExecutionFailure> {
     let mut reuse = Vec::new();
-    let mut to_send = Vec::new();
+    let mut missing = BTreeMap::<String, Vec<&EmbeddableChunk>>::new();
     for chunk in batch {
         let embedding_hash =
             chunk_embedding_hash(chunk, profile).map_err(|_| TaskExecutionFailure {
@@ -7696,7 +8274,7 @@ fn plan_embed_batch<'a>(
             })?;
         match embedding_store::content_vector(conn, &embedding_hash) {
             Ok(Some(bytes)) => reuse.push((chunk, bytes)),
-            Ok(None) => to_send.push((chunk, embedding_hash)),
+            Ok(None) => missing.entry(embedding_hash).or_default().push(chunk),
             Err(_) => {
                 return Err(TaskExecutionFailure {
                     retry_kind: RetryErrorKind::ContractViolation,
@@ -7704,6 +8282,14 @@ fn plan_embed_batch<'a>(
             }
         }
     }
+    let to_send = missing
+        .into_iter()
+        .map(|(embedding_hash, members)| EmbeddingSendGroup {
+            representative: members[0],
+            embedding_hash,
+            members,
+        })
+        .collect();
     Ok(EmbedBatchPlan { reuse, to_send })
 }
 
@@ -7728,13 +8314,13 @@ fn send_embed_batch(
     conn: &Connection,
     execution: AdoptedEmbeddingExecution,
     profile: &DeclaredEmbeddingProfile,
-    to_send: &[(&EmbeddableChunk, String)],
+    to_send: &[EmbeddingSendGroup<'_>],
 ) -> std::result::Result<(), TaskExecutionFailure> {
     let items = to_send
         .iter()
-        .map(|(chunk, _)| EmbeddingItem {
-            id: chunk.chunk_id.clone(),
-            text: Some(chunk.text.clone()),
+        .map(|group| EmbeddingItem {
+            id: group.representative.chunk_id.clone(),
+            text: Some(group.representative.text.clone()),
             path: None,
             mime: None,
         })
@@ -7744,7 +8330,9 @@ fn send_embed_batch(
         .into_iter()
         .map(|vector| (vector.id, vector.vector))
         .collect::<BTreeMap<_, _>>();
-    for (chunk, embedding_hash) in to_send {
+    let held = BTreeSet::new();
+    for group in to_send {
+        let chunk = group.representative;
         let Some(vector) = by_id.get(&chunk.chunk_id) else {
             return Err(TaskExecutionFailure {
                 retry_kind: RetryErrorKind::ContractViolation,
@@ -7753,7 +8341,7 @@ fn send_embed_batch(
         let bytes = f32_to_le_bytes(vector);
         embedding_store::write_chunk_embedding(
             conn,
-            embedding_hash,
+            &group.embedding_hash,
             &chunk.text_hash,
             &chunk.chunk_id,
             &bytes,
@@ -7761,6 +8349,15 @@ fn send_embed_batch(
             &profile.distance,
             &profile.modality,
             &profile.profile_hash,
+        )
+        .map_err(|_| TaskExecutionFailure {
+            retry_kind: RetryErrorKind::ContractViolation,
+        })?;
+        embedding_store::link_chunk_vecs_to_content_vector(
+            conn,
+            &group.embedding_hash,
+            group.members.iter().map(|member| member.chunk_id.as_str()),
+            &held,
         )
         .map_err(|_| TaskExecutionFailure {
             retry_kind: RetryErrorKind::ContractViolation,
@@ -7780,17 +8377,25 @@ fn filter_embeddable_by_task_state(
     override_budget: bool,
 ) -> Result<Vec<EmbeddableChunk>> {
     let tasks = task_store.all().map_err(pipeline_to_kcs)?;
-    let by_ref = tasks
+    let mut by_ref = BTreeMap::<String, Vec<&TaskDescriptor>>::new();
+    for task in tasks
         .iter()
         .filter(|task| task.task_type == TaskType::Embedding)
-        .map(|task| (task.output_ref.clone(), task))
-        .collect::<BTreeMap<_, _>>();
+    {
+        by_ref
+            .entry(task.output_ref.clone())
+            .or_default()
+            .push(task);
+    }
     Ok(pending
         .into_iter()
         .filter(|chunk| {
             let output_ref = embedding_task_output_ref(&chunk.chunk_id);
             match by_ref.get(&output_ref) {
-                Some(task) => embeddable_task_state(task, override_budget),
+                Some(tasks) => tasks
+                    .iter()
+                    .filter(|task| task.fallback_reason.as_deref() != Some(RETIRED_NON_LIVE))
+                    .all(|task| embeddable_task_state(task, override_budget)),
                 // No task row yet (should not happen post-enqueue): embed it.
                 None => true,
             }
@@ -7948,20 +8553,26 @@ fn embedding_task_output_ref(chunk_id: &str) -> String {
 /// `index_status` reporting phantom pending enrichment permanently. Mark such tasks
 /// `Done` (idempotent, no adapter call, no re-charge — the vector is already stored,
 /// so search/data are unaffected; only task accounting + the Agent contract heal).
+struct EmbeddingReconcileContext<'a> {
+    head: &'a str,
+    chunking_config_hash: &'a str,
+    pending: &'a [EmbeddableChunk],
+    now: &'a str,
+    allow_auth_revive: bool,
+}
+
 fn reconcile_committed_embedding_tasks(
     repo: &Repository,
     conn: &Connection,
     task_store: &TaskStore,
-    head: &str,
-    chunking_config_hash: &str,
-    pending: &[EmbeddableChunk],
-    now: &str,
+    context: EmbeddingReconcileContext<'_>,
 ) -> Result<()> {
-    let pending_ids: BTreeSet<&str> = pending
+    let pending_ids: BTreeSet<&str> = context
+        .pending
         .iter()
         .map(|chunk| chunk.chunk_id.as_str())
         .collect();
-    let live_ids = live_chunk_ids(conn, head, chunking_config_hash)?;
+    let live_ids = live_chunk_ids(conn, context.head, context.chunking_config_hash)?;
     // R18-1: reclaim the F8 phantom of a NON-LIVE embedding task whose send failed
     // RateLimit/Quota. Embedding charges before the send (like markdownize, F8) but had NO
     // reclaim path — `reserved_usd`/`reserved_month` are now stamped at charge time
@@ -7976,104 +8587,94 @@ fn reconcile_committed_embedding_tasks(
     // reclaim uses the task's stamped `reserved_month`, so month accounting matches the
     // charge.
     let reservation_scope_id = repo.scope_id_for_adapter();
+    #[derive(Clone, Copy)]
+    enum ReconcileReservationAction {
+        Revive,
+        Complete,
+        Retire,
+    }
+    let mut actions = BTreeMap::<String, ReconcileReservationAction>::new();
     let mut reclaims: Vec<MonthlyCostLedgerEntry> = Vec::new();
+    let cost_ledger = CostLedger::new(cost_ledger_path());
+    for task in task_store.all().map_err(pipeline_to_kcs)? {
+        if task.task_type != TaskType::Embedding {
+            continue;
+        }
+        let budget_paused = task.status == TaskStatus::Paused
+            && task.fallback_reason.as_deref() == Some("budget_exceeded");
+        if !budget_paused
+            && !matches!(
+                task.status,
+                TaskStatus::Pending | TaskStatus::Running | TaskStatus::Failed
+            )
+        {
+            continue;
+        }
+        let auth_revive_candidate = context.allow_auth_revive
+            && task.status == TaskStatus::Failed
+            && retry_kind_from_reason(task.fallback_reason.as_deref()) == RetryErrorKind::AuthError;
+        let Some(chunk_id) = task.output_ref.strip_prefix("embedding:") else {
+            continue;
+        };
+        let live = live_ids.contains(chunk_id);
+        let live_embedded = live && !pending_ids.contains(chunk_id);
+        let materialized_completion =
+            live_embedded && task_can_complete_from_materialized_output(&task);
+        if task.reservation_claim().is_none()
+            && !auth_revive_candidate
+            && !budget_paused
+            && !materialized_completion
+        {
+            continue;
+        }
+        let action = if live && !live_embedded {
+            if auth_revive_candidate {
+                ReconcileReservationAction::Revive
+            } else {
+                continue;
+            }
+        } else if live_embedded {
+            ReconcileReservationAction::Complete
+        } else {
+            ReconcileReservationAction::Retire
+        };
+        if let Some(entry) = settle_task_reservation(
+            &cost_ledger,
+            &task,
+            &reservation_scope_id,
+            EMBEDDING_ADAPTER_KIND,
+        )? {
+            reclaims.push(entry);
+        }
+        actions.insert(task.task_id.clone(), action);
+    }
     task_store
         .update_matching(|task| {
-            if task.task_type != TaskType::Embedding
-                || !matches!(
-                    task.status,
-                    TaskStatus::Pending | TaskStatus::Running | TaskStatus::Failed
-                )
-            {
-                return false;
-            }
-            // R22-6(b): STATE revival must not depend on carrying a reservation. `reserved_*`
-            // only exists on tasks charged by an R18-1-or-later build, so a Failed(AuthError)
-            // task written by an older build was skipped here and could never resume — the
-            // very stuck state R21-6 set out to fix. Admit an un-stamped task when it is a
-            // live-AuthError revive candidate; `reclaim_entry_for` returns None without a
-            // stamp, so the reclaim half is simply a no-op. Everything else still requires a
-            // stamp (there is nothing to reclaim or terminalize otherwise).
-            let auth_revive_candidate = matches!(task.status, TaskStatus::Failed)
-                && retry_kind_from_reason(task.fallback_reason.as_deref())
-                    == RetryErrorKind::AuthError;
-            if task.reserved_usd.is_none() && !auth_revive_candidate {
-                return false;
-            }
-            let Some(chunk_id) = task.output_ref.strip_prefix("embedding:") else {
+            let Some(action) = actions.get(&task.task_id).copied() else {
                 return false;
             };
-            let live = live_ids.contains(chunk_id);
-            // R19-4: the chunk is live AND already has a vector (its content-hash twin
-            // was embedded and `rebuild_chunk_vec` linked THIS chunk_id) — the task's own
-            // send failed (e.g. RateLimit) but the work is genuinely done. Without this,
-            // such a Failed task is never converged by `kcs index` (the transitions loop
-            // below only visits Pending/Running), so it stays Failed forever, keeps its
-            // phantom reservation eating the cap, and reports pending enrichment == 1.
-            let live_embedded = live && !pending_ids.contains(chunk_id);
-            // Live AND un-embedded is genuine outstanding work — leave it (a retryable
-            // Failed awaits `batch retry`; Pending/Running is driven normally).
-            if live && !live_embedded {
-                // R21-6: EXCEPT a Failed AuthError task. It is non-retryable
-                // (`max_attempts:0`, so `batch retry` / `filter_embeddable_by_task_state`
-                // skip it) yet the file is unchanged, so no non-live retire ever fires —
-                // it stays Failed forever, its non-billable (401/403, refused before
-                // billing — R20-3) phantom eating the cap, and fixing the credentials
-                // resumes nothing. The reclaim series (R16-7→R19-2→R20-3) only handled the
-                // NON-LIVE case. Revive in place (Failed→Pending) so a re-index after
-                // fixing credentials re-attempts the send, reclaiming the phantom first so
-                // it stops eating the cap (and is not double-counted when the retry bills).
-                // RateLimit self-heals via `batch retry`; NetworkError may have billed, so
-                // neither is revived here.
-                if retry_kind_from_reason(task.fallback_reason.as_deref())
-                    == RetryErrorKind::AuthError
-                {
-                    if let Some(entry) =
-                        reclaim_entry_for(task, &reservation_scope_id, EMBEDDING_ADAPTER_KIND)
-                    {
-                        reclaims.push(entry);
-                    }
+            task.clear_reservation();
+            match action {
+                ReconcileReservationAction::Revive => {
                     task.status = TaskStatus::Pending;
                     task.fallback_reason = None;
                     task.attempts = 0;
-                    task.reserved_usd = None;
-                    task.reserved_month = None;
                     task.next_retry_at = None;
                     task.heartbeat_at = None;
-                    return true;
                 }
-                return false;
-            }
-            if live_embedded {
-                // Reclaim + clear ONLY a non-billable RateLimit/Quota phantom; a
-                // NetworkError stamp may have billed server-side, so keep it as real
-                // spend on the completed task (R16-7's conservative asymmetry).
-                if let Some(entry) =
-                    reclaim_entry_for(task, &reservation_scope_id, EMBEDDING_ADAPTER_KIND)
-                {
-                    reclaims.push(entry);
-                    task.reserved_usd = None;
-                    task.reserved_month = None;
+                ReconcileReservationAction::Complete => {
+                    task.status = TaskStatus::Done;
+                    task.fallback_reason = Some("embedding_adapter_done".to_owned());
+                    task.next_retry_at = None;
+                    task.heartbeat_at = None;
                 }
-                task.status = TaskStatus::Done;
-                task.fallback_reason = Some("embedding_adapter_done".to_owned());
-                task.next_retry_at = None;
-                task.heartbeat_at = None;
-            } else if let Some(entry) =
-                // Non-live: R18-1 + R19-3 reversible retire + reclaim.
-                retire_online_task_reclaiming(
-                    task,
-                    &reservation_scope_id,
-                    EMBEDDING_ADAPTER_KIND,
-                )
-            {
-                reclaims.push(entry);
+                ReconcileReservationAction::Retire => retire_online_task(task),
             }
             true
         })
         .map_err(pipeline_to_kcs)?;
     if !reclaims.is_empty() {
-        let reclaim_ledger = CostLedger::new(cost_ledger_path()).reclaim_ledger();
+        let reclaim_ledger = cost_ledger.reclaim_ledger();
         for entry in &reclaims {
             reclaim_ledger
                 .append_monthly(entry)
@@ -8132,7 +8733,7 @@ fn reconcile_committed_embedding_tasks(
         transitions.insert(task.output_ref.clone(), embedding_done_transition());
     }
     // No fresh reservations to stamp on the reconcile path (it charges nothing).
-    apply_embedding_transitions(task_store, &transitions, now, &BTreeMap::new())?;
+    apply_embedding_transitions(task_store, &transitions, context.now, &BTreeMap::new())?;
     Ok(())
 }
 
@@ -8218,13 +8819,34 @@ fn hold_secret_embedding_tasks(
         .filter(|task| task.fallback_reason.as_deref() == Some(RETIRED_NON_LIVE))
         .map(|task| task.output_ref.clone())
         .collect::<BTreeSet<_>>();
+    let existing_nonretired = all_tasks
+        .iter()
+        .filter(|task| task.task_type == TaskType::Embedding)
+        .filter(|task| task.fallback_reason.as_deref() != Some(RETIRED_NON_LIVE))
+        .map(|task| task.output_ref.clone())
+        .collect::<BTreeSet<_>>();
+    // A secret hold is a policy overlay, not permission to erase a terminal retry
+    // decision. Preserve non-retryable and exhausted failures in place so a
+    // hold/unhold cycle cannot turn them back into fresh sendable work.
+    let terminal_failed = all_tasks
+        .iter()
+        .filter(|task| task.task_type == TaskType::Embedding)
+        .filter(|task| {
+            task.status == TaskStatus::Failed
+                && task.fallback_reason.as_deref() != Some(RETIRED_NON_LIVE)
+                && !task_retry_allowed(task)
+        })
+        .map(|task| task.output_ref.clone())
+        .collect::<BTreeSet<_>>();
     // Live, non-retired, not-yet-held, not Done → demote in place to a Paused hold.
     let demotable = all_tasks
         .iter()
         .filter(|task| task.task_type == TaskType::Embedding)
         .filter(|task| {
-            !already_held.contains(&task.output_ref)
+            task_can_enter_secret_hold(task)
+                && !already_held.contains(&task.output_ref)
                 && !done.contains(&task.output_ref)
+                && !terminal_failed.contains(&task.output_ref)
                 && task.fallback_reason.as_deref() != Some(RETIRED_NON_LIVE)
         })
         .map(|task| task.output_ref.clone())
@@ -8242,8 +8864,14 @@ fn hold_secret_embedding_tasks(
             to_revive.insert(output_ref);
             continue;
         }
+        if terminal_failed.contains(&output_ref) {
+            continue;
+        }
         if demotable.contains(&output_ref) {
             to_demote.insert(output_ref, chunk.raw_path.clone());
+            continue;
+        }
+        if existing_nonretired.contains(&output_ref) {
             continue;
         }
         let task = TaskDescriptor {
@@ -8266,6 +8894,7 @@ fn hold_secret_embedding_tasks(
             created_at: now.to_owned(),
             reserved_usd: None,
             reserved_month: None,
+            reservation_id: None,
         };
         task_store.append(&task).map_err(pipeline_to_kcs)?;
     }
@@ -8283,8 +8912,7 @@ fn hold_secret_embedding_tasks(
                     task.attempts = 0;
                     task.next_retry_at = None;
                     task.heartbeat_at = None;
-                    task.reserved_usd = None;
-                    task.reserved_month = None;
+                    task.clear_reservation();
                     true
                 } else {
                     false
@@ -8302,6 +8930,19 @@ fn hold_secret_embedding_tasks(
     if !to_demote.is_empty() {
         let reservation_scope_id = repo.scope_id_for_adapter();
         let mut reclaims: Vec<MonthlyCostLedgerEntry> = Vec::new();
+        let cost_ledger = CostLedger::new(cost_ledger_path());
+        for task in &all_tasks {
+            if task.task_type == TaskType::Embedding && to_demote.contains_key(&task.output_ref) {
+                if let Some(entry) = settle_task_reservation(
+                    &cost_ledger,
+                    task,
+                    &reservation_scope_id,
+                    EMBEDDING_ADAPTER_KIND,
+                )? {
+                    reclaims.push(entry);
+                }
+            }
+        }
         task_store
             .update_matching(|task| {
                 if task.task_type != TaskType::Embedding {
@@ -8310,13 +8951,7 @@ fn hold_secret_embedding_tasks(
                 let Some(current_path) = to_demote.get(&task.output_ref) else {
                     return false;
                 };
-                if let Some(entry) =
-                    reclaim_entry_for(task, &reservation_scope_id, EMBEDDING_ADAPTER_KIND)
-                {
-                    reclaims.push(entry);
-                    task.reserved_usd = None;
-                    task.reserved_month = None;
-                }
+                task.clear_reservation();
                 task.status = TaskStatus::Paused;
                 task.fallback_reason = Some(SECRETS_TIER_B_HOLD.to_owned());
                 task.input_path = current_path.clone();
@@ -8327,7 +8962,7 @@ fn hold_secret_embedding_tasks(
             })
             .map_err(pipeline_to_kcs)?;
         if !reclaims.is_empty() {
-            let reclaim_ledger = CostLedger::new(cost_ledger_path()).reclaim_ledger();
+            let reclaim_ledger = cost_ledger.reclaim_ledger();
             for entry in &reclaims {
                 reclaim_ledger
                     .append_monthly(entry)
@@ -8433,6 +9068,7 @@ fn enqueue_embedding_tasks(
             created_at: now.to_owned(),
             reserved_usd: None,
             reserved_month: None,
+            reservation_id: None,
         };
         task_store.append(&task).map_err(pipeline_to_kcs)?;
     }
@@ -8451,8 +9087,7 @@ fn enqueue_embedding_tasks(
                     task.attempts = 0;
                     task.next_retry_at = None;
                     task.heartbeat_at = None;
-                    task.reserved_usd = None;
-                    task.reserved_month = None;
+                    task.clear_reservation();
                     true
                 } else {
                     false
@@ -8799,7 +9434,7 @@ fn index_preview_json(root: &Path, preview: &ScanPreview) -> Value {
 
 #[derive(Debug, Default)]
 struct IndexPipelineResult {
-    normalize_by_path: BTreeMap<String, NormalizeRef>,
+    normalize_by_path: BTreeMap<String, PendingNormalizeRef>,
     network_allowed: bool,
     pending_online_tasks: usize,
     paused_tasks: usize,
@@ -8817,6 +9452,18 @@ struct IndexPipelineResult {
 
 fn online_output_ref(adapter_id: &str) -> String {
     format!("online:{adapter_id}")
+}
+
+fn explicitly_allowed_tier_a_paths(preview: &ScanPreview) -> BTreeSet<String> {
+    preview
+        .candidates
+        .iter()
+        .filter(|candidate| {
+            !candidate.ignored
+                && candidate.quarantine_reason.as_deref() == Some("secrets_tier_a_online_hold")
+        })
+        .map(|candidate| candidate.input_path.clone())
+        .collect()
 }
 
 fn online_markdownize_profile() -> AdapterProfile {
@@ -8853,6 +9500,22 @@ fn active_markdown_adapter(_repo: &Repository) -> Box<dyn MarkdownizeAdapter> {
         }),
         _ => builtin_offline_markdownize_adapter(),
     }
+}
+
+fn offline_markdownize_from_verified_bytes(
+    adapter: &dyn MarkdownizeAdapter,
+    request: MarkdownizeRequest,
+    verified_raw_bytes: &[u8],
+) -> kcs_adapter::Result<kcs_adapter::types::MarkdownizeResponse> {
+    if matches!(
+        std::env::var("KCS_TEST_MARKDOWNIZE_ADAPTER")
+            .ok()
+            .as_deref(),
+        Some("incremental" | "reject_incremental" | "reject_incremental_and_full")
+    ) {
+        return adapter.markdownize(request);
+    }
+    kcs_adapter::deterministic::markdownize_from_bytes(request, verified_raw_bytes)
 }
 
 #[derive(Debug, Clone)]
@@ -9005,25 +9668,32 @@ fn run_index_pipeline(
             .map(|candidate| candidate.input_path.as_str())
             .collect();
         let mut orphan_reclaims: Vec<MonthlyCostLedgerEntry> = Vec::new();
+        let mut orphan_ids = BTreeSet::new();
+        for task in task_store.all().map_err(pipeline_to_kcs)? {
+            let orphaned = task.task_type == TaskType::Markdownize
+                && task.output_ref == placeholder_output_ref
+                && task.status == TaskStatus::Failed
+                && is_reservation_bearing_send_failure(&task)
+                && !live_paths.contains(task.input_path.as_str());
+            if !orphaned {
+                continue;
+            }
+            if let Some(entry) = settle_task_reservation(
+                &cost_ledger,
+                &task,
+                &reservation_scope_id,
+                markdown_adapter_kind,
+            )? {
+                orphan_reclaims.push(entry);
+            }
+            orphan_ids.insert(task.task_id);
+        }
         task_store
             .update_matching(|task| {
-                let orphaned = task.task_type == TaskType::Markdownize
-                    && task.output_ref == placeholder_output_ref
-                    && task.status == TaskStatus::Failed
-                    // R19-2: include exhausted-quota phantoms (was `task_retry_allowed`,
-                    // which excluded them and left the reservation stuck).
-                    && is_reservation_bearing_send_failure(task)
-                    && !live_paths.contains(task.input_path.as_str());
-                if !orphaned {
+                if !orphan_ids.contains(&task.task_id) {
                     return false;
                 }
-                if let Some(entry) = retire_online_task_reclaiming(
-                    task,
-                    &reservation_scope_id,
-                    markdown_adapter_kind,
-                ) {
-                    orphan_reclaims.push(entry);
-                }
+                retire_online_task(task);
                 true
             })
             .map_err(pipeline_to_kcs)?;
@@ -9041,6 +9711,18 @@ fn run_index_pipeline(
         network_allowed,
         ..IndexPipelineResult::default()
     };
+    let unsupported_store = UnsupportedInputStore::new(repo.kcs_dir());
+    let mut unsupported_by_path = unsupported_store
+        .latest_by_path()
+        .map_err(pipeline_to_kcs)?
+        .into_iter()
+        .map(|entry| (entry.path.clone(), entry))
+        .collect::<BTreeMap<_, _>>();
+    let mut unsupported_paths = unsupported_by_path
+        .values()
+        .filter(|entry| entry.reason == UNSUPPORTED_REASON_UNRECOGNIZED_BINARY)
+        .map(|entry| entry.path.clone())
+        .collect::<BTreeSet<_>>();
     // N1a: a Tier B (candidate-secret) file is ingested locally but its online
     // task is held unless the scope carries an explicit `--send-secrets` approval.
     let secrets_approved = secrets_send_approved(repo);
@@ -9075,8 +9757,20 @@ fn run_index_pipeline(
         // lifted Tier A.
         let secrets_hold = !secrets_approved && classify_secret(&candidate.input_path).is_some();
         let path = repo.root().join(&candidate.input_path);
-        let bytes = fs::read(&path)
-            .map_err(|err| KcsError::io(err.to_string(), path.display().to_string()))?;
+        let verified =
+            match read_verified_scan_input(repo.root(), &candidate.input_path, max_input_bytes) {
+                Ok(verified) => verified,
+                Err(error) => {
+                    append_event_log(
+                        "KCS-I-INDEX-INPUT-CHANGED-001",
+                        "input could not be rebound to a regular bounded scope child; skipped",
+                        json!({ "input_path": candidate.input_path }),
+                    )?;
+                    let _ = error;
+                    result.failed_files += 1;
+                    continue;
+                }
+            };
         // R15-8: `candidate.raw_hash` was computed at SCAN time; `bytes` is read HERE. If
         // the file was externally edited in that window, persisting the normalized
         // instance under the stale SCAN hash while the closing snapshot hashes the CURRENT
@@ -9087,7 +9781,7 @@ fn run_index_pipeline(
         // rare defensive guard. (No deterministic test: reproducing it needs an external
         // edit landing inside the lock-held critical section between the scan and this
         // read, which no public seam exposes.)
-        let current_hash = hash_bytes(&bytes);
+        let current_hash = verified.raw_hash.clone();
         if let Some(scan_hash) = &candidate.raw_hash {
             if scan_hash != &current_hash {
                 append_event_log(
@@ -9100,12 +9794,24 @@ fn run_index_pipeline(
                 continue;
             }
         }
+        if !current_scan_policy_allows_file(repo.root(), &candidate.input_path)
+            .map_err(pipeline_to_kcs)?
+        {
+            append_event_log(
+                "KCS-I-INDEX-INPUT-POLICY-CHANGED-001",
+                "input is no longer authorized by current scope policy; skipped",
+                json!({ "input_path": candidate.input_path }),
+            )?;
+            result.failed_files += 1;
+            continue;
+        }
         let raw_hash = current_hash;
-        let prepare = prepare_units(PrepareStageRequest {
-            raw_hash: raw_hash.clone(),
-            media_type: candidate.media_type.clone(),
-            input_path: path.display().to_string(),
-            tool_profile_hash: prepare_profile_hash.clone(),
+        let prepare = prepare_units_from_bytes(PrepareStageBytesRequest {
+            raw_hash: &raw_hash,
+            media_type: &candidate.media_type,
+            input_path: &path.display().to_string(),
+            tool_profile_hash: &prepare_profile_hash,
+            bytes: &verified.bytes,
         })
         .map_err(pipeline_to_kcs)?;
 
@@ -9113,7 +9819,7 @@ fn run_index_pipeline(
             repo,
             &prepare.prepared_units,
             &prepare.prepared_object_hashes,
-            &bytes,
+            &verified.bytes,
             &candidate.media_type,
         )?;
 
@@ -9133,6 +9839,19 @@ fn run_index_pipeline(
             // (a .sqlite, a .zip, a compiled blob) is not a document and can never be OCR'd,
             // so enqueuing one only pollutes pending enrichment forever. Skip it.
             if candidate.media_type != "application/octet-stream" {
+                if unsupported_paths.remove(&candidate.input_path) {
+                    record_unsupported_if_changed(
+                        &unsupported_store,
+                        &mut unsupported_by_path,
+                        UnsupportedInputDisposition {
+                            path: candidate.input_path.clone(),
+                            raw_hash: raw_hash.clone(),
+                            media_type: candidate.media_type.clone(),
+                            size_bytes: verified.size_bytes,
+                            reason: UNSUPPORTED_REASON_RESOLVED.to_owned(),
+                        },
+                    )?;
+                }
                 enqueue_online_placeholder_task(
                     repo,
                     &task_store,
@@ -9158,6 +9877,18 @@ fn run_index_pipeline(
                 // anything to act on. Disclose it exactly the way the sibling oversized-input
                 // gate does: a counter plus an INFO event (no new error code — docs frozen).
                 result.skipped_unrecognized_binary_files += 1;
+                record_unsupported_if_changed(
+                    &unsupported_store,
+                    &mut unsupported_by_path,
+                    UnsupportedInputDisposition {
+                        path: candidate.input_path.clone(),
+                        raw_hash: raw_hash.clone(),
+                        media_type: candidate.media_type.clone(),
+                        size_bytes: verified.size_bytes,
+                        reason: UNSUPPORTED_REASON_UNRECOGNIZED_BINARY.to_owned(),
+                    },
+                )?;
+                unsupported_paths.insert(candidate.input_path.clone());
                 append_event_log(
                     "KCS-I-INDEX-INPUT-UNRECOGNIZED-BINARY-001",
                     "binary input has no locally-extractable text and no OCR-able media type; archived but not enriched",
@@ -9170,6 +9901,20 @@ fn run_index_pipeline(
             continue;
         }
 
+        if unsupported_paths.remove(&candidate.input_path) {
+            record_unsupported_if_changed(
+                &unsupported_store,
+                &mut unsupported_by_path,
+                UnsupportedInputDisposition {
+                    path: candidate.input_path.clone(),
+                    raw_hash: raw_hash.clone(),
+                    media_type: candidate.media_type.clone(),
+                    size_bytes: verified.size_bytes,
+                    reason: UNSUPPORTED_REASON_RESOLVED.to_owned(),
+                },
+            )?;
+        }
+
         let output_ref = normalized_output_ref(repo, &raw_hash, &markdown_profile_hash, 0);
         if task_store
             .done_output_for(&raw_hash, &output_ref)
@@ -9178,9 +9923,12 @@ fn run_index_pipeline(
         {
             result.normalize_by_path.insert(
                 candidate.input_path.clone(),
-                NormalizeRef {
-                    tool_profile_hash: markdown_profile_hash.clone(),
-                    gen: 0,
+                PendingNormalizeRef {
+                    expected_raw_hash: raw_hash.clone(),
+                    normalize: NormalizeRef {
+                        tool_profile_hash: markdown_profile_hash.clone(),
+                        gen: 0,
+                    },
                 },
             );
             result.normalized_files += 1;
@@ -9226,9 +9974,13 @@ fn run_index_pipeline(
                     );
                     None
                 });
-        let mapping = previous
-            .as_ref()
-            .map(|previous| map_units(&previous.prepared_units, &prepare.prepared_units));
+        let mapping = if incremental_config.enabled {
+            previous
+                .as_ref()
+                .map(|previous| map_units(&previous.prepared_units, &prepare.prepared_units))
+        } else {
+            None
+        };
         let incremental_hints = mapping
             .as_ref()
             .map(|mapping| incremental_hints_from_mapping(mapping, &prepare.prepared_units))
@@ -9299,9 +10051,12 @@ fn run_index_pipeline(
             spec_version: 1,
         };
 
-        let mut response = markdown_adapter
-            .markdownize(request.clone())
-            .map_err(adapter_to_kcs)?;
+        let mut response = offline_markdownize_from_verified_bytes(
+            markdown_adapter.as_ref(),
+            request.clone(),
+            &verified.bytes,
+        )
+        .map_err(adapter_to_kcs)?;
         let mut final_mode = mode;
         let mut fallback_reason = mode_decision.reason.clone();
         let validation = if response.fallback_to_full {
@@ -9331,18 +10086,21 @@ fn run_index_pipeline(
             full_request.mode = AdapterMarkdownizeMode::Full;
             full_request.previous = None;
             full_request.hints = None;
-            let fallback_response = markdown_adapter
-                .markdownize(full_request)
-                .map_err(adapter_to_kcs)
-                .and_then(|response| {
-                    validate_markdownize_response(
-                        &response,
-                        &incremental_hints,
-                        &prepare.prepared_units,
-                    )
-                    .map_err(pipeline_to_kcs)?;
-                    Ok(response)
-                });
+            let fallback_response = offline_markdownize_from_verified_bytes(
+                markdown_adapter.as_ref(),
+                full_request,
+                &verified.bytes,
+            )
+            .map_err(adapter_to_kcs)
+            .and_then(|response| {
+                validate_markdownize_response(
+                    &response,
+                    &incremental_hints,
+                    &prepare.prepared_units,
+                )
+                .map_err(pipeline_to_kcs)?;
+                Ok(response)
+            });
             let Ok(fallback_response) = fallback_response else {
                 append_failed_markdownize_task(
                     repo,
@@ -9416,9 +10174,12 @@ fn run_index_pipeline(
         task_store.append(&task).map_err(pipeline_to_kcs)?;
         result.normalize_by_path.insert(
             candidate.input_path.clone(),
-            NormalizeRef {
-                tool_profile_hash: markdown_profile_hash.clone(),
-                gen: 0,
+            PendingNormalizeRef {
+                expected_raw_hash: raw_hash.clone(),
+                normalize: NormalizeRef {
+                    tool_profile_hash: markdown_profile_hash.clone(),
+                    gen: 0,
+                },
             },
         );
         result.normalized_files += 1;
@@ -9468,38 +10229,194 @@ fn run_index_pipeline(
 /// file under the final `sha256:` name. `cas::atomic_write` is `pub(crate)` and
 /// unreachable from here, so this mirrors it locally. The caller keeps its
 /// `if !path.exists()` dedup skip before calling this.
-fn atomic_write_cas_object(path: &Path, bytes: &[u8]) -> Result<()> {
+fn ensure_contained_directory_chain(kcs_dir: &Path, target: &Path) -> Result<()> {
+    let canonical_kcs = kcs_dir
+        .canonicalize()
+        .map_err(|error| KcsError::io(error.to_string(), kcs_dir.display().to_string()))?;
+    let relative = target
+        .strip_prefix(kcs_dir)
+        .map_err(|_| KcsError::schema("derived object directory escapes the repository store"))?;
+    let mut current = kcs_dir.to_path_buf();
+    for component in relative.components() {
+        let std::path::Component::Normal(component) = component else {
+            return Err(KcsError::schema(
+                "derived object directory contains a non-local path component",
+            ));
+        };
+        current.push(component);
+        match fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_dir() => {}
+            Ok(_) => {
+                return Err(store_corrupt_error(
+                    &current,
+                    "derived object ancestor is not a real directory",
+                ))
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => fs::create_dir(&current)
+                .map_err(|error| KcsError::io(error.to_string(), current.display().to_string()))?,
+            Err(error) => {
+                return Err(KcsError::io(
+                    error.to_string(),
+                    current.display().to_string(),
+                ))
+            }
+        }
+        let canonical = current
+            .canonicalize()
+            .map_err(|error| KcsError::io(error.to_string(), current.display().to_string()))?;
+        if !canonical.starts_with(&canonical_kcs) {
+            return Err(store_corrupt_error(
+                &current,
+                "derived object ancestor resolves outside the repository store",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn atomic_write_cas_object(kcs_dir: &Path, path: &Path, bytes: &[u8]) -> Result<()> {
     use std::sync::atomic::{AtomicU64, Ordering};
     static SEQ: AtomicU64 = AtomicU64::new(0);
     let parent = path
         .parent()
         .ok_or_else(|| KcsError::io("path has no parent", path.display().to_string()))?;
-    fs::create_dir_all(parent)
-        .map_err(|err| KcsError::io(err.to_string(), parent.display().to_string()))?;
+    ensure_contained_directory_chain(kcs_dir, parent)?;
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|elapsed| elapsed.as_nanos())
         .unwrap_or_default();
     let seq = SEQ.fetch_add(1, Ordering::Relaxed);
     let temp = parent.join(format!(".tmp-{}-{}-{}", process::id(), nanos, seq));
-    // R9-8: remove the temp on any write/sync/rename failure so a torn write does
-    // not leave an orphan `.tmp-*` in the CAS fanout dir (no GC before Step 4).
-    // Same cleanup idiom as `cas::atomic_write`, which this mirrors.
+    match fs::symlink_metadata(path) {
+        Ok(_) => return verify_exact_cas_object(path, bytes),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(KcsError::io(error.to_string(), path.display().to_string())),
+    }
     let result = (|| -> Result<()> {
-        let mut file = fs::File::create(&temp)
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options
+            .open(&temp)
             .map_err(|err| KcsError::io(err.to_string(), temp.display().to_string()))?;
         file.write_all(bytes)
             .map_err(|err| KcsError::io(err.to_string(), temp.display().to_string()))?;
         file.sync_all()
             .map_err(|err| KcsError::io(err.to_string(), temp.display().to_string()))?;
         drop(file);
-        fs::rename(&temp, path)
-            .map_err(|err| KcsError::io(err.to_string(), path.display().to_string()))
+        let mut permissions = fs::metadata(&temp)
+            .map_err(|err| KcsError::io(err.to_string(), temp.display().to_string()))?
+            .permissions();
+        permissions.set_readonly(true);
+        fs::set_permissions(&temp, permissions)
+            .map_err(|err| KcsError::io(err.to_string(), temp.display().to_string()))?;
+        match fs::hard_link(&temp, path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                verify_exact_cas_object(path, bytes)?;
+            }
+            Err(error) => {
+                return Err(KcsError::io(error.to_string(), path.display().to_string()));
+            }
+        }
+        fs::remove_file(&temp)
+            .map_err(|err| KcsError::io(err.to_string(), temp.display().to_string()))?;
+        verify_exact_cas_object(path, bytes)
     })();
     if result.is_err() {
         let _ = fs::remove_file(&temp);
     }
     result
+}
+
+fn verify_exact_cas_object(path: &Path, expected: &[u8]) -> Result<()> {
+    let metadata = fs::symlink_metadata(path)
+        .map_err(|err| KcsError::io(err.to_string(), path.display().to_string()))?;
+    if !metadata.file_type().is_file() || metadata.len() != expected.len() as u64 {
+        return Err(store_corrupt_error(
+            path,
+            "content-addressed object is not the expected regular file",
+        ));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if metadata.nlink() != 1 {
+            return Err(store_corrupt_error(
+                path,
+                "content-addressed object has an unexpected hard-link count",
+            ));
+        }
+    }
+    let mut file = fs::File::open(path)
+        .map_err(|err| KcsError::io(err.to_string(), path.display().to_string()))?;
+    let opened = file
+        .metadata()
+        .map_err(|err| KcsError::io(err.to_string(), path.display().to_string()))?;
+    if !opened.is_file() || opened.len() != expected.len() as u64 {
+        return Err(store_corrupt_error(
+            path,
+            "content-addressed object changed while it was verified",
+        ));
+    }
+    let mut actual = Vec::with_capacity(expected.len());
+    (&mut file)
+        .take((expected.len() as u64).saturating_add(1))
+        .read_to_end(&mut actual)
+        .map_err(|err| KcsError::io(err.to_string(), path.display().to_string()))?;
+    if actual != expected || hash_bytes(&actual) != hash_bytes(expected) {
+        return Err(store_corrupt_error(
+            path,
+            "content-addressed object bytes do not match their identity",
+        ));
+    }
+    Ok(())
+}
+
+fn verify_existing_cas_objects(
+    kcs_dir: &Path,
+    subdir: &str,
+    hash: &str,
+    bytes: &[u8],
+) -> Result<bool> {
+    let paths = existing_cas_object_paths(kcs_dir, subdir, hash)?;
+    for path in &paths {
+        let parent = path
+            .parent()
+            .ok_or_else(|| KcsError::io("path has no parent", path.display().to_string()))?;
+        ensure_contained_directory_chain(kcs_dir, parent)?;
+        verify_exact_cas_object(path, bytes)?;
+    }
+    Ok(!paths.is_empty())
+}
+
+fn write_cas_object_or_reuse_legacy(
+    kcs_dir: &Path,
+    subdir: &str,
+    hash: &str,
+    bytes: &[u8],
+) -> Result<()> {
+    if verify_existing_cas_objects(kcs_dir, subdir, hash, bytes)? {
+        return Ok(());
+    }
+
+    // Close the preflight/publication window as far as possible before entering the
+    // atomic canonical writer. Its own create-new publication handles a canonical
+    // race; the postcondition below also catches a concurrently-created legacy leaf.
+    if verify_existing_cas_objects(kcs_dir, subdir, hash, bytes)? {
+        return Ok(());
+    }
+
+    let canonical = cas_object_path(kcs_dir, subdir, hash)?;
+    atomic_write_cas_object(kcs_dir, &canonical, bytes)?;
+    if !verify_existing_cas_objects(kcs_dir, subdir, hash, bytes)? {
+        return Err(KcsError::not_found(hash));
+    }
+    Ok(())
 }
 
 fn write_prepared_objects(
@@ -9509,36 +10426,42 @@ fn write_prepared_objects(
     bytes: &[u8],
     media_type: &str,
 ) -> Result<()> {
-    let pdf_pages = (media_type == "application/pdf").then(|| pdf_text_pages(bytes));
+    if prepared_units.len() != prepared_hashes.len() {
+        return Err(KcsError::schema(
+            "prepared unit and object hash cardinalities differ",
+        ));
+    }
+    let pdf_pages = if media_type == "application/pdf" {
+        Some(pdf_text_pages_bounded(bytes).map_err(pipeline_to_kcs)?)
+    } else {
+        None
+    };
+    if pdf_pages
+        .as_ref()
+        .is_some_and(|pages| pages.len() != prepared_hashes.len())
+    {
+        return Err(KcsError::schema(
+            "prepared PDF page and object hash cardinalities differ",
+        ));
+    }
     for (index, prepared_hash) in prepared_hashes.iter().enumerate() {
-        let digest = prepared_hash
-            .strip_prefix("sha256:")
-            .ok_or_else(|| KcsError::schema("prepared hash must use sha256 prefix"))?;
-        let path = repo
-            .kcs_dir()
-            .join("objects/prepared")
-            .join(&digest[0..2])
-            .join(&digest[2..4])
-            .join(prepared_hash);
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)
-                .map_err(|err| KcsError::io(err.to_string(), parent.display().to_string()))?;
+        if !is_hash(prepared_hash) {
+            return Err(KcsError::schema("prepared object hash is invalid"));
         }
-        if !path.exists() {
-            let object_bytes = pdf_pages
-                .as_ref()
-                .and_then(|pages| pages.get(index))
-                .map(|page| page.as_bytes())
-                .or_else(|| {
-                    prepared_units
-                        .get(index)
-                        .and_then(|unit| (unit.unit_type == UnitType::Page).then_some(b"" as &[u8]))
-                })
-                .unwrap_or(bytes);
-            // Q2: crash-atomic (temp + fsync + rename) so a torn write cannot
-            // leave a partial prepared object under the final `sha256:` name.
-            atomic_write_cas_object(&path, object_bytes)?;
+        let path = cas_object_path(repo.kcs_dir(), "prepared", prepared_hash)?;
+        let object_bytes = pdf_pages
+            .as_ref()
+            .and_then(|pages| pages.get(index))
+            .map_or(bytes, |page| page.as_bytes());
+        if hash_bytes(object_bytes) != *prepared_hash
+            || prepared_units[index].prepared_hash != *prepared_hash
+        {
+            return Err(store_corrupt_error(
+                &path,
+                "prepared object bytes do not match the declared hash",
+            ));
         }
+        write_cas_object_or_reuse_legacy(repo.kcs_dir(), "prepared", prepared_hash, object_bytes)?;
     }
     Ok(())
 }
@@ -9591,6 +10514,7 @@ fn task_descriptor(
         created_at: created_at.to_owned(),
         reserved_usd: None,
         reserved_month: None,
+        reservation_id: None,
     }
 }
 
@@ -9672,7 +10596,7 @@ fn previous_instance_for_path(
         .collect::<Vec<_>>();
     tasks.sort_by(|a, b| b.created_at.cmp(&a.created_at));
     for task in tasks {
-        let Some(previous) = load_previous_instance(&task.output_ref)? else {
+        let Some(previous) = load_previous_instance_for_task(task_store, &task)? else {
             continue;
         };
         if previous.manifest.tool_profile_hash == tool_profile_hash {
@@ -9682,36 +10606,38 @@ fn previous_instance_for_path(
     Ok(None)
 }
 
-fn load_previous_instance(output_ref: &str) -> Result<Option<PreviousInstance>> {
-    let dir = PathBuf::from(output_ref);
-    let manifest_path = dir.join("manifest.json");
-    let Ok(bytes) = fs::read(&manifest_path) else {
+fn load_previous_instance_for_task(
+    task_store: &TaskStore,
+    task: &TaskDescriptor,
+) -> Result<Option<PreviousInstance>> {
+    let identity = validate_task_output_ref(task_store.kcs_dir(), task).map_err(pipeline_to_kcs)?;
+    let TaskOutputRef::NormalizedInstance {
+        raw_hash,
+        tool_profile_hash,
+        gen,
+        ..
+    } = identity
+    else {
         return Ok(None);
     };
-    let manifest: NormalizedInstanceManifest =
-        serde_json::from_slice(&bytes).map_err(|err| KcsError::schema(err.to_string()))?;
-    let mut units = Vec::new();
-    for entry in &manifest.units {
-        if entry.status != UnitStatus::Done {
-            continue;
-        }
-        let unit_path = dir.join(format!("{}.json", entry.unit_ref));
-        // R14-1: a partially-corrupt previous instance (manifest claims `done` but the
-        // unit `<unit_ref>.json` is unreadable or malformed) must degrade to "no usable
-        // previous" — exactly like a missing manifest.json above (`Ok(None)`) — so the
-        // caller falls back to a Full re-send and self-heals. The prior asymmetric hard
-        // `Err` here bricked online markdownize for the document permanently (the same
-        // corrupt previous was read every run, never re-OCR'd) and, on the offline
-        // route, propagated out of `run_index_pipeline`'s candidate loop and aborted the
-        // whole `kcs index`, silently skipping alphabetically-later files.
-        let Ok(bytes) = fs::read(&unit_path) else {
-            return Ok(None);
-        };
-        let Ok(unit) = serde_json::from_slice::<NormalizedUnitObject>(&bytes) else {
-            return Ok(None);
-        };
-        units.push(unit);
-    }
+    // A missing/corrupt previous instance degrades to a Full run for this document,
+    // while a forged task reference is rejected above before it reaches the filesystem.
+    Ok(
+        load_previous_instance_identity(task_store.kcs_dir(), &raw_hash, &tool_profile_hash, gen)
+            .ok(),
+    )
+}
+
+fn load_previous_instance_identity(
+    kcs_dir: &Path,
+    raw_hash: &str,
+    tool_profile_hash: &str,
+    gen: u64,
+) -> Result<PreviousInstance> {
+    let instance = load_validated_normalized_instance(kcs_dir, raw_hash, tool_profile_hash, gen)
+        .map_err(pipeline_to_kcs)?;
+    let manifest = instance.manifest;
+    let units = instance.units;
     let prepared_units = manifest
         .units
         .iter()
@@ -9729,11 +10655,11 @@ fn load_previous_instance(output_ref: &str) -> Result<Option<PreviousInstance>> 
             page_number: (entry.unit_type == UnitType::Page).then_some(entry.order + 1),
         })
         .collect();
-    Ok(Some(PreviousInstance {
+    Ok(PreviousInstance {
         manifest,
         units,
         prepared_units,
-    }))
+    })
 }
 
 fn incremental_hints_from_mapping(
@@ -9974,41 +10900,64 @@ const RETIRED_NON_LIVE: &str = "retired_non_live";
 /// ate the per-adapter cap for the month. NetworkError stays out (it may have billed).
 /// Shared by `retire_online_task_reclaiming` (which then retires the task) and the
 /// embedding live-embedded convergence (which then completes the task as Done).
-fn reclaim_entry_for(
+fn settle_task_reservation(
+    cost_ledger: &CostLedger,
     task: &TaskDescriptor,
     reservation_scope_id: &str,
     adapter_kind: &str,
-) -> Option<MonthlyCostLedgerEntry> {
-    if !matches!(
+) -> Result<Option<MonthlyCostLedgerEntry>> {
+    let Some(claim) = task.reservation_claim() else {
+        return Ok(None);
+    };
+    let ledger = cost_ledger.reservation_ledger();
+    if matches!(
         retry_kind_from_reason(task.fallback_reason.as_deref()),
         RetryErrorKind::RateLimit | RetryErrorKind::QuotaExceeded | RetryErrorKind::AuthError
     ) {
-        return None;
+        if let Some(entry) = ledger
+            .consume(claim, reservation_scope_id, adapter_kind)
+            .map_err(pipeline_to_kcs)?
+        {
+            return Ok(Some(entry));
+        }
     }
-    match (task.reserved_usd, task.reserved_month.clone()) {
-        (Some(usd), Some(month)) => Some(MonthlyCostLedgerEntry {
-            month,
-            scope_id: reservation_scope_id.to_owned(),
-            adapter_kind: adapter_kind.to_owned(),
-            usd,
-        }),
-        _ => None,
-    }
+    // Active reservations represent successful or billing-ambiguous attempts and
+    // can never authorize credit. Unknown/copied claims simply produce `false`.
+    ledger
+        .close(claim, reservation_scope_id, adapter_kind)
+        .map_err(pipeline_to_kcs)?;
+    Ok(None)
 }
 
-fn retire_online_task_reclaiming(
-    task: &mut TaskDescriptor,
+fn transition_reservation_after_outcome(
+    cost_ledger: &CostLedger,
+    claim: TaskReservationClaim<'_>,
     reservation_scope_id: &str,
-    markdown_adapter_kind: &str,
-) -> Option<MonthlyCostLedgerEntry> {
-    let reclaim = reclaim_entry_for(task, reservation_scope_id, markdown_adapter_kind);
+    adapter_kind: &str,
+    failure_kind: Option<RetryErrorKind>,
+) -> Result<()> {
+    let ledger = cost_ledger.reservation_ledger();
+    if matches!(
+        failure_kind,
+        Some(RetryErrorKind::RateLimit | RetryErrorKind::QuotaExceeded | RetryErrorKind::AuthError)
+    ) {
+        ledger
+            .mark_reclaimable(claim, reservation_scope_id, adapter_kind)
+            .map_err(pipeline_to_kcs)?;
+    } else {
+        ledger
+            .close(claim, reservation_scope_id, adapter_kind)
+            .map_err(pipeline_to_kcs)?;
+    }
+    Ok(())
+}
+
+fn retire_online_task(task: &mut TaskDescriptor) {
     task.status = TaskStatus::Failed;
     task.fallback_reason = Some(RETIRED_NON_LIVE.to_owned());
     task.next_retry_at = None;
     task.heartbeat_at = None;
-    task.reserved_usd = None;
-    task.reserved_month = None;
-    reclaim
+    task.clear_reservation();
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -10072,27 +11021,34 @@ fn enqueue_online_placeholder_task(
     // folder-scoped totals too, not just the device total.
     let reservation_scope_id = repo.scope_id_for_adapter();
     let mut reclaims: Vec<MonthlyCostLedgerEntry> = Vec::new();
+    let mut stale_ids = BTreeSet::new();
+    for task in task_store.all().map_err(pipeline_to_kcs)? {
+        let stale = task.task_type == TaskType::Markdownize
+            && task.output_ref == output_ref
+            && task.input_path == candidate.input_path
+            && task.input_hash != raw_hash
+            && (matches!(task.status, TaskStatus::Pending | TaskStatus::Paused)
+                || (task.status == TaskStatus::Failed
+                    && is_reservation_bearing_send_failure(&task)));
+        if !stale {
+            continue;
+        }
+        if let Some(entry) = settle_task_reservation(
+            cost_ledger,
+            &task,
+            &reservation_scope_id,
+            markdown_adapter_kind,
+        )? {
+            reclaims.push(entry);
+        }
+        stale_ids.insert(task.task_id);
+    }
     task_store
         .update_matching(|task| {
-            let stale = task.task_type == TaskType::Markdownize
-                && task.output_ref == output_ref
-                && task.input_path == candidate.input_path
-                && task.input_hash != raw_hash
-                && (matches!(task.status, TaskStatus::Pending | TaskStatus::Paused)
-                    // R19-2: include exhausted-quota phantoms (was `task_retry_allowed`,
-                    // which excluded them and left the reservation stuck).
-                    || (task.status == TaskStatus::Failed
-                        && is_reservation_bearing_send_failure(task)));
-            if !stale {
+            if !stale_ids.contains(&task.task_id) {
                 return false;
             }
-            // R17-3/R18-2: retire + reclaim via the shared helper (reclaims only a
-            // non-billable RateLimit/Quota phantom, clears the stamp so no double-reclaim).
-            if let Some(entry) =
-                retire_online_task_reclaiming(task, &reservation_scope_id, markdown_adapter_kind)
-            {
-                reclaims.push(entry);
-            }
+            retire_online_task(task);
             true
         })
         .map_err(pipeline_to_kcs)?;
@@ -10306,6 +11262,14 @@ enum ChargeOutcome {
     BudgetExceeded,
 }
 
+struct CostChargeRequest<'a> {
+    month: &'a str,
+    adapter_kind: &'a str,
+    estimate: &'a BudgetEstimate,
+    override_budget: bool,
+    reservations: &'a [ReservationRecord],
+}
+
 /// F8: atomically reserve a charge against the device-global cost-ledger.
 ///
 /// The ledger is device-global while `StoreLock` (`.kcs/.lock`) is scope-scoped,
@@ -10326,23 +11290,25 @@ fn charge_cost_ledger_under_lock(
     cost_ledger: &CostLedger,
     lock_path: PathBuf,
     budget_caps: &BudgetCaps,
-    month: &str,
-    adapter_kind: &str,
-    estimate: &BudgetEstimate,
-    override_budget: bool,
+    request: CostChargeRequest<'_>,
 ) -> Result<ChargeOutcome> {
     // The reserved row is derived from the same `(month, estimate.scope_id,
     // adapter_kind, estimate.estimated_usd)` used for the cap check, so the
     // checked and appended `adapter_kind`/amount can never diverge.
-    let scope_id = estimate.scope_id.as_str();
+    let scope_id = request.estimate.scope_id.as_str();
     let _ledger_lock = StoreLock::acquire_path(lock_path)?;
-    let (device_remaining, folder_remaining) =
-        budget_remaining_for_adapter(cost_ledger, budget_caps, month, scope_id, adapter_kind)?;
+    let (device_remaining, folder_remaining) = budget_remaining_for_adapter(
+        cost_ledger,
+        budget_caps,
+        request.month,
+        scope_id,
+        request.adapter_kind,
+    )?;
     let budget = evaluate_budget_with_caps(
-        estimate,
+        request.estimate,
         device_remaining,
         folder_remaining,
-        override_budget,
+        request.override_budget,
     );
     // F5: `hard_stop` (default true) pauses at the cap as before. `hard_stop=false`
     // is a soft-stop: over cap we still append the real charge and continue, so the
@@ -10351,12 +11317,44 @@ fn charge_cost_ledger_under_lock(
     if !budget.allowed && budget_caps.hard_stop {
         return Ok(ChargeOutcome::BudgetExceeded);
     }
+    let mut reservation_ids = BTreeSet::new();
+    let mut task_ids = BTreeSet::new();
+    let mut reservation_total = 0.0_f64;
+    for reservation in request.reservations {
+        if reservation.month != request.month
+            || reservation.scope_id != scope_id
+            || reservation.adapter_kind != request.adapter_kind
+            || !reservation_ids.insert(reservation.reservation_id.as_str())
+            || !task_ids.insert(reservation.task_id.as_str())
+        {
+            return Err(KcsError::schema(
+                "cost reservation identity does not match the charged request",
+            ));
+        }
+        reservation_total += reservation.usd;
+    }
+    let tolerance = 1e-12_f64.max(request.estimate.estimated_usd.abs() * 1e-12);
+    if request.reservations.is_empty()
+        || !reservation_total.is_finite()
+        || (reservation_total - request.estimate.estimated_usd).abs() > tolerance
+    {
+        return Err(KcsError::schema(
+            "cost reservation total does not match the charged amount",
+        ));
+    }
+    // Issue reclaim authority before the charge row while the global cost lock is
+    // held. Newly issued reservations are Active and cannot produce credit; if the
+    // following charge append fails, the residue therefore fails closed.
+    cost_ledger
+        .reservation_ledger()
+        .issue_all(request.reservations)
+        .map_err(pipeline_to_kcs)?;
     cost_ledger
         .append_monthly(&MonthlyCostLedgerEntry {
-            month: month.to_owned(),
+            month: request.month.to_owned(),
             scope_id: scope_id.to_owned(),
-            adapter_kind: adapter_kind.to_owned(),
-            usd: estimate.estimated_usd,
+            adapter_kind: request.adapter_kind.to_owned(),
+            usd: request.estimate.estimated_usd,
         })
         .map_err(pipeline_to_kcs)?;
     Ok(ChargeOutcome::Charged)
@@ -10436,9 +11434,7 @@ fn network_allowed(repo: &Repository, args: &IndexArgs) -> Result<bool> {
     if args.approve {
         return Ok(true);
     }
-    if read_allow_network_config(&repo.kcs_dir().join("config.toml"))? == Some(true)
-        || read_allow_network_config(&user_config_toml_path())? == Some(true)
-    {
+    if read_allow_network_config(&user_config_toml_path())? == Some(true) {
         return Ok(true);
     }
     approval_row_present(repo, &online_markdownize_profile().adapter_id)
@@ -10538,26 +11534,173 @@ fn set_allow_network_false(value: &mut toml::Value) {
 /// signal (decisions #45).
 const SECRETS_APPROVAL_FILE: &str = "secrets-approved.jsonl";
 
+#[derive(Clone, Copy)]
+enum ConsentOperation {
+    Network,
+    SendSecrets,
+}
+
+impl ConsentOperation {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Network => "network",
+            Self::SendSecrets => "send_secrets",
+        }
+    }
+}
+
+const DEVICE_CONSENT_SCHEMA_VERSION: u64 = 1;
+
+fn device_consent_path() -> PathBuf {
+    data_home().join("kcs/consents.jsonl")
+}
+
+fn device_consent_lock_path() -> PathBuf {
+    data_home().join("kcs/consents.lock")
+}
+
+fn consent_identity(kcs_dir: &Path) -> Result<(String, String)> {
+    let root = kcs_dir
+        .parent()
+        .ok_or_else(|| KcsError::invalid_usage(".kcs has no scope root"))?;
+    let canonical_root = root
+        .canonicalize()
+        .map_err(|err| KcsError::io(err.to_string(), root.display().to_string()))?;
+    Ok((
+        scope_id(kcs_dir)?,
+        canonical_root.to_string_lossy().into_owned(),
+    ))
+}
+
+fn trusted_consent_present(
+    kcs_dir: &Path,
+    tool_id: Option<&str>,
+    operation: ConsentOperation,
+) -> Result<bool> {
+    let path = device_consent_path();
+    let metadata = match fs::symlink_metadata(&path) {
+        Ok(metadata) => metadata,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(err) => return Err(KcsError::io(err.to_string(), path.display().to_string())),
+    };
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(KcsError::invalid_usage(
+            "device consent store must be a regular file",
+        ));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if metadata.permissions().mode() & 0o077 != 0 {
+            return Err(KcsError::invalid_usage(
+                "device consent store must not be group/world accessible",
+            ));
+        }
+    }
+    let (expected_scope_id, expected_root) = consent_identity(kcs_dir)?;
+    let text = fs::read_to_string(&path)
+        .map_err(|err| KcsError::io(err.to_string(), path.display().to_string()))?;
+    Ok(text
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .any(|value| {
+            value.get("schema_version").and_then(Value::as_u64)
+                == Some(DEVICE_CONSENT_SCHEMA_VERSION)
+                && value.get("scope_id").and_then(Value::as_str) == Some(expected_scope_id.as_str())
+                && value.get("canonical_root").and_then(Value::as_str)
+                    == Some(expected_root.as_str())
+                && value.get("operation").and_then(Value::as_str) == Some(operation.as_str())
+                && tool_id
+                    .map(|tool_id| value.get("tool_id").and_then(Value::as_str) == Some(tool_id))
+                    .unwrap_or(true)
+        }))
+}
+
+fn write_device_consent(
+    repo: &Repository,
+    tool_id: &str,
+    operation: ConsentOperation,
+) -> Result<()> {
+    let path = device_consent_path();
+    let parent = path
+        .parent()
+        .ok_or_else(|| KcsError::invalid_usage("device consent path has no parent"))?;
+    fs::create_dir_all(parent)
+        .map_err(|err| KcsError::io(err.to_string(), parent.display().to_string()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(parent, fs::Permissions::from_mode(0o700))
+            .map_err(|err| KcsError::io(err.to_string(), parent.display().to_string()))?;
+    }
+    let _lock = StoreLock::acquire_path(device_consent_lock_path())?;
+    if trusted_consent_present(repo.kcs_dir(), Some(tool_id), operation)? {
+        return Ok(());
+    }
+    let (scope_id, canonical_root) = consent_identity(repo.kcs_dir())?;
+    let mut line = serde_json::to_string(&json!({
+        "schema_version": DEVICE_CONSENT_SCHEMA_VERSION,
+        "scope_id": scope_id,
+        "canonical_root": canonical_root,
+        "tool_id": tool_id,
+        "operation": operation.as_str(),
+        "granted_at": now_utc_seconds(),
+        "kcs_version": env!("CARGO_PKG_VERSION"),
+    }))
+    .map_err(|err| KcsError::io(err.to_string(), path.display().to_string()))?;
+    line.push('\n');
+    let mut options = OpenOptions::new();
+    options.create(true).append(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options
+        .open(&path)
+        .map_err(|err| KcsError::io(err.to_string(), path.display().to_string()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600))
+            .map_err(|err| KcsError::io(err.to_string(), path.display().to_string()))?;
+    }
+    file.write_all(line.as_bytes())
+        .map_err(|err| KcsError::io(err.to_string(), path.display().to_string()))
+}
+
+fn active_online_tool_ids() -> Result<Vec<String>> {
+    let mut tool_ids = vec![online_markdownize_profile().adapter_id];
+    if let Some(adapter_id) = active_embedding_adapter_id()? {
+        tool_ids.push(adapter_id);
+    }
+    tool_ids.sort();
+    tool_ids.dedup();
+    Ok(tool_ids)
+}
+
 /// Whether Tier B (candidate-secret) files may be sent to online adapters for
 /// this scope, i.e. `--send-secrets` was recorded at least once (N1c).
 fn secrets_send_approved(repo: &Repository) -> bool {
-    let Ok(expected_scope_id) = scope_id(repo.kcs_dir()) else {
-        return false;
-    };
-    let Ok(text) = fs::read_to_string(repo.kcs_dir().join(SECRETS_APPROVAL_FILE)) else {
-        return false;
-    };
-    text.lines()
-        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
-        .any(|value| {
-            value.get("scope_id").and_then(Value::as_str) == Some(expected_scope_id.as_str())
-                && value.get("approval_method").and_then(Value::as_str) == Some("send_secrets")
-        })
+    secrets_send_approved_in_kcs_dir(repo.kcs_dir())
+}
+
+fn secrets_send_approved_in_kcs_dir(kcs_dir: &Path) -> bool {
+    active_online_tool_ids().is_ok_and(|tool_ids| {
+        !tool_ids.is_empty()
+            && tool_ids.iter().all(|tool_id| {
+                trusted_consent_present(kcs_dir, Some(tool_id), ConsentOperation::SendSecrets)
+                    .unwrap_or(false)
+            })
+    })
 }
 
 /// Record the explicit `--send-secrets` approval (N1c). Idempotent: appended as
 /// an audit trail; `secrets_send_approved` accepts only a row bound to this scope.
 fn write_secrets_approval(repo: &Repository, preview: &ScanPreview) -> Result<()> {
+    for tool_id in active_online_tool_ids()? {
+        write_device_consent(repo, &tool_id, ConsentOperation::SendSecrets)?;
+    }
     let path = repo.kcs_dir().join(SECRETS_APPROVAL_FILE);
     let mut file = OpenOptions::new()
         .create(true)
@@ -10581,7 +11724,29 @@ fn write_secrets_approval(repo: &Repository, preview: &ScanPreview) -> Result<()
 /// `batch resume`; embedding holds are re-driven by the enrichment pass.
 fn release_secret_holds(repo: &Repository) -> Result<usize> {
     let store = TaskStore::new(repo.kcs_dir());
-    store
+    let mut tasks = store.all().map_err(pipeline_to_kcs)?;
+    let terminal_embedding_refs = tasks
+        .iter()
+        .filter(|task| {
+            task.task_type == TaskType::Embedding
+                && task.status == TaskStatus::Failed
+                && task.fallback_reason.as_deref() != Some(RETIRED_NON_LIVE)
+                && !task_retry_allowed(task)
+        })
+        .map(|task| task.output_ref.clone())
+        .collect::<BTreeSet<_>>();
+    let before = tasks.len();
+    tasks.retain(|task| {
+        !(task.task_type == TaskType::Embedding
+            && task.status == TaskStatus::Paused
+            && task.fallback_reason.as_deref() == Some(SECRETS_TIER_B_HOLD)
+            && terminal_embedding_refs.contains(&task.output_ref))
+    });
+    let removed_duplicates = before.saturating_sub(tasks.len());
+    if removed_duplicates > 0 {
+        store.replace_all(&tasks).map_err(pipeline_to_kcs)?;
+    }
+    let released = store
         .update_matching(|task| {
             if task.status == TaskStatus::Paused
                 && task.fallback_reason.as_deref() == Some(SECRETS_TIER_B_HOLD)
@@ -10593,7 +11758,8 @@ fn release_secret_holds(repo: &Repository) -> Result<usize> {
                 false
             }
         })
-        .map_err(pipeline_to_kcs)
+        .map_err(pipeline_to_kcs)?;
+    Ok(removed_duplicates.saturating_add(released))
 }
 
 /// Fallback reason marking an online task held because its input is a Tier B
@@ -10725,9 +11891,11 @@ fn write_approval_record(
     // One approval row per configured online adapter (07 §3: opt-in unit is
     // scope × adapter, L4). Adapter IDs are sourced from AdapterProfile rather
     // than hard-coded in the CLI.
-    let mut tool_ids = vec![online_markdownize_profile().adapter_id];
-    if let Some(adapter_id) = active_embedding_adapter_id()? {
-        tool_ids.push(adapter_id);
+    let tool_ids = active_online_tool_ids()?;
+    if network_opt_in {
+        for tool_id in &tool_ids {
+            write_device_consent(repo, tool_id, ConsentOperation::Network)?;
+        }
     }
     // P7: the opt-in is a persistent, idempotent marker. Every `index` used to
     // append a fresh row per adapter, so approvals.jsonl grew unbounded (and the
@@ -10941,12 +12109,27 @@ fn validate_user_config() -> Result<()> {
 
 fn validate_repo_tool_lock(repo: &Repository) -> Result<()> {
     let path = repo.kcs_dir().join("tool-lock.json");
-    if !path.is_file() {
-        return Ok(());
+    match fs::symlink_metadata(&path) {
+        Ok(metadata) if metadata.file_type().is_file() => {}
+        Ok(_) => return Err(KcsError::schema("tool-lock must be a regular file")),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(KcsError::io(error.to_string(), path.display().to_string())),
     }
     let bytes =
         fs::read(&path).map_err(|err| KcsError::io(err.to_string(), path.display().to_string()))?;
     load_tool_lock(&bytes).map(|_| ()).map_err(adapter_to_kcs)
+}
+
+fn require_repo_tool_lock(repo: &Repository) -> Result<()> {
+    let path = repo.kcs_dir().join("tool-lock.json");
+    match fs::symlink_metadata(&path) {
+        Ok(metadata) if metadata.file_type().is_file() => validate_repo_tool_lock(repo),
+        Ok(_) => Err(KcsError::schema("tool-lock must be a regular file")),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Err(KcsError::schema(
+            "tool-lock is required before executing persisted batch tasks; run `kcs index` to regenerate it",
+        )),
+        Err(error) => Err(KcsError::io(error.to_string(), path.display().to_string())),
+    }
 }
 
 fn user_tools_toml_path() -> Option<PathBuf> {
@@ -11033,9 +12216,10 @@ fn cost_ledger_lock_path() -> PathBuf {
 }
 
 /// Device-local HMAC key that signs search cursors (O1(b)). Stored at
-/// `$XDG_DATA_HOME/kcs/cursor-key` (0600), generated from `/dev/urandom` on first
-/// use. Signing binds a cursor to this device so a caller cannot forge or tamper
-/// a token to jump scope or page — `query_hash` alone covers only public inputs.
+/// `$XDG_DATA_HOME/kcs/cursor-key` (0600), generated from the operating system's
+/// cryptographically secure random source on first use. Signing binds a cursor
+/// to this device so a caller cannot forge or tamper a token to jump scope or
+/// page — `query_hash` alone covers only public inputs.
 fn cursor_signing_key() -> Result<Vec<u8>> {
     let path = data_home().join("kcs/cursor-key");
     if let Ok(bytes) = fs::read(&path) {
@@ -11079,14 +12263,16 @@ fn cursor_signing_key() -> Result<Vec<u8>> {
     }
 }
 
-/// 32 fresh random bytes from `/dev/urandom` (available on the supported
-/// unix-like targets); the cursor key needs no CSPRNG crate.
+/// 32 fresh bytes from the operating system's cryptographically secure random
+/// source. `getrandom` selects the native source on each supported platform.
 fn random_key_32() -> Result<Vec<u8>> {
-    use std::io::Read;
     let mut buf = vec![0u8; 32];
-    fs::File::open("/dev/urandom")
-        .and_then(|mut file| file.read_exact(&mut buf))
-        .map_err(|err| KcsError::io(err.to_string(), "/dev/urandom".to_owned()))?;
+    getrandom::fill(&mut buf).map_err(|err| {
+        KcsError::io(
+            format!("operating system random source failed: {err}"),
+            "operating system random source",
+        )
+    })?;
     Ok(buf)
 }
 
@@ -11124,6 +12310,7 @@ fn pipeline_to_kcs(error: kcs_pipeline::PipelineError) -> KcsError {
             json!({ "path": path }),
             ExitCode::InvalidUsage,
         ),
+        kcs_pipeline::PipelineError::Locked { path } => KcsError::locked(path),
         kcs_pipeline::PipelineError::Io { path, message } => KcsError::io(message, path),
         kcs_pipeline::PipelineError::Contract { code, message } => {
             KcsError::new(code, message, json!({}), ExitCode::Failure)
@@ -11145,39 +12332,38 @@ fn print_output(value: Value, json_mode: bool) {
     // "viewed" status. When the payload carries a `text` field (view / chunk
     // object resolution), print the body — that is the point of `view`.
     if let Some(text) = value.get("text").and_then(Value::as_str) {
-        println!("{text}");
+        println!("{}", terminal_safe_text(text, true));
     } else if let Some(status) = value.get("status").and_then(Value::as_str) {
-        println!("{status}");
+        println!("{}", terminal_safe_text(status, false));
     } else if let Some(commits) = value.get("commits").and_then(Value::as_array) {
         for commit in commits {
             println!(
                 "{} {} {}",
-                commit["commit_hash"].as_str().unwrap_or_default(),
-                commit["created_at"].as_str().unwrap_or_default(),
-                commit["message"].as_str().unwrap_or_default()
+                terminal_safe_text(commit["commit_hash"].as_str().unwrap_or_default(), false),
+                terminal_safe_text(commit["created_at"].as_str().unwrap_or_default(), false),
+                terminal_safe_text(commit["message"].as_str().unwrap_or_default(), false)
             );
         }
     } else if let Some(changes) = value.get("changes").and_then(Value::as_array) {
         for change in changes {
             println!(
                 "{} {}",
-                change["change"].as_str().unwrap_or_default(),
-                change["relative_path"].as_str().unwrap_or_default()
+                terminal_safe_text(change["change"].as_str().unwrap_or_default(), false),
+                terminal_safe_text(change["relative_path"].as_str().unwrap_or_default(), false)
             );
         }
     } else if let Some(files) = value.get("files").and_then(Value::as_array) {
         for file in files {
             println!(
                 "{} {}",
-                file["status"].as_str().unwrap_or_default(),
-                file["relative_path"].as_str().unwrap_or_default()
+                terminal_safe_text(file["status"].as_str().unwrap_or_default(), false),
+                terminal_safe_text(file["relative_path"].as_str().unwrap_or_default(), false)
             );
         }
     } else {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&value).expect("serializing command output cannot fail")
-        );
+        let rendered =
+            serde_json::to_string_pretty(&value).expect("serializing command output cannot fail");
+        println!("{}", terminal_safe_text(&rendered, true));
     }
 }
 
@@ -11189,8 +12375,37 @@ fn print_error(error: &KcsError, json_mode: bool) {
                 .expect("serializing command error cannot fail")
         );
     } else {
-        eprintln!("{}: {}", error.error_code(), error.message());
+        eprintln!(
+            "{}: {}",
+            terminal_safe_text(error.error_code(), false),
+            terminal_safe_text(error.message(), false)
+        );
     }
+}
+
+/// Make lower-trust repository/provider text inert before writing it to a terminal.
+/// Structured JSON output is serialized separately and retains the logical value.
+fn terminal_safe_text(input: &str, allow_newlines: bool) -> String {
+    let mut output = String::with_capacity(input.len());
+    for ch in input.chars() {
+        if allow_newlines && ch == '\n' {
+            output.push(ch);
+            continue;
+        }
+        let code = ch as u32;
+        let terminal_active = matches!(code, 0x00..=0x1f | 0x7f..=0x9f)
+            || matches!(code, 0x061c | 0x200e..=0x200f | 0x2028..=0x202e | 0x2066..=0x2069);
+        if terminal_active {
+            if code <= 0xff {
+                output.push_str(&format!("\\x{code:02x}"));
+            } else {
+                output.push_str(&format!("\\u{{{code:04x}}}"));
+            }
+        } else {
+            output.push(ch);
+        }
+    }
+    output
 }
 
 #[cfg(test)]
@@ -11198,7 +12413,417 @@ mod tests {
     use clap::Parser;
     use kcs_adapter::catalog::deterministic_embedding_vector;
 
-    use super::{command_captured_json_flag, Cli, Command};
+    use super::{command_captured_json_flag, terminal_safe_text, Cli, Command};
+
+    #[test]
+    fn r23_cand_059_human_output_escapes_terminal_controls() {
+        let input = "safe\x1b]8;;https://example.invalid\x07label\x1b]8;;\x07\u{202e}";
+        let rendered = terminal_safe_text(input, false);
+        assert!(!rendered.contains('\x1b'));
+        assert!(!rendered.contains('\x07'));
+        assert!(!rendered.contains('\u{202e}'));
+        assert!(rendered.contains("\\x1b"));
+        assert!(rendered.contains("\\x07"));
+        assert!(rendered.contains("\\u{202e}"));
+
+        for control in [
+            '\u{061c}', '\u{200e}', '\u{200f}', '\u{2028}', '\u{2029}', '\u{202a}', '\u{202b}',
+            '\u{202c}', '\u{202d}', '\u{202e}', '\u{2066}', '\u{2067}', '\u{2068}', '\u{2069}',
+        ] {
+            let escaped = terminal_safe_text(&control.to_string(), false);
+            assert!(!escaped.contains(control));
+            assert!(escaped.starts_with("\\u{"));
+        }
+    }
+
+    #[test]
+    fn r23_cand_059_document_body_preserves_only_newline_control() {
+        assert_eq!(
+            terminal_safe_text("line 1\nline\t2\r", true),
+            "line 1\nline\\x092\\x0d"
+        );
+    }
+
+    #[test]
+    fn r23_aggregate_index_status_fails_closed_for_corrupt_scope_state() {
+        use super::{compute_index_status, SearchedScopeInfo};
+        use kcs_core::scope::Repository;
+
+        let healthy_root = tempfile::tempdir().unwrap();
+        let corrupt_root = tempfile::tempdir().unwrap();
+        let vanished_root = tempfile::tempdir().unwrap();
+        Repository::init(healthy_root.path()).unwrap();
+        let corrupt_repo = Repository::init(corrupt_root.path()).unwrap();
+        std::fs::write(corrupt_repo.kcs_dir().join("tasks.jsonl"), b"not-json\n").unwrap();
+        std::fs::write(
+            corrupt_repo.kcs_dir().join("unsupported-inputs.jsonl"),
+            b"not-json\n",
+        )
+        .unwrap();
+
+        let searched = [
+            SearchedScopeInfo {
+                scope_id: "healthy".to_owned(),
+                scope_path: healthy_root.path().to_path_buf(),
+                snapshot_at: "sha256:healthy".to_owned(),
+                max_rowid: 0,
+            },
+            SearchedScopeInfo {
+                scope_id: "corrupt".to_owned(),
+                scope_path: corrupt_root.path().to_path_buf(),
+                snapshot_at: "sha256:corrupt".to_owned(),
+                max_rowid: 0,
+            },
+            SearchedScopeInfo {
+                scope_id: "vanished".to_owned(),
+                scope_path: vanished_root.path().to_path_buf(),
+                snapshot_at: "sha256:vanished".to_owned(),
+                max_rowid: 0,
+            },
+        ];
+
+        let status = compute_index_status(&searched);
+        assert_eq!(status["tasks_complete"], false);
+        assert_eq!(status["unsupported_inputs_complete"], false);
+        assert_eq!(status["task_errors"].as_array().unwrap().len(), 2);
+        assert_eq!(
+            status["unsupported_input_errors"].as_array().unwrap().len(),
+            2
+        );
+        for field in ["task_errors", "unsupported_input_errors"] {
+            assert!(status[field].as_array().unwrap().iter().any(|error| {
+                error["scope_path"]
+                    .as_str()
+                    .is_some_and(|path| std::path::Path::new(path) == vanished_root.path())
+            }));
+        }
+        assert!(status["task_errors"][0]["error_code"]
+            .as_str()
+            .unwrap()
+            .contains("STORE-CORRUPT"));
+        assert!(status["unsupported_input_errors"][0]["error_code"]
+            .as_str()
+            .unwrap()
+            .contains("STORE-CORRUPT"));
+    }
+
+    #[test]
+    fn r23_cand_001_terminal_failure_does_not_spawn_releasable_secret_hold() {
+        use super::{
+            embedding_task_output_ref, hold_secret_embedding_tasks, release_secret_holds,
+            EmbeddableChunk,
+        };
+        use kcs_core::scope::Repository;
+        use kcs_pipeline::task::{TaskDescriptor, TaskStatus, TaskStore, TaskType};
+
+        let root = tempfile::tempdir().unwrap();
+        let repo = Repository::init(root.path()).unwrap();
+        let store = TaskStore::new(repo.kcs_dir());
+        let chunk_id = format!("sha256:{}", "a".repeat(64));
+        let output_ref = embedding_task_output_ref(&chunk_id);
+        store
+            .append(&TaskDescriptor {
+                task_id: "task_terminal".to_owned(),
+                task_type: TaskType::Embedding,
+                mode: None,
+                input_path: "credentials_backup.md".to_owned(),
+                input_hash: format!("sha256:{}", "b".repeat(64)),
+                previous_raw_hash: None,
+                parent_run_id: None,
+                changed_unit_keys: vec![chunk_id.clone()],
+                output_ref: output_ref.clone(),
+                unit_keys: None,
+                status: TaskStatus::Failed,
+                attempts: 1,
+                next_retry_at: None,
+                deadline: None,
+                heartbeat_at: None,
+                fallback_reason: Some("contract_violation".to_owned()),
+                created_at: "2026-07-12T00:00:00Z".to_owned(),
+                reserved_usd: None,
+                reserved_month: None,
+                reservation_id: None,
+            })
+            .unwrap();
+
+        hold_secret_embedding_tasks(
+            &store,
+            &repo,
+            &[EmbeddableChunk {
+                chunk_id,
+                text: "secret".to_owned(),
+                text_hash: format!("sha256:{}", "b".repeat(64)),
+                raw_path: "credentials_backup.md".to_owned(),
+            }],
+            "2026-07-12T00:00:01Z",
+        )
+        .unwrap();
+
+        let tasks = store.all().unwrap();
+        assert_eq!(
+            tasks.len(),
+            1,
+            "terminal state must not gain a duplicate hold"
+        );
+        assert_eq!(tasks[0].output_ref, output_ref);
+        assert_eq!(tasks[0].status, TaskStatus::Failed);
+        assert_eq!(
+            tasks[0].fallback_reason.as_deref(),
+            Some("contract_violation")
+        );
+        assert_eq!(release_secret_holds(&repo).unwrap(), 0);
+        assert_eq!(store.all().unwrap()[0].status, TaskStatus::Failed);
+    }
+
+    #[test]
+    fn r23_cand_001_legacy_duplicate_hold_cannot_override_terminal_failure() {
+        use super::{
+            embedding_task_output_ref, filter_embeddable_by_task_state, release_secret_holds,
+            EmbeddableChunk, SECRETS_TIER_B_HOLD,
+        };
+        use kcs_core::scope::Repository;
+        use kcs_pipeline::task::{TaskDescriptor, TaskStatus, TaskStore, TaskType};
+
+        let root = tempfile::tempdir().unwrap();
+        let repo = Repository::init(root.path()).unwrap();
+        let store = TaskStore::new(repo.kcs_dir());
+        let chunk_id = format!("sha256:{}", "c".repeat(64));
+        let output_ref = embedding_task_output_ref(&chunk_id);
+        let terminal = TaskDescriptor {
+            task_id: "task_terminal_legacy".to_owned(),
+            task_type: TaskType::Embedding,
+            mode: None,
+            input_path: "credentials_backup.md".to_owned(),
+            input_hash: format!("sha256:{}", "d".repeat(64)),
+            previous_raw_hash: None,
+            parent_run_id: None,
+            changed_unit_keys: vec![chunk_id.clone()],
+            output_ref: output_ref.clone(),
+            unit_keys: None,
+            status: TaskStatus::Failed,
+            attempts: 1,
+            next_retry_at: None,
+            deadline: None,
+            heartbeat_at: None,
+            fallback_reason: Some("contract_violation".to_owned()),
+            created_at: "2026-07-12T00:00:00Z".to_owned(),
+            reserved_usd: None,
+            reserved_month: None,
+            reservation_id: None,
+        };
+        let mut legacy_hold = terminal.clone();
+        legacy_hold.task_id = "task_later_hold".to_owned();
+        legacy_hold.status = TaskStatus::Paused;
+        legacy_hold.attempts = 0;
+        legacy_hold.fallback_reason = Some(SECRETS_TIER_B_HOLD.to_owned());
+        legacy_hold.created_at = "2026-07-12T00:00:01Z".to_owned();
+        store.append(&terminal).unwrap();
+        store.append(&legacy_hold).unwrap();
+
+        assert_eq!(release_secret_holds(&repo).unwrap(), 1);
+        let tasks = store.all().unwrap();
+        assert_eq!(tasks.len(), 1, "legacy duplicate hold should be removed");
+        assert!(tasks.iter().any(|task| {
+            task.task_id == "task_terminal_legacy"
+                && task.status == TaskStatus::Failed
+                && task.fallback_reason.as_deref() == Some("contract_violation")
+        }));
+
+        let mut poisoned_pending = terminal.clone();
+        poisoned_pending.task_id = "zzzz_later_pending".to_owned();
+        poisoned_pending.status = TaskStatus::Pending;
+        poisoned_pending.fallback_reason = None;
+        poisoned_pending.created_at = "2026-07-12T00:00:02Z".to_owned();
+        store.append(&poisoned_pending).unwrap();
+
+        let sendable = filter_embeddable_by_task_state(
+            &store,
+            vec![EmbeddableChunk {
+                chunk_id,
+                text: "must not send".to_owned(),
+                text_hash: format!("sha256:{}", "d".repeat(64)),
+                raw_path: "credentials_backup.md".to_owned(),
+            }],
+            false,
+        )
+        .unwrap();
+        assert!(sendable.is_empty());
+        assert_eq!(tasks[0].output_ref, output_ref);
+    }
+
+    #[test]
+    fn r23_secret_classification_preserves_retry_backoff_state() {
+        use super::{embedding_task_output_ref, hold_secret_embedding_tasks, EmbeddableChunk};
+        use kcs_core::scope::Repository;
+        use kcs_pipeline::task::{TaskDescriptor, TaskStatus, TaskStore, TaskType};
+
+        let root = tempfile::tempdir().unwrap();
+        let repo = Repository::init(root.path()).unwrap();
+        let store = TaskStore::new(repo.kcs_dir());
+        let chunk_id = format!("sha256:{}", "e".repeat(64));
+        let output_ref = embedding_task_output_ref(&chunk_id);
+        store
+            .append(&TaskDescriptor {
+                task_id: "task_retry_backoff".to_owned(),
+                task_type: TaskType::Embedding,
+                mode: None,
+                input_path: "credentials_backup.md".to_owned(),
+                input_hash: format!("sha256:{}", "f".repeat(64)),
+                previous_raw_hash: None,
+                parent_run_id: None,
+                changed_unit_keys: vec![chunk_id.clone()],
+                output_ref,
+                unit_keys: None,
+                status: TaskStatus::Failed,
+                attempts: 3,
+                next_retry_at: Some("2099-01-01T00:00:00Z".to_owned()),
+                deadline: None,
+                heartbeat_at: None,
+                fallback_reason: Some("network_error".to_owned()),
+                created_at: "2026-07-12T00:00:00Z".to_owned(),
+                reserved_usd: None,
+                reserved_month: None,
+                reservation_id: None,
+            })
+            .unwrap();
+
+        hold_secret_embedding_tasks(
+            &store,
+            &repo,
+            &[EmbeddableChunk {
+                chunk_id,
+                text: "retryable".to_owned(),
+                text_hash: format!("sha256:{}", "f".repeat(64)),
+                raw_path: "credentials_backup.md".to_owned(),
+            }],
+            "2026-07-12T00:00:01Z",
+        )
+        .unwrap();
+
+        let tasks = store.all().unwrap();
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].status, TaskStatus::Failed);
+        assert_eq!(tasks[0].attempts, 3);
+        assert_eq!(
+            tasks[0].next_retry_at.as_deref(),
+            Some("2099-01-01T00:00:00Z")
+        );
+        assert_eq!(tasks[0].fallback_reason.as_deref(), Some("network_error"));
+    }
+
+    #[test]
+    fn r23_cand_057_scan_budget_charges_failures_and_caps_empty_entries() {
+        use super::WorkingTreeScanBudget;
+
+        let mut failed = WorkingTreeScanBudget {
+            remaining_bytes: 10,
+            remaining_entries: 2,
+        };
+        assert!(failed.consume_entry());
+        let attempt = failed.reserve_file(u64::MAX).unwrap();
+        assert_eq!(attempt.max_bytes, 9);
+        assert_eq!(attempt.reserved_bytes, 10);
+        assert_eq!(failed.remaining_bytes, 0);
+        assert!(failed.reserve_file(0).is_none());
+
+        let mut empty = WorkingTreeScanBudget {
+            remaining_bytes: 10,
+            remaining_entries: 2,
+        };
+        for _ in 0..2 {
+            assert!(empty.consume_entry());
+            let attempt = empty.reserve_file(0).unwrap();
+            assert_eq!(attempt.max_bytes, 0);
+            empty.finish_success(&attempt, 0);
+            assert_eq!(empty.remaining_bytes, 10);
+        }
+        assert!(!empty.consume_entry());
+
+        let mut valid = WorkingTreeScanBudget {
+            remaining_bytes: 10,
+            remaining_entries: 1,
+        };
+        assert!(valid.consume_entry());
+        let attempt = valid.reserve_file(4).unwrap();
+        valid.finish_success(&attempt, 4);
+        assert_eq!(valid.remaining_bytes, 6);
+    }
+
+    #[test]
+    fn r23_markdown_charge_and_send_share_one_verified_input() {
+        use super::{
+            classify_online_markdownize_precondition, estimate_online_markdownize_cost,
+            prorated_markdownize_cost, OnlineMarkdownizePrecondition,
+        };
+        use kcs_core::scope::Repository;
+        use kcs_pipeline::prepare::hash_bytes;
+        use kcs_pipeline::task::{TaskDescriptor, TaskStatus, TaskType};
+
+        let root = tempfile::tempdir().unwrap();
+        let repo = Repository::init(root.path()).unwrap();
+        let pdf = b"%PDF-1.4\n1 0 obj << /Type /Pages /Kids [2 0 R] /Count 1 >> endobj\n2 0 obj << /Type /Page /Parent 1 0 R >> stream\nBT (verified billing input) Tj ET\nendstream endobj\n%%EOF\n";
+        std::fs::write(root.path().join("doc.pdf"), pdf).unwrap();
+        let task = TaskDescriptor {
+            task_id: "task_verified_charge".to_owned(),
+            task_type: TaskType::Markdownize,
+            mode: None,
+            input_path: "doc.pdf".to_owned(),
+            input_hash: hash_bytes(pdf),
+            previous_raw_hash: None,
+            parent_run_id: None,
+            changed_unit_keys: Vec::new(),
+            output_ref: "online:mistral_ocr_markdownize".to_owned(),
+            unit_keys: None,
+            status: TaskStatus::Pending,
+            attempts: 0,
+            next_retry_at: None,
+            deadline: None,
+            heartbeat_at: None,
+            fallback_reason: Some("ready_for_online_adapter".to_owned()),
+            created_at: "2026-07-12T00:00:00Z".to_owned(),
+            reserved_usd: None,
+            reserved_month: None,
+            reservation_id: None,
+        };
+
+        let prepared = match classify_online_markdownize_precondition(&repo, &task) {
+            OnlineMarkdownizePrecondition::Send(prepared) => prepared,
+            _ => panic!("valid text-bearing PDF must reach the prepared send state"),
+        };
+        let valid_unit_key = prepared.prepared_units[0].unit_key.clone();
+        for unit_keys in [
+            Vec::new(),
+            vec!["unknown-unit".to_owned()],
+            vec![valid_unit_key.clone(), valid_unit_key.clone()],
+        ] {
+            let mut invalid = task.clone();
+            invalid.unit_keys = Some(unit_keys);
+            assert!(matches!(
+                classify_online_markdownize_precondition(&repo, &invalid),
+                OnlineMarkdownizePrecondition::Retire
+            ));
+        }
+        let mut valid_retry = task.clone();
+        valid_retry.unit_keys = Some(vec![valid_unit_key]);
+        assert!(matches!(
+            classify_online_markdownize_precondition(&repo, &valid_retry),
+            OnlineMarkdownizePrecondition::Send(_)
+        ));
+        std::fs::write(root.path().join("doc.pdf"), b"").unwrap();
+
+        assert_eq!(prepared.bytes, pdf);
+        assert!(!prepared.prepared_units.is_empty());
+        let charged = prorated_markdownize_cost(
+            &task,
+            prepared.bytes.len() as u64,
+            prepared.prepared_units.len(),
+        );
+        assert_eq!(charged, estimate_online_markdownize_cost(pdf.len() as u64));
+        assert!(
+            charged > 0.0,
+            "a post-check pathname change cannot mint a zero charge"
+        );
+    }
 
     #[test]
     fn r12_1_read_search_tuning_parses_documented_keys() {
@@ -11355,49 +12980,37 @@ mod tests {
 
     #[test]
     fn r10_4_partial_retry_plan_gates_on_retryability_and_budget() {
-        use super::partial_retry_plan_from_instance;
-        let dir = tempfile::tempdir().unwrap();
-        let write_manifest = |units: serde_json::Value| {
-            let manifest = serde_json::json!({
-                "raw_hash": "sha256:r",
-                "tool_profile_hash": "sha256:t",
+        use super::{partial_retry_plan_from_manifest, unit_ref, NormalizedInstanceManifest};
+        let manifest = |first_error: Option<&str>, second_error: Option<&str>| {
+            serde_json::from_value::<NormalizedInstanceManifest>(serde_json::json!({
+                "raw_hash": format!("sha256:{}", "a".repeat(64)),
+                "tool_profile_hash": format!("sha256:{}", "b".repeat(64)),
                 "gen": 0,
                 "parent_gen": null,
                 "run_id": "run_x",
-                "units": units,
+                "units": [
+                    {"order":0,"unit_key":"page:1","unit_ref":unit_ref("page:1"),"unit_type":"page","status":if first_error.is_some() { "failed" } else { "done" },"prepared_hash":format!("sha256:{}", "c".repeat(64)),"error_kind":first_error},
+                    {"order":1,"unit_key":"page:2","unit_ref":unit_ref("page:2"),"unit_type":"page","status":if second_error.is_some() { "failed" } else { "done" },"prepared_hash":format!("sha256:{}", "d".repeat(64)),"error_kind":second_error},
+                ],
                 "generated_at": "2026-07-05T00:00:00Z",
-            });
-            std::fs::write(
-                dir.path().join("manifest.json"),
-                serde_json::to_vec(&manifest).unwrap(),
-            )
-            .unwrap();
+            }))
+            .unwrap()
         };
-        let output_ref = dir.path().to_string_lossy().into_owned();
 
         // A Failed unit with a RETRYABLE kind is re-enqueued, with a finite budget.
-        write_manifest(serde_json::json!([
-            {"order":0,"unit_key":"page:1","unit_ref":"u0","unit_type":"page","status":"done","prepared_hash":"sha256:p0","error_kind":null},
-            {"order":1,"unit_key":"page:2","unit_ref":"u1","unit_type":"page","status":"failed","prepared_hash":"sha256:p1","error_kind":"network_error"},
-        ]));
-        let plan = partial_retry_plan_from_instance(&output_ref).unwrap();
+        let plan = partial_retry_plan_from_manifest(&manifest(None, Some("network_error")));
         assert_eq!(plan.retryable_units, vec!["page:2".to_owned()]);
         assert_eq!(plan.max_attempts, Some(5));
 
         // A Failed unit with a NON-retryable (permanent) kind is never re-enqueued.
-        write_manifest(serde_json::json!([
-            {"order":0,"unit_key":"page:1","unit_ref":"u0","unit_type":"page","status":"done","prepared_hash":"sha256:p0","error_kind":null},
-            {"order":1,"unit_key":"page:2","unit_ref":"u1","unit_type":"page","status":"failed","prepared_hash":"sha256:p1","error_kind":"invalid_input"},
-        ]));
-        let plan = partial_retry_plan_from_instance(&output_ref).unwrap();
+        let plan = partial_retry_plan_from_manifest(&manifest(None, Some("invalid_input")));
         assert!(plan.retryable_units.is_empty());
 
         // Mixed: only the retryable unit survives; a contract_violation is dropped.
-        write_manifest(serde_json::json!([
-            {"order":0,"unit_key":"page:1","unit_ref":"u0","unit_type":"page","status":"failed","prepared_hash":"sha256:p0","error_kind":"contract_violation"},
-            {"order":1,"unit_key":"page:2","unit_ref":"u1","unit_type":"page","status":"failed","prepared_hash":"sha256:p1","error_kind":"network_error"},
-        ]));
-        let plan = partial_retry_plan_from_instance(&output_ref).unwrap();
+        let plan = partial_retry_plan_from_manifest(&manifest(
+            Some("contract_violation"),
+            Some("network_error"),
+        ));
         assert_eq!(plan.retryable_units, vec!["page:2".to_owned()]);
     }
 
@@ -11541,7 +13154,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let dest = dir.path().join("obj");
         std::fs::create_dir(&dest).unwrap();
-        let result = atomic_write_cas_object(&dest, b"derived-bytes");
+        let result = atomic_write_cas_object(dir.path(), &dest, b"derived-bytes");
         assert!(result.is_err(), "write onto a directory must fail");
         let stray: Vec<_> = std::fs::read_dir(dir.path())
             .unwrap()
@@ -11553,6 +13166,58 @@ mod tests {
             stray.is_empty(),
             "temp not cleaned up on failure: {stray:?}"
         );
+    }
+
+    #[test]
+    fn r23_cand_031_existing_prepared_slot_must_match_exact_bytes() {
+        use super::atomic_write_cas_object;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("prepared-object");
+        std::fs::write(&path, b"poison").unwrap();
+        let error = atomic_write_cas_object(dir.path(), &path, b"secure").unwrap_err();
+        assert_eq!(error.error_code(), "KCS-E-STORE-CORRUPT-001");
+        assert_eq!(std::fs::read(&path).unwrap(), b"poison");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn r23_prepared_writer_rejects_symlinked_store_ancestor() {
+        use std::os::unix::fs::symlink;
+
+        use super::write_prepared_objects;
+        use kcs_core::scope::Repository;
+        use kcs_pipeline::prepare::{hash_bytes, PreparedUnit, UnitFingerprint, UnitType};
+
+        let root = tempfile::tempdir().unwrap();
+        let repo = Repository::init(root.path()).unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let prepared_root = repo.kcs_dir().join("objects/prepared");
+        if prepared_root.exists() {
+            std::fs::remove_dir_all(&prepared_root).unwrap();
+        }
+        std::fs::create_dir_all(prepared_root.parent().unwrap()).unwrap();
+        symlink(outside.path(), &prepared_root).unwrap();
+        let bytes = b"outside-write";
+        let prepared_hash = hash_bytes(bytes);
+        let unit = PreparedUnit {
+            order: 0,
+            unit_key: "file:0".to_owned(),
+            unit_type: UnitType::File,
+            prepared_hash: prepared_hash.clone(),
+            fingerprint: UnitFingerprint {
+                perceptual_hash: prepared_hash.clone(),
+                text_hash: prepared_hash.clone(),
+                visual_hash: prepared_hash.clone(),
+            },
+            mime: Some("text/plain".to_owned()),
+            page_number: None,
+        };
+
+        let error = write_prepared_objects(&repo, &[unit], &[prepared_hash], bytes, "text/plain")
+            .unwrap_err();
+        assert_eq!(error.error_code(), "KCS-E-STORE-CORRUPT-001");
+        assert!(std::fs::read_dir(outside.path()).unwrap().next().is_none());
     }
 
     #[test]
@@ -11595,8 +13260,16 @@ mod tests {
     #[test]
     fn f8_charge_serializes_reread_and_enforces_cap() {
         use super::{
-            charge_cost_ledger_under_lock, BudgetCaps, BudgetEstimate, ChargeOutcome, CostLedger,
-            TaskType,
+            charge_cost_ledger_under_lock, BudgetCaps, BudgetEstimate, ChargeOutcome,
+            CostChargeRequest, CostLedger, ReservationRecord, TaskType,
+        };
+        let reservation = |id: &str, task_id: &str| ReservationRecord {
+            reservation_id: id.to_owned(),
+            task_id: task_id.to_owned(),
+            month: "2026-07".to_owned(),
+            scope_id: "scope".to_owned(),
+            adapter_kind: "embedding".to_owned(),
+            usd: 0.6,
         };
         use std::collections::BTreeMap;
 
@@ -11623,10 +13296,13 @@ mod tests {
             &ledger,
             lock_path.clone(),
             &caps,
-            "2026-07",
-            "embedding",
-            &estimate,
-            false,
+            CostChargeRequest {
+                month: "2026-07",
+                adapter_kind: "embedding",
+                estimate: &estimate,
+                override_budget: false,
+                reservations: &[reservation("res_first", "task_first")],
+            },
         )
         .unwrap();
         assert!(matches!(first, ChargeOutcome::Charged));
@@ -11637,14 +13313,28 @@ mod tests {
             &ledger,
             lock_path.clone(),
             &caps,
-            "2026-07",
-            "embedding",
-            &estimate,
-            false,
+            CostChargeRequest {
+                month: "2026-07",
+                adapter_kind: "embedding",
+                estimate: &estimate,
+                override_budget: false,
+                reservations: &[reservation("res_second", "task_second")],
+            },
         )
         .unwrap();
         assert!(matches!(second, ChargeOutcome::BudgetExceeded));
         assert_eq!(ledger.monthly_total("2026-07", None).unwrap(), 0.6);
+    }
+
+    #[test]
+    fn reservation_ledger_lock_preserves_retryable_cli_error_contract() {
+        use super::{pipeline_to_kcs, ExitCode};
+
+        let err = pipeline_to_kcs(kcs_pipeline::PipelineError::locked(
+            "/tmp/cost-ledger-reservations.jsonl.lock",
+        ));
+        assert_eq!(err.error_code(), "KCS-E-STORE-LOCKED-001");
+        assert_eq!(err.exit_code(), ExitCode::PartialFailure);
     }
 
     // F8: the charge path is gated by the device-global ledger lock. A held lock
@@ -11653,7 +13343,8 @@ mod tests {
     #[test]
     fn f8_charge_is_gated_by_the_device_global_lock() {
         use super::{
-            charge_cost_ledger_under_lock, BudgetCaps, BudgetEstimate, CostLedger, TaskType,
+            charge_cost_ledger_under_lock, BudgetCaps, BudgetEstimate, CostChargeRequest,
+            CostLedger, ReservationRecord, TaskType,
         };
         use std::collections::BTreeMap;
 
@@ -11676,19 +13367,71 @@ mod tests {
             estimated_usd: 0.01,
             adapter_id: Some("gemini".to_owned()),
         };
+        let reservation = ReservationRecord {
+            reservation_id: "res_locked".to_owned(),
+            task_id: "task_locked".to_owned(),
+            month: "2026-07".to_owned(),
+            scope_id: "scope".to_owned(),
+            adapter_kind: "embedding".to_owned(),
+            usd: 0.01,
+        };
         let err = charge_cost_ledger_under_lock(
             &ledger,
             lock_path.clone(),
             &caps,
-            "2026-07",
-            "embedding",
-            &estimate,
-            false,
+            CostChargeRequest {
+                month: "2026-07",
+                adapter_kind: "embedding",
+                estimate: &estimate,
+                override_budget: false,
+                reservations: &[reservation],
+            },
         )
         .unwrap_err();
         assert_eq!(err.error_code(), "KCS-E-STORE-LOCKED-001");
         // Nothing was charged while the lock was held.
         assert_eq!(ledger.monthly_total("2026-07", None).unwrap(), 0.0);
+    }
+
+    #[test]
+    fn r23_cand_048_forged_task_stamp_cannot_create_reclaim_credit() {
+        use super::{settle_task_reservation, CostLedger, TaskDescriptor, TaskStatus, TaskType};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let ledger = CostLedger::new(tmp.path().join("cost-ledger.jsonl"));
+        let task = TaskDescriptor {
+            task_id: "task_forged".to_owned(),
+            task_type: TaskType::Markdownize,
+            mode: None,
+            input_path: "doc.pdf".to_owned(),
+            input_hash: format!("sha256:{}", "a".repeat(64)),
+            previous_raw_hash: None,
+            parent_run_id: None,
+            changed_unit_keys: Vec::new(),
+            output_ref: "online:mistral_ocr_markdownize".to_owned(),
+            unit_keys: None,
+            status: TaskStatus::Failed,
+            attempts: 1,
+            next_retry_at: None,
+            deadline: None,
+            heartbeat_at: None,
+            fallback_reason: Some("rate_limit".to_owned()),
+            created_at: "2026-07-01T00:00:00Z".to_owned(),
+            reserved_usd: Some(49.0),
+            reserved_month: Some("2026-07".to_owned()),
+            reservation_id: Some("res_forged".to_owned()),
+        };
+
+        assert!(settle_task_reservation(&ledger, &task, "scope", "markdown")
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            ledger
+                .reclaim_ledger()
+                .monthly_total("2026-07", None)
+                .unwrap(),
+            0.0
+        );
     }
 
     #[test]
@@ -11805,7 +13548,7 @@ mod tests {
         let kcs_dir = dir.path().join(".kcs");
         // The correct `sha256:` filename for the AUTHENTIC bytes...
         let hash = hash_bytes(b"authentic prepared object");
-        let object_path = cas_object_path(&kcs_dir, "prepared", &hash);
+        let object_path = cas_object_path(&kcs_dir, "prepared", &hash).unwrap();
         std::fs::create_dir_all(object_path.parent().unwrap()).unwrap();
         // ...but the file under it holds corrupt/torn bytes (non-atomic write).
         std::fs::write(&object_path, b"corrupt partial bytes").unwrap();
@@ -11820,6 +13563,182 @@ mod tests {
             "KCS-E-STORE-CORRUPT-001",
             "a corrupt CAS object must not be served as authentic evidence"
         );
+    }
+
+    #[test]
+    fn portable_cas_leaf_uses_digest_and_presence_rejects_nonregular_slot() {
+        use super::{cas_object_path, cas_object_present, hash_bytes, MAX_RAW_OBJECT_BYTES};
+
+        let dir = tempfile::tempdir().unwrap();
+        let hash = hash_bytes(b"portable object");
+        let path = cas_object_path(dir.path(), "raw", &hash).unwrap();
+        assert_eq!(
+            path.file_name().and_then(|name| name.to_str()),
+            hash.strip_prefix("sha256:")
+        );
+        assert!(!path.to_string_lossy().contains("sha256:"));
+
+        std::fs::create_dir_all(&path).unwrap();
+        let error = cas_object_present(dir.path(), "raw", &hash, MAX_RAW_OBJECT_BYTES).unwrap_err();
+        assert_eq!(error.error_code(), "KCS-E-STORE-CORRUPT-001");
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn legacy_cas_leaf_is_verified_and_dual_conflict_fails_closed() {
+        use super::{
+            cas_object_path, hash_bytes, legacy_cas_object_path, read_cas_byte_object,
+            MAX_RAW_OBJECT_BYTES,
+        };
+
+        let dir = tempfile::tempdir().unwrap();
+        let bytes = b"legacy object";
+        let hash = hash_bytes(bytes);
+        let legacy = legacy_cas_object_path(dir.path(), "prepared", &hash).unwrap();
+        std::fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+        std::fs::write(&legacy, bytes).unwrap();
+        let (resolved, loaded) =
+            read_cas_byte_object(dir.path(), "prepared", &hash, MAX_RAW_OBJECT_BYTES)
+                .unwrap()
+                .unwrap();
+        assert_eq!(resolved, legacy);
+        assert_eq!(loaded, bytes);
+
+        let canonical = cas_object_path(dir.path(), "prepared", &hash).unwrap();
+        std::fs::write(&canonical, bytes).unwrap();
+        std::fs::write(&legacy, b"conflicting bytes").unwrap();
+        let error =
+            read_cas_byte_object(dir.path(), "prepared", &hash, MAX_RAW_OBJECT_BYTES).unwrap_err();
+        assert_eq!(error.error_code(), "KCS-E-STORE-CORRUPT-001");
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn prepared_writer_reuses_verified_legacy_and_validates_both_slots() {
+        use super::{
+            cas_object_path, hash_bytes, legacy_cas_object_path, write_cas_object_or_reuse_legacy,
+        };
+
+        let dir = tempfile::tempdir().unwrap();
+        let kcs_dir = dir.path().join(".kcs");
+        std::fs::create_dir(&kcs_dir).unwrap();
+        let bytes = b"prepared bytes";
+        let hash = hash_bytes(bytes);
+        let canonical = cas_object_path(&kcs_dir, "prepared", &hash).unwrap();
+        let legacy = legacy_cas_object_path(&kcs_dir, "prepared", &hash).unwrap();
+        std::fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+        std::fs::write(&legacy, bytes).unwrap();
+
+        write_cas_object_or_reuse_legacy(&kcs_dir, "prepared", &hash, bytes).unwrap();
+        assert!(!canonical.exists(), "legacy reuse must not eagerly migrate");
+        assert_eq!(std::fs::read(&legacy).unwrap(), bytes);
+
+        std::fs::write(&canonical, bytes).unwrap();
+        write_cas_object_or_reuse_legacy(&kcs_dir, "prepared", &hash, bytes).unwrap();
+        std::fs::write(&legacy, b"conflict").unwrap();
+        let error =
+            write_cas_object_or_reuse_legacy(&kcs_dir, "prepared", &hash, bytes).unwrap_err();
+        assert_eq!(error.error_code(), "KCS-E-STORE-CORRUPT-001");
+    }
+
+    #[test]
+    fn prepared_writer_publishes_new_objects_to_portable_leaf() {
+        use super::{cas_object_path, hash_bytes, write_cas_object_or_reuse_legacy};
+
+        let dir = tempfile::tempdir().unwrap();
+        let kcs_dir = dir.path().join(".kcs");
+        std::fs::create_dir(&kcs_dir).unwrap();
+        let bytes = b"new prepared bytes";
+        let hash = hash_bytes(bytes);
+        write_cas_object_or_reuse_legacy(&kcs_dir, "prepared", &hash, bytes).unwrap();
+        let canonical = cas_object_path(&kcs_dir, "prepared", &hash).unwrap();
+        assert_eq!(std::fs::read(canonical).unwrap(), bytes);
+    }
+
+    #[test]
+    fn latest_normalize_ref_parses_portable_digest_basename() {
+        use super::{hash_bytes, latest_normalize_ref};
+
+        let dir = tempfile::tempdir().unwrap();
+        let raw_hash = hash_bytes(b"raw");
+        let tool_hash = hash_bytes(b"tool");
+        let raw_digest = raw_hash.strip_prefix("sha256:").unwrap();
+        let tool_digest = tool_hash.strip_prefix("sha256:").unwrap();
+        let instance = dir
+            .path()
+            .join("objects/normalized_units")
+            .join(&raw_digest[0..2])
+            .join(&raw_digest[2..4])
+            .join(format!("{raw_digest}.{tool_digest}.g2"));
+        std::fs::create_dir_all(instance).unwrap();
+
+        let reference = latest_normalize_ref(dir.path(), &raw_hash)
+            .unwrap()
+            .unwrap();
+        assert_eq!(reference.tool_profile_hash, tool_hash);
+        assert_eq!(reference.gen, 2);
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn latest_normalize_ref_also_parses_legacy_prefixed_basename() {
+        use super::{hash_bytes, latest_normalize_ref};
+
+        let dir = tempfile::tempdir().unwrap();
+        let raw_hash = hash_bytes(b"raw");
+        let tool_hash = hash_bytes(b"tool");
+        let raw_digest = raw_hash.strip_prefix("sha256:").unwrap();
+        let instance = dir
+            .path()
+            .join("objects/normalized_units")
+            .join(&raw_digest[0..2])
+            .join(&raw_digest[2..4])
+            .join(format!("{raw_hash}.{tool_hash}.g3"));
+        std::fs::create_dir_all(instance).unwrap();
+
+        let reference = latest_normalize_ref(dir.path(), &raw_hash)
+            .unwrap()
+            .unwrap();
+        assert_eq!(reference.tool_profile_hash, tool_hash);
+        assert_eq!(reference.gen, 3);
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn tombstone_reader_reuses_verified_legacy_and_rejects_conflict() {
+        use super::{
+            hash_bytes, legacy_tombstone_path, read_tombstone, tombstone_path, ScopeTarget,
+        };
+
+        let dir = tempfile::tempdir().unwrap();
+        let kcs_dir = dir.path().join(".kcs");
+        std::fs::create_dir(&kcs_dir).unwrap();
+        let raw_hash = hash_bytes(b"purged raw");
+        let legacy = legacy_tombstone_path(&kcs_dir, &raw_hash).unwrap();
+        std::fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+        let record = serde_json::json!({"raw_hash": raw_hash, "reason": "privacy"});
+        std::fs::write(&legacy, serde_json::to_vec(&record).unwrap()).unwrap();
+        let target = ScopeTarget {
+            repo_root: dir.path().to_path_buf(),
+            kcs_dir: kcs_dir.clone(),
+            scope_id: "scope_test".to_owned(),
+        };
+        let loaded = read_tombstone(&target, &raw_hash).unwrap().unwrap();
+        assert_eq!(loaded["raw_hash"], raw_hash);
+        assert_eq!(loaded["reason"], "privacy");
+
+        let canonical = tombstone_path(&kcs_dir, &raw_hash).unwrap();
+        std::fs::write(
+            canonical,
+            serde_json::to_vec(&serde_json::json!({
+                "raw_hash": raw_hash,
+                "reason": "legal"
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let error = read_tombstone(&target, &raw_hash).unwrap_err();
+        assert_eq!(error.error_code(), "KCS-E-STORE-CORRUPT-001");
     }
 
     #[test]
@@ -11851,6 +13770,7 @@ mod tests {
             created_at: "2026-07-04T00:00:00Z".to_owned(),
             reserved_usd: None,
             reserved_month: None,
+            reservation_id: None,
         };
         store.append(&task).unwrap();
         let reclaimed = reclaim_orphaned_running_tasks(&store).unwrap();

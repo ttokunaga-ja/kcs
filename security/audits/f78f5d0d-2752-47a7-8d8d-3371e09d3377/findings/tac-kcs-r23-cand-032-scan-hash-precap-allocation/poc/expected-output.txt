@@ -1,0 +1,6 @@
+[ok] normal index enables raw scan hashes before preview returns
+[ok] scanner records metadata length before the raw-hash read
+[ok] raw-hash branch performs a whole-file read before the adapter cap
+[ok] downstream max_input_bytes gate is adapter-only and post-preview
+[ok] bounded local read demo allocated 1048576 bytes for hashing
+[safe] no KCS command executed; no network, credentials, or large files used

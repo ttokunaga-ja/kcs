@@ -1,0 +1,180 @@
+{
+  "affectedLocations": [
+    {
+      "label": "entrypoint_and_closest_control",
+      "lines": "9077-9118",
+      "path": "crates/kcs-cli/src/main.rs"
+    },
+    {
+      "label": "root_control",
+      "lines": "72-103",
+      "path": "crates/kcs-pipeline/src/prepare.rs"
+    },
+    {
+      "label": "sink",
+      "lines": "9505-9541",
+      "path": "crates/kcs-cli/src/main.rs"
+    }
+  ],
+  "attackPath": {
+    "dataflow": {
+      "evidenceRefs": [
+        "cli-first-read",
+        "prepare-hash",
+        "caller-write",
+        "prepared-publication"
+      ],
+      "outcome": "persistent prepared CAS content/name mismatch for one raced file",
+      "sink": "`write_prepared_objects()` publishing into `objects/prepared`",
+      "source": "mutable selected-scope file after initial raw-hash verification",
+      "summary": "selected-scope pathname -> CLI first read/hash -> prepare-stage reopen/hash -> prepared CAS publication"
+    },
+    "impact": {
+      "level": "medium",
+      "why": "The trusted prepared CAS namespace can contain an object whose content does not match its name, causing bounded provenance/search/evidence integrity loss."
+    },
+    "likelihood": {
+      "level": "medium",
+      "why": "The path is real, but the exploit depends on a post-check race and no deterministic barrier was identified."
+    },
+    "limitations": [
+      "No confidentiality, outside-scope write, or code execution impact was demonstrated."
+    ],
+    "reachability": {
+      "attacker": "lower-trust local or synced-folder contributor to the selected root",
+      "entrypoint": "ordinary `kcs index` processing of the mutable file",
+      "outcome": "prepared object name and body disagree inside one scope-local store",
+      "summary": "Local CLI indexing only; exploitation requires concurrent selected-root write/rename authority and favorable scheduling between the CLI hash check and prepare reopen."
+    },
+    "summary": "A lower-trust selected-root contributor lets version A pass the first read, replaces the pathname with version B before prepare, and causes KCS to publish A bytes at a prepared object path named for B."
+  },
+  "candidate_id": "KCS-R23-CAND-031",
+  "codeEvidence": [
+    {
+      "code": "        let path = repo.root().join(&candidate.input_path);\n        let bytes = fs::read(&path)\n            .map_err(|err| KcsError::io(err.to_string(), path.display().to_string()))?;\n        // R15-8: `candidate.raw_hash` was computed at SCAN time; `bytes` is read HERE. If\n        // the file was externally edited in that window, persisting the normalized\n        // instance under the stale SCAN hash while the closing snapshot hashes the CURRENT\n        // bytes for the tree entry would diverge their identities (the offline twin of\n        // R14-2). Re-hash what we actually read and, on a mismatch, SKIP this candidate \u2014\n        // the next clean index re-scans and normalizes it under its correct identity. The\n        // window is one store-lock-held `kcs index` plus an external write, so this is a\n        // rare defensive guard. (No deterministic test: reproducing it needs an external\n        // edit landing inside the lock-held critical section between the scan and this\n        // read, which no public seam exposes.)\n        let current_hash = hash_bytes(&bytes);\n        if let Some(scan_hash) = &candidate.raw_hash {\n            if scan_hash != &current_hash {\n                append_event_log(\n                    \"KCS-I-INDEX-INPUT-CHANGED-001\",\n                    \"input file changed between scan and normalize; skipped to preserve \\\n                     content-addressing (re-run index)\",\n                    json!({ \"input_path\": candidate.input_path }),\n                )?;\n                result.failed_files += 1;\n                continue;\n            }\n        }\n        let raw_hash = current_hash;\n        let prepare = prepare_units(PrepareStageRequest {\n            raw_hash: raw_hash.clone(),\n            media_type: candidate.media_type.clone(),\n            input_path: path.display().to_string(),\n            tool_profile_hash: prepare_profile_hash.clone(),\n        })",
+      "endLine": 9109,
+      "explanation": "The CLI hashes the bytes it just read and rejects stale scan-state mismatches, but then forwards `input_path` rather than the verified byte buffer to `prepare_units()`.",
+      "id": "cli-first-read",
+      "label": "CLI verifies only the first read",
+      "language": "rust",
+      "path": "crates/kcs-cli/src/main.rs",
+      "role": "entrypoint",
+      "startLine": 9077
+    },
+    {
+      "code": "pub struct PrepareStageRequest {\n    pub raw_hash: String,\n    pub media_type: String,\n    pub input_path: String,\n    pub tool_profile_hash: String,\n}",
+      "endLine": 46,
+      "explanation": "`PrepareStageRequest` carries both `raw_hash` and `input_path`, creating an expected binding point between the caller-verified identity and the bytes prepare consumes.",
+      "id": "prepare-reopen",
+      "label": "Prepare reopens the pathname and hashes later bytes",
+      "language": "rust",
+      "path": "crates/kcs-pipeline/src/prepare.rs",
+      "role": "propagation",
+      "startLine": 41
+    },
+    {
+      "code": "pub fn prepare_units(request: PrepareStageRequest) -> Result<PrepareStageOutput> {\n    // R20-6: the local deterministic adapter only parses text (Markdown / plain text /\n    // code) and PDF text layers (docs/07 \u00a77.1). A RECOGNIZED non-text-native binary (image\n    // / OOXML office document) is never locally parseable \u2014 a raw-bytes \"passthrough\" unit\n    // evidences its bytes (a ZIP's PK header, an image's pixels) as searchable garbage.\n    // Route it to online OCR (empty prepared_units \u2192 the R20-5 path). `octet-stream`\n    // (unrecognized extension) is content-sniffed below: it may be a TEXT file with an\n    // unknown extension (`.env`, `.cfg`) \u2014 still passthrough'd locally \u2014 or a binary blob.\n    let media_type = request.media_type.as_str();\n    let is_text_native = matches!(media_type, \"text/markdown\" | \"text/plain\" | \"text/x-code\");\n    let is_pdf = media_type == \"application/pdf\";\n    if !is_text_native && !is_pdf && media_type != \"application/octet-stream\" {\n        return Ok(PrepareStageOutput {\n            prepared_object_hashes: Vec::new(),\n            prepared_units: Vec::new(),\n            image_object_hashes: Vec::new(),\n        });\n    }\n    let bytes = std::fs::read(&request.input_path).pipeline_io(Path::new(&request.input_path))?;\n    if !is_text_native && !is_pdf && !bytes_are_text(&bytes) {\n        // Binary octet-stream (a DOCX-as-unknown-ext, a compiled blob): do NOT evidence its\n        // raw bytes as text \u2014 route to OCR like the other non-text-native media above.\n        return Ok(PrepareStageOutput {\n            prepared_object_hashes: Vec::new(),\n            prepared_units: Vec::new(),\n            image_object_hashes: Vec::new(),\n        });\n    }\n    let prepared_hash = hash_bytes(&bytes);\n    let unit_type = unit_type_for_media_type(&request.media_type);\n    let pdf_pages = if request.media_type == \"application/pdf\" {\n        let pages = pdf_text_pages(&bytes);",
+      "endLine": 103,
+      "explanation": "`prepare_units()` reads `request.input_path` again and computes `prepared_hash` from that second byte buffer without comparing it to `request.raw_hash`.",
+      "id": "prepare-hash",
+      "label": "Prepare derives prepared hashes from the reopened bytes",
+      "language": "rust",
+      "path": "crates/kcs-pipeline/src/prepare.rs",
+      "role": "root_control",
+      "startLine": 72
+    },
+    {
+      "code": "        write_prepared_objects(\n            repo,\n            &prepare.prepared_units,\n            &prepare.prepared_object_hashes,\n            &bytes,\n            &candidate.media_type,\n        )?;",
+      "endLine": 9118,
+      "explanation": "The caller combines `prepare.prepared_object_hashes` from the second read with `bytes` from the first read, setting up a content/name mismatch when the pathname changes between reads.",
+      "id": "caller-write",
+      "label": "Caller writes the first-read bytes under prepare-returned hashes",
+      "language": "rust",
+      "path": "crates/kcs-cli/src/main.rs",
+      "role": "sink",
+      "startLine": 9112
+    },
+    {
+      "code": "fn write_prepared_objects(\n    repo: &Repository,\n    prepared_units: &[PreparedUnit],\n    prepared_hashes: &[String],\n    bytes: &[u8],\n    media_type: &str,\n) -> Result<()> {\n    let pdf_pages = (media_type == \"application/pdf\").then(|| pdf_text_pages(bytes));\n    for (index, prepared_hash) in prepared_hashes.iter().enumerate() {\n        let digest = prepared_hash\n            .strip_prefix(\"sha256:\")\n            .ok_or_else(|| KcsError::schema(\"prepared hash must use sha256 prefix\"))?;\n        let path = repo\n            .kcs_dir()\n            .join(\"objects/prepared\")\n            .join(&digest[0..2])\n            .join(&digest[2..4])\n            .join(prepared_hash);\n        if let Some(parent) = path.parent() {\n            fs::create_dir_all(parent)\n                .map_err(|err| KcsError::io(err.to_string(), parent.display().to_string()))?;\n        }\n        if !path.exists() {\n            let object_bytes = pdf_pages\n                .as_ref()\n                .and_then(|pages| pages.get(index))\n                .map(|page| page.as_bytes())\n                .or_else(|| {\n                    prepared_units\n                        .get(index)\n                        .and_then(|unit| (unit.unit_type == UnitType::Page).then_some(b\"\" as &[u8]))\n                })\n                .unwrap_or(bytes);\n            // Q2: crash-atomic (temp + fsync + rename) so a torn write cannot\n            // leave a partial prepared object under the final `sha256:` name.\n            atomic_write_cas_object(&path, object_bytes)?;\n        }",
+      "endLine": 9541,
+      "explanation": "`write_prepared_objects()` builds the object path from `prepared_hash` and, for the text-native single-unit case, publishes `bytes` from the caller. Atomic publication does not validate that the body hashes to the destination name.",
+      "id": "prepared-publication",
+      "label": "Prepared CAS path is selected by hash but body comes from caller bytes",
+      "language": "rust",
+      "path": "crates/kcs-cli/src/main.rs",
+      "role": "outcome",
+      "startLine": 9505
+    },
+    {
+      "code": "                .unwrap_or(bytes);\n            // Q2: crash-atomic (temp + fsync + rename) so a torn write cannot\n            // leave a partial prepared object under the final `sha256:` name.\n            atomic_write_cas_object(&path, object_bytes)?;",
+      "endLine": 9540,
+      "explanation": "Before `atomic_write_cas_object()`, the implementation should verify that `hash_bytes(object_bytes)` equals `prepared_hash`, or should make divergence impossible by preparing from the already verified bytes.",
+      "id": "expected-control",
+      "label": "Expected invariant",
+      "language": "rust",
+      "path": "crates/kcs-cli/src/main.rs",
+      "role": "expected_control",
+      "startLine": 9537
+    }
+  ],
+  "confidence": "medium",
+  "extensions": {
+    "candidateId": "KCS-R23-CAND-031",
+    "ledgerRowId": "KCS-R23-CAND-031",
+    "reportId": "KCS-R23-CAND-031"
+  },
+  "final_policy": "reportable",
+  "final_severity": "low",
+  "instance_key": "KCS-R23-CAND-031:prepare-cas-identity",
+  "ledger_row_id": "KCS-R23-CAND-031",
+  "priority": "P3",
+  "remediation": {
+    "regressionTests": [
+      "Force prepare to observe bytes different from the caller-verified buffer and require rejection.",
+      "Verify text prepared object content hashes to its object name before publication.",
+      "Verify PDF per-page prepared hashes are checked against the exact page bytes written."
+    ],
+    "summary": "Prepare from the caller-verified bytes or a stable descriptor, and add a final `hash_bytes(object_bytes) == prepared_hash` assertion before publication."
+  },
+  "rootCause": {
+    "evidenceRefs": [
+      "cli-first-read",
+      "prepare-reopen",
+      "prepare-hash",
+      "caller-write",
+      "prepared-publication",
+      "expected-control"
+    ],
+    "summary": "The violated invariant is that a prepared object name must be derived from the same bytes published at that name. The CLI validates the first read, `prepare_units()` reopens and hashes the path again without consuming or comparing `raw_hash`, and `write_prepared_objects()` publishes the first-read buffer under the second-read prepared hashes."
+  },
+  "scan_id": "f78f5d0d-2752-47a7-8d8d-3371e09d3377",
+  "schema_version": 1,
+  "scope": ".",
+  "summary": "The CLI verifies one byte buffer, passes only the mutable pathname to `prepare_units()`, and later writes the first-read bytes under prepared hashes derived from a second path read. A selected-root replacement between the two reads can publish a prepared CAS object whose name and contents disagree.",
+  "target_revision": "0e19f3c6489da458e93a982a333c308d92d0a0ae",
+  "title": "Prepare-stage reopen can poison prepared CAS identity",
+  "validation": {
+    "assertions": [
+      "`PrepareStageRequest.raw_hash` is not consumed by `prepare_units()` as a byte-binding check.",
+      "`write_prepared_objects()` derives the destination from `prepared_hash` but can publish the caller-retained first-read bytes.",
+      "Atomic publication protects crash consistency, not content/name agreement."
+    ],
+    "evidenceRefs": [
+      "cli-first-read",
+      "prepare-hash",
+      "caller-write",
+      "prepared-publication"
+    ],
+    "limitations": [
+      "No barrier-controlled replacement was run inside a live KCS store.",
+      "Race reliability and downstream consumer behavior beyond prepared CAS integrity were not measured."
+    ],
+    "method": "V10 exact static trace plus local synthetic regression probe",
+    "summary": "Source review confirms the two independent reads and the missing prepared-hash/object-byte equality check. The bundled PoC models the exact invariant violation with synthetic bytes and demonstrates that A can be written at B's prepared object name."
+  },
+  "writeup": {
+    "reportPath": "findings/tac-kcs-r23-cand-031-prepare-cas-identity-misbinding/tac-kcs-r23-cand-031-prepare-cas-identity-misbinding.md",
+    "reportSha256": "040ad69a95459f2836f3e4aebc14cb0aa925063792c5ce36f334cd05490b3295",
+    "pocDirectory": "findings/tac-kcs-r23-cand-031-prepare-cas-identity-misbinding/poc"
+  }
+}

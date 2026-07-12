@@ -1,0 +1,191 @@
+{
+  "ruleId": "kcs.r23.cand-019",
+  "identity": {
+    "anchor": "kcs-r23-cand-019",
+    "instance": "unbounded-direct-child-read"
+  },
+  "title": "Status and snapshot read unbounded direct-child files into memory",
+  "summary": "`kcs status` and `kcs snapshot` call a shared working-tree builder that reads every included direct-child regular file wholly before any size limit. A lower-trust scope contributor can therefore drive local memory, I/O, and snapshot storage consumption through routine commands.",
+  "severity": {
+    "level": "medium",
+    "rationale": "A realistic lower-trust scope contributor can deterministically reach a victim resource sink through routine commands, so self-only suppression does not apply. The required matrix maps medium impact plus high likelihood to medium.",
+    "changeConditions": "Severity would rise if a bounded input can cause persistent or cross-scope service loss; it would fall once status and snapshot enforce a pre-read byte budget or stream hashing and storage without attacker-sized allocation."
+  },
+  "confidence": {
+    "level": "high",
+    "rationale": "V5+V10. Exact status and snapshot call graphs both terminate at an unconditional whole-file read. Repository tests cover small files only; no status/snapshot large/sparse-file bound was found."
+  },
+  "taxonomy": {
+    "category": "resource consumption / local denial of service (CWE-400, CWE-770)",
+    "cwe": [
+      "CWE-400",
+      "CWE-770"
+    ]
+  },
+  "locations": [
+    {
+      "path": "crates/kcs-cli/src/main.rs",
+      "startLine": 435,
+      "endLine": 442,
+      "role": "status entry"
+    },
+    {
+      "path": "crates/kcs-core/src/scope.rs",
+      "startLine": 261,
+      "endLine": 309,
+      "role": "working-tree builder"
+    },
+    {
+      "path": "crates/kcs-core/src/scope.rs",
+      "startLine": 373,
+      "endLine": 386,
+      "role": "snapshot entry"
+    },
+    {
+      "path": "crates/kcs-core/src/scope.rs",
+      "startLine": 413,
+      "endLine": 427,
+      "role": "snapshot entry"
+    },
+    {
+      "path": "crates/kcs-cli/src/main.rs",
+      "startLine": 4425,
+      "endLine": 4444,
+      "role": "unrelated later input cap"
+    },
+    {
+      "path": "crates/kcs-cli/src/main.rs",
+      "startLine": 9047,
+      "endLine": 9061,
+      "role": "unrelated later input cap"
+    }
+  ],
+  "writeup": {
+    "reportPath": "findings/unbounded-direct-child-read/unbounded-direct-child-read.md"
+  },
+  "codeEvidence": [
+    {
+      "id": "status-entry",
+      "label": "Status reaches repository working-tree state",
+      "path": "crates/kcs-cli/src/main.rs",
+      "startLine": 435,
+      "endLine": 442,
+      "language": "rust",
+      "role": "entrypoint",
+      "code": "        Command::Status => {\n            let repo = Repository::open_current()?;\n            validate_repo_tool_lock(&repo)?;\n            let task_store = TaskStore::new(repo.kcs_dir());\n            // R15-4: `status` is a pure read — a shallow HEAD (tree object gone)\n            // degrades to listing files without a classification (`head_shallow`)\n            // instead of dying on a raw KCS-E-STORE-NOT-FOUND-001.\n            let status = repo.status()?;",
+      "explanation": "The routine `status` command opens the selected scope and calls `repo.status()`, which reaches the shared working-tree builder."
+    },
+    {
+      "id": "whole-file-read",
+      "label": "Builder reads each included file wholly",
+      "path": "crates/kcs-core/src/scope.rs",
+      "startLine": 261,
+      "endLine": 299,
+      "language": "rust",
+      "role": "root_control",
+      "code": "        for entry in fs::read_dir(&self.root).kcs_io(&self.root)? {\n            let entry = entry.kcs_io(&self.root)?;\n            if entry.file_name() == \".kcs\" {\n                continue;\n            }\n            let path = entry.path();\n            let file_type = entry.file_type().kcs_io(&path)?;\n            // Subfolders are out of scope (03 §3: direct children only) and are\n            // skipped silently. Symlinks / other non-regular files are skipped\n            // with a warning so the omission is visible (WS1c S5, 10 §4).\n            if file_type.is_dir() {\n                continue;\n            }\n            if !file_type.is_file() {\n                eprintln!(\"warning: skipping non-regular file: {}\", path.display());\n                continue;\n            }\n            // A non-UTF-8 file name cannot be a tree entry path; warn and skip\n            // rather than failing the whole snapshot (WS1c S6).\n            let file_name = match entry.file_name().into_string() {\n                Ok(name) => name,\n                Err(_) => {\n                    eprintln!(\"warning: skipping non-UTF-8 file name: {}\", path.display());\n                    continue;\n                }\n            };\n            if excluded_paths.contains(&file_name) {\n                continue;\n            }\n            let bytes = fs::read(&path).kcs_io(&path)?;\n            let raw_hash = if store_raw {\n                self.store.write_raw(&bytes)?\n            } else {\n                hash_bytes(&bytes)\n            };\n            let mut tree_entry = TreeEntry::raw_file(file_name.clone(), raw_hash)?;\n            tree_entry.normalize = normalize_by_path.get(&file_name).cloned();\n            tree_entry.validate()?;\n            entries.push(tree_entry);",
+      "explanation": "After only direct-child, file-type, UTF-8-name, and exclusion checks, the builder calls `fs::read` and materializes the full attacker-sized file before hashing or storing it."
+    },
+    {
+      "id": "late-adapter-cap",
+      "label": "Nearby size cap is later and adapter-specific",
+      "path": "crates/kcs-cli/src/main.rs",
+      "startLine": 9047,
+      "endLine": 9061,
+      "language": "rust",
+      "role": "expected_control",
+      "code": "    // R12-2: the documented `adapter.policy.max_input_bytes` input gate (07 §7.1.2 —\n    // \"KCS 側の入力制御\" is an MVP contract). Scope config wins over user config,\n    // default 100 MB. A file larger than the cap is never handed to the Markdownize\n    // adapter (below); it stays archived but unenriched, and the count is disclosed.\n    let max_input_bytes = effective_max_input_bytes(repo);\n    // R12-1: the documented `[markdownize.incremental]` overrides (were hardcoded).\n    let incremental_config = effective_incremental_config(repo)?;\n\n    for candidate in preview\n        .candidates\n        .iter()\n        .filter(|candidate| !candidate.ignored && candidate.media_type != \"inode/directory\")\n    {\n        if candidate.size_bytes > max_input_bytes {\n            result.skipped_oversized_files += 1;",
+      "explanation": "`effective_max_input_bytes` is enforced only while selecting later adapter candidates, so it does not bound the earlier status or snapshot builder read."
+    }
+  ],
+  "rootCause": {
+    "summary": "The shared working-tree builder filters file type and name but then calls `fs::read` without a per-file or aggregate byte budget. The nearby `adapter.policy.max_input_bytes` check belongs to later adapter processing and does not protect status or snapshot.",
+    "evidenceRefs": [
+      "status-entry",
+      "whole-file-read",
+      "late-adapter-cap"
+    ]
+  },
+  "remediation": "Add a shared pre-read bound or streaming policy for status/snapshot; scan-hash and deferred-task reads are separate instances.",
+  "validation": {
+    "method": "V5+V10",
+    "summary": "Exact status and snapshot call graphs both terminate at an unconditional whole-file read. Repository tests cover small files only; no status/snapshot large/sparse-file bound was found.",
+    "evidenceRefs": [
+      "status-entry",
+      "whole-file-read",
+      "late-adapter-cap"
+    ],
+    "assertions": [
+      "Exact status and snapshot call graphs both terminate at an unconditional whole-file read.",
+      "Repository tests cover small files only; no status/snapshot large/sparse-file bound was found."
+    ],
+    "counterevidence": [
+      "Subdirectories, symlinks, and explicit exclusions are skipped.",
+      "Status does not persist bytes; snapshot holds the store lock.",
+      "The operator can remove the file and retry."
+    ],
+    "limitations": [
+      "No large or sparse-file runtime measurement was retained; actual failure thresholds depend on host limits."
+    ]
+  },
+  "attackPath": {
+    "summary": "A lower-trust content contributor places a very large or sparse regular direct-child file in a scope the victim uses. The victim runs status or snapshot on that scope. The working-tree builder accepts the file through the type, name, and exclusion filters and calls fs::read before applying any byte ceiling. The victim process allocates and reads attacker-sized bytes; snapshot can additionally copy them into the archive, causing command failure or substantial local resource pressure.",
+    "dataflow": {
+      "summary": "A lower-trust content contributor places a very large or sparse regular direct-child file in a scope the victim uses. The victim runs status or snapshot on that scope. The working-tree builder accepts the file through the type, name, and exclusion filters and calls fs::read before applying any byte ceiling. The victim process allocates and reads attacker-sized bytes; snapshot can additionally copy them into the archive, causing command failure or substantial local resource pressure.",
+      "source": "A lower-trust content contributor places a very large or sparse regular direct-child file in a scope the victim uses.",
+      "sink": "the unconditional whole-file `fs::read` and, for snapshot, raw-object persistence",
+      "outcome": "one KCS process and selected scope per invocation",
+      "evidenceRefs": [
+        "status-entry",
+        "whole-file-read",
+        "late-adapter-cap"
+      ]
+    },
+    "reachability": {
+      "summary": "not public; reachable through local CLI processing of an adopted or shared scope",
+      "attacker": "KCS runs as the victim OS user with that user's filesystem and memory limits; the attacker needs no KCS or OS-administrator identity",
+      "entrypoint": "A lower-trust content contributor places a very large or sparse regular direct-child file in a scope the victim uses.",
+      "preconditions": "plausible: control one included direct-child file and wait for the operator to run status or snapshot; sparse files can make the logical-size amplification inexpensive",
+      "outcome": "runtime memory and I/O; snapshot also affects archive disk usage"
+    },
+    "evidenceRefs": [
+      "status-entry",
+      "whole-file-read",
+      "late-adapter-cap"
+    ],
+    "impact": {
+      "level": "medium",
+      "why": "A realistic lower-trust scope contributor can deterministically reach a victim resource sink through routine commands, so self-only suppression does not apply. The required matrix maps medium impact plus high likelihood to medium."
+    },
+    "likelihood": {
+      "level": "high",
+      "why": "The selected scope is shared, supplied, or otherwise writable by a lower-trust content contributor. The hostile file is a direct regular child and is not explicitly excluded. The victim invokes a routine status or snapshot command."
+    },
+    "counterevidence": [
+      "The later effective_max_input_bytes control applies only to adapter processing and does not protect status or snapshot.",
+      "The command is recoverable after removing the file and does not create a confidentiality or authorization bypass."
+    ],
+    "limitations": [
+      "No large or sparse-file runtime measurement was retained; actual failure thresholds depend on host limits."
+    ]
+  },
+  "remediationTests": [
+    "Place a direct-child file just above the configured core limit and assert status and snapshot reject it before allocation or use bounded streaming.",
+    "Use a bounded sparse-file regression to confirm logical size cannot trigger unbounded materialization or dense snapshot expansion."
+  ],
+  "preventiveControls": [
+    "direct-child, file-type, and exclusion filtering",
+    "snapshot store lock",
+    "late adapter-only input-size gate",
+    "Add a shared pre-read bound or streaming policy for status/snapshot; scan-hash and deferred-task reads are separate instances."
+  ],
+  "provenance": {
+    "source": "Codex Security deep-scan validation, attack-path closure, and an accepted dedicated one-finding vulnerability write-up"
+  },
+  "extensions": {
+    "candidateId": "KCS-R23-CAND-019",
+    "ledgerRowId": "KCS-R23-CAND-019",
+    "reportId": "KCS-R23-019"
+  }
+}
+

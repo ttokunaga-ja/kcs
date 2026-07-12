@@ -1,0 +1,192 @@
+{
+  "schema_version": 1,
+  "scan_id": "f78f5d0d-2752-47a7-8d8d-3371e09d3377",
+  "candidate_id": "KCS-R23-CAND-030",
+  "ledger_row_id": "KCS-R23-CAND-030",
+  "title": "Deterministic PDF normalization repeatedly reopens an unbound pathname",
+  "summary": "KCS verifies one selected-scope PDF byte buffer and keeps that hash as the raw identity, but deterministic PDF markdownization later reopens the mutable pathname for aggregate text and again for each page hint. A lower-trust scope writer who replaces the PDF after the checked read can have later PDF bytes persisted as normalized/search evidence under the earlier raw hash.",
+  "affected_locations": [
+    {
+      "label": "entrypoint_and_closest_control",
+      "path": "crates/kcs-cli/src/main.rs",
+      "lines": "9077-9109"
+    },
+    {
+      "label": "root_control",
+      "path": "crates/kcs-adapter/src/deterministic.rs",
+      "lines": "225-249"
+    },
+    {
+      "label": "sink",
+      "path": "crates/kcs-cli/src/main.rs",
+      "lines": "9364-9388"
+    }
+  ],
+  "final_policy": "reportable",
+  "final_severity": "low",
+  "priority": "P3",
+  "confidence": "medium",
+  "codeEvidence": [
+    {
+      "id": "cli-hash-control",
+      "label": "Indexing hashes one current byte buffer",
+      "path": "crates/kcs-cli/src/main.rs",
+      "startLine": 9077,
+      "endLine": 9109,
+      "language": "rust",
+      "role": "entrypoint",
+      "code": "let path = repo.root().join(&candidate.input_path);\nlet bytes = fs::read(&path)\n    .map_err(|err| KcsError::io(err.to_string(), path.display().to_string()))?;\nlet current_hash = hash_bytes(&bytes);\nif let Some(scan_hash) = &candidate.raw_hash {\n    if scan_hash != &current_hash {\n        append_event_log(\n            \"KCS-I-INDEX-INPUT-CHANGED-001\",\n            \"input file changed between scan and normalize; skipped to preserve \\\n             content-addressing (re-run index)\",\n            json!({ \"input_path\": candidate.input_path }),\n        )?;\n        result.failed_files += 1;\n        continue;\n    }\n}\nlet raw_hash = current_hash;\nlet prepare = prepare_units(PrepareStageRequest {\n    raw_hash: raw_hash.clone(),\n    media_type: candidate.media_type.clone(),\n    input_path: path.display().to_string(),\n    tool_profile_hash: prepare_profile_hash.clone(),\n})\n.map_err(pipeline_to_kcs)?;",
+      "explanation": "`run_index_pipeline()` reads the selected file once and computes `current_hash`. This closes replacements that occur before the read, but the later request carries `raw_hash` plus the pathname rather than an immutable byte buffer or descriptor."
+    },
+    {
+      "id": "markdownize-request-path",
+      "label": "Markdownize request pairs raw hash with pathname",
+      "path": "crates/kcs-cli/src/main.rs",
+      "startLine": 9282,
+      "endLine": 9304,
+      "language": "rust",
+      "role": "propagation",
+      "code": "let request = MarkdownizeRequest {\n    raw: RawInput {\n        raw_hash: raw_hash.clone(),\n        path: Some(path.display().to_string()),\n    },\n    media_type: candidate.media_type.clone(),\n    prepared_unit_hint: Some(hints),\n    mode: adapter_mode(mode),\n    previous: (mode == MarkdownizeMode::Incremental)\n        .then_some(adapter_previous)\n        .flatten(),\n    hints: (mode == MarkdownizeMode::Incremental)\n        .then(|| adapter_hints(&incremental_hints)),\n    restrict_to_hint_pages: false,\n    tool_profile_hash: markdown_profile_hash.clone(),\n    spec_version: 1,\n};\n\nlet mut response = markdown_adapter\n    .markdownize(request.clone())\n    .map_err(adapter_to_kcs)?;",
+      "explanation": "The adapter receives the authoritative `raw_hash` and a string path. A concurrent writer can change what that path names after the hash control has already accepted the earlier bytes."
+    },
+    {
+      "id": "source-reopen",
+      "label": "Aggregate PDF text reopens the mutable path",
+      "path": "crates/kcs-adapter/src/deterministic.rs",
+      "startLine": 225,
+      "endLine": 230,
+      "language": "rust",
+      "role": "root_control",
+      "code": "fn read_source_text(request: &MarkdownizeRequest) -> Option<String> {\n    let path = request.raw.path.as_ref()?;\n    let bytes = std::fs::read(path).ok()?;\n    if request.media_type == \"application/pdf\" {\n        return Some(extract_pdf_text_pages(&bytes).join(\"\\n\\n\"));\n    }",
+      "explanation": "`read_source_text()` opens `request.raw.path` and parses the bytes currently present there. It does not compare the reopened bytes with `request.raw.raw_hash`."
+    },
+    {
+      "id": "page-reopen",
+      "label": "Each PDF page hint reopens the path again",
+      "path": "crates/kcs-adapter/src/deterministic.rs",
+      "startLine": 244,
+      "endLine": 249,
+      "language": "rust",
+      "role": "sink",
+      "code": "fn read_pdf_page_text(request: &MarkdownizeRequest, hint: &PreparedUnitHint) -> Option<String> {\n    let path = request.raw.path.as_ref()?;\n    let bytes = std::fs::read(path).ok()?;\n    let pages = extract_pdf_text_pages(&bytes);\n    let page_index = page_index_from_unit_key(&hint.unit_key).unwrap_or(hint.order as usize);\n    let page = pages.get(page_index).cloned()?;",
+      "explanation": "The per-page helper performs another independent pathname read. Replacements after the aggregate read can therefore affect individual page markdown while the request still carries the earlier raw identity."
+    },
+    {
+      "id": "raw-hash-persistence",
+      "label": "Normalized units retain the earlier raw hash",
+      "path": "crates/kcs-cli/src/main.rs",
+      "startLine": 9364,
+      "endLine": 9388,
+      "language": "rust",
+      "role": "outcome",
+      "code": "let units = normalized_units_from_response(\n    &response,\n    &prepare.prepared_units,\n    previous.as_ref(),\n    &raw_hash,\n    &markdown_profile_hash,\n    final_mode,\n    &generated_at,\n)?;\nlet manifest = manifest_from_units(\n    &prepare.prepared_units,\n    &units,\n    &raw_hash,\n    &markdown_profile_hash,\n    previous.as_ref().map(|previous| previous.manifest.gen),\n    &run_id,\n    &generated_at,\n    RetryErrorKind::ContractViolation,\n);\npersist_normalized_instance(repo.kcs_dir(), &manifest, &units).map_err(pipeline_to_kcs)?;",
+      "explanation": "The adapter response is persisted with the earlier `raw_hash`, so text derived from later pathname bytes becomes durable normalized/search evidence for the first checked identity."
+    }
+  ],
+  "rootCause": {
+    "summary": "The violated invariant is that deterministic normalized PDF output must come from the same bytes that produced the raw hash used for persistence. KCS hashes one read, then passes only the hash and pathname onward; deterministic PDF extraction independently reopens that pathname for aggregate and per-page text without rebinding the bytes to the hash.",
+    "evidenceRefs": [
+      "cli-hash-control",
+      "markdownize-request-path",
+      "source-reopen",
+      "page-reopen",
+      "raw-hash-persistence"
+    ]
+  },
+  "validation": {
+    "method": "static source trace plus local/offline synthetic control-flow PoC",
+    "summary": "Source review confirms that the first hash check ends before deterministic PDF reads, and the PoC modeled the accepted interleaving with disposable PDF-like files: A was hashed, B was observed by the aggregate reopen, C was observed by the per-page reopen, and C-derived markdown remained labelled with H(A).",
+    "evidenceRefs": [
+      "cli-hash-control",
+      "markdownize-request-path",
+      "source-reopen",
+      "page-reopen",
+      "raw-hash-persistence"
+    ],
+    "assertions": [
+      "Replacements before the checked read are rejected by the existing scan/current hash comparison.",
+      "No byte buffer, stable descriptor, inode identity, or hash comparison crosses from the checked read into deterministic PDF extraction.",
+      "The deterministic adapter reads `request.raw.path` once for aggregate PDF text and again for each PDF page hint.",
+      "Normalized persistence keeps using the original `raw_hash` after adapter output is produced."
+    ],
+    "limitations": [
+      "No barrier-controlled replacement was run inside the unmodified KCS binary.",
+      "Race success rate and stable mixed-page output were not measured.",
+      "This validation does not prove arbitrary out-of-scope file disclosure or online upload."
+    ]
+  },
+  "attackPath": {
+    "summary": "A lower-trust local contributor replaces a selected-scope PDF after KCS has accepted the checked read. Deterministic PDF normalization then consumes later bytes from the same pathname and KCS persists the resulting normalized units under the earlier raw identity.",
+    "dataflow": {
+      "summary": "scope PDF pathname -> checked `fs::read()` and `hash_bytes()` -> `MarkdownizeRequest.raw.path` -> deterministic aggregate and per-page `std::fs::read()` -> normalized persistence under original `raw_hash`",
+      "source": "a mutable selected-scope PDF pathname controlled by a contributor with write/rename authority",
+      "sink": "normalized PDF units and manifest entries keyed by the earlier raw hash",
+      "outcome": "search/evidence provenance can describe replacement PDF bytes while naming the original PDF identity",
+      "evidenceRefs": [
+        "cli-hash-control",
+        "markdownize-request-path",
+        "source-reopen",
+        "page-reopen",
+        "raw-hash-persistence"
+      ]
+    },
+    "reachability": {
+      "summary": "The attacker needs local write/rename authority in a scope the operator indexes and a replacement that lands after the accepted hash read.",
+      "attacker": "lower-trust local content contributor",
+      "entrypoint": "ordinary deterministic `kcs index` processing of a selected-scope PDF",
+      "preconditions": [
+        "Concurrent write or rename authority for the selected PDF pathname.",
+        "Operator deterministic indexing of that scope.",
+        "Favorable scheduling after the first checked read and before or between deterministic PDF reopens."
+      ],
+      "outcome": "bounded local normalized/search provenance poisoning for one scope"
+    },
+    "evidenceRefs": [
+      "cli-hash-control",
+      "source-reopen",
+      "page-reopen",
+      "raw-hash-persistence"
+    ],
+    "impact": {
+      "level": "medium",
+      "why": "The boundary crossed is trusted content identity: later bytes can become authoritative normalized/search evidence for an earlier raw hash. The demonstrated reach is bounded to one scope and can be corrected by a stable re-index."
+    },
+    "likelihood": {
+      "level": "medium",
+      "why": "Exploitation requires a concurrent local writer and favorable timing; no deterministic scheduling hook was exposed in the target revision."
+    },
+    "limitations": [
+      "No public network surface participates in the validated path.",
+      "No credential, live service, or third-party target is required or touched.",
+      "The stronger arbitrary-file disclosure and online-send consequences were not adopted for this finding."
+    ]
+  },
+  "remediation": {
+    "summary": "Carry the verified PDF bytes, or a stable opened descriptor with final hash revalidation, through prepare and deterministic markdownize so every derived unit is produced from the same input that generated the persisted raw hash.",
+    "recommendations": [
+      "Refactor deterministic prepare/markdownize to accept a verified byte snapshot rather than reopening `request.raw.path`.",
+      "If path-based adapter compatibility must remain, rehash the bytes immediately before each path-consuming adapter read and fail closed on mismatch.",
+      "Parse PDF pages once from the verified bytes and reuse that page vector for aggregate and per-page markdown.",
+      "Keep display paths as metadata only; do not treat them as byte authority after the raw hash is accepted."
+    ],
+    "regression_tests": [
+      "A barrier after the checked read followed by a PDF replacement must not persist replacement text under H(A).",
+      "A replacement between aggregate and per-page PDF extraction must not produce mixed-version normalized units.",
+      "A stable PDF should continue to produce the same deterministic units and markdown as before.",
+      "A later symlink or regular-file substitution after initial scan filtering should fail before normalized persistence."
+    ]
+  },
+  "writeup": {
+    "reportPath": "findings/tac-kcs-r23-cand-030-pdf-repeated-path-reopen/tac-kcs-r23-cand-030-pdf-repeated-path-reopen.md",
+    "pocDirectory": "findings/tac-kcs-r23-cand-030-pdf-repeated-path-reopen/poc"
+  },
+  "source_reports": [
+    "artifacts/05_findings/KCS-R23-CAND-030/validation_report.md",
+    "artifacts/05_findings/KCS-R23-CAND-030/attack_path_analysis_report.md"
+  ],
+  "extensions": {
+    "candidateId": "KCS-R23-CAND-030",
+    "ledgerRowId": "KCS-R23-CAND-030",
+    "reportId": "KCS-R23-CAND-030"
+  }
+}

@@ -1,0 +1,2 @@
+# Security audit exports preserve source bytes for receipt and checksum bindings.
+security/audits/** -whitespace

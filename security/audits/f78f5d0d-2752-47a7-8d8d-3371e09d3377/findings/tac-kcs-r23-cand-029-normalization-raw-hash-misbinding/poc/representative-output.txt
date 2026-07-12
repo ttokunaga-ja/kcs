@@ -1,0 +1,8 @@
+[+] scan hash for version A: a31b2d3f75db14c2
+[+] caller verified current read equals scan hash
+[+] prepare derived prepared hash: a31b2d3f75db14c2
+[+] attacker replaced the path after prepare and before markdownize
+[+] adapter markdown came from version B: 461c1060d311aaf2
+[+] persisted normalized raw_hash: a31b2d3f75db14c2
+[+] primitive reached: version B text is stored under H(version A)
+[+] fixed final binding check would reject: final read hash does not match request raw_hash

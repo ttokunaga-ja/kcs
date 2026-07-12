@@ -1,0 +1,5 @@
+[+] attack provider pages: [(0, 'page-A'), (0, 'page-B')]
+[+] attack mapped outputs: ['page-B', 'page-B']
+[+] strict coverage validation still passes: True
+[+] unique-index control outputs: ['page-A', 'page-B']
+[+] proposed bijection check rejects attack: duplicate page index 0

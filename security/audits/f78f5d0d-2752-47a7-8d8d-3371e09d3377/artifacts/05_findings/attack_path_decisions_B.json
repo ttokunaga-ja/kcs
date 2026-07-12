@@ -1,0 +1,770 @@
+[
+  {
+    "candidate_id": "KCS-R23-CAND-010",
+    "title": "AuthError output omits the resume-only recovery command",
+    "ledger_row_id": "KCS-R23-CAND-010",
+    "instance_key": "KCS-R23-CAND-010",
+    "affected_locations": [
+      {
+        "label": "retry refusal",
+        "path": "crates/kcs-cli/src/main.rs",
+        "lines": "5639-5666"
+      },
+      {
+        "label": "resume-only revival",
+        "path": "crates/kcs-cli/src/main.rs",
+        "lines": "5934-6048"
+      },
+      {
+        "label": "generic output/log",
+        "path": "crates/kcs-cli/src/main.rs",
+        "lines": "320-357,5570-5637"
+      },
+      {
+        "label": "auth retry policy",
+        "path": "crates/kcs-pipeline/src/task.rs",
+        "lines": "320-347"
+      }
+    ],
+    "attack_steps": [
+      "A configured adapter or intermediary returns an authentication error, leaving markdownize work in Failed(auth_error).",
+      "CLI output reports AuthError and exit code 5 but omits the sole revival command.",
+      "The operator or automation invokes batch retry, which intentionally leaves the task failed.",
+      "Work remains incomplete until batch resume is independently discovered."
+    ],
+    "assumptions": [
+      "Online markdownization is configured.",
+      "The operator or automation relies on machine output for recovery."
+    ],
+    "context": "Current production CLI task recovery and output contract; the consequence remains within the operator's own scope and task.",
+    "in_scope": true,
+    "exposure": "A configured outbound adapter response can initiate the state, but the affected surface is local operator-facing CLI, JSON, and log output; KCS has no listener.",
+    "identity": "An untrusted adapter response can trigger AuthError, but the recovery decision belongs to the trusted operator or calling automation.",
+    "cross_boundary": false,
+    "vector": "remote",
+    "preconditions": [
+      "A markdownize task fails with AuthError.",
+      "The operator or automation follows batch retry rather than batch resume."
+    ],
+    "attacker_control": "A remote service controls the initial error response but cannot gain authority, cause disclosure, or force the operator's recovery choice through this defect.",
+    "category": "observability and recovery guidance",
+    "mitigations": [
+      "Exit code 5 and AuthError classification remain visible.",
+      "Batch retry correctly preserves the non-retryable state.",
+      "Batch resume correctly provides explicit revival."
+    ],
+    "auth_scope": "admin-only: the affected action is recovery by the local operator or its trusted automation, with no authorization-scope change.",
+    "impact_surface": "runtime: single-scope enrichment availability and recovery observability",
+    "target_reach": "Affected failed markdownize tasks in the selected scope.",
+    "secrets_references": [],
+    "counterevidence": [
+      "Exit code 5 and the AuthError class are disclosed.",
+      "Repository documentation may identify the recovery command.",
+      "No send, confidentiality, authorization, or budget-cap bypass occurs."
+    ],
+    "blindspots": [
+      "The permitted artifacts do not show that real automation persistently loops rather than escalating the visible AuthError."
+    ],
+    "controls": [
+      "AuthError has max_attempts=0.",
+      "Batch retry refuses revival.",
+      "Batch resume is the explicit revival path."
+    ],
+    "confidence": "high",
+    "impact": "low",
+    "likelihood": "medium",
+    "final_policy": "ignore",
+    "final_severity": "none",
+    "priority": null,
+    "rationale": "The only demonstrated consequence is omitted recovery guidance for operator-controlled work. It neither expands attacker authority nor crosses a confidentiality, integrity, or monetary boundary. Hard suppression applies to this operator/self-only path, and low impact independently maps to ignore."
+  },
+  {
+    "candidate_id": "KCS-R23-CAND-011",
+    "title": "a new secret content twin is vector-linked before its hold exists",
+    "ledger_row_id": "KCS-R23-CAND-011",
+    "instance_key": "KCS-R23-CAND-011",
+    "affected_locations": [
+      {
+        "label": "rebuild-before-enrichment ordering",
+        "path": "crates/kcs-cli/src/main.rs",
+        "lines": "620-653"
+      },
+      {
+        "label": "task-derived hold denylist",
+        "path": "crates/kcs-cli/src/main.rs",
+        "lines": "3008-3027"
+      },
+      {
+        "label": "content-twin relink",
+        "path": "crates/kcs-index/src/embedding_store.rs",
+        "lines": "149-185"
+      },
+      {
+        "label": "already-linked filtering",
+        "path": "crates/kcs-cli/src/main.rs",
+        "lines": "7848-7936"
+      }
+    ],
+    "attack_steps": [
+      "A public chunk is embedded under the active profile.",
+      "A lower-trust scope contributor adds a Tier-B secret-labeled file containing the same chunk text.",
+      "Index rebuild runs before secret-hold creation and links the new chunk to the existing embedding by text_hash.",
+      "Because no hold task yet exists, the task-derived denylist does not exclude the new secret chunk.",
+      "Later enrichment treats the linked chunk as complete, so no hold is created.",
+      "Vector search exposes the secret file's path, provenance, and policy-visible presence."
+    ],
+    "assumptions": [
+      "The scope accepts files from a local or shared/synced lower-trust contributor.",
+      "An identical public text twin already has a current-profile embedding.",
+      "The new file receives Tier-B classification and the operator has not approved sending secrets."
+    ],
+    "context": "Normal sequential index execution; no private-store corruption, race, or privileged access is required.",
+    "in_scope": true,
+    "exposure": "Untrusted local scope content enters trusted vector-index and search state through ordinary indexing; no network listener or unauthorized outbound send is involved.",
+    "identity": "A local content contributor or shared/synced archive contributor controls the new file, while the operator and its automation consume trusted search state.",
+    "cross_boundary": true,
+    "vector": "none",
+    "preconditions": [
+      "An existing public embedded twin.",
+      "A new secret-labeled content twin.",
+      "An ordinary index command without --send-secrets."
+    ],
+    "attacker_control": "The lower-trust contributor controls the new file's name and bytes and can deterministically satisfy the content-twin condition.",
+    "category": "secret-policy and search-identity bypass",
+    "mitigations": [
+      "Existing secret-hold task IDs are excluded from rebuild.",
+      "Secret partitioning would create a hold if the chunk reached enrichment.",
+      "The identical text already exists in a public twin and is not newly transmitted."
+    ],
+    "auth_scope": "internal-only: no network authorization is bypassed, but the local secret-hold and trusted-search policy boundary is crossed.",
+    "impact_surface": "data: secret path/provenance visibility and durable vector-search policy integrity",
+    "target_reach": "Secret twin chunks in the indexed scope that share text with an existing embedding.",
+    "secrets_references": [
+      "Tier-B secret classification",
+      "secrets_tier_b_hold",
+      "--send-secrets"
+    ],
+    "counterevidence": [
+      "The identical text is already present in a public twin.",
+      "No secret bytes are newly transmitted.",
+      "Disclosure is limited to secret path/provenance and policy visibility."
+    ],
+    "blindspots": [
+      "The permitted artifacts do not quantify downstream reliance on secret-path search results.",
+      "A contributor may already know the file it supplied, though other search consumers need not."
+    ],
+    "controls": [
+      "The rebuild denylist uses already persisted hold-task IDs.",
+      "Secret partitioning is present but is skipped after the premature content link.",
+      "Already-linked completion filtering prevents the missing hold from catching up."
+    ],
+    "confidence": "high",
+    "impact": "medium",
+    "likelihood": "high",
+    "final_policy": "reportable",
+    "final_severity": "medium",
+    "priority": "P2",
+    "rationale": "A realistic lower-trust path exists: an ordinary content contributor controls names and bytes, and deterministic normal indexing crosses that content into trusted vector/search state without store tampering. Impact is bounded because the text is already public and no send occurs. Medium impact plus high likelihood maps mechanically to medium."
+  },
+  {
+    "candidate_id": "KCS-R23-CAND-012",
+    "title": "Content-twin reuse leaves completed budget-paused tasks falsely pending",
+    "ledger_row_id": "KCS-R23-CAND-012",
+    "instance_key": "KCS-R23-CAND-012",
+    "affected_locations": [
+      {
+        "label": "content_reuse_projection",
+        "path": "crates/kcs-index/src/embedding_store.rs",
+        "lines": "149-184",
+        "detail": "Rebuild links non-secret-held content-hash twins."
+      },
+      {
+        "label": "held_only_filter",
+        "path": "crates/kcs-cli/src/main.rs",
+        "lines": "3008-3027,3655-3658",
+        "detail": "Only secrets holds are excluded from content-vector rebuild."
+      },
+      {
+        "label": "completion_detection",
+        "path": "crates/kcs-cli/src/main.rs",
+        "lines": "7911-7917,8006-8013",
+        "detail": "The budget-paused live chunk has a current vector and is no longer pending."
+      },
+      {
+        "label": "root_control",
+        "path": "crates/kcs-cli/src/main.rs",
+        "lines": "8088-8132",
+        "detail": "A reason-blind Paused guard skips the Done transition."
+      },
+      {
+        "label": "status_sink",
+        "path": "crates/kcs-cli/src/main.rs",
+        "lines": "2417-2506",
+        "detail": "The stale row remains pending and sets budget_paused."
+      }
+    ],
+    "attack_steps": [
+      "A contributor-controlled chunk reaches a configured hard budget cap and becomes Paused(budget_exceeded).",
+      "After budget availability or configuration changes, a byte-distinct twin with identical normalized text obtains an embedding.",
+      "Rebuild links the paused chunk to that embedding by text_hash.",
+      "Completion detection recognizes the chunk as materially embedded.",
+      "The reason-blind Paused guard nevertheless refuses to transition it to Done.",
+      "Search remains functional, but automation-facing status persistently reports pending enrichment and budget_paused."
+    ],
+    "assumptions": [
+      "An embedding profile and hard budget cap are configured.",
+      "A genuine budget pause occurs before the twin is embedded.",
+      "A lower-trust contributor can supply appropriately ordered content twins.",
+      "The operator later raises or otherwise clears the cap."
+    ],
+    "context": "Normal CLI lifecycle involving budget enforcement, content reuse, reconciliation, and status.",
+    "in_scope": true,
+    "exposure": "Untrusted local scope content can influence trusted task and budget-status state under ordinary operator configuration.",
+    "identity": "A local content contributor supplies the documents; the operator controls budget configuration and later cap recovery.",
+    "cross_boundary": true,
+    "vector": "none",
+    "preconditions": [
+      "An earlier hard budget pause.",
+      "A byte-distinct chunk with identical normalized text.",
+      "Later materialization of a current-profile vector.",
+      "Ordinary re-indexing."
+    ],
+    "attacker_control": "A contributor controls document bytes and ordering, but does not control the configured cap or the operator's later cap change.",
+    "category": "task convergence and budget-status integrity",
+    "mitigations": [
+      "Budget enforcement correctly creates the initial pause.",
+      "Content reuse correctly materializes the shared vector.",
+      "Explicit batch resume --override-budget repairs the record without another adapter call."
+    ],
+    "auth_scope": "internal-only: no authorization, secret-send, or monetary-cap bypass occurs.",
+    "impact_surface": "runtime: automation-facing index status, budget-paused telemetry, and task convergence",
+    "target_reach": "Budget-paused chunks completed through same-profile content-twin reuse in one scope.",
+    "secrets_references": [
+      "secrets_tier_b_hold is the necessary negative control that must remain Paused"
+    ],
+    "counterevidence": [
+      "Both documents remain searchable and search data is intact.",
+      "No confidentiality or extra-spend effect was observed.",
+      "Explicit override heals the task without another adapter call."
+    ],
+    "blindspots": [
+      "No downstream automation was shown taking a harmful action based on the false status.",
+      "The lower-trust contributor cannot independently create the required cap-change lifecycle."
+    ],
+    "controls": [
+      "The hard budget gate correctly pauses work.",
+      "Current-vector completion detection recognizes the materialized embedding.",
+      "A reason-blind Paused guard is the broken convergence control."
+    ],
+    "confidence": "high",
+    "impact": "medium",
+    "likelihood": "medium",
+    "final_policy": "reportable",
+    "final_severity": "low",
+    "priority": "P3",
+    "rationale": "A plausible lower-trust content path exists, but it depends on a multi-stage operator budget lifecycle the contributor does not control. The false durable state can mislead automation, while intact search, no extra spend, and free explicit recovery materially constrain likelihood and consequence. Medium impact plus medium likelihood maps mechanically to low."
+  },
+  {
+    "candidate_id": "KCS-R23-CAND-013",
+    "title": "Embedding reconciliation revives AuthError work during batch retry",
+    "ledger_row_id": "KCS-R23-CAND-013",
+    "instance_key": "KCS-R23-CAND-013",
+    "affected_locations": [
+      {
+        "label": "command_contract",
+        "path": "crates/kcs-cli/src/main.rs",
+        "lines": "5639-5666",
+        "detail": "batch retry passes allow_auth_revive=false and excludes non-retryable AuthError."
+      },
+      {
+        "label": "missing_control_propagation",
+        "path": "crates/kcs-cli/src/main.rs",
+        "lines": "5934-5967",
+        "detail": "The flag reaches markdownize but is omitted from embedding enrichment."
+      },
+      {
+        "label": "negative_control",
+        "path": "crates/kcs-cli/src/main.rs",
+        "lines": "5992-6022",
+        "detail": "Markdownize revival is correctly gated on allow_auth_revive."
+      },
+      {
+        "label": "root_control",
+        "path": "crates/kcs-cli/src/main.rs",
+        "lines": "7997-8043",
+        "detail": "Embedding reconciliation unconditionally revives live Failed(AuthError)."
+      },
+      {
+        "label": "send_sink",
+        "path": "crates/kcs-cli/src/main.rs",
+        "lines": "7340-7345,7526-7544,7727-7742",
+        "detail": "The revived chunk passes task filtering and its text is sent in the same pass."
+      }
+    ],
+    "attack_steps": [
+      "An approved embedding attempt leaves a live Failed(auth_error) task.",
+      "The operator repairs credentials and invokes batch retry.",
+      "Embedding reconciliation ignores allow_auth_revive=false and resets the task to Pending.",
+      "The revived task passes filtering and its text is sent to the adapter in the same pass."
+    ],
+    "assumptions": [
+      "Persistent embedding approval remains valid.",
+      "Secret holds and budget checks pass.",
+      "Credentials are usable again."
+    ],
+    "context": "Command-scoped task authorization failure in the normal embedding recovery workflow.",
+    "in_scope": true,
+    "exposure": "A local CLI recovery path reaches a configured outbound adapter call; KCS has no inbound listener.",
+    "identity": "A lower-trust remote provider can create the AuthError response state; the trusted operator supplies the later recovery command.",
+    "cross_boundary": true,
+    "vector": "remote",
+    "preconditions": [
+      "An existing Failed(auth_error) embedding task.",
+      "Repaired credentials.",
+      "The operator invokes batch retry."
+    ],
+    "attacker_control": "The remote provider controls the failure response; a content contributor may control the already-approved chunk text, but neither controls the later operator command.",
+    "category": "task-lifecycle and command-scoped authorization bypass",
+    "mitigations": [
+      "Initial network approval remains required.",
+      "Secret holds remain effective.",
+      "Budget enforcement remains effective."
+    ],
+    "auth_scope": "internal-only: only AuthError revival under batch retry is bypassed; initial adapter consent is not bypassed.",
+    "impact_surface": "network: previously approved content can be resent and bounded online cost incurred contrary to the selected recovery contract",
+    "target_reach": "Live AuthError embedding tasks in the selected scope.",
+    "secrets_references": [],
+    "counterevidence": [
+      "The operator requested retry work generally.",
+      "Content was already approved for the same adapter.",
+      "No monetary-cap or secret-hold bypass occurs."
+    ],
+    "blindspots": [
+      "Validation used the adapter seam rather than a real provider, although the real pre-adapter request path was reached."
+    ],
+    "controls": [
+      "AuthError is non-retryable with max_attempts=0.",
+      "The outer retry path sets allow_auth_revive=false.",
+      "Adapter approval, secret holds, and the budget gate still execute."
+    ],
+    "confidence": "high",
+    "impact": "medium",
+    "likelihood": "high",
+    "final_policy": "reportable",
+    "final_severity": "medium",
+    "priority": "P2",
+    "rationale": "A realistic lower-trust provider-response path exists and the revival/send transition is deterministic once ordinary recovery preconditions hold. The wrong command reaches a real send, but existing consent, secret, and budget controls bound impact. Medium impact plus high likelihood maps mechanically to medium."
+  },
+  {
+    "candidate_id": "KCS-R23-CAND-014",
+    "title": "Unrecognized binary gaps disappear from durable completeness and path telemetry",
+    "ledger_row_id": "KCS-R23-CAND-014",
+    "instance_key": "KCS-R23-CAND-014",
+    "affected_locations": [
+      {
+        "label": "transient_result",
+        "path": "crates/kcs-cli/src/main.rs",
+        "lines": "656-671",
+        "detail": "The unsupported count exists only in the current index result."
+      },
+      {
+        "label": "persistent_status_sink",
+        "path": "crates/kcs-cli/src/main.rs",
+        "lines": "435-450",
+        "detail": "status lists the archived file and tasks without an unsupported disposition."
+      },
+      {
+        "label": "completeness_control",
+        "path": "crates/kcs-cli/src/main.rs",
+        "lines": "2417-2506",
+        "detail": "Search completeness counts task rows only."
+      },
+      {
+        "label": "root_control",
+        "path": "crates/kcs-cli/src/main.rs",
+        "lines": "9120-9169",
+        "detail": "The octet-stream skip creates no task and its event omits input_path."
+      }
+    ],
+    "attack_steps": [
+      "An untrusted contributor supplies an unsupported binary in the indexed scope.",
+      "Indexing archives it but creates no task or durable per-path unsupported disposition.",
+      "The immediate response reports only a skipped count and the retained event omits the path.",
+      "Later status and search omit the gap and can report full enrichment with no pending work."
+    ],
+    "assumptions": [
+      "The operator indexes the supplied scope.",
+      "Status or search completeness is later trusted after the immediate index response is unavailable."
+    ],
+    "context": "Durable completeness and recovery telemetry omit archived-but-unsearchable input.",
+    "in_scope": true,
+    "exposure": "An ordinary untrusted direct-child file is processed by the local CLI; no network exposure is required.",
+    "identity": "A lower-trust content contributor influences trusted operator or automation completeness decisions.",
+    "cross_boundary": true,
+    "vector": "none",
+    "preconditions": [
+      "Unsupported binary input.",
+      "A normal indexing invocation.",
+      "Later reliance on status or search telemetry."
+    ],
+    "attacker_control": "A content contributor controls the file bytes and format needed to deterministically reach the unsupported branch.",
+    "category": "observability and completeness-integrity failure",
+    "mitigations": [
+      "Raw bytes remain in CAS.",
+      "The immediate invocation reports the skipped-file count.",
+      "Rerunning index repeats the count."
+    ],
+    "auth_scope": "internal-only: no authorization bypass occurs, but untrusted scope content crosses into trusted completeness decisions.",
+    "impact_surface": "data: search completeness, recovery decisions, and automation consuming enrichment status",
+    "target_reach": "Any unsupported file in the supplied scope; aggregate scope completeness can be false.",
+    "secrets_references": [],
+    "counterevidence": [
+      "No data is destroyed.",
+      "No confidentiality, network-consent, or budget boundary is bypassed.",
+      "The immediate count reveals that some input was skipped."
+    ],
+    "blindspots": [],
+    "controls": [
+      "A one-run skipped counter and INFO event expose the gap class.",
+      "CAS preserves the original bytes.",
+      "Task-based status aggregation is the broken completeness control."
+    ],
+    "confidence": "high",
+    "impact": "medium",
+    "likelihood": "high",
+    "final_policy": "reportable",
+    "final_severity": "medium",
+    "priority": "P2",
+    "rationale": "The lower-trust path is direct and deterministic: an ordinary unsupported file produces durable false completeness and non-actionable status. Impact is bounded to search and workflow integrity. Medium impact plus high likelihood maps mechanically to medium."
+  },
+  {
+    "candidate_id": "KCS-R23-CAND-015",
+    "title": "soft-stop budget exhaustion is falsely reported as paused",
+    "ledger_row_id": "KCS-R23-CAND-015",
+    "instance_key": "KCS-R23-CAND-015",
+    "affected_locations": [
+      {
+        "label": "soft-stop contract",
+        "path": "crates/kcs-pipeline/src/budget.rs",
+        "lines": "70-82"
+      },
+      {
+        "label": "correct charge enforcement",
+        "path": "crates/kcs-cli/src/main.rs",
+        "lines": "10337-10362"
+      },
+      {
+        "label": "false status shortcut",
+        "path": "crates/kcs-cli/src/main.rs",
+        "lines": "2480-2492"
+      }
+    ],
+    "attack_steps": [
+      "The operator configures hard_stop=false.",
+      "Legitimate spend reaches or exceeds the configured cap.",
+      "Execution correctly continues and completes.",
+      "Status nevertheless reports budget_paused=true from the nonpositive balance alone."
+    ],
+    "assumptions": [
+      "The operator intentionally selected soft-stop policy.",
+      "A status consumer acts on the inaccurate governance flag."
+    ],
+    "context": "Incorrect status wording for an intentionally configured soft budget cap.",
+    "in_scope": true,
+    "exposure": "Trusted local configuration and valid ledger state only.",
+    "identity": "Trusted operator/self; no realistic lower-trust source is demonstrated.",
+    "cross_boundary": false,
+    "vector": "none",
+    "preconditions": [
+      "hard_stop=false.",
+      "The cap is exhausted.",
+      "Status is consulted."
+    ],
+    "attacker_control": "None beyond already-authorized operator configuration.",
+    "category": "governance-status accuracy",
+    "mitigations": [
+      "Execution correctly honors soft-stop semantics.",
+      "Ledger accounting remains correct.",
+      "Task-level status correctly identifies genuine budget pauses."
+    ],
+    "auth_scope": "admin-only: no authority is gained or bypassed.",
+    "impact_surface": "runtime: status consumers may perform unnecessary recovery or misdiagnose healthy enrichment",
+    "target_reach": "Only scopes using an exhausted operator-configured soft cap.",
+    "secrets_references": [],
+    "counterevidence": [
+      "No work is blocked.",
+      "No send is newly authorized.",
+      "No cap or accounting control is bypassed."
+    ],
+    "blindspots": [],
+    "controls": [
+      "The execution gate is hard-stop-aware.",
+      "Charges are recorded correctly.",
+      "Task-level pause classification remains accurate."
+    ],
+    "confidence": "high",
+    "impact": "low",
+    "likelihood": "high",
+    "final_policy": "ignore",
+    "final_severity": "none",
+    "priority": null,
+    "rationale": "The defect is deterministic but status-only and requires deliberate operator configuration. With no realistic lower-trust path and low impact, hard suppression and the matrix both require ignore."
+  },
+  {
+    "candidate_id": "KCS-R23-CAND-016",
+    "title": "malformed lock publication can permanently wedge protected operations",
+    "ledger_row_id": "KCS-R23-CAND-016",
+    "instance_key": "KCS-R23-CAND-016",
+    "affected_locations": [
+      {
+        "label": "final-path creation",
+        "path": "crates/kcs-core/src/scope.rs",
+        "lines": "1811-1815"
+      },
+      {
+        "label": "fallible publication",
+        "path": "crates/kcs-core/src/scope.rs",
+        "lines": "1868-1877"
+      },
+      {
+        "label": "parse-before-recovery",
+        "path": "crates/kcs-core/src/scope.rs",
+        "lines": "1880-1907"
+      },
+      {
+        "label": "rotation behavior",
+        "path": "crates/kcs-core/src/scope.rs",
+        "lines": "1213-1243"
+      }
+    ],
+    "attack_steps": [
+      "KCS creates the final StoreLock pathname before serializing, writing, and syncing a complete record.",
+      "A crash or fallible constructor step leaves an empty or truncated final lock file.",
+      "Later acquisitions parse the malformed file before stale recovery and repeatedly return the locked error.",
+      "Protected scope mutations, batch work, or device cost operations remain wedged until the operator deletes the file."
+    ],
+    "assumptions": [
+      "The process crashes or a local I/O/serialization step fails in the narrow constructor window.",
+      "The malformed final pathname remains present across restart."
+    ],
+    "context": "Crash-recovery defect in private local lock publication; read-only commands remain available and log pruning still runs.",
+    "in_scope": true,
+    "exposure": "Private local store or device-state lock files only; no public, network, or untrusted-content entry point was established.",
+    "identity": "The in-scope crash/fault boundary can create the state, but no realistic lower-privileged attacker can trigger it without already-equivalent private-state write authority.",
+    "cross_boundary": false,
+    "vector": "none",
+    "preconditions": [
+      "A crash or fallible operation occurs after create_new and before complete durable publication.",
+      "The operator later retries a protected operation."
+    ],
+    "attacker_control": "No realistic lower-trust attacker control is shown. Arbitrary same-user mutation of the private live store is explicitly equivalent authority under the threat model.",
+    "category": "lock publication and crash-recovery availability",
+    "mitigations": [
+      "Well-formed dead-PID locks are recoverable.",
+      "Read-only commands do not require the scope lock.",
+      "Manual deletion restores service, and log pruning still executes."
+    ],
+    "auth_scope": "admin-only: recovery and the affected private lock path belong to the local operator.",
+    "impact_surface": "runtime: recoverable local availability of lock-protected mutations and accounting",
+    "target_reach": "The scope or device operations protected by the particular malformed lock.",
+    "secrets_references": [],
+    "counterevidence": [
+      "Complete dead-PID records recover normally.",
+      "Read-only commands remain usable.",
+      "Manual deletion restores service.",
+      "Pruning remains enabled even when rotation is suppressed."
+    ],
+    "blindspots": [
+      "Constructor fault injection was not retained, so real-world occurrence frequency is not quantified."
+    ],
+    "controls": [
+      "Exclusive create prevents ordinary concurrent acquisition.",
+      "Stale recovery handles well-formed records.",
+      "Parse-before-recovery causes malformed records to fail closed indefinitely."
+    ],
+    "confidence": "high",
+    "impact": "medium",
+    "likelihood": "low",
+    "final_policy": "ignore",
+    "final_severity": "none",
+    "priority": null,
+    "rationale": "The wedge is a real recoverable availability bug, but the only evidenced source is a crash or fault in trusted local lock publication. No realistic lower-privileged attacker path exists, and same-user private-store mutation grants equivalent authority. Hard suppression applies; medium impact plus low likelihood also maps to ignore."
+  },
+  {
+    "candidate_id": "KCS-R23-CAND-017",
+    "title": "recursive star matching has exponential backtracking",
+    "ledger_row_id": "KCS-R23-CAND-017",
+    "instance_key": "KCS-R23-CAND-017",
+    "affected_locations": [
+      {
+        "label": "ignore source",
+        "path": "crates/kcs-pipeline/src/scan.rs",
+        "lines": "178-200"
+      },
+      {
+        "label": "per-candidate dispatch",
+        "path": "crates/kcs-pipeline/src/scan.rs",
+        "lines": "90-159,315-327"
+      },
+      {
+        "label": "recursive matcher",
+        "path": "crates/kcs-pipeline/src/scan.rs",
+        "lines": "383-415"
+      },
+      {
+        "label": "command reachability",
+        "path": "crates/kcs-cli/src/main.rs",
+        "lines": "452-472,558-580"
+      }
+    ],
+    "attack_steps": [
+      "A lower-trust scope contributor supplies a crafted .kcsignore pattern with overlapping star branches.",
+      "Snapshot or index accepts the rule without length or complexity limits and evaluates it for candidate paths.",
+      "The recursive matcher explores both zero-consumption and input-consumption states without memoization.",
+      "Matching work grows exponentially and blocks the synchronous CLI operation before useful indexing or snapshot work completes."
+    ],
+    "assumptions": [
+      "The operator opens or indexes a supplied/shared scope containing the crafted .kcsignore.",
+      "At least one candidate pathname reaches the adversarial failing match."
+    ],
+    "context": "Ordinary local scope adoption; the recurrence is 2^(n+2)-3 for the validated pattern family and requires no private-store access.",
+    "in_scope": true,
+    "exposure": "Untrusted local scope content is synchronously parsed by snapshot and index; KCS has no daemon or remote listener.",
+    "identity": "A local content contributor or shared/synced scope contributor controls .kcsignore and candidate names; the operator runs KCS.",
+    "cross_boundary": true,
+    "vector": "none",
+    "preconditions": [
+      "A crafted overlapping-star ignore rule.",
+      "A candidate name that drives the failing backtracking case.",
+      "An ordinary snapshot or index invocation."
+    ],
+    "attacker_control": "The lower-trust contributor fully controls the ignore rule and candidate path needed to trigger deterministic exponential work.",
+    "category": "algorithmic complexity denial of service",
+    "mitigations": [
+      "Simple glob patterns remain fast.",
+      "The impact is confined to the selected local scope and command.",
+      "The operator can remove the rule and retry."
+    ],
+    "auth_scope": "internal-only: an untrusted scope contributor can trigger the issue when the operator processes the scope.",
+    "impact_surface": "runtime: CPU exhaustion and availability of snapshot/index for the selected scope",
+    "target_reach": "Every snapshot or index evaluation of matching candidates in the crafted scope.",
+    "secrets_references": [],
+    "counterevidence": [
+      "Simple patterns are fast.",
+      "There is no daemon, listener, or cross-scope persistence.",
+      "The operator can remove the local rule and recover."
+    ],
+    "blindspots": [
+      "The bounded probe stopped at n=18 and did not intentionally exhaust the host; larger-case wall time is inferred from the proven recurrence."
+    ],
+    "controls": [
+      "Rule parsing drops comments and empty lines but imposes no complexity bound.",
+      "The recursive star matcher lacks memoization or a work budget.",
+      "Synchronous scan preview makes the sink reachable from normal commands."
+    ],
+    "confidence": "high",
+    "impact": "medium",
+    "likelihood": "high",
+    "final_policy": "reportable",
+    "final_severity": "medium",
+    "priority": "P2",
+    "rationale": "A realistic lower-trust contributor directly controls the crafted rule, and normal snapshot/index deterministically reaches the exponential matcher. The local, removable scope wedge bounds impact to medium, while deterministic reachability supports high likelihood. The matrix yields medium."
+  },
+  {
+    "candidate_id": "KCS-R23-CAND-018",
+    "title": "Snapshot's regular-file check can be raced into archiving an outside-scope symlink target",
+    "ledger_row_id": "KCS-R23-CAND-018",
+    "instance_key": "KCS-R23-CAND-018",
+    "affected_locations": [
+      {
+        "label": "entrypoint",
+        "path": "crates/kcs-cli/src/main.rs",
+        "lines": "452-472",
+        "detail": "Manual snapshot opens the current repository, computes filename exclusions, and calls snapshot_filtered."
+      },
+      {
+        "label": "root_control",
+        "path": "crates/kcs-core/src/scope.rs",
+        "lines": "261-290",
+        "detail": "DirEntry file_type is observed before a separate pathname-based fs::read with no descriptor/inode binding."
+      },
+      {
+        "label": "archive_sink",
+        "path": "crates/kcs-core/src/scope.rs",
+        "lines": "290-299",
+        "detail": "Bytes read through the replacement path are hashed, written to raw CAS, and bound under the benign filename."
+      },
+      {
+        "label": "cas_sink",
+        "path": "crates/kcs-core/src/cas.rs",
+        "lines": "60-75",
+        "detail": "ObjectStore persists the supplied buffer under its content hash."
+      },
+      {
+        "label": "closest_control",
+        "path": "crates/kcs-core/src/scope.rs",
+        "lines": "413-430",
+        "detail": "Snapshot holds only the .kcs store lock; it does not exclude external working-directory renames."
+      }
+    ],
+    "attack_steps": [
+      "A lower-trust writer presents a regular direct-child file in the selected working root.",
+      "KCS observes DirEntry.file_type as regular.",
+      "Before the later pathname read, the writer atomically replaces the name with a symlink to a victim-readable file outside the scope.",
+      "fs::read follows the replacement symlink.",
+      "Snapshot hashes and stores the outside bytes in raw CAS and binds them into the authoritative tree under the benign direct-child name."
+    ],
+    "assumptions": [
+      "A lower-trust process has write and rename authority in the selected working directory.",
+      "The KCS process can read the outside target.",
+      "The operator invokes status or snapshot and the attacker wins the check/read interleaving."
+    ],
+    "context": "Mutable working-directory TOCTOU across the scope filesystem and content-identity boundaries; the .kcs store lock does not serialize external directory writers.",
+    "in_scope": true,
+    "exposure": "A local untrusted filesystem contributor races ordinary status or snapshot; there is no network exposure.",
+    "identity": "A lower-trust local content contributor controls the mutable directory entry, while KCS runs with the operator's broader read authority.",
+    "cross_boundary": true,
+    "vector": "none",
+    "preconditions": [
+      "Concurrent rename authority in the selected root.",
+      "Victim read permission on an outside target.",
+      "An operator status or snapshot invocation.",
+      "A successful timing interleaving."
+    ],
+    "attacker_control": "The attacker controls the direct-child replacement and symlink target but not filesystem scheduling; repeated attempts may improve reliability.",
+    "category": "pathname TOCTOU and out-of-scope archival",
+    "mitigations": [
+      "A stable symlink present at the initial file-type check is skipped.",
+      "The owner-only .kcs parent normally limits later CAS disclosure.",
+      "The store lock serializes cooperating KCS store writers."
+    ],
+    "auth_scope": "internal-only: a lower-trust writer in the selected working root can exploit broader operator read authority.",
+    "impact_surface": "data: authoritative snapshot integrity and out-of-scope byte ingestion",
+    "target_reach": "The current status tree or snapshot and its raw CAS objects within the selected scope.",
+    "secrets_references": [
+      "The outside target may contain victim-readable sensitive data, but no specific secret or lower-trust CAS-read path is proven."
+    ],
+    "counterevidence": [
+      "A symlink present during the initial file-type observation is skipped.",
+      "The attacker requires concurrent directory-write authority and a successful race.",
+      "Losing interleavings archive benign bytes, skip the entry, or return an I/O error.",
+      "Owner-only .kcs permissions normally prevent the lower-trust writer from reading the archived bytes."
+    ],
+    "blindspots": [
+      "No live stress harness measured scheduling reliability.",
+      "No standalone lower-trust read path from owner-only CAS was established."
+    ],
+    "controls": [
+      "The early no-follow file-type observation rejects stable symlinks.",
+      "The later fs::read is a distinct pathname operation without no-follow, descriptor, inode, or containment rebinding.",
+      "The .kcs lock does not exclude external working-root renames."
+    ],
+    "confidence": "high",
+    "impact": "medium",
+    "likelihood": "medium",
+    "final_policy": "reportable",
+    "final_severity": "low",
+    "priority": "P3",
+    "rationale": "A realistic lower-trust filesystem writer can cross the scope boundary and place outside bytes into authoritative archive state. Standalone impact is bounded because CAS is normally owner-only and disclosure is not proven, while exploitation requires winning a race. Medium impact plus medium likelihood maps mechanically to low."
+  }
+]

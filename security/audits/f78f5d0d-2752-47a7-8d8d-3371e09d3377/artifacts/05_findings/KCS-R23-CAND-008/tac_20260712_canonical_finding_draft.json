@@ -1,0 +1,258 @@
+{
+  "schema_version": 1,
+  "scan_id": "f78f5d0d-2752-47a7-8d8d-3371e09d3377",
+  "candidate_id": "KCS-R23-CAND-008",
+  "ledger_row_id": "KCS-R23-CAND-008",
+  "title": "A symlinked `.kcs` binds one working root to another scope's live store",
+  "scan_scope": ".",
+  "target_revision": "0e19f3c6489da458e93a982a333c308d92d0a0ae",
+  "final_policy": "reportable",
+  "final_severity": "medium",
+  "priority": "P2",
+  "confidence": "high",
+  "summary": "KCS canonicalizes the selected working root but accepts the lexical `root/.kcs` path with link-following checks and installs that path as the repository state and `ObjectStore` root. A lower-trust supplied root can therefore symlink `.kcs` to another valid reachable store, causing normal commands to read working files from root A while comparing, snapshotting, and advancing refs in store B.",
+  "cwe": [
+    "CWE-59",
+    "CWE-706"
+  ],
+  "affectedLocations": [
+    {
+      "label": "entrypoint",
+      "path": "crates/kcs-core/src/scope.rs",
+      "lines": "126-139",
+      "detail": "`Repository::init()` delegates any existing `root/.kcs` entry to `Repository::open()`."
+    },
+    {
+      "label": "root_control",
+      "path": "crates/kcs-core/src/scope.rs",
+      "lines": "188-200",
+      "detail": "`Repository::open()` canonicalizes only the working root and accepts `root/.kcs` with link-following `is_dir()`."
+    },
+    {
+      "label": "closest_control",
+      "path": "crates/kcs-core/src/scope.rs",
+      "lines": "889-909",
+      "detail": "`validate_scope()` validates schema, `scope_id`, and format version but does not bind the store to `Repository.root`."
+    },
+    {
+      "label": "mutation_sink",
+      "path": "crates/kcs-core/src/scope.rs",
+      "lines": "254-303,421-430,504-520",
+      "detail": "Snapshot construction reads direct children from `self.root` and writes objects, refs, `HEAD`, and manifest through the substituted store."
+    },
+    {
+      "label": "product_entrypoints",
+      "path": "crates/kcs-cli/src/main.rs",
+      "lines": "435-472,558-635",
+      "detail": "`status`, `snapshot`, and `index` reach the mixed root/store repository through normal CLI commands."
+    }
+  ],
+  "codeEvidence": [
+    {
+      "id": "cli-status-snapshot-open",
+      "label": "Normal CLI commands open the current root",
+      "path": "crates/kcs-cli/src/main.rs",
+      "startLine": 435,
+      "endLine": 455,
+      "language": "rust",
+      "role": "entrypoint",
+      "code": "Command::Status => {\n    let repo = Repository::open_current()?;\n    validate_repo_tool_lock(&repo)?;\n    let task_store = TaskStore::new(repo.kcs_dir());\n    let status = repo.status()?;\n    Ok(json!({\n        \"scope_path\": repo.kcs_dir(),\n        \"files\": status.files,\n        \"head_shallow\": status.head_shallow,\n        \"tasks\": task_store.all().map_err(pipeline_to_kcs)?,\n        \"quarantine\": quarantine_status_records(&repo)?,\n        \"budget\": budget_status_json(&repo)?,\n    }))\n}\nCommand::Snapshot(args) => {\n    let _action = args.action;\n    let repo = Repository::open_current()?;\n    validate_repo_tool_lock(&repo)?;",
+      "explanation": "`status` and `snapshot` use the repository opened from the current directory, so a supplied working root directly controls which `root/.kcs` entry is resolved."
+    },
+    {
+      "id": "cli-index-open",
+      "label": "Index also opens the current root and later snapshots",
+      "path": "crates/kcs-cli/src/main.rs",
+      "startLine": 564,
+      "endLine": 580,
+      "language": "rust",
+      "role": "entrypoint",
+      "code": "let repo = Repository::open_current()?;\nlet _lock = repo.lock_store()?;\nvalidate_repo_tool_lock(&repo)?;\nif args.revoke_network {\n    write_network_revoke_record(&repo)?;\n    return Ok(json!({ \"status\": \"network revoked\" }));\n}\nlet preview = build_scan_preview(ScanPreviewRequest {\n    scope_path: repo.root().display().to_string(),\n    include_raw_hashes: !args.preview,\n    require_network_approval: !args.offline,\n})\n.map_err(pipeline_to_kcs)?;",
+      "explanation": "`index` consumes the same `Repository` object and scans `repo.root()`, preserving the split root/store state into indexing and auto-snapshot behavior."
+    },
+    {
+      "id": "init-delegates-existing-kcs",
+      "label": "Existing `.kcs` entries are opened",
+      "path": "crates/kcs-core/src/scope.rs",
+      "startLine": 135,
+      "endLine": 139,
+      "language": "rust",
+      "role": "propagation",
+      "code": "let root = root.canonicalize().kcs_io(root)?;\nlet kcs_dir = root.join(\".kcs\");\nif kcs_dir.exists() {\n    return Self::open(root);\n}",
+      "explanation": "`exists()` follows a symlink to an existing target, so `init` delegates a supplied `.kcs` link to `open()` instead of rejecting or binding it."
+    },
+    {
+      "id": "open-follows-kcs-symlink",
+      "label": "Open follows `.kcs` and installs it as the store",
+      "path": "crates/kcs-core/src/scope.rs",
+      "startLine": 188,
+      "endLine": 200,
+      "language": "rust",
+      "role": "root_control",
+      "code": "pub fn open(path: impl AsRef<Path>) -> Result<Self> {\n    let root = path.as_ref().canonicalize().kcs_io(path.as_ref())?;\n    let kcs_dir = root.join(\".kcs\");\n    if !kcs_dir.is_dir() {\n        return Err(KcsError::invalid_usage(\"not a kcs scope\"));\n    }\n\n    let repo = Self {\n        root,\n        kcs_dir: kcs_dir.clone(),\n        store: ObjectStore::new(kcs_dir),\n    };\n    repo.validate()?;",
+      "explanation": "`open()` canonicalizes only the selected root. The link-following `is_dir()` result is then trusted as both `Repository.kcs_dir` and the `ObjectStore` root, allowing root A to bind to store B."
+    },
+    {
+      "id": "scope-validation-omits-binding",
+      "label": "Scope validation omits root/store binding",
+      "path": "crates/kcs-core/src/scope.rs",
+      "startLine": 889,
+      "endLine": 909,
+      "language": "rust",
+      "role": "expected_control",
+      "code": "fn validate_scope(&self) -> Result<()> {\n    let path = self.kcs_dir.join(\"scope.json\");\n    let value: Value = serde_json::from_str(&fs::read_to_string(&path).kcs_io(&path)?)\n        .map_err(|err| KcsError::schema(err.to_string()))?;\n    validate_json_schema(SchemaKind::Scope, &value)?;\n    let Some(scope_id) = value.get(\"scope_id\").and_then(Value::as_str) else {\n        return Err(KcsError::schema(\"scope.json missing scope_id\"));\n    };\n    if scope_id.is_empty() {\n        return Err(KcsError::schema(\"scope_id is empty\"));\n    }\n    if !is_ulid(scope_id) {\n        return Err(KcsError::schema(\"scope_id must be a ULID\"));\n    }\n    if let Some(version) = value.get(\"kcs_format_version\") {\n        let version = version\n            .as_str()\n            .ok_or_else(|| KcsError::schema(\"kcs_format_version must be a string\"))?;\n        validate_format_version(version)?;\n    }\n    Ok(())\n}",
+      "explanation": "The nearest validation proves the target is a structurally valid KCS store, but it never checks `symlink_metadata()`, canonical store parentage, or stored path equality with the selected root."
+    },
+    {
+      "id": "working-tree-root-read-store-write",
+      "label": "Working bytes come from `self.root` but raw objects use `self.store`",
+      "path": "crates/kcs-core/src/scope.rs",
+      "startLine": 260,
+      "endLine": 292,
+      "language": "rust",
+      "role": "sink",
+      "code": "let mut entries = Vec::new();\nfor entry in fs::read_dir(&self.root).kcs_io(&self.root)? {\n    let entry = entry.kcs_io(&self.root)?;\n    if entry.file_name() == \".kcs\" {\n        continue;\n    }\n    let path = entry.path();\n    let file_type = entry.file_type().kcs_io(&path)?;\n    if file_type.is_dir() {\n        continue;\n    }\n    if !file_type.is_file() {\n        eprintln!(\"warning: skipping non-regular file: {}\", path.display());\n        continue;\n    }\n    let file_name = match entry.file_name().into_string() {\n        Ok(name) => name,\n        Err(_) => {\n            eprintln!(\"warning: skipping non-UTF-8 file name: {}\", path.display());\n            continue;\n        }\n    };\n    if excluded_paths.contains(&file_name) {\n        continue;\n    }\n    let bytes = fs::read(&path).kcs_io(&path)?;\n    let raw_hash = if store_raw {\n        self.store.write_raw(&bytes)?",
+      "explanation": "After a symlinked store is accepted, this code enumerates and reads attacker-controlled files from the selected root while writing raw bytes through the linked foreign `ObjectStore`."
+    },
+    {
+      "id": "status-mixes-current-root-and-store-head",
+      "label": "Status compares selected-root files with store `HEAD`",
+      "path": "crates/kcs-core/src/scope.rs",
+      "startLine": 306,
+      "endLine": 317,
+      "language": "rust",
+      "role": "outcome",
+      "code": "pub fn status(&self) -> Result<StatusReport> {\n    self.validate()?;\n    let current = self.build_working_tree(false)?.tree;\n    let current_map = tree_map(&current);\n    let (head_map, head_shallow) = match self.head_tree_state()? {\n        HeadTreeState::Unborn => (BTreeMap::new(), false),\n        HeadTreeState::Present(tree) => (tree_map(&tree), false),\n        HeadTreeState::Shallow => (BTreeMap::new(), true),\n    };",
+      "explanation": "`status` shows the read-only inconsistency: the current tree is selected-root state, while `head_tree_state()` is resolved from the accepted store."
+    },
+    {
+      "id": "snapshot-writes-tree-and-refs",
+      "label": "Snapshot advances the substituted store",
+      "path": "crates/kcs-core/src/scope.rs",
+      "startLine": 421,
+      "endLine": 430,
+      "language": "rust",
+      "role": "outcome",
+      "code": "self.validate()?;\nlet _lock = StoreLock::acquire(&self.kcs_dir)?;\nmaybe_hold_lock_for_tests();\n\nlet working = self\n    .build_working_tree_with_normalize(true, excluded_paths, normalize_by_path)?\n    .tree;\nlet tree_value =\n    serde_json::to_value(&working).map_err(|err| KcsError::schema(err.to_string()))?;\nlet (tree_hash, _) = self.store.write_json(ObjectKind::Tree, &tree_value)?;",
+      "explanation": "The mutating path locks `self.kcs_dir`, builds a tree from the selected root, and writes that tree to the foreign store reached through `.kcs`."
+    },
+    {
+      "id": "snapshot-advances-head-manifest",
+      "label": "Refs, `HEAD`, and manifest are written below `self.kcs_dir`",
+      "path": "crates/kcs-core/src/scope.rs",
+      "startLine": 504,
+      "endLine": 520,
+      "language": "rust",
+      "role": "outcome",
+      "code": "let commit_value =\n    serde_json::to_value(&commit).map_err(|err| KcsError::schema(err.to_string()))?;\nlet (commit_hash, _) = self.store.write_json(ObjectKind::Commit, &commit_value)?;\n\natomic_overwrite(\n    &self.kcs_dir.join(\"refs/heads/main\"),\n    commit_hash.as_bytes(),\n)?;\natomic_overwrite(&self.kcs_dir.join(\"HEAD\"), commit_hash.as_bytes())?;\nself.write_manifest(&working, prior_tree.as_ref())?;",
+      "explanation": "After writing the commit object through `self.store`, KCS advances refs, `HEAD`, and manifest beneath the substituted `kcs_dir`, producing persistent cross-scope history."
+    }
+  ],
+  "rootCause": {
+    "summary": "The violated invariant is that the live `.kcs` store for an opened repository must be physically bound to the selected canonical root. KCS validates the root and the store separately, but it never verifies that `root/.kcs` is a real child directory rather than a live link to another scope's store.",
+    "evidenceRefs": [
+      "cli-status-snapshot-open",
+      "cli-index-open",
+      "init-delegates-existing-kcs",
+      "open-follows-kcs-symlink",
+      "scope-validation-omits-binding",
+      "working-tree-root-read-store-write",
+      "snapshot-writes-tree-and-refs",
+      "snapshot-advances-head-manifest"
+    ]
+  },
+  "validation": {
+    "method": "static source trace plus local offline PoC",
+    "summary": "The source trace confirms that normal commands open the current root, `Repository::open()` follows a `.kcs` symlink without binding it to the root, and snapshot writes selected-root bytes and refs through the linked store. The local PoC reproduced the state change with synthetic temporary scopes.",
+    "evidenceRefs": [
+      "cli-status-snapshot-open",
+      "open-follows-kcs-symlink",
+      "scope-validation-omits-binding",
+      "working-tree-root-read-store-write",
+      "snapshot-advances-head-manifest"
+    ],
+    "assertions": [
+      "`Repository::open()` has no no-follow or canonical-parent check for `.kcs`.",
+      "`validate_scope()` accepts a structurally valid foreign store without comparing it to `Repository.root`.",
+      "A snapshot from the linked root advances `refs/heads/main`, `HEAD`, and manifest in the linked store."
+    ],
+    "observations": [
+      "The PoC changed the victim store `HEAD` from `sha256:052dc462a259d4f5d4d87d8c93da97400de26330aa6a0198eed3d5b369df3552` to `sha256:85cebfc512b79c6857245121fe6ea9b2ae69ce9dab7ab83d51fab3c9d1407671`."
+    ],
+    "limitations": [
+      "No live service, credential, or public target was used.",
+      "The proven instance requires a valid reachable KCS store and a local command invocation.",
+      "Detached copied stores and broader approval-replay variants were not needed for this decision."
+    ]
+  },
+  "attackPath": {
+    "summary": "A lower-trust shared/archive contributor supplies a root whose `.kcs` entry is a live symlink or equivalent alias to another valid KCS store. When the operator runs `status`, `snapshot`, or `index` in that root, KCS reads root-A files and uses store B for state, object writes, refs, `HEAD`, and manifest.",
+    "dataflow": {
+      "summary": "supplied root `.kcs` entry -> `Repository::open_current()` -> `Repository::open()` -> unbound `Repository { root, kcs_dir, store }` -> working tree read from `self.root` -> objects and refs written through `self.store`/`self.kcs_dir`",
+      "source": "lower-trust supplied filesystem root and its `.kcs` symlink target",
+      "sink": "foreign KCS store object, ref, `HEAD`, and manifest writes",
+      "outcome": "cross-scope archive history and evidence mutation",
+      "evidenceRefs": [
+        "cli-status-snapshot-open",
+        "open-follows-kcs-symlink",
+        "working-tree-root-read-store-write",
+        "snapshot-advances-head-manifest"
+      ]
+    },
+    "reachability": {
+      "summary": "The attacker must be able to supply a root that the victim opens with KCS, and the symlink target must resolve to a valid store readable and writable by the victim process.",
+      "attacker": "lower-trust shared/archive contributor",
+      "entrypoint": "normal local CLI commands such as `status`, `snapshot`, and `index`",
+      "preconditions": [
+        "The supplied root contains a live `.kcs` symlink or equivalent alias.",
+        "The target is a structurally valid accessible KCS store.",
+        "The operator invokes KCS in the supplied root."
+      ],
+      "outcome": "root-A bytes and derived state are committed into store B"
+    },
+    "evidenceRefs": [
+      "cli-status-snapshot-open",
+      "cli-index-open",
+      "open-follows-kcs-symlink",
+      "snapshot-writes-tree-and-refs",
+      "snapshot-advances-head-manifest"
+    ],
+    "impact": {
+      "level": "high",
+      "why": "The primitive can durably advance another scope's authoritative history and derived evidence state with content from a different working root."
+    },
+    "likelihood": {
+      "level": "medium",
+      "why": "Exploitation requires local command execution by the operator, symlink preservation, target-path availability, and a valid writable target store."
+    },
+    "limitations": [
+      "This is not arbitrary-directory write because the target must be a valid KCS store.",
+      "Prior commits are usually recoverable from the content-addressed object graph.",
+      "KCS has no network listener in this path."
+    ]
+  },
+  "remediation": {
+    "summary": "Before constructing `Repository`, inspect `.kcs` without following symlinks and require the resolved store path to be the real `.kcs` directory inside the selected canonical root. Keep whole-folder moves/imports separate from live external-store adoption.",
+    "recommendations": [
+      "Use `symlink_metadata()` or equivalent no-follow APIs on `root/.kcs` and reject symlinks for normal opens.",
+      "Canonicalize the accepted `.kcs` directory and compare it to the expected child path under the canonical root.",
+      "If external store adoption is supported, implement it as an explicit audited command rather than implicit command open behavior."
+    ],
+    "regressionTests": [
+      "`Repository::open` rejects a root whose `.kcs` is a symlink to another valid KCS store.",
+      "`Repository::init` does not silently delegate an existing `.kcs` symlink to `open`.",
+      "`status`, `snapshot`, and `index` cannot combine root A with store B.",
+      "A legitimate whole-folder move with a real `.kcs` directory remains supported if that is intended."
+    ]
+  },
+  "writeup": {
+    "reportPath": "findings/tac-kcs-r23-cand-008-symlinked-kcs-cross-scope-store/tac-kcs-r23-cand-008-symlinked-kcs-cross-scope-store.md",
+    "pocPath": "findings/tac-kcs-r23-cand-008-symlinked-kcs-cross-scope-store/poc",
+    "validationBasis": "source review of revision `0e19f3c6489da458e93a982a333c308d92d0a0ae` and local offline synthetic PoC"
+  },
+  "extensions": {
+    "candidateId": "KCS-R23-CAND-008",
+    "ledgerRowId": "KCS-R23-CAND-008",
+    "reportId": "KCS-R23-CAND-008"
+  }
+}

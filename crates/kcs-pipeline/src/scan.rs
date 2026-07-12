@@ -1,12 +1,18 @@
 //! Scan preview contracts.
 
-use std::path::{Path, PathBuf};
+use std::fs::File;
+#[cfg(not(windows))]
+use std::fs::Metadata;
+use std::io::Read;
+use std::path::{Component, Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use unicode_normalization::UnicodeNormalization;
 
-use crate::prepare::hash_bytes;
+use crate::prepare::{hash_bytes, hash_reader};
 use crate::{IoResultExt, Result};
+
+const MAX_GLOB_STATES: usize = 100_000;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ScanCandidate {
@@ -119,20 +125,20 @@ fn collect_direct_candidates(
         if relative == ".kcsignore" {
             continue;
         }
-        let size_bytes = entry.metadata().pipeline_io(&path)?.len();
+        let mut size_bytes = entry.metadata().pipeline_io(&path)?.len();
         let secret = classify_secret(&relative);
-        let ignored = ignored_by_rules(
+        let ignored = try_ignored_by_rules(
             &relative,
             file_type.is_dir(),
             ignore_rules,
             case_insensitive,
-        ) || secret == Some(SecretTier::TierA)
-            && !explicitly_unignored(
+        )? || secret == Some(SecretTier::TierA)
+            && !try_explicitly_unignored(
                 &relative,
                 file_type.is_dir(),
                 ignore_rules,
                 case_insensitive,
-            );
+            )?;
         let quarantine_reason = match secret {
             Some(SecretTier::TierA) if ignored => Some("secrets_tier_a_excluded".to_owned()),
             // R19-1: a Tier A secret explicitly un-ignored (`!pattern`) is ingested
@@ -145,7 +151,27 @@ fn collect_direct_candidates(
             _ => None,
         };
         let raw_hash = if include_raw_hashes && !ignored {
-            Some(hash_bytes(&std::fs::read(&path).pipeline_io(&path)?))
+            let (mut file, metadata) = open_verified_regular_file(&path)?;
+            size_bytes = metadata.len();
+            let read_limit = metadata.len().checked_add(1).ok_or_else(|| {
+                crate::PipelineError::contract(
+                    "KCS-E-SCAN-INPUT-OVERSIZED-001",
+                    format!("scan candidate is too large to hash: {}", path.display()),
+                )
+            })?;
+            let mut reader = (&mut file).take(read_limit);
+            let raw_hash = hash_reader(&mut reader).pipeline_io(&path)?;
+            if reader.limit() == 0 {
+                return Err(crate::PipelineError::contract(
+                    "KCS-E-SCAN-INPUT-CHANGED-001",
+                    format!(
+                        "scan candidate grew while it was being hashed: {}",
+                        path.display()
+                    ),
+                ));
+            }
+            ensure_file_unchanged(&file, &metadata, &path)?;
+            Some(raw_hash)
         } else {
             None
         };
@@ -159,6 +185,347 @@ fn collect_direct_candidates(
         });
     }
     Ok(())
+}
+
+/// A direct-child input read through one verified file handle and bounded before
+/// allocation. The returned hash always identifies the returned bytes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifiedScanInput {
+    pub bytes: Vec<u8>,
+    pub raw_hash: String,
+    pub size_bytes: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifiedScanIdentity {
+    pub raw_hash: String,
+    pub size_bytes: u64,
+}
+
+/// Open and read a scope-local direct child without trusting a pathname check for
+/// a later pathname read. The metadata size is checked before allocation, and a
+/// bounded reader catches growth after that check.
+pub fn read_verified_scan_input(
+    scope_path: &Path,
+    input_path: &str,
+    max_bytes: u64,
+) -> Result<VerifiedScanInput> {
+    let path = direct_child_path(scope_path, input_path)?;
+    let (mut file, metadata) = open_verified_regular_file(&path)?;
+    if metadata.len() > max_bytes {
+        return Err(crate::PipelineError::contract(
+            "KCS-E-SCAN-INPUT-OVERSIZED-001",
+            format!(
+                "input {} is {} bytes, above the {} byte limit",
+                path.display(),
+                metadata.len(),
+                max_bytes
+            ),
+        ));
+    }
+
+    let initial_capacity = usize::try_from(metadata.len()).map_err(|_| {
+        crate::PipelineError::contract(
+            "KCS-E-SCAN-INPUT-OVERSIZED-001",
+            format!("input {} cannot fit in process memory", path.display()),
+        )
+    })?;
+    let mut bytes = Vec::new();
+    bytes.try_reserve_exact(initial_capacity).map_err(|_| {
+        crate::PipelineError::contract(
+            "KCS-E-SCAN-INPUT-OVERSIZED-001",
+            format!("input {} cannot fit in process memory", path.display()),
+        )
+    })?;
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let remaining = max_bytes.saturating_sub(bytes.len() as u64);
+        let read_cap = std::cmp::min(buffer.len() as u64, remaining.saturating_add(1)) as usize;
+        let read = file.read(&mut buffer[..read_cap]).pipeline_io(&path)?;
+        if read == 0 {
+            break;
+        }
+        if read as u64 > remaining {
+            return Err(crate::PipelineError::contract(
+                "KCS-E-SCAN-INPUT-OVERSIZED-001",
+                format!(
+                    "input {} grew beyond the {} byte limit",
+                    path.display(),
+                    max_bytes
+                ),
+            ));
+        }
+        bytes.try_reserve_exact(read).map_err(|_| {
+            crate::PipelineError::contract(
+                "KCS-E-SCAN-INPUT-OVERSIZED-001",
+                format!("input {} cannot fit in process memory", path.display()),
+            )
+        })?;
+        bytes.extend_from_slice(&buffer[..read]);
+    }
+    ensure_file_unchanged(&file, &metadata, &path)?;
+
+    Ok(VerifiedScanInput {
+        size_bytes: bytes.len() as u64,
+        raw_hash: hash_bytes(&bytes),
+        bytes,
+    })
+}
+
+/// Hash a direct-child input with fixed working memory through the same verified
+/// file handle used for metadata checks. The `max + 1` reader bounds growth while
+/// hashing, so callers can scan for an identity without materializing file bytes.
+pub fn hash_verified_scan_input(
+    scope_path: &Path,
+    input_path: &str,
+    max_bytes: u64,
+) -> Result<VerifiedScanIdentity> {
+    let path = direct_child_path(scope_path, input_path)?;
+    let (mut file, metadata) = open_verified_regular_file(&path)?;
+    if metadata.len() > max_bytes {
+        return Err(crate::PipelineError::contract(
+            "KCS-E-SCAN-INPUT-OVERSIZED-001",
+            format!(
+                "input {} is {} bytes, above the {} byte limit",
+                path.display(),
+                metadata.len(),
+                max_bytes
+            ),
+        ));
+    }
+    let raw_hash = {
+        let mut limited = (&mut file).take(max_bytes.saturating_add(1));
+        let raw_hash = hash_reader(&mut limited).pipeline_io(&path)?;
+        if limited.limit() == 0 {
+            return Err(crate::PipelineError::contract(
+                "KCS-E-SCAN-INPUT-OVERSIZED-001",
+                format!(
+                    "input {} grew beyond the {} byte limit",
+                    path.display(),
+                    max_bytes
+                ),
+            ));
+        }
+        raw_hash
+    };
+    ensure_file_unchanged(&file, &metadata, &path)?;
+    Ok(VerifiedScanIdentity {
+        raw_hash,
+        size_bytes: metadata.len(),
+    })
+}
+
+/// Re-evaluate current ignore authorization and byte identity for a durable task.
+/// Errors are intentionally distinct from `false` so callers can fail closed while
+/// retaining an audit reason.
+pub fn current_scan_allows_file(
+    scope_path: &Path,
+    input_path: &str,
+    expected_raw_hash: &str,
+    max_bytes: u64,
+) -> Result<bool> {
+    if !current_scan_policy_allows_file(scope_path, input_path)? {
+        return Ok(false);
+    }
+    let identity = hash_verified_scan_input(scope_path, input_path, max_bytes)?;
+    Ok(identity.raw_hash == expected_raw_hash)
+}
+
+/// Re-evaluate path classification without reopening input bytes. Callers that
+/// already hold a verified buffer can bind its hash separately and use this check
+/// immediately before a sink without creating a second pathname-read race.
+pub fn current_scan_policy_allows_file(scope_path: &Path, input_path: &str) -> Result<bool> {
+    let path = direct_child_path(scope_path, input_path)?;
+    if input_path == ".kcs" || input_path == ".kcsignore" {
+        return Ok(false);
+    }
+    if is_xdg_state_inside_scope(scope_path, &path) {
+        return Ok(false);
+    }
+    let listed = match std::fs::symlink_metadata(&path) {
+        Ok(metadata) => metadata,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(err) => {
+            return Err(crate::PipelineError::Io {
+                path: path.display().to_string(),
+                message: err.to_string(),
+            })
+        }
+    };
+    if !listed.file_type().is_file() {
+        return Ok(false);
+    }
+
+    let case_insensitive = probe_case_insensitive(scope_path);
+    let mut ignore_rules = load_config_ignore(scope_path)?;
+    ignore_rules.extend(load_kcsignore(scope_path)?);
+    let secret = classify_secret(input_path);
+    let ignored = try_ignored_by_rules(input_path, false, &ignore_rules, case_insensitive)?
+        || secret == Some(SecretTier::TierA)
+            && !try_explicitly_unignored(input_path, false, &ignore_rules, case_insensitive)?;
+    if ignored {
+        return Ok(false);
+    }
+
+    Ok(true)
+}
+
+fn direct_child_path(scope_path: &Path, input_path: &str) -> Result<PathBuf> {
+    let relative = Path::new(input_path);
+    let mut components = relative.components();
+    let valid = !input_path.is_empty()
+        && !input_path.contains('/')
+        && !input_path.contains('\\')
+        && matches!(components.next(), Some(Component::Normal(_)))
+        && components.next().is_none();
+    if !valid {
+        return Err(crate::PipelineError::path(input_path));
+    }
+    Ok(scope_path.join(relative))
+}
+
+#[derive(Debug)]
+struct OpenedFileState {
+    #[cfg(not(windows))]
+    metadata: Metadata,
+    #[cfg(windows)]
+    information: crate::windows_file::WindowsFileInformation,
+}
+
+impl OpenedFileState {
+    fn len(&self) -> u64 {
+        #[cfg(windows)]
+        {
+            self.information.file_size()
+        }
+        #[cfg(not(windows))]
+        {
+            self.metadata.len()
+        }
+    }
+}
+
+fn open_verified_regular_file(path: &Path) -> Result<(File, OpenedFileState)> {
+    #[cfg(windows)]
+    {
+        let listed = crate::windows_file::open_path_no_follow(path).pipeline_io(path)?;
+        let listed_information = crate::windows_file::information(&listed).pipeline_io(path)?;
+        if !listed_information.is_regular_file() {
+            return Err(crate::PipelineError::contract(
+                "KCS-E-SCAN-FILE-IDENTITY-001",
+                format!("scan candidate is not a regular file: {}", path.display()),
+            ));
+        }
+        let file = File::open(path).pipeline_io(path)?;
+        verify_opened_regular_file(path, listed_information, file)
+    }
+
+    #[cfg(not(windows))]
+    {
+        // `symlink_metadata` does not follow the final component. Comparing its identity
+        // with the opened handle closes the swap-to-symlink interval without requiring a
+        // later pathname read.
+        let listed = std::fs::symlink_metadata(path).pipeline_io(path)?;
+        if !listed.file_type().is_file() {
+            return Err(crate::PipelineError::contract(
+                "KCS-E-SCAN-FILE-IDENTITY-001",
+                format!("scan candidate is not a regular file: {}", path.display()),
+            ));
+        }
+        let file = File::open(path).pipeline_io(path)?;
+        verify_opened_regular_file(path, listed, file)
+    }
+}
+
+#[cfg(not(windows))]
+fn verify_opened_regular_file(
+    path: &Path,
+    listed: Metadata,
+    file: File,
+) -> Result<(File, OpenedFileState)> {
+    let opened = file.metadata().pipeline_io(path)?;
+    if !opened.is_file() || !same_file_identity(&listed, &opened) {
+        return Err(crate::PipelineError::contract(
+            "KCS-E-SCAN-FILE-IDENTITY-001",
+            format!(
+                "scan candidate changed while it was being opened: {}",
+                path.display()
+            ),
+        ));
+    }
+    Ok((file, OpenedFileState { metadata: opened }))
+}
+
+#[cfg(windows)]
+fn verify_opened_regular_file(
+    path: &Path,
+    listed: crate::windows_file::WindowsFileInformation,
+    file: File,
+) -> Result<(File, OpenedFileState)> {
+    let opened = file.metadata().pipeline_io(path)?;
+    let information = crate::windows_file::information(&file).pipeline_io(path)?;
+    if !opened.is_file() || !information.is_regular_file() || !listed.same_identity(information) {
+        return Err(crate::PipelineError::contract(
+            "KCS-E-SCAN-FILE-IDENTITY-001",
+            format!(
+                "scan candidate changed while it was being opened: {}",
+                path.display()
+            ),
+        ));
+    }
+    Ok((file, OpenedFileState { information }))
+}
+
+fn ensure_file_unchanged(file: &File, before: &OpenedFileState, path: &Path) -> Result<()> {
+    #[cfg(windows)]
+    let unchanged = {
+        let after = crate::windows_file::information(file).pipeline_io(path)?;
+        after.is_regular_file() && before.information.same_file_state(after)
+    };
+    #[cfg(not(windows))]
+    let unchanged = {
+        let after = file.metadata().pipeline_io(path)?;
+        same_file_state(&before.metadata, &after)
+    };
+    if !unchanged {
+        return Err(crate::PipelineError::contract(
+            "KCS-E-SCAN-INPUT-CHANGED-001",
+            format!(
+                "scan candidate changed while it was being read: {}",
+                path.display()
+            ),
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn same_file_identity(left: &Metadata, right: &Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    left.dev() == right.dev() && left.ino() == right.ino()
+}
+
+#[cfg(not(any(unix, windows)))]
+fn same_file_identity(left: &Metadata, right: &Metadata) -> bool {
+    left.file_type() == right.file_type()
+        && left.len() == right.len()
+        && left.modified().ok() == right.modified().ok()
+}
+
+#[cfg(unix)]
+fn same_file_state(left: &Metadata, right: &Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    same_file_identity(left, right)
+        && left.len() == right.len()
+        && left.mtime() == right.mtime()
+        && left.mtime_nsec() == right.mtime_nsec()
+        && left.ctime() == right.ctime()
+        && left.ctime_nsec() == right.ctime_nsec()
+}
+
+#[cfg(not(any(unix, windows)))]
+fn same_file_state(left: &Metadata, right: &Metadata) -> bool {
+    same_file_identity(left, right)
 }
 
 fn is_xdg_state_inside_scope(scope_path: &Path, path: &Path) -> bool {
@@ -236,36 +603,7 @@ pub fn classify_secret(path: &str) -> Option<SecretTier> {
     let normalized = path.trim_start_matches('/').replace('\\', "/");
     let name = normalized.rsplit('/').next().unwrap_or(&normalized);
     let lower = name.to_ascii_lowercase();
-    let lower_path = normalized.to_ascii_lowercase();
-    let tier_a_path = lower_path == ".kube/config"
-        || lower_path == ".docker/config.json"
-        || lower_path.starts_with(".ssh/")
-        || lower_path.starts_with(".gnupg/")
-        || lower_path.starts_with(".aws/")
-        || lower_path.starts_with(".kube/")
-        || lower_path.starts_with(".docker/");
-    let tier_a = lower == ".env"
-        || lower.starts_with(".env.")
-        || lower == ".ssh"
-        || lower == ".gnupg"
-        || lower == ".aws"
-        || lower == ".kube"
-        || lower == ".docker"
-        || lower.ends_with(".pem")
-        || lower.ends_with(".key")
-        || lower.ends_with(".p12")
-        || lower.ends_with(".pfx")
-        || lower.starts_with("id_rsa")
-        || lower.starts_with("id_ecdsa")
-        || lower.starts_with("id_ed25519")
-        || lower.ends_with(".keystore")
-        || lower == ".netrc"
-        || lower == ".npmrc"
-        || lower == ".pypirc"
-        || lower.ends_with(".tfstate")
-        || lower.contains(".tfstate.")
-        || tier_a_path;
-    if tier_a {
+    if kcs_core::scope::is_tier_a_secret_name(path) {
         return Some(SecretTier::TierA);
     }
     let tier_b = ["credentials", "secret", "token", "apikey", "password"]
@@ -318,27 +656,46 @@ pub fn ignored_by_rules(
     rules: &[IgnoreRule],
     case_insensitive: bool,
 ) -> bool {
-    let mut ignored = false;
-    for rule in rules {
-        if matches_ignore_pattern(path, is_dir, &rule.pattern, case_insensitive) {
-            ignored = !rule.negated;
-        }
-    }
-    ignored
+    // This compatibility API cannot surface a malformed/over-budget rule. Fail
+    // closed; scan construction uses the fallible variant below and reports it.
+    try_ignored_by_rules(path, is_dir, rules, case_insensitive).unwrap_or(true)
 }
 
-fn explicitly_unignored(
+fn try_ignored_by_rules(
     path: &str,
     is_dir: bool,
     rules: &[IgnoreRule],
     case_insensitive: bool,
-) -> bool {
-    rules.iter().any(|rule| {
-        rule.negated && matches_ignore_pattern(path, is_dir, &rule.pattern, case_insensitive)
-    })
+) -> Result<bool> {
+    let mut ignored = false;
+    for rule in rules {
+        if matches_ignore_pattern(path, is_dir, &rule.pattern, case_insensitive)? {
+            ignored = !rule.negated;
+        }
+    }
+    Ok(ignored)
 }
 
-fn matches_ignore_pattern(path: &str, is_dir: bool, pattern: &str, case_insensitive: bool) -> bool {
+fn try_explicitly_unignored(
+    path: &str,
+    is_dir: bool,
+    rules: &[IgnoreRule],
+    case_insensitive: bool,
+) -> Result<bool> {
+    for rule in rules.iter().filter(|rule| rule.negated) {
+        if matches_ignore_pattern(path, is_dir, &rule.pattern, case_insensitive)? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn matches_ignore_pattern(
+    path: &str,
+    is_dir: bool,
+    pattern: &str,
+    case_insensitive: bool,
+) -> Result<bool> {
     // R9-1: match on the NFC projection of BOTH sides so a Unicode canonically
     // equivalent `.kcsignore` / `[scope] ignore` pattern reliably excludes a file
     // whose on-disk name uses a different normal form (NFD names are routine on
@@ -359,7 +716,7 @@ fn matches_ignore_pattern(path: &str, is_dir: bool, pattern: &str, case_insensit
     }
     let directory_only = pattern.ends_with('/');
     if directory_only && !is_dir {
-        return false;
+        return Ok(false);
     }
     let rooted = pattern.starts_with('/');
     let pattern = pattern.trim_start_matches('/').trim_end_matches('/');
@@ -376,43 +733,64 @@ fn matches_ignore_pattern(path: &str, is_dir: bool, pattern: &str, case_insensit
     wildcard_match(pattern, &normalized_path)
 }
 
-fn wildcard_match(pattern: &str, value: &str) -> bool {
-    wildcard_match_bytes(pattern.as_bytes(), value.as_bytes())
+fn wildcard_match(pattern: &str, value: &str) -> Result<bool> {
+    // Match Unicode scalar values: `?` consumes one scalar, never one UTF-8 byte.
+    // The bottom-up state table visits each (pattern, value) pair at most once,
+    // replacing recursive backtracking with explicitly bounded work.
+    let pattern = pattern.chars().collect::<Vec<_>>();
+    let value = value.chars().collect::<Vec<_>>();
+    let width = value.len().checked_add(1).ok_or_else(glob_budget_error)?;
+    let states = pattern
+        .len()
+        .checked_add(1)
+        .and_then(|height| height.checked_mul(width))
+        .filter(|states| *states <= MAX_GLOB_STATES)
+        .ok_or_else(glob_budget_error)?;
+    let mut matched = vec![false; states];
+    let at = |pi: usize, vi: usize| pi * width + vi;
+    let mut next_slash = vec![None; width];
+    let mut nearest = None;
+    for vi in (0..value.len()).rev() {
+        if value[vi] == '/' {
+            nearest = Some(vi);
+        }
+        next_slash[vi] = nearest;
+    }
+    matched[at(pattern.len(), value.len())] = true;
+
+    for pi in (0..pattern.len()).rev() {
+        for vi in (0..=value.len()).rev() {
+            let is_terminal_double_star =
+                pi + 2 == pattern.len() && pattern[pi] == '*' && pattern[pi + 1] == '*';
+            let is_double_star_directory = pi + 2 < pattern.len()
+                && pattern[pi] == '*'
+                && pattern[pi + 1] == '*'
+                && pattern[pi + 2] == '/';
+            matched[at(pi, vi)] = if is_terminal_double_star {
+                true
+            } else if is_double_star_directory {
+                matched[at(pi + 3, vi)]
+                    || next_slash[vi].is_some_and(|slash| matched[at(pi, slash + 1)])
+            } else {
+                match pattern[pi] {
+                    '*' => {
+                        matched[at(pi + 1, vi)]
+                            || vi < value.len() && value[vi] != '/' && matched[at(pi, vi + 1)]
+                    }
+                    '?' => vi < value.len() && value[vi] != '/' && matched[at(pi + 1, vi + 1)],
+                    ch => vi < value.len() && ch == value[vi] && matched[at(pi + 1, vi + 1)],
+                }
+            };
+        }
+    }
+    Ok(matched[0])
 }
 
-fn wildcard_match_bytes(pattern: &[u8], value: &[u8]) -> bool {
-    if pattern.is_empty() {
-        return value.is_empty();
-    }
-    if pattern.starts_with(b"**/") {
-        return wildcard_match_bytes(&pattern[3..], value)
-            || value
-                .iter()
-                .position(|byte| *byte == b'/')
-                .map(|slash| wildcard_match_bytes(pattern, &value[slash + 1..]))
-                .unwrap_or(false);
-    }
-    if pattern == b"**" {
-        return true;
-    }
-    match pattern[0] {
-        b'*' => {
-            wildcard_match_bytes(&pattern[1..], value)
-                || !value.is_empty()
-                    && value[0] != b'/'
-                    && wildcard_match_bytes(pattern, &value[1..])
-        }
-        b'?' => {
-            !value.is_empty()
-                && value[0] != b'/'
-                && wildcard_match_bytes(&pattern[1..], &value[1..])
-        }
-        byte => {
-            !value.is_empty()
-                && byte == value[0]
-                && wildcard_match_bytes(&pattern[1..], &value[1..])
-        }
-    }
+fn glob_budget_error() -> crate::PipelineError {
+    crate::PipelineError::contract(
+        "KCS-E-SCAN-IGNORE-BUDGET-001",
+        format!("ignore pattern exceeds the {MAX_GLOB_STATES} state matching budget"),
+    )
 }
 
 fn media_type_for_path(path: &Path) -> &'static str {
@@ -566,8 +944,8 @@ mod tests {
                 negated: true,
             },
         ];
-        assert!(explicitly_unignored("keep.log", false, &negation, true));
-        assert!(!explicitly_unignored("keep.log", false, &negation, false));
+        assert!(try_explicitly_unignored("keep.log", false, &negation, true).unwrap());
+        assert!(!try_explicitly_unignored("keep.log", false, &negation, false).unwrap());
     }
 
     #[test]
@@ -593,5 +971,172 @@ mod tests {
             leftovers.is_empty(),
             "probe must remove its files: {leftovers:?}"
         );
+    }
+
+    #[test]
+    fn r23_cand_005_question_matches_one_unicode_scalar() {
+        let rules = vec![IgnoreRule {
+            pattern: "?.txt".to_owned(),
+            negated: false,
+        }];
+        for name in ["a.txt", "é.txt", "e\u{301}.txt", "😀.txt"] {
+            assert!(
+                ignored_by_rules(name, false, &rules, false),
+                "one-scalar name should be ignored: {name:?}"
+            );
+        }
+        assert!(!ignored_by_rules("ab.txt", false, &rules, false));
+        assert!(!wildcard_match("?", "/").unwrap());
+    }
+
+    #[test]
+    fn r23_cand_005_unicode_rule_applies_through_scan_preview() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(".kcsignore"), "?.txt\n").unwrap();
+        std::fs::write(dir.path().join("é.txt"), b"excluded").unwrap();
+        std::fs::write(dir.path().join("ab.txt"), b"included").unwrap();
+
+        let preview = build_scan_preview(ScanPreviewRequest {
+            scope_path: dir.path().display().to_string(),
+            include_raw_hashes: false,
+            require_network_approval: false,
+        })
+        .unwrap();
+        assert!(
+            preview
+                .candidates
+                .iter()
+                .find(|candidate| candidate.input_path == "é.txt")
+                .unwrap()
+                .ignored
+        );
+        assert!(
+            !preview
+                .candidates
+                .iter()
+                .find(|candidate| candidate.input_path == "ab.txt")
+                .unwrap()
+                .ignored
+        );
+    }
+
+    #[test]
+    fn r23_cand_017_adversarial_glob_visits_bounded_states() {
+        let mut pattern = "*a".repeat(64);
+        pattern.push('b');
+        let value = "a".repeat(64);
+        assert!(!wildcard_match(&pattern, &value).unwrap());
+
+        let over_budget = "a".repeat(MAX_GLOB_STATES);
+        let error = wildcard_match(&over_budget, "").unwrap_err();
+        assert!(error.to_string().contains("KCS-E-SCAN-IGNORE-BUDGET-001"));
+    }
+
+    #[test]
+    fn r23_cand_017_star_and_double_star_semantics_remain_intact() {
+        assert!(wildcard_match("*.md", "notes.md").unwrap());
+        assert!(!wildcard_match("*.md", "dir/notes.md").unwrap());
+        assert!(wildcard_match("**/notes.md", "notes.md").unwrap());
+        assert!(wildcard_match("**/notes.md", "a/b/notes.md").unwrap());
+        assert!(!wildcard_match("**/notes.md", "a/b/notes.txt").unwrap());
+    }
+
+    #[test]
+    fn r23_cand_032_scan_hash_streams_from_verified_handle() {
+        let dir = tempfile::tempdir().unwrap();
+        let bytes = vec![0x5a; 256 * 1024];
+        std::fs::write(dir.path().join("large.bin"), &bytes).unwrap();
+
+        let preview = build_scan_preview(ScanPreviewRequest {
+            scope_path: dir.path().display().to_string(),
+            include_raw_hashes: true,
+            require_network_approval: false,
+        })
+        .unwrap();
+        let candidate = preview
+            .candidates
+            .iter()
+            .find(|candidate| candidate.input_path == "large.bin")
+            .unwrap();
+        assert_eq!(candidate.size_bytes, bytes.len() as u64);
+        assert_eq!(
+            candidate.raw_hash.as_deref(),
+            Some(hash_bytes(&bytes).as_str())
+        );
+    }
+
+    #[test]
+    fn r23_cand_027_verified_read_is_bounded_and_scope_local() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("small.txt"), b"hello").unwrap();
+
+        let input = read_verified_scan_input(dir.path(), "small.txt", 5).unwrap();
+        assert_eq!(input.bytes, b"hello");
+        assert_eq!(input.raw_hash, hash_bytes(b"hello"));
+        assert!(read_verified_scan_input(dir.path(), "small.txt", 4).is_err());
+        assert!(read_verified_scan_input(dir.path(), "../small.txt", 5).is_err());
+    }
+
+    #[test]
+    fn r23_cand_057_streaming_identity_honors_exact_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("bounded.bin"), b"12345").unwrap();
+
+        let identity = hash_verified_scan_input(dir.path(), "bounded.bin", 5).unwrap();
+        assert_eq!(identity.size_bytes, 5);
+        assert_eq!(identity.raw_hash, hash_bytes(b"12345"));
+        assert!(hash_verified_scan_input(dir.path(), "bounded.bin", 4).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn r23_cand_027_verified_read_rejects_symlink_target() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let outside = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(outside.path(), b"outside").unwrap();
+        symlink(outside.path(), dir.path().join("inside.txt")).unwrap();
+
+        let error = read_verified_scan_input(dir.path(), "inside.txt", 1024).unwrap_err();
+        assert!(error.to_string().contains("KCS-E-SCAN-FILE-IDENTITY-001"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn r23_cand_027_replacement_after_listing_rejects_outside_handle() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("inside.txt");
+        std::fs::write(&path, b"inside").unwrap();
+        let listed = std::fs::symlink_metadata(&path).unwrap();
+
+        let outside = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(outside.path(), b"outside").unwrap();
+        std::fs::remove_file(&path).unwrap();
+        symlink(outside.path(), &path).unwrap();
+        let outside_handle = File::open(&path).unwrap();
+
+        let error = verify_opened_regular_file(&path, listed, outside_handle).unwrap_err();
+        assert!(error.to_string().contains("KCS-E-SCAN-FILE-IDENTITY-001"));
+    }
+
+    #[test]
+    fn r23_cand_067_current_ignore_policy_reauthorizes_durable_input() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("private.pdf"), b"%PDF BT (text)").unwrap();
+        let raw_hash = hash_bytes(b"%PDF BT (text)");
+
+        assert!(current_scan_allows_file(dir.path(), "private.pdf", &raw_hash, 64).unwrap());
+        assert!(
+            !current_scan_allows_file(dir.path(), "private.pdf", &hash_bytes(b"other"), 64)
+                .unwrap()
+        );
+        std::fs::write(dir.path().join(".kcsignore"), "private.pdf\n").unwrap();
+        assert!(!current_scan_allows_file(dir.path(), "private.pdf", &raw_hash, 64).unwrap());
+
+        std::fs::write(dir.path().join(".kcsignore"), "").unwrap();
+        assert!(current_scan_allows_file(dir.path(), "private.pdf", &raw_hash, 13).is_err());
     }
 }

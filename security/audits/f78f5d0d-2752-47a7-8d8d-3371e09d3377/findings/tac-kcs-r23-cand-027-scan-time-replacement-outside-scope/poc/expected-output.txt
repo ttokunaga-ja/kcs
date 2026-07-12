@@ -1,0 +1,8 @@
+[+] setup complete with a synthetic selected scope and synthetic outside target
+[+] phase 1: observed quarterly-summary.pdf as a regular direct child
+[+] phase 1: benign identity secret_hold=no media_type=application/pdf
+[+] phase 2: replaced the direct child with a symlink to the outside target
+[+] phase 3: scan raw_hash=sha256:<hash>
+[+] phase 4: later index hash matched the scan hash
+[+] result: accepted identity=quarterly-summary.pdf content_source=outside target
+[+] result: synthetic outside marker reached through the benign path

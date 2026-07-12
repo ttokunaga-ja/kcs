@@ -22,7 +22,7 @@ Object 種別:
   commit       tree + parents + metadata
 ```
 
-raw / prepared / image / chunk / embedding / tree / commit は **CAS object** として `objects/<type>/ab/cd/<hash>` に保存。hash の算出は object 種別ごとに §8.1 で規定する: raw / prepared / image は**バイト列そのものの content hash**、tree / commit は **canonical JSON 保存バイト列の content hash**、chunk / embedding は **identity タプルから導出する identity hash**。normalized_unit は **path-named** で `objects/normalized_units/ab/cd/<raw_hash>.<tool_profile_hash>.g<gen>/` 配下に保存する (content hash 不採用、§5。詳細は §2.1)。ファイル全文の normalized Markdown は unit を決定論的に結合した **view (再生成可能な cache)** であり、正本ではない。
+raw / prepared / image / chunk / embedding / tree / commit は **CAS object** として `objects/<type>/ab/cd/<digest64>` に保存。hash の算出は object 種別ごとに §8.1 で規定する: raw / prepared / image は**バイト列そのものの content hash**、tree / commit は **canonical JSON 保存バイト列の content hash**、chunk / embedding は **identity タプルから導出する identity hash**。normalized_unit は **path-named** で `objects/normalized_units/ab/cd/<raw64>.<tool64>.g<gen>/` 配下に保存する (content hash 不採用、§5。詳細は §2.1)。ファイル全文の normalized Markdown は unit を決定論的に結合した **view (再生成可能な cache)** であり、正本ではない。
 
 # 2. .kcs 物理レイアウト
 
@@ -35,22 +35,22 @@ raw / prepared / image / chunk / embedding / tree / commit は **CAS object** �
   tool-lock.json      Adapter capability 記録 (cmd/url/auth は含めない)
   manifest.json       working/index state (永続的真実は tree/commit object)
   objects/
-    raw/ab/cd/<raw_hash>
-    prepared/ab/cd/<prepared_hash>
-    images/ab/cd/<image_hash>       # 文書内 embedded image (type 予約済み、実装 Step 2。
+    raw/ab/cd/<raw64>
+    prepared/ab/cd/<prepared64>
+    images/ab/cd/<image64>          # 文書内 embedded image (type 予約済み、実装 Step 2。
                                     # media_type は unit metadata に記録)
-    normalized_units/ab/cd/<raw_hash>.<tool_profile_hash>.g<gen>/
+    normalized_units/ab/cd/<raw64>.<tool64>.g<gen>/
       manifest.json                    # 順序付き unit 一覧 + unit status (正本, §2.1)
       <unit_ref>.json                  # unit object (unit_ref = base16(sha256(unit_key))[0:16])
-    normalized/ab/cd/<raw_hash>.<tool_profile_hash>.g<gen>.md   # 全文 view (cache, 再生成可能)
-    chunks/ab/cd/<chunk_hash>
-    embeddings/ab/cd/<embedding_hash>
-    trees/ab/cd/<tree_hash>
-    commits/ab/cd/<commit_hash>
+    normalized/ab/cd/<raw64>.<tool64>.g<gen>.md   # 全文 view (cache, 再生成可能)
+    chunks/ab/cd/<chunk64>
+    embeddings/ab/cd/<embedding64>
+    trees/ab/cd/<tree64>
+    commits/ab/cd/<commit64>
   refs/
     heads/main
     tags/<name>
-  tombstones/ab/cd/<raw_hash>   purge の tombstone 記録 (05-runtime.md §3.5。CAS object ではない)
+  tombstones/ab/cd/<raw64>      purge の tombstone 記録 (05-runtime.md §3.5。CAS object ではない)
   index/
     sqlite.db         FTS5 + sqlite-vec (query acceleration layer; 真実は objects/)
   logs/
@@ -58,13 +58,33 @@ raw / prepared / image / chunk / embedding / tree / commit は **CAS object** �
   packs/              v2+ (delta compression, MVP 対象外)
 ```
 
+`<raw64>` / `<tool64>` / `<digest64>` 等は、対応する論理 hash
+`sha256:<64 lowercase hex>` から `sha256:` を除いた **64 文字の小文字 hex digest** である。
+物理ファイル名とディレクトリ名にはこの digest-only 表現を使い、`:` を含めない。JSON、SQLite、
+refs、CLI 出力、Evidence URI 等で扱う論理 hash は従来どおり `sha256:<64 lowercase hex>` のままであり、
+object identity と hash 算出規約は変わらない。
+
+**旧物理パスとの互換性と移行**:
+
+- 新しく物理 object、normalized instance/view、tombstone を作成する場合は上記の digest-only 名を使う
+- 旧 Unix store にある `sha256:<64hex>` を leaf または basename 要素に含む物理パスは、検証付きの
+  compatibility fallback として読み取る。CAS object は要求された論理 hash と内容/identity hash を、
+  normalized は manifest の `(raw_hash, tool_profile_hash, gen)` を、tombstone はレコード内の
+  `raw_hash` を照合してから受け入れる
+- canonical path と legacy path の両方が存在する場合は両方を検証する。いずれかが期待値と一致しない、
+  または同一 identity に対して内容が競合する場合は store corruption として fail closed する
+- 要求内容と完全一致する検証済み legacy 表現はその場で再利用し、通常の read/index を契機に
+  canonical path へ copy、rename、rewrite しない。normalized の同一 gen を更新する既存の partial retry
+  だけは、選択済みの legacy layout 内で instance/view を置き換えられるが、canonical への eager migration
+  は行わない。したがって事前の一括移行は不要であり、既存 store は段階的に利用し続けられる
+
 **format_version**: 旧称 `VERSION 0.1.0` (research/kcs.md) は `kcs_format_version` に統一。semver は [10-operations.md §12.5](10-operations.md) 参照。
 
 ## 2.1 normalized instance と全文 view
 
 **normalized の正本は unit object 群** ([04-pipeline.md §2](04-pipeline.md))。1 つの
 `(raw_hash, tool_profile_hash, gen)` の組を **normalized instance** と呼び、
-`objects/normalized_units/ab/cd/<raw_hash>.<tool_profile_hash>.g<gen>/` ディレクトリ全体で表現する。
+`objects/normalized_units/ab/cd/<raw64>.<tool64>.g<gen>/` ディレクトリ全体で表現する。
 
 manifest schema:
 
@@ -133,7 +153,7 @@ unit object schema (`<unit_ref>.json`):
 **normalized_hash の代替ではない** (§5: Markdown の content hash は計算・保存・比較しない)。
 新規参照 (新規 commit の tree entry / 新規 chunk) は常に最新 gen を使う。
 
-**全文 view**: `objects/normalized/ab/cd/<raw_hash>.<tool_profile_hash>.g<gen>.md` は
+**全文 view**: `objects/normalized/ab/cd/<raw64>.<tool64>.g<gen>.md` は
 unit を決定論的に結合した **再生成可能な cache** であり、正本ではない。組み立て規則:
 
 1. manifest.units を `order` 昇順に走査する
@@ -380,11 +400,11 @@ object hash は artifact identity と Evidence Pointer の永続性 (08 §6) を
 
 **共通規則**:
 
-- hash 表記は `"sha256:" + base16(sha256(...))` (小文字 hex)。
-- fan-out パス `objects/<type>/ab/cd/<hash>` の `ab` / `cd` は、`sha256:` プレフィックスを除いた digest の先頭 2 文字 / 続く 2 文字。
+- 論理 hash 表記は `"sha256:" + base16(sha256(...))` (小文字 hex)。JSON、SQLite、refs、CLI、URI ではこの完全表記を使う。
+- canonical fan-out パスは `objects/<type>/ab/cd/<digest64>`。`digest64` は論理 hash から `sha256:` を除いた 64 文字の小文字 hex で、`ab` / `cd` はその先頭 2 文字 / 続く 2 文字。normalized basename と tombstone leaf も §2 の digest-only 規則に従う。
 - object 本体は**自身の hash を含めない** (Git 同様、保存キーが ID。旧 `tree_id` / `commit_id` フィールドは廃止)。
 - 人間向け表示は先頭 12 hex への短縮可 (`sha256:9f2c1a7b04de…`)。`--json` は完全 hash ([06-cli-spec.md §4](06-cli-spec.md))。
-- 本規約の変更は `kcs_format_version` の MAJOR bump (migration plan 必須)。
+- hash 算出または論理 identity 規約の変更は `kcs_format_version` の MAJOR bump (migration plan 必須)。§2 の digest-only 物理名は、論理 hash を変えず Windows を含む filesystem で同じ object を表現する portability correction であり、identity の変更ではない。旧物理名は §2 の検証付き fallback で読み取る。
 
 **raw / prepared / image** — content hash:
 
@@ -441,7 +461,7 @@ embedding_hash = "sha256:" + base16(sha256(JCS({
 ## tree / commit object
 
 ```json
-// tree — objects/trees/3f/9a/<tree_hash> に JCS 形式で保存 (tree_hash は保存バイト列の sha256)
+// tree — objects/trees/3f/9a/<tree64> に JCS 形式で保存 (tree_hash は保存バイト列の sha256)
 {
   "object_type": "tree",
   "entries": [
@@ -454,7 +474,7 @@ embedding_hash = "sha256:" + base16(sha256(JCS({
   ]
 }
 
-// commit — objects/commits/9f/2c/<commit_hash> に JCS 形式で保存
+// commit — objects/commits/9f/2c/<commit64> に JCS 形式で保存
 {
   "object_type": "commit",
   "tree": "sha256:3f9a...",
@@ -576,11 +596,12 @@ Generated-At: 2026-04-25T12:00:00Z
 ```toml
 [markdown.mistral_ocr_markdownize]
 kind = "online_api"
-cmd = "uvx kcs-mistral-ocr-adapter"
 model = "mistral-ocr-latest"        # config では可変 alias 可。tool_profile の pin は解決済み immutable 版 (§5.1)
 profile_hash = "sha256:..."
 capabilities = ["ocr", "layout_detection", "table_extraction"]
 ```
+
+現行版の認証付き Markdownize / Embedding adapter は KCS 組込み target のみを実行する。`cmd` / `args` / `url` による任意 target は受理せず、旧設定にこれらのキーがある場合は削除して組込み adapter 宣言へ移行する。Summary / Classification / Rerank など未実装 role の外部 dispatch 契約は [07-adapter-spec.md §7](07-adapter-spec.md) の将来仕様であり、現行 runtime が実行できることを意味しない。
 
 `.kcs/config.toml`:
 

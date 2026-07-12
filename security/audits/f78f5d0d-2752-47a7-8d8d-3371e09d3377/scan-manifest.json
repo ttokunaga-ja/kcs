@@ -1,0 +1,326 @@
+{
+  "documentType": "codex-security.scan-manifest",
+  "scan": {
+    "artifacts": [
+      {
+        "mediaType": "application/json",
+        "path": "findings.json",
+        "sha256": "a7ab58a64f2f82b8317d9c467f532d8c30b35df3472b5d7e4c99c40b93ac6e4b"
+      },
+      {
+        "mediaType": "application/json",
+        "path": "coverage.json",
+        "sha256": "9eef7f656d72f9f5f95da16f3d7cbaa449ed5b4965ee1a84b96f465e889194cc"
+      },
+      {
+        "mediaType": "application/jsonl",
+        "path": "artifacts/05_findings/KCS-R23-CAND-069/candidate_ledger.jsonl",
+        "sha256": "02d85ee46e0b3855d457ce38e0aabf6a9ea255bfc694b1c618b52dc7ad361baa"
+      },
+      {
+        "mediaType": "application/jsonl",
+        "path": "artifacts/05_findings/KCS-R23-CAND-003/candidate_ledger.jsonl",
+        "sha256": "bc6bdceb6e13bf82f9ce938cbb508d81a9daa7f0bda82559f09a230905108761"
+      },
+      {
+        "mediaType": "application/jsonl",
+        "path": "artifacts/05_findings/KCS-R23-CAND-004/candidate_ledger.jsonl",
+        "sha256": "fa676e020f15756820b997db5a103d8c35d8919db8951194afef01bdaaaadecc"
+      },
+      {
+        "mediaType": "application/jsonl",
+        "path": "artifacts/05_findings/KCS-R23-CAND-005/candidate_ledger.jsonl",
+        "sha256": "a96cb54050495cab147efdff92fa44c4c880cf71ea425a7e07ff62610fd8c5cb"
+      },
+      {
+        "mediaType": "application/jsonl",
+        "path": "artifacts/05_findings/KCS-R23-CAND-006/candidate_ledger.jsonl",
+        "sha256": "d9b9d6df5cdd979435b6635fe4f0cfb3b1033f1d516619e702ffae6a4aec150d"
+      },
+      {
+        "mediaType": "application/jsonl",
+        "path": "artifacts/05_findings/KCS-R23-CAND-007/candidate_ledger.jsonl",
+        "sha256": "252af9a395da4984e0c65208a7d2941fc323201eadad29e0563a4e9be3d27547"
+      },
+      {
+        "mediaType": "application/jsonl",
+        "path": "artifacts/05_findings/KCS-R23-CAND-008/candidate_ledger.jsonl",
+        "sha256": "ddf65e329b32df848913bb253dabcd69d87642414771f361cf35755228369b6a"
+      },
+      {
+        "mediaType": "application/jsonl",
+        "path": "artifacts/05_findings/KCS-R23-CAND-011/candidate_ledger.jsonl",
+        "sha256": "8240fddbcdfd1efd8b445b57bb6b9a5b8bb1a7f36cafa373659c96ace9cdca7c"
+      },
+      {
+        "mediaType": "application/jsonl",
+        "path": "artifacts/05_findings/KCS-R23-CAND-013/candidate_ledger.jsonl",
+        "sha256": "089873faebeb8db751b8da44507d1a9967ec424a319520a2da3a21d18c74d7dc"
+      },
+      {
+        "mediaType": "application/jsonl",
+        "path": "artifacts/05_findings/KCS-R23-CAND-014/candidate_ledger.jsonl",
+        "sha256": "c4253b02e9bec68a3f9e676f02cb5f099c0b13d6df466bcc441cde2faab9e16e"
+      },
+      {
+        "mediaType": "application/jsonl",
+        "path": "artifacts/05_findings/KCS-R23-CAND-017/candidate_ledger.jsonl",
+        "sha256": "fdcfe6b7e99a46b00ba326a2e44abbd54b8e184bdc58da077e428bb2248a833a"
+      },
+      {
+        "mediaType": "application/jsonl",
+        "path": "artifacts/05_findings/KCS-R23-CAND-019/candidate_ledger.jsonl",
+        "sha256": "c67d625b49ca5e8a8384d135918e004780b4888440212fdfbe5524305836996c"
+      },
+      {
+        "mediaType": "application/jsonl",
+        "path": "artifacts/05_findings/KCS-R23-CAND-020/candidate_ledger.jsonl",
+        "sha256": "8fd45e61b697bf908cdb6ea489a370e112b84104ffe6788af8f6e6b7ee3d1846"
+      },
+      {
+        "mediaType": "application/jsonl",
+        "path": "artifacts/05_findings/KCS-R23-CAND-022/candidate_ledger.jsonl",
+        "sha256": "e81b125a25227a278eae464afd9680f3c09d052bfd82e9e793a568d4720d2e35"
+      },
+      {
+        "mediaType": "application/jsonl",
+        "path": "artifacts/05_findings/KCS-R23-CAND-023/candidate_ledger.jsonl",
+        "sha256": "7b8f996e3ca80bf490ad99a4fd7c24b1d1e4e02b51be4c43df2df2203b404392"
+      },
+      {
+        "mediaType": "application/jsonl",
+        "path": "artifacts/05_findings/KCS-R23-CAND-024/candidate_ledger.jsonl",
+        "sha256": "32370578fd734954b2c09ca4e38b1698060e12739ddd0210902e556b048450d3"
+      },
+      {
+        "mediaType": "application/jsonl",
+        "path": "artifacts/05_findings/KCS-R23-CAND-025/candidate_ledger.jsonl",
+        "sha256": "d801e26405d016588f1df2b36194a923486aad0dff131377def4908ee2f1ac42"
+      },
+      {
+        "mediaType": "application/jsonl",
+        "path": "artifacts/05_findings/KCS-R23-CAND-027/candidate_ledger.jsonl",
+        "sha256": "7a49ec3d61c97a82dca88f2b10f173f452221a03d37fd8b95163e826a2c9157d"
+      },
+      {
+        "mediaType": "application/jsonl",
+        "path": "artifacts/05_findings/KCS-R23-CAND-028/candidate_ledger.jsonl",
+        "sha256": "cc2dedbb86fc358f3c7b90365501d06ff17648d056346a3744ded01c4f162bf3"
+      },
+      {
+        "mediaType": "application/jsonl",
+        "path": "artifacts/05_findings/KCS-R23-CAND-032/candidate_ledger.jsonl",
+        "sha256": "e11e7a9cf2bdba63c6a0ab6b2cd7ccff0aec5ac42929bf1f1fa270758a1cc264"
+      },
+      {
+        "mediaType": "application/jsonl",
+        "path": "artifacts/05_findings/KCS-R23-CAND-034/candidate_ledger.jsonl",
+        "sha256": "64cc0177339c3810e7c3fef967e52cd6a3ccd3907d8a9964ade37414e21d8b3d"
+      },
+      {
+        "mediaType": "application/jsonl",
+        "path": "artifacts/05_findings/KCS-R23-CAND-036/candidate_ledger.jsonl",
+        "sha256": "0fd50f29323d432d309e32a54c22ccc4946de7132c9867c9e941799bc7c05a18"
+      },
+      {
+        "mediaType": "application/jsonl",
+        "path": "artifacts/05_findings/KCS-R23-CAND-038/candidate_ledger.jsonl",
+        "sha256": "499a409b60c25d7127138babfde01de33dde60228811f1a549b1181b3adf0741"
+      },
+      {
+        "mediaType": "application/jsonl",
+        "path": "artifacts/05_findings/KCS-R23-CAND-039/candidate_ledger.jsonl",
+        "sha256": "85021c25a03887335369670f9d1ee152d74bb314a22a01ea92f2c672898c402b"
+      },
+      {
+        "mediaType": "application/jsonl",
+        "path": "artifacts/05_findings/KCS-R23-CAND-040/candidate_ledger.jsonl",
+        "sha256": "4b1dd55fa574a012a9ab6e33797205c935bc0bec1912b0bc068daf02615816d9"
+      },
+      {
+        "mediaType": "application/jsonl",
+        "path": "artifacts/05_findings/KCS-R23-CAND-047/candidate_ledger.jsonl",
+        "sha256": "3eb6d95ad140e87355762a303d62e73e400ddfb7ceb29df8d51ccd2695f64be8"
+      },
+      {
+        "mediaType": "application/jsonl",
+        "path": "artifacts/05_findings/KCS-R23-CAND-048/candidate_ledger.jsonl",
+        "sha256": "48aa5b115bf94cde59a20e2e6cb93d2e5f4b285ee605d4938e06aa3661ab763a"
+      },
+      {
+        "mediaType": "application/jsonl",
+        "path": "artifacts/05_findings/KCS-R23-CAND-049/candidate_ledger.jsonl",
+        "sha256": "083868361340e759765225d65f12a7de2bf220d81ef6f2df1af1d4a7797fc3ef"
+      },
+      {
+        "mediaType": "application/jsonl",
+        "path": "artifacts/05_findings/KCS-R23-CAND-051/candidate_ledger.jsonl",
+        "sha256": "5de78eb0242145995ec1b660f7d87cbba654f2b4430b354b9b97584595bde29a"
+      },
+      {
+        "mediaType": "application/jsonl",
+        "path": "artifacts/05_findings/KCS-R23-CAND-059/candidate_ledger.jsonl",
+        "sha256": "dd2cacca4982267addb47ba6353f8341aab3318c13f19c52792a16ea17e53829"
+      },
+      {
+        "mediaType": "application/jsonl",
+        "path": "artifacts/05_findings/KCS-R23-CAND-061/candidate_ledger.jsonl",
+        "sha256": "63b3ef0270fb7a042a8f59b3771616a7666813d12a0b67b46c0479d2515189a1"
+      },
+      {
+        "mediaType": "application/jsonl",
+        "path": "artifacts/05_findings/KCS-R23-CAND-067/candidate_ledger.jsonl",
+        "sha256": "cfcda7de3946f226cd92b42b90e935a08435d2212a2b56bd1be9870caa1fb2cc"
+      },
+      {
+        "mediaType": "application/jsonl",
+        "path": "artifacts/05_findings/KCS-R23-CAND-068/candidate_ledger.jsonl",
+        "sha256": "e1202753e82a02a92d1527f33dd8184b6f7dd9dd7a2914c5ae806ea29741ac1e"
+      },
+      {
+        "mediaType": "application/jsonl",
+        "path": "artifacts/05_findings/KCS-R23-CAND-001/candidate_ledger.jsonl",
+        "sha256": "4267e3ccf909302d1cbf7098feccab9a0795e4a01f4e28a0b6031d085f3caf5e"
+      },
+      {
+        "mediaType": "application/jsonl",
+        "path": "artifacts/05_findings/KCS-R23-CAND-012/candidate_ledger.jsonl",
+        "sha256": "36a542cf67d23618b67b604c721b02ed3f42bfe1ad72a4ef594f72ec8a84113f"
+      },
+      {
+        "mediaType": "application/jsonl",
+        "path": "artifacts/05_findings/KCS-R23-CAND-018/candidate_ledger.jsonl",
+        "sha256": "59e7aafb278ef1bf2dd56de854c5203e1411de252f5c9b5ab3ba29016781667e"
+      },
+      {
+        "mediaType": "application/jsonl",
+        "path": "artifacts/05_findings/KCS-R23-CAND-029/candidate_ledger.jsonl",
+        "sha256": "618ca5ae1c4bdec45fef84cae14a4acb9e1c1b83985cfd5f903288194616957e"
+      },
+      {
+        "mediaType": "application/jsonl",
+        "path": "artifacts/05_findings/KCS-R23-CAND-030/candidate_ledger.jsonl",
+        "sha256": "04700f3b859e89d2dc33f5d2f584c2e66f89278f76e8d01a13441ee2110b0d6b"
+      },
+      {
+        "mediaType": "application/jsonl",
+        "path": "artifacts/05_findings/KCS-R23-CAND-031/candidate_ledger.jsonl",
+        "sha256": "4383b05771e4911c5d0e099213d3f0771562551454241850a999f378824a2045"
+      },
+      {
+        "mediaType": "application/jsonl",
+        "path": "artifacts/05_findings/KCS-R23-CAND-033/candidate_ledger.jsonl",
+        "sha256": "eaf49635fdd8f991b18869a4f6fea709601f1ba0159f28273a936eed312791bb"
+      },
+      {
+        "mediaType": "application/jsonl",
+        "path": "artifacts/05_findings/KCS-R23-CAND-041/candidate_ledger.jsonl",
+        "sha256": "645c1e2425792b44d3c11d39b465b8a22632fb0afdf11c0989003884b8a730be"
+      },
+      {
+        "mediaType": "application/jsonl",
+        "path": "artifacts/05_findings/KCS-R23-CAND-042/candidate_ledger.jsonl",
+        "sha256": "bb2a41b3693b4ad89455e5acef083af0993907621701a8503768e4c31c5d922a"
+      },
+      {
+        "mediaType": "application/jsonl",
+        "path": "artifacts/05_findings/KCS-R23-CAND-043/candidate_ledger.jsonl",
+        "sha256": "fcf20492ed3efd1aa2e3c0d8fc70a27d667cf6900e990f9c98a8b203cacab5d0"
+      },
+      {
+        "mediaType": "application/jsonl",
+        "path": "artifacts/05_findings/KCS-R23-CAND-046/candidate_ledger.jsonl",
+        "sha256": "d331ba6581756516905134d1f915f0b0388656d90d18fa9e742be819e8b925f3"
+      },
+      {
+        "mediaType": "application/jsonl",
+        "path": "artifacts/05_findings/KCS-R23-CAND-050/candidate_ledger.jsonl",
+        "sha256": "a04dd99c3b368b4fe6ec9dc97065fbcf5575393ebff8e88e053031f7bb79adc9"
+      },
+      {
+        "mediaType": "application/jsonl",
+        "path": "artifacts/05_findings/KCS-R23-CAND-057/candidate_ledger.jsonl",
+        "sha256": "71599440f1f8525a17e2d4c93da1497bb184702e35341a9df0d56d93d07241d0"
+      },
+      {
+        "mediaType": "application/jsonl",
+        "path": "artifacts/05_findings/KCS-R23-CAND-064/candidate_ledger.jsonl",
+        "sha256": "b5d13b95e7327c47b83bc6e76e58b222e69dba1bd5f0597b26e4250e6324cf5e"
+      }
+    ],
+    "completedAt": "2026-07-11T20:52:16Z",
+    "coverageRef": "coverage.json",
+    "findingsRef": "findings.json",
+    "hardening": {
+      "portfolioPath": "hardening/hardening.md"
+    },
+    "id": "f78f5d0d-2752-47a7-8d8d-3371e09d3377",
+    "producer": {
+      "name": "codex-security",
+      "version": "0.1.11"
+    },
+    "scope": {
+      "artifactsReviewed": [
+        "420/420 coverage rows",
+        "69 validation decisions",
+        "47 final reportable findings",
+        "47 accepted detailed write-ups"
+      ],
+      "context": "The scan was resumed from reporting artifacts only; no new scan, discovery, validation, or attack-path adjudication was run.",
+      "excludePaths": [],
+      "includePaths": [
+        "."
+      ],
+      "limitations": [
+        "Hardening proposals are design guidance and are not implemented fixes.",
+        "Some legacy accepted receipts retain pending coordinator fields; the later provenance audit records formal acceptance and matching hashes."
+      ],
+      "runtimeStatus": "No live third-party targets were exercised during final reporting; local and synthetic PoCs are linked from write-ups.",
+      "summary": "Deep repository scan of KCS at the fixed target revision.",
+      "validationMode": "Saved validation and attack-path evidence plus local artifact integrity checks."
+    },
+    "sealedAt": "2026-07-11T20:52:16Z",
+    "startedAt": "2026-07-10T10:49:46Z",
+    "status": "completed",
+    "target": {
+      "displayName": "kcs",
+      "kind": "git_revision",
+      "remote": "https://github.com/ttokunaga-ja/kcs",
+      "revision": "0e19f3c6489da458e93a982a333c308d92d0a0ae",
+      "targetId": "target_sha256_5f564eafaec7c5be5962c948120cedc6ff55c83a742cfdd830d07cbe62ee69a2"
+    },
+    "threatModel": {
+      "assets": [
+        "repository contents and derived normalized units",
+        "local .kcs store and CAS objects",
+        "provider API credentials and responses",
+        "embedding, OCR, and search indexes",
+        "scan provenance and audit reports"
+      ],
+      "assumptions": [
+        "The attacker is local to repository content or scan inputs, not a live third-party service attacker in final reporting."
+      ],
+      "attackerCapabilities": [
+        "commit or place crafted files in a repository processed by KCS",
+        "preseed or race local paths in a working tree under review",
+        "control oversized or malformed provider-like response data in tests or adapters",
+        "replay or tamper with persisted KCS task records when local store integrity is not enforced"
+      ],
+      "securityObjectives": [
+        "bind authorized scope to the final bytes consumed",
+        "bound reads, allocations, provider responses, and derived work before materialization",
+        "keep provider credentials and adapter targets scoped to their intended origin",
+        "make persisted workflow state replay-safe and auditable"
+      ],
+      "summary": "KCS processes lower-trust repository content, provider responses, persisted task state, and local stores. The main objectives are preserving repository scope isolation, secret handling, provenance integrity, bounded resource use, and credential confinement.",
+      "trustBoundaries": [
+        "repository-controlled paths and file bytes entering KCS",
+        "external OCR and embedding provider responses",
+        "persisted task and budget state replayed across runs",
+        "human-readable terminal output",
+        "local store adoption and scope validation"
+      ]
+    }
+  },
+  "schemaVersion": "1.0"
+}

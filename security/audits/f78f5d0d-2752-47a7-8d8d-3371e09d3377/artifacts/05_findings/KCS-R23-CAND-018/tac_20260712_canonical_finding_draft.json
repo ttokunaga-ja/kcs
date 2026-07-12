@@ -1,0 +1,193 @@
+{
+  "schema_version": 1,
+  "scanId": "f78f5d0d-2752-47a7-8d8d-3371e09d3377",
+  "candidateId": "KCS-R23-CAND-018",
+  "ledgerRowId": "KCS-R23-CAND-018",
+  "title": "Snapshot's regular-file check can be raced into archiving an outside-scope symlink target",
+  "finalPolicy": "reportable",
+  "severity": "low",
+  "priority": "P3",
+  "confidence": "high",
+  "targetRevision": "0e19f3c6489da458e93a982a333c308d92d0a0ae",
+  "summary": "KCS observes a direct child's file type before performing a separate pathname-based `fs::read`. A lower-trust local writer that can rename a checked direct child can replace it with a symlink to a victim-readable file outside the scope before the read, causing snapshot to archive those outside bytes under the benign in-scope name.",
+  "affectedLocations": [
+    {
+      "label": "entrypoint",
+      "path": "crates/kcs-cli/src/main.rs",
+      "lines": "452-472",
+      "detail": "Manual snapshot opens the current repository, computes filename exclusions, and calls `snapshot_filtered`."
+    },
+    {
+      "label": "root_control",
+      "path": "crates/kcs-core/src/scope.rs",
+      "lines": "261-290",
+      "detail": "`DirEntry::file_type` is observed before a separate pathname-based `fs::read` with no descriptor or inode binding."
+    },
+    {
+      "label": "archive_sink",
+      "path": "crates/kcs-core/src/scope.rs",
+      "lines": "290-299",
+      "detail": "Bytes read through the replacement path are hashed, optionally written to raw CAS, and bound under the benign filename."
+    },
+    {
+      "label": "cas_sink",
+      "path": "crates/kcs-core/src/cas.rs",
+      "lines": "60-75",
+      "detail": "`ObjectStore::write_raw` persists the supplied buffer under its content hash."
+    },
+    {
+      "label": "closest_control",
+      "path": "crates/kcs-core/src/scope.rs",
+      "lines": "421-430",
+      "detail": "Snapshot holds only the `.kcs` store lock; it does not exclude external working-directory renames."
+    }
+  ],
+  "codeEvidence": [
+    {
+      "id": "snapshot-cli-entry",
+      "label": "Manual snapshot reaches the filtered snapshot path",
+      "path": "crates/kcs-cli/src/main.rs",
+      "startLine": 452,
+      "endLine": 472,
+      "language": "rust",
+      "role": "entrypoint",
+      "code": "Command::Snapshot(args) => {\n    let _action = args.action;\n    let repo = Repository::open_current()?;\n    validate_repo_tool_lock(&repo)?;\n    let preview = build_scan_preview(ScanPreviewRequest {\n        scope_path: repo.root().display().to_string(),\n        include_raw_hashes: false,\n        require_network_approval: false,\n    })\n    .map_err(pipeline_to_kcs)?;\n    let excluded = preview\n        .candidates\n        .iter()\n        .filter(|candidate| candidate.ignored)\n        .map(|candidate| candidate.input_path.clone())\n        .collect::<BTreeSet<_>>();\n    let outcome = repo.snapshot_filtered(args.message.as_deref(), None, &excluded)?;",
+      "explanation": "The ordinary `kcs snapshot` path reaches the repository snapshot builder after only name-based exclusions. A lower-trust writer races the selected working root while this victim command runs."
+    },
+    {
+      "id": "type-observation",
+      "label": "Stable non-regular entries are skipped before the read",
+      "path": "crates/kcs-core/src/scope.rs",
+      "startLine": 261,
+      "endLine": 277,
+      "language": "rust",
+      "role": "expected_control",
+      "code": "for entry in fs::read_dir(&self.root).kcs_io(&self.root)? {\n    let entry = entry.kcs_io(&self.root)?;\n    if entry.file_name() == \".kcs\" {\n        continue;\n    }\n    let path = entry.path();\n    let file_type = entry.file_type().kcs_io(&path)?;\n    if file_type.is_dir() {\n        continue;\n    }\n    if !file_type.is_file() {\n        eprintln!(\"warning: skipping non-regular file: {}\", path.display());\n        continue;\n    }",
+      "explanation": "`entry.file_type()` protects only the filesystem state observed at this point. A stable symlink is skipped, but the accepted `path` remains a mutable pathname that can be renamed before use."
+    },
+    {
+      "id": "path-reopen",
+      "label": "The accepted name is reopened by pathname",
+      "path": "crates/kcs-core/src/scope.rs",
+      "startLine": 278,
+      "endLine": 299,
+      "language": "rust",
+      "role": "root_control",
+      "code": "let file_name = match entry.file_name().into_string() {\n    Ok(name) => name,\n    Err(_) => {\n        eprintln!(\"warning: skipping non-UTF-8 file name: {}\", path.display());\n        continue;\n    }\n};\nif excluded_paths.contains(&file_name) {\n    continue;\n}\nlet bytes = fs::read(&path).kcs_io(&path)?;\nlet raw_hash = if store_raw {\n    self.store.write_raw(&bytes)?\n} else {\n    hash_bytes(&bytes)\n};\nlet mut tree_entry = TreeEntry::raw_file(file_name.clone(), raw_hash)?;\ntree_entry.normalize = normalize_by_path.get(&file_name).cloned();\ntree_entry.validate()?;\nentries.push(tree_entry);",
+      "explanation": "The later `fs::read(&path)` performs a fresh pathname resolution. If the direct-child name was replaced with an outside symlink after the type observation, these lines read and bind the target bytes under the earlier benign filename."
+    },
+    {
+      "id": "raw-cas-sink",
+      "label": "Snapshot persists the followed bytes",
+      "path": "crates/kcs-core/src/cas.rs",
+      "startLine": 60,
+      "endLine": 75,
+      "language": "rust",
+      "role": "sink",
+      "code": "pub fn write_raw(&self, bytes: &[u8]) -> Result<String> {\n    let hash = hash_bytes(bytes);\n    self.write_object_bytes(ObjectKind::Raw, &hash, bytes)?;\n    Ok(hash)\n}\n\npub fn write_object_bytes(&self, kind: ObjectKind, hash: &str, bytes: &[u8]) -> Result<()> {\n    let path = self.object_path(kind, hash)?;\n    atomic_write(&path, bytes)\n}",
+      "explanation": "`write_raw` stores exactly the buffer returned by the racy pathname read, so the outside target's bytes become raw CAS state when snapshot calls the builder with `store_raw=true`."
+    },
+    {
+      "id": "store-lock-only",
+      "label": "The snapshot lock does not cover working-directory renames",
+      "path": "crates/kcs-core/src/scope.rs",
+      "startLine": 421,
+      "endLine": 430,
+      "language": "rust",
+      "role": "expected_control",
+      "code": "self.validate()?;\nlet _lock = StoreLock::acquire(&self.kcs_dir)?;\nmaybe_hold_lock_for_tests();\n\nlet working = self\n    .build_working_tree_with_normalize(true, excluded_paths, normalize_by_path)?\n    .tree;\nlet tree_value =\n    serde_json::to_value(&working).map_err(|err| KcsError::schema(err.to_string()))?;\nlet (tree_hash, _) = self.store.write_json(ObjectKind::Tree, &tree_value)?;",
+      "explanation": "The held lock serializes `.kcs` updates by cooperating KCS processes. It does not stop an external lower-trust writer from renaming a direct child in the working root during the check/read gap."
+    }
+  ],
+  "rootCause": {
+    "summary": "The violated invariant is that the filesystem object accepted as a regular direct child must be the same object whose bytes are hashed and archived. `build_working_tree_with_normalize()` observes `DirEntry::file_type()` and later calls `fs::read(&path)` on a mutable pathname, with no descriptor-bound no-follow open, inode comparison, post-open type check, or working-directory writer exclusion.",
+    "evidenceRefs": [
+      "snapshot-cli-entry",
+      "type-observation",
+      "path-reopen",
+      "raw-cas-sink",
+      "store-lock-only"
+    ]
+  },
+  "validation": {
+    "method": "static source trace plus local/offline deterministic interleaving PoC",
+    "summary": "The source trace confirms separate file-type and read operations on the same mutable pathname. The included PoC creates a synthetic scope, observes a direct child as regular, swaps it to a symlink to `../outside-victim.txt`, and shows a path reopen following and hashing the outside bytes.",
+    "evidenceRefs": [
+      "type-observation",
+      "path-reopen",
+      "raw-cas-sink"
+    ],
+    "assertions": [
+      "A stable symlink is skipped only if it is already present when `entry.file_type()` runs.",
+      "`fs::read(&path)` is a later pathname open and can follow a symlink installed after the type observation.",
+      "Snapshot passes `store_raw=true`, causing the followed bytes to be persisted through `ObjectStore::write_raw` and named in the tree."
+    ],
+    "limitations": [
+      "No live KCS timing stress harness measured race win probability.",
+      "No standalone lower-trust read path from owner-only raw CAS was proven.",
+      "The PoC is a deterministic model of the interleaving rather than an end-to-end CLI race."
+    ]
+  },
+  "attackPath": {
+    "summary": "A local lower-trust writer presents a regular direct-child file in a scope the operator snapshots, then atomically replaces that name with a symlink to a victim-readable outside file after KCS observes the type and before the later read. Snapshot follows the replacement and records the outside bytes under the benign direct-child name.",
+    "dataflow": {
+      "summary": "direct-child name -> `DirEntry::file_type()` acceptance -> attacker rename to outside symlink -> `fs::read(&path)` -> `ObjectStore::write_raw()` -> tree entry under benign name",
+      "source": "lower-trust local writer controls one direct-child pathname and symlink target",
+      "sink": "raw CAS object and snapshot tree entry",
+      "outcome": "outside-scope bytes enter authoritative archive state under an in-scope filename",
+      "evidenceRefs": [
+        "type-observation",
+        "path-reopen",
+        "raw-cas-sink"
+      ]
+    },
+    "reachability": {
+      "summary": "The path requires concurrent rename authority in the selected root, victim read permission on the outside target, an operator status or snapshot invocation, and a successful timing interleaving.",
+      "attacker": "lower-trust local content contributor or process with write authority in the selected scope",
+      "entrypoint": "ordinary `kcs snapshot`; `kcs status` reaches the same read path without raw persistence",
+      "outcome": "snapshot archive integrity and scope-boundary confusion"
+    },
+    "impact": {
+      "level": "medium",
+      "why": "The primitive can place victim-readable outside bytes into the selected scope's authoritative snapshot and raw CAS."
+    },
+    "likelihood": {
+      "level": "medium",
+      "why": "The source permits the interleaving, but exploitation needs local directory-write authority and a race win; losing interleavings usually skip the entry, archive benign bytes, or return an I/O error."
+    },
+    "limitations": [
+      "Stable symlinks present during the initial file-type observation are skipped.",
+      "The owner-only `.kcs` parent normally limits later disclosure to the lower-trust writer.",
+      "No race reliability measurement was retained."
+    ],
+    "evidenceRefs": [
+      "snapshot-cli-entry",
+      "type-observation",
+      "path-reopen",
+      "store-lock-only"
+    ]
+  },
+  "remediation": {
+    "summary": "Bind the type decision and byte read to one opened filesystem object. Open each direct child relative to an opened scope directory with no-follow semantics, validate the opened descriptor as a regular file, and read/hash/store from that descriptor rather than reopening a mutable pathname.",
+    "minimalFix": "Replace the pre-read `DirEntry::file_type()` plus later `fs::read(&path)` sequence with a descriptor-bound no-follow open, `fstat` regular-file check, and descriptor read. On platforms without that primitive, fail closed or use a capability-filesystem abstraction.",
+    "regressionTests": [
+      "A stable symlink direct child remains skipped with a warning.",
+      "A test hook that replaces a checked regular child with an outside symlink before the read must not hash or archive the outside marker.",
+      "`status` and `snapshot` variants should both exercise the shared builder.",
+      "A concurrent rename-loop stress test should never produce a tree or status hash for the outside target bytes."
+    ]
+  },
+  "writeup": {
+    "reportPath": "findings/tac-kcs-r23-cand-018-snapshot-symlink-race/tac-kcs-r23-cand-018-snapshot-symlink-race.md",
+    "pocPath": "findings/tac-kcs-r23-cand-018-snapshot-symlink-race/poc/"
+  },
+  "sourceArtifacts": {
+    "validationReport": "artifacts/05_findings/KCS-R23-CAND-018/validation_report.md",
+    "attackPathReport": "artifacts/05_findings/KCS-R23-CAND-018/attack_path_analysis_report.md"
+  },
+  "extensions": {
+    "candidateId": "KCS-R23-CAND-018",
+    "ledgerRowId": "KCS-R23-CAND-018",
+    "reportId": "KCS-R23-CAND-018"
+  }
+}

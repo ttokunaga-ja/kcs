@@ -1,0 +1,249 @@
+{
+  "ruleId": "kcs.r23.cand-028",
+  "identity": {
+    "anchor": "kcs-r23-cand-028",
+    "instance": "ocr-final-hash-reopen"
+  },
+  "title": "Mistral OCR can upload bytes reopened after the final hash check",
+  "summary": "KCS verifies the selected OCR file against the approved task hash, discards that checked buffer, and later lets the Mistral adapter reopen the mutable pathname. A lower-trust scope contributor who wins the post-check rename window can cause different bytes to be uploaded while KCS retains the earlier hash as provenance.",
+  "severity": {
+    "level": "medium",
+    "rationale": "Hard suppression does not apply: the shared/synced-scope contributor is explicitly in scope, does not need privileged private-store access, and the path crosses a core exact-byte authorization boundary in a real product workflow. Impact is high because unapproved document bytes can leave the device and trusted provenance is corrupted; likelihood is medium because online eligibility and an unmeasured rename race are required. The matrix maps high impact plus medium likelihood to Medium/P2.",
+    "changeConditions": "Severity would rise if a barrier-controlled reproduction shows reliable sensitive-file substitution across supported platforms; it would fall once the verified byte buffer or a stable no-follow descriptor is carried to request construction and revalidated at the sink."
+  },
+  "confidence": {
+    "level": "high",
+    "rationale": "V10. crates/kcs-cli/src/main.rs:6050-6066 applies secret policy to task.input_path, not final physical bytes. crates/kcs-cli/src/main.rs:6533-6614 performs valid hash/size/media controls on buffers that are not passed to the sink. crates/kcs-cli/src/main.rs:6674-6691 and crates/kcs-adapter/src/catalog.rs:82-101 carry path and old raw hash as independent values. crates/kcs-adapter/src/mistral_ocr.rs:112-138 obtains the exact outbound buffer from a fresh unchecked std::fs::read(path). Seventeen preserved worker validations independently close the same pinned last-check-to-send path."
+  },
+  "taxonomy": {
+    "category": "CWE-367-style pathname TOCTOU causing exact-byte authorization/secret-decision bypass and provenance corruption",
+    "cwe": [
+      "CWE-367"
+    ]
+  },
+  "locations": [
+    {
+      "path": "crates/kcs-cli/src/main.rs",
+      "startLine": 6050,
+      "endLine": 6066,
+      "role": "secret_control"
+    },
+    {
+      "path": "crates/kcs-cli/src/main.rs",
+      "startLine": 6533,
+      "endLine": 6614,
+      "role": "closest_control"
+    },
+    {
+      "path": "crates/kcs-cli/src/main.rs",
+      "startLine": 6615,
+      "endLine": 6691,
+      "role": "path_handoff"
+    },
+    {
+      "path": "crates/kcs-adapter/src/catalog.rs",
+      "startLine": 82,
+      "endLine": 101,
+      "role": "request_bridge"
+    },
+    {
+      "path": "crates/kcs-adapter/src/catalog.rs",
+      "startLine": 134,
+      "endLine": 147,
+      "role": "request_bridge"
+    },
+    {
+      "path": "crates/kcs-adapter/src/mistral_ocr.rs",
+      "startLine": 112,
+      "endLine": 138,
+      "role": "network_sink"
+    },
+    {
+      "path": "crates/kcs-cli/src/main.rs",
+      "startLine": 6674,
+      "endLine": 6722,
+      "role": "identity_sink"
+    },
+    {
+      "path": "crates/kcs-cli/src/main.rs",
+      "startLine": 6770,
+      "endLine": 6792,
+      "role": "identity_sink"
+    }
+  ],
+  "writeup": {
+    "reportPath": "findings/ocr-final-hash-reopen/ocr-final-hash-reopen.md"
+  },
+  "codeEvidence": [
+    {
+      "id": "final-hash-check",
+      "label": "Executor verifies one byte buffer",
+      "path": "crates/kcs-cli/src/main.rs",
+      "startLine": 6596,
+      "endLine": 6605,
+      "language": "rust",
+      "role": "expected_control",
+      "code": "    let Ok(current_bytes) = fs::read(&path) else {\n        return Err(TaskExecutionFailure {\n            retry_kind: RetryErrorKind::InvalidInput,\n        });\n    };\n    if hash_bytes(&current_bytes) != task.input_hash {\n        return Err(TaskExecutionFailure {\n            retry_kind: RetryErrorKind::InvalidInput,\n        });\n    }",
+      "explanation": "The executor correctly reads the selected path and compares that buffer with `task.input_hash`, but the checked `current_bytes` value is not carried forward."
+    },
+    {
+      "id": "path-only-handoff",
+      "label": "Preparation receives the mutable path and old hash",
+      "path": "crates/kcs-cli/src/main.rs",
+      "startLine": 6615,
+      "endLine": 6621,
+      "language": "rust",
+      "role": "propagation",
+      "code": "    let prepare_profile_hash = builtin_prepare_profile().tool_profile_hash;\n    let prepare = prepare_units(PrepareStageRequest {\n        raw_hash: task.input_hash.clone(),\n        media_type: media_type.clone(),\n        input_path: path.display().to_string(),\n        tool_profile_hash: prepare_profile_hash,\n    })",
+      "explanation": "After verification, preparation receives `task.input_hash` and the lexical pathname rather than the checked byte buffer or a stable descriptor."
+    },
+    {
+      "id": "online-path-handoff",
+      "label": "Online dispatch carries hash and path separately",
+      "path": "crates/kcs-cli/src/main.rs",
+      "startLine": 6674,
+      "endLine": 6691,
+      "language": "rust",
+      "role": "propagation",
+      "code": "    let outcome = run_standard_online_markdownize(StandardOnlineMarkdownizeRequest {\n        scope_id: &scope_id,\n        kcs_dir: repo.kcs_dir(),\n        raw_hash: &task.input_hash,\n        path: &path,\n        media_type: &media_type,\n        prepared_unit_hints: prepared_unit_hints(&request_units),\n        // Full send (or unit-scoped retry): every requested unit, no previous/hints.\n        mode: AdapterMarkdownizeMode::Full,\n        previous: None,\n        hints: None,\n        // R15-5: a unit-scoped retry (`retry_units.is_some()`) re-sends ONLY the failed\n        // subset — scope the real OCR send/bill to those pages instead of the whole\n        // document (the ledger already prorated the reserve to the subset). A fresh full\n        // send (`retry_units.is_none()`) leaves this false → whole document, no `pages`.\n        restrict_to_hint_pages: retry_units.is_some(),\n    })\n    .map_err(task_failure_from_adapter)?;",
+      "explanation": "The online request passes the approved hash and mutable path as independent fields, preserving the opportunity for the path to name different bytes."
+    },
+    {
+      "id": "request-bridge",
+      "label": "Adapter request preserves separate identity and path",
+      "path": "crates/kcs-adapter/src/catalog.rs",
+      "startLine": 82,
+      "endLine": 101,
+      "language": "rust",
+      "role": "propagation",
+      "code": "pub fn run_standard_online_markdownize(\n    request: StandardOnlineMarkdownizeRequest<'_>,\n) -> Result<StandardOnlineMarkdownizeOutcome> {\n    let adapter_request = MarkdownizeRequest {\n        raw: RawInput {\n            raw_hash: request.raw_hash.to_owned(),\n            path: Some(request.path.display().to_string()),\n        },\n        media_type: request.media_type.to_owned(),\n        prepared_unit_hint: Some(request.prepared_unit_hints),\n        // R13-1: forward the caller-computed mode/previous/hints (was hard-coded\n        // Full/None/None, which is why incremental never fired on the online route).\n        mode: request.mode,\n        previous: request.previous,\n        hints: request.hints,\n        // R15-5: forward the retry page-scoping signal to the real client.\n        restrict_to_hint_pages: request.restrict_to_hint_pages,\n        tool_profile_hash: String::new(),\n        spec_version: 1,\n    };",
+      "explanation": "`RawInput` stores the old `raw_hash` beside a string pathname without binding the subsequent read to that identity."
+    },
+    {
+      "id": "fresh-read-network-sink",
+      "label": "Mistral reopens and sends pathname bytes",
+      "path": "crates/kcs-adapter/src/mistral_ocr.rs",
+      "startLine": 112,
+      "endLine": 138,
+      "language": "rust",
+      "role": "sink",
+      "code": "    fn ocr_markdown(&self, request: &MarkdownizeRequest, model_pin: &str) -> Result<OcrResponse> {\n        let api_key = Self::api_key()?;\n        let path = request.raw.path.as_deref().ok_or_else(|| {\n            AdapterError::ContractViolation(\"Mistral OCR requires a local raw path\".to_owned())\n        })?;\n        let bytes = std::fs::read(path).map_err(|err| AdapterError::Io {\n            path: path.to_owned(),\n            message: err.to_string(),\n        })?;\n        // R14-4: in incremental mode, restrict the OCR request to the changed+added\n        // pages via the `pages` parameter (built from `prepared_unit_hint`), instead of\n        // silently sending — and re-billing — the whole document every revision. Full\n        // mode sends no `pages` (process the entire document).\n        let pages = request_pages(request);\n        let value: Value = ureq::post(&format!(\"{}/v1/ocr\", self.base_url()))\n            .set(\"Authorization\", &format!(\"Bearer {api_key}\"))\n            .set(\"Content-Type\", \"application/json\")\n            .send_json(ocr_request_body(\n                &request.media_type,\n                &bytes,\n                model_pin,\n                pages.as_deref(),\n            ))\n            .map_err(http_error)?\n            .into_json()\n            .map_err(|err| AdapterError::ContractViolation(err.to_string()))?;\n        parse_ocr_response(value, model_pin)",
+      "explanation": "The production client freshly reads the pathname and places that buffer into the authenticated OCR request without comparing it with `request.raw.raw_hash`."
+    }
+  ],
+  "rootCause": {
+    "summary": "The last correct hash check is applied to `current_bytes`, but downstream preparation and online dispatch carry only the old hash and mutable path. The adapter then performs a fresh unchecked `std::fs::read(path)` and sends that new buffer without binding it to the approved hash.",
+    "evidenceRefs": [
+      "final-hash-check",
+      "path-only-handoff",
+      "online-path-handoff",
+      "request-bridge",
+      "fresh-read-network-sink"
+    ]
+  },
+  "remediation": "Pass executor-verified bytes or a stable no-follow descriptor into the online adapter and verify the final hash before request construction; this closes the OCR tail only when binding reaches the network sink, not the initial scan authorization or deterministic-normalization instances.",
+  "validation": {
+    "method": "V10",
+    "summary": "crates/kcs-cli/src/main.rs:6050-6066 applies secret policy to task.input_path, not final physical bytes. crates/kcs-cli/src/main.rs:6533-6614 performs valid hash/size/media controls on buffers that are not passed to the sink. crates/kcs-cli/src/main.rs:6674-6691 and crates/kcs-adapter/src/catalog.rs:82-101 carry path and old raw hash as independent values. crates/kcs-adapter/src/mistral_ocr.rs:112-138 obtains the exact outbound buffer from a fresh unchecked std::fs::read(path). Seventeen preserved worker validations independently close the same pinned last-check-to-send path.",
+    "evidenceRefs": [
+      "final-hash-check",
+      "path-only-handoff",
+      "online-path-handoff",
+      "request-bridge",
+      "fresh-read-network-sink"
+    ],
+    "assertions": [
+      "crates/kcs-cli/src/main.rs:6050-6066 applies secret policy to task.input_path, not final physical bytes.",
+      "crates/kcs-cli/src/main.rs:6533-6614 performs valid hash/size/media controls on buffers that are not passed to the sink.",
+      "crates/kcs-cli/src/main.rs:6674-6691 and crates/kcs-adapter/src/catalog.rs:82-101 carry path and old raw hash as independent values.",
+      "crates/kcs-adapter/src/mistral_ocr.rs:112-138 obtains the exact outbound buffer from a fresh unchecked std::fs::read(path).",
+      "Seventeen preserved worker validations independently close the same pinned last-check-to-send path."
+    ],
+    "counterevidence": [
+      "A replacement before the executor hash check is rejected.",
+      "The attacker needs concurrent rename authority and must win the post-check/pre-read interval.",
+      "OCR-supported media, configured adapter, network opt-in, budget, task eligibility, and operator execution are required.",
+      "The provider is operator-configured rather than automatically attacker-controlled.",
+      "A losing race or read failure prevents substituted-byte transmission.",
+      "Central calibration: practical race reliability was not reproduced; the canonical threat model bars High for a merely theoretical race window."
+    ],
+    "limitations": [
+      "No live swap harness or network/loopback request was run. The V10 dataflow is complete, but race reliability and captured request bytes remain unmeasured.",
+      "Race success rate across supported operating systems and filesystems is unmeasured.",
+      "The validation did not demonstrate which sensitive replacement sources a contributor can practically name or read through the victim process."
+    ]
+  },
+  "attackPath": {
+    "summary": "A lower-trust contributor leaves an eligible OCR-supported file unchanged through task selection, secret classification, and the executor's final hash, size, and media checks at crates/kcs-cli/src/main.rs:6050-6066 and 6576-6614. After the checked buffer is discarded, the contributor atomically replaces the selected-scope pathname before the Mistral adapter's fresh read. The production adapter reads the replacement through request.raw.path and posts those bytes with the configured bearer credential at crates/kcs-adapter/src/mistral_ocr.rs:112-138 without comparing them to request.raw.raw_hash. KCS persists returned units under the earlier task.input_hash, causing an unapproved external disclosure and false provenance for one task.",
+    "dataflow": {
+      "summary": "A lower-trust contributor leaves an eligible OCR-supported file unchanged through task selection, secret classification, and the executor's final hash, size, and media checks at crates/kcs-cli/src/main.rs:6050-6066 and 6576-6614. After the checked buffer is discarded, the contributor atomically replaces the selected-scope pathname before the Mistral adapter's fresh read. The production adapter reads the replacement through request.raw.path and posts those bytes with the configured bearer credential at crates/kcs-adapter/src/mistral_ocr.rs:112-138 without comparing them to request.raw.raw_hash. KCS persists returned units under the earlier task.input_hash, causing an unapproved external disclosure and false provenance for one task.",
+      "source": "A lower-trust contributor leaves an eligible OCR-supported file unchanged through task selection, secret classification, and the executor's final hash, size, and media checks at crates/kcs-cli/src/main.rs:6050-6066 and 6576-6614.",
+      "sink": "the authenticated Mistral OCR request built from a fresh pathname read after the final hash check",
+      "outcome": "One eligible OCR task/file and its normalized provenance in one scope; the unchecked bytes are sent to one configured provider.",
+      "evidenceRefs": [
+        "final-hash-check",
+        "path-only-handoff",
+        "online-path-handoff",
+        "request-bridge",
+        "fresh-read-network-sink"
+      ]
+    },
+    "reachability": {
+      "summary": "No daemon, listener, ingress, or load balancer exists. Exposure is an operator-invoked local CLI operating on a selected root that may contain lower-trust mutable content; the configured remote service is the sink, not the attacker entrypoint.",
+      "attacker": "The OCR request runs as the invoking OS user and attaches the operator-configured Mistral bearer credential. No service account or managed identity is evidenced, and the credential is not shown to be redirected to the contributor.",
+      "entrypoint": "A lower-trust contributor leaves an eligible OCR-supported file unchanged through task selection, secret classification, and the executor's final hash, size, and media checks at crates/kcs-cli/src/main.rs:6050-6066 and 6576-6614.",
+      "preconditions": [
+        "Concurrent rename/write authority in the selected root.",
+        "A pending eligible OCR task and an operator-driven online index, resume, or retry command.",
+        "Configured adapter, network opt-in, approval, credential, and budget availability.",
+        "Favorable scheduling after the final checked read and before the adapter read."
+      ],
+      "outcome": "network"
+    },
+    "evidenceRefs": [
+      "final-hash-check",
+      "path-only-handoff",
+      "online-path-handoff",
+      "request-bridge",
+      "fresh-read-network-sink"
+    ],
+    "impact": {
+      "level": "high",
+      "why": "Hard suppression does not apply: the shared/synced-scope contributor is explicitly in scope, does not need privileged private-store access, and the path crosses a core exact-byte authorization boundary in a real product workflow. Impact is high because unapproved document bytes can leave the device and trusted provenance is corrupted; likelihood is medium because online eligibility and an unmeasured rename race are required. The matrix maps high impact plus medium likelihood to Medium/P2."
+    },
+    "likelihood": {
+      "level": "medium",
+      "why": "The selected root is shared, synced, or otherwise writable by an in-scope lower-trust content contributor while KCS runs. The operator has intentionally enabled the Mistral online adapter and the task passes approval, media, budget, and eligibility gates. The contributor can win the post-check/pre-read rename interval; no measured success rate is available."
+    },
+    "counterevidence": [
+      "The executor correctly rejects an earlier replacement by hashing current_bytes against task.input_hash and applying size/media checks.",
+      "The provider endpoint is an operator decision, so the trace does not establish credential theft or an attacker-selected exfiltration host.",
+      "No barrier-controlled swap or loopback request capture measured practical race reliability."
+    ],
+    "limitations": [
+      "No live swap harness or network/loopback request was run. The V10 dataflow is complete, but race reliability and captured request bytes remain unmeasured.",
+      "Race success rate across supported operating systems and filesystems is unmeasured.",
+      "The validation did not demonstrate which sensitive replacement sources a contributor can practically name or read through the victim process."
+    ]
+  },
+  "remediationTests": [
+    "Add a deterministic barrier-controlled rename test and assert the bytes supplied to the adapter are exactly those covered by the final task hash.",
+    "Reject post-check replacement and symlink substitution while preserving successful OCR for a stable regular file."
+  ],
+  "preventiveControls": [
+    "task.input_hash comparison",
+    "effective input-size and media gates",
+    "secret decision and adapter/network approval",
+    "budget and eligibility checks",
+    "Pass executor-verified bytes or a stable no-follow descriptor into the online adapter and verify the final hash before request construction; this closes the OCR tail only when binding reaches the network sink, not the initial scan authorization or deterministic-normalization instances."
+  ],
+  "provenance": {
+    "source": "Codex Security deep-scan validation, attack-path closure, and an accepted dedicated one-finding vulnerability write-up"
+  },
+  "extensions": {
+    "candidateId": "KCS-R23-CAND-028",
+    "ledgerRowId": "KCS-R23-CAND-028",
+    "reportId": "KCS-R23-028"
+  }
+}
+

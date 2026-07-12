@@ -1,0 +1,12 @@
+rustc -O probe.rs -o kcs-glob-backtracking-probe
+[+] bounded offline probe for KCS recursive star matching
+[+] pattern family: (*a)^n b against a^n
+   n  pattern_bytes    value_bytes          calls    matched   elapsed_us
+   8             17              8           1021      false            3
+  10             21             10           4093      false           12
+  12             25             12          16381      false           49
+  14             29             14          65533      false          200
+  16             33             16         262141      false          810
+  18             37             18        1048573      false         3790
+[+] linear control a*b vs aaaaaaaaab: matched=true, calls=20, elapsed_us=0
+[+] recurrence validated through n=18; larger cases intentionally not executed

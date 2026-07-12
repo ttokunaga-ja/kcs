@@ -1,0 +1,260 @@
+{
+  "schema_version": 1,
+  "scan_id": "f78f5d0d-2752-47a7-8d8d-3371e09d3377",
+  "candidate_id": "KCS-R23-CAND-013",
+  "ledger_row_id": "KCS-R23-CAND-013",
+  "instance_key": "KCS-R23-CAND-013",
+  "title": "Embedding reconciliation revives AuthError work during batch retry",
+  "summary": "The `batch retry` command correctly leaves `AuthError` embedding tasks failed in its outer retry scheduler, but the later embedding reconciliation pass unconditionally rewrites live `Failed(auth_error)` tasks to `Pending`. The revived chunk then passes task-state filtering and reaches the embedding adapter send path in the same retry pass.",
+  "final_policy": "reportable",
+  "final_severity": "medium",
+  "priority": "P2",
+  "confidence": {
+    "level": "high",
+    "score": 0.99
+  },
+  "affectedLocations": [
+    {
+      "label": "command_contract",
+      "path": "crates/kcs-cli/src/main.rs",
+      "lines": "5639-5666",
+      "detail": "`batch retry` passes `allow_auth_revive=false` and documents that `auth_error` is not revived by this command."
+    },
+    {
+      "label": "missing_control_propagation",
+      "path": "crates/kcs-cli/src/main.rs",
+      "lines": "5934-5967",
+      "detail": "`allow_auth_revive` reaches markdownize, but `run_embedding_enrichment()` is called without the command policy."
+    },
+    {
+      "label": "negative_control",
+      "path": "crates/kcs-cli/src/main.rs",
+      "lines": "6002-6022",
+      "detail": "Markdownize only builds the `AuthError` revival set when `allow_auth_revive` is true."
+    },
+    {
+      "label": "root_control",
+      "path": "crates/kcs-cli/src/main.rs",
+      "lines": "7997-8043",
+      "detail": "Embedding reconciliation unconditionally resets live `Failed(AuthError)` tasks to `Pending`."
+    },
+    {
+      "label": "task_filter",
+      "path": "crates/kcs-cli/src/main.rs",
+      "lines": "7777-7820",
+      "detail": "The task-state filter skips failed non-retryable tasks, but accepts the task after reconciliation changes it to `Pending`."
+    },
+    {
+      "label": "send_sink",
+      "path": "crates/kcs-cli/src/main.rs",
+      "lines": "7526-7544,7727-7742",
+      "detail": "The revived chunk is sent through `send_embed_batch()` as an `EmbeddingItem` containing chunk text."
+    }
+  ],
+  "codeEvidence": [
+    {
+      "id": "retry-command-contract",
+      "label": "`batch retry` excludes `AuthError` revival",
+      "path": "crates/kcs-cli/src/main.rs",
+      "startLine": 5639,
+      "endLine": 5666,
+      "language": "rust",
+      "role": "entrypoint",
+      "code": "Some(BatchCommand::Retry) => {\n    let partial_reenqueued = reenqueue_partial_markdownize_tasks(&store)?;\n    let changed = store\n        .update_matching(|task| {\n            if task.status == TaskStatus::Failed\n                && task_retry_allowed(task)\n                && task_retry_due(task)\n            {\n                task.status = TaskStatus::Pending;\n                task.next_retry_at = None;\n                true\n            } else {\n                false\n            }\n        })\n        .map_err(pipeline_to_kcs)?;\n    // `batch retry` never overrides the budget cap ... and never\n    // revives an auth_error task ...\n    let outcome = execute_pending_tasks(&repo, &store, false, false)?;",
+      "explanation": "`batch retry` only requeues failed tasks that pass `task_retry_allowed()` and then calls `execute_pending_tasks()` with `allow_auth_revive=false`. The command-level policy says this pass must not revive `auth_error` work."
+    },
+    {
+      "id": "embedding-policy-gap",
+      "label": "Embedding enrichment does not receive `allow_auth_revive`",
+      "path": "crates/kcs-cli/src/main.rs",
+      "startLine": 5934,
+      "endLine": 5967,
+      "language": "rust",
+      "role": "propagation",
+      "code": "fn execute_pending_tasks(\n    repo: &Repository,\n    store: &TaskStore,\n    override_budget: bool,\n    allow_auth_revive: bool,\n) -> Result<ExecOutcome> {\n    let mut outcome = ExecOutcome::default();\n    reclaim_orphaned_running_tasks(store)?;\n    if persistent_network_allowed(repo)? {\n        outcome.add(execute_pending_markdownize_tasks(\n            repo,\n            store,\n            override_budget,\n            allow_auth_revive,\n        )?);\n    }\n    let embedding_online = embedding_online_allowed(repo, false, false, false)?;\n    outcome.add(run_embedding_enrichment(\n        repo,\n        embedding_online,\n        override_budget,\n    )?);\n    Ok(outcome)\n}",
+      "explanation": "The command-specific auth-revival bit is propagated into markdownize, but the embedding branch drops it before entering the shared embedding reconciliation and send pipeline."
+    },
+    {
+      "id": "markdownize-expected-control",
+      "label": "Sibling markdownize path gates auth revival",
+      "path": "crates/kcs-cli/src/main.rs",
+      "startLine": 6002,
+      "endLine": 6022,
+      "language": "rust",
+      "role": "expected_control",
+      "code": "let auth_revivable = if allow_auth_revive {\n    store\n        .all()\n        .map_err(pipeline_to_kcs)?\n        .into_iter()\n        .filter(|task| {\n            task.task_type == TaskType::Markdownize\n                && task.output_ref == output_ref\n                && task.status == TaskStatus::Failed\n                && retry_kind_from_reason(task.fallback_reason.as_deref())\n                    == RetryErrorKind::AuthError\n                && !matches!(\n                    classify_online_markdownize_precondition(repo, task),\n                    OnlineMarkdownizePrecondition::Retire\n                )\n        })\n        .map(|task| task.task_id)\n        .collect::<BTreeSet<_>>()\n} else {\n    BTreeSet::new()\n};",
+      "explanation": "The sibling enrichment path demonstrates the expected control: when `allow_auth_revive` is false, no failed `AuthError` markdownize task can be selected for revival."
+    },
+    {
+      "id": "embedding-reconcile-revival",
+      "label": "Embedding reconciliation revives live `AuthError` tasks unconditionally",
+      "path": "crates/kcs-cli/src/main.rs",
+      "startLine": 7997,
+      "endLine": 8043,
+      "language": "rust",
+      "role": "root_control",
+      "code": "let auth_revive_candidate = matches!(task.status, TaskStatus::Failed)\n    && retry_kind_from_reason(task.fallback_reason.as_deref())\n        == RetryErrorKind::AuthError;\nif task.reserved_usd.is_none() && !auth_revive_candidate {\n    return false;\n}\nlet Some(chunk_id) = task.output_ref.strip_prefix(\"embedding:\") else {\n    return false;\n};\nlet live = live_ids.contains(chunk_id);\nlet live_embedded = live && !pending_ids.contains(chunk_id);\nif live && !live_embedded {\n    if retry_kind_from_reason(task.fallback_reason.as_deref())\n        == RetryErrorKind::AuthError\n    {\n        if let Some(entry) =\n            reclaim_entry_for(task, &reservation_scope_id, EMBEDDING_ADAPTER_KIND)\n        {\n            reclaims.push(entry);\n        }\n        task.status = TaskStatus::Pending;\n        task.fallback_reason = None;\n        task.attempts = 0;\n        task.reserved_usd = None;\n        task.reserved_month = None;\n        task.next_retry_at = None;\n        task.heartbeat_at = None;\n        return true;\n    }\n    return false;\n}",
+      "explanation": "For a live chunk without a committed vector, any `Failed(AuthError)` embedding task is reset to `Pending` and has its failure state cleared. The branch has no caller policy check, so it runs during `batch retry` as well as `batch resume`."
+    },
+    {
+      "id": "task-state-filter-after-revival",
+      "label": "Task-state filtering accepts the revived `Pending` task",
+      "path": "crates/kcs-cli/src/main.rs",
+      "startLine": 7777,
+      "endLine": 7820,
+      "language": "rust",
+      "role": "outcome",
+      "code": "fn filter_embeddable_by_task_state(\n    task_store: &TaskStore,\n    pending: Vec<EmbeddableChunk>,\n    override_budget: bool,\n) -> Result<Vec<EmbeddableChunk>> {\n    let tasks = task_store.all().map_err(pipeline_to_kcs)?;\n    let by_ref = tasks\n        .iter()\n        .filter(|task| task.task_type == TaskType::Embedding)\n        .map(|task| (task.output_ref.clone(), task))\n        .collect::<BTreeMap<_, _>>();\n    Ok(pending\n        .into_iter()\n        .filter(|chunk| {\n            let output_ref = embedding_task_output_ref(&chunk.chunk_id);\n            match by_ref.get(&output_ref) {\n                Some(task) => embeddable_task_state(task, override_budget),\n                None => true,\n            }\n        })\n        .collect())\n}\n\nfn embeddable_task_state(task: &TaskDescriptor, override_budget: bool) -> bool {\n    match task.status {\n        TaskStatus::Failed => task_retry_due(task) && task_retry_allowed(task),\n        _ => true,\n    }\n}",
+      "explanation": "A still-failed `AuthError` task would be skipped because it is non-retryable, but the reconciliation branch has already changed the task to `Pending`, which falls through to `true`."
+    },
+    {
+      "id": "embedding-send-sink",
+      "label": "Revived chunks are sent as adapter input",
+      "path": "crates/kcs-cli/src/main.rs",
+      "startLine": 7727,
+      "endLine": 7742,
+      "language": "rust",
+      "role": "sink",
+      "code": "fn send_embed_batch(\n    conn: &Connection,\n    execution: AdoptedEmbeddingExecution,\n    profile: &DeclaredEmbeddingProfile,\n    to_send: &[(&EmbeddableChunk, String)],\n) -> std::result::Result<(), TaskExecutionFailure> {\n    let items = to_send\n        .iter()\n        .map(|(chunk, _)| EmbeddingItem {\n            id: chunk.chunk_id.clone(),\n            text: Some(chunk.text.clone()),\n            path: None,\n            mime: None,\n        })\n        .collect::<Vec<_>>();\n    let vectors = run_embedding_adapter(execution, items, EmbeddingInputType::MarkdownChunk)?;",
+      "explanation": "Once the chunk reaches `send_embed_batch()`, its text becomes an `EmbeddingItem` and is passed to the configured adapter. That is the outbound send and budget-consuming sink reached by the revived task."
+    }
+  ],
+  "rootCause": {
+    "summary": "The violated invariant is that `AuthError` revival must be controlled by the command recovery mode. `batch retry` supplies `allow_auth_revive=false`, but embedding reconciliation never receives that flag and unconditionally converts live `Failed(auth_error)` tasks to `Pending` before task-state filtering.",
+    "evidenceRefs": [
+      "retry-command-contract",
+      "embedding-policy-gap",
+      "embedding-reconcile-revival",
+      "task-state-filter-after-revival",
+      "embedding-send-sink",
+      "markdownize-expected-control"
+    ]
+  },
+  "validation": {
+    "method": "static source trace, preserved hermetic CLI reproduction, and offline synthetic PoC",
+    "summary": "The source trace confirms the command policy is set to disallow auth revival, the embedding path drops that policy, and the reconciliation branch revives the failed task before the send filter. The preserved validation report records a hermetic KCS reproduction with `tasks_updated=0`, `tasks_attempted=1`, `tasks_executed=1`, and final `Done(embedding_adapter_done)`. The included PoC was run locally and reproduced the same state transition offline.",
+    "evidenceRefs": [
+      "retry-command-contract",
+      "embedding-policy-gap",
+      "embedding-reconcile-revival",
+      "task-state-filter-after-revival",
+      "embedding-send-sink"
+    ],
+    "assertions": [
+      "`batch retry` does not explicitly requeue failed `AuthError` tasks.",
+      "`allow_auth_revive=false` is not passed into embedding reconciliation.",
+      "A live unembedded `Failed(auth_error)` embedding task is reset to `Pending` before filtering.",
+      "The revived chunk can reach `send_embed_batch()` in the same pass."
+    ],
+    "limitations": [
+      "No real provider, real credential, or live service was used during this writeup.",
+      "The preserved CLI reproduction used a built-in adapter seam rather than an external provider, although it reached the real pre-adapter send path."
+    ]
+  },
+  "attackPath": {
+    "summary": "An approved embedding attempt leaves a live `Failed(auth_error)` task. After credentials are usable again, the operator invokes `batch retry`; embedding reconciliation ignores the command policy, revives the task, and the chunk text is sent to the adapter in that retry pass.",
+    "dataflow": {
+      "summary": "`batch retry` -> `execute_pending_tasks(false)` -> `run_embedding_enrichment()` -> `reconcile_committed_embedding_tasks()` -> `filter_embeddable_by_task_state()` -> `send_embed_batch()`",
+      "source": "persisted live `Failed(auth_error)` embedding task for already-approved chunk text",
+      "sink": "`send_embed_batch()` constructs `EmbeddingItem { text: Some(chunk.text) }` and calls the embedding adapter",
+      "outcome": "previously approved chunk text can be resent and bounded online embedding cost can be incurred under `batch retry`",
+      "evidenceRefs": [
+        "retry-command-contract",
+        "embedding-policy-gap",
+        "embedding-reconcile-revival",
+        "task-state-filter-after-revival",
+        "embedding-send-sink"
+      ]
+    },
+    "reachability": {
+      "summary": "The attacker-relevant boundary is the earlier provider response or content contribution; the later command is operator-driven. Existing network consent, secret holds, and budget caps remain in force.",
+      "attacker": "lower-trust provider response or contributor of already-approved content",
+      "entrypoint": "`kcs batch retry` over a live `Failed(auth_error)` embedding task",
+      "preconditions": [
+        "persistent embedding approval exists for the scope",
+        "a live embedding task is failed with `auth_error`",
+        "credentials are usable again",
+        "the operator invokes `batch retry`"
+      ],
+      "outcome": "the wrong recovery command revives and sends the embedding task"
+    },
+    "impact": {
+      "level": "medium",
+      "why": "The bypass can send previously approved chunk text and consume bounded online budget contrary to the selected recovery command, but it does not create initial network consent or bypass secret and budget gates."
+    },
+    "likelihood": {
+      "level": "high",
+      "why": "Once the ordinary recovery preconditions hold, the source path deterministically revives the task before filtering."
+    },
+    "evidenceRefs": [
+      "embedding-policy-gap",
+      "embedding-reconcile-revival",
+      "embedding-send-sink"
+    ],
+    "limitations": [
+      "The operator must still issue `batch retry`.",
+      "The content was already approved for embedding.",
+      "Budget and secret controls still execute."
+    ]
+  },
+  "severityRationale": {
+    "level": "medium",
+    "impact": "medium",
+    "likelihood": "high",
+    "rationale": "The wrong command reaches a real outbound send and cost path, but existing consent, secret, and budget controls bound the resulting confidentiality and cost impact."
+  },
+  "remediation": {
+    "summary": "Propagate the command-level `allow_auth_revive` decision into the embedding enrichment and reconciliation path, and require it before resetting live `Failed(AuthError)` embedding tasks to `Pending`.",
+    "regressionTests": [
+      "`batch retry` leaves a live `Failed(auth_error)` embedding task failed and records no embedding attempt.",
+      "`batch resume` with repaired credentials revives and completes the same task.",
+      "Non-auth retry classes retain their existing retry behavior.",
+      "Secret holds and budget pauses remain sticky across embedding reconciliation."
+    ]
+  },
+  "writeup": {
+    "reportPath": "findings/tac-kcs-r23-cand-013-auth-error-retry-revival/tac-kcs-r23-cand-013-auth-error-retry-revival.md",
+    "pocDirectory": "findings/tac-kcs-r23-cand-013-auth-error-retry-revival/poc",
+    "artifactBindings": [
+      {
+        "path": "findings/tac-kcs-r23-cand-013-auth-error-retry-revival/tac-kcs-r23-cand-013-auth-error-retry-revival.md",
+        "role": "vulnerability_report",
+        "sha256": "88148a4acdcd8afb610a09fa1dd858352142cbaded1a9471b77471f6f2c386c5",
+        "size_bytes": 19607
+      },
+      {
+        "path": "findings/tac-kcs-r23-cand-013-auth-error-retry-revival/poc/Makefile",
+        "role": "poc_build_file",
+        "sha256": "c0b0f82d314dec3ae77542eee3e534620826aa3e5d11286086d62d90afe6b541",
+        "size_bytes": 109
+      },
+      {
+        "path": "findings/tac-kcs-r23-cand-013-auth-error-retry-revival/poc/README.md",
+        "role": "poc_readme",
+        "sha256": "8a3da12bcc340ca0bcb6530e3649e22fa38ffcba6860630eca7c423fe4cb9ca9",
+        "size_bytes": 1111
+      },
+      {
+        "path": "findings/tac-kcs-r23-cand-013-auth-error-retry-revival/poc/auth_error_retry_revival_poc.py",
+        "role": "poc_source",
+        "sha256": "0cd51e6e2d8c99e345943ea94d292b6f96e9b385be5811b52cadabfc4e42a769",
+        "size_bytes": 6399
+      }
+    ]
+  },
+  "sourceRevision": {
+    "revision": "0e19f3c6489da458e93a982a333c308d92d0a0ae",
+    "sourceBindings": [
+      {
+        "path": "crates/kcs-cli/src/main.rs",
+        "revision": "0e19f3c6489da458e93a982a333c308d92d0a0ae",
+        "sha256": "478ab298b66deb05578f22499006947761252c03c51a7b51030c9b40b2b573ef"
+      }
+    ]
+  },
+  "extensions": {
+    "candidateId": "KCS-R23-CAND-013",
+    "ledgerRowId": "KCS-R23-CAND-013",
+    "reportId": "KCS-R23-CAND-013"
+  }
+}

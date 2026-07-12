@@ -1,0 +1,203 @@
+{
+  "ruleId": "kcs.cas.read-before-verification",
+  "identity": {
+    "anchor": "crates/kcs-core/src/cas.rs/read-by-hash",
+    "instance": "adopted-store/whole-object-read"
+  },
+  "title": "CAS reads allocate attacker-sized objects before verification",
+  "summary": "A lower-trust copied or preseeded `.kcs` store can contain a hash-consistent object of attacker-selected size. `ObjectStore::read_by_hash()` materializes the entire file with `fs::read()` before digest, type, JSON, or command-specific size validation; even raw `inspect` retains all bytes merely to report their length. A selected oversized object can therefore consume local memory, I/O, and CPU in proportion to its size.",
+  "severity": {
+    "level": "low",
+    "rationale": "The adopted-store boundary permits a lower-trust contributor to control victim allocation, and a sufficiently large selected object can substantially disrupt the KCS process. Exploitation nevertheless requires a copied or preseeded store, a hash-consistent oversized object, and a command or supplied ref that selects it. The effect is local and recoverable, fresh stores are owner-only, and the resource cost is approximately linear in bytes already supplied. The validated Medium impact and Medium likelihood therefore map to Low/P3 under the scan policy.",
+    "changeConditions": "Raise the rating if the same reader becomes remotely reachable, a small input can amplify into substantially larger allocation, or normal automatic workflows repeatedly select untrusted objects without adoption review. Lower or close the finding when every CAS read applies enforced per-kind byte/cardinality ceilings before allocation and streams digest verification through a bounded buffer."
+  },
+  "confidence": {
+    "level": "high",
+    "rationale": "The exact revision shows `fs::read()` preceding digest and type checks, and a bounded offline target-runtime control confirmed that both `read_by_hash()` and raw `inspect()` retain the complete 65,536-byte object. Peak RSS and an exhaustion threshold were intentionally not measured."
+  },
+  "taxonomy": {
+    "category": "Uncontrolled Resource Consumption",
+    "cwe": [
+      "CWE-400"
+    ]
+  },
+  "locations": [
+    {
+      "path": "crates/kcs-core/src/cas.rs",
+      "startLine": 78,
+      "endLine": 100,
+      "role": "root_control"
+    },
+    {
+      "path": "crates/kcs-core/src/scope.rs",
+      "startLine": 623,
+      "endLine": 637,
+      "role": "outcome"
+    },
+    {
+      "path": "crates/kcs-core/src/scope.rs",
+      "startLine": 742,
+      "endLine": 755,
+      "role": "propagation"
+    },
+    {
+      "path": "crates/kcs-cli/src/main.rs",
+      "startLine": 513,
+      "endLine": 530,
+      "role": "entrypoint"
+    }
+  ],
+  "writeup": {
+    "reportPath": "findings/cas-read-before-verification/cas-read-before-verification.md"
+  },
+  "codeEvidence": [
+    {
+      "id": "inspect-hash-input",
+      "label": "CLI accepts the object hash",
+      "path": "crates/kcs-cli/src/main.rs",
+      "startLine": 161,
+      "endLine": 164,
+      "language": "rust",
+      "role": "user_input",
+      "code": "#[derive(Debug, Args)]\nstruct InspectArgs {\n    hash: String,\n}",
+      "explanation": "The operator-selected `hash` identifies an object in the adopted store. A lower-trust store contributor can supply the corresponding hash or bind it through a supplied ref."
+    },
+    {
+      "id": "inspect-forward",
+      "label": "Inspect forwards the selected hash",
+      "path": "crates/kcs-cli/src/main.rs",
+      "startLine": 513,
+      "endLine": 516,
+      "language": "rust",
+      "role": "entrypoint",
+      "code": "Command::Inspect(args) => {\n    let repo = Repository::open_current()?;\n    validate_repo_tool_lock(&repo)?;\n    match repo.inspect(&args.hash)? {",
+      "explanation": "The command opens the current scope and forwards the selected hash to `Repository::inspect()` without applying an object-size policy."
+    },
+    {
+      "id": "whole-object-read",
+      "label": "Whole file is allocated before integrity validation",
+      "path": "crates/kcs-core/src/cas.rs",
+      "startLine": 78,
+      "endLine": 100,
+      "language": "rust",
+      "role": "root_control",
+      "code": "pub fn read_by_hash(&self, hash: &str) -> Result<StoredObject> {\n    if !is_hash(hash) {\n        return Err(KcsError::invalid_usage(\"invalid hash\"));\n    }\n\n    for kind in [ObjectKind::Tree, ObjectKind::Commit, ObjectKind::Raw] {\n        let path = self.object_path(kind, hash)?;\n        if path.exists() {\n            let bytes = fs::read(&path).kcs_io(&path)?;\n            let actual = hash_bytes(&bytes);\n            if actual != hash {\n                return Err(KcsError::new(\n                    \"KCS-E-STORE-CORRUPT-001\",\n                    \"CAS object hash mismatch\",\n                    serde_json::json!({ \"path\": path, \"expected\": hash, \"actual\": actual }),\n                    crate::ExitCode::PermanentFailure,\n                ));\n            }\n            return Ok(StoredObject {\n                kind,\n                hash: hash.to_owned(),\n                bytes,\n            });",
+      "explanation": "Hash syntax constrains the lookup path, but the first existing object is read into an unbounded `Vec<u8>` before SHA-256 equality, object type, JSON shape, or a byte ceiling is checked. A contributor choosing both content and digest can satisfy integrity while controlling allocation size."
+    },
+    {
+      "id": "raw-inspect-outcome",
+      "label": "Metadata-only raw inspection retains all bytes",
+      "path": "crates/kcs-core/src/scope.rs",
+      "startLine": 623,
+      "endLine": 638,
+      "language": "rust",
+      "role": "outcome",
+      "code": "pub fn inspect(&self, hash: &str) -> Result<InspectedObject> {\n    self.validate()?;\n    let object = self.store.read_by_hash(hash)?;\n    match object.kind {\n        ObjectKind::Tree => serde_json::from_slice(&object.bytes)\n            .map(InspectedObject::Tree)\n            .map_err(|err| KcsError::schema(err.to_string())),\n        ObjectKind::Commit => serde_json::from_slice(&object.bytes)\n            .map(InspectedObject::Commit)\n            .map_err(|err| KcsError::schema(err.to_string())),\n        ObjectKind::Raw => Ok(InspectedObject::Raw {\n            raw_hash: object.hash,\n            size_bytes: object.bytes.len() as u64,\n        }),\n    }\n}",
+      "explanation": "Raw `inspect` consumes only the hash and length, yet `read_by_hash()` has already materialized the complete body. Thus a metadata-only operation incurs memory, I/O, and hashing proportional to attacker-selected object size."
+    },
+    {
+      "id": "structured-object-consumers",
+      "label": "Commit and tree readers share the primitive",
+      "path": "crates/kcs-core/src/scope.rs",
+      "startLine": 742,
+      "endLine": 756,
+      "language": "rust",
+      "role": "propagation",
+      "code": "pub fn read_commit(&self, hash: &str) -> Result<CommitObject> {\n    let object = self.store.read_by_hash(hash)?;\n    if object.kind != ObjectKind::Commit {\n        return Err(KcsError::schema(\"hash does not identify a commit\"));\n    }\n    serde_json::from_slice(&object.bytes).map_err(|err| KcsError::schema(err.to_string()))\n}\n\npub fn read_tree(&self, hash: &str) -> Result<TreeObject> {\n    let object = self.store.read_by_hash(hash)?;\n    if object.kind != ObjectKind::Tree {\n        return Err(KcsError::schema(\"hash does not identify a tree\"));\n    }\n    serde_json::from_slice(&object.bytes).map_err(|err| KcsError::schema(err.to_string()))\n}",
+      "explanation": "Supplied commit and tree refs reach the same full-object read. Type and JSON validation happen only after allocation, and deserialization can add further resource use for structured objects."
+    }
+  ],
+  "rootCause": {
+    "summary": "KCS conflates integrity verification with resource admission. `ObjectStore::read_by_hash()` verifies hash syntax before lookup, but it performs an unbounded `fs::read()` and retains the complete file before checking digest equality, object kind, structured shape, or a per-kind byte ceiling. The generic owned-`Vec` interface forces even raw metadata inspection to pay the full allocation cost.",
+    "evidenceRefs": [
+      "inspect-hash-input",
+      "inspect-forward",
+      "whole-object-read",
+      "raw-inspect-outcome",
+      "structured-object-consumers"
+    ]
+  },
+  "remediation": "Enforce explicit per-kind object-byte and structured-cardinality ceilings before proportional allocation. Open each object once, stream SHA-256 verification through a fixed-size buffer with a hard `limit + 1` read bound, and materialize bytes only for callers that require them. Provide a separate verified metadata path for raw `inspect` so it can count bytes without retaining the full payload.",
+  "validation": {
+    "method": "Exact-revision static trace plus bounded offline target-runtime control",
+    "summary": "Source review established that `fs::read()` precedes digest, type, and JSON checks. An isolated target-runtime harness wrote and reopened a valid 65,536-byte raw CAS object; `read_by_hash()` returned a 65,536-byte vector and raw `inspect()` reported 65,536 bytes. A malformed short hash was rejected before lookup.",
+    "evidenceRefs": [
+      "whole-object-read",
+      "raw-inspect-outcome",
+      "structured-object-consumers"
+    ],
+    "assertions": [
+      "A hash-consistent object is fully allocated before SHA-256 equality is checked.",
+      "Metadata-only raw inspection uses the full-object interface solely to obtain `bytes.len()`.",
+      "Commit and tree readers perform kind and JSON validation only after the same allocation."
+    ],
+    "limitations": [
+      "The control was capped at 65,536 bytes by default and 1,048,576 bytes by the runner.",
+      "Peak RSS, out-of-memory behavior, sparse-file packaging, and an end-to-end poisoned-HEAD stress case were not tested."
+    ]
+  },
+  "attackPath": {
+    "summary": "A lower-trust contributor supplies a copied or preseeded `.kcs` store containing an oversized, hash-consistent CAS object and a hash or ref selecting it. After the operator adopts the store, `inspect` or a commit/tree consumer invokes `read_by_hash()`, causing the victim process to allocate, read, and hash all object bytes before later validation.",
+    "dataflow": {
+      "summary": "supplied object/hash or ref -> CLI/repository consumer -> `ObjectStore::read_by_hash()` -> unbounded `fs::read()` -> digest/type/JSON checks",
+      "source": "hash-consistent CAS bytes, size, digest-derived name, and supplied refs controlled before store adoption",
+      "sink": "whole-file `fs::read()` into `StoredObject.bytes`",
+      "outcome": "local memory, I/O, CPU, and repository-command availability consumption proportional to object size",
+      "evidenceRefs": [
+        "inspect-hash-input",
+        "inspect-forward",
+        "whole-object-read",
+        "raw-inspect-outcome",
+        "structured-object-consumers"
+      ]
+    },
+    "reachability": {
+      "summary": "The surface is not public. Exploitation requires adoption of a lower-trust copied/preseeded store, a valid digest for the oversized object, and an operator command or supplied ref that selects it. Direct same-user mutation of a private live store is outside the relevant boundary.",
+      "attacker": "lower-trust contributor controlling a store before adoption",
+      "entrypoint": "local `inspect` or a HEAD/tree/commit consumer",
+      "outcome": "substantial disruption or termination of the invoking KCS process when object size exceeds available resources"
+    },
+    "evidenceRefs": [
+      "inspect-forward",
+      "whole-object-read",
+      "raw-inspect-outcome",
+      "structured-object-consumers"
+    ],
+    "impact": {
+      "level": "medium",
+      "why": "A selected object sized relative to victim memory can substantially disrupt local KCS operation, including automated jobs, without requiring write access to the victim's live store."
+    },
+    "likelihood": {
+      "level": "medium",
+      "why": "The contributor must package an oversized hash-consistent object, the operator must adopt the supplied store, and a command or ref must select it."
+    },
+    "limitations": [
+      "Resource use is approximately linear in attacker-supplied bytes rather than a demonstrated small-input amplification.",
+      "The primitive does not itself disclose data, execute code, or cross an OS privilege boundary.",
+      "Fresh stores are owner-only, reducing post-creation tampering exposure."
+    ]
+  },
+  "remediationTests": [
+    "Reject each object kind at one byte above its configured limit before a proportional allocation.",
+    "Accept and verify a hash-consistent object exactly at the configured limit.",
+    "Ensure a file that grows while being read cannot exceed the streaming `limit + 1` bound.",
+    "Preserve digest-mismatch errors for bounded objects with incorrect content.",
+    "Verify that raw `inspect` hashes and counts an object without retaining its complete body.",
+    "Apply commit/tree entry and parent-cardinality ceilings after bounded streaming verification."
+  ],
+  "preventiveControls": [
+    "Centralize CAS resource policy in the storage layer so every consumer inherits the same bounds.",
+    "Separate streaming verification, metadata inspection, and payload materialization APIs.",
+    "Treat copied or preseeded stores as untrusted input during adoption and reject objects outside the supported profile."
+  ],
+  "provenance": {
+    "source": "Codex Security deep scan of KCS revision 0e19f3c6489da458e93a982a333c308d92d0a0ae"
+  },
+  "extensions": {
+    "candidateId": "KCS-R23-CAND-046",
+    "ledgerRowId": "KCS-R23-CAND-046",
+    "reportId": "cas-read-before-verification",
+    "finalPolicy": "reportable",
+    "priority": "P3"
+  }
+}

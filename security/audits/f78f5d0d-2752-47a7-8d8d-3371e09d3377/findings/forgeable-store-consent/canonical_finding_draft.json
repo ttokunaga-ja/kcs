@@ -1,0 +1,249 @@
+{
+  "ruleId": "kcs.authorization.forgeable-store-consent",
+  "identity": {
+    "anchor": "kcs/consent/portable-store-records",
+    "instance": "kcs-r23-cand-025"
+  },
+  "title": "Store-local consent records are forgeable or replayable across preseeded or copied scopes",
+  "summary": "KCS treats unsigned network and secret-release approval rows inside a portable `.kcs` store as active authorization. Because the supplied store controls both `scope.json.scope_id` and the matching approval rows, a lower-trust archive contributor can create self-consistent consent that bypasses fresh approval when a victim adopts the store and later runs an online-capable workflow.",
+  "severity": {
+    "level": "medium",
+    "rationale": "A forged network grant can cause local content to be sent through the victim's configured adapter, and a separate forged `send_secrets` grant can release secret-classified chunks. Impact is high, but likelihood is medium because the victim must adopt the store, configure a matching provider and credential, invoke a later eligible command, and leave offline mode and revocation disabled.",
+    "changeConditions": "Severity would increase if store adoption automatically triggered a send or if the contributor could select or observe the provider destination. It would decrease if imported or moved stores always lost active consent and required explicit local reauthorization."
+  },
+  "confidence": {
+    "level": "high",
+    "rationale": "The exact revision shows a deterministic source-to-sink path, the offline source-faithful regression accepts whole-store replay and preseeded forgery while rejecting a foreign-row control, and the focused Rust negative-control test passes. No live provider send was performed."
+  },
+  "taxonomy": {
+    "category": "Persistent consent provenance failure",
+    "cwe": [
+      "CWE-345"
+    ]
+  },
+  "locations": [
+    {
+      "path": "crates/kcs-core/src/scope.rs",
+      "startLine": 188,
+      "endLine": 200,
+      "role": "entrypoint"
+    },
+    {
+      "path": "crates/kcs-core/src/scope.rs",
+      "startLine": 889,
+      "endLine": 909,
+      "role": "root_control"
+    },
+    {
+      "path": "crates/kcs-cli/src/main.rs",
+      "startLine": 586,
+      "endLine": 610,
+      "role": "propagation"
+    },
+    {
+      "path": "crates/kcs-cli/src/main.rs",
+      "startLine": 6362,
+      "endLine": 6378,
+      "role": "root_control"
+    },
+    {
+      "path": "crates/kcs-cli/src/main.rs",
+      "startLine": 10418,
+      "endLine": 10445,
+      "role": "propagation"
+    },
+    {
+      "path": "crates/kcs-cli/src/main.rs",
+      "startLine": 10543,
+      "endLine": 10555,
+      "role": "root_control"
+    },
+    {
+      "path": "crates/kcs-cli/src/main.rs",
+      "startLine": 7727,
+      "endLine": 7743,
+      "role": "sink"
+    }
+  ],
+  "writeup": {
+    "reportPath": "findings/forgeable-store-consent/forgeable-store-consent.md"
+  },
+  "codeEvidence": [
+    {
+      "id": "portable-store-open",
+      "label": "Repository opening adopts an existing `.kcs` directory",
+      "path": "crates/kcs-core/src/scope.rs",
+      "startLine": 188,
+      "endLine": 200,
+      "language": "rust",
+      "role": "entrypoint",
+      "code": "    pub fn open(path: impl AsRef<Path>) -> Result<Self> {\n        let root = path.as_ref().canonicalize().kcs_io(path.as_ref())?;\n        let kcs_dir = root.join(\".kcs\");\n        if !kcs_dir.is_dir() {\n            return Err(KcsError::invalid_usage(\"not a kcs scope\"));\n        }\n\n        let repo = Self {\n            root,\n            kcs_dir: kcs_dir.clone(),\n            store: ObjectStore::new(kcs_dir),\n        };\n        repo.validate()?;",
+      "explanation": "A lower-trust contributor can supply the existing `.kcs` state. `Repository::open()` canonicalizes the selected working root but adopts the derived store after structural validation, carrying that store into every later consent read."
+    },
+    {
+      "id": "scope-shape-only",
+      "label": "Scope validation checks identity shape, not provenance or current root",
+      "path": "crates/kcs-core/src/scope.rs",
+      "startLine": 889,
+      "endLine": 902,
+      "language": "rust",
+      "role": "root_control",
+      "code": "    fn validate_scope(&self) -> Result<()> {\n        let path = self.kcs_dir.join(\"scope.json\");\n        let value: Value = serde_json::from_str(&fs::read_to_string(&path).kcs_io(&path)?)\n            .map_err(|err| KcsError::schema(err.to_string()))?;\n        validate_json_schema(SchemaKind::Scope, &value)?;\n        let Some(scope_id) = value.get(\"scope_id\").and_then(Value::as_str) else {\n            return Err(KcsError::schema(\"scope.json missing scope_id\"));\n        };\n        if scope_id.is_empty() {\n            return Err(KcsError::schema(\"scope_id is empty\"));\n        }\n        if !is_ulid(scope_id) {\n            return Err(KcsError::schema(\"scope_id must be a ULID\"));\n        }",
+      "explanation": "The contributor-controlled `scope_id` need only be a valid ULID. The function does not compare `scope_path` with the canonical root and does not authenticate the store, so the contributor can choose the identity later used as the consent lookup key."
+    },
+    {
+      "id": "network-row-reader",
+      "label": "Unsigned network row is accepted by self-matching fields",
+      "path": "crates/kcs-cli/src/main.rs",
+      "startLine": 6362,
+      "endLine": 6379,
+      "language": "rust",
+      "role": "root_control",
+      "code": "fn approval_row_present_in_kcs_dir(kcs_dir: &Path, tool_id: Option<&str>) -> Result<bool> {\n    let expected_scope_id = scope_id(kcs_dir)?;\n    let path = kcs_dir.join(\"approvals.jsonl\");\n    let Ok(text) = fs::read_to_string(&path) else {\n        return Ok(false);\n    };\n    Ok(text\n        .lines()\n        .filter_map(|line| serde_json::from_str::<Value>(line).ok())\n        .any(|value| {\n            value.get(\"scope_id\").and_then(Value::as_str) == Some(expected_scope_id.as_str())\n                && tool_id\n                    .map(|tool_id| value.get(\"tool_id\").and_then(Value::as_str) == Some(tool_id))\n                    .unwrap_or(true)\n                && value.get(\"execution_mode\").and_then(Value::as_str) == Some(\"online_api\")\n                && value.get(\"network_opt_in\").and_then(Value::as_bool) == Some(true)\n        }))\n}",
+      "explanation": "Both `expected_scope_id` and the approval row come from the supplied `.kcs` tree. The reader ignores the writer's `root_path`, `actor`, timestamp, and approval provenance, so a self-consistent forged row becomes an active network grant."
+    },
+    {
+      "id": "approval-prompt-bypass",
+      "label": "Accepted store row suppresses the fresh approval branch",
+      "path": "crates/kcs-cli/src/main.rs",
+      "startLine": 586,
+      "endLine": 596,
+      "language": "rust",
+      "role": "propagation",
+      "code": "    let approved = approval_exists(&repo)?;\n    if !approved && !args.approve && !args.yes {\n        if !std::io::stdin().is_terminal() {\n            return Err(KcsError::invalid_usage(\n                \"index requires --preview, --approve, or --yes in non-interactive mode\",\n            ));\n        }\n        return Err(KcsError::invalid_usage(\n            \"interactive approval is unavailable in this build; use --approve or --yes\",\n        ));\n    }",
+      "explanation": "`approval_exists()` delegates to the unsigned row reader. When a forged row makes `approved` true, KCS skips the branch that would otherwise demand a current invocation's explicit approval."
+    },
+    {
+      "id": "secret-row-reader",
+      "label": "Secret-release row is accepted without trusted provenance",
+      "path": "crates/kcs-cli/src/main.rs",
+      "startLine": 10543,
+      "endLine": 10556,
+      "language": "rust",
+      "role": "root_control",
+      "code": "fn secrets_send_approved(repo: &Repository) -> bool {\n    let Ok(expected_scope_id) = scope_id(repo.kcs_dir()) else {\n        return false;\n    };\n    let Ok(text) = fs::read_to_string(repo.kcs_dir().join(SECRETS_APPROVAL_FILE)) else {\n        return false;\n    };\n    text.lines()\n        .filter_map(|line| serde_json::from_str::<Value>(line).ok())\n        .any(|value| {\n            value.get(\"scope_id\").and_then(Value::as_str) == Some(expected_scope_id.as_str())\n                && value.get(\"approval_method\").and_then(Value::as_str) == Some(\"send_secrets\")\n        })\n}",
+      "explanation": "The same self-coordinated `scope_id` comparison authorizes secret release. The reader does not verify who granted permission, on which device or canonical root, or for which adapter."
+    },
+    {
+      "id": "secret-hold-release",
+      "label": "Secret approval controls whether classified chunks enter the sendable set",
+      "path": "crates/kcs-cli/src/main.rs",
+      "startLine": 7322,
+      "endLine": 7334,
+      "language": "rust",
+      "role": "propagation",
+      "code": "    let secrets_approved = secrets_send_approved(repo);\n    let (held, sendable): (Vec<EmbeddableChunk>, Vec<EmbeddableChunk>) =\n        pending.into_iter().partition(|chunk| {\n            // R19-1: hold ANY secret (Tier B, or a lifted Tier A) from the embedding\n            // API unless `--send-secrets`. Non-lifted Tier A never produces chunks\n            // (excluded at ingest), so `.is_some()` newly gates only lifted Tier A.\n            !secrets_approved && classify_secret(&chunk.raw_path).is_some()\n        });\n    hold_secret_embedding_tasks(&task_store, repo, &held, &now)?;\n    if sendable.is_empty() {\n        return Ok(ExecOutcome::default());\n    }\n    enqueue_embedding_tasks(&task_store, repo, &sendable, online, &now)?;",
+      "explanation": "A forged `send_secrets` row changes a classified chunk from `held` to `sendable`. If the separate network gate and execution preconditions also pass, the chunk continues toward the online adapter."
+    },
+    {
+      "id": "embedding-adapter-sink",
+      "label": "Local chunk text is passed to the configured embedding adapter",
+      "path": "crates/kcs-cli/src/main.rs",
+      "startLine": 7727,
+      "endLine": 7742,
+      "language": "rust",
+      "role": "sink",
+      "code": "fn send_embed_batch(\n    conn: &Connection,\n    execution: AdoptedEmbeddingExecution,\n    profile: &DeclaredEmbeddingProfile,\n    to_send: &[(&EmbeddableChunk, String)],\n) -> std::result::Result<(), TaskExecutionFailure> {\n    let items = to_send\n        .iter()\n        .map(|(chunk, _)| EmbeddingItem {\n            id: chunk.chunk_id.clone(),\n            text: Some(chunk.text.clone()),\n            path: None,\n            mime: None,\n        })\n        .collect::<Vec<_>>();\n    let vectors = run_embedding_adapter(execution, items, EmbeddingInputType::MarkdownChunk)?;",
+      "explanation": "The accepted authorization ultimately allows local chunk text to become adapter input. The adapter and credential are configured by the victim; this finding does not independently redirect the destination."
+    }
+  ],
+  "rootCause": {
+    "summary": "KCS uses portable, unsigned audit records as active authorization. `Repository::open()` adopts contributor-supplied `.kcs` state, scope validation accepts a contributor-chosen ULID without current-root or provenance binding, and both consent readers compare records only with identity fields from that same store. The resulting booleans suppress fresh approval, release secret holds, and enable local text to reach the configured adapter.",
+    "evidenceRefs": [
+      "portable-store-open",
+      "scope-shape-only",
+      "network-row-reader",
+      "approval-prompt-bypass",
+      "secret-row-reader",
+      "secret-hold-release",
+      "embedding-adapter-sink"
+    ]
+  },
+  "remediation": "Separate portable scope data from active authority. Store network and secret-release grants in a device-protected consent store keyed by canonical root, scope ID, adapter, and operation, or authenticate equivalent records with a device-held key. Treat copied or imported historical rows as audit data and require explicit local reauthorization, with secret release cleared by default.",
+  "validation": {
+    "method": "Exact-revision static trace plus offline source-faithful state regression and focused Rust negative-control test",
+    "summary": "The source trace confirms that a supplied store controls both sides of the scope-ID comparison, the offline regression rejects a foreign row but accepts whole-store replay and self-consistent forgery for both consent predicates, and the existing foreign-scope test passes in isolated temporary XDG directories.",
+    "evidenceRefs": [
+      "portable-store-open",
+      "scope-shape-only",
+      "network-row-reader",
+      "secret-row-reader",
+      "approval-prompt-bypass",
+      "secret-hold-release",
+      "embedding-adapter-sink"
+    ],
+    "assertions": [
+      "A row copied alone into a different scope is rejected because the scope IDs differ.",
+      "A whole-store copy and a self-consistent preseeded store satisfy the current network and secret predicates.",
+      "The consent readers do not authenticate writer, device, canonical root, or record integrity."
+    ],
+    "limitations": [
+      "No real provider, credential, or end-to-end outbound send was used.",
+      "The contributor is not shown to control or observe the victim-configured provider destination."
+    ]
+  },
+  "attackPath": {
+    "summary": "A lower-trust archive contributor supplies a self-consistent `.kcs` store with forged network and optional `send_secrets` rows. The victim adopts it and later runs an online-capable workflow with a matching provider. KCS trusts the supplied rows, skips fresh consent, releases eligible secret holds, and sends local text through the victim-configured adapter.",
+    "dataflow": {
+      "summary": "supplied `.kcs/scope.json` and approval rows -> structural scope validation -> unsigned consent predicates -> prompt/network and secret-release gates -> configured embedding adapter",
+      "source": "contributor-controlled scope identity and unsigned consent rows",
+      "sink": "`run_embedding_adapter()` with local chunk text",
+      "outcome": "local document or secret-classified content can cross the provider boundary without a fresh grant on the current device or root",
+      "evidenceRefs": [
+        "portable-store-open",
+        "scope-shape-only",
+        "network-row-reader",
+        "secret-row-reader",
+        "secret-hold-release",
+        "embedding-adapter-sink"
+      ]
+    },
+    "reachability": {
+      "summary": "Exploitation is filesystem-mediated and multi-step: the victim must adopt supplied state, configure a matching online adapter and credential, invoke an eligible command, and leave offline mode and revocation inactive.",
+      "attacker": "lower-trust shared-state or archive contributor",
+      "entrypoint": "an existing copied or preseeded `.kcs` directory opened as a KCS scope",
+      "outcome": "stored contributor-supplied consent is exercised with the victim's provider configuration"
+    },
+    "evidenceRefs": [
+      "portable-store-open",
+      "network-row-reader",
+      "approval-prompt-bypass",
+      "secret-row-reader",
+      "secret-hold-release",
+      "embedding-adapter-sink"
+    ],
+    "impact": {
+      "level": "high",
+      "why": "Network consent can expose local document text, and a forged secret-release record can expose classified chunks to the configured provider."
+    },
+    "likelihood": {
+      "level": "medium",
+      "why": "The path requires store adoption, later operator action, a matching configured provider and credential, and no offline or revocation override."
+    },
+    "limitations": [
+      "The forged row does not choose the provider endpoint in this candidate.",
+      "A mismatched adapter row, offline mode, revocation, absent credentials, or no later eligible command defeats the send."
+    ]
+  },
+  "remediationTests": [
+    "Reject a whole store copied to a different canonical root until the current device explicitly reauthorizes it.",
+    "Reject a self-consistent preseeded scope and approval row that lack a protected device-local grant.",
+    "Accept a local grant only for its exact canonical root, scope ID, adapter, and operation.",
+    "Keep network and `send_secrets` grants non-substitutable and clear secret release during import or move.",
+    "Verify that offline mode and revocation override a valid protected grant."
+  ],
+  "preventiveControls": [
+    "Keep active consent in device-protected state rather than portable `.kcs` content.",
+    "Bind authenticated grants to canonical root, scope ID, adapter, operation, and version.",
+    "Require an explicit trusted-import or move reauthorization workflow.",
+    "Display inactive historical approval rows as audit data without exercising them."
+  ],
+  "provenance": {
+    "source": "Codex Security deep-scan validation and attack-path analysis of Git revision 0e19f3c6489da458e93a982a333c308d92d0a0ae"
+  },
+  "extensions": {
+    "candidateId": "KCS-R23-CAND-025",
+    "ledgerRowId": "KCS-R23-CAND-025",
+    "reportId": "KCS-R23-025"
+  }
+}

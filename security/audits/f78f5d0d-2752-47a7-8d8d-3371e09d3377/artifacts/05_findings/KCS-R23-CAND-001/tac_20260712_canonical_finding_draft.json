@@ -1,0 +1,249 @@
+{
+  "schema_version": 1,
+  "scan_id": "f78f5d0d-2752-47a7-8d8d-3371e09d3377",
+  "candidate_id": "KCS-R23-CAND-001",
+  "ledger_row_id": "KCS-R23-CAND-001",
+  "title": "secret-hold cycles erase terminal embedding failure state",
+  "target_revision": "0e19f3c6489da458e93a982a333c308d92d0a0ae",
+  "final_policy": "reportable",
+  "final_severity": "low",
+  "priority": "P3",
+  "summary": "The KCS embedding secret-hold overlay is implemented by overwriting the same task fields that encode retry terminality. A lower-trust local content contributor can combine ordinary operator indexing with a Tier-B name cycle so a terminal or retry-exhausted embedding `Failed` task is demoted to `Paused(secrets_tier_b_hold)`, then released as fresh `Pending` work with `attempts` reset to zero. Existing adapter approval and budget controls still apply, but the retry contract is bypassed and the configured adapter can be invoked again for work KCS had already made terminal.",
+  "affected_locations": [
+    {
+      "label": "demotion selector",
+      "path": "crates/kcs-cli/src/main.rs",
+      "lines": "8221-8231"
+    },
+    {
+      "label": "destructive hold",
+      "path": "crates/kcs-cli/src/main.rs",
+      "lines": "8295-8325"
+    },
+    {
+      "label": "fresh unhold",
+      "path": "crates/kcs-cli/src/main.rs",
+      "lines": "8360-8368,8463-8484"
+    },
+    {
+      "label": "retry contract",
+      "path": "crates/kcs-pipeline/src/task.rs",
+      "lines": "320-378"
+    },
+    {
+      "label": "send sink",
+      "path": "crates/kcs-cli/src/main.rs",
+      "lines": "7340-7345,7727-7768"
+    }
+  ],
+  "codeEvidence": [
+    {
+      "id": "secret-classification-source",
+      "label": "Path classification controls the hold partition",
+      "path": "crates/kcs-cli/src/main.rs",
+      "startLine": 7322,
+      "endLine": 7330,
+      "language": "rust",
+      "role": "user_input",
+      "code": "let secrets_approved = secrets_send_approved(repo);\nlet (held, sendable): (Vec<EmbeddableChunk>, Vec<EmbeddableChunk>) =\n    pending.into_iter().partition(|chunk| {\n        // R19-1: hold ANY secret (Tier B, or a lifted Tier A) from the embedding\n        // API unless `--send-secrets`. Non-lifted Tier A never produces chunks\n        // (excluded at ingest), so `.is_some()` newly gates only lifted Tier A.\n        !secrets_approved && classify_secret(&chunk.raw_path).is_some()\n    });\nhold_secret_embedding_tasks(&task_store, repo, &held, &now)?;",
+      "explanation": "A live chunk's `raw_path` determines whether it enters `held`. A lower-trust contributor who can influence names or revisions in an indexed scope can cause the same content-addressed chunk to move into this partition during an operator-run index pass."
+    },
+    {
+      "id": "demotion-selector",
+      "label": "Failed terminal tasks are demotable",
+      "path": "crates/kcs-cli/src/main.rs",
+      "startLine": 8222,
+      "endLine": 8231,
+      "language": "rust",
+      "role": "root_control",
+      "code": "let demotable = all_tasks\n    .iter()\n    .filter(|task| task.task_type == TaskType::Embedding)\n    .filter(|task| {\n        !already_held.contains(&task.output_ref)\n            && !done.contains(&task.output_ref)\n            && task.fallback_reason.as_deref() != Some(RETIRED_NON_LIVE)\n    })\n    .map(|task| task.output_ref.clone())\n    .collect::<BTreeSet<_>>();",
+      "explanation": "The selector excludes already held, `Done`, and `retired_non_live` embedding rows, but it does not exclude `Failed` rows whose `fallback_reason` and `attempts` make them non-retryable or exhausted."
+    },
+    {
+      "id": "destructive-hold",
+      "label": "Hold overwrites terminal retry state",
+      "path": "crates/kcs-cli/src/main.rs",
+      "startLine": 8320,
+      "endLine": 8325,
+      "language": "rust",
+      "role": "root_control",
+      "code": "task.status = TaskStatus::Paused;\ntask.fallback_reason = Some(SECRETS_TIER_B_HOLD.to_owned());\ntask.input_path = current_path.clone();\ntask.attempts = 0;\ntask.next_retry_at = None;\ntask.heartbeat_at = None;",
+      "explanation": "The demotion does not preserve the prior `Failed` reason, attempt count, or retry timestamp. A terminal `contract_violation`, `auth_error`, `invalid_input`, or exhausted bounded failure becomes indistinguishable from an ordinary secret hold."
+    },
+    {
+      "id": "hold-is-not-sendable",
+      "label": "Secret holds are blocked only while held",
+      "path": "crates/kcs-cli/src/main.rs",
+      "startLine": 7801,
+      "endLine": 7820,
+      "language": "rust",
+      "role": "expected_control",
+      "code": "fn embeddable_task_state(task: &TaskDescriptor, override_budget: bool) -> bool {\n    match task.status {\n        TaskStatus::Paused => match task.fallback_reason.as_deref() {\n            // Sticky budget pause (L2 ii): only an explicit override re-includes it.\n            Some(\"budget_exceeded\") => override_budget,\n            // R21-1: a secrets hold must NEVER be re-driven into the send pipeline by a\n            // sendable chunk (e.g. a non-secret content-twin whose JOIN fan-out shares\n            // this held task's output_ref) \u2014 only `--send-secrets` (which flips the task\n            // back to Pending via `release_secret_holds`) may. Defense-in-depth behind\n            // the R21-1 JOIN dedup so the hold cannot be bypassed even if a same\n            // output_ref collision re-appears from another source.\n            Some(SECRETS_TIER_B_HOLD) => false,\n            // Any other Paused reason is safe to re-drive.\n            _ => true,\n        },\n        // Failed embeddings are owned by `batch retry` (L7): skip unless the\n        // backoff has elapsed AND the error is still retryable.\n        TaskStatus::Failed => task_retry_due(task) && task_retry_allowed(task),\n        _ => true,",
+      "explanation": "This guard prevents sends while the task still carries `secrets_tier_b_hold`, and it would also block terminal `Failed` rows. The bug is that the hold mutation erases the failed row before this guard later evaluates the unheld task."
+    },
+    {
+      "id": "stale-hold-source",
+      "label": "All secret holds are considered revivable",
+      "path": "crates/kcs-cli/src/main.rs",
+      "startLine": 8360,
+      "endLine": 8368,
+      "language": "rust",
+      "role": "propagation",
+      "code": "let hold_revivable = all_tasks\n    .iter()\n    .filter(|task| task.task_type == TaskType::Embedding)\n    .filter(|task| {\n        task.status == TaskStatus::Paused\n            && task.fallback_reason.as_deref() == Some(SECRETS_TIER_B_HOLD)\n    })\n    .map(|task| task.output_ref.clone())\n    .collect::<BTreeSet<_>>();",
+      "explanation": "After demotion, the row is selected solely because it is a secret hold. There is no remaining marker that the hold came from a terminal failure rather than a normal sendable state."
+    },
+    {
+      "id": "fresh-unhold",
+      "label": "Unhold releases the row as fresh pending work",
+      "path": "crates/kcs-cli/src/main.rs",
+      "startLine": 8468,
+      "endLine": 8484,
+      "language": "rust",
+      "role": "root_control",
+      "code": "if !to_unhold.is_empty() {\n    task_store\n        .update_matching(|task| {\n            if task.task_type == TaskType::Embedding\n                && task.status == TaskStatus::Paused\n                && task.fallback_reason.as_deref() == Some(SECRETS_TIER_B_HOLD)\n            {\n                let Some(current_path) = to_unhold.get(&task.output_ref) else {\n                    return false;\n                };\n                task.status = TaskStatus::Pending;\n                task.fallback_reason = Some(reason.to_owned());\n                task.input_path = current_path.clone();\n                task.attempts = 0;\n                task.next_retry_at = None;\n                task.heartbeat_at = None;",
+      "explanation": "When the same content becomes non-secret, unhold does not restore the original terminal failure. It writes `Pending` with zero attempts, so the later embedding state filter sees normal work."
+    },
+    {
+      "id": "sendable-gate",
+      "label": "Fresh pending rows re-enter embedding execution",
+      "path": "crates/kcs-cli/src/main.rs",
+      "startLine": 7340,
+      "endLine": 7345,
+      "language": "rust",
+      "role": "sink",
+      "code": "// L2(ii)/L7: skip chunks whose embedding task is sticky budget-Paused (unless\n// override) or a Failed task that is not retry-eligible (unelapsed backoff or\n// non-retryable) \u2014 the same lifecycle semantics markdownize already honors.\nlet embeddable = filter_embeddable_by_task_state(&task_store, sendable, override_budget)?;\nif embeddable.is_empty() {\n    return Ok(ExecOutcome::default());",
+      "explanation": "The normal guard would skip non-retryable `Failed` work, but the unheld row is now `Pending`. It therefore remains in the embeddable set unless another control, such as budget, stops it."
+    },
+    {
+      "id": "adapter-call",
+      "label": "Embedding adapter call sink",
+      "path": "crates/kcs-cli/src/main.rs",
+      "startLine": 7526,
+      "endLine": 7545,
+      "language": "rust",
+      "role": "sink",
+      "code": "match send_embed_batch(&conn, execution, &profile, &plan.to_send) {\n    Ok(()) => {\n        // Charge already reserved under the lock above (F8).\n        record_embedding_transitions(\n            &mut transitions,\n            plan.to_send.iter().map(|(chunk, _)| *chunk),\n            embedding_done_transition(),\n        );\n        outcome.executed += plan.to_send.len();\n    }\n    Err(failure) => {\n        // Enrichment failure is non-fatal: mark the sent chunks failed and\n        // stop (search sees no embeddings \u2192 text). Never fails `kcs index`.\n        record_embedding_transitions(\n            &mut transitions,\n            plan.to_send.iter().map(|(chunk, _)| *chunk),\n            embedding_fail_transition(failure.retry_kind),\n        );\n        count_embedding_failure(&mut outcome, failure.retry_kind, plan.to_send.len());",
+      "explanation": "Once the revived row reaches `plan.to_send`, KCS invokes the configured embedding adapter path and records a new success or failure transition."
+    },
+    {
+      "id": "retry-contract",
+      "label": "Retry policy marks terminal and bounded failures",
+      "path": "crates/kcs-pipeline/src/task.rs",
+      "startLine": 320,
+      "endLine": 378,
+      "language": "rust",
+      "role": "expected_control",
+      "code": "pub fn retry_policy(error_kind: RetryErrorKind) -> RetryPolicy {\n    match error_kind {\n        RetryErrorKind::NetworkError => RetryPolicy {\n            error_kind,\n            retryable: true,\n            max_attempts: Some(5),\n            backoff: \"exp(base=2s,cap=60s,full_jitter)\".to_owned(),\n            error_code: \"KCS-E-BATCH-NET-001\".to_owned(),\n            paused: false,\n        },\n        RetryErrorKind::RateLimit => RetryPolicy {\n            error_kind,\n            retryable: true,\n            max_attempts: None,\n            backoff: \"retry_after\".to_owned(),\n            error_code: \"KCS-E-BATCH-RATE-001\".to_owned(),\n            paused: false,\n        },\n        RetryErrorKind::AuthError => RetryPolicy {\n            error_kind,\n            retryable: false,\n            max_attempts: Some(0),\n            backoff: \"user_action\".to_owned(),\n            error_code: \"KCS-E-BATCH-AUTH-001\".to_owned(),\n            paused: false,\n        },\n        RetryErrorKind::QuotaExceeded => RetryPolicy {\n            error_kind,\n            retryable: true,\n            max_attempts: Some(3),\n            backoff: \"fixed(1h)\".to_owned(),\n            error_code: \"KCS-E-BATCH-QUOTA-001\".to_owned(),\n            paused: false,\n        },\n        RetryErrorKind::InvalidInput => RetryPolicy {\n            error_kind,\n            retryable: false,\n            max_attempts: Some(0),\n            backoff: \"none\".to_owned(),\n            error_code: \"KCS-E-BATCH-INPUT-001\".to_owned(),\n            paused: false,\n        },\n        RetryErrorKind::ContractViolation => RetryPolicy {\n            error_kind,\n            retryable: false,\n            max_attempts: Some(0),\n            backoff: \"full_fallback_once\".to_owned(),\n            error_code: \"KCS-E-ADAPTER-CONTRACT-001\".to_owned(),\n            paused: false,\n        },\n        RetryErrorKind::BudgetExceeded => RetryPolicy {\n            error_kind,\n            retryable: false,\n            max_attempts: Some(0),\n            backoff: \"override_budget_required\".to_owned(),\n            error_code: \"KCS-E-BATCH-BUDGET-001\".to_owned(),\n            paused: true,\n        },\n    }",
+      "explanation": "This is the retry contract that the hold/unhold cycle bypasses. Several failure kinds are non-retryable, and others have finite attempt caps; resetting `fallback_reason` and `attempts` removes that decision."
+    }
+  ],
+  "rootCause": {
+    "summary": "The secret hold is a classification overlay, but `hold_secret_embedding_tasks()` implements it by overwriting the task lifecycle fields that encode terminal retry state. The demotion selector admits terminal and exhausted `Failed` embedding rows, the demotion rewrites them to `Paused(secrets_tier_b_hold)` with `attempts = 0`, and stale-hold release rewrites them again to fresh `Pending` work. The fixed invariant should be that a hold either preserves and restores pre-hold retry state or never demotes terminal/exhausted failures.",
+    "evidenceRefs": [
+      "secret-classification-source",
+      "demotion-selector",
+      "destructive-hold",
+      "stale-hold-source",
+      "fresh-unhold",
+      "sendable-gate",
+      "adapter-call",
+      "retry-contract"
+    ]
+  },
+  "validation": {
+    "method": "static source trace plus local offline state-machine PoC",
+    "summary": "The source trace confirms that path classification can move an existing embedding task into the hold branch, the hold selector includes terminal failed tasks, the hold mutation destroys the original failure state, and unhold releases the row as pending. The included offline PoC exercised the same field transitions with synthetic data and asserted that a `Failed(contract_violation)` row becomes sendable after a vulnerable hold/unhold cycle.",
+    "evidenceRefs": [
+      "secret-classification-source",
+      "demotion-selector",
+      "destructive-hold",
+      "fresh-unhold",
+      "sendable-gate",
+      "retry-contract"
+    ],
+    "assertions": [
+      "`Failed(contract_violation)` and other non-retryable embedding failures satisfy the demotion selector because the selector does not test retry eligibility.",
+      "The destructive hold overwrites `fallback_reason`, `attempts`, and `next_retry_at`, so unhold cannot distinguish a prior terminal failure from an ordinary stale hold.",
+      "After unhold, the row is `Pending`, so `filter_embeddable_by_task_state()` no longer applies the `Failed` retry-policy gate."
+    ],
+    "limitations": [
+      "The TAC PoC is offline and synthetic; it does not execute the full KCS binary or contact a live provider.",
+      "Actual third-party billing for a revived request remains adapter-dependent.",
+      "The exact affected release range and fixing commit were not established in this draft."
+    ],
+    "confidence": "high"
+  },
+  "attackPath": {
+    "summary": "A local content contributor causes an already terminal or retry-exhausted embedding task to cycle into a Tier-B-looking path and then back to a non-secret path while the operator continues ordinary online indexing. KCS erases the terminal state during the hold and later treats the same task as new pending work.",
+    "dataflow": {
+      "summary": "attacker-influenced live path -> `classify_secret()` hold partition -> `hold_secret_embedding_tasks()` demotion -> `enqueue_embedding_tasks()` stale-hold release -> `filter_embeddable_by_task_state()` -> budget reservation and embedding adapter call",
+      "source": "attacker-influenced local file name or revision in an indexed scope",
+      "sink": "configured embedding adapter execution for a revived `Pending` task",
+      "outcome": "bounded repeat outbound embedding attempt and cost/cap consumption for work that was previously terminal",
+      "evidenceRefs": [
+        "secret-classification-source",
+        "destructive-hold",
+        "fresh-unhold",
+        "sendable-gate",
+        "adapter-call"
+      ]
+    },
+    "reachability": {
+      "summary": "The attacker does not directly call KCS or obtain credentials. The operator must continue indexing the affected scope with online embedding configured and approved.",
+      "attacker": "lower-trust local content contributor",
+      "entrypoint": "operator-run KCS index or batch flow over attacker-influenced file names/revisions",
+      "access_requirements": [
+        "An affected embedding task already exists in terminal or retry-exhausted state.",
+        "The same content cycles into and out of Tier-B secret classification.",
+        "The operator runs the relevant index/enrichment cycles with online embedding enabled."
+      ],
+      "outcome": "the KCS OS user's configured adapter identity may be used for a revived request"
+    },
+    "impact": {
+      "level": "medium",
+      "why": "The primitive bypasses retry terminality and can cause repeated provider sends or budget/cap depletion, but it does not disclose credentials, choose a new destination, or bypass existing adapter approval."
+    },
+    "likelihood": {
+      "level": "medium",
+      "why": "The field transitions are deterministic, but exploitation requires a prior failed task, path/classification cycling, and repeated operator indexing."
+    },
+    "evidenceRefs": [
+      "demotion-selector",
+      "destructive-hold",
+      "fresh-unhold",
+      "retry-contract"
+    ],
+    "limitations": [
+      "`Done` and `retired_non_live` tasks are excluded from the destructive demotion.",
+      "A task still in `secrets_tier_b_hold` is not sendable; the adapter path is reached only after unhold.",
+      "Existing budget and adapter controls still bound the revived execution."
+    ]
+  },
+  "severity": {
+    "level": "low",
+    "priority": "P3",
+    "rationale": "The validated impact is task-state integrity loss plus bounded repeat adapter execution/cost under an operator-mediated local workflow. Medium impact and medium likelihood map to low/P3 under the scan policy."
+  },
+  "remediation": {
+    "summary": "Do not implement secret holds by destructively overwriting retry lifecycle state. Either preserve and restore the pre-hold `status`, `fallback_reason`, `attempts`, `next_retry_at`, and reservation fields, or exclude terminal/exhausted failures from hold demotion.",
+    "regression_tests": [
+      "A `Failed(contract_violation)` embedding task renamed into a Tier-B path and back remains non-sendable and does not reserve budget.",
+      "An exhausted `Failed(network_error, attempts = 5)` remains exhausted after a hold/unhold cycle.",
+      "A legitimately fresh secret hold still blocks sending while secret and releases only when the pre-hold state was sendable.",
+      "`Done` and `retired_non_live` tasks keep their current special-case behavior."
+    ]
+  },
+  "writeup": {
+    "reportPath": "findings/tac-kcs-r23-cand-001-secret-hold-terminal-failure/tac-kcs-r23-cand-001-secret-hold-terminal-failure.md",
+    "pocDirectory": "findings/tac-kcs-r23-cand-001-secret-hold-terminal-failure/poc"
+  },
+  "source_artifacts": {
+    "validation_report": "artifacts/05_findings/KCS-R23-CAND-001/validation_report.md",
+    "attack_path_report": "artifacts/05_findings/KCS-R23-CAND-001/attack_path_analysis_report.md"
+  },
+  "extensions": {
+    "candidateId": "KCS-R23-CAND-001",
+    "ledgerRowId": "KCS-R23-CAND-001",
+    "reportId": "KCS-R23-CAND-001"
+  }
+}

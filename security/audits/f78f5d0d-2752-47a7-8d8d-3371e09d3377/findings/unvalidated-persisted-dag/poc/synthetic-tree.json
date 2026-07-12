@@ -1,0 +1,14 @@
+{
+  "entries": [
+    {
+      "path": "synthetic.txt",
+      "type": "file",
+      "raw_hash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "normalize": {
+        "tool_profile_hash": "marker/../../../../../../../__synthetic_escape_marker__",
+        "gen": 1
+      }
+    }
+  ],
+  "object_type": "tree"
+}

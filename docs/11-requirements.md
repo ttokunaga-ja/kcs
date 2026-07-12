@@ -11,6 +11,7 @@
 > | "Git inspired なローカル知識アーカイブ" | "**Local-first knowledge archive, powered by frontier AI**" / "Git for knowledge" は発言禁止 | [01-positioning.md §1](01-positioning.md) |
 > | "オフラインで動作可能" / "オフライン自立性" | **local-first** (データの主権はローカル、計算は frontier AI を使ってよい)。"offline-first" は発言禁止 | [01-positioning.md §1.1](01-positioning.md) |
 > | `normalized_hash` フィールド (chunk schema, evidence, JSON 例) | **採用しない**。Markdown は read-only artifact、identity は `(raw_hash, tool_profile_hash)` のみ | [03-data-model.md §5](03-data-model.md) |
+> | logical hash 全体または `<sha256>` を物理ファイル名に使う例 | **旧表現**。canonical physical leaf/basename は `sha256:` を除いた 64 文字の小文字 hex。論理 hash は `sha256:<64hex>` のまま | [03-data-model.md §2 / §8.1](03-data-model.md) |
 > | "正本は `docs/research/` 配下の研究ノート" | research/ は **設計検討メモ (正本ではない)**。正本は `docs/` 直下の 10 本 spec | [README.md §1](README.md) |
 > | OCR を Markdownize と並列に列挙する箇所 | OCR は **Markdownize Adapter の内部能力 (capability)** であり独立 Adapter ではない | [07-adapter-spec.md §5.2](07-adapter-spec.md) |
 >

@@ -1,0 +1,199 @@
+{
+  "affectedLocations": [
+    {
+      "endLine": 150,
+      "label": "unbounded line and serde",
+      "path": "crates/kcs-pipeline/src/task.rs",
+      "startLine": 129
+    },
+    {
+      "endLine": 184,
+      "label": "late semantic checks",
+      "path": "crates/kcs-pipeline/src/task.rs",
+      "startLine": 151
+    },
+    {
+      "endLine": 186,
+      "label": "map retention",
+      "path": "crates/kcs-pipeline/src/task.rs",
+      "startLine": 140
+    },
+    {
+      "endLine": 450,
+      "label": "status consumer",
+      "path": "crates/kcs-cli/src/main.rs",
+      "startLine": 435
+    }
+  ],
+  "attackPath": {
+    "dataflow": {
+      "evidenceRefs": [
+        "all-unbounded-read-parse",
+        "late-controls-and-retention",
+        "status-consumer"
+      ],
+      "outcome": "persistent local denial of service for task-reading commands until task state is repaired",
+      "sink": "runtime memory/CPU consumed by unbounded line/descriptor allocation and map retention",
+      "source": "pre-adoption control of task JSONL line size, strings, collection cardinalities, record count, and task IDs",
+      "summary": "adopted `.kcs/tasks.jsonl` -> `BufRead::lines()` -> `serde_json::from_str()` -> late path/hash checks -> `BTreeMap` retention -> status/batch consumers"
+    },
+    "impact": {
+      "level": "medium",
+      "why": "One adopted scope can repeatedly wedge local task-reading commands through memory and CPU exhaustion."
+    },
+    "likelihood": {
+      "level": "medium",
+      "why": "Exploitation requires copied/preseeded task-state adoption and a sufficiently large valid payload."
+    },
+    "limitations": [
+      "Fresh owner-only stores reduce exposure.",
+      "Malformed JSON fails closed.",
+      "Manual task-state repair restores service."
+    ],
+    "reachability": {
+      "attacker": "lower-trust contributor to copied or preseeded task state",
+      "entrypoint": "`.kcs/tasks.jsonl` consumed by `TaskStore::all()`",
+      "outcome": "status, index, and recovery workflows repeatedly allocate on oversized state",
+      "summary": "The attacker needs pre-adoption control of supplied KCS task state and the victim must run a task-reading command. The vector is local to one adopted scope and has no network listener."
+    },
+    "summary": "A lower-trust contributor supplies an adopted or preseeded KCS scope with a huge valid `tasks.jsonl` record or many unique records. When the operator invokes status, index, or batch recovery, KCS allocates and retains attacker-shaped task state before rejecting poisoned fields."
+  },
+  "candidate_id": "KCS-R23-CAND-050",
+  "codeEvidence": [
+    {
+      "code": "#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]\npub struct TaskDescriptor {\n    pub task_id: String,\n    #[serde(rename = \"type\")]\n    pub task_type: TaskType,\n    pub mode: Option<MarkdownizeMode>,\n    pub input_path: String,\n    pub input_hash: String,\n    pub previous_raw_hash: Option<String>,\n    pub parent_run_id: Option<String>,\n    pub changed_unit_keys: Vec<String>,\n    pub output_ref: String,\n    pub unit_keys: Option<Vec<String>>,\n    pub status: TaskStatus,\n    pub attempts: u32,\n    pub next_retry_at: Option<String>,\n    pub deadline: Option<String>,\n    pub heartbeat_at: Option<String>,\n    pub fallback_reason: Option<String>,\n    pub created_at: String,",
+      "endLine": 60,
+      "explanation": "Adopted task state controls `task_id`, `input_path`, strings, `changed_unit_keys`, and `unit_keys`; the default serde shape has no field-level size or cardinality cap.",
+      "id": "task-descriptor-unbounded-fields",
+      "label": "Task descriptor carries unbounded strings and arrays",
+      "language": "rust",
+      "path": "crates/kcs-pipeline/src/task.rs",
+      "role": "user_input",
+      "startLine": 41
+    },
+    {
+      "code": "pub fn all(&self) -> Result<Vec<TaskDescriptor>> {\n    let file = match fs::File::open(&self.path) {\n        Ok(file) => file,\n        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),\n        Err(err) => {\n            return Err(PipelineError::Io {\n                path: self.path.display().to_string(),\n                message: err.to_string(),\n            });\n        }\n    };\n    let mut by_id = BTreeMap::new();\n    for line in std::io::BufReader::new(file).lines() {\n        let line = line.pipeline_io(&self.path)?;\n        if line.trim().is_empty() {\n            continue;\n        }\n        let descriptor: TaskDescriptor = serde_json::from_str(&line).map_err(|err| {\n            PipelineError::corrupt(self.path.display().to_string(), err.to_string())\n        })?;",
+      "endLine": 150,
+      "explanation": "`BufRead::lines()` grows the complete line and `serde_json::from_str()` materializes the complete descriptor before KCS applies task-specific controls.",
+      "id": "all-unbounded-read-parse",
+      "label": "Reader allocates a full line and descriptor before validation",
+      "language": "rust",
+      "path": "crates/kcs-pipeline/src/task.rs",
+      "role": "entrypoint",
+      "startLine": 129
+    },
+    {
+      "code": "if !is_scope_local_file_name(&descriptor.input_path) {\n    return Err(PipelineError::path(descriptor.input_path));\n}\nif !kcs_core::cas::is_hash(&descriptor.input_hash) {\n    return Err(PipelineError::corrupt(\n        self.path.display().to_string(),\n        format!(\n            \"task input_hash is not a valid hash: {}\",\n            descriptor.input_hash\n        ),\n    ));\n}\nif let Some(previous) = &descriptor.previous_raw_hash {\n    if !kcs_core::cas::is_hash(previous) {\n        return Err(PipelineError::corrupt(\n            self.path.display().to_string(),\n            format!(\"task previous_raw_hash is not a valid hash: {previous}\"),\n        ));\n    }\n}\nby_id.insert(descriptor.task_id.clone(), descriptor);\n}\nOk(by_id.into_values().collect())",
+      "endLine": 186,
+      "explanation": "The path and hash checks reject poisoned semantics only after deserialization. Valid records with unique `task_id` values are retained in the `BTreeMap`, so cumulative record count also consumes memory.",
+      "id": "late-controls-and-retention",
+      "label": "Semantic controls and map retention happen after allocation",
+      "language": "rust",
+      "path": "crates/kcs-pipeline/src/task.rs",
+      "role": "sink",
+      "startLine": 151
+    },
+    {
+      "code": "Command::Status => {\n    let repo = Repository::open_current()?;\n    validate_repo_tool_lock(&repo)?;\n    let task_store = TaskStore::new(repo.kcs_dir());\n    let status = repo.status()?;\n    Ok(json!({\n        \"scope_path\": repo.kcs_dir(),\n        \"files\": status.files,\n        \"head_shallow\": status.head_shallow,\n        \"tasks\": task_store.all().map_err(pipeline_to_kcs)?,\n        \"quarantine\": quarantine_status_records(&repo)?,\n        \"budget\": budget_status_json(&repo)?,\n    }))\n}",
+      "endLine": 450,
+      "explanation": "Routine status output invokes `TaskStore::all()`, so an oversized adopted `tasks.jsonl` blocks normal inspection and recovery workflows.",
+      "id": "status-consumer",
+      "label": "Status command reads all task state",
+      "language": "rust",
+      "path": "crates/kcs-cli/src/main.rs",
+      "role": "outcome",
+      "startLine": 435
+    },
+    {
+      "code": "for line in std::io::BufReader::new(file).lines() {\n    let line = line.pipeline_io(&self.path)?;\n    if line.trim().is_empty() {\n        continue;\n    }\n    let descriptor: TaskDescriptor = serde_json::from_str(&line).map_err(|err| {",
+      "endLine": 148,
+      "explanation": "The existing loop is the natural place to add total-file, per-line, record-count, string-length, and vector-cardinality limits before descriptor allocation and retention.",
+      "id": "expected-bounded-reader",
+      "label": "Reader should bound bytes and cardinality before retaining tasks",
+      "language": "rust",
+      "path": "crates/kcs-pipeline/src/task.rs",
+      "role": "expected_control",
+      "startLine": 141
+    }
+  ],
+  "confidence": "high",
+  "confidence_score": 0.99,
+  "extensions": {
+    "attackPathReport": "artifacts/05_findings/KCS-R23-CAND-050/attack_path_analysis_report.md",
+    "attackPathReportSha256": "9e2fdb707fdb0bba38e5d7b00941125da7e613cc1f521f0ecbff74c7cea80625",
+    "candidateId": "KCS-R23-CAND-050",
+    "ledgerRowId": "KCS-R23-CAND-050",
+    "reportId": "KCS-R23-CAND-050",
+    "reportPath": "findings/tac-kcs-r23-cand-050-task-jsonl-unbounded-records/task-jsonl-unbounded-records.md",
+    "reportSha256": "3aeb0cd6a961fb7a9560134eb5ec27cdb68d30d83a9cb0b56661d2b59e3b35f6",
+    "validationReport": "artifacts/05_findings/KCS-R23-CAND-050/validation_report.md",
+    "validationReportSha256": "35b8509989a62d491bd47e512789912e4f5d16b21da7b015c60c43c8710bb2f2"
+  },
+  "final_policy": "reportable",
+  "final_severity": "low",
+  "instance_key": "KCS-R23-CAND-050:task-jsonl-unbounded-line-collections-records",
+  "ledger_row_id": "KCS-R23-CAND-050",
+  "priority": "P3",
+  "remediation": {
+    "regressionTests": [
+      "Reject over-limit lines before JSON deserialization.",
+      "Reject over-limit `changed_unit_keys` and `unit_keys` cardinalities.",
+      "Reject task files exceeding the record-count budget.",
+      "Keep path/hash validation after bounded parsing.",
+      "Ensure `kcs status` surfaces bounded corruption without unbounded allocation."
+    ],
+    "summary": "Enforce total task-file size, per-line byte length, record count, string length, and vector cardinality before deserializing or retaining task descriptors. Return a bounded corruption/recovery error when limits are exceeded."
+  },
+  "rootCause": {
+    "evidenceRefs": [
+      "task-descriptor-unbounded-fields",
+      "all-unbounded-read-parse",
+      "late-controls-and-retention",
+      "expected-bounded-reader"
+    ],
+    "summary": "The violated invariant is that adopted task state must be bounded before KCS materializes records. The reader accepts a complete task JSONL line, deserializes all strings and collections, and retains unique descriptors before any size, cardinality, or record-count control exists."
+  },
+  "scan_id": "f78f5d0d-2752-47a7-8d8d-3371e09d3377",
+  "scan_scope": ".",
+  "schema_version": "codex-security-canonical-finding-draft/v1",
+  "source_revision": "0e19f3c6489da458e93a982a333c308d92d0a0ae",
+  "summary": "`TaskStore::all()` reads adopted `.kcs/tasks.jsonl` records into an unbounded line string and deserializes all task strings and key arrays before enforcing path and hash controls. A lower-trust preseeded scope can therefore wedge status, index, or batch recovery through memory and CPU consumption before the poisoned state is rejected.",
+  "target_revision": "0e19f3c6489da458e93a982a333c308d92d0a0ae",
+  "title": "Oversized task JSONL records allocate before validation",
+  "validation": {
+    "assertions": [
+      "Per-line allocation is not bounded before `String` growth.",
+      "Serde collection allocation is not cardinality-bounded before semantic checks.",
+      "Unique task IDs are retained in a `BTreeMap` until the full result vector is returned."
+    ],
+    "evidenceRefs": [
+      "all-unbounded-read-parse",
+      "late-controls-and-retention"
+    ],
+    "limitations": [
+      "No OOM-sized payload was generated; practical RSS thresholds were not measured."
+    ],
+    "method": "saved target-runtime bounded controls plus local synthetic PoC",
+    "summary": "Saved validation parsed one 38,318-byte record with 512 `changed_unit_keys` and 512 `unit_keys`, retained 64 unique records, and showed a poisoned path is rejected only after the same arrays are parsed. The included PoC reproduces that ordering with synthetic local records."
+  },
+  "writeup": {
+    "attemptId": "tac_20260712",
+    "reportPath": "findings/tac-kcs-r23-cand-050-task-jsonl-unbounded-records/task-jsonl-unbounded-records.md",
+    "reportSha256": "3aeb0cd6a961fb7a9560134eb5ec27cdb68d30d83a9cb0b56661d2b59e3b35f6",
+    "supportingArtifacts": [
+      {
+        "path": "findings/tac-kcs-r23-cand-050-task-jsonl-unbounded-records/poc/Makefile",
+        "sha256": "3c28ec60c78f728b2cac90b96dddc4988f2056d2193f9016a3f126ca14a681de"
+      },
+      {
+        "path": "findings/tac-kcs-r23-cand-050-task-jsonl-unbounded-records/poc/README.md",
+        "sha256": "54e599a4a806002d0bfd0ec77b1e4b2140057d7680eafa2593a732569778b45e"
+      },
+      {
+        "path": "findings/tac-kcs-r23-cand-050-task-jsonl-unbounded-records/poc/task_jsonl_unbounded_probe.py",
+        "sha256": "30bf44ace55c97e316fcb0668ecdb7af06418006fc6f3998cbbff4541386f2c6"
+      }
+    ],
+    "pocDirectory": "findings/tac-kcs-r23-cand-050-task-jsonl-unbounded-records/poc"
+  }
+}

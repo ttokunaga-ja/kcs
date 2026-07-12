@@ -1,0 +1,207 @@
+{
+  "schema_version": 1,
+  "scanId": "f78f5d0d-2752-47a7-8d8d-3371e09d3377",
+  "candidateId": "KCS-R23-CAND-012",
+  "ledgerRowId": "KCS-R23-CAND-012",
+  "title": "Content-twin reuse leaves completed budget-paused tasks falsely pending",
+  "finalPolicy": "reportable",
+  "severity": "low",
+  "priority": "P3",
+  "confidence": "high",
+  "targetRevision": "0e19f3c6489da458e93a982a333c308d92d0a0ae",
+  "summary": "A budget-paused embedding task remains eligible for content-addressed reuse, so a byte-distinct content twin can materialize the same current-profile vector and rebuild `chunk_vec` for the paused chunk. Reconciliation then sees the chunk as live and already embedded, but a reason-blind `TaskStatus::Paused` guard preserves `Paused(budget_exceeded)` instead of marking the task `Done`. `index_status` continues to report pending enrichment and `budget_paused=true` even though the searchable vector exists.",
+  "affectedLocations": [
+    {
+      "label": "held_only_filter",
+      "path": "crates/kcs-cli/src/main.rs",
+      "lines": "3008-3027,3655-3658",
+      "detail": "Only `secrets_tier_b_hold` chunks are excluded from content-vector rebuild."
+    },
+    {
+      "label": "content_reuse_projection",
+      "path": "crates/kcs-index/src/embedding_store.rs",
+      "lines": "160-185",
+      "detail": "Rebuild joins chunks to embeddings by `text_hash` and links every non-held chunk into `chunk_vec`."
+    },
+    {
+      "label": "completion_detection",
+      "path": "crates/kcs-cli/src/main.rs",
+      "lines": "7911-7917,8006-8013",
+      "detail": "A live chunk with a current content vector and `chunk_vec` row is no longer pending."
+    },
+    {
+      "label": "root_control",
+      "path": "crates/kcs-cli/src/main.rs",
+      "lines": "8088-8132",
+      "detail": "The `Paused` guard skips `embedding_done_transition()` for all pause reasons."
+    },
+    {
+      "label": "status_sink",
+      "path": "crates/kcs-cli/src/main.rs",
+      "lines": "2463-2467",
+      "detail": "The stale budget task remains pending and sets `budget_paused`."
+    }
+  ],
+  "codeEvidence": [
+    {
+      "id": "held-only-filter",
+      "label": "Only secrets holds are excluded from rebuild",
+      "path": "crates/kcs-cli/src/main.rs",
+      "startLine": 3008,
+      "endLine": 3027,
+      "language": "rust",
+      "role": "expected_control",
+      "code": "fn held_secret_embedding_chunk_ids(kcs_dir: &Path) -> Result<BTreeSet<String>> {\n    let task_store = TaskStore::new(kcs_dir);\n    Ok(task_store\n        .all()\n        .map_err(pipeline_to_kcs)?\n        .into_iter()\n        .filter(|task| {\n            task.task_type == TaskType::Embedding\n                && task.status == TaskStatus::Paused\n                && task.fallback_reason.as_deref() == Some(SECRETS_TIER_B_HOLD)\n        })\n        .filter_map(|task| {\n            task.output_ref\n                .strip_prefix(\"embedding:\")\n                .map(str::to_owned)\n        })\n        .collect())\n}",
+      "explanation": "The exclusion set is intentionally reason-specific. A `Paused(budget_exceeded)` task is not a secrets hold, so its chunk is allowed to receive a content-twin projection."
+    },
+    {
+      "id": "content-reuse-projection",
+      "label": "Rebuild links chunks by shared text hash",
+      "path": "crates/kcs-index/src/embedding_store.rs",
+      "startLine": 160,
+      "endLine": 185,
+      "language": "rust",
+      "role": "propagation",
+      "code": "pub fn rebuild_chunk_vec(\n    conn: &Connection,\n    held_chunk_ids: &std::collections::BTreeSet<String>,\n) -> Result<()> {\n    conn.execute_batch(\"DELETE FROM chunk_vec;\")?;\n    let mut stmt = conn.prepare(\n        \"SELECT c.chunk_id, e.vector, e.dimensions\n         FROM chunks c\n         JOIN embeddings e ON e.target_type = 'chunk' AND e.target_id = c.text_hash\",\n    )?;\n    let rows = stmt\n        .query_map([], |row| {\n            Ok((\n                row.get::<_, String>(0)?,\n                row.get::<_, Vec<u8>>(1)?,\n                row.get::<_, i64>(2)? as u64,\n            ))\n        })?\n        .collect::<std::result::Result<Vec<_>, _>>()?;\n    for (chunk_id, vector, dimensions) in rows {\n        if held_chunk_ids.contains(&chunk_id) {\n            continue;\n        }\n        link_chunk_vec(conn, &chunk_id, &vector, dimensions)?;\n    }\n    Ok(())\n}",
+      "explanation": "The projection joins live chunks to content embeddings by `text_hash`. Because budget-paused chunks are not in `held_chunk_ids`, a byte-distinct twin that shares normalized text can make the paused chunk searchable."
+    },
+    {
+      "id": "completion-detection",
+      "label": "Current vector plus projection removes the chunk from pending work",
+      "path": "crates/kcs-cli/src/main.rs",
+      "startLine": 7911,
+      "endLine": 7917,
+      "language": "rust",
+      "role": "propagation",
+      "code": "let chunk = row.map_err(|err| KcsError::schema(err.to_string()))?;\nlet embedding_hash = chunk_embedding_hash(&chunk, profile)?;\nlet has_current_profile = embedding_store::content_vector(conn, &embedding_hash)\n    .map_err(index_to_kcs)?\n    .is_some();\nif has_current_profile && existing.contains(&chunk.chunk_id) {\n    continue;",
+      "explanation": "`live_chunks_without_embedding` skips a chunk once the content vector and `chunk_vec` row exist. The budget-paused chunk is therefore no longer treated as material embedding work."
+    },
+    {
+      "id": "live-embedded-state",
+      "label": "Reconciliation names the already-complete state",
+      "path": "crates/kcs-cli/src/main.rs",
+      "startLine": 8006,
+      "endLine": 8013,
+      "language": "rust",
+      "role": "propagation",
+      "code": "let live = live_ids.contains(chunk_id);\nlet live_embedded = live && !pending_ids.contains(chunk_id);",
+      "explanation": "A live chunk absent from `pending_ids` is already embedded. This is the state that should allow a budget-paused task to converge without another adapter call."
+    },
+    {
+      "id": "reason-blind-paused-guard",
+      "label": "All paused tasks skip the done transition",
+      "path": "crates/kcs-cli/src/main.rs",
+      "startLine": 8088,
+      "endLine": 8132,
+      "language": "rust",
+      "role": "root_control",
+      "code": "let paused = matches!(task.status, TaskStatus::Paused);\nif !matches!(\n    task.status,\n    TaskStatus::Pending | TaskStatus::Running | TaskStatus::Paused\n) {\n    continue;\n}\nlet Some(chunk_id) = task.output_ref.strip_prefix(\"embedding:\") else {\n    continue;\n};\nif pending_ids.contains(chunk_id) {\n    continue;\n}\nif !live_ids.contains(chunk_id) {\n    transitions.insert(\n        task.output_ref.clone(),\n        embedding_retired_non_live_transition(),\n    );\n    continue;\n}\nif paused {\n    continue;\n}\ntransitions.insert(task.output_ref.clone(), embedding_done_transition());",
+      "explanation": "After the code proves the chunk is live and not pending, it still skips completion for every `Paused` task. That preserves a completed `budget_exceeded` pause as if it were an unsent secrets hold."
+    },
+    {
+      "id": "status-sink",
+      "label": "Stale budget pause drives automation-facing status",
+      "path": "crates/kcs-cli/src/main.rs",
+      "startLine": 2463,
+      "endLine": 2467,
+      "language": "rust",
+      "role": "outcome",
+      "code": "TaskStatus::Paused => {\n    pending += 1;\n    if task.fallback_reason.as_deref() == Some(\"budget_exceeded\") {\n        budget_paused = true;\n    }\n}",
+      "explanation": "The preserved task row is counted as pending enrichment and sets `budget_paused`, even though content-twin reuse has already supplied the vector."
+    }
+  ],
+  "rootCause": {
+    "summary": "The violated invariant is that pause reasons carry different security meanings after a live chunk is already embedded. The rebuild path is reason-specific and excludes only `secrets_tier_b_hold`, so `Paused(budget_exceeded)` chunks can correctly reuse a content-twin vector. The reconciliation path then discards that reason and treats every `Paused` task as sticky, skipping the `Done` transition that would clear a completed budget pause.",
+    "evidenceRefs": [
+      "held-only-filter",
+      "content-reuse-projection",
+      "completion-detection",
+      "live-embedded-state",
+      "reason-blind-paused-guard",
+      "status-sink"
+    ]
+  },
+  "validation": {
+    "method": "static source trace plus local offline state-model PoC; supplied validation report records a hermetic CLI reproduction with mock embeddings",
+    "summary": "The source trace confirms that only secrets holds are excluded from content-hash rebuild, the pending detector treats a chunk with a current vector and projection as complete, and the later `Paused` guard refuses to mark a completed budget pause `Done`. The included PoC asserts the vulnerable false-pending state and the reason-specific fixed behavior with synthetic data.",
+    "evidenceRefs": [
+      "held-only-filter",
+      "content-reuse-projection",
+      "completion-detection",
+      "reason-blind-paused-guard",
+      "status-sink"
+    ],
+    "assertions": [
+      "A budget-paused chunk is eligible for content-twin `chunk_vec` rebuild because only `secrets_tier_b_hold` chunks enter `held_chunk_ids`.",
+      "Once the shared vector exists, the chunk is no longer pending material embedding work.",
+      "The final sweep skips all `TaskStatus::Paused` rows, preserving `Paused(budget_exceeded)` after work is complete.",
+      "`compute_index_status` maps that stale row to pending enrichment and `budget_paused=true`."
+    ],
+    "limitations": [
+      "This TAC attempt did not rerun the full CLI lifecycle or call an embedding adapter.",
+      "No downstream automation was shown taking a harmful action based on the false status."
+    ]
+  },
+  "attackPath": {
+    "summary": "A local content contributor supplies two byte-distinct documents that normalize to identical chunk text. One chunk is first paused by a hard budget cap. After the operator makes budget available, the twin obtains the shared embedding, rebuild links both chunks by `text_hash`, and reconciliation leaves the original task budget-paused because the paused guard is reason-blind.",
+    "dataflow": {
+      "summary": "content twin text -> shared `text_hash` embedding -> `rebuild_chunk_vec` projection -> live embedded reconciliation state -> skipped `Done` transition -> false `index_status` budget pause",
+      "source": "contributor-controlled local scope content and ordering",
+      "sink": "`compute_index_status` pending enrichment and `budget_paused` output",
+      "outcome": "automation-facing status reports an actionable budget pause after the vector is already searchable",
+      "evidenceRefs": [
+        "content-reuse-projection",
+        "completion-detection",
+        "reason-blind-paused-guard",
+        "status-sink"
+      ]
+    },
+    "reachability": {
+      "summary": "The path requires an embedding profile, a genuine hard budget pause, a byte-distinct normalized-content twin, later budget availability, and ordinary re-indexing.",
+      "attacker": "lower-trust local content contributor",
+      "entrypoint": "repository or scope content indexed by KCS",
+      "outcome": "persistent false pending and budget-paused task state"
+    },
+    "impact": {
+      "level": "medium",
+      "why": "The stale row can mislead agents, CI, or operators into treating a completed scope as budget-blocked."
+    },
+    "likelihood": {
+      "level": "medium",
+      "why": "The transition is deterministic with the right lifecycle, but the contributor does not independently control the operator's budget cap changes."
+    },
+    "limitations": [
+      "Search data remains intact and both documents can be returned.",
+      "No confidentiality, authorization, or extra-spend bypass was demonstrated.",
+      "Explicit `batch resume --override-budget` can repair the row without another adapter attempt."
+    ],
+    "evidenceRefs": [
+      "held-only-filter",
+      "content-reuse-projection",
+      "reason-blind-paused-guard",
+      "status-sink"
+    ]
+  },
+  "remediation": {
+    "summary": "Classify paused embedding tasks by `fallback_reason` once the chunk is live and already embedded. Preserve `secrets_tier_b_hold`, but allow completed `budget_exceeded` tasks to take the existing no-adapter `embedding_done_transition()` path.",
+    "minimalFix": "Replace the Boolean `paused` guard with a reason-specific hold check such as `task.status == TaskStatus::Paused && task.fallback_reason.as_deref() == Some(SECRETS_TIER_B_HOLD)` before skipping completion.",
+    "regressionTests": [
+      "Budget pause, byte-distinct normalized-content twin, rebuild, and re-index should converge the original task to `Done` with `pending_enrichment_tasks=0` and `budget_paused=false`.",
+      "The same shape with `secrets_tier_b_hold` should remain paused and excluded from unauthorized vector search.",
+      "The convergence path should make no adapter attempt and record no new budget reservation when the vector already exists."
+    ]
+  },
+  "writeup": {
+    "reportPath": "findings/tac-kcs-r23-cand-012-budget-paused-content-twin-pending/tac-kcs-r23-cand-012-budget-paused-content-twin-pending.md",
+    "pocPath": "findings/tac-kcs-r23-cand-012-budget-paused-content-twin-pending/poc/"
+  },
+  "sourceArtifacts": {
+    "validationReport": "artifacts/05_findings/KCS-R23-CAND-012/validation_report.md",
+    "attackPathReport": "artifacts/05_findings/KCS-R23-CAND-012/attack_path_analysis_report.md"
+  },
+  "extensions": {
+    "candidateId": "KCS-R23-CAND-012",
+    "ledgerRowId": "KCS-R23-CAND-012",
+    "reportId": "KCS-R23-CAND-012"
+  }
+}

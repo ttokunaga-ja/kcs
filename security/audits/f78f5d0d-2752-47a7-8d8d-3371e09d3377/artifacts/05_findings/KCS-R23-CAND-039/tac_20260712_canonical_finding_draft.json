@@ -1,0 +1,256 @@
+{
+  "affectedLocations": [
+    {
+      "detail": "Embedding declarations accept execution target, model, and authentication fields.",
+      "endLine": 231,
+      "label": "accepted_surface",
+      "path": "crates/kcs-adapter/src/tool_lock.rs",
+      "startLine": 106
+    },
+    {
+      "detail": "DeclaredAdapter drops execution kind, command, arguments, and URL.",
+      "endLine": 428,
+      "label": "lossy_projection",
+      "path": "crates/kcs-adapter/src/tool_lock.rs",
+      "startLine": 376
+    },
+    {
+      "detail": "Any declared embedding authentication reference selects real execution, which always constructs GeminiEmbeddingAdapter::default and ignores the declared target/model.",
+      "endLine": 401,
+      "label": "auth_triggered_dispatch",
+      "path": "crates/kcs-adapter/src/catalog.rs",
+      "startLine": 313
+    },
+    {
+      "detail": "The fixed Gemini model/base client sends the retained declared secret and input text in authenticated requests.",
+      "endLine": 149,
+      "label": "credential_data_sink",
+      "path": "crates/kcs-adapter/src/gemini_embedding.rs",
+      "startLine": 48
+    },
+    {
+      "detail": "Preview shows generic embedding/network policy rather than the declared and effective provider/model target.",
+      "endLine": 8797,
+      "label": "preview_gap",
+      "path": "crates/kcs-cli/src/main.rs",
+      "startLine": 8736
+    }
+  ],
+  "attackPath": {
+    "dataflow": {
+      "evidenceRefs": [
+        "accepted-fields",
+        "lossy-copy",
+        "auth-real-switch",
+        "fixed-gemini-dispatch",
+        "credentialed-text-sink"
+      ],
+      "outcome": "wrong-recipient disclosure of declared embedding secret and document/query text",
+      "sink": "API-key-authenticated Gemini/effective-base model discovery and embedding request",
+      "source": "operator-controlled embedding declaration and text selected for embedding",
+      "summary": "`tools.toml` embedding fields -> `declared_adapter_for_role()` -> registered `DeclaredAdapter` with only model/auth -> `active_adopted_embedding_execution()` -> `run_adopted_embedding()` -> `GeminiEmbeddingAdapter::default()` -> `EnvGeminiEmbeddingClient::embed()`"
+    },
+    "evidenceRefs": [
+      "fixed-gemini-dispatch",
+      "gemini-base-and-key",
+      "credentialed-text-sink"
+    ],
+    "impact": {
+      "level": "high",
+      "why": "The recipient can receive a declared embedding credential and indexed document or query text."
+    },
+    "likelihood": {
+      "level": "medium",
+      "why": "The path requires local configuration and online execution gates, but the dispatch is deterministic once those preconditions hold."
+    },
+    "limitations": [
+      "This path does not directly execute code on the local host.",
+      "Aligned official Gemini declarations or an intentionally aligned base URL may avoid practical recipient drift."
+    ],
+    "reachability": {
+      "attacker": "lower-trust unintended embedding recipient/effective provider",
+      "entrypoint": "accepted embedding adapter declaration plus later embedding operation",
+      "outcome": "the effective recipient receives an API key and text outside the declared provider/model boundary",
+      "summary": "Local operator configuration, a resolvable credential, general online opt-in, budget availability, and an embedding invocation are required."
+    },
+    "summary": "A KCS operator accepts or supplies a non-Gemini/private/offline/different-model embedding declaration with an auth reference. Later, online embedding executes through the fixed Gemini/effective-base client, which attaches the retained credential and sends eligible text to a recipient not bound to the accepted declaration."
+  },
+  "candidate_id": "KCS-R23-CAND-039",
+  "category": "adapter destination/model confusion and wrong-recipient credential/text disclosure",
+  "codeEvidence": [
+    {
+      "code": "const TOOLS_ENTRY_FIELDS: &[&str] = &[\n    \"kind\",\n    \"cmd\",\n    \"args\",\n    \"url\",\n    \"model\",\n    \"auth\",\n    \"profile_hash\",\n    \"capabilities\",\n    \"dimensions\",\n    \"distance\",\n    \"modality\",\n    \"mode\",\n];",
+      "endLine": 134,
+      "explanation": "The schema accepts the fields that identify an embedding adapter execution target, model, and credential reference.",
+      "id": "accepted-fields",
+      "label": "Embedding declarations accept destination and model fields",
+      "language": "rust",
+      "path": "crates/kcs-adapter/src/tool_lock.rs",
+      "role": "user_input",
+      "startLine": 121
+    },
+    {
+      "code": "pub struct DeclaredAdapter {\n    pub tool_id: Option<String>,\n    pub model: Option<String>,\n    pub auth: Option<String>,\n}",
+      "endLine": 386,
+      "explanation": "After validation, the runtime declaration has no field for `kind`, `cmd`, `args`, or `url`, so the accepted recipient identity is no longer available to the executor.",
+      "id": "lossy-struct",
+      "label": "Runtime projection keeps only model and auth",
+      "language": "rust",
+      "path": "crates/kcs-adapter/src/tool_lock.rs",
+      "role": "propagation",
+      "startLine": 381
+    },
+    {
+      "code": "if has_direct_fields {\n    return Some(DeclaredAdapter {\n        tool_id: None,\n        model: section\n            .get(\"model\")\n            .and_then(toml::Value::as_str)\n            .map(str::to_owned),\n        auth: section\n            .get(\"auth\")\n            .and_then(toml::Value::as_str)\n            .map(str::to_owned),\n    });\n}",
+      "endLine": 412,
+      "explanation": "The conversion preserves the credential reference but drops the declared destination fields before registration.",
+      "id": "lossy-copy",
+      "label": "Conversion copies model/auth but not URL or kind",
+      "language": "rust",
+      "path": "crates/kcs-adapter/src/tool_lock.rs",
+      "role": "propagation",
+      "startLine": 401
+    },
+    {
+      "code": "None => real_embedding_activation(\n    crate::tool_lock::registered_declared_adapter(\"embedding\")\n        .and_then(|declared| declared.auth)\n        .is_some(),\n    std::env::var(\"GEMINI_API_KEY\").is_ok(),\n),\n...\npub fn real_embedding_activation(\n    declared: bool,\n    env_key_present: bool,\n) -> Option<AdoptedEmbeddingExecution> {\n    (declared || env_key_present).then_some(AdoptedEmbeddingExecution::Real)\n}",
+      "endLine": 343,
+      "explanation": "A declared embedding credential is enough to activate the real path; no declared destination or model comparison remains in this decision.",
+      "id": "auth-real-switch",
+      "label": "Declared auth selects real embedding execution",
+      "language": "rust",
+      "path": "crates/kcs-adapter/src/catalog.rs",
+      "role": "entrypoint",
+      "startLine": 327
+    },
+    {
+      "code": "let response = match execution {\n    AdoptedEmbeddingExecution::Real => GeminiEmbeddingAdapter::default().embed(request),\n    other => GeminiEmbeddingAdapter::new(\n        MockAdoptedEmbeddingClient { execution: other },\n        ADOPTED_MODEL_PIN,\n        ADOPTED_DIMENSIONS,\n    )\n    .embed(request),\n}?;\nOk(response.vectors)",
+      "endLine": 401,
+      "explanation": "The real branch does not dispatch the accepted adapter; it always constructs the default Gemini embedding adapter.",
+      "id": "fixed-gemini-dispatch",
+      "label": "Real execution dispatches the default Gemini adapter",
+      "language": "rust",
+      "path": "crates/kcs-adapter/src/catalog.rs",
+      "role": "root_control",
+      "startLine": 386
+    },
+    {
+      "code": "fn base_url(&self) -> String {\n    self.base_url\n        .clone()\n        .or_else(|| std::env::var(\"GEMINI_API_BASE\").ok())\n        .unwrap_or_else(|| \"https://generativelanguage.googleapis.com\".to_owned())\n        .trim_end_matches('/')\n        .to_owned()\n}\n\nfn api_key() -> Result<String> {\n    crate::tool_lock::resolve_role_api_key(\"embedding\", \"GEMINI_API_KEY\")?.ok_or_else(|| {\n        AdapterError::Auth(\n            \"no Gemini embedding API key: set GEMINI_API_KEY or a tools.toml `[embedding] auth\"\n                .to_owned(),\n        )\n    })\n}",
+      "endLine": 80,
+      "explanation": "The effective HTTP base is a programmatic value, `GEMINI_API_BASE`, or Google default, while the credential comes from the embedding role declaration or legacy environment fallback.",
+      "id": "gemini-base-and-key",
+      "label": "Gemini client derives its own base and resolves the embedding credential",
+      "language": "rust",
+      "path": "crates/kcs-adapter/src/gemini_embedding.rs",
+      "role": "root_control",
+      "startLine": 62
+    },
+    {
+      "code": "let api_key = Self::api_key()?;\nlet requests = items\n    .iter()\n    .map(|item| {\n        json!({\n            \"model\": format!(\"models/{model_pin}\"),\n            \"content\": { \"parts\": [{ \"text\": item.text.clone().unwrap_or_default() }] },\n            \"outputDimensionality\": dimensions,\n        })\n    })\n    .collect::<Vec<_>>();\nlet response: Value = ureq::post(&format!(\n    \"{}/v1beta/models/{model_pin}:batchEmbedContents\",\n    self.base_url()\n))\n.set(\"x-goog-api-key\", &api_key)\n.set(\"Content-Type\", \"application/json\")",
+      "endLine": 145,
+      "explanation": "The sink attaches the retained secret and serializes each embedding item text into the request sent to the effective Gemini base.",
+      "id": "credentialed-text-sink",
+      "label": "Embedding text and API key are sent to the effective Gemini base",
+      "language": "rust",
+      "path": "crates/kcs-adapter/src/gemini_embedding.rs",
+      "role": "sink",
+      "startLine": 126
+    },
+    {
+      "code": "\"network_transmission_policy\": {\n    \"default\": \"disabled until --approve or --online\",\n    \"yes_grants_network\": false,\n},\n\"adapter_execution_mode\": {\n    \"markdownize\": \"deterministic_library baseline\",\n    \"embedding\": \"not generated without online opt-in\",\n},",
+      "endLine": 8792,
+      "explanation": "The user-facing gate confirms generic network and embedding behavior, but it does not reveal or enforce equality between the declared provider/model and the effective Gemini recipient.",
+      "id": "preview-gap",
+      "label": "Preview describes generic online embedding rather than recipient binding",
+      "language": "rust",
+      "path": "crates/kcs-cli/src/main.rs",
+      "role": "expected_control",
+      "startLine": 8785
+    }
+  ],
+  "confidence": "high (0.97)",
+  "confidence_score": 0.97,
+  "extensions": {
+    "attemptId": "tac_20260712",
+    "candidateId": "KCS-R23-CAND-039",
+    "ledgerRowId": "KCS-R23-CAND-039",
+    "reportId": "KCS-R23-CAND-039"
+  },
+  "final_policy": "reportable",
+  "final_severity": "medium",
+  "instance_key": "KCS-R23-CAND-039",
+  "ledger_row_id": "KCS-R23-CAND-039",
+  "priority": "P2",
+  "record_type": "canonical_finding_draft",
+  "remediation": {
+    "invariants": [
+      "Accepted embedding destination/model must equal the effective request destination/model.",
+      "Custom-provider credentials must not be attached to the built-in Gemini endpoint.",
+      "Ambient `GEMINI_API_BASE` must not silently override a declaration-bound destination."
+    ],
+    "summary": "Reject unsupported embedding targets or preserve and dispatch the exact accepted provider/model identity. Bind approval, credential resolution, runtime dispatch, and provenance to the same adapter identity.",
+    "tests": [
+      "A non-Gemini `[embedding]` declaration with `url`, `model`, and `auth` is rejected unless a matching implementation exists.",
+      "If custom embedding is supported, the request base URL and model are exactly the declared URL and model.",
+      "Preview and approval output fails or warns when declared and effective provider/model differ."
+    ]
+  },
+  "rootCause": {
+    "evidenceRefs": [
+      "accepted-fields",
+      "lossy-struct",
+      "lossy-copy",
+      "auth-real-switch",
+      "fixed-gemini-dispatch",
+      "gemini-base-and-key",
+      "credentialed-text-sink",
+      "preview-gap"
+    ],
+    "summary": "The violated invariant is that an embedding credential and text should be sent only to the provider/model identity accepted for the embedding role. KCS accepts destination fields, then projects them out of `DeclaredAdapter`; the remaining `auth` field activates real execution, and the real branch always dispatches the fixed Gemini adapter."
+  },
+  "scan_id": "f78f5d0d-2752-47a7-8d8d-3371e09d3377",
+  "scan_scope": ".",
+  "schema_version": 1,
+  "source_revision": "0e19f3c6489da458e93a982a333c308d92d0a0ae",
+  "summary": "KCS accepts embedding declarations with target, command/URL, model, and auth fields, but the runtime DeclaredAdapter keeps only model/auth. A declared embedding auth reference activates real execution, and the real branch always dispatches GeminiEmbeddingAdapter::default(), so the retained secret and embedding text can be sent to the fixed Gemini/effective-base recipient instead of the accepted provider/model.",
+  "target_revision": "0e19f3c6489da458e93a982a333c308d92d0a0ae",
+  "title": "Accepted embedding adapter targets are discarded before fixed Gemini execution",
+  "validation": {
+    "assertions": [
+      "Embedding declarations accept target/model/auth fields.",
+      "`DeclaredAdapter` does not retain `kind`, `cmd`, `args`, or `url`.",
+      "A retained declared auth reference activates `AdoptedEmbeddingExecution::Real`.",
+      "The real branch dispatches `GeminiEmbeddingAdapter::default()`.",
+      "The Gemini client attaches the resolved embedding API key and item text to the effective Gemini request."
+    ],
+    "evidenceRefs": [
+      "accepted-fields",
+      "lossy-copy",
+      "auth-real-switch",
+      "fixed-gemini-dispatch",
+      "credentialed-text-sink"
+    ],
+    "limitations": [
+      "No live embedding request or loopback capture was performed.",
+      "The prevalence of non-Gemini embedding declarations in deployed configurations was not measured."
+    ],
+    "method": "static source trace plus local non-network regression probe",
+    "summary": "The saved V10 validation and local PoC confirm the source path from accepted embedding declaration fields, through lossy projection and auth-triggered real execution, to the fixed Gemini authenticated text sink."
+  },
+  "writeup": {
+    "pocArtifacts": [
+      {
+        "path": "findings/tac-kcs-r23-cand-039-embedding-target-discarded-gemini/poc/check_declared_embedding_target_drift.py",
+        "role": "static_regression_probe",
+        "sha256": "055990eceef734de5f5be1836ae86fd97a32be1937511629d1c7d58b8ca2233d"
+      },
+      {
+        "path": "findings/tac-kcs-r23-cand-039-embedding-target-discarded-gemini/poc/Makefile",
+        "role": "poc_makefile",
+        "sha256": "57ea5236662e90396c6b46d549ef83d13338b8689ab6d15adf66789df4037216"
+      }
+    ],
+    "reportPath": "findings/tac-kcs-r23-cand-039-embedding-target-discarded-gemini/embedding-target-discarded-fixed-gemini.md",
+    "reportSha256": "45d12380746108cbf9467ad2ac718e15dc556c442df888d7f5d826a14f6c94c6",
+    "pocDirectory": "findings/tac-kcs-r23-cand-039-embedding-target-discarded-gemini/poc"
+  }
+}

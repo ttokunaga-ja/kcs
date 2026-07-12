@@ -1,0 +1,233 @@
+{
+  "ruleId": "kcs.r23.cand-020",
+  "identity": {
+    "anchor": "kcs-r23-cand-020",
+    "instance": "mistral-ocr-response-bounds"
+  },
+  "title": "Mistral OCR responses lack read, body, cardinality, and persistence bounds",
+  "summary": "The Mistral OCR client has no effective read or overall deadline and no response-body ceiling before full JSON materialization. It then collects page and image data, decodes base64 content, and persists images before the CLI's response-acceptance check, allowing a connected remote peer to consume local memory, CPU, time, and disk.",
+  "severity": {
+    "level": "medium",
+    "rationale": "A remote adapter response is a realistic in-scope attacker source once an ordinary approved OCR request occurs. The path is bounded to availability and disk effects, and the required matrix maps medium impact plus high likelihood to medium.",
+    "changeConditions": "Severity would rise if a malicious response can reliably cause durable multi-scope outage or overwrite unrelated data; it would fall after effective deadlines, body/cardinality/decoded-byte limits, and a pre-persistence aggregate quota are enforced."
+  },
+  "confidence": {
+    "level": "high",
+    "rationale": "V5+V10. Exact source-to-sink trace shows full OCR JSON materialization followed by unbounded page/image expansion and pre-acceptance CAS writes. Cargo.lock pins ureq 2.12.1; local primary source defaults are connect=30s, read/write/overall=None, and into_json uses serde_json::from_reader without caller take. Four bounded network-free existing tests passed for image persistence and page-scoped request behavior."
+  },
+  "taxonomy": {
+    "category": "uncontrolled resource consumption from remote response (CWE-400, CWE-770)",
+    "cwe": [
+      "CWE-400",
+      "CWE-770"
+    ]
+  },
+  "locations": [
+    {
+      "path": "crates/kcs-adapter/src/mistral_ocr.rs",
+      "startLine": 112,
+      "endLine": 138,
+      "role": "OCR POST and full JSON materialization"
+    },
+    {
+      "path": "crates/kcs-adapter/src/mistral_ocr.rs",
+      "startLine": 356,
+      "endLine": 422,
+      "role": "page/image/base64 expansion"
+    },
+    {
+      "path": "crates/kcs-adapter/src/mistral_ocr.rs",
+      "startLine": 229,
+      "endLine": 235,
+      "role": "pre-acceptance image persistence"
+    },
+    {
+      "path": "crates/kcs-adapter/src/mistral_ocr.rs",
+      "startLine": 570,
+      "endLine": 594,
+      "role": "pre-acceptance image persistence"
+    },
+    {
+      "path": "crates/kcs-cli/src/main.rs",
+      "startLine": 6694,
+      "endLine": 6696,
+      "role": "late caller acceptance"
+    },
+    {
+      "path": "crates/kcs-cli/src/main.rs",
+      "startLine": 6533,
+      "endLine": 6552,
+      "role": "live input cap control"
+    },
+    {
+      "path": "crates/kcs-core/src/scope.rs",
+      "startLine": 1581,
+      "endLine": 1590,
+      "role": "unwired timeout control"
+    }
+  ],
+  "writeup": {
+    "reportPath": "findings/mistral-ocr-response-bounds/mistral-ocr-response-bounds.md"
+  },
+  "codeEvidence": [
+    {
+      "id": "ocr-response-materialization",
+      "label": "OCR response is fully materialized",
+      "path": "crates/kcs-adapter/src/mistral_ocr.rs",
+      "startLine": 112,
+      "endLine": 138,
+      "language": "rust",
+      "role": "root_control",
+      "code": "    fn ocr_markdown(&self, request: &MarkdownizeRequest, model_pin: &str) -> Result<OcrResponse> {\n        let api_key = Self::api_key()?;\n        let path = request.raw.path.as_deref().ok_or_else(|| {\n            AdapterError::ContractViolation(\"Mistral OCR requires a local raw path\".to_owned())\n        })?;\n        let bytes = std::fs::read(path).map_err(|err| AdapterError::Io {\n            path: path.to_owned(),\n            message: err.to_string(),\n        })?;\n        // R14-4: in incremental mode, restrict the OCR request to the changed+added\n        // pages via the `pages` parameter (built from `prepared_unit_hint`), instead of\n        // silently sending — and re-billing — the whole document every revision. Full\n        // mode sends no `pages` (process the entire document).\n        let pages = request_pages(request);\n        let value: Value = ureq::post(&format!(\"{}/v1/ocr\", self.base_url()))\n            .set(\"Authorization\", &format!(\"Bearer {api_key}\"))\n            .set(\"Content-Type\", \"application/json\")\n            .send_json(ocr_request_body(\n                &request.media_type,\n                &bytes,\n                model_pin,\n                pages.as_deref(),\n            ))\n            .map_err(http_error)?\n            .into_json()\n            .map_err(|err| AdapterError::ContractViolation(err.to_string()))?;\n        parse_ocr_response(value, model_pin)",
+      "explanation": "The authenticated OCR request reads the response through unrestricted `into_json()` and supplies no caller deadline or byte ceiling before materialization."
+    },
+    {
+      "id": "page-image-expansion",
+      "label": "Every page and image is collected and decoded",
+      "path": "crates/kcs-adapter/src/mistral_ocr.rs",
+      "startLine": 356,
+      "endLine": 407,
+      "language": "rust",
+      "role": "propagation",
+      "code": "fn parse_ocr_response(value: Value, model_pin: &str) -> Result<OcrResponse> {\n    let pages = value\n        .get(\"pages\")\n        .and_then(Value::as_array)\n        .ok_or_else(|| AdapterError::ContractViolation(\"OCR response missing pages\".to_owned()))?\n        .iter()\n        .enumerate()\n        .map(|(fallback_index, page)| parse_ocr_page(page, fallback_index))\n        .collect::<Result<Vec<_>>>()?;\n    Ok(OcrResponse {\n        pages,\n        model_version_pin: value\n            .get(\"model\")\n            .and_then(Value::as_str)\n            .unwrap_or(model_pin)\n            .to_owned(),\n    })\n}\n\nfn parse_ocr_page(value: &Value, fallback_index: usize) -> Result<OcrPage> {\n    let images = value\n        .get(\"images\")\n        .and_then(Value::as_array)\n        .into_iter()\n        .flatten()\n        .map(parse_ocr_image)\n        .collect::<Result<Vec<_>>>()?;\n    Ok(OcrPage {\n        index: value\n            .get(\"index\")\n            .and_then(Value::as_u64)\n            .map(|index| index as usize)\n            .unwrap_or(fallback_index),\n        markdown: value\n            .get(\"markdown\")\n            .and_then(Value::as_str)\n            .unwrap_or_default()\n            .to_owned(),\n        images,\n    })\n}\n\nfn parse_ocr_image(value: &Value) -> Result<OcrImage> {\n    let raw_base64 = value\n        .get(\"image_base64\")\n        .or_else(|| value.get(\"base64\"))\n        .and_then(Value::as_str)\n        .unwrap_or_default();\n    let (media_type, data) = split_data_uri(raw_base64);\n    let bytes = base64::engine::general_purpose::STANDARD\n        .decode(data)\n        .map_err(|err| AdapterError::ContractViolation(err.to_string()))?;",
+      "explanation": "The parser collects all pages and images, clones markdown strings, and base64-decodes each remote image without cardinality or decoded-byte limits."
+    },
+    {
+      "id": "preaccept-image-persistence",
+      "label": "Images persist before caller acceptance",
+      "path": "crates/kcs-adapter/src/mistral_ocr.rs",
+      "startLine": 229,
+      "endLine": 235,
+      "language": "rust",
+      "role": "sink",
+      "code": "    fn markdownize(&self, request: MarkdownizeRequest) -> Result<MarkdownizeResponse> {\n        let model_pin = self.client.resolve_model_pin(&self.configured_model)?;\n        let ocr = self.client.ocr_markdown(&request, &model_pin)?;\n        if let Some(kcs_dir) = &self.image_store_dir {\n            for page in &ocr.pages {\n                persist_images(kcs_dir, &page.images)?;\n            }",
+      "explanation": "The adapter writes every parsed page image to the image store immediately after the OCR call, before returning the response to the CLI."
+    },
+    {
+      "id": "late-response-acceptance",
+      "label": "CLI validates only after adapter completion",
+      "path": "crates/kcs-cli/src/main.rs",
+      "startLine": 6691,
+      "endLine": 6696,
+      "language": "rust",
+      "role": "outcome",
+      "code": "    .map_err(task_failure_from_adapter)?;\n    let profile = outcome.profile;\n    let response = outcome.response;\n    let hints = all_changed_hints(&prepare.prepared_units);\n    let strict_valid =\n        validate_markdownize_response(&response, &hints, &prepare.prepared_units).is_ok();",
+      "explanation": "The CLI's strict response validation runs only after the adapter has materialized the response and persisted images."
+    },
+    {
+      "id": "unwired-timeout",
+      "label": "Configured timeout is not threaded",
+      "path": "crates/kcs-core/src/scope.rs",
+      "startLine": 1581,
+      "endLine": 1590,
+      "language": "rust",
+      "role": "expected_control",
+      "code": "        // timeout_seconds: a per-adapter execution timeout is not threaded through\n        // the adapter HTTP path (it would touch every adapter's transport). Accept\n        // the documented default (300); reject any other value loudly rather than\n        // silently ignore it. (R12-2 decision: real wiring is a large change.)\n        if let Some(timeout) = policy.get(\"timeout_seconds\").and_then(Value::as_i64) {\n            if timeout != 300 {\n                return Err(KcsError::not_implemented(\n                    \"adapter.policy.timeout_seconds other than 300\",\n                ));\n            }",
+      "explanation": "Configuration accepts only the documented default value but explicitly does not thread it into adapter HTTP transports, leaving no effective application deadline."
+    }
+  ],
+  "rootCause": {
+    "summary": "The OCR transport calls unrestricted `into_json()` without threading the configured timeout or a compressed/decompressed body ceiling. Parsed page, markdown, and image cardinalities and decoded bytes are also unbounded, and image persistence occurs inside the adapter before caller acceptance.",
+    "evidenceRefs": [
+      "ocr-response-materialization",
+      "page-image-expansion",
+      "preaccept-image-persistence",
+      "late-response-acceptance",
+      "unwired-timeout"
+    ]
+  },
+  "remediation": "Use a shared bounded OCR transport with configured deadlines, compressed/decompressed body limits, page/markdown/image/decoded-byte limits, and a pre-persistence aggregate quota; retain the existing outbound input cap.",
+  "validation": {
+    "method": "V5+V10",
+    "summary": "Exact source-to-sink trace shows full OCR JSON materialization followed by unbounded page/image expansion and pre-acceptance CAS writes. Cargo.lock pins ureq 2.12.1; local primary source defaults are connect=30s, read/write/overall=None, and into_json uses serde_json::from_reader without caller take. Four bounded network-free existing tests passed for image persistence and page-scoped request behavior.",
+    "evidenceRefs": [
+      "ocr-response-materialization",
+      "page-image-expansion",
+      "preaccept-image-persistence",
+      "late-response-acceptance",
+      "unwired-timeout"
+    ],
+    "assertions": [
+      "Exact source-to-sink trace shows full OCR JSON materialization followed by unbounded page/image expansion and pre-acceptance CAS writes.",
+      "Cargo.lock pins ureq 2.12.1; local primary source defaults are connect=30s, read/write/overall=None, and into_json uses serde_json::from_reader without caller take.",
+      "Four bounded network-free existing tests passed for image persistence and page-scoped request behavior."
+    ],
+    "counterevidence": [
+      "Supported CLI rechecks effective_max_input_bytes before the adapter call, so the outbound request is not independently unbounded.",
+      "Connection establishment has a 30-second timeout.",
+      "Online approval is required; fixed input/page-scoping, JSON shape checks, content-addressed deduplication, and atomic image publication narrow impact."
+    ],
+    "limitations": [
+      "No loopback timing/body measurement was run under the read-only/no-network constraint; exact code and pinned dependency defaults make this non-material to disposition.",
+      "No loopback slow-read or oversized-body measurement was retained; the exact resource constants remain unmeasured."
+    ]
+  },
+  "attackPath": {
+    "summary": "The operator configures and authorizes an online Mistral OCR operation for an eligible document. The configured remote service, proxy, or intermediary accepts the authenticated request and slow-streams or returns an oversized or highly expanded response. KCS reads and decompresses the complete JSON without a read or overall deadline or byte ceiling, then collects all pages, markdown, and images and decodes every base64 image. Images are persisted before the caller's acceptance check, allowing the remote peer to hang the command or consume substantial memory, CPU, and disk.",
+    "dataflow": {
+      "summary": "The operator configures and authorizes an online Mistral OCR operation for an eligible document. The configured remote service, proxy, or intermediary accepts the authenticated request and slow-streams or returns an oversized or highly expanded response. KCS reads and decompresses the complete JSON without a read or overall deadline or byte ceiling, then collects all pages, markdown, and images and decodes every base64 image. Images are persisted before the caller's acceptance check, allowing the remote peer to hang the command or consume substantial memory, CPU, and disk.",
+      "source": "The operator configures and authorizes an online Mistral OCR operation for an eligible document.",
+      "sink": "full OCR JSON materialization, page/image expansion, base64 decoding, and image-CAS persistence",
+      "outcome": "one online OCR command, its selected scope, and image CAS per malicious response",
+      "evidenceRefs": [
+        "ocr-response-materialization",
+        "page-image-expansion",
+        "preaccept-image-persistence",
+        "late-response-acceptance",
+        "unwired-timeout"
+      ]
+    },
+    "reachability": {
+      "summary": "outbound remote connection only; KCS has no public listener and the path begins after online-adapter approval",
+      "attacker": "KCS uses the victim OS identity and configured Mistral credential; the untrusted remote peer controls response timing and content but gains no additional local identity",
+      "entrypoint": "The operator configures and authorizes an online Mistral OCR operation for an eligible document.",
+      "preconditions": "plausible: an eligible approved OCR operation reaches a connected peer that can control the response; no local privilege or private-store write is required",
+      "outcome": "runtime memory, CPU, command availability, store-lock duration, and archive disk usage"
+    },
+    "evidenceRefs": [
+      "ocr-response-materialization",
+      "page-image-expansion",
+      "preaccept-image-persistence",
+      "late-response-acceptance",
+      "unwired-timeout"
+    ],
+    "impact": {
+      "level": "medium",
+      "why": "A remote adapter response is a realistic in-scope attacker source once an ordinary approved OCR request occurs. The path is bounded to availability and disk effects, and the required matrix maps medium impact plus high likelihood to medium."
+    },
+    "likelihood": {
+      "level": "high",
+      "why": "An operator-approved online OCR request is made. The configured service, proxy, or intermediary is faulty, compromised, or hostile. The response remains syntactically processable long enough to drive the unbounded sinks."
+    },
+    "counterevidence": [
+      "The outbound request body is bounded by effective_max_input_bytes on the shipped CLI path.",
+      "Later acceptance checks can reject bad semantic output, but run only after response allocation and image persistence.",
+      "A well-behaved provider ordinarily constrains responses, but the threat model treats provider behavior as untrusted."
+    ],
+    "limitations": [
+      "No loopback timing/body measurement was run under the read-only/no-network constraint; exact code and pinned dependency defaults make this non-material to disposition.",
+      "No loopback slow-read or oversized-body measurement was retained; the exact resource constants remain unmeasured."
+    ]
+  },
+  "remediationTests": [
+    "Use a local bounded fake transport to verify read/overall deadlines and compressed/decompressed body ceilings terminate slow or oversized responses.",
+    "Reject excessive page, markdown, image, and decoded-byte cardinality before any image-CAS write, while retaining valid bounded responses."
+  ],
+  "preventiveControls": [
+    "online opt-in and current input-size check",
+    "30-second connect timeout",
+    "request page scoping",
+    "post-materialization response validation",
+    "content-addressed atomic image publication",
+    "Use a shared bounded OCR transport with configured deadlines, compressed/decompressed body limits, page/markdown/image/decoded-byte limits, and a pre-persistence aggregate quota; retain the existing outbound input cap."
+  ],
+  "provenance": {
+    "source": "Codex Security deep-scan validation, attack-path closure, and an accepted dedicated one-finding vulnerability write-up"
+  },
+  "extensions": {
+    "candidateId": "KCS-R23-CAND-020",
+    "ledgerRowId": "KCS-R23-CAND-020",
+    "reportId": "KCS-R23-020"
+  }
+}
+

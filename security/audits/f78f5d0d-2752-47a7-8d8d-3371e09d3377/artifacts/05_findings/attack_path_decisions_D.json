@@ -1,0 +1,771 @@
+[
+  {
+    "candidate_id": "KCS-R23-CAND-028",
+    "title": "Mistral OCR reopens the path after the final hash check and sends unbound bytes",
+    "ledger_row_id": "KCS-R23-CAND-028",
+    "instance_key": "KCS-R23-CAND-028",
+    "affected_locations": [
+      {
+        "label": "secret_control",
+        "path": "crates/kcs-cli/src/main.rs",
+        "lines": "6050-6066",
+        "detail": "Online task selection rechecks secret policy from the persisted lexical input_path."
+      },
+      {
+        "label": "closest_control",
+        "path": "crates/kcs-cli/src/main.rs",
+        "lines": "6533-6614",
+        "detail": "Precondition and executor read/hash/size-check earlier path states against task.input_hash."
+      },
+      {
+        "label": "path_handoff",
+        "path": "crates/kcs-cli/src/main.rs",
+        "lines": "6615-6691",
+        "detail": "Checked bytes are discarded; preparation and the online wrapper receive only the mutable path and old hash."
+      },
+      {
+        "label": "request_bridge",
+        "path": "crates/kcs-adapter/src/catalog.rs",
+        "lines": "82-101,134-147",
+        "detail": "The catalog preserves raw_hash and path as independent request fields and delegates to Mistral."
+      },
+      {
+        "label": "network_sink",
+        "path": "crates/kcs-adapter/src/mistral_ocr.rs",
+        "lines": "112-138",
+        "detail": "The client freshly reads path and places that buffer directly in the authenticated OCR POST without comparing raw_hash."
+      },
+      {
+        "label": "identity_sink",
+        "path": "crates/kcs-cli/src/main.rs",
+        "lines": "6674-6722,6770-6792",
+        "detail": "Returned content is labeled and persisted under the earlier task.input_hash."
+      }
+    ],
+    "attack_steps": [
+      "A lower-trust contributor leaves an eligible OCR-supported file unchanged through task selection, secret classification, and the executor's final hash, size, and media checks at crates/kcs-cli/src/main.rs:6050-6066 and 6576-6614.",
+      "After the checked buffer is discarded, the contributor atomically replaces the selected-scope pathname before the Mistral adapter's fresh read.",
+      "The production adapter reads the replacement through request.raw.path and posts those bytes with the configured bearer credential at crates/kcs-adapter/src/mistral_ocr.rs:112-138 without comparing them to request.raw.raw_hash.",
+      "KCS persists returned units under the earlier task.input_hash, causing an unapproved external disclosure and false provenance for one task."
+    ],
+    "assumptions": [
+      "The selected root is shared, synced, or otherwise writable by an in-scope lower-trust content contributor while KCS runs.",
+      "The operator has intentionally enabled the Mistral online adapter and the task passes approval, media, budget, and eligibility gates.",
+      "The contributor can win the post-check/pre-read rename interval; no measured success rate is available."
+    ],
+    "context": "This is a real online OCR product workflow in a local-first CLI. The attacker enters through mutable selected-scope content rather than a network listener; the security consequence is that bytes not covered by the final identity and secret decision cross the external-adapter boundary.",
+    "in_scope": true,
+    "exposure": "No daemon, listener, ingress, or load balancer exists. Exposure is an operator-invoked local CLI operating on a selected root that may contain lower-trust mutable content; the configured remote service is the sink, not the attacker entrypoint.",
+    "identity": "The OCR request runs as the invoking OS user and attaches the operator-configured Mistral bearer credential. No service account or managed identity is evidenced, and the credential is not shown to be redirected to the contributor.",
+    "cross_boundary": "Verified: lower-trust mutable pathname bytes bypass the approved raw-hash/secret identity and cross from the local selected scope to the configured external OCR service; returned data also enters trusted normalized provenance under the old hash.",
+    "vector": "none",
+    "preconditions": [
+      "Concurrent rename/write authority in the selected root.",
+      "A pending eligible OCR task and an operator-driven online index, resume, or retry command.",
+      "Configured adapter, network opt-in, approval, credential, and budget availability.",
+      "Favorable scheduling after the final checked read and before the adapter read."
+    ],
+    "attacker_control": "yes — the contributor controls the replacement pathname target and bytes, but does not control the configured destination in the validated path.",
+    "category": "CWE-367-style pathname TOCTOU causing exact-byte authorization/secret-decision bypass and provenance corruption",
+    "mitigations": [
+      "Replacements before the executor hash check are rejected.",
+      "Secret, media, adapter approval, network-opt-in, tool, and budget gates run before execution.",
+      "The destination is operator-configured rather than automatically attacker-selected.",
+      "A lost race or I/O error prevents the substituted send."
+    ],
+    "auth_scope": "internal-only",
+    "impact_surface": "network",
+    "target_reach": "One eligible OCR task/file and its normalized provenance in one scope; the unchecked bytes are sent to one configured provider.",
+    "secrets_references": [
+      "The configured Mistral bearer credential is attached to the request but is not shown to be exposed to the contributor.",
+      "Replacement document bytes may bypass the prior secret classification and approval decision."
+    ],
+    "counterevidence": [
+      "The executor correctly rejects an earlier replacement by hashing current_bytes against task.input_hash and applying size/media checks.",
+      "The provider endpoint is an operator decision, so the trace does not establish credential theft or an attacker-selected exfiltration host.",
+      "No barrier-controlled swap or loopback request capture measured practical race reliability."
+    ],
+    "blindspots": [
+      "Race success rate across supported operating systems and filesystems is unmeasured.",
+      "The validation did not demonstrate which sensitive replacement sources a contributor can practically name or read through the victim process."
+    ],
+    "controls": [
+      "task.input_hash comparison",
+      "effective input-size and media gates",
+      "secret decision and adapter/network approval",
+      "budget and eligibility checks"
+    ],
+    "confidence": "high",
+    "impact": "high",
+    "likelihood": "medium",
+    "final_policy": "reportable",
+    "final_severity": "medium",
+    "priority": "P2",
+    "rationale": "Hard suppression does not apply: the shared/synced-scope contributor is explicitly in scope, does not need privileged private-store access, and the path crosses a core exact-byte authorization boundary in a real product workflow. Impact is high because unapproved document bytes can leave the device and trusted provenance is corrupted; likelihood is medium because online eligibility and an unmeasured rename race are required. The matrix maps high impact plus medium likelihood to Medium/P2."
+  },
+  {
+    "candidate_id": "KCS-R23-CAND-029",
+    "title": "Deterministic normalization persists a later path read under the earlier raw hash",
+    "ledger_row_id": "KCS-R23-CAND-029",
+    "instance_key": "KCS-R23-CAND-029",
+    "affected_locations": [
+      {
+        "label": "caller_control",
+        "path": "crates/kcs-cli/src/main.rs",
+        "lines": "9072-9118",
+        "detail": "The caller reads and verifies one buffer, retains it for object writes, then passes only a mutable pathname and earlier raw hash to later stages."
+      },
+      {
+        "label": "prepare_reopen",
+        "path": "crates/kcs-pipeline/src/prepare.rs",
+        "lines": "72-103",
+        "detail": "Preparation independently reads input_path and derives prepared_hash without checking request.raw_hash."
+      },
+      {
+        "label": "path_request",
+        "path": "crates/kcs-cli/src/main.rs",
+        "lines": "9282-9304",
+        "detail": "MarkdownizeRequest carries earlier raw_hash and mutable path as independent fields."
+      },
+      {
+        "label": "normalization_sink",
+        "path": "crates/kcs-adapter/src/deterministic.rs",
+        "lines": "113-118,225-249",
+        "detail": "The adapter rereads raw.path to obtain normalized source text and does not compare those bytes with raw_hash."
+      },
+      {
+        "label": "persistence_sink",
+        "path": "crates/kcs-cli/src/main.rs",
+        "lines": "9364-9388",
+        "detail": "Normalized units and manifest derived from the later read are persisted under the earlier raw_hash."
+      }
+    ],
+    "attack_steps": [
+      "A lower-trust selected-scope contributor leaves text/code version A stable while run_index_pipeline reads it and verifies H(A) against the scan identity at crates/kcs-cli/src/main.rs:9072-9103.",
+      "After that verified read, the contributor replaces the mutable pathname with version B before deterministic markdownization.",
+      "The deterministic adapter reopens the path at crates/kcs-adapter/src/deterministic.rs:225-241, derives normalized text from B, and never rebinds it to request.raw.raw_hash.",
+      "KCS persists B-derived normalized/searchable units under H(A) at crates/kcs-cli/src/main.rs:9364-9388, poisoning one scope's provenance and evidence state."
+    ],
+    "assumptions": [
+      "A lower-trust contributor has concurrent rename/write authority in the selected root.",
+      "The operator performs ordinary deterministic indexing.",
+      "The contributor wins the post-hash/pre-adapter interval."
+    ],
+    "context": "The affected deterministic normalization and persistence path is a real product workflow. Impact is not self-only: untrusted content becomes trusted archive/search evidence under a different content identity, although it remains confined to one selected scope in the validated trace.",
+    "in_scope": true,
+    "exposure": "Local operator-invoked CLI only, with no listener or public ingress. The relevant surface is a selected root containing mutable lower-trust direct-child content.",
+    "identity": "The pipeline runs with the invoking OS user's access to the selected scope and authoritative .kcs store; no separate service identity is involved.",
+    "cross_boundary": "Verified: version B crosses from an untrusted mutable pathname into the authoritative normalized/search/evidence store while being labeled with version A's raw identity.",
+    "vector": "none",
+    "preconditions": [
+      "Concurrent selected-root write/rename access.",
+      "Operator indexing of the targeted file.",
+      "Favorable scheduling after the caller hash comparison and before the adapter read."
+    ],
+    "attacker_control": "yes — the contributor controls version B and the replacement timing; the resulting stored identity remains chosen by the earlier benign version A.",
+    "category": "CWE-367-style pathname TOCTOU causing content/provenance identity misbinding",
+    "mitigations": [
+      "Changes before the caller's current-buffer hash comparison are detected and skipped.",
+      "Stable, non-mutating files produce consistent raw, prepared, and normalized identities.",
+      "The validated consequence is scope-local provenance corruption, not an outside-file overwrite or required network send.",
+      "Re-indexing stable content can repair derived state."
+    ],
+    "auth_scope": "internal-only",
+    "impact_surface": "data",
+    "target_reach": "One file's normalized units, chunks, search results, and evidence provenance within one selected scope.",
+    "secrets_references": [],
+    "counterevidence": [
+      "The pre-normalization hash comparison closes replacements that happen before its read.",
+      "No live controlled interleaving established exploit reliability.",
+      "Network egress is optional and was not needed or proven for this candidate; the direct impact is recoverable, scope-local integrity loss."
+    ],
+    "blindspots": [
+      "Scheduler/filesystem race reliability is unmeasured.",
+      "No downstream consumer reliance was demonstrated beyond persistence into searchable/evidence state."
+    ],
+    "controls": [
+      "scan/current-buffer raw-hash comparison",
+      "response shape validation",
+      "content-addressed raw/prepared persistence",
+      "operator re-index recovery"
+    ],
+    "confidence": "high",
+    "impact": "medium",
+    "likelihood": "medium",
+    "final_policy": "reportable",
+    "final_severity": "low",
+    "priority": "P3",
+    "rationale": "The explicit untrusted-content-to-authoritative-provenance boundary prevents internal-surface suppression, and the contributor need not control the private live store. The proved impact is material but bounded and recoverable within one scope, so impact is medium. The unresolved local race and operator indexing precondition make likelihood medium. The matrix mechanically maps medium impact plus medium likelihood to Low/P3."
+  },
+  {
+    "candidate_id": "KCS-R23-CAND-030",
+    "title": "Deterministic PDF normalization repeatedly reopens an unbound pathname",
+    "ledger_row_id": "KCS-R23-CAND-030",
+    "instance_key": "KCS-R23-CAND-030:deterministic-pdf-path-reopen",
+    "affected_locations": [
+      {
+        "label": "entrypoint_and_closest_control",
+        "path": "crates/kcs-cli/src/main.rs",
+        "lines": "9077-9109"
+      },
+      {
+        "label": "root_control",
+        "path": "crates/kcs-adapter/src/deterministic.rs",
+        "lines": "225-249"
+      },
+      {
+        "label": "sink",
+        "path": "crates/kcs-cli/src/main.rs",
+        "lines": "9364-9388"
+      }
+    ],
+    "attack_steps": [
+      "The operator indexes a selected-scope PDF version A, and run_index_pipeline reads and verifies H(A) at crates/kcs-cli/src/main.rs:9077-9103.",
+      "A lower-trust concurrent pathname writer replaces A after that read with PDF B, and may replace it again between later page reads.",
+      "prepare_units and the deterministic adapter independently reopen the pathname at crates/kcs-pipeline/src/prepare.rs:72-103 and crates/kcs-adapter/src/deterministic.rs:225-249 without comparing reopened bytes to the earlier raw hash.",
+      "KCS persists B-derived or mixed-version normalized PDF units under H(A) at crates/kcs-cli/src/main.rs:9364-9388."
+    ],
+    "assumptions": [
+      "A lower-trust contributor can concurrently replace a selected-scope PDF pathname.",
+      "The operator runs ordinary deterministic indexing.",
+      "One or more replacements land after the verified read and before or between later PDF reads."
+    ],
+    "context": "This is the PDF instance of a real normalization workflow. It crosses the untrusted-file-to-authoritative-provenance boundary, but validation proves only scope-local normalized/search integrity and not arbitrary-file disclosure or online upload.",
+    "in_scope": true,
+    "exposure": "No public network surface. Exposure is local CLI indexing of a mutable selected-scope PDF supplied or changed by an in-scope content contributor.",
+    "identity": "The invoking OS user reads the working file and writes the scope-local authoritative store; no service account, credential, or remote identity participates in the validated path.",
+    "cross_boundary": "Verified: later PDF bytes cross into trusted normalized persistence while bound to the earlier PDF's raw identity; repeated reopens can also mix versions within one normalized result.",
+    "vector": "none",
+    "preconditions": [
+      "Concurrent write/rename authority in the selected root.",
+      "Operator deterministic indexing of the PDF.",
+      "Favorable scheduling after the first verified read."
+    ],
+    "attacker_control": "yes — the contributor controls replacement PDF bytes and timing; stable mixed-page output was not dynamically demonstrated.",
+    "category": "CWE-367-style pathname TOCTOU causing PDF normalization identity misbinding",
+    "mitigations": [
+      "The initial current-buffer hash check rejects replacements occurring before it.",
+      "Symlinks observed during initial scan enumeration are rejected.",
+      "The proved impact is confined to normalized/search evidence integrity in one scope.",
+      "A stable re-index can rebuild affected derived state."
+    ],
+    "auth_scope": "internal-only",
+    "impact_surface": "data",
+    "target_reach": "One PDF's normalized units and search/evidence provenance in one selected scope.",
+    "secrets_references": [],
+    "counterevidence": [
+      "The initial raw-hash comparison closes pre-read replacements.",
+      "No barrier-controlled replacement proved practical reliability, mixed-page output, outside-file disclosure, or a network send.",
+      "Initial symlink filtering reduces but does not bind later pathname opens."
+    ],
+    "blindspots": [
+      "Race success rate and stable mixed-version output are unmeasured.",
+      "Validation did not establish a broader downstream compromise beyond the affected scope's derived state."
+    ],
+    "controls": [
+      "initial scan/type and symlink filtering",
+      "current-buffer raw-hash comparison",
+      "normalized response/persistence shape checks",
+      "re-index recovery"
+    ],
+    "confidence": "medium",
+    "impact": "medium",
+    "likelihood": "medium",
+    "final_policy": "reportable",
+    "final_severity": "low",
+    "priority": "P3",
+    "rationale": "The trusted provenance misbinding is a meaningful in-scope boundary regression, so local/internal exposure alone does not suppress it. Impact is medium because the demonstrated result is bounded, recoverable integrity loss in one scope. Likelihood is medium because a lower-trust writer and favorable timing are needed and no controlled race was run. The matrix yields Low/P3."
+  },
+  {
+    "candidate_id": "KCS-R23-CAND-031",
+    "title": "Prepare-stage reopen can poison prepared CAS identity",
+    "ledger_row_id": "KCS-R23-CAND-031",
+    "instance_key": "KCS-R23-CAND-031:prepare-cas-identity",
+    "affected_locations": [
+      {
+        "label": "entrypoint_and_closest_control",
+        "path": "crates/kcs-cli/src/main.rs",
+        "lines": "9077-9118"
+      },
+      {
+        "label": "root_control",
+        "path": "crates/kcs-pipeline/src/prepare.rs",
+        "lines": "72-103"
+      },
+      {
+        "label": "sink",
+        "path": "crates/kcs-cli/src/main.rs",
+        "lines": "9505-9541"
+      }
+    ],
+    "attack_steps": [
+      "run_index_pipeline reads selected-scope file version A, computes its raw hash, and verifies it against scan state at crates/kcs-cli/src/main.rs:9077-9103.",
+      "A lower-trust contributor replaces the pathname with version B before prepare_units reopens it at crates/kcs-pipeline/src/prepare.rs:90.",
+      "prepare_units derives prepared_hash values from B but does not consume or compare its raw_hash field, while write_prepared_objects receives the retained A buffer.",
+      "write_prepared_objects publishes A bytes at paths named by H(B) at crates/kcs-cli/src/main.rs:9505-9541, creating a persistent prepared-CAS identity mismatch."
+    ],
+    "assumptions": [
+      "A lower-trust selected-root contributor can replace the pathname concurrently.",
+      "The operator runs indexing and the replacement lands between the first verified read and prepare_units.",
+      "The mismatched object path does not already contain a verified correct object."
+    ],
+    "context": "The prepare and CAS publication path is part of ordinary indexing. The issue crosses from lower-trust mutable content into an authoritative content-addressed object namespace, but the proven outcome is recoverable scope-local integrity loss rather than confidentiality or code execution.",
+    "in_scope": true,
+    "exposure": "Local CLI only, reached by indexing a mutable selected-scope file. There is no listener, ingress, or remote request surface.",
+    "identity": "The invoking OS user owns the selected-scope .kcs store; no network or service identity is involved.",
+    "cross_boundary": "Verified: a lower-trust pathname replacement causes bytes from A to enter trusted prepared CAS storage under a name derived from B, breaking the content/name integrity boundary.",
+    "vector": "none",
+    "preconditions": [
+      "Concurrent write/rename authority in the selected root.",
+      "Operator indexing.",
+      "Favorable scheduling between initial verification and prepare-stage reopen."
+    ],
+    "attacker_control": "yes — the contributor controls B and replacement timing; the old A buffer used for publication is selected by the earlier read.",
+    "category": "CWE-367-style pathname TOCTOU causing content-addressed prepared-object identity corruption",
+    "mitigations": [
+      "The initial scan/current-buffer hash comparison rejects earlier replacements.",
+      "Temporary-file, fsync, and rename publication protects crash atomicity.",
+      "The effect is limited to prepared/index integrity and processing reliability in the affected scope.",
+      "A controlled rebuild can recover affected derived objects."
+    ],
+    "auth_scope": "internal-only",
+    "impact_surface": "data",
+    "target_reach": "Prepared object(s) for one raced file in one selected scope, with downstream consumers potentially observing hash/name disagreement.",
+    "secrets_references": [],
+    "counterevidence": [
+      "Atomic publication prevents partial visibility but does not validate content/name agreement.",
+      "The pre-prepare hash comparison closes replacements before the first read.",
+      "No controlled replacement or demonstrated high-impact downstream reliance was run."
+    ],
+    "blindspots": [
+      "Race reliability and exact downstream failure modes are unmeasured.",
+      "No confidentiality, outside-scope write, or code-execution consequence was established."
+    ],
+    "controls": [
+      "initial raw-hash comparison",
+      "atomic prepared-object publication",
+      "existing path/shape construction",
+      "scope rebuild recovery"
+    ],
+    "confidence": "medium",
+    "impact": "medium",
+    "likelihood": "medium",
+    "final_policy": "reportable",
+    "final_severity": "low",
+    "priority": "P3",
+    "rationale": "This is an explicit content-identity trust-boundary regression in a real product path, so the internal CLI surface is not dispositive. The proved corruption is bounded and recoverable, giving medium impact; the unmeasured post-check race gives medium likelihood. The mechanical matrix maps that pair to Low/P3."
+  },
+  {
+    "candidate_id": "KCS-R23-CAND-032",
+    "title": "scan hashing allocates the full file before the input-size gate",
+    "ledger_row_id": "KCS-R23-CAND-032",
+    "instance_key": "KCS-R23-CAND-032",
+    "affected_locations": [
+      {
+        "label": "normal index enables raw hashing",
+        "path": "crates/kcs-cli/src/main.rs",
+        "lines": "558-584"
+      },
+      {
+        "label": "metadata length then whole-file allocation",
+        "path": "crates/kcs-pipeline/src/scan.rs",
+        "lines": "90-159"
+      },
+      {
+        "label": "late adapter-only input gate",
+        "path": "crates/kcs-cli/src/main.rs",
+        "lines": "9047-9070"
+      },
+      {
+        "label": "configured/default cap",
+        "path": "crates/kcs-cli/src/main.rs",
+        "lines": "4425-4444"
+      }
+    ],
+    "attack_steps": [
+      "An in-scope content contributor places an included oversized or sparse regular file as a direct child of a selected scope.",
+      "The operator runs normal non-preview indexing, which calls build_scan_preview with include_raw_hashes=true.",
+      "The scanner already knows the logical length but calls std::fs::read on the whole file at crates/kcs-pipeline/src/scan.rs:122-149 before consulting the configured adapter cap.",
+      "The process incurs O(n) allocation, I/O, and hashing while holding the scope store lock; the later cap at crates/kcs-cli/src/main.rs:9047-9070 only prevents downstream normalization/send."
+    ],
+    "assumptions": [
+      "The contributor can add a readable, included regular direct-child file to a scope the operator indexes.",
+      "The file is not ignored, secret-excluded, a symlink, or a directory.",
+      "The operator runs ordinary non-preview indexing."
+    ],
+    "context": "This deterministic normal-index path lets a lower-trust file consume process memory and I/O before a known limit while the store lock is held. Impact is local and recoverable but can deny indexing for the scope and stress the host.",
+    "in_scope": true,
+    "exposure": "No network exposure. The attack surface is an operator-selected local/shared scope containing lower-trust direct-child content.",
+    "identity": "The KCS process runs as the invoking OS user and consumes that user's memory, I/O bandwidth, and scope lock; no service account or credential is involved.",
+    "cross_boundary": "Verified: attacker-controlled file length crosses the scope-filesystem/parser boundary into unbounded whole-file allocation before the configured policy control.",
+    "vector": "none",
+    "preconditions": [
+      "Ability to supply an included regular file in the selected root.",
+      "Operator invocation of normal indexing rather than --preview.",
+      "Sufficient filesystem capacity or sparse-file support to present a large logical size."
+    ],
+    "attacker_control": "yes — the contributor directly controls file size and contents; allocation is deterministic and requires no race.",
+    "category": "CWE-400 uncontrolled resource consumption / whole-file allocation before size enforcement",
+    "mitigations": [
+      "Directories, symlinks, ignored entries, .kcs state, XDG state, and Tier-A secret exclusions do not enter this read.",
+      "--preview disables raw hashing.",
+      "The later default/configured 100 MiB adapter cap prevents oversized normalization and network submission.",
+      "The operator can remove the file and retry."
+    ],
+    "auth_scope": "internal-only",
+    "impact_surface": "runtime",
+    "target_reach": "One indexing process and the selected scope's store-lock availability per invocation; host memory and I/O may also be pressured.",
+    "secrets_references": [],
+    "counterevidence": [
+      "The later cap correctly prevents adapter work and egress, so confidentiality and billed-network impact do not follow.",
+      "The failure is recoverable by removing the file and retrying.",
+      "No deliberate high-memory exhaustion run measured peak RSS."
+    ],
+    "blindspots": [
+      "Actual process termination thresholds and host-wide impact depend on allocator, OS, and available memory.",
+      "Sparse-file behavior varies by filesystem, although the source-order allocation proof does not depend on sparseness."
+    ],
+    "controls": [
+      "direct-child/type/ignore filtering",
+      "preview-mode hash suppression",
+      "late effective input-size gate",
+      "operator recovery by removing the file"
+    ],
+    "confidence": "high",
+    "impact": "medium",
+    "likelihood": "high",
+    "final_policy": "reportable",
+    "final_severity": "medium",
+    "priority": "P2",
+    "rationale": "The lower-trust direct-child file is an explicit threat-model surface and normal indexing deterministically reaches the pre-cap whole-file allocation, so hard suppression does not apply. Impact is medium because availability loss is substantial but local and recoverable; likelihood is high because no race, privilege, or unusual command is required once the operator indexes the supplied scope. The matrix maps medium impact plus high likelihood to Medium/P2."
+  },
+  {
+    "candidate_id": "KCS-R23-CAND-033",
+    "title": "Deferred OCR tasks read replacement files before enforcing the cap",
+    "ledger_row_id": "KCS-R23-CAND-033",
+    "instance_key": "KCS-R23-CAND-033:deferred-ocr-precap-read",
+    "affected_locations": [
+      {
+        "label": "entrypoint",
+        "path": "crates/kcs-cli/src/main.rs",
+        "lines": "5974-6081"
+      },
+      {
+        "label": "root_control_and_sink",
+        "path": "crates/kcs-cli/src/main.rs",
+        "lines": "6533-6551"
+      },
+      {
+        "label": "cap_definition",
+        "path": "crates/kcs-cli/src/main.rs",
+        "lines": "4425-4445"
+      }
+    ],
+    "attack_steps": [
+      "A legitimate small OCR file first produces a persisted Pending online-markdownize task.",
+      "Before the operator resumes or retries the task, a lower-trust selected-scope contributor replaces the path with a much larger or sparse regular file; no same-call race is needed.",
+      "classify_online_markdownize_precondition reads the entire current file at crates/kcs-cli/src/main.rs:6537-6541 before comparing its length to effective_max_input_bytes at 6542-6551.",
+      "KCS incurs O(n) allocation and I/O before retiring the task; pre-charge ordering prevents the oversized replacement from reaching the adapter or budget reservation."
+    ],
+    "assumptions": [
+      "An eligible Pending OCR task exists for a selected-scope path.",
+      "A lower-trust contributor can replace that path between enqueue and a later resume/retry.",
+      "The operator invokes the deferred-task processing command."
+    ],
+    "context": "This is a deterministic lifecycle/resource path in the shipped CLI. The attack crosses from mutable scope content into process memory before a known cap, but the oversized branch retires before network or billing effects.",
+    "in_scope": true,
+    "exposure": "No listener or public ingress. The relevant surface is a deferred local OCR task whose selected-scope input remains writable by an in-scope contributor.",
+    "identity": "The invoking OS user owns the KCS process, pending task state, memory, and I/O resources; no credential is attached because the oversized branch stops before online execution.",
+    "cross_boundary": "Verified: attacker-controlled replacement-file size crosses the deferred-task input boundary into whole-file allocation before the cap; no external network boundary is crossed for the oversized case.",
+    "vector": "none",
+    "preconditions": [
+      "A queued Pending OCR task for a formerly acceptable file.",
+      "Selected-root write/rename authority between enqueue and resume/retry.",
+      "Operator execution of deferred task processing."
+    ],
+    "attacker_control": "yes — the contributor controls the replacement file and its logical size; after resume the vulnerable allocation order is deterministic.",
+    "category": "CWE-400 uncontrolled resource consumption in deferred task precondition checking",
+    "mitigations": [
+      "Initial indexing enforces the cap before enqueue for the original file.",
+      "Hash mismatch and oversize checks retire the changed task.",
+      "Classification occurs before budget reservation and online execution, preventing a paid send.",
+      "The operator can remove the replacement and recreate/retry work."
+    ],
+    "auth_scope": "internal-only",
+    "impact_surface": "runtime",
+    "target_reach": "One deferred task execution and local process/host resources; no provider or cross-scope data effect is established.",
+    "secrets_references": [],
+    "counterevidence": [
+      "The original file had to pass the input cap before the task existed.",
+      "The changed task is retired before charge or network send.",
+      "Peak allocator behavior was not stress-tested, and the operator must later resume or retry the task."
+    ],
+    "blindspots": [
+      "Actual memory-pressure severity depends on host resources and allocator behavior.",
+      "The frequency of long-lived deferred tasks in real deployments is not established."
+    ],
+    "controls": [
+      "initial enqueue-time input cap",
+      "post-read hash and size retirement",
+      "pre-charge/pre-send ordering",
+      "task lifecycle eligibility checks"
+    ],
+    "confidence": "high",
+    "impact": "medium",
+    "likelihood": "medium",
+    "final_policy": "reportable",
+    "final_severity": "low",
+    "priority": "P3",
+    "rationale": "A lower-trust mutable scope file can deterministically trigger substantial pre-cap work in a real deferred-task workflow, so the internal surface does not mandate suppression. Impact is medium because the availability loss may be substantial but remains local/recoverable and stops before billing or egress. Likelihood is medium due to the required prior task and later operator resume/retry. The matrix yields Low/P3."
+  },
+  {
+    "candidate_id": "KCS-R23-CAND-034",
+    "title": "Deterministic PDF handling reparses the whole file once per page",
+    "ledger_row_id": "KCS-R23-CAND-034",
+    "instance_key": "KCS-R23-CAND-034:lexical-page-count-reparse-amplification",
+    "affected_locations": [
+      {
+        "label": "lexical_page_counter",
+        "path": "crates/kcs-adapter/src/deterministic.rs",
+        "lines": "415-437"
+      },
+      {
+        "label": "page_vector_and_unit_expansion",
+        "path": "crates/kcs-pipeline/src/prepare.rs",
+        "lines": "102-170,315-347"
+      },
+      {
+        "label": "per_hint_reparse_sink",
+        "path": "crates/kcs-adapter/src/deterministic.rs",
+        "lines": "151-156,190-249"
+      },
+      {
+        "label": "ordinary_index_entrypoint",
+        "path": "crates/kcs-cli/src/main.rs",
+        "lines": "9047-9118,9229-9304"
+      }
+    ],
+    "attack_steps": [
+      "An in-scope content contributor supplies a small accepted PDF with one readable text layer and many false /Page-prefixed markers such as /PageX.",
+      "pdf_page_count_in_text counts those lexical prefixes without structural validation or a page ceiling at crates/kcs-adapter/src/deterministic.rs:419-437.",
+      "Preparation pads to P pages and allocates/hashes P PreparedUnits, then deterministic markdownization iterates every hint.",
+      "Each hint rereads and reparses the entire S-byte PDF at crates/kcs-adapter/src/deterministic.rs:151-156 and 190-249, producing at least O(P*S + P^2) work and potentially blocking ordinary indexing."
+    ],
+    "assumptions": [
+      "The contributor can place a crafted, readable regular PDF in a scope the operator indexes.",
+      "The PDF remains within the raw byte-size cap and contains enough readable text to use deterministic rather than wholly-scanned OCR handling.",
+      "The contributor chooses a large lexical marker count within the admitted file bytes."
+    ],
+    "context": "The malformed-document parser path is part of normal offline indexing and requires no network, privilege, persisted-state write, or timing race. A tiny bounded control already demonstrated 64 derived units and 65 whole-file extractions from a 490-byte file.",
+    "in_scope": true,
+    "exposure": "Local CLI indexing of an untrusted direct-child PDF; no daemon or remote endpoint is exposed.",
+    "identity": "The KCS process runs as the invoking OS user and consumes local CPU, heap, filesystem I/O, and the indexing/store operation; no credentials are involved.",
+    "cross_boundary": "Verified: attacker-controlled PDF tokens cross the untrusted-parser boundary into unbounded logical page/unit cardinality and repeated local work.",
+    "vector": "none",
+    "preconditions": [
+      "Supply of an accepted text-bearing PDF within max_input_bytes.",
+      "Operator ordinary indexing of the selected scope."
+    ],
+    "attacker_control": "yes — the contributor controls S and the false lexical page count P; the repeated parse relation is deterministic.",
+    "category": "CWE-400 algorithmic resource amplification through unbounded lexical page count and repeated parsing",
+    "mitigations": [
+      "The default/configured 100 MiB raw input cap bounds S.",
+      "Wholly nontext PDFs route to OCR rather than this deterministic page loop.",
+      "The effect is local availability degradation, not code execution, credential access, or external send.",
+      "The operator can remove the crafted document and retry."
+    ],
+    "auth_scope": "internal-only",
+    "impact_surface": "runtime",
+    "target_reach": "One indexing process/scope per crafted PDF, with CPU, memory, I/O, and store-operation availability effects.",
+    "secrets_references": [],
+    "counterevidence": [
+      "max_input_bytes bounds raw bytes but not derived pages, units, repeated parses, or LCS cells.",
+      "The document must be adversarial/malformed and text-bearing.",
+      "No unsafe stress-size run established host-wide exhaustion; the bounded 64-vs-1 differential proves the growth mechanism."
+    ],
+    "blindspots": [
+      "The largest practical P and wall-clock/RSS impact across supported PDF inputs were not stress-tested.",
+      "Filesystem cache and parser implementation details affect constants but not the asymptotic repeated work."
+    ],
+    "controls": [
+      "raw max_input_bytes gate",
+      "OCR routing for wholly nontext PDFs",
+      "regular-file/direct-child filtering",
+      "operator recovery by removing the input"
+    ],
+    "confidence": "high",
+    "impact": "medium",
+    "likelihood": "high",
+    "final_policy": "reportable",
+    "final_severity": "medium",
+    "priority": "P2",
+    "rationale": "The attack needs only a crafted in-scope document and ordinary indexing, and bounded target-runtime evidence verifies the amplification, so no hard suppression applies. Impact is medium because the result is substantial but local and recoverable availability loss. Likelihood is high because the path is deterministic and needs no race or privileged state access. The matrix maps medium impact plus high likelihood to Medium/P2."
+  },
+  {
+    "candidate_id": "KCS-R23-CAND-035",
+    "title": "Stale-lock recovery executes ps through attacker-influenced PATH",
+    "ledger_row_id": "KCS-R23-CAND-035",
+    "instance_key": "KCS-R23-CAND-035:path-resolved-liveness-helper",
+    "affected_locations": [
+      {
+        "label": "entrypoint",
+        "path": "crates/kcs-core/src/scope.rs",
+        "lines": "1810-1827"
+      },
+      {
+        "label": "trigger_and_secondary_sink",
+        "path": "crates/kcs-core/src/scope.rs",
+        "lines": "1880-1897"
+      },
+      {
+        "label": "root_control_and_process_sink",
+        "path": "crates/kcs-core/src/scope.rs",
+        "lines": "1915-1931"
+      }
+    ],
+    "attack_steps": [
+      "A hypothetical lower-trust launcher supplies a PATH that resolves the bare name ps to an attacker-chosen executable.",
+      "A supplied, stale, or contended StoreLock causes StoreLock::acquire_path to invoke reclaim_stale_lock at crates/kcs-core/src/scope.rs:1810-1897.",
+      "process_is_alive calls Command::new(\"ps\").status() with fixed PID arguments at crates/kcs-core/src/scope.rs:1915-1931.",
+      "If the unproven launcher condition exists, the PATH-selected program would execute with the invoking KCS process's authority and its status could influence lock reclamation."
+    ],
+    "assumptions": [
+      "A lower-trust actor can control PATH or a searched directory for a KCS launch while lacking equivalent direct code-execution authority.",
+      "The same invocation reaches a non-self liveness probe through a contended or stale lock.",
+      "KCS runs with a meaningful privilege/authority delta over the actor controlling PATH."
+    ],
+    "context": "The process-execution sink is real, but saved validation identifies no shipped service wrapper, scheduler, delegated launcher, or ordinary product deployment that grants lower trust control of PATH. Normal interactive PATH is operator-controlled under the threat model.",
+    "in_scope": true,
+    "exposure": "No network or public ingress. The only asserted surface is ambient local launch configuration plus a contended lock; the required lower-trust launch context is not evidenced.",
+    "identity": "An alternate helper would run as the invoking OS user. A privilege delta exists only if an unproven lower-trust launcher controls PATH for a more-authoritative KCS process.",
+    "cross_boundary": "Not verified: source-to-exec mechanics are exact, but repository evidence does not establish a realistic lower-trust principal controlling executable resolution across a meaningful authority boundary.",
+    "vector": "none",
+    "preconditions": [
+      "Control of the KCS launch PATH or a searched executable directory.",
+      "A non-self liveness probe triggered by an existing lock.",
+      "A KCS process authority greater than the PATH-controlling actor's existing authority."
+    ],
+    "attacker_control": "plausible only under an unevidenced delegated-launch deployment; no default lower-trust PATH control was demonstrated.",
+    "category": "CWE-426 untrusted search path for an external helper",
+    "mitigations": [
+      "Normal interactive launches use an operator-controlled system PATH.",
+      "Fixed numeric arguments prevent argument injection.",
+      "The current PID avoids external lookup.",
+      "Spawn failure is treated as alive, so missing helper resolution fails closed."
+    ],
+    "auth_scope": "admin-only",
+    "impact_surface": "runtime",
+    "target_reach": "Potentially the invoking user's process/account if all preconditions held; no concrete product deployment or victim population is established.",
+    "secrets_references": [],
+    "counterevidence": [
+      "The threat model treats the normal local launcher environment as operator-controlled.",
+      "A safe system-PATH control resolved ps to /bin/ps.",
+      "No alternate program was executed and no shipped lower-trust launcher was identified.",
+      "Without a privilege delta, control of PATH that causes arbitrary program execution grants no meaningful new authority."
+    ],
+    "blindspots": [
+      "External deployments could wrap KCS in a service or automation that delegates PATH, but none is evidenced in the allowed inputs.",
+      "Platform-specific executable lookup behavior outside the observed system PATH was not tested."
+    ],
+    "controls": [
+      "operator-controlled normal launcher environment",
+      "fixed ps arguments",
+      "self-PID fast path",
+      "fail-closed spawn-error handling"
+    ],
+    "confidence": "medium",
+    "impact": "high",
+    "likelihood": "ignore",
+    "final_policy": "ignore",
+    "final_severity": "none",
+    "priority": null,
+    "rationale": "Hard suppression applies before severity calibration. The candidate depends on operator/deployment-controlled ambient PATH plus an unevidenced delegated privilege delta; saved evidence does not establish a realistic lower-privileged in-scope attacker path in the actual product. Although successful arbitrary helper execution would have high impact, likelihood is ignore under the policy, and the high-impact/ignore-likelihood matrix result remains ignored with no priority."
+  },
+  {
+    "candidate_id": "KCS-R23-CAND-036",
+    "title": "Persisted DAG semantics are not revalidated, enabling poisoned fields and path escape",
+    "ledger_row_id": "KCS-R23-CAND-036",
+    "instance_key": "KCS-R23-CAND-036:persisted-tree-normalize-path",
+    "affected_locations": [
+      {
+        "label": "intended_semantic_control",
+        "path": "crates/kcs-core/src/dag.rs",
+        "lines": "40-79"
+      },
+      {
+        "label": "root_control",
+        "path": "crates/kcs-core/src/scope.rs",
+        "lines": "742-755"
+      },
+      {
+        "label": "path_constructor",
+        "path": "crates/kcs-pipeline/src/markdownize.rs",
+        "lines": "311-329"
+      },
+      {
+        "label": "filesystem_sinks",
+        "path": "crates/kcs-cli/src/main.rs",
+        "lines": "5453-5543"
+      }
+    ],
+    "attack_steps": [
+      "A lower-trust archive contributor supplies a copied or preseeded .kcs store whose CAS-valid HEAD tree contains a normalize.tool_profile_hash with path separators or parent components.",
+      "Repository::read_commit/read_tree verifies object hashes and JSON shape but does not rerun CommitObject/TreeEntry semantic validation at crates/kcs-core/src/scope.rs:742-755.",
+      "The operator adopts the archive and invokes the documented recovery workflow reindex --force --yes, which passes the poisoned value to normalized_instance_dir.",
+      "Path construction embeds the value verbatim, escaping the normalized-units base; copy_normalized_instance_gen then creates directories, overwrites fixed KCS-shaped files, or recursively removes the escaped .gN destination on error at crates/kcs-cli/src/main.rs:5453-5543."
+    ],
+    "assumptions": [
+      "The victim opens a copied, shared, synced, or preseeded store supplied by a lower-trust contributor.",
+      "The contributor can construct content-hash-correct commit/tree objects with semantically invalid path-bearing fields.",
+      "The operator intentionally runs reindex --force --yes on the adopted archive.",
+      "The escaped destination is writable by the invoking OS user."
+    ],
+    "context": "Adoption of lower-trust copied/preseeded stores is explicitly in scope and distinct from arbitrary same-user mutation of a private live store. The explicit reindex confirmation is meaningful interaction but is not consent to filesystem effects outside the selected scope.",
+    "in_scope": true,
+    "exposure": "No network surface. Exposure is an operator-invoked local archive adoption and forced reindex workflow consuming attacker-supplied persisted state.",
+    "identity": "Filesystem operations run with the invoking OS user's permissions. The archive contributor need not already possess that user's arbitrary live-filesystem write authority.",
+    "cross_boundary": "Verified: semantically poisoned but CAS-valid adopted state crosses the trusted-store reader boundary and directs create/write/recursive-remove operations outside .kcs and the selected scope.",
+    "vector": "none",
+    "preconditions": [
+      "Adoption of a lower-trust copied/preseeded .kcs store.",
+      "A CAS-valid malicious HEAD commit/tree containing parent/path components in tool_profile_hash.",
+      "Operator reindex --force --yes interaction.",
+      "A user-writable escaped destination compatible with the generated .gN suffix and fixed filenames."
+    ],
+    "attacker_control": "yes — the archive contributor controls the persisted tool_profile_hash and can compute matching CAS hashes; exact target shape is constrained by fanout, .gN suffixes, and fixed manifest/unit names.",
+    "category": "CWE-22 path traversal from semantically unvalidated persisted DAG state",
+    "mitigations": [
+      "Freshly constructed trees call TreeEntry::validate.",
+      "ObjectStore::read_by_hash verifies requested hashes and object bytes.",
+      "reindex requires explicit --force and --yes.",
+      "Generated .gN suffixes and fixed KCS-shaped filenames constrain exact write/removal targets."
+    ],
+    "auth_scope": "internal-only",
+    "impact_surface": "data",
+    "target_reach": "User-writable filesystem paths reachable through the poisoned path component during one adopted-store reindex; effects include directory creation, fixed-name replacement, or recursive removal of the constructed destination.",
+    "secrets_references": [],
+    "counterevidence": [
+      "CAS hash verification defeats accidental corruption but not a contributor who intentionally hashes malicious semantic content.",
+      "Writer-side TreeEntry validation protects fresh local stores but is not rerun on read.",
+      "The operator must explicitly run reindex --force --yes.",
+      "Suffix and filename constraints prevent a claim of completely unconstrained arbitrary-file overwrite."
+    ],
+    "blindspots": [
+      "No full two-root runtime reproduction was performed, although lexical containment and direct filesystem sinks are statically complete.",
+      "The exact set of useful external targets depends on path normalization, permissions, existing directory layout, and generated suffixes."
+    ],
+    "controls": [
+      "writer-side TreeEntry semantic validation",
+      "CAS kind/hash/content verification",
+      "forced-reindex confirmation",
+      "fixed destination naming and atomic file writes"
+    ],
+    "confidence": "high",
+    "impact": "high",
+    "likelihood": "medium",
+    "final_policy": "reportable",
+    "final_severity": "medium",
+    "priority": "P2",
+    "rationale": "This is a realistic in-scope supplied-store confused-deputy path, not equivalent same-user private-store tampering, and it crosses scope containment in a real recovery workflow. Impact is high because the KCS user's authority can be redirected to create, replace, or recursively remove data outside the selected store. Likelihood is medium because archive adoption, a crafted CAS-valid tree, explicit forced reindex, and a compatible writable target are all required. The matrix mechanically maps high impact plus medium likelihood to Medium/P2."
+  }
+]

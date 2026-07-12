@@ -1,5 +1,6 @@
 //! Prepare stage contracts.
 
+use std::io::Read;
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
@@ -45,6 +46,17 @@ pub struct PrepareStageRequest {
     pub tool_profile_hash: String,
 }
 
+/// Prepare from a caller-verified byte buffer. `input_path` is display/provenance
+/// metadata only and is never reopened by this API.
+#[derive(Debug, Clone, Copy)]
+pub struct PrepareStageBytesRequest<'a> {
+    pub raw_hash: &'a str,
+    pub media_type: &'a str,
+    pub input_path: &'a str,
+    pub tool_profile_hash: &'a str,
+    pub bytes: &'a [u8],
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PrepareStageOutput {
     pub prepared_object_hashes: Vec<String>,
@@ -69,6 +81,11 @@ pub struct UnitReuse {
     pub reason: String,
 }
 
+/// Maximum number of dynamic-programming cells used for exact unit alignment.
+/// At 8 bytes per `usize`, this caps cell storage at about 16 MiB before row
+/// overhead. Larger comparisons take the deterministic full-change fallback.
+pub const MAX_UNIT_LCS_CELLS: usize = 2_000_000;
+
 pub fn prepare_units(request: PrepareStageRequest) -> Result<PrepareStageOutput> {
     // R20-6: the local deterministic adapter only parses text (Markdown / plain text /
     // code) and PDF text layers (docs/07 §7.1). A RECOGNIZED non-text-native binary (image
@@ -81,26 +98,48 @@ pub fn prepare_units(request: PrepareStageRequest) -> Result<PrepareStageOutput>
     let is_text_native = matches!(media_type, "text/markdown" | "text/plain" | "text/x-code");
     let is_pdf = media_type == "application/pdf";
     if !is_text_native && !is_pdf && media_type != "application/octet-stream" {
-        return Ok(PrepareStageOutput {
-            prepared_object_hashes: Vec::new(),
-            prepared_units: Vec::new(),
-            image_object_hashes: Vec::new(),
-        });
+        return Ok(empty_prepare_output());
     }
     let bytes = std::fs::read(&request.input_path).pipeline_io(Path::new(&request.input_path))?;
-    if !is_text_native && !is_pdf && !bytes_are_text(&bytes) {
+    prepare_units_from_bytes(PrepareStageBytesRequest {
+        raw_hash: &request.raw_hash,
+        media_type: &request.media_type,
+        input_path: &request.input_path,
+        tool_profile_hash: &request.tool_profile_hash,
+        bytes: &bytes,
+    })
+}
+
+/// Prepare logical units from exactly the byte buffer whose identity the caller
+/// supplied. This closes path-reopen races between raw hashing and preparation.
+pub fn prepare_units_from_bytes(
+    request: PrepareStageBytesRequest<'_>,
+) -> Result<PrepareStageOutput> {
+    let media_type = request.media_type;
+    let is_text_native = matches!(media_type, "text/markdown" | "text/plain" | "text/x-code");
+    let is_pdf = media_type == "application/pdf";
+    if !is_text_native && !is_pdf && media_type != "application/octet-stream" {
+        return Ok(empty_prepare_output());
+    }
+    let bytes = request.bytes;
+    let prepared_hash = hash_bytes(bytes);
+    if prepared_hash != request.raw_hash {
+        return Err(crate::PipelineError::contract(
+            "KCS-E-PREPARE-IDENTITY-001",
+            format!(
+                "prepare bytes do not match the declared raw hash for {}",
+                request.input_path
+            ),
+        ));
+    }
+    if !is_text_native && !is_pdf && !bytes_are_text(bytes) {
         // Binary octet-stream (a DOCX-as-unknown-ext, a compiled blob): do NOT evidence its
         // raw bytes as text — route to OCR like the other non-text-native media above.
-        return Ok(PrepareStageOutput {
-            prepared_object_hashes: Vec::new(),
-            prepared_units: Vec::new(),
-            image_object_hashes: Vec::new(),
-        });
+        return Ok(empty_prepare_output());
     }
-    let prepared_hash = hash_bytes(&bytes);
-    let unit_type = unit_type_for_media_type(&request.media_type);
+    let unit_type = unit_type_for_media_type(request.media_type);
     let pdf_pages = if request.media_type == "application/pdf" {
-        let pages = pdf_text_pages(&bytes);
+        let pages = pdf_text_pages_bounded(bytes)?;
         // R20-4: `pdf_has_text_layer` and the stream/literal extractors match on raw
         // (undecompressed) bytes, so a scanned PDF's compressed image streams yield garbage
         // "text" (a chance `BT` plus random `(...)` literals). If every recovered page is
@@ -108,11 +147,7 @@ pub fn prepare_units(request: PrepareStageRequest) -> Result<PrepareStageOutput>
         // and route to OCR rather than persisting the garbage as a searchable unit. (An
         // empty `pages` — the honest no-text-layer result — also lands here vacuously.)
         if pages.iter().all(|page| !is_probably_real_text(page)) {
-            return Ok(PrepareStageOutput {
-                prepared_object_hashes: Vec::new(),
-                prepared_units: Vec::new(),
-                image_object_hashes: Vec::new(),
-            });
+            return Ok(empty_prepare_output());
         }
         // R21-5: for a MIXED PDF (a real text page + a scanned image page) the per-page
         // suppression of a scanned page's garbage is applied in the deterministic
@@ -139,7 +174,7 @@ pub fn prepare_units(request: PrepareStageRequest) -> Result<PrepareStageOutput>
         let page_bytes = pdf_pages
             .get(index)
             .map(|page| page.as_bytes())
-            .unwrap_or(bytes.as_slice());
+            .unwrap_or(bytes);
         let unit_prepared_hash = if unit_type == UnitType::Page {
             hash_bytes(page_bytes)
         } else if unit_count == 1 {
@@ -150,7 +185,7 @@ pub fn prepare_units(request: PrepareStageRequest) -> Result<PrepareStageOutput>
         let fingerprint = if unit_type == UnitType::Page {
             fingerprint_for_bytes(page_bytes, page_bytes)
         } else {
-            fingerprint_for_bytes(&bytes, unit_prepared_hash.as_bytes())
+            fingerprint_for_bytes(bytes, unit_prepared_hash.as_bytes())
         };
         prepared_units.push(PreparedUnit {
             order: index as u64,
@@ -158,7 +193,7 @@ pub fn prepare_units(request: PrepareStageRequest) -> Result<PrepareStageOutput>
             unit_type,
             prepared_hash: unit_prepared_hash,
             fingerprint,
-            mime: Some(request.media_type.clone()),
+            mime: Some(request.media_type.to_owned()),
             page_number: (unit_type == UnitType::Page).then_some(index as u64 + 1),
         });
     }
@@ -170,6 +205,14 @@ pub fn prepare_units(request: PrepareStageRequest) -> Result<PrepareStageOutput>
         prepared_units,
         image_object_hashes: Vec::new(),
     })
+}
+
+fn empty_prepare_output() -> PrepareStageOutput {
+    PrepareStageOutput {
+        prepared_object_hashes: Vec::new(),
+        prepared_units: Vec::new(),
+        image_object_hashes: Vec::new(),
+    }
 }
 
 #[must_use]
@@ -207,6 +250,9 @@ pub fn change_rate(changed: usize, added: usize, removed: usize, new_unit_count:
 
 #[must_use]
 pub fn map_units(old_units: &[PreparedUnit], new_units: &[PreparedUnit]) -> UnitMapping {
+    if !unit_mapping_within_budget(old_units.len(), new_units.len()) {
+        return full_changed_mapping(old_units, new_units);
+    }
     let pairs = lcs_fingerprint_pairs(old_units, new_units);
     let mut unchanged = Vec::new();
     let mut changed_unit_keys = Vec::new();
@@ -254,9 +300,56 @@ pub fn map_units(old_units: &[PreparedUnit], new_units: &[PreparedUnit]) -> Unit
 }
 
 #[must_use]
+pub fn unit_mapping_within_budget(old_len: usize, new_len: usize) -> bool {
+    old_len
+        .checked_add(1)
+        .and_then(|old| new_len.checked_add(1).and_then(|new| old.checked_mul(new)))
+        .is_some_and(|cells| cells <= MAX_UNIT_LCS_CELLS)
+}
+
+fn full_changed_mapping(old_units: &[PreparedUnit], new_units: &[PreparedUnit]) -> UnitMapping {
+    let mut changed_unit_keys = Vec::new();
+    let mut added_unit_keys = Vec::new();
+    let mut removed_unit_keys = Vec::new();
+    align_changed_interval(
+        old_units,
+        new_units,
+        &mut changed_unit_keys,
+        &mut added_unit_keys,
+        &mut removed_unit_keys,
+    );
+    UnitMapping {
+        change_rate: change_rate(
+            changed_unit_keys.len(),
+            added_unit_keys.len(),
+            removed_unit_keys.len(),
+            new_units.len(),
+        ),
+        unchanged: Vec::new(),
+        changed_unit_keys,
+        added_unit_keys,
+        removed_unit_keys,
+    }
+}
+
+#[must_use]
 pub fn hash_bytes(bytes: &[u8]) -> String {
     let digest = Sha256::digest(bytes);
     format!("sha256:{}", lower_hex(&digest))
+}
+
+/// Compute the same content hash as [`hash_bytes`] with fixed working memory.
+pub fn hash_reader<R: Read>(mut reader: R) -> std::io::Result<String> {
+    let mut digest = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let read = reader.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        digest.update(&buffer[..read]);
+    }
+    Ok(format!("sha256:{}", lower_hex(&digest.finalize())))
 }
 
 fn unit_type_for_media_type(media_type: &str) -> UnitType {
@@ -313,56 +406,23 @@ fn bytes_are_text(bytes: &[u8]) -> bool {
 
 #[must_use]
 pub fn pdf_text_pages(bytes: &[u8]) -> Vec<String> {
+    // Compatibility for callers that cannot surface a prepare error. The primary
+    // prepare path uses the fallible API below and reports an oversized PDF.
+    pdf_text_pages_bounded(bytes).unwrap_or_default()
+}
+
+pub fn pdf_text_pages_bounded(bytes: &[u8]) -> Result<Vec<String>> {
     if !bytes.starts_with(b"%PDF") {
-        return vec![String::from_utf8_lossy(bytes).into_owned()];
+        return Ok(vec![String::from_utf8_lossy(bytes).into_owned()]);
     }
     if !pdf_has_text_layer(bytes) {
-        return Vec::new();
+        return Ok(Vec::new());
     }
-    let page_count =
-        kcs_adapter::deterministic::pdf_page_count_in_text(&String::from_utf8_lossy(bytes)).max(1);
-    let stream_pages = kcs_adapter::deterministic::pdf_stream_text_pages(bytes);
-    if !stream_pages.is_empty() {
-        return normalize_pdf_page_count(stream_pages, page_count);
-    }
-    let strings = pdf_literal_strings(bytes);
-    if strings.is_empty() {
-        return vec![pdf_text_fallback(bytes)];
-    }
-    if strings.len() == page_count {
-        return strings;
-    }
-    let mut pages = strings;
-    while pages.len() < page_count {
-        pages.push(String::new());
-    }
-    pages.truncate(page_count);
-    pages
-}
-
-fn normalize_pdf_page_count(mut pages: Vec<String>, page_count: usize) -> Vec<String> {
-    while pages.len() < page_count {
-        pages.push(String::new());
-    }
-    pages.truncate(page_count);
-    pages
-}
-
-// The PDF stream/literal-string extraction helpers live in `kcs-adapter`
-// (`kcs_adapter::deterministic`), the lower crate that this crate already
-// depends on. They were previously duplicated here; unifying on the adapter
-// copy keeps the endstream-boundary logic in one place (Step2c I3).
-fn pdf_literal_strings(bytes: &[u8]) -> Vec<String> {
-    let text = String::from_utf8_lossy(bytes);
-    kcs_adapter::deterministic::pdf_literal_strings_in_text(&text)
-}
-
-fn pdf_text_fallback(bytes: &[u8]) -> String {
-    String::from_utf8_lossy(bytes)
-        .lines()
-        .filter(|line| !line.trim_start().starts_with('%'))
-        .collect::<Vec<_>>()
-        .join("\n")
+    kcs_adapter::deterministic::extract_pdf_text_pages_bounded(
+        bytes,
+        kcs_adapter::deterministic::MAX_DETERMINISTIC_PDF_PAGES,
+    )
+    .map_err(|err| crate::PipelineError::contract("KCS-E-PREPARE-PDF-LIMIT-001", err.to_string()))
 }
 
 fn align_changed_interval(
@@ -430,6 +490,22 @@ fn lower_hex(bytes: &[u8]) -> String {
 mod tests {
     use super::*;
 
+    fn prepared_page(order: u64, key: &str, fp: &str) -> PreparedUnit {
+        PreparedUnit {
+            order,
+            unit_key: key.to_owned(),
+            unit_type: UnitType::Page,
+            prepared_hash: format!("sha256:{fp:0<64}"),
+            fingerprint: UnitFingerprint {
+                perceptual_hash: fp.to_owned(),
+                text_hash: fp.to_owned(),
+                visual_hash: fp.to_owned(),
+            },
+            mime: None,
+            page_number: Some(order + 1),
+        }
+    }
+
     #[test]
     fn placeholder_unit_type_uses_snake_case() {
         let value = serde_json::to_value(UnitType::HeadingSection).expect("serialize unit type");
@@ -456,28 +532,111 @@ mod tests {
 
     #[test]
     fn mapping_uses_fingerprint_lcs_for_insertions() {
-        let mk = |order, key: &str, fp: &str| PreparedUnit {
-            order,
-            unit_key: key.to_owned(),
-            unit_type: UnitType::Page,
-            prepared_hash: format!("sha256:{fp:0<64}"),
-            fingerprint: UnitFingerprint {
-                perceptual_hash: fp.to_owned(),
-                text_hash: fp.to_owned(),
-                visual_hash: fp.to_owned(),
-            },
-            mime: None,
-            page_number: Some(order + 1),
-        };
         let old = (0..10)
-            .map(|i| mk(i, &format!("page:{}", i + 1), &format!("fp{i}")))
+            .map(|i| prepared_page(i, &format!("page:{}", i + 1), &format!("fp{i}")))
             .collect::<Vec<_>>();
-        let mut new = vec![mk(0, "page:1", "inserted")];
-        new.extend((0..10).map(|i| mk(i + 1, &format!("page:{}", i + 2), &format!("fp{i}"))));
+        let mut new = vec![prepared_page(0, "page:1", "inserted")];
+        new.extend(
+            (0..10).map(|i| prepared_page(i + 1, &format!("page:{}", i + 2), &format!("fp{i}"))),
+        );
         let mapping = map_units(&old, &new);
         assert_eq!(mapping.unchanged.len(), 10);
         assert_eq!(mapping.added_unit_keys, vec!["page:1"]);
         assert!(mapping.changed_unit_keys.is_empty());
         assert!(mapping.removed_unit_keys.is_empty());
+    }
+
+    #[test]
+    fn r23_cand_007_lcs_budget_uses_checked_cell_count() {
+        assert!(unit_mapping_within_budget(999, 1_999));
+        assert!(!unit_mapping_within_budget(1_000, 1_999));
+        assert!(!unit_mapping_within_budget(usize::MAX, 1));
+        assert!(!unit_mapping_within_budget(1, usize::MAX));
+    }
+
+    #[test]
+    fn r23_cand_007_over_budget_mapping_falls_back_to_full_change() {
+        let count = 1_414_u64;
+        let old = (0..count)
+            .map(|i| prepared_page(i, &format!("page:{}", i + 1), &format!("old-{i}")))
+            .collect::<Vec<_>>();
+        let new = (0..count)
+            .map(|i| prepared_page(i, &format!("page:{}", i + 1), &format!("new-{i}")))
+            .collect::<Vec<_>>();
+        assert!(!unit_mapping_within_budget(old.len(), new.len()));
+
+        let mapping = map_units(&old, &new);
+        assert!(mapping.unchanged.is_empty());
+        assert_eq!(mapping.changed_unit_keys.len(), count as usize);
+        assert!(mapping.added_unit_keys.is_empty());
+        assert!(mapping.removed_unit_keys.is_empty());
+        assert_eq!(mapping.change_rate, 1.0);
+    }
+
+    #[test]
+    fn r23_cand_031_prepare_from_verified_bytes_binds_raw_hash() {
+        let bytes = b"# trusted\n";
+        let raw_hash = hash_bytes(bytes);
+        let prepared = prepare_units_from_bytes(PrepareStageBytesRequest {
+            raw_hash: &raw_hash,
+            media_type: "text/markdown",
+            input_path: "trusted.md",
+            tool_profile_hash: "sha256:test",
+            bytes,
+        })
+        .unwrap();
+        assert_eq!(prepared.prepared_units.len(), 1);
+        assert_eq!(prepared.prepared_units[0].prepared_hash, raw_hash);
+
+        let error = prepare_units_from_bytes(PrepareStageBytesRequest {
+            raw_hash: &hash_bytes(b"different"),
+            media_type: "text/markdown",
+            input_path: "trusted.md",
+            tool_profile_hash: "sha256:test",
+            bytes,
+        })
+        .unwrap_err();
+        assert!(error.to_string().contains("KCS-E-PREPARE-IDENTITY-001"));
+    }
+
+    #[test]
+    fn r23_cand_006_prepare_rejects_pdf_page_count_over_limit() {
+        let mut pdf = b"%PDF-1.4\nBT\n".to_vec();
+        for id in 1..=kcs_adapter::deterministic::MAX_DETERMINISTIC_PDF_PAGES + 1 {
+            pdf.extend_from_slice(format!("{id} 0 obj << /Type /Page >> endobj\n").as_bytes());
+        }
+        let raw_hash = hash_bytes(&pdf);
+        let error = prepare_units_from_bytes(PrepareStageBytesRequest {
+            raw_hash: &raw_hash,
+            media_type: "application/pdf",
+            input_path: "oversized.pdf",
+            tool_profile_hash: "sha256:test",
+            bytes: &pdf,
+        })
+        .unwrap_err();
+        assert!(error.to_string().contains("KCS-E-PREPARE-PDF-LIMIT-001"));
+    }
+
+    #[test]
+    fn r23_cand_031_path_wrapper_rejects_bytes_different_from_declared_hash() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mutable.md");
+        std::fs::write(&path, b"version-b").unwrap();
+
+        let error = prepare_units(PrepareStageRequest {
+            raw_hash: hash_bytes(b"version-a"),
+            media_type: "text/markdown".to_owned(),
+            input_path: path.display().to_string(),
+            tool_profile_hash: "sha256:test".to_owned(),
+        })
+        .unwrap_err();
+        assert!(error.to_string().contains("KCS-E-PREPARE-IDENTITY-001"));
+    }
+
+    #[test]
+    fn r23_cand_032_stream_hash_matches_in_memory_hash() {
+        let bytes = vec![0xa5; 256 * 1024 + 17];
+        let streamed = hash_reader(std::io::Cursor::new(&bytes)).unwrap();
+        assert_eq!(streamed, hash_bytes(&bytes));
     }
 }

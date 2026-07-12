@@ -11,6 +11,7 @@ path = "src/main.rs"
 
 [dependencies]
 clap.workspace = true
+getrandom.workspace = true
 kcs-adapter = { path = "../kcs-adapter" }
 kcs-core.workspace = true
 kcs-index = { path = "../kcs-index" }

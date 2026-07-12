@@ -1,0 +1,221 @@
+{
+  "affectedLocations": [
+    {
+      "label": "accepted_surface",
+      "lines": "106-231",
+      "path": "crates/kcs-adapter/src/tool_lock.rs"
+    },
+    {
+      "label": "lossy_projection",
+      "lines": "376-428",
+      "path": "crates/kcs-adapter/src/tool_lock.rs"
+    },
+    {
+      "label": "fixed_dispatch",
+      "lines": "82-156",
+      "path": "crates/kcs-adapter/src/catalog.rs"
+    },
+    {
+      "label": "credential_data_sink",
+      "lines": "47-138",
+      "path": "crates/kcs-adapter/src/mistral_ocr.rs"
+    },
+    {
+      "label": "preview_gap",
+      "lines": "8736-8797",
+      "path": "crates/kcs-cli/src/main.rs"
+    }
+  ],
+  "attackPath": {
+    "dataflow": {
+      "evidenceRefs": [
+        "accepted-target-fields",
+        "projection-copies-only-model-auth",
+        "fixed-mistral-dispatch",
+        "credentialed-document-post"
+      ],
+      "outcome": "credential and document bytes can reach a recipient different from the accepted declaration",
+      "sink": "bearer-authenticated `/v1/ocr` request to `MISTRAL_API_BASE` or `https://api.mistral.ai`",
+      "source": "operator-controlled markdown adapter declaration containing target fields and authentication",
+      "summary": "accepted `tools.toml` target/auth -> `declared_adapter_for_role()` keeps auth/model but drops target -> `run_standard_online_markdownize()` builds `EnvMistralOcrClient` -> `ocr_markdown()` posts to Mistral/effective base"
+    },
+    "evidenceRefs": [
+      "projection-copies-only-model-auth",
+      "fixed-mistral-dispatch",
+      "ambient-mistral-origin",
+      "credentialed-document-post",
+      "preview-gap"
+    ],
+    "impact": {
+      "level": "high",
+      "why": "A provider-specific credential and document content can be sent to a recipient that the accepted declaration did not authorize."
+    },
+    "likelihood": {
+      "level": "medium",
+      "why": "The configuration is local and operator-mediated, and ordinary online, credential, media, and budget gates still apply."
+    },
+    "limitations": [
+      "This does not create an inbound public attack surface.",
+      "The operator controls device-local configuration in normal use.",
+      "An intentionally matching `MISTRAL_API_BASE` can avoid recipient drift, but it is not derived from the accepted target."
+    ],
+    "reachability": {
+      "attacker": "unintended lower-trust external recipient, or a lower-trust launcher when it can influence ambient Mistral base configuration",
+      "entrypoint": "accepted markdown adapter declaration plus ordinary online markdown execution",
+      "outcome": "wrong-recipient disclosure of the markdown credential and document bytes",
+      "preconditions": [
+        "A non-Mistral or command/offline markdown target is accepted.",
+        "The declaration includes or resolves a bearer credential.",
+        "Online execution and budget gates allow the markdown job.",
+        "An eligible document is processed."
+      ],
+      "summary": "The route is operator-mediated and requires a local declaration, resolvable credential, online opt-in, eligible document, and later markdown invocation."
+    },
+    "summary": "An operator configures a markdown declaration for a non-Mistral URL or command with a credential reference. KCS accepts that declaration, drops the target during projection, and later sends the credential and eligible document through the fixed Mistral/effective-base client after ordinary online gates."
+  },
+  "candidate_id": "KCS-R23-CAND-038",
+  "codeEvidence": [
+    {
+      "code": "const TOOLS_ENTRY_FIELDS: &[&str] = &[\n    \"kind\",\n    \"cmd\",\n    \"args\",\n    \"url\",\n    \"model\",\n    \"auth\",\n    \"profile_hash\",\n    \"capabilities\",\n    \"dimensions\",\n    \"distance\",\n    \"modality\",\n    \"mode\",\n];",
+      "endLine": 134,
+      "explanation": "`tools.toml` entries can include execution target fields and an authentication reference in the same accepted markdown declaration.",
+      "id": "accepted-target-fields",
+      "label": "tools.toml accepts markdown target and auth fields",
+      "language": "rust",
+      "path": "crates/kcs-adapter/src/tool_lock.rs",
+      "role": "user_input",
+      "startLine": 121
+    },
+    {
+      "code": "pub struct DeclaredAdapter {\n    pub tool_id: Option<String>,\n    pub model: Option<String>,\n    pub auth: Option<String>,\n}",
+      "endLine": 386,
+      "explanation": "The runtime declaration has no place to carry `kind`, `cmd`, `args`, or `url`, so accepted target intent cannot reach dispatch.",
+      "id": "projection-drops-target",
+      "label": "DeclaredAdapter omits execution target fields",
+      "language": "rust",
+      "path": "crates/kcs-adapter/src/tool_lock.rs",
+      "role": "root_control",
+      "startLine": 381
+    },
+    {
+      "code": "pub fn declared_adapter_for_role(value: &toml::Value, role: &str) -> Option<DeclaredAdapter> {\n    let section = value.as_table()?.get(role)?.as_table()?;\n    let has_direct_fields = section\n        .keys()\n        .any(|key| TOOLS_ENTRY_FIELDS.contains(&key.as_str()));\n    if has_direct_fields {\n        return Some(DeclaredAdapter {\n            tool_id: None,\n            model: section.get(\"model\").and_then(toml::Value::as_str).map(str::to_owned),\n            auth: section.get(\"auth\").and_then(toml::Value::as_str).map(str::to_owned),\n        });\n    }\n    let (tool_id, entry) = section.iter().next()?;\n    let entry = entry.as_table()?;\n    Some(DeclaredAdapter {\n        tool_id: Some(tool_id.clone()),\n        model: entry.get(\"model\").and_then(toml::Value::as_str).map(str::to_owned),\n        auth: entry.get(\"auth\").and_then(toml::Value::as_str).map(str::to_owned),\n    })\n}",
+      "endLine": 428,
+      "explanation": "`declared_adapter_for_role()` preserves the declared credential and model while discarding the accepted command or URL recipient.",
+      "id": "projection-copies-only-model-auth",
+      "label": "Projection copies only model and auth from entries",
+      "language": "rust",
+      "path": "crates/kcs-adapter/src/tool_lock.rs",
+      "role": "propagation",
+      "startLine": 395
+    },
+    {
+      "code": "let client = EnvMistralOcrClient::new();\nlet configured_model = declared_markdown_model();\nlet model_pin = client.resolve_model_pin(&configured_model)?;\nlet adapter = MistralOcrMarkdownizeAdapter::new(client, model_pin, request.scope_id)\n    .with_image_store(request.kcs_dir);\nlet profile = adapter.profile();\nlet mut adapter_request = adapter_request;\nadapter_request.tool_profile_hash = profile.tool_profile_hash.clone();\nlet response = adapter.markdownize(adapter_request)?;\nOk(StandardOnlineMarkdownizeOutcome { profile, response })",
+      "endLine": 147,
+      "explanation": "The production path consults the retained model but instantiates the fixed Mistral OCR client rather than dispatching to the declared target.",
+      "id": "fixed-mistral-dispatch",
+      "label": "Production markdown execution constructs Mistral OCR",
+      "language": "rust",
+      "path": "crates/kcs-adapter/src/catalog.rs",
+      "role": "sink",
+      "startLine": 134
+    },
+    {
+      "code": "fn base_url(&self) -> String {\n    self.base_url\n        .clone()\n        .or_else(|| std::env::var(\"MISTRAL_API_BASE\").ok())\n        .unwrap_or_else(|| \"https://api.mistral.ai\".to_owned())\n        .trim_end_matches('/')\n        .to_owned()\n}\n\nfn api_key() -> Result<String> {\n    crate::tool_lock::resolve_role_api_key(\"markdown\", \"MISTRAL_API_KEY\")?.ok_or_else(|| {\n        AdapterError::Auth(\n            \"no Mistral OCR API key: set MISTRAL_API_KEY or a tools.toml `[markdown] auth`\"\n                .to_owned(),\n        )\n    })\n}",
+      "endLine": 80,
+      "explanation": "The destination is `MISTRAL_API_BASE` or the hard-coded Mistral default, while the credential can still come from the markdown declaration.",
+      "id": "ambient-mistral-origin",
+      "label": "Mistral client chooses ambient or default base URL",
+      "language": "rust",
+      "path": "crates/kcs-adapter/src/mistral_ocr.rs",
+      "role": "root_control",
+      "startLine": 61
+    },
+    {
+      "code": "let api_key = Self::api_key()?;\nlet path = request.raw.path.as_deref().ok_or_else(|| {\n    AdapterError::ContractViolation(\"Mistral OCR requires a local raw path\".to_owned())\n})?;\nlet bytes = std::fs::read(path).map_err(|err| AdapterError::Io {\n    path: path.to_owned(),\n    message: err.to_string(),\n})?;\nlet value: Value = ureq::post(&format!(\"{}/v1/ocr\", self.base_url()))\n    .set(\"Authorization\", &format!(\"Bearer {api_key}\"))\n    .set(\"Content-Type\", \"application/json\")\n    .send_json(ocr_request_body(\n        &request.media_type,\n        &bytes,\n        model_pin,\n        pages.as_deref(),\n    ))",
+      "endLine": 138,
+      "explanation": "Once ordinary online gates allow execution, the fixed/effective Mistral recipient receives both the resolved credential and document bytes.",
+      "id": "credentialed-document-post",
+      "label": "OCR request sends the file bytes with bearer authentication",
+      "language": "rust",
+      "path": "crates/kcs-adapter/src/mistral_ocr.rs",
+      "role": "outcome",
+      "startLine": 112
+    },
+    {
+      "code": "json!({\n    \"status\": \"preview\",\n    \"root\": root,\n    \"scope\": preview.scope_id,\n    \"network_transmission_policy\": {\n        \"default\": \"disabled until --approve or --online\",\n        \"yes_grants_network\": false,\n    },\n    \"adapter_execution_mode\": {\n        \"markdownize\": \"deterministic_library baseline\",\n        \"embedding\": \"not generated without online opt-in\",\n    },\n    \"estimated_completion\": \"baseline completes in this run; online enhancement depends on budget and opt-in\",\n    \"candidates\": preview.candidates,\n})",
+      "endLine": 8797,
+      "explanation": "The preview is generic and does not expose that the accepted declared target and the effective Mistral recipient differ.",
+      "id": "preview-gap",
+      "label": "Preview does not show declared or effective recipient",
+      "language": "rust",
+      "path": "crates/kcs-cli/src/main.rs",
+      "role": "expected_control",
+      "startLine": 8775
+    }
+  ],
+  "confidence": "high (0.96)",
+  "extensions": {
+    "candidateId": "KCS-R23-CAND-038",
+    "ledgerRowId": "KCS-R23-CAND-038",
+    "reportId": "KCS-R23-CAND-038"
+  },
+  "final_policy": "reportable",
+  "final_severity": "medium",
+  "ledger_row_id": "KCS-R23-CAND-038",
+  "priority": "P2",
+  "remediation": {
+    "regressionTests": [
+      "Assert a markdown declaration with `url` or `cmd` is rejected when custom markdown dispatch is unsupported.",
+      "If custom dispatch is supported, assert the exact declared URL or command reaches the executor.",
+      "Assert preview and approval display and bind the effective recipient.",
+      "Assert changing recipient identity changes the approval/provenance identity rather than reusing a model/auth-only profile.",
+      "Assert no credential is resolved for a declaration whose execution target is ignored."
+    ],
+    "summary": "Reject unsupported markdown execution target fields at configuration load, or preserve `kind`, `cmd`, `args`, and `url` through runtime dispatch and bind the final recipient to preview, approval, credential resolution, profile identity, and request execution."
+  },
+  "rootCause": {
+    "evidenceRefs": [
+      "accepted-target-fields",
+      "projection-drops-target",
+      "projection-copies-only-model-auth",
+      "fixed-mistral-dispatch",
+      "ambient-mistral-origin",
+      "credentialed-document-post",
+      "preview-gap"
+    ],
+    "summary": "The violated invariant is that an accepted adapter target and its credential must describe the same execution recipient. `tools.toml` validation accepts target fields, but `DeclaredAdapter` and `declared_adapter_for_role()` drop them while retaining `auth` and `model`. The production catalog therefore has no declared recipient to dispatch to and instantiates the fixed Mistral OCR client."
+  },
+  "scan_id": "f78f5d0d-2752-47a7-8d8d-3371e09d3377",
+  "schema_version": 1,
+  "scope": ".",
+  "summary": "KCS accepts markdown adapter declarations containing execution target fields such as `kind`, `cmd`, `args`, and `url`, but projects the runtime declaration down to `tool_id`, `model`, and `auth`. Production markdown execution then constructs the fixed Mistral OCR client, resolves the retained declared credential, and uploads document bytes to `MISTRAL_API_BASE` or `https://api.mistral.ai` rather than the accepted target.",
+  "target_revision": "0e19f3c6489da458e93a982a333c308d92d0a0ae",
+  "title": "Accepted markdown adapter targets are discarded before fixed Mistral execution",
+  "validation": {
+    "assertions": [
+      "`kind`, `cmd`, `args`, and `url` are accepted configuration fields for adapter entries.",
+      "`DeclaredAdapter` and `declared_adapter_for_role()` do not preserve those target fields.",
+      "The production markdown path constructs `EnvMistralOcrClient` and uses only the retained model from the declaration.",
+      "`EnvMistralOcrClient` resolves the markdown credential and posts document bytes to its ambient/default OCR base URL."
+    ],
+    "evidenceRefs": [
+      "accepted-target-fields",
+      "projection-copies-only-model-auth",
+      "fixed-mistral-dispatch",
+      "ambient-mistral-origin",
+      "credentialed-document-post"
+    ],
+    "limitations": [
+      "No live OCR request or loopback capture was run.",
+      "No real credential or real document was used.",
+      "The prevalence of non-Mistral declarations in deployments was not measured."
+    ],
+    "method": "static source trace plus local/offline source invariant PoC",
+    "summary": "The source trace confirms accepted target fields, lossy projection, fixed Mistral dispatch, retained credential resolution, and bearer-authenticated document upload. The included PoC rechecked those invariants against the pinned revision without network access or credentials."
+  },
+  "writeup": {
+    "pocDirectory": "findings/tac-kcs-r23-cand-038-markdown-target-discarded-mistral-execution/poc",
+    "reportPath": "findings/tac-kcs-r23-cand-038-markdown-target-discarded-mistral-execution/tac-kcs-r23-cand-038-markdown-target-discarded-mistral-execution.md",
+    "reportSha256": "c19a2664b26cd10f090d5fae727aec44f142bbb20204a4dc1b19173a9a34487b"
+  }
+}

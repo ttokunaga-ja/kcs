@@ -1,0 +1,244 @@
+{
+  "affected_locations": [
+    {
+      "label": "open_control_gap",
+      "lines": "188-206,235-239",
+      "path": "crates/kcs-core/src/scope.rs"
+    },
+    {
+      "label": "batch_control_gap",
+      "lines": "5586-5667",
+      "path": "crates/kcs-cli/src/main.rs"
+    },
+    {
+      "label": "online_execution",
+      "lines": "5934-5968,6050-6067,6248",
+      "path": "crates/kcs-cli/src/main.rs"
+    },
+    {
+      "label": "expected_control",
+      "lines": "10942-10949",
+      "path": "crates/kcs-cli/src/main.rs"
+    },
+    {
+      "label": "schema_validator",
+      "lines": "52-57,238-260",
+      "path": "crates/kcs-adapter/src/tool_lock.rs"
+    }
+  ],
+  "attackPath": {
+    "dataflow": {
+      "evidenceRefs": [
+        "repo-open-no-tool-lock",
+        "batch-missing-validator",
+        "pending-online-execution"
+      ],
+      "outcome": "derived state can be produced while the repository identity record is invalid",
+      "sink": "batch recovery task mutation and operator-approved outbound enrichment",
+      "source": "adopted repository state with malformed tool-lock and eligible persisted task",
+      "summary": "malformed `.kcs/tool-lock.json` plus recoverable task -> `Repository::open_current()` -> `run_batch()` -> task requeue -> `execute_pending_tasks()` -> markdownize or embedding execution"
+    },
+    "evidenceRefs": [
+      "batch-missing-validator",
+      "pending-online-execution",
+      "future-version-negative-control"
+    ],
+    "impact": {
+      "level": "medium",
+      "why": "Repository provenance and online-recovery authorization consistency are weakened, and bounded adapter execution or derived-state persistence can occur under malformed tool identity state."
+    },
+    "likelihood": {
+      "level": "medium",
+      "why": "A supplied-state workflow, eligible recovery task, and operator-run batch command with existing approvals are required."
+    },
+    "limitations": [
+      "The malformed lock does not choose the adapter destination or expose credentials.",
+      "Current-byte, secret, media, network, and budget checks remain in force.",
+      "The trace does not prove false runtime-profile labeling."
+    ],
+    "reachability": {
+      "attacker": "lower-trust contributor to copied, shared, migrated, or preseeded KCS scope state",
+      "entrypoint": "`kcs batch resume` or `kcs batch retry`",
+      "outcome": "batch work proceeds under malformed tool-lock state that sibling commands reject",
+      "summary": "The attacker must influence adopted scope state and rely on the operator or automation to run batch recovery with existing network, credential, and budget authorization."
+    },
+    "summary": "A lower-trust copied, shared, migrated, or preseeded scope carries a malformed repository tool lock and an otherwise eligible recoverable task. The operator runs `batch resume` or `batch retry`; KCS mutates task state and can issue approved outbound enrichment work even though sibling commands reject the same repository identity state."
+  },
+  "candidate_id": "KCS-R23-CAND-064",
+  "codeEvidence": [
+    {
+      "code": "    pub fn open(path: impl AsRef<Path>) -> Result<Self> {\n        let root = path.as_ref().canonicalize().kcs_io(path.as_ref())?;\n        let kcs_dir = root.join(\".kcs\");\n        if !kcs_dir.is_dir() {\n            return Err(KcsError::invalid_usage(\"not a kcs scope\"));\n        }\n\n        let repo = Self {\n            root,\n            kcs_dir: kcs_dir.clone(),\n            store: ObjectStore::new(kcs_dir),\n        };\n        repo.validate()?;\n        // R13-4: repair a corrupt (empty/missing) HEAD from refs/heads/main before\n        // any command reads or advances HEAD. Done on every `open` so `log`/`status`\n        // display the real history and `snapshot` extends it (rather than orphaning\n        // it under a fresh root commit). A healthy HEAD is an untouched no-op.\n        repo.self_heal_head()?;\n        Ok(repo)\n    }\n\n    pub fn open_current() -> Result<Self> {\n        let cwd = std::env::current_dir().map_err(|err| KcsError::io(err.to_string(), \".\"))?;\n        Self::open(cwd)\n    }\n\n    #[must_use]\n    pub fn root(&self) -> &Path {\n        &self.root\n    }\n\n    #[must_use]\n    pub fn kcs_dir(&self) -> &Path {\n        &self.kcs_dir\n    }\n\n    /// Acquire the exclusive `.kcs/.lock` store lock (05 \u00a76) and return an RAII\n    /// guard held for the caller's lifetime. Used to serialize whole mutating\n    /// commands (`kcs index` / `repair` / `reindex`) end-to-end, not just their\n    /// snapshot sub-step. The lock is reentrant within a single process, so a\n    /// held guard does not deadlock when `snapshot` re-acquires it internally.\n    /// The loser of a concurrent acquisition gets `KCS-E-STORE-LOCKED-001`\n    /// (exit 3), the same contract as `snapshot` / `tag`.\n    pub fn lock_store(&self) -> Result<StoreLock> {\n        StoreLock::acquire(&self.kcs_dir)\n    }\n\n    pub fn validate(&self) -> Result<()> {\n        self.validate_config()?;\n        self.validate_scope()?;\n        self.validate_manifest()?;\n        Ok(())",
+      "endLine": 239,
+      "explanation": "`Repository::open_current()` only reaches config, scope, manifest, and HEAD checks. It does not parse or validate `.kcs/tool-lock.json`, so each command that depends on the repository tool identity predicate must invoke the CLI helper itself.",
+      "id": "repo-open-no-tool-lock",
+      "label": "Repository open does not validate tool-lock.json",
+      "language": "rust",
+      "path": "crates/kcs-core/src/scope.rs",
+      "role": "entrypoint",
+      "startLine": 188
+    },
+    {
+      "code": "fn run_batch(args: BatchArgs) -> Result<Value> {\n    let repo = Repository::open_current()?;\n    // O3: `batch resume` / `batch retry` read-modify-write `tasks.jsonl` and drive\n    // online sends, so hold the folder store lock end-to-end \u2014 the same guard M1\n    // wired onto index/repair/reindex. Without it two concurrent `batch resume`\n    // runs interleave the ledger and double-send held tasks. Reentrant with any\n    // inner auto-snapshot; losers fail fast with KCS-E-STORE-LOCKED-001 (exit 3).\n    let _lock = repo.lock_store()?;\n    let store = TaskStore::new(repo.kcs_dir());\n    // N1: a Tier B online hold is only lifted by an explicit `--send-secrets`\n    // approval, never by a plain `batch resume`. Without this, resume's\n    // Paused -> Pending flip would silently un-hold the candidate-secret task.\n    let secrets_approved = secrets_send_approved(&repo);\n    match args.command {\n        Some(BatchCommand::Resume(resume)) => {\n            let changed = store\n                .update_matching(|task| {\n                    let held_secret = task.fallback_reason.as_deref() == Some(SECRETS_TIER_B_HOLD);\n                    if task.status == TaskStatus::Paused\n                        && (resume.override_budget\n                            || task.fallback_reason.as_deref() != Some(\"budget_exceeded\"))\n                        && (!held_secret || secrets_approved)\n                    {\n                        task.status = TaskStatus::Pending;\n                        task.fallback_reason = None;\n                        true\n                    } else {\n                        false\n                    }\n                })\n                .map_err(pipeline_to_kcs)?;\n            let outcome = execute_pending_tasks(&repo, &store, resume.override_budget, true)?;\n            let mut output = json!({\n                \"status\": \"resumed\",\n                \"override_budget\": resume.override_budget,\n                \"tasks_updated\": changed,\n                \"tasks_executed\": outcome.executed,\n                // R9-7: surface driven online-send attempts and failures, not just\n                // successes, so an orchestrator sees rate-limit / auth / charge\n                // consumption even when nothing completed.\n                \"tasks_attempted\": outcome.attempted(),\n                \"tasks_failed\": outcome.failed,\n                // R11-2: pauses this pass are a real state change (previously invisible\n                // \u2014 `tasks_updated` reported 0 while the store flipped to paused).\n                \"tasks_paused\": outcome.paused,\n            });\n            // R11-2: report the batch exit code (docs/04 \u00a75.6) from what this pass did\n            // \u2014 auth (5) / budget-paused (6) / partial (3) / all-permanent (4) \u2014 while\n            // the full result JSON still prints to stdout. R14-5: with a batch-owned\n            // error_code so errors.jsonl does not borrow a search code.\n            apply_batch_exit_override(&mut output, &outcome);\n            Ok(output)\n        }\n        Some(BatchCommand::Retry) => {\n            // R9-4: `batch retry` also recovers Partial online markdownize tasks\n            // (docs/04 \u00a75.2 `partial -> done`). A Partial task has some Done and\n            // some Failed units; re-drive it (Pending) with `unit_keys` scoped to\n            // the still-Failed units and the placeholder output_ref restored so\n            // execute_pending_markdownize_tasks selects it. On full success it\n            // becomes Done, ending the silent data gap index_status showed as\n            // fully enriched.\n            let partial_reenqueued = reenqueue_partial_markdownize_tasks(&store)?;\n            let changed = store\n                .update_matching(|task| {\n                    if task.status == TaskStatus::Failed\n                        && task_retry_allowed(task)\n                        && task_retry_due(task)\n                    {\n                        task.status = TaskStatus::Pending;\n                        task.next_retry_at = None;\n                        true\n                    } else {\n                        false\n                    }\n                })\n                .map_err(pipeline_to_kcs)?;\n            // `batch retry` never overrides the budget cap (retry re-schedules,\n            // it does not bypass caps \u2014 `batch resume --override-budget` does), and never\n            // revives an auth_error task (CT2-TASK-005: `max_attempts=0` is this command's\n            // contract; `batch resume` is where repaired credentials take effect).\n            let outcome = execute_pending_tasks(&repo, &store, false, false)?;\n            let mut output = json!({",
+      "endLine": 5667,
+      "explanation": "`run_batch()` opens the repository and holds the store lock, but neither `resume` nor `retry` calls `validate_repo_tool_lock()` before task mutation or `execute_pending_tasks()`.",
+      "id": "batch-missing-validator",
+      "label": "Batch recovery mutates task state without the validator",
+      "language": "rust",
+      "path": "crates/kcs-cli/src/main.rs",
+      "role": "root_control",
+      "startLine": 5586
+    },
+    {
+      "code": "fn execute_pending_tasks(\n    repo: &Repository,\n    store: &TaskStore,\n    override_budget: bool,\n    // R22-6(a): `batch resume` means \"carry on with the work\", so it may revive a task the\n    // operator has since unblocked by fixing credentials. `batch retry` may NOT \u2014 CT2-TASK-005\n    // (docs/04 \u00a75.6, `auth_error: max_attempts=0`) makes non-retryability of an auth failure a\n    // contract of that command specifically.\n    allow_auth_revive: bool,\n) -> Result<ExecOutcome> {\n    let mut outcome = ExecOutcome::default();\n    // Q3: under the folder store lock, any Running task is an orphan from a crashed\n    // run \u2014 reclaim it to Pending so this pass re-executes it.\n    reclaim_orphaned_running_tasks(store)?;\n    // Markdownize and embedding opt-ins are per-adapter (07 \u00a73, L4): gate each\n    // adapter on its own approval rather than one blanket check.\n    if persistent_network_allowed(repo)? {\n        outcome.add(execute_pending_markdownize_tasks(\n            repo,\n            store,\n            override_budget,\n            allow_auth_revive,\n        )?);\n    }\n    // Embedding tasks are executed by the same enrichment pass `kcs index` uses;\n    // without this, rate-limited Pending embedding tasks could never be completed\n    // by `batch resume` / `batch retry`. `override_budget` reaches the budget\n    // judgement (L2) and the embedding opt-in is the embedding adapter's own (L4).\n    let embedding_online = embedding_online_allowed(repo, false, false, false)?;\n    outcome.add(run_embedding_enrichment(\n        repo,\n        embedding_online,\n        override_budget,\n    )?);\n    Ok(outcome)",
+      "endLine": 5968,
+      "explanation": "Once batch recovery has requeued work, the pending-task executor can drive markdownize and embedding enrichment under the operator's already approved network and budget controls without ever reading the malformed tool lock.",
+      "id": "pending-online-execution",
+      "label": "Recovered pending tasks can reach adapter work",
+      "language": "rust",
+      "path": "crates/kcs-cli/src/main.rs",
+      "role": "sink",
+      "startLine": 5934
+    },
+    {
+      "code": "    let repo = Repository::open_current()?;\n    // M1(a): serialize the whole index command against concurrent index/repair/\n    // reindex (05 \u00a76). Held end-to-end, not just across the snapshot sub-step, so\n    // two processes cannot interleave chunk writes / sqlite rebuilds. The lock is\n    // reentrant, so the internal auto-snapshot re-acquisition does not deadlock.\n    let _lock = repo.lock_store()?;\n    validate_repo_tool_lock(&repo)?;",
+      "endLine": 570,
+      "explanation": "`index`, `repair`, `reindex`, `status`, `snapshot`, `log`, `diff`, `inspect`, `tag`, and `search` all use the repository tool-lock validation helper before consuming repository state.",
+      "id": "sibling-commands-validate",
+      "label": "Sibling commands invoke the expected control",
+      "language": "rust",
+      "path": "crates/kcs-cli/src/main.rs",
+      "role": "expected_control",
+      "startLine": 564
+    },
+    {
+      "code": "fn validate_repo_tool_lock(repo: &Repository) -> Result<()> {\n    let path = repo.kcs_dir().join(\"tool-lock.json\");\n    if !path.is_file() {\n        return Ok(());\n    }\n    let bytes =\n        fs::read(&path).map_err(|err| KcsError::io(err.to_string(), path.display().to_string()))?;\n    load_tool_lock(&bytes).map(|_| ()).map_err(adapter_to_kcs)",
+      "endLine": 10949,
+      "explanation": "The helper is the fail-closed control that batch recovery omits. It reads the repository lock file and delegates schema validation to `load_tool_lock()`.",
+      "id": "tool-lock-helper",
+      "label": "The omitted helper parses and validates tool-lock.json",
+      "language": "rust",
+      "path": "crates/kcs-cli/src/main.rs",
+      "role": "expected_control",
+      "startLine": 10942
+    },
+    {
+      "code": "#[test]\nfn r6_tool_lock_rejects_future_spec_version() {\n    let dir = indexed_scope();\n    let path = dir.path().join(\".kcs/tool-lock.json\");\n    let mut value: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();\n    value[\"spec_version\"] = Value::from(999);\n    fs::write(&path, serde_json::to_vec_pretty(&value).unwrap()).unwrap();\n\n    let err = json_failure(&dir, &[\"status\"], 2);\n    assert_eq!(err[\"error_code\"], \"KCS-E-CONFIG-SCHEMA-001\");\n    assert!(err[\"message\"]\n        .as_str()\n        .unwrap()\n        .contains(\"unsupported tool-lock spec_version\"));",
+      "endLine": 3817,
+      "explanation": "A malformed future-version lock already causes sibling command failure when the helper is invoked, so batch recovery is bypassing a concrete existing control rather than an aspirational check.",
+      "id": "future-version-negative-control",
+      "label": "Existing contract test proves malformed locks are rejected",
+      "language": "rust",
+      "path": "crates/kcs-cli/tests/step3_p0_contract.rs",
+      "role": "outcome",
+      "startLine": 3804
+    }
+  ],
+  "confidence": "high",
+  "confidence_score": 0.93,
+  "coordinator_review": {
+    "notes": "Awaiting parent coordinator acceptance.",
+    "reviewer": null,
+    "status": "pending"
+  },
+  "coordinator_review_state": "pending",
+  "disposition": "reportable",
+  "extensions": {
+    "attackPathReport": "artifacts/05_findings/KCS-R23-CAND-064/attack_path_analysis_report.md",
+    "attackPathReportSha256": "b9b8cd1b78d32c40559386609eea3418652b13b131f4ad5b6980507559e24cb4",
+    "attemptId": "tac_20260712",
+    "candidateId": "KCS-R23-CAND-064",
+    "ledgerRowId": "KCS-R23-CAND-064",
+    "reportId": "KCS-R23-CAND-064",
+    "reportPath": "findings/tac-kcs-r23-cand-064-batch-tool-lock-bypass/tac-kcs-r23-cand-064-batch-tool-lock-bypass.md",
+    "reportSha256": "f98f8d9daf5bbd474a1e240321e6ae641c84e811fb11091bc181840881ab88b7",
+    "sourceRevision": "0e19f3c6489da458e93a982a333c308d92d0a0ae",
+    "validationReport": "artifacts/05_findings/KCS-R23-CAND-064/validation_report.md",
+    "validationReportSha256": "4428e7cdb40adc55e9cc9201b073afb3afcd084a0f563b005332cf839693b99f"
+  },
+  "final_policy": "reportable",
+  "final_severity": "low",
+  "instance_key": "KCS-R23-CAND-064",
+  "ledger_row_id": "KCS-R23-CAND-064",
+  "priority": "P3",
+  "remediation": {
+    "summary": "Call `validate_repo_tool_lock(&repo)?` under the acquired store lock and before any batch resume/retry task mutation or execution. Keep this schema validation distinct from stronger per-task adapter-profile and destination binding controls.",
+    "tests": [
+      "Create a temporary scope with a future-version `tool-lock.json` and a paused markdownize task, then assert `batch resume` fails before mutating task state.",
+      "Repeat with retryable failed and partial markdownize tasks, then assert `batch retry` fails before requeue.",
+      "Assert well-formed locks still permit recovery when independent network, secret, byte, and budget gates allow it.",
+      "Keep a static guard that `run_batch()` calls `validate_repo_tool_lock()` before `execute_pending_tasks()`."
+    ]
+  },
+  "rootCause": {
+    "evidenceRefs": [
+      "repo-open-no-tool-lock",
+      "batch-missing-validator",
+      "pending-online-execution",
+      "sibling-commands-validate",
+      "tool-lock-helper",
+      "future-version-negative-control"
+    ],
+    "summary": "The violated invariant is that commands which mutate or consume adapter-derived repository state must reject malformed `.kcs/tool-lock.json` before work begins. `Repository::open_current()` does not enforce that invariant globally, and `run_batch()` omits the explicit `validate_repo_tool_lock()` call before resume/retry task mutation and pending adapter execution."
+  },
+  "scan_id": "f78f5d0d-2752-47a7-8d8d-3371e09d3377",
+  "schema_version": 1,
+  "source_revision": "0e19f3c6489da458e93a982a333c308d92d0a0ae",
+  "summary": "KCS batch resume and retry open a repository, take the store lock, mutate recovery task state, and can reach online markdownize or embedding execution without invoking the repository tool-lock validator that sibling commands use.",
+  "target_revision": "0e19f3c6489da458e93a982a333c308d92d0a0ae",
+  "title": "batch recovery bypasses repository tool-lock validation",
+  "validation": {
+    "assertions": [
+      "`Repository::open_current()` does not validate `.kcs/tool-lock.json`.",
+      "`run_batch()` omits `validate_repo_tool_lock()` on both resume and retry branches before task mutation and pending execution.",
+      "The existing helper rejects unsupported `tool-lock.json` schema versions when sibling commands invoke it."
+    ],
+    "evidenceRefs": [
+      "repo-open-no-tool-lock",
+      "batch-missing-validator",
+      "pending-online-execution",
+      "future-version-negative-control"
+    ],
+    "limitations": [
+      "No live adapter request, credential use, or third-party target interaction was performed.",
+      "No isolated CLI batch invocation with a malformed lock was captured; the PoC is a non-destructive static regression probe.",
+      "The existing validator is schema-oriented and does not prove queued tasks match the current effective adapter profile."
+    ],
+    "method": "saved V10 source trace plus local static regression probe",
+    "summary": "The saved validation trace and local probe confirm that repository open does not parse the tool lock, batch recovery reaches `execute_pending_tasks()` without `validate_repo_tool_lock()`, and sibling commands reject malformed locks through the existing helper."
+  },
+  "writeup": {
+    "attemptId": "tac_20260712",
+    "reportPath": "findings/tac-kcs-r23-cand-064-batch-tool-lock-bypass/tac-kcs-r23-cand-064-batch-tool-lock-bypass.md",
+    "reportSha256": "f98f8d9daf5bbd474a1e240321e6ae641c84e811fb11091bc181840881ab88b7",
+    "report_sha256": "f98f8d9daf5bbd474a1e240321e6ae641c84e811fb11091bc181840881ab88b7",
+    "supportingArtifacts": [
+      {
+        "path": "findings/tac-kcs-r23-cand-064-batch-tool-lock-bypass/poc/Makefile",
+        "sha256": "ffbfb5dcbe89a1e9cdb70304dc20f0cb98bdbe3b2b2c21df9d267492d985d2ef"
+      },
+      {
+        "path": "findings/tac-kcs-r23-cand-064-batch-tool-lock-bypass/poc/README.md",
+        "sha256": "8096b9e3c99b3400de1281fb94414a78c427092d3c000134c66a67ab258d8009"
+      },
+      {
+        "path": "findings/tac-kcs-r23-cand-064-batch-tool-lock-bypass/poc/batch_tool_lock_probe.py",
+        "sha256": "5c6c824c67b5dcc45b428c0189ab6a07acddfcdc5e80c224ca5a7cff78fb4c73"
+      }
+    ],
+    "supporting_artifacts": [
+      {
+        "path": "findings/tac-kcs-r23-cand-064-batch-tool-lock-bypass/poc/Makefile",
+        "sha256": "ffbfb5dcbe89a1e9cdb70304dc20f0cb98bdbe3b2b2c21df9d267492d985d2ef"
+      },
+      {
+        "path": "findings/tac-kcs-r23-cand-064-batch-tool-lock-bypass/poc/README.md",
+        "sha256": "8096b9e3c99b3400de1281fb94414a78c427092d3c000134c66a67ab258d8009"
+      },
+      {
+        "path": "findings/tac-kcs-r23-cand-064-batch-tool-lock-bypass/poc/batch_tool_lock_probe.py",
+        "sha256": "5c6c824c67b5dcc45b428c0189ab6a07acddfcdc5e80c224ca5a7cff78fb4c73"
+      }
+    ],
+    "pocDirectory": "findings/tac-kcs-r23-cand-064-batch-tool-lock-bypass/poc"
+  }
+}

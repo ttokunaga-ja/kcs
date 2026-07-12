@@ -1,0 +1,265 @@
+{
+  "affected_locations": [
+    {
+      "label": "entrypoint",
+      "lines": "9-30",
+      "path": "crates/kcs-search/src/evidence.rs"
+    },
+    {
+      "label": "root_control",
+      "lines": "4576-4586",
+      "path": "crates/kcs-cli/src/main.rs"
+    },
+    {
+      "label": "reachable_branch",
+      "lines": "4773-4784",
+      "path": "crates/kcs-cli/src/main.rs"
+    },
+    {
+      "label": "file_read_sink",
+      "lines": "5207-5226",
+      "path": "crates/kcs-cli/src/main.rs"
+    },
+    {
+      "label": "disclosure_sink",
+      "lines": "5227-5249,11184-11190",
+      "path": "crates/kcs-cli/src/main.rs"
+    }
+  ],
+  "attackPath": {
+    "dataflow": {
+      "evidenceRefs": [
+        "inline-json-schema-only",
+        "tree-miss-tombstone-lookup",
+        "tombstone-read-path",
+        "tombstone-context",
+        "stderr-json-sink"
+      ],
+      "outcome": "process-readable JSON outside the selected scope is disclosed to the lower-trust caller",
+      "sink": "`fs::read()` of the joined tombstone path and JSON error serialization",
+      "source": "caller-controlled inline `raw_hash`",
+      "summary": "inline EvidencePointer JSON -> `parse_pointer_text()` -> `resolve_pointer_for_cli()` tree miss -> `read_tombstone()` path join and `fs::read()` -> JSON parse -> `KcsError.context` -> JSON-mode stderr"
+    },
+    "evidenceRefs": [
+      "pointer-raw-hash-string",
+      "inline-json-schema-only",
+      "tombstone-read-path",
+      "json-error-output"
+    ],
+    "impact": {
+      "level": "high",
+      "why": "The primitive can disclose user-readable JSON configuration, application state, or credential material across the lower-trust caller to KCS process boundary."
+    },
+    "likelihood": {
+      "level": "high",
+      "why": "The source trace is direct and repeatable once the caller has valid pointer metadata and JSON-mode error exposure."
+    },
+    "limitations": [
+      "No file write, code execution, or non-JSON file disclosure is established.",
+      "Human error output omits the context.",
+      "The URI form is less exposed to slash-bearing values because it requires five path segments."
+    ],
+    "reachability": {
+      "access_requirements": [
+        "A legitimate `scope_id` and existing `commit` are known or copied from a valid pointer.",
+        "The attacker-selected `raw_hash` is absent from the referenced tree.",
+        "The target file is readable by the invoking OS user and contains valid JSON.",
+        "Structured JSON error output is returned or exposed."
+      ],
+      "attacker": "lower-trust caller with pointer-input authority",
+      "entrypoint": "inline JSON EvidencePointer operand to KCS open/view/verify-style resolution",
+      "outcome": "local JSON file contents are returned in structured error context",
+      "summary": "The path is reachable through local CLI/stdin and agent-tool input surfaces. KCS has no network listener, but calling automation that accepts pointer text and returns JSON errors is in scope."
+    },
+    "summary": "A partially trusted automation, agent, or operator-facing workflow passes attacker-authored inline pointer JSON to KCS and returns structured JSON errors. The attacker reuses legitimate scope and commit metadata but sets `raw_hash` to an absolute or traversal-bearing path for a process-readable JSON file absent from the selected commit tree. KCS reads that file as a tombstone and reflects the parsed object in JSON error output."
+  },
+  "candidate_id": "KCS-R23-CAND-069",
+  "codeEvidence": [
+    {
+      "code": "#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]\npub struct EvidencePointer {\n    pub schema_version: u64,\n    pub commit: String,\n    #[serde(skip_serializing_if = \"Option::is_none\")]\n    pub tree: Option<String>,\n    pub raw_hash: String,\n    pub tool_profile_hash: String,\n    pub chunk_hash: String,\n    // ...\n    pub scope_id: String,\n    #[serde(skip_serializing_if = \"Option::is_none\")]\n    pub scope_path: Option<String>,\n}",
+      "endLine": 30,
+      "explanation": "The inline JSON input can populate `raw_hash` as arbitrary text unless the caller validates the field before resolution.",
+      "id": "pointer-raw-hash-string",
+      "label": "EvidencePointer stores raw_hash as an unconstrained string",
+      "language": "rust",
+      "path": "crates/kcs-search/src/evidence.rs",
+      "role": "user_input",
+      "startLine": 9
+    },
+    {
+      "code": "fn parse_pointer_text(pointer: &str) -> Result<EvidencePointer> {\n    if pointer.starts_with(\"kcs://\") {\n        return parse_evidence_pointer_uri(pointer).map_err(search_to_kcs);\n    }\n    if pointer.trim_start().starts_with('{') {\n        let pointer: EvidencePointer =\n            serde_json::from_str(pointer).map_err(|err| KcsError::schema(err.to_string()))?;\n        if pointer.schema_version != EVIDENCE_POINTER_SCHEMA_VERSION {\n            return Err(KcsError::schema(\"unsupported evidence schema version\"));\n        }\n        return Ok(pointer);\n    }",
+      "endLine": 4586,
+      "explanation": "The parser deserializes the attacker-controlled JSON object and returns it after only a schema-version check, so `raw_hash` reaches pointer resolution without the hash grammar enforced on other operand forms.",
+      "id": "inline-json-schema-only",
+      "label": "Inline JSON checks only schema_version",
+      "language": "rust",
+      "path": "crates/kcs-cli/src/main.rs",
+      "role": "entrypoint",
+      "startLine": 4576
+    },
+    {
+      "code": "fn validate_short_hash_operand(hash: &str) -> Result<()> {\n    let digest = hash.strip_prefix(\"sha256:\").unwrap_or(hash);\n    if digest.len() < 4\n        || !digest\n            .bytes()\n            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))\n    {\n        return Err(KcsError::invalid_usage(\n            \"short hash must be `sha256:` followed by at least 4 lowercase hex characters\",\n        ));\n    }\n    Ok(())\n}",
+      "endLine": 4624,
+      "explanation": "Another entry point rejects path-shaped or malformed hash input before lookup, but inline JSON pointers bypass this control.",
+      "id": "short-hash-expected-control",
+      "label": "Short-hash operands show the expected hash grammar",
+      "language": "rust",
+      "path": "crates/kcs-cli/src/main.rs",
+      "role": "expected_control",
+      "startLine": 4613
+    },
+    {
+      "code": "let (commit_shallow, entry_gen) = match repo.read_tree(&commit.tree) {\n    Ok(tree) => {\n        let entry = tree\n            .entries\n            .iter()\n            .find(|entry| entry.raw_hash == pointer.raw_hash);\n        let Some(entry) = entry else {\n            if let Some(tombstone) = read_tombstone(&target, &pointer.raw_hash)? {\n                return Err(tombstone_error(tombstone));\n            }\n            return Err(purge_not_found_error(&target, &pointer.raw_hash));\n        };",
+      "endLine": 4784,
+      "explanation": "After scope and commit checks pass, a `raw_hash` absent from the selected tree is still used for tombstone lookup before KCS returns not-found.",
+      "id": "tree-miss-tombstone-lookup",
+      "label": "A valid commit tree miss reaches tombstone lookup",
+      "language": "rust",
+      "path": "crates/kcs-cli/src/main.rs",
+      "role": "propagation",
+      "startLine": 4773
+    },
+    {
+      "code": "fn read_tombstone(target: &ScopeTarget, raw_hash: &str) -> Result<Option<Value>> {\n    let digest = raw_hash.trim_start_matches(\"sha256:\");\n    if digest.len() < 4 {\n        return Ok(None);\n    }\n    let path = target\n        .kcs_dir\n        .join(\"tombstones\")\n        .join(&digest[0..2])\n        .join(&digest[2..4])\n        .join(raw_hash);\n    let bytes = match fs::read(&path) {\n        Ok(bytes) => bytes,\n        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),\n        Err(err) => return Err(KcsError::io(err.to_string(), path.display().to_string())),\n    };\n    let mut value: Value =\n        serde_json::from_slice(&bytes).map_err(|err| KcsError::schema(err.to_string()))?;",
+      "endLine": 5226,
+      "explanation": "`read_tombstone()` validates only a four-byte length condition before using `raw_hash` as a path component and reading the resulting file. Absolute or parent-bearing values are not confined to `.kcs/tombstones`.",
+      "id": "tombstone-read-path",
+      "label": "read_tombstone joins raw_hash and reads the result",
+      "language": "rust",
+      "path": "crates/kcs-cli/src/main.rs",
+      "role": "sink",
+      "startLine": 5207
+    },
+    {
+      "code": "if let Some(object) = value.as_object_mut() {\n    object\n        .entry(\"raw_hash\".to_owned())\n        .or_insert_with(|| json!(raw_hash));\n    object.insert(\n        \"scope_path\".to_owned(),\n        json!(target.kcs_dir.display().to_string()),\n    );\n}\nOk(Some(value))\n}\n\nfn tombstone_error(mut tombstone: Value) -> KcsError {\n    if let Some(object) = tombstone.as_object_mut() {\n        object.insert(\"status\".to_owned(), json!(\"purged\"));\n    }\n    KcsError::new(\n        \"KCS-E-PURGE-TOMBSTONED-001\",\n        \"evidence target was purged (tombstone recorded)\",\n        tombstone,",
+      "endLine": 5249,
+      "explanation": "If the attacker-selected file parses as JSON, KCS preserves its object fields, adds tombstone metadata, and installs the object as structured error context.",
+      "id": "tombstone-context",
+      "label": "Parsed JSON becomes tombstone error context",
+      "language": "rust",
+      "path": "crates/kcs-cli/src/main.rs",
+      "role": "outcome",
+      "startLine": 5227
+    },
+    {
+      "code": "pub fn to_error_json(&self) -> Value {\n    json!({\n        \"error_code\": self.error_code,\n        \"message\": self.message,\n        \"context\": self.context,\n    })\n}",
+      "endLine": 173,
+      "explanation": "`KcsError::to_error_json()` includes the full context object that `tombstone_error()` received from the parsed JSON file.",
+      "id": "json-error-output",
+      "label": "JSON-mode errors serialize context",
+      "language": "rust",
+      "path": "crates/kcs-core/src/error.rs",
+      "role": "outcome",
+      "startLine": 168
+    },
+    {
+      "code": "fn print_error(error: &KcsError, json_mode: bool) {\n    if json_mode {\n        eprintln!(\n            \"{}\",\n            serde_json::to_string(&error.to_error_json())\n                .expect(\"serializing command error cannot fail\")\n        );",
+      "endLine": 11190,
+      "explanation": "When the caller receives JSON-mode stderr, the file-derived context becomes observable structured output.",
+      "id": "stderr-json-sink",
+      "label": "print_error emits serialized JSON context",
+      "language": "rust",
+      "path": "crates/kcs-cli/src/main.rs",
+      "role": "outcome",
+      "startLine": 11184
+    }
+  ],
+  "extensions": {
+    "attackPathReport": "artifacts/05_findings/KCS-R23-CAND-069/attack_path_analysis_report.md",
+    "attackPathReportSha256": "47bca95e3a5277e4169a8641711de88b080f5e145279823189ffc24fb1862c6e",
+    "candidateId": "KCS-R23-CAND-069",
+    "ledgerRowId": "KCS-R23-CAND-069",
+    "reportId": "KCS-R23-CAND-069",
+    "reportPath": "findings/tac-kcs-r23-cand-069-inline-raw-hash-json-disclosure/tac-kcs-r23-cand-069-inline-raw-hash-json-disclosure.md",
+    "reportSha256": "9e28d88be26bdd76e02f3987e2ffd4b0fc6d9002371780d7ed11d563ebba8aa0",
+    "validationReport": "artifacts/05_findings/KCS-R23-CAND-069/validation_report.md",
+    "validationReportSha256": "3c3e39690dbb231a368fbb264ca9311c6ad4adac2d3701fc68aff7187dd14d16"
+  },
+  "final_policy": "reportable",
+  "final_severity": "high",
+  "ledger_row_id": "KCS-R23-CAND-069",
+  "priority": "P1",
+  "remediation": {
+    "regression_tests": [
+      "Inline JSON with an absolute `raw_hash` is rejected before `fs::read()`.",
+      "Inline JSON with `../`, mixed separators, short hashes, uppercase hashes, missing prefixes, or malformed hashes is rejected.",
+      "A valid `sha256:` plus 64 lowercase hex digest still checks the expected tombstone fanout path.",
+      "JSON-mode errors for malformed pointer operands do not include file-derived context."
+    ],
+    "summary": "Apply one shared full hash validator to every EvidencePointer hash before any lookup; require exactly `sha256:` plus 64 lowercase hex characters. Construct tombstone paths from validated digest components only, and reject absolute or non-Normal components as defense in depth."
+  },
+  "rootCause": {
+    "evidenceRefs": [
+      "pointer-raw-hash-string",
+      "inline-json-schema-only",
+      "tree-miss-tombstone-lookup",
+      "tombstone-read-path",
+      "tombstone-context",
+      "json-error-output",
+      "stderr-json-sink",
+      "short-hash-expected-control"
+    ],
+    "summary": "The violated invariant is that `raw_hash` must be a content hash before any storage lookup. Inline JSON pointer parsing accepts arbitrary `raw_hash` text, pointer resolution forwards it through a valid scope and commit tree-miss branch, and `read_tombstone()` uses it directly in a path followed by `fs::read()`. The expected short-hash validator demonstrates that path-shaped input should be rejected before lookup, but that control is not applied to inline JSON."
+  },
+  "scan_id": "f78f5d0d-2752-47a7-8d8d-3371e09d3377",
+  "schema_version": 1,
+  "severity": {
+    "level": "high",
+    "priority": "P1",
+    "rationale": "High impact and high likelihood are supported by a complete source-to-output trace and an in-scope partially trusted caller boundary. Critical is not justified because valid repository context, readable JSON target files, and structured error exposure remain prerequisites, and no code execution or broad automatic exfiltration is shown."
+  },
+  "source_artifacts": {
+    "attack_path_report": "artifacts/05_findings/KCS-R23-CAND-069/attack_path_analysis_report.md",
+    "validation_report": "artifacts/05_findings/KCS-R23-CAND-069/validation_report.md"
+  },
+  "source_revision": "0e19f3c6489da458e93a982a333c308d92d0a0ae",
+  "summary": "The inline JSON EvidencePointer parser validates only schema_version and leaves raw_hash as an unconstrained String. When a real scope and existing commit do not contain that raw_hash, pointer resolution probes the tombstone store before returning not-found. read_tombstone joins the attacker-controlled raw_hash into the tombstone path and calls fs::read; absolute or parent-bearing values escape .kcs/tombstones, and parsed JSON is returned through KcsError.context in JSON-mode error output.",
+  "target_revision": "0e19f3c6489da458e93a982a333c308d92d0a0ae",
+  "title": "Inline EvidencePointer raw_hash escapes tombstone storage and discloses arbitrary JSON files",
+  "validation": {
+    "assertions": [
+      "Inline JSON deserialization leaves `raw_hash` unconstrained.",
+      "A valid scope and existing commit whose tree lacks the supplied `raw_hash` reaches tombstone lookup.",
+      "`read_tombstone()` checks only digest length before joining `raw_hash` into a filesystem path and reading it.",
+      "A parsed JSON object survives in the error context and is emitted in JSON mode."
+    ],
+    "confidence": "high",
+    "evidenceRefs": [
+      "pointer-raw-hash-string",
+      "inline-json-schema-only",
+      "tree-miss-tombstone-lookup",
+      "tombstone-read-path",
+      "tombstone-context",
+      "json-error-output",
+      "stderr-json-sink"
+    ],
+    "limitations": [
+      "The attacker must provide or reuse a valid scope and existing commit.",
+      "The selected target must be readable by the KCS process and parse as JSON.",
+      "Disclosure requires JSON-mode error output or an integration that exposes structured errors.",
+      "The TAC PoC is synthetic and local; it does not invoke KCS or read real secrets."
+    ],
+    "method": "complete static source trace plus safe local synthetic path probe",
+    "summary": "The saved validation traced attacker-controlled inline `raw_hash` from JSON deserialization through scope and commit checks, the tombstone path join, `fs::read`, JSON parsing, `KcsError.context`, and JSON-mode stderr. The TAC PoC added a local synthetic path observation showing that an absolute final component escapes the intended tombstone prefix and that a strict full-hash validator rejects the same value."
+  },
+  "writeup": {
+    "attemptId": "tac_20260712",
+    "pocDirectory": "findings/tac-kcs-r23-cand-069-inline-raw-hash-json-disclosure/poc",
+    "reportPath": "findings/tac-kcs-r23-cand-069-inline-raw-hash-json-disclosure/tac-kcs-r23-cand-069-inline-raw-hash-json-disclosure.md",
+    "reportSha256": "9e28d88be26bdd76e02f3987e2ffd4b0fc6d9002371780d7ed11d563ebba8aa0",
+    "supportingArtifacts": [
+      {
+        "path": "findings/tac-kcs-r23-cand-069-inline-raw-hash-json-disclosure/poc/Makefile",
+        "sha256": "dc1ef6288bfa93b2b7b71b359ecc349b1316247ac97829a25e6f4f1c284bcb41"
+      },
+      {
+        "path": "findings/tac-kcs-r23-cand-069-inline-raw-hash-json-disclosure/poc/README.md",
+        "sha256": "22999a9010b6a6a7a217a0beb632b6882d396f52279afa746e3c554afb0db1f8"
+      },
+      {
+        "path": "findings/tac-kcs-r23-cand-069-inline-raw-hash-json-disclosure/poc/synthetic_tombstone_path_probe.py",
+        "sha256": "2a0e34a6404ae768ad54c7543cc9d1e8f136f4aab639a0cb6ec5cfb8e5749b24"
+      }
+    ]
+  }
+}
