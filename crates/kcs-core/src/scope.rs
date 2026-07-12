@@ -5,6 +5,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+#[cfg(not(windows))]
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -2439,6 +2440,42 @@ fn lock_file_matches(path: &Path, pid: u32, token: &str) -> Result<bool> {
     Ok(read_lock_file(path)?.is_some_and(|lock| lock.pid == pid && lock.token == token))
 }
 
+#[cfg(windows)]
+fn process_is_alive(pid: u32) -> bool {
+    if pid == std::process::id() {
+        return true;
+    }
+
+    use windows_sys::Win32::Foundation::{
+        CloseHandle, GetLastError, ERROR_INVALID_PARAMETER, STILL_ACTIVE,
+    };
+    use windows_sys::Win32::System::Threading::{
+        GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+
+    // SAFETY: `OpenProcess` is called with a PID read from the lock file and no
+    // inheritable handle. A null handle is never passed to the query/close calls.
+    let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+    if process.is_null() {
+        // Windows documents ERROR_INVALID_PARAMETER for a PID that does not name
+        // a process (including PID 0). Access denial and every other query error
+        // are ambiguous, so keep the lock rather than reclaiming a live owner's.
+        return unsafe { GetLastError() } != ERROR_INVALID_PARAMETER;
+    }
+
+    let mut exit_code = 0_u32;
+    // SAFETY: `process` is a valid handle returned by `OpenProcess`, and
+    // `exit_code` points to writable storage for the duration of the call.
+    let queried = unsafe { GetExitCodeProcess(process, &mut exit_code) } != 0;
+    // SAFETY: this function owns the process handle and closes it exactly once.
+    let _ = unsafe { CloseHandle(process) };
+
+    // A query failure is ambiguous. Conservatively retain the lock; otherwise,
+    // STILL_ACTIVE is the documented marker for a process that has not exited.
+    !queried || exit_code == STILL_ACTIVE as u32
+}
+
+#[cfg(not(windows))]
 fn process_is_alive(pid: u32) -> bool {
     if pid == std::process::id() {
         return true;
@@ -2651,16 +2688,27 @@ pub fn parse_utc_seconds(value: &str) -> Option<i64> {
 mod tests {
     use super::{
         append_jsonl_rotating, civil_from_days, format_unix_seconds, format_utc_seconds,
-        open_scope_file_nofollow, parse_utc_seconds, prune_rotated_logs, read_logs_retention_days,
-        redact_context, redact_message_paths, rotate_stale_log, ArchiveLimits, PendingNormalizeRef,
-        Repository, StoreLock, DEFAULT_MAX_ARCHIVE_FILE_BYTES, MAX_COMMIT_PARENTS,
-        MAX_TREE_ENTRIES,
+        open_scope_file_nofollow, parse_utc_seconds, process_is_alive, prune_rotated_logs,
+        read_logs_retention_days, redact_context, redact_message_paths, rotate_stale_log,
+        ArchiveLimits, PendingNormalizeRef, Repository, StoreLock, DEFAULT_MAX_ARCHIVE_FILE_BYTES,
+        MAX_COMMIT_PARENTS, MAX_TREE_ENTRIES,
     };
     use crate::cas::{hash_bytes, ObjectKind, ObjectStore};
     use crate::dag::NormalizeRef;
     use serde_json::json;
     use std::collections::{BTreeMap, BTreeSet};
     use std::fs;
+
+    #[test]
+    fn process_liveness_recognizes_current_process() {
+        assert!(process_is_alive(std::process::id()));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_process_liveness_rejects_reserved_pid_zero() {
+        assert!(!process_is_alive(0));
+    }
 
     // F8: the device-global cost-ledger lock is acquired via `acquire_path` at an
     // arbitrary path outside any `.kcs`. It must create the parent dir, remove the
