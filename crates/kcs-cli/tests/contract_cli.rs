@@ -20,6 +20,7 @@ const KCS_CHILD_ENV_DENYLIST: &[&str] = &[
     "KCS_TEST_R13_2_AUTH",
     "KCS_TEST_R13_2_DECLARED",
     "KCS_TEST_R13_2_FALLBACK",
+    "KCS_TEST_WINDOWS_PROFILE",
 ];
 
 fn hermetic_assert_command() -> AssertCommand {
@@ -219,13 +220,24 @@ fn ct_cli_snapshot_commit_alias_log_inspect_tag_diff() {
     assert_eq!(inspected["object_type"], "commit");
     assert_eq!(inspected["parents"][0], snap["commit_hash"]);
 
-    kcs()
-        .args(["tag", "v1", second["commit_hash"].as_str().unwrap()])
+    let tag_out = kcs()
+        .args([
+            "tag",
+            "v1",
+            second["commit_hash"].as_str().unwrap(),
+            "--json",
+        ])
         .current_dir(left.path())
         .assert()
-        .success();
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let tag: Value = serde_json::from_slice(&tag_out).unwrap();
+    let tag_path = tag["path"].as_str().unwrap();
+    assert!(Path::new(tag_path).is_file());
     assert_eq!(
-        fs::read_to_string(left.path().join(".kcs/refs/tags/v1")).unwrap(),
+        fs::read_to_string(tag_path).unwrap(),
         second["commit_hash"].as_str().unwrap()
     );
 

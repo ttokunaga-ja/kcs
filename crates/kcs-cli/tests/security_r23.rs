@@ -18,6 +18,7 @@ const KCS_CHILD_ENV_DENYLIST: &[&str] = &[
     "KCS_TEST_R13_2_AUTH",
     "KCS_TEST_R13_2_DECLARED",
     "KCS_TEST_R13_2_FALLBACK",
+    "KCS_TEST_WINDOWS_PROFILE",
 ];
 
 fn hermetic_kcs_command() -> Command {

@@ -49,7 +49,8 @@ raw / prepared / image / chunk / embedding / tree / commit は **CAS object** �
     commits/ab/cd/<commit64>
   refs/
     heads/main
-    tags/<name>
+    tags-v1/tag-<digest64>          # canonical: digest64 = sha256(NFC + Unicode lowercase の論理 tag 名)
+    tags/<logical-name>             # legacy Unix raw-name refs (read-only compatibility)
   tombstones/ab/cd/<raw64>      purge の tombstone 記録 (05-runtime.md §3.5。CAS object ではない)
   index/
     sqlite.db         FTS5 + sqlite-vec (query acceleration layer; 真実は objects/)
@@ -77,6 +78,17 @@ object identity と hash 算出規約は変わらない。
   canonical path へ copy、rename、rewrite しない。normalized の同一 gen を更新する既存の partial retry
   だけは、選択済みの legacy layout 内で instance/view を置き換えられるが、canonical への eager migration
   は行わない。したがって事前の一括移行は不要であり、既存 store は段階的に利用し続けられる
+
+tag の新規物理 leaf は上記の固定 ASCII hash 形式を使う。論理 tag 名は OS 非依存の portable
+leaf 規則 (Windows 予約名、`<>:"/\\|?*`、control、末尾 dot/space を禁止) を満たす必要があり、
+NFC 正規化 + Unicode lowercase が同じ名前は case-insensitive collision として同一 slot を占める。
+`HEAD` の case variant は論理 tag 名として予約する。canonical ref は legacy namespace と分離した
+`refs/tags-v1/tag-<digest64>` に置くため、`tag-<digest64>` に見える旧 raw tag も別の canonical ref と
+誤認せず、その論理名のまま読める。旧 Unix store の `refs/tags/<name>` は bounded・hash 検証付き
+fallback で読み、canonical と legacy
+が併存するときは全表現が同じ commit を指す場合だけ受理する。履歴 tree 内の `path` は論理名なので、
+Windows で物理 leaf にできない既存 Unix 名も read/inspect は可能とし、restore 等の物理化直前に
+対象 OS の規則を別途検証する。
 
 **format_version**: 旧称 `VERSION 0.1.0` (research/kcs.md) は `kcs_format_version` に統一。semver は [10-operations.md §12.5](10-operations.md) 参照。
 
@@ -422,7 +434,7 @@ image_hash    = "sha256:" + base16(sha256(抽出画像のバイト列))
 - tree の `entries` は `path` の UTF-8 バイト列昇順で一意にソートする。同一 `path` の重複 entry は禁止。
 - commit の `parents` は commit_hash の配列。第一要素は直前 HEAD (first parent)。
 - timestamp は UTC ISO8601 + `Z` ([06-cli-spec.md §12](06-cli-spec.md))。
-- `HEAD` / `refs/heads/*` / `refs/tags/*` の値は commit_hash。
+- `HEAD` / `refs/heads/*` / canonical `refs/tags-v1/*` / legacy `refs/tags/*` の値は commit_hash。
 
 **chunk** — identity hash:
 

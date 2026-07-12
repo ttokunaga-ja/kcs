@@ -4,6 +4,7 @@ pub mod cas;
 pub mod dag;
 pub mod error;
 pub mod exit_code;
+pub mod portable;
 pub mod schema;
 pub mod scope;
 pub mod xdg;

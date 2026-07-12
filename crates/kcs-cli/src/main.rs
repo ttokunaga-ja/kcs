@@ -24,6 +24,7 @@ use kcs_adapter::types::{
 };
 use kcs_core::cas::{fanout_path, hash_path_component, is_hash, MAX_RAW_OBJECT_BYTES};
 use kcs_core::dag::{NormalizeRef, TreeObject};
+use kcs_core::portable::{portable_cache_leaf, portable_tag_leaf, PORTABLE_TAGS_DIRECTORY};
 use kcs_core::schema::{validate_json_schema, SchemaKind};
 use kcs_core::scope::{
     append_error_log, append_event_log, append_warn_log, new_ulid, now_utc_seconds,
@@ -568,7 +569,7 @@ fn run(cli: Cli) -> Result<Value> {
             Ok(json!({
                 "tag": args.name,
                 "commit_hash": commit_hash,
-                "path": repo.kcs_dir().join("refs/tags").join(args.name),
+                "path": repo.kcs_dir().join("refs").join(PORTABLE_TAGS_DIRECTORY).join(portable_tag_leaf(&args.name)),
             }))
         }
         Command::Index(args) => run_index(args),
@@ -5178,10 +5179,7 @@ fn open_cas_byte_object(
     else {
         return Ok(None);
     };
-    let basename = path_hint
-        .and_then(|path| Path::new(path).file_name())
-        .and_then(|name| name.to_str())
-        .unwrap_or("object");
+    let basename = path_hint.unwrap_or("object");
     // P9 (06 §1.1): the read-only expansion cache belongs under $XDG_CACHE_HOME
     // (regenerable, safe to purge), not $XDG_DATA_HOME (durable truth/state).
     let cache = open_cache_path(basename, hash);
@@ -5324,7 +5322,7 @@ fn open_cache_path(basename: &str, hash: &str) -> PathBuf {
     cache_home()
         .join("kcs/open")
         .join(hash.trim_start_matches("sha256:"))
-        .join(basename)
+        .join(portable_cache_leaf(basename))
 }
 
 /// R10-6: crash-atomic write of the open/view expansion cache file. Writes bytes to
@@ -13038,7 +13036,10 @@ mod tests {
             .unwrap();
         assert_eq!(dir.len(), 64, "cache dir must be the full 64-hex hash");
         assert_eq!(dir, "a".repeat(64));
-        assert_eq!(path.file_name().unwrap(), "doc.md");
+        let leaf = path.file_name().unwrap().to_str().unwrap();
+        assert_ne!(leaf, "doc.md");
+        assert!(leaf.starts_with("open-"));
+        assert!(leaf.ends_with(".md"));
     }
 
     #[test]
