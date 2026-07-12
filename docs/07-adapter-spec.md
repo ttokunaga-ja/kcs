@@ -213,6 +213,49 @@ incremental の詳細プロンプト規約は §8 (生成 LLM 系のみ。§8 �
   incremental 再利用でさらに希釈されるため +25% は budget 内。生成 LLM (Gemini Vision) による二次
   Markdownize fallback は annotation で不足する場合の Phase 4+ 保留のまま。実装は Step 4 (契約は
   step4a で確定)。
+  - wire は次の exact `bbox_annotation_format` JSON Schema 1 個を使い、説明/書き起こし指示は schema
+    field description に固定する (bbox 専用 prompt parameter は使わない)。各 `pages[].images[]` の
+    `image_annotation` は `short_description` / `transcribed_text` の厳密 JSON とする。JCS byte 列の
+    sha256 `sha256:9404f8ffe2983113f082d255a61817ad0798e74aeb82cb5063a391fbcbea9ca8`
+    を enabled profile の `prompt_template_hash` とする
+
+    ```json
+    {
+      "type": "json_schema",
+      "json_schema": {
+        "name": "kcs_bbox_annotation_v1",
+        "strict": true,
+        "schema": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "short_description": {
+              "type": "string",
+              "description": "Describe the figure briefly in plain text. Do not use Markdown or HTML."
+            },
+            "transcribed_text": {
+              "type": "string",
+              "description": "Transcribe all visible text verbatim in plain text. Do not use Markdown or HTML."
+            }
+          },
+          "required": ["short_description", "transcribed_text"]
+        }
+      }
+    }
+    ```
+
+  - annotation text は newline→LF / NFC / non-newline-control 除去後、provider 由来の各行を次の exact
+    CommonMark source escape に通す: original `&`→`&amp;`、`<`→`&lt;`、`>`→`&gt;`、それ以外の
+    ASCII punctuation (`U+0021..002F`, `U+003A..0040`, `U+005B..0060`, `U+007B..007E`) は文字の前に
+    `\` を 1 個付け、その他は変更しない。変換後の各行を trusted prefix
+    `> KCS figure description: ` / `> KCS figure text: ` の後へ置き、対応 image URI 直後の persisted
+    unit Markdown に入れる。unit metadata にも同じ post-escape strings を保持し、検索 bytes と Evidence
+    span の元を一致させる。この変換後の CommonMark AST は provider 由来の link / image / raw HTML /
+    autolink node を 1 件も含んではならない
+  - 上限は image 256/page・4,096/response、description 4 KiB、transcription 64 KiB、aggregate
+    16 MiB、bbox coordinate 0..=1e9 かつ positive area。string/aggregate byte 上限は untrusted response
+    decode 時と上記 canonical escape 後の両方で検査し、膨張後も超過を許さない。annotation
+    policy/profile は task identity に含め、既存 annotation 無し Done task を default-on の完了扱いにしない
 - 生成 LLM (Gemini / Claude / GPT 等) は Markdownize の主処理ではなく、OCR 後の品質検証・図表解釈・summary (§5.4) に使う。
 
 > **実地検証済み (2026-07-03、設計宿題 #6 解消 [09-mvp-scope.md §5.5](09-mvp-scope.md))**: 合成 fixture (複雑表・日本語・数式・埋め込み画像、4 ページ) を sync / Batch 両モードで検証: 表セル一致率 1.0 (17/17)、日本語 CER 0.0、画像抽出 1/1 (placeholder 形式も §5.2 想定どおり)、数式は LaTeX でテキスト化。単価は公称一致 (API $4 / Batch $2 per 1,000 pages)、Batch のジョブ往復は 4 ページで約 24 秒。ハーネスと実測ログは `experiments/ocr-verification`。検証が崩れた場合の fallback (生成 LLM 系 §8.2 へ戻す) の設計は維持する。

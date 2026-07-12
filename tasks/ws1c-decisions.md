@@ -311,3 +311,125 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     containing names such as `CON`, `?`, `:`, trailing dot/space, or a literal backslash without
     permitting those names to escape or materialize unsafely. Read-only status/diff retains the
     logical `relative_path` but omits the absolute physical `path` when the host cannot materialize it.
+
+## Step 4 contract freeze (2026-07-13)
+
+64. Canonical phase boundaries win over stale kickoff prose. Step 4 implements single-pointer
+    `evidence verify`; verify batch, retarget, export/import, `kcs move`, `kcs gc`, retention, and full
+    purge DAG rewriting remain Phase 4+/v2. `docs/11-requirements.md` is not a current source.
+65. Time-travel has one effective selector. `--since` implies all-history and freezes its page-1 UTC
+    cutoff inside the signed cursor; duration grammar is positive `s/m/h/d/w`. `--at` resolves per
+    selected scope and uses existing partial/all-failed multi-scope behavior. Explicit-at shallow is
+    always `KCS-E-COMMIT-SHALLOW-001`, even if cached tree rows survive. The cursor carries canonical
+    `time_travel`; selector-less replay inherits it and repeated selector flags must match exactly.
+66. Historical path reporting preserves the frozen M3-2 alias criterion without changing chunk
+    identity. All-history/since expands one chunk to each distinct historical path binding, collapsing
+    repeated `(chunk,path)` appearances across every commit reachable from the page-1 snapshot HEAD via
+    all parent edges. The backing commit is the ancestor-most introduction; incomparable introductions
+    tie-break by full commit hash. Each alias carries sorted page-1 snapshot `current_paths`; singular
+    `current_path` is emitted only for exactly one live snapshot path, so twins are unambiguous. An unchanged rename therefore
+    returns old/new path hits backed by one path-independent chunk row.
+67. Historical reindex is enrichment-only. `reindex --at` never bumps normalized gen or moves HEAD;
+    it fills missing current-chunk-config chunks/embeddings for the selected snapshot under normal
+    consent/budget rules. `--force --at` is invalid; existing HEAD `--force` keeps gen+1 semantics.
+68. Evidence verify has exactly three completed states (`alive`, `tombstoned`, `not_found`). Non-strict
+    returns exit 0 for every completed inspection; strict keeps the state payload but exits 4 for dead
+    states. Scope resolution failure is an error, not a fourth state. Verify is bounded, no-follow,
+    lock-free, content-free, and never materializes/open-caches data.
+69. Chunk CAS becomes durable truth for Step 4 verify/fsck. SQLite and `chunks.jsonl` remain acceleration
+    and rebuild inputs but cannot independently make a pointer alive. Repair verifies bounded raw,
+    chunk, tree, commit objects and normalized reference integrity; identical working bytes may heal a
+    raw object and force a `commit_type=repaired` commit. The repaired commit remains unprotected /
+    shallow-eligible per 05 §2.1; the recovered raw object itself stays GC-ineligible.
+70. Restore syntax is `restore <evidence|path|commit> --to <dir>`; raw-hash shorthand is excluded.
+    URI/JSON/stdin selects evidence, HEAD/full hash selects commit, and other operands resolve tag
+    before logical direct-child path. Path selects the newest matching entry on HEAD's first-parent
+    ancestry (merge side parents require evidence/commit) and fails on incomplete shallow ancestry.
+    Every restore source rejects shallow/purged content, all source bytes
+    come from verified CAS, and `.kcs` remains lock-free/read-only. Destination publication is private,
+    no-clobber by default, force-confirmed, per-file atomic, and reparse/symlink safe.
+71. Purge-by-path means every raw ever bound to that logical path; incomplete shallow history fails.
+    Raw-hash purge remains available. KCS never deletes user originals and refuses purge while target
+    bytes remain in the working tree. Default tombstones gate all read/ingest paths; erase mode leaves
+    no resurrection barrier and reports that limitation.
+72. Purge is a resumable monotonic transaction under the store lock. An owner-only journal is written
+    before a tombstone/in-progress visibility barrier; after it, all reads are dead even if physical
+    cleanup is incomplete. Post-barrier failure returns `KCS-E-PURGE-INCOMPLETE-001` exit 3 and rerun
+    resumes. Identical default repeat is idempotent; converting an existing tombstone to erase is
+    deferred/rejected. Shared derived objects survive only while referenced by non-target raws; images
+    are purgeable content. Logs are serialized and scrubbed before a sanitized reason/actor/count event.
+73. Bbox annotation is default-on at `markdownize.bbox_annotation.enabled`. Enabled identity uses
+    `kcs-markdown+bbox-annotation-v1` plus fixed prompt id/hash; disabled identity stays the existing
+    profile. Bounded `short_description`/`transcribed_text` metadata is bound to image order/bbox and
+    projected beside the image URI for chunk search without changing required Evidence fields.
+74. Online Markdownize promotion occurs only for current, fully accepted Done outputs under the store
+    lock. One deterministic batch atomically materializes the resolved immutable profile in tool-lock,
+    creates an auto commit with matching normalize refs, and swaps rebuilt SQLite. Stale/partial/failed
+    output never promotes; repeated Done processing is idempotent and does not recharge.
+75. Chunk CAS uses one exact semantic JSON payload: `spec_version:1`, the eight identity fields
+    (`raw_hash`, `tool_profile_hash`, `gen`, `unit_key`, `heading_path`, optional `section_id`, optional
+    `char_start`, optional `char_end`), `text_hash`, and exact `text`. It omits its own `chunk_hash`, path,
+    first-seen/created timestamps, and `chunking_config_hash`; the latter remains generation metadata in
+    the append-only index/ledger and may map multiple config hashes to one chunk identity. Fsck recomputes
+    the identity hash against the fan-out key and validates `text_hash` against both text and normalized
+    span; it does not content-hash the JSON bytes.
+76. Fsck treats validated tombstones and internal non-content erase receipts as healthy dead terminals.
+    `--erase-tombstone` leaves no public tombstone and verify stays `not_found`, but atomically retains
+    `.kcs/purge/erase-receipts/ab/cd/<raw64>` with exact `{schema_version,raw_hash,purged_in_commit,
+    erased_at}` for fsck only. It never blocks re-ingest; verified raw wins and retires a stale receipt.
+    A valid receipt binds to a verified ref-reachable purged commit and its exact non-future UTC
+    `created_at`; malformed, forged, future, or unreachable bindings are corruption.
+    Active journal is incomplete exit 3, receipt-covered bytes are never auto-healed, and unmarked
+    missing references remain store corruption. Reports list bounded affected commit hashes and state
+    that external self-contained pointers may be affected, never fabricate a pointer registry.
+77. Purge log scrub is serialized beyond the scope lock. Device events/errors/metrics appenders and
+    scrubbers share `$XDG_DATA_HOME/kcs/logs/scrub.lock`; scope access appenders/scrubbers share
+    `.kcs/logs/access.scrub.lock`. Lock order is scope store → reservation ledger → device observability
+    → scope access. A final scrub runs before the purge journal/barrier is removed.
+78. Bbox annotation follows the Mistral wire format: one `bbox_annotation_format`, instructions inside
+    one exact strict JSON Schema whose JCS hash is `sha256:9404f8ff...9ca8`, and one
+    `pages[].images[].image_annotation` JSON string per returned image. Bounds are 256 images/page,
+    4,096/response, 4 KiB description, 64 KiB transcription, 16 MiB aggregate, and strict
+    non-negative/positive-area coordinates ≤1e9. NFC/control-normalized provider text HTML-encodes
+    `&<>` and backslash-escapes every other ASCII punctuation before trusted blockquote prefixes; the
+    same safe strings are retained in metadata and cannot form provider-created CommonMark links/images/
+    HTML. Task identity pins annotation policy/profile, and zero-text prepared inputs still reach OCR;
+    old non-bbox Done work cannot suppress it.
+79. Fsck walks every commit parent with a visited set and is globally bounded at 1,000,000 objects,
+    1 TiB streamed bytes, 1,024 findings, and 4,096 affected commit hashes. Prepared/image/embedding
+    content rehash is outside the 10 §7.5 minimum, but referenced prepared/image identities are checked
+    through normalized validation. Chunk/tree/commit damage is report-only; automatic recovery is raw-only.
+80. `chunking_config_hash` is a many-to-many generation association, not a column in immutable chunk
+    CAS identity. SQLite uses append-only `chunk_config_generations(association_rowid,chunk_id,
+    chunking_config_hash,created_at)` and the durable chunk ledger may hold one association record per
+    `(chunk_id,config)`. Search joins this relation; signed cursors freeze maximum association rowid,
+    chunk rowid, each scope's effective config, and the page-1 `--since` cutoff. Query identity binds a
+    sorted `{scope_id,chunking_config_hash}` mapping, so later associations, per-scope config changes,
+    and moving time cannot silently change page 2.
+81. History traversal has explicit aggregate caps in addition to per-object limits. All-parent and
+    first-parent walks each have independent maxima of 100,000 commits, 10,000,000 tree entries, and
+    4 GiB verified commit+tree bytes. Search fails a scope without partial aliases; purge/restore fail
+    before mutation/publication with `KCS-E-COMMIT-HISTORY-LIMIT-001`.
+82. Include-deleted is snapshot-derived, not mutable-manifest-derived: for each path absent at page-1
+    snapshot, use the newest exact binding on snapshot HEAD's first-parent ancestry. Its pointer commit
+    is that binding commit, so `path_at_commit` exists and cursor replay ignores later manifest changes.
+    A live binding wins over a same-chunk deleted alias; with no live binding all distinct final-deleted
+    paths expand after ranking, and live twins choose the bytewise-smallest path.
+83. Search performs per-scope rank/RRF, rank-based cross-scope merge, then global MMR/dedup on unique
+    semantic chunks with immutable tie key `(scope_id,chunk_hash)`. It expands retained historical/
+    deleted aliases afterward, copies the parent score/rank, orders each group by
+    `(scope_id,chunk_hash,path_at_commit,evidence_pointer.commit)`, and paginates.
+    Mutable `scope_path` never orders results; aliases neither compete in MMR nor re-count against
+    `max_per_raw_hash`; cursor consumed counts final expanded hits per scope, so old/new aliases survive
+    and pagination is deterministic even inside one alias group.
+84. Step 4 cursor schema is version 2 because selector, per-scope config, and association maxima are
+    security-required bindings. Legacy v1 and unknown versions are rejected as cursor misuse; cursors
+    are opaque short-lived paging state, not durable artifacts.
+85. Multi-scope cursors contain only successfully participating active scope sub-cursors/configs plus
+    bounded signed page-1 exclusions. Initial exclusions never enter. Loss/corruption/shallowing of any
+    active replay scope hard-fails cause-specifically without a partial page/next cursor because
+    shrinking the global MMR input would invalidate consumed offsets; fresh search is required. Config
+    drift is cursor misuse. Ordering uses immutable scope_id, so moving a scope changes display hints only.
+86. Historical eligibility never fills an omitted tree-entry `normalize` from later instances or cached
+    projections. CAS tree omission means zero chunks at that commit for `--at`, all-history, and
+    include-deleted; this closes future-normalization leakage into old snapshots.
