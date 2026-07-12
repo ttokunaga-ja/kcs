@@ -639,6 +639,7 @@ version = "0.1.0"
 dependencies = [
  "assert_cmd",
  "clap",
+ "getrandom 0.3.4",
  "kcs-adapter",
  "kcs-core",
  "kcs-index",
