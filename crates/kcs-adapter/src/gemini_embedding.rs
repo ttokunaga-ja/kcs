@@ -10,11 +10,15 @@
 //! the wire format below is documentation-accurate best effort and the contract is
 //! covered by the CLI mock seam. `profile()` never performs network I/O.
 
+use crate::http_policy::{
+    authenticated_agent, read_json_bounded, HttpPolicy, EMBEDDING_RESPONSE_MAX_BYTES,
+    MODEL_CATALOG_MAX_BYTES,
+};
 use crate::identity::{is_mutable_model_alias, tool_profile_hash};
 use crate::traits::EmbeddingAdapter;
 use crate::types::{
-    AdapterKind, AdapterProfile, EmbeddingItem, EmbeddingRequest, EmbeddingResponse,
-    EmbeddingVector, ExecutionMode,
+    validate_cosine_vector, AdapterKind, AdapterProfile, EmbeddingItem, EmbeddingRequest,
+    EmbeddingResponse, EmbeddingVector, ExecutionMode,
 };
 use crate::{AdapterError, Result};
 use serde_json::{json, Value};
@@ -24,6 +28,7 @@ use serde_json::{json, Value};
 pub const ADOPTED_MODEL_FAMILY: &str = "gemini-embedding";
 pub const ADOPTED_MODEL_PIN: &str = "gemini-embedding-2";
 pub const ADOPTED_DIMENSIONS: u32 = 768;
+const GEMINI_API_ORIGIN: &str = "https://generativelanguage.googleapis.com";
 
 /// Network boundary for the Gemini embedding backend.
 pub trait GeminiEmbeddingClient: Clone {
@@ -43,12 +48,16 @@ pub trait GeminiEmbeddingClient: Clone {
 #[derive(Debug, Clone, Default)]
 pub struct EnvGeminiEmbeddingClient {
     base_url: Option<String>,
+    http_policy: HttpPolicy,
 }
 
 impl EnvGeminiEmbeddingClient {
     #[must_use]
     pub fn new() -> Self {
-        Self { base_url: None }
+        Self {
+            base_url: None,
+            http_policy: HttpPolicy::default(),
+        }
     }
 
     #[allow(dead_code)]
@@ -56,14 +65,23 @@ impl EnvGeminiEmbeddingClient {
     pub fn with_base_url(base_url: impl Into<String>) -> Self {
         Self {
             base_url: Some(base_url.into()),
+            http_policy: HttpPolicy::default(),
         }
     }
 
     fn base_url(&self) -> String {
         self.base_url
             .clone()
-            .or_else(|| std::env::var("GEMINI_API_BASE").ok())
-            .unwrap_or_else(|| "https://generativelanguage.googleapis.com".to_owned())
+            .or_else(|| {
+                // A registered built-in declaration is origin-bound. The legacy
+                // environment override remains only for undeclared compatibility
+                // and hermetic tests.
+                crate::tool_lock::registered_declared_adapter("embedding")
+                    .is_none()
+                    .then(|| std::env::var("GEMINI_API_BASE").ok())
+                    .flatten()
+            })
+            .unwrap_or_else(|| GEMINI_API_ORIGIN.to_owned())
             .trim_end_matches('/')
             .to_owned()
     }
@@ -87,12 +105,17 @@ impl GeminiEmbeddingClient for EnvGeminiEmbeddingClient {
             return Ok(configured_model.to_owned());
         }
         let api_key = Self::api_key()?;
-        let value: Value = ureq::get(&format!("{}/v1beta/models", self.base_url()))
+        let response = authenticated_agent(self.http_policy)
+            .get(&format!("{}/v1beta/models", self.base_url()))
             .set("x-goog-api-key", &api_key)
+            .set("Accept-Encoding", "identity")
             .call()
-            .map_err(http_error)?
-            .into_json()
-            .map_err(|err| AdapterError::ContractViolation(err.to_string()))?;
+            .map_err(http_error)?;
+        let value = read_json_bounded(
+            response,
+            MODEL_CATALOG_MAX_BYTES,
+            "Gemini model catalog response",
+        )?;
         // Model ids arrive as "models/<family>-NNN"; pick the max stable version
         // of the configured family, rejecting any remaining "-latest" alias.
         let family = configured_model
@@ -100,11 +123,29 @@ impl GeminiEmbeddingClient for EnvGeminiEmbeddingClient {
             .rsplit('/')
             .next()
             .unwrap_or(configured_model);
-        value
+        let models = value
             .get("models")
             .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
+            .ok_or_else(|| {
+                AdapterError::ContractViolation("Gemini model catalog missing models".to_owned())
+            })?;
+        if models.len() > 10_000 {
+            return Err(AdapterError::ContractViolation(
+                "Gemini model catalog has too many entries".to_owned(),
+            ));
+        }
+        if models.iter().any(|model| {
+            model
+                .get("name")
+                .and_then(Value::as_str)
+                .is_some_and(|name| name.len() > 512)
+        }) {
+            return Err(AdapterError::ContractViolation(
+                "Gemini model identifier exceeds 512 bytes".to_owned(),
+            ));
+        }
+        models
+            .iter()
             .filter_map(|model| model.get("name").and_then(Value::as_str))
             .map(|name| name.rsplit('/').next().unwrap_or(name))
             .filter(|id| id.starts_with(family) && !id.ends_with("-latest"))
@@ -136,16 +177,21 @@ impl GeminiEmbeddingClient for EnvGeminiEmbeddingClient {
                 })
             })
             .collect::<Vec<_>>();
-        let response: Value = ureq::post(&format!(
-            "{}/v1beta/models/{model_pin}:batchEmbedContents",
-            self.base_url()
-        ))
-        .set("x-goog-api-key", &api_key)
-        .set("Content-Type", "application/json")
-        .send_json(json!({ "requests": requests }))
-        .map_err(http_error)?
-        .into_json()
-        .map_err(|err| AdapterError::ContractViolation(err.to_string()))?;
+        let response = authenticated_agent(self.http_policy)
+            .post(&format!(
+                "{}/v1beta/models/{model_pin}:batchEmbedContents",
+                self.base_url()
+            ))
+            .set("x-goog-api-key", &api_key)
+            .set("Content-Type", "application/json")
+            .set("Accept-Encoding", "identity")
+            .send_json(json!({ "requests": requests }))
+            .map_err(http_error)?;
+        let response = read_json_bounded(
+            response,
+            EMBEDDING_RESPONSE_MAX_BYTES,
+            "Gemini embedding response",
+        )?;
         parse_embeddings(&response, items, dimensions)
     }
 }
@@ -170,12 +216,19 @@ fn parse_embeddings(
         .iter()
         .zip(embeddings)
         .map(|(item, embedding)| {
-            let vector = embedding
+            let values = embedding
                 .get("values")
                 .and_then(Value::as_array)
                 .ok_or_else(|| {
                     AdapterError::ContractViolation("embedding missing values".to_owned())
-                })?
+                })?;
+            if values.len() != dimensions as usize {
+                return Err(AdapterError::ContractViolation(format!(
+                    "embedding dimension mismatch: expected {dimensions}, got {}",
+                    values.len()
+                )));
+            }
+            let vector = values
                 .iter()
                 .map(|value| value.as_f64().map(|value| value as f32))
                 .collect::<Option<Vec<f32>>>()
@@ -189,12 +242,7 @@ fn parse_embeddings(
             // (permanent KNN exclusion) even though the chunk is billed and marked
             // done, with no self-repair path. Reject it as a contract violation so
             // the batch fails (retryable/reportable) instead of being charged.
-            if vector.len() != dimensions as usize {
-                return Err(AdapterError::ContractViolation(format!(
-                    "embedding dimension mismatch: expected {dimensions}, got {}",
-                    vector.len()
-                )));
-            }
+            validate_cosine_vector(&vector, dimensions)?;
             Ok(EmbeddingVector {
                 id: item.id.clone(),
                 vector,
@@ -276,6 +324,19 @@ impl<C: GeminiEmbeddingClient> EmbeddingAdapter for GeminiEmbeddingAdapter<C> {
         let vectors = self
             .client
             .embed(&request.items, &model_pin, self.dimensions)?;
+        if vectors.len() != request.items.len() {
+            return Err(AdapterError::ContractViolation(
+                "embedding response count does not match request".to_owned(),
+            ));
+        }
+        for (item, vector) in request.items.iter().zip(&vectors) {
+            if vector.id != item.id {
+                return Err(AdapterError::ContractViolation(
+                    "embedding response order or identity does not match request".to_owned(),
+                ));
+            }
+            validate_cosine_vector(&vector.vector, self.dimensions)?;
+        }
         Ok(EmbeddingResponse {
             vectors,
             dimensions: self.dimensions,
@@ -330,7 +391,11 @@ mod tests {
                 .iter()
                 .map(|item| EmbeddingVector {
                     id: item.id.clone(),
-                    vector: vec![0.0; dimensions as usize],
+                    vector: {
+                        let mut vector = vec![0.0; dimensions as usize];
+                        vector[0] = 1.0;
+                        vector
+                    },
                 })
                 .collect())
         }
@@ -426,6 +491,33 @@ mod tests {
         assert!(
             matches!(err, AdapterError::ContractViolation(_)),
             "expected ContractViolation, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn embedding_numeric_domain_is_validated_after_f32_conversion() {
+        let items = vec![EmbeddingItem {
+            id: "x".to_owned(),
+            text: Some("a".to_owned()),
+            path: None,
+            mime: None,
+        }];
+        let over_range = json!({
+            "embeddings": [{ "values": [3.5e38, 1.0] }]
+        });
+        assert!(parse_embeddings(&over_range, &items, 2).is_err());
+
+        let zero = json!({
+            "embeddings": [{ "values": [0.0, 0.0] }]
+        });
+        assert!(parse_embeddings(&zero, &items, 2).is_err());
+
+        let valid = json!({
+            "embeddings": [{ "values": [1.0, 0.0] }]
+        });
+        assert_eq!(
+            parse_embeddings(&valid, &items, 2).unwrap()[0].vector,
+            vec![1.0, 0.0]
         );
     }
 }

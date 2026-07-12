@@ -576,11 +576,12 @@ Generated-At: 2026-04-25T12:00:00Z
 ```toml
 [markdown.mistral_ocr_markdownize]
 kind = "online_api"
-cmd = "uvx kcs-mistral-ocr-adapter"
 model = "mistral-ocr-latest"        # config では可変 alias 可。tool_profile の pin は解決済み immutable 版 (§5.1)
 profile_hash = "sha256:..."
 capabilities = ["ocr", "layout_detection", "table_extraction"]
 ```
+
+現行版の認証付き Markdownize / Embedding adapter は KCS 組込み target のみを実行する。`cmd` / `args` / `url` による任意 target は受理せず、旧設定にこれらのキーがある場合は削除して組込み adapter 宣言へ移行する。Summary / Classification / Rerank など未実装 role の外部 dispatch 契約は [07-adapter-spec.md §7](07-adapter-spec.md) の将来仕様であり、現行 runtime が実行できることを意味しない。
 
 `.kcs/config.toml`:
 

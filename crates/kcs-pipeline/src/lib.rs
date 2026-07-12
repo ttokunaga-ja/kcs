@@ -4,7 +4,11 @@ pub mod budget;
 pub mod markdownize;
 pub mod prepare;
 pub mod scan;
+mod store_path;
 pub mod task;
+pub mod unsupported;
+#[cfg(any(test, windows))]
+mod windows_file;
 
 use thiserror::Error;
 
@@ -16,10 +20,14 @@ pub enum PipelineError {
     Contract { code: &'static str, message: String },
     #[error("io error at {path}: {message}")]
     Io { path: String, message: String },
+    /// A live writer owns a store lock. Kept distinct from I/O so CLI callers
+    /// preserve the retryable `KCS-E-STORE-LOCKED-001` / exit-3 contract.
+    #[error("KCS-E-STORE-LOCKED-001: store is locked: {path}")]
+    Locked { path: String },
     #[error("schema error: {0}")]
     Schema(String),
-    /// A persisted store file (tasks.jsonl / cost-ledger.jsonl) could not be
-    /// parsed — the on-disk record is corrupt, not a config/schema error
+    /// A persisted store file (tasks / cost ledger / unsupported inputs) could
+    /// not be parsed — the on-disk record is corrupt, not a config/schema error
     /// (M1(c)). Surfaced as `KCS-E-STORE-CORRUPT-001` (exit 4), carrying the
     /// offending file path.
     #[error("KCS-E-STORE-CORRUPT-001: corrupt store file at {path}: {message}")]
@@ -49,6 +57,11 @@ impl PipelineError {
             path: path.into(),
             message: message.into(),
         }
+    }
+
+    #[must_use]
+    pub fn locked(path: impl Into<String>) -> Self {
+        Self::Locked { path: path.into() }
     }
 
     #[must_use]

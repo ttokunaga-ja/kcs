@@ -138,9 +138,9 @@ const TOOLS_ENTRY_FIELDS: &[&str] = &[
 /// `auth` prefixes. Before this, a `tools.toml` `[markdown] totally_bogus_key="x"`
 /// plus `cmd = 12345` (type-mismatched) were accepted at exit 0 while `config.toml`
 /// rejected the same shapes at exit 2. Now unknown sections/fields and wrong types
-/// are `KCS-E-CONFIG-SCHEMA-001` (exit 2), while the documented keys (the docs §11
-/// and §1 copy-paste) pass. The `auth`-prefix check is applied ONLY to the `auth`
-/// field, so a documented `url = "plain:"` no longer bricks the device (R13-2(e)).
+/// are `KCS-E-CONFIG-SCHEMA-001` (exit 2). Fields are type-checked first, then
+/// target-rich declarations are rejected when this build has no matching
+/// dispatcher. The `auth`-prefix check is applied only to the `auth` field.
 pub fn validate_tools_toml_value(value: &toml::Value) -> Result<()> {
     let table = value
         .as_table()
@@ -175,6 +175,20 @@ fn validate_tools_role_section(role: &str, section: &toml::Value) -> Result<()> 
             )));
         }
     }
+    let has_direct_fields = table
+        .keys()
+        .any(|key| TOOLS_ENTRY_FIELDS.contains(&key.as_str()));
+    if has_direct_fields {
+        if table
+            .keys()
+            .any(|key| !TOOLS_ENTRY_FIELDS.contains(&key.as_str()))
+        {
+            return Err(AdapterError::ConfigSchema(format!(
+                "tools.toml `{role}` cannot mix direct adapter fields with nested adapter entries"
+            )));
+        }
+        validate_supported_runtime_target(role, None, table)?;
+    }
     Ok(())
 }
 
@@ -191,6 +205,113 @@ fn validate_tools_adapter_entry(role: &str, tool_id: &str, entry: &toml::Value) 
         }
         validate_tools_entry_field(&context, key, val)?;
     }
+    validate_supported_runtime_target(role, Some(tool_id), table)?;
+    Ok(())
+}
+
+fn validate_supported_runtime_target(
+    role: &str,
+    tool_id: Option<&str>,
+    table: &toml::value::Table,
+) -> Result<()> {
+    let unsupported_target =
+        table.contains_key("cmd") || table.contains_key("args") || table.contains_key("url");
+    match role {
+        "markdown" => {
+            if tool_id.is_some_and(|id| id != "mistral_ocr_markdownize") {
+                return Err(AdapterError::ConfigSchema(format!(
+                    "unsupported markdown adapter `{}`; this build executes only `mistral_ocr_markdownize`",
+                    tool_id.unwrap_or_default()
+                )));
+            }
+            if unsupported_target {
+                return Err(AdapterError::ConfigSchema(
+                    "markdown cmd/args/url targets are unsupported by the built-in Mistral runtime"
+                        .to_owned(),
+                ));
+            }
+            require_online_kind("markdown", table)?;
+            if let Some(model) = table.get("model").and_then(toml::Value::as_str) {
+                if !model.starts_with("mistral-ocr-") {
+                    return Err(AdapterError::ConfigSchema(format!(
+                        "unsupported markdown model `{model}` for the built-in Mistral runtime"
+                    )));
+                }
+            }
+        }
+        "embedding" => {
+            if tool_id.is_some_and(|id| id != "gemini_embedding_2") {
+                return Err(AdapterError::ConfigSchema(format!(
+                    "unsupported embedding adapter `{}`; this build executes only `gemini_embedding_2`",
+                    tool_id.unwrap_or_default()
+                )));
+            }
+            if unsupported_target {
+                return Err(AdapterError::ConfigSchema(
+                    "embedding cmd/args/url targets are unsupported by the built-in Gemini runtime"
+                        .to_owned(),
+                ));
+            }
+            require_online_kind("embedding", table)?;
+            if let Some(model) = table.get("model").and_then(toml::Value::as_str) {
+                if model != "gemini-embedding-2" {
+                    return Err(AdapterError::ConfigSchema(format!(
+                        "unsupported embedding model `{model}`; expected `gemini-embedding-2`"
+                    )));
+                }
+            }
+            if table
+                .get("dimensions")
+                .and_then(toml::Value::as_integer)
+                .is_some_and(|dimensions| dimensions != 768)
+            {
+                return Err(AdapterError::ConfigSchema(
+                    "embedding dimensions must be 768 for `gemini_embedding_2`".to_owned(),
+                ));
+            }
+            if table
+                .get("distance")
+                .and_then(toml::Value::as_str)
+                .is_some_and(|distance| distance != "cosine")
+            {
+                return Err(AdapterError::ConfigSchema(
+                    "embedding distance must be `cosine` for `gemini_embedding_2`".to_owned(),
+                ));
+            }
+            if table
+                .get("modality")
+                .and_then(toml::Value::as_str)
+                .is_some_and(|modality| modality != "multimodal")
+            {
+                return Err(AdapterError::ConfigSchema(
+                    "embedding modality must be `multimodal` for `gemini_embedding_2`".to_owned(),
+                ));
+            }
+            if table
+                .get("mode")
+                .and_then(toml::Value::as_str)
+                .is_some_and(|mode| mode != "online")
+            {
+                return Err(AdapterError::ConfigSchema(
+                    "embedding mode must be `online` for `gemini_embedding_2`".to_owned(),
+                ));
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn require_online_kind(role: &str, table: &toml::value::Table) -> Result<()> {
+    if table
+        .get("kind")
+        .and_then(toml::Value::as_str)
+        .is_some_and(|kind| kind != "online_api")
+    {
+        return Err(AdapterError::ConfigSchema(format!(
+            "tools.toml `{role}.kind` must be `online_api` for the built-in runtime"
+        )));
+    }
     Ok(())
 }
 
@@ -203,7 +324,7 @@ fn validate_tools_entry_field(context: &str, key: &str, val: &toml::Value) -> Re
         }
         "auth" => {
             // R13-2(e): the `keychain:`/`env:`/`plain:` prefix check is scoped to the
-            // `auth` field ONLY, so a documented `url = "plain:"` never bricks.
+            // Credential reference prefixes are meaningful only on `auth`.
             let Some(auth) = val.as_str() else {
                 return Err(field_type_error(context, key, "a string"));
             };
@@ -375,19 +496,23 @@ fn valid_auth_value(value: &str) -> bool {
 
 /// R13-2: a declared adapter entry from `tools.toml`, resolved for a single
 /// adapter role. `tool_id` is the `[role.tool_id]` key (or the role name for the
-/// single-adapter form). `model`/`auth` carry the documented alias + credential
-/// reference so the executing client can resolve a real API key and model pin
-/// rather than the previous hard-coded `MISTRAL_API_KEY`/`GEMINI_API_KEY`.
+/// single-adapter form). Execution-target fields are preserved as well as
+/// model/auth so the runtime can prove that its effective recipient matches the
+/// accepted declaration instead of silently projecting target identity away.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct DeclaredAdapter {
     pub tool_id: Option<String>,
+    pub kind: Option<String>,
+    pub cmd: Option<String>,
+    pub args: Vec<String>,
+    pub url: Option<String>,
     pub model: Option<String>,
     pub auth: Option<String>,
 }
 
 /// R13-2: locate the declared adapter for `role` in an already-parsed `tools.toml`
-/// (`markdown` / `embedding` / …). Returns the entry's `model`/`auth`/`tool_id`
-/// so the CLI can resolve the credential and model alias. Accepts both documented
+/// (`markdown` / `embedding` / …). Returns the complete execution identity so
+/// the CLI can recheck recipient, credential, and model together. Accepts both documented
 /// shapes: fields directly under `[role]` (single adapter) and a single
 /// `[role.tool_id]` table. `None` when the role is not declared. Assumes the value
 /// already passed [`validate_tools_toml_value`].
@@ -401,6 +526,10 @@ pub fn declared_adapter_for_role(value: &toml::Value, role: &str) -> Option<Decl
     if has_direct_fields {
         return Some(DeclaredAdapter {
             tool_id: None,
+            kind: optional_string(section, "kind"),
+            cmd: optional_string(section, "cmd"),
+            args: optional_string_array(section, "args"),
+            url: optional_string(section, "url"),
             model: section
                 .get("model")
                 .and_then(toml::Value::as_str)
@@ -416,6 +545,10 @@ pub fn declared_adapter_for_role(value: &toml::Value, role: &str) -> Option<Decl
     let entry = entry.as_table()?;
     Some(DeclaredAdapter {
         tool_id: Some(tool_id.clone()),
+        kind: optional_string(entry, "kind"),
+        cmd: optional_string(entry, "cmd"),
+        args: optional_string_array(entry, "args"),
+        url: optional_string(entry, "url"),
         model: entry
             .get("model")
             .and_then(toml::Value::as_str)
@@ -425,6 +558,24 @@ pub fn declared_adapter_for_role(value: &toml::Value, role: &str) -> Option<Decl
             .and_then(toml::Value::as_str)
             .map(str::to_owned),
     })
+}
+
+fn optional_string(table: &toml::value::Table, field: &str) -> Option<String> {
+    table
+        .get(field)
+        .and_then(toml::Value::as_str)
+        .map(str::to_owned)
+}
+
+fn optional_string_array(table: &toml::value::Table, field: &str) -> Vec<String> {
+    table
+        .get(field)
+        .and_then(toml::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(toml::Value::as_str)
+        .map(str::to_owned)
+        .collect()
 }
 
 /// R13-2: process-global registry of the declared adapters from the user
@@ -460,7 +611,65 @@ pub fn registered_declared_adapter(role: &str) -> Option<DeclaredAdapter> {
 /// the `Env*` clients call so a declared `auth = "env:MY_KEY"` is honored instead
 /// of the previous hard-coded variable.
 pub fn resolve_role_api_key(role: &str, fallback_env: &str) -> Result<Option<String>> {
-    resolve_declared_or_env_api_key(registered_declared_adapter(role).as_ref(), fallback_env)
+    let declared = registered_declared_adapter(role);
+    if let Some(declared) = declared.as_ref() {
+        validate_declared_runtime_target(role, declared)?;
+    }
+    resolve_declared_or_env_api_key(declared.as_ref(), fallback_env)
+}
+
+pub fn validate_declared_runtime_target(role: &str, declared: &DeclaredAdapter) -> Result<()> {
+    let expected_tool = match role {
+        "markdown" => Some("mistral_ocr_markdownize"),
+        "embedding" => Some("gemini_embedding_2"),
+        _ => None,
+    };
+    if let (Some(expected), Some(actual)) = (expected_tool, declared.tool_id.as_deref()) {
+        if actual != expected {
+            return Err(AdapterError::ConfigSchema(format!(
+                "declared {role} adapter `{actual}` does not match effective runtime `{expected}`"
+            )));
+        }
+    }
+    if matches!(role, "markdown" | "embedding")
+        && (declared.cmd.is_some() || declared.url.is_some() || !declared.args.is_empty())
+    {
+        return Err(AdapterError::ConfigSchema(format!(
+            "declared {role} target cannot be executed by the built-in runtime"
+        )));
+    }
+    if matches!(role, "markdown" | "embedding")
+        && declared
+            .kind
+            .as_deref()
+            .is_some_and(|kind| kind != "online_api")
+    {
+        return Err(AdapterError::ConfigSchema(format!(
+            "declared {role} kind does not match effective `online_api` runtime"
+        )));
+    }
+    if role == "embedding"
+        && declared
+            .model
+            .as_deref()
+            .is_some_and(|model| model != "gemini-embedding-2")
+    {
+        return Err(AdapterError::ConfigSchema(
+            "declared embedding model does not match effective `gemini-embedding-2` runtime"
+                .to_owned(),
+        ));
+    }
+    if role == "markdown"
+        && declared
+            .model
+            .as_deref()
+            .is_some_and(|model| !model.starts_with("mistral-ocr-"))
+    {
+        return Err(AdapterError::ConfigSchema(
+            "declared markdown model is not supported by the Mistral OCR runtime".to_owned(),
+        ));
+    }
+    Ok(())
 }
 
 /// R13-2: pure core of [`resolve_role_api_key`] (unit-testable without the
@@ -624,12 +833,11 @@ auth = "file:/tmp/key"
         assert!(validate_tools_toml(b"[embedding.g]\nbogus = \"y\"\n").is_err());
     }
 
-    // R13-2(b): the docs/03 §11 + docs/07 §1 copy-paste must pass (exit 0), so
-    // documenting a config that then bricks the device (R12-2 lesson) cannot recur.
+    // Declared execution targets must match the built-in runtime. Target-rich
+    // declarations are rejected until a matching dispatcher exists.
     #[test]
-    fn r13_2_typed_loader_accepts_documented_config() {
-        // docs/03 §11 markdown entry.
-        validate_tools_toml(
+    fn declared_targets_must_match_builtin_runtime() {
+        assert!(validate_tools_toml(
             br#"[markdown.mistral_ocr_markdownize]
 kind = "online_api"
 cmd = "uvx kcs-mistral-ocr-adapter"
@@ -638,21 +846,37 @@ profile_hash = "sha256:..."
 capabilities = ["ocr", "layout_detection", "table_extraction"]
 "#,
         )
+        .is_err());
+        validate_tools_toml(
+            br#"[markdown.mistral_ocr_markdownize]
+kind = "online_api"
+model = "mistral-ocr-latest"
+auth = "env:MISTRAL_API_KEY"
+"#,
+        )
         .unwrap();
-        // docs/07 §1 auth references (env / plain).
         validate_tools_toml(b"[embedding.gemini_embedding_2]\nauth = \"env:GEMINI_API_KEY\"\n")
             .unwrap();
         validate_tools_toml(b"[markdown]\nauth = \"plain:sk-secret-key\"\n").unwrap();
+        assert!(validate_tools_toml(
+            b"[embedding.custom]\nurl = \"https://example.test\"\nauth = \"plain:key\"\n"
+        )
+        .is_err());
     }
 
-    // R13-2(c)/(e): the auth-prefix check is scoped to the `auth` field, so a
-    // documented `url = "plain:"` (edge value) no longer bricks the device.
     #[test]
-    fn r13_2_auth_prefix_only_checked_on_auth_field() {
-        validate_tools_toml(b"[markdown.x]\nurl = \"plain:\"\n").unwrap();
-        validate_tools_toml(b"[markdown.x]\nmodel = \"keychain:\"\n").unwrap();
-        // But a real auth field with a bad prefix is still rejected.
-        assert!(validate_tools_toml(b"[markdown.x]\nauth = \"file:/tmp/key\"\n").is_err());
+    fn auth_prefix_and_target_fields_are_validated_independently() {
+        assert!(
+            validate_tools_toml(b"[markdown.mistral_ocr_markdownize]\nurl = \"plain:\"\n").is_err()
+        );
+        assert!(validate_tools_toml(
+            b"[markdown.mistral_ocr_markdownize]\nmodel = \"keychain:\"\n"
+        )
+        .is_err());
+        assert!(validate_tools_toml(
+            b"[markdown.mistral_ocr_markdownize]\nauth = \"file:/tmp/key\"\n"
+        )
+        .is_err());
     }
 
     // R13-2(2)/(e): auth resolution — env resolves, plain is literal, keychain is a
@@ -687,6 +911,7 @@ capabilities = ["ocr", "layout_detection", "table_extraction"]
             tool_id: Some("gemini".to_owned()),
             model: None,
             auth: Some("env:KCS_TEST_R13_2_DECLARED".to_owned()),
+            ..DeclaredAdapter::default()
         };
         assert_eq!(
             resolve_declared_or_env_api_key(Some(&declared), "GEMINI_API_KEY").unwrap(),
@@ -699,6 +924,7 @@ capabilities = ["ocr", "layout_detection", "table_extraction"]
             tool_id: None,
             model: None,
             auth: Some("keychain:login".to_owned()),
+            ..DeclaredAdapter::default()
         };
         assert!(matches!(
             resolve_declared_or_env_api_key(Some(&keychain), "GEMINI_API_KEY"),
@@ -730,5 +956,17 @@ capabilities = ["ocr", "layout_detection", "table_extraction"]
         assert_eq!(declared.tool_id, None);
         assert_eq!(declared.auth.as_deref(), Some("plain:k"));
         assert_eq!(declared_adapter_for_role(&flat, "embedding"), None);
+    }
+
+    #[test]
+    fn declared_adapter_projection_preserves_target_for_runtime_recheck() {
+        let value: toml::Value = toml::from_str(
+            "[embedding.custom]\nkind = \"online_api\"\nurl = \"https://example.test\"\nmodel = \"custom-v1\"\nauth = \"plain:synthetic\"\n",
+        )
+        .unwrap();
+        let declared = declared_adapter_for_role(&value, "embedding").unwrap();
+        assert_eq!(declared.tool_id.as_deref(), Some("custom"));
+        assert_eq!(declared.url.as_deref(), Some("https://example.test"));
+        assert!(validate_declared_runtime_target("embedding", &declared).is_err());
     }
 }
