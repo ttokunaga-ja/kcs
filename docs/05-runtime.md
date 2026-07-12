@@ -473,7 +473,7 @@ purge は **object の物理削除 + tombstone 記録** であり、**履歴 DAG
 消すもの (対象 raw_hash について、全履歴にわたり):
 
 ```text
-- raw object 本体 (objects/raw/ab/cd/<raw_hash>)
+- raw object 本体 (objects/raw/ab/cd/<raw64>)
 - 派生 artifact: prepared / normalized / chunk / embedding
   (normalized は同一 (raw_hash, tool_profile_hash) 配下の全 gen instance を対象とする)
 - SQLite の chunks / embeddings 行と FTS エントリ
@@ -485,7 +485,7 @@ purge は **object の物理削除 + tombstone 記録** であり、**履歴 DAG
 - すべての commit / tree object。commit / tree は書き換えない。
   DAG の再結線・tree entry の削除・連鎖再 hash は行わない。
 - tree entry のメタデータ (path, raw_hash)。raw_hash から原文は復元できない。
-- tombstone (.kcs/tombstones/ab/cd/<raw_hash>)。--erase-tombstone 指定時を除く。
+- tombstone (.kcs/tombstones/ab/cd/<raw64>)。--erase-tombstone 指定時を除く。
 ```
 
 追加されるもの:
@@ -494,7 +494,11 @@ purge は **object の物理削除 + tombstone 記録** であり、**履歴 DAG
 - commit_type=purged の新 commit (purge 実行後の working tree を指す)
 ```
 
-tombstone は raw_hash をキーとする JSON レコードで、CAS object ではないため `objects/` の外に置く:
+tombstone は raw_hash をキーとする JSON レコードで、CAS object ではないため `objects/` の外に置く。
+物理 leaf の `<raw64>` は論理 `raw_hash` から `sha256:` を除いた 64 文字の小文字 hex であり、
+JSON 内の `raw_hash` は完全な `sha256:<64hex>` を保持する。旧 Unix store の prefixed leaf は
+[03-data-model.md §2](03-data-model.md) の検証付き compatibility fallback で解決する。purge 実装時は
+canonical / legacy の両 variant が存在する場合に両方を検証し、競合時は fail closed、整合時は両方を削除する。
 
 ```json
 {

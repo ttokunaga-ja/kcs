@@ -22,7 +22,7 @@ use kcs_adapter::types::{
     MarkdownizeMode as AdapterMarkdownizeMode, MarkdownizeRequest, PreparedUnitHint,
     PreviousMarkdownizeContext, RawInput, UnitKind,
 };
-use kcs_core::cas::{is_hash, MAX_RAW_OBJECT_BYTES};
+use kcs_core::cas::{fanout_path, hash_path_component, is_hash, MAX_RAW_OBJECT_BYTES};
 use kcs_core::dag::{NormalizeRef, TreeObject};
 use kcs_core::schema::{validate_json_schema, SchemaKind};
 use kcs_core::scope::{
@@ -74,9 +74,8 @@ use kcs_search::cursor::{
     decode_cursor_token, encode_cursor_token, CursorToken, ScopeCursor, ScopeMode,
 };
 use kcs_search::evidence::{
-    evidence_pointer_to_uri, issue_evidence_pointer, parse_evidence_pointer_uri,
-    validate_full_hash, EvidencePointer, EvidencePointerIssueRequest,
-    EVIDENCE_POINTER_SCHEMA_VERSION,
+    evidence_pointer_to_uri, issue_evidence_pointer, parse_evidence_pointer_uri, EvidencePointer,
+    EvidencePointerIssueRequest, EVIDENCE_POINTER_SCHEMA_VERSION,
 };
 use kcs_search::mmr::{diversify_candidates, MmrCandidate, MmrConfig};
 use kcs_search::query::{
@@ -86,6 +85,7 @@ use kcs_search::rrf::{fuse_rrf, BackendRank, RrfConfig};
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use unicode_normalization::UnicodeNormalization;
 
 // clap のパースエラーは exit code 2 で終了する。これは docs/06-cli-spec.md §7 の
@@ -3436,10 +3436,7 @@ fn merge_reindex_skips(report: &mut Step3RebuildReport, reindex_skipped: Vec<Val
 }
 
 fn latest_normalize_ref(kcs_dir: &Path, raw_hash: &str) -> Result<Option<NormalizeRef>> {
-    let digest = raw_hash.trim_start_matches("sha256:");
-    if digest.len() < 4 {
-        return Ok(None);
-    }
+    let digest = hash_path_component(raw_hash)?;
     let dir = kcs_dir
         .join("objects/normalized_units")
         .join(&digest[0..2])
@@ -3457,25 +3454,39 @@ fn latest_normalize_ref(kcs_dir: &Path, raw_hash: &str) -> Result<Option<Normali
         let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
             continue;
         };
-        let Some(rest) = name
-            .strip_prefix(raw_hash)
+        let parsed = name
+            .strip_prefix(digest)
             .and_then(|value| value.strip_prefix('.'))
-        else {
+            .map(|rest| (rest, true))
+            .or_else(|| {
+                name.strip_prefix(raw_hash)
+                    .and_then(|value| value.strip_prefix('.'))
+                    .map(|rest| (rest, false))
+            });
+        let Some((rest, portable)) = parsed else {
             continue;
         };
-        let Some((tool_profile_hash, gen_part)) = rest.rsplit_once(".g") else {
+        let Some((tool_component, gen_part)) = rest.rsplit_once(".g") else {
             continue;
         };
         let Ok(gen) = gen_part.parse::<u64>() else {
             continue;
         };
+        let tool_profile_hash = if portable {
+            format!("sha256:{tool_component}")
+        } else {
+            tool_component.to_owned()
+        };
+        if !is_hash(&tool_profile_hash) {
+            continue;
+        }
         if best
             .as_ref()
             .map(|current| gen > current.gen)
             .unwrap_or(true)
         {
             best = Some(NormalizeRef {
-                tool_profile_hash: tool_profile_hash.to_owned(),
+                tool_profile_hash,
                 gen,
             });
         }
@@ -4838,7 +4849,7 @@ fn classify_short_hash(hash: &str) -> Result<ShortHash> {
 /// CAS raw store (08 §2.3 rule 4 raw resolution). Used only for the raw-only
 /// short-hash case (no chunk carries the raw_hash).
 fn raw_object_present(target: &ScopeTarget, raw_hash: &str) -> Result<bool> {
-    if cas_object_path(&target.kcs_dir, "raw", raw_hash).is_file() {
+    if cas_object_present(&target.kcs_dir, "raw", raw_hash, MAX_RAW_OBJECT_BYTES)? {
         return Ok(true);
     }
     Ok(find_working_tree_raw(&target.repo_root, raw_hash)?.is_some())
@@ -5162,10 +5173,11 @@ fn open_cas_byte_object(
             return Ok(Some((path, false)));
         }
     }
-    let object_path = cas_object_path(&target.kcs_dir, subdir, hash);
-    if !object_path.is_file() {
+    let Some((_object_path, bytes)) =
+        read_cas_byte_object(&target.kcs_dir, subdir, hash, MAX_RAW_OBJECT_BYTES)?
+    else {
         return Ok(None);
-    }
+    };
     let basename = path_hint
         .and_then(|path| Path::new(path).file_name())
         .and_then(|name| name.to_str())
@@ -5200,7 +5212,6 @@ fn open_cas_byte_object(
     // corrupt object is rejected as STORE-CORRUPT instead of returned as authentic
     // evidence. The immutable object is verified once here at first
     // materialization; the read-only open cache is reused as-is thereafter (M5).
-    let bytes = read_bounded_cas_object(&object_path, hash, MAX_RAW_OBJECT_BYTES)?;
     if let Some(parent) = cache.parent() {
         fs::create_dir_all(parent)
             .map_err(|err| KcsError::io(err.to_string(), parent.display().to_string()))?;
@@ -5219,6 +5230,19 @@ fn open_cas_byte_object(
 }
 
 fn read_bounded_cas_object(path: &Path, expected_hash: &str, max_bytes: u64) -> Result<Vec<u8>> {
+    read_or_verify_bounded_cas_object(path, expected_hash, max_bytes, true)
+}
+
+fn verify_bounded_cas_object(path: &Path, expected_hash: &str, max_bytes: u64) -> Result<()> {
+    read_or_verify_bounded_cas_object(path, expected_hash, max_bytes, false).map(|_| ())
+}
+
+fn read_or_verify_bounded_cas_object(
+    path: &Path,
+    expected_hash: &str,
+    max_bytes: u64,
+    materialize: bool,
+) -> Result<Vec<u8>> {
     let listed = fs::symlink_metadata(path)
         .map_err(|err| KcsError::io(err.to_string(), path.display().to_string()))?;
     if !listed.file_type().is_file() || listed.len() > max_bytes {
@@ -5248,24 +5272,45 @@ fn read_bounded_cas_object(path: &Path, expected_hash: &str, max_bytes: u64) -> 
             "CAS object changed while it was opened",
         ));
     }
-    let capacity = usize::try_from(opened.len()).map_err(|_| {
-        store_corrupt_error(
-            path,
-            "CAS object size cannot be represented by this process",
-        )
-    })?;
     let mut bytes = Vec::new();
-    bytes.try_reserve_exact(capacity).map_err(|_| {
-        store_corrupt_error(
-            path,
-            "CAS object cannot fit within the process memory limit",
-        )
-    })?;
-    (&mut file)
-        .take(max_bytes.saturating_add(1))
-        .read_to_end(&mut bytes)
-        .map_err(|err| KcsError::io(err.to_string(), path.display().to_string()))?;
-    if bytes.len() as u64 > max_bytes || hash_bytes(&bytes) != expected_hash {
+    if materialize {
+        let capacity = usize::try_from(opened.len()).map_err(|_| {
+            store_corrupt_error(
+                path,
+                "CAS object size cannot be represented by this process",
+            )
+        })?;
+        bytes.try_reserve_exact(capacity).map_err(|_| {
+            store_corrupt_error(
+                path,
+                "CAS object cannot fit within the process memory limit",
+            )
+        })?;
+    }
+    let mut hasher = Sha256::new();
+    let mut total = 0_u64;
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let count = file
+            .read(&mut buffer)
+            .map_err(|err| KcsError::io(err.to_string(), path.display().to_string()))?;
+        if count == 0 {
+            break;
+        }
+        total = total.saturating_add(count as u64);
+        if total > max_bytes {
+            return Err(store_corrupt_error(
+                path,
+                format!("CAS object exceeds the {max_bytes} byte limit while being read"),
+            ));
+        }
+        hasher.update(&buffer[..count]);
+        if materialize {
+            bytes.extend_from_slice(&buffer[..count]);
+        }
+    }
+    let actual_hash = format!("sha256:{:x}", hasher.finalize());
+    if actual_hash != expected_hash {
         return Err(store_corrupt_error(path, "CAS object hash mismatch"));
     }
     Ok(bytes)
@@ -5457,49 +5502,198 @@ fn find_working_tree_raw(root: &Path, raw_hash: &str) -> Result<Option<PathBuf>>
     Ok(None)
 }
 
-/// Fan-out path of a content-hashed CAS byte object: `objects/<subdir>/ab/cd/<hash>`
-/// (03 §2 / §8.1). `subdir` is the object-type directory ("raw" / "prepared" /
-/// "images").
-fn cas_object_path(kcs_dir: &Path, subdir: &str, hash: &str) -> PathBuf {
-    let digest = hash.trim_start_matches("sha256:");
-    kcs_dir
+/// Portable fan-out path for a content-hashed byte object. Logical identities retain
+/// `sha256:<digest>`; only the physical leaf omits the Windows-invalid colon.
+fn cas_object_path(kcs_dir: &Path, subdir: &str, hash: &str) -> Result<PathBuf> {
+    fanout_path(kcs_dir.join("objects").join(subdir), hash)
+}
+
+#[cfg(not(windows))]
+fn legacy_cas_object_path(kcs_dir: &Path, subdir: &str, hash: &str) -> Result<PathBuf> {
+    let digest = hash_path_component(hash)?;
+    Ok(kcs_dir
         .join("objects")
         .join(subdir)
         .join(&digest[0..2])
         .join(&digest[2..4])
-        .join(hash)
+        .join(hash))
 }
 
-/// `.kcs/tombstones/ab/cd/<raw_hash>` (05 §3.5). `Ok(None)` when no tombstone
-/// exists. The returned value is the on-disk tombstone JSON augmented with the
-/// resolved `scope_path` (08 §4.1 response shape).
-fn read_tombstone(target: &ScopeTarget, raw_hash: &str) -> Result<Option<Value>> {
-    let digest = validate_full_hash(raw_hash).map_err(search_to_kcs)?;
-    let path = target
-        .kcs_dir
+fn path_entry_exists(path: &Path) -> Result<bool> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(KcsError::io(error.to_string(), path.display().to_string())),
+    }
+}
+
+fn existing_cas_object_paths(kcs_dir: &Path, subdir: &str, hash: &str) -> Result<Vec<PathBuf>> {
+    let canonical = cas_object_path(kcs_dir, subdir, hash)?;
+    let mut paths = Vec::with_capacity(2);
+    if path_entry_exists(&canonical)? {
+        paths.push(canonical);
+    }
+    #[cfg(not(windows))]
+    {
+        let legacy = legacy_cas_object_path(kcs_dir, subdir, hash)?;
+        if path_entry_exists(&legacy)? {
+            paths.push(legacy);
+        }
+    }
+    Ok(paths)
+}
+
+fn cas_object_present(kcs_dir: &Path, subdir: &str, hash: &str, max_bytes: u64) -> Result<bool> {
+    let canonical = cas_object_path(kcs_dir, subdir, hash)?;
+    let canonical_present = path_entry_exists(&canonical)?;
+
+    #[cfg(not(windows))]
+    {
+        let legacy = legacy_cas_object_path(kcs_dir, subdir, hash)?;
+        let legacy_present = path_entry_exists(&legacy)?;
+        if canonical_present && legacy_present {
+            verify_bounded_cas_object(&canonical, hash, max_bytes)?;
+            verify_bounded_cas_object(&legacy, hash, max_bytes)?;
+        } else if canonical_present {
+            verify_bounded_cas_object(&canonical, hash, max_bytes)?;
+        } else if legacy_present {
+            verify_bounded_cas_object(&legacy, hash, max_bytes)?;
+        }
+        Ok(canonical_present || legacy_present)
+    }
+
+    #[cfg(windows)]
+    {
+        if canonical_present {
+            verify_bounded_cas_object(&canonical, hash, max_bytes)?;
+        }
+        Ok(canonical_present)
+    }
+}
+
+fn read_cas_byte_object(
+    kcs_dir: &Path,
+    subdir: &str,
+    hash: &str,
+    max_bytes: u64,
+) -> Result<Option<(PathBuf, Vec<u8>)>> {
+    let canonical = cas_object_path(kcs_dir, subdir, hash)?;
+    if path_entry_exists(&canonical)? {
+        let bytes = read_bounded_cas_object(&canonical, hash, max_bytes)?;
+        #[cfg(not(windows))]
+        {
+            let legacy = legacy_cas_object_path(kcs_dir, subdir, hash)?;
+            if path_entry_exists(&legacy)? {
+                verify_bounded_cas_object(&legacy, hash, max_bytes)?;
+            }
+        }
+        return Ok(Some((canonical, bytes)));
+    }
+
+    #[cfg(not(windows))]
+    {
+        let legacy = legacy_cas_object_path(kcs_dir, subdir, hash)?;
+        if path_entry_exists(&legacy)? {
+            let bytes = read_bounded_cas_object(&legacy, hash, max_bytes)?;
+            return Ok(Some((legacy, bytes)));
+        }
+    }
+    Ok(None)
+}
+
+fn tombstone_path(kcs_dir: &Path, raw_hash: &str) -> Result<PathBuf> {
+    fanout_path(kcs_dir.join("tombstones"), raw_hash)
+}
+
+#[cfg(not(windows))]
+fn legacy_tombstone_path(kcs_dir: &Path, raw_hash: &str) -> Result<PathBuf> {
+    let digest = hash_path_component(raw_hash)?;
+    Ok(kcs_dir
         .join("tombstones")
         .join(&digest[0..2])
         .join(&digest[2..4])
-        .join(raw_hash);
-    let bytes = match fs::read(&path) {
-        Ok(bytes) => bytes,
-        // Only a missing tombstone file means "no tombstone"; an unreadable
-        // tombstones dir must not be misclassified as not_found (08 §3.2).
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(err) => return Err(KcsError::io(err.to_string(), path.display().to_string())),
-    };
-    let mut value: Value =
-        serde_json::from_slice(&bytes).map_err(|err| KcsError::schema(err.to_string()))?;
-    if let Some(object) = value.as_object_mut() {
-        object
-            .entry("raw_hash".to_owned())
-            .or_insert_with(|| json!(raw_hash));
-        object.insert(
-            "scope_path".to_owned(),
-            json!(target.kcs_dir.display().to_string()),
-        );
+        .join(raw_hash))
+}
+
+fn read_optional_file(path: &Path) -> Result<Option<Vec<u8>>> {
+    match fs::read(path) {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(KcsError::io(error.to_string(), path.display().to_string())),
     }
-    Ok(Some(value))
+}
+
+fn parse_tombstone(
+    bytes: &[u8],
+    path: &Path,
+    raw_hash: &str,
+    require_identity: bool,
+) -> Result<Value> {
+    let mut value: Value =
+        serde_json::from_slice(bytes).map_err(|err| KcsError::schema(err.to_string()))?;
+    let object = value
+        .as_object_mut()
+        .ok_or_else(|| KcsError::schema("tombstone must be a JSON object"))?;
+    match object.get("raw_hash") {
+        Some(Value::String(stored)) if stored == raw_hash => {}
+        Some(_) => {
+            return Err(store_corrupt_error(
+                path,
+                "tombstone identity does not match its storage key",
+            ))
+        }
+        None if require_identity => {
+            return Err(store_corrupt_error(
+                path,
+                "legacy tombstone is missing its raw_hash identity",
+            ))
+        }
+        None => {
+            object.insert("raw_hash".to_owned(), json!(raw_hash));
+        }
+    }
+    Ok(value)
+}
+
+/// `.kcs/tombstones/ab/cd/<raw-digest>` (05 §3.5). `Ok(None)` when no tombstone
+/// exists. The returned value is the on-disk tombstone JSON augmented with the
+/// resolved `scope_path` (08 §4.1 response shape).
+fn read_tombstone(target: &ScopeTarget, raw_hash: &str) -> Result<Option<Value>> {
+    let canonical = tombstone_path(&target.kcs_dir, raw_hash)?;
+    let canonical_value = read_optional_file(&canonical)?
+        .map(|bytes| parse_tombstone(&bytes, &canonical, raw_hash, false))
+        .transpose()?;
+
+    #[cfg(not(windows))]
+    let legacy_value = {
+        let legacy = legacy_tombstone_path(&target.kcs_dir, raw_hash)?;
+        read_optional_file(&legacy)?
+            .map(|bytes| parse_tombstone(&bytes, &legacy, raw_hash, true))
+            .transpose()?
+    };
+
+    #[cfg(not(windows))]
+    if let (Some(portable), Some(legacy)) = (&canonical_value, &legacy_value) {
+        if portable != legacy {
+            return Err(store_corrupt_error(
+                &canonical,
+                "portable and legacy tombstones disagree",
+            ));
+        }
+    }
+
+    #[cfg(not(windows))]
+    let mut value = canonical_value.or(legacy_value);
+    #[cfg(windows)]
+    let mut value = canonical_value;
+    let Some(value) = value.as_mut() else {
+        return Ok(None);
+    };
+    value.as_object_mut().expect("validated above").insert(
+        "scope_path".to_owned(),
+        json!(target.kcs_dir.display().to_string()),
+    );
+    Ok(Some(value.take()))
 }
 
 /// 08 §4.1 tombstone response as an exit-4 error (open/view surface it as a
@@ -10183,6 +10377,48 @@ fn verify_exact_cas_object(path: &Path, expected: &[u8]) -> Result<()> {
     Ok(())
 }
 
+fn verify_existing_cas_objects(
+    kcs_dir: &Path,
+    subdir: &str,
+    hash: &str,
+    bytes: &[u8],
+) -> Result<bool> {
+    let paths = existing_cas_object_paths(kcs_dir, subdir, hash)?;
+    for path in &paths {
+        let parent = path
+            .parent()
+            .ok_or_else(|| KcsError::io("path has no parent", path.display().to_string()))?;
+        ensure_contained_directory_chain(kcs_dir, parent)?;
+        verify_exact_cas_object(path, bytes)?;
+    }
+    Ok(!paths.is_empty())
+}
+
+fn write_cas_object_or_reuse_legacy(
+    kcs_dir: &Path,
+    subdir: &str,
+    hash: &str,
+    bytes: &[u8],
+) -> Result<()> {
+    if verify_existing_cas_objects(kcs_dir, subdir, hash, bytes)? {
+        return Ok(());
+    }
+
+    // Close the preflight/publication window as far as possible before entering the
+    // atomic canonical writer. Its own create-new publication handles a canonical
+    // race; the postcondition below also catches a concurrently-created legacy leaf.
+    if verify_existing_cas_objects(kcs_dir, subdir, hash, bytes)? {
+        return Ok(());
+    }
+
+    let canonical = cas_object_path(kcs_dir, subdir, hash)?;
+    atomic_write_cas_object(kcs_dir, &canonical, bytes)?;
+    if !verify_existing_cas_objects(kcs_dir, subdir, hash, bytes)? {
+        return Err(KcsError::not_found(hash));
+    }
+    Ok(())
+}
+
 fn write_prepared_objects(
     repo: &Repository,
     prepared_units: &[PreparedUnit],
@@ -10212,15 +10448,7 @@ fn write_prepared_objects(
         if !is_hash(prepared_hash) {
             return Err(KcsError::schema("prepared object hash is invalid"));
         }
-        let digest = prepared_hash
-            .strip_prefix("sha256:")
-            .ok_or_else(|| KcsError::schema("prepared hash must use sha256 prefix"))?;
-        let path = repo
-            .kcs_dir()
-            .join("objects/prepared")
-            .join(&digest[0..2])
-            .join(&digest[2..4])
-            .join(prepared_hash);
+        let path = cas_object_path(repo.kcs_dir(), "prepared", prepared_hash)?;
         let object_bytes = pdf_pages
             .as_ref()
             .and_then(|pages| pages.get(index))
@@ -10233,7 +10461,7 @@ fn write_prepared_objects(
                 "prepared object bytes do not match the declared hash",
             ));
         }
-        atomic_write_cas_object(repo.kcs_dir(), &path, object_bytes)?;
+        write_cas_object_or_reuse_legacy(repo.kcs_dir(), "prepared", prepared_hash, object_bytes)?;
     }
     Ok(())
 }
@@ -13317,7 +13545,7 @@ mod tests {
         let kcs_dir = dir.path().join(".kcs");
         // The correct `sha256:` filename for the AUTHENTIC bytes...
         let hash = hash_bytes(b"authentic prepared object");
-        let object_path = cas_object_path(&kcs_dir, "prepared", &hash);
+        let object_path = cas_object_path(&kcs_dir, "prepared", &hash).unwrap();
         std::fs::create_dir_all(object_path.parent().unwrap()).unwrap();
         // ...but the file under it holds corrupt/torn bytes (non-atomic write).
         std::fs::write(&object_path, b"corrupt partial bytes").unwrap();
@@ -13332,6 +13560,182 @@ mod tests {
             "KCS-E-STORE-CORRUPT-001",
             "a corrupt CAS object must not be served as authentic evidence"
         );
+    }
+
+    #[test]
+    fn portable_cas_leaf_uses_digest_and_presence_rejects_nonregular_slot() {
+        use super::{cas_object_path, cas_object_present, hash_bytes, MAX_RAW_OBJECT_BYTES};
+
+        let dir = tempfile::tempdir().unwrap();
+        let hash = hash_bytes(b"portable object");
+        let path = cas_object_path(dir.path(), "raw", &hash).unwrap();
+        assert_eq!(
+            path.file_name().and_then(|name| name.to_str()),
+            hash.strip_prefix("sha256:")
+        );
+        assert!(!path.to_string_lossy().contains("sha256:"));
+
+        std::fs::create_dir_all(&path).unwrap();
+        let error = cas_object_present(dir.path(), "raw", &hash, MAX_RAW_OBJECT_BYTES).unwrap_err();
+        assert_eq!(error.error_code(), "KCS-E-STORE-CORRUPT-001");
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn legacy_cas_leaf_is_verified_and_dual_conflict_fails_closed() {
+        use super::{
+            cas_object_path, hash_bytes, legacy_cas_object_path, read_cas_byte_object,
+            MAX_RAW_OBJECT_BYTES,
+        };
+
+        let dir = tempfile::tempdir().unwrap();
+        let bytes = b"legacy object";
+        let hash = hash_bytes(bytes);
+        let legacy = legacy_cas_object_path(dir.path(), "prepared", &hash).unwrap();
+        std::fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+        std::fs::write(&legacy, bytes).unwrap();
+        let (resolved, loaded) =
+            read_cas_byte_object(dir.path(), "prepared", &hash, MAX_RAW_OBJECT_BYTES)
+                .unwrap()
+                .unwrap();
+        assert_eq!(resolved, legacy);
+        assert_eq!(loaded, bytes);
+
+        let canonical = cas_object_path(dir.path(), "prepared", &hash).unwrap();
+        std::fs::write(&canonical, bytes).unwrap();
+        std::fs::write(&legacy, b"conflicting bytes").unwrap();
+        let error =
+            read_cas_byte_object(dir.path(), "prepared", &hash, MAX_RAW_OBJECT_BYTES).unwrap_err();
+        assert_eq!(error.error_code(), "KCS-E-STORE-CORRUPT-001");
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn prepared_writer_reuses_verified_legacy_and_validates_both_slots() {
+        use super::{
+            cas_object_path, hash_bytes, legacy_cas_object_path, write_cas_object_or_reuse_legacy,
+        };
+
+        let dir = tempfile::tempdir().unwrap();
+        let kcs_dir = dir.path().join(".kcs");
+        std::fs::create_dir(&kcs_dir).unwrap();
+        let bytes = b"prepared bytes";
+        let hash = hash_bytes(bytes);
+        let canonical = cas_object_path(&kcs_dir, "prepared", &hash).unwrap();
+        let legacy = legacy_cas_object_path(&kcs_dir, "prepared", &hash).unwrap();
+        std::fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+        std::fs::write(&legacy, bytes).unwrap();
+
+        write_cas_object_or_reuse_legacy(&kcs_dir, "prepared", &hash, bytes).unwrap();
+        assert!(!canonical.exists(), "legacy reuse must not eagerly migrate");
+        assert_eq!(std::fs::read(&legacy).unwrap(), bytes);
+
+        std::fs::write(&canonical, bytes).unwrap();
+        write_cas_object_or_reuse_legacy(&kcs_dir, "prepared", &hash, bytes).unwrap();
+        std::fs::write(&legacy, b"conflict").unwrap();
+        let error =
+            write_cas_object_or_reuse_legacy(&kcs_dir, "prepared", &hash, bytes).unwrap_err();
+        assert_eq!(error.error_code(), "KCS-E-STORE-CORRUPT-001");
+    }
+
+    #[test]
+    fn prepared_writer_publishes_new_objects_to_portable_leaf() {
+        use super::{cas_object_path, hash_bytes, write_cas_object_or_reuse_legacy};
+
+        let dir = tempfile::tempdir().unwrap();
+        let kcs_dir = dir.path().join(".kcs");
+        std::fs::create_dir(&kcs_dir).unwrap();
+        let bytes = b"new prepared bytes";
+        let hash = hash_bytes(bytes);
+        write_cas_object_or_reuse_legacy(&kcs_dir, "prepared", &hash, bytes).unwrap();
+        let canonical = cas_object_path(&kcs_dir, "prepared", &hash).unwrap();
+        assert_eq!(std::fs::read(canonical).unwrap(), bytes);
+    }
+
+    #[test]
+    fn latest_normalize_ref_parses_portable_digest_basename() {
+        use super::{hash_bytes, latest_normalize_ref};
+
+        let dir = tempfile::tempdir().unwrap();
+        let raw_hash = hash_bytes(b"raw");
+        let tool_hash = hash_bytes(b"tool");
+        let raw_digest = raw_hash.strip_prefix("sha256:").unwrap();
+        let tool_digest = tool_hash.strip_prefix("sha256:").unwrap();
+        let instance = dir
+            .path()
+            .join("objects/normalized_units")
+            .join(&raw_digest[0..2])
+            .join(&raw_digest[2..4])
+            .join(format!("{raw_digest}.{tool_digest}.g2"));
+        std::fs::create_dir_all(instance).unwrap();
+
+        let reference = latest_normalize_ref(dir.path(), &raw_hash)
+            .unwrap()
+            .unwrap();
+        assert_eq!(reference.tool_profile_hash, tool_hash);
+        assert_eq!(reference.gen, 2);
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn latest_normalize_ref_also_parses_legacy_prefixed_basename() {
+        use super::{hash_bytes, latest_normalize_ref};
+
+        let dir = tempfile::tempdir().unwrap();
+        let raw_hash = hash_bytes(b"raw");
+        let tool_hash = hash_bytes(b"tool");
+        let raw_digest = raw_hash.strip_prefix("sha256:").unwrap();
+        let instance = dir
+            .path()
+            .join("objects/normalized_units")
+            .join(&raw_digest[0..2])
+            .join(&raw_digest[2..4])
+            .join(format!("{raw_hash}.{tool_hash}.g3"));
+        std::fs::create_dir_all(instance).unwrap();
+
+        let reference = latest_normalize_ref(dir.path(), &raw_hash)
+            .unwrap()
+            .unwrap();
+        assert_eq!(reference.tool_profile_hash, tool_hash);
+        assert_eq!(reference.gen, 3);
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn tombstone_reader_reuses_verified_legacy_and_rejects_conflict() {
+        use super::{
+            hash_bytes, legacy_tombstone_path, read_tombstone, tombstone_path, ScopeTarget,
+        };
+
+        let dir = tempfile::tempdir().unwrap();
+        let kcs_dir = dir.path().join(".kcs");
+        std::fs::create_dir(&kcs_dir).unwrap();
+        let raw_hash = hash_bytes(b"purged raw");
+        let legacy = legacy_tombstone_path(&kcs_dir, &raw_hash).unwrap();
+        std::fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+        let record = serde_json::json!({"raw_hash": raw_hash, "reason": "privacy"});
+        std::fs::write(&legacy, serde_json::to_vec(&record).unwrap()).unwrap();
+        let target = ScopeTarget {
+            repo_root: dir.path().to_path_buf(),
+            kcs_dir: kcs_dir.clone(),
+            scope_id: "scope_test".to_owned(),
+        };
+        let loaded = read_tombstone(&target, &raw_hash).unwrap().unwrap();
+        assert_eq!(loaded["raw_hash"], raw_hash);
+        assert_eq!(loaded["reason"], "privacy");
+
+        let canonical = tombstone_path(&kcs_dir, &raw_hash).unwrap();
+        std::fs::write(
+            canonical,
+            serde_json::to_vec(&serde_json::json!({
+                "raw_hash": raw_hash,
+                "reason": "legal"
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let error = read_tombstone(&target, &raw_hash).unwrap_err();
+        assert_eq!(error.error_code(), "KCS-E-STORE-CORRUPT-001");
     }
 
     #[test]

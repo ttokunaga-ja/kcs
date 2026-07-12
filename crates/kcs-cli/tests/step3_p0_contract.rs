@@ -1403,7 +1403,7 @@ fn run_json(cwd: &Path, data_home: &Path, args: &[&str]) -> (i32, Value) {
     (code, serde_json::from_slice(stream).unwrap())
 }
 
-/// CAS object path: `<kcs>/objects/<kind>/ab/cd/<hash>` (kcs_core::cas::fanout).
+/// CAS object path: `<kcs>/objects/<kind>/ab/cd/<digest>` (kcs_core::cas::fanout).
 fn object_path(kcs_dir: &Path, kind: &str, hash: &str) -> std::path::PathBuf {
     let digest = hash.strip_prefix("sha256:").unwrap();
     kcs_dir
@@ -1411,17 +1411,17 @@ fn object_path(kcs_dir: &Path, kind: &str, hash: &str) -> std::path::PathBuf {
         .join(kind)
         .join(&digest[0..2])
         .join(&digest[2..4])
-        .join(hash)
+        .join(digest)
 }
 
-/// Tombstone path: `<kcs>/tombstones/ab/cd/<raw_hash>` (05 §3.5).
+/// Tombstone path: `<kcs>/tombstones/ab/cd/<raw-digest>` (05 §3.5).
 fn tombstone_path(kcs_dir: &Path, raw_hash: &str) -> std::path::PathBuf {
     let digest = raw_hash.strip_prefix("sha256:").unwrap();
     kcs_dir
         .join("tombstones")
         .join(&digest[0..2])
         .join(&digest[2..4])
-        .join(raw_hash)
+        .join(digest)
 }
 
 fn registry_path(data_home: &Path) -> std::path::PathBuf {

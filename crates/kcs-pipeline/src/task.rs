@@ -383,7 +383,8 @@ impl TaskStore {
     ) -> Result<Option<TaskDescriptor>> {
         Ok(self.all()?.into_iter().find(|task| {
             task.input_hash == input_hash
-                && task.output_ref == output_ref
+                && (task.output_ref == output_ref
+                    || normalized_output_refs_equivalent(input_hash, &task.output_ref, output_ref))
                 && matches!(task.status, TaskStatus::Done | TaskStatus::Partial)
         }))
     }
@@ -404,6 +405,60 @@ pub fn is_scope_local_file_name(input_path: &str) -> bool {
     }
     let mut components = Path::new(input_path).components();
     matches!(components.next(), Some(Component::Normal(_))) && components.next().is_none()
+}
+
+fn normalized_output_ref_identity(input_hash: &str, output_ref: &str) -> Option<(String, u64)> {
+    if !kcs_core::cas::is_hash(input_hash) {
+        return None;
+    }
+    let name = Path::new(output_ref).file_name()?.to_str()?;
+    parse_normalized_output_basename(input_hash, name)
+}
+
+fn normalized_output_refs_equivalent(input_hash: &str, left: &str, right: &str) -> bool {
+    Path::new(left).parent() == Path::new(right).parent()
+        && normalized_output_ref_identity(input_hash, left)
+            == normalized_output_ref_identity(input_hash, right)
+        && normalized_output_ref_identity(input_hash, left).is_some()
+}
+
+fn parse_normalized_output_basename(input_hash: &str, name: &str) -> Option<(String, u64)> {
+    let raw_digest = input_hash.strip_prefix("sha256:")?;
+    let canonical_suffix = name.strip_prefix(&format!("{raw_digest}."));
+    if let Some(suffix) = canonical_suffix {
+        let (tool_digest, gen_text) = suffix.rsplit_once(".g")?;
+        if is_lower_sha256_digest(tool_digest) && is_canonical_generation(gen_text) {
+            let gen = gen_text.parse::<u64>().ok()?;
+            return Some((format!("sha256:{tool_digest}"), gen));
+        }
+        return None;
+    }
+
+    #[cfg(not(windows))]
+    {
+        let suffix = name.strip_prefix(&format!("{input_hash}."))?;
+        let (tool_profile_hash, gen_text) = suffix.rsplit_once(".g")?;
+        if !kcs_core::cas::is_hash(tool_profile_hash) || !is_canonical_generation(gen_text) {
+            return None;
+        }
+        let gen = gen_text.parse::<u64>().ok()?;
+        Some((tool_profile_hash.to_owned(), gen))
+    }
+    #[cfg(windows)]
+    {
+        None
+    }
+}
+
+fn is_lower_sha256_digest(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+}
+
+fn is_canonical_generation(value: &str) -> bool {
+    !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit())
 }
 
 /// Validate and classify a persisted task output reference before any consumer
@@ -483,22 +538,9 @@ pub fn validate_task_output_ref(
     if components[0] != digest[0..2] || components[1] != digest[2..4] {
         return Err(invalid_output_ref(kcs_dir.as_ref(), &descriptor.output_ref));
     }
-    let prefix = format!("{}.", descriptor.input_hash);
-    let suffix = components[2]
-        .strip_prefix(&prefix)
-        .ok_or_else(|| invalid_output_ref(kcs_dir.as_ref(), &descriptor.output_ref))?;
-    let (tool_profile_hash, gen_text) = suffix
-        .rsplit_once(".g")
-        .ok_or_else(|| invalid_output_ref(kcs_dir.as_ref(), &descriptor.output_ref))?;
-    if !kcs_core::cas::is_hash(tool_profile_hash)
-        || gen_text.is_empty()
-        || !gen_text.bytes().all(|byte| byte.is_ascii_digit())
-    {
-        return Err(invalid_output_ref(kcs_dir.as_ref(), &descriptor.output_ref));
-    }
-    let gen = gen_text
-        .parse::<u64>()
-        .map_err(|_| invalid_output_ref(kcs_dir.as_ref(), &descriptor.output_ref))?;
+    let (tool_profile_hash, gen) =
+        parse_normalized_output_basename(&descriptor.input_hash, &components[2])
+            .ok_or_else(|| invalid_output_ref(kcs_dir.as_ref(), &descriptor.output_ref))?;
 
     // Validate every existing component from `.kcs` downward. In particular,
     // `normalized_units` cannot become a second trust root by being a symlink.
@@ -509,7 +551,7 @@ pub fn validate_task_output_ref(
     Ok(TaskOutputRef::NormalizedInstance {
         path: absolute,
         raw_hash: descriptor.input_hash.clone(),
-        tool_profile_hash: tool_profile_hash.to_owned(),
+        tool_profile_hash,
         gen,
     })
 }
@@ -1211,6 +1253,61 @@ mod tests {
             validate_task_output_ref(dir.path(), &embedding).unwrap(),
             TaskOutputRef::Embedding { .. }
         ));
+    }
+
+    #[test]
+    fn canonical_output_ref_rejects_noncanonical_generation() {
+        let dir = tempfile::tempdir().unwrap();
+        let raw_hash = format!("sha256:{}", "a".repeat(64));
+        let tool_hash = format!("sha256:{}", "b".repeat(64));
+        let canonical =
+            crate::markdownize::normalized_instance_dir(dir.path(), &raw_hash, &tool_hash, 1);
+        let malformed =
+            canonical.with_file_name(format!("{}.{}.g+1", "a".repeat(64), "b".repeat(64)));
+        let mut task = valid_task();
+        task.input_hash = raw_hash;
+        task.output_ref = malformed.display().to_string();
+        assert!(validate_task_output_ref(dir.path(), &task).is_err());
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn legacy_output_ref_validates_and_matches_canonical_only_under_same_parent() {
+        let dir = tempfile::tempdir().unwrap();
+        let raw_hash = format!("sha256:{}", "a".repeat(64));
+        let tool_hash = format!("sha256:{}", "b".repeat(64));
+        let canonical =
+            crate::markdownize::normalized_instance_dir(dir.path(), &raw_hash, &tool_hash, 7);
+        let legacy = canonical.with_file_name(format!("{raw_hash}.{tool_hash}.g7"));
+        fs::create_dir_all(&legacy).unwrap();
+
+        let mut task = valid_task();
+        task.input_hash = raw_hash.clone();
+        task.output_ref = legacy.display().to_string();
+        task.status = TaskStatus::Done;
+        assert!(matches!(
+            validate_task_output_ref(dir.path(), &task).unwrap(),
+            TaskOutputRef::NormalizedInstance {
+                tool_profile_hash,
+                gen: 7,
+                ..
+            } if tool_profile_hash == tool_hash
+        ));
+
+        let store = TaskStore::new(dir.path());
+        store.append(&task).unwrap();
+        assert!(store
+            .done_output_for(&raw_hash, &canonical.display().to_string())
+            .unwrap()
+            .is_some());
+        let foreign = dir
+            .path()
+            .join("objects/normalized_units/ff/ff")
+            .join(canonical.file_name().unwrap());
+        assert!(store
+            .done_output_for(&raw_hash, &foreign.display().to_string())
+            .unwrap()
+            .is_none());
     }
 
     #[cfg(windows)]

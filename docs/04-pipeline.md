@@ -48,11 +48,16 @@ code          | file / symbol
 物理配置は [03-data-model.md §2 / §2.1](03-data-model.md) を正とする:
 
 ```text
-.kcs/objects/prepared/ab/cd/<prepared_hash>       # unit 単位の中間表現 (CAS)
-.kcs/objects/normalized_units/ab/cd/<raw_hash>.<tool_profile_hash>.g<gen>/
+.kcs/objects/prepared/ab/cd/<prepared64>           # unit 単位の中間表現 (CAS)
+.kcs/objects/normalized_units/ab/cd/<raw64>.<tool64>.g<gen>/
   manifest.json                                   # 順序付き unit 一覧 + unit status
   <unit_ref>.json                                 # unit object (unit_ref = base16(sha256(unit_key))[0:16])
 ```
+
+`<prepared64>` / `<raw64>` / `<tool64>` は論理 hash から `sha256:` を除いた 64 文字の小文字 hex。
+JSON 内の `prepared_hash` / `raw_hash` / `tool_profile_hash` は `sha256:<64hex>` のまま保持する。
+旧 Unix store の prefixed physical basename は [03-data-model.md §2](03-data-model.md) の
+検証付き compatibility fallback で読み取り、新規作成時は digest-only basename を使う。
 
 (prepared unit 専用ディレクトリは設けない。prepared object は最初から unit 粒度の CAS object であり、
 `(raw_hash, unit_key, prepared_hash, fingerprint, order)` の台帳は SQLite cache (§4.7) に持つ。
@@ -477,7 +482,7 @@ CREATE TABLE prepared_units (
   "previous_raw_hash": "sha256:old...", // incremental 時
   "parent_run_id": "run_01H...",        // incremental 時
   "changed_unit_keys": ["page:12"],     // incremental 時
-  "output_ref": ".kcs/objects/normalized_units/ab/cd/abc.tool1.g0/",
+  "output_ref": ".kcs/objects/normalized_units/ab/cd/<raw64>.<tool64>.g0/",
   "unit_keys": null,
   "status": "pending",
   "attempts": 0,
