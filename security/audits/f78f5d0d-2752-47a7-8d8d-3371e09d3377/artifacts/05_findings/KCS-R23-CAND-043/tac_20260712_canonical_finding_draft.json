@@ -1,0 +1,220 @@
+{
+  "affectedLocations": [
+    {
+      "label": "unverified early success",
+      "lines": "155-163",
+      "path": "crates/kcs-core/src/cas.rs"
+    },
+    {
+      "label": "later read verification",
+      "lines": "78-100",
+      "path": "crates/kcs-core/src/cas.rs"
+    },
+    {
+      "label": "raw object snapshot write",
+      "lines": "290-296",
+      "path": "crates/kcs-core/src/scope.rs"
+    },
+    {
+      "label": "snapshot publication",
+      "lines": "413-520",
+      "path": "crates/kcs-core/src/scope.rs"
+    }
+  ],
+  "attackPath": {
+    "dataflow": {
+      "evidenceRefs": [
+        "fanout-path-is-predictable",
+        "existing-path-returns-success",
+        "snapshot-records-returned-raw-hash",
+        "refs-advance-to-commit",
+        "read-time-detects-mismatch"
+      ],
+      "outcome": "recoverable local archive integrity and availability failure for that object hash",
+      "sink": "published KCS tree, commit, and refs naming a corrupt raw object slot",
+      "source": "lower-trust adopted or shared `.kcs` state",
+      "summary": "preseeded occupied CAS slot -> `write_raw()` expected hash -> `atomic_write()` existing-path success -> working tree raw hash -> tree/commit/ref publication -> later read-time corruption error"
+    },
+    "evidenceRefs": [
+      "existing-path-returns-success",
+      "snapshot-publishes-tree-commit-refs",
+      "refs-advance-to-commit",
+      "read-time-detects-mismatch"
+    ],
+    "impact": {
+      "level": "medium",
+      "why": "The primitive causes local archive integrity and availability loss for matching objects, but read-time verification prevents silent return of wrong bytes."
+    },
+    "likelihood": {
+      "level": "medium",
+      "why": "The adopted/shared-state boundary is in scope, but exploitation needs exact-slot poisoning and an operator snapshot of matching content."
+    },
+    "limitations": [
+      "Private live-store arbitrary same-user tampering is out of scope.",
+      "Read-time digest verification detects wrong regular-file contents.",
+      "The corrupt slot can be manually repaired or quarantined."
+    ],
+    "reachability": {
+      "attacker": "untrusted archive-state contributor",
+      "entrypoint": "adopted, copied, synced, shared, or preseeded `.kcs` store",
+      "outcome": "future reads of the published object fail as corrupt, and future legitimate writes continue to accept the occupied slot as success",
+      "preconditions": [
+        "The operator adopts lower-trust persisted KCS state.",
+        "The occupied object path exactly matches content the operator later snapshots.",
+        "The corrupt slot remains present when `atomic_write()` runs."
+      ],
+      "summary": "The attacker must supply or influence adopted store state, know or select the content hash, and rely on the operator snapshotting content that maps to the poisoned slot."
+    },
+    "summary": "A lower-trust archive-state contributor supplies a copied, shared, synced, or preseeded store containing a corrupt entry at the exact raw CAS path for content the operator later snapshots. KCS treats the occupied slot as a successful write, publishes history that names the expected hash, and later reports corruption when the object is read."
+  },
+  "candidate_id": "KCS-R23-CAND-043",
+  "codeEvidence": [
+    {
+      "code": "pub fn write_raw(&self, bytes: &[u8]) -> Result<String> {\n    let hash = hash_bytes(bytes);\n    self.write_object_bytes(ObjectKind::Raw, &hash, bytes)?;\n    Ok(hash)\n}\n\npub fn write_object_bytes(&self, kind: ObjectKind, hash: &str, bytes: &[u8]) -> Result<()> {\n    let path = self.object_path(kind, hash)?;\n    atomic_write(&path, bytes)\n}",
+      "endLine": 75,
+      "explanation": "`write_raw()` derives the authoritative object hash from the file bytes and then asks the shared writer to store those same bytes at the hash-derived path.",
+      "id": "raw-write-computes-expected-hash",
+      "label": "Raw writes compute the expected CAS identity before storage",
+      "language": "rust",
+      "path": "crates/kcs-core/src/cas.rs",
+      "role": "entrypoint",
+      "startLine": 60
+    },
+    {
+      "code": "pub fn fanout_path(base: impl AsRef<Path>, hash: &str) -> Result<PathBuf> {\n    if !is_hash(hash) {\n        return Err(KcsError::invalid_usage(\"invalid hash\"));\n    }\n\n    let digest = &hash[\"sha256:\".len()..];\n    Ok(base\n        .as_ref()\n        .join(&digest[0..2])\n        .join(&digest[2..4])\n        .join(hash))\n}",
+      "endLine": 152,
+      "explanation": "A contributor who supplies or predicts the bytes can compute the exact raw object slot before the operator adopts the store.",
+      "id": "fanout-path-is-predictable",
+      "label": "Hash fanout path is deterministic",
+      "language": "rust",
+      "path": "crates/kcs-core/src/cas.rs",
+      "role": "propagation",
+      "startLine": 142
+    },
+    {
+      "code": "pub(crate) fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {\n    let parent = path\n        .parent()\n        .ok_or_else(|| KcsError::io(\"path has no parent\", path.display().to_string()))?;\n    fs::create_dir_all(parent).kcs_io(parent)?;\n\n    if path.exists() {\n        return Ok(());\n    }",
+      "endLine": 163,
+      "explanation": "`atomic_write()` only checks whether the path exists. It does not verify the filesystem type, compare existing bytes with `bytes`, or reject an occupied corrupt slot before returning success.",
+      "id": "existing-path-returns-success",
+      "label": "Existing destination is accepted without verification",
+      "language": "rust",
+      "path": "crates/kcs-core/src/cas.rs",
+      "role": "root_control",
+      "startLine": 155
+    },
+    {
+      "code": "let bytes = fs::read(&path).kcs_io(&path)?;\nlet raw_hash = if store_raw {\n    self.store.write_raw(&bytes)?\n} else {\n    hash_bytes(&bytes)\n};\nlet mut tree_entry = TreeEntry::raw_file(file_name.clone(), raw_hash)?;",
+      "endLine": 296,
+      "explanation": "When `write_raw()` returns success, the working tree carries the expected hash forward even if the durable raw slot was not actually repaired or verified.",
+      "id": "snapshot-records-returned-raw-hash",
+      "label": "Snapshot records the returned raw hash in the tree",
+      "language": "rust",
+      "path": "crates/kcs-core/src/scope.rs",
+      "role": "propagation",
+      "startLine": 290
+    },
+    {
+      "code": "let working = self\n    .build_working_tree_with_normalize(true, excluded_paths, normalize_by_path)?\n    .tree;\nlet tree_value =\n    serde_json::to_value(&working).map_err(|err| KcsError::schema(err.to_string()))?;\nlet (tree_hash, _) = self.store.write_json(ObjectKind::Tree, &tree_value)?;",
+      "endLine": 430,
+      "explanation": "The accepted raw hash becomes part of the tree object that `snapshot_with_type()` is about to publish.",
+      "id": "snapshot-publishes-tree-commit-refs",
+      "label": "Snapshot can publish history after the accepted write",
+      "language": "rust",
+      "path": "crates/kcs-core/src/scope.rs",
+      "role": "outcome",
+      "startLine": 425
+    },
+    {
+      "code": "let commit = CommitObject::new(\n    tree_hash.clone(),\n    parents,\n    created_at,\n    message,\n    self.tool_lock_hash()?,\n    stats.clone(),\n    commit_type,\n)?;\nlet commit_value =\n    serde_json::to_value(&commit).map_err(|err| KcsError::schema(err.to_string()))?;\nlet (commit_hash, _) = self.store.write_json(ObjectKind::Commit, &commit_value)?;\n\natomic_overwrite(\n    &self.kcs_dir.join(\"refs/heads/main\"),\n    commit_hash.as_bytes(),\n)?;\natomic_overwrite(&self.kcs_dir.join(\"HEAD\"), commit_hash.as_bytes())?;",
+      "endLine": 519,
+      "explanation": "After the tree and commit writes succeed, refs can advance to history that points at the corrupt raw slot through the recorded tree entry.",
+      "id": "refs-advance-to-commit",
+      "label": "Refs advance to the commit that names the tree",
+      "language": "rust",
+      "path": "crates/kcs-core/src/scope.rs",
+      "role": "outcome",
+      "startLine": 494
+    },
+    {
+      "code": "for kind in [ObjectKind::Tree, ObjectKind::Commit, ObjectKind::Raw] {\n    let path = self.object_path(kind, hash)?;\n    if path.exists() {\n        let bytes = fs::read(&path).kcs_io(&path)?;\n        let actual = hash_bytes(&bytes);\n        if actual != hash {\n            return Err(KcsError::new(\n                \"KCS-E-STORE-CORRUPT-001\",\n                \"CAS object hash mismatch\",\n                serde_json::json!({ \"path\": path, \"expected\": hash, \"actual\": actual }),\n                crate::ExitCode::PermanentFailure,\n            ));\n        }\n        return Ok(StoredObject {\n            kind,\n            hash: hash.to_owned(),\n            bytes,\n        });",
+      "endLine": 100,
+      "explanation": "Later reads reject a hash mismatch, which prevents silent return of wrong bytes but leaves publication and future write repair blocked until the corrupt slot is manually removed or quarantined.",
+      "id": "read-time-detects-mismatch",
+      "label": "Read path detects but does not repair corrupt objects",
+      "language": "rust",
+      "path": "crates/kcs-core/src/cas.rs",
+      "role": "expected_control",
+      "startLine": 83
+    }
+  ],
+  "confidence": "high (0.99)",
+  "extensions": {
+    "attackPathReport": "artifacts/05_findings/KCS-R23-CAND-043/attack_path_analysis_report.md",
+    "attackPathReportSha256": "c62e37fa9d3ed8258c7dc88188295be6bb3dfddd9447e342fb1fc8d5876a3e79",
+    "candidateId": "KCS-R23-CAND-043",
+    "ledgerRowId": "KCS-R23-CAND-043",
+    "reportId": "KCS-R23-CAND-043",
+    "reportPath": "findings/tac-kcs-r23-cand-043-cas-preexisting-corrupt-slot/tac-kcs-r23-cand-043-cas-preexisting-corrupt-slot.md",
+    "reportSha256": "932f85f94f664a408c6fe0bdb79158db81773493032df6dd8fb5b35085ff72e8",
+    "validationReport": "artifacts/05_findings/KCS-R23-CAND-043/validation_report.md",
+    "validationReportSha256": "ff8e26831d4f6e5e37f2190ee0d87ae86e1a603060cdb22f341b35b2c8fc6ef7"
+  },
+  "final_policy": "reportable",
+  "final_severity": "low",
+  "ledger_row_id": "KCS-R23-CAND-043",
+  "priority": "P3",
+  "remediation": {
+    "regressionTests": [
+      "Preseed a raw CAS path with wrong bytes, snapshot matching content, and assert the write fails or quarantines before refs advance.",
+      "Preseed a raw CAS path with the exact expected bytes and assert idempotent success.",
+      "Preseed a CAS path with a directory, symlink, or other non-regular entry and assert failure.",
+      "Repeat occupied-slot checks for tree and commit object writes because they share `atomic_write()`."
+    ],
+    "summary": "Before returning success for an existing destination, verify that it is a regular file and that its bytes match the bytes being written; reject or quarantine mismatches atomically so legitimate writes can recover."
+  },
+  "rootCause": {
+    "evidenceRefs": [
+      "raw-write-computes-expected-hash",
+      "fanout-path-is-predictable",
+      "existing-path-returns-success",
+      "snapshot-records-returned-raw-hash",
+      "snapshot-publishes-tree-commit-refs",
+      "refs-advance-to-commit",
+      "read-time-detects-mismatch"
+    ],
+    "summary": "The violated invariant is that an existing CAS destination is idempotent only if it is the exact regular object being written. `atomic_write()` returns success solely because the path exists, so a preseeded corrupt slot prevents both repair and failure while the snapshot path carries the expected hash into published tree and commit state."
+  },
+  "scan_id": "f78f5d0d-2752-47a7-8d8d-3371e09d3377",
+  "schema_version": 1,
+  "scope": ".",
+  "source_revision": "0e19f3c6489da458e93a982a333c308d92d0a0ae",
+  "summary": "The KCS CAS writer treats any pre-existing object destination as a successful write without verifying that the occupied slot is a regular file containing the expected bytes. A lower-trust copied, shared, synced, or preseeded .kcs store can therefore contain a corrupt raw object at the exact fanout path for content the operator later snapshots; KCS reports the write as successful, publishes tree and commit state naming the expected hash, and only detects corruption on later reads.",
+  "target_revision": "0e19f3c6489da458e93a982a333c308d92d0a0ae",
+  "title": "CAS write accepts a pre-existing corrupt destination as success",
+  "validation": {
+    "assertions": [
+      "A pre-existing regular file with wrong bytes at the exact fanout path is accepted as a successful write.",
+      "Snapshot can carry the expected hash into tree and commit publication even when the durable raw slot remains corrupt.",
+      "Read-time digest verification detects corruption but does not repair or unblock future writes to the occupied slot."
+    ],
+    "evidenceRefs": [
+      "raw-write-computes-expected-hash",
+      "existing-path-returns-success",
+      "snapshot-records-returned-raw-hash",
+      "read-time-detects-mismatch"
+    ],
+    "limitations": [
+      "No end-to-end adopted-store runtime was recorded in the saved validation.",
+      "The PoC is local and synthetic; it does not touch a real operator store or any external system.",
+      "The prevalence of copied, synced, or preseeded lower-trust KCS stores is deployment-dependent."
+    ],
+    "method": "saved static source trace plus local/offline synthetic PoC",
+    "summary": "The saved validation confirms that all raw, tree, and commit writes reach `atomic_write()` and that the existing-destination branch returns success without checking type, bytes, or digest. The included PoC models the raw-object case with synthetic bytes and shows the corrupt slot remains occupied until a fixed check rejects it."
+  },
+  "writeup": {
+    "attemptId": "tac_20260712",
+    "pocDirectory": "findings/tac-kcs-r23-cand-043-cas-preexisting-corrupt-slot/poc",
+    "reportPath": "findings/tac-kcs-r23-cand-043-cas-preexisting-corrupt-slot/tac-kcs-r23-cand-043-cas-preexisting-corrupt-slot.md",
+    "reportSha256": "932f85f94f664a408c6fe0bdb79158db81773493032df6dd8fb5b35085ff72e8"
+  }
+}

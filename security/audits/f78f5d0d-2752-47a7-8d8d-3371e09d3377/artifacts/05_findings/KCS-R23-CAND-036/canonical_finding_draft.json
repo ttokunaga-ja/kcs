@@ -1,0 +1,237 @@
+{
+  "ruleId": "kcs.r23.cand-036",
+  "identity": {
+    "anchor": "kcs-r23-cand-036",
+    "instance": "unvalidated-persisted-dag"
+  },
+  "title": "Persisted DAG objects bypass semantic validation and escape normalized storage paths",
+  "summary": "Persisted commit and tree objects are checked for CAS identity and JSON shape but not for the semantic invariants enforced at construction. A supplied CAS-valid tree can therefore carry path components in `tool_profile_hash` into forced reindex path construction and redirect directory creation, fixed-name writes, or recursive cleanup outside the selected store.",
+  "severity": {
+    "level": "medium",
+    "rationale": "This is a realistic in-scope supplied-store confused-deputy path, not equivalent same-user private-store tampering, and it crosses scope containment in a real recovery workflow. Impact is high because the KCS user's authority can be redirected to create, replace, or recursively remove data outside the selected store. Likelihood is medium because archive adoption, a crafted CAS-valid tree, explicit forced reindex, and a compatible writable target are all required. The matrix mechanically maps high impact plus medium likelihood to Medium/P2.",
+    "changeConditions": "Severity would rise if a full isolated reproduction demonstrates reliable overwrite or deletion of a high-value target; it would fall once semantic validation is mandatory on every persisted read and normalized-instance paths are proven contained beneath the store."
+  },
+  "confidence": {
+    "level": "high",
+    "rationale": "V6 poisoned-state provenance + complete V10 static trace + safe lexical /tmp control. crates/kcs-core/src/dag.rs:40-79 validates tree entries only on construction crates/kcs-core/src/scope.rs:742-755 verifies kind and deserializes persisted commit/tree objects without semantic validation crates/kcs-pipeline/src/markdownize.rs:311-329 embeds the unvalidated tool_profile_hash verbatim in a path crates/kcs-cli/src/main.rs:5453-5543 creates, overwrites, and on failure recursively removes the constructed directory"
+  },
+  "taxonomy": {
+    "category": "CWE-22 path traversal from semantically unvalidated persisted DAG state",
+    "cwe": [
+      "CWE-22"
+    ]
+  },
+  "locations": [
+    {
+      "path": "crates/kcs-core/src/dag.rs",
+      "startLine": 40,
+      "endLine": 79,
+      "role": "intended_semantic_control"
+    },
+    {
+      "path": "crates/kcs-core/src/scope.rs",
+      "startLine": 742,
+      "endLine": 755,
+      "role": "root_control"
+    },
+    {
+      "path": "crates/kcs-pipeline/src/markdownize.rs",
+      "startLine": 311,
+      "endLine": 329,
+      "role": "path_constructor"
+    },
+    {
+      "path": "crates/kcs-cli/src/main.rs",
+      "startLine": 5453,
+      "endLine": 5543,
+      "role": "filesystem_sinks"
+    }
+  ],
+  "writeup": {
+    "reportPath": "findings/unvalidated-persisted-dag/unvalidated-persisted-dag.md"
+  },
+  "codeEvidence": [
+    {
+      "id": "unchecked-persisted-read",
+      "label": "Persisted objects skip semantic validation",
+      "path": "crates/kcs-core/src/scope.rs",
+      "startLine": 742,
+      "endLine": 755,
+      "language": "rust",
+      "role": "root_control",
+      "code": "    pub fn read_commit(&self, hash: &str) -> Result<CommitObject> {\n        let object = self.store.read_by_hash(hash)?;\n        if object.kind != ObjectKind::Commit {\n            return Err(KcsError::schema(\"hash does not identify a commit\"));\n        }\n        serde_json::from_slice(&object.bytes).map_err(|err| KcsError::schema(err.to_string()))\n    }\n\n    pub fn read_tree(&self, hash: &str) -> Result<TreeObject> {\n        let object = self.store.read_by_hash(hash)?;\n        if object.kind != ObjectKind::Tree {\n            return Err(KcsError::schema(\"hash does not identify a tree\"));\n        }\n        serde_json::from_slice(&object.bytes).map_err(|err| KcsError::schema(err.to_string()))",
+      "explanation": "`read_commit` and `read_tree` verify object kind and deserialize JSON, but do not rerun the semantic validators required when objects are constructed."
+    },
+    {
+      "id": "path-fragment-construction",
+      "label": "Unvalidated hash becomes a path fragment",
+      "path": "crates/kcs-pipeline/src/markdownize.rs",
+      "startLine": 311,
+      "endLine": 329,
+      "language": "rust",
+      "role": "propagation",
+      "code": "pub fn normalized_instance_dir(\n    kcs_dir: impl AsRef<Path>,\n    raw_hash: &str,\n    tool_profile_hash: &str,\n    gen: u64,\n) -> PathBuf {\n    let digest = raw_hash.strip_prefix(\"sha256:\").unwrap_or(raw_hash);\n    // Q6 (defense in depth): never slice-panic on a malformed short digest. The\n    // authoritative validation lives at `TaskStore::all` (`is_hash`); this keeps\n    // any other caller from aborting with exit 101 on a stray hash.\n    let fanout_a = digest.get(0..2).unwrap_or(digest);\n    let fanout_b = digest.get(2..4).unwrap_or(\"\");\n    kcs_dir\n        .as_ref()\n        .join(\"objects/normalized_units\")\n        .join(fanout_a)\n        .join(fanout_b)\n        .join(format!(\"{raw_hash}.{tool_profile_hash}.g{gen}\"))\n}",
+      "explanation": "`normalized_instance_dir` embeds `tool_profile_hash` verbatim in the final path component without checking separators, parent components, or containment."
+    },
+    {
+      "id": "escaped-directory-create",
+      "label": "Constructed destination is created",
+      "path": "crates/kcs-cli/src/main.rs",
+      "startLine": 5453,
+      "endLine": 5473,
+      "language": "rust",
+      "role": "sink",
+      "code": "fn copy_normalized_instance_gen(\n    kcs_dir: &Path,\n    raw_hash: &str,\n    tool_profile_hash: &str,\n    old_gen: u64,\n    new_gen: u64,\n) -> Result<()> {\n    let old_dir = kcs_pipeline::markdownize::normalized_instance_dir(\n        kcs_dir,\n        raw_hash,\n        tool_profile_hash,\n        old_gen,\n    );\n    let new_dir = kcs_pipeline::markdownize::normalized_instance_dir(\n        kcs_dir,\n        raw_hash,\n        tool_profile_hash,\n        new_gen,\n    );\n    fs::create_dir_all(&new_dir)\n        .map_err(|err| KcsError::io(err.to_string(), new_dir.display().to_string()))?;",
+      "explanation": "Forced reindex derives `new_dir` from the poisoned field and calls `create_dir_all` on that constructed path."
+    },
+    {
+      "id": "fixed-name-overwrite",
+      "label": "Manifest is overwritten beneath the destination",
+      "path": "crates/kcs-cli/src/main.rs",
+      "startLine": 5488,
+      "endLine": 5491,
+      "language": "rust",
+      "role": "sink",
+      "code": "        let manifest_bytes = serde_json::to_vec_pretty(&manifest)\n            .map_err(|err| KcsError::schema(err.to_string()))?;\n        atomic_overwrite_file(&new_dir.join(\"manifest.json\"), &manifest_bytes)?;\n        for entry in fs::read_dir(&old_dir)",
+      "explanation": "The copy path atomically overwrites the fixed `manifest.json` name beneath the attacker-influenced destination."
+    },
+    {
+      "id": "recursive-cleanup",
+      "label": "Failure recursively removes the destination",
+      "path": "crates/kcs-cli/src/main.rs",
+      "startLine": 5535,
+      "endLine": 5543,
+      "language": "rust",
+      "role": "outcome",
+      "code": "            let unit_bytes = serde_json::to_vec_pretty(&unit)\n                .map_err(|err| KcsError::schema(err.to_string()))?;\n            atomic_overwrite_file(&new_dir.join(entry.file_name()), &unit_bytes)?;\n        }\n        Ok(())\n    })();\n    if result.is_err() {\n        let _ = fs::remove_dir_all(&new_dir);\n    }",
+      "explanation": "If copying fails, cleanup calls `remove_dir_all` on the same constructed destination, extending the path escape to recursive deletion."
+    },
+    {
+      "id": "writer-semantic-validator",
+      "label": "Fresh trees enforce the missing invariant",
+      "path": "crates/kcs-core/src/dag.rs",
+      "startLine": 40,
+      "endLine": 79,
+      "language": "rust",
+      "role": "expected_control",
+      "code": "    pub fn validate(&self) -> Result<()> {\n        if self.path.contains('/') {\n            return Err(KcsError::path(\n                \"tree entry path must be a direct child file name\",\n                self.path.clone(),\n            ));\n        }\n        if self.path.is_empty() {\n            return Err(KcsError::path(\n                \"tree entry path is empty\",\n                self.path.clone(),\n            ));\n        }\n        if self.entry_type != \"file\" {\n            return Err(KcsError::schema(\"Step 1 tree entry type must be file\"));\n        }\n        if !is_hash(&self.raw_hash) {\n            return Err(KcsError::schema(\"raw_hash must be sha256 lowercase hex\"));\n        }\n        if let Some(normalize) = &self.normalize {\n            if !is_hash(&normalize.tool_profile_hash) {\n                return Err(KcsError::schema(\n                    \"tool_profile_hash must be sha256 lowercase hex\",\n                ));\n            }\n        }\n        Ok(())\n    }\n}\n\n#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]\npub struct TreeObject {\n    pub entries: Vec<TreeEntry>,\n    pub object_type: String,\n}\n\npub fn build_tree(mut entries: Vec<TreeEntry>) -> Result<TreeObject> {\n    for entry in &entries {\n        entry.validate()?;\n    }",
+      "explanation": "Fresh `TreeEntry` construction rejects path separators and requires `tool_profile_hash` to be a canonical hash, showing the invariant that persisted reads fail to reapply."
+    }
+  ],
+  "rootCause": {
+    "summary": "`read_commit` and `read_tree` deserialize persisted objects without rerunning `CommitObject` and `TreeEntry` validation. `normalized_instance_dir` then embeds the unvalidated `tool_profile_hash` directly in a filesystem path used by create, overwrite, and recursive-remove operations.",
+    "evidenceRefs": [
+      "unchecked-persisted-read",
+      "path-fragment-construction",
+      "escaped-directory-create",
+      "fixed-name-overwrite",
+      "recursive-cleanup",
+      "writer-semantic-validator"
+    ]
+  },
+  "remediation": "Run full tree/commit semantic validators on every persisted read and enforce safe path components.",
+  "validation": {
+    "method": "V6 poisoned-state provenance + complete V10 static trace + safe lexical /tmp control",
+    "summary": "crates/kcs-core/src/dag.rs:40-79 validates tree entries only on construction crates/kcs-core/src/scope.rs:742-755 verifies kind and deserializes persisted commit/tree objects without semantic validation crates/kcs-pipeline/src/markdownize.rs:311-329 embeds the unvalidated tool_profile_hash verbatim in a path crates/kcs-cli/src/main.rs:5453-5543 creates, overwrites, and on failure recursively removes the constructed directory",
+    "evidenceRefs": [
+      "unchecked-persisted-read",
+      "path-fragment-construction",
+      "escaped-directory-create",
+      "fixed-name-overwrite",
+      "recursive-cleanup",
+      "writer-semantic-validator"
+    ],
+    "assertions": [
+      "crates/kcs-core/src/dag.rs:40-79 validates tree entries only on construction",
+      "crates/kcs-core/src/scope.rs:742-755 verifies kind and deserializes persisted commit/tree objects without semantic validation",
+      "crates/kcs-pipeline/src/markdownize.rs:311-329 embeds the unvalidated tool_profile_hash verbatim in a path",
+      "crates/kcs-cli/src/main.rs:5453-5543 creates, overwrites, and on failure recursively removes the constructed directory"
+    ],
+    "counterevidence": [
+      "crates/kcs-core/src/cas.rs:78-100 verifies CAS bytes against their hash, which a supplied-store author can satisfy",
+      "reindex requires explicit --force --yes",
+      "targets retain a .gN suffix and writes use fixed KCS-shaped filenames"
+    ],
+    "limitations": [
+      "No material V10 gap remains; an isolated two-root runtime control would increase assurance but would not change reportability.",
+      "No full two-root runtime reproduction was performed, although lexical containment and direct filesystem sinks are statically complete.",
+      "The exact set of useful external targets depends on path normalization, permissions, existing directory layout, and generated suffixes."
+    ]
+  },
+  "attackPath": {
+    "summary": "A lower-trust archive contributor supplies a copied or preseeded .kcs store whose CAS-valid HEAD tree contains a normalize.tool_profile_hash with path separators or parent components. Repository::read_commit/read_tree verifies object hashes and JSON shape but does not rerun CommitObject/TreeEntry semantic validation at crates/kcs-core/src/scope.rs:742-755. The operator adopts the archive and invokes the documented recovery workflow reindex --force --yes, which passes the poisoned value to normalized_instance_dir. Path construction embeds the value verbatim, escaping the normalized-units base; copy_normalized_instance_gen then creates directories, overwrites fixed KCS-shaped files, or recursively removes the escaped .gN destination on error at crates/kcs-cli/src/main.rs:5453-5543.",
+    "dataflow": {
+      "summary": "A lower-trust archive contributor supplies a copied or preseeded .kcs store whose CAS-valid HEAD tree contains a normalize.tool_profile_hash with path separators or parent components. Repository::read_commit/read_tree verifies object hashes and JSON shape but does not rerun CommitObject/TreeEntry semantic validation at crates/kcs-core/src/scope.rs:742-755. The operator adopts the archive and invokes the documented recovery workflow reindex --force --yes, which passes the poisoned value to normalized_instance_dir. Path construction embeds the value verbatim, escaping the normalized-units base; copy_normalized_instance_gen then creates directories, overwrites fixed KCS-shaped files, or recursively removes the escaped .gN destination on error at crates/kcs-cli/src/main.rs:5453-5543.",
+      "source": "A lower-trust archive contributor supplies a copied or preseeded .kcs store whose CAS-valid HEAD tree contains a normalize.tool_profile_hash with path separators or parent components.",
+      "sink": "filesystem create, overwrite, and recursive-remove operations rooted at the attacker-influenced normalized-instance path",
+      "outcome": "User-writable filesystem paths reachable through the poisoned path component during one adopted-store reindex; effects include directory creation, fixed-name replacement, or recursive removal of the constructed destination.",
+      "evidenceRefs": [
+        "unchecked-persisted-read",
+        "path-fragment-construction",
+        "escaped-directory-create",
+        "fixed-name-overwrite",
+        "recursive-cleanup",
+        "writer-semantic-validator"
+      ]
+    },
+    "reachability": {
+      "summary": "No network surface. Exposure is an operator-invoked local archive adoption and forced reindex workflow consuming attacker-supplied persisted state.",
+      "attacker": "Filesystem operations run with the invoking OS user's permissions. The archive contributor need not already possess that user's arbitrary live-filesystem write authority.",
+      "entrypoint": "A lower-trust archive contributor supplies a copied or preseeded .kcs store whose CAS-valid HEAD tree contains a normalize.tool_profile_hash with path separators or parent components.",
+      "preconditions": [
+        "Adoption of a lower-trust copied/preseeded .kcs store.",
+        "A CAS-valid malicious HEAD commit/tree containing parent/path components in tool_profile_hash.",
+        "Operator reindex --force --yes interaction.",
+        "A user-writable escaped destination compatible with the generated .gN suffix and fixed filenames."
+      ],
+      "outcome": "data"
+    },
+    "evidenceRefs": [
+      "unchecked-persisted-read",
+      "path-fragment-construction",
+      "escaped-directory-create",
+      "fixed-name-overwrite",
+      "recursive-cleanup",
+      "writer-semantic-validator"
+    ],
+    "impact": {
+      "level": "high",
+      "why": "This is a realistic in-scope supplied-store confused-deputy path, not equivalent same-user private-store tampering, and it crosses scope containment in a real recovery workflow. Impact is high because the KCS user's authority can be redirected to create, replace, or recursively remove data outside the selected store. Likelihood is medium because archive adoption, a crafted CAS-valid tree, explicit forced reindex, and a compatible writable target are all required. The matrix mechanically maps high impact plus medium likelihood to Medium/P2."
+    },
+    "likelihood": {
+      "level": "medium",
+      "why": "The victim opens a copied, shared, synced, or preseeded store supplied by a lower-trust contributor. The contributor can construct content-hash-correct commit/tree objects with semantically invalid path-bearing fields. The operator intentionally runs reindex --force --yes on the adopted archive. The escaped destination is writable by the invoking OS user."
+    },
+    "counterevidence": [
+      "CAS hash verification defeats accidental corruption but not a contributor who intentionally hashes malicious semantic content.",
+      "Writer-side TreeEntry validation protects fresh local stores but is not rerun on read.",
+      "The operator must explicitly run reindex --force --yes.",
+      "Suffix and filename constraints prevent a claim of completely unconstrained arbitrary-file overwrite."
+    ],
+    "limitations": [
+      "No material V10 gap remains; an isolated two-root runtime control would increase assurance but would not change reportability.",
+      "No full two-root runtime reproduction was performed, although lexical containment and direct filesystem sinks are statically complete.",
+      "The exact set of useful external targets depends on path normalization, permissions, existing directory layout, and generated suffixes."
+    ]
+  },
+  "remediationTests": [
+    "Construct a CAS-valid tree with an invalid `tool_profile_hash` path component and assert persisted read or reindex rejects it before path construction.",
+    "Exercise parent, absolute, separator, and platform-prefix variants and assert an outside canary is never created, overwritten, or removed, including cleanup failures."
+  ],
+  "preventiveControls": [
+    "writer-side TreeEntry semantic validation",
+    "CAS kind/hash/content verification",
+    "forced-reindex confirmation",
+    "fixed destination naming and atomic file writes",
+    "Run full tree/commit semantic validators on every persisted read and enforce safe path components."
+  ],
+  "provenance": {
+    "source": "Codex Security deep-scan validation, attack-path closure, and an accepted dedicated one-finding vulnerability write-up"
+  },
+  "extensions": {
+    "candidateId": "KCS-R23-CAND-036",
+    "ledgerRowId": "KCS-R23-CAND-036",
+    "reportId": "KCS-R23-036"
+  }
+}
+

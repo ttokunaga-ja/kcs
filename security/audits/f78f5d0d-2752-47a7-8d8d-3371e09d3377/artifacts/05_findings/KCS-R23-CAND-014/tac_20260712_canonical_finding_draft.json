@@ -1,0 +1,214 @@
+{
+  "schema_version": 1,
+  "scan_id": "f78f5d0d-2752-47a7-8d8d-3371e09d3377",
+  "candidate_id": "KCS-R23-CAND-014",
+  "attempt_id": "tac_20260712",
+  "title": "Unrecognized binary gaps disappear from durable completeness and path telemetry",
+  "ledger_row_id": "KCS-R23-CAND-014",
+  "instance_key": "KCS-R23-CAND-014",
+  "scan_scope": ".",
+  "target_revision": "0e19f3c6489da458e93a982a333c308d92d0a0ae",
+  "final_policy": "reportable",
+  "severity": "medium",
+  "priority": "P2",
+  "confidence": "high",
+  "confidence_score": 0.99,
+  "summary": "The `kcs index` octet-stream no-text branch archives an unsupported binary but persists only a one-run skipped count and a pathless INFO event. Later `status` and search completeness are derived from file status and enrichment tasks, so the archived-but-unsearchable path can appear complete and non-actionable after the original index response is gone.",
+  "affectedLocations": [
+    {
+      "label": "transient_result",
+      "path": "crates/kcs-cli/src/main.rs",
+      "lines": "656-671",
+      "detail": "The unsupported count exists only in the current index result."
+    },
+    {
+      "label": "persistent_status_sink",
+      "path": "crates/kcs-cli/src/main.rs",
+      "lines": "435-450",
+      "detail": "`status` lists archived files and tasks without an unsupported-input disposition."
+    },
+    {
+      "label": "completeness_control",
+      "path": "crates/kcs-cli/src/main.rs",
+      "lines": "2422-2506",
+      "detail": "Search completeness counts Markdownize and Embedding task rows only."
+    },
+    {
+      "label": "root_control",
+      "path": "crates/kcs-cli/src/main.rs",
+      "lines": "9120-9169",
+      "detail": "The octet-stream skip creates no task and its event omits `input_path`."
+    }
+  ],
+  "codeEvidence": [
+    {
+      "id": "prepare-input-path",
+      "label": "Prepare request still has the input path",
+      "path": "crates/kcs-cli/src/main.rs",
+      "startLine": 9104,
+      "endLine": 9110,
+      "language": "rust",
+      "role": "user_input",
+      "code": "let prepare = prepare_units(PrepareStageRequest {\n    raw_hash: raw_hash.clone(),\n    media_type: candidate.media_type.clone(),\n    input_path: path.display().to_string(),\n    tool_profile_hash: prepare_profile_hash.clone(),\n})\n.map_err(pipeline_to_kcs)?;",
+      "explanation": "The indexing path has both the caller-controlled file path and the detected media type when it decides how to represent enrichment state."
+    },
+    {
+      "id": "octet-stream-skip",
+      "label": "Unrecognized binary skip writes only a count and pathless event",
+      "path": "crates/kcs-cli/src/main.rs",
+      "startLine": 9135,
+      "endLine": 9168,
+      "language": "rust",
+      "role": "root_control",
+      "code": "if candidate.media_type != \"application/octet-stream\" {\n    enqueue_online_placeholder_task(\n        repo,\n        &task_store,\n        candidate,\n        &raw_hash,\n        &scope_id,\n        network_allowed,\n        secrets_hold,\n        args,\n        &now,\n        &mut result,\n        &cost_ledger,\n        &budget_caps,\n        &month,\n    )?;\n} else {\n    result.skipped_unrecognized_binary_files += 1;\n    append_event_log(\n        \"KCS-I-INDEX-INPUT-UNRECOGNIZED-BINARY-001\",\n        \"binary input has no locally-extractable text and no OCR-able media type; archived but not enriched\",\n        json!({\n            \"media_type\": candidate.media_type,\n            \"size_bytes\": candidate.size_bytes,\n        }),\n    )?;\n}",
+      "explanation": "Recognized no-text media gets a task through `enqueue_online_placeholder_task()`. The octet-stream branch does not reuse that durable path and records only `media_type` plus `size_bytes`, so the affected input path is lost."
+    },
+    {
+      "id": "index-response-counter",
+      "label": "Skipped count is returned only in the index response",
+      "path": "crates/kcs-cli/src/main.rs",
+      "startLine": 656,
+      "endLine": 671,
+      "language": "rust",
+      "role": "outcome",
+      "code": "let mut output = json!({\n    \"status\": if outcome.noop { \"noop\" } else { \"indexed\" },\n    \"approval_method\": if args.approve { \"approve\" } else if args.yes { \"yes\" } else { \"existing\" },\n    \"network_allowed\": index_result.network_allowed,\n    \"network_opt_in\": persistent_network_allowed(&repo)?,\n    \"pending_online_tasks\": index_result.pending_online_tasks,\n    \"paused_tasks\": index_result.paused_tasks + enrichment.paused,\n    \"failed_files\": index_result.failed_files,\n    \"normalized_files\": index_result.normalized_files,\n    \"pending_files\": index_result.pending_files,\n    \"skipped_oversized_files\": index_result.skipped_oversized_files,\n    \"skipped_unrecognized_binary_files\": index_result.skipped_unrecognized_binary_files,",
+      "explanation": "The caller can see that some unrecognized binary was skipped during this invocation, but this aggregate field does not identify the path and is not later status state."
+    },
+    {
+      "id": "status-task-only-projection",
+      "label": "`status` has files and tasks but no unsupported disposition",
+      "path": "crates/kcs-cli/src/main.rs",
+      "startLine": 435,
+      "endLine": 450,
+      "language": "rust",
+      "role": "sink",
+      "code": "Command::Status => {\n    let repo = Repository::open_current()?;\n    validate_repo_tool_lock(&repo)?;\n    let task_store = TaskStore::new(repo.kcs_dir());\n    let status = repo.status()?;\n    Ok(json!({\n        \"scope_path\": repo.kcs_dir(),\n        \"files\": status.files,\n        \"head_shallow\": status.head_shallow,\n        \"tasks\": task_store.all().map_err(pipeline_to_kcs)?,\n        \"quarantine\": quarantine_status_records(&repo)?,\n        \"budget\": budget_status_json(&repo)?,\n    }))\n}",
+      "explanation": "After indexing, public status can show the raw file as `unchanged` and can list task rows, but there is no field that carries a permanent unsupported-input decision."
+    },
+    {
+      "id": "task-only-completeness",
+      "label": "Search completeness excludes files with no tasks",
+      "path": "crates/kcs-cli/src/main.rs",
+      "startLine": 2434,
+      "endLine": 2506,
+      "language": "rust",
+      "role": "outcome",
+      "code": "for task in tasks {\n    if !matches!(task.task_type, TaskType::Markdownize | TaskType::Embedding) {\n        continue;\n    }\n    if task.fallback_reason.as_deref() == Some(RETIRED_NON_LIVE) {\n        continue;\n    }\n    total += 1;\n    match task.status {\n        TaskStatus::Done => done += 1,\n        TaskStatus::Partial | TaskStatus::Pending | TaskStatus::Running => pending += 1,\n        TaskStatus::Paused => {\n            pending += 1;\n            if task.fallback_reason.as_deref() == Some(\"budget_exceeded\") {\n                budget_paused = true;\n            }\n        }\n        TaskStatus::Failed if task_retry_allowed(&task) => pending += 1,\n        TaskStatus::Failed => {}\n    }\n}\n\nlet enriched_ratio = if total == 0 {\n    1.0\n} else {\n    done as f64 / total as f64\n};\njson!({\n    \"enriched_ratio\": enriched_ratio,\n    \"pending_enrichment_tasks\": pending,\n    \"budget_paused\": budget_paused,\n})",
+      "explanation": "`compute_index_status()` builds both the denominator and pending count from enrichment tasks. An unsupported archived file with no task is therefore absent from the completeness calculation."
+    }
+  ],
+  "rootCause": {
+    "summary": "The violated invariant is that every archived input that cannot be searched must retain durable, path-bearing state. The no-text octet-stream branch has the path and raw hash available, but it records only a transient counter and a pathless event, then exits before any task or unsupported disposition is persisted.",
+    "evidenceRefs": [
+      "prepare-input-path",
+      "octet-stream-skip",
+      "index-response-counter",
+      "status-task-only-projection",
+      "task-only-completeness"
+    ]
+  },
+  "validation": {
+    "method": "static source trace plus local offline synthetic CLI reproduction",
+    "summary": "The source trace and PoC confirm that an unsupported `photo.bmp` is archived and counted once, while later `status` has no task or unsupported row for it and text search reports full enrichment.",
+    "evidenceRefs": [
+      "prepare-input-path",
+      "octet-stream-skip",
+      "status-task-only-projection",
+      "task-only-completeness"
+    ],
+    "assertions": [
+      "A binary `photo.bmp` can deterministically reach the `application/octet-stream` skip branch.",
+      "The branch increments `skipped_unrecognized_binary_files` and logs `media_type` plus `size_bytes` without `input_path`.",
+      "`status` later shows the raw file as `unchanged` and lists only the recognized sibling's completed Markdownize task.",
+      "Search `index_status` can return `enriched_ratio=1.0`, `pending_enrichment_tasks=0`, and `budget_paused=false` for the mixed scope."
+    ],
+    "limitations": [
+      "The finding affects local completeness telemetry; no online adapter, credential, live service, or third-party target was used.",
+      "Raw bytes remain archived, so the validated impact is false completeness and non-actionable recovery state rather than data destruction."
+    ]
+  },
+  "attackPath": {
+    "summary": "A lower-trust content contributor places an unsupported binary in a scope. A trusted operator indexes that scope, loses the one-run response, and later trusts `status` or search `index_status`; the unsupported path is preserved as raw bytes but absent from durable completeness telemetry.",
+    "dataflow": {
+      "summary": "direct-child file -> `prepare_units()` no-text result -> octet-stream skip -> transient counter/pathless event -> task-only status/search completeness",
+      "source": "attacker-controlled unsupported binary input",
+      "sink": "`status` and search `index_status` projections",
+      "outcome": "archived-but-unsearchable content is omitted from durable completeness and recovery state",
+      "evidenceRefs": [
+        "prepare-input-path",
+        "octet-stream-skip",
+        "status-task-only-projection",
+        "task-only-completeness"
+      ]
+    },
+    "reachability": {
+      "summary": "The path is local and deterministic for a direct-child unsupported binary whose local prepare stage extracts no text.",
+      "attacker": "lower-trust content contributor",
+      "entrypoint": "`kcs index` over the supplied scope",
+      "preconditions": [
+        "operator indexes the supplied scope",
+        "unsupported binary input is classified as `application/octet-stream`",
+        "later workflow relies on status or search completeness after the immediate index response is unavailable"
+      ],
+      "outcome": "workflow consumers can accept a false fully-enriched state and cannot identify the skipped path from public durable telemetry"
+    },
+    "impact": {
+      "level": "medium",
+      "why": "The issue affects search completeness, review decisions, and recovery actionability for archived content, but it does not by itself destroy data, bypass authorization, expose secrets, or execute code."
+    },
+    "likelihood": {
+      "level": "high",
+      "why": "A normal direct-child unsupported binary deterministically reaches the no-task branch in a standard local indexing invocation."
+    },
+    "limitations": [
+      "The immediate `index` response reports an aggregate skipped count.",
+      "Rerunning `index` can repeat the count.",
+      "Manual archive inspection can still find the raw bytes."
+    ]
+  },
+  "remediation": {
+    "summary": "Persist a relative-path-bearing unsupported-input disposition for every archived file that is intentionally excluded from searchable enrichment, and include that disposition in `status` and search completeness semantics.",
+    "minimalInvariant": "An archived input without a searchable representation must remain visible by relative path, raw hash, media type, reason, and status after the original index response is gone.",
+    "regressionTests": [
+      "Index a mixed scope with `photo.bmp` and `ok.md`, discard the index response, and assert `status --json` exposes a durable unsupported disposition for `photo.bmp`.",
+      "Assert search `index_status` cannot present an unqualified fully-enriched state while a live unsupported disposition exists.",
+      "Assert the event or durable disposition includes the relative input path while preserving log redaction policy.",
+      "Keep an all-text negative control with zero unsupported dispositions.",
+      "Keep a recognized OCR-able no-text control that receives task state rather than the unsupported disposition."
+    ]
+  },
+  "writeup": {
+    "reportPath": "findings/tac-kcs-r23-cand-014-unrecognized-binary-visibility/tac-kcs-r23-cand-014-unrecognized-binary-visibility.md",
+    "reportSha256": "e62776c50d6092ea096d3717d1f3e7390bd2aa5f2a795c21f26213606b46634c",
+    "pocDirectory": "findings/tac-kcs-r23-cand-014-unrecognized-binary-visibility/poc",
+    "pocFiles": [
+      {
+        "path": "findings/tac-kcs-r23-cand-014-unrecognized-binary-visibility/poc/Makefile",
+        "sha256": "4a503d5adeed3735908f4fcdf254396ad74021e124bf80d044595d144a39851c"
+      },
+      {
+        "path": "findings/tac-kcs-r23-cand-014-unrecognized-binary-visibility/poc/README.md",
+        "sha256": "d6b412e135141e889616c8cb414545dbcf875748b28fd565c106c5ff3e029acb"
+      },
+      {
+        "path": "findings/tac-kcs-r23-cand-014-unrecognized-binary-visibility/poc/representative-output.txt",
+        "sha256": "dbc0b7f5bd828299b4fe38fe4b2db9705248109b86d34b6bf1d3999c56add45f"
+      },
+      {
+        "path": "findings/tac-kcs-r23-cand-014-unrecognized-binary-visibility/poc/unrecognized_binary_visibility_poc.py",
+        "sha256": "873511c37f9bfd3bd0471cb9d2bd733a6d2d4aee46f9040ea383b76ed4965a47"
+      }
+    ],
+    "poCValidation": {
+      "dryRun": "make dry-run",
+      "run": "KCS_BIN=<local kcs binary> make run",
+      "result": "passed"
+    }
+  },
+  "coordinator_review_state": "pending",
+  "extensions": {
+    "candidateId": "KCS-R23-CAND-014",
+    "ledgerRowId": "KCS-R23-CAND-014",
+    "reportId": "KCS-R23-CAND-014"
+  }
+}

@@ -472,7 +472,10 @@ MVP文書:
 
 # 10. Adapter セキュリティ
 
-Adapter は任意コマンド、任意URL、ローカルAPI、オンラインAPIを扱えるため、実行境界を明確にする。
+R23 の Markdownize / Embedding Adapter は KCS 同梱の built-in target のみを実行し、
+任意コマンドや任意 URL への差し替えは受理しない。ローカルAPIや外部プロセスを扱う
+dispatcher は将来仕様であり、実装時には現行の入力・送信境界に加えて command 境界も
+明確にする。
 
 最低限必要な制御:
 
@@ -484,9 +487,11 @@ timeout_seconds
 redact_logs
 store_request_body = false
 store_response_body = false
-command allowlist / confirmation
 secret redaction
 ```
+
+将来の外部 Adapter dispatcher には、上記に加えて `command allowlist / confirmation` を
+必須とする。これは現行 built-in target に任意コマンド実行能力があることを意味しない。
 
 これらの policy の強制モデル (宣言 + 監査であって sandbox 保証ではないこと) は
 [07-adapter-spec.md §7.1](07-adapter-spec.md) を正本とする。
@@ -732,4 +737,3 @@ output_hash (in normalization_runs) | (廃止)                            | rese
 ## 12.8 推奨 Reading Path
 
 Reading Path の正本は [README.md §1](README.md)。docs/ 直下のファイル名の数字プレフィックスがそのまま読む順番であり、本書で別の順序を定義しない。
-

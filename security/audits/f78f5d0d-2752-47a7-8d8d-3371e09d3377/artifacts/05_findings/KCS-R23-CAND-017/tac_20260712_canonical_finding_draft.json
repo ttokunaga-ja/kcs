@@ -1,0 +1,252 @@
+{
+  "ruleId": "kcs.scan.ignore-glob-exponential-backtracking",
+  "identity": {
+    "anchor": "kcs/scan/ignore-glob/wildcard_match_bytes",
+    "instance": "scope-ignore-star-backtracking"
+  },
+  "title": "Recursive star matching has exponential backtracking",
+  "summary": "KCS loads scope-controlled `.kcsignore` rules, applies every rule to direct scan candidates, and sends `*` patterns into a recursive matcher that explores both zero-consumption and input-consumption branches without memoization or a work budget. A lower-trust scope contributor can pair a short overlapping-star rule with a direct-child filename so normal snapshot or index preview work grows exponentially and blocks the victim CLI process.",
+  "severity": {
+    "level": "medium",
+    "rationale": "The attacker controls both the ignore rule and candidate name in an adopted or shared local scope, and normal snapshot/index commands synchronously reach the matcher before useful work completes. The impact is deterministic local availability loss for the selected scope, with no demonstrated code execution, data exfiltration, privilege escalation, daemon exposure, or cross-scope persistence, so Medium severity and P2 priority are appropriate.",
+    "changeConditions": "Severity would increase if KCS automatically processed lower-trust scopes, if the same matcher were reachable through a remote or long-lived service boundary, or if a crafted pattern caused unrecoverable cross-scope state damage. It would decrease if ignore matching were memoized, bounded, or delegated to a vetted linear-time glob implementation before untrusted rules are accepted."
+  },
+  "confidence": {
+    "level": "high",
+    "rationale": "The reviewed revision explicitly loads unbounded `.kcsignore` lines, applies each rule per candidate, and recursively branches on `*` without memoization. The bounded offline probe reproduced the exact recurrence `C(n)=2^(n+2)-3` through `n=18`, growing from 1,021 to 1,048,573 recursive calls while a simple linear control remained fast."
+  },
+  "taxonomy": {
+    "category": "Algorithmic complexity denial of service",
+    "cwe": [
+      "CWE-1333",
+      "CWE-400"
+    ]
+  },
+  "locations": [
+    {
+      "path": "crates/kcs-pipeline/src/scan.rs",
+      "startLine": 178,
+      "endLine": 200,
+      "role": "user_input"
+    },
+    {
+      "path": "crates/kcs-pipeline/src/scan.rs",
+      "startLine": 124,
+      "endLine": 135,
+      "role": "propagation"
+    },
+    {
+      "path": "crates/kcs-pipeline/src/scan.rs",
+      "startLine": 315,
+      "endLine": 328,
+      "role": "propagation"
+    },
+    {
+      "path": "crates/kcs-pipeline/src/scan.rs",
+      "startLine": 341,
+      "endLine": 376,
+      "role": "root_control"
+    },
+    {
+      "path": "crates/kcs-pipeline/src/scan.rs",
+      "startLine": 383,
+      "endLine": 416,
+      "role": "sink"
+    },
+    {
+      "path": "crates/kcs-cli/src/main.rs",
+      "startLine": 452,
+      "endLine": 465,
+      "role": "entrypoint"
+    },
+    {
+      "path": "crates/kcs-cli/src/main.rs",
+      "startLine": 575,
+      "endLine": 583,
+      "role": "entrypoint"
+    }
+  ],
+  "writeup": {
+    "reportPath": "findings/tac-kcs-r23-cand-017-exponential-glob-backtracking/tac-kcs-r23-cand-017-exponential-glob-backtracking.md",
+    "pocPath": "findings/tac-kcs-r23-cand-017-exponential-glob-backtracking/poc"
+  },
+  "codeEvidence": [
+    {
+      "id": "ignore-rule-input",
+      "label": "Scope-controlled `.kcsignore` lines become rules",
+      "path": "crates/kcs-pipeline/src/scan.rs",
+      "startLine": 183,
+      "endLine": 200,
+      "language": "rust",
+      "role": "user_input",
+      "code": "    let content = std::fs::read_to_string(&path).pipeline_io(&path)?;\n    Ok(content\n        .lines()\n        .filter_map(|line| {\n            let trimmed = line.trim();\n            if trimmed.is_empty() || trimmed.starts_with('#') {\n                return None;\n            }\n            let (negated, pattern) = trimmed\n                .strip_prefix('!')\n                .map(|pattern| (true, pattern))\n                .unwrap_or((false, trimmed));\n            Some(IgnoreRule {\n                pattern: pattern.to_owned(),\n                negated,\n            })\n        })\n        .collect())",
+      "explanation": "The scope supplies each non-comment line. The loader trims and stores the pattern without a length limit, star-count limit, parser complexity check, or per-rule work budget."
+    },
+    {
+      "id": "preview-loads-ignore-rules",
+      "label": "Scan preview loads supplied rules before candidate enumeration",
+      "path": "crates/kcs-pipeline/src/scan.rs",
+      "startLine": 62,
+      "endLine": 71,
+      "language": "rust",
+      "role": "entrypoint",
+      "code": "    let mut ignore_rules = load_config_ignore(&scope_path)?;\n    ignore_rules.extend(load_kcsignore(&scope_path)?);\n    let mut candidates = Vec::new();\n    collect_direct_candidates(\n        &scope_path,\n        &ignore_rules,\n        request.include_raw_hashes,\n        case_insensitive,\n        &mut candidates,\n    )?;",
+      "explanation": "`build_scan_preview()` always adds `.kcsignore` rules to the preview rule set and then passes them into candidate collection. Snapshot and index both use this preview path."
+    },
+    {
+      "id": "candidate-ignore-eval",
+      "label": "Each candidate invokes ignore matching",
+      "path": "crates/kcs-pipeline/src/scan.rs",
+      "startLine": 124,
+      "endLine": 135,
+      "language": "rust",
+      "role": "propagation",
+      "code": "        let ignored = ignored_by_rules(\n            &relative,\n            file_type.is_dir(),\n            ignore_rules,\n            case_insensitive,\n        ) || secret == Some(SecretTier::TierA)\n            && !explicitly_unignored(\n                &relative,\n                file_type.is_dir(),\n                ignore_rules,\n                case_insensitive,\n            );",
+      "explanation": "The direct-child filename is attacker-controlled within a supplied scope. The preview asks `ignored_by_rules()` about that name before raw hashing, indexing, or snapshot filtering can continue."
+    },
+    {
+      "id": "per-rule-dispatch",
+      "label": "Every rule is applied to the candidate",
+      "path": "crates/kcs-pipeline/src/scan.rs",
+      "startLine": 315,
+      "endLine": 328,
+      "language": "rust",
+      "role": "propagation",
+      "code": "pub fn ignored_by_rules(\n    path: &str,\n    is_dir: bool,\n    rules: &[IgnoreRule],\n    case_insensitive: bool,\n) -> bool {\n    let mut ignored = false;\n    for rule in rules {\n        if matches_ignore_pattern(path, is_dir, &rule.pattern, case_insensitive) {\n            ignored = !rule.negated;\n        }\n    }\n    ignored\n}",
+      "explanation": "`ignored_by_rules()` does not short-circuit after a non-match and imposes no per-rule cost limit. The attacker needs only one crafted rule, while additional rules can multiply work."
+    },
+    {
+      "id": "pattern-dispatch",
+      "label": "Normalized patterns reach the byte matcher without a work budget",
+      "path": "crates/kcs-pipeline/src/scan.rs",
+      "startLine": 364,
+      "endLine": 376,
+      "language": "rust",
+      "role": "root_control",
+      "code": "    let rooted = pattern.starts_with('/');\n    let pattern = pattern.trim_start_matches('/').trim_end_matches('/');\n    let normalized_path = path.trim_start_matches('/').replace('\\\\', \"/\");\n    if !rooted && !pattern.contains('/') {\n        return wildcard_match(\n            pattern,\n            normalized_path\n                .rsplit('/')\n                .next()\n                .unwrap_or(&normalized_path),\n        );\n    }\n    wildcard_match(pattern, &normalized_path)",
+      "explanation": "For the shortest exploit path, a non-rooted no-slash pattern is matched against the attacker-controlled final path component. Normalization preserves the overlapping-star structure."
+    },
+    {
+      "id": "recursive-star-sink",
+      "label": "The star branch recursively explores overlapping states",
+      "path": "crates/kcs-pipeline/src/scan.rs",
+      "startLine": 383,
+      "endLine": 416,
+      "language": "rust",
+      "role": "sink",
+      "code": "fn wildcard_match_bytes(pattern: &[u8], value: &[u8]) -> bool {\n    if pattern.is_empty() {\n        return value.is_empty();\n    }\n    if pattern.starts_with(b\"**/\") {\n        return wildcard_match_bytes(&pattern[3..], value)\n            || value\n                .iter()\n                .position(|byte| *byte == b'/')\n                .map(|slash| wildcard_match_bytes(pattern, &value[slash + 1..]))\n                .unwrap_or(false);\n    }\n    if pattern == b\"**\" {\n        return true;\n    }\n    match pattern[0] {\n        b'*' => {\n            wildcard_match_bytes(&pattern[1..], value)\n                || !value.is_empty()\n                    && value[0] != b'/'\n                    && wildcard_match_bytes(pattern, &value[1..])\n        }\n        b'?' => {\n            !value.is_empty()\n                && value[0] != b'/'\n                && wildcard_match_bytes(&pattern[1..], &value[1..])\n        }\n        byte => {\n            !value.is_empty()\n                && byte == value[0]\n                && wildcard_match_bytes(&pattern[1..], &value[1..])\n        }\n    }\n}",
+      "explanation": "The `*` arm tries both the zero-character transition and the consume-one-byte transition. Those branches revisit the same suffix pairs repeatedly, and no memo table or step counter bounds the search."
+    },
+    {
+      "id": "snapshot-reachability",
+      "label": "Snapshot reaches scan preview synchronously",
+      "path": "crates/kcs-cli/src/main.rs",
+      "startLine": 460,
+      "endLine": 465,
+      "language": "rust",
+      "role": "entrypoint",
+      "code": "            let preview = build_scan_preview(ScanPreviewRequest {\n                scope_path: repo.root().display().to_string(),\n                include_raw_hashes: false,\n                require_network_approval: false,\n            })\n            .map_err(pipeline_to_kcs)?;",
+      "explanation": "A normal manual snapshot enters the preview path before it computes the excluded set or creates the snapshot."
+    },
+    {
+      "id": "index-reachability",
+      "label": "Index and preview reach scan preview before approval handling",
+      "path": "crates/kcs-cli/src/main.rs",
+      "startLine": 575,
+      "endLine": 583,
+      "language": "rust",
+      "role": "entrypoint",
+      "code": "    let preview = build_scan_preview(ScanPreviewRequest {\n        scope_path: repo.root().display().to_string(),\n        include_raw_hashes: !args.preview,\n        require_network_approval: !args.offline,\n    })\n    .map_err(pipeline_to_kcs)?;\n\n    if args.preview {\n        return Ok(index_preview_json(repo.root(), &preview));",
+      "explanation": "`index` and `index --preview` both evaluate ignore rules before returning preview JSON or checking later approval state."
+    }
+  ],
+  "rootCause": {
+    "summary": "The violated invariant is that ignore matching must be bounded by the number of distinct pattern/value states. KCS accepts attacker-controlled ignore patterns, dispatches each candidate to the custom matcher, and recursively explores both branches of every `*` without memoization or a work cap. The failing `(*a)^n b` versus `a^n` family revisits overlapping suffix states until the search grows as `2^(n+2)-3` calls.",
+    "evidenceRefs": [
+      "ignore-rule-input",
+      "preview-loads-ignore-rules",
+      "candidate-ignore-eval",
+      "per-rule-dispatch",
+      "pattern-dispatch",
+      "recursive-star-sink"
+    ]
+  },
+  "remediation": "Replace the recursive backtracking matcher with a vetted linear or near-linear glob implementation, or memoize matches by `(pattern_index, value_index)` and enforce explicit per-rule state budgets. Also cap `.kcsignore` line length, rule count, and star density, and return a structured over-limit error that identifies the offending rule instead of silently doing unbounded work.",
+  "validation": {
+    "method": "Exact-revision static source trace plus bounded offline recurrence probe",
+    "summary": "The source trace confirms attacker-controlled `.kcsignore` patterns and direct-child candidate names flow into `wildcard_match_bytes()` through snapshot and index preview paths. The bounded probe reproduced 1,021 calls at `n=8` and 1,048,573 calls at `n=18` for `(*a)^n b` against `a^n`; a simple `a*b` successful control used 20 calls.",
+    "evidenceRefs": [
+      "ignore-rule-input",
+      "candidate-ignore-eval",
+      "per-rule-dispatch",
+      "recursive-star-sink",
+      "snapshot-reachability",
+      "index-reachability"
+    ],
+    "assertions": [
+      "`.kcsignore` accepts every non-comment line as a pattern without a complexity budget.",
+      "Every direct candidate can be evaluated against every loaded rule.",
+      "The recursive `*` branch has overlapping subproblems and no memoization.",
+      "The validated pattern family follows `C(n)=2^(n+2)-3` recursive calls.",
+      "Snapshot and index reach this path synchronously during normal local operation."
+    ],
+    "limitations": [
+      "Larger cases were not executed to exhaustion.",
+      "No live service, third-party target, real credentials, or network access was used.",
+      "No fixed revision or exact affected release range was available for comparison."
+    ]
+  },
+  "attackPath": {
+    "summary": "A lower-trust scope contributor supplies a crafted `.kcsignore` rule and one direct-child filename. The operator runs snapshot, index, or index preview. KCS loads the rule, evaluates the candidate, recursively explores overlapping star states, and burns CPU before the command can finish.",
+    "dataflow": {
+      "summary": "scope-controlled `.kcsignore` line and filename -> `load_kcsignore()` -> `collect_direct_candidates()` -> `ignored_by_rules()` -> `matches_ignore_pattern()` -> `wildcard_match_bytes()` recursive star branch",
+      "source": "attacker-controlled ignore rule plus direct-child candidate name in an adopted or shared local scope",
+      "sink": "victim CLI CPU time and command availability during scan preview construction",
+      "outcome": "snapshot/index preview for the selected scope stalls or consumes excessive CPU until the rule is removed",
+      "evidenceRefs": [
+        "ignore-rule-input",
+        "preview-loads-ignore-rules",
+        "candidate-ignore-eval",
+        "per-rule-dispatch",
+        "pattern-dispatch",
+        "recursive-star-sink"
+      ]
+    },
+    "reachability": {
+      "summary": "The path is filesystem-mediated and operator-triggered. It requires the operator to process a supplied/shared scope containing the crafted `.kcsignore` and at least one matching direct child file.",
+      "attacker": "lower-trust local or shared scope contributor",
+      "entrypoint": "normal `kcs snapshot`, `kcs index`, or `kcs index --preview` command",
+      "outcome": "local availability loss for scan-preview-dependent workflows in that scope"
+    },
+    "evidenceRefs": [
+      "snapshot-reachability",
+      "index-reachability",
+      "recursive-star-sink"
+    ],
+    "impact": {
+      "level": "medium",
+      "why": "The primitive can deterministically block ordinary snapshot/index workflows with tiny valid metadata, but it is confined to the selected local scope and does not provide code execution, credential access, or durable cross-scope compromise."
+    },
+    "likelihood": {
+      "level": "high",
+      "why": "A crafted `.kcsignore` rule and filename are ordinary scope content, and the affected commands automatically build a scan preview."
+    },
+    "limitations": [
+      "The operator can remove or edit `.kcsignore` outside the failing KCS command and recover.",
+      "Simple glob patterns remain fast.",
+      "The direct-child scanner reduces slash-heavy `**/` exploitation options, though plain `*` already demonstrates the issue."
+    ]
+  },
+  "remediationTests": [
+    "Evaluate `(*a)^n b` against `a^n` through `ignored_by_rules()` and assert bounded state count or bounded elapsed time.",
+    "Run `build_scan_preview()` on a fixture containing a crafted `.kcsignore` and direct child filename.",
+    "Exercise normal successful `*`, `?`, rooted, negated, directory-only, and `**` rules to preserve existing semantics.",
+    "Assert over-limit rules return a stable diagnostic rather than unbounded recursion or silent non-matches.",
+    "Test multiple rules and multiple candidates to ensure aggregate work budgets are enforced."
+  ],
+  "extensions": {
+    "candidateId": "KCS-R23-CAND-017",
+    "ledgerRowId": "KCS-R23-CAND-017",
+    "reportId": "KCS-R23-CAND-017"
+  }
+}

@@ -1,0 +1,469 @@
+[
+  {
+    "candidate_id": "KCS-R23-CAND-064",
+    "title": "Batch recovery bypasses repository tool-lock validation",
+    "ledger_row_id": "KCS-R23-CAND-064",
+    "instance_key": "KCS-R23-CAND-064",
+    "affected_locations": [
+      {
+        "label": "open_control_gap",
+        "path": "crates/kcs-core/src/scope.rs",
+        "lines": "188-206,235-239",
+        "detail": "Repository open validates config, scope, and manifest but not tool-lock.json."
+      },
+      {
+        "label": "batch_control_gap",
+        "path": "crates/kcs-cli/src/main.rs",
+        "lines": "5586-5667",
+        "detail": "Both resume and retry acquire the store lock and execute tasks without validate_repo_tool_lock."
+      },
+      {
+        "label": "online_execution",
+        "path": "crates/kcs-cli/src/main.rs",
+        "lines": "5934-5968,6050-6067,6248",
+        "detail": "Batch gates and drives markdownize/embedding work without reading the repository tool lock."
+      },
+      {
+        "label": "expected_control",
+        "path": "crates/kcs-cli/src/main.rs",
+        "lines": "10942-10949",
+        "detail": "The existing helper parses and validates repository tool-lock.json."
+      },
+      {
+        "label": "schema_validator",
+        "path": "crates/kcs-adapter/src/tool_lock.rs",
+        "lines": "52-57,238-260",
+        "detail": "Malformed versions/entries are rejected when the helper is actually invoked."
+      }
+    ],
+    "attack_steps": [
+      "A lower-trust shared or preseeded scope is adopted with a malformed repository tool-lock and an otherwise eligible persisted recovery task.",
+      "The operator or calling automation invokes batch resume or batch retry with the already configured network approval, adapter credential, and budget authority.",
+      "Repository open validates config, scope, and manifest but does not parse tool-lock.json, and the batch dispatcher does not invoke validate_repo_tool_lock before mutating tasks.",
+      "The recovered task passes the independent path, hash, media, secret, network, and budget checks and reaches online markdownize or embedding execution.",
+      "KCS performs an outbound operation and can persist derived state even though sibling commands reject the same repository identity state as malformed."
+    ],
+    "assumptions": [
+      "The operator opens a copied, shared, migrated, or preseeded scope rather than an exclusively owner-created live private store.",
+      "The scope contains an otherwise eligible persisted task and matching current file bytes.",
+      "Online adapter use, credentials, and budget were already authorized independently of the malformed tool lock."
+    ],
+    "context": "KCS has no inbound listener. The meaningful boundary is adoption of lower-trust repository state followed by an operator-mediated outbound adapter operation under a repository identity record that the normal validator rejects.",
+    "in_scope": true,
+    "exposure": "Local copied/shared archive and batch-recovery workflow; the only network activity is an approved outbound adapter request.",
+    "identity": "The KCS OS user supplies the configured adapter identity and budget authority. A shared/archive-state contributor can supply the scope state but does not thereby obtain the user's credential or choose the configured destination.",
+    "cross_boundary": true,
+    "vector": "none",
+    "preconditions": [
+      "A copied, shared, preseeded, or fault-affected scope must carry a malformed tool-lock and a recoverable task.",
+      "The operator or automation must explicitly run batch resume or retry.",
+      "All independent network, credential, secret, exact-byte, media, and budget checks must pass."
+    ],
+    "attacker_control": "plausible: the in-scope shared/archive-state contributor can provide the malformed repository state and persisted task, while the operator retains command, destination, credential, and approval control",
+    "category": "repository provenance and online-recovery authorization-control bypass",
+    "mitigations": [
+      "Persistent network approval, credentials, task eligibility, current path/hash/size/media checks, secret holds, and budget limits remain enforced.",
+      "The adapter reports its actual runtime profile, so false runtime-profile labeling is not established by this candidate.",
+      "The malformed lock can be repaired or removed to restore normal command behavior."
+    ],
+    "auth_scope": "operator-mediated local workflow with pre-existing outbound adapter authorization",
+    "impact_surface": "repository identity-policy consistency, bounded adapter execution/cost, and derived-state provenance",
+    "target_reach": "eligible recovery tasks in one adopted scope",
+    "secrets_references": [
+      "The configured adapter credential is used for the already approved outbound request; the defect does not expose or redirect that credential."
+    ],
+    "counterevidence": [
+      "tool-lock.json is normally owner-protected inside a private .kcs store, so unrestricted same-user mutation alone would grant equivalent authority and is not reportable.",
+      "The validator checks schema and modality, not equality with the current effective adapter configuration; its omission therefore proves malformed-state bypass but not destination substitution.",
+      "No isolated batch invocation captured a send under a malformed lock, although the exact branch-to-sink trace and sibling negative control are complete.",
+      "All controls that directly authorize bytes, secrets, network use, credentials, and spend remain in force."
+    ],
+    "blindspots": [
+      "The frequency with which users batch-resume copied scopes containing recoverable tasks is not measured.",
+      "The evidence does not quantify provider charges or downstream reliance on state produced during the invalid-lock interval."
+    ],
+    "controls": [
+      "Repository open validates config, scope, and manifest but not tool-lock.json.",
+      "validate_repo_tool_lock parses and validates lock shape when sibling commands invoke it.",
+      "Batch task selection and send-time byte, secret, adapter, network, and budget controls remain present."
+    ],
+    "confidence": "high",
+    "impact": "medium",
+    "likelihood": "medium",
+    "final_policy": "reportable",
+    "final_severity": "low",
+    "priority": "P3",
+    "rationale": "A realistic lower-trust copied/shared-store source exists in the threat model, so hard suppression does not apply. The consequence is nevertheless bounded because malformed lock state neither chooses a destination nor bypasses byte, secret, credential, or budget authorization. Medium impact with Medium likelihood maps mechanically to Low/P3.",
+    "remediation_subsumption_decision": "Under the acquired store lock, validate tool-lock.json before any resume/retry mutation or execution. Keep this schema-validation fix distinct from controls that bind each task to the current effective adapter profile and destination."
+  },
+  {
+    "candidate_id": "KCS-R23-CAND-066",
+    "title": "torn final task and cost JSONL records permanently poison their stores",
+    "ledger_row_id": "KCS-R23-CAND-066",
+    "instance_key": "KCS-R23-CAND-066",
+    "affected_locations": [
+      {
+        "label": "task append",
+        "path": "crates/kcs-pipeline/src/task.rs",
+        "lines": "112-127"
+      },
+      {
+        "label": "task reader",
+        "path": "crates/kcs-pipeline/src/task.rs",
+        "lines": "129-186"
+      },
+      {
+        "label": "cost append",
+        "path": "crates/kcs-pipeline/src/budget.rs",
+        "lines": "111-126"
+      },
+      {
+        "label": "cost reader",
+        "path": "crates/kcs-pipeline/src/budget.rs",
+        "lines": "138-181"
+      }
+    ],
+    "attack_steps": [
+      "A process or power failure interrupts a direct append to the final task or cost JSONL file after only a prefix of a record becomes visible.",
+      "The next reader processes the unterminated final bytes as an ordinary JSON line and treats the parse error as fatal.",
+      "Every later restart reparses the same tail and fails again because no framed publication or conservative torn-tail recovery exists.",
+      "A task tail wedges task, status, batch, or reconciliation operations in one scope; a cost tail wedges device-global budget accounting across scopes until manual repair."
+    ],
+    "assumptions": [
+      "A crash, short write, or power failure occurs during the narrow final-file append interval.",
+      "The incomplete bytes remain on disk and are visible after restart.",
+      "The operator does not manually identify and repair the tail."
+    ],
+    "context": "This is a real crash-durability and persistent availability defect, but the validated cause is an untrusted fault/scheduling boundary rather than a realistic lower-trust attacker who can supply or trigger the torn append without already holding equivalent local process authority.",
+    "in_scope": true,
+    "exposure": "Local crash/power-failure path only; there is no network, shared-archive, or attacker-controlled input path to the partial final write in the validated trace.",
+    "identity": "The append and later read run as the same KCS OS user; no lower-privileged principal or remote service participates.",
+    "cross_boundary": false,
+    "vector": "none",
+    "preconditions": [
+      "The process or host must fail during a direct append after partial visibility.",
+      "The same malformed final bytes must persist to the next read.",
+      "Recovery requires manual store surgery because blindly dropping a cost tail could erase real billable state."
+    ],
+    "attacker_control": "no realistic lower-trust attacker control is established; only crash, short-write, or power-failure timing creates the condition",
+    "category": "crash durability and persistent local availability",
+    "mitigations": [
+      "Store locks prevent concurrent writer interleaving.",
+      "write_all detects ordinary in-process short-write failure but cannot make append publication atomic across a crash.",
+      "Manual removal or repair of the malformed tail restores service."
+    ],
+    "auth_scope": "same-user local storage operation",
+    "impact_surface": "scope-local task availability or device-global budget-ledger availability",
+    "target_reach": "one scope for task corruption, or all scopes using the affected device cost ledger",
+    "secrets_references": [],
+    "counterevidence": [
+      "No attacker-controlled record content, remote response, or copied-state adoption is needed or shown; the trigger is a process/power fault.",
+      "Manual ledger repair restores operation.",
+      "A newline-terminated malformed row must remain fatal, and blind tail deletion could lose a legitimate charge, which constrains but does not eliminate safe recovery."
+    ],
+    "blindspots": [
+      "The evidence does not establish a lower-trust method to reliably time or induce the partial append.",
+      "Crash frequency and filesystem-specific partial-append behavior are not quantified."
+    ],
+    "controls": [
+      "Both stores serialize appenders with locks.",
+      "Both readers fail closed on every malformed line.",
+      "Neither store uses record framing or a provably torn-tail quarantine protocol."
+    ],
+    "confidence": "high",
+    "impact": "medium",
+    "likelihood": "low",
+    "final_policy": "ignore",
+    "final_severity": "none",
+    "priority": null,
+    "rationale": "The persistent wedge is materially real, but no realistic lower-trust attacker path is established; hard suppression applies. Independently, Medium impact with Low likelihood maps mechanically to ignore.",
+    "remediation_subsumption_decision": "Treat as non-reportable durability hardening: use durable framed publication or quarantine only a provably torn final tail while preserving billable charge state and continuing to reject complete malformed records."
+  },
+  {
+    "candidate_id": "KCS-R23-CAND-067",
+    "title": "Persisted OCR tasks bypass current ignore authorization",
+    "ledger_row_id": "KCS-R23-CAND-067",
+    "instance_key": "KCS-R23-CAND-067",
+    "affected_locations": [
+      {
+        "label": "scan_authorization",
+        "path": "crates/kcs-pipeline/src/scan.rs",
+        "lines": "56-87,90-160,178-200",
+        "detail": "A fresh scan loads ignore policy and marks candidate eligibility."
+      },
+      {
+        "label": "normal_task_source",
+        "path": "crates/kcs-cli/src/main.rs",
+        "lines": "10015-10039,10179-10213",
+        "detail": "An allowed OCR candidate is normally persisted as an online placeholder task."
+      },
+      {
+        "label": "persisted_task_loader",
+        "path": "crates/kcs-pipeline/src/task.rs",
+        "lines": "41-75,129-186",
+        "detail": "Tasks retain path/hash/state but no scan decision or ignore-policy binding; the loader checks only shape, locality, and hash syntax."
+      },
+      {
+        "label": "missing_current_authorization",
+        "path": "crates/kcs-cli/src/main.rs",
+        "lines": "6050-6067,6533-6573",
+        "detail": "Selection and preconditions check secrets/hash/size/media but not current ignore policy or scan membership."
+      },
+      {
+        "label": "ocr_sink",
+        "path": "crates/kcs-adapter/src/mistral_ocr.rs",
+        "lines": "112-138",
+        "detail": "The production client reads and posts the task path's document bytes with authentication."
+      }
+    ],
+    "attack_steps": [
+      "A document is legitimately eligible for OCR and KCS persists a pending or paused online markdownize task for its current bytes.",
+      "The operator or a lower-trust scope contributor changes .kcsignore or the effective scope ignore rules so that a fresh scan excludes the unchanged document.",
+      "The operator or calling automation later invokes batch resume or retry; the command consumes persisted tasks without building a current scan preview.",
+      "Task selection and the send precondition recheck status, filename-secret class, direct-child path, raw hash, size, media, network approval, budget, and credentials, but never current ignore membership.",
+      "The unchanged now-excluded document is read and sent in an authenticated request to the configured external OCR adapter."
+    ],
+    "assumptions": [
+      "An eligible online OCR task was created before the ignore-policy change, or an equivalent task came from an adopted shared store.",
+      "The document bytes remain unchanged while only current ignore policy changes.",
+      "The operator retains valid credentials, persistent network approval, available budget, and later invokes a batch recovery command.",
+      "The document is locally preparable for the concrete OCR path, such as a text-layer PDF enhancement task."
+    ],
+    "context": "The path crosses a current local exclusion/authorization boundary into an external service. Persisted task state is incorrectly treated as sufficient authority after current scan policy has removed the path from eligibility.",
+    "in_scope": true,
+    "exposure": "Operator- or automation-mediated local batch workflow followed by an authenticated outbound OCR request; KCS has no inbound listener.",
+    "identity": "The KCS OS user and configured adapter credential perform the send. A local content/shared-scope contributor can influence files and ignore policy, and calling automation can invoke recovery, but neither should inherit stale authorization to disclose excluded bytes.",
+    "cross_boundary": true,
+    "vector": "none",
+    "preconditions": [
+      "A prior allowed task must remain recoverable after its path becomes ignored.",
+      "Document bytes must remain identical so the raw-hash recheck passes.",
+      "The path must pass current filename-secret, media, and size checks.",
+      "The operator must have approved the adapter and later run batch recovery with credentials and budget available."
+    ],
+    "attacker_control": "plausible: an in-scope local content or shared-scope contributor can influence the file and ignore-policy state, and a partially trusted automation can invoke batch; the operator still controls credentials and the configured destination",
+    "category": "stale authorization and excluded-document egress",
+    "mitigations": [
+      "Direct-child locality, exact current raw hash, size, media routing, persistent network approval, credential presence, budget, and filename-based secret classification are rechecked.",
+      "Changing the document bytes retires the stale task.",
+      "Known secret-looking names remain held absent separate secret-send approval.",
+      "A fresh ignored file does not create a task; prior eligible durable state is required."
+    ],
+    "auth_scope": "local operator/automation recovery path with prior adapter authorization but revoked current scan membership",
+    "impact_surface": "confidentiality of an excluded user-readable document and correctness of durable authorization state",
+    "target_reach": "one unchanged OCR-eligible document per stale task, repeatable across eligible tasks in the scope",
+    "secrets_references": [
+      "The configured OCR credential authenticates the request but is not disclosed by this defect.",
+      "The excluded document can contain confidential content not recognized by filename-based secret classification."
+    ],
+    "counterevidence": [
+      "The document must previously have been allowed and enqueued; ignore rules do not create tasks for fresh excluded files.",
+      "The user explicitly approved the configured external adapter and must invoke a later recovery command.",
+      "Current hash, direct-child, size, media, secret-name, budget, and credential controls all remain effective.",
+      "No runtime adapter capture was made, although the normal task source through authenticated sink trace is complete."
+    ],
+    "blindspots": [
+      "The prevalence of long-lived OCR tasks across ignore-policy changes is not measured.",
+      "The V10 proof does not quantify whether particular external providers retain or train on the transmitted document."
+    ],
+    "controls": [
+      "Fresh indexing loads .kcsignore and effective scope ignore rules before enqueue.",
+      "Persisted TaskDescriptor stores path, hash, and lifecycle state but no current scan-membership or ignore-policy binding.",
+      "Batch recovery and send-time classification omit build_scan_preview and ignored_by_rules while preserving other send controls."
+    ],
+    "confidence": "high",
+    "impact": "high",
+    "likelihood": "medium",
+    "final_policy": "reportable",
+    "final_severity": "medium",
+    "priority": "P2",
+    "rationale": "The path reaches a meaningful confidentiality boundary from a normal stale-task workflow and an in-scope lower-trust scope/automation source, so it is reportable. Prior enqueue, unchanged bytes, explicit batch use, existing adapter consent, and the remaining send controls materially constrain likelihood. High impact with Medium likelihood maps mechanically to Medium/P2.",
+    "remediation_subsumption_decision": "Immediately before reservation and adapter invocation, rebuild or equivalently evaluate current scan membership, ignore rules, secret classification, and exact byte identity, retiring tasks that are no longer eligible. Keep this fix distinct from final path-reopen binding and tool-lock validation."
+  },
+  {
+    "candidate_id": "KCS-R23-CAND-068",
+    "title": "same-batch duplicate embedding identities split authoritative and KNN vectors",
+    "ledger_row_id": "KCS-R23-CAND-068",
+    "instance_key": "KCS-R23-CAND-068",
+    "affected_locations": [
+      {
+        "label": "embedding identity",
+        "path": "crates/kcs-index/src/embedding_store.rs",
+        "lines": "10-27"
+      },
+      {
+        "label": "all-read planning",
+        "path": "crates/kcs-cli/src/main.rs",
+        "lines": "7675-7708"
+      },
+      {
+        "label": "sequential response writes",
+        "path": "crates/kcs-cli/src/main.rs",
+        "lines": "7726-7769"
+      },
+      {
+        "label": "first-wins source and current-vector KNN",
+        "path": "crates/kcs-index/src/embedding_store.rs",
+        "lines": "86-145"
+      }
+    ],
+    "attack_steps": [
+      "A normal embedding batch contains two distinct chunks whose equal text and profile produce the same authoritative embedding identity.",
+      "Batch planning probes both identities before either write and sends both equal texts because it does not group duplicate misses.",
+      "The untrusted remote adapter returns two shape-valid but non-identical vectors for the equal inputs.",
+      "The first response creates the authoritative embeddings row; the conflicting second insert is ignored, but each response's current vector is independently linked into its chunk_vec row.",
+      "KNN search observes different vectors for the same authoritative identity, while a later rebuild relinks both chunks from the first vector and changes search ordering or evidence selection."
+    ],
+    "assumptions": [
+      "Two equal texts under the same profile occur in one write-before-reprobe batch while retaining distinct chunk IDs.",
+      "The configured remote adapter is faulty, variable, compromised, or malicious and returns different width-valid vectors for the duplicates.",
+      "Vector search or downstream evidence selection relies on the divergent derived rows before repair/rebuild."
+    ],
+    "context": "Remote adapter responses are explicitly untrusted. The path crosses from response-controlled vector bytes into an authoritative local embedding identity and a derived native KNN projection that disagree about the same content.",
+    "in_scope": true,
+    "exposure": "Approved outbound embedding workflow whose response is controlled by the configured remote service; KCS has no inbound listener.",
+    "identity": "The KCS user authorizes the adapter call. The remote service controls each returned vector, while KCS is responsible for enforcing one canonical vector per content/profile identity.",
+    "cross_boundary": true,
+    "vector": "remote",
+    "preconditions": [
+      "The same batch must contain duplicate embedding identities that were all probed before any write.",
+      "The adapter must return non-identical vectors that satisfy existing count, dimension, and representation checks.",
+      "A consumer must use vector KNN results before an eventual rebuild normalizes the derived rows."
+    ],
+    "attacker_control": "yes: the in-scope remote response actor directly chooses both valid-looking vector payloads and can recognize duplicate inputs in the same request",
+    "category": "authoritative/derived embedding identity split and search-evidence integrity",
+    "mitigations": [
+      "Embedding identity already binds text hash and profile.",
+      "Response count and vector dimension are checked.",
+      "The authoritative embeddings table keeps the first vector, and a later rebuild relinks derived rows from it.",
+      "Baseline text search remains available and no credential or document-confidentiality bypass is caused by the split itself."
+    ],
+    "auth_scope": "remote response to a previously approved outbound embedding request",
+    "impact_surface": "trusted vector-index integrity, KNN ordering, and evidence selection within one scope",
+    "target_reach": "duplicate-content chunks in the affected batch and the scope's derived vector search until rebuild",
+    "secrets_references": [
+      "The configured embedding credential authenticates the approved request; no credential disclosure or destination change is shown."
+    ],
+    "counterevidence": [
+      "Stable deterministic adapters ordinarily return equal or near-equal vectors for identical text.",
+      "The configured adapter is already entrusted to generate semantic vectors and can degrade search quality without this identity collision.",
+      "The defect requires same-batch duplicates and conflicting responses; later rebuild converges both chunks to the first authoritative vector.",
+      "No confidentiality, code-execution, authorization, or monetary-cap impact is involved."
+    ],
+    "blindspots": [
+      "The validation reproduces storage divergence but does not quantify downstream decisions made from altered KNN ordering.",
+      "Duplicate-text batch frequency and legitimate provider nondeterminism are not measured."
+    ],
+    "controls": [
+      "Text/profile-derived embedding IDs provide the intended authoritative identity.",
+      "All-read planning checks existing rows but does not deduplicate same-batch misses.",
+      "ON CONFLICT DO NOTHING preserves the first authoritative row, while link_chunk_vec incorrectly consumes the current response vector.",
+      "Rebuild uses the authoritative row and exposes the prior projection inconsistency."
+    ],
+    "confidence": "high",
+    "impact": "medium",
+    "likelihood": "high",
+    "final_policy": "reportable",
+    "final_severity": "medium",
+    "priority": "P2",
+    "rationale": "The remote response actor is realistic and directly controls the conflicting payloads, so the path is reportable. However, the incremental impact is bounded to vector/evidence integrity in one scope, the provider already supplies semantic vectors, and rebuild converges the rows; Medium impact with High likelihood maps mechanically to Medium/P2.",
+    "remediation_subsumption_decision": "Group equal embedding hashes before sending, persist exactly one canonical vector, link every member from the persisted canonical bytes, and reject conflicting duplicate responses atomically."
+  },
+  {
+    "candidate_id": "KCS-R23-CAND-069",
+    "title": "Inline EvidencePointer raw_hash escapes tombstone storage and discloses arbitrary JSON files",
+    "ledger_row_id": "KCS-R23-CAND-069",
+    "instance_key": "KCS-R23-CAND-069:inline-raw-hash-tombstone-read",
+    "affected_locations": [
+      {
+        "label": "entrypoint",
+        "path": "crates/kcs-search/src/evidence.rs",
+        "lines": "9-30"
+      },
+      {
+        "label": "root_control",
+        "path": "crates/kcs-cli/src/main.rs",
+        "lines": "4576-4586"
+      },
+      {
+        "label": "reachable_branch",
+        "path": "crates/kcs-cli/src/main.rs",
+        "lines": "4773-4784"
+      },
+      {
+        "label": "file_read_sink",
+        "path": "crates/kcs-cli/src/main.rs",
+        "lines": "5207-5226"
+      },
+      {
+        "label": "disclosure_sink",
+        "path": "crates/kcs-cli/src/main.rs",
+        "lines": "5227-5249,11184-11190"
+      }
+    ],
+    "attack_steps": [
+      "A lower-trust caller supplies an inline EvidencePointer JSON object containing a legitimate scope identity and existing commit but an absolute or parent-bearing raw_hash naming a process-readable JSON file.",
+      "The inline parser checks schema_version only and deserializes raw_hash as an unconstrained string, bypassing the strict hash validation used by the short-hash and URI routes.",
+      "The valid commit does not contain that attacker value, so resolution reaches tombstone lookup before returning not-found.",
+      "Tombstone path construction joins the unvalidated raw_hash as the final path component; an absolute component replaces the intended tombstone prefix and fs::read opens the attacker-selected file.",
+      "KCS parses the file as JSON, retains its fields in KcsError.context, and emits the full context in JSON mode to the calling automation or agent."
+    ],
+    "assumptions": [
+      "A calling automation, agent, or operator passes attacker-authored inline pointer text to open, view, or verify and returns structured errors to the caller.",
+      "The attacker can reuse a legitimate scope_id/scope_path and existing commit, which are routinely present in a valid pointer.",
+      "The chosen target is readable by the KCS OS identity and contains parseable JSON.",
+      "The supplied raw_hash is absent from the selected commit tree so tombstone lookup is reached."
+    ],
+    "context": "The path crosses from partially trusted CLI/pointer input into filesystem reads outside the selected scope under the KCS user's identity, then crosses back through structured error output to the lower-trust caller.",
+    "in_scope": true,
+    "exposure": "Local CLI/stdin and agent-tool input surface; there is no KCS listener, but calling automation is an explicit threat-model actor and consumes JSON output.",
+    "identity": "The KCS process reads with the invoking user's filesystem privileges. The lower-trust caller needs pointer-input authority but does not otherwise need read permission to the selected JSON file.",
+    "cross_boundary": true,
+    "vector": "none",
+    "preconditions": [
+      "The caller must cause a KCS pointer-resolution command to process inline JSON.",
+      "A real scope and existing commit must be named.",
+      "The target file must be process-readable and valid JSON.",
+      "Structured JSON error output must be returned or exposed to the caller."
+    ],
+    "attacker_control": "yes: the lower-trust caller directly controls inline raw_hash and can select an absolute or traversal-bearing path while reusing legitimate pointer metadata",
+    "category": "path traversal, arbitrary local JSON file read, and structured error disclosure",
+    "mitigations": [
+      "Scope resolution and commit existence are validated before tombstone access.",
+      "The target must be readable under the KCS user's OS identity and parse as JSON.",
+      "Human error output emits code/message rather than full context.",
+      "URI and short-hash routes impose stronger syntax constraints; the strongest escape is specific to supported inline JSON."
+    ],
+    "auth_scope": "partially trusted calling automation or agent input with no authorization to read arbitrary user files",
+    "impact_surface": "confidentiality of user-readable JSON configuration, application state, and credential material outside the selected scope",
+    "target_reach": "any process-readable parseable JSON file addressable on the local filesystem, repeatable across pointer invocations",
+    "secrets_references": [
+      "Potential targets include JSON credential stores, tokens, service configuration, and application state readable by the invoking user.",
+      "The exact exposed secret depends on local file formats and permissions; non-JSON files are not reflected by this sink."
+    ],
+    "counterevidence": [
+      "The attacker must know or obtain a valid scope identity and existing commit and must induce pointer resolution.",
+      "Only process-readable parseable JSON is returned, and disclosure requires structured JSON output; ordinary human output omits the context.",
+      "No file write, code execution, or general non-JSON file disclosure is established.",
+      "URI pointers do not permit the same slash-bearing raw_hash form, but inline JSON is a separately supported input surface."
+    ],
+    "blindspots": [
+      "The repository does not enumerate every external agent/tool integration that forwards attacker pointer text and returns JSON errors.",
+      "No real secret file was read during validation; the conclusion rests on a complete source-to-output trace and safe lexical path observation."
+    ],
+    "controls": [
+      "Scope ID/path resolution and commit existence checks constrain which repository context reaches tombstone lookup.",
+      "validate_short_hash_operand exists for another operand form but is not applied to inline pointers.",
+      "read_tombstone checks only minimal digest length and performs no component or canonical containment validation.",
+      "KcsError JSON serialization preserves the parsed tombstone object as context."
+    ],
+    "confidence": "high",
+    "impact": "high",
+    "likelihood": "high",
+    "final_policy": "reportable",
+    "final_severity": "high",
+    "priority": "P1",
+    "rationale": "A partially trusted calling automation is explicitly in scope, controls the pointer operand, and can receive structured output. The complete trace provides a direct arbitrary JSON read outside the chosen scope with potential credential exposure and no speculative chain. High impact with High likelihood maps to High/P1; Critical is not justified because valid repository context, JSON format, readable permissions, and tool invocation remain prerequisites and no code execution or broad automatic exfiltration is shown.",
+    "remediation_subsumption_decision": "Apply one shared full hash validator before every EvidencePointer lookup, require exactly sha256: plus 64 lowercase hexadecimal characters, construct tombstone paths only from validated digest components, and reject absolute or non-Normal path components."
+  }
+]

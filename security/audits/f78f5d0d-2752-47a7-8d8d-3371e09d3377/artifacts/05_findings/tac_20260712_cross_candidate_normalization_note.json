@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "scan_id": "f78f5d0d-2752-47a7-8d8d-3371e09d3377",
+  "event": "cross_candidate_normalization_by_writer_context",
+  "created_at_utc": "2026-07-11T20:40:35Z",
+  "reported_by_agent": "/root/writeup_047_tac",
+  "reported_text": "Before I recognized this turn was executing inside the 047 writer context, I performed parent-level scanDir normalization for pending rows 050/057/059/061/064/067/068/069.",
+  "affected_candidate_ids_reported": [
+    "KCS-R23-CAND-050",
+    "KCS-R23-CAND-057",
+    "KCS-R23-CAND-059",
+    "KCS-R23-CAND-061",
+    "KCS-R23-CAND-064",
+    "KCS-R23-CAND-067",
+    "KCS-R23-CAND-068",
+    "KCS-R23-CAND-069"
+  ],
+  "formal_acceptance_use": false,
+  "coordinator_repair": "The root coordinator independently re-reviewed and rewrote TAC receipt and ledger hash bindings for all remaining candidate write-ups after this note; this writer-context normalization is preserved only as audit evidence.",
+  "repository_checkout_modified": false
+}

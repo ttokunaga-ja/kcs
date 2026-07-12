@@ -1,0 +1,496 @@
+{
+  "documentType": "codex-security.coverage",
+  "schemaVersion": "1.0",
+  "scanId": "f78f5d0d-2752-47a7-8d8d-3371e09d3377",
+  "mode": "deep_repository",
+  "completeness": "complete",
+  "inventoryStrategy": "repository",
+  "includePaths": [
+    "."
+  ],
+  "excludePaths": [],
+  "surfaces": [
+    {
+      "id": "surface-kcs-r23-cand-069",
+      "label": "Inline EvidencePointer raw_hash escapes tombstone storage and discloses arbitrary JSON files",
+      "disposition": "reported",
+      "receiptRefs": [
+        "artifacts/05_findings/KCS-R23-CAND-069/candidate_ledger.jsonl"
+      ],
+      "riskArea": "Bind content identity to final scope and provenance",
+      "notes": "Reported as KCS-R23-CAND-069; detailed write-up linked from findings.json."
+    },
+    {
+      "id": "surface-kcs-r23-cand-003",
+      "label": "Gemini vectors lack numeric-domain and positive-norm validation",
+      "disposition": "reported",
+      "receiptRefs": [
+        "artifacts/05_findings/KCS-R23-CAND-003/candidate_ledger.jsonl"
+      ],
+      "riskArea": "Run adapters through scoped capabilities and policy-preserving targets",
+      "notes": "Reported as KCS-R23-CAND-003; detailed write-up linked from findings.json."
+    },
+    {
+      "id": "surface-kcs-r23-cand-004",
+      "label": "OCR bounding-box arithmetic can overflow",
+      "disposition": "reported",
+      "receiptRefs": [
+        "artifacts/05_findings/KCS-R23-CAND-004/candidate_ledger.jsonl"
+      ],
+      "riskArea": "Centralize bounds before untrusted work is materialized",
+      "notes": "Reported as KCS-R23-CAND-004; detailed write-up linked from findings.json."
+    },
+    {
+      "id": "surface-kcs-r23-cand-005",
+      "label": "byte-oriented question-mark globs bypass Unicode names",
+      "disposition": "reported",
+      "receiptRefs": [
+        "artifacts/05_findings/KCS-R23-CAND-005/candidate_ledger.jsonl"
+      ],
+      "riskArea": "Bind content identity to final scope and provenance",
+      "notes": "Reported as KCS-R23-CAND-005; detailed write-up linked from findings.json."
+    },
+    {
+      "id": "surface-kcs-r23-cand-006",
+      "label": "lexical PDF page markers amplify derived work without a cardinality bound",
+      "disposition": "reported",
+      "receiptRefs": [
+        "artifacts/05_findings/KCS-R23-CAND-006/candidate_ledger.jsonl"
+      ],
+      "riskArea": "Centralize bounds before untrusted work is materialized",
+      "notes": "Reported as KCS-R23-CAND-006; detailed write-up linked from findings.json."
+    },
+    {
+      "id": "surface-kcs-r23-cand-007",
+      "label": "incremental unit mapping allocates a quadratic LCS matrix",
+      "disposition": "reported",
+      "receiptRefs": [
+        "artifacts/05_findings/KCS-R23-CAND-007/candidate_ledger.jsonl"
+      ],
+      "riskArea": "Centralize bounds before untrusted work is materialized",
+      "notes": "Reported as KCS-R23-CAND-007; detailed write-up linked from findings.json."
+    },
+    {
+      "id": "surface-kcs-r23-cand-008",
+      "label": "A symlinked `.kcs` binds one working root to another scope's live store",
+      "disposition": "reported",
+      "receiptRefs": [
+        "artifacts/05_findings/KCS-R23-CAND-008/candidate_ledger.jsonl"
+      ],
+      "riskArea": "Bind content identity to final scope and provenance",
+      "notes": "Reported as KCS-R23-CAND-008; detailed write-up linked from findings.json."
+    },
+    {
+      "id": "surface-kcs-r23-cand-011",
+      "label": "a new secret content twin is vector-linked before its hold exists",
+      "disposition": "reported",
+      "receiptRefs": [
+        "artifacts/05_findings/KCS-R23-CAND-011/candidate_ledger.jsonl"
+      ],
+      "riskArea": "Make durable workflow state transitions verifiable and replay-safe",
+      "notes": "Reported as KCS-R23-CAND-011; detailed write-up linked from findings.json."
+    },
+    {
+      "id": "surface-kcs-r23-cand-013",
+      "label": "Embedding reconciliation revives AuthError work during batch retry",
+      "disposition": "reported",
+      "receiptRefs": [
+        "artifacts/05_findings/KCS-R23-CAND-013/candidate_ledger.jsonl"
+      ],
+      "riskArea": "Make durable workflow state transitions verifiable and replay-safe",
+      "notes": "Reported as KCS-R23-CAND-013; detailed write-up linked from findings.json."
+    },
+    {
+      "id": "surface-kcs-r23-cand-014",
+      "label": "Unrecognized binary gaps disappear from durable completeness and path telemetry",
+      "disposition": "reported",
+      "receiptRefs": [
+        "artifacts/05_findings/KCS-R23-CAND-014/candidate_ledger.jsonl"
+      ],
+      "riskArea": "Make durable workflow state transitions verifiable and replay-safe",
+      "notes": "Reported as KCS-R23-CAND-014; detailed write-up linked from findings.json."
+    },
+    {
+      "id": "surface-kcs-r23-cand-017",
+      "label": "recursive star matching has exponential backtracking",
+      "disposition": "reported",
+      "receiptRefs": [
+        "artifacts/05_findings/KCS-R23-CAND-017/candidate_ledger.jsonl"
+      ],
+      "riskArea": "Centralize bounds before untrusted work is materialized",
+      "notes": "Reported as KCS-R23-CAND-017; detailed write-up linked from findings.json."
+    },
+    {
+      "id": "surface-kcs-r23-cand-019",
+      "label": "status and snapshot read unbounded direct-child files before any cap",
+      "disposition": "reported",
+      "receiptRefs": [
+        "artifacts/05_findings/KCS-R23-CAND-019/candidate_ledger.jsonl"
+      ],
+      "riskArea": "Centralize bounds before untrusted work is materialized",
+      "notes": "Reported as KCS-R23-CAND-019; detailed write-up linked from findings.json."
+    },
+    {
+      "id": "surface-kcs-r23-cand-020",
+      "label": "Mistral OCR responses lack read, body, cardinality, and persistence bounds",
+      "disposition": "reported",
+      "receiptRefs": [
+        "artifacts/05_findings/KCS-R23-CAND-020/candidate_ledger.jsonl"
+      ],
+      "riskArea": "Centralize bounds before untrusted work is materialized",
+      "notes": "Reported as KCS-R23-CAND-020; detailed write-up linked from findings.json."
+    },
+    {
+      "id": "surface-kcs-r23-cand-022",
+      "label": "Mistral model resolution lacks response-body and read-time bounds",
+      "disposition": "reported",
+      "receiptRefs": [
+        "artifacts/05_findings/KCS-R23-CAND-022/candidate_ledger.jsonl"
+      ],
+      "riskArea": "Centralize bounds before untrusted work is materialized",
+      "notes": "Reported as KCS-R23-CAND-022; detailed write-up linked from findings.json."
+    },
+    {
+      "id": "surface-kcs-r23-cand-023",
+      "label": "Gemini embedding responses lack body and read-time bounds before semantic checks",
+      "disposition": "reported",
+      "receiptRefs": [
+        "artifacts/05_findings/KCS-R23-CAND-023/candidate_ledger.jsonl"
+      ],
+      "riskArea": "Centralize bounds before untrusted work is materialized",
+      "notes": "Reported as KCS-R23-CAND-023; detailed write-up linked from findings.json."
+    },
+    {
+      "id": "surface-kcs-r23-cand-024",
+      "label": "Opening an existing permissive `.kcs` exposes future private archive bytes",
+      "disposition": "reported",
+      "receiptRefs": [
+        "artifacts/05_findings/KCS-R23-CAND-024/candidate_ledger.jsonl"
+      ],
+      "riskArea": "Bind content identity to final scope and provenance",
+      "notes": "Reported as KCS-R23-CAND-024; detailed write-up linked from findings.json."
+    },
+    {
+      "id": "surface-kcs-r23-cand-025",
+      "label": "Store-local consent records are forgeable or replayable across preseeded or copied scopes",
+      "disposition": "reported",
+      "receiptRefs": [
+        "artifacts/05_findings/KCS-R23-CAND-025/candidate_ledger.jsonl"
+      ],
+      "riskArea": "Bind content identity to final scope and provenance",
+      "notes": "Reported as KCS-R23-CAND-025; detailed write-up linked from findings.json."
+    },
+    {
+      "id": "surface-kcs-r23-cand-027",
+      "label": "Scan-time replacement can authorize an outside-scope file under a benign name",
+      "disposition": "reported",
+      "receiptRefs": [
+        "artifacts/05_findings/KCS-R23-CAND-027/candidate_ledger.jsonl"
+      ],
+      "riskArea": "Bind content identity to final scope and provenance",
+      "notes": "Reported as KCS-R23-CAND-027; detailed write-up linked from findings.json."
+    },
+    {
+      "id": "surface-kcs-r23-cand-028",
+      "label": "Mistral OCR reopens the path after the final hash check and sends unbound bytes",
+      "disposition": "reported",
+      "receiptRefs": [
+        "artifacts/05_findings/KCS-R23-CAND-028/candidate_ledger.jsonl"
+      ],
+      "riskArea": "Bind content identity to final scope and provenance",
+      "notes": "Reported as KCS-R23-CAND-028; detailed write-up linked from findings.json."
+    },
+    {
+      "id": "surface-kcs-r23-cand-032",
+      "label": "scan hashing allocates the full file before the input-size gate",
+      "disposition": "reported",
+      "receiptRefs": [
+        "artifacts/05_findings/KCS-R23-CAND-032/candidate_ledger.jsonl"
+      ],
+      "riskArea": "Centralize bounds before untrusted work is materialized",
+      "notes": "Reported as KCS-R23-CAND-032; detailed write-up linked from findings.json."
+    },
+    {
+      "id": "surface-kcs-r23-cand-034",
+      "label": "Deterministic PDF handling reparses the whole file once per page",
+      "disposition": "reported",
+      "receiptRefs": [
+        "artifacts/05_findings/KCS-R23-CAND-034/candidate_ledger.jsonl"
+      ],
+      "riskArea": "Centralize bounds before untrusted work is materialized",
+      "notes": "Reported as KCS-R23-CAND-034; detailed write-up linked from findings.json."
+    },
+    {
+      "id": "surface-kcs-r23-cand-036",
+      "label": "Persisted DAG semantics are not revalidated, enabling poisoned fields and path escape",
+      "disposition": "reported",
+      "receiptRefs": [
+        "artifacts/05_findings/KCS-R23-CAND-036/candidate_ledger.jsonl"
+      ],
+      "riskArea": "Make durable workflow state transitions verifiable and replay-safe",
+      "notes": "Reported as KCS-R23-CAND-036; detailed write-up linked from findings.json."
+    },
+    {
+      "id": "surface-kcs-r23-cand-038",
+      "label": "Accepted markdown adapter targets are discarded before fixed Mistral execution",
+      "disposition": "reported",
+      "receiptRefs": [
+        "artifacts/05_findings/KCS-R23-CAND-038/candidate_ledger.jsonl"
+      ],
+      "riskArea": "Run adapters through scoped capabilities and policy-preserving targets",
+      "notes": "Reported as KCS-R23-CAND-038; detailed write-up linked from findings.json."
+    },
+    {
+      "id": "surface-kcs-r23-cand-039",
+      "label": "Accepted embedding adapter targets are discarded before fixed Gemini execution",
+      "disposition": "reported",
+      "receiptRefs": [
+        "artifacts/05_findings/KCS-R23-CAND-039/candidate_ledger.jsonl"
+      ],
+      "riskArea": "Run adapters through scoped capabilities and policy-preserving targets",
+      "notes": "Reported as KCS-R23-CAND-039; detailed write-up linked from findings.json."
+    },
+    {
+      "id": "surface-kcs-r23-cand-040",
+      "label": "Gemini API keys are retained across cross-origin redirects",
+      "disposition": "reported",
+      "receiptRefs": [
+        "artifacts/05_findings/KCS-R23-CAND-040/candidate_ledger.jsonl"
+      ],
+      "riskArea": "Run adapters through scoped capabilities and policy-preserving targets",
+      "notes": "Reported as KCS-R23-CAND-040; detailed write-up linked from findings.json."
+    },
+    {
+      "id": "surface-kcs-r23-cand-047",
+      "label": "Persisted task output_ref can escape the scope",
+      "disposition": "reported",
+      "receiptRefs": [
+        "artifacts/05_findings/KCS-R23-CAND-047/candidate_ledger.jsonl"
+      ],
+      "riskArea": "Bind content identity to final scope and provenance",
+      "notes": "Reported as KCS-R23-CAND-047; detailed write-up linked from findings.json."
+    },
+    {
+      "id": "surface-kcs-r23-cand-048",
+      "label": "unbound reservation stamps can forge budget-reclaim credits",
+      "disposition": "reported",
+      "receiptRefs": [
+        "artifacts/05_findings/KCS-R23-CAND-048/candidate_ledger.jsonl"
+      ],
+      "riskArea": "Make durable workflow state transitions verifiable and replay-safe",
+      "notes": "Reported as KCS-R23-CAND-048; detailed write-up linked from findings.json."
+    },
+    {
+      "id": "surface-kcs-r23-cand-049",
+      "label": "Persisted manifest unit_ref can escape its normalized-instance directory",
+      "disposition": "reported",
+      "receiptRefs": [
+        "artifacts/05_findings/KCS-R23-CAND-049/candidate_ledger.jsonl"
+      ],
+      "riskArea": "Bind content identity to final scope and provenance",
+      "notes": "Reported as KCS-R23-CAND-049; detailed write-up linked from findings.json."
+    },
+    {
+      "id": "surface-kcs-r23-cand-051",
+      "label": "Duplicate OCR page indices bind one provider page to multiple evidence units",
+      "disposition": "reported",
+      "receiptRefs": [
+        "artifacts/05_findings/KCS-R23-CAND-051/candidate_ledger.jsonl"
+      ],
+      "riskArea": "Run adapters through scoped capabilities and policy-preserving targets",
+      "notes": "Reported as KCS-R23-CAND-051; detailed write-up linked from findings.json."
+    },
+    {
+      "id": "surface-kcs-r23-cand-059",
+      "label": "Human-readable CLI output emits untrusted terminal control sequences",
+      "disposition": "reported",
+      "receiptRefs": [
+        "artifacts/05_findings/KCS-R23-CAND-059/candidate_ledger.jsonl"
+      ],
+      "riskArea": "Make durable workflow state transitions verifiable and replay-safe",
+      "notes": "Reported as KCS-R23-CAND-059; detailed write-up linked from findings.json."
+    },
+    {
+      "id": "surface-kcs-r23-cand-061",
+      "label": "normalized manifests and unit objects are not rebound to the requested provenance tuple",
+      "disposition": "reported",
+      "receiptRefs": [
+        "artifacts/05_findings/KCS-R23-CAND-061/candidate_ledger.jsonl"
+      ],
+      "riskArea": "Bind content identity to final scope and provenance",
+      "notes": "Reported as KCS-R23-CAND-061; detailed write-up linked from findings.json."
+    },
+    {
+      "id": "surface-kcs-r23-cand-067",
+      "label": "Persisted OCR tasks bypass current ignore authorization",
+      "disposition": "reported",
+      "receiptRefs": [
+        "artifacts/05_findings/KCS-R23-CAND-067/candidate_ledger.jsonl"
+      ],
+      "riskArea": "Bind content identity to final scope and provenance",
+      "notes": "Reported as KCS-R23-CAND-067; detailed write-up linked from findings.json."
+    },
+    {
+      "id": "surface-kcs-r23-cand-068",
+      "label": "same-batch duplicate embedding identities split authoritative and KNN vectors",
+      "disposition": "reported",
+      "receiptRefs": [
+        "artifacts/05_findings/KCS-R23-CAND-068/candidate_ledger.jsonl"
+      ],
+      "riskArea": "Make durable workflow state transitions verifiable and replay-safe",
+      "notes": "Reported as KCS-R23-CAND-068; detailed write-up linked from findings.json."
+    },
+    {
+      "id": "surface-kcs-r23-cand-001",
+      "label": "secret-hold cycles erase terminal embedding failure state",
+      "disposition": "reported",
+      "receiptRefs": [
+        "artifacts/05_findings/KCS-R23-CAND-001/candidate_ledger.jsonl"
+      ],
+      "riskArea": "Make durable workflow state transitions verifiable and replay-safe",
+      "notes": "Reported as KCS-R23-CAND-001; detailed write-up linked from findings.json."
+    },
+    {
+      "id": "surface-kcs-r23-cand-012",
+      "label": "Content-twin reuse leaves completed budget-paused tasks falsely pending",
+      "disposition": "reported",
+      "receiptRefs": [
+        "artifacts/05_findings/KCS-R23-CAND-012/candidate_ledger.jsonl"
+      ],
+      "riskArea": "Make durable workflow state transitions verifiable and replay-safe",
+      "notes": "Reported as KCS-R23-CAND-012; detailed write-up linked from findings.json."
+    },
+    {
+      "id": "surface-kcs-r23-cand-018",
+      "label": "Snapshot's regular-file check can be raced into archiving an outside-scope symlink target",
+      "disposition": "reported",
+      "receiptRefs": [
+        "artifacts/05_findings/KCS-R23-CAND-018/candidate_ledger.jsonl"
+      ],
+      "riskArea": "Bind content identity to final scope and provenance",
+      "notes": "Reported as KCS-R23-CAND-018; detailed write-up linked from findings.json."
+    },
+    {
+      "id": "surface-kcs-r23-cand-029",
+      "label": "Deterministic normalization persists a later path read under the earlier raw hash",
+      "disposition": "reported",
+      "receiptRefs": [
+        "artifacts/05_findings/KCS-R23-CAND-029/candidate_ledger.jsonl"
+      ],
+      "riskArea": "Bind content identity to final scope and provenance",
+      "notes": "Reported as KCS-R23-CAND-029; detailed write-up linked from findings.json."
+    },
+    {
+      "id": "surface-kcs-r23-cand-030",
+      "label": "Deterministic PDF normalization repeatedly reopens an unbound pathname",
+      "disposition": "reported",
+      "receiptRefs": [
+        "artifacts/05_findings/KCS-R23-CAND-030/candidate_ledger.jsonl"
+      ],
+      "riskArea": "Bind content identity to final scope and provenance",
+      "notes": "Reported as KCS-R23-CAND-030; detailed write-up linked from findings.json."
+    },
+    {
+      "id": "surface-kcs-r23-cand-031",
+      "label": "Prepare-stage reopen can poison prepared CAS identity",
+      "disposition": "reported",
+      "receiptRefs": [
+        "artifacts/05_findings/KCS-R23-CAND-031/candidate_ledger.jsonl"
+      ],
+      "riskArea": "Bind content identity to final scope and provenance",
+      "notes": "Reported as KCS-R23-CAND-031; detailed write-up linked from findings.json."
+    },
+    {
+      "id": "surface-kcs-r23-cand-033",
+      "label": "Deferred OCR tasks read replacement files before enforcing the cap",
+      "disposition": "reported",
+      "receiptRefs": [
+        "artifacts/05_findings/KCS-R23-CAND-033/candidate_ledger.jsonl"
+      ],
+      "riskArea": "Centralize bounds before untrusted work is materialized",
+      "notes": "Reported as KCS-R23-CAND-033; detailed write-up linked from findings.json."
+    },
+    {
+      "id": "surface-kcs-r23-cand-041",
+      "label": "closing snapshot can ingest a newly introduced Tier-A secret",
+      "disposition": "reported",
+      "receiptRefs": [
+        "artifacts/05_findings/KCS-R23-CAND-041/candidate_ledger.jsonl"
+      ],
+      "riskArea": "Bind content identity to final scope and provenance",
+      "notes": "Reported as KCS-R23-CAND-041; detailed write-up linked from findings.json."
+    },
+    {
+      "id": "surface-kcs-r23-cand-042",
+      "label": "closing snapshot can attach normalization metadata to different bytes",
+      "disposition": "reported",
+      "receiptRefs": [
+        "artifacts/05_findings/KCS-R23-CAND-042/candidate_ledger.jsonl"
+      ],
+      "riskArea": "Bind content identity to final scope and provenance",
+      "notes": "Reported as KCS-R23-CAND-042; detailed write-up linked from findings.json."
+    },
+    {
+      "id": "surface-kcs-r23-cand-043",
+      "label": "CAS write accepts a pre-existing corrupt destination as success",
+      "disposition": "reported",
+      "receiptRefs": [
+        "artifacts/05_findings/KCS-R23-CAND-043/candidate_ledger.jsonl"
+      ],
+      "riskArea": "Bind content identity to final scope and provenance",
+      "notes": "Reported as KCS-R23-CAND-043; detailed write-up linked from findings.json."
+    },
+    {
+      "id": "surface-kcs-r23-cand-046",
+      "label": "CAS reads allocate attacker-sized objects before verification",
+      "disposition": "reported",
+      "receiptRefs": [
+        "artifacts/05_findings/KCS-R23-CAND-046/candidate_ledger.jsonl"
+      ],
+      "riskArea": "Centralize bounds before untrusted work is materialized",
+      "notes": "Reported as KCS-R23-CAND-046; detailed write-up linked from findings.json."
+    },
+    {
+      "id": "surface-kcs-r23-cand-050",
+      "label": "Oversized task JSONL records allocate before validation",
+      "disposition": "reported",
+      "receiptRefs": [
+        "artifacts/05_findings/KCS-R23-CAND-050/candidate_ledger.jsonl"
+      ],
+      "riskArea": "Centralize bounds before untrusted work is materialized",
+      "notes": "Reported as KCS-R23-CAND-050; detailed write-up linked from findings.json."
+    },
+    {
+      "id": "surface-kcs-r23-cand-057",
+      "label": "Raw-hash working-tree resolution reads every direct child without bounds",
+      "disposition": "reported",
+      "receiptRefs": [
+        "artifacts/05_findings/KCS-R23-CAND-057/candidate_ledger.jsonl"
+      ],
+      "riskArea": "Centralize bounds before untrusted work is materialized",
+      "notes": "Reported as KCS-R23-CAND-057; detailed write-up linked from findings.json."
+    },
+    {
+      "id": "surface-kcs-r23-cand-064",
+      "label": "Batch recovery bypasses repository tool-lock validation",
+      "disposition": "reported",
+      "receiptRefs": [
+        "artifacts/05_findings/KCS-R23-CAND-064/candidate_ledger.jsonl"
+      ],
+      "riskArea": "Run adapters through scoped capabilities and policy-preserving targets",
+      "notes": "Reported as KCS-R23-CAND-064; detailed write-up linked from findings.json."
+    }
+  ],
+  "explicitExclusions": [],
+  "deferred": [],
+  "openQuestions": [
+    {
+      "question": "Which hardening option should be prioritized first for implementation?",
+      "followUpPrompt": "Use the hardening portfolio to select one option, then ask Codex to turn that option into an implementation plan without changing scope or target revision."
+    }
+  ],
+  "summary": {
+    "coverage": "420/420 saved coverage rows closed",
+    "reportableFindings": 47
+  }
+}

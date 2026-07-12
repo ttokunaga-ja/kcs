@@ -1,0 +1,189 @@
+{
+  "schema_version": 1,
+  "scan_id": "f78f5d0d-2752-47a7-8d8d-3371e09d3377",
+  "candidate_id": "KCS-R23-CAND-007",
+  "ledger_row_id": "KCS-R23-CAND-007",
+  "title": "incremental unit mapping allocates a quadratic LCS matrix",
+  "target_revision": "0e19f3c6489da458e93a982a333c308d92d0a0ae",
+  "scope": ".",
+  "final_policy": "reportable",
+  "final_severity": "medium",
+  "priority": "P2",
+  "confidence": "high",
+  "summary": "KCS computes revision unit reuse by passing prior and current prepared-unit arrays into `map_units()`, which immediately allocates a full `(old_units + 1) * (new_units + 1)` `usize` LCS matrix. A local contributor who controls successive document revisions in an indexed scope can inflate both dimensions and repeatedly exhaust memory or CPU during the operator's normal indexing workflow.",
+  "affectedLocations": [
+    {
+      "label": "mapping entrypoint",
+      "path": "crates/kcs-pipeline/src/prepare.rs",
+      "lines": "208-253"
+    },
+    {
+      "label": "quadratic LCS",
+      "path": "crates/kcs-pipeline/src/prepare.rs",
+      "lines": "387-416"
+    },
+    {
+      "label": "index reachability",
+      "path": "crates/kcs-cli/src/main.rs",
+      "lines": "9219-9235"
+    }
+  ],
+  "codeEvidence": [
+    {
+      "id": "pdf-page-vector-padding",
+      "label": "Prepared page vector can grow to inferred page count",
+      "path": "crates/kcs-pipeline/src/prepare.rs",
+      "startLine": 322,
+      "endLine": 340,
+      "language": "rust",
+      "role": "user_input",
+      "code": "let page_count =\n    kcs_adapter::deterministic::pdf_page_count_in_text(&String::from_utf8_lossy(bytes)).max(1);\nlet stream_pages = kcs_adapter::deterministic::pdf_stream_text_pages(bytes);\nif !stream_pages.is_empty() {\n    return normalize_pdf_page_count(stream_pages, page_count);\n}\nlet strings = pdf_literal_strings(bytes);\nif strings.is_empty() {\n    return vec![pdf_text_fallback(bytes)];\n}\nif strings.len() == page_count {\n    return strings;\n}\nlet mut pages = strings;\nwhile pages.len() < page_count {\n    pages.push(String::new());\n}\npages.truncate(page_count);\npages",
+      "explanation": "`pdf_text_pages()` derives a logical page count from the current revision bytes and pads the page vector to that count. That cardinality later controls how many `PreparedUnit` values the current revision contributes to mapping."
+    },
+    {
+      "id": "prepared-unit-count",
+      "label": "One prepared unit is created per recovered PDF page",
+      "path": "crates/kcs-pipeline/src/prepare.rs",
+      "startLine": 125,
+      "endLine": 131,
+      "language": "rust",
+      "role": "propagation",
+      "code": "let unit_count = if unit_type == UnitType::Page {\n    pdf_pages.len().max(1)\n} else {\n    1\n};\nlet mut prepared_units = Vec::new();\nfor index in 0..unit_count {",
+      "explanation": "For PDF inputs, the prepared-unit array length follows `pdf_pages.len()`. A large logical page vector therefore becomes a large unit array before revision mapping runs."
+    },
+    {
+      "id": "index-prior-current-map",
+      "label": "Indexing maps complete prior and current unit arrays",
+      "path": "crates/kcs-cli/src/main.rs",
+      "startLine": 9219,
+      "endLine": 9235,
+      "language": "rust",
+      "role": "entrypoint",
+      "code": "let previous =\n    previous_instance_for_path(&task_store, &candidate.input_path, &markdown_profile_hash)\n        .unwrap_or_else(|_err| {\n            let _ = append_event_log(\n                \"KCS-I-INDEX-PREVIOUS-UNREADABLE-001\",\n                \"prior normalized instance unreadable; indexing this file as Full\",\n                json!({ \"input_path\": candidate.input_path }),\n            );\n            None\n        });\nlet mapping = previous\n    .as_ref()\n    .map(|previous| map_units(&previous.prepared_units, &prepare.prepared_units));\nlet incremental_hints = mapping\n    .as_ref()\n    .map(|mapping| incremental_hints_from_mapping(mapping, &prepare.prepared_units))\n    .unwrap_or_else(|| all_changed_hints(&prepare.prepared_units));",
+      "explanation": "When a prior normalized instance exists, `run_index_pipeline()` passes the entire previous and current prepared-unit slices into `map_units()` before any later full-versus-incremental mode decision can avoid the comparison."
+    },
+    {
+      "id": "map-units-lcs-call",
+      "label": "Mapping immediately invokes the LCS helper",
+      "path": "crates/kcs-pipeline/src/prepare.rs",
+      "startLine": 208,
+      "endLine": 214,
+      "language": "rust",
+      "role": "root_control",
+      "code": "#[must_use]\npub fn map_units(old_units: &[PreparedUnit], new_units: &[PreparedUnit]) -> UnitMapping {\n    let pairs = lcs_fingerprint_pairs(old_units, new_units);\n    let mut unchanged = Vec::new();\n    let mut changed_unit_keys = Vec::new();\n    let mut added_unit_keys = Vec::new();",
+      "explanation": "`map_units()` performs no unit-count, cell-count, or work-budget check before calling the exact LCS implementation with attacker-influenced dimensions."
+    },
+    {
+      "id": "quadratic-lcs-matrix",
+      "label": "Full dynamic-programming matrix is allocated and filled",
+      "path": "crates/kcs-pipeline/src/prepare.rs",
+      "startLine": 387,
+      "endLine": 400,
+      "language": "rust",
+      "role": "sink",
+      "code": "fn lcs_fingerprint_pairs(\n    old_units: &[PreparedUnit],\n    new_units: &[PreparedUnit],\n) -> Vec<(usize, usize)> {\n    let m = old_units.len();\n    let n = new_units.len();\n    let mut dp = vec![vec![0usize; n + 1]; m + 1];\n    for i in (0..m).rev() {\n        for j in (0..n).rev() {\n            dp[i][j] = if old_units[i].fingerprint == new_units[j].fingerprint {\n                1 + dp[i + 1][j + 1]\n            } else {\n                dp[i + 1][j].max(dp[i][j + 1])\n            };",
+      "explanation": "The sink allocates `(m + 1) * (n + 1)` `usize` cells and then performs `m * n` fingerprint comparisons. This cost is paid even when no fingerprints match."
+    },
+    {
+      "id": "closest-byte-control",
+      "label": "Existing control bounds bytes, not prepared-unit product",
+      "path": "crates/kcs-cli/src/main.rs",
+      "startLine": 9047,
+      "endLine": 9061,
+      "language": "rust",
+      "role": "expected_control",
+      "code": "let max_input_bytes = effective_max_input_bytes(repo);\n// R12-1: the documented `[markdownize.incremental]` overrides (were hardcoded).\nlet incremental_config = effective_incremental_config(repo)?;\n\nfor candidate in preview\n    .candidates\n    .iter()\n    .filter(|candidate| !candidate.ignored && candidate.media_type != \"inode/directory\")\n{\n    if candidate.size_bytes > max_input_bytes {\n        result.skipped_oversized_files += 1;",
+      "explanation": "The closest general resource gate rejects oversized raw files but does not bound `old_units.len()`, `new_units.len()`, or their product before the LCS allocation."
+    }
+  ],
+  "rootCause": {
+    "summary": "The violated invariant is that revision unit alignment must be bounded by unit count, cell count, or an explicit work budget before any all-pairs algorithm executes. KCS instead derives prepared-unit arrays from document contents, loads a prior array for the same path, and calls `lcs_fingerprint_pairs()` without checking the product of the two lengths.",
+    "evidenceRefs": [
+      "pdf-page-vector-padding",
+      "prepared-unit-count",
+      "index-prior-current-map",
+      "map-units-lcs-call",
+      "quadratic-lcs-matrix",
+      "closest-byte-control"
+    ]
+  },
+  "validation": {
+    "method": "static source trace plus bounded synthetic probe",
+    "summary": "The source trace confirms that prior and current prepared units reach `map_units()` unchanged, and `map_units()` allocates a full LCS matrix. A bounded offline probe reproduced quadratic cell and comparison growth for 64, 128, 256, and 512 unit pairs and computed larger memory estimates without allocation.",
+    "evidenceRefs": [
+      "index-prior-current-map",
+      "map-units-lcs-call",
+      "quadratic-lcs-matrix"
+    ],
+    "assertions": [
+      "The matrix cell count is exactly `(old_units.len() + 1) * (new_units.len() + 1)`.",
+      "The nested loops perform `old_units.len() * new_units.len()` fingerprint comparisons.",
+      "A 10,000 by 10,000 mapping needs 100,020,001 `usize` cells, approximately 763.09 MiB of cell storage on 64-bit targets, excluding row overhead."
+    ],
+    "limitations": [
+      "Large 10,000-plus unit cases were computed, not allocated.",
+      "The minimum host-specific document size and unit-generation pattern needed for reliable denial of service were not fully measured."
+    ]
+  },
+  "attackPath": {
+    "summary": "A lower-trust local contributor supplies one large-unit revision that is indexed, then supplies another large-unit revision at the same path. The operator's next index loads the prior normalized instance, maps both complete unit arrays, and allocates or fills the quadratic matrix.",
+    "dataflow": {
+      "summary": "revision bytes -> prepared page/unit vector -> prior/current prepared-unit arrays -> `map_units()` -> `lcs_fingerprint_pairs()` -> full LCS matrix",
+      "source": "successive contributor-controlled document revisions in an indexed scope",
+      "sink": "`Vec<Vec<usize>>` LCS table in `lcs_fingerprint_pairs()`",
+      "outcome": "KCS process memory exhaustion, allocator abort/OOM kill, or prolonged CPU saturation during local indexing",
+      "evidenceRefs": [
+        "pdf-page-vector-padding",
+        "prepared-unit-count",
+        "index-prior-current-map",
+        "quadratic-lcs-matrix"
+      ]
+    },
+    "reachability": {
+      "summary": "The path is reached through an operator-mediated local index or reindex workflow when a prior normalized instance exists for the same path and profile.",
+      "attacker": "local contributor controlling document revisions in the indexed scope",
+      "entrypoint": "`kcs index` processing of a changed file with a prior normalized instance",
+      "preconditions": [
+        "Two indexed revisions each produce sufficiently many prepared units.",
+        "The operator runs index or reindex on the affected scope.",
+        "The prior normalized instance remains readable."
+      ],
+      "outcome": "persistent denial of indexing for the affected KCS process/scope"
+    },
+    "evidenceRefs": [
+      "index-prior-current-map",
+      "map-units-lcs-call",
+      "quadratic-lcs-matrix"
+    ],
+    "impact": {
+      "level": "high",
+      "why": "A crafted revision pair can request hundreds of megabytes to many gigabytes of matrix storage and force quadratic CPU work during normal indexing."
+    },
+    "likelihood": {
+      "level": "medium",
+      "why": "The trigger requires two large prepared revisions plus an operator-mediated local indexing workflow rather than a single remote request."
+    },
+    "limitations": [
+      "No confidentiality, authorization, or cross-scope integrity impact was shown.",
+      "This is a safe Rust resource-exhaustion issue, not a demonstrated memory-corruption primitive."
+    ]
+  },
+  "remediation": {
+    "summary": "Guard `map_units()` with checked arithmetic and an explicit maximum cell/work budget, move the caller so mapping is skipped when incremental behavior is disabled, and fall back to a deterministic full/changed mapping when exact LCS would exceed budget.",
+    "regressionTests": [
+      "`map_units()` over the cell-count budget returns the fallback without allocating the LCS matrix.",
+      "Boundary and overflow tests cover `(old_len + 1) * (new_len + 1)`.",
+      "A CLI pipeline test with `incremental.enabled = false` confirms no unit mapping is computed for a prior instance.",
+      "Two high-unit revisions complete through the safe fallback instead of exhausting memory."
+    ]
+  },
+  "writeup": {
+    "reportPath": "findings/tac-kcs-r23-cand-007-quadratic-unit-lcs/tac-kcs-r23-cand-007-quadratic-unit-lcs.md",
+    "pocDirectory": "findings/tac-kcs-r23-cand-007-quadratic-unit-lcs/poc"
+  },
+  "extensions": {
+    "candidateId": "KCS-R23-CAND-007",
+    "ledgerRowId": "KCS-R23-CAND-007",
+    "reportId": "KCS-R23-CAND-007"
+  }
+}

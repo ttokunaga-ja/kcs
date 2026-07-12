@@ -2,14 +2,31 @@
 
 use std::collections::BTreeMap;
 use std::fs::{self, OpenOptions};
-use std::io::{BufRead, Write};
+use std::io::{BufRead, Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::{Deserialize, Serialize};
 
 use crate::markdownize::MarkdownizeMode;
+use crate::store_path::{resolve_existing_store_path, StorePathKind};
 use crate::{IoResultExt, PipelineError, Result};
+
+/// Hard limits for persisted task state. They are deliberately above the normal
+/// batch sizes, but finite so an adopted `tasks.jsonl` cannot make KCS allocate
+/// attacker-selected amounts before it reaches semantic validation.
+pub const MAX_TASK_STORE_BYTES: u64 = 64 * 1024 * 1024;
+pub const MAX_TASK_RECORD_BYTES: u64 = 256 * 1024;
+pub const MAX_TASK_RECORDS: usize = 100_000;
+pub const MAX_TASK_UNIT_KEYS: usize = 4_096;
+const MAX_TASK_ID_BYTES: usize = 256;
+const MAX_TASK_PATH_BYTES: usize = 4_096;
+const MAX_TASK_REASON_BYTES: usize = 256;
+const MAX_TASK_TIMESTAMP_BYTES: usize = 128;
+
+pub const BUDGET_EXCEEDED_REASON: &str = "budget_exceeded";
+pub const SECRETS_TIER_B_HOLD_REASON: &str = "secrets_tier_b_hold";
+pub const RETIRED_NON_LIVE_REASON: &str = "retired_non_live";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -66,12 +83,56 @@ pub struct TaskDescriptor {
     // Quota) reservation is reclaimed by exactly this (usd, month) into the sibling
     // reclaim ledger — canceling the phantom precisely even though the edited file
     // is gone. Absent (None) on fresh/legacy tasks and after a reclaim (cleared, so
-    // it can never be reclaimed twice). Serialized only when present so untouched
-    // tasks stay byte-identical to pre-R17-3 records.
+    // it can never be reclaimed twice). These legacy amount/month fields are
+    // advisory unless `reservation_id` resolves to the same trusted device-ledger
+    // record.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reserved_usd: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reserved_month: Option<String>,
+    /// Identity of the matching record in the trusted device reservation ledger.
+    /// Legacy task rows can carry amount/month without this field, but such stamps
+    /// are advisory only and must never authorize a reclaim.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reservation_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TaskRecoveryMode {
+    Resume,
+    Retry,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TaskOutputRef {
+    Online {
+        adapter_id: String,
+    },
+    Embedding {
+        chunk_id: String,
+    },
+    NormalizedInstance {
+        path: PathBuf,
+        raw_hash: String,
+        tool_profile_hash: String,
+        gen: u64,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CappedTaskInput {
+    Bytes(Vec<u8>),
+    Unavailable,
+    NotRegular,
+    TooLarge,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TaskReservationClaim<'a> {
+    pub reservation_id: &'a str,
+    pub task_id: &'a str,
+    pub usd: f64,
+    pub month: &'a str,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -110,6 +171,7 @@ impl TaskStore {
     }
 
     pub fn append(&self, descriptor: &TaskDescriptor) -> Result<()> {
+        let line = self.framed_record(descriptor)?;
         if let Some(parent) = self.path.parent() {
             fs::create_dir_all(parent).pipeline_io(parent)?;
         }
@@ -120,10 +182,14 @@ impl TaskStore {
             .pipeline_io(&self.path)?;
         // M1(b): frame the record and emit it with one write_all so concurrent
         // appends cannot interleave byte-wise under O_APPEND.
-        let mut line = serde_json::to_string(descriptor)
-            .map_err(|err| PipelineError::Schema(err.to_string()))?;
-        line.push('\n');
-        file.write_all(line.as_bytes()).pipeline_io(&self.path)
+        let existing_len = file.metadata().pipeline_io(&self.path)?.len();
+        if existing_len.saturating_add(line.len() as u64) > MAX_TASK_STORE_BYTES {
+            return Err(PipelineError::corrupt(
+                self.path.display().to_string(),
+                format!("tasks.jsonl exceeds {MAX_TASK_STORE_BYTES} byte limit"),
+            ));
+        }
+        file.write_all(&line).pipeline_io(&self.path)
     }
 
     pub fn all(&self) -> Result<Vec<TaskDescriptor>> {
@@ -137,56 +203,72 @@ impl TaskStore {
                 });
             }
         };
+        let file_len = file.metadata().pipeline_io(&self.path)?.len();
+        if file_len > MAX_TASK_STORE_BYTES {
+            return Err(PipelineError::corrupt(
+                self.path.display().to_string(),
+                format!("tasks.jsonl exceeds {MAX_TASK_STORE_BYTES} byte limit: {file_len}"),
+            ));
+        }
         let mut by_id = BTreeMap::new();
-        for line in std::io::BufReader::new(file).lines() {
-            let line = line.pipeline_io(&self.path)?;
-            if line.trim().is_empty() {
+        let mut reader = std::io::BufReader::new(file);
+        let mut line = Vec::new();
+        let mut record_count = 0usize;
+        let mut total_read = 0u64;
+        loop {
+            line.clear();
+            let read = reader
+                .by_ref()
+                .take(MAX_TASK_RECORD_BYTES.saturating_add(1))
+                .read_until(b'\n', &mut line)
+                .pipeline_io(&self.path)?;
+            if read == 0 {
+                break;
+            }
+            total_read = total_read.saturating_add(read as u64);
+            if total_read > MAX_TASK_STORE_BYTES {
+                return Err(PipelineError::corrupt(
+                    self.path.display().to_string(),
+                    format!("tasks.jsonl exceeds {MAX_TASK_STORE_BYTES} byte limit"),
+                ));
+            }
+            if read as u64 > MAX_TASK_RECORD_BYTES {
+                return Err(PipelineError::corrupt(
+                    self.path.display().to_string(),
+                    format!("task record exceeds {MAX_TASK_RECORD_BYTES} byte limit"),
+                ));
+            }
+            if line.iter().all(u8::is_ascii_whitespace) {
                 continue;
+            }
+            record_count = record_count.saturating_add(1);
+            if record_count > MAX_TASK_RECORDS {
+                return Err(PipelineError::corrupt(
+                    self.path.display().to_string(),
+                    format!("tasks.jsonl exceeds {MAX_TASK_RECORDS} record limit"),
+                ));
             }
             // M1(c): a malformed line is a corrupt store file, not a schema/config
             // error — classify it as KCS-E-STORE-CORRUPT-001 with the file path.
-            let descriptor: TaskDescriptor = serde_json::from_str(&line).map_err(|err| {
+            let descriptor: TaskDescriptor = serde_json::from_slice(&line).map_err(|err| {
                 PipelineError::corrupt(self.path.display().to_string(), err.to_string())
             })?;
-            // P1: reject any task whose `input_path` escapes the scope before any
-            // consumer joins it onto the scope root and reads / sends the file.
-            // Validating here (the single read path) guards every consumer at once
-            // (`batch resume`, `status`, enrichment) so a poisoned / shared
-            // tasks.jsonl cannot exfiltrate `/etc/*` or `../../id_rsa` to an online
-            // adapter (03 §3.3, same rule dag.rs enforces for tree entries).
-            if !is_scope_local_file_name(&descriptor.input_path) {
-                return Err(PipelineError::path(descriptor.input_path));
-            }
-            // Q6: validate every hash-shaped ref has the CAS hash form before any
-            // consumer slices its digest. A poisoned tasks.jsonl with a short
-            // `input_hash` (e.g. "sha256:ab") would otherwise panic (slice out of
-            // bounds) deep in the online markdownize path
-            // (`normalized_instance_dir` does `digest[0..2]` / `[2..4]`). Reject it
-            // here at the single read choke point as STORE-CORRUPT — same guard,
-            // same place P1 rejects an out-of-scope input_path.
-            if !kcs_core::cas::is_hash(&descriptor.input_hash) {
-                return Err(PipelineError::corrupt(
-                    self.path.display().to_string(),
-                    format!(
-                        "task input_hash is not a valid hash: {}",
-                        descriptor.input_hash
-                    ),
-                ));
-            }
-            if let Some(previous) = &descriptor.previous_raw_hash {
-                if !kcs_core::cas::is_hash(previous) {
-                    return Err(PipelineError::corrupt(
-                        self.path.display().to_string(),
-                        format!("task previous_raw_hash is not a valid hash: {previous}"),
-                    ));
-                }
-            }
+            validate_task_descriptor(self.kcs_dir(), &descriptor)?;
             by_id.insert(descriptor.task_id.clone(), descriptor);
         }
         Ok(by_id.into_values().collect())
     }
 
     pub fn replace_all(&self, descriptors: &[TaskDescriptor]) -> Result<()> {
+        if descriptors.len() > MAX_TASK_RECORDS {
+            return Err(PipelineError::corrupt(
+                self.path.display().to_string(),
+                format!("tasks.jsonl exceeds {MAX_TASK_RECORDS} record limit"),
+            ));
+        }
+        for descriptor in descriptors {
+            validate_task_descriptor(self.kcs_dir(), descriptor)?;
+        }
         if let Some(parent) = self.path.parent() {
             fs::create_dir_all(parent).pipeline_io(parent)?;
         }
@@ -201,10 +283,17 @@ impl TaskStore {
         // tasks dir (no GC before Step 4). Same cleanup idiom as the CAS /
         // normalized-instance writers.
         let result = (|| -> Result<()> {
+            let mut total_bytes = 0u64;
             for descriptor in descriptors {
-                serde_json::to_writer(&mut file, descriptor)
-                    .map_err(|err| PipelineError::Schema(err.to_string()))?;
-                file.write_all(b"\n").pipeline_io(&temp_path)?;
+                let line = self.framed_record(descriptor)?;
+                total_bytes = total_bytes.saturating_add(line.len() as u64);
+                if total_bytes > MAX_TASK_STORE_BYTES {
+                    return Err(PipelineError::corrupt(
+                        self.path.display().to_string(),
+                        format!("tasks.jsonl exceeds {MAX_TASK_STORE_BYTES} byte limit"),
+                    ));
+                }
+                file.write_all(&line).pipeline_io(&temp_path)?;
             }
             drop(file);
             fs::rename(&temp_path, &self.path).pipeline_io(&self.path)
@@ -213,6 +302,19 @@ impl TaskStore {
             let _ = fs::remove_file(&temp_path);
         }
         result
+    }
+
+    fn framed_record(&self, descriptor: &TaskDescriptor) -> Result<Vec<u8>> {
+        let mut line =
+            serde_json::to_vec(descriptor).map_err(|err| PipelineError::Schema(err.to_string()))?;
+        line.push(b'\n');
+        if line.len() as u64 > MAX_TASK_RECORD_BYTES {
+            return Err(PipelineError::corrupt(
+                self.path.display().to_string(),
+                format!("task record exceeds {MAX_TASK_RECORD_BYTES} byte limit"),
+            ));
+        }
+        Ok(line)
     }
 
     /// Create (`O_CREAT | O_EXCL`) a uniquely-named temp file next to the store
@@ -285,6 +387,11 @@ impl TaskStore {
                 && matches!(task.status, TaskStatus::Done | TaskStatus::Partial)
         }))
     }
+
+    #[must_use]
+    pub fn kcs_dir(&self) -> &Path {
+        self.path.parent().unwrap_or_else(|| Path::new("."))
+    }
 }
 
 /// Whether `input_path` names a direct child of the scope root: a single
@@ -297,6 +404,380 @@ pub fn is_scope_local_file_name(input_path: &str) -> bool {
     }
     let mut components = Path::new(input_path).components();
     matches!(components.next(), Some(Component::Normal(_))) && components.next().is_none()
+}
+
+/// Validate and classify a persisted task output reference before any consumer
+/// turns it into a filesystem path.
+pub fn validate_task_output_ref(
+    kcs_dir: impl AsRef<Path>,
+    descriptor: &TaskDescriptor,
+) -> Result<TaskOutputRef> {
+    if !kcs_core::cas::is_hash(&descriptor.input_hash) {
+        return Err(invalid_output_ref(kcs_dir.as_ref(), &descriptor.output_ref));
+    }
+    if let Some(adapter_id) = descriptor.output_ref.strip_prefix("online:") {
+        if descriptor.task_type != TaskType::Markdownize || !is_safe_logical_id(adapter_id) {
+            return Err(invalid_output_ref(kcs_dir.as_ref(), &descriptor.output_ref));
+        }
+        return Ok(TaskOutputRef::Online {
+            adapter_id: adapter_id.to_owned(),
+        });
+    }
+    if let Some(chunk_id) = descriptor.output_ref.strip_prefix("embedding:") {
+        if descriptor.task_type != TaskType::Embedding || !kcs_core::cas::is_hash(chunk_id) {
+            return Err(invalid_output_ref(kcs_dir.as_ref(), &descriptor.output_ref));
+        }
+        return Ok(TaskOutputRef::Embedding {
+            chunk_id: chunk_id.to_owned(),
+        });
+    }
+    if descriptor.task_type != TaskType::Markdownize {
+        return Err(invalid_output_ref(kcs_dir.as_ref(), &descriptor.output_ref));
+    }
+
+    let persisted = Path::new(&descriptor.output_ref);
+    let has_unsafe_component = persisted
+        .components()
+        .any(|component| matches!(component, Component::CurDir | Component::ParentDir));
+    let has_prefix = persisted
+        .components()
+        .any(|component| matches!(component, Component::Prefix(_)));
+    let has_root = persisted
+        .components()
+        .any(|component| matches!(component, Component::RootDir));
+    if has_unsafe_component || ((has_prefix || has_root) && !persisted.is_absolute()) {
+        return Err(invalid_output_ref(kcs_dir.as_ref(), &descriptor.output_ref));
+    }
+    let current_dir = std::env::current_dir().map_err(|err| PipelineError::Io {
+        path: descriptor.output_ref.clone(),
+        message: err.to_string(),
+    })?;
+    let absolute = if persisted.is_absolute() {
+        persisted.to_path_buf()
+    } else {
+        current_dir.join(persisted)
+    };
+    let normalized_root = kcs_dir.as_ref().join("objects/normalized_units");
+    let absolute_root = if normalized_root.is_absolute() {
+        normalized_root.clone()
+    } else {
+        current_dir.join(&normalized_root)
+    };
+    let relative = absolute
+        .strip_prefix(&absolute_root)
+        .map_err(|_| invalid_output_ref(kcs_dir.as_ref(), &descriptor.output_ref))?;
+    let components = relative
+        .components()
+        .filter_map(|component| match component {
+            Component::Normal(value) => value.to_str().map(str::to_owned),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    if components.len() != 3 {
+        return Err(invalid_output_ref(kcs_dir.as_ref(), &descriptor.output_ref));
+    }
+    let digest = descriptor
+        .input_hash
+        .strip_prefix("sha256:")
+        .ok_or_else(|| invalid_output_ref(kcs_dir.as_ref(), &descriptor.output_ref))?;
+    if components[0] != digest[0..2] || components[1] != digest[2..4] {
+        return Err(invalid_output_ref(kcs_dir.as_ref(), &descriptor.output_ref));
+    }
+    let prefix = format!("{}.", descriptor.input_hash);
+    let suffix = components[2]
+        .strip_prefix(&prefix)
+        .ok_or_else(|| invalid_output_ref(kcs_dir.as_ref(), &descriptor.output_ref))?;
+    let (tool_profile_hash, gen_text) = suffix
+        .rsplit_once(".g")
+        .ok_or_else(|| invalid_output_ref(kcs_dir.as_ref(), &descriptor.output_ref))?;
+    if !kcs_core::cas::is_hash(tool_profile_hash)
+        || gen_text.is_empty()
+        || !gen_text.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return Err(invalid_output_ref(kcs_dir.as_ref(), &descriptor.output_ref));
+    }
+    let gen = gen_text
+        .parse::<u64>()
+        .map_err(|_| invalid_output_ref(kcs_dir.as_ref(), &descriptor.output_ref))?;
+
+    // Validate every existing component from `.kcs` downward. In particular,
+    // `normalized_units` cannot become a second trust root by being a symlink.
+    let store_relative = Path::new("objects").join("normalized_units").join(relative);
+    resolve_existing_store_path(kcs_dir.as_ref(), &store_relative, StorePathKind::Directory)
+        .map_err(|_| invalid_output_ref(kcs_dir.as_ref(), &descriptor.output_ref))?;
+
+    Ok(TaskOutputRef::NormalizedInstance {
+        path: absolute,
+        raw_hash: descriptor.input_hash.clone(),
+        tool_profile_hash: tool_profile_hash.to_owned(),
+        gen,
+    })
+}
+
+/// Open a deferred task input once and enforce the byte cap on that same file
+/// handle. Metadata rejects the common oversized case before allocation; the
+/// `max + 1` streaming guard also contains growth after the metadata read.
+#[must_use]
+pub fn read_capped_task_input(path: impl AsRef<Path>, max_bytes: u64) -> CappedTaskInput {
+    let Ok(file) = fs::File::open(path.as_ref()) else {
+        return CappedTaskInput::Unavailable;
+    };
+    let Ok(metadata) = file.metadata() else {
+        return CappedTaskInput::Unavailable;
+    };
+    if !metadata.is_file() {
+        return CappedTaskInput::NotRegular;
+    }
+    if metadata.len() > max_bytes {
+        return CappedTaskInput::TooLarge;
+    }
+    let capacity = usize::try_from(metadata.len().min(max_bytes)).unwrap_or(0);
+    let mut bytes = Vec::with_capacity(capacity);
+    let mut limited = file.take(max_bytes.saturating_add(1));
+    if limited.read_to_end(&mut bytes).is_err() {
+        return CappedTaskInput::Unavailable;
+    }
+    if bytes.len() as u64 > max_bytes {
+        CappedTaskInput::TooLarge
+    } else {
+        CappedTaskInput::Bytes(bytes)
+    }
+}
+
+/// Map the durable failure reason to the retry contract. Unknown or absent
+/// reasons fail closed as a contract violation.
+#[must_use]
+pub fn task_retry_kind(task: &TaskDescriptor) -> RetryErrorKind {
+    match task.fallback_reason.as_deref() {
+        Some("network_error") => RetryErrorKind::NetworkError,
+        Some("rate_limit") => RetryErrorKind::RateLimit,
+        Some("auth_error") => RetryErrorKind::AuthError,
+        Some("quota_exceeded") => RetryErrorKind::QuotaExceeded,
+        Some("invalid_input") | Some(RETIRED_NON_LIVE_REASON) => RetryErrorKind::InvalidInput,
+        Some(BUDGET_EXCEEDED_REASON) => RetryErrorKind::BudgetExceeded,
+        _ => RetryErrorKind::ContractViolation,
+    }
+}
+
+#[must_use]
+pub fn task_retry_allowed(task: &TaskDescriptor) -> bool {
+    let policy = retry_policy(task_retry_kind(task));
+    policy.retryable
+        && policy
+            .max_attempts
+            .map(|max| task.attempts < max)
+            .unwrap_or(true)
+}
+
+#[must_use]
+pub fn task_failure_is_terminal(task: &TaskDescriptor) -> bool {
+    task.status == TaskStatus::Failed && !task_retry_allowed(task)
+}
+
+/// A destructive secret-hold transition is safe only for fresh pending work.
+/// Failed tasks retain their retry/backoff state; classification still keeps the
+/// corresponding content out of the sendable partition.
+#[must_use]
+pub fn task_can_enter_secret_hold(task: &TaskDescriptor) -> bool {
+    task.task_type == TaskType::Embedding && task.status == TaskStatus::Pending
+}
+
+/// Materialized output can converge ordinary work and budget pauses to `Done`.
+/// Secret and unknown holds remain sticky because they may represent an
+/// unsatisfied authorization boundary.
+#[must_use]
+pub fn task_can_complete_from_materialized_output(task: &TaskDescriptor) -> bool {
+    match task.status {
+        TaskStatus::Pending | TaskStatus::Running | TaskStatus::Failed => true,
+        TaskStatus::Paused => task.fallback_reason.as_deref() == Some(BUDGET_EXCEEDED_REASON),
+        TaskStatus::Done | TaskStatus::Partial => false,
+    }
+}
+
+#[must_use]
+pub fn task_auth_revival_allowed(task: &TaskDescriptor, mode: TaskRecoveryMode) -> bool {
+    mode == TaskRecoveryMode::Resume
+        && task.status == TaskStatus::Failed
+        && task_retry_kind(task) == RetryErrorKind::AuthError
+}
+
+impl TaskDescriptor {
+    #[must_use]
+    pub fn reservation_claim(&self) -> Option<TaskReservationClaim<'_>> {
+        match (
+            self.reservation_id.as_deref(),
+            self.reserved_usd,
+            self.reserved_month.as_deref(),
+        ) {
+            (Some(reservation_id), Some(usd), Some(month)) => Some(TaskReservationClaim {
+                reservation_id,
+                task_id: &self.task_id,
+                usd,
+                month,
+            }),
+            _ => None,
+        }
+    }
+
+    pub fn clear_reservation(&mut self) {
+        self.reservation_id = None;
+        self.reserved_usd = None;
+        self.reserved_month = None;
+    }
+}
+
+fn validate_task_descriptor(kcs_dir: &Path, descriptor: &TaskDescriptor) -> Result<()> {
+    let corrupt = |message: String| {
+        PipelineError::corrupt(kcs_dir.join("tasks.jsonl").display().to_string(), message)
+    };
+    if descriptor.task_id.is_empty()
+        || descriptor.task_id.len() > MAX_TASK_ID_BYTES
+        || !is_safe_logical_id(&descriptor.task_id)
+    {
+        return Err(corrupt(
+            "task_id is not a bounded logical identifier".to_owned(),
+        ));
+    }
+    if descriptor.input_path.len() > MAX_TASK_PATH_BYTES
+        || !is_scope_local_file_name(&descriptor.input_path)
+    {
+        return Err(PipelineError::path(descriptor.input_path.clone()));
+    }
+    if !kcs_core::cas::is_hash(&descriptor.input_hash) {
+        return Err(corrupt(format!(
+            "task input_hash is not a valid hash: {}",
+            descriptor.input_hash
+        )));
+    }
+    if let Some(previous) = &descriptor.previous_raw_hash {
+        if !kcs_core::cas::is_hash(previous) {
+            return Err(corrupt(format!(
+                "task previous_raw_hash is not a valid hash: {previous}"
+            )));
+        }
+    }
+    if descriptor.changed_unit_keys.len() > MAX_TASK_UNIT_KEYS
+        || descriptor
+            .unit_keys
+            .as_ref()
+            .is_some_and(|keys| keys.len() > MAX_TASK_UNIT_KEYS)
+    {
+        return Err(corrupt(format!(
+            "task unit key count exceeds {MAX_TASK_UNIT_KEYS}"
+        )));
+    }
+    if descriptor
+        .changed_unit_keys
+        .iter()
+        .chain(descriptor.unit_keys.iter().flatten())
+        .any(|key| key.is_empty() || key.len() > MAX_TASK_PATH_BYTES || has_control(key))
+    {
+        return Err(corrupt(
+            "task unit key is empty, oversized, or contains controls".to_owned(),
+        ));
+    }
+    if descriptor.output_ref.len() > MAX_TASK_PATH_BYTES {
+        return Err(corrupt("task output_ref is oversized".to_owned()));
+    }
+    validate_task_output_ref(kcs_dir, descriptor)?;
+    if descriptor
+        .fallback_reason
+        .as_ref()
+        .is_some_and(|value| value.len() > MAX_TASK_REASON_BYTES || has_control(value))
+    {
+        return Err(corrupt(
+            "task fallback_reason is oversized or contains controls".to_owned(),
+        ));
+    }
+    for timestamp in [
+        descriptor.next_retry_at.as_deref(),
+        descriptor.deadline.as_deref(),
+        descriptor.heartbeat_at.as_deref(),
+        Some(descriptor.created_at.as_str()),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if timestamp.len() > MAX_TASK_TIMESTAMP_BYTES || has_control(timestamp) {
+            return Err(corrupt(
+                "task timestamp is oversized or contains controls".to_owned(),
+            ));
+        }
+    }
+    match (
+        descriptor.reserved_usd,
+        descriptor.reserved_month.as_deref(),
+    ) {
+        (None, None) => {}
+        (Some(usd), Some(month)) if usd.is_finite() && usd >= 0.0 && is_utc_month(month) => {}
+        _ => {
+            return Err(corrupt(
+                "task reservation amount/month stamp is invalid".to_owned(),
+            ))
+        }
+    }
+    if let Some(reservation_id) = descriptor.reservation_id.as_deref() {
+        if !is_valid_reservation_id(reservation_id)
+            || descriptor.reserved_usd.is_none()
+            || descriptor.reserved_month.is_none()
+        {
+            return Err(corrupt(
+                "task reservation_id requires a valid amount/month stamp".to_owned(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn invalid_output_ref(kcs_dir: &Path, output_ref: &str) -> PipelineError {
+    PipelineError::corrupt(
+        kcs_dir.join("tasks.jsonl").display().to_string(),
+        format!("task output_ref is not a scoped typed reference: {output_ref}"),
+    )
+}
+
+fn is_safe_logical_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= MAX_TASK_ID_BYTES
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
+}
+
+#[must_use]
+pub fn is_valid_reservation_id(value: &str) -> bool {
+    value.len() <= MAX_TASK_ID_BYTES
+        && (value.starts_with("res_") || value.starts_with("reservation_"))
+        && is_safe_logical_id(value)
+}
+
+fn is_utc_month(value: &str) -> bool {
+    if value.len() != 7 || value.as_bytes()[4] != b'-' {
+        return false;
+    }
+    let year = &value.as_bytes()[0..4];
+    let month = &value.as_bytes()[5..7];
+    year.iter().all(u8::is_ascii_digit)
+        && month.iter().all(u8::is_ascii_digit)
+        && matches!(
+            month,
+            b"01"
+                | b"02"
+                | b"03"
+                | b"04"
+                | b"05"
+                | b"06"
+                | b"07"
+                | b"08"
+                | b"09"
+                | b"10"
+                | b"11"
+                | b"12"
+        )
+}
+
+fn has_control(value: &str) -> bool {
+    value.chars().any(char::is_control)
 }
 
 #[must_use]
@@ -387,6 +868,31 @@ pub fn idempotency_key(input_hash: &str, tool_profile_hash: &str) -> String {
 mod tests {
     use super::*;
 
+    fn valid_task() -> TaskDescriptor {
+        TaskDescriptor {
+            task_id: "task_01H".to_owned(),
+            task_type: TaskType::Markdownize,
+            mode: Some(MarkdownizeMode::Full),
+            input_path: "report.pdf".to_owned(),
+            input_hash: format!("sha256:{}", "a".repeat(64)),
+            previous_raw_hash: None,
+            parent_run_id: None,
+            changed_unit_keys: Vec::new(),
+            output_ref: "online:test_markdownize".to_owned(),
+            unit_keys: None,
+            status: TaskStatus::Pending,
+            attempts: 0,
+            next_retry_at: None,
+            deadline: None,
+            heartbeat_at: None,
+            fallback_reason: None,
+            created_at: "2026-04-25T12:00:00Z".to_owned(),
+            reserved_usd: None,
+            reserved_month: None,
+            reservation_id: None,
+        }
+    }
+
     #[test]
     fn placeholder_task_type_field_is_named_type() {
         let descriptor = TaskDescriptor {
@@ -409,6 +915,7 @@ mod tests {
             created_at: "2026-04-25T12:00:00Z".to_owned(),
             reserved_usd: None,
             reserved_month: None,
+            reservation_id: None,
         };
 
         let value = serde_json::to_value(descriptor).expect("serialize task descriptor");
@@ -465,6 +972,7 @@ mod tests {
             created_at: "2026-04-25T12:00:00Z".to_owned(),
             reserved_usd: None,
             reserved_month: None,
+            reservation_id: None,
         };
         store.append(&task).unwrap();
         // A bare-name task reads back fine.
@@ -509,6 +1017,7 @@ mod tests {
             created_at: "2026-04-25T12:00:00Z".to_owned(),
             reserved_usd: None,
             reserved_month: None,
+            reservation_id: None,
         };
         store.append(&task).unwrap();
         let err = store.all().unwrap_err();
@@ -567,5 +1076,273 @@ mod tests {
             retry_policy(RetryErrorKind::ContractViolation).error_code,
             "KCS-E-ADAPTER-CONTRACT-001"
         );
+    }
+
+    #[test]
+    fn cand_050_task_store_rejects_oversized_file_before_reading() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tasks.jsonl");
+        let file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .unwrap();
+        file.set_len(MAX_TASK_STORE_BYTES + 1).unwrap();
+        let err = TaskStore::new(dir.path()).all().unwrap_err();
+        assert!(matches!(err, PipelineError::Corrupt { .. }));
+        assert!(err.to_string().contains("exceeds"));
+    }
+
+    #[test]
+    fn cand_050_task_store_rejects_record_before_unbounded_line_allocation() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tasks.jsonl");
+        let mut bytes = vec![b' '; MAX_TASK_RECORD_BYTES as usize + 1];
+        bytes.push(b'\n');
+        fs::write(path, bytes).unwrap();
+        let err = TaskStore::new(dir.path()).all().unwrap_err();
+        assert!(matches!(err, PipelineError::Corrupt { .. }));
+        assert!(err.to_string().contains("task record exceeds"));
+    }
+
+    #[test]
+    fn cand_050_task_writer_and_reader_share_the_framed_record_boundary() {
+        let mut task = valid_task();
+        task.changed_unit_keys = vec!["x".repeat(MAX_TASK_PATH_BYTES); 63];
+        let current_len = serde_json::to_vec(&task).unwrap().len();
+        let target_json_len = MAX_TASK_RECORD_BYTES as usize - 1;
+        let added_json_overhead = 3;
+        let padding_len = target_json_len
+            .checked_sub(current_len + added_json_overhead)
+            .unwrap();
+        assert!(padding_len <= MAX_TASK_PATH_BYTES);
+        task.changed_unit_keys.push("y".repeat(padding_len));
+        assert_eq!(
+            serde_json::to_vec(&task).unwrap().len() + 1,
+            MAX_TASK_RECORD_BYTES as usize
+        );
+
+        let append_dir = tempfile::tempdir().unwrap();
+        let append_store = TaskStore::new(append_dir.path());
+        append_store.append(&task).unwrap();
+        assert_eq!(append_store.all().unwrap(), vec![task.clone()]);
+
+        let replace_dir = tempfile::tempdir().unwrap();
+        let replace_store = TaskStore::new(replace_dir.path());
+        replace_store.replace_all(&[task.clone()]).unwrap();
+        assert_eq!(replace_store.all().unwrap(), vec![task.clone()]);
+
+        let last = task.changed_unit_keys.last_mut().unwrap();
+        last.push('z');
+        assert!(append_store.append(&task).is_err());
+        assert!(replace_store.replace_all(&[task]).is_err());
+    }
+
+    #[test]
+    fn cand_050_task_store_bounds_collection_cardinality_and_keeps_valid_control() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = TaskStore::new(dir.path());
+        store.append(&valid_task()).unwrap();
+        assert_eq!(store.all().unwrap(), vec![valid_task()]);
+
+        let mut oversized = valid_task();
+        oversized.task_id = "task_02H".to_owned();
+        oversized.changed_unit_keys = (0..=MAX_TASK_UNIT_KEYS)
+            .map(|index| format!("page:{index}"))
+            .collect();
+        store.append(&oversized).unwrap();
+        let err = store.all().unwrap_err();
+        assert!(matches!(err, PipelineError::Corrupt { .. }));
+        assert!(err.to_string().contains("unit key count"));
+    }
+
+    #[test]
+    fn cand_047_output_ref_is_typed_and_bound_to_the_task_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let foreign_dir = tempfile::tempdir().unwrap();
+        let raw_hash = format!("sha256:{}", "a".repeat(64));
+        let tool_hash = format!("sha256:{}", "b".repeat(64));
+        let mut task = valid_task();
+        task.input_hash = raw_hash.clone();
+        task.output_ref =
+            crate::markdownize::normalized_instance_dir(dir.path(), &raw_hash, &tool_hash, 7)
+                .display()
+                .to_string();
+        fs::create_dir_all(&task.output_ref).unwrap();
+        assert!(matches!(
+            validate_task_output_ref(dir.path(), &task).unwrap(),
+            TaskOutputRef::NormalizedInstance { gen: 7, .. }
+        ));
+
+        for foreign in [
+            "/tmp/foreign/manifest-parent".to_owned(),
+            "../foreign/normalized-instance".to_owned(),
+            crate::markdownize::normalized_instance_dir(
+                foreign_dir.path(),
+                &raw_hash,
+                &tool_hash,
+                7,
+            )
+            .display()
+            .to_string(),
+        ] {
+            task.output_ref = foreign;
+            assert!(validate_task_output_ref(dir.path(), &task).is_err());
+        }
+
+        let mut poisoned = valid_task();
+        poisoned.input_hash = raw_hash.clone();
+        poisoned.output_ref = crate::markdownize::normalized_instance_dir(
+            foreign_dir.path(),
+            &raw_hash,
+            &tool_hash,
+            7,
+        )
+        .display()
+        .to_string();
+        let store = TaskStore::new(dir.path());
+        store.append(&poisoned).unwrap();
+        assert!(matches!(store.all(), Err(PipelineError::Corrupt { .. })));
+
+        let mut embedding = valid_task();
+        embedding.task_type = TaskType::Embedding;
+        embedding.output_ref = format!("embedding:sha256:{}", "c".repeat(64));
+        assert!(matches!(
+            validate_task_output_ref(dir.path(), &embedding).unwrap(),
+            TaskOutputRef::Embedding { .. }
+        ));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn cand_047_canonical_windows_absolute_output_ref_is_supported() {
+        let dir = tempfile::tempdir().unwrap();
+        let foreign = tempfile::tempdir().unwrap();
+        let kcs_dir = dir.path().canonicalize().unwrap();
+        let raw_hash = format!("sha256:{}", "a".repeat(64));
+        let tool_hash = format!("sha256:{}", "b".repeat(64));
+        let path = crate::markdownize::normalized_instance_dir(&kcs_dir, &raw_hash, &tool_hash, 2);
+        fs::create_dir_all(&path).unwrap();
+        assert!(path
+            .components()
+            .any(|component| matches!(component, Component::Prefix(_))));
+
+        let mut task = valid_task();
+        task.input_hash = raw_hash.clone();
+        task.output_ref = path.display().to_string();
+        assert!(validate_task_output_ref(&kcs_dir, &task).is_ok());
+
+        task.output_ref = crate::markdownize::normalized_instance_dir(
+            foreign.path().canonicalize().unwrap(),
+            &raw_hash,
+            &tool_hash,
+            2,
+        )
+        .display()
+        .to_string();
+        assert!(validate_task_output_ref(&kcs_dir, &task).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cand_047_normalized_units_root_symlink_is_not_a_store_boundary() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let raw_hash = format!("sha256:{}", "a".repeat(64));
+        let tool_hash = format!("sha256:{}", "b".repeat(64));
+        fs::create_dir_all(dir.path().join("objects")).unwrap();
+        symlink(outside.path(), dir.path().join("objects/normalized_units")).unwrap();
+
+        let mut task = valid_task();
+        task.input_hash = raw_hash.clone();
+        task.output_ref =
+            crate::markdownize::normalized_instance_dir(dir.path(), &raw_hash, &tool_hash, 0)
+                .display()
+                .to_string();
+        assert!(validate_task_output_ref(dir.path(), &task).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cand_047_existing_normalized_ref_cannot_escape_through_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let raw_hash = format!("sha256:{}", "a".repeat(64));
+        let tool_hash = format!("sha256:{}", "b".repeat(64));
+        let path =
+            crate::markdownize::normalized_instance_dir(dir.path(), &raw_hash, &tool_hash, 0);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        symlink(outside.path(), &path).unwrap();
+        let mut task = valid_task();
+        task.input_hash = raw_hash;
+        task.output_ref = path.display().to_string();
+        assert!(validate_task_output_ref(dir.path(), &task).is_err());
+    }
+
+    #[test]
+    fn cand_033_capped_task_input_rejects_before_full_materialization() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("report.pdf");
+        fs::write(&path, vec![b'x'; 16]).unwrap();
+        assert_eq!(
+            read_capped_task_input(&path, 16),
+            CappedTaskInput::Bytes(vec![b'x'; 16])
+        );
+        assert_eq!(read_capped_task_input(&path, 15), CappedTaskInput::TooLarge);
+        assert_eq!(
+            read_capped_task_input(dir.path(), 16),
+            CappedTaskInput::NotRegular
+        );
+    }
+
+    #[test]
+    fn cand_001_012_013_recovery_helpers_preserve_security_state() {
+        let mut task = valid_task();
+        task.task_type = TaskType::Embedding;
+        task.output_ref = format!("embedding:sha256:{}", "c".repeat(64));
+        assert!(task_can_enter_secret_hold(&task));
+
+        task.status = TaskStatus::Failed;
+        task.fallback_reason = Some("contract_violation".to_owned());
+        task.attempts = 1;
+        assert!(task_failure_is_terminal(&task));
+        assert!(!task_can_enter_secret_hold(&task));
+
+        task.fallback_reason = Some("network_error".to_owned());
+        task.attempts = 5;
+        assert!(task_failure_is_terminal(&task));
+        assert!(!task_can_enter_secret_hold(&task));
+
+        task.status = TaskStatus::Paused;
+        task.fallback_reason = Some(BUDGET_EXCEEDED_REASON.to_owned());
+        assert!(task_can_complete_from_materialized_output(&task));
+        task.fallback_reason = Some(SECRETS_TIER_B_HOLD_REASON.to_owned());
+        assert!(!task_can_complete_from_materialized_output(&task));
+
+        task.status = TaskStatus::Failed;
+        task.fallback_reason = Some("auth_error".to_owned());
+        assert!(!task_auth_revival_allowed(&task, TaskRecoveryMode::Retry));
+        assert!(task_auth_revival_allowed(&task, TaskRecoveryMode::Resume));
+    }
+
+    #[test]
+    fn cand_048_only_complete_reservation_stamps_yield_claims() {
+        let mut task = valid_task();
+        task.reserved_usd = Some(1.25);
+        task.reserved_month = Some("2026-07".to_owned());
+        assert!(
+            task.reservation_claim().is_none(),
+            "legacy stamp is advisory"
+        );
+        task.reservation_id = Some("res_01HVALID".to_owned());
+        let claim = task.reservation_claim().unwrap();
+        assert_eq!(claim.reservation_id, "res_01HVALID");
+        assert_eq!(claim.usd, 1.25);
+        task.clear_reservation();
+        assert!(task.reservation_claim().is_none());
     }
 }

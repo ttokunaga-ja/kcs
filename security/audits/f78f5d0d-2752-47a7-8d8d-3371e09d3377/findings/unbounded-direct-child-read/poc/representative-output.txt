@@ -1,0 +1,8 @@
+fixture_bytes=262144
+configured_adapter_cap_bytes=4096
+status_exit=0
+status_full_hash=true
+snapshot_exit=0
+snapshot_raw_object=true
+snapshot_raw_object_bytes=262144
+result=WHOLE_FILE_STATUS_AND_SNAPSHOT_PATH_REACHED

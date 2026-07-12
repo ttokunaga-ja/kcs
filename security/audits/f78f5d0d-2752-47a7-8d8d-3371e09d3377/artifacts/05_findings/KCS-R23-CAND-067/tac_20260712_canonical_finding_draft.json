@@ -1,0 +1,288 @@
+{
+  "affectedLocations": [
+    {
+      "detail": "A fresh scan loads ignore policy and marks candidate eligibility.",
+      "label": "scan_authorization",
+      "lines": "56-87,90-160,178-200",
+      "path": "crates/kcs-pipeline/src/scan.rs"
+    },
+    {
+      "detail": "An allowed OCR candidate is normally persisted as an online placeholder task.",
+      "label": "normal_task_source",
+      "lines": "9055-9059,10015-10039,10179-10213",
+      "path": "crates/kcs-cli/src/main.rs"
+    },
+    {
+      "detail": "Tasks retain path, hash, and lifecycle state but no scan decision or ignore-policy binding; the loader checks only shape, locality, and hash syntax.",
+      "label": "persisted_task_loader",
+      "lines": "41-75,129-186",
+      "path": "crates/kcs-pipeline/src/task.rs"
+    },
+    {
+      "detail": "Selection and preconditions check secrets, hash, size, and media but not current ignore policy or scan membership.",
+      "label": "missing_current_authorization",
+      "lines": "6050-6067,6533-6573",
+      "path": "crates/kcs-cli/src/main.rs"
+    },
+    {
+      "detail": "The production client reads and posts the task path's document bytes with authentication.",
+      "label": "ocr_sink",
+      "lines": "112-138",
+      "path": "crates/kcs-adapter/src/mistral_ocr.rs"
+    }
+  ],
+  "attackPath": {
+    "dataflow": {
+      "evidenceRefs": [
+        "index-filters-ignored",
+        "task-stores-no-policy",
+        "pending-filter-omits-ignore",
+        "send-precondition-omits-ignore",
+        "ocr-adapter-posts-bytes"
+      ],
+      "outcome": "current ignore policy is bypassed for one stale OCR task",
+      "sink": "authenticated external OCR request carrying the document bytes",
+      "source": "a prior allowed OCR-eligible direct-child document with an unchanged raw hash",
+      "summary": "current allowed scan candidate -> persisted `TaskDescriptor` -> `batch resume`/`batch retry` -> pending task filter -> send precondition -> `run_standard_online_markdownize` -> Mistral OCR request"
+    },
+    "evidenceRefs": [
+      "batch-consumes-store",
+      "pending-filter-omits-ignore",
+      "send-precondition-omits-ignore",
+      "ocr-adapter-posts-bytes"
+    ],
+    "impact": {
+      "level": "high",
+      "why": "A user-readable document that current policy excludes can cross an external adapter boundary."
+    },
+    "likelihood": {
+      "level": "medium",
+      "why": "Prior enqueue, unchanged bytes, existing adapter consent, credentials, budget, and recovery invocation materially constrain reachability."
+    },
+    "limitations": [
+      "This finding does not disclose the OCR credential itself.",
+      "The path does not provide arbitrary filesystem read because task locality and raw-hash checks remain active.",
+      "Fresh ignored files do not create tasks through the normal index path."
+    ],
+    "reachability": {
+      "accessRequirements": "prior task creation, unchanged bytes, persistent network approval, valid OCR credentials, available budget, OCR-eligible media, and explicit batch execution",
+      "attacker": "local content/shared-scope contributor or partially trusted automation influencing file and ignore-policy state",
+      "entrypoint": "`batch resume` or `batch retry` over persisted online markdownize tasks",
+      "outcome": "excluded document bytes are sent to the configured external OCR provider",
+      "summary": "The attacker or lower-trust workflow needs a prior allowed task and later batch recovery under the operator's configured adapter. KCS has no inbound listener; the egress occurs through local operator or automation activity."
+    },
+    "summary": "A document is legitimately eligible for OCR and receives a durable online markdownize task. The path later becomes ignored while bytes stay unchanged. A later batch recovery consumes the stale task, passes the live hash/media controls, and sends the now-excluded document to the configured OCR adapter."
+  },
+  "attackPathReport": "artifacts/05_findings/KCS-R23-CAND-067/attack_path_analysis_report.md",
+  "candidateId": "KCS-R23-CAND-067",
+  "candidate_id": "KCS-R23-CAND-067",
+  "category": "stale authorization and excluded-document egress",
+  "codeEvidence": [
+    {
+      "code": "pub fn build_scan_preview(request: ScanPreviewRequest) -> Result<ScanPreview> {\n    let scope_path = PathBuf::from(&request.scope_path);\n    let case_insensitive = probe_case_insensitive(&scope_path);\n    let mut ignore_rules = load_config_ignore(&scope_path)?;\n    ignore_rules.extend(load_kcsignore(&scope_path)?);\n    let mut candidates = Vec::new();",
+      "endLine": 64,
+      "explanation": "The current authorization decision for a path starts by loading current scope config and `.kcsignore` rules.",
+      "id": "fresh-scan-loads-ignore",
+      "label": "Fresh scan loads current ignore policy",
+      "language": "rust",
+      "path": "crates/kcs-pipeline/src/scan.rs",
+      "role": "expected_control",
+      "startLine": 56
+    },
+    {
+      "code": "let ignored = ignored_by_rules(\n    &relative,\n    file_type.is_dir(),\n    ignore_rules,\n    case_insensitive,\n) || secret == Some(SecretTier::TierA)\n    && !explicitly_unignored(\n        &relative,\n        file_type.is_dir(),\n        ignore_rules,\n        case_insensitive,\n    );\nlet raw_hash = if include_raw_hashes && !ignored {\n    Some(hash_bytes(&std::fs::read(&path).pipeline_io(&path)?))\n} else {\n    None\n};\ncandidates.push(ScanCandidate {\n    input_path: relative.clone(),\n    media_type: media_type_for_path(&path).to_owned(),\n    size_bytes,\n    raw_hash,\n    ignored,\n    quarantine_reason,\n});",
+      "endLine": 159,
+      "explanation": "A fresh preview binds current ignore rules to the candidate and only computes a raw hash for non-ignored files.",
+      "id": "fresh-scan-records-ignored",
+      "label": "Fresh scan records whether the path is ignored",
+      "language": "rust",
+      "path": "crates/kcs-pipeline/src/scan.rs",
+      "role": "expected_control",
+      "startLine": 124
+    },
+    {
+      "code": "for candidate in preview\n    .candidates\n    .iter()\n    .filter(|candidate| !candidate.ignored && candidate.media_type != \"inode/directory\")\n{",
+      "endLine": 9059,
+      "explanation": "A normal online task source is a candidate that passed the current scan authorization decision at enqueue time.",
+      "id": "index-filters-ignored",
+      "label": "Indexing processes only non-ignored candidates",
+      "language": "rust",
+      "path": "crates/kcs-cli/src/main.rs",
+      "role": "entrypoint",
+      "startLine": 9055
+    },
+    {
+      "code": "pub struct TaskDescriptor {\n    pub task_id: String,\n    #[serde(rename = \"type\")]\n    pub task_type: TaskType,\n    pub mode: Option<MarkdownizeMode>,\n    pub input_path: String,\n    pub input_hash: String,\n    pub previous_raw_hash: Option<String>,\n    pub parent_run_id: Option<String>,\n    pub changed_unit_keys: Vec<String>,\n    pub output_ref: String,\n    pub unit_keys: Option<Vec<String>>,\n    pub status: TaskStatus,\n    pub attempts: u32,\n    pub next_retry_at: Option<String>,\n    pub deadline: Option<String>,\n    pub heartbeat_at: Option<String>,\n    pub fallback_reason: Option<String>,\n    pub created_at: String,\n    pub reserved_usd: Option<f64>,\n    pub reserved_month: Option<String>,\n}",
+      "endLine": 75,
+      "explanation": "After enqueue, durable state can prove a path and raw hash but cannot prove that current ignore policy still authorizes the path.",
+      "id": "task-stores-no-policy",
+      "label": "Persisted task stores path and hash but no ignore-policy binding",
+      "language": "rust",
+      "path": "crates/kcs-pipeline/src/task.rs",
+      "role": "propagation",
+      "startLine": 41
+    },
+    {
+      "code": "fn run_batch(args: BatchArgs) -> Result<Value> {\n    let repo = Repository::open_current()?;\n    let _lock = repo.lock_store()?;\n    let store = TaskStore::new(repo.kcs_dir());\n    let secrets_approved = secrets_send_approved(&repo);\n    match args.command {\n        Some(BatchCommand::Resume(resume)) => {\n            let changed = store\n                .update_matching(|task| {\n                    let held_secret = task.fallback_reason.as_deref() == Some(SECRETS_TIER_B_HOLD);\n                    if task.status == TaskStatus::Paused\n                        && (resume.override_budget\n                            || task.fallback_reason.as_deref() != Some(\"budget_exceeded\"))\n                        && (!held_secret || secrets_approved)\n                    {\n                        task.status = TaskStatus::Pending;\n                        task.fallback_reason = None;\n                        true\n                    } else {\n                        false\n                    }\n                })\n                .map_err(pipeline_to_kcs)?;\n            let outcome = execute_pending_tasks(&repo, &store, resume.override_budget, true)?;",
+      "endLine": 5618,
+      "explanation": "Recovery opens the task store and proceeds to task execution without constructing a current `ScanPreview` for the persisted path.",
+      "id": "batch-consumes-store",
+      "label": "Batch recovery drives persisted tasks directly",
+      "language": "rust",
+      "path": "crates/kcs-cli/src/main.rs",
+      "role": "entrypoint",
+      "startLine": 5586
+    },
+    {
+      "code": "let tasks = store\n    .all()\n    .map_err(pipeline_to_kcs)?\n    .into_iter()\n    .filter(|task| {\n        task.status == TaskStatus::Pending\n            && task.task_type == TaskType::Markdownize\n            && task.output_ref == output_ref\n            && task_retry_due(task)\n            && (secrets_approved\n                || classify_secret(&task.input_path).is_none())\n    })\n    .collect::<Vec<_>>();",
+      "endLine": 6067,
+      "explanation": "The selection gate checks lifecycle, type, adapter output, retry timing, and filename-secret state, but not whether current ignore rules still admit `task.input_path`.",
+      "id": "pending-filter-omits-ignore",
+      "label": "Pending task filter omits current scan membership",
+      "language": "rust",
+      "path": "crates/kcs-cli/src/main.rs",
+      "role": "root_control",
+      "startLine": 6050
+    },
+    {
+      "code": "fn classify_online_markdownize_precondition(\n    repo: &Repository,\n    task: &TaskDescriptor,\n) -> OnlineMarkdownizePrecondition {\n    let path = repo.root().join(&task.input_path);\n    let media_type = media_type_for_cli_path(&path).to_owned();\n    let Ok(current_bytes) = fs::read(&path) else {\n        return OnlineMarkdownizePrecondition::Retire;\n    };\n    if hash_bytes(&current_bytes) != task.input_hash {\n        return OnlineMarkdownizePrecondition::Retire;\n    }\n    if current_bytes.len() as u64 > effective_max_input_bytes(repo) {\n        return OnlineMarkdownizePrecondition::Retire;\n    }\n    if is_text_native_media(&media_type) {\n        return OnlineMarkdownizePrecondition::Retire;\n    }\n    let prepare_profile_hash = builtin_prepare_profile().tool_profile_hash;\n    let Ok(prepare) = prepare_units(PrepareStageRequest {\n        raw_hash: task.input_hash.clone(),\n        media_type: media_type.clone(),\n        input_path: path.display().to_string(),\n        tool_profile_hash: prepare_profile_hash,\n    }) else {\n        return OnlineMarkdownizePrecondition::Retire;\n    };\n    if prepare.prepared_units.is_empty() {\n        return OnlineMarkdownizePrecondition::AwaitOcr;\n    }\n    if is_local_passthrough_text(&media_type, &prepare.prepared_units) {\n        return OnlineMarkdownizePrecondition::Retire;\n    }\n    OnlineMarkdownizePrecondition::Send\n}",
+      "endLine": 6573,
+      "explanation": "An unchanged OCR-eligible document reaches `Send` when the live byte and media checks pass, even if a fresh scan would now mark the path ignored.",
+      "id": "send-precondition-omits-ignore",
+      "label": "Send precondition verifies bytes and media but not current ignore policy",
+      "language": "rust",
+      "path": "crates/kcs-cli/src/main.rs",
+      "role": "root_control",
+      "startLine": 6533
+    },
+    {
+      "code": "fn ocr_markdown(&self, request: &MarkdownizeRequest, model_pin: &str) -> Result<OcrResponse> {\n    let api_key = Self::api_key()?;\n    let path = request.raw.path.as_deref().ok_or_else(|| {\n        AdapterError::ContractViolation(\"Mistral OCR requires a local raw path\".to_owned())\n    })?;\n    let bytes = std::fs::read(path).map_err(|err| AdapterError::Io {\n        path: path.to_owned(),\n        message: err.to_string(),\n    })?;\n    let value: Value = ureq::post(&format!(\"{}/v1/ocr\", self.base_url()))\n        .set(\"Authorization\", &format!(\"Bearer {api_key}\"))\n        .set(\"Content-Type\", \"application/json\")\n        .send_json(ocr_request_body(\n            &request.media_type,\n            &bytes,\n            model_pin,\n            pages.as_deref(),\n        ))\n        .map_err(http_error)?\n        .into_json()\n        .map_err(|err| AdapterError::ContractViolation(err.to_string()))?;\n    parse_ocr_response(value, model_pin)\n}",
+      "endLine": 138,
+      "explanation": "The stale task's path reaches an authenticated external OCR request with the current document bytes.",
+      "id": "ocr-adapter-posts-bytes",
+      "label": "OCR adapter posts the current document bytes",
+      "language": "rust",
+      "path": "crates/kcs-adapter/src/mistral_ocr.rs",
+      "role": "sink",
+      "startLine": 112
+    }
+  ],
+  "confidence": "high",
+  "extensions": {
+    "attackPathReport": "artifacts/05_findings/KCS-R23-CAND-067/attack_path_analysis_report.md",
+    "attackPathReportSha256": "2233b0f2cd2c3247e5b3c1eb92f79a16008c189ae74cba1054c374d98887d867",
+    "attemptId": "tac_20260712",
+    "candidateId": "KCS-R23-CAND-067",
+    "ledgerRowId": "KCS-R23-CAND-067",
+    "reportId": "KCS-R23-CAND-067",
+    "reportPath": "findings/tac-kcs-r23-cand-067-persisted-ocr-ignore-bypass/persisted-ocr-ignore-bypass.md",
+    "reportSha256": "aeb0f80724ab0324838c0209ab1d14866624748f35fa385a4135f7a61b283e89",
+    "validationReport": "artifacts/05_findings/KCS-R23-CAND-067/validation_report.md",
+    "validationReportSha256": "d3efeaa9848cb372696c101b8132678dba77a8b344724018226b3e72c6bbd421",
+    "writer": "writeup_067_tac"
+  },
+  "finalPolicy": "reportable",
+  "finalSeverity": "medium",
+  "final_policy": "reportable",
+  "final_severity": "medium",
+  "id": "KCS-R23-CAND-067",
+  "impact": "high",
+  "instanceKey": "KCS-R23-CAND-067",
+  "ledgerRowId": "KCS-R23-CAND-067",
+  "ledger_row_id": "KCS-R23-CAND-067",
+  "likelihood": "medium",
+  "priority": "P2",
+  "remediation": {
+    "recommendations": [
+      "Compute a current scan membership predicate for each pending online task or once per batch pass.",
+      "Require `candidate.input_path == task.input_path`, `!candidate.ignored`, and `candidate.raw_hash == task.input_hash` before returning `Send`.",
+      "Perform this check before cost reservation and before `execute_online_markdownize_task` can call the adapter.",
+      "Keep existing raw-hash, media, size, secret, budget, credential, and network-approval controls as independent gates."
+    ],
+    "regressionTests": [
+      "Allowed PDF enqueue, unchanged bytes, then `.kcsignore` exclusion before `batch resume` should produce no adapter call and no charge.",
+      "The same sequence through `[scope] ignore` should retire the task.",
+      "Paused-to-pending and failed-auth revival paths should both enforce current scan membership.",
+      "Changed bytes should still use the existing raw-hash retirement path.",
+      "Secret-looking filenames should remain held unless separately approved."
+    ],
+    "summary": "Rebind every persisted online markdownize task to current scan authorization immediately before budget reservation and adapter invocation. Retire tasks whose path is now ignored, whose current candidate is absent, or whose current candidate hash does not match the task hash."
+  },
+  "rootCause": {
+    "evidenceRefs": [
+      "index-filters-ignored",
+      "task-stores-no-policy",
+      "batch-consumes-store",
+      "pending-filter-omits-ignore",
+      "send-precondition-omits-ignore",
+      "ocr-adapter-posts-bytes",
+      "fresh-scan-loads-ignore",
+      "fresh-scan-records-ignored"
+    ],
+    "summary": "The violated invariant is that an online OCR send must be authorized by current scan policy for the exact document bytes being sent. KCS validates byte identity at send time, but durable `TaskDescriptor` state has no ignore-policy binding and batch recovery never checks current scan membership before allowing `OnlineMarkdownizePrecondition::Send`."
+  },
+  "scan_id": "f78f5d0d-2752-47a7-8d8d-3371e09d3377",
+  "schema_version": 1,
+  "sourceRevision": "0e19f3c6489da458e93a982a333c308d92d0a0ae",
+  "source_revision": "0e19f3c6489da458e93a982a333c308d92d0a0ae",
+  "summary": "A normally created online OCR task can remain recoverable after the document becomes ignored by current scope policy. Batch recovery selects the persisted task, verifies hash, size, media, network, budget, and filename-secret controls, but never rebuilds or emulates the current scan membership check before sending the document to the OCR adapter.",
+  "target_revision": "0e19f3c6489da458e93a982a333c308d92d0a0ae",
+  "title": "Persisted OCR tasks bypass current ignore authorization",
+  "validation": {
+    "artifacts": [
+      {
+        "path": "findings/tac-kcs-r23-cand-067-persisted-ocr-ignore-bypass/poc/ignore_bypass_probe.py",
+        "sha256": "7910e5ce4039158f7859f6333fef0016668e0c23d00acba211186c7c6ce647c4"
+      },
+      {
+        "path": "findings/tac-kcs-r23-cand-067-persisted-ocr-ignore-bypass/poc/Makefile",
+        "sha256": "504efe50315ca324530cef3c3153bebb4d97cfbbbd23b32fbbe63e871f6c3286"
+      }
+    ],
+    "assertions": [
+      "A prior allowed task can remain pending or recoverable after the path becomes ignored.",
+      "If the document bytes remain unchanged, the raw-hash check does not retire the task.",
+      "The nearest send-time controls cover secrets, hash, size, media, network approval, budget, and credentials, but not current ignore policy.",
+      "The included PoC models the vulnerable gate returning `Send` and the fixed gate returning `Retire` for the same now-ignored synthetic document."
+    ],
+    "evidenceRefs": [
+      "index-filters-ignored",
+      "task-stores-no-policy",
+      "pending-filter-omits-ignore",
+      "send-precondition-omits-ignore",
+      "ocr-adapter-posts-bytes"
+    ],
+    "limitations": [
+      "No production OCR adapter call or credentialed network request was executed.",
+      "No hermetic end-to-end KCS lifecycle test was run; the PoC is a local regression model of the missing predicate."
+    ],
+    "method": "static source trace plus safe local synthetic regression probe",
+    "summary": "The source trace confirms that normally enqueued tasks come from non-ignored candidates, persisted tasks retain path/hash but no current policy binding, and batch recovery plus send preconditions omit current ignore membership before the OCR sink."
+  },
+  "validationReport": "artifacts/05_findings/KCS-R23-CAND-067/validation_report.md",
+  "writeup": {
+    "attemptId": "tac_20260712",
+    "pocPaths": [
+      "findings/tac-kcs-r23-cand-067-persisted-ocr-ignore-bypass/poc/Makefile",
+      "findings/tac-kcs-r23-cand-067-persisted-ocr-ignore-bypass/poc/README.md",
+      "findings/tac-kcs-r23-cand-067-persisted-ocr-ignore-bypass/poc/ignore_bypass_probe.py"
+    ],
+    "reportPath": "findings/tac-kcs-r23-cand-067-persisted-ocr-ignore-bypass/persisted-ocr-ignore-bypass.md",
+    "reportSha256": "aeb0f80724ab0324838c0209ab1d14866624748f35fa385a4135f7a61b283e89",
+    "supportingArtifacts": [
+      {
+        "path": "findings/tac-kcs-r23-cand-067-persisted-ocr-ignore-bypass/poc/Makefile",
+        "sha256": "504efe50315ca324530cef3c3153bebb4d97cfbbbd23b32fbbe63e871f6c3286"
+      },
+      {
+        "path": "findings/tac-kcs-r23-cand-067-persisted-ocr-ignore-bypass/poc/README.md",
+        "sha256": "1b16be030c680bce180fd2447b7acf7ebeb63acb4e20c3f622f76899a83c7181"
+      },
+      {
+        "path": "findings/tac-kcs-r23-cand-067-persisted-ocr-ignore-bypass/poc/ignore_bypass_probe.py",
+        "sha256": "7910e5ce4039158f7859f6333fef0016668e0c23d00acba211186c7c6ce647c4"
+      }
+    ],
+    "pocDirectory": "findings/tac-kcs-r23-cand-067-persisted-ocr-ignore-bypass/poc"
+  }
+}

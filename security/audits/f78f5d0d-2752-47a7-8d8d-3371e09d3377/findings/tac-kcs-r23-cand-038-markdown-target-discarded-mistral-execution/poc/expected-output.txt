@@ -1,0 +1,19 @@
+[+] checked target revision 0e19f3c6489da458e93a982a333c308d92d0a0ae
+[+] found TOOLS_ENTRY_FIELDS
+[+] tools.toml accepts kind/cmd/args/url/model/auth fields
+[+] DeclaredAdapter retains only tool_id/model/auth
+[+] DeclaredAdapter has no kind/cmd/args/url fields
+[+] declared_adapter_for_role copies model/auth
+[+] declared_adapter_for_role never copies kind/cmd/args/url
+[+] CLI registers the lossy DeclaredAdapter projection
+[+] production markdown path constructs EnvMistralOcrClient
+[+] production markdown path consults only the declared model
+[+] catalog has no declared target dispatcher
+[+] Mistral client chooses ambient/default base URL
+[+] Mistral client resolves the retained markdown auth secret
+[+] document bytes are sent in a bearer-authenticated OCR request
+[+] preview exposes generic network/mode fields
+[+] preview does not disclose declared versus effective recipient
+[+] synthetic declared url http://127.0.0.1:18080/private-ocr is not projected into runtime
+[+] effective default recipient remains https://api.mistral.ai unless ambient base is set
+result: vulnerable destination-confusion invariant is present

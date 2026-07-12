@@ -1,0 +1,175 @@
+{
+  "affected_locations": [
+    {
+      "label": "entrypoint",
+      "lines": "5974-6081",
+      "path": "crates/kcs-cli/src/main.rs"
+    },
+    {
+      "label": "root_control_and_sink",
+      "lines": "6533-6551",
+      "path": "crates/kcs-cli/src/main.rs"
+    },
+    {
+      "label": "cap_definition",
+      "lines": "4425-4445",
+      "path": "crates/kcs-cli/src/main.rs"
+    }
+  ],
+  "attackPath": {
+    "dataflow": {
+      "evidenceRefs": [
+        "deferred-task-selection",
+        "precap-whole-read"
+      ],
+      "outcome": "local memory pressure, process termination, or I/O contention before safe retirement",
+      "sink": "whole-file allocation and I/O in the KCS process",
+      "source": "selected-scope replacement file controlled between enqueue and resume",
+      "summary": "Queued `TaskDescriptor.input_path` -> `execute_pending_markdownize_tasks()` -> `classify_online_markdownize_precondition()` -> `fs::read()` -> post-read hash/cap retirement."
+    },
+    "evidenceRefs": [
+      "deferred-task-selection",
+      "precap-whole-read",
+      "enqueue-cap"
+    ],
+    "impact": {
+      "level": "medium",
+      "why": "The resource effect can be substantial on the local host but remains recoverable and does not cross into adapter execution or external services."
+    },
+    "likelihood": {
+      "level": "medium",
+      "why": "The route depends on a pre-existing pending task and inter-command replacement authority, but no precise timing race is required."
+    },
+    "limitations": [
+      "No confidentiality, billing, or external network impact is established for the oversized replacement branch.",
+      "Actual severity depends on host memory, allocator behavior, filesystem behavior, and deferred-task frequency."
+    ],
+    "reachability": {
+      "attacker": "lower-trust selected-scope contributor",
+      "entrypoint": "deferred markdownize task processing",
+      "outcome": "local resource consumption before the precondition rejects the changed file",
+      "summary": "Requires an existing pending OCR task, write/rename authority over the selected path, and a later operator resume or retry."
+    },
+    "summary": "A lower-trust contributor who can replace a selected-scope file after a valid pending OCR task is queued can make the next deferred-task resume read the replacement file into memory before the task is retired."
+  },
+  "candidate_id": "KCS-R23-CAND-033",
+  "codeEvidence": [
+    {
+      "code": "let tasks = store\n    .all()\n    .map_err(pipeline_to_kcs)?\n    .into_iter()\n    .filter(|task| {\n        task.status == TaskStatus::Pending\n            && task.task_type == TaskType::Markdownize\n            && task.output_ref == output_ref\n            && task_retry_due(task)\n            && (secrets_approved\n                || classify_secret(&task.input_path).is_none())\n    })\n    .collect::<Vec<_>>();\n\nfor task in tasks {\n    let task_id = task.task_id.clone();\n    match classify_online_markdownize_precondition(repo, &task) {\n        OnlineMarkdownizePrecondition::Send => {}\n        OnlineMarkdownizePrecondition::AwaitOcr => {\n            continue;\n        }\n        OnlineMarkdownizePrecondition::Retire => {",
+      "endLine": 6081,
+      "explanation": "The deferred path selects persisted pending markdownize tasks by stored `input_path` and reaches `classify_online_markdownize_precondition()` before new budget reservation or adapter execution.",
+      "id": "deferred-task-selection",
+      "label": "Pending markdownize tasks reach the pre-charge precondition",
+      "language": "rust",
+      "path": "crates/kcs-cli/src/main.rs",
+      "role": "entrypoint",
+      "startLine": 6050
+    },
+    {
+      "code": "fn classify_online_markdownize_precondition(\n    repo: &Repository,\n    task: &TaskDescriptor,\n) -> OnlineMarkdownizePrecondition {\n    let path = repo.root().join(&task.input_path);\n    let media_type = media_type_for_cli_path(&path).to_owned();\n    let Ok(current_bytes) = fs::read(&path) else {\n        return OnlineMarkdownizePrecondition::Retire;\n    };\n    if hash_bytes(&current_bytes) != task.input_hash {\n        return OnlineMarkdownizePrecondition::Retire;\n    }\n    if current_bytes.len() as u64 > effective_max_input_bytes(repo) {\n        return OnlineMarkdownizePrecondition::Retire;\n    }",
+      "endLine": 6551,
+      "explanation": "`fs::read()` materializes the replacement file before either the task hash check or `effective_max_input_bytes()` can reject it, so the configured cap does not bound pre-control allocation or I/O.",
+      "id": "precap-whole-read",
+      "label": "The current file is read before hash and cap checks",
+      "language": "rust",
+      "path": "crates/kcs-cli/src/main.rs",
+      "role": "root_control",
+      "startLine": 6533
+    },
+    {
+      "code": "const DEFAULT_MAX_INPUT_BYTES: u64 = 104_857_600;\n\nfn effective_max_input_bytes(repo: &Repository) -> u64 {\n    read_max_input_bytes_config(&repo.kcs_dir().join(\"config.toml\"))\n        .or_else(|| read_max_input_bytes_config(&user_config_toml_path()))\n        .unwrap_or(DEFAULT_MAX_INPUT_BYTES)\n}",
+      "endLine": 4445,
+      "explanation": "`effective_max_input_bytes()` provides the intended bound, but the vulnerable resume-time path calls it after `fs::read()` has already allocated the current file.",
+      "id": "cap-definition",
+      "label": "The configured cap exists but is consumed too late on resume",
+      "language": "rust",
+      "path": "crates/kcs-cli/src/main.rs",
+      "role": "expected_control",
+      "startLine": 4425
+    },
+    {
+      "code": "let max_input_bytes = effective_max_input_bytes(repo);\n\nfor candidate in preview\n    .candidates\n    .iter()\n    .filter(|candidate| !candidate.ignored && candidate.media_type != \"inode/directory\")\n{\n    if candidate.size_bytes > max_input_bytes {\n        result.skipped_oversized_files += 1;\n        append_event_log(\n            \"KCS-I-INDEX-INPUT-OVERSIZED-001\",\n            \"input file exceeds adapter.policy.max_input_bytes; skipped adapter processing\",\n            json!({\n                \"size_bytes\": candidate.size_bytes,\n                \"max_input_bytes\": max_input_bytes,\n            }),\n        )?;\n        continue;\n    }",
+      "endLine": 9070,
+      "explanation": "The original task must be for an acceptable file. The bypass is an inter-command lifecycle issue where the selected path changes before deferred resume.",
+      "id": "enqueue-cap",
+      "label": "Initial indexing applies the cap before task creation",
+      "language": "rust",
+      "path": "crates/kcs-cli/src/main.rs",
+      "role": "expected_control",
+      "startLine": 9051
+    }
+  ],
+  "confidence": "high",
+  "disposition": "reportable",
+  "extensions": {
+    "attemptId": "tac_20260712",
+    "candidateId": "KCS-R23-CAND-033",
+    "ledgerRowId": "KCS-R23-CAND-033",
+    "reportId": "KCS-R23-CAND-033",
+    "sourceRevision": "0e19f3c6489da458e93a982a333c308d92d0a0ae"
+  },
+  "final_policy": "reportable",
+  "final_severity": "low",
+  "instance_key": "KCS-R23-CAND-033:deferred-ocr-precap-read",
+  "ledger_row_id": "KCS-R23-CAND-033",
+  "priority": "P3",
+  "remediation": {
+    "regression_tests": [
+      "Create a pending markdownize task for a small non-text-native input, replace the path with an over-cap file, run the precondition under a small cap, and assert retirement without reading more than cap + 1 bytes.",
+      "Cover a file that grows after metadata is checked; the streaming limit should still retire it without unbounded allocation.",
+      "Retain coverage that a same-size changed file retires by hash mismatch and a valid unchanged file can still reach Send or AwaitOcr as appropriate."
+    ],
+    "summary": "Open the file, validate regular-file metadata and length against `effective_max_input_bytes()`, then read through a `max + 1` byte limit before hashing or preparing the input."
+  },
+  "rootCause": {
+    "evidenceRefs": [
+      "deferred-task-selection",
+      "precap-whole-read",
+      "cap-definition",
+      "enqueue-cap"
+    ],
+    "summary": "The violated invariant is that the deferred task cap must bound the current file before the process materializes it. `classify_online_markdownize_precondition()` joins the stored path and calls `fs::read()` first, then performs both the task hash check and the size check on the already allocated bytes."
+  },
+  "scan_id": "f78f5d0d-2752-47a7-8d8d-3371e09d3377",
+  "schema_version": 1,
+  "summary": "A pending online markdownize task reopens its stored `input_path` and reads the entire current file before checking the queued hash or `adapter.policy.max_input_bytes`, allowing a selected-scope replacement to impose local O(n) I/O and allocation before the task is retired.",
+  "target_revision": "0e19f3c6489da458e93a982a333c308d92d0a0ae",
+  "title": "Deferred OCR tasks read replacement files before enforcing the cap",
+  "validation": {
+    "assertions": [
+      "A changed deferred input is retired only after `fs::read()` has materialized the replacement bytes.",
+      "For replacement size n and configured cap C, the rejected path can still perform O(n) I/O and allocation when n > C.",
+      "The oversized or changed branch stops before adapter execution, network egress, and new billing reservation."
+    ],
+    "evidenceRefs": [
+      "deferred-task-selection",
+      "precap-whole-read",
+      "cap-definition"
+    ],
+    "limitations": [
+      "No host-exhausting allocation test was run.",
+      "The PoC is a bounded control-order model rather than a KCS invocation against a large file."
+    ],
+    "method": "static source trace plus bounded synthetic local probe",
+    "summary": "The pinned source shows `fs::read()` before the identity and cap checks. The bounded probe created a 1 KiB original, replaced it with a 16 KiB file under a 4 KiB cap, and observed that the vulnerable-order model read all 16 KiB before retiring on hash mismatch."
+  },
+  "writeup": {
+    "reportPath": "findings/tac-kcs-r23-cand-033-deferred-ocr-precap-read/deferred-ocr-task-precap-read.md",
+    "reportSha256": "97a5f996cfdee56cf10db2af919af7045afac7cb2d6660f40ffa145a04f0d94f",
+    "supportingArtifacts": [
+      {
+        "path": "findings/tac-kcs-r23-cand-033-deferred-ocr-precap-read/poc/deferred_precap_read_probe.py",
+        "sha256": "9dd392c9cc53d21a49e4af2db80419ae03c542af5ebc7b6652fd9a94d811c424"
+      },
+      {
+        "path": "findings/tac-kcs-r23-cand-033-deferred-ocr-precap-read/poc/Makefile",
+        "sha256": "7020a95a6a71050c39b0beb776bbe68d8b0992a2b99505733ccb31824ce0acbb"
+      },
+      {
+        "path": "findings/tac-kcs-r23-cand-033-deferred-ocr-precap-read/poc/README.md",
+        "sha256": "26458919b02fd75f0aaba8566b0ef0b05da2f34c83c7a7d0d22a26f8da300a20"
+      }
+    ],
+    "pocDirectory": "findings/tac-kcs-r23-cand-033-deferred-ocr-precap-read/poc"
+  }
+}

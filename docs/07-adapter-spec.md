@@ -22,6 +22,12 @@ KCS core:                 Adapter:
 
 Adapter の実行設定 (cmd / args / url / 認証情報) は **`.kcs/` の共有対象に含めない**。各デバイスの `~/.config/kcs/tools.toml` や OS keychain に保存する。`.kcs/` は生成済み artifact の provenance と互換性判定に必要な `profile_hash` だけを保持する。
 
+R23 の同梱 runtime が実行できる online target は `mistral_ocr_markdownize` と
+`gemini_embedding_2` の built-in 実装に限定する。これらの role では `cmd` / `args` /
+`url` による実行先の差し替えを受理せず、宣言された model と built-in target の一致を
+起動時と実行直前に検証する。上記の実行設定フィールドは将来の外部 Adapter 契約用であり、
+現在の built-in role の設定方法ではない。
+
 認証情報の保存規約:
 
 ```text
@@ -323,7 +329,11 @@ store_response_body = false
 require_command_confirmation = true
 ```
 
-任意コマンド/任意 URL を使う Adapter は、**初回実行時** に command / URL / scope / network policy を preview し、ユーザー承認を得る。実装は command allowlist、secret redaction、ログ本文禁止を前提にする。
+任意コマンド/任意 URL を使う外部 Adapter dispatcher は将来仕様とする。実装する場合は
+**初回実行時** に command / URL / scope / network policy を preview し、ユーザー承認を
+得るほか、command allowlist、secret redaction、ログ本文禁止を前提にする。R23 の
+Markdownize / Embedding runtime にはこの dispatcher と承認経路はなく、`cmd` / `args` /
+`url` を設定しても実行せず schema error とする。
 
 ログに残してよいもの:
 
@@ -345,9 +355,9 @@ started_at, finished_at
 MVP における Adapter の脅威モデルを次のとおり確定する。
 
 ```text
-1. Adapter は trusted code として扱う。
-   実行されるのは、ユーザーが明示的にインストールし ~/.config/kcs/tools.toml に
-   設定した Adapter のみ。
+1. R23 で実行される Adapter は KCS 同梱の built-in target のみで、trusted code として
+   扱う。将来の外部 dispatcher を実装する場合も、ユーザーが明示的にインストールし
+   ~/.config/kcs/tools.toml に設定した Adapter だけを trusted code として扱う。
 
 2. [adapter.policy] は「KCS 側の入力制御 + 事後監査」の規約であり、
    sandbox による強制保証ではない。
@@ -355,7 +365,7 @@ MVP における Adapter の脅威モデルを次のとおり確定する。
    - KCS は allow_network=false の Adapter にオンライン送信前提の task を発行しない
    - AdapterRun (task_id / input_hashes / output_hashes / status) を監査ログとして残す
 
-3. 悪意ある・侵害された Adapter プロセス自体の挙動 (allowed_scope 外の読み取り、
+3. 将来の外部 dispatcher における、悪意ある・侵害された Adapter プロセス自体の挙動 (allowed_scope 外の読み取り、
    allow_network=false 下での無断送信) は MVP では防御しない。
    OS レベルのサンドボックス強制は Phase 4+ の再設計論点とする。
 
@@ -363,8 +373,9 @@ MVP における Adapter の脅威モデルを次のとおり確定する。
    MVP で同梱・文書化するのは KCS 公式 Adapter のみ。
 ```
 
-初回実行時の承認 UI はこの前提を反映した文言にする (例: 「この Adapter はあなたの権限で
-実行されます。信頼できる提供元のものだけをインストールしてください」)。
+将来の外部 dispatcher に初回実行時の承認 UI を追加する場合は、この前提を反映した
+文言にする (例: 「この Adapter はあなたの権限で実行されます。信頼できる提供元のもの
+だけをインストールしてください」)。
 
 ---
 

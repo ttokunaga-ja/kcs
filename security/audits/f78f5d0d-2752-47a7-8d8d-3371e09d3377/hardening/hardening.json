@@ -1,0 +1,1725 @@
+{
+  "documentType": "codex-security.hardening-analysis",
+  "schemaVersion": "1.0",
+  "analysisId": "hardening_final",
+  "sourceScan": {
+    "scanId": "f78f5d0d-2752-47a7-8d8d-3371e09d3377",
+    "targetRevision": "0e19f3c6489da458e93a982a333c308d92d0a0ae",
+    "sourceDrift": "none"
+  },
+  "assessment": {
+    "outcome": "opportunities_identified",
+    "summary": "The scan supports four recurring hardening opportunities around resource bounds, scope/provenance binding, adapter authority, and durable workflow state."
+  },
+  "constraints": {
+    "profile": "balanced",
+    "changeHorizons": [
+      "incremental",
+      "medium_term",
+      "foundational"
+    ],
+    "nonNegotiables": [
+      "Do not weaken local repository isolation or credential handling.",
+      "Preserve existing valid KCS workflows while tactical fixes roll out."
+    ],
+    "assumptions": [
+      "No measured latency or memory budget was supplied.",
+      "The current analysis is source and saved-evidence derived; it does not prove any proposal is implemented."
+    ]
+  },
+  "opportunities": [
+    {
+      "opportunityId": "bounded-input-work",
+      "title": "Centralize bounds before untrusted work is materialized",
+      "summary": "Several findings show bytes, provider responses, glob patterns, and task records being read, parsed, or expanded before the relevant size, time, or cardinality gate owns the operation.",
+      "diagnosis": "Several findings show bytes, provider responses, glob patterns, and task records being read, parsed, or expanded before the relevant size, time, or cardinality gate owns the operation.",
+      "evidence": [
+        {
+          "claimType": "observed",
+          "sourceKind": "finding",
+          "findingId": "csf_033bd1d61f101472ee6f71ab",
+          "path": "findings/tac-kcs-r23-cand-004-ocr-bounding-box-overflow/tac-kcs-r23-cand-004-ocr-bounding-box-overflow.md",
+          "claim": "KCS-R23-CAND-004 reports OCR bounding-box arithmetic can overflow."
+        },
+        {
+          "claimType": "observed",
+          "sourceKind": "finding",
+          "findingId": "csf_644e5ddaf7fedf7c28dc53a0",
+          "path": "findings/tac-kcs-r23-cand-006-pdf-page-marker-amplification/tac-kcs-r23-cand-006-pdf-page-marker-amplification.md",
+          "claim": "KCS-R23-CAND-006 reports lexical PDF page markers amplify derived work without a cardinality bound."
+        },
+        {
+          "claimType": "observed",
+          "sourceKind": "finding",
+          "findingId": "csf_b523844fcaa61bbfd11eb4f1",
+          "path": "findings/tac-kcs-r23-cand-007-quadratic-unit-lcs/tac-kcs-r23-cand-007-quadratic-unit-lcs.md",
+          "claim": "KCS-R23-CAND-007 reports incremental unit mapping allocates a quadratic LCS matrix."
+        },
+        {
+          "claimType": "observed",
+          "sourceKind": "finding",
+          "findingId": "csf_fde5f3380185c08f4a9418ac",
+          "path": "findings/tac-kcs-r23-cand-017-exponential-glob-backtracking/tac-kcs-r23-cand-017-exponential-glob-backtracking.md",
+          "claim": "KCS-R23-CAND-017 reports recursive star matching has exponential backtracking."
+        },
+        {
+          "claimType": "observed",
+          "sourceKind": "finding",
+          "findingId": "csf_f85926a297d5b96957e676eb",
+          "path": "findings/unbounded-direct-child-read/unbounded-direct-child-read.md",
+          "claim": "KCS-R23-CAND-019 reports status and snapshot read unbounded direct-child files before any cap."
+        },
+        {
+          "claimType": "observed",
+          "sourceKind": "finding",
+          "findingId": "csf_a23733c512c7df9b437b468f",
+          "path": "findings/mistral-ocr-response-bounds/mistral-ocr-response-bounds.md",
+          "claim": "KCS-R23-CAND-020 reports Mistral OCR responses lack read, body, cardinality, and persistence bounds."
+        },
+        {
+          "claimType": "observed",
+          "sourceKind": "finding",
+          "findingId": "csf_c7c8d3e89019f39735bf6842",
+          "path": "findings/mistral-model-resolution-bounds/mistral-model-resolution-bounds.md",
+          "claim": "KCS-R23-CAND-022 reports Mistral model resolution lacks response-body and read-time bounds."
+        },
+        {
+          "claimType": "observed",
+          "sourceKind": "finding",
+          "findingId": "csf_224a6b7b118c1be7f03bc549",
+          "path": "findings/gemini-response-bounds/gemini-response-bounds.md",
+          "claim": "KCS-R23-CAND-023 reports Gemini embedding responses lack body and read-time bounds before semantic checks."
+        },
+        {
+          "claimType": "observed",
+          "sourceKind": "finding",
+          "findingId": "csf_7fe98abd01cc7244e36ced70",
+          "path": "findings/tac-kcs-r23-cand-032-scan-hash-precap-allocation/tac-kcs-r23-cand-032-scan-hash-precap-allocation.md",
+          "claim": "KCS-R23-CAND-032 reports scan hashing allocates the full file before the input-size gate."
+        },
+        {
+          "claimType": "observed",
+          "sourceKind": "finding",
+          "findingId": "csf_8470a0059545557e5723abb1",
+          "path": "findings/tac-kcs-r23-cand-034-pdf-reparse-amplification/tac-kcs-r23-cand-034-pdf-reparse-amplification.md",
+          "claim": "KCS-R23-CAND-034 reports Deterministic PDF handling reparses the whole file once per page."
+        },
+        {
+          "claimType": "observed",
+          "sourceKind": "finding",
+          "findingId": "csf_2447fa8869fc7ee8bbd6b8d4",
+          "path": "findings/tac-kcs-r23-cand-033-deferred-ocr-precap-read/tac-kcs-r23-cand-033-deferred-ocr-precap-read.md",
+          "claim": "KCS-R23-CAND-033 reports Deferred OCR tasks read replacement files before enforcing the cap."
+        },
+        {
+          "claimType": "observed",
+          "sourceKind": "finding",
+          "findingId": "csf_f5ce2265c67607d344593bcd",
+          "path": "findings/cas-read-before-verification/cas-read-before-verification.md",
+          "claim": "KCS-R23-CAND-046 reports CAS reads allocate attacker-sized objects before verification."
+        },
+        {
+          "claimType": "observed",
+          "sourceKind": "finding",
+          "findingId": "csf_cb768807562e6677b320f39d",
+          "path": "findings/tac-kcs-r23-cand-050-task-jsonl-unbounded-records/tac-kcs-r23-cand-050-task-jsonl-unbounded-records.md",
+          "claim": "KCS-R23-CAND-050 reports Oversized task JSONL records allocate before validation."
+        },
+        {
+          "claimType": "observed",
+          "sourceKind": "finding",
+          "findingId": "csf_0bb5d5b0eb85dce01e614c27",
+          "path": "findings/tac-kcs-r23-cand-057-raw-hash-unbounded-scan/tac-kcs-r23-cand-057-raw-hash-unbounded-scan.md",
+          "claim": "KCS-R23-CAND-057 reports Raw-hash working-tree resolution reads every direct child without bounds."
+        }
+      ],
+      "desiredInvariants": [
+        "Every mapped centralize bounds before untrusted work is materialized decision is enforced at the final trusted boundary.",
+        "Persisted or provider-supplied state is rejected unless it is rebound to current scope, size, policy, and provenance."
+      ],
+      "proposalPath": "proposals/bounded-input-work.md",
+      "options": [
+        {
+          "optionId": "local-guards",
+          "title": "strengthen local guards",
+          "kind": "baseline",
+          "summary": "Keep the current component layout and add missing checks at each affected call site.",
+          "diagramPaths": {
+            "before": "diagrams/bounded-input-work-before.mmd",
+            "after": "diagrams/bounded-input-work-local-guards-after.mmd"
+          },
+          "findingCoverage": [
+            {
+              "findingId": "csf_033bd1d61f101472ee6f71ab",
+              "effect": "addresses",
+              "tacticalFixRequired": true,
+              "rationale": "The option must still verify this candidate-specific regression during rollout."
+            },
+            {
+              "findingId": "csf_644e5ddaf7fedf7c28dc53a0",
+              "effect": "addresses",
+              "tacticalFixRequired": true,
+              "rationale": "The option must still verify this candidate-specific regression during rollout."
+            },
+            {
+              "findingId": "csf_b523844fcaa61bbfd11eb4f1",
+              "effect": "addresses",
+              "tacticalFixRequired": true,
+              "rationale": "The option must still verify this candidate-specific regression during rollout."
+            },
+            {
+              "findingId": "csf_fde5f3380185c08f4a9418ac",
+              "effect": "addresses",
+              "tacticalFixRequired": true,
+              "rationale": "The option must still verify this candidate-specific regression during rollout."
+            },
+            {
+              "findingId": "csf_f85926a297d5b96957e676eb",
+              "effect": "addresses",
+              "tacticalFixRequired": true,
+              "rationale": "The option must still verify this candidate-specific regression during rollout."
+            },
+            {
+              "findingId": "csf_a23733c512c7df9b437b468f",
+              "effect": "addresses",
+              "tacticalFixRequired": true,
+              "rationale": "The option must still verify this candidate-specific regression during rollout."
+            },
+            {
+              "findingId": "csf_c7c8d3e89019f39735bf6842",
+              "effect": "addresses",
+              "tacticalFixRequired": true,
+              "rationale": "The option must still verify this candidate-specific regression during rollout."
+            },
+            {
+              "findingId": "csf_224a6b7b118c1be7f03bc549",
+              "effect": "addresses",
+              "tacticalFixRequired": true,
+              "rationale": "The option must still verify this candidate-specific regression during rollout."
+            },
+            {
+              "findingId": "csf_7fe98abd01cc7244e36ced70",
+              "effect": "addresses",
+              "tacticalFixRequired": true,
+              "rationale": "The option must still verify this candidate-specific regression during rollout."
+            },
+            {
+              "findingId": "csf_8470a0059545557e5723abb1",
+              "effect": "addresses",
+              "tacticalFixRequired": true,
+              "rationale": "The option must still verify this candidate-specific regression during rollout."
+            },
+            {
+              "findingId": "csf_2447fa8869fc7ee8bbd6b8d4",
+              "effect": "addresses",
+              "tacticalFixRequired": true,
+              "rationale": "The option must still verify this candidate-specific regression during rollout."
+            },
+            {
+              "findingId": "csf_f5ce2265c67607d344593bcd",
+              "effect": "addresses",
+              "tacticalFixRequired": true,
+              "rationale": "The option must still verify this candidate-specific regression during rollout."
+            },
+            {
+              "findingId": "csf_cb768807562e6677b320f39d",
+              "effect": "addresses",
+              "tacticalFixRequired": true,
+              "rationale": "The option must still verify this candidate-specific regression during rollout."
+            },
+            {
+              "findingId": "csf_0bb5d5b0eb85dce01e614c27",
+              "effect": "addresses",
+              "tacticalFixRequired": true,
+              "rationale": "The option must still verify this candidate-specific regression during rollout."
+            }
+          ],
+          "tradeoffs": [
+            {
+              "dimension": "security",
+              "direction": "improves",
+              "confidence": "medium",
+              "basis": "source-derived",
+              "assessment": "The baseline improves security only where the patched call sites are covered; future drift remains possible because enforcement is still distributed.",
+              "validationPlan": "Compare representative KCS workloads before and after the selected option and verify the mapped PoCs for security-relevant regressions."
+            },
+            {
+              "dimension": "performance",
+              "direction": "neutral",
+              "confidence": "medium",
+              "basis": "source-derived",
+              "assessment": "The baseline improves performance only where the patched call sites are covered; future drift remains possible because enforcement is still distributed.",
+              "validationPlan": "Compare representative KCS workloads before and after the selected option and verify the mapped PoCs for performance-relevant regressions."
+            },
+            {
+              "dimension": "memory",
+              "direction": "neutral",
+              "confidence": "medium",
+              "basis": "source-derived",
+              "assessment": "The baseline improves memory only where the patched call sites are covered; future drift remains possible because enforcement is still distributed.",
+              "validationPlan": "Compare representative KCS workloads before and after the selected option and verify the mapped PoCs for memory-relevant regressions."
+            },
+            {
+              "dimension": "reliability",
+              "direction": "improves",
+              "confidence": "medium",
+              "basis": "source-derived",
+              "assessment": "The baseline improves reliability only where the patched call sites are covered; future drift remains possible because enforcement is still distributed.",
+              "validationPlan": "Compare representative KCS workloads before and after the selected option and verify the mapped PoCs for reliability-relevant regressions."
+            },
+            {
+              "dimension": "operability",
+              "direction": "neutral",
+              "confidence": "medium",
+              "basis": "source-derived",
+              "assessment": "The baseline improves operability only where the patched call sites are covered; future drift remains possible because enforcement is still distributed.",
+              "validationPlan": "Compare representative KCS workloads before and after the selected option and verify the mapped PoCs for operability-relevant regressions."
+            },
+            {
+              "dimension": "migration",
+              "direction": "improves",
+              "confidence": "medium",
+              "basis": "source-derived",
+              "assessment": "The baseline improves migration only where the patched call sites are covered; future drift remains possible because enforcement is still distributed.",
+              "validationPlan": "Compare representative KCS workloads before and after the selected option and verify the mapped PoCs for migration-relevant regressions."
+            }
+          ],
+          "residualRisks": [
+            "A tactical patch can miss a sibling path."
+          ],
+          "implementationReadiness": {
+            "affectedComponents": [
+              "crates/kcs-adapter/src/catalog.rs",
+              "crates/kcs-adapter/src/deterministic.rs",
+              "crates/kcs-adapter/src/gemini_embedding.rs",
+              "crates/kcs-adapter/src/mistral_ocr.rs",
+              "crates/kcs-cli/src/main.rs",
+              "crates/kcs-core/src/cas.rs",
+              "crates/kcs-core/src/scope.rs",
+              "crates/kcs-pipeline/src/prepare.rs",
+              "crates/kcs-pipeline/src/scan.rs",
+              "crates/kcs-pipeline/src/task.rs"
+            ],
+            "workPackages": [
+              "Add focused regression tests for every mapped candidate.",
+              "Introduce the selected guard or boundary without changing repository behavior for valid inputs.",
+              "Record metrics for rejection, latency, and memory where relevant."
+            ],
+            "acceptanceCriteria": [
+              "All mapped candidate PoCs fail safely or pass fixed-invariant assertions.",
+              "Valid repository workflows remain compatible."
+            ],
+            "migrationNotes": [
+              "Ship tactical fixes before relying on the structural migration."
+            ],
+            "rollback": "Revert the selected boundary change while keeping candidate-specific regression tests."
+          }
+        },
+        {
+          "optionId": "owned-boundary",
+          "title": "move the invariant behind an owned boundary",
+          "kind": "structural",
+          "summary": "Introduce a shared typed boundary that owns validation, rebinding, and rejection before the trusted operation.",
+          "diagramPaths": {
+            "before": "diagrams/bounded-input-work-before.mmd",
+            "after": "diagrams/bounded-input-work-owned-boundary-after.mmd"
+          },
+          "findingCoverage": [
+            {
+              "findingId": "csf_033bd1d61f101472ee6f71ab",
+              "effect": "addresses",
+              "tacticalFixRequired": true,
+              "rationale": "The option must still verify this candidate-specific regression during rollout."
+            },
+            {
+              "findingId": "csf_644e5ddaf7fedf7c28dc53a0",
+              "effect": "addresses",
+              "tacticalFixRequired": true,
+              "rationale": "The option must still verify this candidate-specific regression during rollout."
+            },
+            {
+              "findingId": "csf_b523844fcaa61bbfd11eb4f1",
+              "effect": "addresses",
+              "tacticalFixRequired": true,
+              "rationale": "The option must still verify this candidate-specific regression during rollout."
+            },
+            {
+              "findingId": "csf_fde5f3380185c08f4a9418ac",
+              "effect": "addresses",
+              "tacticalFixRequired": true,
+              "rationale": "The option must still verify this candidate-specific regression during rollout."
+            },
+            {
+              "findingId": "csf_f85926a297d5b96957e676eb",
+              "effect": "addresses",
+              "tacticalFixRequired": true,
+              "rationale": "The option must still verify this candidate-specific regression during rollout."
+            },
+            {
+              "findingId": "csf_a23733c512c7df9b437b468f",
+              "effect": "addresses",
+              "tacticalFixRequired": true,
+              "rationale": "The option must still verify this candidate-specific regression during rollout."
+            },
+            {
+              "findingId": "csf_c7c8d3e89019f39735bf6842",
+              "effect": "addresses",
+              "tacticalFixRequired": true,
+              "rationale": "The option must still verify this candidate-specific regression during rollout."
+            },
+            {
+              "findingId": "csf_224a6b7b118c1be7f03bc549",
+              "effect": "addresses",
+              "tacticalFixRequired": true,
+              "rationale": "The option must still verify this candidate-specific regression during rollout."
+            },
+            {
+              "findingId": "csf_7fe98abd01cc7244e36ced70",
+              "effect": "addresses",
+              "tacticalFixRequired": true,
+              "rationale": "The option must still verify this candidate-specific regression during rollout."
+            },
+            {
+              "findingId": "csf_8470a0059545557e5723abb1",
+              "effect": "addresses",
+              "tacticalFixRequired": true,
+              "rationale": "The option must still verify this candidate-specific regression during rollout."
+            },
+            {
+              "findingId": "csf_2447fa8869fc7ee8bbd6b8d4",
+              "effect": "addresses",
+              "tacticalFixRequired": true,
+              "rationale": "The option must still verify this candidate-specific regression during rollout."
+            },
+            {
+              "findingId": "csf_f5ce2265c67607d344593bcd",
+              "effect": "addresses",
+              "tacticalFixRequired": true,
+              "rationale": "The option must still verify this candidate-specific regression during rollout."
+            },
+            {
+              "findingId": "csf_cb768807562e6677b320f39d",
+              "effect": "addresses",
+              "tacticalFixRequired": true,
+              "rationale": "The option must still verify this candidate-specific regression during rollout."
+            },
+            {
+              "findingId": "csf_0bb5d5b0eb85dce01e614c27",
+              "effect": "addresses",
+              "tacticalFixRequired": true,
+              "rationale": "The option must still verify this candidate-specific regression during rollout."
+            }
+          ],
+          "tradeoffs": [
+            {
+              "dimension": "security",
+              "direction": "improves",
+              "confidence": "medium",
+              "basis": "source-derived",
+              "assessment": "The owned boundary improves security by centralizing the invariant, while adding integration and rollout cost that should be measured before broad adoption.",
+              "validationPlan": "Compare representative KCS workloads before and after the selected option and verify the mapped PoCs for security-relevant regressions."
+            },
+            {
+              "dimension": "performance",
+              "direction": "regresses",
+              "confidence": "medium",
+              "basis": "source-derived",
+              "assessment": "The owned boundary improves performance by centralizing the invariant, while adding integration and rollout cost that should be measured before broad adoption.",
+              "validationPlan": "Compare representative KCS workloads before and after the selected option and verify the mapped PoCs for performance-relevant regressions."
+            },
+            {
+              "dimension": "memory",
+              "direction": "neutral",
+              "confidence": "medium",
+              "basis": "source-derived",
+              "assessment": "The owned boundary improves memory by centralizing the invariant, while adding integration and rollout cost that should be measured before broad adoption.",
+              "validationPlan": "Compare representative KCS workloads before and after the selected option and verify the mapped PoCs for memory-relevant regressions."
+            },
+            {
+              "dimension": "reliability",
+              "direction": "improves",
+              "confidence": "medium",
+              "basis": "source-derived",
+              "assessment": "The owned boundary improves reliability by centralizing the invariant, while adding integration and rollout cost that should be measured before broad adoption.",
+              "validationPlan": "Compare representative KCS workloads before and after the selected option and verify the mapped PoCs for reliability-relevant regressions."
+            },
+            {
+              "dimension": "operability",
+              "direction": "regresses",
+              "confidence": "medium",
+              "basis": "source-derived",
+              "assessment": "The owned boundary improves operability by centralizing the invariant, while adding integration and rollout cost that should be measured before broad adoption.",
+              "validationPlan": "Compare representative KCS workloads before and after the selected option and verify the mapped PoCs for operability-relevant regressions."
+            },
+            {
+              "dimension": "migration",
+              "direction": "regresses",
+              "confidence": "medium",
+              "basis": "source-derived",
+              "assessment": "The owned boundary improves migration by centralizing the invariant, while adding integration and rollout cost that should be measured before broad adoption.",
+              "validationPlan": "Compare representative KCS workloads before and after the selected option and verify the mapped PoCs for migration-relevant regressions."
+            }
+          ],
+          "residualRisks": [
+            "The new boundary can become a privileged dependency and needs clear ownership."
+          ],
+          "implementationReadiness": {
+            "affectedComponents": [
+              "crates/kcs-adapter/src/catalog.rs",
+              "crates/kcs-adapter/src/deterministic.rs",
+              "crates/kcs-adapter/src/gemini_embedding.rs",
+              "crates/kcs-adapter/src/mistral_ocr.rs",
+              "crates/kcs-cli/src/main.rs",
+              "crates/kcs-core/src/cas.rs",
+              "crates/kcs-core/src/scope.rs",
+              "crates/kcs-pipeline/src/prepare.rs",
+              "crates/kcs-pipeline/src/scan.rs",
+              "crates/kcs-pipeline/src/task.rs"
+            ],
+            "workPackages": [
+              "Add focused regression tests for every mapped candidate.",
+              "Introduce the selected guard or boundary without changing repository behavior for valid inputs.",
+              "Record metrics for rejection, latency, and memory where relevant."
+            ],
+            "acceptanceCriteria": [
+              "All mapped candidate PoCs fail safely or pass fixed-invariant assertions.",
+              "Valid repository workflows remain compatible."
+            ],
+            "migrationNotes": [
+              "Ship tactical fixes before relying on the structural migration."
+            ],
+            "rollback": "Revert the selected boundary change while keeping candidate-specific regression tests."
+          }
+        }
+      ],
+      "recommendedOptionId": "owned-boundary",
+      "recommendation": "I recommend the owned-boundary option when the team can absorb a medium-term migration; use local guards first for urgent exposure reduction."
+    },
+    {
+      "opportunityId": "content-scope-binding",
+      "title": "Bind content identity to final scope and provenance",
+      "summary": "Path, CAS, raw-hash, manifest, and evidence-pointer findings share a recurring gap between the object that was authorized and the object later consumed.",
+      "diagnosis": "Path, CAS, raw-hash, manifest, and evidence-pointer findings share a recurring gap between the object that was authorized and the object later consumed.",
+      "evidence": [
+        {
+          "claimType": "observed",
+          "sourceKind": "finding",
+          "findingId": "csf_d1aba3e1d81daf00e3e4f56b",
+          "path": "findings/tac-kcs-r23-cand-069-inline-raw-hash-json-disclosure/tac-kcs-r23-cand-069-inline-raw-hash-json-disclosure.md",
+          "claim": "KCS-R23-CAND-069 reports Inline EvidencePointer raw_hash escapes tombstone storage and discloses arbitrary JSON files."
+        },
+        {
+          "claimType": "observed",
+          "sourceKind": "finding",
+          "findingId": "csf_4f30c830e0f86daa76683123",
+          "path": "findings/tac-kcs-r23-cand-005-unicode-question-glob-bypass/tac-kcs-r23-cand-005-unicode-question-glob-bypass.md",
+          "claim": "KCS-R23-CAND-005 reports byte-oriented question-mark globs bypass Unicode names."
+        },
+        {
+          "claimType": "observed",
+          "sourceKind": "finding",
+          "findingId": "csf_58bc59573c4da85eea403dff",
+          "path": "findings/tac-kcs-r23-cand-008-symlinked-kcs-cross-scope-store/tac-kcs-r23-cand-008-symlinked-kcs-cross-scope-store.md",
+          "claim": "KCS-R23-CAND-008 reports A symlinked `.kcs` binds one working root to another scope's live store."
+        },
+        {
+          "claimType": "observed",
+          "sourceKind": "finding",
+          "findingId": "csf_cd141f8d3413d6f548d8f581",
+          "path": "findings/tac-kcs-r23-cand-024-permissive-existing-store/tac-kcs-r23-cand-024-permissive-existing-store.md",
+          "claim": "KCS-R23-CAND-024 reports Opening an existing permissive `.kcs` exposes future private archive bytes."
+        },
+        {
+          "claimType": "observed",
+          "sourceKind": "finding",
+          "findingId": "csf_54db74483017fde021082ec6",
+          "path": "findings/forgeable-store-consent/forgeable-store-consent.md",
+          "claim": "KCS-R23-CAND-025 reports Store-local consent records are forgeable or replayable across preseeded or copied scopes."
+        },
+        {
+          "claimType": "observed",
+          "sourceKind": "finding",
+          "findingId": "csf_cf6c09b87bde9bade93bf9a8",
+          "path": "findings/tac-kcs-r23-cand-027-scan-time-replacement-outside-scope/tac-kcs-r23-cand-027-scan-time-replacement-outside-scope.md",
+          "claim": "KCS-R23-CAND-027 reports Scan-time replacement can authorize an outside-scope file under a benign name."
+        },
+        {
+          "claimType": "observed",
+          "sourceKind": "finding",
+          "findingId": "csf_6fc687d01bf8b11b6df17b0d",
+          "path": "findings/ocr-final-hash-reopen/ocr-final-hash-reopen.md",
+          "claim": "KCS-R23-CAND-028 reports Mistral OCR reopens the path after the final hash check and sends unbound bytes."
+        },
+        {
+          "claimType": "observed",
+          "sourceKind": "finding",
+          "findingId": "csf_27e471397d93d2b6f7ba9dec",
+          "path": "findings/tac-kcs-r23-cand-047-output-ref-cross-scope/tac-kcs-r23-cand-047-output-ref-cross-scope.md",
+          "claim": "KCS-R23-CAND-047 reports Persisted task output_ref can escape the scope."
+        },
+        {
+          "claimType": "observed",
+          "sourceKind": "finding",
+          "findingId": "csf_96a20dc19c3f614845362545",
+          "path": "findings/manifest-unit-ref-traversal/manifest-unit-ref-traversal.md",
+          "claim": "KCS-R23-CAND-049 reports Persisted manifest unit_ref can escape its normalized-instance directory."
+        },
+        {
+          "claimType": "observed",
+          "sourceKind": "finding",
+          "findingId": "csf_9ae0a1852cdfffc7937a56d5",
+          "path": "findings/tac-kcs-r23-cand-061-normalized-unit-provenance-rebinding/tac-kcs-r23-cand-061-normalized-unit-provenance-rebinding.md",
+          "claim": "KCS-R23-CAND-061 reports normalized manifests and unit objects are not rebound to the requested provenance tuple."
+        },
+        {
+          "claimType": "observed",
+          "sourceKind": "finding",
+          "findingId": "csf_358a0ea54252951d65861512",
+          "path": "findings/tac-kcs-r23-cand-067-persisted-ocr-ignore-bypass/tac-kcs-r23-cand-067-persisted-ocr-ignore-bypass.md",
+          "claim": "KCS-R23-CAND-067 reports Persisted OCR tasks bypass current ignore authorization."
+        },
+        {
+          "claimType": "observed",
+          "sourceKind": "finding",
+          "findingId": "csf_f348090779cb86163da2a8fc",
+          "path": "findings/tac-kcs-r23-cand-018-snapshot-symlink-race/tac-kcs-r23-cand-018-snapshot-symlink-race.md",
+          "claim": "KCS-R23-CAND-018 reports Snapshot's regular-file check can be raced into archiving an outside-scope symlink target."
+        },
+        {
+          "claimType": "observed",
+          "sourceKind": "finding",
+          "findingId": "csf_07ed30f00ad59d26ad23de08",
+          "path": "findings/tac-kcs-r23-cand-029-normalization-raw-hash-misbinding/tac-kcs-r23-cand-029-normalization-raw-hash-misbinding.md",
+          "claim": "KCS-R23-CAND-029 reports Deterministic normalization persists a later path read under the earlier raw hash."
+        },
+        {
+          "claimType": "observed",
+          "sourceKind": "finding",
+          "findingId": "csf_6927dfa75b13740520d8892e",
+          "path": "findings/tac-kcs-r23-cand-030-pdf-repeated-path-reopen/tac-kcs-r23-cand-030-pdf-repeated-path-reopen.md",
+          "claim": "KCS-R23-CAND-030 reports Deterministic PDF normalization repeatedly reopens an unbound pathname."
+        },
+        {
+          "claimType": "observed",
+          "sourceKind": "finding",
+          "findingId": "csf_0cf770e78d30c4bbb44dce9b",
+          "path": "findings/tac-kcs-r23-cand-031-prepare-cas-identity-misbinding/tac-kcs-r23-cand-031-prepare-cas-identity-misbinding.md",
+          "claim": "KCS-R23-CAND-031 reports Prepare-stage reopen can poison prepared CAS identity."
+        },
+        {
+          "claimType": "observed",
+          "sourceKind": "finding",
+          "findingId": "csf_f64b86ad50ede6ff0d6ece65",
+          "path": "findings/tac-kcs-r23-cand-041-closing-snapshot-secret-toctou/tac-kcs-r23-cand-041-closing-snapshot-secret-toctou.md",
+          "claim": "KCS-R23-CAND-041 reports closing snapshot can ingest a newly introduced Tier-A secret."
+        },
+        {
+          "claimType": "observed",
+          "sourceKind": "finding",
+          "findingId": "csf_df88f4b52440691a87b22e87",
+          "path": "findings/tac-kcs-r23-cand-042-stale-normalize-ref/tac-kcs-r23-cand-042-stale-normalize-ref.md",
+          "claim": "KCS-R23-CAND-042 reports closing snapshot can attach normalization metadata to different bytes."
+        },
+        {
+          "claimType": "observed",
+          "sourceKind": "finding",
+          "findingId": "csf_59898a579c539a5c36ecd09d",
+          "path": "findings/tac-kcs-r23-cand-043-cas-preexisting-corrupt-slot/tac-kcs-r23-cand-043-cas-preexisting-corrupt-slot.md",
+          "claim": "KCS-R23-CAND-043 reports CAS write accepts a pre-existing corrupt destination as success."
+        }
+      ],
+      "desiredInvariants": [
+        "Every mapped bind content identity to final scope and provenance decision is enforced at the final trusted boundary.",
+        "Persisted or provider-supplied state is rejected unless it is rebound to current scope, size, policy, and provenance."
+      ],
+      "proposalPath": "proposals/content-scope-binding.md",
+      "options": [
+        {
+          "optionId": "local-guards",
+          "title": "strengthen local guards",
+          "kind": "baseline",
+          "summary": "Keep the current component layout and add missing checks at each affected call site.",
+          "diagramPaths": {
+            "before": "diagrams/content-scope-binding-before.mmd",
+            "after": "diagrams/content-scope-binding-local-guards-after.mmd"
+          },
+          "findingCoverage": [
+            {
+              "findingId": "csf_d1aba3e1d81daf00e3e4f56b",
+              "effect": "addresses",
+              "tacticalFixRequired": true,
+              "rationale": "The option must still verify this candidate-specific regression during rollout."
+            },
+            {
+              "findingId": "csf_4f30c830e0f86daa76683123",
+              "effect": "addresses",
+              "tacticalFixRequired": true,
+              "rationale": "The option must still verify this candidate-specific regression during rollout."
+            },
+            {
+              "findingId": "csf_58bc59573c4da85eea403dff",
+              "effect": "addresses",
+              "tacticalFixRequired": true,
+              "rationale": "The option must still verify this candidate-specific regression during rollout."
+            },
+            {
+              "findingId": "csf_cd141f8d3413d6f548d8f581",
+              "effect": "addresses",
+              "tacticalFixRequired": true,
+              "rationale": "The option must still verify this candidate-specific regression during rollout."
+            },
+            {
+              "findingId": "csf_54db74483017fde021082ec6",
+              "effect": "addresses",
+              "tacticalFixRequired": true,
+              "rationale": "The option must still verify this candidate-specific regression during rollout."
+            },
+            {
+              "findingId": "csf_cf6c09b87bde9bade93bf9a8",
+              "effect": "addresses",
+              "tacticalFixRequired": true,
+              "rationale": "The option must still verify this candidate-specific regression during rollout."
+            },
+            {
+              "findingId": "csf_6fc687d01bf8b11b6df17b0d",
+              "effect": "addresses",
+              "tacticalFixRequired": true,
+              "rationale": "The option must still verify this candidate-specific regression during rollout."
+            },
+            {
+              "findingId": "csf_27e471397d93d2b6f7ba9dec",
+              "effect": "addresses",
+              "tacticalFixRequired": true,
+              "rationale": "The option must still verify this candidate-specific regression during rollout."
+            },
+            {
+              "findingId": "csf_96a20dc19c3f614845362545",
+              "effect": "addresses",
+              "tacticalFixRequired": true,
+              "rationale": "The option must still verify this candidate-specific regression during rollout."
+            },
+            {
+              "findingId": "csf_9ae0a1852cdfffc7937a56d5",
+              "effect": "addresses",
+              "tacticalFixRequired": true,
+              "rationale": "The option must still verify this candidate-specific regression during rollout."
+            },
+            {
+              "findingId": "csf_358a0ea54252951d65861512",
+              "effect": "addresses",
+              "tacticalFixRequired": true,
+              "rationale": "The option must still verify this candidate-specific regression during rollout."
+            },
+            {
+              "findingId": "csf_f348090779cb86163da2a8fc",
+              "effect": "addresses",
+              "tacticalFixRequired": true,
+              "rationale": "The option must still verify this candidate-specific regression during rollout."
+            },
+            {
+              "findingId": "csf_07ed30f00ad59d26ad23de08",
+              "effect": "addresses",
+              "tacticalFixRequired": true,
+              "rationale": "The option must still verify this candidate-specific regression during rollout."
+            },
+            {
+              "findingId": "csf_6927dfa75b13740520d8892e",
+              "effect": "addresses",
+              "tacticalFixRequired": true,
+              "rationale": "The option must still verify this candidate-specific regression during rollout."
+            },
+            {
+              "findingId": "csf_0cf770e78d30c4bbb44dce9b",
+              "effect": "addresses",
+              "tacticalFixRequired": true,
+              "rationale": "The option must still verify this candidate-specific regression during rollout."
+            },
+            {
+              "findingId": "csf_f64b86ad50ede6ff0d6ece65",
+              "effect": "addresses",
+              "tacticalFixRequired": true,
+              "rationale": "The option must still verify this candidate-specific regression during rollout."
+            },
+            {
+              "findingId": "csf_df88f4b52440691a87b22e87",
+              "effect": "addresses",
+              "tacticalFixRequired": true,
+              "rationale": "The option must still verify this candidate-specific regression during rollout."
+            },
+            {
+              "findingId": "csf_59898a579c539a5c36ecd09d",
+              "effect": "addresses",
+              "tacticalFixRequired": true,
+              "rationale": "The option must still verify this candidate-specific regression during rollout."
+            }
+          ],
+          "tradeoffs": [
+            {
+              "dimension": "security",
+              "direction": "improves",
+              "confidence": "medium",
+              "basis": "source-derived",
+              "assessment": "The baseline improves security only where the patched call sites are covered; future drift remains possible because enforcement is still distributed.",
+              "validationPlan": "Compare representative KCS workloads before and after the selected option and verify the mapped PoCs for security-relevant regressions."
+            },
+            {
+              "dimension": "performance",
+              "direction": "neutral",
+              "confidence": "medium",
+              "basis": "source-derived",
+              "assessment": "The baseline improves performance only where the patched call sites are covered; future drift remains possible because enforcement is still distributed.",
+              "validationPlan": "Compare representative KCS workloads before and after the selected option and verify the mapped PoCs for performance-relevant regressions."
+            },
+            {
+              "dimension": "memory",
+              "direction": "neutral",
+              "confidence": "medium",
+              "basis": "source-derived",
+              "assessment": "The baseline improves memory only where the patched call sites are covered; future drift remains possible because enforcement is still distributed.",
+              "validationPlan": "Compare representative KCS workloads before and after the selected option and verify the mapped PoCs for memory-relevant regressions."
+            },
+            {
+              "dimension": "reliability",
+              "direction": "improves",
+              "confidence": "medium",
+              "basis": "source-derived",
+              "assessment": "The baseline improves reliability only where the patched call sites are covered; future drift remains possible because enforcement is still distributed.",
+              "validationPlan": "Compare representative KCS workloads before and after the selected option and verify the mapped PoCs for reliability-relevant regressions."
+            },
+            {
+              "dimension": "operability",
+              "direction": "neutral",
+              "confidence": "medium",
+              "basis": "source-derived",
+              "assessment": "The baseline improves operability only where the patched call sites are covered; future drift remains possible because enforcement is still distributed.",
+              "validationPlan": "Compare representative KCS workloads before and after the selected option and verify the mapped PoCs for operability-relevant regressions."
+            },
+            {
+              "dimension": "migration",
+              "direction": "improves",
+              "confidence": "medium",
+              "basis": "source-derived",
+              "assessment": "The baseline improves migration only where the patched call sites are covered; future drift remains possible because enforcement is still distributed.",
+              "validationPlan": "Compare representative KCS workloads before and after the selected option and verify the mapped PoCs for migration-relevant regressions."
+            }
+          ],
+          "residualRisks": [
+            "A tactical patch can miss a sibling path."
+          ],
+          "implementationReadiness": {
+            "affectedComponents": [
+              "crates/kcs-adapter/src/catalog.rs",
+              "crates/kcs-adapter/src/deterministic.rs",
+              "crates/kcs-cli/src/main.rs",
+              "crates/kcs-core/src/cas.rs",
+              "crates/kcs-core/src/scope.rs",
+              "crates/kcs-index/src/chunking.rs",
+              "crates/kcs-pipeline/src/markdownize.rs",
+              "crates/kcs-pipeline/src/prepare.rs",
+              "crates/kcs-pipeline/src/scan.rs",
+              "crates/kcs-pipeline/src/task.rs",
+              "crates/kcs-search/src/evidence.rs"
+            ],
+            "workPackages": [
+              "Add focused regression tests for every mapped candidate.",
+              "Introduce the selected guard or boundary without changing repository behavior for valid inputs.",
+              "Record metrics for rejection, latency, and memory where relevant."
+            ],
+            "acceptanceCriteria": [
+              "All mapped candidate PoCs fail safely or pass fixed-invariant assertions.",
+              "Valid repository workflows remain compatible."
+            ],
+            "migrationNotes": [
+              "Ship tactical fixes before relying on the structural migration."
+            ],
+            "rollback": "Revert the selected boundary change while keeping candidate-specific regression tests."
+          }
+        },
+        {
+          "optionId": "owned-boundary",
+          "title": "move the invariant behind an owned boundary",
+          "kind": "structural",
+          "summary": "Introduce a shared typed boundary that owns validation, rebinding, and rejection before the trusted operation.",
+          "diagramPaths": {
+            "before": "diagrams/content-scope-binding-before.mmd",
+            "after": "diagrams/content-scope-binding-owned-boundary-after.mmd"
+          },
+          "findingCoverage": [
+            {
+              "findingId": "csf_d1aba3e1d81daf00e3e4f56b",
+              "effect": "addresses",
+              "tacticalFixRequired": true,
+              "rationale": "The option must still verify this candidate-specific regression during rollout."
+            },
+            {
+              "findingId": "csf_4f30c830e0f86daa76683123",
+              "effect": "addresses",
+              "tacticalFixRequired": true,
+              "rationale": "The option must still verify this candidate-specific regression during rollout."
+            },
+            {
+              "findingId": "csf_58bc59573c4da85eea403dff",
+              "effect": "addresses",
+              "tacticalFixRequired": true,
+              "rationale": "The option must still verify this candidate-specific regression during rollout."
+            },
+            {
+              "findingId": "csf_cd141f8d3413d6f548d8f581",
+              "effect": "addresses",
+              "tacticalFixRequired": true,
+              "rationale": "The option must still verify this candidate-specific regression during rollout."
+            },
+            {
+              "findingId": "csf_54db74483017fde021082ec6",
+              "effect": "addresses",
+              "tacticalFixRequired": true,
+              "rationale": "The option must still verify this candidate-specific regression during rollout."
+            },
+            {
+              "findingId": "csf_cf6c09b87bde9bade93bf9a8",
+              "effect": "addresses",
+              "tacticalFixRequired": true,
+              "rationale": "The option must still verify this candidate-specific regression during rollout."
+            },
+            {
+              "findingId": "csf_6fc687d01bf8b11b6df17b0d",
+              "effect": "addresses",
+              "tacticalFixRequired": true,
+              "rationale": "The option must still verify this candidate-specific regression during rollout."
+            },
+            {
+              "findingId": "csf_27e471397d93d2b6f7ba9dec",
+              "effect": "addresses",
+              "tacticalFixRequired": true,
+              "rationale": "The option must still verify this candidate-specific regression during rollout."
+            },
+            {
+              "findingId": "csf_96a20dc19c3f614845362545",
+              "effect": "addresses",
+              "tacticalFixRequired": true,
+              "rationale": "The option must still verify this candidate-specific regression during rollout."
+            },
+            {
+              "findingId": "csf_9ae0a1852cdfffc7937a56d5",
+              "effect": "addresses",
+              "tacticalFixRequired": true,
+              "rationale": "The option must still verify this candidate-specific regression during rollout."
+            },
+            {
+              "findingId": "csf_358a0ea54252951d65861512",
+              "effect": "addresses",
+              "tacticalFixRequired": true,
+              "rationale": "The option must still verify this candidate-specific regression during rollout."
+            },
+            {
+              "findingId": "csf_f348090779cb86163da2a8fc",
+              "effect": "addresses",
+              "tacticalFixRequired": true,
+              "rationale": "The option must still verify this candidate-specific regression during rollout."
+            },
+            {
+              "findingId": "csf_07ed30f00ad59d26ad23de08",
+              "effect": "addresses",
+              "tacticalFixRequired": true,
+              "rationale": "The option must still verify this candidate-specific regression during rollout."
+            },
+            {
+              "findingId": "csf_6927dfa75b13740520d8892e",
+              "effect": "addresses",
+              "tacticalFixRequired": true,
+              "rationale": "The option must still verify this candidate-specific regression during rollout."
+            },
+            {
+              "findingId": "csf_0cf770e78d30c4bbb44dce9b",
+              "effect": "addresses",
+              "tacticalFixRequired": true,
+              "rationale": "The option must still verify this candidate-specific regression during rollout."
+            },
+            {
+              "findingId": "csf_f64b86ad50ede6ff0d6ece65",
+              "effect": "addresses",
+              "tacticalFixRequired": true,
+              "rationale": "The option must still verify this candidate-specific regression during rollout."
+            },
+            {
+              "findingId": "csf_df88f4b52440691a87b22e87",
+              "effect": "addresses",
+              "tacticalFixRequired": true,
+              "rationale": "The option must still verify this candidate-specific regression during rollout."
+            },
+            {
+              "findingId": "csf_59898a579c539a5c36ecd09d",
+              "effect": "addresses",
+              "tacticalFixRequired": true,
+              "rationale": "The option must still verify this candidate-specific regression during rollout."
+            }
+          ],
+          "tradeoffs": [
+            {
+              "dimension": "security",
+              "direction": "improves",
+              "confidence": "medium",
+              "basis": "source-derived",
+              "assessment": "The owned boundary improves security by centralizing the invariant, while adding integration and rollout cost that should be measured before broad adoption.",
+              "validationPlan": "Compare representative KCS workloads before and after the selected option and verify the mapped PoCs for security-relevant regressions."
+            },
+            {
+              "dimension": "performance",
+              "direction": "regresses",
+              "confidence": "medium",
+              "basis": "source-derived",
+              "assessment": "The owned boundary improves performance by centralizing the invariant, while adding integration and rollout cost that should be measured before broad adoption.",
+              "validationPlan": "Compare representative KCS workloads before and after the selected option and verify the mapped PoCs for performance-relevant regressions."
+            },
+            {
+              "dimension": "memory",
+              "direction": "neutral",
+              "confidence": "medium",
+              "basis": "source-derived",
+              "assessment": "The owned boundary improves memory by centralizing the invariant, while adding integration and rollout cost that should be measured before broad adoption.",
+              "validationPlan": "Compare representative KCS workloads before and after the selected option and verify the mapped PoCs for memory-relevant regressions."
+            },
+            {
+              "dimension": "reliability",
+              "direction": "improves",
+              "confidence": "medium",
+              "basis": "source-derived",
+              "assessment": "The owned boundary improves reliability by centralizing the invariant, while adding integration and rollout cost that should be measured before broad adoption.",
+              "validationPlan": "Compare representative KCS workloads before and after the selected option and verify the mapped PoCs for reliability-relevant regressions."
+            },
+            {
+              "dimension": "operability",
+              "direction": "regresses",
+              "confidence": "medium",
+              "basis": "source-derived",
+              "assessment": "The owned boundary improves operability by centralizing the invariant, while adding integration and rollout cost that should be measured before broad adoption.",
+              "validationPlan": "Compare representative KCS workloads before and after the selected option and verify the mapped PoCs for operability-relevant regressions."
+            },
+            {
+              "dimension": "migration",
+              "direction": "regresses",
+              "confidence": "medium",
+              "basis": "source-derived",
+              "assessment": "The owned boundary improves migration by centralizing the invariant, while adding integration and rollout cost that should be measured before broad adoption.",
+              "validationPlan": "Compare representative KCS workloads before and after the selected option and verify the mapped PoCs for migration-relevant regressions."
+            }
+          ],
+          "residualRisks": [
+            "The new boundary can become a privileged dependency and needs clear ownership."
+          ],
+          "implementationReadiness": {
+            "affectedComponents": [
+              "crates/kcs-adapter/src/catalog.rs",
+              "crates/kcs-adapter/src/deterministic.rs",
+              "crates/kcs-cli/src/main.rs",
+              "crates/kcs-core/src/cas.rs",
+              "crates/kcs-core/src/scope.rs",
+              "crates/kcs-index/src/chunking.rs",
+              "crates/kcs-pipeline/src/markdownize.rs",
+              "crates/kcs-pipeline/src/prepare.rs",
+              "crates/kcs-pipeline/src/scan.rs",
+              "crates/kcs-pipeline/src/task.rs",
+              "crates/kcs-search/src/evidence.rs"
+            ],
+            "workPackages": [
+              "Add focused regression tests for every mapped candidate.",
+              "Introduce the selected guard or boundary without changing repository behavior for valid inputs.",
+              "Record metrics for rejection, latency, and memory where relevant."
+            ],
+            "acceptanceCriteria": [
+              "All mapped candidate PoCs fail safely or pass fixed-invariant assertions.",
+              "Valid repository workflows remain compatible."
+            ],
+            "migrationNotes": [
+              "Ship tactical fixes before relying on the structural migration."
+            ],
+            "rollback": "Revert the selected boundary change while keeping candidate-specific regression tests."
+          }
+        }
+      ],
+      "recommendedOptionId": "owned-boundary",
+      "recommendation": "I recommend the owned-boundary option when the team can absorb a medium-term migration; use local guards first for urgent exposure reduction."
+    },
+    {
+      "opportunityId": "adapter-capability-policy",
+      "title": "Run adapters through scoped capabilities and policy-preserving targets",
+      "summary": "External OCR and embedding adapters can lose target policy, retain credentials across redirects, or accept provider-shaped data without a narrow capability boundary.",
+      "diagnosis": "External OCR and embedding adapters can lose target policy, retain credentials across redirects, or accept provider-shaped data without a narrow capability boundary.",
+      "evidence": [
+        {
+          "claimType": "observed",
+          "sourceKind": "finding",
+          "findingId": "csf_d986aa07a68c7bb5802a8462",
+          "path": "findings/tac-kcs-r23-cand-003-gemini-invalid-vector/tac-kcs-r23-cand-003-gemini-invalid-vector.md",
+          "claim": "KCS-R23-CAND-003 reports Gemini vectors lack numeric-domain and positive-norm validation."
+        },
+        {
+          "claimType": "observed",
+          "sourceKind": "finding",
+          "findingId": "csf_ff67ea930a58fa5da514bc0c",
+          "path": "findings/tac-kcs-r23-cand-038-markdown-target-discarded-mistral-execution/tac-kcs-r23-cand-038-markdown-target-discarded-mistral-execution.md",
+          "claim": "KCS-R23-CAND-038 reports Accepted markdown adapter targets are discarded before fixed Mistral execution."
+        },
+        {
+          "claimType": "observed",
+          "sourceKind": "finding",
+          "findingId": "csf_f68df52f8b574b8eb3c9e4c8",
+          "path": "findings/tac-kcs-r23-cand-039-embedding-target-discarded-gemini/tac-kcs-r23-cand-039-embedding-target-discarded-gemini.md",
+          "claim": "KCS-R23-CAND-039 reports Accepted embedding adapter targets are discarded before fixed Gemini execution."
+        },
+        {
+          "claimType": "observed",
+          "sourceKind": "finding",
+          "findingId": "csf_abcff1a3f198845afc1461be",
+          "path": "findings/tac-kcs-r23-cand-040-gemini-redirect-key-retention/tac-kcs-r23-cand-040-gemini-redirect-key-retention.md",
+          "claim": "KCS-R23-CAND-040 reports Gemini API keys are retained across cross-origin redirects."
+        },
+        {
+          "claimType": "observed",
+          "sourceKind": "finding",
+          "findingId": "csf_d95c49c0fc187b5163711d5e",
+          "path": "findings/tac-kcs-r23-cand-051-duplicate-ocr-page-index-misbinding/tac-kcs-r23-cand-051-duplicate-ocr-page-index-misbinding.md",
+          "claim": "KCS-R23-CAND-051 reports Duplicate OCR page indices bind one provider page to multiple evidence units."
+        },
+        {
+          "claimType": "observed",
+          "sourceKind": "finding",
+          "findingId": "csf_f65217744f5218f56bfd93b2",
+          "path": "findings/tac-kcs-r23-cand-064-batch-tool-lock-bypass/tac-kcs-r23-cand-064-batch-tool-lock-bypass.md",
+          "claim": "KCS-R23-CAND-064 reports Batch recovery bypasses repository tool-lock validation."
+        }
+      ],
+      "desiredInvariants": [
+        "Every mapped run adapters through scoped capabilities and policy-preserving targets decision is enforced at the final trusted boundary.",
+        "Persisted or provider-supplied state is rejected unless it is rebound to current scope, size, policy, and provenance."
+      ],
+      "proposalPath": "proposals/adapter-capability-policy.md",
+      "options": [
+        {
+          "optionId": "local-guards",
+          "title": "strengthen local guards",
+          "kind": "baseline",
+          "summary": "Keep the current component layout and add missing checks at each affected call site.",
+          "diagramPaths": {
+            "before": "diagrams/adapter-capability-policy-before.mmd",
+            "after": "diagrams/adapter-capability-policy-local-guards-after.mmd"
+          },
+          "findingCoverage": [
+            {
+              "findingId": "csf_d986aa07a68c7bb5802a8462",
+              "effect": "addresses",
+              "tacticalFixRequired": true,
+              "rationale": "The option must still verify this candidate-specific regression during rollout."
+            },
+            {
+              "findingId": "csf_ff67ea930a58fa5da514bc0c",
+              "effect": "addresses",
+              "tacticalFixRequired": true,
+              "rationale": "The option must still verify this candidate-specific regression during rollout."
+            },
+            {
+              "findingId": "csf_f68df52f8b574b8eb3c9e4c8",
+              "effect": "addresses",
+              "tacticalFixRequired": true,
+              "rationale": "The option must still verify this candidate-specific regression during rollout."
+            },
+            {
+              "findingId": "csf_abcff1a3f198845afc1461be",
+              "effect": "addresses",
+              "tacticalFixRequired": true,
+              "rationale": "The option must still verify this candidate-specific regression during rollout."
+            },
+            {
+              "findingId": "csf_d95c49c0fc187b5163711d5e",
+              "effect": "addresses",
+              "tacticalFixRequired": true,
+              "rationale": "The option must still verify this candidate-specific regression during rollout."
+            },
+            {
+              "findingId": "csf_f65217744f5218f56bfd93b2",
+              "effect": "addresses",
+              "tacticalFixRequired": true,
+              "rationale": "The option must still verify this candidate-specific regression during rollout."
+            }
+          ],
+          "tradeoffs": [
+            {
+              "dimension": "security",
+              "direction": "improves",
+              "confidence": "medium",
+              "basis": "source-derived",
+              "assessment": "The baseline improves security only where the patched call sites are covered; future drift remains possible because enforcement is still distributed.",
+              "validationPlan": "Compare representative KCS workloads before and after the selected option and verify the mapped PoCs for security-relevant regressions."
+            },
+            {
+              "dimension": "performance",
+              "direction": "neutral",
+              "confidence": "medium",
+              "basis": "source-derived",
+              "assessment": "The baseline improves performance only where the patched call sites are covered; future drift remains possible because enforcement is still distributed.",
+              "validationPlan": "Compare representative KCS workloads before and after the selected option and verify the mapped PoCs for performance-relevant regressions."
+            },
+            {
+              "dimension": "memory",
+              "direction": "neutral",
+              "confidence": "medium",
+              "basis": "source-derived",
+              "assessment": "The baseline improves memory only where the patched call sites are covered; future drift remains possible because enforcement is still distributed.",
+              "validationPlan": "Compare representative KCS workloads before and after the selected option and verify the mapped PoCs for memory-relevant regressions."
+            },
+            {
+              "dimension": "reliability",
+              "direction": "improves",
+              "confidence": "medium",
+              "basis": "source-derived",
+              "assessment": "The baseline improves reliability only where the patched call sites are covered; future drift remains possible because enforcement is still distributed.",
+              "validationPlan": "Compare representative KCS workloads before and after the selected option and verify the mapped PoCs for reliability-relevant regressions."
+            },
+            {
+              "dimension": "operability",
+              "direction": "neutral",
+              "confidence": "medium",
+              "basis": "source-derived",
+              "assessment": "The baseline improves operability only where the patched call sites are covered; future drift remains possible because enforcement is still distributed.",
+              "validationPlan": "Compare representative KCS workloads before and after the selected option and verify the mapped PoCs for operability-relevant regressions."
+            },
+            {
+              "dimension": "migration",
+              "direction": "improves",
+              "confidence": "medium",
+              "basis": "source-derived",
+              "assessment": "The baseline improves migration only where the patched call sites are covered; future drift remains possible because enforcement is still distributed.",
+              "validationPlan": "Compare representative KCS workloads before and after the selected option and verify the mapped PoCs for migration-relevant regressions."
+            }
+          ],
+          "residualRisks": [
+            "A tactical patch can miss a sibling path."
+          ],
+          "implementationReadiness": {
+            "affectedComponents": [
+              "Cargo.toml",
+              "crates/kcs-adapter/src/catalog.rs",
+              "crates/kcs-adapter/src/gemini_embedding.rs",
+              "crates/kcs-adapter/src/mistral_ocr.rs",
+              "crates/kcs-adapter/src/tool_lock.rs",
+              "crates/kcs-cli/src/main.rs",
+              "crates/kcs-core/src/scope.rs",
+              "crates/kcs-index/src/embedding_store.rs",
+              "crates/kcs-pipeline/src/markdownize.rs"
+            ],
+            "workPackages": [
+              "Add focused regression tests for every mapped candidate.",
+              "Introduce the selected guard or boundary without changing repository behavior for valid inputs.",
+              "Record metrics for rejection, latency, and memory where relevant."
+            ],
+            "acceptanceCriteria": [
+              "All mapped candidate PoCs fail safely or pass fixed-invariant assertions.",
+              "Valid repository workflows remain compatible."
+            ],
+            "migrationNotes": [
+              "Ship tactical fixes before relying on the structural migration."
+            ],
+            "rollback": "Revert the selected boundary change while keeping candidate-specific regression tests."
+          }
+        },
+        {
+          "optionId": "owned-boundary",
+          "title": "move the invariant behind an owned boundary",
+          "kind": "structural",
+          "summary": "Introduce a shared typed boundary that owns validation, rebinding, and rejection before the trusted operation.",
+          "diagramPaths": {
+            "before": "diagrams/adapter-capability-policy-before.mmd",
+            "after": "diagrams/adapter-capability-policy-owned-boundary-after.mmd"
+          },
+          "findingCoverage": [
+            {
+              "findingId": "csf_d986aa07a68c7bb5802a8462",
+              "effect": "addresses",
+              "tacticalFixRequired": true,
+              "rationale": "The option must still verify this candidate-specific regression during rollout."
+            },
+            {
+              "findingId": "csf_ff67ea930a58fa5da514bc0c",
+              "effect": "addresses",
+              "tacticalFixRequired": true,
+              "rationale": "The option must still verify this candidate-specific regression during rollout."
+            },
+            {
+              "findingId": "csf_f68df52f8b574b8eb3c9e4c8",
+              "effect": "addresses",
+              "tacticalFixRequired": true,
+              "rationale": "The option must still verify this candidate-specific regression during rollout."
+            },
+            {
+              "findingId": "csf_abcff1a3f198845afc1461be",
+              "effect": "addresses",
+              "tacticalFixRequired": true,
+              "rationale": "The option must still verify this candidate-specific regression during rollout."
+            },
+            {
+              "findingId": "csf_d95c49c0fc187b5163711d5e",
+              "effect": "addresses",
+              "tacticalFixRequired": true,
+              "rationale": "The option must still verify this candidate-specific regression during rollout."
+            },
+            {
+              "findingId": "csf_f65217744f5218f56bfd93b2",
+              "effect": "addresses",
+              "tacticalFixRequired": true,
+              "rationale": "The option must still verify this candidate-specific regression during rollout."
+            }
+          ],
+          "tradeoffs": [
+            {
+              "dimension": "security",
+              "direction": "improves",
+              "confidence": "medium",
+              "basis": "source-derived",
+              "assessment": "The owned boundary improves security by centralizing the invariant, while adding integration and rollout cost that should be measured before broad adoption.",
+              "validationPlan": "Compare representative KCS workloads before and after the selected option and verify the mapped PoCs for security-relevant regressions."
+            },
+            {
+              "dimension": "performance",
+              "direction": "regresses",
+              "confidence": "medium",
+              "basis": "source-derived",
+              "assessment": "The owned boundary improves performance by centralizing the invariant, while adding integration and rollout cost that should be measured before broad adoption.",
+              "validationPlan": "Compare representative KCS workloads before and after the selected option and verify the mapped PoCs for performance-relevant regressions."
+            },
+            {
+              "dimension": "memory",
+              "direction": "neutral",
+              "confidence": "medium",
+              "basis": "source-derived",
+              "assessment": "The owned boundary improves memory by centralizing the invariant, while adding integration and rollout cost that should be measured before broad adoption.",
+              "validationPlan": "Compare representative KCS workloads before and after the selected option and verify the mapped PoCs for memory-relevant regressions."
+            },
+            {
+              "dimension": "reliability",
+              "direction": "improves",
+              "confidence": "medium",
+              "basis": "source-derived",
+              "assessment": "The owned boundary improves reliability by centralizing the invariant, while adding integration and rollout cost that should be measured before broad adoption.",
+              "validationPlan": "Compare representative KCS workloads before and after the selected option and verify the mapped PoCs for reliability-relevant regressions."
+            },
+            {
+              "dimension": "operability",
+              "direction": "regresses",
+              "confidence": "medium",
+              "basis": "source-derived",
+              "assessment": "The owned boundary improves operability by centralizing the invariant, while adding integration and rollout cost that should be measured before broad adoption.",
+              "validationPlan": "Compare representative KCS workloads before and after the selected option and verify the mapped PoCs for operability-relevant regressions."
+            },
+            {
+              "dimension": "migration",
+              "direction": "regresses",
+              "confidence": "medium",
+              "basis": "source-derived",
+              "assessment": "The owned boundary improves migration by centralizing the invariant, while adding integration and rollout cost that should be measured before broad adoption.",
+              "validationPlan": "Compare representative KCS workloads before and after the selected option and verify the mapped PoCs for migration-relevant regressions."
+            }
+          ],
+          "residualRisks": [
+            "The new boundary can become a privileged dependency and needs clear ownership."
+          ],
+          "implementationReadiness": {
+            "affectedComponents": [
+              "Cargo.toml",
+              "crates/kcs-adapter/src/catalog.rs",
+              "crates/kcs-adapter/src/gemini_embedding.rs",
+              "crates/kcs-adapter/src/mistral_ocr.rs",
+              "crates/kcs-adapter/src/tool_lock.rs",
+              "crates/kcs-cli/src/main.rs",
+              "crates/kcs-core/src/scope.rs",
+              "crates/kcs-index/src/embedding_store.rs",
+              "crates/kcs-pipeline/src/markdownize.rs"
+            ],
+            "workPackages": [
+              "Add focused regression tests for every mapped candidate.",
+              "Introduce the selected guard or boundary without changing repository behavior for valid inputs.",
+              "Record metrics for rejection, latency, and memory where relevant."
+            ],
+            "acceptanceCriteria": [
+              "All mapped candidate PoCs fail safely or pass fixed-invariant assertions.",
+              "Valid repository workflows remain compatible."
+            ],
+            "migrationNotes": [
+              "Ship tactical fixes before relying on the structural migration."
+            ],
+            "rollback": "Revert the selected boundary change while keeping candidate-specific regression tests."
+          }
+        }
+      ],
+      "recommendedOptionId": "owned-boundary",
+      "recommendation": "I recommend the owned-boundary option when the team can absorb a medium-term migration; use local guards first for urgent exposure reduction."
+    },
+    {
+      "opportunityId": "durable-state-invariants",
+      "title": "Make durable workflow state transitions verifiable and replay-safe",
+      "summary": "Persisted task, budget, DAG, completion, and presentation state can be replayed or reinterpreted without a current invariant check at the transition boundary.",
+      "diagnosis": "Persisted task, budget, DAG, completion, and presentation state can be replayed or reinterpreted without a current invariant check at the transition boundary.",
+      "evidence": [
+        {
+          "claimType": "observed",
+          "sourceKind": "finding",
+          "findingId": "csf_41caf8acbf878f23020ac065",
+          "path": "findings/secret-twin-prehold-vector-link/secret-twin-prehold-vector-link.md",
+          "claim": "KCS-R23-CAND-011 reports a new secret content twin is vector-linked before its hold exists."
+        },
+        {
+          "claimType": "observed",
+          "sourceKind": "finding",
+          "findingId": "csf_8e13f1ff12b42a54509959b4",
+          "path": "findings/tac-kcs-r23-cand-013-auth-error-retry-revival/tac-kcs-r23-cand-013-auth-error-retry-revival.md",
+          "claim": "KCS-R23-CAND-013 reports Embedding reconciliation revives AuthError work during batch retry."
+        },
+        {
+          "claimType": "observed",
+          "sourceKind": "finding",
+          "findingId": "csf_d3f63b005b812956824b90ac",
+          "path": "findings/tac-kcs-r23-cand-014-unrecognized-binary-visibility/tac-kcs-r23-cand-014-unrecognized-binary-visibility.md",
+          "claim": "KCS-R23-CAND-014 reports Unrecognized binary gaps disappear from durable completeness and path telemetry."
+        },
+        {
+          "claimType": "observed",
+          "sourceKind": "finding",
+          "findingId": "csf_ba1f09d4893107da81092969",
+          "path": "findings/unvalidated-persisted-dag/unvalidated-persisted-dag.md",
+          "claim": "KCS-R23-CAND-036 reports Persisted DAG semantics are not revalidated, enabling poisoned fields and path escape."
+        },
+        {
+          "claimType": "observed",
+          "sourceKind": "finding",
+          "findingId": "csf_ca96fd4350776636ab8fd8f3",
+          "path": "findings/tac-kcs-r23-cand-048-forged-reclaim-credit/tac-kcs-r23-cand-048-forged-reclaim-credit.md",
+          "claim": "KCS-R23-CAND-048 reports unbound reservation stamps can forge budget-reclaim credits."
+        },
+        {
+          "claimType": "observed",
+          "sourceKind": "finding",
+          "findingId": "csf_3d39967b18c72313e204ba5c",
+          "path": "findings/tac-kcs-r23-cand-059-terminal-control-human-output/tac-kcs-r23-cand-059-terminal-control-human-output.md",
+          "claim": "KCS-R23-CAND-059 reports Human-readable CLI output emits untrusted terminal control sequences."
+        },
+        {
+          "claimType": "observed",
+          "sourceKind": "finding",
+          "findingId": "csf_2eece34c77173c835a163862",
+          "path": "findings/tac-kcs-r23-cand-068-embedding-identity-split/tac-kcs-r23-cand-068-embedding-identity-split.md",
+          "claim": "KCS-R23-CAND-068 reports same-batch duplicate embedding identities split authoritative and KNN vectors."
+        },
+        {
+          "claimType": "observed",
+          "sourceKind": "finding",
+          "findingId": "csf_ca349949c66fef22b1fc7ed4",
+          "path": "findings/tac-kcs-r23-cand-001-secret-hold-terminal-failure/tac-kcs-r23-cand-001-secret-hold-terminal-failure.md",
+          "claim": "KCS-R23-CAND-001 reports secret-hold cycles erase terminal embedding failure state."
+        },
+        {
+          "claimType": "observed",
+          "sourceKind": "finding",
+          "findingId": "csf_fc2b4aa0bc98a464b37e8e30",
+          "path": "findings/tac-kcs-r23-cand-012-budget-paused-content-twin-pending/tac-kcs-r23-cand-012-budget-paused-content-twin-pending.md",
+          "claim": "KCS-R23-CAND-012 reports Content-twin reuse leaves completed budget-paused tasks falsely pending."
+        }
+      ],
+      "desiredInvariants": [
+        "Every mapped make durable workflow state transitions verifiable and replay-safe decision is enforced at the final trusted boundary.",
+        "Persisted or provider-supplied state is rejected unless it is rebound to current scope, size, policy, and provenance."
+      ],
+      "proposalPath": "proposals/durable-state-invariants.md",
+      "options": [
+        {
+          "optionId": "local-guards",
+          "title": "strengthen local guards",
+          "kind": "baseline",
+          "summary": "Keep the current component layout and add missing checks at each affected call site.",
+          "diagramPaths": {
+            "before": "diagrams/durable-state-invariants-before.mmd",
+            "after": "diagrams/durable-state-invariants-local-guards-after.mmd"
+          },
+          "findingCoverage": [
+            {
+              "findingId": "csf_41caf8acbf878f23020ac065",
+              "effect": "addresses",
+              "tacticalFixRequired": true,
+              "rationale": "The option must still verify this candidate-specific regression during rollout."
+            },
+            {
+              "findingId": "csf_8e13f1ff12b42a54509959b4",
+              "effect": "addresses",
+              "tacticalFixRequired": true,
+              "rationale": "The option must still verify this candidate-specific regression during rollout."
+            },
+            {
+              "findingId": "csf_d3f63b005b812956824b90ac",
+              "effect": "addresses",
+              "tacticalFixRequired": true,
+              "rationale": "The option must still verify this candidate-specific regression during rollout."
+            },
+            {
+              "findingId": "csf_ba1f09d4893107da81092969",
+              "effect": "addresses",
+              "tacticalFixRequired": true,
+              "rationale": "The option must still verify this candidate-specific regression during rollout."
+            },
+            {
+              "findingId": "csf_ca96fd4350776636ab8fd8f3",
+              "effect": "addresses",
+              "tacticalFixRequired": true,
+              "rationale": "The option must still verify this candidate-specific regression during rollout."
+            },
+            {
+              "findingId": "csf_3d39967b18c72313e204ba5c",
+              "effect": "addresses",
+              "tacticalFixRequired": true,
+              "rationale": "The option must still verify this candidate-specific regression during rollout."
+            },
+            {
+              "findingId": "csf_2eece34c77173c835a163862",
+              "effect": "addresses",
+              "tacticalFixRequired": true,
+              "rationale": "The option must still verify this candidate-specific regression during rollout."
+            },
+            {
+              "findingId": "csf_ca349949c66fef22b1fc7ed4",
+              "effect": "addresses",
+              "tacticalFixRequired": true,
+              "rationale": "The option must still verify this candidate-specific regression during rollout."
+            },
+            {
+              "findingId": "csf_fc2b4aa0bc98a464b37e8e30",
+              "effect": "addresses",
+              "tacticalFixRequired": true,
+              "rationale": "The option must still verify this candidate-specific regression during rollout."
+            }
+          ],
+          "tradeoffs": [
+            {
+              "dimension": "security",
+              "direction": "improves",
+              "confidence": "medium",
+              "basis": "source-derived",
+              "assessment": "The baseline improves security only where the patched call sites are covered; future drift remains possible because enforcement is still distributed.",
+              "validationPlan": "Compare representative KCS workloads before and after the selected option and verify the mapped PoCs for security-relevant regressions."
+            },
+            {
+              "dimension": "performance",
+              "direction": "neutral",
+              "confidence": "medium",
+              "basis": "source-derived",
+              "assessment": "The baseline improves performance only where the patched call sites are covered; future drift remains possible because enforcement is still distributed.",
+              "validationPlan": "Compare representative KCS workloads before and after the selected option and verify the mapped PoCs for performance-relevant regressions."
+            },
+            {
+              "dimension": "memory",
+              "direction": "neutral",
+              "confidence": "medium",
+              "basis": "source-derived",
+              "assessment": "The baseline improves memory only where the patched call sites are covered; future drift remains possible because enforcement is still distributed.",
+              "validationPlan": "Compare representative KCS workloads before and after the selected option and verify the mapped PoCs for memory-relevant regressions."
+            },
+            {
+              "dimension": "reliability",
+              "direction": "improves",
+              "confidence": "medium",
+              "basis": "source-derived",
+              "assessment": "The baseline improves reliability only where the patched call sites are covered; future drift remains possible because enforcement is still distributed.",
+              "validationPlan": "Compare representative KCS workloads before and after the selected option and verify the mapped PoCs for reliability-relevant regressions."
+            },
+            {
+              "dimension": "operability",
+              "direction": "neutral",
+              "confidence": "medium",
+              "basis": "source-derived",
+              "assessment": "The baseline improves operability only where the patched call sites are covered; future drift remains possible because enforcement is still distributed.",
+              "validationPlan": "Compare representative KCS workloads before and after the selected option and verify the mapped PoCs for operability-relevant regressions."
+            },
+            {
+              "dimension": "migration",
+              "direction": "improves",
+              "confidence": "medium",
+              "basis": "source-derived",
+              "assessment": "The baseline improves migration only where the patched call sites are covered; future drift remains possible because enforcement is still distributed.",
+              "validationPlan": "Compare representative KCS workloads before and after the selected option and verify the mapped PoCs for migration-relevant regressions."
+            }
+          ],
+          "residualRisks": [
+            "A tactical patch can miss a sibling path."
+          ],
+          "implementationReadiness": {
+            "affectedComponents": [
+              "crates/kcs-cli/src/main.rs",
+              "crates/kcs-core/src/dag.rs",
+              "crates/kcs-core/src/scope.rs",
+              "crates/kcs-index/src/embedding_store.rs",
+              "crates/kcs-pipeline/src/markdownize.rs",
+              "crates/kcs-pipeline/src/task.rs"
+            ],
+            "workPackages": [
+              "Add focused regression tests for every mapped candidate.",
+              "Introduce the selected guard or boundary without changing repository behavior for valid inputs.",
+              "Record metrics for rejection, latency, and memory where relevant."
+            ],
+            "acceptanceCriteria": [
+              "All mapped candidate PoCs fail safely or pass fixed-invariant assertions.",
+              "Valid repository workflows remain compatible."
+            ],
+            "migrationNotes": [
+              "Ship tactical fixes before relying on the structural migration."
+            ],
+            "rollback": "Revert the selected boundary change while keeping candidate-specific regression tests."
+          }
+        },
+        {
+          "optionId": "owned-boundary",
+          "title": "move the invariant behind an owned boundary",
+          "kind": "structural",
+          "summary": "Introduce a shared typed boundary that owns validation, rebinding, and rejection before the trusted operation.",
+          "diagramPaths": {
+            "before": "diagrams/durable-state-invariants-before.mmd",
+            "after": "diagrams/durable-state-invariants-owned-boundary-after.mmd"
+          },
+          "findingCoverage": [
+            {
+              "findingId": "csf_41caf8acbf878f23020ac065",
+              "effect": "addresses",
+              "tacticalFixRequired": true,
+              "rationale": "The option must still verify this candidate-specific regression during rollout."
+            },
+            {
+              "findingId": "csf_8e13f1ff12b42a54509959b4",
+              "effect": "addresses",
+              "tacticalFixRequired": true,
+              "rationale": "The option must still verify this candidate-specific regression during rollout."
+            },
+            {
+              "findingId": "csf_d3f63b005b812956824b90ac",
+              "effect": "addresses",
+              "tacticalFixRequired": true,
+              "rationale": "The option must still verify this candidate-specific regression during rollout."
+            },
+            {
+              "findingId": "csf_ba1f09d4893107da81092969",
+              "effect": "addresses",
+              "tacticalFixRequired": true,
+              "rationale": "The option must still verify this candidate-specific regression during rollout."
+            },
+            {
+              "findingId": "csf_ca96fd4350776636ab8fd8f3",
+              "effect": "addresses",
+              "tacticalFixRequired": true,
+              "rationale": "The option must still verify this candidate-specific regression during rollout."
+            },
+            {
+              "findingId": "csf_3d39967b18c72313e204ba5c",
+              "effect": "addresses",
+              "tacticalFixRequired": true,
+              "rationale": "The option must still verify this candidate-specific regression during rollout."
+            },
+            {
+              "findingId": "csf_2eece34c77173c835a163862",
+              "effect": "addresses",
+              "tacticalFixRequired": true,
+              "rationale": "The option must still verify this candidate-specific regression during rollout."
+            },
+            {
+              "findingId": "csf_ca349949c66fef22b1fc7ed4",
+              "effect": "addresses",
+              "tacticalFixRequired": true,
+              "rationale": "The option must still verify this candidate-specific regression during rollout."
+            },
+            {
+              "findingId": "csf_fc2b4aa0bc98a464b37e8e30",
+              "effect": "addresses",
+              "tacticalFixRequired": true,
+              "rationale": "The option must still verify this candidate-specific regression during rollout."
+            }
+          ],
+          "tradeoffs": [
+            {
+              "dimension": "security",
+              "direction": "improves",
+              "confidence": "medium",
+              "basis": "source-derived",
+              "assessment": "The owned boundary improves security by centralizing the invariant, while adding integration and rollout cost that should be measured before broad adoption.",
+              "validationPlan": "Compare representative KCS workloads before and after the selected option and verify the mapped PoCs for security-relevant regressions."
+            },
+            {
+              "dimension": "performance",
+              "direction": "regresses",
+              "confidence": "medium",
+              "basis": "source-derived",
+              "assessment": "The owned boundary improves performance by centralizing the invariant, while adding integration and rollout cost that should be measured before broad adoption.",
+              "validationPlan": "Compare representative KCS workloads before and after the selected option and verify the mapped PoCs for performance-relevant regressions."
+            },
+            {
+              "dimension": "memory",
+              "direction": "neutral",
+              "confidence": "medium",
+              "basis": "source-derived",
+              "assessment": "The owned boundary improves memory by centralizing the invariant, while adding integration and rollout cost that should be measured before broad adoption.",
+              "validationPlan": "Compare representative KCS workloads before and after the selected option and verify the mapped PoCs for memory-relevant regressions."
+            },
+            {
+              "dimension": "reliability",
+              "direction": "improves",
+              "confidence": "medium",
+              "basis": "source-derived",
+              "assessment": "The owned boundary improves reliability by centralizing the invariant, while adding integration and rollout cost that should be measured before broad adoption.",
+              "validationPlan": "Compare representative KCS workloads before and after the selected option and verify the mapped PoCs for reliability-relevant regressions."
+            },
+            {
+              "dimension": "operability",
+              "direction": "regresses",
+              "confidence": "medium",
+              "basis": "source-derived",
+              "assessment": "The owned boundary improves operability by centralizing the invariant, while adding integration and rollout cost that should be measured before broad adoption.",
+              "validationPlan": "Compare representative KCS workloads before and after the selected option and verify the mapped PoCs for operability-relevant regressions."
+            },
+            {
+              "dimension": "migration",
+              "direction": "regresses",
+              "confidence": "medium",
+              "basis": "source-derived",
+              "assessment": "The owned boundary improves migration by centralizing the invariant, while adding integration and rollout cost that should be measured before broad adoption.",
+              "validationPlan": "Compare representative KCS workloads before and after the selected option and verify the mapped PoCs for migration-relevant regressions."
+            }
+          ],
+          "residualRisks": [
+            "The new boundary can become a privileged dependency and needs clear ownership."
+          ],
+          "implementationReadiness": {
+            "affectedComponents": [
+              "crates/kcs-cli/src/main.rs",
+              "crates/kcs-core/src/dag.rs",
+              "crates/kcs-core/src/scope.rs",
+              "crates/kcs-index/src/embedding_store.rs",
+              "crates/kcs-pipeline/src/markdownize.rs",
+              "crates/kcs-pipeline/src/task.rs"
+            ],
+            "workPackages": [
+              "Add focused regression tests for every mapped candidate.",
+              "Introduce the selected guard or boundary without changing repository behavior for valid inputs.",
+              "Record metrics for rejection, latency, and memory where relevant."
+            ],
+            "acceptanceCriteria": [
+              "All mapped candidate PoCs fail safely or pass fixed-invariant assertions.",
+              "Valid repository workflows remain compatible."
+            ],
+            "migrationNotes": [
+              "Ship tactical fixes before relying on the structural migration."
+            ],
+            "rollback": "Revert the selected boundary change while keeping candidate-specific regression tests."
+          }
+        }
+      ],
+      "recommendedOptionId": "owned-boundary",
+      "recommendation": "I recommend the owned-boundary option when the team can absorb a medium-term migration; use local guards first for urgent exposure reduction."
+    }
+  ],
+  "openQuestions": [
+    "Which opportunity should be implemented first after tactical fixes are scheduled?",
+    "What latency and memory budgets should govern owned-boundary designs?"
+  ]
+}

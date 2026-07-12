@@ -1,0 +1,233 @@
+{
+  "ruleId": "kcs.r23.cand-023",
+  "identity": {
+    "anchor": "kcs-r23-cand-023",
+    "instance": "gemini-response-bounds"
+  },
+  "title": "Gemini embedding responses lack body and read-time bounds",
+  "summary": "Gemini embedding responses are fully read, decompressed, and materialized into an unrestricted JSON value before count, numeric-type, and dimension validation. A connected remote service or intermediary can therefore block query or index work or drive substantial transient memory and CPU consumption.",
+  "severity": {
+    "level": "medium",
+    "rationale": "Remote response control is realistic and explicitly in scope once an ordinary approved operation occurs. Existing controls prevent durable bad vectors but not the availability sink; medium impact plus high likelihood maps to medium.",
+    "changeConditions": "Severity would rise if the response path can reliably create durable multi-scope outage or corrupt stored vectors; it would fall after effective deadlines and body ceilings precede JSON materialization while the existing semantic checks remain intact."
+  },
+  "confidence": {
+    "level": "high",
+    "rationale": "bounded parser/control tests+V10. Exact query/index-to-Gemini-POST-to-into_json-to-late-shape-check source trace. Cargo.lock pins ureq 2.12.1; local primary source shows connect=30s, read/write/overall=None, gzip before unbounded serde_json::from_reader. Two bounded network-free parser tests passed for normal order and wrong-dimension rejection."
+  },
+  "taxonomy": {
+    "category": "remote response resource exhaustion / missing deadline (CWE-400, CWE-770)",
+    "cwe": [
+      "CWE-400",
+      "CWE-770"
+    ]
+  },
+  "locations": [
+    {
+      "path": "crates/kcs-adapter/src/gemini_embedding.rs",
+      "startLine": 120,
+      "endLine": 149,
+      "role": "Gemini POST and full JSON materialization"
+    },
+    {
+      "path": "crates/kcs-adapter/src/gemini_embedding.rs",
+      "startLine": 153,
+      "endLine": 203,
+      "role": "post-materialization semantic checks"
+    },
+    {
+      "path": "crates/kcs-cli/src/main.rs",
+      "startLine": 7179,
+      "endLine": 7204,
+      "role": "query consumer"
+    },
+    {
+      "path": "crates/kcs-cli/src/main.rs",
+      "startLine": 7420,
+      "endLine": 7423,
+      "role": "index batch and persistence consumer"
+    },
+    {
+      "path": "crates/kcs-cli/src/main.rs",
+      "startLine": 7526,
+      "endLine": 7547,
+      "role": "index batch and persistence consumer"
+    },
+    {
+      "path": "crates/kcs-cli/src/main.rs",
+      "startLine": 7726,
+      "endLine": 7768,
+      "role": "index batch and persistence consumer"
+    },
+    {
+      "path": "crates/kcs-core/src/scope.rs",
+      "startLine": 1581,
+      "endLine": 1590,
+      "role": "unwired timeout control"
+    }
+  ],
+  "writeup": {
+    "reportPath": "findings/gemini-response-bounds/gemini-response-bounds.md"
+  },
+  "codeEvidence": [
+    {
+      "id": "embedding-wrapper",
+      "label": "Embedding execution reaches the production client",
+      "path": "crates/kcs-adapter/src/catalog.rs",
+      "startLine": 386,
+      "endLine": 401,
+      "language": "rust",
+      "role": "entrypoint",
+      "code": "pub fn run_adopted_embedding(\n    execution: AdoptedEmbeddingExecution,\n    items: Vec<EmbeddingItem>,\n    input_type: EmbeddingInputType,\n) -> Result<Vec<EmbeddingVector>> {\n    let request = EmbeddingRequest { input_type, items };\n    let response = match execution {\n        AdoptedEmbeddingExecution::Real => GeminiEmbeddingAdapter::default().embed(request),\n        other => GeminiEmbeddingAdapter::new(\n            MockAdoptedEmbeddingClient { execution: other },\n            ADOPTED_MODEL_PIN,\n            ADOPTED_DIMENSIONS,\n        )\n        .embed(request),\n    }?;\n    Ok(response.vectors)",
+      "explanation": "The adopted real execution path dispatches the request to the production `GeminiEmbeddingAdapter` and waits for its response vectors."
+    },
+    {
+      "id": "gemini-response-materialization",
+      "label": "Gemini response is fully materialized",
+      "path": "crates/kcs-adapter/src/gemini_embedding.rs",
+      "startLine": 120,
+      "endLine": 149,
+      "language": "rust",
+      "role": "root_control",
+      "code": "    fn embed(\n        &self,\n        items: &[EmbeddingItem],\n        model_pin: &str,\n        dimensions: u32,\n    ) -> Result<Vec<EmbeddingVector>> {\n        let api_key = Self::api_key()?;\n        // `:batchEmbedContents` embeds the whole batch in one request. Vertex has\n        // no batch inference, so batching is client-side (07 §5.3).\n        let requests = items\n            .iter()\n            .map(|item| {\n                json!({\n                    \"model\": format!(\"models/{model_pin}\"),\n                    \"content\": { \"parts\": [{ \"text\": item.text.clone().unwrap_or_default() }] },\n                    \"outputDimensionality\": dimensions,\n                })\n            })\n            .collect::<Vec<_>>();\n        let response: Value = ureq::post(&format!(\n            \"{}/v1beta/models/{model_pin}:batchEmbedContents\",\n            self.base_url()\n        ))\n        .set(\"x-goog-api-key\", &api_key)\n        .set(\"Content-Type\", \"application/json\")\n        .send_json(json!({ \"requests\": requests }))\n        .map_err(http_error)?\n        .into_json()\n        .map_err(|err| AdapterError::ContractViolation(err.to_string()))?;\n        parse_embeddings(&response, items, dimensions)",
+      "explanation": "The authenticated batch request feeds the entire response to unrestricted `into_json()` before any count, numeric, or dimension check."
+    },
+    {
+      "id": "late-semantic-checks",
+      "label": "Semantic checks occur after materialization",
+      "path": "crates/kcs-adapter/src/gemini_embedding.rs",
+      "startLine": 153,
+      "endLine": 203,
+      "language": "rust",
+      "role": "expected_control",
+      "code": "fn parse_embeddings(\n    response: &Value,\n    items: &[EmbeddingItem],\n    dimensions: u32,\n) -> Result<Vec<EmbeddingVector>> {\n    let embeddings = response\n        .get(\"embeddings\")\n        .and_then(Value::as_array)\n        .ok_or_else(|| {\n            AdapterError::ContractViolation(\"embedding response missing embeddings\".to_owned())\n        })?;\n    if embeddings.len() != items.len() {\n        return Err(AdapterError::ContractViolation(\n            \"embedding response count does not match request\".to_owned(),\n        ));\n    }\n    items\n        .iter()\n        .zip(embeddings)\n        .map(|(item, embedding)| {\n            let vector = embedding\n                .get(\"values\")\n                .and_then(Value::as_array)\n                .ok_or_else(|| {\n                    AdapterError::ContractViolation(\"embedding missing values\".to_owned())\n                })?\n                .iter()\n                .map(|value| value.as_f64().map(|value| value as f32))\n                .collect::<Option<Vec<f32>>>()\n                .ok_or_else(|| {\n                    AdapterError::ContractViolation(\"embedding values must be numeric\".to_owned())\n                })?;\n            // F7: the response vector must have exactly the requested\n            // `outputDimensionality`. A wrong-width vector would otherwise be\n            // persisted with the declared `dimensions` (768) but a mismatched\n            // byte length, so `link_chunk_vec` silently drops it from `chunk_vec`\n            // (permanent KNN exclusion) even though the chunk is billed and marked\n            // done, with no self-repair path. Reject it as a contract violation so\n            // the batch fails (retryable/reportable) instead of being charged.\n            if vector.len() != dimensions as usize {\n                return Err(AdapterError::ContractViolation(format!(\n                    \"embedding dimension mismatch: expected {dimensions}, got {}\",\n                    vector.len()\n                )));\n            }\n            Ok(EmbeddingVector {\n                id: item.id.clone(),\n                vector,\n            })\n        })\n        .collect()",
+      "explanation": "Count, numeric-type, and dimension validation protect accepted vector integrity, but only after the complete remote JSON tree is already in memory."
+    },
+    {
+      "id": "query-consumer",
+      "label": "Query waits for adapter completion",
+      "path": "crates/kcs-cli/src/main.rs",
+      "startLine": 7179,
+      "endLine": 7204,
+      "language": "rust",
+      "role": "outcome",
+      "code": "/// Compute the query embedding once per search (05 §1.1). Returns `None` when no\n/// adapter is configured or the query is too short to embed. A failing adapter\n/// call (auth/rate) degrades to `None` → text fallback rather than erroring the\n/// whole search. Query-embedding cost is not metered in the MVP (negligible; the\n/// budget guardrails target bulk index enrichment).\nfn compute_query_embedding(query: &str) -> Result<Option<Vec<f32>>> {\n    if query.chars().count() < 2 {\n        return Ok(None);\n    }\n    let Some(execution) = embedding_execution() else {\n        return Ok(None);\n    };\n    // O2 regression seam: mark that the query is about to be SENT to the embedding\n    // endpoint, so a test can prove `--text` never reaches this path. No-op unless\n    // the env var is set (mirrors the KCS_TEST_* adapter seams).\n    record_query_embed_trace(query);\n    let items = vec![EmbeddingItem {\n        id: \"query\".to_owned(),\n        text: Some(query.to_owned()),\n        path: None,\n        mime: None,\n    }];\n    match run_embedding_adapter(execution, items, EmbeddingInputType::Query) {\n        Ok(vectors) => Ok(vectors.into_iter().next().map(|vector| vector.vector)),\n        Err(_) => Ok(None),\n    }",
+      "explanation": "Online query embedding waits for the adapter call; errors fall back to text search only after the unbounded response operation returns or fails."
+    },
+    {
+      "id": "unwired-timeout",
+      "label": "Configured timeout is not threaded",
+      "path": "crates/kcs-core/src/scope.rs",
+      "startLine": 1581,
+      "endLine": 1591,
+      "language": "rust",
+      "role": "expected_control",
+      "code": "        // timeout_seconds: a per-adapter execution timeout is not threaded through\n        // the adapter HTTP path (it would touch every adapter's transport). Accept\n        // the documented default (300); reject any other value loudly rather than\n        // silently ignore it. (R12-2 decision: real wiring is a large change.)\n        if let Some(timeout) = policy.get(\"timeout_seconds\").and_then(Value::as_i64) {\n            if timeout != 300 {\n                return Err(KcsError::not_implemented(\n                    \"adapter.policy.timeout_seconds other than 300\",\n                ));\n            }\n        }",
+      "explanation": "The configuration path leaves adapter HTTP transports unwired, so the documented timeout does not bound a connected peer's response."
+    }
+  ],
+  "rootCause": {
+    "summary": "The production Gemini client performs unrestricted `into_json()` with no effective read/overall deadline or response-body ceiling. Semantic response checks correctly reject invalid vectors, but they execute only after the resource sink, and the configured timeout remains unwired.",
+    "evidenceRefs": [
+      "embedding-wrapper",
+      "gemini-response-materialization",
+      "late-semantic-checks",
+      "query-consumer",
+      "unwired-timeout"
+    ]
+  },
+  "remediation": "Use a shared Gemini HTTP client with configured read/write/overall deadlines and compressed/decompressed response byte ceilings before JSON materialization; retain count/dimension checks.",
+  "validation": {
+    "method": "bounded parser/control tests+V10",
+    "summary": "Exact query/index-to-Gemini-POST-to-into_json-to-late-shape-check source trace. Cargo.lock pins ureq 2.12.1; local primary source shows connect=30s, read/write/overall=None, gzip before unbounded serde_json::from_reader. Two bounded network-free parser tests passed for normal order and wrong-dimension rejection.",
+    "evidenceRefs": [
+      "embedding-wrapper",
+      "gemini-response-materialization",
+      "late-semantic-checks",
+      "query-consumer",
+      "unwired-timeout"
+    ],
+    "assertions": [
+      "Exact query/index-to-Gemini-POST-to-into_json-to-late-shape-check source trace.",
+      "Cargo.lock pins ureq 2.12.1; local primary source shows connect=30s, read/write/overall=None, gzip before unbounded serde_json::from_reader.",
+      "Two bounded network-free parser tests passed for normal order and wrong-dimension rejection."
+    ],
+    "counterevidence": [
+      "Connection establishment has a 30-second timeout and the adopted embedding model is fixed.",
+      "Query uses one item; index batches at most 32; response count, numeric JSON type, and dimension are checked.",
+      "Invalid responses are not persisted; query errors fall back to text and index errors become failed tasks; online activation/authorization is required."
+    ],
+    "limitations": [
+      "No loopback delay/body measurement was run under the read-only/no-network constraint; exact code and pinned dependency defaults make this non-material to disposition.",
+      "No loopback slow-read or oversized-body measurement was retained; exact memory and timing thresholds remain unmeasured."
+    ]
+  },
+  "attackPath": {
+    "summary": "The operator activates the Gemini embedding adapter and runs an online query or index operation. KCS sends a one-item query or at-most-32-item index batch to the configured remote service. The service, proxy, or intermediary slow-streams or returns an oversized or highly compressed JSON response. KCS fully reads, decompresses, and materializes the response before count, numeric-type, and dimension checks, allowing the remote peer to block the operation or consume substantial transient resources.",
+    "dataflow": {
+      "summary": "The operator activates the Gemini embedding adapter and runs an online query or index operation. KCS sends a one-item query or at-most-32-item index batch to the configured remote service. The service, proxy, or intermediary slow-streams or returns an oversized or highly compressed JSON response. KCS fully reads, decompresses, and materializes the response before count, numeric-type, and dimension checks, allowing the remote peer to block the operation or consume substantial transient resources.",
+      "source": "The operator activates the Gemini embedding adapter and runs an online query or index operation.",
+      "sink": "full Gemini response read, decompression, and JSON materialization before semantic validation",
+      "outcome": "one query or index batch and its KCS process per malicious response",
+      "evidenceRefs": [
+        "embedding-wrapper",
+        "gemini-response-materialization",
+        "late-semantic-checks",
+        "query-consumer",
+        "unwired-timeout"
+      ]
+    },
+    "reachability": {
+      "summary": "outbound remote embedding request after adapter activation and authorization; no public inbound endpoint",
+      "attacker": "KCS uses the victim OS identity and configured Gemini credential; the remote peer controls only response behavior",
+      "entrypoint": "The operator activates the Gemini embedding adapter and runs an online query or index operation.",
+      "preconditions": "plausible: an approved query or index call reaches a connected malicious or malfunctioning remote peer",
+      "outcome": "query/index availability and transient process memory/CPU"
+    },
+    "evidenceRefs": [
+      "embedding-wrapper",
+      "gemini-response-materialization",
+      "late-semantic-checks",
+      "query-consumer",
+      "unwired-timeout"
+    ],
+    "impact": {
+      "level": "medium",
+      "why": "Remote response control is realistic and explicitly in scope once an ordinary approved operation occurs. Existing controls prevent durable bad vectors but not the availability sink; medium impact plus high likelihood maps to medium."
+    },
+    "likelihood": {
+      "level": "high",
+      "why": "An operator-approved Gemini query or indexing request is made. The connected provider, proxy, or intermediary is faulty, compromised, or hostile."
+    },
+    "counterevidence": [
+      "Small request batches and post-parse shape checks bound accepted semantic output, not the body materialized before those checks.",
+      "No invalid vectors are persisted and a returned query error degrades to text search."
+    ],
+    "limitations": [
+      "No loopback delay/body measurement was run under the read-only/no-network constraint; exact code and pinned dependency defaults make this non-material to disposition.",
+      "No loopback slow-read or oversized-body measurement was retained; exact memory and timing thresholds remain unmeasured."
+    ]
+  },
+  "remediationTests": [
+    "Use a bounded local fake transport to verify configured deadlines and compressed/decompressed response ceilings stop slow or oversized responses.",
+    "Retain count, numeric-type, and dimension rejection tests and confirm no invalid vector is persisted after the transport bounds are added."
+  ],
+  "preventiveControls": [
+    "online activation and authorization",
+    "30-second connect timeout",
+    "fixed embedding model",
+    "request batch cap",
+    "post-materialization count, type, and dimension validation",
+    "error fallback and failed-task handling",
+    "Use a shared Gemini HTTP client with configured read/write/overall deadlines and compressed/decompressed response byte ceilings before JSON materialization; retain count/dimension checks."
+  ],
+  "provenance": {
+    "source": "Codex Security deep-scan validation, attack-path closure, and an accepted dedicated one-finding vulnerability write-up"
+  },
+  "extensions": {
+    "candidateId": "KCS-R23-CAND-023",
+    "ledgerRowId": "KCS-R23-CAND-023",
+    "reportId": "KCS-R23-023"
+  }
+}
+

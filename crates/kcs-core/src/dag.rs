@@ -1,6 +1,7 @@
 //! Snapshot DAG object types.
 
 use std::fmt;
+use std::path::{Component, Path};
 use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
@@ -38,15 +39,9 @@ impl TreeEntry {
     }
 
     pub fn validate(&self) -> Result<()> {
-        if self.path.contains('/') {
+        if !is_platform_safe_direct_child(&self.path) {
             return Err(KcsError::path(
-                "tree entry path must be a direct child file name",
-                self.path.clone(),
-            ));
-        }
-        if self.path.is_empty() {
-            return Err(KcsError::path(
-                "tree entry path is empty",
+                "tree entry path must be a platform-safe direct child file name",
                 self.path.clone(),
             ));
         }
@@ -67,28 +62,76 @@ impl TreeEntry {
     }
 }
 
+/// Preserve names valid on the current scope filesystem while rejecting every
+/// component that can escape a direct child on that platform. In particular,
+/// `:` and `\` remain legitimate Unix filename bytes, but are path/ADS syntax on
+/// Windows and are rejected there.
+fn is_platform_safe_direct_child(path: &str) -> bool {
+    if path.is_empty()
+        || path == "."
+        || path == ".."
+        || path.contains('/')
+        || Path::new(path).is_absolute()
+    {
+        return false;
+    }
+
+    #[cfg(windows)]
+    if path.contains('\\') || path.contains(':') {
+        return false;
+    }
+
+    let mut components = Path::new(path).components();
+    matches!(components.next(), Some(Component::Normal(_))) && components.next().is_none()
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TreeObject {
     pub entries: Vec<TreeEntry>,
     pub object_type: String,
 }
 
-pub fn build_tree(mut entries: Vec<TreeEntry>) -> Result<TreeObject> {
-    for entry in &entries {
-        entry.validate()?;
-    }
-
-    entries.sort_by(|a, b| a.path.as_bytes().cmp(b.path.as_bytes()));
-    for pair in entries.windows(2) {
-        if pair[0].path == pair[1].path {
-            return Err(KcsError::duplicate_path(pair[0].path.clone()));
+impl TreeObject {
+    /// Validate the semantic invariants that serde alone cannot enforce.
+    ///
+    /// Callers that deserialize persisted tree objects must invoke this before
+    /// using any entry fields. Construction through [`build_tree`] applies the
+    /// same validation after canonical sorting.
+    pub fn validate(&self) -> Result<()> {
+        if self.object_type != "tree" {
+            return Err(KcsError::schema("tree object_type must be tree"));
         }
-    }
 
-    Ok(TreeObject {
+        for entry in &self.entries {
+            entry.validate()?;
+        }
+
+        for pair in self.entries.windows(2) {
+            match pair[0].path.as_bytes().cmp(pair[1].path.as_bytes()) {
+                std::cmp::Ordering::Equal => {
+                    return Err(KcsError::duplicate_path(pair[0].path.clone()));
+                }
+                std::cmp::Ordering::Greater => {
+                    return Err(KcsError::schema(
+                        "tree entries must be sorted by path UTF-8 bytes",
+                    ));
+                }
+                std::cmp::Ordering::Less => {}
+            }
+        }
+
+        Ok(())
+    }
+}
+
+pub fn build_tree(mut entries: Vec<TreeEntry>) -> Result<TreeObject> {
+    entries.sort_by(|a, b| a.path.as_bytes().cmp(b.path.as_bytes()));
+    let tree = TreeObject {
         entries,
         object_type: "tree".to_owned(),
-    })
+    };
+    tree.validate()?;
+    Ok(tree)
 }
 
 pub fn tree_hash(tree: &TreeObject) -> Result<String> {
@@ -124,26 +167,7 @@ impl CommitObject {
         stats: CommitStats,
         commit_type: CommitType,
     ) -> Result<Self> {
-        if !is_hash(&tree) {
-            return Err(KcsError::schema("tree must be sha256 lowercase hex"));
-        }
-        if !is_hash(&tool_lock_hash) {
-            return Err(KcsError::schema(
-                "tool_lock_hash must be sha256 lowercase hex",
-            ));
-        }
-        for parent in &parents {
-            if !is_hash(parent) {
-                return Err(KcsError::schema("parent must be sha256 lowercase hex"));
-            }
-        }
-        if !is_valid_created_at(&created_at) {
-            return Err(KcsError::schema(
-                "created_at must be UTC ISO8601 YYYY-MM-DDTHH:MM:SSZ",
-            ));
-        }
-
-        Ok(Self {
+        let commit = Self {
             commit_type,
             created_at,
             message,
@@ -152,7 +176,38 @@ impl CommitObject {
             stats,
             tool_lock_hash,
             tree,
-        })
+        };
+        commit.validate()?;
+        Ok(commit)
+    }
+
+    /// Validate the semantic invariants that serde alone cannot enforce.
+    ///
+    /// This is intentionally the same validation path used by [`Self::new`]
+    /// so persisted commits and newly constructed commits cannot diverge.
+    pub fn validate(&self) -> Result<()> {
+        if self.object_type != "commit" {
+            return Err(KcsError::schema("commit object_type must be commit"));
+        }
+        if !is_hash(&self.tree) {
+            return Err(KcsError::schema("tree must be sha256 lowercase hex"));
+        }
+        if !is_hash(&self.tool_lock_hash) {
+            return Err(KcsError::schema(
+                "tool_lock_hash must be sha256 lowercase hex",
+            ));
+        }
+        for parent in &self.parents {
+            if !is_hash(parent) {
+                return Err(KcsError::schema("parent must be sha256 lowercase hex"));
+            }
+        }
+        if !is_valid_created_at(&self.created_at) {
+            return Err(KcsError::schema(
+                "created_at must be UTC ISO8601 YYYY-MM-DDTHH:MM:SSZ",
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -293,16 +348,27 @@ pub const fn protected(commit_type: CommitType) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_valid_created_at, CommitObject, CommitStats, CommitType};
+    use super::{
+        build_tree, is_valid_created_at, CommitObject, CommitStats, CommitType, TreeEntry,
+        TreeObject,
+    };
     use crate::error::Result;
+    use serde_json::json;
+
+    const RAW_HASH: &str =
+        "sha256:eca8de0abaf2a27a1ea57feff4f44385bcfb3485274e73ddfa7c47144f383e1e";
+    const OTHER_RAW_HASH: &str =
+        "sha256:9a32a740871b1dd9db1bda186dce07e8e6c60d2cd316f21683ea2bd857c16ffa";
+    const TOOL_HASH: &str =
+        "sha256:8a32a740871b1dd9db1bda186dce07e8e6c60d2cd316f21683ea2bd857c16ffb";
 
     fn commit_with_created_at(created_at: &str) -> Result<CommitObject> {
         CommitObject::new(
-            "sha256:eca8de0abaf2a27a1ea57feff4f44385bcfb3485274e73ddfa7c47144f383e1e".to_owned(),
+            RAW_HASH.to_owned(),
             Vec::new(),
             created_at.to_owned(),
             "m".to_owned(),
-            "sha256:8a32a740871b1dd9db1bda186dce07e8e6c60d2cd316f21683ea2bd857c16ffb".to_owned(),
+            TOOL_HASH.to_owned(),
             CommitStats {
                 files_added: 0,
                 files_modified: 0,
@@ -310,6 +376,10 @@ mod tests {
             },
             CommitType::Manual,
         )
+    }
+
+    fn valid_entry(path: &str, raw_hash: &str) -> TreeEntry {
+        TreeEntry::raw_file(path, raw_hash).unwrap()
     }
 
     #[test]
@@ -348,5 +418,165 @@ mod tests {
                 "commit should reject {bad:?}"
             );
         }
+    }
+
+    #[test]
+    fn semantic_tree_validation_accepts_legacy_controls() {
+        let legacy: TreeObject = serde_json::from_value(json!({
+            "object_type": "tree",
+            "entries": [{
+                "path": "notes.md",
+                "type": "file",
+                "raw_hash": RAW_HASH,
+                "normalize": { "tool_profile_hash": TOOL_HASH }
+            }]
+        }))
+        .unwrap();
+
+        assert_eq!(legacy.entries[0].normalize.as_ref().unwrap().gen, 0);
+        assert!(legacy.validate().is_ok());
+        assert!(build_tree(Vec::new()).unwrap().validate().is_ok());
+        assert!(build_tree(vec![valid_entry("raw.txt", RAW_HASH)])
+            .unwrap()
+            .validate()
+            .is_ok());
+
+        for path in [".env", "a..b", "report final.txt", "C-report.txt"] {
+            assert!(TreeEntry::raw_file(path, RAW_HASH).is_ok(), "{path:?}");
+        }
+        #[cfg(not(windows))]
+        for path in ["report:2026.md", r"a\b.md"] {
+            assert!(TreeEntry::raw_file(path, RAW_HASH).is_ok(), "{path:?}");
+        }
+    }
+
+    #[test]
+    fn semantic_tree_validation_rejects_invalid_tags_hashes_and_paths() {
+        let invalid_cases = [
+            json!({
+                "object_type": "commit",
+                "entries": []
+            }),
+            json!({
+                "object_type": "tree",
+                "entries": [{"path":"notes.md","type":"directory","raw_hash":RAW_HASH}]
+            }),
+            json!({
+                "object_type": "tree",
+                "entries": [{"path":"notes.md","type":"file","raw_hash":"not-a-hash"}]
+            }),
+            json!({
+                "object_type": "tree",
+                "entries": [{
+                    "path":"notes.md",
+                    "type":"file",
+                    "raw_hash":RAW_HASH,
+                    "normalize":{"tool_profile_hash":"../../outside","gen":0}
+                }]
+            }),
+        ];
+
+        for value in invalid_cases {
+            let tree: TreeObject = serde_json::from_value(value).unwrap();
+            assert_eq!(
+                tree.validate().unwrap_err().error_code(),
+                "KCS-E-CONFIG-SCHEMA-001"
+            );
+        }
+
+        for path in [
+            "",
+            ".",
+            "..",
+            "../outside",
+            "nested/file.txt",
+            "/etc/passwd",
+        ] {
+            let tree: TreeObject = serde_json::from_value(json!({
+                "object_type": "tree",
+                "entries": [{"path":path,"type":"file","raw_hash":RAW_HASH}]
+            }))
+            .unwrap();
+            assert_eq!(
+                tree.validate().unwrap_err().error_code(),
+                "KCS-E-STORE-PATH-001"
+            );
+        }
+
+        #[cfg(windows)]
+        for path in [
+            r"..\outside",
+            r"nested\file.txt",
+            r"\windows\system.ini",
+            "C:relative.txt",
+            r"C:\absolute.txt",
+            r"\\server\share\file.txt",
+            r"\\?\C:\file.txt",
+            "file.txt:stream",
+        ] {
+            assert!(TreeEntry::raw_file(path, RAW_HASH).is_err(), "{path:?}");
+        }
+    }
+
+    #[test]
+    fn semantic_tree_validation_rejects_unsorted_and_duplicate_entries() {
+        let unsorted = TreeObject {
+            entries: vec![
+                valid_entry("z.txt", OTHER_RAW_HASH),
+                valid_entry("a.txt", RAW_HASH),
+            ],
+            object_type: "tree".to_owned(),
+        };
+        assert_eq!(
+            unsorted.validate().unwrap_err().error_code(),
+            "KCS-E-CONFIG-SCHEMA-001"
+        );
+
+        let duplicate = TreeObject {
+            entries: vec![
+                valid_entry("same.txt", RAW_HASH),
+                valid_entry("same.txt", OTHER_RAW_HASH),
+            ],
+            object_type: "tree".to_owned(),
+        };
+        assert_eq!(
+            duplicate.validate().unwrap_err().error_code(),
+            "KCS-E-STORE-DUP-001"
+        );
+
+        let sorted = build_tree(vec![
+            valid_entry("z.txt", OTHER_RAW_HASH),
+            valid_entry("a.txt", RAW_HASH),
+        ])
+        .unwrap();
+        assert_eq!(sorted.entries[0].path, "a.txt");
+        assert!(sorted.validate().is_ok());
+    }
+
+    #[test]
+    fn semantic_commit_validation_rejects_invalid_tags_and_hashes() {
+        let mut invalid_tag = commit_with_created_at("2026-04-29T12:00:00Z").unwrap();
+        invalid_tag.object_type = "tree".to_owned();
+
+        let mut invalid_tree = commit_with_created_at("2026-04-29T12:00:00Z").unwrap();
+        invalid_tree.tree = "not-a-hash".to_owned();
+
+        let mut invalid_tool_lock = commit_with_created_at("2026-04-29T12:00:00Z").unwrap();
+        invalid_tool_lock.tool_lock_hash = "not-a-hash".to_owned();
+
+        let mut invalid_parent = commit_with_created_at("2026-04-29T12:00:00Z").unwrap();
+        invalid_parent.parents.push("not-a-hash".to_owned());
+
+        for commit in [invalid_tag, invalid_tree, invalid_tool_lock, invalid_parent] {
+            assert_eq!(
+                commit.validate().unwrap_err().error_code(),
+                "KCS-E-CONFIG-SCHEMA-001"
+            );
+        }
+
+        assert!(commit_with_created_at("2026-04-29T12:00:00.123456Z")
+            .unwrap()
+            .validate()
+            .is_ok());
     }
 }

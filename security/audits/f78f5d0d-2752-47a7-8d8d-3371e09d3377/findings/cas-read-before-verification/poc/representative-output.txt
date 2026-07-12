@@ -1,0 +1,10 @@
+{
+  "bounded_object_bytes": 65536,
+  "full_vec_retained_by_read_by_hash": true,
+  "hash_consistent": true,
+  "inspect_reported_size_bytes": 65536,
+  "malformed_hash_rejected_before_lookup": true,
+  "network_used": false,
+  "repository_reopened": true,
+  "stored_object_vec_bytes": 65536
+}

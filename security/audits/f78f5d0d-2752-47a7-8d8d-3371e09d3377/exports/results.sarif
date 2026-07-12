@@ -1,0 +1,4299 @@
+{
+  "$schema": "https://docs.oasis-open.org/sarif/sarif/v2.1.0/os/schemas/sarif-schema-2.1.0.json",
+  "runs": [
+    {
+      "automationDetails": {
+        "id": "f78f5d0d-2752-47a7-8d8d-3371e09d3377"
+      },
+      "properties": {
+        "codexSecuritySchemaVersion": "1.0",
+        "codexSecurityTargetKind": "git_revision"
+      },
+      "results": [
+        {
+          "level": "note",
+          "locations": [
+            {
+              "message": {
+                "text": "root_control"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "crates/kcs-pipeline/src/prepare.rs"
+                },
+                "region": {
+                  "endLine": 103,
+                  "startLine": 72
+                }
+              }
+            }
+          ],
+          "message": {
+            "text": "Prepare-stage reopen can poison prepared CAS identity. The saved validation and attack-path reports show that KCS accepts attacker-influenced repository, provider, or persisted state at a boundary where the final object, size, policy, or provenance is not rechecked before it is consumed."
+          },
+          "partialFingerprints": {
+            "codexSecurity/v1": "codex-security/v1:sha256:88ea28bb401706b5f5fa3fa8930fee20b2c467e3e6558a6747300d26264cdb03"
+          },
+          "properties": {
+            "candidateId": "KCS-R23-CAND-031",
+            "category": "Insufficient data integrity validation",
+            "confidence": "medium",
+            "findingId": "csf_0cf770e78d30c4bbb44dce9b",
+            "occurrenceId": "occ_011fc9cd40518fe7b629ccd9",
+            "severity": "low"
+          },
+          "relatedLocations": [
+            {
+              "id": 0,
+              "message": {
+                "text": "entrypoint_and_closest_control"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "crates/kcs-cli/src/main.rs"
+                },
+                "region": {
+                  "endLine": 9118,
+                  "startLine": 9077
+                }
+              }
+            },
+            {
+              "id": 2,
+              "message": {
+                "text": "sink"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "crates/kcs-cli/src/main.rs"
+                },
+                "region": {
+                  "endLine": 9541,
+                  "startLine": 9505
+                }
+              }
+            }
+          ],
+          "ruleId": "kcs-r23-cand-031",
+          "ruleIndex": 23
+        },
+        {
+          "level": "warning",
+          "locations": [
+            {
+              "message": {
+                "text": "rebuild-before-enrichment ordering"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "crates/kcs-cli/src/main.rs"
+                },
+                "region": {
+                  "endLine": 653,
+                  "startLine": 620
+                }
+              }
+            }
+          ],
+          "message": {
+            "text": "a new secret content twin is vector-linked before its hold exists. The saved validation and attack-path reports show that KCS accepts attacker-influenced repository, provider, or persisted state at a boundary where the final object, size, policy, or provenance is not rechecked before it is consumed."
+          },
+          "partialFingerprints": {
+            "codexSecurity/v1": "codex-security/v1:sha256:aa3d9bd5aee75bbec507f8551c6b43cd9a07928ada8ac09fc1c0ba1f54947998"
+          },
+          "properties": {
+            "candidateId": "KCS-R23-CAND-011",
+            "category": "Sensitive data exposure",
+            "confidence": "high",
+            "findingId": "csf_41caf8acbf878f23020ac065",
+            "occurrenceId": "occ_04379177501c72e72a7a4f67",
+            "severity": "medium"
+          },
+          "relatedLocations": [
+            {
+              "id": 1,
+              "message": {
+                "text": "task-derived hold denylist"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "crates/kcs-cli/src/main.rs"
+                },
+                "region": {
+                  "endLine": 3027,
+                  "startLine": 3008
+                }
+              }
+            },
+            {
+              "id": 2,
+              "message": {
+                "text": "content-twin relink"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "crates/kcs-index/src/embedding_store.rs"
+                },
+                "region": {
+                  "endLine": 185,
+                  "startLine": 149
+                }
+              }
+            },
+            {
+              "id": 3,
+              "message": {
+                "text": "already-linked filtering"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "crates/kcs-cli/src/main.rs"
+                },
+                "region": {
+                  "endLine": 7936,
+                  "startLine": 7848
+                }
+              }
+            }
+          ],
+          "ruleId": "kcs-r23-cand-011",
+          "ruleIndex": 7
+        },
+        {
+          "level": "warning",
+          "locations": [
+            {
+              "message": {
+                "text": "view_entrypoint"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "crates/kcs-cli/src/main.rs"
+                },
+                "region": {
+                  "endLine": 2835,
+                  "startLine": 2816
+                }
+              }
+            }
+          ],
+          "message": {
+            "text": "Human-readable CLI output emits untrusted terminal control sequences. The saved validation and attack-path reports show that KCS accepts attacker-influenced repository, provider, or persisted state at a boundary where the final object, size, policy, or provenance is not rechecked before it is consumed."
+          },
+          "partialFingerprints": {
+            "codexSecurity/v1": "codex-security/v1:sha256:6c4b87f046a4fffedba6f5d5d629ef3b10618cf2ba2ad7b1d2daf013fcff290d"
+          },
+          "properties": {
+            "candidateId": "KCS-R23-CAND-059",
+            "category": "Improper output encoding",
+            "confidence": "high",
+            "findingId": "csf_3d39967b18c72313e204ba5c",
+            "occurrenceId": "occ_067f71c7501786fe29ab868b",
+            "severity": "medium"
+          },
+          "relatedLocations": [
+            {
+              "id": 1,
+              "message": {
+                "text": "stored_text_source"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "crates/kcs-cli/src/main.rs"
+                },
+                "region": {
+                  "endLine": 4859,
+                  "startLine": 4823
+                }
+              }
+            },
+            {
+              "id": 2,
+              "message": {
+                "text": "human_output_sink"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "crates/kcs-cli/src/main.rs"
+                },
+                "region": {
+                  "endLine": 11176,
+                  "startLine": 11135
+                }
+              }
+            },
+            {
+              "id": 3,
+              "message": {
+                "text": "human_error_sink"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "crates/kcs-cli/src/main.rs"
+                },
+                "region": {
+                  "endLine": 11193,
+                  "startLine": 11184
+                }
+              }
+            }
+          ],
+          "ruleId": "kcs-r23-cand-059",
+          "ruleIndex": 41
+        },
+        {
+          "level": "warning",
+          "locations": [
+            {
+              "message": {
+                "text": "normal index enables raw hashing"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "crates/kcs-cli/src/main.rs"
+                },
+                "region": {
+                  "endLine": 584,
+                  "startLine": 558
+                }
+              }
+            }
+          ],
+          "message": {
+            "text": "scan hashing allocates the full file before the input-size gate. The saved validation and attack-path reports show that KCS accepts attacker-influenced repository, provider, or persisted state at a boundary where the final object, size, policy, or provenance is not rechecked before it is consumed."
+          },
+          "partialFingerprints": {
+            "codexSecurity/v1": "codex-security/v1:sha256:c4bd496fe959e27313a1bc8d3449117226bc5b1e4093c2630e765d323cd41407"
+          },
+          "properties": {
+            "candidateId": "KCS-R23-CAND-032",
+            "category": "Uncontrolled resource consumption",
+            "confidence": "high",
+            "findingId": "csf_7fe98abd01cc7244e36ced70",
+            "occurrenceId": "occ_0e4352706facf8de78955773",
+            "severity": "medium"
+          },
+          "relatedLocations": [
+            {
+              "id": 1,
+              "message": {
+                "text": "metadata length then whole-file allocation"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "crates/kcs-pipeline/src/scan.rs"
+                },
+                "region": {
+                  "endLine": 159,
+                  "startLine": 90
+                }
+              }
+            },
+            {
+              "id": 2,
+              "message": {
+                "text": "late adapter-only input gate"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "crates/kcs-cli/src/main.rs"
+                },
+                "region": {
+                  "endLine": 9070,
+                  "startLine": 9047
+                }
+              }
+            },
+            {
+              "id": 3,
+              "message": {
+                "text": "configured/default cap"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "crates/kcs-cli/src/main.rs"
+                },
+                "region": {
+                  "endLine": 4444,
+                  "startLine": 4425
+                }
+              }
+            }
+          ],
+          "ruleId": "kcs-r23-cand-032",
+          "ruleIndex": 24
+        },
+        {
+          "level": "note",
+          "locations": [
+            {
+              "message": {
+                "text": "whole_object_read_before_digest"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "crates/kcs-core/src/cas.rs"
+                },
+                "region": {
+                  "endLine": 100,
+                  "startLine": 78
+                }
+              }
+            }
+          ],
+          "message": {
+            "text": "CAS reads allocate attacker-sized objects before verification. The saved validation and attack-path reports show that KCS accepts attacker-influenced repository, provider, or persisted state at a boundary where the final object, size, policy, or provenance is not rechecked before it is consumed."
+          },
+          "partialFingerprints": {
+            "codexSecurity/v1": "codex-security/v1:sha256:5675bc40f481a5bfd55a71b6b75a63969d752ffd414f1197cae0897ec49dbf4c"
+          },
+          "properties": {
+            "candidateId": "KCS-R23-CAND-046",
+            "category": "Uncontrolled resource consumption",
+            "confidence": "medium",
+            "findingId": "csf_f5ce2265c67607d344593bcd",
+            "occurrenceId": "occ_30e59cd788e207474a22f3e7",
+            "severity": "low"
+          },
+          "relatedLocations": [
+            {
+              "id": 1,
+              "message": {
+                "text": "raw_inspect_sink"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "crates/kcs-core/src/scope.rs"
+                },
+                "region": {
+                  "endLine": 637,
+                  "startLine": 623
+                }
+              }
+            },
+            {
+              "id": 2,
+              "message": {
+                "text": "commit_tree_consumers"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "crates/kcs-core/src/scope.rs"
+                },
+                "region": {
+                  "endLine": 755,
+                  "startLine": 742
+                }
+              }
+            },
+            {
+              "id": 3,
+              "message": {
+                "text": "cli_inspect_entrypoint"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "crates/kcs-cli/src/main.rs"
+                },
+                "region": {
+                  "endLine": 530,
+                  "startLine": 513
+                }
+              }
+            }
+          ],
+          "ruleId": "kcs-r23-cand-046",
+          "ruleIndex": 34
+        },
+        {
+          "level": "warning",
+          "locations": [
+            {
+              "message": {
+                "text": "root_control"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "crates/kcs-core/src/scope.rs"
+                },
+                "region": {
+                  "endLine": 200,
+                  "startLine": 188
+                }
+              }
+            }
+          ],
+          "message": {
+            "text": "A symlinked `.kcs` binds one working root to another scope's live store. The saved validation and attack-path reports show that KCS accepts attacker-influenced repository, provider, or persisted state at a boundary where the final object, size, policy, or provenance is not rechecked before it is consumed."
+          },
+          "partialFingerprints": {
+            "codexSecurity/v1": "codex-security/v1:sha256:c4011c8303ac6345200ba1e6b374be3a6dce6f23630de33ae86c741d0522340a"
+          },
+          "properties": {
+            "candidateId": "KCS-R23-CAND-008",
+            "category": "Path and scope containment bypass",
+            "confidence": "high",
+            "findingId": "csf_58bc59573c4da85eea403dff",
+            "occurrenceId": "occ_31ff7295ab88113293c7d67f",
+            "severity": "medium"
+          },
+          "relatedLocations": [
+            {
+              "id": 0,
+              "message": {
+                "text": "entrypoint"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "crates/kcs-core/src/scope.rs"
+                },
+                "region": {
+                  "endLine": 139,
+                  "startLine": 126
+                }
+              }
+            },
+            {
+              "id": 2,
+              "message": {
+                "text": "closest_control"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "crates/kcs-core/src/scope.rs"
+                },
+                "region": {
+                  "endLine": 909,
+                  "startLine": 889
+                }
+              }
+            },
+            {
+              "id": 3,
+              "message": {
+                "text": "working_tree_source"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "crates/kcs-core/src/scope.rs"
+                },
+                "region": {
+                  "endLine": 303,
+                  "startLine": 254
+                }
+              }
+            }
+          ],
+          "ruleId": "kcs-r23-cand-008",
+          "ruleIndex": 6
+        },
+        {
+          "level": "note",
+          "locations": [
+            {
+              "message": {
+                "text": "open_control_gap"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "crates/kcs-core/src/scope.rs"
+                },
+                "region": {
+                  "endLine": 206,
+                  "startLine": 188
+                }
+              }
+            }
+          ],
+          "message": {
+            "text": "Batch recovery bypasses repository tool-lock validation. The saved validation and attack-path reports show that KCS accepts attacker-influenced repository, provider, or persisted state at a boundary where the final object, size, policy, or provenance is not rechecked before it is consumed."
+          },
+          "partialFingerprints": {
+            "codexSecurity/v1": "codex-security/v1:sha256:478848d62f50b097ffa72d1a26e96dbdc6913998c34159a969cb7fb253852c5b"
+          },
+          "properties": {
+            "candidateId": "KCS-R23-CAND-064",
+            "category": "Authorization or policy bypass",
+            "confidence": "medium",
+            "findingId": "csf_f65217744f5218f56bfd93b2",
+            "occurrenceId": "occ_332456f1a822eb44910d5a33",
+            "severity": "low"
+          },
+          "relatedLocations": [
+            {
+              "id": 1,
+              "message": {
+                "text": "batch_control_gap"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "crates/kcs-cli/src/main.rs"
+                },
+                "region": {
+                  "endLine": 5667,
+                  "startLine": 5586
+                }
+              }
+            },
+            {
+              "id": 2,
+              "message": {
+                "text": "online_execution"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "crates/kcs-cli/src/main.rs"
+                },
+                "region": {
+                  "endLine": 5968,
+                  "startLine": 5934
+                }
+              }
+            },
+            {
+              "id": 3,
+              "message": {
+                "text": "expected_control"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "crates/kcs-cli/src/main.rs"
+                },
+                "region": {
+                  "endLine": 10949,
+                  "startLine": 10942
+                }
+              }
+            }
+          ],
+          "ruleId": "kcs-r23-cand-064",
+          "ruleIndex": 43
+        },
+        {
+          "level": "warning",
+          "locations": [
+            {
+              "message": {
+                "text": "ignore source"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "crates/kcs-pipeline/src/scan.rs"
+                },
+                "region": {
+                  "endLine": 200,
+                  "startLine": 178
+                }
+              }
+            }
+          ],
+          "message": {
+            "text": "recursive star matching has exponential backtracking. The saved validation and attack-path reports show that KCS accepts attacker-influenced repository, provider, or persisted state at a boundary where the final object, size, policy, or provenance is not rechecked before it is consumed."
+          },
+          "partialFingerprints": {
+            "codexSecurity/v1": "codex-security/v1:sha256:06f9e1c42de6510a5b00a1ad0ddb60b83f791a777387e7a1c0f2990e0ee8c74d"
+          },
+          "properties": {
+            "candidateId": "KCS-R23-CAND-017",
+            "category": "Uncontrolled resource consumption",
+            "confidence": "high",
+            "findingId": "csf_fde5f3380185c08f4a9418ac",
+            "occurrenceId": "occ_33efaf2bbc3030e25885c14a",
+            "severity": "medium"
+          },
+          "relatedLocations": [
+            {
+              "id": 1,
+              "message": {
+                "text": "per-candidate dispatch"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "crates/kcs-pipeline/src/scan.rs"
+                },
+                "region": {
+                  "endLine": 159,
+                  "startLine": 90
+                }
+              }
+            },
+            {
+              "id": 2,
+              "message": {
+                "text": "recursive matcher"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "crates/kcs-pipeline/src/scan.rs"
+                },
+                "region": {
+                  "endLine": 415,
+                  "startLine": 383
+                }
+              }
+            },
+            {
+              "id": 3,
+              "message": {
+                "text": "command reachability"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "crates/kcs-cli/src/main.rs"
+                },
+                "region": {
+                  "endLine": 472,
+                  "startLine": 452
+                }
+              }
+            }
+          ],
+          "ruleId": "kcs-r23-cand-017",
+          "ruleIndex": 11
+        },
+        {
+          "level": "note",
+          "locations": [
+            {
+              "message": {
+                "text": "manual preview"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "crates/kcs-cli/src/main.rs"
+                },
+                "region": {
+                  "endLine": 472,
+                  "startLine": 456
+                }
+              }
+            }
+          ],
+          "message": {
+            "text": "closing snapshot can ingest a newly introduced Tier-A secret. The saved validation and attack-path reports show that KCS accepts attacker-influenced repository, provider, or persisted state at a boundary where the final object, size, policy, or provenance is not rechecked before it is consumed."
+          },
+          "partialFingerprints": {
+            "codexSecurity/v1": "codex-security/v1:sha256:5692f60247df5f2d183e43c92d24fed9214ae43905c52a562eb45d4a8eca9440"
+          },
+          "properties": {
+            "candidateId": "KCS-R23-CAND-041",
+            "category": "Sensitive data exposure",
+            "confidence": "medium",
+            "findingId": "csf_f64b86ad50ede6ff0d6ece65",
+            "occurrenceId": "occ_3b644ee92f5c9f33a62d356f",
+            "severity": "low"
+          },
+          "relatedLocations": [
+            {
+              "id": 1,
+              "message": {
+                "text": "index preview/closing snapshot"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "crates/kcs-cli/src/main.rs"
+                },
+                "region": {
+                  "endLine": 580,
+                  "startLine": 575
+                }
+              }
+            },
+            {
+              "id": 2,
+              "message": {
+                "text": "path-only rescan"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "crates/kcs-core/src/scope.rs"
+                },
+                "region": {
+                  "endLine": 299,
+                  "startLine": 254
+                }
+              }
+            }
+          ],
+          "ruleId": "kcs-r23-cand-041",
+          "ruleIndex": 31
+        },
+        {
+          "level": "note",
+          "locations": [
+            {
+              "message": {
+                "text": "root_control"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "crates/kcs-cli/src/main.rs"
+                },
+                "region": {
+                  "endLine": 8132,
+                  "startLine": 8088
+                }
+              }
+            }
+          ],
+          "message": {
+            "text": "Content-twin reuse leaves completed budget-paused tasks falsely pending. The saved validation and attack-path reports show that KCS accepts attacker-influenced repository, provider, or persisted state at a boundary where the final object, size, policy, or provenance is not rechecked before it is consumed."
+          },
+          "partialFingerprints": {
+            "codexSecurity/v1": "codex-security/v1:sha256:87e296df256abcb5154269b971c47d5079d81543c975cd70a5d3298ef3a4c574"
+          },
+          "properties": {
+            "candidateId": "KCS-R23-CAND-012",
+            "category": "Improper input validation",
+            "confidence": "medium",
+            "findingId": "csf_fc2b4aa0bc98a464b37e8e30",
+            "occurrenceId": "occ_401e397fcf6347a3ee6248d5",
+            "severity": "low"
+          },
+          "relatedLocations": [
+            {
+              "id": 0,
+              "message": {
+                "text": "content_reuse_projection"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "crates/kcs-index/src/embedding_store.rs"
+                },
+                "region": {
+                  "endLine": 184,
+                  "startLine": 149
+                }
+              }
+            },
+            {
+              "id": 1,
+              "message": {
+                "text": "held_only_filter"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "crates/kcs-cli/src/main.rs"
+                },
+                "region": {
+                  "endLine": 3027,
+                  "startLine": 3008
+                }
+              }
+            },
+            {
+              "id": 2,
+              "message": {
+                "text": "completion_detection"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "crates/kcs-cli/src/main.rs"
+                },
+                "region": {
+                  "endLine": 7917,
+                  "startLine": 7911
+                }
+              }
+            }
+          ],
+          "ruleId": "kcs-r23-cand-012",
+          "ruleIndex": 8
+        },
+        {
+          "level": "warning",
+          "locations": [
+            {
+              "message": {
+                "text": "task reservation fields"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "crates/kcs-pipeline/src/task.rs"
+                },
+                "region": {
+                  "endLine": 74,
+                  "startLine": 41
+                }
+              }
+            }
+          ],
+          "message": {
+            "text": "unbound reservation stamps can forge budget-reclaim credits. The saved validation and attack-path reports show that KCS accepts attacker-influenced repository, provider, or persisted state at a boundary where the final object, size, policy, or provenance is not rechecked before it is consumed."
+          },
+          "partialFingerprints": {
+            "codexSecurity/v1": "codex-security/v1:sha256:37435fa0e18ba6aa222c748e64d0c9519dfbbf9b52e991d5a2cd41d3de53f869"
+          },
+          "properties": {
+            "candidateId": "KCS-R23-CAND-048",
+            "category": "Uncontrolled resource consumption",
+            "confidence": "high",
+            "findingId": "csf_ca96fd4350776636ab8fd8f3",
+            "occurrenceId": "occ_456095957a4d48e5644893b2",
+            "severity": "medium"
+          },
+          "relatedLocations": [
+            {
+              "id": 1,
+              "message": {
+                "text": "reclaim trigger"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "crates/kcs-cli/src/main.rs"
+                },
+                "region": {
+                  "endLine": 9037,
+                  "startLine": 8987
+                }
+              }
+            },
+            {
+              "id": 2,
+              "message": {
+                "text": "credit construction"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "crates/kcs-cli/src/main.rs"
+                },
+                "region": {
+                  "endLine": 9996,
+                  "startLine": 9977
+                }
+              }
+            },
+            {
+              "id": 3,
+              "message": {
+                "text": "accounting sink"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "crates/kcs-cli/src/main.rs"
+                },
+                "region": {
+                  "endLine": 10261,
+                  "startLine": 10226
+                }
+              }
+            }
+          ],
+          "ruleId": "kcs-r23-cand-048",
+          "ruleIndex": 36
+        },
+        {
+          "level": "note",
+          "locations": [
+            {
+              "message": {
+                "text": "unverified early success"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "crates/kcs-core/src/cas.rs"
+                },
+                "region": {
+                  "endLine": 163,
+                  "startLine": 155
+                }
+              }
+            }
+          ],
+          "message": {
+            "text": "CAS write accepts a pre-existing corrupt destination as success. The saved validation and attack-path reports show that KCS accepts attacker-influenced repository, provider, or persisted state at a boundary where the final object, size, policy, or provenance is not rechecked before it is consumed."
+          },
+          "partialFingerprints": {
+            "codexSecurity/v1": "codex-security/v1:sha256:8e820ece0a9745fbafbc7e516426c323862e3c5064dcc0a640180a2b438b2eed"
+          },
+          "properties": {
+            "candidateId": "KCS-R23-CAND-043",
+            "category": "Insufficient data integrity validation",
+            "confidence": "medium",
+            "findingId": "csf_59898a579c539a5c36ecd09d",
+            "occurrenceId": "occ_4c94dda7dc5fac5055fac201",
+            "severity": "low"
+          },
+          "relatedLocations": [
+            {
+              "id": 1,
+              "message": {
+                "text": "later read verification"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "crates/kcs-core/src/cas.rs"
+                },
+                "region": {
+                  "endLine": 100,
+                  "startLine": 78
+                }
+              }
+            },
+            {
+              "id": 2,
+              "message": {
+                "text": "snapshot publication"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "crates/kcs-core/src/scope.rs"
+                },
+                "region": {
+                  "endLine": 520,
+                  "startLine": 413
+                }
+              }
+            }
+          ],
+          "ruleId": "kcs-r23-cand-043",
+          "ruleIndex": 33
+        },
+        {
+          "level": "note",
+          "locations": [
+            {
+              "message": {
+                "text": "scan-to-normalize guard"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "crates/kcs-cli/src/main.rs"
+                },
+                "region": {
+                  "endLine": 9103,
+                  "startLine": 9077
+                }
+              }
+            }
+          ],
+          "message": {
+            "text": "closing snapshot can attach normalization metadata to different bytes. The saved validation and attack-path reports show that KCS accepts attacker-influenced repository, provider, or persisted state at a boundary where the final object, size, policy, or provenance is not rechecked before it is consumed."
+          },
+          "partialFingerprints": {
+            "codexSecurity/v1": "codex-security/v1:sha256:94bf5f98f31fbac5470a705e776235e27626714a0dbaba2e1116dd0129a3073a"
+          },
+          "properties": {
+            "candidateId": "KCS-R23-CAND-042",
+            "category": "Insufficient data integrity validation",
+            "confidence": "medium",
+            "findingId": "csf_df88f4b52440691a87b22e87",
+            "occurrenceId": "occ_4cda7524830e47a07e57f648",
+            "severity": "low"
+          },
+          "relatedLocations": [
+            {
+              "id": 1,
+              "message": {
+                "text": "path-keyed normalize map"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "crates/kcs-cli/src/main.rs"
+                },
+                "region": {
+                  "endLine": 9426,
+                  "startLine": 9390
+                }
+              }
+            },
+            {
+              "id": 2,
+              "message": {
+                "text": "closing read/attach"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "crates/kcs-core/src/scope.rs"
+                },
+                "region": {
+                  "endLine": 299,
+                  "startLine": 254
+                }
+              }
+            },
+            {
+              "id": 3,
+              "message": {
+                "text": "rebuild consumer"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "crates/kcs-cli/src/main.rs"
+                },
+                "region": {
+                  "endLine": 3090,
+                  "startLine": 3045
+                }
+              }
+            }
+          ],
+          "ruleId": "kcs-r23-cand-042",
+          "ruleIndex": 32
+        },
+        {
+          "level": "warning",
+          "locations": [
+            {
+              "message": {
+                "text": "credential_source"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "crates/kcs-adapter/src/gemini_embedding.rs"
+                },
+                "region": {
+                  "endLine": 80,
+                  "startLine": 71
+                }
+              }
+            }
+          ],
+          "message": {
+            "text": "Gemini API keys are retained across cross-origin redirects. The saved validation and attack-path reports show that KCS accepts attacker-influenced repository, provider, or persisted state at a boundary where the final object, size, policy, or provenance is not rechecked before it is consumed."
+          },
+          "partialFingerprints": {
+            "codexSecurity/v1": "codex-security/v1:sha256:0ae3f2b69ef98fba4e6a9356753dd010024b1f4ceb78e7ba13fd4f3cfaef961c"
+          },
+          "properties": {
+            "candidateId": "KCS-R23-CAND-040",
+            "category": "Sensitive data exposure",
+            "confidence": "high",
+            "findingId": "csf_abcff1a3f198845afc1461be",
+            "occurrenceId": "occ_4fd6b29b45501f2c6ef68e80",
+            "severity": "medium"
+          },
+          "relatedLocations": [
+            {
+              "id": 1,
+              "message": {
+                "text": "custom_header_sink"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "crates/kcs-adapter/src/gemini_embedding.rs"
+                },
+                "region": {
+                  "endLine": 148,
+                  "startLine": 120
+                }
+              }
+            },
+            {
+              "id": 2,
+              "message": {
+                "text": "production_reachability"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "crates/kcs-adapter/src/gemini_embedding.rs"
+                },
+                "region": {
+                  "endLine": 220,
+                  "startLine": 206
+                }
+              }
+            },
+            {
+              "id": 3,
+              "message": {
+                "text": "dependency_selection"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "Cargo.toml"
+                },
+                "region": {
+                  "endLine": 29,
+                  "startLine": 17
+                }
+              }
+            }
+          ],
+          "ruleId": "kcs-r23-cand-040",
+          "ruleIndex": 30
+        },
+        {
+          "level": "warning",
+          "locations": [
+            {
+              "message": {
+                "text": "root_control"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "crates/kcs-cli/src/main.rs"
+                },
+                "region": {
+                  "endLine": 6378,
+                  "startLine": 6362
+                }
+              }
+            }
+          ],
+          "message": {
+            "text": "Store-local consent records are forgeable or replayable across preseeded or copied scopes. The saved validation and attack-path reports show that KCS accepts attacker-influenced repository, provider, or persisted state at a boundary where the final object, size, policy, or provenance is not rechecked before it is consumed."
+          },
+          "partialFingerprints": {
+            "codexSecurity/v1": "codex-security/v1:sha256:a484b684cffe7e6be2d4a3b121581a76a123e50d5304123f079a54255954792e"
+          },
+          "properties": {
+            "candidateId": "KCS-R23-CAND-025",
+            "category": "Path and scope containment bypass",
+            "confidence": "high",
+            "findingId": "csf_54db74483017fde021082ec6",
+            "occurrenceId": "occ_514c011697e3e716058d94f3",
+            "severity": "medium"
+          },
+          "relatedLocations": [
+            {
+              "id": 0,
+              "message": {
+                "text": "store_adoption"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "crates/kcs-core/src/scope.rs"
+                },
+                "region": {
+                  "endLine": 200,
+                  "startLine": 188
+                }
+              }
+            },
+            {
+              "id": 1,
+              "message": {
+                "text": "scope_validation"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "crates/kcs-core/src/scope.rs"
+                },
+                "region": {
+                  "endLine": 909,
+                  "startLine": 889
+                }
+              }
+            },
+            {
+              "id": 2,
+              "message": {
+                "text": "approval_prompt"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "crates/kcs-cli/src/main.rs"
+                },
+                "region": {
+                  "endLine": 610,
+                  "startLine": 586
+                }
+              }
+            }
+          ],
+          "ruleId": "kcs-r23-cand-025",
+          "ruleIndex": 18
+        },
+        {
+          "level": "warning",
+          "locations": [
+            {
+              "message": {
+                "text": "root_control"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "crates/kcs-pipeline/src/scan.rs"
+                },
+                "region": {
+                  "endLine": 149,
+                  "startLine": 97
+                }
+              }
+            }
+          ],
+          "message": {
+            "text": "Scan-time replacement can authorize an outside-scope file under a benign name. The saved validation and attack-path reports show that KCS accepts attacker-influenced repository, provider, or persisted state at a boundary where the final object, size, policy, or provenance is not rechecked before it is consumed."
+          },
+          "partialFingerprints": {
+            "codexSecurity/v1": "codex-security/v1:sha256:f713020a67939e2af6e3af36a1d7c0bbf18f8739a3196813234484cc33c1bc00"
+          },
+          "properties": {
+            "candidateId": "KCS-R23-CAND-027",
+            "category": "Path and scope containment bypass",
+            "confidence": "high",
+            "findingId": "csf_cf6c09b87bde9bade93bf9a8",
+            "occurrenceId": "occ_579e544d3ccee5115779b9e6",
+            "severity": "medium"
+          },
+          "relatedLocations": [
+            {
+              "id": 0,
+              "message": {
+                "text": "entrypoint"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "crates/kcs-cli/src/main.rs"
+                },
+                "region": {
+                  "endLine": 580,
+                  "startLine": 558
+                }
+              }
+            },
+            {
+              "id": 2,
+              "message": {
+                "text": "hash_acceptance"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "crates/kcs-cli/src/main.rs"
+                },
+                "region": {
+                  "endLine": 9118,
+                  "startLine": 9072
+                }
+              }
+            },
+            {
+              "id": 3,
+              "message": {
+                "text": "prepare_reopen"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "crates/kcs-pipeline/src/prepare.rs"
+                },
+                "region": {
+                  "endLine": 103,
+                  "startLine": 72
+                }
+              }
+            }
+          ],
+          "ruleId": "kcs-r23-cand-027",
+          "ruleIndex": 19
+        },
+        {
+          "level": "note",
+          "locations": [
+            {
+              "message": {
+                "text": "caller_control"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "crates/kcs-cli/src/main.rs"
+                },
+                "region": {
+                  "endLine": 9118,
+                  "startLine": 9072
+                }
+              }
+            }
+          ],
+          "message": {
+            "text": "Deterministic normalization persists a later path read under the earlier raw hash. The saved validation and attack-path reports show that KCS accepts attacker-influenced repository, provider, or persisted state at a boundary where the final object, size, policy, or provenance is not rechecked before it is consumed."
+          },
+          "partialFingerprints": {
+            "codexSecurity/v1": "codex-security/v1:sha256:879fff2e9baccfa7a0962e5d0c5ac543fc8b52d31bdb03256d973a4b28c7bdaa"
+          },
+          "properties": {
+            "candidateId": "KCS-R23-CAND-029",
+            "category": "Path and scope containment bypass",
+            "confidence": "medium",
+            "findingId": "csf_07ed30f00ad59d26ad23de08",
+            "occurrenceId": "occ_58099beee56bd8eb1e50c7e2",
+            "severity": "low"
+          },
+          "relatedLocations": [
+            {
+              "id": 1,
+              "message": {
+                "text": "prepare_reopen"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "crates/kcs-pipeline/src/prepare.rs"
+                },
+                "region": {
+                  "endLine": 103,
+                  "startLine": 72
+                }
+              }
+            },
+            {
+              "id": 2,
+              "message": {
+                "text": "path_request"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "crates/kcs-cli/src/main.rs"
+                },
+                "region": {
+                  "endLine": 9304,
+                  "startLine": 9282
+                }
+              }
+            },
+            {
+              "id": 3,
+              "message": {
+                "text": "normalization_sink"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "crates/kcs-adapter/src/deterministic.rs"
+                },
+                "region": {
+                  "endLine": 118,
+                  "startLine": 113
+                }
+              }
+            }
+          ],
+          "ruleId": "kcs-r23-cand-029",
+          "ruleIndex": 21
+        },
+        {
+          "level": "warning",
+          "locations": [
+            {
+              "message": {
+                "text": "root_control"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "crates/kcs-core/src/scope.rs"
+                },
+                "region": {
+                  "endLine": 200,
+                  "startLine": 188
+                }
+              }
+            }
+          ],
+          "message": {
+            "text": "Opening an existing permissive `.kcs` exposes future private archive bytes. The saved validation and attack-path reports show that KCS accepts attacker-influenced repository, provider, or persisted state at a boundary where the final object, size, policy, or provenance is not rechecked before it is consumed."
+          },
+          "partialFingerprints": {
+            "codexSecurity/v1": "codex-security/v1:sha256:256283cceca46a900bb2566a6696001dd15a7165b8bb649fc92dcf27b917e289"
+          },
+          "properties": {
+            "candidateId": "KCS-R23-CAND-024",
+            "category": "Improper input validation",
+            "confidence": "high",
+            "findingId": "csf_cd141f8d3413d6f548d8f581",
+            "occurrenceId": "occ_5afacfbde83b4bfbf80ece24",
+            "severity": "medium"
+          },
+          "relatedLocations": [
+            {
+              "id": 0,
+              "message": {
+                "text": "creation_control"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "crates/kcs-core/src/scope.rs"
+                },
+                "region": {
+                  "endLine": 158,
+                  "startLine": 135
+                }
+              }
+            },
+            {
+              "id": 2,
+              "message": {
+                "text": "owner_hardening"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "crates/kcs-core/src/scope.rs"
+                },
+                "region": {
+                  "endLine": 1660,
+                  "startLine": 1650
+                }
+              }
+            },
+            {
+              "id": 3,
+              "message": {
+                "text": "raw_source"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "crates/kcs-core/src/scope.rs"
+                },
+                "region": {
+                  "endLine": 303,
+                  "startLine": 254
+                }
+              }
+            }
+          ],
+          "ruleId": "kcs-r23-cand-024",
+          "ruleIndex": 17
+        },
+        {
+          "level": "warning",
+          "locations": [
+            {
+              "message": {
+                "text": "root_control"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "crates/kcs-cli/src/main.rs"
+                },
+                "region": {
+                  "endLine": 8043,
+                  "startLine": 7997
+                }
+              }
+            }
+          ],
+          "message": {
+            "text": "Embedding reconciliation revives AuthError work during batch retry. The saved validation and attack-path reports show that KCS accepts attacker-influenced repository, provider, or persisted state at a boundary where the final object, size, policy, or provenance is not rechecked before it is consumed."
+          },
+          "partialFingerprints": {
+            "codexSecurity/v1": "codex-security/v1:sha256:6fe8b2659d6b872f92ea9122f5f054f4d8f74bce08d5f4b30588a4d2dd64ef12"
+          },
+          "properties": {
+            "candidateId": "KCS-R23-CAND-013",
+            "category": "Improper input validation",
+            "confidence": "high",
+            "findingId": "csf_8e13f1ff12b42a54509959b4",
+            "occurrenceId": "occ_5ce5959f6a01c8e721755f7d",
+            "severity": "medium"
+          },
+          "relatedLocations": [
+            {
+              "id": 0,
+              "message": {
+                "text": "command_contract"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "crates/kcs-cli/src/main.rs"
+                },
+                "region": {
+                  "endLine": 5666,
+                  "startLine": 5639
+                }
+              }
+            },
+            {
+              "id": 1,
+              "message": {
+                "text": "missing_control_propagation"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "crates/kcs-cli/src/main.rs"
+                },
+                "region": {
+                  "endLine": 5967,
+                  "startLine": 5934
+                }
+              }
+            },
+            {
+              "id": 2,
+              "message": {
+                "text": "negative_control"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "crates/kcs-cli/src/main.rs"
+                },
+                "region": {
+                  "endLine": 6022,
+                  "startLine": 5992
+                }
+              }
+            }
+          ],
+          "ruleId": "kcs-r23-cand-013",
+          "ruleIndex": 9
+        },
+        {
+          "level": "warning",
+          "locations": [
+            {
+              "message": {
+                "text": "accepted_surface"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "crates/kcs-adapter/src/tool_lock.rs"
+                },
+                "region": {
+                  "endLine": 231,
+                  "startLine": 106
+                }
+              }
+            }
+          ],
+          "message": {
+            "text": "Accepted embedding adapter targets are discarded before fixed Gemini execution. The saved validation and attack-path reports show that KCS accepts attacker-influenced repository, provider, or persisted state at a boundary where the final object, size, policy, or provenance is not rechecked before it is consumed."
+          },
+          "partialFingerprints": {
+            "codexSecurity/v1": "codex-security/v1:sha256:2eea273dce5e39f11017620428552dde4df69a7c7826a5043108f440d77f5f87"
+          },
+          "properties": {
+            "candidateId": "KCS-R23-CAND-039",
+            "category": "Improper input validation",
+            "confidence": "high",
+            "findingId": "csf_f68df52f8b574b8eb3c9e4c8",
+            "occurrenceId": "occ_63029c4ac33ce3fa7ceeecad",
+            "severity": "medium"
+          },
+          "relatedLocations": [
+            {
+              "id": 1,
+              "message": {
+                "text": "lossy_projection"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "crates/kcs-adapter/src/tool_lock.rs"
+                },
+                "region": {
+                  "endLine": 428,
+                  "startLine": 376
+                }
+              }
+            },
+            {
+              "id": 2,
+              "message": {
+                "text": "auth_triggered_dispatch"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "crates/kcs-adapter/src/catalog.rs"
+                },
+                "region": {
+                  "endLine": 401,
+                  "startLine": 313
+                }
+              }
+            },
+            {
+              "id": 3,
+              "message": {
+                "text": "credential_data_sink"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "crates/kcs-adapter/src/gemini_embedding.rs"
+                },
+                "region": {
+                  "endLine": 149,
+                  "startLine": 48
+                }
+              }
+            }
+          ],
+          "ruleId": "kcs-r23-cand-039",
+          "ruleIndex": 29
+        },
+        {
+          "level": "warning",
+          "locations": [
+            {
+              "message": {
+                "text": "bbox parser"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "crates/kcs-adapter/src/mistral_ocr.rs"
+                },
+                "region": {
+                  "endLine": 463,
+                  "startLine": 434
+                }
+              }
+            }
+          ],
+          "message": {
+            "text": "OCR bounding-box arithmetic can overflow. The saved validation and attack-path reports show that KCS accepts attacker-influenced repository, provider, or persisted state at a boundary where the final object, size, policy, or provenance is not rechecked before it is consumed."
+          },
+          "partialFingerprints": {
+            "codexSecurity/v1": "codex-security/v1:sha256:8a565ec8c85fd278e83d5311106c4bc92917da712ae80b94deb0f99b644a96ad"
+          },
+          "properties": {
+            "candidateId": "KCS-R23-CAND-004",
+            "category": "Uncontrolled resource consumption",
+            "confidence": "high",
+            "findingId": "csf_033bd1d61f101472ee6f71ab",
+            "occurrenceId": "occ_74f1a6eac9618f8cd1bc309d",
+            "severity": "medium"
+          },
+          "relatedLocations": [
+            {
+              "id": 1,
+              "message": {
+                "text": "metadata sink"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "crates/kcs-adapter/src/mistral_ocr.rs"
+                },
+                "region": {
+                  "endLine": 422,
+                  "startLine": 398
+                }
+              }
+            }
+          ],
+          "ruleId": "kcs-r23-cand-004",
+          "ruleIndex": 2
+        },
+        {
+          "level": "warning",
+          "locations": [
+            {
+              "message": {
+                "text": "lexical page counter"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "crates/kcs-adapter/src/deterministic.rs"
+                },
+                "region": {
+                  "endLine": 437,
+                  "startLine": 415
+                }
+              }
+            }
+          ],
+          "message": {
+            "text": "lexical PDF page markers amplify derived work without a cardinality bound. The saved validation and attack-path reports show that KCS accepts attacker-influenced repository, provider, or persisted state at a boundary where the final object, size, policy, or provenance is not rechecked before it is consumed."
+          },
+          "partialFingerprints": {
+            "codexSecurity/v1": "codex-security/v1:sha256:15ea097ed66a1a304164ae4cffd8c932af059d63466696ed7cba44247ea0b22f"
+          },
+          "properties": {
+            "candidateId": "KCS-R23-CAND-006",
+            "category": "Uncontrolled resource consumption",
+            "confidence": "high",
+            "findingId": "csf_644e5ddaf7fedf7c28dc53a0",
+            "occurrenceId": "occ_836ad5bde2d580405eb4019e",
+            "severity": "medium"
+          },
+          "relatedLocations": [
+            {
+              "id": 1,
+              "message": {
+                "text": "page-vector expansion"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "crates/kcs-pipeline/src/prepare.rs"
+                },
+                "region": {
+                  "endLine": 349,
+                  "startLine": 315
+                }
+              }
+            },
+            {
+              "id": 2,
+              "message": {
+                "text": "unit materialization"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "crates/kcs-pipeline/src/prepare.rs"
+                },
+                "region": {
+                  "endLine": 170,
+                  "startLine": 102
+                }
+              }
+            },
+            {
+              "id": 3,
+              "message": {
+                "text": "input-size-only control"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "crates/kcs-cli/src/main.rs"
+                },
+                "region": {
+                  "endLine": 9061,
+                  "startLine": 9047
+                }
+              }
+            }
+          ],
+          "ruleId": "kcs-r23-cand-006",
+          "ruleIndex": 4
+        },
+        {
+          "level": "warning",
+          "locations": [
+            {
+              "message": {
+                "text": "Gemini POST and full JSON materialization"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "crates/kcs-adapter/src/gemini_embedding.rs"
+                },
+                "region": {
+                  "endLine": 149,
+                  "startLine": 120
+                }
+              }
+            }
+          ],
+          "message": {
+            "text": "Gemini embedding responses lack body and read-time bounds before semantic checks. The saved validation and attack-path reports show that KCS accepts attacker-influenced repository, provider, or persisted state at a boundary where the final object, size, policy, or provenance is not rechecked before it is consumed."
+          },
+          "partialFingerprints": {
+            "codexSecurity/v1": "codex-security/v1:sha256:5a911cd757deff9f33d8354099d8114a30509f1b00a91070f87b4c5265402619"
+          },
+          "properties": {
+            "candidateId": "KCS-R23-CAND-023",
+            "category": "Uncontrolled resource consumption",
+            "confidence": "high",
+            "findingId": "csf_224a6b7b118c1be7f03bc549",
+            "occurrenceId": "occ_83802e8a4d72e922ed07ff8b",
+            "severity": "medium"
+          },
+          "relatedLocations": [
+            {
+              "id": 1,
+              "message": {
+                "text": "post-materialization semantic checks"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "crates/kcs-adapter/src/gemini_embedding.rs"
+                },
+                "region": {
+                  "endLine": 203,
+                  "startLine": 153
+                }
+              }
+            },
+            {
+              "id": 2,
+              "message": {
+                "text": "query consumer"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "crates/kcs-cli/src/main.rs"
+                },
+                "region": {
+                  "endLine": 7204,
+                  "startLine": 7179
+                }
+              }
+            },
+            {
+              "id": 3,
+              "message": {
+                "text": "index batch and persistence consumer"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "crates/kcs-cli/src/main.rs"
+                },
+                "region": {
+                  "endLine": 7423,
+                  "startLine": 7420
+                }
+              }
+            }
+          ],
+          "ruleId": "kcs-r23-cand-023",
+          "ruleIndex": 16
+        },
+        {
+          "level": "warning",
+          "locations": [
+            {
+              "message": {
+                "text": "secret_control"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "crates/kcs-cli/src/main.rs"
+                },
+                "region": {
+                  "endLine": 6066,
+                  "startLine": 6050
+                }
+              }
+            }
+          ],
+          "message": {
+            "text": "Mistral OCR reopens the path after the final hash check and sends unbound bytes. The saved validation and attack-path reports show that KCS accepts attacker-influenced repository, provider, or persisted state at a boundary where the final object, size, policy, or provenance is not rechecked before it is consumed."
+          },
+          "partialFingerprints": {
+            "codexSecurity/v1": "codex-security/v1:sha256:20499ba130539d63dad39941a6453eab3c01c98f6bba18824455d35fe79a1b79"
+          },
+          "properties": {
+            "candidateId": "KCS-R23-CAND-028",
+            "category": "Uncontrolled resource consumption",
+            "confidence": "high",
+            "findingId": "csf_6fc687d01bf8b11b6df17b0d",
+            "occurrenceId": "occ_8c5a0da1979a40183ee84e4f",
+            "severity": "medium"
+          },
+          "relatedLocations": [
+            {
+              "id": 1,
+              "message": {
+                "text": "closest_control"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "crates/kcs-cli/src/main.rs"
+                },
+                "region": {
+                  "endLine": 6614,
+                  "startLine": 6533
+                }
+              }
+            },
+            {
+              "id": 2,
+              "message": {
+                "text": "path_handoff"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "crates/kcs-cli/src/main.rs"
+                },
+                "region": {
+                  "endLine": 6691,
+                  "startLine": 6615
+                }
+              }
+            },
+            {
+              "id": 3,
+              "message": {
+                "text": "request_bridge"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "crates/kcs-adapter/src/catalog.rs"
+                },
+                "region": {
+                  "endLine": 101,
+                  "startLine": 82
+                }
+              }
+            }
+          ],
+          "ruleId": "kcs-r23-cand-028",
+          "ruleIndex": 20
+        },
+        {
+          "level": "warning",
+          "locations": [
+            {
+              "message": {
+                "text": "embedding identity"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "crates/kcs-index/src/embedding_store.rs"
+                },
+                "region": {
+                  "endLine": 27,
+                  "startLine": 10
+                }
+              }
+            }
+          ],
+          "message": {
+            "text": "same-batch duplicate embedding identities split authoritative and KNN vectors. The saved validation and attack-path reports show that KCS accepts attacker-influenced repository, provider, or persisted state at a boundary where the final object, size, policy, or provenance is not rechecked before it is consumed."
+          },
+          "partialFingerprints": {
+            "codexSecurity/v1": "codex-security/v1:sha256:1f310e25f5a28b0ebc044c338dfebac2a317db36099a768276b03b80e973c204"
+          },
+          "properties": {
+            "candidateId": "KCS-R23-CAND-068",
+            "category": "Insufficient data integrity validation",
+            "confidence": "high",
+            "findingId": "csf_2eece34c77173c835a163862",
+            "occurrenceId": "occ_8c5cfb5d87f0a36195599550",
+            "severity": "medium"
+          },
+          "relatedLocations": [
+            {
+              "id": 1,
+              "message": {
+                "text": "all-read planning"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "crates/kcs-cli/src/main.rs"
+                },
+                "region": {
+                  "endLine": 7708,
+                  "startLine": 7675
+                }
+              }
+            },
+            {
+              "id": 2,
+              "message": {
+                "text": "sequential response writes"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "crates/kcs-cli/src/main.rs"
+                },
+                "region": {
+                  "endLine": 7769,
+                  "startLine": 7726
+                }
+              }
+            },
+            {
+              "id": 3,
+              "message": {
+                "text": "first-wins source and current-vector KNN"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "crates/kcs-index/src/embedding_store.rs"
+                },
+                "region": {
+                  "endLine": 145,
+                  "startLine": 86
+                }
+              }
+            }
+          ],
+          "ruleId": "kcs-r23-cand-068",
+          "ruleIndex": 45
+        },
+        {
+          "level": "warning",
+          "locations": [
+            {
+              "message": {
+                "text": "remote response parser"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "crates/kcs-adapter/src/gemini_embedding.rs"
+                },
+                "region": {
+                  "endLine": 203,
+                  "startLine": 153
+                }
+              }
+            }
+          ],
+          "message": {
+            "text": "Gemini vectors lack numeric-domain and positive-norm validation. The saved validation and attack-path reports show that KCS accepts attacker-influenced repository, provider, or persisted state at a boundary where the final object, size, policy, or provenance is not rechecked before it is consumed."
+          },
+          "partialFingerprints": {
+            "codexSecurity/v1": "codex-security/v1:sha256:1db3ebf50a7fb7636e8651d18bb99a5b228fc2eb62a00274773bc177da0ac2e5"
+          },
+          "properties": {
+            "candidateId": "KCS-R23-CAND-003",
+            "category": "Insufficient data integrity validation",
+            "confidence": "high",
+            "findingId": "csf_d986aa07a68c7bb5802a8462",
+            "occurrenceId": "occ_911ad10a8ea4ef1793ebbe94",
+            "severity": "medium"
+          },
+          "relatedLocations": [
+            {
+              "id": 1,
+              "message": {
+                "text": "persistence caller"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "crates/kcs-cli/src/main.rs"
+                },
+                "region": {
+                  "endLine": 7768,
+                  "startLine": 7727
+                }
+              }
+            },
+            {
+              "id": 2,
+              "message": {
+                "text": "vector store and KNN"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "crates/kcs-index/src/embedding_store.rs"
+                },
+                "region": {
+                  "endLine": 146,
+                  "startLine": 91
+                }
+              }
+            }
+          ],
+          "ruleId": "kcs-r23-cand-003",
+          "ruleIndex": 1
+        },
+        {
+          "level": "note",
+          "locations": [
+            {
+              "message": {
+                "text": "root_control"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "crates/kcs-core/src/scope.rs"
+                },
+                "region": {
+                  "endLine": 290,
+                  "startLine": 261
+                }
+              }
+            }
+          ],
+          "message": {
+            "text": "Snapshot's regular-file check can be raced into archiving an outside-scope symlink target. The saved validation and attack-path reports show that KCS accepts attacker-influenced repository, provider, or persisted state at a boundary where the final object, size, policy, or provenance is not rechecked before it is consumed."
+          },
+          "partialFingerprints": {
+            "codexSecurity/v1": "codex-security/v1:sha256:c255cc2f4c70b67734a4c5bfb5ad1677d1300a4ab1942b653777f6cbdb4e1910"
+          },
+          "properties": {
+            "candidateId": "KCS-R23-CAND-018",
+            "category": "Path and scope containment bypass",
+            "confidence": "medium",
+            "findingId": "csf_f348090779cb86163da2a8fc",
+            "occurrenceId": "occ_9185a595ae69e75e08598858",
+            "severity": "low"
+          },
+          "relatedLocations": [
+            {
+              "id": 0,
+              "message": {
+                "text": "entrypoint"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "crates/kcs-cli/src/main.rs"
+                },
+                "region": {
+                  "endLine": 472,
+                  "startLine": 452
+                }
+              }
+            },
+            {
+              "id": 2,
+              "message": {
+                "text": "archive_sink"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "crates/kcs-core/src/scope.rs"
+                },
+                "region": {
+                  "endLine": 299,
+                  "startLine": 290
+                }
+              }
+            },
+            {
+              "id": 3,
+              "message": {
+                "text": "cas_sink"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "crates/kcs-core/src/cas.rs"
+                },
+                "region": {
+                  "endLine": 75,
+                  "startLine": 60
+                }
+              }
+            }
+          ],
+          "ruleId": "kcs-r23-cand-018",
+          "ruleIndex": 12
+        },
+        {
+          "level": "note",
+          "locations": [
+            {
+              "message": {
+                "text": "entrypoints"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "crates/kcs-cli/src/main.rs"
+                },
+                "region": {
+                  "endLine": 2825,
+                  "startLine": 2796
+                }
+              }
+            }
+          ],
+          "message": {
+            "text": "Raw-hash working-tree resolution reads every direct child without bounds. The saved validation and attack-path reports show that KCS accepts attacker-influenced repository, provider, or persisted state at a boundary where the final object, size, policy, or provenance is not rechecked before it is consumed."
+          },
+          "partialFingerprints": {
+            "codexSecurity/v1": "codex-security/v1:sha256:0f5f977fea5106e0e06f84709e63e2ed8a59fcad66af3233cb241ba4708b4f20"
+          },
+          "properties": {
+            "candidateId": "KCS-R23-CAND-057",
+            "category": "Uncontrolled resource consumption",
+            "confidence": "medium",
+            "findingId": "csf_0bb5d5b0eb85dce01e614c27",
+            "occurrenceId": "occ_952115be7874dc2a2d3ff803",
+            "severity": "low"
+          },
+          "relatedLocations": [
+            {
+              "id": 1,
+              "message": {
+                "text": "wrapper"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "crates/kcs-cli/src/main.rs"
+                },
+                "region": {
+                  "endLine": 5007,
+                  "startLine": 4993
+                }
+              }
+            },
+            {
+              "id": 2,
+              "message": {
+                "text": "root_control_and_sink"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "crates/kcs-cli/src/main.rs"
+                },
+                "region": {
+                  "endLine": 5188,
+                  "startLine": 5165
+                }
+              }
+            }
+          ],
+          "ruleId": "kcs-r23-cand-057",
+          "ruleIndex": 40
+        },
+        {
+          "level": "error",
+          "locations": [
+            {
+              "message": {
+                "text": "root_control"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "crates/kcs-cli/src/main.rs"
+                },
+                "region": {
+                  "endLine": 4586,
+                  "startLine": 4576
+                }
+              }
+            }
+          ],
+          "message": {
+            "text": "Inline EvidencePointer raw_hash escapes tombstone storage and discloses arbitrary JSON files. The saved validation and attack-path reports show that KCS accepts attacker-influenced repository, provider, or persisted state at a boundary where the final object, size, policy, or provenance is not rechecked before it is consumed."
+          },
+          "partialFingerprints": {
+            "codexSecurity/v1": "codex-security/v1:sha256:3157e8f7b531668540c787d3ac9a3900550e5560de142b079e241d45ed0f2b0d"
+          },
+          "properties": {
+            "candidateId": "KCS-R23-CAND-069",
+            "category": "Path and scope containment bypass",
+            "confidence": "high",
+            "findingId": "csf_d1aba3e1d81daf00e3e4f56b",
+            "occurrenceId": "occ_976eb0a77b51ab7ed7afd656",
+            "severity": "high"
+          },
+          "relatedLocations": [
+            {
+              "id": 0,
+              "message": {
+                "text": "entrypoint"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "crates/kcs-search/src/evidence.rs"
+                },
+                "region": {
+                  "endLine": 30,
+                  "startLine": 9
+                }
+              }
+            },
+            {
+              "id": 2,
+              "message": {
+                "text": "reachable_branch"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "crates/kcs-cli/src/main.rs"
+                },
+                "region": {
+                  "endLine": 4784,
+                  "startLine": 4773
+                }
+              }
+            },
+            {
+              "id": 3,
+              "message": {
+                "text": "file_read_sink"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "crates/kcs-cli/src/main.rs"
+                },
+                "region": {
+                  "endLine": 5226,
+                  "startLine": 5207
+                }
+              }
+            }
+          ],
+          "ruleId": "kcs-r23-cand-069",
+          "ruleIndex": 46
+        },
+        {
+          "level": "warning",
+          "locations": [
+            {
+              "message": {
+                "text": "root_control"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "crates/kcs-core/src/scope.rs"
+                },
+                "region": {
+                  "endLine": 755,
+                  "startLine": 742
+                }
+              }
+            }
+          ],
+          "message": {
+            "text": "Persisted DAG semantics are not revalidated, enabling poisoned fields and path escape. The saved validation and attack-path reports show that KCS accepts attacker-influenced repository, provider, or persisted state at a boundary where the final object, size, policy, or provenance is not rechecked before it is consumed."
+          },
+          "partialFingerprints": {
+            "codexSecurity/v1": "codex-security/v1:sha256:544ed85c1d2e180f601748fd0e39666a9ad12d36408b9f673b1a294607e55ade"
+          },
+          "properties": {
+            "candidateId": "KCS-R23-CAND-036",
+            "category": "Path and scope containment bypass",
+            "confidence": "high",
+            "findingId": "csf_ba1f09d4893107da81092969",
+            "occurrenceId": "occ_99e764f3730b50034369662c",
+            "severity": "medium"
+          },
+          "relatedLocations": [
+            {
+              "id": 0,
+              "message": {
+                "text": "intended_semantic_control"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "crates/kcs-core/src/dag.rs"
+                },
+                "region": {
+                  "endLine": 79,
+                  "startLine": 40
+                }
+              }
+            },
+            {
+              "id": 2,
+              "message": {
+                "text": "path_constructor"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "crates/kcs-pipeline/src/markdownize.rs"
+                },
+                "region": {
+                  "endLine": 329,
+                  "startLine": 311
+                }
+              }
+            },
+            {
+              "id": 3,
+              "message": {
+                "text": "filesystem_sinks"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "crates/kcs-cli/src/main.rs"
+                },
+                "region": {
+                  "endLine": 5543,
+                  "startLine": 5453
+                }
+              }
+            }
+          ],
+          "ruleId": "kcs-r23-cand-036",
+          "ruleIndex": 27
+        },
+        {
+          "level": "warning",
+          "locations": [
+            {
+              "message": {
+                "text": "unbound normalized reader"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "crates/kcs-cli/src/main.rs"
+                },
+                "region": {
+                  "endLine": 3390,
+                  "startLine": 3355
+                }
+              }
+            }
+          ],
+          "message": {
+            "text": "normalized manifests and unit objects are not rebound to the requested provenance tuple. The saved validation and attack-path reports show that KCS accepts attacker-influenced repository, provider, or persisted state at a boundary where the final object, size, policy, or provenance is not rechecked before it is consumed."
+          },
+          "partialFingerprints": {
+            "codexSecurity/v1": "codex-security/v1:sha256:749542fb46b38b5bebaae1057126683e4cdd9987c3d08564054691c7cb737b82"
+          },
+          "properties": {
+            "candidateId": "KCS-R23-CAND-061",
+            "category": "Uncontrolled resource consumption",
+            "confidence": "high",
+            "findingId": "csf_9ae0a1852cdfffc7937a56d5",
+            "occurrenceId": "occ_9b08e750c839cf3be2db2e0a",
+            "severity": "medium"
+          },
+          "relatedLocations": [
+            {
+              "id": 1,
+              "message": {
+                "text": "chunk provenance sink"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "crates/kcs-index/src/chunking.rs"
+                },
+                "region": {
+                  "endLine": 185,
+                  "startLine": 167
+                }
+              }
+            },
+            {
+              "id": 2,
+              "message": {
+                "text": "rebuild consumer"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "crates/kcs-cli/src/main.rs"
+                },
+                "region": {
+                  "endLine": 3090,
+                  "startLine": 3045
+                }
+              }
+            },
+            {
+              "id": 3,
+              "message": {
+                "text": "search attribution sink"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "crates/kcs-cli/src/main.rs"
+                },
+                "region": {
+                  "endLine": 2120,
+                  "startLine": 2107
+                }
+              }
+            }
+          ],
+          "ruleId": "kcs-r23-cand-061",
+          "ruleIndex": 42
+        },
+        {
+          "level": "warning",
+          "locations": [
+            {
+              "message": {
+                "text": "untrusted_response_parser"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "crates/kcs-adapter/src/mistral_ocr.rs"
+                },
+                "region": {
+                  "endLine": 395,
+                  "startLine": 356
+                }
+              }
+            }
+          ],
+          "message": {
+            "text": "Duplicate OCR page indices bind one provider page to multiple evidence units. The saved validation and attack-path reports show that KCS accepts attacker-influenced repository, provider, or persisted state at a boundary where the final object, size, policy, or provenance is not rechecked before it is consumed."
+          },
+          "partialFingerprints": {
+            "codexSecurity/v1": "codex-security/v1:sha256:8aed9d4a3685d3acac391676535f175aedf5a07bedd44743191eb120f228cd96"
+          },
+          "properties": {
+            "candidateId": "KCS-R23-CAND-051",
+            "category": "Insufficient data integrity validation",
+            "confidence": "high",
+            "findingId": "csf_d95c49c0fc187b5163711d5e",
+            "occurrenceId": "occ_9cfd75e1f3dcb1ae13501d16",
+            "severity": "medium"
+          },
+          "relatedLocations": [
+            {
+              "id": 1,
+              "message": {
+                "text": "root_mapping_control"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "crates/kcs-adapter/src/mistral_ocr.rs"
+                },
+                "region": {
+                  "endLine": 276,
+                  "startLine": 229
+                }
+              }
+            },
+            {
+              "id": 2,
+              "message": {
+                "text": "insufficient_acceptance"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "crates/kcs-pipeline/src/markdownize.rs"
+                },
+                "region": {
+                  "endLine": 511,
+                  "startLine": 476
+                }
+              }
+            },
+            {
+              "id": 3,
+              "message": {
+                "text": "done_persistence_sink"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "crates/kcs-cli/src/main.rs"
+                },
+                "region": {
+                  "endLine": 6696,
+                  "startLine": 6674
+                }
+              }
+            }
+          ],
+          "ruleId": "kcs-r23-cand-051",
+          "ruleIndex": 39
+        },
+        {
+          "level": "warning",
+          "locations": [
+            {
+              "message": {
+                "text": "scan_authorization"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "crates/kcs-pipeline/src/scan.rs"
+                },
+                "region": {
+                  "endLine": 87,
+                  "startLine": 56
+                }
+              }
+            }
+          ],
+          "message": {
+            "text": "Persisted OCR tasks bypass current ignore authorization. The saved validation and attack-path reports show that KCS accepts attacker-influenced repository, provider, or persisted state at a boundary where the final object, size, policy, or provenance is not rechecked before it is consumed."
+          },
+          "partialFingerprints": {
+            "codexSecurity/v1": "codex-security/v1:sha256:a57b6037eb8921efdea6fac89f5ee3a7cff7f713027b3440a57469c386604704"
+          },
+          "properties": {
+            "candidateId": "KCS-R23-CAND-067",
+            "category": "Authorization or policy bypass",
+            "confidence": "high",
+            "findingId": "csf_358a0ea54252951d65861512",
+            "occurrenceId": "occ_9dda63806c1c824cc4530ae9",
+            "severity": "medium"
+          },
+          "relatedLocations": [
+            {
+              "id": 1,
+              "message": {
+                "text": "normal_task_source"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "crates/kcs-cli/src/main.rs"
+                },
+                "region": {
+                  "endLine": 10039,
+                  "startLine": 10015
+                }
+              }
+            },
+            {
+              "id": 2,
+              "message": {
+                "text": "persisted_task_loader"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "crates/kcs-pipeline/src/task.rs"
+                },
+                "region": {
+                  "endLine": 75,
+                  "startLine": 41
+                }
+              }
+            },
+            {
+              "id": 3,
+              "message": {
+                "text": "missing_current_authorization"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "crates/kcs-cli/src/main.rs"
+                },
+                "region": {
+                  "endLine": 6067,
+                  "startLine": 6050
+                }
+              }
+            }
+          ],
+          "ruleId": "kcs-r23-cand-067",
+          "ruleIndex": 44
+        },
+        {
+          "level": "warning",
+          "locations": [
+            {
+              "message": {
+                "text": "mapping entrypoint"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "crates/kcs-pipeline/src/prepare.rs"
+                },
+                "region": {
+                  "endLine": 253,
+                  "startLine": 208
+                }
+              }
+            }
+          ],
+          "message": {
+            "text": "incremental unit mapping allocates a quadratic LCS matrix. The saved validation and attack-path reports show that KCS accepts attacker-influenced repository, provider, or persisted state at a boundary where the final object, size, policy, or provenance is not rechecked before it is consumed."
+          },
+          "partialFingerprints": {
+            "codexSecurity/v1": "codex-security/v1:sha256:4cc407b1b5fc7f6a030a46709fa85e758372949a82daa9aede167f8183fd5a9e"
+          },
+          "properties": {
+            "candidateId": "KCS-R23-CAND-007",
+            "category": "Uncontrolled resource consumption",
+            "confidence": "high",
+            "findingId": "csf_b523844fcaa61bbfd11eb4f1",
+            "occurrenceId": "occ_a1f898cd6270d32ba0127b32",
+            "severity": "medium"
+          },
+          "relatedLocations": [
+            {
+              "id": 1,
+              "message": {
+                "text": "quadratic LCS"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "crates/kcs-pipeline/src/prepare.rs"
+                },
+                "region": {
+                  "endLine": 416,
+                  "startLine": 387
+                }
+              }
+            },
+            {
+              "id": 2,
+              "message": {
+                "text": "index reachability"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "crates/kcs-cli/src/main.rs"
+                },
+                "region": {
+                  "endLine": 9235,
+                  "startLine": 9219
+                }
+              }
+            }
+          ],
+          "ruleId": "kcs-r23-cand-007",
+          "ruleIndex": 5
+        },
+        {
+          "level": "warning",
+          "locations": [
+            {
+              "message": {
+                "text": "default mutable model alias"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "crates/kcs-adapter/src/catalog.rs"
+                },
+                "region": {
+                  "endLine": 157,
+                  "startLine": 150
+                }
+              }
+            }
+          ],
+          "message": {
+            "text": "Mistral model resolution lacks response-body and read-time bounds. The saved validation and attack-path reports show that KCS accepts attacker-influenced repository, provider, or persisted state at a boundary where the final object, size, policy, or provenance is not rechecked before it is consumed."
+          },
+          "partialFingerprints": {
+            "codexSecurity/v1": "codex-security/v1:sha256:67c21cb5e28dbe20ce702202e49a92e572b1909d0cb35ecdde251de4ef10fc80"
+          },
+          "properties": {
+            "candidateId": "KCS-R23-CAND-022",
+            "category": "Uncontrolled resource consumption",
+            "confidence": "high",
+            "findingId": "csf_c7c8d3e89019f39735bf6842",
+            "occurrenceId": "occ_a934355bc5ac5099bc2086f1",
+            "severity": "medium"
+          },
+          "relatedLocations": [
+            {
+              "id": 1,
+              "message": {
+                "text": "normal and resolve-only wrappers"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "crates/kcs-adapter/src/catalog.rs"
+                },
+                "region": {
+                  "endLine": 146,
+                  "startLine": 134
+                }
+              }
+            },
+            {
+              "id": 2,
+              "message": {
+                "text": "model-list GET and full JSON materialization"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "crates/kcs-adapter/src/mistral_ocr.rs"
+                },
+                "region": {
+                  "endLine": 110,
+                  "startLine": 83
+                }
+              }
+            },
+            {
+              "id": 3,
+              "message": {
+                "text": "unwired timeout control"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "crates/kcs-core/src/scope.rs"
+                },
+                "region": {
+                  "endLine": 1590,
+                  "startLine": 1581
+                }
+              }
+            }
+          ],
+          "ruleId": "kcs-r23-cand-022",
+          "ruleIndex": 15
+        },
+        {
+          "level": "note",
+          "locations": [
+            {
+              "message": {
+                "text": "root_control"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "crates/kcs-adapter/src/deterministic.rs"
+                },
+                "region": {
+                  "endLine": 249,
+                  "startLine": 225
+                }
+              }
+            }
+          ],
+          "message": {
+            "text": "Deterministic PDF normalization repeatedly reopens an unbound pathname. The saved validation and attack-path reports show that KCS accepts attacker-influenced repository, provider, or persisted state at a boundary where the final object, size, policy, or provenance is not rechecked before it is consumed."
+          },
+          "partialFingerprints": {
+            "codexSecurity/v1": "codex-security/v1:sha256:99d794335efde6f8c55bbc89a2a891b318fa621b80f60e57cdec9c89232242e0"
+          },
+          "properties": {
+            "candidateId": "KCS-R23-CAND-030",
+            "category": "Uncontrolled resource consumption",
+            "confidence": "medium",
+            "findingId": "csf_6927dfa75b13740520d8892e",
+            "occurrenceId": "occ_ad19174bcc5749e5ee74fe63",
+            "severity": "low"
+          },
+          "relatedLocations": [
+            {
+              "id": 0,
+              "message": {
+                "text": "entrypoint_and_closest_control"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "crates/kcs-cli/src/main.rs"
+                },
+                "region": {
+                  "endLine": 9109,
+                  "startLine": 9077
+                }
+              }
+            },
+            {
+              "id": 2,
+              "message": {
+                "text": "sink"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "crates/kcs-cli/src/main.rs"
+                },
+                "region": {
+                  "endLine": 9388,
+                  "startLine": 9364
+                }
+              }
+            }
+          ],
+          "ruleId": "kcs-r23-cand-030",
+          "ruleIndex": 22
+        },
+        {
+          "level": "warning",
+          "locations": [
+            {
+              "message": {
+                "text": "OCR POST and full JSON materialization"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "crates/kcs-adapter/src/mistral_ocr.rs"
+                },
+                "region": {
+                  "endLine": 138,
+                  "startLine": 112
+                }
+              }
+            }
+          ],
+          "message": {
+            "text": "Mistral OCR responses lack read, body, cardinality, and persistence bounds. The saved validation and attack-path reports show that KCS accepts attacker-influenced repository, provider, or persisted state at a boundary where the final object, size, policy, or provenance is not rechecked before it is consumed."
+          },
+          "partialFingerprints": {
+            "codexSecurity/v1": "codex-security/v1:sha256:51606c15d70c9a9e21322b1f34522fb515a512e0a83dc60c32aef4f0f68b3c6b"
+          },
+          "properties": {
+            "candidateId": "KCS-R23-CAND-020",
+            "category": "Uncontrolled resource consumption",
+            "confidence": "high",
+            "findingId": "csf_a23733c512c7df9b437b468f",
+            "occurrenceId": "occ_c07946e2529691ae3ca4716e",
+            "severity": "medium"
+          },
+          "relatedLocations": [
+            {
+              "id": 1,
+              "message": {
+                "text": "page/image/base64 expansion"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "crates/kcs-adapter/src/mistral_ocr.rs"
+                },
+                "region": {
+                  "endLine": 422,
+                  "startLine": 356
+                }
+              }
+            },
+            {
+              "id": 2,
+              "message": {
+                "text": "pre-acceptance image persistence"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "crates/kcs-adapter/src/mistral_ocr.rs"
+                },
+                "region": {
+                  "endLine": 235,
+                  "startLine": 229
+                }
+              }
+            },
+            {
+              "id": 3,
+              "message": {
+                "text": "late caller acceptance"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "crates/kcs-cli/src/main.rs"
+                },
+                "region": {
+                  "endLine": 6696,
+                  "startLine": 6694
+                }
+              }
+            }
+          ],
+          "ruleId": "kcs-r23-cand-020",
+          "ruleIndex": 14
+        },
+        {
+          "level": "note",
+          "locations": [
+            {
+              "message": {
+                "text": "unbounded line and serde"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "crates/kcs-pipeline/src/task.rs"
+                },
+                "region": {
+                  "endLine": 150,
+                  "startLine": 129
+                }
+              }
+            }
+          ],
+          "message": {
+            "text": "Oversized task JSONL records allocate before validation. The saved validation and attack-path reports show that KCS accepts attacker-influenced repository, provider, or persisted state at a boundary where the final object, size, policy, or provenance is not rechecked before it is consumed."
+          },
+          "partialFingerprints": {
+            "codexSecurity/v1": "codex-security/v1:sha256:a63347b34ff2d733100e1a9c082d2fa5bf71f191c3b387aa184c66eaf14b4ba5"
+          },
+          "properties": {
+            "candidateId": "KCS-R23-CAND-050",
+            "category": "Uncontrolled resource consumption",
+            "confidence": "medium",
+            "findingId": "csf_cb768807562e6677b320f39d",
+            "occurrenceId": "occ_c83d1bca1e9cc77399f73958",
+            "severity": "low"
+          },
+          "relatedLocations": [
+            {
+              "id": 1,
+              "message": {
+                "text": "late semantic checks"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "crates/kcs-pipeline/src/task.rs"
+                },
+                "region": {
+                  "endLine": 184,
+                  "startLine": 151
+                }
+              }
+            },
+            {
+              "id": 2,
+              "message": {
+                "text": "map retention"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "crates/kcs-pipeline/src/task.rs"
+                },
+                "region": {
+                  "endLine": 186,
+                  "startLine": 140
+                }
+              }
+            },
+            {
+              "id": 3,
+              "message": {
+                "text": "status consumer"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "crates/kcs-cli/src/main.rs"
+                },
+                "region": {
+                  "endLine": 450,
+                  "startLine": 435
+                }
+              }
+            }
+          ],
+          "ruleId": "kcs-r23-cand-050",
+          "ruleIndex": 38
+        },
+        {
+          "level": "warning",
+          "locations": [
+            {
+              "message": {
+                "text": "accepted_surface"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "crates/kcs-adapter/src/tool_lock.rs"
+                },
+                "region": {
+                  "endLine": 231,
+                  "startLine": 106
+                }
+              }
+            }
+          ],
+          "message": {
+            "text": "Accepted markdown adapter targets are discarded before fixed Mistral execution. The saved validation and attack-path reports show that KCS accepts attacker-influenced repository, provider, or persisted state at a boundary where the final object, size, policy, or provenance is not rechecked before it is consumed."
+          },
+          "partialFingerprints": {
+            "codexSecurity/v1": "codex-security/v1:sha256:30a7054dd7637a762aef2d44ca1fe56c438157331c6c245a0da0bee23749d4bc"
+          },
+          "properties": {
+            "candidateId": "KCS-R23-CAND-038",
+            "category": "Improper input validation",
+            "confidence": "high",
+            "findingId": "csf_ff67ea930a58fa5da514bc0c",
+            "occurrenceId": "occ_d06f0cadf30c589bef8b18de",
+            "severity": "medium"
+          },
+          "relatedLocations": [
+            {
+              "id": 1,
+              "message": {
+                "text": "lossy_projection"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "crates/kcs-adapter/src/tool_lock.rs"
+                },
+                "region": {
+                  "endLine": 428,
+                  "startLine": 376
+                }
+              }
+            },
+            {
+              "id": 2,
+              "message": {
+                "text": "fixed_dispatch"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "crates/kcs-adapter/src/catalog.rs"
+                },
+                "region": {
+                  "endLine": 156,
+                  "startLine": 82
+                }
+              }
+            },
+            {
+              "id": 3,
+              "message": {
+                "text": "credential_data_sink"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "crates/kcs-adapter/src/mistral_ocr.rs"
+                },
+                "region": {
+                  "endLine": 138,
+                  "startLine": 47
+                }
+              }
+            }
+          ],
+          "ruleId": "kcs-r23-cand-038",
+          "ruleIndex": 28
+        },
+        {
+          "level": "note",
+          "locations": [
+            {
+              "message": {
+                "text": "demotion selector"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "crates/kcs-cli/src/main.rs"
+                },
+                "region": {
+                  "endLine": 8231,
+                  "startLine": 8221
+                }
+              }
+            }
+          ],
+          "message": {
+            "text": "secret-hold cycles erase terminal embedding failure state. The saved validation and attack-path reports show that KCS accepts attacker-influenced repository, provider, or persisted state at a boundary where the final object, size, policy, or provenance is not rechecked before it is consumed."
+          },
+          "partialFingerprints": {
+            "codexSecurity/v1": "codex-security/v1:sha256:e615a8fbf54ae15d9cb11f3417a96839c741fe7f8869235ebf79a496fe614d51"
+          },
+          "properties": {
+            "candidateId": "KCS-R23-CAND-001",
+            "category": "Improper output encoding",
+            "confidence": "medium",
+            "findingId": "csf_ca349949c66fef22b1fc7ed4",
+            "occurrenceId": "occ_e2e0f0601ac1161046cdb4c4",
+            "severity": "low"
+          },
+          "relatedLocations": [
+            {
+              "id": 1,
+              "message": {
+                "text": "destructive hold"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "crates/kcs-cli/src/main.rs"
+                },
+                "region": {
+                  "endLine": 8325,
+                  "startLine": 8295
+                }
+              }
+            },
+            {
+              "id": 2,
+              "message": {
+                "text": "fresh unhold"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "crates/kcs-cli/src/main.rs"
+                },
+                "region": {
+                  "endLine": 8368,
+                  "startLine": 8360
+                }
+              }
+            },
+            {
+              "id": 3,
+              "message": {
+                "text": "retry contract"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "crates/kcs-pipeline/src/task.rs"
+                },
+                "region": {
+                  "endLine": 378,
+                  "startLine": 320
+                }
+              }
+            }
+          ],
+          "ruleId": "kcs-r23-cand-001",
+          "ruleIndex": 0
+        },
+        {
+          "level": "warning",
+          "locations": [
+            {
+              "message": {
+                "text": "lexical_page_counter"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "crates/kcs-adapter/src/deterministic.rs"
+                },
+                "region": {
+                  "endLine": 437,
+                  "startLine": 415
+                }
+              }
+            }
+          ],
+          "message": {
+            "text": "Deterministic PDF handling reparses the whole file once per page. The saved validation and attack-path reports show that KCS accepts attacker-influenced repository, provider, or persisted state at a boundary where the final object, size, policy, or provenance is not rechecked before it is consumed."
+          },
+          "partialFingerprints": {
+            "codexSecurity/v1": "codex-security/v1:sha256:74f18536874fec60d18bffe0dde40f969463d156de14beeed78829e5a3e8fa81"
+          },
+          "properties": {
+            "candidateId": "KCS-R23-CAND-034",
+            "category": "Uncontrolled resource consumption",
+            "confidence": "high",
+            "findingId": "csf_8470a0059545557e5723abb1",
+            "occurrenceId": "occ_eb6800a306bf1aa5b770f13e",
+            "severity": "medium"
+          },
+          "relatedLocations": [
+            {
+              "id": 1,
+              "message": {
+                "text": "page_vector_and_unit_expansion"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "crates/kcs-pipeline/src/prepare.rs"
+                },
+                "region": {
+                  "endLine": 170,
+                  "startLine": 102
+                }
+              }
+            },
+            {
+              "id": 2,
+              "message": {
+                "text": "per_hint_reparse_sink"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "crates/kcs-adapter/src/deterministic.rs"
+                },
+                "region": {
+                  "endLine": 156,
+                  "startLine": 151
+                }
+              }
+            },
+            {
+              "id": 3,
+              "message": {
+                "text": "ordinary_index_entrypoint"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "crates/kcs-cli/src/main.rs"
+                },
+                "region": {
+                  "endLine": 9118,
+                  "startLine": 9047
+                }
+              }
+            }
+          ],
+          "ruleId": "kcs-r23-cand-034",
+          "ruleIndex": 26
+        },
+        {
+          "level": "warning",
+          "locations": [
+            {
+              "message": {
+                "text": "normalization and byte projection"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "crates/kcs-pipeline/src/scan.rs"
+                },
+                "region": {
+                  "endLine": 380,
+                  "startLine": 341
+                }
+              }
+            }
+          ],
+          "message": {
+            "text": "byte-oriented question-mark globs bypass Unicode names. The saved validation and attack-path reports show that KCS accepts attacker-influenced repository, provider, or persisted state at a boundary where the final object, size, policy, or provenance is not rechecked before it is consumed."
+          },
+          "partialFingerprints": {
+            "codexSecurity/v1": "codex-security/v1:sha256:2316f4725d8335eaf04de364e634df0450438cba550b39981af5a82b3eac83d9"
+          },
+          "properties": {
+            "candidateId": "KCS-R23-CAND-005",
+            "category": "Improper input validation",
+            "confidence": "high",
+            "findingId": "csf_4f30c830e0f86daa76683123",
+            "occurrenceId": "occ_eb8849ff58f2da0905807271",
+            "severity": "medium"
+          },
+          "relatedLocations": [
+            {
+              "id": 1,
+              "message": {
+                "text": "question wildcard"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "crates/kcs-pipeline/src/scan.rs"
+                },
+                "region": {
+                  "endLine": 415,
+                  "startLine": 383
+                }
+              }
+            },
+            {
+              "id": 2,
+              "message": {
+                "text": "ingest decision"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "crates/kcs-pipeline/src/scan.rs"
+                },
+                "region": {
+                  "endLine": 159,
+                  "startLine": 97
+                }
+              }
+            },
+            {
+              "id": 3,
+              "message": {
+                "text": "processing sink"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "crates/kcs-cli/src/main.rs"
+                },
+                "region": {
+                  "endLine": 9118,
+                  "startLine": 9044
+                }
+              }
+            }
+          ],
+          "ruleId": "kcs-r23-cand-005",
+          "ruleIndex": 3
+        },
+        {
+          "level": "note",
+          "locations": [
+            {
+              "message": {
+                "text": "entrypoint"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "crates/kcs-cli/src/main.rs"
+                },
+                "region": {
+                  "endLine": 6081,
+                  "startLine": 5974
+                }
+              }
+            }
+          ],
+          "message": {
+            "text": "Deferred OCR tasks read replacement files before enforcing the cap. The saved validation and attack-path reports show that KCS accepts attacker-influenced repository, provider, or persisted state at a boundary where the final object, size, policy, or provenance is not rechecked before it is consumed."
+          },
+          "partialFingerprints": {
+            "codexSecurity/v1": "codex-security/v1:sha256:1b7a92e8609b381aeba6820f17c667c545a2ef32e8ac9b1a76501983fc17cf1d"
+          },
+          "properties": {
+            "candidateId": "KCS-R23-CAND-033",
+            "category": "Improper input validation",
+            "confidence": "medium",
+            "findingId": "csf_2447fa8869fc7ee8bbd6b8d4",
+            "occurrenceId": "occ_efe7cb69298e4ca767292e30",
+            "severity": "low"
+          },
+          "relatedLocations": [
+            {
+              "id": 1,
+              "message": {
+                "text": "root_control_and_sink"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "crates/kcs-cli/src/main.rs"
+                },
+                "region": {
+                  "endLine": 6551,
+                  "startLine": 6533
+                }
+              }
+            },
+            {
+              "id": 2,
+              "message": {
+                "text": "cap_definition"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "crates/kcs-cli/src/main.rs"
+                },
+                "region": {
+                  "endLine": 4445,
+                  "startLine": 4425
+                }
+              }
+            }
+          ],
+          "ruleId": "kcs-r23-cand-033",
+          "ruleIndex": 25
+        },
+        {
+          "level": "warning",
+          "locations": [
+            {
+              "message": {
+                "text": "entrypoint"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "crates/kcs-pipeline/src/markdownize.rs"
+                },
+                "region": {
+                  "endLine": 84,
+                  "startLine": 65
+                }
+              }
+            }
+          ],
+          "message": {
+            "text": "Persisted manifest unit_ref can escape its normalized-instance directory. The saved validation and attack-path reports show that KCS accepts attacker-influenced repository, provider, or persisted state at a boundary where the final object, size, policy, or provenance is not rechecked before it is consumed."
+          },
+          "partialFingerprints": {
+            "codexSecurity/v1": "codex-security/v1:sha256:63d24004d46cd14632e371b85e0888615f987857c3ea687a482a1cedf2dc63c6"
+          },
+          "properties": {
+            "candidateId": "KCS-R23-CAND-049",
+            "category": "Path and scope containment bypass",
+            "confidence": "high",
+            "findingId": "csf_96a20dc19c3f614845362545",
+            "occurrenceId": "occ_f19f749a7c94a816a9d86c74",
+            "severity": "medium"
+          },
+          "relatedLocations": [
+            {
+              "id": 1,
+              "message": {
+                "text": "root_control_and_read_sink"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "crates/kcs-cli/src/main.rs"
+                },
+                "region": {
+                  "endLine": 3383,
+                  "startLine": 3355
+                }
+              }
+            },
+            {
+              "id": 2,
+              "message": {
+                "text": "index_sink"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "crates/kcs-cli/src/main.rs"
+                },
+                "region": {
+                  "endLine": 3127,
+                  "startLine": 3030
+                }
+              }
+            },
+            {
+              "id": 3,
+              "message": {
+                "text": "previous_instance_sink"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "crates/kcs-cli/src/main.rs"
+                },
+                "region": {
+                  "endLine": 9713,
+                  "startLine": 9685
+                }
+              }
+            }
+          ],
+          "ruleId": "kcs-r23-cand-049",
+          "ruleIndex": 37
+        },
+        {
+          "level": "warning",
+          "locations": [
+            {
+              "message": {
+                "text": "status entry"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "crates/kcs-cli/src/main.rs"
+                },
+                "region": {
+                  "endLine": 442,
+                  "startLine": 435
+                }
+              }
+            }
+          ],
+          "message": {
+            "text": "status and snapshot read unbounded direct-child files before any cap. The saved validation and attack-path reports show that KCS accepts attacker-influenced repository, provider, or persisted state at a boundary where the final object, size, policy, or provenance is not rechecked before it is consumed."
+          },
+          "partialFingerprints": {
+            "codexSecurity/v1": "codex-security/v1:sha256:9c248581252d485ec6a11096b9cf76f94afc25e63da5d4b5df9d8cff6af7d3d9"
+          },
+          "properties": {
+            "candidateId": "KCS-R23-CAND-019",
+            "category": "Uncontrolled resource consumption",
+            "confidence": "high",
+            "findingId": "csf_f85926a297d5b96957e676eb",
+            "occurrenceId": "occ_fb4cc6f6433f62078b11a905",
+            "severity": "medium"
+          },
+          "relatedLocations": [
+            {
+              "id": 1,
+              "message": {
+                "text": "working-tree builder"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "crates/kcs-core/src/scope.rs"
+                },
+                "region": {
+                  "endLine": 309,
+                  "startLine": 261
+                }
+              }
+            },
+            {
+              "id": 2,
+              "message": {
+                "text": "snapshot entry"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "crates/kcs-core/src/scope.rs"
+                },
+                "region": {
+                  "endLine": 386,
+                  "startLine": 373
+                }
+              }
+            },
+            {
+              "id": 3,
+              "message": {
+                "text": "unrelated later input cap"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "crates/kcs-cli/src/main.rs"
+                },
+                "region": {
+                  "endLine": 4444,
+                  "startLine": 4425
+                }
+              }
+            }
+          ],
+          "ruleId": "kcs-r23-cand-019",
+          "ruleIndex": 13
+        },
+        {
+          "level": "warning",
+          "locations": [
+            {
+              "message": {
+                "text": "root_control"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "crates/kcs-cli/src/main.rs"
+                },
+                "region": {
+                  "endLine": 9169,
+                  "startLine": 9120
+                }
+              }
+            }
+          ],
+          "message": {
+            "text": "Unrecognized binary gaps disappear from durable completeness and path telemetry. The saved validation and attack-path reports show that KCS accepts attacker-influenced repository, provider, or persisted state at a boundary where the final object, size, policy, or provenance is not rechecked before it is consumed."
+          },
+          "partialFingerprints": {
+            "codexSecurity/v1": "codex-security/v1:sha256:80c376c8fa462e18487d174cf8ca91aca2c93a8d978fc5e4bb3f6d35ee0eb9af"
+          },
+          "properties": {
+            "candidateId": "KCS-R23-CAND-014",
+            "category": "Path and scope containment bypass",
+            "confidence": "high",
+            "findingId": "csf_d3f63b005b812956824b90ac",
+            "occurrenceId": "occ_fc3170652cb817304acf8156",
+            "severity": "medium"
+          },
+          "relatedLocations": [
+            {
+              "id": 0,
+              "message": {
+                "text": "transient_result"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "crates/kcs-cli/src/main.rs"
+                },
+                "region": {
+                  "endLine": 671,
+                  "startLine": 656
+                }
+              }
+            },
+            {
+              "id": 1,
+              "message": {
+                "text": "persistent_status_sink"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "crates/kcs-cli/src/main.rs"
+                },
+                "region": {
+                  "endLine": 450,
+                  "startLine": 435
+                }
+              }
+            },
+            {
+              "id": 2,
+              "message": {
+                "text": "completeness_control"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "crates/kcs-cli/src/main.rs"
+                },
+                "region": {
+                  "endLine": 2506,
+                  "startLine": 2417
+                }
+              }
+            }
+          ],
+          "ruleId": "kcs-r23-cand-014",
+          "ruleIndex": 10
+        },
+        {
+          "level": "warning",
+          "locations": [
+            {
+              "message": {
+                "text": "entrypoint_and_partial_control"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "crates/kcs-pipeline/src/task.rs"
+                },
+                "region": {
+                  "endLine": 184,
+                  "startLine": 129
+                }
+              }
+            }
+          ],
+          "message": {
+            "text": "Persisted task output_ref can escape the scope. The saved validation and attack-path reports show that KCS accepts attacker-influenced repository, provider, or persisted state at a boundary where the final object, size, policy, or provenance is not rechecked before it is consumed."
+          },
+          "partialFingerprints": {
+            "codexSecurity/v1": "codex-security/v1:sha256:b81454b04f0e8acbe254bcc63d241967aa97f505f1b120573ccfdfa20d72b06b"
+          },
+          "properties": {
+            "candidateId": "KCS-R23-CAND-047",
+            "category": "Path and scope containment bypass",
+            "confidence": "high",
+            "findingId": "csf_27e471397d93d2b6f7ba9dec",
+            "occurrenceId": "occ_fe35baa92c614db4203b1991",
+            "severity": "medium"
+          },
+          "relatedLocations": [
+            {
+              "id": 1,
+              "message": {
+                "text": "root_control_and_read_sink"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "crates/kcs-cli/src/main.rs"
+                },
+                "region": {
+                  "endLine": 9713,
+                  "startLine": 9685
+                }
+              }
+            },
+            {
+              "id": 2,
+              "message": {
+                "text": "reuse_sink"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "crates/kcs-cli/src/main.rs"
+                },
+                "region": {
+                  "endLine": 9885,
+                  "startLine": 9863
+                }
+              }
+            },
+            {
+              "id": 3,
+              "message": {
+                "text": "persistence_sink"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "crates/kcs-cli/src/main.rs"
+                },
+                "region": {
+                  "endLine": 6995,
+                  "startLine": 6977
+                }
+              }
+            }
+          ],
+          "ruleId": "kcs-r23-cand-047",
+          "ruleIndex": 35
+        }
+      ],
+      "tool": {
+        "driver": {
+          "name": "Codex Security",
+          "rules": [
+            {
+              "id": "kcs-r23-cand-001",
+              "name": "kcs-r23-cand-001",
+              "properties": {
+                "tags": [
+                  "security"
+                ]
+              },
+              "shortDescription": {
+                "text": "kcs-r23-cand-001"
+              }
+            },
+            {
+              "id": "kcs-r23-cand-003",
+              "name": "kcs-r23-cand-003",
+              "properties": {
+                "tags": [
+                  "security"
+                ]
+              },
+              "shortDescription": {
+                "text": "kcs-r23-cand-003"
+              }
+            },
+            {
+              "id": "kcs-r23-cand-004",
+              "name": "kcs-r23-cand-004",
+              "properties": {
+                "tags": [
+                  "security"
+                ]
+              },
+              "shortDescription": {
+                "text": "kcs-r23-cand-004"
+              }
+            },
+            {
+              "id": "kcs-r23-cand-005",
+              "name": "kcs-r23-cand-005",
+              "properties": {
+                "tags": [
+                  "security"
+                ]
+              },
+              "shortDescription": {
+                "text": "kcs-r23-cand-005"
+              }
+            },
+            {
+              "id": "kcs-r23-cand-006",
+              "name": "kcs-r23-cand-006",
+              "properties": {
+                "tags": [
+                  "security"
+                ]
+              },
+              "shortDescription": {
+                "text": "kcs-r23-cand-006"
+              }
+            },
+            {
+              "id": "kcs-r23-cand-007",
+              "name": "kcs-r23-cand-007",
+              "properties": {
+                "tags": [
+                  "security"
+                ]
+              },
+              "shortDescription": {
+                "text": "kcs-r23-cand-007"
+              }
+            },
+            {
+              "id": "kcs-r23-cand-008",
+              "name": "kcs-r23-cand-008",
+              "properties": {
+                "tags": [
+                  "security"
+                ]
+              },
+              "shortDescription": {
+                "text": "kcs-r23-cand-008"
+              }
+            },
+            {
+              "id": "kcs-r23-cand-011",
+              "name": "kcs-r23-cand-011",
+              "properties": {
+                "tags": [
+                  "security"
+                ]
+              },
+              "shortDescription": {
+                "text": "kcs-r23-cand-011"
+              }
+            },
+            {
+              "id": "kcs-r23-cand-012",
+              "name": "kcs-r23-cand-012",
+              "properties": {
+                "tags": [
+                  "security"
+                ]
+              },
+              "shortDescription": {
+                "text": "kcs-r23-cand-012"
+              }
+            },
+            {
+              "id": "kcs-r23-cand-013",
+              "name": "kcs-r23-cand-013",
+              "properties": {
+                "tags": [
+                  "security"
+                ]
+              },
+              "shortDescription": {
+                "text": "kcs-r23-cand-013"
+              }
+            },
+            {
+              "id": "kcs-r23-cand-014",
+              "name": "kcs-r23-cand-014",
+              "properties": {
+                "tags": [
+                  "security"
+                ]
+              },
+              "shortDescription": {
+                "text": "kcs-r23-cand-014"
+              }
+            },
+            {
+              "id": "kcs-r23-cand-017",
+              "name": "kcs-r23-cand-017",
+              "properties": {
+                "tags": [
+                  "security"
+                ]
+              },
+              "shortDescription": {
+                "text": "kcs-r23-cand-017"
+              }
+            },
+            {
+              "id": "kcs-r23-cand-018",
+              "name": "kcs-r23-cand-018",
+              "properties": {
+                "tags": [
+                  "security"
+                ]
+              },
+              "shortDescription": {
+                "text": "kcs-r23-cand-018"
+              }
+            },
+            {
+              "id": "kcs-r23-cand-019",
+              "name": "kcs-r23-cand-019",
+              "properties": {
+                "tags": [
+                  "security"
+                ]
+              },
+              "shortDescription": {
+                "text": "kcs-r23-cand-019"
+              }
+            },
+            {
+              "id": "kcs-r23-cand-020",
+              "name": "kcs-r23-cand-020",
+              "properties": {
+                "tags": [
+                  "security"
+                ]
+              },
+              "shortDescription": {
+                "text": "kcs-r23-cand-020"
+              }
+            },
+            {
+              "id": "kcs-r23-cand-022",
+              "name": "kcs-r23-cand-022",
+              "properties": {
+                "tags": [
+                  "security"
+                ]
+              },
+              "shortDescription": {
+                "text": "kcs-r23-cand-022"
+              }
+            },
+            {
+              "id": "kcs-r23-cand-023",
+              "name": "kcs-r23-cand-023",
+              "properties": {
+                "tags": [
+                  "security"
+                ]
+              },
+              "shortDescription": {
+                "text": "kcs-r23-cand-023"
+              }
+            },
+            {
+              "id": "kcs-r23-cand-024",
+              "name": "kcs-r23-cand-024",
+              "properties": {
+                "tags": [
+                  "security"
+                ]
+              },
+              "shortDescription": {
+                "text": "kcs-r23-cand-024"
+              }
+            },
+            {
+              "id": "kcs-r23-cand-025",
+              "name": "kcs-r23-cand-025",
+              "properties": {
+                "tags": [
+                  "security"
+                ]
+              },
+              "shortDescription": {
+                "text": "kcs-r23-cand-025"
+              }
+            },
+            {
+              "id": "kcs-r23-cand-027",
+              "name": "kcs-r23-cand-027",
+              "properties": {
+                "tags": [
+                  "security"
+                ]
+              },
+              "shortDescription": {
+                "text": "kcs-r23-cand-027"
+              }
+            },
+            {
+              "id": "kcs-r23-cand-028",
+              "name": "kcs-r23-cand-028",
+              "properties": {
+                "tags": [
+                  "security"
+                ]
+              },
+              "shortDescription": {
+                "text": "kcs-r23-cand-028"
+              }
+            },
+            {
+              "id": "kcs-r23-cand-029",
+              "name": "kcs-r23-cand-029",
+              "properties": {
+                "tags": [
+                  "security"
+                ]
+              },
+              "shortDescription": {
+                "text": "kcs-r23-cand-029"
+              }
+            },
+            {
+              "id": "kcs-r23-cand-030",
+              "name": "kcs-r23-cand-030",
+              "properties": {
+                "tags": [
+                  "security"
+                ]
+              },
+              "shortDescription": {
+                "text": "kcs-r23-cand-030"
+              }
+            },
+            {
+              "id": "kcs-r23-cand-031",
+              "name": "kcs-r23-cand-031",
+              "properties": {
+                "tags": [
+                  "security"
+                ]
+              },
+              "shortDescription": {
+                "text": "kcs-r23-cand-031"
+              }
+            },
+            {
+              "id": "kcs-r23-cand-032",
+              "name": "kcs-r23-cand-032",
+              "properties": {
+                "tags": [
+                  "security"
+                ]
+              },
+              "shortDescription": {
+                "text": "kcs-r23-cand-032"
+              }
+            },
+            {
+              "id": "kcs-r23-cand-033",
+              "name": "kcs-r23-cand-033",
+              "properties": {
+                "tags": [
+                  "security"
+                ]
+              },
+              "shortDescription": {
+                "text": "kcs-r23-cand-033"
+              }
+            },
+            {
+              "id": "kcs-r23-cand-034",
+              "name": "kcs-r23-cand-034",
+              "properties": {
+                "tags": [
+                  "security"
+                ]
+              },
+              "shortDescription": {
+                "text": "kcs-r23-cand-034"
+              }
+            },
+            {
+              "id": "kcs-r23-cand-036",
+              "name": "kcs-r23-cand-036",
+              "properties": {
+                "tags": [
+                  "security"
+                ]
+              },
+              "shortDescription": {
+                "text": "kcs-r23-cand-036"
+              }
+            },
+            {
+              "id": "kcs-r23-cand-038",
+              "name": "kcs-r23-cand-038",
+              "properties": {
+                "tags": [
+                  "security"
+                ]
+              },
+              "shortDescription": {
+                "text": "kcs-r23-cand-038"
+              }
+            },
+            {
+              "id": "kcs-r23-cand-039",
+              "name": "kcs-r23-cand-039",
+              "properties": {
+                "tags": [
+                  "security"
+                ]
+              },
+              "shortDescription": {
+                "text": "kcs-r23-cand-039"
+              }
+            },
+            {
+              "id": "kcs-r23-cand-040",
+              "name": "kcs-r23-cand-040",
+              "properties": {
+                "tags": [
+                  "security"
+                ]
+              },
+              "shortDescription": {
+                "text": "kcs-r23-cand-040"
+              }
+            },
+            {
+              "id": "kcs-r23-cand-041",
+              "name": "kcs-r23-cand-041",
+              "properties": {
+                "tags": [
+                  "security"
+                ]
+              },
+              "shortDescription": {
+                "text": "kcs-r23-cand-041"
+              }
+            },
+            {
+              "id": "kcs-r23-cand-042",
+              "name": "kcs-r23-cand-042",
+              "properties": {
+                "tags": [
+                  "security"
+                ]
+              },
+              "shortDescription": {
+                "text": "kcs-r23-cand-042"
+              }
+            },
+            {
+              "id": "kcs-r23-cand-043",
+              "name": "kcs-r23-cand-043",
+              "properties": {
+                "tags": [
+                  "security"
+                ]
+              },
+              "shortDescription": {
+                "text": "kcs-r23-cand-043"
+              }
+            },
+            {
+              "id": "kcs-r23-cand-046",
+              "name": "kcs-r23-cand-046",
+              "properties": {
+                "tags": [
+                  "security"
+                ]
+              },
+              "shortDescription": {
+                "text": "kcs-r23-cand-046"
+              }
+            },
+            {
+              "id": "kcs-r23-cand-047",
+              "name": "kcs-r23-cand-047",
+              "properties": {
+                "tags": [
+                  "security"
+                ]
+              },
+              "shortDescription": {
+                "text": "kcs-r23-cand-047"
+              }
+            },
+            {
+              "id": "kcs-r23-cand-048",
+              "name": "kcs-r23-cand-048",
+              "properties": {
+                "tags": [
+                  "security"
+                ]
+              },
+              "shortDescription": {
+                "text": "kcs-r23-cand-048"
+              }
+            },
+            {
+              "id": "kcs-r23-cand-049",
+              "name": "kcs-r23-cand-049",
+              "properties": {
+                "tags": [
+                  "security"
+                ]
+              },
+              "shortDescription": {
+                "text": "kcs-r23-cand-049"
+              }
+            },
+            {
+              "id": "kcs-r23-cand-050",
+              "name": "kcs-r23-cand-050",
+              "properties": {
+                "tags": [
+                  "security"
+                ]
+              },
+              "shortDescription": {
+                "text": "kcs-r23-cand-050"
+              }
+            },
+            {
+              "id": "kcs-r23-cand-051",
+              "name": "kcs-r23-cand-051",
+              "properties": {
+                "tags": [
+                  "security"
+                ]
+              },
+              "shortDescription": {
+                "text": "kcs-r23-cand-051"
+              }
+            },
+            {
+              "id": "kcs-r23-cand-057",
+              "name": "kcs-r23-cand-057",
+              "properties": {
+                "tags": [
+                  "security"
+                ]
+              },
+              "shortDescription": {
+                "text": "kcs-r23-cand-057"
+              }
+            },
+            {
+              "id": "kcs-r23-cand-059",
+              "name": "kcs-r23-cand-059",
+              "properties": {
+                "tags": [
+                  "security"
+                ]
+              },
+              "shortDescription": {
+                "text": "kcs-r23-cand-059"
+              }
+            },
+            {
+              "id": "kcs-r23-cand-061",
+              "name": "kcs-r23-cand-061",
+              "properties": {
+                "tags": [
+                  "security"
+                ]
+              },
+              "shortDescription": {
+                "text": "kcs-r23-cand-061"
+              }
+            },
+            {
+              "id": "kcs-r23-cand-064",
+              "name": "kcs-r23-cand-064",
+              "properties": {
+                "tags": [
+                  "security"
+                ]
+              },
+              "shortDescription": {
+                "text": "kcs-r23-cand-064"
+              }
+            },
+            {
+              "id": "kcs-r23-cand-067",
+              "name": "kcs-r23-cand-067",
+              "properties": {
+                "tags": [
+                  "security"
+                ]
+              },
+              "shortDescription": {
+                "text": "kcs-r23-cand-067"
+              }
+            },
+            {
+              "id": "kcs-r23-cand-068",
+              "name": "kcs-r23-cand-068",
+              "properties": {
+                "tags": [
+                  "security"
+                ]
+              },
+              "shortDescription": {
+                "text": "kcs-r23-cand-068"
+              }
+            },
+            {
+              "id": "kcs-r23-cand-069",
+              "name": "kcs-r23-cand-069",
+              "properties": {
+                "tags": [
+                  "security"
+                ]
+              },
+              "shortDescription": {
+                "text": "kcs-r23-cand-069"
+              }
+            }
+          ],
+          "version": "0.1.11"
+        }
+      },
+      "versionControlProvenance": [
+        {
+          "repositoryUri": "https://github.com/ttokunaga-ja/kcs",
+          "revisionId": "0e19f3c6489da458e93a982a333c308d92d0a0ae"
+        }
+      ]
+    }
+  ],
+  "version": "2.1.0"
+}

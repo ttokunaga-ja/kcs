@@ -1,0 +1,5 @@
+[+] first read accepted version A
+[+] prepare-stage reopen derived sha256:b2bcf2178491b9d37bea5d41227350d9dc89cbc4c28ac8e30ad78656cb13827d from version B
+[+] publication wrote caller-retained version A under B's prepared hash
+[+] mismatch reproduced: object name expects b2bcf2178491b9d3..., body hashes to 69c0e2bbc06a8709...
+[+] fixed invariant would reject before publication or write bytes that hash to the object name

@@ -1,0 +1,11 @@
+{
+  "candidate_id": "KCS-R23-CAND-039",
+  "created_at_utc": "2026-07-11T19:46:49Z",
+  "ledger_path": "artifacts/05_findings/KCS-R23-CAND-039/candidate_ledger.jsonl",
+  "reason": "Coordinator normalized duplicated tac_20260712 ledger rows after accepting the reviewed row; superseded pending row preserved for audit but excluded from formal ledger counting.",
+  "scan_id": "f78f5d0d-2752-47a7-8d8d-3371e09d3377",
+  "schema_version": "codex-security-vulnerability-writeup-superseded-ledger-row/v1",
+  "superseded_rows_count": 1,
+  "superseded_rows_path": "artifacts/05_findings/KCS-R23-CAND-039/tac_20260712_superseded_ledger_rows.jsonl",
+  "superseded_rows_sha256": "34d59c6108011340b63058d32c0bd9c737ec8f7d976b7ba9f154d71b2f7806c3"
+}

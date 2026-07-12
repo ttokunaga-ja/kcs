@@ -26,6 +26,28 @@ use kcs_pipeline::task::{
 use serde_json::{json, Value};
 use tempfile::TempDir;
 
+const KCS_CHILD_ENV_DENYLIST: &[&str] = &[
+    "GEMINI_API_KEY",
+    "MISTRAL_API_KEY",
+    "KCS_FIXED_NOW",
+    "KCS_TEST_GEMINI_EMBED",
+    "KCS_TEST_MISTRAL_OCR",
+    "KCS_TEST_MARKDOWNIZE_ADAPTER",
+    "KCS_TEST_QUERY_EMBED_TRACE",
+    "KCS_TEST_HOLD_LOCK_MS",
+    "KCS_TEST_R13_2_AUTH",
+    "KCS_TEST_R13_2_DECLARED",
+    "KCS_TEST_R13_2_FALLBACK",
+];
+
+fn hermetic_kcs_command() -> Command {
+    let mut command = Command::cargo_bin("kcs").unwrap();
+    for name in KCS_CHILD_ENV_DENYLIST {
+        command.env_remove(name);
+    }
+    command
+}
+
 fn profile_deterministic() -> Value {
     json!({
         "adapter_kind": "markdownize",
@@ -144,7 +166,7 @@ fn scope() -> TempDir {
 }
 
 fn kcs<const N: usize>(dir: &TempDir, args: [&str; N]) -> Command {
-    let mut command = Command::cargo_bin("kcs").unwrap();
+    let mut command = hermetic_kcs_command();
     command
         .current_dir(dir.path())
         .env("XDG_CONFIG_HOME", dir.path().join(".test-config"))
@@ -1210,7 +1232,7 @@ fn ct2_network_002_approve_grants_opt_in_yes_does_not() {
 }
 
 #[test]
-fn ct2_network_004_config_allow_network_enables_online() {
+fn ct2_network_004_portable_scope_config_cannot_grant_network_consent() {
     let dir = scope();
     fs::write(
         dir.path().join(".kcs/config.toml"),
@@ -1221,13 +1243,13 @@ fn ct2_network_004_config_allow_network_enables_online() {
     // no longer enqueue online tasks).
     fs::write(dir.path().join("a.pdf"), fake_pdf(&["hello"])).unwrap();
     let output = json_success(&dir, ["index", "--yes"]);
-    assert_eq!(output["network_allowed"], true);
-    assert_eq!(output["network_opt_in"], true);
+    assert_eq!(output["network_allowed"], false);
+    assert_eq!(output["network_opt_in"], false);
     let status = json_success(&dir, ["status"]);
     assert!(status["tasks"].as_array().unwrap().iter().any(|task| {
         task["input_path"] == "a.pdf"
             && task["status"] == "pending"
-            && task["fallback_reason"] == "ready_for_online_adapter"
+            && task["fallback_reason"] == "network_opt_in_required"
     }));
 }
 
@@ -2423,7 +2445,7 @@ fn r13_5_reinit_on_unrecoverable_corruption_exits_nonzero() {
 /// 0600 cursor-signing key) and the device budget cap silently split per working
 /// directory. Now the startup guard refuses to run and writes nothing under CWD.
 fn kcs_no_base<const N: usize>(work: &Path, home: Option<&str>, args: [&str; N]) -> Command {
-    let mut command = Command::cargo_bin("kcs").unwrap();
+    let mut command = hermetic_kcs_command();
     command
         .current_dir(work)
         .env_remove("XDG_CONFIG_HOME")
@@ -2470,7 +2492,7 @@ fn r13_6_absolute_xdg_lets_commands_run_even_without_home() {
     // must NOT block that case (XDG takes precedence over HOME).
     let work = tempfile::tempdir().unwrap();
     let xdg = tempfile::tempdir().unwrap();
-    let mut command = Command::cargo_bin("kcs").unwrap();
+    let mut command = hermetic_kcs_command();
     command
         .current_dir(work.path())
         .env_remove("HOME")
@@ -3096,7 +3118,7 @@ fn r14_3_corrupt_head_read_only_scope_reads_run_and_defer_heal() {
     // self-heal can neither create `.lock` nor overwrite HEAD.
     fs::write(dir.path().join(".kcs/HEAD"), "").unwrap();
     let kcs_dir = dir.path().join(".kcs");
-    fs::set_permissions(&kcs_dir, fs::Permissions::from_mode(0o555)).unwrap();
+    fs::set_permissions(&kcs_dir, fs::Permissions::from_mode(0o500)).unwrap();
 
     // Pure-read commands must succeed (exit 0). Before R14-3 the self-heal's `.lock`
     // create failed with PermissionDenied → KCS-E-STORE-IO-001, exit 1.
@@ -3142,7 +3164,7 @@ fn r14_3_corrupt_head_read_only_scope_reads_run_and_defer_heal() {
 
     // A later WRITABLE open completes the heal (never lost): HEAD is restored and the
     // repair is now recorded.
-    fs::set_permissions(&kcs_dir, fs::Permissions::from_mode(0o755)).unwrap();
+    fs::set_permissions(&kcs_dir, fs::Permissions::from_mode(0o700)).unwrap();
     json_success(&dir, ["log"]);
     assert_eq!(
         fs::read_to_string(dir.path().join(".kcs/HEAD"))
@@ -3169,7 +3191,7 @@ fn r14_3_healthy_head_read_only_scope_unchanged() {
     let c1_hash = c1["commit_hash"].as_str().unwrap().to_owned();
 
     let kcs_dir = dir.path().join(".kcs");
-    fs::set_permissions(&kcs_dir, fs::Permissions::from_mode(0o555)).unwrap();
+    fs::set_permissions(&kcs_dir, fs::Permissions::from_mode(0o500)).unwrap();
 
     let status = json_success(&dir, ["status"]);
     assert!(
@@ -3191,7 +3213,7 @@ fn r14_3_healthy_head_read_only_scope_unchanged() {
         "a healthy HEAD triggers neither a repair nor a deferred-heal warn"
     );
 
-    fs::set_permissions(&kcs_dir, fs::Permissions::from_mode(0o755)).unwrap();
+    fs::set_permissions(&kcs_dir, fs::Permissions::from_mode(0o700)).unwrap();
 }
 
 // R15-4: a HEAD commit whose TREE object is gone (shallow: GC'd / manually deleted /

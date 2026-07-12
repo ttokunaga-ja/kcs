@@ -1,0 +1,252 @@
+{
+  "affected_locations": [
+    {
+      "label": "ordinary_index_entrypoint",
+      "lines": "9047-9118,9229-9304",
+      "path": "crates/kcs-cli/src/main.rs"
+    },
+    {
+      "label": "lexical_page_counter",
+      "lines": "415-437",
+      "path": "crates/kcs-adapter/src/deterministic.rs"
+    },
+    {
+      "label": "page_vector_and_unit_expansion",
+      "lines": "102-170,315-347",
+      "path": "crates/kcs-pipeline/src/prepare.rs"
+    },
+    {
+      "label": "per_hint_reparse_sink",
+      "lines": "113-163,190-249,287-315",
+      "path": "crates/kcs-adapter/src/deterministic.rs"
+    },
+    {
+      "label": "revision_mapping_amplifier",
+      "lines": "387-416",
+      "path": "crates/kcs-pipeline/src/prepare.rs"
+    }
+  ],
+  "artifact_hashes": {
+    "findings/tac-kcs-r23-cand-034-pdf-reparse-amplification/poc/Makefile": "4430b7005e444b1a5761f31b9d327798f1fb0e06859eeee80262d5553212c4a3",
+    "findings/tac-kcs-r23-cand-034-pdf-reparse-amplification/poc/README.md": "e3a610290c4c0362e3990453d4c6d42f9683c1d515004d378f57ab8e61672fc7",
+    "findings/tac-kcs-r23-cand-034-pdf-reparse-amplification/poc/pdf_page_reparse_amplification_probe.py": "07fa44804e6b2d20a9a970531fa7893f5f3a51690798dcf31ab0d7a2edea71d1",
+    "findings/tac-kcs-r23-cand-034-pdf-reparse-amplification/tac-kcs-r23-cand-034-pdf-reparse-amplification.md": "0d59c2be002e95ca43e881465a8941c92d455150d476fdd16c0f616db90009c3"
+  },
+  "attackPath": {
+    "dataflow": {
+      "evidenceRefs": [
+        "cli-byte-gate-and-prepare",
+        "lexical-page-counter",
+        "page-vector-padding",
+        "prepared-unit-materialization",
+        "per-hint-full-reparse"
+      ],
+      "outcome": "disproportionate local work and possible indexing stall or termination",
+      "sink": "CPU, heap, filesystem I/O, and index/store operation availability in the local KCS process",
+      "source": "attacker-controlled readable PDF bytes in an indexed local scope",
+      "summary": "scope PDF bytes -> raw byte gate -> lexical `/Page` count -> padded PDF page vector -> `PreparedUnit` hints -> per-hint whole-file `std::fs::read()` and `extract_pdf_text_pages()`"
+    },
+    "evidenceRefs": [
+      "cli-byte-gate-and-prepare",
+      "lexical-page-counter",
+      "page-vector-padding",
+      "per-hint-full-reparse"
+    ],
+    "impact": {
+      "level": "medium",
+      "why": "The result is substantial local CPU, memory, and I/O amplification against indexing, but it is recoverable by removing the crafted file and does not expose credentials or execute code."
+    },
+    "likelihood": {
+      "level": "high",
+      "why": "The trigger is deterministic once the crafted readable PDF is indexed; it does not require race timing or privileged state access."
+    },
+    "limitations": [
+      "`max_input_bytes` bounds raw `S` but not derived `P` or `P` repeated extractions.",
+      "Wholly nontext PDFs route to OCR, so the crafted document must retain a readable text layer.",
+      "The LCS matrix branch is supporting amplification; the first-index repeated-parse sink is independently sufficient."
+    ],
+    "reachability": {
+      "attacker": "lower-trust local content contributor",
+      "entrypoint": "operator-run `kcs index` over an accepted direct-child PDF",
+      "outcome": "local indexing availability loss for the affected process/scope",
+      "preconditions": [
+        "The crafted PDF remains within `adapter.policy.max_input_bytes`.",
+        "The PDF has enough readable text to avoid the wholly-scanned OCR fallback.",
+        "The operator indexes the affected scope."
+      ],
+      "summary": "The path is part of ordinary offline indexing and needs no listener, remote service, credentials, privilege escalation, persistence, or timing race."
+    },
+    "summary": "A lower-trust content contributor supplies a crafted readable PDF in a scope the operator indexes. The ordinary index path admits the file under the raw byte cap, converts false `/Page` prefixes into logical pages, creates one unit per padded page, and then performs repeated full-document PDF extraction for each derived hint."
+  },
+  "candidate_id": "KCS-R23-CAND-034",
+  "codeEvidence": [
+    {
+      "code": "let max_input_bytes = effective_max_input_bytes(repo);\n\nfor candidate in preview\n    .candidates\n    .iter()\n    .filter(|candidate| !candidate.ignored && candidate.media_type != \"inode/directory\")\n{\n    if candidate.size_bytes > max_input_bytes {\n        result.skipped_oversized_files += 1;\n        // ... skip oversized file ...\n        continue;\n    }\n    let path = repo.root().join(&candidate.input_path);\n    let bytes = fs::read(&path)\n        .map_err(|err| KcsError::io(err.to_string(), path.display().to_string()))?;\n    // ... hash consistency guard ...\n    let prepare = prepare_units(PrepareStageRequest {\n        raw_hash: raw_hash.clone(),\n        media_type: candidate.media_type.clone(),\n        input_path: path.display().to_string(),\n        tool_profile_hash: prepare_profile_hash.clone(),\n    })\n    .map_err(pipeline_to_kcs)?;",
+      "endLine": 9118,
+      "explanation": "The closest control is a raw byte-size cap. After an accepted file passes that cap, its bytes and pathname enter `prepare_units()` without a separate logical page, unit, or parse-work ceiling.",
+      "id": "cli-byte-gate-and-prepare",
+      "label": "Ordinary indexing enforces bytes, then prepares the accepted PDF",
+      "language": "rust",
+      "path": "crates/kcs-cli/src/main.rs",
+      "role": "entrypoint",
+      "startLine": 9047
+    },
+    {
+      "code": "fn pdf_page_count(bytes: &[u8]) -> usize {\n    pdf_page_count_in_text(&String::from_utf8_lossy(bytes))\n}\n\npub fn pdf_page_count_in_text(text: &str) -> usize {\n    let pages = text\n        .match_indices(\"/Type\")\n        .filter(|(index, _)| {\n            let tail = bounded_str_window(text, *index, 32);\n            tail.contains(\"/Page\") && !tail.contains(\"/Pages\")\n        })\n        .count();\n    pages.max(\n        text.match_indices(\"/Page\")\n            .filter(|(index, _)| {\n                let tail = bounded_str_window(text, *index, 8);\n                !tail.starts_with(\"/Pages\")\n            })\n            .count(),\n    )\n}",
+      "endLine": 437,
+      "explanation": "`pdf_page_count_in_text()` counts textual `/Page` matches in lossy-decoded input. It suppresses `/Pages`, but it does not require a token boundary or structural page object, so `/PageX` is counted and no page ceiling is enforced.",
+      "id": "lexical-page-counter",
+      "label": "Loose `/Page` prefixes define the page count",
+      "language": "rust",
+      "path": "crates/kcs-adapter/src/deterministic.rs",
+      "role": "root_control",
+      "startLine": 415
+    },
+    {
+      "code": "pub fn pdf_text_pages(bytes: &[u8]) -> Vec<String> {\n    if !bytes.starts_with(b\"%PDF\") {\n        return vec![String::from_utf8_lossy(bytes).into_owned()];\n    }\n    if !pdf_has_text_layer(bytes) {\n        return Vec::new();\n    }\n    let page_count =\n        kcs_adapter::deterministic::pdf_page_count_in_text(&String::from_utf8_lossy(bytes)).max(1);\n    let stream_pages = kcs_adapter::deterministic::pdf_stream_text_pages(bytes);\n    if !stream_pages.is_empty() {\n        return normalize_pdf_page_count(stream_pages, page_count);\n    }\n    let strings = pdf_literal_strings(bytes);\n    if strings.is_empty() {\n        return vec![pdf_text_fallback(bytes)];\n    }\n    if strings.len() == page_count {\n        return strings;\n    }\n    let mut pages = strings;\n    while pages.len() < page_count {\n        pages.push(String::new());\n    }\n    pages.truncate(page_count);\n    pages\n}",
+      "endLine": 347,
+      "explanation": "For a readable PDF, the pipeline trusts `page_count` and pads the extracted page vector with empty strings until its length equals the attacker-inflated lexical count.",
+      "id": "page-vector-padding",
+      "label": "The pipeline pads extracted pages to the lexical count",
+      "language": "rust",
+      "path": "crates/kcs-pipeline/src/prepare.rs",
+      "role": "propagation",
+      "startLine": 315
+    },
+    {
+      "code": "let unit_count = if unit_type == UnitType::Page {\n    pdf_pages.len().max(1)\n} else {\n    1\n};\nlet mut prepared_units = Vec::new();\nfor index in 0..unit_count {\n    let selector = match unit_type {\n        UnitType::Page | UnitType::Slide => (index + 1).to_string(),\n        UnitType::Sheet => \"Sheet1\".to_owned(),\n        UnitType::Image => index.to_string(),\n        UnitType::File | UnitType::HeadingSection | UnitType::Symbol => \"1\".to_owned(),\n    };\n    let unit_key = canonical_unit_key(unit_type, &selector);\n    let page_bytes = pdf_pages\n        .get(index)\n        .map(|page| page.as_bytes())\n        .unwrap_or(bytes.as_slice());\n    let unit_prepared_hash = if unit_type == UnitType::Page {\n        hash_bytes(page_bytes)\n    } else if unit_count == 1 {\n        prepared_hash.clone()\n    } else {\n        hash_bytes(format!(\"{prepared_hash}\\0{unit_key}\").as_bytes())\n    };\n    let fingerprint = if unit_type == UnitType::Page {\n        fingerprint_for_bytes(page_bytes, page_bytes)\n    } else {\n        fingerprint_for_bytes(&bytes, unit_prepared_hash.as_bytes())\n    };\n    prepared_units.push(PreparedUnit {\n        order: index as u64,\n        unit_key,\n        unit_type,\n        prepared_hash: unit_prepared_hash,\n        fingerprint,\n        mime: Some(request.media_type.clone()),\n        page_number: (unit_type == UnitType::Page).then_some(index as u64 + 1),\n    });",
+      "endLine": 163,
+      "explanation": "`unit_count` follows the padded vector length, so every false page marker can become a unit, hash, fingerprint, page number, and later markdown hint.",
+      "id": "prepared-unit-materialization",
+      "label": "One `PreparedUnit` is allocated and hashed per padded page",
+      "language": "rust",
+      "path": "crates/kcs-pipeline/src/prepare.rs",
+      "role": "sink",
+      "startLine": 125
+    },
+    {
+      "code": "let hints = request\n    .prepared_unit_hint\n    .clone()\n    .unwrap_or_else(|| vec![default_hint(&request.raw.raw_hash)]);\nlet source_text = read_source_text(&request);\n// ...\nOk(MarkdownizeResponse {\n    mode_used: MarkdownizeMode::Full,\n    updated_units: hints\n        .iter()\n        .map(|hint| markdown_unit_from_hint(hint, &request, source_text.as_deref()))\n        .collect(),\n    unchanged_unit_keys: Vec::new(),\n    added_units: Vec::new(),\n    removed_unit_keys: Vec::new(),\n    evidence_pointers: Vec::new(),\n    fallback_to_full: false,\n    reason: None,\n})",
+      "endLine": 163,
+      "explanation": "The inflated prepared-unit vector becomes an equally inflated hint iterator. `read_source_text()` has already extracted the PDF once before this loop.",
+      "id": "markdownize-all-hints",
+      "label": "Full markdownization maps every prepared hint",
+      "language": "rust",
+      "path": "crates/kcs-adapter/src/deterministic.rs",
+      "role": "propagation",
+      "startLine": 113
+    },
+    {
+      "code": "Some(text) if request.media_type == \"application/pdf\" => {\n    let page_text = read_pdf_page_text(request, hint).unwrap_or_else(|| text.to_owned());\n    format!(\"{}\\n\", page_text.trim())\n}\n// ...\nfn read_pdf_page_text(request: &MarkdownizeRequest, hint: &PreparedUnitHint) -> Option<String> {\n    let path = request.raw.path.as_ref()?;\n    let bytes = std::fs::read(path).ok()?;\n    let pages = extract_pdf_text_pages(&bytes);\n    let page_index = page_index_from_unit_key(&hint.unit_key).unwrap_or(hint.order as usize);\n    let page = pages.get(page_index).cloned()?;\n    // ...\n    Some(page)\n}",
+      "endLine": 249,
+      "explanation": "For each hint, the adapter opens `request.raw.path`, reads the full PDF, rebuilds the page vector, and selects one page. With `P` inflated hints, this is at least `P` whole-file PDF reads/extractions plus the initial extraction.",
+      "id": "per-hint-full-reparse",
+      "label": "Every PDF hint reopens and reparses the whole file",
+      "language": "rust",
+      "path": "crates/kcs-adapter/src/deterministic.rs",
+      "role": "sink",
+      "startLine": 190
+    },
+    {
+      "code": "fn lcs_fingerprint_pairs(\n    old_units: &[PreparedUnit],\n    new_units: &[PreparedUnit],\n) -> Vec<(usize, usize)> {\n    let m = old_units.len();\n    let n = new_units.len();\n    let mut dp = vec![vec![0usize; n + 1]; m + 1];\n    for i in (0..m).rev() {\n        for j in (0..n).rev() {\n            dp[i][j] = if old_units[i].fingerprint == new_units[j].fingerprint {\n                1 + dp[i + 1][j + 1]\n            } else {\n                dp[i + 1][j].max(dp[i][j + 1])\n            };\n        }\n    }\n    // ...\n}",
+      "endLine": 416,
+      "explanation": "The repeated-parse sink is sufficient on first indexing. When prior units exist, the same inflated count can also feed the LCS matrix, adding `(m+1)*(n+1)` cells.",
+      "id": "lcs-matrix-amplifier",
+      "label": "Incremental mapping can add quadratic state",
+      "language": "rust",
+      "path": "crates/kcs-pipeline/src/prepare.rs",
+      "role": "outcome",
+      "startLine": 387
+    }
+  ],
+  "confidence": "high",
+  "extensions": {
+    "candidateId": "KCS-R23-CAND-034",
+    "ledgerRowId": "KCS-R23-CAND-034",
+    "reportId": "KCS-R23-CAND-034"
+  },
+  "final_policy": "reportable",
+  "final_severity": "medium",
+  "ledger_row_id": "KCS-R23-CAND-034",
+  "priority": "P2",
+  "remediation": {
+    "recommendations": [
+      "Replace lexical `/Page` substring counting with validated page-tree traversal or a conservative bounded fallback.",
+      "Enforce a configured maximum derived PDF page/unit count before padding vectors or materializing `PreparedUnit`s.",
+      "Carry a verified page vector or byte snapshot through markdownization so page hints never reopen and reparse the whole file independently.",
+      "Degrade suspicious PDFs to a single file-level unit, controlled skip/error, or safer OCR path instead of trusting non-structural page markers.",
+      "Retain independent `(m, n)` bounds for `map_units()` so incremental LCS cannot amplify large unit sets."
+    ],
+    "regression_tests": [
+      "A PDF containing `/PageX` false markers must not derive one page per marker.",
+      "A readable PDF with many false markers must produce a bounded unit count or a controlled skip/error.",
+      "Markdownization of multiple PDF hints must perform one PDF read/extraction per request, not one per hint.",
+      "A valid PDF below the configured page limit must still produce stable page units.",
+      "Incremental mapping must reject or cap large old/new unit matrices independently of PDF parser fixes."
+    ],
+    "summary": "Structurally validate and cap PDF page/unit count, parse each PDF once into a bounded page representation, and reuse that representation for all hints. Keep a separate LCS work/cell cap for incremental mapping."
+  },
+  "rootCause": {
+    "evidenceRefs": [
+      "cli-byte-gate-and-prepare",
+      "lexical-page-counter",
+      "page-vector-padding",
+      "prepared-unit-materialization",
+      "markdownize-all-hints",
+      "per-hint-full-reparse",
+      "lcs-matrix-amplifier"
+    ],
+    "summary": "The violated invariant is that a PDF page count used for allocation and repeated parsing must be structural, bounded, and shared across consumers. KCS instead enforces only a raw byte cap, counts loose `/Page` prefixes, pads page vectors to that count, materializes one unit per padded entry, and then reparses the full PDF for every derived hint."
+  },
+  "scan_id": "f78f5d0d-2752-47a7-8d8d-3371e09d3377",
+  "schema_version": 1,
+  "severity": {
+    "level": "medium",
+    "priority": "P2",
+    "rationale": "Medium local availability impact combined with high deterministic likelihood maps to Medium/P2. The absence of code execution, credential access, network exposure, or durable cross-scope corruption keeps the finding below High."
+  },
+  "source_reports": {
+    "attack_path_report": "artifacts/05_findings/KCS-R23-CAND-034/attack_path_analysis_report.md",
+    "validation_report": "artifacts/05_findings/KCS-R23-CAND-034/validation_report.md"
+  },
+  "summary": "KCS accepts PDFs under a raw byte-size gate, but its deterministic PDF path derives page count from loose textual `/Page` prefixes. That count pads the page vector, creates one `PreparedUnit` per page, and then drives markdownization that reopens and reparses the whole PDF for each hint. A small readable PDF with many false `/PageX` markers can therefore turn admitted bytes into disproportionate CPU, heap, filesystem I/O, and index availability loss.",
+  "target_revision": "0e19f3c6489da458e93a982a333c308d92d0a0ae",
+  "title": "Deterministic PDF handling reparses the whole file once per page",
+  "validation": {
+    "assertions": [
+      "The lexical counter counts `/PageX` and other non-structural `/Page` prefixes.",
+      "A PDF with one readable text literal remains on the deterministic path and is padded to the lexical count.",
+      "Prepared and markdown unit counts follow the inflated page count.",
+      "The adapter performs one initial PDF extraction plus one full read/extraction per derived hint."
+    ],
+    "bounded_observation": {
+      "attack_input_bytes": 490,
+      "attack_markdown_units": 64,
+      "attack_minimum_full_pdf_extractions": 65,
+      "attack_prepared_units": 64,
+      "control_input_bytes": 49,
+      "control_minimum_full_pdf_extractions": 2,
+      "control_prepared_units": 1,
+      "false_page_markers": 63
+    },
+    "confidence": "high",
+    "evidenceRefs": [
+      "lexical-page-counter",
+      "page-vector-padding",
+      "prepared-unit-materialization",
+      "markdownize-all-hints",
+      "per-hint-full-reparse"
+    ],
+    "limitations": [
+      "No unsafe stress-size input was run.",
+      "The largest practical marker count and host-specific wall-clock/RSS impact were not measured.",
+      "The impact is local availability, not code execution, credential access, or external send."
+    ],
+    "method": "static source trace plus bounded target-runtime attack/control exercise",
+    "summary": "The saved target-runtime control used one readable PDF-like input with 63 false `/PageX` markers. It produced 64 prepared units, 64 markdown units, and a source-trace minimum of 65 whole-file PDF extractions from 490 bytes; the 49-byte honest control produced one unit and two extractions. No stress-size input, external endpoint, credential, or production store was used."
+  },
+  "writeup": {
+    "pocDirectory": "findings/tac-kcs-r23-cand-034-pdf-reparse-amplification/poc",
+    "reportPath": "findings/tac-kcs-r23-cand-034-pdf-reparse-amplification/tac-kcs-r23-cand-034-pdf-reparse-amplification.md",
+    "reportSha256": "0d59c2be002e95ca43e881465a8941c92d455150d476fdd16c0f616db90009c3"
+  }
+}

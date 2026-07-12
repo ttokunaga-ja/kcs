@@ -1,0 +1,808 @@
+[
+  {
+    "candidate_id": "KCS-R23-CAND-037",
+    "title": "OCR verification manifest can traverse outside its fixture tree",
+    "ledger_row_id": "KCS-R23-CAND-037",
+    "instance_key": "KCS-R23-CAND-037",
+    "affected_locations": [
+      {
+        "label": "external_manifest_source",
+        "path": "experiments/ocr-verification/run_ocr.py",
+        "lines": "28-66",
+        "detail": "--ground-truth selects JSON whose fixture_pdf value is resolved into the path used by live OCR."
+      },
+      {
+        "label": "root_control_gap",
+        "path": "experiments/ocr-verification/run_ocr.py",
+        "lines": "66-68",
+        "detail": "The selected path is resolved and checked only for existence; no canonical fixture-root containment check runs."
+      },
+      {
+        "label": "live_dispatch",
+        "path": "experiments/ocr-verification/run_ocr.py",
+        "lines": "72-87",
+        "detail": "Both non-dry sync and batch branches pass the escaped path into live OCR helpers."
+      },
+      {
+        "label": "third_party_request_construction",
+        "path": "experiments/ocr-verification/run_ocr.py",
+        "lines": "128-165",
+        "detail": "The sync and batch helpers construct the OCR request using the selected path."
+      },
+      {
+        "label": "whole_file_read_sink",
+        "path": "experiments/ocr-verification/run_ocr.py",
+        "lines": "214-219",
+        "detail": "read_bytes loads the complete selected file and embeds it in a data URI."
+      },
+      {
+        "label": "late_non_control",
+        "path": "experiments/ocr-verification/run_ocr.py",
+        "lines": "93-106",
+        "detail": "relative_to(ROOT) is evaluated only while building output metadata after OCR dispatch."
+      }
+    ],
+    "attack_steps": [
+      "A lower-trust OCR ground-truth manifest supplies an absolute or parent-traversing fixture_pdf value.",
+      "A developer explicitly invokes experiments/ocr-verification/run_ocr.py in a live, non-dry mode with SDK support and a configured service credential.",
+      "The runner resolves the path and checks only existence at experiments/ocr-verification/run_ocr.py:66-68, without proving containment under the fixture tree.",
+      "The runner reads and base64-encodes the complete selected file at experiments/ocr-verification/run_ocr.py:214-219 and dispatches it to the fixed OCR service before the late relative_to(ROOT) check."
+    ],
+    "assumptions": [
+      "The developer or CI identity can read the escaped target.",
+      "The developer chooses the supplied manifest and intentionally enables a live experiment run.",
+      "The configured OCR service receives the file; provider-side retention or adversarial access was not established."
+    ],
+    "context": "This is an explicitly invoked developer experiment with no demonstrated production or automatic caller. The code path is real, but its privilege and deployment context are materially narrower than the shipped KCS CLI.",
+    "in_scope": "yes, but only within the threat model's explicitly limited developer-tooling boundary (I2, I3, and I11)",
+    "exposure": "not public; local developer CLI input followed by an outbound request to a fixed OCR service",
+    "identity": "A trusted developer or CI identity selects the manifest and performs the read/send; the manifest may be lower trust, but no lower-privileged execution identity is gained.",
+    "cross_boundary": "yes: a manifest-selected file outside the intended fixture root can cross to the OCR service, but only through the developer's explicit credentialed invocation",
+    "vector": "none",
+    "preconditions": [
+      "Explicit live, non-dry developer invocation",
+      "SDK availability and configured API key",
+      "A developer-readable escaped file",
+      "A crafted or mistaken manifest selected by the developer"
+    ],
+    "attacker_control": "plausible over fixture_pdf in the selected manifest; no control over the developer execution identity or fixed service destination is established",
+    "category": "developer-tool path traversal and unintended file disclosure",
+    "mitigations": [
+      "The script is outside the production Rust workspace and requires explicit invocation.",
+      "The service destination is fixed.",
+      "The path is resolved and checked for existence, although containment is not checked before send.",
+      "A late relative_to(ROOT) check detects the escape only after dispatch."
+    ],
+    "auth_scope": "admin-only (explicit developer/CI operator workflow)",
+    "impact_surface": "data",
+    "target_reach": "single developer experiment invocation and one readable file",
+    "secrets_references": [
+      "Configured OCR service API key is required but is sent to its intended service.",
+      "The escaped file may contain sensitive local data."
+    ],
+    "counterevidence": [
+      "No production or automatic CI caller was demonstrated.",
+      "The developer explicitly selects the manifest and live mode.",
+      "The fixed provider, not a manifest-selected destination, receives the bytes.",
+      "The target must already be readable by the developer or CI identity."
+    ],
+    "blindspots": [
+      "No external request was made, so provider retention and access were not measured.",
+      "No repository evidence establishes routine consumption of untrusted manifests."
+    ],
+    "controls": [
+      "Require canonical containment beneath the fixture root before existence checks, file reads, hashing, client construction, or dispatch.",
+      "Reject absolute and parent-traversing fixture_pdf values before entering live mode."
+    ],
+    "confidence": "high (0.98) for the code path; high for suppression under the explicit developer-only policy",
+    "impact": "low",
+    "likelihood": "low",
+    "final_policy": "ignore",
+    "final_severity": "none",
+    "priority": null,
+    "rationale": "The source-to-sink path is valid, but it is developer-only, requires an explicit credentialed live run, and establishes no privilege delta for a lower-privileged execution identity. Independently, impact=low maps to ignore for every likelihood under the mandatory matrix."
+  },
+  {
+    "candidate_id": "KCS-R23-CAND-038",
+    "title": "Accepted markdown adapter targets are discarded before fixed Mistral execution",
+    "ledger_row_id": "KCS-R23-CAND-038",
+    "instance_key": "KCS-R23-CAND-038",
+    "affected_locations": [
+      {
+        "label": "accepted_surface",
+        "path": "crates/kcs-adapter/src/tool_lock.rs",
+        "lines": "106-231",
+        "detail": "Markdown declarations accept execution kind, command, arguments, URL, model, and authentication fields."
+      },
+      {
+        "label": "lossy_projection",
+        "path": "crates/kcs-adapter/src/tool_lock.rs",
+        "lines": "376-428",
+        "detail": "DeclaredAdapter retains only tool ID, model, and auth and drops the accepted execution target fields."
+      },
+      {
+        "label": "fixed_dispatch",
+        "path": "crates/kcs-adapter/src/catalog.rs",
+        "lines": "82-156",
+        "detail": "Normal production markdown execution always constructs the Mistral OCR adapter, consulting only the retained declared model."
+      },
+      {
+        "label": "credential_data_sink",
+        "path": "crates/kcs-adapter/src/mistral_ocr.rs",
+        "lines": "47-138",
+        "detail": "The retained declared secret and freshly read document bytes are sent through the fixed Mistral/effective-base client."
+      },
+      {
+        "label": "preview_gap",
+        "path": "crates/kcs-cli/src/main.rs",
+        "lines": "8736-8797",
+        "detail": "Preview shows generic network policy rather than the declared and effective command/URL recipient."
+      }
+    ],
+    "attack_steps": [
+      "An operator configures a markdown adapter declaration containing a target kind, command or URL, model, and authentication reference.",
+      "Validation accepts those fields, but projection to DeclaredAdapter at crates/kcs-adapter/src/tool_lock.rs:376-428 drops kind, command, arguments, and URL.",
+      "The production catalog unconditionally constructs the Mistral OCR implementation while retaining the declared model and authentication reference.",
+      "After ordinary online, credential, media, and budget gates, the fixed Mistral/effective-base client attaches the retained bearer credential and uploads the eligible document to a recipient different from the accepted declaration."
+    ],
+    "assumptions": [
+      "The operator reasonably relies on the accepted target declaration rather than separately matching MISTRAL_API_BASE to it.",
+      "The declared authentication secret resolves and an eligible document is processed.",
+      "General online approval is granted, but it is not approval for the substituted recipient."
+    ],
+    "context": "This is a real production adapter-selection workflow. Device-local configuration is operator-controlled, yet KCS turns a declaration for one provider or command into an authenticated document request to another provider, creating an unintended-recipient confidentiality boundary.",
+    "in_scope": "yes; the threat model expressly keeps discarded adapter declarations and unexpected credential forwarding in scope under I3",
+    "exposure": "not inbound-public; local operator configuration triggers outbound network disclosure to the fixed Mistral or ambient effective base",
+    "identity": "The KCS operator authorizes the declared adapter; the lower-trust unintended Mistral/effective-base recipient gains document and credential access not conferred by that declaration.",
+    "cross_boundary": "yes: credential and document bytes cross from the approved declared target boundary to a different external service",
+    "vector": "none",
+    "preconditions": [
+      "A non-Mistral or command/offline markdown declaration is accepted",
+      "A resolvable declared bearer credential",
+      "General online opt-in and an eligible OCR document",
+      "Later operator invocation and available budget"
+    ],
+    "attacker_control": "no direct control of device-local configuration is required; the unintended external recipient is lower trust and passively receives data because KCS substitutes the target",
+    "category": "adapter destination confusion and wrong-recipient credential/document disclosure",
+    "mitigations": [
+      "Device-local tools configuration is normally operator-controlled.",
+      "Outer online opt-in, credential presence, media eligibility, and budget checks still apply.",
+      "The declared model is retained for markdown execution.",
+      "Documentation describes an official-adapter MVP, although unsupported declarations are accepted rather than rejected."
+    ],
+    "auth_scope": "admin-only (local KCS operator), with disclosure to an unintended remote recipient",
+    "impact_surface": "data and identity",
+    "target_reach": "one configured markdown adapter workflow and each eligible document processed through it",
+    "secrets_references": [
+      "Declared markdown authentication secret, attached as bearer authentication",
+      "Eligible document bytes uploaded for OCR"
+    ],
+    "counterevidence": [
+      "The operator controls tools.toml and must enable online execution.",
+      "The current MVP is described as supporting official adapters.",
+      "No live loopback request captured the substituted request.",
+      "An operator who independently aligns MISTRAL_API_BASE with the declared service can avoid recipient drift."
+    ],
+    "blindspots": [
+      "Dynamic request contents were not captured, although the static accepted-config-to-sink trace is complete.",
+      "The prevalence of non-Mistral declarations in real deployments is unknown."
+    ],
+    "controls": [
+      "Reject unsupported execution kinds and targets before approval, or dispatch only the exact declared target.",
+      "Bind preview, approval, credential resolution, model, and final request origin to the same canonical adapter identity."
+    ],
+    "confidence": "high (0.96)",
+    "impact": "high",
+    "likelihood": "medium",
+    "final_policy": "reportable",
+    "final_severity": "medium",
+    "priority": "P2",
+    "rationale": "The operator-only trigger does not force suppression because KCS creates a concrete privilege delta for an unintended external recipient: it receives a provider-specific credential and document that the accepted declaration did not authorize. The explicit configuration and online-invocation prerequisites constrain likelihood to medium; high impact multiplied by medium likelihood maps mechanically to medium."
+  },
+  {
+    "candidate_id": "KCS-R23-CAND-039",
+    "title": "Accepted embedding adapter targets are discarded before fixed Gemini execution",
+    "ledger_row_id": "KCS-R23-CAND-039",
+    "instance_key": "KCS-R23-CAND-039",
+    "affected_locations": [
+      {
+        "label": "accepted_surface",
+        "path": "crates/kcs-adapter/src/tool_lock.rs",
+        "lines": "106-231",
+        "detail": "Embedding declarations accept execution target, model, and authentication fields."
+      },
+      {
+        "label": "lossy_projection",
+        "path": "crates/kcs-adapter/src/tool_lock.rs",
+        "lines": "376-428",
+        "detail": "DeclaredAdapter drops execution kind, command, arguments, and URL."
+      },
+      {
+        "label": "auth_triggered_dispatch",
+        "path": "crates/kcs-adapter/src/catalog.rs",
+        "lines": "313-401",
+        "detail": "Any declared embedding authentication reference selects real execution, which always constructs GeminiEmbeddingAdapter::default and ignores the declared target/model."
+      },
+      {
+        "label": "credential_data_sink",
+        "path": "crates/kcs-adapter/src/gemini_embedding.rs",
+        "lines": "48-149,206-220",
+        "detail": "The fixed Gemini model/base client sends the retained declared secret and input text in authenticated requests."
+      },
+      {
+        "label": "preview_gap",
+        "path": "crates/kcs-cli/src/main.rs",
+        "lines": "8736-8797",
+        "detail": "Preview shows generic embedding/network policy rather than the declared and effective provider/model target."
+      }
+    ],
+    "attack_steps": [
+      "An operator configures an embedding adapter declaration containing a target kind, command or URL, model, and authentication reference.",
+      "Validation accepts the declaration, but projection at crates/kcs-adapter/src/tool_lock.rs:376-428 drops the execution target fields.",
+      "The presence of the declared authentication reference activates real embedding execution, whose profile and implementation are fixed to the adopted Gemini adapter and model.",
+      "After ordinary online and budget gates, the fixed Gemini/effective-base client attaches the retained API secret and sends the input text to a recipient and model different from the accepted declaration."
+    ],
+    "assumptions": [
+      "The operator reasonably relies on the accepted embedding target and model declaration.",
+      "The declared authentication secret resolves and text is eligible for embedding.",
+      "General online approval does not authorize silent substitution of the declared recipient and model."
+    ],
+    "context": "This is a production embedding workflow. Operator-controlled configuration is projected into a fixed Gemini implementation, allowing an unintended remote provider to receive a custom-provider credential and indexed text.",
+    "in_scope": "yes; discarded declarations, destination binding, and unexpected credential forwarding are explicit I3 concerns",
+    "exposure": "not inbound-public; local operator configuration triggers outbound disclosure to Gemini or an ambient GEMINI_API_BASE",
+    "identity": "The KCS operator authorizes the declared embedding adapter; the lower-trust unintended Gemini/effective-base recipient gains credential and text access not granted by that declaration.",
+    "cross_boundary": "yes: the declared provider/model boundary is crossed when the fixed Gemini client receives and transmits the retained secret and text",
+    "vector": "none",
+    "preconditions": [
+      "A non-Gemini, offline, command, private-URL, or different-model embedding declaration is accepted",
+      "A resolvable declared embedding credential",
+      "General online opt-in and an eligible embedding operation",
+      "Later operator invocation and available budget"
+    ],
+    "attacker_control": "no direct control of device-local configuration is required; the unintended remote provider is lower trust and receives data through KCS's target substitution",
+    "category": "adapter destination/model confusion and wrong-recipient credential/text disclosure",
+    "mitigations": [
+      "Device-local configuration is normally controlled by the operator.",
+      "Online opt-in, credential availability, and budget controls still gate execution.",
+      "The current MVP is documented around official adapters.",
+      "A programmatic or GEMINI_API_BASE override can align the fixed client, but is not derived from the declaration."
+    ],
+    "auth_scope": "admin-only (local KCS operator), with disclosure to an unintended remote recipient",
+    "impact_surface": "data and identity",
+    "target_reach": "one configured embedding workflow and each eligible text processed through it",
+    "secrets_references": [
+      "Declared embedding authentication secret, used as x-goog-api-key",
+      "Input document or chunk text sent for embedding"
+    ],
+    "counterevidence": [
+      "The operator controls tools.toml and must enable online execution.",
+      "The current MVP is described as supporting official adapters.",
+      "No live loopback request captured the fixed-client send.",
+      "An independently aligned GEMINI_API_BASE can avoid recipient drift."
+    ],
+    "blindspots": [
+      "Dynamic request contents were not captured, although the static target-loss-to-sink trace is complete.",
+      "The prevalence of non-Gemini declarations in real deployments is unknown."
+    ],
+    "controls": [
+      "Reject unsupported embedding declarations, or dispatch only the exact declared target and model.",
+      "Bind approval, credential resolution, declared profile/model, and final request origin to one canonical adapter identity."
+    ],
+    "confidence": "high (0.97)",
+    "impact": "high",
+    "likelihood": "medium",
+    "final_policy": "reportable",
+    "final_severity": "medium",
+    "priority": "P2",
+    "rationale": "Although an operator initiates the workflow, silent target substitution grants the unintended external recipient access to a credential and indexed text, so the hard operator-only/no-privilege-delta suppression does not apply. Explicit configuration and execution prerequisites constrain likelihood to medium; the matrix maps high impact and medium likelihood to medium."
+  },
+  {
+    "candidate_id": "KCS-R23-CAND-040",
+    "title": "Gemini API keys are retained across cross-origin redirects",
+    "ledger_row_id": "KCS-R23-CAND-040",
+    "instance_key": "KCS-R23-CAND-040",
+    "affected_locations": [
+      {
+        "label": "credential_source",
+        "path": "crates/kcs-adapter/src/gemini_embedding.rs",
+        "lines": "71-80",
+        "detail": "Resolves the declared embedding secret or GEMINI_API_KEY."
+      },
+      {
+        "label": "custom_header_sink",
+        "path": "crates/kcs-adapter/src/gemini_embedding.rs",
+        "lines": "120-148",
+        "detail": "Places the credential in x-goog-api-key on a top-level ureq POST with no redirect policy."
+      },
+      {
+        "label": "production_reachability",
+        "path": "crates/kcs-adapter/src/gemini_embedding.rs",
+        "lines": "206-220,259-285",
+        "detail": "The adopted default adapter reaches the environment-backed client's embed call."
+      },
+      {
+        "label": "dependency_selection",
+        "path": "Cargo.toml",
+        "lines": "17-29",
+        "detail": "Selects ureq without a configured wrapper or redirect override."
+      },
+      {
+        "label": "dependency_pin",
+        "path": "Cargo.lock",
+        "lines": "1396-1411",
+        "detail": "Pins ureq 2.12.1, whose resolved redirect code defaults to five redirects and retains custom headers."
+      }
+    ],
+    "attack_steps": [
+      "An operator performs an approved embedding operation using a valid Gemini credential.",
+      "KCS sends the request with the credential in x-goog-api-key through the default ureq 2.12.1 agent.",
+      "The accepted origin returns a 301, 302, or 303 with a cross-origin or downgraded Location.",
+      "ureq rewrites the POST to a bodyless GET, strips standard Authorization/Cookie headers but retains x-goog-api-key, and sends that credential to the redirect origin."
+    ],
+    "assumptions": [
+      "The initially approved HTTPS origin is trusted enough to receive the key but may be compromised, misconfigured, or redirect through a lower-trust origin.",
+      "The redirected origin can observe the custom API-key header.",
+      "A cross-origin 301/302/303 occurs; this behavior was not established for the default Google endpoint."
+    ],
+    "context": "Normal adopted embedding execution reaches a remote-response trust boundary. The configured service identity is an operator choice, but redirect destinations are remote-controlled and are not rebound to that approved identity.",
+    "in_scope": "yes; credential-origin and redirect-destination binding are explicit I3 security properties",
+    "exposure": "outbound authenticated adapter request with a remote-controlled redirect response; no KCS listener exists",
+    "identity": "The approved Gemini service or an accepted intermediary controls the redirect response; the unauthorized redirect origin receives the reusable API credential.",
+    "cross_boundary": "yes: x-goog-api-key crosses from the approved provider origin to a second, unapproved origin",
+    "vector": "remote",
+    "preconditions": [
+      "Valid Gemini credential and per-adapter network opt-in",
+      "An operator-driven embedding operation",
+      "The accepted origin returns a cross-origin 301, 302, or 303",
+      "The redirect target is observable by a lower-trust recipient"
+    ],
+    "attacker_control": "yes over the redirect target when the accepted origin, compromised service, or relevant intermediary can emit the response; no default-endpoint open redirect was proven",
+    "category": "cross-origin credential forwarding on redirect",
+    "mitigations": [
+      "HTTPS authenticates the initial origin against ordinary on-path response injection.",
+      "Per-adapter opt-in and a valid credential are required.",
+      "The embedding body is discarded on 301/302/303, so this path proves credential rather than text disclosure.",
+      "Body-bearing 307/308 POST responses are not automatically followed by this exact path.",
+      "ureq removes standard Authorization and Cookie headers, but not x-goog-api-key."
+    ],
+    "auth_scope": "internal-only (credentialed, operator-approved adapter operation)",
+    "impact_surface": "identity",
+    "target_reach": "one Gemini credential and each embedding request encountering a qualifying redirect",
+    "secrets_references": [
+      "Declared embedding secret or GEMINI_API_KEY",
+      "x-goog-api-key request header retained across redirect"
+    ],
+    "counterevidence": [
+      "No open redirect or cross-origin redirect was established at Google's default endpoint.",
+      "A malicious custom base already receives the key on the initial request.",
+      "HTTPS blocks an ordinary on-path attacker from injecting the first redirect.",
+      "The request body is not forwarded on the proven 301/302/303 route."
+    ],
+    "blindspots": [
+      "No two-origin loopback capture was run.",
+      "The frequency and destination behavior of real accepted-origin redirects are unknown."
+    ],
+    "controls": [
+      "Disable redirects for credential-bearing requests or enforce same-origin and no-scheme-downgrade redirect policy.",
+      "Strip all provider credential headers before any origin change."
+    ],
+    "confidence": "high (0.96) for header retention; medium for real-world redirect occurrence",
+    "impact": "high",
+    "likelihood": "medium",
+    "final_policy": "reportable",
+    "final_severity": "medium",
+    "priority": "P2",
+    "rationale": "A remote in-scope actor can cause a reusable credential to cross an approved origin boundary. The missing evidence that the default endpoint actually issues such a redirect constrains likelihood to medium. The mandatory matrix maps high impact and medium likelihood to medium."
+  },
+  {
+    "candidate_id": "KCS-R23-CAND-041",
+    "title": "closing snapshot can ingest a newly introduced Tier-A secret",
+    "ledger_row_id": "KCS-R23-CAND-041",
+    "instance_key": "KCS-R23-CAND-041",
+    "affected_locations": [
+      {
+        "label": "manual preview",
+        "path": "crates/kcs-cli/src/main.rs",
+        "lines": "456-472"
+      },
+      {
+        "label": "index preview/closing snapshot",
+        "path": "crates/kcs-cli/src/main.rs",
+        "lines": "575-580,623-635"
+      },
+      {
+        "label": "path-only rescan",
+        "path": "crates/kcs-core/src/scope.rs",
+        "lines": "254-299"
+      }
+    ],
+    "attack_steps": [
+      "KCS previews a scope and converts only the names currently classified as ignored or Tier-A secret into an exclusion set.",
+      "During the interval before the closing snapshot, a local or synced content contributor creates or renames a direct child to .env, a PEM name, or another Tier-A secret name.",
+      "The closing snapshot re-enumerates the root but excludes only names in the stale set and does not rerun Tier-A classification.",
+      "KCS reads the newly introduced secret, writes its plaintext raw object, and publishes it in local commit history."
+    ],
+    "assumptions": [
+      "A lower-trust local or synced contributor can change direct-child names during the preview-to-snapshot interval.",
+      "The newly introduced file is readable by KCS and its name would be Tier-A if classified at last use.",
+      "The owner-only archive may later be retained, copied, or consumed even though immediate third-party disclosure is not shown."
+    ],
+    "context": "Manual snapshot and index are real product workflows. The defect crosses the current secret-classification control into authoritative archive history, but the immediate sink is the operator's owner-only local store.",
+    "in_scope": "yes; mutable-path stable-byte use, secret policy, and archive provenance are explicit I2, I3, and I7 concerns",
+    "exposure": "no network listener; local or synced scope mutation during a normal snapshot/index operation",
+    "identity": "An untrusted local content or shared/synced contributor changes scope contents while KCS runs under the operator identity.",
+    "cross_boundary": "yes: a name that should be excluded as Tier-A crosses from the untrusted scope into trusted plaintext CAS and commit history",
+    "vector": "none",
+    "preconditions": [
+      "Concurrent write or rename access to the selected scope",
+      "A Tier-A file introduced after preview but before closing enumeration",
+      "A manual snapshot or index operation covering that interval"
+    ],
+    "attacker_control": "yes over direct-child name and bytes for an in-scope local or synced content contributor; control of the precise interleaving is plausible but was not dynamically measured",
+    "category": "TOCTOU secret-classification bypass and unintended archival",
+    "mitigations": [
+      "Tier-A files present during preview are classified and added to the exclusion set.",
+      "The snapshot excludes exact names in that set.",
+      "The .kcs store is intended to be owner-only.",
+      "No automatic remote send from this archived object was established."
+    ],
+    "auth_scope": "internal-only (local scope contributor versus KCS operator/store boundary)",
+    "impact_surface": "data",
+    "target_reach": "one scope and each newly introduced Tier-A file caught by the interleaving",
+    "secrets_references": [
+      "Tier-A secret-bearing direct-child file",
+      "Plaintext raw CAS object and commit-history reference"
+    ],
+    "counterevidence": [
+      "Stable files and secrets present during preview are excluded correctly.",
+      "Immediate disclosure outside the owner-only local archive was not shown.",
+      "No barrier-controlled race measured practical timing."
+    ],
+    "blindspots": [
+      "The practical width and frequency of the preview-to-closing-snapshot interleaving were not measured.",
+      "Downstream sharing or online processing of the archived secret was not traced."
+    ],
+    "controls": [
+      "Classify every closing-snapshot entry at last use before raw persistence.",
+      "Alternatively bind each preview candidate to an expected name and byte identity and reject drift before publication."
+    ],
+    "confidence": "high (0.96) for the interleaving trace; medium for occurrence frequency",
+    "impact": "medium",
+    "likelihood": "medium",
+    "final_policy": "reportable",
+    "final_severity": "low",
+    "priority": "P3",
+    "rationale": "The in-scope local/synced contributor crosses a real secret-classification boundary in a production workflow, so internal exposure alone does not suppress it. Impact is bounded to local archive inclusion and the race was not measured, supporting medium likelihood. The matrix maps medium impact and medium likelihood to low."
+  },
+  {
+    "candidate_id": "KCS-R23-CAND-042",
+    "title": "closing snapshot can attach normalization metadata to different bytes",
+    "ledger_row_id": "KCS-R23-CAND-042",
+    "instance_key": "KCS-R23-CAND-042",
+    "affected_locations": [
+      {
+        "label": "scan-to-normalize guard",
+        "path": "crates/kcs-cli/src/main.rs",
+        "lines": "9077-9103"
+      },
+      {
+        "label": "path-keyed normalize map",
+        "path": "crates/kcs-cli/src/main.rs",
+        "lines": "9390-9426"
+      },
+      {
+        "label": "closing read/attach",
+        "path": "crates/kcs-core/src/scope.rs",
+        "lines": "254-299"
+      },
+      {
+        "label": "rebuild consumer",
+        "path": "crates/kcs-cli/src/main.rs",
+        "lines": "3045-3090"
+      }
+    ],
+    "attack_steps": [
+      "Index reads and hashes a candidate, normalizes those verified bytes, and stores units for the old raw hash.",
+      "It records only a path-keyed NormalizeRef containing tool_profile_hash and generation.",
+      "A local or synced content contributor changes the file after normalization but before the closing snapshot.",
+      "The closing snapshot rereads the path, records the new raw hash, and attaches the stale NormalizeRef without comparing the expected old raw hash.",
+      "Rebuild resolves the new raw hash with the stale profile/generation, producing missing or skipped enrichment and false historical provenance."
+    ],
+    "assumptions": [
+      "A lower-trust contributor can modify the file during an index run.",
+      "The closing snapshot executes after the modification.",
+      "Consumers rely on the published tree and normalization references for historical provenance or enrichment."
+    ],
+    "context": "This is a production index-to-auto-snapshot workflow. The initial scan-to-normalize guard is sound, but the later publication loses the raw-byte binding and crosses the untrusted working-file boundary into authoritative history.",
+    "in_scope": "yes; stable-byte use, CAS/DAG provenance, and search/evidence identity are explicit I2, I7, and I8 concerns",
+    "exposure": "no network listener; local or synced file mutation during a normal index operation",
+    "identity": "An untrusted local content or shared/synced contributor changes a working file while KCS publishes history under the operator identity.",
+    "cross_boundary": "yes: normalization metadata for old bytes is attached to a trusted tree entry naming new bytes",
+    "vector": "none",
+    "preconditions": [
+      "Concurrent modification access to the selected scope",
+      "A file change after normalization and before closing snapshot",
+      "A later rebuild or consumer that relies on the published provenance tuple"
+    ],
+    "attacker_control": "yes over working-file bytes and timing for an in-scope local or synced contributor; deterministic scheduling was not demonstrated",
+    "category": "TOCTOU provenance confusion and stale normalization binding",
+    "mitigations": [
+      "Index rehashes scan candidates before normalization.",
+      "Normalized units themselves remain keyed to the old raw hash.",
+      "Rebuild encounters missing/skipped enrichment rather than silently resolving unrelated old units as valid new content.",
+      "The affected history remains local to the selected scope."
+    ],
+    "auth_scope": "internal-only (local scope contributor versus archive provenance boundary)",
+    "impact_surface": "data",
+    "target_reach": "one scope and each file changed in the normalization-to-snapshot interval",
+    "secrets_references": [],
+    "counterevidence": [
+      "The earlier scan-to-normalize raw-hash guard is correct.",
+      "The demonstrated consequence is missing/skipped enrichment and false provenance, not arbitrary file read or code execution.",
+      "No scheduler-controlled race was run."
+    ],
+    "blindspots": [
+      "The practical interleaving frequency was not measured.",
+      "No downstream decision that turns the false provenance into broader compromise was demonstrated."
+    ],
+    "controls": [
+      "Carry expected raw_hash with every path-to-NormalizeRef mapping.",
+      "Reject or drain any file whose closing-snapshot raw hash differs before attaching normalization metadata."
+    ],
+    "confidence": "high (0.97) for the static interleaving; medium for occurrence frequency",
+    "impact": "medium",
+    "likelihood": "medium",
+    "final_policy": "reportable",
+    "final_severity": "low",
+    "priority": "P3",
+    "rationale": "A realistic lower-trust scope contributor can cross the provenance boundary in a production workflow, but the impact is bounded to local historical integrity/enrichment and the timing was not measured. Medium impact and medium likelihood map mechanically to low."
+  },
+  {
+    "candidate_id": "KCS-R23-CAND-043",
+    "title": "CAS write accepts a pre-existing corrupt destination as success",
+    "ledger_row_id": "KCS-R23-CAND-043",
+    "instance_key": "KCS-R23-CAND-043",
+    "affected_locations": [
+      {
+        "label": "unverified early success",
+        "path": "crates/kcs-core/src/cas.rs",
+        "lines": "155-163"
+      },
+      {
+        "label": "later read verification",
+        "path": "crates/kcs-core/src/cas.rs",
+        "lines": "78-100"
+      },
+      {
+        "label": "snapshot publication",
+        "path": "crates/kcs-core/src/scope.rs",
+        "lines": "413-520"
+      }
+    ],
+    "attack_steps": [
+      "A shared, copied, or preseeded scope contains a wrong-byte or wrong-type entry at the exact CAS fanout path for a known raw hash.",
+      "The operator adopts the lower-trust store and snapshots content whose expected hash maps to that occupied path.",
+      "atomic_write at crates/kcs-core/src/cas.rs:155-163 sees the destination exists and returns success without verifying type, bytes, or digest.",
+      "Snapshot publishes tree, commit, and refs naming the expected hash even though the durable slot is corrupt.",
+      "Later reads detect the mismatch and fail, while future legitimate writes continue accepting the occupied slot as successful."
+    ],
+    "assumptions": [
+      "The attacker can supply a copied, shared, synced, or preseeded store without already having unrestricted write access to the operator's private live store.",
+      "The attacker knows or supplies content whose hash selects the poisoned slot.",
+      "The operator performs a snapshot after adopting that state."
+    ],
+    "context": "CAS and archive history are real product surfaces. Direct arbitrary same-user tampering with an already private live store is excluded, but adoption of attacker-supplied archive state is an explicit trust boundary.",
+    "in_scope": "yes for adopted/shared state under I7 and I9; same-user arbitrary mutation of a private live store is excluded",
+    "exposure": "no network listener; malicious state arrives through copied, shared, synced, or preseeded scope adoption",
+    "identity": "An untrusted archive-state contributor supplies the occupied CAS slot; KCS later consumes it under the operator identity.",
+    "cross_boundary": "yes: lower-trust persisted state is accepted as a successful authoritative CAS write and published into trusted refs",
+    "vector": "none",
+    "preconditions": [
+      "Adoption of a lower-trust .kcs store",
+      "A corrupt entry at an exact predictable CAS fanout path",
+      "Snapshot of content selecting that hash"
+    ],
+    "attacker_control": "yes over preseeded/shared archive state and potentially the matching scope content; ordinary private-live-store tampering is not relied upon",
+    "category": "persisted-state poisoning and CAS write integrity failure",
+    "mitigations": [
+      "CAS paths are derived from lowercase SHA-256 hashes.",
+      "Read paths verify content digest and detect the corrupt slot.",
+      "The normal live store is intended to be owner-only.",
+      "Impact is recoverable local archive integrity/availability rather than external overwrite."
+    ],
+    "auth_scope": "internal-only (archive adoption and local snapshot workflow)",
+    "impact_surface": "data",
+    "target_reach": "one adopted store and each object hash whose slot is preseeded corrupt",
+    "secrets_references": [],
+    "counterevidence": [
+      "Read-time digest verification prevents silent return of wrong bytes.",
+      "An attacker with unrestricted write access to the private live store already has equivalent authority and is out of scope.",
+      "The exact CAS slot must match content the operator later snapshots.",
+      "The corruption can be detected and manually repaired."
+    ],
+    "blindspots": [
+      "No end-to-end adopted-store runtime was recorded in the saved validation.",
+      "The prevalence of copied or preseeded untrusted stores is unknown."
+    ],
+    "controls": [
+      "When a destination exists, verify regular-file type and exact digest before returning success.",
+      "Atomically reject or quarantine mismatched occupied slots so later valid writes can recover."
+    ],
+    "confidence": "high (0.99)",
+    "impact": "medium",
+    "likelihood": "medium",
+    "final_policy": "reportable",
+    "final_severity": "low",
+    "priority": "P3",
+    "rationale": "The attack relies on the explicitly in-scope adopted/shared-state contributor, not equivalent private-store authority, and crosses into authoritative archive publication. Exact-slot and adoption prerequisites constrain likelihood while impact is recoverable local corruption. The matrix maps medium impact and medium likelihood to low."
+  },
+  {
+    "candidate_id": "KCS-R23-CAND-044",
+    "title": "Snapshot publication is not durably atomic across objects and refs",
+    "ledger_row_id": "KCS-R23-CAND-044",
+    "instance_key": "KCS-R23-CAND-044:snapshot-publication-durability",
+    "affected_locations": [
+      {
+        "label": "atomic_write_controls",
+        "path": "crates/kcs-core/src/cas.rs",
+        "lines": "155-203"
+      },
+      {
+        "label": "ref_publication_sink",
+        "path": "crates/kcs-core/src/scope.rs",
+        "lines": "508-520"
+      },
+      {
+        "label": "recovery_control",
+        "path": "crates/kcs-core/src/scope.rs",
+        "lines": "758-779, 791-841"
+      },
+      {
+        "label": "sibling_atomic_helper",
+        "path": "crates/kcs-cli/src/main.rs",
+        "lines": "4511-4537"
+      }
+    ],
+    "attack_steps": [
+      "KCS writes and syncs snapshot object or ref file contents, then renames them without syncing the containing directories.",
+      "An abrupt termination, filesystem crash, or power loss occurs between separately published object, refs/heads/main, and HEAD generations.",
+      "Restart can observe HEAD=old while main=new, or a ref whose referenced object directory entry was not durably published.",
+      "The empty-HEAD-only recovery path accepts a syntactically valid old nonempty HEAD and does not reconcile the divergent generations.",
+      "A later snapshot can continue from old ancestry, orphaning the interrupted commit or exposing shallow/missing history."
+    ],
+    "assumptions": [
+      "The target filesystem requires parent-directory synchronization for rename durability.",
+      "An interruption occurs in the publication window.",
+      "The resulting filesystem state matches one of the statically modeled asymmetric generations."
+    ],
+    "context": "Snapshot publication and crash recovery are real product workflows, but the validated source is an ordinary fault boundary rather than a lower-privileged attacker. The consequence is local recoverable history integrity/availability.",
+    "in_scope": "yes as a crash/durability invariant under I7 and I9, but not meaningfully reportable as a security vulnerability without an attacker-controlled trigger or privilege delta",
+    "exposure": "local filesystem and crash boundary only; no public, remote, or lower-privileged input surface established",
+    "identity": "The KCS operator process is interrupted by a crash, power loss, or filesystem fault; no malicious principal is shown to gain authority.",
+    "cross_boundary": "no attacker trust boundary is verified; only the durability boundary between volatile publication ordering and restarted local state is crossed",
+    "vector": "none",
+    "preconditions": [
+      "Abrupt interruption at a specific multi-rename publication point",
+      "Filesystem persistence behavior that loses or reorders unsynced directory entries",
+      "Restart and later archive use without manual repair"
+    ],
+    "attacker_control": "no; the saved evidence models a crash/fault, not an attacker-controlled interruption or lower-privileged input",
+    "category": "crash consistency and ref-publication durability",
+    "mitigations": [
+      "Each individual file's contents are sync_all'd before rename.",
+      "The scope lock serializes cooperating KCS writers.",
+      "Recovery repairs missing or empty HEAD.",
+      "Objects or commits may remain manually recoverable by hash when their directory entries survive."
+    ],
+    "auth_scope": "internal-only (local operator filesystem workflow)",
+    "impact_surface": "data",
+    "target_reach": "one local scope and one interrupted snapshot generation",
+    "secrets_references": [],
+    "counterevidence": [
+      "No attacker-controlled source or realistic lower-privileged path is established.",
+      "Each file is fully written and synced before rename, preventing ordinary torn visible file contents.",
+      "No actual power-loss or filesystem fault injection reproduced persistent loss.",
+      "The impact is local, recoverable history integrity/availability, not cross-user access or execution."
+    ],
+    "blindspots": [
+      "Filesystem-specific persistence outcomes were not measured.",
+      "The frequency of interruptions in the exact asymmetric window is unknown."
+    ],
+    "controls": [
+      "Sync each containing directory after rename and use a transaction/journal tying object and ref generations together.",
+      "On recovery, compare valid nonempty HEAD with refs/heads/main and reconcile divergent generations safely."
+    ],
+    "confidence": "high (0.86) for the static durability gap; medium for a persistent real-world failure state",
+    "impact": "medium",
+    "likelihood": "low",
+    "final_policy": "ignore",
+    "final_severity": "none",
+    "priority": null,
+    "rationale": "The saved evidence establishes a robustness defect but no realistic lower-privileged attacker path or privilege delta. The specific interruption and filesystem-state preconditions give low likelihood; the matrix maps medium impact and low likelihood to ignore, consistent with hard suppression of non-attacker local correctness defects."
+  },
+  {
+    "candidate_id": "KCS-R23-CAND-045",
+    "title": "Default log redaction omits input_path",
+    "ledger_row_id": "KCS-R23-CAND-045",
+    "instance_key": "KCS-R23-CAND-045:input-path-log-redaction",
+    "affected_locations": [
+      {
+        "label": "changed_input_source",
+        "path": "crates/kcs-cli/src/main.rs",
+        "lines": "9077-9098"
+      },
+      {
+        "label": "prior_unreadable_source",
+        "path": "crates/kcs-cli/src/main.rs",
+        "lines": "9219-9226"
+      },
+      {
+        "label": "redaction_boundary",
+        "path": "crates/kcs-core/src/scope.rs",
+        "lines": "1384-1410"
+      },
+      {
+        "label": "root_control",
+        "path": "crates/kcs-core/src/scope.rs",
+        "lines": "1489-1510"
+      }
+    ],
+    "attack_steps": [
+      "A local content contributor chooses a potentially sensitive direct-child filename.",
+      "A changed-input or prior-unreadable index condition emits an observation containing that scope-relative name under input_path.",
+      "append_observation applies recursive exact-key redaction, but input_path is absent from the seven-key mask set.",
+      "The unmasked relative filename is appended to the device-global JSONL event log under the KCS user's local data directory."
+    ],
+    "assumptions": [
+      "One of the two path-bearing index events occurs.",
+      "The filename itself conveys sensitive project, customer, incident, or secret-category metadata.",
+      "A party other than the KCS operator can later read the device log despite its owner-only intent."
+    ],
+    "context": "Logging is a real production workflow and scope metadata crosses into device-global state, but the value is only a relative filename, the sink is intended to be owner-only, and no second principal or remote disclosure was established.",
+    "in_scope": "yes under the I10 log-redaction property, but final reportability is constrained by self-only/owner-only impact",
+    "exposure": "local device-global JSONL log intended for the same OS account; no network or public exposure shown",
+    "identity": "A lower-trust content contributor controls the filename, while the same KCS user writes and ordinarily reads the device log; no lower-privileged log reader is demonstrated.",
+    "cross_boundary": "limited: metadata crosses from a selected scope into device-global logging, but no verified user, tenant, or privilege boundary is crossed",
+    "vector": "none",
+    "preconditions": [
+      "A sensitive filename",
+      "A changed-input or prior-unreadable event",
+      "Access to the KCS user's device-global event log for any third-party disclosure"
+    ],
+    "attacker_control": "yes over the repository filename; no attacker access to the owner-intended log sink is established",
+    "category": "sensitive metadata logging and incomplete structural redaction",
+    "mitigations": [
+      "Default redaction is recursive and masks seven nearby sensitive keys.",
+      "Only a scope-relative filename, not file contents, credentials, or an absolute path, is retained.",
+      "Device data directories are intended to be owner-only.",
+      "The leak requires one of two specific index observations."
+    ],
+    "auth_scope": "internal-only (same-account device logging)",
+    "impact_surface": "data",
+    "target_reach": "one device-global log and filenames appearing in two specific index events",
+    "secrets_references": [
+      "Potentially sensitive filename metadata only; no file contents or credentials"
+    ],
+    "counterevidence": [
+      "The logged path is scope-relative rather than absolute.",
+      "The log is intended for the same owner account.",
+      "No second principal, remote reader, or credential/content disclosure was shown.",
+      "The content contributor already knows the filename it supplied."
+    ],
+    "blindspots": [
+      "Actual log permissions and access by a second principal were not tested in this candidate.",
+      "The sensitivity of real filenames and frequency of triggering events are deployment-dependent."
+    ],
+    "controls": [
+      "Add input_path to the recursive structural redaction set and cover top-level and nested values in regression tests.",
+      "Preserve owner-only creation and rotation for device logs."
+    ],
+    "confidence": "high (0.93)",
+    "impact": "low",
+    "likelihood": "medium",
+    "final_policy": "ignore",
+    "final_severity": "none",
+    "priority": null,
+    "rationale": "The bug is source-correct, but the demonstrated effect is a relative filename retained in an owner-intended same-account log, with no verified privilege boundary or attacker-readable sink. Impact=low maps to ignore for every likelihood under the mandatory matrix."
+  }
+]

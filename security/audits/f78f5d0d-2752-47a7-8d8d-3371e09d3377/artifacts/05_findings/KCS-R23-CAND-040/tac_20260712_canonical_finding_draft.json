@@ -1,0 +1,192 @@
+{
+  "schema_version": 1,
+  "scan_id": "f78f5d0d-2752-47a7-8d8d-3371e09d3377",
+  "candidate_id": "KCS-R23-CAND-040",
+  "ledger_row_id": "KCS-R23-CAND-040",
+  "target_revision": "0e19f3c6489da458e93a982a333c308d92d0a0ae",
+  "scope": ".",
+  "title": "Gemini API keys are retained across cross-origin redirects",
+  "summary": "KCS sends Gemini embedding requests with a reusable provider credential in the custom x-goog-api-key header through top-level ureq::post. The pinned ureq 2.12.1 default agent follows 301/302/303 redirects, reuses the header vector, and strips only content-length, cookie, and authorization, so the custom provider credential can be sent to a cross-origin redirect target.",
+  "final_policy": "reportable",
+  "final_severity": "medium",
+  "priority": "P2",
+  "confidence": "high (0.96) for header retention; medium for real-world redirect occurrence",
+  "affectedLocations": [
+    {
+      "label": "credential_source",
+      "path": "crates/kcs-adapter/src/gemini_embedding.rs",
+      "lines": "71-80"
+    },
+    {
+      "label": "custom_header_sink",
+      "path": "crates/kcs-adapter/src/gemini_embedding.rs",
+      "lines": "120-148"
+    },
+    {
+      "label": "production_reachability",
+      "path": "crates/kcs-adapter/src/gemini_embedding.rs",
+      "lines": "206-220,259-285"
+    },
+    {
+      "label": "dependency_selection",
+      "path": "Cargo.toml",
+      "lines": "17-29"
+    },
+    {
+      "label": "dependency_pin",
+      "path": "Cargo.lock",
+      "lines": "1396-1411"
+    },
+    {
+      "label": "redirect_reconstruction",
+      "path": "ureq-2.12.1/src/unit.rs",
+      "lines": "154-235"
+    }
+  ],
+  "codeEvidence": [
+    {
+      "id": "credential-source",
+      "label": "Gemini secret resolution",
+      "path": "crates/kcs-adapter/src/gemini_embedding.rs",
+      "startLine": 71,
+      "endLine": 80,
+      "language": "rust",
+      "role": "user_input",
+      "code": "fn api_key() -> Result<String> {\n    crate::tool_lock::resolve_role_api_key(\"embedding\", \"GEMINI_API_KEY\")?.ok_or_else(|| {\n        AdapterError::Auth(\n            \"no Gemini embedding API key: set GEMINI_API_KEY or a tools.toml `[embedding] auth\"\n                .to_owned(),\n        )\n    })\n}",
+      "explanation": "The embedding credential is resolved from the declared embedding auth or GEMINI_API_KEY before the outbound request is built."
+    },
+    {
+      "id": "custom-header-post",
+      "label": "Credential attached to top-level ureq POST",
+      "path": "crates/kcs-adapter/src/gemini_embedding.rs",
+      "startLine": 139,
+      "endLine": 148,
+      "language": "rust",
+      "role": "sink",
+      "code": "let response: Value = ureq::post(&format!(\n    \"{}/v1beta/models/{model_pin}:batchEmbedContents\",\n    self.base_url()\n))\n.set(\"x-goog-api-key\", &api_key)\n.set(\"Content-Type\", \"application/json\")\n.send_json(json!({ \"requests\": requests }))\n.map_err(http_error)?\n.into_json()\n.map_err(|err| AdapterError::ContractViolation(err.to_string()))?;",
+      "explanation": "KCS places the credential in a provider-specific header and delegates redirect handling to the top-level ureq request without a KCS redirect policy."
+    },
+    {
+      "id": "default-agent",
+      "label": "Top-level ureq POST uses default agent",
+      "path": "ureq-2.12.1/src/lib.rs",
+      "startLine": 512,
+      "endLine": 583,
+      "language": "rust",
+      "role": "propagation",
+      "code": "pub fn agent() -> Agent {\n    AgentBuilder::new().build()\n}\n\npub fn post(path: &str) -> Request {\n    request(\"POST\", path)\n}",
+      "explanation": "The top-level helper constructs a default agent, so the request inherits the default redirect behavior selected by the dependency."
+    },
+    {
+      "id": "redirect-default",
+      "label": "Default ureq agent follows redirects",
+      "path": "ureq-2.12.1/src/agent.rs",
+      "startLine": 251,
+      "endLine": 266,
+      "language": "rust",
+      "role": "propagation",
+      "code": "AgentBuilder {\n    config: AgentConfig {\n        https_only: false,\n        redirects: 5,\n        redirect_auth_headers: RedirectAuthHeaders::Never,\n        user_agent: format!(\"ureq/{}\", env!(\"CARGO_PKG_VERSION\")),\n        tls_config: TlsConfig(crate::default_tls_config()),\n    },\n}",
+      "explanation": "The default agent follows redirects rather than returning the initial 3xx response to KCS for origin validation."
+    },
+    {
+      "id": "header-retention",
+      "label": "Redirect reconstruction keeps custom credential headers",
+      "path": "ureq-2.12.1/src/unit.rs",
+      "startLine": 180,
+      "endLine": 235,
+      "language": "rust",
+      "role": "root_control",
+      "code": "let new_url = url.join(location)?;\nlet new_method = match resp.status() {\n    301 | 302 | 303 => match &method[..] {\n        \"GET\" | \"HEAD\" => unit.method,\n        _ => \"GET\".into(),\n    },\n    _ => break resp,\n};\nbody = Payload::Empty.into_read();\nlet mut headers = unit.headers;\nheaders.retain(|h| {\n    !h.is_name(\"content-length\")\n        && !h.is_name(\"cookie\")\n        && (!h.is_name(\"authorization\") || keep_auth_header)\n});",
+      "explanation": "The redirect target is joined without a same-origin requirement, and the header filter strips standard credentials but not x-goog-api-key."
+    }
+  ],
+  "rootCause": {
+    "summary": "KCS treats the initial Gemini URL as the only credential boundary, while the selected HTTP client can replace the final origin after a remote 301/302/303 response. Because the reusable credential is stored in x-goog-api-key and the ureq redirect filter does not classify that header as sensitive, the credential remains on the redirected request.",
+    "evidenceRefs": [
+      "credential-source",
+      "custom-header-post",
+      "default-agent",
+      "redirect-default",
+      "header-retention"
+    ]
+  },
+  "validation": {
+    "method": "V10 exact repository-to-locked-dependency redirect trace plus local static regression probe",
+    "summary": "The saved validation traces production embedding execution into a top-level ureq::post carrying x-goog-api-key, confirms Cargo.lock pins ureq 2.12.1, and verifies that the selected redirect code keeps the custom header across 301/302/303 origin changes.",
+    "evidenceRefs": [
+      "credential-source",
+      "custom-header-post",
+      "default-agent",
+      "redirect-default",
+      "header-retention"
+    ],
+    "assertions": [
+      "Normal adopted embedding reaches a default ureq request carrying x-goog-api-key.",
+      "The inspected redirect implementation is the dependency version pinned by the repository.",
+      "Redirect reconstruction strips content-length, cookie, and authorization, but not x-goog-api-key.",
+      "KCS performs no post-redirect origin or scheme comparison before the redirected send."
+    ],
+    "limitations": [
+      "No two-origin loopback capture was run.",
+      "No open redirect or cross-origin redirect was established at the default Google endpoint."
+    ]
+  },
+  "attackPath": {
+    "summary": "An operator-approved embedding request sends x-goog-api-key to an accepted origin. If that origin returns a cross-origin 301, 302, or 303, ureq rewrites the POST to a bodyless GET, retains the custom credential header, and sends it to the redirect target.",
+    "dataflow": {
+      "summary": "resolved embedding credential -> KCS x-goog-api-key header -> top-level ureq::post -> default redirect loop -> redirected request headers",
+      "source": "declared embedding secret or GEMINI_API_KEY",
+      "sink": "redirected request to the Location origin",
+      "outcome": "the Gemini credential crosses from the approved origin to a second origin",
+      "evidenceRefs": [
+        "credential-source",
+        "custom-header-post",
+        "header-retention"
+      ]
+    },
+    "reachability": {
+      "summary": "Requires a valid credential, per-adapter network opt-in, an operator-driven embedding operation, and a qualifying 301/302/303 from the accepted origin.",
+      "attacker": "accepted origin, compromised service, misconfigured endpoint, or relevant intermediary that can emit the redirect response",
+      "entrypoint": "remote Location header on the Gemini embedding request",
+      "outcome": "cross-origin credential disclosure"
+    },
+    "impact": {
+      "level": "high",
+      "why": "A reusable Gemini credential can be disclosed to an origin that was not approved to receive it."
+    },
+    "likelihood": {
+      "level": "medium",
+      "why": "The redirect behavior is deterministic, but a qualifying redirect from the default endpoint was not proven."
+    },
+    "limitations": [
+      "HTTPS prevents ordinary on-path redirect injection for the initial request.",
+      "The POST body is emptied on the proven 301/302/303 route, so this instance proves credential disclosure, not embedding-text forwarding."
+    ]
+  },
+  "remediation": {
+    "summary": "Disable automatic redirects for credential-bearing Gemini requests, or implement KCS-owned redirect handling that permits only approved same-origin, non-downgrade targets and reconstructs provider credentials after validation.",
+    "regressionTests": [
+      "Static test fails if gemini_embedding.rs uses top-level redirect-following ureq::post with x-goog-api-key.",
+      "Two-loopback test returns a 302 from the first origin and asserts the second origin never receives x-goog-api-key.",
+      "Same-origin redirect test, if redirects remain supported, verifies credential reconstruction only after policy approval.",
+      "307/308 regression ensures future wrapper changes do not replay body plus credential across origins."
+    ]
+  },
+  "writeup": {
+    "reportPath": "findings/tac-kcs-r23-cand-040-gemini-redirect-key-retention/gemini-redirect-key-retention.md",
+    "reportSha256": "1420a8d3531ff6b81f33d16a41a2f3fbeb28d1a47fecb7abeb5ddedc33360016",
+    "pocDirectory": "findings/tac-kcs-r23-cand-040-gemini-redirect-key-retention/poc",
+    "artifactSha256": {
+      "findings/tac-kcs-r23-cand-040-gemini-redirect-key-retention/gemini-redirect-key-retention.md": "1420a8d3531ff6b81f33d16a41a2f3fbeb28d1a47fecb7abeb5ddedc33360016",
+      "findings/tac-kcs-r23-cand-040-gemini-redirect-key-retention/poc/Makefile": "bd5ee8e01d769e01bee783bae52f305c5df8a82d254f1e7369e4e0fe5584fe84",
+      "findings/tac-kcs-r23-cand-040-gemini-redirect-key-retention/poc/README.md": "a439dc7a973b7e98484368f420793a5280481fd3c368a93bc4eadc33a0194016",
+      "findings/tac-kcs-r23-cand-040-gemini-redirect-key-retention/poc/check_redirect_key_retention.py": "1e12ffdff2b7bee917e8238885fe58df12af0aaaa964c2e5907124541c161d75"
+    }
+  },
+  "extensions": {
+    "candidateId": "KCS-R23-CAND-040",
+    "ledgerRowId": "KCS-R23-CAND-040",
+    "reportId": "KCS-R23-CAND-040",
+    "attemptId": "tac_20260712"
+  }
+}

@@ -1,0 +1,197 @@
+{
+  "schema_version": 1,
+  "scan_id": "f78f5d0d-2752-47a7-8d8d-3371e09d3377",
+  "candidate_id": "KCS-R23-CAND-006",
+  "ledger_row_id": "KCS-R23-CAND-006",
+  "title": "lexical PDF page markers amplify derived work without a cardinality bound",
+  "summary": "KCS bounds raw input bytes before indexing but derives PDF page count by counting loose textual `/Page` prefixes. A crafted PDF with one printable stream and many inert `/PageX` markers stays on the deterministic path, pads the page vector to the marker count, and creates one `PreparedUnit` per synthetic page.",
+  "target": {
+    "revision": "0e19f3c6489da458e93a982a333c308d92d0a0ae",
+    "scope": "."
+  },
+  "final_policy": "reportable",
+  "final_severity": "medium",
+  "priority": "P2",
+  "confidence": "high",
+  "affected_locations": [
+    {
+      "label": "lexical page counter",
+      "path": "crates/kcs-adapter/src/deterministic.rs",
+      "lines": "415-437"
+    },
+    {
+      "label": "page-vector expansion",
+      "path": "crates/kcs-pipeline/src/prepare.rs",
+      "lines": "315-349"
+    },
+    {
+      "label": "unit materialization",
+      "path": "crates/kcs-pipeline/src/prepare.rs",
+      "lines": "102-170"
+    },
+    {
+      "label": "input-size-only control",
+      "path": "crates/kcs-cli/src/main.rs",
+      "lines": "9047-9061"
+    }
+  ],
+  "codeEvidence": [
+    {
+      "id": "cli-byte-gate",
+      "label": "Indexing applies a raw byte-size gate",
+      "path": "crates/kcs-cli/src/main.rs",
+      "startLine": 9047,
+      "endLine": 9061,
+      "language": "rust",
+      "role": "entrypoint",
+      "code": "// R12-2: the documented `adapter.policy.max_input_bytes` input gate (07 \u00a77.1.2 \u2014\n// \"KCS \u5074\u306e\u5165\u529b\u5236\u5fa1\" is an MVP contract). Scope config wins over user config,\n// default 100 MB. A file larger than the cap is never handed to the Markdownize\n// adapter (below); it stays archived but unenriched, and the count is disclosed.\nlet max_input_bytes = effective_max_input_bytes(repo);\n// R12-1: the documented `[markdownize.incremental]` overrides (were hardcoded).\nlet incremental_config = effective_incremental_config(repo)?;\n\nfor candidate in preview\n    .candidates\n    .iter()\n    .filter(|candidate| !candidate.ignored && candidate.media_type != \"inode/directory\")\n{\n    if candidate.size_bytes > max_input_bytes {\n        result.skipped_oversized_files += 1;",
+      "explanation": "The reachable indexing loop rejects files larger than `adapter.policy.max_input_bytes`, but this control is expressed only in raw bytes and does not constrain the number of PDF pages or units later derived from an accepted file."
+    },
+    {
+      "id": "cli-prepare-call",
+      "label": "Accepted content reaches deterministic preparation",
+      "path": "crates/kcs-cli/src/main.rs",
+      "startLine": 9077,
+      "endLine": 9110,
+      "language": "rust",
+      "role": "propagation",
+      "code": "let path = repo.root().join(&candidate.input_path);\nlet bytes = fs::read(&path)\n    .map_err(|err| KcsError::io(err.to_string(), path.display().to_string()))?;\n// ...\nlet raw_hash = current_hash;\nlet prepare = prepare_units(PrepareStageRequest {\n    raw_hash: raw_hash.clone(),\n    media_type: candidate.media_type.clone(),\n    input_path: path.display().to_string(),\n    tool_profile_hash: prepare_profile_hash.clone(),\n})\n.map_err(pipeline_to_kcs)?;",
+      "explanation": "After passing the byte-size gate, attacker-controlled PDF bytes are read from the indexed scope and forwarded to `prepare_units()` with the file's media type."
+    },
+    {
+      "id": "lexical-page-counter",
+      "label": "Loose `/Page` prefixes define page count",
+      "path": "crates/kcs-adapter/src/deterministic.rs",
+      "startLine": 415,
+      "endLine": 437,
+      "language": "rust",
+      "role": "root_control",
+      "code": "fn pdf_page_count(bytes: &[u8]) -> usize {\n    pdf_page_count_in_text(&String::from_utf8_lossy(bytes))\n}\n\n/// Count PDF page objects from the (lossy-decoded) file text. Shared by the\n/// pipeline crate so the char-boundary-safe lookahead lives in one place (O4).\npub fn pdf_page_count_in_text(text: &str) -> usize {\n    let pages = text\n        .match_indices(\"/Type\")\n        .filter(|(index, _)| {\n            let tail = bounded_str_window(text, *index, 32);\n            tail.contains(\"/Page\") && !tail.contains(\"/Pages\")\n        })\n        .count();\n    pages.max(\n        text.match_indices(\"/Page\")\n            .filter(|(index, _)| {\n                let tail = bounded_str_window(text, *index, 8);\n                !tail.starts_with(\"/Pages\")\n            })\n            .count(),\n    )\n}",
+      "explanation": "`pdf_page_count_in_text()` counts raw textual `/Page` matches in lossy-decoded PDF bytes. A marker such as `/PageX` increments the count because the lookahead excludes `/Pages` but does not require a structural page object or impose a count limit."
+    },
+    {
+      "id": "page-vector-padding",
+      "label": "Pipeline pads pages to the lexical count",
+      "path": "crates/kcs-pipeline/src/prepare.rs",
+      "startLine": 315,
+      "endLine": 340,
+      "language": "rust",
+      "role": "propagation",
+      "code": "pub fn pdf_text_pages(bytes: &[u8]) -> Vec<String> {\n    if !bytes.starts_with(b\"%PDF\") {\n        return vec![String::from_utf8_lossy(bytes).into_owned()];\n    }\n    if !pdf_has_text_layer(bytes) {\n        return Vec::new();\n    }\n    let page_count =\n        kcs_adapter::deterministic::pdf_page_count_in_text(&String::from_utf8_lossy(bytes)).max(1);\n    let stream_pages = kcs_adapter::deterministic::pdf_stream_text_pages(bytes);\n    if !stream_pages.is_empty() {\n        return normalize_pdf_page_count(stream_pages, page_count);\n    }\n    let strings = pdf_literal_strings(bytes);\n    if strings.is_empty() {\n        return vec![pdf_text_fallback(bytes)];\n    }\n    if strings.len() == page_count {\n        return strings;\n    }\n    let mut pages = strings;\n    while pages.len() < page_count {\n        pages.push(String::new());\n    }\n    pages.truncate(page_count);\n    pages\n}",
+      "explanation": "For PDF bytes with a text layer, `pdf_text_pages()` trusts the lexical `page_count` and pads the extracted page vector until its length equals that attacker-controlled value."
+    },
+    {
+      "id": "prepared-unit-materialization",
+      "label": "One `PreparedUnit` is created per padded page",
+      "path": "crates/kcs-pipeline/src/prepare.rs",
+      "startLine": 125,
+      "endLine": 163,
+      "language": "rust",
+      "role": "sink",
+      "code": "let unit_count = if unit_type == UnitType::Page {\n    pdf_pages.len().max(1)\n} else {\n    1\n};\nlet mut prepared_units = Vec::new();\nfor index in 0..unit_count {\n    let selector = match unit_type {\n        UnitType::Page | UnitType::Slide => (index + 1).to_string(),\n        UnitType::Sheet => \"Sheet1\".to_owned(),\n        UnitType::Image => index.to_string(),\n        UnitType::File | UnitType::HeadingSection | UnitType::Symbol => \"1\".to_owned(),\n    };\n    let unit_key = canonical_unit_key(unit_type, &selector);\n    let page_bytes = pdf_pages\n        .get(index)\n        .map(|page| page.as_bytes())\n        .unwrap_or(bytes.as_slice());\n    let unit_prepared_hash = if unit_type == UnitType::Page {\n        hash_bytes(page_bytes)\n    } else if unit_count == 1 {\n        prepared_hash.clone()\n    } else {\n        hash_bytes(format!(\"{prepared_hash}\\0{unit_key}\").as_bytes())\n    };\n    let fingerprint = if unit_type == UnitType::Page {\n        fingerprint_for_bytes(page_bytes, page_bytes)\n    } else {\n        fingerprint_for_bytes(&bytes, unit_prepared_hash.as_bytes())\n    };\n    prepared_units.push(PreparedUnit {\n        order: index as u64,\n        unit_key,\n        unit_type,\n        prepared_hash: unit_prepared_hash,\n        fingerprint,\n        mime: Some(request.media_type.clone()),\n        page_number: (unit_type == UnitType::Page).then_some(index as u64 + 1),\n    });",
+      "explanation": "`unit_count` is derived from `pdf_pages.len()`, so every padded synthetic page causes additional allocation, hashing, fingerprinting, and an owned `PreparedUnit`."
+    }
+  ],
+  "rootCause": {
+    "summary": "The violated invariant is that parser-derived PDF page cardinality must be structural and bounded before it controls allocation. KCS enforces only a raw byte-size cap, counts loose `/Page` prefixes in attacker-controlled bytes, pads the page vector to that count, and materializes one `PreparedUnit` for each padded entry.",
+    "evidenceRefs": [
+      "cli-byte-gate",
+      "cli-prepare-call",
+      "lexical-page-counter",
+      "page-vector-padding",
+      "prepared-unit-materialization"
+    ]
+  },
+  "validation": {
+    "method": "static source trace plus bounded local synthetic probe",
+    "summary": "Source review confirms the byte-size-only control, lexical page count, unbounded page-vector padding, and per-page `PreparedUnit` materialization. The bounded probe reproduced marker counts of 1, 4, 16, and 64 yielding equal page-vector and prepared-unit counts.",
+    "evidenceRefs": [
+      "cli-byte-gate",
+      "lexical-page-counter",
+      "page-vector-padding",
+      "prepared-unit-materialization"
+    ],
+    "assertions": [
+      "A `/PageX` marker is counted as a page by the reviewed lexical counter.",
+      "One printable stream keeps the deterministic PDF path active, so padded empty pages are retained.",
+      "Prepared-unit count follows padded page-vector length."
+    ],
+    "limitations": [
+      "The unsafe high-marker case was not allocated; the upper range was computed to avoid intentional host exhaustion.",
+      "The exact public affected release range and fixing revision were not established in this write-up."
+    ]
+  },
+  "attackPath": {
+    "summary": "A lower-trust local content contributor places a crafted PDF in an indexed scope. Normal indexing accepts the file under the raw byte cap, converts inert `/Page`-prefixed tokens into page count, pads the page vector, and allocates/processes one unit per synthetic page. The persistent file can retrigger the condition on later indexing.",
+    "dataflow": {
+      "summary": "scope PDF bytes -> `run_index_pipeline()` byte gate -> `prepare_units()` -> `pdf_page_count_in_text()` -> `pdf_text_pages()` padding -> `PreparedUnit` allocation",
+      "source": "attacker-controlled PDF bytes in an indexed local scope",
+      "sink": "`PreparedUnit` vector materialization and associated per-page hashing/fingerprinting",
+      "outcome": "memory and CPU exhaustion of the KCS indexing process",
+      "evidenceRefs": [
+        "cli-prepare-call",
+        "lexical-page-counter",
+        "page-vector-padding",
+        "prepared-unit-materialization"
+      ]
+    },
+    "reachability": {
+      "summary": "The attacker needs content-placement ability in a scope the operator indexes; no listener, live service, credentials, or elevated privilege are required.",
+      "attacker": "lower-trust local content contributor",
+      "entrypoint": "ordinary `kcs index` processing of an accepted PDF",
+      "preconditions": [
+        "The crafted PDF remains below `adapter.policy.max_input_bytes`.",
+        "The PDF begins with `%PDF` and contains enough printable text to avoid the all-garbage OCR fallback.",
+        "The operator indexes the affected scope."
+      ],
+      "outcome": "persistent local denial of service for indexing that scope"
+    },
+    "evidenceRefs": [
+      "cli-byte-gate",
+      "lexical-page-counter",
+      "page-vector-padding",
+      "prepared-unit-materialization"
+    ],
+    "impact": {
+      "level": "high",
+      "why": "A small accepted document can drive millions of derived pages and units, exhausting CPU and memory for the local indexing workflow."
+    },
+    "likelihood": {
+      "level": "medium",
+      "why": "The trigger requires a crafted file, deterministic-path selection, content placement in an indexed scope, and an operator indexing action."
+    },
+    "limitations": [
+      "No code execution, cross-scope corruption, or secret disclosure is shown.",
+      "The exact failure threshold depends on host memory, allocator behavior, and surrounding indexing workload."
+    ]
+  },
+  "remediation": {
+    "summary": "Replace loose lexical page counting with structural PDF page counting and enforce a configured derived-page/unit ceiling before `normalize_pdf_page_count()` or `prepare_units()` can allocate per-page objects.",
+    "recommendations": [
+      "Use a PDF parser or validated page tree traversal for page count instead of raw `/Page` substring matching.",
+      "Reject, skip, OCR-route, or single-unit degrade PDFs whose structural page count cannot be established safely.",
+      "Add a configurable maximum derived PDF page count and enforce it before vector padding.",
+      "Carry derived-cardinality budgets through later stages that consume `PreparedUnit` vectors."
+    ],
+    "regression_tests": [
+      "A PDF with one printable stream and many `/PageX` markers must not create one unit per marker.",
+      "A valid multi-page PDF under the configured limit should still produce expected page units.",
+      "A valid PDF above the derived-page limit should fail in a controlled skip/error path.",
+      "A textless PDF should continue to use the existing OCR fallback.",
+      "A boundary test should combine the raw byte cap with the derived page limit."
+    ]
+  },
+  "writeup": {
+    "reportPath": "findings/tac-kcs-r23-cand-006-pdf-page-marker-amplification/tac-kcs-r23-cand-006-pdf-page-marker-amplification.md",
+    "pocDirectory": "findings/tac-kcs-r23-cand-006-pdf-page-marker-amplification/poc"
+  },
+  "source_reports": {
+    "validation_report": "artifacts/05_findings/KCS-R23-CAND-006/validation_report.md",
+    "attack_path_report": "artifacts/05_findings/KCS-R23-CAND-006/attack_path_analysis_report.md"
+  },
+  "extensions": {
+    "candidateId": "KCS-R23-CAND-006",
+    "ledgerRowId": "KCS-R23-CAND-006",
+    "reportId": "KCS-R23-CAND-006"
+  }
+}

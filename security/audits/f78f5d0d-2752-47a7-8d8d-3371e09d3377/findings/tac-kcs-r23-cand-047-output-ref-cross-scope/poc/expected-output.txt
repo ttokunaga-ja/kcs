@@ -1,0 +1,4 @@
+[+] built victim and foreign fixture under a disposable temp root
+[+] vulnerable loader accepted foreign output_ref
+[+] unchanged reuse copied foreign markdown into current raw identity
+[+] fixed guard rejected cross-scope output_ref before reading manifest

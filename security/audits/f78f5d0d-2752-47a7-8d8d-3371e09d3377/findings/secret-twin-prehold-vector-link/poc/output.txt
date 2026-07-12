@@ -1,0 +1,7 @@
+temporary_scope=true
+network_adapter=deterministic_in_process_mock
+distinct_chunk_ids_share_text_hash=true
+secret_unique_chunk_hold_count=1
+secret_shared_chunk_hold_count=0
+secret_shared_chunk_in_vector_results=true
+result=VULNERABLE_POLICY_STATE_OBSERVED

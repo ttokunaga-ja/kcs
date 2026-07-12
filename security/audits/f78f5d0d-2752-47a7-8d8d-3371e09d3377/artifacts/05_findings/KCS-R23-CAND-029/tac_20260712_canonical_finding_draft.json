@@ -1,0 +1,209 @@
+{
+  "schema_version": 1,
+  "scan_id": "f78f5d0d-2752-47a7-8d8d-3371e09d3377",
+  "candidate_id": "KCS-R23-CAND-029",
+  "ledger_row_id": "KCS-R23-CAND-029",
+  "title": "Deterministic normalization persists a later path read under the earlier raw hash",
+  "target_revision": "0e19f3c6489da458e93a982a333c308d92d0a0ae",
+  "scope": ".",
+  "final_policy": "reportable",
+  "final_severity": "low",
+  "priority": "P3",
+  "confidence": "high (0.92) in the source trace; race reliability unmeasured",
+  "summary": "The deterministic index path verifies one byte buffer and assigns `raw_hash`, but later preparation and markdownization receive only a mutable pathname plus the old hash. A lower-trust selected-root writer who replaces the path after the hash check and before the deterministic adapter read can make normalized text from version B persist under version A's raw identity.",
+  "affectedLocations": [
+    {
+      "label": "caller_control",
+      "path": "crates/kcs-cli/src/main.rs",
+      "lines": "9072-9118"
+    },
+    {
+      "label": "prepare_reopen",
+      "path": "crates/kcs-pipeline/src/prepare.rs",
+      "lines": "72-103"
+    },
+    {
+      "label": "path_request",
+      "path": "crates/kcs-cli/src/main.rs",
+      "lines": "9282-9304"
+    },
+    {
+      "label": "normalization_sink",
+      "path": "crates/kcs-adapter/src/deterministic.rs",
+      "lines": "113-118,225-249"
+    },
+    {
+      "label": "persistence_sink",
+      "path": "crates/kcs-cli/src/main.rs",
+      "lines": "9364-9388"
+    }
+  ],
+  "codeEvidence": [
+    {
+      "id": "index-read-hash",
+      "label": "Index hashes one current byte buffer",
+      "path": "crates/kcs-cli/src/main.rs",
+      "startLine": 9076,
+      "endLine": 9109,
+      "language": "rust",
+      "role": "entrypoint",
+      "code": "let secrets_hold = !secrets_approved && classify_secret(&candidate.input_path).is_some();\nlet path = repo.root().join(&candidate.input_path);\nlet bytes = fs::read(&path)\n    .map_err(|err| KcsError::io(err.to_string(), path.display().to_string()))?;\nlet current_hash = hash_bytes(&bytes);\nif let Some(scan_hash) = &candidate.raw_hash {\n    if scan_hash != &current_hash {\n        append_event_log(\n            \"KCS-I-INDEX-INPUT-CHANGED-001\",\n            \"input file changed between scan and normalize; skipped to preserve \\\n             content-addressing (re-run index)\",\n            json!({ \"input_path\": candidate.input_path }),\n        )?;\n        result.failed_files += 1;\n        continue;\n    }\n}\nlet raw_hash = current_hash;\nlet prepare = prepare_units(PrepareStageRequest {\n    raw_hash: raw_hash.clone(),\n    media_type: candidate.media_type.clone(),\n    input_path: path.display().to_string(),\n    tool_profile_hash: prepare_profile_hash.clone(),\n})",
+      "explanation": "The caller verifies the bytes it just read and rejects changes that happened before this point. After `raw_hash` is assigned, however, the next stage receives a string path rather than the verified `bytes` buffer."
+    },
+    {
+      "id": "verified-buffer-separate",
+      "label": "Verified bytes are retained outside the adapter path",
+      "path": "crates/kcs-cli/src/main.rs",
+      "startLine": 9112,
+      "endLine": 9118,
+      "language": "rust",
+      "role": "propagation",
+      "code": "write_prepared_objects(\n    repo,\n    &prepare.prepared_units,\n    &prepare.prepared_object_hashes,\n    &bytes,\n    &candidate.media_type,\n)?;",
+      "explanation": "The verified buffer remains available for object writes, showing that the later path-based adapter flow is a separate source of bytes rather than a necessary consequence of losing the buffer."
+    },
+    {
+      "id": "prepare-reopens-input-path",
+      "label": "Preparation reopens the mutable path",
+      "path": "crates/kcs-pipeline/src/prepare.rs",
+      "startLine": 72,
+      "endLine": 103,
+      "language": "rust",
+      "role": "propagation",
+      "code": "pub fn prepare_units(request: PrepareStageRequest) -> Result<PrepareStageOutput> {\n    let media_type = request.media_type.as_str();\n    let is_text_native = matches!(media_type, \"text/markdown\" | \"text/plain\" | \"text/x-code\");\n    let is_pdf = media_type == \"application/pdf\";\n    if !is_text_native && !is_pdf && media_type != \"application/octet-stream\" {\n        return Ok(PrepareStageOutput {\n            prepared_object_hashes: Vec::new(),\n            prepared_units: Vec::new(),\n            image_object_hashes: Vec::new(),\n        });\n    }\n    let bytes = std::fs::read(&request.input_path).pipeline_io(Path::new(&request.input_path))?;\n    if !is_text_native && !is_pdf && !bytes_are_text(&bytes) {\n        return Ok(PrepareStageOutput {\n            prepared_object_hashes: Vec::new(),\n            prepared_units: Vec::new(),\n            image_object_hashes: Vec::new(),\n        });\n    }\n    let prepared_hash = hash_bytes(&bytes);",
+      "explanation": "`prepare_units()` receives `request.raw_hash` but does not use it to verify the reopened bytes. In the clean exploit interleaving, the attacker waits until this step has completed before swapping the path."
+    },
+    {
+      "id": "markdownize-request-old-hash-path",
+      "label": "Markdownize request combines old hash with mutable path",
+      "path": "crates/kcs-cli/src/main.rs",
+      "startLine": 9282,
+      "endLine": 9304,
+      "language": "rust",
+      "role": "root_control",
+      "code": "let request = MarkdownizeRequest {\n    raw: RawInput {\n        raw_hash: raw_hash.clone(),\n        path: Some(path.display().to_string()),\n    },\n    media_type: candidate.media_type.clone(),\n    prepared_unit_hint: Some(hints),\n    mode: adapter_mode(mode),\n    previous: (mode == MarkdownizeMode::Incremental)\n        .then_some(adapter_previous)\n        .flatten(),\n    hints: (mode == MarkdownizeMode::Incremental)\n        .then(|| adapter_hints(&incremental_hints)),\n    restrict_to_hint_pages: false,\n    tool_profile_hash: markdown_profile_hash.clone(),\n    spec_version: 1,\n};\nlet mut response = markdown_adapter\n    .markdownize(request.clone())\n    .map_err(adapter_to_kcs)?;",
+      "explanation": "The adapter receives the earlier identity and the live path as independent fields. No byte source or stable descriptor is carried into the adapter call."
+    },
+    {
+      "id": "deterministic-reopens-source",
+      "label": "Deterministic adapter reads source text from the path",
+      "path": "crates/kcs-adapter/src/deterministic.rs",
+      "startLine": 113,
+      "endLine": 241,
+      "language": "rust",
+      "role": "sink",
+      "code": "fn markdownize(&self, request: MarkdownizeRequest) -> Result<MarkdownizeResponse> {\n    let hints = request\n        .prepared_unit_hint\n        .clone()\n        .unwrap_or_else(|| vec![default_hint(&request.raw.raw_hash)]);\n    let source_text = read_source_text(&request);\n    // ...\n}\n\nfn read_source_text(request: &MarkdownizeRequest) -> Option<String> {\n    let path = request.raw.path.as_ref()?;\n    let bytes = std::fs::read(path).ok()?;\n    if request.media_type == \"application/pdf\" {\n        return Some(extract_pdf_text_pages(&bytes).join(\"\\n\\n\"));\n    }\n    let text = String::from_utf8_lossy(&bytes).into_owned();\n    match text.strip_prefix('\\u{feff}') {\n        Some(stripped) => Some(stripped.to_owned()),\n        None => Some(text),\n    }\n}",
+      "explanation": "`read_source_text()` supplies the markdown source from a fresh path read and never compares those bytes with `request.raw.raw_hash`. Version B can therefore become the adapter response while the request still carries `H(A)`."
+    },
+    {
+      "id": "persist-under-old-raw-hash",
+      "label": "Normalized units and manifest use the earlier raw hash",
+      "path": "crates/kcs-cli/src/main.rs",
+      "startLine": 9364,
+      "endLine": 9388,
+      "language": "rust",
+      "role": "outcome",
+      "code": "let units = normalized_units_from_response(\n    &response,\n    &prepare.prepared_units,\n    previous.as_ref(),\n    &raw_hash,\n    &markdown_profile_hash,\n    final_mode,\n    &generated_at,\n)?;\nlet manifest = manifest_from_units(\n    &prepare.prepared_units,\n    &units,\n    &raw_hash,\n    &markdown_profile_hash,\n    previous.as_ref().map(|previous| previous.manifest.gen),\n    &run_id,\n    &generated_at,\n    RetryErrorKind::ContractViolation,\n);\npersist_normalized_instance(repo.kcs_dir(), &manifest, &units).map_err(pipeline_to_kcs)?;",
+      "explanation": "The response is persisted under the old `raw_hash`. If the adapter response was derived from a later path replacement, normalized/searchable state now labels B-derived text as A."
+    }
+  ],
+  "rootCause": {
+    "summary": "The violated invariant is that normalized content persisted under a `raw_hash` must be derived from the same bytes that produced that hash. The CLI verifies one buffer, but the local preparation and deterministic markdownize flow continues to reopen the mutable pathname without rebinding the later bytes to `raw_hash` before persistence.",
+    "evidenceRefs": [
+      "index-read-hash",
+      "verified-buffer-separate",
+      "prepare-reopens-input-path",
+      "markdownize-request-old-hash-path",
+      "deterministic-reopens-source",
+      "persist-under-old-raw-hash"
+    ]
+  },
+  "validation": {
+    "method": "static source trace plus local/offline synthetic PoC",
+    "summary": "The source trace confirms that the verified caller buffer never reaches the deterministic adapter, the adapter obtains source text from a fresh path read, and persistence stamps the response with the earlier `raw_hash`. The included PoC deterministically models the replacement after preparation and before markdownization.",
+    "evidenceRefs": [
+      "index-read-hash",
+      "prepare-reopens-input-path",
+      "markdownize-request-old-hash-path",
+      "deterministic-reopens-source",
+      "persist-under-old-raw-hash"
+    ],
+    "assertions": [
+      "Changes before the caller's current-buffer hash comparison are rejected.",
+      "A replacement after the hash check and before deterministic adapter read is not compared with `request.raw.raw_hash`.",
+      "Normalized units and the manifest retain the earlier `raw_hash` even though markdown came from the later path read."
+    ],
+    "limitations": [
+      "No live scheduler-controlled KCS race was executed.",
+      "Race reliability and downstream consumer reliance were not measured.",
+      "The PoC uses synthetic temporary files and does not access live services, credentials, or third-party targets."
+    ]
+  },
+  "attackPath": {
+    "summary": "A lower-trust contributor in the selected root leaves benign version A in place for the caller hash check and preparation, then atomically replaces the path with version B before deterministic markdownization. The adapter reads B and KCS persists that normalized text under `H(A)`.",
+    "dataflow": {
+      "summary": "selected-root pathname -> caller `fs::read` and `hash_bytes` -> `raw_hash = H(A)` -> path-only `MarkdownizeRequest` -> deterministic `read_source_text()` -> normalized persistence under old `raw_hash`",
+      "source": "concurrent replacement of a selected-root file by a lower-trust local writer",
+      "sink": "normalized units, chunks, search results, and evidence provenance inside the selected scope",
+      "outcome": "B-derived text is stored and retrieved as if it belonged to raw object A",
+      "evidenceRefs": [
+        "index-read-hash",
+        "markdownize-request-old-hash-path",
+        "deterministic-reopens-source",
+        "persist-under-old-raw-hash"
+      ]
+    },
+    "reachability": {
+      "summary": "The attacker needs selected-root write or rename authority, operator indexing, victim read access to the replacement content, and a successful post-check/pre-adapter timing window.",
+      "attacker": "lower-trust local contributor to a shared or supplied selected root",
+      "entrypoint": "operator-invoked deterministic `kcs index`",
+      "preconditions": [
+        "The target is a text/code or deterministic-readable file.",
+        "The caller hash comparison has completed for version A.",
+        "The attacker replaces the pathname before the deterministic adapter reads it."
+      ],
+      "outcome": "scope-local normalized/search/evidence provenance is poisoned for one raw identity"
+    },
+    "evidenceRefs": [
+      "index-read-hash",
+      "prepare-reopens-input-path",
+      "deterministic-reopens-source",
+      "persist-under-old-raw-hash"
+    ],
+    "impact": {
+      "level": "medium",
+      "why": "The primitive creates durable false provenance in authoritative search/evidence state, but it is bounded to the selected scope and does not itself overwrite outside files or require network egress."
+    },
+    "likelihood": {
+      "level": "medium",
+      "why": "The actor and workflow are realistic for a shared root, but exploitation still depends on operator indexing and an unmeasured local timing race."
+    },
+    "limitations": [
+      "Stable, non-mutating files produce consistent identity.",
+      "Changes before the current-buffer comparison are detected and skipped.",
+      "Re-indexing stable content can repair the derived state.",
+      "No downstream online send is needed or proven for this candidate."
+    ]
+  },
+  "remediation": {
+    "summary": "Carry the caller-verified bytes or a stable no-follow descriptor through preparation and deterministic markdownization, and reject any adapter output whose computed source hash differs from `raw_hash` before persistence.",
+    "regressionTests": [
+      "Replace a text file after the current-buffer hash check and before deterministic markdownization; assert KCS rejects or normalizes the original bytes rather than storing B under `H(A)`.",
+      "Assert preparation cannot derive unit hashes from bytes different from the caller-verified raw buffer.",
+      "Assert deterministic text, code, and PDF page extraction reuse the verified byte source instead of reopening `raw.path`.",
+      "Assert normalized persistence rejects a response with `source_hash != raw_hash`.",
+      "Assert stable non-mutating files continue to index and re-index normally."
+    ]
+  },
+  "writeup": {
+    "reportPath": "findings/tac-kcs-r23-cand-029-normalization-raw-hash-misbinding/tac-kcs-r23-cand-029-normalization-raw-hash-misbinding.md",
+    "pocDirectory": "findings/tac-kcs-r23-cand-029-normalization-raw-hash-misbinding/poc"
+  },
+  "extensions": {
+    "candidateId": "KCS-R23-CAND-029",
+    "attempt_id": "tac_20260712",
+    "validation_report": "artifacts/05_findings/KCS-R23-CAND-029/validation_report.md",
+    "attack_path_report": "artifacts/05_findings/KCS-R23-CAND-029/attack_path_analysis_report.md",
+    "ledgerRowId": "KCS-R23-CAND-029",
+    "reportId": "KCS-R23-CAND-029"
+  }
+}

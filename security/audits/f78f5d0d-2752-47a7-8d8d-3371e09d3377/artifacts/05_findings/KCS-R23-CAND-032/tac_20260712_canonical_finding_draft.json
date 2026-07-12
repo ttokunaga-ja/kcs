@@ -1,0 +1,204 @@
+{
+  "affectedLocations": [
+    {
+      "label": "normal index enables raw hashing",
+      "lines": "558-584",
+      "path": "crates/kcs-cli/src/main.rs"
+    },
+    {
+      "label": "metadata length then whole-file allocation",
+      "lines": "90-159",
+      "path": "crates/kcs-pipeline/src/scan.rs"
+    },
+    {
+      "label": "configured/default cap",
+      "lines": "4425-4444",
+      "path": "crates/kcs-cli/src/main.rs"
+    },
+    {
+      "label": "late adapter-only input gate",
+      "lines": "9047-9070",
+      "path": "crates/kcs-cli/src/main.rs"
+    },
+    {
+      "label": "existing small cap regression",
+      "lines": "4212-4231",
+      "path": "crates/kcs-cli/tests/step3_p0_contract.rs"
+    }
+  ],
+  "attackPath": {
+    "dataflow": {
+      "evidenceRefs": [
+        "scanner-known-size",
+        "scanner-whole-file-read",
+        "late-adapter-gate"
+      ],
+      "outcome": "recoverable local denial of indexing and host resource pressure",
+      "sink": "KCS process heap, filesystem I/O, hash CPU, and scope store-lock availability",
+      "source": "attacker-controlled file size and contents in an operator-selected local scope",
+      "summary": "direct-child file length -> `entry.metadata().len()` -> unchecked `std::fs::read()` for raw hash -> preview candidate -> late `max_input_bytes` adapter skip"
+    },
+    "evidenceRefs": [
+      "index-enables-raw-hashes",
+      "scanner-whole-file-read",
+      "late-adapter-gate"
+    ],
+    "impact": {
+      "level": "medium",
+      "why": "The issue can deny indexing for the selected scope and stress host resources, but it is local, recoverable by removing the file, and does not cross a confidentiality or authorization boundary by itself."
+    },
+    "likelihood": {
+      "level": "high",
+      "why": "Once the operator indexes the supplied scope, the allocation path is deterministic and requires no timing race or unusual command."
+    },
+    "limitations": [
+      "Preview mode disables raw hashing.",
+      "Ignored files, non-regular entries, `.kcs`, `.kcsignore`, XDG state, and default-excluded Tier-A secrets do not enter this read.",
+      "The later cap still prevents oversized adapter normalization and network submission."
+    ],
+    "reachability": {
+      "attacker": "lower-trust content contributor to a selected local/shared scope",
+      "entrypoint": "normal non-preview `kcs index`",
+      "outcome": "one indexing invocation can be delayed, aborted, or killed before useful adapter work begins",
+      "preconditions": [
+        "The file is readable, regular, direct-child, and not ignored or secret-excluded.",
+        "The operator runs non-preview indexing.",
+        "The filesystem can present the chosen logical size; sparse-file support increases attacker efficiency."
+      ],
+      "summary": "The attacker needs the ability to supply a readable, included regular direct-child file and the operator must run normal indexing rather than preview. No race, credential, network service, or elevated privilege is required."
+    },
+    "summary": "A lower-trust content contributor places an included oversized or sparse regular file as a direct child of a selected scope. When the operator runs ordinary non-preview indexing, KCS computes a raw hash by reading the whole file before the configured cap is checked, consuming memory, I/O, and hash CPU while the store lock is held."
+  },
+  "candidate_id": "KCS-R23-CAND-032",
+  "codeEvidence": [
+    {
+      "code": "let preview = build_scan_preview(ScanPreviewRequest {\n    scope_path: repo.root().display().to_string(),\n    include_raw_hashes: !args.preview,\n    require_network_approval: !args.offline,\n})\n.map_err(pipeline_to_kcs)?;\n\nif args.preview {\n    return Ok(index_preview_json(repo.root(), &preview));\n}",
+      "endLine": 584,
+      "explanation": "A normal `kcs index` call sets `include_raw_hashes` to true before the preview-mode early return. This makes scan-time hashing part of the ordinary non-preview path.",
+      "id": "index-enables-raw-hashes",
+      "label": "Non-preview index requests scan raw hashes",
+      "language": "rust",
+      "path": "crates/kcs-cli/src/main.rs",
+      "role": "entrypoint",
+      "startLine": 575
+    },
+    {
+      "code": "let file_type = entry.file_type().pipeline_io(&path)?;\nif !file_type.is_file() {\n    continue;\n}\nlet relative = path\n    .strip_prefix(scope_path)\n    .unwrap_or(&path)\n    .to_string_lossy()\n    .replace('\\\\', \"/\");\nif relative == \".kcsignore\" {\n    continue;\n}\nlet size_bytes = entry.metadata().pipeline_io(&path)?.len();",
+      "endLine": 122,
+      "explanation": "The contributor-controlled direct child must be a regular file, and KCS already has its logical `size_bytes` before any raw hash is computed. That value is the available pre-allocation decision point.",
+      "id": "scanner-known-size",
+      "label": "Scanner records candidate length before hashing",
+      "language": "rust",
+      "path": "crates/kcs-pipeline/src/scan.rs",
+      "role": "user_input",
+      "startLine": 110
+    },
+    {
+      "code": "let secret = classify_secret(&relative);\nlet ignored = ignored_by_rules(\n    &relative,\n    file_type.is_dir(),\n    ignore_rules,\n    case_insensitive,\n) || secret == Some(SecretTier::TierA)\n    && !explicitly_unignored(\n        &relative,\n        file_type.is_dir(),\n        ignore_rules,\n        case_insensitive,\n    );\nlet raw_hash = if include_raw_hashes && !ignored {\n    Some(hash_bytes(&std::fs::read(&path).pipeline_io(&path)?))\n} else {\n    None\n};",
+      "endLine": 149,
+      "explanation": "If the file is included, the raw-hash branch calls `std::fs::read(&path)` without checking `size_bytes` or streaming. The resulting owned byte vector creates `O(n)` heap growth before the configured cap can act.",
+      "id": "scanner-whole-file-read",
+      "label": "Raw hashing reads the complete file into memory",
+      "language": "rust",
+      "path": "crates/kcs-pipeline/src/scan.rs",
+      "role": "root_control",
+      "startLine": 123
+    },
+    {
+      "code": "/// Documented default for `adapter.policy.max_input_bytes` (07 \u00a77): 100 MB.\nconst DEFAULT_MAX_INPUT_BYTES: u64 = 104_857_600;\n\n/// R12-2: effective `adapter.policy.max_input_bytes` \u2014 scope config wins over user\n/// config, default 100 MB (07 \u00a77). Enforced as an input gate in `run_index_pipeline`.\nfn effective_max_input_bytes(repo: &Repository) -> u64 {\n    read_max_input_bytes_config(&repo.kcs_dir().join(\"config.toml\"))\n        .or_else(|| read_max_input_bytes_config(&user_config_toml_path()))\n        .unwrap_or(DEFAULT_MAX_INPUT_BYTES)\n}",
+      "endLine": 4433,
+      "explanation": "KCS has a documented default size policy. The missing control is not the absence of a cap, but that the cap is not consulted before scan-time allocation.",
+      "id": "default-cap-definition",
+      "label": "The input cap exists but is defined for the adapter policy",
+      "language": "rust",
+      "path": "crates/kcs-cli/src/main.rs",
+      "role": "expected_control",
+      "startLine": 4425
+    },
+    {
+      "code": "// R12-2: the documented `adapter.policy.max_input_bytes` input gate (07 \u00a77.1.2 \u2014\n// \"KCS \u5074\u306e\u5165\u529b\u5236\u5fa1\" is an MVP contract). Scope config wins over user config,\n// default 100 MB. A file larger than the cap is never handed to the Markdownize\n// adapter (below); it stays archived but unenriched, and the count is disclosed.\nlet max_input_bytes = effective_max_input_bytes(repo);\nfor candidate in preview\n    .candidates\n    .iter()\n    .filter(|candidate| !candidate.ignored && candidate.media_type != \"inode/directory\")\n{\n    if candidate.size_bytes > max_input_bytes {\n        result.skipped_oversized_files += 1;\n        append_event_log(\n            \"KCS-I-INDEX-INPUT-OVERSIZED-001\",\n            \"input file exceeds adapter.policy.max_input_bytes; skipped adapter processing\",\n            json!({\n                \"size_bytes\": candidate.size_bytes,\n                \"max_input_bytes\": max_input_bytes,\n            }),\n        )?;\n        continue;\n    }",
+      "endLine": 9070,
+      "explanation": "This branch correctly prevents downstream adapter work for oversized files, but it iterates over an already-built preview. The raw-hash read has already happened.",
+      "id": "late-adapter-gate",
+      "label": "The cap is checked only after preview construction",
+      "language": "rust",
+      "path": "crates/kcs-cli/src/main.rs",
+      "role": "expected_control",
+      "startLine": 9047
+    },
+    {
+      "code": "// max_input_bytes is a real input gate: a file larger than the cap is skipped for\n// adapter processing (never normalized) but the index still succeeds.\n#[test]\nfn r12_2_max_input_bytes_gates_oversized_input() {\n    let dir = tempfile::tempdir().unwrap();\n    kcs(&dir, &[\"init\"]).assert().success();\n    // Cap at 50 bytes; write a markdown file well over that.\n    fs::write(\n        dir.path().join(\".kcs/config.toml\"),\n        \"kcs_format_version = \\\"0.1.0\\\"\\n[adapter.policy]\\nmax_input_bytes = 50\\n\",\n    )\n    .unwrap();\n    fs::write(\n        dir.path().join(\"big.md\"),\n        \"# Big\\n\\n## Section\\nthis body is definitely longer than fifty bytes in total.\\n\",\n    )\n    .unwrap();\n    let index = json_success(&dir, &[\"index\", \"--approve\"]);\n    assert_eq!(index[\"skipped_oversized_files\"], 1);\n    assert_eq!(index[\"normalized_files\"], 0);\n}",
+      "endLine": 4231,
+      "explanation": "The existing regression proves the later adapter skip and uses a small file. It does not prove that scanning avoids a large or sparse pre-cap allocation.",
+      "id": "existing-test-only-adapter-skip",
+      "label": "Existing test checks adapter skip, not scanner allocation",
+      "language": "rust",
+      "path": "crates/kcs-cli/tests/step3_p0_contract.rs",
+      "role": "outcome",
+      "startLine": 4212
+    }
+  ],
+  "confidence": "high (0.99)",
+  "extensions": {
+    "candidateId": "KCS-R23-CAND-032",
+    "ledgerRowId": "KCS-R23-CAND-032",
+    "reportId": "KCS-R23-CAND-032"
+  },
+  "final_policy": "reportable",
+  "final_severity": "medium",
+  "ledger_row_id": "KCS-R23-CAND-032",
+  "priority": "P2",
+  "remediation": {
+    "regressionTests": [
+      "Create an included file larger than a tiny configured cap and assert the scanner does not allocate or hash the full file before deciding it is oversized.",
+      "Use a sparse file under a memory limit to prove logical file size is not materialized by scan hashing.",
+      "Keep preview, ignored-file, symlink, directory, `.kcs`, `.kcsignore`, XDG state, and Tier-A secret negative controls.",
+      "Verify streaming hash parity for ordinary small files."
+    ],
+    "summary": "Enforce a scan-stage per-file or aggregate budget before any whole-file allocation, or replace raw hashing and CAS ingestion with bounded streaming. Keep the late adapter skip, but do not rely on it as the first resource-control point."
+  },
+  "rootCause": {
+    "evidenceRefs": [
+      "index-enables-raw-hashes",
+      "scanner-known-size",
+      "scanner-whole-file-read",
+      "default-cap-definition",
+      "late-adapter-gate",
+      "existing-test-only-adapter-skip"
+    ],
+    "summary": "The violated invariant is that KCS must enforce a per-file budget or stream hashing before allocating an included file's entire contents. `collect_direct_candidates()` already has `size_bytes`, but the raw-hash branch ignores it and calls `std::fs::read()`. `run_index_pipeline()` applies `max_input_bytes` only after `build_scan_preview()` returns, so the documented cap does not protect scan-time memory, I/O, or hash work."
+  },
+  "scan_id": "f78f5d0d-2752-47a7-8d8d-3371e09d3377",
+  "schema_version": 1,
+  "scope": ".",
+  "summary": "Normal non-preview `kcs index` asks the scanner to compute raw hashes. The scanner already records each included direct-child file's `metadata().len()`, but then calls `std::fs::read()` on the whole file before `adapter.policy.max_input_bytes` is consulted in the downstream indexing pipeline. An oversized or sparse regular file can therefore force proportional heap allocation, I/O, and hashing while the store lock is held.",
+  "target_revision": "0e19f3c6489da458e93a982a333c308d92d0a0ae",
+  "title": "Scan hashing allocates the full file before the input-size gate",
+  "validation": {
+    "assertions": [
+      "An included direct-child regular file reaches raw-hash computation in normal non-preview indexing.",
+      "`metadata().len()` is available before the whole-file read, but no pre-read cap or streaming guard consumes it.",
+      "`adapter.policy.max_input_bytes` prevents adapter normalization and network submission only after scan preview construction.",
+      "The resource cost is proportional to the candidate's logical length for heap allocation, read I/O, and hashing work."
+    ],
+    "evidenceRefs": [
+      "index-enables-raw-hashes",
+      "scanner-known-size",
+      "scanner-whole-file-read",
+      "late-adapter-gate",
+      "existing-test-only-adapter-skip"
+    ],
+    "limitations": [
+      "No high-memory or exhaustion experiment was performed.",
+      "Exact process termination thresholds depend on filesystem, allocator, OS policy, and available host memory.",
+      "Sparse-file behavior varies by filesystem, although the source-order allocation proof does not depend on sparseness."
+    ],
+    "method": "bounded existing cap test plus static source-order proof and safe local PoC",
+    "summary": "The saved validation traces normal `index` into `build_scan_preview()` with raw hashes enabled, then from `metadata().len()` to `std::fs::read()` with no intervening size decision, and finally to the downstream `max_input_bytes` skip. The included PoC verifies this ordering without running KCS or creating large inputs."
+  },
+  "writeup": {
+    "pocDirectory": "findings/tac-kcs-r23-cand-032-scan-hash-precap-allocation/poc",
+    "reportPath": "findings/tac-kcs-r23-cand-032-scan-hash-precap-allocation/tac-kcs-r23-cand-032-scan-hash-precap-allocation.md",
+    "reportSha256": "472bce97ee4d6688c47b332a02a41846f2fc6ac948dca5eeb05f5fdec49a3f82"
+  }
+}

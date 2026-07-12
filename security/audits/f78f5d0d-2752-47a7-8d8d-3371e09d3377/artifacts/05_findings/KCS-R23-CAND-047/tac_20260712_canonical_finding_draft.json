@@ -1,0 +1,248 @@
+{
+  "affectedLocations": [
+    {
+      "endLine": 184,
+      "label": "entrypoint_and_partial_control",
+      "path": "crates/kcs-pipeline/src/task.rs",
+      "startLine": 129
+    },
+    {
+      "endLine": 9713,
+      "label": "root_control_and_read_sink",
+      "path": "crates/kcs-cli/src/main.rs",
+      "startLine": 9685
+    },
+    {
+      "endLine": 9885,
+      "label": "reuse_sink",
+      "path": "crates/kcs-cli/src/main.rs",
+      "startLine": 9863
+    },
+    {
+      "endLine": 6995,
+      "label": "persistence_sink",
+      "path": "crates/kcs-cli/src/main.rs",
+      "startLine": 6977
+    }
+  ],
+  "attackPath": {
+    "dataflow": {
+      "evidenceRefs": [
+        "taskstore-all-misses-output-ref",
+        "latest-online-uses-output-ref",
+        "load-previous-pathbuf-read",
+        "reuse-copies-foreign-markdown",
+        "persist-current-scope"
+      ],
+      "outcome": "cross-scope normalized-text read and durable provenance substitution",
+      "sink": "foreign normalized unit markdown copied into current-scope normalized objects",
+      "source": "lower-trust supplied/shared persisted task record and attacker-chosen `output_ref`",
+      "summary": "supplied task `output_ref` -> `TaskStore::all()` -> `latest_online_instance_for_path()` -> `load_previous_instance()` -> `normalized_units_from_response()` -> `persist_normalized_instance()`"
+    },
+    "impact": {
+      "level": "high",
+      "why": "Foreign normalized markdown can cross scope boundaries and become durable current-scope evidence/search/archive data under misleading provenance."
+    },
+    "likelihood": {
+      "level": "medium",
+      "why": "The path requires adoption of supplied/shared task state plus a compatible readable normalized instance and victim workflow invocation."
+    },
+    "limitations": [
+      "Fresh owner-only stores reduce direct live-ledger exposure.",
+      "Random files do not satisfy normalized manifest/unit shape checks.",
+      "Automatic remote exfiltration was not established; the direct effects are cross-scope read and durable contamination."
+    ],
+    "reachability": {
+      "access_requirements": "control over supplied task state before adoption; no credentials, live adapter access, or arbitrary write to an already-private healthy store is required",
+      "attacker": "lower-trust contributor to copied, synced, preseeded, or shared KCS task state",
+      "entrypoint": "persisted `.kcs/tasks.jsonl` consumed by `TaskStore::all()`",
+      "outcome": "current-scope KCS data can include foreign markdown under current provenance",
+      "preconditions": [
+        "victim adopts lower-trust task state",
+        "task has current-scope `input_path` and valid hash-shaped fields",
+        "foreign normalized instance is readable and parseable",
+        "profile and incremental workflow preconditions pass"
+      ],
+      "summary": "The attacker needs the victim to adopt lower-trust persisted task state and must know or arrange a readable compatible normalized instance. The path is local and deterministic once the victim runs a matching incremental or retry workflow."
+    },
+    "saved_reports": [
+      "artifacts/05_findings/KCS-R23-CAND-047/attack_path_analysis_report.md"
+    ],
+    "summary": "A lower-trust contributor supplies or syncs a KCS store whose `tasks.jsonl` contains a valid current-scope task with an absolute or traversing `output_ref` pointing at another readable compatible normalized instance. When the victim invokes an incremental or retry workflow, KCS reads the foreign instance and can persist its markdown under current-scope provenance."
+  },
+  "candidate_id": "KCS-R23-CAND-047",
+  "codeEvidence": [
+    {
+      "code": "pub struct TaskDescriptor {\n    pub task_id: String,\n    #[serde(rename = \"type\")]\n    pub task_type: TaskType,\n    pub mode: Option<MarkdownizeMode>,\n    pub input_path: String,\n    pub input_hash: String,\n    pub previous_raw_hash: Option<String>,\n    pub parent_run_id: Option<String>,\n    pub changed_unit_keys: Vec<String>,\n    pub output_ref: String,\n    pub unit_keys: Option<Vec<String>>,",
+      "endLine": 53,
+      "explanation": "A lower-trust supplied task record controls `output_ref` alongside current-scope task identity. The field is serialized as a plain string rather than a typed contained normalized-instance reference.",
+      "id": "task-descriptor-output-ref",
+      "label": "Persisted task descriptor carries output_ref as a raw string",
+      "language": "rust",
+      "path": "crates/kcs-pipeline/src/task.rs",
+      "role": "user_input",
+      "startLine": 41
+    },
+    {
+      "code": "let descriptor: TaskDescriptor = serde_json::from_str(&line).map_err(|err| {\n    PipelineError::corrupt(self.path.display().to_string(), err.to_string())\n})?;\nif !is_scope_local_file_name(&descriptor.input_path) {\n    return Err(PipelineError::path(descriptor.input_path));\n}\nif !kcs_core::cas::is_hash(&descriptor.input_hash) {\n    return Err(PipelineError::corrupt(\n        self.path.display().to_string(),\n        format!(\"task input_hash is not a valid hash: {}\", descriptor.input_hash),\n    ));\n}\nif let Some(previous) = &descriptor.previous_raw_hash {\n    if !kcs_core::cas::is_hash(previous) {\n        return Err(PipelineError::corrupt(\n            self.path.display().to_string(),\n            format!(\"task previous_raw_hash is not a valid hash: {previous}\"),\n        ));\n    }\n}\nby_id.insert(descriptor.task_id.clone(), descriptor);",
+      "endLine": 184,
+      "explanation": "`TaskStore::all()` is the single read choke point for persisted task state. It rejects escaping `input_path` and malformed hash-shaped fields, but it returns descriptors with arbitrary `output_ref` values intact.",
+      "id": "taskstore-all-misses-output-ref",
+      "label": "TaskStore validates input path and hashes but not output_ref",
+      "language": "rust",
+      "path": "crates/kcs-pipeline/src/task.rs",
+      "role": "entrypoint",
+      "startLine": 148
+    },
+    {
+      "code": "let mut tasks = task_store\n    .all()\n    .map_err(pipeline_to_kcs)?\n    .into_iter()\n    .filter(|task| {\n        task.input_path == input_path\n            && matches!(task.status, TaskStatus::Done | TaskStatus::Partial)\n            && task.fallback_reason.as_deref() == Some(\"online_adapter_done\")\n    })\n    .collect::<Vec<_>>();\ntasks.sort_by(|a, b| b.created_at.cmp(&a.created_at));\nfor task in tasks {\n    if let Some(previous) = load_previous_instance(&task.output_ref)? {\n        return Ok(Some(previous));\n    }\n}",
+      "endLine": 7026,
+      "explanation": "A schema-valid supplied record for the current `input_path` can be selected as the previous online instance. The unchecked `output_ref` is then passed directly into the previous-instance loader.",
+      "id": "latest-online-uses-output-ref",
+      "label": "Incremental previous-instance selection forwards output_ref",
+      "language": "rust",
+      "path": "crates/kcs-cli/src/main.rs",
+      "role": "propagation",
+      "startLine": 7008
+    },
+    {
+      "code": "fn load_previous_instance(output_ref: &str) -> Result<Option<PreviousInstance>> {\n    let dir = PathBuf::from(output_ref);\n    let manifest_path = dir.join(\"manifest.json\");\n    let Ok(bytes) = fs::read(&manifest_path) else {\n        return Ok(None);\n    };\n    let manifest: NormalizedInstanceManifest =\n        serde_json::from_slice(&bytes).map_err(|err| KcsError::schema(err.to_string()))?;\n    let mut units = Vec::new();\n    for entry in &manifest.units {\n        if entry.status != UnitStatus::Done {\n            continue;\n        }\n        let unit_path = dir.join(format!(\"{}.json\", entry.unit_ref));\n        let Ok(bytes) = fs::read(&unit_path) else {\n            return Ok(None);\n        };",
+      "endLine": 9713,
+      "explanation": "The root control is missing here: `output_ref` becomes a filesystem base path without canonical containment under the current `.kcs` root. KCS reads the selected manifest and unit files with the victim process authority.",
+      "id": "load-previous-pathbuf-read",
+      "label": "Loader builds paths directly from output_ref",
+      "language": "rust",
+      "path": "crates/kcs-cli/src/main.rs",
+      "role": "root_control",
+      "startLine": 9685
+    },
+    {
+      "code": "for unit_key in &response.unchanged_unit_keys {\n    let prepared = prepared\n        .get(unit_key.as_str())\n        .ok_or_else(|| KcsError::schema(\"adapter returned unknown unchanged unit\"))?;\n    let previous_unit = previous_units\n        .get(unit_key.as_str())\n        .ok_or_else(|| KcsError::schema(\"unchanged unit has no previous normalized unit\"))?;\n    units.push(NormalizedUnitObject {\n        unit_key: unit_key.clone(),\n        unit_type: prepared.unit_type,\n        raw_hash: raw_hash.to_owned(),\n        prepared_hash: prepared.prepared_hash.clone(),\n        tool_profile_hash: tool_profile_hash.to_owned(),\n        gen: 0,\n        mode,\n        markdown: previous_unit.markdown.clone(),\n        reused_from: Some(kcs_pipeline::markdownize::ReusedFrom {\n            raw_hash: previous_unit.raw_hash.clone(),",
+      "endLine": 9885,
+      "explanation": "After a compatible previous instance is loaded, unchanged reuse copies `previous_unit.markdown` while assigning current raw/profile/prepared metadata. This converts the cross-scope read into current-scope provenance contamination.",
+      "id": "reuse-copies-foreign-markdown",
+      "label": "Unchanged-unit reuse relabels previous markdown under the current raw hash",
+      "language": "rust",
+      "path": "crates/kcs-cli/src/main.rs",
+      "role": "sink",
+      "startLine": 9863
+    },
+    {
+      "code": "let manifest = manifest_from_units(\n    prepared_units,\n    &units,\n    &task.input_hash,\n    &profile_tool_hash,\n    Some(previous.manifest.gen),\n    &run_id,\n    &generated_at,\n    RetryErrorKind::NetworkError,\n);\npersist_normalized_instance(repo.kcs_dir(), &manifest, &units).map_err(|_| {\n    TaskExecutionFailure {\n        retry_kind: persist_failure_retry_kind(),\n    }\n})?;",
+      "endLine": 6995,
+      "explanation": "The final sink stores the newly constructed manifest and unit objects below the current scope. Foreign markdown can therefore become durable current-scope data.",
+      "id": "persist-current-scope",
+      "label": "The relabeled units are persisted in the current scope",
+      "language": "rust",
+      "path": "crates/kcs-cli/src/main.rs",
+      "role": "outcome",
+      "startLine": 6977
+    },
+    {
+      "code": "fn load_previous_instance(output_ref: &str) -> Result<Option<PreviousInstance>> {\n    let dir = PathBuf::from(output_ref);\n    let manifest_path = dir.join(\"manifest.json\");\n    let Ok(bytes) = fs::read(&manifest_path) else {",
+      "endLine": 9688,
+      "explanation": "Before this read, KCS should reject absolute, parent-bearing, symlink-escaping, or semantically unbound previous-instance references and require a current-scope normalized object identity.",
+      "id": "expected-contained-output-ref",
+      "label": "Expected control: output_ref should resolve only under the current normalized root",
+      "language": "rust",
+      "path": "crates/kcs-cli/src/main.rs",
+      "role": "expected_control",
+      "startLine": 9685
+    }
+  ],
+  "confidence": "high",
+  "confidence_score": 0.88,
+  "extensions": {
+    "attackPathReport": "artifacts/05_findings/KCS-R23-CAND-047/attack_path_analysis_report.md",
+    "attackPathReportSha256": "eb1c6c1dcecaa31864b39f8fa16a88b31c5293fe58805fca146568f46b9306bd",
+    "candidateId": "KCS-R23-CAND-047",
+    "ledgerRowId": "KCS-R23-CAND-047",
+    "reportId": "KCS-R23-CAND-047",
+    "reportPath": "findings/tac-kcs-r23-cand-047-output-ref-cross-scope/task-output-ref-cross-scope.md",
+    "reportSha256": "501eb6f0ef0519932ccebc0f8dcf73695aa728cf86206726b78102d44d91b83b",
+    "validationReport": "artifacts/05_findings/KCS-R23-CAND-047/validation_report.md",
+    "validationReportSha256": "254464f5bbc41e8e03f0f6e61f21f961413da55db3f2614a8af6eba9ce4da800"
+  },
+  "final_policy": "reportable",
+  "final_severity": "medium",
+  "instance_key": "KCS-R23-CAND-047:task-output-ref-cross-scope",
+  "ledger_row_id": "KCS-R23-CAND-047",
+  "priority": "P2",
+  "remediation": {
+    "invariant": "Persisted previous-output references must identify a normalized instance contained in the current KCS scope and compatible with the current raw/profile/unit provenance tuple before any manifest or unit file is read.",
+    "regressionTests": [
+      "absolute `output_ref` in `tasks.jsonl` is rejected before descriptor return",
+      "parent-traversing `output_ref` is rejected before descriptor return",
+      "`load_previous_instance()` refuses a directory outside the current `.kcs` root before `manifest.json` is read",
+      "incremental reuse rejects previous manifests whose raw hash, profile, unit keys, or prepared hashes are not bound to the current tuple",
+      "partial retry planning uses the same contained resolver as incremental reuse"
+    ],
+    "summary": "Reject absolute, parent-bearing, and symlink-escaping `output_ref` values at the task read boundary; resolve previous instances through a current-scope normalized-object API; and rebind loaded manifests and units to the current raw/profile/unit tuple before reuse."
+  },
+  "rootCause": {
+    "evidenceRefs": [
+      "task-descriptor-output-ref",
+      "taskstore-all-misses-output-ref",
+      "latest-online-uses-output-ref",
+      "load-previous-pathbuf-read",
+      "reuse-copies-foreign-markdown",
+      "persist-current-scope",
+      "expected-contained-output-ref"
+    ],
+    "summary": "The violated invariant is that persisted previous-output references must be bound to the current KCS scope before they are used as filesystem bases. `TaskStore::all()` validates current input fields but not `output_ref`; incremental previous-instance selection forwards that string unchanged; `load_previous_instance()` turns it into a path and reads manifest/unit files; unchanged-unit reuse then copies previous markdown into objects persisted under current-scope provenance."
+  },
+  "scan_id": "f78f5d0d-2752-47a7-8d8d-3371e09d3377",
+  "scan_scope": ".",
+  "schema_version": "codex-security-canonical-finding-draft/v1",
+  "source_revision": "0e19f3c6489da458e93a982a333c308d92d0a0ae",
+  "summary": "A supplied or shared KCS task ledger can carry an unchecked `output_ref` that selects a normalized instance outside the current scope. Incremental reuse reads that foreign manifest and unit text, then can persist unchanged markdown under the current raw/profile identity.",
+  "target_revision": "0e19f3c6489da458e93a982a333c308d92d0a0ae",
+  "title": "Persisted task output_ref can escape the scope",
+  "validation": {
+    "assertions": [
+      "`output_ref` is not validated by the task-ledger read choke point.",
+      "`load_previous_instance()` uses `PathBuf::from(output_ref)` before reading `manifest.json` and unit JSON.",
+      "Unchanged-unit reuse copies `previous_unit.markdown` while assigning current raw/profile metadata."
+    ],
+    "evidenceRefs": [
+      "taskstore-all-misses-output-ref",
+      "latest-online-uses-output-ref",
+      "load-previous-pathbuf-read",
+      "reuse-copies-foreign-markdown"
+    ],
+    "limitations": [
+      "No online adapter was contacted.",
+      "No real external document or live shared store was read.",
+      "An end-to-end two-root KCS runtime regression was not retained; the PoC is a local synthetic model of the vulnerable transition."
+    ],
+    "method": "saved V6 poisoned-state provenance, V10 static trace, and local synthetic PoC",
+    "saved_reports": [
+      "artifacts/05_findings/KCS-R23-CAND-047/validation_report.md"
+    ],
+    "summary": "The saved validation confirms that a schema-valid supplied task can preserve an absolute or traversing `output_ref`, that `load_previous_instance()` reads the selected manifest and units directly, and that incremental reuse can copy previous markdown into a current-scope normalized unit. The included PoC models this cross-scope selection and fixed containment rejection using synthetic temporary files only."
+  },
+  "writeup": {
+    "attemptId": "tac_20260712",
+    "reportPath": "findings/tac-kcs-r23-cand-047-output-ref-cross-scope/task-output-ref-cross-scope.md",
+    "reportSha256": "501eb6f0ef0519932ccebc0f8dcf73695aa728cf86206726b78102d44d91b83b",
+    "supportingArtifacts": [
+      {
+        "path": "findings/tac-kcs-r23-cand-047-output-ref-cross-scope/poc/Makefile",
+        "sha256": "e1ac02767d66327c5b3782962d0f906e746a6c31a7d404365db21324d7243d0b"
+      },
+      {
+        "path": "findings/tac-kcs-r23-cand-047-output-ref-cross-scope/poc/README.md",
+        "sha256": "4880b0c2dad46a11920dad6ffbc3110879cf1f03f3c1bedeb3e1456ee8ec3ffd"
+      },
+      {
+        "path": "findings/tac-kcs-r23-cand-047-output-ref-cross-scope/poc/expected-output.txt",
+        "sha256": "4cc6395fcb76e0f4c7c3a4f8985e71ffb676bc41191005db8d954b7f2cb45550"
+      },
+      {
+        "path": "findings/tac-kcs-r23-cand-047-output-ref-cross-scope/poc/output_ref_cross_scope_probe.py",
+        "sha256": "9728a6aa024fbb22738bb654e6eef2b1bc5db04b09ea13b9447e90a408df37f9"
+      }
+    ],
+    "pocDirectory": "findings/tac-kcs-r23-cand-047-output-ref-cross-scope/poc"
+  }
+}

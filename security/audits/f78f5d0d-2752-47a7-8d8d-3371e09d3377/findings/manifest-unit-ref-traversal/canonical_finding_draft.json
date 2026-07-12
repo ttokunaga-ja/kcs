@@ -1,0 +1,205 @@
+{
+  "ruleId": "kcs.store.manifest-unit-ref-traversal",
+  "identity": {
+    "anchor": "kcs/normalized-instance/unit-ref-containment",
+    "instance": "manifest-unit-ref-cross-scope"
+  },
+  "title": "Persisted manifest unit_ref can escape its normalized-instance directory",
+  "summary": "A lower-trust adopted KCS store can persist an absolute or parent-traversing `unit_ref`. Both normalized-unit readers append `.json`, join the unvalidated value to the instance directory, and read the result with the victim user's filesystem authority. A compatible external normalized unit can then enter current-scope chunks, indexing, or incremental previous context.",
+  "severity": {
+    "level": "medium",
+    "rationale": "Cross-scope normalized text and evidence provenance can be exposed or contaminated, giving High impact. Likelihood is Medium because exploitation requires adoption of lower-trust persisted state, a predictable victim-readable JSON target, a schema-compatible normalized unit, a later eligible invocation, and for reliable live search, compatible provenance fields. The immutable attack-path decision is Medium/P2.",
+    "changeConditions": "Severity would increase if untrusted store import were automatic or victim normalized-unit paths were broadly predictable with direct attacker readback. It would decrease if imported stores were always fully revalidated and unit references were derived and opened only beneath a trusted instance directory."
+  },
+  "confidence": {
+    "level": "high",
+    "rationale": "The exact revision provides a complete manifest-to-read-to-index/reuse trace. A bounded offline regression exercised absolute and parent-component references with synthetic unit JSON and observed the external marker in the vulnerable model while the derived-reference fixed model rejected both. No production-store or shared-service readback was executed."
+  },
+  "taxonomy": {
+    "category": "Path traversal and cross-scope normalized-data import",
+    "cwe": [
+      "CWE-22"
+    ]
+  },
+  "locations": [
+    {
+      "path": "crates/kcs-pipeline/src/markdownize.rs",
+      "startLine": 65,
+      "endLine": 84,
+      "role": "user_input"
+    },
+    {
+      "path": "crates/kcs-cli/src/main.rs",
+      "startLine": 3355,
+      "endLine": 3390,
+      "role": "root_control"
+    },
+    {
+      "path": "crates/kcs-cli/src/main.rs",
+      "startLine": 3030,
+      "endLine": 3127,
+      "role": "outcome"
+    },
+    {
+      "path": "crates/kcs-cli/src/main.rs",
+      "startLine": 9685,
+      "endLine": 9713,
+      "role": "sink"
+    }
+  ],
+  "writeup": {
+    "reportPath": "findings/manifest-unit-ref-traversal/manifest-unit-ref-traversal.md"
+  },
+  "codeEvidence": [
+    {
+      "id": "manifest-unit-ref-input",
+      "label": "Persisted manifest accepts unit_ref as an unconstrained string",
+      "path": "crates/kcs-pipeline/src/markdownize.rs",
+      "startLine": 65,
+      "endLine": 74,
+      "language": "rust",
+      "role": "user_input",
+      "code": "#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]\npub struct NormalizedUnitManifestEntry {\n    pub order: u64,\n    pub unit_key: String,\n    pub unit_ref: String,\n    pub unit_type: UnitType,\n    pub status: UnitStatus,\n    pub prepared_hash: String,\n    pub error_kind: Option<String>,\n}",
+      "explanation": "An adopted store contributor controls the deserialized `unit_ref`. The type does not distinguish a derived local identifier from an absolute or parent-bearing path string, so the value reaches both readers without a format or containment guarantee."
+    },
+    {
+      "id": "canonical-unit-ref-derivation",
+      "label": "Normal writers derive a 16-hex local object identifier",
+      "path": "crates/kcs-pipeline/src/prepare.rs",
+      "startLine": 175,
+      "endLine": 179,
+      "language": "rust",
+      "role": "expected_control",
+      "code": "#[must_use]\npub fn unit_ref(unit_key: &str) -> String {\n    let digest = Sha256::digest(unit_key.as_bytes());\n    lower_hex(&digest)[..16].to_owned()\n}",
+      "explanation": "The writer-side invariant is that the filename stem is derived from `unit_key`, yielding only 16 lowercase hexadecimal characters. The vulnerable readers do not reapply this derivation before reading persisted state."
+    },
+    {
+      "id": "rebuild-external-unit-read",
+      "label": "Rebuild reader joins and reads the manifest-controlled reference",
+      "path": "crates/kcs-cli/src/main.rs",
+      "startLine": 3367,
+      "endLine": 3392,
+      "language": "rust",
+      "role": "root_control",
+      "code": "    let manifest_path = dir.join(\"manifest.json\");\n    let manifest: NormalizedInstanceManifest = serde_json::from_slice(\n        &fs::read(&manifest_path)\n            .map_err(|err| KcsError::io(err.to_string(), manifest_path.display().to_string()))?,\n    )\n    .map_err(|err| store_corrupt_error(&manifest_path, err.to_string()))?;\n    let mut units = Vec::new();\n    for entry in &manifest.units {\n        if entry.status != UnitStatus::Done {\n            continue;\n        }\n        let unit_path = dir.join(format!(\"{}.json\", entry.unit_ref));\n        let unit: NormalizedUnitObject = serde_json::from_slice(\n            &fs::read(&unit_path)\n                .map_err(|err| KcsError::io(err.to_string(), unit_path.display().to_string()))?,\n        )\n        .map_err(|err| store_corrupt_error(&unit_path, err.to_string()))?;\n        units.push(NormalizedUnitInput {\n            raw_hash: unit.raw_hash,\n            tool_profile_hash: unit.tool_profile_hash,\n            gen: unit.gen,\n            unit_key: unit.unit_key,\n            markdown: unit.markdown,\n        });\n    }\n    Ok(units)",
+      "explanation": "For every `Done` entry, KCS appends `.json`, joins the contributor-controlled string to `dir`, and immediately calls `fs::read()`. An absolute component replaces `dir`; parent components traverse it. Successful parsing carries the external object's markdown and provenance into `NormalizedUnitInput`."
+    },
+    {
+      "id": "rebuild-index-outcome",
+      "label": "Externally selected markdown is chunked under the current tree entry",
+      "path": "crates/kcs-cli/src/main.rs",
+      "startLine": 3104,
+      "endLine": 3111,
+      "language": "rust",
+      "role": "outcome",
+      "code": "        let input = ChunkingInput {\n            raw_path: entry.path.clone(),\n            units,\n            config: config.clone(),\n            created_at: now_utc_seconds(),\n        };\n        for mut row in chunk_normalized_instance(input).map_err(index_to_kcs)? {\n            row.first_seen_commit = Some(head.clone());",
+      "explanation": "The units returned by the uncontained read are paired with the current tree entry's `raw_path` and chunked for derived index state. This is where external normalized content can acquire current-scope attribution."
+    },
+    {
+      "id": "incremental-external-unit-read",
+      "label": "Previous-instance loading repeats the uncontained read",
+      "path": "crates/kcs-cli/src/main.rs",
+      "startLine": 9691,
+      "endLine": 9713,
+      "language": "rust",
+      "role": "sink",
+      "code": "    let manifest: NormalizedInstanceManifest =\n        serde_json::from_slice(&bytes).map_err(|err| KcsError::schema(err.to_string()))?;\n    let mut units = Vec::new();\n    for entry in &manifest.units {\n        if entry.status != UnitStatus::Done {\n            continue;\n        }\n        let unit_path = dir.join(format!(\"{}.json\", entry.unit_ref));\n        // R14-1: a partially-corrupt previous instance (manifest claims `done` but the\n        // unit `<unit_ref>.json` is unreadable or malformed) must degrade to \"no usable\n        // previous\" — exactly like a missing manifest.json above (`Ok(None)`) — so the\n        // caller falls back to a Full re-send and self-heals. The prior asymmetric hard\n        // `Err` here bricked online markdownize for the document permanently (the same\n        // corrupt previous was read every run, never re-OCR'd) and, on the offline\n        // route, propagated out of `run_index_pipeline`'s candidate loop and aborted the\n        // whole `kcs index`, silently skipping alphabetically-later files.\n        let Ok(bytes) = fs::read(&unit_path) else {\n            return Ok(None);\n        };\n        let Ok(unit) = serde_json::from_slice::<NormalizedUnitObject>(&bytes) else {\n            return Ok(None);\n        };\n        units.push(unit);",
+      "explanation": "The incremental path performs the same join and read. A parseable external object is accepted into `units`, which can become previous normalized context for a later adapter operation."
+    }
+  ],
+  "rootCause": {
+    "summary": "KCS persists `unit_ref` as if it were a derived local object identifier but deserializes it as an unrestricted string. Normal writers derive a safe 16-hex value from `unit_key`; the rebuild and previous-instance readers do not re-derive or validate that value, do not reject separators or absolute paths, and do not prove direct-child containment before `fs::read()`. The resulting external unit is then consumed as current-scope chunking input or incremental previous context.",
+    "evidenceRefs": [
+      "manifest-unit-ref-input",
+      "rebuild-external-unit-read",
+      "rebuild-index-outcome",
+      "incremental-external-unit-read",
+      "canonical-unit-ref-derivation"
+    ]
+  },
+  "remediation": "Treat `unit_ref` as a derived identifier, not a path. In every reader, compute `kcs_pipeline::prepare::unit_ref(entry.unit_key)`, reject any persisted value that differs, and construct the filename only from the computed value. Centralize the logic for rebuild and previous-instance loading, validate the unit object's provenance tuple before consumption, and use direct-child/no-follow opening or equivalent containment defense in depth.",
+  "validation": {
+    "method": "Exact-revision static source trace plus bounded offline synthetic path regression",
+    "summary": "Static review traced contributor-controlled persisted metadata through both path joins and reads to index chunking and incremental reuse. The bundled temporary-directory regression loaded a synthetic external marker for both an absolute reference and a parent traversal in the vulnerable model; the fixed derived-reference model rejected both and accepted a canonical in-instance control.",
+    "evidenceRefs": [
+      "manifest-unit-ref-input",
+      "rebuild-external-unit-read",
+      "rebuild-index-outcome",
+      "incremental-external-unit-read",
+      "canonical-unit-ref-derivation"
+    ],
+    "assertions": [
+      "An absolute formatted unit filename replaces the intended instance base.",
+      "A parent-bearing unit reference selects a JSON object outside the instance directory.",
+      "Both production readers lack a canonical-reference or containment check before `fs::read()`.",
+      "The synthetic fixed model rejects both malicious references and accepts the canonical control."
+    ],
+    "limitations": [
+      "The regression is source-faithful but does not invoke the KCS CLI end to end.",
+      "No real `.kcs` store, non-synthetic file, credential, external service, or shared-store readback was used.",
+      "Victim path predictability and the prevalence of adopted lower-trust stores were not measured."
+    ]
+  },
+  "attackPath": {
+    "summary": "A lower-trust contributor supplies an adopted store with a `Done` manifest entry whose `unit_ref` is absolute or parent-traversing. A later victim rebuild or incremental workflow reads a compatible normalized-unit JSON outside the instance with victim authority, then chunks or reuses its markdown under the current scope.",
+    "dataflow": {
+      "summary": "adopted `manifest.json` unit_ref -> `.json` suffix and unchecked path join -> victim-authority `fs::read()` -> `NormalizedUnitObject` parse -> current-scope chunking/index or previous context",
+      "source": "contributor-controlled `unit_ref` in a lower-trust adopted normalized manifest",
+      "sink": "filesystem reads in `load_normalized_units()` and `load_previous_instance()`",
+      "outcome": "cross-scope normalized text import and derived-state/evidence contamination",
+      "evidenceRefs": [
+        "manifest-unit-ref-input",
+        "rebuild-external-unit-read",
+        "rebuild-index-outcome",
+        "incremental-external-unit-read"
+      ]
+    },
+    "reachability": {
+      "summary": "Reachability is local and filesystem-mediated. The victim must adopt supplied persisted state, the contributor must know or arrange a readable compatible JSON target, and the victim must run rebuild/index or incremental processing.",
+      "attacker": "lower-trust copied/shared/synchronized-store contributor",
+      "entrypoint": "a persisted normalized manifest in an adopted `.kcs` store",
+      "outcome": "an external normalized unit is consumed under the adopted scope"
+    },
+    "evidenceRefs": [
+      "manifest-unit-ref-input",
+      "rebuild-external-unit-read",
+      "incremental-external-unit-read",
+      "rebuild-index-outcome"
+    ],
+    "impact": {
+      "level": "high",
+      "why": "A selected unit can contain sensitive normalized text from another scope, and its markdown can contaminate chunks, index attribution, evidence, or incremental context."
+    },
+    "likelihood": {
+      "level": "medium",
+      "why": "The path requires lower-trust store adoption, victim-readable target knowledge, schema compatibility, later operator invocation, and potentially compatible provenance fields for reliable live search."
+    },
+    "limitations": [
+      "The primitive appends `.json` and cannot directly disclose arbitrary non-JSON files.",
+      "Operating system permissions bound the readable targets.",
+      "Direct disclosure back to the contributor requires a later readback channel."
+    ]
+  },
+  "remediationTests": [
+    "Reject absolute `unit_ref` values before any unit read in both normalized-unit readers.",
+    "Reject `../`, embedded separators, uppercase, overlong, and otherwise non-canonical references.",
+    "Reject a valid-looking 16-hex reference that does not equal the value derived from the entry's `unit_key`.",
+    "Reject symlinked or canonically escaped unit objects without a time-of-check/time-of-use gap.",
+    "Accept a canonical in-instance unit and verify all object provenance fields against the manifest and requested tuple.",
+    "Run an end-to-end rebuild and incremental regression that asserts an external marker never reaches chunks, search/evidence state, or previous adapter context."
+  ],
+  "preventiveControls": [
+    "Centralize all persisted normalized-instance reads behind one validated loader.",
+    "Represent derived object references with a validated newtype instead of `String`.",
+    "Open store objects relative to trusted directory handles with no-follow semantics where supported.",
+    "Fully validate imported stores before they are eligible for rebuild, search, or incremental reuse."
+  ],
+  "provenance": {
+    "source": "Codex Security deep-scan validation, attack-path analysis, and dedicated vulnerability write-up of Git revision 0e19f3c6489da458e93a982a333c308d92d0a0ae"
+  },
+  "extensions": {
+    "candidateId": "KCS-R23-CAND-049",
+    "ledgerRowId": "KCS-R23-CAND-049",
+    "reportId": "KCS-R23-049"
+  }
+}

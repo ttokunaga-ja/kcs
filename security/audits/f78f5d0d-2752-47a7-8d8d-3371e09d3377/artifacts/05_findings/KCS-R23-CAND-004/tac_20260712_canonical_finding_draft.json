@@ -1,0 +1,189 @@
+{
+  "schema_version": 1,
+  "scan_id": "f78f5d0d-2752-47a7-8d8d-3371e09d3377",
+  "candidate_id": "KCS-R23-CAND-004",
+  "ledger_row_id": "KCS-R23-CAND-004",
+  "title": "OCR bounding-box arithmetic can overflow",
+  "summary": "The Mistral OCR adapter parses remote OCR image bounding boxes and normalizes object-style `x`/`y`/`w`/`h` coordinates with unchecked signed addition. A response-controlled `x = i64::MAX, w = 1` or `y = i64::MAX, h = 1` panics in overflow-checked builds and can wrap into inverted extracted-image metadata in optimized builds with overflow checks disabled.",
+  "final_policy": "reportable",
+  "final_severity": "medium",
+  "priority": "P2",
+  "confidence": "high",
+  "affectedLocations": [
+    {
+      "label": "OCR response parser",
+      "path": "crates/kcs-adapter/src/mistral_ocr.rs",
+      "lines": "356-382"
+    },
+    {
+      "label": "Image metadata construction",
+      "path": "crates/kcs-adapter/src/mistral_ocr.rs",
+      "lines": "398-422"
+    },
+    {
+      "label": "Unchecked bounding-box normalization",
+      "path": "crates/kcs-adapter/src/mistral_ocr.rs",
+      "lines": "434-463"
+    },
+    {
+      "label": "Metadata sink",
+      "path": "crates/kcs-adapter/src/mistral_ocr.rs",
+      "lines": "466-480"
+    }
+  ],
+  "codeEvidence": [
+    {
+      "id": "remote-ocr-json",
+      "label": "Remote OCR JSON is parsed into the adapter",
+      "path": "crates/kcs-adapter/src/mistral_ocr.rs",
+      "startLine": 126,
+      "endLine": 138,
+      "language": "rust",
+      "role": "user_input",
+      "code": "let value: Value = ureq::post(&format!(\"{}/v1/ocr\", self.base_url()))\n    .set(\"Authorization\", &format!(\"Bearer {api_key}\"))\n    .set(\"Content-Type\", \"application/json\")\n    .send_json(ocr_request_body(\n        &request.media_type,\n        &bytes,\n        model_pin,\n        pages.as_deref(),\n    ))\n    .map_err(http_error)?\n    .into_json()\n    .map_err(|err| AdapterError::ContractViolation(err.to_string()))?;\nparse_ocr_response(value, model_pin)",
+      "explanation": "After an approved OCR call, the remote service controls the JSON `value` passed into `parse_ocr_response()`."
+    },
+    {
+      "id": "pages-entrypoint",
+      "label": "Response pages are mapped through page parsing",
+      "path": "crates/kcs-adapter/src/mistral_ocr.rs",
+      "startLine": 356,
+      "endLine": 364,
+      "language": "rust",
+      "role": "entrypoint",
+      "code": "fn parse_ocr_response(value: Value, model_pin: &str) -> Result<OcrResponse> {\n    let pages = value\n        .get(\"pages\")\n        .and_then(Value::as_array)\n        .ok_or_else(|| AdapterError::ContractViolation(\"OCR response missing pages\".to_owned()))?\n        .iter()\n        .enumerate()\n        .map(|(fallback_index, page)| parse_ocr_page(page, fallback_index))\n        .collect::<Result<Vec<_>>>()?;",
+      "explanation": "`parse_ocr_response()` performs a shape check for the `pages` array, then forwards each remote page toward image parsing."
+    },
+    {
+      "id": "image-bbox-forward",
+      "label": "Image parser forwards remote bbox data",
+      "path": "crates/kcs-adapter/src/mistral_ocr.rs",
+      "startLine": 398,
+      "endLine": 416,
+      "language": "rust",
+      "role": "propagation",
+      "code": "fn parse_ocr_image(value: &Value) -> Result<OcrImage> {\n    let raw_base64 = value\n        .get(\"image_base64\")\n        .or_else(|| value.get(\"base64\"))\n        .and_then(Value::as_str)\n        .unwrap_or_default();\n    let (media_type, data) = split_data_uri(raw_base64);\n    let bytes = base64::engine::general_purpose::STANDARD\n        .decode(data)\n        .map_err(|err| AdapterError::ContractViolation(err.to_string()))?;\n    Ok(OcrImage {\n        bytes,\n        media_type: value\n            .get(\"media_type\")\n            .and_then(Value::as_str)\n            .unwrap_or(media_type)\n            .to_owned(),\n        bbox: parse_bbox(value.get(\"bbox\").unwrap_or(value)),",
+      "explanation": "The remote image object controls either the nested `bbox` field or, if absent, the top-level coordinate fields passed to `parse_bbox()`."
+    },
+    {
+      "id": "unchecked-bbox-addition",
+      "label": "Width and height are added without overflow checks",
+      "path": "crates/kcs-adapter/src/mistral_ocr.rs",
+      "startLine": 434,
+      "endLine": 463,
+      "language": "rust",
+      "role": "root_control",
+      "code": "fn parse_bbox(value: &Value) -> Option<[i64; 4]> {\n    if let Some(array) = value.as_array() {\n        if array.len() == 4 {\n            return Some([\n                array[0].as_i64()?,\n                array[1].as_i64()?,\n                array[2].as_i64()?,\n                array[3].as_i64()?,\n            ]);\n        }\n    }\n    let x1 = value\n        .get(\"top_left_x\")\n        .or_else(|| value.get(\"x\"))\n        .and_then(Value::as_i64)?;\n    let y1 = value\n        .get(\"top_left_y\")\n        .or_else(|| value.get(\"y\"))\n        .and_then(Value::as_i64)?;\n    let x2 = value\n        .get(\"bottom_right_x\")\n        .or_else(|| value.get(\"x2\"))\n        .and_then(Value::as_i64)\n        .or_else(|| value.get(\"w\").and_then(Value::as_i64).map(|w| x1 + w))?;\n    let y2 = value\n        .get(\"bottom_right_y\")\n        .or_else(|| value.get(\"y2\"))\n        .and_then(Value::as_i64)\n        .or_else(|| value.get(\"h\").and_then(Value::as_i64).map(|h| y1 + h))?;\n    Some([x1, y1, x2, y2])\n}",
+      "explanation": "`x1`, `y1`, `w`, and `h` are response-controlled `i64` values. The object-form fallback computes `x1 + w` and `y1 + h` without `checked_add()` or a geometry predicate."
+    },
+    {
+      "id": "metadata-sink",
+      "label": "Parsed boxes are serialized into extracted-image metadata",
+      "path": "crates/kcs-adapter/src/mistral_ocr.rs",
+      "startLine": 466,
+      "endLine": 480,
+      "language": "rust",
+      "role": "sink",
+      "code": "fn page_metadata(model_version_pin: &str, images: Option<&[OcrImage]>) -> BTreeMap<String, Value> {\n    let mut metadata = BTreeMap::new();\n    metadata.insert(\"model_version_pin\".to_owned(), json!(model_version_pin));\n    let image_values = images\n        .unwrap_or(&[])\n        .iter()\n        .map(|image| {\n            json!({\n                \"hash\": image_hash(&image.bytes),\n                \"media_type\": image.media_type,\n                \"bbox\": image.bbox,\n                \"confidence\": image.confidence,\n            })\n        })\n        .collect::<Vec<_>>();",
+      "explanation": "When optimized builds wrap instead of panicking, the resulting impossible `[x1, y1, x2, y2]` tuple is preserved as image metadata."
+    }
+  ],
+  "rootCause": {
+    "summary": "The violated invariant is that remote OCR coordinates must be proven safe and geometrically valid before KCS derives `x2` and `y2`. `parse_bbox()` accepts object-style start-plus-extent coordinates and evaluates `x1 + w` and `y1 + h` directly on response-controlled `i64` values, then returns the tuple without checking for overflow, negative extents, or inverted boxes.",
+    "evidenceRefs": [
+      "remote-ocr-json",
+      "pages-entrypoint",
+      "image-bbox-forward",
+      "unchecked-bbox-addition",
+      "metadata-sink"
+    ]
+  },
+  "validation": {
+    "method": "static source trace plus local synthetic arithmetic probe",
+    "summary": "The source trace confirms that OCR response JSON controls the image `bbox` fields and that object-style `w` and `h` operands reach unchecked signed addition. The local PoC confirms the two relevant build outcomes: overflow-checked builds panic, while an optimized build with overflow checks disabled wraps into an inverted coordinate.",
+    "evidenceRefs": [
+      "remote-ocr-json",
+      "image-bbox-forward",
+      "unchecked-bbox-addition",
+      "metadata-sink"
+    ],
+    "assertions": [
+      "`serde_json::Value::as_i64()` constrains type but not arithmetic range.",
+      "`x1 + w` and `y1 + h` are evaluated before any geometry validation.",
+      "The array form returns four values directly and is not the overflow trigger, although it still needs geometry validation."
+    ],
+    "limitations": [
+      "No live OCR endpoint was contacted.",
+      "No end-to-end downstream consumer of wrapped metadata was exercised.",
+      "Batch-wide recovery after a panic was not measured."
+    ]
+  },
+  "attackPath": {
+    "summary": "A remote OCR response actor answers an approved OCR request with an image object whose `bbox` uses `x`/`y` plus `w`/`h` values near `i64` boundaries. KCS computes the derived edges without checked arithmetic, causing a panic or wrapped metadata depending on overflow-check configuration.",
+    "dataflow": {
+      "summary": "remote OCR JSON -> `parse_ocr_response()` -> `parse_ocr_page()` -> `parse_ocr_image()` -> `parse_bbox()` -> `page_metadata()`",
+      "source": "response-controlled object-style `bbox` fields `x`, `y`, `w`, and `h`",
+      "sink": "`images[].bbox` in extracted-image metadata",
+      "outcome": "active OCR operation panic or wrapped inverted metadata",
+      "evidenceRefs": [
+        "remote-ocr-json",
+        "image-bbox-forward",
+        "unchecked-bbox-addition",
+        "metadata-sink"
+      ]
+    },
+    "reachability": {
+      "summary": "The attacker must influence the response to an OCR request that KCS has already approved; there is no inbound KCS listener involved in this path.",
+      "attacker": "remote OCR service, compatible configured OCR endpoint, or actor able to influence that response",
+      "entrypoint": "Mistral OCR response JSON",
+      "preconditions": [
+        "online OCR is enabled and an approved OCR request is sent",
+        "the response includes an image with object-style `bbox` coordinates using `w` or `h`",
+        "the chosen operands overflow signed 64-bit addition or produce invalid geometry"
+      ],
+      "outcome": "availability harm to OCR processing or invalid image coordinate metadata"
+    },
+    "evidenceRefs": [
+      "remote-ocr-json",
+      "unchecked-bbox-addition",
+      "metadata-sink"
+    ],
+    "impact": {
+      "level": "medium",
+      "why": "The response crosses a trust boundary and can reliably trigger panic or metadata-integrity failure, but the demonstrated effect is bounded to OCR processing and does not bypass authorization or disclose credentials."
+    },
+    "likelihood": {
+      "level": "high",
+      "why": "Once the remote response actor is in position, the operands are direct JSON fields with no arithmetic guard."
+    },
+    "limitations": [
+      "The array and explicit-corner forms avoid the overflowing addition.",
+      "The finding does not demonstrate arbitrary code execution, cross-scope persistence, or credential disclosure."
+    ]
+  },
+  "remediation": {
+    "summary": "Use checked arithmetic for start-plus-extent coordinates and reject negative, overflowing, inverted, or unreasonable bounding boxes before constructing `OcrImage` metadata.",
+    "recommendations": [
+      "Replace `x1 + w` and `y1 + h` with `checked_add()` after rejecting negative `w` and `h`.",
+      "Apply a shared final predicate that enforces `x2 >= x1` and `y2 >= y1` for array, explicit-corner, and width/height forms.",
+      "Consider returning `Result<Option<[i64; 4]>>` so invalid coordinates can be reported as contract violations instead of being conflated with absent coordinates.",
+      "If page or image dimensions are available, reject coordinates outside those bounds."
+    ],
+    "regressionTests": [
+      "Object-form `x = i64::MAX, w = 1` is rejected without panic.",
+      "Normal object-form `x = 10, y = 5, w = 20, h = 7` still returns `[10, 5, 30, 12]`.",
+      "Negative widths or heights are rejected.",
+      "Array and explicit-corner boxes with inverted geometry are rejected.",
+      "`page_metadata()` never receives an inverted `bbox` from `parse_ocr_image()`."
+    ]
+  },
+  "writeup": {
+    "reportPath": "findings/tac-kcs-r23-cand-004-ocr-bounding-box-overflow/tac-kcs-r23-cand-004-ocr-bounding-box-overflow.md",
+    "pocDir": "findings/tac-kcs-r23-cand-004-ocr-bounding-box-overflow/poc"
+  },
+  "extensions": {
+    "candidateId": "KCS-R23-CAND-004",
+    "ledgerRowId": "KCS-R23-CAND-004",
+    "reportId": "KCS-R23-CAND-004"
+  }
+}

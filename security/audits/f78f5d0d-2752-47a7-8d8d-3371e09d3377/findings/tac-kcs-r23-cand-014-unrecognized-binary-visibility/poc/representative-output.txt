@@ -1,0 +1,6 @@
+[+] created disposable scope with ok.md and photo.bmp
+[+] index: skipped_unrecognized_binary_files=1 normalized_files=1 pending_online_tasks=0
+[+] status: photo.bmp status=unchanged and no task references photo.bmp
+[+] search: ok.md is searchable and index_status=enriched_ratio=1.0,pending=0,budget_paused=false
+[+] event: KCS-I-INDEX-INPUT-UNRECOGNIZED-BINARY-001 has media_type=application/octet-stream,size_bytes=2002 and no path/input_path
+[+] vulnerable behavior reproduced: archived binary is absent from durable completeness telemetry

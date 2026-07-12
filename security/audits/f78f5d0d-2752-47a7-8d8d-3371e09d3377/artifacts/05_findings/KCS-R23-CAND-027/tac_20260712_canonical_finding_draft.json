@@ -1,0 +1,224 @@
+{
+  "schema_version": 1,
+  "scan_id": "f78f5d0d-2752-47a7-8d8d-3371e09d3377",
+  "candidate_id": "KCS-R23-CAND-027",
+  "ledger_row_id": "KCS-R23-CAND-027",
+  "title": "Scan-time replacement can authorize an outside-scope file under a benign name",
+  "target_revision": "0e19f3c6489da458e93a982a333c308d92d0a0ae",
+  "scope": ".",
+  "final_policy": "reportable",
+  "final_severity": "medium",
+  "priority": "P2",
+  "confidence": "high (0.91) in the code interleaving; medium in practical race reliability",
+  "summary": "During a non-preview `kcs index`, the scanner checks that a selected-scope direct child is a regular file and derives policy from its benign relative name, but later follows the mutable pathname to compute the accepted scan hash. A lower-trust directory writer who replaces that child with a symlink after the type check can make KCS bind outside victim-readable bytes to the benign in-scope identity; later hash equality accepts the same outside target because the scan hash was already computed from it.",
+  "affectedLocations": [
+    {
+      "label": "entrypoint",
+      "path": "crates/kcs-cli/src/main.rs",
+      "lines": "558-580"
+    },
+    {
+      "label": "root_control",
+      "path": "crates/kcs-pipeline/src/scan.rs",
+      "lines": "97-149"
+    },
+    {
+      "label": "hash_acceptance",
+      "path": "crates/kcs-cli/src/main.rs",
+      "lines": "9072-9118"
+    },
+    {
+      "label": "prepare_reopen",
+      "path": "crates/kcs-pipeline/src/prepare.rs",
+      "lines": "72-103"
+    },
+    {
+      "label": "online_sink",
+      "path": "crates/kcs-adapter/src/mistral_ocr.rs",
+      "lines": "112-138"
+    },
+    {
+      "label": "secret_control",
+      "path": "crates/kcs-cli/src/main.rs",
+      "lines": "7317-7329"
+    }
+  ],
+  "codeEvidence": [
+    {
+      "id": "index-requests-scan-hashes",
+      "label": "Non-preview index requests raw hashes during scan",
+      "path": "crates/kcs-cli/src/main.rs",
+      "startLine": 575,
+      "endLine": 580,
+      "language": "rust",
+      "role": "entrypoint",
+      "code": "let preview = build_scan_preview(ScanPreviewRequest {\n    scope_path: repo.root().display().to_string(),\n    include_raw_hashes: !args.preview,\n    require_network_approval: !args.offline,\n})\n.map_err(pipeline_to_kcs)?;",
+      "explanation": "A normal non-preview `index` call asks the scanner to include a `raw_hash`, so the scan-stage file identity becomes an input to the later indexing pipeline."
+    },
+    {
+      "id": "scan-observes-regular-child",
+      "label": "Scanner observes the direct child as a regular file",
+      "path": "crates/kcs-pipeline/src/scan.rs",
+      "startLine": 97,
+      "endLine": 122,
+      "language": "rust",
+      "role": "user_input",
+      "code": "for entry in std::fs::read_dir(scope_path).pipeline_io(scope_path)? {\n    let entry = entry.pipeline_io(scope_path)?;\n    let name = match entry.file_name().into_string() {\n        Ok(name) => name,\n        Err(_) => continue,\n    };\n    if name == \".kcs\" || name == \".kcsignore\" {\n        continue;\n    }\n    let path = entry.path();\n    if is_xdg_state_inside_scope(scope_path, &path) {\n        continue;\n    }\n    let file_type = entry.file_type().pipeline_io(&path)?;\n    if !file_type.is_file() {\n        continue;\n    }\n    let relative = path\n        .strip_prefix(scope_path)\n        .unwrap_or(&path)\n        .to_string_lossy()\n        .replace('\\\\', \"/\");\n    if relative == \".kcsignore\" {\n        continue;\n    }\n    let size_bytes = entry.metadata().pipeline_io(&path)?.len();",
+      "explanation": "The attacker-controlled directory entry is accepted because it is observed as a regular direct child at this moment. The result is not bound to an open descriptor, so a later rename can change what `path` resolves to."
+    },
+    {
+      "id": "scan-classifies-name-then-reads-path",
+      "label": "Benign-name policy precedes a following pathname read",
+      "path": "crates/kcs-pipeline/src/scan.rs",
+      "startLine": 123,
+      "endLine": 149,
+      "language": "rust",
+      "role": "root_control",
+      "code": "let secret = classify_secret(&relative);\nlet ignored = ignored_by_rules(\n    &relative,\n    file_type.is_dir(),\n    ignore_rules,\n    case_insensitive,\n) || secret == Some(SecretTier::TierA)\n    && !explicitly_unignored(\n        &relative,\n        file_type.is_dir(),\n        ignore_rules,\n        case_insensitive,\n    );\nlet quarantine_reason = match secret {\n    Some(SecretTier::TierA) if ignored => Some(\"secrets_tier_a_excluded\".to_owned()),\n    Some(SecretTier::TierA) => Some(\"secrets_tier_a_online_hold\".to_owned()),\n    Some(SecretTier::TierB) => Some(\"secrets_tier_b_warning\".to_owned()),\n    _ => None,\n};\nlet raw_hash = if include_raw_hashes && !ignored {\n    Some(hash_bytes(&std::fs::read(&path).pipeline_io(&path)?))\n} else {\n    None\n};",
+      "explanation": "`relative` drives the secret decision, but `std::fs::read(&path)` follows the current pathname. A replacement symlink can therefore supply outside bytes while retaining the benign in-scope name and policy result."
+    },
+    {
+      "id": "index-accepts-already-substituted-hash",
+      "label": "Later hash equality accepts the same outside target",
+      "path": "crates/kcs-cli/src/main.rs",
+      "startLine": 9072,
+      "endLine": 9109,
+      "language": "rust",
+      "role": "propagation",
+      "code": "let secrets_hold = !secrets_approved && classify_secret(&candidate.input_path).is_some();\nlet path = repo.root().join(&candidate.input_path);\nlet bytes = fs::read(&path)\n    .map_err(|err| KcsError::io(err.to_string(), path.display().to_string()))?;\nlet current_hash = hash_bytes(&bytes);\nif let Some(scan_hash) = &candidate.raw_hash {\n    if scan_hash != &current_hash {\n        append_event_log(\n            \"KCS-I-INDEX-INPUT-CHANGED-001\",\n            \"input file changed between scan and normalize; skipped to preserve \\\n             content-addressing (re-run index)\",\n            json!({ \"input_path\": candidate.input_path }),\n        )?;\n        result.failed_files += 1;\n        continue;\n    }\n}\nlet raw_hash = current_hash;\nlet prepare = prepare_units(PrepareStageRequest {\n    raw_hash: raw_hash.clone(),\n    media_type: candidate.media_type.clone(),\n    input_path: path.display().to_string(),\n    tool_profile_hash: prepare_profile_hash.clone(),\n})\n.map_err(pipeline_to_kcs)?;",
+      "explanation": "The hash check catches ordinary post-scan edits, but not this interleaving: `candidate.raw_hash` and `current_hash` can both be the outside target's hash. The secret hold still uses `candidate.input_path`, and only the mutable path is passed onward."
+    },
+    {
+      "id": "prepare-reopens-input-path",
+      "label": "Preparation independently reopens the input path",
+      "path": "crates/kcs-pipeline/src/prepare.rs",
+      "startLine": 72,
+      "endLine": 90,
+      "language": "rust",
+      "role": "sink",
+      "code": "pub fn prepare_units(request: PrepareStageRequest) -> Result<PrepareStageOutput> {\n    let media_type = request.media_type.as_str();\n    let is_text_native = matches!(media_type, \"text/markdown\" | \"text/plain\" | \"text/x-code\");\n    let is_pdf = media_type == \"application/pdf\";\n    if !is_text_native && !is_pdf && media_type != \"application/octet-stream\" {\n        return Ok(PrepareStageOutput {\n            prepared_object_hashes: Vec::new(),\n            prepared_units: Vec::new(),\n            image_object_hashes: Vec::new(),\n        });\n    }\n    let bytes = std::fs::read(&request.input_path).pipeline_io(Path::new(&request.input_path))?;",
+      "explanation": "`prepare_units()` receives `raw_hash` but does not consume the previously verified buffer. It opens `request.input_path` again, preserving the pathname-binding weakness into preparation."
+    },
+    {
+      "id": "ocr-reopens-and-sends",
+      "label": "OCR client reopens the path before sending",
+      "path": "crates/kcs-adapter/src/mistral_ocr.rs",
+      "startLine": 112,
+      "endLine": 138,
+      "language": "rust",
+      "role": "outcome",
+      "code": "fn ocr_markdown(&self, request: &MarkdownizeRequest, model_pin: &str) -> Result<OcrResponse> {\n    let api_key = Self::api_key()?;\n    let path = request.raw.path.as_deref().ok_or_else(|| {\n        AdapterError::ContractViolation(\"Mistral OCR requires a local raw path\".to_owned())\n    })?;\n    let bytes = std::fs::read(path).map_err(|err| AdapterError::Io {\n        path: path.to_owned(),\n        message: err.to_string(),\n    })?;\n    let pages = request_pages(request);\n    let value: Value = ureq::post(&format!(\"{}/v1/ocr\", self.base_url()))\n        .set(\"Authorization\", &format!(\"Bearer {api_key}\"))\n        .set(\"Content-Type\", \"application/json\")\n        .send_json(ocr_request_body(\n            &request.media_type,\n            &bytes,\n            model_pin,\n            pages.as_deref(),\n        ))\n        .map_err(http_error)?\n        .into_json()\n        .map_err(|err| AdapterError::ContractViolation(err.to_string()))?;\n    parse_ocr_response(value, model_pin)\n}",
+      "explanation": "When the ordinary online OCR path is otherwise authorized, the adapter performs a final pathname read and serializes those bytes into the request body. No descriptor or byte-buffer binding from scan time reaches this sink."
+    },
+    {
+      "id": "embedding-hold-uses-benign-raw-path",
+      "label": "Embedding secret hold uses stored raw path",
+      "path": "crates/kcs-cli/src/main.rs",
+      "startLine": 7317,
+      "endLine": 7329,
+      "language": "rust",
+      "role": "outcome",
+      "code": "let secrets_approved = secrets_send_approved(repo);\nlet (held, sendable): (Vec<EmbeddableChunk>, Vec<EmbeddableChunk>) =\n    pending.into_iter().partition(|chunk| {\n        // R19-1: hold ANY secret (Tier B, or a lifted Tier A) from the embedding\n        // API unless `--send-secrets`. Non-lifted Tier A never produces chunks\n        // (excluded at ingest), so `.is_some()` newly gates only lifted Tier A.\n        !secrets_approved && classify_secret(&chunk.raw_path).is_some()\n    });",
+      "explanation": "Derived content later relies on the stored raw path for secret holds. If outside content was adopted under a benign raw path, this downstream control sees the benign identity rather than the physical target."
+    }
+  ],
+  "rootCause": {
+    "summary": "The violated invariant is that direct-child authorization, secret/media decisions, raw hashing, preparation, and online sends must describe the same file identity. KCS observes the initial directory entry as a regular file but then relies on repeated pathname reads; a replacement symlink can make the accepted hash and later bytes come from outside the selected scope while policy remains tied to the benign relative name.",
+    "evidenceRefs": [
+      "index-requests-scan-hashes",
+      "scan-observes-regular-child",
+      "scan-classifies-name-then-reads-path",
+      "index-accepts-already-substituted-hash",
+      "prepare-reopens-input-path",
+      "ocr-reopens-and-sends",
+      "embedding-hold-uses-benign-raw-path"
+    ]
+  },
+  "validation": {
+    "method": "static source trace plus local/offline synthetic PoC",
+    "summary": "The source trace confirms the multi-stage interleaving: the scanner checks a regular direct child, classifies the benign relative name, computes the scan hash through a later path read, and the index pipeline accepts a reread when it equals that already-substituted hash. The included PoC deterministically models this state transition with synthetic files.",
+    "evidenceRefs": [
+      "scan-observes-regular-child",
+      "scan-classifies-name-then-reads-path",
+      "index-accepts-already-substituted-hash",
+      "prepare-reopens-input-path",
+      "ocr-reopens-and-sends"
+    ],
+    "assertions": [
+      "A symlink present at the initial type check is skipped, but a later replacement is not bound to the earlier regular-file observation.",
+      "The later `candidate.raw_hash` comparison does not reject this case because the scan hash can already be the outside target's hash.",
+      "Preparation and OCR continue to receive or read a mutable path rather than the scan-verified byte buffer."
+    ],
+    "limitations": [
+      "No live KCS timing race was executed.",
+      "Race reliability and an end-to-end OCR request capture were not measured.",
+      "The PoC uses synthetic local files and does not access real private data or any live service."
+    ]
+  },
+  "attackPath": {
+    "summary": "A lower-trust writer places a benign regular file in a selected scope, replaces it with a symlink after KCS observes the regular file, and leaves the link pointed at a victim-readable outside target. KCS hashes and later rereads that outside target while retaining the benign in-scope identity.",
+    "dataflow": {
+      "summary": "benign direct-child path -> `entry.file_type()` regular observation -> benign `relative` policy -> following `std::fs::read(&path)` scan hash -> later equal index reread -> preparation/OCR path reopens",
+      "source": "concurrent replacement of a selected-scope direct child by a lower-trust directory writer",
+      "sink": "prepared/local KCS state under the benign raw path and, when separately authorized, Mistral OCR request bytes",
+      "outcome": "outside victim-readable bytes can be adopted or sent under a benign in-scope name",
+      "evidenceRefs": [
+        "scan-observes-regular-child",
+        "scan-classifies-name-then-reads-path",
+        "index-accepts-already-substituted-hash",
+        "ocr-reopens-and-sends"
+      ]
+    },
+    "reachability": {
+      "summary": "The attacker needs rename authority in the operator-selected scope, knowledge of a victim-readable outside target, a successful timing window, and victim indexing. OCR egress additionally requires normal online adapter approval and eligibility.",
+      "attacker": "lower-trust local writer of a shared or supplied selected scope",
+      "entrypoint": "non-preview `kcs index` over the selected root",
+      "preconditions": [
+        "The direct child is observed as a regular file before replacement.",
+        "The attacker wins the initial check/read interval.",
+        "The outside target is readable by the KCS process.",
+        "The victim invokes indexing; OCR requires configured online execution."
+      ],
+      "outcome": "one victim-readable outside file per successful replacement can cross the selected-scope boundary"
+    },
+    "evidenceRefs": [
+      "index-requests-scan-hashes",
+      "scan-classifies-name-then-reads-path",
+      "index-accepts-already-substituted-hash",
+      "prepare-reopens-input-path",
+      "ocr-reopens-and-sends"
+    ],
+    "impact": {
+      "level": "high",
+      "why": "The primitive can disclose victim-readable files outside the selected scope into KCS derived/archive state, and into an OCR provider request when ordinary online controls also allow it."
+    },
+    "likelihood": {
+      "level": "medium",
+      "why": "Exploitation requires local shared-scope rename authority, operator-mediated indexing, a known readable target, and an unmeasured race window."
+    },
+    "limitations": [
+      "Stable symlinks present before the type check are skipped.",
+      "Post-scan byte changes that do not match the scan hash are rejected.",
+      "No real target, real credential, or live provider request was used in validation."
+    ]
+  },
+  "remediation": {
+    "summary": "Use descriptor-bound no-follow opens for direct-child scan candidates, compute size/media/hash from the opened object, and carry verified bytes or a stable file identity through preparation and OCR instead of reopening `input_path`.",
+    "regressionTests": [
+      "Replace a regular child with a symlink between scan observation and read; assert outside bytes cannot become `raw_hash` under the benign name.",
+      "Keep the replacement symlink stable through index; assert the later hash equality does not accept the outside target as an in-scope candidate.",
+      "Assert `prepare_units` consumes caller-verified bytes rather than reopening the mutable path.",
+      "Assert the OCR adapter body is built from verified bytes or a still-bound descriptor identity.",
+      "Assert stable symlinks remain skipped and ordinary regular files still index normally."
+    ]
+  },
+  "writeup": {
+    "reportPath": "findings/tac-kcs-r23-cand-027-scan-time-replacement-outside-scope/tac-kcs-r23-cand-027-scan-time-replacement-outside-scope.md",
+    "pocDirectory": "findings/tac-kcs-r23-cand-027-scan-time-replacement-outside-scope/poc"
+  },
+  "extensions": {
+    "candidateId": "KCS-R23-CAND-027",
+    "ledgerRowId": "KCS-R23-CAND-027",
+    "reportId": "KCS-R23-CAND-027"
+  }
+}

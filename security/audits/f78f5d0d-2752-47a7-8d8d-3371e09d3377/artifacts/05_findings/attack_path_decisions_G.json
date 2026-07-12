@@ -1,0 +1,696 @@
+[
+  {
+    "candidate_id": "KCS-R23-CAND-055",
+    "title": "Truncated persisted cursor keys are accepted as valid HMAC keys",
+    "ledger_row_id": "KCS-R23-CAND-055",
+    "instance_key": "KCS-R23-CAND-055:truncated-cursor-key",
+    "affected_locations": [
+      {
+        "label": "persisted_key_loader_and_writer",
+        "path": "crates/kcs-cli/src/main.rs",
+        "lines": "11035-11079"
+      },
+      {
+        "label": "fresh_entropy_source",
+        "path": "crates/kcs-cli/src/main.rs",
+        "lines": "11082-11091"
+      },
+      {
+        "label": "hmac_sink",
+        "path": "crates/kcs-search/src/cursor.rs",
+        "lines": "41-96"
+      },
+      {
+        "label": "trusted_cursor_state",
+        "path": "crates/kcs-cli/src/main.rs",
+        "lines": "1160-1209"
+      }
+    ],
+    "attack_steps": [
+      "An initialization-time crash, short write, storage fault, or equivalent corruption leaves the final device cursor-key file nonempty but far shorter than the intended 32 bytes.",
+      "A later KCS search accepts that file because cursor_signing_key checks only that the byte vector is nonempty.",
+      "A lower-trust cursor recipient observes a known canonical cursor payload and its HMAC and, if the residual key is sufficiently short, enumerates the key offline.",
+      "The recipient submits a modified cursor whose HMAC verifies; KCS trusts its frozen commit, maximum-rowid, and consumed state for scopes that remain in the currently allowed target set."
+    ],
+    "assumptions": [
+      "The first key publication suffers a fault that leaves a very short, nonempty final file rather than zero or nearly 32 bytes.",
+      "A lower-trust caller can observe at least one cursor payload/tag pair and later supply a cursor to a KCS search workflow.",
+      "Referenced historical commits, rows, and objects remain retained, and the affected scope remains currently allowed."
+    ],
+    "context": "KCS has no listener. The relevant boundary is a device-local signing key used to authenticate caller-supplied search state. The cryptographic acceptance defect is real, but exploitation needs an uncontrolled publication fault to create a brute-forceable key before a cursor caller can act.",
+    "in_scope": true,
+    "exposure": "Local CLI or calling-automation cursor input only; no port, ingress, load balancer, or public service is present.",
+    "identity": "KCS verifies the cursor and performs search as the invoking OS user. The lower-trust caller can control a token but has no demonstrated control over cursor-key creation, truncation, or the owner-only key file.",
+    "cross_boundary": true,
+    "cross_boundary_evidence": "If the rare weak-key state exists, a caller-controlled token crosses the HMAC trust boundary and influences trusted search pagination/history state. Scope intersection prevents adding an arbitrary unregistered target.",
+    "vector": "none",
+    "preconditions": [
+      "A crash or storage fault during first key creation must leave only a brute-forceable number of nonzero bytes.",
+      "The attacker must obtain a valid cursor and be able to feed a forged cursor to a victim search workflow.",
+      "The desired historical data must still be materialized inside a currently authorized scope."
+    ],
+    "attacker_control": "no control over the reportability-driving key-weakening event is established; control of a later cursor token is plausible",
+    "category": "weak cryptographic key acceptance after non-atomic durable-state publication",
+    "mitigations": [
+      "Normal generation reads exactly 32 random bytes from /dev/urandom and creates the file with requested mode 0600.",
+      "Cursor signatures use HMAC-SHA256 and constant-time comparison.",
+      "Search intersects cursor scopes with currently allowed targets and requires referenced retained state."
+    ],
+    "auth_scope": "internal-only local caller/automation workflow",
+    "impact_surface": "search-state integrity and possible access to retained historical results within an already allowed scope",
+    "target_reach": "one device's cursors and only scopes currently allowed to the invoking search",
+    "secrets_references": [
+      "The device cursor-key is security-sensitive but is not disclosed; exploitation relies on offline recovery only if a fault reduced it to very low entropy."
+    ],
+    "counterevidence": [
+      "An uninterrupted writer produces 32 random bytes and owner-only creation permissions.",
+      "No attacker-controlled way to induce a short write, crash at the exact point, or choose the residual key length was established.",
+      "A 31-byte or other merely truncated-but-long key remains infeasible to enumerate; the bounded proof covered a synthetic one-byte key only.",
+      "Allowed-target intersection blocks introduction of arbitrary unregistered scopes, and historical rows must still exist."
+    ],
+    "blindspots": [
+      "No partial-write fault injection established how often a nonempty brute-forceable final key can arise.",
+      "No real cursor forgery or historical-result disclosure was exercised."
+    ],
+    "controls": [
+      "Require exactly 32 bytes on every existing-key and race-winner read.",
+      "Publish the key through an owner-only temporary file, sync it, rename it atomically, and sync the parent directory.",
+      "Reject or securely rotate malformed existing key state with explicit cursor invalidation."
+    ],
+    "confidence": "high for the acceptance defect; high for suppression because the attacker cannot realistically create the prerequisite weak-key state",
+    "impact": "medium",
+    "likelihood": "low",
+    "final_policy": "ignore",
+    "final_severity": "none",
+    "priority": null,
+    "rationale": "The defect can weaken cursor integrity, but its exploitable form requires an uncontrolled, unusually short partial first write plus a known cursor and retained already-authorized data. No realistic lower-trust actor controls the decisive fault. Medium impact with Low likelihood maps mechanically to ignore, and the hard unrealistic-precondition suppression independently applies.",
+    "remediation_subsumption_decision": "Require the exact cryptographic key length, publish atomically and durably, and reject or securely rotate malformed existing keys. This remains worthwhile hardening but is not a reportable security finding under the final attack-path policy."
+  },
+  {
+    "candidate_id": "KCS-R23-CAND-056",
+    "title": "kcs open returns a mutable pathname after content verification",
+    "ledger_row_id": "KCS-R23-CAND-056",
+    "instance_key": "KCS-R23-CAND-056:verified-working-path-return",
+    "affected_locations": [
+      {
+        "label": "entrypoint",
+        "path": "crates/kcs-cli/src/main.rs",
+        "lines": "2796-2813"
+      },
+      {
+        "label": "wrapper",
+        "path": "crates/kcs-cli/src/main.rs",
+        "lines": "4993-5003"
+      },
+      {
+        "label": "root_control",
+        "path": "crates/kcs-cli/src/main.rs",
+        "lines": "5165-5186"
+      },
+      {
+        "label": "pointer_sink",
+        "path": "crates/kcs-cli/src/main.rs",
+        "lines": "4861-4874"
+      }
+    ],
+    "attack_steps": [
+      "A lower-trust contributor leaves working-tree file A in a selected shared or synced scope, with bytes matching the requested raw hash.",
+      "The operator or an automation invokes kcs open for that object; find_working_tree_raw reads A, hashes it, and returns only its pathname.",
+      "After verification but before a downstream consumer opens the returned path, the contributor replaces the pathname with file B or a symlink.",
+      "A downstream consumer that trusts the path without rehashing can consume bytes that were not authenticated by the returned raw_hash."
+    ],
+    "assumptions": [
+      "The selected root remains concurrently writable by a lower-trust contributor.",
+      "The contributor wins a post-verification/pre-consumption replacement interval.",
+      "An external caller opens the returned pathname without checking the simultaneously returned raw_hash."
+    ],
+    "context": "The product workflow returns a path after validating bytes, but the pinned repository does not itself open that path or demonstrate an agent/viewer that treats it as immutable. The possible boundary crossing is therefore conditional on external consumer behavior and a timing race.",
+    "in_scope": true,
+    "exposure": "Operator-invoked local CLI and its output consumer; no network listener or remotely callable opener is evidenced.",
+    "identity": "KCS and the downstream opener run with the invoking OS user's filesystem authority. The contributor controls a pathname inside the selected root but gains no new KCS identity.",
+    "cross_boundary": false,
+    "cross_boundary_evidence": "KCS exposes only a mutable path and raw_hash; substituted bytes cross into a privileged consumer only if an out-of-repository caller later reopens the path without verification. That final sink was not established.",
+    "vector": "none",
+    "preconditions": [
+      "Concurrent rename or write authority in the selected root.",
+      "An open operation that resolves the working-tree branch rather than the immutable CAS cache.",
+      "Favorable timing and a downstream path consumer that does not bind bytes to raw_hash."
+    ],
+    "attacker_control": "plausible over the selected-root pathname and replacement bytes; unknown over the downstream consumer and race timing",
+    "category": "verified-then-mutable pathname / evidence TOCTOU",
+    "mitigations": [
+      "The exact bytes KCS reads are SHA-256 checked before the path is returned.",
+      "Observed symlinks and non-files are skipped during enumeration.",
+      "The result includes raw_hash so a careful consumer can reverify, and CAS-only fallback returns a read-only cache materialization."
+    ],
+    "auth_scope": "internal-only local operator/automation workflow",
+    "impact_surface": "conditional data/evidence integrity at an external pathname consumer",
+    "target_reach": "one returned object path and one downstream consumption event",
+    "secrets_references": [],
+    "counterevidence": [
+      "No in-repository OS opener or other consumer of the returned pathname was found.",
+      "The authenticated raw_hash is returned alongside the path and enables last-use verification.",
+      "A deterministic barrier-controlled replacement and downstream read were not reproduced.",
+      "The safe CAS branch already returns a read-only materialization rather than the mutable working file."
+    ],
+    "blindspots": [
+      "External agents or integrations may automatically open the path, but no such repository evidence was available.",
+      "The practical replacement success rate and the exact substituted target class were not measured."
+    ],
+    "controls": [
+      "Always return an immutable, hash-verified CAS materialization for raw objects.",
+      "Alternatively retain a descriptor-bound handle and verify identity at the actual consumer boundary.",
+      "Document and enforce raw_hash verification if a mutable path remains part of the interface."
+    ],
+    "confidence": "medium for the conditional attack path; high for suppression under the repository-evidence requirement",
+    "impact": "medium",
+    "likelihood": "low",
+    "final_policy": "ignore",
+    "final_severity": "none",
+    "priority": null,
+    "rationale": "A real check/return gap exists, but the repository establishes neither a consuming sink nor a reliable race. The path is local, operator-mediated, and exposes raw_hash for revalidation. Medium impact with Low likelihood maps mechanically to ignore, and the missing realistic in-repository lower-trust end-to-end path independently supports suppression.",
+    "remediation_subsumption_decision": "Return an immutable CAS materialization or descriptor-bound handle instead of a mutable working pathname after verification. This is security hardening but is suppressed as a final reportable finding because the downstream exploit sink is not established."
+  },
+  {
+    "candidate_id": "KCS-R23-CAND-057",
+    "title": "Raw-hash working-tree resolution reads every direct child without bounds",
+    "ledger_row_id": "KCS-R23-CAND-057",
+    "instance_key": "KCS-R23-CAND-057:raw-resolver-unbounded-scan",
+    "affected_locations": [
+      {
+        "label": "entrypoints",
+        "path": "crates/kcs-cli/src/main.rs",
+        "lines": "2796-2825"
+      },
+      {
+        "label": "wrapper",
+        "path": "crates/kcs-cli/src/main.rs",
+        "lines": "4993-5007"
+      },
+      {
+        "label": "root_control_and_sink",
+        "path": "crates/kcs-cli/src/main.rs",
+        "lines": "5165-5188"
+      }
+    ],
+    "attack_steps": [
+      "A lower-trust content contributor places one or more very large or sparse regular direct-child files in a scope the operator uses.",
+      "The contributor or another caller supplies an absent or late-matching raw hash through an open, view, or Evidence workflow.",
+      "Before checking immutable CAS, find_working_tree_raw visits every candidate and fs::read allocates the complete file, then hashes it.",
+      "The victim KCS process incurs O(max n_i) peak input allocation and O(sum n_i) I/O/hash work, potentially failing or becoming unavailable for that command."
+    ],
+    "assumptions": [
+      "The selected scope is supplied, shared, synced, or otherwise contains files controlled by a lower-trust contributor.",
+      "At least one included direct-child regular file is large enough to create material resource pressure.",
+      "The operator or calling automation invokes a raw-object resolution whose match is absent or late in directory enumeration."
+    ],
+    "context": "KCS has no listener, but untrusted scope files and caller-supplied pointers are explicit product inputs. The resource effect crosses from lower-trust content into the victim process deterministically, while remaining local, per-command, and recoverable.",
+    "in_scope": true,
+    "exposure": "Local CLI processing of an adopted/shared scope; no public port or inbound network service.",
+    "identity": "The victim KCS process runs as the operator's OS user. The lower-trust contributor needs file-content control in the selected scope but no private .kcs write, credential, administrator, or shell access on the victim process.",
+    "cross_boundary": true,
+    "cross_boundary_evidence": "Attacker-sized direct-child files are read wholesale into victim-process memory and hashed before the CAS fallback, crossing the scope-content boundary into runtime resources.",
+    "vector": "none",
+    "preconditions": [
+      "Control an included large regular file in an operator-selected scope.",
+      "Cause or wait for open/view/Evidence resolution of an absent or late-matching raw hash.",
+      "Host resource limits must be low enough relative to the visited file size for visible degradation or failure."
+    ],
+    "attacker_control": "yes over file size/content and plausibly over a supplied raw hash or Evidence input; the operator still invokes the local command",
+    "category": "uncontrolled local resource consumption / denial of service",
+    "mitigations": [
+      "The .kcs entry, observed directories, symlinks, and special files are skipped.",
+      "Each file Vec is dropped before the next iteration, limiting peak retained input memory to the largest visited file rather than the corpus total.",
+      "Removing the hostile file or avoiding the supplied pointer restores service."
+    ],
+    "auth_scope": "internal-only local filesystem and CLI workflow",
+    "impact_surface": "runtime memory, disk I/O, and CPU availability",
+    "target_reach": "one KCS process and selected scope per resolution command",
+    "secrets_references": [],
+    "counterevidence": [
+      "The effect is transient and recoverable and does not authorize network egress, cross-scope access, or durable corruption.",
+      "The victim must invoke a narrower open/view/Evidence path rather than a default background listener.",
+      "No unsafe stress test measured actual RSS or failure thresholds."
+    ],
+    "blindspots": [
+      "Directory ordering and host memory limits determine the exact work and failure point.",
+      "The prevalence of automatically consumed attacker-supplied Evidence Pointers is unknown."
+    ],
+    "controls": [
+      "Hash through a bounded streaming reader rather than fs::read.",
+      "Apply per-file and aggregate byte/work ceilings to working-tree lookup.",
+      "Prefer an indexed raw-hash lookup and avoid scanning unrelated files before a verified CAS hit."
+    ],
+    "confidence": "high",
+    "impact": "medium",
+    "likelihood": "medium",
+    "final_policy": "reportable",
+    "final_severity": "low",
+    "priority": "P3",
+    "rationale": "A realistic lower-trust scope contributor can deterministically reach a material resource sink without private-store or privileged access, so self-only suppression does not apply. The narrower operator-invoked resolution path and transient single-process impact limit likelihood and impact to Medium; the mandatory matrix maps Medium plus Medium to Low/P3.",
+    "remediation_subsumption_decision": "Use streaming hashing or an indexed lookup with per-file and aggregate byte/work limits; avoid whole-file Vec allocation. This is a distinct open/view resolver sink even if broader file-size caps are fixed elsewhere."
+  },
+  {
+    "candidate_id": "KCS-R23-CAND-059",
+    "title": "Human-readable CLI output emits untrusted terminal control sequences",
+    "ledger_row_id": "KCS-R23-CAND-059",
+    "instance_key": "KCS-R23-CAND-059:terminal-control-human-output",
+    "affected_locations": [
+      {
+        "label": "view_entrypoint",
+        "path": "crates/kcs-cli/src/main.rs",
+        "lines": "2816-2835"
+      },
+      {
+        "label": "stored_text_source",
+        "path": "crates/kcs-cli/src/main.rs",
+        "lines": "4823-4859"
+      },
+      {
+        "label": "human_output_sink",
+        "path": "crates/kcs-cli/src/main.rs",
+        "lines": "11135-11176"
+      },
+      {
+        "label": "human_error_sink",
+        "path": "crates/kcs-cli/src/main.rs",
+        "lines": "11184-11193"
+      }
+    ],
+    "attack_steps": [
+      "A lower-trust contributor places ESC/C0, bidi, newline, or terminal-active sequences in a direct-child filename, indexed document/OCR text, or commit message.",
+      "The operator runs a routine human-readable view, status, diff, or log command on the hostile scope.",
+      "The non-JSON branches interpolate the string directly into println without a terminal-safe renderer.",
+      "The interactive terminal interprets the bytes, enabling trusted-output spoofing and, depending on emulator policy, deceptive hyperlinks, title rewriting, or clipboard/control actions."
+    ],
+    "assumptions": [
+      "The hostile string reaches one of the documented human-output fields.",
+      "The operator uses default human output in a control-sequence-aware terminal rather than --json or a non-terminal sink.",
+      "The terminal supports at least display manipulation; stronger OSC effects depend on its policy."
+    ],
+    "context": "Untrusted repository/store strings are data until KCS writes them to an interactive terminal, where control bytes become terminal instructions. This is a real product surface with an ordinary one-command user interaction, though it does not by itself grant OS privileges or shell execution.",
+    "in_scope": true,
+    "exposure": "Interactive local terminal output; no network listener, port, ingress, or load balancer.",
+    "identity": "KCS runs as the operator and writes to that operator's terminal. The lower-trust content contributor controls stored strings but not the OS identity or terminal configuration.",
+    "cross_boundary": true,
+    "cross_boundary_evidence": "Stored content, commit metadata, and Unix filenames cross directly into a terminal instruction channel through raw println sinks.",
+    "vector": "none",
+    "preconditions": [
+      "Control a filename, indexed text/OCR response, or persisted commit message in a scope the victim inspects.",
+      "The victim invokes a human-readable command in an interactive terminal.",
+      "The desired terminal action must be enabled by that emulator for effects stronger than output spoofing."
+    ],
+    "attacker_control": "yes over the emitted string; the operator controls command invocation and terminal policy",
+    "category": "terminal control-sequence injection and output spoofing",
+    "mitigations": [
+      "JSON output uses serde_json serialization and escapes control bytes.",
+      "Piping output into a non-terminal generally prevents terminal interpretation.",
+      "Many terminals gate or disable high-impact OSC actions."
+    ],
+    "auth_scope": "internal-only local operator terminal workflow",
+    "impact_surface": "operator-interface integrity and emulator-dependent terminal state",
+    "target_reach": "one operator terminal session and command output at a time",
+    "secrets_references": [
+      "Clipboard content could be overwritten or solicited only when the terminal implements and enables the corresponding OSC behavior; no secret exfiltration was demonstrated."
+    ],
+    "counterevidence": [
+      "The --json path is already safe against raw control-byte interpretation.",
+      "Terminal policies vary and may ignore title, hyperlink, or clipboard sequences.",
+      "No shell execution, OS permission crossing, or credential theft was established.",
+      "A live control sequence was intentionally not emitted during validation."
+    ],
+    "blindspots": [
+      "The exact effect varies across terminal emulators and user configuration.",
+      "The relative frequency of human versus --json operation is not measured."
+    ],
+    "controls": [
+      "Route every untrusted human-output string through one visible terminal-safe escaping renderer.",
+      "Cover C0, ESC, CSI, OSC, bidi controls, newlines, and hyperlink delimiters while preserving JSON semantics.",
+      "Retain structured --json output as the automation-safe interface."
+    ],
+    "confidence": "high",
+    "impact": "medium",
+    "likelihood": "high",
+    "final_policy": "reportable",
+    "final_severity": "medium",
+    "priority": "P2",
+    "rationale": "A lower-trust contributor can deterministically place control bytes in common status/view inputs, and a routine human command reaches the sink without a race or privileged prerequisite. The impact is bounded to terminal/operator integrity rather than code execution, so Medium impact plus High likelihood maps mechanically to Medium/P2.",
+    "remediation_subsumption_decision": "Route all human-readable untrusted strings through one terminal-safe renderer that visibly escapes control sequences while preserving JSON semantics. The shared renderer should subsume the text, commit, diff, status, and lower-trust error-message instances."
+  },
+  {
+    "candidate_id": "KCS-R23-CAND-060",
+    "title": "charge records are not durably flushed before billable calls",
+    "ledger_row_id": "KCS-R23-CAND-060",
+    "instance_key": "KCS-R23-CAND-060",
+    "affected_locations": [
+      {
+        "label": "non-durable append",
+        "path": "crates/kcs-pipeline/src/budget.rs",
+        "lines": "96-126"
+      },
+      {
+        "label": "Charged result",
+        "path": "crates/kcs-cli/src/main.rs",
+        "lines": "10325-10364"
+      },
+      {
+        "label": "markdown send",
+        "path": "crates/kcs-cli/src/main.rs",
+        "lines": "6185-6248"
+      },
+      {
+        "label": "embedding send",
+        "path": "crates/kcs-cli/src/main.rs",
+        "lines": "7486-7526"
+      }
+    ],
+    "attack_steps": [
+      "An approved online task passes the cap check, and KCS appends its reservation under the device-global lock with write_all but no sync barrier.",
+      "KCS returns Charged, releases the lock, and starts the billable adapter operation.",
+      "The provider accepts or bills the request while the reservation remains only in volatile filesystem state.",
+      "A power, kernel, storage, or equivalent durability fault loses the append; after restart, ledger totals omit actual spend and restore cap headroom."
+    ],
+    "assumptions": [
+      "A billable approved adapter call is in progress.",
+      "A durability fault occurs after remote acceptance but before the ledger data reaches stable storage.",
+      "The user later restarts KCS and performs additional billable work against the understated ledger."
+    ],
+    "context": "The write-before-send ordering and device lock are correct for ordinary concurrency, but no stable-storage barrier exists. This is a monetary safety/durability defect driven by crash timing; repository evidence does not establish a lower-trust actor able to induce the decisive fault or gain authority from it.",
+    "in_scope": true,
+    "exposure": "Operator-approved outbound adapter workflow only; no public or local-network entry point.",
+    "identity": "The same KCS OS user authorizes, records, and sends the work with an already configured adapter identity. The provider controls billing but is not shown to control local stable-storage failure.",
+    "cross_boundary": false,
+    "cross_boundary_evidence": "A durability boundary between volatile ledger state and a remote billable action is crossed, but no attacker-controlled trust-boundary crossing is established.",
+    "vector": "none",
+    "preconditions": [
+      "A billable call must be accepted during the post-write/pre-durability window.",
+      "An abrupt process, OS, power, or filesystem durability failure must lose precisely the dirty ledger state.",
+      "Additional later calls are required to turn restored headroom into cap overrun."
+    ],
+    "attacker_control": "no realistic lower-trust control over the durability fault is established",
+    "category": "crash durability and budget-accounting safety",
+    "mitigations": [
+      "The reservation is appended before send and ordinary concurrent processes are serialized by the device-global lock.",
+      "Finite/nonnegative validation and a hard-stop check prevent ordinary malformed-value or concurrent bypass.",
+      "A send failure conservatively retains the written reservation when the record survives."
+    ],
+    "auth_scope": "operator-only approved online workflow",
+    "impact_surface": "monetary cap integrity under abrupt durability failure",
+    "target_reach": "one device-global cost ledger and later adapter calls until totals catch up",
+    "secrets_references": [
+      "Configured provider credentials are used for an already approved request; no credential disclosure or destination change is shown."
+    ],
+    "counterevidence": [
+      "The device lock and append-before-send order close normal concurrent budget TOCTOU.",
+      "Exploitation depends on an abrupt durability fault in a narrow timing window, not on ordinary remote response control.",
+      "No destructive crash probe, lost-row restart, or provider billing event was reproduced.",
+      "No lower-trust attacker can be shown to trigger the fault or benefit from spend on the user's behalf."
+    ],
+    "blindspots": [
+      "Filesystem, mount, and hardware writeback behavior determine the actual window.",
+      "Repeated real-world crash probability and provider billing semantics were not measured."
+    ],
+    "controls": [
+      "Call sync_data or sync_all on the reservation record while still holding the device lock.",
+      "Use a transactional durable accounting store and propagate any durability failure before sending.",
+      "Add hermetic crash/restart fault-injection around the exact reservation/send boundary."
+    ],
+    "confidence": "high for the missing durability guarantee; high for suppression because no realistic attacker path is established",
+    "impact": "high",
+    "likelihood": "low",
+    "final_policy": "ignore",
+    "final_severity": "none",
+    "priority": null,
+    "rationale": "Loss of a real reservation could have high monetary impact, but the only established trigger is an uncontrolled narrow crash/durability fault in an operator-approved workflow. There is no realistic lower-trust attacker path. High impact with Low likelihood maps mechanically to ignore, and the no-attacker hard suppression independently applies.",
+    "remediation_subsumption_decision": "Durably persist reservations under the device lock before releasing billable work and never send after sync failure. This remains important reliability/safety hardening but is not reportable under the attacker-path policy."
+  },
+  {
+    "candidate_id": "KCS-R23-CAND-061",
+    "title": "normalized manifests and unit objects are not rebound to the requested provenance tuple",
+    "ledger_row_id": "KCS-R23-CAND-061",
+    "instance_key": "KCS-R23-CAND-061",
+    "affected_locations": [
+      {
+        "label": "unbound normalized reader",
+        "path": "crates/kcs-cli/src/main.rs",
+        "lines": "3355-3390"
+      },
+      {
+        "label": "chunk provenance sink",
+        "path": "crates/kcs-index/src/chunking.rs",
+        "lines": "167-185"
+      },
+      {
+        "label": "rebuild consumer",
+        "path": "crates/kcs-cli/src/main.rs",
+        "lines": "3045-3090"
+      },
+      {
+        "label": "search attribution sink",
+        "path": "crates/kcs-cli/src/main.rs",
+        "lines": "2107-2120"
+      }
+    ],
+    "attack_steps": [
+      "A shared, copied, or preseeded scope contributor supplies parse-valid normalized manifest and unit files under the directory for a live tree entry's requested raw-hash/profile/generation tuple.",
+      "The objects self-declare attacker-chosen raw_hash, profile, generation, unit key, and markdown values that are inconsistent with their requested directory or manifest entry.",
+      "During index, reindex, or repair rebuild, load_normalized_units parses those files but does not compare the requested tuple to the manifest, entry, unit_ref, or unit object.",
+      "chunk_normalized_units hashes and stores chunks from the unverified self-declared identity and text; rebuild/search/evidence consumers then expose durable attacker-chosen content with trusted-looking provenance."
+    ],
+    "assumptions": [
+      "The operator adopts a copied, shared, synced, or preseeded .kcs store from a lower-trust contributor, as expressly covered by the threat model.",
+      "The contributor knows the public on-disk schemas and places parse-valid files at the requested normalized-instance path.",
+      "The operator runs a rebuild/index/search workflow that consumes the poisoned state."
+    ],
+    "context": "The .kcs archive is authoritative after adoption but can originate from a lower-trust copied/preseeded source. Schema and path checks prove shape/location only. The missing semantic rebinding lets supplied state cross into trusted search and Evidence content, which is a meaningful core-product integrity boundary.",
+    "in_scope": true,
+    "exposure": "No public listener; local adoption of a copied/shared scope followed by routine index, repair, search, or Evidence operations.",
+    "identity": "KCS processes the store as the invoking OS user. The lower-trust contributor needs control of the supplied archive before adoption, not arbitrary write access to the victim's already-private live store.",
+    "cross_boundary": true,
+    "cross_boundary_evidence": "Parse-valid contributor-controlled normalized objects become durable chunk/search/evidence rows under a live tree workflow without binding to the requested provenance tuple.",
+    "vector": "none",
+    "preconditions": [
+      "Supply or influence a copied/preseeded .kcs store before the operator adopts it.",
+      "Craft schema-valid manifest and unit objects at the normalized-instance location used by a live tree entry.",
+      "The operator performs rebuild/index and later consumes search or Evidence output."
+    ],
+    "attacker_control": "yes over the supplied persisted normalized state and markdown; no private live-store or OS-administrator authority is required in the adopted-store scenario",
+    "category": "persisted-state provenance confusion and durable false-evidence injection",
+    "mitigations": [
+      "Normalized-instance path construction uses the requested raw hash, profile, and generation.",
+      "Manifest and unit JSON must deserialize into typed schemas.",
+      "Later pointer checks bind to stored ChunkRow fields, but cannot recover the missing binding to the original normalized source."
+    ],
+    "auth_scope": "internal-only adopted-store workflow with a meaningful archive trust boundary",
+    "impact_surface": "durable data integrity, search attribution, and Evidence provenance",
+    "target_reach": "crafted documents/units in one adopted scope, with downstream search and Evidence consumers",
+    "secrets_references": [],
+    "counterevidence": [
+      "Path construction and typed JSON parsing constrain location and shape.",
+      "A mismatch that does not join a live tree tuple can be omitted rather than surfaced as false evidence.",
+      "Direct arbitrary modification of an already-private live store by the same unrestricted OS user would confer equivalent authority and is not the relied-upon attacker model.",
+      "No public network surface distributes the poisoned state automatically."
+    ],
+    "blindspots": [
+      "No full poisoned-store runtime was executed during central validation, although the source-to-sink trace is complete.",
+      "The frequency of operators adopting archives that retain contributor-controlled .kcs state is unknown."
+    ],
+    "controls": [
+      "Compare the requested raw_hash/profile/gen tuple with manifest identity before reading units.",
+      "Bind every manifest entry to its derived unit_ref and compare entry key/type/prepared hash with the unit object.",
+      "Reject mismatches before chunking and rebuilding derived search state."
+    ],
+    "confidence": "high",
+    "impact": "high",
+    "likelihood": "medium",
+    "final_policy": "reportable",
+    "final_severity": "medium",
+    "priority": "P2",
+    "rationale": "The copied/preseeded-store contributor is explicitly in scope and can deterministically inject durable false evidence without already possessing private live-store authority. Impact is High because trusted provenance and downstream Evidence can be substituted; local archive adoption and crafted-state prerequisites make likelihood Medium. The matrix maps High plus Medium to Medium/P2.",
+    "remediation_subsumption_decision": "Validate the complete requested provenance tuple against the manifest, each entry, every unit, and derived unit_ref before reuse or indexing. This is distinct from pathname containment and should be fixed at the normalized reader boundary."
+  },
+  {
+    "candidate_id": "KCS-R23-CAND-062",
+    "title": "Newline-terminated malformed final chunks records are incorrectly treated as torn tails",
+    "ledger_row_id": "KCS-R23-CAND-062",
+    "instance_key": "KCS-R23-CAND-062:newline-terminated-tail-suppression",
+    "affected_locations": [
+      {
+        "label": "tail_parse_suppression",
+        "path": "crates/kcs-cli/src/main.rs",
+        "lines": "3417-3457"
+      },
+      {
+        "label": "byte_level_torn_tail_control",
+        "path": "crates/kcs-cli/src/main.rs",
+        "lines": "3460-3500"
+      },
+      {
+        "label": "rebuild_read_then_truncate",
+        "path": "crates/kcs-cli/src/main.rs",
+        "lines": "3043-3050"
+      },
+      {
+        "label": "chunk_consumer",
+        "path": "crates/kcs-cli/src/main.rs",
+        "lines": "4823-4859"
+      }
+    ],
+    "attack_steps": [
+      "A complete newline-terminated but malformed final record exists in chunks.jsonl because of incompatible state, faulty writing, or corruption.",
+      "read_stored_chunks discards byte framing with str::lines and suppresses any parse failure solely because the logical record is last.",
+      "truncate_torn_chunk_tail sees the final newline and correctly performs no truncation, leaving the malformed record on disk.",
+      "Rebuild/view/Evidence consumers silently omit the record until another append makes it non-final and changes behavior to a corruption error."
+    ],
+    "assumptions": [
+      "A newline-terminated malformed record exists despite the normal writer serializing typed JSON plus a newline.",
+      "The operator invokes rebuild, view, or Evidence before a later append exposes the corruption.",
+      "The omitted record would otherwise have a meaningful effect rather than merely being attacker-chosen invalid bytes."
+    ],
+    "context": "The byte-framing bug is real, but it chiefly changes recovery/error classification for malformed owner-controlled persisted state. No realistic lower-trust actor gains authority: a preseeded contributor able to choose the file can simply omit a record or place a non-final malformed row to force an error.",
+    "in_scope": true,
+    "exposure": "Local owner-controlled or adopted-store JSONL processing only; no network or public entry point.",
+    "identity": "KCS reads the index as the same OS user that owns the store. No independent lower-privilege live-store writer was established.",
+    "cross_boundary": false,
+    "cross_boundary_evidence": "The defect silently omits malformed local state but does not authenticate it, authorize a send, disclose another scope, or give a supplied-store contributor capability beyond choosing the supplied file's contents.",
+    "vector": "none",
+    "preconditions": [
+      "A malformed record must nevertheless be fully newline-terminated.",
+      "The record must be the last nonempty logical line.",
+      "A consumer must rely on silent omission before a later append makes the corruption visible."
+    ],
+    "attacker_control": "no meaningful lower-trust capability beyond supplying already-malformed persisted state is established",
+    "category": "JSONL framing, recovery classification, and local integrity/availability correctness",
+    "mitigations": [
+      "The ordinary writer serializes a complete typed object and newline in one buffer.",
+      "Non-final malformed records fail closed with KCS-E-STORE-CORRUPT-001.",
+      "The byte-level truncator does not delete a newline-terminated record, and prior valid rows remain readable."
+    ],
+    "auth_scope": "same-user internal store/recovery workflow",
+    "impact_surface": "local index/evidence completeness and recovery determinism",
+    "target_reach": "one chunks.jsonl tail and its selected scope",
+    "secrets_references": [],
+    "counterevidence": [
+      "The normal append writer does not intentionally produce a newline-terminated malformed record.",
+      "No lower-privilege writer to the live owner-controlled chunks file was established.",
+      "A preseeded-store contributor already chooses the full store and gains no extra authority from silent omission of its own invalid row.",
+      "A later append turns the malformed line non-final and surfaces a corruption error."
+    ],
+    "blindspots": [
+      "Legacy schema migrations might create complete but incompatible rows, but no concrete security consequence was shown.",
+      "No real store was rebuilt with this state; the framing contradiction was proven with an in-memory model."
+    ],
+    "controls": [
+      "Inspect raw final-byte framing before deciding a parse error is a torn tail.",
+      "Suppress/truncate only a malformed last record that lacks the required newline.",
+      "Fail closed with path and line for every newline-terminated malformed record."
+    ],
+    "confidence": "high for the correctness defect; high for suppression as a non-security local-state classification issue",
+    "impact": "low",
+    "likelihood": "medium",
+    "final_policy": "ignore",
+    "final_severity": "none",
+    "priority": null,
+    "rationale": "The behavior can hide or defer a local corruption error, but the proved impact is recoverable index/evidence omission and inconsistent recovery. No lower-trust actor obtains a privilege, confidentiality, authorization, or meaningful integrity advantage. Low impact maps to ignore for every likelihood, and the no-realistic-attacker rule also applies.",
+    "remediation_subsumption_decision": "Suppress and truncate only a malformed final record whose bytes lack the required newline terminator; classify a newline-terminated malformed record as store corruption. Treat as correctness/recovery hardening rather than a final security finding."
+  },
+  {
+    "candidate_id": "KCS-R23-CAND-063",
+    "title": "Batch OCR persists full-document request artifacts without owner-only creation",
+    "ledger_row_id": "KCS-R23-CAND-063",
+    "instance_key": "KCS-R23-CAND-063",
+    "affected_locations": [
+      {
+        "label": "output_directory_source",
+        "path": "experiments/ocr-verification/run_ocr.py",
+        "lines": "28-53",
+        "detail": "--out-dir is caller-selected, with repository-local defaults."
+      },
+      {
+        "label": "directory_mode_control_gap",
+        "path": "experiments/ocr-verification/run_ocr.py",
+        "lines": "70",
+        "detail": "mkdir is called without owner-only mode enforcement or validation of an existing directory."
+      },
+      {
+        "label": "batch_reachability",
+        "path": "experiments/ocr-verification/run_ocr.py",
+        "lines": "82-87",
+        "detail": "Live batch mode passes the selected document and output directory to run_batch_ocr."
+      },
+      {
+        "label": "full_request_artifact_sink",
+        "path": "experiments/ocr-verification/run_ocr.py",
+        "lines": "149-158",
+        "detail": "batch_input.jsonl is written with Path.write_text and inherits creation permissions from the process umask."
+      },
+      {
+        "label": "complete_document_material",
+        "path": "experiments/ocr-verification/run_ocr.py",
+        "lines": "214-219",
+        "detail": "The persisted request contains a base64 encoding of the complete selected document."
+      }
+    ],
+    "attack_steps": [
+      "A trusted developer explicitly selects a document and output directory and invokes the non-dry-run batch OCR experiment.",
+      "The helper base64-encodes the complete selected document into the batch request.",
+      "mkdir and Path.write_text create the output directory and batch_input.jsonl without application-enforced owner-only modes.",
+      "Under a permissive umask and traversable ancestry, another local principal can read the full document request artifact."
+    ],
+    "assumptions": [
+      "A developer intentionally runs the batch experiment with a document and credential.",
+      "The process umask is permissive, such as 0022, and the output ancestry is traversable by another local principal.",
+      "A separate local principal can access the host while the artifact remains present."
+    ],
+    "context": "The mode defect and document-bearing artifact are proven, but this script is an explicit developer experiment outside the production Rust workspace. The operator chooses both the document and output location, so the final-policy developer-only suppression is controlling.",
+    "in_scope": true,
+    "exposure": "Explicit local developer CLI followed by a fixed-provider outbound workflow; no production entrypoint, automatic caller, listener, ingress, or service port was demonstrated.",
+    "identity": "A trusted developer/CI identity invokes the tool and can already read the selected document. The potential reader is another local principal with path traversal permission; no remote identity is involved.",
+    "cross_boundary": true,
+    "cross_boundary_evidence": "With umask 0022 the exact path creates a 0755 directory and 0644 full-document request file, so bytes can cross to another local principal when the selected ancestry is traversable.",
+    "vector": "none",
+    "preconditions": [
+      "Explicit non-dry-run batch experiment invocation by a developer.",
+      "A permissive ambient umask and traversable selected output path.",
+      "A second local account with timely access to the artifact."
+    ],
+    "attacker_control": "a second local principal can read only if the trusted developer's explicit workflow and filesystem permissions expose the artifact; no control over production KCS execution is established",
+    "category": "developer-tool sensitive artifact permissions",
+    "mitigations": [
+      "The path is developer-only and requires explicit live batch mode.",
+      "The trusted operator selects the input and output directory.",
+      "The artifact contains document bytes but not the Mistral API key.",
+      "A restrictive umask such as 0077 or non-traversable ancestors prevents the demonstrated cross-account read."
+    ],
+    "auth_scope": "admin-only explicit developer/CI workflow",
+    "impact_surface": "local confidentiality of one intentionally selected experiment document",
+    "target_reach": "one developer batch invocation and its output artifact",
+    "secrets_references": [
+      "A provider API key is needed for the live run but is not written to batch_input.jsonl.",
+      "The selected document itself may contain sensitive data."
+    ],
+    "counterevidence": [
+      "The script is not imported by the production workspace and no automatic CI/production consumer was demonstrated.",
+      "Sync mode does not create batch_input.jsonl.",
+      "The developer intentionally chooses the document and output path, and default output directories are Git-ignored.",
+      "Actual disclosure requires a separate local principal plus permissive ancestor permissions; umask 0077 produced 0700/0600 in the control."
+    ],
+    "blindspots": [
+      "No second OS principal tested real cross-account readability.",
+      "External ACLs and selected output ancestry determine actual access."
+    ],
+    "controls": [
+      "Create or validate the final output directory as 0700 before materializing document bytes.",
+      "Create batch_input.jsonl atomically with 0600 and reject unsafe pre-existing types or modes.",
+      "Avoid persisting full request bodies unless explicitly requested and document cleanup."
+    ],
+    "confidence": "high for the permission behavior; high for suppression under the explicit developer-only policy",
+    "impact": "low",
+    "likelihood": "medium",
+    "final_policy": "ignore",
+    "final_severity": "none",
+    "priority": null,
+    "rationale": "The file-mode weakness is real, but it exists only in explicitly invoked developer tooling where the trusted operator selects the document and output location. That privileged/developer-only precondition triggers hard suppression; independently, Low impact maps to ignore for every likelihood.",
+    "remediation_subsumption_decision": "Create the output directory and request artifact with owner-only permissions atomically before writing document bytes and verify final modes. This remains developer-tool hardening and is not a final reportable product finding."
+  }
+]

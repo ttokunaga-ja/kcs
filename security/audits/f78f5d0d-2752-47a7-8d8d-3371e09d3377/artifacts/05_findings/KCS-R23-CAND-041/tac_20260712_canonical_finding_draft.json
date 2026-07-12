@@ -1,0 +1,174 @@
+{
+  "schema_version": 1,
+  "scan_id": "f78f5d0d-2752-47a7-8d8d-3371e09d3377",
+  "candidate_id": "KCS-R23-CAND-041",
+  "ledger_row_id": "KCS-R23-CAND-041",
+  "title": "Closing snapshot can ingest a newly introduced Tier-A secret",
+  "target_revision": "0e19f3c6489da458e93a982a333c308d92d0a0ae",
+  "scope": ".",
+  "final_policy": "reportable",
+  "final_severity": "low",
+  "priority": "P3",
+  "confidence": "high (0.96) for the interleaving trace; medium for occurrence frequency",
+  "summary": "Manual snapshot and index build a preview-time exclusion set from currently ignored Tier-A names, but the closing snapshot re-enumerates the scope and only applies that stale set before raw persistence. A lower-trust local or synced writer who introduces a new `.env`, PEM, or other Tier-A direct child after preview can cause KCS to write the plaintext raw object and publish it in local commit history.",
+  "affectedLocations": [
+    {
+      "label": "manual preview",
+      "path": "crates/kcs-cli/src/main.rs",
+      "lines": "456-472"
+    },
+    {
+      "label": "index preview",
+      "path": "crates/kcs-cli/src/main.rs",
+      "lines": "575-580"
+    },
+    {
+      "label": "index closing snapshot",
+      "path": "crates/kcs-cli/src/main.rs",
+      "lines": "623-635"
+    },
+    {
+      "label": "path-only rescan",
+      "path": "crates/kcs-core/src/scope.rs",
+      "lines": "254-299"
+    }
+  ],
+  "codeEvidence": [
+    {
+      "id": "manual-preview-exclusions",
+      "label": "Manual snapshot derives exclusions from preview-time ignored names",
+      "path": "crates/kcs-cli/src/main.rs",
+      "startLine": 456,
+      "endLine": 472,
+      "language": "rust",
+      "role": "entrypoint",
+      "code": "let preview = build_scan_preview(ScanPreviewRequest {\n    scope_path: repo.root().display().to_string(),\n    include_raw_hashes: false,\n    require_network_approval: false,\n})\n.map_err(pipeline_to_kcs)?;\nlet excluded = preview\n    .candidates\n    .iter()\n    .filter(|candidate| candidate.ignored)\n    .map(|candidate| candidate.input_path.clone())\n    .collect::<BTreeSet<_>>();\nlet outcome = repo.snapshot_filtered(args.message.as_deref(), None, &excluded)?;",
+      "explanation": "The manual snapshot entrypoint classifies only the direct children present during `build_scan_preview()` and sends the resulting ignored names to the snapshot path as a `BTreeSet` of strings."
+    },
+    {
+      "id": "index-preview-exclusions",
+      "label": "Index uses the same preview-to-exclusion pattern before auto snapshot",
+      "path": "crates/kcs-cli/src/main.rs",
+      "startLine": 575,
+      "endLine": 635,
+      "language": "rust",
+      "role": "propagation",
+      "code": "let preview = build_scan_preview(ScanPreviewRequest {\n    scope_path: repo.root().display().to_string(),\n    include_raw_hashes: !args.preview,\n    require_network_approval: !args.offline,\n})\n.map_err(pipeline_to_kcs)?;\n\nlet index_result = run_index_pipeline(&repo, &preview, &args)?;\nlet excluded = preview\n    .candidates\n    .iter()\n    .filter(|candidate| candidate.ignored)\n    .map(|candidate| candidate.input_path.clone())\n    .collect::<BTreeSet<_>>();\nlet outcome = repo.auto_snapshot_with_normalize(\n    Some(\"kcs index auto snapshot\"),\n    None,\n    &excluded,\n    &index_result.normalize_by_path,\n)?;",
+      "explanation": "`index` also turns the preview candidates into a stale exclusion set. The later auto snapshot receives only names that were ignored at preview time, not a classifier or bound candidate identity."
+    },
+    {
+      "id": "closing-rescan-path-set",
+      "label": "Closing enumeration checks only the stale path set",
+      "path": "crates/kcs-core/src/scope.rs",
+      "startLine": 254,
+      "endLine": 299,
+      "language": "rust",
+      "role": "root_control",
+      "code": "for entry in fs::read_dir(&self.root).kcs_io(&self.root)? {\n    let entry = entry.kcs_io(&self.root)?;\n    if entry.file_name() == \".kcs\" {\n        continue;\n    }\n    let path = entry.path();\n    let file_type = entry.file_type().kcs_io(&path)?;\n    if file_type.is_dir() {\n        continue;\n    }\n    if !file_type.is_file() {\n        eprintln!(\"warning: skipping non-regular file: {}\", path.display());\n        continue;\n    }\n    let file_name = match entry.file_name().into_string() {\n        Ok(name) => name,\n        Err(_) => {\n            eprintln!(\"warning: skipping non-UTF-8 file name: {}\", path.display());\n            continue;\n        }\n    };\n    if excluded_paths.contains(&file_name) {\n        continue;\n    }",
+      "explanation": "The core snapshot path independently re-enumerates the root. A newly introduced Tier-A name is accepted unless its exact name already appears in the preview-derived `excluded_paths` set."
+    },
+    {
+      "id": "raw-persistence",
+      "label": "Unexcluded current file bytes are written as raw objects",
+      "path": "crates/kcs-core/src/scope.rs",
+      "startLine": 290,
+      "endLine": 299,
+      "language": "rust",
+      "role": "sink",
+      "code": "let bytes = fs::read(&path).kcs_io(&path)?;\nlet raw_hash = if store_raw {\n    self.store.write_raw(&bytes)?\n} else {\n    hash_bytes(&bytes)\n};\nlet mut tree_entry = TreeEntry::raw_file(file_name.clone(), raw_hash)?;\ntree_entry.normalize = normalize_by_path.get(&file_name).cloned();\ntree_entry.validate()?;\nentries.push(tree_entry);",
+      "explanation": "Once the new file name misses the stale exclusion set, `store_raw` snapshot mode persists the plaintext bytes and publishes a tree entry under that name."
+    }
+  ],
+  "rootCause": {
+    "summary": "The violated invariant is that Tier-A classification must apply to the file that is actually persisted. The CLI classifies a preview of the directory, but `Repository::build_working_tree_with_normalize()` performs the authoritative enumeration later and checks only a stale set of preview names before reading and writing raw bytes.",
+    "evidenceRefs": [
+      "manual-preview-exclusions",
+      "index-preview-exclusions",
+      "closing-rescan-path-set",
+      "raw-persistence"
+    ]
+  },
+  "validation": {
+    "method": "static source trace plus local/offline synthetic PoC",
+    "summary": "The source trace confirms two separate enumerations: preview-time classification produces ignored names, while closing snapshot performs a path-only rescan that does not rerun Tier-A classification. The PoC models the same interleaving with temporary synthetic files.",
+    "evidenceRefs": [
+      "manual-preview-exclusions",
+      "index-preview-exclusions",
+      "closing-rescan-path-set",
+      "raw-persistence"
+    ],
+    "assertions": [
+      "Tier-A files present during preview are correctly excluded.",
+      "A new Tier-A file introduced after preview is absent from `excluded_paths`.",
+      "`build_working_tree_with_normalize()` has no secret classifier before `fs::read()` and `write_raw()`."
+    ],
+    "limitations": [
+      "No barrier-controlled live KCS race was executed.",
+      "Race timing frequency was not measured.",
+      "The PoC uses synthetic temporary files and does not read real secrets or touch a real KCS store."
+    ]
+  },
+  "attackPath": {
+    "summary": "A lower-trust local or synced contributor introduces `.env`, a PEM file, or another Tier-A direct child during the preview-to-snapshot interval. The closing snapshot sees the new file, misses it in the stale exclusion set, and archives the plaintext into local CAS and commit history.",
+    "dataflow": {
+      "summary": "preview candidates -> ignored-name set -> delayed `build_working_tree_with_normalize()` enumeration -> `excluded_paths.contains()` miss -> `fs::read()` -> `write_raw()` -> tree entry",
+      "source": "concurrent direct-child create or rename by a lower-trust local/synced contributor",
+      "sink": "plaintext raw object and commit-history reference in the owner-only local KCS store",
+      "outcome": "newly introduced Tier-A content crosses the secret-exclusion boundary into archive history",
+      "evidenceRefs": [
+        "manual-preview-exclusions",
+        "closing-rescan-path-set",
+        "raw-persistence"
+      ]
+    },
+    "reachability": {
+      "summary": "The attacker needs write or rename authority in the selected scope and must land the new Tier-A name between preview and closing enumeration during a manual snapshot or index operation.",
+      "attacker": "lower-trust local or synced content contributor",
+      "entrypoint": "manual `snapshot` or non-preview `index` covering the mutable scope",
+      "preconditions": [
+        "Concurrent write or rename access to the selected scope.",
+        "A Tier-A direct-child file introduced after preview.",
+        "The new file is readable by the KCS process.",
+        "The operator completes a snapshot or index operation covering that interval."
+      ],
+      "outcome": "one newly introduced Tier-A direct child can be archived per successful interleaving"
+    },
+    "evidenceRefs": [
+      "index-preview-exclusions",
+      "closing-rescan-path-set",
+      "raw-persistence"
+    ],
+    "impact": {
+      "level": "medium",
+      "why": "Secret-classified local content can be unintentionally retained in plaintext raw CAS and commit history, though immediate disclosure outside the owner-only archive was not shown."
+    },
+    "likelihood": {
+      "level": "medium",
+      "why": "Concurrent mutation by a local or synced contributor is plausible, but practical timing was not measured and the workflow is operator mediated."
+    },
+    "limitations": [
+      "Stable secrets present during preview are excluded correctly.",
+      "No automatic remote send follows directly from this archived object.",
+      "The owner-only `.kcs` store limits immediate exposure."
+    ]
+  },
+  "remediation": {
+    "summary": "Reclassify every closing-snapshot entry before raw persistence, or bind preview candidates to an expected name and byte identity and reject drift before publication.",
+    "regressionTests": [
+      "Manual snapshot: create `.env` after preview and before closing enumeration; assert it is not persisted.",
+      "`index` auto snapshot: create a PEM file after the pipeline preview and before auto snapshot; assert it is excluded.",
+      "Control: a Tier-A file present during preview remains excluded.",
+      "Control: ordinary benign files still snapshot as intended under the chosen identity-binding policy."
+    ]
+  },
+  "writeup": {
+    "reportPath": "findings/tac-kcs-r23-cand-041-closing-snapshot-secret-toctou/closing-snapshot-secret-toctou.md",
+    "pocDirectory": "findings/tac-kcs-r23-cand-041-closing-snapshot-secret-toctou/poc",
+    "reportSha256": "30e0ac008a7916bce77f60fc8d33f1f742d3ad8202bfc8136558f03586d87fd3"
+  },
+  "extensions": {
+    "candidateId": "KCS-R23-CAND-041",
+    "ledgerRowId": "KCS-R23-CAND-041",
+    "reportId": "KCS-R23-CAND-041"
+  }
+}

@@ -1,0 +1,228 @@
+{
+  "affected_locations": [
+    {
+      "label": "scan-to-normalize guard",
+      "lines": "9077-9103",
+      "path": "crates/kcs-cli/src/main.rs"
+    },
+    {
+      "label": "path-keyed normalize map",
+      "lines": "9390-9426",
+      "path": "crates/kcs-cli/src/main.rs"
+    },
+    {
+      "label": "closing read/attach",
+      "lines": "254-299",
+      "path": "crates/kcs-core/src/scope.rs"
+    },
+    {
+      "label": "rebuild consumer",
+      "lines": "3045-3090",
+      "path": "crates/kcs-cli/src/main.rs"
+    }
+  ],
+  "artifacts": [
+    {
+      "kind": "markdown_report",
+      "path": "findings/tac-kcs-r23-cand-042-stale-normalize-ref/tac-kcs-r23-cand-042-stale-normalize-ref.md",
+      "sha256": "70c10494c103dc1664b409454aa751d3283f92c4b3411c34ed3272633ab15baa"
+    },
+    {
+      "kind": "poc",
+      "path": "findings/tac-kcs-r23-cand-042-stale-normalize-ref/poc/stale_normalize_binding_probe.py",
+      "sha256": "07f3a0003b9a0010101bbec4f59b34a171487b184b48f2f94f488cee71eff83b"
+    },
+    {
+      "kind": "poc_readme",
+      "path": "findings/tac-kcs-r23-cand-042-stale-normalize-ref/poc/README.md",
+      "sha256": "a87bc6c897268af46168d52c0a7677aa1cfd622d7020a6db431db7f92c463a9c"
+    },
+    {
+      "kind": "poc_makefile",
+      "path": "findings/tac-kcs-r23-cand-042-stale-normalize-ref/poc/Makefile",
+      "sha256": "cf5bdcca62fe79361376e7a3d538de2b67a4a10b12571f01b5b96a9beefc3737"
+    }
+  ],
+  "attackPath": {
+    "dataflow": {
+      "evidenceRefs": [
+        "path-keyed-map",
+        "snapshot-attach",
+        "rebuild-consumer"
+      ],
+      "outcome": "stale normalization binding, false provenance tuple, and missing or skipped enrichment",
+      "sink": "tree entry `raw_hash` plus attached `NormalizeRef` and rebuild `load_normalized_units()` lookup",
+      "source": "working-file bytes controlled by a local or synced scope contributor",
+      "summary": "candidate bytes -> verified normalization -> path-keyed `NormalizeRef` -> closing snapshot reread -> tree entry -> rebuild unit lookup"
+    },
+    "evidenceRefs": [
+      "index-auto-snapshot-map",
+      "path-keyed-map",
+      "snapshot-attach",
+      "rebuild-consumer"
+    ],
+    "impact": {
+      "level": "medium",
+      "why": "The issue crosses the local provenance boundary and can make historical metadata and enrichment inconsistent for changed files."
+    },
+    "likelihood": {
+      "level": "medium",
+      "why": "The interleaving is realistic for shared or synced content, but deterministic scheduling frequency was not measured."
+    },
+    "limitations": [
+      "The finding does not demonstrate code execution, credential exposure, or arbitrary file access.",
+      "Normalized units remain keyed by raw hash, limiting the consequence to false provenance and missing/skipped enrichment."
+    ],
+    "reachability": {
+      "attacker": "lower-trust local or synced-file contributor",
+      "entrypoint": "file modification during the index-to-auto-snapshot interval",
+      "outcome": "local archive/search provenance integrity degradation for affected files",
+      "summary": "The attacker needs concurrent modification access to the selected scope and timing during a normal local `kcs index` run; there is no network listener."
+    },
+    "summary": "A lower-trust local or synced-folder contributor changes a selected file after KCS normalizes the old bytes but before the closing snapshot rereads the path. The published tree entry then names the new bytes and carries a normalization reference for old bytes, causing false historical metadata and missing or skipped enrichment on rebuild."
+  },
+  "candidate_id": "KCS-R23-CAND-042",
+  "codeEvidence": [
+    {
+      "code": "let index_result = run_index_pipeline(&repo, &preview, &args)?;\nlet excluded = preview\n    .candidates\n    .iter()\n    .filter(|candidate| candidate.ignored)\n    .map(|candidate| candidate.input_path.clone())\n    .collect::<BTreeSet<_>>();\nlet outcome = repo.auto_snapshot_with_normalize(\n    Some(\"kcs index auto snapshot\"),\n    None,\n    &excluded,\n    &index_result.normalize_by_path,\n)?;",
+      "endLine": 635,
+      "explanation": "`kcs index` carries the result of normalization directly into the automatic snapshot as `normalize_by_path`, so any identity metadata omitted from that map is unavailable at publication time.",
+      "id": "index-auto-snapshot-map",
+      "label": "Index passes path-keyed normalization map into auto snapshot",
+      "language": "rust",
+      "path": "crates/kcs-cli/src/main.rs",
+      "role": "entrypoint",
+      "startLine": 623
+    },
+    {
+      "code": "pub struct NormalizeRef {\n    pub tool_profile_hash: String,\n    #[serde(default)]\n    pub gen: u64,\n}\n\npub struct TreeEntry {\n    pub path: String,\n    #[serde(rename = \"type\")]\n    pub entry_type: String,\n    pub raw_hash: String,\n    #[serde(skip_serializing_if = \"Option::is_none\")]\n    pub normalize: Option<NormalizeRef>,\n}",
+      "endLine": 25,
+      "explanation": "`NormalizeRef` records profile and generation but not the expected raw hash, while `TreeEntry` stores `raw_hash` separately. The publication path must therefore verify compatibility before attaching the reference.",
+      "id": "normalize-ref-shape",
+      "label": "NormalizeRef does not carry the raw hash it was produced for",
+      "language": "rust",
+      "path": "crates/kcs-core/src/dag.rs",
+      "role": "root_control",
+      "startLine": 11
+    },
+    {
+      "code": "let path = repo.root().join(&candidate.input_path);\nlet bytes = fs::read(&path)\n    .map_err(|err| KcsError::io(err.to_string(), path.display().to_string()))?;\nlet current_hash = hash_bytes(&bytes);\nif let Some(scan_hash) = &candidate.raw_hash {\n    if scan_hash != &current_hash {\n        append_event_log(\n            \"KCS-I-INDEX-INPUT-CHANGED-001\",\n            \"input file changed between scan and normalize; skipped to preserve \\\n             content-addressing (re-run index)\",\n            json!({ \"input_path\": candidate.input_path }),\n        )?;\n        result.failed_files += 1;\n        continue;\n    }\n}\nlet raw_hash = current_hash;",
+      "endLine": 9103,
+      "explanation": "The earlier interval is protected: KCS normalizes only bytes whose current hash still matches the scan-time hash. The missing control is not here; it is the later loss of this verified `raw_hash` when publishing the snapshot.",
+      "id": "scan-to-normalize-guard",
+      "label": "Candidate bytes are rehashed before normalization",
+      "language": "rust",
+      "path": "crates/kcs-cli/src/main.rs",
+      "role": "expected_control",
+      "startLine": 9077
+    },
+    {
+      "code": "result.normalize_by_path.insert(\n    candidate.input_path.clone(),\n    NormalizeRef {\n        tool_profile_hash: markdown_profile_hash.clone(),\n        gen: 0,\n    },\n);",
+      "endLine": 9423,
+      "explanation": "After normalization, the pipeline stores only `candidate.input_path -> NormalizeRef`. The verified `raw_hash` is no longer carried with the pending publication metadata.",
+      "id": "path-keyed-map",
+      "label": "Successful normalization is downgraded to a path-keyed reference",
+      "language": "rust",
+      "path": "crates/kcs-cli/src/main.rs",
+      "role": "propagation",
+      "startLine": 9417
+    },
+    {
+      "code": "let bytes = fs::read(&path).kcs_io(&path)?;\nlet raw_hash = if store_raw {\n    self.store.write_raw(&bytes)?\n} else {\n    hash_bytes(&bytes)\n};\nlet mut tree_entry = TreeEntry::raw_file(file_name.clone(), raw_hash)?;\ntree_entry.normalize = normalize_by_path.get(&file_name).cloned();\ntree_entry.validate()?;\nentries.push(tree_entry);",
+      "endLine": 299,
+      "explanation": "The snapshot computes `raw_hash` from the current bytes, then copies any path-matching `NormalizeRef` into the tree entry without checking that the reference was produced for that same raw hash.",
+      "id": "snapshot-attach",
+      "label": "Closing snapshot rereads bytes and attaches by path only",
+      "language": "rust",
+      "path": "crates/kcs-core/src/scope.rs",
+      "role": "sink",
+      "startLine": 290
+    },
+    {
+      "code": "for entry in &tree.entries {\n    let normalize = match &entry.normalize {\n        Some(normalize) => normalize.clone(),\n        None => match latest_normalize_ref(repo.kcs_dir(), &entry.raw_hash)? {\n            Some(normalize) => normalize,\n            None => continue,\n        },\n    };\n    tree_entries.push(TreeEntryRow {\n        commit_hash: head.clone(),\n        path: entry.path.clone(),\n        raw_hash: entry.raw_hash.clone(),\n        tool_profile_hash: Some(normalize.tool_profile_hash.clone()),\n        gen: normalize.gen,\n    });\n    let units = match load_normalized_units(\n        repo.kcs_dir(),\n        &entry.raw_hash,\n        &normalize.tool_profile_hash,\n        normalize.gen,\n    ) {",
+      "endLine": 3083,
+      "explanation": "A later rebuild records the tree entry raw hash with the attached profile/generation and attempts to load units for that tuple. If the bytes changed after normalization, the tuple names new bytes with old-byte metadata.",
+      "id": "rebuild-consumer",
+      "label": "Rebuild consumes the tree raw hash with the attached reference",
+      "language": "rust",
+      "path": "crates/kcs-cli/src/main.rs",
+      "role": "outcome",
+      "startLine": 3063
+    }
+  ],
+  "confidence": "high (0.97) for the static interleaving; medium for occurrence frequency",
+  "extensions": {
+    "attackPathReport": "artifacts/05_findings/KCS-R23-CAND-042/attack_path_analysis_report.md",
+    "attackPathReportSha256": "8d497b277fa4d2b50dcec4530c1537b4a10bc8334c568b6cc3f375bd6678a406",
+    "attemptId": "tac_20260712",
+    "candidateId": "KCS-R23-CAND-042",
+    "ledgerRowId": "KCS-R23-CAND-042",
+    "reportId": "KCS-R23-CAND-042",
+    "reportPath": "findings/tac-kcs-r23-cand-042-stale-normalize-ref/tac-kcs-r23-cand-042-stale-normalize-ref.md",
+    "reportSha256": "70c10494c103dc1664b409454aa751d3283f92c4b3411c34ed3272633ab15baa",
+    "validationReport": "artifacts/05_findings/KCS-R23-CAND-042/validation_report.md",
+    "validationReportSha256": "d9e9cccc5e07ad7fe07c77e886570ac0284f7b2aba70c160b1a4bf33020b12bd"
+  },
+  "final_policy": "reportable",
+  "final_severity": "low",
+  "ledger_row_id": "KCS-R23-CAND-042",
+  "priority": "P3",
+  "remediation": {
+    "invariant": "Never publish `raw_hash(current_bytes)` with `NormalizeRef(old_bytes)`.",
+    "regression_tests": [
+      "Unchanged bytes attach the normalization reference as before.",
+      "Bytes changed after normalization do not attach the reference and emit a visible event or retry signal.",
+      "Rebuild does not create a `tree_entries` row that pairs the changed raw hash with the old profile/generation."
+    ],
+    "summary": "Carry the expected normalized raw hash with each pending path mapping and attach `NormalizeRef` only if the closing snapshot reads the same raw hash. On mismatch, skip attachment, log a visible drift event, or abort/retry the snapshot according to product policy."
+  },
+  "report_id": "tac-kcs-r23-cand-042-stale-normalize-ref",
+  "rootCause": {
+    "evidenceRefs": [
+      "index-auto-snapshot-map",
+      "normalize-ref-shape",
+      "scan-to-normalize-guard",
+      "path-keyed-map",
+      "snapshot-attach",
+      "rebuild-consumer"
+    ],
+    "summary": "The violated invariant is that a `NormalizeRef` may be attached to a tree entry only for the raw bytes that were normalized. KCS protects the scan-to-normalize interval, but it loses the verified raw hash when it stores `candidate.input_path -> NormalizeRef`; the closing snapshot then binds that old reference to whatever bytes are present at the same path."
+  },
+  "scan_id": "f78f5d0d-2752-47a7-8d8d-3371e09d3377",
+  "schema_version": 1,
+  "source_revision": "0e19f3c6489da458e93a982a333c308d92d0a0ae",
+  "summary": "The `kcs index` pipeline verifies bytes before normalization, but then records only a path-keyed `NormalizeRef`. The automatic closing snapshot rereads current file bytes and attaches that reference by path without comparing the raw hash that was normalized, allowing a concurrent local file change to publish a tree entry whose `raw_hash` names new bytes while its normalization metadata was produced for old bytes.",
+  "target_revision": "0e19f3c6489da458e93a982a333c308d92d0a0ae",
+  "title": "closing snapshot can attach normalization metadata to different bytes",
+  "validation": {
+    "assertions": [
+      "The earlier scan-to-normalize guard is correct and does not bind the later snapshot publication.",
+      "`normalize_by_path` carries no expected raw hash.",
+      "The closing snapshot attaches by file name after computing the current raw hash.",
+      "Rebuild consumes the tree raw hash with the attached profile and generation."
+    ],
+    "evidenceRefs": [
+      "scan-to-normalize-guard",
+      "path-keyed-map",
+      "snapshot-attach",
+      "rebuild-consumer"
+    ],
+    "limitations": [
+      "No scheduler-controlled race was run inside KCS.",
+      "No downstream escalation beyond local provenance/enrichment integrity was demonstrated."
+    ],
+    "method": "static source trace plus synthetic local regression probe",
+    "summary": "The saved validation traced the verified old bytes through normalization, the path-keyed reference, the closing reread of current bytes, and rebuild consumption. The included synthetic probe confirms that path-only attachment can produce a tree entry with a new raw hash and a stale reference, while an `expected_raw_hash` check rejects the drift."
+  },
+  "writeup": {
+    "attemptId": "tac_20260712",
+    "pocPaths": [
+      "findings/tac-kcs-r23-cand-042-stale-normalize-ref/poc/stale_normalize_binding_probe.py",
+      "findings/tac-kcs-r23-cand-042-stale-normalize-ref/poc/README.md",
+      "findings/tac-kcs-r23-cand-042-stale-normalize-ref/poc/Makefile"
+    ],
+    "reportPath": "findings/tac-kcs-r23-cand-042-stale-normalize-ref/tac-kcs-r23-cand-042-stale-normalize-ref.md",
+    "reportSha256": "70c10494c103dc1664b409454aa751d3283f92c4b3411c34ed3272633ab15baa",
+    "pocDirectory": "findings/tac-kcs-r23-cand-042-stale-normalize-ref/poc"
+  }
+}

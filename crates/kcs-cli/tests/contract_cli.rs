@@ -8,6 +8,42 @@ use assert_cmd::Command as AssertCommand;
 use kcs_core::cas::{canonical_json_bytes, fanout_path, hash_bytes};
 use serde_json::Value;
 
+const KCS_CHILD_ENV_DENYLIST: &[&str] = &[
+    "GEMINI_API_KEY",
+    "MISTRAL_API_KEY",
+    "KCS_FIXED_NOW",
+    "KCS_TEST_GEMINI_EMBED",
+    "KCS_TEST_MISTRAL_OCR",
+    "KCS_TEST_MARKDOWNIZE_ADAPTER",
+    "KCS_TEST_QUERY_EMBED_TRACE",
+    "KCS_TEST_HOLD_LOCK_MS",
+    "KCS_TEST_R13_2_AUTH",
+    "KCS_TEST_R13_2_DECLARED",
+    "KCS_TEST_R13_2_FALLBACK",
+];
+
+fn hermetic_assert_command() -> AssertCommand {
+    let mut command = AssertCommand::cargo_bin("kcs").unwrap();
+    for name in KCS_CHILD_ENV_DENYLIST {
+        command.env_remove(name);
+    }
+    command
+}
+
+fn hermetic_process_command(bin: &Path) -> ProcessCommand {
+    let mut command = ProcessCommand::new(bin);
+    for name in KCS_CHILD_ENV_DENYLIST {
+        command.env_remove(name);
+    }
+    command
+}
+
+fn value_path_ends_with(value: &Value, suffix: &str) -> bool {
+    value
+        .as_str()
+        .is_some_and(|path| Path::new(path).ends_with(suffix))
+}
+
 /// A process-wide isolated XDG home so `init` / `index` never touch the developer's
 /// real `~/.local/share/kcs/scope-registry.sqlite` (K3 — init/index now register
 /// scopes). Tests that need to read the data home set `XDG_DATA_HOME` explicitly,
@@ -19,7 +55,7 @@ fn isolated_home() -> &'static std::path::Path {
 }
 
 fn kcs() -> AssertCommand {
-    let mut command = AssertCommand::cargo_bin("kcs").unwrap();
+    let mut command = hermetic_assert_command();
     command
         .env("XDG_DATA_HOME", isolated_home().join("data"))
         .env("XDG_CONFIG_HOME", isolated_home().join("config"))
@@ -191,10 +227,10 @@ fn ct_cli_snapshot_commit_alias_log_inspect_tag_diff() {
     assert_eq!(changes.len(), 2);
     assert!(changes
         .iter()
-        .any(|c| c["change"] == "modified" && c["path"].as_str().unwrap().ends_with("/a.pdf")));
+        .any(|c| c["change"] == "modified" && value_path_ends_with(&c["path"], "a.pdf")));
     assert!(changes
         .iter()
-        .any(|c| c["change"] == "added" && c["path"].as_str().unwrap().ends_with("/b.pdf")));
+        .any(|c| c["change"] == "added" && value_path_ends_with(&c["path"], "b.pdf")));
 }
 
 #[test]
@@ -208,7 +244,7 @@ fn ct_lock_001_concurrent_snapshots_fail_fast() {
     fs::write(temp.path().join("a.pdf"), b"one").unwrap();
 
     let bin = assert_cmd::cargo::cargo_bin("kcs");
-    let first = ProcessCommand::new(&bin)
+    let first = hermetic_process_command(&bin)
         .args(["snapshot", "-m", "first", "--json"])
         .env("KCS_FIXED_NOW", "2026-04-29T12:00:00Z")
         .env("KCS_TEST_HOLD_LOCK_MS", "800")
@@ -220,7 +256,7 @@ fn ct_lock_001_concurrent_snapshots_fail_fast() {
 
     wait_for_path(temp.path().join(".kcs/.lock").as_path());
 
-    let second = ProcessCommand::new(&bin)
+    let second = hermetic_process_command(&bin)
         .args(["snapshot", "-m", "second", "--json"])
         .env("KCS_FIXED_NOW", "2026-04-29T12:00:01Z")
         .current_dir(temp.path())
@@ -245,7 +281,7 @@ fn m1_concurrent_index_loser_is_locked_and_store_intact() {
     let xdg = tempfile::tempdir().unwrap();
     let bin = assert_cmd::cargo::cargo_bin("kcs");
 
-    ProcessCommand::new(&bin)
+    hermetic_process_command(&bin)
         .arg("init")
         .env("XDG_DATA_HOME", xdg.path().join("data"))
         .env("XDG_CONFIG_HOME", xdg.path().join("config"))
@@ -260,7 +296,7 @@ fn m1_concurrent_index_loser_is_locked_and_store_intact() {
 
     // Process A holds the lock across its snapshot sub-step for 1.2s, guaranteeing
     // the contention window (the outer command lock is held the whole time).
-    let first = ProcessCommand::new(&bin)
+    let first = hermetic_process_command(&bin)
         .args(["index", "--approve", "--json"])
         .env("XDG_DATA_HOME", xdg.path().join("data"))
         .env("XDG_CONFIG_HOME", xdg.path().join("config"))
@@ -273,7 +309,7 @@ fn m1_concurrent_index_loser_is_locked_and_store_intact() {
 
     wait_for_path(temp.path().join(".kcs/.lock").as_path());
 
-    let second = ProcessCommand::new(&bin)
+    let second = hermetic_process_command(&bin)
         .args(["index", "--approve", "--json"])
         .env("XDG_DATA_HOME", xdg.path().join("data"))
         .env("XDG_CONFIG_HOME", xdg.path().join("config"))
@@ -340,7 +376,7 @@ fn m1c_corrupt_cost_ledger_is_store_corrupt_not_schema() {
     let temp = tempfile::tempdir().unwrap();
     let xdg = tempfile::tempdir().unwrap();
     let mk = || {
-        let mut command = AssertCommand::cargo_bin("kcs").unwrap();
+        let mut command = hermetic_assert_command();
         command
             .env("XDG_DATA_HOME", xdg.path().join("data"))
             .env("XDG_CONFIG_HOME", xdg.path().join("config"));

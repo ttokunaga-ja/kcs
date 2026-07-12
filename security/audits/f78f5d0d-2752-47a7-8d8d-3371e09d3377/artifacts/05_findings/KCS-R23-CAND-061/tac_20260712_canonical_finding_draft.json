@@ -1,0 +1,215 @@
+{
+  "affectedLocations": [
+    {
+      "label": "unbound normalized reader",
+      "lines": "3355-3390",
+      "path": "crates/kcs-cli/src/main.rs"
+    },
+    {
+      "label": "chunk provenance sink",
+      "lines": "167-185",
+      "path": "crates/kcs-index/src/chunking.rs"
+    },
+    {
+      "label": "rebuild consumer",
+      "lines": "3045-3090",
+      "path": "crates/kcs-cli/src/main.rs"
+    },
+    {
+      "label": "search attribution sink",
+      "lines": "2107-2120",
+      "path": "crates/kcs-cli/src/main.rs"
+    },
+    {
+      "label": "evidence row consumer",
+      "lines": "4824-4859",
+      "path": "crates/kcs-cli/src/main.rs"
+    }
+  ],
+  "attackPath": {
+    "dataflow": {
+      "evidenceRefs": [
+        "unit-self-declared-fields",
+        "chunk-row-sink",
+        "search-live-join"
+      ],
+      "outcome": "attacker-chosen markdown can be substituted, misattributed, or silently excluded under live-tree workflows",
+      "sink": "durable chunks and search/Evidence text/provenance",
+      "source": "lower-trust supplied persisted normalized manifest/unit state",
+      "summary": "copied normalized instance directory -> manifest.json -> <unit_ref>.json -> NormalizedUnitInput -> ChunkRow -> search/Evidence consumers"
+    },
+    "evidenceRefs": [
+      "requested-instance-path",
+      "unit-self-declared-fields",
+      "chunk-row-sink",
+      "search-live-join"
+    ],
+    "impact": {
+      "level": "high",
+      "why": "Trusted search and Evidence provenance can be substituted or misattributed in a core product integrity boundary."
+    },
+    "likelihood": {
+      "level": "medium",
+      "why": "The path is deterministic once a poisoned archive is adopted, but it requires local store adoption and crafted persisted state."
+    },
+    "limitations": [
+      "Malformed JSON is rejected by typed parsing.",
+      "Rows whose forged tuple does not match a live tree entry may be filtered rather than surfaced.",
+      "Same-user unrestricted writes to an already-private live store are not the relied-upon boundary."
+    ],
+    "reachability": {
+      "attacker": "lower-trust contributor to adopted local store state",
+      "entrypoint": "rebuild/index path that calls load_normalized_units",
+      "outcome": "durable false-evidence injection or search attribution confusion",
+      "preconditions": [
+        "The operator adopts a copied, shared, synced, or preseeded .kcs archive.",
+        "The archive contains parse-valid normalized manifest and unit JSON under a live requested tuple directory.",
+        "The operator rebuilds or indexes and later consumes search or Evidence output."
+      ],
+      "summary": "The attacker must influence a copied/shared/preseeded .kcs store before the operator adopts it, then rely on operator rebuild/index/search/Evidence workflows. No public network listener is involved."
+    },
+    "summary": "A lower-trust contributor supplies parse-valid normalized manifest and unit files in a copied/preseeded .kcs archive. After adoption, rebuild or index reads the files from the requested instance directory, trusts unit self-declared identity and markdown, and stores chunks that search/Evidence can return with trusted-looking provenance."
+  },
+  "candidate_id": "KCS-R23-CAND-061",
+  "codeEvidence": [
+    {
+      "code": "fn load_normalized_units(\n    kcs_dir: &Path,\n    raw_hash: &str,\n    tool_profile_hash: &str,\n    gen: u64,\n) -> Result<Vec<NormalizedUnitInput>> {\n    let dir = kcs_pipeline::markdownize::normalized_instance_dir(\n        kcs_dir,\n        raw_hash,\n        tool_profile_hash,\n        gen,\n    );",
+      "endLine": 3366,
+      "explanation": "The caller supplies the live tree entry tuple and uses it only to choose a directory. This is the point where the lower-trust persisted state must be rebound to the requested identity.",
+      "id": "requested-instance-path",
+      "label": "Requested tuple selects the normalized instance directory",
+      "language": "rust",
+      "path": "crates/kcs-cli/src/main.rs",
+      "role": "entrypoint",
+      "startLine": 3355
+    },
+    {
+      "code": "let manifest_path = dir.join(\"manifest.json\");\nlet manifest: NormalizedInstanceManifest = serde_json::from_slice(\n    &fs::read(&manifest_path)\n        .map_err(|err| KcsError::io(err.to_string(), manifest_path.display().to_string()))?,\n)\n.map_err(|err| store_corrupt_error(&manifest_path, err.to_string()))?;",
+      "endLine": 3374,
+      "explanation": "Typed JSON parsing proves syntax, but the code never checks that manifest.raw_hash, manifest.tool_profile_hash, or manifest.gen match the requested tuple.",
+      "id": "manifest-not-rebound",
+      "label": "Manifest is deserialized without comparing its identity to the request",
+      "language": "rust",
+      "path": "crates/kcs-cli/src/main.rs",
+      "role": "root_control",
+      "startLine": 3367
+    },
+    {
+      "code": "for entry in &manifest.units {\n    if entry.status != UnitStatus::Done {\n        continue;\n    }\n    let unit_path = dir.join(format!(\"{}.json\", entry.unit_ref));\n    let unit: NormalizedUnitObject = serde_json::from_slice(\n        &fs::read(&unit_path)\n            .map_err(|err| KcsError::io(err.to_string(), unit_path.display().to_string()))?,\n    )\n    .map_err(|err| store_corrupt_error(&unit_path, err.to_string()))?;\n    units.push(NormalizedUnitInput {\n        raw_hash: unit.raw_hash,\n        tool_profile_hash: unit.tool_profile_hash,\n        gen: unit.gen,\n        unit_key: unit.unit_key,\n        markdown: unit.markdown,\n    });\n}",
+      "endLine": 3390,
+      "explanation": "The reader follows the manifest entry filename, but it does not derive unit_ref from unit_key or compare entry key, type, prepared hash, and requested tuple with the unit object before reusing the unit markdown.",
+      "id": "unit-self-declared-fields",
+      "label": "Unit object fields become normalized input without manifest binding",
+      "language": "rust",
+      "path": "crates/kcs-cli/src/main.rs",
+      "role": "root_control",
+      "startLine": 3375
+    },
+    {
+      "code": "let mut row = ChunkRow {\n    chunk_id: String::new(),\n    raw_hash: unit.raw_hash.clone(),\n    tool_profile_hash: unit.tool_profile_hash.clone(),\n    gen: unit.gen,\n    unit_key: unit.unit_key.clone(),\n    chunking_config_hash: input.config.chunking_config_hash.clone(),\n    raw_path: input.raw_path.clone(),\n    heading_path: Some(section.heading_path.clone()),\n    section_id: section_id.clone(),\n    char_start: Some(start as u64),\n    char_end: Some(end as u64),\n    text_hash: hash_bytes(text.as_bytes()),\n    text,\n    first_seen_commit: None,\n    created_at: input.created_at.clone(),\n};\nrow.chunk_id = chunk_hash(&row)?;\nrows.push(row);",
+      "endLine": 185,
+      "explanation": "Chunking uses the unit object identity and markdown as durable row fields. Hashes generated here are internally consistent with the poisoned row, but they no longer prove origin from the requested normalized instance.",
+      "id": "chunk-row-sink",
+      "label": "Chunk rows persist unverified unit identity and text",
+      "language": "rust",
+      "path": "crates/kcs-index/src/chunking.rs",
+      "role": "sink",
+      "startLine": 167
+    },
+    {
+      "code": "JOIN tree_entries te ON te.commit_hash = ?1\n    AND te.raw_hash = c.raw_hash\n    AND te.tool_profile_hash = c.tool_profile_hash\n    AND te.gen = c.gen\nWHERE chunk_fts MATCH ?2\n    AND c.chunking_config_hash = ?3\n    AND c.rowid <= ?4\nORDER BY score, c.chunk_id\nLIMIT 200",
+      "endLine": 2120,
+      "explanation": "The live-set join filters rows by stored chunk identity. It cannot recover the missing source binding because c.raw_hash, c.tool_profile_hash, c.gen, and c.text were already accepted from unverified unit data.",
+      "id": "search-live-join",
+      "label": "Search joins poisoned chunk identity to live tree entries",
+      "language": "rust",
+      "path": "crates/kcs-cli/src/main.rs",
+      "role": "outcome",
+      "startLine": 2107
+    }
+  ],
+  "confidence": "high",
+  "extensions": {
+    "attackPathReport": "artifacts/05_findings/KCS-R23-CAND-061/attack_path_analysis_report.md",
+    "attackPathReportSha256": "f51f8beb94149833e4ebee586bc6f26f2a742acbf3476a7d0c113d443417a511",
+    "candidateId": "KCS-R23-CAND-061",
+    "ledgerRowId": "KCS-R23-CAND-061",
+    "reportId": "KCS-R23-CAND-061",
+    "reportPath": "findings/tac-kcs-r23-cand-061-normalized-unit-provenance-rebinding/normalized-unit-provenance-rebinding.md",
+    "reportSha256": "235727c5cadd013318d21af62382f97bb7fb8e88dfcab55bb74fc5456d41426d",
+    "validationReport": "artifacts/05_findings/KCS-R23-CAND-061/validation_report.md",
+    "validationReportSha256": "2326b7903a3bfcd68f6239b9a741886277c7c961cb86e0d26e6070b44f2eec21"
+  },
+  "final_policy": "reportable",
+  "final_severity": "medium",
+  "ledger_row_id": "KCS-R23-CAND-061",
+  "priority": "P2",
+  "remediation": {
+    "regressionTests": [
+      "Manifest raw_hash/tool_profile_hash/gen mismatch is rejected before reading or chunking done units.",
+      "Manifest entry unit_ref not derived from unit_key is rejected.",
+      "Unit raw_hash/tool_profile_hash/gen mismatch is rejected.",
+      "Unit unit_key/unit_type/prepared_hash mismatch with manifest entry is rejected.",
+      "A poisoned adopted-store fixture cannot produce searchable chunks or Evidence text."
+    ],
+    "summary": "Fail closed before chunking unless the requested tuple, manifest identity, manifest entry, derived unit_ref, and unit object all agree. Treat mismatches as localized store corruption and surface them through rebuild skipped-unit reporting."
+  },
+  "rootCause": {
+    "evidenceRefs": [
+      "requested-instance-path",
+      "manifest-not-rebound",
+      "unit-self-declared-fields",
+      "chunk-row-sink",
+      "search-live-join"
+    ],
+    "summary": "The violated invariant is that a normalized unit consumed for a live tree entry must be semantically bound to the requested raw_hash, tool_profile_hash, generation, manifest entry, prepared hash, and derived unit_ref before any markdown is indexed. load_normalized_units uses the requested tuple for path construction, but emits NormalizedUnitInput from unit self-declared fields without these equality checks."
+  },
+  "scan_id": "f78f5d0d-2752-47a7-8d8d-3371e09d3377",
+  "schema_version": 1,
+  "scope": ".",
+  "source_revision": "0e19f3c6489da458e93a982a333c308d92d0a0ae",
+  "summary": "KCS rebuild selects a normalized-instance directory from a live tree entry raw_hash, tool_profile_hash, and generation, but load_normalized_units only parses manifest and unit JSON and then trusts the unit object self-declared identity and markdown. In an adopted copied/preseeded store, a lower-trust contributor can place parse-valid normalized state under the requested directory and have chunk/search/Evidence consumers index attacker-chosen text with trusted-looking provenance.",
+  "target_revision": "0e19f3c6489da458e93a982a333c308d92d0a0ae",
+  "title": "Normalized manifests and unit objects are not rebound to the requested provenance tuple",
+  "validation": {
+    "assertions": [
+      "Manifest raw_hash, tool_profile_hash, and gen are not compared with the request.",
+      "Manifest entry unit_ref, unit_key, unit_type, and prepared_hash are not compared with the unit object.",
+      "Unit self-declared raw_hash, tool_profile_hash, gen, unit_key, and markdown become durable chunk fields.",
+      "Later search and Evidence checks bind to the materialized ChunkRow and therefore cannot prove normalized-source identity."
+    ],
+    "evidenceRefs": [
+      "requested-instance-path",
+      "manifest-not-rebound",
+      "unit-self-declared-fields",
+      "chunk-row-sink"
+    ],
+    "limitations": [
+      "No poisoned real KCS store was executed during this write-up.",
+      "The frequency of copied/preseeded store adoption in production use was not measured.",
+      "The PoC uses synthetic local JSON only and does not access live data or services."
+    ],
+    "method": "static source trace plus local/offline synthetic PoC",
+    "summary": "The saved validation trace and the source both confirm that path construction and typed JSON parsing are the only controls before unit fields reach chunking. The accompanying synthetic PoC builds mismatched manifest/unit JSON, shows the permissive reader accepting it, and shows the strict tuple/entry/unit checks rejecting it."
+  },
+  "writeup": {
+    "attemptId": "tac_20260712",
+    "pocDirectory": "findings/tac-kcs-r23-cand-061-normalized-unit-provenance-rebinding/poc",
+    "reportPath": "findings/tac-kcs-r23-cand-061-normalized-unit-provenance-rebinding/normalized-unit-provenance-rebinding.md",
+    "reportSha256": "235727c5cadd013318d21af62382f97bb7fb8e88dfcab55bb74fc5456d41426d",
+    "supportingArtifacts": [
+      {
+        "path": "findings/tac-kcs-r23-cand-061-normalized-unit-provenance-rebinding/poc/Makefile",
+        "sha256": "1da0e269a26ec74f2bbd57f4c2354b1e4834f6e88fe1b43b38d7bdccbc7d61c6"
+      },
+      {
+        "path": "findings/tac-kcs-r23-cand-061-normalized-unit-provenance-rebinding/poc/README.md",
+        "sha256": "b9e55d5b280b74f534f5a5f2957febd7d95c4152e6e81363f19d26339d36fc23"
+      },
+      {
+        "path": "findings/tac-kcs-r23-cand-061-normalized-unit-provenance-rebinding/poc/normalized_rebinding_probe.py",
+        "sha256": "daa4278f5d5845be75ccb0d8e58b2e426951de38ed7cd7cf103a9c816808c4c4"
+      }
+    ]
+  }
+}

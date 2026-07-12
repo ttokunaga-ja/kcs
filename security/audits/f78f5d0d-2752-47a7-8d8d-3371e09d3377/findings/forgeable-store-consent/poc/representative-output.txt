@@ -1,0 +1,5 @@
+[+] foreign-row negative control: network=False secrets=False
+[!] copied whole-store replay: network=True secrets=True
+[!] preseeded same-store forgery: network=True secrets=True
+[+] fixed provenance oracle: origin=True copied=False forged=False
+[+] no KCS binary, adapter, service, socket, or credential was used

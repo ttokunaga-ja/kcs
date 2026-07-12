@@ -1,0 +1,252 @@
+{
+  "attackPath": {
+    "dataflow": {
+      "evidenceRefs": [
+        "content-derived-identity",
+        "all-read-batch-plan",
+        "response-by-chunk",
+        "first-wins-authoritative-row",
+        "current-vector-knn-link"
+      ],
+      "outcome": "trusted vector search consumes bytes that contradict the authoritative identity and can select different evidence before and after rebuild",
+      "sink": "the derived `chunk_vec` row for the later duplicate chunk",
+      "source": "different shape-valid vectors controlled by the configured remote adapter for duplicate input texts",
+      "summary": "duplicate chunk text -> shared `embedding_hash` -> all-read batch misses -> per-chunk adapter vectors -> first-wins `embeddings` row plus current-vector `chunk_vec` links -> KNN ordering"
+    },
+    "evidenceRefs": [
+      "all-read-batch-plan",
+      "response-by-chunk",
+      "first-wins-authoritative-row",
+      "current-vector-knn-link",
+      "rebuild-from-authoritative"
+    ],
+    "impact": {
+      "level": "medium",
+      "why": "A response actor can make a trusted derived search row disagree with its documented source of truth, changing vector ranking and evidence selection before rebuild."
+    },
+    "likelihood": {
+      "level": "high",
+      "why": "The configured remote response actor directly chooses both vectors and can recognize duplicate items, although the batch and duplicate-identity preconditions constrain the trigger."
+    },
+    "limitations": [
+      "Stable deterministic adapters ordinarily return equal or nearly equal vectors for identical text.",
+      "The adapter can already degrade semantic quality without this identity collision.",
+      "Rebuild converges the rows, and no confidentiality, execution, authorization, or billing impact was shown."
+    ],
+    "reachability": {
+      "attacker": "faulty, variable, compromised, or malicious configured embedding service controlling an approved response",
+      "entrypoint": "response to an outbound same-batch embedding request containing duplicate texts",
+      "outcome": "temporary manipulation of KNN ordering and evidence selection within the affected scope",
+      "summary": "KCS has no inbound listener on this path. The user must approve an outbound embedding workflow; the same batch must contain duplicate missing identities; and the configured response actor must return different vectors that pass count and width checks before a consumer searches the derived index."
+    },
+    "summary": "An approved embedding batch contains two distinct chunks with equal text and profile. The configured remote service recognizes the duplicates and returns different width-valid vectors under their chunk IDs. KCS keeps the first authoritative vector but links the second response into the second chunk's KNN row, altering vector ordering or evidence selection until rebuild."
+  },
+  "candidate_id": "KCS-R23-CAND-068",
+  "codeEvidence": [
+    {
+      "code": "/// Embedding identity hash (03 \u00a78.1) keyed on the chunk's `text_hash` so identical\n/// content shares one `embeddings` row (content-based reuse).\nfn chunk_embedding_hash(\n    chunk: &EmbeddableChunk,\n    profile: &DeclaredEmbeddingProfile,\n) -> Result<String> {\n    embedding_store::embedding_hash(\n        EmbeddingTargetType::Chunk,\n        &chunk.text_hash,\n        profile.dimensions,\n        EmbeddingDistance::Cosine,\n        EmbeddingModality::Multimodal,\n        &profile.profile_hash,\n    )\n    .map_err(index_to_kcs)\n}",
+      "endLine": 7839,
+      "explanation": "The adapter-bound identity uses `text_hash` and profile fields, not `chunk_id`. Two distinct chunks with equal text therefore enter the batch with one shared authoritative identity.",
+      "id": "content-derived-identity",
+      "label": "Duplicate text shares one embedding identity",
+      "language": "rust",
+      "path": "crates/kcs-cli/src/main.rs",
+      "role": "user_input",
+      "startLine": 7824
+    },
+    {
+      "code": "fn plan_embed_batch<'a>(\n    conn: &Connection,\n    profile: &DeclaredEmbeddingProfile,\n    batch: &'a [EmbeddableChunk],\n) -> std::result::Result<EmbedBatchPlan<'a>, TaskExecutionFailure> {\n    let mut reuse = Vec::new();\n    let mut to_send = Vec::new();\n    for chunk in batch {\n        let embedding_hash =\n            chunk_embedding_hash(chunk, profile).map_err(|_| TaskExecutionFailure {\n                retry_kind: RetryErrorKind::ContractViolation,\n            })?;\n        match embedding_store::content_vector(conn, &embedding_hash) {\n            Ok(Some(bytes)) => reuse.push((chunk, bytes)),\n            Ok(None) => to_send.push((chunk, embedding_hash)),\n            Err(_) => {\n                return Err(TaskExecutionFailure {\n                    retry_kind: RetryErrorKind::ContractViolation,\n                })\n            }\n        }\n    }\n    Ok(EmbedBatchPlan { reuse, to_send })\n}",
+      "endLine": 7708,
+      "explanation": "Every chunk probes the store before any response is written. If two chunks share a missing `embedding_hash`, both see `None` and are independently added to `to_send`; no per-batch map enforces one request item per identity.",
+      "id": "all-read-batch-plan",
+      "label": "Planner does not coalesce equal missing identities",
+      "language": "rust",
+      "path": "crates/kcs-cli/src/main.rs",
+      "role": "root_control",
+      "startLine": 7685
+    },
+    {
+      "code": "let vectors = run_embedding_adapter(execution, items, EmbeddingInputType::MarkdownChunk)?;\nlet by_id = vectors\n    .into_iter()\n    .map(|vector| (vector.id, vector.vector))\n    .collect::<BTreeMap<_, _>>();\nfor (chunk, embedding_hash) in to_send {\n    let Some(vector) = by_id.get(&chunk.chunk_id) else {\n        return Err(TaskExecutionFailure {\n            retry_kind: RetryErrorKind::ContractViolation,\n        });\n    };\n    let bytes = f32_to_le_bytes(vector);\n    embedding_store::write_chunk_embedding(\n        conn,\n        embedding_hash,\n        &chunk.text_hash,\n        &chunk.chunk_id,\n        &bytes,\n        profile.dimensions,\n        &profile.distance,\n        &profile.modality,\n        &profile.profile_hash,\n    )\n    .map_err(|_| TaskExecutionFailure {\n        retry_kind: RetryErrorKind::ContractViolation,\n    })?;\n}",
+      "endLine": 7768,
+      "explanation": "The untrusted response is keyed by per-chunk ID and written sequentially. Response-shape validation does not compare vectors belonging to the same `embedding_hash`, so conflicting valid vectors reach storage.",
+      "id": "response-by-chunk",
+      "label": "Each chunk forwards its own returned vector",
+      "language": "rust",
+      "path": "crates/kcs-cli/src/main.rs",
+      "role": "propagation",
+      "startLine": 7742
+    },
+    {
+      "code": "conn.execute(\n    \"INSERT INTO embeddings(id, target_type, target_id, modality, vector, dimensions, distance, profile_hash)\n     VALUES (?1, 'chunk', ?2, ?3, ?4, ?5, ?6, ?7)\n     ON CONFLICT(id) DO NOTHING\",\n    params![\n        embedding_hash,\n        text_hash,\n        modality,\n        vector,\n        dimensions as i64,\n        distance,\n        profile_hash\n    ],\n)?;\nlink_chunk_vec(conn, chunk_id, vector, dimensions)?;\nOk(())",
+      "endLine": 122,
+      "explanation": "A duplicate ID leaves the first authoritative vector unchanged, but the function does not re-read or compare that canonical value before forwarding current response bytes to the derived linker.",
+      "id": "first-wins-authoritative-row",
+      "label": "Authoritative row keeps the first vector",
+      "language": "rust",
+      "path": "crates/kcs-index/src/embedding_store.rs",
+      "role": "root_control",
+      "startLine": 107
+    },
+    {
+      "code": "pub fn link_chunk_vec(\n    conn: &Connection,\n    chunk_id: &str,\n    vector: &[u8],\n    dimensions: u64,\n) -> Result<()> {\n    if dimensions as usize != CHUNK_VEC_DIMENSIONS || vector.len() != CHUNK_VEC_DIMENSIONS * 4 {\n        return Ok(());\n    }\n    conn.execute(\n        \"DELETE FROM chunk_vec WHERE chunk_id = ?1\",\n        params![chunk_id],\n    )?;\n    conn.execute(\n        \"INSERT INTO chunk_vec(chunk_id, embedding) VALUES (?1, ?2)\",\n        params![chunk_id, vector],\n    )?;\n    Ok(())\n}",
+      "endLine": 147,
+      "explanation": "The derived row checks only vector width. For the second duplicate response it stores bytes that may differ from the first-wins authoritative row, so KNN search observes a contradictory vector.",
+      "id": "current-vector-knn-link",
+      "label": "Derived KNN row accepts current response bytes",
+      "language": "rust",
+      "path": "crates/kcs-index/src/embedding_store.rs",
+      "role": "outcome",
+      "startLine": 128
+    },
+    {
+      "code": "conn.execute_batch(\"DELETE FROM chunk_vec;\")?;\nlet mut stmt = conn.prepare(\n    \"SELECT c.chunk_id, e.vector, e.dimensions\n     FROM chunks c\n     JOIN embeddings e ON e.target_type = 'chunk' AND e.target_id = c.text_hash\",\n)?;\n// rows are then relinked from `e.vector`\nfor (chunk_id, vector, dimensions) in rows {\n    if held_chunk_ids.contains(&chunk_id) {\n        continue;\n    }\n    link_chunk_vec(conn, &chunk_id, &vector, dimensions)?;\n}",
+      "endLine": 184,
+      "explanation": "Rebuild uses the authoritative join and therefore replaces any conflicting derived row. The change in bytes after rebuild exposes the earlier source-of-truth violation.",
+      "id": "rebuild-from-authoritative",
+      "label": "Rebuild relinks from the authoritative bytes",
+      "language": "rust",
+      "path": "crates/kcs-index/src/embedding_store.rs",
+      "role": "expected_control",
+      "startLine": 164
+    }
+  ],
+  "confidence": {
+    "level": "high",
+    "rationale": "The exact revision shows all-read planning, first-wins authoritative insertion, and current-response KNN linking. Saved validation reproduced the split through the target storage APIs, and this TAC write-up includes a bounded network-free harness that demonstrates the vulnerable and fixed invariants. Provider nondeterminism and downstream decision frequency were not measured."
+  },
+  "extensions": {
+    "attackPathReport": "artifacts/05_findings/KCS-R23-CAND-068/attack_path_analysis_report.md",
+    "attackPathReportSha256": "8b9f79f8e12d87bb32caff85406a6a63d15cf8b0010224c40691f0cb94e2aca5",
+    "candidateId": "KCS-R23-CAND-068",
+    "finalPolicy": "reportable",
+    "ledgerRowId": "KCS-R23-CAND-068",
+    "priority": "P2",
+    "reportId": "KCS-R23-CAND-068",
+    "reportPath": "findings/tac-kcs-r23-cand-068-embedding-identity-split/same-batch-duplicate-embedding-identity-split.md",
+    "reportSha256": "71dadb64c2b1acf609689305726a2bbc8cc71e9ae5971f8349996df1f2369f3d",
+    "validationReport": "artifacts/05_findings/KCS-R23-CAND-068/validation_report.md",
+    "validationReportSha256": "e5e743e66a75a416c1627691af8bb057d0d9584607b1910ca82906942ffe194e"
+  },
+  "final_policy": "reportable",
+  "final_severity": "medium",
+  "identity": {
+    "anchor": "crates/kcs-index/src/embedding_store.rs/write_chunk_embedding",
+    "instance": "same-batch/duplicate-identity-vector-split"
+  },
+  "ledger_row_id": "KCS-R23-CAND-068",
+  "locations": [
+    {
+      "endLine": 27,
+      "path": "crates/kcs-index/src/embedding_store.rs",
+      "role": "user_input",
+      "startLine": 10
+    },
+    {
+      "endLine": 7708,
+      "path": "crates/kcs-cli/src/main.rs",
+      "role": "root_control",
+      "startLine": 7685
+    },
+    {
+      "endLine": 7768,
+      "path": "crates/kcs-cli/src/main.rs",
+      "role": "propagation",
+      "startLine": 7742
+    },
+    {
+      "endLine": 145,
+      "path": "crates/kcs-index/src/embedding_store.rs",
+      "role": "outcome",
+      "startLine": 107
+    },
+    {
+      "endLine": 184,
+      "path": "crates/kcs-index/src/embedding_store.rs",
+      "role": "expected_control",
+      "startLine": 164
+    }
+  ],
+  "preventiveControls": [
+    "Centralize content-identity grouping before adapter calls.",
+    "Publish authoritative and derived embedding rows in one transaction after whole-response validation.",
+    "Expose a storage API that accepts one embedding identity plus all member chunk IDs and never accepts transient per-member vectors."
+  ],
+  "priority": "P2",
+  "provenance": {
+    "source": "Codex Security deep scan f78f5d0d-2752-47a7-8d8d-3371e09d3377 of KCS revision 0e19f3c6489da458e93a982a333c308d92d0a0ae"
+  },
+  "remediation": "Coalesce same-batch misses by `embedding_hash`, send one representative item per identity, validate the complete adapter response set before writes, persist one canonical vector, and link every member chunk only from the persisted bytes. Add a transactional guard that rejects a supplied vector when an existing authoritative row for that identity contains different bytes.",
+  "remediationTests": [
+    "Verify that two same-batch chunks with equal text produce one adapter identity and identical links from persisted bytes.",
+    "Reject conflicting vectors for one embedding identity before any authoritative or derived row becomes visible.",
+    "Verify that cached and new identities mixed in one batch retain content-addressed reuse.",
+    "Verify that equal text across separate batches links only from the existing authoritative row.",
+    "Assert byte-for-byte KNN and ordering parity before and after `rebuild_chunk_vec()`."
+  ],
+  "rootCause": {
+    "evidenceRefs": [
+      "content-derived-identity",
+      "all-read-batch-plan",
+      "response-by-chunk",
+      "first-wins-authoritative-row",
+      "current-vector-knn-link",
+      "rebuild-from-authoritative"
+    ],
+    "summary": "KCS uses a content-derived `embedding_hash` as the authoritative identity but does not enforce that identity consistently across batch planning and publication. `plan_embed_batch()` performs all lookups before writes and does not coalesce equal misses. `send_embed_batch()` preserves per-chunk response vectors. `write_chunk_embedding()` applies first-writer-wins semantics to `embeddings` yet passes the current unpersisted vector to `chunk_vec`, whose width check cannot detect a conflict. The same identity can consequently have one authoritative vector and a different derived KNN vector."
+  },
+  "ruleId": "kcs.embedding.same-batch-identity-split",
+  "scan_id": "f78f5d0d-2752-47a7-8d8d-3371e09d3377",
+  "schema_version": "codex-security-canonical-finding-draft/v1",
+  "severity": {
+    "changeConditions": "Raise the rating if vector evidence becomes an authorization or execution input, if inconsistent rows persist across repair, or if a remote actor can trigger the path without an operator-approved adapter workflow. Lower or close the finding when same-identity misses are coalesced, conflicting duplicate responses fail atomically, and every derived link is created only from persisted canonical bytes.",
+    "level": "medium",
+    "rationale": "The configured remote response actor directly controls conflicting width-valid vectors and can cause KNN ordering and evidence selection to diverge from KCS's authoritative embedding identity. The effect is limited to vector-index integrity within one scope, requires duplicate identities in the same write-before-reprobe batch, and converges on rebuild. The adapter already supplies semantic quality, and no confidentiality, code-execution, authorization, or monetary-cap impact was demonstrated. Medium impact with high likelihood maps to Medium/P2 under the scan policy."
+  },
+  "source_revision": "0e19f3c6489da458e93a982a333c308d92d0a0ae",
+  "summary": "Two distinct chunks with identical text share one content/profile embedding identity. The batch planner probes all chunks before any write and does not coalesce equal missing identities, so an untrusted adapter can return different shape-valid vectors for duplicate items. The authoritative `embeddings` table keeps the first vector while each `chunk_vec` row receives the current response vector, allowing vector search to consume bytes that contradict the source of truth until rebuild.",
+  "target_revision": "0e19f3c6489da458e93a982a333c308d92d0a0ae",
+  "taxonomy": {
+    "category": "Improper validation of consistency within input",
+    "cwe": [
+      "CWE-20"
+    ]
+  },
+  "title": "Same-batch duplicate embedding identities split authoritative and KNN vectors",
+  "validation": {
+    "assertions": [
+      "Two distinct chunks can share one content/profile embedding identity.",
+      "Both same-batch misses can be sent before either response is persisted.",
+      "A conflicting second vector remains absent from the authoritative row but is present in the second chunk's KNN row.",
+      "Rebuild replaces the conflicting KNN vector from the authoritative row and can change ordering."
+    ],
+    "evidenceRefs": [
+      "all-read-batch-plan",
+      "response-by-chunk",
+      "first-wins-authoritative-row",
+      "current-vector-knn-link",
+      "rebuild-from-authoritative"
+    ],
+    "limitations": [
+      "The TAC PoC is a local regression harness and does not contact a remote adapter.",
+      "Duplicate-text batch frequency, provider nondeterminism, and downstream decisions made from altered KNN order were not measured."
+    ],
+    "method": "exact-revision source trace plus bounded offline target-runtime reproduction and TAC regression harness",
+    "summary": "Source review established the all-read planner, per-chunk response mapping, first-wins authoritative insertion, and current-vector KNN link. Saved validation created two chunks with one text identity, wrote conflicting valid vectors, and observed the first vector in `embeddings` and the second vector in one `chunk_vec` row. The TAC harness reproduced the same vulnerable invariant and demonstrated the expected fixed grouping behavior without network access."
+  },
+  "writeup": {
+    "attemptId": "tac_20260712",
+    "reportPath": "findings/tac-kcs-r23-cand-068-embedding-identity-split/same-batch-duplicate-embedding-identity-split.md",
+    "reportSha256": "71dadb64c2b1acf609689305726a2bbc8cc71e9ae5971f8349996df1f2369f3d",
+    "supportingArtifacts": [
+      {
+        "path": "findings/tac-kcs-r23-cand-068-embedding-identity-split/poc/duplicate_embedding_split.py",
+        "sha256": "341e6517bf21fbfcb7295d3963090e1e9c15070bf02b6006d2db840b2c576f45"
+      },
+      {
+        "path": "findings/tac-kcs-r23-cand-068-embedding-identity-split/poc/README.md",
+        "sha256": "60af9b137844fea5c3b8365a7ffdd8280ec58cf827112d29db1de51c03a94526"
+      }
+    ],
+    "pocDirectory": "findings/tac-kcs-r23-cand-068-embedding-identity-split/poc"
+  }
+}

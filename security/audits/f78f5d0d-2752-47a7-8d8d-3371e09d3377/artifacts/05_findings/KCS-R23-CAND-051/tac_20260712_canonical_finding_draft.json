@@ -1,0 +1,205 @@
+{
+  "affected_locations": [
+    {
+      "label": "untrusted response parser",
+      "lines": "356-395",
+      "path": "crates/kcs-adapter/src/mistral_ocr.rs"
+    },
+    {
+      "label": "root mapping control",
+      "lines": "249-263",
+      "path": "crates/kcs-adapter/src/mistral_ocr.rs"
+    },
+    {
+      "label": "insufficient acceptance",
+      "lines": "476-511",
+      "path": "crates/kcs-pipeline/src/markdownize.rs"
+    },
+    {
+      "label": "done persistence sink",
+      "lines": "6674-6696,6714-6789",
+      "path": "crates/kcs-cli/src/main.rs"
+    }
+  ],
+  "attackPath": {
+    "dataflow": {
+      "evidenceRefs": [
+        "ocr-parser-index-source",
+        "duplicate-index-map",
+        "hint-key-assignment",
+        "done-persistence"
+      ],
+      "outcome": "one source page is lost while another page is attributed to multiple trusted unit keys",
+      "sink": "Done normalized OCR units and downstream chunks/evidence provenance",
+      "source": "approved remote OCR response page metadata and markdown",
+      "summary": "remote `pages[].index` and markdown -> `parse_ocr_page()` -> `pages_by_index` duplicate overwrite -> hint-key assignment -> full response validation -> normalized unit persistence"
+    },
+    "evidenceRefs": [
+      "duplicate-index-map",
+      "full-response-validation",
+      "done-persistence"
+    ],
+    "impact": {
+      "level": "medium",
+      "why": "The defect corrupts search, chunks, normalized data, and Evidence provenance for the affected OCR task, but it does not disclose credentials, execute code, bypass approval, or access another scope."
+    },
+    "likelihood": {
+      "level": "high",
+      "why": "Once malformed duplicate indices are returned, the map/fallback behavior is deterministic. Practical exploitation still depends on the configured endpoint returning malformed or hostile metadata."
+    },
+    "limitations": [
+      "The official provider is expected to return well-formed unique indices.",
+      "The provider already controls OCR markdown, so the incremental primitive is identity/provenance misbinding.",
+      "No downstream consumer impact beyond corrupted OCR task state was quantified."
+    ],
+    "reachability": {
+      "access_requirements": [
+        "An operator-approved OCR request with at least two prepared hints.",
+        "A response with duplicate explicit page indices and a missing expected index.",
+        "Non-empty markdown sufficient for existing shape validation."
+      ],
+      "attacker": "malformed, compromised, redirected, or compatible OCR endpoint",
+      "entrypoint": "Mistral-compatible OCR `pages[]` response",
+      "outcome": "document-scoped OCR content and Evidence provenance misbinding",
+      "summary": "The operator must enable the online OCR route and make an approved outbound request. KCS has no inbound listener; the remote response actor controls only the response to that approved request."
+    },
+    "summary": "A configured OCR endpoint returns duplicate explicit page indices during an operator-approved online OCR task. The adapter collapses one provider page and emits both prepared unit keys with the surviving page's markdown; KCS accepts and persists the result as a complete normalized instance."
+  },
+  "candidate_id": "KCS-R23-CAND-051",
+  "codeEvidence": [
+    {
+      "code": "fn parse_ocr_response(value: Value, model_pin: &str) -> Result<OcrResponse> {\n    let pages = value\n        .get(\"pages\")\n        .and_then(Value::as_array)\n        .ok_or_else(|| AdapterError::ContractViolation(\"OCR response missing pages\".to_owned()))?\n        .iter()\n        .enumerate()\n        .map(|(fallback_index, page)| parse_ocr_page(page, fallback_index))\n        .collect::<Result<Vec<_>>>()?;\n    Ok(OcrResponse { pages, model_version_pin: value.get(\"model\").and_then(Value::as_str).unwrap_or(model_pin).to_owned() })\n}\n\nfn parse_ocr_page(value: &Value, fallback_index: usize) -> Result<OcrPage> {\n    Ok(OcrPage {\n        index: value.get(\"index\").and_then(Value::as_u64).map(|index| index as usize).unwrap_or(fallback_index),\n        markdown: value.get(\"markdown\").and_then(Value::as_str).unwrap_or_default().to_owned(),\n        images,\n    })\n}",
+      "endLine": 395,
+      "explanation": "The approved remote OCR response controls each `pages[].index` and markdown value. The parser uses the explicit unsigned index when present and does not reject duplicate, missing, or out-of-range index sets.",
+      "id": "ocr-parser-index-source",
+      "label": "Remote OCR page index is accepted independently",
+      "language": "rust",
+      "path": "crates/kcs-adapter/src/mistral_ocr.rs",
+      "role": "user_input",
+      "startLine": 356
+    },
+    {
+      "code": "let pages_by_index = ocr\n    .pages\n    .iter()\n    .map(|page| (page.index, page))\n    .collect::<BTreeMap<_, _>>();\nOk(MarkdownizeResponse {\n    mode_used: request.mode,\n    updated_units: hints\n        .iter()\n        .filter_map(|hint| {\n            let page_index = hint.order as usize;\n            let page = pages_by_index\n                .get(&page_index)\n                .copied()\n                .or_else(|| ocr.pages.get(page_index))?;",
+      "endLine": 263,
+      "explanation": "`BTreeMap` construction retains the last page for a duplicated key. When `[(0,A),(0,B)]` crosses this boundary, `pages_by_index[0]` resolves to `B`, and the missing key `1` falls back to response position `1`, which is also `B`.",
+      "id": "duplicate-index-map",
+      "label": "Duplicate indices collapse before hint mapping",
+      "language": "rust",
+      "path": "crates/kcs-adapter/src/mistral_ocr.rs",
+      "role": "root_control",
+      "startLine": 249
+    },
+    {
+      "code": "let markdown =\n    replace_image_placeholders(&page.markdown, &self.scope_id, &page.images);\nSome(MarkdownUnit {\n    unit_key: hint.unit_key.clone(),\n    unit_type: hint.unit_kind,\n    markdown,\n    metadata: page_metadata(\n        &ocr.model_version_pin,\n        Some(page.images.as_slice()),\n    ),\n})",
+      "endLine": 274,
+      "explanation": "After the vulnerable selection, the adapter copies the prepared hint's `unit_key` onto the chosen provider page markdown. The output now has distinct KCS identities even when both units came from the same provider page.",
+      "id": "hint-key-assignment",
+      "label": "Trusted unit keys are assigned after provider page selection",
+      "language": "rust",
+      "path": "crates/kcs-adapter/src/mistral_ocr.rs",
+      "role": "propagation",
+      "startLine": 264
+    },
+    {
+      "code": "let expected = prepared_units\n    .iter()\n    .map(|unit| unit.unit_key.clone())\n    .collect::<BTreeSet<_>>();\nlet actual = unit_keys(&response.updated_units);\nif actual != expected {\n    return Err(contract_violation(\n        \"full response does not cover all prepared units\",\n    ));\n}\nvalidate_unit_shapes(&response.updated_units, prepared_units)",
+      "endLine": 511,
+      "explanation": "The closest acceptance control compares synthesized prepared unit keys and then checks non-empty markdown and type. It has no provider page index or bijection evidence to detect the duplicate-page binding.",
+      "id": "full-response-validation",
+      "label": "Full-response validation checks keys and shape only",
+      "language": "rust",
+      "path": "crates/kcs-pipeline/src/markdownize.rs",
+      "role": "expected_control",
+      "startLine": 476
+    },
+    {
+      "code": "let strict_valid =\n    validate_markdownize_response(&response, &hints, &prepare.prepared_units).is_ok();\nlet mut units = normalized_units_from_response(\n    &response,\n    &prepare.prepared_units,\n    previous.as_ref(),\n    &task.input_hash,\n    &profile.tool_profile_hash,\n    MarkdownizeMode::Full,\n    &generated_at,\n)?;\nlet status = if retry_units.is_none() && strict_valid {\n    TaskStatus::Done\n} else {\n    task_status_from_unit_counts(done, failed, false)\n};\npersist_normalized_instance(repo.kcs_dir(), &manifest, &units)?;",
+      "endLine": 6789,
+      "explanation": "A full response with complete synthesized keys takes the `TaskStatus::Done` branch and is persisted. The corrupted unit-to-page binding therefore becomes durable normalized output and downstream Evidence state.",
+      "id": "done-persistence",
+      "label": "Strict-valid full response is persisted as Done",
+      "language": "rust",
+      "path": "crates/kcs-cli/src/main.rs",
+      "role": "sink",
+      "startLine": 6674
+    }
+  ],
+  "extensions": {
+    "attackPathReport": "artifacts/05_findings/KCS-R23-CAND-051/attack_path_analysis_report.md",
+    "attackPathReportSha256": "57d8020a956c0fcd981738077facfb776cd0c54345c321a9469a1229af60a118",
+    "candidateId": "KCS-R23-CAND-051",
+    "ledgerRowId": "KCS-R23-CAND-051",
+    "reportId": "KCS-R23-CAND-051",
+    "reportPath": "findings/tac-kcs-r23-cand-051-duplicate-ocr-page-index-misbinding/tac-kcs-r23-cand-051-duplicate-ocr-page-index-misbinding.md",
+    "reportSha256": "f2b442d94ea818b02d72752ed9894c2b390e4140ba3c51ef2fc4a7d472adc4b2",
+    "validationReport": "artifacts/05_findings/KCS-R23-CAND-051/validation_report.md",
+    "validationReportSha256": "26eaa7755a17629fe215acbeeaf5149f7a0ff47f285c4fb2ed605acbd15ba3fd"
+  },
+  "final_policy": "reportable",
+  "final_severity": "medium",
+  "ledger_row_id": "KCS-R23-CAND-051",
+  "priority": "P2",
+  "remediation": {
+    "regression_tests": [
+      "Reject duplicate explicit page indices such as `[(0,A),(0,B)]` before mapping.",
+      "Reject out-of-range page indices.",
+      "Reject responses that mix explicit indices with missing expected indices.",
+      "Preserve valid `[(0,A),(1,B)]` behavior.",
+      "Assert that a strict-valid full response cannot be produced when provider page identity is not bijective."
+    ],
+    "summary": "Reject OCR responses unless explicit page indices form an exact bijection over prepared hint orders. Do not use positional fallback to hide malformed explicitly indexed responses."
+  },
+  "rootCause": {
+    "evidenceRefs": [
+      "ocr-parser-index-source",
+      "duplicate-index-map",
+      "hint-key-assignment",
+      "full-response-validation",
+      "done-persistence"
+    ],
+    "summary": "The violated invariant is that provider OCR page identity must be a unique, complete, in-range bijection before KCS assigns markdown to prepared unit keys. The parser accepts duplicate explicit indices, `BTreeMap` collection overwrites an earlier page, positional fallback reuses the same surviving page for a missing order, and KCS validates only the hint-derived unit keys after the identity was lost."
+  },
+  "scan_id": "f78f5d0d-2752-47a7-8d8d-3371e09d3377",
+  "schema_version": 1,
+  "severity": {
+    "level": "medium",
+    "priority": "P2",
+    "rationale": "The issue crosses a lower-trust remote response boundary into durable normalized evidence identity. It is document-scoped and does not expose credentials or execute code, so Medium/P2 matches the saved attack-path decision."
+  },
+  "source_artifacts": {
+    "attack_path_report": "artifacts/05_findings/KCS-R23-CAND-051/attack_path_analysis_report.md",
+    "mapping_control": "artifacts/05_findings/KCS-R23-CAND-051/validation_artifacts/mapping_control.json",
+    "validation_report": "artifacts/05_findings/KCS-R23-CAND-051/validation_report.md"
+  },
+  "source_revision": "0e19f3c6489da458e93a982a333c308d92d0a0ae",
+  "summary": "The online OCR adapter accepts provider-controlled page indices without proving that they are unique, in range, and complete. Duplicate indices collapse through a BTreeMap and positional fallback can assign the surviving provider page to more than one prepared unit key. KCS then validates synthesized hint keys and non-empty markdown, marks the task Done, and persists normalized OCR units whose provenance no longer matches the original page identity.",
+  "target_revision": "0e19f3c6489da458e93a982a333c308d92d0a0ae",
+  "title": "Duplicate OCR page indices bind one provider page to multiple evidence units",
+  "validation": {
+    "assertions": [
+      "Explicit duplicate `pages[].index` values are accepted without a uniqueness check.",
+      "`BTreeMap` collection keeps the second duplicate and positional fallback can select that same response position for the missing expected index.",
+      "Full-response validation compares prepared unit keys and unit shapes, not provider page identity.",
+      "The full online executor can mark the response Done and persist normalized units."
+    ],
+    "confidence": "high",
+    "evidenceRefs": [
+      "ocr-parser-index-source",
+      "duplicate-index-map",
+      "full-response-validation",
+      "done-persistence"
+    ],
+    "limitations": [
+      "No live OCR provider was contacted.",
+      "Malformed-response prevalence for official providers was not measured.",
+      "The demonstrated impact is normalized OCR content and provenance integrity, not code execution or credential disclosure."
+    ],
+    "method": "static source trace plus local offline synthetic mapping probe",
+    "summary": "The saved validation and the TAC probe confirm that duplicate provider pages `[(0,A),(0,B)]` map to outputs `[B,B]`, while unique pages `[(0,A),(1,B)]` preserve `[A,B]`. The key/shape validation still passes because the adapter emits both trusted unit keys with non-empty markdown."
+  },
+  "writeup": {
+    "attemptId": "tac_20260712",
+    "pocDirectory": "findings/tac-kcs-r23-cand-051-duplicate-ocr-page-index-misbinding/poc",
+    "reportPath": "findings/tac-kcs-r23-cand-051-duplicate-ocr-page-index-misbinding/tac-kcs-r23-cand-051-duplicate-ocr-page-index-misbinding.md",
+    "reportSha256": "f2b442d94ea818b02d72752ed9894c2b390e4140ba3c51ef2fc4a7d472adc4b2"
+  }
+}

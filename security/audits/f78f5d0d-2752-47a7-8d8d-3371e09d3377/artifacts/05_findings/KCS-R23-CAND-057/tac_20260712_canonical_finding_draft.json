@@ -1,0 +1,227 @@
+{
+  "affected_locations": [
+    {
+      "label": "entrypoints",
+      "lines": "2796-2825",
+      "path": "crates/kcs-cli/src/main.rs"
+    },
+    {
+      "label": "wrapper",
+      "lines": "4993-5007",
+      "path": "crates/kcs-cli/src/main.rs"
+    },
+    {
+      "label": "root_control_and_sink",
+      "lines": "5165-5188",
+      "path": "crates/kcs-cli/src/main.rs"
+    }
+  ],
+  "attackPath": {
+    "dataflow": {
+      "evidenceRefs": [
+        "open-view-raw-hash-input",
+        "evidence-raw-object-resolution",
+        "pre-cas-working-tree-scan",
+        "whole-file-read-hash-sink"
+      ],
+      "outcome": "local availability loss or command failure for one KCS process and selected scope",
+      "sink": "`fs::read()` whole-file allocation and SHA-256 hashing inside `find_working_tree_raw()`",
+      "source": "attacker-sized direct-child regular files plus a caller-supplied absent or late-matching raw hash",
+      "summary": "`open`/`view`/Evidence raw hash -> `open_raw_object()` -> `open_cas_byte_object()` -> `find_working_tree_raw()` -> repeated `fs::read()` and hash"
+    },
+    "finalSeverity": {
+      "level": "low",
+      "priority": "P3",
+      "why": "The scan's mandatory matrix maps Medium impact and Medium likelihood to Low/P3."
+    },
+    "impact": {
+      "level": "medium",
+      "why": "The resource sink can make a local KCS command slow, memory pressured, or unavailable, but it does not by itself disclose data, execute code, or persistently corrupt state."
+    },
+    "likelihood": {
+      "level": "medium",
+      "why": "The path is reachable from normal read-oriented commands in a hostile scope, but it requires operator invocation and is not exposed as a public background service."
+    },
+    "limitations": [
+      "The effect is transient and recoverable by removing the hostile file or avoiding the supplied pointer.",
+      "No unsafe large allocation or sparse-file stress test was run.",
+      "The prevalence of automatically consumed attacker-supplied Evidence Pointers is unknown."
+    ],
+    "reachability": {
+      "access_requirements": "file-content control in the selected scope; no private `.kcs` write, credentials, administrator access, or shell access to the victim process",
+      "attacker": "lower-trust contributor to an adopted/shared scope",
+      "entrypoint": "local `open`, `view`, or Evidence raw-object resolution",
+      "outcome": "the victim process incurs O(max n_i) peak input allocation and O(sum n_i) I/O/hash work",
+      "preconditions": [
+        "the selected scope contains attacker-controlled large or sparse direct-child regular files",
+        "the requested raw hash is absent or late in directory enumeration",
+        "host resource limits are low enough relative to the candidate file size for visible degradation"
+      ],
+      "summary": "The attacker needs file-content control in an operator-selected scope and a raw-object resolution. KCS has no public listener for this path, and the operator still invokes the local command."
+    },
+    "saved_reports": [
+      "artifacts/05_findings/KCS-R23-CAND-057/attack_path_analysis_report.md"
+    ],
+    "summary": "A lower-trust content contributor places one or more very large or sparse regular direct-child files in a scope the operator uses. When the operator or automation resolves an absent or late-matching raw hash through open, view, or Evidence, KCS reads and hashes each candidate before CAS lookup, causing local CPU, disk I/O, and memory pressure in the victim process."
+  },
+  "candidate_id": "KCS-R23-CAND-057",
+  "category": "uncontrolled local resource consumption / denial of service",
+  "codeEvidence": [
+    {
+      "code": "fn run_open(args: UnsupportedArgs) -> Result<Value> {\n    let raw = read_pointer_input(without_json(args.args))?;\n    if let Some(object) = parse_object_uri(&raw)? {\n        return resolve_object_uri(&object, false);\n    }\n    if raw.starts_with(\"sha256:\") {\n        return resolve_short_hash_command(&raw, false);\n    }\n    let pointer = parse_pointer_text(&raw)?;\n    let resolved = resolve_pointer_for_cli(&pointer)?;\n    // ...\n}\n\nfn run_view(args: UnsupportedArgs) -> Result<Value> {\n    let raw = read_pointer_input(without_json(args.args))?;\n    if let Some(object) = parse_object_uri(&raw)? {\n        return resolve_object_uri(&object, true);\n    }\n    if raw.starts_with(\"sha256:\") {\n        return resolve_short_hash_command(&raw, true);\n    }\n    let pointer = parse_pointer_text(&raw)?;\n    let resolved = resolve_pointer_for_cli(&pointer)?;",
+      "endLine": 2825,
+      "explanation": "`open` and `view` carry caller-supplied raw object identifiers or Evidence Pointer text into the resolver. This is the attacker-influenced trigger once the operator runs the local command in a lower-trust scope.",
+      "id": "open-view-raw-hash-input",
+      "label": "open and view accept caller-supplied raw hashes or pointers",
+      "language": "rust",
+      "path": "crates/kcs-cli/src/main.rs",
+      "role": "entrypoint",
+      "startLine": 2796
+    },
+    {
+      "code": "// Raw object resolution: working tree first (rename-tolerant), else CAS\n// read-only expansion. Absent from both with no tombstone -> not_found.\nmatch open_raw_object(\n    &target,\n    &pointer.raw_hash,\n    pointer.path_at_commit.as_deref(),\n)? {\n    Some((path, temporary)) => Ok(PointerResolution {\n        path: Some(path),\n        text: Some(text),\n        temporary,\n        commit_shallow,\n    }),\n    None => Err(purge_not_found_error(&target, &pointer.raw_hash)),\n}",
+      "endLine": 4875,
+      "explanation": "After pointer validation, the saved `raw_hash` is forwarded to `open_raw_object()`. The lower-trust scope's files become lookup candidates for the victim process.",
+      "id": "evidence-raw-object-resolution",
+      "label": "Evidence Pointer resolution reaches raw-object lookup",
+      "language": "rust",
+      "path": "crates/kcs-cli/src/main.rs",
+      "role": "propagation",
+      "startLine": 4861
+    },
+    {
+      "code": "fn open_raw_object(\n    target: &ScopeTarget,\n    raw_hash: &str,\n    path_hint: Option<&str>,\n) -> Result<Option<(PathBuf, bool)>> {\n    open_cas_byte_object(target, \"raw\", true, raw_hash, path_hint)\n}\n\nfn open_cas_byte_object(\n    target: &ScopeTarget,\n    subdir: &str,\n    scan_working_tree: bool,\n    hash: &str,\n    path_hint: Option<&str>,\n) -> Result<Option<(PathBuf, bool)>> {\n    if scan_working_tree {\n        if let Some(path) = find_working_tree_raw(&target.repo_root, hash)? {\n            return Ok(Some((path, false)));\n        }\n    }\n    let object_path = cas_object_path(&target.kcs_dir, subdir, hash);\n    if !object_path.is_file() {\n        return Ok(None);\n    }",
+      "endLine": 5007,
+      "explanation": "`open_raw_object()` sets `scan_working_tree` to true, and `open_cas_byte_object()` scans the working tree before checking whether the requested raw object already exists in CAS.",
+      "id": "pre-cas-working-tree-scan",
+      "label": "working-tree scan runs before CAS lookup",
+      "language": "rust",
+      "path": "crates/kcs-cli/src/main.rs",
+      "role": "root_control",
+      "startLine": 4977
+    },
+    {
+      "code": "fn find_working_tree_raw(root: &Path, raw_hash: &str) -> Result<Option<PathBuf>> {\n    for entry in fs::read_dir(root)\n        .map_err(|err| KcsError::io(err.to_string(), root.display().to_string()))?\n    {\n        let entry =\n            entry.map_err(|err| KcsError::io(err.to_string(), root.display().to_string()))?;\n        if entry.file_name() == \".kcs\" {\n            continue;\n        }\n        if !entry\n            .file_type()\n            .map(|kind| kind.is_file())\n            .unwrap_or(false)\n        {\n            continue;\n        }\n        let path = entry.path();\n        let bytes = fs::read(&path)\n            .map_err(|err| KcsError::io(err.to_string(), path.display().to_string()))?;\n        if hash_bytes(&bytes) == raw_hash {\n            return Ok(Some(path));\n        }\n    }\n    Ok(None)\n}",
+      "endLine": 5188,
+      "explanation": "The nearest controls skip `.kcs` and non-files, but every remaining regular file is allocated in full before hashing. There is no metadata size precheck, streaming reader, aggregate byte budget, or indexed lookup.",
+      "id": "whole-file-read-hash-sink",
+      "label": "each regular direct child is read wholly and hashed",
+      "language": "rust",
+      "path": "crates/kcs-cli/src/main.rs",
+      "role": "sink",
+      "startLine": 5165
+    }
+  ],
+  "confidence": "high",
+  "extensions": {
+    "attackPathReport": "artifacts/05_findings/KCS-R23-CAND-057/attack_path_analysis_report.md",
+    "attackPathReportSha256": "65da768b5e2e2784e437c42f03a261e5929c1e395cf5c1b40cd7d937e5ab9b66",
+    "candidateId": "KCS-R23-CAND-057",
+    "ledgerRowId": "KCS-R23-CAND-057",
+    "reportId": "KCS-R23-CAND-057",
+    "reportPath": "findings/tac-kcs-r23-cand-057-raw-hash-unbounded-scan/raw-hash-working-tree-unbounded-scan.md",
+    "reportSha256": "73ebbb4e58d7d506c85b7620ca87f98d8ce22838b1d6d91e01fafc56bcfee509",
+    "validationReport": "artifacts/05_findings/KCS-R23-CAND-057/validation_report.md",
+    "validationReportSha256": "f9de0ab38850812e2cb3eaf1b5c65e32d6b8ee7e53c06fa2d3beaf5f6992258f"
+  },
+  "final_policy": "reportable",
+  "final_severity": "low",
+  "instance_key": "KCS-R23-CAND-057:raw-resolver-unbounded-scan",
+  "ledger_row_id": "KCS-R23-CAND-057",
+  "priority": "P3",
+  "remediation": {
+    "invariant": "Raw-object lookup must not allocate or hash attacker-controlled scope content without explicit per-file and aggregate budgets.",
+    "regression_tests": [
+      "absent raw hash in a scope with multiple direct-child regular files",
+      "existing CAS raw object while unrelated working-tree files are present",
+      "direct-child file larger than the per-file limit",
+      "many small files whose aggregate size exceeds the scan budget",
+      "`.kcs`, directories, symlinks, and special files remain excluded"
+    ],
+    "summary": "Hash working-tree candidates through a bounded streaming reader or an indexed raw-hash lookup. Apply per-file and aggregate byte/work ceilings, and avoid scanning unrelated working-tree files before a verified CAS hit when rename tolerance is not required."
+  },
+  "report_id": "KCS-R23-CAND-057-tac_20260712",
+  "rootCause": {
+    "evidenceRefs": [
+      "open-view-raw-hash-input",
+      "evidence-raw-object-resolution",
+      "pre-cas-working-tree-scan",
+      "whole-file-read-hash-sink"
+    ],
+    "summary": "The violated invariant is that raw-object resolution should bound work to the requested object or an explicit lookup budget. The implementation performs rename-tolerant working-tree discovery first and uses whole-file allocation for every eligible direct child, so unrelated lower-trust scope files can control memory, disk I/O, and CPU cost before CAS is consulted."
+  },
+  "scan_id": "f78f5d0d-2752-47a7-8d8d-3371e09d3377",
+  "schema_version": 1,
+  "source_revision": "0e19f3c6489da458e93a982a333c308d92d0a0ae",
+  "summary": "Raw-object open, view, and Evidence workflows scan the selected scope's direct-child files before checking the immutable CAS store. Each regular file is allocated in full with fs::read() and then hashed, so a lower-trust contributor to an adopted scope can force O(max n_i) live input allocation and O(sum n_i) I/O and CPU work for an absent or late-matching raw hash.",
+  "target_revision": "0e19f3c6489da458e93a982a333c308d92d0a0ae",
+  "title": "Raw-hash working-tree resolution reads every direct child without bounds",
+  "validation": {
+    "assertions": [
+      "Peak retained input allocation is proportional to the largest visited file.",
+      "Total read and hash work is proportional to the sum of all visited eligible files for an absent or late-matching hash.",
+      "The configured adapter `max_input_bytes` does not govern this read-oriented resolver."
+    ],
+    "evidenceRefs": [
+      "open-view-raw-hash-input",
+      "evidence-raw-object-resolution",
+      "pre-cas-working-tree-scan",
+      "whole-file-read-hash-sink"
+    ],
+    "limitations": [
+      "Peak RSS and sparse-file behavior were intentionally not stress-tested.",
+      "Directory order and host resource limits determine the exact failure point."
+    ],
+    "method": "V5 bounded resource analysis plus V10 exact static caller trace",
+    "saved_reports": [
+      "artifacts/05_findings/KCS-R23-CAND-057/validation_report.md"
+    ],
+    "summary": "Static source tracing confirms that open, view, and Evidence paths can call `find_working_tree_raw()`, that the scan runs before CAS lookup, and that each eligible regular file is fully read and hashed. The saved bounded control used only 98,304 total synthetic bytes and intentionally avoided unsafe stress testing."
+  },
+  "writeup": {
+    "attemptId": "tac_20260712",
+    "poc": [
+      {
+        "path": "findings/tac-kcs-r23-cand-057-raw-hash-unbounded-scan/poc/Makefile",
+        "sha256": "e07e8c1d1aeb53783fa0603ee4671072ecf6208299b8a0c5ba3faa27880ada83"
+      },
+      {
+        "path": "findings/tac-kcs-r23-cand-057-raw-hash-unbounded-scan/poc/README.md",
+        "sha256": "6a92cdef9b376d7612560d48648cf5a398e24fa914fca4cb598515faf0efe620"
+      },
+      {
+        "path": "findings/tac-kcs-r23-cand-057-raw-hash-unbounded-scan/poc/raw_hash_resolver_bound_probe.sh",
+        "sha256": "350f8dd07e8f244339f0ca41683caf4eb52a2a281d560f35e39dc7c78844bd44"
+      }
+    ],
+    "reportPath": "findings/tac-kcs-r23-cand-057-raw-hash-unbounded-scan/raw-hash-working-tree-unbounded-scan.md",
+    "reportSha256": "73ebbb4e58d7d506c85b7620ca87f98d8ce22838b1d6d91e01fafc56bcfee509",
+    "supportingArtifacts": [
+      {
+        "path": "findings/tac-kcs-r23-cand-057-raw-hash-unbounded-scan/poc/Makefile",
+        "sha256": "e07e8c1d1aeb53783fa0603ee4671072ecf6208299b8a0c5ba3faa27880ada83"
+      },
+      {
+        "path": "findings/tac-kcs-r23-cand-057-raw-hash-unbounded-scan/poc/README.md",
+        "sha256": "6a92cdef9b376d7612560d48648cf5a398e24fa914fca4cb598515faf0efe620"
+      },
+      {
+        "path": "findings/tac-kcs-r23-cand-057-raw-hash-unbounded-scan/poc/raw_hash_resolver_bound_probe.sh",
+        "sha256": "350f8dd07e8f244339f0ca41683caf4eb52a2a281d560f35e39dc7c78844bd44"
+      },
+      {
+        "path": "artifacts/05_findings/KCS-R23-CAND-057/validation_report.md",
+        "sha256": "f9de0ab38850812e2cb3eaf1b5c65e32d6b8ee7e53c06fa2d3beaf5f6992258f"
+      },
+      {
+        "path": "artifacts/05_findings/KCS-R23-CAND-057/attack_path_analysis_report.md",
+        "sha256": "65da768b5e2e2784e437c42f03a261e5929c1e395cf5c1b40cd7d937e5ab9b66"
+      },
+      {
+        "path": "artifacts/05_findings/KCS-R23-CAND-057/candidate_ledger.jsonl",
+        "sha256": "87ef2feb1ea850298274bd3121474fc8a8b03e8e5411a88a1dd5596a2a4dfcfd"
+      }
+    ],
+    "pocDirectory": "findings/tac-kcs-r23-cand-057-raw-hash-unbounded-scan/poc"
+  }
+}

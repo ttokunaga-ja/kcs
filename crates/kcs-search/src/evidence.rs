@@ -5,8 +5,101 @@ use serde::{Deserialize, Serialize};
 use crate::{Result, SearchError};
 
 pub const EVIDENCE_POINTER_SCHEMA_VERSION: u64 = 1;
+pub const SHA256_HASH_PREFIX: &str = "sha256:";
+pub const SHA256_DIGEST_LENGTH: usize = 64;
+
+const FULL_HASH_REQUIREMENT: &str =
+    "hash must be `sha256:` followed by 64 lowercase hexadecimal characters";
+
+/// A full SHA-256 identifier that has passed the KCS object-hash grammar.
+///
+/// The borrowed representation prevents callers from accidentally substituting
+/// unvalidated input after validation. Filesystem fanout should be derived from
+/// [`Self::digest`] or [`Self::fanout`], never from the original input directly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ValidatedHash<'a> {
+    value: &'a str,
+    digest: &'a str,
+}
+
+impl<'a> ValidatedHash<'a> {
+    fn new(value: &'a str, field: &str) -> Result<Self> {
+        let digest = validate_full_hash(value).map_err(|_| {
+            SearchError::Evidence(format!(
+                "invalid evidence pointer {field}: {FULL_HASH_REQUIREMENT}"
+            ))
+        })?;
+        Ok(Self { value, digest })
+    }
+
+    pub fn as_str(self) -> &'a str {
+        self.value
+    }
+
+    pub fn digest(self) -> &'a str {
+        self.digest
+    }
+
+    pub fn fanout(self) -> (&'a str, &'a str) {
+        (&self.digest[..2], &self.digest[2..4])
+    }
+}
+
+/// A pointer whose hash-bearing fields all satisfy the KCS object-hash grammar.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ValidatedEvidencePointer<'a> {
+    pointer: &'a EvidencePointer,
+    commit: ValidatedHash<'a>,
+    tree: Option<ValidatedHash<'a>>,
+    raw_hash: ValidatedHash<'a>,
+    tool_profile_hash: ValidatedHash<'a>,
+    chunk_hash: ValidatedHash<'a>,
+}
+
+impl<'a> ValidatedEvidencePointer<'a> {
+    pub fn as_pointer(self) -> &'a EvidencePointer {
+        self.pointer
+    }
+
+    pub fn commit(self) -> ValidatedHash<'a> {
+        self.commit
+    }
+
+    pub fn tree(self) -> Option<ValidatedHash<'a>> {
+        self.tree
+    }
+
+    pub fn raw_hash(self) -> ValidatedHash<'a> {
+        self.raw_hash
+    }
+
+    pub fn tool_profile_hash(self) -> ValidatedHash<'a> {
+        self.tool_profile_hash
+    }
+
+    pub fn chunk_hash(self) -> ValidatedHash<'a> {
+        self.chunk_hash
+    }
+}
+
+/// Validates the canonical KCS object-hash representation and returns its
+/// lowercase 64-character digest without the `sha256:` prefix.
+pub fn validate_full_hash(hash: &str) -> Result<&str> {
+    let digest = hash
+        .strip_prefix(SHA256_HASH_PREFIX)
+        .ok_or_else(|| SearchError::Evidence(FULL_HASH_REQUIREMENT.to_owned()))?;
+    if digest.len() != SHA256_DIGEST_LENGTH
+        || !digest
+            .bytes()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+    {
+        return Err(SearchError::Evidence(FULL_HASH_REQUIREMENT.to_owned()));
+    }
+    Ok(digest)
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "UncheckedEvidencePointer")]
 pub struct EvidencePointer {
     pub schema_version: u64,
     pub commit: String,
@@ -30,6 +123,71 @@ pub struct EvidencePointer {
     pub scope_path: Option<String>,
 }
 
+#[derive(Deserialize)]
+struct UncheckedEvidencePointer {
+    schema_version: u64,
+    commit: String,
+    tree: Option<String>,
+    raw_hash: String,
+    tool_profile_hash: String,
+    chunk_hash: String,
+    path_at_commit: Option<String>,
+    heading_path: Option<Vec<String>>,
+    section_id: Option<String>,
+    char_start: Option<u64>,
+    char_end: Option<u64>,
+    scope_id: String,
+    scope_path: Option<String>,
+}
+
+impl TryFrom<UncheckedEvidencePointer> for EvidencePointer {
+    type Error = SearchError;
+
+    fn try_from(value: UncheckedEvidencePointer) -> Result<Self> {
+        let pointer = Self {
+            schema_version: value.schema_version,
+            commit: value.commit,
+            tree: value.tree,
+            raw_hash: value.raw_hash,
+            tool_profile_hash: value.tool_profile_hash,
+            chunk_hash: value.chunk_hash,
+            path_at_commit: value.path_at_commit,
+            heading_path: value.heading_path,
+            section_id: value.section_id,
+            char_start: value.char_start,
+            char_end: value.char_end,
+            scope_id: value.scope_id,
+            scope_path: value.scope_path,
+        };
+        pointer.validate()?;
+        Ok(pointer)
+    }
+}
+
+impl EvidencePointer {
+    /// Validates the schema version and every hash-bearing pointer field.
+    pub fn validate(&self) -> Result<ValidatedEvidencePointer<'_>> {
+        if self.schema_version != EVIDENCE_POINTER_SCHEMA_VERSION {
+            return Err(SearchError::Evidence(
+                "unsupported evidence schema version".to_owned(),
+            ));
+        }
+
+        Ok(ValidatedEvidencePointer {
+            pointer: self,
+            commit: ValidatedHash::new(&self.commit, "commit")?,
+            tree: self
+                .tree
+                .as_deref()
+                .map(|tree| ValidatedHash::new(tree, "tree"))
+                .transpose()?,
+            raw_hash: ValidatedHash::new(&self.raw_hash, "raw_hash")?,
+            tool_profile_hash: ValidatedHash::new(&self.tool_profile_hash, "tool_profile_hash")?,
+            chunk_hash: ValidatedHash::new(&self.chunk_hash, "chunk_hash")?,
+        })
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EvidencePointerIssueRequest {
     pub scope_id: String,
@@ -47,7 +205,7 @@ pub struct EvidencePointerIssueRequest {
 }
 
 pub fn issue_evidence_pointer(request: EvidencePointerIssueRequest) -> Result<EvidencePointer> {
-    Ok(EvidencePointer {
+    let pointer = EvidencePointer {
         schema_version: EVIDENCE_POINTER_SCHEMA_VERSION,
         commit: request.commit,
         tree: request.tree,
@@ -61,15 +219,13 @@ pub fn issue_evidence_pointer(request: EvidencePointerIssueRequest) -> Result<Ev
         char_end: request.char_end,
         scope_id: request.scope_id,
         scope_path: request.scope_path,
-    })
+    };
+    pointer.validate()?;
+    Ok(pointer)
 }
 
 pub fn evidence_pointer_to_uri(pointer: &EvidencePointer) -> Result<String> {
-    if pointer.schema_version != EVIDENCE_POINTER_SCHEMA_VERSION {
-        return Err(SearchError::Evidence(
-            "unsupported evidence schema version".to_owned(),
-        ));
-    }
+    pointer.validate()?;
     Ok(format!(
         "kcs://{}/{}/{}/{}/{}",
         pointer.scope_id,
@@ -114,7 +270,7 @@ pub fn parse_evidence_pointer_uri(uri: &str) -> Result<EvidencePointer> {
             "evidence URI must have five path segments".to_owned(),
         ));
     }
-    Ok(EvidencePointer {
+    let pointer = EvidencePointer {
         schema_version,
         scope_id: parts[0].to_owned(),
         commit: parts[1].to_owned(),
@@ -128,7 +284,9 @@ pub fn parse_evidence_pointer_uri(uri: &str) -> Result<EvidencePointer> {
         char_start: None,
         char_end: None,
         scope_path: None,
-    })
+    };
+    pointer.validate()?;
+    Ok(pointer)
 }
 
 #[cfg(test)]
@@ -140,7 +298,10 @@ mod tests {
             schema_version: 1,
             commit: "sha256:9f2c1a7b04dee5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e"
                 .to_owned(),
-            tree: Some("sha256:tree".to_owned()),
+            tree: Some(
+                "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+                    .to_owned(),
+            ),
             raw_hash: "sha256:74bcb92d8088c950e45e4c43563332da2ca1e04b25d6d4016aa43f830d4cca8a"
                 .to_owned(),
             tool_profile_hash:
@@ -189,5 +350,119 @@ mod tests {
         let uri = evidence_pointer_to_uri(&pointer()).unwrap();
         assert_eq!(parse_evidence_pointer_uri(&uri).unwrap().schema_version, 1);
         assert!(parse_evidence_pointer_uri(&(uri + "?sv=99")).is_err());
+    }
+
+    fn inline_pointer_with_raw_hash(raw_hash: &str) -> serde_json::Value {
+        let mut value = serde_json::to_value(pointer()).unwrap();
+        value["raw_hash"] = serde_json::Value::String(raw_hash.to_owned());
+        value
+    }
+
+    #[test]
+    fn r23_cand_069_inline_json_rejects_absolute_raw_hash() {
+        let error = serde_json::from_value::<EvidencePointer>(inline_pointer_with_raw_hash(
+            "/tmp/synthetic-marker.json",
+        ))
+        .unwrap_err()
+        .to_string();
+
+        assert!(error.contains("raw_hash"));
+        assert!(error.contains("64 lowercase hexadecimal"));
+    }
+
+    #[test]
+    fn r23_cand_069_inline_json_rejects_parent_traversal_raw_hash() {
+        for raw_hash in [
+            "../../synthetic-marker.json",
+            "sha256:../../synthetic-marker.json",
+            r"sha256:..\..\synthetic-marker.json",
+        ] {
+            let error =
+                serde_json::from_value::<EvidencePointer>(inline_pointer_with_raw_hash(raw_hash))
+                    .unwrap_err()
+                    .to_string();
+            assert!(error.contains("raw_hash"), "unexpected error: {error}");
+        }
+    }
+
+    #[test]
+    fn r23_cand_069_inline_json_rejects_malformed_hashes() {
+        let malformed = [
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "sha256:abcd",
+            "sha256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            "sha256:gggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggg",
+            "sha512:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        ];
+
+        for raw_hash in malformed {
+            assert!(
+                serde_json::from_value::<EvidencePointer>(inline_pointer_with_raw_hash(raw_hash))
+                    .is_err(),
+                "malformed hash was accepted: {raw_hash}"
+            );
+        }
+    }
+
+    #[test]
+    fn r23_cand_069_inline_json_valid_control_exposes_only_validated_digest() {
+        let encoded = serde_json::to_string(&pointer()).unwrap();
+        let decoded: EvidencePointer = serde_json::from_str(&encoded).unwrap();
+
+        let validated = decoded.validate().unwrap();
+
+        assert_eq!(
+            validated.raw_hash().digest(),
+            "74bcb92d8088c950e45e4c43563332da2ca1e04b25d6d4016aa43f830d4cca8a"
+        );
+        assert_eq!(validated.raw_hash().fanout(), ("74", "bc"));
+        assert_eq!(validated.raw_hash().as_str(), decoded.raw_hash.as_str());
+    }
+
+    #[test]
+    fn r23_cand_069_inline_json_preserves_optional_field_compatibility() {
+        let value = serde_json::json!({
+            "schema_version": EVIDENCE_POINTER_SCHEMA_VERSION,
+            "commit": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "raw_hash": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "tool_profile_hash": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+            "chunk_hash": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+            "scope_id": "scope_01J8ZQABCDEFGHJKMNPQRS"
+        });
+
+        let decoded: EvidencePointer = serde_json::from_value(value).unwrap();
+
+        assert!(decoded.tree.is_none());
+        assert!(decoded.path_at_commit.is_none());
+        assert!(decoded.scope_path.is_none());
+    }
+
+    #[test]
+    fn r23_cand_069_all_pointer_hash_fields_share_the_validation_boundary() {
+        for field in [
+            "commit",
+            "tree",
+            "raw_hash",
+            "tool_profile_hash",
+            "chunk_hash",
+        ] {
+            let mut value = serde_json::to_value(pointer()).unwrap();
+            value[field] = serde_json::Value::String("sha256:not-a-digest".to_owned());
+            let error = serde_json::from_value::<EvidencePointer>(value)
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.contains(field),
+                "unexpected error for {field}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn r23_cand_069_uri_parser_rejects_malformed_hash_segments() {
+        let uri = evidence_pointer_to_uri(&pointer()).unwrap();
+        let invalid = uri.replace(&pointer().raw_hash, "sha256:../../synthetic-marker.json");
+
+        assert!(parse_evidence_pointer_uri(&invalid).is_err());
     }
 }

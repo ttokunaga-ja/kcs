@@ -1,0 +1,223 @@
+{
+  "schema_version": 1,
+  "scan_id": "f78f5d0d-2752-47a7-8d8d-3371e09d3377",
+  "candidate_id": "KCS-R23-CAND-003",
+  "ledger_row_id": "KCS-R23-CAND-003",
+  "title": "Gemini vectors lack numeric-domain and positive-norm validation",
+  "summary": "The Gemini embedding adapter accepts remote response vectors after JSON numeric and exact-width checks only. Finite JSON values outside the f32 range narrow to non-finite f32 components, and exact-width zero vectors also pass. The query path can use those vectors directly, and the batch path can persist them as authoritative chunk embeddings, leading to sqlite-vec NULL distance failures for affected vector searches.",
+  "targetRevision": "0e19f3c6489da458e93a982a333c308d92d0a0ae",
+  "final_severity": "medium",
+  "priority": "P2",
+  "confidence": "high",
+  "cwe_ids": [
+    "CWE-20",
+    "CWE-682"
+  ],
+  "affectedLocations": [
+    {
+      "label": "remote response parser",
+      "path": "crates/kcs-adapter/src/gemini_embedding.rs",
+      "lines": "153-203"
+    },
+    {
+      "label": "persistence caller",
+      "path": "crates/kcs-cli/src/main.rs",
+      "lines": "7727-7768"
+    },
+    {
+      "label": "vector store and KNN",
+      "path": "crates/kcs-index/src/embedding_store.rs",
+      "lines": "91-146,240-264"
+    }
+  ],
+  "codeEvidence": [
+    {
+      "id": "gemini-http-response",
+      "label": "Remote Gemini JSON becomes the parser input",
+      "path": "crates/kcs-adapter/src/gemini_embedding.rs",
+      "startLine": 139,
+      "endLine": 149,
+      "language": "rust",
+      "role": "entrypoint",
+      "code": "let response: Value = ureq::post(&format!(\n    \"{}/v1beta/models/{model_pin}:batchEmbedContents\",\n    self.base_url()\n))\n.set(\"x-goog-api-key\", &api_key)\n.set(\"Content-Type\", \"application/json\")\n.send_json(json!({ \"requests\": requests }))\n.map_err(http_error)?\n.into_json()\n.map_err(|err| AdapterError::ContractViolation(err.to_string()))?;\nparse_embeddings(&response, items, dimensions)",
+      "explanation": "After an approved outbound embedding call, the configured remote service controls the JSON `response` passed to `parse_embeddings()`."
+    },
+    {
+      "id": "parser-narrows-width-only",
+      "label": "Parser narrows f64 values and checks only width",
+      "path": "crates/kcs-adapter/src/gemini_embedding.rs",
+      "startLine": 173,
+      "endLine": 197,
+      "language": "rust",
+      "role": "root_control",
+      "code": "let vector = embedding\n    .get(\"values\")\n    .and_then(Value::as_array)\n    .ok_or_else(|| {\n        AdapterError::ContractViolation(\"embedding missing values\".to_owned())\n    })?\n    .iter()\n    .map(|value| value.as_f64().map(|value| value as f32))\n    .collect::<Option<Vec<f32>>>()\n    .ok_or_else(|| {\n        AdapterError::ContractViolation(\"embedding values must be numeric\".to_owned())\n    })?;\nif vector.len() != dimensions as usize {\n    return Err(AdapterError::ContractViolation(format!(\n        \"embedding dimension mismatch: expected {dimensions}, got {}\",\n        vector.len()\n    )));\n}",
+      "explanation": "The remote `values` array is narrowed to `f32` before validation, but the only post-conversion predicate is `vector.len()`. No `is_finite()` or positive-norm check rejects an over-range finite JSON number or an exact-width zero vector."
+    },
+    {
+      "id": "query-vector-return",
+      "label": "Query path returns the accepted vector unchanged",
+      "path": "crates/kcs-cli/src/main.rs",
+      "startLine": 7201,
+      "endLine": 7203,
+      "language": "rust",
+      "role": "propagation",
+      "code": "match run_embedding_adapter(execution, items, EmbeddingInputType::Query) {\n    Ok(vectors) => Ok(vectors.into_iter().next().map(|vector| vector.vector)),\n    Err(_) => Ok(None),",
+      "explanation": "A malformed query vector accepted by the adapter is returned to the vector search path without another numeric-domain predicate."
+    },
+    {
+      "id": "batch-persistence",
+      "label": "Batch embedding serializes accepted f32 values",
+      "path": "crates/kcs-cli/src/main.rs",
+      "startLine": 7742,
+      "endLine": 7764,
+      "language": "rust",
+      "role": "propagation",
+      "code": "let vectors = run_embedding_adapter(execution, items, EmbeddingInputType::MarkdownChunk)?;\nlet by_id = vectors\n    .into_iter()\n    .map(|vector| (vector.id, vector.vector))\n    .collect::<BTreeMap<_, _>>();\nfor (chunk, embedding_hash) in to_send {\n    let Some(vector) = by_id.get(&chunk.chunk_id) else {\n        return Err(TaskExecutionFailure {\n            retry_kind: RetryErrorKind::ContractViolation,\n        });\n    };\n    let bytes = f32_to_le_bytes(vector);\n    embedding_store::write_chunk_embedding(\n        conn,\n        embedding_hash,\n        &chunk.text_hash,\n        &chunk.chunk_id,\n        &bytes,\n        profile.dimensions,\n        &profile.distance,\n        &profile.modality,\n        &profile.profile_hash,",
+      "explanation": "The batch path converts the accepted `f32` vector directly into bytes and forwards it to `write_chunk_embedding()` as a successful embedding result."
+    },
+    {
+      "id": "store-link-width-only",
+      "label": "Store persists and links any width-correct blob",
+      "path": "crates/kcs-index/src/embedding_store.rs",
+      "startLine": 102,
+      "endLine": 145,
+      "language": "rust",
+      "role": "sink",
+      "code": "conn.execute(\n    \"INSERT INTO embeddings(id, target_type, target_id, modality, vector, dimensions, distance, profile_hash)\n     VALUES (?1, 'chunk', ?2, ?3, ?4, ?5, ?6, ?7)\n     ON CONFLICT(id) DO NOTHING\",\n    params![\n        embedding_hash,\n        text_hash,\n        modality,\n        vector,\n        dimensions as i64,\n        distance,\n        profile_hash\n    ],\n)?;\nlink_chunk_vec(conn, chunk_id, vector, dimensions)?;\nOk(())\n}\n\n/// Map a `chunk_id` to a vector in `chunk_vec` (idempotent). No-op if the vector\n/// width is not the adopted `chunk_vec` dimension (incompatible-width embeddings\n/// never enter the KNN table).\npub fn link_chunk_vec(\n    conn: &Connection,\n    chunk_id: &str,\n    vector: &[u8],\n    dimensions: u64,\n) -> Result<()> {\n    if dimensions as usize != CHUNK_VEC_DIMENSIONS || vector.len() != CHUNK_VEC_DIMENSIONS * 4 {\n        return Ok(());\n    }\n    // vec0 virtual tables do not support UPSERT; delete-then-insert is idempotent.\n    conn.execute(\n        \"DELETE FROM chunk_vec WHERE chunk_id = ?1\",\n        params![chunk_id],\n    )?;\n    conn.execute(\n        \"INSERT INTO chunk_vec(chunk_id, embedding) VALUES (?1, ?2)\",\n        params![chunk_id, vector],\n    )?;",
+      "explanation": "`embeddings` becomes the source of truth for the raw bytes, and `link_chunk_vec()` gates only on declared dimension and byte length before inserting into the cosine vector table."
+    },
+    {
+      "id": "rebuild-relinks-stored",
+      "label": "Rebuild reuses stored vector bytes",
+      "path": "crates/kcs-index/src/embedding_store.rs",
+      "startLine": 160,
+      "endLine": 185,
+      "language": "rust",
+      "role": "outcome",
+      "code": "pub fn rebuild_chunk_vec(\n    conn: &Connection,\n    held_chunk_ids: &std::collections::BTreeSet<String>,\n) -> Result<()> {\n    conn.execute_batch(\"DELETE FROM chunk_vec;\")?;\n    let mut stmt = conn.prepare(\n        \"SELECT c.chunk_id, e.vector, e.dimensions\n         FROM chunks c\n         JOIN embeddings e ON e.target_type = 'chunk' AND e.target_id = c.text_hash\",\n    )?;\n    let rows = stmt\n        .query_map([], |row| {\n            Ok((\n                row.get::<_, String>(0)?,\n                row.get::<_, Vec<u8>>(1)?,\n                row.get::<_, i64>(2)? as u64,\n            ))\n        })?\n        .collect::<std::result::Result<Vec<_>, _>>()?;\n    for (chunk_id, vector, dimensions) in rows {\n        if held_chunk_ids.contains(&chunk_id) {\n            continue;\n        }\n        link_chunk_vec(conn, &chunk_id, &vector, dimensions)?;\n    }\n    Ok(())\n}",
+      "explanation": "A malformed vector persisted in `embeddings` can be relinked into `chunk_vec` during rebuild because the rebuild path also delegates to the width-only linker."
+    },
+    {
+      "id": "knn-distance-decode",
+      "label": "KNN expects finite distance rows",
+      "path": "crates/kcs-index/src/embedding_store.rs",
+      "startLine": 248,
+      "endLine": 259,
+      "language": "rust",
+      "role": "sink",
+      "code": "if query_vector.len() != CHUNK_VEC_DIMENSIONS * 4 {\n    return Err(IndexError::Contract(\n        \"KCS-E-SEARCH-VEC-INCOMPAT-001: query vector width mismatch\".to_owned(),\n    ));\n}\nlet mut stmt = conn.prepare(\n    \"SELECT chunk_id, distance FROM chunk_vec\n     WHERE embedding MATCH ?1 ORDER BY distance LIMIT ?2\",\n)?;\nlet rows = stmt.query_map(params![query_vector, k as i64], |row| {\n    Ok((row.get::<_, String>(0)?, row.get::<_, f64>(1)?))\n})?;",
+      "explanation": "The KNN query checks only the query byte width before sqlite-vec cosine search. The validation probe observed malformed vectors causing a NULL `distance`, which fails this `f64` decode."
+    }
+  ],
+  "rootCause": {
+    "summary": "The violated invariant is that a cosine embedding must have the expected dimension, finite `f32` components after conversion, and a positive finite norm. The Gemini parser performs the dimension check but omits the numeric-domain checks, and the query, persistence, rebuild, and KNN paths do not restore them.",
+    "evidenceRefs": [
+      "gemini-http-response",
+      "parser-narrows-width-only",
+      "query-vector-return",
+      "batch-persistence",
+      "store-link-width-only",
+      "rebuild-relinks-stored",
+      "knn-distance-decode"
+    ]
+  },
+  "validation": {
+    "method": "static source trace plus bounded local synthetic probe",
+    "summary": "The source trace confirms direct remote control of `embeddings[*].values[]`, width-only post-cast validation, unchanged query propagation, and durable batch storage. The local probe confirmed that finite JSON `3.5e38` narrows to non-finite `f32`, that non-finite values can round-trip from storage, and that both overflow and zero-norm vectors produce sqlite-vec NULL distance decode failures while a finite basis-vector control returns distance `0.0`.",
+    "evidenceRefs": [
+      "gemini-http-response",
+      "parser-narrows-width-only",
+      "batch-persistence",
+      "store-link-width-only",
+      "knn-distance-decode"
+    ],
+    "assertions": [
+      "JSON syntax rejection of literal `NaN` and `Infinity` does not reject finite over-range f64 values before narrowing.",
+      "Exact-width zero vectors pass the parser because no positive-norm predicate exists.",
+      "The KNN failure is not the sqlite-vec capacity error class that KCS degrades to text-only."
+    ],
+    "limitations": [
+      "No live Gemini endpoint was called.",
+      "The analysis does not quantify how likely the official configured service is to emit malformed values absent compromise, misdirection, or provider fault.",
+      "The recovery cost for already persisted malformed vectors was not measured."
+    ]
+  },
+  "attackPath": {
+    "summary": "After online embedding is approved, a malicious or faulty configured remote service returns a shape- and width-correct embedding containing an over-range finite JSON value or an all-zero vector. KCS accepts the vector, uses it for a query or persists it for chunks, and later vector KNN fails on undefined/NULL cosine distance for the affected scope.",
+    "dataflow": {
+      "summary": "remote Gemini JSON response -> `parse_embeddings()` f64-to-f32 narrowing -> query vector or `send_embed_batch()` -> `write_chunk_embedding()`/`link_chunk_vec()` -> `knn_chunk_distances()`",
+      "source": "remote-controlled `embeddings[*].values[]` in an approved outbound embedding response",
+      "sink": "`chunk_vec` cosine MATCH and `distance` f64 decoding",
+      "outcome": "scope-limited vector/hybrid search failure and persistent vector-index poisoning when malformed bytes are stored",
+      "evidenceRefs": [
+        "gemini-http-response",
+        "parser-narrows-width-only",
+        "batch-persistence",
+        "store-link-width-only",
+        "knn-distance-decode"
+      ]
+    },
+    "reachability": {
+      "summary": "KCS has no inbound listener for this path; the operator must approve online embedding and the configured remote service must return malformed but width-correct numeric vectors.",
+      "attacker": "configured remote embedding service after user-approved online embedding",
+      "entrypoint": "Gemini `batchEmbedContents` response",
+      "preconditions": [
+        "Online embedding is enabled and approved.",
+        "The response count and vector width match the request.",
+        "The remote response contains at least one post-cast non-finite component or a zero-norm vector."
+      ],
+      "outcome": "vector search for the affected scope errors; stored malformed vectors can keep failing later searches and rebuilds"
+    },
+    "evidenceRefs": [
+      "gemini-http-response",
+      "parser-narrows-width-only",
+      "query-vector-return",
+      "batch-persistence",
+      "rebuild-relinks-stored",
+      "knn-distance-decode"
+    ],
+    "impact": {
+      "level": "medium",
+      "why": "The demonstrated outcome is vector-search availability/integrity loss for affected scopes, with persistence through stored embeddings. Text-only search remains available, and no secret disclosure or code execution was shown."
+    },
+    "likelihood": {
+      "level": "high",
+      "why": "When the configured remote response actor is malicious or faulty, it directly controls the missing predicate while satisfying existing count, numeric-JSON, and width checks."
+    },
+    "limitations": [
+      "Requires online embedding approval.",
+      "Ordinary provider responses are expected to be finite normalized vectors.",
+      "Does not redirect or disclose the configured Gemini credential."
+    ]
+  },
+  "severity": {
+    "level": "medium",
+    "priority": "P2",
+    "rationale": "Remote direct control of the malformed vector and durable local persistence support reportability, but the outcome is scoped vector-index denial of service after online embedding approval rather than broader archive loss, credential exposure, or code execution."
+  },
+  "remediation": {
+    "summary": "Validate cosine vector semantics before returning adapter vectors and before storing or relinking legacy bytes.",
+    "invariant": "A vector is valid for cosine KNN only when it has the expected dimension, every post-cast `f32` component is finite, and the squared norm is positive and finite.",
+    "minimalFix": "Add a shared validator after `parse_embeddings()` constructs each vector, reject invalid query and batch vectors before serialization, decode and validate `embeddings.vector` bytes before `link_chunk_vec()`, and exclude/report invalid legacy rows during rebuild.",
+    "regressionTests": [
+      "Reject a Gemini response containing finite JSON `3.5e38` after f32 narrowing.",
+      "Reject an exact-width all-zero vector.",
+      "Accept a normal finite basis vector.",
+      "Cover query embedding, batch persistence, reuse, and rebuild paths.",
+      "Seed a legacy invalid embedding row and assert rebuild does not relink it into `chunk_vec`."
+    ],
+    "preventiveControls": [
+      "Keep vector-domain validation in one shared helper used by adapters and store/rebuild code.",
+      "Treat invalid legacy vector rows as repairable data errors with explicit diagnostics."
+    ]
+  },
+  "writeup": {
+    "reportPath": "findings/tac-kcs-r23-cand-003-gemini-invalid-vector/tac-kcs-r23-cand-003-gemini-invalid-vector.md",
+    "pocPath": "findings/tac-kcs-r23-cand-003-gemini-invalid-vector/poc"
+  },
+  "extensions": {
+    "candidateId": "KCS-R23-CAND-003",
+    "ledgerRowId": "KCS-R23-CAND-003",
+    "reportId": "KCS-R23-CAND-003"
+  }
+}

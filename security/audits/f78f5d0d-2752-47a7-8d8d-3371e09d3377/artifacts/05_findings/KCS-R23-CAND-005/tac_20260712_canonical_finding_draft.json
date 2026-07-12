@@ -1,0 +1,188 @@
+{
+  "schema_version": 1,
+  "scan_id": "f78f5d0d-2752-47a7-8d8d-3371e09d3377",
+  "candidate_id": "KCS-R23-CAND-005",
+  "ledger_row_id": "KCS-R23-CAND-005",
+  "title": "byte-oriented question-mark globs bypass Unicode names",
+  "summary": "KCS normalizes ignore patterns and paths as Unicode strings, then converts them to UTF-8 bytes for wildcard matching. The `?` branch advances by one byte, so a one-character Unicode filename such as `\u00e9.txt` or `\ud83d\ude00.txt` does not match `?.txt` and remains eligible for indexing despite the operator's ignore rule.",
+  "final_policy": "reportable",
+  "final_severity": "medium",
+  "priority": "P2",
+  "confidence": "high",
+  "codeEvidence": [
+    {
+      "id": "ignore-rule-input",
+      "label": "Scope ignore rules enter as operator-controlled text",
+      "path": "crates/kcs-pipeline/src/scan.rs",
+      "startLine": 178,
+      "endLine": 200,
+      "language": "rust",
+      "role": "user_input",
+      "code": "pub fn load_kcsignore(scope_path: &Path) -> Result<Vec<IgnoreRule>> {\n    let path = scope_path.join(\".kcsignore\");\n    if !path.is_file() {\n        return Ok(Vec::new());\n    }\n    let content = std::fs::read_to_string(&path).pipeline_io(&path)?;\n    Ok(content\n        .lines()\n        .filter_map(|line| {\n            let trimmed = line.trim();\n            if trimmed.is_empty() || trimmed.starts_with('#') {\n                return None;\n            }\n            let (negated, pattern) = trimmed\n                .strip_prefix('!')\n                .map(|pattern| (true, pattern))\n                .unwrap_or((false, trimmed));\n            Some(IgnoreRule {\n                pattern: pattern.to_owned(),\n                negated,\n            })\n        })\n        .collect())\n}",
+      "explanation": "The operator's `.kcsignore` pattern, including a rule such as `?.txt`, is preserved as text and later passed to the matcher."
+    },
+    {
+      "id": "candidate-ignore-decision",
+      "label": "Direct-child candidates are gated by `ignored_by_rules()`",
+      "path": "crates/kcs-pipeline/src/scan.rs",
+      "startLine": 114,
+      "endLine": 135,
+      "language": "rust",
+      "role": "entrypoint",
+      "code": "let relative = path\n    .strip_prefix(scope_path)\n    .unwrap_or(&path)\n    .to_string_lossy()\n    .replace('\\\\', \"/\");\nif relative == \".kcsignore\" {\n    continue;\n}\nlet size_bytes = entry.metadata().pipeline_io(&path)?.len();\nlet secret = classify_secret(&relative);\nlet ignored = ignored_by_rules(\n    &relative,\n    file_type.is_dir(),\n    ignore_rules,\n    case_insensitive,\n) || secret == Some(SecretTier::TierA)\n    && !explicitly_unignored(\n        &relative,\n        file_type.is_dir(),\n        ignore_rules,\n        case_insensitive,\n    );",
+      "explanation": "A lower-trust scope contributor controls the direct-child filename that becomes `relative`. If `ignored_by_rules()` fails to match the operator's `?` rule, the candidate is not marked ignored unless an independent Tier A secret rule applies."
+    },
+    {
+      "id": "unicode-normalization-byte-projection",
+      "label": "Unicode normalization is followed by UTF-8 byte projection",
+      "path": "crates/kcs-pipeline/src/scan.rs",
+      "startLine": 341,
+      "endLine": 380,
+      "language": "rust",
+      "role": "propagation",
+      "code": "fn matches_ignore_pattern(path: &str, is_dir: bool, pattern: &str, case_insensitive: bool) -> bool {\n    let mut path = path.nfc().collect::<String>();\n    let mut pattern = pattern.nfc().collect::<String>();\n    if case_insensitive {\n        path = path.to_lowercase();\n        pattern = pattern.to_lowercase();\n    }\n    let directory_only = pattern.ends_with('/');\n    if directory_only && !is_dir {\n        return false;\n    }\n    let rooted = pattern.starts_with('/');\n    let pattern = pattern.trim_start_matches('/').trim_end_matches('/');\n    let normalized_path = path.trim_start_matches('/').replace('\\\\', \"/\");\n    if !rooted && !pattern.contains('/') {\n        return wildcard_match(\n            pattern,\n            normalized_path\n                .rsplit('/')\n                .next()\n                .unwrap_or(&normalized_path),\n        );\n    }\n    wildcard_match(pattern, &normalized_path)\n}\n\nfn wildcard_match(pattern: &str, value: &str) -> bool {\n    wildcard_match_bytes(pattern.as_bytes(), value.as_bytes())\n}",
+      "explanation": "The code deliberately normalizes Unicode forms, but then `wildcard_match()` discards scalar boundaries by calling `as_bytes()`."
+    },
+    {
+      "id": "byte-question-branch",
+      "label": "`?` consumes one byte instead of one Unicode scalar",
+      "path": "crates/kcs-pipeline/src/scan.rs",
+      "startLine": 383,
+      "endLine": 415,
+      "language": "rust",
+      "role": "root_control",
+      "code": "fn wildcard_match_bytes(pattern: &[u8], value: &[u8]) -> bool {\n    if pattern.is_empty() {\n        return value.is_empty();\n    }\n    if pattern.starts_with(b\"**/\") {\n        return wildcard_match_bytes(&pattern[3..], value)\n            || value\n                .iter()\n                .position(|byte| *byte == b'/')\n                .map(|slash| wildcard_match_bytes(pattern, &value[slash + 1..]))\n                .unwrap_or(false);\n    }\n    if pattern == b\"**\" {\n        return true;\n    }\n    match pattern[0] {\n        b'*' => {\n            wildcard_match_bytes(&pattern[1..], value)\n                || !value.is_empty()\n                    && value[0] != b'/'\n                    && wildcard_match_bytes(pattern, &value[1..])\n        }\n        b'?' => {\n            !value.is_empty()\n                && value[0] != b'/'\n                && wildcard_match_bytes(&pattern[1..], &value[1..])\n        }\n        byte => {\n            !value.is_empty()\n                && byte == value[0]\n                && wildcard_match_bytes(&pattern[1..], &value[1..])\n        }\n    }\n}",
+      "explanation": "For `\u00e9.txt`, `?` consumes only byte `0xc3`; the following literal `.` is compared with continuation byte `0xa9`, so `?.txt` fails to match a one-character Unicode filename."
+    },
+    {
+      "id": "index-archive-sink",
+      "label": "Non-ignored candidates are read, prepared, and written",
+      "path": "crates/kcs-cli/src/main.rs",
+      "startLine": 9055,
+      "endLine": 9118,
+      "language": "rust",
+      "role": "sink",
+      "code": "for candidate in preview\n    .candidates\n    .iter()\n    .filter(|candidate| !candidate.ignored && candidate.media_type != \"inode/directory\")\n{\n    if candidate.size_bytes > max_input_bytes {\n        result.skipped_oversized_files += 1;\n        continue;\n    }\n    let secrets_hold = !secrets_approved && classify_secret(&candidate.input_path).is_some();\n    let path = repo.root().join(&candidate.input_path);\n    let bytes = fs::read(&path)\n        .map_err(|err| KcsError::io(err.to_string(), path.display().to_string()))?;\n    let current_hash = hash_bytes(&bytes);\n    if let Some(scan_hash) = &candidate.raw_hash {\n        if scan_hash != &current_hash {\n            result.failed_files += 1;\n            continue;\n        }\n    }\n    let raw_hash = current_hash;\n    let prepare = prepare_units(PrepareStageRequest {\n        raw_hash: raw_hash.clone(),\n        media_type: candidate.media_type.clone(),\n        input_path: path.display().to_string(),\n        tool_profile_hash: prepare_profile_hash.clone(),\n    })\n    .map_err(pipeline_to_kcs)?;\n\n    write_prepared_objects(\n        repo,\n        &prepare.prepared_units,\n        &prepare.prepared_object_hashes,\n        &bytes,\n        &candidate.media_type,\n    )?;",
+      "explanation": "Once the Unicode filename is incorrectly left with `ignored == false`, the index path reads and prepares its bytes like any other in-scope candidate."
+    },
+    {
+      "id": "online-ocr-eligibility",
+      "label": "Accepted recognized media can be queued for approved online OCR",
+      "path": "crates/kcs-cli/src/main.rs",
+      "startLine": 9135,
+      "endLine": 9150,
+      "language": "rust",
+      "role": "outcome",
+      "code": "if candidate.media_type != \"application/octet-stream\" {\n    enqueue_online_placeholder_task(\n        repo,\n        &task_store,\n        candidate,\n        &raw_hash,\n        &scope_id,\n        network_allowed,\n        secrets_hold,\n        args,\n        &now,\n        &mut result,\n        &cost_ledger,\n        &budget_caps,\n        &month,\n    )?;\n}",
+      "explanation": "For OCR-able media, the wrongly accepted candidate reaches the online task enqueue path, subject to existing network, budget, and secret gates."
+    }
+  ],
+  "rootCause": {
+    "summary": "The violated invariant is that `?` in an ignore glob should consume one filename character after Unicode normalization. KCS preserves the operator's ignore pattern as text and normalizes both sides, but `wildcard_match()` converts both strings to UTF-8 bytes. The `b'?'` arm advances by `value[1..]`, so multibyte Unicode scalars leave continuation bytes that cause the following literal comparison to fail.",
+    "evidenceRefs": [
+      "ignore-rule-input",
+      "candidate-ignore-decision",
+      "unicode-normalization-byte-projection",
+      "byte-question-branch",
+      "index-archive-sink",
+      "online-ocr-eligibility"
+    ]
+  },
+  "validation": {
+    "method": "static source trace plus local offline synthetic PoC",
+    "summary": "The source trace confirms that direct-child filenames flow into `ignored_by_rules()`, that normalized strings are converted to bytes before wildcard evaluation, and that `?` consumes one UTF-8 byte. The offline PoC reproduces `?.txt` excluding `a.txt` while failing to exclude precomposed, decomposed, and non-BMP one-character Unicode filenames.",
+    "evidenceRefs": [
+      "candidate-ignore-decision",
+      "unicode-normalization-byte-projection",
+      "byte-question-branch",
+      "index-archive-sink"
+    ],
+    "assertions": [
+      "`?.txt` matches `a.txt` under the vulnerable matcher.",
+      "`?.txt` does not match `\u00e9.txt`, decomposed `e\u0301.txt`, or `\ud83d\ude00.txt` under the vulnerable matcher.",
+      "A false ignore decision lets the candidate reach byte reading and local preparation.",
+      "Network impact remains conditional on existing online authorization and independent gates."
+    ],
+    "limitations": [
+      "No live adapter call or public target was exercised.",
+      "The exact released version range was not established beyond vulnerable revision `0e19f3c6489da458e93a982a333c308d92d0a0ae`.",
+      "Documented `?` semantics are inferred from ordinary character-glob expectations rather than an explicit KCS Unicode contract."
+    ]
+  },
+  "attackPath": {
+    "summary": "A lower-trust contributor supplies a direct-child Unicode filename in a scope where the operator relies on a one-character `?` ignore rule. The byte matcher fails the rule, leaving the file non-ignored and eligible for local archive and, when separately approved, online processing.",
+    "dataflow": {
+      "summary": "`.kcsignore` rule plus scope filename -> `ignored_by_rules()` -> Unicode normalization -> UTF-8 byte matcher -> `ignored == false` -> index preparation and optional online task enqueue",
+      "source": "operator ignore rule and contributor-controlled Unicode filename",
+      "sink": "local archive/index preparation and conditional online OCR or embedding eligibility",
+      "outcome": "content the operator intended to exclude can be processed as in-scope",
+      "evidenceRefs": [
+        "ignore-rule-input",
+        "candidate-ignore-decision",
+        "unicode-normalization-byte-projection",
+        "byte-question-branch",
+        "index-archive-sink",
+        "online-ocr-eligibility"
+      ]
+    },
+    "reachability": {
+      "summary": "The attacker needs local filename control in a selected scope and an operator rule using `?`; remote impact additionally requires online mode and no independent secret or budget hold.",
+      "attacker": "lower-trust local scope contributor",
+      "entrypoint": "direct-child filename evaluated against `.kcsignore` or configured ignore rules",
+      "accessRequirements": "write or supply-file control inside a scope the operator indexes",
+      "preconditions": [
+        "The ignore policy uses `?` for a Unicode-sensitive filename position.",
+        "The attacker chooses a multibyte Unicode scalar in that position.",
+        "The operator runs indexing.",
+        "Network impact requires pre-existing online approval and no separate hold."
+      ],
+      "outcome": "the file bypasses the declared exclusion and is treated as active input"
+    },
+    "evidenceRefs": [
+      "candidate-ignore-decision",
+      "byte-question-branch",
+      "index-archive-sink",
+      "online-ocr-eligibility"
+    ],
+    "impact": {
+      "level": "high",
+      "why": "The bypass crosses an operator-declared scope boundary before archive/index processing and can make excluded bytes eligible for already-approved external processing."
+    },
+    "likelihood": {
+      "level": "medium",
+      "why": "Exploitation requires a `?` rule, a Unicode filename, operator invocation, and independent gates for network impact."
+    },
+    "limitations": [
+      "Literal Unicode rules and many `*` rules still exclude the file.",
+      "Secret classification, offline mode, adapter approval, and budget gates can stop particular downstream sends.",
+      "The contributor often knows content they supplied, limiting attacker-centric confidentiality gain in simple cases."
+    ]
+  },
+  "remediation": {
+    "summary": "Keep wildcard matching on Unicode scalar values after NFC/case folding, or explicitly document and implement grapheme-cluster semantics. Do not convert normalized strings to UTF-8 bytes for `?` matching.",
+    "minimalFix": "Replace `wildcard_match_bytes(pattern.as_bytes(), value.as_bytes())` with a scalar-aware matcher over `pattern.chars()` and `value.chars()`, preserving slash handling for `*`, `?`, and `**/`.",
+    "regressionTests": [
+      "`?.txt` excludes `a.txt`, `\u00e9.txt`, decomposed `e\u0301.txt`, and `\ud83d\ude00.txt`.",
+      "`?.txt` does not match `ab.txt` or cross `/`.",
+      "Literal Unicode rules continue to match NFC and NFD spellings.",
+      "A scan-preview test proves a Unicode direct child excluded by `?.txt` never reaches active ingestion or online eligibility."
+    ],
+    "preventiveControls": [
+      "Add tests for every Unicode normalization path before dropping to lower-level representations.",
+      "Document whether KCS glob semantics are Unicode scalar or grapheme-cluster based."
+    ]
+  },
+  "writeup": {
+    "reportPath": "findings/tac-kcs-r23-cand-005-unicode-question-glob-bypass/tac-kcs-r23-cand-005-unicode-question-glob-bypass.md",
+    "pocPath": "findings/tac-kcs-r23-cand-005-unicode-question-glob-bypass/poc"
+  },
+  "references": {
+    "validation_report": "artifacts/05_findings/KCS-R23-CAND-005/validation_report.md",
+    "attack_path_report": "artifacts/05_findings/KCS-R23-CAND-005/attack_path_analysis_report.md"
+  },
+  "extensions": {
+    "candidateId": "KCS-R23-CAND-005",
+    "ledgerRowId": "KCS-R23-CAND-005",
+    "reportId": "KCS-R23-CAND-005"
+  }
+}
