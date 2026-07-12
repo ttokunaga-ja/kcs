@@ -3,6 +3,7 @@
 pub mod catalog;
 pub mod deterministic;
 mod gemini_embedding;
+mod http_policy;
 pub mod identity;
 mod mistral_ocr;
 pub mod tool_lock;

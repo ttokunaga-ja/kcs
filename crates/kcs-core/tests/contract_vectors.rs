@@ -59,11 +59,15 @@ fn ct_hash_004_commit_jcs_vector() {
 }
 
 #[test]
-fn ct_hash_005_fanout_path_uses_prefixed_leaf() {
+fn ct_hash_005_fanout_path_uses_portable_digest_leaf() {
     let path = fanout_path("objects/commits", COMMIT_HASH).unwrap();
     assert_eq!(
-        path.to_string_lossy(),
-        "objects/commits/6b/98/sha256:6b9884a55265cb9dab75ecc79e1e90de145aeae91e3bb5b43538e58fe848eac6"
+        path,
+        std::path::Path::new("objects")
+            .join("commits")
+            .join("6b")
+            .join("98")
+            .join("6b9884a55265cb9dab75ecc79e1e90de145aeae91e3bb5b43538e58fe848eac6")
     );
 }
 

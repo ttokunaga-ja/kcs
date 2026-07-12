@@ -232,6 +232,33 @@ pub struct EmbeddingResponse {
     pub modality: String,
 }
 
+/// Validate the numeric domain required by cosine distance. Width alone is not
+/// sufficient: non-finite values and a zero vector make cosine results
+/// undefined and must never reach persistence or search.
+pub fn validate_cosine_vector(vector: &[f32], dimensions: u32) -> crate::Result<()> {
+    if vector.len() != dimensions as usize {
+        return Err(crate::AdapterError::ContractViolation(format!(
+            "embedding dimension mismatch: expected {dimensions}, got {}",
+            vector.len()
+        )));
+    }
+    if vector.iter().any(|value| !value.is_finite()) {
+        return Err(crate::AdapterError::ContractViolation(
+            "embedding values must be finite f32 values".to_owned(),
+        ));
+    }
+    let norm_squared = vector
+        .iter()
+        .map(|value| f64::from(*value).powi(2))
+        .sum::<f64>();
+    if !norm_squared.is_finite() || norm_squared <= 0.0 {
+        return Err(crate::AdapterError::ContractViolation(
+            "embedding vector must have a positive finite norm".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SummaryRequest {
     pub normalized_refs: Vec<String>,
@@ -311,5 +338,13 @@ mod tests {
 
         let value = serde_json::to_value(request).expect("serialize adapter request");
         assert_eq!(value["adapter_kind"], "prepare");
+    }
+
+    #[test]
+    fn cosine_vector_requires_finite_positive_norm() {
+        validate_cosine_vector(&[1.0, 0.0], 2).unwrap();
+        assert!(validate_cosine_vector(&[0.0, 0.0], 2).is_err());
+        assert!(validate_cosine_vector(&[f32::INFINITY, 0.0], 2).is_err());
+        assert!(validate_cosine_vector(&[1.0], 2).is_err());
     }
 }

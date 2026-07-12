@@ -1,12 +1,68 @@
 use std::fs;
 use std::path::Path;
-use std::process::{Command as ProcessCommand, Stdio};
+use std::process::{Child, Command as ProcessCommand, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use assert_cmd::Command as AssertCommand;
 use kcs_core::cas::{canonical_json_bytes, fanout_path, hash_bytes};
 use serde_json::Value;
+
+const KCS_CHILD_ENV_DENYLIST: &[&str] = &[
+    "GEMINI_API_KEY",
+    "MISTRAL_API_KEY",
+    "KCS_FIXED_NOW",
+    "KCS_TEST_GEMINI_EMBED",
+    "KCS_TEST_MISTRAL_OCR",
+    "KCS_TEST_MARKDOWNIZE_ADAPTER",
+    "KCS_TEST_QUERY_EMBED_TRACE",
+    "KCS_TEST_HOLD_LOCK_MS",
+    "KCS_TEST_R13_2_AUTH",
+    "KCS_TEST_R13_2_DECLARED",
+    "KCS_TEST_R13_2_FALLBACK",
+];
+
+fn hermetic_assert_command() -> AssertCommand {
+    let mut command = AssertCommand::cargo_bin("kcs").unwrap();
+    for name in KCS_CHILD_ENV_DENYLIST {
+        command.env_remove(name);
+    }
+    command
+}
+
+fn hermetic_process_command(bin: &Path) -> ProcessCommand {
+    let mut command = ProcessCommand::new(bin);
+    for name in KCS_CHILD_ENV_DENYLIST {
+        command.env_remove(name);
+    }
+    command
+}
+
+fn assert_command_with_device_home(home: &Path) -> AssertCommand {
+    let mut command = hermetic_assert_command();
+    command
+        .env("HOME", home)
+        .env("XDG_DATA_HOME", home.join("data"))
+        .env("XDG_CONFIG_HOME", home.join("config"))
+        .env("XDG_CACHE_HOME", home.join("cache"));
+    command
+}
+
+fn process_command_with_device_home(bin: &Path, home: &Path) -> ProcessCommand {
+    let mut command = hermetic_process_command(bin);
+    command
+        .env("HOME", home)
+        .env("XDG_DATA_HOME", home.join("data"))
+        .env("XDG_CONFIG_HOME", home.join("config"))
+        .env("XDG_CACHE_HOME", home.join("cache"));
+    command
+}
+
+fn value_path_ends_with(value: &Value, suffix: &str) -> bool {
+    value
+        .as_str()
+        .is_some_and(|path| Path::new(path).ends_with(suffix))
+}
 
 /// A process-wide isolated XDG home so `init` / `index` never touch the developer's
 /// real `~/.local/share/kcs/scope-registry.sqlite` (K3 — init/index now register
@@ -19,7 +75,7 @@ fn isolated_home() -> &'static std::path::Path {
 }
 
 fn kcs() -> AssertCommand {
-    let mut command = AssertCommand::cargo_bin("kcs").unwrap();
+    let mut command = hermetic_assert_command();
     command
         .env("XDG_DATA_HOME", isolated_home().join("data"))
         .env("XDG_CONFIG_HOME", isolated_home().join("config"))
@@ -78,7 +134,7 @@ fn ct_cli_003_state_001_002_status_reports_new_modified_unchanged() {
         .clone();
     let json: Value = serde_json::from_slice(&out).unwrap();
     assert_eq!(json["files"][0]["status"], "new");
-    assert!(json["files"][0]["path"].as_str().unwrap().starts_with('/'));
+    assert!(Path::new(json["files"][0]["path"].as_str().unwrap()).is_absolute());
 
     kcs()
         .args(["snapshot", "create", "-m", "first"])
@@ -191,16 +247,17 @@ fn ct_cli_snapshot_commit_alias_log_inspect_tag_diff() {
     assert_eq!(changes.len(), 2);
     assert!(changes
         .iter()
-        .any(|c| c["change"] == "modified" && c["path"].as_str().unwrap().ends_with("/a.pdf")));
+        .any(|c| c["change"] == "modified" && value_path_ends_with(&c["path"], "a.pdf")));
     assert!(changes
         .iter()
-        .any(|c| c["change"] == "added" && c["path"].as_str().unwrap().ends_with("/b.pdf")));
+        .any(|c| c["change"] == "added" && value_path_ends_with(&c["path"], "b.pdf")));
 }
 
 #[test]
 fn ct_lock_001_concurrent_snapshots_fail_fast() {
     let temp = tempfile::tempdir().unwrap();
-    kcs()
+    let device_home = tempfile::tempdir().unwrap();
+    assert_command_with_device_home(device_home.path())
         .arg("init")
         .current_dir(temp.path())
         .assert()
@@ -208,7 +265,7 @@ fn ct_lock_001_concurrent_snapshots_fail_fast() {
     fs::write(temp.path().join("a.pdf"), b"one").unwrap();
 
     let bin = assert_cmd::cargo::cargo_bin("kcs");
-    let first = ProcessCommand::new(&bin)
+    let first = process_command_with_device_home(&bin, device_home.path())
         .args(["snapshot", "-m", "first", "--json"])
         .env("KCS_FIXED_NOW", "2026-04-29T12:00:00Z")
         .env("KCS_TEST_HOLD_LOCK_MS", "800")
@@ -218,9 +275,9 @@ fn ct_lock_001_concurrent_snapshots_fail_fast() {
         .spawn()
         .unwrap();
 
-    wait_for_path(temp.path().join(".kcs/.lock").as_path());
+    let first = wait_for_path(first, temp.path().join(".kcs/.lock").as_path());
 
-    let second = ProcessCommand::new(&bin)
+    let second = process_command_with_device_home(&bin, device_home.path())
         .args(["snapshot", "-m", "second", "--json"])
         .env("KCS_FIXED_NOW", "2026-04-29T12:00:01Z")
         .current_dir(temp.path())
@@ -242,16 +299,20 @@ fn ct_lock_001_concurrent_snapshots_fail_fast() {
 #[test]
 fn m1_concurrent_index_loser_is_locked_and_store_intact() {
     let temp = tempfile::tempdir().unwrap();
-    let xdg = tempfile::tempdir().unwrap();
+    let device_home = tempfile::tempdir().unwrap();
     let bin = assert_cmd::cargo::cargo_bin("kcs");
 
-    ProcessCommand::new(&bin)
+    let init = process_command_with_device_home(&bin, device_home.path())
         .arg("init")
-        .env("XDG_DATA_HOME", xdg.path().join("data"))
-        .env("XDG_CONFIG_HOME", xdg.path().join("config"))
         .current_dir(temp.path())
         .output()
         .unwrap();
+    assert!(
+        init.status.success(),
+        "init failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&init.stdout),
+        String::from_utf8_lossy(&init.stderr)
+    );
     fs::write(
         temp.path().join("a.md"),
         "# Title\n\n## Section\nbody text\n",
@@ -260,10 +321,8 @@ fn m1_concurrent_index_loser_is_locked_and_store_intact() {
 
     // Process A holds the lock across its snapshot sub-step for 1.2s, guaranteeing
     // the contention window (the outer command lock is held the whole time).
-    let first = ProcessCommand::new(&bin)
+    let first = process_command_with_device_home(&bin, device_home.path())
         .args(["index", "--approve", "--json"])
-        .env("XDG_DATA_HOME", xdg.path().join("data"))
-        .env("XDG_CONFIG_HOME", xdg.path().join("config"))
         .env("KCS_TEST_HOLD_LOCK_MS", "1200")
         .current_dir(temp.path())
         .stdout(Stdio::piped())
@@ -271,12 +330,10 @@ fn m1_concurrent_index_loser_is_locked_and_store_intact() {
         .spawn()
         .unwrap();
 
-    wait_for_path(temp.path().join(".kcs/.lock").as_path());
+    let first = wait_for_path(first, temp.path().join(".kcs/.lock").as_path());
 
-    let second = ProcessCommand::new(&bin)
+    let second = process_command_with_device_home(&bin, device_home.path())
         .args(["index", "--approve", "--json"])
-        .env("XDG_DATA_HOME", xdg.path().join("data"))
-        .env("XDG_CONFIG_HOME", xdg.path().join("config"))
         .current_dir(temp.path())
         .output()
         .unwrap();
@@ -297,7 +354,7 @@ fn m1_concurrent_index_loser_is_locked_and_store_intact() {
             }
         }
     }
-    let ledger = xdg.path().join("data/kcs/cost-ledger.jsonl");
+    let ledger = device_home.path().join("data/kcs/cost-ledger.jsonl");
     if let Ok(text) = fs::read_to_string(&ledger) {
         for line in text.lines().filter(|line| !line.trim().is_empty()) {
             serde_json::from_str::<Value>(line).expect("corrupt cost-ledger JSONL line");
@@ -338,16 +395,10 @@ fn m1c_corrupt_tasks_jsonl_is_store_corrupt_not_schema() {
 #[test]
 fn m1c_corrupt_cost_ledger_is_store_corrupt_not_schema() {
     let temp = tempfile::tempdir().unwrap();
-    let xdg = tempfile::tempdir().unwrap();
-    let mk = || {
-        let mut command = AssertCommand::cargo_bin("kcs").unwrap();
-        command
-            .env("XDG_DATA_HOME", xdg.path().join("data"))
-            .env("XDG_CONFIG_HOME", xdg.path().join("config"));
-        command
-    };
+    let device_home = tempfile::tempdir().unwrap();
+    let mk = || assert_command_with_device_home(device_home.path());
     mk().arg("init").current_dir(temp.path()).assert().success();
-    let ledger = xdg.path().join("data/kcs/cost-ledger.jsonl");
+    let ledger = device_home.path().join("data/kcs/cost-ledger.jsonl");
     fs::create_dir_all(ledger.parent().unwrap()).unwrap();
     fs::write(&ledger, "garbage not json\n").unwrap();
     let out = mk()
@@ -736,15 +787,40 @@ fn snapshot_json(dir: &std::path::Path, args: &[&str], now: &str) -> Value {
     serde_json::from_slice(&out).unwrap()
 }
 
-fn wait_for_path(path: &Path) {
+fn wait_for_path(mut child: Child, path: &Path) -> Child {
     let deadline = Instant::now() + Duration::from_secs(5);
     while Instant::now() < deadline {
         if path.exists() {
-            return;
+            return child;
+        }
+        match child.try_wait() {
+            Ok(Some(_)) => {
+                let output = child.wait_with_output().unwrap();
+                panic!(
+                    "child exited before {} appeared (status {}): stdout={} stderr={}",
+                    path.display(),
+                    output.status,
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            }
+            Ok(None) => {}
+            Err(error) => panic!(
+                "failed to poll child while waiting for {}: {error}",
+                path.display()
+            ),
         }
         thread::sleep(Duration::from_millis(10));
     }
-    panic!("timed out waiting for {}", path.display());
+    let _ = child.kill();
+    let output = child.wait_with_output().unwrap();
+    panic!(
+        "timed out waiting for {} (child status {}): stdout={} stderr={}",
+        path.display(),
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 fn write_active_lock(root: &Path) {

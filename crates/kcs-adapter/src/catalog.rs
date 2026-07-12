@@ -82,6 +82,27 @@ pub struct StandardOnlineMarkdownizeOutcome {
 pub fn run_standard_online_markdownize(
     request: StandardOnlineMarkdownizeRequest<'_>,
 ) -> Result<StandardOnlineMarkdownizeOutcome> {
+    let bytes = std::fs::read(request.path).map_err(|err| AdapterError::Io {
+        path: request.path.display().to_string(),
+        message: err.to_string(),
+    })?;
+    run_standard_online_markdownize_with_bytes(request, &bytes)
+}
+
+/// Execute online markdownization from bytes already owned by the caller. The
+/// same verified buffer crosses the adapter boundary and is serialized into the
+/// provider request; no pathname is reopened by the HTTP client.
+pub fn run_standard_online_markdownize_with_bytes(
+    request: StandardOnlineMarkdownizeRequest<'_>,
+    verified_raw_bytes: &[u8],
+) -> Result<StandardOnlineMarkdownizeOutcome> {
+    let actual_hash = crate::identity::hash_bytes(verified_raw_bytes);
+    if actual_hash != request.raw_hash {
+        return Err(AdapterError::ContractViolation(format!(
+            "online markdownize input identity changed: expected {}, got {actual_hash}",
+            request.raw_hash
+        )));
+    }
     let adapter_request = MarkdownizeRequest {
         raw: RawInput {
             raw_hash: request.raw_hash.to_owned(),
@@ -122,11 +143,32 @@ pub fn run_standard_online_markdownize(
             let client = MockStandardOnlineMarkdownizeClient;
             let model_pin = client.resolve_model_pin("mistral-ocr-latest")?;
             let adapter = MistralOcrMarkdownizeAdapter::new(client, model_pin, request.scope_id)
-                .with_image_store(request.kcs_dir);
+                .with_image_store(request.kcs_dir)
+                .with_verified_raw_bytes(verified_raw_bytes.to_vec());
             let profile = adapter.profile();
             let mut adapter_request = adapter_request;
             adapter_request.tool_profile_hash = profile.tool_profile_hash.clone();
-            let response = adapter.markdownize(adapter_request)?;
+            let response_mode = adapter_request.mode;
+            let mut response = adapter.markdownize(adapter_request)?;
+            // Test-only KCS response seams run after the provider page mapping has
+            // passed its exact-bijection checks. This preserves partial/fallback
+            // lifecycle coverage without weakening the OCR transport contract.
+            if std::env::var(TEST_STANDARD_ONLINE_MARKDOWNIZE_ENV)
+                .ok()
+                .as_deref()
+                == Some("partial")
+            {
+                response.updated_units.pop();
+            }
+            if std::env::var(TEST_STANDARD_ONLINE_MARKDOWNIZE_ENV)
+                .ok()
+                .as_deref()
+                == Some("incr_incomplete")
+                && response_mode == MarkdownizeMode::Incremental
+                && response.updated_units.len() > 1
+            {
+                response.updated_units.pop();
+            }
             return Ok(StandardOnlineMarkdownizeOutcome { profile, response });
         }
         _ => {}
@@ -136,10 +178,11 @@ pub fn run_standard_online_markdownize(
     // (docs/03 §11: config may carry a mutable alias, resolved to an immutable pin
     // at execution — §5.1/§6), rather than the previously hard-coded
     // `"mistral-ocr-latest"`.
-    let configured_model = declared_markdown_model();
+    let configured_model = declared_markdown_model()?;
     let model_pin = client.resolve_model_pin(&configured_model)?;
     let adapter = MistralOcrMarkdownizeAdapter::new(client, model_pin, request.scope_id)
-        .with_image_store(request.kcs_dir);
+        .with_image_store(request.kcs_dir)
+        .with_verified_raw_bytes(verified_raw_bytes.to_vec());
     let profile = adapter.profile();
     let mut adapter_request = adapter_request;
     adapter_request.tool_profile_hash = profile.tool_profile_hash.clone();
@@ -150,10 +193,14 @@ pub fn run_standard_online_markdownize(
 /// R13-2: the configured `[markdown] model` alias (or the built-in `mistral-ocr-latest`),
 /// resolved to an immutable pin at execution. Shared by the send path and the
 /// resolve-only profile path (R14-6) so both agree on the model.
-fn declared_markdown_model() -> String {
-    crate::tool_lock::registered_declared_adapter("markdown")
+fn declared_markdown_model() -> Result<String> {
+    let declared = crate::tool_lock::registered_declared_adapter("markdown");
+    if let Some(declared) = declared.as_ref() {
+        crate::tool_lock::validate_declared_runtime_target("markdown", declared)?;
+    }
+    Ok(declared
         .and_then(|declared| declared.model)
-        .unwrap_or_else(|| "mistral-ocr-latest".to_owned())
+        .unwrap_or_else(|| "mistral-ocr-latest".to_owned()))
 }
 
 /// R14-6: resolve the online markdownize adapter's profile (its `tool_profile_hash`)
@@ -188,7 +235,7 @@ pub fn resolve_standard_online_markdownize_profile(scope_id: &str) -> Result<Ada
         _ => {}
     }
     let client = EnvMistralOcrClient::new();
-    let model_pin = client.resolve_model_pin(&declared_markdown_model())?;
+    let model_pin = client.resolve_model_pin(&declared_markdown_model()?)?;
     Ok(MistralOcrMarkdownizeAdapter::new(client, model_pin, scope_id).profile())
 }
 
@@ -210,7 +257,12 @@ impl MistralOcrClient for MockStandardOnlineMarkdownizeClient {
         Ok("mistral-ocr-2505".to_owned())
     }
 
-    fn ocr_markdown(&self, request: &MarkdownizeRequest, model_pin: &str) -> Result<OcrResponse> {
+    fn ocr_markdown(
+        &self,
+        request: &MarkdownizeRequest,
+        model_pin: &str,
+        _verified_raw_bytes: &[u8],
+    ) -> Result<OcrResponse> {
         // R14-6: under `pin_changed`, an INCREMENTAL send must never reach the adapter —
         // the gate resolves the changed pin first and falls back to Full. If one is
         // attempted (a regression that sends before gating), fail loudly so the test
@@ -241,7 +293,7 @@ impl MistralOcrClient for MockStandardOnlineMarkdownizeClient {
                     .to_owned(),
             ));
         }
-        let mut pages: Vec<OcrPage> = request
+        let pages: Vec<OcrPage> = request
             .prepared_unit_hint
             .as_deref()
             .unwrap_or(&[])
@@ -280,19 +332,6 @@ impl MistralOcrClient for MockStandardOnlineMarkdownizeClient {
                 }
             })
             .collect();
-        let seam = std::env::var(TEST_STANDARD_ONLINE_MARKDOWNIZE_ENV).ok();
-        if seam.as_deref() == Some("partial") {
-            pages.pop();
-        }
-        // R13-1: drop a page in incremental mode only, to exercise the acceptance
-        // check → Full fallback path. A full re-send (mode != incremental) returns
-        // every requested page, so the fallback succeeds.
-        if seam.as_deref() == Some("incr_incomplete")
-            && request.mode == crate::types::MarkdownizeMode::Incremental
-            && pages.len() > 1
-        {
-            pages.pop();
-        }
         Ok(OcrResponse {
             pages,
             model_version_pin: model_pin.to_owned(),
@@ -390,7 +429,21 @@ pub fn run_adopted_embedding(
 ) -> Result<Vec<EmbeddingVector>> {
     let request = EmbeddingRequest { input_type, items };
     let response = match execution {
-        AdoptedEmbeddingExecution::Real => GeminiEmbeddingAdapter::default().embed(request),
+        AdoptedEmbeddingExecution::Real => {
+            let declared = crate::tool_lock::registered_declared_adapter("embedding");
+            if let Some(declared) = declared.as_ref() {
+                crate::tool_lock::validate_declared_runtime_target("embedding", declared)?;
+            }
+            let configured_model = declared
+                .and_then(|declared| declared.model)
+                .unwrap_or_else(|| ADOPTED_MODEL_PIN.to_owned());
+            GeminiEmbeddingAdapter::new(
+                crate::gemini_embedding::EnvGeminiEmbeddingClient::new(),
+                configured_model,
+                ADOPTED_DIMENSIONS,
+            )
+            .embed(request)
+        }
         other => GeminiEmbeddingAdapter::new(
             MockAdoptedEmbeddingClient { execution: other },
             ADOPTED_MODEL_PIN,
@@ -575,12 +628,14 @@ mod tests {
     fn standard_online_markdownize_mock_runs() {
         let temp = tempfile::tempdir().unwrap();
         let input = temp.path().join("input.pdf");
-        std::fs::write(&input, b"%PDF mock").unwrap();
+        let input_bytes = b"%PDF mock";
+        std::fs::write(&input, input_bytes).unwrap();
+        let input_hash = crate::identity::hash_bytes(input_bytes);
         std::env::set_var(TEST_STANDARD_ONLINE_MARKDOWNIZE_ENV, "mock");
         let outcome = run_standard_online_markdownize(StandardOnlineMarkdownizeRequest {
             scope_id: "01H00000000000000000000000",
             kcs_dir: temp.path(),
-            raw_hash: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            raw_hash: &input_hash,
             path: &input,
             media_type: "application/pdf",
             prepared_unit_hints: vec![PreparedUnitHint {

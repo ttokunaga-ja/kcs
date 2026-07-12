@@ -3,8 +3,9 @@
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs::{self, File, OpenOptions};
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+#[cfg(not(windows))]
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -13,8 +14,8 @@ use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 
 use crate::cas::{
-    append_jsonl, atomic_overwrite, atomic_write, hash_bytes, hash_json, is_hash, ObjectKind,
-    ObjectStore,
+    append_jsonl, atomic_overwrite, atomic_write, hash_json, is_hash, ObjectKind, ObjectStore,
+    CAS_STREAM_BUFFER_BYTES, MAX_RAW_OBJECT_BYTES,
 };
 use crate::dag::{
     build_tree, CommitObject, CommitStats, CommitType, NormalizeRef, TreeEntry, TreeObject,
@@ -24,6 +25,54 @@ use crate::schema::{validate_json_schema, SchemaKind};
 use crate::ExitCode;
 
 const FORMAT_VERSION: &str = "0.1.0";
+pub const DEFAULT_MAX_ARCHIVE_FILE_BYTES: u64 = MAX_RAW_OBJECT_BYTES;
+pub const DEFAULT_MAX_ARCHIVE_SCOPE_BYTES: u64 = 4 * 1024 * 1024 * 1024;
+pub const MAX_TREE_ENTRIES: usize = 10_000;
+pub const MAX_COMMIT_PARENTS: usize = 64;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ArchiveLimits {
+    pub max_file_bytes: u64,
+    pub max_scope_bytes: u64,
+}
+
+impl ArchiveLimits {
+    #[must_use]
+    pub const fn new(max_file_bytes: u64, max_scope_bytes: u64) -> Self {
+        Self {
+            max_file_bytes,
+            max_scope_bytes,
+        }
+    }
+}
+
+impl Default for ArchiveLimits {
+    fn default() -> Self {
+        Self::new(
+            DEFAULT_MAX_ARCHIVE_FILE_BYTES,
+            DEFAULT_MAX_ARCHIVE_SCOPE_BYTES,
+        )
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ScopeIdentity {
+    pub scope_id: String,
+    pub canonical_root: PathBuf,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingNormalizeRef {
+    pub expected_raw_hash: String,
+    pub normalize: NormalizeRef,
+}
+
+#[derive(Debug)]
+struct WorkingFileCandidate {
+    path: PathBuf,
+    file_name: String,
+}
+
 #[derive(Debug, Clone)]
 pub struct Repository {
     root: PathBuf,
@@ -134,8 +183,15 @@ impl Repository {
 
         let root = root.canonicalize().kcs_io(root)?;
         let kcs_dir = root.join(".kcs");
-        if kcs_dir.exists() {
-            return Self::open(root);
+        match fs::symlink_metadata(&kcs_dir) {
+            Ok(_) => return Self::open(root),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(KcsError::io(
+                    error.to_string(),
+                    kcs_dir.display().to_string(),
+                ))
+            }
         }
 
         for dir in [
@@ -188,9 +244,7 @@ impl Repository {
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let root = path.as_ref().canonicalize().kcs_io(path.as_ref())?;
         let kcs_dir = root.join(".kcs");
-        if !kcs_dir.is_dir() {
-            return Err(KcsError::invalid_usage("not a kcs scope"));
-        }
+        validate_store_directory(&kcs_dir)?;
 
         let repo = Self {
             root,
@@ -221,6 +275,17 @@ impl Repository {
         &self.kcs_dir
     }
 
+    /// Return the portable scope ID together with the canonical local root.
+    /// Authorization callers must bind both values to protected device-local
+    /// state; `scope.json` alone is portable audit data, not active consent.
+    pub fn scope_identity(&self) -> Result<ScopeIdentity> {
+        validate_store_directory(&self.kcs_dir)?;
+        Ok(ScopeIdentity {
+            scope_id: self.validated_scope_id()?,
+            canonical_root: self.root.clone(),
+        })
+    }
+
     /// Acquire the exclusive `.kcs/.lock` store lock (05 §6) and return an RAII
     /// guard held for the caller's lifetime. Used to serialize whole mutating
     /// commands (`kcs index` / `repair` / `reindex`) end-to-end, not just their
@@ -233,6 +298,7 @@ impl Repository {
     }
 
     pub fn validate(&self) -> Result<()> {
+        validate_store_directory(&self.kcs_dir)?;
         self.validate_config()?;
         self.validate_scope()?;
         self.validate_manifest()?;
@@ -257,7 +323,132 @@ impl Repository {
         excluded_paths: &BTreeSet<String>,
         normalize_by_path: &BTreeMap<String, NormalizeRef>,
     ) -> Result<WorkingTree> {
+        if !normalize_by_path.is_empty() {
+            return Err(KcsError::invalid_usage(
+                "normalization metadata must include its expected raw hash",
+            ));
+        }
+        self.build_working_tree_with_limits(
+            store_raw,
+            excluded_paths,
+            normalize_by_path,
+            ArchiveLimits::default(),
+        )
+    }
+
+    pub fn build_working_tree_with_limits(
+        &self,
+        store_raw: bool,
+        excluded_paths: &BTreeSet<String>,
+        normalize_by_path: &BTreeMap<String, NormalizeRef>,
+        limits: ArchiveLimits,
+    ) -> Result<WorkingTree> {
+        if !normalize_by_path.is_empty() {
+            return Err(KcsError::invalid_usage(
+                "normalization metadata must include its expected raw hash",
+            ));
+        }
+        self.build_working_tree_with_bound_normalize_and_limits(
+            store_raw,
+            excluded_paths,
+            &BTreeMap::new(),
+            &BTreeSet::new(),
+            limits,
+        )
+    }
+
+    pub fn build_working_tree_with_bound_normalize_and_limits(
+        &self,
+        store_raw: bool,
+        excluded_paths: &BTreeSet<String>,
+        normalize_by_path: &BTreeMap<String, PendingNormalizeRef>,
+        explicitly_allowed_tier_a_paths: &BTreeSet<String>,
+        limits: ArchiveLimits,
+    ) -> Result<WorkingTree> {
+        if limits.max_file_bytes > MAX_RAW_OBJECT_BYTES {
+            return Err(KcsError::invalid_usage(
+                "archive max_file_bytes exceeds the raw CAS object limit",
+            ));
+        }
+
+        let candidates = self.working_file_candidates(
+            excluded_paths,
+            explicitly_allowed_tier_a_paths,
+            store_raw,
+            limits,
+        )?;
         let mut entries = Vec::new();
+        let mut consumed_scope_bytes = 0_u64;
+        for candidate in candidates {
+            let mut file = open_scope_file_nofollow(&candidate.path)?;
+            let metadata = file.metadata().kcs_io(&candidate.path)?;
+            let remaining = limits
+                .max_scope_bytes
+                .checked_sub(consumed_scope_bytes)
+                .ok_or_else(|| scope_input_oversized(&candidate.file_name, limits, u64::MAX))?;
+            let allowed = limits.max_file_bytes.min(remaining);
+            if metadata.len() > allowed {
+                return Err(scope_input_oversized(
+                    &candidate.file_name,
+                    limits,
+                    metadata.len(),
+                ));
+            }
+            let (raw_hash, consumed) = if store_raw {
+                match self.store.write_raw_reader(&mut file, allowed) {
+                    Ok(result) => result,
+                    Err(error) if error.error_code() == "KCS-E-STORE-OBJECT-OVERSIZED-001" => {
+                        return Err(scope_input_oversized(
+                            &candidate.file_name,
+                            limits,
+                            allowed.saturating_add(1),
+                        ))
+                    }
+                    Err(error) => return Err(error),
+                }
+            } else {
+                hash_scope_file(
+                    &mut file,
+                    &candidate.path,
+                    &candidate.file_name,
+                    allowed,
+                    limits,
+                )?
+            };
+            if file.metadata().kcs_io(&candidate.path)?.len() != consumed {
+                return Err(scope_file_changed(&candidate.file_name));
+            }
+            consumed_scope_bytes = consumed_scope_bytes
+                .checked_add(consumed)
+                .ok_or_else(|| scope_input_oversized(&candidate.file_name, limits, u64::MAX))?;
+            let mut tree_entry = TreeEntry::raw_file(candidate.file_name.clone(), raw_hash)?;
+            if let Some(pending) = normalize_by_path.get(&candidate.file_name) {
+                if pending.expected_raw_hash == tree_entry.raw_hash {
+                    tree_entry.normalize = Some(pending.normalize.clone());
+                } else {
+                    eprintln!(
+                        "warning: normalization metadata not attached because {} changed after normalization",
+                        candidate.file_name
+                    );
+                }
+            }
+            tree_entry.validate()?;
+            entries.push(tree_entry);
+        }
+        Ok(WorkingTree {
+            tree: build_tree(entries)?,
+        })
+    }
+
+    fn working_file_candidates(
+        &self,
+        excluded_paths: &BTreeSet<String>,
+        explicitly_allowed_tier_a_paths: &BTreeSet<String>,
+        enforce_tier_a: bool,
+        limits: ArchiveLimits,
+    ) -> Result<Vec<WorkingFileCandidate>> {
+        let mut candidates = Vec::new();
+        let mut declared_scope_bytes = 0_u64;
         for entry in fs::read_dir(&self.root).kcs_io(&self.root)? {
             let entry = entry.kcs_io(&self.root)?;
             if entry.file_name() == ".kcs" {
@@ -265,9 +456,6 @@ impl Repository {
             }
             let path = entry.path();
             let file_type = entry.file_type().kcs_io(&path)?;
-            // Subfolders are out of scope (03 §3: direct children only) and are
-            // skipped silently. Symlinks / other non-regular files are skipped
-            // with a warning so the omission is visible (WS1c S5, 10 §4).
             if file_type.is_dir() {
                 continue;
             }
@@ -275,8 +463,6 @@ impl Repository {
                 eprintln!("warning: skipping non-regular file: {}", path.display());
                 continue;
             }
-            // A non-UTF-8 file name cannot be a tree entry path; warn and skip
-            // rather than failing the whole snapshot (WS1c S6).
             let file_name = match entry.file_name().into_string() {
                 Ok(name) => name,
                 Err(_) => {
@@ -287,20 +473,36 @@ impl Repository {
             if excluded_paths.contains(&file_name) {
                 continue;
             }
-            let bytes = fs::read(&path).kcs_io(&path)?;
-            let raw_hash = if store_raw {
-                self.store.write_raw(&bytes)?
-            } else {
-                hash_bytes(&bytes)
-            };
-            let mut tree_entry = TreeEntry::raw_file(file_name.clone(), raw_hash)?;
-            tree_entry.normalize = normalize_by_path.get(&file_name).cloned();
-            tree_entry.validate()?;
-            entries.push(tree_entry);
+            if enforce_tier_a
+                && is_tier_a_secret_name(&file_name)
+                && !explicitly_allowed_tier_a_paths.contains(&file_name)
+            {
+                eprintln!("warning: skipping Tier-A secret file: {file_name}");
+                continue;
+            }
+            if candidates.len() == MAX_TREE_ENTRIES {
+                return Err(scope_tree_entries_oversized(
+                    candidates.len().saturating_add(1),
+                ));
+            }
+            let file = open_scope_file_nofollow(&path)?;
+            let metadata = file.metadata().kcs_io(&path)?;
+            if metadata.len() > limits.max_file_bytes {
+                return Err(scope_input_oversized(&file_name, limits, metadata.len()));
+            }
+            declared_scope_bytes = declared_scope_bytes
+                .checked_add(metadata.len())
+                .ok_or_else(|| scope_input_oversized(&file_name, limits, u64::MAX))?;
+            if declared_scope_bytes > limits.max_scope_bytes {
+                return Err(scope_input_oversized(
+                    &file_name,
+                    limits,
+                    declared_scope_bytes,
+                ));
+            }
+            candidates.push(WorkingFileCandidate { path, file_name });
         }
-        Ok(WorkingTree {
-            tree: build_tree(entries)?,
-        })
+        Ok(candidates)
     }
 
     pub fn status(&self) -> Result<StatusReport> {
@@ -365,16 +567,24 @@ impl Repository {
         self.snapshot_filtered(message, fixed_now, &BTreeSet::new())
     }
 
-    /// Manual snapshot that honors an `excluded_paths` filter (N2). `kcs core`
-    /// has no notion of secrets; the CLI computes the Tier A exclusion set from
-    /// `build_scan_preview` and passes it here so a manual `kcs snapshot` cannot
-    /// bake `.env`/`*.pem` plaintext into the CAS + tree (10 §1.1 "CAS 保存・
-    /// snapshot 取り込みを行わない"). Same exclusion channel `kcs index` uses.
+    /// Manual snapshot that honors preview exclusions and reclassifies Tier-A
+    /// names at the final read boundary. The policy-aware variant preserves an
+    /// explicit local-only Tier-A unignore from the same preview.
     pub fn snapshot_filtered(
         &self,
         message: Option<&str>,
         fixed_now: Option<&str>,
         excluded_paths: &BTreeSet<String>,
+    ) -> Result<SnapshotOutcome> {
+        self.snapshot_filtered_with_policy(message, fixed_now, excluded_paths, &BTreeSet::new())
+    }
+
+    pub fn snapshot_filtered_with_policy(
+        &self,
+        message: Option<&str>,
+        fixed_now: Option<&str>,
+        excluded_paths: &BTreeSet<String>,
+        explicitly_allowed_tier_a_paths: &BTreeSet<String>,
     ) -> Result<SnapshotOutcome> {
         self.snapshot_with_type(
             message,
@@ -382,6 +592,7 @@ impl Repository {
             CommitType::Manual,
             excluded_paths,
             &BTreeMap::new(),
+            explicitly_allowed_tier_a_paths,
         )
     }
 
@@ -391,7 +602,14 @@ impl Repository {
         fixed_now: Option<&str>,
         excluded_paths: &BTreeSet<String>,
     ) -> Result<SnapshotOutcome> {
-        self.auto_snapshot_with_normalize(message, fixed_now, excluded_paths, &BTreeMap::new())
+        self.snapshot_with_type(
+            message,
+            fixed_now,
+            CommitType::Auto,
+            excluded_paths,
+            &BTreeMap::new(),
+            &BTreeSet::new(),
+        )
     }
 
     pub fn auto_snapshot_with_normalize(
@@ -401,12 +619,35 @@ impl Repository {
         excluded_paths: &BTreeSet<String>,
         normalize_by_path: &BTreeMap<String, NormalizeRef>,
     ) -> Result<SnapshotOutcome> {
+        if !normalize_by_path.is_empty() {
+            return Err(KcsError::invalid_usage(
+                "normalization metadata must include its expected raw hash",
+            ));
+        }
+        self.auto_snapshot_with_bound_normalize(
+            message,
+            fixed_now,
+            excluded_paths,
+            &BTreeMap::new(),
+            &BTreeSet::new(),
+        )
+    }
+
+    pub fn auto_snapshot_with_bound_normalize(
+        &self,
+        message: Option<&str>,
+        fixed_now: Option<&str>,
+        excluded_paths: &BTreeSet<String>,
+        normalize_by_path: &BTreeMap<String, PendingNormalizeRef>,
+        explicitly_allowed_tier_a_paths: &BTreeSet<String>,
+    ) -> Result<SnapshotOutcome> {
         self.snapshot_with_type(
             message,
             fixed_now,
             CommitType::Auto,
             excluded_paths,
             normalize_by_path,
+            explicitly_allowed_tier_a_paths,
         )
     }
 
@@ -416,14 +657,21 @@ impl Repository {
         fixed_now: Option<&str>,
         commit_type: CommitType,
         excluded_paths: &BTreeSet<String>,
-        normalize_by_path: &BTreeMap<String, NormalizeRef>,
+        normalize_by_path: &BTreeMap<String, PendingNormalizeRef>,
+        explicitly_allowed_tier_a_paths: &BTreeSet<String>,
     ) -> Result<SnapshotOutcome> {
         self.validate()?;
         let _lock = StoreLock::acquire(&self.kcs_dir)?;
         maybe_hold_lock_for_tests();
 
         let working = self
-            .build_working_tree_with_normalize(true, excluded_paths, normalize_by_path)?
+            .build_working_tree_with_bound_normalize_and_limits(
+                true,
+                excluded_paths,
+                normalize_by_path,
+                explicitly_allowed_tier_a_paths,
+                ArchiveLimits::default(),
+            )?
             .tree;
         let tree_value =
             serde_json::to_value(&working).map_err(|err| KcsError::schema(err.to_string()))?;
@@ -622,17 +870,13 @@ impl Repository {
 
     pub fn inspect(&self, hash: &str) -> Result<InspectedObject> {
         self.validate()?;
-        let object = self.store.read_by_hash(hash)?;
+        let object = self.store.inspect_by_hash(hash)?;
         match object.kind {
-            ObjectKind::Tree => serde_json::from_slice(&object.bytes)
-                .map(InspectedObject::Tree)
-                .map_err(|err| KcsError::schema(err.to_string())),
-            ObjectKind::Commit => serde_json::from_slice(&object.bytes)
-                .map(InspectedObject::Commit)
-                .map_err(|err| KcsError::schema(err.to_string())),
+            ObjectKind::Tree => self.read_tree(hash).map(InspectedObject::Tree),
+            ObjectKind::Commit => self.read_commit(hash).map(InspectedObject::Commit),
             ObjectKind::Raw => Ok(InspectedObject::Raw {
                 raw_hash: object.hash,
-                size_bytes: object.bytes.len() as u64,
+                size_bytes: object.size_bytes,
             }),
         }
     }
@@ -744,7 +988,15 @@ impl Repository {
         if object.kind != ObjectKind::Commit {
             return Err(KcsError::schema("hash does not identify a commit"));
         }
-        serde_json::from_slice(&object.bytes).map_err(|err| KcsError::schema(err.to_string()))
+        let commit: CommitObject = serde_json::from_slice(&object.bytes)
+            .map_err(|err| KcsError::schema(err.to_string()))?;
+        if commit.parents.len() > MAX_COMMIT_PARENTS {
+            return Err(KcsError::schema(format!(
+                "commit parents exceed the limit of {MAX_COMMIT_PARENTS}"
+            )));
+        }
+        commit.validate()?;
+        Ok(commit)
     }
 
     pub fn read_tree(&self, hash: &str) -> Result<TreeObject> {
@@ -752,7 +1004,15 @@ impl Repository {
         if object.kind != ObjectKind::Tree {
             return Err(KcsError::schema("hash does not identify a tree"));
         }
-        serde_json::from_slice(&object.bytes).map_err(|err| KcsError::schema(err.to_string()))
+        let tree: TreeObject = serde_json::from_slice(&object.bytes)
+            .map_err(|err| KcsError::schema(err.to_string()))?;
+        if tree.entries.len() > MAX_TREE_ENTRIES {
+            return Err(KcsError::schema(format!(
+                "tree entries exceed the limit of {MAX_TREE_ENTRIES}"
+            )));
+        }
+        tree.validate()?;
+        Ok(tree)
     }
 
     pub fn head_commit_hash(&self) -> Result<Option<String>> {
@@ -887,6 +1147,10 @@ impl Repository {
     }
 
     fn validate_scope(&self) -> Result<()> {
+        self.validated_scope_id().map(|_| ())
+    }
+
+    fn validated_scope_id(&self) -> Result<String> {
         let path = self.kcs_dir.join("scope.json");
         let value: Value = serde_json::from_str(&fs::read_to_string(&path).kcs_io(&path)?)
             .map_err(|err| KcsError::schema(err.to_string()))?;
@@ -906,7 +1170,7 @@ impl Repository {
                 .ok_or_else(|| KcsError::schema("kcs_format_version must be a string"))?;
             validate_format_version(version)?;
         }
-        Ok(())
+        Ok(scope_id.to_owned())
     }
 
     fn validate_manifest(&self) -> Result<()> {
@@ -1439,10 +1703,10 @@ fn append_observation(
     )
 }
 
-/// Replace every absolute-path-looking token (a whitespace-delimited run that
-/// starts with `/`) in a log message with `[redacted]` (P4). Whitespace is
-/// preserved exactly. This is deliberately conservative: relative tokens are
-/// left alone; the leak sources all emit absolute paths via `path.display()`.
+/// Replace every absolute-path-looking token (a whitespace-delimited run) in a
+/// log message with `[redacted]` (P4). Whitespace is preserved exactly. This is
+/// deliberately conservative: relative tokens are left alone; the leak sources
+/// all emit absolute paths via `path.display()`.
 fn redact_message_paths(message: &str) -> String {
     let mut out = String::with_capacity(message.len());
     let mut token = String::new();
@@ -1460,11 +1724,22 @@ fn redact_message_paths(message: &str) -> String {
 }
 
 fn push_redacted_token(token: &str, out: &mut String) {
-    if token.starts_with('/') && token.len() > 1 {
+    if looks_like_absolute_path_token(token) {
         out.push_str("[redacted]");
     } else {
         out.push_str(token);
     }
+}
+
+fn looks_like_absolute_path_token(token: &str) -> bool {
+    let bytes = token.as_bytes();
+    let windows_drive_absolute = bytes.len() >= 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && matches!(bytes[2], b'\\' | b'/');
+    let windows_unc_absolute = token.len() > 2 && token.starts_with(r"\\");
+
+    (token.len() > 1 && token.starts_with('/')) || windows_drive_absolute || windows_unc_absolute
 }
 
 /// Whether `redact_logs` is in effect (06 §8 default true). Read from the user
@@ -1645,6 +1920,270 @@ fn data_home() -> PathBuf {
     crate::xdg::xdg_dir("XDG_DATA_HOME")
         .or_else(|| crate::xdg::home_dir().map(|home| home.join(".local/share")))
         .unwrap_or_else(|| PathBuf::from("."))
+}
+
+/// Built-in Tier-A name policy applied again at the closing archive read.
+/// Keep this predicate aligned with `kcs_pipeline::scan::classify_secret`;
+/// callers pass explicitly unignored Tier-A paths separately.
+#[must_use]
+pub fn is_tier_a_secret_name(path: &str) -> bool {
+    let normalized = path.trim_start_matches('/').replace('\\', "/");
+    let name = normalized.rsplit('/').next().unwrap_or(&normalized);
+    let lower = name.to_ascii_lowercase();
+    let lower_path = normalized.to_ascii_lowercase();
+    let tier_a_path = lower_path == ".kube/config"
+        || lower_path == ".docker/config.json"
+        || lower_path.starts_with(".ssh/")
+        || lower_path.starts_with(".gnupg/")
+        || lower_path.starts_with(".aws/")
+        || lower_path.starts_with(".kube/")
+        || lower_path.starts_with(".docker/");
+    lower == ".env"
+        || lower.starts_with(".env.")
+        || lower == ".ssh"
+        || lower == ".gnupg"
+        || lower == ".aws"
+        || lower == ".kube"
+        || lower == ".docker"
+        || lower.ends_with(".pem")
+        || lower.ends_with(".key")
+        || lower.ends_with(".p12")
+        || lower.ends_with(".pfx")
+        || lower.starts_with("id_rsa")
+        || lower.starts_with("id_ecdsa")
+        || lower.starts_with("id_ed25519")
+        || lower.ends_with(".keystore")
+        || lower == ".netrc"
+        || lower == ".npmrc"
+        || lower == ".pypirc"
+        || lower.ends_with(".tfstate")
+        || lower.contains(".tfstate.")
+        || tier_a_path
+}
+
+fn validate_store_directory(kcs_dir: &Path) -> Result<()> {
+    let metadata = match fs::symlink_metadata(kcs_dir) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Err(KcsError::invalid_usage("not a kcs scope"))
+        }
+        Err(error) => {
+            return Err(KcsError::io(
+                error.to_string(),
+                kcs_dir.display().to_string(),
+            ))
+        }
+    };
+    if metadata.file_type().is_symlink() || !metadata.file_type().is_dir() {
+        return Err(unsafe_store_error(
+            kcs_dir,
+            ".kcs must be a real directory inside the selected scope root",
+        ));
+    }
+    let resolved = kcs_dir.canonicalize().kcs_io(kcs_dir)?;
+    if resolved != kcs_dir {
+        return Err(unsafe_store_error(
+            kcs_dir,
+            ".kcs resolves outside the selected scope root",
+        ));
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+        if metadata.permissions().mode() & 0o077 != 0 {
+            return Err(unsafe_store_error(
+                kcs_dir,
+                ".kcs must not be accessible to group or other principals",
+            ));
+        }
+        if metadata.uid() != effective_uid() {
+            return Err(unsafe_store_error(
+                kcs_dir,
+                ".kcs must be owned by the current effective user",
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn effective_uid() -> u32 {
+    extern "C" {
+        fn geteuid() -> u32;
+    }
+    // SAFETY: geteuid has no preconditions and only returns process metadata.
+    unsafe { geteuid() }
+}
+
+fn unsafe_store_error(path: &Path, message: &str) -> KcsError {
+    KcsError::new(
+        "KCS-E-STORE-UNSAFE-001",
+        message,
+        json!({ "kcs_path": path }),
+        ExitCode::PermanentFailure,
+    )
+}
+
+fn open_scope_file_nofollow(path: &Path) -> Result<File> {
+    let before = fs::symlink_metadata(path).kcs_io(path)?;
+    if before.file_type().is_symlink() || !before.file_type().is_file() {
+        return Err(scope_file_changed_path(path));
+    }
+
+    let mut options = OpenOptions::new();
+    options.read(true);
+    configure_scope_no_follow(&mut options);
+    let file = options.open(path).kcs_io(path)?;
+    let opened = file.metadata().kcs_io(path)?;
+    let after = fs::symlink_metadata(path).kcs_io(path)?;
+    #[cfg(windows)]
+    let same_identity = {
+        let mut verification_options = OpenOptions::new();
+        verification_options.read(true);
+        configure_scope_no_follow(&mut verification_options);
+        let verification = verification_options.open(path).kcs_io(path)?;
+        verification.metadata().kcs_io(path)?.is_file()
+            && same_scope_file_identity(&file, &verification)
+    };
+    #[cfg(not(windows))]
+    let same_identity = same_scope_file_identity(&opened, &after);
+    if !opened.is_file()
+        || after.file_type().is_symlink()
+        || !after.file_type().is_file()
+        || !same_identity
+    {
+        return Err(scope_file_changed_path(path));
+    }
+    Ok(file)
+}
+
+#[cfg(unix)]
+fn configure_scope_no_follow(options: &mut OpenOptions) {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    options.custom_flags(0x20_800);
+    #[cfg(any(
+        target_os = "macos",
+        target_os = "ios",
+        target_os = "freebsd",
+        target_os = "openbsd",
+        target_os = "netbsd",
+        target_os = "dragonfly"
+    ))]
+    options.custom_flags(0x104);
+    let _ = options;
+}
+
+#[cfg(windows)]
+fn configure_scope_no_follow(options: &mut OpenOptions) {
+    use std::os::windows::fs::OpenOptionsExt;
+    options.custom_flags(0x0020_0000);
+}
+
+#[cfg(not(any(unix, windows)))]
+fn configure_scope_no_follow(_options: &mut OpenOptions) {}
+
+#[cfg(unix)]
+fn same_scope_file_identity(opened: &fs::Metadata, path: &fs::Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    opened.dev() == path.dev() && opened.ino() == path.ino()
+}
+
+#[cfg(windows)]
+fn same_scope_file_identity(opened: &File, path: &File) -> bool {
+    crate::cas::same_windows_regular_file(opened, path)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn same_scope_file_identity(opened: &fs::Metadata, path: &fs::Metadata) -> bool {
+    opened.len() == path.len() && opened.modified().ok() == path.modified().ok()
+}
+
+fn hash_scope_file(
+    file: &mut File,
+    path: &Path,
+    file_name: &str,
+    allowed: u64,
+    limits: ArchiveLimits,
+) -> Result<(String, u64)> {
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; CAS_STREAM_BUFFER_BYTES];
+    let mut total = 0_u64;
+    loop {
+        let read_cap = allowed
+            .saturating_sub(total)
+            .saturating_add(1)
+            .min(buffer.len() as u64) as usize;
+        let count = file.read(&mut buffer[..read_cap]).kcs_io(path)?;
+        if count == 0 {
+            break;
+        }
+        total = total
+            .checked_add(count as u64)
+            .ok_or_else(|| scope_input_oversized(file_name, limits, u64::MAX))?;
+        if total > allowed {
+            return Err(scope_input_oversized(file_name, limits, total));
+        }
+        hasher.update(&buffer[..count]);
+    }
+    Ok((format!("sha256:{}", hex_digest(&hasher.finalize())), total))
+}
+
+fn hex_digest(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        out.push(HEX[(byte >> 4) as usize] as char);
+        out.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    out
+}
+
+fn scope_input_oversized(file_name: &str, limits: ArchiveLimits, actual: u64) -> KcsError {
+    KcsError::new(
+        "KCS-E-SCOPE-INPUT-OVERSIZED-001",
+        "scope input exceeds the core archive byte budget",
+        json!({
+            "path": file_name,
+            "actual_bytes": actual,
+            "max_file_bytes": limits.max_file_bytes,
+            "max_scope_bytes": limits.max_scope_bytes,
+        }),
+        ExitCode::PermanentFailure,
+    )
+}
+
+fn scope_tree_entries_oversized(observed: usize) -> KcsError {
+    KcsError::new(
+        "KCS-E-SCOPE-INPUT-OVERSIZED-001",
+        "scope tree entry count exceeds the persisted tree limit",
+        json!({
+            "observed_entries": observed,
+            "max_tree_entries": MAX_TREE_ENTRIES,
+        }),
+        ExitCode::PermanentFailure,
+    )
+}
+
+fn scope_file_changed(file_name: &str) -> KcsError {
+    KcsError::new(
+        "KCS-E-SCOPE-FILE-CHANGED-001",
+        "scope file changed while it was being archived",
+        json!({ "path": file_name }),
+        ExitCode::Failure,
+    )
+}
+
+fn scope_file_changed_path(path: &Path) -> KcsError {
+    KcsError::new(
+        "KCS-E-SCOPE-FILE-CHANGED-001",
+        "scope path no longer identifies the checked regular file",
+        json!({ "path": path }),
+        ExitCode::Failure,
+    )
 }
 
 /// Restrict a directory that may hold document bytes / secrets / usage data to
@@ -1912,6 +2451,42 @@ fn lock_file_matches(path: &Path, pid: u32, token: &str) -> Result<bool> {
     Ok(read_lock_file(path)?.is_some_and(|lock| lock.pid == pid && lock.token == token))
 }
 
+#[cfg(windows)]
+fn process_is_alive(pid: u32) -> bool {
+    if pid == std::process::id() {
+        return true;
+    }
+
+    use windows_sys::Win32::Foundation::{
+        CloseHandle, GetLastError, ERROR_INVALID_PARAMETER, STILL_ACTIVE,
+    };
+    use windows_sys::Win32::System::Threading::{
+        GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+
+    // SAFETY: `OpenProcess` is called with a PID read from the lock file and no
+    // inheritable handle. A null handle is never passed to the query/close calls.
+    let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+    if process.is_null() {
+        // Windows documents ERROR_INVALID_PARAMETER for a PID that does not name
+        // a process (including PID 0). Access denial and every other query error
+        // are ambiguous, so keep the lock rather than reclaiming a live owner's.
+        return unsafe { GetLastError() } != ERROR_INVALID_PARAMETER;
+    }
+
+    let mut exit_code = 0_u32;
+    // SAFETY: `process` is a valid handle returned by `OpenProcess`, and
+    // `exit_code` points to writable storage for the duration of the call.
+    let queried = unsafe { GetExitCodeProcess(process, &mut exit_code) } != 0;
+    // SAFETY: this function owns the process handle and closes it exactly once.
+    let _ = unsafe { CloseHandle(process) };
+
+    // A query failure is ambiguous. Conservatively retain the lock; otherwise,
+    // STILL_ACTIVE is the documented marker for a process that has not exited.
+    !queried || exit_code == STILL_ACTIVE as u32
+}
+
+#[cfg(not(windows))]
 fn process_is_alive(pid: u32) -> bool {
     if pid == std::process::id() {
         return true;
@@ -2124,11 +2699,27 @@ pub fn parse_utc_seconds(value: &str) -> Option<i64> {
 mod tests {
     use super::{
         append_jsonl_rotating, civil_from_days, format_unix_seconds, format_utc_seconds,
-        parse_utc_seconds, prune_rotated_logs, read_logs_retention_days, redact_context,
-        redact_message_paths, rotate_stale_log, StoreLock,
+        open_scope_file_nofollow, parse_utc_seconds, process_is_alive, prune_rotated_logs,
+        read_logs_retention_days, redact_context, redact_message_paths, rotate_stale_log,
+        ArchiveLimits, PendingNormalizeRef, Repository, StoreLock, DEFAULT_MAX_ARCHIVE_FILE_BYTES,
+        MAX_COMMIT_PARENTS, MAX_TREE_ENTRIES,
     };
+    use crate::cas::{hash_bytes, ObjectKind, ObjectStore};
+    use crate::dag::NormalizeRef;
     use serde_json::json;
+    use std::collections::{BTreeMap, BTreeSet};
     use std::fs;
+
+    #[test]
+    fn process_liveness_recognizes_current_process() {
+        assert!(process_is_alive(std::process::id()));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_process_liveness_rejects_reserved_pid_zero() {
+        assert!(!process_is_alive(0));
+    }
 
     // F8: the device-global cost-ledger lock is acquired via `acquire_path` at an
     // arbitrary path outside any `.kcs`. It must create the parent dir, remove the
@@ -2179,6 +2770,28 @@ mod tests {
             "scope registry write failed (recover with index)"
         );
         assert!(!redact_message_paths("read /etc/hosts now").contains("/etc/hosts"));
+        assert_eq!(
+            redact_message_paths(
+                r"corrupt store file at C:\Users\runner\.kcs\tasks.jsonl: expected value"
+            ),
+            "corrupt store file at [redacted] expected value"
+        );
+        assert_eq!(
+            redact_message_paths("read C:/Users/runner/.kcs/tasks.jsonl now"),
+            "read [redacted] now"
+        );
+        assert_eq!(
+            redact_message_paths(r"io error at \\server\share\scope\.kcs\tasks.jsonl: denied"),
+            "io error at [redacted] denied"
+        );
+        assert_eq!(
+            redact_message_paths(r"read \\?\C:\scope\.kcs\tasks.jsonl now"),
+            "read [redacted] now"
+        );
+        assert_eq!(
+            redact_message_paths(r"relative C:scope\.kcs\tasks.jsonl is unchanged"),
+            r"relative C:scope\.kcs\tasks.jsonl is unchanged"
+        );
     }
 
     #[test]
@@ -2334,6 +2947,333 @@ mod tests {
         assert_eq!(civil_from_days(47_541), (2100, 3, 1));
         // Negative day index -> proleptic pre-epoch date.
         assert_eq!(civil_from_days(-1), (1969, 12, 31));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cand_008_symlinked_kcs_store_is_rejected() {
+        use std::os::unix::fs::symlink;
+
+        let victim = tempfile::tempdir().unwrap();
+        let victim_repo = Repository::init(victim.path()).unwrap();
+        let lure = tempfile::tempdir().unwrap();
+        symlink(victim_repo.kcs_dir(), lure.path().join(".kcs")).unwrap();
+
+        let error = Repository::open(lure.path()).unwrap_err();
+        assert_eq!(error.error_code(), "KCS-E-STORE-UNSAFE-001");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cand_024_existing_store_requires_private_owner_mode() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+        let dir = tempfile::tempdir().unwrap();
+        let repo = Repository::init(dir.path()).unwrap();
+        let kcs_dir = repo.kcs_dir().to_path_buf();
+        assert_eq!(
+            fs::metadata(&kcs_dir).unwrap().uid(),
+            super::effective_uid()
+        );
+
+        fs::set_permissions(&kcs_dir, fs::Permissions::from_mode(0o755)).unwrap();
+        let error = Repository::open(dir.path()).unwrap_err();
+        assert_eq!(error.error_code(), "KCS-E-STORE-UNSAFE-001");
+
+        fs::set_permissions(&kcs_dir, fs::Permissions::from_mode(0o700)).unwrap();
+        Repository::open(dir.path()).unwrap();
+        fs::set_permissions(&kcs_dir, fs::Permissions::from_mode(0o500)).unwrap();
+        Repository::open(dir.path()).unwrap();
+        fs::set_permissions(&kcs_dir, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+
+    #[test]
+    fn cand_025_scope_identity_binds_portable_id_to_canonical_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = Repository::init(dir.path()).unwrap();
+        let identity = repo.scope_identity().unwrap();
+        assert_eq!(identity.canonical_root, dir.path().canonicalize().unwrap());
+        assert!(!identity.scope_id.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cand_018_checked_regular_replaced_by_symlink_is_never_opened() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("report.txt");
+        fs::write(&path, b"benign").unwrap();
+        let entry = fs::read_dir(dir.path()).unwrap().next().unwrap().unwrap();
+        assert!(entry.file_type().unwrap().is_file());
+
+        let original = dir.path().join("original.txt");
+        let outside = dir.path().join("outside.txt");
+        fs::rename(&path, &original).unwrap();
+        fs::write(&outside, b"outside marker").unwrap();
+        symlink(&outside, &path).unwrap();
+
+        assert!(open_scope_file_nofollow(&path).is_err());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn cand_018_windows_scope_identity_rejects_distinct_equal_sized_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = dir.path().join("first.txt");
+        let second = dir.path().join("second.txt");
+        fs::write(&first, b"same-size").unwrap();
+        fs::write(&second, b"same-size").unwrap();
+        let first_handle = fs::File::open(&first).unwrap();
+        let same_handle = fs::File::open(&first).unwrap();
+        let second_handle = fs::File::open(&second).unwrap();
+
+        assert!(super::same_scope_file_identity(&first_handle, &same_handle));
+        assert!(!super::same_scope_file_identity(
+            &first_handle,
+            &second_handle
+        ));
+        assert!(open_scope_file_nofollow(&first).is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cand_018_stable_symlink_remains_skipped() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let repo = Repository::init(dir.path()).unwrap();
+        let outside = dir.path().join("outside-source");
+        fs::write(&outside, b"outside marker").unwrap();
+        symlink(&outside, dir.path().join("linked.txt")).unwrap();
+        let tree = repo.build_working_tree(false).unwrap().tree;
+        assert!(tree.entries.iter().all(|entry| entry.path != "linked.txt"));
+    }
+
+    #[test]
+    fn cand_019_archive_limits_accept_exact_and_reject_plus_one_and_aggregate() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = Repository::init(dir.path()).unwrap();
+        let empty_paths = BTreeSet::new();
+        let empty_normalize = BTreeMap::new();
+        let limit = 64 * 1024;
+        fs::write(dir.path().join("exact.bin"), vec![b'x'; limit]).unwrap();
+        repo.build_working_tree_with_limits(
+            false,
+            &empty_paths,
+            &empty_normalize,
+            ArchiveLimits::new(limit as u64, limit as u64),
+        )
+        .unwrap();
+
+        fs::write(dir.path().join("exact.bin"), vec![b'x'; limit + 1]).unwrap();
+        let error = repo
+            .build_working_tree_with_limits(
+                false,
+                &empty_paths,
+                &empty_normalize,
+                ArchiveLimits::new(limit as u64, (2 * limit) as u64),
+            )
+            .unwrap_err();
+        assert_eq!(error.error_code(), "KCS-E-SCOPE-INPUT-OVERSIZED-001");
+
+        fs::write(dir.path().join("exact.bin"), vec![b'x'; 40 * 1024]).unwrap();
+        fs::write(dir.path().join("second.bin"), vec![b'y'; 40 * 1024]).unwrap();
+        let error = repo
+            .build_working_tree_with_limits(
+                false,
+                &empty_paths,
+                &empty_normalize,
+                ArchiveLimits::new(limit as u64, limit as u64),
+            )
+            .unwrap_err();
+        assert_eq!(error.error_code(), "KCS-E-SCOPE-INPUT-OVERSIZED-001");
+    }
+
+    #[test]
+    fn cand_019_oversized_sparse_snapshot_does_not_advance_head_or_write_raw() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = Repository::init(dir.path()).unwrap();
+        let path = dir.path().join("oversized.bin");
+        let file = fs::File::create(&path).unwrap();
+        file.set_len(DEFAULT_MAX_ARCHIVE_FILE_BYTES + 1).unwrap();
+        let head_before = fs::read(repo.kcs_dir().join("HEAD")).unwrap();
+
+        let error = repo.snapshot(Some("oversized"), None).unwrap_err();
+        assert_eq!(error.error_code(), "KCS-E-SCOPE-INPUT-OVERSIZED-001");
+        assert_eq!(fs::read(repo.kcs_dir().join("HEAD")).unwrap(), head_before);
+        assert_eq!(
+            fs::read_dir(repo.kcs_dir().join("objects/raw"))
+                .unwrap()
+                .count(),
+            0
+        );
+    }
+
+    #[test]
+    fn cand_041_closing_snapshot_reclassifies_new_tier_a_names() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = Repository::init(dir.path()).unwrap();
+        fs::write(dir.path().join("notes.md"), b"notes").unwrap();
+        fs::write(dir.path().join(".env"), b"synthetic=value").unwrap();
+
+        let outcome = repo
+            .snapshot_filtered(Some("closing"), None, &BTreeSet::new())
+            .unwrap();
+        let tree = repo.read_tree(&outcome.tree_hash).unwrap();
+        assert_eq!(tree.entries.len(), 1);
+        assert_eq!(tree.entries[0].path, "notes.md");
+
+        let allowed = BTreeSet::from([".env".to_owned()]);
+        let outcome = repo
+            .snapshot_filtered_with_policy(Some("explicit lift"), None, &BTreeSet::new(), &allowed)
+            .unwrap();
+        let tree = repo.read_tree(&outcome.tree_hash).unwrap();
+        assert!(tree.entries.iter().any(|entry| entry.path == ".env"));
+    }
+
+    #[test]
+    fn cand_042_normalize_ref_attaches_only_to_its_expected_raw_hash() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = Repository::init(dir.path()).unwrap();
+        let path = dir.path().join("doc.txt");
+        fs::write(&path, b"old bytes").unwrap();
+        let normalize = NormalizeRef {
+            tool_profile_hash: hash_bytes(b"profile"),
+            gen: 0,
+        };
+        let pending = BTreeMap::from([(
+            "doc.txt".to_owned(),
+            PendingNormalizeRef {
+                expected_raw_hash: hash_bytes(b"old bytes"),
+                normalize: normalize.clone(),
+            },
+        )]);
+        let limits = ArchiveLimits::new(1024, 1024);
+        let tree = repo
+            .build_working_tree_with_bound_normalize_and_limits(
+                false,
+                &BTreeSet::new(),
+                &pending,
+                &BTreeSet::new(),
+                limits,
+            )
+            .unwrap()
+            .tree;
+        assert_eq!(tree.entries[0].normalize, Some(normalize));
+
+        fs::write(&path, b"new bytes").unwrap();
+        let tree = repo
+            .build_working_tree_with_bound_normalize_and_limits(
+                false,
+                &BTreeSet::new(),
+                &pending,
+                &BTreeSet::new(),
+                limits,
+            )
+            .unwrap()
+            .tree;
+        assert_eq!(tree.entries[0].raw_hash, hash_bytes(b"new bytes"));
+        assert!(tree.entries[0].normalize.is_none());
+    }
+
+    #[test]
+    fn cand_043_poisoned_raw_slot_prevents_snapshot_publication() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = Repository::init(dir.path()).unwrap();
+        fs::write(dir.path().join("doc.txt"), b"expected bytes").unwrap();
+        let hash = hash_bytes(b"expected bytes");
+        let store = ObjectStore::new(repo.kcs_dir());
+        let object_path = store.object_path(ObjectKind::Raw, &hash).unwrap();
+        fs::create_dir_all(object_path.parent().unwrap()).unwrap();
+        fs::write(&object_path, b"poisoned").unwrap();
+        let head_before = fs::read(repo.kcs_dir().join("HEAD")).unwrap();
+
+        let error = repo.snapshot(Some("poisoned"), None).unwrap_err();
+        assert_eq!(error.error_code(), "KCS-E-STORE-CORRUPT-001");
+        assert_eq!(fs::read(repo.kcs_dir().join("HEAD")).unwrap(), head_before);
+    }
+
+    #[test]
+    fn cand_036_persisted_dag_objects_are_semantically_validated() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = Repository::init(dir.path()).unwrap();
+        let store = ObjectStore::new(repo.kcs_dir());
+        let invalid_tree = json!({
+            "entries": [{"path":"sub/file", "type":"file", "raw_hash":hash_bytes(b"raw")}],
+            "object_type":"tree"
+        });
+        let (hash, _) = store.write_json(ObjectKind::Tree, &invalid_tree).unwrap();
+        assert!(repo.read_tree(&hash).is_err());
+    }
+
+    #[test]
+    fn cand_046_dag_cardinality_limits_apply_after_bounded_deserialization() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = Repository::init(dir.path()).unwrap();
+        let store = ObjectStore::new(repo.kcs_dir());
+        let parent = hash_bytes(b"parent");
+        let commit = json!({
+            "commit_type":"manual",
+            "created_at":"2026-07-12T00:00:00Z",
+            "message":"bounded",
+            "object_type":"commit",
+            "parents":vec![parent; MAX_COMMIT_PARENTS + 1],
+            "stats":{"files_added":0,"files_modified":0,"files_deleted":0},
+            "tool_lock_hash":hash_bytes(b"tool"),
+            "tree":hash_bytes(b"tree")
+        });
+        let (commit_hash, _) = store.write_json(ObjectKind::Commit, &commit).unwrap();
+        assert!(repo.read_commit(&commit_hash).is_err());
+
+        let entry = json!({"path":"a", "type":"file", "raw_hash":hash_bytes(b"raw")});
+        let tree = json!({
+            "entries":vec![entry; MAX_TREE_ENTRIES + 1],
+            "object_type":"tree"
+        });
+        let (tree_hash, _) = store.write_json(ObjectKind::Tree, &tree).unwrap();
+        assert!(repo.read_tree(&tree_hash).is_err());
+    }
+
+    #[test]
+    fn cand_046_snapshot_rejects_tree_entry_overflow_before_publication() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = Repository::init(dir.path()).unwrap();
+        for index in 0..=MAX_TREE_ENTRIES {
+            fs::File::create(dir.path().join(format!("entry-{index:05}.txt"))).unwrap();
+        }
+
+        let head_before = fs::read(repo.kcs_dir().join("HEAD")).unwrap();
+        let branch_before = fs::read(repo.kcs_dir().join("refs/heads/main")).unwrap();
+        let error = repo.snapshot(Some("over-limit"), None).unwrap_err();
+        assert_eq!(error.error_code(), "KCS-E-SCOPE-INPUT-OVERSIZED-001");
+        assert_eq!(
+            error.context()["observed_entries"],
+            json!(MAX_TREE_ENTRIES + 1)
+        );
+        assert_eq!(error.context()["max_tree_entries"], json!(MAX_TREE_ENTRIES));
+        assert_eq!(fs::read(repo.kcs_dir().join("HEAD")).unwrap(), head_before);
+        assert_eq!(
+            fs::read(repo.kcs_dir().join("refs/heads/main")).unwrap(),
+            branch_before
+        );
+        for kind in ["raw", "trees", "commits"] {
+            assert_eq!(
+                fs::read_dir(repo.kcs_dir().join("objects").join(kind))
+                    .unwrap()
+                    .count(),
+                0,
+                "over-limit snapshot published a {kind} CAS object"
+            );
+        }
+
+        fs::remove_file(
+            dir.path()
+                .join(format!("entry-{:05}.txt", MAX_TREE_ENTRIES)),
+        )
+        .unwrap();
+        let boundary = repo.build_working_tree(false).unwrap();
+        assert_eq!(boundary.tree.entries.len(), MAX_TREE_ENTRIES);
     }
 
     // R15-1 / R15-1b: an empty HEAD whose `refs/heads/main` still names a real commit

@@ -1,8 +1,9 @@
 //! Embedding metadata and chunk_vec store contracts.
 
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
+use std::collections::BTreeSet;
 
 use crate::fts::CHUNK_VEC_DIMENSIONS;
 use crate::{EmbeddingDistance, EmbeddingModality, EmbeddingTargetType, IndexError, Result};
@@ -75,10 +76,15 @@ pub fn chunk_embedding_profiles(conn: &Connection) -> Result<Vec<EmbeddingProfil
 /// unchanged chunk can reuse it without re-calling the Embedding Adapter
 /// (CT3-EMBED-006, 04 §5.5). Returns the raw f32 LE bytes.
 pub fn content_vector(conn: &Connection, embedding_hash: &str) -> Result<Option<Vec<u8>>> {
-    let mut stmt = conn.prepare("SELECT vector FROM embeddings WHERE id = ?1")?;
+    let mut stmt = conn.prepare("SELECT vector, dimensions FROM embeddings WHERE id = ?1")?;
     let mut rows = stmt.query(params![embedding_hash])?;
     match rows.next()? {
-        Some(row) => Ok(Some(row.get(0)?)),
+        Some(row) => {
+            let vector: Vec<u8> = row.get(0)?;
+            let dimensions = sql_dimension(row.get(1)?)?;
+            validate_embedding_vector(&vector, dimensions)?;
+            Ok(Some(vector))
+        }
         None => Ok(None),
     }
 }
@@ -99,27 +105,44 @@ pub fn write_chunk_embedding(
     modality: &str,
     profile_hash: &str,
 ) -> Result<()> {
-    conn.execute(
-        "DELETE FROM embeddings
-         WHERE target_type = 'chunk' AND target_id = ?1 AND profile_hash <> ?2",
-        params![text_hash, profile_hash],
-    )?;
-    conn.execute(
-        "INSERT INTO embeddings(id, target_type, target_id, modality, vector, dimensions, distance, profile_hash)
-         VALUES (?1, 'chunk', ?2, ?3, ?4, ?5, ?6, ?7)
-         ON CONFLICT(id) DO NOTHING",
-        params![
+    validate_embedding_vector(vector, dimensions)?;
+    with_savepoint(conn, "kcs_write_chunk_embedding", || {
+        conn.execute(
+            "DELETE FROM embeddings
+             WHERE target_type = 'chunk' AND target_id = ?1 AND profile_hash <> ?2",
+            params![text_hash, profile_hash],
+        )?;
+        conn.execute(
+            "INSERT INTO embeddings(id, target_type, target_id, modality, vector, dimensions, distance, profile_hash)
+             VALUES (?1, 'chunk', ?2, ?3, ?4, ?5, ?6, ?7)
+             ON CONFLICT(id) DO NOTHING",
+            params![
+                embedding_hash,
+                text_hash,
+                modality,
+                vector,
+                dimensions as i64,
+                distance,
+                profile_hash
+            ],
+        )?;
+        let canonical = canonical_chunk_embedding(
+            conn,
             embedding_hash,
             text_hash,
-            modality,
-            vector,
-            dimensions as i64,
+            dimensions,
             distance,
-            profile_hash
-        ],
-    )?;
-    link_chunk_vec(conn, chunk_id, vector, dimensions)?;
-    Ok(())
+            modality,
+            profile_hash,
+        )?;
+        if canonical.vector != vector {
+            return Err(IndexError::Contract(
+                "embedding identity already has a different canonical vector".to_owned(),
+            ));
+        }
+        link_chunk_vec(conn, chunk_id, &canonical.vector, canonical.dimensions)?;
+        Ok(())
+    })
 }
 
 /// Map a `chunk_id` to a vector in `chunk_vec` (idempotent). No-op if the vector
@@ -131,9 +154,20 @@ pub fn link_chunk_vec(
     vector: &[u8],
     dimensions: u64,
 ) -> Result<()> {
-    if dimensions as usize != CHUNK_VEC_DIMENSIONS || vector.len() != CHUNK_VEC_DIMENSIONS * 4 {
-        return Ok(());
+    link_chunk_vec_if_compatible(conn, chunk_id, vector, dimensions)?;
+    Ok(())
+}
+
+fn link_chunk_vec_if_compatible(
+    conn: &Connection,
+    chunk_id: &str,
+    vector: &[u8],
+    dimensions: u64,
+) -> Result<bool> {
+    if usize::try_from(dimensions).ok() != Some(CHUNK_VEC_DIMENSIONS) {
+        return Ok(false);
     }
+    validate_embedding_vector(vector, dimensions)?;
     // vec0 virtual tables do not support UPSERT; delete-then-insert is idempotent.
     conn.execute(
         "DELETE FROM chunk_vec WHERE chunk_id = ?1",
@@ -143,7 +177,55 @@ pub fn link_chunk_vec(
         "INSERT INTO chunk_vec(chunk_id, embedding) VALUES (?1, ?2)",
         params![chunk_id, vector],
     )?;
-    Ok(())
+    Ok(true)
+}
+
+/// Map a `chunk_id` to `chunk_vec` unless the caller has identified it as held.
+/// This is the lower-crate publication guard; callers still own how the hold set
+/// is derived from current policy.
+pub fn link_chunk_vec_unless_held(
+    conn: &Connection,
+    chunk_id: &str,
+    vector: &[u8],
+    dimensions: u64,
+    held_chunk_ids: &BTreeSet<String>,
+) -> Result<bool> {
+    if held_chunk_ids.contains(chunk_id) {
+        return Ok(false);
+    }
+    link_chunk_vec_if_compatible(conn, chunk_id, vector, dimensions)
+}
+
+/// Fan one persisted content vector out to several chunk ids. This gives callers
+/// a transactional primitive for duplicate same-batch identities: persist one
+/// canonical row, then link every member from those persisted bytes.
+pub fn link_chunk_vecs_to_content_vector<'a>(
+    conn: &Connection,
+    embedding_hash: &str,
+    chunk_ids: impl IntoIterator<Item = &'a str>,
+    held_chunk_ids: &BTreeSet<String>,
+) -> Result<usize> {
+    let chunk_ids = chunk_ids.into_iter().collect::<Vec<_>>();
+    with_savepoint(conn, "kcs_link_chunk_vecs_to_content_vector", || {
+        let canonical = stored_embedding_vector(conn, embedding_hash)?.ok_or_else(|| {
+            IndexError::Contract(format!(
+                "missing canonical embedding vector for {embedding_hash}"
+            ))
+        })?;
+        let mut linked = 0usize;
+        for chunk_id in &chunk_ids {
+            if link_chunk_vec_unless_held(
+                conn,
+                chunk_id,
+                &canonical.vector,
+                canonical.dimensions,
+                held_chunk_ids,
+            )? {
+                linked += 1;
+            }
+        }
+        Ok(linked)
+    })
 }
 
 /// Rebuild `chunk_vec` from `embeddings` joined to `chunks` on `text_hash`
@@ -157,32 +239,55 @@ pub fn link_chunk_vec(
 /// R19-4's Failed(retryable) content-twin convergence is unaffected: only Paused
 /// secret-holds are passed here, never Failed tasks. Releasing the hold (`--send-secrets`)
 /// drops the chunk from this set, so the next rebuild re-links it.
-pub fn rebuild_chunk_vec(
-    conn: &Connection,
-    held_chunk_ids: &std::collections::BTreeSet<String>,
-) -> Result<()> {
-    conn.execute_batch("DELETE FROM chunk_vec;")?;
-    let mut stmt = conn.prepare(
-        "SELECT c.chunk_id, e.vector, e.dimensions
-         FROM chunks c
-         JOIN embeddings e ON e.target_type = 'chunk' AND e.target_id = c.text_hash",
-    )?;
-    let rows = stmt
-        .query_map([], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, Vec<u8>>(1)?,
-                row.get::<_, i64>(2)? as u64,
-            ))
-        })?
-        .collect::<std::result::Result<Vec<_>, _>>()?;
-    for (chunk_id, vector, dimensions) in rows {
-        if held_chunk_ids.contains(&chunk_id) {
-            continue;
+pub fn rebuild_chunk_vec(conn: &Connection, held_chunk_ids: &BTreeSet<String>) -> Result<()> {
+    with_savepoint(conn, "kcs_rebuild_chunk_vec", || {
+        conn.execute_batch("DELETE FROM chunk_vec;")?;
+        let mut stmt = conn.prepare(
+            "SELECT c.chunk_id, e.vector, e.dimensions
+             FROM chunks c
+             JOIN embeddings e ON e.target_type = 'chunk' AND e.target_id = c.text_hash",
+        )?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Vec<u8>>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        for (chunk_id, vector, dimensions) in rows {
+            link_chunk_vec_unless_held(
+                conn,
+                &chunk_id,
+                &vector,
+                sql_dimension(dimensions)?,
+                held_chunk_ids,
+            )?;
         }
-        link_chunk_vec(conn, &chunk_id, &vector, dimensions)?;
+        Ok(())
+    })
+}
+
+/// Return the subset of supplied chunk ids that currently have a materialized
+/// `chunk_vec` row. Task-state callers can use this to distinguish an already
+/// materialized budget pause from a still-unpublished authorization hold.
+pub fn materialized_chunk_ids<'a>(
+    conn: &Connection,
+    chunk_ids: impl IntoIterator<Item = &'a str>,
+) -> Result<BTreeSet<String>> {
+    let mut stmt = conn.prepare("SELECT 1 FROM chunk_vec WHERE chunk_id = ?1 LIMIT 1")?;
+    let mut out = BTreeSet::new();
+    for chunk_id in chunk_ids {
+        let exists = stmt
+            .query_row(params![chunk_id], |_| Ok(()))
+            .optional()?
+            .is_some();
+        if exists {
+            out.insert(chunk_id.to_owned());
+        }
     }
-    Ok(())
+    Ok(out)
 }
 
 /// Snapshot every chunk embedding row (content + all mapped chunk_ids) so the
@@ -219,20 +324,41 @@ pub fn snapshot_chunk_embeddings(conn: &Connection) -> Result<Vec<ChunkEmbedding
          JOIN chunks c ON e.target_type = 'chunk' AND c.text_hash = e.target_id",
     )?;
     let rows = stmt.query_map([], |row| {
-        Ok(ChunkEmbeddingSnapshotRow {
-            embedding_hash: row.get(0)?,
-            text_hash: row.get(1)?,
-            chunk_id: row.get(2)?,
-            vector: row.get(3)?,
-            dimensions: row.get::<_, i64>(4)? as u64,
-            distance: row.get(5)?,
-            modality: row.get(6)?,
-            profile_hash: row.get(7)?,
-        })
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, Vec<u8>>(3)?,
+            row.get::<_, i64>(4)?,
+            row.get::<_, String>(5)?,
+            row.get::<_, String>(6)?,
+            row.get::<_, String>(7)?,
+        ))
     })?;
     let mut out = Vec::new();
     for row in rows {
-        out.push(row?);
+        let (
+            embedding_hash,
+            text_hash,
+            chunk_id,
+            vector,
+            dimensions,
+            distance,
+            modality,
+            profile_hash,
+        ) = row?;
+        let dimensions = sql_dimension(dimensions)?;
+        validate_embedding_vector(&vector, dimensions)?;
+        out.push(ChunkEmbeddingSnapshotRow {
+            embedding_hash,
+            text_hash,
+            chunk_id,
+            vector,
+            dimensions,
+            distance,
+            modality,
+            profile_hash,
+        });
     }
     Ok(out)
 }
@@ -250,6 +376,7 @@ pub fn knn_chunk_distances(
             "KCS-E-SEARCH-VEC-INCOMPAT-001: query vector width mismatch".to_owned(),
         ));
     }
+    validate_embedding_vector(query_vector, CHUNK_VEC_DIMENSIONS as u64)?;
     let mut stmt = conn.prepare(
         "SELECT chunk_id, distance FROM chunk_vec
          WHERE embedding MATCH ?1 ORDER BY distance LIMIT ?2",
@@ -279,6 +406,7 @@ pub fn read_chunk_vector(conn: &Connection, chunk_id: &str) -> Result<Option<Vec
     match rows.next()? {
         Some(row) => {
             let bytes: Vec<u8> = row.get(0)?;
+            validate_embedding_vector(&bytes, CHUNK_VEC_DIMENSIONS as u64)?;
             Ok(Some(f32_from_le_bytes(&bytes)))
         }
         None => Ok(None),
@@ -300,6 +428,153 @@ pub fn f32_to_le_bytes(vector: &[f32]) -> Vec<u8> {
         .iter()
         .flat_map(|value| value.to_le_bytes())
         .collect()
+}
+
+/// Validate raw little-endian f32 vector bytes for cosine search.
+pub fn validate_embedding_vector(vector: &[u8], dimensions: u64) -> Result<()> {
+    let expected = expected_vector_len(dimensions)?;
+    if vector.len() != expected {
+        return Err(IndexError::Contract(format!(
+            "embedding vector width mismatch: expected {expected} bytes for {dimensions} dimensions, got {}",
+            vector.len()
+        )));
+    }
+    let mut norm_sq = 0.0f64;
+    for chunk in vector.chunks_exact(4) {
+        let value = f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+        if !value.is_finite() {
+            return Err(IndexError::Contract(
+                "embedding vector component is not finite".to_owned(),
+            ));
+        }
+        let value = f64::from(value);
+        norm_sq += value * value;
+    }
+    if !norm_sq.is_finite() || norm_sq <= 0.0 {
+        return Err(IndexError::Contract(
+            "embedding vector norm must be positive and finite".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+struct StoredEmbeddingVector {
+    vector: Vec<u8>,
+    dimensions: u64,
+}
+
+struct StoredChunkEmbedding {
+    vector: Vec<u8>,
+    dimensions: u64,
+}
+
+fn stored_embedding_vector(
+    conn: &Connection,
+    embedding_hash: &str,
+) -> Result<Option<StoredEmbeddingVector>> {
+    let Some((vector, dimensions)) = conn
+        .query_row(
+            "SELECT vector, dimensions FROM embeddings WHERE id = ?1",
+            params![embedding_hash],
+            |row| Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, i64>(1)?)),
+        )
+        .optional()?
+    else {
+        return Ok(None);
+    };
+    let dimensions = sql_dimension(dimensions)?;
+    validate_embedding_vector(&vector, dimensions)?;
+    Ok(Some(StoredEmbeddingVector { vector, dimensions }))
+}
+
+fn canonical_chunk_embedding(
+    conn: &Connection,
+    embedding_hash: &str,
+    text_hash: &str,
+    dimensions: u64,
+    distance: &str,
+    modality: &str,
+    profile_hash: &str,
+) -> Result<StoredChunkEmbedding> {
+    let Some((
+        target_type,
+        target_id,
+        stored_modality,
+        vector,
+        stored_dimensions,
+        stored_distance,
+        stored_profile_hash,
+    )) = conn
+        .query_row(
+            "SELECT target_type, target_id, modality, vector, dimensions, distance, profile_hash
+             FROM embeddings WHERE id = ?1",
+            params![embedding_hash],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, Vec<u8>>(3)?,
+                    row.get::<_, i64>(4)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, String>(6)?,
+                ))
+            },
+        )
+        .optional()?
+    else {
+        return Err(IndexError::Contract(format!(
+            "missing canonical embedding row for {embedding_hash}"
+        )));
+    };
+    let stored_dimensions = sql_dimension(stored_dimensions)?;
+    if target_type != "chunk"
+        || target_id != text_hash
+        || stored_dimensions != dimensions
+        || stored_distance != distance
+        || stored_modality != modality
+        || stored_profile_hash != profile_hash
+    {
+        return Err(IndexError::Contract(format!(
+            "canonical embedding metadata mismatch for {embedding_hash}"
+        )));
+    }
+    validate_embedding_vector(&vector, stored_dimensions)?;
+    Ok(StoredChunkEmbedding {
+        vector,
+        dimensions: stored_dimensions,
+    })
+}
+
+fn expected_vector_len(dimensions: u64) -> Result<usize> {
+    usize::try_from(dimensions)
+        .ok()
+        .and_then(|dimensions| dimensions.checked_mul(4))
+        .ok_or_else(|| IndexError::Contract("embedding vector dimensions overflow".to_owned()))
+}
+
+fn sql_dimension(value: i64) -> Result<u64> {
+    u64::try_from(value).map_err(|_| {
+        IndexError::Contract("embedding vector dimensions must be non-negative".to_owned())
+    })
+}
+
+fn with_savepoint<T>(
+    conn: &Connection,
+    name: &str,
+    operation: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    conn.execute_batch(&format!("SAVEPOINT {name};"))?;
+    match operation() {
+        Ok(value) => {
+            conn.execute_batch(&format!("RELEASE {name};"))?;
+            Ok(value)
+        }
+        Err(err) => {
+            let _ = conn.execute_batch(&format!("ROLLBACK TO {name}; RELEASE {name};"));
+            Err(err)
+        }
+    }
 }
 
 fn target_type_name(value: EmbeddingTargetType) -> &'static str {
@@ -429,6 +704,31 @@ mod tests {
         f32_to_le_bytes(&v)
     }
 
+    fn zero_vector() -> Vec<u8> {
+        f32_to_le_bytes(&vec![0f32; CHUNK_VEC_DIMENSIONS])
+    }
+
+    fn infinite_vector() -> Vec<u8> {
+        let mut v = vec![0f32; CHUNK_VEC_DIMENSIONS];
+        v[0] = f32::INFINITY;
+        f32_to_le_bytes(&v)
+    }
+
+    fn insert_raw_embedding(
+        conn: &Connection,
+        embedding_hash: &str,
+        text_hash: &str,
+        vector: &[u8],
+        dimensions: u64,
+    ) {
+        conn.execute(
+            "INSERT INTO embeddings(id, target_type, target_id, modality, vector, dimensions, distance, profile_hash)
+             VALUES (?1, 'chunk', ?2, 'multimodal', ?3, ?4, 'cosine', 'sha256:profile')",
+            params![embedding_hash, text_hash, vector, dimensions as i64],
+        )
+        .unwrap();
+    }
+
     fn write_basis(conn: &Connection, chunk_id: &str, text_hash: &str, axis: usize) {
         write_chunk_embedding(
             conn,
@@ -442,6 +742,269 @@ mod tests {
             "sha256:profile",
         )
         .unwrap();
+    }
+
+    #[test]
+    fn invalid_vectors_are_rejected_at_store_link_reuse_and_query_boundaries() {
+        let store = schema_conn();
+        let conn = store.connection();
+        let zero = zero_vector();
+        let infinite = infinite_vector();
+
+        let err = write_chunk_embedding(
+            conn,
+            "sha256:zero",
+            "sha256:t-zero",
+            "c-zero",
+            &zero,
+            CHUNK_VEC_DIMENSIONS as u64,
+            "cosine",
+            "multimodal",
+            "sha256:profile",
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("positive and finite"));
+        assert!(content_vector(conn, "sha256:zero").unwrap().is_none());
+
+        let err =
+            link_chunk_vec(conn, "c-inf", &infinite, CHUNK_VEC_DIMENSIONS as u64).unwrap_err();
+        assert!(err.to_string().contains("not finite"));
+        assert!(read_chunk_vector(conn, "c-inf").unwrap().is_none());
+
+        let err = knn_chunk_distances(conn, &zero, 1).unwrap_err();
+        assert!(err.to_string().contains("positive and finite"));
+
+        write_basis(conn, "c-valid", "sha256:t-valid", 0);
+        let knn = knn_chunk_distances(conn, &basis_vector(0), 1).unwrap();
+        assert_eq!(knn[0].0, "c-valid");
+        assert_eq!(knn[0].1, 0.0);
+    }
+
+    #[test]
+    fn legacy_invalid_content_vector_is_not_reused_or_snapshotted() {
+        let mut store = schema_conn();
+        store
+            .index_chunk(&chunk_row("c-legacy", "sha256:t-legacy"))
+            .unwrap();
+        let conn = store.connection();
+        insert_raw_embedding(
+            conn,
+            "sha256:legacy",
+            "sha256:t-legacy",
+            &zero_vector(),
+            CHUNK_VEC_DIMENSIONS as u64,
+        );
+
+        let err = content_vector(conn, "sha256:legacy").unwrap_err();
+        assert!(err.to_string().contains("positive and finite"));
+
+        let err = snapshot_chunk_embeddings(conn).err().unwrap();
+        assert!(err.to_string().contains("positive and finite"));
+    }
+
+    #[test]
+    fn duplicate_identity_conflict_keeps_chunk_vec_tied_to_canonical_vector() {
+        let store = schema_conn();
+        let conn = store.connection();
+        let first = basis_vector(0);
+        let conflicting = basis_vector(1);
+
+        write_chunk_embedding(
+            conn,
+            "sha256:dup",
+            "sha256:t-dup",
+            "c-a",
+            &first,
+            CHUNK_VEC_DIMENSIONS as u64,
+            "cosine",
+            "multimodal",
+            "sha256:profile",
+        )
+        .unwrap();
+        let err = write_chunk_embedding(
+            conn,
+            "sha256:dup",
+            "sha256:t-dup",
+            "c-b",
+            &conflicting,
+            CHUNK_VEC_DIMENSIONS as u64,
+            "cosine",
+            "multimodal",
+            "sha256:profile",
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("different canonical vector"));
+        assert_eq!(read_chunk_vector(conn, "c-b").unwrap(), None);
+
+        let linked = link_chunk_vecs_to_content_vector(
+            conn,
+            "sha256:dup",
+            ["c-a", "c-b"].iter().copied(),
+            &std::collections::BTreeSet::new(),
+        )
+        .unwrap();
+        assert_eq!(linked, 2);
+        assert_eq!(read_chunk_vector(conn, "c-a").unwrap().unwrap()[0], 1.0);
+        let c_b = read_chunk_vector(conn, "c-b").unwrap().unwrap();
+        assert_eq!(c_b[0], 1.0);
+        assert_eq!(c_b[1], 0.0);
+    }
+
+    #[test]
+    fn rebuild_rolls_back_when_legacy_invalid_vector_would_be_relinked() {
+        let mut store = schema_conn();
+        store
+            .index_chunk(&chunk_row("c-valid", "sha256:t-valid"))
+            .unwrap();
+        store
+            .index_chunk(&chunk_row("c-bad", "sha256:t-bad"))
+            .unwrap();
+        let conn = store.connection();
+        write_basis(conn, "c-valid", "sha256:t-valid", 0);
+        insert_raw_embedding(
+            conn,
+            "sha256:bad",
+            "sha256:t-bad",
+            &zero_vector(),
+            CHUNK_VEC_DIMENSIONS as u64,
+        );
+        assert_eq!(chunk_vec_count(conn).unwrap(), 1);
+
+        let err = rebuild_chunk_vec(conn, &std::collections::BTreeSet::new()).unwrap_err();
+        assert!(err.to_string().contains("positive and finite"));
+
+        assert_eq!(
+            chunk_vec_count(conn).unwrap(),
+            1,
+            "savepoint rollback preserves the pre-rebuild projection"
+        );
+        assert!(read_chunk_vector(conn, "c-valid").unwrap().is_some());
+        assert!(read_chunk_vector(conn, "c-bad").unwrap().is_none());
+    }
+
+    #[test]
+    fn held_publication_guard_and_materialized_helper_preserve_secret_hold_control() {
+        let mut store = schema_conn();
+        store
+            .index_chunk(&chunk_row("c-budget", "sha256:t-shared"))
+            .unwrap();
+        store
+            .index_chunk(&chunk_row("c-secret", "sha256:t-shared"))
+            .unwrap();
+        let conn = store.connection();
+        write_chunk_embedding(
+            conn,
+            "sha256:shared",
+            "sha256:t-shared",
+            "c-budget",
+            &basis_vector(0),
+            CHUNK_VEC_DIMENSIONS as u64,
+            "cosine",
+            "multimodal",
+            "sha256:profile",
+        )
+        .unwrap();
+        conn.execute_batch("DELETE FROM chunk_vec").unwrap();
+
+        let held = std::collections::BTreeSet::from(["c-secret".to_owned()]);
+        rebuild_chunk_vec(conn, &held).unwrap();
+        let materialized =
+            materialized_chunk_ids(conn, ["c-budget", "c-secret", "missing"].iter().copied())
+                .unwrap();
+        assert!(materialized.contains("c-budget"));
+        assert!(!materialized.contains("c-secret"));
+
+        let linked = link_chunk_vec_unless_held(
+            conn,
+            "c-secret",
+            &basis_vector(0),
+            CHUNK_VEC_DIMENSIONS as u64,
+            &held,
+        )
+        .unwrap();
+        assert!(!linked);
+        assert!(read_chunk_vector(conn, "c-secret").unwrap().is_none());
+
+        let linked = link_chunk_vecs_to_content_vector(
+            conn,
+            "sha256:shared",
+            ["c-secret"].iter().copied(),
+            &std::collections::BTreeSet::new(),
+        )
+        .unwrap();
+        assert_eq!(linked, 1);
+        assert!(read_chunk_vector(conn, "c-secret").unwrap().is_some());
+    }
+
+    #[test]
+    fn incompatible_dimension_links_are_reported_as_no_op() {
+        let store = schema_conn();
+        let conn = store.connection();
+        let dimensions = 512_u64;
+        let mut values = vec![0_f32; dimensions as usize];
+        values[0] = 1.0;
+        let vector = f32_to_le_bytes(&values);
+        let held = BTreeSet::new();
+
+        let linked =
+            link_chunk_vec_unless_held(conn, "c-direct", &vector, dimensions, &held).unwrap();
+        assert!(!linked);
+        assert!(read_chunk_vector(conn, "c-direct").unwrap().is_none());
+
+        insert_raw_embedding(
+            conn,
+            "sha256:wrong-dim",
+            "sha256:t-wrong-dim",
+            &vector,
+            dimensions,
+        );
+        let linked = link_chunk_vecs_to_content_vector(
+            conn,
+            "sha256:wrong-dim",
+            ["c-fan-a", "c-fan-b"].iter().copied(),
+            &held,
+        )
+        .unwrap();
+        assert_eq!(linked, 0);
+        assert!(read_chunk_vector(conn, "c-fan-a").unwrap().is_none());
+        assert!(read_chunk_vector(conn, "c-fan-b").unwrap().is_none());
+    }
+
+    #[test]
+    fn adopted_dimension_links_report_publication() {
+        let store = schema_conn();
+        let conn = store.connection();
+        let vector = basis_vector(0);
+        let held = BTreeSet::new();
+
+        let linked = link_chunk_vec_unless_held(
+            conn,
+            "c-direct",
+            &vector,
+            CHUNK_VEC_DIMENSIONS as u64,
+            &held,
+        )
+        .unwrap();
+        assert!(linked);
+        assert!(read_chunk_vector(conn, "c-direct").unwrap().is_some());
+
+        insert_raw_embedding(
+            conn,
+            "sha256:adopted-dim",
+            "sha256:t-adopted-dim",
+            &vector,
+            CHUNK_VEC_DIMENSIONS as u64,
+        );
+        let linked = link_chunk_vecs_to_content_vector(
+            conn,
+            "sha256:adopted-dim",
+            ["c-fan-a", "c-fan-b"].iter().copied(),
+            &held,
+        )
+        .unwrap();
+        assert_eq!(linked, 2);
+        assert!(read_chunk_vector(conn, "c-fan-a").unwrap().is_some());
+        assert!(read_chunk_vector(conn, "c-fan-b").unwrap().is_some());
     }
 
     #[test]
