@@ -203,6 +203,7 @@ device state は corpus 内の `.kcs-eval-device` に隔離され、開発者の
   `(raw_hash, tool_profile_hash, gen)` predicate による current eligible chunk 数
 - 全 section 共通 sentinel の FTS `MATCH` と FTS5 docsize shadow の双方で同数を確認
 - full では current eligible chunks が 120,000、かつ 100,000 を超えること
+- 各scopeの検索標本は期待section内に1回だけ現れる決定論reference tokenを使い、共通語によるscope順位tieを避ける
 
 `run_scale_eval.py` は release binary・manifest・保存済み/再計算attestation・platformをreportへ束縛し、
 各検索で既定の全scope選択、attested 20 scopes の成功、期待文書の上位10件入りを確認する。検索modeも

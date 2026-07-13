@@ -201,15 +201,26 @@ def section_needle(scope_index, file_index, section_index):
     return f"scale needle s{scope_index:02d} f{file_index:04d} c{section_index:02d}"
 
 
-def _sentence(scope, scope_index, file_index, section_index, sentence_index):
-    terms = scope["terms"]
-    first = terms[sentence_index % len(terms)]
-    second = terms[(sentence_index + 1) % len(terms)]
-    digest = hashlib.sha256(
+def _reference_token(scope_index, file_index, section_index, sentence_index):
+    return hashlib.sha256(
         (
             f"{SEED}:{scope_index}:{file_index}:{section_index}:{sentence_index}"
         ).encode("ascii")
     ).hexdigest()[:12]
+
+
+def section_query(scope_index, file_index, section_index):
+    """Return a tokenizer-stable token unique to the expected section."""
+    return _reference_token(scope_index, file_index, section_index, 0)
+
+
+def _sentence(scope, scope_index, file_index, section_index, sentence_index):
+    terms = scope["terms"]
+    first = terms[sentence_index % len(terms)]
+    second = terms[(sentence_index + 1) % len(terms)]
+    digest = _reference_token(
+        scope_index, file_index, section_index, sentence_index
+    )
     measure = 100 + ((scope_index * 7919 + file_index * 101 + section_index * 17
                       + sentence_index) % 9_800)
     return (
