@@ -190,6 +190,11 @@ fn ct4_promotion_done_batch_updates_provenance_search_and_is_idempotent() {
         count >= 2,
         "both files must be rebuilt under the promoted profile"
     );
+    // Windows does not allow the later atomic index swap to replace sqlite.db
+    // while this read connection is still open. Keep the assertion scoped to
+    // the database observation it needs, just as a real search process would
+    // close its handle before a subsequent index process replaces the database.
+    drop(conn);
     let search = json_success(
         &dir,
         &["search", "mock ocr", "--scope", ".", "--text"],
