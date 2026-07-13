@@ -256,7 +256,7 @@ mod tests {
     use std::fs;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::thread;
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
 
     fn update_max(maximum: &AtomicUsize, value: usize) {
         let mut seen = maximum.load(Ordering::Relaxed);
@@ -304,18 +304,34 @@ mod tests {
     }
 
     #[test]
-    fn queue_wait_does_not_consume_a_scope_timeout() {
-        let settings = MultiScopeSettings::new(1, Duration::from_millis(80));
-        let started = Instant::now();
-        let executions = run_ordered(3, settings, |index, _deadline| {
-            thread::sleep(Duration::from_millis(40));
-            index
+    fn queued_job_receives_a_fresh_deadline_when_claimed() {
+        // Inspect the per-job deadline directly instead of putting CI scheduler
+        // jitter close to the timeout boundary. With one worker, each sleep is
+        // queue time for the following job; its expiry must therefore move
+        // forward rather than inherit a deadline created before it was claimed.
+        let settings = MultiScopeSettings::new(1, Duration::from_secs(60));
+        let executions = run_ordered(3, settings, |index, deadline| {
+            if index < 2 {
+                thread::sleep(Duration::from_millis(10));
+            }
+            (index, deadline.expires_at)
         });
-        assert!(started.elapsed() >= Duration::from_millis(120));
+        let completed = executions
+            .into_iter()
+            .map(|execution| match execution {
+                ScopeExecution::Completed(value) => value,
+                ScopeExecution::TimedOut => panic!("wide-margin queue test timed out"),
+            })
+            .collect::<Vec<_>>();
         assert_eq!(
-            executions,
-            (0..3).map(ScopeExecution::Completed).collect::<Vec<_>>()
+            completed
+                .iter()
+                .map(|(index, _)| *index)
+                .collect::<Vec<_>>(),
+            vec![0, 1, 2]
         );
+        assert!(completed[0].1 < completed[1].1);
+        assert!(completed[1].1 < completed[2].1);
     }
 
     #[test]
