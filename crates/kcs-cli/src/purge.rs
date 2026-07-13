@@ -1241,10 +1241,19 @@ fn validate_existing_regular(path: &Path, max_bytes: Option<u64>) -> Result<fs::
             ));
         }
     }
+    #[cfg(windows)]
+    let _ = windows_regular_file_identity(path)?;
     if max_bytes.is_some_and(|limit| listed.len() > limit) {
         return Err(store_corrupt(path, "regular file exceeds its byte bound"));
     }
     Ok(listed)
+}
+
+#[cfg(windows)]
+fn windows_regular_file_identity(path: &Path) -> Result<kcs_core::cas::WindowsRegularFileIdentity> {
+    kcs_core::cas::windows_real_regular_file_identity(path)
+        .map_err(|error| KcsError::io(error.to_string(), path.display().to_string()))?
+        .ok_or_else(|| store_corrupt(path, "expected a real single-link regular file"))
 }
 
 fn read_bounded_regular(path: &Path, max_bytes: u64) -> Result<Option<Vec<u8>>> {
@@ -1252,12 +1261,19 @@ fn read_bounded_regular(path: &Path, max_bytes: u64) -> Result<Option<Vec<u8>>> 
         return Ok(None);
     }
     let listed = validate_existing_regular(path, Some(max_bytes))?;
-    let mut file = fs::File::open(path)
-        .map_err(|error| KcsError::io(error.to_string(), path.display().to_string()))?;
+    #[cfg(windows)]
+    let listed_identity = windows_regular_file_identity(path)?;
+    let mut file = kcs_core::cas::open_regular_nofollow(path)
+        .map_err(|_| store_corrupt(path, "regular file changed while it was opened"))?;
     let opened = file
         .metadata()
         .map_err(|error| KcsError::io(error.to_string(), path.display().to_string()))?;
-    if !same_file_identity(&listed, &opened) {
+    #[cfg(windows)]
+    let identity_matches = same_file_identity(&listed, &opened)
+        && kcs_core::cas::windows_regular_file_handle_identity(&file) == Some(listed_identity);
+    #[cfg(not(windows))]
+    let identity_matches = same_file_identity(&listed, &opened);
+    if !identity_matches {
         return Err(store_corrupt(
             path,
             "regular file changed while it was opened",
@@ -1289,20 +1305,42 @@ fn same_file_identity(left: &fs::Metadata, right: &fs::Metadata) -> bool {
     }
 }
 
+struct TreeRemoval {
+    path: PathBuf,
+    expected: fs::Metadata,
+    is_directory: bool,
+    #[cfg(windows)]
+    directory_identity: Option<kcs_core::cas::WindowsDirectoryIdentity>,
+    #[cfg(windows)]
+    regular_file_identity: Option<kcs_core::cas::WindowsRegularFileIdentity>,
+}
+
 fn remove_tree_nofollow(path: &Path) -> Result<bool> {
     if !path_exists(path)? {
         return Ok(false);
     }
     validate_real_directory(path)?;
-    let mut removals = Vec::<(PathBuf, fs::Metadata, bool)>::new();
+    let mut removals = Vec::<TreeRemoval>::new();
     collect_tree_removals(path, &mut removals, 0)?;
-    for (entry, expected, is_directory) in removals {
+    for removal in removals {
+        let entry = removal.path;
         let current = fs::symlink_metadata(&entry)
             .map_err(|error| KcsError::io(error.to_string(), entry.display().to_string()))?;
-        if !same_file_identity(&expected, &current) {
+        #[cfg(windows)]
+        let identity_matches = if removal.is_directory {
+            kcs_core::cas::windows_real_directory_identity(&entry)
+                .map_err(|error| KcsError::io(error.to_string(), entry.display().to_string()))?
+                == removal.directory_identity
+        } else {
+            same_file_identity(&removal.expected, &current)
+                && Some(windows_regular_file_identity(&entry)?) == removal.regular_file_identity
+        };
+        #[cfg(not(windows))]
+        let identity_matches = same_file_identity(&removal.expected, &current);
+        if !identity_matches {
             return Err(store_corrupt(&entry, "artifact changed before deletion"));
         }
-        if is_directory {
+        if removal.is_directory {
             fs::remove_dir(&entry)
                 .map_err(|error| KcsError::io(error.to_string(), entry.display().to_string()))?;
         } else {
@@ -1313,11 +1351,7 @@ fn remove_tree_nofollow(path: &Path) -> Result<bool> {
     Ok(true)
 }
 
-fn collect_tree_removals(
-    path: &Path,
-    output: &mut Vec<(PathBuf, fs::Metadata, bool)>,
-    depth: usize,
-) -> Result<()> {
+fn collect_tree_removals(path: &Path, output: &mut Vec<TreeRemoval>, depth: usize) -> Result<()> {
     if depth > 16 || output.len() >= 100_000 {
         return Err(store_corrupt(
             path,
@@ -1333,10 +1367,22 @@ fn collect_tree_removals(
         ));
     }
     if metadata.is_dir() {
+        #[cfg(windows)]
+        let directory_identity = kcs_core::cas::windows_real_directory_identity(path)
+            .map_err(|error| KcsError::io(error.to_string(), path.display().to_string()))?
+            .ok_or_else(|| store_corrupt(path, "artifact tree contains a reparse directory"))?;
         for child in read_real_directory(path)? {
             collect_tree_removals(&child, output, depth + 1)?;
         }
-        output.push((path.to_path_buf(), metadata, true));
+        output.push(TreeRemoval {
+            path: path.to_path_buf(),
+            expected: metadata,
+            is_directory: true,
+            #[cfg(windows)]
+            directory_identity: Some(directory_identity),
+            #[cfg(windows)]
+            regular_file_identity: None,
+        });
     } else if metadata.is_file() {
         #[cfg(unix)]
         {
@@ -1348,7 +1394,17 @@ fn collect_tree_removals(
                 ));
             }
         }
-        output.push((path.to_path_buf(), metadata, false));
+        #[cfg(windows)]
+        let regular_file_identity = windows_regular_file_identity(path)?;
+        output.push(TreeRemoval {
+            path: path.to_path_buf(),
+            expected: metadata,
+            is_directory: false,
+            #[cfg(windows)]
+            directory_identity: None,
+            #[cfg(windows)]
+            regular_file_identity: Some(regular_file_identity),
+        });
     } else {
         return Err(store_corrupt(
             path,
@@ -1465,11 +1521,20 @@ fn atomic_private_replace(path: &Path, bytes: &[u8]) -> Result<()> {
             parent.display().to_string(),
         ));
     }
+    #[cfg(windows)]
+    let parent_identity = kcs_core::cas::windows_real_directory_identity(parent)
+        .map_err(|error| KcsError::io(error.to_string(), parent.display().to_string()))?
+        .ok_or_else(|| store_corrupt(parent, "purge state parent is a reparse directory"))?;
     let original_leaf = if path_exists(path)? {
         Some(validate_existing_regular(path, None)?)
     } else {
         None
     };
+    #[cfg(windows)]
+    let original_leaf_identity = original_leaf
+        .as_ref()
+        .map(|_| windows_regular_file_identity(path))
+        .transpose()?;
     let sequence = SEQUENCE.fetch_add(1, Ordering::Relaxed);
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -1495,18 +1560,37 @@ fn atomic_private_replace(path: &Path, bytes: &[u8]) -> Result<()> {
         file.sync_all()
             .map_err(|error| KcsError::io(error.to_string(), temp.display().to_string()))?;
         drop(file);
-        let current_parent = fs::symlink_metadata(parent)
-            .map_err(|error| KcsError::io(error.to_string(), parent.display().to_string()))?;
-        if !same_file_identity(&metadata, &current_parent) {
-            return Err(store_corrupt(
-                parent,
-                "purge state parent changed during rewrite",
-            ));
+        #[cfg(windows)]
+        {
+            let current_parent = kcs_core::cas::windows_real_directory_identity(parent)
+                .map_err(|error| KcsError::io(error.to_string(), parent.display().to_string()))?;
+            if current_parent != Some(parent_identity) {
+                return Err(store_corrupt(
+                    parent,
+                    "purge state parent changed during rewrite",
+                ));
+            }
+        }
+        #[cfg(not(windows))]
+        {
+            let current_parent = fs::symlink_metadata(parent)
+                .map_err(|error| KcsError::io(error.to_string(), parent.display().to_string()))?;
+            if !same_file_identity(&metadata, &current_parent) {
+                return Err(store_corrupt(
+                    parent,
+                    "purge state parent changed during rewrite",
+                ));
+            }
         }
         match &original_leaf {
             Some(expected) => {
                 let current = validate_existing_regular(path, None)?;
-                if !same_file_identity(expected, &current) {
+                #[cfg(windows)]
+                let identity_matches = same_file_identity(expected, &current)
+                    && Some(windows_regular_file_identity(path)?) == original_leaf_identity;
+                #[cfg(not(windows))]
+                let identity_matches = same_file_identity(expected, &current);
+                if !identity_matches {
                     return Err(store_corrupt(
                         path,
                         "purge state file changed during rewrite",
@@ -1807,7 +1891,36 @@ fn confirm(preview: &PurgePreview, yes: bool) -> Result<()> {
 mod windows_tests {
     use std::process::Command;
 
-    use super::validate_real_directory;
+    use super::{atomic_private_replace, remove_tree_nofollow, validate_real_directory};
+
+    #[test]
+    fn ct4_atomic_private_replace_uses_stable_directory_identity() {
+        let root = tempfile::tempdir().unwrap();
+        let purge_dir = root.path().join("purge");
+        let path = purge_dir.join("chunk-ids.json");
+
+        atomic_private_replace(&path, b"[]").unwrap();
+        atomic_private_replace(&path, b"[\"replacement\"]").unwrap();
+
+        assert_eq!(std::fs::read(&path).unwrap(), b"[\"replacement\"]");
+        assert!(std::fs::read_dir(&purge_dir).unwrap().all(|entry| !entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with(".purge-write-")));
+    }
+
+    #[test]
+    fn ct4_remove_tree_uses_stable_directory_identity_after_child_removal() {
+        let root = tempfile::tempdir().unwrap();
+        let tree = root.path().join("normalized");
+        let nested = tree.join("nested");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(nested.join("artifact.md"), b"content").unwrap();
+
+        assert!(remove_tree_nofollow(&tree).unwrap());
+        assert!(!tree.exists());
+    }
 
     #[test]
     fn ct4_purge_rejects_directory_junction_before_traversal() {

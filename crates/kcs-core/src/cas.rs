@@ -1765,7 +1765,9 @@ fn ensure_real_directory(path: &Path, create: bool) -> Result<()> {
     }
 }
 
-fn open_regular_nofollow(path: &Path) -> Result<File> {
+/// Open a real, single-link regular file without following its final symlink
+/// or reparse point, and bind the returned handle to the verified path entry.
+pub fn open_regular_nofollow(path: &Path) -> Result<File> {
     let before = fs::symlink_metadata(path).kcs_io(path)?;
     if !before.file_type().is_file() || before.file_type().is_symlink() {
         return Err(non_regular_object_error(path));
@@ -1896,6 +1898,46 @@ impl WindowsFileInformation {
         self.file_attributes & Self::DIRECTORY_ATTRIBUTE != 0
             && self.file_attributes & Self::REPARSE_POINT_ATTRIBUTE == 0
     }
+
+    #[cfg(windows)]
+    fn directory_identity(self) -> Option<WindowsDirectoryIdentity> {
+        self.is_real_directory()
+            .then_some(WindowsDirectoryIdentity {
+                volume_serial_number: self.volume_serial_number,
+                file_index: self.file_index,
+            })
+    }
+
+    #[cfg(windows)]
+    fn regular_file_identity(self) -> Option<WindowsRegularFileIdentity> {
+        (self.is_regular_file() && self.is_single_link()).then_some(WindowsRegularFileIdentity {
+            volume_serial_number: self.volume_serial_number,
+            file_index: self.file_index,
+        })
+    }
+}
+
+/// Stable identity of a real, non-reparse Windows directory.
+///
+/// Unlike directory metadata timestamps, this remains unchanged when children
+/// are created or removed.  Its fields stay private so callers can compare
+/// identities without treating their representation as a persistence format.
+#[cfg(windows)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WindowsDirectoryIdentity {
+    volume_serial_number: u32,
+    file_index: u64,
+}
+
+/// Stable identity of a real, non-reparse, single-link Windows regular file.
+///
+/// The representation is intentionally opaque so it is only used for
+/// within-operation path binding, never as a persisted identifier.
+#[cfg(windows)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WindowsRegularFileIdentity {
+    volume_serial_number: u32,
+    file_index: u64,
 }
 
 #[cfg(test)]
@@ -1969,7 +2011,9 @@ fn windows_file_information(file: &File) -> Option<WindowsFileInformation> {
 /// verify its handle attributes. `symlink_metadata().is_symlink()` alone does
 /// not cover every directory reparse-point kind (notably junctions).
 #[cfg(windows)]
-pub fn windows_directory_is_real(path: &Path) -> std::io::Result<bool> {
+pub fn windows_real_directory_identity(
+    path: &Path,
+) -> std::io::Result<Option<WindowsDirectoryIdentity>> {
     use std::os::windows::fs::OpenOptionsExt;
     use windows_sys::Win32::Storage::FileSystem::{
         FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES,
@@ -1983,13 +2027,15 @@ pub fn windows_directory_is_real(path: &Path) -> std::io::Result<bool> {
         .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
         .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS);
     let directory = options.open(path)?;
-    Ok(windows_file_information(&directory).is_some_and(WindowsFileInformation::is_real_directory))
+    Ok(windows_file_information(&directory).and_then(WindowsFileInformation::directory_identity))
 }
 
-/// Open a Windows leaf without following a reparse point and require a real,
-/// single-link regular file. Restore uses this before replacing a destination.
+/// Open a Windows path without following its final reparse point and return a
+/// stable identity only for a real, single-link regular file.
 #[cfg(windows)]
-pub fn windows_regular_file_is_safe(path: &Path) -> std::io::Result<bool> {
+pub fn windows_real_regular_file_identity(
+    path: &Path,
+) -> std::io::Result<Option<WindowsRegularFileIdentity>> {
     use std::os::windows::fs::OpenOptionsExt;
     use windows_sys::Win32::Storage::FileSystem::{
         FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ,
@@ -2003,8 +2049,28 @@ pub fn windows_regular_file_is_safe(path: &Path) -> std::io::Result<bool> {
         .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
         .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
     let file = options.open(path)?;
-    Ok(windows_file_information(&file)
-        .is_some_and(|info| info.is_regular_file() && info.is_single_link()))
+    Ok(windows_file_information(&file).and_then(WindowsFileInformation::regular_file_identity))
+}
+
+/// Return the stable identity of an already-opened Windows regular file.
+#[cfg(windows)]
+#[must_use]
+pub fn windows_regular_file_handle_identity(file: &File) -> Option<WindowsRegularFileIdentity> {
+    windows_file_information(file).and_then(WindowsFileInformation::regular_file_identity)
+}
+
+/// Return whether a Windows path is a real directory rather than any reparse
+/// point, including junction kinds not reported by `is_symlink()`.
+#[cfg(windows)]
+pub fn windows_directory_is_real(path: &Path) -> std::io::Result<bool> {
+    windows_real_directory_identity(path).map(|identity| identity.is_some())
+}
+
+/// Open a Windows leaf without following a reparse point and require a real,
+/// single-link regular file. Restore uses this before replacing a destination.
+#[cfg(windows)]
+pub fn windows_regular_file_is_safe(path: &Path) -> std::io::Result<bool> {
+    windows_real_regular_file_identity(path).map(|identity| identity.is_some())
 }
 
 fn corrupt_object_error(
@@ -2353,6 +2419,14 @@ mod tests {
         let information = windows_file_information(&first_handle).unwrap();
         assert!(information.is_regular_file());
         assert!(information.is_single_link());
+        assert_eq!(
+            windows_real_regular_file_identity(&first).unwrap(),
+            windows_regular_file_handle_identity(&first_handle)
+        );
+        assert_ne!(
+            windows_real_regular_file_identity(&first).unwrap(),
+            windows_real_regular_file_identity(&second).unwrap()
+        );
         assert!(same_windows_regular_file(&first_handle, &same_handle));
         assert!(!same_windows_regular_file(&first_handle, &second_handle));
         assert!(open_regular_nofollow(&first).is_ok());
