@@ -240,3 +240,168 @@ python3 -m unittest \
   eval.test_scale_prepare \
   eval.test_run_scale_eval
 ```
+
+## 20人の独立persona-PC fixture（設計契約）
+
+上のbalanced fixtureは「1 registryの20用途」であり、20人のPC再現ではない。別の
+persona-PC suiteでは、1人につき独立したPC root、XDG device state/registry、12個の
+職種固有leaf scopeと8個の共通PC leaf scopeを持たせる。20人の各PCがformal fullで
+W0/W5とも120,000 contributor chunks、W5後はcurrent+history 180,000 chunks以上を満たす。
+
+- machine-readable matrix: `eval/persona_fixture_spec.py`
+- contract and implementation order: `tasks/persona-pc-eval-contract.md`
+- readable 20-person/ratio proposal: `tasks/persona-pc-eval-proposal.md`
+- W0 plan/writer/strict verifier and read-only prepare-envelope verifier:
+  `eval/generate_persona_corpus.py`
+- bounded one-person plan API and full planned-count/resource oracle:
+  `eval/generate_persona_corpus.py`, `eval/persona_full_scale_limits.py`
+- W1-W5 contributor cohort allocator: `eval/persona_history_allocation.py`
+- W1-W5 structural allocator: `eval/persona_structural_allocation.py`
+- root-independent planned event manifest: `eval/persona_event_manifest.py`
+- 20-person root-wide planned schedule: `eval/persona_suite_event_manifest.py`
+- bounded per-person event shards and O(20) schedule/locator/MMR composer:
+  `eval/persona_suite_event_streaming.py`
+- blocked-until-readback capacity projection: `eval/persona_capacity.py`
+- non-formal bounded JSONL artifact storage: `eval/persona_streaming_storage.py`
+- read-only replay-root lease primitive: `eval/persona_root_lock.py`
+- fail-closed KCS command/result boundary: `eval/persona_kcs_runner.py`
+- partial filesystem/content/quota semantic attestor:
+  `eval/persona_history_attestation.py`
+- topology/generator tests: `eval/test_persona_fixture.py`,
+  `eval/test_persona_history_allocation.py`,
+  `eval/test_persona_structural_allocation.py`,
+  `eval/test_persona_event_manifest.py`,
+  `eval/test_persona_suite_event_manifest.py`,
+  `eval/test_persona_suite_event_streaming.py`,
+  `eval/test_persona_root_lock.py`,
+  `eval/test_generate_persona_corpus.py`
+
+15形式のW0物理ファイル比率、20人×12 primary paths、7,000〜16,000 files/person、
+75% primary / 25% common-secondary contributor負荷、W0〜W5操作集合を固定済みである。
+比率の分母はW0の物理direct-child filesで、current chunk数とは別台帳にする。
+Office、scan PDF、image、media、domain binaryを作成しただけでは120,000の検索可能
+chunkへ数えない。
+
+20人それぞれのOS semantics、device class、locale/language、work style、
+synthetic export source、sensitivity、nesting、size/domain-binary profileは、共通の
+small/medium/large/tail size-complexity bucketとともにmachine-readableな仮説metadataとして
+実装済みである。ただし、それらは実ユーザー統計ではなく、
+`implemented_by_renderer=false`である。現在のrendererのbytes、サイズ分布、
+extension/domain-binary variants、OS動作は従来のままで、検索可能性も主張しない。
+
+`tiny`は200 files/personとする。100 files/personではfinance-controllerの安定
+contributorが19件にしかならず、20個すべてのscopeへ非ゼロchunk targetを割り当てられない。
+200件なら比率を整数のまま保ちつつ、全scopeへ最低1 contributorを配置できる。
+
+実装順は次で固定する。
+
+1. W0のfolder/fileとphysical/logical/search-plan台帳を生成する。
+2. W0をprepare/init/indexし、編集前の履歴境界とactual chunk receiptを作る。
+3. mutation前にevent manifest全体をpreflightし、同じrootへW1〜W5を適用する。
+4. 同一の不変manifestから3つのfresh rootへ全waveを独立replayする（`.kcs`はコピーしない）。
+5. 60 registries / 1,200 scopesが完成してからattest、Recall、history、latencyを測る。
+
+W0 indexを省くと編集前のbytesが履歴にならない。これは最終評価を前倒しする手順ではなく、
+履歴を成立させるための必須境界である。
+
+現在はtiny W0 generatorに加え、contributor/structural allocatorとplanned event manifestまで
+実装済みである。20人×200 files、400 scope、4,131 planned contract chunksを原子的に生成し、
+2 fresh rootsのbyte同一性、inode非共有、strict no-op、改ざん拒否を検証する。400 scope中63 scopeは
+深さ4以上、10人は深さ5以上、最大深さ6である。
+全suiteをメモリに展開せず、1人のcanonical planを最大16,000 sources、8 MiB、
+20 scopesに制限して生成・再検算するAPIと、fullの正確なcount oracleも実装済みである。
+このoracleは1 replay当たり43,596 events、5,175 boundaries、48,771 schedule items、
+3 replayで130,788 / 15,525 / 146,313をcanonical allocationから導出するが、
+full event manifestの構築やKCS実測は行わない。
+
+構造laneはtiny/pilotで1人11 events、fullで1人30 events。full W2は20 scopesすべてへ
+same-scope U renameを置き、cross-scope moveはraw-only travelerを使う。near PNGは親RGBの
+1 channelだけを±1し、derived scan PDFは親PNGのdecoded pixelsをそのまま埋め込む。
+source/version/materializationを分離し、restoreは削除済みpath/checkpointをsourceにして別の
+既存active scopeへ新materializationを作る。final active file数はfull 195,080/replay、
+3 replayで585,240である。
+
+`pilot`/`full`はplan生成のみ可能で、物理writeはstreaming/RSS、rich-file size、pilot容量の
+承認前なのでblockedである。旧raw-file bucketはfull 20人中16人でpurge quotaを運べず、
+正本候補をwhole-source contributor cohort `P=4%, X=10%, Y=6%, N=4%, U=76%`へ変更した。
+現行W0 planについてsource-ID allocatorを実装し、tiny/pilot/full全60 persona-profileで
+person単位のexact subsetを生成・再検算できる。fullはP/X/Y/Nすべてを全20 scopesへ配置する。
+scopeごとのexact割合は多数の
+整数cellで不可能なので要求しない。
+
+W5はP'をold Pと並存させてindexし、old Pを1 pathずつremove→path purgeする。これにより
+1人あたり4,800 current + 4,800 historical = 9,600 version-chunksをpurgeし、最終の
+120,000 current / 60,000 contributor historyへ戻す。event manifestはevents/boundaries/scheduleを
+分離し、wave×scopeのordinary indexを1件へcoalesceし、W5の逐次purge順を凍結する。
+suite manifestは20人の個人manifestをhashで束縛し、W1--W4の全regular→全index、W5の
+全regular→全index→persona/source順purge pair→全noopを、root-wide lock 1本で実行する
+単一依存鎖へする。tiny全20人は1,076 events、908 boundaries、1,984 schedule itemsである。
+旧in-memory builderと別に、完全なevent manifestは一度に1人分だけ保持し、
+events/boundaries/schedule projectionをbounded JSONL shardへpublishするlayerを実装した。
+suite composerは20人のcompact summaryだけを持つO(20) mergeで、global schedule、
+external row locator、schedule/locator bindingのMMRを構成し、20個のfull manifest objectを同時に保持しない。
+tinyは旧builderの1,076 / 908 / 1,984、schedule SHA-256、suite-manifest SHA-256と完全一致する。
+ただし、下位のsource-inode rename blockerを引き継ぐためすべてのartifactは
+`formal_publication_attested=false`であり、fullのsupervisor実測RSS・artifact readback・`wait4`
+receiptも未証明である。このstreaming実装はformal fullまたはW1〜W5の実行を許可しない。
+p01/fullのCI回帰は120,000 current、60,000 history、30 structural events、20-scope W2を
+一度の構築で検査する。W0 immutable verifierとpost-W0 envelope verifierは分離済みで、
+後者はcanonical intent、400 `.kcs`、20 `.kcs-eval-device`と固定control/receipt namespaceを
+外側から検証する。opaque内部はtyped callback receiptなしでは明示的にunattestedであり、
+history-readyを主張しない。partial semantic attestorはprofile、canonical persona/scope、
+contract quota算術、file bytes/content roots、typed runtime callback receiptを束縛できるが、
+SQLite/CAS、HEAD/commit、KCS binary/config、root/prepare-intentの統合的検証ではなく、
+完全な400-scope入力でも`history_ready_attested=false`のままである。
+attestorは各directoryの子entryを名前またはMerkle childとして保持する前に
+16,384 direct entriesのhard capを適用する。
+
+KCS runnerはstrict JSON/result validator、isolated environment recipe、binary snapshot、
+unbound receipt形式まで実装した。しかしpathname検証後の`Popen(cwd=...)`には
+same-user TOCTOUが残るため、`HANDLE_RELATIVE_EXECUTION_AVAILABLE`、
+`PERSONA_FILESYSTEM_MUTATION_AVAILABLE`、`TRUSTED_BINARY_EXECUTION_AVAILABLE`は全てfalseであり、
+init/index/version subprocessも物理mutationも許可しない。root/owner inodeへのread-only leaseは
+実装済みだが、prepare runner統合、handle-relative safe mutation、journal、replay executorは未実装なので
+W1〜W5 mutationは引き続きfail closedである。
+
+capacity APIはcardinalityと呼出側宣言値を束縛するが、pilot measurement receiptと
+destination-root availabilityの読み戻しがない限りblockedで、receiptはphysical writeを承認しない。
+bounded streaming storageはcanonical JSONL shardをno-replace publish/readbackできるが、
+verified source directory inodeをrenameのatomic preconditionにできないため、
+`formal_publication_attested=false` / `source_directory_inode_not_bound_by_rename`のままである。
+これらはformal full実測、W0 prepare、actual KCS chunk/history attestationの証拠ではない。
+
+```bash
+python3 eval/generate_persona_corpus.py plan \
+  --profile tiny --plan-out /private/tmp/kcs-persona-tiny-plan.json
+mkdir -p /private/tmp/kcs-persona-runs
+python3 eval/generate_persona_corpus.py generate \
+  --plan /private/tmp/kcs-persona-tiny-plan.json \
+  --out /private/tmp/kcs-persona-runs/replay-01 \
+  --replay-id replay-01
+```
+
+```bash
+python3 -m unittest \
+  eval.test_persona_fixture \
+  eval.test_persona_person_plan \
+  eval.test_persona_full_scale_limits \
+  eval.test_persona_allocation \
+  eval.test_persona_history_allocation \
+  eval.test_persona_structural_allocation \
+  eval.test_persona_event_manifest \
+  eval.test_persona_suite_event_manifest \
+  eval.test_persona_suite_event_streaming \
+  eval.test_persona_capacity \
+  eval.test_persona_storage \
+  eval.test_persona_streaming_storage \
+  eval.test_persona_root_lock \
+  eval.test_persona_kcs_runner \
+  eval.test_persona_history_attestation \
+  eval.test_persona_renderers \
+  eval.test_persona_manifest \
+  eval.test_generate_persona_corpus \
+  eval.test_eval_env
+
+KCS_RUN_PERSONA_FS_INTEGRATION=1 \
+  python3 -m unittest eval.test_generate_persona_corpus
+```
