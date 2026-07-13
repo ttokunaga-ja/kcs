@@ -265,6 +265,8 @@ W0/W5とも120,000 contributor chunks、W5後はcurrent+history 180,000 chunks�
 - non-formal bounded JSONL artifact storage: `eval/persona_streaming_storage.py`
 - read-only replay-root lease primitive: `eval/persona_root_lock.py`
 - fail-closed KCS command/result boundary: `eval/persona_kcs_runner.py`
+- canonical non-executing 20-person prepare-receipt composer:
+  `eval/persona_prepare_receipt.py`
 - partial filesystem/content/quota semantic attestor:
   `eval/persona_history_attestation.py`
 - topology/generator tests: `eval/test_persona_fixture.py`,
@@ -347,21 +349,41 @@ receiptも未証明である。このstreaming実装はformal fullまたはW1〜
 p01/fullのCI回帰は120,000 current、60,000 history、30 structural events、20-scope W2を
 一度の構築で検査する。W0 immutable verifierとpost-W0 envelope verifierは分離済みで、
 後者はcanonical intent、400 `.kcs`、20 `.kcs-eval-device`と固定control/receipt namespaceを
-外側から検証する。opaque内部はtyped callback receiptなしでは明示的にunattestedであり、
+外側から検証する。opaque内部はtyped checker observationなしでは明示的にunattestedであり、
 history-readyを主張しない。partial semantic attestorはprofile、canonical persona/scope、
-contract quota算術、file bytes/content roots、typed runtime callback receiptを束縛できるが、
+contract quota算術、file bytes/content roots、typed runtime observationを束縛できるが、
 SQLite/CAS、HEAD/commit、KCS binary/config、root/prepare-intentの統合的検証ではなく、
 完全な400-scope入力でも`history_ready_attested=false`のままである。
 attestorは各directoryの子entryを名前またはMerkle childとして保持する前に
 16,384 direct entriesのhard capを適用する。
 
+non-executing prepare-receipt composerはcanonical all-person plan SHAを1人分ずつ
+streaming再構成し、root/person/device/scopeのexact 20×20 projectionへroot binding、
+binary identity、environment、init、indexの宣言SHAを束縛する。artifact本文、SQLite/CAS、
+HEAD/registryは検査しないため、全semantic/history/execution/mutation claimはfalse固定である。
+rootは`/`を許さず、4 KiB/64 components/255 bytes per component、person bindingは20 scopeを
+走査前に要求する。
+
 KCS runnerはstrict JSON/result validator、isolated environment recipe、binary snapshot、
 unbound receipt形式まで実装した。しかしpathname検証後の`Popen(cwd=...)`には
 same-user TOCTOUが残るため、`HANDLE_RELATIVE_EXECUTION_AVAILABLE`、
 `PERSONA_FILESYSTEM_MUTATION_AVAILABLE`、`TRUSTED_BINARY_EXECUTION_AVAILABLE`は全てfalseであり、
-init/index/version subprocessも物理mutationも許可しない。root/owner inodeへのread-only leaseは
-実装済みだが、prepare runner統合、handle-relative safe mutation、journal、replay executorは未実装なので
-W1〜W5 mutationは引き続きfail closedである。
+init/index/version subprocessも物理mutationも許可しない。root/owner inodeへのread-only leaseと、
+lease保持済みroot FDのnon-inheritable duplicateを貸すAPIは実装済みである。これにより
+trusted-rootのpath-check/open seamは閉じるが、同一プロセスcheckerのFD複製・一時再束縛、
+持続的なsame-inode reopenはDarwin/Linux共通のopen-description flag probeで拒否する。
+ただしsame-UID ABA、immutable snapshot、process isolationは未解決である。prepare runner統合、
+handle-relative safe mutation、journal、replay executorも未実装なので、W1〜W5 mutationは
+引き続きfail closedである。
+
+complete W0 semantic checkerには、HEAD/ref/commit/tree/raw/normalize/chunk CAS、strict
+JSONL/task/approval/unsupported state、scope SQLite/FTS、person registryのexact 20行を
+同一snapshotで検査する必要がある。Python標準`sqlite3`は既存directory FDをauthorityとして
+main/WAL/SHMをcross-platformに開けず、registryのread-only openもsidecarへ書く可能性がある。
+FD-bound native read-only VFSまたはwriter排除下の同一epoch immutable snapshotが入るまで、
+checker-local evidenceは`semantics_attested=true`を要求しても、receiptの
+`formal_transport_attested`、suite formal semantic coverage、actual chunks、history readinessは
+falseのままで、legacy nine-field callbackへ変換できない。
 
 capacity APIはcardinalityと呼出側宣言値を束縛するが、pilot measurement receiptと
 destination-root availabilityの読み戻しがない限りblockedで、receiptはphysical writeを承認しない。
@@ -396,6 +418,7 @@ python3 -m unittest \
   eval.test_persona_streaming_storage \
   eval.test_persona_root_lock \
   eval.test_persona_kcs_runner \
+  eval.test_persona_prepare_receipt \
   eval.test_persona_history_attestation \
   eval.test_persona_renderers \
   eval.test_persona_manifest \

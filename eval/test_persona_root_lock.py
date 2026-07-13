@@ -112,6 +112,306 @@ except lock.PersonaRootLockError as error:
 
 
 class TestReplayRootLease(PersonaRootLockTestCase):
+    def test_active_root_descriptor_reads_from_held_root_and_is_closed(self):
+        root, binding_sha = self.make_owned_root()
+        payload = b"read through the lease-held root descriptor\n"
+        (root / "payload.txt").write_bytes(payload)
+        supplied = None
+
+        with self.acquire(root, binding_sha) as lease:
+            with root_lock.active_root_descriptor(lease, root) as descriptor:
+                supplied = descriptor
+                metadata = os.fstat(descriptor)
+                self.assertEqual(
+                    (metadata.st_dev, metadata.st_ino, metadata.st_nlink),
+                    (lease.root_device, lease.root_inode, root.lstat().st_nlink),
+                )
+                self.assertFalse(os.get_inheritable(descriptor))
+                payload_fd = os.open("payload.txt", os.O_RDONLY, dir_fd=descriptor)
+                try:
+                    self.assertEqual(os.read(payload_fd, len(payload) + 1), payload)
+                finally:
+                    os.close(payload_fd)
+            with self.assertRaises(OSError):
+                os.fstat(supplied)
+            self.assertIs(root_lock.require_active_lease(lease, root), lease)
+
+    def test_active_root_descriptor_rejects_expired_wrong_and_foreign_lease(self):
+        root, binding_sha = self.make_owned_root()
+        with self.acquire(root, binding_sha) as lease:
+            with self.assertRaisesRegex(
+                root_lock.PersonaRootLockError, "path differs"
+            ):
+                with root_lock.active_root_descriptor(lease, self.base / "wrong"):
+                    self.fail("wrong-root descriptor unexpectedly yielded")
+            with self.assertRaisesRegex(
+                root_lock.PersonaRootLockError, "invalid replay root lease"
+            ):
+                with root_lock.active_root_descriptor(object()):
+                    self.fail("foreign lease unexpectedly yielded")
+        with self.assertRaisesRegex(
+            root_lock.PersonaRootLockError, "not active"
+        ):
+            with root_lock.active_root_descriptor(lease):
+                self.fail("expired lease unexpectedly yielded")
+
+    def test_active_root_descriptor_rejects_caller_close(self):
+        root, binding_sha = self.make_owned_root()
+        with self.acquire(root, binding_sha) as lease:
+            with self.assertRaisesRegex(
+                root_lock.PersonaRootLockError,
+                "not open|closed|cannot close",
+            ):
+                with root_lock.active_root_descriptor(lease) as descriptor:
+                    os.close(descriptor)
+            self.assertIs(root_lock.require_active_lease(lease), lease)
+
+    def test_active_root_descriptor_does_not_close_reused_foreign_slot(self):
+        root, binding_sha = self.make_owned_root()
+        foreign = self.base / "foreign-reuse"
+        foreign.mkdir()
+        replacement_fd = -1
+        with self.acquire(root, binding_sha) as lease:
+            try:
+                with self.assertRaisesRegex(
+                    root_lock.PersonaRootLockError,
+                    "closed|changed|identity|rebound",
+                ):
+                    with root_lock.active_root_descriptor(lease) as descriptor:
+                        os.close(descriptor)
+                        replacement_fd = os.open(foreign, os.O_RDONLY)
+                        self.assertEqual(replacement_fd, descriptor)
+                replacement = os.fstat(replacement_fd)
+                self.assertEqual(
+                    (replacement.st_dev, replacement.st_ino),
+                    (foreign.lstat().st_dev, foreign.lstat().st_ino),
+                )
+            finally:
+                if replacement_fd >= 0:
+                    os.close(replacement_fd)
+            self.assertIs(root_lock.require_active_lease(lease), lease)
+
+    def test_open_description_probe_distinguishes_dup_from_same_inode_open(self):
+        root, _binding_sha = self.make_owned_root()
+        anchor_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+        duplicate_fd = os.dup(anchor_fd)
+        fresh_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            self.assertTrue(
+                root_lock._shares_open_directory_description(
+                    anchor_fd, duplicate_fd
+                )
+            )
+            self.assertFalse(
+                root_lock._shares_open_directory_description(
+                    anchor_fd, fresh_fd
+                )
+            )
+        finally:
+            os.close(fresh_fd)
+            os.close(duplicate_fd)
+            os.close(anchor_fd)
+
+    def test_active_root_descriptor_rejects_same_inode_reopen_without_closing_it(self):
+        root, binding_sha = self.make_owned_root()
+        replacement_fd = -1
+        with self.acquire(root, binding_sha) as lease:
+            try:
+                with self.assertRaisesRegex(
+                    root_lock.PersonaRootLockError,
+                    "rebound|changed|ownership",
+                ):
+                    with root_lock.active_root_descriptor(lease) as descriptor:
+                        os.close(descriptor)
+                        replacement_fd = os.open(
+                            root, os.O_RDONLY | os.O_DIRECTORY
+                        )
+                        self.assertEqual(replacement_fd, descriptor)
+                replacement = os.fstat(replacement_fd)
+                expected = root.lstat()
+                self.assertEqual(
+                    (replacement.st_dev, replacement.st_ino),
+                    (expected.st_dev, expected.st_ino),
+                )
+            finally:
+                if replacement_fd >= 0:
+                    os.close(replacement_fd)
+            self.assertIs(root_lock.require_active_lease(lease), lease)
+
+    def test_active_root_descriptor_setup_does_not_close_reused_foreign_slot(self):
+        root, binding_sha = self.make_owned_root()
+        foreign = self.base / "setup-foreign-reuse"
+        foreign.mkdir()
+        replacement = []
+
+        def replace_before_inheritable_check(descriptor, _inheritable):
+            os.close(descriptor)
+            replacement.append(
+                os.open(foreign, os.O_RDONLY | os.O_DIRECTORY)
+            )
+            self.assertEqual(replacement[0], descriptor)
+            raise OSError("injected setup failure")
+
+        with self.acquire(root, binding_sha) as lease:
+            try:
+                with mock.patch.object(
+                    root_lock.os,
+                    "set_inheritable",
+                    side_effect=replace_before_inheritable_check,
+                ):
+                    with self.assertRaisesRegex(
+                        root_lock.PersonaRootLockError, "cannot duplicate"
+                    ):
+                        with root_lock.active_root_descriptor(lease):
+                            self.fail("tampered setup unexpectedly yielded")
+                observed = os.fstat(replacement[0])
+                expected = foreign.lstat()
+                self.assertEqual(
+                    (observed.st_dev, observed.st_ino),
+                    (expected.st_dev, expected.st_ino),
+                )
+            finally:
+                if replacement:
+                    os.close(replacement[0])
+
+    def test_active_root_descriptor_rechecks_after_inheritable_query(self):
+        root, binding_sha = self.make_owned_root()
+        foreign = self.base / "query-foreign-reuse"
+        foreign.mkdir()
+        replacement = []
+        original_get_inheritable = os.get_inheritable
+        query_count = 0
+
+        def replace_on_final_query(descriptor):
+            nonlocal query_count
+            query_count += 1
+            if query_count == 1:
+                os.close(descriptor)
+                replacement.append(
+                    os.open(foreign, os.O_RDONLY | os.O_DIRECTORY)
+                )
+                self.assertEqual(replacement[0], descriptor)
+                return False
+            return original_get_inheritable(descriptor)
+
+        with self.acquire(root, binding_sha) as lease:
+            try:
+                with mock.patch.object(
+                    root_lock.os,
+                    "get_inheritable",
+                    side_effect=replace_on_final_query,
+                ):
+                    with self.assertRaisesRegex(
+                        root_lock.PersonaRootLockError,
+                        "private non-inheritable duplicate",
+                    ):
+                        with root_lock.active_root_descriptor(lease):
+                            self.fail("reused setup descriptor unexpectedly yielded")
+                observed = os.fstat(replacement[0])
+                expected = foreign.lstat()
+                self.assertEqual(
+                    (observed.st_dev, observed.st_ino),
+                    (expected.st_dev, expected.st_ino),
+                )
+            finally:
+                if replacement:
+                    os.close(replacement[0])
+
+    def test_active_root_descriptor_rejects_caller_rebind(self):
+        root, binding_sha = self.make_owned_root()
+        foreign = self.base / "foreign"
+        foreign.mkdir()
+        foreign_fd = os.open(foreign, os.O_RDONLY)
+        supplied = None
+        try:
+            with self.acquire(root, binding_sha) as lease:
+                with self.assertRaisesRegex(
+                    root_lock.PersonaRootLockError,
+                    "identity changed|rebound",
+                ):
+                    with root_lock.active_root_descriptor(lease) as descriptor:
+                        supplied = descriptor
+                        os.dup2(foreign_fd, descriptor, inheritable=False)
+                supplied_metadata = os.fstat(supplied)
+                foreign_metadata = os.fstat(foreign_fd)
+                self.assertEqual(
+                    (supplied_metadata.st_dev, supplied_metadata.st_ino),
+                    (foreign_metadata.st_dev, foreign_metadata.st_ino),
+                )
+                os.close(supplied)
+                supplied = None
+                self.assertIs(root_lock.require_active_lease(lease), lease)
+        finally:
+            if supplied is not None:
+                try:
+                    os.close(supplied)
+                except OSError:
+                    pass
+            os.close(foreign_fd)
+
+    def test_active_root_descriptor_rejects_inheritable_tamper(self):
+        root, binding_sha = self.make_owned_root()
+        supplied = None
+        with self.acquire(root, binding_sha) as lease:
+            with self.assertRaisesRegex(
+                root_lock.PersonaRootLockError, "inheritable"
+            ):
+                with root_lock.active_root_descriptor(lease) as descriptor:
+                    supplied = descriptor
+                    os.set_inheritable(descriptor, True)
+            with self.assertRaises(OSError):
+                os.fstat(supplied)
+            self.assertIs(root_lock.require_active_lease(lease), lease)
+
+    def test_active_root_descriptor_namespace_swap_overrides_body_failure(self):
+        root, binding_sha = self.make_owned_root()
+        parked = self.base / "parked"
+        with self.acquire(root, binding_sha) as lease:
+            try:
+                with self.assertRaisesRegex(
+                    root_lock.PersonaRootLockError, "root identity changed"
+                ) as caught:
+                    with root_lock.active_root_descriptor(lease):
+                        root.rename(parked)
+                        root.mkdir()
+                        raise ValueError("body failure")
+                self.assertIsInstance(caught.exception.__cause__, ValueError)
+            finally:
+                if root.exists():
+                    root.rmdir()
+                if parked.exists():
+                    parked.rename(root)
+            self.assertIs(root_lock.require_active_lease(lease), lease)
+
+    def test_active_root_descriptor_preserves_clean_body_failure(self):
+        root, binding_sha = self.make_owned_root()
+        with self.acquire(root, binding_sha) as lease:
+            with self.assertRaisesRegex(ValueError, "body failure"):
+                with root_lock.active_root_descriptor(lease):
+                    raise ValueError("body failure")
+            self.assertIs(root_lock.require_active_lease(lease), lease)
+
+    def test_active_root_descriptor_normalizes_stateful_pathlike_once(self):
+        root, binding_sha = self.make_owned_root()
+
+        class StatefulPath:
+            def __init__(self, value):
+                self.value = value
+                self.calls = 0
+
+            def __fspath__(self):
+                self.calls += 1
+                if self.calls > 1:
+                    raise RuntimeError("path was evaluated twice")
+                return str(self.value)
+
+        expected_root = StatefulPath(root)
+        with self.acquire(root, binding_sha) as lease:
+            with root_lock.active_root_descriptor(lease, expected_root):
+                pass
+            self.assertEqual(expected_root.calls, 1)
+            self.assertIs(root_lock.require_active_lease(lease), lease)
+
     def test_success_is_read_only_and_lease_expires(self):
         root, binding_sha = self.make_owned_root()
         marker_path = root / storage.OWNER_MARKER_NAME

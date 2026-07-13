@@ -31,6 +31,7 @@ jobs:
           eval.test_persona_streaming_storage
           eval.test_persona_root_lock
           eval.test_persona_kcs_runner
+          eval.test_persona_prepare_receipt
           eval.test_persona_history_attestation
           eval.test_persona_renderers
           eval.test_persona_manifest
@@ -83,6 +84,11 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo test --workspace --all-targets --locked
+      - run: >-
+          python3 -m unittest
+          eval.test_persona_root_lock
+          eval.test_persona_prepare_receipt
+          eval.test_persona_history_attestation
 
   windows-security-r23:
     runs-on: windows-latest

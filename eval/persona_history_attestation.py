@@ -5,12 +5,21 @@ This module deliberately separates two different claims:
 * :func:`walk_directory_content_root` proves only a bounded, stable subtree
   below an opened final directory (not trusted-root containment) using a
   directory-local hierarchical Merkle root; and
-* :func:`build_runtime_directory_receipt` emits the exact nine-field callback
-  receipt accepted by ``verify_history_prepare_envelope`` only after an
-  explicit externally supplied KCS semantic checker succeeds, its typed result
-  binds profile/person/scope/path/content root/chunk arithmetic, the tree is
-  unchanged by it, and the descriptor is opened component-by-component from a
-  canonical trusted-root file descriptor.
+* :func:`build_runtime_directory_receipt` retains the original pathname-based
+  checker API for compatibility, but is not an executable attestation
+  authority; and
+* :func:`build_handle_bound_runtime_directory_receipt` constructs a typed
+  observation only after an explicit KCS checker reads through a private directory
+  descriptor opened component-by-component from a canonical trusted-root
+  descriptor.  Its typed result binds profile/person/scope/path/content root/
+  chunk arithmetic, and the tree plus namespace are revalidated afterwards.
+  This in-process transport is still non-authoritative because it cannot prove
+  absence of same-UID ABA writes or reclaim checker-created descriptor copies;
+  :func:`build_lease_bound_runtime_directory_receipt` additionally derives the
+  trusted root from the active replay lease instead of reopening its pathname,
+  but deliberately retains the same non-authoritative status.  Current typed
+  observations fix ``formal_transport_attested`` false and cannot enter the
+  legacy nine-field history-envelope callback protocol.
 
 The generic walker does not understand SQLite, KCS commits, CAS objects, HEAD,
 or device-registry semantics.  A content root must therefore never be called a
@@ -33,9 +42,11 @@ import unicodedata
 try:  # Package imports and direct ``python eval/...`` execution.
     from . import generate_persona_corpus as generator
     from . import persona_fixture_spec as fixture_spec
+    from . import persona_root_lock as root_lock
 except ImportError:  # pragma: no cover - retained for repository script style.
     import generate_persona_corpus as generator
     import persona_fixture_spec as fixture_spec
+    import persona_root_lock as root_lock
 
 
 CONTENT_ROOT_SCHEMA = "kcs.persona.filesystem-content-root/v2"
@@ -44,6 +55,12 @@ PARTIAL_PERSON_SCHEMA = "kcs.persona.w0.partial-person-attestation/v1"
 SUITE_RECEIPT_SCHEMA = "kcs.persona.w0.suite-semantic-attestation/v1"
 KCS_SEMANTIC_EVIDENCE_SCHEMA = "kcs.persona.kcs-semantic-evidence/v1"
 FILESYSTEM_COVERAGE = "filesystem_structure_and_file_bytes_only"
+# This module intentionally exposes no formal execution authority yet.  The
+# handle-bound callback narrows namespace races, but same-process code can
+# transiently rebind/restore descriptors, duplicate them, or perform an
+# in-place ABA write between snapshots.  A quiesced immutable snapshot and an
+# isolated checker process are still required before this can become true.
+HANDLE_BOUND_SEMANTIC_TRANSPORT_FORMAL = False
 EXPECTED_PERSONAS = 20
 EXPECTED_SCOPES_PER_PERSON = 20
 EXPECTED_SCOPE_STORES = EXPECTED_PERSONAS * EXPECTED_SCOPES_PER_PERSON
@@ -196,8 +213,80 @@ class DirectoryContentRoot:
 
 
 @dataclass(frozen=True)
+class BoundRuntimeDirectory:
+    """Ephemeral, no-follow handle passed to a concrete semantic checker.
+
+    ``directory_fd`` is a private duplicate of the descriptor opened from the
+    trusted replay-root descriptor.  The receipt builder closes it immediately
+    after the checker returns and rejects closing, descriptor-number rebinding,
+    or making it inheritable.  A checker using this experimental transport must
+    resolve every KCS file and subdirectory relative to this descriptor;
+    ``path`` is diagnostic identity, not authority for reopening the runtime
+    namespace.  The checker can still duplicate or transiently replace the
+    descriptor, so this object is not a formal execution capability.
+    """
+
+    path: Path
+    trusted_root: Path
+    kind: str
+    relative_path: str
+    directory_fd: int
+    directory_device: int
+    directory_inode: int
+    directory_nlink: int
+
+    def __post_init__(self):
+        _validate_relative_runtime_path(self.relative_path, self.kind)
+        if (
+            not isinstance(self.path, Path)
+            or not isinstance(self.trusted_root, Path)
+            or type(self.directory_fd) is not int
+            or self.directory_fd < 0
+            or type(self.directory_device) is not int
+            or type(self.directory_inode) is not int
+            or type(self.directory_nlink) is not int
+            or min(
+                self.directory_device,
+                self.directory_inode,
+                self.directory_nlink,
+            )
+            < 0
+        ):
+            raise PersonaHistoryAttestationError(
+                "bound runtime directory identity is invalid"
+            )
+        try:
+            metadata = os.fstat(self.directory_fd)
+        except OSError as error:
+            raise PersonaHistoryAttestationError(
+                "bound runtime directory descriptor is not open"
+            ) from error
+        if (
+            not stat.S_ISDIR(metadata.st_mode)
+            or (
+                metadata.st_dev,
+                metadata.st_ino,
+                metadata.st_nlink,
+            )
+            != (
+                self.directory_device,
+                self.directory_inode,
+                self.directory_nlink,
+            )
+        ):
+            raise PersonaHistoryAttestationError(
+                "bound runtime directory descriptor identity differs"
+            )
+        _require_noninheritable(self.directory_fd, "semantic checker runtime")
+
+
+@dataclass(frozen=True)
 class KcsSemanticEvidence:
-    """Externally supplied KCS result bound to one observed runtime snapshot."""
+    """Checker-local KCS assertion bound to one observed runtime snapshot.
+
+    ``semantics_attested`` records what the external checker asserted.  It is
+    not proof that the in-process/pathname transport is formal.
+    """
 
     schema: str
     schema_version: int
@@ -245,7 +334,12 @@ class KcsSemanticEvidence:
 
 @dataclass(frozen=True)
 class RuntimeDirectoryReceipt:
-    """Exact callback receipt consumed by the history-prepare envelope."""
+    """Exact callback receipt consumed by the history-prepare envelope.
+
+    Current builders are intentionally non-formal.  The fixed-false provenance
+    prevents a typed handle/path callback from being promoted into a suite KCS
+    semantics claim merely because its external checker asserted success.
+    """
 
     schema: str
     schema_version: int
@@ -257,6 +351,7 @@ class RuntimeDirectoryReceipt:
     attestor_schema: str
     content_root_sha256: str
     semantic_evidence: KcsSemanticEvidence
+    formal_transport_attested: bool = field(default=False, init=False)
 
     def __post_init__(self):
         expected_schema = _attestor_schema_for_kind(self.kind)
@@ -282,13 +377,24 @@ class RuntimeDirectoryReceipt:
             or self.semantic_evidence.attestor_schema != self.attestor_schema
             or self.semantic_evidence.content_root_sha256
             != self.content_root_sha256
+            or self.formal_transport_attested is not False
         ):
             raise PersonaHistoryAttestationError(
                 "runtime directory callback receipt is invalid"
             )
 
     def to_callback_dict(self) -> dict[str, object]:
-        """Return exactly the nine primitive fields required by the callback."""
+        """Serialize only a future formally transported receipt.
+
+        The legacy nine-field protocol carries no transport provenance.  Every
+        builder in this module currently fixes that provenance false, so
+        serialization must fail rather than let the history envelope relabel a
+        non-formal observation as ``attested_by_callback``.
+        """
+        if not self.formal_transport_attested:
+            raise PersonaHistoryAttestationError(
+                "non-formal runtime receipt cannot enter the callback protocol"
+            )
         return {
             "schema": self.schema,
             "schema_version": self.schema_version,
@@ -403,7 +509,10 @@ class PartialScopeReceipt:
 
     @property
     def kcs_semantics_attested(self) -> bool:
-        return self.runtime_callback_receipt is not None
+        return (
+            self.runtime_callback_receipt is not None
+            and self.runtime_callback_receipt.formal_transport_attested
+        )
 
 
 @dataclass(frozen=True)
@@ -502,6 +611,7 @@ class PartialPersonReceipt:
     def kcs_semantics_attested(self) -> bool:
         return (
             self.device_runtime_callback_receipt is not None
+            and self.device_runtime_callback_receipt.formal_transport_attested
             and self.scope_coverage_complete
             and all(scope.kcs_semantics_attested for scope in self.scopes)
         )
@@ -509,12 +619,7 @@ class PartialPersonReceipt:
 
 @dataclass(frozen=True)
 class SuiteAttestationReceipt:
-    """Root-independent W0 coverage projection, never history readiness.
-
-    ``semantic_coverage_attested`` means only that all 420 externally supplied,
-    identity-bound callback results are represented.  It is not this module's
-    own SQLite/CAS/KCS semantic conclusion.
-    """
+    """Root-independent W0 coverage projection, never formal KCS readiness."""
 
     schema: str
     schema_version: int
@@ -590,16 +695,9 @@ class SuiteAttestationReceipt:
                 "this structural/callback substrate cannot attest history readiness"
             )
         if self.kcs_semantics_callback_attested or self.semantic_coverage_attested:
-            if (
-                not self.filesystem_coverage_complete
-                or not self.kcs_semantics_callback_attested
-                or not self.semantic_coverage_attested
-                or self.expected_contract_contributor_chunks
-                != self.contract_contributor_chunks
-            ):
-                raise PersonaHistoryAttestationError(
-                    "suite semantic/history readiness prerequisites are incomplete"
-                )
+            raise PersonaHistoryAttestationError(
+                "current callback transports cannot attest formal KCS semantics"
+            )
 
 
 def _attestor_schema_for_kind(kind: str) -> str:
@@ -663,12 +761,21 @@ def _validate_portable_component(value: str, label: str) -> None:
 
 
 def _validate_relative_runtime_path(value: object, kind: str) -> str:
-    if type(value) is not str or not value or value.startswith("/") or "\\" in value:
+    if (
+        type(value) is not str
+        or not value
+        or len(value) > 4_096
+        or value.startswith("/")
+        or "\\" in value
+    ):
         raise PersonaHistoryAttestationError("runtime relative_path is invalid")
+    encoded = value.encode("utf-8")
+    if len(encoded) > 4_096:
+        raise PersonaHistoryAttestationError("runtime relative_path is not canonical")
     if unicodedata.normalize("NFC", value) != value:
         raise PersonaHistoryAttestationError("runtime relative_path must be NFC")
     path = PurePosixPath(value)
-    if str(path) != value or len(value.encode("utf-8")) > 4_096:
+    if str(path) != value:
         raise PersonaHistoryAttestationError("runtime relative_path is not canonical")
     for index, component in enumerate(path.parts):
         _validate_portable_component(component, f"relative_path[{index}]")
@@ -786,6 +893,38 @@ def _require_noninheritable(descriptor: int, label: str) -> None:
         )
 
 
+def _shares_open_directory_description(anchor_fd: int, candidate_fd: int) -> bool:
+    """Use the root-lock module's Darwin/Linux open-description probe."""
+    return root_lock._shares_open_directory_description(anchor_fd, candidate_fd)
+
+
+def _is_owned_directory_duplicate(
+    anchor_fd: int,
+    candidate_fd: int,
+    expected_metadata: os.stat_result,
+) -> bool:
+    """Distinguish our live duplicate from a reused numeric descriptor slot."""
+    try:
+        candidate = os.fstat(candidate_fd)
+    except OSError:
+        return False
+    return (
+        stat.S_ISDIR(candidate.st_mode)
+        and candidate.st_nlink > 0
+        and (
+            candidate.st_dev,
+            candidate.st_ino,
+            candidate.st_nlink,
+        )
+        == (
+            expected_metadata.st_dev,
+            expected_metadata.st_ino,
+            expected_metadata.st_nlink,
+        )
+        and _shares_open_directory_description(anchor_fd, candidate_fd)
+    )
+
+
 def _open_root_directory(path: Path) -> tuple[int, os.stat_result]:
     try:
         before = path.lstat()
@@ -810,14 +949,23 @@ def _open_root_directory(path: Path) -> tuple[int, os.stat_result]:
             raise PersonaHistoryAttestationError(
                 "runtime root changed while opening"
             )
-    except PersonaHistoryAttestationError:
-        os.close(descriptor)
+    except BaseException as error:
+        close_error = None
+        try:
+            os.close(descriptor)
+        except OSError as descriptor_close_error:
+            close_error = descriptor_close_error
+        if close_error is not None:
+            raise PersonaHistoryAttestationError(
+                "cannot close the failed runtime-root descriptor"
+            ) from close_error
+        if isinstance(error, PersonaHistoryAttestationError):
+            raise
+        if isinstance(error, OSError):
+            raise PersonaHistoryAttestationError(
+                "cannot identity-bind the opened runtime root"
+            ) from error
         raise
-    except OSError as error:
-        os.close(descriptor)
-        raise PersonaHistoryAttestationError(
-            "cannot identity-bind the opened runtime root"
-        ) from error
     return descriptor, opened
 
 
@@ -873,8 +1021,9 @@ def _read_regular_file(
             raise PersonaHistoryAttestationError(
                 "runtime file changed while opening"
             )
-        while True:
-            block = os.read(descriptor, limits.read_size)
+        while total < expected.st_size:
+            remaining = expected.st_size - total
+            block = os.read(descriptor, min(limits.read_size, remaining))
             if not block:
                 break
             total += len(block)
@@ -1131,8 +1280,8 @@ def walk_directory_content_root(
     It excludes the absolute root, device/inode identities, permissions, and
     timestamps, so equivalent trees at different safe roots have the same
     digest.  This generic entry point binds the final root component and all
-    descendants; formal callback containment additionally requires the
-    trusted-root entry point below.
+    descendants; callback containment additionally requires the trusted-root
+    entry point below.
     """
     _require_handle_platform()
     if type(limits) is not AttestationLimits:
@@ -1202,10 +1351,12 @@ def _open_relative_directory(
         raise PersonaHistoryAttestationError(
             "cannot duplicate the trusted-root descriptor"
         ) from error
+    owned_fds = [current_fd]
     try:
         _require_noninheritable(current_fd, "trusted-root duplicate")
         current_metadata = os.fstat(current_fd)
         for component in parts:
+            child_fd = None
             try:
                 namespace = os.stat(
                     component,
@@ -1217,30 +1368,36 @@ def _open_relative_directory(
                     _open_flags(directory=True),
                     dir_fd=current_fd,
                 )
+                owned_fds.append(child_fd)
             except OSError as error:
                 raise PersonaHistoryAttestationError(
                     f"cannot open contained runtime component safely: {component}"
                 ) from error
-            try:
-                _require_noninheritable(child_fd, "contained runtime directory")
-                opened = os.fstat(child_fd)
-                if (
-                    not stat.S_ISDIR(opened.st_mode)
-                    or opened.st_dev != trusted_device
-                    or _stable_metadata(opened) != _stable_metadata(namespace)
-                ):
-                    raise PersonaHistoryAttestationError(
-                        f"contained runtime component changed while opening: {component}"
-                    )
-            except Exception:
-                os.close(child_fd)
-                raise
-            os.close(current_fd)
+            _require_noninheritable(child_fd, "contained runtime directory")
+            opened = os.fstat(child_fd)
+            if (
+                not stat.S_ISDIR(opened.st_mode)
+                or opened.st_dev != trusted_device
+                or _stable_metadata(opened) != _stable_metadata(namespace)
+            ):
+                raise PersonaHistoryAttestationError(
+                    f"contained runtime component changed while opening: {component}"
+                )
+            previous_fd = current_fd
             current_fd = child_fd
             current_metadata = opened
+            os.close(previous_fd)
+            owned_fds.remove(previous_fd)
         return current_fd, current_metadata
-    except Exception:
-        os.close(current_fd)
+    except BaseException:
+        # A previous-close failure must not strand a newly opened child.  Keep
+        # the complete ownership set until each successful handoff, and never
+        # let one cleanup failure prevent attempts for the remaining fds.
+        for owned_fd in reversed(owned_fds):
+            try:
+                os.close(owned_fd)
+            except BaseException:
+                pass
         raise
 
 
@@ -1315,6 +1472,365 @@ SemanticChecker = Callable[
     [Path, Mapping[str, str], DirectoryContentRoot],
     KcsSemanticEvidence,
 ]
+HandleSemanticChecker = Callable[
+    [BoundRuntimeDirectory, Mapping[str, str], DirectoryContentRoot],
+    KcsSemanticEvidence,
+]
+
+
+def _validated_runtime_descriptor(
+    descriptor: Mapping[str, str],
+) -> tuple[str, str]:
+    if (
+        type(descriptor) is not dict
+        or len(descriptor) != 2
+        or "kind" not in descriptor
+        or "relative_path" not in descriptor
+    ):
+        raise PersonaHistoryAttestationError(
+            "runtime descriptor must contain exactly kind and relative_path"
+        )
+    kind = descriptor.get("kind")
+    relative_path = descriptor.get("relative_path")
+    if type(kind) is not str:
+        raise PersonaHistoryAttestationError("runtime descriptor kind is invalid")
+    _validate_relative_runtime_path(relative_path, kind)
+    return kind, relative_path
+
+
+def _validate_runtime_semantic_evidence(
+    evidence: object,
+    *,
+    kind: str,
+    relative_path: str,
+    content: DirectoryContentRoot,
+) -> KcsSemanticEvidence:
+    if type(evidence) is not KcsSemanticEvidence:
+        raise PersonaHistoryAttestationError(
+            "KCS semantic checker did not return typed evidence"
+        )
+    if (
+        evidence.kind != kind
+        or evidence.relative_path != relative_path
+        or evidence.content_root_sha256 != content.content_root_sha256
+    ):
+        raise PersonaHistoryAttestationError(
+            "KCS semantic evidence is not bound to this runtime snapshot"
+        )
+    return evidence
+
+
+def build_handle_bound_runtime_directory_receipt(
+    path: os.PathLike[str] | str,
+    descriptor: Mapping[str, str],
+    *,
+    trusted_root: os.PathLike[str] | str,
+    semantic_checker: HandleSemanticChecker,
+    limits: AttestationLimits = DEFAULT_LIMITS,
+    _trusted_root_fd: int | None = None,
+) -> RuntimeDirectoryReceipt:
+    """Run a concrete KCS checker against one held runtime directory FD.
+
+    This is an experimental, non-authoritative semantic-checker transport.  The
+    target is opened component-by-component from ``trusted_root`` with
+    no-follow semantics and remains open for both filesystem snapshots and the
+    checker call.  A private duplicate narrows persistent namespace redirection
+    between validation and use, but this pathname entry point still has a
+    trusted-root check/open seam and an in-process checker can perform ABA or
+    duplicate/transiently rebind its descriptor.
+
+    The checker is still responsible for using ``bound.directory_fd`` for every
+    semantic read.  This transport does not itself understand KCS, grant
+    execution authority, or make the suite history-ready.
+    """
+    kind, relative_path = _validated_runtime_descriptor(descriptor)
+    if type(limits) is not AttestationLimits:
+        raise PersonaHistoryAttestationError("limits must be AttestationLimits")
+    if not callable(semantic_checker):
+        raise PersonaHistoryAttestationError(
+            "an explicit handle-bound KCS semantic checker is required"
+        )
+    _require_handle_platform()
+    trusted = _canonical_existing_absolute_directory(
+        trusted_root, "trusted_root"
+    )
+    runtime = _canonical_existing_absolute_directory(path, "runtime path")
+    parts = PurePosixPath(relative_path).parts
+    if runtime != trusted.joinpath(*parts):
+        raise PersonaHistoryAttestationError(
+            "runtime path is not the descriptor child of trusted_root"
+        )
+
+    owns_trusted_fd = _trusted_root_fd is None
+    if owns_trusted_fd:
+        trusted_fd, trusted_metadata = _open_root_directory(trusted)
+    else:
+        if type(_trusted_root_fd) is not int or _trusted_root_fd < 0:
+            raise PersonaHistoryAttestationError(
+                "trusted replay-root descriptor is invalid"
+            )
+        trusted_fd = _trusted_root_fd
+        try:
+            trusted_metadata = os.fstat(trusted_fd)
+            trusted_namespace = trusted.lstat()
+        except OSError as error:
+            raise PersonaHistoryAttestationError(
+                "trusted replay-root descriptor is not stable"
+            ) from error
+        if (
+            not stat.S_ISDIR(trusted_metadata.st_mode)
+            or trusted_metadata.st_nlink <= 0
+            or _stable_metadata(trusted_metadata)
+            != _stable_metadata(trusted_namespace)
+        ):
+            raise PersonaHistoryAttestationError(
+                "trusted replay-root descriptor differs from its namespace"
+            )
+        _require_noninheritable(trusted_fd, "trusted replay root")
+    target_fd = None
+    checker_fd = None
+    try:
+        target_fd, target_metadata = _open_relative_directory(
+            trusted_fd,
+            parts,
+            trusted_metadata.st_dev,
+        )
+        namespace = runtime.lstat()
+        if _stable_metadata(namespace) != _stable_metadata(target_metadata):
+            raise PersonaHistoryAttestationError(
+                "contained runtime namespace differs from its held descriptor"
+            )
+        before = _walk_directory_fd(target_fd, target_metadata, limits)
+        try:
+            checker_fd = os.dup(target_fd)
+            if not _is_owned_directory_duplicate(
+                target_fd, checker_fd, target_metadata
+            ):
+                raise PersonaHistoryAttestationError(
+                    "cannot prove semantic checker descriptor ownership"
+                )
+            _require_noninheritable(checker_fd, "semantic checker runtime")
+            if not _is_owned_directory_duplicate(
+                target_fd, checker_fd, target_metadata
+            ):
+                raise PersonaHistoryAttestationError(
+                    "cannot prove semantic checker descriptor ownership"
+                )
+        except BaseException as error:
+            close_error = None
+            if checker_fd is not None:
+                if _is_owned_directory_duplicate(
+                    target_fd, checker_fd, target_metadata
+                ):
+                    try:
+                        os.close(checker_fd)
+                    except OSError as candidate_close_error:
+                        close_error = candidate_close_error
+                checker_fd = None
+            if close_error is not None:
+                raise PersonaHistoryAttestationError(
+                    "cannot close the failed semantic checker descriptor"
+                ) from close_error
+            if isinstance(error, PersonaHistoryAttestationError):
+                raise
+            if isinstance(error, OSError):
+                raise PersonaHistoryAttestationError(
+                    "cannot duplicate the semantic checker runtime descriptor"
+                ) from error
+            raise
+        bound = BoundRuntimeDirectory(
+            path=runtime,
+            trusted_root=trusted,
+            kind=kind,
+            relative_path=relative_path,
+            directory_fd=checker_fd,
+            directory_device=target_metadata.st_dev,
+            directory_inode=target_metadata.st_ino,
+            directory_nlink=target_metadata.st_nlink,
+        )
+        if (
+            bound.directory_fd != checker_fd
+            or os.get_inheritable(checker_fd)
+            or not _is_owned_directory_duplicate(
+                target_fd, checker_fd, target_metadata
+            )
+        ):
+            raise PersonaHistoryAttestationError(
+                "semantic checker descriptor changed during setup"
+            )
+        checker_descriptor_tampered = False
+        checker_descriptor_still_bound = False
+        try:
+            try:
+                evidence = semantic_checker(bound, dict(descriptor), before)
+            except Exception as error:
+                raise PersonaHistoryAttestationError(
+                    "handle-bound KCS semantic checker failed"
+                ) from error
+        finally:
+            try:
+                checker_after = os.fstat(checker_fd)
+                checker_descriptor_still_bound = (
+                    (
+                        checker_after.st_dev,
+                        checker_after.st_ino,
+                        checker_after.st_nlink,
+                    )
+                    == (
+                        target_metadata.st_dev,
+                        target_metadata.st_ino,
+                        target_metadata.st_nlink,
+                    )
+                    and not os.get_inheritable(checker_fd)
+                    and _is_owned_directory_duplicate(
+                        target_fd, checker_fd, target_metadata
+                    )
+                )
+                if not checker_descriptor_still_bound:
+                    checker_descriptor_tampered = True
+            except OSError:
+                checker_descriptor_tampered = True
+            if checker_descriptor_still_bound:
+                try:
+                    os.close(checker_fd)
+                except OSError:
+                    checker_descriptor_tampered = True
+            checker_fd = None
+        if checker_descriptor_tampered:
+            raise PersonaHistoryAttestationError(
+                "handle-bound KCS semantic checker changed its supplied descriptor"
+            )
+        evidence = _validate_runtime_semantic_evidence(
+            evidence,
+            kind=kind,
+            relative_path=relative_path,
+            content=before,
+        )
+
+        after = _walk_directory_fd(target_fd, target_metadata, limits)
+        if after != before:
+            raise PersonaHistoryAttestationError(
+                "runtime directory changed during handle-bound KCS semantic checking"
+            )
+        target_after = os.fstat(target_fd)
+        if _stable_metadata(target_after) != _stable_metadata(target_metadata):
+            raise PersonaHistoryAttestationError(
+                "contained runtime root changed during semantic checking"
+            )
+        reopened_fd, reopened_metadata = _open_relative_directory(
+            trusted_fd,
+            parts,
+            trusted_metadata.st_dev,
+        )
+        try:
+            if _stable_metadata(reopened_metadata) != _stable_metadata(target_after):
+                raise PersonaHistoryAttestationError(
+                    "contained runtime namespace changed during semantic checking"
+                )
+        finally:
+            os.close(reopened_fd)
+        trusted_after = os.fstat(trusted_fd)
+        trusted_namespace = trusted.lstat()
+        runtime_namespace = runtime.lstat()
+        if (
+            _stable_metadata(trusted_after) != _stable_metadata(trusted_metadata)
+            or _stable_metadata(trusted_namespace) != _stable_metadata(trusted_after)
+            or _stable_metadata(runtime_namespace) != _stable_metadata(target_after)
+            or trusted.resolve(strict=True) != trusted
+            or runtime.resolve(strict=True) != runtime
+        ):
+            raise PersonaHistoryAttestationError(
+                "trusted-root/runtime containment changed during semantic checking"
+            )
+        return RuntimeDirectoryReceipt(
+            schema=generator.RUNTIME_DIRECTORY_ATTESTATION_SCHEMA,
+            schema_version=1,
+            kind=kind,
+            relative_path=relative_path,
+            directory_device=before.directory_device,
+            directory_inode=before.directory_inode,
+            directory_nlink=before.directory_nlink,
+            attestor_schema=evidence.attestor_schema,
+            content_root_sha256=before.content_root_sha256,
+            semantic_evidence=evidence,
+        )
+    finally:
+        close_failures = []
+        owned_checker_fd = checker_fd
+        if (
+            owned_checker_fd is not None
+            and target_fd is not None
+            and not _is_owned_directory_duplicate(
+                target_fd, owned_checker_fd, target_metadata
+            )
+        ):
+            # The numeric slot now belongs to the checker/caller.  Failing
+            # closed here means reporting the boundary failure without
+            # destroying a foreign descriptor.
+            owned_checker_fd = None
+        for label, owned_descriptor in (
+            ("semantic checker runtime", owned_checker_fd),
+            ("contained runtime root", target_fd),
+            (
+                "trusted replay root",
+                trusted_fd if owns_trusted_fd else None,
+            ),
+        ):
+            if owned_descriptor is None:
+                continue
+            try:
+                os.close(owned_descriptor)
+            except OSError as error:
+                close_failures.append((label, error))
+        if close_failures:
+            label, error = close_failures[0]
+            raise PersonaHistoryAttestationError(
+                f"cannot close owned {label} descriptor"
+            ) from error
+
+
+def build_lease_bound_runtime_directory_receipt(
+    path: os.PathLike[str] | str,
+    descriptor: Mapping[str, str],
+    *,
+    lease: root_lock.ReplayRootLease,
+    semantic_checker: HandleSemanticChecker,
+    limits: AttestationLimits = DEFAULT_LIMITS,
+) -> RuntimeDirectoryReceipt:
+    """Use the already-held replay-root lease fd for one checker callback.
+
+    Unlike the pathname entry point, this function does not reopen the trusted
+    root after validating it.  It borrows a private descriptor from the active
+    lease and traverses the runtime path relative to that descriptor.  This
+    closes the trusted-root check/open seam for cooperating readers, but remains
+    non-authoritative: the in-process checker and a hostile same-UID writer can
+    still exploit descriptor duplication, transient rebinding, or content ABA.
+    """
+    if type(limits) is not AttestationLimits:
+        raise PersonaHistoryAttestationError("limits must be AttestationLimits")
+    if not callable(semantic_checker):
+        raise PersonaHistoryAttestationError(
+            "an explicit handle-bound KCS semantic checker is required"
+        )
+    expected_root = (
+        lease.root if type(lease) is root_lock.ReplayRootLease else None
+    )
+    try:
+        with root_lock.active_root_descriptor(
+            lease, expected_root
+        ) as trusted_fd:
+            return build_handle_bound_runtime_directory_receipt(
+                path,
+                descriptor,
+                trusted_root=lease.root,
+                semantic_checker=semantic_checker,
+                limits=limits,
+                _trusted_root_fd=trusted_fd,
+            )
+    except root_lock.PersonaRootLockError as error:
+        raise PersonaHistoryAttestationError(
+            "active replay-root lease could not supply a stable descriptor"
+        ) from error
 
 
 def build_runtime_directory_receipt(
@@ -1325,23 +1841,18 @@ def build_runtime_directory_receipt(
     semantic_checker: SemanticChecker,
     limits: AttestationLimits = DEFAULT_LIMITS,
 ) -> RuntimeDirectoryReceipt:
-    """Build an envelope-compatible receipt after explicit KCS semantics.
+    """Build a compatibility receipt with a pathname-based KCS checker.
 
     The checker is intentionally a required keyword argument.  A generic tree
     walk cannot be promoted accidentally.  ``trusted_root`` is also mandatory;
     every descriptor component is opened no-follow relative to its held FD.
     The directory is walked again after the checker and both filesystem-only
-    receipts must match exactly.
+    receipts must match exactly.  The checker itself nevertheless receives a
+    pathname and can reopen a substituted namespace.  The handle-bound variant
+    narrows that risk but is also non-authoritative until snapshot quiescence
+    and checker process isolation are implemented.
     """
-    if type(descriptor) is not dict or set(descriptor) != {"kind", "relative_path"}:
-        raise PersonaHistoryAttestationError(
-            "runtime descriptor must contain exactly kind and relative_path"
-        )
-    kind = descriptor.get("kind")
-    relative_path = descriptor.get("relative_path")
-    if type(kind) is not str:
-        raise PersonaHistoryAttestationError("runtime descriptor kind is invalid")
-    _validate_relative_runtime_path(relative_path, kind)
+    kind, relative_path = _validated_runtime_descriptor(descriptor)
     if not callable(semantic_checker):
         raise PersonaHistoryAttestationError(
             "an explicit KCS semantic checker is required"
@@ -1359,18 +1870,12 @@ def build_runtime_directory_receipt(
         raise PersonaHistoryAttestationError(
             "KCS semantic checker failed"
         ) from error
-    if type(evidence) is not KcsSemanticEvidence:
-        raise PersonaHistoryAttestationError(
-            "KCS semantic checker did not return typed evidence"
-        )
-    if (
-        evidence.kind != kind
-        or evidence.relative_path != relative_path
-        or evidence.content_root_sha256 != before.content_root_sha256
-    ):
-        raise PersonaHistoryAttestationError(
-            "KCS semantic evidence is not bound to this runtime snapshot"
-        )
+    evidence = _validate_runtime_semantic_evidence(
+        evidence,
+        kind=kind,
+        relative_path=relative_path,
+        content=before,
+    )
     after = _walk_trusted_runtime_content_root(
         trusted_root,
         root,
@@ -1401,22 +1906,46 @@ def make_runtime_attestor(
     trusted_root: os.PathLike[str] | str,
     limits: AttestationLimits = DEFAULT_LIMITS,
 ) -> Callable[[Path, dict[str, str]], dict[str, object]]:
-    """Adapt a typed checker to the envelope's exact callback protocol."""
+    """Reject promotion of the non-formal pathname checker transport."""
     if not callable(semantic_checker):
         raise PersonaHistoryAttestationError(
             "an explicit KCS semantic checker is required"
         )
+    raise PersonaHistoryAttestationError(
+        "non-formal pathname checker cannot enter the callback protocol"
+    )
 
-    def callback(path: Path, descriptor: dict[str, str]) -> dict[str, object]:
-        return build_runtime_directory_receipt(
-            path,
-            descriptor,
-            trusted_root=trusted_root,
-            semantic_checker=semantic_checker,
-            limits=limits,
-        ).to_callback_dict()
 
-    return callback
+def make_handle_bound_runtime_attestor(
+    semantic_checker: HandleSemanticChecker,
+    *,
+    trusted_root: os.PathLike[str] | str,
+    limits: AttestationLimits = DEFAULT_LIMITS,
+) -> Callable[[Path, dict[str, str]], dict[str, object]]:
+    """Reject promotion of the non-authoritative handle checker."""
+    if not callable(semantic_checker):
+        raise PersonaHistoryAttestationError(
+            "an explicit handle-bound KCS semantic checker is required"
+        )
+    raise PersonaHistoryAttestationError(
+        "non-formal handle checker cannot enter the callback protocol"
+    )
+
+
+def make_lease_bound_runtime_attestor(
+    semantic_checker: HandleSemanticChecker,
+    *,
+    lease: root_lock.ReplayRootLease,
+    limits: AttestationLimits = DEFAULT_LIMITS,
+) -> Callable[[Path, dict[str, str]], dict[str, object]]:
+    """Reject promotion of the lease-derived non-authoritative checker."""
+    if not callable(semantic_checker):
+        raise PersonaHistoryAttestationError(
+            "an explicit handle-bound KCS semantic checker is required"
+        )
+    raise PersonaHistoryAttestationError(
+        "non-formal lease-bound checker cannot enter the callback protocol"
+    )
 
 
 def validate_chunk_arithmetic(
@@ -1678,20 +2207,25 @@ def build_suite_receipt(
 ) -> SuiteAttestationReceipt:
     """Build a suite projection while enforcing the 400/20 readiness gate.
 
-    An incomplete set is useful as a progress receipt but cannot claim semantic
-    coverage.  Requesting the semantic-callback coverage flag on anything other
-    than the exact canonical 20-person/400-scope shape fails closed.  Even when
-    all 420 external checker callbacks are represented, this module has not
-    itself validated SQLite/CAS, HEAD/commit relations, KCS binary/config, plan,
-    root, or prepare-intent binding.  It therefore always leaves
-    ``history_ready_attested=False``; a later concrete full semantic attestor
-    must produce that stronger claim.
+    An incomplete or complete set is useful as a progress receipt but cannot
+    claim formal semantic coverage.  Current typed checker observations all
+    carry fixed-false transport provenance, so requesting the legacy semantic
+    callback flag is rejected before persona expansion.  This module has not
+    validated SQLite/CAS, HEAD/commit relations, KCS binary/config, plan, root,
+    or prepare-intent binding and always leaves semantic coverage and history
+    readiness false.  A later isolated full semantic attestor must produce the
+    stronger claim through a provenance-carrying protocol.
     """
     if profile not in ("tiny", "pilot", "full"):
         raise PersonaHistoryAttestationError(f"unknown profile: {profile!r}")
     if type(kcs_semantics_callback_attested) is not bool:
         raise PersonaHistoryAttestationError(
             "kcs_semantics_callback_attested must be a bool"
+        )
+    if kcs_semantics_callback_attested:
+        raise PersonaHistoryAttestationError(
+            "current callback transports are non-formal; semantic coverage "
+            "cannot be promoted"
         )
     people = _bounded_tuple(people, EXPECTED_PERSONAS, "suite people")
     if any(type(person) is not PartialPersonReceipt for person in people):
