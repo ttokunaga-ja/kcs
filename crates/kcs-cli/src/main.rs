@@ -1,4 +1,5 @@
 mod historical_reindex;
+mod multi_scope;
 mod ocr_discovery;
 mod online_task;
 mod promotion;
@@ -1303,6 +1304,10 @@ fn run_search_inner(args: UnsupportedArgs, started: Instant) -> Result<Value> {
     // them through so config actually changes ranking/dedup AND invalidates a stale
     // cursor via query_hash.
     let (rrf_config, diversify_request) = effective_search_tuning(&repo)?;
+    let multi_scope_settings = multi_scope::effective_settings(
+        &repo.kcs_dir().join("config.toml"),
+        &user_config_toml_path(),
+    )?;
     let requested_mode = if parsed.explicit_mode {
         parsed.requested_mode
     } else {
@@ -1520,19 +1525,33 @@ fn run_search_inner(args: UnsupportedArgs, started: Instant) -> Result<Value> {
     let mut excluded = cursor_excluded;
     let mut candidates = Vec::<ScoredCandidate>::new();
 
-    for (idx, exec) in exec_scopes.iter().enumerate() {
-        match search_one_scope(
-            exec,
-            idx,
-            &tiers,
-            mode.resolved,
-            scope_query_embedding,
-            rrf_config,
-            ScopeTimeRequest {
-                selector: &time_selector,
-                since_cutoff: since_cutoff.as_deref(),
-            },
-        ) {
+    let scope_executions =
+        multi_scope::run_ordered(exec_scopes.len(), multi_scope_settings, |idx, deadline| {
+            search_one_scope(
+                &exec_scopes[idx],
+                idx,
+                ScopeSearchRequest {
+                    tiers: &tiers,
+                    resolved_mode: mode.resolved,
+                    query_embedding: scope_query_embedding,
+                    rrf_config,
+                    time: ScopeTimeRequest {
+                        selector: &time_selector,
+                        since_cutoff: since_cutoff.as_deref(),
+                    },
+                    deadline,
+                },
+            )
+        });
+    for (idx, execution) in scope_executions.into_iter().enumerate() {
+        let exec = &exec_scopes[idx];
+        let result = match execution {
+            multi_scope::ScopeExecution::Completed(result) => result,
+            multi_scope::ScopeExecution::TimedOut => {
+                Err(ScopeSearchError::Excluded("timeout".to_owned()))
+            }
+        };
+        match result {
             Ok(outcome) => {
                 searched.push(SearchedScopeInfo {
                     scope_id: exec.target.scope_id.clone(),
@@ -1994,6 +2013,16 @@ struct ScopeTimeRequest<'a> {
     since_cutoff: Option<&'a str>,
 }
 
+#[derive(Clone, Copy)]
+struct ScopeSearchRequest<'a> {
+    tiers: &'a [String],
+    resolved_mode: SearchMode,
+    query_embedding: Option<&'a [f32]>,
+    rrf_config: RrfConfig,
+    time: ScopeTimeRequest<'a>,
+    deadline: multi_scope::ScopeDeadline,
+}
+
 fn history_plan_error(error: KcsError, from_cursor: bool) -> ScopeSearchError {
     match error.error_code() {
         "KCS-E-COMMIT-SHALLOW-001" => ScopeSearchError::Shallow,
@@ -2067,14 +2096,46 @@ fn purge_blocks_rebuild_raw(kcs_dir: &Path, raw_hash: &str) -> Result<bool> {
 fn search_one_scope(
     exec: &ExecScope,
     scope_index: usize,
-    tiers: &[String],
-    resolved_mode: SearchMode,
-    query_embedding: Option<&[f32]>,
-    rrf_config: RrfConfig,
-    time: ScopeTimeRequest<'_>,
+    request: ScopeSearchRequest<'_>,
 ) -> std::result::Result<ScopeOutcome, ScopeSearchError> {
+    multi_scope::maybe_delay_scope_for_test(&exec.target.scope_id, request.deadline);
+    scope_deadline_check(request.deadline)?;
+    let result = search_one_scope_inner(exec, scope_index, request);
+    // Convert both a progress-handler interruption and work that completed just
+    // after its budget into the same stable exclusion reason.
+    if request.deadline.is_expired() {
+        Err(ScopeSearchError::Excluded("timeout".to_owned()))
+    } else {
+        result
+    }
+}
+
+fn scope_deadline_check(
+    deadline: multi_scope::ScopeDeadline,
+) -> std::result::Result<(), ScopeSearchError> {
+    if deadline.is_expired() {
+        Err(ScopeSearchError::Excluded("timeout".to_owned()))
+    } else {
+        Ok(())
+    }
+}
+
+fn search_one_scope_inner(
+    exec: &ExecScope,
+    scope_index: usize,
+    request: ScopeSearchRequest<'_>,
+) -> std::result::Result<ScopeOutcome, ScopeSearchError> {
+    let ScopeSearchRequest {
+        tiers,
+        resolved_mode,
+        query_embedding,
+        rrf_config,
+        time,
+        deadline,
+    } = request;
     let repo = Repository::open_for_search(&exec.target.repo_root)
         .map_err(|_| ScopeSearchError::Excluded("unreachable".to_owned()))?;
+    scope_deadline_check(deadline)?;
 
     // Resolve the search snapshot independently per scope. Cursor replay always
     // uses the signed commit; a fresh `--at` resolves its operand in this scope;
@@ -2098,6 +2159,7 @@ fn search_one_scope(
                 .ok_or_else(|| ScopeSearchError::Excluded("not_indexed".to_owned()))?,
         },
     };
+    scope_deadline_check(deadline)?;
 
     let db_path = sqlite_path(&exec.target.kcs_dir);
     if !db_path.exists() {
@@ -2105,6 +2167,8 @@ fn search_one_scope(
     }
     let conn = Connection::open(&db_path)
         .map_err(|_| ScopeSearchError::Excluded("index_corrupt".to_owned()))?;
+    deadline.install_sqlite_progress_handler(&conn);
+    scope_deadline_check(deadline)?;
 
     // M4: `Connection::open` is lazy — it succeeds on an empty or garbage file and
     // only fails when the DB is first read. Probe the index eagerly so a corrupt
@@ -2116,6 +2180,7 @@ fn search_one_scope(
         Ok(()) | Err(rusqlite::Error::QueryReturnedNoRows) => {}
         Err(_) => return Err(ScopeSearchError::Excluded("index_corrupt".to_owned())),
     }
+    scope_deadline_check(deadline)?;
 
     // Build the immutable eligible binding relation. Default search retains the
     // established shallow-cache read degradation; every explicit historical mode
@@ -2155,12 +2220,14 @@ fn search_one_scope(
                 .map_err(|error| history_plan_error(error, exec.from_cursor))?
         }
     };
+    scope_deadline_check(deadline)?;
     // A purge barrier becomes the universal visibility boundary before any
     // destructive deletion. Filter CAS-derived historical bindings as well as
     // current ones so stale SQLite rows cannot leak through text/vector/history
     // search or a signed cursor replay.
     let mut blocked_raws = BTreeMap::<String, bool>::new();
     for binding in &history_plan.bindings {
+        scope_deadline_check(deadline)?;
         if !blocked_raws.contains_key(&binding.raw_hash) {
             blocked_raws.insert(
                 binding.raw_hash.clone(),
@@ -2176,6 +2243,7 @@ fn search_one_scope(
             .unwrap_or(false)
     });
     install_eligible_identities(&conn, &history_plan).map_err(ScopeSearchError::Fatal)?;
+    scope_deadline_check(deadline)?;
 
     // P10: `run_reindex` advances HEAD to a new generation and only afterwards
     // swaps in the rebuilt sqlite (P5's temp+rename). A concurrent search in that
@@ -2208,10 +2276,12 @@ fn search_one_scope(
             .map_err(index_to_kcs)
             .map_err(ScopeSearchError::Fatal)?,
     };
+    scope_deadline_check(deadline)?;
 
     let chunking_config_hash = read_chunking_config(&repo)
         .map(|config| config.chunking_config_hash)
         .map_err(ScopeSearchError::Fatal)?;
+    scope_deadline_check(deadline)?;
     if exec
         .chunking_config_hash
         .as_deref()
@@ -2242,6 +2312,7 @@ fn search_one_scope(
         )
         .map_err(ScopeSearchError::Fatal)?
     };
+    scope_deadline_check(deadline)?;
 
     // chunk_vec KNN vector ranks (hybrid/vector mode with a query embedding).
     let vector_ranks = if want_vector {
@@ -2275,6 +2346,7 @@ fn search_one_scope(
     } else {
         Vec::new()
     };
+    scope_deadline_check(deadline)?;
 
     // R12-1: fuse with the effective `[search.rrf]` (was hardcoded 60/1/1/200).
     let fused = fuse_rrf(&text_ranks, &vector_ranks, rrf_config)
@@ -2284,6 +2356,7 @@ fn search_one_scope(
     let grouped_bindings = history_plan.grouped_bindings();
     let mut candidates = Vec::new();
     for candidate in fused {
+        scope_deadline_check(deadline)?;
         let Some(chunk_meta) = meta.get(&candidate.chunk_hash) else {
             continue;
         };
@@ -2320,6 +2393,7 @@ fn search_one_scope(
     // that window must not cross the response boundary.
     let mut blocked_after_query = BTreeMap::<String, bool>::new();
     for candidate in &candidates {
+        scope_deadline_check(deadline)?;
         if !blocked_after_query.contains_key(&candidate.meta.raw_hash) {
             blocked_after_query.insert(
                 candidate.meta.raw_hash.clone(),
@@ -2334,6 +2408,7 @@ fn search_one_scope(
             .copied()
             .unwrap_or(false)
     });
+    scope_deadline_check(deadline)?;
 
     Ok(ScopeOutcome {
         snapshot_commit,
@@ -4777,8 +4852,8 @@ fn read_search_config(path: &Path) -> Result<(Option<SearchMode>, Option<SearchF
 
 /// R11-7: effective `[search]` settings — the scope config.toml takes precedence
 /// over the user config.toml (same precedence direction the acceptance uses for
-/// other scoped overrides). `[search.multi_scope]` is intentionally untouched
-/// (R11-7 defer / MULTI-006).
+/// other scoped overrides). Multi-scope execution settings are resolved by the
+/// focused `multi_scope` module.
 fn effective_search_config(
     repo: &Repository,
 ) -> Result<(Option<SearchMode>, Option<SearchFailBehavior>)> {
