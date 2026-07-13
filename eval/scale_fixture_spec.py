@@ -11,6 +11,7 @@ import hashlib
 SCHEMA_VERSION = 1
 SEED = 20260713
 FIXTURE_ID = "kcs-scale-120k-v1"
+QUERY_WORKLOAD_ID = "exact-reference-v1"
 GENERATOR_ID = "eval/generate_scale_corpus.py"
 MANIFEST_NAME = "scale-corpus-manifest.json"
 OWNER_MARKER_NAME = ".kcs-scale-owner.json"

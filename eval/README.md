@@ -195,7 +195,8 @@ python3 eval/run_scale_eval.py \
 HEAD tree projection を公開するので、その直後に別の `kcs snapshot` を追加してはならない。
 device state は corpus 内の `.kcs-eval-device` に隔離され、開発者の実 registry や API key を使わない。
 
-出力の `scale-corpus-manifest.json` は全 source bytes と expected chunk 数、
+出力の `scale-corpus-manifest.json` は全 source bytes、expected chunk 数、
+query契約を版管理する `query_workload_id=exact-reference-v1`、
 `scale-attestation.json` は次を証明する。
 
 - manifest と 4,000 source files の完全一致、isolated registry の indexed 20 scopes 完全一致
@@ -203,14 +204,15 @@ device state は corpus 内の `.kcs-eval-device` に隔離され、開発者の
   `(raw_hash, tool_profile_hash, gen)` predicate による current eligible chunk 数
 - 全 section 共通 sentinel の FTS `MATCH` と FTS5 docsize shadow の双方で同数を確認
 - full では current eligible chunks が 120,000、かつ 100,000 を超えること
-- 各scopeの検索標本は期待section内に1回だけ現れる決定論reference tokenを使い、共通語によるscope順位tieを避ける
+- 各scopeの検索標本は期待section内に1回だけ現れる決定論reference tokenを使い、共通語によるscope順位tieを避ける。
+  これは高選択性queryのlatency probeであり、広いqueryのmulti-scope ranking性能は証明しない
 
 `run_scale_eval.py` は release binary・manifest・保存済み/再計算attestation・platformをreportへ束縛し、
 各検索で既定の全scope選択、attested 20 scopes の成功、期待文書の上位10件入りを確認する。検索modeも
 明示指定せず、既定 `auto` が `embedding_endpoint_not_configured` により `text` へfallbackしたことを検証する。
 主指標は各検索が1行だけ追記する `KCS-M-SEARCH-001 search.latency_ms`、副指標はrunner計測のprocess wall timeで、
 両方の生標本とp50/p95/p99を保存する。M3-1の `< 5秒` 判定は
-**default-auto current-text baseline** であり、hybridを含む正式なMVP性能gateではない。M3-2
+**high-selectivity default-auto current-text baseline** であり、広いqueryやhybridを含む正式なMVP性能gateではない。M3-2
 (`--all-history`) とM3-3 (`--include-deleted`) も同じ標本数で実行するが、このfixtureは単一HEADで
 編集・rename・deleteを含まないため、結果は **execution-path-only** であり正式な履歴性能値ではない。
 
@@ -219,6 +221,7 @@ device state は corpus 内の `.kcs-eval-device` に隔離され、開発者の
 - 全scopeが6,000 chunks、全ファイルが同じ生成Markdownであり、実フォルダの偏ったscope規模、
   日本語、表、ログ、コード、長短文書の混在は代表しない。
 - embeddingを必須化しないため、hybrid/vector p95は証明しない。
+- exact reference tokenを使うため、広い共通語queryで20 scopeの候補が競合するranking/latencyは証明しない。
 - M3-2/M3-3の正式な10万chunk性能には、同じ20 scopeへ編集・rename・deleteを重ね、
   historical/deleted populationをattestする独立したhistory overlayが必要。
 - Q_hardのSpotlight/rga比較、dogfood、D1 (PDF 1,000本/5GB相当、TTFV/AI時間/コスト) は

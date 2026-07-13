@@ -457,7 +457,8 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     frozen Recall corpus: 20 direct-child scopes map 14 personas to 20 use cases, with 200 deterministic
     Markdown files and 30 heading chunks per file (120,000 current chunks total). Exact source bytes,
     HEAD/current-config eligibility, FTS coverage, and the isolated 20-row registry are attested. Its
-    M3-1 result is a default-auto current-text baseline, not the formal hybrid/MVP latency gate; its
-    single-HEAD M3-2/M3-3 timings are execution-path-only. Formal history latency needs a separately
-    attested edit/rename/delete overlay. Hybrid vectors, Q_hard baseline comparison, dogfood, and D1
-    TTFV/cost remain separate gates rather than being simulated by inflating the balanced corpus.
+    M3-1 result uses high-selectivity deterministic reference tokens as a default-auto current-text
+    baseline, not the formal broad-query/hybrid MVP latency gate; its single-HEAD M3-2/M3-3 timings are
+    execution-path-only. Formal history latency needs a separately attested edit/rename/delete overlay.
+    Broad-query ranking, hybrid vectors, Q_hard baseline comparison, dogfood, and D1 TTFV/cost remain
+    separate gates rather than being simulated by inflating the balanced corpus.
