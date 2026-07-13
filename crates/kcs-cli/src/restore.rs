@@ -1363,38 +1363,44 @@ fn atomic_replace_handle(
     use std::os::windows::ffi::OsStrExt;
     use std::os::windows::io::AsRawHandle;
     use std::ptr;
-    use windows_sys::Win32::Storage::FileSystem::{
-        FileRenameInfo, SetFileInformationByHandle, FILE_RENAME_INFO,
+    use windows_sys::Wdk::Storage::FileSystem::{
+        FileRenameInformation, NtSetInformationFile, FILE_RENAME_INFORMATION,
     };
+    use windows_sys::Win32::Foundation::RtlNtStatusToDosError;
+    use windows_sys::Win32::System::IO::IO_STATUS_BLOCK;
 
     let name = destination_name
         .as_os_str()
         .encode_wide()
         .collect::<Vec<_>>();
-    // Win32 requires the full fixed structure size plus the variable name
-    // bytes. `offset + name_bytes` is four bytes short on x64 because the
-    // trailing one-element array and structure padding are part of the input.
-    let bytes = std::mem::size_of::<FILE_RENAME_INFO>() + name.len() * std::mem::size_of::<u16>();
+    // The Win32 SetFileInformationByHandle wrapper requires RootDirectory to
+    // be null. Use the native user-mode entry point so the validated held
+    // destination directory remains the authority for this relative rename.
+    let bytes =
+        std::mem::size_of::<FILE_RENAME_INFORMATION>() + name.len() * std::mem::size_of::<u16>();
     let words = bytes.div_ceil(std::mem::size_of::<usize>());
     let mut storage = vec![0_usize; words];
-    let info = storage.as_mut_ptr().cast::<FILE_RENAME_INFO>();
+    let info = storage.as_mut_ptr().cast::<FILE_RENAME_INFORMATION>();
     unsafe {
         (*info).Anonymous.ReplaceIfExists = true;
         (*info).RootDirectory = destination.handle.as_raw_handle();
         (*info).FileNameLength = (name.len() * std::mem::size_of::<u16>()) as u32;
         ptr::copy_nonoverlapping(name.as_ptr(), (*info).FileName.as_mut_ptr(), name.len());
     }
-    if unsafe {
-        SetFileInformationByHandle(
+    let mut io_status = IO_STATUS_BLOCK::default();
+    let status = unsafe {
+        NtSetInformationFile(
             source_file.as_raw_handle(),
-            FileRenameInfo,
+            &mut io_status,
             info.cast(),
             bytes as u32,
+            FileRenameInformation,
         )
-    } == 0
-    {
+    };
+    if status < 0 {
+        let os_error = unsafe { RtlNtStatusToDosError(status) };
         return Err(KcsError::io(
-            std::io::Error::last_os_error().to_string(),
+            std::io::Error::from_raw_os_error(os_error as i32).to_string(),
             destination
                 .path
                 .join(destination_name)
