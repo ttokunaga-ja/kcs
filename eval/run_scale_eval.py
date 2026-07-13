@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Manual 20-scope / 100k-plus default-search baseline measurement.
+"""Manual 20-scope / 100k-plus high-selectivity search baseline measurement.
 
 This runner deliberately does not replace the frozen Recall evaluation.  It
 measures the release CLI's default ``auto`` search against the independently
@@ -52,7 +52,7 @@ SCENARIOS = (
         "name": "M3-1",
         "flag": None,
         "target_p95_ms": 5_000.0,
-        "measurement_class": "default-auto-current-text-baseline",
+        "measurement_class": "default-auto-high-selectivity-current-text-baseline",
         "formal_history_latency": None,
     },
     {
@@ -210,6 +210,11 @@ def resolve_release_binary(bin_path):
 def validate_full_fixture(manifest, attestation):
     if manifest.get("profile") != "full" or attestation.get("profile") != "full":
         raise ScaleLatencyError("scale latency measurement requires profile=full")
+    if (
+        manifest.get("query_workload_id") != spec.QUERY_WORKLOAD_ID
+        or attestation.get("query_workload_id") != spec.QUERY_WORKLOAD_ID
+    ):
+        raise ScaleLatencyError("scale query workload identity mismatch")
     shape = manifest.get("shape")
     totals = attestation.get("totals")
     scopes = attestation.get("scopes")
@@ -807,8 +812,9 @@ def execute_workload(query_mix, samples_per_scenario, warmups_per_scenario, exec
         if name == "M3-1":
             value["passes_default_auto_current_text_baseline_target"] = observed
             value["limitation"] = (
-                "default auto resolved to text on an embedding-free fixture; this is "
-                "not the formal hybrid/MVP latency gate"
+                "a highly selective exact token used default auto resolving to text on "
+                "an embedding-free fixture; this is not the formal broad-query/hybrid "
+                "MVP latency gate"
             )
         else:
             value["passes_formal_history_latency_gate"] = None
@@ -1010,13 +1016,14 @@ def run_locked_measurement(
     ]
     return {
         "schema_version": 1,
-        "benchmark": "kcs-default-auto-current-text-scale-baseline",
+        "benchmark": "kcs-default-auto-high-selectivity-current-text-scale-baseline",
         "passed": m31_passed,
         "formal_hybrid_mvp_latency_gate": False,
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "fixture": {
             "fixture_id": spec.FIXTURE_ID,
             "profile": "full",
+            "query_workload_id": spec.QUERY_WORKLOAD_ID,
             "scopes": EXPECTED_SCOPE_COUNT,
             "current_eligible_chunks": live_before["totals"]["current_eligible_chunks"],
             "physical_chunks": live_before["totals"]["physical_chunks"],
@@ -1035,6 +1042,7 @@ def run_locked_measurement(
             "secondary_clock_source": "runner process wall time",
             "result_limit": RESULT_LIMIT,
             "query_mix_size": len(query_mix),
+            "query_class": "exact deterministic reference token",
             "query_schedule": "manifest-order round-robin, scenarios interleaved",
             "warmups_per_scenario": warmups_per_scenario,
             "samples_per_scenario": samples_per_scenario,
@@ -1047,13 +1055,16 @@ def run_locked_measurement(
         },
         "limitations": {
             "hybrid_latency_measured": False,
+            "broad_multi_scope_query_ranking_measured": False,
             "m3_1_is_formal_hybrid_mvp_latency": False,
             "history_operations_present": False,
             "m3_2_m3_3_are_formal_history_latency": False,
             "note": (
-                "M3-1 is a default-auto current-text baseline, not the formal hybrid/MVP "
-                "gate. M3-2/M3-3 only exercise selector paths on a fresh current-only "
-                "corpus; a history-bearing fixture is required for formal history p95."
+                "M3-1 uses one highly selective exact reference token per expected section; "
+                "it does not measure broad multi-scope ranking and is not the formal "
+                "hybrid/MVP gate. M3-2/M3-3 only exercise selector paths on a fresh "
+                "current-only corpus; a history-bearing fixture is required for formal "
+                "history p95."
             ),
         },
         "scenarios": scenario_reports,
@@ -1063,8 +1074,8 @@ def run_locked_measurement(
 def main(argv=None):
     parser = argparse.ArgumentParser(
         description=(
-            "Measure the default-auto current-text baseline on the attested full "
-            "120k fixture"
+            "Measure the high-selectivity default-auto current-text baseline on the "
+            "attested full 120k fixture"
         )
     )
     parser.add_argument("--corpus", required=True, help="prepared full scale corpus")
@@ -1113,14 +1124,14 @@ def main(argv=None):
 
     m31 = report["scenarios"]["M3-1"]
     print(
-        "[ok] default-auto current-text scale baseline measured: "
+        "[ok] high-selectivity default-auto current-text scale baseline measured: "
         f"scopes={report['fixture']['scopes']} "
         f"chunks={report['fixture']['current_eligible_chunks']} "
         f"samples/scenario={args.samples_per_scenario} "
         "M3-1-internal-p95="
         f"{m31['internal_search_statistics_ms']['p95']:.3f}ms"
     )
-    print("     M3-1: baseline only (not formal hybrid/MVP latency)")
+    print("     M3-1: high-selectivity baseline only (not formal broad-query/hybrid MVP latency)")
     print("     M3-2/M3-3: execution-path-only (not formal history latency)")
     print(f"     report: {report_path}")
     return 0 if report["passed"] else 1

@@ -634,6 +634,7 @@ def attest_corpus(corpus_dir):
         "schema_version": spec.SCHEMA_VERSION,
         "passed": True,
         "fixture_id": spec.FIXTURE_ID,
+        "query_workload_id": spec.QUERY_WORKLOAD_ID,
         "profile": owner["profile"],
         "manifest_sha256": _sha256(manifest_raw),
         "content_root_sha256": manifest["content_root_sha256"],

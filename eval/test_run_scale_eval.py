@@ -30,6 +30,7 @@ def _scope_reports():
 def _full_fixture_values():
     manifest = {
         "profile": "full",
+        "query_workload_id": runner.spec.QUERY_WORKLOAD_ID,
         "shape": {
             "scope_count": 20,
             "expected_current_chunks": 120_000,
@@ -46,6 +47,7 @@ def _full_fixture_values():
     }
     attestation = {
         "profile": "full",
+        "query_workload_id": runner.spec.QUERY_WORKLOAD_ID,
         "totals": {
             "current_eligible_chunks": 120_000,
             "physical_chunks": 120_000,
@@ -344,7 +346,7 @@ class WorkloadTests(unittest.TestCase):
         self.assertEqual(report["M3-1"]["sample_count"], 100)
         self.assertEqual(
             report["M3-1"]["measurement_class"],
-            "default-auto-current-text-baseline",
+            "default-auto-high-selectivity-current-text-baseline",
         )
         self.assertIn(
             "passes_default_auto_current_text_baseline_target", report["M3-1"]

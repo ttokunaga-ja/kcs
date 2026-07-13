@@ -518,7 +518,8 @@ def validate_manifest(manifest):
         raise ScaleGenerationError("scale manifest must be an object")
     required = {
         "schema_version", "fixture_id", "generator", "seed", "profile",
-        "chunking", "shape", "scopes", "needles", "content_root_sha256",
+        "query_workload_id", "chunking", "shape", "scopes", "needles",
+        "content_root_sha256",
     }
     if set(manifest) != required:
         raise ScaleGenerationError("scale manifest field set mismatch")
@@ -526,6 +527,8 @@ def validate_manifest(manifest):
         raise ScaleGenerationError("scale manifest schema_version mismatch")
     if manifest["fixture_id"] != spec.FIXTURE_ID:
         raise ScaleGenerationError("scale manifest fixture_id mismatch")
+    if manifest["query_workload_id"] != spec.QUERY_WORKLOAD_ID:
+        raise ScaleGenerationError("scale manifest query_workload_id mismatch")
     if manifest["generator"] != spec.GENERATOR_ID or manifest["seed"] != spec.SEED:
         raise ScaleGenerationError("scale manifest generator/seed mismatch")
     profile_name = manifest["profile"]
@@ -674,6 +677,7 @@ def _manifest_for_files(root, profile_name, write_missing):
     manifest = {
         "schema_version": spec.SCHEMA_VERSION,
         "fixture_id": spec.FIXTURE_ID,
+        "query_workload_id": spec.QUERY_WORKLOAD_ID,
         "generator": spec.GENERATOR_ID,
         "seed": spec.SEED,
         "profile": profile_name,

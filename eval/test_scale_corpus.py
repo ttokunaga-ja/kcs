@@ -79,10 +79,20 @@ class TestScaleGeneration(unittest.TestCase):
         )
         _, owner, loaded = generator.load_owned_manifest(self.root)
         self.assertEqual(owner["state"], "ready")
+        self.assertEqual(loaded["query_workload_id"], spec.QUERY_WORKLOAD_ID)
         self.assertEqual(loaded["shape"]["expected_current_chunks"], 60)
         self.assertEqual(
             attestor.verify_source_files(self.root, loaded, allow_kcs=True), 20
         )
+
+    def test_query_workload_identity_is_required(self):
+        manifest, _ = generator.write_corpus(self.root, "tiny")
+        tampered = json.loads(json.dumps(manifest))
+        tampered["query_workload_id"] = "broad-common-legacy"
+        with self.assertRaisesRegex(
+            generator.ScaleGenerationError, "query_workload_id"
+        ):
+            generator.validate_manifest(tampered)
 
     def test_nonempty_unowned_output_is_never_modified(self):
         self.root.mkdir()
