@@ -254,9 +254,10 @@ def _run_kcs(bin_path, scope_dir, args, env):
 
 def _validate_index_result(value, scope_manifest):
     expected = scope_manifest["expected_files"]
-    if value.get("status") != "indexed":
+    status = value.get("status")
+    if status not in ("indexed", "noop"):
         raise ScalePreparationError(
-            f"unexpected index status for {scope_manifest['name']}: {value.get('status')!r}"
+            f"unexpected index status for {scope_manifest['name']}: {status!r}"
         )
     exact_zero_fields = (
         "failed_files",
@@ -276,10 +277,16 @@ def _validate_index_result(value, scope_manifest):
             f"expected {expected}, got {value.get('normalized_files')!r}"
         )
     commit_hash = value.get("commit_hash")
-    if not isinstance(commit_hash, str) or not attestor.HASH_RE.fullmatch(commit_hash):
+    if status == "indexed":
+        if not isinstance(commit_hash, str) or not attestor.HASH_RE.fullmatch(commit_hash):
+            raise ScalePreparationError(
+                f"index omitted a valid commit_hash for {scope_manifest['name']}"
+            )
+    elif commit_hash is not None:
         raise ScalePreparationError(
-            f"index omitted a valid commit_hash for {scope_manifest['name']}"
+            f"noop index unexpectedly returned commit_hash for {scope_manifest['name']}"
         )
+    return status
 
 
 def _validate_reregistration_result(value, scope_manifest):
@@ -501,6 +508,7 @@ def _prepare_corpus_locked(corpus_dir, bin_path):
     generated = []
     skipped = []
     reregistered = []
+    resumed_noop = []
     scope_reports = []
     existing_reports = _existing_scope_attestations(root, manifest)
     registry_current = _registry_matches_attested_scopes(
@@ -566,14 +574,17 @@ def _prepare_corpus_locked(corpus_dir, bin_path):
             pass
 
         indexed = _run_kcs(binary, scope_dir, _OFFLINE_INDEX_ARGS, env)
-        _validate_index_result(indexed, scope_manifest)
+        index_status = _validate_index_result(indexed, scope_manifest)
         try:
             scope_report = attestor.attest_scope(root, scope_manifest)
         except attestor.ScaleAttestationError as exc:
             raise ScalePreparationError(
                 f"post-index attestation failed for {scope_manifest['name']}: {exc}"
             ) from exc
-        generated.append(scope_manifest["name"])
+        if index_status == "indexed":
+            generated.append(scope_manifest["name"])
+        else:
+            resumed_noop.append(scope_manifest["name"])
         scope_reports.append(scope_report)
 
     # Re-run collection-level checks, including exact isolated registry binding.
@@ -585,10 +596,12 @@ def _prepare_corpus_locked(corpus_dir, bin_path):
         "schema_version": spec.SCHEMA_VERSION,
         "passed": True,
         "fixture_id": spec.FIXTURE_ID,
+        "query_workload_id": spec.QUERY_WORKLOAD_ID,
         "profile": manifest["profile"],
         "binary": str(binary),
         "indexed_scopes": generated,
         "reregistered_scopes": reregistered,
+        "resumed_noop_scopes": resumed_noop,
         "already_attested_scopes": skipped,
         "totals": attestation["totals"],
         "attestation": str(root / spec.ATTESTATION_NAME),
@@ -626,6 +639,7 @@ def main(argv=None):
         "[ok] scale corpus prepared: "
         f"profile={report['profile']} "
         f"indexed_scopes={len(report['indexed_scopes'])} "
+        f"resumed_noop_scopes={len(report['resumed_noop_scopes'])} "
         f"already_attested_scopes={len(report['already_attested_scopes'])} "
         f"current_chunks={totals['current_eligible_chunks']}"
     )

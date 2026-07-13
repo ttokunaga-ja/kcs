@@ -95,6 +95,25 @@ class TestRegistryRecovery(unittest.TestCase):
             preparer._registry_matches_attested_scopes(self.root, self.reports)
         )
 
+    def test_nonattested_crash_recovery_accepts_only_a_strict_noop(self):
+        value = {
+            "status": "noop",
+            "failed_files": 0,
+            "pending_files": 0,
+            "skipped_oversized_files": 0,
+            "skipped_unrecognized_binary_files": 0,
+            "normalized_files": 1,
+            "commit_hash": None,
+        }
+        scope = {"name": "scope-a", "expected_files": 1}
+        self.assertEqual(preparer._validate_index_result(value, scope), "noop")
+
+        value["commit_hash"] = "sha256:" + "1" * 64
+        with self.assertRaisesRegex(
+            preparer.ScalePreparationError, "noop.*commit_hash"
+        ):
+            preparer._validate_index_result(value, scope)
+
     def test_missing_and_corrupt_registry_require_recovery(self):
         self.assertFalse(
             preparer._registry_matches_attested_scopes(self.root, self.reports)
@@ -369,6 +388,7 @@ class TestPreparationBoundsAndLock(unittest.TestCase):
             report = {
                 "profile": "tiny",
                 "indexed_scopes": [],
+                "resumed_noop_scopes": [],
                 "already_attested_scopes": [],
                 "totals": {"current_eligible_chunks": 60},
             }
