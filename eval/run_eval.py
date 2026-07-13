@@ -60,7 +60,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 SCENARIOS = ["M3-1", "M3-2", "M3-3"]
 SCENARIO_FLAG = {"M3-1": None, "M3-2": "--all-history", "M3-3": "--include-deleted"}
 RECALL_TARGET = 0.8
-LATENCY_TARGET_MS = 7_000.0
+LATENCY_TARGET_MS = {"M3-1": 5_000.0, "M3-2": 7_000.0, "M3-3": 7_000.0}
 HISTORY_QUERY_COUNT = 16
 REQUIRED_POINTER_FIELDS = {
     "schema_version", "commit", "raw_hash", "tool_profile_hash", "chunk_hash", "scope_id",
@@ -815,6 +815,11 @@ def percentile_nearest_rank(values, percentile):
     return ordered[rank - 1]
 
 
+def passes_latency_target(scenario, p95_ms):
+    """Return whether p95 satisfies the scenario-specific strict upper bound."""
+    return p95_ms is not None and p95_ms < LATENCY_TARGET_MS[scenario]
+
+
 def assess_history_coverage(responses_by_scenario, history_manifest):
     """Structural guards that prevent HEAD-only Recall from false-passing."""
     def correctly_recalled_results(scenario):
@@ -1025,13 +1030,15 @@ def run_full_eval(queries, resolver, history_manifest, corpus_dir, bin_path,
         latencies = per_scenario_latencies.get(s, [])
         avg = sum(scores) / len(scores) if scores else None
         p95_ms = percentile_nearest_rank(latencies, 0.95)
+        latency_target_ms = LATENCY_TARGET_MS[s]
         results["scenarios"][s] = {
             "n_queries": sum(1 for q in queries if q["scenario"] == s),
             "n_scored": len(scores),
             "recall_at_10": avg,
             "passes_target": (avg is not None and avg >= RECALL_TARGET),
             "p95_ms": p95_ms,
-            "passes_latency": (p95_ms is not None and p95_ms < LATENCY_TARGET_MS),
+            "latency_target_ms": latency_target_ms,
+            "passes_latency": passes_latency_target(s, p95_ms),
         }
 
     history_coverage = assess_history_coverage(responses_by_scenario, history_manifest)
@@ -1103,8 +1110,8 @@ def _write_report(path, results, active):
         lines.append("- 状態: **kcs search 未実装のクエリあり (NOT-IMPLEMENTED)**。"
                      "Recall 判定は無効 (exit 2)。")
     lines.append("")
-    lines.append("| シナリオ | クエリ数 | scored | Recall@10 | p95 ms | 判定 |")
-    lines.append("| --- | --- | --- | --- | --- | --- |")
+    lines.append("| シナリオ | クエリ数 | scored | Recall@10 | p95 ms | 目標 ms | 判定 |")
+    lines.append("| --- | --- | --- | --- | --- | --- | --- |")
     for s in active:
         sc = results["scenarios"][s]
         rec = "-" if sc["recall_at_10"] is None else f"{sc['recall_at_10']:.3f}"
@@ -1113,8 +1120,10 @@ def _write_report(path, results, active):
         else:
             verdict = "PASS" if sc["passes_target"] and sc["passes_latency"] else "FAIL"
         p95 = "-" if sc["p95_ms"] is None else f"{sc['p95_ms']:.1f}"
+        target = f"<{sc['latency_target_ms']:.0f}"
         lines.append(
-            f"| {s} | {sc['n_queries']} | {sc['n_scored']} | {rec} | {p95} | {verdict} |")
+            f"| {s} | {sc['n_queries']} | {sc['n_scored']} | {rec} | {p95} | "
+            f"{target} | {verdict} |")
     coverage = results.get("history_coverage", {})
     if "M3-2" in active:
         lines.append("")
