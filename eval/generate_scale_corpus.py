@@ -587,7 +587,7 @@ def validate_manifest(manifest):
         raise ScaleGenerationError("scale manifest needle count mismatch")
     for scope_index, (needle, scope) in enumerate(zip(needles, spec.SCOPES)):
         expected = {
-            "query": spec.section_needle(scope_index, 0, 0),
+            "query": spec.section_query(scope_index, 0, 0),
             "scope": scope["name"],
             "file": spec.document_name(0),
             "heading": spec.section_heading(scope_index, 0, 0),
@@ -666,7 +666,7 @@ def _manifest_for_files(root, profile_name, write_missing):
             "files": files,
         })
         needles.append({
-            "query": spec.section_needle(scope_index, 0, 0),
+            "query": spec.section_query(scope_index, 0, 0),
             "scope": scope["name"],
             "file": spec.document_name(0),
             "heading": spec.section_heading(scope_index, 0, 0),

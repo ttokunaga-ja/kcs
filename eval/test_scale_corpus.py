@@ -44,6 +44,16 @@ class TestScaleSpec(unittest.TestCase):
         self.assertEqual(len(sections), 3)
         self.assertEqual(rendered.count("scale needle"), 3)
 
+    def test_manifest_queries_are_unique_tokens_in_the_expected_sections(self):
+        queries = [spec.section_query(index, 0, 0) for index in range(20)]
+        self.assertEqual(len(set(queries)), 20)
+        for index, query in enumerate(queries):
+            self.assertRegex(query, r"^[0-9a-f]{12}$")
+            rendered = spec.render_document(index, 0, "full")
+            first_section = rendered.split("## ", 2)[1]
+            self.assertEqual(first_section.count(query), 1)
+            self.assertEqual(rendered.count(query), 1)
+
 
 class TestScaleGeneration(unittest.TestCase):
     def setUp(self):
