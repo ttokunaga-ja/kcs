@@ -19,6 +19,12 @@
 | `history-manifest.json` | replay がリネーム/編集/削除したファイルの記録 (`replay_history.py` が生成) |
 | `run_eval.py` | 評価ランナー。`kcs search --json` で Recall@10 を集計。expected のニーモニック → 実 `section_id` の解決層 (docs/04 §4.1 slug) を持つ。`--dry-run` は expected 実在 + 解決チェック。`--scenario` でシナリオ絞り込み |
 | `test_run_eval.py` | `run_eval` の単体テスト (slugify / 解決層 / recall_at_k / exit 分類)。`python3 -m unittest eval.test_run_eval` |
+| `scale_fixture_spec.py` | Recall corpus とは独立した性能 fixture の正本。20 scope と tiny/full の形を固定 |
+| `generate_scale_corpus.py` | owner marker 付きで 20 scope の性能 corpus を決定論生成。full は 4,000 files / 120,000 expected chunks |
+| `prepare_scale_corpus.py` | 各 leaf scope を `init → index` し、隔離 registry と SQLite attestation を作成 |
+| `attest_scale_corpus.py` | HEAD・現行 chunk config・FTS coverage を照合し、検索可能 chunk の正確な総数を証明 |
+| `run_scale_eval.py` | full fixture に対して既定 `auto` 横断検索を反復。text fallback を確認し、内部/プロセス時間の p50 / p95 / p99 と生の標本を出力 |
+| `test_scale_*.py`, `test_run_scale_eval.py` | 性能 fixture の形、所有権、排他、bounded read、registry 復旧、計測契約の単体テスト |
 
 ## 使い方
 
@@ -43,7 +49,7 @@ python3 eval/run_eval.py --dry-run --corpus /tmp/kcs-eval-corpus
 #     kcs search 未実装の間は全クエリ NOT-IMPLEMENTED → exit 2 (未実装を green にしない)。
 python3 eval/run_eval.py --corpus /tmp/kcs-eval-corpus --bin target/release/kcs
 
-# 3c. シナリオ絞り込み (複数指定可)。Step 3 の Done gate は M3-1 のみ (下記)。
+# 3c. シナリオ絞り込み (複数指定可)。最終HEADのCIは3シナリオを個別に実行する。
 python3 eval/run_eval.py --scenario M3-1 --corpus /tmp/kcs-eval-corpus --bin target/release/kcs
 ```
 
@@ -89,8 +95,8 @@ Recall の突き合わせ単位は `(raw_hash, section_id)` (docs/09 §4.3)。`e
 
 ### Recall 実測の gate タイミング
 
-- **Step 3 の Done gate は M3-1 のみ** (`--scenario M3-1`)。M3-2 / M3-3 の Recall 実測は
-  `--all-history` / `--include-deleted` が揃う **Step 4 完了時**に判定する。
+- Step 3 当時の gate は M3-1 のみだった。`--all-history` / `--include-deleted` が揃った現在は、
+  **最終HEADのCIで M3-1 / M3-2 / M3-3 をすべて個別実行**する。
 
 ## dogfood との関係 (docs/09 §4.3)
 
@@ -122,3 +128,111 @@ diff -r /tmp/c1 /tmp/c2   # 差分なし (byte 同一) であること
 
 `history-manifest.json` の renamed/edited/deleted と scope 別 commit 件数も、フレッシュな
 コーパスに対して 2 回再現すれば同一になる (commit hash / timestamp は非決定なので manifest に含めない)。
+
+## 20 scope / 12 万 chunk 性能 fixture
+
+§4.1 の「20 scopes / 合計 10 万 chunk」性能ゲートは、Recall の凍結済み 305 files / 7 scope
+corpus を水増しせず、独立した fixture で測る。最初の層は再現性を優先した
+**balanced current-text fixture** であり、`full` の形を次で固定する。
+
+- 20 leaf scopes × 200 Markdown files × 30 ATX sections = **120,000 current chunks**
+- 14 の利用者属性、20 の用途を engineering / research / ML-data / product / security / client / inbox に分ける
+- 1 section を既定 `[chunking] strategy="heading", max_chars=6000` の 1 chunk 未満に保つ
+- KCS は scope 直下だけを対象にするため、collection root 自体は scope にせず、20 leaf folders を個別 scope にする
+
+folder と利用者・用途の対応は manifest にも保存する。
+
+| folder | 主な利用者属性 | ユースケース |
+| --- | --- | --- |
+| `engineering-architecture` | software engineer | architecture / ADR |
+| `engineering-api-specs` | software engineer | API contracts |
+| `engineering-incidents` | SRE | incident response |
+| `engineering-runbooks` | SRE | operations runbooks |
+| `engineering-releases` | release engineer | release / migration notes |
+| `research-papers` | academic researcher | paper library |
+| `research-lab-notes` | academic researcher | laboratory notebook |
+| `research-experiments` | academic researcher | experiment results |
+| `research-grants` | principal investigator | grants / budgets |
+| `research-literature` | graduate student | literature notes |
+| `ml-model-evaluations` | ML engineer | model evaluation |
+| `data-dictionaries` | data engineer | data dictionary / lineage |
+| `data-dashboard-reports` | data analyst | dashboard reports |
+| `ml-notebook-exports` | ML engineer | notebook exports |
+| `product-meetings` | product manager | meeting decisions |
+| `product-requirements` | product manager | requirements / user research |
+| `product-roadmaps` | engineering manager | roadmap / capacity planning |
+| `security-compliance` | security engineer | controls / audit / threats |
+| `client-deliverables` | consultant | findings / recommendations |
+| `downloads-inbox` | knowledge worker | downloaded references / inbox |
+
+full は時間・ディスクを使う明示実行専用であり、通常 CI では生成・index しない。通常の安全確認には
+同じ 20 scope 構造の `tiny` (20 files / 60 chunks) を使う。
+
+```bash
+# 軽量 smoke (20 scopes / 60 chunks)
+python3 eval/generate_scale_corpus.py \
+  --out /tmp/kcs-scale-tiny --profile tiny
+python3 eval/prepare_scale_corpus.py \
+  --corpus /tmp/kcs-scale-tiny --bin target/release/kcs
+
+# 本番規模 (20 scopes / 4,000 files / 120,000 chunks): 手動性能計測時のみ
+python3 eval/generate_scale_corpus.py \
+  --out /tmp/kcs-scale-full --profile full
+python3 eval/prepare_scale_corpus.py \
+  --corpus /tmp/kcs-scale-full --bin target/release/kcs
+
+# 任意時点で再検証 (read-only SQLite attestation)
+python3 eval/attest_scale_corpus.py --corpus /tmp/kcs-scale-full
+
+# current-text 横断検索の手動計測。各scenario 5 warmup + 100標本、nearest-rank p50/p95/p99。
+# 既定reportは corpus外の /tmp/kcs-scale-full.latency.json。
+python3 eval/run_scale_eval.py \
+  --corpus /tmp/kcs-scale-full --bin target/release/kcs \
+  --warmups-per-scenario 5 --samples-per-scenario 100
+```
+
+`prepare_scale_corpus.py` は各 scope を明示的な `kcs index --offline --yes` で終える。`index` 自体が snapshot と
+HEAD tree projection を公開するので、その直後に別の `kcs snapshot` を追加してはならない。
+device state は corpus 内の `.kcs-eval-device` に隔離され、開発者の実 registry や API key を使わない。
+
+出力の `scale-corpus-manifest.json` は全 source bytes と expected chunk 数、
+`scale-attestation.json` は次を証明する。
+
+- manifest と 4,000 source files の完全一致、isolated registry の indexed 20 scopes 完全一致
+- 本番検索と同じ `first_seen_commit` + 現行 `chunk_config_generations` + HEAD
+  `(raw_hash, tool_profile_hash, gen)` predicate による current eligible chunk 数
+- 全 section 共通 sentinel の FTS `MATCH` と FTS5 docsize shadow の双方で同数を確認
+- full では current eligible chunks が 120,000、かつ 100,000 を超えること
+
+`run_scale_eval.py` は release binary・manifest・保存済み/再計算attestation・platformをreportへ束縛し、
+各検索で既定の全scope選択、attested 20 scopes の成功、期待文書の上位10件入りを確認する。検索modeも
+明示指定せず、既定 `auto` が `embedding_endpoint_not_configured` により `text` へfallbackしたことを検証する。
+主指標は各検索が1行だけ追記する `KCS-M-SEARCH-001 search.latency_ms`、副指標はrunner計測のprocess wall timeで、
+両方の生標本とp50/p95/p99を保存する。M3-1の `< 5秒` 判定は
+**default-auto current-text baseline** であり、hybridを含む正式なMVP性能gateではない。M3-2
+(`--all-history`) とM3-3 (`--include-deleted`) も同じ標本数で実行するが、このfixtureは単一HEADで
+編集・rename・deleteを含まないため、結果は **execution-path-only** であり正式な履歴性能値ではない。
+
+### このfixtureで証明しないもの
+
+- 全scopeが6,000 chunks、全ファイルが同じ生成Markdownであり、実フォルダの偏ったscope規模、
+  日本語、表、ログ、コード、長短文書の混在は代表しない。
+- embeddingを必須化しないため、hybrid/vector p95は証明しない。
+- M3-2/M3-3の正式な10万chunk性能には、同じ20 scopeへ編集・rename・deleteを重ね、
+  historical/deleted populationをattestする独立したhistory overlayが必要。
+- Q_hardのSpotlight/rga比較、dogfood、D1 (PDF 1,000本/5GB相当、TTFV/AI時間/コスト) は
+  性質の異なるゲートなので、このbalanced fixtureへ混ぜない。
+
+次の拡張順は (1) history overlay、(2) scope/chunk長を偏らせたskewed robustness fixture、
+(3) Q_hard/D1/dogfood の実データ系ゲートとする。balanced fixtureの再現性は維持する。
+
+生成先は owner marker で保護する。非空の未所有 directory は変更せず、`--reset-owned` も未知の
+entry があれば削除前に停止する。ready corpus の再生成と再 prepare は no-op になる。
+
+```bash
+python3 -m unittest \
+  eval.test_scale_corpus \
+  eval.test_scale_attest_bounds \
+  eval.test_scale_prepare \
+  eval.test_run_scale_eval
+```
