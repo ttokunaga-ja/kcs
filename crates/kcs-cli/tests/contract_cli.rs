@@ -65,23 +65,34 @@ fn value_path_ends_with(value: &Value, suffix: &str) -> bool {
         .is_some_and(|path| Path::new(path).ends_with(suffix))
 }
 
-/// A process-wide isolated XDG home so `init` / `index` never touch the developer's
-/// real `~/.local/share/kcs/scope-registry.sqlite` (K3 — init/index now register
-/// scopes). Tests that need to read the data home set `XDG_DATA_HOME` explicitly,
-/// which overrides this default.
-fn isolated_home() -> &'static std::path::Path {
-    use std::sync::OnceLock;
-    static HOME: OnceLock<tempfile::TempDir> = OnceLock::new();
-    HOME.get_or_init(|| tempfile::tempdir().unwrap()).path()
+/// A per-test-thread isolated XDG home so `init` / `index` never touch either the
+/// developer's real device state or another parallel test's device-global locks.
+/// Commands issued by one test still share their registry and logs because the
+/// Rust test harness runs each test on one thread.
+fn isolated_home() -> std::path::PathBuf {
+    thread_local! {
+        static HOME: tempfile::TempDir = tempfile::tempdir().unwrap();
+    }
+    HOME.with(|home| home.path().to_path_buf())
 }
 
 fn kcs() -> AssertCommand {
     let mut command = hermetic_assert_command();
+    let home = isolated_home();
     command
-        .env("XDG_DATA_HOME", isolated_home().join("data"))
-        .env("XDG_CONFIG_HOME", isolated_home().join("config"))
-        .env("XDG_CACHE_HOME", isolated_home().join("cache"));
+        .env("XDG_DATA_HOME", home.join("data"))
+        .env("XDG_CONFIG_HOME", home.join("config"))
+        .env("XDG_CACHE_HOME", home.join("cache"));
     command
+}
+
+#[test]
+fn contract_helpers_isolate_device_home_per_test_thread() {
+    let this_test_home = isolated_home();
+    assert_eq!(isolated_home(), this_test_home);
+
+    let parallel_test_home = thread::spawn(isolated_home).join().unwrap();
+    assert_ne!(parallel_test_home, this_test_home);
 }
 
 #[test]
