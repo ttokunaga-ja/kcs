@@ -501,7 +501,7 @@ mod tests {
             .unwrap();
             assert!(historical.validate().is_ok(), "{path:?}");
             #[cfg(windows)]
-            assert!(!is_materializable_direct_child(path), "{path:?}");
+            assert!(!super::is_materializable_direct_child(path), "{path:?}");
         }
     }
 
