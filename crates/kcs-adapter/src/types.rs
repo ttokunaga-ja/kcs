@@ -178,8 +178,16 @@ pub struct MarkdownizeRequest {
     /// leaves this `false` (whole document, no `pages`); the retry sets it `true`.
     #[serde(default)]
     pub restrict_to_hint_pages: bool,
+    /// Step 4 Mistral bbox annotation policy. Legacy serialized requests predate
+    /// the default-on contract, so deserialization supplies `true` when absent.
+    #[serde(default = "default_bbox_annotation_enabled")]
+    pub bbox_annotation_enabled: bool,
     pub tool_profile_hash: String,
     pub spec_version: u64,
+}
+
+const fn default_bbox_annotation_enabled() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -321,12 +329,24 @@ mod tests {
             previous: None,
             hints: None,
             restrict_to_hint_pages: false,
+            bbox_annotation_enabled: true,
             tool_profile_hash: "sha256:tool".to_owned(),
             spec_version: 1,
         };
 
         let value = serde_json::to_value(request).expect("serialize markdownize request");
         assert_eq!(value["mode"], "incremental");
+
+        let mut legacy = value;
+        legacy
+            .as_object_mut()
+            .expect("markdownize request serializes as an object")
+            .remove("bbox_annotation_enabled");
+        assert!(
+            serde_json::from_value::<MarkdownizeRequest>(legacy)
+                .expect("deserialize legacy markdownize request")
+                .bbox_annotation_enabled
+        );
     }
 
     #[test]

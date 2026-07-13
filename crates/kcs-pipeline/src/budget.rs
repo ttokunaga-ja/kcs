@@ -417,6 +417,43 @@ impl ReservationLedger {
         )
     }
 
+    /// Close a reservation whose owning scope-local task is being irreversibly
+    /// removed by purge. The trusted reservation still has to match every claim
+    /// field and the selected scope; only the adapter-kind comparison is omitted
+    /// because purge operates across all task kinds and must not guess a provider
+    /// budget key from mutable configuration. Closed/consumed/unknown claims are
+    /// idempotent `false` and can never mint reclaim credit.
+    pub fn close_for_purge(
+        &self,
+        claim: TaskReservationClaim<'_>,
+        expected_scope_id: &str,
+    ) -> Result<bool> {
+        if !is_valid_reservation_id(claim.reservation_id) {
+            return Ok(false);
+        }
+        let _lock = self.acquire_lock()?;
+        let state = self.load_state()?;
+        let Some(entry) = state.get(claim.reservation_id) else {
+            return Ok(false);
+        };
+        let record = &entry.record;
+        if record.task_id != claim.task_id
+            || record.scope_id != expected_scope_id
+            || record.month != claim.month
+            || record.usd.to_bits() != claim.usd.to_bits()
+            || !matches!(
+                entry.status,
+                ReservationStatus::Active | ReservationStatus::Reclaimable
+            )
+        {
+            return Ok(false);
+        }
+        self.append_event(&ReservationLedgerEvent::Closed {
+            reservation_id: record.reservation_id.clone(),
+        })?;
+        Ok(true)
+    }
+
     #[must_use]
     pub fn path(&self) -> &Path {
         &self.path
@@ -1271,6 +1308,44 @@ mod tests {
             .unwrap());
         assert!(ledger
             .consume(claim, &record.scope_id, &record.adapter_kind)
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn purge_closes_exact_task_reservation_without_guessing_adapter_kind() {
+        let dir = tempfile::tempdir().unwrap();
+        let ledger = ReservationLedger::new(dir.path().join("reservations.jsonl"));
+        let record = ReservationRecord {
+            reservation_id: "res_01JPURGE".to_owned(),
+            task_id: "task_purge".to_owned(),
+            month: "2026-07".to_owned(),
+            scope_id: "scope-a".to_owned(),
+            adapter_kind: "provider-specific-markdown".to_owned(),
+            usd: 3.5,
+        };
+        ledger.issue(&record).unwrap();
+        let exact = TaskReservationClaim {
+            reservation_id: &record.reservation_id,
+            task_id: &record.task_id,
+            usd: record.usd,
+            month: &record.month,
+        };
+        let forged = TaskReservationClaim {
+            reservation_id: &record.reservation_id,
+            task_id: "task_other",
+            usd: record.usd,
+            month: &record.month,
+        };
+        assert!(!ledger.close_for_purge(forged, &record.scope_id).unwrap());
+        assert!(!ledger.close_for_purge(exact, "scope-b").unwrap());
+        assert!(ledger.close_for_purge(exact, &record.scope_id).unwrap());
+        assert!(!ledger.close_for_purge(exact, &record.scope_id).unwrap());
+        assert!(!ledger
+            .mark_reclaimable(exact, &record.scope_id, &record.adapter_kind)
+            .unwrap());
+        assert!(ledger
+            .consume(exact, &record.scope_id, &record.adapter_kind)
             .unwrap()
             .is_none());
     }

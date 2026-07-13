@@ -558,6 +558,7 @@ fn ct2_incr_008_identity_vector_ignores_mode() {
         gen: 0,
         mode: MarkdownizeMode::Full,
         markdown: "full".to_owned(),
+        metadata: BTreeMap::new(),
         reused_from: None,
         generated_at: "2026-04-25T12:00:00Z".to_owned(),
     };
@@ -1435,7 +1436,6 @@ fn ct2_budget_005_online_success_records_ledger_and_caps_next_task() {
         ["batch", "resume"],
         &[(TEST_STANDARD_ONLINE_MARKDOWNIZE_ENV, "mock")],
     );
-
     let online_entry = ledger_lines(&dir).into_iter().find(|entry| {
         entry["adapter_kind"] == "markdown" && entry["usd"].as_f64().unwrap_or_default() > 0.0
     });
@@ -3043,6 +3043,13 @@ fn r15_6_zero_change_incremental_reuses_without_calling_adapter() {
         ["batch", "resume"],
         &[(TEST_STANDARD_ONLINE_MARKDOWNIZE_ENV, "mock")],
     );
+    let v1_hash = hash_bytes(v1.as_bytes());
+    let v1_annotations = normalized_units(&dir)
+        .into_iter()
+        .find(|unit| unit.raw_hash == v1_hash && unit.markdown.contains("mock ocr"))
+        .expect("v1 bbox-enabled online unit")
+        .metadata;
+    assert!(v1_annotations.contains_key("bbox_annotations"));
 
     // v2: append a trailing PDF comment. The raw bytes (raw_hash) change — so re-index
     // enqueues a fresh online task — but the page stream text is byte-identical, so every
@@ -3070,6 +3077,7 @@ fn r15_6_zero_change_incremental_reuses_without_calling_adapter() {
             task["input_path"] == "report.pdf"
                 && task["fallback_reason"] == "online_adapter_done"
                 && task["status"] == "done"
+                && task["bbox_annotation_enabled"] == true
                 && task["changed_unit_keys"]
                     .as_array()
                     .is_some_and(|keys| keys.is_empty())
@@ -3091,6 +3099,10 @@ fn r15_6_zero_change_incremental_reuses_without_calling_adapter() {
     assert!(
         reused.iter().all(|unit| unit.reused_from.is_some()),
         "every v2 unit must be reused_from the prior instance (no fresh OCR)"
+    );
+    assert!(
+        reused.iter().all(|unit| unit.metadata == v1_annotations),
+        "unchanged pages must reuse identical bounded bbox metadata without a send"
     );
 }
 

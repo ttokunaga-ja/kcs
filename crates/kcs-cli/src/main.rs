@@ -1,3 +1,13 @@
+mod historical_reindex;
+mod promotion;
+mod purge;
+mod restore;
+mod search_history;
+mod search_time;
+mod verify_objects;
+
+use crate::historical_reindex::{retained_history_instances, RetainedNormalizedInstance};
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, OpenOptions};
 use std::io::{IsTerminal, Read, Write};
@@ -9,10 +19,10 @@ use clap::{Args, Parser, Subcommand};
 use kcs_adapter::catalog::{
     active_adopted_embedding_execution, adopted_embedding_profile,
     builtin_offline_markdownize_adapter, builtin_prepare_profile,
-    declared_adopted_embedding_profile, resolve_standard_online_markdownize_profile,
+    declared_adopted_embedding_profile, resolve_standard_online_markdownize_profile_with_bbox,
     run_adopted_embedding, run_standard_online_markdownize_with_bytes,
-    standard_online_markdownize_profile, AdoptedEmbeddingExecution, DeclaredEmbeddingProfile,
-    StandardOnlineMarkdownizeRequest,
+    standard_online_markdownize_profile, standard_online_markdownize_profile_with_bbox,
+    AdoptedEmbeddingExecution, DeclaredEmbeddingProfile, StandardOnlineMarkdownizeRequest,
 };
 use kcs_adapter::identity::tool_profile_hash;
 use kcs_adapter::tool_lock::{load_tool_lock, validate_tools_toml};
@@ -22,9 +32,14 @@ use kcs_adapter::types::{
     MarkdownizeMode as AdapterMarkdownizeMode, MarkdownizeRequest, PreparedUnitHint,
     PreviousMarkdownizeContext, RawInput, UnitKind,
 };
-use kcs_core::cas::{fanout_path, hash_path_component, is_hash, MAX_RAW_OBJECT_BYTES};
-use kcs_core::dag::{NormalizeRef, TreeObject};
+use kcs_core::cas::{
+    fanout_path, hash_path_component, is_hash, read_bounded_regular_file, ChunkObject, ObjectStore,
+    MAX_RAW_OBJECT_BYTES,
+};
+use kcs_core::dag::{CommitType, NormalizeRef, TreeObject};
+use kcs_core::history::{HistoryReader, TreeBinding};
 use kcs_core::portable::{portable_cache_leaf, portable_tag_leaf, PORTABLE_TAGS_DIRECTORY};
+use kcs_core::purge::PurgeState;
 use kcs_core::schema::{validate_json_schema, SchemaKind};
 use kcs_core::scope::{
     append_error_log, append_event_log, append_warn_log, new_ulid, now_utc_seconds,
@@ -72,7 +87,8 @@ use kcs_pipeline::unsupported::{
     UNSUPPORTED_REASON_UNRECOGNIZED_BINARY,
 };
 use kcs_search::cursor::{
-    decode_cursor_token, encode_cursor_token, CursorToken, ScopeCursor, ScopeMode,
+    decode_cursor_token, encode_cursor_token, CursorExcludedScope, CursorToken, ScopeCursor,
+    ScopeMode,
 };
 use kcs_search::evidence::{
     evidence_pointer_to_uri, issue_evidence_pointer, parse_evidence_pointer_uri, EvidencePointer,
@@ -80,7 +96,8 @@ use kcs_search::evidence::{
 };
 use kcs_search::mmr::{diversify_candidates, MmrCandidate, MmrConfig};
 use kcs_search::query::{
-    query_hash, DiversifyRequest, DiversifyStrategy, QueryHashInput, ScopeSelectionMode, SearchMode,
+    query_hash, ChunkingConfigBinding, DiversifyRequest, DiversifyStrategy, QueryHashInput,
+    ScopeSelectionMode, SearchMode, TimeTravelSelector,
 };
 use kcs_search::rrf::{fuse_rrf, BackendRank, RrfConfig};
 use rusqlite::Connection;
@@ -88,6 +105,20 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use unicode_normalization::UnicodeNormalization;
+
+use crate::promotion::{
+    apply_online_promotion_to_index, clear_promotion_state, finish_pending_online_promotion,
+    maybe_inject_promotion_fault, promote_completed_online_markdownize,
+    recover_pending_online_promotion,
+};
+use crate::search_history::{
+    current_history_plan_from_cache, exact_project_snapshot, install_eligible_identities,
+    plan_search_history, SearchContentKey, SearchHistoryBinding,
+};
+use crate::search_time::{
+    reconcile_cursor_selector, since_cutoff_utc, validate_cursor_cutoff, TimeSelector,
+    TimeSelectorFlags,
+};
 
 // clap のパースエラーは exit code 2 で終了する。これは docs/06-cli-spec.md §7 の
 // invalid usage (= 2) と一致するため、そのまま採用する。
@@ -131,12 +162,12 @@ enum Command {
     Open(UnsupportedArgs),
     /// View an Evidence Pointer target.
     View(UnsupportedArgs),
-    /// Step 4 command placeholder.
-    Restore(UnsupportedArgs),
+    /// Restore historical raw bytes to an explicit destination.
+    Restore(RestoreArgs),
     /// Phase 4+ command placeholder.
     Gc(UnsupportedArgs),
-    /// Step 4 command placeholder.
-    Purge(UnsupportedArgs),
+    /// Remove content from KCS-managed history after preview and confirmation.
+    Purge(purge::PurgeArgs),
     /// Reindex normalized instances.
     Reindex(UnsupportedArgs),
     /// Phase 4+ command placeholder.
@@ -183,6 +214,17 @@ struct InspectArgs {
 struct TagArgs {
     name: String,
     commit: Option<String>,
+}
+
+#[derive(Debug, Args)]
+struct RestoreArgs {
+    source: String,
+    #[arg(long)]
+    to: PathBuf,
+    #[arg(long)]
+    force: bool,
+    #[arg(long)]
+    yes: bool,
 }
 
 #[derive(Debug, Args)]
@@ -379,20 +421,19 @@ fn command_captured_json_flag(command: &Command) -> bool {
         | Command::Search(args)
         | Command::Open(args)
         | Command::View(args)
-        | Command::Restore(args)
         | Command::Gc(args)
-        | Command::Purge(args)
         | Command::Reindex(args)
         | Command::Move(args)
         | Command::Evidence(args) => args.args.iter().any(|arg| arg == "--json"),
-        Command::Index(_) | Command::Batch(_) => false,
+        Command::Index(_) | Command::Batch(_) | Command::Purge(_) => false,
         Command::Init(_)
         | Command::Status
         | Command::Snapshot(_)
         | Command::Log(_)
         | Command::Diff(_)
         | Command::Inspect(_)
-        | Command::Tag(_) => false,
+        | Command::Tag(_)
+        | Command::Restore(_) => false,
     }
 }
 
@@ -545,6 +586,8 @@ fn run(cli: Cli) -> Result<Value> {
         Command::Inspect(args) => {
             let repo = Repository::open_current()?;
             validate_repo_tool_lock(&repo)?;
+            let target = scope_target(repo.root())?;
+            enforce_purge_read_barrier(&target, &args.hash)?;
             match repo.inspect(&args.hash)? {
                 InspectedObject::Tree(tree) => {
                     serde_json::to_value(tree).map_err(|err| KcsError::schema(err.to_string()))
@@ -555,11 +598,16 @@ fn run(cli: Cli) -> Result<Value> {
                 InspectedObject::Raw {
                     raw_hash,
                     size_bytes,
-                } => Ok(json!({
-                    "object_type": "raw",
-                    "raw_hash": raw_hash,
-                    "size_bytes": size_bytes,
-                })),
+                } => {
+                    // Recheck after the metadata read so a barrier published in
+                    // the inspect window cannot leak even the raw object's size.
+                    enforce_purge_read_barrier(&target, &raw_hash)?;
+                    Ok(json!({
+                        "object_type": "raw",
+                        "raw_hash": raw_hash,
+                        "size_bytes": size_bytes,
+                    }))
+                }
             }
         }
         Command::Tag(args) => {
@@ -579,11 +627,10 @@ fn run(cli: Cli) -> Result<Value> {
         Command::Open(args) => run_open(args),
         Command::View(args) => run_view(args),
         Command::Reindex(args) => run_reindex(args),
-        Command::Restore(_)
-        | Command::Gc(_)
-        | Command::Purge(_)
-        | Command::Move(_)
-        | Command::Evidence(_) => Err(KcsError::not_implemented("command")),
+        Command::Evidence(args) => verify_objects::run_evidence(args),
+        Command::Restore(args) => restore::run(args),
+        Command::Purge(args) => purge::run(args),
+        Command::Gc(_) | Command::Move(_) => Err(KcsError::not_implemented("command")),
     }
 }
 
@@ -651,8 +698,16 @@ fn run_index(args: IndexArgs) -> Result<Value> {
     let secrets_approved = secrets_send_approved(&repo);
     record_quarantine_candidates(&repo, &preview, secrets_approved)?;
 
+    if recover_pending_online_promotion(&repo)? {
+        finish_pending_online_promotion(&repo)?;
+    }
     materialize_tool_lock(&repo)?;
-    let index_result = run_index_pipeline(&repo, &preview, &args)?;
+    let mut index_result = run_index_pipeline(&repo, &preview, &args)?;
+    // A prior batch may already have produced a complete accepted online
+    // instance. Overlay it before the one normal index snapshot so an ordinary
+    // index neither demotes the file to the deterministic baseline nor creates a
+    // second promotion commit.
+    apply_online_promotion_to_index(&repo, &mut index_result)?;
     let excluded = preview
         .candidates
         .iter()
@@ -736,6 +791,13 @@ fn run_index(args: IndexArgs) -> Result<Value> {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct StoredChunk {
     rowid: u64,
+    /// Stable rowid of this `(chunk_id, chunking_config_hash)` association.
+    ///
+    /// Step 3 ledgers predate the many-to-many config relation and omit this
+    /// field. `read_stored_chunks` assigns those legacy records deterministic
+    /// rowids in ledger order before any replay or append.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    association_rowid: Option<u64>,
     #[serde(flatten)]
     row: ChunkRow,
 }
@@ -772,20 +834,51 @@ struct ParsedSearch {
     limit: u64,
     offset: Option<u64>,
     cursor: Option<String>,
+    time_selector_flags: TimeSelectorFlags,
 }
 
 fn run_repair(args: UnsupportedArgs) -> Result<Value> {
     let args = without_json(args.args);
-    parse_repair_args(args)?;
-    let repo = Repository::open_current()?;
+    let mode = parse_repair_args(args)?;
+    let repo = Repository::open_current_without_head_repair()?;
     // M1(a): serialize the DB rebuild against concurrent index/repair/reindex.
     let _lock = repo.lock_store()?;
+    repo.self_heal_head_for_repair()?;
     validate_repo_tool_lock(&repo)?;
+    if mode == RepairMode::VerifyObjects {
+        let report = verify_objects::verify_objects(&repo)?;
+        let has_findings = report.has_remaining_findings();
+        let purge_incomplete = report
+            .remaining_findings
+            .iter()
+            .any(|finding| finding.kind == "purge_incomplete");
+        let mut output =
+            serde_json::to_value(report).map_err(|error| KcsError::schema(error.to_string()))?;
+        if has_findings {
+            if let Some(object) = output.as_object_mut() {
+                object.insert(
+                    "error_code".to_owned(),
+                    json!(if purge_incomplete {
+                        "KCS-E-PURGE-INCOMPLETE-001"
+                    } else {
+                        "KCS-E-STORE-CORRUPT-001"
+                    }),
+                );
+                object.insert("__exit_code".to_owned(), json!(3));
+            }
+        }
+        return Ok(output);
+    }
+    let promotion_rebuild_pending = recover_pending_online_promotion(&repo)?;
     let db = repo.kcs_dir().join("index/sqlite.db");
     // `rebuild_sqlite_index` drops and rebuilds chunks/FTS/tree_entries in place
     // while preserving the `embeddings` rows and re-deriving `chunk_vec` from them
     // (04 §4.3). It is not pre-deleted here so vector search survives the rebuild.
     let report = rebuild_step3_index(&repo)?;
+    if promotion_rebuild_pending {
+        maybe_inject_promotion_fault("after_index_swap")?;
+        clear_promotion_state(repo.kcs_dir())?;
+    }
     // L1: after a DB rebuild, re-drive enrichment so any chunk lacking an
     // embedding (e.g. a rebuild that produced new chunk rows, or a scope whose
     // enrichment never ran) is enqueued/embedded rather than silently reported as
@@ -812,13 +905,20 @@ fn run_repair(args: UnsupportedArgs) -> Result<Value> {
     Ok(output)
 }
 
-fn parse_repair_args(args: Vec<String>) -> Result<()> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RepairMode {
+    RebuildDb,
+    VerifyObjects,
+}
+
+fn parse_repair_args(args: Vec<String>) -> Result<RepairMode> {
     if args.is_empty() {
         return Err(KcsError::invalid_usage(
             "repair currently supports --rebuild-db",
         ));
     }
     let mut rebuild_db = false;
+    let mut verify_objects = false;
     for arg in &args {
         // R12-7: accept `--flag=value` before matching so an existing flag is not
         // misreported as unknown. R16-6: every repair flag is boolean, so an inline
@@ -837,13 +937,15 @@ fn parse_repair_args(args: Vec<String>) -> Result<()> {
                 ));
             }
             "--yes" => reject_inline_value(flag, inline)?,
+            "--verify-objects" if !verify_objects => {
+                reject_inline_value(flag, inline)?;
+                verify_objects = true;
+            }
             "--verify-objects" => {
-                // R9-6: route not-implemented through the canonical
-                // `KcsError::not_implemented` (exit 1) so the same error_code
-                // (KCS-E-CONFIG-NOT-IMPLEMENTED-001) never maps to two exit
-                // classes — the hand-rolled variant returned exit 2, which broke
-                // an agent's error classification (`log --at` already exits 1).
-                return Err(KcsError::not_implemented("repair --verify-objects"));
+                reject_inline_value(flag, inline)?;
+                return Err(KcsError::invalid_usage(
+                    "repair accepts --verify-objects only once",
+                ));
             }
             value if value.starts_with('-') => {
                 return Err(KcsError::invalid_usage(format!(
@@ -857,12 +959,16 @@ fn parse_repair_args(args: Vec<String>) -> Result<()> {
             }
         }
     }
-    if !rebuild_db {
+    if rebuild_db == verify_objects {
         return Err(KcsError::invalid_usage(
-            "repair currently supports --rebuild-db",
+            "repair requires exactly one of --rebuild-db or --verify-objects",
         ));
     }
-    Ok(())
+    Ok(if rebuild_db {
+        RepairMode::RebuildDb
+    } else {
+        RepairMode::VerifyObjects
+    })
 }
 
 /// Resolved search mode plus the honest fallback reporting fields (05 §1.1/§1.7).
@@ -1113,6 +1219,10 @@ struct ExecScope {
     snapshot_commit: Option<String>,
     /// `rowid <= max_rowid` freezes the chunk set across pages (CT3-CURSOR-002).
     max_rowid: Option<u64>,
+    /// Association append boundary frozen by a v2 cursor.
+    max_association_rowid: Option<u64>,
+    /// Effective per-scope chunking config frozen by a v2 cursor.
+    chunking_config_hash: Option<String>,
     from_cursor: bool,
 }
 
@@ -1121,10 +1231,11 @@ struct ScoredCandidate {
     scope_index: usize,
     scope_id: String,
     scope_path: PathBuf,
-    snapshot_commit: String,
     chunk_hash: String,
     rrf_score: f64,
     meta: ChunkMeta,
+    /// Deterministic path/commit aliases expanded only after global diversify.
+    bindings: Vec<SearchHistoryBinding>,
     /// The chunk's embedding (hybrid/vector mode only), fed into MMR (05 §1.4).
     /// `None` in text mode, which makes MMR skip and only the raw_hash dedup run.
     embedding: Option<Vec<f32>>,
@@ -1134,12 +1245,18 @@ struct ScoredCandidate {
 struct ChunkMeta {
     raw_hash: String,
     tool_profile_hash: String,
+    gen: u64,
     heading_path: Option<Vec<String>>,
     section_id: Option<String>,
     char_start: Option<u64>,
     char_end: Option<u64>,
     text: String,
-    path_at_commit: String,
+}
+
+/// One final result hit after historical/deleted alias expansion.
+struct ExpandedCandidate<'a> {
+    candidate: &'a ScoredCandidate,
+    binding: &'a SearchHistoryBinding,
 }
 
 struct SearchedScopeInfo {
@@ -1147,6 +1264,8 @@ struct SearchedScopeInfo {
     scope_path: PathBuf,
     snapshot_at: String,
     max_rowid: u64,
+    max_association_rowid: u64,
+    chunking_config_hash: String,
 }
 
 fn run_search(args: UnsupportedArgs) -> Result<Value> {
@@ -1165,7 +1284,7 @@ fn run_search(args: UnsupportedArgs) -> Result<Value> {
 
 fn run_search_inner(args: UnsupportedArgs, started: Instant) -> Result<Value> {
     let parsed = parse_search_args(without_json(args.args))?;
-    let repo = Repository::open_current()?;
+    let repo = Repository::open_current_for_search()?;
     validate_repo_tool_lock(&repo)?;
 
     // R11-7: apply the `[search]` config (config.schema.json §search). `default_mode`
@@ -1199,9 +1318,29 @@ fn run_search_inner(args: UnsupportedArgs, started: Instant) -> Result<Value> {
         Some(token) => Some(decode_cursor_token(token, &cursor_key).map_err(search_to_kcs)?),
         None => None,
     };
+    let explicit_selector = parsed
+        .time_selector_flags
+        .is_explicit()
+        .then(|| parsed.time_selector_flags.canonicalize())
+        .transpose()?;
+    let (time_selector, since_cutoff) = match &decoded_cursor {
+        Some(cursor) => {
+            let frozen = selector_from_cursor(&cursor.time_travel)?;
+            validate_cursor_cutoff(&frozen, cursor.since_cutoff.as_deref())?;
+            (
+                reconcile_cursor_selector(explicit_selector.as_ref(), &frozen)?,
+                cursor.since_cutoff.clone(),
+            )
+        }
+        None => {
+            let selector = explicit_selector.unwrap_or_default();
+            let cutoff = since_cutoff_utc(&selector, &now_utc_seconds())?;
+            (selector, cutoff)
+        }
+    };
     let (scope_mode, exec_scopes, cursor_excluded) = match &decoded_cursor {
         Some(cursor) => {
-            let (exec, mut excluded) = resolve_cursor_exec_scopes(cursor)?;
+            let (exec, excluded) = resolve_cursor_exec_scopes(cursor)?;
             // O1(a): a cursor must not bypass the caller's --scope/--descendants
             // restriction. Compute the scopes this invocation is allowed to reach
             // and intersect the cursor's frozen scope set with it; a cursor scope
@@ -1213,19 +1352,23 @@ fn run_search_inner(args: UnsupportedArgs, started: Instant) -> Result<Value> {
                 .iter()
                 .map(|target| target.scope_id.clone())
                 .collect();
-            let (permitted, restricted): (Vec<ExecScope>, Vec<ExecScope>) = exec
-                .into_iter()
-                .partition(|exec| allowed_ids.contains(&exec.target.scope_id));
-            for exec in restricted {
-                excluded.push(json!({
-                    "scope_id": exec.target.scope_id,
-                    "scope_path": exec.target.repo_root,
-                    "reason": "scope_restriction_mismatch",
-                }));
+            if let Some(restricted) = exec
+                .iter()
+                .find(|exec| !allowed_ids.contains(&exec.target.scope_id))
+            {
+                return Err(KcsError::new(
+                    "KCS-E-SEARCH-CURSOR-001",
+                    "search cursor active scope is outside the requested scope restriction",
+                    json!({
+                        "reason": "active_scope_unavailable",
+                        "scope_id": restricted.target.scope_id,
+                    }),
+                    ExitCode::InvalidUsage,
+                ));
             }
             (
                 scope_selection_from_cursor(cursor.scope_mode),
-                permitted,
+                exec,
                 excluded,
             )
         }
@@ -1237,6 +1380,8 @@ fn run_search_inner(args: UnsupportedArgs, started: Instant) -> Result<Value> {
                     target,
                     snapshot_commit: None,
                     max_rowid: None,
+                    max_association_rowid: None,
+                    chunking_config_hash: None,
                     from_cursor: false,
                 })
                 .collect::<Vec<_>>();
@@ -1310,43 +1455,41 @@ fn run_search_inner(args: UnsupportedArgs, started: Instant) -> Result<Value> {
         ));
     }
 
-    // query_hash covers the search's scope set. On a cursor replay that set is
-    // the cursor token's OWN scope_id list (05 §1.8 — the cursor scope set is
-    // truth), not the currently-resolvable subset: a scope that became
-    // unreachable must surface as excluded_scopes/exit 3, never as a misleading
-    // KCS-E-SEARCH-CURSOR-001 mismatch.
-    let mut scope_ids = match &decoded_cursor {
-        Some(cursor) => cursor
+    // A replay can validate its hash entirely from the signed active scopes and
+    // their frozen config mappings. Page 1 defers hash construction until after
+    // per-scope execution, so an unreadable sibling remains a normal partial
+    // exclusion instead of aborting before the isolation boundary.
+    let mut qhash = String::new();
+    if let Some(cursor) = &decoded_cursor {
+        let mut scope_ids = cursor
             .scopes
             .iter()
-            .map(|sub| sub.scope_id.clone())
-            .collect::<Vec<_>>(),
-        None => exec_scopes
+            .map(|scope| scope.scope_id.clone())
+            .collect::<Vec<_>>();
+        scope_ids.sort();
+        let mut chunking_configs = cursor
+            .scopes
             .iter()
-            .map(|exec| exec.target.scope_id.clone())
-            .collect::<Vec<_>>(),
-    };
-    scope_ids.sort();
-    let qhash = query_hash(&QueryHashInput {
-        query: parsed.query.clone(),
-        mode: mode.resolved,
-        scope_mode,
-        scopes: scope_ids,
-        // R12-1: the effective tuning (not fixed literals), so a config change to
-        // rrf/diversify correctly invalidates an in-flight cursor (05 §1.8:280).
-        diversify: diversify_request.clone(),
-        rrf_k: rrf_config.k,
-        rrf_candidate_depth: rrf_config.candidate_depth,
-        rrf_w_text: rrf_config.w_text,
-        rrf_w_vector: rrf_config.w_vector,
-        at: None,
-        all_history: false,
-        include_deleted: false,
-        since: None,
-    })
-    .map_err(search_to_kcs)?;
-
-    if let Some(cursor) = &decoded_cursor {
+            .map(|scope| ChunkingConfigBinding {
+                scope_id: scope.scope_id.clone(),
+                chunking_config_hash: scope.chunking_config_hash.clone(),
+            })
+            .collect::<Vec<_>>();
+        chunking_configs.sort_by(|left, right| left.scope_id.cmp(&right.scope_id));
+        qhash = query_hash(&QueryHashInput {
+            query: parsed.query.clone(),
+            mode: mode.resolved,
+            scope_mode,
+            scopes: scope_ids,
+            diversify: diversify_request.clone(),
+            rrf_k: rrf_config.k,
+            rrf_candidate_depth: rrf_config.candidate_depth,
+            rrf_w_text: rrf_config.w_text,
+            rrf_w_vector: rrf_config.w_vector,
+            chunking_configs,
+            time_travel: selector_for_search(&time_selector),
+        })
+        .map_err(search_to_kcs)?;
         if cursor.query_hash != qhash {
             return Err(KcsError::new(
                 "KCS-E-SEARCH-CURSOR-001",
@@ -1381,6 +1524,10 @@ fn run_search_inner(args: UnsupportedArgs, started: Instant) -> Result<Value> {
             mode.resolved,
             scope_query_embedding,
             rrf_config,
+            ScopeTimeRequest {
+                selector: &time_selector,
+                since_cutoff: since_cutoff.as_deref(),
+            },
         ) {
             Ok(outcome) => {
                 searched.push(SearchedScopeInfo {
@@ -1388,6 +1535,8 @@ fn run_search_inner(args: UnsupportedArgs, started: Instant) -> Result<Value> {
                     scope_path: exec.target.repo_root.clone(),
                     snapshot_at: outcome.snapshot_commit.clone(),
                     max_rowid: outcome.max_rowid,
+                    max_association_rowid: outcome.max_association_rowid,
+                    chunking_config_hash: outcome.chunking_config_hash.clone(),
                 });
                 candidates.extend(outcome.candidates);
             }
@@ -1403,6 +1552,18 @@ fn run_search_inner(args: UnsupportedArgs, started: Instant) -> Result<Value> {
                 ));
             }
             Err(ScopeSearchError::Excluded(reason)) => {
+                if exec.from_cursor {
+                    return Err(KcsError::new(
+                        "KCS-E-SEARCH-CURSOR-001",
+                        "search cursor active scope is no longer available; re-run without a cursor",
+                        json!({
+                            "reason": "active_scope_unavailable",
+                            "cause": reason,
+                            "scope_id": exec.target.scope_id,
+                        }),
+                        ExitCode::InvalidUsage,
+                    ));
+                }
                 // R18-4: attach the store-corruption recovery hint to THIS entry (not
                 // only to the all-scopes-failed aggregate below), so a PARTIAL exclusion
                 // (some scopes healthy → `searched` non-empty → the aggregate block is
@@ -1418,6 +1579,9 @@ fn run_search_inner(args: UnsupportedArgs, started: Instant) -> Result<Value> {
                 excluded.push(entry);
             }
             Err(ScopeSearchError::Fatal(error)) => {
+                if exec.from_cursor {
+                    return Err(error);
+                }
                 // R16-2: a store-corruption Fatal from ONE scope must not discard the
                 // healthy scopes' already-collected results — that violated the 05 §1.8
                 // per-scope isolation contract that `index_corrupt` / `index_missing` /
@@ -1570,6 +1734,38 @@ fn run_search_inner(args: UnsupportedArgs, started: Instant) -> Result<Value> {
         ));
     }
 
+    // A fresh page-1 cursor binds only scopes that actually participated. Scopes
+    // excluded during execution are signed separately and never enter the stream.
+    if decoded_cursor.is_none() {
+        let mut active_scope_ids = searched
+            .iter()
+            .map(|scope| scope.scope_id.clone())
+            .collect::<Vec<_>>();
+        active_scope_ids.sort();
+        let mut active_configs = searched
+            .iter()
+            .map(|scope| ChunkingConfigBinding {
+                scope_id: scope.scope_id.clone(),
+                chunking_config_hash: scope.chunking_config_hash.clone(),
+            })
+            .collect::<Vec<_>>();
+        active_configs.sort_by(|a, b| a.scope_id.cmp(&b.scope_id));
+        qhash = query_hash(&QueryHashInput {
+            query: parsed.query.clone(),
+            mode: mode.resolved,
+            scope_mode,
+            scopes: active_scope_ids,
+            diversify: diversify_request.clone(),
+            rrf_k: rrf_config.k,
+            rrf_candidate_depth: rrf_config.candidate_depth,
+            rrf_w_text: rrf_config.w_text,
+            rrf_w_vector: rrf_config.w_vector,
+            chunking_configs: active_configs,
+            time_travel: selector_for_search(&time_selector),
+        })
+        .map_err(search_to_kcs)?;
+    }
+
     // N8: now that scope resolution, the all-failed check, and (below) index_status
     // are honored, a short (< 2 char) query — which produces no indexable token —
     // short-circuits the ranking/paging with an honest empty page that still
@@ -1578,12 +1774,12 @@ fn run_search_inner(args: UnsupportedArgs, started: Instant) -> Result<Value> {
         return empty_search_response(&parsed, &repo, started, &mode, &searched, &excluded);
     }
 
-    // Cross-scope merge is rank-based: RRF score desc, tie-break (scope_path,
+    // Cross-scope merge is rank-based: RRF score desc, tie-break (scope_id,
     // chunk_hash) — never compare raw BM25 across corpora (05 §1.8 / CT3-MULTI-002).
     candidates.sort_by(|a, b| {
         b.rrf_score
             .total_cmp(&a.rrf_score)
-            .then_with(|| a.scope_path.cmp(&b.scope_path))
+            .then_with(|| a.scope_id.as_bytes().cmp(b.scope_id.as_bytes()))
             .then_with(|| a.chunk_hash.cmp(&b.chunk_hash))
     });
 
@@ -1593,65 +1789,90 @@ fn run_search_inner(args: UnsupportedArgs, started: Instant) -> Result<Value> {
     let (ordered, diversify_summary) =
         diversify_merged(&candidates, mode.resolved, &diversify_request)?;
 
+    // Historical/deleted path aliases inherit their semantic parent's score and
+    // are expanded only after global MMR/dedup. Group order is stable by
+    // (scope_id, chunk_hash, path, pointer commit), then pagination sees the final
+    // hit stream rather than semantic chunks.
+    let mut expanded = Vec::<ExpandedCandidate<'_>>::new();
+    for candidate in ordered {
+        let mut bindings = candidate.bindings.iter().collect::<Vec<_>>();
+        bindings.sort_by(|left, right| {
+            left.path_at_commit
+                .as_bytes()
+                .cmp(right.path_at_commit.as_bytes())
+                .then_with(|| {
+                    left.pointer_commit
+                        .as_bytes()
+                        .cmp(right.pointer_commit.as_bytes())
+                })
+        });
+        expanded.extend(
+            bindings
+                .into_iter()
+                .map(|binding| ExpandedCandidate { candidate, binding }),
+        );
+    }
+
     // Global skip: cursor consumed (summed across scopes) or --offset (05 §1.5).
-    // Only resolvable scopes count: a dropped (unreachable) scope's candidates are
-    // no longer in the stream, so counting its consumed would silently swallow
-    // results from the surviving scopes.
     let total_skip = match &decoded_cursor {
-        Some(cursor) => {
-            let resolved = exec_scopes
-                .iter()
-                .map(|exec| exec.target.scope_id.as_str())
-                .collect::<BTreeSet<_>>();
-            cursor
-                .scopes
-                .iter()
-                .filter(|sub| resolved.contains(sub.scope_id.as_str()))
-                .map(|scope| scope.consumed)
-                .sum::<u64>() as usize
-        }
+        Some(cursor) => cursor
+            .scopes
+            .iter()
+            .map(|scope| scope.consumed)
+            .sum::<u64>() as usize,
         None => parsed.offset.unwrap_or(0) as usize,
     };
     let limit = parsed.limit as usize;
-    let slice_start = total_skip.min(ordered.len());
-    let slice_end = slice_start.saturating_add(limit).min(ordered.len());
-    let page = &ordered[slice_start..slice_end];
+    let slice_start = total_skip.min(expanded.len());
+    let slice_end = slice_start.saturating_add(limit).min(expanded.len());
+    let page = &expanded[slice_start..slice_end];
 
     // Per-scope consumed = candidates from that scope within the first `slice_end`
     // positions of the deterministic stream (uniform for cursor and --offset,
     // CT3-CURSOR-006). Preserves the frozen scope set even at 0 consumed.
-    let next_cursor = if slice_end < ordered.len() {
+    let mut signed_exclusions = excluded
+        .iter()
+        .filter_map(|entry| {
+            Some(CursorExcludedScope {
+                scope_id: entry.get("scope_id")?.as_str()?.to_owned(),
+                reason: entry.get("reason")?.as_str()?.to_owned(),
+            })
+        })
+        .collect::<Vec<_>>();
+    signed_exclusions.sort_by(|a, b| a.scope_id.cmp(&b.scope_id));
+    signed_exclusions.dedup_by(|a, b| a.scope_id == b.scope_id);
+    let next_cursor = if slice_end < expanded.len() {
         let mut consumed = vec![0u64; exec_scopes.len()];
-        for candidate in &ordered[..slice_end] {
-            consumed[candidate.scope_index] += 1;
+        for hit in &expanded[..slice_end] {
+            consumed[hit.candidate.scope_index] += 1;
         }
-        let sub_cursors = exec_scopes
+        let mut sub_cursors = exec_scopes
             .iter()
             .enumerate()
-            .map(|(idx, exec)| {
+            .filter_map(|(idx, exec)| {
                 let searched_scope = searched
                     .iter()
-                    .find(|scope| scope.scope_id == exec.target.scope_id);
-                ScopeCursor {
+                    .find(|scope| scope.scope_id == exec.target.scope_id)?;
+                Some(ScopeCursor {
                     scope_id: exec.target.scope_id.clone(),
-                    snapshot_commit: searched_scope
-                        .map(|scope| scope.snapshot_at.clone())
-                        .or_else(|| exec.snapshot_commit.clone())
-                        .unwrap_or_default(),
-                    max_rowid: searched_scope
-                        .map(|scope| scope.max_rowid)
-                        .or(exec.max_rowid)
-                        .unwrap_or_default(),
+                    snapshot_commit: searched_scope.snapshot_at.clone(),
+                    max_rowid: searched_scope.max_rowid,
+                    max_association_rowid: searched_scope.max_association_rowid,
+                    chunking_config_hash: searched_scope.chunking_config_hash.clone(),
                     consumed: consumed[idx],
-                }
+                })
             })
             .collect::<Vec<_>>();
+        sub_cursors.sort_by(|a, b| a.scope_id.cmp(&b.scope_id));
         Some(
             encode_cursor_token(
                 &CursorToken {
-                    version: 1,
+                    version: CursorToken::VERSION,
                     scope_mode: cursor_mode_from_selection(scope_mode),
                     query_hash: qhash,
+                    time_travel: selector_for_search(&time_selector),
+                    since_cutoff: since_cutoff.clone(),
+                    excluded_scopes: signed_exclusions,
                     scopes: sub_cursors,
                 },
                 &cursor_key,
@@ -1663,16 +1884,18 @@ fn run_search_inner(args: UnsupportedArgs, started: Instant) -> Result<Value> {
     };
 
     let mut results = Vec::new();
-    for candidate in page {
+    for hit in page {
+        let candidate = hit.candidate;
+        let binding = hit.binding;
         let pointer = issue_evidence_pointer(EvidencePointerIssueRequest {
             scope_id: candidate.scope_id.clone(),
             scope_path: Some(candidate.scope_path.display().to_string()),
-            commit: candidate.snapshot_commit.clone(),
+            commit: binding.pointer_commit.clone(),
             tree: None,
             raw_hash: candidate.meta.raw_hash.clone(),
             tool_profile_hash: candidate.meta.tool_profile_hash.clone(),
             chunk_hash: candidate.chunk_hash.clone(),
-            path_at_commit: Some(candidate.meta.path_at_commit.clone()),
+            path_at_commit: Some(binding.path_at_commit.clone()),
             heading_path: candidate.meta.heading_path.clone(),
             section_id: candidate.meta.section_id.clone(),
             char_start: candidate.meta.char_start,
@@ -1680,15 +1903,22 @@ fn run_search_inner(args: UnsupportedArgs, started: Instant) -> Result<Value> {
         })
         .map_err(search_to_kcs)?;
         let uri = evidence_pointer_to_uri(&pointer).map_err(search_to_kcs)?;
-        results.push(json!({
+        let mut result = json!({
             "chunk_hash": candidate.chunk_hash,
             "evidence_pointer": pointer,
             "evidence_uri": uri,
             "score": candidate.rrf_score,
             "scope_path": candidate.scope_path,
-            "title": candidate.meta.path_at_commit,
+            "title": binding.path_at_commit,
             "snippet": candidate.meta.text.chars().take(200).collect::<String>(),
-        }));
+        });
+        if time_selector.all_history() && !binding.current_paths.is_empty() {
+            result["current_paths"] = json!(binding.current_paths);
+            if let Some(current_path) = binding.current_path() {
+                result["current_path"] = json!(current_path);
+            }
+        }
+        results.push(result);
     }
 
     let searched_scopes = searched
@@ -1749,7 +1979,85 @@ const INDEX_REBUILDING_REASON: &str = "index_rebuilding";
 struct ScopeOutcome {
     snapshot_commit: String,
     max_rowid: u64,
+    max_association_rowid: u64,
+    chunking_config_hash: String,
     candidates: Vec<ScoredCandidate>,
+}
+
+#[derive(Clone, Copy)]
+struct ScopeTimeRequest<'a> {
+    selector: &'a TimeSelector,
+    since_cutoff: Option<&'a str>,
+}
+
+fn history_plan_error(error: KcsError, from_cursor: bool) -> ScopeSearchError {
+    match error.error_code() {
+        "KCS-E-COMMIT-SHALLOW-001" => ScopeSearchError::Shallow,
+        "KCS-E-COMMIT-HISTORY-LIMIT-001" if !from_cursor => {
+            ScopeSearchError::Excluded("history_limit_exceeded".to_owned())
+        }
+        _ => ScopeSearchError::Fatal(error),
+    }
+}
+
+fn purge_blocks_raw(target: &ScopeTarget, raw_hash: &str) -> Result<bool> {
+    // Public tombstones and an in-progress transaction after its visibility
+    // barrier hide content. Fsck-only erase receipts intentionally do not.
+    Ok(read_tombstone(target, raw_hash)?.is_some()
+        || PurgeState::new(&target.kcs_dir).barrier_blocks(raw_hash)?)
+}
+
+/// Mutation-side purge gate. Public tombstones permanently reject identical-byte
+/// re-ingest, while an active post-visibility journal is a retryable incomplete
+/// purge. Fsck-only erase receipts deliberately do not block explicit ingest.
+fn ensure_raw_ingest_allowed(repo: &Repository, raw_hash: &str) -> Result<()> {
+    let purge = PurgeState::new(repo.kcs_dir());
+    if purge.barrier_blocks(raw_hash)? {
+        return Err(KcsError::new(
+            "KCS-E-PURGE-INCOMPLETE-001",
+            "raw ingest is blocked while purge remains incomplete",
+            json!({ "component": "raw_ingest" }),
+            ExitCode::PartialFailure,
+        ));
+    }
+    if let Some(record) = purge.read_tombstone(raw_hash)? {
+        let value =
+            serde_json::to_value(record).map_err(|error| KcsError::schema(error.to_string()))?;
+        return Err(tombstone_error(value));
+    }
+    // Read and validate a receipt, but do not treat it as a liveness decision.
+    // The store-locked raw publication boundary retires it after verified write.
+    let _ = purge.read_erase_receipt(raw_hash)?;
+    Ok(())
+}
+
+fn raw_ingest_is_purge_blocked(repo: &Repository, raw_hash: &str) -> bool {
+    ensure_raw_ingest_allowed(repo, raw_hash).is_err()
+}
+
+/// Rebuilders hold the scope store lock, so an already-visible purge journal
+/// cannot make forward progress until they return. Refuse the rebuild before any
+/// derived write instead of temporarily resurrecting its blocked rows.
+fn ensure_no_visible_purge_journal(kcs_dir: &Path) -> Result<()> {
+    if PurgeState::new(kcs_dir)
+        .read_journal()?
+        .is_some_and(|journal| journal.phase.is_barrier_visible())
+    {
+        return Err(KcsError::new(
+            "KCS-E-PURGE-INCOMPLETE-001",
+            "index rebuild is blocked while purge remains incomplete",
+            json!({ "component": "index_rebuild" }),
+            ExitCode::PartialFailure,
+        ));
+    }
+    Ok(())
+}
+
+/// Persistent tombstones and the active visibility barrier are both authoritative
+/// over append-only history/chunk ledgers. Derived rebuilds must omit either form.
+fn purge_blocks_rebuild_raw(kcs_dir: &Path, raw_hash: &str) -> Result<bool> {
+    let state = PurgeState::new(kcs_dir);
+    Ok(state.read_tombstone(raw_hash)?.is_some() || state.barrier_blocks(raw_hash)?)
 }
 
 fn search_one_scope(
@@ -1759,17 +2067,32 @@ fn search_one_scope(
     resolved_mode: SearchMode,
     query_embedding: Option<&[f32]>,
     rrf_config: RrfConfig,
+    time: ScopeTimeRequest<'_>,
 ) -> std::result::Result<ScopeOutcome, ScopeSearchError> {
-    let repo = Repository::open(&exec.target.repo_root)
+    let repo = Repository::open_for_search(&exec.target.repo_root)
         .map_err(|_| ScopeSearchError::Excluded("unreachable".to_owned()))?;
 
-    // Resolve the search snapshot: frozen commit on a cursor replay, else HEAD.
+    // Resolve the search snapshot independently per scope. Cursor replay always
+    // uses the signed commit; a fresh `--at` resolves its operand in this scope;
+    // every other selector freezes the scope's current HEAD.
     let snapshot_commit = match &exec.snapshot_commit {
         Some(commit) => commit.clone(),
-        None => repo
-            .head_commit_hash()
-            .map_err(|_| ScopeSearchError::Excluded("unreachable".to_owned()))?
-            .ok_or_else(|| ScopeSearchError::Excluded("not_indexed".to_owned()))?,
+        None => match time.selector.at() {
+            Some(operand) => match repo.resolve_commit(operand) {
+                Ok(commit) => commit,
+                Err(error) if error.error_code() == "KCS-E-COMMIT-SHALLOW-001" => {
+                    return Err(ScopeSearchError::Shallow);
+                }
+                Err(error) if error.error_code() == "KCS-E-STORE-NOT-FOUND-001" => {
+                    return Err(ScopeSearchError::Excluded("commit_not_found".to_owned()));
+                }
+                Err(error) => return Err(ScopeSearchError::Fatal(error)),
+            },
+            None => repo
+                .head_commit_hash()
+                .map_err(|_| ScopeSearchError::Excluded("unreachable".to_owned()))?
+                .ok_or_else(|| ScopeSearchError::Excluded("not_indexed".to_owned()))?,
+        },
     };
 
     let db_path = sqlite_path(&exec.target.kcs_dir);
@@ -1790,30 +2113,65 @@ fn search_one_scope(
         Err(_) => return Err(ScopeSearchError::Excluded("index_corrupt".to_owned())),
     }
 
-    // On a cursor replay, the snapshot's tree must still exist to reproduce the
-    // page. Any shallow snapshot (tree OR commit object discarded, cached rows or
-    // not) fails hard (05 §2.2 / CT3-CURSOR-005) — the frozen page cannot be
-    // faithfully reproduced from a shallow base.
-    match ensure_snapshot_tree_entries(&repo, &conn, &snapshot_commit) {
-        Ok(SnapshotTreeEntries::Projected) => {}
-        Ok(SnapshotTreeEntries::ShallowCachedRows) if exec.from_cursor => {
-            return Err(ScopeSearchError::Shallow);
+    // Build the immutable eligible binding relation. Default search retains the
+    // established shallow-cache read degradation; every explicit historical mode
+    // reads verified commit/tree CAS and therefore rejects incomplete ancestry.
+    let mut history_plan = match time.selector {
+        TimeSelector::Current => {
+            match ensure_snapshot_tree_entries(&repo, &conn, &snapshot_commit) {
+                Ok(SnapshotTreeEntries::Projected) => {}
+                Ok(SnapshotTreeEntries::ShallowCachedRows) if exec.from_cursor => {
+                    return Err(ScopeSearchError::Shallow);
+                }
+                Ok(SnapshotTreeEntries::ShallowCachedRows) => {}
+                Ok(SnapshotTreeEntries::ShallowNoRows) if exec.from_cursor => {
+                    return Err(ScopeSearchError::Shallow);
+                }
+                Ok(SnapshotTreeEntries::ShallowNoRows) => {
+                    return Err(ScopeSearchError::Excluded("snapshot_shallow".to_owned()));
+                }
+                Err(error) => return Err(ScopeSearchError::Fatal(error)),
+            }
+            current_history_plan_from_cache(&conn, &snapshot_commit)
+                .map_err(ScopeSearchError::Fatal)?
         }
-        // R16-3: fresh path — a shallow snapshot WITH cached rows still serves real
-        // results (read degrade); Evidence resolves via raw_hash direct resolution.
-        Ok(SnapshotTreeEntries::ShallowCachedRows) => {}
-        // R16-3: fresh path — a shallow snapshot with NO cached rows has nothing to
-        // serve. Exclude the scope loudly (`snapshot_shallow`) instead of the former
-        // silent exit-0 empty page (the `Ok(false)` the fresh path used to drop on
-        // the floor). On a cursor replay it is a hard failure.
-        Ok(SnapshotTreeEntries::ShallowNoRows) if exec.from_cursor => {
-            return Err(ScopeSearchError::Shallow);
+        TimeSelector::At(_) => {
+            exact_project_snapshot(&repo, &conn, &snapshot_commit).map_err(|error| {
+                if error.error_code() == "KCS-E-COMMIT-SHALLOW-001" {
+                    ScopeSearchError::Shallow
+                } else {
+                    ScopeSearchError::Fatal(error)
+                }
+            })?;
+            plan_search_history(&repo, &snapshot_commit, time.selector, time.since_cutoff)
+                .map_err(|error| history_plan_error(error, exec.from_cursor))?
         }
-        Ok(SnapshotTreeEntries::ShallowNoRows) => {
-            return Err(ScopeSearchError::Excluded("snapshot_shallow".to_owned()));
+        TimeSelector::AllHistory | TimeSelector::Since(_) | TimeSelector::IncludeDeleted => {
+            plan_search_history(&repo, &snapshot_commit, time.selector, time.since_cutoff)
+                .map_err(|error| history_plan_error(error, exec.from_cursor))?
         }
-        Err(error) => return Err(ScopeSearchError::Fatal(error)),
+    };
+    // A purge barrier becomes the universal visibility boundary before any
+    // destructive deletion. Filter CAS-derived historical bindings as well as
+    // current ones so stale SQLite rows cannot leak through text/vector/history
+    // search or a signed cursor replay.
+    let mut blocked_raws = BTreeMap::<String, bool>::new();
+    for binding in &history_plan.bindings {
+        if !blocked_raws.contains_key(&binding.raw_hash) {
+            blocked_raws.insert(
+                binding.raw_hash.clone(),
+                purge_blocks_raw(&exec.target, &binding.raw_hash)
+                    .map_err(ScopeSearchError::Fatal)?,
+            );
+        }
     }
+    history_plan.bindings.retain(|binding| {
+        !blocked_raws
+            .get(&binding.raw_hash)
+            .copied()
+            .unwrap_or(false)
+    });
+    install_eligible_identities(&conn, &history_plan).map_err(ScopeSearchError::Fatal)?;
 
     // P10: `run_reindex` advances HEAD to a new generation and only afterwards
     // swaps in the rebuilt sqlite (P5's temp+rename). A concurrent search in that
@@ -1827,7 +2185,9 @@ fn search_one_scope(
     // text-less scope has no chunks (never fires); a genuine miss still has live
     // chunks (never fires) — see `index_is_rebuilding`. 05 §1.8 part-failure keeps
     // the other, healthy scopes' results.
-    if index_is_rebuilding(&conn, &snapshot_commit).map_err(ScopeSearchError::Fatal)? {
+    if matches!(time.selector, TimeSelector::Current)
+        && index_is_rebuilding(&conn, &snapshot_commit).map_err(ScopeSearchError::Fatal)?
+    {
         return Err(ScopeSearchError::Excluded(
             INDEX_REBUILDING_REASON.to_owned(),
         ));
@@ -1838,9 +2198,28 @@ fn search_one_scope(
         None => current_max_rowid(&conn).map_err(ScopeSearchError::Fatal)?,
     };
 
+    let max_association_rowid = match exec.max_association_rowid {
+        Some(value) => value,
+        None => kcs_index::fts::max_chunk_config_association_rowid(&conn)
+            .map_err(index_to_kcs)
+            .map_err(ScopeSearchError::Fatal)?,
+    };
+
     let chunking_config_hash = read_chunking_config(&repo)
         .map(|config| config.chunking_config_hash)
         .map_err(ScopeSearchError::Fatal)?;
+    if exec
+        .chunking_config_hash
+        .as_deref()
+        .is_some_and(|frozen| frozen != chunking_config_hash.as_str())
+    {
+        return Err(ScopeSearchError::Fatal(KcsError::new(
+            "KCS-E-SEARCH-CURSOR-001",
+            "search cursor chunking config changed",
+            json!({ "scope_id": exec.target.scope_id }),
+            ExitCode::InvalidUsage,
+        )));
+    }
 
     let want_vector = matches!(resolved_mode, SearchMode::Hybrid | SearchMode::Vector);
 
@@ -1851,10 +2230,11 @@ fn search_one_scope(
     } else {
         fts_scope_search(
             &conn,
-            &snapshot_commit,
             tiers,
             &chunking_config_hash,
             max_rowid,
+            max_association_rowid,
+            history_plan.since_cutoff.as_deref(),
         )
         .map_err(ScopeSearchError::Fatal)?
     };
@@ -1864,10 +2244,11 @@ fn search_one_scope(
         if let Some(query_vec) = query_embedding {
             let (ranks, vmeta) = match vector_scope_search(
                 &conn,
-                &snapshot_commit,
                 query_vec,
                 &chunking_config_hash,
                 max_rowid,
+                max_association_rowid,
+                history_plan.since_cutoff.as_deref(),
             ) {
                 Ok(result) => result,
                 // R10-1(a): a sqlite-vec capacity limit degrades THIS scope's vector
@@ -1896,6 +2277,7 @@ fn search_one_scope(
         .map_err(search_to_kcs)
         .map_err(ScopeSearchError::Fatal)?;
 
+    let grouped_bindings = history_plan.grouped_bindings();
     let mut candidates = Vec::new();
     for candidate in fused {
         let Some(chunk_meta) = meta.get(&candidate.chunk_hash) else {
@@ -1914,17 +2296,46 @@ fn search_one_scope(
             scope_index,
             scope_id: exec.target.scope_id.clone(),
             scope_path: exec.target.repo_root.clone(),
-            snapshot_commit: snapshot_commit.clone(),
             chunk_hash: candidate.chunk_hash,
             rrf_score: candidate.rrf_score,
             meta: chunk_meta.clone(),
+            bindings: grouped_bindings
+                .get(&SearchContentKey {
+                    raw_hash: chunk_meta.raw_hash.clone(),
+                    tool_profile_hash: chunk_meta.tool_profile_hash.clone(),
+                    gen: chunk_meta.gen,
+                })
+                .cloned()
+                .unwrap_or_default(),
             embedding,
         });
     }
 
+    // Linearize the lock-free read after SQLite/vector metadata access. A purge
+    // may publish its barrier while the query is running; candidates blocked in
+    // that window must not cross the response boundary.
+    let mut blocked_after_query = BTreeMap::<String, bool>::new();
+    for candidate in &candidates {
+        if !blocked_after_query.contains_key(&candidate.meta.raw_hash) {
+            blocked_after_query.insert(
+                candidate.meta.raw_hash.clone(),
+                purge_blocks_raw(&exec.target, &candidate.meta.raw_hash)
+                    .map_err(ScopeSearchError::Fatal)?,
+            );
+        }
+    }
+    candidates.retain(|candidate| {
+        !blocked_after_query
+            .get(&candidate.meta.raw_hash)
+            .copied()
+            .unwrap_or(false)
+    });
+
     Ok(ScopeOutcome {
         snapshot_commit,
         max_rowid,
+        max_association_rowid,
+        chunking_config_hash,
         candidates,
     })
 }
@@ -1972,10 +2383,11 @@ fn vector_capacity_error() -> KcsError {
 /// by (cosine distance, chunk_id) and truncated to `candidate_depth` (05 §1.3).
 fn vector_scope_search(
     conn: &Connection,
-    snapshot_commit: &str,
     query_embedding: &[f32],
     chunking_config_hash: &str,
     max_rowid: u64,
+    max_association_rowid: u64,
+    since_cutoff: Option<&str>,
 ) -> Result<(Vec<BackendRank>, BTreeMap<String, ChunkMeta>)> {
     let total = embedding_store::chunk_vec_count(conn).map_err(index_to_kcs)?;
     if total == 0 || query_embedding.len() != CHUNK_VEC_DIMENSIONS {
@@ -2002,10 +2414,11 @@ fn vector_scope_search(
     let chunk_ids = knn.iter().map(|(id, _)| id.clone()).collect::<Vec<_>>();
     let meta = fetch_live_meta(
         conn,
-        snapshot_commit,
         &chunk_ids,
         chunking_config_hash,
         max_rowid,
+        max_association_rowid,
+        since_cutoff,
     )?;
     let mut kept = knn
         .into_iter()
@@ -2029,10 +2442,11 @@ fn vector_scope_search(
 /// the live set are simply absent from the result.
 fn fetch_live_meta(
     conn: &Connection,
-    snapshot_commit: &str,
     chunk_ids: &[String],
     chunking_config_hash: &str,
     max_rowid: u64,
+    max_association_rowid: u64,
+    since_cutoff: Option<&str>,
 ) -> Result<BTreeMap<String, ChunkMeta>> {
     if chunk_ids.is_empty() {
         return Ok(BTreeMap::new());
@@ -2040,19 +2454,30 @@ fn fetch_live_meta(
     let placeholders = chunk_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
     let sql = format!(
         "SELECT c.chunk_id, c.raw_hash, c.tool_profile_hash, c.heading_path,
-                c.section_id, c.char_start, c.char_end, c.text, te.path
+                c.section_id, c.char_start, c.char_end, c.text, c.gen
          FROM chunks c
-         JOIN tree_entries te ON te.commit_hash = ?1
-             AND te.raw_hash = c.raw_hash
-             AND te.tool_profile_hash = c.tool_profile_hash
-             AND te.gen = c.gen
-         WHERE c.chunking_config_hash = ?2 AND c.rowid <= ?3
+         WHERE c.first_seen_commit IS NOT NULL
+             AND c.rowid <= ?2
+             AND EXISTS (
+                 SELECT 1 FROM chunk_config_generations cg
+                 WHERE cg.chunk_id = c.chunk_id
+                   AND cg.chunking_config_hash = ?1
+                   AND cg.association_rowid <= ?3
+             )
+             AND EXISTS (
+                 SELECT 1 FROM kcs_eligible_identity eligible
+                 WHERE eligible.raw_hash = c.raw_hash
+                   AND eligible.tool_profile_hash = c.tool_profile_hash
+                   AND eligible.gen = c.gen
+             )
+             AND (?4 IS NULL OR c.created_at >= ?4)
              AND c.chunk_id IN ({placeholders})"
     );
     let mut params: Vec<Box<dyn rusqlite::ToSql>> = vec![
-        Box::new(snapshot_commit.to_owned()),
         Box::new(chunking_config_hash.to_owned()),
         Box::new(max_rowid as i64),
+        Box::new(max_association_rowid as i64),
+        Box::new(since_cutoff.map(str::to_owned)),
     ];
     for chunk_id in chunk_ids {
         params.push(Box::new(chunk_id.clone()));
@@ -2084,6 +2509,7 @@ fn chunk_meta_row(row: &rusqlite::Row) -> rusqlite::Result<(String, ChunkMeta)> 
         ChunkMeta {
             raw_hash: row.get(1)?,
             tool_profile_hash: row.get(2)?,
+            gen: row.get::<_, i64>(8)? as u64,
             heading_path: heading_path_raw
                 .and_then(|value| serde_json::from_str::<Vec<String>>(&value).ok()),
             section_id: row
@@ -2092,7 +2518,6 @@ fn chunk_meta_row(row: &rusqlite::Row) -> rusqlite::Result<(String, ChunkMeta)> 
             char_start: row.get::<_, Option<i64>>(5)?.map(|value| value as u64),
             char_end: row.get::<_, Option<i64>>(6)?.map(|value| value as u64),
             text: row.get(7)?,
-            path_at_commit: row.get(8)?,
         },
     ))
 }
@@ -2104,18 +2529,20 @@ fn chunk_meta_row(row: &rusqlite::Row) -> rusqlite::Result<(String, ChunkMeta)> 
 /// post-hoc re-ordering by hand-computed features).
 fn fts_scope_search(
     conn: &Connection,
-    snapshot_commit: &str,
     tiers: &[String],
     chunking_config_hash: &str,
     max_rowid: u64,
+    max_association_rowid: u64,
+    since_cutoff: Option<&str>,
 ) -> Result<(Vec<BackendRank>, BTreeMap<String, ChunkMeta>)> {
     for match_expr in tiers {
         let (ranks, meta) = execute_fts_tier(
             conn,
-            snapshot_commit,
             match_expr,
             chunking_config_hash,
             max_rowid,
+            max_association_rowid,
+            since_cutoff,
         )?;
         if !ranks.is_empty() {
             return Ok((ranks, meta));
@@ -2133,23 +2560,33 @@ fn fts_scope_search(
 /// Ties break on chunk_id.
 fn execute_fts_tier(
     conn: &Connection,
-    snapshot_commit: &str,
     match_expr: &str,
     chunking_config_hash: &str,
     max_rowid: u64,
+    max_association_rowid: u64,
+    since_cutoff: Option<&str>,
 ) -> Result<(Vec<BackendRank>, BTreeMap<String, ChunkMeta>)> {
     let sql = "SELECT c.chunk_id, c.raw_hash, c.tool_profile_hash, c.heading_path,
-                      c.section_id, c.char_start, c.char_end, c.text, te.path,
+                      c.section_id, c.char_start, c.char_end, c.text, c.gen,
                       bm25(chunk_fts, 1.0, 0.3) AS score
                FROM chunk_fts f
                JOIN chunks c ON c.rowid = f.rowid
-               JOIN tree_entries te ON te.commit_hash = ?1
-                   AND te.raw_hash = c.raw_hash
-                   AND te.tool_profile_hash = c.tool_profile_hash
-                   AND te.gen = c.gen
-               WHERE chunk_fts MATCH ?2
-                   AND c.chunking_config_hash = ?3
-                   AND c.rowid <= ?4
+               WHERE chunk_fts MATCH ?1
+                   AND c.first_seen_commit IS NOT NULL
+                   AND c.rowid <= ?3
+                   AND EXISTS (
+                       SELECT 1 FROM chunk_config_generations cg
+                       WHERE cg.chunk_id = c.chunk_id
+                         AND cg.chunking_config_hash = ?2
+                         AND cg.association_rowid <= ?4
+                   )
+                   AND EXISTS (
+                       SELECT 1 FROM kcs_eligible_identity eligible
+                       WHERE eligible.raw_hash = c.raw_hash
+                         AND eligible.tool_profile_hash = c.tool_profile_hash
+                         AND eligible.gen = c.gen
+                   )
+                   AND (?5 IS NULL OR c.created_at >= ?5)
                ORDER BY score, c.chunk_id
                LIMIT 200";
     let mut stmt = conn
@@ -2158,10 +2595,11 @@ fn execute_fts_tier(
     let rows = stmt
         .query_map(
             rusqlite::params![
-                snapshot_commit,
                 match_expr,
                 chunking_config_hash,
-                max_rowid as i64
+                max_rowid as i64,
+                max_association_rowid as i64,
+                since_cutoff,
             ],
             chunk_meta_row,
         )
@@ -2265,7 +2703,9 @@ fn ensure_snapshot_tree_entries(
         Err(error) => return Err(error),
     };
     // Resolve every row first (the `latest_normalize_ref` lookups do file I/O) so the
-    // insert transaction below stays tight and holds no I/O.
+    // insert transaction below stays tight and holds no I/O. Step 4 historical search
+    // uses its own exact CAS planner and does not treat this compatibility cache as
+    // truth.
     let mut rows: Vec<TreeEntryProjection> = Vec::new();
     for entry in &tree.entries {
         let normalize = match &entry.normalize {
@@ -2781,6 +3221,23 @@ fn fts_keyword_group(keyword: &str) -> String {
     }
 }
 
+/// Small deterministic bilingual expansions for core retrieval vocabulary.
+/// These are query-construction aliases (like the numeric display variant
+/// above), never post-hoc score adjustments. They let an English query match the
+/// Japanese technical term that KCS itself exposes throughout the CLI/docs while
+/// preserving BM25 as the sole ranking function.
+fn fts_keyword_expansions(keyword: &str) -> &'static [&'static str] {
+    if keyword.eq_ignore_ascii_case("chunk") || keyword.eq_ignore_ascii_case("chunks") {
+        &["チャンク"]
+    } else if keyword.eq_ignore_ascii_case("token") || keyword.eq_ignore_ascii_case("tokens") {
+        &["トークン"]
+    } else if keyword.eq_ignore_ascii_case("pipeline") {
+        &["パイプライン"]
+    } else {
+        &[]
+    }
+}
+
 fn thousands_separated(digits: &str) -> String {
     let bytes = digits.as_bytes();
     let mut out = String::with_capacity(bytes.len() + bytes.len() / 3);
@@ -2831,14 +3288,31 @@ fn build_fts_tiers(query: &str) -> Vec<String> {
     // is dedup'd upstream (query_units), so this is "first 64 after dedup". A
     // multi-thousand-word query no longer builds a multi-thousand-clause OR (linear
     // FTS cost of seconds); SQLite FTS5 tolerates it, but the cost is pointless.
-    let keyword_groups = keywords
-        .iter()
-        .take(MAX_TRIGRAMS)
-        .map(|keyword| fts_keyword_group(keyword))
-        .collect::<Vec<_>>();
+    let mut keyword_groups = Vec::new();
+    for keyword in keywords.iter().take(MAX_TRIGRAMS) {
+        if keyword_groups.len() >= MAX_TRIGRAMS {
+            break;
+        }
+        keyword_groups.push(fts_keyword_group(keyword));
+        for expansion in fts_keyword_expansions(keyword) {
+            if keyword_groups.len() >= MAX_TRIGRAMS {
+                break;
+            }
+            let group = fts_keyword_group(expansion);
+            if !keyword_groups.contains(&group) {
+                keyword_groups.push(group);
+            }
+        }
+    }
 
     let strict = if keyword_groups.len() >= 2 {
-        Some(keyword_groups.join(" OR "))
+        // Mixed-script queries must retain their CJK context. Dropping it here
+        // made a title matching one ASCII acronym outrank a section matching the
+        // user's complete Japanese phrase, and prevented the relaxed tier from
+        // running because the acronym produced at least one hit.
+        let mut units = trigram_phrases.clone();
+        units.extend(keyword_groups.iter().cloned());
+        Some(units.join(" OR "))
     } else if keyword_groups.len() == 1 && !trigram_phrases.is_empty() {
         Some(format!(
             "{} AND ({})",
@@ -2874,6 +3348,25 @@ fn scope_selection_from_cursor(mode: ScopeMode) -> ScopeSelectionMode {
     }
 }
 
+fn selector_from_cursor(selector: &TimeTravelSelector) -> Result<TimeSelector> {
+    TimeSelectorFlags {
+        at: selector.at.clone(),
+        all_history: selector.all_history,
+        include_deleted: selector.include_deleted,
+        since: selector.since.clone(),
+    }
+    .canonicalize()
+}
+
+fn selector_for_search(selector: &TimeSelector) -> TimeTravelSelector {
+    TimeTravelSelector {
+        at: selector.at().map(str::to_owned),
+        all_history: selector.all_history(),
+        include_deleted: selector.include_deleted(),
+        since: selector.since().map(|duration| duration.canonical()),
+    }
+}
+
 fn cursor_mode_from_selection(mode: ScopeSelectionMode) -> ScopeMode {
     match mode {
         ScopeSelectionMode::All => ScopeMode::All,
@@ -2890,7 +3383,17 @@ fn cursor_mode_from_selection(mode: ScopeSelectionMode) -> ScopeMode {
 /// never a misleading cursor-mismatch error.
 fn resolve_cursor_exec_scopes(cursor: &CursorToken) -> Result<(Vec<ExecScope>, Vec<Value>)> {
     let mut exec = Vec::new();
-    let mut excluded = Vec::new();
+    let excluded = cursor
+        .excluded_scopes
+        .iter()
+        .map(|scope| {
+            json!({
+                "scope_id": scope.scope_id,
+                "scope_path": Value::Null,
+                "reason": scope.reason,
+            })
+        })
+        .collect::<Vec<_>>();
     for sub in &cursor.scopes {
         // O7: resolve through the shared registry resolver so a scope_id that a
         // `.kcs` copy made ambiguous is reported KCS-E-EVIDENCE-SCOPE-AMBIGUOUS-001
@@ -2900,13 +3403,21 @@ fn resolve_cursor_exec_scopes(cursor: &CursorToken) -> Result<(Vec<ExecScope>, V
                 target,
                 snapshot_commit: Some(sub.snapshot_commit.clone()),
                 max_rowid: Some(sub.max_rowid),
+                max_association_rowid: Some(sub.max_association_rowid),
+                chunking_config_hash: Some(sub.chunking_config_hash.clone()),
                 from_cursor: true,
             }),
-            None => excluded.push(json!({
-                "scope_id": sub.scope_id,
-                "scope_path": Value::Null,
-                "reason": "unreachable",
-            })),
+            None => {
+                return Err(KcsError::new(
+                    "KCS-E-SEARCH-CURSOR-001",
+                    "search cursor active scope is no longer reachable; re-run without a cursor",
+                    json!({
+                        "reason": "active_scope_unavailable",
+                        "scope_id": sub.scope_id,
+                    }),
+                    ExitCode::InvalidUsage,
+                ));
+            }
         }
     }
     Ok((exec, excluded))
@@ -2956,7 +3467,21 @@ fn run_view(args: UnsupportedArgs) -> Result<Value> {
 }
 
 fn run_reindex(args: UnsupportedArgs) -> Result<Value> {
-    let parsed = parse_reindex_args(without_json(args.args))?;
+    let parsed = historical_reindex::parse_args(without_json(args.args))?;
+    if parsed.at.is_some() && parsed.force {
+        return Err(KcsError::invalid_usage(
+            "reindex --force and --at are mutually exclusive",
+        ));
+    }
+    let repo = Repository::open_current()?;
+    // M1(a): serialize both HEAD reindex and historical enrichment against
+    // concurrent index/repair/reindex. Historical enrichment is derived-state
+    // only, but still appends to the chunk ledger and SQLite projection.
+    let _lock = repo.lock_store()?;
+    validate_repo_tool_lock(&repo)?;
+    if let Some(at) = parsed.at.as_deref() {
+        return historical_reindex::run(&repo, at);
+    }
     if !parsed.force {
         return Err(KcsError::invalid_usage(
             "reindex requires --force in Step 3",
@@ -2970,11 +3495,6 @@ fn run_reindex(args: UnsupportedArgs) -> Result<Value> {
             ExitCode::ConfirmationRejected,
         ));
     }
-    let repo = Repository::open_current()?;
-    // M1(a): serialize reindex (re-normalize + rebuild) against concurrent
-    // index/repair/reindex. Reentrant with the internal auto-snapshot.
-    let _lock = repo.lock_store()?;
-    validate_repo_tool_lock(&repo)?;
     let head = repo
         .head_commit_hash()?
         .ok_or_else(|| KcsError::not_found("HEAD"))?;
@@ -2985,6 +3505,12 @@ fn run_reindex(args: UnsupportedArgs) -> Result<Value> {
     // missing-commit and missing-tree cases (the same conversion the shared
     // `rebuild_step3_index` below applies, so reindex's two tree reads stay symmetric).
     let tree = read_head_tree_for_rebuild(&repo, &head)?;
+    // Validate the complete selected identity set before copying any normalized
+    // generation. A post-barrier reindex must not partially republish derived
+    // state for entries encountered before the purged target.
+    for entry in &tree.entries {
+        ensure_raw_ingest_allowed(&repo, &entry.raw_hash)?;
+    }
     let mut normalize_by_path = BTreeMap::new();
     let mut reindexed = 0u64;
     // R17-2: a single document's missing/corrupt normalized unit must not abort the
@@ -3070,7 +3596,7 @@ fn run_reindex(args: UnsupportedArgs) -> Result<Value> {
     // skipped document whose kept previous gen is ALSO unloadable is already reported by
     // the rebuild above; this appends only reindex-only skips (e.g. a corrupt non-`Done`
     // unit whose healthy `Done` units still let the rebuild serve the document).
-    merge_reindex_skips(&mut report, reindex_skipped);
+    historical_reindex::merge_reindex_skips(&mut report, reindex_skipped);
     // L1: reindex = re-normalize + re-embedding (docs/06). The rebuild appends
     // fresh chunk rows; enrich them symmetrically with the `kcs index` path so
     // the embedding index tracks the new generation. Online only under the
@@ -3098,51 +3624,6 @@ fn run_reindex(args: UnsupportedArgs) -> Result<Value> {
     Ok(output)
 }
 
-#[derive(Debug, Default)]
-struct ParsedReindex {
-    force: bool,
-    yes: bool,
-}
-
-fn parse_reindex_args(args: Vec<String>) -> Result<ParsedReindex> {
-    let mut parsed = ParsedReindex::default();
-    let mut i = 0;
-    while i < args.len() {
-        // R12-7: accept `--flag=value` before matching.
-        let (flag, inline) = split_flag_value(&args[i]);
-        match flag {
-            "--force" => {
-                // R16-6: `--force=false` must not be silently coerced to `true`.
-                reject_inline_value(flag, inline)?;
-                parsed.force = true;
-            }
-            "--yes" => {
-                reject_inline_value(flag, inline)?;
-                parsed.yes = true;
-            }
-            "--at" => {
-                // A bare `--at` is a usage error (requires a value); with a value it
-                // is R9-6 not_implemented (exit 1, single error class).
-                flag_value(&args, &mut i, inline, "--at")?;
-                return Err(KcsError::not_implemented("reindex --at"));
-            }
-            value if value.starts_with('-') => {
-                return Err(KcsError::invalid_usage(format!(
-                    "unknown reindex flag: {value}"
-                )));
-            }
-            _ => {
-                return Err(KcsError::invalid_usage(format!(
-                    "unexpected reindex argument: {}",
-                    args[i]
-                )));
-            }
-        }
-        i += 1;
-    }
-    Ok(parsed)
-}
-
 /// R20-10: chunk_ids whose embedding task is currently on a secrets hold (Paused
 /// `secrets_tier_b_hold`). `rebuild_chunk_vec` excludes them so a content-hash twin's
 /// online embedding cannot expose a held file in vector search before `--send-secrets`.
@@ -3165,37 +3646,8 @@ fn held_secret_embedding_chunk_ids(kcs_dir: &Path) -> Result<BTreeSet<String>> {
         .collect())
 }
 
-/// Current live secret classification is authoritative even before its durable hold
-/// task has been materialized. A content-identical public twin may already have an
-/// embedding, so rebuilding `chunk_vec` must exclude any chunk identity with at least
-/// one unapproved live secret path directly from the freshly projected tree.
-fn current_live_secret_chunk_ids(conn: &Connection) -> Result<BTreeSet<String>> {
-    let mut statement = conn
-        .prepare(
-            "SELECT DISTINCT c.chunk_id, te.path
-             FROM chunks c
-             JOIN tree_entries te
-               ON te.raw_hash = c.raw_hash
-              AND te.tool_profile_hash = c.tool_profile_hash
-              AND te.gen = c.gen",
-        )
-        .map_err(|err| KcsError::schema(err.to_string()))?;
-    let rows = statement
-        .query_map([], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-        })
-        .map_err(|err| KcsError::schema(err.to_string()))?;
-    let mut blocked = BTreeSet::new();
-    for row in rows {
-        let (chunk_id, path) = row.map_err(|err| KcsError::schema(err.to_string()))?;
-        if classify_secret(&path).is_some() {
-            blocked.insert(chunk_id);
-        }
-    }
-    Ok(blocked)
-}
-
 fn rebuild_step3_index(repo: &Repository) -> Result<Step3RebuildReport> {
+    ensure_no_visible_purge_journal(repo.kcs_dir())?;
     let Some(head) = repo.head_commit_hash()? else {
         return Ok(Step3RebuildReport::default());
     };
@@ -3207,6 +3659,17 @@ fn rebuild_step3_index(repo: &Repository) -> Result<Step3RebuildReport> {
     // rebuilder that repair uses). Placing the conversion in this shared function
     // covers all three commands at once.
     let tree = read_head_tree_for_rebuild(repo, &head)?;
+    let retained_instances = retained_history_instances(repo.kcs_dir(), &head)?;
+    let retained_instance_keys = retained_instances
+        .iter()
+        .map(|instance| {
+            (
+                instance.raw_hash.clone(),
+                instance.normalize.tool_profile_hash.clone(),
+                instance.normalize.gen,
+            )
+        })
+        .collect::<BTreeSet<_>>();
     let config = read_chunking_config(repo)?;
     let existing = read_stored_chunks(repo.kcs_dir())?;
     // Q1: physically remove any torn trailing record from `chunks.jsonl` before the
@@ -3215,11 +3678,26 @@ fn rebuild_step3_index(repo: &Repository) -> Result<Step3RebuildReport> {
     // permanently-skipped malformed line and re-brick every later rebuild).
     // read/skip alone is not self-healing; this truncation is what makes it so.
     truncate_torn_chunk_tail(repo.kcs_dir())?;
-    let mut known = existing
+    let mut known_associations = existing
         .iter()
-        .map(|chunk| chunk.row.chunk_id.clone())
+        .map(|chunk| {
+            (
+                chunk.row.chunk_id.clone(),
+                chunk.row.chunking_config_hash.clone(),
+            )
+        })
         .collect::<BTreeSet<_>>();
+    let mut chunk_rowids = existing
+        .iter()
+        .map(|chunk| (chunk.row.chunk_id.clone(), chunk.rowid))
+        .collect::<BTreeMap<_, _>>();
     let mut next_rowid = existing.iter().map(|chunk| chunk.rowid).max().unwrap_or(0) + 1;
+    let mut next_association_rowid = existing
+        .iter()
+        .filter_map(|chunk| chunk.association_rowid)
+        .max()
+        .unwrap_or(0)
+        + 1;
     let mut appended = Vec::<StoredChunk>::new();
     let mut tree_entries = Vec::<TreeEntryRow>::new();
     // R16-4: documents whose normalized units are missing/corrupt are skipped and
@@ -3227,6 +3705,49 @@ fn rebuild_step3_index(repo: &Repository) -> Result<Step3RebuildReport> {
     // objects/ と refs/ が保全されていれば復旧できる" — one bad unit must not veto
     // the recovery of every healthy document). Never silent: the caller surfaces this.
     let mut skipped_units = Vec::<Value>::new();
+
+    // A config change must regenerate chunks for normalized identities retained
+    // anywhere in the reachable history, not only identities live at HEAD. Do
+    // exact historical refs first so shared HEAD chunks retain their true
+    // ancestor-most first-seen commit instead of being stamped as newly created.
+    for retained in &retained_instances {
+        let units = match load_normalized_units(
+            repo.kcs_dir(),
+            &retained.raw_hash,
+            &retained.normalize.tool_profile_hash,
+            retained.normalize.gen,
+        ) {
+            Ok(units) => units,
+            Err(error) if is_rebuild_skippable_unit_error(&error) => {
+                skipped_units.push(json!({
+                    "raw_hash": retained.raw_hash,
+                    "path": retained.raw_path,
+                    "gen": retained.normalize.gen,
+                    "reason": error.error_code(),
+                }));
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
+        let input = ChunkingInput {
+            raw_path: retained.raw_path.clone(),
+            units,
+            config: config.clone(),
+            created_at: now_utc_seconds(),
+        };
+        for mut row in chunk_normalized_instance(input).map_err(index_to_kcs)? {
+            row.first_seen_commit = Some(retained.first_seen_commit.clone());
+            append_new_chunk_association(
+                repo.kcs_dir(),
+                row,
+                &mut known_associations,
+                &mut chunk_rowids,
+                &mut next_rowid,
+                &mut next_association_rowid,
+                &mut appended,
+            )?;
+        }
+    }
 
     for entry in &tree.entries {
         let normalize = match &entry.normalize {
@@ -3243,6 +3764,13 @@ fn rebuild_step3_index(repo: &Repository) -> Result<Step3RebuildReport> {
             tool_profile_hash: Some(normalize.tool_profile_hash.clone()),
             gen: normalize.gen,
         });
+        if retained_instance_keys.contains(&(
+            entry.raw_hash.clone(),
+            normalize.tool_profile_hash.clone(),
+            normalize.gen,
+        )) {
+            continue;
+        }
         let units = match load_normalized_units(
             repo.kcs_dir(),
             &entry.raw_hash,
@@ -3277,13 +3805,15 @@ fn rebuild_step3_index(repo: &Repository) -> Result<Step3RebuildReport> {
         };
         for mut row in chunk_normalized_instance(input).map_err(index_to_kcs)? {
             row.first_seen_commit = Some(head.clone());
-            if known.insert(row.chunk_id.clone()) {
-                appended.push(StoredChunk {
-                    rowid: next_rowid,
-                    row,
-                });
-                next_rowid += 1;
-            }
+            append_new_chunk_association(
+                repo.kcs_dir(),
+                row,
+                &mut known_associations,
+                &mut chunk_rowids,
+                &mut next_rowid,
+                &mut next_association_rowid,
+                &mut appended,
+            )?;
         }
     }
 
@@ -3292,12 +3822,57 @@ fn rebuild_step3_index(repo: &Repository) -> Result<Step3RebuildReport> {
     // live-chunk resolution (search and short-hash resolution both read it via
     // `ensure_snapshot_tree_entries`). The former JSON projection went stale after
     // a bare snapshot and is no longer written (L3).
-    rebuild_sqlite_index(repo.kcs_dir(), &tree_entries)?;
+    rebuild_sqlite_index(
+        repo.kcs_dir(),
+        &tree_entries,
+        &retained_instances,
+        &config.chunking_config_hash,
+    )?;
     Ok(Step3RebuildReport {
         rebuilt_chunks: appended.len() as u64,
         rebuilt_tree_entries: tree_entries.len() as u64,
         skipped_units,
     })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn append_new_chunk_association(
+    kcs_dir: &Path,
+    row: ChunkRow,
+    known_associations: &mut BTreeSet<(String, String)>,
+    chunk_rowids: &mut BTreeMap<String, u64>,
+    next_rowid: &mut u64,
+    next_association_rowid: &mut u64,
+    appended: &mut Vec<StoredChunk>,
+) -> Result<()> {
+    if purge_blocks_rebuild_raw(kcs_dir, &row.raw_hash)? {
+        return Ok(());
+    }
+    let association = (row.chunk_id.clone(), row.chunking_config_hash.clone());
+    if !known_associations.insert(association) {
+        return Ok(());
+    }
+    let rowid = match chunk_rowids.get(&row.chunk_id).copied() {
+        Some(rowid) => rowid,
+        None => {
+            let rowid = *next_rowid;
+            *next_rowid = next_rowid
+                .checked_add(1)
+                .ok_or_else(|| KcsError::schema("chunk rowid overflow"))?;
+            chunk_rowids.insert(row.chunk_id.clone(), rowid);
+            rowid
+        }
+    };
+    persist_chunk_object(kcs_dir, &row)?;
+    appended.push(StoredChunk {
+        rowid,
+        association_rowid: Some(*next_association_rowid),
+        row,
+    });
+    *next_association_rowid = next_association_rowid
+        .checked_add(1)
+        .ok_or_else(|| KcsError::schema("chunk/config association rowid overflow"))?;
+    Ok(())
 }
 
 /// R16-1/R16-4: read the HEAD commit's tree object for a *write* / rebuild path
@@ -3414,28 +3989,6 @@ fn attach_skipped_units(output: &mut Value, report: &Step3RebuildReport, kcs_dir
 
 /// R17-2: merge the reindex copy-loop's per-document skips into the rebuild report,
 /// deduplicated by raw_hash so a document reported by BOTH phases surfaces once.
-fn merge_reindex_skips(report: &mut Step3RebuildReport, reindex_skipped: Vec<Value>) {
-    let seen: BTreeSet<String> = report
-        .skipped_units
-        .iter()
-        .filter_map(|entry| {
-            entry
-                .get("raw_hash")
-                .and_then(Value::as_str)
-                .map(str::to_owned)
-        })
-        .collect();
-    for skip in reindex_skipped {
-        let already = skip
-            .get("raw_hash")
-            .and_then(Value::as_str)
-            .is_some_and(|raw_hash| seen.contains(raw_hash));
-        if !already {
-            report.skipped_units.push(skip);
-        }
-    }
-}
-
 fn latest_normalize_ref(kcs_dir: &Path, raw_hash: &str) -> Result<Option<NormalizeRef>> {
     let digest = hash_path_component(raw_hash)?;
     let dir = kcs_dir
@@ -3598,7 +4151,7 @@ fn read_stored_chunks(kcs_dir: &Path) -> Result<Vec<StoredChunk>> {
     let mut chunks = Vec::with_capacity(lines.len());
     for (index, line) in lines.iter().enumerate() {
         match serde_json::from_str::<StoredChunk>(line) {
-            Ok(chunk) => chunks.push(chunk),
+            Ok(chunk) => chunks.push((index + 1, chunk)),
             Err(_) if index == last_index => break,
             Err(err) => {
                 return Err(KcsError::new(
@@ -3614,7 +4167,134 @@ fn read_stored_chunks(kcs_dir: &Path) -> Result<Vec<StoredChunk>> {
             }
         }
     }
-    Ok(chunks)
+
+    // Legacy Step 3 records have no association rowid. Their one-config-per-
+    // chunk layout was replayed in chunk-row order, so stored chunk rowid is the
+    // deterministic migration order used by `migrate_legacy_chunk_config_column`.
+    // Assign the missing prefix here and persist explicit ids on every new append;
+    // this keeps a later SQLite rebuild from renumbering signed cursor bounds.
+    let mut used_association_rowids = chunks
+        .iter()
+        .filter_map(|(_, chunk)| chunk.association_rowid)
+        .collect::<BTreeSet<_>>();
+    for (line, chunk) in &chunks {
+        if chunk.rowid == 0 || chunk.association_rowid == Some(0) {
+            return Err(corrupt_chunk_ledger_error(
+                &path,
+                *line,
+                "chunk and association rowids must be positive",
+            ));
+        }
+    }
+    let mut legacy_indices = chunks
+        .iter()
+        .enumerate()
+        .filter_map(|(index, (_, chunk))| chunk.association_rowid.is_none().then_some(index))
+        .collect::<Vec<_>>();
+    legacy_indices.sort_by_key(|index| (chunks[*index].1.rowid, chunks[*index].0));
+    let mut next_legacy_association_rowid = 1_u64;
+    for index in legacy_indices {
+        while used_association_rowids.contains(&next_legacy_association_rowid) {
+            next_legacy_association_rowid += 1;
+        }
+        chunks[index].1.association_rowid = Some(next_legacy_association_rowid);
+        used_association_rowids.insert(next_legacy_association_rowid);
+        next_legacy_association_rowid += 1;
+    }
+
+    let mut association_owners = BTreeMap::<u64, (String, String)>::new();
+    let mut known_associations = BTreeSet::<(String, String)>::new();
+    let mut chunk_rowid_owners = BTreeMap::<u64, String>::new();
+    let mut rowid_for_chunk = BTreeMap::<String, u64>::new();
+    for (line, chunk) in &chunks {
+        let association = (
+            chunk.row.chunk_id.clone(),
+            chunk.row.chunking_config_hash.clone(),
+        );
+        if !known_associations.insert(association.clone()) {
+            return Err(corrupt_chunk_ledger_error(
+                &path,
+                *line,
+                "duplicate chunk/config association",
+            ));
+        }
+        let association_rowid = chunk.association_rowid.expect("assigned above");
+        if association_owners
+            .insert(association_rowid, association.clone())
+            .is_some()
+        {
+            return Err(corrupt_chunk_ledger_error(
+                &path,
+                *line,
+                "association rowid is assigned more than once",
+            ));
+        }
+        if chunk_rowid_owners
+            .insert(chunk.rowid, chunk.row.chunk_id.clone())
+            .is_some_and(|owner| owner != chunk.row.chunk_id)
+        {
+            return Err(corrupt_chunk_ledger_error(
+                &path,
+                *line,
+                "chunk rowid is assigned to multiple chunk ids",
+            ));
+        }
+        if rowid_for_chunk
+            .insert(chunk.row.chunk_id.clone(), chunk.rowid)
+            .is_some_and(|rowid| rowid != chunk.rowid)
+        {
+            return Err(corrupt_chunk_ledger_error(
+                &path,
+                *line,
+                "one chunk id is assigned multiple chunk rowids",
+            ));
+        }
+    }
+    Ok(chunks.into_iter().map(|(_, chunk)| chunk).collect())
+}
+
+fn corrupt_chunk_ledger_error(path: &Path, line: usize, message: &str) -> KcsError {
+    KcsError::new(
+        "KCS-E-STORE-CORRUPT-001",
+        "corrupt chunks.jsonl record",
+        json!({
+            "path": path.display().to_string(),
+            "line": line,
+            "message": message,
+        }),
+        ExitCode::PermanentFailure,
+    )
+}
+
+/// Publish the exact semantic chunk CAS object before the JSONL/SQLite
+/// acceleration record can make the chunk discoverable.
+fn persist_chunk_object(kcs_dir: &Path, row: &ChunkRow) -> Result<()> {
+    let object = ChunkObject {
+        spec_version: 1,
+        raw_hash: row.raw_hash.clone(),
+        tool_profile_hash: row.tool_profile_hash.clone(),
+        gen: row.gen,
+        unit_key: row.unit_key.clone(),
+        heading_path: row.heading_path.clone().unwrap_or_default(),
+        section_id: row.section_id.clone().filter(|value| !value.is_empty()),
+        char_start: row.char_start,
+        char_end: row.char_end,
+        text_hash: row.text_hash.clone(),
+        text: row.text.clone(),
+    };
+    let stored_hash = ObjectStore::new(kcs_dir).write_chunk(&object)?;
+    if stored_hash != row.chunk_id {
+        return Err(KcsError::new(
+            "KCS-E-STORE-CORRUPT-001",
+            "chunk ledger identity does not match the canonical chunk object",
+            json!({
+                "ledger_chunk_hash": row.chunk_id,
+                "canonical_chunk_hash": stored_hash,
+            }),
+            ExitCode::PermanentFailure,
+        ));
+    }
+    Ok(())
 }
 
 /// Q1: physically drop a torn trailing record from `chunks.jsonl` before the next
@@ -3686,7 +4366,13 @@ fn append_stored_chunks(kcs_dir: &Path, chunks: &[StoredChunk]) -> Result<()> {
     Ok(())
 }
 
-fn rebuild_sqlite_index(kcs_dir: &Path, tree_entries: &[TreeEntryRow]) -> Result<()> {
+fn rebuild_sqlite_index(
+    kcs_dir: &Path,
+    tree_entries: &[TreeEntryRow],
+    retained_instances: &[RetainedNormalizedInstance],
+    chunking_config_hash: &str,
+) -> Result<()> {
+    ensure_no_visible_purge_journal(kcs_dir)?;
     let path = sqlite_path(kcs_dir);
     // O5: a 0-chunk scope (empty folder / secrets-only / text-less PDF) skips
     // `append_stored_chunks` and so never creates `.kcs/index/`, but the auto-
@@ -3701,13 +4387,14 @@ fn rebuild_sqlite_index(kcs_dir: &Path, tree_entries: &[TreeEntryRow]) -> Result
     // MVP), so snapshot them from the CURRENT db (without removing it) and replay
     // them into the fresh db, then rebuild chunk_vec from them (04 §4.3). This
     // keeps `kcs repair --rebuild-db` / reindex from wiping vector search.
-    let preserved = if path.exists() {
+    let (preserved, preserved_tree_entries) = if path.exists() {
         let existing = Connection::open(&path).map_err(|err| KcsError::schema(err.to_string()))?;
         let rows = embedding_store::snapshot_chunk_embeddings(&existing).map_err(index_to_kcs)?;
+        let tree_rows = snapshot_tree_entries(&existing)?;
         drop(existing);
-        rows
+        (rows, tree_rows)
     } else {
-        Vec::new()
+        (Vec::new(), Vec::new())
     };
     // P5 (docs/05:564): build the new index in a unique temp db and atomically
     // rename it over sqlite.db. `kcs search` takes no store lock and opens
@@ -3723,7 +4410,15 @@ fn rebuild_sqlite_index(kcs_dir: &Path, tree_entries: &[TreeEntryRow]) -> Result
         fs::remove_file(&temp_path)
             .map_err(|err| KcsError::io(err.to_string(), temp_path.display().to_string()))?;
     }
-    match build_sqlite_index_at(&temp_path, kcs_dir, tree_entries, &preserved) {
+    match build_sqlite_index_at(
+        &temp_path,
+        kcs_dir,
+        &preserved_tree_entries,
+        tree_entries,
+        &preserved,
+        retained_instances,
+        chunking_config_hash,
+    ) {
         Ok(()) => fs::rename(&temp_path, &path)
             .map_err(|err| KcsError::io(err.to_string(), path.display().to_string())),
         Err(error) => {
@@ -3731,6 +4426,32 @@ fn rebuild_sqlite_index(kcs_dir: &Path, tree_entries: &[TreeEntryRow]) -> Result
             Err(error)
         }
     }
+}
+
+/// Preserve immutable historical tree projections across an atomic rebuild.
+/// The current HEAD rows supplied by the caller are replayed afterward and win
+/// on the `(commit_hash,path)` key. Retaining older cache rows is contract-safe;
+/// history search still verifies commit/tree CAS before consulting a projection.
+fn snapshot_tree_entries(conn: &Connection) -> Result<Vec<TreeEntryRow>> {
+    let mut statement = conn
+        .prepare(
+            "SELECT commit_hash, path, raw_hash, tool_profile_hash, gen
+             FROM tree_entries ORDER BY commit_hash, path",
+        )
+        .map_err(|err| KcsError::schema(err.to_string()))?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok(TreeEntryRow {
+                commit_hash: row.get(0)?,
+                path: row.get(1)?,
+                raw_hash: row.get(2)?,
+                tool_profile_hash: row.get(3)?,
+                gen: row.get(4)?,
+            })
+        })
+        .map_err(|err| KcsError::schema(err.to_string()))?;
+    rows.collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(|err| KcsError::schema(err.to_string()))
 }
 
 /// A unique sibling temp path for the atomic sqlite rebuild
@@ -3755,9 +4476,13 @@ fn unique_sqlite_temp_path(path: &Path) -> PathBuf {
 fn build_sqlite_index_at(
     temp_path: &Path,
     kcs_dir: &Path,
+    preserved_tree_entries: &[TreeEntryRow],
     tree_entries: &[TreeEntryRow],
     preserved: &[embedding_store::ChunkEmbeddingSnapshotRow],
+    retained_instances: &[RetainedNormalizedInstance],
+    chunking_config_hash: &str,
 ) -> Result<()> {
+    ensure_no_visible_purge_journal(kcs_dir)?;
     let mut fts = SqliteFtsIndex::open(
         temp_path,
         FtsSchemaConfig {
@@ -3779,10 +4504,20 @@ fn build_sqlite_index_at(
     fts.connection()
         .execute_batch("BEGIN")
         .map_err(|err| KcsError::schema(err.to_string()))?;
+    let mut live_chunk_ids = BTreeSet::new();
     for chunk in read_stored_chunks(kcs_dir)? {
-        fts.index_chunk(&chunk.row).map_err(index_to_kcs)?;
+        if purge_blocks_rebuild_raw(kcs_dir, &chunk.row.raw_hash)? {
+            continue;
+        }
+        live_chunk_ids.insert(chunk.row.chunk_id.clone());
+        persist_chunk_object(kcs_dir, &chunk.row)?;
+        fts.index_chunk_with_rowids(&chunk.row, Some(chunk.rowid), chunk.association_rowid)
+            .map_err(index_to_kcs)?;
     }
-    for entry in tree_entries {
+    for entry in preserved_tree_entries.iter().chain(tree_entries) {
+        if purge_blocks_rebuild_raw(kcs_dir, &entry.raw_hash)? {
+            continue;
+        }
         fts.connection()
             .execute(
                 "INSERT OR REPLACE INTO tree_entries(commit_hash, path, raw_hash, tool_profile_hash, gen)
@@ -3799,6 +4534,9 @@ fn build_sqlite_index_at(
     }
     // Replay preserved embeddings (source of truth) and re-derive chunk_vec.
     for row in preserved {
+        if !live_chunk_ids.contains(&row.chunk_id) {
+            continue;
+        }
         embedding_store::write_chunk_embedding(
             fts.connection(),
             &row.embedding_hash,
@@ -3816,7 +4554,17 @@ fn build_sqlite_index_at(
     // (Tier B) chunk to a non-secret content-twin's vector and expose it in vector search.
     let mut held_chunk_ids = held_secret_embedding_chunk_ids(kcs_dir)?;
     if !secrets_send_approved_in_kcs_dir(kcs_dir) {
-        held_chunk_ids.extend(current_live_secret_chunk_ids(fts.connection())?);
+        held_chunk_ids.extend(
+            retained_history_chunks(
+                fts.connection(),
+                kcs_dir,
+                retained_instances,
+                chunking_config_hash,
+            )?
+            .into_iter()
+            .filter(|chunk| chunk.requires_secret_approval)
+            .map(|chunk| chunk.chunk_id),
+        );
     }
     embedding_store::rebuild_chunk_vec(fts.connection(), &held_chunk_ids).map_err(index_to_kcs)?;
     fts.connection()
@@ -3880,16 +4628,43 @@ fn parse_search_args(args: Vec<String>) -> Result<ParsedSearch> {
     let mut limit = 20u64;
     let mut offset = None;
     let mut cursor = None;
+    let mut time_selector_flags = TimeSelectorFlags::default();
     let mut i = 0usize;
     while i < args.len() {
         // R12-7: accept `--flag=value` before matching (the manual parser used to
         // reject it as "unknown flag" even though the flag exists).
         let (flag, inline) = split_flag_value(&args[i]);
         match flag {
-            "--at" | "--all-history" | "--include-deleted" | "--since" => {
-                // R9-6: exit 1 via the canonical not_implemented (was exit 2) so
-                // KCS-E-CONFIG-NOT-IMPLEMENTED-001 maps to a single exit class.
-                return Err(KcsError::not_implemented(format!("search {flag} flag")));
+            "--at" => {
+                if time_selector_flags.at.is_some() {
+                    return Err(KcsError::invalid_usage("--at may be specified once"));
+                }
+                time_selector_flags.at = Some(flag_value(args.as_slice(), &mut i, inline, "--at")?);
+            }
+            "--all-history" => {
+                reject_inline_value(flag, inline)?;
+                if time_selector_flags.all_history {
+                    return Err(KcsError::invalid_usage(
+                        "--all-history may be specified once",
+                    ));
+                }
+                time_selector_flags.all_history = true;
+            }
+            "--include-deleted" => {
+                reject_inline_value(flag, inline)?;
+                if time_selector_flags.include_deleted {
+                    return Err(KcsError::invalid_usage(
+                        "--include-deleted may be specified once",
+                    ));
+                }
+                time_selector_flags.include_deleted = true;
+            }
+            "--since" => {
+                if time_selector_flags.since.is_some() {
+                    return Err(KcsError::invalid_usage("--since may be specified once"));
+                }
+                time_selector_flags.since =
+                    Some(flag_value(args.as_slice(), &mut i, inline, "--since")?);
             }
             "--text" | "--no-vector" => {
                 // R16-6: these are value-less mode selectors — `--text=false` must be
@@ -3958,6 +4733,8 @@ fn parse_search_args(args: Vec<String>) -> Result<ParsedSearch> {
         }
         i += 1;
     }
+    // Validate selector exclusivity/duration before repository or DB access.
+    time_selector_flags.canonicalize()?;
     Ok(ParsedSearch {
         query: query.ok_or_else(|| KcsError::invalid_usage("search query is required"))?,
         requested_mode,
@@ -3968,6 +4745,7 @@ fn parse_search_args(args: Vec<String>) -> Result<ParsedSearch> {
         limit,
         offset,
         cursor,
+        time_selector_flags,
     })
 }
 
@@ -4316,7 +5094,7 @@ fn participates_in_global_search(kcs_dir: &Path) -> bool {
 }
 
 fn scope_target(root: &Path) -> Result<ScopeTarget> {
-    let repo = Repository::open(root)?;
+    let repo = Repository::open_for_search(root)?;
     Ok(ScopeTarget {
         repo_root: repo.root().to_path_buf(),
         kcs_dir: repo.kcs_dir().to_path_buf(),
@@ -4613,6 +5391,31 @@ fn read_max_input_bytes_config(path: &Path) -> Option<u64> {
         .and_then(|bytes| u64::try_from(bytes).ok())
 }
 
+/// Effective Step 4 bbox-annotation policy. Scope config overrides user config;
+/// absence at both levels is the frozen secure/searchable default `true`.
+fn bbox_annotation_enabled(repo: &Repository) -> bool {
+    effective_bbox_annotation_policy(
+        &repo.kcs_dir().join("config.toml"),
+        &user_config_toml_path(),
+    )
+}
+
+fn effective_bbox_annotation_policy(scope_config: &Path, user_config: &Path) -> bool {
+    read_bbox_annotation_config(scope_config)
+        .or_else(|| read_bbox_annotation_config(user_config))
+        .unwrap_or(true)
+}
+
+fn read_bbox_annotation_config(path: &Path) -> Option<bool> {
+    let text = fs::read_to_string(path).ok()?;
+    let value: toml::Value = toml::from_str(&text).ok()?;
+    value
+        .get("markdownize")
+        .and_then(|markdownize| markdownize.get("bbox_annotation"))
+        .and_then(|bbox| bbox.get("enabled"))
+        .and_then(toml::Value::as_bool)
+}
+
 /// R12-1: effective `[markdownize.incremental]` (docs/10:537, docs/03:595). `enabled`
 /// / `threshold` / `max_consecutive` were documented `.kcs/config.toml` overrides but
 /// hardcoded (0.30 / 5) in the mode decision. `include_neighbors` is enforced
@@ -4720,6 +5523,7 @@ struct PointerResolution {
 /// Reads the raw `<pointer>` operand (08 §2.3), resolving `-` from stdin.
 /// Branching into evidence-pointer vs `object` URI happens in the caller.
 fn read_pointer_input(args: Vec<String>) -> Result<String> {
+    const MAX_POINTER_INPUT_BYTES: u64 = 64 * 1024;
     let mut args = args.into_iter();
     let Some(pointer) = args.next() else {
         return Err(KcsError::invalid_usage("pointer argument is required"));
@@ -4730,9 +5534,18 @@ fn read_pointer_input(args: Vec<String>) -> Result<String> {
         )));
     }
     if pointer == "-" {
-        let mut input = String::new();
-        std::io::Read::read_to_string(&mut std::io::stdin(), &mut input)
+        let mut bytes = Vec::new();
+        std::io::stdin()
+            .take(MAX_POINTER_INPUT_BYTES + 1)
+            .read_to_end(&mut bytes)
             .map_err(|err| KcsError::io(err.to_string(), "stdin"))?;
+        if bytes.len() as u64 > MAX_POINTER_INPUT_BYTES {
+            return Err(KcsError::invalid_usage(
+                "pointer stdin exceeds the 64 KiB limit",
+            ));
+        }
+        let input = String::from_utf8(bytes)
+            .map_err(|_| KcsError::invalid_usage("pointer stdin must be UTF-8"))?;
         return Ok(input.trim().to_owned());
     }
     Ok(pointer)
@@ -4806,7 +5619,9 @@ fn classify_short_hash(hash: &str) -> Result<ShortHash> {
         .map(|chunk| chunk.path_at_commit.clone());
     // A raw_hash may name a file with no chunks (raw-only entry); fall back to the
     // working tree / CAS raw object for existence.
-    let is_raw = raw_path_hint.is_some() || raw_object_present(&target, hash)?;
+    let is_raw = raw_path_hint.is_some()
+        || read_tombstone(&target, hash)?.is_some()
+        || raw_object_present(&target, hash)?;
     let is_chunk = chunk_match.is_some();
 
     match (is_chunk, is_raw) {
@@ -4818,6 +5633,7 @@ fn classify_short_hash(hash: &str) -> Result<ShortHash> {
         )),
         (true, false) => {
             let chunk = chunk_match.expect("chunk_match is Some");
+            enforce_purge_read_barrier(&target, &chunk.row.raw_hash)?;
             let pointer = issue_evidence_pointer(EvidencePointerIssueRequest {
                 scope_id: chunk.scope_id.clone(),
                 scope_path: Some(chunk.scope_path.display().to_string()),
@@ -4833,13 +5649,17 @@ fn classify_short_hash(hash: &str) -> Result<ShortHash> {
                 char_end: chunk.row.char_end,
             })
             .map_err(search_to_kcs)?;
+            enforce_purge_read_barrier(&target, &chunk.row.raw_hash)?;
             Ok(ShortHash::Chunk(Box::new(pointer)))
         }
-        (false, true) => Ok(ShortHash::Raw {
-            target,
-            raw_hash: hash.to_owned(),
-            path_hint: raw_path_hint,
-        }),
+        (false, true) => {
+            enforce_purge_read_barrier(&target, hash)?;
+            Ok(ShortHash::Raw {
+                target,
+                raw_hash: hash.to_owned(),
+                path_hint: raw_path_hint,
+            })
+        }
         (false, false) => Err(KcsError::invalid_usage(
             "short hash is not found in the current scope",
         )),
@@ -4889,6 +5709,12 @@ fn resolve_short_hash_command(hash: &str, as_view: bool) -> Result<Value> {
         } => match open_raw_object(&target, &raw_hash, path_hint.as_deref())? {
             // A raw object has no chunk text; open/view surface only its path.
             Some((path, temporary)) => {
+                if let Err(error) = enforce_purge_read_barrier(&target, &raw_hash) {
+                    if temporary {
+                        let _ = fs::remove_file(&path);
+                    }
+                    return Err(error);
+                }
                 let status = if as_view { "viewed" } else { "opened" };
                 Ok(json!({
                     "status": status,
@@ -4947,9 +5773,7 @@ fn resolve_pointer_for_cli(pointer: &EvidencePointer) -> Result<PointerResolutio
                 .find(|entry| entry.raw_hash == pointer.raw_hash);
             let Some(entry) = entry else {
                 // step 5 (tombstone) is checked before declaring not_found.
-                if let Some(tombstone) = read_tombstone(&target, &pointer.raw_hash)? {
-                    return Err(tombstone_error(tombstone));
-                }
+                enforce_purge_read_barrier(&target, &pointer.raw_hash)?;
                 return Err(purge_not_found_error(&target, &pointer.raw_hash));
             };
             // M6: the tree entry's normalization must bind to the pointer's
@@ -4979,39 +5803,45 @@ fn resolve_pointer_for_cli(pointer: &EvidencePointer) -> Result<PointerResolutio
     };
 
     // 08 §3.1 step 5: purged raw_hash carrying a tombstone -> tombstone response.
-    if let Some(tombstone) = read_tombstone(&target, &pointer.raw_hash)? {
-        return Err(tombstone_error(tombstone));
+    enforce_purge_read_barrier(&target, &pointer.raw_hash)?;
+
+    // Erase-mode purge intentionally leaves no public marker. Resolve raw
+    // liveness before chunk/profile availability so an old pointer whose raw and
+    // derivatives were deleted reports the required purge not-found state rather
+    // than the unrelated retarget-required profile error.
+    if !raw_object_present(&target, &pointer.raw_hash)? {
+        return Err(purge_not_found_error(&target, &pointer.raw_hash));
     }
 
-    // 08 §3.1 step 6-7: chunk_hash -> chunk text (the normalized instance is
-    // keyed by (raw_hash, tool_profile_hash, gen); chunk rows carry the span).
-    // A pointer whose chunk_hash has NO materialized chunk row in this scope
+    // 08 §3.1 step 6-7: chunk_hash -> durable semantic chunk CAS. SQLite and
+    // chunks.jsonl are acceleration/rebuild inputs and cannot independently make
+    // a pointer alive (Step 4 decision #69/#75).
+    // A pointer whose chunk_hash has NO materialized chunk object in this scope
     // cannot be served under this tool_profile_hash — that is 08 §3.2's
     // "tool_profile_hash 不一致: chunk が存在しない場合は retarget が必要 (§5)",
     // exit 8 (06 §7). Applies on the shallow path too: chunk rows outlive tree
     // discard, so their absence means the profile mismatch, not GC.
-    let chunk = read_stored_chunks(&target.kcs_dir)?
-        .into_iter()
-        .find(|chunk| chunk.row.chunk_id == pointer.chunk_hash);
-    let Some(chunk) = chunk else {
-        return Err(KcsError::new(
-            "KCS-E-EVIDENCE-RETARGET-REQUIRED-001",
-            "chunk not materialized for this tool_profile_hash; retarget required (08 §5)",
-            json!({
-                "chunk_hash": pointer.chunk_hash,
-                "tool_profile_hash": pointer.tool_profile_hash,
-                "raw_hash": pointer.raw_hash,
-            }),
-            ExitCode::IncompatibleProfile,
-        ));
+    let chunk = match ObjectStore::new(&target.kcs_dir).read_chunk(&pointer.chunk_hash) {
+        Ok(chunk) => chunk,
+        Err(error) if is_store_not_found(&error) => {
+            return Err(KcsError::new(
+                "KCS-E-EVIDENCE-RETARGET-REQUIRED-001",
+                "chunk not materialized for this tool_profile_hash; retarget required (08 §5)",
+                json!({
+                    "chunk_hash": pointer.chunk_hash,
+                    "tool_profile_hash": pointer.tool_profile_hash,
+                    "raw_hash": pointer.raw_hash,
+                }),
+                ExitCode::IncompatibleProfile,
+            ));
+        }
+        Err(error) => return Err(error),
     };
     // M6: the resolved chunk row must bind to the pointer's (raw_hash,
     // tool_profile_hash). A chunk_hash that materializes under a *different* raw
     // or tool identity than the pointer claims is a tampered pointer — reject it
     // rather than serve inconsistent evidence (body from A, raw from B).
-    if chunk.row.raw_hash != pointer.raw_hash
-        || chunk.row.tool_profile_hash != pointer.tool_profile_hash
-    {
+    if chunk.raw_hash != pointer.raw_hash || chunk.tool_profile_hash != pointer.tool_profile_hash {
         return Err(invalid_pointer_identity_error(pointer));
     }
     // N5: on a non-shallow commit, the chunk's generation must equal the tree
@@ -5021,11 +5851,11 @@ fn resolve_pointer_for_cli(pointer: &EvidencePointer) -> Result<PointerResolutio
     // path has no tree entry, so gen stays unbound there (chunk (raw, tool)
     // identity is the only available check).
     if let Some(entry_gen) = entry_gen {
-        if chunk.row.gen != entry_gen {
+        if chunk.gen != entry_gen {
             return Err(invalid_pointer_identity_error(pointer));
         }
     }
-    let text = chunk.row.text;
+    let text = chunk.text;
 
     // Raw object resolution: working tree first (rename-tolerant), else CAS
     // read-only expansion. Absent from both with no tombstone -> not_found.
@@ -5034,12 +5864,20 @@ fn resolve_pointer_for_cli(pointer: &EvidencePointer) -> Result<PointerResolutio
         &pointer.raw_hash,
         pointer.path_at_commit.as_deref(),
     )? {
-        Some((path, temporary)) => Ok(PointerResolution {
-            path: Some(path),
-            text: Some(text),
-            temporary,
-            commit_shallow,
-        }),
+        Some((path, temporary)) => {
+            if let Err(error) = enforce_purge_read_barrier(&target, &pointer.raw_hash) {
+                if temporary {
+                    let _ = fs::remove_file(&path);
+                }
+                return Err(error);
+            }
+            Ok(PointerResolution {
+                path: Some(path),
+                text: Some(text),
+                temporary,
+                commit_shallow,
+            })
+        }
         None => Err(purge_not_found_error(&target, &pointer.raw_hash)),
     }
 }
@@ -5614,8 +6452,9 @@ fn legacy_tombstone_path(kcs_dir: &Path, raw_hash: &str) -> Result<PathBuf> {
 }
 
 fn read_optional_file(path: &Path) -> Result<Option<Vec<u8>>> {
-    match fs::read(path) {
-        Ok(bytes) => Ok(Some(bytes)),
+    const MAX_TOMBSTONE_BYTES: u64 = 64 * 1024;
+    match fs::symlink_metadata(path) {
+        Ok(_) => read_bounded_regular_file(path, MAX_TOMBSTONE_BYTES).map(Some),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(KcsError::io(error.to_string(), path.display().to_string())),
     }
@@ -5692,6 +6531,19 @@ fn read_tombstone(target: &ScopeTarget, raw_hash: &str) -> Result<Option<Value>>
         json!(target.kcs_dir.display().to_string()),
     );
     Ok(Some(value.take()))
+}
+
+/// Enforce the purge visibility boundary on every raw-derived read surface.
+/// Erase receipts are deliberately absent here: they are fsck-only and must not
+/// prevent a later verified re-ingest of identical bytes.
+fn enforce_purge_read_barrier(target: &ScopeTarget, raw_hash: &str) -> Result<()> {
+    if let Some(tombstone) = read_tombstone(target, raw_hash)? {
+        return Err(tombstone_error(tombstone));
+    }
+    if PurgeState::new(&target.kcs_dir).barrier_blocks(raw_hash)? {
+        return Err(purge_not_found_error(target, raw_hash));
+    }
+    Ok(())
 }
 
 /// 08 §4.1 tombstone response as an exit-4 error (open/view surface it as a
@@ -5866,11 +6718,13 @@ fn resolve_object_uri(object: &ObjectUri, as_view: bool) -> Result<Value> {
     let status = if as_view { "viewed" } else { "opened" };
     let target = resolve_scope_target(&object.scope_id, None)?;
     if object.object_type == "chunk" {
-        let text = read_stored_chunks(&target.kcs_dir)?
+        let chunk = read_stored_chunks(&target.kcs_dir)?
             .into_iter()
             .find(|chunk| chunk.row.chunk_id == object.hash)
-            .map(|chunk| chunk.row.text)
             .ok_or_else(|| KcsError::not_found(object.hash.clone()))?;
+        enforce_purge_read_barrier(&target, &chunk.row.raw_hash)?;
+        let text = chunk.row.text;
+        enforce_purge_read_barrier(&target, &chunk.row.raw_hash)?;
         return Ok(json!({
             "status": status,
             "object_type": "chunk",
@@ -5896,14 +6750,65 @@ fn resolve_object_uri(object: &ObjectUri, as_view: bool) -> Result<Value> {
             )));
         }
     };
+    if object.object_type == "raw" {
+        enforce_purge_read_barrier(&target, &object.hash)?;
+    } else if PurgeState::new(&target.kcs_dir)
+        .read_journal()?
+        .is_some_and(|journal| journal.phase.is_barrier_visible())
+    {
+        // Image/prepared object URIs carry only the derived-object hash, so no
+        // trustworthy raw association can be recovered at this boundary. During
+        // the short destructive window, fail the whole derived-object surface
+        // closed; normal reads resume after terminal publication/deletion.
+        return Err(KcsError::new(
+            "KCS-E-PURGE-NOT-FOUND-001",
+            "derived object access is hidden by an in-progress purge barrier",
+            json!({
+                "object_type": object.object_type,
+                "hash": object.hash,
+                "scope_path": target.kcs_dir.display().to_string(),
+                "purge_state": "in_progress",
+            }),
+            ExitCode::PermanentFailure,
+        ));
+    }
     match open_cas_byte_object(&target, subdir, scan_working_tree, &object.hash, None)? {
-        Some((path, temporary)) => Ok(json!({
-            "status": status,
-            "object_type": object.object_type,
-            "hash": object.hash,
-            "path": path,
-            "temporary": temporary,
-        })),
+        Some((path, temporary)) => {
+            let blocked_after_open = if object.object_type == "raw" {
+                enforce_purge_read_barrier(&target, &object.hash).err()
+            } else if PurgeState::new(&target.kcs_dir)
+                .read_journal()?
+                .is_some_and(|journal| journal.phase.is_barrier_visible())
+            {
+                Some(KcsError::new(
+                    "KCS-E-PURGE-NOT-FOUND-001",
+                    "derived object access is hidden by an in-progress purge barrier",
+                    json!({
+                        "object_type": object.object_type,
+                        "hash": object.hash,
+                        "scope_path": target.kcs_dir.display().to_string(),
+                        "purge_state": "in_progress",
+                    }),
+                    ExitCode::PermanentFailure,
+                ))
+            } else {
+                None
+            };
+            if let Some(error) = blocked_after_open {
+                if temporary {
+                    let _ = fs::remove_file(&path);
+                }
+                return Err(error);
+            }
+            Ok(json!({
+                "status": status,
+                "object_type": object.object_type,
+                "hash": object.hash,
+                "path": path,
+                "temporary": temporary,
+            }))
+        }
+        None if object.object_type == "raw" => Err(purge_not_found_error(&target, &object.hash)),
         None => Err(KcsError::not_found(object.hash.clone())),
     }
 }
@@ -6376,6 +7281,9 @@ fn execute_pending_tasks(
     // Q3: under the folder store lock, any Running task is an orphan from a crashed
     // run — reclaim it to Pending so this pass re-executes it.
     reclaim_orphaned_running_tasks(store)?;
+    if recover_pending_online_promotion(repo)? {
+        finish_pending_online_promotion(repo)?;
+    }
     // Markdownize and embedding opt-ins are per-adapter (07 §3, L4): gate each
     // adapter on its own approval rather than one blanket check.
     if persistent_network_allowed(repo)? {
@@ -6385,6 +7293,12 @@ fn execute_pending_tasks(
             override_budget,
             allow_auth_revive,
         )?);
+    }
+    // Online Markdownize changes durable search truth only after the complete
+    // output is rebound into one auto commit and SQLite is rebuilt. Do this before
+    // embedding enrichment so the same batch pass can see/promote the new chunks.
+    if promote_completed_online_markdownize(repo)? {
+        finish_pending_online_promotion(repo)?;
     }
     // Embedding tasks are executed by the same enrichment pass `kcs index` uses;
     // without this, rate-limited Pending embedding tasks could never be completed
@@ -6419,7 +7333,7 @@ fn execute_pending_markdownize_tasks(
     // sent when its input is a Tier B (candidate-secret) file and the scope is not
     // `--send-secrets`-approved — in case the hold was cleared by some other path.
     let secrets_approved = secrets_send_approved(repo);
-    let online_profile = online_markdownize_profile();
+    let online_profile = online_markdownize_profile_for(repo);
     let output_ref = online_output_ref(&online_profile.adapter_id);
     // R22-6(a): R21-6 gave the embedding pipeline a live-AuthError revive but never wired
     // the markdownize twin, so a 401/403 left its task Failed(`auth_error`) — non-retryable
@@ -6608,8 +7522,12 @@ fn execute_pending_markdownize_tasks(
             // still-failed units, and `execute_online_markdownize_task` requests only
             // those. A full send (`unit_keys == None`) still bills the whole document.
             // Without this, a 1-page retry of a 500-page PDF re-billed all 500 pages.
-            let estimated_usd =
-                prorated_markdownize_cost(&task, file_size, prepared_input.prepared_units.len());
+            let estimated_usd = prorated_markdownize_cost(
+                &task,
+                file_size,
+                prepared_input.prepared_units.len(),
+                task.bbox_annotation_enabled.unwrap_or(false),
+            );
             let estimate = BudgetEstimate {
                 scope_id: scope_id.clone(),
                 task_type: TaskType::Markdownize,
@@ -6920,8 +7838,9 @@ fn prorated_markdownize_cost(
     task: &TaskDescriptor,
     file_size: u64,
     prepared_unit_count: usize,
+    bbox_annotation_enabled: bool,
 ) -> f64 {
-    let full = estimate_online_markdownize_cost(file_size);
+    let full = estimate_online_markdownize_cost(file_size, bbox_annotation_enabled);
     let Some(unit_keys) = task.unit_keys.as_ref().filter(|keys| !keys.is_empty()) else {
         return full;
     };
@@ -7005,6 +7924,9 @@ fn classify_online_markdownize_precondition(
     repo: &Repository,
     task: &TaskDescriptor,
 ) -> OnlineMarkdownizePrecondition {
+    if raw_ingest_is_purge_blocked(repo, &task.input_hash) {
+        return OnlineMarkdownizePrecondition::Retire;
+    }
     let path = repo.root().join(&task.input_path);
     let media_type = media_type_for_cli_path(&path).to_owned();
     let Ok(verified) = read_verified_scan_input(
@@ -7158,6 +8080,7 @@ fn execute_online_markdownize_task(
             // document (the ledger already prorated the reserve to the subset). A fresh full
             // send (`retry_units.is_none()`) leaves this false → whole document, no `pages`.
             restrict_to_hint_pages: retry_units.is_some(),
+            bbox_annotation_enabled: task.bbox_annotation_enabled.unwrap_or(false),
         },
         &bytes,
     )
@@ -7305,8 +8228,11 @@ fn try_online_incremental_markdownize(
     // AFTER the incremental request had been sent (and, post-R14-4, the whole document
     // uploaded), wasting a send + bill and then re-sending Full. `capability_flags` are
     // pin-independent, so the mode decision is unchanged.
-    let resolved_profile =
-        resolve_standard_online_markdownize_profile(scope_id).map_err(task_failure_from_adapter)?;
+    let resolved_profile = resolve_standard_online_markdownize_profile_with_bbox(
+        scope_id,
+        task.bbox_annotation_enabled.unwrap_or(false),
+    )
+    .map_err(task_failure_from_adapter)?;
     let decision = choose_markdownize_mode(&IncrementalModeInput {
         has_previous_done_run: true,
         raw_hash_only_changed: true,
@@ -7388,6 +8314,7 @@ fn try_online_incremental_markdownize(
                 hints: Some(adapter_hints(&incremental_hints)),
                 // Incremental already scopes pages via `mode`; the retry-only signal stays off.
                 restrict_to_hint_pages: false,
+                bbox_annotation_enabled: task.bbox_annotation_enabled.unwrap_or(false),
             },
             verified_raw_bytes,
         )
@@ -7710,12 +8637,107 @@ fn embedding_tool_lock_entry() -> Result<Option<Value>> {
     })))
 }
 
-/// A live chunk awaiting an embedding (current chunking_config_hash, HEAD-live).
+/// A retained-history chunk eligible for the effective current config.
 struct EmbeddableChunk {
     chunk_id: String,
     text: String,
     text_hash: String,
     raw_path: String,
+    requires_secret_approval: bool,
+}
+
+/// Materialize the current-config chunk set for every exact normalized identity
+/// retained by the bounded CAS graph. Purge barriers are applied here, before
+/// content-vector reuse or any adapter enqueue can observe the chunk text.
+fn retained_history_chunks(
+    conn: &Connection,
+    kcs_dir: &Path,
+    retained_instances: &[RetainedNormalizedInstance],
+    chunking_config_hash: &str,
+) -> Result<Vec<EmbeddableChunk>> {
+    let purge = PurgeState::new(kcs_dir);
+    let in_progress = purge
+        .read_journal()?
+        .map(|journal| {
+            journal
+                .target_raw_hashes
+                .into_iter()
+                .collect::<BTreeSet<_>>()
+        })
+        .unwrap_or_default();
+    let mut blocked_raw_hashes = in_progress;
+    let raw_hashes = retained_instances
+        .iter()
+        .map(|instance| instance.raw_hash.clone())
+        .collect::<BTreeSet<_>>();
+    for raw_hash in raw_hashes {
+        let tombstoned = purge.read_tombstone(&raw_hash)?.is_some();
+        if tombstoned {
+            blocked_raw_hashes.insert(raw_hash);
+        }
+    }
+
+    let identities = retained_instances
+        .iter()
+        .filter(|instance| !blocked_raw_hashes.contains(&instance.raw_hash))
+        .map(|instance| {
+            (
+                (
+                    instance.raw_hash.clone(),
+                    instance.normalize.tool_profile_hash.clone(),
+                    instance.normalize.gen,
+                ),
+                (
+                    instance.embedding_path.clone(),
+                    classify_secret(&instance.embedding_path).is_some(),
+                ),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    let mut statement = conn
+        .prepare(
+            "SELECT c.chunk_id, c.text, c.text_hash,
+                    c.raw_hash, c.tool_profile_hash, c.gen
+             FROM chunks c
+             WHERE c.first_seen_commit IS NOT NULL
+               AND EXISTS (
+                   SELECT 1 FROM chunk_config_generations cg
+                   WHERE cg.chunk_id = c.chunk_id
+                     AND cg.chunking_config_hash = ?1
+               )
+             ORDER BY c.rowid",
+        )
+        .map_err(|error| KcsError::schema(error.to_string()))?;
+    let rows = statement
+        .query_map(rusqlite::params![chunking_config_hash], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, u64>(5)?,
+            ))
+        })
+        .map_err(|error| KcsError::schema(error.to_string()))?;
+    let mut chunks = Vec::new();
+    for row in rows {
+        let (chunk_id, text, text_hash, raw_hash, tool_profile_hash, gen) =
+            row.map_err(|error| KcsError::schema(error.to_string()))?;
+        let Some((raw_path, requires_secret_approval)) =
+            identities.get(&(raw_hash, tool_profile_hash, gen))
+        else {
+            continue;
+        };
+        chunks.push(EmbeddableChunk {
+            chunk_id,
+            text,
+            text_hash,
+            raw_path: raw_path.clone(),
+            requires_secret_approval: *requires_secret_approval,
+        });
+    }
+    Ok(chunks)
 }
 
 /// Generate chunk embeddings for the scope after the SQLite index is rebuilt
@@ -7746,6 +8768,42 @@ fn run_embedding_enrichment(
     override_budget: bool,
     allow_auth_revive: bool,
 ) -> Result<ExecOutcome> {
+    run_embedding_enrichment_for_instances(
+        repo,
+        online,
+        override_budget,
+        allow_auth_revive,
+        None,
+        true,
+    )
+}
+
+/// Historical reindex drives only the selected snapshot's embedding work. In
+/// particular it must not reconcile/retire task rows belonging to non-selected
+/// history merely because they are absent from this deliberately narrow set.
+fn run_historical_embedding_enrichment(
+    repo: &Repository,
+    online: bool,
+    selected_instances: &[RetainedNormalizedInstance],
+) -> Result<ExecOutcome> {
+    run_embedding_enrichment_for_instances(
+        repo,
+        online,
+        false,
+        false,
+        Some(selected_instances),
+        false,
+    )
+}
+
+fn run_embedding_enrichment_for_instances(
+    repo: &Repository,
+    online: bool,
+    override_budget: bool,
+    allow_auth_revive: bool,
+    selected_instances: Option<&[RetainedNormalizedInstance]>,
+    reconcile_scope_tasks: bool,
+) -> Result<ExecOutcome> {
     let Some(execution) = embedding_execution() else {
         return Ok(ExecOutcome::default());
     };
@@ -7759,15 +8817,32 @@ fn run_embedding_enrichment(
         return Ok(ExecOutcome::default());
     }
     let conn = Connection::open(&db_path).map_err(|err| KcsError::schema(err.to_string()))?;
-    let Some(head) = repo.head_commit_hash()? else {
-        return Ok(ExecOutcome::default());
-    };
-    // `kcs snapshot` advances HEAD without projecting tree_entries (search
-    // projects lazily); do the same here or the live-chunk JOIN silently
-    // matches nothing for any scope whose last commit was a snapshot.
-    ensure_snapshot_tree_entries(repo, &conn, &head)?;
     let chunking_config_hash = read_chunking_config(repo)?.chunking_config_hash;
-    let pending = live_chunks_without_embedding(&conn, &head, &chunking_config_hash, &profile)?;
+    let retained_instances_owned;
+    let retained_instances = if let Some(selected) = selected_instances {
+        selected
+    } else {
+        let Some(head) = repo.head_commit_hash()? else {
+            return Ok(ExecOutcome::default());
+        };
+        // `kcs snapshot` advances HEAD without projecting tree_entries (search
+        // projects lazily); do the same here or the live-chunk JOIN silently
+        // matches nothing for any scope whose last commit was a snapshot.
+        ensure_snapshot_tree_entries(repo, &conn, &head)?;
+        retained_instances_owned = retained_history_instances(repo.kcs_dir(), &head)?;
+        &retained_instances_owned
+    };
+    let retained_chunks = retained_history_chunks(
+        &conn,
+        repo.kcs_dir(),
+        retained_instances,
+        &chunking_config_hash,
+    )?;
+    let active_chunk_ids = retained_chunks
+        .iter()
+        .map(|chunk| chunk.chunk_id.clone())
+        .collect::<BTreeSet<_>>();
+    let pending = retained_chunks_without_embedding(&conn, retained_chunks, &profile)?;
 
     let task_store = TaskStore::new(repo.kcs_dir());
     let now = now_utc_seconds();
@@ -7777,18 +8852,18 @@ fn run_embedding_enrichment(
     // empty-`pending` early return: the r12k crash left every chunk embedded with 64
     // tasks still Pending, so `pending` is empty yet index_status reported phantom
     // pending enrichment forever. Idempotent; no adapter call, no re-charge.
-    reconcile_committed_embedding_tasks(
-        repo,
-        &conn,
-        &task_store,
-        EmbeddingReconcileContext {
-            head: &head,
-            chunking_config_hash: &chunking_config_hash,
-            pending: &pending,
-            now: &now,
-            allow_auth_revive,
-        },
-    )?;
+    if reconcile_scope_tasks {
+        reconcile_committed_embedding_tasks(
+            repo,
+            &task_store,
+            EmbeddingReconcileContext {
+                active_chunk_ids: &active_chunk_ids,
+                pending: &pending,
+                now: &now,
+                allow_auth_revive,
+            },
+        )?;
+    }
     if pending.is_empty() {
         return Ok(ExecOutcome::default());
     }
@@ -7803,7 +8878,7 @@ fn run_embedding_enrichment(
             // R19-1: hold ANY secret (Tier B, or a lifted Tier A) from the embedding
             // API unless `--send-secrets`. Non-lifted Tier A never produces chunks
             // (excluded at ingest), so `.is_some()` newly gates only lifted Tier A.
-            !secrets_approved && classify_secret(&chunk.raw_path).is_some()
+            !secrets_approved && chunk.requires_secret_approval
         });
     hold_secret_embedding_tasks(&task_store, repo, &held, &now)?;
     if sendable.is_empty() {
@@ -8022,20 +9097,88 @@ fn run_embedding_enrichment(
             )?
         };
         if matches!(charge, ChargeOutcome::BudgetExceeded) {
-            for claim in &activated_claims {
-                reservation_ledger
-                    .mark_reclaimable(*claim, &scope_id, EMBEDDING_ADAPTER_KIND)
-                    .map_err(pipeline_to_kcs)?;
+            // A batch may mix retry groups already covered by a trusted prior
+            // reservation with fresh groups whose new charge exceeds the cap.
+            // The covered retries remain authorized and must still run; pausing
+            // the whole batch would strand historical rate-limit work forever.
+            let covered_to_send = plan
+                .to_send
+                .iter()
+                .enumerate()
+                .filter(|(index, _)| covered_groups.contains(index))
+                .map(|(_, group)| group.clone())
+                .collect::<Vec<_>>();
+            if !covered_to_send.is_empty() {
+                match send_embed_batch(&conn, execution, &profile, &covered_to_send) {
+                    Ok(()) => {
+                        for claim in &activated_claims {
+                            transition_reservation_after_outcome(
+                                &cost_ledger,
+                                *claim,
+                                &scope_id,
+                                EMBEDDING_ADAPTER_KIND,
+                                None,
+                            )?;
+                        }
+                        record_embedding_transitions(
+                            &mut transitions,
+                            covered_to_send
+                                .iter()
+                                .flat_map(|group| group.members.iter().copied()),
+                            embedding_done_transition(),
+                        );
+                        outcome.executed += covered_to_send
+                            .iter()
+                            .map(|group| group.members.len())
+                            .sum::<usize>();
+                    }
+                    Err(failure) => {
+                        for claim in &activated_claims {
+                            transition_reservation_after_outcome(
+                                &cost_ledger,
+                                *claim,
+                                &scope_id,
+                                EMBEDDING_ADAPTER_KIND,
+                                Some(failure.retry_kind),
+                            )?;
+                        }
+                        record_embedding_transitions(
+                            &mut transitions,
+                            covered_to_send
+                                .iter()
+                                .flat_map(|group| group.members.iter().copied()),
+                            embedding_fail_transition(failure.retry_kind),
+                        );
+                        count_embedding_failure(
+                            &mut outcome,
+                            failure.retry_kind,
+                            covered_to_send
+                                .iter()
+                                .map(|group| group.members.len())
+                                .sum(),
+                        );
+                    }
+                }
             }
-            // Budget exhausted: pause the remaining to-send chunks
-            // (index_status.budget_paused). Already-linked reuse stays done.
+            // Budget exhausted: pause only fresh, uncovered groups. Already-linked
+            // reuse and covered retry groups retain their independently-set state.
             record_embedding_transitions(
                 &mut transitions,
-                plan.send_chunks(),
+                plan.to_send
+                    .iter()
+                    .enumerate()
+                    .filter(|(index, _)| !covered_groups.contains(index))
+                    .flat_map(|(_, group)| group.members.iter().copied()),
                 embedding_pause_transition(),
             );
             // R11-2: budget-paused this pass → docs/04 §5.6 exit 6.
-            outcome.paused += plan.send_count();
+            outcome.paused += plan
+                .to_send
+                .iter()
+                .enumerate()
+                .filter(|(index, _)| !covered_groups.contains(index))
+                .map(|(_, group)| group.members.len())
+                .sum::<usize>();
             break;
         }
         // R18-1: a fresh charge landed (`sent_chars > 0`, ChargeOutcome::Charged). Record
@@ -8238,6 +9381,7 @@ struct EmbedBatchPlan<'a> {
     to_send: Vec<EmbeddingSendGroup<'a>>,
 }
 
+#[derive(Clone)]
 struct EmbeddingSendGroup<'a> {
     embedding_hash: String,
     representative: &'a EmbeddableChunk,
@@ -8448,12 +9592,10 @@ fn estimate_embedding_cost(chars: u64) -> f64 {
     tokens / 1_000_000.0 * 0.15
 }
 
-/// Live chunks (current chunking_config_hash, HEAD tree_entries) that have no
-/// `chunk_vec` row yet.
-fn live_chunks_without_embedding(
+/// Retained current-config chunks that have no usable current-profile vector.
+fn retained_chunks_without_embedding(
     conn: &Connection,
-    head: &str,
-    chunking_config_hash: &str,
+    candidates: Vec<EmbeddableChunk>,
     profile: &DeclaredEmbeddingProfile,
 ) -> Result<Vec<EmbeddableChunk>> {
     let mut existing_stmt = conn
@@ -8466,52 +9608,8 @@ fn live_chunks_without_embedding(
         .map_err(|err| KcsError::schema(err.to_string()))?;
     drop(existing_stmt);
 
-    // R20-1: select the CURRENT path (`te.path`) from the joined HEAD tree, NOT the
-    // append-only `chunks.raw_path` (the chunk's first-seen path, kept for display /
-    // time-travel per docs/04-pipeline.md:301). `EmbeddableChunk.raw_path` feeds the
-    // secret online-send hold gate (`classify_secret`, main.rs:7098) and the enqueued
-    // task's `input_path`; reading the STALE first-seen path let a file renamed INTO a
-    // secret-matching name (after it was indexed but before its embedding was sent) slip
-    // the hold and be sent online with a falsely-"hold" audit record. `te.path` is the
-    // live name, so the gate classifies the file as it exists now. (`chunks.raw_path`
-    // itself stays append-only; only what embedding sees changes.)
-    let mut stmt = conn
-        .prepare(
-            "SELECT c.chunk_id, c.text, c.text_hash, te.path
-             FROM chunks c
-             JOIN tree_entries te ON te.commit_hash = ?1
-                 AND te.raw_hash = c.raw_hash
-                 AND te.tool_profile_hash = c.tool_profile_hash
-                 AND te.gen = c.gen
-             WHERE c.chunking_config_hash = ?2
-             ORDER BY c.rowid",
-        )
-        .map_err(|err| KcsError::schema(err.to_string()))?;
-    let rows = stmt
-        .query_map(rusqlite::params![head, chunking_config_hash], |row| {
-            Ok(EmbeddableChunk {
-                chunk_id: row.get(0)?,
-                text: row.get(1)?,
-                text_hash: row.get(2)?,
-                raw_path: row.get(3)?,
-            })
-        })
-        .map_err(|err| KcsError::schema(err.to_string()))?;
-    // R21-1/R21-2: a content-addressed `chunk_id` is path-independent (chunking.rs
-    // omits path from the hash), so the tree_entries JOIN fans out ONE chunk into N
-    // rows when N byte-identical files are live (a vendored LICENSE, a backup copy).
-    // Left un-deduped this made `enqueue_embedding_tasks` create N tasks under one
-    // `output_ref` — double send + double charge, the R20-2 invariant broken from a
-    // second source (R21-2) — and, worse, let a non-secret twin's instance land in
-    // `sendable` while the secret twin's landed in `held`, so the send loop drove the
-    // shared held task Done and shipped a Tier B file's text online with no
-    // `--send-secrets` (R21-1). Collapse to one instance per chunk_id, PREFERRING a
-    // secret path so the survivor is held (conservative, matching R20-1's live-path
-    // secret classification).
-    let mut pending: Vec<EmbeddableChunk> = Vec::new();
-    let mut index_of: BTreeMap<String, usize> = BTreeMap::new();
-    for row in rows {
-        let chunk = row.map_err(|err| KcsError::schema(err.to_string()))?;
+    let mut pending = Vec::new();
+    for chunk in candidates {
         let embedding_hash = chunk_embedding_hash(&chunk, profile)?;
         let has_current_profile = embedding_store::content_vector(conn, &embedding_hash)
             .map_err(index_to_kcs)?
@@ -8519,22 +9617,7 @@ fn live_chunks_without_embedding(
         if has_current_profile && existing.contains(&chunk.chunk_id) {
             continue;
         }
-        match index_of.get(&chunk.chunk_id) {
-            Some(&i) => {
-                // Duplicate live path for one content-addressed chunk: keep a single
-                // instance, swapping in a secret-path one if the kept instance is not
-                // secret (so the survivor is held, never sent unapproved).
-                if classify_secret(&pending[i].raw_path).is_none()
-                    && classify_secret(&chunk.raw_path).is_some()
-                {
-                    pending[i] = chunk;
-                }
-            }
-            None => {
-                index_of.insert(chunk.chunk_id.clone(), pending.len());
-                pending.push(chunk);
-            }
-        }
+        pending.push(chunk);
     }
     Ok(pending)
 }
@@ -8552,8 +9635,7 @@ fn embedding_task_output_ref(chunk_id: &str) -> String {
 /// `Done` (idempotent, no adapter call, no re-charge — the vector is already stored,
 /// so search/data are unaffected; only task accounting + the Agent contract heal).
 struct EmbeddingReconcileContext<'a> {
-    head: &'a str,
-    chunking_config_hash: &'a str,
+    active_chunk_ids: &'a BTreeSet<String>,
     pending: &'a [EmbeddableChunk],
     now: &'a str,
     allow_auth_revive: bool,
@@ -8561,7 +9643,6 @@ struct EmbeddingReconcileContext<'a> {
 
 fn reconcile_committed_embedding_tasks(
     repo: &Repository,
-    conn: &Connection,
     task_store: &TaskStore,
     context: EmbeddingReconcileContext<'_>,
 ) -> Result<()> {
@@ -8570,7 +9651,7 @@ fn reconcile_committed_embedding_tasks(
         .iter()
         .map(|chunk| chunk.chunk_id.as_str())
         .collect();
-    let live_ids = live_chunk_ids(conn, context.head, context.chunking_config_hash)?;
+    let live_ids = context.active_chunk_ids;
     // R18-1: reclaim the F8 phantom of a NON-LIVE embedding task whose send failed
     // RateLimit/Quota. Embedding charges before the send (like markdownize, F8) but had NO
     // reclaim path — `reserved_usd`/`reserved_month` are now stamped at charge time
@@ -8735,35 +9816,6 @@ fn reconcile_committed_embedding_tasks(
     Ok(())
 }
 
-/// R12-3: all live chunk_ids for the given HEAD snapshot (the same liveness JOIN
-/// `live_chunks_without_embedding` uses, minus the embedding filter). The embedded
-/// set is then "live minus pending".
-fn live_chunk_ids(
-    conn: &Connection,
-    head: &str,
-    chunking_config_hash: &str,
-) -> Result<BTreeSet<String>> {
-    let mut stmt = conn
-        .prepare(
-            "SELECT c.chunk_id
-             FROM chunks c
-             JOIN tree_entries te ON te.commit_hash = ?1
-                 AND te.raw_hash = c.raw_hash
-                 AND te.tool_profile_hash = c.tool_profile_hash
-                 AND te.gen = c.gen
-             WHERE c.chunking_config_hash = ?2",
-        )
-        .map_err(|err| KcsError::schema(err.to_string()))?;
-    let ids = stmt
-        .query_map(rusqlite::params![head, chunking_config_hash], |row| {
-            row.get::<_, String>(0)
-        })
-        .map_err(|err| KcsError::schema(err.to_string()))?
-        .collect::<std::result::Result<BTreeSet<String>, _>>()
-        .map_err(|err| KcsError::schema(err.to_string()))?;
-    Ok(ids)
-}
-
 /// N1a: enqueue a held `Embedding` task (Paused `secrets_tier_b_hold`) per Tier B
 /// chunk that lacks one, so the hold is visible in `kcs status` without ever
 /// entering the send pipeline. Idempotent — a chunk that already has an embedding
@@ -8890,6 +9942,7 @@ fn hold_secret_embedding_tasks(
             heartbeat_at: None,
             fallback_reason: Some(SECRETS_TIER_B_HOLD.to_owned()),
             created_at: now.to_owned(),
+            bbox_annotation_enabled: None,
             reserved_usd: None,
             reserved_month: None,
             reservation_id: None,
@@ -9064,6 +10117,7 @@ fn enqueue_embedding_tasks(
             heartbeat_at: None,
             fallback_reason: Some(reason.to_owned()),
             created_at: now.to_owned(),
+            bbox_annotation_enabled: None,
             reserved_usd: None,
             reserved_month: None,
             reservation_id: None,
@@ -9265,8 +10319,13 @@ fn duration_secs_field(inner: &str, key: &str) -> Option<i64> {
     })
 }
 
-fn estimate_online_markdownize_cost(size_bytes: u64) -> f64 {
-    estimate_local_baseline_cost(size_bytes) * 10.0
+fn estimate_online_markdownize_cost(size_bytes: u64, bbox_annotation_enabled: bool) -> f64 {
+    let unannotated = estimate_local_baseline_cost(size_bytes) * 10.0;
+    if bbox_annotation_enabled {
+        unannotated * 1.25
+    } else {
+        unannotated
+    }
 }
 
 fn media_type_for_cli_path(path: &Path) -> &'static str {
@@ -9468,6 +10527,10 @@ fn online_markdownize_profile() -> AdapterProfile {
     standard_online_markdownize_profile()
 }
 
+fn online_markdownize_profile_for(repo: &Repository) -> AdapterProfile {
+    standard_online_markdownize_profile_with_bbox(bbox_annotation_enabled(repo))
+}
+
 fn adapter_kind_budget_key(kind: AdapterKind) -> &'static str {
     match kind {
         AdapterKind::Prepare => "prepare",
@@ -9655,7 +10718,7 @@ fn run_index_pipeline(
     // whose input_path is no longer a live candidate. Runs before the enqueue loop so the
     // freed cap is available to this index's tasks.
     {
-        let online_profile = online_markdownize_profile();
+        let online_profile = online_markdownize_profile_for(repo);
         let placeholder_output_ref = online_output_ref(&online_profile.adapter_id);
         let markdown_adapter_kind = adapter_kind_budget_key(online_profile.adapter_kind);
         let reservation_scope_id = repo.scope_id_for_adapter();
@@ -9804,6 +10867,9 @@ fn run_index_pipeline(
             continue;
         }
         let raw_hash = current_hash;
+        // Reject before Prepare/Markdownize writes any derived state. The closing
+        // snapshot independently rechecks every staged raw under the store lock.
+        ensure_raw_ingest_allowed(repo, &raw_hash)?;
         let prepare = prepare_units_from_bytes(PrepareStageBytesRequest {
             raw_hash: &raw_hash,
             media_type: &candidate.media_type,
@@ -10045,6 +11111,7 @@ fn run_index_pipeline(
             // Offline (deterministic) markdownize path: the builtin adapter ignores
             // page scoping (R15-5 concerns only the real Mistral client).
             restrict_to_hint_pages: false,
+            bbox_annotation_enabled: false,
             tool_profile_hash: markdown_profile_hash.clone(),
             spec_version: 1,
         };
@@ -10510,6 +11577,7 @@ fn task_descriptor(
         heartbeat_at: None,
         fallback_reason: fallback_reason.map(str::to_owned),
         created_at: created_at.to_owned(),
+        bbox_annotation_enabled: None,
         reserved_usd: None,
         reserved_month: None,
         reservation_id: None,
@@ -10717,7 +11785,7 @@ fn normalized_unit_to_adapter_unit(unit: &NormalizedUnitObject) -> MarkdownUnit 
         unit_key: unit.unit_key.clone(),
         unit_type: adapter_unit_kind(unit.unit_type),
         markdown: unit.markdown.clone(),
-        metadata: BTreeMap::new(),
+        metadata: unit.metadata.clone(),
     }
 }
 
@@ -10779,6 +11847,7 @@ fn normalized_units_from_response(
                 gen: 0,
                 mode,
                 markdown: unit.markdown.clone(),
+                metadata: unit.metadata.clone(),
                 reused_from: None,
                 generated_at: generated_at.to_owned(),
             })
@@ -10800,6 +11869,7 @@ fn normalized_units_from_response(
             gen: 0,
             mode,
             markdown: previous_unit.markdown.clone(),
+            metadata: previous_unit.metadata.clone(),
             reused_from: Some(kcs_pipeline::markdownize::ReusedFrom {
                 raw_hash: previous_unit.raw_hash.clone(),
                 gen: previous_unit.gen,
@@ -10982,8 +12052,9 @@ fn enqueue_online_placeholder_task(
     if is_text_native_media(&candidate.media_type) {
         return Ok(());
     }
-    let online_profile = online_markdownize_profile();
+    let online_profile = online_markdownize_profile_for(repo);
     let output_ref = online_output_ref(&online_profile.adapter_id);
+    let effective_bbox_policy = bbox_annotation_enabled(repo);
     // R15-2: supersede any stale online markdownize task for THIS path whose
     // `input_hash` differs from the current content. The file was edited after that
     // task was enqueued, so it is stale: `batch resume` would R14-2-supersede a
@@ -11087,6 +12158,9 @@ fn enqueue_online_placeholder_task(
             if task.input_path != candidate.input_path || task.input_hash != raw_hash {
                 return false;
             }
+            if task.bbox_annotation_enabled != Some(effective_bbox_policy) {
+                return false;
+            }
             match task.status {
                 TaskStatus::Pending | TaskStatus::Paused => task.output_ref == output_ref,
                 TaskStatus::Done | TaskStatus::Partial => {
@@ -11114,7 +12188,10 @@ fn enqueue_online_placeholder_task(
     let estimate = BudgetEstimate {
         scope_id: scope_id.to_owned(),
         task_type: TaskType::Markdownize,
-        estimated_usd: estimate_online_markdownize_cost(candidate.size_bytes),
+        estimated_usd: estimate_online_markdownize_cost(
+            candidate.size_bytes,
+            bbox_annotation_enabled(repo),
+        ),
         adapter_id: Some(online_profile.adapter_id.clone()),
     };
     let (device_remaining, folder_remaining) = budget_remaining_for_adapter(
@@ -11153,7 +12230,7 @@ fn enqueue_online_placeholder_task(
     } else {
         (TaskStatus::Pending, Some("ready_for_online_adapter"))
     };
-    let task = task_descriptor(
+    let mut task = task_descriptor(
         repo,
         TaskType::Markdownize,
         Some(MarkdownizeMode::Full),
@@ -11164,6 +12241,7 @@ fn enqueue_online_placeholder_task(
         reason,
         created_at,
     );
+    task.bbox_annotation_enabled = Some(effective_bbox_policy);
     task_store.append(&task).map_err(pipeline_to_kcs)?;
     match status {
         TaskStatus::Paused => result.paused_tasks += 1,
@@ -12414,6 +13492,108 @@ mod tests {
     use super::{command_captured_json_flag, terminal_safe_text, Cli, Command};
 
     #[test]
+    fn ct4_rebuild_refuses_visible_purge_and_filters_its_raw() {
+        use super::{ensure_no_visible_purge_journal, purge_blocks_rebuild_raw};
+        use kcs_core::purge::{BeginOutcome, PurgePhase, PurgeReason, PurgeState, TombstoneMode};
+
+        let dir = tempfile::tempdir().unwrap();
+        let kcs_dir = dir.path().join(".kcs");
+        std::fs::create_dir_all(&kcs_dir).unwrap();
+        let raw_hash = kcs_pipeline::prepare::hash_bytes(b"purge barrier rebuild target");
+        let state = PurgeState::new(&kcs_dir);
+        let journal = match state
+            .begin(
+                vec![raw_hash.clone()],
+                PurgeReason::Privacy,
+                TombstoneMode::Default,
+                "2026-07-13T00:00:00Z",
+            )
+            .unwrap()
+        {
+            BeginOutcome::Started(journal) => journal,
+            other => panic!("unexpected begin outcome: {other:?}"),
+        };
+
+        // Prepared is not yet public. Once the barrier is durable, every rebuild
+        // entry point fails before writing and its target is filtered per raw.
+        ensure_no_visible_purge_journal(&kcs_dir).unwrap();
+        assert!(!purge_blocks_rebuild_raw(&kcs_dir, &raw_hash).unwrap());
+        state
+            .advance_phase(&journal, PurgePhase::BarrierPublished)
+            .unwrap();
+        let error = ensure_no_visible_purge_journal(&kcs_dir).unwrap_err();
+        assert_eq!(error.error_code(), "KCS-E-PURGE-INCOMPLETE-001");
+        assert!(purge_blocks_rebuild_raw(&kcs_dir, &raw_hash).unwrap());
+    }
+
+    #[test]
+    fn ct4_purge_004_erase_receipt_is_not_retained_embedding_liveness() {
+        let dir = tempfile::tempdir().unwrap();
+        let kcs_dir = dir.path().join(".kcs");
+        std::fs::create_dir_all(&kcs_dir).unwrap();
+        let raw_hash = kcs_pipeline::prepare::hash_bytes(b"explicitly reintroduced raw");
+        let profile_hash = kcs_pipeline::prepare::hash_bytes(b"profile");
+        let commit_hash = kcs_pipeline::prepare::hash_bytes(b"commit");
+        let receipt = kcs_core::purge::EraseReceipt::new(
+            raw_hash.clone(),
+            commit_hash.clone(),
+            "2026-07-13T00:00:00Z",
+        )
+        .unwrap();
+        let purge = kcs_core::purge::PurgeState::new(&kcs_dir);
+        let receipt_path = purge.erase_receipt_path(&raw_hash).unwrap();
+        std::fs::create_dir_all(receipt_path.parent().unwrap()).unwrap();
+        std::fs::write(&receipt_path, serde_json::to_vec(&receipt).unwrap()).unwrap();
+
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE chunks (
+                 rowid INTEGER PRIMARY KEY,
+                 chunk_id TEXT NOT NULL,
+                 text TEXT NOT NULL,
+                 text_hash TEXT NOT NULL,
+                 raw_hash TEXT NOT NULL,
+                 tool_profile_hash TEXT NOT NULL,
+                 gen INTEGER NOT NULL,
+                 first_seen_commit TEXT
+             );
+             CREATE TABLE chunk_config_generations (
+                 chunk_id TEXT NOT NULL,
+                 chunking_config_hash TEXT NOT NULL
+             );",
+        )
+        .unwrap();
+        let chunk_id = kcs_pipeline::prepare::hash_bytes(b"chunk");
+        let text_hash = kcs_pipeline::prepare::hash_bytes(b"searchable text");
+        conn.execute(
+            "INSERT INTO chunks
+             (chunk_id,text,text_hash,raw_hash,tool_profile_hash,gen,first_seen_commit)
+             VALUES (?1,'searchable text',?2,?3,?4,0,?5)",
+            rusqlite::params![chunk_id, text_hash, raw_hash, profile_hash, commit_hash],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO chunk_config_generations(chunk_id,chunking_config_hash)
+             VALUES (?1,'config')",
+            rusqlite::params![chunk_id],
+        )
+        .unwrap();
+        let retained = vec![super::RetainedNormalizedInstance {
+            raw_hash,
+            normalize: kcs_core::dag::NormalizeRef {
+                tool_profile_hash: profile_hash,
+                gen: 0,
+            },
+            raw_path: "reintroduced.md".to_owned(),
+            embedding_path: "reintroduced.md".to_owned(),
+            first_seen_commit: commit_hash,
+        }];
+        let chunks = super::retained_history_chunks(&conn, &kcs_dir, &retained, "config").unwrap();
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].chunk_id, chunk_id);
+    }
+
+    #[test]
     fn r23_cand_059_human_output_escapes_terminal_controls() {
         let input = "safe\x1b]8;;https://example.invalid\x07label\x1b]8;;\x07\u{202e}";
         let rendered = terminal_safe_text(input, false);
@@ -12465,18 +13645,24 @@ mod tests {
                 scope_path: healthy_root.path().to_path_buf(),
                 snapshot_at: "sha256:healthy".to_owned(),
                 max_rowid: 0,
+                max_association_rowid: 0,
+                chunking_config_hash: "sha256:config".to_owned(),
             },
             SearchedScopeInfo {
                 scope_id: "corrupt".to_owned(),
                 scope_path: corrupt_root.path().to_path_buf(),
                 snapshot_at: "sha256:corrupt".to_owned(),
                 max_rowid: 0,
+                max_association_rowid: 0,
+                chunking_config_hash: "sha256:config".to_owned(),
             },
             SearchedScopeInfo {
                 scope_id: "vanished".to_owned(),
                 scope_path: vanished_root.path().to_path_buf(),
                 snapshot_at: "sha256:vanished".to_owned(),
                 max_rowid: 0,
+                max_association_rowid: 0,
+                chunking_config_hash: "sha256:config".to_owned(),
             },
         ];
 
@@ -12538,6 +13724,7 @@ mod tests {
                 heartbeat_at: None,
                 fallback_reason: Some("contract_violation".to_owned()),
                 created_at: "2026-07-12T00:00:00Z".to_owned(),
+                bbox_annotation_enabled: None,
                 reserved_usd: None,
                 reserved_month: None,
                 reservation_id: None,
@@ -12552,6 +13739,7 @@ mod tests {
                 text: "secret".to_owned(),
                 text_hash: format!("sha256:{}", "b".repeat(64)),
                 raw_path: "credentials_backup.md".to_owned(),
+                requires_secret_approval: true,
             }],
             "2026-07-12T00:00:01Z",
         )
@@ -12605,6 +13793,7 @@ mod tests {
             heartbeat_at: None,
             fallback_reason: Some("contract_violation".to_owned()),
             created_at: "2026-07-12T00:00:00Z".to_owned(),
+            bbox_annotation_enabled: None,
             reserved_usd: None,
             reserved_month: None,
             reservation_id: None,
@@ -12641,6 +13830,7 @@ mod tests {
                 text: "must not send".to_owned(),
                 text_hash: format!("sha256:{}", "d".repeat(64)),
                 raw_path: "credentials_backup.md".to_owned(),
+                requires_secret_approval: true,
             }],
             false,
         )
@@ -12679,6 +13869,7 @@ mod tests {
                 heartbeat_at: None,
                 fallback_reason: Some("network_error".to_owned()),
                 created_at: "2026-07-12T00:00:00Z".to_owned(),
+                bbox_annotation_enabled: None,
                 reserved_usd: None,
                 reserved_month: None,
                 reservation_id: None,
@@ -12693,6 +13884,7 @@ mod tests {
                 text: "retryable".to_owned(),
                 text_hash: format!("sha256:{}", "f".repeat(64)),
                 raw_path: "credentials_backup.md".to_owned(),
+                requires_secret_approval: true,
             }],
             "2026-07-12T00:00:01Z",
         )
@@ -12779,6 +13971,7 @@ mod tests {
             heartbeat_at: None,
             fallback_reason: Some("ready_for_online_adapter".to_owned()),
             created_at: "2026-07-12T00:00:00Z".to_owned(),
+            bbox_annotation_enabled: None,
             reserved_usd: None,
             reserved_month: None,
             reservation_id: None,
@@ -12815,8 +14008,16 @@ mod tests {
             &task,
             prepared.bytes.len() as u64,
             prepared.prepared_units.len(),
+            true,
         );
-        assert_eq!(charged, estimate_online_markdownize_cost(pdf.len() as u64));
+        assert_eq!(
+            charged,
+            estimate_online_markdownize_cost(pdf.len() as u64, true)
+        );
+        assert_eq!(
+            estimate_online_markdownize_cost(pdf.len() as u64, true),
+            estimate_online_markdownize_cost(pdf.len() as u64, false) * 1.25
+        );
         assert!(
             charged > 0.0,
             "a post-check pathname change cannot mint a zero charge"
@@ -12867,6 +14068,23 @@ mod tests {
     }
 
     #[test]
+    fn ct4_bbox_001_reads_default_and_scope_over_user_annotation_policy() {
+        use super::{effective_bbox_annotation_policy, read_bbox_annotation_config};
+
+        let dir = tempfile::tempdir().unwrap();
+        let scope = dir.path().join("scope.toml");
+        let user = dir.path().join("user.toml");
+        assert!(effective_bbox_annotation_policy(&scope, &user));
+
+        std::fs::write(&user, "[markdownize.bbox_annotation]\nenabled = false\n").unwrap();
+        assert_eq!(read_bbox_annotation_config(&user), Some(false));
+        assert!(!effective_bbox_annotation_policy(&scope, &user));
+
+        std::fs::write(&scope, "[markdownize.bbox_annotation]\nenabled = true\n").unwrap();
+        assert!(effective_bbox_annotation_policy(&scope, &user));
+    }
+
+    #[test]
     fn r10_1_vector_capacity_message_classifier() {
         use super::is_vector_capacity_message;
         // R10-1(a): sqlite-vec's KNN k-ceiling and SQLite's bound-variable ceiling are
@@ -12907,6 +14125,30 @@ mod tests {
                 "keyword groups must be capped at 64, got {group_count}: {tier}"
             );
         }
+    }
+
+    #[test]
+    fn ct4_eval_mixed_script_query_keeps_cjk_context_in_first_tier() {
+        use super::build_fts_tiers;
+
+        let tiers = build_fts_tiers("RAG パイプラインで再ランクに Merlin を使う 5 段構成の資料");
+        assert_eq!(tiers.len(), 1);
+        assert!(tiers[0].contains("\"RAG\""));
+        assert!(tiers[0].contains("\"Merlin\""));
+        assert!(tiers[0].contains("\"再ラン\""));
+        assert!(tiers[0].contains("\"段構成\""));
+    }
+
+    #[test]
+    fn ct4_eval_english_retrieval_terms_expand_to_japanese_index_terms() {
+        use super::build_fts_tiers;
+
+        let tiers = build_fts_tiers("chunk size was 512 tokens in the retrieval pipeline doc");
+        assert!(!tiers.is_empty());
+        assert!(tiers[0].contains("\"チャンク\""));
+        assert!(tiers[0].contains("\"トークン\""));
+        assert!(tiers[0].contains("\"パイプライン\""));
+        assert!(tiers[0].matches(" OR ").count() < 64);
     }
 
     #[test]
@@ -13418,6 +14660,7 @@ mod tests {
             heartbeat_at: None,
             fallback_reason: Some("rate_limit".to_owned()),
             created_at: "2026-07-01T00:00:00Z".to_owned(),
+            bbox_annotation_enabled: None,
             reserved_usd: Some(49.0),
             reserved_month: Some("2026-07".to_owned()),
             reservation_id: Some("res_forged".to_owned()),
@@ -13540,6 +14783,57 @@ mod tests {
         std::fs::write(&path, contents).unwrap();
         let err = read_stored_chunks(&kcs_dir).unwrap_err();
         assert_eq!(err.error_code(), "KCS-E-STORE-CORRUPT-001");
+    }
+
+    #[test]
+    fn ct4_legacy_chunk_ledger_assigns_stable_association_rowids() {
+        use super::{chunks_jsonl_path, read_stored_chunks};
+        let dir = tempfile::tempdir().unwrap();
+        let kcs_dir = dir.path().join(".kcs");
+        let path = chunks_jsonl_path(&kcs_dir);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            format!(
+                "{}\n{}\n",
+                stored_chunk_line(42, "c42"),
+                stored_chunk_line(7, "c7")
+            ),
+        )
+        .unwrap();
+
+        let chunks = read_stored_chunks(&kcs_dir).unwrap();
+        assert_eq!(chunks[0].association_rowid, Some(2));
+        assert_eq!(chunks[1].association_rowid, Some(1));
+        assert_eq!(chunks[0].rowid, 42);
+        assert_eq!(chunks[1].rowid, 7);
+    }
+
+    #[test]
+    fn ct4_chunk_ledger_retains_two_configs_for_one_chunk() {
+        use super::{chunks_jsonl_path, read_stored_chunks};
+        let dir = tempfile::tempdir().unwrap();
+        let kcs_dir = dir.path().join(".kcs");
+        let path = chunks_jsonl_path(&kcs_dir);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let mut first: serde_json::Value =
+            serde_json::from_str(&stored_chunk_line(7, "shared")).unwrap();
+        first["association_rowid"] = serde_json::json!(11);
+        let mut second = first.clone();
+        second["association_rowid"] = serde_json::json!(29);
+        second["chunking_config_hash"] = serde_json::json!(format!("sha256:{}", "e".repeat(64)));
+        std::fs::write(&path, format!("{first}\n{second}\n")).unwrap();
+
+        let chunks = read_stored_chunks(&kcs_dir).unwrap();
+        assert_eq!(chunks.len(), 2);
+        assert_eq!(chunks[0].rowid, 7);
+        assert_eq!(chunks[1].rowid, 7);
+        assert_eq!(chunks[0].association_rowid, Some(11));
+        assert_eq!(chunks[1].association_rowid, Some(29));
+        assert_ne!(
+            chunks[0].row.chunking_config_hash,
+            chunks[1].row.chunking_config_hash
+        );
     }
 
     #[test]
@@ -13769,6 +15063,7 @@ mod tests {
             heartbeat_at: Some("2020-01-01T00:00:00Z".to_owned()),
             fallback_reason: Some("ready_for_online_adapter".to_owned()),
             created_at: "2026-07-04T00:00:00Z".to_owned(),
+            bbox_annotation_enabled: None,
             reserved_usd: None,
             reserved_month: None,
             reservation_id: None,

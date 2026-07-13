@@ -3,7 +3,7 @@
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs::{self, File, OpenOptions};
-use std::io::{Read, Write};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 #[cfg(not(windows))]
 use std::process::Command;
@@ -25,14 +25,14 @@ use crate::error::{IoResultExt, KcsError, Result};
 use crate::portable::{
     portable_collision_key, portable_leaf_error, portable_tag_leaf, PORTABLE_TAGS_DIRECTORY,
 };
+use crate::purge::PurgeState;
 use crate::schema::{validate_json_schema, SchemaKind};
 use crate::ExitCode;
 
 const FORMAT_VERSION: &str = "0.1.0";
 pub const DEFAULT_MAX_ARCHIVE_FILE_BYTES: u64 = MAX_RAW_OBJECT_BYTES;
 pub const DEFAULT_MAX_ARCHIVE_SCOPE_BYTES: u64 = 4 * 1024 * 1024 * 1024;
-pub const MAX_TREE_ENTRIES: usize = 10_000;
-pub const MAX_COMMIT_PARENTS: usize = 64;
+pub use crate::dag::{MAX_COMMIT_PARENTS, MAX_TREE_ENTRIES};
 const MAX_TAG_REFS: usize = 100_000;
 const MAX_TAG_REF_BYTES: u64 = 128;
 
@@ -77,6 +77,21 @@ pub struct PendingNormalizeRef {
 struct WorkingFileCandidate {
     path: PathBuf,
     file_name: String,
+}
+
+#[derive(Debug)]
+struct StagedWorkingFile {
+    candidate: WorkingFileCandidate,
+    temp_path: PathBuf,
+    file: File,
+    raw_hash: String,
+    size_bytes: u64,
+}
+
+impl Drop for StagedWorkingFile {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.temp_path);
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -251,6 +266,18 @@ impl Repository {
     }
 
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
+        let repo = Self::open_without_head_repair(path)?;
+        // R13-4: repair a corrupt (empty/missing) HEAD from refs/heads/main before
+        // any command reads or advances HEAD. Done on every ordinary `open` so
+        // `log`/`status` display the real history and `snapshot` extends it.
+        repo.self_heal_head()?;
+        Ok(repo)
+    }
+
+    /// Validate and open a repository without performing HEAD self-healing.
+    /// Mutating repair commands use this to acquire `.kcs/.lock` before invoking
+    /// [`Self::self_heal_head_for_repair`].
+    pub fn open_without_head_repair(path: impl AsRef<Path>) -> Result<Self> {
         let root = path.as_ref().canonicalize().kcs_io(path.as_ref())?;
         let kcs_dir = root.join(".kcs");
         validate_store_directory(&kcs_dir)?;
@@ -261,17 +288,48 @@ impl Repository {
             store: ObjectStore::new(kcs_dir),
         };
         repo.validate()?;
-        // R13-4: repair a corrupt (empty/missing) HEAD from refs/heads/main before
-        // any command reads or advances HEAD. Done on every `open` so `log`/`status`
-        // display the real history and `snapshot` extends it (rather than orphaning
-        // it under a fresh root commit). A healthy HEAD is an untouched no-op.
-        repo.self_heal_head()?;
         Ok(repo)
     }
 
     pub fn open_current() -> Result<Self> {
         let cwd = std::env::current_dir().map_err(|err| KcsError::io(err.to_string(), "."))?;
         Self::open(cwd)
+    }
+
+    pub fn open_current_without_head_repair() -> Result<Self> {
+        let cwd = std::env::current_dir().map_err(|err| KcsError::io(err.to_string(), "."))?;
+        Self::open_without_head_repair(cwd)
+    }
+
+    /// Perform the established HEAD self-heal after a repair command has
+    /// acquired the scope store lock. The lock is process-reentrant.
+    pub fn self_heal_head_for_repair(&self) -> Result<()> {
+        self.self_heal_head().map(|_| ())
+    }
+
+    /// Open a scope for immutable CAS/index search while treating
+    /// `manifest.json` as a derived acceleration artifact. Search history is
+    /// committed tree truth, so a malformed mutable manifest must not invalidate a
+    /// signed cursor replay. Config, scope identity, store directory, and HEAD are
+    /// validated exactly as in [`Self::open`].
+    pub fn open_for_search(path: impl AsRef<Path>) -> Result<Self> {
+        let root = path.as_ref().canonicalize().kcs_io(path.as_ref())?;
+        let kcs_dir = root.join(".kcs");
+        validate_store_directory(&kcs_dir)?;
+        let repo = Self {
+            root,
+            kcs_dir: kcs_dir.clone(),
+            store: ObjectStore::new(kcs_dir),
+        };
+        repo.validate_config()?;
+        repo.validate_scope()?;
+        repo.self_heal_head()?;
+        Ok(repo)
+    }
+
+    pub fn open_current_for_search() -> Result<Self> {
+        let cwd = std::env::current_dir().map_err(|err| KcsError::io(err.to_string(), "."))?;
+        Self::open_for_search(cwd)
     }
 
     #[must_use]
@@ -386,6 +444,13 @@ impl Repository {
             store_raw,
             limits,
         )?;
+        if store_raw {
+            // Raw publication and erase-receipt retirement are one store-locked
+            // operation even for direct callers of this public builder. Snapshot
+            // callers already hold this reentrant lock.
+            let _lock = StoreLock::acquire(&self.kcs_dir)?;
+            return self.archive_staged_working_tree(candidates, normalize_by_path, limits);
+        }
         let mut entries = Vec::new();
         let mut consumed_scope_bytes = 0_u64;
         for candidate in candidates {
@@ -403,27 +468,13 @@ impl Repository {
                     metadata.len(),
                 ));
             }
-            let (raw_hash, consumed) = if store_raw {
-                match self.store.write_raw_reader(&mut file, allowed) {
-                    Ok(result) => result,
-                    Err(error) if error.error_code() == "KCS-E-STORE-OBJECT-OVERSIZED-001" => {
-                        return Err(scope_input_oversized(
-                            &candidate.file_name,
-                            limits,
-                            allowed.saturating_add(1),
-                        ))
-                    }
-                    Err(error) => return Err(error),
-                }
-            } else {
-                hash_scope_file(
-                    &mut file,
-                    &candidate.path,
-                    &candidate.file_name,
-                    allowed,
-                    limits,
-                )?
-            };
+            let (raw_hash, consumed) = hash_scope_file(
+                &mut file,
+                &candidate.path,
+                &candidate.file_name,
+                allowed,
+                limits,
+            )?;
             if file.metadata().kcs_io(&candidate.path)?.len() != consumed {
                 return Err(scope_file_changed(&candidate.file_name));
             }
@@ -441,6 +492,75 @@ impl Repository {
                     );
                 }
             }
+            tree_entry.validate()?;
+            entries.push(tree_entry);
+        }
+        Ok(WorkingTree {
+            tree: build_tree(entries)?,
+        })
+    }
+
+    fn archive_staged_working_tree(
+        &self,
+        candidates: Vec<WorkingFileCandidate>,
+        normalize_by_path: &BTreeMap<String, PendingNormalizeRef>,
+        limits: ArchiveLimits,
+    ) -> Result<WorkingTree> {
+        // The caller holds `.kcs/.lock`, so no live KCS writer can own an
+        // `.ingest-*` leaf. Remove crash-orphaned raw bytes before creating any
+        // new staging file; otherwise a tombstoned re-ingest killed before its
+        // authorization check could remain in KCS-managed storage indefinitely.
+        cleanup_orphan_raw_ingest_temps(&self.kcs_dir)?;
+        let mut staged = Vec::with_capacity(candidates.len());
+        let mut consumed_scope_bytes = 0_u64;
+        for candidate in candidates {
+            let remaining = limits
+                .max_scope_bytes
+                .checked_sub(consumed_scope_bytes)
+                .ok_or_else(|| scope_input_oversized(&candidate.file_name, limits, u64::MAX))?;
+            let allowed = limits.max_file_bytes.min(remaining);
+            let staged_file = stage_scope_file(&self.kcs_dir, candidate, allowed, limits)?;
+            consumed_scope_bytes = consumed_scope_bytes
+                .checked_add(staged_file.size_bytes)
+                .ok_or_else(|| {
+                    scope_input_oversized(&staged_file.candidate.file_name, limits, u64::MAX)
+                })?;
+            staged.push(staged_file);
+        }
+
+        // Discover and validate every candidate barrier before the first raw CAS
+        // publication. Thus a later path carrying a tombstoned identity cannot
+        // leave earlier, otherwise-valid candidates partially archived.
+        let purge = PurgeState::new(&self.kcs_dir);
+        let mut receipts = BTreeSet::new();
+        for file in &staged {
+            if ensure_raw_publication_allowed(&purge, &file.raw_hash)? {
+                receipts.insert(file.raw_hash.clone());
+            }
+        }
+
+        let mut entries = Vec::with_capacity(staged.len());
+        for mut staged_file in staged {
+            staged_file
+                .file
+                .seek(SeekFrom::Start(0))
+                .kcs_io(&staged_file.temp_path)?;
+            let (published_hash, published_size) = self
+                .store
+                .write_raw_reader(&mut staged_file.file, staged_file.size_bytes)?;
+            if published_hash != staged_file.raw_hash || published_size != staged_file.size_bytes {
+                return Err(scope_file_changed(&staged_file.candidate.file_name));
+            }
+            if receipts.remove(&published_hash) {
+                purge.retire_erase_receipt(&published_hash)?;
+            }
+            let mut tree_entry =
+                TreeEntry::raw_file(staged_file.candidate.file_name.clone(), published_hash)?;
+            attach_pending_normalize(
+                &mut tree_entry,
+                &staged_file.candidate.file_name,
+                normalize_by_path,
+            );
             tree_entry.validate()?;
             entries.push(tree_entry);
         }
@@ -602,6 +722,7 @@ impl Repository {
             excluded_paths,
             &BTreeMap::new(),
             explicitly_allowed_tier_a_paths,
+            false,
         )
     }
 
@@ -618,6 +739,7 @@ impl Repository {
             excluded_paths,
             &BTreeMap::new(),
             &BTreeSet::new(),
+            false,
         )
     }
 
@@ -657,9 +779,234 @@ impl Repository {
             excluded_paths,
             normalize_by_path,
             explicitly_allowed_tier_a_paths,
+            false,
         )
     }
 
+    /// Promote verified normalized identities on existing HEAD entries without
+    /// snapshotting unrelated working-tree edits.
+    ///
+    /// The caller supplies content-bound references after validating the online
+    /// result and current policy.  This boundary independently hashes the current
+    /// working tree while holding the store lock and applies a reference only when
+    /// both HEAD and the current file still equal `expected_raw_hash`.  A changed,
+    /// deleted, or newly-created path is ignored.  Every unrelated HEAD entry is
+    /// retained byte-for-byte, so one accepted online task cannot accidentally
+    /// commit a sibling edit that happened while the task was deferred.
+    pub fn promote_normalize_refs(
+        &self,
+        message: Option<&str>,
+        normalize_by_path: &BTreeMap<String, PendingNormalizeRef>,
+    ) -> Result<SnapshotOutcome> {
+        self.promote_normalize_refs_with_tool_lock_hash(message, normalize_by_path, None)
+    }
+
+    /// Promotion variant used by a caller that has durably staged the next
+    /// tool-lock and therefore needs the commit to attest that staged identity
+    /// before the mutable live projection is published.
+    pub fn promote_normalize_refs_with_staged_tool_lock(
+        &self,
+        message: Option<&str>,
+        normalize_by_path: &BTreeMap<String, PendingNormalizeRef>,
+        tool_lock_hash: &str,
+    ) -> Result<SnapshotOutcome> {
+        if !is_hash(tool_lock_hash) {
+            return Err(KcsError::schema(
+                "staged promotion tool_lock_hash must be sha256 lowercase hex",
+            ));
+        }
+        self.promote_normalize_refs_with_tool_lock_hash(
+            message,
+            normalize_by_path,
+            Some(tool_lock_hash),
+        )
+    }
+
+    fn promote_normalize_refs_with_tool_lock_hash(
+        &self,
+        message: Option<&str>,
+        normalize_by_path: &BTreeMap<String, PendingNormalizeRef>,
+        staged_tool_lock_hash: Option<&str>,
+    ) -> Result<SnapshotOutcome> {
+        self.validate()?;
+        let _lock = StoreLock::acquire(&self.kcs_dir)?;
+        let head_hash = self
+            .head_commit_hash()?
+            .ok_or_else(|| KcsError::invalid_usage("cannot promote in an unborn scope"))?;
+        let head_commit = self.read_commit(&head_hash).map_err(|error| {
+            if is_store_not_found(&error) {
+                KcsError::commit_shallow(
+                    "HEAD commit object is missing; online output was not promoted",
+                    head_hash.clone(),
+                )
+            } else {
+                error
+            }
+        })?;
+        let prior_tree = self.read_tree(&head_commit.tree).map_err(|error| {
+            if is_store_not_found(&error) {
+                KcsError::commit_shallow(
+                    "HEAD tree object is missing; online output was not promoted",
+                    head_hash.clone(),
+                )
+            } else {
+                error
+            }
+        })?;
+        let current = self.build_working_tree(false)?.tree;
+        let current_raw = tree_map(&current);
+        let purge = PurgeState::new(&self.kcs_dir);
+        let mut promoted_tree = prior_tree.clone();
+        let mut changed = false;
+        for entry in &mut promoted_tree.entries {
+            let Some(pending) = normalize_by_path.get(&entry.path) else {
+                continue;
+            };
+            let exact_current = current_raw
+                .get(&entry.path)
+                .is_some_and(|raw_hash| raw_hash == &pending.expected_raw_hash);
+            if !exact_current || entry.raw_hash != pending.expected_raw_hash {
+                continue;
+            }
+            ensure_raw_publication_allowed(&purge, &pending.expected_raw_hash)?;
+            if entry.normalize.as_ref() != Some(&pending.normalize) {
+                entry.normalize = Some(pending.normalize.clone());
+                changed = true;
+            }
+        }
+        promoted_tree.validate()?;
+        let stats = commit_stats(Some(&prior_tree), &promoted_tree);
+        if !changed {
+            return Ok(SnapshotOutcome {
+                noop: true,
+                message: "promotion noop: bindings unchanged".to_owned(),
+                tree_hash: head_commit.tree,
+                commit_hash: None,
+                commit: None,
+                stats,
+            });
+        }
+
+        let tree_value = serde_json::to_value(&promoted_tree)
+            .map_err(|error| KcsError::schema(error.to_string()))?;
+        let (tree_hash, _) = self.store.write_json(ObjectKind::Tree, &tree_value)?;
+        let created_at = fixed_now_override().unwrap_or_else(now_utc_seconds);
+        let commit = CommitObject::new(
+            tree_hash.clone(),
+            vec![head_hash],
+            created_at.clone(),
+            message
+                .map(str::to_owned)
+                .unwrap_or_else(|| format!("online Markdownize promotion at {created_at}")),
+            match staged_tool_lock_hash {
+                Some(hash) => hash.to_owned(),
+                None => self.tool_lock_hash()?,
+            },
+            stats.clone(),
+            CommitType::Auto,
+        )?;
+        let commit_value =
+            serde_json::to_value(&commit).map_err(|error| KcsError::schema(error.to_string()))?;
+        let (commit_hash, _) = self.store.write_json(ObjectKind::Commit, &commit_value)?;
+        atomic_overwrite(
+            &self.kcs_dir.join("refs/heads/main"),
+            commit_hash.as_bytes(),
+        )?;
+        atomic_overwrite(&self.kcs_dir.join("HEAD"), commit_hash.as_bytes())?;
+        self.write_manifest(&promoted_tree, Some(&prior_tree))?;
+        Ok(SnapshotOutcome {
+            noop: false,
+            message: "online Markdownize promotion created".to_owned(),
+            tree_hash,
+            commit_hash: Some(commit_hash),
+            commit: Some(commit),
+            stats,
+        })
+    }
+
+    /// Capture the purge-time working tree and force exactly one protected
+    /// `commit_type=purged` child even when the tree equals HEAD. Unchanged
+    /// files retain their existing normalize bindings; changed/new files do not
+    /// inherit stale normalization metadata.
+    pub fn purged_snapshot(
+        &self,
+        reason: &str,
+        fixed_now: Option<&str>,
+    ) -> Result<SnapshotOutcome> {
+        self.validate()?;
+        let _lock = StoreLock::acquire(&self.kcs_dir)?;
+        let head = self
+            .head_commit_hash()?
+            .ok_or_else(|| KcsError::invalid_usage("cannot purge an unborn scope"))?;
+        let head_commit = self.read_commit(&head)?;
+        let head_tree = self.read_tree(&head_commit.tree)?;
+        let normalize_by_path = head_tree
+            .entries
+            .iter()
+            .filter_map(|entry| {
+                entry.normalize.clone().map(|normalize| {
+                    (
+                        entry.path.clone(),
+                        PendingNormalizeRef {
+                            expected_raw_hash: entry.raw_hash.clone(),
+                            normalize,
+                        },
+                    )
+                })
+            })
+            .collect::<BTreeMap<_, _>>();
+        self.snapshot_with_type(
+            Some(reason),
+            fixed_now,
+            CommitType::Purged,
+            &BTreeSet::new(),
+            &normalize_by_path,
+            &BTreeSet::new(),
+            true,
+        )
+    }
+
+    /// Record a successful object repair without rescanning or changing the
+    /// snapshot tree. The caller holds the store lock while restoring verified
+    /// bytes; this method is reentrant and advances refs only after the repaired
+    /// commit object is durable.
+    pub fn record_repaired_commit(&self, message: Option<&str>) -> Result<String> {
+        self.validate()?;
+        let _lock = StoreLock::acquire(&self.kcs_dir)?;
+        let head = self
+            .head_commit_hash()?
+            .ok_or_else(|| KcsError::invalid_usage("cannot record repair in an unborn scope"))?;
+        let head_commit = self.read_commit(&head)?;
+        // The tree itself must still be verified before a new commit refers to it.
+        self.read_tree(&head_commit.tree)?;
+        let created_at = now_utc_seconds();
+        let commit = CommitObject::new(
+            head_commit.tree,
+            vec![head],
+            created_at.clone(),
+            message
+                .map(str::to_owned)
+                .unwrap_or_else(|| format!("object repair at {created_at}")),
+            self.tool_lock_hash()?,
+            CommitStats {
+                files_added: 0,
+                files_modified: 0,
+                files_deleted: 0,
+            },
+            CommitType::Repaired,
+        )?;
+        let commit_value =
+            serde_json::to_value(&commit).map_err(|error| KcsError::schema(error.to_string()))?;
+        let (commit_hash, _) = self.store.write_json(ObjectKind::Commit, &commit_value)?;
+        atomic_overwrite(
+            &self.kcs_dir.join("refs/heads/main"),
+            commit_hash.as_bytes(),
+        )?;
+        atomic_overwrite(&self.kcs_dir.join("HEAD"), commit_hash.as_bytes())?;
+        Ok(commit_hash)
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn snapshot_with_type(
         &self,
         message: Option<&str>,
@@ -668,6 +1015,7 @@ impl Repository {
         excluded_paths: &BTreeSet<String>,
         normalize_by_path: &BTreeMap<String, PendingNormalizeRef>,
         explicitly_allowed_tier_a_paths: &BTreeSet<String>,
+        force_commit: bool,
     ) -> Result<SnapshotOutcome> {
         self.validate()?;
         let _lock = StoreLock::acquire(&self.kcs_dir)?;
@@ -727,7 +1075,7 @@ impl Repository {
         };
         let stats = commit_stats(prior_tree.as_ref(), &working);
 
-        if head_tree_hash.as_deref() == Some(tree_hash.as_str()) {
+        if !force_commit && head_tree_hash.as_deref() == Some(tree_hash.as_str()) {
             return Ok(SnapshotOutcome {
                 noop: true,
                 message: "snapshot noop: tree unchanged".to_owned(),
@@ -1517,6 +1865,13 @@ pub fn read_logs_retention_days(config_toml_path: &Path) -> Option<u32> {
 /// concurrent process's `O_APPEND` handle on the renamed inode loses no lines —
 /// rename is atomic and its bytes land in the dated file.
 pub fn append_jsonl_rotating(path: &Path, value: &Value, retention_days: u32) -> Result<()> {
+    // CT4-PURGE-008: every current-log append is serialized against purge's
+    // current+rotated scrub. A contended nonblocking lock makes this best-effort
+    // append fail without landing a post-scrub row; existing observability callers
+    // already downgrade log failures so user operations remain unaffected.
+    let _scrub_lock = scrub_lock_path(path)
+        .map(StoreLock::acquire_path)
+        .transpose()?;
     let today = today_utc_date();
     // R22-8: `rotate_stale_log` is a check-then-rename (`!dated.exists()` then `fs::rename`),
     // which two processes crossing the first append after midnight can both enter. P1 renames
@@ -1536,6 +1891,18 @@ pub fn append_jsonl_rotating(path: &Path, value: &Value, retention_days: u32) ->
     }
     let _ = prune_rotated_logs(path, &today, retention_days);
     append_jsonl(path, value)
+}
+
+fn scrub_lock_path(path: &Path) -> Option<PathBuf> {
+    let name = path.file_name()?.to_str()?;
+    let parent = path.parent()?;
+    if matches!(name, "events.jsonl" | "errors.jsonl" | "metrics.jsonl") {
+        Some(parent.join("scrub.lock"))
+    } else if name == "access.jsonl" {
+        Some(parent.join("access.scrub.lock"))
+    } else {
+        None
+    }
 }
 
 /// Cheap pre-check for [`append_jsonl_rotating`]: is the live log's last-written day older
@@ -2346,6 +2713,254 @@ fn hash_scope_file(
     Ok((format!("sha256:{}", hex_digest(&hasher.finalize())), total))
 }
 
+fn stage_scope_file(
+    kcs_dir: &Path,
+    candidate: WorkingFileCandidate,
+    allowed: u64,
+    limits: ArchiveLimits,
+) -> Result<StagedWorkingFile> {
+    let mut source = open_scope_file_nofollow(&candidate.path)?;
+    let metadata = source.metadata().kcs_io(&candidate.path)?;
+    if metadata.len() > allowed {
+        return Err(scope_input_oversized(
+            &candidate.file_name,
+            limits,
+            metadata.len(),
+        ));
+    }
+    let raw_base = kcs_dir.join("objects/raw");
+    let (temp_path, mut staged) = create_raw_staging_file(&raw_base)?;
+    let result = (|| -> Result<(String, u64)> {
+        let mut hasher = Sha256::new();
+        let mut buffer = [0_u8; CAS_STREAM_BUFFER_BYTES];
+        let mut total = 0_u64;
+        loop {
+            let read_cap = allowed
+                .saturating_sub(total)
+                .saturating_add(1)
+                .min(buffer.len() as u64) as usize;
+            let count = source
+                .read(&mut buffer[..read_cap])
+                .kcs_io(&candidate.path)?;
+            if count == 0 {
+                break;
+            }
+            total = total
+                .checked_add(count as u64)
+                .ok_or_else(|| scope_input_oversized(&candidate.file_name, limits, u64::MAX))?;
+            if total > allowed {
+                return Err(scope_input_oversized(&candidate.file_name, limits, total));
+            }
+            hasher.update(&buffer[..count]);
+            staged.write_all(&buffer[..count]).kcs_io(&temp_path)?;
+        }
+        if source.metadata().kcs_io(&candidate.path)?.len() != total {
+            return Err(scope_file_changed(&candidate.file_name));
+        }
+        staged.sync_all().kcs_io(&temp_path)?;
+        Ok((format!("sha256:{}", hex_digest(&hasher.finalize())), total))
+    })();
+    match result {
+        Ok((raw_hash, size_bytes)) => Ok(StagedWorkingFile {
+            candidate,
+            temp_path,
+            file: staged,
+            raw_hash,
+            size_bytes,
+        }),
+        Err(error) => {
+            drop(staged);
+            let _ = fs::remove_file(&temp_path);
+            Err(error)
+        }
+    }
+}
+
+fn create_raw_staging_file(parent: &Path) -> Result<(PathBuf, File)> {
+    for attempt in 0..16_u8 {
+        let path = parent.join(format!(
+            ".ingest-{}-{}-{attempt}",
+            std::process::id(),
+            unix_nanos()
+        ));
+        let mut options = OpenOptions::new();
+        options.write(true).read(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        match options.open(&path) {
+            Ok(file) => return Ok((path, file)),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(KcsError::io(error.to_string(), path.display().to_string())),
+        }
+    }
+    Err(KcsError::io(
+        "could not allocate a unique raw-ingest staging file",
+        parent.display().to_string(),
+    ))
+}
+
+/// Remove crash-orphaned raw-ingest transaction files while the caller holds
+/// the scope store lock. The namespace walk and aggregate physical bytes are
+/// bounded; every candidate is opened no-follow and must be a single-link,
+/// bounded regular file before unlinking.
+pub fn cleanup_orphan_raw_ingest_temps(kcs_dir: &Path) -> Result<u64> {
+    const MAX_RAW_DIRECTORY_ENTRIES: usize = 100_000;
+    const MAX_ORPHAN_BYTES: u64 = DEFAULT_MAX_ARCHIVE_SCOPE_BYTES;
+
+    validate_store_directory(kcs_dir)?;
+    let objects = kcs_dir.join("objects");
+    let raw_base = objects.join("raw");
+    for directory in [&objects, &raw_base] {
+        validate_ingest_directory(directory)?;
+    }
+
+    let mut visited = 0_usize;
+    let mut total_bytes = 0_u64;
+    let mut removed = 0_u64;
+    let entries = fs::read_dir(&raw_base).kcs_io(&raw_base)?;
+    for entry in entries {
+        let entry = entry.kcs_io(&raw_base)?;
+        visited = visited.saturating_add(1);
+        if visited > MAX_RAW_DIRECTORY_ENTRIES {
+            return Err(orphan_raw_ingest_error(
+                &raw_base,
+                "raw object directory exceeds the orphan-cleanup entry limit",
+            ));
+        }
+        if !entry
+            .file_name()
+            .as_encoded_bytes()
+            .starts_with(b".ingest-")
+        {
+            continue;
+        }
+
+        let path = entry.path();
+        let listed = fs::symlink_metadata(&path).kcs_io(&path)?;
+        if listed.file_type().is_symlink()
+            || !listed.file_type().is_file()
+            || listed.len() > MAX_RAW_OBJECT_BYTES
+        {
+            return Err(orphan_raw_ingest_error(
+                &path,
+                "raw-ingest orphan is not a bounded regular file",
+            ));
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            if listed.nlink() != 1 {
+                return Err(orphan_raw_ingest_error(
+                    &path,
+                    "raw-ingest orphan has an unexpected hard-link count",
+                ));
+            }
+        }
+        #[cfg(windows)]
+        if !crate::cas::windows_regular_file_is_safe(&path).kcs_io(&path)? {
+            return Err(orphan_raw_ingest_error(
+                &path,
+                "raw-ingest orphan is a reparse point or hard link",
+            ));
+        }
+
+        let opened = open_scope_file_nofollow(&path)?;
+        let opened_metadata = opened.metadata().kcs_io(&path)?;
+        if opened_metadata.len() != listed.len() || opened_metadata.len() > MAX_RAW_OBJECT_BYTES {
+            return Err(orphan_raw_ingest_error(
+                &path,
+                "raw-ingest orphan changed while it was opened",
+            ));
+        }
+        total_bytes = total_bytes
+            .checked_add(opened_metadata.len())
+            .ok_or_else(|| {
+                orphan_raw_ingest_error(&raw_base, "raw-ingest orphan byte count overflow")
+            })?;
+        if total_bytes > MAX_ORPHAN_BYTES {
+            return Err(orphan_raw_ingest_error(
+                &raw_base,
+                "raw-ingest orphans exceed the aggregate cleanup byte limit",
+            ));
+        }
+        drop(opened);
+        fs::remove_file(&path).kcs_io(&path)?;
+        removed = removed.saturating_add(1);
+    }
+    if removed > 0 {
+        if let Ok(directory) = File::open(&raw_base) {
+            let _ = directory.sync_all();
+        }
+    }
+    Ok(removed)
+}
+
+fn validate_ingest_directory(path: &Path) -> Result<()> {
+    let metadata = fs::symlink_metadata(path).kcs_io(path)?;
+    if metadata.file_type().is_symlink() || !metadata.file_type().is_dir() {
+        return Err(orphan_raw_ingest_error(
+            path,
+            "raw-ingest namespace ancestor is not a real directory",
+        ));
+    }
+    #[cfg(windows)]
+    if !crate::cas::windows_directory_is_real(path).kcs_io(path)? {
+        return Err(orphan_raw_ingest_error(
+            path,
+            "raw-ingest namespace ancestor is a reparse point",
+        ));
+    }
+    Ok(())
+}
+
+fn orphan_raw_ingest_error(path: &Path, message: &str) -> KcsError {
+    KcsError::new(
+        "KCS-E-STORE-CORRUPT-001",
+        message,
+        json!({ "path": path }),
+        ExitCode::PermanentFailure,
+    )
+}
+
+fn ensure_raw_publication_allowed(purge: &PurgeState, raw_hash: &str) -> Result<bool> {
+    if purge.barrier_blocks(raw_hash)? {
+        return Err(KcsError::new(
+            "KCS-E-PURGE-INCOMPLETE-001",
+            "raw publication is blocked by an active purge transaction",
+            json!({ "component": "raw_ingest" }),
+            ExitCode::PartialFailure,
+        ));
+    }
+    if purge.read_tombstone(raw_hash)?.is_some() {
+        return Err(KcsError::new(
+            "KCS-E-PURGE-TOMBSTONED-001",
+            "raw publication is blocked by a public tombstone",
+            json!({ "component": "raw_ingest" }),
+            ExitCode::PermanentFailure,
+        ));
+    }
+    Ok(purge.read_erase_receipt(raw_hash)?.is_some())
+}
+
+fn attach_pending_normalize(
+    tree_entry: &mut TreeEntry,
+    file_name: &str,
+    normalize_by_path: &BTreeMap<String, PendingNormalizeRef>,
+) {
+    if let Some(pending) = normalize_by_path.get(file_name) {
+        if pending.expected_raw_hash == tree_entry.raw_hash {
+            tree_entry.normalize = Some(pending.normalize.clone());
+        } else {
+            eprintln!(
+                "warning: normalization metadata not attached because {file_name} changed after normalization"
+            );
+        }
+    }
+}
+
 fn hex_digest(bytes: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut out = String::with_capacity(bytes.len() * 2);
@@ -2919,7 +3534,7 @@ mod tests {
         MAX_COMMIT_PARENTS, MAX_TREE_ENTRIES,
     };
     use crate::cas::{hash_bytes, ObjectKind, ObjectStore};
-    use crate::dag::NormalizeRef;
+    use crate::dag::{CommitType, NormalizeRef};
     use serde_json::json;
     use std::collections::{BTreeMap, BTreeSet};
     use std::fs;
@@ -3118,6 +3733,34 @@ mod tests {
             .filter_map(std::result::Result::ok)
             .any(|entry| entry.file_name().to_string_lossy().starts_with("events-"));
         assert!(!rotated, "no rotation may happen within the same day");
+    }
+
+    #[test]
+    fn ct4_purge_log_appenders_honor_device_and_scope_scrub_locks() {
+        for (file_name, lock_name) in [
+            ("events.jsonl", "scrub.lock"),
+            ("access.jsonl", "access.scrub.lock"),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let log = dir.path().join(file_name);
+            let lock = dir.path().join(lock_name);
+            let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+            let (release_tx, release_rx) = std::sync::mpsc::channel();
+            let holder = std::thread::spawn(move || {
+                let _guard = StoreLock::acquire_path(lock).unwrap();
+                ready_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+            });
+            ready_rx.recv().unwrap();
+            let error = append_jsonl_rotating(&log, &json!({ "target": "late" }), 30).unwrap_err();
+            assert_eq!(error.error_code(), "KCS-E-STORE-LOCKED-001");
+            assert!(!log.exists(), "a contended post-scrub append must not land");
+            release_tx.send(()).unwrap();
+            holder.join().unwrap();
+
+            append_jsonl_rotating(&log, &json!({ "target": "after" }), 30).unwrap();
+            assert_eq!(fs::read_to_string(&log).unwrap().lines().count(), 1);
+        }
     }
 
     #[test]
@@ -3322,6 +3965,47 @@ mod tests {
                 .count(),
             0
         );
+    }
+
+    #[test]
+    fn ct4_raw_archive_removes_crash_orphans_before_new_staging() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = Repository::init(dir.path()).unwrap();
+        let orphan = repo.kcs_dir().join("objects/raw/.ingest-crashed-writer");
+        fs::write(&orphan, b"stale private transaction bytes").unwrap();
+        fs::write(dir.path().join("doc.md"), b"new authoritative bytes").unwrap();
+
+        let outcome = repo.snapshot(Some("cleanup and archive"), None).unwrap();
+        assert!(!orphan.exists());
+        let tree = repo.read_tree(&outcome.tree_hash).unwrap();
+        let raw_hash = tree
+            .entries
+            .iter()
+            .find(|entry| entry.path == "doc.md")
+            .unwrap()
+            .raw_hash
+            .clone();
+        ObjectStore::new(repo.kcs_dir())
+            .inspect_object(ObjectKind::Raw, &raw_hash)
+            .unwrap();
+    }
+
+    #[test]
+    fn ct4_raw_archive_rejects_oversized_orphan_before_publication() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = Repository::init(dir.path()).unwrap();
+        let orphan = repo.kcs_dir().join("objects/raw/.ingest-oversized");
+        fs::File::create(&orphan)
+            .unwrap()
+            .set_len(crate::cas::MAX_RAW_OBJECT_BYTES + 1)
+            .unwrap();
+        fs::write(dir.path().join("doc.md"), b"must not publish").unwrap();
+        let head_before = fs::read(repo.kcs_dir().join("HEAD")).unwrap();
+
+        let error = repo.snapshot(Some("blocked cleanup"), None).unwrap_err();
+        assert_eq!(error.error_code(), "KCS-E-STORE-CORRUPT-001");
+        assert!(orphan.exists());
+        assert_eq!(fs::read(repo.kcs_dir().join("HEAD")).unwrap(), head_before);
     }
 
     #[test]
@@ -3550,6 +4234,61 @@ mod tests {
             direct.head_commit_hash().unwrap(),
             None,
             "both HEAD and refs empty is a genuinely unborn branch"
+        );
+    }
+
+    #[test]
+    fn purge_snapshot_forces_protected_child_when_tree_is_unchanged() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = Repository::init(dir.path()).unwrap();
+        fs::write(dir.path().join("doc.txt"), b"retained").unwrap();
+        let parent = repo
+            .snapshot(Some("initial"), Some("2026-07-12T00:00:00Z"))
+            .unwrap()
+            .commit_hash
+            .unwrap();
+        let parent_tree = repo.read_commit(&parent).unwrap().tree;
+
+        let outcome = repo
+            .purged_snapshot("legal", Some("2026-07-13T00:00:00Z"))
+            .unwrap();
+        assert!(!outcome.noop);
+        let commit_hash = outcome.commit_hash.unwrap();
+        let commit = repo.read_commit(&commit_hash).unwrap();
+        assert_eq!(commit.commit_type, CommitType::Purged);
+        assert_eq!(commit.message, "legal");
+        assert_eq!(commit.parents, vec![parent]);
+        assert_eq!(commit.tree, parent_tree);
+        assert_eq!(commit.created_at, "2026-07-13T00:00:00Z");
+    }
+
+    #[test]
+    fn purge_snapshot_captures_the_current_working_tree() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = Repository::init(dir.path()).unwrap();
+        fs::write(dir.path().join("keep.txt"), b"keep").unwrap();
+        fs::write(dir.path().join("removed.txt"), b"remove before purge").unwrap();
+        let parent = repo
+            .snapshot(Some("initial"), Some("2026-07-12T00:00:00Z"))
+            .unwrap()
+            .commit_hash
+            .unwrap();
+        fs::remove_file(dir.path().join("removed.txt")).unwrap();
+
+        let outcome = repo
+            .purged_snapshot("privacy", Some("2026-07-13T00:00:00Z"))
+            .unwrap();
+        let commit = outcome.commit.unwrap();
+        let tree = repo.read_tree(&commit.tree).unwrap();
+        assert_eq!(commit.commit_type, CommitType::Purged);
+        assert_eq!(commit.parents, vec![parent]);
+        assert_eq!(outcome.stats.files_deleted, 1);
+        assert_eq!(
+            tree.entries
+                .iter()
+                .map(|entry| entry.path.as_str())
+                .collect::<Vec<_>>(),
+            vec!["keep.txt"]
         );
     }
 }

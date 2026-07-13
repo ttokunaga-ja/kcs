@@ -808,6 +808,171 @@ fn ct3_chunk_007_search_only_serves_current_chunking_config_generation() {
 }
 
 #[test]
+fn ct4_current_config_association_is_added_for_deleted_history() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(
+        dir.path().join("historical.md"),
+        "# Historical\n\nretained-history-config-fixture\n",
+    )
+    .unwrap();
+    kcs(&dir, &["init"]).assert().success();
+    json_success(&dir, &["index", "--approve"]);
+
+    let db_path = dir.path().join(".kcs/index/sqlite.db");
+    let conn = rusqlite::Connection::open(&db_path).unwrap();
+    let historical_chunk: String = conn
+        .query_row(
+            "SELECT chunk_id FROM chunks
+             WHERE text LIKE '%retained-history-config-fixture%' LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    drop(conn);
+
+    fs::remove_file(dir.path().join("historical.md")).unwrap();
+    json_success(&dir, &["index", "--approve"]);
+    fs::write(
+        dir.path().join(".kcs/config.toml"),
+        "kcs_format_version = \"0.1.0\"\n[chunking]\nstrategy = \"heading\"\nmax_chars = 5999\n",
+    )
+    .unwrap();
+    json_success(&dir, &["index", "--approve"]);
+
+    let conn = rusqlite::Connection::open(&db_path).unwrap();
+    let current_config: String = conn
+        .query_row(
+            "SELECT chunking_config_hash
+             FROM chunk_config_generations
+             ORDER BY association_rowid DESC LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let current_association_count: u64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM chunk_config_generations
+             WHERE chunk_id = ?1 AND chunking_config_hash = ?2",
+            rusqlite::params![historical_chunk, current_config],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        current_association_count, 1,
+        "a config-preserving boundary must append a current-config association even when the normalized instance is historical-only"
+    );
+    assert_eq!(
+        conn.query_row(
+            "SELECT COUNT(*) FROM chunks WHERE chunk_id = ?1",
+            rusqlite::params![historical_chunk],
+            |row| row.get::<_, u64>(0),
+        )
+        .unwrap(),
+        1,
+        "the immutable chunk row is shared by both config generations"
+    );
+}
+
+#[test]
+fn ct4_historical_only_current_config_chunks_enqueue_embeddings() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(
+        dir.path().join("historical.md"),
+        "# Historical\n\nretained embedding history alpha bravo charlie delta echo\n",
+    )
+    .unwrap();
+    kcs(&dir, &["init"]).assert().success();
+    json_success_embed(&dir, "mock", &["index", "--yes"]);
+    let conn = rusqlite::Connection::open(dir.path().join(".kcs/index/sqlite.db")).unwrap();
+    let historical_raw: String = conn
+        .query_row(
+            "SELECT raw_hash FROM chunks WHERE text LIKE '%retained embedding history%' LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    drop(conn);
+
+    fs::remove_file(dir.path().join("historical.md")).unwrap();
+    json_success_embed(&dir, "mock", &["index", "--yes"]);
+    fs::write(
+        dir.path().join(".kcs/config.toml"),
+        "kcs_format_version = \"0.1.0\"\n[chunking]\nstrategy = \"heading\"\nmax_chars = 24\n",
+    )
+    .unwrap();
+    json_success_embed(&dir, "mock", &["index", "--yes"]);
+
+    let conn = rusqlite::Connection::open(dir.path().join(".kcs/index/sqlite.db")).unwrap();
+    let current_config: String = conn
+        .query_row(
+            "SELECT chunking_config_hash FROM chunk_config_generations
+             ORDER BY association_rowid DESC LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let mut statement = conn
+        .prepare(
+            "SELECT c.chunk_id FROM chunks c
+             WHERE c.raw_hash = ?1
+               AND EXISTS (
+                   SELECT 1 FROM chunk_config_generations cg
+                   WHERE cg.chunk_id = c.chunk_id AND cg.chunking_config_hash = ?2
+               )",
+        )
+        .unwrap();
+    let historical_current_ids = statement
+        .query_map(rusqlite::params![historical_raw, current_config], |row| {
+            row.get::<_, String>(0)
+        })
+        .unwrap()
+        .collect::<std::result::Result<std::collections::BTreeSet<_>, _>>()
+        .unwrap();
+    assert!(!historical_current_ids.is_empty());
+
+    let status = json_success_embed(&dir, "mock", &["status"]);
+    let task_refs = tasks_of_type(&status, "embedding")
+        .into_iter()
+        .filter_map(|task| task["output_ref"].as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    for chunk_id in historical_current_ids {
+        assert!(
+            task_refs.contains(format!("embedding:{chunk_id}").as_str()),
+            "every retained historical current-config chunk needs an embedding task: {status}"
+        );
+    }
+}
+
+#[test]
+fn ct4_rebuild_preserves_historical_tree_projection_cache() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("cached.md"), "# C1\n\nfirst snapshot\n").unwrap();
+    kcs(&dir, &["init"]).assert().success();
+    let first = json_success(&dir, &["index", "--approve"]);
+    let first_commit = first["commit_hash"].as_str().unwrap().to_owned();
+
+    fs::write(dir.path().join("cached.md"), "# C2\n\nsecond snapshot\n").unwrap();
+    let second = json_success(&dir, &["index", "--approve"]);
+    let second_commit = second["commit_hash"].as_str().unwrap();
+    assert_ne!(first_commit, second_commit);
+
+    let conn = rusqlite::Connection::open(dir.path().join(".kcs/index/sqlite.db")).unwrap();
+    for commit in [&first_commit, second_commit] {
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM tree_entries
+                 WHERE commit_hash = ?1 AND path = 'cached.md'",
+                rusqlite::params![commit],
+                |row| row.get::<_, u64>(0),
+            )
+            .unwrap(),
+            1,
+            "atomic rebuild must retain immutable historical tree cache rows"
+        );
+    }
+}
+
+#[test]
 fn ct3_cursor_006_offset_matches_cursor_page() {
     let dir = indexed_scope();
     let first = json_success(&dir, &["search", "認証仕様", "--limit", "1"]);
@@ -1090,13 +1255,11 @@ fn ct3_multi_005_all_failed_returns_exit_4() {
     assert_eq!(err["error_code"], "KCS-E-SEARCH-SCOPE-ALL-FAILED-001");
 }
 
-// Cursor replay when a frozen scope is no longer resolvable via the registry:
-// query_hash is validated against the cursor's OWN scope list, the surviving
-// scope is served, the dropped scope lands in excluded_scopes (reason
-// "unreachable"), and the exit is 3 (CT3-MULTI-005 partial-failure semantics) —
-// never a misleading KCS-E-SEARCH-CURSOR-001.
+// Step 4 cursor v2 freezes the complete active scope set. Losing any active
+// scope makes replay non-reproducible, so replay hard-fails and instructs a
+// fresh search instead of silently shrinking to the surviving scopes.
 #[test]
-fn ct3_multi_005_cursor_replay_with_unresolvable_scope_is_partial() {
+fn ct4_cursor_replay_with_unresolvable_active_scope_hard_fails() {
     let parent = tempfile::tempdir().unwrap();
     let data_home = parent.path().join("xdg");
     // "a" sorts first → page 1 serves its chunk (RRF tie-break by scope_path),
@@ -1131,35 +1294,22 @@ fn ct3_multi_005_cursor_replay_with_unresolvable_scope_is_partial() {
     fs::remove_file(registry_path(&data_home)).unwrap();
     json_success_path(&b, &data_home, &["index", "--approve"]);
 
-    let output = hermetic_kcs_command()
-        .current_dir(&b)
-        .env("XDG_CONFIG_HOME", data_home.join("config"))
-        .env("XDG_DATA_HOME", data_home.join("data"))
-        .env("XDG_CACHE_HOME", data_home.join("cache"))
-        .args([
+    let (code, error) = run_json(
+        &b,
+        &data_home,
+        &[
             "search",
             "共通トピック",
             "--cursor",
             &cursor,
             "--limit",
             "5",
-        ])
-        .arg("--json")
-        .assert()
-        .code(3)
-        .get_output()
-        .stdout
-        .clone();
-    let page2: Value = serde_json::from_slice(&output).unwrap();
-    let excluded = page2["excluded_scopes"].as_array().unwrap();
-    assert_eq!(excluded.len(), 1);
-    assert_eq!(excluded[0]["scope_id"], a_scope_id.as_str());
-    assert_eq!(excluded[0]["reason"], "unreachable");
-    assert_eq!(page2["searched_scopes"].as_array().unwrap().len(), 1);
-    // The surviving scope's results are served on the replayed page.
-    let results = page2["results"].as_array().unwrap();
-    assert!(!results.is_empty());
-    assert!(value_path_ends_with(&results[0]["scope_path"], "b"));
+        ],
+    );
+    assert_eq!(code, 2, "active-scope loss is a cursor misuse: {error}");
+    assert_eq!(error["error_code"], "KCS-E-SEARCH-CURSOR-001");
+    assert_eq!(error["context"]["reason"], "active_scope_unavailable");
+    assert_eq!(error["context"]["scope_id"], a_scope_id);
 }
 
 // CT3-EMBED-003 (de-tautologized): cross-scope embedding profiles disagree — scope
@@ -1958,14 +2108,11 @@ fn ct3_l1_reindex_offline_surfaces_pending_embeddings_in_index_status() {
     assert!(search["index_status"]["enriched_ratio"].as_f64().unwrap() < 1.0);
 }
 
-// R15-7: an embedding task whose chunk is DELETED (file removed / re-chunked) is no
-// longer live at HEAD, so it can never be driven to completion
-// (`live_chunks_without_embedding` never revisits it). Left Pending it permanently
-// pollutes `index_status.pending_enrichment_tasks` / `status.tasks` with phantom pending
-// work. On the next index the reconciler now terminalizes it (non-retryable Failed), so
-// it drops out of the pending count while the surviving file's task stays pending.
+// Step 4 all-history keeps a deleted chunk active while its exact normalized
+// binding remains reachable. Its embedding task is real pending history work,
+// not a HEAD-only phantom to terminalize.
 #[test]
-fn r15_7_deleted_chunk_embedding_task_not_counted_pending() {
+fn ct4_deleted_historical_chunk_embedding_stays_pending() {
     let dir = tempfile::tempdir().unwrap();
     fs::write(
         dir.path().join("keep.md"),
@@ -1995,30 +2142,29 @@ fn r15_7_deleted_chunk_embedding_task_not_counted_pending() {
         .as_u64()
         .unwrap();
 
-    // Delete drop.md and re-index: its chunk is no longer live at the new HEAD.
+    // Delete drop.md and re-index: its chunk remains reachable through history.
     fs::remove_file(dir.path().join("drop.md")).unwrap();
     json_success_embed(&dir, "mock", &["index", "--yes"]);
 
     let after = json_success_embed(&dir, "mock", &["status"]);
     let emb_after = tasks_of_type(&after, "embedding");
-    // The deleted chunk's task is terminalized (non-retryable Failed), not pending.
     assert!(
-        emb_after.iter().any(|task| task["status"] == "failed"),
-        "the deleted chunk's embedding task must be terminalized: {after}"
+        emb_after.iter().all(|task| task["status"] == "pending"),
+        "retained historical embedding tasks remain genuine pending work: {after}"
     );
     // The surviving file still has a pending embedding task (no over-terminalization).
     assert!(
         emb_after.iter().any(|task| task["status"] == "pending"),
         "the live file's embedding task must stay pending: {after}"
     );
-    // index_status no longer counts the deleted chunk as pending enrichment.
+    // Both live and historical gaps remain in index_status.
     let count_after = json_success_embed(&dir, "mock", &["search", "本文"])["index_status"]
         ["pending_enrichment_tasks"]
         .as_u64()
         .unwrap();
     assert!(
-        count_after < count_before,
-        "the deleted chunk must drop out of pending_enrichment_tasks: {count_before} -> {count_after}"
+        count_after == count_before,
+        "deletion must not retire retained-history embedding work: {count_before} -> {count_after}"
     );
 }
 
@@ -2442,36 +2588,27 @@ fn m8_user_config_valid_budget_cap_accepted() {
     json_success(&dir, &["status"]);
 }
 
-// Minor: previously-untested error code KCS-E-CONFIG-NOT-IMPLEMENTED-001
-// (time-travel search flags are a later step).
+// Step 4 implements exact snapshot search; HEAD is a canonical commit selector.
 #[test]
-fn minor_not_implemented_error_code_is_emitted() {
+fn ct4_search_at_head_is_implemented() {
     let dir = indexed_scope();
-    // R9-6: KCS-E-CONFIG-NOT-IMPLEMENTED-001 exits 1 (canonical
-    // `KcsError::not_implemented`), unified across every not-implemented path.
-    let err = json_failure(&dir, &["search", "認証仕様", "--at", "HEAD"], 1);
-    assert_eq!(err["error_code"], "KCS-E-CONFIG-NOT-IMPLEMENTED-001");
+    let result = json_success(&dir, &["search", "認証仕様", "--at", "HEAD"]);
+    assert!(!result["results"].as_array().unwrap().is_empty());
+    assert_eq!(
+        result["results"][0]["evidence_pointer"]["commit"],
+        result["searched_scopes"][0]["snapshot_at"]
+    );
 }
 
-/// R9-6: every KCS-E-CONFIG-NOT-IMPLEMENTED-001 path exits with the SAME class
-/// (1, canonical `KcsError::not_implemented`). Before the fix `log --at` exited 1
-/// while `search --at`, `reindex --at` and `repair --verify-objects` exited 2, so
-/// an agent classifying by exit code saw one error_code split across two classes.
+/// R9-6: every remaining KCS-E-CONFIG-NOT-IMPLEMENTED-001 path exits with the
+/// canonical class 1. Step 4 implements search-at, historical reindex, and object
+/// verification, so none of those completed paths belongs here.
 #[test]
 fn r9_6_not_implemented_exit_code_is_uniform() {
     let dir = indexed_scope();
-    for args in [
-        vec!["search", "認証仕様", "--at", "HEAD"],
-        vec!["reindex", "--force", "--yes", "--at", "HEAD"],
-        vec!["repair", "--verify-objects"],
-        vec!["log", "--at", "HEAD"],
-    ] {
-        let err = json_failure(&dir, &args, 1);
-        assert_eq!(
-            err["error_code"], "KCS-E-CONFIG-NOT-IMPLEMENTED-001",
-            "args {args:?} must map to the not-implemented code at exit 1"
-        );
-    }
+    let args = ["log", "--at", "HEAD"];
+    let err = json_failure(&dir, &args, 1);
+    assert_eq!(err["error_code"], "KCS-E-CONFIG-NOT-IMPLEMENTED-001");
 }
 
 // Minor: previously-untested error code KCS-E-EVIDENCE-SCOPE-AMBIGUOUS-001 — a
@@ -2754,9 +2891,9 @@ fn n7_online_flag_drives_embedding_enrichment() {
 // acceptance scenarios (a)-(f).
 // ===========================================================================
 
-// (a) / O1: a cursor minted for another scope cannot bypass a --scope restriction
-// (no secret leak; the frozen vault scope is excluded scope_restriction_mismatch),
-// and a tampered/forged cursor fails HMAC verification (KCS-E-SEARCH-CURSOR-001).
+// (a) / O1: a cursor minted for another scope cannot bypass a --scope restriction.
+// Step 4 v2 rejects any restriction that drops a frozen active scope; a
+// tampered/forged cursor also fails HMAC verification.
 #[test]
 fn o1_cursor_scope_restriction_and_signature() {
     let parent = tempfile::tempdir().unwrap();
@@ -2807,7 +2944,7 @@ fn o1_cursor_scope_restriction_and_signature() {
         .to_owned();
 
     // Attacker in the safe scope replays the vault cursor but restricts --scope .
-    // (their own scope). O1(a): the vault scope is intersected out — no leak.
+    // The active vault scope cannot be intersected out of a signed v2 replay.
     let (code, resp) = run_json(
         &safe,
         &data_home,
@@ -2828,16 +2965,11 @@ fn o1_cursor_scope_restriction_and_signature() {
         "a cursor must not leak another scope's content across a --scope restriction: {dump}"
     );
     assert_eq!(
-        code, 4,
-        "every cursor scope excluded => all-failed exit 4: {resp}"
+        code, 2,
+        "dropping an active cursor scope is rejected: {resp}"
     );
-    let excluded = resp["context"]["excluded_scopes"].as_array().unwrap();
-    assert!(
-        excluded
-            .iter()
-            .any(|entry| entry["reason"] == "scope_restriction_mismatch"),
-        "the restricted vault scope must be excluded with scope_restriction_mismatch: {resp}"
-    );
+    assert_eq!(resp["error_code"], "KCS-E-SEARCH-CURSOR-001");
+    assert_eq!(resp["context"]["reason"], "active_scope_unavailable");
 
     // O1(b): a forged cursor (payload byte flipped) fails signature verification.
     let (payload, signature) = cursor.rsplit_once('.').unwrap();
@@ -3790,12 +3922,12 @@ fn r6_view_open_reject_extra_pointer_arguments() {
 }
 
 #[test]
-fn r6_reindex_rejects_unimplemented_at_and_extra_operands() {
+fn r6_reindex_rejects_force_at_and_extra_operands() {
     let dir = indexed_scope();
-    // R9-6: not-implemented `--at` exits 1 (canonical not_implemented); the extra
-    // positional stays a usage error (exit 2).
-    let at = json_failure(&dir, &["reindex", "--force", "--yes", "--at", "HEAD"], 1);
-    assert_eq!(at["error_code"], "KCS-E-CONFIG-NOT-IMPLEMENTED-001");
+    // Step 4 decision #67: historical enrichment and generation-forcing are
+    // mutually exclusive. The extra positional remains a usage error too.
+    let at = json_failure(&dir, &["reindex", "--force", "--yes", "--at", "HEAD"], 2);
+    assert_eq!(at["error_code"], "KCS-E-CONFIG-USAGE-001");
     let extra = json_failure(&dir, &["reindex", "--force", "--yes", "HEAD"], 2);
     assert_eq!(extra["error_code"], "KCS-E-CONFIG-USAGE-001");
 }
@@ -3970,7 +4102,7 @@ fn r7_multiscope_query_embedding_requires_every_target_scope_opt_in() {
 }
 
 #[test]
-fn r7_repair_rejects_unknown_flags_extra_operands_and_step4_verify() {
+fn r7_repair_rejects_unknown_flags_and_extra_operands() {
     let dir = indexed_scope();
     let unknown = json_failure(
         &dir,
@@ -3979,9 +4111,8 @@ fn r7_repair_rejects_unknown_flags_extra_operands_and_step4_verify() {
     );
     assert_eq!(unknown["error_code"], "KCS-E-CONFIG-USAGE-001");
 
-    // R9-6: not-implemented `--verify-objects` exits 1 (canonical not_implemented).
-    let verify = json_failure(&dir, &["repair", "--verify-objects"], 1);
-    assert_eq!(verify["error_code"], "KCS-E-CONFIG-NOT-IMPLEMENTED-001");
+    let verify = json_success(&dir, &["repair", "--verify-objects"]);
+    assert_eq!(verify["status"], "ok");
 }
 
 #[test]
@@ -6109,10 +6240,11 @@ const R18_1_BODY_V1: &str =
 const R18_1_BODY_V2: &str =
     "# R18-1\n\nembedding phantom reclaim regression 本文あいうえお かきくけこ さしすせそ B\n";
 
-// Discriminator (a): rate_limit embedding phantom → edit → re-index. The non-live phantom
-// is reclaimed, so the edited doc's chunk embeds (Done) instead of budget-Paused.
+// Step 4 discriminator: a rate-limited edited-away chunk remains active historical
+// work. Its reservation is not reclaimed; retry may complete it, while the newer
+// chunk remains budget-paused under a cap sized for only one send.
 #[test]
-fn r18_1_embedding_rate_limit_phantom_reclaimed_frees_cap_for_edited_doc() {
+fn ct4_retained_embedding_reservation_is_not_reclaimed_on_edit() {
     let dir = tempfile::tempdir().unwrap();
     assert_eq!(R18_1_BODY_V1.len(), R18_1_BODY_V2.len());
     fs::write(dir.path().join("doc.md"), R18_1_BODY_V1).unwrap();
@@ -6137,20 +6269,19 @@ fn r18_1_embedding_rate_limit_phantom_reclaimed_frees_cap_for_edited_doc() {
 
     // Edit (new chunk_id → old chunk non-live) and re-index with mock in the same month.
     fs::write(dir.path().join("doc.md"), R18_1_BODY_V2).unwrap();
-    json_success_embed_at(
-        &dir,
-        "mock",
-        "2026-07-05T00:00:00Z",
-        &["index", "--approve", "--online"],
-    );
+    // Retained historical work still owns the adapter cap, so publishing the new
+    // snapshot succeeds but enrichment truthfully reports the budget pause (exit 6).
+    kcs(&dir, &["index", "--approve", "--online"])
+        .env(TEST_ADOPTED_EMBEDDING_ENV, "mock")
+        .env("KCS_FIXED_NOW", "2026-07-05T00:00:00Z")
+        .arg("--json")
+        .assert()
+        .code(6);
 
-    // The non-live rate_limit phantom is reclaimed by exactly its reserved cost (F3-safe
-    // positive row; the charge ledger keeps the phantom row).
-    assert!(
-        (embedding_reclaim_usd(&dir) - doc_cost).abs() < 1e-12,
-        "the non-live rate_limit embedding phantom must be reclaimed by its exact cost \
-         (got reclaim={}, cost={doc_cost})",
-        embedding_reclaim_usd(&dir)
+    assert_eq!(
+        embedding_reclaim_usd(&dir),
+        0.0,
+        "a retained historical send reservation is still live and cannot be reclaimed"
     );
 
     let status = json_success_embed_at(&dir, "mock", "2026-07-05T00:00:00Z", &["status"]);
@@ -6160,8 +6291,8 @@ fn r18_1_embedding_rate_limit_phantom_reclaimed_frees_cap_for_edited_doc() {
         .filter(|task| task["status"] == "paused" && task["fallback_reason"] == "budget_exceeded")
         .count();
     assert_eq!(
-        paused_budget, 0,
-        "no embedding may be budget-paused after the reclaim: {status}"
+        paused_budget, 1,
+        "the newer chunk waits because retained historical work owns the cap: {status}"
     );
     let done = embedding
         .iter()
@@ -6169,7 +6300,7 @@ fn r18_1_embedding_rate_limit_phantom_reclaimed_frees_cap_for_edited_doc() {
         .count();
     assert!(
         done >= 1,
-        "the edited doc's chunk must embed (done) after the reclaim: {status}"
+        "the retained rate-limited historical chunk should complete on retry: {status}"
     );
 }
 
@@ -6443,12 +6574,10 @@ fn r19_1_lifted_tier_a_secret_held_from_online_send() {
     );
 }
 
-// R19-3: a non-live embedding retirement is REVERSIBLE (`retired_non_live`, not the
-// permanent `invalid_input`) — when the exact content-addressed chunk reappears
-// (revert/restore), the enqueue guard creates a FRESH task instead of the chunk being
-// silently stuck out of vector search forever.
+// Step 4 retains edited-away chunks as active historical work. Reverting exact
+// bytes reuses the same task without a retire/revive cycle or duplicate output_ref.
 #[test]
-fn r19_3_reverted_chunk_re_embeds_after_non_live_retirement() {
+fn ct4_reverted_chunk_reuses_retained_embedding_task() {
     let dir = tempfile::tempdir().unwrap();
     assert_eq!(R18_1_BODY_V1.len(), R18_1_BODY_V2.len());
     fs::write(dir.path().join("doc.md"), R18_1_BODY_V1).unwrap();
@@ -6460,7 +6589,7 @@ fn r19_3_reverted_chunk_re_embeds_after_non_live_retirement() {
         "2026-07-03T00:00:00Z",
         &["index", "--approve", "--online"],
     );
-    // Edit to v2 -> v1 chunk non-live -> retired REVERSIBLY.
+    // Edit to v2: v1 remains retained and is retried in this pass.
     fs::write(dir.path().join("doc.md"), R18_1_BODY_V2).unwrap();
     json_success_embed_at(
         &dir,
@@ -6473,10 +6602,9 @@ fn r19_3_reverted_chunk_re_embeds_after_non_live_retirement() {
         .iter()
         .filter(|t| t["fallback_reason"] == "retired_non_live")
         .count();
-    assert!(
-        retired >= 1,
-        "R19-3: the non-live chunk must be retired REVERSIBLY (retired_non_live), \
-         not the blocking invalid_input: {status}"
+    assert_eq!(
+        retired, 0,
+        "retained history is never retired_non_live: {status}"
     );
     let tasks_before = tasks_of_type(&status, "embedding").len();
 
@@ -6490,14 +6618,14 @@ fn r19_3_reverted_chunk_re_embeds_after_non_live_retirement() {
     );
     let status = json_success_embed_at(&dir, "mock", "2026-07-07T00:00:00Z", &["status"]);
     let tasks_after = tasks_of_type(&status, "embedding").len();
-    // R20-2: reverting REVIVES the retired-non-live task in place (Failed -> Pending),
-    // reusing its slot rather than appending a duplicate `output_ref` task. A duplicate
+    // Reverting reuses the retained task in place rather than appending a duplicate
+    // `output_ref` task. A duplicate
     // would be double-stamped by `apply_embedding_transitions` (keyed on output_ref) and
     // then double-reclaimed (silent cap fail-open). So the task count must NOT grow; the
     // reappeared chunk still re-embeds (asserted below via `reverted_done`).
     assert_eq!(
         tasks_after, tasks_before,
-        "R20-2: reverting must REVIVE the retired task in place, not append a duplicate \
+        "reverting must reuse the retained task, not append a duplicate \
          output_ref task (before={tasks_before}, after={tasks_after}): {status}"
     );
     let reverted_done = tasks_of_type(&status, "embedding")
@@ -6854,12 +6982,11 @@ fn r21_6_auth_error_live_task_recovers_after_credentials_fixed() {
     );
 }
 
-/// R21-7: a `retired_non_live` embedding task whose exact bytes reappear under a Tier B
-/// name must get a fresh HOLD (Paused `secrets_tier_b_hold`) — the R20-2 revive pattern,
-/// cross-wired to the held branch. Before the fix the stale retired task blocked the hold,
-/// so the restored chunk was frozen and invisible in `index_status`.
+/// Step 4 keeps a chunk active while any reachable history binds it. If an already
+/// embedded historical chunk later appears under a Tier B path, the durable Done
+/// task remains truthful, but the derived vector row is withheld until approval.
 #[test]
-fn r21_7_retired_non_live_restored_under_secret_name_gets_hold() {
+fn ct4_historical_secret_path_withholds_existing_vector() {
     let dir = tempfile::tempdir().unwrap();
     let v1 = "# Notes\n\nordinary paragraph alpha bravo charlie delta echo foxtrot.\n";
     let v2 = "# Notes\n\nCOMPLETELY different body xray yankee zulu whiskey victor.\n";
@@ -6871,7 +6998,13 @@ fn r21_7_retired_non_live_restored_under_secret_name_gets_hold() {
         "2026-07-03T00:00:00Z",
         &["index", "--approve", "--online"],
     );
-    // Edit -> v1 chunk goes non-live -> retired_non_live.
+    let initial_status = json_success_embed_at(&dir, "mock", "2026-07-03T00:00:00Z", &["status"]);
+    let v1_output_ref = tasks_of_type(&initial_status, "embedding")[0]["output_ref"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let v1_chunk_id = v1_output_ref.strip_prefix("embedding:").unwrap().to_owned();
+    // Edit: v1 stays retained by history and may complete on the next pass.
     fs::write(dir.path().join("notes.md"), v2).unwrap();
     json_success_embed_at(
         &dir,
@@ -6892,9 +7025,20 @@ fn r21_7_retired_non_live_restored_under_secret_name_gets_hold() {
     assert!(
         tasks_of_type(&status, "embedding")
             .iter()
-            .any(|t| t["status"] == "paused" && t["fallback_reason"] == "secrets_tier_b_hold"),
-        "R21-7: the chunk restored under a Tier B name must get a fresh secrets hold, \
-         not stay stuck retired_non_live: {status}"
+            .any(|task| task["output_ref"] == v1_output_ref && task["status"] == "done"),
+        "the already materialized embedding task remains a truthful terminal record: {status}"
+    );
+    kcs_index::vec::ensure_registered();
+    let conn = rusqlite::Connection::open(dir.path().join(".kcs/index/sqlite.db")).unwrap();
+    assert_eq!(
+        conn.query_row(
+            "SELECT COUNT(*) FROM chunk_vec WHERE chunk_id = ?1",
+            rusqlite::params![v1_chunk_id],
+            |row| row.get::<_, u64>(0),
+        )
+        .unwrap(),
+        0,
+        "any retained secret path must exclude the chunk from derived vector search"
     );
 }
 
@@ -6971,13 +7115,11 @@ fn r21_3_scanned_pdf_stays_pending_no_churn() {
 // R22: exploratory-audit round 22 fixes (tasks/step3-bughunt22-fixes.md).
 // ===========================================================================
 
-/// R22-1 [major]: a Tier B embedding hold must be RELEASED when the chunk's live path is
-/// no longer secret (renamed out of a Tier B name, or its secret twin deleted). Before the
-/// fix the R21-1 defense-in-depth froze the hold forever — the (often false-positive) file
-/// fell out of vector search with no recovery short of `--send-secrets`, which permanently
-/// lowers the whole scope's security posture.
+/// Step 4 historical search retains old path aliases. Renaming a Tier B path to a
+/// public live name therefore does not release its embedding hold: the old secret
+/// alias remains reachable and secret-any-path wins until explicit approval.
 #[test]
-fn r22_1_secret_hold_released_when_path_no_longer_secret() {
+fn ct4_historical_secret_alias_keeps_hold_after_public_rename() {
     let dir = tempfile::tempdir().unwrap();
     let body = "# Notes\n\nalpha bravo charlie delta echo foxtrot golf hotel india juliet.\n";
     fs::write(dir.path().join("password_notes.md"), body).unwrap();
@@ -6993,8 +7135,7 @@ fn r22_1_secret_hold_released_when_path_no_longer_secret() {
                 .all(|t| t["status"] == "paused" && t["fallback_reason"] == "secrets_tier_b_hold"),
         "R22-1 precondition: the Tier B embedding task must be held: {status}"
     );
-    // Rename to a NON-secret name (identical bytes → same content-addressed chunk) and
-    // re-index online: the hold must release in place and the chunk must embed.
+    // Rename to a NON-secret live name. The historical secret alias is retained.
     fs::rename(
         dir.path().join("password_notes.md"),
         dir.path().join("notes.md"),
@@ -7003,23 +7144,12 @@ fn r22_1_secret_hold_released_when_path_no_longer_secret() {
     json_success_embed(&dir, "mock", &["index", "--approve", "--online"]);
     let status = json_success_embed(&dir, "mock", &["status"]);
     let embedding = tasks_of_type(&status, "embedding");
-    let done = embedding
-        .iter()
-        .find(|t| t["status"] == "done" && t["fallback_reason"] == "embedding_adapter_done");
     assert!(
-        done.is_some(),
-        "R22-1: the released hold must embed to Done/embedding_adapter_done: {status}"
-    );
-    let input_path = done.unwrap()["input_path"].as_str().unwrap();
-    assert!(
-        input_path.ends_with("notes.md") && !input_path.contains("password"),
-        "R22-1: the released task's input_path must be the current non-secret path: {status}"
-    );
-    assert!(
-        !embedding
+        embedding
             .iter()
-            .any(|t| t["fallback_reason"] == "secrets_tier_b_hold"),
-        "R22-1: no embedding task may remain held after the rename-out: {status}"
+            .all(|task| task["status"] == "paused"
+                && task["fallback_reason"] == "secrets_tier_b_hold"),
+        "a reachable historical secret alias must keep the shared task held: {status}"
     );
 }
 
@@ -7151,12 +7281,10 @@ fn r22_2b_done_task_is_not_demoted_when_path_becomes_secret() {
     );
 }
 
-/// R22-3 [major]: a Paused `secrets_tier_b_hold` whose chunk goes non-live (the Tier B file
-/// is edited) must be RETIRED (`retired_non_live`), not left to accrete orphan holds that
-/// permanently inflate `pending_enrichment_tasks` / deflate `enriched_ratio`. Only the
-/// latest live chunk stays held; `index_status` counts exactly that one.
+/// Step 4 all-history keeps each edited-away secret version eligible. Its hold is
+/// real outstanding historical vector work, not an orphan to retire.
 #[test]
-fn r22_3_paused_hold_retires_when_chunk_goes_non_live() {
+fn ct4_edited_secret_history_keeps_each_version_held() {
     let dir = tempfile::tempdir().unwrap();
     let v1 = "# Secret\n\nalpha bravo charlie delta echo foxtrot golf hotel india.\n";
     let v2 = "# Secret\n\nkilo lima mike november oscar papa quebec romeo sierra.\n";
@@ -7195,18 +7323,18 @@ fn r22_3_paused_hold_retires_when_chunk_goes_non_live() {
         .filter(|t| t["status"] == "failed" && t["fallback_reason"] == "retired_non_live")
         .count();
     assert_eq!(
-        held, 1,
-        "R22-3: exactly one (latest) chunk may stay held; the stale holds must retire: {status}"
+        held, 3,
+        "each retained secret version must stay held for historical vector search: {status}"
     );
-    assert!(
-        retired >= 1,
-        "R22-3: the non-live held chunks must be retired retired_non_live: {status}"
+    assert_eq!(
+        retired, 0,
+        "retained historical holds are not non-live: {status}"
     );
-    // `index_status` must count only the single live hold as pending enrichment.
+    // `index_status` counts all three real historical embedding gaps.
     let search = json_success_embed(&dir, "mock", &["search", "juliet"]);
     assert_eq!(
-        search["index_status"]["pending_enrichment_tasks"], 1,
-        "R22-3: only the latest live hold may count as pending enrichment: {search}"
+        search["index_status"]["pending_enrichment_tasks"], 3,
+        "all retained historical holds count as pending enrichment: {search}"
     );
 }
 
@@ -7325,6 +7453,7 @@ fn r22_5_legacy_octet_stream_text_task_is_retired_not_sent() {
         heartbeat_at: None,
         fallback_reason: Some("ready_for_online_adapter".to_owned()),
         created_at: "2026-07-01T00:00:00Z".to_owned(),
+        bbox_annotation_enabled: None,
         reserved_usd: None,
         reserved_month: None,
         reservation_id: None,

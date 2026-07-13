@@ -35,7 +35,14 @@ pub fn builtin_prepare_profile() -> AdapterProfile {
 
 #[must_use]
 pub fn standard_online_markdownize_profile() -> AdapterProfile {
-    MistralOcrMarkdownizeAdapter::default().profile()
+    standard_online_markdownize_profile_with_bbox(true)
+}
+
+#[must_use]
+pub fn standard_online_markdownize_profile_with_bbox(enabled: bool) -> AdapterProfile {
+    MistralOcrMarkdownizeAdapter::default()
+        .with_bbox_annotation(enabled)
+        .profile()
 }
 
 pub fn builtin_offline_markdownize_adapter() -> Box<dyn MarkdownizeAdapter> {
@@ -72,6 +79,7 @@ pub struct StandardOnlineMarkdownizeRequest<'a> {
     /// Mistral client so it OCRs/bills only those pages instead of the whole document.
     /// A fresh full send leaves this `false`.
     pub restrict_to_hint_pages: bool,
+    pub bbox_annotation_enabled: bool,
 }
 
 pub struct StandardOnlineMarkdownizeOutcome {
@@ -117,6 +125,7 @@ pub fn run_standard_online_markdownize_with_bytes(
         hints: request.hints,
         // R15-5: forward the retry page-scoping signal to the real client.
         restrict_to_hint_pages: request.restrict_to_hint_pages,
+        bbox_annotation_enabled: request.bbox_annotation_enabled,
         tool_profile_hash: String::new(),
         spec_version: 1,
     };
@@ -144,6 +153,7 @@ pub fn run_standard_online_markdownize_with_bytes(
             let model_pin = client.resolve_model_pin("mistral-ocr-latest")?;
             let adapter = MistralOcrMarkdownizeAdapter::new(client, model_pin, request.scope_id)
                 .with_image_store(request.kcs_dir)
+                .with_bbox_annotation(request.bbox_annotation_enabled)
                 .with_verified_raw_bytes(verified_raw_bytes.to_vec());
             let profile = adapter.profile();
             let mut adapter_request = adapter_request;
@@ -182,6 +192,7 @@ pub fn run_standard_online_markdownize_with_bytes(
     let model_pin = client.resolve_model_pin(&configured_model)?;
     let adapter = MistralOcrMarkdownizeAdapter::new(client, model_pin, request.scope_id)
         .with_image_store(request.kcs_dir)
+        .with_bbox_annotation(request.bbox_annotation_enabled)
         .with_verified_raw_bytes(verified_raw_bytes.to_vec());
     let profile = adapter.profile();
     let mut adapter_request = adapter_request;
@@ -212,6 +223,13 @@ fn declared_markdown_model() -> Result<String> {
 /// send instead of wasting an incremental send (and, post-R14-4, a full-document upload)
 /// only to discard it. Keep the seam arms in sync with `run_standard_online_markdownize`.
 pub fn resolve_standard_online_markdownize_profile(scope_id: &str) -> Result<AdapterProfile> {
+    resolve_standard_online_markdownize_profile_with_bbox(scope_id, true)
+}
+
+pub fn resolve_standard_online_markdownize_profile_with_bbox(
+    scope_id: &str,
+    bbox_annotation_enabled: bool,
+) -> Result<AdapterProfile> {
     match std::env::var(TEST_STANDARD_ONLINE_MARKDOWNIZE_ENV)
         .ok()
         .as_deref()
@@ -230,13 +248,21 @@ pub fn resolve_standard_online_markdownize_profile(scope_id: &str) -> Result<Ada
         | Some("no_change_no_send") => {
             let client = MockStandardOnlineMarkdownizeClient;
             let model_pin = client.resolve_model_pin("mistral-ocr-latest")?;
-            return Ok(MistralOcrMarkdownizeAdapter::new(client, model_pin, scope_id).profile());
+            return Ok(
+                MistralOcrMarkdownizeAdapter::new(client, model_pin, scope_id)
+                    .with_bbox_annotation(bbox_annotation_enabled)
+                    .profile(),
+            );
         }
         _ => {}
     }
     let client = EnvMistralOcrClient::new();
     let model_pin = client.resolve_model_pin(&declared_markdown_model()?)?;
-    Ok(MistralOcrMarkdownizeAdapter::new(client, model_pin, scope_id).profile())
+    Ok(
+        MistralOcrMarkdownizeAdapter::new(client, model_pin, scope_id)
+            .with_bbox_annotation(bbox_annotation_enabled)
+            .profile(),
+    )
 }
 
 #[derive(Debug, Clone)]
@@ -328,6 +354,17 @@ impl MistralOcrClient for MockStandardOnlineMarkdownizeClient {
                         media_type: "image/png".to_owned(),
                         bbox: Some([index as i64, 0, index as i64 + 1, 1]),
                         confidence: Some("0.99".to_owned()),
+                        annotation: request.bbox_annotation_enabled.then(|| {
+                            let text = format!(
+                                "KCS bbox label {} value 1000",
+                                hint.unit_key
+                            );
+                            crate::bbox_annotation::BboxAnnotation {
+                                short_description: "mock chart".to_owned(),
+                                transcribed_text:
+                                    crate::bbox_annotation::canonical_source_escape(&text),
+                            }
+                        }),
                     }],
                 }
             })
@@ -650,10 +687,71 @@ mod tests {
             previous: None,
             hints: None,
             restrict_to_hint_pages: false,
+            bbox_annotation_enabled: false,
         })
         .unwrap();
         std::env::remove_var(TEST_STANDARD_ONLINE_MARKDOWNIZE_ENV);
         assert_eq!(outcome.profile.adapter_kind, AdapterKind::Markdownize);
         assert_eq!(outcome.response.updated_units.len(), 1);
+    }
+
+    #[test]
+    fn ct4_bbox_003_and_006_catalog_mock_persists_profile_metadata_and_search_text() {
+        let temp = tempfile::tempdir().unwrap();
+        let input = temp.path().join("chart.pdf");
+        let input_bytes = b"%PDF bbox mock";
+        std::fs::write(&input, input_bytes).unwrap();
+        let input_hash = crate::identity::hash_bytes(input_bytes);
+        std::env::set_var(TEST_STANDARD_ONLINE_MARKDOWNIZE_ENV, "mock");
+        let outcome = run_standard_online_markdownize(StandardOnlineMarkdownizeRequest {
+            scope_id: "01H00000000000000000000000",
+            kcs_dir: temp.path(),
+            raw_hash: &input_hash,
+            path: &input,
+            media_type: "application/pdf",
+            prepared_unit_hints: vec![PreparedUnitHint {
+                unit_key: "page:1".to_owned(),
+                prepared_hash:
+                    "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                        .to_owned(),
+                unit_kind: crate::types::UnitKind::Page,
+                order: 0,
+            }],
+            mode: MarkdownizeMode::Full,
+            previous: None,
+            hints: None,
+            restrict_to_hint_pages: false,
+            bbox_annotation_enabled: true,
+        })
+        .unwrap();
+        std::env::remove_var(TEST_STANDARD_ONLINE_MARKDOWNIZE_ENV);
+
+        assert_eq!(
+            outcome.profile.tool_profile_hash,
+            "sha256:830c45cada7e9ea8c6f6816579fa0493645208626201181f3763b4bc6bddda3e"
+        );
+        let unit = &outcome.response.updated_units[0];
+        assert!(unit.markdown.contains(r"KCS bbox label page\:1 value 1000"));
+        assert_eq!(
+            unit.metadata["bbox_annotations"][0]["transcribed_text"],
+            "KCS bbox label page\\:1 value 1000"
+        );
+        let images = temp.path().join("objects/images");
+        assert!(
+            images.exists(),
+            "mock image bytes remain persisted in image CAS"
+        );
+    }
+
+    #[test]
+    fn ct4_bbox_001_catalog_default_is_enabled_and_disabled_preserves_old_identity() {
+        assert_eq!(
+            standard_online_markdownize_profile().tool_profile_hash,
+            standard_online_markdownize_profile_with_bbox(true).tool_profile_hash
+        );
+        assert_ne!(
+            standard_online_markdownize_profile().tool_profile_hash,
+            standard_online_markdownize_profile_with_bbox(false).tool_profile_hash
+        );
     }
 }
