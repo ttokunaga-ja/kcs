@@ -300,6 +300,12 @@ impl ObjectStore {
             drop(temp);
 
             let quarantine = create_repair_quarantine(path, &corrupt)?;
+            // MoveFileEx requires both path operands to be closed on Windows.
+            // The verified quarantine hard link now pins the exact corrupt
+            // object for rollback, so the original read handle can be released
+            // without reopening or trusting its pathname.
+            #[cfg(windows)]
+            drop(corrupt);
             if let Err(error) = replace_file(&temp_path, path) {
                 let _ = fs::remove_file(&quarantine);
                 return Err(error);
