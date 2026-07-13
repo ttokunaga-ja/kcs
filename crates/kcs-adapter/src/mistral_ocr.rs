@@ -532,6 +532,25 @@ impl<C: MistralOcrClient> MarkdownizeAdapter for MistralOcrMarkdownizeAdapter<C>
                 "bbox annotation request policy does not match adapter profile".to_owned(),
             ));
         }
+        let discovers_units = request
+            .prepared_unit_hint
+            .as_ref()
+            .is_none_or(Vec::is_empty);
+        if discovers_units {
+            // This trait implementation is callable without the catalog wrapper. Keep
+            // the no-upload/no-bill preflight here too: discovery is a fresh whole-file
+            // operation and only PDF/standalone-image wire formats are proven.
+            if request.mode != crate::types::MarkdownizeMode::Full
+                || request.previous.is_some()
+                || request.hints.is_some()
+                || request.restrict_to_hint_pages
+            {
+                return Err(AdapterError::ContractViolation(
+                    "OCR-from-scratch requires a fresh unrestricted Full request".to_owned(),
+                ));
+            }
+            discovered_unit_kind(&request.media_type)?;
+        }
         let raw_bytes: Cow<'_, [u8]> = if let Some(bytes) = self.verified_raw_bytes.as_deref() {
             Cow::Borrowed(bytes)
         } else {
@@ -582,18 +601,14 @@ impl<C: MistralOcrClient> MarkdownizeAdapter for MistralOcrMarkdownizeAdapter<C>
                 ));
             }
         }
-        let hints = request
+        let hints = match request
             .prepared_unit_hint
             .as_ref()
-            .cloned()
-            .unwrap_or_else(|| {
-                vec![PreparedUnitHint {
-                    unit_key: "page:1".to_owned(),
-                    prepared_hash: request.raw.raw_hash.clone(),
-                    unit_kind: crate::types::UnitKind::Page,
-                    order: 0,
-                }]
-            });
+            .filter(|hints| !hints.is_empty())
+        {
+            Some(hints) => hints.clone(),
+            None => discovered_unit_hints(&request.media_type, &request.raw.raw_hash, &ocr.pages)?,
+        };
         let pages_by_index = verified_pages_by_index(&ocr.pages, &hints)?;
         if let Some(kcs_dir) = &self.image_store_dir {
             let images = ocr
@@ -644,6 +659,79 @@ impl<C: MistralOcrClient> MarkdownizeAdapter for MistralOcrMarkdownizeAdapter<C>
             fallback_to_full: false,
             reason: None,
         })
+    }
+}
+
+/// Build the canonical unit identities discovered by a full OCR-from-scratch
+/// response. Local Prepare intentionally returns no units for scanned PDFs and
+/// images, so the provider page set is the first trusted
+/// unit boundary available to the adapter. The response parser already bounds
+/// the page count; this additionally requires a contiguous, duplicate-free
+/// 0-based page sequence before minting KCS unit keys.
+fn discovered_unit_hints(
+    media_type: &str,
+    raw_hash: &str,
+    pages: &[OcrPage],
+) -> Result<Vec<PreparedUnitHint>> {
+    if pages.is_empty() {
+        return Err(AdapterError::ContractViolation(
+            "OCR-from-scratch returned no pages".to_owned(),
+        ));
+    }
+    let mut ordered = pages.iter().collect::<Vec<_>>();
+    ordered.sort_by_key(|page| page.index);
+    for (expected, page) in ordered.iter().enumerate() {
+        if page.index != expected {
+            return Err(AdapterError::ContractViolation(
+                "OCR-from-scratch page indices must be contiguous from zero".to_owned(),
+            ));
+        }
+    }
+    let kind = discovered_unit_kind(media_type)?;
+    if kind == crate::types::UnitKind::Image && ordered.len() != 1 {
+        return Err(AdapterError::ContractViolation(
+            "standalone-image OCR must return exactly one page".to_owned(),
+        ));
+    }
+    ordered
+        .into_iter()
+        .map(|page| {
+            let order = u64::try_from(page.index).map_err(|_| {
+                AdapterError::ContractViolation(
+                    "OCR page index exceeds the supported unit order".to_owned(),
+                )
+            })?;
+            Ok(PreparedUnitHint {
+                unit_key: discovered_unit_key(kind, page.index),
+                // No local page artifact exists before OCR. The verified raw object is
+                // therefore the immutable prepared source shared by all discovered units.
+                prepared_hash: raw_hash.to_owned(),
+                unit_kind: kind,
+                order,
+            })
+        })
+        .collect()
+}
+
+fn discovered_unit_kind(media_type: &str) -> Result<crate::types::UnitKind> {
+    use crate::types::UnitKind;
+    match media_type {
+        "application/pdf" => Ok(UnitKind::Page),
+        "image/png" | "image/jpeg" | "image/webp" | "image/gif" => Ok(UnitKind::Image),
+        _ => Err(AdapterError::ContractViolation(format!(
+            "OCR-from-scratch media type is unsupported: {media_type}"
+        ))),
+    }
+}
+
+fn discovered_unit_key(kind: crate::types::UnitKind, index: usize) -> String {
+    use crate::types::UnitKind;
+    match kind {
+        UnitKind::Page => format!("page:{}", index + 1),
+        UnitKind::Slide => format!("slide:{}", index + 1),
+        UnitKind::Sheet => format!("sheet:{}", index + 1),
+        UnitKind::Image => format!("image:{index}"),
+        UnitKind::File | UnitKind::HeadingSection | UnitKind::Symbol => "doc:1".to_owned(),
     }
 }
 
@@ -2182,6 +2270,168 @@ mod tests {
                 }],
                 model_version_pin: model_pin.to_owned(),
             })
+        }
+    }
+
+    #[derive(Debug, Clone)]
+    struct DiscoveryClient {
+        pages: Vec<OcrPage>,
+        network_calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl MistralOcrClient for DiscoveryClient {
+        fn resolve_model_pin(&self, _configured_model: &str) -> Result<String> {
+            self.network_calls
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok("mistral-ocr-2505".to_owned())
+        }
+
+        fn ocr_markdown(
+            &self,
+            _request: &MarkdownizeRequest,
+            model_pin: &str,
+            _verified_raw_bytes: &[u8],
+        ) -> Result<OcrResponse> {
+            self.network_calls
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(OcrResponse {
+                pages: self.pages.clone(),
+                model_version_pin: model_pin.to_owned(),
+            })
+        }
+    }
+
+    fn discovery_request(bytes: &[u8], media_type: &str) -> MarkdownizeRequest {
+        MarkdownizeRequest {
+            raw: RawInput {
+                raw_hash: crate::identity::hash_bytes(bytes),
+                path: None,
+            },
+            media_type: media_type.to_owned(),
+            prepared_unit_hint: None,
+            mode: MarkdownizeMode::Full,
+            previous: None,
+            hints: None,
+            restrict_to_hint_pages: false,
+            bbox_annotation_enabled: false,
+            tool_profile_hash: String::new(),
+            spec_version: 1,
+        }
+    }
+
+    fn discovery_page(index: usize) -> OcrPage {
+        OcrPage {
+            index,
+            markdown: format!("page {index}"),
+            images: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn ocr_from_scratch_discovers_canonical_pdf_and_image_units() {
+        let bytes = b"verified raw";
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let pdf = MistralOcrMarkdownizeAdapter::new(
+            DiscoveryClient {
+                pages: vec![discovery_page(0), discovery_page(1)],
+                network_calls: calls.clone(),
+            },
+            "mistral-ocr-2505",
+            "scope",
+        )
+        .with_bbox_annotation(false)
+        .with_verified_raw_bytes(bytes.to_vec())
+        .markdownize(discovery_request(bytes, "application/pdf"))
+        .unwrap();
+        assert_eq!(
+            pdf.updated_units
+                .iter()
+                .map(|unit| (unit.unit_key.as_str(), unit.unit_type))
+                .collect::<Vec<_>>(),
+            vec![("page:1", UnitKind::Page), ("page:2", UnitKind::Page)]
+        );
+
+        let image = MistralOcrMarkdownizeAdapter::new(
+            DiscoveryClient {
+                pages: vec![discovery_page(0)],
+                network_calls: calls.clone(),
+            },
+            "mistral-ocr-2505",
+            "scope",
+        )
+        .with_bbox_annotation(false)
+        .with_verified_raw_bytes(bytes.to_vec())
+        .markdownize(discovery_request(bytes, "image/png"))
+        .unwrap();
+        assert_eq!(image.updated_units[0].unit_key, "image:0");
+        assert_eq!(image.updated_units[0].unit_type, UnitKind::Image);
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 4);
+    }
+
+    #[test]
+    fn ocr_from_scratch_rejects_bad_discovery_shapes() {
+        let bytes = b"verified raw";
+        for (media_type, pages) in [
+            ("application/pdf", vec![]),
+            ("application/pdf", vec![discovery_page(1)]),
+            (
+                "application/pdf",
+                vec![discovery_page(0), discovery_page(0)],
+            ),
+            ("image/png", vec![discovery_page(0), discovery_page(1)]),
+        ] {
+            let adapter = MistralOcrMarkdownizeAdapter::new(
+                DiscoveryClient {
+                    pages,
+                    network_calls: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                },
+                "mistral-ocr-2505",
+                "scope",
+            )
+            .with_bbox_annotation(false)
+            .with_verified_raw_bytes(bytes.to_vec());
+            assert!(matches!(
+                adapter.markdownize(discovery_request(bytes, media_type)),
+                Err(AdapterError::ContractViolation(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn ocr_from_scratch_preflight_rejects_before_network() {
+        let bytes = b"verified raw";
+        for request in [
+            discovery_request(
+                bytes,
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            ),
+            {
+                let mut request = discovery_request(bytes, "application/pdf");
+                request.mode = MarkdownizeMode::Incremental;
+                request
+            },
+            {
+                let mut request = discovery_request(bytes, "application/pdf");
+                request.restrict_to_hint_pages = true;
+                request
+            },
+        ] {
+            let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let adapter = MistralOcrMarkdownizeAdapter::new(
+                DiscoveryClient {
+                    pages: vec![discovery_page(0)],
+                    network_calls: calls.clone(),
+                },
+                "mistral-ocr-2505",
+                "scope",
+            )
+            .with_bbox_annotation(false)
+            .with_verified_raw_bytes(bytes.to_vec());
+            assert!(matches!(
+                adapter.markdownize(request),
+                Err(AdapterError::ContractViolation(_))
+            ));
+            assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
         }
     }
 

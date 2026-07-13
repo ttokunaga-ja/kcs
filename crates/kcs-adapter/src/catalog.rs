@@ -85,6 +85,11 @@ pub struct StandardOnlineMarkdownizeRequest<'a> {
 pub struct StandardOnlineMarkdownizeOutcome {
     pub profile: AdapterProfile,
     pub response: MarkdownizeResponse,
+    /// The complete unit set used by the adapter before any test-only response seam
+    /// mutates the returned units. Fresh OCR-from-scratch requests have no caller
+    /// hints, so this is how the provider-discovered page/image identities cross the
+    /// adapter boundary and become the normalized manifest's Prepared units.
+    pub effective_prepared_unit_hints: Vec<PreparedUnitHint>,
 }
 
 pub fn run_standard_online_markdownize(
@@ -111,13 +116,40 @@ pub fn run_standard_online_markdownize_with_bytes(
             request.raw_hash
         )));
     }
+    if request.prepared_unit_hints.is_empty() {
+        // Discovery is only a fresh, whole-document operation. Reject unsupported
+        // media and contradictory retry/incremental fields before constructing a real
+        // client, so no document can be uploaded or billed before the contract error.
+        if request.mode != MarkdownizeMode::Full
+            || request.previous.is_some()
+            || request.hints.is_some()
+            || request.restrict_to_hint_pages
+        {
+            return Err(AdapterError::ContractViolation(
+                "OCR-from-scratch requires a fresh unrestricted Full request".to_owned(),
+            ));
+        }
+        if !supports_ocr_from_scratch(request.media_type) {
+            return Err(AdapterError::ContractViolation(format!(
+                "OCR-from-scratch media type is unsupported: {}",
+                request.media_type
+            )));
+        }
+    }
+    let requested_prepared_unit_hints = request.prepared_unit_hints.clone();
+    let prepared_unit_hint =
+        (!request.prepared_unit_hints.is_empty()).then_some(request.prepared_unit_hints);
     let adapter_request = MarkdownizeRequest {
         raw: RawInput {
             raw_hash: request.raw_hash.to_owned(),
             path: Some(request.path.display().to_string()),
         },
         media_type: request.media_type.to_owned(),
-        prepared_unit_hint: Some(request.prepared_unit_hints),
+        // An empty local Prepare result is meaningful for scanned PDFs and images:
+        // the online OCR adapter must discover the page/unit set
+        // from the provider response. Preserve that distinction as `None`; `Some([])`
+        // previously forced the hint-driven path to return zero units forever.
+        prepared_unit_hint,
         // R13-1: forward the caller-computed mode/previous/hints (was hard-coded
         // Full/None/None, which is why incremental never fired on the online route).
         mode: request.mode,
@@ -160,6 +192,14 @@ pub fn run_standard_online_markdownize_with_bytes(
             adapter_request.tool_profile_hash = profile.tool_profile_hash.clone();
             let response_mode = adapter_request.mode;
             let mut response = adapter.markdownize(adapter_request)?;
+            // Capture the complete discovered/requested unit set before the partial
+            // response seams remove an output. Otherwise a simulated missing page would
+            // disappear from the manifest instead of remaining a retryable Failed unit.
+            let effective_prepared_unit_hints = effective_prepared_unit_hints(
+                &requested_prepared_unit_hints,
+                request.raw_hash,
+                &response,
+            )?;
             // Test-only KCS response seams run after the provider page mapping has
             // passed its exact-bijection checks. This preserves partial/fallback
             // lifecycle coverage without weakening the OCR transport contract.
@@ -179,7 +219,11 @@ pub fn run_standard_online_markdownize_with_bytes(
             {
                 response.updated_units.pop();
             }
-            return Ok(StandardOnlineMarkdownizeOutcome { profile, response });
+            return Ok(StandardOnlineMarkdownizeOutcome {
+                profile,
+                response,
+                effective_prepared_unit_hints,
+            });
         }
         _ => {}
     }
@@ -198,7 +242,66 @@ pub fn run_standard_online_markdownize_with_bytes(
     let mut adapter_request = adapter_request;
     adapter_request.tool_profile_hash = profile.tool_profile_hash.clone();
     let response = adapter.markdownize(adapter_request)?;
-    Ok(StandardOnlineMarkdownizeOutcome { profile, response })
+    let effective_prepared_unit_hints =
+        effective_prepared_unit_hints(&requested_prepared_unit_hints, request.raw_hash, &response)?;
+    Ok(StandardOnlineMarkdownizeOutcome {
+        profile,
+        response,
+        effective_prepared_unit_hints,
+    })
+}
+
+fn supports_ocr_from_scratch(media_type: &str) -> bool {
+    matches!(
+        media_type,
+        "application/pdf" | "image/png" | "image/jpeg" | "image/webp" | "image/gif"
+    )
+}
+
+fn effective_prepared_unit_hints(
+    requested: &[PreparedUnitHint],
+    raw_hash: &str,
+    response: &MarkdownizeResponse,
+) -> Result<Vec<PreparedUnitHint>> {
+    if !requested.is_empty() {
+        return Ok(requested.to_vec());
+    }
+    if response.mode_used != crate::types::MarkdownizeMode::Full {
+        return Err(AdapterError::ContractViolation(
+            "OCR-from-scratch requires Full markdownize mode".to_owned(),
+        ));
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    let hints = response
+        .updated_units
+        .iter()
+        .chain(response.added_units.iter())
+        .enumerate()
+        .map(|(index, unit)| {
+            if !seen.insert(unit.unit_key.clone()) {
+                return Err(AdapterError::ContractViolation(
+                    "OCR-from-scratch returned duplicate unit keys".to_owned(),
+                ));
+            }
+            let order = u64::try_from(index).map_err(|_| {
+                AdapterError::ContractViolation(
+                    "OCR-from-scratch unit count exceeds the supported order".to_owned(),
+                )
+            })?;
+            Ok(PreparedUnitHint {
+                unit_key: unit.unit_key.clone(),
+                prepared_hash: raw_hash.to_owned(),
+                unit_kind: unit.unit_type,
+                order,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    if hints.is_empty() {
+        return Err(AdapterError::ContractViolation(
+            "OCR-from-scratch returned no units".to_owned(),
+        ));
+    }
+    Ok(hints)
 }
 
 /// R13-2: the configured `[markdown] model` alias (or the built-in `mistral-ocr-latest`),
@@ -319,10 +422,22 @@ impl MistralOcrClient for MockStandardOnlineMarkdownizeClient {
                     .to_owned(),
             ));
         }
-        let pages: Vec<OcrPage> = request
+        let discovered = request
             .prepared_unit_hint
             .as_deref()
-            .unwrap_or(&[])
+            .is_none_or(<[_]>::is_empty);
+        let discovered_hint = crate::types::PreparedUnitHint {
+            unit_key: "discovered:1".to_owned(),
+            prepared_hash: request.raw.raw_hash.clone(),
+            unit_kind: crate::types::UnitKind::Page,
+            order: 0,
+        };
+        let hints = if discovered {
+            std::slice::from_ref(&discovered_hint)
+        } else {
+            request.prepared_unit_hint.as_deref().unwrap_or(&[])
+        };
+        let pages: Vec<OcrPage> = hints
             .iter()
             .map(|hint| {
                 // R11-6: index each returned page by the unit's DOCUMENT order
@@ -561,6 +676,8 @@ mod tests {
     use super::*;
     use crate::types::AdapterKind;
 
+    static MARKDOWNIZE_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn adopted_profiles_are_catalog_owned() {
         assert_eq!(builtin_prepare_profile().adapter_id, "prepare_default");
@@ -663,6 +780,7 @@ mod tests {
 
     #[test]
     fn standard_online_markdownize_mock_runs() {
+        let _env_lock = MARKDOWNIZE_ENV_LOCK.lock().unwrap();
         let temp = tempfile::tempdir().unwrap();
         let input = temp.path().join("input.pdf");
         let input_bytes = b"%PDF mock";
@@ -693,10 +811,37 @@ mod tests {
         std::env::remove_var(TEST_STANDARD_ONLINE_MARKDOWNIZE_ENV);
         assert_eq!(outcome.profile.adapter_kind, AdapterKind::Markdownize);
         assert_eq!(outcome.response.updated_units.len(), 1);
+
+        // A test-only missing output must not shrink the Prepared manifest. Capture
+        // the complete provider-discovered set before the seam removes page:1.
+        std::env::set_var(TEST_STANDARD_ONLINE_MARKDOWNIZE_ENV, "partial");
+        let partial = run_standard_online_markdownize(StandardOnlineMarkdownizeRequest {
+            scope_id: "01H00000000000000000000000",
+            kcs_dir: temp.path(),
+            raw_hash: &input_hash,
+            path: &input,
+            media_type: "application/pdf",
+            prepared_unit_hints: Vec::new(),
+            mode: MarkdownizeMode::Full,
+            previous: None,
+            hints: None,
+            restrict_to_hint_pages: false,
+            bbox_annotation_enabled: false,
+        })
+        .unwrap();
+        std::env::remove_var(TEST_STANDARD_ONLINE_MARKDOWNIZE_ENV);
+        assert!(partial.response.updated_units.is_empty());
+        assert_eq!(partial.effective_prepared_unit_hints.len(), 1);
+        assert_eq!(partial.effective_prepared_unit_hints[0].unit_key, "page:1");
+        assert_eq!(
+            partial.effective_prepared_unit_hints[0].prepared_hash,
+            input_hash
+        );
     }
 
     #[test]
     fn ct4_bbox_003_and_006_catalog_mock_persists_profile_metadata_and_search_text() {
+        let _env_lock = MARKDOWNIZE_ENV_LOCK.lock().unwrap();
         let temp = tempfile::tempdir().unwrap();
         let input = temp.path().join("chart.pdf");
         let input_bytes = b"%PDF bbox mock";

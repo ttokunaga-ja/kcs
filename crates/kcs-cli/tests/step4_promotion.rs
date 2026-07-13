@@ -3,7 +3,11 @@ use std::fs;
 use assert_cmd::Command;
 use kcs_adapter::tool_lock::tool_lock_hash;
 use kcs_core::scope::Repository;
-use kcs_pipeline::task::{TaskStatus, TaskStore};
+use kcs_pipeline::markdownize::load_validated_normalized_instance;
+use kcs_pipeline::prepare::UnitType;
+use kcs_pipeline::task::{
+    validate_task_output_ref, TaskOutputRef, TaskStatus, TaskStore, TaskType,
+};
 use rusqlite::{params, Connection};
 use serde_json::Value;
 use tempfile::TempDir;
@@ -225,6 +229,103 @@ fn ct4_promotion_done_batch_updates_provenance_search_and_is_idempotent() {
     json_success(&dir, &["index", "--approve"], Some("mock"));
     assert_eq!(head(&dir), promoted_head);
     assert_eq!(cost_ledger(&dir), charged);
+}
+
+#[test]
+fn ct4_bbox_006_ocr_from_scratch_promotes_scanned_pdf_and_image() {
+    let dir = tempfile::tempdir().unwrap();
+    init(&dir);
+    // Neither input has locally extractable text. The provider response must become
+    // the first canonical Prepared unit set (page:1 and image:0 respectively).
+    fs::write(
+        dir.path().join("scan.pdf"),
+        b"%PDF-1.4\n1 0 obj << /Type /Catalog >> endobj\n%%EOF\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.path().join("diagram.png"),
+        b"\x89PNG\r\n\x1a\nmock-image-body",
+    )
+    .unwrap();
+
+    json_success(&dir, &["index", "--approve"], None);
+    let baseline_head = head(&dir);
+    json_success(&dir, &["batch", "resume"], Some("mock"));
+    let promoted_head = head(&dir);
+    assert_ne!(
+        promoted_head, baseline_head,
+        "OCR-from-scratch completion must promote a new HEAD"
+    );
+
+    let repo = Repository::open(dir.path()).unwrap();
+    let store = TaskStore::new(repo.kcs_dir());
+    let tasks = store
+        .all()
+        .unwrap()
+        .into_iter()
+        .filter(|task| task.task_type == TaskType::Markdownize)
+        .collect::<Vec<_>>();
+    assert_eq!(tasks.len(), 2, "one durable task per input, without churn");
+    for task in &tasks {
+        assert_eq!(task.status, TaskStatus::Done);
+        let TaskOutputRef::NormalizedInstance {
+            raw_hash,
+            tool_profile_hash,
+            gen,
+            ..
+        } = validate_task_output_ref(repo.kcs_dir(), task).unwrap()
+        else {
+            panic!("Done OCR task must retain a typed normalized output_ref");
+        };
+        let instance =
+            load_validated_normalized_instance(repo.kcs_dir(), &raw_hash, &tool_profile_hash, gen)
+                .unwrap();
+        assert_eq!(instance.manifest.units.len(), 1);
+        assert_eq!(instance.units.len(), 1);
+        let expected_key = if task.input_path.ends_with(".pdf") {
+            "page:1"
+        } else {
+            "image:0"
+        };
+        let expected_type = if task.input_path.ends_with(".pdf") {
+            UnitType::Page
+        } else {
+            UnitType::Image
+        };
+        assert_eq!(instance.manifest.units[0].unit_key, expected_key);
+        assert_eq!(instance.manifest.units[0].unit_type, expected_type);
+        assert_eq!(instance.manifest.units[0].prepared_hash, raw_hash);
+        assert_eq!(instance.units[0].unit_key, expected_key);
+        assert_eq!(instance.units[0].unit_type, expected_type);
+    }
+
+    let search = json_success(
+        &dir,
+        &["search", "mock ocr", "--scope", ".", "--text"],
+        None,
+    );
+    assert!(search["results"].as_array().unwrap().len() >= 2);
+    let bbox_search = json_success(&dir, &["search", "1000", "--scope", ".", "--text"], None);
+    assert!(
+        bbox_search["results"].as_array().unwrap().len() >= 2,
+        "bbox annotations discovered from both inputs must be searchable"
+    );
+
+    let charged = cost_ledger(&dir);
+    json_success(&dir, &["batch", "resume"], Some("mock"));
+    json_success(&dir, &["index", "--approve"], Some("mock"));
+    assert_eq!(head(&dir), promoted_head, "idle retries must not recommit");
+    assert_eq!(cost_ledger(&dir), charged, "idle retries must not recharge");
+    assert_eq!(
+        TaskStore::new(repo.kcs_dir())
+            .all()
+            .unwrap()
+            .into_iter()
+            .filter(|task| task.task_type == TaskType::Markdownize)
+            .count(),
+        2,
+        "idle retries must not append duplicate tasks"
+    );
 }
 
 #[test]

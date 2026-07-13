@@ -7042,72 +7042,44 @@ fn ct4_historical_secret_path_withholds_existing_vector() {
     );
 }
 
-/// R21-3: a scanned/text-layer-less PDF (empty `prepared_units`, needs OCR-from-scratch)
-/// must be left a stable Pending online task — not retired `retired_non_live` and churned
-/// on every re-index (which R20-7 then hid as enriched_ratio 1.0). Assert the online task
-/// stays Pending across a `batch resume` and an idle re-index, with no duplicate rows.
+/// CT4-BBOX-006: a scanned/text-layer-less PDF (empty local `prepared_units`) must
+/// complete OCR-from-scratch and remain idempotent across resume/re-index, rather than
+/// staying Pending forever or churning replacement tasks.
 #[test]
-fn r21_3_scanned_pdf_stays_pending_no_churn() {
+fn ct4_bbox_006_scanned_pdf_completes_without_churn() {
     let dir = tempfile::tempdir().unwrap();
     // %PDF header but no text layer (no `BT`): prepare_units returns empty.
     let mut scan = b"%PDF-1.4\n".to_vec();
     scan.extend((0u32..4000).map(|i| (i.wrapping_mul(97) & 0x7f) as u8 | 0x80));
     fs::write(dir.path().join("scan.pdf"), &scan).unwrap();
     kcs(&dir, &["init"]).assert().success();
-    // Persistent network opt-in so `batch resume` can drive the online adapter.
-    fs::write(
-        dir.path().join(".kcs/config.toml"),
-        "kcs_format_version = \"0.1.0\"\n[adapter.policy]\nallow_network = true\n",
-    )
-    .unwrap();
-    let online_count = |status: &Value| -> usize {
-        status["tasks"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter(|t| {
-                t["output_ref"]
-                    .as_str()
-                    .is_some_and(|r| r.starts_with("online:"))
-            })
-            .count()
-    };
-    let retired_count = |status: &Value| -> usize {
-        status["tasks"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter(|t| {
-                t["output_ref"]
-                    .as_str()
-                    .is_some_and(|r| r.starts_with("online:"))
-                    && t["fallback_reason"] == "retired_non_live"
-            })
-            .count()
-    };
-    json_both_mock(&dir, &["index", "--online", "--yes"]);
+    // `--approve` records the persistent consent that deferred batch execution needs.
+    json_both_mock(&dir, &["index", "--approve"]);
     json_both_mock(&dir, &["batch", "resume"]);
-    json_both_mock(&dir, &["index", "--online", "--yes"]);
+    json_both_mock(&dir, &["index", "--approve"]);
     json_both_mock(&dir, &["batch", "resume"]);
     let status = json_both_mock(&dir, &["status"]);
-    assert_eq!(
-        online_count(&status),
-        1,
-        "R21-3: the scanned-PDF online task must not churn (exactly one row): {status}"
-    );
-    assert_eq!(
-        retired_count(&status),
-        0,
-        "R21-3: a live scanned PDF must not be mislabeled retired_non_live: {status}"
-    );
-    let pending = status["tasks"]
+    let tasks = status["tasks"]
         .as_array()
         .unwrap()
         .iter()
-        .any(|t| t["type"] == "markdownize" && t["status"] == "pending");
+        .filter(|task| task["type"] == "markdownize")
+        .collect::<Vec<_>>();
+    assert_eq!(
+        tasks.len(),
+        1,
+        "the scanned-PDF online task must not churn: {status}"
+    );
+    assert_eq!(
+        tasks[0]["status"], "done",
+        "OCR-from-scratch must reach Done: {status}"
+    );
     assert!(
-        pending,
-        "R21-3: the scanned-PDF task must stay honestly Pending: {status}"
+        !tasks[0]["output_ref"]
+            .as_str()
+            .unwrap()
+            .starts_with("online:"),
+        "Done must retain a normalized-instance output_ref: {status}"
     );
 }
 
