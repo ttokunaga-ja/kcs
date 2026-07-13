@@ -1,4 +1,6 @@
 mod historical_reindex;
+mod ocr_discovery;
+mod online_task;
 mod promotion;
 mod purge;
 mod restore;
@@ -7,6 +9,8 @@ mod search_time;
 mod verify_objects;
 
 use crate::historical_reindex::{retained_history_instances, RetainedNormalizedInstance};
+use crate::ocr_discovery::{prepared_units_from_ocr_discovery, supports_ocr_from_scratch};
+use crate::online_task::targets_standard_online_markdownize;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, OpenOptions};
@@ -7041,7 +7045,7 @@ fn reenqueue_partial_markdownize_tasks(store: &TaskStore) -> Result<usize> {
     for task in store.all().map_err(pipeline_to_kcs)? {
         if task.status != TaskStatus::Partial
             || task.task_type != TaskType::Markdownize
-            || task.output_ref.starts_with("online:")
+            || !targets_standard_online_markdownize(store.kcs_dir(), &task, &online_ref)
         {
             continue;
         }
@@ -7068,7 +7072,10 @@ fn reenqueue_partial_markdownize_tasks(store: &TaskStore) -> Result<usize> {
             };
             task.status = TaskStatus::Pending;
             task.unit_keys = Some(retryable.clone());
-            task.output_ref = online_ref.clone();
+            // Preserve the typed normalized-instance reference. The retry precondition
+            // needs its complete manifest to recover every provider-discovered unit;
+            // replacing this with the online placeholder made OCR-from-scratch partial
+            // tasks impossible to resume.
             task.fallback_reason = None;
             task.next_retry_at = None;
             // R10-4/R19-5: the re-drive is charged against the retry budget in the
@@ -7352,7 +7359,7 @@ fn execute_pending_markdownize_tasks(
             .into_iter()
             .filter(|task| {
                 task.task_type == TaskType::Markdownize
-                    && task.output_ref == output_ref
+                    && targets_standard_online_markdownize(store.kcs_dir(), task, &output_ref)
                     && task.status == TaskStatus::Failed
                     && retry_kind_from_reason(task.fallback_reason.as_deref())
                         == RetryErrorKind::AuthError
@@ -7405,7 +7412,7 @@ fn execute_pending_markdownize_tasks(
         .filter(|task| {
             task.status == TaskStatus::Pending
                 && task.task_type == TaskType::Markdownize
-                && task.output_ref == output_ref
+                && targets_standard_online_markdownize(store.kcs_dir(), task, &output_ref)
                 // Honor an unelapsed retry backoff even for a Pending task
                 // (Step2c I2); `batch retry` already gates on this, so this is
                 // a defensive belt-and-braces guard.
@@ -7430,13 +7437,9 @@ fn execute_pending_markdownize_tasks(
         // the charge.
         let prepared_input = match classify_online_markdownize_precondition(repo, &task) {
             OnlineMarkdownizePrecondition::Send(prepared_input) => prepared_input,
-            OnlineMarkdownizePrecondition::AwaitOcr => {
-                // R21-3: a valid non-text-native file with no locally-extractable text
-                // (scanned PDF / image / OOXML) needs OCR-from-scratch, which the
-                // hint-driven send cannot do yet. Leave the task Pending — it stays honest
-                // pending enrichment and is deduped by the next re-index — rather than
-                // retiring it (which mislabels a live file, churns, and hides it via R20-7).
-                // Not counted as attempted/failed/paused: nothing was sent.
+            OnlineMarkdownizePrecondition::AwaitConversion => {
+                // A live Office document remains honest Pending work until its bounded
+                // local conversion contract exists. Nothing was sent or charged.
                 continue;
             }
             OnlineMarkdownizePrecondition::Retire => {
@@ -7868,14 +7871,10 @@ enum OnlineMarkdownizePrecondition {
     /// Genuine failure — retire the task (file gone / edited-since-enqueue / text-native /
     /// oversize). The recovery is a fresh re-index, not a retry.
     Retire,
-    /// Valid non-text-native media with NO locally-extractable text (a scanned/text-layer-
-    /// less PDF, image, or OOXML doc). The OCR send is driven by prepared-unit hints, so
-    /// with zero units it would return zero pages — genuine OCR-from-scratch is not yet
-    /// implemented. Leave the task Pending (honest pending enrichment counted by
-    /// `index_status`) instead of retiring it as `retired_non_live`, which mislabels a
-    /// LIVE file, churns a new task on every re-index, and (via R20-7) hides it as
-    /// enriched_ratio 1.0.
-    AwaitOcr,
+    /// The file is live and recognized, but KCS does not yet have a bounded local
+    /// conversion contract that can feed it to the OCR adapter. Keep it Pending without
+    /// charging or sending; currently this is the Office-container path.
+    AwaitConversion,
 }
 
 struct PreparedOnlineMarkdownizeInput {
@@ -7962,7 +7961,36 @@ fn classify_online_markdownize_precondition(
         return OnlineMarkdownizePrecondition::Retire;
     };
     if prepare.prepared_units.is_empty() {
-        return OnlineMarkdownizePrecondition::AwaitOcr;
+        // A supported non-text-native file reaches the provider without local unit
+        // hints; the OCR response discovers its canonical page/image units.
+        // A unit-scoped retry can recover those units from the previously-persisted
+        // Partial manifest. Office containers still need a separate bounded conversion
+        // contract, and unknown octet-stream binaries are never valid OCR inputs.
+        if !supports_ocr_from_scratch(&media_type) {
+            return if media_type == "application/octet-stream" {
+                OnlineMarkdownizePrecondition::Retire
+            } else {
+                OnlineMarkdownizePrecondition::AwaitConversion
+            };
+        }
+        let prepared_units = if task.unit_keys.is_some() {
+            let store = TaskStore::new(repo.kcs_dir());
+            let Ok(Some(previous)) = load_previous_instance_for_task(&store, task) else {
+                return OnlineMarkdownizePrecondition::Retire;
+            };
+            previous.prepared_units
+        } else {
+            Vec::new()
+        };
+        if !retry_unit_subset_is_valid(task, &prepared_units) {
+            return OnlineMarkdownizePrecondition::Retire;
+        }
+        return OnlineMarkdownizePrecondition::Send(PreparedOnlineMarkdownizeInput {
+            path,
+            media_type,
+            bytes: verified.bytes,
+            prepared_units,
+        });
     }
     // R22-5: retire a legacy task for octet-stream TEXT. The recovery is a re-index (which
     // no longer enqueues it), not a retry — the deterministic pass already handled the file.
@@ -7989,7 +8017,7 @@ fn execute_online_markdownize_task(
         path,
         media_type,
         bytes,
-        prepared_units,
+        mut prepared_units,
     } = prepared_input;
     // R14-2: an online markdownize task is always deferred — one pass enqueues it and
     // a later `batch resume` / `index --online` executes it — so the file may have been
@@ -8042,7 +8070,7 @@ fn execute_online_markdownize_task(
     // Returns Some on success; None when it doesn't apply or the acceptance check
     // fails (fall through to the Full send below); Err on an adapter auth/rate error
     // (a Full re-send would hit the same error, so propagate).
-    if retry_units.is_none() {
+    if retry_units.is_none() && !prepared_units.is_empty() {
         if let Some(outcome) = try_online_incremental_markdownize(
             repo,
             task,
@@ -8085,6 +8113,29 @@ fn execute_online_markdownize_task(
         &bytes,
     )
     .map_err(task_failure_from_adapter)?;
+    if prepared_units.is_empty() {
+        if retry_units.is_some() {
+            return Err(TaskExecutionFailure {
+                retry_kind: RetryErrorKind::ContractViolation,
+            });
+        }
+        prepared_units = prepared_units_from_ocr_discovery(
+            &outcome.effective_prepared_unit_hints,
+            &media_type,
+            &task.input_hash,
+            &bytes,
+        )
+        .map_err(|_| TaskExecutionFailure {
+            retry_kind: RetryErrorKind::ContractViolation,
+        })?;
+        // No page artifact exists before OCR for a scanned PDF. The already-verified
+        // immutable raw object is the bounded prepared source shared by each discovered
+        // unit; publish it under the same content hash before the manifest can refer to it.
+        write_cas_object_or_reuse_legacy(repo.kcs_dir(), "prepared", &task.input_hash, &bytes)
+            .map_err(|_| TaskExecutionFailure {
+                retry_kind: persist_failure_retry_kind(),
+            })?;
+    }
     let profile = outcome.profile;
     let response = outcome.response;
     let hints = all_changed_hints(&prepared_units);
@@ -8139,15 +8190,14 @@ fn execute_online_markdownize_task(
                 .unwrap_or(u64::MAX)
         });
     }
-    // R11-6: with the merge, `units` is empty only for a full send that returned
-    // nothing (a genuine contract violation). A unit-scoped retry where the adapter
-    // dropped every requested unit still carries the preserved previously-done units,
-    // so it is NOT a ContractViolation — it stays Partial and `attempts` advances (the
-    // mock `partial` seam drops the last requested unit, so a single-unit retry
-    // legitimately returns nothing).
+    // A total coverage miss is retryable just like a partial coverage miss. The adapter
+    // itself enforces the provider's exact page bijection, but a downstream transport
+    // seam may still yield zero normalized outputs (notably a one-unit image). Preserve
+    // the placeholder output_ref and let the ordinary NetworkError backoff/retry path
+    // re-drive the whole document; there is no Done unit worth materializing yet.
     if units.is_empty() {
         return Err(TaskExecutionFailure {
-            retry_kind: RetryErrorKind::ContractViolation,
+            retry_kind: RetryErrorKind::NetworkError,
         });
     }
     let done = units.len();
@@ -10732,7 +10782,11 @@ fn run_index_pipeline(
         let mut orphan_ids = BTreeSet::new();
         for task in task_store.all().map_err(pipeline_to_kcs)? {
             let orphaned = task.task_type == TaskType::Markdownize
-                && task.output_ref == placeholder_output_ref
+                && targets_standard_online_markdownize(
+                    task_store.kcs_dir(),
+                    &task,
+                    &placeholder_output_ref,
+                )
                 && task.status == TaskStatus::Failed
                 && is_reservation_bearing_send_failure(&task)
                 && !live_paths.contains(task.input_path.as_str());
@@ -12093,7 +12147,7 @@ fn enqueue_online_placeholder_task(
     let mut stale_ids = BTreeSet::new();
     for task in task_store.all().map_err(pipeline_to_kcs)? {
         let stale = task.task_type == TaskType::Markdownize
-            && task.output_ref == output_ref
+            && targets_standard_online_markdownize(task_store.kcs_dir(), &task, &output_ref)
             && task.input_path == candidate.input_path
             && task.input_hash != raw_hash
             && (matches!(task.status, TaskStatus::Pending | TaskStatus::Paused)
@@ -12162,7 +12216,9 @@ fn enqueue_online_placeholder_task(
                 return false;
             }
             match task.status {
-                TaskStatus::Pending | TaskStatus::Paused => task.output_ref == output_ref,
+                TaskStatus::Pending | TaskStatus::Paused => {
+                    targets_standard_online_markdownize(task_store.kcs_dir(), task, &output_ref)
+                }
                 TaskStatus::Done | TaskStatus::Partial => {
                     task.fallback_reason.as_deref() == Some("online_adapter_done")
                 }
@@ -12170,10 +12226,12 @@ fn enqueue_online_placeholder_task(
                 // when the (path,hash) identity reappears (revert/restore). Other Failed
                 // tasks stay deduped (owned by `batch retry`, which honors backoff).
                 TaskStatus::Failed => {
-                    task.output_ref == output_ref
+                    targets_standard_online_markdownize(task_store.kcs_dir(), task, &output_ref)
                         && task.fallback_reason.as_deref() != Some(RETIRED_NON_LIVE)
                 }
-                TaskStatus::Running => task.output_ref == output_ref,
+                TaskStatus::Running => {
+                    targets_standard_online_markdownize(task_store.kcs_dir(), task, &output_ref)
+                }
             }
         })
     {

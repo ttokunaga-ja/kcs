@@ -1842,6 +1842,54 @@ fn r9_4_partial_task_recovers_via_retry_and_status_counts_it() {
     );
 }
 
+/// A one-unit OCR-from-scratch response can lose its only normalized output. That
+/// total coverage miss must remain a retryable network failure with the online
+/// placeholder intact; treating it as a permanent contract violation strands every
+/// standalone image because there is no Partial manifest with a Done unit to retain.
+#[test]
+fn ct4_bbox_006_single_discovered_unit_total_miss_retries_to_done() {
+    let dir = scope();
+    fs::write(
+        dir.path().join("diagram.png"),
+        b"\x89PNG\r\n\x1a\nretryable-image",
+    )
+    .unwrap();
+    json_success(&dir, ["index", "--approve"]);
+
+    let first = json_code_stdout_with_env(
+        &dir,
+        ["batch", "resume"],
+        3,
+        &[
+            (TEST_STANDARD_ONLINE_MARKDOWNIZE_ENV, "partial"),
+            ("KCS_FIXED_NOW", "2026-07-03T00:00:00Z"),
+        ],
+    );
+    assert_eq!(first["tasks_failed"], 1);
+    let failed = json_success(&dir, ["status"]);
+    let task = first_online_task(&failed);
+    assert_eq!(task["status"], "failed");
+    assert_eq!(task["fallback_reason"], "network_error");
+
+    let retry = json_success_with_env(
+        &dir,
+        ["batch", "retry"],
+        &[
+            (TEST_STANDARD_ONLINE_MARKDOWNIZE_ENV, "mock"),
+            ("KCS_FIXED_NOW", "2026-07-03T01:00:00Z"),
+        ],
+    );
+    assert_eq!(retry["tasks_updated"], 1);
+    assert_eq!(retry["tasks_executed"], 1);
+    let done = json_success(&dir, ["status"]);
+    assert!(done["tasks"].as_array().unwrap().iter().any(|task| {
+        task["input_path"] == "diagram.png"
+            && task["type"] == "markdownize"
+            && task["status"] == "done"
+            && !task["output_ref"].as_str().unwrap().starts_with("online:")
+    }));
+}
+
 /// R10-4: a Partial online markdownize task whose unit keeps failing must NOT be
 /// re-sent & re-billed forever. Each `batch retry` charges the retry budget
 /// (`attempts`++) and, once `max_attempts` is reached, the task is left Partial and
