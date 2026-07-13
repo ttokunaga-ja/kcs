@@ -26,6 +26,7 @@ jobs:
       - run: cargo build --release --locked
       - run: python3 eval/generate_corpus.py --out /tmp/kcs-eval-corpus
       - run: python3 eval/replay_history.py --corpus /tmp/kcs-eval-corpus --bin target/release/kcs
+      - run: python3 eval/run_eval.py --scenario M3-1 --corpus /tmp/kcs-eval-corpus --bin target/release/kcs
       - run: python3 eval/run_eval.py --scenario M3-2 --corpus /tmp/kcs-eval-corpus --bin target/release/kcs
       - run: python3 eval/run_eval.py --scenario M3-3 --corpus /tmp/kcs-eval-corpus --bin target/release/kcs
 

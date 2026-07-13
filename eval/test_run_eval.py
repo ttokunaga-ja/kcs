@@ -496,7 +496,7 @@ class TestStep4EvalGates(unittest.TestCase):
         self.assertEqual(len(incomplete["deleted_missing"]), 1)
         self.assertFalse(incomplete["passes_m3_3"])
 
-    def test_evidence_fields_and_latency_boundary(self):
+    def test_evidence_fields(self):
         bad = {"results": [_pointer("sha256:a", section_id="x/y")]}
         self.assertTrue(run_eval.evidence_problems(bad))
         pointer = {
@@ -509,9 +509,20 @@ class TestStep4EvalGates(unittest.TestCase):
         }
         self.assertEqual(run_eval.evidence_problems(
             {"results": [{"evidence_pointer": pointer}]}), [])
+
+    def test_scenario_specific_latency_boundaries(self):
         self.assertEqual(run_eval.percentile_nearest_rank([1, 2, 3, 4, 5], .95), 5)
-        self.assertLess(6999.9, run_eval.LATENCY_TARGET_MS)
-        self.assertFalse(7000.0 < run_eval.LATENCY_TARGET_MS)
+        self.assertEqual(run_eval.LATENCY_TARGET_MS, {
+            "M3-1": 5_000.0,
+            "M3-2": 7_000.0,
+            "M3-3": 7_000.0,
+        })
+        self.assertTrue(run_eval.passes_latency_target("M3-1", 4_999.9))
+        self.assertFalse(run_eval.passes_latency_target("M3-1", 5_000.0))
+        for scenario in ("M3-2", "M3-3"):
+            self.assertTrue(run_eval.passes_latency_target(scenario, 6_999.9))
+            self.assertFalse(run_eval.passes_latency_target(scenario, 7_000.0))
+        self.assertFalse(run_eval.passes_latency_target("M3-1", None))
 
 
 if __name__ == "__main__":
