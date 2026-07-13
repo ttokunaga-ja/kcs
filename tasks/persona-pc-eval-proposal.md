@@ -339,8 +339,10 @@ W5後は10,800,000 current+history contract chunksを計画する。W5 pre-purge
 - pilot/root読み戻し前はblockedのcapacity projection/receipt API
 - no-replace canonical JSONL shard storage（source inode rename blockerにより常にnon-formal）
 - root directory/owner markerをinode固定し、W0 bytesを変えず保持するread-only
-  replay-root lease primitive（POSIXのみ。executor未接続）
+  replay-root lease primitiveとlease-held root FD貸出し（POSIXのみ。executor未接続）
 - strict KCS result/environment/binary-receipt boundary（TOCTOU対策完了前は全execution/mutation gate false）
+- canonical all-person plan SHAを1人ずつ再構成し、root/person/device/scopeのexact 20×20と
+  宣言artifact SHAを束縛するnon-executing prepare-receipt composer（全semantic claim false）
 - profile、canonical scope quota、file bytes/content rootを束縛するpartial semantic attestor
   （完全形状でも`history_ready_attested=false`）
 - no-replace/owned-root/capacity/reparse/hard-link安全境界
@@ -351,8 +353,8 @@ W5後は10,800,000 current+history contract chunksを計画する。W5 pre-purge
 
 - metadataを実bytesへ反映するpersona別rich size distribution、role別extension/domain-binary renderer、
   native/emulated OS behavior（現行render behaviorは未変更）
-- W0 init/index prepare executor・complete KCS semantic history-ready attestor、root lease統合、W1-W5 safe
-  mutation/journal/replay、query generator
+- W0 init/index prepare executor・native FD-bound SQLite/WAL snapshotを含むcomplete KCS semantic
+  history-ready attestor、W1-W5 safe mutation/journal/replay、query generator
 - pilot/fullのW0 writer・suite streamのformal publication/RSS/readback/`wait4` gate・実測byte cap
 - Windows directory-handle durability（planは可、物理publishは現状blocked）
 - full 120,000 actual KCS chunks/personの証明
@@ -362,8 +364,8 @@ W5後は10,800,000 current+history contract chunksを計画する。W5 pre-purge
 tiny/pilot/full全60 persona-profileでexact subsetが存在し、full P/X/Y/Nの20-scope coverageも実現可能と
 確認し、source-ID cohort allocator、structural allocator、planned event manifestのcanonical
 rebuild validatorまで実装した。full 1 replayではP path 2,775件、X replacement 6,931件、P+X
-replacement 9,706件となる。root-wide lease primitive自体は実装したが、W0 history-ready
-receipt、prepare/replayへのlease統合、safe mutation、append-only journal、replay executorは
+replacement 9,706件となる。root-wide leaseとlease-held root FD貸出しは実装したが、W0
+history-ready receipt、prepare executor、safe mutation、append-only journal、replay executorは
 未実装なので、W1-W5 mutationは引き続きfail closedとする。
 planned quota/manifestは実KCS chunk attestationの代用ではない。
 
@@ -386,9 +388,17 @@ KCS runnerはvalidatorとisolated environment recipeを持つが、scope path検
 init/index/version subprocessもpersona mutationも実行しない。partial semantic attestorはprofile、
 persona/scope identity、quota算術、file content rootsとtyped callback receiptsを束縛するが、
 SQLite/CAS、HEAD/commit、binary/config、root/prepare intentの完全な検査ではなく、
-20人/400 scopes/20 devicesが揃っても`history_ready_attested=false`である。
+20人/400 scopes/20 devicesが揃ってもformal semantic coverageと
+`history_ready_attested`はfalseである。checker-local observationは
+`formal_transport_attested=false`固定で、legacy nine-field callbackへ昇格できない。
 各directoryは名前またはMerkle childを保持する前に16,384 direct entriesでhard capされる。
 `HISTORY_ASSIGNMENT_EXECUTABLE=False`を維持する。
+
+lease-derived callbackはtrusted-rootのpath-check/open seamを閉じるが、同一process checkerの
+FD複製・一時再束縛、same-UID ABA、immutable snapshot/process isolationは未解決である。
+さらにPython標準`sqlite3`ではheld directory FDをauthorityにしてscope DBとregistry
+main/WAL/SHMをcross-platformに同一epochで検査できない。native read-only VFSまたはwriter排除下の
+immutable snapshotが入るまで、actual chunk/history-readyを主張しない。
 
 post-W0 verifierはstrict W0 exact-tree verifierを緩めない。別APIでW0のowner/root binding、
 ledger、source bytesを再検証し、canonical intentが宣言する400個の`.kcs`と20個の
@@ -431,6 +441,17 @@ incidental 47、raw-only 0を確認した。各scopeの初回commitはparentな�
 allocated約14.8 MiBであり、小さなscopeを多数持つ構成ではSQLite/CAS固定費が支配的になる。
 これはp01/tinyの実装可能性probeであって、400 scope history-ready barrier、pilot/full容量、
 または120,000 actual chunks/personの証拠ではない。
+
+同日の別fresh rootでは、tiny全20人・400 scopes・4,000 W0 files・4,131 planned chunksを
+生成し、plan SHA
+`fb0f704a94f596bac8b9e00188e0908c06f8233923567b11b45125aaae5adaaa`を再確認した。
+このうちp01の2 scopesだけをisolated offline `init/index`で開発probeした。primary-01は
+20 physical sourcesのうち13 contributorから38 chunks、7 incidentalから7 chunksで合計45、
+primary-09は10 sourcesのうち6 local contributorだけがSQLite/chunkへ入り、4 DOCXはHEAD treeと
+raw CASには存在するがnormalizeなし・SQLite `tree_entries`なし・pending online taskとなった。
+したがってformal attestorは「HEAD tree=全physical sources」と「SQLite tree_entries=normalized
+sources」を別台帳として検査しなければならない。この2-scope結果も400-scope attestationではなく、
+外部APIを使わない開発probeに限る。
 
 現行20人はMVPの**職業知識労働者**を広くstressする集合であり、家庭用PC人口を代表しない。
 creative/media制作、学生個人、家庭写真中心、SMB general-adminまで対象を広げる場合は、既存比率を

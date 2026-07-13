@@ -311,6 +311,267 @@ def require_active_lease(
     return lease
 
 
+def _root_descriptor_metadata(
+    descriptor: int,
+    *,
+    lease: ReplayRootLease,
+    expected_nlink: int | None,
+    label: str,
+) -> os.stat_result:
+    try:
+        metadata = os.fstat(descriptor)
+    except OSError as error:
+        raise PersonaRootLockError(f"{label} is not open") from error
+    if (
+        not _plain_root_metadata(metadata)
+        or (metadata.st_dev, metadata.st_ino)
+        != (lease.root_device, lease.root_inode)
+        or metadata.st_nlink <= 0
+        or (expected_nlink is not None and metadata.st_nlink != expected_nlink)
+    ):
+        raise PersonaRootLockError(f"{label} identity changed")
+    return metadata
+
+
+def _shares_open_directory_description(anchor_fd: int, candidate_fd: int) -> bool:
+    """Probe whether two directory fds share one POSIX open description.
+
+    ``fstat`` alone cannot distinguish a real ``dup`` from closing and
+    reopening the same inode.  Mutable file-status flags belong to the open
+    file description, so a real duplicate follows both an ``O_NONBLOCK``
+    transition and its restoration while an independently opened descriptor
+    does not.  The anchor is always restored before returning.
+
+    This remains an in-process, non-authoritative probe: another thread can
+    race the transitions.  It is nevertheless portable across the Darwin and
+    Linux directory-offset behaviours used by supported CI hosts.
+    """
+    try:
+        import fcntl
+    except ImportError:  # pragma: no cover - guarded by POSIX callers.
+        return False
+
+    anchor_flags = None
+    restored = False
+    try:
+        if anchor_fd == candidate_fd:
+            return False
+        anchor_flags = fcntl.fcntl(anchor_fd, fcntl.F_GETFL)
+        candidate_flags = fcntl.fcntl(candidate_fd, fcntl.F_GETFL)
+        if candidate_flags != anchor_flags:
+            return False
+        probe_flags = anchor_flags ^ os.O_NONBLOCK
+        fcntl.fcntl(anchor_fd, fcntl.F_SETFL, probe_flags)
+        probe_anchor = fcntl.fcntl(anchor_fd, fcntl.F_GETFL)
+        probe_candidate = fcntl.fcntl(candidate_fd, fcntl.F_GETFL)
+        fcntl.fcntl(anchor_fd, fcntl.F_SETFL, anchor_flags)
+        restored = True
+        restored_anchor = fcntl.fcntl(anchor_fd, fcntl.F_GETFL)
+        restored_candidate = fcntl.fcntl(candidate_fd, fcntl.F_GETFL)
+        return (
+            probe_anchor == probe_flags
+            and probe_candidate == probe_anchor
+            and restored_anchor == anchor_flags
+            and restored_candidate == anchor_flags
+        )
+    except (OSError, TypeError, ValueError):
+        return False
+    finally:
+        if anchor_flags is not None and not restored:
+            try:
+                fcntl.fcntl(anchor_fd, fcntl.F_SETFL, anchor_flags)
+            except OSError:
+                pass
+
+
+def _is_owned_root_duplicate(
+    anchor_fd: int,
+    candidate_fd: int,
+    expected_metadata: os.stat_result,
+) -> bool:
+    """Return true only while ``candidate_fd`` is still our anchor duplicate."""
+    try:
+        candidate = os.fstat(candidate_fd)
+    except OSError:
+        return False
+    return (
+        _plain_root_metadata(candidate)
+        and candidate.st_nlink > 0
+        and (
+            candidate.st_dev,
+            candidate.st_ino,
+            candidate.st_nlink,
+        )
+        == (
+            expected_metadata.st_dev,
+            expected_metadata.st_ino,
+            expected_metadata.st_nlink,
+        )
+        and _shares_open_directory_description(anchor_fd, candidate_fd)
+    )
+
+
+@contextmanager
+def active_root_descriptor(
+    lease: ReplayRootLease,
+    expected_root: os.PathLike[str] | str | None = None,
+) -> Iterator[int]:
+    """Yield a private, non-inheritable duplicate of a lease-held root fd.
+
+    The duplicate is derived from the descriptor already held by ``lease``;
+    this function never reopens the diagnostic root path.  It therefore closes
+    that particular path-check/open seam for a cooperating in-process reader.
+    The caller must treat the yielded descriptor as borrowed.  A descriptor
+    that remains closed, remains rebound to a foreign object, or remains
+    inheritable is rejected on exit.
+
+    This is not protection against hostile same-UID ABA changes, same-root or
+    transient fd rebinding, leaked duplicates, or concurrent manipulation by
+    another thread in the same process.  A formal execution boundary still
+    requires a quiesced snapshot and process isolation.
+    """
+    if type(lease) is not ReplayRootLease:
+        raise PersonaRootLockError("invalid replay root lease")
+    canonical_expected_root = None
+    if expected_root is not None:
+        try:
+            canonical_expected_root = Path(
+                os.path.abspath(os.path.expanduser(os.fspath(expected_root)))
+            )
+        except Exception as error:
+            raise PersonaRootLockError(
+                "expected replay root path is invalid"
+            ) from error
+    require_active_lease(lease, canonical_expected_root)
+    state = lease._state
+    if type(state) is not _LeaseState:  # Defensive after exact lease validation.
+        raise PersonaRootLockError("replay root lease state is invalid")
+    held_metadata = _root_descriptor_metadata(
+        state.root_fd,
+        lease=lease,
+        expected_nlink=None,
+        label="lease-held replay root descriptor",
+    )
+    expected_nlink = held_metadata.st_nlink
+    descriptor = -1
+    body_error = None
+    body_traceback = None
+    release_error = None
+    try:
+        try:
+            descriptor = os.dup(state.root_fd)
+            if not _is_owned_root_duplicate(
+                state.root_fd, descriptor, held_metadata
+            ):
+                raise PersonaRootLockError(
+                    "cannot prove active replay root descriptor ownership"
+                )
+            os.set_inheritable(descriptor, False)
+            duplicated = _root_descriptor_metadata(
+                descriptor,
+                lease=lease,
+                expected_nlink=expected_nlink,
+                label="active replay root descriptor",
+            )
+            if (
+                (duplicated.st_dev, duplicated.st_ino, duplicated.st_nlink)
+                != (held_metadata.st_dev, held_metadata.st_ino, held_metadata.st_nlink)
+                or os.get_inheritable(descriptor)
+                or not _is_owned_root_duplicate(
+                    state.root_fd, descriptor, held_metadata
+                )
+            ):
+                raise PersonaRootLockError(
+                    "active replay root descriptor is not a private "
+                    "non-inheritable duplicate"
+                )
+        except PersonaRootLockError:
+            raise
+        except OSError as error:
+            raise PersonaRootLockError(
+                "cannot duplicate the active replay root descriptor"
+            ) from error
+
+        try:
+            yield descriptor
+        except BaseException as error:  # Preserve body failure if release is clean.
+            body_error = error
+            body_traceback = error.__traceback__
+
+        try:
+            after = os.fstat(descriptor)
+            descriptor_still_bound = _is_owned_root_duplicate(
+                state.root_fd, descriptor, held_metadata
+            )
+            if (
+                not descriptor_still_bound
+                or (after.st_dev, after.st_ino, after.st_nlink)
+                != (
+                    held_metadata.st_dev,
+                    held_metadata.st_ino,
+                    held_metadata.st_nlink,
+                )
+                or os.get_inheritable(descriptor)
+                or not _is_owned_root_duplicate(
+                    state.root_fd, descriptor, held_metadata
+                )
+            ):
+                raise PersonaRootLockError(
+                    "active replay root descriptor was rebound or made inheritable"
+                )
+        except OSError as error:
+            descriptor_still_bound = False
+            release_error = PersonaRootLockError(
+                "active replay root descriptor was closed or changed"
+            )
+            release_error.__cause__ = error
+        except BaseException as error:
+            release_error = error
+
+        try:
+            current_held = _root_descriptor_metadata(
+                state.root_fd,
+                lease=lease,
+                expected_nlink=expected_nlink,
+                label="lease-held replay root descriptor",
+            )
+            if (
+                current_held.st_dev,
+                current_held.st_ino,
+                current_held.st_nlink,
+            ) != (
+                held_metadata.st_dev,
+                held_metadata.st_ino,
+                held_metadata.st_nlink,
+            ):
+                raise PersonaRootLockError(
+                    "lease-held replay root descriptor identity changed"
+                )
+            require_active_lease(lease, canonical_expected_root)
+        except BaseException as error:
+            if release_error is None:
+                release_error = error
+    finally:
+        if descriptor >= 0 and _is_owned_root_duplicate(
+            state.root_fd, descriptor, held_metadata
+        ):
+            try:
+                os.close(descriptor)
+            except OSError as error:
+                if release_error is None:
+                    release_error = PersonaRootLockError(
+                        "cannot close the active replay root descriptor"
+                    )
+                    release_error.__cause__ = error
+
+    if release_error is not None:
+        if body_error is not None:
+            raise release_error from body_error
+        raise release_error
+    if body_error is not None:
+        raise body_error.with_traceback(body_traceback)
+
+
 @contextmanager
 def replay_root_lock(
     root: os.PathLike[str] | str,

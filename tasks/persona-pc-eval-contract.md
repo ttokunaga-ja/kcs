@@ -4,7 +4,8 @@ Status: partial implementation.  W0 tiny publication, contributor/structural
 allocators, the root-independent planned event manifest, and the twenty-person
 suite schedule exist.  Persona fidelity/size hypotheses, bounded one-person
 planning, the full planned-count oracle, read-only root lease, partial semantic
-attestation, and fail-closed capacity/storage/runner boundaries also exist;
+attestation, canonical non-executing prepare-receipt composition, and
+fail-closed capacity/storage/runner boundaries also exist;
 W0 history prepare, replay, and pilot/full physical publication remain blocked.  This
 suite is additive to the frozen Recall corpus and Decision 90's balanced
 20-scope scale control.
@@ -486,15 +487,28 @@ and resource-limit oracle complement the P/X/Y/N allocator, structural
 allocator, event manifest, tiny-tested root-wide suite schedule, bounded
 per-person event artifacts plus an O(20) schedule/locator/MMR composer,
 tiny-only W0 publisher, prepare-envelope verifier, and read-only replay-root
-lease.
+lease, plus a canonical root/person/device/scope prepare-receipt composer.
 
 The history allocator proves exact person-global planned sums in tiny/pilot/full
-and full twenty-scope coverage for every positive cohort.  The tiny filesystem
+and full twenty-scope coverage for every positive cohort.  The prepare-receipt
+composer regenerates the canonical all-person plan SHA one bounded persona at
+a time, binds an exact ordered 20×20 projection to the root binding and declared
+binary/environment/init/index receipt hashes, rejects root `/`, overlong paths,
+duplicate environment/init/index receipt hashes, coherent plan-digest
+substitution, and fixes every
+semantic/history/execution/mutation claim to false.  It does not parse or
+type-check the referenced artifact bodies.  The tiny filesystem
 gate creates two fresh 4,000-source roots, proves immutable-byte equality and
 disjoint inodes, preserves all metadata on a ready no-op, and rejects raw
 tampering.  The lease identity-binds the root, owner marker, and W0 root binding,
 rejects reentry/contention, repeats its checks before release, creates no lock
-artifact, and remains POSIX-only.  It neither attests KCS nor authorizes mutation.
+artifact, and remains POSIX-only.  A scoped API duplicates the already-held root
+FD without reopening its path and detects persistent close/rebind/inheritable
+tampering, including a fresh reopen of the same inode, without closing a reused
+foreign FD.  The open-description probe is covered on Darwin and Linux.  It closes the root check/open
+seam only for cooperating readers; same-UID ABA, transient rebinding, leaked
+duplicates, immutable snapshots, and process isolation remain unresolved.  It
+neither attests KCS nor authorizes mutation.
 
 The full oracle processes one canonical persona at a time and derives, without
 building full event manifests, exactly 43,596 events, 5,175 boundaries, and
@@ -534,12 +548,21 @@ and `TRUSTED_BINARY_EXECUTION_AVAILABLE` all remain false.  No init/index/versio
 subprocess or persona mutation is executable through this API.
 
 The partial semantic attestor binds profile, canonical persona/scope identity,
-contract-quota arithmetic, file bytes/content roots, and typed runtime callback
-receipts.  It does not itself validate SQLite/CAS semantics, HEAD/commit
+contract-quota arithmetic, file bytes/content roots, and typed runtime checker
+observations.  It does not itself validate SQLite/CAS semantics, HEAD/commit
 relations, binary/config, root binding, or prepare intent.  Even an exact
 20-person, 400-scope, 20-device projection always returns
 `history_ready_attested=false`.  Before retaining child names or Merkle
-children, every walked directory is hard-capped at 16,384 direct entries.
+children, every walked directory is hard-capped at 16,384 direct entries.  Its
+experimental handle callback now has a lease-derived root-FD entry point, but is
+explicitly non-authoritative.  Its typed receipt fixes
+`formal_transport_attested=false` and cannot be serialized into the
+provenance-free legacy nine-field envelope callback.  A complete checker additionally needs a native
+FD-bound read-only SQLite/WAL snapshot backend: Python's standard `sqlite3`
+path API cannot use a held directory FD as cross-platform authority for the
+scope database and per-person registry without reopening paths or potentially
+touching sidecars.  Until that backend also proves writer quiescence/same-epoch
+snapshot semantics, actual chunks and history readiness remain unattested.
 
 The fidelity and size profiles remain metadata-only initial hypotheses:
 `implemented_by_renderer=false`.  Current renderer bytes, extension/domain-
