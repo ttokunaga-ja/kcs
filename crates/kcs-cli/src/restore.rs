@@ -1567,8 +1567,16 @@ fn configure_cap_no_follow(_options: &mut cap_fs::OpenOptions) {}
 
 #[cfg(unix)]
 fn sync_directory_handle(destination: &DestinationDir) -> Result<()> {
-    destination
-        .handle
+    // `cap_primitives` deliberately opens capability directories with
+    // `O_PATH` on Linux. That descriptor is suitable for the relative
+    // operations above, but `fsync(O_PATH)` fails with `EBADF`. Re-open `.`
+    // relative to the held capability so durability is requested for the
+    // same directory without falling back to its ambient pathname.
+    let mut options = cap_fs::OpenOptions::new();
+    options.read(true);
+    let syncable = cap_fs::open(&destination.handle, Path::new("."), &options)
+        .map_err(|error| KcsError::io(error.to_string(), destination.path.display().to_string()))?;
+    syncable
         .sync_all()
         .map_err(|error| KcsError::io(error.to_string(), destination.path.display().to_string()))
 }
@@ -1650,7 +1658,8 @@ mod tests {
 
     use super::{
         atomic_replace_handle, check_purge_state, create_private_temp, missing_live_raw_error,
-        normalize_absolute, open_destination_dir, validate_source_names, RestoreItem, ScopeTarget,
+        normalize_absolute, open_destination_dir, sync_directory_handle, validate_source_names,
+        RestoreItem, ScopeTarget,
     };
 
     #[test]
@@ -1677,6 +1686,16 @@ mod tests {
             normalize_absolute(std::path::Path::new("a/../b")).unwrap(),
             cwd.join("b")
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn destination_directory_sync_uses_a_syncable_capability_descriptor() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let destination =
+            open_destination_dir(&temp.path().canonicalize().unwrap(), false).unwrap();
+
+        sync_directory_handle(&destination).unwrap();
     }
 
     #[test]

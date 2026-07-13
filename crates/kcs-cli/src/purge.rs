@@ -1805,7 +1805,7 @@ fn confirm(preview: &PurgePreview, yes: bool) -> Result<()> {
 
 #[cfg(all(test, windows))]
 mod windows_tests {
-    use std::process::{Command, Stdio};
+    use std::process::Command;
 
     use super::validate_real_directory;
 
@@ -1814,15 +1814,10 @@ mod windows_tests {
         let root = tempfile::tempdir().unwrap();
         let outside = tempfile::tempdir().unwrap();
         let junction = root.path().join("poisoned-junction");
-        let command = format!(
-            "mklink /J \"{}\" \"{}\"",
-            junction.display(),
-            outside.path().display()
-        );
         let status = Command::new("cmd.exe")
-            .args(["/D", "/S", "/C", &command])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .args(["/D", "/C", "mklink", "/J"])
+            .arg(&junction)
+            .arg(outside.path())
             .status()
             .expect("cmd.exe must be available on Windows");
         assert!(status.success(), "test junction creation failed");
