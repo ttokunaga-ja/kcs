@@ -669,9 +669,9 @@ query_hash = sha256:08820fbe38f26821717a56fde4cc1db4e104c5ff1221f62477127c070503
   コーパス統計が異なる。
 - When: scope 間マージ。
 - Then: 各 scope の **RRF スコア (rank のみから決まる)** をそのまま比較して降順マージ。BM25/vector の
-  raw スコアを scope 間で比較・正規化しない。同点は `(scope_path, chunk_hash)` の辞書順で安定化。
+  raw スコアを scope 間で比較・正規化しない。同点は `(scope_id, chunk_hash)` の辞書順で安定化。
 - 根拠: `05 §1.8` (実行とマージ 3) (「rank ベース … raw スコアを scope 間で比較・正規化してはならない …
-  同点は (scope_path, chunk_hash) の辞書順」)。
+  同点は (scope_id, chunk_hash) の辞書順」)。
 
 **CT3-MULTI-003** — P0 — diversify は統合後の候補列に適用
 - Given: 複数 scope マージ後の候補列。

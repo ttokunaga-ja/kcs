@@ -15,6 +15,8 @@ const KCS_CHILD_ENV_DENYLIST: &[&str] = &[
     "KCS_TEST_MARKDOWNIZE_ADAPTER",
     "KCS_TEST_QUERY_EMBED_TRACE",
     "KCS_TEST_HOLD_LOCK_MS",
+    "KCS_TEST_SCOPE_SEARCH_DELAY_SCOPE_ID",
+    "KCS_TEST_SCOPE_SEARCH_DELAY_MS",
     "KCS_TEST_R13_2_AUTH",
     "KCS_TEST_R13_2_DECLARED",
     "KCS_TEST_R13_2_FALLBACK",
@@ -90,6 +92,19 @@ fn json_success_path(path: &Path, data_home: &Path, args: &[&str]) -> Value {
         .stdout
         .clone();
     serde_json::from_slice(&output).unwrap()
+}
+
+fn read_scope_id(path: &Path) -> String {
+    let scope: Value =
+        serde_json::from_str(&fs::read_to_string(path.join(".kcs/scope.json")).unwrap()).unwrap();
+    scope["scope_id"].as_str().unwrap().to_owned()
+}
+
+fn replace_scope_id(path: &Path, scope_id: &str) {
+    let scope_path = path.join(".kcs/scope.json");
+    let mut scope: Value = serde_json::from_str(&fs::read_to_string(&scope_path).unwrap()).unwrap();
+    scope["scope_id"] = serde_json::json!(scope_id);
+    fs::write(scope_path, serde_json::to_vec_pretty(&scope).unwrap()).unwrap();
 }
 
 fn indexed_scope() -> TempDir {
@@ -1130,7 +1145,7 @@ fn r15_3_reinit_same_path_does_not_duplicate_registry_target() {
 }
 
 // scope-cross merge is rank-based: both scopes' rank-1 hits get the SAME RRF score
-// (1/(60+1)) despite skewed corpus statistics, and tie-break is (scope_path, ...).
+// (1/(60+1)) despite skewed corpus statistics, and tie-break is (scope_id, ...).
 #[test]
 fn ct3_multi_002_cross_scope_merge_is_rank_based() {
     let parent = tempfile::tempdir().unwrap();
@@ -1150,6 +1165,10 @@ fn ct3_multi_002_cross_scope_merge_is_rank_based() {
     fs::write(b.join("b.md"), "# B\n\n## Sec\nzephyrterm\n").unwrap();
     json_success_path(&a, &data_home, &["init"]);
     json_success_path(&b, &data_home, &["init"]);
+    // Make immutable scope-id order intentionally oppose mutable path order.
+    // This catches accidental reintroduction of the old scope_path tie-break.
+    replace_scope_id(&a, "7ZZZZZZZZZZZZZZZZZZZZZZZZZ");
+    replace_scope_id(&b, "00000000000000000000000001");
     json_success_path(&a, &data_home, &["index", "--approve"]);
     json_success_path(&b, &data_home, &["index", "--approve"]);
     let search = json_success_path(&a, &data_home, &["search", "zephyrterm"]);
@@ -1159,9 +1178,59 @@ fn ct3_multi_002_cross_scope_merge_is_rank_based() {
     assert_eq!(results[0]["score"], results[1]["score"]);
     let expected = 1.0f64 / 61.0;
     assert!((results[0]["score"].as_f64().unwrap() - expected).abs() < 1e-12);
-    // Deterministic tie-break by scope_path: /a before /b.
-    assert!(value_path_ends_with(&results[0]["scope_path"], "a"));
-    assert!(value_path_ends_with(&results[1]["scope_path"], "b"));
+    // Deterministic tie-break by scope_id: b's low id precedes a's high id even
+    // though registry/input order is path a then path b.
+    assert!(value_path_ends_with(&results[0]["scope_path"], "b"));
+    assert!(value_path_ends_with(&results[1]["scope_path"], "a"));
+}
+
+#[test]
+fn ct3_multi_006_completion_order_does_not_change_results_or_cursor() {
+    let parent = tempfile::tempdir().unwrap();
+    let data_home = parent.path().join("xdg");
+    let a = parent.path().join("a");
+    let b = parent.path().join("b");
+    fs::create_dir_all(&a).unwrap();
+    fs::create_dir_all(&b).unwrap();
+    fs::write(a.join("a.md"), "# A\n\n## Sec\norderstable token\n").unwrap();
+    fs::write(b.join("b.md"), "# B\n\n## Sec\norderstable token\n").unwrap();
+    json_success_path(&a, &data_home, &["init"]);
+    json_success_path(&b, &data_home, &["init"]);
+    replace_scope_id(&a, "7ZZZZZZZZZZZZZZZZZZZZZZZZZ");
+    replace_scope_id(&b, "00000000000000000000000001");
+    json_success_path(&a, &data_home, &["index", "--approve"]);
+    json_success_path(&b, &data_home, &["index", "--approve"]);
+    fs::write(
+        a.join(".kcs/config.toml"),
+        "kcs_format_version = \"0.1.0\"\n[search.multi_scope]\nparallelism = 2\n",
+    )
+    .unwrap();
+
+    let baseline = json_success_path(&a, &data_home, &["search", "orderstable", "--limit", "1"]);
+    let delayed_output = hermetic_kcs_command()
+        .current_dir(&a)
+        .env("XDG_CONFIG_HOME", data_home.join("config"))
+        .env("XDG_DATA_HOME", data_home.join("data"))
+        .env("XDG_CACHE_HOME", data_home.join("cache"))
+        // Registry/input order is a then b. Delay a so b completes first.
+        .env(
+            "KCS_TEST_SCOPE_SEARCH_DELAY_SCOPE_ID",
+            "7ZZZZZZZZZZZZZZZZZZZZZZZZZ",
+        )
+        .env("KCS_TEST_SCOPE_SEARCH_DELAY_MS", "300")
+        .args(["search", "orderstable", "--limit", "1", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let delayed: Value = serde_json::from_slice(&delayed_output).unwrap();
+
+    assert!(baseline["paging"]["next_cursor"].is_string());
+    assert_eq!(delayed["results"], baseline["results"]);
+    assert_eq!(delayed["searched_scopes"], baseline["searched_scopes"]);
+    assert_eq!(delayed["excluded_scopes"], baseline["excluded_scopes"]);
+    assert_eq!(delayed["paging"], baseline["paging"]);
 }
 
 // diversify runs on the merged pool: max_per_raw_hash caps a raw_hash across scopes.
@@ -1253,6 +1322,108 @@ fn ct3_multi_005_all_failed_returns_exit_4() {
     kcs(&dir, &["init"]).assert().success();
     let err = json_failure(&dir, &["search", "alpha"], 4);
     assert_eq!(err["error_code"], "KCS-E-SEARCH-SCOPE-ALL-FAILED-001");
+}
+
+#[test]
+fn ct3_multi_006_timeout_preserves_fresh_all_failed_and_cursor_contracts() {
+    let parent = tempfile::tempdir().unwrap();
+    let data_home = parent.path().join("xdg");
+    let a = parent.path().join("a");
+    let b = parent.path().join("b");
+    fs::create_dir_all(&a).unwrap();
+    fs::create_dir_all(&b).unwrap();
+    fs::write(a.join("a.md"), "# A\n\n## Sec\ntimeouttoken alpha\n").unwrap();
+    fs::write(b.join("b.md"), "# B\n\n## Sec\ntimeouttoken beta\n").unwrap();
+    json_success_path(&a, &data_home, &["init"]);
+    json_success_path(&b, &data_home, &["init"]);
+    json_success_path(&a, &data_home, &["index", "--approve"]);
+    json_success_path(&b, &data_home, &["index", "--approve"]);
+    fs::write(
+        a.join(".kcs/config.toml"),
+        "kcs_format_version = \"0.1.0\"\n[search.multi_scope]\nparallelism = 2\nper_scope_timeout_seconds = 1\n",
+    )
+    .unwrap();
+    let b_scope_id = read_scope_id(&b);
+
+    // A fresh search isolates the timed-out scope, returns the healthy result,
+    // and uses the established partial-failure exit 3 payload contract.
+    let partial_output = hermetic_kcs_command()
+        .current_dir(&a)
+        .env("XDG_CONFIG_HOME", data_home.join("config"))
+        .env("XDG_DATA_HOME", data_home.join("data"))
+        .env("XDG_CACHE_HOME", data_home.join("cache"))
+        .env("KCS_TEST_SCOPE_SEARCH_DELAY_SCOPE_ID", &b_scope_id)
+        .env("KCS_TEST_SCOPE_SEARCH_DELAY_MS", "2500")
+        .args(["search", "timeouttoken", "--json"])
+        .assert()
+        .code(3)
+        .get_output()
+        .stdout
+        .clone();
+    let partial: Value = serde_json::from_slice(&partial_output).unwrap();
+    assert_eq!(partial["searched_scopes"].as_array().unwrap().len(), 1);
+    assert_eq!(partial["excluded_scopes"].as_array().unwrap().len(), 1);
+    assert_eq!(partial["excluded_scopes"][0]["scope_id"], b_scope_id);
+    assert_eq!(partial["excluded_scopes"][0]["reason"], "timeout");
+    assert!(!partial["results"].as_array().unwrap().is_empty());
+    assert!(partial.get("__exit_code").is_none());
+
+    // With only the delayed scope selected, the same reason participates in the
+    // established all-scopes-failed exit 4 aggregation.
+    let b_arg = b.display().to_string();
+    let all_failed = hermetic_kcs_command()
+        .current_dir(&a)
+        .env("XDG_CONFIG_HOME", data_home.join("config"))
+        .env("XDG_DATA_HOME", data_home.join("data"))
+        .env("XDG_CACHE_HOME", data_home.join("cache"))
+        .env("KCS_TEST_SCOPE_SEARCH_DELAY_SCOPE_ID", &b_scope_id)
+        .env("KCS_TEST_SCOPE_SEARCH_DELAY_MS", "2500")
+        .args(["search", "timeouttoken", "--scope", &b_arg, "--json"])
+        .assert()
+        .code(4)
+        .get_output()
+        .stderr
+        .clone();
+    let all_failed: Value = serde_json::from_slice(&all_failed).unwrap();
+    assert_eq!(
+        all_failed["error_code"],
+        "KCS-E-SEARCH-SCOPE-ALL-FAILED-001"
+    );
+    assert_eq!(
+        all_failed["context"]["excluded_scopes"][0]["reason"],
+        "timeout"
+    );
+
+    // Cursor replay cannot shrink its frozen active set. A timeout therefore
+    // hard-fails with no partial stdout or replacement cursor.
+    let first = json_success_path(&a, &data_home, &["search", "timeouttoken", "--limit", "1"]);
+    let cursor = first["paging"]["next_cursor"].as_str().unwrap();
+    let replay = hermetic_kcs_command()
+        .current_dir(&a)
+        .env("XDG_CONFIG_HOME", data_home.join("config"))
+        .env("XDG_DATA_HOME", data_home.join("data"))
+        .env("XDG_CACHE_HOME", data_home.join("cache"))
+        .env("KCS_TEST_SCOPE_SEARCH_DELAY_SCOPE_ID", &b_scope_id)
+        .env("KCS_TEST_SCOPE_SEARCH_DELAY_MS", "2500")
+        .args([
+            "search",
+            "timeouttoken",
+            "--limit",
+            "1",
+            "--cursor",
+            cursor,
+            "--json",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(replay.status.code(), Some(2));
+    assert!(
+        replay.stdout.is_empty(),
+        "cursor failure must not emit a page"
+    );
+    let replay_error: Value = serde_json::from_slice(&replay.stderr).unwrap();
+    assert_eq!(replay_error["error_code"], "KCS-E-SEARCH-CURSOR-001");
+    assert_eq!(replay_error["context"]["cause"], "timeout");
 }
 
 // Step 4 cursor v2 freezes the complete active scope set. Losing any active
@@ -4492,13 +4663,20 @@ fn r12_1_unknown_search_rrf_key_is_schema_error() {
     assert_eq!(err["error_code"], "KCS-E-CONFIG-SCHEMA-001");
 }
 
-// [search.multi_scope] stays typed-but-accepted (MULTI-006 defer): a documented
-// key must not brick, even though it is unwired.
+// [search.multi_scope] is a live execution setting; both documented keys are
+// accepted and the hard worker ceiling rejects accidental oversubscription.
 #[test]
-fn r12_1_multi_scope_config_is_accepted_not_bricked() {
+fn r12_1_multi_scope_config_is_wired_and_bounded() {
     let dir = multi_chunk_scope();
-    write_scope_config(&dir, "[search.multi_scope]\nparallelism = 4\n");
+    write_scope_config(
+        &dir,
+        "[search.multi_scope]\nparallelism = 4\nper_scope_timeout_seconds = 2\n",
+    );
     json_success(&dir, &["search", "sharedtoken"]);
+
+    write_scope_config(&dir, "[search.multi_scope]\nparallelism = 5\n");
+    let error = json_failure(&dir, &["search", "sharedtoken"], 2);
+    assert_eq!(error["error_code"], "KCS-E-CONFIG-SCHEMA-001");
 }
 
 // include_neighbors has no implementation concept: a non-default value is a loud
