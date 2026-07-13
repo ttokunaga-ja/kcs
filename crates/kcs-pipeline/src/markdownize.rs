@@ -10,6 +10,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use kcs_adapter::types as adapter_types;
 use kcs_core::scope::{new_ulid, now_utc_seconds};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use crate::prepare::{
     hash_bytes, unit_ref as prepared_unit_ref, PreparedUnit, UnitFingerprint, UnitType,
@@ -21,6 +22,10 @@ static ATOMIC_WRITE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 const MAX_NORMALIZED_MANIFEST_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_NORMALIZED_UNIT_BYTES: u64 = 128 * 1024 * 1024;
 const MAX_NORMALIZED_INSTANCE_BYTES: u64 = 256 * 1024 * 1024;
+// CT4-FSCK's invocation-wide object ceiling is also the outer bound for the
+// physical manifest/unit entries inspected before the loader can identify the
+// valid subset. Canonical and legacy representations share this one counter.
+const MAX_NORMALIZED_INSTANCE_FILES: usize = 1_000_000;
 
 #[derive(Debug, Clone, Copy)]
 struct NormalizedSizeLimits {
@@ -75,6 +80,9 @@ pub struct NormalizedUnitObject {
     pub gen: u64,
     pub mode: MarkdownizeMode,
     pub markdown: String,
+    /// Provider/layout metadata. Legacy unit objects deserialize as an empty map.
+    #[serde(default)]
+    pub metadata: BTreeMap<String, Value>,
     pub reused_from: Option<ReusedFrom>,
     pub generated_at: String,
 }
@@ -153,6 +161,8 @@ pub struct NormalizedInstanceIdentity {
 pub struct ValidatedNormalizedInstance {
     pub manifest: NormalizedInstanceManifest,
     pub units: Vec<NormalizedUnitObject>,
+    /// Exact bytes read for the verified physical manifest/unit representation(s).
+    pub verified_bytes: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -252,6 +262,7 @@ pub fn markdownize_units(request: MarkdownizeStageRequest) -> Result<Markdownize
             "<!-- KCS deterministic baseline {} {} -->\n",
             unit_key, request.new_raw.raw_hash
         ),
+        metadata: BTreeMap::new(),
         reused_from: None,
         generated_at: generated_at.clone(),
     };
@@ -517,13 +528,19 @@ pub fn load_validated_normalized_instance(
                     &legacy_dir,
                     &identity,
                 )?;
-                if canonical != legacy {
+                if canonical.manifest != legacy.manifest || canonical.units != legacy.units {
                     return Err(normalized_corrupt(
                         &kcs_dir.as_ref().join(&canonical_relative),
                         "canonical and legacy normalized instances disagree",
                     ));
                 }
-                Ok(canonical)
+                Ok(ValidatedNormalizedInstance {
+                    manifest: canonical.manifest,
+                    units: canonical.units,
+                    verified_bytes: canonical
+                        .verified_bytes
+                        .saturating_add(legacy.verified_bytes),
+                })
             }
             (Some(canonical_dir), None) => load_validated_normalized_instance_at(
                 kcs_dir.as_ref(),
@@ -558,6 +575,86 @@ pub fn load_validated_normalized_instance(
             &identity,
         )
     }
+}
+
+/// Conservatively account every bounded physical file that the normalized
+/// loader can consume for one identity. Fsck charges this before loading so a
+/// schema/identity failure cannot evade the invocation-wide byte budget.
+pub fn normalized_instance_read_budget(
+    kcs_dir: impl AsRef<Path>,
+    raw_hash: &str,
+    tool_profile_hash: &str,
+    gen: u64,
+) -> Result<u64> {
+    normalized_instance_read_budget_with_file_limit(
+        kcs_dir.as_ref(),
+        raw_hash,
+        tool_profile_hash,
+        gen,
+        MAX_NORMALIZED_INSTANCE_FILES,
+    )
+}
+
+fn normalized_instance_read_budget_with_file_limit(
+    kcs_dir: &Path,
+    raw_hash: &str,
+    tool_profile_hash: &str,
+    gen: u64,
+    max_files: usize,
+) -> Result<u64> {
+    if !kcs_core::cas::is_hash(raw_hash) || !kcs_core::cas::is_hash(tool_profile_hash) {
+        return Err(PipelineError::corrupt(
+            kcs_dir.display().to_string(),
+            "requested normalized instance has an invalid hash identity".to_owned(),
+        ));
+    }
+    let mut relatives = vec![normalized_instance_relative_path(
+        raw_hash,
+        tool_profile_hash,
+        gen,
+    )];
+    #[cfg(not(windows))]
+    relatives.push(legacy_normalized_instance_relative_path(
+        raw_hash,
+        tool_profile_hash,
+        gen,
+    ));
+
+    let mut total = 0_u64;
+    let mut visited_files = 0_usize;
+    for relative in relatives {
+        let Some(directory) =
+            resolve_existing_store_path(kcs_dir, &relative, StorePathKind::Directory)?
+        else {
+            continue;
+        };
+        for entry in fs::read_dir(&directory).pipeline_io(&directory)? {
+            let entry = entry.pipeline_io(&directory)?;
+            let path = entry.path();
+            visited_files = visited_files.saturating_add(1);
+            if visited_files > max_files {
+                return Err(normalized_corrupt(
+                    &directory,
+                    format!("normalized instance physical file count exceeds {max_files} limit"),
+                ));
+            }
+            let file_type = entry.file_type().pipeline_io(&path)?;
+            if !file_type.is_file() || file_type.is_symlink() {
+                return Err(normalized_corrupt(
+                    &path,
+                    "normalized instance contains a non-regular file",
+                ));
+            }
+            let limit = if entry.file_name() == "manifest.json" {
+                MAX_NORMALIZED_MANIFEST_BYTES
+            } else {
+                MAX_NORMALIZED_UNIT_BYTES
+            };
+            let size = entry.metadata().pipeline_io(&path)?.len();
+            total = total.saturating_add(size.min(limit.saturating_add(1)));
+        }
+    }
+    Ok(total)
 }
 
 fn load_validated_normalized_instance_at(
@@ -607,7 +704,11 @@ fn load_validated_normalized_instance_at(
         units.push(unit);
     }
     validate_normalized_instance(&manifest_path, identity, &manifest, &units)?;
-    Ok(ValidatedNormalizedInstance { manifest, units })
+    Ok(ValidatedNormalizedInstance {
+        manifest,
+        units,
+        verified_bytes: total_bytes,
+    })
 }
 
 /// Validate already-deserialized normalized state. This is also used by the
@@ -1383,6 +1484,15 @@ mod tests {
             gen: 7,
             mode: MarkdownizeMode::Full,
             markdown: "trusted markdown".to_owned(),
+            metadata: BTreeMap::from([(
+                "bbox_annotations".to_owned(),
+                serde_json::json!([{
+                    "image_hash": format!("sha256:{}", "e".repeat(64)),
+                    "bbox": [0, 0, 1, 1],
+                    "short_description": "figure",
+                    "transcribed_text": "ZXQ\\-UNIQUE"
+                }]),
+            )]),
             reused_from: None,
             generated_at: "2026-07-12T00:00:00Z".to_owned(),
         }];
@@ -1401,6 +1511,24 @@ mod tests {
 
         let value = serde_json::to_value(unit_ref).expect("serialize unit ref");
         assert_eq!(value["gen"], 2);
+    }
+
+    #[test]
+    fn ct4_bbox_006_legacy_normalized_unit_defaults_metadata_empty() {
+        let legacy = serde_json::json!({
+            "unit_key": "page:1",
+            "unit_type": "page",
+            "raw_hash": format!("sha256:{}", "a".repeat(64)),
+            "prepared_hash": format!("sha256:{}", "b".repeat(64)),
+            "tool_profile_hash": format!("sha256:{}", "c".repeat(64)),
+            "gen": 0,
+            "mode": "full",
+            "markdown": "legacy",
+            "reused_from": null,
+            "generated_at": "2026-07-13T00:00:00Z"
+        });
+        let unit: NormalizedUnitObject = serde_json::from_value(legacy).unwrap();
+        assert!(unit.metadata.is_empty());
     }
 
     #[test]
@@ -1667,6 +1795,58 @@ mod tests {
     }
 
     #[test]
+    fn ct4_fsck_normalized_budget_charges_corrupt_unit_bytes_before_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let (identity, manifest, units) = normalized_fixture();
+        persist_normalized_instance(dir.path(), &manifest, &units).unwrap();
+        let loaded = load_validated_normalized_instance(
+            dir.path(),
+            &identity.raw_hash,
+            &identity.tool_profile_hash,
+            identity.gen,
+        )
+        .unwrap();
+        let budget = normalized_instance_read_budget(
+            dir.path(),
+            &identity.raw_hash,
+            &identity.tool_profile_hash,
+            identity.gen,
+        )
+        .unwrap();
+        assert_eq!(budget, loaded.verified_bytes);
+
+        let unit_path = normalized_instance_dir(
+            dir.path(),
+            &identity.raw_hash,
+            &identity.tool_profile_hash,
+            identity.gen,
+        )
+        .join(format!(
+            "{}.json",
+            prepared_unit_ref(&manifest.units[0].unit_key)
+        ));
+        let length = fs::metadata(&unit_path).unwrap().len();
+        fs::write(&unit_path, vec![b'x'; length as usize]).unwrap();
+        assert_eq!(
+            normalized_instance_read_budget(
+                dir.path(),
+                &identity.raw_hash,
+                &identity.tool_profile_hash,
+                identity.gen,
+            )
+            .unwrap(),
+            budget
+        );
+        assert!(load_validated_normalized_instance(
+            dir.path(),
+            &identity.raw_hash,
+            &identity.tool_profile_hash,
+            identity.gen,
+        )
+        .is_err());
+    }
+
+    #[test]
     fn canonical_normalized_layout_allows_retry_overwrite() {
         let dir = tempfile::tempdir().unwrap();
         let (identity, mut manifest, mut units) = normalized_fixture();
@@ -1866,6 +2046,36 @@ mod tests {
         let err = persist_normalized_instance(dir.path(), &manifest, &units).unwrap_err();
         assert!(err.to_string().contains("normalized manifest exceeds"));
         assert!(!expected_dir.exists());
+    }
+
+    #[test]
+    fn ct4_fsck_normalized_read_budget_bounds_physical_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let (identity, manifest, units) = normalized_fixture();
+        persist_normalized_instance(dir.path(), &manifest, &units).unwrap();
+
+        assert!(normalized_instance_read_budget_with_file_limit(
+            dir.path(),
+            &identity.raw_hash,
+            &identity.tool_profile_hash,
+            identity.gen,
+            2,
+        )
+        .is_ok());
+        let error = normalized_instance_read_budget_with_file_limit(
+            dir.path(),
+            &identity.raw_hash,
+            &identity.tool_profile_hash,
+            identity.gen,
+            1,
+        )
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("physical file count exceeds 1 limit"),
+            "{error}"
+        );
     }
 
     #[cfg(unix)]

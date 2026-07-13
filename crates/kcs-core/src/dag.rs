@@ -9,7 +9,10 @@ use serde::{Deserialize, Serialize};
 use crate::cas::{hash_json, is_hash};
 use crate::error::{KcsError, Result};
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub const MAX_TREE_ENTRIES: usize = 10_000;
+pub const MAX_COMMIT_PARENTS: usize = 64;
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct NormalizeRef {
     pub tool_profile_hash: String,
     #[serde(default)]

@@ -1,10 +1,12 @@
 //! FTS5 external-content index contracts.
 
-use rusqlite::{params, Connection};
+use std::collections::BTreeSet;
+
+use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use unicode_normalization::UnicodeNormalization;
 
-use crate::{ChunkRow, Result};
+use crate::{ChunkRow, IndexError, Result};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -23,6 +25,19 @@ pub struct FtsMatch {
     pub chunk_id: String,
     pub rank: u64,
     pub bm25_score: f64,
+}
+
+/// Rows removed from the derived index for one purged raw object.
+///
+/// `chunk_ids` is sorted so callers can deterministically remove the matching
+/// chunk CAS objects and durable-ledger records after this transaction commits.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct PurgeRawIndexReport {
+    pub chunk_ids: Vec<String>,
+    pub deleted_chunks: u64,
+    pub deleted_associations: u64,
+    pub deleted_chunk_vectors: u64,
+    pub deleted_orphan_embeddings: u64,
 }
 
 pub struct SqliteFtsIndex {
@@ -56,6 +71,40 @@ impl SqliteFtsIndex {
     }
 
     pub fn index_chunk(&mut self, row: &ChunkRow) -> Result<()> {
+        self.index_chunk_with_association_rowid(row, None)
+            .map(|_| ())
+    }
+
+    /// Insert an immutable chunk row and append its chunking-config generation.
+    ///
+    /// Fresh indexing passes `None` and lets SQLite allocate the monotonically
+    /// increasing association rowid. Durable-ledger replay may pass the recorded
+    /// rowid so a rebuilt database preserves cursor ordering exactly.
+    pub fn index_chunk_with_association_rowid(
+        &mut self,
+        row: &ChunkRow,
+        association_rowid: Option<u64>,
+    ) -> Result<u64> {
+        self.index_chunk_with_rowids(row, None, association_rowid)
+            .map(|(_, association_rowid)| association_rowid)
+    }
+
+    /// Replay one durable chunk/config ledger record with stable rowids.
+    ///
+    /// `chunk_rowid` is shared by every association record for the immutable
+    /// chunk. Both explicit rowids are collision-checked inside one savepoint so
+    /// a malformed ledger cannot partially publish either side of the relation.
+    pub fn index_chunk_with_rowids(
+        &mut self,
+        row: &ChunkRow,
+        chunk_rowid: Option<u64>,
+        association_rowid: Option<u64>,
+    ) -> Result<(u64, u64)> {
+        if chunk_rowid == Some(0) {
+            return Err(IndexError::Contract(
+                "chunk rowid must be positive".to_owned(),
+            ));
+        }
         // Q4: the trigram tokenizer stops at a NUL byte, so any text after a
         // U+0000 (e.g. a UTF-16-LE `.txt` decoded lossily keeps interleaved NULs)
         // would be silently unsearchable even though `index` reported success.
@@ -73,37 +122,187 @@ impl SqliteFtsIndex {
         // form. This is a derived-index projection only; the char offsets that
         // evidence resolves against remain over the original `row.text`.
         let indexed_text = row.text.nfc().collect::<String>().replace('\u{0}', "");
-        self.conn.execute(
-            "INSERT OR IGNORE INTO chunks(
-                chunk_id, raw_hash, tool_profile_hash, gen, unit_key,
-                chunking_config_hash, raw_path, heading_path, section_id,
-                char_start, char_end, text_hash, text, first_seen_commit, created_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
-            params![
-                row.chunk_id,
-                row.raw_hash,
-                row.tool_profile_hash,
-                row.gen,
-                row.unit_key,
-                row.chunking_config_hash,
-                row.raw_path,
-                serde_json::to_string(&row.heading_path.clone().unwrap_or_default())?,
-                row.section_id,
-                row.char_start,
-                row.char_end,
-                row.text_hash,
-                indexed_text,
-                row.first_seen_commit,
-                row.created_at,
-            ],
-        )?;
-        Ok(())
+        with_savepoint(&self.conn, "kcs_index_chunk", || {
+            let requested_chunk_rowid = chunk_rowid.map(sql_rowid).transpose()?;
+            let existing_chunk_rowid = self
+                .conn
+                .query_row(
+                    "SELECT rowid FROM chunks WHERE chunk_id = ?1",
+                    params![row.chunk_id],
+                    |result| result.get::<_, i64>(0),
+                )
+                .optional()?;
+            let actual_chunk_rowid = match existing_chunk_rowid {
+                Some(existing) => {
+                    if requested_chunk_rowid.is_some_and(|requested| requested != existing) {
+                        return Err(IndexError::Contract(format!(
+                            "chunk {} has rowid {existing}, not requested rowid {}",
+                            row.chunk_id,
+                            requested_chunk_rowid.expect("checked as some")
+                        )));
+                    }
+                    existing
+                }
+                None => {
+                    let heading_path =
+                        serde_json::to_string(&row.heading_path.clone().unwrap_or_default())?;
+                    if let Some(requested) = requested_chunk_rowid {
+                        let occupied = self
+                            .conn
+                            .query_row(
+                                "SELECT chunk_id FROM chunks WHERE rowid = ?1",
+                                params![requested],
+                                |result| result.get::<_, String>(0),
+                            )
+                            .optional()?;
+                        if let Some(occupied) = occupied {
+                            return Err(IndexError::Contract(format!(
+                                "chunk rowid {requested} is already occupied by {occupied}"
+                            )));
+                        }
+                        self.conn.execute(
+                            "INSERT INTO chunks(
+                                rowid, chunk_id, raw_hash, tool_profile_hash, gen, unit_key,
+                                raw_path, heading_path, section_id, char_start, char_end,
+                                text_hash, text, first_seen_commit, created_at
+                             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+                            params![
+                                requested,
+                                row.chunk_id,
+                                row.raw_hash,
+                                row.tool_profile_hash,
+                                row.gen,
+                                row.unit_key,
+                                row.raw_path,
+                                heading_path,
+                                row.section_id,
+                                row.char_start,
+                                row.char_end,
+                                row.text_hash,
+                                indexed_text,
+                                row.first_seen_commit,
+                                row.created_at,
+                            ],
+                        )?;
+                        requested
+                    } else {
+                        self.conn.execute(
+                            "INSERT INTO chunks(
+                                chunk_id, raw_hash, tool_profile_hash, gen, unit_key,
+                                raw_path, heading_path, section_id, char_start, char_end,
+                                text_hash, text, first_seen_commit, created_at
+                             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+                            params![
+                                row.chunk_id,
+                                row.raw_hash,
+                                row.tool_profile_hash,
+                                row.gen,
+                                row.unit_key,
+                                row.raw_path,
+                                heading_path,
+                                row.section_id,
+                                row.char_start,
+                                row.char_end,
+                                row.text_hash,
+                                indexed_text,
+                                row.first_seen_commit,
+                                row.created_at,
+                            ],
+                        )?;
+                        self.conn.last_insert_rowid()
+                    }
+                }
+            };
+            let association_rowid = record_chunk_config_association(
+                &self.conn,
+                &row.chunk_id,
+                &row.chunking_config_hash,
+                &row.created_at,
+                association_rowid,
+            )?;
+            Ok((sql_u64_rowid(actual_chunk_rowid)?, association_rowid))
+        })
     }
 
     pub fn delete_chunk(&mut self, chunk_id: &str) -> Result<()> {
-        self.conn
-            .execute("DELETE FROM chunks WHERE chunk_id = ?1", params![chunk_id])?;
-        Ok(())
+        with_savepoint(&self.conn, "kcs_delete_chunk", || {
+            self.conn.execute(
+                "DELETE FROM chunk_config_generations WHERE chunk_id = ?1",
+                params![chunk_id],
+            )?;
+            self.conn
+                .execute("DELETE FROM chunks WHERE chunk_id = ?1", params![chunk_id])?;
+            Ok(())
+        })
+    }
+
+    /// Transactionally remove every derived-index row owned by `raw_hash`.
+    ///
+    /// Embeddings are keyed by normalized text rather than raw objects, so an
+    /// embedding is removed only when no surviving chunk references its text
+    /// hash. `tree_entries` is intentionally untouched: immutable commit/tree
+    /// history is governed by the purge tombstone/barrier rather than rewritten.
+    pub fn purge_raw(&mut self, raw_hash: &str) -> Result<PurgeRawIndexReport> {
+        with_savepoint(&self.conn, "kcs_purge_raw", || {
+            let targets = {
+                let mut statement = self.conn.prepare(
+                    "SELECT chunk_id, text_hash
+                     FROM chunks
+                     WHERE raw_hash = ?1
+                     ORDER BY chunk_id",
+                )?;
+                let rows = statement.query_map(params![raw_hash], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })?;
+                rows.collect::<std::result::Result<Vec<_>, _>>()?
+            };
+
+            let mut report = PurgeRawIndexReport {
+                chunk_ids: targets
+                    .iter()
+                    .map(|(chunk_id, _)| chunk_id.clone())
+                    .collect(),
+                ..PurgeRawIndexReport::default()
+            };
+            let text_hashes = targets
+                .iter()
+                .map(|(_, text_hash)| text_hash.clone())
+                .collect::<BTreeSet<_>>();
+
+            for (chunk_id, _) in &targets {
+                report.deleted_chunk_vectors += u64::try_from(self.conn.execute(
+                    "DELETE FROM chunk_vec WHERE chunk_id = ?1",
+                    params![chunk_id],
+                )?)
+                .map_err(|_| IndexError::Contract("deleted row count exceeds u64".to_owned()))?;
+                report.deleted_associations += u64::try_from(self.conn.execute(
+                    "DELETE FROM chunk_config_generations WHERE chunk_id = ?1",
+                    params![chunk_id],
+                )?)
+                .map_err(|_| IndexError::Contract("deleted row count exceeds u64".to_owned()))?;
+            }
+
+            report.deleted_chunks = u64::try_from(
+                self.conn
+                    .execute("DELETE FROM chunks WHERE raw_hash = ?1", params![raw_hash])?,
+            )
+            .map_err(|_| IndexError::Contract("deleted row count exceeds u64".to_owned()))?;
+
+            for text_hash in text_hashes {
+                report.deleted_orphan_embeddings += u64::try_from(self.conn.execute(
+                    "DELETE FROM embeddings
+                     WHERE target_type = 'chunk'
+                       AND target_id = ?1
+                       AND NOT EXISTS (
+                           SELECT 1 FROM chunks WHERE text_hash = ?1 LIMIT 1
+                       )",
+                    params![text_hash],
+                )?)
+                .map_err(|_| IndexError::Contract("deleted row count exceeds u64".to_owned()))?;
+            }
+
+            Ok(report)
+        })
     }
 
     /// Schema/tokenizer contract probe: a bare `chunk_fts MATCH` over the whole
@@ -139,12 +338,166 @@ impl SqliteFtsIndex {
     }
 }
 
+/// Append a chunk/config generation association and return its stable rowid.
+///
+/// The `(chunk_id, chunking_config_hash)` relation is idempotent. When an
+/// explicit rowid is supplied (during durable-ledger rebuild), both the pair and
+/// rowid must agree with an existing record; a collision is a contract error
+/// rather than a silent renumbering that could invalidate signed cursors.
+pub fn record_chunk_config_association(
+    conn: &Connection,
+    chunk_id: &str,
+    chunking_config_hash: &str,
+    created_at: &str,
+    association_rowid: Option<u64>,
+) -> Result<u64> {
+    if association_rowid == Some(0) {
+        return Err(IndexError::Contract(
+            "chunk/config association rowid must be positive".to_owned(),
+        ));
+    }
+    let chunk_exists = conn
+        .query_row(
+            "SELECT 1 FROM chunks WHERE chunk_id = ?1 LIMIT 1",
+            params![chunk_id],
+            |_| Ok(()),
+        )
+        .optional()?
+        .is_some();
+    if !chunk_exists {
+        return Err(IndexError::Contract(format!(
+            "cannot associate missing chunk {chunk_id}"
+        )));
+    }
+
+    let requested_rowid = association_rowid.map(sql_rowid).transpose()?;
+    let existing_for_pair = conn
+        .query_row(
+            "SELECT association_rowid
+             FROM chunk_config_generations
+             WHERE chunk_id = ?1 AND chunking_config_hash = ?2",
+            params![chunk_id, chunking_config_hash],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()?;
+
+    if let Some(existing_rowid) = existing_for_pair {
+        if let Some(requested_rowid) = requested_rowid {
+            if existing_rowid != requested_rowid {
+                return Err(IndexError::Contract(format!(
+                    "chunk/config association {chunk_id}/{chunking_config_hash} has rowid \
+                     {existing_rowid}, not requested rowid {requested_rowid}"
+                )));
+            }
+        }
+        return sql_u64_rowid(existing_rowid);
+    }
+
+    if let Some(requested_rowid) = requested_rowid {
+        let occupied = conn
+            .query_row(
+                "SELECT chunk_id, chunking_config_hash
+                 FROM chunk_config_generations
+                 WHERE association_rowid = ?1",
+                params![requested_rowid],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()?;
+        if let Some((occupied_chunk, occupied_config)) = occupied {
+            return Err(IndexError::Contract(format!(
+                "chunk/config association rowid {requested_rowid} is already occupied by \
+                 {occupied_chunk}/{occupied_config}"
+            )));
+        }
+        conn.execute(
+            "INSERT INTO chunk_config_generations(
+                association_rowid, chunk_id, chunking_config_hash, created_at
+             ) VALUES (?1, ?2, ?3, ?4)",
+            params![requested_rowid, chunk_id, chunking_config_hash, created_at],
+        )?;
+        return sql_u64_rowid(requested_rowid);
+    }
+
+    conn.execute(
+        "INSERT INTO chunk_config_generations(chunk_id, chunking_config_hash, created_at)
+         VALUES (?1, ?2, ?3)",
+        params![chunk_id, chunking_config_hash, created_at],
+    )?;
+    sql_u64_rowid(conn.last_insert_rowid())
+}
+
+/// Maximum generation-association rowid frozen into a page-1 cursor.
+/// Empty databases use zero, which cannot name an AUTOINCREMENT row.
+pub fn max_chunk_config_association_rowid(conn: &Connection) -> Result<u64> {
+    let maximum = conn.query_row(
+        "SELECT COALESCE(MAX(association_rowid), 0) FROM chunk_config_generations",
+        [],
+        |row| row.get::<_, i64>(0),
+    )?;
+    sql_u64_rowid(maximum)
+}
+
+/// Whether a chunk had an association with the effective config at the frozen
+/// association maximum.
+pub fn chunk_has_current_config_association(
+    conn: &Connection,
+    chunk_id: &str,
+    chunking_config_hash: &str,
+    max_association_rowid: u64,
+) -> Result<bool> {
+    let max_association_rowid = sql_rowid(max_association_rowid)?;
+    Ok(conn
+        .query_row(
+            "SELECT 1
+             FROM chunk_config_generations
+             WHERE chunk_id = ?1
+               AND chunking_config_hash = ?2
+               AND association_rowid <= ?3
+             LIMIT 1",
+            params![chunk_id, chunking_config_hash, max_association_rowid],
+            |_| Ok(()),
+        )
+        .optional()?
+        .is_some())
+}
+
+/// Return chunks satisfying the shared row/config cursor eligibility filter.
+/// Snapshot/tree liveness is intentionally layered on by the caller because it
+/// differs between default, `--at`, all-history, and include-deleted modes.
+pub fn current_config_eligible_chunk_ids(
+    conn: &Connection,
+    chunking_config_hash: &str,
+    max_chunk_rowid: u64,
+    max_association_rowid: u64,
+) -> Result<BTreeSet<String>> {
+    let max_chunk_rowid = sql_rowid(max_chunk_rowid)?;
+    let max_association_rowid = sql_rowid(max_association_rowid)?;
+    let mut stmt = conn.prepare(
+        "SELECT c.chunk_id
+         FROM chunks c
+         JOIN chunk_config_generations g ON g.chunk_id = c.chunk_id
+         WHERE c.first_seen_commit IS NOT NULL
+           AND c.rowid <= ?1
+           AND g.chunking_config_hash = ?2
+           AND g.association_rowid <= ?3
+         ORDER BY c.chunk_id",
+    )?;
+    let rows = stmt.query_map(
+        params![max_chunk_rowid, chunking_config_hash, max_association_rowid],
+        |row| row.get::<_, String>(0),
+    )?;
+    rows.collect::<std::result::Result<BTreeSet<_>, _>>()
+        .map_err(IndexError::from)
+}
+
 pub fn ensure_fts_external_content_schema(config: FtsSchemaConfig) -> Result<()> {
     let conn = Connection::open_in_memory()?;
     ensure_schema_on_connection(&conn, config)
 }
 
 pub fn ensure_schema_on_connection(conn: &Connection, config: FtsSchemaConfig) -> Result<()> {
+    let fts_existed = table_exists(conn, "chunk_fts")?;
+    let migrated_legacy_chunks = migrate_legacy_chunk_config_column(conn)?;
     conn.execute_batch(
         r#"
         CREATE TABLE IF NOT EXISTS chunks (
@@ -153,7 +506,6 @@ pub fn ensure_schema_on_connection(conn: &Connection, config: FtsSchemaConfig) -
             tool_profile_hash TEXT NOT NULL,
             gen INTEGER NOT NULL,
             unit_key TEXT NOT NULL,
-            chunking_config_hash TEXT NOT NULL,
             raw_path TEXT NOT NULL,
             heading_path TEXT NOT NULL,
             section_id TEXT,
@@ -163,6 +515,15 @@ pub fn ensure_schema_on_connection(conn: &Connection, config: FtsSchemaConfig) -
             text TEXT NOT NULL,
             first_seen_commit TEXT,
             created_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_chunks_ident
+            ON chunks(raw_hash, tool_profile_hash, gen);
+        CREATE TABLE IF NOT EXISTS chunk_config_generations (
+            association_rowid INTEGER PRIMARY KEY AUTOINCREMENT,
+            chunk_id TEXT NOT NULL,
+            chunking_config_hash TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            UNIQUE(chunk_id, chunking_config_hash)
         );
         CREATE TABLE IF NOT EXISTS embeddings (
             id TEXT PRIMARY KEY,
@@ -212,6 +573,9 @@ pub fn ensure_schema_on_connection(conn: &Connection, config: FtsSchemaConfig) -
         END;
         "#
     ))?;
+    if migrated_legacy_chunks || !fts_existed {
+        conn.execute("INSERT INTO chunk_fts(chunk_fts) VALUES('rebuild')", [])?;
+    }
 
     // `chunk_vec` is a sqlite-vec `vec0` virtual table (04 §4.3): the KNN
     // acceleration layer derived from the `embeddings` table. Fixed at the adopted
@@ -225,6 +589,128 @@ pub fn ensure_schema_on_connection(conn: &Connection, config: FtsSchemaConfig) -
         );"
     ))?;
     Ok(())
+}
+
+fn migrate_legacy_chunk_config_column(conn: &Connection) -> Result<bool> {
+    if !table_exists(conn, "chunks")? || !table_has_column(conn, "chunks", "chunking_config_hash")?
+    {
+        return Ok(false);
+    }
+
+    with_savepoint(conn, "kcs_migrate_chunk_config", || {
+        conn.execute_batch(
+            r#"
+            DROP TRIGGER IF EXISTS chunks_ai;
+            DROP TRIGGER IF EXISTS chunks_ad;
+            DROP TRIGGER IF EXISTS chunks_au;
+            DROP TABLE IF EXISTS chunk_fts;
+
+            ALTER TABLE chunks RENAME TO chunks_legacy_chunk_config;
+            CREATE TABLE chunks (
+                chunk_id TEXT PRIMARY KEY,
+                raw_hash TEXT NOT NULL,
+                tool_profile_hash TEXT NOT NULL,
+                gen INTEGER NOT NULL,
+                unit_key TEXT NOT NULL,
+                raw_path TEXT NOT NULL,
+                heading_path TEXT NOT NULL,
+                section_id TEXT,
+                char_start INTEGER,
+                char_end INTEGER,
+                text_hash TEXT NOT NULL,
+                text TEXT NOT NULL,
+                first_seen_commit TEXT,
+                created_at TEXT NOT NULL
+            );
+            INSERT INTO chunks(
+                rowid, chunk_id, raw_hash, tool_profile_hash, gen, unit_key,
+                raw_path, heading_path, section_id, char_start, char_end,
+                text_hash, text, first_seen_commit, created_at
+            )
+            SELECT
+                rowid, chunk_id, raw_hash, tool_profile_hash, gen, unit_key,
+                raw_path, heading_path, section_id, char_start, char_end,
+                text_hash, text, first_seen_commit, created_at
+            FROM chunks_legacy_chunk_config
+            ORDER BY rowid;
+
+            CREATE TABLE IF NOT EXISTS chunk_config_generations (
+                association_rowid INTEGER PRIMARY KEY AUTOINCREMENT,
+                chunk_id TEXT NOT NULL,
+                chunking_config_hash TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                UNIQUE(chunk_id, chunking_config_hash)
+            );
+            INSERT OR IGNORE INTO chunk_config_generations(
+                chunk_id, chunking_config_hash, created_at
+            )
+            SELECT chunk_id, chunking_config_hash, created_at
+            FROM chunks_legacy_chunk_config
+            ORDER BY rowid;
+
+            DROP TABLE chunks_legacy_chunk_config;
+            "#,
+        )?;
+        Ok(())
+    })?;
+    Ok(true)
+}
+
+fn table_exists(conn: &Connection, table_name: &str) -> Result<bool> {
+    Ok(conn
+        .query_row(
+            "SELECT 1 FROM sqlite_master WHERE type IN ('table', 'view') AND name = ?1 LIMIT 1",
+            params![table_name],
+            |_| Ok(()),
+        )
+        .optional()?
+        .is_some())
+}
+
+fn table_has_column(conn: &Connection, table_name: &str, column_name: &str) -> Result<bool> {
+    let quoted_table_name = format!("'{}'", table_name.replace('\'', "''"));
+    let mut stmt = conn.prepare(&format!("PRAGMA table_info({quoted_table_name})"))?;
+    let columns = stmt.query_map([], |row| row.get::<_, String>(1))?;
+    for column in columns {
+        if column? == column_name {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn with_savepoint<T>(
+    conn: &Connection,
+    name: &str,
+    operation: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    conn.execute_batch(&format!("SAVEPOINT {name}"))?;
+    match operation() {
+        Ok(value) => {
+            conn.execute_batch(&format!("RELEASE SAVEPOINT {name}"))?;
+            Ok(value)
+        }
+        Err(error) => {
+            let _ = conn.execute_batch(&format!(
+                "ROLLBACK TO SAVEPOINT {name}; RELEASE SAVEPOINT {name}"
+            ));
+            Err(error)
+        }
+    }
+}
+
+fn sql_rowid(value: u64) -> Result<i64> {
+    i64::try_from(value).map_err(|_| {
+        IndexError::Contract(format!(
+            "SQLite rowid must not exceed {} (received {value})",
+            i64::MAX
+        ))
+    })
+}
+
+fn sql_u64_rowid(value: i64) -> Result<u64> {
+    u64::try_from(value)
+        .map_err(|_| IndexError::Schema(format!("SQLite returned a negative rowid: {value}")))
 }
 
 /// Adopted embedding dimensionality (07 §5.3 / 03 §7). `chunk_vec` is fixed to
@@ -259,6 +745,12 @@ mod tests {
         }
     }
 
+    fn basis_vector_bytes(axis: usize) -> Vec<u8> {
+        let mut vector = vec![0.0_f32; CHUNK_VEC_DIMENSIONS];
+        vector[axis] = 1.0;
+        vector.into_iter().flat_map(f32::to_le_bytes).collect()
+    }
+
     #[test]
     fn ct3_fts_001_external_content_triggers_sync_insert_delete() {
         let mut fts = SqliteFtsIndex::in_memory(FtsSchemaConfig {
@@ -269,6 +761,183 @@ mod tests {
         assert_eq!(fts.search("認証仕様", 10).unwrap()[0].chunk_id, "c1");
         fts.delete_chunk("c1").unwrap();
         assert!(fts.search("認証仕様", 10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn purge_raw_is_atomic_and_preserves_shared_content_embeddings() {
+        const RAW_TARGET: &str =
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        const RAW_SURVIVOR: &str =
+            "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        const TEXT_SHARED: &str =
+            "sha256:1111111111111111111111111111111111111111111111111111111111111111";
+        const TEXT_UNIQUE: &str =
+            "sha256:2222222222222222222222222222222222222222222222222222222222222222";
+
+        let mut fts = SqliteFtsIndex::in_memory(FtsSchemaConfig {
+            tokenizer: FtsTokenizer::Trigram,
+        })
+        .unwrap();
+        let mut target_shared = row("c-target-shared", "shared searchable phrase");
+        target_shared.raw_hash = RAW_TARGET.to_owned();
+        target_shared.text_hash = TEXT_SHARED.to_owned();
+        let mut survivor = row("c-survivor", "shared searchable phrase");
+        survivor.raw_hash = RAW_SURVIVOR.to_owned();
+        survivor.text_hash = TEXT_SHARED.to_owned();
+        let mut target_unique = row("c-target-unique", "unique purge phrase");
+        target_unique.raw_hash = RAW_TARGET.to_owned();
+        target_unique.text_hash = TEXT_UNIQUE.to_owned();
+
+        fts.index_chunk(&target_shared).unwrap();
+        fts.index_chunk(&survivor).unwrap();
+        fts.index_chunk(&target_unique).unwrap();
+        crate::embedding_store::write_chunk_embedding(
+            fts.connection(),
+            "sha256:embedding-shared",
+            TEXT_SHARED,
+            &target_shared.chunk_id,
+            &basis_vector_bytes(0),
+            CHUNK_VEC_DIMENSIONS as u64,
+            "cosine",
+            "multimodal",
+            "sha256:profile",
+        )
+        .unwrap();
+        crate::embedding_store::write_chunk_embedding(
+            fts.connection(),
+            "sha256:embedding-shared",
+            TEXT_SHARED,
+            &survivor.chunk_id,
+            &basis_vector_bytes(0),
+            CHUNK_VEC_DIMENSIONS as u64,
+            "cosine",
+            "multimodal",
+            "sha256:profile",
+        )
+        .unwrap();
+        crate::embedding_store::write_chunk_embedding(
+            fts.connection(),
+            "sha256:embedding-unique",
+            TEXT_UNIQUE,
+            &target_unique.chunk_id,
+            &basis_vector_bytes(1),
+            CHUNK_VEC_DIMENSIONS as u64,
+            "cosine",
+            "multimodal",
+            "sha256:profile",
+        )
+        .unwrap();
+
+        let report = fts.purge_raw(RAW_TARGET).unwrap();
+        assert_eq!(
+            report,
+            PurgeRawIndexReport {
+                chunk_ids: vec!["c-target-shared".to_owned(), "c-target-unique".to_owned()],
+                deleted_chunks: 2,
+                deleted_associations: 2,
+                deleted_chunk_vectors: 2,
+                deleted_orphan_embeddings: 1,
+            }
+        );
+        assert_eq!(
+            fts.search("shared searchable", 10)
+                .unwrap()
+                .into_iter()
+                .map(|hit| hit.chunk_id)
+                .collect::<Vec<_>>(),
+            vec!["c-survivor"]
+        );
+        assert!(fts.search("unique purge", 10).unwrap().is_empty());
+        assert!(crate::embedding_store::read_chunk_vector(
+            fts.connection(),
+            &target_shared.chunk_id
+        )
+        .unwrap()
+        .is_none());
+        assert!(crate::embedding_store::read_chunk_vector(
+            fts.connection(),
+            &target_unique.chunk_id
+        )
+        .unwrap()
+        .is_none());
+        assert!(
+            crate::embedding_store::read_chunk_vector(fts.connection(), &survivor.chunk_id)
+                .unwrap()
+                .is_some()
+        );
+        assert_eq!(
+            fts.connection()
+                .query_row(
+                    "SELECT COUNT(*) FROM embeddings WHERE target_id = ?1",
+                    params![TEXT_SHARED],
+                    |row| row.get::<_, u64>(0)
+                )
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            fts.connection()
+                .query_row(
+                    "SELECT COUNT(*) FROM embeddings WHERE target_id = ?1",
+                    params![TEXT_UNIQUE],
+                    |row| row.get::<_, u64>(0)
+                )
+                .unwrap(),
+            0
+        );
+
+        assert_eq!(
+            fts.purge_raw(RAW_TARGET).unwrap(),
+            PurgeRawIndexReport::default(),
+            "replay after a completed purge is idempotent"
+        );
+    }
+
+    #[test]
+    fn purge_raw_rolls_back_all_index_layers_when_chunk_delete_fails() {
+        let mut fts = SqliteFtsIndex::in_memory(FtsSchemaConfig {
+            tokenizer: FtsTokenizer::Trigram,
+        })
+        .unwrap();
+        let target = row("c-target", "rollback searchable phrase");
+        fts.index_chunk(&target).unwrap();
+        crate::embedding_store::write_chunk_embedding(
+            fts.connection(),
+            "sha256:embedding-rollback",
+            &target.text_hash,
+            &target.chunk_id,
+            &basis_vector_bytes(0),
+            CHUNK_VEC_DIMENSIONS as u64,
+            "cosine",
+            "multimodal",
+            "sha256:profile",
+        )
+        .unwrap();
+        fts.connection()
+            .execute_batch(
+                "CREATE TRIGGER reject_purge BEFORE DELETE ON chunks BEGIN
+                     SELECT RAISE(ABORT, 'synthetic purge failure');
+                 END;",
+            )
+            .unwrap();
+
+        let error = fts.purge_raw(&target.raw_hash).unwrap_err();
+        assert!(error.to_string().contains("synthetic purge failure"));
+        assert_eq!(fts.search("rollback searchable", 10).unwrap().len(), 1);
+        assert!(
+            crate::embedding_store::read_chunk_vector(fts.connection(), &target.chunk_id)
+                .unwrap()
+                .is_some()
+        );
+        assert_eq!(
+            fts.connection()
+                .query_row("SELECT COUNT(*) FROM chunk_config_generations", [], |row| {
+                    row.get::<_, u64>(0)
+                })
+                .unwrap(),
+            1,
+            "config association deletion must roll back with the chunk"
+        );
     }
 
     #[test]
@@ -304,6 +973,259 @@ mod tests {
             tokenizer: FtsTokenizer::Trigram,
         })
         .unwrap();
+    }
+
+    #[test]
+    fn ct4_chunk_config_schema_is_an_append_only_association() {
+        let mut fts = SqliteFtsIndex::in_memory(FtsSchemaConfig {
+            tokenizer: FtsTokenizer::Trigram,
+        })
+        .unwrap();
+        let conn = fts.connection();
+        assert!(!table_has_column(conn, "chunks", "chunking_config_hash").unwrap());
+        assert!(table_has_column(conn, "chunk_config_generations", "association_rowid").unwrap());
+        assert_eq!(max_chunk_config_association_rowid(conn).unwrap(), 0);
+
+        let mut first = row("c1", "認証仕様の更新");
+        first.first_seen_commit = Some("sha256:commit".to_owned());
+        fts.index_chunk_with_association_rowid(&first, Some(17))
+            .unwrap();
+        // Replaying the same durable association is idempotent and does not burn
+        // another AUTOINCREMENT value.
+        fts.index_chunk_with_association_rowid(&first, Some(17))
+            .unwrap();
+
+        let mut next_generation = first.clone();
+        next_generation.chunking_config_hash = "sha256:next-config".to_owned();
+        fts.index_chunk(&next_generation).unwrap();
+
+        let conn = fts.connection();
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM chunks", [], |row| row
+                .get::<_, u64>(0))
+                .unwrap(),
+            1,
+            "one immutable chunk row is shared by both configs"
+        );
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM chunk_config_generations", [], |row| {
+                row.get::<_, u64>(0)
+            })
+            .unwrap(),
+            2
+        );
+        assert_eq!(max_chunk_config_association_rowid(conn).unwrap(), 18);
+        assert!(
+            chunk_has_current_config_association(conn, "c1", &first.chunking_config_hash, 17)
+                .unwrap()
+        );
+        assert!(!chunk_has_current_config_association(
+            conn,
+            "c1",
+            &next_generation.chunking_config_hash,
+            17
+        )
+        .unwrap());
+        assert_eq!(
+            current_config_eligible_chunk_ids(conn, &next_generation.chunking_config_hash, 1, 17)
+                .unwrap(),
+            BTreeSet::new(),
+            "a page-1 association maximum excludes a later generation"
+        );
+        assert_eq!(
+            current_config_eligible_chunk_ids(conn, &next_generation.chunking_config_hash, 1, 18)
+                .unwrap(),
+            BTreeSet::from(["c1".to_owned()])
+        );
+    }
+
+    #[test]
+    fn ct4_explicit_association_rowid_conflicts_roll_back_the_chunk() {
+        let mut fts = SqliteFtsIndex::in_memory(FtsSchemaConfig {
+            tokenizer: FtsTokenizer::Trigram,
+        })
+        .unwrap();
+        fts.index_chunk_with_association_rowid(&row("c1", "first chunk"), Some(9))
+            .unwrap();
+
+        let error = fts
+            .index_chunk_with_association_rowid(&row("c2", "second chunk"), Some(9))
+            .unwrap_err();
+        assert!(error.to_string().contains("already occupied"));
+        assert_eq!(
+            fts.connection()
+                .query_row(
+                    "SELECT COUNT(*) FROM chunks WHERE chunk_id = 'c2'",
+                    [],
+                    |row| row.get::<_, u64>(0)
+                )
+                .unwrap(),
+            0,
+            "chunk and association publication are atomic"
+        );
+
+        let error = fts
+            .index_chunk_with_association_rowid(&row("c1", "first chunk"), Some(10))
+            .unwrap_err();
+        assert!(error.to_string().contains("not requested rowid"));
+        assert_eq!(
+            max_chunk_config_association_rowid(fts.connection()).unwrap(),
+            9
+        );
+    }
+
+    #[test]
+    fn ct4_durable_replay_preserves_chunk_and_association_rowids() {
+        let mut fts = SqliteFtsIndex::in_memory(FtsSchemaConfig {
+            tokenizer: FtsTokenizer::Trigram,
+        })
+        .unwrap();
+        let first = row("c1", "first chunk");
+        assert_eq!(
+            fts.index_chunk_with_rowids(&first, Some(41), Some(101))
+                .unwrap(),
+            (41, 101)
+        );
+
+        let mut second_config = first.clone();
+        second_config.chunking_config_hash = "sha256:next-config".to_owned();
+        assert_eq!(
+            fts.index_chunk_with_rowids(&second_config, Some(41), Some(205))
+                .unwrap(),
+            (41, 205)
+        );
+        assert_eq!(
+            fts.connection()
+                .query_row("SELECT COUNT(*) FROM chunks", [], |row| row
+                    .get::<_, u64>(0))
+                .unwrap(),
+            1
+        );
+
+        let error = fts
+            .index_chunk_with_rowids(&row("c2", "collision"), Some(41), Some(206))
+            .unwrap_err();
+        assert!(error.to_string().contains("already occupied"));
+        assert_eq!(
+            max_chunk_config_association_rowid(fts.connection()).unwrap(),
+            205
+        );
+    }
+
+    #[test]
+    fn ct4_legacy_chunk_config_column_migrates_without_changing_chunk_rowids() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("sqlite.db");
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                r#"
+                CREATE TABLE chunks (
+                    chunk_id TEXT PRIMARY KEY,
+                    raw_hash TEXT NOT NULL,
+                    tool_profile_hash TEXT NOT NULL,
+                    gen INTEGER NOT NULL,
+                    unit_key TEXT NOT NULL,
+                    chunking_config_hash TEXT NOT NULL,
+                    raw_path TEXT NOT NULL,
+                    heading_path TEXT NOT NULL,
+                    section_id TEXT,
+                    char_start INTEGER,
+                    char_end INTEGER,
+                    text_hash TEXT NOT NULL,
+                    text TEXT NOT NULL,
+                    first_seen_commit TEXT,
+                    created_at TEXT NOT NULL
+                );
+                CREATE VIRTUAL TABLE chunk_fts
+                USING fts5(
+                    text,
+                    heading_path,
+                    content='chunks',
+                    content_rowid='rowid',
+                    tokenize='trigram'
+                );
+                CREATE TRIGGER chunks_ai AFTER INSERT ON chunks BEGIN
+                    INSERT INTO chunk_fts(rowid, text, heading_path)
+                    VALUES (new.rowid, new.text, new.heading_path);
+                END;
+                CREATE TRIGGER chunks_ad AFTER DELETE ON chunks BEGIN
+                    INSERT INTO chunk_fts(chunk_fts, rowid, text, heading_path)
+                    VALUES ('delete', old.rowid, old.text, old.heading_path);
+                END;
+                CREATE TRIGGER chunks_au AFTER UPDATE OF text, heading_path ON chunks BEGIN
+                    INSERT INTO chunk_fts(chunk_fts, rowid, text, heading_path)
+                    VALUES ('delete', old.rowid, old.text, old.heading_path);
+                    INSERT INTO chunk_fts(rowid, text, heading_path)
+                    VALUES (new.rowid, new.text, new.heading_path);
+                END;
+                INSERT INTO chunks(
+                    rowid, chunk_id, raw_hash, tool_profile_hash, gen, unit_key,
+                    chunking_config_hash, raw_path, heading_path, section_id,
+                    char_start, char_end, text_hash, text, first_seen_commit, created_at
+                ) VALUES
+                    (7, 'c7', 'sha256:raw7', 'sha256:profile', 0, 'doc:7',
+                     'sha256:cfg7', 'seven.md', '[]', NULL, 0, 16,
+                     'sha256:text7', '認証仕様の更新', 'sha256:commit7', '2026-07-01T00:00:00Z'),
+                    (42, 'c42', 'sha256:raw42', 'sha256:profile', 0, 'doc:42',
+                     'sha256:cfg42', 'forty-two.md', '[]', NULL, 0, 18,
+                     'sha256:text42', '検索インデックス', 'sha256:commit42', '2026-07-02T00:00:00Z');
+                "#,
+            )
+            .unwrap();
+        }
+
+        let fts = SqliteFtsIndex::open(
+            &path,
+            FtsSchemaConfig {
+                tokenizer: FtsTokenizer::Trigram,
+            },
+        )
+        .unwrap();
+        let conn = fts.connection();
+        assert!(!table_has_column(conn, "chunks", "chunking_config_hash").unwrap());
+        assert_eq!(
+            conn.query_row(
+                "SELECT rowid FROM chunks WHERE chunk_id = 'c7'",
+                [],
+                |row| { row.get::<_, u64>(0) }
+            )
+            .unwrap(),
+            7
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT rowid FROM chunks WHERE chunk_id = 'c42'",
+                [],
+                |row| row.get::<_, u64>(0)
+            )
+            .unwrap(),
+            42
+        );
+        let associations = conn
+            .prepare(
+                "SELECT association_rowid, chunk_id, chunking_config_hash
+                 FROM chunk_config_generations ORDER BY association_rowid",
+            )
+            .unwrap()
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, u64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })
+            .unwrap()
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(
+            associations,
+            vec![
+                (1, "c7".to_owned(), "sha256:cfg7".to_owned()),
+                (2, "c42".to_owned(), "sha256:cfg42".to_owned())
+            ]
+        );
+        assert_eq!(fts.search("認証仕様", 10).unwrap()[0].chunk_id, "c7");
     }
 
     #[test]

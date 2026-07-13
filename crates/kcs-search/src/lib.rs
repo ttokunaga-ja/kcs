@@ -14,8 +14,9 @@ pub mod rrf;
 
 use thiserror::Error;
 
-pub use cursor::{CursorToken, ScopeCursor, ScopeMode};
+pub use cursor::{CursorExcludedScope, CursorToken, ScopeCursor, ScopeMode};
 pub use evidence::EvidencePointer;
+pub use query::{ChunkingConfigBinding, TimeTravelSelector};
 
 pub type Result<T> = std::result::Result<T, SearchError>;
 

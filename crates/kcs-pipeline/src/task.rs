@@ -75,6 +75,11 @@ pub struct TaskDescriptor {
     pub heartbeat_at: Option<String>,
     pub fallback_reason: Option<String>,
     pub created_at: String,
+    /// Frozen bbox-annotation policy for online Markdownize task identity.
+    /// `None` marks legacy/non-Markdownize tasks and never suppresses new
+    /// default-on work.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bbox_annotation_enabled: Option<bool>,
     // R17-3: the exact F8 reservation this task currently holds (amount + the
     // ledger `month` it landed in), stamped when a FRESH charge is reserved in the
     // batch send path and left untouched on the RateLimit/Quota re-reservation-skip
@@ -929,6 +934,7 @@ mod tests {
             heartbeat_at: None,
             fallback_reason: None,
             created_at: "2026-04-25T12:00:00Z".to_owned(),
+            bbox_annotation_enabled: None,
             reserved_usd: None,
             reserved_month: None,
             reservation_id: None,
@@ -955,6 +961,7 @@ mod tests {
             heartbeat_at: None,
             fallback_reason: None,
             created_at: "2026-04-25T12:00:00Z".to_owned(),
+            bbox_annotation_enabled: None,
             reserved_usd: None,
             reserved_month: None,
             reservation_id: None,
@@ -962,6 +969,32 @@ mod tests {
 
         let value = serde_json::to_value(descriptor).expect("serialize task descriptor");
         assert_eq!(value["type"], "markdownize");
+    }
+
+    #[test]
+    fn ct4_bbox_006_task_pins_policy_and_legacy_rows_default_to_none() {
+        let mut descriptor = valid_task();
+        descriptor.bbox_annotation_enabled = Some(true);
+
+        let mut value = serde_json::to_value(&descriptor).expect("serialize task descriptor");
+        assert_eq!(value["bbox_annotation_enabled"], true);
+        assert_eq!(
+            serde_json::from_value::<TaskDescriptor>(value.clone())
+                .expect("deserialize current task descriptor")
+                .bbox_annotation_enabled,
+            Some(true)
+        );
+
+        value
+            .as_object_mut()
+            .expect("task descriptor serializes as an object")
+            .remove("bbox_annotation_enabled");
+        assert_eq!(
+            serde_json::from_value::<TaskDescriptor>(value)
+                .expect("deserialize legacy task descriptor")
+                .bbox_annotation_enabled,
+            None
+        );
     }
 
     #[test]
@@ -1012,6 +1045,7 @@ mod tests {
             heartbeat_at: None,
             fallback_reason: None,
             created_at: "2026-04-25T12:00:00Z".to_owned(),
+            bbox_annotation_enabled: None,
             reserved_usd: None,
             reserved_month: None,
             reservation_id: None,
@@ -1057,6 +1091,7 @@ mod tests {
             heartbeat_at: None,
             fallback_reason: None,
             created_at: "2026-04-25T12:00:00Z".to_owned(),
+            bbox_annotation_enabled: None,
             reserved_usd: None,
             reserved_month: None,
             reservation_id: None,

@@ -689,6 +689,7 @@ mod tests {
             previous: None,
             hints: None,
             restrict_to_hint_pages: false,
+            bbox_annotation_enabled: false,
             tool_profile_hash: format!("sha256:{}", "1".repeat(64)),
             spec_version: 1,
         };
@@ -757,6 +758,7 @@ stream\nBT (/Type /Page and /PageX) Tj ET\nendstream\nendobj\n";
             previous: None,
             hints: None,
             restrict_to_hint_pages: false,
+            bbox_annotation_enabled: false,
             tool_profile_hash: "sha256:tool".to_owned(),
             spec_version: 1,
         };

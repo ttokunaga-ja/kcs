@@ -1,5 +1,9 @@
 //! Mistral OCR markdownize adapter.
 
+use crate::bbox_annotation::{
+    bbox_annotation_format, decode_image_annotation, mistral_markdownize_profile,
+    validate_bbox as validate_annotation_bbox, AnnotationTotals, BboxAnnotation,
+};
 use crate::http_policy::{
     authenticated_agent, read_json_bounded, HttpPolicy, MODEL_CATALOG_MAX_BYTES,
     OCR_RESPONSE_MAX_BYTES,
@@ -12,9 +16,12 @@ use crate::types::{
 };
 use crate::{AdapterError, Result};
 use base64::Engine;
+use serde::de::{DeserializeSeed, Error as _, MapAccess, SeqAccess, Visitor};
 use serde_json::{json, Value};
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt;
+use std::io::Read as _;
 use std::path::{Path, PathBuf};
 
 const MISTRAL_API_ORIGIN: &str = "https://api.mistral.ai";
@@ -38,8 +45,8 @@ impl Default for OcrResponsePolicy {
             max_pages: 10_000,
             max_markdown_bytes_per_page: 4 * 1024 * 1024,
             max_markdown_bytes_total: 32 * 1024 * 1024,
-            max_images_per_page: 256,
-            max_images_total: 4_096,
+            max_images_per_page: crate::bbox_annotation::MAX_ANNOTATION_IMAGES_PER_PAGE,
+            max_images_total: crate::bbox_annotation::MAX_ANNOTATION_IMAGES_PER_RESPONSE,
             max_encoded_image_bytes: 16 * 1024 * 1024,
             max_decoded_image_bytes: 12 * 1024 * 1024,
             max_decoded_image_bytes_total: 48 * 1024 * 1024,
@@ -54,6 +61,7 @@ pub struct OcrImage {
     pub media_type: String,
     pub bbox: Option<[i64; 4]>,
     pub confidence: Option<String>,
+    pub annotation: Option<BboxAnnotation>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -206,16 +214,220 @@ impl MistralOcrClient for EnvMistralOcrClient {
                 verified_raw_bytes,
                 model_pin,
                 pages.as_deref(),
+                request.bbox_annotation_enabled,
             ))
             .map_err(http_error)?;
-        let value = read_json_bounded(response, OCR_RESPONSE_MAX_BYTES, "Mistral OCR response")?;
+        let value = read_ocr_json_bounded(
+            response,
+            OCR_RESPONSE_MAX_BYTES,
+            request.bbox_annotation_enabled,
+        )?;
         parse_ocr_response(
             value,
             model_pin,
             expected_pages.as_deref(),
             self.response_policy,
+            request.bbox_annotation_enabled,
         )
     }
+}
+
+/// Read the OCR response under the existing wire-byte ceiling, then reject a
+/// duplicate `pages[].images[].image_annotation` key before conversion to
+/// `serde_json::Value` can collapse it. Other response semantics remain owned by
+/// `parse_ocr_response` below.
+fn read_ocr_json_bounded(
+    response: ureq::Response,
+    max_bytes: usize,
+    bbox_annotation_enabled: bool,
+) -> Result<Value> {
+    const CONTEXT: &str = "Mistral OCR response";
+    if response
+        .header("Content-Encoding")
+        .is_some_and(|encoding| !encoding.eq_ignore_ascii_case("identity"))
+    {
+        return Err(AdapterError::ContractViolation(format!(
+            "{CONTEXT} uses unsupported content encoding"
+        )));
+    }
+    if let Some(content_length) = response.header("Content-Length") {
+        if content_length
+            .parse::<u64>()
+            .ok()
+            .is_some_and(|length| length > max_bytes as u64)
+        {
+            return Err(AdapterError::ContractViolation(format!(
+                "{CONTEXT} exceeds {max_bytes} bytes"
+            )));
+        }
+    }
+
+    let read_limit = max_bytes
+        .checked_add(1)
+        .ok_or_else(|| AdapterError::ContractViolation("response limit overflow".to_owned()))?;
+    let mut body = Vec::with_capacity(max_bytes.min(64 * 1024));
+    response
+        .into_reader()
+        .take(read_limit as u64)
+        .read_to_end(&mut body)
+        .map_err(|error| AdapterError::Network(format!("{CONTEXT} read failed: {error}")))?;
+    parse_ocr_json_bytes_bounded(&body, max_bytes, bbox_annotation_enabled)
+}
+
+fn parse_ocr_json_bytes_bounded(
+    body: &[u8],
+    max_bytes: usize,
+    bbox_annotation_enabled: bool,
+) -> Result<Value> {
+    if body.len() > max_bytes {
+        return Err(AdapterError::ContractViolation(format!(
+            "Mistral OCR response exceeds {max_bytes} bytes"
+        )));
+    }
+    if bbox_annotation_enabled {
+        let mut deserializer = serde_json::Deserializer::from_slice(body);
+        OcrAnnotationKeySeed(OcrJsonContext::Root)
+            .deserialize(&mut deserializer)
+            .map_err(|error| {
+                AdapterError::ContractViolation(format!(
+                    "invalid Mistral OCR response JSON: {error}"
+                ))
+            })?;
+        deserializer.end().map_err(|error| {
+            AdapterError::ContractViolation(format!("invalid Mistral OCR response JSON: {error}"))
+        })?;
+    }
+    serde_json::from_slice(body).map_err(|error| {
+        AdapterError::ContractViolation(format!("invalid Mistral OCR response JSON: {error}"))
+    })
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum OcrJsonContext {
+    Root,
+    Pages,
+    Page,
+    Images,
+    Image,
+    Other,
+}
+
+struct OcrAnnotationKeySeed(OcrJsonContext);
+
+impl<'de> DeserializeSeed<'de> for OcrAnnotationKeySeed {
+    type Value = ();
+
+    fn deserialize<D>(self, deserializer: D) -> std::result::Result<Self::Value, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        deserializer.deserialize_any(OcrAnnotationKeyVisitor(self.0))
+    }
+}
+
+struct OcrAnnotationKeyVisitor(OcrJsonContext);
+
+macro_rules! ignore_json_scalars {
+    () => {
+        fn visit_bool<E>(self, _value: bool) -> std::result::Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            Ok(())
+        }
+
+        fn visit_i64<E>(self, _value: i64) -> std::result::Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            Ok(())
+        }
+
+        fn visit_u64<E>(self, _value: u64) -> std::result::Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            Ok(())
+        }
+
+        fn visit_f64<E>(self, _value: f64) -> std::result::Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            Ok(())
+        }
+
+        fn visit_str<E>(self, _value: &str) -> std::result::Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            Ok(())
+        }
+
+        fn visit_string<E>(self, _value: String) -> std::result::Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            Ok(())
+        }
+
+        fn visit_unit<E>(self) -> std::result::Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            Ok(())
+        }
+    };
+}
+
+impl<'de> Visitor<'de> for OcrAnnotationKeyVisitor {
+    type Value = ();
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("JSON data in a Mistral OCR response")
+    }
+
+    fn visit_map<A>(self, mut map: A) -> std::result::Result<Self::Value, A::Error>
+    where
+        A: MapAccess<'de>,
+    {
+        let mut saw_image_annotation = false;
+        while let Some(key) = map.next_key::<String>()? {
+            if self.0 == OcrJsonContext::Image && key == "image_annotation" {
+                if saw_image_annotation {
+                    return Err(A::Error::custom(
+                        "duplicate pages[].images[].image_annotation field",
+                    ));
+                }
+                saw_image_annotation = true;
+            }
+            let child_context = match (self.0, key.as_str()) {
+                (OcrJsonContext::Root, "pages") => OcrJsonContext::Pages,
+                (OcrJsonContext::Page, "images") => OcrJsonContext::Images,
+                _ => OcrJsonContext::Other,
+            };
+            map.next_value_seed(OcrAnnotationKeySeed(child_context))?;
+        }
+        Ok(())
+    }
+
+    fn visit_seq<A>(self, mut sequence: A) -> std::result::Result<Self::Value, A::Error>
+    where
+        A: SeqAccess<'de>,
+    {
+        let child_context = match self.0 {
+            OcrJsonContext::Pages => OcrJsonContext::Page,
+            OcrJsonContext::Images => OcrJsonContext::Image,
+            _ => OcrJsonContext::Other,
+        };
+        while sequence
+            .next_element_seed(OcrAnnotationKeySeed(child_context))?
+            .is_some()
+        {}
+        Ok(())
+    }
+
+    ignore_json_scalars!();
 }
 
 #[derive(Debug, Clone)]
@@ -225,11 +437,13 @@ pub struct MistralOcrMarkdownizeAdapter<C = EnvMistralOcrClient> {
     scope_id: String,
     image_store_dir: Option<PathBuf>,
     verified_raw_bytes: Option<Vec<u8>>,
+    bbox_annotation_enabled: bool,
 }
 
 impl Default for MistralOcrMarkdownizeAdapter<EnvMistralOcrClient> {
     fn default() -> Self {
         Self::new(EnvMistralOcrClient::new(), "mistral-ocr-latest", "unknown")
+            .with_bbox_annotation(true)
     }
 }
 
@@ -245,6 +459,7 @@ impl<C> MistralOcrMarkdownizeAdapter<C> {
             scope_id: scope_id.into(),
             image_store_dir: None,
             verified_raw_bytes: None,
+            bbox_annotation_enabled: false,
         }
     }
 
@@ -257,6 +472,12 @@ impl<C> MistralOcrMarkdownizeAdapter<C> {
     #[must_use]
     pub fn with_verified_raw_bytes(mut self, bytes: impl Into<Vec<u8>>) -> Self {
         self.verified_raw_bytes = Some(bytes.into());
+        self
+    }
+
+    #[must_use]
+    pub fn with_bbox_annotation(mut self, enabled: bool) -> Self {
+        self.bbox_annotation_enabled = enabled;
         self
     }
 }
@@ -279,15 +500,7 @@ impl<C: MistralOcrClient> MarkdownizeAdapter for MistralOcrMarkdownizeAdapter<C>
         } else {
             self.configured_model.clone()
         };
-        let profile = json!({
-            "adapter_kind": "markdownize",
-            "adapter_role": "multimodal",
-            "model_or_tool_family": "mistral-ocr",
-            "model_version_pin": model_pin,
-            "output_schema": "kcs-markdown-v1",
-            "runtime_kind": "cloud",
-            "spec_version": 1
-        });
+        let profile = mistral_markdownize_profile(&model_pin, self.bbox_annotation_enabled);
         AdapterProfile {
             adapter_kind: AdapterKind::Markdownize,
             adapter_id: "mistral_ocr_markdownize".to_owned(),
@@ -314,6 +527,11 @@ impl<C: MistralOcrClient> MarkdownizeAdapter for MistralOcrMarkdownizeAdapter<C>
     }
 
     fn markdownize(&self, request: MarkdownizeRequest) -> Result<MarkdownizeResponse> {
+        if request.bbox_annotation_enabled != self.bbox_annotation_enabled {
+            return Err(AdapterError::ContractViolation(
+                "bbox annotation request policy does not match adapter profile".to_owned(),
+            ));
+        }
         let raw_bytes: Cow<'_, [u8]> = if let Some(bytes) = self.verified_raw_bytes.as_deref() {
             Cow::Borrowed(bytes)
         } else {
@@ -339,6 +557,31 @@ impl<C: MistralOcrClient> MarkdownizeAdapter for MistralOcrMarkdownizeAdapter<C>
         let ocr = self
             .client
             .ocr_markdown(&request, &model_pin, raw_bytes.as_ref())?;
+        if self.bbox_annotation_enabled {
+            let mut total = 0_usize;
+            for page in &ocr.pages {
+                if page.images.len() > crate::bbox_annotation::MAX_ANNOTATION_IMAGES_PER_PAGE {
+                    return Err(AdapterError::ContractViolation(
+                        "annotation image count exceeds per-page limit".to_owned(),
+                    ));
+                }
+                total = total.checked_add(page.images.len()).ok_or_else(|| {
+                    AdapterError::ContractViolation("annotation image count overflow".to_owned())
+                })?;
+                for image in &page.images {
+                    if image.bbox.is_none() || image.annotation.is_none() {
+                        return Err(AdapterError::ContractViolation(
+                            "bbox annotation requires one annotation and bbox per image".to_owned(),
+                        ));
+                    }
+                }
+            }
+            if total > crate::bbox_annotation::MAX_ANNOTATION_IMAGES_PER_RESPONSE {
+                return Err(AdapterError::ContractViolation(
+                    "annotation image count exceeds response limit".to_owned(),
+                ));
+            }
+        }
         let hints = request
             .prepared_unit_hint
             .as_ref()
@@ -381,6 +624,8 @@ impl<C: MistralOcrClient> MarkdownizeAdapter for MistralOcrMarkdownizeAdapter<C>
                     })?;
                     let markdown =
                         replace_image_placeholders(&page.markdown, &self.scope_id, &page.images);
+                    let markdown =
+                        project_bbox_annotations(&markdown, &self.scope_id, &page.images)?;
                     Ok(MarkdownUnit {
                         unit_key: hint.unit_key.clone(),
                         unit_type: hint.unit_kind,
@@ -484,6 +729,7 @@ fn ocr_request_body(
     bytes: &[u8],
     model_pin: &str,
     pages: Option<&[usize]>,
+    bbox_annotation_enabled: bool,
 ) -> Value {
     let mut body = json!({
         "model": model_pin,
@@ -493,6 +739,14 @@ fn ocr_request_body(
     if let (Some(pages), Some(object)) = (pages, body.as_object_mut()) {
         object.insert("pages".to_owned(), json!(pages));
     }
+    if bbox_annotation_enabled {
+        body.as_object_mut()
+            .expect("OCR request body is an object")
+            .insert(
+                "bbox_annotation_format".to_owned(),
+                bbox_annotation_format(),
+            );
+    }
     body
 }
 
@@ -501,6 +755,7 @@ fn parse_ocr_response(
     model_pin: &str,
     expected_page_indices: Option<&[usize]>,
     policy: OcrResponsePolicy,
+    bbox_annotation_enabled: bool,
 ) -> Result<OcrResponse> {
     let page_values = value
         .get("pages")
@@ -533,6 +788,13 @@ fn parse_ocr_response(
     let mut markdown_total = 0_usize;
     let mut image_total = 0_usize;
     let mut decoded_total = 0_usize;
+    let mut annotation_totals = AnnotationTotals::default();
+    let mut totals = OcrParseTotals {
+        markdown: &mut markdown_total,
+        images: &mut image_total,
+        decoded_images: &mut decoded_total,
+        annotations: &mut annotation_totals,
+    };
     let mut seen_indices = BTreeSet::new();
     let mut pages = Vec::with_capacity(page_values.len());
     for (position, page) in page_values.iter().enumerate() {
@@ -547,9 +809,8 @@ fn parse_ocr_response(
             page,
             fallback_index,
             policy,
-            &mut markdown_total,
-            &mut image_total,
-            &mut decoded_total,
+            &mut totals,
+            bbox_annotation_enabled,
         )?;
         if !seen_indices.insert(parsed.index) {
             return Err(AdapterError::ContractViolation(format!(
@@ -577,13 +838,19 @@ fn parse_ocr_response(
     })
 }
 
+struct OcrParseTotals<'a> {
+    markdown: &'a mut usize,
+    images: &'a mut usize,
+    decoded_images: &'a mut usize,
+    annotations: &'a mut AnnotationTotals,
+}
+
 fn parse_ocr_page(
     value: &Value,
     fallback_index: usize,
     policy: OcrResponsePolicy,
-    markdown_total: &mut usize,
-    image_total: &mut usize,
-    decoded_total: &mut usize,
+    totals: &mut OcrParseTotals<'_>,
+    bbox_annotation_enabled: bool,
 ) -> Result<OcrPage> {
     let markdown = value
         .get("markdown")
@@ -594,10 +861,10 @@ fn parse_ocr_page(
             "OCR page markdown exceeds per-page limit".to_owned(),
         ));
     }
-    *markdown_total = markdown_total.checked_add(markdown.len()).ok_or_else(|| {
+    *totals.markdown = totals.markdown.checked_add(markdown.len()).ok_or_else(|| {
         AdapterError::ContractViolation("OCR markdown byte count overflow".to_owned())
     })?;
-    if *markdown_total > policy.max_markdown_bytes_total {
+    if *totals.markdown > policy.max_markdown_bytes_total {
         return Err(AdapterError::ContractViolation(
             "OCR markdown exceeds aggregate limit".to_owned(),
         ));
@@ -614,17 +881,18 @@ fn parse_ocr_page(
             "OCR image count exceeds per-page limit".to_owned(),
         ));
     }
-    *image_total = image_total
+    *totals.images = totals
+        .images
         .checked_add(image_values.len())
         .ok_or_else(|| AdapterError::ContractViolation("OCR image count overflow".to_owned()))?;
-    if *image_total > policy.max_images_total {
+    if *totals.images > policy.max_images_total {
         return Err(AdapterError::ContractViolation(
             "OCR image count exceeds aggregate limit".to_owned(),
         ));
     }
     let images = image_values
         .into_iter()
-        .map(|image| parse_ocr_image(image, policy, decoded_total))
+        .map(|image| parse_ocr_image(image, policy, totals, bbox_annotation_enabled))
         .collect::<Result<Vec<_>>>()?;
     let index = match value.get("index") {
         Some(index) => {
@@ -649,7 +917,8 @@ fn parse_ocr_page(
 fn parse_ocr_image(
     value: &Value,
     policy: OcrResponsePolicy,
-    decoded_total: &mut usize,
+    totals: &mut OcrParseTotals<'_>,
+    bbox_annotation_enabled: bool,
 ) -> Result<OcrImage> {
     let raw_base64 = value
         .get("image_base64")
@@ -670,10 +939,13 @@ fn parse_ocr_image(
             "OCR decoded image exceeds per-image limit".to_owned(),
         ));
     }
-    *decoded_total = decoded_total.checked_add(bytes.len()).ok_or_else(|| {
-        AdapterError::ContractViolation("OCR decoded image byte count overflow".to_owned())
-    })?;
-    if *decoded_total > policy.max_decoded_image_bytes_total {
+    *totals.decoded_images = totals
+        .decoded_images
+        .checked_add(bytes.len())
+        .ok_or_else(|| {
+            AdapterError::ContractViolation("OCR decoded image byte count overflow".to_owned())
+        })?;
+    if *totals.decoded_images > policy.max_decoded_image_bytes_total {
         return Err(AdapterError::ContractViolation(
             "OCR decoded images exceed aggregate limit".to_owned(),
         ));
@@ -698,6 +970,29 @@ fn parse_ocr_image(
             .any(|field| value.get(*field).is_some())
             .then_some(value)
         });
+    let bbox = bbox_value.map(parse_bbox).transpose()?.flatten();
+    let annotation = if bbox_annotation_enabled {
+        let bbox = bbox.ok_or_else(|| {
+            AdapterError::ContractViolation(
+                "bbox-annotated OCR image is missing its bounding box".to_owned(),
+            )
+        })?;
+        let raw_annotation = value
+            .get("image_annotation")
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                AdapterError::ContractViolation(
+                    "bbox-annotated OCR image is missing image_annotation".to_owned(),
+                )
+            })?;
+        Some(decode_image_annotation(
+            raw_annotation,
+            bbox,
+            totals.annotations,
+        )?)
+    } else {
+        None
+    };
     Ok(OcrImage {
         bytes,
         media_type: value
@@ -705,13 +1000,14 @@ fn parse_ocr_image(
             .and_then(Value::as_str)
             .unwrap_or(media_type)
             .to_owned(),
-        bbox: bbox_value.map(parse_bbox).transpose()?.flatten(),
+        bbox,
         confidence: value.get("confidence").map(|confidence| {
             confidence
                 .as_str()
                 .map(str::to_owned)
                 .unwrap_or_else(|| confidence.to_string())
         }),
+        annotation,
     })
 }
 
@@ -781,12 +1077,9 @@ fn checked_extent(start: i64, value: Option<&Value>, label: &str) -> Result<i64>
 }
 
 fn valid_bbox([x1, y1, x2, y2]: [i64; 4]) -> Result<[i64; 4]> {
-    if x2 < x1 || y2 < y1 {
-        return Err(AdapterError::ContractViolation(
-            "OCR bounding box has inverted geometry".to_owned(),
-        ));
-    }
-    Ok([x1, y1, x2, y2])
+    let bbox = [x1, y1, x2, y2];
+    validate_annotation_bbox(bbox)?;
+    Ok(bbox)
 }
 
 fn verified_pages_by_index<'a>(
@@ -838,6 +1131,21 @@ fn page_metadata(model_version_pin: &str, images: Option<&[OcrImage]>) -> BTreeM
         .collect::<Vec<_>>();
     if !image_values.is_empty() {
         metadata.insert("images".to_owned(), json!(image_values));
+    }
+    let annotations = images
+        .unwrap_or(&[])
+        .iter()
+        .filter_map(|image| {
+            Some(
+                image
+                    .annotation
+                    .as_ref()?
+                    .metadata_value(&image_hash(&image.bytes), image.bbox?),
+            )
+        })
+        .collect::<Vec<_>>();
+    if !annotations.is_empty() {
+        metadata.insert("bbox_annotations".to_owned(), Value::Array(annotations));
     }
     metadata
 }
@@ -1151,6 +1459,35 @@ pub fn replace_image_placeholders(markdown: &str, scope_id: &str, images: &[OcrI
     output
 }
 
+fn project_bbox_annotations(markdown: &str, scope_id: &str, images: &[OcrImage]) -> Result<String> {
+    let mut output = String::with_capacity(markdown.len());
+    let mut cursor = 0;
+    for image in images {
+        let Some(annotation) = &image.annotation else {
+            continue;
+        };
+        let uri = image_object_uri(scope_id, &image_hash(&image.bytes));
+        let relative = markdown[cursor..].find(&uri).ok_or_else(|| {
+            AdapterError::ContractViolation(
+                "annotated OCR image has no corresponding Markdown image URI".to_owned(),
+            )
+        })?;
+        let uri_end = cursor + relative + uri.len();
+        let close = markdown[uri_end..].strip_prefix(')').ok_or_else(|| {
+            AdapterError::ContractViolation(
+                "annotated OCR image URI is not a Markdown image target".to_owned(),
+            )
+        })?;
+        let close_end = markdown.len() - close.len();
+        output.push_str(&markdown[cursor..close_end]);
+        output.push('\n');
+        output.push_str(&annotation.markdown_block());
+        cursor = close_end;
+    }
+    output.push_str(&markdown[cursor..]);
+    Ok(output)
+}
+
 fn next_markdown_image_target(markdown: &str, cursor: usize) -> Option<(usize, usize)> {
     let image_start = markdown[cursor..].find("![")? + cursor;
     let label_end = markdown[image_start + 2..].find("](")? + image_start + 2;
@@ -1254,12 +1591,14 @@ mod tests {
                     media_type: "image/png".to_owned(),
                     bbox: None,
                     confidence: None,
+                    annotation: None,
                 },
                 OcrImage {
                     bytes: b"two".to_vec(),
                     media_type: "image/png".to_owned(),
                     bbox: None,
                     confidence: None,
+                    annotation: None,
                 },
             ],
         );
@@ -1299,6 +1638,7 @@ mod tests {
             media_type: "image/png".to_owned(),
             bbox: None,
             confidence: None,
+            annotation: None,
         }];
         let hashes = persist_images(&kcs_dir, &images).unwrap();
         assert_eq!(hashes.len(), 1);
@@ -1323,6 +1663,7 @@ mod tests {
             media_type: "image/png".to_owned(),
             bbox: None,
             confidence: None,
+            annotation: None,
         };
         let hash = image_hash(&image.bytes);
         let canonical = image_object_path(dir.path(), &hash).unwrap();
@@ -1347,6 +1688,7 @@ mod tests {
             media_type: "image/png".to_owned(),
             bbox: None,
             confidence: None,
+            annotation: None,
         };
         let hash = image_hash(&image.bytes);
 
@@ -1392,6 +1734,7 @@ mod tests {
             media_type: "image/png".to_owned(),
             bbox: None,
             confidence: None,
+            annotation: None,
         };
         let hash = image_hash(&image.bytes);
 
@@ -1445,6 +1788,7 @@ mod tests {
             previous: None,
             hints: None,
             restrict_to_hint_pages: false,
+            bbox_annotation_enabled: false,
             tool_profile_hash: String::new(),
             spec_version: 1,
         }
@@ -1468,6 +1812,7 @@ mod tests {
             b"pdf-bytes",
             "mistral-ocr-2505",
             pages.as_deref(),
+            false,
         );
         assert_eq!(
             body["pages"],
@@ -1492,11 +1837,143 @@ mod tests {
             None,
             "Full must not restrict the pages"
         );
-        let body = ocr_request_body("application/pdf", b"pdf-bytes", "mistral-ocr-2505", None);
+        let body = ocr_request_body(
+            "application/pdf",
+            b"pdf-bytes",
+            "mistral-ocr-2505",
+            None,
+            false,
+        );
         assert!(
             body.get("pages").is_none(),
             "Full must send no `pages` parameter (process the whole document)"
         );
+    }
+
+    #[test]
+    fn ct4_bbox_002_wire_request_has_exact_optional_format() {
+        let enabled = ocr_request_body(
+            "application/pdf",
+            b"pdf-bytes",
+            "mistral-ocr-2505",
+            None,
+            true,
+        );
+        assert_eq!(enabled["bbox_annotation_format"], bbox_annotation_format());
+        assert!(enabled.get("bbox_annotation_prompt").is_none());
+        let disabled = ocr_request_body(
+            "application/pdf",
+            b"pdf-bytes",
+            "mistral-ocr-2505",
+            None,
+            false,
+        );
+        assert!(disabled.get("bbox_annotation_format").is_none());
+    }
+
+    #[test]
+    fn ct4_bbox_003_and_004_metadata_and_projection_follow_image_order() {
+        let response = parse_ocr_response(
+            json!({
+                "pages": [{
+                    "index": 0,
+                    "markdown": "![chart](provider.png)",
+                    "images": [{
+                        "image_base64": "",
+                        "bbox": [1, 2, 30, 40],
+                        "image_annotation": serde_json::json!({
+                            "short_description": "Quarterly chart",
+                            "transcribed_text": "ZXQ-UNIQUE 1000"
+                        }).to_string()
+                    }]
+                }]
+            }),
+            "mistral-ocr-2505",
+            Some(&[0]),
+            OcrResponsePolicy::default(),
+            true,
+        )
+        .unwrap();
+        let page = &response.pages[0];
+        let replaced = replace_image_placeholders(&page.markdown, "scope", &page.images);
+        let uri = image_object_uri("scope", &image_hash(&page.images[0].bytes));
+        assert!(replaced.contains(&uri));
+        let projected = project_bbox_annotations(&replaced, "scope", &page.images).unwrap();
+        assert!(projected.contains(&format!("{uri})\n> KCS figure description:")));
+        assert!(projected.contains(r"ZXQ\-UNIQUE 1000"));
+        let metadata = page_metadata("mistral-ocr-2505", Some(&page.images));
+        assert_eq!(
+            metadata["bbox_annotations"][0]["image_hash"],
+            image_hash(&[])
+        );
+        assert_eq!(
+            metadata["bbox_annotations"][0]["transcribed_text"],
+            "ZXQ\\-UNIQUE 1000"
+        );
+
+        let missing = json!({
+            "pages": [{
+                "index": 0,
+                "markdown": "![chart](provider.png)",
+                "images": [{"image_base64": "", "bbox": [1, 2, 30, 40]}]
+            }]
+        });
+        assert!(parse_ocr_response(
+            missing,
+            "mistral-ocr-2505",
+            Some(&[0]),
+            OcrResponsePolicy::default(),
+            true,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn ct4_bbox_004_rejects_duplicate_wrapper_image_annotation_before_value_parse() {
+        let duplicate_annotation = br#"{
+            "pages": [{
+                "index": 0,
+                "markdown": "![chart](provider.png)",
+                "images": [{
+                    "image_base64": "",
+                    "bbox": [0, 0, 1, 1],
+                    "image_annotation": "{\"short_description\":\"first\",\"transcribed_text\":\"one\"}",
+                    "image_annotation": "{\"short_description\":\"second\",\"transcribed_text\":\"two\"}"
+                }]
+            }]
+        }"#;
+        let error =
+            parse_ocr_json_bytes_bounded(duplicate_annotation, duplicate_annotation.len(), true)
+                .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("duplicate pages[].images[].image_annotation field"),
+            "{error}"
+        );
+
+        // Disabled annotation preserves the pre-existing response semantics, and
+        // unrelated duplicate provider fields are still left to serde_json's
+        // established last-value behavior.
+        assert!(parse_ocr_json_bytes_bounded(
+            duplicate_annotation,
+            duplicate_annotation.len(),
+            false,
+        )
+        .is_ok());
+        let unrelated_duplicate = br#"{
+            "pages": [{
+                "images": [{
+                    "confidence": 0.1,
+                    "confidence": 0.9,
+                    "image_annotation": "{\"short_description\":\"chart\",\"transcribed_text\":\"1000\"}"
+                }]
+            }]
+        }"#;
+        let value =
+            parse_ocr_json_bytes_bounded(unrelated_duplicate, unrelated_duplicate.len(), true)
+                .unwrap();
+        assert_eq!(value["pages"][0]["images"][0]["confidence"], 0.9);
     }
 
     // R15-5: a unit-scoped retry re-sends ONLY the failed subset (here page:3, order 2)
@@ -1520,6 +1997,7 @@ mod tests {
             b"pdf-bytes",
             "mistral-ocr-2505",
             pages.as_deref(),
+            false,
         );
         assert_eq!(
             body["pages"],
@@ -1537,11 +2015,21 @@ mod tests {
             parse_bbox(&json!({"x": 10, "y": 5, "w": 20, "h": 7})).unwrap(),
             Some([10, 5, 30, 12])
         );
-        let mut total = 0;
+        let mut markdown_total = 0;
+        let mut image_total = 0;
+        let mut decoded_total = 0;
+        let mut annotation_totals = AnnotationTotals::default();
+        let mut totals = OcrParseTotals {
+            markdown: &mut markdown_total,
+            images: &mut image_total,
+            decoded_images: &mut decoded_total,
+            annotations: &mut annotation_totals,
+        };
         let image = parse_ocr_image(
             &json!({"image_base64": "", "bbox": null}),
             OcrResponsePolicy::default(),
-            &mut total,
+            &mut totals,
+            false,
         )
         .unwrap();
         assert_eq!(image.bbox, None);
@@ -1559,7 +2047,8 @@ mod tests {
             duplicate,
             "mistral-ocr-2505",
             Some(&[0, 1]),
-            OcrResponsePolicy::default()
+            OcrResponsePolicy::default(),
+            false
         )
         .is_err());
 
@@ -1573,7 +2062,8 @@ mod tests {
             mixed,
             "mistral-ocr-2505",
             Some(&[0, 1]),
-            OcrResponsePolicy::default()
+            OcrResponsePolicy::default(),
+            false
         )
         .is_err());
 
@@ -1588,6 +2078,7 @@ mod tests {
             "mistral-ocr-2505",
             Some(&[2, 4]),
             OcrResponsePolicy::default(),
+            false,
         )
         .unwrap();
         assert_eq!(
@@ -1602,6 +2093,15 @@ mod tests {
 
     #[test]
     fn ocr_response_cardinality_and_content_budgets_fail_closed() {
+        let defaults = OcrResponsePolicy::default();
+        assert_eq!(
+            defaults.max_images_per_page,
+            crate::bbox_annotation::MAX_ANNOTATION_IMAGES_PER_PAGE
+        );
+        assert_eq!(
+            defaults.max_images_total,
+            crate::bbox_annotation::MAX_ANNOTATION_IMAGES_PER_RESPONSE
+        );
         let policy = OcrResponsePolicy {
             max_pages: 1,
             max_markdown_bytes_per_page: 3,
@@ -1617,7 +2117,8 @@ mod tests {
             json!({"pages": [{"index": 0, "markdown": "1234"}]}),
             "pin",
             Some(&[0]),
-            policy
+            policy,
+            false
         )
         .is_err());
         assert!(parse_ocr_response(
@@ -1630,7 +2131,8 @@ mod tests {
             }),
             "pin",
             Some(&[0]),
-            policy
+            policy,
+            false
         )
         .is_err());
     }
@@ -1643,12 +2145,14 @@ mod tests {
             media_type: "image/png".to_owned(),
             bbox: None,
             confidence: None,
+            annotation: None,
         };
         let second = OcrImage {
             bytes: b"more".to_vec(),
             media_type: "image/png".to_owned(),
             bbox: None,
             confidence: None,
+            annotation: None,
         };
         let err = persist_image_refs_bounded(dir.path(), &[&first, &second], 7).unwrap_err();
         assert!(matches!(err, AdapterError::QuotaExceeded(_)));
@@ -1690,6 +2194,7 @@ mod tests {
         request.raw.raw_hash = crate::identity::hash_bytes(approved);
         request.raw.path = Some("/path/that/must/not/be/reopened.pdf".to_owned());
         let adapter = MistralOcrMarkdownizeAdapter::new(client, "mistral-ocr-2505", "scope")
+            .with_bbox_annotation(false)
             .with_verified_raw_bytes(approved.to_vec());
         let response = adapter.markdownize(request).unwrap();
         assert_eq!(response.updated_units[0].markdown, "verified");
@@ -1705,6 +2210,7 @@ mod tests {
         let mut request = markdownize_request(MarkdownizeMode::Full, vec![hint("page:1", 0)]);
         request.raw.raw_hash = crate::identity::hash_bytes(approved);
         let adapter = MistralOcrMarkdownizeAdapter::new(client, "mistral-ocr-2505", "scope")
+            .with_bbox_annotation(false)
             .with_verified_raw_bytes(replacement.to_vec());
         assert!(adapter.markdownize(request).is_err());
         assert!(captured.lock().unwrap().is_empty());

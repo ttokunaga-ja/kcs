@@ -433,3 +433,14 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
 86. Historical eligibility never fills an omitted tree-entry `normalize` from later instances or cached
     projections. CAS tree omission means zero chunks at that commit for `--at`, all-history, and
     include-deleted; this closes future-normalization leakage into old snapshots.
+87. Restore remains read-only with respect to `.kcs` truth and does not acquire `.kcs/.lock`, but purge
+    source authorization is linearized by `.kcs/purge-publication.lock`. Purge acquires scope store →
+    purge-publication before publishing its visibility barrier and holds both through physical cleanup
+    and final journal removal. Restore acquires purge-publication only after interactive confirmation and
+    destination-handle opening, then holds it across the final purge-state/raw recheck, private staging,
+    and every atomic destination publication. This closes the check-to-publication race without a reverse
+    lock order or changing docs/05 §6 read-command store-lock semantics.
+88. Raw archive `.ingest-*` files are private transactions, never durable objects. With `.kcs/.lock`
+    held, archive and purge entry remove every stale bounded/no-follow regular ingest temp before new
+    staging or purge working-copy refusal; unsafe, over-limit, or linked entries fail closed as store
+    corruption. This makes a crash before the raw-identity purge gate recover without retaining bytes.
