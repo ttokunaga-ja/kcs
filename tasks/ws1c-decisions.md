@@ -462,3 +462,163 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     execution-path-only. Formal history latency needs a separately attested edit/rename/delete overlay.
     Broad-query ranking, hybrid vectors, Q_hard baseline comparison, dogfood, and D1 TTFV/cost remain
     separate gates rather than being simulated by inflating the balanced corpus.
+91. The persona-PC environmental suite is separate from decision 90's balanced control. It defines
+    twenty independent synthetic people, each with its own PC umbrella tree, isolated XDG device
+    state/registry, exactly twenty active direct-file scopes (twelve role-primary plus eight common-PC
+    secondary scopes), and exactly 120,000 attested contract-contributor chunks at both W0 and W5
+    (the more-than-100,000 condition is only an exploratory floor), plus at least 180,000 eligible
+    current-plus-historical chunks after W5; additional ambient
+    directories and byte-volume noise belong only to the full-PC robustness view. Raw physical-file
+    ratios, logical artifacts, searchable chunks, pending conversion,
+    unsupported inputs, and history cardinality are separate ledgers. History is produced in place by a
+    deterministic W0 baseline followed by W1-W5 edit/rename/move/duplicate/archive/delete/restore/purge
+    event waves. Ordinary working-tree changes use each affected scope's normal `index` auto-snapshot as
+    the history boundary, so the runner does not add a redundant explicit snapshot. Purge is the exception:
+    its own forced `commit_type=purged` commit is the boundary and a following index is expected to be a
+    no-op; restore materializes into a distinct destination scope whose following index is the boundary.
+    Event scope effects therefore declare `index_auto`, `purged_commit`, `index_noop`, or `none` rather than
+    assuming every operation is an index boundary. Reproducibility is tested by replaying the same immutable
+    event manifests from W0 into three fresh roots with separately isolated registries, never by copying a
+    `.kcs` store or placing checkpoint copies inside the indexed PC. Generation performs only fail-fast
+    structural guards; delete and purge waves add planned replacements so current scale remains net-zero,
+    and formal Recall, history, and latency evaluation starts after all replay roots exist.
+    The suite uses deterministic synthetic data and offline/mock format artifacts only: no personal data,
+    ambient credentials, or external API calls.
+92. Persona-PC W0 publication is a planned-versus-observed boundary, not a performance attestation.
+    The canonical plan expands twenty people into 400 direct-file leaf scopes and source-level 1–72
+    contributor quotas; W0 writes deterministic raw sources plus separate physical, logical, and
+    pre-index search-plan ledgers.  The tiny physical writer alone is enabled.  It atomically publishes
+    a root-bound plan/suite/persona/capacity receipt, counts filesystem allocation overhead rather than
+    only payload length, rejects repo output, symlink/reparse/special/hard-linked/unexpected entries,
+    rerenders every source on verification, and makes a completed rerun a durability-reconfirmed strict
+    no-op.  Two fresh roots must have byte-identical immutable artifacts but disjoint inodes.  Windows
+    physical publication remains blocked until directory-handle durability is available; plans remain
+    portable.  Pilot/full writes remain blocked until streaming/RSS and pilot-derived rich-file capacity
+    gates are approved; the current full canonical expansion peaks near 455 MiB RSS.
+93. W1-W5 persona history requires a joint source/quota/event allocation before any mutation.  The
+    earlier independent defaults (one percent of raw files in the purge bucket and four percent of
+    contributor chunks purged) are infeasible for 16 of 20 full personas and also fail several tiny/
+    pilot personas.  The event manifest must jointly bind source ID, gate role, scope, current quota,
+    history bucket, before/after state, and replacement source count/format, and must prove exact wave
+    chunk deltas plus twenty-scope coverage.  Count-only `history_event_plan()` output is projection
+    evidence, not authorization to run W1-W5.  Persona format weights remain stress-design hypotheses;
+    role-specific variants, scope-size weights, and rich size/logical-complexity distributions are
+    required before pilot/full approval.
+94. Decision 93's infeasible exclusive raw-file history buckets are superseded for arithmetic by five
+    mutually exclusive whole-source contributor cohorts: P=4%, X=10%, Y=6%, N=4%, and U=76% in full.
+    W1 edits P+X+Y, W3 edits X+Y+N, W4 deletes X and replaces it one-for-one with a same-scope,
+    same-variant, same-quota X', and W5 corrects N and replaces/purges P.  W5 first indexes distinct P'
+    paths while old P remains, producing an explicit 124,800-current/64,800-history transient; it then
+    removes and path-purges one old P source at a time.  Each P path has exactly W0 and W1 versions, so
+    full purge deletes 9,600 contributor version-chunks (4,800 current plus 4,800 historical), while P'
+    returns final C/H to 120,000/60,000.  A following index per purge scope must be noop.  Exact cohort
+    sums are person-global, with full P/X positive coverage across all twenty scopes; per-scope exact
+    percentages are prohibited because indivisible q/q+1 quotas make many cells infeasible.  Cross-scope
+    move/archive/restore, near duplicate, derived format, and create initially use quota-zero raw-only
+    sentinels, so they prove structure/lifecycle but not searchable move/restore Recall.  Same-scope rename
+    and exact duplicate may use safe U contributors.  This mathematical model remains non-executable until
+    a source-ID joint allocator, immutable event manifest, and independent validator land.
+95. The P/X/Y/N source-ID allocator and its canonical-regeneration validator are now
+    implemented for the existing W0 plans.  All twenty personas in tiny, pilot, and full have exact,
+    disjoint whole-source assignments; full P/X/Y/N each covers all twenty scopes, and X'/P'
+    replacements preserve source scope, variant, and chunk quota one-for-one.  Full one-replay planning
+    yields 2,775 P purge paths, 6,931 X replacements, and 9,706 total contributor replacements; each P
+    path binds exactly two raw versions, for 5,550 purge raw targets.  This makes the cohort assignment
+    executable.  Canonical W0 source expansion is authenticated before allocation, candidates use a
+    deterministic hash-spread order, and every full cohort covers all scopes while no one scope may carry
+    more than 20% of a cohort plus one 72-chunk source.  It still does not authorize W1-W5 mutation:
+    quota-zero structural sentinels, immutable event
+    manifests, replay/preflight/resume, and actual KCS chunk attestation remain required.
+96. Persona history structural allocation and the root-independent planned event manifest are now
+    independently executable, but replay remains fail-closed.  Tiny/pilot use eleven structural
+    events/person; full uses thirty, including one safe U same-scope W2 rename in every scope plus
+    one raw-only cross-scope traveler.  Source ID, source version, and materialization ID are distinct:
+    rename/move/archive preserve all three, edits advance only the version, exact alias and restore add
+    materializations, and near/derived/create add sources.  Near PNG changes exactly one decoded RGB
+    channel by one; PNG-derived scan PDF embeds the parent's exact decoded pixels without a text layer.
+    Structural final live delta is four files/person, so full final active files are 195,080/replay and
+    585,240 for three replays.  The immutable manifest keeps events, wave-scope boundaries, and schedule
+    in separate canonical inventories; ordinary indexes coalesce to exactly one per affected wave/scope,
+    restore's source command has no commit boundary while its existing active destination is indexed, and
+    W5 is regular changes → ordinary indexes → one old-P unlink/path-purge plus forced commit at a time →
+    one noop index per purge scope.  Complete rendered before/after hashes, parent-transform witnesses,
+    managed-state/event hash chains, dependencies, and leaf-derived chunk/file arithmetic are regenerated
+    for validation.  These are planned, not observed, facts.  `HISTORY_ASSIGNMENT_EXECUTABLE` stays false
+    until W0 history-ready receipts, a root-wide lock, expected-state safe mutation, immutable progress
+    journal, crash resume, and actual KCS attestation are implemented.
+97. Persona history planning now has two additional non-authorizing boundaries.  First, exactly twenty
+    individually validated persona event manifests are hash-bound into one root-independent suite
+    schedule held under one future replay-root lock.  In W1--W4 every person's regular events precede
+    every ordinary index in that wave; W5 is all regular events, all ordinary indexes, persona/source-
+    ordered unlink/path-purge plus purged-commit pairs, then all post-purge noop indexes.  This prevents
+    twenty unrelated per-person dependency chains from being resumed concurrently or in a different
+    purge order.  Second, strict W0 exact-tree verification remains unchanged while a separate read-only
+    prepare-envelope verifier allows only the canonical 400 `.kcs` directories, 20 isolated
+    `.kcs-eval-device` directories, and hash-bound files below
+    `.kcs-persona-history/{control,receipts}` after re-verifying all W0 bytes.  Opaque runtime interiors
+    require typed directory-identity/content-root callback receipts; without them they are explicitly
+    unattested, and even with them this verifier always leaves `history_ready_attested=false`.  Neither
+    the suite schedule nor the envelope authorizes mutation.  W0 init/index receipts, the owner-marker
+    root lock, handle-relative safe mutation, replay journal/resume, and actual KCS attestation remain
+    required before `HISTORY_ASSIGNMENT_EXECUTABLE` can become true.
+    The in-memory twenty-manifest composition is tested only with tiny; full additionally requires a
+    bounded one-person-at-a-time input/validation path and an RSS gate.
+98. The replay-root mutual-exclusion carrier is the already-published immutable owner marker,
+    reinforced by an advisory lock on the opened root directory; acquiring a lease creates no new
+    W0 entry and rewrites no byte.  The POSIX-only primitive opens the root, owner marker, and root
+    binding with no-follow semantics, requires stable single-link control-file identities and exact
+    canonical bytes, binds profile/replay/plan/root path/filesystem device, rejects same-process
+    reentry and nonblocking cross-process contention, binds the lease to the acquiring PID, resets the
+    inherited process mutex after `fork`, prevents a child from unlocking the parent's flock, retains
+    all descriptors, and repeats namespace and semantic checks before unlock.  Root or control-file
+    replacement is a release failure and the
+    foreign replacement is never rewritten.  This is an advisory cooperative-writer boundary, not a
+    defense against an actor replacing the entire path with a different inode, and it is unavailable
+    on Windows.  The lease does not attest KCS internals or make history executable: prepare-runner
+    integration, a complete 400-scope semantic receipt, handle-relative expected-state mutation,
+    durable journal/resume, and the replay executor remain required, so
+    `HISTORY_ASSIGNMENT_EXECUTABLE` stays false.
+99. Persona fidelity is now a machine-readable planning hypothesis, not an observed distribution or
+    renderer claim.  Each of the twenty synthetic owners has a distinct row for declared OS semantics,
+    device class, locale/languages, work style, synthetic snapshot/export sources, sensitivity tiers,
+    nesting, size-profile identity, and raw-only domain-binary variants.  A common six-dimension
+    small/medium/large/tail size-complexity envelope covers text/code chunks, PDF pages, EML attachments,
+    XLSX sheets, PPTX slides, and image/media/domain bytes.  All such rows remain synthetic-only,
+    non-live, and `implemented_by_renderer=false`; they neither alter current bytes/extensions/OS
+    behavior nor grant raw formats searchable chunks.
+100. Full-scale cardinality and resource limits are now derived through one bounded canonical persona
+    plan at a time, without constructing a full event manifest.  The frozen oracle yields 43,596 events,
+    5,175 boundaries, and 48,771 schedule items/replay, or 130,788 / 15,525 / 146,313 for three replays.
+    It caps a persona plan at 8 MiB, 16,000 sources, 20 scopes, 384 MiB worker RSS, 128 MiB composer RSS,
+    512 MiB process-tree RSS, one concurrent worker, 512 rows/shard, and 32 MiB/shard.  Worker and suite
+    receipts are caller-declared projections only and keep `formal_capacity_gate_satisfied=false` until
+    published artifacts are read back and supervisor `wait4` evidence is independently bound.
+101. Persona capacity and generic streaming storage are implemented as non-authorizing boundaries.
+    Capacity derives exact cardinalities but remains blocked until canonical pilot measurement readback;
+    a root-bound check additionally requires read-back filesystem identity, allocation unit, availability,
+    caps, and reserves.  No capacity receipt authorizes a write or attests KCS.  Streaming JSONL storage
+    enforces bounded canonical shards, no-replace publication, and exact readback, but portable rename
+    cannot atomically require that the verified source directory inode remains the rename source.  Every
+    result therefore reports `formal_publication_attested=false` with blocker
+    `source_directory_inode_not_bound_by_rename` and cannot serve as a formal full-publication receipt.
+102. The KCS runner boundary and partial semantic attestor are fail-closed scaffolding, not W0 prepare.
+    Strict result validation, isolated environment construction, read-only binary identity, content-root
+    walking, canonical persona/scope/quota binding, and typed runtime callback receipts are implemented.
+    A validated scope path can still be swapped before `Popen(cwd=...)` resolves it, so
+    `HANDLE_RELATIVE_EXECUTION_AVAILABLE`, `PERSONA_FILESYSTEM_MUTATION_AVAILABLE`, and
+    `TRUSTED_BINARY_EXECUTION_AVAILABLE` all remain false; init/index/version subprocesses and persona
+    mutation are unavailable.  The attestor does not itself prove SQLite/CAS, HEAD/commit, binary/config,
+    root, or prepare-intent semantics, and returns `history_ready_attested=false` even for the exact
+    20-person/400-scope/20-device projection.  Consequently `HISTORY_ASSIGNMENT_EXECUTABLE` remains false.
+103. Persona suite-event streaming is implemented as bounded planning storage, not history execution.
+    At most one complete persona event manifest is retained while canonical events, boundaries, and
+    schedule-projection rows are published as bounded shards.  The suite composer holds twenty compact
+    summaries, performs an O(20) merge, and emits the global schedule, external row locators, and an MMR
+    over paired schedule/locator bindings without retaining twenty full manifest objects.  The tiny
+    differential is exact: 1,076 events, 908 boundaries, 1,984 schedule items, schedule SHA-256
+    `3f64675b1b8b83455b6eb18d9a2592b8e8b882621ad3f1b735cd233b6ef437c0`, and suite-manifest
+    SHA-256 `d76ca8d55e92ff77eec98aaac69cab2bc3e35f3cd392c4ae681e5a7972afac3a` match the legacy
+    builder.  This does not clear the generic publisher's
+    `source_directory_inode_not_bound_by_rename` blocker: person and suite artifacts always report
+    `formal_publication_attested=false`.  Full supervisor RSS, artifact readback, and `wait4` receipts
+    remain unproven, the layer contains no W1-W5 mutation, and it grants no history-execution authority.
