@@ -1526,7 +1526,10 @@ fn same_open_file(left: &File, right: &File) -> Result<bool> {
 
 #[cfg(windows)]
 fn same_open_file(left: &File, right: &File) -> Result<bool> {
-    Ok(same_windows_cas_file(left, right))
+    Ok(same_windows_repair_quarantine_file_components(
+        windows_file_information(left),
+        windows_file_information(right),
+    ))
 }
 
 #[cfg(not(any(unix, windows)))]
@@ -1984,6 +1987,22 @@ fn same_windows_cas_file_components(
     )
 }
 
+#[cfg(any(test, windows))]
+fn same_windows_repair_quarantine_file_components(
+    left: Option<WindowsFileInformation>,
+    right: Option<WindowsFileInformation>,
+) -> bool {
+    matches!(
+        (left, right),
+        (Some(left), Some(right))
+            if left.same_identity(right)
+                && left.is_regular_file()
+                && right.is_regular_file()
+                && left.number_of_links == 2
+                && right.number_of_links == 2
+    )
+}
+
 #[cfg(windows)]
 fn windows_file_information(file: &File) -> Option<WindowsFileInformation> {
     use std::os::windows::io::AsRawHandle;
@@ -2357,6 +2376,7 @@ mod tests {
     fn windows_cas_components_require_regular_single_link_handles() {
         let single_link = WindowsFileInformation::new(7, 11, 1, 0);
         let hard_linked = WindowsFileInformation::new(7, 11, 2, 0);
+        let extra_link = WindowsFileInformation::new(7, 11, 3, 0);
         let directory =
             WindowsFileInformation::new(7, 11, 1, WindowsFileInformation::DIRECTORY_ATTRIBUTE);
         let reparse_point =
@@ -2399,6 +2419,22 @@ mod tests {
             Some(reparse_point)
         ));
         assert!(!same_windows_cas_file_components(Some(single_link), None));
+        assert!(same_windows_repair_quarantine_file_components(
+            Some(hard_linked),
+            Some(hard_linked)
+        ));
+        assert!(!same_windows_repair_quarantine_file_components(
+            Some(single_link),
+            Some(single_link)
+        ));
+        assert!(!same_windows_repair_quarantine_file_components(
+            Some(hard_linked),
+            Some(extra_link)
+        ));
+        assert!(!same_windows_repair_quarantine_file_components(
+            Some(directory),
+            Some(directory)
+        ));
         assert!(directory.is_real_directory());
         assert!(!reparse_point.is_real_directory());
         assert!(!single_link.is_real_directory());
