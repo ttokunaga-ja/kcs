@@ -27,6 +27,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import corpus_spec as spec  # noqa: E402
+from eval_env import subprocess_env  # noqa: E402
 
 # anchor の (scope, file) -> 定義 (旧内容の見出し解決に使う)。
 # renamed は old_file、edited/deleted は file が anchor の原名と一致する。
@@ -51,10 +52,17 @@ def _sections_for(scope, file_):
     return [{"slug": s["slug"], "heading": s["heading"]} for s in anchor["sections"]]
 
 
-def run_kcs(bin_path, scope_dir, args, tolerate_partial=True):
+def run_kcs(bin_path, scope_dir, args, tolerate_partial=True, corpus_dir=None):
     """kcs を scope_dir で実行し JSON を返す。index の partial(exit3) は許容."""
     cmd = [bin_path, "--json"] + args
-    proc = subprocess.run(cmd, cwd=scope_dir, capture_output=True, text=True)
+    corpus_dir = corpus_dir or os.path.dirname(scope_dir)
+    proc = subprocess.run(
+        cmd,
+        cwd=scope_dir,
+        capture_output=True,
+        text=True,
+        env=subprocess_env(corpus_dir),
+    )
     # index --approve は failed_files>0 で exit 3 を返すが auto snapshot は済む。
     # また合成コーパスは全て正常 normalize される想定。exit!=0 かつ tolerate 外なら失敗。
     if proc.returncode != 0 and not (tolerate_partial and proc.returncode == 3):
@@ -115,9 +123,9 @@ def replay(corpus_dir, bin_path):
         if not os.path.isdir(scope_dir):
             raise ReplayError(f"scope ディレクトリ不在: {scope_dir}")
 
-        run_kcs(bin_path, scope_dir, ["init", "."])
-        run_kcs(bin_path, scope_dir, ["index", "--approve"])
-        run_kcs(bin_path, scope_dir, ["snapshot", "-m", "baseline"])
+        run_kcs(bin_path, scope_dir, ["init", "."], corpus_dir=corpus_dir)
+        run_kcs(bin_path, scope_dir, ["index", "--approve"], corpus_dir=corpus_dir)
+        run_kcs(bin_path, scope_dir, ["snapshot", "-m", "baseline"], corpus_dir=corpus_dir)
 
         steps = ["baseline"]
 
@@ -128,9 +136,10 @@ def replay(corpus_dir, bin_path):
                 old_hashes[(scope, e["file"])] = _sha256_file(
                     os.path.join(scope_dir, e["file"]))
                 apply_edit(scope_dir, e)
-            run_kcs(bin_path, scope_dir, ["index", "--approve"])
+            run_kcs(bin_path, scope_dir, ["index", "--approve"], corpus_dir=corpus_dir)
             files = ", ".join(e["file"] for e in edits)
-            run_kcs(bin_path, scope_dir, ["snapshot", "-m", f"edit: {files}"])
+            run_kcs(bin_path, scope_dir, ["snapshot", "-m", f"edit: {files}"],
+                    corpus_dir=corpus_dir)
             steps.append("edit")
 
         # リネーム -> snapshot (rename は bytes 不変。旧名時点の bytes を記録)
@@ -140,9 +149,10 @@ def replay(corpus_dir, bin_path):
                 old_hashes[(scope, r["old_file"])] = _sha256_file(
                     os.path.join(scope_dir, r["old_file"]))
                 apply_rename(scope_dir, r)
-            run_kcs(bin_path, scope_dir, ["index", "--approve"])
+            run_kcs(bin_path, scope_dir, ["index", "--approve"], corpus_dir=corpus_dir)
             pairs = ", ".join(f"{r['old_file']}->{r['new_file']}" for r in renames)
-            run_kcs(bin_path, scope_dir, ["snapshot", "-m", f"rename: {pairs}"])
+            run_kcs(bin_path, scope_dir, ["snapshot", "-m", f"rename: {pairs}"],
+                    corpus_dir=corpus_dir)
             steps.append("rename")
 
         # 削除 -> snapshot (削除前の bytes を記録)
@@ -152,13 +162,14 @@ def replay(corpus_dir, bin_path):
                 old_hashes[(scope, d["file"])] = _sha256_file(
                     os.path.join(scope_dir, d["file"]))
                 apply_delete(scope_dir, d)
-            run_kcs(bin_path, scope_dir, ["index", "--approve"])
+            run_kcs(bin_path, scope_dir, ["index", "--approve"], corpus_dir=corpus_dir)
             files = ", ".join(d["file"] for d in deletes)
-            run_kcs(bin_path, scope_dir, ["snapshot", "-m", f"delete: {files}"])
+            run_kcs(bin_path, scope_dir, ["snapshot", "-m", f"delete: {files}"],
+                    corpus_dir=corpus_dir)
             steps.append("delete")
 
         # 検証: kcs log
-        log = run_kcs(bin_path, scope_dir, ["log"])
+        log = run_kcs(bin_path, scope_dir, ["log"], corpus_dir=corpus_dir)
         commits = log.get("commits", [])
         per_scope[scope] = {
             "steps": steps,
@@ -210,8 +221,8 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description="KCS 履歴シナリオ再現 (決定論的)")
     ap.add_argument("--corpus", required=True, help="generate_corpus.py の出力ディレクトリ")
     ap.add_argument("--bin", default="target/release/kcs", help="kcs バイナリのパス")
-    ap.add_argument("--manifest", default=os.path.join(here, "history-manifest.json"),
-                    help="履歴 manifest の出力先")
+    ap.add_argument("--manifest", default=None,
+                    help="履歴 manifest の出力先 (既定 <corpus>/history-manifest.json)")
     args = ap.parse_args(argv)
 
     corpus_dir = os.path.abspath(args.corpus)
@@ -220,9 +231,10 @@ def main(argv=None):
         raise SystemExit(f"[error] kcs バイナリ不在: {bin_path} "
                          f"(cargo build --release 済みか確認)")
 
+    manifest_path = args.manifest or os.path.join(corpus_dir, "history-manifest.json")
     per_scope, old_hashes = replay(corpus_dir, bin_path)
     manifest = build_manifest(per_scope, old_hashes)
-    with open(args.manifest, "w", encoding="utf-8", newline="\n") as fh:
+    with open(manifest_path, "w", encoding="utf-8", newline="\n") as fh:
         json.dump(manifest, fh, ensure_ascii=False, indent=2, sort_keys=True)
         fh.write("\n")
 
@@ -237,7 +249,7 @@ def main(argv=None):
         v = per_scope[scope]
         print(f"       - {scope:12s}: steps={'/'.join(v['steps'])} "
               f"commits={v['commit_count']}")
-    print(f"     manifest: {args.manifest}")
+    print(f"     manifest: {manifest_path}")
     return 0
 
 

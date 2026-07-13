@@ -40,20 +40,38 @@ exit コード (2026-07-03 J2 裁定):
 """
 
 import argparse
+import hashlib
 import json
+import math
 import os
 import re
+import stat
 import subprocess
 import sys
+import tempfile
+import time
 import unicodedata
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import corpus_spec as spec  # noqa: E402
+from eval_env import subprocess_env  # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SCENARIOS = ["M3-1", "M3-2", "M3-3"]
 SCENARIO_FLAG = {"M3-1": None, "M3-2": "--all-history", "M3-3": "--include-deleted"}
 RECALL_TARGET = 0.8
+LATENCY_TARGET_MS = 7_000.0
+HISTORY_QUERY_COUNT = 16
+REQUIRED_POINTER_FIELDS = {
+    "schema_version", "commit", "raw_hash", "tool_profile_hash", "chunk_hash", "scope_id",
+}
+HASH_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+MAX_COMMIT_OBJECT_BYTES = 1024 * 1024
+MAX_TREE_OBJECT_BYTES = 16 * 1024 * 1024
+MAX_CHUNK_OBJECT_BYTES = 128 * 1024 * 1024
+MAX_TREE_ENTRIES = 10_000
+MAX_POINTER_ATTESTATIONS_PER_QUERY = 10
+MAX_POINTER_ATTESTATION_BYTES = 512 * 1024 * 1024
 
 
 # --------------------------------------------------------------------------- #
@@ -111,6 +129,103 @@ def load_json(path, label):
             f"        先に generate_corpus.py / replay_history.py を実行すること。")
     with open(path, "r", encoding="utf-8") as fh:
         return json.load(fh)
+
+
+def _history_anchor(scope, file_name):
+    return next((anchor for anchor in spec.ANCHORS
+                 if anchor["scope"] == scope and anchor["file"] == file_name), None)
+
+
+def _expected_history_messages(scope):
+    """Exact newest-first log messages emitted by replay_history.py for one scope."""
+    messages = []
+    deletes = [item for item in spec.HISTORY["deletes"] if item["scope"] == scope]
+    if deletes:
+        messages.extend([
+            "delete: " + ", ".join(item["file"] for item in deletes),
+            "kcs index auto snapshot",
+        ])
+    renames = [item for item in spec.HISTORY["renames"] if item["scope"] == scope]
+    if renames:
+        messages.extend([
+            "rename: " + ", ".join(
+                f"{item['old_file']}->{item['new_file']}" for item in renames),
+            "kcs index auto snapshot",
+        ])
+    edits = [item for item in spec.HISTORY["edits"] if item["scope"] == scope]
+    if edits:
+        messages.extend([
+            "edit: " + ", ".join(item["file"] for item in edits),
+            "kcs index auto snapshot",
+        ])
+    messages.extend(["baseline", "kcs index auto snapshot"])
+    return messages
+
+
+def validate_history_manifest(history_manifest):
+    """Reject a missing/stale replay manifest before it can authorize scoring."""
+    problems = []
+    if history_manifest.get("replay") != "eval/replay_history.py":
+        problems.append("replay identity mismatch")
+    if history_manifest.get("seed") != spec.SEED:
+        problems.append("history seed mismatch")
+    if history_manifest.get("scopes") != spec.SCOPES:
+        problems.append("history scope order/set mismatch")
+
+    def identities(items, fields):
+        return [tuple(item.get(field) for field in fields) for item in items]
+
+    operation_specs = (
+        ("renamed", spec.HISTORY["renames"], ("scope", "old_file", "new_file")),
+        ("edited", spec.HISTORY["edits"], ("scope", "file", "old_value", "new_value")),
+        ("deleted", spec.HISTORY["deletes"], ("scope", "file")),
+    )
+    for manifest_key, expected, fields in operation_specs:
+        actual = history_manifest.get(manifest_key)
+        if not isinstance(actual, list) or identities(actual, fields) != identities(expected, fields):
+            problems.append(f"history {manifest_key} operations mismatch")
+            continue
+        file_field = "old_file" if manifest_key == "renamed" else "file"
+        for entry in actual:
+            anchor = _history_anchor(entry["scope"], entry[file_field])
+            if anchor is None:
+                problems.append(f"history {manifest_key} anchor mismatch")
+                continue
+            expected_hash = hashlib.sha256(
+                spec.render_anchor(anchor).encode("utf-8")).hexdigest()
+            if entry.get("raw_sha256") != expected_hash:
+                problems.append(
+                    f"history {manifest_key} raw_sha256 mismatch: "
+                    f"{entry['scope']}/{entry[file_field]}")
+            expected_sections = [
+                {"slug": section["slug"], "heading": section["heading"]}
+                for section in anchor["sections"]
+            ]
+            if entry.get("sections") != expected_sections:
+                problems.append(
+                    f"history {manifest_key} sections mismatch: "
+                    f"{entry['scope']}/{entry[file_field]}")
+
+    verified = history_manifest.get("verified")
+    if not isinstance(verified, dict) or set(verified) != set(spec.SCOPES):
+        problems.append("history verified scope set mismatch")
+        return problems
+    for scope in spec.SCOPES:
+        expected_steps = ["baseline"]
+        if any(item["scope"] == scope for item in spec.HISTORY["edits"]):
+            expected_steps.append("edit")
+        if any(item["scope"] == scope for item in spec.HISTORY["renames"]):
+            expected_steps.append("rename")
+        if any(item["scope"] == scope for item in spec.HISTORY["deletes"]):
+            expected_steps.append("delete")
+        record = verified.get(scope) or {}
+        if record.get("steps") != expected_steps:
+            problems.append(f"history verified steps mismatch: {scope}")
+        if record.get("commit_count") != 2 * len(expected_steps):
+            problems.append(f"history verified commit_count mismatch: {scope}")
+        if record.get("messages") != _expected_history_messages(scope):
+            problems.append(f"history verified messages mismatch: {scope}")
+    return problems
 
 
 class CorpusModel:
@@ -340,9 +455,34 @@ def run_search(bin_path, corpus_dir, query, flags):
     # ここでは代表として最初の scope ディレクトリを cwd に実行する。
     cwd = scope_dir_for(corpus_dir, spec.SCOPES[0])
     cmd = [bin_path, "--json", "search", query, "--all-scopes"] + list(flags)
-    proc = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True)
+    started = time.monotonic()
+    proc = subprocess.run(
+        cmd, cwd=cwd, capture_output=True, text=True,
+        env=subprocess_env(corpus_dir))
+    duration_ms = (time.monotonic() - started) * 1000.0
     return {"returncode": proc.returncode,
-            "stdout": proc.stdout, "stderr": proc.stderr}
+            "stdout": proc.stdout, "stderr": proc.stderr,
+            "duration_ms": duration_ms}
+
+
+def validate_replayed_history(bin_path, corpus_dir, history_manifest):
+    """Compare the live CAS-backed log shape with the replay manifest."""
+    problems = []
+    for scope in spec.SCOPES:
+        cwd = scope_dir_for(corpus_dir, scope)
+        proc = subprocess.run(
+            [bin_path, "--json", "log"], cwd=cwd, capture_output=True,
+            text=True, env=subprocess_env(corpus_dir))
+        response = _parse_json(proc.stdout)
+        if proc.returncode != 0 or not isinstance(response, dict):
+            problems.append(f"history log unavailable: {scope}")
+            continue
+        commits = response.get("commits") or []
+        expected = history_manifest["verified"][scope]
+        messages = [commit.get("message") for commit in commits]
+        if len(commits) != expected["commit_count"] or messages != expected["messages"]:
+            problems.append(f"history log is stale: {scope}")
+    return problems
 
 
 def _parse_json(text):
@@ -439,25 +579,382 @@ def recall_at_k(response, expected_set, k=10):
     return len(expected_set & got) / len(expected_set)
 
 
-def run_full_eval(queries, resolver, corpus_dir, bin_path, out_path, report_path,
-                  active):
+def evidence_problems(response):
+    """Validate required Evidence fields for every returned scored hit."""
+    problems = []
+    for index, result in enumerate(response.get("results") or []):
+        pointer = result.get("evidence_pointer")
+        if not isinstance(pointer, dict):
+            problems.append(f"result[{index}] has no evidence_pointer")
+            continue
+        missing = sorted(REQUIRED_POINTER_FIELDS - set(pointer))
+        if missing:
+            problems.append(f"result[{index}] missing Evidence fields: {missing}")
+        if pointer.get("schema_version") != 1:
+            problems.append(f"result[{index}] has invalid Evidence schema_version")
+        for field in REQUIRED_POINTER_FIELDS - {"schema_version"}:
+            if not isinstance(pointer.get(field), str) or not pointer[field]:
+                problems.append(f"result[{index}] has invalid Evidence field: {field}")
+    return problems
+
+
+class PointerAttestationError(RuntimeError):
+    """A content-free pointer/CAS identity attestation failure."""
+
+
+def _canonical_json_bytes(value):
+    """Canonical bytes for the frozen ASCII-key object shapes used here."""
+    return json.dumps(
+        value, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+    ).encode("utf-8")
+
+
+def _hash_bytes(data):
+    return "sha256:" + hashlib.sha256(data).hexdigest()
+
+
+def _chunk_identity_hash(chunk):
+    identity_fields = (
+        "spec_version", "raw_hash", "tool_profile_hash", "gen", "unit_key",
+        "heading_path", "section_id", "char_start", "char_end",
+    )
+    identity = {field: chunk[field] for field in identity_fields if field in chunk}
+    return _hash_bytes(_canonical_json_bytes(identity))
+
+
+def _read_json_bounded(path, max_bytes, label):
+    """Read one no-follow regular JSON file with a strict pre/post size bound."""
+    try:
+        before = os.lstat(path)
+    except OSError as exc:
+        raise PointerAttestationError(f"{label} unavailable") from exc
+    if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1:
+        raise PointerAttestationError(f"{label} is not a private regular file")
+    if before.st_size > max_bytes:
+        raise PointerAttestationError(f"{label} exceeds byte bound")
+    flags = os.O_RDONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        fd = os.open(path, flags)
+    except OSError as exc:
+        raise PointerAttestationError(f"{label} unavailable") from exc
+    try:
+        opened = os.fstat(fd)
+        if (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino):
+            raise PointerAttestationError(f"{label} changed during read")
+        with os.fdopen(fd, "rb", closefd=False) as fh:
+            data = fh.read(max_bytes + 1)
+    finally:
+        os.close(fd)
+    if len(data) > max_bytes:
+        raise PointerAttestationError(f"{label} exceeds byte bound")
+    try:
+        value = json.loads(data)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise PointerAttestationError(f"{label} is not valid JSON") from exc
+    if not isinstance(value, dict):
+        raise PointerAttestationError(f"{label} is not a JSON object")
+    return value, data
+
+
+class PointerAttestor:
+    """Bounded immutable-CAS attestation for historical result pointers."""
+
+    _KINDS = {
+        "commit": ("commits", MAX_COMMIT_OBJECT_BYTES),
+        "tree": ("trees", MAX_TREE_OBJECT_BYTES),
+        "chunk": ("chunks", MAX_CHUNK_OBJECT_BYTES),
+    }
+
+    def __init__(self, corpus_dir):
+        self.corpus_dir = os.path.abspath(corpus_dir)
+        self.scope_dirs = {}
+        self.scope_errors = {}
+        self.object_cache = {}
+        self.verified_bytes = 0
+        self._load_scope_map()
+
+    def _load_scope_map(self):
+        # The frozen corpus has a small fixed scope list; never scan arbitrary
+        # filesystem descendants while resolving an untrusted pointer scope_id.
+        for scope in spec.SCOPES:
+            kcs_dir = os.path.join(scope_dir_for(self.corpus_dir, scope), ".kcs")
+            scope_path = os.path.join(kcs_dir, "scope.json")
+            if not os.path.isdir(kcs_dir):
+                continue
+            try:
+                value, _ = _read_json_bounded(scope_path, 64 * 1024, "scope record")
+            except PointerAttestationError as exc:
+                self.scope_errors[scope] = str(exc)
+                continue
+            scope_id = value.get("scope_id")
+            if not isinstance(scope_id, str) or not scope_id:
+                self.scope_errors[scope] = "scope record has invalid scope_id"
+                continue
+            if scope_id in self.scope_dirs:
+                self.scope_errors[scope_id] = "scope_id is ambiguous"
+                self.scope_dirs.pop(scope_id, None)
+                continue
+            self.scope_dirs[scope_id] = kcs_dir
+
+    @staticmethod
+    def _object_path(kcs_dir, subdir, object_hash):
+        if not isinstance(object_hash, str) or not HASH_RE.fullmatch(object_hash):
+            raise PointerAttestationError("pointer contains an invalid object hash")
+        digest = object_hash.removeprefix("sha256:")
+        return os.path.join(kcs_dir, "objects", subdir, digest[:2], digest[2:4], digest)
+
+    def _read_object(self, scope_id, kind, object_hash):
+        key = (scope_id, kind, object_hash)
+        if key in self.object_cache:
+            return self.object_cache[key]
+        if scope_id in self.scope_errors:
+            raise PointerAttestationError(self.scope_errors[scope_id])
+        kcs_dir = self.scope_dirs.get(scope_id)
+        if kcs_dir is None:
+            raise PointerAttestationError("pointer scope_id is not in the synthetic corpus")
+        subdir, max_bytes = self._KINDS[kind]
+        path = self._object_path(kcs_dir, subdir, object_hash)
+        remaining = MAX_POINTER_ATTESTATION_BYTES - self.verified_bytes
+        if remaining <= 0:
+            raise PointerAttestationError("pointer attestation byte bound exhausted")
+        value, data = _read_json_bounded(
+            path, min(max_bytes, remaining), f"{kind} object")
+        self.verified_bytes += len(data)
+        if kind in ("commit", "tree") and _hash_bytes(data) != object_hash:
+            raise PointerAttestationError(f"{kind} object hash mismatch")
+        if kind == "chunk" and _chunk_identity_hash(value) != object_hash:
+            raise PointerAttestationError("chunk object identity mismatch")
+        self.object_cache[key] = value
+        return value
+
+    def attest(self, pointer):
+        if not isinstance(pointer, dict):
+            raise PointerAttestationError("result has no evidence_pointer")
+        scope_id = pointer.get("scope_id")
+        commit_hash = pointer.get("commit")
+        chunk_hash = pointer.get("chunk_hash")
+        path_at_commit = pointer.get("path_at_commit")
+        raw_hash = pointer.get("raw_hash")
+        profile_hash = pointer.get("tool_profile_hash")
+        if not isinstance(scope_id, str) or not scope_id:
+            raise PointerAttestationError("pointer has invalid scope_id")
+        if not isinstance(path_at_commit, str) or not path_at_commit:
+            raise PointerAttestationError("pointer has invalid path_at_commit")
+        for name, value in (
+                ("commit", commit_hash), ("chunk_hash", chunk_hash),
+                ("raw_hash", raw_hash), ("tool_profile_hash", profile_hash)):
+            if not isinstance(value, str) or not HASH_RE.fullmatch(value):
+                raise PointerAttestationError(f"pointer has invalid {name}")
+
+        commit = self._read_object(scope_id, "commit", commit_hash)
+        if commit.get("object_type") != "commit":
+            raise PointerAttestationError("commit object has wrong object_type")
+        tree_hash = commit.get("tree")
+        if not isinstance(tree_hash, str) or not HASH_RE.fullmatch(tree_hash):
+            raise PointerAttestationError("commit has invalid tree hash")
+        if pointer.get("tree") not in (None, tree_hash):
+            raise PointerAttestationError("pointer tree does not match commit")
+
+        tree = self._read_object(scope_id, "tree", tree_hash)
+        if tree.get("object_type") != "tree":
+            raise PointerAttestationError("tree object has wrong object_type")
+        entries = tree.get("entries")
+        if not isinstance(entries, list) or len(entries) > MAX_TREE_ENTRIES:
+            raise PointerAttestationError("tree entries are invalid or exceed bound")
+        matching = [entry for entry in entries
+                    if isinstance(entry, dict) and entry.get("path") == path_at_commit]
+        if len(matching) != 1:
+            raise PointerAttestationError("tree does not contain exactly one pointer path")
+        entry = matching[0]
+        if entry.get("raw_hash") != raw_hash:
+            raise PointerAttestationError("tree path raw_hash does not match pointer")
+        normalize = entry.get("normalize")
+        if not isinstance(normalize, dict):
+            raise PointerAttestationError("tree path has no normalized identity")
+        if normalize.get("tool_profile_hash") != profile_hash:
+            raise PointerAttestationError("tree path profile does not match pointer")
+        gen = normalize.get("gen", 0)
+        if isinstance(gen, bool) or not isinstance(gen, int) or gen < 0:
+            raise PointerAttestationError("tree path has invalid normalized generation")
+
+        chunk = self._read_object(scope_id, "chunk", chunk_hash)
+        if chunk.get("spec_version") != 1:
+            raise PointerAttestationError("chunk object has invalid spec_version")
+        if chunk.get("raw_hash") != raw_hash:
+            raise PointerAttestationError("chunk raw_hash does not match pointer")
+        if chunk.get("tool_profile_hash") != profile_hash:
+            raise PointerAttestationError("chunk profile does not match pointer")
+        if chunk.get("gen") != gen:
+            raise PointerAttestationError("chunk generation does not match tree path")
+
+
+def pointer_attestation_problems(response, attestor, k=MAX_POINTER_ATTESTATIONS_PER_QUERY):
+    """Attest every bounded top-k result pointer used by M3-2 scoring."""
+    problems = []
+    results = response.get("results") or []
+    if not isinstance(results, list):
+        return ["results is not an array"]
+    for index, result in enumerate(results[:k]):
+        if not isinstance(result, dict):
+            problems.append(f"result[{index}] is not an object")
+            continue
+        try:
+            attestor.attest(result.get("evidence_pointer"))
+        except PointerAttestationError as exc:
+            problems.append(f"result[{index}] pointer attestation failed: {exc}")
+    return problems
+
+
+def percentile_nearest_rank(values, percentile):
+    if not values:
+        return None
+    ordered = sorted(values)
+    rank = max(1, math.ceil(percentile * len(ordered)))
+    return ordered[rank - 1]
+
+
+def assess_history_coverage(responses_by_scenario, history_manifest):
+    """Structural guards that prevent HEAD-only Recall from false-passing."""
+    def correctly_recalled_results(scenario):
+        recalled = []
+        for record in responses_by_scenario.get(scenario, []):
+            expected = record.get("expected_set") or set()
+            for result in (record.get("response", {}).get("results") or [])[:10]:
+                pointer = result.get("evidence_pointer") or {}
+                identity = (pointer.get("raw_hash"), _pointer_section(pointer))
+                if identity in expected:
+                    recalled.append(result)
+        return recalled
+
+    # A historical identity only counts when it is a correct Recall@10 hit for
+    # that query. Irrelevant noise in another query's top ten cannot satisfy a
+    # structural gate merely by carrying the same raw hash.
+    m32_results = correctly_recalled_results("M3-2")
+    m33_results = correctly_recalled_results("M3-3")
+    m32_raws = {
+        (result.get("evidence_pointer") or {}).get("raw_hash") for result in m32_results
+    }
+    edited_required = {
+        "sha256:" + entry["raw_sha256"] for entry in history_manifest.get("edited", [])
+    }
+    edited_missing = sorted(edited_required - m32_raws)
+
+    rename_failures = []
+    for entry in history_manifest.get("renamed", []):
+        raw_hash = "sha256:" + entry["raw_sha256"]
+        hits = [result for result in m32_results
+                if (result.get("evidence_pointer") or {}).get("raw_hash") == raw_hash]
+        paths = {(result.get("evidence_pointer") or {}).get("path_at_commit") for result in hits}
+        required_paths = {entry["old_file"], entry["new_file"]}
+        aliases_valid = bool(hits) and all(
+            result.get("current_paths") == [entry["new_file"]]
+            and result.get("current_path") == entry["new_file"]
+            for result in hits)
+        if not required_paths.issubset(paths) or not aliases_valid:
+            rename_failures.append({
+                "scope": entry["scope"], "raw_hash": raw_hash,
+                "paths": sorted(path for path in paths if path),
+            })
+
+    m33_by_raw = {}
+    for result in m33_results:
+        raw_hash = (result.get("evidence_pointer") or {}).get("raw_hash")
+        if raw_hash:
+            m33_by_raw.setdefault(raw_hash, result)
+    deleted_required = {
+        "sha256:" + entry["raw_sha256"] for entry in history_manifest.get("deleted", [])
+    }
+    deleted_missing = sorted(deleted_required - set(m33_by_raw))
+    return {
+        "edited_old_required": len(edited_required),
+        "edited_old_missing": edited_missing,
+        "rename_required": len(history_manifest.get("renamed", [])),
+        "rename_failures": rename_failures,
+        "deleted_required": len(deleted_required),
+        "deleted_missing": deleted_missing,
+        "passes_m3_2": not edited_missing and not rename_failures,
+        "passes_m3_3": not deleted_missing,
+        "deleted_results": m33_by_raw,
+    }
+
+
+def _working_tree_fingerprint(corpus_dir):
+    rows = []
+    for scope in spec.SCOPES:
+        scope_dir = scope_dir_for(corpus_dir, scope)
+        for name in sorted(os.listdir(scope_dir)):
+            if name == ".kcs":
+                continue
+            path = os.path.join(scope_dir, name)
+            if os.path.isfile(path):
+                with open(path, "rb") as fh:
+                    rows.append((scope, name, hashlib.sha256(fh.read()).hexdigest()))
+    return rows
+
+
+def verify_deleted_restore(bin_path, corpus_dir, history_manifest, deleted_results):
+    """Restore one pointer for every deleted identity without mutating the corpus."""
+    before = _working_tree_fingerprint(corpus_dir)
+    problems = []
+    cwd = scope_dir_for(corpus_dir, spec.SCOPES[0])
+    for entry in history_manifest.get("deleted", []):
+        raw_hash = "sha256:" + entry["raw_sha256"]
+        result = deleted_results.get(raw_hash)
+        if not result:
+            problems.append(f"deleted result absent for restore: {entry['scope']}/{entry['file']}")
+            continue
+        pointer = result.get("evidence_pointer")
+        with tempfile.TemporaryDirectory(prefix="kcs-eval-restore-") as destination:
+            proc = subprocess.run(
+                [bin_path, "--json", "restore", json.dumps(pointer, separators=(",", ":")),
+                 "--to", destination],
+                cwd=cwd, capture_output=True, text=True, env=subprocess_env(corpus_dir))
+            if proc.returncode != 0:
+                problems.append(
+                    f"restore failed for {entry['scope']}/{entry['file']}: {proc.stderr.strip()}")
+                continue
+            restored = []
+            for root, _, files in os.walk(destination):
+                restored.extend(os.path.join(root, name) for name in files)
+            if len(restored) != 1:
+                problems.append(f"restore count mismatch for {entry['scope']}/{entry['file']}")
+                continue
+            with open(restored[0], "rb") as fh:
+                actual = hashlib.sha256(fh.read()).hexdigest()
+            if actual != entry["raw_sha256"]:
+                problems.append(f"restore hash mismatch for {entry['scope']}/{entry['file']}")
+    if _working_tree_fingerprint(corpus_dir) != before:
+        problems.append("restore mutated the source corpus working tree")
+    return problems
+
+
+def run_full_eval(queries, resolver, history_manifest, corpus_dir, bin_path,
+                  out_path, report_path, active):
     print("=== eval: kcs search 実行 + Recall@10 集計 ===")
     results = {"target_recall_at_10": RECALL_TARGET, "scenarios": {}, "queries": []}
     per_scenario_scores = {s: [] for s in active}
+    per_scenario_latencies = {s: [] for s in active}
+    responses_by_scenario = {s: [] for s in active}
     n_unimplemented = 0
     n_failed = 0
+    n_pointer_attested = 0
+    n_pointer_attestation_failed = 0
+    pointer_attestor = PointerAttestor(corpus_dir) if "M3-2" in active else None
 
     for q in queries:
         sc = q["scenario"]
         expected_set, resolve_errors = resolver.resolve_expected(q["expected"])
         outcome = run_search(bin_path, corpus_dir, q["query"], q.get("flags", []))
         kind, response, error_code, detail = classify_outcome(outcome)
+        duration_ms = float(outcome.get("duration_ms", 0.0))
 
         if kind == "unimplemented":
             n_unimplemented += 1
             results["queries"].append({
                 "scenario": sc, "query": q["query"], "status": "unimplemented",
-                "error_code": error_code, "detail": detail,
+                "error_code": error_code, "detail": detail, "duration_ms": duration_ms,
             })
             continue
 
@@ -468,35 +965,94 @@ def run_full_eval(queries, resolver, corpus_dir, bin_path, out_path, report_path
         if kind == "fail":
             n_failed += 1
             per_scenario_scores.setdefault(sc, []).append(0.0)
+            per_scenario_latencies.setdefault(sc, []).append(duration_ms)
             results["queries"].append({
                 "scenario": sc, "query": q["query"], "status": "failed",
                 "recall_at_10": 0.0, "error_code": error_code, "detail": detail,
+                "duration_ms": duration_ms,
             })
             continue
 
+        pointer_problems = evidence_problems(response)
+        if pointer_problems:
+            n_failed += 1
+            per_scenario_scores.setdefault(sc, []).append(0.0)
+            per_scenario_latencies.setdefault(sc, []).append(duration_ms)
+            results["queries"].append({
+                "scenario": sc, "query": q["query"], "status": "failed",
+                "recall_at_10": 0.0, "detail": "; ".join(pointer_problems),
+                "duration_ms": duration_ms,
+            })
+            continue
+
+        attestation_problems = []
+        if sc == "M3-2":
+            attestation_problems = pointer_attestation_problems(
+                response, pointer_attestor)
+            if attestation_problems:
+                n_failed += 1
+                n_pointer_attestation_failed += 1
+                per_scenario_scores.setdefault(sc, []).append(0.0)
+                per_scenario_latencies.setdefault(sc, []).append(duration_ms)
+                results["queries"].append({
+                    "scenario": sc, "query": q["query"], "status": "failed",
+                    "recall_at_10": 0.0,
+                    "detail": "; ".join(attestation_problems),
+                    "duration_ms": duration_ms,
+                })
+                continue
+            n_pointer_attested += min(
+                len(response.get("results") or []), MAX_POINTER_ATTESTATIONS_PER_QUERY)
+
         score = recall_at_k(response, expected_set, k=10)
         per_scenario_scores.setdefault(sc, []).append(score)
+        per_scenario_latencies.setdefault(sc, []).append(duration_ms)
+        responses_by_scenario.setdefault(sc, []).append({
+            "response": response,
+            "expected_set": expected_set,
+        })
         results["queries"].append({
             "scenario": sc, "query": q["query"], "status": "scored",
-            "recall_at_10": score,
+            "recall_at_10": score, "duration_ms": duration_ms,
+            **({"pointer_attested": min(
+                len(response.get("results") or []),
+                MAX_POINTER_ATTESTATIONS_PER_QUERY)} if sc == "M3-2" else {}),
             **({"detail": detail} if detail else {}),
         })
 
     for s in active:
         scores = per_scenario_scores.get(s, [])
+        latencies = per_scenario_latencies.get(s, [])
         avg = sum(scores) / len(scores) if scores else None
+        p95_ms = percentile_nearest_rank(latencies, 0.95)
         results["scenarios"][s] = {
             "n_queries": sum(1 for q in queries if q["scenario"] == s),
             "n_scored": len(scores),
             "recall_at_10": avg,
             "passes_target": (avg is not None and avg >= RECALL_TARGET),
+            "p95_ms": p95_ms,
+            "passes_latency": (p95_ms is not None and p95_ms < LATENCY_TARGET_MS),
         }
+
+    history_coverage = assess_history_coverage(responses_by_scenario, history_manifest)
+    deleted_results = history_coverage.pop("deleted_results")
+    restore_problems = []
+    if "M3-3" in active and history_coverage["passes_m3_3"]:
+        restore_problems = verify_deleted_restore(
+            bin_path, corpus_dir, history_manifest, deleted_results)
+    history_coverage["restore_problems"] = restore_problems
+    history_coverage["passes_restore"] = not restore_problems
+    history_coverage["pointer_attested"] = n_pointer_attested
+    history_coverage["pointer_attestation_failures"] = n_pointer_attestation_failed
+    history_coverage["passes_pointer_attestation"] = n_pointer_attestation_failed == 0
+    results["history_coverage"] = history_coverage
 
     results["counts"] = {
         "n_queries": len(queries),
         "n_unimplemented": n_unimplemented,
         "n_failed": n_failed,
         "n_scored": sum(len(v) for v in per_scenario_scores.values()),
+        "n_pointer_attested": n_pointer_attested,
     }
 
     with open(out_path, "w", encoding="utf-8", newline="\n") as fh:
@@ -515,8 +1071,19 @@ def run_full_eval(queries, resolver, corpus_dir, bin_path, out_path, report_path
     all_pass = (n_failed == 0)
     for s in active:
         scv = results["scenarios"][s]
-        if scv["n_scored"] == 0 or not scv["passes_target"]:
+        expected_count = sum(1 for query in queries if query["scenario"] == s)
+        if (scv["n_scored"] != expected_count or not scv["passes_target"]
+                or not scv["passes_latency"]):
             all_pass = False
+        if s in ("M3-2", "M3-3") and expected_count != HISTORY_QUERY_COUNT:
+            all_pass = False
+    if "M3-2" in active and not history_coverage["passes_m3_2"]:
+        all_pass = False
+    if "M3-2" in active and not history_coverage["passes_pointer_attestation"]:
+        all_pass = False
+    if "M3-3" in active and (
+            not history_coverage["passes_m3_3"] or not history_coverage["passes_restore"]):
+        all_pass = False
     verdict = "OK" if all_pass else "NG"
     if n_failed:
         print(f"[note] 実行失敗 (非 0 exit / 不正レスポンス / 解決不能) が {n_failed} 件。")
@@ -536,16 +1103,31 @@ def _write_report(path, results, active):
         lines.append("- 状態: **kcs search 未実装のクエリあり (NOT-IMPLEMENTED)**。"
                      "Recall 判定は無効 (exit 2)。")
     lines.append("")
-    lines.append("| シナリオ | クエリ数 | scored | Recall@10 | 判定 |")
-    lines.append("| --- | --- | --- | --- | --- |")
+    lines.append("| シナリオ | クエリ数 | scored | Recall@10 | p95 ms | 判定 |")
+    lines.append("| --- | --- | --- | --- | --- | --- |")
     for s in active:
         sc = results["scenarios"][s]
         rec = "-" if sc["recall_at_10"] is None else f"{sc['recall_at_10']:.3f}"
         if sc["n_scored"] == 0:
             verdict = "n/a"
         else:
-            verdict = "PASS" if sc["passes_target"] else "FAIL"
-        lines.append(f"| {s} | {sc['n_queries']} | {sc['n_scored']} | {rec} | {verdict} |")
+            verdict = "PASS" if sc["passes_target"] and sc["passes_latency"] else "FAIL"
+        p95 = "-" if sc["p95_ms"] is None else f"{sc['p95_ms']:.1f}"
+        lines.append(
+            f"| {s} | {sc['n_queries']} | {sc['n_scored']} | {rec} | {p95} | {verdict} |")
+    coverage = results.get("history_coverage", {})
+    if "M3-2" in active:
+        lines.append("")
+        lines.append(f"- M3-2 edited/rename structural coverage: "
+                     f"{'PASS' if coverage.get('passes_m3_2') else 'FAIL'}")
+        lines.append(f"- M3-2 pointer CAS attestation: "
+                     f"{'PASS' if coverage.get('passes_pointer_attestation') else 'FAIL'} "
+                     f"({coverage.get('pointer_attested', 0)} pointers)")
+    if "M3-3" in active:
+        lines.append(f"- M3-3 deleted coverage: "
+                     f"{'PASS' if coverage.get('passes_m3_3') else 'FAIL'}")
+        lines.append(f"- M3-3 restore verification: "
+                     f"{'PASS' if coverage.get('passes_restore') else 'FAIL'}")
     lines.append("")
     with open(path, "w", encoding="utf-8", newline="\n") as fh:
         fh.write("\n".join(lines) + "\n")
@@ -558,8 +1140,8 @@ def main(argv=None):
     ap.add_argument("--corpus", help="コーパスディレクトリ (corpus-manifest.json を含む)")
     ap.add_argument("--corpus-manifest",
                     help="corpus-manifest.json のパス (既定 <corpus>/corpus-manifest.json)")
-    ap.add_argument("--history-manifest",
-                    default=os.path.join(HERE, "history-manifest.json"))
+    ap.add_argument("--history-manifest", default=None,
+                    help="既定 <corpus>/history-manifest.json")
     ap.add_argument("--bin", default="target/release/kcs")
     ap.add_argument("--out", default=os.path.join(HERE, "results.json"))
     ap.add_argument("--report", default=os.path.join(HERE, "report.md"))
@@ -584,7 +1166,17 @@ def main(argv=None):
             raise SystemExit("[error] --corpus か --corpus-manifest を指定すること。")
         cm_path = os.path.join(os.path.abspath(args.corpus), spec.CORPUS_MANIFEST_NAME)
     corpus_manifest = load_json(cm_path, "corpus-manifest.json")
-    history_manifest = load_json(args.history_manifest, "history-manifest.json")
+    history_path = args.history_manifest
+    if history_path is None:
+        if not args.corpus:
+            raise SystemExit("[error] --history-manifest か --corpus を指定すること。")
+        history_path = os.path.join(os.path.abspath(args.corpus), "history-manifest.json")
+    history_manifest = load_json(history_path, "history-manifest.json")
+    history_problems = validate_history_manifest(history_manifest)
+    if history_problems:
+        for problem in history_problems:
+            print(f"[error] {problem}", file=sys.stderr)
+        return 1
     model = CorpusModel(corpus_manifest, history_manifest)
     resolver = Resolver(corpus_manifest, history_manifest)
 
@@ -602,7 +1194,13 @@ def main(argv=None):
     bin_path = os.path.abspath(args.bin)
     if not os.path.exists(bin_path):
         raise SystemExit(f"[error] kcs バイナリ不在: {bin_path}")
-    return run_full_eval(queries, resolver, os.path.abspath(args.corpus),
+    corpus_dir = os.path.abspath(args.corpus)
+    replay_problems = validate_replayed_history(bin_path, corpus_dir, history_manifest)
+    if replay_problems:
+        for problem in replay_problems:
+            print(f"[error] {problem}", file=sys.stderr)
+        return 1
+    return run_full_eval(queries, resolver, history_manifest, corpus_dir,
                          bin_path, args.out, args.report, active)
 
 

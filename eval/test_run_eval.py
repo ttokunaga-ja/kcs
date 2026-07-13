@@ -13,8 +13,11 @@
 """
 
 import hashlib
+import copy
+import json
 import os
 import sys
+import tempfile
 import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -63,6 +66,129 @@ class TestPointerSection(unittest.TestCase):
 
     def test_no_section_info(self):
         self.assertIsNone(run_eval._pointer_section({}))
+
+
+class TestPointerAttestation(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix="kcs-eval-attest-")
+        self.addCleanup(self.temp.cleanup)
+        self.scope_name = spec.SCOPES[0]
+        self.scope_id = "scope_eval_attestation"
+        self.scope_dir = os.path.join(self.temp.name, self.scope_name)
+        self.kcs_dir = os.path.join(self.scope_dir, ".kcs")
+        os.makedirs(self.kcs_dir)
+        with open(os.path.join(self.kcs_dir, "scope.json"), "w", encoding="utf-8") as fh:
+            json.dump({"scope_id": self.scope_id}, fh)
+
+        self.raw_hash = "sha256:" + "11" * 32
+        self.profile_hash = "sha256:" + "22" * 32
+        text = "historical pointer attestation"
+        self.chunk = {
+            "spec_version": 1,
+            "raw_hash": self.raw_hash,
+            "tool_profile_hash": self.profile_hash,
+            "gen": 3,
+            "unit_key": "section:old",
+            "heading_path": ["Old Document", "Historical"],
+            "section_id": "old-document/historical",
+            "char_start": 0,
+            "char_end": len(text),
+            "text_hash": "sha256:" + hashlib.sha256(text.encode()).hexdigest(),
+            "text": text,
+        }
+        self.chunk_hash = run_eval._chunk_identity_hash(self.chunk)
+        self._publish("chunks", self.chunk, self.chunk_hash)
+        self.pointer = self._publish_snapshot(gen=3)
+        self.attestor = run_eval.PointerAttestor(self.temp.name)
+
+    def _publish(self, subdir, value, object_hash=None):
+        data = run_eval._canonical_json_bytes(value)
+        object_hash = object_hash or run_eval._hash_bytes(data)
+        digest = object_hash.removeprefix("sha256:")
+        directory = os.path.join(
+            self.kcs_dir, "objects", subdir, digest[:2], digest[2:4])
+        os.makedirs(directory, exist_ok=True)
+        with open(os.path.join(directory, digest), "wb") as fh:
+            fh.write(data)
+        return object_hash
+
+    def _publish_snapshot(self, gen, profile_hash=None, raw_hash=None):
+        profile_hash = profile_hash or self.profile_hash
+        raw_hash = raw_hash or self.raw_hash
+        tree = {
+            "object_type": "tree",
+            "entries": [{
+                "path": "old-name.md",
+                "type": "file",
+                "raw_hash": raw_hash,
+                "normalize": {"tool_profile_hash": profile_hash, "gen": gen},
+            }],
+        }
+        tree_hash = self._publish("trees", tree)
+        commit = {
+            "object_type": "commit",
+            "tree": tree_hash,
+            "parents": [],
+            "created_at": "2026-07-13T00:00:00Z",
+            "message": "synthetic attestation",
+            "tool_lock_hash": "sha256:" + "33" * 32,
+            "stats": {"files_added": 1, "files_modified": 0, "files_deleted": 0},
+            "commit_type": "manual",
+        }
+        commit_hash = self._publish("commits", commit)
+        return {
+            "schema_version": 1,
+            "scope_id": self.scope_id,
+            "commit": commit_hash,
+            "tree": tree_hash,
+            "raw_hash": self.raw_hash,
+            "tool_profile_hash": self.profile_hash,
+            "chunk_hash": self.chunk_hash,
+            "path_at_commit": "old-name.md",
+        }
+
+    def test_exact_commit_tree_path_profile_and_generation_attest(self):
+        response = {"results": [{"evidence_pointer": self.pointer}]}
+        self.assertEqual(
+            run_eval.pointer_attestation_problems(response, self.attestor), [])
+        verified = self.attestor.verified_bytes
+        self.assertEqual(
+            run_eval.pointer_attestation_problems(response, self.attestor), [])
+        self.assertEqual(self.attestor.verified_bytes, verified, "CAS reads must be cached")
+
+    def test_wrong_historical_path_or_raw_fails(self):
+        wrong_path = copy.deepcopy(self.pointer)
+        wrong_path["path_at_commit"] = "current-name.md"
+        problems = run_eval.pointer_attestation_problems(
+            {"results": [{"evidence_pointer": wrong_path}]}, self.attestor)
+        self.assertTrue(any("pointer path" in problem for problem in problems))
+
+        wrong_raw = copy.deepcopy(self.pointer)
+        wrong_raw["raw_hash"] = "sha256:" + "44" * 32
+        problems = run_eval.pointer_attestation_problems(
+            {"results": [{"evidence_pointer": wrong_raw}]}, self.attestor)
+        self.assertTrue(any("raw_hash" in problem for problem in problems))
+
+    def test_wrong_profile_or_chunk_generation_fails(self):
+        wrong_profile = copy.deepcopy(self.pointer)
+        wrong_profile["tool_profile_hash"] = "sha256:" + "55" * 32
+        problems = run_eval.pointer_attestation_problems(
+            {"results": [{"evidence_pointer": wrong_profile}]}, self.attestor)
+        self.assertTrue(any("profile" in problem for problem in problems))
+
+        wrong_generation = self._publish_snapshot(gen=4)
+        problems = run_eval.pointer_attestation_problems(
+            {"results": [{"evidence_pointer": wrong_generation}]}, self.attestor)
+        self.assertTrue(any("generation" in problem for problem in problems))
+
+    def test_reader_rejects_oversize_and_non_regular_data(self):
+        path = os.path.join(self.temp.name, "oversize.json")
+        with open(path, "wb") as fh:
+            fh.write(b"{}")
+        with self.assertRaises(run_eval.PointerAttestationError):
+            run_eval._read_json_bounded(path, 1, "test object")
+        with self.assertRaises(run_eval.PointerAttestationError):
+            run_eval._read_json_bounded(self.temp.name, 1024, "test object")
 
 
 def _pointer(raw_hash, section_id=None, heading_path=None):
@@ -241,6 +367,151 @@ class TestClassifyOutcome(unittest.TestCase):
         outcome = {"returncode": 0, "stdout": "not json", "stderr": ""}
         kind, resp, code, detail = run_eval.classify_outcome(outcome)
         self.assertEqual(kind, "fail")
+
+
+class TestStep4EvalGates(unittest.TestCase):
+    @staticmethod
+    def _record(results, expected_set=None):
+        if expected_set is None:
+            expected_set = {
+                (result["evidence_pointer"]["raw_hash"],
+                 run_eval._pointer_section(result["evidence_pointer"]))
+                for result in results
+            }
+        return {"response": {"results": results}, "expected_set": expected_set}
+
+    def _history(self):
+        history = {
+            "replay": "eval/replay_history.py",
+            "seed": spec.SEED,
+            "scopes": list(spec.SCOPES),
+            "renamed": copy.deepcopy(spec.HISTORY["renames"]),
+            "edited": copy.deepcopy(spec.HISTORY["edits"]),
+            "deleted": copy.deepcopy(spec.HISTORY["deletes"]),
+            "verified": {},
+        }
+        for manifest_key in ("edited", "renamed", "deleted"):
+            file_field = "old_file" if manifest_key == "renamed" else "file"
+            for entry in history[manifest_key]:
+                anchor = run_eval._history_anchor(entry["scope"], entry[file_field])
+                entry["raw_sha256"] = hashlib.sha256(
+                    spec.render_anchor(anchor).encode("utf-8")).hexdigest()
+                entry["sections"] = [
+                    {"slug": section["slug"], "heading": section["heading"]}
+                    for section in anchor["sections"]
+                ]
+        for scope in spec.SCOPES:
+            steps = ["baseline"]
+            if any(item["scope"] == scope for item in spec.HISTORY["edits"]):
+                steps.append("edit")
+            if any(item["scope"] == scope for item in spec.HISTORY["renames"]):
+                steps.append("rename")
+            if any(item["scope"] == scope for item in spec.HISTORY["deletes"]):
+                steps.append("delete")
+            count = 2 * len(steps)
+            history["verified"][scope] = {
+                "steps": steps,
+                "commit_count": count,
+                "messages": run_eval._expected_history_messages(scope),
+            }
+        return history
+
+    def test_history_manifest_structure_accepts_exact_and_rejects_stale(self):
+        history = self._history()
+        self.assertEqual(run_eval.validate_history_manifest(history), [])
+        stale = copy.deepcopy(history)
+        stale["seed"] += 1
+        stale["verified"].pop(spec.SCOPES[-1])
+        problems = run_eval.validate_history_manifest(stale)
+        self.assertTrue(any("seed" in problem for problem in problems))
+        self.assertTrue(any("scope set" in problem for problem in problems))
+
+        corrupt = copy.deepcopy(history)
+        corrupt["edited"][0]["raw_sha256"] = "not-a-hash"
+        corrupt["renamed"][0]["sections"][0]["slug"] = "stale"
+        corrupt["verified"][spec.SCOPES[0]]["messages"][0] = "wrong"
+        problems = run_eval.validate_history_manifest(corrupt)
+        self.assertTrue(any("raw_sha256" in problem for problem in problems))
+        self.assertTrue(any("sections" in problem for problem in problems))
+        self.assertTrue(any("messages" in problem for problem in problems))
+
+    def test_head_only_point_eight_one_two_five_cannot_false_pass_m3_2(self):
+        history = self._history()
+        # The aggregate score 13/16 = .8125 clears the numeric threshold, but none
+        # of the three edited-away old identities appears.
+        self.assertGreaterEqual(13 / 16, run_eval.RECALL_TARGET)
+        coverage = run_eval.assess_history_coverage({"M3-2": []}, history)
+        self.assertEqual(len(coverage["edited_old_missing"]), 3)
+        self.assertFalse(coverage["passes_m3_2"])
+
+    def test_all_edited_old_identities_are_required(self):
+        history = self._history()
+        results = []
+        for entry in history["edited"]:
+            results.append(_pointer("sha256:" + entry["raw_sha256"], section_id="x/y"))
+        coverage = run_eval.assess_history_coverage(
+            {"M3-2": [self._record(results)]}, history)
+        self.assertEqual(coverage["edited_old_missing"], [])
+
+        noise = run_eval.assess_history_coverage(
+            {"M3-2": [self._record(results, {("sha256:other", "y")})]}, history)
+        self.assertEqual(len(noise["edited_old_missing"]), 3)
+
+    def test_rename_requires_old_and_new_snapshot_paths_with_current_alias(self):
+        history = self._history()
+        responses = []
+        for entry in history["renamed"]:
+            raw_hash = "sha256:" + entry["raw_sha256"]
+            results = []
+            for path_at_commit in (entry["old_file"], entry["new_file"]):
+                result = _pointer(raw_hash, section_id="x/y")
+                result["evidence_pointer"]["path_at_commit"] = path_at_commit
+                result["current_paths"] = [entry["new_file"]]
+                result["current_path"] = entry["new_file"]
+                results.append(result)
+            responses.append(self._record(results))
+        coverage = run_eval.assess_history_coverage(
+            {"M3-2": responses}, history)
+        self.assertEqual(coverage["rename_failures"], [])
+
+        responses[0]["response"]["results"][0]["current_paths"] = [
+            history["renamed"][0]["old_file"]]
+        stale = run_eval.assess_history_coverage(
+            {"M3-2": responses}, history)
+        self.assertTrue(stale["rename_failures"])
+
+    def test_every_deleted_identity_is_required(self):
+        history = self._history()
+        results = [
+            _pointer("sha256:" + entry["raw_sha256"], section_id="x/y")
+            for entry in history["deleted"]
+        ]
+        coverage = run_eval.assess_history_coverage(
+            {"M3-3": [self._record(results)]}, history)
+        self.assertEqual(coverage["deleted_missing"], [])
+        self.assertTrue(coverage["passes_m3_3"])
+
+        incomplete = run_eval.assess_history_coverage(
+            {"M3-3": [self._record(results[:-1])]}, history)
+        self.assertEqual(len(incomplete["deleted_missing"]), 1)
+        self.assertFalse(incomplete["passes_m3_3"])
+
+    def test_evidence_fields_and_latency_boundary(self):
+        bad = {"results": [_pointer("sha256:a", section_id="x/y")]}
+        self.assertTrue(run_eval.evidence_problems(bad))
+        pointer = {
+            "schema_version": 1,
+            "commit": "sha256:c",
+            "raw_hash": "sha256:r",
+            "tool_profile_hash": "sha256:t",
+            "chunk_hash": "sha256:h",
+            "scope_id": "scope_1",
+        }
+        self.assertEqual(run_eval.evidence_problems(
+            {"results": [{"evidence_pointer": pointer}]}), [])
+        self.assertEqual(run_eval.percentile_nearest_rank([1, 2, 3, 4, 5], .95), 5)
+        self.assertLess(6999.9, run_eval.LATENCY_TARGET_MS)
+        self.assertFalse(7000.0 < run_eval.LATENCY_TARGET_MS)
 
 
 if __name__ == "__main__":
