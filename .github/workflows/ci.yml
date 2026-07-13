@@ -14,6 +14,20 @@ jobs:
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo test --workspace --all-targets --locked
+      - run: python3 -m unittest eval.test_run_eval
+
+  synthetic-history-eval:
+    needs: rust
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo build --release --locked
+      - run: python3 eval/generate_corpus.py --out /tmp/kcs-eval-corpus
+      - run: python3 eval/replay_history.py --corpus /tmp/kcs-eval-corpus --bin target/release/kcs
+      - run: python3 eval/run_eval.py --scenario M3-2 --corpus /tmp/kcs-eval-corpus --bin target/release/kcs
+      - run: python3 eval/run_eval.py --scenario M3-3 --corpus /tmp/kcs-eval-corpus --bin target/release/kcs
 
   msrv:
     runs-on: ubuntu-latest
