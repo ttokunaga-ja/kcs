@@ -444,3 +444,20 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     held, archive and purge entry remove every stale bounded/no-follow regular ingest temp before new
     staging or purge working-copy refusal; unsafe, over-limit, or linked entries fail closed as store
     corruption. This makes a crash before the raw-identity purge gate recover without retaining bytes.
+89. Multi-scope search uses a scoped fixed worker pool with at most four workers and a two-second
+    per-scope default deadline. Scope config overrides user config per key; queue wait is outside the
+    deadline because the clock starts when a worker claims a scope. SQLite connections remain
+    worker-local and install a progress handler, while filesystem/history phases check the same
+    deadline cooperatively. Workers never publish output or logs: joined outcomes are restored to
+    enumeration order before aggregation, and the global result tie key remains immutable
+    `(scope_id,chunk_hash)`. A fresh timeout is exclusion reason `timeout` (partial exit 3 when another
+    scope succeeds, all-failed exit 4 otherwise); timeout of any signed active cursor scope hard-fails
+    replay without a partial page or replacement cursor. Scoped joins prohibit detached timeout work.
+90. The first 100k-plus performance fixture is a balanced current-text baseline, independent from the
+    frozen Recall corpus: 20 direct-child scopes map 14 personas to 20 use cases, with 200 deterministic
+    Markdown files and 30 heading chunks per file (120,000 current chunks total). Exact source bytes,
+    HEAD/current-config eligibility, FTS coverage, and the isolated 20-row registry are attested. Its
+    M3-1 result is a default-auto current-text baseline, not the formal hybrid/MVP latency gate; its
+    single-HEAD M3-2/M3-3 timings are execution-path-only. Formal history latency needs a separately
+    attested edit/rename/delete overlay. Hybrid vectors, Q_hard baseline comparison, dogfood, and D1
+    TTFV/cost remain separate gates rather than being simulated by inflating the balanced corpus.
