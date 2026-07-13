@@ -1371,8 +1371,10 @@ fn atomic_replace_handle(
         .as_os_str()
         .encode_wide()
         .collect::<Vec<_>>();
-    let offset = std::mem::offset_of!(FILE_RENAME_INFO, FileName);
-    let bytes = offset + name.len() * std::mem::size_of::<u16>();
+    // Win32 requires the full fixed structure size plus the variable name
+    // bytes. `offset + name_bytes` is four bytes short on x64 because the
+    // trailing one-element array and structure padding are part of the input.
+    let bytes = std::mem::size_of::<FILE_RENAME_INFO>() + name.len() * std::mem::size_of::<u16>();
     let words = bytes.div_ceil(std::mem::size_of::<usize>());
     let mut storage = vec![0_usize; words];
     let info = storage.as_mut_ptr().cast::<FILE_RENAME_INFO>();
