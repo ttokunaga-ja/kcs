@@ -4,6 +4,11 @@ Status: W0 tiny、W1-W5 contributor/structural allocator、root-independent plan
 event manifest、persona fidelity仮説metadata、bounded suite streaming planningを実装済み。
 W0 history prepare/replay、fidelityのrenderer反映、formal pilot/full物理生成は未実装または未承認。
 
+2026-07-14の人物別topology、semantic filename、extension/domain variant、容量lane、
+create-edit-replay-validate順序の改訂案は
+[`persona-pc-fidelity-v2-proposal.md`](persona-pc-fidelity-v2-proposal.md)を参照する。
+同案はproposal onlyであり、このv1契約やcanonical planをまだ変更しない。
+
 ## 1. 結論
 
 20個の用途フォルダを1人に持たせるのではなく、**20人分の独立PC root**を作る。
