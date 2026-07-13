@@ -5397,27 +5397,48 @@ fn read_max_input_bytes_config(path: &Path) -> Option<u64> {
 
 /// Effective Step 4 bbox-annotation policy. Scope config overrides user config;
 /// absence at both levels is the frozen secure/searchable default `true`.
-fn bbox_annotation_enabled(repo: &Repository) -> bool {
+fn bbox_annotation_enabled(repo: &Repository) -> Result<bool> {
     effective_bbox_annotation_policy(
         &repo.kcs_dir().join("config.toml"),
         &user_config_toml_path(),
     )
 }
 
-fn effective_bbox_annotation_policy(scope_config: &Path, user_config: &Path) -> bool {
-    read_bbox_annotation_config(scope_config)
-        .or_else(|| read_bbox_annotation_config(user_config))
-        .unwrap_or(true)
+fn effective_bbox_annotation_policy(scope_config: &Path, user_config: &Path) -> Result<bool> {
+    if let Some(enabled) = read_bbox_annotation_config(scope_config)? {
+        return Ok(enabled);
+    }
+    Ok(read_bbox_annotation_config(user_config)?.unwrap_or(true))
 }
 
-fn read_bbox_annotation_config(path: &Path) -> Option<bool> {
-    let text = fs::read_to_string(path).ok()?;
-    let value: toml::Value = toml::from_str(&text).ok()?;
-    value
+const BBOX_ANNOTATION_CONFIG_MAX_BYTES: u64 = 1024 * 1024;
+
+fn read_bbox_annotation_config(path: &Path) -> Result<Option<bool>> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(KcsError::io(error.to_string(), path.display().to_string()));
+        }
+    }
+    let bytes = read_bounded_regular_file(path, BBOX_ANNOTATION_CONFIG_MAX_BYTES)?;
+    let text = std::str::from_utf8(&bytes).map_err(|error| {
+        KcsError::schema(format!(
+            "bbox annotation config is not valid UTF-8 at {}: {error}",
+            path.display()
+        ))
+    })?;
+    let value: toml::Value = toml::from_str(text).map_err(|error| {
+        KcsError::schema(format!(
+            "invalid bbox annotation config at {}: {error}",
+            path.display()
+        ))
+    })?;
+    Ok(value
         .get("markdownize")
         .and_then(|markdownize| markdownize.get("bbox_annotation"))
         .and_then(|bbox| bbox.get("enabled"))
-        .and_then(toml::Value::as_bool)
+        .and_then(toml::Value::as_bool))
 }
 
 /// R12-1: effective `[markdownize.incremental]` (docs/10:537, docs/03:595). `enabled`
@@ -7340,7 +7361,7 @@ fn execute_pending_markdownize_tasks(
     // sent when its input is a Tier B (candidate-secret) file and the scope is not
     // `--send-secrets`-approved — in case the hold was cleared by some other path.
     let secrets_approved = secrets_send_approved(repo);
-    let online_profile = online_markdownize_profile_for(repo);
+    let online_profile = online_markdownize_profile_for(repo)?;
     let output_ref = online_output_ref(&online_profile.adapter_id);
     // R22-6(a): R21-6 gave the embedding pipeline a live-AuthError revive but never wired
     // the markdownize twin, so a 401/403 left its task Failed(`auth_error`) — non-retryable
@@ -10577,8 +10598,10 @@ fn online_markdownize_profile() -> AdapterProfile {
     standard_online_markdownize_profile()
 }
 
-fn online_markdownize_profile_for(repo: &Repository) -> AdapterProfile {
-    standard_online_markdownize_profile_with_bbox(bbox_annotation_enabled(repo))
+fn online_markdownize_profile_for(repo: &Repository) -> Result<AdapterProfile> {
+    Ok(standard_online_markdownize_profile_with_bbox(
+        bbox_annotation_enabled(repo)?,
+    ))
 }
 
 fn adapter_kind_budget_key(kind: AdapterKind) -> &'static str {
@@ -10768,7 +10791,7 @@ fn run_index_pipeline(
     // whose input_path is no longer a live candidate. Runs before the enqueue loop so the
     // freed cap is available to this index's tasks.
     {
-        let online_profile = online_markdownize_profile_for(repo);
+        let online_profile = online_markdownize_profile_for(repo)?;
         let placeholder_output_ref = online_output_ref(&online_profile.adapter_id);
         let markdown_adapter_kind = adapter_kind_budget_key(online_profile.adapter_kind);
         let reservation_scope_id = repo.scope_id_for_adapter();
@@ -12106,9 +12129,9 @@ fn enqueue_online_placeholder_task(
     if is_text_native_media(&candidate.media_type) {
         return Ok(());
     }
-    let online_profile = online_markdownize_profile_for(repo);
+    let online_profile = online_markdownize_profile_for(repo)?;
     let output_ref = online_output_ref(&online_profile.adapter_id);
-    let effective_bbox_policy = bbox_annotation_enabled(repo);
+    let effective_bbox_policy = bbox_annotation_enabled(repo)?;
     // R15-2: supersede any stale online markdownize task for THIS path whose
     // `input_hash` differs from the current content. The file was edited after that
     // task was enqueued, so it is stale: `batch resume` would R14-2-supersede a
@@ -12248,7 +12271,7 @@ fn enqueue_online_placeholder_task(
         task_type: TaskType::Markdownize,
         estimated_usd: estimate_online_markdownize_cost(
             candidate.size_bytes,
-            bbox_annotation_enabled(repo),
+            effective_bbox_policy,
         ),
         adapter_id: Some(online_profile.adapter_id.clone()),
     };
@@ -14132,14 +14155,71 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let scope = dir.path().join("scope.toml");
         let user = dir.path().join("user.toml");
-        assert!(effective_bbox_annotation_policy(&scope, &user));
+        assert!(effective_bbox_annotation_policy(&scope, &user).unwrap());
+        assert_eq!(read_bbox_annotation_config(&scope).unwrap(), None);
 
         std::fs::write(&user, "[markdownize.bbox_annotation]\nenabled = false\n").unwrap();
-        assert_eq!(read_bbox_annotation_config(&user), Some(false));
-        assert!(!effective_bbox_annotation_policy(&scope, &user));
+        assert_eq!(read_bbox_annotation_config(&user).unwrap(), Some(false));
+        assert!(!effective_bbox_annotation_policy(&scope, &user).unwrap());
 
         std::fs::write(&scope, "[markdownize.bbox_annotation]\nenabled = true\n").unwrap();
-        assert!(effective_bbox_annotation_policy(&scope, &user));
+        assert!(effective_bbox_annotation_policy(&scope, &user).unwrap());
+    }
+
+    #[test]
+    fn ct4_bbox_001_config_reads_are_bounded_regular_and_fail_closed() {
+        use super::{
+            effective_bbox_annotation_policy, read_bbox_annotation_config,
+            BBOX_ANNOTATION_CONFIG_MAX_BYTES,
+        };
+
+        let dir = tempfile::tempdir().unwrap();
+
+        let oversized = dir.path().join("oversized.toml");
+        let file = std::fs::File::create(&oversized).unwrap();
+        file.set_len(BBOX_ANNOTATION_CONFIG_MAX_BYTES + 1).unwrap();
+        let error = read_bbox_annotation_config(&oversized).unwrap_err();
+        assert_eq!(error.error_code(), "KCS-E-STORE-OBJECT-OVERSIZED-001");
+
+        let directory = dir.path().join("directory.toml");
+        std::fs::create_dir(&directory).unwrap();
+        let error = read_bbox_annotation_config(&directory).unwrap_err();
+        assert_eq!(error.error_code(), "KCS-E-STORE-CORRUPT-001");
+
+        let invalid_utf8 = dir.path().join("invalid-utf8.toml");
+        std::fs::write(&invalid_utf8, [0xff]).unwrap();
+        let error = read_bbox_annotation_config(&invalid_utf8).unwrap_err();
+        assert_eq!(error.error_code(), "KCS-E-CONFIG-SCHEMA-001");
+
+        let invalid_toml = dir.path().join("invalid.toml");
+        std::fs::write(&invalid_toml, "[").unwrap();
+        let error = read_bbox_annotation_config(&invalid_toml).unwrap_err();
+        assert_eq!(error.error_code(), "KCS-E-CONFIG-SCHEMA-001");
+
+        let valid_user = dir.path().join("valid-user.toml");
+        std::fs::write(
+            &valid_user,
+            "[markdownize.bbox_annotation]\nenabled = false\n",
+        )
+        .unwrap();
+        assert!(effective_bbox_annotation_policy(&invalid_toml, &valid_user).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ct4_bbox_001_config_read_rejects_symlink() {
+        use std::os::unix::fs::symlink;
+
+        use super::read_bbox_annotation_config;
+
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("target.toml");
+        let link = dir.path().join("link.toml");
+        std::fs::write(&target, "[markdownize.bbox_annotation]\nenabled = true\n").unwrap();
+        symlink(&target, &link).unwrap();
+
+        let error = read_bbox_annotation_config(&link).unwrap_err();
+        assert_eq!(error.error_code(), "KCS-E-STORE-CORRUPT-001");
     }
 
     #[test]

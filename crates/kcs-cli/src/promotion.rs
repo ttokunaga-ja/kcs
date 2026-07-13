@@ -380,7 +380,7 @@ fn plan_online_markdownize_promotion(
         return Ok(None);
     }
     selected.sort_by(|left, right| left.input_path.as_bytes().cmp(right.input_path.as_bytes()));
-    let effective_bbox_policy = bbox_annotation_enabled(repo);
+    let effective_bbox_policy = bbox_annotation_enabled(repo)?;
     let active_profile_hash = selected
         .iter()
         .rev()
