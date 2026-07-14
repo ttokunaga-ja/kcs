@@ -663,6 +663,14 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     marginal source/quota/cohort plan; those source rows must be embedded unchanged into full, which adds
     sources to reach its own exact marginals.  Thus pilot must become a true source-ID/byte subset without
     post-hoc re-quota.
+    The model is twenty independent synthetic people, not one person with twenty use-case folders.  One
+    replay therefore has twenty persona-PC roots, each with twelve primary plus eight persona-specific
+    secondary scopes and exactly 120,000 current contract chunks.  Three retained fresh-storage replays
+    are still the same twenty logical people, but physically contain sixty roots, 1,200 scopes, and
+    609,000 W0 source files (203,000 per replay).  Generation order is frozen plan, W0 folder/file build,
+    W0 offline index/attestation, W1--W5 edits and lifecycle operations, fresh-root replay from W0 without
+    copying a completed root or `.kcs`, then validation after all replays.  These counts are not a measured
+    capacity-feasibility claim.
     Tiny remains a
     separate topology/routing smoke without the formal density distribution.  Variant dictionaries, not
     family labels or source rows, must bind extension, media type, gate role, offline disposition, validator,
@@ -697,14 +705,26 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     Pilot cohort chunks P/X/Y/N/U are 480/1,200/720/480/9,120.  With a 70-chunk source cap and
     P/X/Y/N coverage across all twenty scopes, their independent source lower bounds are
     20/20/20/20/131, or 211 total.  The former p17 pilot had only 203 contributors and was impossible;
-    p08 had 211 with no headroom.  The physical `benchmark_stress_mix_v2` therefore changes p08
-    md/domain-binary from 10/2 to 11/1 percent and p17 from 3/15 to 5/13, yielding 219 pilot and
-    2,192 full contributors for both.  Suite md/domain-binary totals become 18,820/6,760 files.
+    p08 had 211 with no headroom.  The final physical `benchmark_stress_mix_v2` correction changes
+    p08 md/text-PDF/docx/pptx to 14/16/12/12, p11 to 5/19/11/8, p15
+    md/text-PDF/scan-PDF/docx to 7/23/5/17, and p17
+    md/text-PDF/scan-PDF/xlsx/domain-binary to 7/24/9/8/12 percent.  P02's domain split is
+    PCAP/JSONL.GZ 30/70 and p17's is IFCZIP/CDE-ZIP 40/60.  Pilot/full contributors become
+    267/2,672 for p08 and p17, and 268/2,680 for p11 and p15.  Suite family totals are
+    md 19,660, txt/log 19,210, code 10,440, structured 15,310, CSV/TSV 18,680, HTML/EML 14,430,
+    IPYNB 2,240, text PDF 29,680, scan PDF 11,200, DOCX 16,490, XLSX 15,270, PPTX 10,180,
+    image 11,380, media 2,150, and domain 6,680.
+    Gate-role totals for pilot/full/residual are respectively
+    6,925/69,236/62,311 contract, 6,040/60,414/54,374 incidental, and
+    7,335/73,350/66,015 raw-only.  The corresponding four density buckets are
+    731/1,707/2,498/1,989; 7,300/17,042/24,995/19,899; and
+    6,569/15,335/22,497/17,910.  Minimum global headroom is +27 pilot and +664 full;
+    minimum pilot scope lower headroom is p13 +56, while p17 is +76.
     The bound `kcs.persona.pc-joint-problem/v2` artifact materializes pilot, full, and coordinatewise
-    full-minus-pilot marginals and necessary feasibility checks.  Its canonical body is 744,081 bytes,
-    SHA-256 `384c95f550355b63443d7f5ca94dad2ed008ab7b24d6b8148a9504f613c29227`, bound to envelope
-    `6b5c7145881f2ab1e8c84fe033f667757dccf478b704e0731d543bfddfcddbac` and topology
-    `fc079fc8e0aaee0ae03a22fee349e0af8f2dfe18e1fed6d8bb05304643e4a958`.
+    full-minus-pilot marginals and necessary feasibility checks.  Its canonical body is 744,137 bytes,
+    SHA-256 `8551472e4993f21ff71f886b3f80b9b02410c409476d0be91d773db335907074`, bound to envelope
+    `1d49e79049b409ee5bd82d0b307db5055c2a58544df81858b77552ea82bff370` and topology
+    `204c9a136438c0dfff3718549c2fcb6009e6ccbe9debdd0cfe54bfaa4290b68f`.
     It contains no source rows, route, quota/cohort assignment, canonical allocation solution, or
     certificate, so all G0/write/history authority remains false.  Physical ratios are stress inputs,
     not observed user statistics; persona realism remains separately blocked by
@@ -757,8 +777,8 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     bounded canonical exact replay or a complete lower-bound/dual proof.  None of these semantics grants
     G0, rendering, write, or history authority.
 111. The first v2 solver-policy artifact is frozen only as the generic aggregate core, schema
-    `kcs.persona.pc-joint-solver-policy/v2`: 82,950 canonical bytes, SHA-256
-    `29046b5b5d60d25db51a670e597617bec07b7c4513bded39196bb1053ee52f41`.  It binds the envelope,
+    `kcs.persona.pc-joint-solver-policy/v2`: 83,004 canonical bytes, SHA-256
+    `2a6c169a5cd02b01e330abf0f3a828d0d947a2f66b18f19e97a682d2edd50857`.  It binds the envelope,
     topology, and joint necessary problem one-way; defines the A/C axes, hard aggregate equations,
     strict 16-component objective, checked 127-bit arithmetic, and provisional deterministic counters;
     and contains no route matrix, realism/source-intent refinement, source recipe, solution, proof, or
@@ -772,7 +792,7 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     hypotheses for OS/case/device metadata, locale/language weights, pinned timezone offsets,
     retention and mtime buckets, permission and placement weights, account counts, and exact
     duplicate/near/conflict/attachment marginal targets.  Its canonical body is 36,811 bytes,
-    SHA-256 `3f3239cdb7b7da954282b0e6224526ca66dbadd678dc705dde4d46340f0b46bf`.
+    SHA-256 `a32bbb0fd7c88c57205454d8555163ad97b2b1a3024e5a5d7f7234bf56766f05`.
     Full-suite targets are 5,080 exact duplicates, 13,230 near revisions, 1,560 conflict copies,
     5,690 standalone attachments, and 19,870 binary content-relation clusters; pilot is exactly one
     tenth.  Exact/near/conflict are mutually exclusive, binary, physical-member-disjoint relation
@@ -782,8 +802,8 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     logical-document scoring/search participation, the eight-axis ledger, independent review,
     source-intent refinement, G0, rendering, writing, and history authority all remain false.
 113. Persona-PC v2 variant identity/marginal completion is a separate non-authorizing sidecar,
-    schema `kcs.persona.pc-variant-catalog/v2`, canonical body 211,734 bytes, SHA-256
-    `9eb29e7dc52acddfb9e57249d88791d07de4a1dadfac949119980c58f9c11be8`.
+    schema `kcs.persona.pc-variant-catalog/v2`, canonical body 211,733 bytes, SHA-256
+    `abbe522ff37a9a091f28b7a230928fd598054498eb80cab99f08d21889f26cec`.
     It exactly projects all 71 variant identities and all 566 persona/family/variant tiny/pilot/full
     marginals, separates content MIME from current KCS path MIME, and assigns format-specific
     complexity units rather than collapsing EML, notebooks, tabular rows, HTML sections, and
@@ -794,9 +814,10 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     It reuses only format encoding/validator identity, is not a formal variant source row, and is always
     lane-local raw-only with requested/actual chunks zero.  OOXML and archive encodings are bounded
     containers limited to small/medium stress classes; large/tail require a non-container encoding.
-    Target-byte/quota feasibility formulas, deterministic
-    padding, all v2 renderers and validators, and production cross-language MIME goldens remain absent,
-    so every byte/complexity parameter-completion claim, source-level feasibility, G0, and execution/
+    An ID-free text renderer/validator and source-profile catalog now exist only as candidate local
+    byte/complexity checks.  Their source recipe profile is not bound, their vertical slice is incomplete,
+    and no production cross-language MIME golden or all-variant target-byte/quota feasibility exists.
+    Therefore every suite-level parameter-completion claim, source-level feasibility, G0, and execution/
     write/history authority remains false.  The shared upstream binder independently hashes canonical
     bodies, preserves the exact fixture identity tuple, pins the four upstream body sizes/digests,
     requires every authority map and the designated execution/proof denial fields false, and rejects
@@ -821,7 +842,7 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     renderer, filesystem, write, or history authority.
 115. The first complete route-affinity candidate is schema
     `kcs.persona.pc-route-affinity/v2`, 70,626 canonical bytes, SHA-256
-    `ddec88f59165a7b54ce71d87047a8ed4b521e1e1e240bbb08e42bdfc75a2be60`.
+    `e8a401193fc751ed3d7b2a47e3661202835579df8700392ce9fdfd30ad07c790`.
     It contains exactly the 541 full-active rows and 10,820 scope scores from the solver-policy
     axis, excludes the 25 declared hard-zero rows, and does not create rows for the 854
     persona/global-variant pairs outside the declared axis.  Every row has maximum score four in
@@ -834,11 +855,65 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
 116. Typed fact input is a separate per-person upstream leaf, schema
     `kcs.persona.pc-fact-graph/v2`.  The twenty leaves contain exactly four authored synthetic
     project/case graphs each: 80 graphs, 320 entities, 640 typed facts, and 80 revision chains in the
-    suite.  Bodies are 23,696--23,986 canonical bytes, 476,602 bytes total, and each is below the
-    1 MiB fact-graph subcap.  Identifiers are suite-synthetic, email uses `.invalid`, IP uses RFC
+    suite.  Bodies are 23,720--24,010 canonical bytes, 477,082 bytes total, and each is below the
+    1 MiB fact-graph subcap.  Revision prior facts are current only at W0 and history-only from W1;
+    their replacements are absent at W0 and current from W1, matching the W1 small-edit boundary.
+    That is the only currently typed revision boundary.  The future history-intent contract must model
+    W3 X/Y/N edits and the W5 N correction as surface/raw lifecycle edits whose events carry
+    `changed_fact_ids=[]`.  Their resulting source versions must carry forward the exact prior visible set
+    in `present_fact_ids`, so those
+    versions may remain semantic expected answers for carried facts.  A semantic change requires a
+    new wave-visible typed revision chain, non-empty changed membership, and binding before G0.
+    Identifiers are suite-synthetic, email uses `.invalid`, IP uses RFC
     5737 space, and time is a fixed logical reference with non-negative offsets.  Each leaf binds
     the core four artifacts and exact realism profile one-way, but deliberately contains no intent,
     answer, distractor, query, source/materialization/chunk ID, path, rendered prose, rank, score,
     environment, host, network, or runtime-random input.  Fact inventory completion does not imply
     semantic answer membership, query specification, source intent, fact-oracle closure, G0,
     solver, renderer, write, or history authority.
+    M3-3 additionally requires at least ten distinct searchable restore logical documents per person,
+    at least 200 suite-wide with no cross-person document/intent reuse and one-to-one query mapping,
+    each bound through intent key, logical-document key, restore materialization/event, and expected
+    source/chunk oracle membership.  Quota-zero/raw-only structural sentinels, multiple paths for one
+    logical document, and restored-but-unindexed files do not satisfy that requirement.
+117. Persona-PC v2 capacity has two non-interchangeable boundaries.  The source-tree envelope contains
+    only managed source files and the authored directories leading to 400 leaf scopes; it excludes every
+    `.kcs` object/index/history store, device registry, plan/ledger/receipt, workspace, staging, and
+    transient artifact.  The 512 MiB/person and 10 GiB/W0-replay, 25 GiB/W5-final-replay, and
+    27 GiB/pre-purge-replay values remain uncalibrated source-tree renderer candidates only.  The former
+    88 GiB sum is therefore not a root-bound hard cap or Go result.  Root-bound capacity includes all
+    retained replay roots and the in-progress peak on the destination filesystem and has no approved
+    fixed full byte or inode cap.  Under the campaign-time-revalidated
+    `scope-local-regular-file-per-distinct-chunk-v1` storage assumption, a formal-success-conditioned
+    pilot W0 already requires at least
+    20,300 source-file, 1,097 authored-directory, and 240,000 current-chunk-CAS inodes: 261,397 total
+    before raw/prepared/normalized/tree/commit CAS, chunk fanout directories, SQLite/FTS/WAL, registries,
+    ledgers, staging, transient, or history.  Thus the old 250,000 pilot inode cap and the equivalent
+    1,000,000-free/750,000-reserve condition are impossible and superseded.  Pilot readback must bind
+    per-person `raw/cas/index/history/staging/transient` allocated bytes, additional inodes, basis units,
+    plan hash, filesystem device, and allocation unit.  Full projection uses integer rational scaling
+    with 5/4 headroom, retains all replay roots, takes the maximum of sequential per-person staging and
+    coexisting all-person W5 transient peaks, and adds at least one destination allocation unit per
+    projected inode.  If runtime revalidation rejects that storage assumption, these inode floors cannot
+    support Go/No-Go and the capacity gate fails closed until the observed model is re-contracted.  A
+    separate destination readback binds free bytes/inodes, caps, reserves, and suite
+    manifest.  Until both actual readers and v2 bindings exist, caller-declared projections cannot clear
+    `formal_capacity_gate_satisfied=false` or authorize a physical write.
+118. The current non-authorizing persona-PC v2 planning core is pinned as: envelope 71,979 bytes / SHA-256
+    `1d49e79049b409ee5bd82d0b307db5055c2a58544df81858b77552ea82bff370`; topology
+    134,195 / `204c9a136438c0dfff3718549c2fcb6009e6ccbe9debdd0cfe54bfaa4290b68f`;
+    joint problem 744,137 / `8551472e4993f21ff71f886b3f80b9b02410c409476d0be91d773db335907074`;
+    solver policy 83,004 / `2a6c169a5cd02b01e330abf0f3a828d0d947a2f66b18f19e97a682d2edd50857`;
+    realism 36,811 / `a32bbb0fd7c88c57205454d8555163ad97b2b1a3024e5a5d7f7234bf56766f05`;
+    variant catalog 211,733 / `abbe522ff37a9a091f28b7a230928fd598054498eb80cab99f08d21889f26cec`;
+    and route candidate 70,626 /
+    `e8a401193fc751ed3d7b2a47e3661202835579df8700392ce9fdfd30ad07c790`.
+    The candidate `kcs.persona.pc-overlay-contract/v2`, ID-free text renderer/validator, and source-profile
+    catalog are deliberately outside this pinned planning core.  They bind no overlay instances or exact
+    placement, have `source_recipe_profile_id=not-bound`, do not complete a source-profile vertical slice,
+    and grant no renderer, filesystem, KCS, history, capacity, or write authority.  Overlay membership,
+    formal profile/upstream binding, source-intent and source-level exact allocation, production MIME
+    goldens, semantic oracle/query closure, and the G0 root remain explicit blockers.
+    Scenario-specific blockers also remain: searchable cross-scope rename/move for M3-2; text/scan-PDF
+    renderer, independent validator, and format anchor minima for M3-1; and a compiled mapping from v2
+    logical-document expectations to the formal MVP distinct `(raw_hash, section)` relevance metric.

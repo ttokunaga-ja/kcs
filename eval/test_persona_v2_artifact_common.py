@@ -144,23 +144,23 @@ class PersonaV2ArtifactCommonTests(unittest.TestCase):
         expected = [
             (
                 "envelope",
-                70_835,
-                "6b5c7145881f2ab1e8c84fe033f667757dccf478b704e0731d543bfddfcddbac",
+                71_979,
+                "1d49e79049b409ee5bd82d0b307db5055c2a58544df81858b77552ea82bff370",
             ),
             (
                 "topology",
-                134_141,
-                "fc079fc8e0aaee0ae03a22fee349e0af8f2dfe18e1fed6d8bb05304643e4a958",
+                134_195,
+                "204c9a136438c0dfff3718549c2fcb6009e6ccbe9debdd0cfe54bfaa4290b68f",
             ),
             (
                 "joint-problem",
-                744_081,
-                "384c95f550355b63443d7f5ca94dad2ed008ab7b24d6b8148a9504f613c29227",
+                744_137,
+                "8551472e4993f21ff71f886b3f80b9b02410c409476d0be91d773db335907074",
             ),
             (
                 "joint-solver-policy",
-                82_950,
-                "29046b5b5d60d25db51a670e597617bec07b7c4513bded39196bb1053ee52f41",
+                83_004,
+                "2a6c169a5cd02b01e330abf0f3a828d0d947a2f66b18f19e97a682d2edd50857",
             ),
         ]
         first = bindings.build_upstream_bindings()

@@ -14,18 +14,18 @@ from eval import persona_v2_topology as topology
 
 
 EXPECTED_ENVELOPE_SHA256 = (
-    "6b5c7145881f2ab1e8c84fe033f667757dccf478b704e0731d543bfddfcddbac"
+    "1d49e79049b409ee5bd82d0b307db5055c2a58544df81858b77552ea82bff370"
 )
 EXPECTED_TOPOLOGY_SHA256 = (
-    "fc079fc8e0aaee0ae03a22fee349e0af8f2dfe18e1fed6d8bb05304643e4a958"
+    "204c9a136438c0dfff3718549c2fcb6009e6ccbe9debdd0cfe54bfaa4290b68f"
 )
 EXPECTED_PROBLEM_SHA256 = (
-    "384c95f550355b63443d7f5ca94dad2ed008ab7b24d6b8148a9504f613c29227"
+    "8551472e4993f21ff71f886b3f80b9b02410c409476d0be91d773db335907074"
 )
 EXPECTED_POLICY_SHA256 = (
-    "29046b5b5d60d25db51a670e597617bec07b7c4513bded39196bb1053ee52f41"
+    "2a6c169a5cd02b01e330abf0f3a828d0d947a2f66b18f19e97a682d2edd50857"
 )
-EXPECTED_POLICY_BYTES = 82_950
+EXPECTED_POLICY_BYTES = 83_004
 
 
 def _reference_components(*, source_rows, scope_chunks, cohort_chunks):
@@ -119,21 +119,21 @@ class PersonaV2JointSolverPolicyTests(unittest.TestCase):
                     "artifact_kind": envelope.ARTIFACT_KIND,
                     "artifact_schema": envelope.ARTIFACT_SCHEMA,
                     "artifact_schema_version": 2,
-                    "canonical_bytes": 70_835,
+                    "canonical_bytes": 71_979,
                     "sha256": EXPECTED_ENVELOPE_SHA256,
                 },
                 "joint_problem": {
                     "artifact_kind": problem.ARTIFACT_KIND,
                     "artifact_schema": problem.ARTIFACT_SCHEMA,
                     "artifact_schema_version": 2,
-                    "canonical_bytes": 744_081,
+                    "canonical_bytes": 744_137,
                     "sha256": EXPECTED_PROBLEM_SHA256,
                 },
                 "topology": {
                     "artifact_kind": topology.ARTIFACT_KIND,
                     "artifact_schema": topology.ARTIFACT_SCHEMA,
                     "artifact_schema_version": 2,
-                    "canonical_bytes": 134_141,
+                    "canonical_bytes": 134_195,
                     "sha256": EXPECTED_TOPOLOGY_SHA256,
                 },
             },

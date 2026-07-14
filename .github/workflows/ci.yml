@@ -22,6 +22,9 @@ jobs:
           eval.test_persona_v2_variant_catalog
           eval.test_persona_v2_route_affinity
           eval.test_persona_v2_fact_graph
+          eval.test_persona_v2_text_renderer_validator
+          eval.test_persona_v2_source_profile_catalog
+          eval.test_persona_v2_overlay_contract
 
   rust:
     runs-on: ubuntu-latest

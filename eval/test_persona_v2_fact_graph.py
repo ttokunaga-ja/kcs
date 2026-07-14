@@ -11,31 +11,31 @@ from eval import persona_v2_fact_graph_data as data
 
 
 EXPECTED_PERSONA_BINDINGS = (
-    ("p01", 23_741, "e7e0cd34834f375939406ddf4ff4069423d6350eedb1e902f84d1f0e8c6e0898"),
-    ("p02", 23_696, "d90a7daad5be77053dea21d736994beb171916e53469fa6d2235c1a4b7e2acaa"),
-    ("p03", 23_810, "8e0b53c5aa4a066e240075aad239dee6100ce7617069048007e5d93faff02dd2"),
-    ("p04", 23_892, "a7a50c9d29a583ff791e1328aba85e5d090a8d9e3553cf83df2533187a3aee8e"),
-    ("p05", 23_862, "d6ee7f454e96253c34b33022639387b3f69f9fa239f5148499272ffb847800ba"),
-    ("p06", 23_850, "987aac5c9d653eae04faf712ebec3db4c463f4e2a0d24d7dc1882179ca94a901"),
-    ("p07", 23_986, "a615e10c2f83a9e54928feaeefd40fe125fcd25ab66fb8384422fac92d5bb5bb"),
-    ("p08", 23_835, "0b3087d4502710c2fe62708c46432c0f1e25f379f2b6fdcaf09ad8f7f2b6a528"),
-    ("p09", 23_869, "d971fc356b4ab092db8bbf987983ea780204eec818c9bfc20ce4c34ddb573b09"),
-    ("p10", 23_827, "566183211cc2fc4545e80f19b091f13f06393a3bb78927486c1faa0a6b96830b"),
-    ("p11", 23_765, "943c1d68bac64c7475555d3f9698db7f66b0d1ea6e6649358196eb65949bbc33"),
-    ("p12", 23_846, "c3fefd618aba43fcbdff06fddeea6485c73a82ae6301743fd0bfbb1517e80d53"),
-    ("p13", 23_818, "a13dc4b0a496502c255cec9f2d1b1099a979f06d322a20a320beff54b5b50396"),
-    ("p14", 23_763, "e522ab8596b1edc58831d62e2735f6f3655003d88155e7138935b1c5bd02511e"),
-    ("p15", 23_861, "e7e43f8f2a547e18d6f416f92e6bba1da0dce858239317c5d6b5b6376646e052"),
-    ("p16", 23_899, "43bac5d71ea6d1a35089d07bb6fa19ec5270fc916e91060ce1776b3f5f18cf61"),
-    ("p17", 23_815, "b3ebae797bbd17e49ff62162bc3bb613a9486b9bad16bd8e6097c41b07529d62"),
-    ("p18", 23_817, "dd6df0fa2b76916df6873ab433bb50ba4b008d65755dd73b99b0c10d09b1093a"),
-    ("p19", 23_779, "bf23fed3a0f440db8d49fff8468bba2d60810aedaeac2467d29dd8208770dd28"),
-    ("p20", 23_871, "4c923c6a96e2b821304d98698bea8dbd9c6abec8b07be6dbad0acc960d06f2db"),
+    ("p01", 23_765, "59679aa5e52f1f9db9e9e5ede1066e68cba1b3ff6c4d2c6dd9f9df47c56ee36d"),
+    ("p02", 23_720, "62eb9b71f9f3a35afb5da00eee67406123d2eb7707b966c447df64bb2ae2a27f"),
+    ("p03", 23_834, "b6f87f235f87d449c8d4660086d79edb47572ed9c54a8f3c97e7eeaa6d7f7a61"),
+    ("p04", 23_916, "96c332ec293085f1594f56f55e7a9b4b340f39392ec4a0d38b53dd2d1edc3192"),
+    ("p05", 23_886, "be6d50dd17ca38555504b7a0fc3b854e48cb1b80da21498a5aca9f9595785f53"),
+    ("p06", 23_874, "30db27b0cbff11701054f7bec194e5d00e6d5ca3484fffcf34c5841dee84b6e0"),
+    ("p07", 24_010, "f447204c98c6c5fb4fe0f95b80fb033f9878654b94df19b0e4aab162d3916abb"),
+    ("p08", 23_859, "1cd082aa37959990361e7b5b3a13af17fb27e9d2532f086e9f5c3518fd9fe66e"),
+    ("p09", 23_893, "ba51f5ba4080604c82b3e59f9aba640a8edbd4aed4d136708aeac38346abb8f3"),
+    ("p10", 23_851, "e2b1b8cf2cbf69c14dd0df665ea9c90170dad7bd0a7f59e6f5ccaf9d113780b0"),
+    ("p11", 23_789, "93131519cfd58bea8a5b59758fdb568aba9b8f26a306f65b8221d81b4a2c79c9"),
+    ("p12", 23_870, "410f550b51d4eff69add866328a5ce5e4b13c2fd6d445b4fb6b36e375084d585"),
+    ("p13", 23_842, "2f16696b56390490ab4e02e0cff3f20f0ec54159ad83fd7a5c5d2f2f5efb4d47"),
+    ("p14", 23_787, "014281d9430db1484f9a7040684c21c49c111da9db96bc44639a5038c8e4ab77"),
+    ("p15", 23_885, "5a7ce55ea697304f9fda019f7d8d0e58e543b0b1e7b0bb9987d50e07cf55134a"),
+    ("p16", 23_923, "190e5902b1d3f60039ec0a89dc87c7e8c6bb7efca816612b8c21f45a9fddff6e"),
+    ("p17", 23_839, "b77beb7fd6cb6ff64275b35e9425ff08ee5d1a9c7ef75bb7cd69416b60fae6ad"),
+    ("p18", 23_841, "4893c3ed0e5aa5281f566cc7063fd2b1a3a7b2f34fbabf6f0c7cb55f6a26ec0a"),
+    ("p19", 23_803, "38201bd5a1bab363abe9c7503e2da07abd585b0ccb73aa4a280b89e2cf40f793"),
+    ("p20", 23_895, "684712c3e78d974272d3cbb81265a63bcc830375ce924367bf7c2c6727eff4a3"),
 )
-EXPECTED_SUITE_CANONICAL_BYTES = 476_602
+EXPECTED_SUITE_CANONICAL_BYTES = 477_082
 EXPECTED_SUITE_SUMMARY_BYTES = 2_566
 EXPECTED_SUITE_SUMMARY_SHA256 = (
-    "28e9273c3c69b8982ea0ec5553865ed99ace0845ff28295af3c969169ee7b0f7"
+    "edf6dad5a7dc1057384f8c47a866fd86eaddd3823ade10aa4d24c86db42a6def"
 )
 
 
@@ -213,11 +213,11 @@ class PersonaV2FactGraphTests(unittest.TestCase):
                 self.assertNotEqual(old["typed_value"], new["typed_value"])
                 self.assertEqual(
                     [row["state"] for row in old["visibility_by_checkpoint"]],
-                    ["current", "current"] + ["history-only"] * 5,
+                    ["current"] + ["history-only"] * 6,
                 )
                 self.assertEqual(
                     [row["state"] for row in new["visibility_by_checkpoint"]],
-                    ["absent", "absent"] + ["current"] * 5,
+                    ["absent"] + ["current"] * 6,
                 )
                 for fact in graph["facts"]:
                     self.assertEqual(
@@ -327,6 +327,13 @@ class PersonaV2FactGraphTests(unittest.TestCase):
         graph = copy.deepcopy(self.values[0]["graphs"][0])
         by_id = {row["fact_id"]: row for row in graph["facts"]}
         by_id[old_id]["visibility_by_checkpoint"][2]["state"] = "current"
+        with self.assertRaises(fact_graph.PersonaV2FactGraphError):
+            fact_graph._validate_graph(graph)
+
+        graph = copy.deepcopy(self.values[0]["graphs"][0])
+        by_id = {row["fact_id"]: row for row in graph["facts"]}
+        by_id[old_id]["visibility_by_checkpoint"][1]["state"] = "current"
+        by_id[new_id]["visibility_by_checkpoint"][1]["state"] = "absent"
         with self.assertRaises(fact_graph.PersonaV2FactGraphError):
             fact_graph._validate_graph(graph)
 

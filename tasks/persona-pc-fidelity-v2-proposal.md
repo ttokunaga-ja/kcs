@@ -3,6 +3,9 @@
 Status: proposal only。envelope marginals、exact topology、pilot/full/full-minus-pilotのjoint必要条件problem、
 generic aggregate-core solver-policy、20人別realism profile/overlay marginal targets、71 variant identityと
 566 persona marginalのcatalog、541-row route候補、20人x4 typed fact-graph leafまで実装済みだが未承認である。
+overlay contract、ID-free text renderer/validator、source-profile catalogも候補実装があるが、いずれも
+non-authoritativeで、instance、source recipe profile binding、vertical-slice completionを証明しない。
+overlayの8軸ledgerはaxis draftであり、byte/host-metadata reconciliationとpersona-local domainは未完成である。
 overlay membership、独立route review receipt、source-intent、semantic oracle/query、source-level exact allocation、
 G0 rootは未実装である。
 現行`kcs-persona-pc-v1`を黙って変更せず、採用時はfixture、renderer、plan、manifestをすべてv2へ上げる。
@@ -12,7 +15,7 @@ G0のversion境界、pilot projection、joint solver、source recipe、negative 
 sidecar化済みで必要条件も全20人で通過したが、joint solver/source recipe/oracle完了までは
 `g0_contract_frozen=false`である。
 
-Date: 2026-07-14
+Date: 2026-07-15
 
 ## 1. 結論
 
@@ -281,16 +284,16 @@ p10/p14のfile数を増やしても百分率は維持する。
 | p05 | 8 | 5 | 6 | 14 | 20 | 5 | 5 | 5 |
 | p06 | 6 | 6 | 3 | 5 | 15 | 2 | 3 | 18 |
 | p07 | 12 | 10 | 0 | 4 | 3 | 5 | 0 | 25 |
-| p08 | 11 | 4 | 1 | 5 | 8 | 8 | 0 | 13 |
+| p08 | 14 | 4 | 1 | 5 | 8 | 8 | 0 | 16 |
 | p09 | 8 | 15 | 0 | 4 | 8 | 3 | 0 | 10 |
 | p10 | 4 | 4 | 0 | 2 | 8 | 6 | 0 | 18 |
-| p11 | 3 | 4 | 0 | 2 | 5 | 25 | 0 | 16 |
+| p11 | 5 | 4 | 0 | 2 | 5 | 25 | 0 | 19 |
 | p12 | 15 | 20 | 4 | 15 | 12 | 12 | 0 | 5 |
 | p13 | 3 | 4 | 0 | 1 | 2 | 14 | 0 | 28 |
 | p14 | 3 | 3 | 1 | 4 | 15 | 5 | 0 | 13 |
-| p15 | 4 | 5 | 0 | 2 | 7 | 15 | 0 | 20 |
+| p15 | 7 | 5 | 0 | 2 | 7 | 15 | 0 | 23 |
 | p16 | 5 | 6 | 1 | 4 | 10 | 4 | 1 | 24 |
-| p17 | 5 | 4 | 0 | 2 | 5 | 4 | 0 | 20 |
+| p17 | 7 | 4 | 0 | 2 | 5 | 4 | 0 | 24 |
 | p18 | 6 | 12 | 2 | 6 | 15 | 3 | 0 | 18 |
 | p19 | 8 | 5 | 0 | 2 | 5 | 5 | 0 | 20 |
 | p20 | 8 | 18 | 1 | 3 | 8 | 10 | 0 | 16 |
@@ -304,16 +307,16 @@ p10/p14のfile数を増やしても百分率は維持する。
 | p05 | 1 | 3 | 15 | 4 | 3 | 0 | 6 |
 | p06 | 8 | 8 | 8 | 5 | 9 | 0 | 4 |
 | p07 | 20 | 10 | 1 | 2 | 6 | 1 | 1 |
-| p08 | 3 | 15 | 8 | 15 | 7 | 1 | 1 |
+| p08 | 3 | 12 | 8 | 12 | 7 | 1 | 1 |
 | p09 | 4 | 12 | 4 | 8 | 15 | 7 | 2 |
 | p10 | 5 | 12 | 18 | 18 | 3 | 0 | 2 |
-| p11 | 4 | 14 | 7 | 10 | 5 | 3 | 2 |
+| p11 | 4 | 11 | 7 | 8 | 5 | 3 | 2 |
 | p12 | 1 | 3 | 2 | 1 | 7 | 1 | 2 |
 | p13 | 15 | 22 | 3 | 2 | 3 | 0 | 3 |
 | p14 | 8 | 8 | 27 | 7 | 3 | 0 | 3 |
-| p15 | 8 | 20 | 8 | 3 | 5 | 1 | 2 |
+| p15 | 5 | 17 | 8 | 3 | 5 | 1 | 2 |
 | p16 | 12 | 10 | 8 | 5 | 6 | 1 | 3 |
-| p17 | 12 | 8 | 10 | 4 | 12 | 1 | 13 |
+| p17 | 9 | 8 | 8 | 4 | 12 | 1 | 12 |
 | p18 | 6 | 8 | 10 | 3 | 5 | 0 | 6 |
 | p19 | 8 | 15 | 7 | 12 | 8 | 3 | 2 |
 | p20 | 10 | 8 | 2 | 2 | 8 | 4 | 2 |
@@ -322,16 +325,16 @@ v2の203,000 filesへ適用したsuite集計は次である。
 
 | family | files | 比 | family | files | 比 |
 | --- | ---: | ---: | --- | ---: | ---: |
-| md | 18,820 | 9.27% | txt/log | 19,210 | 9.46% |
+| md | 19,660 | 9.68% | txt/log | 19,210 | 9.46% |
 | code | 10,440 | 5.14% | structured | 15,310 | 7.54% |
 | csv/tsv | 18,680 | 9.20% | html/eml | 14,430 | 7.11% |
-| ipynb | 2,240 | 1.10% | text PDF | 28,580 | 14.08% |
-| scan PDF | 11,680 | 5.75% | docx | 17,270 | 8.51% |
-| xlsx | 15,430 | 7.60% | pptx | 10,620 | 5.23% |
+| ipynb | 2,240 | 1.10% | text PDF | 29,680 | 14.62% |
+| scan PDF | 11,200 | 5.52% | docx | 16,490 | 8.12% |
+| xlsx | 15,270 | 7.52% | pptx | 10,180 | 5.01% |
 | image | 11,380 | 5.61% | media | 2,150 | 1.06% |
-| domain binary | 6,760 | 3.33% | total | 203,000 | 100.00% |
+| domain binary | 6,680 | 3.29% | total | 203,000 | 100.00% |
 
-表示比の合計は小数第2位丸めにより99.99%になるが、正本は上のexact file countsであり、
+表示比の合計は小数第2位丸めの影響を受けるが、正本は上のexact file countsであり、
 203,000を分母にした丸め前合計は100%である。
 
 ### 4.1 120,000 chunksへ寄与するfileの分離
@@ -350,30 +353,31 @@ joint solverで割り当てる。
 | p05 | 2,610 | 5,550 | 3,840 | 46.0 |
 | p06 | 2,424 | 2,216 | 3,360 | 49.5 |
 | p07 | 3,115 | 1,015 | 2,870 | 38.5 |
-| p08 | 2,192 | 1,808 | 4,000 | 54.7 |
+| p08 | 2,672 | 1,808 | 3,520 | 44.9 |
 | p09 | 2,565 | 1,755 | 4,680 | 46.8 |
 | p10 | 2,728 | 1,892 | 6,380 | 44.0 |
-| p11 | 2,180 | 3,320 | 4,500 | 55.0 |
+| p11 | 2,680 | 3,320 | 4,000 | 44.8 |
 | p12 | 4,960 | 8,320 | 2,720 | 24.2 |
 | p13 | 2,380 | 1,260 | 3,360 | 50.4 |
 | p14 | 2,464 | 3,256 | 7,280 | 48.7 |
-| p15 | 2,200 | 2,040 | 3,760 | 54.5 |
+| p15 | 2,680 | 2,040 | 3,280 | 44.8 |
 | p16 | 2,736 | 1,664 | 3,600 | 43.9 |
-| p17 | 2,192 | 1,008 | 4,800 | 54.7 |
+| p17 | 2,672 | 1,008 | 4,320 | 44.9 |
 | p18 | 3,768 | 3,672 | 4,560 | 31.8 |
 | p19 | 2,835 | 1,215 | 4,950 | 42.3 |
 | p20 | 3,670 | 2,730 | 3,600 | 32.7 |
 
 旧p17 pilotは203 contributor sourcesしかなく、70 chunks/source上限とP/X/Y/N全20 scope coverageから
-導く人物別global cohort下限211 sourcesを満たせなかった。旧p08も211で余裕0だった。このためp08は
-domain binary 1 point、p17は2 pointsをraw-onlyからmd contributorへ移し、両者をpilot 219 / full 2,192
-sourcesへ変更した。これは利用実態の校正ではなく、history cohortを成立させるfeasibility correctionである。
+導く人物別global cohort下限211 sourcesを満たせなかった。旧p08も211で余裕0だった。最終補正では
+p08/p11/p15/p17のoffice/PDF中心のraw-only比を一部text PDF/Markdown contributorへ移し、pilot/fullを
+p08=267/2,672、p11=268/2,680、p15=268/2,680、p17=267/2,672 contributorsとした。これは利用実態の
+校正ではなく、1人のPC内で検索対象を十分に持たせ、history cohortを成立させるfeasibility correctionである。
 
 | profile | physical | contributor | incidental | raw-only |
 | --- | ---: | ---: | ---: | ---: |
-| pilot | 20,300 | 6,731 | 6,040 | 7,529 |
-| full | 203,000 | 67,296 | 60,414 | 75,290 |
-| full-minus-pilot | 182,700 | 60,565 | 54,374 | 67,761 |
+| pilot | 20,300 | 6,925 | 6,040 | 7,335 |
+| full | 203,000 | 69,236 | 60,414 | 73,350 |
+| full-minus-pilot | 182,700 | 62,311 | 54,374 | 66,015 |
 
 これはplanned gate-role projectionであり、実rootの検索可能性を証明しない。offline index後にactual chunksを
 role別・variant別に読み戻し、contract exact、incidental cap内、raw-only zeroを別々にattestする。
@@ -457,7 +461,7 @@ exact整数へ割り当てる。単に拡張子だけを付け替えたbytesは�
 | id | domain binary family内比 |
 | --- | --- |
 | p01 | canonical source-export ZIP 70 / USTAR 30 |
-| p02 | PCAP 70 / canonical JSONL.GZ 30 |
+| p02 | PCAP 30 / canonical JSONL.GZ 70 |
 | p03 | PCAP 40 / evidence ZIP 60 |
 | p04 | valid NPZ 70 / model-metadata ZIP 30 |
 | p05 | warehouse ZIP 60 / CSV.GZ 40 |
@@ -472,7 +476,7 @@ exact整数へ割り当てる。単に拡張子だけを付け替えたbytesは�
 | p14 | ERP CSV.GZ 60 / close-package ZIP 40 |
 | p15 | ATS ZIP 60 / HRIS JSONL.GZ 40 |
 | p16 | synthetic DICOM Part-10 70 / EDC ZIP 30 |
-| p17 | IFCZIP 70 / CDE ZIP 30 |
+| p17 | IFCZIP 40 / CDE ZIP 60 |
 | p18 | QMS ZIP 60 / PLM USTAR 40 |
 | p19 | course-package ZIP 70 / LMS USTAR 30 |
 | p20 | FOIA ZIP 70 / synthetic source-drop USTAR 30 |
@@ -581,12 +585,20 @@ scope-set参照だけが決める。
 `persona_id+variant_id`でjoinし、表示位置やfiltered row番号でzipしない。aggregateの最終tie-breakに
 hash-spreadは使わず、domain-separated hashは解の確定後のsource/materialization identityだけに使う。
 
-現在のpilot global下限余裕はp11の+7が最小、p08/p17が+8、p15が+9である。scope-boundではp17の
-lower headroomが28、minimum scope spanが3、upper側はp07の388が最小である。joint必要条件problemは
+現在のpilot global下限余裕は最小でも+27、fullでは+664である。scope-boundのpilot lower headroomは
+p13の+56が最小で、p17は+76、upper側はp07の+388が最小である。joint必要条件problemは
 全20人のpilot/full/full-minus-pilotで通過したが、source rows、route、quota/cohort assignmentを含まず、
 full-minus-pilotもcoordinatewise residualにすぎない。したがってaggregate cell subset、source-ID subset、
 materialization subset、rendered-byte subsetのいずれも未証明であり、canonical allocation solutionの
 証明でもない。
+
+suite-wideのdensity-source exact totalsも人物別rounding後の正本として別に固定する。
+
+| profile | 1-4 | 5-20 | 21-50 | 51-70 | total contributors |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| pilot | 731 | 1,707 | 2,498 | 1,989 | 6,925 |
+| full | 7,300 | 17,042 | 24,995 | 19,899 | 69,236 |
+| full-minus-pilot | 6,569 | 15,335 | 22,497 | 17,910 | 62,311 |
 
 PDF pages、Office member数、attachment数、raw bytesはchunk quotaとは別fieldにする。
 
@@ -599,13 +611,13 @@ PDF pages、Office member数、attachment数、raw bytesはchunk quotaとは別f
 | PPTX | 1-40 slides | 41-200 slides |
 | image/media/domain | ordinary rawを4 KiB-512 KiB、tailは最大16 files/person・1-4 MiB | 128 KiB-100 MiB |
 
-formal W0 source treeの提案上限は512 MiB/personかつ10 GiB/replayである。W5 finalは
-1.25 GiB/personかつ25 GiB/replay、pre-purge peakは1.35 GiB/personかつ27 GiB/replayを
-上限候補にする。各person上限と20人合計上限を同時に満たさなければならない。
-3 rootsを保持するformal suite、plan/ledger/tempを含む提案hard capは88 GiBとする。ただし、これは
-completed root 25+25 GiB、進行中rootのpre-purge 27 GiB、plan/ledger/temp/supervisor 11 GiBの
-合計上限である。pilot実測前の承認ではない。raw、CAS、SQLite/FTS/WAL、history、staging、inodeをpilotで測り、
-root-bound capacity receiptが上限内と証明するまでfull writeはblockedのままにする。
+formal W0の512 MiB/personかつ10 GiB/replay、W5 finalの1.25 GiB/personかつ25 GiB/replay、
+pre-purgeの`floor(27 GiB / 20)`/personかつ27 GiB/replayは、managed source filesとauthored scope
+directoriesだけを数える**source-tree envelope候補**とする。`.kcs`、CAS、SQLite/FTS/WAL、registry、
+plan/ledger/receipt、staging/transient/history、共有workspaceを含む**root-bound capacity**とは別境界である。
+旧88 GiBはsource-tree候補25+25+27 GiBとworkspace仮置き11 GiBを足しただけなので、root-bound hard capや
+Go証拠としては廃止する。fullの固定byte/inode capはなく、pilotのcomponent別allocated-block/inode実測と
+actual destination readbackから25% headroom込みで導出するまでfull writeをblockedのままにする。
 
 byte-stressは1 replay、W0-only、20人×64 raw-only filesとする。1人あたりsmall 32×128 KiB、
 medium 16×2 MiB、large 12×32 MiB、tail 4×80 MiBでpayload 740 MiB、receipt余裕込み
@@ -616,7 +628,8 @@ actual chunks 0である。expanded 8 MiB上限を持つOOXML/archive container 
 large/tailはnon-container encodingへ限定する。
 
 容量判定は`st_blocks`相当のallocated bytesを使い、hard link、clone、sparse、filesystem compressionで
-見かけだけの容量を作ることを禁止する。
+見かけだけの容量を作ることを禁止する。root-bound preflightはさらに、全projected inodeについてdestination
+allocation unit 1個分以上のallowanceを加える。
 
 ## 7. personaらしさをbytesへ束縛するsource recipe
 
@@ -670,6 +683,14 @@ actual rank/score/latencyはさらに後段へ分ける。fact/oracle/query bund
 最大4,096 rows/4 MiB shard、全frame/manifest/overlay込み16 MiB/personとする。pilot shardはfullでも
 byte-identicalに再利用し、residual shardだけを追加する。
 
+現typed fact graphが表すrevision境界はW1だけである。したがって将来のhistory-intent契約では、現契約の
+W3 X/Y/N editとW5 N correctionをsemantic factの更新ではなくsurface/raw lifecycle editとし、eventの
+`changed_fact_ids=[]`を要求する。一方、新しいsource versionの`present_fact_ids`は直前versionの可視fact集合を
+exactに引き継がなければならないため、引き継いだfactを
+問うsemantic oracleの期待回答には利用できる。W3/W5で意味上のfact変更を評価したい場合は、そのwave
+visibilityを持つtyped revision chain、非空のchanged membership、intent membershipを先に追加し、
+fact/oracle input closureへ束縛してからG0を更新する。
+
 synthetic entityは`.invalid` email、RFC 5737 documentation IP、`*-syn-NNN`識別子だけを使う。
 hostのHOME、USER、hostname、環境credential、実PII/PHI、network/live syncを入力にしない。
 
@@ -681,9 +702,14 @@ restore/purgeをjournal順に適用、(5) 完成rootや`.kcs`をcopyせず同じ
 fresh buildし直す、を3 replayで行い、(6) 3 replay完成後に構造・比率・chunk/history・query・容量を
 検証する。W0をindexする前にeditを開始せず、最初のrootをtemplateとして複製しない。
 
+1 replayは20人の独立persona-PC root、各rootは12 primary + 8 secondary scopesとexact 120,000 current
+contract chunksを持つ。W0 sourceは203,000 files/replayであり、3 fresh replayを同時保持する場合は
+60 physical roots、1,200 scopes、609,000 W0 source filesになる。ただしこれはcardinality計画であり、
+後述のpilot component実測とdestination readbackがない限り容量feasibilityやwrite authorityを意味しない。
+
 | Gate | 実装・実行 | 合格条件 | 現在地 |
 | --- | --- | --- | --- |
-| G0 v2契約凍結 | 400 exact scope paths/load、family/extension/variant整数比、`persona_realism_profile`と8軸台帳、ambient spec、共有辞書、pre-solve source-intent recipe、size、fact/oracle、W0-W5 exact eventをversioned artifact graphとsuite descriptor hashへ固定 | generator変更前に全20人でcanonical rebuild。joint solverがrealism overlayを入力にfull contributor=120,000とpilot=12,000、scope routing、wave別incidental上限、plan 16 MiB上限をexactに解く | envelope、topology、joint必要条件、generic solver policy、realism marginal、variant catalog、route候補、typed fact leafまで実装。独立route review、membership/input closure/solution/root未実装 |
+| G0 v2契約凍結 | 400 exact scope paths/load、family/extension/variant整数比、`persona_realism_profile`と8軸台帳、ambient spec、共有辞書、pre-solve source-intent recipe、size、fact/oracle、W0-W5 exact eventをversioned artifact graphとsuite descriptor hashへ固定 | generator変更前に全20人でcanonical rebuild。joint solverがrealism overlayを入力にfull contributor=120,000とpilot=12,000、scope routing、wave別incidental上限、plan 16 MiB上限をexactに解く | envelope、topology、joint必要条件、generic solver policy、realism marginal、variant catalog、route候補、typed fact leafまで実装。overlay/text/source-profile候補はnon-authoritative。独立route review、membership/profile binding/input closure/solution/root未実装 |
 | G1 v2 tiny W0 | 20人×200 files/persona-PC rootを1人・1sourceずつstreaming作成 | 4,000 files/suite replay、2 fresh suite replays合計8,000 writes、400 scopes/replay、比率/path/hash/readback、inode非共有 | v1相当は済。v2回帰が必要 |
 | G2 pilot W0 | pilot-first solverのexact subset、計20,300 files、各人12,000 planned、init→offline index | 各人actual contributor 12,000、raw-only 0、planned/actualを別台帳化 | streaming writerと完全attestorが未実装 |
 | G3 pilot W1-W5 | immutable eventをmutation前に検証し、edit/rename/move/duplicate/derive/archive/delete/restore/purge | exactly-once journal、再開収束、waveごとのactual attestation、purge後index noop | v1相当のみ済。v2 allocator/manifest未実装 |
@@ -754,29 +780,77 @@ gold oracleをsource rendering前に凍結する。queryとanswer文書のrare t
 重複率をgateし、template exact lookupを拒否する。pooled平均だけで合格させず、同一seedの3 replay結果から
 20人一般への統計的一般化を主張しない。
 
+M3-3の`restored` 10問/personaを成立させるため、各人物に少なくとも10個の**distinct searchable restore
+logical documents**を予約する。各文書はcontract-contributorとしてrestore後にindexされ、`intent_key`、
+logical-document key、restore materialization/event、期待chunk/source membershipをsemantic oracleへ
+束縛する。quota-zero/raw-onlyのstructural restore sentinel、同一logical documentの複数path、未indexの
+復元fileはこの10件へ数えない。
+人物間でもlogical document/intentを再利用せず、suite minimumを200 distinct restore anchorsとし、
+200 restored queriesへ1対1で対応させる。
+`restored`はW5-finalの`current-restored`として、W4 delete、W5 restore、新materialization、destination
+index、lifecycle receiptまで一致させる。同じ内容の別current copyだけが見つかる偽PASSを拒否する。
+`deleted`は別の10問としてW5-finalの`final-deleted`を要求し、`--include-deleted`を検証する。
+
 ## 9. 容量判断
 
-2026-07-14時点の内蔵APFS空きは約143.83 GiBである。現行v1の35/40/20/5 binary byte仮説を
+2026-07-15の再測定時点の内蔵APFS空きは約146.00 GiBである。現行v1の35/40/20/5 binary byte仮説を
 20,090 filesへそのまま適用すると、binaryだけで最低約80.4 GiB/replay、約241.3 GiB/3 replayとなる。
 v2のimage+media+domainは20,290 filesなので、同じ旧envelopeなら最低約81.2 GiB/replay、
 約243.7 GiB/3 replayとなる。どちらもOffice、PDF、CAS、index、history、staging前に不足するため、
 旧size envelopeのfullはNo-Goである。
 
-内蔵volumeで最初に許可する候補は20人全員・1 replayのpilotだけとする。
+内蔵volumeで最初に検討できるのは20人全員・1 replayのpilotだけだが、現在の数値inode条件では実行を
+許可できない。次表は`scope-local-regular-file-per-distinct-chunk-v1`、すなわち各distinct `(scope, chunk)`が
+scope-local regular chunk objectを1つ持つstorage modelをcampaign直前にruntime再検証できた場合だけの
+formal-success-conditioned下限である。
+
+| profile | managed sources | authored path dirs | actual current chunk CAS | 保守的inode下限 |
+| --- | ---: | ---: | ---: | ---: |
+| pilot、1 replay | 20,300 | 1,097 | 240,000 | **261,397** |
+| full W0、1 replay | 203,000 | 1,097 | 2,400,000 | **2,604,097** |
+| full W0、3 retained replays | 609,000 | 3,291 | 7,200,000 | **7,812,291** |
+
+この下限はraw/prepared/normalized/tree/commit CAS、chunk CAS fanout directories、SQLite/FTS/WAL、
+400 `.kcs` stores/replay、20 device registries/replay、plan/ledger/receipt、staging、transient、historyを
+一切数えない。したがって旧`inode_cap=250,000`はpilot formal成功より小さく、`free=1,000,000`から
+`reserve=750,000`を引く同値条件も成立しないので廃止する。新しい数値inode cap/reserveは実測前に置かない。
+runtime再検証でstorage model仮定が不成立なら、261,397/2,604,097/7,812,291をGo/No-Go根拠に使わず
+capacity gateをfail closedにし、観測した実storage modelから再契約する。
+
+pilot実行候補のbyte条件は当面`byte_cap=32 GiB`、`reserve_bytes=96 GiB`、worker 1のままにできるが、
+これはroot-bound readbackを通過した場合だけのpreflight候補であり、write authorityではない。byte条件も
+componentが未知ならfail closedにする。人物`p`、component
+`i in {raw,cas,index,history,staging,transient}`について、canonical pilot planへ束縛された実測値を
+allocated bytes `B[p,i]`、additional inodes `N[p,i]`、basis units `U[p,i]`、full対象unitsを`T[p,i]`とし、
+次のinteger式で25% headroomを加える。basisは順に`final_active_files`、`transient_current_chunks`、
+`transient_current_plus_history_chunks`、`history_only_chunks`、`w0_physical_files`、
+`transient_extra_chunk_rows`である。
 
 ```text
-byte_cap                  = 32 GiB
-reserve_bytes             = 96 GiB
-inode_cap                 = 250,000
-explicit_free_inodes      = 1,000,000
-reserve_inodes            = 750,000
-concurrent_persona_worker = 1
+PB[p,i] = ceil(ceil(B[p,i] * T[p,i] / U[p,i]) * 5 / 4)
+PI[p,i] = ceil(ceil(N[p,i] * T[p,i] / U[p,i]) * 5 / 4)
+
+retained = sum_persona(raw + cas + index + history)
+payload_peak = replay_count * retained
+             + max(max_persona(staging), sum_persona(transient))
+inode_peak   = replay_count * retained_inodes
+             + max(max_persona(staging_inodes), sum_persona(transient_inodes))
+required_root_bytes = payload_peak + inode_peak * destination_allocation_unit
 ```
 
-formal fullの88 GiB候補とbyte-stress 15 GiB候補はpilot receipt後に再裁定する。現在のvolumeで理論上
-103 GiBに収まっても、40 GiB程度しかreserveが残らないため、自動的にGoにしない。正式実行環境は
-初期運用案として512 GiB以上の空きを持つ専用volumeを推奨し、最終必要量はpilotのallocated blocks、
-CAS/index/history amplification、W5 transient peak、25% headroomから決める。
+ここで`retained/staging/transient_inodes`はsource/directory/ledger等のexact known inodesへ上式の
+additional inodesを加えた値であり、unknownを0としてはならない。
+
+pilot measurement receiptはplan SHA、component basis/units、`st_blocks`相当のbytes/inodes、device/allocation
+unitを読み戻して束縛する。続くroot measurement/receiptはactual destination、free bytes/inodes、explicit
+caps/reserves、suite manifest SHAを束縛し、cap内かつ減算後reserve以上であることを検証する。現実装は
+caller-declared projectionのreadback要求までなので、これらのactual readerとv2 plan bindingが完成するまで
+`formal_capacity_gate_satisfied=false`、`authorizes_physical_write=false`である。
+
+formal fullの固定root-bound capは未設定である。512 GiB以上の空きを持つ専用volumeは初期運用候補にすぎず、
+最終必要量はpilotのallocated blocks、CAS/index/history amplification、W5 transient peak、25% headroom、
+actual destination reserveから決める。byte-stress 15 GiBは別laneのsource payload候補であり、formal suiteと
+同居させる場合はroot-bound projectionへ別componentとして加える。
 
 planner/renderer/writerは全person/bytesを同時保持せず、1 persona・1 sourceずつ処理する。
 既存のplanning上限はworker RSS 384 MiB、composer 128 MiB、process tree 512 MiB、worker同時1である。
@@ -802,34 +876,44 @@ v2で実装済み（planning only、non-authorizing）:
 - tiny/pilot/fullのphysical projectionとpilot/fullのscope chunk projection、必要source上下界とmargin regression
 - pilot/full/full-minus-pilotのfamily/variant/scope/density/cohort marginalsと必要条件problem。全20人でpass、
   `joint_allocation_proved=false`
-- envelope canonical 70,835 bytes、SHA-256
-  `6b5c7145881f2ab1e8c84fe033f667757dccf478b704e0731d543bfddfcddbac`
-- topology canonical 134,141 bytes、SHA-256
-  `fc079fc8e0aaee0ae03a22fee349e0af8f2dfe18e1fed6d8bb05304643e4a958`
-- joint必要条件problem canonical 744,081 bytes、SHA-256
-  `384c95f550355b63443d7f5ca94dad2ed008ab7b24d6b8148a9504f613c29227`
-- generic aggregate-core solver-policy sidecar canonical 82,950 bytes、SHA-256
-  `29046b5b5d60d25db51a670e597617bec07b7c4513bded39196bb1053ee52f41`。route matrix、
+- envelope canonical 71,979 bytes、SHA-256
+  `1d49e79049b409ee5bd82d0b307db5055c2a58544df81858b77552ea82bff370`
+- topology canonical 134,195 bytes、SHA-256
+  `204c9a136438c0dfff3718549c2fcb6009e6ccbe9debdd0cfe54bfaa4290b68f`
+- joint必要条件problem canonical 744,137 bytes、SHA-256
+  `8551472e4993f21ff71f886b3f80b9b02410c409476d0be91d773db335907074`
+- generic aggregate-core solver-policy sidecar canonical 83,004 bytes、SHA-256
+  `2a6c169a5cd02b01e330abf0f3a828d0d947a2f66b18f19e97a682d2edd50857`。route matrix、
   realism/source-intent refinement、solution/proofを含まず、実行・G0・write authorityはすべてfalse
 - strict post-policy canonical helperとone-way upstream binding。fixture identity、pinned body bytes/SHA、
   全authority mapと指定execution/proof denial、downstream/back-binding不在をfail closedで検査するが、
   framed loaderではない
 - `kcs.persona.pc-realism-profile/v2` canonical 36,811 bytes、SHA-256
-  `3f3239cdb7b7da954282b0e6224526ca66dbadd678dc705dde4d46340f0b46bf`。20人のprofile vectorと
+  `a32bbb0fd7c88c57205454d8555163ad97b2b1a3024e5a5d7f7234bf56766f05`。20人のprofile vectorと
   overlay marginal targetだけがcompleteで、membership/scoring/placement整数割当/8軸台帳/G0はfalse
-- `kcs.persona.pc-variant-catalog/v2` canonical 211,734 bytes、SHA-256
-  `9eb29e7dc52acddfb9e57249d88791d07de4a1dadfac949119980c58f9c11be8`。71 identityと566 marginal、
-  content MIME/KCS path MIME、形式別complexity/byte lane候補を束縛するが、全renderer/validatorと
-  source-level feasibility/G0はfalse
+- `kcs.persona.pc-variant-catalog/v2` canonical 211,733 bytes、SHA-256
+  `abbe522ff37a9a091f28b7a230928fd598054498eb80cab99f08d21889f26cec`。71 identityと566 marginal、
+  content MIME/KCS path MIME、形式別complexity/byte lane候補を束縛するが、catalog全variantの
+  renderer/validator/profile bindingとsource-level feasibility/G0はfalse
 - `kcs.persona.pc-route-affinity/v2` candidate canonical 70,626 bytes、SHA-256
-  `ddec88f59165a7b54ce71d87047a8ed4b521e1e1e240bbb08e42bdfc75a2be60`。541 active rows/
+  `e8a401193fc751ed3d7b2a47e3661202835579df8700392ce9fdfd30ad07c790`。541 active rows/
   10,820 scoresを束縛し、25 declared hard-zeroと854 out-of-domainを除外する。clone、secondary-only
   maximum、max/coverage機械違反は0だが、独立human review receiptはなくsolver/G0 authorityはfalse
 - 人物別`kcs.persona.pc-fact-graph/v2`を20 body実装。各4 graph/16 entities/32 typed facts/
-  4 revision chains、suite合計80/320/640/80、body 23,696--23,986 bytes、合計476,602 bytes。
+  4 revision chains、suite合計80/320/640/80、body 23,720--24,010 bytes、合計477,082 bytes。
+  prior factはW0だけcurrent、replacementはW1以降currentで、W1 small-edit境界と一致する。
   intent/query/answer/path/final ID/rank/score/proseは持たず、fact-oracle closureとquery specはfalse
+- `kcs.persona.pc-overlay-contract/v2`、ID-free text renderer/validator、source-profile catalogの候補実装。
+  これらは設計・局所検査用で、canonical G0 inputとして未採用である。overlay instances/placement、
+  `source_recipe_profile_id`、source-level exact allocation、production MIME golden、vertical-slice completion、
+  全authorityはfalseのままである
 
 v2で残るもの:
+
+pre-solve closureは`source-intent-origin-shard`、`fact-membership`、`history-intent`、`query-intent`、
+`semantic-oracle`、`fact-oracle-query-manifest`を別bodyとしてhashし、最後に`input-closure-manifest`が
+realism、review済route、source profile、overlayを含めて一方向に束縛する。query/oracleをsource rendererへ
+渡さず、source-intentが下流manifestを逆参照しない。
 
 - realism profileとvariant catalogの独立review receipt、overlay intent membership、placement整数割当、
   logical-document採点/検索参加、8軸台帳
@@ -841,6 +925,14 @@ v2で残るもの:
 - aggregate + source-intent refinementのcanonical solution、400 scopeへのfamily/variant/density/cohort同時routing、
   bounded canonical exact replayまたはcomplete proof、cycle-free final IDs
 - 人物別event-mixのexact source件数/wave/familyとformat×scenario query coverage
+- W3 X/Y/N・W5 correctionをsemantic更新に使う場合の追加typed revision chain。追加しない現契約では
+  eventの`changed_fact_ids=[]`とし、source versionの`present_fact_ids`は直前の可視集合をexactに継承
+- M3-3用の人物ごと10 distinct searchable restore logical documentsとsemantic oracle/event/materialization binding
+- M3-2用のsearchable cross-scope rename/move。現raw-only structural sentinelだけでは検索評価にならない
+- M3-1用のtext PDF/scan PDF renderer・独立validator・format別最低anchor数。9 text variant sliceだけでは
+  「根拠PDF」やOCRの性能・Recallを証明しない
+- v2 logical-document Recallから正式MVPのdistinct `(raw_hash, section)` Recallへのcompiled relevance対応。
+  対応artifactができるまで両metricを読み替えない
 - 1 persona・1 source streaming W0 writerとpilot/full write gate
 - W0 init/index complete attestor、W1-W5 journal/executor
 - 3 fresh-storage replay、actual chunk/history attestation、1,800 query evaluation

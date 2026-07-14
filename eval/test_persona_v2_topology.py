@@ -7,7 +7,7 @@ from eval import persona_v2_contract as envelope
 from eval import persona_v2_topology as topology
 
 
-EXPECTED_TOPOLOGY_SHA256 = "fc079fc8e0aaee0ae03a22fee349e0af8f2dfe18e1fed6d8bb05304643e4a958"
+EXPECTED_TOPOLOGY_SHA256 = "204c9a136438c0dfff3718549c2fcb6009e6ccbe9debdd0cfe54bfaa4290b68f"
 
 
 def _independent_hamilton(total, weights):
@@ -379,7 +379,7 @@ class PersonaV2TopologyTests(unittest.TestCase):
         )
         self.assertEqual(
             topology.contributor_source_feasibility("p17", "pilot")["lower_headroom"],
-            28,
+            76,
         )
         self.assertEqual(
             topology.contributor_source_feasibility("p17", "pilot")["minimum_scope_span"],
