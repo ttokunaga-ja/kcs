@@ -20,6 +20,8 @@ jobs:
           eval.test_persona_v2_artifact_common
           eval.test_persona_v2_realism_profile
           eval.test_persona_v2_variant_catalog
+          eval.test_persona_v2_route_affinity
+          eval.test_persona_v2_fact_graph
 
   rust:
     runs-on: ubuntu-latest

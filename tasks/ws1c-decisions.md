@@ -801,3 +801,44 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     bodies, preserves the exact fixture identity tuple, pins the four upstream body sizes/digests,
     requires every authority map and the designated execution/proof denial fields false, and rejects
     unexpected downstream SHA paths; it is still not a bounded framed external loader.
+114. The pre-solve source and evaluation inputs are sharded by one synthetic owner, never as one
+    203,000-row suite body.  A source profile pre-binds family, variant, gate role, media, renderer,
+    and validator; source-intent refinement only validates those values and assigns scope, density
+    bucket, history cohort, quota, and cell-local ordinal.  Each immutable intent also carries an
+    explicit `pilot|full-residual` origin.  Eligible scope keys may be transitively bound through a
+    persona-local scope-set catalog instead of repeated on every row.  Pilot intent bytes are one
+    dedicated shard reused unchanged by the full manifest; full only adds residual shards.  With
+    maximum 4,096 rows and 4 MiB per shard, the current 203,000 intents require exactly 73 shards:
+    twenty pilot and fifty-three residual.  Every intent row is capped at 768 canonical bytes and
+    the complete framed persona source-intent package, including manifests and overlay shards, is
+    capped at 16 MiB.  Fact, answer, and query information uses a separate one-way chain per persona:
+    typed fact graph without intent/query/answer references, semantic answer membership keyed only
+    by intent/logical-document keys, query-intent unavailable to the corpus renderer, and a compact
+    bundle manifest.  That bundle is capped at 4 MiB/person with 1 MiB fact, 1.5 MiB semantic-oracle,
+    1 MiB query-intent, and 128 KiB manifest subcaps.  Rendered query text, compiled final-ID relevance,
+    and observed rank/score/latency are later artifacts.  This sharding decision proves neither
+    aggregate/source/materialization/rendered-byte pilot subset nor feasibility, G0, solver,
+    renderer, filesystem, write, or history authority.
+115. The first complete route-affinity candidate is schema
+    `kcs.persona.pc-route-affinity/v2`, 70,626 canonical bytes, SHA-256
+    `ddec88f59165a7b54ce71d87047a8ed4b521e1e1e240bbb08e42bdfc75a2be60`.
+    It contains exactly the 541 full-active rows and 10,820 scope scores from the solver-policy
+    axis, excludes the 25 declared hard-zero rows, and does not create rows for the 854
+    persona/global-variant pairs outside the declared axis.  Every row has maximum score four in
+    one through eight scopes; all 400 persona/scope positions have at least one active score of two
+    or more; same-variant cross-person vector clones and secondary-only maxima are absent.  Score
+    zero is a soft absence of preference, never a hard eligibility ban.  The candidate back-binds
+    the exact envelope, topology, necessary joint problem, and generic solver policy, and validates
+    the policy's 566-row declared axis before construction.  It has no independent human-review
+    receipt, so route review, solver, source-plan, G0, write, and history authority remain false.
+116. Typed fact input is a separate per-person upstream leaf, schema
+    `kcs.persona.pc-fact-graph/v2`.  The twenty leaves contain exactly four authored synthetic
+    project/case graphs each: 80 graphs, 320 entities, 640 typed facts, and 80 revision chains in the
+    suite.  Bodies are 23,696--23,986 canonical bytes, 476,602 bytes total, and each is below the
+    1 MiB fact-graph subcap.  Identifiers are suite-synthetic, email uses `.invalid`, IP uses RFC
+    5737 space, and time is a fixed logical reference with non-negative offsets.  Each leaf binds
+    the core four artifacts and exact realism profile one-way, but deliberately contains no intent,
+    answer, distractor, query, source/materialization/chunk ID, path, rendered prose, rank, score,
+    environment, host, network, or runtime-random input.  Fact inventory completion does not imply
+    semantic answer membership, query specification, source intent, fact-oracle closure, G0,
+    solver, renderer, write, or history authority.
