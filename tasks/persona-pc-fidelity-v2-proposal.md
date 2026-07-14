@@ -2,12 +2,15 @@
 
 Status: proposal only。envelope marginals、exact topology、pilot/full/full-minus-pilotのjoint必要条件problem、
 generic aggregate-core solver-policy、20人別realism profile/overlay marginal targets、71 variant identityと
-566 persona marginalのcatalog、541-row route候補、20人x4 typed fact-graph leafまで実装済みだが未承認である。
-overlay contract、ID-free text renderer/validator、source-profile catalogも候補実装があるが、いずれも
-non-authoritativeで、instance、source recipe profile binding、vertical-slice completionを証明しない。
-overlayの8軸ledgerはaxis draftであり、byte/host-metadata reconciliationとpersona-local domainは未完成である。
-overlay membership、独立route review receipt、source-intent、semantic oracle/query、source-level exact allocation、
-G0 rootは未実装である。
+566 persona marginalのcatalog、541-row route候補、20人x4 typed fact-graph leafに加え、negative route-review
+receipt、20人各1件のrepresentative source-intent/fact-membership/history-intent、2,100 query intentsと
+semantic oracle、非authorizing input-closure候補まで実装済みだが未承認である。source-intentは203,000件の
+full inventoryではなく、history-intentもsolver後のcompiled event planではない。overlay contract、ID-free
+text renderer/validator、source-profile catalogを含め、どの候補もG0、renderer、filesystem、write、history
+authorityを与えない。overlayの8軸ledgerはaxis draftであり、byte/host-metadata reconciliation、
+persona-local domain、conflictを成立させるunordered W0-current fact branchesは未完成である。
+schema別content-only `semantic_payload` projection、full source-level exact allocation、canonical solution/proof、
+正式G0 rootは未実装である。
 現行`kcs-persona-pc-v1`を黙って変更せず、採用時はfixture、renderer、plan、manifestをすべてv2へ上げる。
 
 G0のversion境界、pilot projection、joint solver、source recipe、negative authorityの詳細は
@@ -639,13 +642,13 @@ profileを共有辞書へ正規化し、immutable `intent_key`とsource固有値
 validatorをpre-bindする。refinementはこれを再選択せず検証し、scope、bucket、cohort、quota、
 cell-local ordinalだけを割り当てる。overlay/fact membershipも
 `intent_key`を参照し、この段階ではfinal source/materialization IDを持たない。すべての共有辞書は
-推移的にinput-closure hashへ含め、参照先のないID、未参照entry、重複IDを拒否する。downstream v2
+推移的にcontent-affecting corpus semantic namespaceへ含め、参照先のないID、未参照entry、重複IDを拒否する。downstream v2
 persona planは16 MiB/personをhard cap候補とし、G0で20人すべての実serialization sizeを測ってresource
 oracleとテストを更新する。
 
 共有persona fidelity profileはOS/case semantics、device class、locale、timezone、languages、work cadence、
 retention、sync snapshot source、sensitivity、permission、mtime-age、duplicate/conflict仮説を持つ。
-各pre-solve intentは少なくとも次をinput-closure hashへ含める。
+各pre-solve intentは少なくとも次をcorpus semantic namespaceへ含める。
 
 ```text
 fidelity_profile_id / fidelity_profile_sha256
@@ -664,7 +667,8 @@ renderer_id / renderer_schema_version / deterministic_payload_seed
 
 aggregate解に続くsource-intent refinementは、各`intent_key`のpre-bound family/variantを検証し、
 scope、bucket/cohort/quota、cell-local ordinalをexactに割り当て、overlay/duplicate-cluster constraintsも検証する。
-source/materialization IDのdomain-separated hashは、pre-solve input-closure namespaceと解かれたsemantic
+planned source/materialization IDのdomain-separated hashは、query/oracle/review receiptを含まない
+pre-solve corpus semantic namespaceと解かれたsemantic
 coordinates、`persona_id`、immutable origin `pilot|full-residual`、`intent_key`、cell-local ordinalからだけ
 導出する。pilot ordinalはfullでも予約して変更せず、residual追加でpilot IDをrenumber/collideさせない。
 IDを含むpayload自身や、そのIDを内包するsolution/planのhashをpreimageへ戻してcycleを作らない。
@@ -678,7 +682,8 @@ source ID、materialization、rendered bytesの4 claimを別々にattestし、�
 
 fact/oracle/queryは人物ごとにtyped fact graph、semantic answer membership、query-intent、bundle manifestへ
 分離する。fact graphはintent/query/answerを参照せず、semantic oracleだけが`intent_key`とlogical document
-keyを参照する。query-intentはcorpus rendererから参照不能にし、rendered query、compiled final-ID oracle、
+keyに加えて`answer_membership_key`でexpected fact/revision/value-stateを参照する。query-intentはcorpus renderer
+から参照不能にし、rendered query、compiled final-ID oracle、
 actual rank/score/latencyはさらに後段へ分ける。fact/oracle/query bundleは4 MiB/person、source-intentは
 最大4,096 rows/4 MiB shard、全frame/manifest/overlay込み16 MiB/personとする。pilot shardはfullでも
 byte-identicalに再利用し、residual shardだけを追加する。
@@ -709,7 +714,7 @@ contract chunksを持つ。W0 sourceは203,000 files/replayであり、3 fresh r
 
 | Gate | 実装・実行 | 合格条件 | 現在地 |
 | --- | --- | --- | --- |
-| G0 v2契約凍結 | 400 exact scope paths/load、family/extension/variant整数比、`persona_realism_profile`と8軸台帳、ambient spec、共有辞書、pre-solve source-intent recipe、size、fact/oracle、W0-W5 exact eventをversioned artifact graphとsuite descriptor hashへ固定 | generator変更前に全20人でcanonical rebuild。joint solverがrealism overlayを入力にfull contributor=120,000とpilot=12,000、scope routing、wave別incidental上限、plan 16 MiB上限をexactに解く | envelope、topology、joint必要条件、generic solver policy、realism marginal、variant catalog、route候補、typed fact leafまで実装。overlay/text/source-profile候補はnon-authoritative。独立route review、membership/profile binding/input closure/solution/root未実装 |
+| G0 v2契約凍結 | 400 exact scope paths/load、family/extension/variant整数比、`persona_realism_profile`と8軸台帳、ambient spec、共有辞書、pre-solve source-intent recipe、size、fact/oracle、W0-W5 exact eventをversioned artifact graphとsuite descriptor hashへ固定 | generator変更前に全20人でcanonical rebuild。joint solverがrealism overlayを入力にfull contributor=120,000とpilot=12,000、scope routing、wave別incidental上限、plan 16 MiB上限をexactに解く | coreに加えnegative route receipt、20件のrepresentative source/fact/history slice、2,100 query/oracle、非authorizing closure候補まで実装。203,000 inventory、overlay placement、62 variant、semantic payload projection、独立approval、solution/proof、正式rootは未実装 |
 | G1 v2 tiny W0 | 20人×200 files/persona-PC rootを1人・1sourceずつstreaming作成 | 4,000 files/suite replay、2 fresh suite replays合計8,000 writes、400 scopes/replay、比率/path/hash/readback、inode非共有 | v1相当は済。v2回帰が必要 |
 | G2 pilot W0 | pilot-first solverのexact subset、計20,300 files、各人12,000 planned、init→offline index | 各人actual contributor 12,000、raw-only 0、planned/actualを別台帳化 | streaming writerと完全attestorが未実装 |
 | G3 pilot W1-W5 | immutable eventをmutation前に検証し、edit/rename/move/duplicate/derive/archive/delete/restore/purge | exactly-once journal、再開収束、waveごとのactual attestation、purge後index noop | v1相当のみ済。v2 allocator/manifest未実装 |
@@ -717,16 +722,16 @@ contract chunksを持つ。W0 sourceは203,000 files/replayであり、3 fresh r
 | G5 full replay×3 | 同一plan/eventから3 fresh rootsをそれぞれW0からW5まで実行 | `.kcs`/完成rootコピーなし、hard link/cloneなし、60 registries、1,200 scopes | 未実装 |
 | G6 reproducibility/resume | root依存値を除くcanonical stateとquery rankを比較、failure injection後resume | event exactly-once、同一seedのstate/count/history/query projection一致 | 未実装 |
 | G7 actual attestation | DB/CAS/HEAD/historyを全persona・全replay・全waveで実読 | 各waveのC/Hがcheckpoint表とexact一致。current eligibleは`C(w)..135,000`、current+history eligibleは`C(w)+H(w)..210,000`かつ動的incidental cap内、raw-only=0 | 未実装 |
-| G8 evaluation | 各人・各scenario最低30問、合計1,800 unique queries | per-person Recall@10 >=0.8、M3-1 p95<5s、M3-2/M3-3 p95<7s。同一seed再現性に限定して報告 | 未実施 |
+| G8 evaluation | 各人・各scenario最低30問、合計1,800 unique positive queries。300 negativeは別判定 | 各persona×scenarioでRecall@10 >=0.8。各persona×scenarioの3 replay観測をnearest-rank集計し、M3-1 p95<5s、M3-2/M3-3 p95<7s。pooled/per-person summaryは参考併記し、同一seed再現性に限定して報告 | 未実施 |
 
 G0内の実装順も固定する。
 
 1. 入力・解・proofを含まないnon-authorizing exact solver-semantics policy sidecar
-2. persona realism profile/overlay、pre-solve source-intent recipe、route matrixの独立review、
-   fact/oracleからなるinput closure
+2. persona realism profile/overlay、pre-solve source-intent recipe、route body、fact membership/history templateから
+   なるcorpus semantic namespace、独立reviewを含むcorpus input closure、query/oracleを含むevaluation input closure
 3. aggregate + source-intent refinementのcanonical solution、bounded canonical exact replayまたは
-   complete proof、cycle-free IDを持つfinal source plan
-4. streaming writer、W0 index、W1-W5 history executor
+   complete proof、cycle-free planned IDを持つfinal source plan、compiled planned history plan、planned ledger
+4. streaming writer、W0 index、W1-W5 history executor、observed relevance/ledger
 
 2より前に3のsolutionを作らない。warm-start steps、objective値、marginal hashだけなら
 `execution receipt`であり、global optimality proofではない。完全proofを8 MiB内に保持できなければ
@@ -775,16 +780,19 @@ queryにpersona/source ID、path、digest、section slug、生成nonceを含め�
 distractorを3件以上持ち、current、old wording、rename/move、deleted、restored、多言語を
 別stratumとしてper-person判定する。最低30問/persona/scenario、合計1,800はpositive queryだけで数える。
 purged-negativeはRecall母数へ混ぜず、別に最低5問/persona/scenarioを置き、`false-positive@10 == 0`を
-要求する。corpus template/seedとquery template/seedを分離し、
+要求する。したがって1人105、suite 2,100 query intents（positive 1,800 / negative 300）であり、同じspecを
+3 replayで各1回観測して6,300 rows（5,400 / 900）とする。replayごとに別intentへ分割しない。
+corpus template/seedとquery template/seedを分離し、
 gold oracleをsource rendering前に凍結する。queryとanswer文書のrare token、特徴的n-gram、renderer内部語彙の
 重複率をgateし、template exact lookupを拒否する。pooled平均だけで合格させず、同一seedの3 replay結果から
 20人一般への統計的一般化を主張しない。
 
 M3-3の`restored` 10問/personaを成立させるため、各人物に少なくとも10個の**distinct searchable restore
-logical documents**を予約する。各文書はcontract-contributorとしてrestore後にindexされ、`intent_key`、
-logical-document key、restore materialization/event、期待chunk/source membershipをsemantic oracleへ
-束縛する。quota-zero/raw-onlyのstructural restore sentinel、同一logical documentの複数path、未indexの
-復元fileはこの10件へ数えない。
+logical documents**を予約する。pre-solve semantic oracleは`intent_key`、logical-document key、
+`answer_membership_key`、abstract restore event/template、checkpoint/evidence stateを束縛する。solution後の
+compiled history planがplanned source/materialization/event IDへ、render/index後のcompiled relevanceと
+lifecycle receiptがobserved materialization/chunk/`raw_hash`/sectionへ写像する。quota-zero/raw-onlyの
+structural restore sentinel、同一logical documentの複数path、未indexの復元fileはこの10件へ数えない。
 人物間でもlogical document/intentを再利用せず、suite minimumを200 distinct restore anchorsとし、
 200 restored queriesへ1対1で対応させる。
 `restored`はW5-finalの`current-restored`として、W4 delete、W5 restore、新materialization、destination
@@ -793,7 +801,8 @@ index、lifecycle receiptまで一致させる。同じ内容の別current copy�
 
 ## 9. 容量判断
 
-2026-07-15の再測定時点の内蔵APFS空きは約146.00 GiBである。現行v1の35/40/20/5 binary byte仮説を
+2026-07-15 03:33 JSTの参考`df -k` snapshotでは、内蔵APFS空きは151,831,172 KiB（約144.80 GiB）である。
+これはplan/root/deviceへ束縛したcapacity receiptではなく、Go evidenceに使わない。現行v1の35/40/20/5 binary byte仮説を
 20,090 filesへそのまま適用すると、binaryだけで最低約80.4 GiB/replay、約241.3 GiB/3 replayとなる。
 v2のimage+media+domainは20,290 filesなので、同じ旧envelopeなら最低約81.2 GiB/replay、
 約243.7 GiB/3 replayとなる。どちらもOffice、PDF、CAS、index、history、staging前に不足するため、
@@ -898,7 +907,10 @@ v2で実装済み（planning only、non-authorizing）:
 - `kcs.persona.pc-route-affinity/v2` candidate canonical 70,626 bytes、SHA-256
   `e8a401193fc751ed3d7b2a47e3661202835579df8700392ce9fdfd30ad07c790`。541 active rows/
   10,820 scoresを束縛し、25 declared hard-zeroと854 out-of-domainを除外する。clone、secondary-only
-  maximum、max/coverage機械違反は0だが、独立human review receiptはなくsolver/G0 authorityはfalse
+  maximum、max/coverage機械違反は0である。9 checksのうち8 machine checksがpassし、独立human reviewが
+  未成立であることを記録するnegative receiptは3,944 bytes、SHA-256
+  `3c236722b900a26b12a7546b3a073dd71d1c935e1d313cb1261781c75ed4fd98`。承認receiptではなく、
+  solver/G0 authorityはfalse
 - 人物別`kcs.persona.pc-fact-graph/v2`を20 body実装。各4 graph/16 entities/32 typed facts/
   4 revision chains、suite合計80/320/640/80、body 23,720--24,010 bytes、合計477,082 bytes。
   prior factはW0だけcurrent、replacementはW1以降currentで、W1 small-edit境界と一致する。
@@ -906,42 +918,89 @@ v2で実装済み（planning only、non-authorizing）:
 - `kcs.persona.pc-overlay-contract/v2`、ID-free text renderer/validator、source-profile catalogの候補実装。
   これらは設計・局所検査用で、canonical G0 inputとして未採用である。overlay instances/placement、
   `source_recipe_profile_id`、source-level exact allocation、production MIME golden、vertical-slice completion、
-  全authorityはfalseのままである
+  全authorityはfalseのままである。overlay canonicalは69,114 bytes、SHA-256
+  `e79d90e38cdfe62c4ed842a6cb20e4bd674d7fee7821e22fde701563415a7678`で、現fact graphでは1,560
+  conflict clustersに必要な同一subject/predicate・値不一致のunordered W0-current fact pairを作れないため、
+  `conflict_fact_realizability_proved=false`を明示する
+- canonical JSON objectは16 MiB、JSONLは16 MiB/65,536 rows/1 row 64 KiBのpre-read capを持つbounded
+  readerを実装した。UTF-8/NFC、duplicate key、null/float/negative integer、CR/BOM/blank row、末尾LF、
+  exact declared bytes/SHAをfail closedで検査する。ただし外側frame header/dispatcherとのbindingは未実装
+- 20人各1件のrepresentative `source-intent-origin-shard`候補を実装。合計197,321 bytes、1 row 436--437
+  bytes、p01は9,862 bytes / SHA-256
+  `23aa4ee0337ef84cb178e54e15eef93447ed9efa29c0b356ff4f395598e23223`。これは20 vertical slicesだけで、
+  203,000 source inventory、53 residual shards、62未対応variant、overlay placement、solutionを完成しない
+- representative source intentのW0 `present_fact_ids`をexact projectionする人物別fact-membershipと、
+  solver割当前のconditional history-intent templateを実装。p01はそれぞれ4,136 bytes /
+  `688fae5e5a7d21085b30e39222547e724ef4f36d807981551f8107e00c20ac16`、14,633 bytes /
+  `be1eb9f69324319ba6624b88311dffb60f38342a5a911de196f5d0d10dafeb90`。typed revisionはW0→W1、
+  W3/W5 surface editはfact carry-forwardとし、P/X/Yだけをrevision fact候補にする。compiled planではない
+- 人物ごと90 positive + 15 negative、suite 2,100 intents、3 replay 6,300 observationsとなるquery-intentと
+  semantic oracle候補を実装。p01は65,798 bytes /
+  `85b29c60b60ee4d78489e03115b334e00479f2860c25645c2f46f198bf2b2b61`、199,296 bytes /
+  `0a2dc13887def2e6f0da14a6ecf0b19559df8e3a78717e45b459f9c27288f84a`。200 restore anchorsと
+  200 final-deleted documentsを分離するが、full membership totality、同topic/languageのrendered distractor
+  vocabulary attestation、compiled `(raw_hash, section)` relevanceはfalse
+- content、evidence、evaluationを別DAGへ注入し、query変更や同一bodyのreview receipt差替えがcorpus
+  identityへ逆流しないinput-closure候補を実装した。ただし現upstream full bodyにはcontentと
+  authority/completion/blocker metadataが同居する。schema別content-only `semantic_payload` projectionが
+  未実装なので、現candidate semantic rootはsource ID namespaceとして不適格で、G0 rootとして発行しない。
+  p01 representative live-DAG compatibility pinはsemantic 46,200 bytes /
+  `dea31e146c5b8603105bcc97f42db9a0c458cd9a00ba0b62bd98a46e89ba36b9`、corpus 3,496 /
+  `374167c8a912e5302a4185b999ba3bd2322459fce68bdf7bdcdcd53e89fe2b86`、evaluation 5,032 /
+  `d190f52fa27c08cb3ca32063c9e421adeba82e9bbd588289b6a8707bea2b5f84`、suite 2,609 /
+  `56af2edb26057709bca246d266ece0d83408c1f1483146af5d84141856ffb79e`。full 20-person closureではない。
+  既知schemaのfield completenessは各注入bodyのexact provider validatorが正本で、closure scannerは
+  canonical fieldと宣言済みaliasに対するdefense-in-depthである。両方を通ってもG0/solver/write authorityはfalse
+- 20人、pilot/fullのW0--W5 checkpoint literal、20 roots/replay、3 replay、203,000 files/replay、
+  2,100 query intents、6,300 observations、420 persona/replay/checkpoint receiptsを独立scale invariant testで固定
 
 v2で残るもの:
 
-pre-solve closureは`source-intent-origin-shard`、`fact-membership`、`history-intent`、`query-intent`、
-`semantic-oracle`、`fact-oracle-query-manifest`を別bodyとしてhashし、最後に`input-closure-manifest`が
-realism、review済route、source profile、overlayを含めて一方向に束縛する。query/oracleをsource rendererへ
-渡さず、source-intentが下流manifestを逆参照しない。
+pre-solve graphは`source-intent-origin-shard`、`fact-membership`、`history-intent`、`query-intent`、
+`semantic-oracle`を別bodyとしてhashする代表candidateまで実装した。fullでは必要に応じて
+`fact-oracle-query-manifest`も分離し、content-affecting semantic payloadだけを
+`corpus-semantic-namespace`へ束縛し、solver/solution/planned IDはこのrootだけを使う。review receiptを加えた
+`corpus-input-closure-manifest`、そこへquery/oracleを加えた`evaluation-input-closure-manifest`、両rootを束縛する
+`suite-input-closure-descriptor`を分ける。query/oracle/review receiptをsource rendererへ渡さず、source-intentが
+下流manifestを逆参照しない。queryだけの変更と同一bodyの再レビューではcorpus solution/IDs/bytes不変を
+機械検証する。upstream artifactにauthority/completion/blocker metadataが同居する場合は、schema別allowlistの
+content-only `semantic_payload` projectionだけをidentity namespaceへ入れ、full body/statusはcorpus input closureへ
+置く。このprojection未実装の現candidateからsemantic rootを発行しない。
 
-- realism profileとvariant catalogの独立review receipt、overlay intent membership、placement整数割当、
+- realism profileとvariant catalogの独立review receipt、routeの独立human approval receipt、overlay intent membership、placement整数割当、
   logical-document採点/検索参加、8軸台帳
 - chunk/complexity/bytesを分離したpre-solve source-intent recipe、人物・family別byte p50/p95/tail、
   source-level semantic filenameとfact membership
 - source-level feasibility parameterを持つcomplete variant catalog、valid validator/renderer
-- route候補の独立review receiptとsemantic answer oracle/queryを含むfact/oracle input closure
-- generic sidecarを上記input closureへ束縛するcomplete objective instance/evaluator、探索上限の実solver校正
+- 全203,000件のsource-intent/fact-membershipと53 residual shards、62 variantのrenderer/validator、
+  schema別content-only semantic projection、正式なcorpus/evaluation closure
+- generic sidecarをcorpus semantic namespaceへ束縛するcomplete objective instance/evaluator、探索上限の実solver校正
 - aggregate + source-intent refinementのcanonical solution、400 scopeへのfamily/variant/density/cohort同時routing、
   bounded canonical exact replayまたはcomplete proof、cycle-free final IDs
 - 人物別event-mixのexact source件数/wave/familyとformat×scenario query coverage
 - W3 X/Y/N・W5 correctionをsemantic更新に使う場合の追加typed revision chain。追加しない現契約では
   eventの`changed_fact_ids=[]`とし、source versionの`present_fact_ids`は直前の可視集合をexactに継承
-- M3-3用の人物ごと10 distinct searchable restore logical documentsとsemantic oracle/event/materialization binding
+- M3-3用の人物ごと10 distinct searchable restore logical documentsとpre-solve semantic oracle/abstract event
+  binding。planned materialization/event IDはsolution後のcompiled history plan、observed materialization/chunk/
+  `raw_hash`/sectionはrender・index後のcompiled artifactへ分離
 - M3-2用のsearchable cross-scope rename/move。現raw-only structural sentinelだけでは検索評価にならない
-- M3-1用のtext PDF/scan PDF renderer・独立validator・format別最低anchor数。9 text variant sliceだけでは
-  「根拠PDF」やOCRの性能・Recallを証明しない
+- M3-1用のtext-layer PDF renderer・独立validator・positive最低anchor数。scan PDFは現v2ではraw-only
+  `awaiting_ocr`のstructural/negative対象でpositive relevanceに含めない。local deterministic OCRを導入する
+  場合だけ別variant/provenance/contributor契約を追加する。9 text variant sliceだけでは「根拠PDF」の性能・
+  Recallを証明しない
 - v2 logical-document Recallから正式MVPのdistinct `(raw_hash, section)` Recallへのcompiled relevance対応。
   対応artifactができるまで両metricを読み替えない
 - 1 persona・1 source streaming W0 writerとpilot/full write gate
 - W0 init/index complete attestor、W1-W5 journal/executor
-- 3 fresh-storage replay、actual chunk/history attestation、1,800 query evaluation
+- 3 fresh-storage replay、actual chunk/history attestation、2,100 intents / 6,300 observationsの実行
+  （Recall対象は1,800 positive）
 
 この提案が採用されるまでは、現行`SCHEMA_VERSION=1`、`FIXTURE_ID=kcs-persona-pc-v1`、
-canonical plan SHAを変更しない。(1) non-authorizing generic solver-semantics sidecarまでは完了した。
-次の実装順は、(2) realism overlay + pre-solve source-intent recipe + reviewed route + fact/oracle input closure、
+canonical plan SHAを変更しない。(1) non-authorizing generic solver-semantics sidecarとrepresentative
+pre-solve vertical sliceまでは完了した。次の実装順は、(2) 203,000 source inventory、62 variant、overlay
+membership/placement、独立review、schema別semantic projectionを完成してcorpus/evaluation input closureを凍結、
 (3) complete objective instance/evaluatorとcanonical aggregate/source-intent solution、execution receiptまたは
-独立検証可能なproof、(4) renderer/writer/historyである。solutionをoverlay/source recipeより先行させない。
+独立検証可能なproof、(4) renderer/writer/historyである。solutionをcomplete overlay/source recipeより先行させない。
 
 Q_hardでのSpotlight/ripgrep-all比較、D1のTTFV/AI強化時間/コスト、実フォルダdogfoodは、
 このsynthetic persona suiteで代替しない。

@@ -917,3 +917,31 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     Scenario-specific blockers also remain: searchable cross-scope rename/move for M3-2; text/scan-PDF
     renderer, independent validator, and format anchor minima for M3-1; and a compiled mapping from v2
     logical-document expectations to the formal MVP distinct `(raw_hash, section)` relevance metric.
+119. Persona-PC v2 pre-solve identity is split into four one-way layers.  A future
+    `kcs.persona.pc-corpus-semantic-namespace/v2` contains only content-affecting semantic payloads and
+    is the only namespace eligible to seed solver output and planned source identity.  Review/evidence
+    receipts are added only by `kcs.persona.pc-corpus-input-closure-manifest/v2`; query intent and semantic
+    oracle are added only by `kcs.persona.pc-evaluation-input-closure-manifest/v2`; and
+    `kcs.persona.pc-suite-input-closure-descriptor/v2` binds the corpus and evaluation closures.  Therefore
+    a query-only mutation changes evaluation and suite identity but not corpus identity, while substituting
+    a review receipt for an unchanged body changes evidence/corpus/evaluation/suite identity but not the
+    semantic namespace, solution, planned IDs, or rendered bytes.  A content-affecting route-body mutation
+    changes the semantic namespace.  The current upstream candidate bodies mix semantic content with
+    authority, completion, and blocker metadata, so a schema-specific allowlisted `semantic_payload`
+    projection is required before any semantic namespace is eligible for production source IDs.  The
+    current full-body dependency DAG is only a non-authorizing compatibility candidate and must not be
+    issued as G0.  Planned source/materialization/event identities may be compiled only after a solution;
+    observed materialization/chunk/raw-hash/section identities are bound only after render and index.
+    The representative source/fact/history/query/oracle candidates do not complete the 203,000-source
+    inventory, 53 residual shards, 62 outstanding variants, solver assignment, or compiled relevance.
+    The current fact graph also cannot realize the 1,560 conflict clusters because it lacks unordered
+    unequal W0-current facts for the same subject and predicate; revision facts may therefore be assigned
+    only to P/X/Y candidates until the graph is extended.  Scan PDF remains raw-only/`awaiting_ocr` and is
+    excluded from positive Recall; positive PDF coverage requires a deterministic text-layer renderer, or
+    a separately versioned deterministic local-OCR variant and provenance contract.  Bounded canonical
+    JSON and JSONL readers, a negative route-review receipt, and the new CI jobs enforce these denials but
+    grant no G0, solver, renderer, filesystem, write, KCS, or history authority.
+    Known-schema field completeness and cross-field validity remain the responsibility of each injected
+    exact provider validator; the closure scanner is defense-in-depth for canonical fields and explicitly
+    declared aliases, not an unbounded synonym interpreter.  Validators must return exact true, and the
+    provider body must match its pinned bytes, SHA-256, fixture identity, schema, kind, and dependency graph.

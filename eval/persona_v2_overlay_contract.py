@@ -1260,7 +1260,7 @@ def _ledger_schema(realism_value):
         },
         "hash_back_reference_rules": [
             "all-hash-edges-follow-hash-dag-order-only",
-            "source-intent-input-closure-manifests-must-not-bind-planned-or-observed-ledger-sha256",
+            "source-intent-origin-manifests-must-not-bind-planned-or-observed-ledger-sha256",
             "history-intent-manifest-must-not-bind-planned-or-observed-ledger-sha256",
             "overlay-membership-manifest-allocation-solution-and-final-source-plan-must-not-bind-planned-or-observed-ledger-sha256",
             "planned-eight-axis-ledger-must-not-bind-observed-eight-axis-ledger-sha256",
@@ -1268,7 +1268,7 @@ def _ledger_schema(realism_value):
             "observed-eight-axis-ledger-is-terminal-and-no-earlier-node-may-bind-its-sha256",
         ],
         "hash_dag_order": [
-            "source-intent-input-closure-manifests",
+            "source-intent-origin-manifests",
             "history-intent-manifest",
             "overlay-membership-manifest",
             "canonical-allocation-solution",
@@ -1279,7 +1279,7 @@ def _ledger_schema(realism_value):
             "observed-eight-axis-ledger",
         ],
         "hash_dag_required_edges": [
-            "overlay-membership-origin-manifests-bind-source-intent-input-closure-manifest-sha256",
+            "overlay-membership-origin-manifests-bind-source-intent-origin-manifest-sha256",
             "canonical-allocation-solution-binds-overlay-membership-manifest-sha256",
             "final-source-plan-binds-canonical-allocation-solution-sha256",
             "planned-eight-axis-ledger-binds-overlay-membership-canonical-allocation-final-source-plan-and-history-intent-sha256s",
@@ -1410,6 +1410,7 @@ def _canonical_overlay_contract_value():
         },
         "completion_claims": {
             "attachment_semantics_complete": True,
+            "conflict_fact_realizability_proved": False,
             "content_relation_semantics_complete": True,
             "eight_axis_ledger_schema_complete": False,
             "logical_document_instance_assignment_complete": False,
@@ -1479,6 +1480,7 @@ def _canonical_overlay_contract_value():
             "scope-and-placement-membership-not-assigned",
             "logical-document-and-revision-keys-not-instantiated",
             "conflict-branch-fact-membership-not-bound",
+            "current-fact-graph-has-no-w0-current-unordered-conflict-pairs",
             "planned-eight-axis-ledgers-not-instantiated",
             "observed-eight-axis-ledgers-not-attested",
             "eight-axis-ledger-cross-axis-and-persona-domain-schema-incomplete",
