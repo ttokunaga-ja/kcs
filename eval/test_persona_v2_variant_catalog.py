@@ -45,10 +45,10 @@ class PersonaV2VariantCatalogTests(unittest.TestCase):
             self.assertIs(type(flag), bool, key)
             self.assertIs(flag, False, key)
         raw = catalog.canonical_json_bytes(value)
-        self.assertEqual(len(raw), 211_734)
+        self.assertEqual(len(raw), 211_733)
         self.assertEqual(
             catalog.variant_catalog_sha256(value),
-            "9eb29e7dc52acddfb9e57249d88791d07de4a1dadfac949119980c58f9c11be8",
+            "abbe522ff37a9a091f28b7a230928fd598054498eb80cab99f08d21889f26cec",
         )
         self.assertTrue(catalog.validate_variant_catalog(value))
 
@@ -76,19 +76,19 @@ class PersonaV2VariantCatalogTests(unittest.TestCase):
             value["suite_gate_role_counts"],
             {
                 "full": {
-                    "contract_contributor": 67_296,
+                    "contract_contributor": 69_236,
                     "incidental_searchable": 60_414,
-                    "raw_only": 75_290,
+                    "raw_only": 73_350,
                 },
                 "pilot": {
-                    "contract_contributor": 6_731,
+                    "contract_contributor": 6_925,
                     "incidental_searchable": 6_040,
-                    "raw_only": 7_529,
+                    "raw_only": 7_335,
                 },
                 "tiny-smoke": {
-                    "contract_contributor": 1_324,
+                    "contract_contributor": 1_370,
                     "incidental_searchable": 1_108,
-                    "raw_only": 1_568,
+                    "raw_only": 1_522,
                 },
             },
         )

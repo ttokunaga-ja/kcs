@@ -36,7 +36,7 @@ FACT_COUNT_PER_GRAPH = 8
 EDGE_COUNT_PER_GRAPH = 1
 EXPECTED_REALISM_BYTES = 36_811
 EXPECTED_REALISM_SHA256 = (
-    "3f3239cdb7b7da954282b0e6224526ca66dbadd678dc705dde4d46340f0b46bf"
+    "a32bbb0fd7c88c57205454d8555163ad97b2b1a3024e5a5d7f7234bf56766f05"
 )
 
 _SYNTHETIC_ID_RE = re.compile(r"^[a-z][a-z0-9-]*-syn-[0-9]{3}$")
@@ -190,9 +190,9 @@ def _visibility(profile):
     if profile == "stable-current":
         states = ["current"] * len(checkpoints)
     elif profile == "superseded-after-W1":
-        states = ["current", "current"] + ["history-only"] * 5
-    elif profile == "introduced-at-W2":
-        states = ["absent", "absent"] + ["current"] * 5
+        states = ["current"] + ["history-only"] * 6
+    elif profile == "introduced-at-W1":
+        states = ["absent"] + ["current"] * 6
     else:
         raise PersonaV2FactGraphError(f"unknown fact visibility profile: {profile!r}")
     return [
@@ -279,7 +279,7 @@ def _graph(project_or_case_id, graph_kind, graph_ordinal):
             predicates[3],
             project_or_case_id,
             {"kind": "synthetic-token", "token_id": f"approved-syn-{graph_suffix}"},
-            "introduced-at-W2",
+            "introduced-at-W1",
         ),
         _fact(
             fact_ids[5],
@@ -552,9 +552,9 @@ def _validate_graph(graph):
         )
     prior_states = [row["state"] for row in prior["visibility_by_checkpoint"]]
     current_states = [row["state"] for row in current["visibility_by_checkpoint"]]
-    if prior_states != ["current", "current"] + ["history-only"] * 5:
+    if prior_states != ["current"] + ["history-only"] * 6:
         raise PersonaV2FactGraphError("prior revision checkpoint states drifted")
-    if current_states != ["absent", "absent"] + ["current"] * 5:
+    if current_states != ["absent"] + ["current"] * 6:
         raise PersonaV2FactGraphError("current revision checkpoint states drifted")
     if any(
         old_state == "current" and new_state == "current"

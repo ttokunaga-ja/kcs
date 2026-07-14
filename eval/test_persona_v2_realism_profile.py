@@ -49,16 +49,16 @@ class PersonaV2RealismProfileTests(unittest.TestCase):
         self.assertEqual(len(raw), 36_811)
         self.assertEqual(
             realism.realism_profile_sha256(value),
-            "3f3239cdb7b7da954282b0e6224526ca66dbadd678dc705dde4d46340f0b46bf",
+            "a32bbb0fd7c88c57205454d8555163ad97b2b1a3024e5a5d7f7234bf56766f05",
         )
         self.assertTrue(realism.validate_realism_profile(value))
         self.assertEqual(
             [(row["name"], row["canonical_bytes"]) for row in value["input_bindings"]],
             [
-                ("envelope", 70_835),
-                ("topology", 134_141),
-                ("joint-problem", 744_081),
-                ("joint-solver-policy", 82_950),
+                ("envelope", 71_979),
+                ("topology", 134_195),
+                ("joint-problem", 744_137),
+                ("joint-solver-policy", 83_004),
             ],
         )
 
@@ -146,8 +146,8 @@ class PersonaV2RealismProfileTests(unittest.TestCase):
                 )
                 self.assertLessEqual(required, searchable)
                 headrooms[profile].append((searchable - required, persona_id))
-        self.assertEqual(min(headrooms["pilot"]), (116, "p17"))
-        self.assertEqual(min(headrooms["full"]), (1_160, "p17"))
+        self.assertEqual(min(headrooms["pilot"]), (164, "p17"))
+        self.assertEqual(min(headrooms["full"]), (1_640, "p17"))
 
         self.assertEqual(
             value["suite_overlay_targets"],

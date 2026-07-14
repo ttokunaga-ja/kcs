@@ -11,10 +11,10 @@ from eval import persona_v2_joint_problem as problem
 from eval import persona_v2_topology as topology
 
 
-EXPECTED_ENVELOPE_SHA256 = "6b5c7145881f2ab1e8c84fe033f667757dccf478b704e0731d543bfddfcddbac"
-EXPECTED_TOPOLOGY_SHA256 = "fc079fc8e0aaee0ae03a22fee349e0af8f2dfe18e1fed6d8bb05304643e4a958"
-EXPECTED_PROBLEM_SHA256 = "384c95f550355b63443d7f5ca94dad2ed008ab7b24d6b8148a9504f613c29227"
-EXPECTED_PROBLEM_BYTES = 744_081
+EXPECTED_ENVELOPE_SHA256 = "1d49e79049b409ee5bd82d0b307db5055c2a58544df81858b77552ea82bff370"
+EXPECTED_TOPOLOGY_SHA256 = "204c9a136438c0dfff3718549c2fcb6009e6ccbe9debdd0cfe54bfaa4290b68f"
+EXPECTED_PROBLEM_SHA256 = "8551472e4993f21ff71f886b3f80b9b02410c409476d0be91d773db335907074"
+EXPECTED_PROBLEM_BYTES = 744_137
 
 
 def _profile(persona, profile):
@@ -159,31 +159,63 @@ class PersonaV2JointProblemTests(unittest.TestCase):
                         envelope.history_cohort_chunk_counts(profile_name),
                     )
 
-        for persona_id in ("p08", "p17"):
+        expected_dense_office = {
+            "p08": {
+                "pilot_sources": 267,
+                "full_sources": 2_672,
+                "pilot_density": (3, 11, 53, 200),
+                "full_density": (27, 107, 534, 2_004),
+            },
+            "p11": {
+                "pilot_sources": 268,
+                "full_sources": 2_680,
+                "pilot_density": (3, 11, 53, 201),
+                "full_density": (27, 107, 536, 2_010),
+            },
+            "p15": {
+                "pilot_sources": 268,
+                "full_sources": 2_680,
+                "pilot_density": (3, 11, 53, 201),
+                "full_density": (27, 107, 536, 2_010),
+            },
+            "p17": {
+                "pilot_sources": 267,
+                "full_sources": 2_672,
+                "pilot_density": (3, 11, 53, 200),
+                "full_density": (27, 107, 534, 2_004),
+            },
+        }
+        for persona_id, expected in expected_dense_office.items():
             persona = problem.get_persona_problem(persona_id)
-            self.assertEqual(_profile(persona, "pilot")["contributor_source_count"], 219)
-            self.assertEqual(_profile(persona, "full")["contributor_source_count"], 2_192)
+            self.assertEqual(
+                _profile(persona, "pilot")["contributor_source_count"],
+                expected["pilot_sources"],
+            )
+            self.assertEqual(
+                _profile(persona, "full")["contributor_source_count"],
+                expected["full_sources"],
+            )
             self.assertEqual(
                 tuple(
                     row["contributor_source_count"]
                     for row in _profile(persona, "pilot")["density_bucket_marginals"]
                 ),
-                (2, 9, 44, 164),
+                expected["pilot_density"],
             )
             self.assertEqual(
                 tuple(
                     row["contributor_source_count"]
                     for row in _profile(persona, "full")["density_bucket_marginals"]
                 ),
-                (22, 88, 438, 1_644),
+                expected["full_density"],
             )
-        self.assertEqual(envelope.get_persona("p08")["format_percentages"]["md"], 11)
+        self.assertEqual(envelope.get_persona("p08")["format_percentages"]["md"], 14)
         self.assertEqual(
             envelope.get_persona("p08")["format_percentages"]["domain_binary"], 1
         )
-        self.assertEqual(envelope.get_persona("p17")["format_percentages"]["md"], 5)
+        self.assertEqual(envelope.get_persona("p17")["format_percentages"]["md"], 7)
         self.assertEqual(
-            envelope.get_persona("p17")["format_percentages"]["domain_binary"], 13
+            envelope.get_persona("p17")["format_percentages"]["domain_binary"], 12
         )
 
     def test_necessary_checks_reject_projection_conservation_drift(self):
@@ -263,19 +295,27 @@ class PersonaV2JointProblemTests(unittest.TestCase):
                     },
                     independently_derived,
                 )
-        self.assertEqual(minimum_headroom, {"pilot": 7, "full": 464})
+        self.assertEqual(minimum_headroom, {"pilot": 27, "full": 664})
         self.assertLess(203, sum(expected["pilot"].values()))
-        for persona_id in ("p08", "p17"):
+        expected_dense_office_headrooms = {
+            "p08": (56, 956),
+            "p11": (57, 964),
+            "p15": (57, 964),
+            "p17": (56, 956),
+        }
+        for persona_id, (pilot_headroom, full_headroom) in (
+            expected_dense_office_headrooms.items()
+        ):
             pilot_feasibility = _profile(
                 problem.get_persona_problem(persona_id), "pilot"
             )["necessary_feasibility"]["cohort_source_interval"]
             self.assertEqual(pilot_feasibility["lower_bound"], 211)
-            self.assertEqual(pilot_feasibility["lower_headroom"], 8)
+            self.assertEqual(pilot_feasibility["lower_headroom"], pilot_headroom)
             full_feasibility = _profile(
                 problem.get_persona_problem(persona_id), "full"
             )["necessary_feasibility"]["cohort_source_interval"]
             self.assertEqual(full_feasibility["lower_bound"], 1_716)
-            self.assertEqual(full_feasibility["lower_headroom"], 476)
+            self.assertEqual(full_feasibility["lower_headroom"], full_headroom)
 
     def test_full_minus_pilot_residual_is_exact_and_nonnegative(self):
         expected_cohort_residual = {
@@ -387,32 +427,32 @@ class PersonaV2JointProblemTests(unittest.TestCase):
         self.assertEqual(suite["pilot"]["physical_files"], 20_300)
         self.assertEqual(suite["full"]["physical_files"], 203_000)
         self.assertEqual(suite["full-minus-pilot"]["physical_files"], 182_700)
-        self.assertEqual(suite["pilot"]["contract_contributor_sources"], 6_731)
-        self.assertEqual(suite["full"]["contract_contributor_sources"], 67_296)
-        self.assertEqual(suite["full-minus-pilot"]["contract_contributor_sources"], 60_565)
+        self.assertEqual(suite["pilot"]["contract_contributor_sources"], 6_925)
+        self.assertEqual(suite["full"]["contract_contributor_sources"], 69_236)
+        self.assertEqual(suite["full-minus-pilot"]["contract_contributor_sources"], 62_311)
         self.assertEqual(
             suite["pilot"]["density_bucket_source_counts"],
-            {"1-4": 727, "5-20": 1_699, "21-50": 2_462, "51-70": 1_843},
+            {"1-4": 731, "5-20": 1_707, "21-50": 2_498, "51-70": 1_989},
         )
         self.assertEqual(
             suite["full"]["density_bucket_source_counts"],
-            {"1-4": 7_280, "5-20": 16_965, "21-50": 24_607, "51-70": 18_444},
+            {"1-4": 7_300, "5-20": 17_042, "21-50": 24_995, "51-70": 19_899},
         )
         self.assertEqual(
             suite["full-minus-pilot"]["density_bucket_source_counts"],
-            {"1-4": 6_553, "5-20": 15_266, "21-50": 22_145, "51-70": 16_601},
+            {"1-4": 6_569, "5-20": 15_335, "21-50": 22_497, "51-70": 17_910},
         )
         self.assertEqual(
             suite["pilot"]["gate_role_file_counts"],
-            {"contract_contributor": 6_731, "incidental_searchable": 6_040, "raw_only": 7_529},
+            {"contract_contributor": 6_925, "incidental_searchable": 6_040, "raw_only": 7_335},
         )
         self.assertEqual(
             suite["full"]["gate_role_file_counts"],
-            {"contract_contributor": 67_296, "incidental_searchable": 60_414, "raw_only": 75_290},
+            {"contract_contributor": 69_236, "incidental_searchable": 60_414, "raw_only": 73_350},
         )
         self.assertEqual(
             suite["full-minus-pilot"]["gate_role_file_counts"],
-            {"contract_contributor": 60_565, "incidental_searchable": 54_374, "raw_only": 67_761},
+            {"contract_contributor": 62_311, "incidental_searchable": 54_374, "raw_only": 66_015},
         )
         self.assertEqual(
             suite["full-minus-pilot"]["contract_contributor_chunks"], 2_160_000

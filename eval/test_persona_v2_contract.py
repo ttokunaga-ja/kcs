@@ -6,7 +6,7 @@ import unittest
 from eval import persona_fixture_spec as v1
 from eval import persona_v2_contract as spec
 
-EXPECTED_ENVELOPE_SHA256 = "6b5c7145881f2ab1e8c84fe033f667757dccf478b704e0731d543bfddfcddbac"
+EXPECTED_ENVELOPE_SHA256 = "1d49e79049b409ee5bd82d0b307db5055c2a58544df81858b77552ea82bff370"
 
 
 class PersonaV2EnvelopeContractTests(unittest.TestCase):
@@ -77,21 +77,21 @@ class PersonaV2EnvelopeContractTests(unittest.TestCase):
                 self.assertEqual(sum(counts.values()), spec.profile_file_count(persona_id, profile))
 
         expected_full = {
-            "md": 18_820,
+            "md": 19_660,
             "txt_log": 19_210,
             "code": 10_440,
             "structured_text": 15_310,
             "csv_tsv": 18_680,
             "html_eml": 14_430,
             "ipynb": 2_240,
-            "pdf_text": 28_580,
-            "pdf_scan": 11_680,
-            "docx": 17_270,
-            "xlsx": 15_430,
-            "pptx": 10_620,
+            "pdf_text": 29_680,
+            "pdf_scan": 11_200,
+            "docx": 16_490,
+            "xlsx": 15_270,
+            "pptx": 10_180,
             "image": 11_380,
             "media": 2_150,
-            "domain_binary": 6_760,
+            "domain_binary": 6_680,
         }
         observed = {family: 0 for family in spec.FORMAT_KEYS}
         for persona_id in spec.PERSONA_IDS:
@@ -164,13 +164,17 @@ class PersonaV2EnvelopeContractTests(unittest.TestCase):
         self.assertEqual(spec.contributor_count("p10", "pilot"), 273)
         self.assertEqual(spec.contributor_count("p14", "full"), 2_464)
         self.assertEqual(spec.contributor_count("p14", "pilot"), 246)
-        self.assertEqual(spec.contributor_count("p08", "pilot"), 219)
-        self.assertEqual(spec.contributor_count("p08", "full"), 2_192)
-        self.assertEqual(spec.contributor_count("p17", "pilot"), 219)
-        self.assertEqual(spec.contributor_count("p17", "full"), 2_192)
+        self.assertEqual(spec.contributor_count("p08", "pilot"), 267)
+        self.assertEqual(spec.contributor_count("p08", "full"), 2_672)
+        self.assertEqual(spec.contributor_count("p11", "pilot"), 268)
+        self.assertEqual(spec.contributor_count("p11", "full"), 2_680)
+        self.assertEqual(spec.contributor_count("p15", "pilot"), 268)
+        self.assertEqual(spec.contributor_count("p15", "full"), 2_680)
+        self.assertEqual(spec.contributor_count("p17", "pilot"), 267)
+        self.assertEqual(spec.contributor_count("p17", "full"), 2_672)
         self.assertEqual(
             tuple(spec.density_bucket_counts("p17", "pilot").values()),
-            (2, 9, 44, 164),
+            (3, 11, 53, 200),
         )
         self.assertEqual(spec.density_chunk_interval("p07", "pilot")[1] - 12_000, 294)
         with self.assertRaisesRegex(spec.PersonaV2ContractError, "density"):
@@ -198,13 +202,38 @@ class PersonaV2EnvelopeContractTests(unittest.TestCase):
         self.assertEqual(contract["lanes"]["byte-stress-v1"]["replay_count"], 1)
         self.assertFalse(contract["lanes"]["recursive-robustness-v1"]["formal_chunk_eligible"])
         self.assertFalse(contract["lanes"]["byte-stress-v1"]["formal_chunk_eligible"])
-        self.assertEqual(contract["capacity"]["formal_retained_suite_bytes"], 88 * 2**30)
+        self.assertIs(contract["capacity"]["absolute_root_bound_caps_frozen"], False)
+        self.assertIs(
+            contract["capacity"]["superseded_unmeasured_absolute_candidates_authoritative"],
+            False,
+        )
         self.assertEqual(contract["capacity"]["byte_stress_payload_per_person"], 740 * 2**20)
         self.assertEqual(contract["capacity"]["byte_stress_cap_per_person"], 768 * 2**20)
         self.assertEqual(contract["capacity"]["byte_stress_suite_cap_bytes"], 15 * 2**30)
-        self.assertEqual(contract["capacity"]["pilot_byte_cap"], 32 * 2**30)
-        self.assertEqual(contract["capacity"]["pilot_reserve_bytes"], 96 * 2**30)
-        self.assertEqual(contract["capacity"]["pilot_inode_cap"], 250_000)
+        self.assertEqual(
+            contract["capacity"]["formal_workload_lower_bounds"]["pilot_w0"],
+            {
+                "contract_chunk_objects_per_replay": 240_000,
+                "source_files_per_replay": 20_300,
+                "source_plus_chunk_regular_file_inodes_per_replay": 260_300,
+            },
+        )
+        self.assertEqual(
+            contract["capacity"]["formal_workload_lower_bounds"]["full_w0"],
+            {
+                "contract_chunk_objects_per_replay": 2_400_000,
+                "source_files_per_replay": 203_000,
+                "source_plus_chunk_regular_file_inodes_per_replay": 2_603_000,
+            },
+        )
+        self.assertEqual(
+            contract["capacity"]["measurement_gate"]["minimum_headroom_basis_points"],
+            2_500,
+        )
+        self.assertIs(
+            contract["capacity"]["measurement_gate"]["pilot_inode_cap_frozen"],
+            False,
+        )
         self.assertEqual(
             contract["history_checkpoints"]["pilot"]["W5-pre-purge"],
             {"current_contract_chunks": 12_480, "history_only_contract_chunks": 6_480},
@@ -264,7 +293,7 @@ class PersonaV2EnvelopeContractTests(unittest.TestCase):
                 - sum(expected_lower["pilot"].values())
                 for persona_id in spec.PERSONA_IDS
             ),
-            7,
+            27,
         )
         self.assertEqual(
             contract["history_checkpoints"],

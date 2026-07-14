@@ -445,19 +445,19 @@ def _canonical_catalog_value():
     }
     expected_counts = {
         "full": {
-            "contract_contributor": 67_296,
+            "contract_contributor": 69_236,
             "incidental_searchable": 60_414,
-            "raw_only": 75_290,
+            "raw_only": 73_350,
         },
         "pilot": {
-            "contract_contributor": 6_731,
+            "contract_contributor": 6_925,
             "incidental_searchable": 6_040,
-            "raw_only": 7_529,
+            "raw_only": 7_335,
         },
         "tiny-smoke": {
-            "contract_contributor": 1_324,
+            "contract_contributor": 1_370,
             "incidental_searchable": 1_108,
-            "raw_only": 1_568,
+            "raw_only": 1_522,
         },
     }
     if suite_counts != expected_counts:
