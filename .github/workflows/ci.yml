@@ -15,6 +15,7 @@ jobs:
           python3 -m unittest -v
           eval.test_persona_v2_contract
           eval.test_persona_v2_topology
+          eval.test_persona_v2_joint_problem
 
   rust:
     runs-on: ubuntu-latest

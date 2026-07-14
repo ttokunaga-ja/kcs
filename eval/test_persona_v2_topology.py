@@ -7,7 +7,7 @@ from eval import persona_v2_contract as envelope
 from eval import persona_v2_topology as topology
 
 
-EXPECTED_TOPOLOGY_SHA256 = "4da9dcd11cf4147026ab7c68e1837a1baa31e43b448fdd4b4d754105788719e4"
+EXPECTED_TOPOLOGY_SHA256 = "fc079fc8e0aaee0ae03a22fee349e0af8f2dfe18e1fed6d8bb05304643e4a958"
 
 
 def _independent_hamilton(total, weights):
@@ -97,10 +97,18 @@ class PersonaV2TopologyTests(unittest.TestCase):
         self.assertEqual(
             value["policy"]["source_bound"],
             {
+                "global_cohort_lower_formula": (
+                    "sum(max(required_scope_count_if_covered_else_zero,"
+                    "ceil(cohort_chunks/max_chunks_per_source)))"
+                ),
                 "lower_formula": (
                     "max(required_cohort_count,ceil(scope_chunks/max_chunks_per_source))"
                 ),
                 "max_chunks_per_source": 70,
+                "profile_global_cohort_source_minimum": {
+                    "pilot": 211,
+                    "full": 1_716,
+                },
                 "required_cohorts_with_positive_source_per_scope": ["P", "X", "Y", "N"],
                 "required_cohort_count": 4,
                 "upper_formula": "min(scope_chunks,scope_physical_files)",
@@ -371,7 +379,7 @@ class PersonaV2TopologyTests(unittest.TestCase):
         )
         self.assertEqual(
             topology.contributor_source_feasibility("p17", "pilot")["lower_headroom"],
-            12,
+            28,
         )
         self.assertEqual(
             topology.contributor_source_feasibility("p17", "pilot")["minimum_scope_span"],

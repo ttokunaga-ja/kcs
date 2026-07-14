@@ -38,8 +38,8 @@ WEIGHT_NORMALIZATION_FORMULA = (
     "weight_i=minimum_bp+hamilton(group_bp-(minimum_bp*scope_count),activity_units)_i"
 )
 PROFILE_PROJECTION_ALGORITHM_ID = "group-subtotal-hamilton-v1"
-MAX_CONTRIBUTOR_CHUNKS_PER_SOURCE = 70
-REQUIRED_SCOPE_HISTORY_COHORTS = ("P", "X", "Y", "N")
+MAX_CONTRIBUTOR_CHUNKS_PER_SOURCE = envelope.MAX_CONTRIBUTOR_CHUNKS_PER_SOURCE
+REQUIRED_SCOPE_HISTORY_COHORTS = envelope.REQUIRED_SCOPE_HISTORY_COHORTS
 MIN_CONTRIBUTOR_SOURCES_PER_SCOPE = len(REQUIRED_SCOPE_HISTORY_COHORTS)
 PRIMARY_SCOPE_COUNT = 12
 SECONDARY_SCOPE_COUNT = 8
@@ -314,6 +314,11 @@ def _canonical_contract_value():
     )
     if envelope_required_cohorts != REQUIRED_SCOPE_HISTORY_COHORTS:
         raise PersonaV2TopologyError("envelope history scope-coverage contract differs")
+    if (
+        envelope_value["history_cohort_contract"]["required_scope_count"]
+        != SCOPES_PER_PERSONA
+    ):
+        raise PersonaV2TopologyError("envelope history scope count differs")
     envelope_max_quota = max(
         maximum for _, maximum in envelope.DENSITY_BUCKET_BOUNDS.values()
     )
@@ -393,8 +398,18 @@ def _canonical_contract_value():
             "secondary_functional_slots": list(SECONDARY_FUNCTIONAL_SLOTS),
             "secondary_scope_count": SECONDARY_SCOPE_COUNT,
             "source_bound": {
+                "global_cohort_lower_formula": (
+                    "sum(max(required_scope_count_if_covered_else_zero,"
+                    "ceil(cohort_chunks/max_chunks_per_source)))"
+                ),
                 "lower_formula": "max(required_cohort_count,ceil(scope_chunks/max_chunks_per_source))",
                 "max_chunks_per_source": MAX_CONTRIBUTOR_CHUNKS_PER_SOURCE,
+                "profile_global_cohort_source_minimum": {
+                    profile: sum(
+                        envelope.history_cohort_source_lower_bounds(profile).values()
+                    )
+                    for profile in ("pilot", "full")
+                },
                 "required_cohorts_with_positive_source_per_scope": list(
                     envelope_required_cohorts
                 ),
