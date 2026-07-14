@@ -710,3 +710,59 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     not observed user statistics; persona realism remains separately blocked by
     `persona_fidelity_realism_profile_and_overlay_missing` until a search-participating
     duplicate/revision/conflict/attachment overlay and its ledgers are frozen.
+110. Persona-PC v2 uses a one-way, non-authorizing solver sequence: exact solver-semantics policy
+    sidecar; then the reviewed persona-realism overlay, pre-solve source-intent recipe, reviewed route
+    matrix, and fact/oracle input closure; then an aggregate plus source-intent-refinement canonical
+    solution and either an execution receipt with bounded canonical replay or an independently
+    verifiable complete proof; only then the final source plan, writer, and history executor.  A
+    solution may not precede the overlay or recipe.  Per persona/profile, physical cells are
+    `A[v,s]` and contributor cells are `C[v,s,b,h,q]`.  With contributor source/chunk totals
+    `N/T`, scope chunk target `t_s`, bucket-source marginal `D_b`, cohort-chunk marginal `H_h`,
+    `n_s=sum C`, `d_b,s=sum C` by bucket/scope, `r_h,s=sum C` by cohort/scope,
+    `k_h,s=sum q*C` by cohort/scope, `z_b,s,q=sum C` by bucket/scope/quota,
+    number of integer quotas in bucket b `w_b`, and `W=240`, the five exact integer layers are
+    `sum_s|T*n_s-N*t_s|`, `sum_b,s|N*d_b,s-D_b*n_s|`,
+    `sum_h,s|T*r_h,s-H_h*n_s|`, `sum_h,s|T*k_h,s-H_h*t_s|`, and
+    `sum_b,s,q(W/w_b)|w_b*z_b,s,q-d_b,s|`.  Cohort-source and quota-uniform layers are benchmark
+    canonicality regularizers, not observed user statistics.  Every marginal and score constant is
+    phase-specific; a full score may not reuse pilot constants.  Exact hard constraints bind variant
+    and scope A marginals, contributor `A=sum C`, density-source and cohort-chunk marginals, scope
+    `sum q*C`, and P/X/Y/N coverage of every scope.  For reviewed
+    `R[persona,variant,scope] in 0..4`, phase marginal `M_phi,v`, and
+    `V+={v | M_full,v>0}`,
+    route loss is exactly
+    `sum_v-in-V+ M_phi,v*max_s R - sum_v-in-V+,s A_phi[v,s]*R[v,s]` and counts physical `A` once.
+    The strict tuple minimizes the pilot five layers, pilot route loss, dense
+    `Flat(A_pilot),Flat(C_pilot)`, then the full-aggregate five layers and route loss, then
+    `Flat(deltaA),Flat(deltaC)`; a pilot candidate must have an exact full extension.  Persona is an
+    outer solve/serialization order, not a flat cell axis.  Each dense A tensor retains all
+    566 bound persona-variant rows (11,320 cells), while route covers only the 541 rows whose full
+    variant marginal is positive (10,820 scores); the omitted 25 rows are hard-zero.  Each C tensor
+    has 116 contributor rows and 812,000 cells.  The pilot-plus-residual decision therefore has at
+    least 22,640 A and 1,624,000 C coordinates before solver auxiliaries.  Joins use persona plus
+    variant ID, never display or filtered position.  V1 route hints are unusable for v2 because only 749/10,820 scores are nonzero,
+    md/txt_log are all zero, and secondary scopes are biased; the complete 0--4 matrix remains blocked
+    on an independent review receipt.
+    Aggregate tie-breaking is semantic dense lexicographic order, never hash-spread.  A
+    domain-separated hash is reserved for post-solve source/materialization identity.  To avoid a
+    cycle, the pre-solve recipe contains immutable `intent_key` values and overlay/fact membership but
+    no final IDs; source-intent refinement assigns semantic cells and cell-local ordinals, final IDs
+    derive from the input-closure namespace plus persona, immutable `pilot|full-residual` origin,
+    `intent_key`, those coordinates, and the ordinal without hashing their enclosing payload/solution/
+    plan.  Pilot ordinals remain reserved unchanged in full so residual additions cannot renumber or
+    collide with pilot IDs, and the downstream final source plan binds the solution and IDs.
+    Aggregate-cell, source-ID, materialization, and rendered-byte pilot subset claims remain four
+    separate false claims until independently established.  Warm-start steps, objective values, and
+    marginal hashes alone are an execution receipt, not a global-optimality certificate; proof requires
+    bounded canonical exact replay or a complete lower-bound/dual proof.  None of these semantics grants
+    G0, rendering, write, or history authority.
+111. The first v2 solver-policy artifact is frozen only as the generic aggregate core, schema
+    `kcs.persona.pc-joint-solver-policy/v2`: 82,950 canonical bytes, SHA-256
+    `29046b5b5d60d25db51a670e597617bec07b7c4513bded39196bb1053ee52f41`.  It binds the envelope,
+    topology, and joint necessary problem one-way; defines the A/C axes, hard aggregate equations,
+    strict 16-component objective, checked 127-bit arithmetic, and provisional deterministic counters;
+    and contains no route matrix, realism/source-intent refinement, source recipe, solution, proof, or
+    source rows.  The 512 KiB bound is an in-memory canonical cap, not framed-loader evidence.  Therefore
+    `exact_objective_evaluable`, `exact_solver_executable`, `policy_definition_complete_for_bound_problem`,
+    `solver_policy_bound`, all four pilot subset proofs, G0, write, and history authority remain false;
+    resource limits remain empirically uncalibrated.
