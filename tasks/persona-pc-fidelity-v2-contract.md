@@ -1,8 +1,9 @@
 # Persona-PC fidelity v2 G0 contract
 
 Status: envelope、exact topology、joint必要条件problem、generic aggregate-core solver-policy、
-20人別realism profile/overlay marginal、71 variant identity/566 persona marginal catalog sidecarまで実装済み。
-必要条件は全20人で通過したが、overlay membership/review、route/source-intent/fact-oracle入力、実行可能solver、
+20人別realism profile/overlay marginal、71 variant identity/566 persona marginal catalog、541-row route候補、
+20人x4 typed fact-graph leafまで実装済み。
+必要条件は全20人で通過したが、overlay membership/review receipt、source-intent、semantic oracle/query、実行可能solver、
 solution、proofは含まない。`g0_contract_frozen=false`、G0 root未実装、非authorizing。
 現行`kcs-persona-pc-v1`、そのartifact、golden hash、writer、history planを変更しない。
 
@@ -347,6 +348,11 @@ dense zero-inclusive vectorとする。personaはflat cell軸ではなくsuite s
 1 tensorあたりfull-zeroを含む566 bound persona x declared-variant rows、11,320 cellsを保持する。
 route matrixは`full variant marginal > 0`をactiveとする別の541 rows、10,820 scoresであり、除外する25 rowsは
 hard-zero `A`なので`R`を要求しない。`C`は1 tensorあたり116 contributor rows、812,000 cellsである。
+global 71 variants x 20 personasの概念空間1,420組をroute軸へ拡張しない。566 declared rowsのうち
+541 activeだけが`R` rowを持ち、25 declared hard-zeroと854 undeclared/out-of-domain組は別分類とする。
+`R=0`はsoft affinityなしであって配置禁止ではない。hard eligibilityはsource-intentが推移的に束縛する
+`eligible_scope_keys`だけで決める。candidate matrixは各rowで`max(R)=4`、最大score scope数1--8とし、
+secondary-only maximumまたは同一variant vectorの人物間cloneは独立reviewのreasoned waiverを要求する。
 joint pilot+residual decision coordinatesは最低22,640 `A` cellsと1,624,000 `C` cellsであり、
 absolute-value/search auxiliary stateは別に数える。
 envelope内の表示順とASCII順が異なる場合も`persona_id+variant_id`でjoinし、位置やfiltered row番号で
@@ -377,7 +383,7 @@ canonical bytes = 82,950
 sha256          = 29046b5b5d60d25db51a670e597617bec07b7c4513bded39196bb1053ee52f41
 ```
 
-ただしroute matrix/review receipt、realism/source-intent refinement、source recipe/variant feasibility、
+ただしroute matrixの独立review receipt、realism/source-intent refinement、source recipe/variant feasibility、
 fact/oracle/query specが未束縛なので、`exact_objective_evaluable=false`、`exact_solver_executable=false`、
 `policy_definition_complete_for_bound_problem=false`、`solver_policy_bound=false`である。探索上限も
 `resource_limits_empirically_calibrated=false`であり、cap到達は`resource_exhausted-unknown`とする。
@@ -490,7 +496,12 @@ chunksを解く。allocation後のpost-hoc追加は禁止する。
 ## 8. source recipeとoracle
 
 pre-solve source-intent artifactは共通catalogとimmutable intentを分離する。overlayとfact membershipは
-すべて`intent_key`を参照し、この段階ではfinal source/materialization IDを持たない。
+すべて`intent_key`を参照し、この段階ではfinal source/materialization IDを持たない。各intentは
+`pilot|full-residual`のimmutable originを持つ。`source_profile_id`がfamily/variant/gate role/media/
+renderer/validatorをpre-solveで一意に固定し、refinementはそれを再選択せず一致を検証する。
+refinementが新たに割り当てるのはscope、bucket、cohort、quota、cell-local ordinalだけである。
+`eligible_scope_keys`は人物catalogの`eligible_scope_set_id`から推移的に束縛できるものとし、20 scope keyを
+全source rowへ反復保存しない。
 
 ```text
 catalogs:
@@ -498,7 +509,7 @@ catalogs:
   filename_templates / content_templates / permission_profiles / mtime_buckets
   validators / renderer_profiles
 intents:
-  persona_id / intent_key / source_profile_id / eligible_scope_keys
+  persona_id / intent_key / origin / source_profile_id / eligible_scope_set_id
   project_or_case_id / entity_ids / fact_ids / period / status / version
   contributor_eligibility / allowed_bucket_ids / expected_incidental_chunks_upper
   target_complexity / target_bytes / duplicate_or_conflict_group / payload_seed
@@ -506,8 +517,8 @@ overlay_memberships:
   relation_kind / cluster_key / intent_keys / search_participation
 ```
 
-aggregate solutionに続くsource-intent refinementは、各`intent_key`へscope、family/variant、
-bucket/cohort/quota、cell-local ordinalをexactに割り当て、overlay/duplicate-cluster constraintも検証する。
+aggregate solutionに続くsource-intent refinementは、各`intent_key`のpre-bound family/variantを検証し、
+scope、bucket/cohort/quota、cell-local ordinalをexactに割り当て、overlay/duplicate-cluster constraintも検証する。
 final source/materialization IDはinput-closure namespaceと解かれたsemantic coordinates/cell-local ordinalの
 domain-separated hashから導出する。preimageは`persona_id`、immutable origin
 `pilot|full-residual`、`intent_key`も含む。pilot cell-local ordinalはfullでも不変に予約し、residual
@@ -522,6 +533,14 @@ ID、path、digest、fixture nonceを露出しない。
 fact graphとanswer membershipをrendererより先に凍結する。corpus template/seed、event seed、query
 template/seedを別domainに置く。query artifactはcorpus rendererから参照不能とし、query text/templateを
 source recipeへ入れない。
+
+fact/oracle/queryは混在bodyにしない。人物ごとに(1) intent/query/answerを参照しないtyped fact graph、
+(2) `intent_key`とlogical document keyだけを持つsemantic answer membership、(3) corpus rendererから
+参照不能なquery-intent、(4)これらのbytes/SHAを束縛するmanifestへ分ける。rendererにはfinal source plan、
+fact graph、corpus template/seedの最小projectionだけを渡し、answer/distractor/query membershipを渡さない。
+query text、compiled final-ID relevance、actual rank/score/latencyはそれぞれ後段artifactとする。
+fact graphは人物ごとexact 4、suite exact 80 graphとし、現在のleafは各人物16 entities、32 typed facts、
+4 revision chainsを持つ。
 
 各人物はexact 90 positive queries（30 x M3-1/M3-2/M3-3）と15 purged-negative（5 x 3）を持つ。
 suite全体で1,800 positive query textをbyte-uniqueにする。scenario内の30問は次の3 strataを各10問とする。
@@ -557,10 +576,18 @@ in-memory canonical capであり、framed loader安全性は未実装なのでlo
 - joint necessary problem: 4 MiB/suite（現在744,081 bytes）
 - joint solver policy: 512 KiB/suite
 - W0 persona plan: 16 MiB、最大16,000 W0 sources、20 scopes
+- source-intent shard: 4 MiB、最大4,096 intents。pilotは専用shard、fullは同じpilot bytesを再利用して
+  full-residual shardだけを追加する
+- source-intent人物package: frame/header、manifest、intent/overlay shardを含む合計16 MiB。rowは最大768 bytes
 - joint allocation execution receipt or independently verifiable proof: 8 MiB/person
 - history intent/event recipe: 16 MiB/person、event-created sources最大4,096/person
-- oracle/query spec: 4 MiB/person、positive 90、negative 15
+- fact/oracle/query bundle: 4 MiB/person。fact graph 1 MiB、semantic oracle 1.5 MiB、query intent 1 MiB、
+  manifest 128 KiBをsubcapとし、positive 90、negative 15
 - suite descriptor/compact summaries: 4 MiB
+
+現203,000件を上記shard規則で分けると、20 pilot shardsと53 full-residual shardsの計73 intent shardsとなる。
+pilot/fullは同じ行を再生成して同値とみなすのではなく、full人物manifestがpilot shardの同一bytes/SHAを
+参照し、residualだけを追加する。
 
 suite buildは1 personaずつ行い、20 full plansを同時保持しない。p12の16,000 W0 sourcesと
 event-created replacement recipesは別inventory/別上限であり、W0 capを暗黙超過させない。
