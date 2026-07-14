@@ -7,7 +7,7 @@ from eval import persona_v2_query_intent as query_intent
 
 EXPECTED_P01_CANONICAL_BYTES = 65_798
 EXPECTED_P01_SHA256 = (
-    "85b29c60b60ee4d78489e03115b334e00479f2860c25645c2f46f198bf2b2b61"
+    "a03e44be981facb65742e38f76874f6c17fde4d428befc365ddacf1f3a355d0b"
 )
 
 

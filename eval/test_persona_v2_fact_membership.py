@@ -103,13 +103,20 @@ class PersonaV2FactMembershipTests(unittest.TestCase):
                 row["name"] for row in source["input_bindings"]
             ])
 
-    def test_conflict_copy_is_fail_closed_instead_of_inventing_facts(self):
+    def test_conflict_fact_precondition_is_projected_without_overlay_escalation(self):
         for value in self.values:
             conflict = value["conflict_copy_feasibility"]
             self.assertIs(conflict["conflict_overlay_membership_complete"], False)
+            self.assertIs(
+                conflict["unordered_w0_current_fact_pair_precondition_complete"],
+                True,
+            )
+            self.assertIs(
+                conflict["distinct_conflict_branch_membership_complete"], False
+            )
             self.assertEqual(
                 conflict["existing_unordered_w0_current_conflict_fact_pair_count"],
-                0,
+                1,
             )
             self.assertIs(conflict["fact_invention_allowed"], False)
             self.assertIs(
@@ -117,9 +124,14 @@ class PersonaV2FactMembershipTests(unittest.TestCase):
                 True,
             )
             self.assertIn(
-                "unordered-w0-current-conflict-branch-facts-not-present",
+                "distinct-conflict-branch-membership-not-bound",
                 value["remaining_blockers"],
             )
+            row = value["memberships"][0]
+            self.assertEqual(len(row["unordered_w0_current_fact_pairs"]), 1)
+            members = row["unordered_w0_current_fact_pairs"][0]["member_fact_ids"]
+            self.assertEqual(members, sorted(members))
+            self.assertTrue(set(members) <= set(row["present_fact_ids"]))
 
     def test_every_authority_and_environment_capability_remains_false(self):
         for value in self.values:
@@ -178,6 +190,19 @@ class PersonaV2FactMembershipTests(unittest.TestCase):
             "conflict_overlay_membership_complete"
         ] = True
         mutations.append(changed)
+        changed = copy.deepcopy(value)
+        changed["conflict_copy_feasibility"][
+            "distinct_conflict_branch_membership_complete"
+        ] = True
+        mutations.append(changed)
+        changed = copy.deepcopy(value)
+        changed["memberships"][0].pop("unordered_w0_current_fact_pairs")
+        mutations.append(changed)
+        changed = copy.deepcopy(value)
+        changed["memberships"][0]["unordered_w0_current_fact_pairs"][0][
+            "member_fact_ids"
+        ].pop()
+        mutations.append(changed)
         for changed in mutations:
             with self.assertRaises(membership.PersonaV2FactMembershipError):
                 membership.validate_fact_membership("p01", changed)
@@ -188,7 +213,7 @@ class PersonaV2FactMembershipTests(unittest.TestCase):
         first = membership.build_fact_membership("p01")
         second = membership.build_fact_membership("p01")
         first["memberships"][0]["present_fact_ids"].pop()
-        self.assertEqual(len(second["memberships"][0]["present_fact_ids"]), 7)
+        self.assertEqual(len(second["memberships"][0]["present_fact_ids"]), 8)
 
 
 if __name__ == "__main__":

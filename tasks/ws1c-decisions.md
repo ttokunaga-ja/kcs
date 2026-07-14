@@ -945,3 +945,19 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     exact provider validator; the closure scanner is defense-in-depth for canonical fields and explicitly
     declared aliases, not an unbounded synonym interpreter.  Validators must return exact true, and the
     provider body must match its pinned bytes, SHA-256, fixture identity, schema, kind, and dependency graph.
+120. Persona-PC v2 conflict feasibility is split between a typed-fact prerequisite and later distinct-
+    branch overlay assignment.  This decision supersedes only the fact counts and conflict-absence
+    statements in decisions 116 and 119.  Each of the eighty persona-local graphs now contains one
+    canonical two-member conflict set: the facts have the same subject and predicate, unequal typed values,
+    are both current at W0, do not belong to the revision chain, and are mutually unreachable through fact
+    edges.  The suite therefore contains 80 graphs, 320 entities, 720 facts, 80 conflict sets, and 80
+    revision chains.  Persona bodies are 26,353--26,672 canonical bytes and total 530,008 bytes.  The
+    representative source-intent and fact-membership project the pair without inventing facts, but both
+    facts remain inside one representative membership; no distinct branch endpoint is assigned.  Therefore
+    `unordered_w0_current_fact_pair_inventory_complete=true` and
+    `unordered_w0_current_fact_pair_precondition_complete=true` are narrow input claims, while
+    `distinct_conflict_branch_membership_complete=false`, overlay membership/placement, and
+    `conflict_fact_realizability_proved=false` remain blockers.  The non-authorizing overlay candidate is
+    now 69,119 canonical bytes, SHA-256
+    `60c17e893f02309cec4d1de7debca211b2b84fb38c9a41f7f5fb6c586748d4a8`.  No G0, solver,
+    renderer, filesystem, KCS, history, capacity, or write authority follows from the fact-pair prerequisite.
