@@ -1,8 +1,9 @@
 # 20人の独立persona-PC fidelity v2提案
 
 Status: proposal only。envelope marginals、exact topology、pilot/full/full-minus-pilotのjoint必要条件problem、
-generic aggregate-core solver-policy sidecarは実装済みだが未承認である。route/realism/source-intent入力、
-source-level exact allocation、G0 rootは未実装である。
+generic aggregate-core solver-policy、20人別realism profile/overlay marginal targets、71 variant identityと
+566 persona marginalのcatalog sidecarまで実装済みだが未承認である。overlay membership、review receipt、
+route/source-intent/fact-oracle入力、source-level exact allocation、G0 rootは未実装である。
 現行`kcs-persona-pc-v1`を黙って変更せず、採用時はfixture、renderer、plan、manifestをすべてv2へ上げる。
 
 G0のversion境界、pilot projection、joint solver、source recipe、negative authorityの詳細は
@@ -379,9 +380,13 @@ role別・variant別に読み戻し、contract exact、incidental cap内、raw-o
 ### 4.2 persona realism overlay
 
 `benchmark_stress_mix_v2`はphysical format構成のstress mixであり、1人の実PCを観測した統計ではない。
-PCらしさは別軸の`persona_realism_profile`として、既存physical materializationへoverlayする。初期候補は
-exact duplicate 1--3%、near/visible revision 3--8%、conflict copy 0.2--1%、standalone attachment copy
-1--4%だが、現時点では凍結値ではない。G0では人物別exact integer、分母、重複可否、検索参加規則を固定する。
+PCらしさは別軸の`kcs.persona.pc-realism-profile/v2`として、既存physical materializationへoverlayする。
+人物別のOS/case/device、locale/language、timezone/固定offset、retention、mtime、permission、placement、
+account数と、exact duplicate 1--3%、near/visible revision 3--8%、conflict copy 0.2--1%、
+standalone attachment copy 1--4%のexact rate/count marginalはsidecar化した。suite fullのtargetは
+exact 5,080、near 13,230、conflict 1,560、attachment 5,690で、pilotはexactに各10分の1である。
+これらはauthored benchmark stress hypothesisであり観測統計ではない。また、まだintent membership、
+placementの整数割当、logical-document採点、検索参加、8軸台帳、独立review receiptを凍結していない。
 overlayを理由にphysical file総数やfamily比へfileを暗黙追加しない。
 overlayはpre-solve source-intent recipeとjoint solverの入力としてallocation前に固定し、解の後へ
 post-hoc追加しない。aggregate `A/C`だけではper-intent cluster配置を証明できないため、membershipを
@@ -392,7 +397,9 @@ post-hoc追加しない。aggregate `A/C`だけではper-intent cluster配置を
 container members/attachments、current/history versions、duplicate/conflict clusters、allocated bytes、
 cloud/OS由来metadataとignored/excluded entriesを別台帳で整合させる。exact/near/conflictは排他的な
 content-relation軸、attachmentは直交するcontainer-role軸として二重計上を防ぐ。これが未確定の間は
-`persona_fidelity_realism_profile_and_overlay_missing`をG0 blockerとして維持する。
+`overlay-intent-memberships-not-present`、`overlay-placement-integer-allocation-not-bound`、
+`logical-document-scoring-and-search-participation-not-bound`、`eight-axis-ledger-contract-not-bound`を
+G0 blockerとして維持する。
 
 ## 5. family内extension/variant比
 
@@ -597,6 +604,10 @@ root-bound capacity receiptが上限内と証明するまでfull writeはblocked
 byte-stressは1 replay、W0-only、20人×64 raw-only filesとする。1人あたりsmall 32×128 KiB、
 medium 16×2 MiB、large 12×32 MiB、tail 4×80 MiBでpayload 740 MiB、receipt余裕込み
 768 MiB/person、20人で15 GiBを上限候補にする。
+catalog上のbyte-stress eligibilityはformal variant source rowのgate roleを再利用せず、format encodingと
+validator identityだけを別lane projectionへ貸す。projectionは常にlane-local `raw_only`、requested chunks 0、
+actual chunks 0である。expanded 8 MiB上限を持つOOXML/archive container encodingはsmall/mediumだけに使い、
+large/tailはnon-container encodingへ限定する。
 
 容量判定は`st_blocks`相当のallocated bytesを使い、hard link、clone、sparse、filesystem compressionで
 見かけだけの容量を作ることを禁止する。
@@ -650,7 +661,7 @@ hostのHOME、USER、hostname、環境credential、実PII/PHI、network/live syn
 
 | Gate | 実装・実行 | 合格条件 | 現在地 |
 | --- | --- | --- | --- |
-| G0 v2契約凍結 | 400 exact scope paths/load、family/extension/variant整数比、`persona_realism_profile`と8軸台帳、ambient spec、共有辞書、pre-solve source-intent recipe、size、fact/oracle、W0-W5 exact eventをversioned artifact graphとsuite descriptor hashへ固定 | generator変更前に全20人でcanonical rebuild。joint solverがrealism overlayを入力にfull contributor=120,000とpilot=12,000、scope routing、wave別incidental上限、plan 16 MiB上限をexactに解く | envelope、exact topology、joint必要条件problem、generic solver sidecarまで実装。input closure/solution/root未実装 |
+| G0 v2契約凍結 | 400 exact scope paths/load、family/extension/variant整数比、`persona_realism_profile`と8軸台帳、ambient spec、共有辞書、pre-solve source-intent recipe、size、fact/oracle、W0-W5 exact eventをversioned artifact graphとsuite descriptor hashへ固定 | generator変更前に全20人でcanonical rebuild。joint solverがrealism overlayを入力にfull contributor=120,000とpilot=12,000、scope routing、wave別incidental上限、plan 16 MiB上限をexactに解く | envelope、topology、joint必要条件、generic solver policy、realism marginal、variant identity/marginalまで実装。membership/input closure/solution/root未実装 |
 | G1 v2 tiny W0 | 20人×200 files/persona-PC rootを1人・1sourceずつstreaming作成 | 4,000 files/suite replay、2 fresh suite replays合計8,000 writes、400 scopes/replay、比率/path/hash/readback、inode非共有 | v1相当は済。v2回帰が必要 |
 | G2 pilot W0 | pilot-first solverのexact subset、計20,300 files、各人12,000 planned、init→offline index | 各人actual contributor 12,000、raw-only 0、planned/actualを別台帳化 | streaming writerと完全attestorが未実装 |
 | G3 pilot W1-W5 | immutable eventをmutation前に検証し、edit/rename/move/duplicate/derive/archive/delete/restore/purge | exactly-once journal、再開収束、waveごとのactual attestation、purge後index noop | v1相当のみ済。v2 allocator/manifest未実装 |
@@ -778,14 +789,24 @@ v2で実装済み（planning only、non-authorizing）:
 - generic aggregate-core solver-policy sidecar canonical 82,950 bytes、SHA-256
   `29046b5b5d60d25db51a670e597617bec07b7c4513bded39196bb1053ee52f41`。route matrix、
   realism/source-intent refinement、solution/proofを含まず、実行・G0・write authorityはすべてfalse
+- strict post-policy canonical helperとone-way upstream binding。fixture identity、pinned body bytes/SHA、
+  全authority mapと指定execution/proof denial、downstream/back-binding不在をfail closedで検査するが、
+  framed loaderではない
+- `kcs.persona.pc-realism-profile/v2` canonical 36,811 bytes、SHA-256
+  `3f3239cdb7b7da954282b0e6224526ca66dbadd678dc705dde4d46340f0b46bf`。20人のprofile vectorと
+  overlay marginal targetだけがcompleteで、membership/scoring/placement整数割当/8軸台帳/G0はfalse
+- `kcs.persona.pc-variant-catalog/v2` canonical 211,734 bytes、SHA-256
+  `9eb29e7dc52acddfb9e57249d88791d07de4a1dadfac949119980c58f9c11be8`。71 identityと566 marginal、
+  content MIME/KCS path MIME、形式別complexity/byte lane候補を束縛するが、全renderer/validatorと
+  source-level feasibility/G0はfalse
 
 v2で残るもの:
 
-- 20人別のv2 fidelity attribute、timezone/retention/permission/mtime/conflict exact値とreview receipt
-- `persona_realism_profile`、検索参加するduplicate/revision/conflict/attachment overlay、8軸台帳
+- realism profileとvariant catalogの独立review receipt、overlay intent membership、placement整数割当、
+  logical-document採点/検索参加、8軸台帳
 - chunk/complexity/bytesを分離したpre-solve source-intent recipe、人物・family別byte p50/p95/tail、
   source-level semantic filenameとfact graph
-- 実装済みextension/domain marginalsを束縛するcomplete variant catalog、valid validator/renderer
+- source-level feasibility parameterを持つcomplete variant catalog、valid validator/renderer
 - reviewed persona x variant x scope route matrixとfact/oracle input closure
 - generic sidecarを上記input closureへ束縛するcomplete objective instance/evaluator、探索上限の実solver校正
 - aggregate + source-intent refinementのcanonical solution、400 scopeへのfamily/variant/density/cohort同時routing、

@@ -766,3 +766,38 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     `exact_objective_evaluable`, `exact_solver_executable`, `policy_definition_complete_for_bound_problem`,
     `solver_policy_bound`, all four pilot subset proofs, G0, write, and history authority remain false;
     resource limits remain empirically uncalibrated.
+112. Persona-PC v2 realism is split into an exact profile/marginal artifact and later intent
+    membership so that the hash graph remains one-way.  Schema
+    `kcs.persona.pc-realism-profile/v2` binds twenty literal, independently rooted synthetic-owner
+    hypotheses for OS/case/device metadata, locale/language weights, pinned timezone offsets,
+    retention and mtime buckets, permission and placement weights, account counts, and exact
+    duplicate/near/conflict/attachment marginal targets.  Its canonical body is 36,811 bytes,
+    SHA-256 `3f3239cdb7b7da954282b0e6224526ca66dbadd678dc705dde4d46340f0b46bf`.
+    Full-suite targets are 5,080 exact duplicates, 13,230 near revisions, 1,560 conflict copies,
+    5,690 standalone attachments, and 19,870 binary content-relation clusters; pilot is exactly one
+    tenth.  Exact/near/conflict are mutually exclusive, binary, physical-member-disjoint relation
+    clusters, while attachment is an orthogonal role with an explicit exact-duplicate overlap target.
+    These are authored benchmark stress hypotheses, not observed user statistics.  Only profile
+    vectors and marginal targets are complete.  Intent membership, placement integer allocation,
+    logical-document scoring/search participation, the eight-axis ledger, independent review,
+    source-intent refinement, G0, rendering, writing, and history authority all remain false.
+113. Persona-PC v2 variant identity/marginal completion is a separate non-authorizing sidecar,
+    schema `kcs.persona.pc-variant-catalog/v2`, canonical body 211,734 bytes, SHA-256
+    `9eb29e7dc52acddfb9e57249d88791d07de4a1dadfac949119980c58f9c11be8`.
+    It exactly projects all 71 variant identities and all 566 persona/family/variant tiny/pilot/full
+    marginals, separates content MIME from current KCS path MIME, and assigns format-specific
+    complexity units rather than collapsing EML, notebooks, tabular rows, HTML sections, and
+    structured records.  Formal complexity lanes bind text PDF 1--72 pages, scan PDF 1--50 pages,
+    EML 0--5 attachments, XLSX 1--20 sheets, PPTX 1--40 slides, and image/media/domain ordinary and
+    persona-global tail byte ranges.  A separate W0-only byte-stress lane includes PDF, EML, XLSX,
+    PPTX, image, media, and domain binary without changing formal marginals, chunks, or Recall.
+    It reuses only format encoding/validator identity, is not a formal variant source row, and is always
+    lane-local raw-only with requested/actual chunks zero.  OOXML and archive encodings are bounded
+    containers limited to small/medium stress classes; large/tail require a non-container encoding.
+    Target-byte/quota feasibility formulas, deterministic
+    padding, all v2 renderers and validators, and production cross-language MIME goldens remain absent,
+    so every byte/complexity parameter-completion claim, source-level feasibility, G0, and execution/
+    write/history authority remains false.  The shared upstream binder independently hashes canonical
+    bodies, preserves the exact fixture identity tuple, pins the four upstream body sizes/digests,
+    requires every authority map and the designated execution/proof denial fields false, and rejects
+    unexpected downstream SHA paths; it is still not a bounded framed external loader.

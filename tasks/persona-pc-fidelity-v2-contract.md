@@ -1,8 +1,9 @@
 # Persona-PC fidelity v2 G0 contract
 
-Status: envelope、exact topology、joint必要条件problem、generic aggregate-core solver-policy sidecarまで
-実装済み。必要条件は全20人で通過したが、route/realism/source-intent入力、実行可能solver、solution、proofは
-含まない。`g0_contract_frozen=false`、G0 root未実装、非authorizing。
+Status: envelope、exact topology、joint必要条件problem、generic aggregate-core solver-policy、
+20人別realism profile/overlay marginal、71 variant identity/566 persona marginal catalog sidecarまで実装済み。
+必要条件は全20人で通過したが、overlay membership/review、route/source-intent/fact-oracle入力、実行可能solver、
+solution、proofは含まない。`g0_contract_frozen=false`、G0 root未実装、非authorizing。
 現行`kcs-persona-pc-v1`、そのartifact、golden hash、writer、history planを変更しない。
 
 Date: 2026-07-14
@@ -47,6 +48,9 @@ performanceは呼び出さない。
 
 robustness entryとbyte-stress entryをformal family ratio、scope count、chunk count、Recall queryへ
 混ぜない。各laneは別root、別manifest、別receiptを持つ。
+byte-stress catalog projectionはformal variant source rowではなく、format encoding/validator identityだけを
+参照する。lane-local gate roleは常に`raw_only`、requested chunks 0、observed gateはactual chunks 0とする。
+expanded 8 MiB上限のcontainer encodingはsmall/medium size classだけ、large/tailはnon-containerだけを許す。
 
 ## 3. profileとpilot projection
 
@@ -156,9 +160,12 @@ extensionだけを付け替えたbytesは禁止する。ZIP/IFCZIP、USTAR、GZI
 独立validatorを割り当てる。SQLiteはruntime/version/compile optionsを完全に束縛できるまでformal
 variantへ入れない。
 
-現envelopeはfamily/variant ratio、extension、gate role、planned disposition、validator/renderer identityを
-機械化したが、variant別`complexity_unit`とfeasibility parameterはsource recipe/renderer設計まで未確定である。
-その間は`variant_catalog_complete=false`とし、G0 root hashを発行しない。
+現envelopeに加え、`kcs.persona.pc-variant-catalog/v2` sidecarは71 identity、566 persona marginal、
+content MIMEとKCS path MIME、形式別complexity unit、formal/byte-stress lane境界を機械化した。
+canonical bodyは211,734 bytes、SHA-256
+`9eb29e7dc52acddfb9e57249d88791d07de4a1dadfac949119980c58f9c11be8`である。ただしtarget bytes/quotaの
+feasibility formula、v2 renderer、standalone validator、production MIME cross-language goldenは未実装で、
+全rowの`parameters_complete=false`、`variant_catalog_complete=false`を維持し、G0 root hashを発行しない。
 
 offline dispositionはfamilyではなくvariant別に固定する。例:
 
@@ -184,11 +191,22 @@ raw identity共有、distinct `(scope_key, chunk_id)` 寄与を証明できな�
 `intent_key`へ束縛したsource-intent refinementを解き、同一scopeでのcollapseを含めても人物ごとの
 contract targetをexactに保つ。
 
+`kcs.persona.pc-realism-profile/v2` sidecarは20人のOS/case/device、locale/language、pinned timezone offset、
+retention/mtime/permission/placement、account数とoverlay marginal rate/countをexactに束縛した。
+canonical bodyは36,811 bytes、SHA-256
+`3f3239cdb7b7da954282b0e6224526ca66dbadd678dc705dde4d46340f0b46bf`である。full suiteのmarginalは
+exact duplicate 5,080、near revision 13,230、conflict 1,560、standalone attachment 5,690、pilotは各10分の1。
+`profile_vectors_complete=true`と`overlay_marginal_targets_complete=true`はこの範囲だけを指す。
+intent membership、placement整数割当、logical-document採点/検索参加、8軸台帳、review receiptは未完了である。
+
 最低限、physical materializations、logical documents、gate/search roleとchunks、container members/
 attachments、current/history versions、duplicate/conflict clusters、allocated bytes、cloud/OS由来metadataと
 ignored/excluded entriesを別台帳で整合させる。exact/near/conflictは排他的なcontent-relation軸、attachmentは
-直交するcontainer-role軸とする。未確定の間は
-`persona_fidelity_realism_profile_and_overlay_missing` blockerを維持する。
+直交するcontainer-role軸とする。frozen envelope内のlegacy総称
+`persona_fidelity_realism_profile_and_overlay_missing`は変更せず維持し、後続sidecarでは
+`overlay-intent-memberships-not-present`、`overlay-placement-integer-allocation-not-bound`、
+`logical-document-scoring-and-search-participation-not-bound`、`eight-axis-ledger-contract-not-bound`を
+具体的な未完了条件として追加する。
 
 ## 6. joint allocation
 
@@ -534,6 +552,8 @@ bodyを読む前のframed byte capを持つ。現solver-policy sidecarの512 KiB
 in-memory canonical capであり、framed loader安全性は未実装なのでloader blockerを解除しない。
 
 - suite/fixture envelope: 2 MiB
+- persona realism profile: 256 KiB/suite（現在36,811 bytes）
+- variant identity/marginal catalog: 2 MiB/suite（現在211,734 bytes）
 - joint necessary problem: 4 MiB/suite（現在744,081 bytes）
 - joint solver policy: 512 KiB/suite
 - W0 persona plan: 16 MiB、最大16,000 W0 sources、20 scopes
