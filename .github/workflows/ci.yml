@@ -5,9 +5,9 @@ on:
   pull_request:
 
 jobs:
-  persona-g0-v2-contract:
+  persona-v2-nonauthorizing-core:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
 
     steps:
       - uses: actions/checkout@v4
@@ -25,6 +25,26 @@ jobs:
           eval.test_persona_v2_text_renderer_validator
           eval.test_persona_v2_source_profile_catalog
           eval.test_persona_v2_overlay_contract
+
+  persona-v2-nonauthorizing-inputs:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+      - run: >-
+          python3 -m unittest -v
+          eval.test_persona_v2_bounded_body
+          eval.test_persona_v2_bounded_jsonl
+          eval.test_persona_v2_route_review_receipt
+          eval.test_persona_v2_source_intent
+          eval.test_persona_v2_fact_membership
+          eval.test_persona_v2_history_intent
+          eval.test_persona_v2_query_intent
+          eval.test_persona_v2_semantic_oracle
+          eval.test_persona_v2_input_closure
+          eval.test_persona_v2_input_closure_live
+          eval.test_persona_v2_scale_invariants
 
   rust:
     runs-on: ubuntu-latest
