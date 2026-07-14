@@ -1,7 +1,11 @@
 # 20人の独立persona-PC fidelity v2提案
 
-Status: proposal only。未承認・未実装。現行`kcs-persona-pc-v1`を黙って変更せず、
-採用時はfixture、renderer、plan、manifestをすべてv2へ上げる。
+Status: proposal only。envelope marginalsは実装済みだが未承認、G0 rootは未凍結・未実装。
+現行`kcs-persona-pc-v1`を黙って変更せず、採用時はfixture、renderer、plan、manifestをすべてv2へ上げる。
+
+G0のversion境界、pilot projection、joint solver、source recipe、negative authorityの詳細は
+[`persona-pc-fidelity-v2-contract.md`](persona-pc-fidelity-v2-contract.md)を参照する。同契約も
+400 exact paths/loadとsolver/oracle完了までは`g0_contract_frozen=false`である。
 
 Date: 2026-07-14
 
@@ -419,9 +423,9 @@ hostのHOME、USER、hostname、環境credential、実PII/PHI、network/live syn
 
 | Gate | 実装・実行 | 合格条件 | 現在地 |
 | --- | --- | --- | --- |
-| G0 v2契約凍結 | 400 exact scope paths/load、family/extension/variant整数比、ambient spec、共有辞書、source recipe、size、fact/oracle、W0-W5 exact eventを1つのmachine-readable specへhash固定 | generator変更前に全20人でcanonical rebuild。joint solverがfull contributor=120,000とpilot=12,000、scope routing、wave別incidental上限、plan 16 MiB上限をexactに解く | 未実装 |
+| G0 v2契約凍結 | 400 exact scope paths/load、family/extension/variant整数比、ambient spec、共有辞書、source recipe、size、fact/oracle、W0-W5 exact eventをversioned artifact graphとsuite descriptor hashへ固定 | generator変更前に全20人でcanonical rebuild。joint solverがfull contributor=120,000とpilot=12,000、scope routing、wave別incidental上限、plan 16 MiB上限をexactに解く | envelopeのみ実装、root未実装 |
 | G1 v2 tiny W0 | 20人×200 files/rootを1人・1sourceずつstreaming作成 | 4,000 files/root、2 roots合計8,000 writes、400 scopes/root、比率/path/hash/readback、inode非共有 | v1相当は済。v2回帰が必要 |
-| G2 pilot W0 | fullの10% stratified sample、計20,300 files、各人12,000 planned、init→offline index | 各人actual contributor 12,000、raw-only 0、planned/actualを別台帳化 | streaming writerと完全attestorが未実装 |
+| G2 pilot W0 | pilot-first solverのexact subset、計20,300 files、各人12,000 planned、init→offline index | 各人actual contributor 12,000、raw-only 0、planned/actualを別台帳化 | streaming writerと完全attestorが未実装 |
 | G3 pilot W1-W5 | immutable eventをmutation前に検証し、edit/rename/move/duplicate/derive/archive/delete/restore/purge | exactly-once journal、再開収束、waveごとのactual attestation、purge後index noop | allocator/manifestのみ済 |
 | G4 full Go/No-Go | pilotのbytes/inodes/RSS/history amplificationを読み戻す | 3 roots+staging+reserveがroot-bound capacity内。不足ならwrite前に停止 | evidence待ち |
 | G5 full replay×3 | 同一plan/eventから3 fresh rootsをそれぞれW0からW5まで実行 | `.kcs`/完成rootコピーなし、hard link/cloneなし、60 registries、1,200 scopes | 未実装 |
@@ -432,7 +436,8 @@ hostのHOME、USER、hostname、環境credential、実PII/PHI、network/live syn
 W0でindexして履歴境界を作ってから編集する。編集後に初めてindexするとW0が履歴に存在しないため、
 順序を入れ替えない。3 replayは完成rootを複製せず、同じimmutable plan/eventを入力にW0から別々に作る。
 pilot file数は各人のproposed full filesの10分の1、すなわち700-1,600 files/personで、suite合計20,300とする。
-これによりfamily/extension比とcontributor密度をfullからstratified sampleできる。
+pilot-first solverでfamily/extension比とcontributor密度をexactに解き、そのsource rowを変更せずfullへ埋め込む。
+したがってpilotはfullからのpost-hoc sampleではなく、fullのstrict source subsetとなる予約inventoryである。
 
 full contract checkpointは各人・各replayで次とする。
 
@@ -500,15 +505,15 @@ KCS index用RSS上限はpilotで別に実測・凍結する。
 
 v2で残るもの:
 
-- 人物別secondary pathsとscope load、深度、semantic filename、fact graph
-- persona-specific extension/domain variantとvalid renderer
+- 完全展開した400 scope paths、人物別scope load、Dmaxとsource-level semantic filename、fact graph
+- 実装済みextension/domain marginalsを束縛するcomplete variant catalog、valid validator/renderer
 - chunk/complexity/bytesを分離したjoint source recipe
 - 1 persona・1 source streaming W0 writerとpilot/full write gate
 - W0 init/index complete attestor、W1-W5 journal/executor
 - 3 fresh-storage replay、actual chunk/history attestation、1,800 query evaluation
 
 この提案が採用されるまでは、現行`SCHEMA_VERSION=1`、`FIXTURE_ID=kcs-persona-pc-v1`、
-canonical plan SHAを変更しない。採用後の最初の実装単位はG0のschema v2とsource recipeであり、
+canonical plan SHAを変更しない。次の実装単位はG0のexact topology sidecar、その後にjoint source recipeであり、
 rendererやfull writerだけを先行させない。
 
 Q_hardでのSpotlight/ripgrep-all比較、D1のTTFV/AI強化時間/コスト、実フォルダdogfoodは、

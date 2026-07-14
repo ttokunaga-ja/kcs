@@ -657,3 +657,23 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     same-epoch immutable snapshot is required before SQLite/registry, actual chunks, FTS completeness, or
     history-ready claims can become true.  The 20-person/400-scope tiny W0 generation and two-scope offline
     probe are synthetic development evidence only, not a 400-scope attestation or full-scale result.
+107. Persona-PC fidelity v2 is a side-by-side planning contract, never an in-place reinterpretation of
+    `kcs-persona-pc-v1`.  V2 must use a bounded framed header and exact artifact-kind/schema plus fixture ID/
+    schema dispatch, and must always write fresh roots.  Pilot must be solved first as an exact Hamilton-
+    marginal source/quota/cohort plan; those source rows must be embedded unchanged into full, which adds
+    sources to reach its own exact marginals.  Thus pilot must become a true source-ID/byte subset without
+    post-hoc re-quota.
+    Tiny remains a
+    separate topology/routing smoke without the formal density distribution.  Variant dictionaries, not
+    family labels or source rows, must bind extension, media type, gate role, offline disposition, validator,
+    renderer, and feasibility rule.  Full/pilot quota allocation must jointly solve family, variant, scope,
+    density bucket, exact 1--70 source quota, and P/X/Y/N/U=4/10/6/4/76 whole-source history cohorts before
+    a G0 hash can be frozen.  Text-layer PDF is planned as a local contract contributor; scan PDF alone is
+    planned as raw-only/awaiting OCR.  The authoritative joint solver is bounded exact search with a versioned objective and
+    lexicographic tie-break; local repair is never the authority.
+    The fact/answer oracle must be frozen before rendering, while query templates/text and query seed remain in a
+    separately hashed artifact unavailable to the corpus renderer.  G0 grants no renderer, filesystem,
+    KCS execution, history mutation, actual-chunk, capacity, or write authority; all such flags stay false
+    until their later observed gates.  Until all 400 paths and reviewed physical/chunk load vectors, the
+    joint solver, source recipes, oracle membership, and bounded canonical hashes exist,
+    `g0_contract_frozen=false` is mandatory.
