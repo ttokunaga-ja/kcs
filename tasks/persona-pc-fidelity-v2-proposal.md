@@ -1,7 +1,8 @@
 # 20人の独立persona-PC fidelity v2提案
 
-Status: proposal only。envelope marginals、exact topology sidecar、pilot/full/full-minus-pilotのjoint必要条件
-problem artifactは実装済みだが未承認である。source-level exact allocationは未実装、G0 rootは未凍結・未実装。
+Status: proposal only。envelope marginals、exact topology、pilot/full/full-minus-pilotのjoint必要条件problem、
+generic aggregate-core solver-policy sidecarは実装済みだが未承認である。route/realism/source-intent入力、
+source-level exact allocation、G0 rootは未実装である。
 現行`kcs-persona-pc-v1`を黙って変更せず、採用時はfixture、renderer、plan、manifestをすべてv2へ上げる。
 
 G0のversion境界、pilot projection、joint solver、source recipe、negative authorityの詳細は
@@ -382,9 +383,10 @@ PCらしさは別軸の`persona_realism_profile`として、既存physical mater
 exact duplicate 1--3%、near/visible revision 3--8%、conflict copy 0.2--1%、standalone attachment copy
 1--4%だが、現時点では凍結値ではない。G0では人物別exact integer、分母、重複可否、検索参加規則を固定する。
 overlayを理由にphysical file総数やfamily比へfileを暗黙追加しない。
-overlayはjoint solver/source recipeの入力としてallocation前に固定し、解の後へpost-hoc追加しない。
-clusterのscope配置、raw identity共有、distinct `(scope_key, chunk_id)` 寄与を証明し、人物ごとの
-120,000 contract chunksをexactに保つ。
+overlayはpre-solve source-intent recipeとjoint solverの入力としてallocation前に固定し、解の後へ
+post-hoc追加しない。aggregate `A/C`だけではper-intent cluster配置を証明できないため、membershipを
+`intent_key`へ束縛したsource-intent refinementでscope配置、raw identity共有、distinct
+`(scope_key, chunk_id)` 寄与を証明し、人物ごとの120,000 contract chunksをexactに保つ。
 
 正本は単一の100%表に畳まず、physical materializations、logical documents、gate/search roleとchunks、
 container members/attachments、current/history versions、duplicate/conflict clusters、allocated bytes、
@@ -520,11 +522,58 @@ contributor_sources(profile) >= sum_h L(h, profile)
 | full chunks | 4,800 | 12,000 | 7,200 | 4,800 | 91,200 | - |
 | full source lower | 69 | 172 | 103 | 69 | 1,303 | 1,716 |
 
+次の数式はfamily/variant/scope/bucket/cohort/quotaのaggregate coreであり、per-intentの
+duplicate cluster配置やvariant feasibilityを単独では証明しない。joint solverのobjectiveは、
+人物・profileごとのphysical aggregate `A[v,s]`とcontributor refinement
+`C[v,s,b,h,q]`を使う。`N/T`をcontributor source/chunk合計、`t_s`をscope chunk target、
+`D_b`をbucket source marginal、`H_h`をcohort chunk marginalとし、次を定義する。これらはすべて
+pilot/full phase別であり、full評価へpilot定数を流用しない。variant/scope/bucket/cohortのexact
+marginal、contributor `A=ΣC`、scope chunk `ΣqC=t_s`、P/X/Y/Nの全scope coverageをhard constraintとする。
+
+```text
+n_s     = Σ_v,b,h,q C[v,s,b,h,q]
+d_b,s   = Σ_v,h,q C[v,s,b,h,q]
+r_h,s   = Σ_v,b,q C[v,s,b,h,q]
+k_h,s   = Σ_v,b,q q C[v,s,b,h,q]
+z_b,s,q = Σ_v,h C[v,s,b,h,q]
+w_b     = bucket bに含まれるinteger quotaの個数
+W       = lcm(4,16,30,20) = 240
+
+L_scope          = Σ_s       |T*n_s - N*t_s|
+L_density        = Σ_b,s     |N*d_b,s - D_b*n_s|
+L_cohort_sources = Σ_h,s     |T*r_h,s - H_h*n_s|
+L_cohort_chunks  = Σ_h,s     |T*k_h,s - H_h*t_s|
+L_quota          = Σ_b,s,q (W/w_b)*|w_b*z_b,s,q - d_b,s|
+```
+
+`L_cohort_sources`とquota-uniformな`L_quota`は観測された利用実態ではなく、benchmark解を一意に
+安定させるcanonicality regularizerである。review済み
+`R[persona,variant,scope] in 0..4`に対するroute lossは、phase別variant marginalを`M_phi,v`、
+`V+={v | M_full,v>0}`として
+`Σ_v∈V+ M_phi,v*max_s R[persona,v,s] - Σ_v∈V+,s A_phi[v,s]*R[persona,v,s]`とし、physical `A`を一度だけ数える。
+v1 route hintは
+10,820 active scoresのうち749しか非0でなく、`md`/`txt_log`全0とsecondary偏重があるため再利用しない。
+完全なpersona x variant x scope行列の独立review receiptを将来のblockerとする。
+
+pilot候補はexact fullへ延長できるものだけをfeasibleとする。strict objective順は、pilotの上記5 L、
+pilot route loss、`Flat(A_pilot)`、`Flat(C_pilot)`、次にpilot+残差のfull aggregate上の5 Lとroute loss、
+最後に`Flat(deltaA)`、`Flat(deltaC)`である。full objectiveを残差だけへ適用しない。flat vectorは
+人物ごとにfamily、variant ASCII、scope、さらに`C`ではbucket、cohort、quotaの順を持つ
+zero-inclusive dense semantic orderとし、personaは外側の`p01..p20` serialization順とする。
+suite-wide `A`は1 tensorあたり566 bound persona-variant rows/11,320 cells、routeは
+`full variant marginal > 0`の別の541 full-active rows/10,820 scores、`C`は1 tensorあたり
+116 contributor rows/812,000 cellsを持つ。joint pilot+residualだけで22,640 `A` cellsと
+1,624,000 `C` cellsになり、solver auxiliary stateは別である。routeから除く25 rowsはhard-zero
+`A`であり、`R`を要求しない。
+`persona_id+variant_id`でjoinし、表示位置やfiltered row番号でzipしない。aggregateの最終tie-breakに
+hash-spreadは使わず、domain-separated hashは解の確定後のsource/materialization identityだけに使う。
+
 現在のpilot global下限余裕はp11の+7が最小、p08/p17が+8、p15が+9である。scope-boundではp17の
 lower headroomが28、minimum scope spanが3、upper側はp07の388が最小である。joint必要条件problemは
 全20人のpilot/full/full-minus-pilotで通過したが、source rows、route、quota/cohort assignmentを含まず、
-full-minus-pilotもcoordinatewise residualにすぎない。したがってstrict pilot source subsetやcanonical
-allocation solutionの証明ではない。
+full-minus-pilotもcoordinatewise residualにすぎない。したがってaggregate cell subset、source-ID subset、
+materialization subset、rendered-byte subsetのいずれも未証明であり、canonical allocation solutionの
+証明でもない。
 
 PDF pages、Office member数、attachment数、raw bytesはchunk quotaとは別fieldにする。
 
@@ -554,29 +603,41 @@ medium 16×2 MiB、large 12×32 MiB、tail 4×80 MiBでpayload 740 MiB、receipt
 
 ## 7. personaらしさをbytesへ束縛するsource recipe
 
-planはpersona fidelity、fact/entity、template、variant、size、permission profileを共有辞書へ正規化し、
-source rowには短い参照IDとsource固有値だけを持たせる。すべての共有辞書は推移的にcanonical plan hashへ
-含め、参照先のないID、未参照entry、重複IDを拒否する。v2 persona planは16 MiB/personをhard cap候補とし、
-G0で20人すべての実serialization sizeを測ってresource oracleとテストを更新する。
+pre-solve source-intent artifactはpersona fidelity、fact/entity、template、variant、size、permission
+profileを共有辞書へ正規化し、immutable `intent_key`とsource固有値を持つ。overlay/fact membershipも
+`intent_key`を参照し、この段階ではfinal source/materialization IDを持たない。すべての共有辞書は
+推移的にinput-closure hashへ含め、参照先のないID、未参照entry、重複IDを拒否する。downstream v2
+persona planは16 MiB/personをhard cap候補とし、G0で20人すべての実serialization sizeを測ってresource
+oracleとテストを更新する。
 
 共有persona fidelity profileはOS/case semantics、device class、locale、timezone、languages、work cadence、
 retention、sync snapshot source、sensitivity、permission、mtime-age、duplicate/conflict仮説を持つ。
-各source rowは少なくとも次をcanonical plan hashへ含める。
+各pre-solve intentは少なくとも次をinput-closure hashへ含める。
 
 ```text
 fidelity_profile_id / fidelity_profile_sha256
-persona_id / scope_key / source_id / materialization_id
+persona_id / intent_key / eligible_scope_keys
 project_or_case_id / synthetic_entity_ids / fact_ids
 filename_template_id / content_template_id / document_role
 language / topic / period / status / version
 family / variant / media_type / validator_id
-quota_bucket / requested_contributor_chunks
+contributor_eligibility / allowed_quota_buckets
 expected_incidental_chunks_upper / expected_disposition
 complexity_unit / target_complexity / target_bytes
 sensitivity_tier / permission_profile_id / mtime_age_bucket
 duplicate_or_conflict_group
 renderer_id / renderer_schema_version / deterministic_payload_seed
 ```
+
+aggregate解に続くsource-intent refinementは、各`intent_key`へscope、family/variant、
+bucket/cohort/quota、cell-local ordinalをexactに割り当て、overlay/duplicate-cluster constraintsも検証する。
+source/materialization IDのdomain-separated hashは、pre-solve input-closure namespaceと解かれたsemantic
+coordinates、`persona_id`、immutable origin `pilot|full-residual`、`intent_key`、cell-local ordinalからだけ
+導出する。pilot ordinalはfullでも予約して変更せず、residual追加でpilot IDをrenumber/collideさせない。
+IDを含むpayload自身や、そのIDを内包するsolution/planのhashをpreimageへ戻してcycleを作らない。
+downstream final source planがsolution hashと導出済みIDを束縛する。
+ID hashをaggregate tie-breakやratio/routing/quota決定には使わない。pilot/fullの関係はaggregate cell、
+source ID、materialization、rendered bytesの4 claimを別々にattestし、前者から後者を推論しない。
 
 人物ごとに3-5個のproject/case fact graphとgold oracleを先に凍結し、メール、PDF、表、メモが同じsynthetic factを
 異なる言い回しで参照する。本文にpersona ID、source ID、digest、fixture nonceを露出させず、
@@ -589,7 +650,7 @@ hostのHOME、USER、hostname、環境credential、実PII/PHI、network/live syn
 
 | Gate | 実装・実行 | 合格条件 | 現在地 |
 | --- | --- | --- | --- |
-| G0 v2契約凍結 | 400 exact scope paths/load、family/extension/variant整数比、`persona_realism_profile`と8軸台帳、ambient spec、共有辞書、source recipe、size、fact/oracle、W0-W5 exact eventをversioned artifact graphとsuite descriptor hashへ固定 | generator変更前に全20人でcanonical rebuild。joint solverがrealism overlayを入力にfull contributor=120,000とpilot=12,000、scope routing、wave別incidental上限、plan 16 MiB上限をexactに解く | envelope、exact topology、joint必要条件problemまで実装。solution/root未実装 |
+| G0 v2契約凍結 | 400 exact scope paths/load、family/extension/variant整数比、`persona_realism_profile`と8軸台帳、ambient spec、共有辞書、pre-solve source-intent recipe、size、fact/oracle、W0-W5 exact eventをversioned artifact graphとsuite descriptor hashへ固定 | generator変更前に全20人でcanonical rebuild。joint solverがrealism overlayを入力にfull contributor=120,000とpilot=12,000、scope routing、wave別incidental上限、plan 16 MiB上限をexactに解く | envelope、exact topology、joint必要条件problem、generic solver sidecarまで実装。input closure/solution/root未実装 |
 | G1 v2 tiny W0 | 20人×200 files/persona-PC rootを1人・1sourceずつstreaming作成 | 4,000 files/suite replay、2 fresh suite replays合計8,000 writes、400 scopes/replay、比率/path/hash/readback、inode非共有 | v1相当は済。v2回帰が必要 |
 | G2 pilot W0 | pilot-first solverのexact subset、計20,300 files、各人12,000 planned、init→offline index | 各人actual contributor 12,000、raw-only 0、planned/actualを別台帳化 | streaming writerと完全attestorが未実装 |
 | G3 pilot W1-W5 | immutable eventをmutation前に検証し、edit/rename/move/duplicate/derive/archive/delete/restore/purge | exactly-once journal、再開収束、waveごとのactual attestation、purge後index noop | v1相当のみ済。v2 allocator/manifest未実装 |
@@ -599,11 +660,25 @@ hostのHOME、USER、hostname、環境credential、実PII/PHI、network/live syn
 | G7 actual attestation | DB/CAS/HEAD/historyを全persona・全replay・全waveで実読 | 各waveのC/Hがcheckpoint表とexact一致。current eligibleは`C(w)..135,000`、current+history eligibleは`C(w)+H(w)..210,000`かつ動的incidental cap内、raw-only=0 | 未実装 |
 | G8 evaluation | 各人・各scenario最低30問、合計1,800 unique queries | per-person Recall@10 >=0.8、M3-1 p95<5s、M3-2/M3-3 p95<7s。同一seed再現性に限定して報告 | 未実施 |
 
+G0内の実装順も固定する。
+
+1. 入力・解・proofを含まないnon-authorizing exact solver-semantics policy sidecar
+2. persona realism profile/overlay、pre-solve source-intent recipe、route matrixの独立review、
+   fact/oracleからなるinput closure
+3. aggregate + source-intent refinementのcanonical solution、bounded canonical exact replayまたは
+   complete proof、cycle-free IDを持つfinal source plan
+4. streaming writer、W0 index、W1-W5 history executor
+
+2より前に3のsolutionを作らない。warm-start steps、objective値、marginal hashだけなら
+`execution receipt`であり、global optimality proofではない。完全proofを8 MiB内に保持できなければ
+`optimality certificate`とは呼ばず、validatorがbounded canonical exact replayを実行する。
+
 W0でindexして履歴境界を作ってから編集する。編集後に初めてindexするとW0が履歴に存在しないため、
 順序を入れ替えない。3 replayは完成rootを複製せず、同じimmutable plan/eventを入力にW0から別々に作る。
 pilot file数は各人のproposed full filesの10分の1、すなわち700-1,600 files/personで、suite合計20,300とする。
-pilot-first solverでfamily/extension比とcontributor密度をexactに解き、そのsource rowを変更せずfullへ埋め込む。
-したがってpilotはfullからのpost-hoc sampleではなく、fullのstrict source subsetとなる予約inventoryである。
+pilot-first solverでfamily/extension比とcontributor密度、source-intent assignmentをexactに解き、その
+final source rowを変更せずfullへ埋め込む。したがってG2ではpilotをfullからのpost-hoc sampleではなく、
+fullのaggregate cell/source-ID/materialization/rendered-byte subsetとして別々に証明する予約inventoryにする。
 
 full contract checkpointは各人・各replayで次とする。
 
@@ -700,24 +775,31 @@ v2で実装済み（planning only、non-authorizing）:
   `fc079fc8e0aaee0ae03a22fee349e0af8f2dfe18e1fed6d8bb05304643e4a958`
 - joint必要条件problem canonical 744,081 bytes、SHA-256
   `384c95f550355b63443d7f5ca94dad2ed008ab7b24d6b8148a9504f613c29227`
+- generic aggregate-core solver-policy sidecar canonical 82,950 bytes、SHA-256
+  `29046b5b5d60d25db51a670e597617bec07b7c4513bded39196bb1053ee52f41`。route matrix、
+  realism/source-intent refinement、solution/proofを含まず、実行・G0・write authorityはすべてfalse
 
 v2で残るもの:
 
 - 20人別のv2 fidelity attribute、timezone/retention/permission/mtime/conflict exact値とreview receipt
 - `persona_realism_profile`、検索参加するduplicate/revision/conflict/attachment overlay、8軸台帳
-- exact solver policy、source-level canonical solution/certificate、400 scopeへのfamily/variant/density/cohort同時routing
-- source-level semantic filenameとfact graph
+- chunk/complexity/bytesを分離したpre-solve source-intent recipe、人物・family別byte p50/p95/tail、
+  source-level semantic filenameとfact graph
 - 実装済みextension/domain marginalsを束縛するcomplete variant catalog、valid validator/renderer
-- chunk/complexity/bytesを分離したjoint source recipe、人物・family別byte p50/p95/tail
+- reviewed persona x variant x scope route matrixとfact/oracle input closure
+- generic sidecarを上記input closureへ束縛するcomplete objective instance/evaluator、探索上限の実solver校正
+- aggregate + source-intent refinementのcanonical solution、400 scopeへのfamily/variant/density/cohort同時routing、
+  bounded canonical exact replayまたはcomplete proof、cycle-free final IDs
 - 人物別event-mixのexact source件数/wave/familyとformat×scenario query coverage
 - 1 persona・1 source streaming W0 writerとpilot/full write gate
 - W0 init/index complete attestor、W1-W5 journal/executor
 - 3 fresh-storage replay、actual chunk/history attestation、1,800 query evaluation
 
 この提案が採用されるまでは、現行`SCHEMA_VERSION=1`、`FIXTURE_ID=kcs-persona-pc-v1`、
-canonical plan SHAを変更しない。次の実装単位はexact joint solver policyとcanonical allocation
-solution/certificate、その後にjoint source recipeであり、
-rendererやfull writerだけを先行させない。
+canonical plan SHAを変更しない。(1) non-authorizing generic solver-semantics sidecarまでは完了した。
+次の実装順は、(2) realism overlay + pre-solve source-intent recipe + reviewed route + fact/oracle input closure、
+(3) complete objective instance/evaluatorとcanonical aggregate/source-intent solution、execution receiptまたは
+独立検証可能なproof、(4) renderer/writer/historyである。solutionをoverlay/source recipeより先行させない。
 
 Q_hardでのSpotlight/ripgrep-all比較、D1のTTFV/AI強化時間/コスト、実フォルダdogfoodは、
 このsynthetic persona suiteで代替しない。
