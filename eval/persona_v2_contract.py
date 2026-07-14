@@ -66,6 +66,15 @@ _DENSITY_PROFILES = {
 DENSITY_BUCKET_BOUNDS = MappingProxyType(dict(_DENSITY_BUCKET_BOUNDS))
 DENSITY_PROFILES = MappingProxyType(dict(_DENSITY_PROFILES))
 
+HISTORY_COHORT_ORDER = ("P", "X", "Y", "N", "U")
+REQUIRED_SCOPE_HISTORY_COHORTS = ("P", "X", "Y", "N")
+REQUIRED_HISTORY_SCOPE_COUNT = 20
+MAX_CONTRIBUTOR_CHUNKS_PER_SOURCE = max(
+    maximum for _, maximum in _DENSITY_BUCKET_BOUNDS.values()
+)
+_HISTORY_COHORT_WEIGHTS_PCT = {"P": 4, "X": 10, "Y": 6, "N": 4, "U": 76}
+_PROFILE_TARGET_CHUNKS = {"pilot": 12_000, "full": 120_000}
+
 _FAMILY_PERCENTAGE_ROWS = (
     ("p01", (22, 8, 28, 12, 3, 5, 1, 7, 1, 3, 2, 2, 3, 0, 3)),
     ("p02", (20, 22, 15, 20, 5, 3, 0, 4, 0, 2, 1, 1, 2, 0, 5)),
@@ -74,7 +83,7 @@ _FAMILY_PERCENTAGE_ROWS = (
     ("p05", (8, 5, 6, 14, 20, 5, 5, 5, 1, 3, 15, 4, 3, 0, 6)),
     ("p06", (6, 6, 3, 5, 15, 2, 3, 18, 8, 8, 8, 5, 9, 0, 4)),
     ("p07", (12, 10, 0, 4, 3, 5, 0, 25, 20, 10, 1, 2, 6, 1, 1)),
-    ("p08", (10, 4, 1, 5, 8, 8, 0, 13, 3, 15, 8, 15, 7, 1, 2)),
+    ("p08", (11, 4, 1, 5, 8, 8, 0, 13, 3, 15, 8, 15, 7, 1, 1)),
     ("p09", (8, 15, 0, 4, 8, 3, 0, 10, 4, 12, 4, 8, 15, 7, 2)),
     ("p10", (4, 4, 0, 2, 8, 6, 0, 18, 5, 12, 18, 18, 3, 0, 2)),
     ("p11", (3, 4, 0, 2, 5, 25, 0, 16, 4, 14, 7, 10, 5, 3, 2)),
@@ -83,7 +92,7 @@ _FAMILY_PERCENTAGE_ROWS = (
     ("p14", (3, 3, 1, 4, 15, 5, 0, 13, 8, 8, 27, 7, 3, 0, 3)),
     ("p15", (4, 5, 0, 2, 7, 15, 0, 20, 8, 20, 8, 3, 5, 1, 2)),
     ("p16", (5, 6, 1, 4, 10, 4, 1, 24, 12, 10, 8, 5, 6, 1, 3)),
-    ("p17", (3, 4, 0, 2, 5, 4, 0, 20, 12, 8, 10, 4, 12, 1, 15)),
+    ("p17", (5, 4, 0, 2, 5, 4, 0, 20, 12, 8, 10, 4, 12, 1, 13)),
     ("p18", (6, 12, 2, 6, 15, 3, 0, 18, 6, 8, 10, 3, 5, 0, 6)),
     ("p19", (8, 5, 0, 2, 5, 5, 0, 20, 8, 15, 7, 12, 8, 3, 2)),
     ("p20", (8, 18, 1, 3, 8, 10, 0, 16, 10, 8, 2, 2, 8, 4, 2)),
@@ -529,6 +538,34 @@ def density_chunk_interval(persona_id, profile):
     return lower, upper
 
 
+def history_cohort_chunk_counts(profile):
+    if profile not in _PROFILE_TARGET_CHUNKS:
+        raise PersonaV2ContractError(
+            f"history cohort contract applies only to pilot/full: {profile!r}"
+        )
+    counts = largest_remainder(
+        _PROFILE_TARGET_CHUNKS[profile],
+        tuple(_HISTORY_COHORT_WEIGHTS_PCT[cohort] for cohort in HISTORY_COHORT_ORDER),
+    )
+    return dict(zip(HISTORY_COHORT_ORDER, counts))
+
+
+def history_cohort_source_lower_bounds(profile):
+    chunks = history_cohort_chunk_counts(profile)
+    return {
+        cohort: max(
+            REQUIRED_HISTORY_SCOPE_COUNT
+            if cohort in REQUIRED_SCOPE_HISTORY_COHORTS
+            else 0,
+            (
+                chunks[cohort] + MAX_CONTRIBUTOR_CHUNKS_PER_SOURCE - 1
+            )
+            // MAX_CONTRIBUTOR_CHUNKS_PER_SOURCE,
+        )
+        for cohort in HISTORY_COHORT_ORDER
+    }
+
+
 def incidental_caps(profile, checkpoint):
     if profile not in _HISTORY_CHECKPOINTS or checkpoint not in _HISTORY_CHECKPOINTS[profile]:
         raise PersonaV2ContractError(f"unknown v2 checkpoint: {profile}/{checkpoint}")
@@ -577,6 +614,51 @@ def _checkpoint_json():
     }
 
 
+def _history_cohort_contract_json():
+    profile_source_lower_bounds = {}
+    for profile in ("pilot", "full"):
+        chunks = history_cohort_chunk_counts(profile)
+        lower = history_cohort_source_lower_bounds(profile)
+        profile_source_lower_bounds[profile] = {
+            "cohorts": [
+                {
+                    "cohort_id": cohort,
+                    "contract_contributor_chunks": chunks[cohort],
+                    "coverage_source_lower_bound": (
+                        REQUIRED_HISTORY_SCOPE_COUNT
+                        if cohort in REQUIRED_SCOPE_HISTORY_COHORTS
+                        else 0
+                    ),
+                    "necessary_source_lower_bound": lower[cohort],
+                    "quota_source_lower_bound": (
+                        chunks[cohort] + MAX_CONTRIBUTOR_CHUNKS_PER_SOURCE - 1
+                    )
+                    // MAX_CONTRIBUTOR_CHUNKS_PER_SOURCE,
+                }
+                for cohort in HISTORY_COHORT_ORDER
+            ],
+            "minimum_contributor_sources": sum(lower.values()),
+            "target_contract_contributor_chunks": _PROFILE_TARGET_CHUNKS[profile],
+        }
+    return {
+        "allocation_unit": "contract_contributor_chunks",
+        "cohort_order": list(HISTORY_COHORT_ORDER),
+        "coverage_required_in_all_twenty_scopes": list(
+            REQUIRED_SCOPE_HISTORY_COHORTS
+        ),
+        "max_chunks_per_contributor_source": MAX_CONTRIBUTOR_CHUNKS_PER_SOURCE,
+        "partition": "whole_source",
+        "profile_source_lower_bounds": profile_source_lower_bounds,
+        "profiles": ["pilot", "full"],
+        "required_scope_count": REQUIRED_HISTORY_SCOPE_COUNT,
+        "source_lower_bound_formula": (
+            "max(required_scope_count_if_covered_else_zero,"
+            "ceil(cohort_chunks/max_chunks_per_contributor_source))"
+        ),
+        "weights_pct": copy.deepcopy(_HISTORY_COHORT_WEIGHTS_PCT),
+    }
+
+
 def build_envelope_contract():
     """Build a detached, root-independent envelope; never a G0 completion receipt."""
     personas = []
@@ -608,6 +690,7 @@ def build_envelope_contract():
             "bounded_framed_loader_and_exact_dispatch_missing",
             "exact_topology_sidecar_not_bound_by_g0_root",
             "joint_scope_variant_density_quota_solver_missing",
+            "persona_fidelity_realism_profile_and_overlay_missing",
             "source_recipe_fact_oracle_and_query_spec_missing",
             "root_independent_history_intent_missing",
             "variant_complexity_units_and_feasibility_parameters_missing",
@@ -646,13 +729,7 @@ def build_envelope_contract():
         "fixture_schema_version": FIXTURE_SCHEMA_VERSION,
         "g0_contract_frozen": False,
         "history_checkpoints": _checkpoint_json(),
-        "history_cohort_contract": {
-            "allocation_unit": "contract_contributor_chunks",
-            "coverage_required_in_all_twenty_scopes": ["P", "X", "Y", "N"],
-            "partition": "whole_source",
-            "profiles": ["pilot", "full"],
-            "weights_pct": {"N": 4, "P": 4, "U": 76, "X": 10, "Y": 6},
-        },
+        "history_cohort_contract": _history_cohort_contract_json(),
         "incidental_cap_contract": _incidental_cap_contract_json(),
         "lanes": {
             "formal-retrieval-history-v2": {
@@ -696,8 +773,8 @@ def build_envelope_contract():
         },
         "profiles": {
             "tiny-smoke": {"density_contract": False, "suite_files": 4_000, "target_kind": "three-per-contributor"},
-            "pilot": {"density_contract": True, "suite_files": 20_300, "target_chunks_per_person": 12_000},
-            "full": {"density_contract": True, "suite_files": 203_000, "target_chunks_per_person": 120_000},
+            "pilot": {"density_contract": True, "suite_files": 20_300, "target_chunks_per_person": _PROFILE_TARGET_CHUNKS["pilot"]},
+            "full": {"density_contract": True, "suite_files": 203_000, "target_chunks_per_person": _PROFILE_TARGET_CHUNKS["full"]},
         },
         "topology_status": "exact-topology-external-sidecar-not-g0-bound",
         "variant_catalog": copy.deepcopy(_VARIANT_CATALOG),
@@ -789,10 +866,18 @@ def _validate_static_rows():
         if len(example.encode("ascii")) > 120 or re.fullmatch(r"[a-z0-9][a-z0-9._-]*", example) is None:
             raise AssertionError(f"invalid v2 semantic filename example: {persona_id}")
     for profile, target in (("pilot", 12_000), ("full", 120_000)):
+        cohort_source_lower = sum(
+            history_cohort_source_lower_bounds(profile).values()
+        )
         for persona_id in PERSONA_IDS:
             lower, upper = density_chunk_interval(persona_id, profile)
             if not lower <= target <= upper:
                 raise AssertionError(f"v2 density interval is infeasible: {persona_id}/{profile}")
+            if contributor_count(persona_id, profile) < cohort_source_lower:
+                raise AssertionError(
+                    "v2 contributor inventory cannot satisfy whole-source cohort lower: "
+                    f"{persona_id}/{profile}"
+                )
 
 
 _validate_static_rows()

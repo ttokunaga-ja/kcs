@@ -1,11 +1,13 @@
 # 20人の独立persona-PC fidelity v2提案
 
-Status: proposal only。envelope marginalsとexact topology sidecarは実装済みだが未承認、G0 rootは未凍結・未実装。
+Status: proposal only。envelope marginals、exact topology sidecar、pilot/full/full-minus-pilotのjoint必要条件
+problem artifactは実装済みだが未承認である。source-level exact allocationは未実装、G0 rootは未凍結・未実装。
 現行`kcs-persona-pc-v1`を黙って変更せず、採用時はfixture、renderer、plan、manifestをすべてv2へ上げる。
 
 G0のversion境界、pilot projection、joint solver、source recipe、negative authorityの詳細は
 [`persona-pc-fidelity-v2-contract.md`](persona-pc-fidelity-v2-contract.md)を参照する。400 exact paths/loadは
-sidecar化済みだが、joint solver/source recipe/oracle完了までは`g0_contract_frozen=false`である。
+sidecar化済みで必要条件も全20人で通過したが、joint solver/source recipe/oracle完了までは
+`g0_contract_frozen=false`である。
 
 Date: 2026-07-14
 
@@ -263,7 +265,8 @@ v1 metadataを参照したままv2 rootを生成してはならない。
 ## 4. 物理file family比
 
 分母は人物ごとのW0 physical filesであり、extension比、byte比、logical member比、chunk比ではない。
-以下は実利用統計ではなく、検索・変換・raw-only境界を広く踏むためのstress-design仮説である。
+以下を`benchmark_stress_mix_v2`と呼ぶ。実利用統計ではなく、検索・変換・raw-only境界を広く踏むための
+stress-design仮説である。
 p10/p14のfile数を増やしても百分率は維持する。
 
 | persona | md | txt/log | code | structured | csv/tsv | html/eml | ipynb | text PDF |
@@ -275,7 +278,7 @@ p10/p14のfile数を増やしても百分率は維持する。
 | p05 | 8 | 5 | 6 | 14 | 20 | 5 | 5 | 5 |
 | p06 | 6 | 6 | 3 | 5 | 15 | 2 | 3 | 18 |
 | p07 | 12 | 10 | 0 | 4 | 3 | 5 | 0 | 25 |
-| p08 | 10 | 4 | 1 | 5 | 8 | 8 | 0 | 13 |
+| p08 | 11 | 4 | 1 | 5 | 8 | 8 | 0 | 13 |
 | p09 | 8 | 15 | 0 | 4 | 8 | 3 | 0 | 10 |
 | p10 | 4 | 4 | 0 | 2 | 8 | 6 | 0 | 18 |
 | p11 | 3 | 4 | 0 | 2 | 5 | 25 | 0 | 16 |
@@ -284,7 +287,7 @@ p10/p14のfile数を増やしても百分率は維持する。
 | p14 | 3 | 3 | 1 | 4 | 15 | 5 | 0 | 13 |
 | p15 | 4 | 5 | 0 | 2 | 7 | 15 | 0 | 20 |
 | p16 | 5 | 6 | 1 | 4 | 10 | 4 | 1 | 24 |
-| p17 | 3 | 4 | 0 | 2 | 5 | 4 | 0 | 20 |
+| p17 | 5 | 4 | 0 | 2 | 5 | 4 | 0 | 20 |
 | p18 | 6 | 12 | 2 | 6 | 15 | 3 | 0 | 18 |
 | p19 | 8 | 5 | 0 | 2 | 5 | 5 | 0 | 20 |
 | p20 | 8 | 18 | 1 | 3 | 8 | 10 | 0 | 16 |
@@ -298,7 +301,7 @@ p10/p14のfile数を増やしても百分率は維持する。
 | p05 | 1 | 3 | 15 | 4 | 3 | 0 | 6 |
 | p06 | 8 | 8 | 8 | 5 | 9 | 0 | 4 |
 | p07 | 20 | 10 | 1 | 2 | 6 | 1 | 1 |
-| p08 | 3 | 15 | 8 | 15 | 7 | 1 | 2 |
+| p08 | 3 | 15 | 8 | 15 | 7 | 1 | 1 |
 | p09 | 4 | 12 | 4 | 8 | 15 | 7 | 2 |
 | p10 | 5 | 12 | 18 | 18 | 3 | 0 | 2 |
 | p11 | 4 | 14 | 7 | 10 | 5 | 3 | 2 |
@@ -307,7 +310,7 @@ p10/p14のfile数を増やしても百分率は維持する。
 | p14 | 8 | 8 | 27 | 7 | 3 | 0 | 3 |
 | p15 | 8 | 20 | 8 | 3 | 5 | 1 | 2 |
 | p16 | 12 | 10 | 8 | 5 | 6 | 1 | 3 |
-| p17 | 12 | 8 | 10 | 4 | 12 | 1 | 15 |
+| p17 | 12 | 8 | 10 | 4 | 12 | 1 | 13 |
 | p18 | 6 | 8 | 10 | 3 | 5 | 0 | 6 |
 | p19 | 8 | 15 | 7 | 12 | 8 | 3 | 2 |
 | p20 | 10 | 8 | 2 | 2 | 8 | 4 | 2 |
@@ -316,14 +319,14 @@ v2の203,000 filesへ適用したsuite集計は次である。
 
 | family | files | 比 | family | files | 比 |
 | --- | ---: | ---: | --- | ---: | ---: |
-| md | 18,580 | 9.15% | txt/log | 19,210 | 9.46% |
+| md | 18,820 | 9.27% | txt/log | 19,210 | 9.46% |
 | code | 10,440 | 5.14% | structured | 15,310 | 7.54% |
 | csv/tsv | 18,680 | 9.20% | html/eml | 14,430 | 7.11% |
 | ipynb | 2,240 | 1.10% | text PDF | 28,580 | 14.08% |
 | scan PDF | 11,680 | 5.75% | docx | 17,270 | 8.51% |
 | xlsx | 15,430 | 7.60% | pptx | 10,620 | 5.23% |
 | image | 11,380 | 5.61% | media | 2,150 | 1.06% |
-| domain binary | 7,000 | 3.45% | total | 203,000 | 100.00% |
+| domain binary | 6,760 | 3.33% | total | 203,000 | 100.00% |
 
 表示比の合計は小数第2位丸めにより99.99%になるが、正本は上のexact file countsであり、
 203,000を分母にした丸め前合計は100%である。
@@ -344,7 +347,7 @@ joint solverで割り当てる。
 | p05 | 2,610 | 5,550 | 3,840 | 46.0 |
 | p06 | 2,424 | 2,216 | 3,360 | 49.5 |
 | p07 | 3,115 | 1,015 | 2,870 | 38.5 |
-| p08 | 2,112 | 1,808 | 4,080 | 56.8 |
+| p08 | 2,192 | 1,808 | 4,000 | 54.7 |
 | p09 | 2,565 | 1,755 | 4,680 | 46.8 |
 | p10 | 2,728 | 1,892 | 6,380 | 44.0 |
 | p11 | 2,180 | 3,320 | 4,500 | 55.0 |
@@ -353,13 +356,41 @@ joint solverで割り当てる。
 | p14 | 2,464 | 3,256 | 7,280 | 48.7 |
 | p15 | 2,200 | 2,040 | 3,760 | 54.5 |
 | p16 | 2,736 | 1,664 | 3,600 | 43.9 |
-| p17 | 2,032 | 1,008 | 4,960 | 59.1 |
+| p17 | 2,192 | 1,008 | 4,800 | 54.7 |
 | p18 | 3,768 | 3,672 | 4,560 | 31.8 |
 | p19 | 2,835 | 1,215 | 4,950 | 42.3 |
 | p20 | 3,670 | 2,730 | 3,600 | 32.7 |
 
+旧p17 pilotは203 contributor sourcesしかなく、70 chunks/source上限とP/X/Y/N全20 scope coverageから
+導く人物別global cohort下限211 sourcesを満たせなかった。旧p08も211で余裕0だった。このためp08は
+domain binary 1 point、p17は2 pointsをraw-onlyからmd contributorへ移し、両者をpilot 219 / full 2,192
+sourcesへ変更した。これは利用実態の校正ではなく、history cohortを成立させるfeasibility correctionである。
+
+| profile | physical | contributor | incidental | raw-only |
+| --- | ---: | ---: | ---: | ---: |
+| pilot | 20,300 | 6,731 | 6,040 | 7,529 |
+| full | 203,000 | 67,296 | 60,414 | 75,290 |
+| full-minus-pilot | 182,700 | 60,565 | 54,374 | 67,761 |
+
 これはplanned gate-role projectionであり、実rootの検索可能性を証明しない。offline index後にactual chunksを
 role別・variant別に読み戻し、contract exact、incidental cap内、raw-only zeroを別々にattestする。
+
+### 4.2 persona realism overlay
+
+`benchmark_stress_mix_v2`はphysical format構成のstress mixであり、1人の実PCを観測した統計ではない。
+PCらしさは別軸の`persona_realism_profile`として、既存physical materializationへoverlayする。初期候補は
+exact duplicate 1--3%、near/visible revision 3--8%、conflict copy 0.2--1%、standalone attachment copy
+1--4%だが、現時点では凍結値ではない。G0では人物別exact integer、分母、重複可否、検索参加規則を固定する。
+overlayを理由にphysical file総数やfamily比へfileを暗黙追加しない。
+overlayはjoint solver/source recipeの入力としてallocation前に固定し、解の後へpost-hoc追加しない。
+clusterのscope配置、raw identity共有、distinct `(scope_key, chunk_id)` 寄与を証明し、人物ごとの
+120,000 contract chunksをexactに保つ。
+
+正本は単一の100%表に畳まず、physical materializations、logical documents、gate/search roleとchunks、
+container members/attachments、current/history versions、duplicate/conflict clusters、allocated bytes、
+cloud/OS由来metadataとignored/excluded entriesを別台帳で整合させる。exact/near/conflictは排他的な
+content-relation軸、attachmentは直交するcontainer-role軸として二重計上を防ぐ。これが未確定の間は
+`persona_fidelity_realism_profile_and_overlay_missing`をG0 blockerとして維持する。
 
 ## 5. family内extension/variant比
 
@@ -473,6 +504,28 @@ bucket件数をlargest remainderで固定した後、joint solverが各sourceへ
 120,000がbucket最小・最大の間に入る。最も余裕が小さいp07でも最大122,718である。ただしscope別の
 正quota、route、family marginalsを同時に満たす証明ではないため、G0のjoint solver成功までは未凍結とする。
 
+whole-source history cohortにはdensity intervalとは別の人物別global必要条件がある。
+
+```text
+L(h, profile)
+  = max(20 if h in {P,X,Y,N} else 0,
+        ceil(cohort_chunks(h, profile) / 70))
+contributor_sources(profile) >= sum_h L(h, profile)
+```
+
+| profile | P | X | Y | N | U | total lower |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| pilot chunks | 480 | 1,200 | 720 | 480 | 9,120 | - |
+| pilot source lower | 20 | 20 | 20 | 20 | 131 | 211 |
+| full chunks | 4,800 | 12,000 | 7,200 | 4,800 | 91,200 | - |
+| full source lower | 69 | 172 | 103 | 69 | 1,303 | 1,716 |
+
+現在のpilot global下限余裕はp11の+7が最小、p08/p17が+8、p15が+9である。scope-boundではp17の
+lower headroomが28、minimum scope spanが3、upper側はp07の388が最小である。joint必要条件problemは
+全20人のpilot/full/full-minus-pilotで通過したが、source rows、route、quota/cohort assignmentを含まず、
+full-minus-pilotもcoordinatewise residualにすぎない。したがってstrict pilot source subsetやcanonical
+allocation solutionの証明ではない。
+
 PDF pages、Office member数、attachment数、raw bytesはchunk quotaとは別fieldにする。
 
 | 対象 | formal retrieval/history | byte-stress |
@@ -536,10 +589,10 @@ hostのHOME、USER、hostname、環境credential、実PII/PHI、network/live syn
 
 | Gate | 実装・実行 | 合格条件 | 現在地 |
 | --- | --- | --- | --- |
-| G0 v2契約凍結 | 400 exact scope paths/load、family/extension/variant整数比、ambient spec、共有辞書、source recipe、size、fact/oracle、W0-W5 exact eventをversioned artifact graphとsuite descriptor hashへ固定 | generator変更前に全20人でcanonical rebuild。joint solverがfull contributor=120,000とpilot=12,000、scope routing、wave別incidental上限、plan 16 MiB上限をexactに解く | envelopeとexact topology sidecarを実装、root未実装 |
+| G0 v2契約凍結 | 400 exact scope paths/load、family/extension/variant整数比、`persona_realism_profile`と8軸台帳、ambient spec、共有辞書、source recipe、size、fact/oracle、W0-W5 exact eventをversioned artifact graphとsuite descriptor hashへ固定 | generator変更前に全20人でcanonical rebuild。joint solverがrealism overlayを入力にfull contributor=120,000とpilot=12,000、scope routing、wave別incidental上限、plan 16 MiB上限をexactに解く | envelope、exact topology、joint必要条件problemまで実装。solution/root未実装 |
 | G1 v2 tiny W0 | 20人×200 files/persona-PC rootを1人・1sourceずつstreaming作成 | 4,000 files/suite replay、2 fresh suite replays合計8,000 writes、400 scopes/replay、比率/path/hash/readback、inode非共有 | v1相当は済。v2回帰が必要 |
 | G2 pilot W0 | pilot-first solverのexact subset、計20,300 files、各人12,000 planned、init→offline index | 各人actual contributor 12,000、raw-only 0、planned/actualを別台帳化 | streaming writerと完全attestorが未実装 |
-| G3 pilot W1-W5 | immutable eventをmutation前に検証し、edit/rename/move/duplicate/derive/archive/delete/restore/purge | exactly-once journal、再開収束、waveごとのactual attestation、purge後index noop | allocator/manifestのみ済 |
+| G3 pilot W1-W5 | immutable eventをmutation前に検証し、edit/rename/move/duplicate/derive/archive/delete/restore/purge | exactly-once journal、再開収束、waveごとのactual attestation、purge後index noop | v1相当のみ済。v2 allocator/manifest未実装 |
 | G4 full Go/No-Go | pilotのbytes/inodes/RSS/history amplificationを読み戻す | 3 suite replay containers=60 persona-PC roots、staging、reserveがcapacity内。不足ならwrite前に停止 | evidence待ち |
 | G5 full replay×3 | 同一plan/eventから3 fresh rootsをそれぞれW0からW5まで実行 | `.kcs`/完成rootコピーなし、hard link/cloneなし、60 registries、1,200 scopes | 未実装 |
 | G6 reproducibility/resume | root依存値を除くcanonical stateとquery rankを比較、failure injection後resume | event exactly-once、同一seedのstate/count/history/query projection一致 | 未実装 |
@@ -597,8 +650,8 @@ gold oracleをsource rendering前に凍結する。queryとanswer文書のrare t
 
 2026-07-14時点の内蔵APFS空きは約143.83 GiBである。現行v1の35/40/20/5 binary byte仮説を
 20,090 filesへそのまま適用すると、binaryだけで最低約80.4 GiB/replay、約241.3 GiB/3 replayとなる。
-v2のimage+media+domainは20,530 filesなので、同じ旧envelopeなら最低約82.2 GiB/replay、
-約246.6 GiB/3 replayとなる。どちらもOffice、PDF、CAS、index、history、staging前に不足するため、
+v2のimage+media+domainは20,290 filesなので、同じ旧envelopeなら最低約81.2 GiB/replay、
+約243.7 GiB/3 replayとなる。どちらもOffice、PDF、CAS、index、history、staging前に不足するため、
 旧size envelopeのfullはNo-Goである。
 
 内蔵volumeで最初に許可する候補は20人全員・1 replayのpilotだけとする。
@@ -639,13 +692,21 @@ v2で実装済み（planning only、non-authorizing）:
 - secondaryのprovider/account/year/project階層を人物別に分離し、共通なのは8 functional slotsだけ
 - activity unitの1--100 rubricと、値が観測統計ではなくauthored stress hypothesisであることを明示
 - tiny/pilot/fullのphysical projectionとpilot/fullのscope chunk projection、必要source上下界とmargin regression
-- topology canonical 133,895 bytes、SHA-256
-  `4da9dcd11cf4147026ab7c68e1837a1baa31e43b448fdd4b4d754105788719e4`
+- pilot/full/full-minus-pilotのfamily/variant/scope/density/cohort marginalsと必要条件problem。全20人でpass、
+  `joint_allocation_proved=false`
+- envelope canonical 70,835 bytes、SHA-256
+  `6b5c7145881f2ab1e8c84fe033f667757dccf478b704e0731d543bfddfcddbac`
+- topology canonical 134,141 bytes、SHA-256
+  `fc079fc8e0aaee0ae03a22fee349e0af8f2dfe18e1fed6d8bb05304643e4a958`
+- joint必要条件problem canonical 744,081 bytes、SHA-256
+  `384c95f550355b63443d7f5ca94dad2ed008ab7b24d6b8148a9504f613c29227`
 
 v2で残るもの:
 
 - 20人別のv2 fidelity attribute、timezone/retention/permission/mtime/conflict exact値とreview receipt
-- source-level semantic filename、fact graph、400 scopeへのfamily/variant/density/cohort同時routing
+- `persona_realism_profile`、検索参加するduplicate/revision/conflict/attachment overlay、8軸台帳
+- exact solver policy、source-level canonical solution/certificate、400 scopeへのfamily/variant/density/cohort同時routing
+- source-level semantic filenameとfact graph
 - 実装済みextension/domain marginalsを束縛するcomplete variant catalog、valid validator/renderer
 - chunk/complexity/bytesを分離したjoint source recipe、人物・family別byte p50/p95/tail
 - 人物別event-mixのexact source件数/wave/familyとformat×scenario query coverage
@@ -654,7 +715,8 @@ v2で残るもの:
 - 3 fresh-storage replay、actual chunk/history attestation、1,800 query evaluation
 
 この提案が採用されるまでは、現行`SCHEMA_VERSION=1`、`FIXTURE_ID=kcs-persona-pc-v1`、
-canonical plan SHAを変更しない。次の実装単位はG0のjoint allocation、その後にjoint source recipeであり、
+canonical plan SHAを変更しない。次の実装単位はexact joint solver policyとcanonical allocation
+solution/certificate、その後にjoint source recipeであり、
 rendererやfull writerだけを先行させない。
 
 Q_hardでのSpotlight/ripgrep-all比較、D1のTTFV/AI強化時間/コスト、実フォルダdogfoodは、

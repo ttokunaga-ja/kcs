@@ -6,7 +6,7 @@ import unittest
 from eval import persona_fixture_spec as v1
 from eval import persona_v2_contract as spec
 
-EXPECTED_ENVELOPE_SHA256 = "08ae6653d825002982ad87c7182df9fefc208875e452e92cb3a733b4ef74a119"
+EXPECTED_ENVELOPE_SHA256 = "6b5c7145881f2ab1e8c84fe033f667757dccf478b704e0731d543bfddfcddbac"
 
 
 class PersonaV2EnvelopeContractTests(unittest.TestCase):
@@ -23,6 +23,10 @@ class PersonaV2EnvelopeContractTests(unittest.TestCase):
             "exact-topology-external-sidecar-not-g0-bound",
         )
         self.assertIn("exact_topology_sidecar_not_bound_by_g0_root", contract["blockers"])
+        self.assertIn(
+            "persona_fidelity_realism_profile_and_overlay_missing",
+            contract["blockers"],
+        )
         self.assertEqual(
             contract["apportionment_contract"],
             {
@@ -73,7 +77,7 @@ class PersonaV2EnvelopeContractTests(unittest.TestCase):
                 self.assertEqual(sum(counts.values()), spec.profile_file_count(persona_id, profile))
 
         expected_full = {
-            "md": 18_580,
+            "md": 18_820,
             "txt_log": 19_210,
             "code": 10_440,
             "structured_text": 15_310,
@@ -87,7 +91,7 @@ class PersonaV2EnvelopeContractTests(unittest.TestCase):
             "pptx": 10_620,
             "image": 11_380,
             "media": 2_150,
-            "domain_binary": 7_000,
+            "domain_binary": 6_760,
         }
         observed = {family: 0 for family in spec.FORMAT_KEYS}
         for persona_id in spec.PERSONA_IDS:
@@ -160,6 +164,14 @@ class PersonaV2EnvelopeContractTests(unittest.TestCase):
         self.assertEqual(spec.contributor_count("p10", "pilot"), 273)
         self.assertEqual(spec.contributor_count("p14", "full"), 2_464)
         self.assertEqual(spec.contributor_count("p14", "pilot"), 246)
+        self.assertEqual(spec.contributor_count("p08", "pilot"), 219)
+        self.assertEqual(spec.contributor_count("p08", "full"), 2_192)
+        self.assertEqual(spec.contributor_count("p17", "pilot"), 219)
+        self.assertEqual(spec.contributor_count("p17", "full"), 2_192)
+        self.assertEqual(
+            tuple(spec.density_bucket_counts("p17", "pilot").values()),
+            (2, 9, 44, 164),
+        )
         self.assertEqual(spec.density_chunk_interval("p07", "pilot")[1] - 12_000, 294)
         with self.assertRaisesRegex(spec.PersonaV2ContractError, "density"):
             spec.density_bucket_counts("p07", "tiny-smoke")
@@ -205,15 +217,54 @@ class PersonaV2EnvelopeContractTests(unittest.TestCase):
             contract["incidental_cap_contract"]["eligible_caps"]["pilot"],
             {"current": 13_500, "total": 21_000, "base_current": 1_500, "base_total": 3_000},
         )
+        history_contract = contract["history_cohort_contract"]
+        self.assertEqual(history_contract["allocation_unit"], "contract_contributor_chunks")
+        self.assertEqual(history_contract["cohort_order"], ["P", "X", "Y", "N", "U"])
         self.assertEqual(
-            contract["history_cohort_contract"],
-            {
-                "allocation_unit": "contract_contributor_chunks",
-                "coverage_required_in_all_twenty_scopes": ["P", "X", "Y", "N"],
-                "partition": "whole_source",
-                "profiles": ["pilot", "full"],
-                "weights_pct": {"N": 4, "P": 4, "U": 76, "X": 10, "Y": 6},
-            },
+            history_contract["coverage_required_in_all_twenty_scopes"],
+            ["P", "X", "Y", "N"],
+        )
+        self.assertEqual(history_contract["partition"], "whole_source")
+        self.assertEqual(history_contract["profiles"], ["pilot", "full"])
+        self.assertEqual(history_contract["required_scope_count"], 20)
+        self.assertEqual(history_contract["max_chunks_per_contributor_source"], 70)
+        self.assertEqual(
+            history_contract["weights_pct"],
+            {"P": 4, "X": 10, "Y": 6, "N": 4, "U": 76},
+        )
+        expected_chunks = {
+            "pilot": {"P": 480, "X": 1_200, "Y": 720, "N": 480, "U": 9_120},
+            "full": {"P": 4_800, "X": 12_000, "Y": 7_200, "N": 4_800, "U": 91_200},
+        }
+        expected_lower = {
+            "pilot": {"P": 20, "X": 20, "Y": 20, "N": 20, "U": 131},
+            "full": {"P": 69, "X": 172, "Y": 103, "N": 69, "U": 1_303},
+        }
+        for profile in ("pilot", "full"):
+            self.assertEqual(spec.history_cohort_chunk_counts(profile), expected_chunks[profile])
+            self.assertEqual(
+                spec.history_cohort_source_lower_bounds(profile),
+                expected_lower[profile],
+            )
+            profile_contract = history_contract["profile_source_lower_bounds"][profile]
+            self.assertEqual(
+                profile_contract["minimum_contributor_sources"],
+                sum(expected_lower[profile].values()),
+            )
+            self.assertEqual(
+                {
+                    row["cohort_id"]: row["contract_contributor_chunks"]
+                    for row in profile_contract["cohorts"]
+                },
+                expected_chunks[profile],
+            )
+        self.assertEqual(
+            min(
+                spec.contributor_count(persona_id, "pilot")
+                - sum(expected_lower["pilot"].values())
+                for persona_id in spec.PERSONA_IDS
+            ),
+            7,
         )
         self.assertEqual(
             contract["history_checkpoints"],

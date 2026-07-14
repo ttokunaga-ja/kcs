@@ -693,3 +693,20 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     not prove the later joint allocation, freeze G0, or authorize rendering, writing, or history mutation.
     The authored activity units require a separately bound rubric-review receipt; until then
     `activity_unit_review_receipt_bound=false` remains an explicit G0 blocker.
+109. Persona-PC v2 rejects a whole-source history-cohort counterexample before solver construction.
+    Pilot cohort chunks P/X/Y/N/U are 480/1,200/720/480/9,120.  With a 70-chunk source cap and
+    P/X/Y/N coverage across all twenty scopes, their independent source lower bounds are
+    20/20/20/20/131, or 211 total.  The former p17 pilot had only 203 contributors and was impossible;
+    p08 had 211 with no headroom.  The physical `benchmark_stress_mix_v2` therefore changes p08
+    md/domain-binary from 10/2 to 11/1 percent and p17 from 3/15 to 5/13, yielding 219 pilot and
+    2,192 full contributors for both.  Suite md/domain-binary totals become 18,820/6,760 files.
+    The bound `kcs.persona.pc-joint-problem/v2` artifact materializes pilot, full, and coordinatewise
+    full-minus-pilot marginals and necessary feasibility checks.  Its canonical body is 744,081 bytes,
+    SHA-256 `384c95f550355b63443d7f5ca94dad2ed008ab7b24d6b8148a9504f613c29227`, bound to envelope
+    `6b5c7145881f2ab1e8c84fe033f667757dccf478b704e0731d543bfddfcddbac` and topology
+    `fc079fc8e0aaee0ae03a22fee349e0af8f2dfe18e1fed6d8bb05304643e4a958`.
+    It contains no source rows, route, quota/cohort assignment, canonical allocation solution, or
+    certificate, so all G0/write/history authority remains false.  Physical ratios are stress inputs,
+    not observed user statistics; persona realism remains separately blocked by
+    `persona_fidelity_realism_profile_and_overlay_missing` until a search-participating
+    duplicate/revision/conflict/attachment overlay and its ledgers are frozen.

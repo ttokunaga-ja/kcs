@@ -1,6 +1,7 @@
 # Persona-PC fidelity v2 G0 contract
 
-Status: envelopeとexact topology sidecar実装済み。`g0_contract_frozen=false`、G0 root未実装、非authorizing。
+Status: envelope、exact topology sidecar、joint必要条件problem artifactまで実装済み。必要条件は全20人で
+通過したがsource-level exact solutionではない。`g0_contract_frozen=false`、G0 root未実装、非authorizing。
 現行`kcs-persona-pc-v1`、そのartifact、golden hash、writer、history planを変更しない。
 
 Date: 2026-07-14
@@ -122,9 +123,12 @@ tiny/pilot/fullの物理配賦とpilot/full chunk配賦、scope別source必要�
 
 ## 5. physical familyとvariant
 
-15 familyの人物別physical-file比はv2提案書のexact 20x15 matrixを正とし、full合計203,000、
+15 familyの人物別physical-file比はv2提案書の`benchmark_stress_mix_v2` exact 20x15 matrixを正とし、
+full合計203,000、
 pilot合計20,300、tiny合計4,000とする。family比の分母はW0 physical filesであり、bytes、logical
-members、chunksではない。
+members、chunksではない。これは観測された実PC統計ではなくstress-design仮説である。whole-source cohort
+必要条件を満たすため、p08のmd/domain-binaryは11/1%、p17は5/13%とし、suite fullのmd/domain-binaryは
+18,820/6,760 filesとする。
 
 family内variantは人物別profileを使う。各variant dictionary entryは次を一意に決め、source rowによる
 overrideを許可しない。
@@ -153,6 +157,23 @@ offline dispositionはfamilyではなくvariant別に固定する。例:
 - `.log/.jsonl`、structured、CSV/TSV、HTML/EML、IPYNB: `incidental_sniff` hypothesis
 
 `raw_only actual chunks == 0`はG2/G7のobserved gateであり、G0のplanned dispositionで代替しない。
+
+### 5.1 persona realism profile
+
+physical format比とは別に`persona_realism_profile`を持ち、既存W0 physical rowsへ検索参加する
+duplicate/revision/conflict/attachment関係をoverlayする。初期候補範囲はexact duplicate 1--3%、
+near/visible revision 3--8%、conflict copy 0.2--1%、standalone attachment copy 1--4%だが、範囲だけでは
+G0条件を満たさない。人物別exact integer、分母、membership、検索参加、logical-document採点規則を凍結する。
+overlayを理由にphysical file総数、family/variant marginal、contract chunk targetを暗黙変更しない。
+overlayはpost-hoc処理ではなくjoint solver/source recipeの入力であり、canonical allocation解の後へ追加しない。
+duplicate clusterのscope配置、raw identity共有、distinct `(scope_key, chunk_id)` 寄与を解の中で証明し、
+同一scopeでのcollapseを含めても人物ごとのcontract targetをexactに保つ。
+
+最低限、physical materializations、logical documents、gate/search roleとchunks、container members/
+attachments、current/history versions、duplicate/conflict clusters、allocated bytes、cloud/OS由来metadataと
+ignored/excluded entriesを別台帳で整合させる。exact/near/conflictは排他的なcontent-relation軸、attachmentは
+直交するcontainer-role軸とする。未確定の間は
+`persona_fidelity_realism_profile_and_overlay_missing` blockerを維持する。
 
 ## 6. joint allocation
 
@@ -186,18 +207,54 @@ max(4, ceil(scope_contributor_chunks / 70))
 下限の4は任意の安全係数ではない。互いに排他的なwhole-source history cohort P/X/Y/Nを、pilot/fullの
 各scopeへ最低1 sourceずつ置くcoverage制約から導く。Uには全scope coverageを要求しない。
 
+scope別境界だけでなく、人物・profile全体で次のcohort別source下限を満たす。
+
+```text
+L(h, profile)
+  = max(20 if h in {P,X,Y,N} else 0,
+        ceil(cohort_chunks(h, profile) / 70))
+contributor_sources(profile) >= sum_h L(h, profile)
+```
+
+| profile | P | X | Y | N | U | total lower |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| pilot chunks | 480 | 1,200 | 720 | 480 | 9,120 | - |
+| pilot source lower | 20 | 20 | 20 | 20 | 131 | 211 |
+| full chunks | 4,800 | 12,000 | 7,200 | 4,800 | 91,200 | - |
+| full source lower | 69 | 172 | 103 | 69 | 1,303 | 1,716 |
+
 authoritative solverはbounded exact searchで、objectiveは順に、hard constraint充足、比例idealからの
 integer L1 deviation最小、route affinity最大、canonical flattened cell vectorのlexicographic最小とする。
 solver schema/version、node/edge/state上限、tie-break順をhashへ含める。2x2 repairはwarm startにだけ使え、
 authoritative exact解と一致しなければ捨てる。certificateはfamily、variant、scope、bucket、quota
 histogram、warm-start repair steps、exact objective、各marginal hashを持つ。同じmarginalだけを満たす
 別解を受理せず、canonical rebuildとexact一致させる。
+この段落はobjective層の設計順だけを要求する。integer L1のexact式、route-affinity matrix、flatten axes、
+探索上限は未束縛であり、これらをmachine-readable policyへ固定するまで`solver_policy_bound=false`である。
 
-現在は400 exact load vectorとscope別physical/chunk projection、必要source上下界が全20人で成立する。
-ただしfamily/variant/density bucket/history cohortを同時にroutingするjoint solverは未実装なので、
-scope-level allocationの十分条件やcompletion evidenceではない。最も厳しい既知のpilot必要条件は、p17の
-source下限合計に対する余裕が12 sources、同人物の最小scope spanが3 sourcesであること、p07のsource上限合計に
-対する余裕が388 sourcesであることである。これらはmargin regressionとして固定する。
+旧p17 pilotは203 contributor sourcesでglobal cohort下限211を満たさず、旧p08は211で余裕0だったため、
+§5のphysical mixを明示変更した。現在は全20人のpilot/full/full-minus-pilot marginalsと必要条件が通過する。
+pilot global下限余裕はp11の+7が最小、p08/p17は+8である。scope-boundではp17のlower headroomが28、
+minimum scope spanが3、p07のupper headroomが388である。これらはmargin regressionとして固定する。
+
+現在の必要条件artifactは次である。
+
+```text
+artifact_schema = kcs.persona.pc-joint-problem/v2
+artifact_kind   = persona-pc-v2-joint-allocation-problem
+canonical bytes = 744,081
+sha256          = 384c95f550355b63443d7f5ca94dad2ed008ab7b24d6b8148a9504f613c29227
+bound envelope  = 6b5c7145881f2ab1e8c84fe033f667757dccf478b704e0731d543bfddfcddbac
+bound topology  = fc079fc8e0aaee0ae03a22fee349e0af8f2dfe18e1fed6d8bb05304643e4a958
+```
+
+これはfamily/variant、gate role、20 scopes、density bucket、cohort chunk、coordinatewise
+full-minus-pilot residualを束縛するが、source rows、variant-to-scope route、source quota/cohort assignment、
+canonical solver solutionを含まない。したがってstrict pilot source subsetの証明ではなく、
+`joint_allocation_proved=false`、`joint_allocation_geometry_proved=false`、
+`joint_allocation_proved_for_g0=false`、`solver_policy_bound=false`、`source_recipe_bound=false`を維持する。
+family/variant/density bucket/history cohortを同時にroutingするjoint solverは未実装であり、必要条件通過を
+completion evidenceとして扱わない。
 
 ## 7. history checkpointsとincidental上限
 
@@ -267,9 +324,13 @@ unlink/path-purge + forced purged commit、全post-purge noop indexesである�
 structural event inventory、dependency、before/after state、replacement recipeもroot-independent intentへ
 exact列挙する。rendererが未完成のG0ではevent bytes/hashを作らず、intent hashだけを凍結候補にする。
 
-formal W0 raw hashesはunique controlとし、exact/near/conflict duplicateは明示eventまたはrobustness
-laneで導入する。logical content identityとmaterialization identityを分離し、duplicate pathがRecall
-expected source数を水増ししない。
+現在のW0 raw-hash unique controlは必要条件artifactの暫定仮説であり、G0正本ではない。
+`persona_realism_profile`は既存W0 physical rowsへduplicate/revision/conflict/attachment関係とsearch
+participationを明示的にoverlayする。exact duplicateはmaterialization identityを分けつつraw identityを
+共有できる。logical documentとduplicate clusterを別台帳で数え、duplicate pathがRecall expected source数を
+水増ししない。overlayはphysical/family marginalsを変更せず、history eventで追加されるmaterializationは
+別inventoryにする。W0 overlayはjoint solver/source recipeへ先に入力し、clusterのscope配置とdistinct
+chunk寄与を含めて120,000 contract chunksを解く。allocation後のpost-hoc追加は禁止する。
 
 ## 8. source recipeとoracle
 
@@ -320,6 +381,7 @@ bounded artifact上限は次とする。すべて最大nesting depth 64、string
 framed byte capを持つ。
 
 - suite/fixture envelope: 2 MiB
+- joint necessary problem: 4 MiB/suite（現在744,081 bytes）
 - W0 persona plan: 16 MiB、最大16,000 W0 sources、20 scopes
 - joint allocation certificate: 8 MiB/person
 - history intent/event recipe: 16 MiB/person、event-created sources最大4,096/person
@@ -348,6 +410,8 @@ G0 artifact/receiptは次を固定する。
 
 ```text
 g0_contract_frozen               = false  # 全400 paths/load/solver/oracle完了まで
+activity_unit_review_receipt_bound = false
+joint_allocation_proved          = false
 renderer_available               = false
 filesystem_writer_available      = false
 kcs_execution_available          = false
@@ -369,6 +433,7 @@ formal flagを変更してはならない。
 2. full/pilot family/variant/scope/bucket/source quota exact allocation
 3. P/X/Y/N/U history cohort、操作順、scope coverage、checkpoint exact projection
 4. source recipe catalog、fact graph、oracle membership、独立query spec
-5. W0-W5全source/destinationのpath/basename collision、variant feasibility、resource cap validation
-6. v1 identity/goldenの非回帰
-7. 20人を1人ずつbuildしたcanonical bytes/hashと16 MiB cap
+5. 人物別`persona_realism_profile`、overlay membership、8軸台帳の整合
+6. W0-W5全source/destinationのpath/basename collision、variant feasibility、resource cap validation
+7. v1 identity/goldenの非回帰
+8. 20人を1人ずつbuildしたcanonical bytes/hashと16 MiB cap
