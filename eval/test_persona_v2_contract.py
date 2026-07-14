@@ -6,7 +6,7 @@ import unittest
 from eval import persona_fixture_spec as v1
 from eval import persona_v2_contract as spec
 
-EXPECTED_ENVELOPE_SHA256 = "e7fd222653c7a9d5337c7ad6e08a1201ee49ab78379e3e9434f7212f11270d91"
+EXPECTED_ENVELOPE_SHA256 = "08ae6653d825002982ad87c7182df9fefc208875e452e92cb3a733b4ef74a119"
 
 
 class PersonaV2EnvelopeContractTests(unittest.TestCase):
@@ -18,6 +18,11 @@ class PersonaV2EnvelopeContractTests(unittest.TestCase):
         self.assertEqual(contract["fixture_id"], "kcs-persona-pc-v2")
         self.assertEqual(contract["fixture_schema_version"], 2)
         self.assertFalse(contract["g0_contract_frozen"])
+        self.assertEqual(
+            contract["topology_status"],
+            "exact-topology-external-sidecar-not-g0-bound",
+        )
+        self.assertIn("exact_topology_sidecar_not_bound_by_g0_root", contract["blockers"])
         self.assertEqual(
             contract["apportionment_contract"],
             {
@@ -250,7 +255,9 @@ class PersonaV2EnvelopeContractTests(unittest.TestCase):
         for mutate in (
             lambda value: value.__setitem__("g0_contract_frozen", True),
             lambda value: value["authority"].__setitem__("authorizes_physical_write", True),
+            lambda value: value["authority"].__setitem__("authorizes_physical_write", 0),
             lambda value: value["personas"][0].__setitem__("full_raw_files", 12_001),
+            lambda value: value["personas"][0].__setitem__("full_raw_files", True),
             lambda value: value.__setitem__("unknown", False),
         ):
             with self.subTest(mutate=mutate):

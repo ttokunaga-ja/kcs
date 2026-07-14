@@ -11,7 +11,10 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
-      - run: python3 -m unittest -v eval.test_persona_v2_contract
+      - run: >-
+          python3 -m unittest -v
+          eval.test_persona_v2_contract
+          eval.test_persona_v2_topology
 
   rust:
     runs-on: ubuntu-latest
