@@ -5,6 +5,14 @@ on:
   pull_request:
 
 jobs:
+  persona-g0-v2-contract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+      - run: python3 -m unittest -v eval.test_persona_v2_contract
+
   rust:
     runs-on: ubuntu-latest
 
