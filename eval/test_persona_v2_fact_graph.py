@@ -11,31 +11,31 @@ from eval import persona_v2_fact_graph_data as data
 
 
 EXPECTED_PERSONA_BINDINGS = (
-    ("p01", 23_765, "59679aa5e52f1f9db9e9e5ede1066e68cba1b3ff6c4d2c6dd9f9df47c56ee36d"),
-    ("p02", 23_720, "62eb9b71f9f3a35afb5da00eee67406123d2eb7707b966c447df64bb2ae2a27f"),
-    ("p03", 23_834, "b6f87f235f87d449c8d4660086d79edb47572ed9c54a8f3c97e7eeaa6d7f7a61"),
-    ("p04", 23_916, "96c332ec293085f1594f56f55e7a9b4b340f39392ec4a0d38b53dd2d1edc3192"),
-    ("p05", 23_886, "be6d50dd17ca38555504b7a0fc3b854e48cb1b80da21498a5aca9f9595785f53"),
-    ("p06", 23_874, "30db27b0cbff11701054f7bec194e5d00e6d5ca3484fffcf34c5841dee84b6e0"),
-    ("p07", 24_010, "f447204c98c6c5fb4fe0f95b80fb033f9878654b94df19b0e4aab162d3916abb"),
-    ("p08", 23_859, "1cd082aa37959990361e7b5b3a13af17fb27e9d2532f086e9f5c3518fd9fe66e"),
-    ("p09", 23_893, "ba51f5ba4080604c82b3e59f9aba640a8edbd4aed4d136708aeac38346abb8f3"),
-    ("p10", 23_851, "e2b1b8cf2cbf69c14dd0df665ea9c90170dad7bd0a7f59e6f5ccaf9d113780b0"),
-    ("p11", 23_789, "93131519cfd58bea8a5b59758fdb568aba9b8f26a306f65b8221d81b4a2c79c9"),
-    ("p12", 23_870, "410f550b51d4eff69add866328a5ce5e4b13c2fd6d445b4fb6b36e375084d585"),
-    ("p13", 23_842, "2f16696b56390490ab4e02e0cff3f20f0ec54159ad83fd7a5c5d2f2f5efb4d47"),
-    ("p14", 23_787, "014281d9430db1484f9a7040684c21c49c111da9db96bc44639a5038c8e4ab77"),
-    ("p15", 23_885, "5a7ce55ea697304f9fda019f7d8d0e58e543b0b1e7b0bb9987d50e07cf55134a"),
-    ("p16", 23_923, "190e5902b1d3f60039ec0a89dc87c7e8c6bb7efca816612b8c21f45a9fddff6e"),
-    ("p17", 23_839, "b77beb7fd6cb6ff64275b35e9425ff08ee5d1a9c7ef75bb7cd69416b60fae6ad"),
-    ("p18", 23_841, "4893c3ed0e5aa5281f566cc7063fd2b1a3a7b2f34fbabf6f0c7cb55f6a26ec0a"),
-    ("p19", 23_803, "38201bd5a1bab363abe9c7503e2da07abd585b0ccb73aa4a280b89e2cf40f793"),
-    ("p20", 23_895, "684712c3e78d974272d3cbb81265a63bcc830375ce924367bf7c2c6727eff4a3"),
+    ("p01", 26_403, "94ab0655788534db4e784709a044fda2cdbeb69775082354b900068e8cbcd70d"),
+    ("p02", 26_353, "92afd654b99da2b4eb537fd9269e0e95405a530e6c01d54eaaaeb8dae42887ef"),
+    ("p03", 26_479, "648b4cb41ba37f925be9022ac683c8982e8aa8dc5d3a4cda0a020d93ae7d88ad"),
+    ("p04", 26_569, "c184999ebbdc043cbb687965815e970954577022632a2b76720e4249e507bf32"),
+    ("p05", 26_536, "ed8b9a49a65f9b9df00693492b1d27d8a52a70e23ba4d873a779160d54747b20"),
+    ("p06", 26_522, "2c523a93fa6279b62aba2a7708a0929861b850f90260377e647455c8a810fe02"),
+    ("p07", 26_672, "c2bc8a08e54de557617b5fe1c0b75732100c971c27bf1e6dc9bbc73b34bad3a4"),
+    ("p08", 26_506, "fdce514cd277e9a5758a97fe6e814c68c3a29ec1d06c8cdd233f9adcb7650ae5"),
+    ("p09", 26_544, "7db7bab2e3ca1c9c91ef7108a097646894907d358f9a304f72ee662e62c52a19"),
+    ("p10", 26_497, "d7fb092cddfcfe45e6fc6910e35c33d8e00c1a99f8b272ff50e6d7c9edce1503"),
+    ("p11", 26_428, "f2882db025022ee476ed2dba11e2813ecc3e0620df00ad2321295113d583c301"),
+    ("p12", 26_518, "e86896736e304e1ba0b56fc43ddc31021db5cdb9b11f1edadd6ab9851389d994"),
+    ("p13", 26_487, "c13953d43b88a817b4a6147c0e00c432f48ecaa7600610a5a87c3dc8e62cadb3"),
+    ("p14", 26_426, "203cc67a8deaf06042d9a201237f89ceefe4c814705325d427c3dc1ecc7b1f62"),
+    ("p15", 26_535, "302f8ba3fe9ee3a890724fb675a09a158d3890e70622b978441966b14af4a26e"),
+    ("p16", 26_577, "ee1d0718b7b9cacc370ead3a19f1e8e5d22bdaf89fcb4503af2f225d17a77567"),
+    ("p17", 26_483, "c342080dc551a4da7b2fbbcd0948bd80ffbc5300e3c04fae7400207639aaa119"),
+    ("p18", 26_485, "26f3c8bbdd4af1ad87572a22ca45961d1276b30d699185331876839a73063eb9"),
+    ("p19", 26_442, "02e33ebfdd8c381b704c2c0f67577f27588f5c4d442baad6e256570faf926b2f"),
+    ("p20", 26_546, "423d3973d26d7ab8e234c1f93f04c166e3fcdc62b560101bbb4b893960a70df7"),
 )
-EXPECTED_SUITE_CANONICAL_BYTES = 477_082
+EXPECTED_SUITE_CANONICAL_BYTES = 530_008
 EXPECTED_SUITE_SUMMARY_BYTES = 2_566
 EXPECTED_SUITE_SUMMARY_SHA256 = (
-    "edf6dad5a7dc1057384f8c47a866fd86eaddd3823ade10aa4d24c86db42a6def"
+    "ac976c886993a44dc40cd492a9da398736b464ffce36ff391b41d9df219003ac"
 )
 
 
@@ -53,6 +53,9 @@ class PersonaV2FactGraphTests(unittest.TestCase):
         self.assertEqual(value["persona_id"], "p01")
         self.assertIs(value["fact_graph_input_leaf_complete"], True)
         self.assertIs(value["fact_graph_inventory_complete"], True)
+        self.assertIs(
+            value["unordered_w0_current_fact_pair_inventory_complete"], True
+        )
         self.assertIs(value["fact_oracle_input_closure_complete"], False)
         self.assertIs(value["source_intent_recipe_bound"], False)
         self.assertIs(value["history_intent_recipe_bound"], False)
@@ -112,6 +115,7 @@ class PersonaV2FactGraphTests(unittest.TestCase):
         actual_bindings = []
         project_ids = []
         suite_counts = {
+            "conflict_set_count": 0,
             "edge_count": 0,
             "entity_count": 0,
             "fact_count": 0,
@@ -125,9 +129,10 @@ class PersonaV2FactGraphTests(unittest.TestCase):
             )
             self.assertLessEqual(len(raw), fact_graph.MAX_FACT_GRAPH_BYTES)
             self.assertEqual(value["summary"], {
+                "conflict_set_count": 4,
                 "edge_count": 4,
                 "entity_count": 16,
-                "fact_count": 32,
+                "fact_count": 36,
                 "graph_count": 4,
                 "revision_chain_count": 4,
             })
@@ -137,9 +142,10 @@ class PersonaV2FactGraphTests(unittest.TestCase):
         self.assertEqual(tuple(actual_bindings), EXPECTED_PERSONA_BINDINGS)
         self.assertEqual(sum(row[1] for row in actual_bindings), EXPECTED_SUITE_CANONICAL_BYTES)
         self.assertEqual(suite_counts, {
+            "conflict_set_count": 80,
             "edge_count": 80,
             "entity_count": 320,
-            "fact_count": 640,
+            "fact_count": 720,
             "graph_count": 80,
             "revision_chain_count": 80,
         })
@@ -178,6 +184,7 @@ class PersonaV2FactGraphTests(unittest.TestCase):
             "fact": set(),
             "edge": set(),
             "revision": set(),
+            "conflict_set": set(),
         }
         for value in self.values:
             artifact_common.validate_plain_value(value, label="fact graph test value")
@@ -203,6 +210,9 @@ class PersonaV2FactGraphTests(unittest.TestCase):
                 )
                 suite_namespace_ids["revision"].update(
                     row["revision_chain_id"] for row in graph["revision_chains"]
+                )
+                suite_namespace_ids["conflict_set"].update(
+                    row["conflict_set_id"] for row in graph["conflict_sets"]
                 )
                 by_fact_id = {row["fact_id"]: row for row in graph["facts"]}
                 chain = graph["revision_chains"][0]
@@ -234,6 +244,36 @@ class PersonaV2FactGraphTests(unittest.TestCase):
                             ipaddress.ip_network("192.0.2.0/24"),
                         )
 
+                conflict_set = graph["conflict_sets"][0]
+                self.assertEqual(
+                    conflict_set["member_fact_ids"],
+                    sorted(conflict_set["member_fact_ids"]),
+                )
+                self.assertEqual(
+                    conflict_set["required_current_checkpoint"], "W0"
+                )
+                left, right = (
+                    by_fact_id[fact_id]
+                    for fact_id in conflict_set["member_fact_ids"]
+                )
+                self.assertEqual(left["predicate_id"], right["predicate_id"])
+                self.assertEqual(
+                    left["subject_entity_id"], right["subject_entity_id"]
+                )
+                self.assertNotEqual(left["typed_value"], right["typed_value"])
+                for fact in (left, right):
+                    states = {
+                        row["checkpoint"]: row["state"]
+                        for row in fact["visibility_by_checkpoint"]
+                    }
+                    self.assertEqual(states["W0"], "current")
+                revision_members = set(chain["prior_fact_ids"]) | {
+                    chain["current_fact_id"]
+                }
+                self.assertFalse(
+                    revision_members & set(conflict_set["member_fact_ids"])
+                )
+
         for identifiers in suite_namespace_ids.values():
             for identifier in identifiers:
                 self.assertIsNotNone(synthetic_id.fullmatch(identifier), identifier)
@@ -243,9 +283,10 @@ class PersonaV2FactGraphTests(unittest.TestCase):
                 "predicate": 7,
                 "graph": 80,
                 "entity": 320,
-                "fact": 640,
+                "fact": 720,
                 "edge": 80,
                 "revision": 80,
+                "conflict_set": 80,
             },
         )
         namespace_names = tuple(suite_namespace_ids)
@@ -329,6 +370,47 @@ class PersonaV2FactGraphTests(unittest.TestCase):
         by_id[old_id]["visibility_by_checkpoint"][2]["state"] = "current"
         with self.assertRaises(fact_graph.PersonaV2FactGraphError):
             fact_graph._validate_graph(graph)
+
+        graph = copy.deepcopy(self.values[0]["graphs"][0])
+        members = graph["conflict_sets"][0]["member_fact_ids"]
+        by_id = {row["fact_id"]: row for row in graph["facts"]}
+        by_id[members[1]]["typed_value"] = copy.deepcopy(
+            by_id[members[0]]["typed_value"]
+        )
+        with self.assertRaises(fact_graph.PersonaV2FactGraphError):
+            fact_graph._validate_graph(graph)
+
+        graph = copy.deepcopy(self.values[0]["graphs"][0])
+        graph["conflict_sets"][0]["member_fact_ids"].reverse()
+        with self.assertRaises(fact_graph.PersonaV2FactGraphError):
+            fact_graph._validate_graph(graph)
+
+        graph = copy.deepcopy(self.values[0]["graphs"][0])
+        members = graph["conflict_sets"][0]["member_fact_ids"]
+        by_id = {row["fact_id"]: row for row in graph["facts"]}
+        by_id[members[1]]["subject_entity_id"] = graph["entities"][1]["entity_id"]
+        with self.assertRaises(fact_graph.PersonaV2FactGraphError):
+            fact_graph._validate_graph(graph)
+
+        graph = copy.deepcopy(self.values[0]["graphs"][0])
+        members = graph["conflict_sets"][0]["member_fact_ids"]
+        by_id = {row["fact_id"]: row for row in graph["facts"]}
+        by_id[members[1]]["visibility_by_checkpoint"][0]["state"] = "absent"
+        with self.assertRaises(fact_graph.PersonaV2FactGraphError):
+            fact_graph._validate_graph(graph)
+
+        graph = copy.deepcopy(self.values[0]["graphs"][0])
+        revision_member = graph["revision_chains"][0]["prior_fact_ids"][0]
+        graph["conflict_sets"][0]["member_fact_ids"][0] = revision_member
+        graph["conflict_sets"][0]["member_fact_ids"].sort()
+        with self.assertRaises(fact_graph.PersonaV2FactGraphError):
+            fact_graph._validate_graph(graph)
+
+        for replacement in ([], graph["conflict_sets"] * 2):
+            changed = copy.deepcopy(self.values[0]["graphs"][0])
+            changed["conflict_sets"] = copy.deepcopy(replacement)
+            with self.assertRaises(fact_graph.PersonaV2FactGraphError):
+                fact_graph._validate_graph(changed)
 
         graph = copy.deepcopy(self.values[0]["graphs"][0])
         by_id = {row["fact_id"]: row for row in graph["facts"]}

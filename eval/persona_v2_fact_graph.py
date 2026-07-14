@@ -1,9 +1,10 @@
 """Typed, authored fact-graph input leaves for persona-PC fidelity v2.
 
 Each persona owns exactly four project/case graphs.  This leaf contains only
-synthetic entities and language-neutral typed facts.  It deliberately has no
-source-intent membership, evaluation labels, generated surface text, final
-identity, filesystem location, retrieval output, or execution authority.
+synthetic entities and language-neutral typed facts, including one unordered
+W0-current conflict set per graph.  It deliberately has no source-intent
+membership, evaluation labels, generated surface text, final identity,
+filesystem location, retrieval output, or execution authority.
 """
 
 from __future__ import annotations
@@ -32,8 +33,10 @@ ARTIFACT_KIND = "persona-pc-v2-fact-graph"
 MAX_FACT_GRAPH_BYTES = 1 * 2**20
 GRAPH_COUNT_PER_PERSONA = 4
 ENTITY_COUNT_PER_GRAPH = 4
-FACT_COUNT_PER_GRAPH = 8
+BASE_FACT_COUNT_PER_GRAPH = 8
+FACT_COUNT_PER_GRAPH = 9
 EDGE_COUNT_PER_GRAPH = 1
+CONFLICT_SET_COUNT_PER_GRAPH = 1
 EXPECTED_REALISM_BYTES = 36_811
 EXPECTED_REALISM_SHA256 = (
     "a32bbb0fd7c88c57205454d8555163ad97b2b1a3024e5a5d7f7234bf56766f05"
@@ -238,9 +241,10 @@ def _graph(project_or_case_id, graph_kind, graph_ordinal):
         {"entity_id": endpoint_id, "entity_type": "synthetic-endpoint"},
     ]
     fact_ids = [
-        f"fact-syn-{((graph_ordinal - 1) * FACT_COUNT_PER_GRAPH + ordinal):03d}"
-        for ordinal in range(1, FACT_COUNT_PER_GRAPH + 1)
+        f"fact-syn-{((graph_ordinal - 1) * BASE_FACT_COUNT_PER_GRAPH + ordinal):03d}"
+        for ordinal in range(1, BASE_FACT_COUNT_PER_GRAPH + 1)
     ]
+    conflict_fact_id = f"conflict-fact-syn-{graph_suffix}"
     project_slug = project_or_case_id.rsplit("-syn-", 1)[0]
     contact_email = f"contact-syn-{graph_suffix}@{project_slug}-syn-{graph_suffix}.invalid"
     documentation_ip = f"192.0.2.{graph_ordinal}"
@@ -312,6 +316,16 @@ def _graph(project_or_case_id, graph_kind, graph_ordinal):
             },
             "stable-current",
         ),
+        _fact(
+            conflict_fact_id,
+            predicates[4],
+            project_or_case_id,
+            {
+                "kind": "unsigned-integer",
+                "value": (graph_ordinal - 1) % 5 + 101,
+            },
+            "stable-current",
+        ),
     ]
     edge = {
         "edge_id": f"revision-edge-syn-{graph_suffix}",
@@ -320,6 +334,13 @@ def _graph(project_or_case_id, graph_kind, graph_ordinal):
         "to_fact_id": fact_ids[4],
     }
     graph = {
+        "conflict_sets": [
+            {
+                "conflict_set_id": f"conflict-set-syn-{graph_suffix}",
+                "member_fact_ids": sorted((fact_ids[5], conflict_fact_id)),
+                "required_current_checkpoint": "W0",
+            }
+        ],
         "entities": entities,
         "fact_edges": [edge],
         "facts": facts,
@@ -426,12 +447,28 @@ def _validate_graph(graph):
     _assert_no_prohibited_graph_keys(graph)
     if type(graph) is not dict:
         raise PersonaV2FactGraphError("fact graph must be an exact object")
+    if set(graph) != {
+        "conflict_sets",
+        "entities",
+        "fact_edges",
+        "facts",
+        "graph_id",
+        "graph_kind",
+        "project_or_case_id",
+        "revision_chains",
+        "semantic_language_mode",
+    }:
+        raise PersonaV2FactGraphError("fact graph has an unexpected shape")
     if len(graph.get("entities", [])) != ENTITY_COUNT_PER_GRAPH:
         raise PersonaV2FactGraphError("each graph must contain exactly four entities")
     if len(graph.get("facts", [])) != FACT_COUNT_PER_GRAPH:
-        raise PersonaV2FactGraphError("each graph must contain exactly eight facts")
+        raise PersonaV2FactGraphError("each graph must contain exactly nine facts")
     if len(graph.get("fact_edges", [])) != EDGE_COUNT_PER_GRAPH:
         raise PersonaV2FactGraphError("each graph must contain exactly one fact edge")
+    if len(graph.get("conflict_sets", [])) != CONFLICT_SET_COUNT_PER_GRAPH:
+        raise PersonaV2FactGraphError(
+            "each graph must contain exactly one unordered conflict set"
+        )
     if graph.get("graph_kind") not in _GRAPH_KINDS:
         raise PersonaV2FactGraphError("fact graph kind is invalid")
     for key in ("graph_id", "project_or_case_id"):
@@ -564,6 +601,77 @@ def _validate_graph(graph):
             "a revision chain cannot expose both values as current at one checkpoint"
         )
 
+    revision_fact_ids = set(chain["prior_fact_ids"]) | {chain["current_fact_id"]}
+    conflict_set_ids = set()
+    for conflict_set in graph["conflict_sets"]:
+        if type(conflict_set) is not dict or set(conflict_set) != {
+            "conflict_set_id", "member_fact_ids", "required_current_checkpoint",
+        }:
+            raise PersonaV2FactGraphError(
+                "conflict set has an unexpected shape"
+            )
+        _require_synthetic_id(
+            conflict_set["conflict_set_id"], label="conflict set ID"
+        )
+        if conflict_set["conflict_set_id"] in conflict_set_ids:
+            raise PersonaV2FactGraphError("conflict set IDs must be unique")
+        conflict_set_ids.add(conflict_set["conflict_set_id"])
+        members = conflict_set["member_fact_ids"]
+        if (
+            type(members) is not list
+            or len(members) != 2
+            or len(set(members)) != 2
+            or members != sorted(members)
+            or any(member not in by_fact_id for member in members)
+        ):
+            raise PersonaV2FactGraphError(
+                "conflict set must contain two canonical unique fact IDs"
+            )
+        if revision_fact_ids & set(members):
+            raise PersonaV2FactGraphError(
+                "unordered conflict facts cannot belong to a revision chain"
+            )
+        left, right = (by_fact_id[member] for member in members)
+        if (
+            left["predicate_id"] != right["predicate_id"]
+            or left["subject_entity_id"] != right["subject_entity_id"]
+            or left["typed_value"] == right["typed_value"]
+        ):
+            raise PersonaV2FactGraphError(
+                "conflict facts must share predicate/subject and disagree in value"
+            )
+        checkpoint = conflict_set["required_current_checkpoint"]
+        if checkpoint != "W0":
+            raise PersonaV2FactGraphError(
+                "v2 conflict sets must require simultaneous W0 visibility"
+            )
+        for fact in (left, right):
+            states = {
+                row["checkpoint"]: row["state"]
+                for row in fact["visibility_by_checkpoint"]
+            }
+            if states.get(checkpoint) != "current":
+                raise PersonaV2FactGraphError(
+                    "both conflict facts must be current at W0"
+                )
+
+        def reachable(source, target):
+            pending = list(adjacency[source])
+            seen = set()
+            while pending:
+                candidate = pending.pop()
+                if candidate == target:
+                    return True
+                if candidate not in seen:
+                    seen.add(candidate)
+                    pending.extend(adjacency[candidate])
+            return False
+
+        if reachable(members[0], members[1]) or reachable(members[1], members[0]):
+            raise PersonaV2FactGraphError(
+                "conflict facts must be unordered by fact edges"
+            )
+
 
 def _validate_identifier_namespaces(predicate_catalog, graphs):
     namespaces = {
@@ -580,6 +688,11 @@ def _validate_identifier_namespaces(predicate_catalog, graphs):
             chain["revision_chain_id"]
             for graph in graphs
             for chain in graph["revision_chains"]
+        },
+        "conflict_set": {
+            conflict_set["conflict_set_id"]
+            for graph in graphs
+            for conflict_set in graph["conflict_sets"]
         },
     }
     names = tuple(namespaces)
@@ -651,11 +764,17 @@ def _canonical_fact_graph(persona_id, *, shared_inputs=None):
     ]
     fact_ids = [fact["fact_id"] for graph in graphs for fact in graph["facts"]]
     edge_ids = [edge["edge_id"] for graph in graphs for edge in graph["fact_edges"]]
+    conflict_set_ids = [
+        conflict_set["conflict_set_id"]
+        for graph in graphs
+        for conflict_set in graph["conflict_sets"]
+    ]
     for label, values in (
         ("graph", graph_ids),
         ("entity", entity_ids),
         ("fact", fact_ids),
         ("edge", edge_ids),
+        ("conflict set", conflict_set_ids),
     ):
         if len(values) != len(set(values)):
             raise PersonaV2FactGraphError(
@@ -698,6 +817,7 @@ def _canonical_fact_graph(persona_id, *, shared_inputs=None):
             "no-evaluation-oracle-no-solver-no-g0"
         ),
         "eligible_languages": languages,
+        "unordered_w0_current_fact_pair_inventory_complete": True,
         "fact_graph_input_leaf_complete": True,
         "fact_graph_inventory_complete": True,
         "fact_oracle_input_closure_complete": False,
@@ -731,6 +851,7 @@ def _canonical_fact_graph(persona_id, *, shared_inputs=None):
         "semantic_surface_text_present": False,
         "source_intent_recipe_bound": False,
         "summary": {
+            "conflict_set_count": len(conflict_set_ids),
             "edge_count": len(edge_ids),
             "entity_count": len(entity_ids),
             "fact_count": len(fact_ids),

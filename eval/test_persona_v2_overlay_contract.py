@@ -9,8 +9,8 @@ from eval import persona_v2_overlay_contract as overlay
 from eval import persona_v2_realism_profile as realism
 
 
-EXPECTED_CANONICAL_BYTES = 69_114
-EXPECTED_SHA256 = "e79d90e38cdfe62c4ed842a6cb20e4bd674d7fee7821e22fde701563415a7678"
+EXPECTED_CANONICAL_BYTES = 69_119
+EXPECTED_SHA256 = "60c17e893f02309cec4d1de7debca211b2b84fb38c9a41f7f5fb6c586748d4a8"
 EXPECTED_INPUT_BINDINGS = [
     (
         "envelope",
@@ -659,7 +659,7 @@ class PersonaV2OverlayContractTests(unittest.TestCase):
             value["completion_claims"]["conflict_fact_realizability_proved"]
         )
         self.assertIn(
-            "current-fact-graph-has-no-w0-current-unordered-conflict-pairs",
+            "unordered-w0-current-conflict-pairs-not-bound-to-overlay-instances",
             value["remaining_blockers"],
         )
         with self.assertRaises(overlay.PersonaV2OverlayContractError):

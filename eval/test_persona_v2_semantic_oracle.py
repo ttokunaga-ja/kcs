@@ -7,9 +7,9 @@ from eval import persona_v2_query_intent as query_intent
 from eval import persona_v2_semantic_oracle as semantic_oracle
 
 
-EXPECTED_P01_CANONICAL_BYTES = 199_296
+EXPECTED_P01_CANONICAL_BYTES = 199_521
 EXPECTED_P01_SHA256 = (
-    "0a2dc13887def2e6f0da14a6ecf0b19559df8e3a78717e45b459f9c27288f84a"
+    "97ebd590e39eaf9b7b8026895fb21df18af425f47e94b452734c1b60b7008954"
 )
 
 

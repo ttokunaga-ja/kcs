@@ -1480,7 +1480,7 @@ def _canonical_overlay_contract_value():
             "scope-and-placement-membership-not-assigned",
             "logical-document-and-revision-keys-not-instantiated",
             "conflict-branch-fact-membership-not-bound",
-            "current-fact-graph-has-no-w0-current-unordered-conflict-pairs",
+            "unordered-w0-current-conflict-pairs-not-bound-to-overlay-instances",
             "planned-eight-axis-ledgers-not-instantiated",
             "observed-eight-axis-ledgers-not-attested",
             "eight-axis-ledger-cross-axis-and-persona-domain-schema-incomplete",

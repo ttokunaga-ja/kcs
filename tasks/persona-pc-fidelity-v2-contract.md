@@ -6,7 +6,8 @@ Status: envelope、exact topology、joint必要条件problem、generic aggregate
 source-intent/fact-membership/history-intent、2,100 query intents/semantic oracle、非authorizing input-closure候補まで実装済み。
 overlay contract、ID-free text renderer/validator、source-profile catalogも候補実装があるがnon-authoritativeである。
 overlayのmembership schemaは候補として固定した一方、8軸ledgerはaxis draftで、byte/host-metadata整合と
-persona-local domainが未完成であり、現fact graphはconflict overlayを実現できない。
+persona-local domainが未完成である。unordered W0-current fact pairの入力前提は実装済みだが、
+distinct branch membership、overlay instance、scope placementがないためconflict overlayは未実現である。
 必要条件は全20人で通過したが、203,000 source inventory、53 residual shards、62未対応variant、
 overlay instance/membership/placement、独立approval receipt、schema別content-only semantic projection、
 実行可能solver、solution、proofは含まない。現input-closureはfull body DAGの互換性候補に限り、
@@ -232,9 +233,11 @@ intent membership、placement整数割当、logical-document採点/検索参加�
 
 `conflict-copy`の各endpointはfact graphに実在し、同じsubject/predicate、異なるtyped value、W0で双方
 `current`、異なるunordered branchでなければならない。fact-membershipが新しいfactを捏造して充足しては
-ならない。現fact graphはlinear `superseded-by` pairだけでreplacementがW0 `absent`のため、この条件を
-1,560 clustersへ割り当てられず、`conflict_fact_realizability_proved=false`をblockerとする。branch-local
-conflict fact pairをfact graphへversioned追加するか、overlay意味契約をversion updateしない限りG0へ進めない。
+ならない。現fact graphは各graphに同一subject/predicate・異なるtyped value・双方W0 `current`で、
+fact-edge上で相互非到達なpairを1組持つ。このfact inventory前提だけはcompleteである。一方、代表
+fact-membershipはpairをdistinct branchへ割り当てず、1,560 clustersのoverlay instance、branch endpoint、
+scope placementも存在しない。このため`conflict_fact_realizability_proved=false`を維持し、branch-local
+membershipとoverlay割当をversioned実装するまでG0へ進めない。
 
 最低限、physical materializations、logical documents、gate/search roleとchunks、container members/
 attachments、current/history versions、duplicate/conflict clusters、allocated bytes、cloud/OS由来metadataと
@@ -618,8 +621,9 @@ fact/oracle/queryは混在bodyにしない。人物ごとに(1) intent/query/ans
 参照不能なquery-intent、(4)これらのbytes/SHAを束縛するmanifestへ分ける。rendererにはfinal source plan、
 fact graph、corpus template/seedの最小projectionだけを渡し、answer/distractor/query membershipを渡さない。
 query text、compiled final-ID relevance、actual rank/score/latencyはそれぞれ後段artifactとする。
-fact graphは人物ごとexact 4、suite exact 80 graphとし、現在のleafは各人物16 entities、32 typed facts、
-4 revision chainsを持つ。revisionのprior factはW0だけ`current`、W1以降`history-only`、replacement
+fact graphは人物ごとexact 4、suite exact 80 graphとし、現在のleafは各人物16 entities、36 typed facts、
+4 unordered W0-current conflict sets、4 revision chainsを持つ。suiteでは320 entities、720 facts、
+80 conflict sets、80 revision chainsである。revisionのprior factはW0だけ`current`、W1以降`history-only`、replacement
 factはW0だけ`absent`、W1以降`current`とし、W1 small-edit境界とexactに一致させる。
 
 各人物はexact 90 positive queries（30 x M3-1/M3-2/M3-3）と15 purged-negative（5 x 3）を持つ。

@@ -8,7 +8,8 @@ semantic oracle、非authorizing input-closure候補まで実装済みだが未�
 full inventoryではなく、history-intentもsolver後のcompiled event planではない。overlay contract、ID-free
 text renderer/validator、source-profile catalogを含め、どの候補もG0、renderer、filesystem、write、history
 authorityを与えない。overlayの8軸ledgerはaxis draftであり、byte/host-metadata reconciliation、
-persona-local domain、conflictを成立させるunordered W0-current fact branchesは未完成である。
+persona-local domain、conflictを成立させるdistinct branch membership/placementは未完成である。
+同一subject/predicate・異なる値を持つunordered W0-current fact pairの入力前提だけは実装済みである。
 schema別content-only `semantic_payload` projection、full source-level exact allocation、canonical solution/proof、
 正式G0 rootは未実装である。
 現行`kcs-persona-pc-v1`を黙って変更せず、採用時はfixture、renderer、plan、manifestをすべてv2へ上げる。
@@ -911,44 +912,47 @@ v2で実装済み（planning only、non-authorizing）:
   未成立であることを記録するnegative receiptは3,944 bytes、SHA-256
   `3c236722b900a26b12a7546b3a073dd71d1c935e1d313cb1261781c75ed4fd98`。承認receiptではなく、
   solver/G0 authorityはfalse
-- 人物別`kcs.persona.pc-fact-graph/v2`を20 body実装。各4 graph/16 entities/32 typed facts/
-  4 revision chains、suite合計80/320/640/80、body 23,720--24,010 bytes、合計477,082 bytes。
+- 人物別`kcs.persona.pc-fact-graph/v2`を20 body実装。各4 graph/16 entities/36 typed facts/
+  4 unordered W0-current conflict sets/4 revision chains、suite合計80 graph/320 entities/720 facts/
+  80 conflict sets/80 revision chains、body 26,353--26,672 bytes、合計530,008 bytes。
   prior factはW0だけcurrent、replacementはW1以降currentで、W1 small-edit境界と一致する。
   intent/query/answer/path/final ID/rank/score/proseは持たず、fact-oracle closureとquery specはfalse
 - `kcs.persona.pc-overlay-contract/v2`、ID-free text renderer/validator、source-profile catalogの候補実装。
   これらは設計・局所検査用で、canonical G0 inputとして未採用である。overlay instances/placement、
   `source_recipe_profile_id`、source-level exact allocation、production MIME golden、vertical-slice completion、
-  全authorityはfalseのままである。overlay canonicalは69,114 bytes、SHA-256
-  `e79d90e38cdfe62c4ed842a6cb20e4bd674d7fee7821e22fde701563415a7678`で、現fact graphでは1,560
-  conflict clustersに必要な同一subject/predicate・値不一致のunordered W0-current fact pairを作れないため、
-  `conflict_fact_realizability_proved=false`を明示する
+  全authorityはfalseのままである。overlay canonicalは69,119 bytes、SHA-256
+  `60c17e893f02309cec4d1de7debca211b2b84fb38c9a41f7f5fb6c586748d4a8`である。fact graphには
+  同一subject/predicate・値不一致のunordered W0-current fact pairが存在するが、1,560 conflict clustersの
+  distinct branch membership、overlay instance、scope placementは未束縛なので、
+  `conflict_fact_realizability_proved=false`を維持する
 - canonical JSON objectは16 MiB、JSONLは16 MiB/65,536 rows/1 row 64 KiBのpre-read capを持つbounded
   readerを実装した。UTF-8/NFC、duplicate key、null/float/negative integer、CR/BOM/blank row、末尾LF、
   exact declared bytes/SHAをfail closedで検査する。ただし外側frame header/dispatcherとのbindingは未実装
-- 20人各1件のrepresentative `source-intent-origin-shard`候補を実装。合計197,321 bytes、1 row 436--437
-  bytes、p01は9,862 bytes / SHA-256
-  `23aa4ee0337ef84cb178e54e15eef93447ed9efa29c0b356ff4f395598e23223`。これは20 vertical slicesだけで、
+- 20人各1件のrepresentative `source-intent-origin-shard`候補を実装。合計197,801 bytes、1 row 436--437
+  bytes、p01は9,886 bytes / SHA-256
+  `b4affb2fbff5d44582915c9548209a780142062522ee5e9db297d771e5f3c06d`。これは20 vertical slicesだけで、
   203,000 source inventory、53 residual shards、62未対応variant、overlay placement、solutionを完成しない
 - representative source intentのW0 `present_fact_ids`をexact projectionする人物別fact-membershipと、
-  solver割当前のconditional history-intent templateを実装。p01はそれぞれ4,136 bytes /
-  `688fae5e5a7d21085b30e39222547e724ef4f36d807981551f8107e00c20ac16`、14,633 bytes /
-  `be1eb9f69324319ba6624b88311dffb60f38342a5a911de196f5d0d10dafeb90`。typed revisionはW0→W1、
+  solver割当前のconditional history-intent templateを実装。p01はそれぞれ4,519 bytes /
+  `670dc71396a4e6daa001b0f898fc9e8365b5e0642a57a2583df9cb4e7a2ea982`、14,657 bytes /
+  `512260ae36b457b55ab64414c16495b73ed785675317e8ce240d566494fd2d85`。typed revisionはW0→W1、
+  unordered fact pairはdistinct branchへ未割当である。
   W3/W5 surface editはfact carry-forwardとし、P/X/Yだけをrevision fact候補にする。compiled planではない
 - 人物ごと90 positive + 15 negative、suite 2,100 intents、3 replay 6,300 observationsとなるquery-intentと
   semantic oracle候補を実装。p01は65,798 bytes /
-  `85b29c60b60ee4d78489e03115b334e00479f2860c25645c2f46f198bf2b2b61`、199,296 bytes /
-  `0a2dc13887def2e6f0da14a6ecf0b19559df8e3a78717e45b459f9c27288f84a`。200 restore anchorsと
+  `a03e44be981facb65742e38f76874f6c17fde4d428befc365ddacf1f3a355d0b`、199,521 bytes /
+  `97ebd590e39eaf9b7b8026895fb21df18af425f47e94b452734c1b60b7008954`。200 restore anchorsと
   200 final-deleted documentsを分離するが、full membership totality、同topic/languageのrendered distractor
   vocabulary attestation、compiled `(raw_hash, section)` relevanceはfalse
 - content、evidence、evaluationを別DAGへ注入し、query変更や同一bodyのreview receipt差替えがcorpus
   identityへ逆流しないinput-closure候補を実装した。ただし現upstream full bodyにはcontentと
   authority/completion/blocker metadataが同居する。schema別content-only `semantic_payload` projectionが
   未実装なので、現candidate semantic rootはsource ID namespaceとして不適格で、G0 rootとして発行しない。
-  p01 representative live-DAG compatibility pinはsemantic 46,200 bytes /
-  `dea31e146c5b8603105bcc97f42db9a0c458cd9a00ba0b62bd98a46e89ba36b9`、corpus 3,496 /
-  `374167c8a912e5302a4185b999ba3bd2322459fce68bdf7bdcdcd53e89fe2b86`、evaluation 5,032 /
-  `d190f52fa27c08cb3ca32063c9e421adeba82e9bbd588289b6a8707bea2b5f84`、suite 2,609 /
-  `56af2edb26057709bca246d266ece0d83408c1f1483146af5d84141856ffb79e`。full 20-person closureではない。
+  p01 representative live-DAG compatibility pinはsemantic 46,277 bytes /
+  `cc489875eb9d2596fe4ac76c15088dc029767f273268c46c0cb2e19ccf0b9171`、corpus 3,496 /
+  `54734cd4af63ce304dbfd73fbe93066f113c06a10a69fc296728539f96d11977`、evaluation 5,032 /
+  `a4d61b18c7294d58b1d8590134b6ff32d50a457f58316cd5040b7edd98895d14`、suite 2,609 /
+  `5b0e432835b636a735a0c7c87d8d5ec2398edc583fa926f33974a717062f729f`。full 20-person closureではない。
   既知schemaのfield completenessは各注入bodyのexact provider validatorが正本で、closure scannerは
   canonical fieldと宣言済みaliasに対するdefense-in-depthである。両方を通ってもG0/solver/write authorityはfalse
 - 20人、pilot/fullのW0--W5 checkpoint literal、20 roots/replay、3 replay、203,000 files/replay、

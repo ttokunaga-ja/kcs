@@ -329,11 +329,12 @@ def _w0_present_fact_set(graph):
                 referenced_entity_ids.add(typed_value["entity_id"])
     if not present or len(present) != len(set(present)):
         raise PersonaV2SourceIntentError("W0 present fact set must be non-empty and unique")
-    entity_ids = [
+    present = sorted(present)
+    entity_ids = sorted(
         row["entity_id"]
         for row in graph["entities"]
         if row["entity_id"] in referenced_entity_ids
-    ]
+    )
     if set(entity_ids) != referenced_entity_ids:
         raise PersonaV2SourceIntentError("present facts reference an unknown entity")
     return present, entity_ids

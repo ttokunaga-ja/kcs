@@ -5,11 +5,11 @@ This sidecar projects that complete W0 set onto one logical document, one
 ordered semantic branch, the applicable typed revision chain, and section
 memberships.  It never invents, drops, or independently owns a fact.
 
-Only one pilot-origin representative intent per persona is covered.  In
-particular the current fact graph has no pair of unequal W0-current facts on
-distinct unordered branches, so this candidate cannot satisfy conflict-copy
-overlay membership.  It grants no source-plan, G0, filesystem, history, query,
-or evaluation authority.
+Only one pilot-origin representative intent per persona is covered.  Its bound
+graph now contains one unequal W0-current unordered conflict pair, and this
+sidecar projects that pair without inventing facts.  It does not assign the two
+facts to distinct branches; full overlay membership is still absent.  It grants
+no source-plan, G0, filesystem, history, query, or evaluation authority.
 """
 
 from __future__ import annotations
@@ -301,6 +301,17 @@ def _canonical_fact_membership(persona_id, *, graph_value=None, source_value=Non
             "W0 membership must contain revision prior facts and exclude replacement"
         )
 
+    conflict_memberships = copy.deepcopy(selected_graph["conflict_sets"])
+    if len(conflict_memberships) != 1:
+        raise PersonaV2FactMembershipError(
+            "representative graph must expose exactly one unordered conflict set"
+        )
+    conflict_member_ids = conflict_memberships[0]["member_fact_ids"]
+    if not set(conflict_member_ids) <= set(present_fact_ids):
+        raise PersonaV2FactMembershipError(
+            "W0 membership must contain both unordered conflict facts"
+        )
+
     section_memberships = [
         {
             "fact_id": fact_id,
@@ -314,6 +325,7 @@ def _canonical_fact_membership(persona_id, *, graph_value=None, source_value=Non
     member = {
         "allowed_history_cohort_ids": copy.deepcopy(allowed_history_cohort_ids),
         "branch_key": f"{persona_id}-branch-main-syn-0001",
+        "unordered_w0_current_fact_pairs": conflict_memberships,
         "intent_key": intent["intent_key"],
         "logical_document_key": f"{persona_id}-logical-document-syn-0001",
         "origin": intent["origin"],
@@ -353,14 +365,18 @@ def _canonical_fact_membership(persona_id, *, graph_value=None, source_value=Non
         },
         "completion_scope": (
             "one-pilot-origin-w0-exact-membership-projection-per-persona-only-"
-            "no-full-inventory-no-conflict-branches-no-oracle-no-history-plan"
+            "with-conflict-fact-precondition-no-full-overlay-no-oracle-no-history-plan"
         ),
         "conflict_copy_feasibility": {
             "conflict_overlay_membership_complete": False,
-            "existing_unordered_w0_current_conflict_fact_pair_count": 0,
+            "distinct_conflict_branch_membership_complete": False,
+            "existing_unordered_w0_current_conflict_fact_pair_count": len(
+                conflict_memberships
+            ),
             "fact_invention_allowed": False,
             "requires_same_subject_predicate_unequal_typed_values": True,
             "requires_two_distinct_unordered_w0_current_branches": True,
+            "unordered_w0_current_fact_pair_precondition_complete": True,
         },
         "fact_membership_inventory_complete": False,
         "fact_oracle_input_closure_complete": False,
@@ -401,7 +417,7 @@ def _canonical_fact_membership(persona_id, *, graph_value=None, source_value=Non
         "remaining_blockers": [
             "full-source-intent-inventory-not-present",
             "overlay-instance-membership-not-bound",
-            "unordered-w0-current-conflict-branch-facts-not-present",
+            "distinct-conflict-branch-membership-not-bound",
             "history-cohort-scope-quota-and-final-identities-not-solved",
             "restore-delete-query-and-semantic-oracle-anchors-not-bound",
             "compiled-raw-hash-section-relevance-not-present",
@@ -511,6 +527,6 @@ def fact_membership_sha256(persona_id, value=None):
 def require_fact_oracle_input_closure():
     raise PersonaV2FactMembershipError(
         "the representative W0 projection is not full fact/oracle input closure; "
-        "full intent, conflict branch, history, restore/delete, query, and compiled "
+        "full intent, conflict overlay, history, restore/delete, query, and compiled "
         "relevance bindings remain absent"
     )

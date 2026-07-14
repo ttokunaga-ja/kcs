@@ -19,26 +19,26 @@ from eval import persona_v2_variant_catalog as variants
 # representative intent, normalized catalog, or corpus-semantic dependency an
 # explicit review event.
 EXPECTED_PERSONA_BINDINGS = (
-    ("p01", 9_862, "23aa4ee0337ef84cb178e54e15eef93447ed9efa29c0b356ff4f395598e23223", 436, "md"),
-    ("p02", 9_854, "65d63d60063c21ed7c40d2aed28f985aacc2021007f5bd5bc17c9a8217392ffd", 436, "md"),
-    ("p03", 9_847, "30029174a601b3893e719f8f4502e2e58978f6b270bf7ee4c859b51f6ee86537", 436, "md"),
-    ("p04", 9_894, "ec8a230a2a85d6b2123ab90f6e3c7343d162fbfe228348e4195619fa5a652905", 436, "py"),
-    ("p05", 9_868, "0cd94691347d9656c8b3e7ab8a3e5dacdb73afe22037282e7d7fa7407dd8018e", 436, "md"),
-    ("p06", 9_859, "8fcb16209705b46a32212fc017e1813a313b71e3bc309eb27301daefc3fe007e", 436, "md"),
-    ("p07", 9_893, "fbd0222242b9def1866a2992dbc346ac5dec5a57784e78a1bd1383cfadaed1aa", 437, "txt"),
-    ("p08", 9_865, "99c80dc461080d0e66e380692dc388f6073e8d483dfb8b309e76adc1998bb9bc", 436, "md"),
-    ("p09", 9_874, "a68d08f295d590219ce3556988f2317627e5dd6c5a3412d4617fb4e8c4ba87e8", 437, "txt"),
-    ("p10", 9_863, "0a8ebce96b79eab2a14ee473d1a031a58e484434dbb1c467e53bf8d5613dfe8d", 436, "md"),
-    ("p11", 9_867, "55d3cada279e23daafe8aec2ac00aba15a211285d8db45980a59c9fef8742c8c", 436, "md"),
-    ("p12", 9_879, "0b9047d4f475f5f42e2127ec382f9044fcca27499afe0858a78fb02858fc693e", 436, "md"),
-    ("p13", 9_859, "a7a609c1869bf7bf84615c3ff86bbd7de6715256bac365f8affd66182ae382eb", 437, "txt"),
-    ("p14", 9_850, "26998ea6ac13e9f2a67b6b3f1baaf5808c27414813e6a1763a32295547929064", 436, "md"),
-    ("p15", 9_866, "6c7c74164d756076993415ed1c1da39d495b550322dfc210b5ad6bab23119a9e", 436, "md"),
-    ("p16", 9_889, "3a1f539e2bc6b1b48161b609d97861a4bbf4c0cceb3bc3af5b0eec9f9e22fd6c", 437, "txt"),
-    ("p17", 9_863, "9d96f4a5c756623a41e33588e707f40ec6a7adf5da8d7b68176a0ae6a2b94ea6", 436, "md"),
-    ("p18", 9_854, "76086a388ff2dc2280984ff50055b8c59667b0f016e9ea9513f7aceaf0e06062", 437, "txt"),
-    ("p19", 9_843, "6b15996481ab4b90cba5167b7755c096006dc47aa101bf98de51353c6f7f7922", 436, "md"),
-    ("p20", 9_872, "e5b75dddc59dbe77d3579adcc3e53d4c4d657ff4ae27a5bd54a0b45fc2edb975", 437, "txt"),
+    ("p01", 9_886, "b4affb2fbff5d44582915c9548209a780142062522ee5e9db297d771e5f3c06d", 436, "md"),
+    ("p02", 9_878, "1eafad8baa445cd029489d1ce45fa1e5f2f06284d945591e8bc32562d32bd42f", 436, "md"),
+    ("p03", 9_871, "5851f1e7155de5a4407a9fb33177eb46b4878aa3c20f8363cd8c5d0680f086c2", 436, "md"),
+    ("p04", 9_918, "c8774faab7365068a5e9c23d2b48455b3b7e96d851d7367af342bd3cbeca6ec0", 436, "py"),
+    ("p05", 9_892, "18f135813cf94b00ba615e5646fa2b9d98447fa7961fcf8807d65c3777f559c0", 436, "md"),
+    ("p06", 9_883, "f003cb60403afa1353a867479bbeadd45ee4872504081cef5379b02a48130b5e", 436, "md"),
+    ("p07", 9_917, "84f19a0b56cceca3b698e0e1b75cfc39f6b234ab05bb55515b901cd39f536fc5", 437, "txt"),
+    ("p08", 9_889, "e3b824d320349dfce5ce12b9e7e78839e3e88f068c345fbfaa16c4a3f3ca57d6", 436, "md"),
+    ("p09", 9_898, "d51887a7281e31d275d382ecd9fbaea5b37c3c63166eb564ac1d5eae041f4018", 437, "txt"),
+    ("p10", 9_887, "e7d7b2968e0273c0a8f70af2c56f6aacf6a291ad801b167adde99f444e6c3015", 436, "md"),
+    ("p11", 9_891, "433605a2e54020b5c4fa92c9a700d5c8b9cef07ca1228571a5b86af2c5d6aad8", 436, "md"),
+    ("p12", 9_903, "00f862656a59277a435d9255c81c5c4cad95d08bba7360c233f1f48c58398732", 436, "md"),
+    ("p13", 9_883, "c1e8095072329e51db9952c6660a4fd2b87bdfa25767be051974b87de73f406b", 437, "txt"),
+    ("p14", 9_874, "800a7b4319d04a3ca95a4f53b425fb0c5f86d391814e4158dffa35d97e045f3d", 436, "md"),
+    ("p15", 9_890, "89e23b56fe9e1fe849f102665e10d7f1bd34024fc50e5275be34e99517127c79", 436, "md"),
+    ("p16", 9_913, "bab19def410f41c4f8bd71283f8fe77d2ceed9f9c2272259f03c009a6c2191ed", 437, "txt"),
+    ("p17", 9_887, "8cb4fb04596180a8075a195f80fcf2e8c8d702eb1d17708cac59420928b0c655", 436, "md"),
+    ("p18", 9_878, "c61b912e2e628b6da2055273bf655abfa68f90712d3399247d16eb2a7eb37eeb", 437, "txt"),
+    ("p19", 9_867, "ad178ae3a30af7b0829fbb3432a1bae6f52bcff2aedf93eca10ebab0a07e36c0", 436, "md"),
+    ("p20", 9_896, "01e61dfe53f9c5d76f1bd0f33c04388a280230ba6573aaa92e34d011d0bf53b8", 437, "txt"),
 )
 
 
@@ -325,20 +325,21 @@ class PersonaV2SourceIntentTests(unittest.TestCase):
                     referenced_entities.add(fact["subject_entity_id"])
                     if fact["typed_value"].get("kind") == "entity-reference":
                         referenced_entities.add(fact["typed_value"]["entity_id"])
+            expected_fact_ids.sort()
             fact_set = catalogs["present_fact_sets"][0]
             self.assertEqual(row["present_fact_set_key"], fact_set["present_fact_set_key"])
             self.assertNotIn(row["present_fact_set_key"], membership_keys)
             membership_keys.add(row["present_fact_set_key"])
             self.assertEqual(fact_set["present_fact_ids"], expected_fact_ids)
-            self.assertEqual(len(expected_fact_ids), 7)
+            self.assertEqual(len(expected_fact_ids), 8)
             self.assertEqual(len(expected_fact_ids), len(set(expected_fact_ids)))
             self.assertEqual(
                 fact_set["synthetic_entity_ids"],
-                [
+                sorted(
                     entity["entity_id"]
                     for entity in graph["entities"]
                     if entity["entity_id"] in referenced_entities
-                ],
+                ),
             )
             self.assertEqual(fact_set["project_or_case_id"], graph["project_or_case_id"])
 
