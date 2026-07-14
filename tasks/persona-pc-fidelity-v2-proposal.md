@@ -1,11 +1,11 @@
 # 20人の独立persona-PC fidelity v2提案
 
-Status: proposal only。envelope marginalsは実装済みだが未承認、G0 rootは未凍結・未実装。
+Status: proposal only。envelope marginalsとexact topology sidecarは実装済みだが未承認、G0 rootは未凍結・未実装。
 現行`kcs-persona-pc-v1`を黙って変更せず、採用時はfixture、renderer、plan、manifestをすべてv2へ上げる。
 
 G0のversion境界、pilot projection、joint solver、source recipe、negative authorityの詳細は
-[`persona-pc-fidelity-v2-contract.md`](persona-pc-fidelity-v2-contract.md)を参照する。同契約も
-400 exact paths/loadとsolver/oracle完了までは`g0_contract_frozen=false`である。
+[`persona-pc-fidelity-v2-contract.md`](persona-pc-fidelity-v2-contract.md)を参照する。400 exact paths/loadは
+sidecar化済みだが、joint solver/source recipe/oracle完了までは`g0_contract_frozen=false`である。
 
 Date: 2026-07-14
 
@@ -26,6 +26,21 @@ formal-replay-01/
     p20-investigative-journalist/
       ...
 ```
+
+ここで`formal-replay-01`はsuite containerであり、1台のPC rootではない。数え方を次に固定する。
+
+| 用語 | 個数 | 意味 |
+| --- | ---: | --- |
+| logical persona | 20 | 再現対象の人間。3 replayでも60人とは数えない |
+| formal persona-PC root | 20/replay、3 replay保持時60 | `devices/pXX-.../`。各rootが単独で120,000 current chunksを満たす |
+| isolated registry | 20/replay、3 replay保持時60 | persona-PC rootごとに1個。別人物・別replayと共有しない |
+| suite replay container | 3 | 同じ20人・seed・plan/eventをfresh storageへ再構築する単位 |
+| robustness / byte-stress lane root | 実行profile別 | 同じ`persona_id`へ束縛するが、formal chunk/format比の分母には入れない |
+
+したがって「10万chunks超のフォルダが20個」は1 replay内の20 persona-PC rootsを指す。
+3 replayを保持すれば、その同じ20人について完成rootコピーではない60個の物理root実体ができる。
+robustnessとbyte-stressは`persona_id`とfidelity-profile hashで同じ擬似PCへ論理的に束縛するが、
+hard link、clone、symlink、完成rootコピーは使わず、別manifest/receiptで計測する。
 
 fullでは各人が単独で次を満たす。20人の合算値で代替しない。
 
@@ -76,10 +91,15 @@ verifierの意味が崩れるため、別root・別manifest・別receiptにす�
 - `planned_max_depth == realized_max_depth`を人物ごとに検証
 - scope同士の重複、祖先・子孫関係、casefold衝突を禁止
 
+400 rowのliteral入力は
+[`eval/persona_v2_topology_data.py`](../eval/persona_v2_topology_data.py)、正規化・検証契約は
+[`eval/persona_v2_topology.py`](../eval/persona_v2_topology.py)を正とする。人物内path制約はroot安全条件、
+人物間のglobal uniquenessは共通templateの量産を防ぐdiversity条件であり、意味を混同しない。
+
 ### 3.2 人物別の代表構造
 
-`D`は`home/`からleaf scopeまでのcomponent数である。表のpathは代表例で、採用時は各人の
-12 primaryと8 secondaryをmachine-readable specへ完全列挙する。
+`D`は`home/`からleaf scopeまでのcomponent数である。表のpathは代表例で、各人の12 primaryと8 secondaryは
+`kcs.persona.pc-topology/v2` sidecarへ完全列挙済みである。
 
 | id | 1人として再現する属性 | proposed full files | primary / secondary load | formal Dmax | 代表primary scope | 代表secondary scope |
 | --- | --- | ---: | ---: | ---: | --- | --- |
@@ -103,6 +123,33 @@ verifierの意味が崩れるため、別root・別manifest・別receiptにす�
 | p18 | manufacturing quality engineer | 12,000 | 88 / 12 | 4 | `quality/nonconformance/2026/open` | `desktop/current-capa` |
 | p19 | educator/instructional designer | 9,000 | 78 / 22 | 6 | `learning/courses/course-alpha/2026/term-1/lesson-plans` | `downloads/lms-exports` |
 | p20 | investigative journalist | 10,000 | 85 / 15 | 5 | `newsroom/investigations/story-alpha/2026/fact-check` | `downloads/foia-exports` |
+
+Dmaxだけを満たす1本の深いpathで複雑さを装わないよう、現在のexact topologyは次のshape auditも持つ。
+depth histogramは20 leaf scopes、directory prefixesはleafを含む重複なしprefix数、fan-outは任意prefixの
+direct child最大数である。file p50/p95は20 scopeのnearest-rank full W0 projectionである。
+
+| id | leaf depth histogram | directory prefixes | max fan-out | full files/scope p50 / p95 / max |
+| --- | --- | ---: | ---: | ---: |
+| p01 | D2:3 / D3:12 / D4:5 | 47 | 12 | 666 / 1,063 / 1,105 |
+| p02 | D2:1 / D3:17 / D5:2 | 54 | 12 | 799 / 1,322 / 1,347 |
+| p03 | D2:1 / D3:18 / D4:1 | 52 | 12 | 476 / 912 / 938 |
+| p04 | D2:1 / D3:15 / D5:4 | 52 | 13 | 525 / 945 / 982 |
+| p05 | D2:1 / D3:16 / D4:3 | 52 | 13 | 600 / 988 / 1,007 |
+| p06 | D3:8 / D4:7 / D5:1 / D6:4 | 65 | 14 | 394 / 720 / 750 |
+| p07 | D2:1 / D3:7 / D4:9 / D5:3 | 62 | 12 | 326 / 545 / 568 |
+| p08 | D3:8 / D4:7 / D5:5 | 57 | 12 | 403 / 597 / 616 |
+| p09 | D3:8 / D4:12 | 55 | 12 | 473 / 705 / 718 |
+| p10 | D3:8 / D4:4 / D6:8 | 55 | 11 | 646 / 909 / 962 |
+| p11 | D2:1 / D3:10 / D4:9 | 52 | 9 | 462 / 857 / 892 |
+| p12 | D2:4 / D3:11 / D4:5 | 48 | 9 | 666 / 1,530 / 1,621 |
+| p13 | D2:1 / D3:3 / D4:12 / D5:4 | 63 | 8 | 305 / 652 / 684 |
+| p14 | D2:1 / D3:2 / D4:13 / D5:4 | 59 | 9 | 628 / 1,263 / 1,287 |
+| p15 | D2:1 / D3:14 / D4:5 | 53 | 11 | 314 / 708 / 799 |
+| p16 | D2:1 / D3:8 / D4:3 / D5:8 | 58 | 13 | 384 / 752 / 842 |
+| p17 | D2:1 / D3:3 / D4:4 / D5:1 / D6:11 | 54 | 9 | 369 / 834 / 886 |
+| p18 | D2:3 / D3:11 / D4:6 | 48 | 10 | 616 / 1,147 / 1,241 |
+| p19 | D2:1 / D3:5 / D4:3 / D5:2 / D6:9 | 59 | 11 | 435 / 736 / 780 |
+| p20 | D2:1 / D3:4 / D4:5 / D5:10 | 52 | 10 | 494 / 918 / 1,008 |
 
 p10は7,000から11,000、p14は9,000から13,000 filesへ増やす。family比は維持したまま、
 120,000 chunksをそれぞれ1,736件、1,719件の巨大contributorへ押し込む現行状態を解消するためである。
@@ -180,6 +227,39 @@ partial download 10%、hidden/lockfile 10%、empty file 5%、Unicode/case-collis
 各entryは`registered_scope=false`、`formal_gate_eligible=false`、formal leafとの交差なし、`.kcs`なしを
 持つ。candidate数とnative realized数を別々に記録し、宣言外entryをverifierが拒否する。
 
+### 3.5 利用者属性の初期v2候補
+
+職種だけをpersona差と見なさない。次は既存v1 fidelity hypothesisからv2へ明示移行する候補値であり、
+OSはtarget metadataであってnative実行・emulation済みという意味ではない。sourceはlive接続ではなく
+synthetic snapshot/exportだけを指す。
+
+| id | OS semantics / device | locale / languages | work cadence | synthetic sources | sensitivity |
+| --- | --- | --- | --- | --- | --- |
+| p01 | macOS APFS case-insensitive / development laptop | ja-JP / ja,en | release-cycle, async development | Git snapshot, Drive export | S1,S2 |
+| p02 | Ubuntu ext4 case-sensitive / SRE workstation | en-US / en | on-call, append-heavy logs | Git snapshot, server export | S2,S3 |
+| p03 | Windows NTFS case-insensitive / managed GRC laptop | ja-JP / ja,en | audit-case, incident-case | SharePoint, SIEM exports | S3 |
+| p04 | Ubuntu ext4 case-sensitive / GPU workstation | en-US / en | experiment-batch, paper-review | Git, object-store exports | S1,S2 |
+| p05 | Windows NTFS case-insensitive / analytics laptop | ja-JP / ja,en | scheduled-report, dashboard-refresh | OneDrive, warehouse exports | S2 |
+| p06 | Windows NTFS case-insensitive / laboratory workstation | en-US / en | protocol-run, cohort-batch | SMB snapshot, instrument export | S2,S3 |
+| p07 | macOS APFS case-insensitive / humanities laptop | en-GB / en,fr,de,ja | longform-writing, archive-OCR | archive snapshot, Drive export | S0,S1 |
+| p08 | macOS APFS case-insensitive / product laptop | ja-JP / ja,en | meeting-heavy, quarterly-roadmap | Drive, Teams exports | S2 |
+| p09 | macOS APFS case-insensitive / field-research laptop | en-US / en,ja | interview-session, media-analysis | recorder, research-drive exports | S2,S3 |
+| p10 | Windows NTFS case-insensitive / consulting VDI export | en-US / en | client-phase, deliverable-review | data-room, Teams exports | S3 |
+| p11 | Windows NTFS case-insensitive / travel-sales laptop | en-US / en,es | mail-call, proposal-cycle | Outlook, CRM exports | S2 |
+| p12 | Windows NTFS case-insensitive / managed support laptop | ja-JP / ja,en | queue-driven, high-frequency update | ticket, CRM exports | S2 |
+| p13 | Windows NTFS case-insensitive / DLP legal laptop | ja-JP / ja,en | matter-case, legal-hold versioning | DMS, mail exports | S3 |
+| p14 | Windows NTFS case-insensitive / finance-control laptop | ja-JP / ja,en | month-close, final-copy | ERP, OneDrive exports | S3 |
+| p15 | Windows NTFS case-insensitive / HR operations laptop | ja-JP / ja,en | requisition-case, people-operations | ATS, HRIS exports | S3 |
+| p16 | Windows NTFS case-insensitive / clinical VDI | ja-JP / ja,en | protocol-append, regulatory-review | EDC export, secure SMB snapshot | S3 |
+| p17 | Windows NTFS case-insensitive / field-construction laptop | ja-JP / ja,en | offline-field, drawing-revision | CDE snapshot | S2 |
+| p18 | Windows NTFS case-insensitive / quality workstation | ja-JP / ja,en | controlled-document, production-batch | QMS, PLM exports | S2 |
+| p19 | ChromeOS-derived portable snapshot / education device | ja-JP / ja,en | academic-term, bulk-LMS import | Drive, LMS exports | S2 |
+| p20 | macOS APFS case-insensitive / encrypted journalist laptop | ja-JP / ja,en | deadline-driven, evidence-chain | mail, FOIA, drop snapshots | S3 |
+
+G0前にこの表をv2専用artifactへ複製してversion/hashを付け、timezone、retention-age buckets、permission
+profile、mtime-age分布、duplicate/conflict率、cloud/mail account数を人物別exact値として追加する。
+v1 metadataを参照したままv2 rootを生成してはならない。
+
 ## 4. 物理file family比
 
 分母は人物ごとのW0 physical filesであり、extension比、byte比、logical member比、chunk比ではない。
@@ -247,6 +327,39 @@ v2の203,000 filesへ適用したsuite集計は次である。
 
 表示比の合計は小数第2位丸めにより99.99%になるが、正本は上のexact file countsであり、
 203,000を分母にした丸め前合計は100%である。
+
+### 4.1 120,000 chunksへ寄与するfileの分離
+
+family/variant profileを現在のgate roleへ整数化したfull W0候補は次である。`contract`だけが人物ごとの
+exact 120,000 chunksへquotaを持つ。`incidental`は実chunkを別上限で測り、`raw-only`はactual 0 chunksを
+要求する。平均は120,000をcontract source数で割った計画値であり、各sourceは1--70のinteger quotaへ
+joint solverで割り当てる。
+
+| id | contract contributors | incidental-searchable | raw-only | avg planned chunks / contributor |
+| --- | ---: | ---: | ---: | ---: |
+| p01 | 7,272 | 3,048 | 1,680 | 16.5 |
+| p02 | 6,675 | 6,675 | 1,650 | 18.0 |
+| p03 | 3,780 | 4,020 | 2,200 | 31.7 |
+| p04 | 4,550 | 3,950 | 1,500 | 26.4 |
+| p05 | 2,610 | 5,550 | 3,840 | 46.0 |
+| p06 | 2,424 | 2,216 | 3,360 | 49.5 |
+| p07 | 3,115 | 1,015 | 2,870 | 38.5 |
+| p08 | 2,112 | 1,808 | 4,080 | 56.8 |
+| p09 | 2,565 | 1,755 | 4,680 | 46.8 |
+| p10 | 2,728 | 1,892 | 6,380 | 44.0 |
+| p11 | 2,180 | 3,320 | 4,500 | 55.0 |
+| p12 | 4,960 | 8,320 | 2,720 | 24.2 |
+| p13 | 2,380 | 1,260 | 3,360 | 50.4 |
+| p14 | 2,464 | 3,256 | 7,280 | 48.7 |
+| p15 | 2,200 | 2,040 | 3,760 | 54.5 |
+| p16 | 2,736 | 1,664 | 3,600 | 43.9 |
+| p17 | 2,032 | 1,008 | 4,960 | 59.1 |
+| p18 | 3,768 | 3,672 | 4,560 | 31.8 |
+| p19 | 2,835 | 1,215 | 4,950 | 42.3 |
+| p20 | 3,670 | 2,730 | 3,600 | 32.7 |
+
+これはplanned gate-role projectionであり、実rootの検索可能性を証明しない。offline index後にactual chunksを
+role別・variant別に読み戻し、contract exact、incidental cap内、raw-only zeroを別々にattestする。
 
 ## 5. family内extension/variant比
 
@@ -423,11 +536,11 @@ hostのHOME、USER、hostname、環境credential、実PII/PHI、network/live syn
 
 | Gate | 実装・実行 | 合格条件 | 現在地 |
 | --- | --- | --- | --- |
-| G0 v2契約凍結 | 400 exact scope paths/load、family/extension/variant整数比、ambient spec、共有辞書、source recipe、size、fact/oracle、W0-W5 exact eventをversioned artifact graphとsuite descriptor hashへ固定 | generator変更前に全20人でcanonical rebuild。joint solverがfull contributor=120,000とpilot=12,000、scope routing、wave別incidental上限、plan 16 MiB上限をexactに解く | envelopeのみ実装、root未実装 |
-| G1 v2 tiny W0 | 20人×200 files/rootを1人・1sourceずつstreaming作成 | 4,000 files/root、2 roots合計8,000 writes、400 scopes/root、比率/path/hash/readback、inode非共有 | v1相当は済。v2回帰が必要 |
+| G0 v2契約凍結 | 400 exact scope paths/load、family/extension/variant整数比、ambient spec、共有辞書、source recipe、size、fact/oracle、W0-W5 exact eventをversioned artifact graphとsuite descriptor hashへ固定 | generator変更前に全20人でcanonical rebuild。joint solverがfull contributor=120,000とpilot=12,000、scope routing、wave別incidental上限、plan 16 MiB上限をexactに解く | envelopeとexact topology sidecarを実装、root未実装 |
+| G1 v2 tiny W0 | 20人×200 files/persona-PC rootを1人・1sourceずつstreaming作成 | 4,000 files/suite replay、2 fresh suite replays合計8,000 writes、400 scopes/replay、比率/path/hash/readback、inode非共有 | v1相当は済。v2回帰が必要 |
 | G2 pilot W0 | pilot-first solverのexact subset、計20,300 files、各人12,000 planned、init→offline index | 各人actual contributor 12,000、raw-only 0、planned/actualを別台帳化 | streaming writerと完全attestorが未実装 |
 | G3 pilot W1-W5 | immutable eventをmutation前に検証し、edit/rename/move/duplicate/derive/archive/delete/restore/purge | exactly-once journal、再開収束、waveごとのactual attestation、purge後index noop | allocator/manifestのみ済 |
-| G4 full Go/No-Go | pilotのbytes/inodes/RSS/history amplificationを読み戻す | 3 roots+staging+reserveがroot-bound capacity内。不足ならwrite前に停止 | evidence待ち |
+| G4 full Go/No-Go | pilotのbytes/inodes/RSS/history amplificationを読み戻す | 3 suite replay containers=60 persona-PC roots、staging、reserveがcapacity内。不足ならwrite前に停止 | evidence待ち |
 | G5 full replay×3 | 同一plan/eventから3 fresh rootsをそれぞれW0からW5まで実行 | `.kcs`/完成rootコピーなし、hard link/cloneなし、60 registries、1,200 scopes | 未実装 |
 | G6 reproducibility/resume | root依存値を除くcanonical stateとquery rankを比較、failure injection後resume | event exactly-once、同一seedのstate/count/history/query projection一致 | 未実装 |
 | G7 actual attestation | DB/CAS/HEAD/historyを全persona・全replay・全waveで実読 | 各waveのC/Hがcheckpoint表とexact一致。current eligibleは`C(w)..135,000`、current+history eligibleは`C(w)+H(w)..210,000`かつ動的incidental cap内、raw-only=0 | 未実装 |
@@ -450,6 +563,22 @@ full contract checkpointは各人・各replayで次とする。
 | W4 | 120,000 | 60,000 |
 | W5 pre-purge | 124,800 | 64,800 |
 | W5 final | 120,000 | 60,000 |
+
+P/X/Y/N/Uのchunk比は比較可能性のため全人物で共通に保つ一方、対象familyと操作の強調点は人物別にする。
+初期event-mix仮説は次とし、exact source件数・wave・quotaはjoint solverでG0へ固定する。
+
+| id | 主な履歴操作 | id | 主な履歴操作 |
+| --- | --- | --- | --- |
+| p01 | edit, rename, derive | p11 | edit, rename, archive |
+| p02 | edit, archive, create/restore | p12 | edit, move, restore |
+| p03 | move, archive, purge | p13 | edit, archive, purge |
+| p04 | edit, derive, duplicate | p14 | edit, duplicate, archive |
+| p05 | edit, duplicate, archive | p15 | edit, move, purge |
+| p06 | edit, derive, archive | p16 | edit, archive, restore |
+| p07 | edit, move, restore | p17 | edit, rename, move |
+| p08 | edit, rename, duplicate | p18 | edit, archive, purge |
+| p09 | edit, derive, archive | p19 | edit, duplicate, restore |
+| p10 | edit, duplicate, move | p20 | edit, move, purge |
 
 small editは90%以上のsemantic sectionsを保持し、指定factだけを変える。major editは別bucketにする。
 rename/moveはbytes不変、delete/restoreはsource/version/rawを保持、purge後は旧queryが0件になることを
@@ -503,17 +632,29 @@ KCS index用RSS上限はpilotで別に実測・凍結する。
 - bounded persona planning、capacity/runner/storage/prepare receiptのfail-closed境界
 - final HEADのM3-1/M3-2/M3-3 CI green
 
+v2で実装済み（planning only、non-authorizing）:
+
+- 20人別のfile-family/extension/domain marginals、density/history/capacity envelope
+- 完全展開した20人 x 20 scopes、400 globally unique paths、人物別physical/chunk load、exact Dmax
+- secondaryのprovider/account/year/project階層を人物別に分離し、共通なのは8 functional slotsだけ
+- activity unitの1--100 rubricと、値が観測統計ではなくauthored stress hypothesisであることを明示
+- tiny/pilot/fullのphysical projectionとpilot/fullのscope chunk projection、必要source上下界とmargin regression
+- topology canonical 133,895 bytes、SHA-256
+  `4da9dcd11cf4147026ab7c68e1837a1baa31e43b448fdd4b4d754105788719e4`
+
 v2で残るもの:
 
-- 完全展開した400 scope paths、人物別scope load、Dmaxとsource-level semantic filename、fact graph
+- 20人別のv2 fidelity attribute、timezone/retention/permission/mtime/conflict exact値とreview receipt
+- source-level semantic filename、fact graph、400 scopeへのfamily/variant/density/cohort同時routing
 - 実装済みextension/domain marginalsを束縛するcomplete variant catalog、valid validator/renderer
-- chunk/complexity/bytesを分離したjoint source recipe
+- chunk/complexity/bytesを分離したjoint source recipe、人物・family別byte p50/p95/tail
+- 人物別event-mixのexact source件数/wave/familyとformat×scenario query coverage
 - 1 persona・1 source streaming W0 writerとpilot/full write gate
 - W0 init/index complete attestor、W1-W5 journal/executor
 - 3 fresh-storage replay、actual chunk/history attestation、1,800 query evaluation
 
 この提案が採用されるまでは、現行`SCHEMA_VERSION=1`、`FIXTURE_ID=kcs-persona-pc-v1`、
-canonical plan SHAを変更しない。次の実装単位はG0のexact topology sidecar、その後にjoint source recipeであり、
+canonical plan SHAを変更しない。次の実装単位はG0のjoint allocation、その後にjoint source recipeであり、
 rendererやfull writerだけを先行させない。
 
 Q_hardでのSpotlight/ripgrep-all比較、D1のTTFV/AI強化時間/コスト、実フォルダdogfoodは、

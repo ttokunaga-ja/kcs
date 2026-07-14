@@ -2,10 +2,11 @@
 
 This module freezes the already-reviewed persona, file-family, extension,
 domain-variant, density, history-scale, lane, and capacity marginals.  It is
-deliberately *not* the G0 root contract: the 400 exact scope rows, reviewed
-load vectors, joint allocation, source recipes, history intent, and query
-oracle are still missing.  Consequently every execution/write authority stays
-false and :func:`require_frozen_g0_contract` always fails closed.
+deliberately *not* the G0 root contract: the exact topology now lives in an
+external sidecar, while its G0 binding, joint allocation, source recipes,
+history intent, and query oracle are still missing.  Consequently every
+execution/write authority stays false and :func:`require_frozen_g0_contract`
+always fails closed.
 
 The existing ``persona_fixture_spec`` remains the normative v1 implementation.
 Nothing in this module changes or reinterprets a v1 artifact.
@@ -605,7 +606,7 @@ def build_envelope_contract():
         },
         "blockers": [
             "bounded_framed_loader_and_exact_dispatch_missing",
-            "exact_400_scope_rows_and_reviewed_load_vectors_missing",
+            "exact_topology_sidecar_not_bound_by_g0_root",
             "joint_scope_variant_density_quota_solver_missing",
             "source_recipe_fact_oracle_and_query_spec_missing",
             "root_independent_history_intent_missing",
@@ -698,7 +699,7 @@ def build_envelope_contract():
             "pilot": {"density_contract": True, "suite_files": 20_300, "target_chunks_per_person": 12_000},
             "full": {"density_contract": True, "suite_files": 203_000, "target_chunks_per_person": 120_000},
         },
-        "topology_status": "representative-only-not-400-row-contract",
+        "topology_status": "exact-topology-external-sidecar-not-g0-bound",
         "variant_catalog": copy.deepcopy(_VARIANT_CATALOG),
         "variant_catalog_complete": False,
     }
@@ -746,9 +747,9 @@ def canonical_json_bytes(value):
 def validate_envelope_contract(value):
     if type(value) is not dict:
         raise PersonaV2ContractError("v2 envelope must be an object")
-    canonical_json_bytes(value)
+    actual_raw = canonical_json_bytes(value)
     expected = build_envelope_contract()
-    if value != expected:
+    if actual_raw != canonical_json_bytes(expected):
         raise PersonaV2ContractError("v2 envelope differs from canonical regeneration")
     return True
 
@@ -762,7 +763,7 @@ def envelope_contract_sha256(value=None):
 
 def require_frozen_g0_contract():
     raise PersonaV2ContractError(
-        "v2 envelope is not frozen and can never be a G0 root: exact topology, joint allocation, recipes, history intent, and oracle remain missing"
+        "v2 envelope is not frozen and can never be a G0 root: topology binding, joint allocation, recipes, history intent, and oracle remain missing"
     )
 
 

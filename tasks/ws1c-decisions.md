@@ -674,6 +674,22 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     The fact/answer oracle must be frozen before rendering, while query templates/text and query seed remain in a
     separately hashed artifact unavailable to the corpus renderer.  G0 grants no renderer, filesystem,
     KCS execution, history mutation, actual-chunk, capacity, or write authority; all such flags stay false
-    until their later observed gates.  Until all 400 paths and reviewed physical/chunk load vectors, the
-    joint solver, source recipes, oracle membership, and bounded canonical hashes exist,
+    until their later observed gates.  Until all 400 paths, authored physical/chunk load vectors, their
+    explicit rubric and review receipt, the joint solver, source recipes, oracle membership, and bounded canonical hashes exist,
     `g0_contract_frozen=false` is mandatory.
+108. The persona-PC v2 exact topology is a separate `kcs.persona.pc-topology/v2` sidecar that binds the
+    envelope SHA instead of embedding 400 rows into the envelope.  Its input is 400 literal, authored
+    stress-design hypotheses: 20 personas, each 12 primary and eight persona-specific secondary paths.  Only the
+    eight secondary functional slots are shared.  Paths and physical/contributor activity units are never
+    derived from a hash, seed, persona ID, or runtime order.  The 1--100 activity scale is ordinal planning
+    input within one persona and scope kind, not observed or empirically calibrated precision; within-band values are canonical authored
+    interpolation.  `per-scope-floor-then-hamilton-residual-v1` gives each scope a 50 bp physical floor or
+    25 bp contributor floor before Hamilton-apportioning only the residual, preserves exact persona
+    primary/secondary subtotals, and rejects
+    duplicate or permutation-clone vectors.  The sidecar proves portable globally unique paths, exact Dmax,
+    profile file/chunk projections, and necessary per-scope source bounds only.  Cross-persona path uniqueness
+    is an anti-template diversity invariant, while collision safety is enforced within each independent root.
+    Its topology completion does
+    not prove the later joint allocation, freeze G0, or authorize rendering, writing, or history mutation.
+    The authored activity units require a separately bound rubric-review receipt; until then
+    `activity_unit_review_receipt_bound=false` remains an explicit G0 blocker.

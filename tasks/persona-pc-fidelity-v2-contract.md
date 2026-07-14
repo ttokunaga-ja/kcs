@@ -1,6 +1,6 @@
 # Persona-PC fidelity v2 G0 contract
 
-Status: envelope contract実装済み。`g0_contract_frozen=false`、G0 root未実装、非authorizing。
+Status: envelopeとexact topology sidecar実装済み。`g0_contract_frozen=false`、G0 root未実装、非authorizing。
 現行`kcs-persona-pc-v1`、そのartifact、golden hash、writer、history planを変更しない。
 
 Date: 2026-07-14
@@ -99,8 +99,26 @@ scope.physical_file_weight_bp / scope.contributor_chunk_weight_bp
 - W1-W5のrename/move/archive/restore/replacement/purge pathにも同じ規則を適用し、全checkpointで
   casefold collision、ancestor conflict、既存destinationを拒否
 
-単に共通vectorをrotateして人物別と見せることは禁止する。各weightはその人物のactivity/folder roleを
-説明できるreviewed stress-design仮説でなければならない。
+単に共通vectorをrotateして人物別と見せることは禁止する。各activity unitは1--100の人物内かつ
+scope kind内の相対尺度で、1--39=low、40--59=moderate、60--79=high、80--100=very-highとする。
+physicalは同じ人物・kind内のfile creation/import/retention pressure、contributorは同じ人物・kind内の
+contract-chunk demandを表し、primaryとsecondaryのunit値を直接比較しない。
+現在値は観測統計や経験的校正値ではなく、roleから作成したstress-design仮説である。同一band内の細かな値は
+canonicalな authored interpolationにすぎず、測定精度を主張しない。G0 freeze前にrubricに照らした独立review
+receiptが必要である。
+topology sidecarは`activity_unit_review_receipt_bound=false`と
+`activity_unit_rubric_review_receipt_not_bound` blockerを固定し、canonical receiptがG0 rootへ束縛されるまで
+自動的に解除しない。
+
+現在の`kcs.persona.pc-topology/v2` sidecarは上記400 rowsを完全展開し、envelope SHAを束縛する。
+人物内のcasefold unique/ancestor禁止はroot安全制約である。人物をまたぐglobal casefold unique/ancestor禁止は
+独立root間の衝突防止ではなく、template copyを抑えるsynthetic-diversity制約として別に扱う。
+400 pathはglobal casefold unique、Dmaxは全人物でexact、physical/chunk vectorは人物間の同一・rotation・
+permutation cloneを拒否する。weightは各scopeへphysical 50 bp / contributor 25 bpを先に与え、残余を
+activity unitでHamilton配賦する`per-scope-floor-then-hamilton-residual-v1`で正規化する。
+tiny/pilot/fullの物理配賦とpilot/full chunk配賦、scope別source必要上下界は
+通過したが、これはjoint family/variant/density/cohort allocationの十分条件ではない。topology artifactの
+`topology_complete=true`はpaths/loadだけを指し、`g0_contract_frozen=false`と全write authority falseを維持する。
 
 ## 5. physical familyとvariant
 
@@ -160,10 +178,13 @@ solverは集約cell上で、次を同時に満たす。
 各scopeの必要境界は次である。
 
 ```text
-ceil(scope_contributor_chunks / 70)
+max(4, ceil(scope_contributor_chunks / 70))
   <= contributor_files
   <= min(scope_contributor_chunks, scope_physical_files)
 ```
+
+下限の4は任意の安全係数ではない。互いに排他的なwhole-source history cohort P/X/Y/Nを、pilot/fullの
+各scopeへ最低1 sourceずつ置くcoverage制約から導く。Uには全scope coverageを要求しない。
 
 authoritative solverはbounded exact searchで、objectiveは順に、hard constraint充足、比例idealからの
 integer L1 deviation最小、route affinity最大、canonical flattened cell vectorのlexicographic最小とする。
@@ -172,8 +193,11 @@ authoritative exact解と一致しなければ捨てる。certificateはfamily�
 histogram、warm-start repair steps、exact objective、各marginal hashを持つ。同じmarginalだけを満たす
 別解を受理せず、canonical rebuildとexact一致させる。
 
-現在のpersona-global probeはfull/pilotの全20人を可解とするが、400 exact load vectorが未凍結なので
-scope-level completion evidenceではない。特にp07 pilotはbucket上限まで294 chunksしか余裕がない。
+現在は400 exact load vectorとscope別physical/chunk projection、必要source上下界が全20人で成立する。
+ただしfamily/variant/density bucket/history cohortを同時にroutingするjoint solverは未実装なので、
+scope-level allocationの十分条件やcompletion evidenceではない。最も厳しい既知のpilot必要条件は、p17の
+source下限合計に対する余裕が12 sources、同人物の最小scope spanが3 sourcesであること、p07のsource上限合計に
+対する余裕が388 sourcesであることである。これらはmargin regressionとして固定する。
 
 ## 7. history checkpointsとincidental上限
 
@@ -341,7 +365,7 @@ formal flagを変更してはならない。
 
 `g0_contract_frozen=true`へ変更できるのは、次がすべてcanonical rebuildで証明された後だけである。
 
-1. 400 exact scope rowsと2種類のreviewed load vector
+1. 400 exact scope rows、2種類のauthored load vector、rubricに対する独立review receipt
 2. full/pilot family/variant/scope/bucket/source quota exact allocation
 3. P/X/Y/N/U history cohort、操作順、scope coverage、checkpoint exact projection
 4. source recipe catalog、fact graph、oracle membership、独立query spec
