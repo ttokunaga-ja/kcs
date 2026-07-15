@@ -1155,3 +1155,32 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     implementations, corpus semantic namespace and query/history mappings, joint allocation and independently
     verifiable solution/proof, allocation/rendering and the streaming folder/file writer, edits/history,
     fresh-storage replays, and actual chunk/history/query/capacity/latency evaluation.
+126. Persona-PC v2 now adds separate ID-free local feasibility contracts for all eleven incidental-searchable
+    variants: csv, eml, html, ipynb, json, jsonl, log, sql, tsv, xml, and yaml.  This supersedes only current
+    implementation-availability wording; it does not mutate the frozen all-71 source-profile catalog, its
+    ten-ready/sixty-one-missing status, its 72,559-byte body, or any prior artifact pin.  Repository-wide local
+    format availability is now twenty-one of seventy-one, and the fifty remaining implementations are raw-only.
+    All seventy-one formal recipes remain unbound.  The eleven implementations span the variants whose full
+    inventory marginals total 60,414 incidental sources, but this is only format-level feasibility, not a
+    source-by-source materialization or search-participation proof.
+    The renderer contract is 9,139 canonical bytes with SHA-256
+    `22fae0f62a67856ef20b5820c7274aad542a2de06f76c93c5c68acdaed9652f4`; the builder-independent validator
+    contract is 10,090 bytes with SHA-256
+    `67a0f0913de6087ca4b1c836d6dff4f845d6ee50a3adf12b794236f128baed75`.  The min/middle/max payload matrix
+    SHA-256 is `c95779f318c0c2d54734e6868b56a0238c0fabd09409735046b505dc37843cdf`.
+    Exact byte formulas are `512 + 96 * (n - 1)` for log/jsonl at n=1..4,096;
+    `1,024 + 256 * (n - 1)` for json/yaml/xml at n=1..1,024;
+    `2,048 + 1,024 * (n - 1)` for sql/html/ipynb at n=1..256;
+    `512 + 48 * (n - 1)` for csv/tsv at n=1..10,000; and `8,192 + 16,384 * a` for eml at
+    a=0..5 attachments.  Every payload is at most 512 KiB.  Canonical EML uses CRLF with a maximum wire line of
+    seventy-eight octets.  Strict JSON-family validation rejects excessive nesting before parser invocation and
+    wraps parser recursion failures in the public contract error.
+    The dedicated ten-test local suite passes, including all legal formula values, min/middle/max rendition,
+    all six EML attachment counts, exact-length tampering, identity injection, cross-format substitution,
+    hostile integer/depth inputs, environment determinism, and validator import independence.  The suite is
+    included in `persona-v2-nonauthorizing-core`; no remote green result is claimed.  Renderer, validator, and
+    receipts grant no formal recipe, source identity, semantic content, materialization, actual chunk,
+    filesystem/write, KCS, history, capacity, solver, or G0 authority.  The next implementation order is formal
+    binding of all seventy-one recipes and these eleven contracts, the fifty raw-only pairs, semantic/query/history
+    closures, joint solution/proof, streaming folder/file writing, edits/history, fresh-storage replays, and
+    observed chunk/search/capacity/latency evaluation.

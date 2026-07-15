@@ -20,6 +20,11 @@ ID-free text/PDF renderer/validator、source-profile catalogを含め、どの�
 write、history authorityを与えない。layoutはrow bodyやbody SHAを持たない件数・key-range予約だけであり、
 row body/digestは下流structural packageが別に束縛する。overlay reservation自体はsource key/関係/identity slotの
 予約であり、下流concrete packageだけがmembershipへ昇格させる。
+凍結済みsource-profile catalogの10 local-ready / 61 implementation-missingは変更しない一方、後続の
+ID-free incidental-text rendererとbuilder非依存validatorで`csv`、`eml`、`html`、`ipynb`、`json`、
+`jsonl`、`log`、`sql`、`tsv`、`xml`、`yaml`の11 variantsを局所実装した。したがって現在の下流実装可用性は
+21 / 71、残る未実装はraw-only 50 / 71である。ただしformal recipeは71件すべてunboundであり、source別の
+materialization、chunk、KCS、G0、filesystem/write authorityは増えていない。
 overlayの8軸ledgerはaxis draftであり、byte/host-metadata reconciliation、scope placement、
 raw/rendered identityと検索参加の実測は未完成である。
 同一subject/predicate・異なる値を持つunordered W0-current fact pairとsource-owned distinct A/B branch profilesは
@@ -689,8 +694,10 @@ oracleとテストを更新する。
 
 現structural source packageは71 variantすべてに一意なinventory-only `source_profile_id`を付与したが、
 これは上記のformal recipe profileではない。formal recipe slotは71件すべて
-`reserved-unbound`/`profile_id=not-bound`であり、局所feasibility済み10件とimplementation missing 61件の
-いずれもrenderer・validator・semantic content・execution authorityを授与しない。
+`reserved-unbound`/`profile_id=not-bound`である。凍結済みsource-profile catalogは局所feasibility済み10件と
+implementation missing 61件を記録し続ける。後続のincidental-text pairは、その61件中11件をcatalog非改変の
+局所実装として追加したため、現在利用可能なformat implementationは21件、残る未実装はraw-only 50件である。
+この21件のいずれもformal recipe・semantic content・source materialization・execution authorityを授与しない。
 
 source-owned semantic-membership packageは、この10-field structural rowを変更せず、
 `intent_key`、`content_context_id`、`present_fact_set_key`を別sidecarで全203,000件exactly once解決する。
@@ -814,7 +821,7 @@ contract chunksを持つ。W0 sourceは203,000 files/replayであり、3 fresh r
 
 | Gate | 実装・実行 | 合格条件 | 現在地 |
 | --- | --- | --- | --- |
-| G0 v2契約凍結 | 400 exact scope paths/load、family/extension/variant整数比、`persona_realism_profile`と8軸台帳、ambient spec、共有辞書、pre-solve source-intent recipe、size、fact/oracle、W0-W5 exact eventをversioned artifact graphとsuite descriptor hashへ固定 | generator変更前に全20人でcanonical rebuild。joint solverがrealism overlayを入力にfull contributor=120,000とpilot=12,000、scope routing、wave別incidental上限、plan 16 MiB上限をexactに解く | coreに加え203,000構造row/73 shard body、40 origin + 40 profile manifest、71 inventory profile ID、40 originのnon-authorizing overlay reservation、45 fact profiles/persona、80 topics、71 semantic profiles、3,733 compact rowsからの203,000 semantic/fact logical total projection、40 concrete origins + 40 concrete profilesと27,660 rich pre-solve overlay rows、negative route receipt、20件のrepresentative source/fact/history slice、2,100 query/oracle、非authorizing closure候補まで実装。formal recipeは71件全てunbound、solved placement、61 renderer/validator implementation、semantic payload projection、独立approval、solution/proof、完全persona 16 MiB proof、正式rootは未実装 |
+| G0 v2契約凍結 | 400 exact scope paths/load、family/extension/variant整数比、`persona_realism_profile`と8軸台帳、ambient spec、共有辞書、pre-solve source-intent recipe、size、fact/oracle、W0-W5 exact eventをversioned artifact graphとsuite descriptor hashへ固定 | generator変更前に全20人でcanonical rebuild。joint solverがrealism overlayを入力にfull contributor=120,000とpilot=12,000、scope routing、wave別incidental上限、plan 16 MiB上限をexactに解く | coreに加え203,000構造row/73 shard body、40 origin + 40 profile manifest、71 inventory profile ID、40 originのnon-authorizing overlay reservation、45 fact profiles/persona、80 topics、71 semantic profiles、3,733 compact rowsからの203,000 semantic/fact logical total projection、40 concrete origins + 40 concrete profilesと27,660 rich pre-solve overlay rows、negative route receipt、20件のrepresentative source/fact/history slice、2,100 query/oracle、非authorizing closure候補、10 contributor + 11 incidentalの局所format実装まで完成。formal recipeは71件全てunbound、solved placement、残る50 raw-only renderer/validator implementation、semantic payload projection、独立approval、solution/proof、完全persona 16 MiB proof、正式rootは未実装 |
 | G1 v2 tiny W0 | 20人×200 files/persona-PC rootを1人・1sourceずつstreaming作成 | 4,000 files/suite replay、2 fresh suite replays合計8,000 writes、400 scopes/replay、比率/path/hash/readback、inode非共有 | v1相当は済。v2回帰が必要 |
 | G2 pilot W0 | pilot-first solverのexact subset、計20,300 files、各人12,000 planned、init→offline index | 各人actual contributor 12,000、raw-only 0、planned/actualを別台帳化 | streaming writerと完全attestorが未実装 |
 | G3 pilot W1-W5 | immutable eventをmutation前に検証し、edit/rename/move/duplicate/derive/archive/delete/restore/purge | exactly-once journal、再開収束、waveごとのactual attestation、purge後index noop | v1相当のみ済。v2 allocator/manifest未実装 |
@@ -1101,6 +1108,12 @@ v2で実装済み（planning only、non-authorizing）:
   これにより局所feasibilityは10 contributor variants、full 69,236 contributor sourcesを覆うが、
   多言語PDF、個別semantic content、positive query anchor、KCS actual chunks、source recipe/G0は証明しない。
   source-profile catalogは72,559 bytes / `6e38fab07851f9fdcbf9d6e67e502484aea7edb66167ea86db1539593b8b58ac`である。
+- 後続のincidental-text narrow feasibility sliceは11 variantsをstdlib-onlyで局所実装する。renderer contractは
+  9,139 bytes / `22fae0f62a67856ef20b5820c7274aad542a2de06f76c93c5c68acdaed9652f4`、独立validator contractは
+  10,090 bytes / `67a0f0913de6087ca4b1c836d6dff4f845d6ee50a3adf12b794236f128baed75`である。全出力は
+  512 KiB以下、EMLはCRLFかつwire line 78 bytes以下である。凍結catalogを変更せず、そのinventory marginalが
+  full 60,414 sourcesを占める11 incidental variantsをformat-levelで覆うが、source別recipe、semantic payload、
+  materialization、actual incidental chunk上限、KCS/G0/writeを証明しない
 - canonical JSON objectは16 MiB、JSONLは16 MiB/65,536 rows/1 row 64 KiBのpre-read capを持つbounded
   readerを実装した。UTF-8/NFC、duplicate key、null/float/negative integer、CR/BOM/blank row、末尾LF、
   exact declared bytes/SHAをfail closedで検査する。ただし外側frame header/dispatcherとのbindingは未実装
@@ -1154,7 +1167,8 @@ content-only `semantic_payload` projectionだけをidentity namespaceへ入れ�
   logical-document採点/検索参加、8軸台帳
 - 71件のformal recipe slotを束縛する、chunk/complexity/bytesを分離したpre-solve source-intent recipe、
   人物・family別byte p50/p95/tail、source-level content recipe/semantic filename
-- 61未実装variantのvalidator/rendererとsource-level feasibility、
+- 11 incidental local contractsのformal profile/recipe bindingと、残る50 raw-only variantのvalidator/renderer、
+  source-level feasibility、
   schema別content-only `semantic_payload` projection、正式なcorpus/evaluation closure
 - concrete overlayの`placement_class_requirement`を400 scopesへ割り当てるjoint solution/proof、
   logical-document/search participation、raw/rendered identityと8軸observed ledger
@@ -1185,7 +1199,8 @@ canonical plan SHAを変更しない。non-authorizing generic solver-semantics 
 vertical slice、203,000-key/73-shard layout、overlay reservation、全203,000 structural rows/73 shard bodies、
 40 origin + 40 profile manifests、71 inventory profile IDs、全203,000 sourceのcontent contexts +
 source-owned fact membership、40 origin + 40 profile manifestsのconcrete overlay membershipまでは完了した。
-以後の実装順は、(1) 71 formal recipeと61 renderer/validator implementations、
+以後の実装順は、(1) 71 formal recipes、11 incidental contractsのprofile binding、
+残る50 raw-only renderer/validator implementations、
 (2) corpus semantic namespaceとquery/history target mappings、
 (3) joint solverと独立検証可能なsolution/proof、(4) allocation/rendering + streaming folder/file writer、
 (5) W1--W5 edits/history、(6) 3 fresh-storage replays、(7) actual
