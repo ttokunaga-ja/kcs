@@ -1030,3 +1030,39 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     concrete overlay membership -> semantic namespace and query/history mappings -> joint solver -> folder/
     file writer -> edits/history -> fresh-storage replays -> evaluation.  No completed root or `.kcs` store
     may be copied to satisfy a fresh replay.
+123. Persona-PC v2 now materializes the complete structural source-slot package without claiming semantic
+    or executable source-intent completion.  The all-variant
+    `kcs.persona.pc-source-inventory-profile-catalog/v2` assigns one unique inventory-only profile ID to
+    each of the 71 variants and is 87,391 canonical bytes, SHA-256
+    `be5e807d97ade4c50de8a47cb017137d12740baea2fb0396d8ac45d39a84e196`.  All 71 formal source-recipe
+    slots remain `reserved-unbound` with `profile_id=not-bound`; ten profiles have only local feasibility
+    implementations and sixty-one remain implementation-missing.  Inventory-profile identity therefore
+    grants no formal recipe, renderer/validator execution, source-level feasibility, G0, filesystem, KCS,
+    history, capacity, or write authority.
+    The downstream `kcs.persona.pc-source-inventory-origin-manifest/v2`,
+    `kcs.persona.pc-source-inventory-profile-manifest/v2`, and
+    `kcs.persona.pc-source-inventory-suite/v2` bind exactly 203,000 reference-only source-slot rows in
+    73 canonical JSONL shard bodies, forty persona/origin manifests, and forty persona/profile manifests.
+    Their shard bodies total 108,682,911 bytes; the largest LF-inclusive row is 558 bytes and the largest
+    shard is 2,225,794 bytes.  The suite descriptor is 45,887 canonical bytes, SHA-256
+    `b62fadfa42b0f3f61b6de017300e65c48a5c07fb801dc470999c3d89a39dd706`.  Representative bindings are
+    p01 pilot origin 13,043 / `b72ea3b5b11744b39499f1c24a4de5b4d65ee2b67cfea351a604df4b7f9ca1df`,
+    p01 pilot profile 7,814 / `89fb76b9a6867790ef7c55ca6ae94b9e8dd97a5a981ed236e7677b2fbfb3b65b`,
+    p12 full-residual origin 15,474 / `418345d14d8a494ab59d342c21ad4cb0323fab6fcf9a064ec677ce64a60177fe`,
+    and p12 full profile 10,369 / `bdf7371dff9cb5ae106564026d616887fffa05ccf9735bff637936fd7fcac41b`.
+    A full profile reuses the exact pilot origin manifest and pilot shard descriptors before adding the
+    full-residual origin.  Every pilot/full profile manifest also binds the overlay-reservation-suite SHA
+    directly, rather than relying only on an indirect origin-manifest path.  The existing representative
+    `...-0001` artifacts share the key grammar but their bodies are not reused as formal pilot bodies.
+    The largest current-component ledger is p12 at 8,598,540 bytes against 16 MiB, but its denominator is
+    exactly unique source shard bodies plus two origin manifests plus two profile manifests.  It excludes
+    semantic content catalogs, present fact sets and source-owned fact membership, concrete overlay
+    membership, framing/header, and every other future persona-package component.  Consequently
+    `source_intent_inventory_complete=false` and `formal_complete_persona_package_cap_proved=false`; no
+    semantic catalog, fact membership, concrete overlay, rendering, writing, history, KCS execution, or
+    G0 authority follows.  A dedicated `persona-v2-source-inventory-full` CI gate is defined for this
+    package, but this decision does not claim a green remote CI result.
+    The next required order is semantic content contexts plus source-owned fact membership, then concrete
+    overlay manifests, formal recipe and renderer implementations, allocation/rendering, folder/file
+    writing, edits/history, fresh-storage replays, and evaluation.  A complete structural row package must
+    not be relabeled as a complete semantic source-intent inventory.

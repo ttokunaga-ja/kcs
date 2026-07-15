@@ -5,12 +5,15 @@ Status: envelope、exact topology、joint必要条件problem、generic aggregate
 20人x4 typed fact-graph leaf、negative route-review receipt、20人各1件のrepresentative
 source-intent/fact-membership/history-intent、2,100 query intents/semantic oracle、非authorizing input-closure候補まで実装済み。
 exact 203,000-key/73-shard source-inventory layout、overlay contract、ID-free text/PDF renderer/validator、
-source-profile catalogも候補実装があるがnon-authoritativeである。layoutはrow bodyやbody SHAを持たない。
+source-profile catalogも候補実装があるがnon-authoritativeである。さらに下流のstructural
+source packageは203,000 reference-only rows、73 canonical JSONL shard bodies、40 origin manifests、
+40 pilot/full profile manifests、71 inventory-only profile IDsを束縛する。layout自体はrow body/body SHAを持たない。
 overlayのmembership schemaは候補として固定した一方、8軸ledgerはaxis draftで、byte/host-metadata整合と
 persona-local domainが未完成である。unordered W0-current fact pairの入力前提は実装済みだが、
 distinct branch membership、overlay instance、scope placementがないためconflict overlayは未実現である。
-必要条件は全20人で通過したが、203,000 source row body inventory、53 residual shard bodies、61未対応variant、
-overlay instance/membership/placement、独立approval receipt、schema別content-only semantic projection、
+必要条件は全20人で通過し、structural row bodiesは完成したが、formal recipeは71件全てunbound、
+semantic content/present fact sets、61未対応variant implementation、overlay instance/membership/placement、
+独立approval receipt、schema別content-only semantic projection、
 実行可能solver、solution、proofは含まない。現input-closureはfull body DAGの互換性候補に限り、
 source ID namespaceとして不適格である。
 `g0_contract_frozen=false`、G0 root未実装、非authorizing。
@@ -578,8 +581,11 @@ refinementが新たに割り当てるのはscope、bucket、cohort、quota、cel
 `eligible_scope_keys`は人物catalogの`eligible_scope_set_id`から推移的に束縛できるものとし、20 scope keyを
 全source rowへ反復保存しない。
 
-現候補source-profile catalogとID-free text/PDF renderer/validatorはbyte/complexityの局所contractだけを検査する。
-`source_recipe_profile_id=not-bound`、`source_profile_vertical_slice_complete=false`であり、source-intent row、
+現structural packageの`source_profile_id`は71 variantすべてに一意なforeign keyを付与するが、
+inventory-only identityでありformal recipe profileではない。formal source recipeは71件全て
+`reserved-unbound`/`profile_id=not-bound`。既存source-profile catalogとID-free text/PDF renderer/validatorは
+byte/complexityの局所contractだけを検査し、10 profilesが`ready-local-only-formal-recipe-unbound`、
+61 profilesが`blocked-implementation-missing`である。どちらもformal recipe parameter、semantic content、
 overlay instance、fact membership、final source allocation、production MIME golden、filesystem/KCS実行の
 authorityを持たない。overlay contract候補もschemaを記述するだけでinstance/placementを束縛せず、G0 rootの
 入力としては未採用である。
@@ -741,6 +747,17 @@ core/G0 rootへ含めず、正式なupstream pinが更新されるまでnon-auth
 | variant catalog | 211,733 | `abbe522ff37a9a091f28b7a230928fd598054498eb80cab99f08d21889f26cec` |
 | route candidate | 70,626 | `e8a401193fc751ed3d7b2a47e3661202835579df8700392ce9fdfd30ad07c790` |
 
+次のstructural source packageはcore/G0 rootの外側にあるnon-authorizing下流artifactとして固定する。
+
+| artifact | bytes | SHA-256 |
+| --- | ---: | --- |
+| all-71 inventory profile catalog | 87,391 | `be5e807d97ade4c50de8a47cb017137d12740baea2fb0396d8ac45d39a84e196` |
+| source inventory suite descriptor | 45,887 | `b62fadfa42b0f3f61b6de017300e65c48a5c07fb801dc470999c3d89a39dd706` |
+| p01 pilot origin manifest | 13,043 | `b72ea3b5b11744b39499f1c24a4de5b4d65ee2b67cfea351a604df4b7f9ca1df` |
+| p01 pilot profile manifest | 7,814 | `89fb76b9a6867790ef7c55ca6ae94b9e8dd97a5a981ed236e7677b2fbfb3b65b` |
+| p12 full-residual origin manifest | 15,474 | `418345d14d8a494ab59d342c21ad4cb0323fab6fcf9a064ec677ce64a60177fe` |
+| p12 full profile manifest | 10,369 | `bdf7371dff9cb5ae106564026d616887fffa05ccf9735bff637936fd7fcac41b` |
+
 bounded artifact上限は次を目標とする。すべて最大nesting depth 64、string 4,096 bytesとし、最終loaderは
 bodyを読む前のframed byte capを持つ。現solver-policy sidecarの512 KiBはmaterialize済みvalueに対する
 in-memory canonical capである。16 MiB object readerと、16 MiB body/65,536 rows/1 row LF込み64 KiBの
@@ -773,8 +790,27 @@ pilot/fullは同じ行を再生成して同値とみなすのではなく、full
 SHA-256 `ef52b756c7100c719f66323cd3cdb4dfc58a78e48d78f2857ca378cb1eb83dba`である。20,300 pilot +
 182,700 residual、20 + 53 shards、566 persona/variant marginals、69,236/60,414/73,350のfull gate-role countsを
 exactに束縛する。一方、row body、body bytes/SHA、source profile assignment、overlay/fact membership、
-16 MiB package proof、source inventory/G0/write authorityは持たない。pilot keyは既存代表sliceと互換な4桁、
+16 MiB package proof、source inventory/G0/write authorityはこのlayout単体には持たない。pilot keyは既存代表sliceと互換な4桁、
 residual keyは最大14,400件を覆う5桁ordinalとし、originごとにordinalを独立させる。
+
+下流の`kcs.persona.pc-source-inventory-profile-catalog/v2`は71 inventory profile identitiesを
+variant-catalog順に束縛する。`kcs.persona.pc-source-inventory-origin-manifest/v2`、
+`kcs.persona.pc-source-inventory-profile-manifest/v2`、`kcs.persona.pc-source-inventory-suite/v2`は、203,000の
+reference-only source-slot rowsを73 canonical JSONL bodiesへstreaming materializeし、40 origin manifests、
+40 pilot/full profile manifests、各body bytes/SHAをexactに束縛する。総shard bodyは108,682,911 bytes、
+最大rowはLF込み558 bytes、最大shardは2,225,794 bytesである。full profileはpilot origin manifestと
+pilot shard descriptorsのexact referenceを先頭に再利用し、再生成同値をreuse証明としない。
+pilot/fullの各profile manifestはoverlay reservation suite SHAを直接束縛し、origin manifest経由の
+間接参照だけに依存しない。
+既存representative `...-0001` artifactsはkey grammarのみ互換で、formal pilot bodyとして再利用しない。
+
+人物別current-component ledgerの分母は、各人物の**unique source shard bodies + pilot/full-residualの
+2 origin manifests + pilot/fullの2 profile manifestsのみ**である。最大p12は8,598,540 bytes / 16 MiBで
+現component capを満たすが、semantic catalogs、present fact sets、source-owned fact membership、concrete overlay、
+frame/header、その他の将来componentを含まない。よって
+`formal_complete_persona_package_cap_proved=false`、`source_intent_inventory_complete=false`を維持する。
+専用CI job `persona-v2-source-inventory-full`でpackage validatorを分離実行する定義を追加したが、
+実行結果のgreenは本契約では主張しない。
 
 `pdf-text`の局所feasibilityは1--72 ASCII text-layer pages、4,096 + 2,048 × (pages - 1) bytesを固定し、
 PDF 1.4のnon-stream 255-byte line上限、xref/trailer/page treeを独立validatorで検査する。renderer contractは
@@ -916,6 +952,11 @@ formal flagを変更してはならない。
     scan PDFは現v2ではoffline raw-only/`awaiting_ocr`のstructural/negative対象で、positive Recall relevanceへ
     数えない。将来local deterministic OCR derivativeを追加する場合は別variant/provenance/contributor契約を
     version updateで先に束縛する
+
+次の実装順は、(1) semantic content contexts + source-owned fact membership、
+(2) concrete overlay manifests、(3) formal recipe/renderer implementations、(4) allocation/rendering、
+(5) folder/file write、(6) edits/history、(7) fresh-storage replays、(8) evaluationとする。
+structural 203,000-row packageの完成からsemantic completeness、formal recipe binding、G0、render/writeを推論しない。
 
 G0後のrender/index実行ゲートは、logical-document expectedから正式MVP distinct `(raw_hash, section)`
 relevanceへのcompiled binding、observed materialization/chunk ID、lifecycle receiptを別artifactで検証する。

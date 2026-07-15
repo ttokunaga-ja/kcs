@@ -49,6 +49,17 @@ jobs:
           eval.test_persona_v2_input_closure_live
           eval.test_persona_v2_scale_invariants
 
+  persona-v2-source-inventory-full:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+      - run: >-
+          python3 -m unittest -v
+          eval.test_persona_v2_source_inventory_profile
+          eval.test_persona_v2_source_inventory_package
+
   rust:
     runs-on: ubuntu-latest
 
