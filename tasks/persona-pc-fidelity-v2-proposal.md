@@ -6,9 +6,12 @@ generic aggregate-core solver-policy、20人別realism profile/overlay marginal 
 receipt、20人各1件のrepresentative source-intent/fact-membership/history-intent、2,100 query intentsと
 semantic oracle、非authorizing input-closure候補まで実装済みだが未承認である。さらに203,000の
 reference-only structural source rows、73 JSONL shard bodies、40 origin + 40 profile manifests、
-71 inventory-only profile IDsを束縛するpackageを実装した。ただしsemantic content/fact membership、
-formal recipe、concrete overlayがなく`source_intent_inventory_complete=false`で、history-intentもsolver後の
-compiled event planではない。exact 203,000-key/73-shard source-inventory layout、overlay contract、
+71 inventory-only profile IDsを束縛するpackageを実装した。さらに20人を混ぜないsource-owned
+semantic-membership packageとして、各人45 fact profiles（suite 900）、80 persona-local topics、
+71 semantic profiles、全203,000 sourceのlogical total projectionを3,733 compact rowsで束縛する。
+ただしformal recipe、concrete overlay、semantic-payload closureはなく、既存structural packageの
+`source_intent_inventory_complete=false`を変更しない。history-intentもsolver後のcompiled event planではない。
+exact 203,000-key/73-shard source-inventory layout、overlay contract、
 40 persona/originのpre-source overlay reservation、
 ID-free text/PDF renderer/validator、source-profile catalogを含め、どの候補もG0、renderer、filesystem、
 write、history authorityを与えない。layoutはrow bodyやbody SHAを持たない件数・key-range予約だけであり、
@@ -16,8 +19,9 @@ row body/digestは下流structural packageが別に束縛する。overlay reserv
 予約であってconcrete membershipではない。
 overlayの8軸ledgerはaxis draftであり、
 byte/host-metadata reconciliation、
-persona-local domain、conflictを成立させるdistinct branch membership/placementは未完成である。
-同一subject/predicate・異なる値を持つunordered W0-current fact pairの入力前提だけは実装済みである。
+persona-local reconciliation、conflictを成立させるconcrete overlay join/placementは未完成である。
+同一subject/predicate・異なる値を持つunordered W0-current fact pairとsource-owned distinct A/B branch profilesは
+実装済みである。
 schema別content-only `semantic_payload` projection、full source-level exact allocation、canonical solution/proof、
 正式G0 rootは未実装である。
 現行`kcs-persona-pc-v1`を黙って変更せず、採用時はfixture、renderer、plan、manifestをすべてv2へ上げる。
@@ -416,8 +420,10 @@ red-team検査を通過した。ただしformal independent approval receiptは�
 このreservationはexact/near/conflict endpoint、relation-kind x placement-class joint marginal、
 EML attachment fanout、logical document/branch/revision/section/payload identity、conflict fact template assignmentを
 先に予約するだけである。下流structural packageは203,000 source row bodies/manifestsを束縛したが、
-このreservation自体はそれらを逆参照しない。source-owned fact membership、concrete overlay membership、
-solved scope placement、logical-document採点・検索参加、8軸実測台帳はまだ存在しない。
+このreservation自体はそれらを逆参照しない。さらに下流のsource-owned semantic-membership packageは
+全sourceのcontent contextとW0 present-fact setをlogicalにtotal-resolveするが、reservationをconcrete
+overlay membershipへ昇格させない。concrete overlay membership、solved scope placement、
+logical-document採点・検索参加、8軸実測台帳はまだ存在しない。
 overlayを理由にphysical file総数やfamily比へfileを暗黙追加しない。
 overlayはpre-solve source-intent recipeとjoint solverの入力としてallocation前に固定し、解の後へ
 post-hoc追加しない。aggregate `A/C`だけではper-intent cluster配置を証明できないため、membershipを
@@ -674,6 +680,55 @@ oracleとテストを更新する。
 `reserved-unbound`/`profile_id=not-bound`であり、局所feasibility済み10件とimplementation missing 61件の
 いずれもrenderer・validator・semantic content・execution authorityを授与しない。
 
+source-owned semantic-membership packageは、この10-field structural rowを変更せず、
+`intent_key`、`content_context_id`、`present_fact_set_key`を別sidecarで全203,000件exactly once解決する。
+人物を跨ぐ共有fact profileは作らず、各personaに次の45 profiles、suiteに900 profilesを持つ。
+
+| fact profile kind | 1 persona | suite | W0 present facts |
+| --- | ---: | ---: | --- |
+| empty | 1 | 20 | 0。`raw_only`専用 |
+| W0 singleton | 32 | 640 | 4 graph x 8 W0-current facts |
+| graph-normal-W0 | 4 | 80 | graphごとのall-and-only 8 W0-current facts |
+| conflict branch | 8 | 160 | 4 graph x A/B。共通6 + branch固有1 |
+| 合計 | 45 | 900 | typed fact graphの部分集合だけ |
+
+topicは各人4 graphに対応する80 persona-local rows、semantic profileは71 inventory profileと1対1の
+71 rowsとする。`topic_id`、`graph_id`、`project_or_case_id`をbijectiveに検査し、自由なslugだけを
+identityにしない。raw-onlyもlanguage/topic/content contextは持てるが、fact、検索参加、chunk寄与を
+意味しない。既存20件のrepresentative source/fact bodyはschema sliceとして残し、full pilot bodyや
+全件projectionの正本へ読み替えない。
+
+物理的なcompact origin bodyは、73 source-shard total-projection rows、2,100 semantic-anchor overrides、
+1,560 conflict-pair overridesの合計3,733 rowsである。各source shard receiptは、同じrangeからstreaming展開する
+content-context bodyとfact-membership bodyのrow count、bytes、SHAを束縛するため、compact row数を
+203,000件のlogical totalityと読み替えない。expanded projectionでは全structural keyがexactly once解決され、
+extra、missing、foreign-persona、duplicateを拒否する。anchor overrideは32 singleton profilesを循環し、
+conflict overrideはreservationのA/B branch profileをそのまま使う。
+
+language/topic quotaはpersona x originごとに、pilotとfullをそれぞれHamilton法で求め、
+`full-residual = full - pilot`とする。exact/near/conflict endpoint、attachment host/member、
+exact-overlap相手をunionした最大7 sourceのconnected componentを分割せず、同じlanguage/topicへ置く。
+conflictとanchorのfixed topicを先に差し引き、残りをcomponent size降順・minimum `intent_key` ASCII昇順、
+整数deficit score、label ASCII tie-breakで割り当て、最後にsingletonでexact quotaを閉じる。
+このclosureはsemantic coordinateの割当であってscope/bucket/cohort/quotaのjoint solver解ではない。
+
+全sourceはW0/currentで、exact duplicate、attachment、conflict、通常sourceはsemantic version 1、
+near-revisionのderivativeだけversion 2とする。fullはversion 1が189,770、version 2が13,230、
+pilotは18,977 / 1,323、full-residualは170,793 / 11,907である。nearのversion 2はW0-visibleな
+surface revisionであり、W1 KCS history transitionではない。conflict A/Bはともにversion 1で、
+version差ではなくunordered branch差である。
+
+依存は`fact graph / realism / inventory profile -> semantic catalog`、
+`catalog + source origin + matching reservation origin + matching persona fact graph -> semantic-membership origin`、
+`catalog + origins -> pilot/full profile`、`catalog + origins + profiles + source/reservation suites -> suite`の
+一方向に限る。後段manifestが同じimmutable upstreamを冗長に直接束縛することは許すが、既存source/
+reservation/fact graphへ新artifact SHAを逆流させない。将来concrete overlayだけがreservation、source、
+semantic/fact manifestsを下流から束縛する。expanded membershipの`semantic_section_key`はpre-solveの
+抽象identityとして許可する一方、query/oracle/review receipt、solution、final source/materialization、
+observed raw/chunk/materialized-section IDはこのpackageへ入れない。
+したがってsemantic/fact projectionのcurrent-component capを満たしても、concrete overlay、frame/header、
+formal recipesを含むcomplete 16 MiB/person cap、正式corpus semantic namespace、G0/write authorityは未成立である。
+
 共有persona fidelity profileはOS/case semantics、device class、locale、timezone、languages、work cadence、
 retention、sync snapshot source、sensitivity、permission、mtime-age、duplicate/conflict仮説を持つ。
 各pre-solve intentは少なくとも次をcorpus semantic namespaceへ含める。
@@ -716,8 +771,9 @@ actual rank/score/latencyはさらに後段へ分ける。fact/oracle/query bund
 最大4,096 rows/4 MiB shard、全frame/manifest/overlay込み16 MiB/personとする。pilot shardはfullでも
 byte-identicalに再利用し、residual shardだけを追加する。現時点で16 MiB内を実測したのは
 source shard bodies + 2 origin manifests + pilot/fullの2 profile manifestsだけであり、最大p12で
-8,598,540 bytesである。frame/header、semantic/fact membership、concrete overlayその他の将来componentを
-含む完全persona packageの16 MiB capは未証明である。
+8,598,540 bytesである。新しいsemantic/fact projectionは別componentとして成立したが、このsource-only
+ledgerへ合算していない。frame/header、semantic/fact projection、concrete overlayその他の将来componentを
+すべて含む完全persona packageの16 MiB capは未証明である。
 
 現typed fact graphが表すrevision境界はW1だけである。したがって将来のhistory-intent契約では、現契約の
 W3 X/Y/N editとW5 N correctionをsemantic factの更新ではなくsurface/raw lifecycle editとし、eventの
@@ -745,7 +801,7 @@ contract chunksを持つ。W0 sourceは203,000 files/replayであり、3 fresh r
 
 | Gate | 実装・実行 | 合格条件 | 現在地 |
 | --- | --- | --- | --- |
-| G0 v2契約凍結 | 400 exact scope paths/load、family/extension/variant整数比、`persona_realism_profile`と8軸台帳、ambient spec、共有辞書、pre-solve source-intent recipe、size、fact/oracle、W0-W5 exact eventをversioned artifact graphとsuite descriptor hashへ固定 | generator変更前に全20人でcanonical rebuild。joint solverがrealism overlayを入力にfull contributor=120,000とpilot=12,000、scope routing、wave別incidental上限、plan 16 MiB上限をexactに解く | coreに加え203,000構造row/73 shard body、40 origin + 40 profile manifest、71 inventory profile ID、40 originのnon-authorizing overlay reservation、negative route receipt、20件のrepresentative source/fact/history slice、2,100 query/oracle、非authorizing closure候補まで実装。formal recipeは71件全てunbound、semantic content/fact membership、concrete overlay membership/solved placement、61 renderer/validator implementation、semantic payload projection、独立approval、solution/proof、完全persona 16 MiB proof、正式rootは未実装 |
+| G0 v2契約凍結 | 400 exact scope paths/load、family/extension/variant整数比、`persona_realism_profile`と8軸台帳、ambient spec、共有辞書、pre-solve source-intent recipe、size、fact/oracle、W0-W5 exact eventをversioned artifact graphとsuite descriptor hashへ固定 | generator変更前に全20人でcanonical rebuild。joint solverがrealism overlayを入力にfull contributor=120,000とpilot=12,000、scope routing、wave別incidental上限、plan 16 MiB上限をexactに解く | coreに加え203,000構造row/73 shard body、40 origin + 40 profile manifest、71 inventory profile ID、40 originのnon-authorizing overlay reservation、45 fact profiles/persona、80 topics、71 semantic profiles、3,733 compact rowsからの203,000 semantic/fact logical total projection、negative route receipt、20件のrepresentative source/fact/history slice、2,100 query/oracle、非authorizing closure候補まで実装。formal recipeは71件全てunbound、concrete overlay membership/solved placement、61 renderer/validator implementation、semantic payload projection、独立approval、solution/proof、完全persona 16 MiB proof、正式rootは未実装 |
 | G1 v2 tiny W0 | 20人×200 files/persona-PC rootを1人・1sourceずつstreaming作成 | 4,000 files/suite replay、2 fresh suite replays合計8,000 writes、400 scopes/replay、比率/path/hash/readback、inode非共有 | v1相当は済。v2回帰が必要 |
 | G2 pilot W0 | pilot-first solverのexact subset、計20,300 files、各人12,000 planned、init→offline index | 各人actual contributor 12,000、raw-only 0、planned/actualを別台帳化 | streaming writerと完全attestorが未実装 |
 | G3 pilot W1-W5 | immutable eventをmutation前に検証し、edit/rename/move/duplicate/derive/archive/delete/restore/purge | exactly-once journal、再開収束、waveごとのactual attestation、purge後index noop | v1相当のみ済。v2 allocator/manifest未実装 |
@@ -953,8 +1009,8 @@ v2で実装済み（planning only、non-authorizing）:
   全authorityはfalseのままである。overlay canonicalは71,179 bytes、SHA-256
   `ae219f90caf97e153e57f821b34f4f8a9ad671ee705387a5d0142ff9963fc75c`である。fact graphには
   同一subject/predicate・値不一致のunordered W0-current fact pairが存在するが、1,560 conflict clustersの
-  concrete branch-fact membership、concrete overlay membership、solved scope placementは未束縛なので、
-  `conflict_fact_realizability_proved=false`を維持する
+  source-owned distinct A/B branch profilesはsemantic-membership packageで束縛した。reservation/sourceへjoinする
+  concrete overlay membershipとsolved scope placementは未束縛なので、`conflict_fact_realizability_proved=false`を維持する
 - 20人 x 2 originの`kcs.persona.pc-overlay-reservation-origin/v2`とcompact suite descriptorを実装。
   40 origin artifactsはfull 25,560 rows、46,840 distinct overlay source-intent references、pilot 2,100
   contributor-only semantic anchorsを予約する。最大originは2,639,467 bytes、最大rowは1,960 / 2,048 bytes。
@@ -986,9 +1042,27 @@ v2で実装済み（planning only、non-authorizing）:
   15,474 / `418345d14d8a494ab59d342c21ad4cb0323fab6fcf9a064ec677ce64a60177fe`、p12 full profile
   10,369 / `bdf7371dff9cb5ae106564026d616887fffa05ccf9735bff637936fd7fcac41b`である。p12の
   8,598,540-byte current-component ledgerは**unique source shard bodies + 2 origin manifests + 2 profile manifestsのみ**
-  を分母にする。semantic catalogs/present fact sets/concrete overlay/frame等を含むcomplete persona packageの
+  を分母にし、新しいsemantic/fact componentを合算していない。semantic/fact projection、concrete overlay、frame等を含むcomplete persona packageの
   16 MiB capはfalseのままである。専用CI gate `persona-v2-source-inventory-full`は定義したが、
   CI実行結果のgreenはここでは主張しない
+- `kcs.persona.pc-source-semantic-membership-catalog/v2`とorigin/profile/suite manifests、
+  builder-independent validatorを実装。20人を独立domainに保った45 fact profiles/persona = 900、
+  80 persona-local topics、71 inventory profileと1対1のsemantic profilesを束縛する。73 source-shard
+  total projections + 2,100 anchor overrides + 1,560 conflict-pair overrides = 3,733 compact rowsから、
+  content contextとsource-owned present-fact membershipを全203,000 structural sourcesへexactly once
+  streaming展開する。language/topicはpilot/full Hamiltonとconnected-component-preserving allocatorで
+  exact closureし、fullのsemantic versionはv1 189,770 / v2 13,230である。既存source、reservation、
+  fact-graph pinsは変更せず、query/oracle/final IDを含めない。catalogは436,495 bytes / SHA-256
+  `45e849cb2b94392820a21870c93e88e879f99d55a8b83c211663e7b3d1497d62`、suite descriptorは
+  49,837 bytes / `62394dd2a3544f7d6c332652e6799b7a60353e8e3aa6a87f80e0ff21590a2e28`である。
+  compact bodiesは合計1,006,627 bytes / 最大row 734 bytes、expanded context/fact membership receiptsは
+  121,020,941 / 135,741,615 bytes、最大row 633 / 743 bytes、最大shard 2,484,590 / 3,030,632 bytesを
+  束縛する。source-only component、matching reservation origins、catalog、compact bodies、semantic origin/
+  profile manifestsを保守的に合算した最大p12は12,070,092 bytes、headroom 4,707,124 bytesである。
+  専用local moduleは11 testsを1,785.462秒で通過し、外側計測の最大RSSは220,839,936 bytesである。
+  生成器とpublic independent validatorはそれぞれ384 MiB RSS gateを通過した。30分では実測余裕がないため
+  dedicated CI jobは60分とする。ただしremote green、concrete overlay、formal recipe、complete 16 MiB cap、
+  正式closure、G0/write authorityは主張しない
 - `pdf-text`のnarrow feasibility sliceは1--72 ASCII text-layer pages、4,096--149,504 bytes、PDF 1.4の
   non-stream 255-byte line上限、xref/trailer/page treeを独立validatorで検査する。renderer contractは
   2,075 bytes / `ab66e11d93e2aa7896bdffd28f1c1fec9f443a4ff3b48ba6dcc4d1c12bab69f6`、validatorは
@@ -1008,13 +1082,14 @@ v2で実装済み（planning only、non-authorizing）:
   solver割当前のconditional history-intent templateを実装。p01はそれぞれ4,519 bytes /
   `7aaa717778e3517ea91e3355f723e6840c95ec7ed8dd9101a4b19e074354bfb2`、14,657 bytes /
   `82f2c0ebcb6acaa28e04a2d69e93bf81882a5984b5618214ed1a1ef004134507`。typed revisionはW0→W1、
-  unordered fact pairはdistinct branchへ未割当である。
+  このrepresentative body内ではunordered fact pairをdistinct branchへ未割当である。full semantic sidecarは
+  source-owned A/B profilesを割り当てるが、concrete overlay join/placementはまだない。
   W3/W5 surface editはfact carry-forwardとし、P/X/Yだけをrevision fact候補にする。compiled planではない
 - 人物ごと90 positive + 15 negative、suite 2,100 intents、3 replay 6,300 observationsとなるquery-intentと
   semantic oracle候補を実装。p01は65,798 bytes /
   `a03e44be981facb65742e38f76874f6c17fde4d428befc365ddacf1f3a355d0b`、199,521 bytes /
   `97ebd590e39eaf9b7b8026895fb21df18af425f47e94b452734c1b60b7008954`。200 restore anchorsと
-  200 final-deleted documentsを分離するが、full membership totality、同topic/languageのrendered distractor
+  200 final-deleted documentsを分離するが、query/oracleからfull membershipへのtarget binding、同topic/languageのrendered distractor
   vocabulary attestation、compiled `(raw_hash, section)` relevanceはfalse
 - content、evidence、evaluationを別DAGへ注入し、query変更や同一bodyのreview receipt差替えがcorpus
   identityへ逆流しないinput-closure候補を実装した。ただし現upstream full bodyにはcontentと
@@ -1045,13 +1120,12 @@ content-only `semantic_payload` projectionだけをidentity namespaceへ入れ�
 
 - realism profileとvariant catalogの独立review receipt、routeの独立human approval receipt、concrete overlay membership、solved placement整数割当、
   logical-document採点/検索参加、8軸台帳
-- 71件のformal recipe slotを束縛する、chunk/complexity/bytesを分離したpre-solve
-  source-intent recipe、人物・family別byte p50/p95/tail、source-level semantic filename/content context
-- source-owned fact membershipの全203,000件projection、semantic content contexts/present fact sets、
-  61未実装variantのvalidator/rendererとsource-level feasibility、schema別content-only semantic projection、
-  正式なcorpus/evaluation closure
+- 71件のformal recipe slotを束縛する、chunk/complexity/bytesを分離したpre-solve source-intent recipe、
+  人物・family別byte p50/p95/tail、source-level content recipe/semantic filename
+- 61未実装variantのvalidator/rendererとsource-level feasibility、
+  schema別content-only `semantic_payload` projection、正式なcorpus/evaluation closure
 - reservationと46,840 overlay references/2,100 anchorsをsource-owned factsにjoinするconcrete overlay manifests、
-  distinct conflict branch membershipとsolved placement
+  distinct conflict branch profilesとのexact joinとsolved placement
 - generic sidecarをcorpus semantic namespaceへ束縛するcomplete objective instance/evaluator、探索上限の実solver校正
 - aggregate + source-intent refinementのcanonical solution、400 scopeへのfamily/variant/density/cohort同時routing、
   bounded canonical exact replayまたはcomplete proof、cycle-free final IDs
@@ -1077,11 +1151,11 @@ content-only `semantic_payload` projectionだけをidentity namespaceへ入れ�
 この提案が採用されるまでは、現行`SCHEMA_VERSION=1`、`FIXTURE_ID=kcs-persona-pc-v1`、
 canonical plan SHAを変更しない。non-authorizing generic solver-semantics sidecar、representative pre-solve
 vertical slice、203,000-key/73-shard layout、overlay reservation、全203,000 structural rows/73 shard bodies、
-40 origin + 40 profile manifests、71 inventory profile IDsまでは完了した。以後の実装順は、
-(1) semantic content contexts + source-owned fact membership、(2) concrete overlay manifests、
-(3) 71 formal recipeと61 renderer/validator implementations、(4) corpus semantic namespaceとquery/history target mappings、
-(5) joint solverと独立検証可能なsolution/proof、(6) allocation/rendering + streaming folder/file writer、
-(7) W1--W5 edits/history、(8) 3 fresh-storage replays、(9) actual
+40 origin + 40 profile manifests、71 inventory profile IDs、全203,000 sourceのcontent contexts +
+source-owned fact membershipまでは完了した。以後の実装順は、(1) concrete overlay manifests、
+(2) 71 formal recipeと61 renderer/validator implementations、(3) corpus semantic namespaceとquery/history target mappings、
+(4) joint solverと独立検証可能なsolution/proof、(5) allocation/rendering + streaming folder/file writer、
+(6) W1--W5 edits/history、(7) 3 fresh-storage replays、(8) actual
 chunk/history/query/capacity/latency evaluation、とする。solutionをcomplete overlay/source recipeより先行させず、
 完成rootや`.kcs`のcopyでfresh replayを代替しない。
 

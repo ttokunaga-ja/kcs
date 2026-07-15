@@ -1066,3 +1066,61 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     overlay manifests, formal recipe and renderer implementations, allocation/rendering, folder/file
     writing, edits/history, fresh-storage replays, and evaluation.  A complete structural row package must
     not be relabeled as a complete semantic source-intent inventory.
+124. Persona-PC v2 now adds a full source-owned W0 semantic-membership layer while preserving twenty
+    independent persona domains and every upstream structural, reservation, and typed-fact-graph pin.
+    This decision supersedes only earlier statements that full source-owned membership, semantic contexts,
+    or distinct source-owned conflict-branch profiles were absent; all historical artifact pins remain.
+    `kcs.persona.pc-source-semantic-membership-catalog/v2` binds forty-five fact profiles per persona,
+    nine hundred for the suite: one empty profile, thirty-two W0-current singleton profiles, four
+    graph-normal-W0 profiles, and eight conflict-branch profiles.  It also binds four persona-local topics
+    per persona, eighty total, and seventy-one semantic profiles in one-to-one correspondence with the
+    inventory profiles.  The origin, profile, and suite schemas are respectively
+    `kcs.persona.pc-source-semantic-membership-origin-manifest/v2`,
+    `kcs.persona.pc-source-semantic-membership-profile-manifest/v2`, and
+    `kcs.persona.pc-source-semantic-membership-suite/v2`.
+    The compact package persists seventy-three source-shard total-projection rows, 2,100 semantic-anchor
+    override rows, and 1,560 conflict-pair override rows, 3,733 rows in total.  Expanded providers resolve
+    exactly 203,000 content contexts and exactly 203,000 source-owned present-fact memberships.  The sparse
+    overrides cover 2,100 anchor references and 3,120 conflict endpoint references.  Missing, extra,
+    duplicate, foreign-persona, or mismatched structural keys fail closed; representative source/fact
+    artifacts remain compatibility slices rather than formal pilot or full bodies.
+    Pilot and full language/topic integer quotas are each computed with Hamilton allocation, and the
+    full-residual quota is exactly full minus pilot rather than an independently rounded allocation.
+    Exact/near/conflict endpoints, attachment host/member relations, and exact-overlap counterparts are
+    unioned into unsplittable language/topic components of at most seven sources.  Fixed conflict and
+    anchor topics are reserved first; remaining components use size, minimum ASCII intent key, integer
+    deficit, and ASCII label tie-breaks before singleton exact closure.  This proves only the semantic
+    coordinate quota, not the scope/bucket/cohort/quota joint allocation.
+    Every source is W0/current.  Only a near-revision derivative has semantic version two.  Full version
+    counts are 189,770 v1 and 13,230 v2; pilot counts are 18,977 and 1,323; full-residual counts are
+    170,793 and 11,907.  Conflict A/B endpoints both remain version one because their unordered branch
+    difference is not a history transition.
+    The dependency graph is additive and one-way: fact graph, realism, and inventory profile feed the
+    semantic catalog; the catalog, source origin, matching reservation origin, and matching persona fact
+    graph directly feed the semantic-membership origin; the catalog and origins feed pilot/full profiles;
+    and the catalog, origins, profiles, and source/reservation suites directly feed the suite.  A downstream
+    manifest may redundantly bind the same immutable upstream, but no backedge is introduced into source,
+    reservation, or fact-graph artifacts.  Expanded membership may contain an abstract pre-solve
+    `semantic_section_key`; query/oracle/review receipts, solution or final IDs, and observed raw, chunk, or
+    materialized-section IDs are excluded.  A future concrete overlay must bind reservation, source, and
+    semantic/fact manifests downstream.
+    This narrow completion does not flip the existing
+    `source_intent_inventory_complete=false` claim and does not prove concrete overlay membership, seventy-
+    one formal recipes, the sixty-one missing renderer/validator implementations, the allowlisted
+    `semantic_payload` namespace or input closures, joint allocation, rendering/writing/history/KCS, G0,
+    or the complete 16 MiB persona-package cap.  The dedicated
+    `persona-v2-source-semantic-membership-full` CI gate is defined, but no remote green result is claimed.
+    The next required order is concrete overlay manifests, formal recipes and the sixty-one missing
+    implementations, the corpus semantic namespace and query/history mappings, joint allocation,
+    rendering/writing, edits/history, fresh-storage replays, and evaluation.
+    The final catalog pin is 436,495 canonical bytes with SHA-256
+    `45e849cb2b94392820a21870c93e88e879f99d55a8b83c211663e7b3d1497d62`; the suite descriptor pin is
+    49,837 bytes with SHA-256 `62394dd2a3544f7d6c332652e6799b7a60353e8e3aa6a87f80e0ff21590a2e28`.
+    Compact origin bodies total 1,006,627 bytes, and the expanded context and fact-membership receipts bind
+    121,020,941 and 135,741,615 bytes respectively.  The conservative current-component maximum is p12 at
+    12,070,092 bytes with 4,707,124 bytes of planning headroom; this remains narrower than the formal
+    complete persona-package cap.  The dedicated local module passed all eleven tests in 1,785.462 seconds;
+    the outer measured maximum RSS was 220,839,936 bytes, and both the producer and public independent-
+    validator subprocesses passed their 384 MiB gates.  Because a thirty-minute CI limit has no variance
+    margin at that measured runtime, the dedicated job limit is sixty minutes and the public-validator
+    subprocess limit is twenty minutes.  These local results do not assert a remote green run.
