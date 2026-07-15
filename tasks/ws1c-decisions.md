@@ -1124,3 +1124,34 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     validator subprocesses passed their 384 MiB gates.  Because a thirty-minute CI limit has no variance
     margin at that measured runtime, the dedicated job limit is sixty minutes and the public-validator
     subprocess limit is twenty minutes.  These local results do not assert a remote green run.
+125. Persona-PC v2 now binds the complete rich pre-solve concrete-overlay membership package downstream of
+    the frozen overlay contract, reservation, structural source, and source-owned semantic/fact packages.
+    This decision supersedes only earlier statements that concrete overlay membership or its reservation/
+    source/semantic-fact join was absent; it does not repin or grant authority to any upstream artifact.
+    The package contains forty persona/origin manifests and forty pilot/full profile manifests.  Its 27,660
+    rich rows are exactly 19,870 content-relation rows, 5,690 attachment rows, and 2,100 semantic-anchor
+    rows.  The first two classes project exactly to all 25,560 draft reservation memberships and resolve
+    46,840 unique overlay source references.  The 2,100 anchors are disjoint from those references, yielding
+    48,940 unique joined sources.  Full relations are exactly 5,080 exact duplicates, 13,230 near revisions,
+    and 1,560 conflict copies; attachments have 2,800 hosts and 1,390 exact-overlap rows.
+    Each full profile reuses the exact matching pilot origin and shard bytes/SHA before adding the residual
+    origin, and shard indices restart at origin-local zero.  The suite descriptor is 51,133 canonical bytes,
+    SHA-256 `4763e06e9408109ad90c5e07a1bb16cd430fd65e6c5730d0015dcbea60cdf41a`.
+    The current-component ledger conservatively adds the overlay contract, unique concrete origin bodies,
+    and both profile manifests to the semantic base without double-charging reservation/catalog components,
+    the draft projection receipt, or the global suite descriptor.  Its maximum is p12 at 13,275,672 bytes,
+    leaving 3,501,544 bytes below 16 MiB; this is not a proof of the future complete persona-package cap.
+    `placement_class_requirement` remains a solver requirement rather than a scope assignment.  Every
+    origin, profile, and suite authority flag is exact false.  The package does not prove the seventy-one
+    formal recipes or sixty-one missing renderer/validator implementations; corpus semantic namespace and
+    query/history target mappings; joint scope allocation, solution, or proof; actual payload, raw identity,
+    chunks, or search observation; rendering, filesystem writes, history, or KCS execution; the complete
+    persona cap; formal capacity; or G0 freeze.
+    The measured producer shape test took 172.190 seconds with maximum RSS 237,158,400 bytes, and the measured
+    full build took 155.45 seconds with maximum RSS 192,757,760 bytes.  Full independent acceptance passed in
+    354.770 seconds with outer maximum RSS 271,368,192 bytes and passed the 384 MiB RSS gate.  The dedicated
+    `persona-v2-concrete-overlay-membership-full` CI job therefore has a ninety-minute timeout; this decision
+    does not claim a remote green result.  The remaining order is formal recipes and renderer/validator
+    implementations, corpus semantic namespace and query/history mappings, joint allocation and independently
+    verifiable solution/proof, allocation/rendering and the streaming folder/file writer, edits/history,
+    fresh-storage replays, and actual chunk/history/query/capacity/latency evaluation.
