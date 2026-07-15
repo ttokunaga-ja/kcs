@@ -41,8 +41,12 @@ storageを分離し、19,801 canonical bytes、SHA-256
 `d9c59e922a2619b1748194241ffdf47ace3eb034f136b0d04154163bda3ccea2`である。そのexact move rowをdirect inputに
 持つ`kcs.persona.pc-lifecycle-demand/v2`は20 x 105 anonymous capabilitiesとsymbolic W1--W5 demandを
 束縛し、463,571 canonical bytes、SHA-256
-`32e0aaf88632803d41266152b81e2cc2917111d69f6dfb03be0621920c8a0080`である。ただしsource matching、W0 actual
-qIM、compiled history plan、observed receiptsはfalseである。別laneの
+`32e0aaf88632803d41266152b81e2cc2917111d69f6dfb03be0621920c8a0080`である。ただしsource matching、W0/W1 actual
+qIM、compiled history plan、observed receiptsはfalseである。これをsource-matchable authorityとして使わず、
+下流の`kcs.persona.pc-lifecycle-coverage-catalog/v1`が人物ごとのcorrected coverage domain、cross-format
+companion、purge-only witness、move receipt/algebraをquery非依存で束縛する。bodyは1,385,596 canonical bytes、
+SHA-256 `ea36aa70e00dadda3cc35e442c21507ebb89c622de6a79f1bb9c79d83a442236`で、source matching、
+final ID、mutation、KCS、G0 authorityはすべてfalseである。別laneの
 `kcs.persona.pc-recursive-robustness-lane-catalog/v1`は76,099 canonical bytes、SHA-256
 `49d6fa26cafa902bfca4a102c5e301c27683fd6761bc456a3930cd059f67a4f2`で、actual host case modeと
 materializationは未束縛である。
@@ -53,7 +57,7 @@ source ID namespaceとして不適格である。
 `g0_contract_frozen=false`、G0 root未実装、非authorizing。
 現行`kcs-persona-pc-v1`、そのartifact、golden hash、writer、history planを変更しない。
 
-Date: 2026-07-15
+Date: 2026-07-16
 
 ## 1. 目的とversion境界
 
@@ -97,8 +101,9 @@ performanceは呼び出さない。
 
 正式な実行順は、plan freeze後、**初回を含む合計3つ**のfresh storageそれぞれで、20人を1人ずつW0
 folder/file生成 -> 全scope W0 offline index/attestation -> W1-W5 edit/lifecycle mutationを実行する。
-完成rootはcopyせず、各replayを同じplan/eventからW0より再生成する。3 replayすべての完了後に、
-構造・比率・chunk/history・query・capacityを検証する。4回目のreplayはこの契約に含めない。
+完成rootはcopyせず、各replayを同じplan/eventからW0より再生成する。W0とW1--W5の各checkpointで
+安全性・plan逸脱・前段receiptをinline検証し、3 replayすべての完了後には構造・比率・chunk/history・
+query・capacityのcross-replay評価を行う。4回目のreplayはこの契約に含めない。
 
 W0とW5 finalではpersona x replayごとにobserved structural/materialization receiptを必須とする。
 このreceiptはfamily/variant/gate-role件数、scope別file数、file/directory depth histogram、
@@ -117,7 +122,10 @@ suite poolingによる相殺は禁止し、各20人 x 3 replayが個別にplan�
 | `byte-stress-v1` | 1 W0-only | 含めない | なし | capacity/I/O専用 |
 
 robustness entryとbyte-stress entryをformal family ratio、scope count、chunk count、Recall queryへ
-混ぜない。各laneは別root、別manifest、別receiptを持つ。
+混ぜない。`pXX-role/`は人物ごとの共通device rootであり、各laneはその直下の非交差child root
+`home/`、`ambient-home/`、`byte-stress/`として別manifest・別receiptを持つ。formal 3 replayでは`home/`を
+常にfresh buildし、robustnessとbyte-stressは各laneのdesignated replayだけで作る。lane間のhard link、clone、
+symlink、shared inode、完成payload copyは禁止する。
 formalのネストは`home/`からleaf scopeまでD2--D6とし、managed fileはleaf直下だけに置く。
 recursive robustnessはD6--D8とし、中間directoryのfile、partial/cache/conflict/case/Unicodeを含める。
 両者は他方の代用にならず、formalは人物別file/directory depth histogram、unique prefix数、
@@ -613,23 +621,29 @@ disjointで、path alias、DB row、materialization数を重複加算しない�
 別metricとして、persona-global distinct `chunk_id`はcontent重複診断、distinct `(scope,chunk_id,path)`は
 all-history alias/binding負荷、`(scope,object_kind,object_hash)`とregular-file/inode countersはphysical storageへ使う。
 いずれもcontract C/Hへ混ぜない。cross-scope move 5件はpilotの`incidental_searchable` sourceへ割り当てる。
-G0では人物ごとexact 5 source refs、source-instance matching、同一chunk config/profile、各source
-`1..70`・合計`5..350`の許容域、宛先scopeに同endpoint/CASがないこと、元scope live multiplicity 1という
-operation ruleだけを固定する。solution後の`solution-compiled planned history plan`はexact source/scope/path/ID、
+G0では人物ごとexact 4 stable move source refsと1 W1-edited move source ref、source-instance matching、同一chunk
+config/profile、各source `1..70`・合計`5..350`の許容域、宛先scopeに同endpoint/CASがないこと、元scope live
+multiplicity 1というoperation ruleだけを固定する。I-edit sourceはW1 typed revisionを必須とする。solution後の
+`solution-compiled planned history plan`はexact source/scope/path/ID、
 contract C/H=`(0,0)`、`qIM_patch_required=true`を持つが、actual `qIM`やそれに依存するincidental/history/physical
 literal deltaを持たない。
-W0 offline index receiptで5 sourceそれぞれのpositive actual endpoint chunksを測り、人物別`qIM`をその合計
-（各1--70、合計5--350）としてattestする。そのreceipt SHAを入力とする
-`post-W0 compiled move-delta patch`のresolution stageは
-`post-W0-attestation-before-W2-event-compilation`である。この既存stage名の`event-compilation`は
+W0 offline index receiptでstable 4 source、W1 edit/index receiptでI-edit 1 sourceのpositive current endpoint
+chunksを測り、人物別`qIM`をその合計（各1--70、合計5--350）としてattestする。I-editのW1 receiptは
+`old_history_endpoint_count=qIE`と`current_move_endpoint_count=qIE`を別fieldで持ち、`1 <= qIE <= 70`、
+旧/new endpoint集合のdisjoint、typed revision/source/scope/config identityを認証する。I-editはW1 incidental
+historyへ`+qIE`を加え、qIMにはcurrent countだけを1回加える。そのreceipt bundle SHAを入力とする
+`pre-W2 compiled move-delta patch`のresolution stageは
+`post-W1-attestation-before-W2-event-compilation`である。このstage名の`event-compilation`は
 solution-compiled planned history planを再生成する意味ではなく、W2実行前のruntime move-delta finalizationだけを
 指す。これだけがincidental endpoint C/H=`(0,+qIM)`、
 persona-global chunk ID=`0`、
 history path binding=`+qIM`およびphysical projectionをliteral化する。receipt/plan/config/source identityの不一致、
 missing、0、範囲外、重複patchはfail closedとし、patch binding前にW2 cross-scope moveを実行しない。
-最も厳しいW5 pre-purgeでもpilotはincidental current upper 1,020 + qIM 350 = 1,370 <
-current+history cap 2,040、fullは10,200 + 350 = 10,550 < 20,400である。ただしこれは上限式の
-feasibilityであり、move anchorのactual chunks > 0とcap内収束はW0 index後にattestする。
+W1以降のincidental total projectionはbase current/history upperに`qIE`、W2以降はさらに`qIM`を加える。
+最も厳しいW5 pre-purgeでもpilotはincidental current upper 1,020 + qIM 350 + qIE 70 = 1,440 <
+current+history cap 2,040、fullは10,200 + 350 + 70 = 10,620 < 20,400である。ただしこれは上限式の
+feasibilityであり、stable move anchorはW0、I-edit旧/newはW1でactual chunks > 0、集合disjoint、cap内収束を
+attestする。
 
 この会計境界のmachine-readable正本候補は`kcs.persona.pc-chunk-accounting/v1`である。
 `chunk_id == chunk_hash`、4 metric、rename/move/duplicateのexact operation deltaと成立precondition、全6 physical
@@ -639,7 +653,7 @@ projections、checkpoint/cap、performance/Recall分母を独立再構築する�
 U35/I5、P'/X'、restore net-zero、disjoint final states、`qIM <= uIM = 350`、`nIM = 5`を固定する。
 bodyは463,571 canonical bytes、SHA-256
 `32e0aaf88632803d41266152b81e2cc2917111d69f6dfb03be0621920c8a0080`である。これはpre-solve demandで、
-source-instance matching、solution-compiled planned history plan、W0 qIM observation/patch、actual physical/C/H
+source-instance matching、solution-compiled planned history plan、W0/W1 qIM observation/patch、actual physical/C/H
 receipt、G0はfalseである。
 
 pilot/fullのwhole-source contributor cohort比は`P/X/Y/N/U = 4/10/6/4/76`である。quota chunk合計を
@@ -688,25 +702,73 @@ purge/restore anchorを束縛する。quota、concrete scope/path、final source
 所有とし、pre-solve rowはsymbolic ruleと許容domainだけを持つ。未解決値をliteral `-1`/nullで偽装せず、
 actual `qIM`やsolution identityを含めない。
 solution/proofとfinal source plan後の`solution-compiled planned history plan`だけがexact before/after
-scope/path、planned ID、contract deltaを持つ。cross-scope moveのqIM依存deltaは上記post-W0 patch slotのままとする。
+scope/path、planned ID、contract deltaを持つ。cross-scope moveのqIM依存deltaは上記pre-W2 patch slotのままとする。
 件数と、patch slotを含むcompiled delta ruleは人物別checkpointへexactに集計でき、
 M3-1/M3-2/M3-3のformat x scenario coverageに
 投影できなければならない。現在の人物別「主な操作」は意図であり、このexact inventoryの
 代替にはならない。
 solution後のcompiled planned history planは全eventをstate machineとして適用し、各eventのcurrent/history
 chunk deltaから、W0 actual値が不要なcontract C/Hについてfull/pilot全7 checkpointを独立literalとexact一致させる。
-qIM依存metricはpost-W0 patch後に同じ検証を再実行する。W4 delete -> W5 restore集合と
+qIM依存metricはpre-W2 patch後に同じ検証を再実行する。W4 delete -> W5 restore集合と
 W5 final-deleted集合はdisjoint、restore anchorは人物ごとexact 10 logical documents/queryと1対1にする。
 同内容の別current copyで状態遷移を代用してはならない。
 
-2,100 semantic anchor slotsはquery IDではなくcontributor capacityとしてpilot originへ固定する。各personaの
-105 contributor slotsのうち、`U=35`（M3-1 current 30、same-scope rename 5）、`Y=30`
-（old wording 10、locale-history 10、archive 10）、`X=20`（final-deleted 10、restored 10）、
-`P=15`（purged-negative 15）、`N=0`の100件を匿名capabilityへ使い、残る5件を
-`unused-reserved-capacity`とする。cross-scope move 5件は別の`I=5 incidental_searchable` capabilityとして
-pilotのunreserved incidental sourcesへ割り当てる。fullは該当pilot rowsをbyte-identicalに再利用する。
-query/oracleとの対応はevaluation-only target-resolution artifactが所有し、ordinal一致から推論しない。
-この要件によりpilotのY cohort source lowerは20ではなく30以上でなければならない。
+immutable `kcs.persona.pc-lifecycle-demand/v2`の`U35/Y30/I5`はanonymous demand snapshotとして維持するが、
+source matchingの正本にはしない。既存105 semantic anchors/personaは32 singleton fact profilesを循環し、W1
+prior factを持つprofile 4種へexact 12件/personaしか当たらないため、P/X/YのW1 edit対象を満たせない。また
+replacement factを期待するqueryが人物ごとexact 4件だけU/Iへ誤分類され、cross-format rendition relationと
+purge-only unique witness factも欠ける。この局所negative claimは下流
+`kcs.persona.pc-lifecycle-coverage-catalog/v1`の実装でcoverage classificationについてsupersedeした。
+immutable demand自体は歴史的snapshotとして変更せず、source matching、fact/rendition materialization、
+effective-membership reconciliationとblocker-resolution ledgerを引き続きG0 blockerとする。
+
+query-independent coverage catalogは人物ごと105 primary logical documentsを次へexact分類する。
+
+| capability | documents | cohort |
+| --- | ---: | --- |
+| stable current M3-1 | 27 | U |
+| replacement-current M3-1 | 3 | Y |
+| same-scope rename | 5 | U |
+| stable cross-scope move | 4 | I |
+| W1-edited cross-scope move | 1 | I-edit |
+| old wording / locale history / archive history | 10 / 10 / 10 | Y |
+| final deleted / restored | 10 / 10 | X |
+| purged negative | 15 | P |
+
+primary totalsは`P15/X20/Y33/U32/I5/N0 = 105`である。100 contributor primaryはpilotの105 semantic anchor
+slotsのうち100件を使い、5 slotsを`unused-reserved-capacity`のまま保つ。I5はpilotのunreserved
+incidental-searchable sourcesへ割り当てる。さらにcross-format 10 documents/personaへ別physical familyの
+rendition companionを1件ずつ加え、exact 115 W0 source-ref requirements/persona、suite 2,300 requirement refsとする。
+replacement-current cross-format groupのcompanion 1件はY、残り9件はUである。cross-format groupは2 distinct
+families、共通logical-document/rendition key・topic・language・fact/revision chain、別variant/raw/payloadを持ち、
+exact-duplicate relationではない。source matching後の評価bankはW1-edited contributor 69 refs/personaにI-edit
+1件を加えexact 70 source edits/personaとなる。
+
+このquery-independent catalogは2,100 primary rows、200 rendition companion requirements、300 unique purge
+witness requirements、20 move receipt policiesを束縛する。canonical bodyは1,385,596 bytes、SHA-256
+`ea36aa70e00dadda3cc35e442c21507ebb89c622de6a79f1bb9c79d83a442236`である。producerと独立validatorを
+実装し、13 focused tests、2 hashseed、dependency/tamper/type/detachment/TOCTOU検査を通過した。これは
+source-instanceを選択せず、query/oracle、solved scope/path/quota、final ID、実測値を含まない。
+
+選択anchorのW0 membershipはquery-independent lifecycle fact overlayで同topicの`graph-normal-W0`集合へ拡張し、
+P/X/Yがprior factを持てるようにする。purged-negative 15件/personaはsuite 300のunique witness factsを持ち、
+P'、他source、rendition、distractor、paddingへ継承しない。query/oracleとの対応はcoverage catalogを共通上流とする
+evaluation-only target-resolution artifactが所有し、query body/hashをcorpus namespaceへ入れず、ordinal一致からも
+推論しない。fullはmatching pilot source/event/template bytesを再利用する。
+
+immutable source-semantic membershipとlifecycle overlayを並列ownerにしない。後続の
+`kcs.persona.pc-lifecycle-effective-membership-reconciliation/v1`が、authenticated base membership、source-matched
+coverage、coverage catalogのtyped purge-witness rows、rendition relationを入力に、全203,000 sourceのeffective W0
+`present_fact_ids`/semantic-section membershipをexactly once合成する。未選択sourceはbaseをbyte-semanticに継承し、
+primary anchorは同topic/graphの`graph-normal-W0`集合へ置換、P anchorだけunique witnessをunionし、rendition
+companionはprimaryと同じeffective fact/revision chainを持つ。base singleton rowとeffective rowをunionして二重
+ownerにしない。
+
+composerは各witnessがmatching P dependency groupだけに出現し、P'、全other source/rendition/distractor/paddingへ
+0件であることをglobal inverted projectionで証明する。corpus semantic namespaceへ入れるsource semantic成分は
+membershipを除いたbase content-context projectionと、このeffective membership projectionだけである。base full
+membership body、reconciliation/derivation receiptはcorpus input closureへ残す。source matching前はcomposerと
+namespace eligibilityをfalseに保つ。
 
 pilot/full history関係はsource subsetから推論せず、event/template key、dependency、cohort、fact transition、
 compiled planned event bytesのbyte-identical reuseを独立claimとして検証する。fullでpilot eventを変更・再採番
@@ -748,6 +810,28 @@ overlay instance、fact membership、final source allocation、production MIME g
 すべてのauthority flagはfalseである。overlay contract候補単体もschemaを記述するだけでinstance/placementを
 束縛せず、G0 rootの入力としては未採用である。instance membershipは後述のnon-authorizing downstream package
 だけが束縛する。
+
+下流のsource-instance parameter assignmentが所有してよいのは、pre-solveでcontent bytesを決める
+`parameter_cell_key`、`recipe_profile_id`、renderer parameters、`target_complexity`、`target_bytes`、
+`size_lane`だけである。`scope`、`bucket`、`cohort`、chunk `quota`、cell-local ordinal、final source/
+materialization IDはjoint solver所有のため、このartifactへ含めない。assignment rowはexact
+`(intent_key, parameter_cell_key)`とし、parameter-cell catalogはexplicit `{variant_id}/{bin_id}` keyで
+variant、bin、recipe、renderer parameters、complexity、bytes、laneを解決する。position/order joinや
+implicit ordinal aliasを禁止する。
+
+canonical ownerは、persona/origin/variant/cellごとのcount、exact-pair unit/singleton/EML-fixed count、
+selection policyを持つcompact origin bodyとする。203,000 expanded rowsは既存73 source shardのrange/orderへ
+1対1投影するdeterministic verification viewで、origin manifestは各viewのrow count、first/last key、canonical
+bytes、SHA-256をreceiptとして束縛する。expanded body自体はpersisted persona-package componentではなく、
+validatorがcompact ownerとauthenticated upstreamからstreaming再構築する。downstreamがexpanded bodyを保存する
+場合は、その保存先packageで別途全bytesを課金する。pilot profileはpilot origin receipt/body identityを再利用し、
+fullはpilot + full-residualからexactに閉じる。
+
+EML hostはconcrete overlay membershipの`host_member_count`に対応する`attachment-1..5` cell、非hostは
+`attachment-0`へ固定する。非EML exact-duplicate pairは同一variant・同一parameter cellへ置き、cell別pair
+capacity `floor(cell_count / 2)`に対するHamilton配分、canonical cell order tie-break、残余singletonの
+`intent_key` ASCII順充填で一意にする。assignmentはquery/oracle、lifecycle demand、scope solution、final IDを
+入力に取らない。
 
 source-owned semantic-membership packageはstructural rowの10 fieldsを変更せず、別sidecarで
 `intent_key`、`content_context_id`、`present_fact_set_key`を全203,000 structural keysへexactly once解決する。
@@ -824,7 +908,13 @@ intents:
   project_or_case_id / entity_ids / fact_ids / period / status / version
   contributor_eligibility / allowed_bucket_ids / allowed_history_cohort_ids
   required_event_profile_id / expected_incidental_chunks_upper
-  target_complexity / target_bytes / duplicate_or_conflict_group / payload_seed
+parameter_cells:
+  parameter_cell_key / variant_id / bin_id / recipe_profile_id / renderer_parameters
+  target_complexity / target_bytes / size_lane
+source_parameter_assignments:
+  intent_key / parameter_cell_key
+payload_relations:
+  duplicate_or_conflict_group / equivalence_key / source_or_shared_payload_seed_rule
 overlay_memberships:
   relation_kind / cluster_key / intent_keys / search_participation
 ```
@@ -948,6 +1038,21 @@ IDs、rendered corpus bytesを変更してはならない。route bodyそのも�
 schema別にallowlistした`semantic_payload` projectionのbytes/SHAだけを束縛し、corpus input closureがfull body
 とmetadataを束縛する。projection未実装の現candidate full bodyをsemantic namespaceとして採用してはならず、
 このため現時点のsemantic namespace/rootは未発行である。
+
+production projectionはfull artifactを丸ごとhashするaliasではなく、schema別のcontent-only bodyとする。
+projection自身にfull upstream SHA、authority/completion/blocker/review status、runtime receipt、query/oracle/
+answer/distractor、solution/scope/final ID、observed raw/chunk/rank/latencyを含めない。full body pin、projector
+ID/version、projection pin、独立validator resultの対応は別`projection-derivation-receipt`が束縛し、receiptは
+corpus input closureへ入れるがsemantic namespaceへ入れない。
+
+最小projection inventoryはtopology path/load、realism/locale/security、route scores、use-case corpus half
+（query strataを除く）、71 recipe/content/filename dictionary、fact graph、base source content-contextとeffective
+source-membership reconciliation、concrete overlay relation bodies、source-instance parameter assignment、query-independent lifecycle coverage/fact/
+rendition rules、payload equivalence rulesである。namespace rootはこれらprojection pinだけをexactly once束縛し、
+missing、extra、duplicate、unused、cycle、foreign-persona、query/evidence schemaを拒否する。
+`semantic_payload_projection_bound=true`、`query_semantics_absence_proved=true`、
+`future_source_id_namespace_eligible=true`はこの完全inventoryと独立derivation validation後だけtrueにできるが、
+solver/G0/write authorityは引き続きfalseである。
 corpus rendererのinput projection/import graphにはquery/oracle/answer/distractor SHAやevaluation root resolverを
 渡さず、query artifactが欠落・valid差替えでも同じcorpus bytesを生成できるcapability境界を要求する。
 
@@ -971,7 +1076,8 @@ solution/proof -> final planned source plan -> solution-compiled planned history
 corpus semantic namespace + positive independent review receipts + blocker resolution ledger -> corpus input closure
 corpus input closure + query intent + semantic oracle -> evaluation input closure
 planned ledger + corpus/evaluation closure + blocker resolution ledger -> G0 suite descriptor
-G0 suite descriptor -> W0 render/index receipt -> post-W0 compiled move-delta patch -> W2+ execution ledger
+G0 suite descriptor -> W0 render/index receipt -> W1 edit/index receipt
+  -> pre-W2 compiled move-delta patch -> W2+ execution ledger
 render/index/lifecycle receipts -> compiled observed relevance -> observed ledger/evaluation terminal
 ```
 
@@ -1020,7 +1126,10 @@ JSONL readerはpre-read cap、exact declared length/SHA、UTF-8/NFC/canonicality
   full-residual shardだけを追加する
 - pre-solve corpus-input persona package: 合計16 MiB。各人物のunique source shard bodies、source
   origin/profile manifests、semantic compact/manifest components、concrete overlay components、per-person
-  formal recipe projection/source-instance assignment、必須frame/headerをexactに一度ずつ課金する。参照する共有suite
+  formal recipe projection、source-instance parameter-cell projection、compact assignment owner、origin/profile
+  manifests、expanded-view receipts、必須frame/headerをexactに一度ずつ課金する。expanded assignment bodyは
+  deterministic non-persisted verification viewなのでこの分母へbodyとして重複課金せず、保存する場合は保存先の
+  別packageへ全bytesを課金する。参照する共有suite
   catalog bodyは人物package内でunique SHAごとにexactly onceだけ課金し、component参照ごとに重複課金しない。
   solution/proof、final W0 source plan、compiled history plan、query/oracle
   bundle、global suite descriptorはこの分母から除外する。source-intent rowは最大768 bytes
@@ -1032,7 +1141,7 @@ JSONL readerはpre-read cap、exact declared length/SHA、UTF-8/NFC/canonicality
 - history intent/event package: source-matched pre-solve lifecycle intent/event inventory、solution-compiled planned
   history plan、人物manifest、必須frame/headerを合わせたcombined 16 MiB/person。event-created sources最大
   4,096/person、最大4,096 rows/4 MiBのshard、LF込みrow最大1,024 bytes、人物合計event/template rows上限
-  16,384とする。W0 qIM receipt/post-W0 move-delta patch、observed lifecycle receiptは含めない
+  16,384とする。W0/W1 qIM receipt/pre-W2 move-delta patch、observed lifecycle receiptは含めない
 - fact/oracle/query bundle: 4 MiB/person。fact graph 1 MiB、semantic oracle 1.5 MiB、query intent 1 MiB、
   manifest 128 KiBをsubcapとし、positive 90、negative 15
 - suite descriptor/compact summaries: 4 MiB
@@ -1251,7 +1360,7 @@ query_instances_rendered         = false
 actual_chunks_attested           = false
 solution_compiled_planned_history_plan_bound = false
 runtime_history_move_delta_finalized = false
-post_w0_move_delta_patch_bound    = false
+pre_w2_move_delta_patch_bound     = false
 pre_solve_persona_input_package_cap_proved = false
 formal_capacity_gate_satisfied   = false
 authorizes_physical_write        = false
@@ -1278,7 +1387,8 @@ formal flagを変更してはならない。
 5. P/X/Y/N/U history操作順、scope coverage、checkpoint exact projection。pre-solve lifecycle demandは実装済みだが、
    solver前にexact source-intentへ結合した`source-matched lifecycle intent/event inventory`、solution/proofと
    final source plan後にexact scope/path/IDへcompileしたplanned history planが必要である。actual qIMはG0へ
-   埋め込まずpost-W0 patch slotとし、W2実行前にW0 receiptからliteral化する。現W3/W5
+   埋め込まずpre-W2 patch slotとし、W2実行前にstable 4件のW0 receiptとI-edit 1件のW1 receiptから
+   literal化する。現W3/W5
    surface editのeventは`changed_fact_ids=[]`、source versionの`present_fact_ids`は直前の可視集合を
    exactに引き継ぐことを要求する。
    semantic変更にする場合は追加typed revision chainと非空changed membershipを要求する
@@ -1303,8 +1413,10 @@ formal flagを変更してはならない。
 次の実装順は、(1) 203,000 source-instance parameter、source-matched pre-solve lifecycle intent/event inventory、
 content-only projection、corpus semantic/query/history closureとblocker resolution ledger、(2) joint
 allocation/solution/proof、(3) final source plan、solution-compiled planned history plan、独立planning cap/ledgerと
-G0 descriptor、(4) allocation/renderingとfolder/file write、(5) W0 offline index/attestation、
-(6) post-W0 qIM move-delta patch、(7) W1-W5 edits/history、(8) fresh-storage replays、(9) evaluationとする。
+G0 descriptor、とする。G0後は各fresh storageで(4) allocation/renderingとfolder/file write、(5) W0 offline
+index/attestation、(6) W1 edit/indexとI-edit attestation、(7) pre-W2 qIM move-delta patch、(8) W2-W5
+edits/history、(9) observed receiptsを実行する。このpipeline全体を初回を含む合計3 replay行い、最後に
+(10) cross-replay evaluationを行う。
 concrete pre-solve membershipとvariant-level recipe policyの完成からscope placement、source-instance recipe、
 G0、render/writeを推論しない。
 
