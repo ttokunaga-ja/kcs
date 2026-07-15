@@ -1466,3 +1466,53 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     index/attestation, W1 edit/index and edited-move attestation, pre-W2 move-delta patch, W2--W5 history, and inline
     receipts.  That entire pipeline runs on exactly three fresh storages including the first run, followed by one
     cross-replay evaluation; it is not one initial run plus three additional replays.
+143. Persona-PC v2 source-instance parameter assignment is implemented as
+    `kcs.persona.pc-source-instance-parameter-assignment-suite/v2`, a 72,535-byte canonical suite with SHA-256
+    `ed95d7875cb961d4fa054f6fa8a8a281cf6906724bc5f2524d9d046b2c3e8f1a`.  It binds 363 shared explicit
+    `{variant_id}/{bin_id}` cells, 2,643 positive persona-cell projections, forty origin manifests containing
+    4,759 compact owner rows, forty pilot/full profiles, and seventy-three authenticated non-persisted expanded-view
+    receipts to all 203,000 source intents.  Pilot 20,300 and full-residual 182,700 are allocated independently;
+    full is their exact owner/receipt union and never reruns Hamilton or singleton filling.  The 5,080 non-EML exact
+    duplicate pairs share one cell, while 9,153 EML sources are fixed to `attachment-0..5` from 2,800 hosts and
+    5,690 memberships.  The diagnostic expanded views total 17,527,680 bytes but are not persisted or charged as
+    bodies; any downstream persistence must charge all bytes separately.
+
+    The logical per-person recipe projection is normalized as shared cell recipe/renderer fields plus persona
+    active-cell foreign keys/counts, and compact owner rows are coalesced exactly once into the origin-manifest
+    canonical body.  No separate recipe or owner body is persisted or double-charged.  The p12 ledger is exactly
+    13,275,672 upstream concrete components + 2,053,316 direct shared input bodies + 106,162 shared cell catalog +
+    19,130 persona projection + 65,847 origin manifests + 53,733 profile manifests = 15,573,860 bytes, leaving
+    1,203,356 nominal bytes before the sixteen-MiB cap.  Frame/header bytes are not implemented, so this remains a
+    partial current-component ledger and `formal_complete_persona_package_cap_proved=false`.
+
+    The cell catalog/projection depend only on formal recipe, aggregate distribution, and effective EML inputs;
+    source/concrete bodies enter only the assignment layer.  The producer-independent validator imports no assignment-
+    producer module or code, reconstructs Hamilton/ASCII/EML assignments and all ledgers from six authenticated
+    upstream pins, replays each body provider only after its first result passes the authenticated descriptor cap,
+    and postflight re-authenticates target and upstream metadata.  The final focused gate passes fourteen tests in
+    779.006 seconds (779.25 seconds wall) with outer maximum RSS 361,381,888 bytes; its two hash-seed subprocesses
+    include producer-plus-independent and producer-plus-expanded-view cold paths, each capped at fifteen minutes and
+    512 MiB.  Scope, bucket, cohort,
+    chunk quota, cell-local ordinal, semantic payload, final identifiers, render/write/history/KCS execution,
+    capacity completion, and G0 authority remain absent and false.
+144. The frozen recursive-robustness catalog's `robustness-root/devices/{persona_id}/ambient-home` and
+    `formal-root/devices/{persona_id}/home` strings are logical lane-plan coordinates, not physical path authority.
+    Before any writer may run, a downstream persona-device lane compositor must join the exact role slug from
+    `persona_v2_contract.py` and map all twenty personas to
+    `<replay>/devices/{persona_id}-{role_slug}/{home|ambient-home|byte-stress}`.  It must reject a missing or mismatched
+    role slug, separate physical formal/robustness device roots, lane overlap, and any shared entry/inode/payload
+    materialization.
+    The historical catalog pin is not rewritten.  Until the compositor and filesystem readback receipt exist,
+    `one physical persona-device container` remains a required plan shape rather than a materialization claim.
+    Deep D6--D8 intermediate-file trees deliberately live in `ambient-home` inside that same persona device but stay
+    outside the formal 120,000-chunk/format/Recall denominator; changing that denominator requires a new recursive
+    ingestion contract rather than silently counting ambient fixtures.
+145. A primary use case's `required_families` join proves a positive physical W0 marginal, not searchability.
+    Source matching must classify every required family exactly once as `searchable-positive`,
+    `raw-only-structural-negative`, or `pending-conversion-negative`, select at least one physical witness per family,
+    select at least one query-answer anchor per searchable-positive family, and give every primary use case at least
+    one searchable-positive family.  Under the current offline contract, scan PDF, DOCX/XLSX/PPTX, image, media, and
+    domain binary are not silently promoted to searchable; a text-layer PDF or local text contributor carries the
+    positive witness.  Promoting a converted rendition requires a separate renderer/ingestion/provenance contract and
+    observed receipt.  The existing twenty-row catalog remains a non-authorizing marginal join until this bridge is
+    implemented.
