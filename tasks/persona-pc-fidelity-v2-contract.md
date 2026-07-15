@@ -4,7 +4,8 @@ Status: envelope、exact topology、joint必要条件problem、generic aggregate
 20人別realism profile/overlay marginal、71 variant identity/566 persona marginal catalog、541-row route候補、
 20人x4 typed fact-graph leaf、negative route-review receipt、20人各1件のrepresentative
 source-intent/fact-membership/history-intent、2,100 query intents/semantic oracle、非authorizing input-closure候補まで実装済み。
-exact 203,000-key/73-shard source-inventory layout、overlay contract、ID-free text/PDF renderer/validator、
+exact 203,000-key/73-shard source-inventory layout、overlay contract、ID-free contributor text/PDF renderer/validator、
+別下流の11 incidental-format renderer/standalone validator、
 source-profile catalogも候補実装があるがnon-authoritativeである。さらに下流のstructural
 source packageは203,000 reference-only rows、73 canonical JSONL shard bodies、40 origin manifests、
 40 pilot/full profile manifests、71 inventory-only profile IDsを束縛する。さらにsource-owned W0
@@ -18,7 +19,9 @@ scope placementが未完成である。unordered W0-current fact pairとsource-o
 reservation/sourceとのpre-solve joinは実装済みだが、raw rendition、observed search participation、scope assignmentがないため、
 conflict overlayの実ファイル・検索上のrealizabilityは未証明である。
 必要条件は全20人で通過し、structural row bodiesとnarrow semantic/fact projectionは完成したが、
-formal recipeは71件全てunbound、61未対応variant implementation、overlay scope placement、
+formal recipeは71件全てunboundである。凍結済みsource-profile catalogの10 local-ready / 61 missingは維持し、
+後続のincidental-text pairで11件を局所実装したため、現在の下流実装可用性は21 / 71、未対応はraw-only 50 / 71である。
+overlay scope placement、
 独立approval receipt、schema別content-only semantic projection、
 実行可能solver、solution、proofは含まない。現input-closureはfull body DAGの互換性候補に限り、
 source ID namespaceとして不適格である。
@@ -590,9 +593,11 @@ refinementが新たに割り当てるのはscope、bucket、cohort、quota、cel
 
 現structural packageの`source_profile_id`は71 variantすべてに一意なforeign keyを付与するが、
 inventory-only identityでありformal recipe profileではない。formal source recipeは71件全て
-`reserved-unbound`/`profile_id=not-bound`。既存source-profile catalogとID-free text/PDF renderer/validatorは
-byte/complexityの局所contractだけを検査し、10 profilesが`ready-local-only-formal-recipe-unbound`、
-61 profilesが`blocked-implementation-missing`である。どちらもformal recipe parameter、semantic content、
+`reserved-unbound`/`profile_id=not-bound`。凍結済みsource-profile catalogとID-free text/PDF renderer/validatorは
+byte/complexityの局所contractだけを検査し、10 profilesを`ready-local-only-formal-recipe-unbound`、
+61 profilesを`blocked-implementation-missing`として記録する。後続のID-free incidental-text rendererと独立validatorは
+その61件中11件をcatalog非改変で局所実装するため、現在利用可能なformat implementationは21件、残る未実装は
+raw-only 50件である。いずれもformal recipe parameter、semantic content、
 overlay instance、fact membership、final source allocation、production MIME golden、filesystem/KCS実行の
 authorityを持たない。overlay contract候補単体もschemaを記述するだけでinstance/placementを束縛せず、G0 rootの
 入力としては未採用である。instance membershipは後述のnon-authorizing downstream packageだけが束縛する。
@@ -914,6 +919,14 @@ PDF 1.4のnon-stream 255-byte line上限、xref/trailer/page treeを独立valida
 10 contributor feasibility variantsがfull 69,236 contributor sourcesを局所的に覆うが、多言語content、
 sourceごとのsemantic recipe、positive query anchor、production KCS chunks、G0を証明しない。
 
+incidental-textの局所feasibilityは`csv`、`eml`、`html`、`ipynb`、`json`、`jsonl`、`log`、`sql`、
+`tsv`、`xml`、`yaml`をstdlib-onlyの決定論的rendererとbuilder非依存validatorで検査する。renderer contractは
+9,139 bytes / `22fae0f62a67856ef20b5820c7274aad542a2de06f76c93c5c68acdaed9652f4`、validator contractは
+10,090 bytes / `67a0f0913de6087ca4b1c836d6dff4f845d6ee50a3adf12b794236f128baed75`である。各出力は
+512 KiB以下、EMLはCRLFかつwire line 78 bytes以下とする。この11 variantはinventory marginal上full 60,414
+incidental sourcesを覆うが、formal source recipe、source別semantic content、materialization、actual incidental
+chunks、KCS、G0、filesystem/write authorityを証明しない。
+
 suite buildは1 personaずつ行い、20 full plansを同時保持しない。p12の16,000 W0 sourcesと
 event-created replacement recipesは別inventory/別上限であり、W0 capを暗黙超過させない。
 
@@ -1026,7 +1039,8 @@ formal flagを変更してはならない。
 3. 人物別`persona_realism_profile`/overlayと8軸台帳、pre-solve source-intent recipe/variant feasibility、
    route matrix、fact graph/membership/history templateのcorpus semantic namespace、独立reviewを含むcorpus
    input closure、独立query spec/oracleを含むevaluation input closure。候補overlay contract、
-   text/PDF renderer/validator、source-profile catalogは正式なprofile ID、instance、upstream hashへ束縛する
+   contributor text/PDF renderer/validator、11 incidental renderer/validator、source-profile catalogは正式な
+   profile ID、instance、upstream hashへ束縛する
 4. full/pilot family/variant/scope/bucket/source quota/cohort aggregateとper-intent overlay assignmentの
    exact refinement、bounded canonical exact replayまたは完全proofによる最適性の検証、cycle-free final ID導出
 5. P/X/Y/N/U history操作順、scope coverage、checkpoint exact projection。将来のhistory-intentで現W3/W5
@@ -1047,7 +1061,8 @@ formal flagを変更してはならない。
     数えない。将来local deterministic OCR derivativeを追加する場合は別variant/provenance/contributor契約を
     version updateで先に束縛する
 
-次の実装順は、(1) formal recipe/renderer implementations、
+次の実装順は、(1) 71 formal recipes、11 incidental contractsのprofile binding、
+50 raw-only renderer/validator implementations、
 (2) corpus semantic namespaceとquery/history mappings、(3) joint allocation/solution/proof、
 (4) allocation/rendering、(5) folder/file write、(6) edits/history、(7) fresh-storage replays、
 (8) evaluationとする。concrete pre-solve membershipの完成からscope placement、formal recipe binding、G0、
