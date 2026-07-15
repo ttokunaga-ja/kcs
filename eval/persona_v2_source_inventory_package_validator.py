@@ -11,6 +11,7 @@ authority.
 
 from __future__ import annotations
 
+import copy
 import functools
 import gc
 import hashlib
@@ -1201,7 +1202,7 @@ def _load_and_validate_shard(descriptor, layout_shard, provider, requirements):
     }
 
 
-def validate_source_inventory_package(
+def _validate_source_inventory_package_snapshot(
     suite, origin_manifests, profile_manifests, shard_body_provider
 ):
     """Validate the suite, eighty manifests, and seventy-three shard bodies.
@@ -1735,6 +1736,102 @@ def validate_source_inventory_package(
             label=f"persona byte ledger denominator {persona_id}",
         )
     return True
+
+
+def _snapshot_artifact(value, *, label, max_bytes):
+    raw = _canonical_bytes(value, label=label, max_bytes=max_bytes)
+    return copy.deepcopy(value), raw
+
+
+def _snapshot_artifact_list(values, *, label, expected_count, max_bytes):
+    if type(values) is not list or len(values) != expected_count:
+        _fail(f"{label} must be an exact {expected_count}-item list")
+    snapshots = []
+    raws = []
+    for value in values:
+        snapshot, raw = _snapshot_artifact(
+            value,
+            label=label,
+            max_bytes=max_bytes,
+        )
+        snapshots.append(snapshot)
+        raws.append(raw)
+    return snapshots, tuple(raws)
+
+
+def _reauth_artifact(value, opening_raw, *, label, max_bytes):
+    try:
+        current_raw = _canonical_bytes(value, label=label, max_bytes=max_bytes)
+    except PersonaV2SourceInventoryPackageValidationError:
+        _fail(f"caller-owned {label} changed during provider callback")
+    if current_raw != opening_raw:
+        _fail(f"caller-owned {label} changed during provider callback")
+
+
+def _reauth_artifact_list(
+    values, opening_raws, *, label, expected_count, max_bytes
+):
+    if type(values) is not list or len(values) != expected_count:
+        _fail(f"caller-owned {label} changed during provider callback")
+    for value, opening_raw in zip(values, opening_raws, strict=True):
+        _reauth_artifact(
+            value,
+            opening_raw,
+            label=label,
+            max_bytes=max_bytes,
+        )
+
+
+def validate_source_inventory_package(
+    suite, origin_manifests, profile_manifests, shard_body_provider
+):
+    """Validate detached opening metadata and reject callback-time mutation."""
+
+    suite_snapshot, suite_raw = _snapshot_artifact(
+        suite,
+        label="persona v2 source inventory suite",
+        max_bytes=MAX_SUITE_DESCRIPTOR_BYTES,
+    )
+    origin_snapshots, origin_raws = _snapshot_artifact_list(
+        origin_manifests,
+        label="persona v2 source inventory origin manifest",
+        expected_count=40,
+        max_bytes=MAX_ORIGIN_MANIFEST_BYTES,
+    )
+    profile_snapshots, profile_raws = _snapshot_artifact_list(
+        profile_manifests,
+        label="persona v2 source inventory profile manifest",
+        expected_count=40,
+        max_bytes=MAX_PROFILE_MANIFEST_BYTES,
+    )
+    try:
+        return _validate_source_inventory_package_snapshot(
+            suite_snapshot,
+            origin_snapshots,
+            profile_snapshots,
+            shard_body_provider,
+        )
+    finally:
+        _reauth_artifact(
+            suite,
+            suite_raw,
+            label="source inventory suite",
+            max_bytes=MAX_SUITE_DESCRIPTOR_BYTES,
+        )
+        _reauth_artifact_list(
+            origin_manifests,
+            origin_raws,
+            label="source inventory origin manifests",
+            expected_count=40,
+            max_bytes=MAX_ORIGIN_MANIFEST_BYTES,
+        )
+        _reauth_artifact_list(
+            profile_manifests,
+            profile_raws,
+            label="source inventory profile manifests",
+            expected_count=40,
+            max_bytes=MAX_PROFILE_MANIFEST_BYTES,
+        )
 
 
 __all__ = [

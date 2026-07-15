@@ -14,6 +14,7 @@ authority.
 
 from __future__ import annotations
 
+import copy
 import gc
 import functools
 import hashlib
@@ -3080,7 +3081,7 @@ def _require_frozen_suite_metrics(suite, origin_metrics):
         _fail("persona current-component cap ledger drifted")
 
 
-def validate_source_semantic_membership_package(
+def _validate_source_semantic_membership_package_snapshot(
     catalog,
     suite,
     origin_manifests,
@@ -3298,6 +3299,168 @@ def validate_source_semantic_membership_package(
     finally:
         _clear_upstream_working_caches()
         gc.collect()
+
+
+def _snapshot_artifact(value, *, label, max_bytes):
+    raw = _canonical_bytes(value, label=label, max_bytes=max_bytes)
+    return copy.deepcopy(value), raw
+
+
+def _snapshot_artifact_list(values, *, label, expected_count, max_bytes):
+    if type(values) is not list or len(values) != expected_count:
+        _fail(f"{label} must be an exact {expected_count}-item list")
+    snapshots = []
+    raws = []
+    for value in values:
+        snapshot, raw = _snapshot_artifact(
+            value,
+            label=label,
+            max_bytes=max_bytes,
+        )
+        snapshots.append(snapshot)
+        raws.append(raw)
+    return snapshots, tuple(raws)
+
+
+def _reauth_artifact(value, opening_raw, *, label, max_bytes):
+    try:
+        current_raw = _canonical_bytes(value, label=label, max_bytes=max_bytes)
+    except PersonaV2SourceSemanticMembershipPackageValidationError:
+        _fail(f"caller-owned {label} changed during provider callback")
+    if current_raw != opening_raw:
+        _fail(f"caller-owned {label} changed during provider callback")
+
+
+def _reauth_artifact_list(
+    values, opening_raws, *, label, expected_count, max_bytes
+):
+    if type(values) is not list or len(values) != expected_count:
+        _fail(f"caller-owned {label} changed during provider callback")
+    for value, opening_raw in zip(values, opening_raws, strict=True):
+        _reauth_artifact(
+            value,
+            opening_raw,
+            label=label,
+            max_bytes=max_bytes,
+        )
+
+
+def validate_source_semantic_membership_package(
+    catalog,
+    suite,
+    origin_manifests,
+    profile_manifests,
+    compact_origin_body_provider,
+    expanded_context_body_provider,
+    expanded_membership_body_provider,
+    *,
+    source_suite,
+    source_origin_manifests,
+    source_profile_manifests,
+    source_shard_body_provider,
+):
+    """Validate detached metadata and reject provider callback TOCTOU."""
+
+    catalog_snapshot, catalog_raw = _snapshot_artifact(
+        catalog,
+        label="persona v2 source semantic membership catalog",
+        max_bytes=MAX_CATALOG_BYTES,
+    )
+    suite_snapshot, suite_raw = _snapshot_artifact(
+        suite,
+        label="persona v2 source semantic membership suite",
+        max_bytes=MAX_SUITE_DESCRIPTOR_BYTES,
+    )
+    origin_snapshots, origin_raws = _snapshot_artifact_list(
+        origin_manifests,
+        label="persona v2 source semantic membership origin manifest",
+        expected_count=EXPECTED_ORIGIN_COUNT,
+        max_bytes=MAX_ORIGIN_MANIFEST_BYTES,
+    )
+    profile_snapshots, profile_raws = _snapshot_artifact_list(
+        profile_manifests,
+        label="persona v2 source semantic membership profile manifest",
+        expected_count=EXPECTED_PROFILE_COUNT,
+        max_bytes=MAX_PROFILE_MANIFEST_BYTES,
+    )
+    source_suite_snapshot, source_suite_raw = _snapshot_artifact(
+        source_suite,
+        label="bound source inventory suite",
+        max_bytes=source_validator.MAX_SUITE_DESCRIPTOR_BYTES,
+    )
+    source_origin_snapshots, source_origin_raws = _snapshot_artifact_list(
+        source_origin_manifests,
+        label="bound source inventory origin manifest",
+        expected_count=EXPECTED_ORIGIN_COUNT,
+        max_bytes=source_validator.MAX_ORIGIN_MANIFEST_BYTES,
+    )
+    source_profile_snapshots, source_profile_raws = _snapshot_artifact_list(
+        source_profile_manifests,
+        label="bound source inventory profile manifest",
+        expected_count=EXPECTED_PROFILE_COUNT,
+        max_bytes=source_validator.MAX_PROFILE_MANIFEST_BYTES,
+    )
+    try:
+        return _validate_source_semantic_membership_package_snapshot(
+            catalog_snapshot,
+            suite_snapshot,
+            origin_snapshots,
+            profile_snapshots,
+            compact_origin_body_provider,
+            expanded_context_body_provider,
+            expanded_membership_body_provider,
+            source_suite=source_suite_snapshot,
+            source_origin_manifests=source_origin_snapshots,
+            source_profile_manifests=source_profile_snapshots,
+            source_shard_body_provider=source_shard_body_provider,
+        )
+    finally:
+        _reauth_artifact(
+            catalog,
+            catalog_raw,
+            label="source semantic membership catalog",
+            max_bytes=MAX_CATALOG_BYTES,
+        )
+        _reauth_artifact(
+            suite,
+            suite_raw,
+            label="source semantic membership suite",
+            max_bytes=MAX_SUITE_DESCRIPTOR_BYTES,
+        )
+        _reauth_artifact_list(
+            origin_manifests,
+            origin_raws,
+            label="source semantic membership origin manifests",
+            expected_count=EXPECTED_ORIGIN_COUNT,
+            max_bytes=MAX_ORIGIN_MANIFEST_BYTES,
+        )
+        _reauth_artifact_list(
+            profile_manifests,
+            profile_raws,
+            label="source semantic membership profile manifests",
+            expected_count=EXPECTED_PROFILE_COUNT,
+            max_bytes=MAX_PROFILE_MANIFEST_BYTES,
+        )
+        _reauth_artifact(
+            source_suite,
+            source_suite_raw,
+            label="bound source inventory suite",
+            max_bytes=source_validator.MAX_SUITE_DESCRIPTOR_BYTES,
+        )
+        _reauth_artifact_list(
+            source_origin_manifests,
+            source_origin_raws,
+            label="bound source inventory origin manifests",
+            expected_count=EXPECTED_ORIGIN_COUNT,
+            max_bytes=source_validator.MAX_ORIGIN_MANIFEST_BYTES,
+        )
+        _reauth_artifact_list(
+            source_profile_manifests,
+            source_profile_raws,
+            label="bound source inventory profile manifests",
+            expected_count=EXPECTED_PROFILE_COUNT,
+            max_bytes=source_validator.MAX_PROFILE_MANIFEST_BYTES,
+        )
 
 
 __all__ = [

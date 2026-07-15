@@ -14,8 +14,27 @@ membership packageを実装し、40 origin + 40 profile manifests、25,560 draft
 2,100 disjoint semantic anchorsを27,660 rich rowsとして束縛する。
 さらに71 variant-level formal recipe profile policyを、inventory slot、semantic content/filename slot、
 all-71 runtime contract/receiptへ推移的に束縛した。ただし203,000 source-instanceごとのrecipe値、
-selected complexity/bytes、solved scope placement、semantic-payload closureはなく、既存structural packageの
+solved scope placement、semantic-payload closureはなく、既存structural packageの
 `source_intent_inventory_complete=false`を変更しない。history-intentもsolver後のcompiled event planではない。
+さらにaggregate byte-distribution catalogで566 persona-variant行、300 persona-family投影、20 persona集計を
+束縛し、pilot/full-residual/fullの件数、complexity histogram、raw-byte sum、nearest-rank p50/p95/max、
+formal tailをexactに閉じた。ただしこれはsource-instance別parameter assignmentやactual allocated bytesではない。
+さらに20 personasと20 distinct primary use casesをexact 1対1で束縛するnon-authorizing catalogを実装し、
+role、positive physical family marginal、代表primary scope、lifecycle capability、query stratumへjoinした。
+canonical bodyは30,008 bytes、SHA-256
+`024916c0d79d30ce859d102ae0e30f34f5209f0665b587151f2c0b410df77624`である。
+さらにscope-qualified semantic endpoint、persona-global chunk hash、history path binding、physical storageを
+混同しない`kcs.persona.pc-chunk-accounting/v1`を実装した。canonical bodyは19,801 bytes、SHA-256
+`d9c59e922a2619b1748194241ffdf47ace3eb034f136b0d04154163bda3ccea2`である。そのsidecarをdirect inputとして
+束縛する`kcs.persona.pc-lifecycle-demand/v2`も、20人 x 105 anonymous capabilities、U35/I5、
+P'/X' replacement、restore/purge/disjoint state、cross-scope moveの4-ledger投影をexact化した。
+canonical bodyは463,571 bytes、SHA-256
+`32e0aaf88632803d41266152b81e2cc2917111d69f6dfb03be0621920c8a0080`である。ただしsource-instance matching、
+W0 actual qIM、compiled events、observed receiptsは未束縛である。
+recursive ambient laneは`kcs.persona.pc-recursive-robustness-lane-catalog/v1`として各人256 candidates/
+128 directories、D6--D8、candidate/native realization分離を固定した。canonical bodyは76,099 bytes、SHA-256
+`49d6fa26cafa902bfca4a102c5e301c27683fd6761bc456a3930cd059f67a4f2`で、actual filesystem case modeと
+materialization receiptは未束縛である。
 exact 203,000-key/73-shard source-inventory layout、overlay contract、
 40 persona/originのpre-source overlay reservation、
 ID-free text/PDF renderer/validator、source-profile catalogを含め、どの候補もG0、renderer、filesystem、
@@ -29,7 +48,7 @@ pilot 20,300 / full 203,000のexact coverageを束縛した。下流のformal so
 71 profileすべてを一意に束縛し、full/pilot別のincidental capと全checkpoint整数表も固定した。
 したがって現在の下流形式実装可用性とvariant-level recipe policyは71 / 71である。ただしsource-instance別の
 parameter/recipe、materialization、chunk、KCS、G0、filesystem/write authorityは増えていない。
-overlayの8軸ledgerはaxis draftであり、byte/host-metadata reconciliation、scope placement、
+overlayの8軸ledgerはaxis draftであり、source-instance byte/host-metadata reconciliation、scope placement、
 raw/rendered identityと検索参加の実測は未完成である。
 同一subject/predicate・異なる値を持つunordered W0-current fact pairとsource-owned distinct A/B branch profilesは
 実装済みである。
@@ -63,6 +82,8 @@ formal-replay-01/
 ```
 
 ここで`formal-replay-01`はsuite containerであり、1台のPC rootではない。数え方を次に固定する。
+ここで再現する「PC」は1人のuser-home/document corpus、export/cache/staging、locale/OS path semanticsであり、
+OS system volume全体、installed application、native filesystem implementationの完全emulationではない。
 
 | 用語 | 個数 | 意味 |
 | --- | ---: | --- |
@@ -208,7 +229,42 @@ p14が2,464 filesで平均48.7 chunksになる。
 全体は203,000 W0 files/replay、609,000 W0 files/3 replayとなる。W1-W5のsource/event exact件数は
 joint allocator再実行後にG0で凍結する。
 
-### 3.3 semantic filename
+### 3.3 20人と20 primary use caseの1対1対応
+
+職種名だけでは「異なる人」は表せても「異なる利用場面」のcoverageを証明できない。そこで各personaは
+exactly one `primary_use_case_id`を所有し、trigger、期待する成果、必須format/scope、履歴操作、検索scenarioを
+次の20行で結ぶ。全員がM3-1/M3-2/M3-3の共通回帰も受けるが、このprimary use caseは人物別のcontent、path、
+format、event強調点を選ぶ正本である。1 use caseを複数personaへ再利用せず、1 personaへ複数primary IDを
+割り当てない。
+
+| persona / primary use case | trigger -> outcome | 必須formatと代表scope | 主な履歴 / 評価焦点 |
+| --- | --- | --- | --- |
+| p01 / `uc01-incident-design-rationale` | production defect -> 修正案と設計根拠を回収 | md/code/structured、`work/products/.../architecture` | edit/rename/derive、M3-1 current + M3-2 rename |
+| p02 / `uc02-production-incident-reconstruction` | alert escalation -> logs/runbook/postmortemで原因を再構成 | txt-log/md/structured/code、`services/.../oncall/operations` | edit/archive/restore、M3-2 old wording + M3-3 restored |
+| p03 / `uc03-control-evidence-package` | auditor request -> controlと証跡版をpackage化 | structured/csv/pdf/docx/eml、`compliance/.../control-evidence` | move/archive/purge、M3-1 evidence + M3-3 deleted/purged |
+| p04 / `uc04-experiment-reproduction` | model regression -> notebook/config/resultを再現 | code/ipynb/csv/npz/pdf、`research/.../experiments/results` | edit/derive/duplicate、M3-1 cross-format + M3-2 revision |
+| p05 / `uc05-kpi-lineage-reconciliation` | KPI discrepancy -> forecastとsource lineageを照合 | csv/xlsx/structured/sql、`analytics/.../lineage/warehouse` | edit/duplicate/archive、M3-1 current + M3-2 history |
+| p06 / `uc06-assay-result-trace` | assay outlier -> protocol/cohort/run/resultを追跡 | csv/pdf/docx/image/domain、`programs/.../run-001/analysis` | edit/derive/archive、M3-1 evidence chain + M3-2 history |
+| p07 / `uc07-archive-citation-recovery` | manuscript claim -> scan/OCR/notesから引用根拠を復元 | scan/text PDF/txt/docx、`research/sources/.../ocr-transcripts` | edit/move/restore、M3-2 move + M3-3 restored |
+| p08 / `uc08-product-decision-reconstruction` | roadmap dispute -> PRD/deck/feedbackの決定経緯を再構成 | md/docx/pptx/pdf/eml、`portfolio/.../q3/prds` | edit/rename/duplicate、M3-1 cross-format + M3-2 rename |
+| p09 / `uc09-user-study-finding-trace` | design challenge -> transcript/recording/noteをfindingへ結ぶ | txt/media/image/docx/pdf、`research/.../transcripts` | edit/derive/archive、M3-1 cross-format + M3-2 wording |
+| p10 / `uc10-client-recommendation-evidence` | partner review -> workbook/deck/sourceの根拠鎖を提出 | xlsx/pptx/pdf/docx/csv、`engagements/.../deliverables` | edit/duplicate/move、M3-1 cross-format + M3-2 move |
+| p11 / `uc11-account-commitment-context` | renewal negotiation -> mail/proposal/action planの約束を確認 | eml/pdf/docx/pptx、`accounts/.../proposals` | edit/rename/archive、M3-1 current + M3-2 rename/history |
+| p12 / `uc12-escalation-timeline` | customer escalation -> case/log/runbookから時系列を構築 | txt-log/md/structured/csv/eml、`customers/.../case-history` | edit/move/restore、M3-2 move + M3-3 restored |
+| p13 / `uc13-legal-hold-matter-recovery` | hold/e-discovery request -> privileged matter evidenceを保全 | pdf/docx/eml/scan PDF、`matters/.../legal-hold/.../working` | edit/archive/purge、M3-2 history + M3-3 deleted/purged |
+| p14 / `uc14-close-variance-reconciliation` | month close variance -> ERP export/workbook/evidenceを照合 | xlsx/csv/pdf/docx、`finance/close/.../2026-03` | edit/duplicate/archive、M3-1 current + M3-2 history |
+| p15 / `uc15-candidate-decision-audit` | complaint/re-open -> interview/mail/ATS記録を監査 | pdf/docx/eml/csv、`recruiting/.../interviews/round-2` | edit/move/purge、M3-2 move + M3-3 deleted/purged |
+| p16 / `uc16-protocol-deviation-evidence` | clinical review -> protocol/case/export/imageを結合 | text/scan PDF/csv/docx/xlsx/domain、`clinical/.../synthetic-cases` | edit/archive/restore、M3-1 cross-format + M3-3 restored |
+| p17 / `uc17-drawing-revision-impact` | field change/RFI -> drawing revisionと工程影響を追跡 | pdf/image/domain/xlsx/docx、`portfolio/.../construction/drawings` | edit/rename/move、M3-1 evidence + M3-2 rename/move |
+| p18 / `uc18-capa-root-cause-trace` | nonconformance -> CAPA/log/inspection evidenceを追跡 | pdf/csv/txt-log/xlsx/docx/domain、`quality/nonconformance/.../open` | edit/archive/purge、M3-2 history + M3-3 purged |
+| p19 / `uc19-course-revision-recovery` | next-term revision -> lesson/deck/LMS artifactを再利用 | pdf/docx/pptx/image/media、`learning/.../term-1/lesson-plans` | edit/duplicate/restore、M3-1 cross-format + M3-3 restored |
+| p20 / `uc20-investigation-claim-verification` | tip/FOIA drop -> mail/document/transcriptでclaimを検証 | txt/pdf/eml/scan/image/media、`newsroom/.../fact-check` | edit/move/purge、M3-1 evidence + M3-3 deleted/purged |
+
+G0ではこの表をmachine-readableな20-row artifactへ移し、`persona_id`、`primary_use_case_id`、required family、
+required scope role、required lifecycle capability、required query stratumをexact joinする。ここでの「必須format」は
+人物の100% physical mixではなく、そのuse caseのpositive/negative witnessに最低1件必要なfamily集合である。
+
+### 3.4 semantic filename
 
 `source_id`は内部identityに残し、basenameは人物、scope、文書role、synthetic entity、期間、版を
 表す。formal basenameはlowercase ASCII、120 bytes以下、scope内casefold uniqueとする。
@@ -239,7 +295,7 @@ joint allocator再実行後にG0で凍結する。
 Unicode、空白、case collision、`final (1)`、conflicted copy、`.part`、Office lockfileは
 recursive robustness laneへ置き、formal basename portabilityと混ぜない。
 
-### 3.4 recursive ambientの代表例
+### 3.5 recursive ambientの代表例
 
 次は`<robustness-root>/devices/<persona>/ambient-home/`以下に置く未登録treeである。
 formal scope、120,000 chunks、Recall/latencyの母数へ入れないが、bytes、directory、inode、traversalは
@@ -271,13 +327,25 @@ robustness用capacity receiptへすべて計上する。
 case-insensitive filesystemで同居できないcollision pairは、POSIX native realizationまたは
 manifest-only expected failureとして記録し、作れなかったfixtureを作成済みと見なさない。
 
-初期robustness profileは各人256 ambient file candidates、128 directories、最大深度D6-D8とする。
-file candidate比はbenign nested document 40%、exact/near/conflict copy 15%、cache/temp 15%、
-partial download 10%、hidden/lockfile 10%、empty file 5%、Unicode/case-collision candidate 5%とする。
+初期robustness profileは各人256 ambient file candidates、128 authored directories、最大深度D6-D8とする。
+深度はlane root直下の`ambient-home/`からfileの親directoryまでのcomponent数で数え、formal `home/`基準の
+depthと混同しない。百分率を整数へ黙って丸めず、1人あたりbenign nested document 102、
+exact/near/conflict copy 38、cache/temp 38、partial download 26、hidden/lockfile 26、empty file 13、
+Unicode/case-collision candidate 13のexact 256件とする。20人のpath/depth vectorは複製せず、少なくとも
+D6/D7/D8の各depthにfileを持つsuite-wide coverageと、人物ごとのplanned/realized Dmax一致を要求する。
 各entryは`registered_scope=false`、`formal_gate_eligible=false`、formal leafとの交差なし、`.kcs`なしを
 持つ。candidate数とnative realized数を別々に記録し、宣言外entryをverifierが拒否する。
 
-### 3.5 利用者属性の初期v2候補
+このprofileのmachine-readable正本候補は`kcs.persona.pc-recursive-robustness-lane-catalog/v1`である。
+20人 x 256 = 5,120 candidates、20人 x 128 = 2,560 authored directories、file depthは
+D6=2,855 / D7=1,901 / D8=364、planned Dmax人数はD6/D7/D8=8/9/3である。target OS/case modeは
+metadata-onlyであり、実行hostのfilesystem semanticsとは見なさない。native実現数は実行前には各人
+253--256の範囲で、case-insensitiveならportable ASCII case-collision mate 3件をmanifest-only expected
+failure、case-sensitiveなら256件すべてをrealizeする条件表をreceiptで照合する。bodyは76,099 canonical
+bytes、SHA-256 `49d6fa26cafa902bfca4a102c5e301c27683fd6761bc456a3930cd059f67a4f2`で、
+materialization/write/G0 authorityはすべてfalseである。
+
+### 3.6 利用者属性の初期v2候補
 
 職種だけをpersona差と見なさない。次は既存v1 fidelity hypothesisからv2へ明示移行する候補値であり、
 OSはtarget metadataであってnative実行・emulation済みという意味ではない。sourceはlive接続ではなく
@@ -309,6 +377,31 @@ synthetic snapshot/exportだけを指す。
 G0前にこの表をv2専用artifactへ複製してversion/hashを付け、timezone、retention-age buckets、permission
 profile、mtime-age分布、duplicate/conflict率、cloud/mail account数を人物別exact値として追加する。
 v1 metadataを参照したままv2 rootを生成してはならない。
+
+### 3.7 調査根拠と適用限界
+
+この20人別構成は単一の「平均的PC」を20コピーする設計ではない。60,000台超を追跡した
+[USENIX FASTのfile-system metadata研究](https://www.usenix.org/legacy/events/fast07/tech/full_papers/agrawal/agrawal_html/)
+はfile type、size、namespace利用にPC間差があり、directory depthの中央値が5から6へ増え、深いpathにも多数の
+fileがあることを報告している。49 million files / 348 user collectionsを扱う
+[user-managed collection研究](https://arxiv.org/abs/2107.03272)も、OSやoccupationによるsize分布差と、
+大半のfileが8 MiB未満である一方のlarge-file tailを報告する。44 home directoriesの
+[USENIX 2004調査](https://www.usenix.org/legacy/publications/library/proceedings/usenix04/tech/general/full_papers/policroniades/policroniades_html/index.html)
+では98,678 files、1,756 extensions、平均31 KiBで、word-processingとsource-developmentの混在、whole-file
+duplicate 12.8%が観測された。
+
+ただし年代、組織、母集団が異なるため、その観測百分率を2026年の20職種へ直接転記しない。本提案のfamily比は
+検索・変換・raw-only境界を広く踏む`benchmark_stress_mix_v2`であり、実利用統計ではない。研究から採用するのは
+次の構造的性質だけである。
+
+- persona間でformat、size、depth、更新頻度を変え、suite-wide平均で相殺しない
+- 多数のordinary small/medium filesと少数のlarge tailを分け、file比とbyte比を混同しない
+- formal leaf scopeのD2--D6と、深い中間directory fileを含むD6--D8 robustness laneを別々に実測する
+- duplicate/revision/conflict、mtime、origin、historyをphysical file countとは別ledgerで束縛する
+
+したがって採用判断は「実世界の比率を再現したか」ではなく、20の相異なる仮説をversion/hash付きで固定し、
+各persona x replayのobserved receiptがその仮説へexact一致したかで行う。将来dogfoodから匿名集計を得ても、
+このv2 stress mixを黙って上書きせず新versionとして比較する。
 
 ## 4. 物理file family比
 
@@ -690,9 +783,14 @@ PDF pages、Office member数、attachment数、raw bytesはchunk quotaとは別f
 | `requested_chunk_policy` | contributor 1--70、incidentalは0以上の動的上限、raw-onlyはexact 0 |
 
 fullの`pilot + full-residual`は件数、complexity histogram、raw-byte sumのすべてでcoordinatewiseに閉じる。
-p50/p95は加法量ではないため差し引かず、fullの順序済みsource列から再計算する。現在は形式別
-feasibilityまでで、このpersona x family表とsource-level assignmentは未束縛であるため、容量やwriteは
-引き続きfail closedとする。
+p50/p95は加法量ではないため差し引かず、fullの順序済みhistogramから再計算する。aggregate catalogは
+566 persona-variant行、300 persona-family投影、20 persona集計を実装し、full 203,000 filesについて
+raw 5,034,302,718 bytes、4 KiB丸め後5,194,530,816 bytes、p50 8,192 bytes、p95 129,024 bytes、
+max 2,621,440 bytes、formal tail 160件を束縛した。最大人物p12も4 KiB丸め後417,591,296 bytesで、
+480 MiB/personの計画上限を満たす。canonical bodyは1,576,125 bytes、SHA-256
+`7f2fdcc823885401cb7ed1b8fc42c9010b38af63d2c58879babb28aadeb6b343`である。
+これはparameter-bin aggregateであり、203,000 source-level assignment、actual allocated blocks、CAS/index/history
+増幅、root-bound capacityを証明しないため、capacity/write authorityは引き続きfail closedとする。
 
 formal W0の512 MiB/personかつ10 GiB/replay、W5 finalの1.25 GiB/personかつ25 GiB/replay、
 pre-purgeの`floor(27 GiB / 20)`/personかつ27 GiB/replayは、managed source filesとauthored scope
@@ -831,7 +929,7 @@ ledgerへ合算していない。semantic/factとconcrete overlayまでを保守
 13,275,672 bytes、headroom 3,501,544 bytesである。ただしframe/header、formal recipesその他を含む
 完全persona packageの16 MiB capは未証明である。
 
-現typed fact graphが表すrevision境界はW1だけである。したがって将来のhistory-intent契約では、現契約の
+現typed fact graphが表すrevision境界はW1だけである。したがってpre-solve lifecycle demandでは、現契約の
 W3 X/Y/N editとW5 N correctionをsemantic factの更新ではなくsurface/raw lifecycle editとし、eventの
 `changed_fact_ids=[]`を要求する。一方、新しいsource versionの`present_fact_ids`は直前versionの可視fact集合を
 exactに引き継がなければならないため、引き継いだfactを
@@ -849,6 +947,9 @@ offline indexしてbaselineをattest、(4) W1--W5のedit/rename/move/duplicate/d
 restore/purgeをjournal順に適用、(5) 完成rootや`.kcs`をcopyせず同じ不変planから別storageへW0から
 fresh buildし直す、を3 replayで行い、(6) 3 replay完成後に構造・比率・chunk/history・query・容量を
 検証する。W0をindexする前にeditを開始せず、最初のrootをtemplateとして複製しない。
+各W0/W1--W5 checkpointでは安全性とplan逸脱をfail-fast attestationし、(6)は3 replay間の決定性、
+per-person Recall/latency、容量集計を比較するfinal cross-replay evaluationとする。途中検査を省いて最後だけ
+検証する意味ではない。
 
 1 replayは20人の独立persona-PC root、各rootは12 primary + 8 secondary scopesとexact 120,000 current
 contract chunksを持つ。W0 sourceは203,000 files/replayであり、3 fresh replayを同時保持する場合は
@@ -867,7 +968,7 @@ persona x replayごとに作る。比較対象はplanであり、suite合算だ�
 
 | Gate | 実装・実行 | 合格条件 | 現在地 |
 | --- | --- | --- | --- |
-| G0 v2契約凍結 | 400 exact scope paths/load、family/extension/variant整数比、`persona_realism_profile`と8軸台帳、ambient spec、共有辞書、pre-solve source-intent recipe、size、fact/oracle、W0-W5 exact eventをversioned artifact graphとsuite descriptor hashへ固定 | generator変更前に全20人でcanonical rebuild。joint solverがrealism overlayを入力にfull contributor=120,000とpilot=12,000、scope routing、wave別incidental上限、plan 16 MiB上限をexactに解く | coreに加え203,000構造row/73 shard body、40 origin + 40 profile manifest、71 inventory profile ID、40 originのnon-authorizing overlay reservation、45 fact profiles/persona、80 topics、71 semantic profiles、3,733 compact rowsからの203,000 semantic/fact logical total projection、40 concrete origins + 40 concrete profilesと27,660 rich pre-solve overlay rows、negative route receipt、20件のrepresentative source/fact/history slice、2,100 query/oracle、非authorizing closure候補、71/71 format implementation、213 runtime probes、71/71 formal recipe profile policyまで完成。source-instance recipe値、solved placement、persona/family byte表、exact event inventory、semantic payload projection、独立approval、solution/proof、完全persona 16 MiB proof、正式rootは未実装 |
+| G0 v2契約凍結 | 400 exact scope paths/load、family/extension/variant整数比、`persona_realism_profile`と8軸台帳、ambient spec、共有辞書、pre-solve source-intent recipe、size、fact/oracle、W0-W5 exact eventをversioned artifact graphとsuite descriptor hashへ固定 | generator変更前に全20人でcanonical rebuild。joint solverがrealism overlayを入力にfull contributor=120,000とpilot=12,000、scope routing、wave別incidental上限、plan 16 MiB上限をexactに解く | coreに加え203,000構造row/73 shard body、40 origin + 40 profile manifest、71 inventory profile ID、40 originのnon-authorizing overlay reservation、45 fact profiles/persona、80 topics、71 semantic profiles、3,733 compact rowsからの203,000 semantic/fact logical total projection、40 concrete origins + 40 concrete profilesと27,660 rich pre-solve overlay rows、negative route receipt、20件のrepresentative source/fact/history slice、2,100 query/oracle、非authorizing closure候補、71/71 format implementation、213 runtime probes、71/71 formal recipe profile policy、566 persona-variant/300 persona-familyのaggregate byte分布、20 persona/20 primary use-case catalog、4-ledger chunk accounting、20 x 105 lifecycle demand、recursive robustness catalogまで完成。source-instance recipe/parameter値、solved placement、source-matched compiled event inventory、semantic payload projection、独立approval、solution/proof、完全persona 16 MiB proof、正式rootは未実装 |
 | G1 v2 tiny W0 | 20人×200 files/persona-PC rootを1人・1sourceずつstreaming作成 | 4,000 files/suite replay、2 fresh suite replays合計8,000 writes、400 scopes/replay、比率/path/hash/readback、inode非共有 | v1相当は済。v2回帰が必要 |
 | G2 pilot W0 | pilot-first solverのexact subset、計20,300 files、各人12,000 planned、init→offline index | 各人actual contributor 12,000、raw-only 0、planned/actualを別台帳化 | streaming writerと完全attestorが未実装 |
 | G3 pilot W1-W5 | immutable eventをmutation前に検証し、edit/rename/move/duplicate/derive/archive/delete/restore/purge | exactly-once journal、再開収束、waveごとのactual attestation、purge後index noop | v1相当のみ済。v2 allocator/manifest未実装 |
@@ -898,6 +999,29 @@ final source rowを変更せずfullへ埋め込む。したがってG2ではpilo
 fullのaggregate cell/source-ID/materialization/rendered-byte subsetとして別々に証明する予約inventoryにする。
 
 full contract checkpointは各人・各replayで次とする。
+
+ここで`current C`と`history-only H`は、persona内20 scopesを横断するdistinct contract semantic endpoint
+`(scope_key, chunk_id)`集合である。`chunk_id`はKCSの`chunk_hash`と同値だが、scopeを落としてpersona-globalに
+dedupしない。`C`はそのscopeで1件以上のlive path bindingを持つendpoint、`H`はそのscopeでlive bindingがなく、
+reachableかつnon-purgedなhistorical/deleted path bindingを持つendpointとする。C/Hはdisjointで、path alias、
+DB row、materialization数を重複加算しない。same-scope renameはcontract `(0,0)`、deleted rawの同scope
+reingestは`(+q,-q)`である。
+
+`persona-global chunk_id`、`(scope,chunk_id,path)` history binding、`(scope,object_kind,object_hash)` physical storageは
+別metricであり、120,000/60,000へ読み替えない。cross-scope move 5件はcontract cohortではなくpilotの
+`incidental_searchable` sourceへ割り当てるため、contract C/Hは`(0,0)`のまま、incidental endpointはcurrent net 0、
+history-only `+qIM`、persona-global chunk IDは0、path bindingとdestination scope-local storageは増加する。
+`qIM`は5 sourceのW0 actual endpoint chunk合計で、各1--70、人物合計5--350とする。
+
+この数え方は`kcs.persona.pc-chunk-accounting/v1`へ機械化した。`chunk_id == chunk_hash`、4 metric、
+rename/move/duplicateのoperation deltaと成立precondition、全6 physical projections、checkpoint/cap式、
+performance/Recall分母の分離を独立validatorが再構築する。bodyは19,801 canonical bytes、SHA-256
+`d9c59e922a2619b1748194241ffdf47ace3eb034f136b0d04154163bda3ccea2`である。
+そのexact move rowをdirect inputへ束縛する`kcs.persona.pc-lifecycle-demand/v2`は、各人105 anonymous
+capabilities（contract 100 / incidental move 5）、pilot/fullのbyte-identical origin、P'/X'、restore net-zero、
+W0 `qIM <= uIM = 350`、`nIM = 5`を固定する。bodyは463,571 canonical bytes、SHA-256
+`32e0aaf88632803d41266152b81e2cc2917111d69f6dfb03be0621920c8a0080`である。これはpre-solve demandであり、
+source matching、compiled history plan、physical receipt、G0 authorityはfalseのままである。
 
 | checkpoint | current C | history-only H |
 | --- | ---: | ---: |
@@ -931,16 +1055,26 @@ P/X/Y/N/Uのchunk比は比較可能性のため全人物で共通に保つ一方
 ```text
 event_intent_key / persona_id / wave / operation / precondition_checkpoint
 logical_document_key / source_intent_key / family / variant / gate_role
-before_scope_key / before_relative_path / after_scope_key / after_relative_path
+scope_relation_requirement / relative_path_transition_rule
 before_raw_state / after_raw_state / bytes_preserved / present_facts_preserved
-expected_current_chunk_delta / expected_history_only_chunk_delta
+current_chunk_delta_rule / history_only_chunk_delta_rule
 required_query_scenario / expected_visibility / purge_or_restore_anchor_key
 ```
 
 persona x waveのevent件数、family/variant件数、chunk deltaはcheckpoint表にexactに集計され、
 M3-1/M3-2/M3-3のquery stratum coverageに投影できなければならない。before/after pathが同一、
 restore後が別のlogical document、raw-onlyがsearchableとして数えられたなどの行は拒否する。
-このexact inventoryとcompiled history planは未実装であり、履歴生成のG0 blockerとする。
+pre-solve rowはscope relation/path transition ruleとquotaを変数とするdelta ruleまでを持ち、joint solverが
+scope/path/quotaを決めた後のcompiled planだけがexact before/after pathとliteral deltaを持つ。
+未解決値を`-1`、null、floatで保存しない。
+anonymous pre-solve demandとsymbolic event templateは実装済みだが、このsource-matched exact inventoryと
+compiled history planは未実装であり、履歴生成のG0 blockerとする。
+
+P'/X' capacity fillerはoriginalと同scope/variant/quotaでよいが、別logical document、別raw/chunk集合、
+独立fact/content recipeを持ち、`capacity_replaces`だけで結ぶ。同一raw/factsのstructural copyでは
+final-deleted/purged queryがlive fillerへhitするため禁止する。W5 restored 10件はW4 deleted Xから選び、
+byte-exact export、別managed direct-childへのreingest/index、対応X' filler deleteを1 dependency groupにして
+net deltaを`(0,0)`へ閉じる。
 
 small editは90%以上のsemantic sectionsを保持し、指定factだけを変える。major editは別bucketにする。
 rename/moveはbytes不変、delete/restoreはsource/version/rawを保持、purge後は旧queryが0件になることを
@@ -952,6 +1086,13 @@ distractorを3件以上持ち、current、old wording、rename/move、deleted、
 purged-negativeはRecall母数へ混ぜず、別に最低5問/persona/scenarioを置き、`false-positive@10 == 0`を
 要求する。したがって1人105、suite 2,100 query intents（positive 1,800 / negative 300）であり、同じspecを
 3 replayで各1回観測して6,300 rows（5,400 / 900）とする。replayごとに別intentへ分割しない。
+corpus側の105 semantic-anchor capacity/personaはquery IDではない。pilot originのcontributor capacityのうち
+`U=35`（M3-1 current 30、same-scope rename 5）、`Y=30`（old wording 10、locale-history 10、archive 10）、
+`X=20`（final-deleted 10、restored 10）、`P=15`（purged-negative 15）、`N=0`の100件を匿名capabilityへ使い、
+残るcontributor 5 slotsは`unused-reserved-capacity`とする。cross-scope move 5件は別の
+`I=5 incidental_searchable` capabilityとして、pilotのunreserved incidental sourcesへ割り当てる。
+query/oracleとの1対1 mappingはevaluation-only bridgeが所有し、slot ordinalから暗黙推論しない。
+この割当はpilot Y source lowerを30以上へ引き上げる追加solver constraintである。
 corpus template/seedとquery template/seedを分離し、
 gold oracleをsource rendering前に凍結する。queryとanswer文書のrare token、特徴的n-gram、renderer内部語彙の
 重複率をgateし、template exact lookupを拒否する。pooled平均だけで合格させず、同一seedの3 replay結果から
@@ -1240,8 +1381,9 @@ content-only `semantic_payload` projectionだけをidentity namespaceへ入れ�
 
 - realism profileとvariant catalogの独立review receipt、routeの独立human approval receipt、solved placement整数割当、
   logical-document採点/検索参加、8軸台帳
-- 71 profile policyを203,000 source-instanceへ展開する、chunk/complexity/bytesを分離したpre-solve
-  source-intent recipe、人物・family別byte p50/p95/tail、source-level content recipe/semantic filename、
+- 71 profile policyと完成済みaggregate byte histogramを203,000 source-instanceへ展開する、
+  chunk/complexity/bytesを分離したpre-solve source-intent recipe、source-level parameter assignment、
+  content recipe/semantic filename、
   schema別content-only `semantic_payload` projection、正式なcorpus/evaluation closure
 - concrete overlayの`placement_class_requirement`を400 scopesへ割り当てるjoint solution/proof、
   logical-document/search participation、raw/rendered identityと8軸observed ledger
@@ -1272,8 +1414,10 @@ canonical plan SHAを変更しない。non-authorizing generic solver-semantics 
 vertical slice、203,000-key/73-shard layout、overlay reservation、全203,000 structural rows/73 shard bodies、
 40 origin + 40 profile manifests、71 inventory profile IDs、全203,000 sourceのcontent contexts +
 source-owned fact membership、40 origin + 40 profile manifestsのconcrete overlay membership、71/71 format
-implementation registry、71/71 variant-level formal recipe profile catalogまでは完了した。
-以後の実装順は、(1) persona/family byte分布、exact event inventory、203,000 source-level parametersと
+implementation registry、71/71 variant-level formal recipe profile catalog、aggregate byte-distribution catalog、
+20 persona/20 primary use-case catalog、chunk-accounting sidecar、pre-solve lifecycle demand、
+recursive robustness lane catalogまでは完了した。
+以後の実装順は、(1) source-instance matchingを伴うcompiled exact event inventory、203,000 source-level parametersと
 corpus semantic/query/history target closure、(2) joint solverと独立検証可能なsolution/proof、
 (3) allocation/rendering + streaming folder/file writer、(4) W1--W5 edits/history、
 (5) 3 fresh-storage replays、(6) observed structural receiptとactual

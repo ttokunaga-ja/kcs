@@ -1248,3 +1248,94 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     claimed.  The next order is persona/family byte distribution, 203,000 source-instance parameters, exact
     lifecycle-event inventory and semantic/query/history closure, joint solution/proof, rendering and streaming
     folder/file writing, edits/history, three fresh-storage replays, and observed evaluation.
+129. Persona-PC v2 now adds an exact aggregate byte-distribution catalog downstream of the frozen variant,
+    all-format implementation, formal recipe, and realism artifacts.  The
+    `kcs.persona.pc-aggregate-byte-distribution-catalog/v2` body contains 566 persona-variant histograms,
+    300 persona-family projections, twenty persona summaries, and one suite summary.  Pilot and full-residual
+    counts are allocated independently and full is their coordinatewise sum for counts, histograms, raw bytes,
+    rounded planning bytes, and tail counts; nearest-rank p50/p95 are recomputed from the merged full histogram
+    rather than subtracted or averaged.  The final body is 1,576,125 canonical bytes, SHA-256
+    `7f2fdcc823885401cb7ed1b8fc42c9010b38af63d2c58879babb28aadeb6b343`.
+    Full covers 203,000 sources, 5,034,302,718 raw bytes, 5,194,530,816 bytes after per-file 4 KiB rounding,
+    p50 8,192 bytes, p95 129,024 bytes, maximum 2,621,440 bytes, and 160 formal tails.  Every persona has
+    exactly one pilot, seven residual, and eight full tails; p12 is the largest at 417,591,296 rounded bytes.
+    All personas remain below the 480 MiB planning cap and the suite remains below 10 GiB.  This rounding model
+    is not observed filesystem allocation and excludes CAS, indexes, history, metadata, and transient storage.
+    The standalone validator imports neither the producer nor renderers.  It independently reconstructs all
+    362 selected anchors from the frozen formula contracts, including affine maxima, raster lattice/aspect/pixel
+    constraints, media counts, tie rules, Hamilton allocation, merged projections, and capacity.  A review found
+    and closed an earlier gap that accepted self-consistent affine under-selection and off-lattice/aspect raster
+    anchors.  Fifteen focused tests pass in 34.305 seconds, all 362 bins pass actual renderer/validator probes,
+    and two hash seeds reproduce the same pin.  Authority remains all false; no source-instance parameter,
+    actual allocation, source/materialization identity, write/history/KCS execution, capacity result, or G0
+    authority follows.
+130. Persona-PC v2 now makes the required one-person/one-primary-use-case relationship explicit rather than
+    inferring use-case coverage from twenty role labels.  The non-authorizing
+    `kcs.persona.pc-primary-use-case-catalog/v2` contains exactly twenty unique persona IDs and twenty unique
+    primary-use-case IDs.  Each row preserves the proposal trigger, desired outcome, and authored format terms,
+    normalizes those terms to positive frozen physical-family marginals, and binds the exact persona role and
+    representative primary topology scope together with allowlisted lifecycle capabilities and query strata.
+    The body is 30,008 canonical bytes, SHA-256
+    `024916c0d79d30ce859d102ae0e30f34f5209f0665b587151f2c0b410df77624`.
+    Required families mean minimum use-case witnesses, not the complete physical mix.  Scope paths are
+    persona-root-relative, data is synthetic/non-PII, and rendered query text, source/final IDs, source-instance
+    membership, evaluation target resolution, execution, and G0 authority are absent.  The independent validator
+    authenticates the frozen envelope/topology bodies, reconstructs all joins, enforces exact blocker and
+    authority contracts, and rejects float/null/negative, extra-key, hostile-repr, path, and rehashed tampering.
+    Nine focused tests and fifteen upstream envelope/topology tests pass; no remote CI green result is claimed.
+131. The independent validators for the full structural source package, source-owned semantic-membership package,
+    and concrete-overlay membership package now close caller-owned metadata TOCTOU across untrusted body-provider
+    callbacks.  Each public validator canonicalizes and deep-copies its target and all caller-owned upstream
+    metadata before any provider call, validates only the detached opening snapshots, and re-authenticates every
+    original object in a `finally` block after callbacks.  Existing coordinate digest/nondeterminism checks remain
+    intact.  Provider-side mutations of target and upstream suite metadata are rejected by new regression tests.
+    Existing producer bodies and pins remain unchanged: source suite 45,887 bytes /
+    `b62fadfa42b0f3f61b6de017300e65c48a5c07fb801dc470999c3d89a39dd706`, semantic suite 49,837 /
+    `62394dd2a3544f7d6c332652e6799b7a60353e8e3aa6a87f80e0ff21590a2e28`, and concrete suite 51,133 /
+    `4763e06e9408109ad90c5e07a1bb16cd430fd65e6c5730d0015dcbea60cdf41a`.  The three mutation regressions and the
+    three existing full public-validator paths pass locally, together with `py_compile` and diff checks.  This is
+    validator hardening only; it does not implement the 203,000 source-instance parameter package or add authority.
+132. Persona-PC v2 now separates chunk cardinality and physical cardinality in a dedicated non-authorizing
+    `kcs.persona.pc-chunk-accounting/v1` sidecar.  Contract checkpoints count distinct scope-qualified semantic
+    endpoints `(scope_id, chunk_id)`, with `chunk_id == chunk_hash`; persona-global chunk hashes,
+    `(scope_id, chunk_id, path)` history bindings, and physical CAS/materialization counters remain separate
+    metrics.  Current and history-only endpoints are disjoint within contract and incidental participation, and
+    the two participation classes are also disjoint.  Rename, cross-scope move, same-scope duplicate, and
+    cross-scope duplicate each carry exact metric-specific deltas, the live/path/collision preconditions needed
+    for those deltas, and a complete six-projection physical table.  The five cross-scope moves are incidental,
+    with `nIM=5`, `qIM` equal to the five observed W0 endpoint-chunk counts, and `5 <= qIM <= 350`; their worst-case
+    W5-pre totals remain below the pilot and full incidental caps.  Performance uses the scope-qualified endpoint
+    count while formal Recall retains the separately compiled `(raw_hash, section)` denominator.
+    The body is 19,801 canonical bytes with SHA-256
+    `d9c59e922a2619b1748194241ffdf47ace3eb034f136b0d04154163bda3ccea2`.  Thirteen focused tests, four hash seeds,
+    independent reconstruction, mutation probes, and final read-only review pass with no blocker.  All execution,
+    source-instance, observed receipt, write, KCS, history, capacity, and G0 authority remains false.
+133. Persona-PC v2 now adds the exact pre-solve `kcs.persona.pc-lifecycle-demand/v2` artifact downstream of the
+    authenticated chunk-accounting sidecar.  Each of twenty personas owns one byte-stable anonymous payload with
+    105 capabilities: one hundred contributor capabilities and five unreserved incidental cross-scope moves.
+    Pilot and full bind the same origin payload bytes.  The artifact fixes U35/I5, P/X/Y/N lifecycle demand,
+    distinct P-prime/X-prime capacity replacements, restore plus paired-delete net-zero groups, pairwise-disjoint
+    current-restored/final-deleted/purged states, surface fact carry-forward, persona emphasis witnesses, and the
+    move crosswalk across four ledgers and twelve projections.  It directly binds chunk accounting at
+    19,801 bytes / `d9c59e922a2619b1748194241ffdf47ace3eb034f136b0d04154163bda3ccea2`, requires the W0
+    sum of five positive endpoint observations, `qIM <= uIM = 350`, and `nIM = 5`, and labels file/inode/object
+    deltas planned and conditional until actual receipts exist.  The lifecycle body is 463,571 canonical bytes
+    with SHA-256 `32e0aaf88632803d41266152b81e2cc2917111d69f6dfb03be0621920c8a0080`.
+    Nineteen focused tests, four hash seeds, ten history-intent regressions, independent dependency reauthentication,
+    adversarial repinning probes, and final review pass.  Source-instance matching, W0 observation, compiled event
+    instances, concrete paths, actual C/H/physical receipts, evaluation targets, execution, and G0 remain false.
+134. Persona-PC v2 now implements the separate non-authorizing
+    `kcs.persona.pc-recursive-robustness-lane-catalog/v1`.  It fixes twenty distinct representative ambient paths,
+    256 file candidates and 128 authored directories per persona, the exact category vector
+    `102/38/38/26/26/13/13`, suite file-depth counts D6/D7/D8=`2,855/1,901/364`, and planned-Dmax persona counts
+    `8/9/3`.  Formal scope overlap, `.kcs`, absolute paths, traversal, and formal gate eligibility are forbidden.
+    Target OS and case mode are metadata only; native execution case mode is unbound.  Each persona therefore has
+    a pre-execution native range of 253--256: a case-insensitive run records three portable ASCII case-collision
+    mates as manifest-only failures, whereas a case-sensitive run may realize all 256.  Candidate, realized, and
+    unrealized outcomes must be reconciled by the execution receipt rather than inferred from persona metadata.
+    The body is 76,099 canonical bytes with SHA-256
+    `49d6fa26cafa902bfca4a102c5e301c27683fd6761bc456a3930cd059f67a4f2`; thirteen focused tests, hash-seed
+    determinism, independent reconstruction, hostile-type/path/TOCTOU probes, and final review pass.  No folder,
+    file, KCS, writer, materialization, or G0 authority is granted.  The chunk-accounting test is included in the
+    nonauthorizing core CI job, and lifecycle-demand plus recursive-robustness tests are included in the inputs job;
+    no remote green result is claimed.
