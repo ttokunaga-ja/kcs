@@ -33,6 +33,7 @@ jobs:
           eval.test_persona_v2_format_implementation_registry
           eval.test_persona_v2_formal_source_recipe_catalog
           eval.test_persona_v2_aggregate_byte_distribution_catalog
+          eval.test_persona_v2_overlay_compatible_byte_distribution
           eval.test_persona_v2_primary_use_case_catalog
           eval.test_persona_v2_chunk_accounting
           eval.test_persona_v2_source_profile_catalog
