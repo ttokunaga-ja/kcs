@@ -70,6 +70,16 @@ jobs:
           python3 -m unittest -v
           eval.test_persona_v2_source_semantic_membership_package
 
+  persona-v2-concrete-overlay-membership-full:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    steps:
+      - uses: actions/checkout@v4
+      - run: >-
+          python3 -m unittest -v
+          eval.test_persona_v2_concrete_overlay_membership_package
+
   rust:
     runs-on: ubuntu-latest
 

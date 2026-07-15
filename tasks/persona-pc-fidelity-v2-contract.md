@@ -10,13 +10,15 @@ source packageは203,000 reference-only rows、73 canonical JSONL shard bodies�
 40 pilot/full profile manifests、71 inventory-only profile IDsを束縛する。さらにsource-owned W0
 semantic-membership packageは、各人45 fact profiles（suite 900）、80 persona-local topics、
 71 semantic profiles、3,733 compact rowsから全203,000 sourceのcontent contextとpresent-fact setを
-logicalにtotal-resolveする。layout自体はrow body/body SHAを持たない。
+logicalにtotal-resolveする。さらに下流のconcrete-overlay membership packageはreservation、structural source、
+semantic/fact manifestsをdirectにjoinし、40 origin + 40 profile manifests、25,560 draft memberships、
+2,100 disjoint anchorsを27,660 rich rowsで束縛する。source-inventory layout自体はrow body/body SHAを持たない。
 overlayのmembership schemaは候補として固定した一方、8軸ledgerはaxis draftで、byte/host-metadata整合と
-persona-local domainが未完成である。unordered W0-current fact pairとsource-owned distinct A/B branch profilesは
-実装済みだが、これらをreservationへjoinするconcrete overlay instance/membershipとscope placementがないため、
-conflict overlay自体は未実現である。
+scope placementが未完成である。unordered W0-current fact pairとsource-owned distinct A/B branch profiles、
+reservation/sourceとのpre-solve joinは実装済みだが、raw rendition、observed search participation、scope assignmentがないため、
+conflict overlayの実ファイル・検索上のrealizabilityは未証明である。
 必要条件は全20人で通過し、structural row bodiesとnarrow semantic/fact projectionは完成したが、
-formal recipeは71件全てunbound、61未対応variant implementation、overlay instance/membership/placement、
+formal recipeは71件全てunbound、61未対応variant implementation、overlay scope placement、
 独立approval receipt、schema別content-only semantic projection、
 実行可能solver、solution、proofは含まない。現input-closureはfull body DAGの互換性候補に限り、
 source ID namespaceとして不適格である。
@@ -237,22 +239,23 @@ canonical bodyは36,811 bytes、SHA-256
 `a32bbb0fd7c88c57205454d8555163ad97b2b1a3024e5a5d7f7234bf56766f05`である。full suiteのmarginalは
 exact duplicate 5,080、near revision 13,230、conflict 1,560、standalone attachment 5,690、pilotは各10分の1。
 `profile_vectors_complete=true`と`overlay_marginal_targets_complete=true`はこの範囲だけを指す。
-intent membership、placement整数割当、logical-document採点/検索参加、8軸台帳、review receiptは未完了である。
+このsidecar単体はintent membershipを持たず、下流concrete packageがmembershipを束縛する。placement整数割当、
+logical-document採点/検索参加、8軸台帳、review receiptは未完了である。
 
 `conflict-copy`の各endpointはfact graphに実在し、同じsubject/predicate、異なるtyped value、W0で双方
 `current`、異なるunordered branchでなければならない。fact-membershipが新しいfactを捏造して充足しては
 ならない。現fact graphは各graphに同一subject/predicate・異なるtyped value・双方W0 `current`で、
 fact-edge上で相互非到達なpairを1組持つ。source-owned semantic-membership packageは1,560 reserved pairsの
-各endpointへ共通6 + branch固有1のdistinct A/B profileを割り当てる。一方、それらをreservationとsourceへ
-joinするconcrete overlay instance/membershipとscope placementは存在しない。このため
-`conflict_fact_realizability_proved=false`を維持し、concrete overlay割当をversioned実装するまでG0へ進めない。
+各endpointへ共通6 + branch固有1のdistinct A/B profileを割り当て、concrete packageはreservation/sourceとの
+exact pre-solve joinを束縛する。一方、scope placement、raw rendition、observed search identityは存在しない。このため
+`conflict_fact_realizability_proved=false`を維持し、joint allocationと実観測を完了するまでG0へ進めない。
 
 最低限、physical materializations、logical documents、gate/search roleとchunks、container members/
 attachments、current/history versions、duplicate/conflict clusters、allocated bytes、cloud/OS由来metadataと
 ignored/excluded entriesを別台帳で整合させる。exact/near/conflictは排他的なcontent-relation軸、attachmentは
 直交するcontainer-role軸とする。frozen envelope内のlegacy総称
 `persona_fidelity_realism_profile_and_overlay_missing`は変更せず維持し、後続sidecarでは
-`overlay-intent-memberships-not-present`、`overlay-placement-integer-allocation-not-bound`、
+`formal-source-recipes-and-renderer-validator-implementations`、`overlay-placement-integer-allocation-not-bound`、
 `logical-document-scoring-and-search-participation-not-bound`、`eight-axis-ledger-contract-not-bound`を
 具体的な未完了条件として追加する。
 
@@ -591,8 +594,8 @@ inventory-only identityでありformal recipe profileではない。formal sourc
 byte/complexityの局所contractだけを検査し、10 profilesが`ready-local-only-formal-recipe-unbound`、
 61 profilesが`blocked-implementation-missing`である。どちらもformal recipe parameter、semantic content、
 overlay instance、fact membership、final source allocation、production MIME golden、filesystem/KCS実行の
-authorityを持たない。overlay contract候補もschemaを記述するだけでinstance/placementを束縛せず、G0 rootの
-入力としては未採用である。
+authorityを持たない。overlay contract候補単体もschemaを記述するだけでinstance/placementを束縛せず、G0 rootの
+入力としては未採用である。instance membershipは後述のnon-authorizing downstream packageだけが束縛する。
 
 source-owned semantic-membership packageはstructural rowの10 fieldsを変更せず、別sidecarで
 `intent_key`、`content_context_id`、`present_fact_set_key`を全203,000 structural keysへexactly once解決する。
@@ -636,12 +639,28 @@ artifact DAGは`fact graph / realism / inventory profile -> semantic catalog`、
 `catalog + source origin + matching reservation origin + matching persona fact graph -> semantic-membership origin`、
 `catalog + origins -> pilot/full profile`、`catalog + origins + profiles + source/reservation suites -> suite`の
 一方向とする。下流manifestが同じimmutable upstreamへ冗長なdirect edgeを持つことは許すが、source/
-reservation/fact graph artifactへ新packageのidentityを逆参照させない。将来のconcrete overlayがreservation、
-source、semantic/fact manifestsを下流から束縛する。expanded membershipはpre-solveの抽象
+reservation/fact graph artifactへ新packageのidentityを逆参照させない。現在のconcrete overlay packageが
+reservation、source、semantic/fact manifestsを下流から束縛する。expanded membershipはpre-solveの抽象
 `semantic_section_key`を持ってよいが、semantic packageへquery/oracle/review receipt、solution/final source/
 materialization、observed raw/chunk/materialized-section IDを含めない。既存source packageの
-`source_intent_inventory_complete=false`を変更せず、formal recipe、concrete
-overlay、正式`semantic_payload` namespace、complete 16 MiB/person cap、G0/render/write authorityを与えない。
+`source_intent_inventory_complete=false`を変更せず、formal recipe、正式`semantic_payload` namespace、
+complete 16 MiB/person cap、G0/render/write authorityを与えない。
+
+`kcs.persona.pc-concrete-overlay-membership-origin-manifest/v2`、同profile manifest、
+`kcs.persona.pc-concrete-overlay-membership-suite/v2`はoverlay contract、reservation suite、source suite、
+semantic-membership suiteをdirectに束縛する一方向のdownstream packageである。40 origins + 40 pilot/full
+profilesが19,870 content-relation rows、5,690 attachment rows、2,100 semantic-anchor rows、合計27,660
+rich rowsを持ち、25,560 draft reservation membershipsをexactに再投影する。46,840 unique overlay source refsと
+それらからdisjointな2,100 anchorsにより48,940 unique joined sourcesを解決する。full relation内訳はexact
+5,080、near 13,230、conflict 1,560、attachment hostsは2,800、exact-overlap attachmentsは1,390である。
+full profileはmatching pilot origin/shardのexact bytes/SHAを再利用し、shard indexはorigin-local 0-basedである。
+
+このpackageはpre-solve membershipだけを完成させる。`placement_class_requirement`はjoint solverへの要件であり
+scope assignmentではない。formal recipes、semantic namespace/query/history target mapping、scope joint
+allocation/solution/proof、actual payload/raw/chunk/search observation、render/write/history/KCS、complete persona
+cap、G0は証明しない。origin/profile/suiteのauthority mapはすべてexact falseである。suite descriptorは
+51,133 canonical bytes、SHA-256
+`4763e06e9408109ad90c5e07a1bb16cd430fd65e6c5730d0015dcbea60cdf41a`に固定する。
 
 ```text
 catalogs:
@@ -861,8 +880,11 @@ pilot/fullの各profile manifestはoverlay reservation suite SHAを直接束縛�
 2 origin manifests + pilot/fullの2 profile manifestsのみ**である。最大p12は8,598,540 bytes / 16 MiBで
 現source-only component capを満たす。semantic suiteのcurrent-component ledgerはこれにmatching reservation
 origins、semantic catalog全量、compact semantic bodies、semantic origin/profile manifestsを保守的に加算し、
-最大p12は12,070,092 bytes、16 MiBまでのheadroomは4,707,124 bytesである。concrete overlay、frame/header、
-formal recipes、その他の将来componentは含まない。よって
+最大p12は12,070,092 bytes、16 MiBまでのheadroomは4,707,124 bytesである。このsemantic ledger単体には
+concrete overlay、frame/header、formal recipesを含まない。concrete overlay suiteのcurrent-component ledgerは
+semantic ledgerをexact baseとし、overlay contract全量、unique concrete origin bodies、pilot/full profile
+manifestsを加算する一方、reservation/catalogを二重計上せず、draft projection receiptとglobal suite descriptorも
+各personaへ課金しない。最大p12は13,275,672 bytes、headroomは3,501,544 bytesである。それでも
 `formal_complete_persona_package_cap_proved=false`、`source_intent_inventory_complete=false`を維持する。
 専用CI job `persona-v2-source-inventory-full`でpackage validatorを分離実行する定義を追加したが、
 実行結果のgreenは本契約では主張しない。
@@ -873,8 +895,16 @@ suite、expanded providers、Hamilton/component closure、version counts、tampe
 `45e849cb2b94392820a21870c93e88e879f99d55a8b83c211663e7b3d1497d62`、suite descriptorは49,837 bytes /
 `62394dd2a3544f7d6c332652e6799b7a60353e8e3aa6a87f80e0ff21590a2e28`に固定する。compact bodiesは
 1,006,627 bytes、expanded context/fact-membership body receiptsは121,020,941 / 135,741,615 bytesを束縛する。
-remote CI greenは主張しない。concrete overlay等を含むcomplete persona packageの実serializationを計測するまで、
-16 MiB capのformal proofへ昇格させない。
+remote CI greenは主張しない。このsemantic gate単体からconcrete overlay completionを推論しない。
+
+concrete-overlay membership packageは専用CI job
+`persona-v2-concrete-overlay-membership-full`でshape、DAG/cross-binding、draft projection、relation/attachment/
+anchor invariants、pilot reuse、byte ledger、tamper rejection、builder-independent validationを回帰し、timeoutを
+90分とする。producer shape testは172.190秒 / 最大RSS 237,158,400 bytes、full buildは155.45秒 /
+最大RSS 192,757,760 bytesと計測した。full independent acceptanceは354.770秒 / 外側最大RSS
+271,368,192 bytesでPASSし、384 MiB RSS gateもPASSした。remote CI greenは主張しない。
+concrete packageまでのcurrent-component capを満たしても、frame/header、formal recipes、
+semantic namespace、solution/proof等を含むcomplete persona packageの16 MiB formal proofへ昇格させない。
 
 `pdf-text`の局所feasibilityは1--72 ASCII text-layer pages、4,096 + 2,048 × (pages - 1) bytesを固定し、
 PDF 1.4のnon-stream 255-byte line上限、xref/trailer/page treeを独立validatorで検査する。renderer contractは
@@ -964,7 +994,7 @@ activity_unit_review_receipt_bound = false
 solver_policy_bound              = false
 route_affinity_matrix_review_receipt_bound = false
 overlay_contract_authoritative   = false
-overlay_instances_bound          = false
+overlay_instances_bound          = false  # concrete packageは存在するが正式G0 rootへ未束縛
 source_recipe_profile_id_bound   = false
 text_renderer_profile_bound      = false
 source_profile_vertical_slice_complete = false
@@ -1017,10 +1047,11 @@ formal flagを変更してはならない。
     数えない。将来local deterministic OCR derivativeを追加する場合は別variant/provenance/contributor契約を
     version updateで先に束縛する
 
-次の実装順は、(1) concrete overlay manifests、(2) formal recipe/renderer implementations、
-(3) corpus semantic namespaceとquery/history mappings、(4) allocation/rendering、(5) folder/file write、
-(6) edits/history、(7) fresh-storage replays、(8) evaluationとする。structural rowsとnarrow semantic/fact
-projectionの完成からconcrete overlay、formal recipe binding、G0、render/writeを推論しない。
+次の実装順は、(1) formal recipe/renderer implementations、
+(2) corpus semantic namespaceとquery/history mappings、(3) joint allocation/solution/proof、
+(4) allocation/rendering、(5) folder/file write、(6) edits/history、(7) fresh-storage replays、
+(8) evaluationとする。concrete pre-solve membershipの完成からscope placement、formal recipe binding、G0、
+render/writeを推論しない。
 
 G0後のrender/index実行ゲートは、logical-document expectedから正式MVP distinct `(raw_hash, section)`
 relevanceへのcompiled binding、observed materialization/chunk ID、lifecycle receiptを別artifactで検証する。
