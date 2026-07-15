@@ -8,15 +8,17 @@ import unittest
 
 from eval import persona_v2_contract as envelope
 from eval import persona_v2_input_bindings as input_bindings
+from eval import persona_v2_pdf_text_renderer as pdf_renderer
+from eval import persona_v2_pdf_text_validator as pdf_validator
 from eval import persona_v2_source_profile_catalog as catalog
 from eval import persona_v2_text_renderer as renderer
 from eval import persona_v2_text_validator as validator
 from eval import persona_v2_variant_catalog as variants
 
 
-EXPECTED_CANONICAL_BYTES = 71_418
+EXPECTED_CANONICAL_BYTES = 72_559
 EXPECTED_CANONICAL_SHA256 = (
-    "470be8c2c485a5ddbc70a0a11701e5cb789db7fde10d9e08995bb7a0ee085049"
+    "6e38fab07851f9fdcbf9d6e67e502484aea7edb66167ea86db1539593b8b58ac"
 )
 
 
@@ -26,7 +28,7 @@ class PersonaV2SourceProfileCatalogTests(unittest.TestCase):
         cls.value = catalog.build_source_profile_catalog()
         cls.upstream = variants.build_variant_catalog()
 
-    def test_all_71_rows_and_exact_nine_ready_variants_are_explicit(self):
+    def test_all_71_rows_and_exact_ten_ready_variants_are_explicit(self):
         value = self.value
         rows = value["source_profile_rows"]
         by_id = {row["variant_id"]: row for row in rows}
@@ -38,10 +40,13 @@ class PersonaV2SourceProfileCatalogTests(unittest.TestCase):
         self.assertEqual(len(rows), 71)
         self.assertEqual(len(by_id), 71)
         self.assertEqual(set(by_id), set(envelope.VARIANT_CATALOG))
-        self.assertEqual(ready, set(renderer.READY_VARIANTS))
-        self.assertEqual(len(ready), 9)
+        self.assertEqual(
+            ready,
+            set(renderer.READY_VARIANTS) | {pdf_renderer.VARIANT_ID},
+        )
+        self.assertEqual(len(ready), 10)
         self.assertEqual(set(value["remaining_variant_ids"]), set(by_id) - ready)
-        self.assertEqual(len(value["remaining_variant_ids"]), 62)
+        self.assertEqual(len(value["remaining_variant_ids"]), 61)
         self.assertEqual(
             [row["variant_id"] for row in rows],
             [
@@ -71,14 +76,24 @@ class PersonaV2SourceProfileCatalogTests(unittest.TestCase):
                 self.assertIs(
                     row["complexity_contract"]["parameters_complete"], True
                 )
-                self.assertEqual(
-                    row["implementation_bindings"]["renderer_id"],
-                    renderer.RENDERER_ID,
-                )
-                self.assertEqual(
-                    row["implementation_bindings"]["validator_id"],
-                    validator.VALIDATOR_ID,
-                )
+                if variant_id == pdf_renderer.VARIANT_ID:
+                    self.assertEqual(
+                        row["implementation_bindings"]["renderer_id"],
+                        pdf_renderer.RENDERER_ID,
+                    )
+                    self.assertEqual(
+                        row["implementation_bindings"]["validator_id"],
+                        pdf_validator.VALIDATOR_ID,
+                    )
+                else:
+                    self.assertEqual(
+                        row["implementation_bindings"]["renderer_id"],
+                        renderer.RENDERER_ID,
+                    )
+                    self.assertEqual(
+                        row["implementation_bindings"]["validator_id"],
+                        validator.VALIDATOR_ID,
+                    )
             else:
                 self.assertEqual(
                     row["bounded_feasibility_profile_id"], "not-bound"
@@ -134,16 +149,16 @@ class PersonaV2SourceProfileCatalogTests(unittest.TestCase):
             value["coverage"],
             {
                 "all_variant_count": 71,
-                "not_ready_variant_count": 62,
-                "ready_active_persona_variant_rows": 96,
-                "ready_persona_variant_rows": 96,
+                "not_ready_variant_count": 61,
+                "ready_active_persona_variant_rows": 116,
+                "ready_persona_variant_rows": 116,
                 "ready_source_counts": {
-                    "tiny_smoke_count": 730,
-                    "pilot_count": 3_957,
-                    "full_count": 39_556,
-                    "full_minus_pilot_count": 35_599,
+                    "tiny_smoke_count": 1_370,
+                    "pilot_count": 6_925,
+                    "full_count": 69_236,
+                    "full_minus_pilot_count": 62_311,
                 },
-                "ready_variant_count": 9,
+                "ready_variant_count": 10,
             },
         )
 
@@ -170,6 +185,26 @@ class PersonaV2SourceProfileCatalogTests(unittest.TestCase):
             bindings["id_free_text_validator"]["sha256"],
             validator.validator_contract_sha256(),
         )
+        self.assertEqual(
+            bindings["id_free_pdf_text_renderer"]["sha256"],
+            pdf_renderer.renderer_contract_sha256(),
+        )
+        self.assertEqual(
+            bindings["id_free_pdf_text_validator"]["sha256"],
+            pdf_validator.validator_contract_sha256(),
+        )
+        self.assertEqual(
+            bindings["id_free_pdf_text_renderer"]["canonical_bytes"],
+            len(pdf_renderer.canonical_json_bytes(
+                pdf_renderer.build_renderer_contract()
+            )),
+        )
+        self.assertEqual(
+            bindings["id_free_pdf_text_validator"]["canonical_bytes"],
+            len(pdf_validator.canonical_json_bytes(
+                pdf_validator.build_validator_contract()
+            )),
+        )
         for name, flag in value["authority"].items():
             self.assertIs(type(flag), bool, name)
             self.assertIs(flag, False, name)
@@ -185,6 +220,8 @@ class PersonaV2SourceProfileCatalogTests(unittest.TestCase):
         sidecar_name = "persona_v2_source_profile_catalog"
         self.assertNotIn(sidecar_name, inspect.getsource(renderer))
         self.assertNotIn(sidecar_name, inspect.getsource(validator))
+        self.assertNotIn(sidecar_name, inspect.getsource(pdf_renderer))
+        self.assertNotIn(sidecar_name, inspect.getsource(pdf_validator))
         self.assertNotIn(sidecar_name, inspect.getsource(variants))
 
     def test_canonical_cap_independent_hash_tamper_and_detachment(self):
@@ -212,6 +249,23 @@ class PersonaV2SourceProfileCatalogTests(unittest.TestCase):
         strict["coverage"]["ready_variant_count"] = True
         with self.assertRaises(catalog.PersonaV2SourceProfileCatalogError):
             catalog.validate_source_profile_catalog(strict)
+
+        pdf_row_tamper = copy.deepcopy(value)
+        pdf_row = next(
+            row
+            for row in pdf_row_tamper["source_profile_rows"]
+            if row["variant_id"] == pdf_renderer.VARIANT_ID
+        )
+        pdf_row["implementation_bindings"]["renderer_id"] = renderer.RENDERER_ID
+        with self.assertRaises(catalog.PersonaV2SourceProfileCatalogError):
+            catalog.validate_source_profile_catalog(pdf_row_tamper)
+
+        pdf_binding_tamper = copy.deepcopy(value)
+        pdf_binding_tamper["input_bindings"]["id_free_pdf_text_validator"][
+            "sha256"
+        ] = "0" * 64
+        with self.assertRaises(catalog.PersonaV2SourceProfileCatalogError):
+            catalog.validate_source_profile_catalog(pdf_binding_tamper)
 
         value["source_profile_rows"][0]["variant_id"] = "poisoned"
         self.assertNotEqual(

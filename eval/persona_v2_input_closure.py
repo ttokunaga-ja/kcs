@@ -265,6 +265,32 @@ _EXACT_TOP_LEVEL_AUTHORITY_FIELDS_BY_SCHEMA = {
             "kcs_execution_attested",
         }
     ),
+    "kcs.persona.pc-id-free-pdf-text-renderer/v2": frozenset(
+        {
+            "actual_chunks_attested",
+            "authorizes_final_source_identifiers",
+            "authorizes_g0_freeze",
+            "authorizes_history_mutation",
+            "authorizes_physical_write",
+            "authorizes_query_plan",
+            "authorizes_source_intents",
+            "authorizes_source_plan",
+            "kcs_execution_attested",
+        }
+    ),
+    "kcs.persona.pc-id-free-pdf-text-validator/v2": frozenset(
+        {
+            "actual_chunks_attested",
+            "authorizes_final_source_identifiers",
+            "authorizes_g0_freeze",
+            "authorizes_history_mutation",
+            "authorizes_physical_write",
+            "authorizes_query_plan",
+            "authorizes_source_intents",
+            "authorizes_source_plan",
+            "kcs_execution_attested",
+        }
+    ),
     "kcs.persona.pc-source-profile-catalog/v2": frozenset(
         {
             "actual_chunks_attested",
@@ -675,6 +701,8 @@ _FALSE_STATUS_TOKENS = (
 )
 _GENERIC_IMPLEMENTATION_SCHEMAS = frozenset(
     {
+        "kcs.persona.pc-id-free-pdf-text-renderer/v2",
+        "kcs.persona.pc-id-free-pdf-text-validator/v2",
         "kcs.persona.pc-id-free-text-renderer/v2",
         "kcs.persona.pc-id-free-text-validator/v2",
     }
@@ -820,6 +848,8 @@ _EXACT_INPUT_BINDING_METADATA = {
         "variant-catalog",
         "id-free-text-renderer",
         "id-free-text-validator",
+        "id-free-pdf-text-renderer",
+        "id-free-pdf-text-validator",
     ],
 }
 

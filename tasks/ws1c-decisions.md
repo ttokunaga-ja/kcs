@@ -961,3 +961,34 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     now 69,119 canonical bytes, SHA-256
     `60c17e893f02309cec4d1de7debca211b2b84fb38c9a41f7f5fb6c586748d4a8`.  No G0, solver,
     renderer, filesystem, KCS, history, capacity, or write authority follows from the fact-pair prerequisite.
+121. Full source cardinality and contributor-format feasibility are separate non-authorizing slices.  The
+    new `kcs.persona.pc-source-inventory-layout/v2` is 274,566 canonical bytes, SHA-256
+    `ef52b756c7100c719f66323cd3cdb4dfc58a78e48d78f2857ca378cb1eb83dba`.  It reserves exactly
+    20,300 pilot plus 182,700 `full-residual` keys, twenty pilot plus fifty-three residual shard ranges,
+    all 566 persona/variant marginals, the 25 hard-zero rows, and exact full gate-role counts
+    69,236 contributor / 60,414 incidental / 73,350 raw-only.  A full manifest must begin with the exact
+    pilot shard references.  The layout deliberately carries no source-intent row bodies, body bytes/SHA,
+    source profile assignment, final ID, scope solution, overlay/fact membership, or materialization
+    authority, so byte reuse, package capacity, the source inventory, and G0 remain unproved.  Pilot keys
+    retain the existing four-digit representative grammar; residual keys use a five-digit origin-local
+    ordinal.  The separate `pdf-text` local-feasibility slice renders 1--72 deterministic ASCII text-layer
+    pages at `4,096 + 2,048 * (pages - 1)` bytes, caps PDF 1.4 non-stream lines at 255 bytes, and independently
+    validates page tree, stream length, xref, trailer, bounded decimal tokens, and identity absence.  Its
+    renderer is 2,075 bytes / `ab66e11d93e2aa7896bdffd28f1c1fec9f443a4ff3b48ba6dcc4d1c12bab69f6`;
+    validator 2,233 / `78c90d4cccb254f67bc030e79eaef46704ce4d8555a3edc8f42edc293e91805e`;
+    and the ten-ready-row source-profile catalog 72,559 /
+    `6e38fab07851f9fdcbf9d6e67e502484aea7edb66167ea86db1539593b8b58ac`.  This supersedes the
+    earlier 9-ready/62-outstanding count with ten contributor feasibility variants covering all 69,236
+    contributor sources and 61 incidental/raw variants still unimplemented.  It does not prove distinct
+    semantic PDF contents, multilingual extraction, query anchors, actual KCS chunks, source recipes, or
+    M3-1 Recall.  The p01 representative source-intent is now 9,886 bytes / SHA-256
+    `e292df1136841f1b246515374e29b9a6926c5b12c15e9d3c39eea5a375bbe3c3`; all twenty source-intent
+    digests change because their source-profile binding changes, and fourteen representatives select
+    `pdf-text`.  The compatibility-only live closure includes both PDF implementation providers and is
+    pinned at semantic 47,495 /
+    `6a7b14dfdf22ddde6e4b96e7f1633b4f2c2168e8d4002c5e042d57e71f67838f`, corpus 3,496 /
+    `79e376975e3b47051950727eb92d37936f7ec7a02464423c9fac8ed1755886d0`, evaluation 5,032 /
+    `af4b50c742473189b274d724791b3b6fad73bedb06b6b1c2165d162ef1c665f2`, and suite 2,609 /
+    `762ee9ffb8d29756b85bc483c46e66fa798ae04a37b9aafb56c5b1e6478b6479`.  These roots remain
+    full-body compatibility candidates, not a semantic-payload namespace or G0 root; every solver,
+    renderer execution, filesystem, KCS, history, capacity, and write authority remains false.

@@ -17,6 +17,8 @@ from eval import persona_v2_input_closure as closure
 from eval import persona_v2_joint_problem as joint_problem
 from eval import persona_v2_joint_solver_policy as solver_policy
 from eval import persona_v2_overlay_contract as overlay
+from eval import persona_v2_pdf_text_renderer as pdf_text_renderer
+from eval import persona_v2_pdf_text_validator as pdf_text_validator
 from eval import persona_v2_query_intent as query_intent
 from eval import persona_v2_realism_profile as realism
 from eval import persona_v2_route_affinity as route_affinity
@@ -37,19 +39,19 @@ PERSONA_ID = "p01"
 EXPECTED_ROOT_IDENTITIES = {
     "corpus": (
         3_496,
-        "54734cd4af63ce304dbfd73fbe93066f113c06a10a69fc296728539f96d11977",
+        "79e376975e3b47051950727eb92d37936f7ec7a02464423c9fac8ed1755886d0",
     ),
     "evaluation": (
         5_032,
-        "a4d61b18c7294d58b1d8590134b6ff32d50a457f58316cd5040b7edd98895d14",
+        "af4b50c742473189b274d724791b3b6fad73bedb06b6b1c2165d162ef1c665f2",
     ),
     "semantic": (
-        46_277,
-        "cc489875eb9d2596fe4ac76c15088dc029767f273268c46c0cb2e19ccf0b9171",
+        47_495,
+        "6a7b14dfdf22ddde6e4b96e7f1633b4f2c2168e8d4002c5e042d57e71f67838f",
     ),
     "suite": (
         2_609,
-        "5b0e432835b636a735a0c7c87d8d5ec2398edc583fa926f33974a717062f729f",
+        "762ee9ffb8d29756b85bc483c46e66fa798ae04a37b9aafb56c5b1e6478b6479",
     ),
 }
 
@@ -119,6 +121,18 @@ def _semantic_inputs():
             text_validator.build_validator_contract(),
             text_validator.validate_validator_contract,
             text_validator.canonical_json_bytes,
+        ),
+        (
+            "id-free-pdf-text-renderer",
+            pdf_text_renderer.build_renderer_contract(),
+            pdf_text_renderer.validate_renderer_contract,
+            pdf_text_renderer.canonical_json_bytes,
+        ),
+        (
+            "id-free-pdf-text-validator",
+            pdf_text_validator.build_validator_contract(),
+            pdf_text_validator.validate_validator_contract,
+            pdf_text_validator.canonical_json_bytes,
         ),
         (
             "source-profile-catalog",
@@ -399,6 +413,14 @@ class PersonaV2InputClosureLiveTests(unittest.TestCase):
             by_id["source-intent-p01"]["dependency_ids"],
         )
         self.assertIn(
+            "id-free-pdf-text-renderer",
+            by_id["source-profile-catalog"]["dependency_ids"],
+        )
+        self.assertIn(
+            "id-free-pdf-text-validator",
+            by_id["source-profile-catalog"]["dependency_ids"],
+        )
+        self.assertIn(
             "source-intent-p01",
             by_id["fact-membership-p01"]["dependency_ids"],
         )
@@ -441,37 +463,43 @@ class PersonaV2InputClosureLiveTests(unittest.TestCase):
             self.assertEqual(len(byte_builder(actual)), expected_bytes)
             self.assertEqual(digest_builder(actual), expected_sha256)
 
-    def test_omitted_variant_dependency_is_not_silently_ignored(self):
-        pins = []
-        for row in self.live["semantic_pins"]:
-            if row["entry_id"] == "variant-catalog":
-                continue
-            replacement = dict(row)
-            replacement["dependency_ids"] = [
-                dependency_id
-                for dependency_id in row["dependency_ids"]
-                if dependency_id != "variant-catalog"
-            ]
-            pins.append(replacement)
-        providers = [
-            provider
-            for provider in self.live["semantic_providers"]
-            if provider["entry_id"] != "variant-catalog"
-        ]
-        roots = [
-            root_id
-            for root_id in self.live["semantic_roots"]
-            if root_id != "variant-catalog"
-        ]
-        with self.assertRaisesRegex(
-            closure.PersonaV2InputClosureError,
-            "input dependency SHA has no known pin|dependency SHA.*no known pin",
+    def test_omitted_catalog_or_pdf_dependency_is_not_silently_ignored(self):
+        for omitted_id in (
+            "variant-catalog",
+            "id-free-pdf-text-renderer",
+            "id-free-pdf-text-validator",
         ):
-            closure.build_corpus_semantic_namespace(
-                pins=pins,
-                providers=providers,
-                root_entry_ids=roots,
-            )
+            with self.subTest(omitted_id=omitted_id):
+                pins = []
+                for row in self.live["semantic_pins"]:
+                    if row["entry_id"] == omitted_id:
+                        continue
+                    replacement = dict(row)
+                    replacement["dependency_ids"] = [
+                        dependency_id
+                        for dependency_id in row["dependency_ids"]
+                        if dependency_id != omitted_id
+                    ]
+                    pins.append(replacement)
+                providers = [
+                    provider
+                    for provider in self.live["semantic_providers"]
+                    if provider["entry_id"] != omitted_id
+                ]
+                roots = [
+                    root_id
+                    for root_id in self.live["semantic_roots"]
+                    if root_id != omitted_id
+                ]
+                with self.assertRaisesRegex(
+                    closure.PersonaV2InputClosureError,
+                    "input dependency SHA has no known pin|dependency SHA.*no known pin",
+                ):
+                    closure.build_corpus_semantic_namespace(
+                        pins=pins,
+                        providers=providers,
+                        root_entry_ids=roots,
+                    )
 
 
 if __name__ == "__main__":

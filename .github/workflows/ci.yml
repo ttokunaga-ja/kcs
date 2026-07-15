@@ -23,6 +23,7 @@ jobs:
           eval.test_persona_v2_route_affinity
           eval.test_persona_v2_fact_graph
           eval.test_persona_v2_text_renderer_validator
+          eval.test_persona_v2_pdf_text_renderer_validator
           eval.test_persona_v2_source_profile_catalog
           eval.test_persona_v2_overlay_contract
 
@@ -37,6 +38,7 @@ jobs:
           eval.test_persona_v2_bounded_body
           eval.test_persona_v2_bounded_jsonl
           eval.test_persona_v2_route_review_receipt
+          eval.test_persona_v2_source_inventory_layout
           eval.test_persona_v2_source_intent
           eval.test_persona_v2_fact_membership
           eval.test_persona_v2_history_intent
