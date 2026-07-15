@@ -1339,3 +1339,47 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     file, KCS, writer, materialization, or G0 authority is granted.  The chunk-accounting test is included in the
     nonauthorizing core CI job, and lifecycle-demand plus recursive-robustness tests are included in the inputs job;
     no remote green result is claimed.
+135. Persona-PC v2 planning now distinguishes three lifecycle stages instead of treating a source-matched event
+    inventory as already compiled.  Before solving, a source-matched lifecycle intent inventory binds exact source
+    intents/capabilities, event counts, templates, dependencies, and abstract scope/path/delta rules, but no solved
+    scope, path, quota, final ID, or actual `qIM`.  After the exact solution and final source plan, a
+    solution-compiled planned history plan binds solved identities and contract deltas while retaining an explicit
+    move-delta patch slot.  Only a positive W0 offline-index receipt may feed the post-W0 patch that literalizes the
+    five cross-scope move sources' `qIM`-dependent incidental, history-binding, and physical deltas before W2.
+    Missing, mismatched, zero, out-of-range, or duplicate patches fail closed; contract C/H remains `(0,0)`.
+    The same clarification separates G0 serialized/planning/path caps from G4 actual root-bound byte/inode capacity,
+    defines exact `source-origin-to-solver-phase-v1` mapping (`pilot -> pilot`, `full-residual -> full-minus-pilot`),
+    and requires a future `kcs.persona.pc-g0-blocker-resolution-ledger/v2` to classify immutable historical blocker
+    fields by exact artifact pin/path as active, downstream-resolved, post-G0 deferred, or historical-local-negative.
+    Existing pinned artifacts and their historical false fields are not rewritten.
+    The formerly ambiguous sixteen-MiB denominator is now the pre-solve corpus-input persona package only: unique
+    source shards/manifests, semantic compact/manifests, concrete overlay, per-person formal recipe/source-instance
+    assignment, and required frame/header, with shared catalogs charged once and solution/proof, final W0 plan,
+    history plan, query/oracle bundle, and global descriptors excluded.  The separate caps are: a combined final W0
+    source-plan/manifest/planned-ledger/frame package (16 MiB/person), a combined canonical solution plus proof or
+    bounded-replay certificate package (8 MiB/person), a combined source-matched pre-solve plus solution-compiled
+    history-plan/manifest/frame package (16 MiB/person), and the query/oracle bundle (4 MiB/person).  Runtime solver
+    telemetry, W0 `qIM` receipt/patch, and observed lifecycle receipts are excluded from those planning packages.
+    The current p12 13,275,672-byte ledger remains only a partial proof, so
+    `pre_solve_persona_input_package_cap_proved=false`; G0, solution, compiled-runtime history, qIM patch, actual
+    chunks, root capacity, render/write/history/KCS execution, and all other authorities remain false.
+136. Persona-PC v2 now inserts a non-authorizing
+    `kcs.persona.pc-overlay-compatible-byte-distribution/v2` sidecar between the immutable aggregate-byte base and
+    source-instance parameter assignment.  The base remains pinned at 1,576,125 bytes /
+    `7f2fdcc823885401cb7ed1b8fc42c9010b38af63d2c58879babb28aadeb6b343`; it is not rewritten.  Its EML bins expose
+    only complexities 0, 1, and 5, while the concrete overlay requires all host fanouts 1 through 5, making all
+    forty persona-origin coordinates infeasible without a downstream refinement.  The sidecar directly binds the
+    base catalog, all-71 implementation registry, and concrete-overlay reservation suite, assigns each EML host
+    `target_complexity == host_member_count`, assigns every nonhost complexity zero, and inherits every non-EML
+    persona-variant row byte-exactly while recomputing all family, persona, and suite projections.  The full fanout
+    vector is `1:1,370 / 2:590 / 3:400 / 4:260 / 5:180` over 2,800 hosts and 5,690
+    memberships.  Its effective full distribution is 203,000 files, 5,029,207,294 raw bytes, 5,189,435,392 bytes
+    after per-file 4-KiB rounding, p50 8,192, p95 129,024, max 2,621,440, and 160 formal tails; p12 is the largest
+    persona at 411,774,976 rounded bytes.  Pilot and full-residual are respectively 499,432,669 / 515,411,968 and
+    4,529,774,625 / 4,674,023,424 raw / rounded bytes and close exactly to full.  The canonical sidecar is 91,039
+    bytes with SHA-256 `e4acd26dd7b268d86e21320a4a893416e7de169501b479a0bd8a215927265a89`.
+    Twenty focused tests, two hash seeds, dependency and origin-manifest authentication, independent reconstruction,
+    direct native-payload validation, forged-receipt rejection, provider-alias and metadata-TOCTOU probes, strict
+    bool/integer rejection, and read-only P0/P1 review pass.  The artifact grants no source assignment,
+    decoded-attachment equivalence, payload, materialization, capacity,
+    write, execution, KCS, G0, or other authority.
