@@ -13,6 +13,7 @@ history execution, KCS execution, G0 freeze, and write authority remain absent.
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import gc
@@ -2926,7 +2927,7 @@ def _clear_working_caches():
             pass
 
 
-def validate_concrete_overlay_membership_package(
+def _validate_concrete_overlay_membership_package_snapshot(
     suite,
     origin_manifests,
     profile_manifests,
@@ -3054,6 +3055,260 @@ def validate_concrete_overlay_membership_package(
                 pass
         _clear_working_caches()
         gc.collect()
+
+
+def _snapshot_artifact(value, *, label, max_bytes):
+    raw = _canonical_bytes(value, label=label, max_bytes=max_bytes)
+    return copy.deepcopy(value), raw
+
+
+def _snapshot_artifact_list(values, *, label, expected_count, max_bytes):
+    if type(values) is not list or len(values) != expected_count:
+        _fail(f"{label} must be an exact {expected_count}-item list")
+    snapshots = []
+    raws = []
+    for value in values:
+        snapshot, raw = _snapshot_artifact(
+            value,
+            label=label,
+            max_bytes=max_bytes,
+        )
+        snapshots.append(snapshot)
+        raws.append(raw)
+    return snapshots, tuple(raws)
+
+
+def _reauth_artifact(value, opening_raw, *, label, max_bytes):
+    try:
+        current_raw = _canonical_bytes(value, label=label, max_bytes=max_bytes)
+    except PersonaV2ConcreteOverlayMembershipPackageValidationError:
+        _fail(f"caller-owned {label} changed during provider callback")
+    if current_raw != opening_raw:
+        _fail(f"caller-owned {label} changed during provider callback")
+
+
+def _reauth_artifact_list(
+    values, opening_raws, *, label, expected_count, max_bytes
+):
+    if type(values) is not list or len(values) != expected_count:
+        _fail(f"caller-owned {label} changed during provider callback")
+    for value, opening_raw in zip(values, opening_raws, strict=True):
+        _reauth_artifact(
+            value,
+            opening_raw,
+            label=label,
+            max_bytes=max_bytes,
+        )
+
+
+def validate_concrete_overlay_membership_package(
+    suite,
+    origin_manifests,
+    profile_manifests,
+    membership_body_provider,
+    *,
+    overlay_contract_value,
+    reservation_suite,
+    reservation_origin_artifacts,
+    semantic_catalog,
+    semantic_suite,
+    semantic_origin_manifests,
+    semantic_profile_manifests,
+    semantic_compact_origin_body_provider,
+    semantic_expanded_context_body_provider,
+    semantic_expanded_membership_body_provider,
+    source_suite,
+    source_origin_manifests,
+    source_profile_manifests,
+    source_shard_body_provider,
+):
+    """Validate detached metadata and reject provider callback TOCTOU."""
+
+    suite_snapshot, suite_raw = _snapshot_artifact(
+        suite,
+        label="persona v2 concrete overlay membership suite",
+        max_bytes=MAX_SUITE_DESCRIPTOR_BYTES,
+    )
+    origin_snapshots, origin_raws = _snapshot_artifact_list(
+        origin_manifests,
+        label="persona v2 concrete overlay membership origin manifest",
+        expected_count=EXPECTED_ORIGIN_COUNT,
+        max_bytes=MAX_ORIGIN_MANIFEST_BYTES,
+    )
+    profile_snapshots, profile_raws = _snapshot_artifact_list(
+        profile_manifests,
+        label="persona v2 concrete overlay membership profile manifest",
+        expected_count=EXPECTED_PROFILE_COUNT,
+        max_bytes=MAX_PROFILE_MANIFEST_BYTES,
+    )
+    overlay_contract_snapshot, overlay_contract_raw = _snapshot_artifact(
+        overlay_contract_value,
+        label="bound overlay contract",
+        max_bytes=overlay_contract.MAX_OVERLAY_CONTRACT_BYTES,
+    )
+    reservation_suite_snapshot, reservation_suite_raw = _snapshot_artifact(
+        reservation_suite,
+        label="bound overlay reservation suite",
+        max_bytes=reservation_validator.MAX_SUITE_ARTIFACT_BYTES,
+    )
+    reservation_origin_snapshots, reservation_origin_raws = _snapshot_artifact_list(
+        reservation_origin_artifacts,
+        label="bound overlay reservation origin",
+        expected_count=EXPECTED_ORIGIN_COUNT,
+        max_bytes=reservation_validator.MAX_ORIGIN_ARTIFACT_BYTES,
+    )
+    semantic_catalog_snapshot, semantic_catalog_raw = _snapshot_artifact(
+        semantic_catalog,
+        label="bound source semantic membership catalog",
+        max_bytes=semantic_validator.MAX_CATALOG_BYTES,
+    )
+    semantic_suite_snapshot, semantic_suite_raw = _snapshot_artifact(
+        semantic_suite,
+        label="bound source semantic membership suite",
+        max_bytes=semantic_validator.MAX_SUITE_DESCRIPTOR_BYTES,
+    )
+    semantic_origin_snapshots, semantic_origin_raws = _snapshot_artifact_list(
+        semantic_origin_manifests,
+        label="bound source semantic membership origin manifest",
+        expected_count=EXPECTED_ORIGIN_COUNT,
+        max_bytes=semantic_validator.MAX_ORIGIN_MANIFEST_BYTES,
+    )
+    semantic_profile_snapshots, semantic_profile_raws = _snapshot_artifact_list(
+        semantic_profile_manifests,
+        label="bound source semantic membership profile manifest",
+        expected_count=EXPECTED_PROFILE_COUNT,
+        max_bytes=semantic_validator.MAX_PROFILE_MANIFEST_BYTES,
+    )
+    source_suite_snapshot, source_suite_raw = _snapshot_artifact(
+        source_suite,
+        label="bound source inventory suite",
+        max_bytes=source_validator.MAX_SUITE_DESCRIPTOR_BYTES,
+    )
+    source_origin_snapshots, source_origin_raws = _snapshot_artifact_list(
+        source_origin_manifests,
+        label="bound source inventory origin manifest",
+        expected_count=EXPECTED_ORIGIN_COUNT,
+        max_bytes=source_validator.MAX_ORIGIN_MANIFEST_BYTES,
+    )
+    source_profile_snapshots, source_profile_raws = _snapshot_artifact_list(
+        source_profile_manifests,
+        label="bound source inventory profile manifest",
+        expected_count=EXPECTED_PROFILE_COUNT,
+        max_bytes=source_validator.MAX_PROFILE_MANIFEST_BYTES,
+    )
+    try:
+        return _validate_concrete_overlay_membership_package_snapshot(
+            suite_snapshot,
+            origin_snapshots,
+            profile_snapshots,
+            membership_body_provider,
+            overlay_contract_value=overlay_contract_snapshot,
+            reservation_suite=reservation_suite_snapshot,
+            reservation_origin_artifacts=reservation_origin_snapshots,
+            semantic_catalog=semantic_catalog_snapshot,
+            semantic_suite=semantic_suite_snapshot,
+            semantic_origin_manifests=semantic_origin_snapshots,
+            semantic_profile_manifests=semantic_profile_snapshots,
+            semantic_compact_origin_body_provider=(
+                semantic_compact_origin_body_provider
+            ),
+            semantic_expanded_context_body_provider=(
+                semantic_expanded_context_body_provider
+            ),
+            semantic_expanded_membership_body_provider=(
+                semantic_expanded_membership_body_provider
+            ),
+            source_suite=source_suite_snapshot,
+            source_origin_manifests=source_origin_snapshots,
+            source_profile_manifests=source_profile_snapshots,
+            source_shard_body_provider=source_shard_body_provider,
+        )
+    finally:
+        _reauth_artifact(
+            suite,
+            suite_raw,
+            label="concrete overlay membership suite",
+            max_bytes=MAX_SUITE_DESCRIPTOR_BYTES,
+        )
+        _reauth_artifact_list(
+            origin_manifests,
+            origin_raws,
+            label="concrete overlay membership origin manifests",
+            expected_count=EXPECTED_ORIGIN_COUNT,
+            max_bytes=MAX_ORIGIN_MANIFEST_BYTES,
+        )
+        _reauth_artifact_list(
+            profile_manifests,
+            profile_raws,
+            label="concrete overlay membership profile manifests",
+            expected_count=EXPECTED_PROFILE_COUNT,
+            max_bytes=MAX_PROFILE_MANIFEST_BYTES,
+        )
+        _reauth_artifact(
+            overlay_contract_value,
+            overlay_contract_raw,
+            label="bound overlay contract",
+            max_bytes=overlay_contract.MAX_OVERLAY_CONTRACT_BYTES,
+        )
+        _reauth_artifact(
+            reservation_suite,
+            reservation_suite_raw,
+            label="bound overlay reservation suite",
+            max_bytes=reservation_validator.MAX_SUITE_ARTIFACT_BYTES,
+        )
+        _reauth_artifact_list(
+            reservation_origin_artifacts,
+            reservation_origin_raws,
+            label="bound overlay reservation origins",
+            expected_count=EXPECTED_ORIGIN_COUNT,
+            max_bytes=reservation_validator.MAX_ORIGIN_ARTIFACT_BYTES,
+        )
+        _reauth_artifact(
+            semantic_catalog,
+            semantic_catalog_raw,
+            label="bound source semantic membership catalog",
+            max_bytes=semantic_validator.MAX_CATALOG_BYTES,
+        )
+        _reauth_artifact(
+            semantic_suite,
+            semantic_suite_raw,
+            label="bound source semantic membership suite",
+            max_bytes=semantic_validator.MAX_SUITE_DESCRIPTOR_BYTES,
+        )
+        _reauth_artifact_list(
+            semantic_origin_manifests,
+            semantic_origin_raws,
+            label="bound source semantic membership origins",
+            expected_count=EXPECTED_ORIGIN_COUNT,
+            max_bytes=semantic_validator.MAX_ORIGIN_MANIFEST_BYTES,
+        )
+        _reauth_artifact_list(
+            semantic_profile_manifests,
+            semantic_profile_raws,
+            label="bound source semantic membership profiles",
+            expected_count=EXPECTED_PROFILE_COUNT,
+            max_bytes=semantic_validator.MAX_PROFILE_MANIFEST_BYTES,
+        )
+        _reauth_artifact(
+            source_suite,
+            source_suite_raw,
+            label="bound source inventory suite",
+            max_bytes=source_validator.MAX_SUITE_DESCRIPTOR_BYTES,
+        )
+        _reauth_artifact_list(
+            source_origin_manifests,
+            source_origin_raws,
+            label="bound source inventory origins",
+            expected_count=EXPECTED_ORIGIN_COUNT,
+            max_bytes=source_validator.MAX_ORIGIN_MANIFEST_BYTES,
+        )
+        _reauth_artifact_list(
+            source_profile_manifests,
+            source_profile_raws,
+            label="bound source inventory profiles",
+            expected_count=EXPECTED_PROFILE_COUNT,
+            max_bytes=source_validator.MAX_PROFILE_MANIFEST_BYTES,
+        )
 
 
 __all__ = [

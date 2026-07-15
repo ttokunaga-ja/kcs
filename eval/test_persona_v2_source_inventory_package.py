@@ -7,6 +7,7 @@ import os
 import subprocess
 import sys
 import unittest
+from unittest import mock
 
 from eval import persona_v2_artifact_common as artifact_common
 from eval import persona_v2_contract as envelope
@@ -599,6 +600,48 @@ class PersonaV2SourceInventoryPackageTests(unittest.TestCase):
 
         with self.assertRaises(package.PersonaV2SourceInventoryPackageError):
             package.require_complete_source_intent_inventory()
+
+    def test_provider_callback_metadata_mutation_is_rejected_postflight(self):
+        suite = copy.deepcopy(self.suite)
+        origins = copy.deepcopy(self.origins)
+        profiles = copy.deepcopy(self.profiles)
+        opening_scope = suite["completion_scope"]
+
+        def detached_validation(
+            suite_snapshot,
+            origin_snapshots,
+            profile_snapshots,
+            body_provider,
+        ):
+            self.assertIsNot(suite_snapshot, suite)
+            self.assertIsNot(origin_snapshots, origins)
+            self.assertIsNot(profile_snapshots, profiles)
+            body_provider("p01", "pilot", 1)
+            self.assertEqual(suite_snapshot["completion_scope"], opening_scope)
+            return True
+
+        def mutating_provider(persona_id, origin, shard_ordinal):
+            suite["completion_scope"] = "mutated-during-provider-callback"
+            return self._body_provider(persona_id, origin, shard_ordinal)
+
+        with mock.patch.object(
+            independent_validator,
+            "_validate_source_inventory_package_snapshot",
+            side_effect=detached_validation,
+        ):
+            with self.assertRaisesRegex(
+                independent_validator.PersonaV2SourceInventoryPackageValidationError,
+                "changed during provider callback",
+            ):
+                independent_validator.validate_source_inventory_package(
+                    suite,
+                    origins,
+                    profiles,
+                    mutating_provider,
+                )
+        self.assertEqual(
+            suite["completion_scope"], "mutated-during-provider-callback"
+        )
 
     def test_nested_metadata_tamper_fails_before_any_body_access(self):
         candidates = []

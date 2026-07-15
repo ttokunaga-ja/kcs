@@ -16,6 +16,7 @@ import subprocess
 import sys
 import unittest
 from collections import Counter, defaultdict
+from unittest import mock
 
 from eval import persona_v2_artifact_common as artifact_common
 from eval import (
@@ -770,6 +771,64 @@ class PersonaV2ConcreteOverlayMembershipPackageTests(unittest.TestCase):
         )
         self.assertEqual(receipt["row_count"], 1)
         self.assertNotEqual(_flip_one_body_byte(body), body)
+
+    def test_provider_callback_target_and_upstream_metadata_mutation_are_rejected(self):
+        self._ensure_package()
+        self._ensure_upstream()
+
+        for mutation_target in ("concrete-suite", "semantic-suite"):
+            with self.subTest(mutation_target=mutation_target):
+                suite = copy.deepcopy(self.suite)
+                origins = copy.deepcopy(self.origins)
+                profiles = copy.deepcopy(self.profiles)
+                upstream = copy.deepcopy(self.upstream)
+                target_opening_scope = suite["completion_scope"]
+                semantic_opening_scope = upstream["semantic_suite"][
+                    "completion_scope"
+                ]
+
+                def mutating_provider(*coordinate):
+                    if mutation_target == "concrete-suite":
+                        suite["completion_scope"] = (
+                            "mutated-during-provider-callback"
+                        )
+                    else:
+                        upstream["semantic_suite"]["completion_scope"] = (
+                            "mutated-during-provider-callback"
+                        )
+                    return b""
+
+                def detached_validation(*args, **kwargs):
+                    self.assertIsNot(args[0], suite)
+                    self.assertIsNot(
+                        kwargs["semantic_suite"], upstream["semantic_suite"]
+                    )
+                    args[3]("p01", "pilot", 0)
+                    self.assertEqual(
+                        args[0]["completion_scope"], target_opening_scope
+                    )
+                    self.assertEqual(
+                        kwargs["semantic_suite"]["completion_scope"],
+                        semantic_opening_scope,
+                    )
+                    return True
+
+                with mock.patch.object(
+                    independent_validator,
+                    "_validate_concrete_overlay_membership_package_snapshot",
+                    side_effect=detached_validation,
+                ):
+                    with self.assertRaisesRegex(
+                        ConcreteValidationError,
+                        "changed during provider callback",
+                    ):
+                        self._validate_public(
+                            suite=suite,
+                            origins=origins,
+                            profiles=profiles,
+                            upstream_overrides=upstream,
+                            providers={"membership": mutating_provider},
+                        )
 
     def test_full_package_shape_semantics_pins_and_negative_authority(self):
         self._ensure_package()

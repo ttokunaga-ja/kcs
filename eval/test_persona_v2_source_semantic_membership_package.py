@@ -10,6 +10,7 @@ import subprocess
 import sys
 import unittest
 from collections import Counter, defaultdict
+from unittest import mock
 
 from eval import persona_v2_artifact_common as artifact_common
 from eval import persona_v2_contract as envelope
@@ -1846,6 +1847,71 @@ print(json.dumps({"rss_bytes": rss_bytes, "success": success}, sort_keys=True))
         self.assertIs(measured["success"], True)
         self.assertGreater(measured["rss_bytes"], 0)
         self.assertLessEqual(measured["rss_bytes"], MAX_BUILD_RSS_BYTES)
+
+    def test_provider_callback_target_and_upstream_metadata_mutation_are_rejected(self):
+        base_origins, base_profiles, base_suite = self._full_package_values()
+        base_source_origins, base_source_profiles, base_source_suite = (
+            self._upstream_source_values()
+        )
+
+        for mutation_target in ("semantic-suite", "source-suite"):
+            with self.subTest(mutation_target=mutation_target):
+                catalog = copy.deepcopy(self.catalog)
+                suite = copy.deepcopy(base_suite)
+                origins = copy.deepcopy(base_origins)
+                profiles = copy.deepcopy(base_profiles)
+                source_suite = copy.deepcopy(base_source_suite)
+                source_origins = copy.deepcopy(base_source_origins)
+                source_profiles = copy.deepcopy(base_source_profiles)
+                semantic_opening_scope = suite["completion_scope"]
+                source_opening_scope = source_suite["completion_scope"]
+
+                def mutating_provider(*coordinates):
+                    if mutation_target == "semantic-suite":
+                        suite["completion_scope"] = (
+                            "mutated-during-provider-callback"
+                        )
+                    else:
+                        source_suite["completion_scope"] = (
+                            "mutated-during-provider-callback"
+                        )
+                    return b""
+
+                def detached_validation(*args, **kwargs):
+                    self.assertIsNot(args[1], suite)
+                    self.assertIsNot(kwargs["source_suite"], source_suite)
+                    args[4]("p01", "pilot")
+                    self.assertEqual(
+                        args[1]["completion_scope"], semantic_opening_scope
+                    )
+                    self.assertEqual(
+                        kwargs["source_suite"]["completion_scope"],
+                        source_opening_scope,
+                    )
+                    return True
+
+                with mock.patch.object(
+                    independent_validator,
+                    "_validate_source_semantic_membership_package_snapshot",
+                    side_effect=detached_validation,
+                ):
+                    with self.assertRaisesRegex(
+                        independent_validator.PersonaV2SourceSemanticMembershipPackageValidationError,
+                        "changed during provider callback",
+                    ):
+                        independent_validator.validate_source_semantic_membership_package(
+                            catalog,
+                            suite,
+                            origins,
+                            profiles,
+                            mutating_provider,
+                            mutating_provider,
+                            mutating_provider,
+                            source_suite=source_suite,
+                            source_origin_manifests=source_origins,
+                            source_profile_manifests=source_profiles,
+                            source_shard_body_provider=mutating_provider,
+                        )
 
     def test_digest_rethreaded_metadata_tamper_fails_before_body_access(self):
         base_origins, base_profiles, base_suite = self._full_package_values()
