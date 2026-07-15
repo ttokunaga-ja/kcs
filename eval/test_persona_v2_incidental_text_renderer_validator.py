@@ -352,7 +352,9 @@ class PersonaV2IncidentalTextRendererValidatorTests(unittest.TestCase):
 
         valid = self._validation_request("json", 2)
         invalid_validation = (
-            ValidationRequestSubclass(*valid.__dict__.values()),
+            ValidationRequestSubclass(
+                *(getattr(valid, field.name) for field in fields(valid))
+            ),
             replace(valid, schema_version=True),
             replace(valid, data=bytearray(valid.data)),
             replace(valid, data=BytesSubclass(valid.data)),

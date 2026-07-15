@@ -204,7 +204,7 @@ class PersonaV2TextValidatorError(ValueError):
     """Raised when bytes or metadata violate the standalone contract."""
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class TextValidationRequest:
     """The complete identity-free payload supplied to the validator."""
 
@@ -220,7 +220,7 @@ class TextValidationRequest:
 
 def _profile(variant):
     if type(variant) is not str or variant not in _VARIANT_ROWS:
-        raise PersonaV2TextValidatorError(f"unsupported text variant: {variant!r}")
+        raise PersonaV2TextValidatorError("unsupported text variant")
     return _VARIANT_ROWS[variant]
 
 

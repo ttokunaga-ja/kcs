@@ -191,7 +191,7 @@ class PersonaV2TextRendererError(ValueError):
     """Raised when the narrow v2 text renderer contract is violated."""
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class TextRenderRequest:
     """An intentionally identity-free feasibility request."""
 
@@ -200,7 +200,7 @@ class TextRenderRequest:
     target_complexity: int
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class RenderedText:
     """Rendered bytes and non-authoritative format/complexity metadata."""
 
@@ -217,7 +217,7 @@ class RenderedText:
 
 def _profile(variant):
     if type(variant) is not str or variant not in _VARIANT_ROWS:
-        raise PersonaV2TextRendererError(f"unsupported text variant: {variant!r}")
+        raise PersonaV2TextRendererError("unsupported text variant")
     return _VARIANT_ROWS[variant]
 
 

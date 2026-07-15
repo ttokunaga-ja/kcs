@@ -25,6 +25,13 @@ jobs:
           eval.test_persona_v2_text_renderer_validator
           eval.test_persona_v2_pdf_text_renderer_validator
           eval.test_persona_v2_incidental_text_renderer_validator
+          eval.test_persona_v2_raw_document_renderer_validator
+          eval.test_persona_v2_raw_image_media_renderer_validator
+          eval.test_persona_v2_raw_zip_renderer_validator
+          eval.test_persona_v2_raw_tar_gzip_renderer_validator
+          eval.test_persona_v2_raw_domain_renderer_validator
+          eval.test_persona_v2_format_implementation_registry
+          eval.test_persona_v2_formal_source_recipe_catalog
           eval.test_persona_v2_source_profile_catalog
           eval.test_persona_v2_overlay_contract
 

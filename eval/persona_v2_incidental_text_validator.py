@@ -257,7 +257,7 @@ class PersonaV2IncidentalTextValidatorError(ValueError):
     """Raised when incidental bytes or metadata violate the exact contract."""
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class IncidentalTextValidationRequest:
     """The complete identity-free incidental payload supplied for validation."""
 
@@ -277,7 +277,7 @@ def _fail(message):
 
 def _profile(variant):
     if type(variant) is not str or variant not in _VARIANT_ROWS:
-        _fail(f"unsupported incidental text variant: {variant!r}")
+        _fail("unsupported incidental text variant")
     return _VARIANT_ROWS[variant]
 
 

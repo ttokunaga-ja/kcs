@@ -18,9 +18,13 @@ overlayのmembership schemaは候補として固定した一方、8軸ledgerはa
 scope placementが未完成である。unordered W0-current fact pairとsource-owned distinct A/B branch profiles、
 reservation/sourceとのpre-solve joinは実装済みだが、raw rendition、observed search participation、scope assignmentがないため、
 conflict overlayの実ファイル・検索上のrealizabilityは未証明である。
-必要条件は全20人で通過し、structural row bodiesとnarrow semantic/fact projectionは完成したが、
-formal recipeは71件全てunboundである。凍結済みsource-profile catalogの10 local-ready / 61 missingは維持し、
-後続のincidental-text pairで11件を局所実装したため、現在の下流実装可用性は21 / 71、未対応はraw-only 50 / 71である。
+必要条件は全20人で通過し、structural row bodiesとnarrow semantic/fact projectionは完成した。上流の凍結済み
+inventory catalogではformal recipe slot 71件をunboundのまま維持する一方、下流の非authorizing catalogで
+71 variant-level recipe profile policyをinventory/semantic/renderer/validator slotへ1対1に束縛した。
+凍結済みsource-profile catalogの10 local-ready / 61 missingは歴史的snapshotとして維持し、後続の
+incidental-text 11件とraw-only 50件を局所実装した。all-71 implementation registryが8 pairs、
+16 contract bodies、71 ownership rows、213 runtime probesを束縛し、現在の下流形式実装可用性と
+variant-level recipe policyは71 / 71である。ただし203,000 source-instance recipe値は未束縛である。
 overlay scope placement、
 独立approval receipt、schema別content-only semantic projection、
 実行可能solver、solution、proofは含まない。現input-closureはfull body DAGの互換性候補に限り、
@@ -68,6 +72,12 @@ folder/file生成 -> 全scope W0 offline index/attestation -> W1-W5 edit/lifecyc
 完成rootはcopyせず、各replayを同じplan/eventからW0より再生成する。3 replayすべての完了後に、
 構造・比率・chunk/history・query・capacityを検証する。4回目のreplayはこの契約に含めない。
 
+W0とW5 finalではpersona x replayごとにobserved structural/materialization receiptを必須とする。
+このreceiptはfamily/variant/gate-role件数、scope別file数、file/directory depth histogram、
+unique prefix数、max fan-out、extension/magic/MIME/disposition/validator結果、raw/allocated bytes、
+inodes、人物・family別p50/p95/max/tail、path/casefold collision、リンク/クローン/共有inode不在を束縛する。
+suite poolingによる相殺は禁止し、各20人 x 3 replayが個別にplanと一致しなければならない。
+
 ## 2. lane境界
 
 1つの小さなsuite descriptorが、次の3つの独立したversioned lane spec hashを束縛する。
@@ -80,6 +90,11 @@ folder/file生成 -> 全scope W0 offline index/attestation -> W1-W5 edit/lifecyc
 
 robustness entryとbyte-stress entryをformal family ratio、scope count、chunk count、Recall queryへ
 混ぜない。各laneは別root、別manifest、別receiptを持つ。
+formalのネストは`home/`からleaf scopeまでD2--D6とし、managed fileはleaf直下だけに置く。
+recursive robustnessはD6--D8とし、中間directoryのfile、partial/cache/conflict/case/Unicodeを含める。
+両者は他方の代用にならず、formalは人物別file/directory depth histogram、unique prefix数、
+max fan-out、scope file数、collision 0を、robustnessはcandidate/実現/不実現数とtraversal/除外結果を
+別のobserved receiptで読み戻す。
 byte-stress catalog projectionはformal variant source rowではなく、format encoding/validator identityだけを
 参照する。lane-local gate roleは常に`raw_only`、requested chunks 0、observed gateはactual chunks 0とする。
 expanded 8 MiB上限のcontainer encodingはsmall/medium size classだけ、large/tailはnon-containerだけを許す。
@@ -204,12 +219,17 @@ extensionだけを付け替えたbytesは禁止する。ZIP/IFCZIP、USTAR、GZI
 独立validatorを割り当てる。SQLiteはruntime/version/compile optionsを完全に束縛できるまでformal
 variantへ入れない。
 
+DICOMはMulti-frame Grayscale Byte Secondary Capture Storageの`.7.2` SOP Classに固定し、Part 10
+metaとdatasetのSOP Class/Instance UID一致、必須Patient/Study/Series/SC/Multi-frame要素、全frameを
+列挙するPage Number Vectorとそれを指すFrame Increment Pointer、complexityごとに異なる決定的SOP
+Instance UID、native 8-bit MONOCHROME2 pixel長を独立validatorで検査する。
+
 現envelopeに加え、`kcs.persona.pc-variant-catalog/v2` sidecarは71 identity、566 persona marginal、
 content MIMEとKCS path MIME、形式別complexity unit、formal/byte-stress lane境界を機械化した。
 canonical bodyは211,733 bytes、SHA-256
 `abbe522ff37a9a091f28b7a230928fd598054498eb80cab99f08d21889f26cec`である。ID-free text renderer/
 validatorとsource-profile catalogは候補実装されたが、全variantのtarget bytes/quota feasibility、
-production MIME cross-language golden、source recipe profile bindingを完成しない。全rowの
+production MIME cross-language golden、source-instance recipeとG0 profile bindingを完成しない。全rowの
 `parameters_complete=false`、`variant_catalog_complete=false`を維持し、G0 root hashを発行しない。
 
 offline dispositionはfamilyではなくvariant別に固定する。例:
@@ -563,6 +583,12 @@ W5順序は全regular events、全ordinary scope indexes、P' current確認、pe
 unlink/path-purge + forced purged commit、全post-purge noop indexesである。rename/move/archive/restore等の
 structural event inventory、dependency、before/after state、replacement recipeもroot-independent intentへ
 exact列挙する。rendererが未完成のG0ではevent bytes/hashを作らず、intent hashだけを凍結候補にする。
+event inventoryは`persona x wave x event_type x family x variant`のexact件数を持ち、各行で
+event intent、logical document/source intent、precondition checkpoint、before/after scope/path/raw state、
+bytes/facts保持、expected current/history delta、query scenario、visibility、purge/restore anchorを束縛する。
+件数とdeltaは人物別checkpointへexactに集計でき、M3-1/M3-2/M3-3のformat x scenario coverageに
+投影できなければならない。現在の人物別「主な操作」は意図であり、このexact inventoryの
+代替にはならない。
 solution後のcompiled planned history planは全eventをstate machineとして適用し、各eventのcurrent/history
 chunk deltaからfull/pilot全7 checkpointを独立literalとexact一致させる。W4 delete -> W5 restore集合と
 W5 final-deleted集合はdisjoint、restore anchorは人物ごとexact 10 logical documents/queryと1対1にする。
@@ -592,15 +618,22 @@ refinementが新たに割り当てるのはscope、bucket、cohort、quota、cel
 全source rowへ反復保存しない。
 
 現structural packageの`source_profile_id`は71 variantすべてに一意なforeign keyを付与するが、
-inventory-only identityでありformal recipe profileではない。formal source recipeは71件全て
-`reserved-unbound`/`profile_id=not-bound`。凍結済みsource-profile catalogとID-free text/PDF renderer/validatorは
-byte/complexityの局所contractだけを検査し、10 profilesを`ready-local-only-formal-recipe-unbound`、
-61 profilesを`blocked-implementation-missing`として記録する。後続のID-free incidental-text rendererと独立validatorは
-その61件中11件をcatalog非改変で局所実装するため、現在利用可能なformat implementationは21件、残る未実装は
-raw-only 50件である。いずれもformal recipe parameter、semantic content、
-overlay instance、fact membership、final source allocation、production MIME golden、filesystem/KCS実行の
-authorityを持たない。overlay contract候補単体もschemaを記述するだけでinstance/placementを束縛せず、G0 rootの
-入力としては未採用である。instance membershipは後述のnon-authorizing downstream packageだけが束縛する。
+inventory-only identityでありformal recipe profileではない。上流の凍結済みsource-profile catalogでは
+formal source recipe 71件を`reserved-unbound`/`profile_id=not-bound`のまま維持する。同catalogとID-free
+text/PDF renderer/validatorはbyte/complexityの局所contractだけを検査し、10 profilesを
+`ready-local-only-formal-recipe-unbound`、61 profilesを`blocked-implementation-missing`として歴史的snapshotに
+記録する。後続のID-free incidental 11件とraw-only 50件はcatalog非改変で局所実装され、all-71 implementation
+registryが現在の71件の実装可用性を束縛する。
+
+さらに下流の`kcs.persona.pc-formal-source-recipe-profile-catalog/v2`は386,152 canonical bytes、SHA-256
+`973a31336b90abc6271165ce4a3130679f36d5a9d65b06fece6827123e5c6cc8`である。71 inventory recipe slot、
+semantic content/filename slot、renderer/validator contractとruntime receiptをvariant-level profile policyへ
+1対1に束縛し、full/pilot別のeligible/base incidental capとW0--W5 exact integer checkpoint tableを持つ。
+これは上流snapshotを改変せず、203,000 source-instanceのparameter、selected complexity/bytes、semantic payload、
+overlay instance、fact membership、final source allocation、production MIME golden、filesystem/KCS実行を束縛しない。
+すべてのauthority flagはfalseである。overlay contract候補単体もschemaを記述するだけでinstance/placementを
+束縛せず、G0 rootの入力としては未採用である。instance membershipは後述のnon-authorizing downstream package
+だけが束縛する。
 
 source-owned semantic-membership packageはstructural rowの10 fieldsを変更せず、別sidecarで
 `intent_key`、`content_context_id`、`present_fact_set_key`を全203,000 structural keysへexactly once解決する。
@@ -930,6 +963,12 @@ chunks、KCS、G0、filesystem/write authorityを証明しない。
 suite buildは1 personaずつ行い、20 full plansを同時保持しない。p12の16,000 W0 sourcesと
 event-created replacement recipesは別inventory/別上限であり、W0 capを暗黙超過させない。
 
+G0は`persona x family x origin`ごとにsource count、ordinary/tail count、rendererで表現可能な
+complexity histogram、raw-byte sum、nearest-rank p50/p95/max、allocated-byte upperの算出根拠、
+gate-role別requested-chunk policyをexactに束縛する。fullはcount、histogram、raw-byte sumのすべてで
+`pilot + full-residual`に閉じる。p50/p95は差し引かずfull source列から再計算する。
+この表とsource-level parameter assignmentが未束縛の間はcapacity/write authorityをfalseのままにする。
+
 capacityは次の2境界を混ぜない。
 
 - **source-tree envelope**: personaのmanaged source filesと、その400 leaf scopeへ至るauthored directoryだけ。
@@ -1008,9 +1047,9 @@ solver_policy_bound              = false
 route_affinity_matrix_review_receipt_bound = false
 overlay_contract_authoritative   = false
 overlay_instances_bound          = false  # concrete packageは存在するが正式G0 rootへ未束縛
-source_recipe_profile_id_bound   = false
-text_renderer_profile_bound      = false
-source_profile_vertical_slice_complete = false
+source_recipe_profile_id_bound   = false  # G0 descriptor/rootへの正式binding。下流71-profile catalogだけではtrueにしない
+text_renderer_profile_bound      = false  # G0 descriptor/rootへの正式binding。下流format registryだけではtrueにしない
+source_profile_vertical_slice_complete = false  # source-instance parameter/materialization/observationが未完成
 source_intent_refinement_policy_bound = false
 joint_allocation_proved          = false
 pilot_aggregate_cell_subset_proved = false
@@ -1061,12 +1100,11 @@ formal flagを変更してはならない。
     数えない。将来local deterministic OCR derivativeを追加する場合は別variant/provenance/contributor契約を
     version updateで先に束縛する
 
-次の実装順は、(1) 71 formal recipes、11 incidental contractsのprofile binding、
-50 raw-only renderer/validator implementations、
-(2) corpus semantic namespaceとquery/history mappings、(3) joint allocation/solution/proof、
-(4) allocation/rendering、(5) folder/file write、(6) edits/history、(7) fresh-storage replays、
-(8) evaluationとする。concrete pre-solve membershipの完成からscope placement、formal recipe binding、G0、
-render/writeを推論しない。
+次の実装順は、(1) persona/family byte分布、exact lifecycle-event inventory、203,000 source-instance parameterと
+corpus semantic/query/history mapping、(2) joint allocation/solution/proof、(3) allocation/rendering、
+(4) folder/file write、(5) edits/history、(6) fresh-storage replays、(7) evaluationとする。
+concrete pre-solve membershipとvariant-level recipe policyの完成からscope placement、source-instance recipe、
+G0、render/writeを推論しない。
 
 G0後のrender/index実行ゲートは、logical-document expectedから正式MVP distinct `(raw_hash, section)`
 relevanceへのcompiled binding、observed materialization/chunk ID、lifecycle receiptを別artifactで検証する。

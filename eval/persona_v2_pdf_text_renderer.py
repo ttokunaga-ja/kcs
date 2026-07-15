@@ -66,7 +66,7 @@ class PersonaV2PdfTextRendererError(ValueError):
     """Raised when the narrow v2 text-layer PDF contract is violated."""
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class PdfTextRenderRequest:
     """An exact three-field request with no fixture or evaluation identity."""
 
@@ -75,7 +75,7 @@ class PdfTextRenderRequest:
     target_complexity: int
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class RenderedPdfText:
     """Rendered PDF bytes plus non-authoritative local format metadata."""
 

@@ -100,7 +100,7 @@ class PersonaV2PdfTextValidatorError(ValueError):
     """Raised when PDF bytes or metadata violate the standalone contract."""
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class PdfTextValidationRequest:
     """The complete identity-free byte payload supplied to the validator."""
 

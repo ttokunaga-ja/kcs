@@ -236,7 +236,7 @@ class PersonaV2IncidentalTextRendererError(ValueError):
     """Raised when the incidental renderer contract is violated."""
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class IncidentalTextRenderRequest:
     """An intentionally identity-free local feasibility request."""
 
@@ -245,7 +245,7 @@ class IncidentalTextRenderRequest:
     target_complexity: int
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class RenderedIncidentalText:
     """Rendered bytes and non-authoritative format metadata."""
 
@@ -263,7 +263,7 @@ class RenderedIncidentalText:
 def _profile(variant):
     if type(variant) is not str or variant not in _VARIANT_ROWS:
         raise PersonaV2IncidentalTextRendererError(
-            f"unsupported incidental text variant: {variant!r}"
+            "unsupported incidental text variant"
         )
     return _VARIANT_ROWS[variant]
 
