@@ -1383,3 +1383,86 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     bool/integer rejection, and read-only P0/P1 review pass.  The artifact grants no source assignment,
     decoded-attachment equivalence, payload, materialization, capacity,
     write, execution, KCS, G0, or other authority.
+137. Persona-PC v2 source-instance parameter assignment is a pre-solve content-parameter owner, not a partial
+    placement solution.  It may bind only an explicit `{variant_id}/{bin_id}` parameter-cell key, recipe profile,
+    renderer parameters, target complexity, target bytes, and size lane for each intent.  Scope, bucket, cohort,
+    chunk quota, cell-local ordinal, and final source/materialization identifiers remain exclusively owned by the
+    later joint solver and are forbidden from this artifact.  The canonical package uses a compact
+    persona/origin/variant/cell count owner plus exact-pair, singleton, EML-fixed, and deterministic-policy counts.
+    Expanded `{intent_key, parameter_cell_key}` rows are streaming verification views over the existing seventy-three
+    source-shard ranges; origin manifests bind their row count, range, canonical bytes, and SHA-256 receipts, but the
+    expanded bodies are not persisted persona-package components.  A downstream package that stores an expanded
+    body must charge all of its bytes separately.  The sixteen-MiB pre-solve persona denominator therefore charges
+    the parameter-cell projection, compact owner, origin/profile manifests, expanded-view receipts, and frame/header,
+    while shared catalog bodies are still charged once per unique SHA.  EML hosts are fixed to attachment cells one
+    through five, EML nonhosts to zero, and non-EML exact pairs to one shared cell.  Remaining pair capacity is
+    allocated by Hamilton apportionment with canonical-cell tie-breaks and singleton intents fill residual counts in
+    ASCII order.  Query/oracle, lifecycle demand, solution, and final identifiers are forbidden inputs.
+138. The immutable lifecycle-demand v2 body remains an anonymous historical snapshot, but its `U35/Y30/I5`
+    allocation is not source-matchable authority.  Only twelve of each persona's current 105 semantic anchors carry
+    a W1-prior fact profile, four replacement-fact queries per persona are assigned to unedited U/I classes, no
+    explicit two-family rendition relation exists for cross-format queries, and reused purge facts cannot prove an
+    empty result.  A downstream query-independent lifecycle-coverage catalog must supersede that local negative
+    state with exactly 105 primary logical documents per persona: stable-current U27, replacement-current Y3,
+    same-scope rename U5, stable move I4, W1-edited move I-edit1, old-wording Y10, locale-history Y10,
+    archive-history Y10, final-deleted X10, restored X10, and purged-negative P15.  Primary totals are
+    `P15/X20/Y33/U32/I5/N0`.  One hundred contributor primaries consume 100 of the existing 105 semantic-anchor
+    slots, five slots remain reserved, and I5 uses separate incidental sources.  Ten cross-format documents per
+    persona each add one distinct-family rendition companion, yielding 115 W0 source-ref requirements/persona and
+    2,300 suite requirement refs.  One replacement-current companion is Y and the other nine are U, so W1 edits cover 69 contributor
+    refs plus one I-edit source per persona.  A corpus-side lifecycle fact overlay supplies prior/stable facts, while
+    fifteen purge-only witness facts per persona are forbidden from P-prime, every other source/rendition, distractor,
+    and padding.  The coverage catalog is a common upstream of corpus lifecycle and evaluation target resolution;
+    query/oracle bodies and hashes may not flow into source matching or the corpus semantic namespace.
+    This also refines the earlier move-patch timing: four stable move sources are attested at W0, the I-edit source is
+    typed-edited and indexed at W1, and only their authenticated five-source bundle may feed a
+    `post-W1-attestation-before-W2-event-compilation` patch.  The I-edit W1 current count must equal its move count,
+    while its receipt separately authenticates equal `1..70` old-history and new-current counts, disjoint endpoint
+    sets, and typed revision/source/scope/config identity.  Only the new-current count enters qIM; the old set adds
+    `+qIE` incidental history at W1.  Incidental-total projections therefore add qIE from W1 and qIM from W2; the
+    W5-pre upper is 1,440 below the 2,040 pilot cap and 10,620 below the 20,400 full cap.  Any missing, zero,
+    out-of-range, identity-mismatched, overlapping, or
+    duplicate observation blocks W2.  The living contract therefore calls this the pre-W2 move-delta patch; the
+    immutable lifecycle-demand and earlier decision text remain historical snapshots rather than execution authority.
+139. The production corpus semantic namespace will bind schema-specific content-only projections, never upstream
+    full bodies that co-locate content with authority, completion, blocker, or review metadata.  A projection also
+    excludes the full upstream SHA, runtime/review receipts, query/oracle/answer/distractor data, solution or solved
+    scope/final identifiers, and observed raw/chunk/rank/latency data.  A separate derivation receipt binds the full
+    body pin, projector ID/version, projection pin, and independent validation result; that receipt belongs to corpus
+    input closure but not to the semantic namespace.  The minimum projection inventory covers topology path/load,
+    realism and locale/security semantics, route scores, the corpus half of primary use cases, recipe/content/filename
+    policy, fact graphs, base source content-context plus reconciled effective membership, concrete-overlay relations, source-instance parameters,
+    query-independent lifecycle fact/rendition rules, and payload-equivalence rules.  The namespace accepts each
+    projection exactly once and rejects missing, extra, duplicate, unused, cyclic, foreign-persona, query, or evidence
+    entries.  Query or review-only changes therefore leave namespace, solution, planned IDs, and corpus bytes stable;
+    content changes alter the namespace.  Namespace eligibility does not grant solver, G0, execution, or write
+    authority.
+140. Lifecycle fact overlays do not become a second owner beside the immutable source-semantic singleton rows.  A
+    downstream `kcs.persona.pc-lifecycle-effective-membership-reconciliation/v1` must authenticate base membership,
+    source-matched coverage, typed purge-witness rows, and rendition relations, then emit exactly one effective W0
+    fact/semantic-section membership for every one of the 203,000 sources.  Unselected sources inherit base
+    semantics; primary anchors replace singleton membership with the same-topic graph-normal W0 set; P anchors alone
+    union one unique witness; and each rendition companion shares its primary's effective fact/revision chain.  A
+    global inverted projection proves all 300 witness facts occur only in their matching P dependency groups and are
+    absent from P-prime, every other source/rendition, distractor, and padding.  The semantic namespace includes the
+    base content-context projection with membership removed plus this effective-membership projection, never both
+    base and effective membership owners.  Base full bodies and reconciliation/derivation receipts remain in corpus
+    input closure, and namespace eligibility stays false until source matching and reconciliation complete.
+141. The query-independent lifecycle coverage design is implemented as
+    `kcs.persona.pc-lifecycle-coverage-catalog/v1`.  It binds 2,100 primary capability rows, 200 cross-format
+    companion requirements, 300 suite-unique purge-witness requirements, twenty move-receipt policies, twelve
+    accounting projections, nineteen symbolic operations, nine scope-relation rules, and thirteen path-transition
+    rules.  Its canonical body is 1,385,596 bytes with SHA-256
+    `ea36aa70e00dadda3cc35e442c21507ebb89c622de6a79f1bb9c79d83a442236`.  The producer and independent validator
+    pass thirteen focused tests, two hash seeds, strict-type and re-pin tamper tests, dependency tamper, detached-build,
+    and target/dependency TOCTOU tests.  The catalog supersedes the historical `U35/Y30/I5` snapshot only for
+    coverage classification.  It selects no concrete source, imports no query/oracle, owns no effective membership,
+    and grants no solution, final-ID, observation, mutation, KCS, capacity, write, or G0 authority.
+142. One synthetic person is presented as one physical persona-device container, not as unrelated lane roots.
+    `pXX-role/` contains non-overlapping `home/` (formal retrieval/history), `ambient-home/` (recursive robustness),
+    and `byte-stress/` child roots with separate manifests and receipts.  Only the twenty `home/` leaves are registered
+    as formal scopes, and no file, inode, payload materialization, hard link, clone, symlink, or completed-root copy is
+    shared across lanes, personas, or replays.  The formal execution pipeline is W0 fresh build, W0 offline
+    index/attestation, W1 edit/index and edited-move attestation, pre-W2 move-delta patch, W2--W5 history, and inline
+    receipts.  That entire pipeline runs on exactly three fresh storages including the first run, followed by one
+    cross-replay evaluation; it is not one initial run plus three additional replays.
