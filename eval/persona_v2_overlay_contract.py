@@ -2,10 +2,11 @@
 
 This sidecar closes only the *schema and authored-target* part of the realism
 overlay.  It defines what exact duplicates, visible near revisions, conflict
-copies, and standalone attachment copies mean; it also fixes the deterministic
-integer placement-demand marginals, the complete membership schema, and a
-bounded draft of the future eight-axis ledger schema.  The ledger draft still
-lacks complete byte/host-metadata reconciliation and persona-local domains.
+copies, and standalone attachment copies mean; it also fixes deterministic
+integer placement-demand marginals and bounded drafts of the future membership
+and eight-axis ledger schemas.  Host marginals, joint relation/placement cells,
+logical identity, payload recipes, and evidence-qualified scoring remain
+downstream reservation or membership work rather than completed here.
 
 It deliberately contains no source row, intent value, cluster instance,
 logical-document instance, scope assignment, planned ledger, or observed
@@ -633,6 +634,8 @@ def _membership_shard_schema():
                 "persona_id",
                 "profile",
                 "overlay_contract_sha256",
+                "overlay_reservation_suite_sha256",
+                "fact_membership_full_manifest_sha256",
                 "pilot_origin_manifest_sha256",
                 "full_residual_origin_manifest_sha256",
                 "target_marginals",
@@ -642,9 +645,15 @@ def _membership_shard_schema():
             "self_hash_embedded": False,
         },
         "hash_dag_order": [
+            "variant-catalog",
+            "source-inventory-layout",
+            "typed-fact-graphs",
+            "overlay-contract",
+            "overlay-reservation-suite-and-origin",
             "source-profile-catalog",
             "source-intent-shards",
             "intent-only-manifest",
+            "source-owned-fact-membership-shards-and-manifest",
             "overlay-membership-shards",
             "overlay-manifest",
         ],
@@ -676,7 +685,9 @@ def _membership_shard_schema():
                 "origin",
                 "target_profile",
                 "overlay_contract_sha256",
+                "overlay_reservation_origin_sha256",
                 "source_intent_manifest_sha256",
+                "fact_membership_manifest_sha256",
                 "target_marginals",
                 "aggregate_row_count",
                 "aggregate_body_bytes",
@@ -770,7 +781,9 @@ def _membership_shard_schema():
                 "row_count",
                 "body_bytes",
                 "body_sha256",
+                "overlay_reservation_origin_sha256",
                 "source_intent_manifest_sha256",
+                "fact_membership_manifest_sha256",
             ],
             "file_name_formula": "overlay-{origin}-{shard-index-zero-padded-4}.jsonl",
             "first_shard_index": 0,
@@ -783,7 +796,14 @@ def _membership_shard_schema():
             "would-exceed-4096-rows-or-4194304-body-bytes-no-empty-shards"
         ),
         "source_or_materialization_or_final_ids_allowed": False,
-        "source_intent_manifest_back_reference_to_overlay_allowed": False,
+        "concrete_membership_must_bind_fact_membership_manifest": True,
+        "concrete_membership_must_bind_overlay_reservation": True,
+        "overlay_reservation_must_bind_overlay_contract": True,
+        "overlay_reservation_must_bind_persona_typed_fact_graph": True,
+        "overlay_reservation_must_bind_source_inventory_layout": True,
+        "overlay_reservation_must_bind_variant_catalog": True,
+        "source_intent_manifest_must_bind_overlay_reservation": True,
+        "source_intent_manifest_back_reference_to_concrete_overlay_membership_allowed": False,
         "source_intent_manifest_kind": "intent-only-no-overlay-membership",
     }
 
@@ -802,14 +822,22 @@ def _search_and_scoring_contract():
         "content_relation_raw_only_endpoint_allowed": False,
         "content_relation_search_rule": "both-physical-endpoints-participate",
         "contract_chunk_accounting_identity": "distinct-scope-key-plus-chunk-id",
-        "default_recall_denominator_identity": "distinct-logical-document-key",
+        "diagnostic_semantic_dedup_identity": "distinct-logical-document-key",
         "duplicate_or_revision_paths_may_increase_recall_denominator": False,
         "evidence_may_report_multiple_physical_materializations": True,
         "exact_duplicate_contributor_endpoints_require_different_scopes": True,
+        "formal_recall_denominator_identity": "distinct-raw-hash-plus-section",
+        "format_rendition_relation_semantics_bound": False,
         "logical_document_assignment_occurs_before_compiled-relevance": True,
+        "logical_document_dedup_occurs_after_evidence_qualification": True,
         "oracle_query_or_rank_instances_present": False,
         "planned_participation_requires_observed-attestation-later": True,
-        "top_k_comparison_projection": "top-ten-distinct-logical-documents",
+        "semantic_evidence_qualification_identity": (
+            "logical-document-plus-revision-plus-branch-plus-semantic-section-"
+            "plus-fact-plus-evidence-state"
+        ),
+        "top_k_formal_gate_projection": "top-ten-distinct-raw-hash-plus-section",
+        "wrong_revision_or_branch_may_satisfy_target": False,
     }
 
 
@@ -1409,24 +1437,31 @@ def _canonical_overlay_contract_value():
             "unicode_normalization": "NFC",
         },
         "completion_claims": {
+            "attachment_host_marginals_complete": False,
             "attachment_semantics_complete": True,
             "conflict_fact_realizability_proved": False,
             "content_relation_semantics_complete": True,
             "eight_axis_ledger_schema_complete": False,
+            "format_rendition_semantics_complete": False,
             "logical_document_instance_assignment_complete": False,
-            "logical_document_scoring_semantics_complete": True,
-            "membership_shard_schema_complete": True,
+            "logical_document_global_assignment_policy_complete": False,
+            "logical_document_scoring_semantics_complete": False,
+            "membership_key_generation_complete": False,
+            "membership_shard_schema_complete": False,
             "observed_eight_axis_ledger_instances_present": False,
             "overlay_integer_target_marginals_complete": True,
             "overlay_membership_instances_present": False,
+            "payload_relation_recipe_complete": False,
             "placement_demand_marginals_complete": True,
             "placement_scope_assignment_complete": False,
             "planned_eight_axis_ledger_instances_present": False,
-            "search_participation_semantics_complete": True,
+            "query_history_target_namespace_mapping_complete": False,
+            "relation_placement_joint_marginals_complete": False,
+            "search_participation_semantics_complete": False,
             "source_format_feasibility_complete": False,
         },
         "completion_scope": (
-            "suite-overlay-semantics-membership-schema-ledger-axis-draft-and-exact-integer-"
+            "suite-overlay-semantics-membership-and-ledger-schema-drafts-and-exact-integer-"
             "target-marginals-only-no-instances-no-scope-assignment-no-feasibility-no-g0"
         ),
         "content_relation_global_contract": {
@@ -1475,6 +1510,16 @@ def _canonical_overlay_contract_value():
         },
         "remaining_blockers": [
             "source-intent-profile-and-recipe-not-bound",
+            "attachment-host-cardinality-marginals-not-bound",
+            "relation-kind-by-placement-class-joint-marginals-not-bound",
+            "membership-key-generation-not-bound",
+            "payload-relation-recipe-not-bound",
+            "logical-document-global-assignment-policy-not-bound",
+            "format-rendition-relation-not-bound",
+            "query-and-history-target-namespace-mapping-not-bound",
+            "evidence-qualified-logical-document-scoring-not-bound",
+            "source-intent-manifest-reservation-binding-not-implemented",
+            "overlay-origin-manifest-reservation-and-fact-bindings-not-implemented",
             "overlay-membership-shards-not-instantiated",
             "overlay-membership-runtime-validator-not-implemented",
             "scope-and-placement-membership-not-assigned",
