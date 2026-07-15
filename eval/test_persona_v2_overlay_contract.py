@@ -9,8 +9,8 @@ from eval import persona_v2_overlay_contract as overlay
 from eval import persona_v2_realism_profile as realism
 
 
-EXPECTED_CANONICAL_BYTES = 69_119
-EXPECTED_SHA256 = "60c17e893f02309cec4d1de7debca211b2b84fb38c9a41f7f5fb6c586748d4a8"
+EXPECTED_CANONICAL_BYTES = 71_179
+EXPECTED_SHA256 = "ae219f90caf97e153e57f821b34f4f8a9ad671ee705387a5d0142ff9963fc75c"
 EXPECTED_INPUT_BINDINGS = [
     (
         "envelope",
@@ -68,20 +68,27 @@ class PersonaV2OverlayContractTests(unittest.TestCase):
         for key in (
             "attachment_semantics_complete",
             "content_relation_semantics_complete",
-            "logical_document_scoring_semantics_complete",
-            "membership_shard_schema_complete",
             "overlay_integer_target_marginals_complete",
             "placement_demand_marginals_complete",
-            "search_participation_semantics_complete",
         ):
             self.assertIs(claims[key], True, key)
         for key in (
+            "attachment_host_marginals_complete",
             "eight_axis_ledger_schema_complete",
+            "format_rendition_semantics_complete",
+            "logical_document_global_assignment_policy_complete",
             "logical_document_instance_assignment_complete",
+            "logical_document_scoring_semantics_complete",
+            "membership_key_generation_complete",
+            "membership_shard_schema_complete",
             "observed_eight_axis_ledger_instances_present",
             "overlay_membership_instances_present",
+            "payload_relation_recipe_complete",
             "placement_scope_assignment_complete",
             "planned_eight_axis_ledger_instances_present",
+            "query_history_target_namespace_mapping_complete",
+            "relation_placement_joint_marginals_complete",
+            "search_participation_semantics_complete",
             "source_format_feasibility_complete",
         ):
             self.assertIs(claims[key], False, key)
@@ -343,9 +350,18 @@ class PersonaV2OverlayContractTests(unittest.TestCase):
 
         search = value["search_and_scoring_contract"]
         self.assertEqual(
-            search["default_recall_denominator_identity"],
+            search["diagnostic_semantic_dedup_identity"],
             "distinct-logical-document-key",
         )
+        self.assertEqual(
+            search["formal_recall_denominator_identity"],
+            "distinct-raw-hash-plus-section",
+        )
+        self.assertIs(
+            search["logical_document_dedup_occurs_after_evidence_qualification"],
+            True,
+        )
+        self.assertIs(search["wrong_revision_or_branch_may_satisfy_target"], False)
         self.assertIs(search["content_relation_raw_only_endpoint_allowed"], False)
         self.assertIs(
             search["attachment_embedded_only_evidence_target_eligible"], False
@@ -380,15 +396,39 @@ class PersonaV2OverlayContractTests(unittest.TestCase):
         self.assertEqual(
             membership["hash_dag_order"],
             [
+                "variant-catalog",
+                "source-inventory-layout",
+                "typed-fact-graphs",
+                "overlay-contract",
+                "overlay-reservation-suite-and-origin",
                 "source-profile-catalog",
                 "source-intent-shards",
                 "intent-only-manifest",
+                "source-owned-fact-membership-shards-and-manifest",
                 "overlay-membership-shards",
                 "overlay-manifest",
             ],
         )
         self.assertIs(
-            membership["source_intent_manifest_back_reference_to_overlay_allowed"],
+            membership["source_intent_manifest_must_bind_overlay_reservation"],
+            True,
+        )
+        self.assertIs(
+            membership["concrete_membership_must_bind_overlay_reservation"],
+            True,
+        )
+        self.assertIs(
+            membership["concrete_membership_must_bind_fact_membership_manifest"],
+            True,
+        )
+        self.assertIs(
+            membership["overlay_reservation_must_bind_persona_typed_fact_graph"],
+            True,
+        )
+        self.assertIs(
+            membership[
+                "source_intent_manifest_back_reference_to_concrete_overlay_membership_allowed"
+            ],
             False,
         )
         self.assertIs(
@@ -662,6 +702,17 @@ class PersonaV2OverlayContractTests(unittest.TestCase):
             "unordered-w0-current-conflict-pairs-not-bound-to-overlay-instances",
             value["remaining_blockers"],
         )
+        for blocker in (
+            "attachment-host-cardinality-marginals-not-bound",
+            "relation-kind-by-placement-class-joint-marginals-not-bound",
+            "membership-key-generation-not-bound",
+            "payload-relation-recipe-not-bound",
+            "logical-document-global-assignment-policy-not-bound",
+            "format-rendition-relation-not-bound",
+            "query-and-history-target-namespace-mapping-not-bound",
+            "evidence-qualified-logical-document-scoring-not-bound",
+        ):
+            self.assertIn(blocker, value["remaining_blockers"])
         with self.assertRaises(overlay.PersonaV2OverlayContractError):
             overlay.require_overlay_membership_and_ledgers()
 

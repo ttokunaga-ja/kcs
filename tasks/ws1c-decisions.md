@@ -992,3 +992,41 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     `762ee9ffb8d29756b85bc483c46e66fa798ae04a37b9aafb56c5b1e6478b6479`.  These roots remain
     full-body compatibility candidates, not a semantic-payload namespace or G0 root; every solver,
     renderer execution, filesystem, KCS, history, capacity, and write authority remains false.
+122. Persona-PC v2 now has an exact pre-source overlay-reservation boundary, without converting that
+    reservation into concrete overlay membership.  This decision preserves decisions 120 and 121 as
+    historical records while superseding decision 120's current overlay-contract pin and dependency/
+    completion wording.  The current `kcs.persona.pc-overlay-contract/v2` is 71,179 canonical bytes,
+    SHA-256 `ae219f90caf97e153e57f821b34f4f8a9ad671ee705387a5d0142ff9963fc75c`.
+    The compact reservation suite is 21,680 canonical bytes, SHA-256
+    `11d042775faebf353a284aad18d137d2735bfd0e29b528666a19d14a008f2c3d`, and binds forty exact
+    persona/origin artifacts: pilot and full-residual for each of twenty personas.  Together they reserve
+    25,560 rows, 46,840 distinct overlay source-intent references, and 2,100 pilot contributor-only
+    semantic-anchor slots.  The largest origin body is 2,639,467 bytes and the largest canonical JSONL
+    row is 1,960 bytes under the 2,048-byte cap.  A builder-independent validator and an independent
+    red-team pass verified allocation, identity, attachment fanout/overlap, conflict-template assignment,
+    row caps, and tamper rejection; a formal approval receipt is still not bound.
+    The representative p01 live compatibility roots are consequently repinned at semantic 48,210 /
+    `57a193aeacc44204c38e13dbc78378cff866d3bd1cc5309e4b72127680f43fb3`, corpus 3,496 /
+    `e648df2733f65b0dae89a4e0715b7c3082be041eda031204ec16d6087e8b8a69`, evaluation 5,032 /
+    `a316641c2c93b4483fca750085a0518f07129b64636fef9b5159ee63783aacfe`, and suite 2,609 /
+    `8c60eaea4def029ac7d29d93ef0c2678cb84c0e0220f6b9ab76069400a0f8c22`; they remain
+    compatibility-only candidates, not G0 or source-identity authority.
+    The one-way dependency order is variant catalog -> source-inventory layout -> typed fact graphs ->
+    overlay contract -> overlay reservation suite/origins -> source-profile catalog -> source-intent
+    shards and intent-only manifests -> source-owned fact-membership shards/manifests -> concrete overlay-
+    membership shards/manifests.  A source-intent manifest must bind the upstream reservation; the
+    reservation may not bind a downstream concrete source, fact, or membership manifest; and concrete
+    membership must later bind both the reservation and source-owned fact manifests.  The reservation
+    assigns authored conflict fact templates to endpoint slots, but does not claim concrete branch-fact
+    membership, solved scope placement, logical-document scoring, search behavior, format rendition,
+    query/history target mapping, or formal distinct `(raw_hash, section)` relevance.
+    Every reservation and suite authority flag is exact false, including G0 freeze, source inventory/plan,
+    concrete membership, solver, renderer, filesystem/write, KCS, and history authority.  Remaining
+    blockers are the complete 203,000 source rows/manifests and source-profile/content recipes; source-owned
+    fact membership; concrete overlay membership; semantic-payload namespace and query/history mappings;
+    format rendition and evaluation-target binding; joint scope solution/proof; renderer/writer, history,
+    and KCS observation; capacity attestation; and formal independent approval.  The required implementation
+    order is therefore reservation -> full 203,000 source rows/manifests -> source-owned fact membership ->
+    concrete overlay membership -> semantic namespace and query/history mappings -> joint solver -> folder/
+    file writer -> edits/history -> fresh-storage replays -> evaluation.  No completed root or `.kcs` store
+    may be copied to satisfy a fresh replay.

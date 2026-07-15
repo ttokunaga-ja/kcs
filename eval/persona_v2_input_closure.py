@@ -1026,6 +1026,13 @@ _EXACT_CAPABILITY_BOOL_METADATA_BY_SCHEMA_PATH = {
         ("placement_contract", "content_relation_endpoints_must_resolve_to_different_scopes"),
     ): True,
     (
+        "kcs.persona.pc-overlay-contract/v2",
+        (
+            "completion_claims",
+            "query_history_target_namespace_mapping_complete",
+        ),
+    ): False,
+    (
         "kcs.persona.pc-fact-graph/v2",
         ("history_intent_recipe_bound",),
     ): False,
