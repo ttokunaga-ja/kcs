@@ -13,6 +13,7 @@ from eval import persona_v2_contract as envelope
 from eval import persona_v2_history_intent as history_intent
 from eval import persona_v2_joint_problem as joint_problem
 from eval import persona_v2_query_intent as query_intent
+from eval import persona_v2_source_inventory_layout as source_inventory_layout
 from eval import persona_v2_source_intent as source_intent
 
 
@@ -373,6 +374,33 @@ class PersonaV2LiteralScaleInvariantTests(unittest.TestCase):
         self.assertEqual(
             sum(pair[1] for pair in PERSONA_W0_PHYSICAL_SOURCE_COUNTS.values()),
             203_000,
+        )
+        layout = source_inventory_layout.build_source_inventory_layout()
+        self.assertTrue(
+            source_inventory_layout.validate_source_inventory_layout(layout)
+        )
+        self.assertEqual(
+            layout["coverage"]["pilot_source_count"],
+            20_300,
+        )
+        self.assertEqual(
+            layout["coverage"]["full_residual_source_count"],
+            182_700,
+        )
+        self.assertEqual(layout["coverage"]["full_source_count"], 203_000)
+        self.assertEqual(layout["coverage"]["pilot_shard_count"], 20)
+        self.assertEqual(
+            layout["coverage"]["full_residual_shard_count"],
+            53,
+        )
+        self.assertEqual(layout["coverage"]["total_shard_count"], 73)
+        self.assertIs(
+            layout["completion_claims"]["source_intent_inventory_complete"],
+            False,
+        )
+        self.assertTrue(layout["authority"])
+        self.assertTrue(
+            all(flag is False for flag in layout["authority"].values())
         )
         self.assertEqual(source_intent.REPRESENTATIVE_INTENTS_PER_PERSONA, 1)
         with self.assertRaisesRegex(

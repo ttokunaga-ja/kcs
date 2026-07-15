@@ -4,11 +4,12 @@ Status: envelope、exact topology、joint必要条件problem、generic aggregate
 20人別realism profile/overlay marginal、71 variant identity/566 persona marginal catalog、541-row route候補、
 20人x4 typed fact-graph leaf、negative route-review receipt、20人各1件のrepresentative
 source-intent/fact-membership/history-intent、2,100 query intents/semantic oracle、非authorizing input-closure候補まで実装済み。
-overlay contract、ID-free text renderer/validator、source-profile catalogも候補実装があるがnon-authoritativeである。
+exact 203,000-key/73-shard source-inventory layout、overlay contract、ID-free text/PDF renderer/validator、
+source-profile catalogも候補実装があるがnon-authoritativeである。layoutはrow bodyやbody SHAを持たない。
 overlayのmembership schemaは候補として固定した一方、8軸ledgerはaxis draftで、byte/host-metadata整合と
 persona-local domainが未完成である。unordered W0-current fact pairの入力前提は実装済みだが、
 distinct branch membership、overlay instance、scope placementがないためconflict overlayは未実現である。
-必要条件は全20人で通過したが、203,000 source inventory、53 residual shards、62未対応variant、
+必要条件は全20人で通過したが、203,000 source row body inventory、53 residual shard bodies、61未対応variant、
 overlay instance/membership/placement、独立approval receipt、schema別content-only semantic projection、
 実行可能solver、solution、proofは含まない。現input-closureはfull body DAGの互換性候補に限り、
 source ID namespaceとして不適格である。
@@ -577,7 +578,7 @@ refinementが新たに割り当てるのはscope、bucket、cohort、quota、cel
 `eligible_scope_keys`は人物catalogの`eligible_scope_set_id`から推移的に束縛できるものとし、20 scope keyを
 全source rowへ反復保存しない。
 
-現候補source-profile catalogとID-free text renderer/validatorはbyte/complexityの局所contractだけを検査する。
+現候補source-profile catalogとID-free text/PDF renderer/validatorはbyte/complexityの局所contractだけを検査する。
 `source_recipe_profile_id=not-bound`、`source_profile_vertical_slice_complete=false`であり、source-intent row、
 overlay instance、fact membership、final source allocation、production MIME golden、filesystem/KCS実行の
 authorityを持たない。overlay contract候補もschemaを記述するだけでinstance/placementを束縛せず、G0 rootの
@@ -768,6 +769,21 @@ JSONL readerはpre-read cap、exact declared length/SHA、UTF-8/NFC/canonicality
 pilot/fullは同じ行を再生成して同値とみなすのではなく、full人物manifestがpilot shardの同一bytes/SHAを
 参照し、residualだけを追加する。
 
+`kcs.persona.pc-source-inventory-layout/v2`はこの算術とkey-range予約だけをcanonical化し、274,566 bytes、
+SHA-256 `ef52b756c7100c719f66323cd3cdb4dfc58a78e48d78f2857ca378cb1eb83dba`である。20,300 pilot +
+182,700 residual、20 + 53 shards、566 persona/variant marginals、69,236/60,414/73,350のfull gate-role countsを
+exactに束縛する。一方、row body、body bytes/SHA、source profile assignment、overlay/fact membership、
+16 MiB package proof、source inventory/G0/write authorityは持たない。pilot keyは既存代表sliceと互換な4桁、
+residual keyは最大14,400件を覆う5桁ordinalとし、originごとにordinalを独立させる。
+
+`pdf-text`の局所feasibilityは1--72 ASCII text-layer pages、4,096 + 2,048 × (pages - 1) bytesを固定し、
+PDF 1.4のnon-stream 255-byte line上限、xref/trailer/page treeを独立validatorで検査する。renderer contractは
+2,075 bytes / `ab66e11d93e2aa7896bdffd28f1c1fec9f443a4ff3b48ba6dcc4d1c12bab69f6`、validator contractは
+2,233 bytes / `78c90d4cccb254f67bc030e79eaef46704ce4d8555a3edc8f42edc293e91805e`、source-profile catalogは
+72,559 bytes / `6e38fab07851f9fdcbf9d6e67e502484aea7edb66167ea86db1539593b8b58ac`である。これにより
+10 contributor feasibility variantsがfull 69,236 contributor sourcesを局所的に覆うが、多言語content、
+sourceごとのsemantic recipe、positive query anchor、production KCS chunks、G0を証明しない。
+
 suite buildは1 personaずつ行い、20 full plansを同時保持しない。p12の16,000 W0 sourcesと
 event-created replacement recipesは別inventory/別上限であり、W0 capを暗黙超過させない。
 
@@ -880,7 +896,7 @@ formal flagを変更してはならない。
 3. 人物別`persona_realism_profile`/overlayと8軸台帳、pre-solve source-intent recipe/variant feasibility、
    route matrix、fact graph/membership/history templateのcorpus semantic namespace、独立reviewを含むcorpus
    input closure、独立query spec/oracleを含むevaluation input closure。候補overlay contract、
-   text renderer/validator、source-profile catalogは正式なprofile ID、instance、upstream hashへ束縛する
+   text/PDF renderer/validator、source-profile catalogは正式なprofile ID、instance、upstream hashへ束縛する
 4. full/pilot family/variant/scope/bucket/source quota/cohort aggregateとper-intent overlay assignmentの
    exact refinement、bounded canonical exact replayまたは完全proofによる最適性の検証、cycle-free final ID導出
 5. P/X/Y/N/U history操作順、scope coverage、checkpoint exact projection。将来のhistory-intentで現W3/W5
@@ -895,7 +911,8 @@ formal flagを変更してはならない。
    planned source/materialization/event IDはsolution後のcompiled planned history planへ含めてよいが、observed
    materialization/chunk/`raw_hash`/section bindingはG0へ逆流させず、render・index後のcompiled observed
    relevance/receiptで検証する
-10. M3-2用searchable cross-scope rename/move、M3-1用text-layer PDF feasibilityとpositive anchor最低数。
+10. M3-2用searchable cross-scope rename/move、M3-1用text-layer PDFの多言語content recipe、KCS chunk
+    attestation、positive anchor最低数。局所ASCII PDF feasibilityだけでM3-1を合格扱いしない。
     scan PDFは現v2ではoffline raw-only/`awaiting_ocr`のstructural/negative対象で、positive Recall relevanceへ
     数えない。将来local deterministic OCR derivativeを追加する場合は別variant/provenance/contributor契約を
     version updateで先に束縛する

@@ -2036,6 +2036,8 @@ class PersonaV2InputClosureTests(unittest.TestCase):
             "variant-catalog",
             "id-free-text-renderer",
             "id-free-text-validator",
+            "id-free-pdf-text-renderer",
+            "id-free-pdf-text-validator",
         ]
         pins = []
         providers = []
@@ -2051,6 +2053,8 @@ class PersonaV2InputClosureTests(unittest.TestCase):
                 "variant-catalog",
                 "id-free-text-renderer",
                 "id-free-text-validator",
+                "id-free-pdf-text-renderer",
+                "id-free-pdf-text-validator",
             }:
                 aliases.append(entry_id.replace("-", "_"))
             pin = _pin(
@@ -2078,6 +2082,14 @@ class PersonaV2InputClosureTests(unittest.TestCase):
                 "name": "id-free-text-validator",
                 "sha256": pin_by_id["id-free-text-validator"]["sha256"],
             },
+            "id_free_pdf_text_renderer": {
+                "name": "id-free-pdf-text-renderer",
+                "sha256": pin_by_id["id-free-pdf-text-renderer"]["sha256"],
+            },
+            "id_free_pdf_text_validator": {
+                "name": "id-free-pdf-text-validator",
+                "sha256": pin_by_id["id-free-pdf-text-validator"]["sha256"],
+            },
             "planning_chain": [
                 {"name": entry_id, "sha256": pin_by_id[entry_id]["sha256"]}
                 for entry_id in dependency_ids[:4]
@@ -2098,7 +2110,7 @@ class PersonaV2InputClosureTests(unittest.TestCase):
             providers=[*providers, _provider("source-profile-catalog", consumer)],
             root_entry_ids=["source-profile-catalog"],
         )
-        self.assertEqual(value["entry_count"], 8)
+        self.assertEqual(value["entry_count"], 10)
 
         drifted = copy.deepcopy(consumer)
         drifted["input_bindings"]["binding_order"] = list(

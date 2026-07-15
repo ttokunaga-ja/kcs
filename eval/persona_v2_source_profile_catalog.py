@@ -1,10 +1,10 @@
 """Non-authorizing source-profile completion sidecar for persona-PC v2.
 
-All 71 frozen variants are represented.  Only the nine ID-free text
-contributor variants implemented by :mod:`persona_v2_text_renderer` and checked
-by the separate :mod:`persona_v2_text_validator` are marked ready in this
+All 71 frozen variants are represented.  The nine ID-free local-text variants
+and the separate ID-free text-layer PDF variant are marked ready in this
 vertical slice.  Readiness means bounded local feasibility only: it does not
-create source intents, final identifiers, files, KCS chunks, or G0 authority.
+create source intents, final identifiers, files, KCS chunks, multilingual PDF
+coverage, or G0 authority.
 
 Dependency direction is one-way::
 
@@ -18,12 +18,15 @@ Neither implementation contract imports this sidecar or any planning input.
 from __future__ import annotations
 
 import copy
+import functools
 import hashlib
 
 try:  # Support package imports and direct ``eval/*.py`` execution.
     from . import persona_v2_artifact_common as artifact_common
     from . import persona_v2_contract as envelope
     from . import persona_v2_input_bindings as input_bindings
+    from . import persona_v2_pdf_text_renderer as pdf_text_renderer
+    from . import persona_v2_pdf_text_validator as pdf_text_validator
     from . import persona_v2_text_renderer as text_renderer
     from . import persona_v2_text_validator as text_validator
     from . import persona_v2_variant_catalog as variant_catalog
@@ -31,6 +34,8 @@ except ImportError:  # pragma: no cover - direct-script compatibility
     import persona_v2_artifact_common as artifact_common
     import persona_v2_contract as envelope
     import persona_v2_input_bindings as input_bindings
+    import persona_v2_pdf_text_renderer as pdf_text_renderer
+    import persona_v2_pdf_text_validator as pdf_text_validator
     import persona_v2_text_renderer as text_renderer
     import persona_v2_text_validator as text_validator
     import persona_v2_variant_catalog as variant_catalog
@@ -41,9 +46,11 @@ ARTIFACT_SCHEMA_VERSION = 2
 ARTIFACT_KIND = "persona-pc-v2-source-profile-catalog"
 MAX_CATALOG_BYTES = 256 * 1024
 
-READY_VARIANTS = frozenset(text_renderer.READY_VARIANTS)
+READY_VARIANTS = frozenset(text_renderer.READY_VARIANTS) | frozenset(
+    {pdf_text_renderer.VARIANT_ID}
+)
 EXPECTED_VARIANT_COUNT = 71
-EXPECTED_READY_VARIANT_COUNT = 9
+EXPECTED_READY_VARIANT_COUNT = 10
 
 
 class PersonaV2SourceProfileCatalogError(ValueError):
@@ -82,7 +89,13 @@ def _artifact_binding(name, value, *, validate, canonical, digest):
     }
 
 
-def _dependency_bindings(variant_value, renderer_value, validator_value):
+def _dependency_bindings(
+    variant_value,
+    text_renderer_value,
+    text_validator_value,
+    pdf_renderer_value,
+    pdf_validator_value,
+):
     return {
         "binding_order": [
             "envelope",
@@ -92,20 +105,36 @@ def _dependency_bindings(variant_value, renderer_value, validator_value):
             "variant-catalog",
             "id-free-text-renderer",
             "id-free-text-validator",
+            "id-free-pdf-text-renderer",
+            "id-free-pdf-text-validator",
         ],
         "id_free_text_renderer": _artifact_binding(
             "id-free-text-renderer",
-            renderer_value,
+            text_renderer_value,
             validate=text_renderer.validate_renderer_contract,
             canonical=text_renderer.canonical_json_bytes,
             digest=text_renderer.renderer_contract_sha256,
         ),
         "id_free_text_validator": _artifact_binding(
             "id-free-text-validator",
-            validator_value,
+            text_validator_value,
             validate=text_validator.validate_validator_contract,
             canonical=text_validator.canonical_json_bytes,
             digest=text_validator.validator_contract_sha256,
+        ),
+        "id_free_pdf_text_renderer": _artifact_binding(
+            "id-free-pdf-text-renderer",
+            pdf_renderer_value,
+            validate=pdf_text_renderer.validate_renderer_contract,
+            canonical=pdf_text_renderer.canonical_json_bytes,
+            digest=pdf_text_renderer.renderer_contract_sha256,
+        ),
+        "id_free_pdf_text_validator": _artifact_binding(
+            "id-free-pdf-text-validator",
+            pdf_validator_value,
+            validate=pdf_text_validator.validate_validator_contract,
+            canonical=pdf_text_validator.canonical_json_bytes,
+            digest=pdf_text_validator.validator_contract_sha256,
         ),
         "planning_chain": input_bindings.build_upstream_bindings(),
         "variant_catalog": _artifact_binding(
@@ -118,7 +147,7 @@ def _dependency_bindings(variant_value, renderer_value, validator_value):
     }
 
 
-def _implementation_rows(contract, *, role):
+def _implementation_rows(contract, *, role, expected_variants):
     rows = contract.get("variant_rows")
     if type(rows) is not list:
         raise PersonaV2SourceProfileCatalogError(
@@ -136,7 +165,7 @@ def _implementation_rows(contract, *, role):
                 f"{role} contract contains duplicate variant {variant_id}"
             )
         by_variant[variant_id] = row
-    if set(by_variant) != READY_VARIANTS:
+    if set(by_variant) != set(expected_variants):
         raise PersonaV2SourceProfileCatalogError(
             f"{role} contract readiness set drifted"
         )
@@ -164,7 +193,13 @@ def _require_renderer_validator_agreement(renderer_row, validator_row):
         )
 
 
-def _source_profile_row(upstream_row, renderer_by_variant, validator_by_variant):
+def _source_profile_row(
+    upstream_row,
+    renderer_by_variant,
+    validator_by_variant,
+    renderer_ids,
+    validator_ids,
+):
     variant_id = upstream_row["variant_id"]
     ready = variant_id in READY_VARIANTS
     row = {
@@ -173,7 +208,11 @@ def _source_profile_row(upstream_row, renderer_by_variant, validator_by_variant)
             "independent_validator_implemented": ready,
             "renderer_implemented": ready,
             "status": (
-                "id-free-text-vertical-slice-ready"
+                (
+                    "id-free-pdf-text-vertical-slice-ready"
+                    if variant_id == pdf_text_renderer.VARIANT_ID
+                    else "id-free-text-vertical-slice-ready"
+                )
                 if ready
                 else "renderer-validator-or-formula-not-implemented"
             ),
@@ -231,13 +270,18 @@ def _source_profile_row(upstream_row, renderer_by_variant, validator_by_variant)
         "parameters_complete": True,
     }
     row["implementation_bindings"] = {
-        "renderer_id": text_renderer.RENDERER_ID,
-        "validator_id": text_validator.VALIDATOR_ID,
+        "renderer_id": renderer_ids[variant_id],
+        "validator_id": validator_ids[variant_id],
         "validator_profile_id": validator_row["validator_profile_id"],
     }
     row["render_template"] = renderer_row["render_template"]
+    slice_name = (
+        "id-free-pdf-text"
+        if variant_id == pdf_text_renderer.VARIANT_ID
+        else "id-free-text"
+    )
     row["bounded_feasibility_profile_id"] = (
-        f"persona-v2-{variant_id}-id-free-text-feasibility-v2"
+        f"persona-v2-{variant_id}-{slice_name}-feasibility-v2"
     )
     return row
 
@@ -270,20 +314,61 @@ def _coverage(variant_value):
     }
 
 
+@functools.lru_cache(maxsize=1)
 def _canonical_catalog_value():
     variant_value = variant_catalog.build_variant_catalog()
-    renderer_value = text_renderer.build_renderer_contract()
-    validator_value = text_validator.build_validator_contract()
+    text_renderer_value = text_renderer.build_renderer_contract()
+    text_validator_value = text_validator.build_validator_contract()
+    pdf_renderer_value = pdf_text_renderer.build_renderer_contract()
+    pdf_validator_value = pdf_text_validator.build_validator_contract()
     variant_catalog.validate_variant_catalog(variant_value)
-    text_renderer.validate_renderer_contract(renderer_value)
-    text_validator.validate_validator_contract(validator_value)
+    text_renderer.validate_renderer_contract(text_renderer_value)
+    text_validator.validate_validator_contract(text_validator_value)
+    pdf_text_renderer.validate_renderer_contract(pdf_renderer_value)
+    pdf_text_validator.validate_validator_contract(pdf_validator_value)
 
-    renderer_by_variant = _implementation_rows(
-        renderer_value, role="renderer"
+    text_renderer_rows = _implementation_rows(
+        text_renderer_value,
+        role="text renderer",
+        expected_variants=text_renderer.READY_VARIANTS,
     )
-    validator_by_variant = _implementation_rows(
-        validator_value, role="validator"
+    pdf_renderer_rows = _implementation_rows(
+        pdf_renderer_value,
+        role="PDF-text renderer",
+        expected_variants=(pdf_text_renderer.VARIANT_ID,),
     )
+    text_validator_rows = _implementation_rows(
+        text_validator_value,
+        role="text validator",
+        expected_variants=text_validator.READY_VARIANTS,
+    )
+    pdf_validator_rows = _implementation_rows(
+        pdf_validator_value,
+        role="PDF-text validator",
+        expected_variants=(pdf_text_validator.VARIANT_ID,),
+    )
+    if set(text_renderer_rows).intersection(pdf_renderer_rows) or set(
+        text_validator_rows
+    ).intersection(pdf_validator_rows):
+        raise PersonaV2SourceProfileCatalogError(
+            "renderer or validator readiness ownership overlaps"
+        )
+    renderer_by_variant = {**text_renderer_rows, **pdf_renderer_rows}
+    validator_by_variant = {**text_validator_rows, **pdf_validator_rows}
+    renderer_ids = {
+        **{
+            variant_id: text_renderer.RENDERER_ID
+            for variant_id in text_renderer.READY_VARIANTS
+        },
+        pdf_text_renderer.VARIANT_ID: pdf_text_renderer.RENDERER_ID,
+    }
+    validator_ids = {
+        **{
+            variant_id: text_validator.VALIDATOR_ID
+            for variant_id in text_validator.READY_VARIANTS
+        },
+        pdf_text_validator.VARIANT_ID: pdf_text_validator.VALIDATOR_ID,
+    }
     upstream_rows = variant_value["variant_rows"]
     if (
         type(upstream_rows) is not list
@@ -297,7 +382,13 @@ def _canonical_catalog_value():
             "upstream 71-variant identity set drifted"
         )
     profile_rows = [
-        _source_profile_row(row, renderer_by_variant, validator_by_variant)
+        _source_profile_row(
+            row,
+            renderer_by_variant,
+            validator_by_variant,
+            renderer_ids,
+            validator_ids,
+        )
         for row in upstream_rows
     ]
     ready_rows = [
@@ -348,14 +439,21 @@ def _canonical_catalog_value():
         "fixture_schema_version": envelope.FIXTURE_SCHEMA_VERSION,
         "g0_contract_frozen": False,
         "input_bindings": _dependency_bindings(
-            variant_value, renderer_value, validator_value
+            variant_value,
+            text_renderer_value,
+            text_validator_value,
+            pdf_renderer_value,
+            pdf_validator_value,
         ),
         "orders": {
             "profile_rows": "exact-upstream-variant-catalog-order",
-            "ready_variants": list(text_renderer.READY_VARIANTS),
+            "ready_variants": sorted(
+                READY_VARIANTS, key=lambda value: value.encode("ascii")
+            ),
         },
         "remaining_blockers": [
-            "sixty-two-variant-renderer-validator-and-formula-profiles-not-ready",
+            "sixty-one-incidental-or-raw-variant-profiles-not-ready",
+            "pdf-text-multilingual-and-kcs-chunk-attestation-not-proved",
             "semantic-content-recipe-inputs-not-bound",
             "source-intent-identities-not-allocated-or-hashed",
             "production-kcs-chunk-count-not-attested",
@@ -371,7 +469,7 @@ def _canonical_catalog_value():
 
 
 def build_source_profile_catalog():
-    """Return a detached 71-row catalog with exactly nine ready profiles."""
+    """Return a detached 71-row catalog with exactly ten ready profiles."""
 
     return copy.deepcopy(_canonical_catalog_value())
 
@@ -413,6 +511,7 @@ def source_profile_catalog_sha256(value=None):
 
 def require_complete_source_profile_catalog():
     raise PersonaV2SourceProfileCatalogError(
-        "only nine ID-free text contributor profiles are ready; 62 variants, "
-        "semantic recipes, source intents, KCS attestation, and capacity gates remain"
+        "ten contributor feasibility profiles are ready, but 61 incidental/raw "
+        "variants, multilingual PDF coverage, semantic recipes, source intents, "
+        "KCS attestation, and capacity gates remain"
     )
