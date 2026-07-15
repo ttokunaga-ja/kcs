@@ -12,7 +12,9 @@ semantic-membership packageとして、各人45 fact profiles（suite 900）、8
 reservation、structural source、semantic/fact manifestsを下流からdirectにjoinするconcrete-overlay
 membership packageを実装し、40 origin + 40 profile manifests、25,560 draft memberships、
 2,100 disjoint semantic anchorsを27,660 rich rowsとして束縛する。
-ただしformal recipe、solved scope placement、semantic-payload closureはなく、既存structural packageの
+さらに71 variant-level formal recipe profile policyを、inventory slot、semantic content/filename slot、
+all-71 runtime contract/receiptへ推移的に束縛した。ただし203,000 source-instanceごとのrecipe値、
+selected complexity/bytes、solved scope placement、semantic-payload closureはなく、既存structural packageの
 `source_intent_inventory_complete=false`を変更しない。history-intentもsolver後のcompiled event planではない。
 exact 203,000-key/73-shard source-inventory layout、overlay contract、
 40 persona/originのpre-source overlay reservation、
@@ -20,11 +22,13 @@ ID-free text/PDF renderer/validator、source-profile catalogを含め、どの�
 write、history authorityを与えない。layoutはrow bodyやbody SHAを持たない件数・key-range予約だけであり、
 row body/digestは下流structural packageが別に束縛する。overlay reservation自体はsource key/関係/identity slotの
 予約であり、下流concrete packageだけがmembershipへ昇格させる。
-凍結済みsource-profile catalogの10 local-ready / 61 implementation-missingは変更しない一方、後続の
-ID-free incidental-text rendererとbuilder非依存validatorで`csv`、`eml`、`html`、`ipynb`、`json`、
-`jsonl`、`log`、`sql`、`tsv`、`xml`、`yaml`の11 variantsを局所実装した。したがって現在の下流実装可用性は
-21 / 71、残る未実装はraw-only 50 / 71である。ただしformal recipeは71件すべてunboundであり、source別の
-materialization、chunk、KCS、G0、filesystem/write authorityは増えていない。
+凍結済みsource-profile catalogの歴史的10 local-ready / 61 implementation-missingは変更しない。その後流で
+11 incidental-searchableと50 raw-only variantsのID-free renderer/independent-validatorを実装し、
+all-71 format implementation registryが71 unique rows、8 implementation pairs、213 runtime probes、
+pilot 20,300 / full 203,000のexact coverageを束縛した。下流のformal source-recipe profile catalogは
+71 profileすべてを一意に束縛し、full/pilot別のincidental capと全checkpoint整数表も固定した。
+したがって現在の下流形式実装可用性とvariant-level recipe policyは71 / 71である。ただしsource-instance別の
+parameter/recipe、materialization、chunk、KCS、G0、filesystem/write authorityは増えていない。
 overlayの8軸ledgerはaxis draftであり、byte/host-metadata reconciliation、scope placement、
 raw/rendered identityと検索参加の実測は未完成である。
 同一subject/predicate・異なる値を持つunordered W0-current fact pairとsource-owned distinct A/B branch profilesは
@@ -99,6 +103,19 @@ contributorが正確でも動的eligible上限を超えたrootは失格とする
 | `formal-retrieval-history-v2` | 20人別の検索、履歴、latency | 含む | W0-W5を3 fresh-storage replay | 含む |
 | `recursive-robustness-v1` | 深いambient tree、noise、Unicode、case/conflict、partial download | 含めない | 別manifest。必要な代表操作だけ | 含む |
 | `byte-stress-v1` | 64-100 MiB級raw file、I/O、allocated blocks | 含めない | W0-only、1 replay | 含む |
+
+「複雑なネスト」を1つの数値で扱わない。正式検索で必要な親階層と、recursive ingestionの
+耐性を試すambient treeは次のように別契約とする。
+
+| 境界 | 実現するネスト | formal比率/chunk/Recallの分母 | 必須の実測receipt |
+| --- | --- | --- | --- |
+| formal persona-PC | `home/`からleaf scopeまでD2--D6、managed fileはleaf直下 | 含む | persona x replay x checkpointのfile-depth histogram、directory-prefix数、max fan-out、scope別file数、path collision 0 |
+| recursive robustness | ambient rootでD6--D8、中間directoryにもfile、partial/cache/conflict/case/Unicodeを含む | 含めない | candidate/実現/不実現数、traversal結果、除外理由、formal leafとの非交差 |
+| byte stress | 形式別I/Oを切り分けた浅いW0-only root | 含めない | allocated bytes/inodes、validator結果、formal rootとの非共有 |
+
+formalでは「深い親pathまで含む検索scope」を、robustnessでは「中間階層にもfileがある
+recursive tree」を試す。後者を10万chunks超の正式コーパスの成績に混ぜない一方、両方の
+actual path shapeを別々読み戻さなければネスト要件を満たしたと判定しない。
 
 正式scopeまでの親階層は深くしてよい。ただしKCSのdirect-file契約に合わせ、managed fileは
 各leaf scopeの直下だけに置く。recursive ambientをformal rootへ混ぜると厳密なfile比、chunk母数、
@@ -539,7 +556,7 @@ variantごとに検査項目を分ける。
 | GZIP | mtime 0、OS 255、DEFLATE stored block、CRC32、ISIZE、展開後byte上限 |
 | NPZ | ZIP gateに加え、内部`.npy`のmagic、header、shape、dtype、payload長 |
 | PCAP | magic、endianness、version 2.4、snaplen、record timestamp/length bounds、packet checksum |
-| DICOM | Part-10 preamble/meta、transfer syntax、explicit-VR length、digest由来UID、synthetic identifier、pixel bounds |
+| DICOM | Part-10 preamble/meta、Explicit VR Little Endian、Multi-frame Grayscale Byte SC SOP Class、必須Patient/Study/Series/SC/Multi-frame要素、complexity別の決定的一意UID、Frame Increment Pointer/Page Number Vector、pixel bounds |
 
 plain IFCはprintable textとしてsniffされ得るためraw-onlyには使わない。すべて独立validatorで
 再読込し、拡張子、media type、magic、gate roleの不一致をfail closedにする。
@@ -660,6 +677,23 @@ PDF pages、Office member数、attachment数、raw bytesはchunk quotaとは別f
 | PPTX | 1-40 slides | 41-200 slides |
 | image/media/domain | ordinary rawを4 KiB-512 KiB、tailは最大16 files/person・1-4 MiB | 128 KiB-100 MiB |
 
+形式実装の最小/中央/最大payloadがvalidであることと、persona-PC全体のbyte分布が意図どおりで
+あることは別である。G0では`persona x family x origin`のexact byte/complexity表を次の列で凍結する。
+
+| 列 | 契約 |
+| --- | --- |
+| `source_count` | pilot、full-residual、fullのfamily/variant件数とexactに一致 |
+| `ordinary_count / tail_count` | formal tailは1 persona最大16 files、variant別許可と整合 |
+| `complexity_histogram` | rendererが表現できるinteger値だけ。丸め後に再集計 |
+| `raw_bytes_p50 / p95 / max` | nearest-rankで人物・family別に事前算出 |
+| `allocated_bytes_upper` | source bytesと分離し、pilot実測から後段で補正 |
+| `requested_chunk_policy` | contributor 1--70、incidentalは0以上の動的上限、raw-onlyはexact 0 |
+
+fullの`pilot + full-residual`は件数、complexity histogram、raw-byte sumのすべてでcoordinatewiseに閉じる。
+p50/p95は加法量ではないため差し引かず、fullの順序済みsource列から再計算する。現在は形式別
+feasibilityまでで、このpersona x family表とsource-level assignmentは未束縛であるため、容量やwriteは
+引き続きfail closedとする。
+
 formal W0の512 MiB/personかつ10 GiB/replay、W5 finalの1.25 GiB/personかつ25 GiB/replay、
 pre-purgeの`floor(27 GiB / 20)`/personかつ27 GiB/replayは、managed source filesとauthored scope
 directoriesだけを数える**source-tree envelope候補**とする。`.kcs`、CAS、SQLite/FTS/WAL、registry、
@@ -692,12 +726,14 @@ cell-local ordinalだけを割り当てる。overlay/fact membershipも
 persona planは16 MiB/personをhard cap候補とし、G0で20人すべての実serialization sizeを測ってresource
 oracleとテストを更新する。
 
-現structural source packageは71 variantすべてに一意なinventory-only `source_profile_id`を付与したが、
-これは上記のformal recipe profileではない。formal recipe slotは71件すべて
-`reserved-unbound`/`profile_id=not-bound`である。凍結済みsource-profile catalogは局所feasibility済み10件と
-implementation missing 61件を記録し続ける。後続のincidental-text pairは、その61件中11件をcatalog非改変の
-局所実装として追加したため、現在利用可能なformat implementationは21件、残る未実装はraw-only 50件である。
-この21件のいずれもformal recipe・semantic content・source materialization・execution authorityを授与しない。
+現structural source packageは71 variantすべてに一意なinventory-only `source_profile_id`を付与した。
+そのupstream rowは歴史的snapshotとして`reserved-unbound`/`profile_id=not-bound`を維持する一方、
+下流のformal source-recipe profile catalogが各slotを一意なpolicy profileへ結合する。これは203,000件の
+source-instance parameterを選択した意味ではない。凍結済みsource-profile catalogは局所feasibility済み10件と
+implementation missing 61件を歴史的snapshotとして記録し続ける。後続のincidental-text 11件とraw-only 50件を
+catalog非改変の局所実装として追加したため、現在利用可能なformat implementationは71件である。
+正本はall-71 implementation registryであり、歴史的catalogを71-readyへ書き換えない。profile policy bindingも
+semantic content instance・source materialization・execution authorityを授与しない。
 
 source-owned semantic-membership packageは、この10-field structural rowを変更せず、
 `intent_key`、`content_context_id`、`present_fact_set_key`を別sidecarで全203,000件exactly once解決する。
@@ -819,16 +855,26 @@ contract chunksを持つ。W0 sourceは203,000 files/replayであり、3 fresh r
 60 physical roots、1,200 scopes、609,000 W0 source filesになる。ただしこれはcardinality計画であり、
 後述のpilot component実測とdestination readbackがない限り容量feasibilityやwrite authorityを意味しない。
 
+作成済みを判定する`observed-structural-materialization-receipt/v2`は少なくともW0とW5 finalで
+persona x replayごとに作る。比較対象はplanであり、suite合算だけの一致では合格させない。
+
+- family/variant/gate-roleのphysical file数、archive member数、logical-document数を別集計
+- scope別file数、file/directory depth histogram、unique prefix数、max fan-out、casefold/path collision 0
+- extension、magic、content MIME、KCS path MIME、offline disposition、独立validator passのexact一致
+- raw-byte sum、allocated blocks、inode数、人物・family別nearest-rank p50/p95/max、formal tail count
+- plan外regular file/directory、hard link、clone、sparse、symlink、別persona/replayとのshared inodeが0
+- W1--W5でpathが動く場合は各checkpointでbefore/after構造deltaをevent journalへ結合
+
 | Gate | 実装・実行 | 合格条件 | 現在地 |
 | --- | --- | --- | --- |
-| G0 v2契約凍結 | 400 exact scope paths/load、family/extension/variant整数比、`persona_realism_profile`と8軸台帳、ambient spec、共有辞書、pre-solve source-intent recipe、size、fact/oracle、W0-W5 exact eventをversioned artifact graphとsuite descriptor hashへ固定 | generator変更前に全20人でcanonical rebuild。joint solverがrealism overlayを入力にfull contributor=120,000とpilot=12,000、scope routing、wave別incidental上限、plan 16 MiB上限をexactに解く | coreに加え203,000構造row/73 shard body、40 origin + 40 profile manifest、71 inventory profile ID、40 originのnon-authorizing overlay reservation、45 fact profiles/persona、80 topics、71 semantic profiles、3,733 compact rowsからの203,000 semantic/fact logical total projection、40 concrete origins + 40 concrete profilesと27,660 rich pre-solve overlay rows、negative route receipt、20件のrepresentative source/fact/history slice、2,100 query/oracle、非authorizing closure候補、10 contributor + 11 incidentalの局所format実装まで完成。formal recipeは71件全てunbound、solved placement、残る50 raw-only renderer/validator implementation、semantic payload projection、独立approval、solution/proof、完全persona 16 MiB proof、正式rootは未実装 |
+| G0 v2契約凍結 | 400 exact scope paths/load、family/extension/variant整数比、`persona_realism_profile`と8軸台帳、ambient spec、共有辞書、pre-solve source-intent recipe、size、fact/oracle、W0-W5 exact eventをversioned artifact graphとsuite descriptor hashへ固定 | generator変更前に全20人でcanonical rebuild。joint solverがrealism overlayを入力にfull contributor=120,000とpilot=12,000、scope routing、wave別incidental上限、plan 16 MiB上限をexactに解く | coreに加え203,000構造row/73 shard body、40 origin + 40 profile manifest、71 inventory profile ID、40 originのnon-authorizing overlay reservation、45 fact profiles/persona、80 topics、71 semantic profiles、3,733 compact rowsからの203,000 semantic/fact logical total projection、40 concrete origins + 40 concrete profilesと27,660 rich pre-solve overlay rows、negative route receipt、20件のrepresentative source/fact/history slice、2,100 query/oracle、非authorizing closure候補、71/71 format implementation、213 runtime probes、71/71 formal recipe profile policyまで完成。source-instance recipe値、solved placement、persona/family byte表、exact event inventory、semantic payload projection、独立approval、solution/proof、完全persona 16 MiB proof、正式rootは未実装 |
 | G1 v2 tiny W0 | 20人×200 files/persona-PC rootを1人・1sourceずつstreaming作成 | 4,000 files/suite replay、2 fresh suite replays合計8,000 writes、400 scopes/replay、比率/path/hash/readback、inode非共有 | v1相当は済。v2回帰が必要 |
 | G2 pilot W0 | pilot-first solverのexact subset、計20,300 files、各人12,000 planned、init→offline index | 各人actual contributor 12,000、raw-only 0、planned/actualを別台帳化 | streaming writerと完全attestorが未実装 |
 | G3 pilot W1-W5 | immutable eventをmutation前に検証し、edit/rename/move/duplicate/derive/archive/delete/restore/purge | exactly-once journal、再開収束、waveごとのactual attestation、purge後index noop | v1相当のみ済。v2 allocator/manifest未実装 |
 | G4 full Go/No-Go | pilotのbytes/inodes/RSS/history amplificationを読み戻す | 3 suite replay containers=60 persona-PC roots、staging、reserveがcapacity内。不足ならwrite前に停止 | evidence待ち |
 | G5 full replay×3 | 同一plan/eventから3 fresh rootsをそれぞれW0からW5まで実行 | `.kcs`/完成rootコピーなし、hard link/cloneなし、60 registries、1,200 scopes | 未実装 |
 | G6 reproducibility/resume | root依存値を除くcanonical stateとquery rankを比較、failure injection後resume | event exactly-once、同一seedのstate/count/history/query projection一致 | 未実装 |
-| G7 actual attestation | DB/CAS/HEAD/historyを全persona・全replay・全waveで実読 | 各waveのC/Hがcheckpoint表とexact一致。current eligibleは`C(w)..135,000`、current+history eligibleは`C(w)+H(w)..210,000`かつ動的incidental cap内、raw-only=0 | 未実装 |
+| G7 actual attestation | filesystemとDB/CAS/HEAD/historyを全persona・全replay・全waveで実読 | 各waveのC/Hがcheckpoint表とexact一致。current eligibleは`C(w)..135,000`、current+history eligibleは`C(w)+H(w)..210,000`かつ動的incidental cap内、raw-only=0。W0/W5の人物別family/variant、path shape、magic/MIME、validator、size p50/p95/tailがplanとexact一致 | 未実装 |
 | G8 evaluation | 各人・各scenario最低30問、合計1,800 unique positive queries。300 negativeは別判定 | 各persona×scenarioでRecall@10 >=0.8。各persona×scenarioの3 replay観測をnearest-rank集計し、M3-1 p95<5s、M3-2/M3-3 p95<7s。pooled/per-person summaryは参考併記し、同一seed再現性に限定して報告 | 未実施 |
 
 G0内の実装順も固定する。
@@ -878,6 +924,23 @@ P/X/Y/N/Uのchunk比は比較可能性のため全人物で共通に保つ一方
 | p08 | edit, rename, duplicate | p18 | edit, archive, purge |
 | p09 | edit, derive, archive | p19 | edit, duplicate, restore |
 | p10 | edit, duplicate, move | p20 | edit, move, purge |
+
+この「主な操作」表は意図だけであり、実行可能なevent inventoryではない。G0までに
+`persona x wave x event_type x family x variant`のexact件数と、各source eventの次の座標を凍結する。
+
+```text
+event_intent_key / persona_id / wave / operation / precondition_checkpoint
+logical_document_key / source_intent_key / family / variant / gate_role
+before_scope_key / before_relative_path / after_scope_key / after_relative_path
+before_raw_state / after_raw_state / bytes_preserved / present_facts_preserved
+expected_current_chunk_delta / expected_history_only_chunk_delta
+required_query_scenario / expected_visibility / purge_or_restore_anchor_key
+```
+
+persona x waveのevent件数、family/variant件数、chunk deltaはcheckpoint表にexactに集計され、
+M3-1/M3-2/M3-3のquery stratum coverageに投影できなければならない。before/after pathが同一、
+restore後が別のlogical document、raw-onlyがsearchableとして数えられたなどの行は拒否する。
+このexact inventoryとcompiled history planは未実装であり、履歴生成のG0 blockerとする。
 
 small editは90%以上のsemantic sectionsを保持し、指定factだけを変える。major editは別bucketにする。
 rename/moveはbytes不変、delete/restoreはsource/version/rawを保持、purge後は旧queryが0件になることを
@@ -1106,7 +1169,7 @@ v2で実装済み（planning only、non-authorizing）:
   2,075 bytes / `ab66e11d93e2aa7896bdffd28f1c1fec9f443a4ff3b48ba6dcc4d1c12bab69f6`、validatorは
   2,233 bytes / `78c90d4cccb254f67bc030e79eaef46704ce4d8555a3edc8f42edc293e91805e`である。
   これにより局所feasibilityは10 contributor variants、full 69,236 contributor sourcesを覆うが、
-  多言語PDF、個別semantic content、positive query anchor、KCS actual chunks、source recipe/G0は証明しない。
+  多言語PDF、個別semantic content、positive query anchor、KCS actual chunks、source-instance recipe/G0は証明しない。
   source-profile catalogは72,559 bytes / `6e38fab07851f9fdcbf9d6e67e502484aea7edb66167ea86db1539593b8b58ac`である。
 - 後続のincidental-text narrow feasibility sliceは11 variantsをstdlib-onlyで局所実装する。renderer contractは
   9,139 bytes / `22fae0f62a67856ef20b5820c7274aad542a2de06f76c93c5c68acdaed9652f4`、独立validator contractは
@@ -1114,6 +1177,18 @@ v2で実装済み（planning only、non-authorizing）:
   512 KiB以下、EMLはCRLFかつwire line 78 bytes以下である。凍結catalogを変更せず、そのinventory marginalが
   full 60,414 sourcesを占める11 incidental variantsをformat-levelで覆うが、source別recipe、semantic payload、
   materialization、actual incidental chunk上限、KCS/G0/writeを証明しない
+- 残る50 raw-only variantsを5 renderer/independent-validator pairで実装し、all-71 implementation
+  registryへ統合した。registryは333,881 canonical bytes / SHA-256
+  `f585ae477daa01db4dc11bbc1edd9824696bd91eddce5870d618caaffd90c683`で、71 unique ownership rows、
+  8 pairs、16 contract bodies、213 min/mid/max runtime probes、pilot 20,300 / residual 182,700 /
+  full 203,000 / 541 active persona-variant rowsを束縛する。provider callback中のbody変更はopening snapshotと
+  post-callback re-pinで拒否する。局所format実装でありsource instance、render/write authorityではない
+- `kcs.persona.pc-formal-source-recipe-profile-catalog/v2`は386,152 canonical bytes / SHA-256
+  `973a31336b90abc6271165ce4a3130679f36d5a9d65b06fece6827123e5c6cc8`である。71 inventory recipe slots、
+  semantic content/filename slots、renderer/validator contractとruntime receiptをvariant-level profile policyへ
+  1対1で束縛し、full/pilot別のeligible/base incidental capとW0--W5 exact integer checkpoint tableを持つ。
+  203,000 source-instance値、selected complexity/bytes、semantic payload materialization、scope assignment、
+  solver/render/write/G0はすべて未束縛でauthorityはfalseである
 - canonical JSON objectは16 MiB、JSONLは16 MiB/65,536 rows/1 row 64 KiBのpre-read capを持つbounded
   readerを実装した。UTF-8/NFC、duplicate key、null/float/negative integer、CR/BOM/blank row、末尾LF、
   exact declared bytes/SHAをfail closedで検査する。ただし外側frame header/dispatcherとのbindingは未実装
@@ -1165,10 +1240,8 @@ content-only `semantic_payload` projectionだけをidentity namespaceへ入れ�
 
 - realism profileとvariant catalogの独立review receipt、routeの独立human approval receipt、solved placement整数割当、
   logical-document採点/検索参加、8軸台帳
-- 71件のformal recipe slotを束縛する、chunk/complexity/bytesを分離したpre-solve source-intent recipe、
-  人物・family別byte p50/p95/tail、source-level content recipe/semantic filename
-- 11 incidental local contractsのformal profile/recipe bindingと、残る50 raw-only variantのvalidator/renderer、
-  source-level feasibility、
+- 71 profile policyを203,000 source-instanceへ展開する、chunk/complexity/bytesを分離したpre-solve
+  source-intent recipe、人物・family別byte p50/p95/tail、source-level content recipe/semantic filename、
   schema別content-only `semantic_payload` projection、正式なcorpus/evaluation closure
 - concrete overlayの`placement_class_requirement`を400 scopesへ割り当てるjoint solution/proof、
   logical-document/search participation、raw/rendered identityと8軸observed ledger
@@ -1198,13 +1271,13 @@ content-only `semantic_payload` projectionだけをidentity namespaceへ入れ�
 canonical plan SHAを変更しない。non-authorizing generic solver-semantics sidecar、representative pre-solve
 vertical slice、203,000-key/73-shard layout、overlay reservation、全203,000 structural rows/73 shard bodies、
 40 origin + 40 profile manifests、71 inventory profile IDs、全203,000 sourceのcontent contexts +
-source-owned fact membership、40 origin + 40 profile manifestsのconcrete overlay membershipまでは完了した。
-以後の実装順は、(1) 71 formal recipes、11 incidental contractsのprofile binding、
-残る50 raw-only renderer/validator implementations、
-(2) corpus semantic namespaceとquery/history target mappings、
-(3) joint solverと独立検証可能なsolution/proof、(4) allocation/rendering + streaming folder/file writer、
-(5) W1--W5 edits/history、(6) 3 fresh-storage replays、(7) actual
-chunk/history/query/capacity/latency evaluation、とする。solutionをformal source recipe/semantic namespaceより先行させず、
+source-owned fact membership、40 origin + 40 profile manifestsのconcrete overlay membership、71/71 format
+implementation registry、71/71 variant-level formal recipe profile catalogまでは完了した。
+以後の実装順は、(1) persona/family byte分布、exact event inventory、203,000 source-level parametersと
+corpus semantic/query/history target closure、(2) joint solverと独立検証可能なsolution/proof、
+(3) allocation/rendering + streaming folder/file writer、(4) W1--W5 edits/history、
+(5) 3 fresh-storage replays、(6) observed structural receiptとactual
+chunk/history/query/capacity/latency evaluation、とする。solutionをsource-instance recipe/semantic namespaceより先行させず、
 完成rootや`.kcs`のcopyでfresh replayを代替しない。
 
 Q_hardでのSpotlight/ripgrep-all比較、D1のTTFV/AI強化時間/コスト、実フォルダdogfoodは、

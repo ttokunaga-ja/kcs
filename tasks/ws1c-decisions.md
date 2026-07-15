@@ -1184,3 +1184,67 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     binding of all seventy-one recipes and these eleven contracts, the fifty raw-only pairs, semantic/query/history
     closures, joint solution/proof, streaming folder/file writing, edits/history, fresh-storage replays, and
     observed chunk/search/capacity/latency evaluation.
+127. Persona-PC v2 now closes the local ID-free format-feasibility implementation surface for all seventy-one
+    frozen variants without rewriting the historical source-profile catalog.  The fifty formerly missing
+    raw-only variants are implemented by five renderer/independent-validator pairs: four raw documents
+    (`pdf-scan`, `docx`, `xlsx`, `pptx`), seven image/media formats, twenty-one ZIP-family formats, sixteen
+    USTAR/GZIP formats, and two domain formats (`pcap`, `dicom`).  Their full inventory marginals total 73,350
+    raw-only sources; pilot and full-residual totals are 7,335 and 66,015.  Together with ten contributor and
+    eleven incidental implementations, downstream implementation availability is now seventy-one of seventy-one:
+    pilot 20,300, full-residual 182,700, full 203,000, and 541 active persona-variant rows.  This availability
+    is format-level feasibility only and does not bind one of those counts to a physical source instance.
+    Raw-document renderer/validator contracts are 4,657 / 5,183 bytes with SHA-256
+    `ac43d8e60fe288552e5edf1e11d98123b34766db8387460cb9f7ddf70af3ba2c` /
+    `c664596fce5331268ad69886b3f2d159e090241b4ef2848ac4ce64c52a1a572a`; their min/mid/max payload
+    aggregate is `f5b19a7b2201c8e699eef539bf1e124c6d24c0076a71aff018821b8cf4fba171`.
+    Raw image/media contracts are 7,504 / 8,223 bytes with SHA-256
+    `25231398ec7002e5ce7fbfe3d3089e14a9ef8547bc9a9f580cc385dd88fcda00` /
+    `b0fdf9e944b0df72b2f8d8601a83f6958654f92272466fd49b897a3b3e168953`.
+    Raw ZIP contracts are 18,670 / 20,737 bytes with SHA-256
+    `037897466c19ce476e4d5a7fff00d18905bbe80ad42d326b503c744d4e3dd1bb` /
+    `8c9390fa0667860e17a872b3c16e047d688dcc7919c73a4933eddfa38082aeec`.
+    Raw USTAR/GZIP contracts are 14,589 / 15,885 bytes with SHA-256
+    `d23a9b29f4e26748f32f07e201c1294ede5cd4534a27533e9ddc9b88a01d8cb8` /
+    `2e98faae761d7ae4aaaeba37a560d4e78dc3cc948551abde1acc399018d31bf6`.
+    Raw PCAP/DICOM contracts are 3,680 / 3,970 bytes with SHA-256
+    `d23868cb344a49ee2c2d354cfe0eb6b0ea9abd07163d573f1ba3b99da229f6ce` /
+    `520ced5cc89ca1bc5a0da45e14c7406e9d7e791d07ae27b2997749cf11ed2e9b`.
+    The DICOM variant is a Multi-frame Grayscale Byte Secondary Capture Part 10 object with the matching
+    `.7.2` SOP Class, mandatory Patient/Study/Series/SC/Multi-frame attributes, a Page Number Vector target for
+    Frame Increment Pointer, and a deterministic complexity-specific SOP Instance UID.
+    The downstream `kcs.persona.pc-format-implementation-registry/v2` binds all three frozen catalogs,
+    eight implementation pairs, sixteen contract bodies, seventy-one unique ownership rows, exact source-count
+    coverage, and 213 actual minimum/midpoint/maximum payload probes.  It is 333,881 canonical bytes with SHA-256
+    `f585ae477daa01db4dc11bbc1edd9824696bd91eddce5870d618caaffd90c683`.  Its standalone validator imports
+    no registry producer or renderer; it treats the eight independent validator modules as the trusted validation
+    base, directly validates each supplied payload for the requested variant, and compares payload and receipt
+    digests.  This closes a review finding in which an external validator provider could rethread or relabel a
+    receipt from another variant.  All sixteen request carriers are exact slotted dataclasses and reject undeclared
+    identity fields.  The focused registry suite passes fourteen tests, and the eight adjacent implementation suites
+    plus registry pass one hundred two tests locally; no remote CI green result is claimed.
+    The historical source-profile catalog remains ten-ready/sixty-one-missing and all historical pins remain
+    unchanged.  That catalog is a historical snapshot; the new registry is the sole current seventy-one-of-
+    seventy-one implementation-availability authority.  All seventy-one formal source-recipe slots still remain
+    unbound in the upstream inventory catalog.  No source instance, selected complexity/bytes, semantic content,
+    scope placement, actual filesystem payload, chunk, KCS, history, capacity, solver, write, or G0 authority is
+    granted.  The next order is downstream formal recipe-profile binding, persona/family byte and source-level
+    parameters plus exact event inventory and semantic closure, joint solution/proof, streaming writing, edits/
+    history, fresh-storage replays, and observed structural/chunk/search/capacity/latency evaluation.
+128. Persona-PC v2 now adds a downstream non-authorizing formal source-recipe profile catalog for all seventy-one
+    variants.  `kcs.persona.pc-formal-source-recipe-profile-catalog/v2` is 386,152 canonical bytes with SHA-256
+    `973a31336b90abc6271165ce4a3130679f36d5a9d65b06fece6827123e5c6cc8`.  It binds each frozen inventory recipe
+    slot to exactly one semantic content slot, filename slot, implementation owner, renderer/validator contract,
+    and runtime receipt policy.  It also freezes exact full/pilot incidental controls: eligible chunk ceilings
+    135,000/13,500, base ceilings 15,000/1,500, high ceilings 210,000/21,000, high bases 30,000/3,000, and
+    W5-pre caps 10,200/1,020 or 20,400/2,040 according to the profile policy.  Every checkpoint value is an
+    integer literal and is independently checked against the bound inventory marginal.
+    The catalog preserves the upstream historical source-profile snapshot and its seventy-one unbound inventory
+    slots; it is a distinct downstream policy binding, not a retroactive rewrite.  Its standalone validator
+    snapshots the catalog and all four bound dependencies before callbacks, validates from detached bytes, and
+    re-authenticates the catalog and dependencies afterward, so provider-side mutation cannot change the object
+    being approved.  The focused suite passes eighteen tests locally.  No source-instance value, selected
+    complexity/bytes, semantic payload materialization, scope placement, solver result/proof, filesystem payload,
+    write/history/KCS execution, capacity result, or G0 authority is granted, and no remote CI green result is
+    claimed.  The next order is persona/family byte distribution, 203,000 source-instance parameters, exact
+    lifecycle-event inventory and semantic/query/history closure, joint solution/proof, rendering and streaming
+    folder/file writing, edits/history, three fresh-storage replays, and observed evaluation.
