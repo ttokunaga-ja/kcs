@@ -134,6 +134,36 @@ jobs:
           python3 -m unittest -v
           eval.test_persona_v2_lifecycle_effective_membership_reconciliation
 
+  persona-v2-semantic-projection-derivation-contract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+      - run: >-
+          python3 -m unittest -v
+          eval.test_persona_v2_semantic_projection_derivation_inventory.SemanticProjectionDerivationInventoryContractTest
+
+  persona-v2-semantic-projection-derivation-full:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+
+    steps:
+      - uses: actions/checkout@v4
+      - run: >-
+          python3 -m unittest -v
+          eval.test_persona_v2_semantic_projection_derivation_inventory.SemanticProjectionDerivationInventoryLongAll113Test
+
+  persona-v2-semantic-projection-derivation-cold:
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+
+    steps:
+      - uses: actions/checkout@v4
+      - run: >-
+          python3 -m unittest -v
+          eval.test_persona_v2_semantic_projection_derivation_inventory.SemanticProjectionDerivationInventoryLongColdHashSeedTest
+
   rust:
     runs-on: ubuntu-latest
 
