@@ -1632,3 +1632,47 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     CI runs this module in its own 120-minute job.  Solver, complete post-W0 membership, compiled history, physical
     materialization, capacity/KCS observation, namespace completion, G0, and every write/execution authority remain
     false and downstream.
+150. Persona-PC v2 freezes a partial semantic-projection derivation inventory before issuing any production semantic
+    namespace.  `kcs.persona.pc-semantic-projection-derivation-inventory/v1` contains exactly 113 external projection
+    bodies, each represented by `kcs.persona.pc-semantic-projection-derivation-receipt/v1`: 73 membership-free base
+    source content-context JSONL shard bodies, twenty effective-source-membership projections, and twenty
+    query-independent lifecycle-fact/rendition-rule projections.  These cover exactly three of the twelve required
+    class IDs: `base-source-content-context`, `effective-source-membership`, and
+    `query-independent-lifecycle-fact-rendition-rules`.  The nine missing class IDs are `topology-path-load`,
+    `realism-locale-security`, `route-scores`, `primary-use-case-corpus-half`,
+    `recipe-content-filename-policy`, `fact-graph`, `concrete-overlay-relations`,
+    `source-instance-parameters`, and `payload-equivalence-rules`.
+
+    Every receipt binds the exact full/direct owner pin chain, logical coordinate/range, projector ID/version,
+    projection bytes/SHA-256, and successful independent-validator result.  Base receipts authenticate the exact
+    source-semantic origin manifest and its `source-shard-total-projection` range before regenerating the
+    membership-free expanded content-context body.  Effective receipts authenticate the reconciliation suite/full
+    owner and persona projection binding; lifecycle receipts authenticate the source-matched suite, persona owner,
+    and event-view receipt.  Neither an embedded SHA alias nor a producer-owned validator is sufficient.  Providers
+    replay twice under exact built-in type/bytes/hash/cap checks.  After every provider callback and at final
+    postflight, the validator reauthenticates the caller-owned opening image, full owners, and direct owner bodies.
+    Projection bodies do not embed full owner/suite pins or derivation receipts, avoiding a hash cycle; full owners
+    and receipts remain corpus-input-closure evidence outside the eventual namespace.
+
+    The canonical inventory cap is 1 MiB and the cumulative external-projection hard cap is 144 MiB.  Each base JSONL
+    body is capped at 4 MiB, 4,096 rows, and 768 bytes per LF-inclusive row.  Each effective and lifecycle projection
+    has a 384 KiB hard cap and 256 KiB target.  The frozen inventory is exactly 293,285 canonical bytes with SHA-256
+    `5b0e516e2784415dd7c416dee42fc7b23b84485e3629514e910dd67f1a600c84`; the canonical JSON array of ordered
+    `{receipt_id, canonical_bytes, sha256}` rows has SHA-256
+    `a909168390dbc7426d5ac21a36a5720c378e0d3281f852dcd90e40344e8cb83d`.  Its 113 external bodies total exactly
+    128,144,915 bytes.  The 73 base bodies contain exactly 203,000 rows and 121,020,941 bytes, with a 633-byte maximum
+    LF-inclusive row and 2,484,590-byte maximum body; effective and lifecycle maximum bodies are 103,864 and 256,790
+    bytes.  These literal pins are independently enforced by the producer, validator, and cold two-hash-seed gate.
+    The 203,000 base rows are planned W0 source projections for one suite replay; they are not evidence that files
+    were physically written, indexed, or that any persona attained 120,000 actual KCS chunks.
+    The final local gates pass three contract tests in 0.010 seconds, thirteen full all-113/tamper/TOCTOU tests in
+    2,093.924 seconds, and the isolated two-hash-seed cold-build test in 2,251.624 seconds.  The measured seed-zero
+    cold build takes 1,191.600 seconds with 304,218,112-byte maximum RSS; both cold builds remain below the 120-minute
+    and 768 MiB per-seed limits and reproduce every frozen value exactly.
+    This artifact is deliberately incomplete and non-authorizing:
+    `semantic_payload_projection_bound=false`, `query_semantics_absence_proved=false`,
+    `future_source_id_namespace_eligible=false`, and `g0_contract_frozen=false`; no semantic namespace is issued and
+    every namespace-completion, solver, solution/proof, final-ID, render, filesystem/write, KCS, history, capacity,
+    or G0 authority remains false.  The next required sequence is to implement and independently validate all nine
+    missing projections, then complete the corpus semantic/query/history closures and blocker-resolution ledger,
+    and only then proceed to the joint solver.

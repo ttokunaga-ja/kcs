@@ -1080,7 +1080,7 @@ persona x replayごとに作る。比較対象はplanであり、suite合算だ�
 
 | Gate | 実装・実行 | 合格条件 | 現在地 |
 | --- | --- | --- | --- |
-| G0 v2契約凍結 | 400 exact scope paths/load、family/extension/variant整数比、`persona_realism_profile`と8軸台帳、ambient spec、共有辞書、pre-solve source-intent recipe、source-matched lifecycle intent、fact/oracle、solution後のcompiled planned history plan、blocker resolution ledgerをversioned artifact graphとsuite descriptor hashへ固定 | generator変更前に全20人でcanonical rebuild。joint solverがrealism overlayを入力にfull contributor=120,000とpilot=12,000、scope routing、wave別incidental上限をexactに解き、pre-solve input 16 MiB、final W0 plan 16 MiB、proof 8 MiB、history 16 MiB、query 4 MiBの各planning capを別々に証明する。actual qIM/root capacityはG0へ含めない | coreに加え203,000構造row/73 shard body、40 origin + 40 profile manifest、71 inventory profile ID、40 originのnon-authorizing overlay reservation、45 fact profiles/persona、80 topics、71 semantic profiles、3,733 compact rowsからの203,000 semantic/fact logical total projection、40 concrete origins + 40 concrete profilesと27,660 rich pre-solve overlay rows、negative route receipt、20件のrepresentative source/fact/history slice、2,100 query/oracle、非authorizing closure候補、71/71 format implementation、213 runtime probes、71/71 formal recipe profile policy、566 persona-variant/300 persona-familyのimmutable aggregate byte分布とEML overlay-compatible effective sidecar、20 persona/20 primary use-case catalog、4-ledger chunk accounting、20 x 105 lifecycle demand、query-independent lifecycle coverage catalog、recursive robustness catalog、203,000 source-instance parameter assignment、2,300 source refs / 7,630 events / event-content projectionを持つsource-matched lifecycle suite、203,000 W0 + 3,630 event-createdを閉じるeffective-membership reconciliationまで完成。solved placement、solution-compiled planned history plan、blocker resolution ledger、完全なcorpus semantic projection inventory、positive independent approval、solution/proof、pre-solve persona input cap proof、正式rootは未実装 |
+| G0 v2契約凍結 | 400 exact scope paths/load、family/extension/variant整数比、`persona_realism_profile`と8軸台帳、ambient spec、共有辞書、pre-solve source-intent recipe、source-matched lifecycle intent、fact/oracle、solution後のcompiled planned history plan、blocker resolution ledgerをversioned artifact graphとsuite descriptor hashへ固定 | generator変更前に全20人でcanonical rebuild。joint solverがrealism overlayを入力にfull contributor=120,000とpilot=12,000、scope routing、wave別incidental上限をexactに解き、pre-solve input 16 MiB、final W0 plan 16 MiB、proof 8 MiB、history 16 MiB、query 4 MiBの各planning capを別々に証明する。actual qIM/root capacityはG0へ含めない | coreに加え203,000構造row/73 shard body、40 origin + 40 profile manifest、71 inventory profile ID、40 originのnon-authorizing overlay reservation、45 fact profiles/persona、80 topics、71 semantic profiles、3,733 compact rowsからの203,000 semantic/fact logical total projection、40 concrete origins + 40 concrete profilesと27,660 rich pre-solve overlay rows、negative route receipt、20件のrepresentative source/fact/history slice、2,100 query/oracle、非authorizing closure候補、71/71 format implementation、213 runtime probes、71/71 formal recipe profile policy、566 persona-variant/300 persona-familyのimmutable aggregate byte分布とEML overlay-compatible effective sidecar、20 persona/20 primary use-case catalog、4-ledger chunk accounting、20 x 105 lifecycle demand、query-independent lifecycle coverage catalog、recursive robustness catalog、203,000 source-instance parameter assignment、2,300 source refs / 7,630 events / event-content projectionを持つsource-matched lifecycle suite、203,000 W0 + 3,630 event-createdを閉じるeffective-membership reconciliation、3/12分類・113-body partial semantic-projection derivation inventoryまで完成。solved placement、残り9 semantic projection、solution-compiled planned history plan、blocker resolution ledger、完全なcorpus semantic projection inventory、positive independent approval、solution/proof、pre-solve persona input cap proof、正式rootは未実装 |
 | G1 v2 tiny W0 | 20人×200 files/persona-PC rootを1人・1sourceずつstreaming作成 | 4,000 files/suite replay、2 fresh suite replays合計8,000 writes、400 scopes/replay、比率/path/hash/readback、inode非共有 | v1相当は済。v2回帰が必要 |
 | G2 pilot W0 | pilot-first solverのexact subset、計20,300 files、各人12,000 planned、init→offline index | 各人actual contributor 12,000、raw-only 0、planned/actualを別台帳化。stable move 4 sourcesのpositive W0 receiptを作る | streaming writer、完全attestor、qIM patcherが未実装 |
 | G3 pilot W1-W5 | W1 typed edit/index後にI-edit 1 sourceをattestし、stable 4件のW0 receiptと合わせたpre-W2 qIM patchをmove前に検証して、以後rename/move/duplicate/derive/archive/delete/restore/purgeを実行 | exactly-once journal、再開収束、waveごとのactual attestation、purge後index noop。I-edit current mismatch、missing/range外qIM patchはfail closed | v1相当のみ済。v2 allocator/manifest未実装 |
@@ -1561,7 +1561,8 @@ pre-solve graphは`source-intent-origin-shard`、`fact-membership`、`history-in
 content-only `semantic_payload` projectionだけをidentity namespaceへ入れ、full body/statusはcorpus input closureへ
 置く。immutable historical blockerはresolution ledgerでexact pin/pathごとにactive/resolved/deferredへ分類し、
 ledger full bodyをcorpus input closureとG0 descriptorへ束縛するがsemantic namespaceへ入れない。
-このprojection/ledger未実装の現candidateからsemantic rootやG0 rootを発行しない。
+現在は下記partial projection derivation inventoryまで実装したが、complete projection inventoryとledgerは
+未実装である。この3/12分類のpartial inventoryからsemantic rootやG0 rootを発行しない。
 
 production projectionはfull artifact SHAを内包しないschema別content-only bodyとし、full pinからprojection pinへの
 対応は別derivation receiptで証明する。projectionにはauthority/completion/blocker/review、query/oracle、runtime
@@ -1570,6 +1571,33 @@ use-case corpus half、recipe/content/filename dictionary、fact graph、base co
 source parameter assignment、lifecycle fact/rendition、payload equivalenceである。namespaceはprojection pinだけを
 exactly once束縛し、derivation/review receiptはcorpus closureだけへ入れる。これによりqueryやreview差替えで
 corpus IDs/bytesを変えず、content変更だけがnamespaceを変える。
+
+Decision 150のpartial inventoryは`kcs.persona.pc-semantic-projection-derivation-inventory/v1`、各receiptは
+`kcs.persona.pc-semantic-projection-derivation-receipt/v1`である。exact 113 bodiesは
+membership-free base source content-context JSONL 73、effective source membership 20、
+query-independent lifecycle fact/rendition rules 20で、最小12分類中3分類だけを覆う。
+missing 9分類はtopology path/load、realism/locale/security、route scores、use-case corpus half、
+recipe/content/filename policy、fact graph、concrete-overlay relations、source-instance parameters、
+payload-equivalence rulesである。base receiptはauthenticated source-semantic origin manifestとexact
+`source-shard-total-projection` range、effective receiptはauthenticated reconciliation suite/full ownerと人物別
+projection binding、lifecycle receiptはauthenticated source-matched suite/persona owner/event-view receiptから再生成する。
+各receiptはfull/direct owner pin、coordinate/range、projector ID/version、projection bytes/SHA、
+独立validator結果を束縛する。embedded SHA aliasのみを信頼せず、projection自身にfull owner pinや
+derivation receiptを入れない。inventoryは1 MiB、external projection合計は144 MiBをhard capとし、
+base JSONLは1 body 4 MiB / 4,096 rows / LF込み768 bytes per row、他の2種は1 projection
+384 KiB hard / 256 KiB targetで二重provider replayを行い、callbackごとと最終postflightでcaller opening
+image、full owner、direct owner bodyを再認証する。
+凍結したinventoryは293,285 canonical bytes / SHA-256
+`5b0e516e2784415dd7c416dee42fc7b23b84485e3629514e910dd67f1a600c84`、ordered projection-pin digestは
+`a909168390dbc7426d5ac21a36a5720c378e0d3281f852dcd90e40344e8cb83d`である。external 113 bodyは
+合計128,144,915 bytes、base 73 bodyは203,000 rows / 121,020,941 bytes（最大body 2,484,590 bytes、
+LF込み最大row 633 bytes）、effective最大bodyは103,864 bytes、lifecycle最大bodyは256,790 bytesである。
+ordered digestのpreimageはreceipt順の`{receipt_id, canonical_bytes, sha256}` canonical JSON arrayである。
+この203,000 rowsは1 suite replayのW0 source計画projectionであり、物理file/indexや人物別120,000 actual
+KCS chunksの達成証拠ではない。
+`semantic_payload_projection_bound`、`query_semantics_absence_proved`、
+`future_source_id_namespace_eligible`、G0/solver/solution/write/KCS authorityはすべてfalseのままである。
+次はmissing 9 projectionを完成してから、corpus semantic/query/history closureとblocker resolution ledgerを閉じる。
 
 - realism profileとvariant catalogの独立review receipt、routeの独立human approval receipt、solved placement整数割当、
   logical-document採点/検索参加、8軸台帳
@@ -1618,9 +1646,10 @@ EML overlay-compatible effective sidecar、20 persona/20 primary use-case catalo
 query-independent lifecycle coverage catalog、recursive robustness lane catalog、203,000 source-instance parameter
 assignment、2,300 lifecycle source refs / 7,630 event intents / event-content projectionを持つ
 source-matched lifecycle suiteと、その下流のeffective-membership reconciliationまで完了した。
-source matchingの最終pinと17-test実測はDecision 146、effective membershipの最終pinと実測はDecision 149を正とする。
-以後の実装順は、(1) effective membershipを採用するprojection derivation receipt、corpus semantic/query/history
-target closureとblocker resolution ledger、
+source matchingの最終pinと17-test実測はDecision 146、effective membershipの最終pinと実測はDecision 149、
+113-body partial projection inventoryの境界はDecision 150を正とする。
+以後の実装順は、(1) missing 9 projection、完全なcorpus semantic/query/history target closureと
+blocker resolution ledger、
 (2) joint solverと独立検証可能なsolution/proof、(3) final source plan、solution-compiled planned history plan、
 planning cap/ledgerとG0 descriptor、とする。G0後は、各fresh storage内で(4) allocation/rendering + streaming
 folder/file writer、(5) W0 offline index/attestation、(6) W1 edit/indexとI-edit attestation、(7) pre-W2 qIM
