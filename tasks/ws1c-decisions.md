@@ -1558,3 +1558,77 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     size checks, strict schema and negative-authority checks, dependency and target tamper/TOCTOU cases, detached
     public builds, public validator/SHA wiring, event-provider framing/nondeterminism/bounds checks, and one complete
     twenty-person suite cold build under a different hash seed capped at fifteen minutes and 512 MiB.
+147. Lifecycle effective-membership reconciliation has one formal W0 owner and one separate witness-lineage proof;
+    it is not a second fact owner beside the immutable source-semantic package.  The effective W0 domain is the exact
+    existing 203,000-key/73-shard source order.  The five incidental I capabilities per persona are selected lifecycle
+    sources but are not reserved semantic anchors: all 100 I rows keep their complete base logical/fact membership.
+    The other 2,000 contributor primaries replace their base singleton with the same-persona/same-topic graph-normal
+    W0 set, the 300 P primaries additionally carry one suite-global typed purge witness, and the 200 rendition
+    companions mirror their primary's lifecycle document, branch, W0 revision, section, revision-chain, and fact set
+    while retaining their own source-owned present-fact-set key.  Therefore the exact W0 modes are 200,800 base
+    inheritances, 1,700 graph-normal overrides, 300 graph-normal-plus-witness overrides, and 200 companion mirrors;
+    the final distribution is 73,350 empty, 100 singleton, 3,120 conflict-branch, 126,130 graph-normal-only, and 300
+    graph-normal-plus-witness sources with 1,033,680 present-fact references.
+
+    A W0-only scan cannot prove P-prime noninheritance.  Reconciliation therefore authenticates all 3,630
+    event-created pre-solve source intents and emits a non-persisted witness-lineage view for every one of them.  The
+    300 W1 descendants of P carry their matching witness, all 300 P-prime replacements carry none, and the remaining
+    3,030 created intents carry none.  A global inverted view is reconstructed over the complete formal universe of
+    203,000 W0 sources plus 3,630 event-created intents; every witness has exactly its matching W0 P source and W1 P
+    descendant as consumers, for 600 total consumer references.  The explicit lifecycle chain is the authenticated
+    capability key plus consumer role; dependency-group naming is not an isolation identity because W1 and W5 use
+    different groups and the P5 group also contains P-prime.  This proves witness isolation only, not a complete
+    post-W0 fact membership for replacements, exports, restores, diagnostics, or companions; those memberships stay
+    owned by the solution-compiled history closure.  Ambient materialization remains outside the formal semantic
+    namespace and cannot be claimed observed until its later receipt exists.
+
+    The persisted representation is sparse: 2,000 primary overrides, 200 companion mirrors, 300 typed witness facts,
+    and 73 expanded-view receipts.  Expanded effective W0 bodies, event-created lineage, and inverted views are
+    bounded streaming verification views, never silently charged as compact bodies.  Content-only projections omit
+    authority, completion/blocker/review state, full upstream pins and derivation receipts, query/oracle/use-case and
+    format-selection roles, solution/scope/path/quota/final identifiers, and observed raw/chunk/rank/latency data.
+    Corpus input closure retains the authenticated base full membership and derivation receipts; the semantic
+    namespace may contain only membership-free base content context plus the single effective owner.  All execution,
+    write, solver, capacity, history, KCS, G0, and namespace-completion authority remains false.
+148. The source-matched lifecycle independent validator now validates detached opening snapshots for persona, suite,
+    and content-projection targets.  Previously, a caller-owned target could be changed from an invalid opening value
+    to the canonical value by an assignment callback and restored by a later event/persona callback; opening and
+    closing bytes then matched while semantic checks observed only the transient valid state.  Each entry point now
+    canonicalizes the original, immediately deep-copies the already validated plain value, performs every semantic
+    read against that detached target, and re-authenticates the original in `finally`.  Exact ABA relay regressions
+    cover all three entry points.  The shared authenticated-body boundary also rejects an invalid expected byte/SHA/
+    cap descriptor before invoking a provider and bounds the exact built-in `bytes` replay before comparison.  The
+    focused three-entry TOCTOU gate passed in 280.518 seconds, the provider-bound gate passed in 267.839 seconds, and
+    a final independent static/adversarial review found no P0/P1 issue.  Artifact schemas, canonical package pins,
+    public APIs, and all negative authority remain unchanged.
+149. The lifecycle effective-membership reconciliation is implemented as
+    `kcs.persona.pc-lifecycle-effective-membership-reconciliation/v1` with a producer-independent validator.  Its
+    formal W0 domain is the existing 203,000 source keys across 73 shards.  The exact modes are 200,800 base
+    inheritances, 1,700 graph-normal overrides, 300 graph-normal-plus-witness overrides, and 200 companion mirrors;
+    the exact fact distribution is 73,350 empty, 100 singleton, 3,120 conflict-branch, 126,130 graph-normal-only, and
+    300 graph-normal-plus-witness rows with 1,033,680 present-fact references.  All 3,630 event-created source intents
+    are separately scanned: 300 P W1 descendants carry their typed witness, 300 P-prime replacements and 3,030 other
+    created intents carry none.  Every one of the 300 witnesses therefore has exactly its matching W0 P and W1 P
+    descendant as consumers, for 600 references over the complete W0-plus-created universe.
+
+    The persisted sparse owner has 2,573 rows: 2,000 primary overrides, 200 companion mirrors, 300 typed witnesses,
+    and 73 expanded-view receipts.  Expanded W0, event-lineage, and inverted bodies remain non-persisted verification
+    views.  The namespace-safe projection contains 73 commitments to its own effective shard body SHA/count/range;
+    these are not upstream pins or derivation receipts.  It retains rendition-group semantic relations while
+    excluding family, variant, gate, use-case, format-selection, query/oracle, solution, authority, physical, and
+    runtime fields.  The frozen suite is 69,195 canonical bytes with SHA-256
+    `14ff220bf47656965d1ac1803a0dd0ccc6b8afa440b64f563e40e623a219bb7c`.  Observed maxima are 5,592-byte origin,
+    3,301-byte profile, 103,864-byte projection, and LF-inclusive rows of 1,136 compact / 913 expanded / 571 event /
+    600 inverted bytes.  The compact hard cap is therefore 2,048 bytes; expanded/event/inverted row caps remain
+    1,024 bytes.
+
+    Validation fails closed when the independent module is unavailable, deserializes the authenticated opening bytes
+    rather than separately copying a live caller object, rejects unknown lifecycle event schemas, authenticates every
+    provider first result and replay under exact type/byte/hash/cap contracts, and hashes the same detached opening
+    bytes that were validated.  Three independent review passes found no remaining public-boundary P0/P1 issue;
+    direct mutation of underscore module internals remains outside the public in-process trust boundary.  The final
+    clean gate passes 13 tests in 1,740.166 seconds, including two cold hash seeds each bounded at fifteen minutes and
+    512 MiB RSS, the full 203,000-row scan, independent suite reconstruction, and adversarial provider/TOCTOU tests.
+    CI runs this module in its own 120-minute job.  Solver, complete post-W0 membership, compiled history, physical
+    materialization, capacity/KCS observation, namespace completion, G0, and every write/execution authority remain
+    false and downstream.

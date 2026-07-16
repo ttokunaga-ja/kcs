@@ -493,6 +493,11 @@ def _canonical(value, *, label, maximum):
         _fail(str(error))
 
 
+def _opening_snapshot(value, *, label, maximum):
+    opening = _canonical(value, label=label, maximum=maximum)
+    return json.loads(opening), opening
+
+
 def _reject_forbidden_keys(value, *, path="$"):
     if type(value) is dict:
         for key, child in value.items():
@@ -751,6 +756,22 @@ def _authenticated_body(
     label,
     replay=False,
 ):
+    if (
+        type(maximum_bytes) is not int
+        or type(maximum_bytes) is bool
+        or maximum_bytes < 1
+        or type(expected_bytes) is not int
+        or type(expected_bytes) is bool
+        or expected_bytes < 1
+        or expected_bytes > maximum_bytes
+        or type(expected_sha256) is not str
+        or len(expected_sha256) != 64
+        or any(
+            character not in "0123456789abcdef"
+            for character in expected_sha256
+        )
+    ):
+        _fail(f"{label} has invalid authenticated receipt bounds")
     if not callable(provider):
         _fail(f"{label} provider must be callable")
     try:
@@ -764,11 +785,7 @@ def _authenticated_body(
     if len(first) > maximum_bytes:
         _fail(f"{label} exceeds its pre-parse byte bound")
     if (
-        type(expected_bytes) is not int
-        or type(expected_bytes) is bool
-        or expected_bytes < 1
-        or type(expected_sha256) is not str
-        or len(first) != expected_bytes
+        len(first) != expected_bytes
         or hashlib.sha256(first).hexdigest() != expected_sha256
     ):
         _fail(f"{label} differs from its authenticated receipt")
@@ -782,6 +799,10 @@ def _authenticated_body(
             ) from error
         if type(second) is not bytes:
             _fail(f"{label} provider replay must return exact bytes")
+        if len(second) > maximum_bytes:
+            _fail(f"{label} replay exceeds its pre-compare byte bound")
+        if len(second) != expected_bytes:
+            _fail(f"{label} provider is nondeterministic or alias-mutated")
         if not hmac.compare_digest(opening, second):
             _fail(f"{label} provider is nondeterministic or alias-mutated")
     return opening
@@ -3063,27 +3084,29 @@ def validate_source_matched_lifecycle_persona(
     _require_persona_id(persona_id)
     if type(value) is not dict:
         _fail("source-matched lifecycle persona must be an object")
-    opening_target = _canonical(
+    target, opening_target = _opening_snapshot(
         value,
         label="source-matched lifecycle persona",
         maximum=MAX_PERSONA_BYTES,
     )
     if (
-        set(value) != PERSONA_TOP_LEVEL_FIELDS
-        or value.get("artifact_kind") != PERSONA_KIND
-        or value.get("artifact_schema") != PERSONA_SCHEMA
-        or value.get("artifact_schema_version") != SCHEMA_VERSION
-        or value.get("fixture_id") != envelope.FIXTURE_ID
-        or value.get("fixture_schema_version")
+        set(target) != PERSONA_TOP_LEVEL_FIELDS
+        or target.get("artifact_kind") != PERSONA_KIND
+        or target.get("artifact_schema") != PERSONA_SCHEMA
+        or target.get("artifact_schema_version") != SCHEMA_VERSION
+        or target.get("fixture_id") != envelope.FIXTURE_ID
+        or target.get("fixture_schema_version")
         != envelope.FIXTURE_SCHEMA_VERSION
-        or value.get("persona_id") != persona_id
+        or target.get("persona_id") != persona_id
     ):
         _fail("source-matched lifecycle persona envelope drifted")
     _require_all_false_authority(
-        value, label="source-matched lifecycle persona", exact_fields=AUTHORITY_FIELDS
+        target,
+        label="source-matched lifecycle persona",
+        exact_fields=AUTHORITY_FIELDS,
     )
-    _strict_json_domain(value)
-    _reject_forbidden_keys(value)
+    _strict_json_domain(target)
+    _reject_forbidden_keys(target)
 
     overrides = {
         "coverage": coverage_value,
@@ -3112,32 +3135,32 @@ def validate_source_matched_lifecycle_persona(
             persona_id, selection, primary_rows, joined
         )
         reserved_rows = _build_reserved_anchor_rows(joined, selection)
-        if not _strict_equal(value["primary_match_rows"], primary_rows):
+        if not _strict_equal(target["primary_match_rows"], primary_rows):
             _fail(
                 "primary matches differ from independent source reconstruction at "
-                + _first_difference(value["primary_match_rows"], primary_rows)
+                + _first_difference(target["primary_match_rows"], primary_rows)
             )
-        if not _strict_equal(value["companion_match_rows"], companion_rows):
+        if not _strict_equal(target["companion_match_rows"], companion_rows):
             _fail(
                 "companion matches differ from independent source reconstruction at "
-                + _first_difference(value["companion_match_rows"], companion_rows)
+                + _first_difference(target["companion_match_rows"], companion_rows)
             )
         if not _strict_equal(
-            value["use_case_family_witness_rows"], witness_rows
+            target["use_case_family_witness_rows"], witness_rows
         ):
             _fail(
                 "format witnesses differ from independent source reconstruction at "
                 + _first_difference(
-                    value["use_case_family_witness_rows"], witness_rows
+                    target["use_case_family_witness_rows"], witness_rows
                 )
             )
         if not _strict_equal(
-            value["reserved_semantic_anchor_rows"], reserved_rows
+            target["reserved_semantic_anchor_rows"], reserved_rows
         ):
             _fail(
                 "reserved anchors differ from independent source reconstruction at "
                 + _first_difference(
-                    value["reserved_semantic_anchor_rows"], reserved_rows
+                    target["reserved_semantic_anchor_rows"], reserved_rows
                 )
             )
 
@@ -3145,18 +3168,18 @@ def validate_source_matched_lifecycle_persona(
             joined
         )
         expected_binding_order = [row["name"] for row in expected_bindings]
-        if value["input_binding_order"] != expected_binding_order:
+        if target["input_binding_order"] != expected_binding_order:
             _fail(
                 "persona dependency binding order differs at "
                 + _first_difference(
-                    value["input_binding_order"], expected_binding_order
+                    target["input_binding_order"], expected_binding_order
                 )
             )
-        if not _strict_equal(value["input_bindings"], expected_bindings):
+        if not _strict_equal(target["input_bindings"], expected_bindings):
             _fail(
                 "persona dependency bindings differ from authenticated owners at "
                 + _first_difference(
-                    value["input_bindings"], expected_bindings
+                    target["input_bindings"], expected_bindings
                 )
             )
 
@@ -3173,16 +3196,16 @@ def validate_source_matched_lifecycle_persona(
             witness_rows,
             expected_event_rows,
         )
-        if not _strict_equal(value, expected_persona):
+        if not _strict_equal(target, expected_persona):
             _fail(
                 "persona differs from complete independent reconstruction at "
-                + _first_difference(value, expected_persona)
+                + _first_difference(target, expected_persona)
             )
         if event_body_provider is None:
             event_rows = expected_event_rows
         else:
             event_rows = _event_rows_from_provider(
-                persona_id, value["event_receipt"], event_body_provider
+                persona_id, target["event_receipt"], event_body_provider
             )
             if not _strict_equal(event_rows, expected_event_rows):
                 _fail("event body differs from independent lifecycle expansion")
@@ -3265,26 +3288,28 @@ def validate_source_matched_lifecycle_suite_descriptor(
 
     if type(value) is not dict:
         _fail("source-matched lifecycle suite must be an object")
-    opening_target = _canonical(
+    target, opening_target = _opening_snapshot(
         value,
         label="source-matched lifecycle suite",
         maximum=MAX_SUITE_BYTES,
     )
     if (
-        set(value) != SUITE_TOP_LEVEL_FIELDS
-        or value.get("artifact_kind") != SUITE_KIND
-        or value.get("artifact_schema") != SUITE_SCHEMA
-        or value.get("artifact_schema_version") != ARTIFACT_SCHEMA_VERSION
-        or value.get("fixture_id") != envelope.FIXTURE_ID
-        or value.get("fixture_schema_version")
+        set(target) != SUITE_TOP_LEVEL_FIELDS
+        or target.get("artifact_kind") != SUITE_KIND
+        or target.get("artifact_schema") != SUITE_SCHEMA
+        or target.get("artifact_schema_version") != ARTIFACT_SCHEMA_VERSION
+        or target.get("fixture_id") != envelope.FIXTURE_ID
+        or target.get("fixture_schema_version")
         != envelope.FIXTURE_SCHEMA_VERSION
     ):
         _fail("source-matched lifecycle suite envelope drifted")
     _require_all_false_authority(
-        value, label="source-matched lifecycle suite", exact_fields=AUTHORITY_FIELDS
+        target,
+        label="source-matched lifecycle suite",
+        exact_fields=AUTHORITY_FIELDS,
     )
-    _strict_json_domain(value)
-    _reject_forbidden_keys(value)
+    _strict_json_domain(target)
+    _reject_forbidden_keys(target)
     if persona_provider is not None and not callable(persona_provider):
         _fail("persona provider must be callable")
     if event_body_provider is not None and not callable(event_body_provider):
@@ -3314,10 +3339,10 @@ def validate_source_matched_lifecycle_suite_descriptor(
             for persona_id in PERSONA_IDS
         }
         expected = _expected_suite_value(inputs, reconstructed)
-        if not _strict_equal(value, expected):
+        if not _strict_equal(target, expected):
             _fail(
                 "suite differs from complete independent reconstruction at "
-                + _first_difference(value, expected)
+                + _first_difference(target, expected)
             )
         if (
             type(EXPECTED_SUITE_CANONICAL_BYTES) is not int
@@ -3419,25 +3444,25 @@ def validate_source_matched_lifecycle_content_projection(
     _require_persona_id(persona_id)
     if type(value) is not dict:
         _fail("source-matched lifecycle content projection must be an object")
-    opening_target = _canonical(
+    target, opening_target = _opening_snapshot(
         value,
         label="source-matched lifecycle content projection",
         maximum=MAX_CONTENT_PROJECTION_BYTES,
     )
     if (
-        set(value) != PROJECTION_TOP_LEVEL_FIELDS
-        or value.get("artifact_kind") != PROJECTION_KIND
-        or value.get("artifact_schema") != PROJECTION_SCHEMA
-        or value.get("artifact_schema_version") != ARTIFACT_SCHEMA_VERSION
-        or value.get("fixture_id") != envelope.FIXTURE_ID
-        or value.get("fixture_schema_version")
+        set(target) != PROJECTION_TOP_LEVEL_FIELDS
+        or target.get("artifact_kind") != PROJECTION_KIND
+        or target.get("artifact_schema") != PROJECTION_SCHEMA
+        or target.get("artifact_schema_version") != ARTIFACT_SCHEMA_VERSION
+        or target.get("fixture_id") != envelope.FIXTURE_ID
+        or target.get("fixture_schema_version")
         != envelope.FIXTURE_SCHEMA_VERSION
-        or value.get("persona_id") != persona_id
+        or target.get("persona_id") != persona_id
     ):
         _fail("content projection envelope or nine-field boundary drifted")
-    _strict_json_domain(value)
-    _reject_forbidden_keys(value)
-    if set(value) & {
+    _strict_json_domain(target)
+    _reject_forbidden_keys(target)
+    if set(target) & {
         "authority",
         "completion_claims",
         "g0_contract_frozen",
@@ -3471,10 +3496,10 @@ def validate_source_matched_lifecycle_content_projection(
             reconstructed["persona"],
             reconstructed["event_rows"],
         )
-        if not _strict_equal(value, expected):
+        if not _strict_equal(target, expected):
             _fail(
                 "content projection differs from independent normalization at "
-                + _first_difference(value, expected)
+                + _first_difference(target, expected)
             )
     finally:
         postflight_error = None

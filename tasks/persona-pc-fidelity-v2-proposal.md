@@ -47,8 +47,13 @@ suite 2,300 lifecycle source refsをpilot source/semantic/reservation/parameter 
 3,630件のevent-created pre-solve source intentを持ち、各人は48 source coupling + 6 scope barrier = 54
 dependency groupsを持つ。content-only projectionもsource selectionだけでなくsource/scope event意味を含む。canonical suiteは
 14,605 bytes、SHA-256 `c4508ed61c88db80b003e9ce3b7c35ea153776442bd3224964897400633dd2c8`である。
-producer-independent validatorによる全20人再構成は通過したが、fact/rendition effective membership、
-scope/quota/cohort solver、compiled history、physical materialization、observed evaluation、execution authorityはない。
+その下流の`kcs.persona.pc-lifecycle-effective-membership-reconciliation/v1`は、全203,000 W0 sourcesを
+base inheritance 200,800 / graph-normal 1,700 / graph-normal+witness 300 / companion mirror 200へ閉じ、
+1,033,680 present-fact refsをexact化した。3,630 event-created intentsと300 purge witnessesも全域走査し、
+consumerはmatching W0 PとW1 descendantの600 refsだけである。compact ownerは2,573 rows、canonical suiteは
+69,195 bytes、SHA-256 `14ff220bf47656965d1ac1803a0dd0ccc6b8afa440b64f563e40e623a219bb7c`である。
+producer-independent validatorによる全20人再構成を持つが、scope/quota/cohort solver、complete post-W0
+membership、compiled history、physical materialization、observed evaluation、execution authorityはない。
 recursive ambient laneは`kcs.persona.pc-recursive-robustness-lane-catalog/v1`として各人256 candidates/
 128 directories、D6--D8、candidate/native realization分離を固定した。canonical bodyは76,099 bytes、SHA-256
 `49d6fa26cafa902bfca4a102c5e301c27683fd6761bc456a3930cd059f67a4f2`で、actual filesystem case modeと
@@ -1075,7 +1080,7 @@ persona x replayごとに作る。比較対象はplanであり、suite合算だ�
 
 | Gate | 実装・実行 | 合格条件 | 現在地 |
 | --- | --- | --- | --- |
-| G0 v2契約凍結 | 400 exact scope paths/load、family/extension/variant整数比、`persona_realism_profile`と8軸台帳、ambient spec、共有辞書、pre-solve source-intent recipe、source-matched lifecycle intent、fact/oracle、solution後のcompiled planned history plan、blocker resolution ledgerをversioned artifact graphとsuite descriptor hashへ固定 | generator変更前に全20人でcanonical rebuild。joint solverがrealism overlayを入力にfull contributor=120,000とpilot=12,000、scope routing、wave別incidental上限をexactに解き、pre-solve input 16 MiB、final W0 plan 16 MiB、proof 8 MiB、history 16 MiB、query 4 MiBの各planning capを別々に証明する。actual qIM/root capacityはG0へ含めない | coreに加え203,000構造row/73 shard body、40 origin + 40 profile manifest、71 inventory profile ID、40 originのnon-authorizing overlay reservation、45 fact profiles/persona、80 topics、71 semantic profiles、3,733 compact rowsからの203,000 semantic/fact logical total projection、40 concrete origins + 40 concrete profilesと27,660 rich pre-solve overlay rows、negative route receipt、20件のrepresentative source/fact/history slice、2,100 query/oracle、非authorizing closure候補、71/71 format implementation、213 runtime probes、71/71 formal recipe profile policy、566 persona-variant/300 persona-familyのimmutable aggregate byte分布とEML overlay-compatible effective sidecar、20 persona/20 primary use-case catalog、4-ledger chunk accounting、20 x 105 lifecycle demand、query-independent lifecycle coverage catalog、recursive robustness catalog、203,000 source-instance parameter assignment、2,300 source refs / 7,630 events / event-content projectionを持つsource-matched lifecycle suiteまで完成。lifecycle fact/rendition materializationとeffective membership、solved placement、solution-compiled planned history plan、blocker resolution ledger、完全なcorpus semantic projection inventory、positive independent approval、solution/proof、pre-solve persona input cap proof、正式rootは未実装 |
+| G0 v2契約凍結 | 400 exact scope paths/load、family/extension/variant整数比、`persona_realism_profile`と8軸台帳、ambient spec、共有辞書、pre-solve source-intent recipe、source-matched lifecycle intent、fact/oracle、solution後のcompiled planned history plan、blocker resolution ledgerをversioned artifact graphとsuite descriptor hashへ固定 | generator変更前に全20人でcanonical rebuild。joint solverがrealism overlayを入力にfull contributor=120,000とpilot=12,000、scope routing、wave別incidental上限をexactに解き、pre-solve input 16 MiB、final W0 plan 16 MiB、proof 8 MiB、history 16 MiB、query 4 MiBの各planning capを別々に証明する。actual qIM/root capacityはG0へ含めない | coreに加え203,000構造row/73 shard body、40 origin + 40 profile manifest、71 inventory profile ID、40 originのnon-authorizing overlay reservation、45 fact profiles/persona、80 topics、71 semantic profiles、3,733 compact rowsからの203,000 semantic/fact logical total projection、40 concrete origins + 40 concrete profilesと27,660 rich pre-solve overlay rows、negative route receipt、20件のrepresentative source/fact/history slice、2,100 query/oracle、非authorizing closure候補、71/71 format implementation、213 runtime probes、71/71 formal recipe profile policy、566 persona-variant/300 persona-familyのimmutable aggregate byte分布とEML overlay-compatible effective sidecar、20 persona/20 primary use-case catalog、4-ledger chunk accounting、20 x 105 lifecycle demand、query-independent lifecycle coverage catalog、recursive robustness catalog、203,000 source-instance parameter assignment、2,300 source refs / 7,630 events / event-content projectionを持つsource-matched lifecycle suite、203,000 W0 + 3,630 event-createdを閉じるeffective-membership reconciliationまで完成。solved placement、solution-compiled planned history plan、blocker resolution ledger、完全なcorpus semantic projection inventory、positive independent approval、solution/proof、pre-solve persona input cap proof、正式rootは未実装 |
 | G1 v2 tiny W0 | 20人×200 files/persona-PC rootを1人・1sourceずつstreaming作成 | 4,000 files/suite replay、2 fresh suite replays合計8,000 writes、400 scopes/replay、比率/path/hash/readback、inode非共有 | v1相当は済。v2回帰が必要 |
 | G2 pilot W0 | pilot-first solverのexact subset、計20,300 files、各人12,000 planned、init→offline index | 各人actual contributor 12,000、raw-only 0、planned/actualを別台帳化。stable move 4 sourcesのpositive W0 receiptを作る | streaming writer、完全attestor、qIM patcherが未実装 |
 | G3 pilot W1-W5 | W1 typed edit/index後にI-edit 1 sourceをattestし、stable 4件のW0 receiptと合わせたpre-W2 qIM patchをmove前に検証して、以後rename/move/duplicate/derive/archive/delete/restore/purgeを実行 | exactly-once journal、再開収束、waveごとのactual attestation、purge後index noop。I-edit current mismatch、missing/range外qIM patchはfail closed | v1相当のみ済。v2 allocator/manifest未実装 |
@@ -1238,8 +1243,8 @@ final ID、observed data、G0 authorityを持たない。
 anchor fact overlayは選択sourceへ同topicのprior/stable fact集合を与える。purged-negativeは15 unique witness
 facts/personaを持ち、P'や他source/distractorへ出現させない。query/oracleとの1対1 mappingはcoverage catalogを
 共通上流とするevaluation-only bridgeが所有し、slot ordinalから暗黙推論せず、query SHAをcorpus namespaceへ
-逆流させない。coverage catalogとsource matchingは完成したが、fact/rendition overlay、effective-membership
-reconciliation、blocker-resolution ledgerが完成するまでG0 blockerである。
+逆流させない。coverage catalog、source matching、fact/rendition effective-membership reconciliationは
+完成したが、corpus semantic/query/history closureとblocker-resolution ledgerが完成するまでG0 blockerである。
 base singleton membershipとoverlayを競合ownerにせず、後続effective-membership composerが全203,000 sourcesを
 exactly once再構成する。未選択sourceはbase、anchorは同topicのgraph-normal集合、Pだけunique witnessを追加、
 rendition companionはprimaryと同じfacts/revision chainとする。namespaceにはbase content-contextからmembershipを
@@ -1612,9 +1617,10 @@ implementation registry、71/71 variant-level formal recipe profile catalog、ag
 EML overlay-compatible effective sidecar、20 persona/20 primary use-case catalog、chunk-accounting sidecar、pre-solve lifecycle demand、
 query-independent lifecycle coverage catalog、recursive robustness lane catalog、203,000 source-instance parameter
 assignment、2,300 lifecycle source refs / 7,630 event intents / event-content projectionを持つ
-source-matched lifecycle suiteまでは完了した。最終pinと17-test実測はDecision 146を正とする。
-以後の実装順は、(1) lifecycle fact/rendition effective-membership reconciliation、projection derivation receipt、
-corpus semantic/query/history target closureとblocker resolution ledger、
+source-matched lifecycle suiteと、その下流のeffective-membership reconciliationまで完了した。
+source matchingの最終pinと17-test実測はDecision 146、effective membershipの最終pinと実測はDecision 149を正とする。
+以後の実装順は、(1) effective membershipを採用するprojection derivation receipt、corpus semantic/query/history
+target closureとblocker resolution ledger、
 (2) joint solverと独立検証可能なsolution/proof、(3) final source plan、solution-compiled planned history plan、
 planning cap/ledgerとG0 descriptor、とする。G0後は、各fresh storage内で(4) allocation/rendering + streaming
 folder/file writer、(5) W0 offline index/attestation、(6) W1 edit/indexとI-edit attestation、(7) pre-W2 qIM

@@ -533,6 +533,17 @@ class PersonaV2SourceMatchedLifecycleInventoryTests(unittest.TestCase):
             )
         return copy.deepcopy(cls.assignment_payloads[persona_id])
 
+    def test_opening_snapshot_is_deserialized_from_authenticated_bytes(self):
+        opening_raw = b'{"marker":"opening"}'
+        live_value = {"marker": "changed-after-opening"}
+        with mock.patch.object(independent, "_canonical", return_value=opening_raw):
+            snapshot, authenticated = independent._opening_snapshot(
+                live_value, label="focused opening snapshot", maximum=4_096
+            )
+        self.assertEqual(authenticated, opening_raw)
+        self.assertEqual(snapshot, {"marker": "opening"})
+        self.assertNotEqual(snapshot, live_value)
+
     def test_exact_source_matching_anchor_companion_and_small_cell_counts(self):
         self._ensure_package()
         cells = {
@@ -1496,6 +1507,169 @@ class PersonaV2SourceMatchedLifecycleInventoryTests(unittest.TestCase):
                 assignment_origin_provider=self._assignment_provider,
             )
 
+    def test_independent_persona_target_aba_relay_uses_opening_snapshot(self):
+        self._ensure_package()
+        canonical = self.personas[0]
+        target = copy.deepcopy(canonical)
+        canonical_event_count = canonical["summary"]["event_intent_count"]
+        target["summary"]["event_intent_count"] = 0
+        assignment_calls = []
+        event_calls = []
+
+        def restoring_assignment_provider(persona_id):
+            assignment_calls.append(persona_id)
+            target["summary"]["event_intent_count"] = canonical_event_count
+            return self._assignment_provider(persona_id)
+
+        def restoring_event_provider(persona_id):
+            event_calls.append(persona_id)
+            target["summary"]["event_intent_count"] = 0
+            return package.source_matched_lifecycle_event_body_bytes(persona_id)
+
+        # A live-target validator accepted this relay: the assignment callback
+        # changed tampered -> canonical before semantic comparison, then the
+        # event callback changed canonical -> opening tamper before postflight.
+        # A detached opening snapshot rejects before the closing callback runs.
+        with self.assertRaises(
+            independent.PersonaV2SourceMatchedLifecycleInventoryValidationError
+        ):
+            independent.validate_source_matched_lifecycle_persona(
+                "p01",
+                target,
+                event_body_provider=restoring_event_provider,
+                assignment_origin_provider=restoring_assignment_provider,
+            )
+        self.assertEqual(assignment_calls, ["p01", "p01"])
+        self.assertEqual(event_calls, [])
+        self.assertEqual(
+            target["summary"]["event_intent_count"], canonical_event_count
+        )
+
+    def test_independent_suite_target_aba_relay_uses_opening_snapshot(self):
+        self._ensure_package()
+        canonical = self.suite
+        target = copy.deepcopy(canonical)
+        canonical_primary_count = canonical["summary"][
+            "primary_source_match_count"
+        ]
+        target["summary"]["primary_source_match_count"] = 0
+        opening = package.canonical_json_bytes(target)
+        personas = self._persona_by_id()
+        assignment_calls = []
+        persona_calls = []
+
+        def restoring_assignment_provider(persona_id):
+            assignment_calls.append(persona_id)
+            target["summary"][
+                "primary_source_match_count"
+            ] = canonical_primary_count
+            return {"unused-by-focused-reconstruction": True}
+
+        def focused_reconstruction(
+            _inputs, persona_id, *, assignment_origin_provider=None
+        ):
+            assignment_origin_provider(persona_id)
+            return {
+                "event_rows": [],
+                "persona": copy.deepcopy(personas[persona_id]),
+            }
+
+        def restoring_persona_provider(persona_id):
+            persona_calls.append(persona_id)
+            target["summary"]["primary_source_match_count"] = 0
+            return copy.deepcopy(personas[persona_id])
+
+        # Coordinated re-pinning is test-only.  With the historical live target,
+        # assignment callbacks made the semantic body canonical, persona
+        # callbacks restored the opening tamper, and the forged opening pin made
+        # the complete relay validate.  The opening snapshot remains tampered.
+        with (
+            mock.patch.object(
+                independent,
+                "EXPECTED_SUITE_CANONICAL_BYTES",
+                len(opening),
+            ),
+            mock.patch.object(
+                independent,
+                "EXPECTED_SUITE_SHA256",
+                hashlib.sha256(opening).hexdigest(),
+            ),
+            mock.patch.object(
+                independent,
+                "_resolve_inputs",
+                return_value=({}, {}, {}, {}),
+            ),
+            mock.patch.object(
+                independent,
+                "_reconstruct_expected_persona",
+                side_effect=focused_reconstruction,
+            ),
+            mock.patch.object(
+                independent,
+                "_expected_suite_value",
+                return_value=copy.deepcopy(canonical),
+            ),
+            self.assertRaises(
+                independent.PersonaV2SourceMatchedLifecycleInventoryValidationError
+            ),
+        ):
+            independent.validate_source_matched_lifecycle_suite_descriptor(
+                target,
+                persona_provider=restoring_persona_provider,
+                assignment_origin_provider=restoring_assignment_provider,
+            )
+        self.assertEqual(assignment_calls, list(envelope.PERSONA_IDS))
+        self.assertEqual(persona_calls, [])
+        self.assertEqual(
+            target["summary"]["primary_source_match_count"],
+            canonical_primary_count,
+        )
+
+    def test_independent_projection_callback_compares_detached_opening_snapshot(self):
+        self._ensure_package()
+        canonical = self.projections[0]
+        target = copy.deepcopy(canonical)
+        summary_key = "source_selection_content_row_count"
+        canonical_count = canonical["summary"][summary_key]
+        target["summary"][summary_key] = 0
+        assignment_calls = []
+        projection_comparands = []
+        strict_equal = independent._strict_equal
+
+        def restoring_assignment_provider(persona_id):
+            assignment_calls.append(persona_id)
+            target["summary"][summary_key] = canonical_count
+            return self._assignment_provider(persona_id)
+
+        def observing_strict_equal(value, expected):
+            if (
+                type(value) is dict
+                and value.get("artifact_schema") == independent.PROJECTION_SCHEMA
+            ):
+                projection_comparands.append(value)
+            return strict_equal(value, expected)
+
+        with (
+            mock.patch.object(
+                independent,
+                "_strict_equal",
+                side_effect=observing_strict_equal,
+            ),
+            self.assertRaises(
+                independent.PersonaV2SourceMatchedLifecycleInventoryValidationError
+            ),
+        ):
+            independent.validate_source_matched_lifecycle_content_projection(
+                "p01",
+                target,
+                assignment_origin_provider=restoring_assignment_provider,
+            )
+        self.assertEqual(assignment_calls, ["p01", "p01"])
+        self.assertEqual(len(projection_comparands), 1)
+        self.assertIsNot(projection_comparands[0], target)
+        self.assertEqual(projection_comparands[0]["summary"][summary_key], 0)
+        self.assertEqual(target["summary"][summary_key], canonical_count)
+
     def test_event_provider_types_coordinates_nondeterminism_and_bounds_fail_closed(self):
         self._ensure_package()
         receipt = self.personas[0]["event_receipt"]
@@ -1551,6 +1725,89 @@ class PersonaV2SourceMatchedLifecycleInventoryTests(unittest.TestCase):
                 "p01", receipt, oversized_first
             )
         self.assertEqual(oversized_calls, 1)
+
+        preflight_calls = 0
+
+        def forbidden_preflight_callback():
+            nonlocal preflight_calls
+            preflight_calls += 1
+            return b"x"
+
+        valid_sha = hashlib.sha256(b"x").hexdigest()
+        malformed_descriptors = (
+            (0, valid_sha, 1),
+            (2, valid_sha, 1),
+            (1, valid_sha[:-1], 1),
+            (1, "G" * 64, 1),
+            (1, valid_sha, True),
+        )
+        for (
+            expected_bytes,
+            expected_sha256,
+            maximum_bytes,
+        ) in malformed_descriptors:
+            with (
+                self.subTest(
+                    expected_bytes=expected_bytes,
+                    expected_sha256=expected_sha256,
+                    maximum_bytes=maximum_bytes,
+                ),
+                self.assertRaisesRegex(
+                    independent.PersonaV2SourceMatchedLifecycleInventoryValidationError,
+                    "invalid authenticated receipt bounds",
+                ),
+            ):
+                independent._authenticated_body(
+                    forbidden_preflight_callback,
+                    (),
+                    expected_bytes=expected_bytes,
+                    expected_sha256=expected_sha256,
+                    maximum_bytes=maximum_bytes,
+                    label="focused malformed descriptor",
+                    replay=True,
+                )
+        self.assertEqual(preflight_calls, 0)
+
+        replay_values = iter((b"x", b"xx"))
+        with (
+            mock.patch.object(independent.hmac, "compare_digest") as compare,
+            self.assertRaisesRegex(
+                independent.PersonaV2SourceMatchedLifecycleInventoryValidationError,
+                "pre-compare byte bound",
+            ),
+        ):
+            independent._authenticated_body(
+                lambda: next(replay_values),
+                (),
+                expected_bytes=1,
+                expected_sha256=valid_sha,
+                maximum_bytes=1,
+                label="focused oversized replay",
+                replay=True,
+            )
+        compare.assert_not_called()
+
+        class DerivedBytes(bytes):
+            pass
+
+        replay_values = iter((b"x", DerivedBytes(b"x")))
+        with (
+            mock.patch.object(independent.hmac, "compare_digest") as compare,
+            self.assertRaisesRegex(
+                independent.PersonaV2SourceMatchedLifecycleInventoryValidationError,
+                "replay must return exact bytes",
+            ),
+        ):
+            independent._authenticated_body(
+                lambda: next(replay_values),
+                (),
+                expected_bytes=1,
+                expected_sha256=valid_sha,
+                maximum_bytes=1,
+                label="focused replay byte subclass",
+                replay=True,
+            )
+        compare.assert_not_called()
 
         with self.assertRaises(
             independent.PersonaV2SourceMatchedLifecycleInventoryValidationError
