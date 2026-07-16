@@ -81,20 +81,25 @@ observed evaluation、KCS、G0 authorityは引き続きfalseである。別lane�
 `kcs.persona.pc-recursive-robustness-lane-catalog/v1`は76,099 canonical bytes、SHA-256
 `49d6fa26cafa902bfca4a102c5e301c27683fd6761bc456a3930cd059f67a4f2`で、actual host case modeと
 materializationは未束縛である。
-さらに下流の`kcs.persona.pc-semantic-projection-derivation-inventory/v1`は、
-`kcs.persona.pc-semantic-projection-derivation-receipt/v1`による113個のprojection body導出を
-partial inventoryとして束縛する。内訳はmembership-free base source content-context JSONL 73、
-effective source membership 20、query-independent lifecycle fact/rendition rules 20で、最小12分類のうち
-3分類だけを覆う。inventory本体は1 MiB、external 113 projection合計は144 MiBをhard capとする。
-base JSONLは1 body 4 MiB / 4,096 rows / LF込み768 bytes per row、後者2種は1 projection
-384 KiB hard / 256 KiB targetである。各receiptはfull/direct owner pin、論理座標とrange、
-projector ID/version、projection bytes/SHA、独立validator結果を束縛し、providerを2回replayして
-exact built-in type/bytes/hash/capとopening/closing ownerを再認証する。このpartial inventoryは
-semantic namespaceを発行せず、namespace/G0/solver/solution/write authorityはすべてfalseである。
-overlay scope placement、
-独立approval receipt、schema別content-only semantic projectionの完全12分類、
-実行可能solver、solution、proofは含まない。現input-closureはfull body DAGの互換性候補に限り、
-source ID namespaceとして不適格である。
+Decision 150の`kcs.persona.pc-semantic-projection-derivation-inventory/v1`と
+`kcs.persona.pc-semantic-projection-derivation-receipt/v1`は、membership-free base source content-context
+JSONL 73、effective source membership 20、query-independent lifecycle fact/rendition rules 20のexact 113 bodies、
+最小12分類中3分類を覆う凍結済み歴史的predecessorであり、そのbody、pin、negative authorityを変更しない。
+その下流のv2候補は`kcs.persona.pc-semantic-projection-derivation-inventory/v2`と
+`kcs.persona.pc-semantic-projection-derivation-receipt/v2`を使い、最小12分類を12/12、exact 253 bodiesで覆う。
+内訳はtopology 1、realism 1、route 1、primary use-case 1、recipe 1、fact graph 20、base content-context 73、
+effective membership 20、concrete overlay 40、source-instance parameters 74、lifecycle fact/rendition 20、
+payload equivalence 1である。framingはcanonical JSON 67 bodies / LF終端canonical JSONL 186 bodiesで、
+missing projection class ledgerは空である。descriptorは697,466 canonical bytes / SHA-256
+`6826fb14293e7147159fae1849f93533c35ae76f1beecbd093d190cd6ddd3e69`、external 253 bodiesは
+合計155,741,469 bytes、ordered projection-pin digestは
+`f524ddcccdd89a216b87d2ad8f98076c8eacabbc258e7b68d514162764a3a97c`である。v1 projection bytes/pinsは
+再生成して継承し、再解釈・再pinしない。
+v2候補は局所completion claimを満たすだけで、`corpus_semantic_namespace_issued=false`、
+`g0_contract_frozen=false`、全authority fieldはfalseである。最終local acceptanceはall-253 independent full
+replayと独立した2 hash-seed cold buildが上記literalを再現して成立した。
+overlay scope placement、positive independent review、corpus/evaluation/history closure、blocker resolution ledger、
+実行可能solver、solution、proofは含まず、現input-closureはfull body DAGの互換性候補に限る。
 `g0_contract_frozen=false`、G0 root未実装、非authorizing。
 現行`kcs-persona-pc-v1`、そのartifact、golden hash、writer、history planを変更しない。
 
@@ -1118,9 +1123,9 @@ receiptだけの差替えはevidenceを含むclosure/descriptorだけを変更�
 IDs、rendered corpus bytesを変更してはならない。route bodyそのものの変更はsemantic namespaceを変更する。
 各upstream bodyがauthority/completion/blockerなど可変の証拠metadataを同居させる場合、semantic namespaceは
 schema別にallowlistした`semantic_payload` projectionのbytes/SHAだけを束縛し、corpus input closureがfull body
-とmetadataを束縛する。complete projection inventoryがない現candidate full bodyやpartial inventoryの
-3分類だけをsemantic namespaceとして採用してはならず、このため現時点のsemantic namespace/rootは
-未発行である。
+とmetadataを束縛する。complete v2 projection inventory候補は存在するが、そのdescriptor自体をsemantic
+namespaceとして採用してはならない。projection pinsをexactly once束縛するnamespace manifest、positive review、
+corpus input closureが未完成であるため、現時点のsemantic namespace/rootは未発行である。
 
 production projectionはfull artifactを丸ごとhashするaliasではなく、schema別のcontent-only bodyとする。
 projection自身にfull upstream SHA、authority/completion/blocker/review status、runtime receipt、query/oracle/
@@ -1136,10 +1141,14 @@ missing、extra、duplicate、unused、cycle、foreign-persona、query/evidence 
 `semantic_payload_projection_bound=true`、`query_semantics_absence_proved=true`、
 `future_source_id_namespace_eligible=true`はこの完全inventoryと独立derivation validation後だけtrueにできるが、
 solver/G0/write authorityは引き続きfalseである。
+v2 descriptor候補はこの3つの局所completion claimをtrue、missing projection class ledgerを空にする一方、
+`corpus_semantic_namespace_issued=false`、`g0_contract_frozen=false`、全authority fieldをfalseに保つ。
+namespace eligibilityをnamespace発行やsource-identity authorityと同一視しない。
 corpus rendererのinput projection/import graphにはquery/oracle/answer/distractor SHAやevaluation root resolverを
 渡さず、query artifactが欠落・valid差替えでも同じcorpus bytesを生成できるcapability境界を要求する。
 
-現partial inventoryのexact body数は113である。covered class IDは
+以下はDecision 150で凍結したv1 predecessorの歴史的記録である。v1 partial inventoryのexact body数は113で、
+covered class IDは
 `base-source-content-context`、`effective-source-membership`、
 `query-independent-lifecycle-fact-rendition-rules`の3件、missing class IDは
 `topology-path-load`、`realism-locale-security`、`route-scores`、
@@ -1150,10 +1159,10 @@ baseのowner chainはauthenticated source-semantic origin manifestとそのexact
 effectiveのchainはauthenticated reconciliation suite/full ownerと人物別projection binding、lifecycleのchainは
 authenticated source-matched suite、persona owner、event-view receiptからそれぞれ人物別projectionを再生成する。
 embedded SHA aliasだけは信頼せず、projection自身にfull owner/suite pinやderivation receiptを逆流させない。
-`semantic_payload_projection_bound=false`、`query_semantics_absence_proved=false`、
-`future_source_id_namespace_eligible=false`、`g0_contract_frozen=false`を維持し、solver入力、
-solution/proof、final ID、render/write/KCSを承認しない。次はmissing 9 projectionをすべて実装・
-独立検証した後にだけ、complete corpus semantic/query/history closureとblocker resolution ledgerを構築する。
+Decision 150のv1 artifactでは`semantic_payload_projection_bound=false`、
+`query_semantics_absence_proved=false`、`future_source_id_namespace_eligible=false`、
+`g0_contract_frozen=false`を維持し、solver入力、solution/proof、final ID、render/write/KCSを承認しない。
+この歴史的値を現在のv2 coverageとして読まず、v1 bodyとpinも変更しない。
 
 partial inventoryのcanonical bodyは293,285 bytes / SHA-256
 `5b0e516e2784415dd7c416dee42fc7b23b84485e3629514e910dd67f1a600c84`、receipt順の
@@ -1165,6 +1174,29 @@ lifecycle最大bodyは256,790 bytesとし、producer、独立validator、2 hash-
 provider callbackごとと最終postflightでcaller opening image、full owner、direct owner bodyを再認証する。
 203,000 base rowsは1 suite replayのW0 source計画projectionであり、物理file作成、index、人物別120,000
 actual KCS chunksの達成証拠ではない。
+
+現在のv2候補は歴史的missing 9分類を追加して12/12分類を覆うexact 253 bodiesである。class順の内訳は
+topology path/load 1、realism/locale/security 1、route scores 1、primary-use-case corpus half 1、
+recipe/content/filename policy 1、fact graph 20、base source content-context 73、effective source membership 20、
+concrete-overlay relations 40、source-instance parameters 74、query-independent lifecycle fact/rendition rules 20、
+payload-equivalence rules 1である。source-instance parametersはshared 363-cell definition 1 bodyと、全203,000
+source intentsを覆うassignment shard 73 bodiesからなる。framingはcanonical JSON 67 bodies / LF終端
+canonical JSONL 186 bodiesである。
+
+v2 descriptorは697,466 canonical bytes / SHA-256
+`6826fb14293e7147159fae1849f93533c35ae76f1beecbd093d190cd6ddd3e69`、external 253 bodiesは
+合計155,741,469 bytes、receipt順の`{receipt_id, canonical_bytes, sha256}` canonical JSON array digestは
+`f524ddcccdd89a216b87d2ad8f98076c8eacabbc258e7b68d514162764a3a97c`である。descriptor 2 MiB、
+cumulative external 256 MiB、cold build RSS 1 GiBのhard cap内に保つ。v1の113 projection bytes/pinsは
+再生成して継承し、再解釈・再pinしない。
+
+最終local acceptanceはproducer-independentなall-253二重provider replay、leakage、alias、tamper、TOCTOU、
+resource gateと独立した2 hash-seed cold buildが上記literalを再現して成立した。
+受入後も`semantic_payload_projection_bound=true`、`query_semantics_absence_proved=true`、
+`future_source_id_namespace_eligible=true`は局所derivation completion/eligibilityだけを意味し、
+`corpus_semantic_namespace_issued=false`、`g0_contract_frozen=false`、全authority fieldはfalseのままである。
+次はpositive independent review、complete corpus semantic/query/history closure、blocker resolution ledgerを
+構築し、その後にjoint solverへ進む。
 
 多言語personaの`locale-language-*`には非primary languageを最低1問含める。negativeはRecall母数外で
 `false-positive@10 == 0`を要求する。各positiveには同topic/languageのdistractor sourcesを3件以上
@@ -1529,8 +1561,9 @@ formal flagを変更してはならない。
     数えない。将来local deterministic OCR derivativeを追加する場合は別variant/provenance/contributor契約を
     version updateで先に束縛する
 
-次の実装順は、(1) partial projection derivation inventoryでmissingの9分類を完成させ、
-complete corpus semantic/query/history closureとblocker resolution ledgerを束縛する、(2) joint
+次の実装順は、(1) local acceptance済み12/12分類のv2 projection pinsへpositive independent reviewを束縛し、
+complete corpus semantic/query/history closureとblocker resolution
+ledgerを完成する、(2) joint
 allocation/solution/proof、(3) final source plan、solution-compiled planned history plan、独立planning cap/ledgerと
 G0 descriptor、とする。G0後は各fresh storageで(4) allocation/renderingとfolder/file write、(5) W0 offline
 index/attestation、(6) W1 edit/indexとI-edit attestation、(7) pre-W2 qIM move-delta patch、(8) W2-W5

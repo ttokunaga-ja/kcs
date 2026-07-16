@@ -1676,3 +1676,109 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     or G0 authority remains false.  The next required sequence is to implement and independently validate all nine
     missing projections, then complete the corpus semantic/query/history closures and blocker-resolution ledger,
     and only then proceed to the joint solver.
+151. Persona-PC v2 will complete the twelve-class semantic projection inventory in a new version rather than mutate
+    the frozen Decision 150 artifact.  The target schemas are
+    `kcs.persona.pc-semantic-projection-derivation-inventory/v2` and
+    `kcs.persona.pc-semantic-projection-derivation-receipt/v2`.  The v2 inventory has exactly 253 projection bodies
+    in minimum-class order: topology path/load 1, realism/locale/security 1, route scores 1, primary-use-case corpus
+    half 1, recipe/content/filename policy 1, persona fact graphs 20, base source content-context shards 73,
+    effective source membership 20, concrete-overlay relation origins 40, source-instance parameters 74,
+    query-independent lifecycle fact/rendition rules 20, and payload-equivalence rules 1.  The source-parameter
+    class contains one shared 363-cell definition body followed by the exact 73 assignment shards covering all
+    203,000 source intents.  The complete framing count is 67 canonical JSON bodies and 186 LF-terminated canonical
+    JSONL bodies.  Existing v1 projection bytes and pins are inherited by regeneration, not reinterpreted or repinned.
+
+    Global topology, realism, route, primary-use-case, and recipe dictionaries are each one body because their
+    cross-persona order and constraints are semantic.  Route scores also carry the exact twenty-person, twenty-scope
+    ordinal-to-scope-key axis from topology so an ordinal cannot silently acquire a different meaning.  The primary
+    use-case projection retains only persona/use-case identity, trigger, desired outcome, required families, required
+    scope role, and required lifecycle capabilities; query strata and evaluation focus are excluded.  The recipe
+    projection retains the 71 content, filename, complexity, renderer semantic-identity, chunk, formal-lane, and
+    byte-stress policy rows while excluding runtime receipts, digests, selected/observed values, and completion
+    claims.  Each fact projection is persona-local and contains only its graph, predicate, and logical-time content.
+
+    Concrete-overlay projections use the already-defined forty persona/origin draft bodies: 19,870 content-relation
+    plus 5,690 attachment rows, with semantic-anchor capacity and payload-rule ownership kept in their other classes.
+    Source-parameter assignment bodies remain the exact two-field `{intent_key, parameter_cell_key}` expanded views.
+    The payload-equivalence class is one shared rule catalog, not forty duplicate instance bodies: existing base rows
+    own every source payload-equivalence key, concrete relation rows own endpoint/attachment membership, and the rule
+    catalog alone owns how default, exact, near-revision, conflict-branch, and decoded attachment relationships join
+    those fields.  Because the historical overlay contract explicitly records `payload_relation_recipe_complete`
+    as false, this catalog requires a new full owner and producer-independent validator; the old full body cannot be
+    relabeled as a complete rule projection.
+
+    Every new projection uses a class-specific exact field allowlist.  Projection bodies contain no authority,
+    completion, blocker, review/evidence, query/oracle/answer/distractor, upstream/full-owner SHA, runtime receipt,
+    solution/solved scope/final identifier, or observed raw/chunk/rank/latency field.  A derivation receipt separately
+    authenticates the bounded full-owner opening image, selected direct fragment, projector version, and output pin.
+    The independent validator must not import the v2 producer, must deserialize and validate the exact bounded opening
+    bytes rather than separately deep-copy a live object, must call each body provider twice, and must reauthenticate
+    the caller target, full owners, and direct fragments after every callback and at final postflight.  Caches may
+    retain immutable canonical bytes or tuples only.
+
+    The v2 descriptor hard cap is initially 2 MiB, the cumulative external-body cap is 256 MiB, and the first complete
+    cold-build RSS cap is 1 GiB; all three are tightened only after two-hash-seed measurement.  Existing per-body caps
+    remain 4 MiB / 4,096 rows for large JSONL, 768 LF-inclusive bytes for base/overlay rows, 256 LF-inclusive bytes
+    for assignment rows, 384 KiB hard / 256 KiB target for large JSON dictionaries, 64 KiB for use-case and persona
+    fact projections, and the existing lifecycle caps.  No v2 golden bytes/SHA, completion flag, namespace eligibility,
+    or source-identity authority is asserted until all 253 bodies pass independent full replay, leakage, alias,
+    tamper, TOCTOU, resource, and two-hash-seed gates.  Even after that acceptance, semantic namespace issuance,
+    positive review receipts, blocker resolution, solver, G0, render/write/history/KCS, and physical 120,000-chunk
+    attestation remain separate downstream gates.
+152. Persona-PC v2 accepts the complete twelve-class semantic-projection derivation inventory as the additive
+    `kcs.persona.pc-semantic-projection-derivation-inventory/v2` artifact.  It contains exactly 253 independently
+    bound projection bodies in minimum-class order: topology path/load 1, realism/locale/security 1, route scores 1,
+    primary-use-case corpus half 1, recipe/content/filename policy 1, persona fact graphs 20, base source
+    content-context shards 73, effective source membership 20, concrete-overlay relation origins 40,
+    source-instance parameters 74, query-independent lifecycle fact/rendition rules 20, and payload-equivalence
+    rules 1.  The framing is exactly 67 canonical JSON bodies and 186 LF-terminated canonical JSONL bodies.  The
+    frozen Decision 150 v1 artifact remains an unchanged historical predecessor: its schemas, 113 receipts,
+    projection bodies and pins, completion claims, and negative authority are neither amended nor superseded.
+
+    The frozen v2 descriptor is exactly 697,466 canonical bytes with SHA-256
+    `6826fb14293e7147159fae1849f93533c35ae76f1beecbd093d190cd6ddd3e69`.  Its 253 external bodies total exactly
+    155,741,469 bytes.  The canonical JSON array of ordered `{receipt_id, canonical_bytes, sha256}` rows has SHA-256
+    `f524ddcccdd89a216b87d2ad8f98076c8eacabbc258e7b68d514162764a3a97c`.  The three large JSONL domains contain
+    exactly 203,000 base rows, 25,560 concrete-overlay rows, and 203,000 source-parameter assignment rows.  Their
+    maximum LF-inclusive row sizes are 633, 388, and 110 bytes; maximum bodies are 2,484,590, 658,944, and 367,471
+    bytes.  The shared parameter catalog defines 363 cells, while the exact assignment domain uses 354 and leaves
+    nine authenticated zero-count `ordinary-max` cells inactive.  The independent validator rejects foreign cells,
+    missing active cells, consumed inactive cells, and any inactive-set drift.
+
+    The descriptor cap is 2 MiB with a 1 MiB target, cumulative external bodies are capped at 256 MiB, canonical
+    JSON bodies at 384 KiB with a 256 KiB target, and canonical JSONL bodies at 4 MiB / 4,096 rows.  Base/overlay and
+    assignment rows are capped at 768 and 256 LF-inclusive bytes.  Bounded preflight rejects excessive receipts,
+    pins, coordinates, identity strings, integers, nesting, bodies, rows, and cumulative bytes before expensive
+    owner/provider work.  Every provider result must be exact built-in `bytes`, replay identically twice, and match
+    its exact length/hash/framing contracts.  The independent validator reauthenticates the detached opening image,
+    live caller target, full owners, and direct fragments after callbacks and at final postflight.
+
+    Final local gates are green on the accepted code.  Focused content tests pass 52 ordinary tests with the one
+    opt-in payload cold test skipped: global 11 in 65.651 seconds, corpus 14 in 374.073 seconds, relations/parameters
+    13 in 389.040 seconds, and payload equivalence 14 in 362.100 seconds.  The complete fast contract passes 6 tests
+    in 0.037 seconds.  The clean all-253 independent replay/tamper/TOCTOU/resource gate passes 5 tests in 2,589.296
+    seconds.  The isolated two-hash-seed cold gate passes its one test in 2,533.997 seconds and reproduces every
+    frozen class/body/row/suite literal.  The separately observed maximum per-seed cold time is 1,278.796 seconds and
+    maximum RSS is 386,088,960 bytes, below the 120-minute / 1-GiB limits.  Pre-acceptance runs exposed and fixed an
+    independent-v1 receipt-schema reference error and the invalid assumption that all 363 defined cells must be
+    active; those failed or interrupted runs are not counted as acceptance.  A final audit then moved the three
+    shallow list type/cardinality bounds before any registry/blocker iteration and added Bomb/overwide regressions.
+    That ordering-only preflight fix passes the final 6-test fast contract and cannot change the already accepted
+    valid descriptor, projection bodies, provider path, or frozen pins.
+
+    CI adds `persona-v2-semantic-projection-complete-content` (120 minutes),
+    `persona-v2-semantic-projection-complete-contract` (15 minutes),
+    `persona-v2-semantic-projection-complete-full` (240 minutes), and
+    `persona-v2-semantic-projection-complete-cold` (300 minutes).  Full and cold depend on content and contract.
+    Remote GitHub Actions remains unverified because the prior workflow was blocked before jobs by the repository or
+    account billing/spending gate; local green does not imply remote green.
+
+    This acceptance proves only the local twelve-class derivation inventory, all 253 receipt bindings, semantic
+    payload projection binding, query-semantics absence, and eligibility for a later source-ID namespace gate.
+    Eligibility is not issuance or authority.  The corpus semantic namespace remains unissued; positive independent
+    route/profile reviews, corpus/query/history closures, and the blocker-resolution ledger remain incomplete.  No
+    source-identity authority, solver solution/proof, final source plan or IDs, compiled history, G0, render/write,
+    filesystem/history/KCS execution, physical materialization, capacity/evaluation result, or per-persona 120,000
+    actual-chunk attestation is granted.  The next required sequence is to close and independently validate the
+    corpus semantic, query, and history closures plus blocker-resolution ledger, and only then invoke the joint
+    solver.
