@@ -164,6 +164,61 @@ jobs:
           python3 -m unittest -v
           eval.test_persona_v2_semantic_projection_derivation_inventory.SemanticProjectionDerivationInventoryLongColdHashSeedTest
 
+  persona-v2-semantic-projection-complete-content:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    steps:
+      - uses: actions/checkout@v4
+      - run: >-
+          python3 -m unittest -v
+          eval.test_persona_v2_semantic_projection_global_content
+      - run: >-
+          python3 -m unittest -v
+          eval.test_persona_v2_semantic_projection_corpus_content
+      - run: >-
+          python3 -m unittest -v
+          eval.test_persona_v2_semantic_projection_relations_parameters
+      - run: >-
+          python3 -m unittest -v
+          eval.test_persona_v2_payload_equivalence_rule_catalog
+
+  persona-v2-semantic-projection-complete-contract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+      - run: >-
+          python3 -m unittest -v
+          eval.test_persona_v2_semantic_projection_complete_inventory.SemanticProjectionCompleteInventoryContractTest
+
+  persona-v2-semantic-projection-complete-full:
+    needs:
+      - persona-v2-semantic-projection-complete-content
+      - persona-v2-semantic-projection-complete-contract
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+
+    steps:
+      - uses: actions/checkout@v4
+      - run: >-
+          python3 -m unittest -v
+          eval.test_persona_v2_semantic_projection_complete_inventory.SemanticProjectionCompleteInventoryLongAll253Test
+
+  persona-v2-semantic-projection-complete-cold:
+    needs:
+      - persona-v2-semantic-projection-complete-content
+      - persona-v2-semantic-projection-complete-contract
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+
+    steps:
+      - uses: actions/checkout@v4
+      - run: >-
+          python3 -m unittest -v
+          eval.test_persona_v2_semantic_projection_complete_inventory.SemanticProjectionCompleteInventoryLongColdHashSeedTest
+
   rust:
     runs-on: ubuntu-latest
 
