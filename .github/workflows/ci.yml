@@ -114,6 +114,16 @@ jobs:
           python3 -m unittest -v
           eval.test_persona_v2_source_parameter_assignment_package
 
+  persona-v2-source-matched-lifecycle-full:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    steps:
+      - uses: actions/checkout@v4
+      - run: >-
+          python3 -m unittest -v
+          eval.test_persona_v2_source_matched_lifecycle_inventory
+
   rust:
     runs-on: ubuntu-latest
 

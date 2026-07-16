@@ -1514,5 +1514,47 @@ These are Step 1 implementation decisions only. `docs/` remains unchanged.
     one searchable-positive family.  Under the current offline contract, scan PDF, DOCX/XLSX/PPTX, image, media, and
     domain binary are not silently promoted to searchable; a text-layer PDF or local text contributor carries the
     positive witness.  Promoting a converted rendition requires a separate renderer/ingestion/provenance contract and
-    observed receipt.  The existing twenty-row catalog remains a non-authorizing marginal join until this bridge is
-    implemented.
+    observed receipt.  The existing twenty-row catalog remains a non-authorizing marginal join; Decision 146 records
+    the implemented source-matching bridge without granting downstream execution authority.
+146. The query-independent source-matched lifecycle bridge is implemented as
+    `kcs.persona.pc-source-matched-lifecycle-suite/v1`.  Each persona owns exactly 105 primary matches
+    (100 contributor semantic anchors and five overlay-unreserved incidental sources), ten distinct-family
+    cross-format companions, five explicitly reserved unused semantic anchors, and its required-family witnesses.
+    The suite therefore binds 2,100 primary matches, 200 companions, 2,300 lifecycle source refs, and 93 format
+    witnesses classified exactly as 52 searchable-positive, 33 pending-conversion-negative, and eight raw-only-
+    structural-negative.  Positive witnesses bind an exact matched lifecycle intent; negative witnesses omit a
+    query anchor.  All selected refs resolve through authenticated pilot source, semantic, reservation, and
+    parameter-assignment owners; full reuses the pilot selection and never selects from full-residual.
+
+    The same package owns a non-persisted pre-solve lifecycle event view with 7,630 exact rows: 5,230 source-event
+    intents (including twenty derive, thirty duplicate, and 300 forced-purge-commit diagnostics), 2,000 ordinary
+    scope-index boundaries, and 400 post-purge no-op index boundaries.  Event transitions create 3,630 persona-local
+    pre-solve source intents for edits, diagnostics, replacements, exports, and restores; these are logical planning
+    keys, never final source/materialization IDs.  Each persona has exactly 48 multi-source coupling groups (twenty
+    X-delete/X-prime-create, ten export/restore/X-prime-delete, fifteen P-prime/purge/forced-commit, one five-source
+    move bundle, and two mirrored-rendition edit groups) plus six shared scope-index barriers, for 54 dependency
+    groups/persona and 1,080 suite-wide.  Each scope-index row references the last source event in its wave; the final
+    no-op indexes reference the last forced purge commit.
+
+    Each persona persists only a receipt over its LF-framed canonical JSONL expansion.  Its content-only projection
+    contains normalized source-selection, source-event, and scope-event sections with created-source, dependency,
+    predecessor, operation, delta, fact, path/scope, and visibility refs, while excluding receipts and runtime/query/
+    solution metadata.  The final suite is 14,605 canonical bytes with SHA-256
+    `c4508ed61c88db80b003e9ce3b7c35ea153776442bd3224964897400633dd2c8`; observed maxima are 103,981 bytes per
+    persona owner, 318,664 bytes per non-persisted event body, 973 bytes per LF-inclusive event row, and 256,790
+    bytes per content-only projection.  Hard caps remain 512 KiB/persona, 4 MiB/event body, 1,024 bytes/event row,
+    and 384 KiB/projection with a 256 KiB projection target.
+
+    The producer-independent validator imports no source-matching producer code.  It reconstructs the bipartite
+    cross-format matching, 100/5 semantic-anchor split, I5 target-byte bound, family witnesses, event expansion,
+    receipts, suite aggregation, and content-only projection from authenticated upstream owners.  The accepted
+    artifact contains no query/oracle body, solved scope/path/quota, final source/materialization/event identity,
+    observed qIM, raw/chunk hash, rank, latency, physical write, KCS execution, capacity completion, or G0 authority.
+    Effective lifecycle membership, joint solver/solution/proof, final W0 source plan, compiled W0--W5 history plan,
+    runtime move-delta patch, physical materialization, and observed evaluation remain downstream blockers.
+
+    The final focused gate passes seventeen tests in 562.285 seconds (562.498 seconds wall) with maximum child RSS
+    283,295,744 bytes.  It includes complete twenty-person producer and independent reconstruction, exact pin/count/
+    size checks, strict schema and negative-authority checks, dependency and target tamper/TOCTOU cases, detached
+    public builds, public validator/SHA wiring, event-provider framing/nondeterminism/bounds checks, and one complete
+    twenty-person suite cold build under a different hash seed capped at fifteen minutes and 512 MiB.

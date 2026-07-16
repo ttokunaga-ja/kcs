@@ -56,7 +56,16 @@ qIM、compiled history plan、observed receiptsはfalseである。これをsour
 下流の`kcs.persona.pc-lifecycle-coverage-catalog/v1`が人物ごとのcorrected coverage domain、cross-format
 companion、purge-only witness、move receipt/algebraをquery非依存で束縛する。bodyは1,385,596 canonical bytes、
 SHA-256 `ea36aa70e00dadda3cc35e442c21507ebb89c622de6a79f1bb9c79d83a442236`で、source matching、
-final ID、mutation、KCS、G0 authorityはすべてfalseである。別laneの
+final ID、mutation、KCS、G0 authorityはすべてfalseである。その下流の
+`kcs.persona.pc-source-matched-lifecycle-suite/v1`は20人 x (105 primary + 10 companion) = 2,300 exact
+pilot source refs、93 family witnesses (52/33/8)、7,630 pre-solve source/scope event intentsを束縛する。
+event-created pre-solve source intentはsuite 3,630、dependency groupは各人48 source coupling + 6 scope barrier =
+54、suite 1,080である。content-only projectionはsource selectionとsource/scope event意味を別sectionで持つ。
+canonical suiteは14,605 bytes、SHA-256
+`c4508ed61c88db80b003e9ce3b7c35ea153776442bd3224964897400633dd2c8`で、producer-independentな全20人
+再構成を通過した。最大persona body 103,981 bytes、非永続event body 318,664 bytes、LF込みrow 973 bytes、
+content-only projection 256,790 bytesである。ただしeffective membership、solver、compiled history、
+physical materialization、observed evaluation、KCS、G0 authorityはすべてfalseである。別laneの
 `kcs.persona.pc-recursive-robustness-lane-catalog/v1`は76,099 canonical bytes、SHA-256
 `49d6fa26cafa902bfca4a102c5e301c27683fd6761bc456a3930cd059f67a4f2`で、actual host case modeと
 materializationは未束縛である。
@@ -743,8 +752,9 @@ prior factを持つprofile 4種へexact 12件/personaしか当たらないため
 replacement factを期待するqueryが人物ごとexact 4件だけU/Iへ誤分類され、cross-format rendition relationと
 purge-only unique witness factも欠ける。この局所negative claimは下流
 `kcs.persona.pc-lifecycle-coverage-catalog/v1`の実装でcoverage classificationについてsupersedeした。
-immutable demand自体は歴史的snapshotとして変更せず、source matching、fact/rendition materialization、
-effective-membership reconciliationとblocker-resolution ledgerを引き続きG0 blockerとする。
+immutable demand自体は歴史的snapshotとして変更しない。source matchingは下流suiteで完成したが、
+fact/rendition materialization、effective-membership reconciliationとblocker-resolution ledgerを
+引き続きG0 blockerとする。
 
 query-independent coverage catalogは人物ごと105 primary logical documentsを次へexact分類する。
 
@@ -1446,7 +1456,7 @@ formal flagを変更してはならない。
     数えない。将来local deterministic OCR derivativeを追加する場合は別variant/provenance/contributor契約を
     version updateで先に束縛する
 
-次の実装順は、(1) source-matched pre-solve lifecycle intent/event inventory、content-only projection、
+次の実装順は、(1) lifecycle fact/rendition effective-membership reconciliation、projection derivation receipt、
 corpus semantic/query/history closureとblocker resolution ledger、(2) joint
 allocation/solution/proof、(3) final source plan、solution-compiled planned history plan、独立planning cap/ledgerと
 G0 descriptor、とする。G0後は各fresh storageで(4) allocation/renderingとfolder/file write、(5) W0 offline
