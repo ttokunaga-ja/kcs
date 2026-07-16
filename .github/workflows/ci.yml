@@ -124,6 +124,16 @@ jobs:
           python3 -m unittest -v
           eval.test_persona_v2_source_matched_lifecycle_inventory
 
+  persona-v2-lifecycle-effective-membership-full:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    steps:
+      - uses: actions/checkout@v4
+      - run: >-
+          python3 -m unittest -v
+          eval.test_persona_v2_lifecycle_effective_membership_reconciliation
+
   rust:
     runs-on: ubuntu-latest
 

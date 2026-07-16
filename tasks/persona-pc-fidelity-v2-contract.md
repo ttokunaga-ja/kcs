@@ -64,8 +64,20 @@ event-created pre-solve source intentはsuite 3,630、dependency groupは各人4
 canonical suiteは14,605 bytes、SHA-256
 `c4508ed61c88db80b003e9ce3b7c35ea153776442bd3224964897400633dd2c8`で、producer-independentな全20人
 再構成を通過した。最大persona body 103,981 bytes、非永続event body 318,664 bytes、LF込みrow 973 bytes、
-content-only projection 256,790 bytesである。ただしeffective membership、solver、compiled history、
-physical materialization、observed evaluation、KCS、G0 authorityはすべてfalseである。別laneの
+content-only projection 256,790 bytesである。このsource-matched suite単体はeffective membership、solver、
+compiled history、physical materialization、observed evaluation、KCS、G0 authorityを持たない。その下流の
+`kcs.persona.pc-lifecycle-effective-membership-reconciliation/v1`は、203,000 W0 sourcesを
+base inheritance 200,800 / graph-normal 1,700 / graph-normal+witness 300 / companion mirror 200へ
+exactly once合成し、1,033,680 present-fact referencesを持つ。さらに3,630 event-created intentsを
+`P W1 carry 300 / P-prime empty 300 / other empty 3,030`へ閉じ、300 witnessesの正当consumerを
+matching W0 PとW1 descendantの600 refsだけに限定する。compact ownerは2,573 rows、canonical suiteは
+69,195 bytes、SHA-256 `14ff220bf47656965d1ac1803a0dd0ccc6b8afa440b64f563e40e623a219bb7c`である。
+73件の`effective-membership-shard-content-commitment`は自身のeffective bodyのSHA/count/rangeだけを
+namespace projectionへ束縛する。禁止対象のupstream pinやderivation receiptではない。rendition-groupの
+semantic relationは含める一方、family/variant/gate/use-case/format-selection roleは除外する。
+producer-independent validatorは全203,000 W0 + 3,630 event-created universeを再構成し、独立validator欠落時は
+fail closedとする。solver、complete post-W0 membership、compiled history、physical materialization、
+observed evaluation、KCS、G0 authorityは引き続きfalseである。別laneの
 `kcs.persona.pc-recursive-robustness-lane-catalog/v1`は76,099 canonical bytes、SHA-256
 `49d6fa26cafa902bfca4a102c5e301c27683fd6761bc456a3930cd059f67a4f2`で、actual host case modeと
 materializationは未束縛である。
@@ -804,6 +816,29 @@ membershipを除いたbase content-context projectionと、このeffective membe
 membership body、reconciliation/derivation receiptはcorpus input closureへ残す。source matching前はcomposerと
 namespace eligibilityをfalseに保つ。
 
+このreconciliationのexact W0 modeを次に固定する。I5はselected lifecycle sourceではあるがsemantic anchorでは
+ないため、100件すべてがbase logical/fact membershipを完全継承する。2,000 contributor primaryだけがoverride
+対象であり、そのうち1,700件はgraph-normal W0、300件のPはgraph-normal W0 + unique purge witnessとなる。
+200 companionはprimaryのlifecycle document/branch/W0 revision/section/revision chain/fact集合をmirrorする。
+したがって203,000件はbase inheritance 200,800 / graph-normal 1,700 / graph-normal+witness 300 /
+companion mirror 200でexactに閉じ、present fact referenceは1,033,680件である。
+
+P'はW0 203,000件の外にあるため、W0 inverted scanだけで非継承を主張してはならない。source-matched eventが
+作る3,630 pre-solve source intentsをexactly once覆う別の非永続witness-lineage viewを認証し、PのW1 descendant
+300件だけがmatching witnessをcarry、P' 300件とその他3,030件はemptyであることを検査する。global inverted
+viewのconsumer universeは203,000 W0 + 3,630 event-created intentsで、各witnessのconsumerはmatching W0 Pと
+matching W1 P descendantのexact 2件、suite合計600件とする。これはwitness isolationの証明であって、P'や
+その他post-W0 sourceのcomplete fact membershipを生成した証明ではない。後者はsolution-compiled history closureが
+所有する。dependency group名からchainを推論せず、capability keyとconsumer roleを明示的なlifecycle chainとして
+検証する。
+
+永続化するのは2,000 primary override、200 companion mirror、300 typed witness fact、73 effective shard receiptの
+compact ownerだけとする。203,000 expanded effective rows、3,630 event-created lineage rows、300 inverted rowsは
+bounded streaming verification viewであり、保存する場合だけ全bytesを別packageへ課金する。content-only projectionは
+authority/completion/blocker/review、full upstream SHA、derivation receipt、query/oracle/use-case/format selection、
+solution/scope/path/quota/final ID、observed raw/chunk/rank/latencyを含めない。ambientはformal semantic namespace外で、
+物理receiptができるまでobserved noninheritanceを主張しない。
+
 pilot/full history関係はsource subsetから推論せず、event/template key、dependency、cohort、fact transition、
 compiled planned event bytesのbyte-identical reuseを独立claimとして検証する。fullでpilot eventを変更・再採番
 してはならない。
@@ -1456,7 +1491,7 @@ formal flagを変更してはならない。
     数えない。将来local deterministic OCR derivativeを追加する場合は別variant/provenance/contributor契約を
     version updateで先に束縛する
 
-次の実装順は、(1) lifecycle fact/rendition effective-membership reconciliation、projection derivation receipt、
+次の実装順は、(1) effective membershipを採用するprojection derivation receipt、
 corpus semantic/query/history closureとblocker resolution ledger、(2) joint
 allocation/solution/proof、(3) final source plan、solution-compiled planned history plan、独立planning cap/ledgerと
 G0 descriptor、とする。G0後は各fresh storageで(4) allocation/renderingとfolder/file write、(5) W0 offline
