@@ -164,7 +164,8 @@ fingerprint 導入 (Phase 4+) まで採用しない)。プラットフォーム�
 1. exact 対応 (unchanged):
    旧 unit 列と新 unit 列の fingerprint 完全一致を等価関係として、
    order を保存する最長共通部分列 (LCS) を取り 1:1 対応させる。
-   同一 fingerprint の unit が複数あっても LCS の順序保存で一意に決まる。
+   同スコアの LCS 対応が複数ありうる (例: 旧 [A,A] × 新 [A]) ため、**tie-break = 旧 index 昇順を
+   優先する対応を選ぶ** (決定性の保証 — LCS の順序保存だけでは一意にならない)。
    → (old_unit_key, new_unit_key, confidence=1.0, reason="fingerprint_exact")
 
 2. 区間対応 (changed):
@@ -219,7 +220,8 @@ raw / prepared → normalized。非 text-native は文書処理 API 系 Adapter 
 **発動条件 (AND 5 つ)**:
 
 ```
-1. 同一 file_id に対する既存 done normalization_run がある
+1. 同一ファイル (= scope 内の同一 path binding。file_id は廃止済み — [03-data-model.md §8](03-data-model.md))
+   に対する既存 done normalization_run がある。rename を跨いだ同一性は追跡しない (rename + 編集は full)
 2. raw_hash のみ変化 (tool_profile_hash は不変)
 3. Adapter が capabilities = ["incremental_update"] を宣言
 4. unit_mapping (§2.2) による変化率 < threshold (default 0.30)
@@ -310,7 +312,7 @@ full 出力でも V6 に違反する場合は run を failed (invalid_input 系,
 
 ```sql
 CREATE TABLE chunks (
-  chunk_id TEXT PRIMARY KEY,
+  chunk_id TEXT NOT NULL PRIMARY KEY,    -- rowid 表の TEXT PRIMARY KEY は NOT NULL を含意しないため明示
   raw_hash TEXT NOT NULL,
   tool_profile_hash TEXT NOT NULL,
   gen INTEGER NOT NULL,                -- chunk は常に normalized instance 由来のため DEFAULT を持たない
@@ -318,8 +320,8 @@ CREATE TABLE chunks (
   raw_path TEXT NOT NULL,              -- chunk 生成時点の path (表示用)。現在 path は tree_entries join で得る
   heading_path TEXT NOT NULL,          -- 見出し未出現は空 ([] 相当)。NULL は許可しない (境界規則 3)
   section_id TEXT,
-  char_start INTEGER,
-  char_end INTEGER,
+  char_start INTEGER NOT NULL,           -- chunk identity (03 §8.1) の必須入力
+  char_end INTEGER NOT NULL,
   text_hash TEXT NOT NULL,
   text TEXT NOT NULL,
   first_seen_commit TEXT,              -- この chunk を含む最初の commit (commit_hash)。commit 作成時に付与
@@ -374,8 +376,9 @@ CREATE VIRTUAL TABLE chunk_fts USING fts5(
   heading_path,
   content='chunks',
   content_rowid='rowid',
-  tokenize='<tokenizer>'      -- 'trigram' (デフォルト) | 'unicode61 remove_diacritics 2'
-);
+  tokenize='trigram'          -- 既定。設定で 'unicode61 remove_diacritics 2' へ切替可
+);                            -- (切替時は許可値 enum から DDL を生成する。プレースホルダの
+                              --  literal 実行は parse error — 掲載 DDL は常に実行可能形とする)
 ```
 
 `chunk_id` 列は FTS 側に **持たない** (2026-07-14 実装準拠へ更新 — 旧 spec の `chunk_id UNINDEXED` 列は
@@ -411,7 +414,7 @@ END;
 
 ```sql
 CREATE TABLE embeddings (
-  id TEXT PRIMARY KEY,
+  id TEXT NOT NULL PRIMARY KEY,
   target_type TEXT NOT NULL,    -- chunk | image | node | query_cache
   target_id TEXT NOT NULL,
   modality TEXT NOT NULL,       -- "multimodal" のみ (非 multimodal は KCS-E-EMBED-MODALITY-001 で採用不可、07 §5.3)
@@ -429,7 +432,7 @@ CREATE VIRTUAL TABLE chunk_vec USING vec0(
 
 `chunk_vec` の次元は採用 profile の **768 (MRL 切り詰め) / cosine に固定** する ([07-adapter-spec.md §5.3](07-adapter-spec.md))。保存 vector と query vector はいずれも L2 正規化済みのため、cosine distance の順位は厳密に一致する。
 
-`embeddings` テーブル (メタデータ + vector BLOB) と `chunk_vec` (vec0 virtual table) は、いずれも `objects/` から再構築可能な加速層であり、真実は `objects/` にある (§4 冒頭)。両テーブル間では **`embeddings` テーブルを正** とし、`chunk_vec` は `embeddings` からの導出物として扱う。不整合を検出した場合および `kcs repair --rebuild-db` では、`objects/` → `embeddings` → `chunk_vec` の順に再構築する。
+`embeddings` テーブル (メタデータ + vector BLOB) と `chunk_vec` (vec0 virtual table) は、いずれも `objects/` から再構築可能な加速層であり、真実は `objects/` にある (§4 冒頭)。両テーブル間では **`embeddings` テーブルを正** とし、`chunk_vec` は `embeddings` からの導出物として扱う。不整合を検出した場合および `kcs repair --rebuild-db` では、`objects/` → `embeddings` → `chunk_vec` の順に再構築する。`chunk_vec` の導出は **`chunks.text_hash` と `embeddings.target_id` の結合**で行い、同一 `text_hash` を持つ複数 chunk には同じ embedding を複数の `chunk_vec` 行へ展開する (content ベース再利用 §5.5 の裏面)。
 
 KCS は Text/Image を分けず **単一マルチモーダル Embedding Adapter** のみを許可する (非 multimodal profile は `KCS-E-EMBED-MODALITY-001` で採用拒否、[03-data-model.md §7](03-data-model.md))。
 
@@ -551,6 +554,10 @@ pending → running → done                     全 unit done
 pending → running → partial                  1 unit 以上 done かつ 1 unit 以上 failed
 pending → running → failed → pending         全 unit 失敗、または run 前提の失敗 (prepare 失敗等)。retryable
 partial → done                               失敗 unit の再投入がすべて成功
+pending → paused → pending                   保留。hold_reason = budget (§5.4) | auth | rate_limit |
+                                             tier_b_approval (10-operations.md §1.1)。解除条件 =
+                                             理由の解消 (budget は §5.4 の再開規則、tier_b は明示承認)。
+                                             paused は Adapter 未呼出のため AdapterRun には現れない
 running が heartbeat_at + 5min を超えたら stale。別 worker が pull 可能
 ```
 
@@ -612,7 +619,7 @@ monthly_usd_cap = 10.0
 ```
 
 - cap は二層で判定する。**device cap** (`~/.config/kcs/config.toml`、デバイス上の全 `.kcs` の当月合算に適用、既定 $50) が正であり、**folder cap** (`.kcs/config.toml`、その `.kcs` の当月消費のみに適用) は任意の追加制限。folder cap 未設定なら device cap のみが効く
-- 判定式: scope S の新規タスクを起動できるのは `ledger(S, 当月) < folder_cap(S)` **かつ** `ledger(device, 当月) < device_cap` のとき (= effective cap は両者の残余の min)。`per_adapter` の下限も同様に両層で判定する。`ledger(...)` は cost_ledger の当月合算 (estimated 行を含む) + 未終端 batch_requests (state 0/1) の `estimated_usd` 合算 (= 予約) を含む
+- 判定式: scope S の新規タスクを起動できるのは `ledger(S, 当月) + candidate < folder_cap(S)` **かつ** `ledger(device, 当月) + candidate < device_cap` のとき (= effective cap は両者の残余の min。candidate = 起動しようとするタスク自身の予約額)。`per_adapter` の下限は **device 層専用** (folder cap は total のみ — folder 側 `[budget.per_adapter]` は定義しない)。`ledger(...)` は cost_ledger の当月合算 (estimated 行も usd 非 NULL のため数値として効く — §5.8) + 未終端 batch_requests (state 0/1) の `estimated_usd` 合算 (= 予約)。**判定と相 1 の reservation 作成は同一の `BEGIN IMMEDIATE` Tx で行う** (check-then-act の並行超過を防ぐ — cap 超過なら相 1 を作らない)
 - 累積コストは Adapter 報告値 (input/output token × 単価) を `~/.local/share/kcs/cost-ledger.sqlite` (デバイスグローバル 1 個。WAL + busy_timeout — [05-runtime.md §6](05-runtime.md)) に記録する。folder cap の判定はこの ledger の scope 別集計で行う (`.kcs` 内に ledger は置かない。cache/truth 規約上、課金台帳はデバイスローカルの運用データであり `.kcs` の truth ではないが、**再構築不可のため cache でもない** — [03-data-model.md §4.1](03-data-model.md)、schema 変更は in-place migration 側 [10-operations.md §7.5.3](10-operations.md))
 - store は 2 表で構成し、**以下の DDL を SQL 正本とする** (旧 3 JSONL + lock 構成は 2026-07-18 に廃止 — §5.8 の 2 相プロトコルは UNIQUE 制約・単一 Tx・ON CONFLICT 冪等という SQLite の保証を前提に監査された機構であり、append-only JSONL では等価の保証を構成できない。[10-operations.md §12.7](10-operations.md) リネーム表):
 
@@ -622,10 +629,14 @@ CREATE TABLE cost_ledger (               -- 確定・推定課金の追記台帳
     adapter_kind      TEXT NOT NULL,     -- 'markdownize' | 'embedding' | ...
     input_hash        TEXT NOT NULL,     -- §5.5 のタスク同一性キーと同じ組
     tool_profile_hash TEXT NOT NULL,
-    submission_seq    INTEGER NOT NULL,  -- 投入の通算連番 (管理は batch_requests 側 — §5.8)
+    submission_seq    INTEGER NOT NULL,  -- 投入の通算連番。**新しい外部投入の開始 (相 1) ごとに
+                                         --  MAX+1 を採番** — 同一 attempt の回復中は不変 (§5.8)
     batch_job_id      TEXT NOT NULL,     -- 値規則: 実 job id。job id 不明の記帳 (期限超・abandon) は
-                                         --  当該 intent_token (§5.8 の記帳済み判別の突合キー)
-    usd               REAL,              -- NULL = 額不明 (estimated=1 と対で使う)
+                                         --  当該 intent_token (§5.8 の記帳済み判別の突合キー)。
+                                         --  sync 呼出 (Batch 非対応 provider) は provider request id、
+                                         --  無ければ当該 attempt の intent_token
+    usd               REAL NOT NULL,     -- estimated=1 の行は保守的な推定額 (NULL 禁止 — SUM が
+                                         --  NULL を無視すると budget 判定が過少 = 安全側の逆になる)
     estimated         INTEGER NOT NULL DEFAULT 0 CHECK (estimated IN (0, 1)),
     month             TEXT NOT NULL,     -- 'YYYY-MM' (確定月配賦 — cap 集計キー)
     recorded_at       INTEGER NOT NULL,  -- UTC ミリ秒
@@ -664,7 +675,7 @@ CREATE TABLE batch_requests (            -- in-flight Batch intent の正本 (§
 - `kcs batch resume --override-budget` で明示的に再開可能 (当月の device cap / folder cap の両方を無視して再開する)。override は markdownize / embedding **両 Adapter の budget 判定に対称に**効く。override 無しの `kcs batch resume` は budget 超過 pause タスクを markdownize / embedding いずれも据え置き (sticky)、他要因の pause のみ再開する
 - ローカル LLM 利用時は単価 0 として記録 (= cap に効かない)
 
-**resume / retry / reindex が駆動する enrichment**: `kcs batch resume` / `kcs batch retry` は online markdownize タスクに加え、**embedding enrichment パスも駆動する** (embedding タスクは現行世代の live chunk 集合から DB 駆動で再検出される。opt-in は Adapter 単位 = embedding は自身の承認行を見る、[07-adapter-spec.md §3](07-adapter-spec.md))。同様に `kcs reindex --force` / `kcs repair --rebuild-db` は rebuild 後に enrichment を実行し、新世代 chunk の embedding を追随させる (§4.6)。offline なら embedding タスクを enqueue のみとし `index_status` ([05-runtime.md §1.7](05-runtime.md)) に pending として可視化する。retry の失敗タスクは backoff / retry 予算 (§5.3) を尊重し、`next_retry_at` 未来または非 retryable の embedding タスクを持つ chunk は enrichment 対象から除外する
+**resume / retry / reindex が駆動する enrichment**: `kcs batch resume` / `kcs batch retry` は online markdownize タスクに加え、**embedding enrichment パスも駆動する** (embedding タスクは現行世代の live chunk 集合から DB 駆動で再検出される。opt-in は Adapter 単位 = embedding は自身の承認行を見る、[07-adapter-spec.md §3](07-adapter-spec.md))。同様に `kcs reindex --force` / `kcs repair --rebuild-db` は rebuild 後に enrichment を実行し、新世代 chunk の embedding を追随させる (§4.6)。offline なら embedding タスクを enqueue のみとし `index_status` ([05-runtime.md §1.7](05-runtime.md)) に pending として可視化する。retry の失敗タスクは backoff / retry 予算 (§5.3) を尊重し、`next_retry_at` 未来または非 retryable の embedding タスクを持つ chunk は enrichment 対象から除外する。**`kcs batch resume` / `retry` / `kcs reindex --force` がオンライン成果 (normalized / chunk) を finalize したときも、`kcs index` 完了時と同じ auto snapshot ([05-runtime.md §8.1](05-runtime.md)) を作成する** — これが無いと完成した成果が次回 `kcs index` まで検索に現れない (chunk の検索対象化は auto snapshot 後 — [05-runtime.md §1.6](05-runtime.md))
 
 ## 5.5 冪等性
 
@@ -738,7 +749,7 @@ collect」の各段の間にクラッシュ窓があり、provider 側に課金�
 **記録の正本**: `cost-ledger.sqlite` の `batch_requests` 行 (DDL は §5.4 が SQL 正本)。tasks.jsonl は
 喪失許容 (§5.7) のため、in-flight Batch の回復は batch_requests だけで可能でなければならない。各段の
 記録は同 DB の単一 Tx で行う。cost-ledger.sqlite ごと喪失した場合の最終回収線は、provider job 一覧の
-metadata から intent_token 規約に一致する job を全走査することである (帰属は token の埋込が担う)。
+metadata から intent_token 規約に一致する job を全走査することである (帰属は metadata の (scope_id, adapter_kind, input_hash, tool_profile_hash) と出力 JSONL の custom_id が担う — 新規 UUIDv7 の token 単独では帰属できない)。tasks.jsonl の task 記述子 (mode / unit_keys / output_ref) は喪失しうるが、**確定先と対象 unit は決定論的に再導出できる**: 出力の取り込み先はタスクキー (input_hash = raw、tool_profile_hash) と gen 規則から、対象 unit は provider 出力 JSONL の custom_id (= unit_key) から復元し、mode が不明な場合は full として扱う (§5.7 の安全側規定と同型)。
 
 手順 (1 job 単位):
 
@@ -746,14 +757,20 @@ metadata から intent_token 規約に一致する job を全走査すること�
    UUIDv7** — 時刻成分を回復期限の起点に使う、estimated_usd = 予約額)。再投入 (retry /
    `kcs reindex --force`) で相 1 を再発行する場合、**同じ UPDATE で upload_id / batch_job_id /
    job_create_started_at / provider_scope_id / error / completed_at を NULL へ戻す** (残存させると
-   下記の照合・猶予起点が旧 attempt の値で誤判定する)。行を再作成する場合の submission_seq は
-   cost_ledger 同キーの MAX から継承する (§5.4 DDL)
-2. **相 2a — upload**: 入力・中間ファイル (JSONL 等) の filename に intent_token を埋め込んで upload し、
+   下記の照合・猶予起点が旧 attempt の値で誤判定する)。**submission_seq はこの相 1 で必ず
+   MAX + 1 へ採番する** (基準 = cost_ledger 同キーの MAX と自行現値の大きい方。同一 attempt の
+   回復・再開では変えない。採番を怠ると、次の実課金記帳が旧 attempt の seq と UNIQUE 衝突して
+   ON CONFLICT DO NOTHING に黙って吸収される — 行再作成時も同じ規則)
+2. **相 2a — upload**: upload の**直前に `provider_scope_id` を行へ記録する** (これから呼び出す
+   client instance から取得。相 2b まで遅らせると upload 後のクラッシュで残骸の存在する scope を
+   再特定できない)。入力・中間ファイル (JSONL 等) の filename に intent_token を埋め込んで upload し、
    **成功直後に upload_id を行へ記録**する (job 作成が失敗しても残骸の handle を失わない)
-3. **相 2b — job 作成**: 呼出の**直前**に `job_create_started_at = now` と `provider_scope_id`
-   ([07-adapter-spec.md §5.7](07-adapter-spec.md) — **これから呼び出す client instance から取得し、
-   job 作成も同一 instance で行う**。記録後に設定を再読みしない) を**単独の小 Tx**で行へ記録し、
-   job metadata に intent_token を埋め込んで作成 → 成功後に batch_job_id と state=1 を記録する
+3. **相 2b — job 作成**: 呼出の**直前**に `job_create_started_at = now` を**単独の小 Tx**で行へ記録する
+   (`provider_scope_id` は相 2a で記録済み — **job 作成は同一 client instance で行い、記録後に設定を
+   再読みしない。現 instance の scope が記録値と一致しない場合は呼び出さず、旧 upload を掃除して
+   相 2a からやり直す** — [07-adapter-spec.md §5.7](07-adapter-spec.md))。job metadata に
+   **intent_token と (scope_id, adapter_kind, input_hash, tool_profile_hash)** を埋め込んで作成 →
+   成功後に batch_job_id と state=1 を記録する
 4. **相 3 — collect**: 出力の取得・persist 後、確定課金の cost_ledger 記帳と state=2 + completed_at を
    **同一 Tx** で行い、upload を削除する (**404 = 削除成功**として扱う。削除失敗・クラッシュは次回回復が
    再試行し、**全削除の完了をもって intent_token を NULL 化**する)
@@ -762,11 +779,16 @@ metadata から intent_token 規約に一致する job を全走査すること�
 記帳前の「記帳済み判別」は同一タスクキー × **batch_job_id IN (発見 job id, 当該 intent_token)** の
 既存行で行う (token キーで estimated 記帳 → 後日 job id で確定、の順で同一 job が 2 行にならない)。
 job id 不明の記帳 (期限超・abandon) は **submission_seq を +1 へ行 UPDATE し、その新値で token キー・
-usd NULL の estimated 行を記帳する** (seq 現値のまま記帳すると、次の正規 close が同じ seq を計算して
-UNIQUE 衝突し、実課金が DO NOTHING に黙って吸収される)。
+usd = 行の estimated_usd (保守推定額 — NULL 禁止) の estimated 行を記帳する** (seq 現値のまま記帳すると、次の正規 close が同じ seq を計算して
+UNIQUE 衝突し、実課金が DO NOTHING に黙って吸収される)。**estimated 行は当該 attempt の最終記録であり、
+後日 job が確認できても書き換え・確定し直しはしない** (UPDATE 禁止と整合。二重計上は記帳済み判別が
+防ぎ、実額との差は既知の有界誤差として受容する)。
 
-**回復** (書き込み系 batch コマンド — `kcs index` / `kcs batch resume` / `kcs batch retry` — の冒頭で、
-未終端の行 (state 0/1) と intent_token 非 NULL の終端行 (= 残骸掃除未完) を三値で照合する):
+**回復** (書き込み系 batch コマンド — `kcs index` / `kcs batch resume` / `kcs batch retry` /
+`kcs batch abandon` — の冒頭。**これらと `kcs reindex` は `.kcs/.lock` を取得する書き込み系であり
+([05-runtime.md §6](05-runtime.md))、相 1〜2b の遷移・token の発行も lock 保持下で行う** — 並行する
+resume/retry が同一行へ別 token を書くと、先行 job が無記録 in-flight になる。未終端の行 (state 0/1) と
+intent_token 非 NULL の終端行 (= 残骸掃除未完) を三値で照合する):
 
 - **found** (job 取得/一覧で intent_token 一致): 追跡を続行し相 3 へ。batch_job_id 未記録なら発見値を
   行へ書く (自己記述化 — 以後この行は token 照合の対象から外れる)
@@ -776,10 +798,12 @@ UNIQUE 衝突し、実課金が DO NOTHING に黙って吸収される)。
   対象にしない** — job 不存在は記録から確定しており、token 時刻起点の猶予経過で再投入してよい
 - **unknown** (照会失敗・scope 不一致・部分応答): 何も変更せず保持し、次回再試行する。**回復期限**
   (max(intent_token 時刻, job_create_started_at) + 既定 48h、config で変更可) を超えたら「作成されたが
-  確認不能」として **estimated 記帳** (上記の seq+1 行 UPDATE + token キー) を冪等に行ってから再投入する
+  確認不能」として **estimated 記帳** (上記の seq+1 行 UPDATE + token キー + usd = 推定額) を冪等に行ってから再投入する
   (記録喪失より過大計上を許容 — budget 判定は安全側に倒れる)
-- **恒久 unknown** (資格情報喪失等) の行は `kcs status` に **stalled** として表示し、
-  `kcs batch abandon` ([06-cli-spec.md §1](06-cli-spec.md)) を脱出路とする: ユーザー確認で estimated
+- **恒久 unknown** (資格情報喪失等) の行は `kcs status` に **stalled** として表示し (表示には
+  intent_token を含める)、`kcs batch abandon` ([06-cli-spec.md §1](06-cli-spec.md) — **指定子は
+  intent_token または (scope, adapter, input_hash) のタスクキー**。tasks.jsonl の task_id は喪失許容の
+  識別子であり、正本 batch_requests 行を指す手段にならない) を脱出路とする: ユーザー確認で estimated
   記帳 + state=3 (error='abandoned') + completed_at。**intent_token は残骸掃除の完了まで NULL 化しない**
   (intent_token 埋込 filename が upload 残骸の唯一の発見キーであるため、先に消すと掃除が残骸を発見
   できず provider TTL まで機密が残留する。掃除の完了 (404 含む) が NULL 化の条件。恒久に掃除できない

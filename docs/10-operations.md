@@ -264,7 +264,9 @@ CREATE TABLE scopes (
 - upsert は `(scope_id, kcs_path)` を key に行い、`indexed` は単調 (MAX) にのみ更新する
 - **stale 登録の退役**: `.kcs` を削除して同じ path で `init` し直すと新しい `scope_id` が採番される
   (scope_id は init 時採番の ULID、[03-data-model.md §2](03-data-model.md))。upsert の直前に、同一
-  `kcs_path` で `scope_id` が異なる行を削除する。放置すると横断検索が同一文書を dead scope_id 経由で
+  `kcs_path` で `scope_id` が異なる行を削除する。**逆方向 (scope の移動) も同様に退役する**: 同一
+  `scope_id` を新しい `kcs_path` で観測 (再発見) したら、同一 scope_id の旧 path 行を削除する —
+  放置すると default 横断検索が旧 path の stale scope を毎回 skip し恒常的に exit 3 になる。放置すると横断検索が同一文書を dead scope_id 経由で
   二重に返し、その Evidence Pointer は `KCS-E-EVIDENCE-SCOPE-UNREACHABLE-001` で解決不能になる。
   registry は cache なので削除は常に安全 (live scope は自分を再登録する)
 - device data dir (`~/.local/share/kcs/`) は owner-only (0700) に制限する (best-effort。非 unix は
@@ -302,16 +304,23 @@ kcs index は対象ファイルや子scopeを発見した時点で必要な .kcs
 履歴やobjectを持たない .kcs は repair / cleanup で整理可能にする
 ```
 
-実装前に方針を明示すべき境界:
+走査境界の既定 (2026-07-18 確定 — いずれも安全側。緩和は config で明示的に行う):
 
 ```text
-symlink
-hardlink
-外部ドライブ
-クラウドストレージの placeholder file
-権限のないフォルダ
-hidden directory
-system directory
+symlink               lstat 基準で検出し、**追跡しない** (skip + status 表示)。scope 外への
+                      参照・循環を構造的に排除する
+hardlink              通常ファイルとして扱う (同一 inode でも path ごとに別実体 — dedup は
+                      content hash が自然に吸収する)
+外部ドライブ          mount 済みなら通常フォルダと同じ。unmount 中の path は missing 扱い
+                      ([03-data-model.md §8](03-data-model.md) の files status)
+クラウド placeholder  内容を hydrate しない (placeholder のまま skip + status 表示 —
+                      勝手なダウンロードで帯域・容量を消費しない)
+権限のないフォルダ    fail-closed: skip + status 表示 (エラーで走査全体を止めない)
+hidden directory      OS の hidden 属性・dotfile は通常どおり対象 (除外は .kcsignore / Tier A で
+                      行う — 隠しであることは機微性の根拠にしない)
+system directory      built-in ignore (Tier A 相当) に含め既定除外
+.kcs 自身             ignore 評価より前に必ず prune (自己再帰の禁止)
+VCS リポジトリ root   既定で子 .kcs を生成しない ([03-data-model.md §3](03-data-model.md))
 ```
 
 ---
@@ -374,9 +383,12 @@ Future:
 
 # 7. Purge の保証範囲
 
-`purge` は、KCS 管理下の object store、snapshot DAG、index、pack、cache、tombstone、
+`purge` は、KCS 管理下の object store (本文 bytes と派生 artifact)、index、pack、cache、
 および KCS 自身のログ (`.kcs/logs/access.jsonl`、`~/.local/share/kcs/logs/` の
 events / errors / metrics) から対象ファイル由来の情報を削除する操作である。
+**snapshot DAG (commit / tree object) は書き換えない** — tree entry のメタデータ (path, raw_hash) は
+履歴に残る (正本 [05-runtime.md §3.5](05-runtime.md)。完全な履歴書き換えは v2+/Phase 4+ —
+[06-cli-spec.md §6](06-cli-spec.md))。
 ログについては、対象の raw_hash / path / query を含む行の削除またはフィールドマスクを行う。
 `redact_logs` デフォルト true (§12.6) の運用では query / path / prompt は元から記録されないため、
 実務上のスクラブ対象は主に raw_hash 参照行に限られ軽量である。
@@ -460,7 +472,11 @@ MVP では手動実行のみとする。自動定期検証 (スケジューラ�
 
 ```text
 1. .kcs ディレクトリごとのコピー (MVP の推奨手段)
-   - コピー中に kcs が書き込まないこと (.kcs/.lock 未取得状態) を確認してから行う
+   - コピー中に kcs が書き込まないこと (.kcs/.lock 未取得状態) を確認してから行う。
+     **注意: この確認は check-then-act であり、確認とコピーの間の書き込みまでは防げない** —
+     コピー中に kcs コマンドを実行しないことがユーザー前提。厳密な原子性が必要なら
+     filesystem スナップショット (APFS/btrfs 等) 上でコピーする。復元後は
+     `kcs repair --verify-objects` (§7.5.1) を必ず実行して整合を確認する
    - sqlite.db は repair --rebuild-db で再構築可能なため、最悪 objects/ と refs/ が
      保全されていれば復旧できる
 
@@ -622,7 +638,6 @@ Adapter が `incremental_update` capability を宣言しない場合は、KCS �
 enabled = true
 threshold = 0.30
 max_consecutive = 5
-include_neighbors = 1
 ```
 
 ---
@@ -649,7 +664,7 @@ done criteria                    → 09-mvp-scope.md
 
 ```text
 .kcsignore spec                  → 03-data-model.md §11.1 に追記済み (2026-07-03)
-Normalized Markdown 形式 spec     → 07-adapter-spec.md へ追記予定
+Normalized Markdown 形式 spec     → 07-adapter-spec.md §5.2.1 に最小凍結済み (2026-07-18)
 ```
 
 特に object hash 算出、Evidence Pointer、Normalized Markdown の決定性、purge 後の到達不能性は、実装後に変えると互換性コストが高い。
@@ -675,6 +690,7 @@ DOMAIN:
   EVIDENCE Evidence Pointer 解決 / verify / retarget
   SYNC     同期・共有 (v2 予約。MVP では発行しない)
   ADAPTER  Adapter ロード・実行
+  EMBED    embedding profile / modality 検証 (KCS-E-EMBED-MODALITY-001 — [03-data-model.md §7](03-data-model.md))
   CONFIG   config / schema / 設定
   STORE    object store / fs IO
   AUTH     認証・認可
@@ -724,7 +740,7 @@ validation 失敗は exit code 2 で停止し、`KCS-E-CONFIG-SCHEMA-NNN` を返
 
 ## 12.4 時刻・タイムゾーン
 
-すべての永続データ (commit timestamps, normalization_runs, access_events, snapshot lineage 等) の時刻は **UTC ISO8601 拡張形式 + suffix `Z`** に固定する。
+すべての永続データ (commit timestamps, normalization_runs, access_events, snapshot lineage 等) の時刻は **UTC ISO8601 拡張形式 + suffix `Z`** に固定する。**例外 = SQLite ストアの内部時刻列** (cost-ledger.sqlite の recorded_at / job_create_started_at / completed_at / created_at — [04-pipeline.md §5.4](04-pipeline.md)): SQL での比較・期限演算のため **UTC epoch ミリ秒の INTEGER** を正とする (JSON / JSONL / UI 境界へ出す際に ISO8601+Z へ変換する)。
 
 ```text
 正:   2026-04-25T12:00:00Z
@@ -783,7 +799,7 @@ errors.jsonl       error_code 付きの全エラー
 ```text
 ts        UTC ISO8601 (§12.4)
 level     debug | info | warn | error
-code      error_code または event_code
+code      error_code (KCS-E-) / event_code (KCS-EV-) / metric_code (KCS-M- — [05-runtime.md §7](05-runtime.md))
 component batch | search | commit | gc | ...
 message   人間可読な短文
 context   任意の JSON object (tool_profile_hash, commit_hash, file_id 等)

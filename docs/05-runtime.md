@@ -116,7 +116,12 @@ kcs search "..." --limit 20 --cursor <token>    # snapshot 越し安全
 ページングは「確定順序 (§1.4) の決定論的再計算」で実現する。cursor に MMR の selected 集合や score は持たない。レスポンスに `next_cursor` を含める。本節の定義は単一 scope 内の sub-cursor であり、複数 scope 横断時の cursor 全体構造 (opaque token、`scope_mode` / `query_hash`) は §1.8 で定義する。
 
 scope ごとの sub-cursor は
-`{scope_id, snapshot_commit, max_rowid, max_association_rowid, chunking_config_hash, consumed}`。
+`{scope_id, snapshot_commit, index_generation, max_rowid, max_association_rowid, chunking_config_hash, consumed}`。
+`index_generation` は sqlite.db の再構築 (`kcs repair --rebuild-db`) と purge のたびに単調増加する
+世代番号 (sqlite.db 内に保持)。**replay 時に現在値と不一致なら `KCS-E-SEARCH-CURSOR-001` で拒否する** —
+rebuild は rowid を再採番し、purge は append-only 前提を破って行を物理削除するため、旧 cursor の
+`max_rowid` / `consumed` は意味を失う (再検索が正)。後発 embedding (enrichment) は候補集合を変えうるが、
+rowid 固定 (`max_rowid`) により page 間の chunk 集合は不変 — 順位は cursor 発行時点の集合で再計算される。
 token 全体には canonical `time_travel` selector を、`--since` ではさらに
 page 1 の `since_cutoff` (UTC ISO8601 + `Z`) も保持する:
 
@@ -391,13 +396,12 @@ M3-1 の p95 < 5 秒 ([09-mvp-scope.md §4.1](09-mvp-scope.md)) は **20 scopes 
 
 ## 2.1 commit_type 永続 enum
 
-`commit_type` は **永久に変更しない契約**。SQLite CHECK 制約で固定:
+`commit_type` は **永久に変更しない契約**。commit は CAS JSON object であり SQLite に commit 表は
+存在しないため ([04-pipeline.md §4.4](04-pipeline.md))、**enum の強制点は commit object の schema
+検証 (publication 時の loader)** である。値域 (JSON Schema enum 相当):
 
-```sql
-commit_type TEXT NOT NULL CHECK (commit_type IN (
-  'manual', 'auto', 'imported', 'migrated',
-  'repaired', 'merged', 'purged'
-))
+```text
+commit_type ∈ { 'manual', 'auto', 'imported', 'migrated', 'repaired', 'merged', 'purged' }
 ```
 
 | type | 用途 | protected | GC policy |
@@ -491,7 +495,9 @@ keep_repaired_per_branch = 5
 GC (tiered retention / `kcs gc --prune-unreachable` を含む) が削除してよいもの:
 
 ```text
-- tree object (shallow 化対象 commit のもの)
+- tree object (shallow 化対象 commit のもの。**ただし同一 tree hash を非 shallow の commit が参照して
+  いる場合は削除しない** — tree は content hash 共有されるため、reachability 確認 (全非 shallow commit
+  からの参照 0) が削除の前提)
 - SQLite index / FTS など objects/ から再構築可能な cache
 - どの commit からも参照されない中間 object (中断した index が残した prepared 等)
 ```
@@ -576,9 +582,12 @@ purge は **object の物理削除 + default tombstone または内部 erase rec
 
 ```text
 - raw object 本体 (objects/raw/ab/cd/<raw64>)
-- 派生 artifact: prepared / normalized / chunk / embedding
-  (normalized は同一 (raw_hash, tool_profile_hash) 配下の全 gen instance を対象とする)
-- SQLite の chunks / embeddings 行と FTS エントリ
+- 派生 artifact: prepared / **image** / normalized / chunk / embedding
+  (normalized は同一 (raw_hash, tool_profile_hash) 配下の全 gen instance を対象とする。
+   **共有されうる派生 (image / embedding — text_hash 単位で他 raw の chunk と共有) は、purge 対象外の
+   live 参照が 0 の場合のみ物理削除する** — 無条件削除は非対象文書の検索を破壊する)
+- SQLite の chunks / chunk_config_generations / chunk_vec / embeddings 行と FTS エントリ
+- chunks.jsonl の対象 chunk 行 (append-only の例外 — purge は法務要件の明示例外として行を落とす)
 ```
 
 残すもの (不変):
@@ -597,6 +606,26 @@ purge は **object の物理削除 + default tombstone または内部 erase rec
 ```text
 - commit_type=purged の新 commit (purge 実行後の working tree を指す)
 ```
+
+**purge journal (クラッシュ安全の正本)**: purge は複数ストア (objects / SQLite / chunks.jsonl / logs /
+tombstone / commit) を跨ぐ破壊操作のため、**mutation 前に `.kcs/purge/journal` へ対象 closure と
+phase を耐久記録し (fsync + atomic rename — [04-pipeline.md §1.1](04-pipeline.md) と同じ書込規律)、
+各 phase を冪等に再開できる**ようにする:
+
+```text
+journal record = { purge_id (ULID), raw_hash 群, reason, phase }
+phase 順序    = prepared (closure 確定・記帳)
+              → tombstoned (tombstone / erase receipt を先に耐久化 — 削除より前)
+              → deleted (objects / SQLite / chunks.jsonl / logs の冪等削除)
+              → committed (commit_type=purged の publication)
+              → done (journal 除去)
+クラッシュ回復 = 次回の書き込み系コマンド冒頭で journal を検出したら、記録 phase から再開する
+              (各 phase は再実行安全)。journal が active な間の fsck は incomplete (exit 3 —
+              [10-operations.md §7.5.1](10-operations.md))
+```
+
+tombstone を削除より先に耐久化するのは、「対象 object が消えたのに purge の痕跡が無い」状態
+(corruption と区別不能な markerless absence) を作らないためである。
 
 tombstone は raw_hash をキーとする JSON レコードで、CAS object ではないため `objects/` の外に置く。
 物理 leaf の `<raw64>` は論理 `raw_hash` から `sha256:` を除いた 64 文字の小文字 hex であり、
@@ -682,8 +711,13 @@ KCS は **常駐 daemon を持たない**。すべての処理は CLI コマン�
 
 ```text
 kcs index / kcs snapshot (= kcs commit) / kcs tag (refs/tags-v1 更新) / kcs gc / kcs purge /
-kcs repair --rebuild-db / kcs repair --verify-objects / kcs move --accept
+kcs repair --rebuild-db / kcs repair --verify-objects / kcs move --accept /
+kcs batch resume / kcs batch retry / kcs batch abandon / kcs reindex
 ```
+
+batch 系と reindex は外部副作用 (upload / job 作成) と batch_requests の状態遷移を伴うため lock 必須
+([04-pipeline.md §5.8](04-pipeline.md) — 並行 resume が同一行へ別 intent_token を書くと先行 job が
+無記録 in-flight になる)。
 
 規約:
 
@@ -692,7 +726,7 @@ kcs repair --rebuild-db / kcs repair --verify-objects / kcs move --accept
 - refs (refs/heads/main, canonical refs/tags-v1/*) の更新は `.kcs/.lock` 保持下で、temp file 書き込み + atomic rename により行う (部分書き込みを外部に見せない)。legacy refs/tags/* は read-only compatibility とする
 - `kcs repair --verify-objects` の raw object 復旧と repaired commit publication も、同じ lock の下で private temp + hash 再検証 + atomic publish を使う
 - `kcs repair --rebuild-db` 実行中の `kcs search` は、再構築完了までの間旧 sqlite.db (存在すれば) を読むか、`KCS-E-INDEX-REBUILDING-001` を返す。再構築の完了も atomic rename (sqlite.db.tmp → sqlite.db) で切り替える
-- scope-registry.sqlite / cost-ledger.sqlite (~/.local/share/kcs/) は WAL モード + busy_timeout (デフォルト 5000ms) で複数プロセスの同時書き込みを直列化する。registry は cache であり ([03-data-model.md §4](03-data-model.md))、破損時は各 `.kcs` の rescan で再構築する。cost-ledger.sqlite は**再構築不可の運用台帳** ([03-data-model.md §4.1](03-data-model.md) / [04-pipeline.md §5.4](04-pipeline.md))
+- scope-registry.sqlite / cost-ledger.sqlite (~/.local/share/kcs/) は WAL モード + busy_timeout (デフォルト 5000ms) で複数プロセスの同時書き込みを直列化する。registry は cache であり ([03-data-model.md §4](03-data-model.md))、破損時は各 `.kcs` の rescan で再構築する (**再構築の入力はユーザーが知る探索 root** — registry 喪失後は `.kcs` の所在一覧も失われるため、各 root での `kcs index` 再実行が再登録を兼ねる。KCS が自力で全ディスクを走査することはしない)。cost-ledger.sqlite は**再構築不可の運用台帳** ([03-data-model.md §4.1](03-data-model.md) / [04-pipeline.md §5.4](04-pipeline.md))
 - purge の log scrub と通常 append/rotation は、device logs では `$XDG_DATA_HOME/kcs/logs/scrub.lock`、scope access logs では `.kcs/logs/access.scrub.lock` を共有する。複合 lock 順序は scope store → cost-ledger.sqlite (Tx) → device observability → scope access とし、逆順取得を禁止する
 
 # 7. 観測 (Observability)
@@ -718,6 +752,7 @@ MVP での snapshot 生成契機は次の 2 つのみ (常駐プロセスは持�
 
 1. 明示的 `kcs snapshot` / `kcs commit` (commit_type=manual)
 2. `kcs index` の成功完了時に同一プロセス内で auto snapshot を作る (commit_type=auto)。ただし tree_hash が現在の HEAD の tree と一致する場合は commit を作らない (no-op、[03-data-model.md §8.2](03-data-model.md))
+3. `kcs batch resume` / `kcs batch retry` / `kcs reindex --force` がオンライン成果 (normalized / chunk) を finalize した成功完了時も同様に auto snapshot を作る ([04-pipeline.md §5.4](04-pipeline.md) — これが無いと後着の成果が次回 `kcs index` まで検索対象にならない §1.6)
 
 ## 8.2 定期 Auto Snapshot (Phase 4 範囲)
 

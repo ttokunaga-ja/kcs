@@ -19,7 +19,10 @@ kcs index [--preview|--approve|--yes] [--online|--offline]  # 取り込み (初�
 kcs batch resume [--override-budget]    # 中断タスクの再開 (budget 超過 pause は --override-budget 必須。04-pipeline.md §5.4/§5.7)。
                                         # markdownize online タスクと embedding enrichment パスを両方駆動 (04-pipeline.md §5.4)
 kcs batch retry                         # failed タスクの再試行 (markdownize + embedding。backoff/retry 予算を尊重)
-kcs batch abandon <task_id>             # 照合が恒久不能な in-flight Batch job の打ち切り (estimated 記帳 + terminal 化。
+kcs batch abandon <intent_token|scope/adapter/input_hash>
+                                        # 照合が恒久不能な in-flight Batch job の打ち切り (estimated 記帳 + terminal 化。
+                                        # 指定子は intent_token または batch_requests のタスクキー — tasks.jsonl の
+                                        # task_id は喪失許容のため使わない。kcs status が stalled 行の token を表示。
                                         # 確認プロンプト必須。残骸掃除完了まで intent_token は保持 — 04-pipeline.md §5.8)
 kcs repair [--rebuild-db|--verify-objects]  # SQLite 再構築 / CAS 整合性検証 (10-operations.md §7.5)
 kcs commit -m "<message>"               # = kcs snapshot create -m
@@ -215,7 +218,7 @@ purge は常に**全履歴**の raw 本文・派生 artifact を対象とする 
 0   成功 / 全 up_to_date
 1   汎用 failure (詳細不明)
 2   invalid usage / config 不正 / schema validation 失敗
-3   一部失敗 (retryable 残あり)
+3   retryable な失敗が残っている (部分成功を含む。lock 取得失敗のような全体 retryable もここ)
 4   全失敗 permanent
 5   auth_error (user action 必要)
 6   budget_exceeded により paused
@@ -256,6 +259,7 @@ DOMAIN:
   EVIDENCE Evidence Pointer 解決 / verify / retarget
   SYNC     同期・共有 (v2 予約。MVP では発行しない)
   ADAPTER  Adapter ロード・実行
+  EMBED    embedding profile / modality 検証
   CONFIG   config / schema / 設定
   STORE    object store / fs IO
   AUTH     認証・認可

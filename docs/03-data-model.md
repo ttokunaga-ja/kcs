@@ -53,6 +53,9 @@ raw / prepared / image / chunk / embedding / tree / commit は **CAS object** �
     tags/<logical-name>             # legacy Unix raw-name refs (read-only compatibility)
   tombstones/ab/cd/<raw64>      purge の tombstone 記録 (05-runtime.md §3.5。CAS object ではない)
   tasks.jsonl         batch タスクストア (04-pipeline.md §5.1。append-only の運用データ、SQLite 非採用)
+  chunks.jsonl        chunk association ledger (**truth** — chunk object が持たない世代 association の正本。
+                      各行 = {chunk_id, chunking_config_hash, created_at, first_seen_commit}。append-only、
+                      SQLite rebuild の入力 — 04-pipeline.md §4.1/§4.6、本書 §8)
   index/
     sqlite.db         FTS5 + sqlite-vec (query acceleration layer; 真実は objects/)
   logs/
@@ -91,7 +94,7 @@ fallback で読み、canonical と legacy
 Windows で物理 leaf にできない既存 Unix 名も read/inspect は可能とし、restore 等の物理化直前に
 対象 OS の規則を別途検証する。
 
-**format_version**: 旧称 `VERSION 0.1.0` (旧 research/kcs.md) は `kcs_format_version` に統一。semver は [10-operations.md §12.5](10-operations.md) 参照。
+**format_version**: 旧称 `VERSION 0.1.0` (旧 research/kcs.md) は `kcs_format_version` に統一。semver は [10-operations.md §12.5](10-operations.md) 参照。**保存場所 = `.kcs/scope.json` の `kcs_format_version` フィールド** (init 時に記録し migration でのみ更新。読めない・欠落した store は旧版とみなし read-only + migration 誘導 — 互換判定の入力)。
 
 ## 2.1 normalized instance と全文 view
 
@@ -192,7 +195,7 @@ view の存在は使わない。
 各 `.kcs` が管理するのは **その `.kcs` が配置されたフォルダ直下のファイルのみ** である。この規則は次の 3 点で一意に定まる:
 
 1. 管理対象は scope フォルダ **直下** のファイルに限る。サブフォルダ配下のファイルは、そのサブフォルダに `.kcs` が存在するか否かに関わらず、親 `.kcs` の管理対象に **ならない** (再帰包含は行わない)。
-2. サブフォルダは常に独立スコープの候補である。対象ファイルを含むサブフォルダには `kcs index` が子 `.kcs` を生成する ([06-cli-spec.md §1](06-cli-spec.md), [10-operations.md §4](10-operations.md))。ignore されたサブツリーには子 `.kcs` を生成しない。
+2. サブフォルダは常に独立スコープの候補である。対象ファイルを含むサブフォルダには `kcs index` が子 `.kcs` を生成する ([06-cli-spec.md §1](06-cli-spec.md), [10-operations.md §4](10-operations.md))。ignore されたサブツリーには子 `.kcs` を生成しない。**VCS リポジトリ root (`.git` 等の VCS 管理ディレクトリを持つフォルダ) とその配下にも既定では子 `.kcs` を生成しない** (skip + status 表示。`[scope] index_vcs_repos = true` で opt-in) — リポジトリの履歴は VCS 自身が持ち、`.kcs` の自動生成はリポジトリを汚す ([01-positioning.md §8](01-positioning.md) の方針の機械化)。
 3. したがって tree entry の `path`、Evidence Pointer の `path_at_commit`、task の `input_path` は **パス区切り (`/`) を含まないファイル名** である。`/` を含む path を持つ tree / pointer は schema violation (`KCS-E-STORE-PATH-001`) として拒否する。
 
 ファイルの位置は `scope_path` (正本 `.kcs` の絶対パス) + ファイル名で一意に表現される。「フォルダ木を横断してファイルを探す」体験は、個々の `.kcs` の再帰包含ではなく scope_registry を使った横断検索 ([05-runtime.md §1.8](05-runtime.md)) が担う。
@@ -235,6 +238,7 @@ cache = scope_registry / aggregator 検索の探索対象一覧 / stale 検出 /
 | `.kcs/logs/access.jsonl` | JSONL (append-only) | **truth** (access_events の正本) | 復旧不能 | §2 |
 | `.kcs/manifest.json` | JSON (schema 検証) | working-state cache (永続的真実は tree/commit object) | rescan で再構築 | §8 files |
 | `.kcs/tasks.jsonl` | JSONL (append-only) | 運用データ | 喪失許容 ([04-pipeline.md §5.7](04-pipeline.md)) | [04-pipeline.md §5.1](04-pipeline.md) |
+| `.kcs/chunks.jsonl` | JSONL (append-only) | **truth** (chunk の世代 association / created_at / first_seen_commit — chunk object には含めない §8) | 復旧不能 (SQLite rebuild の入力) | §8 / [04-pipeline.md §4.1](04-pipeline.md) |
 | `.kcs/index/sqlite.db` | **SQLite** (chunks / chunk_config_generations / chunk_fts / embeddings / chunk_vec / tree_entries の 6 表) | cache | `kcs repair --rebuild-db` | [04-pipeline.md §4](04-pipeline.md) |
 | `~/.local/share/kcs/scope-registry.sqlite` | **SQLite** (`scopes` 1 表) | cache | 各 `.kcs` の rescan | [10-operations.md §3](10-operations.md) |
 | `~/.local/share/kcs/cost-ledger.sqlite` | **SQLite** (`cost_ledger` / `batch_requests` の 2 表、WAL) | 運用データ (課金台帳 + **in-flight Batch intent の正本** — [04-pipeline.md §5.8](04-pipeline.md)。tasks.jsonl と異なり喪失許容ではない) | 確定課金は再構築不可 (Adapter 報告値の記録であり再導出元がない)。in-flight は provider job 一覧の intent_token 全走査で回収 | [04-pipeline.md §5.4](04-pipeline.md) (SQL 正本) |
@@ -272,6 +276,8 @@ prompt_template_id    KCS が管理する prompt 識別子
 prompt_template_hash  prompt 本文を canonical 化した sha256
 sampling              {temperature, top_p, top_k, max_tokens, seed}
 output_schema         期待する Markdown / JSON schema id とバージョン
+render_params         prepare 専用: {renderer_name, renderer_version, dpi, color_space, output_format}
+                      (バイト列決定性に影響する全レンダリング設定 — [04-pipeline.md §2.1](04-pipeline.md))
 dimensions / distance / modality   embedding 専用
 runtime_kind          "cloud" | "local" (capability レベル)
 spec_version          この計算規約自体のバージョン
@@ -347,6 +353,8 @@ inst = latest_instance(current_raw_hash, current_tool_profile_hash)
        # objects/normalized_units/ 配下の最大 gen の manifest (§2.1)
 if inst is None:
     pending
+elif all(u.status == "failed" for u in inst.units):
+    failed           # 全滅 — retryable (04-pipeline.md §5.2 の failed → pending と同じ扱い)
 elif any(u.status == "failed" for u in inst.units):
     partial          # 成功 unit は検索対象。失敗 unit のみ再投入 (04-pipeline.md §5.2)
 elif all(u.status == "done" and unit_object_exists(u) for u in inst.units):
@@ -508,7 +516,8 @@ embedding_hash = "sha256:" + base16(sha256(JCS({
 })))
 ```
 
-- `target_hash` は対象 chunk の **`text_hash`** (chunk 抽出範囲のみの content hash、§6) であって `chunk_hash` ではない。embedding は Markdown 本文そのものの関数なので、同一本文を持つ複数 chunk (別世代・別ファイルの同一断片) は 1 本の `embeddings` 行を共有する — これが **content ベース再利用** ([04-pipeline.md §4.3 / §5.4](04-pipeline.md)) の identity 基盤である。`chunk_vec` (vec0) は `chunk_hash → embedding` の写像として `embeddings` から導出する。
+- `target_hash` は対象 chunk の **`text_hash`** (chunk 抽出範囲のみの content hash、§8) であって `chunk_hash` ではない。embedding は Markdown 本文そのものの関数なので、同一本文を持つ複数 chunk (別世代・別ファイルの同一断片) は 1 本の `embeddings` 行を共有する — これが **content ベース再利用** ([04-pipeline.md §4.3 / §5.5](04-pipeline.md)) の identity 基盤である。`chunk_vec` (vec0) は `chunk_hash → embedding` の写像として `embeddings` から導出する。
+- embedding object の保存 bytes は **`JCS(identity fields) + LF + base64(vector, float32 little-endian)`** に固定する。fsck ([10-operations.md §7.5.1](10-operations.md)) は identity hash の再計算に加え、vector 長 (= dimensions × 4 bytes) と有限値 (NaN / Inf の拒否) を検査する。
 
 ## tree / commit object
 
@@ -557,7 +566,7 @@ Step 2 で Markdownize されたファイルから順に `normalize` 付き entr
 manual | auto | imported | migrated | repaired | merged | purged
 ```
 
-SQLite CHECK 制約で固定し、**この値域は永久に変更しない契約** (semver MAJOR でも bump しない)。
+commit object の schema 検証 (publication 時の loader — [05-runtime.md §2.1](05-runtime.md)。commit は CAS JSON object であり SQLite に commit 表は無い) で固定し、**この値域は永久に変更しない契約** (semver MAJOR でも bump しない)。
 
 ## 8.2 tree のスケール前提 (flat entries)
 
@@ -600,7 +609,7 @@ chunk identity は `(raw_hash, tool_profile_hash, gen, unit_key, heading_path, s
 chunk object の永続 JSON は上記の `spec_version` + identity fields + `text_hash` + exact `text` に固定し、
 自身の `chunk_hash`、path、`first_seen_commit`、`created_at`、`chunking_config_hash` は含めない。
 `chunking_config_hash` は同一 chunk identity に複数値が対応しうる generation association として
-append-only index ledger / SQLite の別 relation に保持する。fsck は object bytes の content hash ではなく
+**append-only の `chunks.jsonl` (§2 layout / §4.1 — truth) を正本に、SQLite の別 relation (cache) へ**保持する。fsck は object bytes の content hash ではなく
 §8.1 の identity hash を再計算して保存 fan-out key と照合し、`text_hash` を object 内の `text` と
 対応 normalized unit の exact span の両方に照合する。
 

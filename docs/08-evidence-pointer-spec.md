@@ -141,6 +141,10 @@ bulk 系 (`kcs evidence verify --batch <pointers.jsonl>`) は従来どおり各�
 6.  tree entry の normalize.(tool_profile_hash, gen) で normalized instance (unit object 群) を解決
     (gen フィールド欠落は gen=0 と読む)
 7.  chunk_hash で chunk object を解決し char_start/char_end の text を取り出す
+8.  **整合検証**: 解決した chunk object の (raw_hash, tool_profile_hash, gen) が pointer の値
+    (および手順 4-6 を経た場合は tree entry の値) と一致することを検証する。不一致は store
+    corruption として KCS-E-STORE-CORRUPT-001 (not_found 扱い) — cross-wired な pointer が
+    別文書の本文を「解決成功」として返すことを防ぐ (shallow 経路 (2a) でも同じ検証を行う)
 ```
 
 ## 3.2 不変条件
@@ -201,8 +205,11 @@ context: { raw_hash, scope_path }
 
 完全削除は法的要件上必要な場合のみ。デフォルトは tombstone。
 `.kcs/purge/erase-receipts/` の bounded non-content receipt は fsck 専用であり、本 API は参照しない。
-receipt は pointer state を tombstoned にせず、re-ingest も阻止しないため、レスポンスは常に上記
-`not_found` のままである ([05-runtime.md §3.5](05-runtime.md))。
+receipt は pointer state を tombstoned にせず、re-ingest も阻止しないため、レスポンスは上記
+`not_found` である。**ただしこの保証は当該 bytes が store に不在の間のもの** — 同一 bytes が後日
+明示的に再 ingest され、同じ identity の chunk が再生成された場合、既存 pointer は再び alive として
+解決される (erase は resurrection barrier ではない設計 — [05-runtime.md §3.5](05-runtime.md)。
+「erase 後も永続的に not_found」と読める保証はしない)。
 
 ## 4.3 検証 API
 
@@ -214,13 +221,15 @@ kcs evidence verify <pointer> [--strict]   # <pointer> の受理形式は §2.3
 
 ```json
 {
-  "status": "alive" | "tombstoned" | "not_found",
+  "status": "alive" | "tombstoned" | "not_found" | "scope_unreachable",
   "details": { ... }
 }
 ```
 
-`--strict`: tombstoned と not_found の両方を **error** として扱う (CI / 自動化用)。
-exit code: 全 pointer が alive なら 0、1 件でも tombstoned / not_found があれば **4** (permanent failure)。
+`--strict`: tombstoned / not_found / scope_unreachable を **error** として扱う (CI / 自動化用)。
+exit code: 全 pointer が alive なら 0。tombstoned / not_found があれば **4** (permanent failure)。
+**scope_unreachable のみ**の失敗は **3** (retryable — §3.2 のとおり再接続・registry 再登録で回復可能。
+permanent の 4 と区別しないと自動化が再試行可能性を判定できない)。
 `--strict` なしの verify は検査が完了すれば 0 を返し、生存状態は `status` フィールドで判定する。
 exit code の横断規約は [06-cli-spec.md §7](06-cli-spec.md)。
 

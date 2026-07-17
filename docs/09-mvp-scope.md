@@ -22,7 +22,7 @@
 - kcs index 完了時の auto snapshot (定期 auto snapshot / watch は Phase 4。[05-runtime.md §8](05-runtime.md))
 - restore (--to 必須)
 - time-travel search (--at / --all-history / --include-deleted)
-- ベースライン index (deterministic 抽出 + FTS。API キーなしで init→snapshot→search→open が成立)
+- ベースライン index (deterministic 抽出 + FTS。API キーなしで init→index→search→open が成立 — [01-positioning.md §3](01-positioning.md))
 - 初回スキャン preview + 明示承認
 - budget guardrail (cost ceiling / kill switch)
 - purge 最小形 (tombstone + commit_type=purged + 検索除外 + ログスクラブ。M3-3 の完了条件)
@@ -71,7 +71,8 @@ Phase 5: Agent           agent API / navigation / neighbors / node / edge
 Step 1 (1-2ヶ月): kcs-core + kcs-cli で init / status / snapshot / log / diff / inspect / tag
                   → CAS と snapshot DAG の正しさを早期検証
 Step 2 (2-3ヶ月): kcs-pipeline + kcs-adapter
-                  → 同梱 deterministic Adapter でベースライン index (キーなしで検索成立)
+                  → 同梱 deterministic Adapter でベースライン抽出 (normalized まで。**検索の成立は
+                    Step 3 の chunk/FTS/search 実装と合わせて** — §3 の割当が正)
                   → 推奨構成は大手 LLM API による AI 強化 (opt-in)
 Step 3 (2-3ヶ月): kcs-index + kcs-search (hybrid + Evidence Pointer)
 Step 4 (1.5-2ヶ月): restore + --at + time-travel

@@ -72,12 +72,12 @@ opt-in の単位・寿命・revoke の正本は [07-adapter-spec.md §3](07-adap
 
 ```bash
 kcs init
-kcs snapshot
+kcs index --approve      # 取り込み + ベースライン index (初回は preview + 明示承認)
 kcs search "あの PDF"
-kcs open
+kcs open <検索結果の pointer>
 ```
 
-これで価値が成立する状態を MVP の Definition of Done に含める。この 4 コマンドは **API キー未設定でも成立する** (同梱 deterministic Adapter によるベースライン index + text 検索。[07-adapter-spec.md §2.1](07-adapter-spec.md))。frontier AI は意味検索・スキャン PDF・画像内テキストへ検索品質を引き上げる推奨 opt-in である。
+これで価値が成立する状態を MVP の Definition of Done に含める。`kcs index` が取り込みと検索 index 構築の唯一の入口であり、成功時に auto snapshot も作られる ([05-runtime.md §8.1](05-runtime.md)) — 明示 `kcs snapshot` は任意。この 4 コマンドは **API キー未設定でも成立する** (同梱 deterministic Adapter によるベースライン index + text 検索。[07-adapter-spec.md §2.1](07-adapter-spec.md))。frontier AI は意味検索・スキャン PDF・画像内テキストへ検索品質を引き上げる推奨 opt-in である。
 
 即効価値と履歴価値は分けて訴求する。
 
@@ -259,7 +259,7 @@ KCS は既存ツールを置き換えない。**横断する**外部アーカイ
 | 既存ワークフロー | KCS の関係 |
 | --- | --- |
 | Obsidian vault | vault を含む親フォルダに `.kcs`。vault 内検索は Smart Connections に任せ、KCS は vault + Documents + Downloads + コードを横断。 |
-| Git リポジトリ | リポジトリ自体には `.kcs` を置かない (Git に管理される)。リポジトリ群を含む親フォルダに `.kcs` で横断検索。 |
+| Git リポジトリ | リポジトリ自体には `.kcs` を置かない (Git に管理される)。リポジトリ群を含む親フォルダに `.kcs` で横断検索。この方針は機械化されている — `kcs index` は VCS repo root 配下に既定で子 `.kcs` を作らない ([03-data-model.md §3](03-data-model.md))。 |
 | 既存ファイル整理 | Documents / Downloads など散らかった領域を整理せず、横断検索と Evidence で「整理しなくても見つかる」体験を提供。 |
 | Khoj / AnythingLLM | KCS の構造化 API を呼ぶ関係を狙う。チャット UX は彼らに任せる。 |
 

@@ -23,9 +23,9 @@ KCS は **local-first** な知識アーカイブ。データの主権はあな�
 
 ```bash
 kcs init
-kcs snapshot
+kcs index --approve      # 取り込み + ベースライン index (成功時に auto snapshot)
 kcs search "あの PDF"
-kcs open
+kcs open <検索結果の pointer>
 ```
 
 # 0.1 ターゲットユーザー
@@ -51,7 +51,7 @@ cache = scope_registry / aggregator      検索キャッシュ: 探索対象一�
 
 # 1. ドキュメント構成 と Reading Path
 
-`docs/` 直下を実装スペックの **正本** とし、ファイル名の **数字プレフィックスがそのまま読む順番** を表す。`README.md` (本書) を最初に読み、続いて `01-` から `11-` の順に読めば、概念がぶつからない。
+`docs/` 直下を実装スペックの **正本** とし、ファイル名の **数字プレフィックスがそのまま読む順番** を表す。`README.md` (本書) を最初に読み、続いて `01-` から `10-` の順に読めば、概念がぶつからない (`11-` は ARCHIVED — 読む順番に含めない)。
 
 | 順 | ファイル | 役割 |
 | --- | --- | --- |
@@ -95,8 +95,10 @@ Step 計画 (Phase 1-3 を実装):
 Step 1 (1-2ヶ月): kcs-core + kcs-cli (init / status / snapshot (=commit) / log / diff / inspect / tag)
 Step 2 (2-3ヶ月): kcs-pipeline + kcs-adapter (frontier AI default)
 Step 3 (2-3ヶ月): kcs-index + kcs-search (hybrid + Evidence Pointer)
-Step 4 (1ヶ月):   restore + --at + time-travel
+Step 4 (1.5-2ヶ月): restore + --at + time-travel + purge 最小形 (tombstone) + evidence verify
 ```
+
+(Step の期間・内容の正本は [09-mvp-scope.md §3](09-mvp-scope.md) — 差分が生じた場合は 09 が正)
 
 **コア規模上限** (ripgrep 以下): テスト除いて 11-16k LOC、テスト含めて 20-30k LOC。
 
@@ -118,16 +120,10 @@ M3-3: 「削除したはずの資料から特定の数字を再発見」
 
 # 4. 設計上の宿題 (4 論点)
 
-詳細は [09-mvp-scope.md §5](09-mvp-scope.md)。
+**status・期限の正本は [09-mvp-scope.md §5.5](09-mvp-scope.md)** — 本書には転記しない (転記は陳腐化して
+「draft なら着手しない」規則を誤発動させた実績があるため、一覧・現在の status は必ず正本を見る)。
 
-```
-1. Markdown 非決定性 = first-instance-wins        Step 1 着手前  decided
-2. remarkdownize CLI セマンティクス               Step 3 着手前  draft
-3. Dead Evidence Pointer のセマンティクス          Step 3 着手前  draft (採用案 08-evidence-pointer-spec.md §4)
-4. Incremental Markdownize プロンプト規約          Step 1 着手前  partial (規約 07-adapter-spec.md §8)
-```
-
-未確定 (draft) のままステップに到達したら **そのステップを着手しない**。
+未確定 (draft) のままステップに到達したら **そのステップを着手しない** (該当判定も 09 §5.5 の status で行う)。
 
 ---
 

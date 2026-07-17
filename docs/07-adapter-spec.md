@@ -109,8 +109,12 @@ revoke: adapter.policy.allow_network = false に設定する。
         以後、当該 scope の新規オンライン送信 task は発行されない
         (送信済みデータの取り消しは保証しない)。
 
-記録:   承認記録 (10-operations.md §1) に scope_id / tool_id / approved_at /
-        approval_method を残す。
+記録:   承認記録に scope_id / tool_id / approved_at / approval_method を残す。
+        **保存先 = `.kcs/scope.json` の `approvals[]` 配列** (schema 検証対象
+        [10-operations.md §12.3](10-operations.md)、truth [03-data-model.md §4.1](03-data-model.md))。
+        `(scope_id, tool_id)` 単位の行で、失効・revoke は当該行の更新 (atomic rename) で行う。
+        初回スキャン承認 (10-operations.md §1) の記録とは別物 — あちらは scope 単位の
+        取り込み承認、こちらは adapter 単位の network opt-in。
 ```
 
 CLI フラグ `--online` は **その 1 回の実行に限る一時 opt-in** で、永続記録を作らない。
@@ -189,9 +193,10 @@ input:
 output:
   mode_used                    "full" | "incremental"
   updated_units / added_units / removed_unit_keys / unchanged_unit_keys
-  evidence_pointers
   fallback_to_full             bool
   reason
+  # Evidence Pointer は Adapter output に含めない — 必須フィールド (chunk_hash / commit) は
+  # chunking と snapshot の後にしか存在しないため、発行は KCS core が行う (08 §2.1)
 capability_flags:
   ocr, layout_detection, table_extraction, speech_to_text, incremental_update
 ```
@@ -260,6 +265,27 @@ incremental の詳細プロンプト規約は §8 (生成 LLM 系のみ。§8 �
 
 > **実地検証済み (2026-07-03、設計宿題 #6 解消 [09-mvp-scope.md §5.5](09-mvp-scope.md))**: 合成 fixture (複雑表・日本語・数式・埋め込み画像、4 ページ) を sync / Batch 両モードで検証: 表セル一致率 1.0 (17/17)、日本語 CER 0.0、画像抽出 1/1 (placeholder 形式も §5.2 想定どおり)、数式は LaTeX でテキスト化。単価は公称一致 (API $4 / Batch $2 per 1,000 pages)、Batch のジョブ往復は 4 ページで約 24 秒。ハーネスと実測ログは `experiments/ocr-verification`。検証が崩れた場合の fallback (生成 LLM 系 §8.2 へ戻す) の設計は維持する。
 
+## 5.2.1 Normalized Markdown 形式 (最小凍結 — 2026-07-18)
+
+全 Markdownize Adapter の出力 (normalized unit の Markdown) は次の最小形式に従う。chunk span と
+Evidence Pointer のバイト位置は保存された bytes に対して定義されるため、**この形式は実装後に
+変えると互換性コストが高い** ([10-operations.md §11](10-operations.md)) — 以下を v1 として凍結する:
+
+- **エンコーディング**: UTF-8 (BOM 禁止)、Unicode 正規化 NFC、改行 LF のみ、行末 trailing space 禁止、
+  ファイル終端は LF 1 個
+- **見出し**: ATX (`#`〜`######`) のみ (Setext 禁止)。chunk 境界規則 ([04-pipeline.md §4.1](04-pipeline.md))
+  の入力
+- **表**: GFM table 記法で inline 保持 (§5.2 規約と同じ — 独立 table object は作らない)
+- **画像参照**: `![...](kcs://<scope_id>/object/image/<image_hash>)` のみ
+  ([08-evidence-pointer-spec.md §2.3](08-evidence-pointer-spec.md))
+- **生 HTML / autolink**: 禁止 (provider 由来テキストの escape 規約は §5.2 bbox_annotation の
+  CommonMark source escape と同系 — `&` `<` `>` の実体参照化 + ASCII punctuation の `\` 前置)
+- **code fence**: CommonMark の ``` fence (チルダ不可)。fence 内は無変換
+- 上記の準拠は KCS 側受け入れ検査 ([04-pipeline.md §3.2](04-pipeline.md)) の構造検証に含める
+
+media 別の変換規約 (何を見出しにするか等) は Adapter 実装の裁量 (tool_profile_hash が識別する)。
+本節が固定するのは**バイト表現の規約のみ**である。
+
 ## 5.3 Embedding (multimodal)
 
 ```
@@ -318,8 +344,10 @@ Batch モードを持つ online Adapter (Markdownize / Embedding) は、[04-pipe
 
 ```
 upload(bytes, filename)        client 指定の filename を受理する (intent_token 埋込のため)
-create_job(inputs, metadata)   client 任意の metadata (intent_token) を job に付与できる
+create_job(inputs, metadata)   client 任意の metadata (intent_token + タスクキー 4 組) を job に付与できる
 get_job(job_id) / list_jobs()  list は account/workspace scope 内の全件を pagination 走査できる
+list_uploads()                 scope 内の upload を pagination 走査でき、filename (intent_token 埋込) で
+                               照合できる — upload_id 記録前クラッシュの残骸発見の唯一の経路
 delete_upload(upload_id)       404 (不存在) は削除成功として報告する
 fetch_output(job_id)
 provider_scope_id()            下記の不変識別子を返す
@@ -335,8 +363,8 @@ provider_scope_id()            下記の不変識別子を返す
 
 **Batch プロバイダ採用条件** (満たさない provider は sync 呼出のみで採用するか、採用しない):
 
-1. job 一覧照会 (または token による job 発見) が可能であること — これが無いと未記録 in-flight の
-   回復が構造的に不可能になる
+1. job 一覧照会 (または token による job 発見) と **upload 一覧照会**が可能であること — これが無いと
+   未記録 in-flight・未記録 upload 残骸の回復が構造的に不可能になる
 2. job 作成 → 一覧可視化の遅延に上限があること (KCS の可視化猶予 既定 10 分以内)
 3. job / 一覧情報の保持期間が KCS の回復期限 (既定 48h) 以上であること
 4. job metadata / filename に client 任意の識別子 (intent_token) を埋め込めること
@@ -469,7 +497,7 @@ MVP における Adapter の脅威モデルを次のとおり確定する。
    違反は KCS-E-ADAPTER-CONTRACT-001 として reject され full に fallback する
 ```
 
-`spec_version` の bump 規約は [10-operations.md §12.5](10-operations.md) を正とする。不一致時、KCS は当該 Adapter を capability なし扱いにして full モードで呼び直す (§8.4)。
+`spec_version` の bump 規約は [10-operations.md §12.5](10-operations.md) を正とする。**full fallback (§8.4) が有効なのは incremental capability だけが非互換な場合に限る** — full request も同じ `spec_version` を含むため、spec_version 自体の非互換は full で呼び直しても同じ invalid_input を再生するだけである。この場合は `KCS-E-ADAPTER-CONTRACT-001` 系の明示エラーとして当該 online Adapter のタスクを failed permanent (Adapter 更新が必要) にし、同梱 deterministic Adapter のベースライン (§2.1) は影響を受けず継続する。
 
 ## 8.2 推奨プロンプト構造 (frontier AI 系)
 
@@ -502,10 +530,12 @@ USER:
 
 大型 PDF (100+ pages) では TTFB を抑えるためストリーミング出力を許容する。KCS は Adapter からの SSE / chunked JSON を受け取り、unit 完了ごとに persist する。
 
-ストリーミング中の unit は staging 領域に persist し、応答完了後に受け入れ検査
-([04-pipeline.md §3.2](04-pipeline.md)) を通過した時点で manifest へ一括確定する。
-ストリーミング失敗時は staging の完了済み unit のみ確定し、未完了は `pending` で再開可能にする
-(再開後の全体集合に対して受け入れ検査を適用する)。
+ストリーミング中の unit は staging 領域に persist し、応答完了後に**全体集合が受け入れ検査
+([04-pipeline.md §3.2](04-pipeline.md)) を通過した時点で manifest へ一括確定する** (検査前の unit は
+公開しない — §3.2 の「違反応答は 1 unit も persist しない」と整合)。ストリーミング失敗時は staging を
+破棄せず、**完了済み unit は保全したまま task を failed (retryable) にする** — manifest には `pending`
+という unit 状態は存在しない ([03-data-model.md §2.1](03-data-model.md) の遷移は failed → done のみ)。
+retry は staging の完了済み unit を再利用してよいが、確定は常に全体検査の通過後に行う。
 
 ## 8.4 Capability 宣言なしの Adapter
 
