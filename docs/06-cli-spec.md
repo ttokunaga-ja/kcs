@@ -19,6 +19,8 @@ kcs index [--preview|--approve|--yes] [--online|--offline]  # 取り込み (初�
 kcs batch resume [--override-budget]    # 中断タスクの再開 (budget 超過 pause は --override-budget 必須。04-pipeline.md §5.4/§5.7)。
                                         # markdownize online タスクと embedding enrichment パスを両方駆動 (04-pipeline.md §5.4)
 kcs batch retry                         # failed タスクの再試行 (markdownize + embedding。backoff/retry 予算を尊重)
+kcs batch abandon <task_id>             # 照合が恒久不能な in-flight Batch job の打ち切り (estimated 記帳 + terminal 化。
+                                        # 確認プロンプト必須。残骸掃除完了まで intent_token は保持 — 04-pipeline.md §5.8)
 kcs repair [--rebuild-db|--verify-objects]  # SQLite 再構築 / CAS 整合性検証 (10-operations.md §7.5)
 kcs commit -m "<message>"               # = kcs snapshot create -m
 kcs snapshot [create] [-m "<message>"]  # create 省略可。-m 省略時は自動 message ("snapshot at <UTC timestamp>")

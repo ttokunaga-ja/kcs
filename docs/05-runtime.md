@@ -58,6 +58,9 @@ default: k = 60, w_text = 1.0, w_vector = 1.0
 - 片方のバックエンドにしか現れない候補は、現れない側の項を 0 とする
 - `RRF_score` の同点は chunk_id 昇順
 - text-only / vector-only モードでは fusion せず当該バックエンドの順位をそのまま使う
+- 実装規則: `candidate_depth` の上限は rank 計算 (window 関数等) の**入力になる内側段 (サブクエリ)** で
+  効かせる。外側の LIMIT では全マッチ行が rank 計算の入力に入り、大ヒット数クエリで実行コストが
+  数十倍に膨張する (出典: [research/folder-history-sqlite-design.md](research/folder-history-sqlite-design.md) §18 の実測 — VM step 1,074 → 70,374)
 
 ```toml
 [search.rrf]
@@ -689,8 +692,8 @@ kcs repair --rebuild-db / kcs repair --verify-objects / kcs move --accept
 - refs (refs/heads/main, canonical refs/tags-v1/*) の更新は `.kcs/.lock` 保持下で、temp file 書き込み + atomic rename により行う (部分書き込みを外部に見せない)。legacy refs/tags/* は read-only compatibility とする
 - `kcs repair --verify-objects` の raw object 復旧と repaired commit publication も、同じ lock の下で private temp + hash 再検証 + atomic publish を使う
 - `kcs repair --rebuild-db` 実行中の `kcs search` は、再構築完了までの間旧 sqlite.db (存在すれば) を読むか、`KCS-E-INDEX-REBUILDING-001` を返す。再構築の完了も atomic rename (sqlite.db.tmp → sqlite.db) で切り替える
-- scope-registry.sqlite (~/.local/share/kcs/) は WAL モード + busy_timeout (デフォルト 5000ms) で複数プロセスの同時書き込みを直列化する。registry は cache であり ([03-data-model.md §4](03-data-model.md))、破損時は各 `.kcs` の rescan で再構築する
-- purge の log scrub と通常 append/rotation は、device logs では `$XDG_DATA_HOME/kcs/logs/scrub.lock`、scope access logs では `.kcs/logs/access.scrub.lock` を共有する。複合 lock 順序は scope store → reservation/cost ledger → device observability → scope access とし、逆順取得を禁止する
+- scope-registry.sqlite / cost-ledger.sqlite (~/.local/share/kcs/) は WAL モード + busy_timeout (デフォルト 5000ms) で複数プロセスの同時書き込みを直列化する。registry は cache であり ([03-data-model.md §4](03-data-model.md))、破損時は各 `.kcs` の rescan で再構築する。cost-ledger.sqlite は**再構築不可の運用台帳** ([03-data-model.md §4.1](03-data-model.md) / [04-pipeline.md §5.4](04-pipeline.md))
+- purge の log scrub と通常 append/rotation は、device logs では `$XDG_DATA_HOME/kcs/logs/scrub.lock`、scope access logs では `.kcs/logs/access.scrub.lock` を共有する。複合 lock 順序は scope store → cost-ledger.sqlite (Tx) → device observability → scope access とし、逆順取得を禁止する
 
 # 7. 観測 (Observability)
 

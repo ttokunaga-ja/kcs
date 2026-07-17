@@ -40,6 +40,7 @@ Research note は「なぜそう決めたか」を短く残す場所です。仕
 | [north-star-scenarios.md](north-star-scenarios.md) | Phase 3 Done 条件 | [09-mvp-scope.md](../09-mvp-scope.md) |
 | [auto_organize.md](auto_organize.md) | Phase 4+ 自動整理構想 | なし。将来構想 |
 | [synchronization.md](synchronization.md) | v2 / Phase 5+ 同期構想 | なし。将来構想 |
+| [folder-history-sqlite-design.md](folder-history-sqlite-design.md) | SQLite 正本方式のフォルダ履歴 + AI 検索の独立設計検討 (KCS 対比、2026-07-14 確定、多エンジン監査 r8〜r20 済み) | 正本方式 (metadata.sqlite = truth) は KCS と独立のまま。監査で固めた機構 (Batch 2 相プロトコル / スキャン安全 / 採用条件 / 検索実装規則) は 2026-07-18 に KCS spec へ選別移植し、**記録ストアの SQL 正本も同日確定** (cost-ledger.sqlite: `cost_ledger` / `batch_requests` の 2 表 — 旧 JSONL 3 ファイル構成を廃止) — [04-pipeline.md §1.1/§5.4/§5.8](../04-pipeline.md)、[07-adapter-spec.md §5.7](../07-adapter-spec.md)、[06-cli-spec.md §1](../06-cli-spec.md)、[10-operations.md §1/§7.5.3](../10-operations.md)、[05-runtime.md §1.3/§6](../05-runtime.md) |
 
 ---
 

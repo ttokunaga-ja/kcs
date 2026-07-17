@@ -113,6 +113,8 @@ estimated_embedding_usd
 承認後の index は二段で進む ([04-pipeline.md §5](04-pipeline.md)): ベースライン index が先に完了し、AI 強化 (Markdownize / Embedding) は budget guardrail の管理下で後段として進む。AI 強化が未完了・paused の間、その状態を隠してはならない。
 
 - `kcs status` は AI 強化の進捗 (done / pending / paused 件数) と paused の理由 (budget / auth / rate limit) を表示する
+- 照合が恒久不能な in-flight Batch job (資格情報喪失等) は **stalled** として表示し続ける。脱出路は
+  `kcs batch abandon` のみ (自動では何も変更しない — [04-pipeline.md §5.8](04-pipeline.md))
 - 検索レスポンスは index が部分的なとき `index_status` を返す ([05-runtime.md §1.7](05-runtime.md))
 
 ## 1.1 Secrets デフォルト除外 (built-in ignore template)
@@ -241,18 +243,36 @@ cache = scope_registry / aggregator
 ~/.local/share/kcs/scope-registry.sqlite
 ```
 
-保存する情報:
+schema (本節が正本。2026-07-14 実装準拠で確定):
 
-```text
-scope_id
-root_path
-kcs_path
-participates_in_global_search
-approved_at
-last_seen_at
-effective_ignore_hash
-permission_status
+```sql
+CREATE TABLE scopes (
+  scope_id TEXT NOT NULL,
+  kcs_path TEXT NOT NULL,
+  root_path TEXT NOT NULL,
+  participates_in_global_search INTEGER NOT NULL DEFAULT 1,
+  indexed INTEGER NOT NULL DEFAULT 0,   -- sqlite.db 構築済み (横断検索の対象候補)
+  last_seen_at TEXT NOT NULL,
+  PRIMARY KEY (scope_id, kcs_path)
+);
 ```
+
+運用規約:
+
+- WAL モード + busy_timeout 5000ms で複数プロセスの書き込みを直列化する
+  ([05-runtime.md](05-runtime.md) 同時実行規約)
+- upsert は `(scope_id, kcs_path)` を key に行い、`indexed` は単調 (MAX) にのみ更新する
+- **stale 登録の退役**: `.kcs` を削除して同じ path で `init` し直すと新しい `scope_id` が採番される
+  (scope_id は init 時採番の ULID、[03-data-model.md §2](03-data-model.md))。upsert の直前に、同一
+  `kcs_path` で `scope_id` が異なる行を削除する。放置すると横断検索が同一文書を dead scope_id 経由で
+  二重に返し、その Evidence Pointer は `KCS-E-EVIDENCE-SCOPE-UNREACHABLE-001` で解決不能になる。
+  registry は cache なので削除は常に安全 (live scope は自分を再登録する)
+- device data dir (`~/.local/share/kcs/`) は owner-only (0700) に制限する (best-effort。非 unix は
+  no-op。registry / cost-ledger / logs は利用パターンとスコープ地図を含むため)
+
+`approved_at` / `effective_ignore_hash` / `permission_status` は permission 系 (Phase 4+) の予約であり、
+**MVP の schema には含めない** (旧 spec の保存情報リストから 2026-07-14 に分離。追加時は §7.5.3 の
+schema 変更規約に従う)。
 
 ### 不変条件 (cache vs truth)
 
@@ -455,6 +475,38 @@ MVP では手動実行のみとする。自動定期検証 (スケジューラ�
 ストレージの placeholder file 上の `.kcs` は破損リスクが高いため、§4 の境界方針の確定
 までは推奨しない。
 
+## 7.5.3 SQLite schema 変更の規約 (rebuild vs in-place migration)
+
+sqlite.db / scope-registry.sqlite は正本から再構築可能な cache である ([03-data-model.md §4.1](03-data-model.md))。
+したがって schema 変更のデフォルト経路は **migration を書かず再構築する** こと
+(sqlite.db は `kcs repair --rebuild-db`、registry は各 `.kcs` の rescan)。
+
+**`cost-ledger.sqlite` はこのデフォルトの対象外** — 再構築不可の運用台帳 (課金記録 + in-flight Batch
+intent、[04-pipeline.md §5.4](04-pipeline.md)) であり、schema 変更は常に下記の in-place migration
+要件に従う (既存行の保全が必須。旧 JSONL 3 ファイル構成からの移行も同要件で一度だけ行う —
+追加列は NULL / DEFAULT で backfill)。
+
+例外として in-place migration を書いてよいのは次の場合のみ:
+
+```text
+1. append-only データの保全が必要な場合
+   例: chunks 行は time-travel 検索の実体 (04-pipeline.md §4.1) で、rebuild は履歴 commit の
+   再展開を伴い高価。旧 `chunks.chunking_config_hash` 列 → `chunk_config_generations` relation
+   への分離 (Step 3) は in-place migration とした (実装済みの先例)
+2. 起動のたびに全再構築するのが非現実的な大規模 store
+```
+
+in-place migration の要件:
+
+```text
+- 冪等であること。旧形状の検出は表 / 列の存在検査で行い、再実行しても結果が変わらない
+- 全体を単一 savepoint で包み、失敗時は rollback して torn state を残さない
+- 移行後に FTS 等の導出インデックスを rebuild する
+```
+
+`PRAGMA user_version` による schema version 管理は MVP では**採用しない** (旧形状の判別は存在検査で
+足りる)。存在検査で表現できない互換性判断が必要になった時点で導入を再検討する。
+
 ---
 
 # 8. commit_type の固定 enum について
@@ -584,7 +636,9 @@ include_neighbors = 1
 ```text
 object store / snapshot DAG      → 03-data-model.md
 Evidence Pointer schema          → 08-evidence-pointer-spec.md
-SQLite schema                    → 03-data-model.md §8
+永続ストア一覧 (SQLite/file 境界) → 03-data-model.md §4.1
+SQLite schema (index / registry) → 04-pipeline.md §4 / 10-operations.md §3
+object / manifest schema         → 03-data-model.md §8
 ingest / markdownize / snapshot  → 04-pipeline.md
 restore / resume-retry           → 05-runtime.md / 04-pipeline.md §5.7
 検索評価規約 / 評価指標定義        → 09-mvp-scope.md §4.3
@@ -759,6 +813,7 @@ Normalized-Hash: <Markdown header> | Tool-Profile-Hash: <Markdown header> | rese
 unit_id                          | unit_key / unit_ref                 | 03-data-model.md §2.1
 last_indexed_git_commit          | (廃止: Git 連携は持たない)             | research/kcs.md §10
 output_hash (in normalization_runs) | (廃止)                            | research/hash.md §3
+cost-ledger.jsonl (+ -reservations / -reclaimed / .lock) | cost-ledger.sqlite (cost_ledger / batch_requests の 2 表) | 04-pipeline.md §5.4
 ```
 
 ## 12.8 推奨 Reading Path

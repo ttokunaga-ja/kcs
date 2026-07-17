@@ -52,6 +52,7 @@ raw / prepared / image / chunk / embedding / tree / commit は **CAS object** �
     tags-v1/tag-<digest64>          # canonical: digest64 = sha256(NFC + Unicode lowercase の論理 tag 名)
     tags/<logical-name>             # legacy Unix raw-name refs (read-only compatibility)
   tombstones/ab/cd/<raw64>      purge の tombstone 記録 (05-runtime.md §3.5。CAS object ではない)
+  tasks.jsonl         batch タスクストア (04-pipeline.md §5.1。append-only の運用データ、SQLite 非採用)
   index/
     sqlite.db         FTS5 + sqlite-vec (query acceleration layer; 真実は objects/)
   logs/
@@ -221,6 +222,25 @@ cache = scope_registry / aggregator 検索の探索対象一覧 / stale 検出 /
 5. raw object の所有権・dedup は scope_registry でグローバル化しない
 ```
 
+## 4.1 永続ストア一覧 (technology × truth/cache)
+
+各永続ストアの実装技術と喪失時の扱いの正本表 (2026-07-14 実装準拠で確定)。個別 schema の正本は右端の参照先に置く。
+
+| ストア | 技術 | 区分 | 喪失時 | schema 正本 |
+|---|---|---|---|---|
+| `.kcs/objects/` (raw / prepared / images / normalized_units / chunks / embeddings / trees / commits) | file (CAS) | **truth** | 復旧不能 (検証: [10-operations.md §7.5](10-operations.md)) | §8 / §2.1 |
+| `.kcs/HEAD` / `refs/` | file (atomic rename) | **truth** | 復旧不能 | §2 |
+| `.kcs/tombstones/` + erase receipt | file | **truth** (purge 証跡) | 復旧不能 | [05-runtime.md §3.5](05-runtime.md) |
+| `.kcs/scope.json` / `config.toml` / `tool-lock.json` | JSON / TOML (schema 検証: [10-operations.md §12.3](10-operations.md)) | **truth** | 復旧不能 | 各 spec |
+| `.kcs/logs/access.jsonl` | JSONL (append-only) | **truth** (access_events の正本) | 復旧不能 | §2 |
+| `.kcs/manifest.json` | JSON (schema 検証) | working-state cache (永続的真実は tree/commit object) | rescan で再構築 | §8 files |
+| `.kcs/tasks.jsonl` | JSONL (append-only) | 運用データ | 喪失許容 ([04-pipeline.md §5.7](04-pipeline.md)) | [04-pipeline.md §5.1](04-pipeline.md) |
+| `.kcs/index/sqlite.db` | **SQLite** (chunks / chunk_config_generations / chunk_fts / embeddings / chunk_vec / tree_entries の 6 表) | cache | `kcs repair --rebuild-db` | [04-pipeline.md §4](04-pipeline.md) |
+| `~/.local/share/kcs/scope-registry.sqlite` | **SQLite** (`scopes` 1 表) | cache | 各 `.kcs` の rescan | [10-operations.md §3](10-operations.md) |
+| `~/.local/share/kcs/cost-ledger.sqlite` | **SQLite** (`cost_ledger` / `batch_requests` の 2 表、WAL) | 運用データ (課金台帳 + **in-flight Batch intent の正本** — [04-pipeline.md §5.8](04-pipeline.md)。tasks.jsonl と異なり喪失許容ではない) | 確定課金は再構築不可 (Adapter 報告値の記録であり再導出元がない)。in-flight は provider job 一覧の intent_token 全走査で回収 | [04-pipeline.md §5.4](04-pipeline.md) (SQL 正本) |
+
+**SQLite を使うのはこの表の 3 ファイル (計 9 テーブル)**。うち index/sqlite.db と scope-registry.sqlite は正本から再構築可能な検索キャッシュ、**cost-ledger.sqlite だけは再構築不可の運用台帳** (cache ではない — schema 変更は rebuild でなく in-place migration 側、[10-operations.md §7.5.3](10-operations.md))。コンテンツの truth は引き続きファイル (CAS objects/ ほか) が正本であり、tasks.jsonl は喪失許容の JSONL のまま。旧 spec が SQLite テーブルとして定義していた `files` / `normalization_runs` / `prepared_units` は採用しない (§8、[04-pipeline.md §4.7](04-pipeline.md))。課金 + in-flight intent の記録は 2026-07-18 に JSONL 3 ファイル構成から cost-ledger.sqlite へ確定した ([04-pipeline.md §5.4](04-pipeline.md) — 2 相プロトコルが UNIQUE・単一 Tx・ON CONFLICT 冪等の保証を正本要件とするため)。
+
 # 5. Identity — hash と semantic_fingerprint の分離
 
 ```
@@ -335,8 +355,9 @@ else:
     missing_output   # manifest は done を記録しているが unit object が見当たらない
 ```
 
-判定の正本は manifest + unit object の存在であり、SQLite の `normalization_runs` は cache
-([04-pipeline.md §5.7](04-pipeline.md) の再構築セマンティクス参照)。全文 view の存在は判定に使わない。
+判定の正本は manifest + unit object の存在である (`normalization_runs` は SQLite テーブルとしては
+持たない — §8。run 状態は manifest から導出し、復元セマンティクスは [04-pipeline.md §5.7](04-pipeline.md))。
+全文 view の存在は判定に使わない。
 
 ファイル状態分類:
 
@@ -370,51 +391,58 @@ adapter 登録の時点で `KCS-E-EMBED-MODALITY-001` (exit 2、[06-cli-spec.md 
 
 # 8. 主要テーブル / object スキーマ
 
-## files (working state)
+## files (working state) — 実体は manifest.json (SQLite テーブル非採用)
 
-```sql
-CREATE TABLE files (
-  file_id TEXT PRIMARY KEY,
-  path TEXT NOT NULL,
-  raw_hash TEXT NOT NULL,
-  size_bytes INTEGER,
-  mtime INTEGER,
-  kind TEXT NOT NULL,
-  first_seen_at TEXT,
-  last_seen_at TEXT,
-  status TEXT NOT NULL
-);
+working state の実体は `.kcs/manifest.json` の `files` 配列であり、**SQLite に `files` テーブルは
+作らない** (§4.1。2026-07-14 実装準拠へ更新 — 旧 `CREATE TABLE files` 定義は未実装のまま廃止)。
+schema は `kcs-core/schemas/manifest.schema.json` (JSON Schema、[10-operations.md §12.3](10-operations.md))
+で検証する:
+
+```json
+{
+  "schema_version": 1,
+  "updated_at": "2026-07-14T00:00:00Z",
+  "files": [
+    { "path": "report.pdf", "raw_hash": "sha256:ab...", "status": "modified" }
+  ]
+}
 ```
 
-ファイル削除を検出しても files 行は **DELETE しない**。`status = 'deleted'` に更新し、最後に観測した
-raw_hash を保持する。同一 path が再作成されたら status を戻す。この行は working-state cache であり、
-cursor-stable `--include-deleted` の truth は page-1 snapshot の first-parent trees から導出する
-([05-runtime.md §1.6](05-runtime.md)); manifest/files の後発変更は paging 集合を変えない。
+- `path` は自フォルダ直下のファイル名のみ (`/` を含まない — §3 スコープ境界)
+- `status` は `new | modified | deleted | unchanged` の固定 enum
+- ファイル削除を検出しても entry は **削除しない**。`status = "deleted"` に更新し、最後に観測した
+  raw_hash を保持する。同一 path が再作成されたら status を戻す
+- manifest は working-state cache であり (§2 レイアウト注記のとおり永続的真実は tree/commit object)、
+  cursor-stable `--include-deleted` の truth は page-1 snapshot の first-parent trees から導出する
+  ([05-runtime.md §1.6](05-runtime.md)); manifest/files の後発変更は paging 集合を変えない
 
-## normalization_runs
+旧テーブル定義にあった `file_id / size_bytes / mtime / kind / first_seen_at / last_seen_at` は
+持たない。必要になった場合は manifest.json の `schema_version` bump で追加する。
 
-```sql
-CREATE TABLE normalization_runs (
-  run_id TEXT PRIMARY KEY,
-  file_id TEXT NOT NULL,
-  path TEXT NOT NULL,
-  raw_hash TEXT NOT NULL,
-  tool_profile_hash TEXT NOT NULL,
-  gen INTEGER NOT NULL DEFAULT 0,
-  status TEXT NOT NULL,         -- pending | running | done | partial | failed
-  mode TEXT NOT NULL,           -- full | incremental
-  parent_run_id TEXT,           -- incremental の chain
-  changed_unit_keys TEXT,       -- JSON array
-  fallback_reason TEXT,         -- capability_missing | threshold_exceeded | ...
-  started_at TEXT,
-  finished_at TEXT,
-  error TEXT
-);
+## normalization_runs — 実体は normalized instance manifest (SQLite テーブル非採用)
+
+normalization run の正本は normalized instance の `manifest.json` (§2.1) であり、**SQLite に
+`normalization_runs` テーブルは作らない** (§4.1。2026-07-14 実装準拠へ更新)。run 状態は独立永続化
+せず、manifest + unit object の存在から導出する (§6、[04-pipeline.md §5.7](04-pipeline.md))。
+
+run レコード (パイプライン内部表現。manifest へは provenance として `run_id` / `parent_gen` を記録):
+
+```text
+run_id                                 manifest.run_id として永続化 (provenance)
+raw_hash / tool_profile_hash / gen     instance identity (= instance ディレクトリ名 §2.1)
+mode                                   full | incremental
+status                                 pending | running | done | partial | failed
+                                       (manifest の unit status から導出)
+changed_unit_keys                      incremental の対象 unit ([04-pipeline.md §5.1](04-pipeline.md) task にも記録)
+output_ref                             normalized instance ディレクトリ
+fallback_reason                        capability_missing | threshold_exceeded | ...
+                                       (task 側の運用データ、喪失許容)
+created_at / finished_at
 ```
 
-`normalized_path` 列は持たない。instance は `(raw_hash, tool_profile_hash, gen)` から一意に決まる。
-`normalization_runs` は `index/sqlite.db` 上の cache であり、喪失時の復元範囲は
-[04-pipeline.md §5.7](04-pipeline.md) に従う。
+`normalized_path` は持たない。instance は `(raw_hash, tool_profile_hash, gen)` から一意に決まる。
+世代の親子関係は manifest の `parent_gen` で表現する (`parent_run_id` チェーンは永続化しない —
+喪失許容の運用データ、[04-pipeline.md §5.7](04-pipeline.md))。
 
 ## 8.1 Object hash 算出規約
 

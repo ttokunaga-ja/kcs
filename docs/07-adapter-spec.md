@@ -277,18 +277,9 @@ Text Embedding Adapter / Image Embedding Adapter は**採用しない**。同一
 
 > **実地検証済み — 単一 multimodal profile を採用 (2026-07-03 再検証で確定)**: 初回調査は「Gemini Embedding 2 multimodal は preview で pin 不可」を根拠に text-only 緩和を適用したが、事実誤認 (`gemini-embedding-2` は 2026-04-22 に GA、pinned stable 版あり) が判明し**撤回**。再検証 (`tasks/step3-embedding-verify.md` の再検証節) により本節冒頭の本来の契約どおり **単一マルチモーダル Embedding Adapter** を採用する。確定 profile: **`gemini-embedding-2` (GA 版を Adapter が起動時解決して pin、§6) / 768 次元 (MRL 切り詰め — 切り詰め後次元も profile に固定) / cosine / `modality="multimodal"` / `mode="online"`** (Vertex はバッチ推論非対応のため client 側で並列 + 429 backoff)。MVP で実際に embed するのは text chunk のみだが、profile を multimodal にしておくことで Phase 4+ の image/audio embedding を [03-data-model.md §7](03-data-model.md) の全 re-index なしに追加できる。text 品質は MTEB で前世代 text 専用モデルを上回り日本語も同格 (再検証節)。コスト: 10 万 chunk 初回 ≈ $10 (単月 budget 内)。**非 multimodal の embedding profile (`modality="text"` 等、別ベクトル空間への埋め込み) は採用不可** — tool-lock materialize / adapter 登録時に `KCS-E-EMBED-MODALITY-001` (exit 2) で拒否する ([03-data-model.md §7](03-data-model.md))。
 
-```sql
-CREATE TABLE embeddings (
-  id TEXT PRIMARY KEY,
-  target_type TEXT NOT NULL,    -- chunk | image | node | query_cache
-  target_id TEXT NOT NULL,
-  modality TEXT NOT NULL,       -- "multimodal" のみ (非 multimodal は KCS-E-EMBED-MODALITY-001 で採用不可、07 §5.3)
-  vector BLOB NOT NULL,
-  dimensions INTEGER NOT NULL,
-  distance TEXT NOT NULL,
-  profile_hash TEXT NOT NULL
-);
-```
+embedding の SQLite schema (`embeddings` / `chunk_vec`) の正本は [04-pipeline.md §4.3](04-pipeline.md)
+とする (本節は profile — モデル / 次元 / 距離 / modality — の正本。SQL 定義の重複記載は 2026-07-14 に
+解消し、本節から参照する)。
 
 sqlite-vec の制約で vector table を物理分割してもよいが、概念上は単一の Embedding Adapter / 単一の `profile_hash`。profile が一致しない場合、KCS は vector 検索を強行せず再生成または text fallback。
 
@@ -319,6 +310,42 @@ metadata: profile_hash, searched_scopes, fallback_reason
 ```
 
 Rerank Adapter は KCS の検索結果を再順位付けするだけで、**searched_scopes / fallback_reason を隠蔽してはならない**。
+
+## 5.7 Batch 実行契約とプロバイダ採用条件
+
+Batch モードを持つ online Adapter (Markdownize / Embedding) は、[04-pipeline.md §5.8](04-pipeline.md) の
+2 相プロトコルが要求する次の操作を trait として公開する:
+
+```
+upload(bytes, filename)        client 指定の filename を受理する (intent_token 埋込のため)
+create_job(inputs, metadata)   client 任意の metadata (intent_token) を job に付与できる
+get_job(job_id) / list_jobs()  list は account/workspace scope 内の全件を pagination 走査できる
+delete_upload(upload_id)       404 (不存在) は削除成功として報告する
+fetch_output(job_id)
+provider_scope_id()            下記の不変識別子を返す
+```
+
+- **エラー分類の契約**: Adapter は失敗を transient (429 / 5xx / ネットワーク断 — `Retry-After` があれば
+  透過する) と permanent (内容起因の 4xx) に分類して報告する。分類と retry 予算の対応は
+  [04-pipeline.md §5.3](04-pipeline.md)
+- **課金報告**: task 完了時に実測コスト (または単価計算に足る unit 数) を報告する。報告値が cost ledger
+  ([04-pipeline.md §5.4](04-pipeline.md)) の記録源である
+- **provider_scope_id**: `adapter 名前空間 + account 不変 ID (+ workspace 不変 ID)` の連結。表示名・
+  alias 等の可変値は使わない。値は「これから呼び出す client instance」から取得する
+
+**Batch プロバイダ採用条件** (満たさない provider は sync 呼出のみで採用するか、採用しない):
+
+1. job 一覧照会 (または token による job 発見) が可能であること — これが無いと未記録 in-flight の
+   回復が構造的に不可能になる
+2. job 作成 → 一覧可視化の遅延に上限があること (KCS の可視化猶予 既定 10 分以内)
+3. job / 一覧情報の保持期間が KCS の回復期限 (既定 48h) 以上であること
+4. job metadata / filename に client 任意の識別子 (intent_token) を埋め込めること
+5. account / workspace の**安定した**識別子を取得できること (取得不能なら reservation の照合が恒久
+   unknown になり、`kcs batch abandon` 頼みの運用になる)
+6. 投入拒否 (permanent 4xx) にも課金するか否かを宣言すること (課金するなら拒否分岐でも estimated 記帳)
+
+`mistral_ocr_markdownize` の Batch モードは 2026-07-03 の実地検証 (§5.2 末尾) の範囲でこの条件下で
+採用済み。
 
 ---
 
