@@ -55,6 +55,10 @@ default: k = 60, w_text = 1.0, w_vector = 1.0
 ```
 
 - `rank_*` は各バックエンド内の 1 始まり順位。バックエンド内の同点は chunk_id 昇順で順位を確定する
+- **短語 fallback**: query の全 token が 3 文字未満で trigram tokenizer の MATCH が成立しない場合
+  (例: 1〜2 文字の日本語 query — MATCH は 0 件になる)、text バックエンドは `chunks.text` への
+  **bounded LIKE スキャン** (上限 = `candidate_depth`、instr ベースの部分一致) へ fallback する。
+  3 文字以上の token が 1 つでもあれば FTS MATCH を使う
 - 片方のバックエンドにしか現れない候補は、現れない側の項を 0 とする
 - `RRF_score` の同点は chunk_id 昇順
 - text-only / vector-only モードでは fusion せず当該バックエンドの順位をそのまま使う
@@ -93,7 +97,7 @@ similarity = embedding の vector cosine (これのみ。2026-07-03 確定 — e
 適用範囲と決定性:
 
 - MMR は候補プールの RRF 上位 `mmr_depth` 件 (デフォルト 100、`candidate_depth` 以下) に対して **1 回だけ** 適用し、並べ替え済みの**確定順序**を得る。`mmr_depth` 以降の候補は RRF 順のまま末尾に接続する
-- `relevance(c)` = RRF スコアを **MMR 候補プール内で min-max 正規化した値** ([0,1]。全候補が同スコアなら一律 1.0。2026-07-03 確定、step3a §C の決定性論点解消 — 生の RRF スコア (最大 ~1/k) をそのまま使うと mmr_lambda の意味が損なわれるため)。`similarity` は embedding の cosine。embedding が無い場合 (text-only 検索) は MMR を適用せず RRF 順のままとする (ただし `max_per_raw_hash` の dedup は embedding 非依存であり text-only でも適用する)。MMR score の同点は RRF 順、さらに同点は immutable `(scope_id,chunk_hash)` の UTF-8 byte order
+- `relevance(c)` = RRF スコアを **MMR 候補プール内で min-max 正規化した値** ([0,1]。全候補が同スコアなら一律 1.0。2026-07-03 確定、step3a §C の決定性論点解消 — 生の RRF スコア (最大 ~1/k) をそのまま使うと mmr_lambda の意味が損なわれるため)。`similarity` は embedding の cosine。embedding が無い場合 (text-only 検索) は MMR を適用せず RRF 順のままとする (ただし `max_per_raw_hash` の dedup は embedding 非依存であり text-only でも適用する)。**hybrid の候補プールに embedding 未付与の chunk が 1 件でも混在する場合 (部分 enrichment) も MMR は適用しない** — pairwise similarity が全対で計算できないため。dedup のみ適用し RRF 順で返す。MMR score の同点は RRF 順、さらに同点は immutable `(scope_id,chunk_hash)` の UTF-8 byte order
 - `max_per_raw_hash` は alias 展開**前**の unique semantic chunk stream に適用する (ページを跨いで
   raw_hash あたり最大 N semantic chunks)。retained chunk の historical path aliases は provenance 行で
   あり、この上限へ再カウントせず全件を返す
@@ -117,11 +121,12 @@ kcs search "..." --limit 20 --cursor <token>    # snapshot 越し安全
 
 scope ごとの sub-cursor は
 `{scope_id, snapshot_commit, index_generation, max_rowid, max_association_rowid, chunking_config_hash, consumed}`。
-`index_generation` は sqlite.db の再構築 (`kcs repair --rebuild-db`) と purge のたびに単調増加する
-世代番号 (sqlite.db 内に保持)。**replay 時に現在値と不一致なら `KCS-E-SEARCH-CURSOR-001` で拒否する** —
-rebuild は rowid を再採番し、purge は append-only 前提を破って行を物理削除するため、旧 cursor の
-`max_rowid` / `consumed` は意味を失う (再検索が正)。後発 embedding (enrichment) は候補集合を変えうるが、
-rowid 固定 (`max_rowid`) により page 間の chunk 集合は不変 — 順位は cursor 発行時点の集合で再計算される。
+`index_generation` は **rebuild (`kcs repair --rebuild-db`)・purge・embedding enrichment の finalize の
+たびに新規採番する ULID** (単調カウンタではない — sqlite.db 内に保持するため DB 喪失で数が戻っても、
+ULID なら旧 cursor が偶然一致して誤受理されることがない)。**replay 時に現在値と不一致なら
+`KCS-E-SEARCH-CURSOR-001` で拒否する** (再検索が正) — rebuild は rowid を再採番し、purge は
+append-only 前提を破って行を削除し、後発 embedding は hybrid の候補集合・順位を変えるため、
+いずれも旧 cursor の `max_rowid` / `consumed` の意味を失わせる。
 token 全体には canonical `time_travel` selector を、`--since` ではさらに
 page 1 の `since_cutoff` (UTC ISO8601 + `Z`) も保持する:
 
@@ -183,8 +188,11 @@ history projection / include-deleted のいずれも later `latest_normalize_ref
   distinct final-deleted `(path,binding_commit)` を §1.7 の post-ranking group expansion で全件返す
 - `--all-history` / `--since` の「全 commit」は page 1 の `snapshot_commit` から全 parent edge で
   到達可能な commit に限る。orphan / disconnected tag-only commit は `--at` で明示する。visited set で
-  全 parent を辿り、side parent にだけ存在して merge 結果から消えた binding も対象にする
-- chunk 行が検索対象になるのは `kcs index` 成功完了時の auto snapshot (§8.1) 作成後。indexing 途中の chunk はどのモードでも返さない。auto snapshot 作成時に新規 chunk 行へ `first_seen_commit` を刻む ([04-pipeline.md §4.1](04-pipeline.md))
+  全 parent を辿り、side parent にだけ存在して merge 結果から消えた binding も対象にする。
+  **walk 中の shallow 化済み commit (tree 破棄済み — §2.2) は skip し、レスポンスに
+  `shallow_skipped` 件数を可視化して partial (exit 3) とする** — 黙って欠落させない
+- chunk 行が検索対象になるのは auto snapshot (§8.1 — `kcs index` / batch finalize の成功完了時) 作成後。indexing 途中の chunk はどのモードでも返さない。auto snapshot 作成時に新規 chunk 行へ `first_seen_commit` を刻む ([04-pipeline.md §4.1](04-pipeline.md))
+- **時点条件 (正式化)**: デフォルト / `--at` の対象は、上記 join に加えて **`first_seen_commit` が対象 commit の ancestor-or-equal である chunk に限る** — same-gen partial retry の後着 chunk は tree schema v2 ([03-data-model.md §8](03-data-model.md)) により新 commit で公開され、この条件が旧 commit への遡及混入を排除する (ancestry 判定は `--at` の到達可能性 walk と同じ)
 - shallow 化済み commit への `--at` の失敗規則は §2.2
 
 History walk の aggregate security bound は exact に次とする (per-object caps に加算):
@@ -353,7 +361,7 @@ per_scope_timeout_seconds = 2   # 超過 scope は excluded_scopes (reason=timeo
   "excluded_scopes": [],
   "scopes": [
     { "scope_id": "...", "snapshot_commit": "sha256:9f2c...", "max_rowid": 18234,
-      "max_association_rowid": 20117,
+      "max_association_rowid": 20117, "index_generation": "01J...",
       "chunking_config_hash": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
       "consumed": 40 }
   ]
@@ -371,7 +379,8 @@ binding を持たない legacy `v=1` は `KCS-E-SEARCH-CURSOR-001` で拒否す�
   query hash の config mapping には入れず、その cursor stream へ後から再参加させない。registry に後から
   現れた scope も入れない
 - `snapshot_commit` は当該 scope の検索時点 snapshot (commit_hash)、`max_rowid` / `max_association_rowid`
-  は snapshot 時点で index に取り込まれていた chunk / association の上限、`chunking_config_hash` は
+  は snapshot 時点で index に取り込まれていた chunk / association の上限、`index_generation` は
+  page 1 時点の当該 scope の世代 ULID (§1.5 — 不一致は cursor 拒否)、`chunking_config_hash` は
   page 1 の当該 scope effective config、`consumed` は当該 scope から既に返した件数。page 2 で current
   config mapping が 1 件でも違えば query hash mismatch として cursor を拒否する。署名検証後も
   いずれかの field 欠落・型違い・範囲外は cursor error
@@ -613,15 +622,23 @@ phase を耐久記録し (fsync + atomic rename — [04-pipeline.md §1.1](04-pi
 各 phase を冪等に再開できる**ようにする:
 
 ```text
-journal record = { purge_id (ULID), raw_hash 群, reason, phase }
+journal record = { purge_id (ULID), raw_hash 群, reason, actor, started_at,
+                   marker_kind (tombstone | erase),
+                   closure (削除対象の全 object type × hash — 共有派生の live 参照判定の結果を含む),
+                   planned_commit (purged commit の canonical bytes — prepared 相で確定し、
+                                   tombstone / receipt の purged_in_commit と一致する hash を先に固定) }
 phase 順序    = prepared (closure 確定・記帳)
               → tombstoned (tombstone / erase receipt を先に耐久化 — 削除より前)
               → deleted (objects / SQLite / chunks.jsonl / logs の冪等削除)
               → committed (commit_type=purged の publication)
               → done (journal 除去)
 クラッシュ回復 = 次回の書き込み系コマンド冒頭で journal を検出したら、記録 phase から再開する
-              (各 phase は再実行安全)。journal が active な間の fsck は incomplete (exit 3 —
-              [10-operations.md §7.5.1](10-operations.md))
+              (各 phase は再実行安全 — planned_commit を journal から publish するため同一 hash を
+              再現でき、時刻の再計算をしない)。journal が active な間の fsck は incomplete (exit 3 —
+              [10-operations.md §7.5.1](10-operations.md))。**読み取り系 (search / open / view) も
+              冒頭で active journal を検出したら KCS-E-PURGE 系 retryable (exit 3) で拒否する** —
+              marker 耐久化後・削除完了前の窓で削除対象の本文を返さないため (読み取り系は lock を
+              取らないので、この検出が唯一の隔離点)
 ```
 
 tombstone を削除より先に耐久化するのは、「対象 object が消えたのに purge の痕跡が無い」状態
@@ -748,11 +765,11 @@ batch 系と reindex は外部副作用 (upload / job 作成) と batch_requests
 
 ## 8.1 MVP (Phase 1-3) の snapshot 契機
 
-MVP での snapshot 生成契機は次の 2 つのみ (常駐プロセスは持たない、§5):
+MVP での snapshot 生成契機は次の 3 つのみ (常駐プロセスは持たない、§5):
 
 1. 明示的 `kcs snapshot` / `kcs commit` (commit_type=manual)
 2. `kcs index` の成功完了時に同一プロセス内で auto snapshot を作る (commit_type=auto)。ただし tree_hash が現在の HEAD の tree と一致する場合は commit を作らない (no-op、[03-data-model.md §8.2](03-data-model.md))
-3. `kcs batch resume` / `kcs batch retry` / `kcs reindex --force` がオンライン成果 (normalized / chunk) を finalize した成功完了時も同様に auto snapshot を作る ([04-pipeline.md §5.4](04-pipeline.md) — これが無いと後着の成果が次回 `kcs index` まで検索対象にならない §1.6)
+3. `kcs batch resume` / `kcs batch retry` / `kcs reindex --force` がオンライン成果 (normalized / chunk) を finalize した成功完了時も同様に auto snapshot を作る ([04-pipeline.md §5.4](04-pipeline.md))。derived 成果の変化は tree entry の `manifest_hash` / tree の `chunking_config_hash` を変えるため (tree schema v2 — [03-data-model.md §8](03-data-model.md))、**tree_hash が実際に変わり、no-op 規則 (tree_hash 一致なら commit を作らない) はそのまま成立する** — これが無いと後着の成果が次回 `kcs index` まで検索対象にならない (§1.6)
 
 ## 8.2 定期 Auto Snapshot (Phase 4 範囲)
 

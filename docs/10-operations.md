@@ -94,7 +94,9 @@ Sensitive candidates (Tier B, 取り込み予定・要確認):
 
 非対話環境では、承認済み scope または `--yes` / `--approve` のような明示オプションがない限り、`kcs index` は失敗させる。
 
-承認記録には、少なくとも次を残す。
+承認記録には、少なくとも次を残す (**保存先 = `.kcs/scope.json` の `scan_approval` key** — schema 検証
+対象 §12.3。adapter 単位の network opt-in 承認 `approvals[]` ([07-adapter-spec.md §3](07-adapter-spec.md))
+とは別 key)。
 
 ```text
 scope_id
@@ -123,6 +125,9 @@ KCS は secrets 系ファイルの取り込み・オンライン送信事故を�
 を同梱する。パターンは 2 段階に分ける。
 
 **Tier A (デフォルト除外)**: 拡張子・ファイル名から secrets とほぼ確実に判定できるもの。
+system directory (§4 の走査境界既定) も Tier A 相当の built-in 除外に含め、**OS 別の対象パターンは
+built-in template に列挙し、その template の版を `effective_ignore_hash` の入力に含める** (パターン
+更新が承認記録の同一性判定に反映されるように)。
 初回 preview で「除外済み」として表示され、取り込むには明示解除が必要。
 
 ```text
@@ -179,8 +184,9 @@ Tier A 一致の新規ファイル:
 
 Tier B 一致の新規ファイル:
   ローカル取り込み (CAS 保存・ローカル index) は行うが、online_api Adapter への
-  送信 task は pending のまま保留し、kcs status に表示する。
-  対話確認 (kcs index の実行時プロンプト) で一括承認できる。
+  送信 task は **paused (hold_reason=tier_b_approval — [04-pipeline.md §5.2](04-pipeline.md))**
+  として保留し、kcs status に表示する。
+  対話確認 (kcs index の実行時プロンプト) で一括承認できる (承認 = paused 解除)。
 
 非一致の新規ファイル:
   従来どおり自動取り込み (デフォルト全管理を維持)。
@@ -192,7 +198,7 @@ Tier B 一致の新規ファイル:
 
 KCS は、容量効率よりも知識を失わないこと、あとから検索・履歴探索・復元できることを優先する。
 
-したがって、全ファイル管理をデフォルトとする方針は維持する。動画・巨大PDF・画像・Officeファイルも、ユーザーが明示的に ignore しない限り管理対象に含める。唯一の例外は secrets 系の built-in デフォルト除外 (§1.1) であり、これは容量ではなく不可逆な漏洩リスクを理由とする。
+したがって、全ファイル管理をデフォルトとする方針は維持する。動画・巨大PDF・画像・Officeファイルも、ユーザーが明示的に ignore しない限り管理対象に含める。例外は secrets 系の built-in デフォルト除外 (§1.1 — 不可逆な漏洩リスク) と、§4 の走査境界既定 (system directory / VCS repo root / placeholder 等 — 安全側の既定であり容量目的ではない) のみ。
 
 ただし、プロダクトはこの事実を隠してはならない。
 
@@ -200,7 +206,8 @@ KCS は、容量効率よりも知識を失わないこと、あとから検索�
 KCS は検索インデックスだけでなく、原本ファイルを content-addressed archive に保存します。
 各 `.kcs` が管理するのはその `.kcs` が置かれたフォルダ直下のファイルのみです。
 サブフォルダのファイルは (そこに `.kcs` があるか否かに関わらず) 親 `.kcs` は取り込みません。
-対象ファイルを含むサブフォルダには子 `.kcs` が作られ、独立したスコープとして管理されます。
+対象ファイルを含むサブフォルダには子 `.kcs` が作られ、独立したスコープとして管理されます
+(§4 の既定により VCS repo root 配下には作られません)。
 同じ `.kcs` 内では同じ内容を重複保存しません。
 別フォルダの別 `.kcs` に同じ内容のファイルが存在するのは、ユーザーが意図的に複数フォルダへ
 同じファイルを配置した場合に限られ、その場合はフォルダ単位の独立性を優先して重複保存します。
@@ -400,7 +407,7 @@ UI 文言は、過剰な保証を避ける。
 
 ```text
 推奨:
-  KCS 管理下の履歴から完全削除
+  KCS 管理下の本文と派生物を全履歴から削除 (ファイル名と存在の記録は履歴に残ります)
 
 避ける:
   世界中のすべてのコピーを完全削除
@@ -412,7 +419,9 @@ UI 文言は、過剰な保証を避ける。
 影響範囲 preview
 理由入力
 明示確認
-対象 raw / normalized / chunk / embedding / evidence / index の削除
+対象の削除 (raw / prepared / image / normalized / chunk / embedding — 共有派生は live 参照 0 のみ、
+  SQLite 行 (chunks / chunk_config_generations / chunk_vec / embeddings / FTS) と chunks.jsonl 行を含む。
+  正本一覧は [05-runtime.md §3.5](05-runtime.md))
 pack / cache / index rebuild
 KCS 自身のログのスクラブ (該当行の削除またはマスク) と、その完了有無の結果表示
 復元不能な最小 tombstone
@@ -431,7 +440,7 @@ KCS 自身のログのスクラブ (該当行の削除またはマスク) と、
 kcs repair --verify-objects
 ```
 
-- `objects/` 配下の全 CAS object (raw / chunk / tree / commit) を §8.1 の per-type algorithm で検証し、
+- `objects/` 配下の全 CAS object (raw / prepared / image / chunk / embedding / tree / commit) を [03-data-model.md §8.1](03-data-model.md) の per-type algorithm で検証し (embedding は vector 長・有限値・vector digest も — 03 §8.1)、
   保存パス・参照 hash と照合する。chunk は object bytes の content hash ではなく semantic identity hash
   と fan-out key、さらに exact `text` / `text_hash` / normalized span を照合する
   ([03-data-model.md §8.1](03-data-model.md))
@@ -477,8 +486,13 @@ MVP では手動実行のみとする。自動定期検証 (スケジューラ�
      コピー中に kcs コマンドを実行しないことがユーザー前提。厳密な原子性が必要なら
      filesystem スナップショット (APFS/btrfs 等) 上でコピーする。復元後は
      `kcs repair --verify-objects` (§7.5.1) を必ず実行して整合を確認する
-   - sqlite.db は repair --rebuild-db で再構築可能なため、最悪 objects/ と refs/ が
-     保全されていれば復旧できる
+   - sqlite.db は repair --rebuild-db で再構築可能。ただし**最低保全集合は objects/ と refs/ では
+     なく、[03-data-model.md §4.1](03-data-model.md) の truth 区分の全行** (scope.json / config /
+     tool-lock / tombstones + erase receipts / chunks.jsonl / access.jsonl を含む) — これらは
+     いずれも喪失時復旧不能である
+   - **デバイスグローバルの cost-ledger.sqlite は `.kcs` コピーに含まれない** — 別途
+     `sqlite3 cost-ledger.sqlite ".backup <dest>"` (WAL-safe) でバックアップし、復元後は
+     §5.8 の回復 (reconcile) が完了するまで新規 Batch 投入を行わない ([04-pipeline.md §5.4](04-pipeline.md))
 
 2. kcs export <scope> --to <bundle.kcsz>
    - .kcsz は公開用と同一の bundle 形式で、バックアップにも使える
@@ -708,7 +722,7 @@ KCS のすべての CLI コマンドは以下の exit code を返す。
 0   成功 / 全 up_to_date
 1   汎用 failure (詳細不明)
 2   invalid usage / config 不正 / schema validation 失敗
-3   一部失敗 (retryable 残あり)
+3   retryable な失敗が残っている (部分成功・全体 retryable を含む — [06-cli-spec.md §7](06-cli-spec.md))
 4   全失敗 permanent
 5   auth_error (user action 必要)
 6   budget_exceeded により paused
@@ -719,7 +733,7 @@ KCS のすべての CLI コマンドは以下の exit code を返す。
 
 スクリプト連携はこれらを参照する。コマンド固有の補足は各 sub-command が docstring に明記する。
 
-dead pointer (tombstoned / not_found / scope_unreachable) は `4`、tool_profile 不一致による chunk 解決不能は `8` に割り当てる (詳細: [06-cli-spec.md §7](06-cli-spec.md))。
+dead pointer (tombstoned / not_found) は `4`、**scope_unreachable のみは retryable の `3`** (再接続・registry 再登録で回復可能 — [08-evidence-pointer-spec.md §4.3](08-evidence-pointer-spec.md))、tool_profile 不一致による chunk 解決不能は `8` に割り当てる (詳細: [06-cli-spec.md §7](06-cli-spec.md))。
 
 ## 12.3 設定ファイル schema validation
 
@@ -780,7 +794,14 @@ PATCH bump:
   - typo / コメント修正レベル。意味変更なし。
 ```
 
-**Adapter 入出力の `spec_version` bump 規約**: `tool-lock.json` の `spec_version` および Adapter 入出力 schema ([04-pipeline.md §3.1](04-pipeline.md)) の `spec_version` は単調増加の整数とする。bump するのは、フィールドの削除・必須化・意味変更など**旧 Adapter が誤動作しうる変更のみ** (MAJOR 相当。該当 spec と CHANGELOG への明示記載必須)。optional フィールドの追加では bump せず、代わりに Adapter は未知フィールドを無視しなければならない (MUST ignore unknown fields)。不一致時の挙動は分業する: Adapter 側は `invalid_input` として失敗し ([07-adapter-spec.md §8.1](07-adapter-spec.md))、KCS 側は当該 Adapter を `incremental_update` capability なしとみなして full モードで呼び直す ([07-adapter-spec.md §8.4](07-adapter-spec.md))。この full fallback により、`spec_version` の bump が index の停止を引き起こさないことを保証する。
+**tree schema v2 (2026-07-18 確定)**: tree entry へ `normalize.manifest_hash`、tree object へ
+`chunking_config_hash` を追加した ([03-data-model.md §8](03-data-model.md)) — hash/identity 規約の
+変更だが、[08-evidence-pointer-spec.md §8](08-evidence-pointer-spec.md) の 2026-07 改訂と同じく
+**実装・store 公開前の schema 確定であり MAJOR bump ではない**。既存 dev store の v1 tree (両フィールド
+欠落) は legacy として読取可 (欠落 = 旧 semantics)。Step 1-2 実装の tree hashing は v2 対応の rework が
+必要 ([09-mvp-scope.md](09-mvp-scope.md))。
+
+**Adapter 入出力の `spec_version` bump 規約**: `tool-lock.json` の `spec_version` および Adapter 入出力 schema ([04-pipeline.md §3.1](04-pipeline.md)) の `spec_version` は単調増加の整数とする。bump するのは、フィールドの削除・必須化・意味変更など**旧 Adapter が誤動作しうる変更のみ** (MAJOR 相当。該当 spec と CHANGELOG への明示記載必須)。optional フィールドの追加では bump せず、代わりに Adapter は未知フィールドを無視しなければならない (MUST ignore unknown fields)。不一致時の挙動は分業する: Adapter 側は `invalid_input` として失敗する ([07-adapter-spec.md §8.1](07-adapter-spec.md))。**full fallback が有効なのは incremental capability だけが非互換な場合に限る** — spec_version 自体の非互換は full で呼び直しても同じ拒否を再生するため、当該 online Adapter のタスクを failed permanent (Adapter 更新が必要) とし、同梱 deterministic Adapter のベースラインは影響なく継続する ([07-adapter-spec.md §8.1](07-adapter-spec.md) と同旨)。index 全体の停止を引き起こさないという保証は、このベースライン継続が担う。
 
 `commit_type` の値域 ([05-runtime.md §2](05-runtime.md)) のみは「永久に変更しない契約」として MAJOR bump も発動しない約束をしている。これは一般 semver 規約より強い保証である。
 
@@ -802,7 +823,7 @@ level     debug | info | warn | error
 code      error_code (KCS-E-) / event_code (KCS-EV-) / metric_code (KCS-M- — [05-runtime.md §7](05-runtime.md))
 component batch | search | commit | gc | ...
 message   人間可読な短文
-context   任意の JSON object (tool_profile_hash, commit_hash, file_id 等)
+context   任意の JSON object (tool_profile_hash, commit_hash, raw_hash, scope_id 等 — file_id は廃止済み識別子のため使わない)
 ```
 
 ログのローテーションは日次、保持は 30 日 (config 上書き可)。`redact_logs` の

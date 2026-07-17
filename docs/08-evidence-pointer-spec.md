@@ -89,7 +89,9 @@ kcs://scope_01J8ZQ.../sha256:9f2c.../sha256:abc123.../sha256:tool1.../sha256:chu
 
 - URI は **必須フィールドのみ** を持つ。optional フィールド (path_at_commit / heading_path / char_start 等) は
   表示用であり (§2.2)、URI ⇄ JSON の往復で失われてよいのは optional フィールドだけ。
-- `sv` (schema_version) 省略時は `1`。未知の `sv` は KCS-E-CONFIG-SCHEMA 系 error (exit 2)。
+- `sv` (schema_version) 省略時は `1`。**wire 上の `sv` は MAJOR のみの整数** (MINOR/PATCH は載せない —
+  optional フィールド追加は sv 不変で、未知フィールド無視則 (§8) が前方互換を担う)。未知の `sv`
+  (= 未知 MAJOR) は KCS-E-CONFIG-SCHEMA 系 error (exit 2)。
 - 各セグメントは §2 の同名フィールド値をそのまま置く (hash は `sha256:` prefix 込み、commit は commit_hash、
   [03-data-model.md §8.1](03-data-model.md))。percent-encoding は不要 (値域が `[A-Za-z0-9_:.-]` に閉じるため)。
 - 第 2 セグメントがリテラル `object` の URI は **object 参照**であり、Evidence Pointer ではない:
@@ -141,10 +143,13 @@ bulk 系 (`kcs evidence verify --batch <pointers.jsonl>`) は従来どおり各�
 6.  tree entry の normalize.(tool_profile_hash, gen) で normalized instance (unit object 群) を解決
     (gen フィールド欠落は gen=0 と読む)
 7.  chunk_hash で chunk object を解決し char_start/char_end の text を取り出す
-8.  **整合検証**: 解決した chunk object の (raw_hash, tool_profile_hash, gen) が pointer の値
-    (および手順 4-6 を経た場合は tree entry の値) と一致することを検証する。不一致は store
-    corruption として KCS-E-STORE-CORRUPT-001 (not_found 扱い) — cross-wired な pointer が
-    別文書の本文を「解決成功」として返すことを防ぐ (shallow 経路 (2a) でも同じ検証を行う)
+8.  **整合検証**: 解決した chunk object の raw_hash / tool_profile_hash が pointer の値と一致し、
+    手順 4-6 を経た場合はさらに chunk object の gen が tree entry の gen と一致することを検証する
+    (pointer は gen を持たない — gen の照合対象は tree entry と chunk object 内部のみ)。不一致は
+    store corruption として KCS-E-STORE-CORRUPT-001 (not_found 扱い) — cross-wired な pointer が
+    別文書の本文を「解決成功」として返すことを防ぐ。**shallow 経路 (2a) は tree membership を検証
+    できない** — この限界は `commit_shallow: true` が表明し、`--strict` verify は shallow 経路の解決を
+    alive でなく **unverifiable (exit 3)** として返す (時点帰属の偽装を「検証済み」と誤認させない)
 ```
 
 ## 3.2 不変条件
@@ -221,10 +226,13 @@ kcs evidence verify <pointer> [--strict]   # <pointer> の受理形式は §2.3
 
 ```json
 {
-  "status": "alive" | "tombstoned" | "not_found" | "scope_unreachable",
+  "status": "alive" | "tombstoned" | "not_found" | "scope_unreachable" | "unverifiable",
   "details": { ... }
 }
 ```
+
+`unverifiable` は `--strict` 時の shallow 経路 (§3.1 手順 8 — tree membership を検証できない解決)。
+非 strict では従来どおり alive + `commit_shallow: true` で返す。
 
 `--strict`: tombstoned / not_found / scope_unreachable を **error** として扱う (CI / 自動化用)。
 exit code: 全 pointer が alive なら 0。tombstoned / not_found があれば **4** (permanent failure)。

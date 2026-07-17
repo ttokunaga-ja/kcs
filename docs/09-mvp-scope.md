@@ -2,7 +2,7 @@
 
 統合元: 旧 `north-star-scenarios.md` + 旧 `design-homework.md` + 旧 `consolidation-plan.md` の Phase plan + `01-positioning.md` から MVP/Phase 部分の抜粋 (research 検討メモは 2026-07-18 に撤去 — git 履歴で参照可)。
 
-> 本書は **実装着手前に確定する論点** を一所に集める。Step 1 着手前に §1-§4 を確定、Step 3 着手前に §5 の (2)(3) を確定する。
+> 本書は **実装着手前に確定する論点** を一所に集める。Step 1 着手前に §1-§4 を確定する。§5 の各宿題の確定期日と現在の status は **§5.5 の表が正本** (本行に期日を再掲しない — 転記の陳腐化が gate を誤発動させるため)。
 
 ---
 
@@ -74,6 +74,8 @@ Step 2 (2-3ヶ月): kcs-pipeline + kcs-adapter
                   → 同梱 deterministic Adapter でベースライン抽出 (normalized まで。**検索の成立は
                     Step 3 の chunk/FTS/search 実装と合わせて** — §3 の割当が正)
                   → 推奨構成は大手 LLM API による AI 強化 (opt-in)
+                  → 注: tree schema v2 (2026-07-18 — 03 §8) により Step 1-2 実装の tree hashing は
+                    v2 対応 (manifest_hash / chunking_config_hash) の rework が必要
 Step 3 (2-3ヶ月): kcs-index + kcs-search (hybrid + Evidence Pointer)
 Step 4 (1.5-2ヶ月): restore + --at + time-travel
                     + purge 最小形 (tombstone) + evidence verify (単発)
@@ -112,7 +114,7 @@ Step 別の目安 (テスト除く):
 | 初回スキャン preview + 明示承認 / `.kcsignore` | [06-cli-spec.md §2](06-cli-spec.md) / [10-operations.md §1](10-operations.md) | Step 2 |
 | preview のコスト概算・budget 超過警告 | [06-cli-spec.md §2](06-cli-spec.md) / [10-operations.md §1](10-operations.md) | Step 2 |
 | Prepare / Markdownize (full + incremental) / Adapter 実行 | [07-adapter-spec.md](07-adapter-spec.md) / [04-pipeline.md §3](04-pipeline.md) | Step 2 |
-| 同梱 deterministic Adapter によるベースライン index (キーなしで検索成立) | [07-adapter-spec.md §2.1](07-adapter-spec.md) | Step 2 |
+| 同梱 deterministic Adapter によるベースライン抽出 (normalized まで — 検索成立は Step 3 の index/search と合わせて) | [07-adapter-spec.md §2.1](07-adapter-spec.md) | Step 2 |
 | Mistral OCR 系標準 Markdownize Adapter + embedded image 抽出・image object 保存 | [07-adapter-spec.md §5.2](07-adapter-spec.md) / [03-data-model.md §2](03-data-model.md) | Step 2 |
 | batch / retry / resume / budget guardrail | [04-pipeline.md §5](04-pipeline.md) | Step 2 |
 | 構造化 task/artifact descriptor (Adapter 境界の内部 API) | [06-cli-spec.md §9](06-cli-spec.md) | Step 2 |
@@ -340,8 +342,8 @@ Status: コアセマンティクスは decided。残未決 2 件は Phase 4 着�
   - プロンプト規約 5 項: unchanged unit 非出力 / full unit replacement /
     heading 変更は chunk side 対応 / fallback_to_full 短絡 (正本 07 §8.1)
   - fallback_to_full の閾値 hint 衝突時は KCS 側を優先 (正本 07 §8.1)
-  - ストリーミング応答: 許容。unit 完了ごとに persist、失敗時は pending で再開 (正本 07 §8.3)
-  - spec_version 不一致は Adapter が invalid_input として失敗、KCS は full モードで呼び直す (正本 07 §8.1 / §8.4)
+  - ストリーミング応答: 許容。staging に保持し全体検査後に一括公開、中断は failed (retryable) — pending 状態は無い (正本 07 §8.3)
+  - spec_version 不一致は Adapter が invalid_input として失敗、当該 Adapter は failed permanent (full fallback は incremental capability 非互換のみ — 正本 07 §8.1)
   - spec_version の bump 規約 (正本 10 §12.5)
 
 残未決: なし

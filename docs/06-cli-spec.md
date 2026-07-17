@@ -19,10 +19,11 @@ kcs index [--preview|--approve|--yes] [--online|--offline]  # 取り込み (初�
 kcs batch resume [--override-budget]    # 中断タスクの再開 (budget 超過 pause は --override-budget 必須。04-pipeline.md §5.4/§5.7)。
                                         # markdownize online タスクと embedding enrichment パスを両方駆動 (04-pipeline.md §5.4)
 kcs batch retry                         # failed タスクの再試行 (markdownize + embedding。backoff/retry 予算を尊重)
-kcs batch abandon <intent_token|scope/adapter/input_hash>
+kcs batch abandon <intent_token|scope/adapter/input_hash/tool_profile_hash>
                                         # 照合が恒久不能な in-flight Batch job の打ち切り (estimated 記帳 + terminal 化。
-                                        # 指定子は intent_token または batch_requests のタスクキー — tasks.jsonl の
-                                        # task_id は喪失許容のため使わない。kcs status が stalled 行の token を表示。
+                                        # 指定子は intent_token または batch_requests の 4 組タスクキー (3 組では別
+                                        # profile 行と曖昧 — 曖昧時は拒否して token を要求)。tasks.jsonl の task_id は
+                                        # 喪失許容のため使わない。kcs status が stalled 行の token を表示。
                                         # 確認プロンプト必須。残骸掃除完了まで intent_token は保持 — 04-pipeline.md §5.8)
 kcs repair [--rebuild-db|--verify-objects]  # SQLite 再構築 / CAS 整合性検証 (10-operations.md §7.5)
 kcs commit -m "<message>"               # = kcs snapshot create -m
@@ -47,7 +48,7 @@ kcs evidence verify <pointer> [--strict]
 kcs evidence retarget <pointer> [--latest|--at <commit>]  # 設計確定後 (09-mvp-scope.md §5.2)
 ```
 
-`kcs init` は現在フォルダの `.kcs` のみ作成する。子フォルダの `.kcs` は `kcs index` の探索が対象を検出した時点で必要に応じて生成される。この結果、深いフォルダ木では scope 数が多くなる。`kcs search` のデフォルトが全 indexed scope 横断である ([05-runtime.md §1.8](05-runtime.md)) のはこの帰結を受けた設計である。
+`kcs init` は現在フォルダの `.kcs` のみ作成する。子フォルダの `.kcs` は `kcs index` の探索が対象を検出した時点で必要に応じて生成される (**VCS repo root 配下には既定で生成しない** — [03-data-model.md §3](03-data-model.md))。この結果、深いフォルダ木では scope 数が多くなる。`kcs search` のデフォルトが全 indexed scope 横断である ([05-runtime.md §1.8](05-runtime.md)) のはこの帰結を受けた設計である。
 
 `<pointer>` 引数の受理形式 (URI / inline JSON / stdin / hash 短縮形) は [08-evidence-pointer-spec.md §2.3](08-evidence-pointer-spec.md) を正本とする。
 
@@ -231,7 +232,9 @@ purge は常に**全履歴**の raw 本文・派生 artifact を対象とする 
 
 ```text
 kcs evidence verify            検査完了で 0 (結果は status フィールド)。parse 失敗は 2
-kcs evidence verify --strict   全 alive なら 0。tombstoned / not_found が 1 件でもあれば 4
+kcs evidence verify --strict   全 alive なら 0。tombstoned / not_found が 1 件でもあれば 4。
+                               scope_unreachable のみの失敗は 3 (retryable — 08 §4.3)
+kcs evidence verify --batch <pointers.jsonl>   一括 verify (Step 4+ — 08 §4.3)
                                (--batch 混在時も 4。内訳は --json の各行 status で判定)
 kcs open / view / restore      dead pointer (tombstoned / not_found / scope_unreachable) は 4
 kcs evidence retarget          対応なし / ambiguous は 4。
@@ -343,7 +346,7 @@ validation 失敗は **exit 2** + `KCS-E-CONFIG-SCHEMA-NNN`。schema は semver 
 
 # 12. 時刻 / TZ
 
-すべての永続データ (commit timestamps / normalization_runs / access_events / snapshot lineage) は **UTC ISO8601 拡張形式 + suffix `Z`** に固定:
+すべての永続データ (commit timestamps / normalization_runs / access_events / snapshot lineage) は **UTC ISO8601 拡張形式 + suffix `Z`** に固定 (例外 = cost-ledger.sqlite の内部時刻列は UTC epoch ミリ秒 INTEGER — 正本 [10-operations.md §12.4](10-operations.md)):
 
 ```
 正:   2026-04-25T12:00:00Z

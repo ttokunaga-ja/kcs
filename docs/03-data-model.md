@@ -110,6 +110,7 @@ manifest schema:
   "tool_profile_hash": "sha256:tool1...",
   "gen": 0,
   "parent_gen": null,
+  "parent_instance": null,
   "run_id": "run_01H...",
   "units": [
     {
@@ -355,12 +356,16 @@ if inst is None:
     pending
 elif all(u.status == "failed" for u in inst.units):
     failed           # 全滅 — retryable (04-pipeline.md §5.2 の failed → pending と同じ扱い)
+elif any(u.status == "done" and not unit_object_exists(u) for u in inst.units):
+    missing_output   # done 宣言 unit の object 欠落 — failed unit と併存しても partial で隠さない
+                     # (回復対象 = 欠落 done ∪ failed の和集合。欠落を先に判定しないと
+                     #  permanent failed の陰で欠落が恒久に再投入されない)
 elif any(u.status == "failed" for u in inst.units):
     partial          # 成功 unit は検索対象。失敗 unit のみ再投入 (04-pipeline.md §5.2)
-elif all(u.status == "done" and unit_object_exists(u) for u in inst.units):
-    up_to_date
 else:
-    missing_output   # manifest は done を記録しているが unit object が見当たらない
+    up_to_date
+# prepare profile の変更は 04 §2.1 の prepared_hash 変化として再投入を駆動する — 本判定は instance の
+# 存在のみを見るが、§2.1 の差分判定が上流で新 run を積むため up_to_date に留まらない
 ```
 
 判定の正本は manifest + unit object の存在である (`normalization_runs` は SQLite テーブルとしては
@@ -450,7 +455,11 @@ created_at / finished_at
 
 `normalized_path` は持たない。instance は `(raw_hash, tool_profile_hash, gen)` から一意に決まる。
 世代の親子関係は manifest の `parent_gen` で表現する (`parent_run_id` チェーンは永続化しない —
-喪失許容の運用データ、[04-pipeline.md §5.7](04-pipeline.md))。
+喪失許容の運用データ、[04-pipeline.md §5.7](04-pipeline.md))。**incremental で親の raw が異なる場合
+(raw 更新をまたぐ通常 incremental) は `parent_instance = {raw_hash, tool_profile_hash, gen}` を必須で
+記録する** — `parent_gen` は同一 raw 内の局所番号であり、整数だけでは親 instance を一意に復元できない
+(full では null)。**manifest_hash** (tree schema v2 の入力 — §8) は manifest の canonical JCS bytes の
+sha256 とする。
 
 ## 8.1 Object hash 算出規約
 
@@ -517,7 +526,7 @@ embedding_hash = "sha256:" + base16(sha256(JCS({
 ```
 
 - `target_hash` は対象 chunk の **`text_hash`** (chunk 抽出範囲のみの content hash、§8) であって `chunk_hash` ではない。embedding は Markdown 本文そのものの関数なので、同一本文を持つ複数 chunk (別世代・別ファイルの同一断片) は 1 本の `embeddings` 行を共有する — これが **content ベース再利用** ([04-pipeline.md §4.3 / §5.5](04-pipeline.md)) の identity 基盤である。`chunk_vec` (vec0) は `chunk_hash → embedding` の写像として `embeddings` から導出する。
-- embedding object の保存 bytes は **`JCS(identity fields) + LF + base64(vector, float32 little-endian)`** に固定する。fsck ([10-operations.md §7.5.1](10-operations.md)) は identity hash の再計算に加え、vector 長 (= dimensions × 4 bytes) と有限値 (NaN / Inf の拒否) を検査する。
+- embedding object の保存 bytes は **`JCS(identity fields) + LF + base64(vector, float32 little-endian) + LF + lower_hex64(sha256(vector bytes))`** に固定する。fsck ([10-operations.md §7.5.1](10-operations.md)) は identity hash の再計算に加え、vector 長 (= dimensions × 4 bytes)・有限値 (NaN / Inf の拒否)・**vector digest の一致** (有限値への bit flip の検出) を検査する。
 
 ## tree / commit object
 
@@ -530,10 +539,21 @@ embedding_hash = "sha256:" + base16(sha256(JCS({
       "path": "report.pdf",
       "type": "file",
       "raw_hash": "sha256:abc...",
-      "normalize": { "tool_profile_hash": "sha256:tool1...", "gen": 0 }
+      "normalize": { "tool_profile_hash": "sha256:tool1...", "gen": 0,
+                     "manifest_hash": "sha256:mani..." }
     }
-  ]
+  ],
+  "chunking_config_hash": "sha256:cfg..."
 }
+// tree schema v2 (2026-07-18 確定 — 実装・store 公開前の schema 確定で MAJOR bump ではない、
+// [10-operations.md §12.5](10-operations.md)):
+//  - entry.normalize.manifest_hash = 当該 normalized instance manifest の canonical hash
+//    (JCS bytes の sha256 — §2.1)。unit の failed → done 遷移で変わるため、**derived 成果の変化が
+//    tree_hash を変える** = same-gen partial retry の finalize も通常の auto snapshot を生む
+//    ([05-runtime.md §8.1](05-runtime.md))
+//  - tree.chunking_config_hash = snapshot 時点の effective chunking config (§5.3)。再 chunk も同様に
+//    tree_hash を変える
+//  - v1 tree (両フィールド欠落) は legacy として読取可 (欠落 = 旧 semantics)。新規 commit は v2 で書く
 
 // commit — objects/commits/9f/2c/<commit64> に JCS 形式で保存
 {
@@ -604,7 +624,7 @@ tree は entries を単一の flat 配列で持つ。スコープ境界規則 (�
 }
 ```
 
-chunk identity は `(raw_hash, tool_profile_hash, gen, unit_key, heading_path, section_id, char_start, char_end)` で決まり、chunk_hash の算出式は §8.1 に定める (heading_path と section_id は両方 hash 入力。未設定フィールドは省略。`char_start` / `char_end` は unit-local)。`text_hash` は **chunk 抽出範囲のみ** の hash であり、Markdown 全体の hash ではない。`chunking_config_hash` は chunk の**世代**を表すメタデータであり、identity には含めない (§5.3)。chunk object 本体が `gen` を保持するため、tree を失った shallow commit からでも chunk_hash → chunk object → gen で normalized unit instance まで直接解決できる ([08-evidence-pointer-spec.md §3.1](08-evidence-pointer-spec.md))。
+chunk identity は `(raw_hash, tool_profile_hash, gen, unit_key, heading_path, section_id, char_start, char_end)` で決まり、chunk_hash の算出式は §8.1 に定める (heading_path と section_id は両方 hash 入力。未設定フィールドは省略。**`char_start` / `char_end` は unit-local の UTF-8 byte offset・0-based half-open** — 「文字」単位ではない。Normalized Markdown は UTF-8/NFC/LF に固定されるため byte offset は決定的 — [07-adapter-spec.md §5.2.1](07-adapter-spec.md))。`text_hash` は **chunk 抽出範囲のみ** の hash (= sha256(当該 byte 範囲の exact bytes)) であり、Markdown 全体の hash ではない。`chunking_config_hash` は chunk の**世代**を表すメタデータであり、identity には含めない (§5.3)。chunk object 本体が `gen` を保持するため、tree を失った shallow commit からでも chunk_hash → chunk object → gen で normalized unit instance まで直接解決できる ([08-evidence-pointer-spec.md §3.1](08-evidence-pointer-spec.md))。
 
 chunk object の永続 JSON は上記の `spec_version` + identity fields + `text_hash` + exact `text` に固定し、
 自身の `chunk_hash`、path、`first_seen_commit`、`created_at`、`chunking_config_hash` は含めない。

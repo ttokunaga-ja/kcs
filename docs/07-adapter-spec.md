@@ -77,7 +77,7 @@ KCS core
 KCS は `deterministic_library` の Prepare / Markdownize Adapter を同梱する。対象: plain text / Markdown / コード (passthrough + fence 正規化)、PDF text layer 抽出。OCR・レイアウト解析・画像理解は行わない。
 
 - online Adapter が未設定または network 未承認のとき、Markdownize タスクは同梱 deterministic Adapter で実行する (タスクを止めない)。Embedding タスクは生成しない (検索は text fallback、[05-runtime.md §1](05-runtime.md))
-- この状態を **ベースライン index** と呼ぶ。`init → snapshot → search → open` の最低体験ライン ([01-positioning.md §3](01-positioning.md)) はベースライン index のみで成立しなければならない
+- この状態を **ベースライン index** と呼ぶ。`init → index --approve → search → open <pointer>` の最低体験ライン ([01-positioning.md §3](01-positioning.md)) はベースライン index のみで成立しなければならない
 - online Adapter を承認した後の AI 強化は、別 `tool_profile_hash` の artifact として通常の Markdownize / Embedding タスクで生成する (identity 規約 [03-data-model.md §5](03-data-model.md) のとおり。ベースライン artifact とその Evidence Pointer は不変のまま残る)
 
 ---
@@ -109,7 +109,9 @@ revoke: adapter.policy.allow_network = false に設定する。
         以後、当該 scope の新規オンライン送信 task は発行されない
         (送信済みデータの取り消しは保証しない)。
 
-記録:   承認記録に scope_id / tool_id / approved_at / approval_method を残す。
+記録:   承認記録に scope_id / tool_id / **execution_mode / tool_profile_hash (承認時点)** /
+        approved_at / approval_method を残す。送信前に現在の execution_mode / profile と照合し、
+        不一致 = 失効 (再承認要求) — 保存しないと「変わった場合は失効」を永続状態から判定できない。
         **保存先 = `.kcs/scope.json` の `approvals[]` 配列** (schema 検証対象
         [10-operations.md §12.3](10-operations.md)、truth [03-data-model.md §4.1](03-data-model.md))。
         `(scope_id, tool_id)` 単位の行で、失効・revoke は当該行の更新 (atomic rename) で行う。
@@ -278,9 +280,12 @@ Evidence Pointer のバイト位置は保存された bytes に対して定義�
 - **表**: GFM table 記法で inline 保持 (§5.2 規約と同じ — 独立 table object は作らない)
 - **画像参照**: `![...](kcs://<scope_id>/object/image/<image_hash>)` のみ
   ([08-evidence-pointer-spec.md §2.3](08-evidence-pointer-spec.md))
-- **生 HTML / autolink**: 禁止 (provider 由来テキストの escape 規約は §5.2 bbox_annotation の
-  CommonMark source escape と同系 — `&` `<` `>` の実体参照化 + ASCII punctuation の `\` 前置)
-- **code fence**: CommonMark の ``` fence (チルダ不可)。fence 内は無変換
+- **生 HTML / autolink**: 禁止。**provider 由来の生テキストを Markdown 本文へ埋め込む場合は、由来を
+  問わず §5.2 bbox_annotation と同じ CommonMark source escape を適用する** (`&` `<` `>` の実体参照化 +
+  ASCII punctuation の `\` 前置 — bbox 専用の手順ではなく全 Markdownize 出力共通の規約)
+- **code fence**: CommonMark の ``` fence (チルダ不可)。**fence 内の「無変換」は構文的変換 (escape /
+  参照置換) の禁止のみを意味する — エンコーディング (UTF-8/NFC)・改行 (LF)・trailing space 禁止は
+  fence 内にも適用する** (適用しないと CRLF/NFD を含むコードで v1 の byte 決定性が壊れる)
 - 上記の準拠は KCS 側受け入れ検査 ([04-pipeline.md §3.2](04-pipeline.md)) の構造検証に含める
 
 media 別の変換規約 (何を見出しにするか等) は Adapter 実装の裁量 (tool_profile_hash が識別する)。
@@ -370,7 +375,9 @@ provider_scope_id()            下記の不変識別子を返す
 4. job metadata / filename に client 任意の識別子 (intent_token) を埋め込めること
 5. account / workspace の**安定した**識別子を取得できること (取得不能なら reservation の照合が恒久
    unknown になり、`kcs batch abandon` 頼みの運用になる)
-6. 投入拒否 (permanent 4xx) にも課金するか否かを宣言すること (課金するなら拒否分岐でも estimated 記帳)
+6. 投入拒否 (permanent 4xx) にも課金するか否かを宣言すること。**課金する provider の Adapter は、
+   拒否応答時に billable_units または estimated_usd を機械可読で返却する** — KCS は submit_rejected の
+   terminal 化と同一 Tx で estimated 記帳する ([04-pipeline.md §5.4](04-pipeline.md) DDL 注記)
 
 `mistral_ocr_markdownize` の Batch モードは 2026-07-03 の実地検証 (§5.2 末尾) の範囲でこの条件下で
 採用済み。
@@ -494,7 +501,8 @@ MVP における Adapter の脅威モデルを次のとおり確定する。
    閾値の Adapter 側 hint は KCS 側 hint と衝突したら **KCS 側を優先**
 5. spec_version 不一致なら、Adapter は invalid_input として失敗
 6. 出力は KCS 側の受け入れ検査 (04-pipeline.md §3.2) を通過しなければ persist されない。
-   違反は KCS-E-ADAPTER-CONTRACT-001 として reject され full に fallback する
+   違反は KCS-E-ADAPTER-CONTRACT-001 として reject され、**incremental capability 非互換の場合に
+   限り** full に fallback する (spec_version 非互換は下記のとおり fallback しない)
 ```
 
 `spec_version` の bump 規約は [10-operations.md §12.5](10-operations.md) を正とする。**full fallback (§8.4) が有効なのは incremental capability だけが非互換な場合に限る** — full request も同じ `spec_version` を含むため、spec_version 自体の非互換は full で呼び直しても同じ invalid_input を再生するだけである。この場合は `KCS-E-ADAPTER-CONTRACT-001` 系の明示エラーとして当該 online Adapter のタスクを failed permanent (Adapter 更新が必要) にし、同梱 deterministic Adapter のベースライン (§2.1) は影響を受けず継続する。
@@ -535,7 +543,10 @@ USER:
 公開しない — §3.2 の「違反応答は 1 unit も persist しない」と整合)。ストリーミング失敗時は staging を
 破棄せず、**完了済み unit は保全したまま task を failed (retryable) にする** — manifest には `pending`
 という unit 状態は存在しない ([03-data-model.md §2.1](03-data-model.md) の遷移は failed → done のみ)。
-retry は staging の完了済み unit を再利用してよいが、確定は常に全体検査の通過後に行う。
+**retry の合成規則**: staging の完了済み bytes は凍結し、retry は**未完了 unit のみ**を返す契約とする。
+KCS が staging + retry 応答を合成し (同一 unit_key の重複は contract violation として reject —
+staging 側が first instance)、**完成集合に対して**受け入れ検査 (incremental は V1〜V6、full は full
+契約) を適用してから一括公開する。
 
 ## 8.4 Capability 宣言なしの Adapter
 
