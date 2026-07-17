@@ -260,7 +260,7 @@ purge の例外性は次のように担保します:
    `--reason <legal|privacy|misingest|...>` を必須引数とする。
 ```
 
-つまり KCS は「忘れない」を理念としつつ、「忘れる必要があるときは、忘れたことを忘れない」かたちで purge を内包します。詳細手順は [05-runtime.md](05-runtime.md) §3 (Purge) と [06-cli-spec.md](06-cli-spec.md) §6 を正本とする。共有環境での purge 伝播は v2 検討事項 (経緯: research/synchronization.md — 正本ではない)。
+つまり KCS は「忘れない」を理念としつつ、「忘れる必要があるときは、忘れたことを忘れない」かたちで purge を内包します。詳細手順は [05-runtime.md](05-runtime.md) §3 (Purge) と [06-cli-spec.md](06-cli-spec.md) §6 を正本とする。共有環境での purge 伝播は v2 検討事項 (経緯: 旧 research/synchronization.md — git 履歴)。
 
 ---
 

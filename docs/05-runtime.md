@@ -1,6 +1,6 @@
 # 05 Runtime
 
-統合元: `research/hybrid.md` (検索モード) + `research/commit_snapshot.md` (commit_type, GC, purge) + 一部 `research/read_only.md` (検索結果での書き込み境界) + 一部 `research/productization_notes.md` (運用)。いずれも正本ではない (経緯参照用)。
+統合元: 旧 `research/hybrid.md` (検索モード) + 旧 `research/commit_snapshot.md` (commit_type, GC, purge) + 一部旧 `research/read_only.md` (検索結果での書き込み境界) + 一部旧 `research/productization_notes.md` (運用)。いずれも正本ではなく、2026-07-18 に docs から撤去 (経緯は git 履歴で参照可)。
 
 ---
 
@@ -60,7 +60,7 @@ default: k = 60, w_text = 1.0, w_vector = 1.0
 - text-only / vector-only モードでは fusion せず当該バックエンドの順位をそのまま使う
 - 実装規則: `candidate_depth` の上限は rank 計算 (window 関数等) の**入力になる内側段 (サブクエリ)** で
   効かせる。外側の LIMIT では全マッチ行が rank 計算の入力に入り、大ヒット数クエリで実行コストが
-  数十倍に膨張する (出典: [research/folder-history-sqlite-design.md](research/folder-history-sqlite-design.md) §18 の実測 — VM step 1,074 → 70,374)
+  数十倍に膨張する (出典: 旧 `research/folder-history-sqlite-design.md` §18 の実測 — VM step 1,074 → 70,374。2026-07-18 撤去、git 履歴で参照可)
 
 ```toml
 [search.rrf]

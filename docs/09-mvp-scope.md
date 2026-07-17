@@ -1,6 +1,6 @@
 # 09 MVP Scope
 
-統合元: `north-star-scenarios.md` + `design-homework.md` + `consolidation-plan.md` の Phase plan + `01-positioning.md` から MVP/Phase 部分の抜粋。
+統合元: 旧 `north-star-scenarios.md` + 旧 `design-homework.md` + 旧 `consolidation-plan.md` の Phase plan + `01-positioning.md` から MVP/Phase 部分の抜粋 (research 検討メモは 2026-07-18 に撤去 — git 履歴で参照可)。
 
 > 本書は **実装着手前に確定する論点** を一所に集める。Step 1 着手前に §1-§4 を確定、Step 3 着手前に §5 の (2)(3) を確定する。
 
@@ -207,7 +207,7 @@ TTFV (enriched)   online 承認 → 最初の 100 ファイルが AI 強化済�
                                        目標: 承認から 15 分以内
 Cost 予実比       preview 概算 vs 実績  目標: 乖離 ±30% 以内 (D1 全量 AI 強化時)
 試算根拠          Markdownize 単価      Mistral OCR 4 Batch $2 / 1,000 pages 前提
-                                       (研究メモ: research/markdown.md。単価改定時は本表を更新)
+                                       (研究メモ: 旧 research/markdown.md — git 履歴。単価改定時は本表を更新)
 ```
 
 ## 4.2 シナリオ凍結規律
@@ -384,7 +384,6 @@ docs/
   09-mvp-scope.md              本書
   10-operations.md             横断規約 (semver / 観測 / リネーム表)
   11-requirements.md           既存要件ドラフト
-  research/                 設計検討メモ (正本ではない)
 ```
 
 ## 6.2 凍結ゲート

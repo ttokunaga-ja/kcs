@@ -70,11 +70,10 @@ cache = scope_registry / aggregator      検索キャッシュ: 探索対象一�
 
 各 spec は前番の概念を前提にできる構成。逆順参照 (例: 03 が 06 を前提) は基本的に発生しない。**`11-requirements.md` は DEPRECATED で読む順序の対象外** (新規読者は読まないこと、`01-` 〜 `10-` のみで完結する)。
 
-## 1.1 設計検討メモ (正本ではない)
+## 1.1 設計検討メモ (撤去済み)
 
-| ディレクトリ | 内容 |
-| --- | --- |
-| [research/](research/README.md) | LLM 出力由来の設計検討メモ 16 本を要点版に圧縮。**正本ではない**。設計判断の経緯参照用 |
+旧 `docs/research/` (LLM 出力由来の設計検討メモ + folder-history 独立設計書) は 2026-07-18 に docs から
+撤去した — 正本は `01-` 〜 `10-` の spec のみ。経緯を参照する場合は git 履歴 (撤去直前のコミット) を辿る。
 
 ---
 
@@ -138,7 +137,7 @@ ADR (Architecture Decision Records) フォルダは廃止しました。本プ�
 
 - **正本は `docs/*.md` の 10 本 spec** (current truth)
 - 「なぜそう決めたか」は spec の各セクション冒頭に短く埋め込む (例: `01-positioning.md §1.1`「なぜ local-first であって offline-first ではないか」)
-- 設計検討の経緯は `docs/research/` のメモから git history で辿れる
+- 設計検討メモ (旧 `docs/research/`) は 2026-07-18 に撤去済み — 経緯は git history で辿れる
 
 将来、本当に「逆方向の判断もありえた」「外部から問われたら答える義務がある」決定が出てきた時点で、改めて `adr/` を作る方針です。Phase 1 着手前の今、ADR を運用するコストはメリットを上回らないと判断しています ([09-mvp-scope.md §6](09-mvp-scope.md))。
 

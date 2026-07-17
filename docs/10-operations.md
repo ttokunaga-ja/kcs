@@ -733,7 +733,7 @@ validation 失敗は exit code 2 で停止し、`KCS-E-CONFIG-SCHEMA-NNN` を返
 誤:   2026-04-25T12:00:00+09:00 (local 表記)
 ```
 
-ユーザー向け UI 表示時のみ local TZ に変換する。snapshot lineage の順序判定は UTC タイムスタンプを使い、Lamport/HLC 系の論理時計は v0 では採用しない (採用判断は v2 の同期設計で別途。経緯: research/synchronization.md — 正本ではない)。
+ユーザー向け UI 表示時のみ local TZ に変換する。snapshot lineage の順序判定は UTC タイムスタンプを使い、Lamport/HLC 系の論理時計は v0 では採用しない (採用判断は v2 の同期設計で別途。経緯: 旧 research/synchronization.md — git 履歴)。
 
 ## 12.5 semver / 互換性 promise
 
@@ -798,6 +798,7 @@ false への変更は明示設定のみで行える。
 ## 12.7 命名リネーム表 (旧 → 新)
 
 過去メモから現行設計への移行で発生した renaming を一覧化する。実装者はこの表を grep して旧称残置を排除する。
+(出所列の research/*.md は 2026-07-18 に docs から撤去済み — git 履歴で参照可)
 
 ```text
 旧称                            | 現行                                | 出所

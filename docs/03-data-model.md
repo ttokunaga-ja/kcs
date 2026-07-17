@@ -1,6 +1,6 @@
 # 03 Data Model
 
-統合元: `research/git_kcs.md` (CAS / DAG) + `research/kcs.md` (.kcs layout) + `research/hash.md` (identity) + `research/read_only.md` (write boundary)。いずれも正本ではない (経緯参照用)。
+統合元: 旧 `research/git_kcs.md` (CAS / DAG) + 旧 `research/kcs.md` (.kcs layout) + 旧 `research/hash.md` (identity) + 旧 `research/read_only.md` (write boundary)。いずれも正本ではなく、2026-07-18 に docs から撤去 (経緯は git 履歴で参照可)。
 
 ---
 
@@ -91,7 +91,7 @@ fallback で読み、canonical と legacy
 Windows で物理 leaf にできない既存 Unix 名も read/inspect は可能とし、restore 等の物理化直前に
 対象 OS の規則を別途検証する。
 
-**format_version**: 旧称 `VERSION 0.1.0` (research/kcs.md) は `kcs_format_version` に統一。semver は [10-operations.md §12.5](10-operations.md) 参照。
+**format_version**: 旧称 `VERSION 0.1.0` (旧 research/kcs.md) は `kcs_format_version` に統一。semver は [10-operations.md §12.5](10-operations.md) 参照。
 
 ## 2.1 normalized instance と全文 view
 

@@ -1,6 +1,6 @@
 # 04 Pipeline
 
-統合元: `research/diff.md` (units / 差分判定) + `research/db.md` (SQLite schema / 検索バックエンド) + `research/batch.md` (タスク実行 / retry / budget)。いずれも正本ではない (経緯参照用)。
+統合元: 旧 `research/diff.md` (units / 差分判定) + 旧 `research/db.md` (SQLite schema / 検索バックエンド) + 旧 `research/batch.md` (タスク実行 / retry / budget)。いずれも正本ではなく、2026-07-18 に docs から撤去 (経緯は git 履歴で参照可)。
 
 ---
 
@@ -32,7 +32,7 @@ SQLite (FTS5 + sqlite-vec, query acceleration)
 
 ## 1.1 ingest / スキャンの安全規則
 
-working tree の読み取りは次の規則に従う (出典: [research/folder-history-sqlite-design.md](research/folder-history-sqlite-design.md) §20 の監査済み規範の KCS 適応):
+working tree の読み取りは次の規則に従う (出典: 旧 `research/folder-history-sqlite-design.md` §20 の監査済み規範の KCS 適応 — 2026-07-18 撤去、git 履歴で参照可):
 
 - **単一 open**: raw_hash の計算と保存する bytes は**同一の open・同一のストリーム**から得る。hash 用と
   保存用に 2 回 open すると、その間の書き換えで「hash A の名前に内容 B」が保存され得る (CAS の破壊)
@@ -731,8 +731,8 @@ Batch 型 online Adapter ([07-adapter-spec.md §5.7](07-adapter-spec.md)) は「
 collect」の各段の間にクラッシュ窓があり、provider 側に課金・機密の実体 (upload・job) が残る。
 §5.5 の done 短絡はローカル出力の重複を防ぐだけで、**provider 側に作成済みの job を KCS が知らない
 状態 (無記録の in-flight)** は防げない。二重課金防止は次の 2 相プロトコルを正本とする (設計出典:
-[research/folder-history-sqlite-design.md](research/folder-history-sqlite-design.md) §9 の多エンジン
-監査 r8〜r20 で固めた機構の KCS 適応。原則 = **外部に副作用を起こす前に意図を耐久記録する**。課金の
+旧 `research/folder-history-sqlite-design.md` §9 の多エンジン監査 r8〜r20 で固めた機構の KCS 適応 —
+2026-07-18 撤去、git 履歴で参照可。原則 = **外部に副作用を起こす前に意図を耐久記録する**。課金の
 記録喪失は有界だが、無記録の in-flight job は無制限に残る)。
 
 **記録の正本**: `cost-ledger.sqlite` の `batch_requests` 行 (DDL は §5.4 が SQL 正本)。tasks.jsonl は
