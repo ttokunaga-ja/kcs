@@ -57,7 +57,7 @@ opt-in の単位・寿命・revoke の正本は [07-adapter-spec.md §3](07-adap
 - AI 検索を試したいが、クラウド丸投げは嫌
 ```
 
-**MVP では一般ユーザー向けではない**。GUI も MVP では持たない (CLI + 構造化 API のみ)。広げるのは、上記層で確実に動いてから。
+**MVP では一般ユーザー向けではない**。GUI も MVP では持たない (CLI + 構造化出力 `--json` のみ。外部 Agent 向け API は Phase 5 — [09-mvp-scope.md §3.1](09-mvp-scope.md))。広げるのは、上記層で確実に動いてから。
 
 ---
 

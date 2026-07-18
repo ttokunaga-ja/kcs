@@ -98,7 +98,9 @@ kcs://scope_01J8ZQ.../sha256:9f2c.../sha256:abc123.../sha256:tool1.../sha256:chu
   `kcs://<scope_id>/object/<type>/<hash>` (例: normalized view 内の画像参照
   `kcs://<scope_id>/object/image/<image_hash>`、[07-adapter-spec.md §5.2](07-adapter-spec.md))。
   `kcs open` はこれを受理して該当 object を解決する。Evidence Pointer URI の第 2 セグメント (commit) は
-  常に `sha256:` prefix を持つため、リテラル `object` と衝突しない。
+  常に `sha256:` prefix を持つため、リテラル `object` と衝突しない。fork 複製 (`kcs import
+  --as-new-scope`) 内の旧 scope_id を含む object URI は、文脈 store に該当 hash の object があれば
+  自 store で解決する ([06-cli-spec.md §1.1](06-cli-spec.md) 手順 1a — hash が identity)。
 
 CLI の `<pointer>` 引数はすべて以下の受理規則に従う (優先順位順に prefix で判定):
 
@@ -160,7 +162,10 @@ bulk 系 (`kcs evidence verify --batch <pointers.jsonl>`) は従来どおり各�
     返さない → not_found)。**v2/v3 tree ではさらに、chunk の publication と config association の
     introduction ([04-pipeline.md §4.1](04-pipeline.md)) が pointer の commit の ancestor-or-equal で
     あることも検証する** — manifest で done でも当該 commit 時点で未公開の chunk を証拠にしない
-    (cache 参照のため、この検証の失敗は corruption ではなく not_found — rebuild 後に再評価できる)。
+    (cache 参照のため、association の**不在**による失敗は corruption ではなく not_found — rebuild 後に
+    再評価できる。**sqlite.db 自体の不在・再構築中はこの検証を実行できない — not_found ではなく
+    `KCS-E-INDEX-REBUILDING-001` の再構築要求を返し ([05-runtime.md §6](05-runtime.md))、検証不能を
+    「不在の確定」と混同しない**)。
     v1 tree (manifest_hash 欠落) はこれらの検証を行えない — legacy 解決とし、
     --strict verify は shallow 経路と同じく unverifiable (exit 3) を返す
 6b. entry の manifest object が purge により欠落している場合 (raw_hash の **tombstone または
@@ -226,11 +231,11 @@ cursor 再計算など tree 全体を要する操作に限る ([05-runtime.md §
 
 ## 4.1 Tombstone レスポンス
 
-raw_hash に active な tombstone (末尾 event = `purged`) がある場合 (= purge 済みだが履歴上は記録。retired は該当しない):
+raw_hash に active な tombstone (末尾 event = `purged`) がある場合 (= purge 済みだが履歴上は記録。retired は該当しない)。レスポンス body の `status` は §4.3 の union と同じ語彙 (`tombstoned`) を使う — purge の事実は `purged_*` フィールドが表す:
 
 ```json
 {
-  "status": "purged",
+  "status": "tombstoned",
   "purged_at": "2026-04-25T12:00:00Z",
   "purged_reason": "legal" | "privacy" | "misingest" | "copyright" | "other",
   "purged_in_commit": "sha256:9f2c...",

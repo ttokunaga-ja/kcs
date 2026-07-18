@@ -124,7 +124,9 @@ kcs search "..." --limit 20 --cursor <token>    # snapshot 越し安全
 scope ごとの sub-cursor は
 `{scope_id, snapshot_commit, index_generation, max_rowid, max_association_rowid, chunking_config_hash, consumed}`。
 `index_generation` は **rebuild (`kcs repair --rebuild-db`)・purge・embedding enrichment の finalize・
-index / batch finalize で `chunk_fts` の内容が変化した場合・および GC の shallow 化実行
+index / batch finalize で `chunk_fts` の内容が変化した場合・tombstone lifecycle の更新
+(retire・再 purge — active-tombstone 判定が検索の可視集合を変えるため、purge の回転と対称。
+[§3.5](05-runtime.md))・および GC の shallow 化実行
 (`--all-history` cursor の walk 対象が変わる) の、いずれでも新規採番する ULID**
 (単調カウンタではない — sqlite.db の `index_metadata` 表 ([04-pipeline.md §4.1](04-pipeline.md)) に保持するため
 DB 喪失で数が戻っても、ULID なら旧 cursor が偶然一致して誤受理されることがない。FTS 内容変化でも回転する
@@ -523,7 +525,10 @@ GC (tiered retention / `kcs gc --prune-unreachable` を含む) が削除して�
 - tree object (shallow 化対象 commit のもの。**ただし同一 tree hash を非 shallow の commit が参照して
   いる場合は削除しない** — tree は content hash 共有されるため、reachability 確認 (全非 shallow commit
   からの参照 0) が削除の前提)
-- SQLite index / FTS など objects/ から再構築可能な cache
+- SQLite index / FTS など objects/ から再構築可能な cache (index を削除すると再構築までの間、
+  検索と pointer 解決の 6a/6b 検証は実行不能 — このときの解決は not_found ではなく
+  `KCS-E-INDEX-REBUILDING-001` の再構築要求を返す [§6・[08-evidence-pointer-spec.md §3.1](08-evidence-pointer-spec.md)]。
+  検証不能を「不在の確定」と混同しない)
 - どの commit からも参照されない中間 object (中断した index が残した prepared 等)
 ```
 
@@ -582,11 +587,11 @@ KCS は「原則として忘れない」が、**purge は「忘れる」ので�
 
 ```text
 purge 後の pointer 解決:
-1. raw_hash が tombstone を持つ → tombstone レスポンス
+1. raw_hash が active な tombstone を持つ → tombstone レスポンス (status = tombstoned)
    {
-     "status": "purged",
+     "status": "tombstoned",
      "purged_at": "2026-04-25T12:00:00Z",
-     "purged_reason": "legal" | "privacy" | "misingest",
+     "purged_reason": "legal" | "privacy" | "misingest" | ...  (enum の正本 = 08 §4.1),
      "purged_in_commit": "sha256:9f2c...",
      "raw_hash": "sha256:..."
    }
@@ -653,9 +658,13 @@ publication と同一の locked mutation 内で active tombstone を**退役 (re
 レコードの events[] へ `retired` を append する (下記 lifecycle 形式)。**耐久順序**: retire の
 append は再 publication の snapshot finalize (§8.1 — chunks.jsonl → SQLite → commit / ref publish)
 の**完了後**に行う。間で crash した場合は tombstone が active のまま残る (安全側 — 解決は
-tombstoned)。次回の locked mutation または fsck が「active tombstone × 同一 raw の ref 到達可能な
-再 publication commit」を検出したら retired event を補完する (erase receipt の crash 整合規則と
-同型)。以後の
+tombstoned)。retire append の完了時に index_generation を新規採番する (§1.5 — finalize〜retire 間に
+発行された cursor の replay が、退役後の可視集合で別 stream を再計算することを拒否で防ぐ)。
+次回の locked mutation または fsck が「active tombstone × 同一 raw の ref 到達可能な
+再 publication commit **であって、末尾 purged event の `in_commit` を ancestor に持つもの
+(= 当該 purge より後の publication)**」を検出したら retired event を補完する (erase receipt の
+crash 整合規則と同型。**この因果条件が無いと、再 purge 後も ref に残る過去の resurrection commit を
+誤検出して、新しい tombstone を退役させてしまう**)。以後の
 open / view / verify / 解決は alive を返す (退役なしには「tombstone 最優先」の解決規則と上記の
 「再び alive」が両立しない)。**retired event には `resurrection_commit` (再 publication を刻んだ
 commit — §8.1 no-op 例外 (a)) を記録する** — purge 前 commit を指す旧 pointer の解決は、このリンクを
@@ -704,9 +713,12 @@ phase 順序    = prepared (closure 確定・記帳)
               OS アプリ起動の直前に再検査する (起動後は取消不能 — 検査はそこまでに完了させる)
 ```
 
-**in-flight Batch との整合**: prepared 相で、対象 raw_hash を入力とする pending / running の batch タスク
-(batch_requests state 0/1) を abandon 相当で terminal 化し (estimated 記帳 — [04-pipeline.md §5.8](04-pipeline.md))、
-provider 上の対応 upload を掃除する。purge 後に相 3 collect が出力を得た場合は、persist 直前の
+**in-flight 外部実行との整合**: prepared 相で、**当該 scope (purge を実行する `.kcs` の scope_id) の**
+対象 raw_hash を入力とする pending / running の外部実行タスク (batch_requests state 0/1 —
+`request_kind` = batch / sync の両方。表はデバイスグローバルのため、scope_id 条件が無いと同一 raw を
+持つ**別 scope** の実行中 request まで terminal 化・掃除してしまう — purge は `.kcs` 単位) を
+abandon 相当で terminal 化し (estimated 記帳 — [04-pipeline.md §5.8](04-pipeline.md))、
+provider 上の対応 upload (batch 行のみ) を掃除する。purge 後に相 3 collect が出力を得た場合は、persist 直前の
 tombstone 再検査で破棄する ([04-pipeline.md §5.8](04-pipeline.md) 相 3)。
 
 tombstone を削除より先に耐久化するのは、「対象 object が消えたのに purge の痕跡が無い」状態

@@ -33,7 +33,8 @@ raw / prepared / image / chunk / embedding / manifest / toollock / tree / commit
 .kcs/
   HEAD
   config.toml         folder-scope の設定 (ignore, chunking, search, budget)
-  scope.json          scope_id (init 時採番の ULID、以後不変・export/import でも保持) と
+  scope.json          scope_id (init 時採番の ULID、以後不変・export/import でも保持 — 例外 =
+                      kcs import --as-new-scope の fork 複製が新 ULID を採番 [06-cli-spec.md §10]) と
                       このフォルダ自身・子 .kcs リンク (旧称 folder.json は廃止)
   tool-lock.json      Adapter capability 記録 (cmd/url/auth は含めない)
   manifest.json       working/index state (永続的真実は tree/commit object)
@@ -113,12 +114,16 @@ Windows で物理 leaf にできない既存 Unix 名も read/inspect は可能�
 **論理名の truth**: digest は一方向であり、canonical ref (leaf + commit_hash 値) からは論理 tag 名を
 復元できない。tag 作成時に `refs/tags-v1/names.jsonl` (append-only JSONL) へ
 `{ digest64, logical_name (NFC 原表記), recorded_at }` を append する — これが論理 tag 名の truth
-(chunks.jsonl と同じ追記・fsync 規律 — [04-pipeline.md §1.1](04-pipeline.md))。**書込順序 =
+(書込は [04-pipeline.md §1.1](04-pipeline.md) の fsync 規律。**torn tail は chunks.jsonl と同型** —
+末尾の不完全行のみ切り詰めて無視し ([05-runtime.md §8.1](05-runtime.md))、途中の malformed 行は
+corruption)。**書込順序 =
 names 行 append (fsync) → ref 作成** (逆順は crash で名前なし ref を作る)。列挙・表示・export は
 names.jsonl で digest を解決する。対応行の無い canonical ref は fsck が corruption として報告する
-([10-operations.md §7.5.1](10-operations.md))。ref の無い names 行は tag 削除後の残存として正常
-(順序の帰結でもある)。同一 digest の複数行は最終行を表示名とする (NFC + lowercase が同じ名前は
-同一 slot — 表記ゆれの上書きは append で表現)。
+(fsck は全行の schema と digest ↔ logical_name の対応、canonical ref ↔ 最終有効行の対応も検査する —
+[10-operations.md §7.5.1](10-operations.md))。ref の無い names 行は tag 削除後の残存として正常
+(順序の帰結でもある — 削除 `kcs tag --delete` は `.kcs/.lock` 下で ref のみを atomic に除去し
+names 行は残す [06-cli-spec.md §1](06-cli-spec.md))。同一 digest の複数行は最終行を表示名とする
+(NFC + lowercase が同じ名前は同一 slot — 表記ゆれの上書きは append で表現)。
 
 **format_version**: 旧称 `VERSION 0.1.0` (旧 research/kcs.md) は `kcs_format_version` に統一。semver は [10-operations.md §12.5](10-operations.md) 参照。**保存場所 = `.kcs/scope.json` の `kcs_format_version` フィールド** (init 時に記録し migration でのみ更新。読めない・欠落した store は旧版とみなし read-only + migration 誘導 — 互換判定の入力)。
 

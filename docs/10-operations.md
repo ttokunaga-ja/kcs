@@ -496,9 +496,12 @@ object の欠落は corruption とする (古い退役 event が新規破損を�
 なら incomplete exit 3。marker 無し missing は ordinary store corruption、malformed / identity-conflicting
 receipt も corruption とする。verified raw と receipt の共存は、末尾 event が `retired` の lifecycle なら**正常**
 (resurrection — [05-runtime.md §3.5](05-runtime.md))。末尾 event が `erased` のまま verified raw が
-存在する場合は raw を正とし、locked repair / 次の locked mutation で `retired` event を append して
-整合させる (**receipt は除去しない** — 除去すると旧 commit が参照する manifest 欠落を説明する
-ものが消える)。
+存在する場合は raw を正とし、**その再 publication commit (末尾 erased event の `in_commit` を
+ancestor に持つ ref 到達可能な commit) が存在するときに**、locked repair / 次の locked mutation で
+`retired` event を append して整合させる (**receipt は除去しない** — 除去すると旧 commit が参照する
+manifest 欠落を説明するものが消える。**commit がまだ無い場合 — snapshot finalize 前の crash — は
+「未 finalize の進行状態」として incomplete (exit 3) とし、append しない** —
+[05-runtime.md §3.5](05-runtime.md) の因果条件と同型)。
 
 erase receipt の validation は schema_version で分岐する。**v2 (events[])**: strict schema / leaf
 identity に加え、各 event が kind 別の必須 field (erased / retired 共通 = `at`・`in_commit`・`actor`、
@@ -506,7 +509,8 @@ retired はさらに `resurrection_commit`) を持つこと、`erased` event の
 CAS で ref-reachable な `commit_type=purged` commit を指すこと、各 `at` が canonical UTC でその event
 の commit `created_at` と一致し invocation の fixed now より未来でないこと、event 列が有効な遷移
 (erased を先頭に erased / retired が交互 — 末尾 event が現況) であること、terminal `retired` の
-`resurrection_commit` が ref-reachable であることを必須とする。**v1 flat (`erased_at` /
+`resurrection_commit` が ref-reachable で、**直前の erased / purged event の `in_commit` を
+ancestor に持つ (= 当該 purge より後の publication である)** ことを必須とする。**v1 flat (`erased_at` /
 `purged_in_commit`)**: 「erased event 1 件」に正規化してから同じ検証器に通す
 ([05-runtime.md §3.5](05-runtime.md) の読取規則)。**tombstone lifecycle にも同じ event 検証**
 (kind 別必須 field・末尾 event 規則・torn / malformed = corruption) を適用する。
@@ -789,7 +793,7 @@ dead pointer (tombstoned / not_found) は `4`、**scope_unreachable のみは re
 
 validation 失敗は exit code 2 で停止し、`KCS-E-CONFIG-SCHEMA-NNN` を返す。schema は semver で版管理し、breaking change は migration を要求 (§12.5)。
 
-`scope.schema.json` は少なくとも次の key を定義する: `scope_id` (required)・子 `.kcs` リンク ([03-data-model.md §2](03-data-model.md))・`scan_approval` (optional — §1 の取り込み承認記録。required field は §1 の記録一覧と一致)・`approvals[]` (optional — adapter 単位の network opt-in。要素の required field = scope_id / tool_id / execution_mode / tool_profile_hash / approved_at / approval_method — [07-adapter-spec.md §3](07-adapter-spec.md))。**未知 key は schema error** (fail-closed)。両 key を欠く旧 scope.json は valid であり、欠落 = 当該承認なしとして扱う (migration 不要の後方互換)。
+`scope.schema.json` は少なくとも次の key を定義する: `scope_id` (required)・子 `.kcs` リンク ([03-data-model.md §2](03-data-model.md))・`scan_approval` (optional — §1 の取り込み承認記録。required field は §1 の記録一覧と一致)・`approvals[]` (optional — adapter 単位の network opt-in。要素の required field = scope_id / tool_id / execution_mode / tool_profile_hash / approved_at / approval_method / status (`active` | `revoked`)、status=revoked の行は revoked_at も必須 — [07-adapter-spec.md §3](07-adapter-spec.md))。**未知 key は schema error** (fail-closed)。両 key を欠く旧 scope.json は valid であり、欠落 = 当該承認なしとして扱う (migration 不要の後方互換)。
 
 `user-config.schema.json` は device cap (`[budget]`、[04-pipeline.md §5.4](04-pipeline.md)) を含む。
 

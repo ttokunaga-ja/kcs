@@ -309,8 +309,8 @@ Status: draft (retarget 実装は Phase 4+ のため、期日は Phase 4 着手�
 問題: 「Evidence Pointer の不変性」と「法務 purge」の緊張領域。purge 後の pointer 挙動が未定義。
 
 設計案:
-  1. raw_hash が tombstone → tombstone レスポンス
-     { "status": "purged", "purged_at", "purged_reason", "commit", "raw_hash" }
+  1. raw_hash が active な tombstone → tombstone レスポンス
+     { "status": "tombstoned", "purged_at", "purged_reason", "commit", "raw_hash" } (正本 08 §4.1)
   2. raw_hash が完全削除 → KCS-E-PURGE-NOT-FOUND-001
 
   検出 API:
@@ -395,7 +395,7 @@ docs/
   08-evidence-pointer-spec.md  Evidence Pointer / Dead Pointer / retarget
   09-mvp-scope.md              本書
   10-operations.md             横断規約 (semver / 観測 / リネーム表)
-  11-requirements.md           既存要件ドラフト
+  11-requirements.md           既存要件ドラフト (ARCHIVED — 現行正本ではない。読む順に含めない、README §1)
 ```
 
 ## 6.2 凍結ゲート

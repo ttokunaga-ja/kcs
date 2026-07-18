@@ -114,9 +114,13 @@ revoke: adapter.policy.allow_network = false に設定する。
         不一致 = 失効 (再承認要求) — 保存しないと「変わった場合は失効」を永続状態から判定できない。
         **保存先 = `.kcs/scope.json` の `approvals[]` 配列** (schema 検証対象
         [10-operations.md §12.3](10-operations.md)、truth [03-data-model.md §4.1](03-data-model.md))。
-        `(scope_id, tool_id)` 単位の行で、失効・revoke は当該行の更新 (atomic rename) で行う。
+        `(scope_id, tool_id)` 単位の行で、失効・revoke は当該行の **status=revoked + revoked_at への
+        更新** (atomic rename) で行う (行は削除しない — 監査保全)。送信 gate は
+        「`allow_network` が false でない **かつ** 現在の execution_mode / tool_profile_hash に一致する
+        `status=active` 行が存在する」の両立とする。
         `approvals[]` 要素の required field = scope_id / tool_id / execution_mode /
-        tool_profile_hash / approved_at / approval_method ([10-operations.md §12.3](10-operations.md) の
+        tool_profile_hash / approved_at / approval_method / **status (`active` | `revoked`)** —
+        status=revoked の行は **revoked_at** も必須 ([10-operations.md §12.3](10-operations.md) の
         schema 定義と一致)。
         初回スキャン承認 (10-operations.md §1) の記録とは別物 — あちらは scope 単位の
         取り込み承認、こちらは adapter 単位の network opt-in。
@@ -129,9 +133,13 @@ revoke: adapter.policy.allow_network = false に設定する。
 CLI フラグ `--online` は **その 1 回の実行に限る一時 opt-in** で、**永続的な承認状態
 (`approvals[]` 行) を作らない** (実行の送信記録は §7 の log に残り、consent の由来 —
 approvals / cli_online — を含める)。`--offline` は逆向きの一時上書きで、当該実行の新規送信を
-禁止する (online 作業は据え置き pause)。適用対象は online 作業を駆動し得る全コマンド
+禁止する (未送信の online タスクは **pending のまま**当該実行では送信しない — 永続状態・
+hold_reason は変更しない ([04-pipeline.md §5.2/§5.4](04-pipeline.md) — enqueue のみ + index_status に
+pending 可視化)。`--override-budget` と併用した場合も budget pause の解除のみ行い、送信はしない)。
+適用対象は online 作業を駆動し得る全コマンド
 (`kcs index` / `kcs batch resume` / `kcs batch retry` / `kcs reindex` — `--force` / `--at <commit>`
-のいずれも online embedding を駆動し得る。[06-cli-spec.md §1](06-cli-spec.md))。**既存 in-flight
+のいずれも online embedding を駆動し得る — / `kcs repair --rebuild-db` (rebuild 後の enrichment —
+[04-pipeline.md §5.4](04-pipeline.md))。[06-cli-spec.md §1](06-cli-spec.md))。**既存 in-flight
 request の照会・出力取得・upload 掃除 ([04-pipeline.md §5.8](04-pipeline.md) 回復) は新規送信に
 当たらず、opt-in / `--online` なしで実行できる** (opt-in が制御するのは新規 upload・job 作成・
 sync 呼出のみ)。
@@ -323,7 +331,7 @@ metadata:
 
 Text Embedding Adapter / Image Embedding Adapter は**採用しない**。同一 Embedding Adapter が同一 profile で多モダリティを単一 vector space へ写像する。
 
-> **実地検証済み — 単一 multimodal profile を採用 (2026-07-03 再検証で確定)**: 初回調査は「Gemini Embedding 2 multimodal は preview で pin 不可」を根拠に text-only 緩和を適用したが、事実誤認 (`gemini-embedding-2` は 2026-04-22 に GA、pinned stable 版あり) が判明し**撤回**。再検証 (`tasks/step3-embedding-verify.md` の再検証節) により本節冒頭の本来の契約どおり **単一マルチモーダル Embedding Adapter** を採用する。確定 profile: **`gemini-embedding-2` (GA 版を Adapter が起動時解決して pin、§6) / 768 次元 (MRL 切り詰め — 切り詰め後次元も profile に固定) / cosine / `modality="multimodal"` / `mode="online"`** (Vertex はバッチ推論非対応のため client 側で並列 + 429 backoff)。MVP で実際に embed するのは text chunk のみだが、profile を multimodal にしておくことで Phase 4+ の image/audio embedding を [03-data-model.md §7](03-data-model.md) の全 re-index なしに追加できる。text 品質は MTEB で前世代 text 専用モデルを上回り日本語も同格 (再検証節)。コスト: 10 万 chunk 初回 ≈ $10 (単月 budget 内)。**非 multimodal の embedding profile (`modality="text"` 等、別ベクトル空間への埋め込み) は採用不可** — tool-lock materialize / adapter 登録時に `KCS-E-EMBED-MODALITY-001` (exit 2) で拒否する ([03-data-model.md §7](03-data-model.md))。
+> **実地検証済み — 単一 multimodal profile を採用 (2026-07-03 再検証で確定)**: 初回調査は「Gemini Embedding 2 multimodal は preview で pin 不可」を根拠に text-only 緩和を適用したが、事実誤認 (`gemini-embedding-2` は 2026-04-22 に GA、pinned stable 版あり) が判明し**撤回**。再検証 (`tasks/step3-embedding-verify.md` の再検証節) により本節冒頭の本来の契約どおり **単一マルチモーダル Embedding Adapter** を採用する。確定 profile: **`gemini-embedding-2` (GA 版を Adapter が起動時解決して pin、§6) / 768 次元 (MRL 切り詰め — 切り詰め後次元も profile に固定) / cosine / `modality="multimodal"` / `mode="online"`** (Vertex はバッチ推論非対応のため sync 呼出 — client 側の並列は**タスク間** (別 batch_requests 行) で行い、単一タスク内の複数 request は直列 ([04-pipeline.md §5.4](04-pipeline.md) の縮退 2 相)。429 は rate_limit 分類で backoff — §5.7)。MVP で実際に embed するのは text chunk のみだが、profile を multimodal にしておくことで Phase 4+ の image/audio embedding を [03-data-model.md §7](03-data-model.md) の全 re-index なしに追加できる。text 品質は MTEB で前世代 text 専用モデルを上回り日本語も同格 (再検証節)。コスト: 10 万 chunk 初回 ≈ $10 (単月 budget 内)。**非 multimodal の embedding profile (`modality="text"` 等、別ベクトル空間への埋め込み) は採用不可** — tool-lock materialize / adapter 登録時に `KCS-E-EMBED-MODALITY-001` (exit 2) で拒否する ([03-data-model.md §7](03-data-model.md))。
 
 embedding の SQLite schema (`embeddings` / `chunk_vec`) の正本は [04-pipeline.md §4.3](04-pipeline.md)
 とする (本節は profile — モデル / 次元 / 距離 / modality — の正本。SQL 定義の重複記載は 2026-07-14 に
@@ -435,7 +443,7 @@ provider_scope_id()            下記の不変識別子を返す
 }
 ```
 
-`tool_lock_hash` は `tool-lock.json` 全体を JCS 畳み込みした identity ([03-data-model.md §5.2](03-data-model.md))。
+`tool_lock_hash` は **[03-data-model.md §5.2](03-data-model.md) の canonical 入力** (spec_version + 各 role の tool_id / profile_hash — embedding のみ + dimensions / distance / modality) を JCS 畳み込みした identity — **tool-lock.json 全体ではない**。`kind` / `capabilities` / `mode` は作業コピーの表示・検証用 field であり identity に含めない (toollock object へ保存されるのも §5.2 の canonical bytes)。
 
 config (`~/.config/kcs/tools.toml`) では `mistral-ocr-latest` のような可変 alias を指定してよい。ただし **OCR API は応答内で alias を実バージョンに解決しない** (2026-07-03 実測: 応答の `model` フィールドは `mistral-ocr-latest` のまま返る。`experiments/ocr-verification`)。したがって Adapter は **API 呼び出し自体を版付きモデル名で行う**: alias が設定されている場合は、Adapter が実行開始時に提供元のモデル一覧 API から現行の版付き名を解決してから呼び出し、その版を `tool_profile_hash` の `model_version_pin` に記録する ([03-data-model.md §5.1](03-data-model.md) — 可変 alias の pin は禁止)。モデル更新は `tool_changed` として扱われ、再 Markdownize は first-instance-wins / gen の既存機構 (§9) に乗る。
 

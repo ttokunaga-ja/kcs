@@ -31,7 +31,8 @@ kcs batch abandon <intent_token|scope/adapter/input_hash/tool_profile_hash>
                                         # profile 行と曖昧 — 曖昧時は拒否して token を要求)。tasks.jsonl の task_id は
                                         # 喪失許容のため使わない。kcs status が stalled 行の token を表示。
                                         # 確認プロンプト必須。残骸掃除完了まで intent_token は保持 — 04-pipeline.md §5.8)
-kcs repair [--rebuild-db|--verify-objects]  # SQLite 再構築 / CAS 整合性検証 (10-operations.md §7.5)
+kcs repair [--rebuild-db|--verify-objects] [--online|--offline]  # SQLite 再構築 / CAS 整合性検証 (10-operations.md §7.5)。
+                                        # --rebuild-db は rebuild 後に enrichment を駆動し得るため online/offline 上書きの対象 (07 §3・04 §5.4)
 kcs commit -m "<message>"               # = kcs snapshot create -m
 kcs snapshot [create] [-m "<message>"]  # create 省略可。-m 省略時は自動 message ("snapshot at <UTC timestamp>")
 kcs snapshot create -m "<message>"      # 正規形
@@ -44,6 +45,9 @@ kcs inspect <hash>                      # object を JSON で表示
 kcs restore <evidence|path|commit> --to <dir> # 詳細 §5
 kcs tag <name> [<commit>]               # 論理名を refs/tags-v1/names.jsonl (truth) に append してから
                                         # canonical ref を作る (書込順序固定 — 03-data-model.md §2)
+kcs tag --delete <name>                 # canonical ref を .kcs/.lock 下で atomic に除去。names.jsonl の
+                                        # 行は残す (監査保全 — 「ref の無い names 行 = 正常」と整合。
+                                        # 付替えは削除 → 再作成の 2 操作 — 専用 retarget は持たない)
 kcs gc [--dry-run|--prune-unreachable] # prune 対象は 05-runtime.md §2.6 (raw/chunk/commit は対象外)。実装は Phase 4+ (09 §3.1)
 kcs purge <path|--raw-hash <h>> --reason <reason> [--erase-tombstone] [--yes]  # 詳細 §6 (確認プロンプト必須 — --yes で省略)
 kcs reindex [--force] [--at <commit>] [--yes] [--online|--offline]  # --at = 過去 snapshot の embedding 再生成 (05-runtime.md §1)。
@@ -81,9 +85,11 @@ kcs evidence retarget <pointer> [--latest|--at <commit>]  # 設計確定後 (09-
 
 ```text
 1. pointer を解決して raw_hash を得る (08-evidence-pointer-spec.md §3)
-1a. object URI (kcs://<scope_id>/object/image/<image_hash> — 08 §2) の場合: scope / type / hash を
-   検証し、image object を ~/.cache/kcs/open/ へ read-only materialize して開く (raw と同じ
-   tombstone / journal barrier と purge closure の対象)。以降の手順 2-5 は raw 系入力のみ
+1a. object URI (kcs://<scope_id>/object/image/<image_hash> — 08 §2) の場合: type / hash を検証し、
+   scope_id が文脈 store と不一致でも**自 store に該当 hash の object があればそれを解決する**
+   (fork 複製由来の旧 scope_id URI — §10。hash が identity、08 §2)。自 store に無い場合のみ
+   scope_id で通常解決する。image object を ~/.cache/kcs/open/ へ read-only materialize して開く
+   (raw と同じ tombstone / journal barrier と purge closure の対象)。以降の手順 2-5 は raw 系入力のみ
 2. tombstone 判定 (最優先): raw_hash に **active な** tombstone があるなら、working tree・cache の状態に
    関わらず §7 の規約どおり exit 4 — purge 済み原本が folder に残っていても KCS 経由では開かない
    (退役済み tombstone は対象外 — 再 ingest による退役は 05-runtime.md §3.5 の resurrection 規則)
@@ -350,10 +356,13 @@ kcs import <bundle.kcsz> --to <dir> [--as-new-scope]  # bundle の scope_id が 
                                         # 複製として取り込むには --as-new-scope で新 scope_id を採番
                                         # (fork 相当。以後の Evidence Pointer は新 ID を指す。既存 normalized 内の
                                         # kcs:// URI が旧 scope_id を含んでいても、自 store に該当 object があれば
-                                        # 解決する — hash が identity (08 §2)。bundle 内 object で自足)
+                                        # 解決する — hash が identity (08 §2、解決手順は §1.1 1a)。bundle 内 object で自足)。
+                                        # fork は旧 scope の approvals[]・初回スキャン承認 (scan_approval)・
+                                        # adapter.policy.allow_network を引き継がない — 新 scope_id で preview +
+                                        # 取り込み承認と network opt-in を再実施する (安全側。07 §3・10 §1)
 ```
 
-`.kcsz` は `.kcs/` の bundle 形式 (zip 等)。`.kcs` 単位で公開可能。別 `.kcs` の object 参照を前提にしないため、同一 raw_hash が別 `.kcs` に存在しても export 単位では重複を許容する。
+`.kcsz` は `.kcs/` **全体**の bundle 形式 (zip 等 — objects/・refs/ (tags-v1/names.jsonl を含む)・chunks.jsonl 等の truth 一式)。`.kcs` 単位で可搬。別 `.kcs` の object 参照を前提にしないため、同一 raw_hash が別 `.kcs` に存在しても export 単位では重複を許容する。**bundle には scope.json の approvals[]・logs/ の運用記録・登録 path 等の機微 metadata が含まれる** — 共有は同一信頼境界内 (自分の別端末・バックアップ) を想定し、第三者公開用の sanitize (承認・log・path の除去) は Phase 4+ の export mode で扱う。
 
 ---
 
