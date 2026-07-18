@@ -114,7 +114,7 @@ estimated_embedding_usd
 
 承認後の index は二段で進む ([04-pipeline.md §5](04-pipeline.md)): ベースライン index が先に完了し、AI 強化 (Markdownize / Embedding) は budget guardrail の管理下で後段として進む。AI 強化が未完了・paused の間、その状態を隠してはならない。
 
-- `kcs status` は AI 強化の進捗 (done / pending / paused 件数) と paused の理由 (budget / auth / rate limit) を表示する
+- `kcs status` は AI 強化の進捗 (done / pending / paused 件数) と paused の理由 (budget / auth / tier_b_approval) を表示する (rate limit は paused ではなく pending + next_retry_at として表示 — [04-pipeline.md §5.2](04-pipeline.md))
 - 照合が恒久不能な in-flight Batch job (資格情報喪失等) は **stalled** として表示し続ける。脱出路は
   `kcs batch abandon` のみ (自動では何も変更しない — [04-pipeline.md §5.8](04-pipeline.md))
 - 検索レスポンスは index が部分的なとき `index_status` を返す ([05-runtime.md §1.7](05-runtime.md))
@@ -273,6 +273,9 @@ CREATE TABLE scopes (
   (scope_id は init 時採番の ULID、[03-data-model.md §2](03-data-model.md))。upsert の直前に、同一
   `kcs_path` で `scope_id` が異なる行を削除する。**逆方向 (scope の移動) も同様に退役する**: 同一
   `scope_id` を新しい `kcs_path` で観測 (再発見) したら、同一 scope_id の旧 path 行を削除する —
+  **ただし旧 path がなお到達可能 (存在し有効な `.kcs`) な場合は move と認定せず、削除しない**。
+  同一 scope_id の複数 live path は clone 併存であり、検索・解決時に KCS-E-REGISTRY-DUP 系 warning で
+  可視化する (どちらを残すかはユーザーの dedupe に委ねる。複製へ新 scope_id を発行する fork は Phase 4+ 予約) —
   放置すると default 横断検索が旧 path の stale scope を毎回 skip し恒常的に exit 3 になる。放置すると横断検索が同一文書を dead scope_id 経由で
   二重に返し、その Evidence Pointer は `KCS-E-EVIDENCE-SCOPE-UNREACHABLE-001` で解決不能になる。
   registry は cache なので削除は常に安全 (live scope は自分を再登録する)
@@ -327,7 +330,7 @@ hidden directory      OS の hidden 属性・dotfile は通常どおり対象 (�
                       行う — 隠しであることは機微性の根拠にしない)
 system directory      built-in ignore (Tier A 相当) に含め既定除外
 .kcs 自身             ignore 評価より前に必ず prune (自己再帰の禁止)
-VCS リポジトリ root   既定で子 .kcs を生成しない ([03-data-model.md §3](03-data-model.md))
+VCS リポジトリ root   既定で子 .kcs を生成しない。既存子 .kcs は grandfathered で継続有効 ([03-data-model.md §3](03-data-model.md))
 ```
 
 ---
@@ -390,7 +393,7 @@ Future:
 
 # 7. Purge の保証範囲
 
-`purge` は、KCS 管理下の object store (本文 bytes と派生 artifact)、index、pack、cache、
+`purge` は、KCS 管理下の object store (本文 bytes と派生 artifact — manifest object 含む)、index、pack、cache (`~/.cache/kcs/open/` の一時展開を含む — [05-runtime.md §3.5](05-runtime.md))、
 および KCS 自身のログ (`.kcs/logs/access.jsonl`、`~/.local/share/kcs/logs/` の
 events / errors / metrics) から対象ファイル由来の情報を削除する操作である。
 **snapshot DAG (commit / tree object) は書き換えない** — tree entry のメタデータ (path, raw_hash) は
@@ -440,12 +443,15 @@ KCS 自身のログのスクラブ (該当行の削除またはマスク) と、
 kcs repair --verify-objects
 ```
 
-- `objects/` 配下の全 CAS object (raw / prepared / image / chunk / embedding / tree / commit) を [03-data-model.md §8.1](03-data-model.md) の per-type algorithm で検証し (embedding は vector 長・有限値・vector digest も — 03 §8.1)、
+- `objects/` 配下の全 CAS object (raw / prepared / image / chunk / embedding / manifest / tree / commit) を [03-data-model.md §8.1](03-data-model.md) の per-type algorithm で検証し (embedding は vector 長・有限値・vector digest も — 03 §8.1)、
   保存パス・参照 hash と照合する。chunk は object bytes の content hash ではなく semantic identity hash
   と fan-out key、さらに exact `text` / `text_hash` / normalized span を照合する
   ([03-data-model.md §8.1](03-data-model.md))
-- normalized は content hash を持たない ([03-data-model.md §5](03-data-model.md)) ため hash 検証対象外とし、
-  参照整合 (対応する `(raw_hash, tool_profile_hash)` object の実在) のみ確認する
+- normalized の unit bytes は content hash を持たない ([03-data-model.md §5](03-data-model.md)) ため hash 検証対象外とし、
+  参照整合 (対応する `(raw_hash, tool_profile_hash)` object の実在) のみ確認する。**manifest object
+  (objects/manifests/ — [03-data-model.md §2.1](03-data-model.md)) は content-addressed であり再 hash 検証の対象**:
+  各 tree entry の `normalize.manifest_hash` が実在する manifest object を指すこと、HEAD tree の entry に
+  ついては作業コピー manifest.json の canonical JCS hash が一致することも検査する (不一致 = 破損)
 - SQLite index は検証対象外 (破損時は `--rebuild-db` で再構築可能なため)
 
 破損検出時の挙動:
@@ -749,6 +755,8 @@ dead pointer (tombstoned / not_found) は `4`、**scope_unreachable のみは re
 ```
 
 validation 失敗は exit code 2 で停止し、`KCS-E-CONFIG-SCHEMA-NNN` を返す。schema は semver で版管理し、breaking change は migration を要求 (§12.5)。
+
+`scope.schema.json` は少なくとも次の key を定義する: `scope_id` (required)・子 `.kcs` リンク ([03-data-model.md §2](03-data-model.md))・`scan_approval` (optional — §1 の取り込み承認記録。required field は §1 の記録一覧と一致)・`approvals[]` (optional — adapter 単位の network opt-in。要素の required field = scope_id / tool_id / execution_mode / tool_profile_hash / approved_at / approval_method — [07-adapter-spec.md §3](07-adapter-spec.md))。**未知 key は schema error** (fail-closed)。両 key を欠く旧 scope.json は valid であり、欠落 = 当該承認なしとして扱う (migration 不要の後方互換)。
 
 `user-config.schema.json` は device cap (`[budget]`、[04-pipeline.md §5.4](04-pipeline.md)) を含む。
 

@@ -58,7 +58,9 @@ default: k = 60, w_text = 1.0, w_vector = 1.0
 - **短語 fallback**: query の全 token が 3 文字未満で trigram tokenizer の MATCH が成立しない場合
   (例: 1〜2 文字の日本語 query — MATCH は 0 件になる)、text バックエンドは `chunks.text` への
   **bounded LIKE スキャン** (上限 = `candidate_depth`、instr ベースの部分一致) へ fallback する。
-  3 文字以上の token が 1 つでもあれば FTS MATCH を使う
+  3 文字以上の token が 1 つでもあれば FTS MATCH を使う。LIKE fallback の順位も決定的に定める:
+  最初の一致位置 (instr) 昇順、同点は chunk_id 昇順。SQL は ORDER BY 確定後に LIMIT candidate_depth
+  を適用する (LIMIT 先行で候補集合が非決定になる形は禁止)
 - 片方のバックエンドにしか現れない候補は、現れない側の項を 0 とする
 - `RRF_score` の同点は chunk_id 昇順
 - text-only / vector-only モードでは fusion せず当該バックエンドの順位をそのまま使う
@@ -121,9 +123,12 @@ kcs search "..." --limit 20 --cursor <token>    # snapshot 越し安全
 
 scope ごとの sub-cursor は
 `{scope_id, snapshot_commit, index_generation, max_rowid, max_association_rowid, chunking_config_hash, consumed}`。
-`index_generation` は **rebuild (`kcs repair --rebuild-db`)・purge・embedding enrichment の finalize の
-たびに新規採番する ULID** (単調カウンタではない — sqlite.db 内に保持するため DB 喪失で数が戻っても、
-ULID なら旧 cursor が偶然一致して誤受理されることがない)。**replay 時に現在値と不一致なら
+`index_generation` は **rebuild (`kcs repair --rebuild-db`)・purge・embedding enrichment の finalize・
+および index / batch finalize で `chunk_fts` の内容が変化した場合の、いずれでも新規採番する ULID**
+(単調カウンタではない — sqlite.db の `index_metadata` 表 ([04-pipeline.md §4.1](04-pipeline.md)) に保持するため
+DB 喪失で数が戻っても、ULID なら旧 cursor が偶然一致して誤受理されることがない。FTS 内容変化でも回転する
+理由: FTS5 の bm25() は文書頻度・平均長という**大域統計**を使うため、cursor が chunk 集合を rowid 上限で
+固定しても、後発行の追加で既存行の順位自体が変わり得る — 誤った続きを返すより旧 cursor を拒否する)。**replay 時に現在値と不一致なら
 `KCS-E-SEARCH-CURSOR-001` で拒否する** (再検索が正) — rebuild は rowid を再採番し、purge は
 append-only 前提を破って行を削除し、後発 embedding は hybrid の候補集合・順位を変えるため、
 いずれも旧 cursor の `max_rowid` / `consumed` の意味を失わせる。
@@ -135,14 +140,14 @@ page 1 の `since_cutoff` (UTC ISO8601 + `Z`) も保持する:
 - `max_association_rowid`: cursor 発行時点の `chunk_config_generations` 最大 association rowid。
   現行 config association も `association_rowid <= max_association_rowid` に固定し、page 1 後に追加された
   association が page 2 の候補へ混入することを防ぐ
-- `chunking_config_hash`: page 1 の当該 scope effective config。current value が変われば replay を拒否する
+- `chunking_config_hash`: page 1 で検索対象にした tree の config (デフォルト = 当該 scope の effective config、時点指定 = 対象 tree の値 — §1.6)。replay 時の対象値と不一致なら拒否する
 - `consumed`: alias expansion 後の final result stream で当該 scope から既に返した hit 数 (semantic chunk
   数ではない)。replay は grouped final stream を完全再計算し、scope ごとにこの件数だけ先頭 hit を skip
   するため、page boundary が 1 chunk の alias group 内でも重複/欠落しない
 - `since_cutoff`: `--since` の page 1 で一度だけ計算した下限。page 2 以降は現在時刻から再計算しない
 - `query_hash` (token 全体に 1 つ、§1.8) が不一致の cursor は `KCS-E-SEARCH-CURSOR-001` で拒否する
 
-2 ページ目以降は同一の候補取得 → RRF (§1.3) → MMR (§1.4) を再計算し、consumed 件を skip して続きを返す。順序安定性の根拠は SQLite WAL のスナップショット分離**ではなく**、「commit 単位で固定された chunk 集合 + 決定論的な順位計算」である。CLI 呼び出しを跨いでも成立する。
+2 ページ目以降は同一の候補取得 → RRF (§1.3) → MMR (§1.4) を再計算し、consumed 件を skip して続きを返す。順序安定性の根拠は SQLite WAL のスナップショット分離**ではなく**、「commit 単位で固定された chunk 集合 + 決定論的な順位計算 + `index_generation` による FTS 内容不変の保証」である。CLI 呼び出しを跨いでも成立する。
 
 `--offset` は cursor の糖衣であり、同じ再現規則で確定順序の `offset` 位置から `limit` 件を返す。確定順序 (= 候補プール) の末尾を超えたら `next_cursor: null` で終端。
 
@@ -171,8 +176,10 @@ page 1 の `since_cutoff` (UTC ISO8601 + `Z`) も保持する:
 --since <duration>  --all-history 集合を chunks.created_at >= now - <duration> で絞る
 ```
 
-共通フィルタ: `chunk_config_generations` に現行 `chunking_config_hash` association がある chunk のみ
-([04-pipeline.md §4.1, §4.6](04-pipeline.md))。purge 済み raw_hash の chunk 行は物理削除済みのため自然に除外される。
+共通フィルタ: `chunk_config_generations` に**対象 tree の `chunking_config_hash`** の association がある chunk のみ
+(デフォルト = HEAD tree = 現行値。`--at` は対象 tree の値、`--all-history` / `--include-deleted` は各 binding
+tree の値で判定する。v1 tree は config 未記録のため現行値で代替し結果に注記 — [04-pipeline.md §4.1, §4.6](04-pipeline.md))。
+purge 済み raw_hash の chunk 行は物理削除済みのため自然に除外される。
 
 tree entry の `normalize` が省略された commit では、その entry に eligible chunk は 0 件。`--at` /
 history projection / include-deleted のいずれも later `latest_normalize_ref` を補完せず、SQLite cached row が
@@ -191,8 +198,8 @@ history projection / include-deleted のいずれも later `latest_normalize_ref
   全 parent を辿り、side parent にだけ存在して merge 結果から消えた binding も対象にする。
   **walk 中の shallow 化済み commit (tree 破棄済み — §2.2) は skip し、レスポンスに
   `shallow_skipped` 件数を可視化して partial (exit 3) とする** — 黙って欠落させない
-- chunk 行が検索対象になるのは auto snapshot (§8.1 — `kcs index` / batch finalize の成功完了時) 作成後。indexing 途中の chunk はどのモードでも返さない。auto snapshot 作成時に新規 chunk 行へ `first_seen_commit` を刻む ([04-pipeline.md §4.1](04-pipeline.md))
-- **時点条件 (正式化)**: デフォルト / `--at` の対象は、上記 join に加えて **`first_seen_commit` が対象 commit の ancestor-or-equal である chunk に限る** — same-gen partial retry の後着 chunk は tree schema v2 ([03-data-model.md §8](03-data-model.md)) により新 commit で公開され、この条件が旧 commit への遡及混入を排除する (ancestry 判定は `--at` の到達可能性 walk と同じ)
+- chunk 行が検索対象になるのは auto snapshot (§8.1 — `kcs index` / batch finalize の成功完了時) 作成後。indexing 途中の chunk はどのモードでも返さない。auto snapshot 作成時に新規 chunk 行へ `first_seen_commit` を刻み、**`chunk_publications` へ `(chunk_id, introduction_commit = 当該 commit)` を追記する** (既存 publication のいずれの子孫でもない tree に同一 chunk が現れた場合も、新しい introduction として追記 — [04-pipeline.md §4.1](04-pipeline.md))
+- **時点条件 (正式化)**: デフォルト / `--at` の対象は、上記 join に加えて **`chunk_publications` のいずれかの `introduction_commit` が対象 commit の ancestor-or-equal である chunk に限る** (単一の `first_seen_commit` では incomparable な複数導入 — merge の side 枝・独立 import — を表現できないため、判定の正本は publication relation。[04-pipeline.md §4.1](04-pipeline.md))。same-gen partial retry の後着 chunk は tree schema v2 ([03-data-model.md §8](03-data-model.md)) により新 commit で公開され、この条件が旧 commit への遡及混入を排除する (ancestry 判定は `--at` の到達可能性 walk と同じ)。**`--include-deleted` の補完 binding にも同条件を適用する** (introduction が当該 binding commit の ancestor-or-equal であること — 削除後に完了した後着 chunk の遡及混入を排除)。**`--all-history` は binding ごとに同判定を行う**
 - shallow 化済み commit への `--at` の失敗規則は §2.2
 
 History walk の aggregate security bound は exact に次とする (per-object caps に加算):
@@ -246,8 +253,8 @@ commit/evidence restore は ancestry walk を必要としない。
         "chunk_hash": "sha256:...",
         "path_at_commit": "report.pdf",
         "heading_path": ["認証仕様", "API Token"],
-        "char_start": 1200,
-        "char_end": 1500,
+        "byte_start": 1200,
+        "byte_end": 1500,
         "scope_id": "scope_01J8ZQ..."
       },
       "evidence_uri": "kcs://scope_01J8ZQ.../sha256:9f2c.../sha256:.../sha256:.../sha256:...",
@@ -300,7 +307,7 @@ score/rank をコピーして、group 内を
 ### 対象 scope の列挙
 
 1. scope_registry から `participates_in_global_search = true` の scope を列挙する
-2. `--scope <path>` / `--descendants` 指定時は root_path の前方一致で絞り込む
+2. `--scope <path>` 単独指定は canonical root_path の**完全一致** (当該 scope のみ — [06-cli-spec.md §3](06-cli-spec.md) の「カレントフォルダのみ」)。`--descendants` 併用時は self + 「`root_path + '/'` を前置に持つ scope」を対象とする (**path-component 境界で判定** — 単純な文字列前方一致は `/work/a` が `/work/ab` に一致するため用いない)
 3. 到達不能 / stale な scope (外部ドライブ切断等) は skip し、`excluded_scopes` に理由付きで記録する (検索全体はエラーにしない)
 
 ### 実行とマージ
@@ -427,7 +434,7 @@ commit_type ∈ { 'manual', 'auto', 'imported', 'migrated', 'repaired', 'merged'
 
 ## 2.2 GC
 
-> GC (§2.2-2.6) の**実装は Phase 4+** ([09-mvp-scope.md §3.1](09-mvp-scope.md))。MVP (Step 1-4) では GC を実行せず (auto snapshot がまだ無く回収対象がほぼ発生しないため)、`gc_policy` × `commit_type` の対応 schema のみ Step 1 の設計時から契約として遵守する (§2.6)。
+> GC (§2.2-2.6) の**実装は Phase 4+** ([09-mvp-scope.md §3.1](09-mvp-scope.md))。MVP (Step 1-4) では GC を実行せず (**定期** auto snapshot・retention 減衰がまだ無く回収対象がほぼ発生しないため — 取り込み完了時の auto snapshot は MVP に存在する: §8.1)、`gc_policy` × `commit_type` の対応 schema のみ Step 1 の設計時から契約として遵守する (§2.6)。
 
 ```text
 gc_policy(commit_type):
@@ -592,10 +599,12 @@ purge は **object の物理削除 + default tombstone または内部 erase rec
 ```text
 - raw object 本体 (objects/raw/ab/cd/<raw64>)
 - 派生 artifact: prepared / **image** / normalized / chunk / embedding
-  (normalized は同一 (raw_hash, tool_profile_hash) 配下の全 gen instance を対象とする。
+  (normalized は同一 (raw_hash, tool_profile_hash) 配下の全 gen instance を対象とし、
+   **manifest object (objects/manifests/ — 当該 (raw_hash, tool_profile_hash) の全 gen・全確定版) を含む**。
    **共有されうる派生 (image / embedding — text_hash 単位で他 raw の chunk と共有) は、purge 対象外の
    live 参照が 0 の場合のみ物理削除する** — 無条件削除は非対象文書の検索を破壊する)
-- SQLite の chunks / chunk_config_generations / chunk_vec / embeddings 行と FTS エントリ
+- `~/.cache/kcs/open/<raw_hash digest64>/` の一時展開 dir (存在すれば冪等削除 — [06-cli-spec.md §1.1](06-cli-spec.md))
+- SQLite の chunks / chunk_config_generations / chunk_publications / chunk_vec / embeddings 行と FTS エントリ
 - chunks.jsonl の対象 chunk 行 (append-only の例外 — purge は法務要件の明示例外として行を落とす)
 ```
 
@@ -616,6 +625,12 @@ purge は **object の物理削除 + default tombstone または内部 erase rec
 - commit_type=purged の新 commit (purge 実行後の working tree を指す)
 ```
 
+**working tree の原本には触れない** (KCS はユーザーのファイルを削除しない)。したがって purge の
+preview と完了表示は、対象 raw_hash と同一 bytes の原本が working tree に残存する場合に**必ず警告する**:
+残存原本は次回 `kcs index` の自動 scan で再取り込みされ、既存 pointer は再び alive になる
+([08-evidence-pointer-spec.md §4.2](08-evidence-pointer-spec.md))。恒久的に除外するには原本の削除または
+`.kcsignore` への追加が必要である。
+
 **purge journal (クラッシュ安全の正本)**: purge は複数ストア (objects / SQLite / chunks.jsonl / logs /
 tombstone / commit) を跨ぐ破壊操作のため、**mutation 前に `.kcs/purge/journal` へ対象 closure と
 phase を耐久記録し (fsync + atomic rename — [04-pipeline.md §1.1](04-pipeline.md) と同じ書込規律)、
@@ -635,10 +650,14 @@ phase 順序    = prepared (closure 確定・記帳)
 クラッシュ回復 = 次回の書き込み系コマンド冒頭で journal を検出したら、記録 phase から再開する
               (各 phase は再実行安全 — planned_commit を journal から publish するため同一 hash を
               再現でき、時刻の再計算をしない)。journal が active な間の fsck は incomplete (exit 3 —
-              [10-operations.md §7.5.1](10-operations.md))。**読み取り系 (search / open / view) も
-              冒頭で active journal を検出したら KCS-E-PURGE 系 retryable (exit 3) で拒否する** —
-              marker 耐久化後・削除完了前の窓で削除対象の本文を返さないため (読み取り系は lock を
-              取らないので、この検出が唯一の隔離点)
+              [10-operations.md §7.5.1](10-operations.md))。**読み取り系 (status を除く §6 の全読取
+              コマンド — search / log / view / inspect / evidence verify / restore / diff / open) は、
+              冒頭と「本文・存在情報を返す直前」の 2 点で active journal を検出したら KCS-E-PURGE 系
+              retryable (exit 3) で拒否する** (2 点目で検出した場合は取得済み結果を破棄する) —
+              marker 耐久化後・削除完了前の窓で削除対象の本文を返さないため。読み取り系は lock を
+              取らないため、冒頭 1 回の検査では検査後に journal が現れる TOCTOU 窓が残る — 返却直前の
+              再検査がこれを閉じる。`kcs status` だけは拒否せず、active journal の存在を状態として
+              表示する (クラッシュした purge の回復可視性のため。status は本文を返さない)
 ```
 
 tombstone を削除より先に耐久化するのは、「対象 object が消えたのに purge の痕跡が無い」状態
@@ -677,7 +696,7 @@ validity は leaf/raw_hash 一致だけでなく、`purged_in_commit` が bounde
 fsck invocation の fixed now より未来でないことを要求する。不一致・extra field は store corruption。
 open / view / search / restore / evidence verify / index の resurrection barrier には使わず、fsck だけが
 intentional absence の説明に使う。したがって Evidence verify は従来どおり `not_found` で、同一 bytes の
-明示的な後日 ingest は許可する。raw object の publication 成功後に receipt を除去し、crash で両方が
+後日 ingest (明示操作に限らず、working tree 残存原本の自動 scan を含む — §3.5 の残存警告) は許可する。raw object の publication 成功後に receipt を除去し、crash で両方が
 残った場合は verified raw object を優先して次の locked mutation で stale receipt を除去する。
 
 **制約 (明記)**: tree entry の `path` 文字列と `raw_hash` は履歴に残る。ファイル名そのものが秘匿対象であるケース (履歴書き換えが必要) は MVP 非対応。commit / tree の書き換えは content hash の連鎖再計算と無関係ファイルの Evidence Pointer 無効化を伴うため、対応する場合も v2+ の再設計事項とする。
@@ -707,7 +726,7 @@ kcs view <evidence-at-commit-X>
 kcs view <path> --at <commit>
 ```
 
-過去 commit 時点の Markdown を再生成せず、当該 commit の object をそのまま返す (re-Markdownize しない)。
+過去 commit 時点の Markdown を再生成せず、当該 commit の object をそのまま返す (re-Markdownize しない)。unit の完成状態・列挙は、当該 commit の tree entry `normalize.manifest_hash` が指す **manifest object** ([03-data-model.md §2.1](03-data-model.md)) で確定する — same-gen partial retry で作業コピー manifest.json が進んでいても、表示は commit 時点の manifest に従う。
 
 # 5. プロセスモデル (常駐なし)
 
@@ -738,7 +757,7 @@ batch 系と reindex は外部副作用 (upload / job 作成) と batch_requests
 
 規約:
 
-- 読み取り系 (search / log / view / inspect / evidence verify / restore / status / diff) は `.kcs/.lock` を取得しない。`kcs index` と `kcs search` の同時実行は許容 (SQLite WAL でリーダーは旧スナップショット)
+- 読み取り系 (search / log / view / open / inspect / evidence verify / restore / status / diff) は `.kcs/.lock` を取得しない。`kcs index` と `kcs search` の同時実行は許容 (SQLite WAL でリーダーは旧スナップショット)
 - `.kcs/.lock` を取得できない場合、書き込み系コマンドは**待機せず即座に失敗する**: error code `KCS-E-STORE-LOCKED-001`、exit code 3 (retryable、[06-cli-spec.md §7](06-cli-spec.md))。lock ファイルには保持プロセスの pid と取得時刻を記録し、保持プロセスが存在しない stale lock は次の取得試行時に回収してよい。待機オプション (`--wait <seconds>`) は Phase 4+ 予約
 - refs (refs/heads/main, canonical refs/tags-v1/*) の更新は `.kcs/.lock` 保持下で、temp file 書き込み + atomic rename により行う (部分書き込みを外部に見せない)。legacy refs/tags/* は read-only compatibility とする
 - `kcs repair --verify-objects` の raw object 復旧と repaired commit publication も、同じ lock の下で private temp + hash 再検証 + atomic publish を使う

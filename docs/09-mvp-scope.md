@@ -76,6 +76,8 @@ Step 2 (2-3ヶ月): kcs-pipeline + kcs-adapter
                   → 推奨構成は大手 LLM API による AI 強化 (opt-in)
                   → 注: tree schema v2 (2026-07-18 — 03 §8) により Step 1-2 実装の tree hashing は
                     v2 対応 (manifest_hash / chunking_config_hash) の rework が必要
+                    (あわせて manifest object 保存 (03 §2.1)・chunk_publications / index_metadata 表
+                    (04 §4.1) も同期間の実装対象)
 Step 3 (2-3ヶ月): kcs-index + kcs-search (hybrid + Evidence Pointer)
 Step 4 (1.5-2ヶ月): restore + --at + time-travel
                     + purge 最小形 (tombstone) + evidence verify (単発)
@@ -260,7 +262,7 @@ Done 条件 = synthetic で各シナリオ Recall@10 >= 0.8
 実装:
   - normalization_run のキャッシュヒット判定で短絡
   - kcs reindex --force のみ新 generation (gen+1) の instance 作成を許可 (上書き・削除はしない)
-  - 新 generation 作成時は parent_run_id と manifest.parent_gen でチェーンを残す
+  - 新 generation 作成時は manifest.parent_instance = {raw_hash, tool_profile_hash, gen} でチェーンを残す (parent_run_id は task cache の揮発情報 — 永続 provenance ではない。[03-data-model.md §8](03-data-model.md))
   - 過去 commit / 既存 Evidence Pointer は tree entry の gen により旧 instance を参照し続ける
 正本: 03-data-model.md §6, 04-pipeline.md §5.5
 Status: decided (Step 1 着手前確定)

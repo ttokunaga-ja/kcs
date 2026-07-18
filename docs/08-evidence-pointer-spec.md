@@ -40,8 +40,8 @@ KCS:   commit + raw_hash + chunk_hash   → ファイル移動・リネーム・
   "path_at_commit": "report.pdf",
   "heading_path": ["認証仕様", "API Token", "有効期限"],
   "section_id": "認証仕様/api-token/有効期限",
-  "char_start": 1200,
-  "char_end": 1500,
+  "byte_start": 1200,
+  "byte_end": 1500,
   "scope_id": "scope_01J8ZQ...",
   "scope_path": "/Users/foo/Research/.kcs"
 }
@@ -57,7 +57,7 @@ KCS:   commit + raw_hash + chunk_hash   → ファイル移動・リネーム・
 | `commit` | commit object の content hash (commit_hash, [03-data-model.md §8.1](03-data-model.md)) | append-only。GC (shallow 化) でも失われない |
 | `raw_hash` | 原文バイト列の identity | 移動・リネームで不変 |
 | `tool_profile_hash` | Markdownize Adapter capability の identity | tool 変更で別 chunk に飛ばない保証 |
-| `chunk_hash` | chunk object の identity | `(raw_hash, tool_profile_hash, gen, unit_key, heading_path, section_id, char_start, char_end)` から導出 (算出式は [03-data-model.md §8.1](03-data-model.md)) |
+| `chunk_hash` | chunk object の identity | `(raw_hash, tool_profile_hash, gen, unit_key, heading_path, section_id, byte_start, byte_end)` から導出 (算出式は [03-data-model.md §8.1](03-data-model.md)) |
 | `scope_id` | 正本 `.kcs` の path 非依存 identity (`.kcs/scope.json` 保持) | `.kcs` の移動・export/import で不変 |
 
 ## 2.2 Optional フィールド
@@ -67,7 +67,7 @@ KCS:   commit + raw_hash + chunk_hash   → ファイル移動・リネーム・
 | `tree` | 当該 commit の tree_hash (高速解決用。shallow 化済み commit では tree object 自体は存在しないことがある) |
 | `path_at_commit` | commit 時点の表示用 path (UI 表示・人間可読性) |
 | `heading_path` / `section_id` | chunk の構造的位置 (UI 表示・semantic retarget 用) |
-| `char_start` / `char_end` | normalized unit 本文内の文字 span (unit-local、[03-data-model.md §8.1](03-data-model.md)) |
+| `byte_start` / `byte_end` | normalized unit 本文内の UTF-8 byte span (unit-local・0-based half-open、[03-data-model.md §8.1](03-data-model.md)) |
 | `scope_path` | 生成時点の正本 `.kcs` の絶対パス (解決の高速ヒント + 表示用。解決の root 信頼は `scope_id`) |
 
 `path_at_commit` は **表示用** であり、解決には使わない。実際の解決は `commit + raw_hash` で行う (path はリネーム履歴をまたいでも追えるが、root 信頼は raw_hash 側)。
@@ -87,7 +87,7 @@ kcs://scope_01J8ZQ.../sha256:9f2c.../sha256:abc123.../sha256:tool1.../sha256:chu
 
 規則:
 
-- URI は **必須フィールドのみ** を持つ。optional フィールド (path_at_commit / heading_path / char_start 等) は
+- URI は **必須フィールドのみ** を持つ。optional フィールド (path_at_commit / heading_path / byte_start 等) は
   表示用であり (§2.2)、URI ⇄ JSON の往復で失われてよいのは optional フィールドだけ。
 - `sv` (schema_version) 省略時は `1`。**wire 上の `sv` は MAJOR のみの整数** (MINOR/PATCH は載せない —
   optional フィールド追加は sv 不変で、未知フィールド無視則 (§8) が前方互換を担う)。未知の `sv`
@@ -142,7 +142,7 @@ bulk 系 (`kcs evidence verify --batch <pointers.jsonl>`) は従来どおり各�
 5.  raw_hash が tombstone を持つなら → tombstone を返す (§4)
 6.  tree entry の normalize.(tool_profile_hash, gen) で normalized instance (unit object 群) を解決
     (gen フィールド欠落は gen=0 と読む)
-7.  chunk_hash で chunk object を解決し char_start/char_end の text を取り出す
+7.  chunk_hash で chunk object を解決し byte_start/byte_end の text を取り出す
 8.  **整合検証**: 解決した chunk object の raw_hash / tool_profile_hash が pointer の値と一致し、
     手順 4-6 を経た場合はさらに chunk object の gen が tree entry の gen と一致することを検証する
     (pointer は gen を持たない — gen の照合対象は tree entry と chunk object 内部のみ)。不一致は
@@ -212,7 +212,8 @@ context: { raw_hash, scope_path }
 `.kcs/purge/erase-receipts/` の bounded non-content receipt は fsck 専用であり、本 API は参照しない。
 receipt は pointer state を tombstoned にせず、re-ingest も阻止しないため、レスポンスは上記
 `not_found` である。**ただしこの保証は当該 bytes が store に不在の間のもの** — 同一 bytes が後日
-明示的に再 ingest され、同じ identity の chunk が再生成された場合、既存 pointer は再び alive として
+再 ingest され (明示操作に限らず、working tree 残存原本の自動 scan を含む — [05-runtime.md §3.5](05-runtime.md)
+の残存警告)、同じ identity の chunk が再生成された場合、既存 pointer は再び alive として
 解決される (erase は resurrection barrier ではない設計 — [05-runtime.md §3.5](05-runtime.md)。
 「erase 後も永続的に not_found」と読める保証はしない)。
 
@@ -247,6 +248,10 @@ bulk verify:
 kcs evidence verify --batch <pointers.jsonl>
 # 各行が pointer JSON。各行に対する status を返す
 ```
+
+active purge journal 中の verify は評価を行わず、KCS-E-PURGE 系 retryable (exit 3) を返す
+([05-runtime.md §3.5](05-runtime.md) の読取系規約 — marker 耐久化後・削除完了前の窓で
+「削除対象が alive」と誤答しないため)。
 
 `--batch` の実装は Phase 4+ ([09-mvp-scope.md §3.1](09-mvp-scope.md))。単発 verify は Step 4。
 

@@ -213,7 +213,7 @@ Phase 3: 履歴
   - --at / --all-history
 
 Phase 4: 自動化
-  - auto snapshot
+  - 定期 auto snapshot (取り込み完了時の auto snapshot は MVP — 05-runtime.md §8.1)
   - Downloads watch
   - inbox
   - classification suggestion (提案のみ)

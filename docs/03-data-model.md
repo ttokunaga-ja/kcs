@@ -43,6 +43,8 @@ raw / prepared / image / chunk / embedding / tree / commit は **CAS object** �
       manifest.json                    # 順序付き unit 一覧 + unit status (正本, §2.1)
       <unit_ref>.json                  # unit object (unit_ref = base16(sha256(unit_key))[0:16])
     normalized/ab/cd/<raw64>.<tool64>.g<gen>.md   # 全文 view (cache, 再生成可能)
+    manifests/ab/cd/<manifest64>    # manifest の immutable 確定版 (canonical JCS bytes、§2.1。
+                                    # tree v2 の normalize.manifest_hash が指す — §8)
     chunks/ab/cd/<chunk64>
     embeddings/ab/cd/<embedding64>
     trees/ab/cd/<tree64>
@@ -54,7 +56,8 @@ raw / prepared / image / chunk / embedding / tree / commit は **CAS object** �
   tombstones/ab/cd/<raw64>      purge の tombstone 記録 (05-runtime.md §3.5。CAS object ではない)
   tasks.jsonl         batch タスクストア (04-pipeline.md §5.1。append-only の運用データ、SQLite 非採用)
   chunks.jsonl        chunk association ledger (**truth** — chunk object が持たない世代 association の正本。
-                      各行 = {chunk_id, chunking_config_hash, created_at, first_seen_commit}。append-only、
+                      各行 = {chunk_id, chunking_config_hash, created_at, first_seen_commit, path}。
+                      path = chunk 生成時点の path (SQLite chunks.raw_path の rebuild 入力)。append-only、
                       SQLite rebuild の入力 — 04-pipeline.md §4.1/§4.6、本書 §8)
   index/
     sqlite.db         FTS5 + sqlite-vec (query acceleration layer; 真実は objects/)
@@ -169,6 +172,12 @@ materialize されるため、chunk span と Evidence 解決元がずれない�
 - unit object は read-only artifact。書き換え・削除しない (purge を除く)
 - manifest の `units[].status` の遷移は `failed → done` の一方向のみ (部分失敗の再開、§6)。
   done unit の差し替えは `kcs reindex --force` による新 gen 作成のみ
+- **manifest の各確定版は immutable object として保存する**: manifest の finalize (初回確定と、partial retry で
+  `failed → done` を反映した各確定) のたびに、canonical JCS bytes を `objects/manifests/ab/cd/<manifest64>` へ
+  content-addressed で書く (post-write verify 対象)。path-named `manifest.json` は**最新版の作業コピー**であり、
+  過去版の解決は manifest object のみが担う。tree entry の `normalize.manifest_hash` (§8) は常に対応する
+  manifest object を指すため、same-gen partial retry で作業コピーが更新された後も、過去 commit 時点の
+  unit 完成状態を正確に列挙・検証できる (fsck の照合 = [10-operations.md §7.5.1](10-operations.md))
 
 **gen (generation)**: 同一 `(raw_hash, tool_profile_hash)` に対する instance の世代番号 (0 起点の整数)。
 通常は `g0` のみ存在する。`kcs reindex --force` だけが `gen = 現最大 + 1` の新 instance を作り、
@@ -184,8 +193,8 @@ unit を決定論的に結合した **再生成可能な cache** であり、正
 2. `status = done` の unit は、その `markdown` から末尾の連続する改行を除去した文字列を採用する
 3. `status = failed` の unit は、固定文字列 `<!-- KCS-MISSING-UNIT <unit_key> <error_kind> -->` を採用する
 4. 採用した文字列を `"\n\n"` で結合し、末尾に `"\n"` を 1 つ付す — これが view 本文
-5. §10 のヘッダコメントを本文の前に付す。chunk の char offset は **unit-local** (当該 unit の
-   `markdown` 本文先頭を 0 とする文字 span、§8.1) であり、全文 view 上の位置・ヘッダ・結合順は
+5. §10 のヘッダコメントを本文の前に付す。chunk の byte offset は **unit-local** (当該 unit の
+   `markdown` 本文 UTF-8 bytes 先頭を 0 とする byte span、§8.1) であり、全文 view 上の位置・ヘッダ・結合順は
    chunk identity に影響しない
 
 view の破損・喪失・直接編集は `kcs repair` による再生成で解消する。up_to_date 判定 (§6) に
@@ -196,7 +205,7 @@ view の存在は使わない。
 各 `.kcs` が管理するのは **その `.kcs` が配置されたフォルダ直下のファイルのみ** である。この規則は次の 3 点で一意に定まる:
 
 1. 管理対象は scope フォルダ **直下** のファイルに限る。サブフォルダ配下のファイルは、そのサブフォルダに `.kcs` が存在するか否かに関わらず、親 `.kcs` の管理対象に **ならない** (再帰包含は行わない)。
-2. サブフォルダは常に独立スコープの候補である。対象ファイルを含むサブフォルダには `kcs index` が子 `.kcs` を生成する ([06-cli-spec.md §1](06-cli-spec.md), [10-operations.md §4](10-operations.md))。ignore されたサブツリーには子 `.kcs` を生成しない。**VCS リポジトリ root (`.git` 等の VCS 管理ディレクトリを持つフォルダ) とその配下にも既定では子 `.kcs` を生成しない** (skip + status 表示。`[scope] index_vcs_repos = true` で opt-in) — リポジトリの履歴は VCS 自身が持ち、`.kcs` の自動生成はリポジトリを汚す ([01-positioning.md §8](01-positioning.md) の方針の機械化)。
+2. サブフォルダは常に独立スコープの候補である。対象ファイルを含むサブフォルダには `kcs index` が子 `.kcs` を生成する ([06-cli-spec.md §1](06-cli-spec.md), [10-operations.md §4](10-operations.md))。ignore されたサブツリーには子 `.kcs` を生成しない。**VCS リポジトリ root (`.git` 等の VCS 管理ディレクトリを持つフォルダ) とその配下にも既定では子 `.kcs` を生成しない** (skip + status 表示。`[scope] index_vcs_repos = true` で opt-in) — リポジトリの履歴は VCS 自身が持ち、`.kcs` の自動生成はリポジトリを汚す ([01-positioning.md §8](01-positioning.md) の方針の機械化)。**本既定の導入以前に生成済みの既存子 `.kcs` は grandfathered** — 引き続き有効な scope として index・検索の対象に残る (skip が適用されるのは新規生成の判断のみ)。
 3. したがって tree entry の `path`、Evidence Pointer の `path_at_commit`、task の `input_path` は **パス区切り (`/`) を含まないファイル名** である。`/` を含む path を持つ tree / pointer は schema violation (`KCS-E-STORE-PATH-001`) として拒否する。
 
 ファイルの位置は `scope_path` (正本 `.kcs` の絶対パス) + ファイル名で一意に表現される。「フォルダ木を横断してファイルを探す」体験は、個々の `.kcs` の再帰包含ではなく scope_registry を使った横断検索 ([05-runtime.md §1.8](05-runtime.md)) が担う。
@@ -239,12 +248,12 @@ cache = scope_registry / aggregator 検索の探索対象一覧 / stale 検出 /
 | `.kcs/logs/access.jsonl` | JSONL (append-only) | **truth** (access_events の正本) | 復旧不能 | §2 |
 | `.kcs/manifest.json` | JSON (schema 検証) | working-state cache (永続的真実は tree/commit object) | rescan で再構築 | §8 files |
 | `.kcs/tasks.jsonl` | JSONL (append-only) | 運用データ | 喪失許容 ([04-pipeline.md §5.7](04-pipeline.md)) | [04-pipeline.md §5.1](04-pipeline.md) |
-| `.kcs/chunks.jsonl` | JSONL (append-only) | **truth** (chunk の世代 association / created_at / first_seen_commit — chunk object には含めない §8) | 復旧不能 (SQLite rebuild の入力) | §8 / [04-pipeline.md §4.1](04-pipeline.md) |
-| `.kcs/index/sqlite.db` | **SQLite** (chunks / chunk_config_generations / chunk_fts / embeddings / chunk_vec / tree_entries の 6 表) | cache | `kcs repair --rebuild-db` | [04-pipeline.md §4](04-pipeline.md) |
+| `.kcs/chunks.jsonl` | JSONL (append-only) | **truth** (chunk の世代 association / created_at / first_seen_commit / 生成時点 path — chunk object には含めない §8) | 復旧不能 (SQLite rebuild の入力) | §8 / [04-pipeline.md §4.1](04-pipeline.md) |
+| `.kcs/index/sqlite.db` | **SQLite** (chunks / chunk_config_generations / chunk_publications / chunk_fts / embeddings / chunk_vec / tree_entries / index_metadata の 8 表) | cache | `kcs repair --rebuild-db` | [04-pipeline.md §4](04-pipeline.md) |
 | `~/.local/share/kcs/scope-registry.sqlite` | **SQLite** (`scopes` 1 表) | cache | 各 `.kcs` の rescan | [10-operations.md §3](10-operations.md) |
 | `~/.local/share/kcs/cost-ledger.sqlite` | **SQLite** (`cost_ledger` / `batch_requests` の 2 表、WAL) | 運用データ (課金台帳 + **in-flight Batch intent の正本** — [04-pipeline.md §5.8](04-pipeline.md)。tasks.jsonl と異なり喪失許容ではない) | 確定課金は再構築不可 (Adapter 報告値の記録であり再導出元がない)。in-flight は provider job 一覧の intent_token 全走査で回収 | [04-pipeline.md §5.4](04-pipeline.md) (SQL 正本) |
 
-**SQLite を使うのはこの表の 3 ファイル (計 9 テーブル)**。うち index/sqlite.db と scope-registry.sqlite は正本から再構築可能な検索キャッシュ、**cost-ledger.sqlite だけは再構築不可の運用台帳** (cache ではない — schema 変更は rebuild でなく in-place migration 側、[10-operations.md §7.5.3](10-operations.md))。コンテンツの truth は引き続きファイル (CAS objects/ ほか) が正本であり、tasks.jsonl は喪失許容の JSONL のまま。旧 spec が SQLite テーブルとして定義していた `files` / `normalization_runs` / `prepared_units` は採用しない (§8、[04-pipeline.md §4.7](04-pipeline.md))。課金 + in-flight intent の記録は 2026-07-18 に JSONL 3 ファイル構成から cost-ledger.sqlite へ確定した ([04-pipeline.md §5.4](04-pipeline.md) — 2 相プロトコルが UNIQUE・単一 Tx・ON CONFLICT 冪等の保証を正本要件とするため)。
+**SQLite を使うのはこの表の 3 ファイル (計 11 テーブル)**。うち index/sqlite.db と scope-registry.sqlite は正本から再構築可能な検索キャッシュ、**cost-ledger.sqlite だけは再構築不可の運用台帳** (cache ではない — schema 変更は rebuild でなく in-place migration 側、[10-operations.md §7.5.3](10-operations.md))。コンテンツの truth は引き続きファイル (CAS objects/ ほか) が正本であり、tasks.jsonl は喪失許容の JSONL のまま。旧 spec が SQLite テーブルとして定義していた `files` / `normalization_runs` / `prepared_units` は採用しない (§8、[04-pipeline.md §4.7](04-pipeline.md))。課金 + in-flight intent の記録は 2026-07-18 に JSONL 3 ファイル構成から cost-ledger.sqlite へ確定した ([04-pipeline.md §5.4](04-pipeline.md) — 2 相プロトコルが UNIQUE・単一 Tx・ON CONFLICT 冪等の保証を正本要件とするため)。
 
 # 5. Identity — hash と semantic_fingerprint の分離
 
@@ -342,7 +351,7 @@ chunking_config_hash = "sha256:" + base16(sha256(JCS({
 
 - 対象は `[chunking]` 配下の **chunk 境界に影響する全キー**。キーを追加したら `spec_version` を bump する
 - デフォルト値も明示的に畳み込む (キー省略と明示指定を識別しない)
-- これは同一性 hash であり、identity には使わない。chunk identity は §8.1 のとおり `(raw_hash, tool_profile_hash, gen, unit_key, heading_path, section_id, char_start, char_end)` のまま。`chunking_config_hash` は chunk の**世代**を表すメタデータに留める
+- これは同一性 hash であり、identity には使わない。chunk identity は §8.1 のとおり `(raw_hash, tool_profile_hash, gen, unit_key, heading_path, section_id, byte_start, byte_end)` のまま。`chunking_config_hash` は chunk の**世代**を表すメタデータに留める
 
 # 6. Up_to_date 判定
 
@@ -493,6 +502,15 @@ image_hash    = "sha256:" + base16(sha256(抽出画像のバイト列))
 - timestamp は UTC ISO8601 + `Z` ([06-cli-spec.md §12](06-cli-spec.md))。
 - `HEAD` / `refs/heads/*` / canonical `refs/tags-v1/*` / legacy `refs/tags/*` の値は commit_hash。
 
+**manifest** — canonical JSON の content hash (§2.1):
+
+```text
+manifest_hash = "sha256:" + base16(sha256(manifest の canonical JCS バイト列))
+```
+
+- 保存パスは `objects/manifests/ab/cd/<manifest64>` (immutable — §2.1)。fsck は再ハッシュで検証し、
+  tree entry の `normalize.manifest_hash` (§8) がこの object を指す ([10-operations.md §7.5.1](10-operations.md))。
+
 **chunk** — identity hash:
 
 ```text
@@ -504,12 +522,12 @@ chunk_hash = "sha256:" + base16(sha256(JCS({
   "unit_key": "...",
   "heading_path": ["...", "..."],
   "section_id": "...",
-  "char_start": <int>,
-  "char_end": <int>
+  "byte_start": <int>,
+  "byte_end": <int>
 })))
 ```
 
-- `gen` は normalized unit の世代番号、`unit_key` は chunk が属する unit の識別子 (例 `page:12`)。`char_start` / `char_end` は **unit-local** (当該 unit 本文先頭を 0 とする文字 span)。
+- `gen` は normalized unit の世代番号、`unit_key` は chunk が属する unit の識別子 (例 `page:12`)。`byte_start` / `byte_end` は **unit-local** の UTF-8 byte span (当該 unit 本文 bytes 先頭を 0 とする 0-based half-open — §8)。
 - null / 未設定フィールドは hash 入力に含めない (§5.1 と同じ規則。`section_id` を持たない chunking strategy では省略)。
 - chunk object 本体 (`text_hash` 等を含む) は `chunk_hash` をキーに保存されるが、`text_hash` は **hash 入力に含めない**。Markdown は LLM ベース非決定的であり (§5)、chunk の同一性は原文 + tool capability + unit 世代 + 構造的位置 + span のみで決まるため。
 
@@ -554,6 +572,8 @@ embedding_hash = "sha256:" + base16(sha256(JCS({
 //  - tree.chunking_config_hash = snapshot 時点の effective chunking config (§5.3)。再 chunk も同様に
 //    tree_hash を変える
 //  - v1 tree (両フィールド欠落) は legacy として読取可 (欠落 = 旧 semantics)。新規 commit は v2 で書く
+//  - manifest_hash は objects/manifests/ の immutable manifest object (§2.1) を指す — same-gen retry で
+//    作業コピー manifest.json が更新された後も、過去 commit の manifest bytes はこの object から解決できる
 
 // commit — objects/commits/9f/2c/<commit64> に JCS 形式で保存
 {
@@ -617,14 +637,14 @@ tree は entries を単一の flat 配列で持つ。スコープ境界規則 (�
   "unit_key": "page:12",
   "heading_path": ["認証仕様", "API Token"],
   "section_id": "認証仕様/api-token",
-  "char_start": 1200,
-  "char_end": 1500,
+  "byte_start": 1200,
+  "byte_end": 1500,
   "text_hash": "sha256:text",
   "text": "chunk の exact normalized text"
 }
 ```
 
-chunk identity は `(raw_hash, tool_profile_hash, gen, unit_key, heading_path, section_id, char_start, char_end)` で決まり、chunk_hash の算出式は §8.1 に定める (heading_path と section_id は両方 hash 入力。未設定フィールドは省略。**`char_start` / `char_end` は unit-local の UTF-8 byte offset・0-based half-open** — 「文字」単位ではない。Normalized Markdown は UTF-8/NFC/LF に固定されるため byte offset は決定的 — [07-adapter-spec.md §5.2.1](07-adapter-spec.md))。`text_hash` は **chunk 抽出範囲のみ** の hash (= sha256(当該 byte 範囲の exact bytes)) であり、Markdown 全体の hash ではない。`chunking_config_hash` は chunk の**世代**を表すメタデータであり、identity には含めない (§5.3)。chunk object 本体が `gen` を保持するため、tree を失った shallow commit からでも chunk_hash → chunk object → gen で normalized unit instance まで直接解決できる ([08-evidence-pointer-spec.md §3.1](08-evidence-pointer-spec.md))。
+chunk identity は `(raw_hash, tool_profile_hash, gen, unit_key, heading_path, section_id, byte_start, byte_end)` で決まり、chunk_hash の算出式は §8.1 に定める (heading_path と section_id は両方 hash 入力。未設定フィールドは省略。**`byte_start` / `byte_end` は unit-local の UTF-8 byte offset・0-based half-open** — 「文字」単位ではない (旧称 `char_start` / `char_end`。実装・pointer 発行前の 2026-07 改名で、意味と名称を一致させた)。Normalized Markdown は UTF-8/NFC/LF に固定されるため byte offset は決定的 — [07-adapter-spec.md §5.2.1](07-adapter-spec.md))。`text_hash` は **chunk 抽出範囲のみ** の hash (= sha256(当該 byte 範囲の exact bytes)) であり、Markdown 全体の hash ではない。`chunking_config_hash` は chunk の**世代**を表すメタデータであり、identity には含めない (§5.3)。chunk object 本体が `gen` を保持するため、tree を失った shallow commit からでも chunk_hash → chunk object → gen で normalized unit instance まで直接解決できる ([08-evidence-pointer-spec.md §3.1](08-evidence-pointer-spec.md))。
 
 chunk object の永続 JSON は上記の `spec_version` + identity fields + `text_hash` + exact `text` に固定し、
 自身の `chunk_hash`、path、`first_seen_commit`、`created_at`、`chunking_config_hash` は含めない。
@@ -699,6 +719,7 @@ participates_in_global_search = true
 [chunking]
 strategy = "heading"
 max_chars = 6000
+# max_chars の計数単位 = Unicode scalar value (code point)。分割規則は 04-pipeline.md §4.1
 # [chunking] の変更は chunking_config_hash (§5.3) の変化として検出され、
 # chunk / embedding のみ再生成される (再 Markdownize しない)。規則は 04-pipeline.md §4.6
 [markdownize.incremental]

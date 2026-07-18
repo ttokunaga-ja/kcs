@@ -115,6 +115,9 @@ revoke: adapter.policy.allow_network = false に設定する。
         **保存先 = `.kcs/scope.json` の `approvals[]` 配列** (schema 検証対象
         [10-operations.md §12.3](10-operations.md)、truth [03-data-model.md §4.1](03-data-model.md))。
         `(scope_id, tool_id)` 単位の行で、失効・revoke は当該行の更新 (atomic rename) で行う。
+        `approvals[]` 要素の required field = scope_id / tool_id / execution_mode /
+        tool_profile_hash / approved_at / approval_method ([10-operations.md §12.3](10-operations.md) の
+        schema 定義と一致)。
         初回スキャン承認 (10-operations.md §1) の記録とは別物 — あちらは scope 単位の
         取り込み承認、こちらは adapter 単位の network opt-in。
 ```
@@ -265,7 +268,7 @@ incremental の詳細プロンプト規約は §8 (生成 LLM 系のみ。§8 �
     policy/profile は task identity に含め、既存 annotation 無し Done task を default-on の完了扱いにしない
 - 生成 LLM (Gemini / Claude / GPT 等) は Markdownize の主処理ではなく、OCR 後の品質検証・図表解釈・summary (§5.4) に使う。
 
-> **実地検証済み (2026-07-03、設計宿題 #6 解消 [09-mvp-scope.md §5.5](09-mvp-scope.md))**: 合成 fixture (複雑表・日本語・数式・埋め込み画像、4 ページ) を sync / Batch 両モードで検証: 表セル一致率 1.0 (17/17)、日本語 CER 0.0、画像抽出 1/1 (placeholder 形式も §5.2 想定どおり)、数式は LaTeX でテキスト化。単価は公称一致 (API $4 / Batch $2 per 1,000 pages)、Batch のジョブ往復は 4 ページで約 24 秒。ハーネスと実測ログは `experiments/ocr-verification`。検証が崩れた場合の fallback (生成 LLM 系 §8.2 へ戻す) の設計は維持する。
+> **実地検証済み (2026-07-03、設計宿題 #6 解消 [09-mvp-scope.md §5.5](09-mvp-scope.md))**: 合成 fixture (複雑表・日本語・数式・埋め込み画像、4 ページ) を sync / Batch 両モードで検証: 表セル一致率 1.0 (17/17)、日本語 CER 0.0、画像抽出 1/1 (placeholder 形式も §5.2 想定どおり)、数式は LaTeX でテキスト化。単価は公称一致 (API $4 / Batch $2 per 1,000 pages)、Batch のジョブ往復は 4 ページで約 24 秒。ハーネスと実測ログは `experiments/ocr-verification`。検証が崩れた場合の fallback (生成 LLM 系 §8.2 へ戻す) の設計は維持する。Batch trait の `list_uploads` / `provider_scope_id` / pagination の契約試験は未実施 — Step 3 実測に含める。
 
 ## 5.2.1 Normalized Markdown 形式 (最小凍結 — 2026-07-18)
 
@@ -547,6 +550,10 @@ USER:
 KCS が staging + retry 応答を合成し (同一 unit_key の重複は contract violation として reject —
 staging 側が first instance)、**完成集合に対して**受け入れ検査 (incremental は V1〜V6、full は full
 契約) を適用してから一括公開する。
+
+**staging の物理喪失** (プロセスクラッシュ・task cache 消失) 時は staging 全体を破棄し、未確定 unit
+全体を再取得する — 完了済み bytes の凍結は転送量の最適化であり、正しさは全再取得で常に回復できる
+(tasks.jsonl と同じ喪失許容 — [04-pipeline.md §5.7](04-pipeline.md))。
 
 ## 8.4 Capability 宣言なしの Adapter
 

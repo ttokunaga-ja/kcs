@@ -289,9 +289,13 @@ V3 越権禁止:  keys(updated_units) ⊆ hints.changed_unit_keys
               (hints に無い unit の書き換え = unchanged unit の再出力違反の検出)
 V4 added:     keys(added_units) = hints.added_unit_keys と完全一致
 V5 形式:      各 updated / added unit の markdown が非空文字列で、
-              unit_key / unit_type が prepared unit 側と整合
+              unit_key / unit_type が prepared unit 側と整合。加えて Normalized Markdown v1
+              ([07-adapter-spec.md §5.2.1](07-adapter-spec.md) が正本) の機械検証可能な規約 —
+              UTF-8 (BOM 禁止)・NFC・LF のみ・trailing space 禁止・ATX 見出し・``` fence・
+              生 HTML / autolink 禁止 — への適合を検査し、違反 unit を含む応答は reject する
 V6 mode:      mode_used = "full" の場合は full 出力契約として検証
-              (全 unit が揃っていること。V1〜V5 は適用しない)
+              (全 unit が揃っていること。V1〜V4 は適用しないが、**V5 の形式検査は
+              full 出力の全 unit にも適用する**)
 ```
 
 違反時の挙動:
@@ -299,8 +303,10 @@ V6 mode:      mode_used = "full" の場合は full 出力契約として検証
 ```text
 error_code:      KCS-E-ADAPTER-CONTRACT-001
 当該応答は unit 1 つも persist しない (全体 reject)
-同一入力で full モードへ自動 fallback (fallback_reason = "contract_violation")
-full 出力でも V6 に違反する場合は run を failed (invalid_input 系, retry しない)
+run は failed (retryable — 同一 mode で 1 回のみ再試行 (§5.2 表)。再違反は failed permanent)。
+full への自動 fallback は行わない
+(fallback は incremental capability 非互換の場合のみ — 正本 [07-adapter-spec.md §8.1](07-adapter-spec.md))
+full mode 応答の V5/V6 違反も同様に全体 reject + failed (invalid_input 系は retry しない)
 ```
 
 内容 (意味) の検証は行わない。Markdown content hash を持たないため ([03-data-model.md §5](03-data-model.md))、
@@ -319,17 +325,30 @@ CREATE TABLE chunks (
   tool_profile_hash TEXT NOT NULL,
   gen INTEGER NOT NULL,                -- chunk は常に normalized instance 由来のため DEFAULT を持たない
   unit_key TEXT NOT NULL,
-  raw_path TEXT NOT NULL,              -- chunk 生成時点の path (表示用)。現在 path は tree_entries join で得る
+  raw_path TEXT NOT NULL,              -- chunk 生成時点の path (表示用)。現在 path は tree_entries join で得る。
+                                       -- rebuild 入力 = chunks.jsonl の path (03 §2)
   heading_path TEXT NOT NULL,          -- 見出し未出現は空 ([] 相当)。NULL は許可しない (境界規則 3)
   section_id TEXT,
-  char_start INTEGER NOT NULL,           -- chunk identity (03 §8.1) の必須入力
-  char_end INTEGER NOT NULL,
+  byte_start INTEGER NOT NULL,           -- chunk identity (03 §8.1) の必須入力
+  byte_end INTEGER NOT NULL,
   text_hash TEXT NOT NULL,
   text TEXT NOT NULL,
-  first_seen_commit TEXT,              -- この chunk を含む最初の commit (commit_hash)。commit 作成時に付与
+  first_seen_commit TEXT,              -- 最初の publication commit (便宜列。時点条件の正本は chunk_publications)
   created_at TEXT NOT NULL
 );
 CREATE INDEX idx_chunks_ident ON chunks(raw_hash, tool_profile_hash, gen);
+
+CREATE TABLE chunk_publications (      -- publication relation (cache — commit DAG + tree から再導出可能)
+  chunk_id            TEXT NOT NULL,
+  introduction_commit TEXT NOT NULL,   -- この chunk が (再) 導入された commit。単一の first_seen_commit では
+                                       -- incomparable な複数導入 (merge の side 枝等) を表現できないため多対多
+  PRIMARY KEY (chunk_id, introduction_commit)
+);                                     -- 時点条件の判定はこの relation を参照 (05 §1.6)
+
+CREATE TABLE index_metadata (          -- 単一行。05 §1.5 index_generation の保存先
+  id               INTEGER PRIMARY KEY CHECK (id = 1),
+  index_generation TEXT NOT NULL       -- ULID (rebuild / purge / enrichment finalize / FTS 内容変化で更新)
+);
 
 CREATE TABLE chunk_config_generations (
   association_rowid INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -340,7 +359,7 @@ CREATE TABLE chunk_config_generations (
 );
 ```
 
-`chunk_id` (PRIMARY KEY) の値は chunk object の `chunk_hash` と同一文字列とする (算出式は [03-data-model.md §8.1](03-data-model.md))。`gen` / `unit_key` は chunk が由来する normalized instance の世代と unit ([03-data-model.md §2.1](03-data-model.md)。`char_start` / `char_end` は unit-local)。chunk が属する Markdown 全体の content hash (normalized_hash) は持たない。
+`chunk_id` (PRIMARY KEY) の値は chunk object の `chunk_hash` と同一文字列とする (算出式は [03-data-model.md §8.1](03-data-model.md))。`gen` / `unit_key` は chunk が由来する normalized instance の世代と unit ([03-data-model.md §2.1](03-data-model.md)。`byte_start` / `byte_end` は unit-local)。chunk が属する Markdown 全体の content hash (normalized_hash) は持たない。
 
 **chunk 境界の正準規則** (2026-07-03 確定、step3a §C-1 の決定性論点解消。chunk_hash の入力である heading_path / section_id / span を実装非依存にする):
 
@@ -356,8 +375,10 @@ CREATE TABLE chunk_config_generations (
    同一 unit 内の重複 slug は 2 つ目以降に "#2", "#3" を付す (出現順)
 5. 分割: 見出し区間が max_chars (03 §11 [chunking]) を超える場合、段落境界 (空行) で
    貪欲に max_chars 以下へ分割する。単一段落が max_chars を超える場合のみ文字位置で
-   機械分割する。分割片は同一 heading_path / section_id を共有し、unit-local の
-   char_start / char_end で区別する (chunk identity は span を含むため衝突しない)
+   機械分割する。max_chars と「文字位置」の計数単位 = **Unicode scalar value** (code point) であり、
+   機械分割は scalar 境界でのみ行う (UTF-8 byte の途中で切らない。grapheme cluster は考慮しない —
+   Unicode 版依存を避け、実装非依存の決定性を優先)。分割片は同一 heading_path / section_id を共有し、
+   unit-local の byte_start / byte_end で区別する (chunk identity は span を含むため衝突しない)
 ```
 
 **chunks 行は append-only**。ファイルの更新・リネーム・削除では既存 chunk 行を削除・変更しない。これが time-travel 検索 (`--at` / `--all-history` / `--include-deleted`、[05-runtime.md §1.6](05-runtime.md)) の実体である。chunk 行を削除する経路は `kcs purge` のみ (対象 raw_hash の chunk 行・FTS エントリ・embeddings を物理削除、[05-runtime.md §3.5](05-runtime.md))。raw / chunk object は GC の削除対象外である ([05-runtime.md §2.6](05-runtime.md))。既存行への UPDATE は `first_seen_commit` の付与のみ許可する。
@@ -440,8 +461,8 @@ KCS は Text/Image を分けず **単一マルチモーダル Embedding Adapter*
 
 ## 4.4 その他のテーブル / ストアの正本
 
-sqlite.db に存在するのは §4.1〜§4.5 の 6 表 (chunks / chunk_config_generations / chunk_fts /
-embeddings / chunk_vec / tree_entries) のみ (ストア全体の一覧は [03-data-model.md §4.1](03-data-model.md))。
+sqlite.db に存在するのは §4.1〜§4.5 の 8 表 (chunks / chunk_config_generations / chunk_publications /
+chunk_fts / embeddings / chunk_vec / tree_entries / index_metadata) のみ (ストア全体の一覧は [03-data-model.md §4.1](03-data-model.md))。
 
 ```text
 chunks / tree / commit object                         03-data-model.md §8
@@ -490,10 +511,10 @@ CREATE INDEX idx_tree_entries_ident ON tree_entries(commit_hash, raw_hash, tool_
 `[chunking]` 設定 ([03-data-model.md §11](03-data-model.md)) の変更は raw_hash / tool_profile_hash に現れないため、独立した世代判定を行う:
 
 - chunk / embedding 段の最新判定は `(raw_hash, tool_profile_hash, gen, chunking_config_hash)` の一致で行う ([03-data-model.md §5.3](03-data-model.md))。03 §6 の up_to_date 判定 (Markdownize 段) は変更しない
-- 検索対象は常に **現行 chunking_config_hash の chunk のみ** ([05-runtime.md §1.6](05-runtime.md))
+- デフォルト (HEAD) 検索の対象は **現行 chunking_config_hash の chunk のみ**。時点指定 (`--at` / history 系) は **対象 tree の `chunking_config_hash`** の association で絞る — tree v2 が時点 config を保存する意味はここにある (v1 tree は config 未記録のため現行値で代替し、結果に注記する。[05-runtime.md §1.6](05-runtime.md))
 - 設定変更を検出したら、次回 `kcs index` で全 normalized instance (履歴分含む) の再 chunk + 再 embedding task を積む。再 chunk はローカル処理で LLM 不要。embedding のみ再課金 (§5.4 budget guardrail の対象)
 - 開始前に再生成対象 chunk 数と embedding 概算コストを提示し確認する (`--yes` で省略)
-- 旧世代 chunk 行は **削除しない**。Evidence Pointer の chunk_hash 解決 ([08-evidence-pointer-spec.md §6](08-evidence-pointer-spec.md)) 用に残置する (検索には出ない)
+- 旧世代 chunk 行は **削除しない**。Evidence Pointer の chunk_hash 解決 ([08-evidence-pointer-spec.md §6](08-evidence-pointer-spec.md)) 用に残置する (デフォルト検索には出ない。時点指定は対象 tree の config で対象になる — [05-runtime.md §1.6](05-runtime.md))
 - 再生成未完了の instance はその間検索から漏れる (index 未完了と同じ扱い。`kcs status` に表示)
 
 ## 4.7 prepared_units (論理台帳 — SQLite テーブル非採用)
@@ -597,7 +618,9 @@ quota_exceeded     retryable             max_attempts=3,  fixed(1h)
                                          KCS-E-BATCH-QUOTA-001
 invalid_input      failed permanent      max_attempts=0
                                          KCS-E-BATCH-INPUT-001
-contract_violation failed permanent      max_attempts=0 (full fallback を 1 回自動投入)
+contract_violation retryable             max_attempts=1 (同一 mode で 1 回のみ再投入 — 出力揺れ対策。
+                                         再違反は failed permanent = Adapter バグ。full への自動
+                                         fallback はしない: 正本 07 §8.1、capability 非互換のみ §8.4)
                                          KCS-E-ADAPTER-CONTRACT-001
 budget_exceeded    paused                KCS-E-BATCH-BUDGET-001
 ```
@@ -615,7 +638,7 @@ monthly_usd_cap = 50.0
 warn_at_percent = 80
 hard_stop = true
 [budget.per_adapter]
-markdown = 30.0
+markdownize = 30.0
 embedding = 15.0
 summary = 5.0
 
@@ -625,7 +648,7 @@ monthly_usd_cap = 10.0
 ```
 
 - cap は二層で判定する。**device cap** (`~/.config/kcs/config.toml`、デバイス上の全 `.kcs` の当月合算に適用、既定 $50) が正であり、**folder cap** (`.kcs/config.toml`、その `.kcs` の当月消費のみに適用) は任意の追加制限。folder cap 未設定なら device cap のみが効く
-- 判定式: scope S の新規タスクを起動できるのは `ledger(S, 当月) + candidate < folder_cap(S)` **かつ** `ledger(device, 当月) + candidate < device_cap` のとき (= effective cap は両者の残余の min。candidate = 起動しようとするタスク自身の予約額)。`per_adapter` の下限は **device 層専用** (folder cap は total のみ — folder 側 `[budget.per_adapter]` は定義しない) で、**第三条件として同様に判定する**: `ledger(device, adapter_kind, 当月) + candidate < per_adapter_cap(adapter_kind)` (設定キー名 = adapter_kind と同一 enum: markdownize / embedding / summary)。`ledger(...)` は cost_ledger の当月合算 (estimated 行も usd 非 NULL のため数値として効く — §5.8) + 未終端 batch_requests (state 0/1) の `estimated_usd` 合算 (= 予約)。**判定と相 1 の reservation 作成は同一の `BEGIN IMMEDIATE` Tx で行う** (check-then-act の並行超過を防ぐ — cap 超過なら相 1 を作らない)
+- 判定式: scope S の新規タスクを起動できるのは `ledger(S, 当月) + candidate < folder_cap(S)` **かつ** `ledger(device, 当月) + candidate < device_cap` のとき (= effective cap は両者の残余の min。candidate = 起動しようとするタスク自身の予約額)。`per_adapter` の下限は **device 層専用** (folder cap は total のみ — folder 側 `[budget.per_adapter]` は定義しない) で、**第三条件として同様に判定する**: `ledger(device, adapter_kind, 当月) + candidate < per_adapter_cap(adapter_kind)` (設定キー名 = adapter_kind と同一 enum: markdownize / embedding / summary。**enum 外の未知キーは schema error** — [10-operations.md §12.3](10-operations.md))。`ledger(...)` は cost_ledger の当月合算 (estimated 行も usd 非 NULL のため数値として効く — §5.8) + 未終端 batch_requests (state 0/1) の `estimated_usd` 合算 (= 予約)。**判定と相 1 の reservation 作成は同一の `BEGIN IMMEDIATE` Tx で行う** (check-then-act の並行超過を防ぐ — cap 超過なら相 1 を作らない)
 - 累積コストは Adapter 報告値 (input/output token × 単価) を `~/.local/share/kcs/cost-ledger.sqlite` (デバイスグローバル 1 個。WAL + busy_timeout — [05-runtime.md §6](05-runtime.md)) に記録する。folder cap の判定はこの ledger の scope 別集計で行う (`.kcs` 内に ledger は置かない。cache/truth 規約上、課金台帳はデバイスローカルの運用データであり `.kcs` の truth ではないが、**再構築不可のため cache でもない** — [03-data-model.md §4.1](03-data-model.md)、schema 変更は in-place migration 側 [10-operations.md §7.5.3](10-operations.md))
 - store は 2 表で構成し、**以下の DDL を SQL 正本とする** (旧 3 JSONL + lock 構成は 2026-07-18 に廃止 — §5.8 の 2 相プロトコルは UNIQUE 制約・単一 Tx・ON CONFLICT 冪等という SQLite の保証を前提に監査された機構であり、append-only JSONL では等価の保証を構成できない。[10-operations.md §12.7](10-operations.md) リネーム表):
 
@@ -721,7 +744,7 @@ chunk の文字数のみ**を対象とし、再利用 chunk (API 非呼出) は�
 ## 5.7 Resume と Repair
 
 - `kcs batch resume`: 中断状態 (running stale, pending) を再開
-- `kcs repair --rebuild-db`: SQLite を objects/ から再構築する (SQLite に存在するのは §4.4 の 6 表のみ。
+- `kcs repair --rebuild-db`: SQLite を objects/ から再構築する (SQLite に存在するのは §4.1〜§4.5 の 8 表のみ。再構築完了時は index_metadata へ新 index_generation ULID を採番する — [05-runtime.md §1.5](05-runtime.md)。
   以下の normalization_runs / prepared_units は SQLite テーブルではなく、manifest / 再 prepare から
   導出される**状態**を指す — [03-data-model.md §8](03-data-model.md) / §4.7)。復元範囲は次の通り:
 

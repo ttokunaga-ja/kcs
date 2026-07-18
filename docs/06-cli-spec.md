@@ -30,25 +30,30 @@ kcs commit -m "<message>"               # = kcs snapshot create -m
 kcs snapshot [create] [-m "<message>"]  # create 省略可。-m 省略時は自動 message ("snapshot at <UTC timestamp>")
 kcs snapshot create -m "<message>"      # 正規形
 kcs log [--at <commit>] [--since <dur>]
-kcs diff <a> <b>
+kcs diff <a> <b>                        # raw/path 差分 + derived-only 差分 (下記の差分種別)
 kcs search "<query>" [options]          # 詳細 §3
 kcs open <pointer|chunk_hash|raw_hash>  # OS 規定アプリで原本を開く。解決規則は §1.1
 kcs view <pointer|path> [--at <commit>]
 kcs inspect <hash>                      # object を JSON で表示
 kcs restore <evidence|path|commit> --to <dir> # 詳細 §5
 kcs tag <name> [<commit>]
-kcs gc [--dry-run|--prune-unreachable] # prune 対象は 05-runtime.md §2.6 (raw/chunk/commit は対象外)
+kcs gc [--dry-run|--prune-unreachable] # prune 対象は 05-runtime.md §2.6 (raw/chunk/commit は対象外)。実装は Phase 4+ (09 §3.1)
 kcs purge <path|--raw-hash <h>> --reason <reason> [--erase-tombstone]  # 詳細 §6
 kcs reindex [--force] [--at <commit>]   # 再 normalize / 再 embedding (Step 3)。--force は first-instance-wins の
                                         # 唯一の上書き経路で gen+1 の新 instance を作る (07-adapter-spec.md §9)。
-                                        # 上書きチェーンは parent_run_id で記録 (09-mvp-scope.md §5.1)。--force は確認プロンプト必須 (--yes で省略可)
+                                        # 上書きチェーンは manifest.parent_instance (三つ組) で永続記録 — parent_run_id は
+                                        # task cache の揮発情報 (03-data-model.md §8、09-mvp-scope.md §5.1)。--force は確認プロンプト必須 (--yes で省略可)
 kcs move --propose <src> <dst>          # 原本移動の提案。Agent はこちらのみ (Phase 4+、MVP 対象外)
 kcs move --accept <id> | --reject <id>  # 提案の承認/却下。KCS が原本を mv できる唯一の経路 (03-data-model.md §10)。書き込み境界の予約定義
-kcs evidence verify <pointer> [--strict]
+kcs evidence verify <pointer> [--strict] [--batch <pointers.jsonl>]  # --batch は Step 4+ (§7、08 §4.3)
 kcs evidence retarget <pointer> [--latest|--at <commit>]  # 設計確定後 (09-mvp-scope.md §5.2)
 ```
 
-`kcs init` は現在フォルダの `.kcs` のみ作成する。子フォルダの `.kcs` は `kcs index` の探索が対象を検出した時点で必要に応じて生成される (**VCS repo root 配下には既定で生成しない** — [03-data-model.md §3](03-data-model.md))。この結果、深いフォルダ木では scope 数が多くなる。`kcs search` のデフォルトが全 indexed scope 横断である ([05-runtime.md §1.8](05-runtime.md)) のはこの帰結を受けた設計である。
+本表はコマンド全量の spec である。MVP での採否・実装 Step の正本は [09-mvp-scope.md §1.2 / §3.1](09-mvp-scope.md) (Phase 4+ のコマンドは行内に注記)。
+
+**`kcs diff` の差分種別**: raw / path の差分に加え、tree schema v2 ([03-data-model.md §8](03-data-model.md)) が生む derived-only の変化 — `normalize_manifest_changed` (unit の failed → done 完成を含む) / `chunking_config_changed` — を差分として表示する (`--json` も同種別を持つ)。derived-only commit を「差分なし」と表示してはならない。片側が v1 tree (フィールド欠落) の場合、derived 差分は `unknown` と表示する。
+
+`kcs init` は現在フォルダの `.kcs` のみ作成する。子フォルダの `.kcs` は `kcs index` の探索が対象を検出した時点で必要に応じて生成される (**VCS repo root 配下には既定で生成しない**。既定導入以前の既存子 `.kcs` は grandfathered として引き続き有効 — [03-data-model.md §3](03-data-model.md))。この結果、深いフォルダ木では scope 数が多くなる。`kcs search` のデフォルトが全 indexed scope 横断である ([05-runtime.md §1.8](05-runtime.md)) のはこの帰結を受けた設計である。
 
 `<pointer>` 引数の受理形式 (URI / inline JSON / stdin / hash 短縮形) は [08-evidence-pointer-spec.md §2.3](08-evidence-pointer-spec.md) を正本とする。
 
@@ -66,18 +71,21 @@ kcs evidence retarget <pointer> [--latest|--at <commit>]  # 設計確定後 (09-
 
 ```text
 1. pointer を解決して raw_hash を得る (08-evidence-pointer-spec.md §3)
-2. working tree 解決:
+2. tombstone 判定 (最優先): raw_hash が tombstoned なら、working tree・cache の状態に関わらず
+   §7 の規約どおり exit 4 — purge 済み原本が folder に残っていても KCS 経由では開かない
+   (05-runtime.md §3.5 の残存警告)
+3. working tree 解決:
    現在の working tree に同一 raw_hash を持つファイルが存在すれば (path_at_commit と
    異なる path でもよい。リネーム済みケース)、その実ファイルを OS 規定アプリで開く
-3. 一時展開 (working tree に存在しない = 削除済み・過去版・raw_hash 直指定):
+4. 一時展開 (working tree に存在しない = 削除済み・過去版・raw_hash 直指定):
    raw object を ~/.cache/kcs/open/<raw_hash digest64>/<basename から導出した portable leaf> に
    read-only で展開し、それを OS 規定アプリで開く。basename の拡張子により OS の
    アプリ関連付けを機能させるが、元 basename 自体は物理名に使用しない
    (path_at_commit が無い場合は kind から推定した拡張子)
-4. raw object が tombstoned / not_found → §7 の規約どおり exit 4
+5. raw object が not_found → §7 の規約どおり exit 4
 ```
 
-一時展開は **restore ではない**: working tree に書かず read-only であるため、[§5](06-cli-spec.md) の安全要件 (`--to` 必須 / `--force`) の対象外。展開先はキャッシュであり、GC (on_idle、Phase 4+) の掃除対象。MVP では自動掃除されないため、必要ならユーザーが削除してよい (正本は `objects/` に無傷)。永続的なコピーが必要な場合は `kcs restore <pointer> --to <dir>` を使う。一時展開で開いた場合、CLI は「原本は working tree に存在しない (削除または過去版)。永続コピーは kcs restore --to」の注記を stderr に表示する。
+一時展開は **restore ではない**: working tree に書かず read-only であるため、[§5](06-cli-spec.md) の安全要件 (`--to` 必須 / `--force`) の対象外。展開先はキャッシュであり、GC (on_idle、Phase 4+) の掃除対象。MVP では自動掃除されないため、必要ならユーザーが削除してよい (正本は `objects/` に無傷)。**purge はこの展開 cache を削除 closure に含める** ([05-runtime.md §3.5](05-runtime.md))。永続的なコピーが必要な場合は `kcs restore <pointer> --to <dir>` を使う。一時展開で開いた場合、CLI は「原本は working tree に存在しない (削除または過去版)。永続コピーは kcs restore --to」の注記を stderr に表示する。
 
 ---
 
@@ -233,10 +241,11 @@ purge は常に**全履歴**の raw 本文・派生 artifact を対象とする 
 ```text
 kcs evidence verify            検査完了で 0 (結果は status フィールド)。parse 失敗は 2
 kcs evidence verify --strict   全 alive なら 0。tombstoned / not_found が 1 件でもあれば 4。
-                               scope_unreachable のみの失敗は 3 (retryable — 08 §4.3)
+                               scope_unreachable のみの失敗は 3 (retryable — 08 §4.3)。
+                               shallow 由来の unverifiable のみも 3 (retryable — 08 §3.1 手順 8)
 kcs evidence verify --batch <pointers.jsonl>   一括 verify (Step 4+ — 08 §4.3)
                                (--batch 混在時も 4。内訳は --json の各行 status で判定)
-kcs open / view / restore      dead pointer (tombstoned / not_found / scope_unreachable) は 4
+kcs open / view / restore      dead pointer (tombstoned / not_found) は 4。scope_unreachable は 3 (retryable — 08 §4.3)
 kcs evidence retarget          対応なし / ambiguous は 4。
                                tool_profile_hash 不一致で chunk 解決不能 (retarget 要) は 8
 ```
