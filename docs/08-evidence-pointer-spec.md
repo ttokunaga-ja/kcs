@@ -134,7 +134,10 @@ bulk 系 (`kcs evidence verify --batch <pointers.jsonl>`) は従来どおり各�
     b. 一致しない・存在しない・scope_path 省略 → scope_registry を scope_id で照会し kcs_path を得る
        (同一 scope_id が複数 **live** 登録されている場合は選択しない — `KCS-E-REGISTRY-DUP-001` の
        候補一覧 error で fail-closed とし、dedupe を要求する ([10-operations.md §3](10-operations.md))。
-       purge 状態の異なる clone へ黙って解決すると scope 単位 purge の判定を取り違えるため)
+       purge 状態の異なる clone へ黙って解決すると scope 単位 purge の判定を取り違えるため。
+       **候補集合は registry の live 行に加えて validated scope_path の canonical path を含めて数える** —
+       registry 未登録の clone を scope_path で指した場合も、既知 live 行と合わせて 2 以上なら同じ error
+       (URI 化で optional path が落ちた場合と結果を変えない))
     c. どちらも失敗 → KCS-E-EVIDENCE-SCOPE-UNREACHABLE-001 (scope_unreachable, §3.2)
 2.  commit を refs / objects/commits/ から取得
 2a. commit が shallow (tree 破棄済み) の場合、手順 3-4 を省略し、手順 5 以降を
@@ -144,7 +147,9 @@ bulk 系 (`kcs evidence verify --batch <pointers.jsonl>`) は従来どおり各�
     レスポンスに "commit_shallow": true を付す。
 3.  tree (commit.tree) を取得
 4.  tree から raw_hash で entry を検索
-5.  raw_hash が tombstone を持つなら → tombstone を返す (§4)
+5.  raw_hash に **active な tombstone** (lifecycle の末尾 event が `purged` — [05-runtime.md §3.5](05-runtime.md)) が
+    あるなら → tombstone を返す (§4)。**retired (末尾 event = `retired`) は tombstone 扱いしない** — 手順 6 へ進む
+    (resurrection 後の旧 pointer を alive に戻すための必須条件)
 6.  tree entry の normalize.(tool_profile_hash, gen) で normalized instance (unit object 群) を解決
     (gen フィールド欠落は gen=0 と読む)
 6a. **時点帰属の検証 (v2 tree)**: entry の normalize.manifest_hash が指す manifest object を読み、
@@ -160,7 +165,11 @@ bulk 系 (`kcs evidence verify --batch <pointers.jsonl>`) は従来どおり各�
     active / retired を問わず — が説明する欠落): 手順 2a と同じ直接解決へ降格し、レスポンスに
     `manifest_missing: true` を付す。時点帰属は検証できないため --strict verify は
     unverifiable (exit 3) — 再 ingest 後の manifest は run_id 等が異なり旧 hash を再生できない
-    ([03-data-model.md §2.1](03-data-model.md)) ので、この降格は恒久である
+    ([03-data-model.md §2.1](03-data-model.md)) ので、この降格は恒久である。**6b でも 6a の v3 検証
+    (publication / association の introduction ancestry) は実施する** — cache は manifest と独立に
+    参照でき、失敗 = not_found (purge → 再 ingest 後の後着 chunk を旧 commit の証拠にしない)。
+    unverifiable になるのは manifest done 検査のみ。`manifest_missing` は `commit_shallow` と
+    独立の response field であり併存し得る
 7.  chunk_hash で chunk object を解決し byte_start/byte_end の text を取り出す
 8.  **整合検証**: 解決した chunk object の raw_hash / tool_profile_hash が pointer の値と一致し、
     手順 4-6 を経た場合はさらに chunk object の gen が tree entry の gen と一致することを検証する
@@ -202,7 +211,7 @@ cursor 再計算など tree 全体を要する操作に限る ([05-runtime.md §
 
 ## 4.1 Tombstone レスポンス
 
-raw_hash が tombstone を持つ場合 (= purge 済みだが履歴上は記録):
+raw_hash に active な tombstone (末尾 event = `purged`) がある場合 (= purge 済みだが履歴上は記録。retired は該当しない):
 
 ```json
 {
@@ -255,7 +264,11 @@ kcs evidence verify <pointer> [--strict]   # <pointer> の受理形式は §2.3
 }
 ```
 
-`unverifiable` は `--strict` 時の shallow 経路 (§3.1 手順 8 — tree membership を検証できない解決)。
+`unverifiable` は `--strict` 時の「時点帰属を検証できない解決」であり、`details.reason` で区別する:
+`commit_shallow` (§3.1 手順 8 — 状況により解消し得る) / `tree_v1` (手順 6a — v2/v3 への再 snapshot で解消) /
+`manifest_missing` (手順 6b — **恒久**)。exit はいずれも 3 (reason で自動化側が再試行の要否を判断する)。
+live clone 重複は status `registry_duplicate` (候補一覧つき、exit 3 — §3.1 手順 1)。--batch は各行の
+status にこれらをそのまま用いる。
 非 strict では従来どおり alive + `commit_shallow: true` で返す。
 
 `--strict`: tombstoned / not_found / scope_unreachable を **error** として扱う (CI / 自動化用)。

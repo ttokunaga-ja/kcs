@@ -379,7 +379,8 @@ provider_scope_id()            下記の不変識別子を返す
 5. account / workspace の**安定した**識別子を取得できること (取得不能なら reservation の照合が恒久
    unknown になり、`kcs batch abandon` 頼みの運用になる)
 6. 投入拒否 (permanent 4xx) にも課金するか否かを宣言すること。**課金する provider の Adapter は、
-   拒否応答時に billable_units または estimated_usd を機械可読で返却する** — KCS は submit_rejected の
+   拒否応答時に billable_units または estimated_usd を機械可読で返却する** (この返却義務は Batch 限定で
+   なく **sync online Adapter にも共通** — [04-pipeline.md §5.4](04-pipeline.md) の sync 記帳規律が参照する) — KCS は submit_rejected の
    terminal 化と同一 Tx で estimated 記帳する ([04-pipeline.md §5.4](04-pipeline.md) DDL 注記)
 
 `mistral_ocr_markdownize` の Batch モードは 2026-07-03 の実地検証 (§5.2 末尾) の範囲でこの条件下で

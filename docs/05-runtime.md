@@ -180,6 +180,10 @@ page 1 の `since_cutoff` (UTC ISO8601 + `Z`) も保持する:
 (デフォルト = HEAD tree = 現行値。`--at` は対象 tree の値、`--all-history` / `--include-deleted` は各 binding
 tree の値で判定する。v1 tree は config 未記録のため現行値で代替し結果に注記 — [04-pipeline.md §4.1, §4.6](04-pipeline.md))。
 purge 済み raw_hash の chunk 行は物理削除済みのため自然に除外される。
+**実装規範**: publication / association の時点条件は correlated **EXISTS** (ancestry 判定と
+`association_rowid <= cursor.max_association_rowid` を副問い合わせ内に含む) で評価する — 同一
+(chunk_id, config) の複数 introduction 行を素の JOIN で結合すると同一 chunk が重複 hit し、
+candidate / rank / cursor を歪める。候補集合は ranking 前に (scope_id, chunk_id) で一意にする。
 
 tree entry の `normalize` が省略された commit では、その entry に eligible chunk は 0 件。`--at` /
 history projection / include-deleted のいずれも later `latest_normalize_ref` を補完せず、SQLite cached row が
@@ -651,7 +655,7 @@ phase を耐久記録し (fsync + atomic rename — [04-pipeline.md §1.1](04-pi
 各 phase を冪等に再開できる**ようにする:
 
 ```text
-journal record = { purge_id (ULID), raw_hash 群, reason, actor, started_at,
+journal record = { purge_id (ULID), raw_hash 群, reason, actor, started_at, target_epoch (完了時の epoch 値),
                    marker_kind (tombstone | erase),
                    closure (削除対象の全 object type × hash — 共有派生の live 参照判定の結果を含む),
                    planned_commit (purged commit の canonical bytes — prepared 相で確定し、
@@ -660,7 +664,10 @@ phase 順序    = prepared (closure 確定・記帳)
               → tombstoned (tombstone / erase receipt を先に耐久化 — 削除より前)
               → deleted (objects / SQLite / chunks.jsonl / logs の冪等削除)
               → committed (commit_type=purged の publication)
-              → done (journal 除去 + `.kcs/purge/epoch` の increment — 同一 mutation)
+              → done: **順序固定** — (1) `.kcs/purge/epoch` を journal の target_epoch へ更新
+                (temp 書込 → file fsync → atomic rename → 親 directory fsync)、(2) その後に
+                journal を除去 + directory fsync。journal が先に消える実装は、除去〜increment 間の
+                crash で「journal 不在 × 旧 epoch」の ABA 窓を作るため禁止
 クラッシュ回復 = 次回の書き込み系コマンド冒頭で journal を検出したら、記録 phase から再開する
               (各 phase は再実行安全 — planned_commit を journal から publish するため同一 hash を
               再現でき、時刻の再計算をしない)。journal が active な間の fsck は incomplete (exit 3 —
@@ -670,7 +677,8 @@ phase 順序    = prepared (closure 確定・記帳)
               `.kcs/purge/epoch` (単調カウンタ) が開始時と不変」でなければ KCS-E-PURGE 系
               retryable (exit 3) で拒否する** (2 点目で検出した場合は取得済み結果を破棄する。
               epoch 比較が無いと、高速な purge が 2 点の間に journal 作成〜除去まで完走した場合に
-              両検査をすり抜ける — ABA) —
+              両検査をすり抜ける — ABA。**epoch ファイルの欠落・不正値も同様に拒否する (fail-closed)** —
+              次の locked mutation が journal の target_epoch から単調性を回復して再作成する) —
               marker 耐久化後・削除完了前の窓で削除対象の本文を返さないため。読み取り系は lock を
               取らないため、冒頭 1 回の検査では検査後に journal が現れる TOCTOU 窓が残る — 返却直前の
               再検査がこれを閉じる。`kcs status` だけは拒否せず、active journal の存在を状態として
@@ -688,7 +696,7 @@ tombstone 再検査で破棄する ([04-pipeline.md §5.8](04-pipeline.md) 相 3
 tombstone を削除より先に耐久化するのは、「対象 object が消えたのに purge の痕跡が無い」状態
 (corruption と区別不能な markerless absence) を作らないためである。
 
-tombstone は raw_hash をキーとする **lifecycle レコード** (append-only の events[] 配列) で、CAS object ではないため `objects/` の外に置く。event は `purged` / `retired` の 2 種で、**active 判定 = 末尾 event が `purged` であること** — retire は末尾に `retired` を append し (上書き・削除しない = 退役監査の保全)、再 purge はさらに `purged` を append する。resolver・fsck・再 purge はこの「末尾 event」規則だけを参照する。events を持たない旧 flat 形式は「purged event 1 件」として読む (legacy)。
+tombstone は raw_hash をキーとする **lifecycle レコード** (append-only の events[] 配列) で、CAS object ではないため `objects/` の外に置く。event は `purged` / `retired` の 2 種で、**active 判定 = 末尾 event が `purged` であること** — retire は末尾に `retired` を append し (上書き・削除しない = 退役監査の保全)、再 purge はさらに `purged` を append する。resolver・fsck・再 purge はこの「末尾 event」規則だけを参照する。events を持たない旧 flat 形式は「purged event 1 件」として読み、**次の mutation 時に一回だけ events 形式へ変換する** (legacy)。**lifecycle レコードの更新 (retire・再 purge・legacy 変換) は `.kcs/.lock` 下で、temp 書込 → file fsync → atomic rename → 親 directory fsync で行う** ([04-pipeline.md §1.1](04-pipeline.md) と同じ規律)。malformed・途中破損 (torn JSON) の record は `KCS-E-STORE-CORRUPT-001` として fail-closed に扱う。
 物理 leaf の `<raw64>` は論理 `raw_hash` から `sha256:` を除いた 64 文字の小文字 hex であり、
 JSON 内の `raw_hash` は完全な `sha256:<64hex>` を保持する。旧 Unix store の prefixed leaf は
 [03-data-model.md §2](03-data-model.md) の検証付き compatibility fallback で解決する。purge 実装時は
@@ -723,8 +731,7 @@ validity は leaf/raw_hash 一致だけでなく、`purged_in_commit` が bounde
 fsck invocation の fixed now より未来でないことを要求する。不一致・extra field は store corruption。
 open / view / search / restore / evidence verify / index の resurrection barrier には使わず、fsck だけが
 intentional absence の説明に使う。したがって Evidence verify は従来どおり `not_found` で、同一 bytes の
-後日 ingest (明示操作に限らず、working tree 残存原本の自動 scan を含む — §3.5 の残存警告) は許可する。raw object の publication 成功後に receipt を除去し、crash で両方が
-残った場合は verified raw object を優先して次の locked mutation で stale receipt を除去する。
+後日 ingest (明示操作に限らず、working tree 残存原本の自動 scan を含む — §3.5 の残存警告) は許可する。**erase receipt も tombstone と同じ lifecycle 形式 (events[]) を持ち、raw object の再 publication 成功時は除去せず `retired` event を append する** — 除去すると erase 済み raw の旧 commit が参照する manifest 欠落を説明するものが消え、fsck の corruption 誤判定と手順 6b の不達を生むため (公開 pointer API に使わない・re-ingest barrier にしない性質は不変)。crash で不整合が残った場合は verified raw object を優先し、次の locked mutation で record を整合させる。
 
 **制約 (明記)**: tree entry の `path` 文字列と `raw_hash` は履歴に残る。ファイル名そのものが秘匿対象であるケース (履歴書き換えが必要) は MVP 非対応。commit / tree の書き換えは content hash の連鎖再計算と無関係ファイルの Evidence Pointer 無効化を伴うため、対応する場合も v2+ の再設計事項とする。
 
@@ -744,6 +751,9 @@ kcs restore <evidence|path|commit> --to <dir>
 - restore は raw object をそのまま展開 (再 Markdownize しない)
 - shallow commit からの restore は KCS-E-COMMIT-SHALLOW-001
 - purged 対象は KCS-E-PURGE-NOT-FOUND-001 / tombstone
+- 展開は検証済み --to ディレクトリの dirfd 配下で no-follow (symlink を辿らない) に行い、
+  private temp → atomic rename で publish する。絶対 path・「..」を含む復元エントリは拒否
+  (既存 symlink 経由で復元先の外部を上書きさせない)
 ```
 
 ## 4.2 kcs view (過去版閲覧)
@@ -816,6 +826,10 @@ MVP での snapshot 生成契機は次の 3 つのみ (常駐プロセスは持�
 1. 明示的 `kcs snapshot` / `kcs commit` (commit_type=manual)
 2. `kcs index` の成功完了時に同一プロセス内で auto snapshot を作る (commit_type=auto)。ただし tree_hash が現在の HEAD の tree と一致する場合は commit を作らない (no-op、[03-data-model.md §8.2](03-data-model.md))
 3. `kcs batch resume` / `kcs batch retry` / `kcs reindex --force` がオンライン成果 (normalized / chunk) を finalize した成功完了時も同様に auto snapshot を作る ([04-pipeline.md §5.4](04-pipeline.md))。derived 成果の変化は tree entry の `manifest_hash` / tree の `chunking_config_hash` / **tree の `chunk_set_hash` (公開 chunk 集合の digest — chunk のみが後着した finalize でも変わる)** を変えるため (tree schema v2/v3 — [03-data-model.md §8](03-data-model.md))、**tree_hash が実際に変わり、no-op 規則 (tree_hash 一致なら commit を作らない) はそのまま成立する** — これが無いと後着の成果が次回 `kcs index` まで検索対象にならないか、manifest 反映済み snapshot が先行したケースで introduction を刻む commit を作れない (§1.6)
+
+**no-op 規則の例外 (2026-07-18 確定)**: (a) **resurrection finalize** (erase / purge 済み raw の再 ingest) は、同一 bytes の再現で tree_hash・chunk_set_hash が HEAD と一致しても publication commit を作る — retire event と introduction を刻む commit が無いと、復活した chunk を検索対象化できないか旧 introduction へ遡及するため。(b) **no-op 判定は tree_hash に加えて commit の `tool_lock_hash` も比較する** — embedding profile のみの更新でも lock が変われば commit を作る (現行 vector index と HEAD の provenance を一致させる)
+
+**snapshot finalize の耐久順序**: (1) chunks.jsonl へ creation / publication event 行を append + fsync → (2) SQLite 反映 → (3) commit / ref publish。(1) と (3) の間の crash で commit 不在の event 行 (dangling) が残った場合、rebuild はそれを無視し、次回 finalize が同内容を冪等に再 append する。chunks.jsonl 末尾の不完全行 (torn tail) は切り詰めて無視する (書込は [04-pipeline.md §1.1](04-pipeline.md) の fsync 規律)
 
 ## 8.2 定期 Auto Snapshot (Phase 4 範囲)
 

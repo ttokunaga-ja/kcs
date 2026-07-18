@@ -132,7 +132,7 @@ Step 別の目安 (テスト除く):
 | `kcs repair --verify-objects` (CAS object 整合性検証) | [10-operations.md §7.5](10-operations.md) | Step 4 |
 | `kcs evidence verify <pointer>` (単発) | [08-evidence-pointer-spec.md §4.3](08-evidence-pointer-spec.md) | Step 4 |
 | purge の完全な履歴書き換え (tree/commit 再結線・filename 秘匿ケース) | [05-runtime.md §3.5](05-runtime.md) / [08-evidence-pointer-spec.md §4.2](08-evidence-pointer-spec.md) | v2+ / Phase 4+ |
-| `kcs gc` (on-demand / shallow / full) | [05-runtime.md §2.2-2.3](05-runtime.md) | Phase 4+ |
+| `kcs gc` (on-demand / shallow / prune-unreachable) | [05-runtime.md §2.2-2.3](05-runtime.md) | Phase 4+ |
 | tiered retention GC (auto snapshot と同時に導入) | [05-runtime.md §2.4](05-runtime.md) | Phase 4+ |
 | CoW 並行 GC / power-loss sweep | [05-runtime.md §2.5](05-runtime.md) | Phase 4+ |
 | 定期 auto snapshot / on_idle GC (OS スケジューラ委譲、常駐なし) | [05-runtime.md §8](05-runtime.md) / [05-runtime.md §2.3](05-runtime.md) | Phase 4+ |
@@ -320,7 +320,8 @@ Status: draft (retarget 実装は Phase 4+ のため、期日は Phase 4 着手�
 
 残未決:
   - bulk verify (--batch) のスループット要件 (実装自体が Phase 4+)
-  - tombstone 自体を purge する操作 (二重 purge) の有無
+  (二重 purge は 2026-07-18 に確定済み — 再 purge は lifecycle events[] へ `purged` を追加 append する。
+   tombstone 判定は「active = 末尾 event が purged」であり、存在だけでは dead にしない — 正本 05 §3.5)
 
 正本: 08-evidence-pointer-spec.md §4 / 05-runtime.md §3
 Status: コアセマンティクスは decided。残未決 2 件は Phase 4 着手前確定

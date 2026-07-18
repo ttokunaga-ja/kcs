@@ -46,7 +46,8 @@ kcs reindex [--force] [--at <commit>]   # --at = 過去 snapshot の embedding �
                                         # task cache の揮発情報 (03-data-model.md §8、09-mvp-scope.md §5.1)。--force は確認プロンプト必須 (--yes で省略可)
 kcs move --propose <src> <dst>          # 原本移動の提案。Agent はこちらのみ (Phase 4+、MVP 対象外)
 kcs move --accept <id> | --reject <id>  # 提案の承認/却下。KCS が原本を mv できる唯一の経路 (03-data-model.md §10)。書き込み境界の予約定義
-kcs evidence verify <pointer> [--strict] [--batch <pointers.jsonl>]  # --batch は Step 4+ (§7、08 §4.3)
+kcs evidence verify <pointer> [--strict]
+kcs evidence verify --batch <pointers.jsonl> [--strict]  # <pointer> と --batch は相互排他 (--batch は Step 4+ — §7、08 §4.3)
 kcs evidence retarget <pointer> [--latest|--at <commit>]  # 設計確定後 (09-mvp-scope.md §5.2)
 ```
 
@@ -72,6 +73,9 @@ kcs evidence retarget <pointer> [--latest|--at <commit>]  # 設計確定後 (09-
 
 ```text
 1. pointer を解決して raw_hash を得る (08-evidence-pointer-spec.md §3)
+1a. object URI (kcs://<scope_id>/object/image/<image_hash> — 08 §2) の場合: scope / type / hash を
+   検証し、image object を ~/.cache/kcs/open/ へ read-only materialize して開く (raw と同じ
+   tombstone / journal barrier と purge closure の対象)。以降の手順 2-5 は raw 系入力のみ
 2. tombstone 判定 (最優先): raw_hash に **active な** tombstone があるなら、working tree・cache の状態に
    関わらず §7 の規約どおり exit 4 — purge 済み原本が folder に残っていても KCS 経由では開かない
    (退役済み tombstone は対象外 — 再 ingest による退役は 05-runtime.md §3.5 の resurrection 規則)
@@ -272,6 +276,7 @@ DOMAIN:
   GC       garbage collection
   PURGE    purge 操作
   EVIDENCE Evidence Pointer 解決 / verify / retarget
+  REGISTRY scope registry (live clone 重複・退役)
   SYNC     同期・共有 (v2 予約。MVP では発行しない)
   ADAPTER  Adapter ロード・実行
   EMBED    embedding profile / modality 検証
@@ -330,7 +335,10 @@ Adapter 種別と契約は [07-adapter-spec.md](07-adapter-spec.md)。
 
 ```bash
 kcs export <scope> --to <bundle.kcsz>
-kcs import <bundle.kcsz> --to <dir>
+kcs import <bundle.kcsz> --to <dir>     # bundle の scope_id が registry に live 登録済みなら拒否
+                                        # (KCS-E-REGISTRY-DUP-001 — clone 併存を正規操作で作らない)。
+                                        # 複製として取り込むには --as-new-scope で新 scope_id を採番
+                                        # (fork 相当。以後の Evidence Pointer は新 ID を指す)
 ```
 
 `.kcsz` は `.kcs/` の bundle 形式 (zip 等)。`.kcs` 単位で公開可能。別 `.kcs` の object 参照を前提にしないため、同一 raw_hash が別 `.kcs` に存在しても export 単位では重複を許容する。

@@ -465,7 +465,7 @@ CREATE VIRTUAL TABLE chunk_vec USING vec0(
 
 `chunk_vec` の次元は採用 profile の **768 (MRL 切り詰め) / cosine に固定** する ([07-adapter-spec.md §5.3](07-adapter-spec.md))。保存 vector と query vector はいずれも L2 正規化済みのため、cosine distance の順位は厳密に一致する。
 
-`embeddings` テーブル (メタデータ + vector BLOB) と `chunk_vec` (vec0 virtual table) は、いずれも `objects/` から再構築可能な加速層であり、真実は `objects/` にある (§4 冒頭)。両テーブル間では **`embeddings` テーブルを正** とし、`chunk_vec` は `embeddings` からの導出物として扱う。不整合を検出した場合および `kcs repair --rebuild-db` では、`objects/` → `embeddings` → `chunk_vec` の順に再構築する。`chunk_vec` の導出は **`chunks.text_hash` と `embeddings.target_id` の結合**で行い、同一 `text_hash` を持つ複数 chunk には同じ embedding を複数の `chunk_vec` 行へ展開する (content ベース再利用 §5.5 の裏面)。
+`embeddings` テーブル (メタデータ + vector BLOB) と `chunk_vec` (vec0 virtual table) は、いずれも `objects/` から再構築可能な加速層であり、真実は `objects/` にある (§4 冒頭)。両テーブル間では **`embeddings` テーブルを正** とし、`chunk_vec` は `embeddings` からの導出物として扱う。不整合を検出した場合および `kcs repair --rebuild-db` では、`objects/` → `embeddings` → `chunk_vec` の順に再構築する。`chunk_vec` の導出は **`chunks.text_hash` と `embeddings.target_id` の結合**で行い、同一 `text_hash` を持つ複数 chunk には同じ embedding を複数の `chunk_vec` 行へ展開する (content ベース再利用 §5.5 の裏面)。**結合は現行 tool-lock の embedding profile に限定する** — `(profile_hash, dimensions, distance, modality)` が現行 lock と一致する embedding 行のみ。複数 profile の embedding が正規に並存し得るため、無条件結合は chunk ごとに複数候補を生み `chunk_vec` の PRIMARY KEY と衝突する (rebuild 停止)。chunk ごとに候補がちょうど 1 件であることを検証する。
 
 KCS は Text/Image を分けず **単一マルチモーダル Embedding Adapter** のみを許可する (非 multimodal profile は `KCS-E-EMBED-MODALITY-001` で採用拒否、[03-data-model.md §7](03-data-model.md))。
 
@@ -658,7 +658,7 @@ monthly_usd_cap = 10.0
 ```
 
 - cap は二層で判定する。**device cap** (`~/.config/kcs/config.toml`、デバイス上の全 `.kcs` の当月合算に適用、既定 $50) が正であり、**folder cap** (`.kcs/config.toml`、その `.kcs` の当月消費のみに適用) は任意の追加制限。folder cap 未設定なら device cap のみが効く
-- 判定式: scope S の新規タスクを起動できるのは `ledger(S, 当月) + candidate < folder_cap(S)` **かつ** `ledger(device, 当月) + candidate < device_cap` のとき (= effective cap は両者の残余の min。candidate = 起動しようとするタスク自身の予約額)。`per_adapter` の下限は **device 層専用** (folder cap は total のみ — folder 側 `[budget.per_adapter]` は定義しない) で、**第三条件として同様に判定する**: `ledger(device, adapter_kind, 当月) + candidate < per_adapter_cap(adapter_kind)` (設定キー名 = adapter_kind と同一 enum: markdownize / embedding / summary。**enum 外の未知キーは schema error** — [10-operations.md §12.3](10-operations.md))。`ledger(...)` は cost_ledger の当月合算 (estimated 行も usd 非 NULL のため数値として効く — §5.8) + 未終端 batch_requests (state 0/1) の `estimated_usd` 合算 (= 予約)。**判定と相 1 の reservation 作成は同一の `BEGIN IMMEDIATE` Tx で行う** (check-then-act の並行超過を防ぐ — cap 超過なら相 1 を作らない)
+- 判定式: scope S の新規タスクを起動できるのは `ledger(S, 当月) + candidate < folder_cap(S)` **かつ** `ledger(device, 当月) + candidate < device_cap` のとき (= effective cap は両者の残余の min。candidate = 起動しようとするタスク自身の予約額)。`per_adapter` の下限は **device 層専用** (folder cap は total のみ — folder 側 `[budget.per_adapter]` は定義しない) で、**第三条件として同様に判定する**: `ledger(device, adapter_kind, 当月) + candidate < per_adapter_cap(adapter_kind)` (設定キー名 = adapter_kind と同一 enum: markdownize / embedding / summary。**enum 外の未知キーは schema error** — [10-operations.md §12.3](10-operations.md))。`ledger(...)` は cost_ledger の当月合算 (estimated 行も usd 非 NULL のため数値として効く — §5.8) + 未終端 batch_requests (state 0/1) の `estimated_usd` 合算 (= 予約)。**判定と相 1 の reservation 作成は同一の `BEGIN IMMEDIATE` Tx で行う** (check-then-act の並行超過を防ぐ — cap 超過なら相 1 を作らない)。**sync online 呼出も同じ規律に従う**: 呼出前に estimated 行を cap 判定と同一 Tx で記帳し (reservation 相当)、終端 (成功・billable reject・contract reject・結果不明) で確定行へ settle する (ON CONFLICT 冪等)。複数 external call を行うタスクは request 単位 (provider_request_id、無ければ attempt token) で冪等記帳し、課金済み call の盲目再試行を禁止する — これが無いと呼出後 crash や並列 multi-call の課金が ledger から漏れ、cap を過少判定する
 - 累積コストは Adapter 報告値 (input/output token × 単価) を `~/.local/share/kcs/cost-ledger.sqlite` (デバイスグローバル 1 個。WAL + busy_timeout — [05-runtime.md §6](05-runtime.md)) に記録する。folder cap の判定はこの ledger の scope 別集計で行う (`.kcs` 内に ledger は置かない。cache/truth 規約上、課金台帳はデバイスローカルの運用データであり `.kcs` の truth ではないが、**再構築不可のため cache でもない** — [03-data-model.md §4.1](03-data-model.md)、schema 変更は in-place migration 側 [10-operations.md §7.5.3](10-operations.md))
 - store は 2 表で構成し、**以下の DDL を SQL 正本とする** (旧 3 JSONL + lock 構成は 2026-07-18 に廃止 — §5.8 の 2 相プロトコルは UNIQUE 制約・単一 Tx・ON CONFLICT 冪等という SQLite の保証を前提に監査された機構であり、append-only JSONL では等価の保証を構成できない。[10-operations.md §12.7](10-operations.md) リネーム表):
 
@@ -703,6 +703,9 @@ CREATE TABLE batch_requests (            -- in-flight Batch intent の正本 (§
                                          --  から継承する (通算連番の高水位の正本は ledger — 0 から
                                          --  数え直すと既存記帳と UNIQUE 衝突する)
     attempts          INTEGER NOT NULL DEFAULT 0,
+    contract_violation_count INTEGER NOT NULL DEFAULT 0,
+                                         -- reject 終端 Tx (§5.8 相 3) で increment。相 1 の NULL 戻しの
+                                         --  対象外 — 「同一 mode で 1 回のみ」の durable 判定源
     estimated_usd     REAL NOT NULL      -- budget 予約額 (§5.4 判定式)。相 1 作成時に保守見積を必須設定
         CHECK (estimated_usd >= 0),      --  (NULL/負を許すと SUM が予約を取りこぼし cap を過少判定)
     error             TEXT,              -- 'submit_rejected' | 'expired' | 'abandoned' | ...
@@ -754,7 +757,7 @@ chunk の文字数のみ**を対象とし、再利用 chunk (API 非呼出) は�
 ## 5.7 Resume と Repair
 
 - `kcs batch resume`: 中断状態 (running stale, pending) を再開
-- `kcs repair --rebuild-db`: SQLite を objects/ から再構築する (SQLite に存在するのは §4.1〜§4.5 の 8 表のみ。再構築完了時は index_metadata へ新 index_generation ULID を採番する — [05-runtime.md §1.5](05-runtime.md)。**publication / association introduction の再導出は chunks.jsonl を正本とする**: 作成行の first_seen_commit + publication event 行 (03 §2 — truth) を読み取って復元し、tree の chunk_set_hash は照合のみに使う。event 行を欠く旧 store は fallback として全 commit を親先行 topological order で走査し、chunk / config association ごとに「既採用 introduction のいずれの子孫でもない commit」のみを introduction として追加する (結果は ancestor-minimal 集合で walk 順序に依存しない)。**backfill は行わない** (pre-release — 既存 dev store は rebuild-db が ledger / fallback から再導出する)。
+- `kcs repair --rebuild-db`: SQLite を objects/ から再構築する (SQLite に存在するのは §4.1〜§4.5 の 8 表のみ。再構築完了時は index_metadata へ新 index_generation ULID を採番する — [05-runtime.md §1.5](05-runtime.md)。**publication / association introduction の再導出は chunks.jsonl を正本とする**: 作成行の first_seen_commit + publication event 行 (03 §2 — truth) を読み取って復元し、tree の chunk_set_hash は照合のみに使う。event 行を欠く旧 store は fallback として全 commit を親先行 topological order で走査し、chunk / config association ごとに「既採用 introduction のいずれの子孫でもない commit」のみを introduction として追加する (結果は ancestor-minimal 集合で walk 順序に依存しない)。**backfill は行わない** (pre-release — 既存 dev store は rebuild-db が ledger / fallback から再導出する)。生存する creation 行 / chunk object を持たない publication event 行は無視する (dangling — [05-runtime.md §8.1](05-runtime.md) の耐久順序で正常に生じ、次回 finalize が冪等に再 append する)。
   以下の normalization_runs / prepared_units は SQLite テーブルではなく、manifest / 再 prepare から
   導出される**状態**を指す — [03-data-model.md §8](03-data-model.md) / §4.7)。復元範囲は次の通り:
 
@@ -827,8 +830,10 @@ metadata から intent_token 規約に一致する job を全走査すること�
    新 intent_token・新 submission_seq の相 1 として開始する (旧 attempt を state=1 のまま放置して
    再 collect ループに入らない・記帳を落とさない)。再投入の mode は原則同一 — tasks.jsonl 喪失で
    mode が復元不能な場合は full で 1 回 (§5.7 の安全側規定と同型)。**「1 回のみ」の判定は durable**:
-   同一タスクキーに error='contract_violation' の terminal 行 (state=3) が既に存在すれば、
-   新たな再投入は行わず failed permanent とする (tasks.jsonl 喪失後もこの判定は batch_requests から回復できる)
+   reject 終端 Tx で `contract_violation_count` を increment する (相 1 の NULL 戻しの対象外)。
+   再投入できるのは count == 1 のときだけで、count >= 2 は failed permanent
+   (tasks.jsonl 喪失後もこの判定は batch_requests から回復できる。error 列は最新状態の表示であり
+   判定源にしない — 相 1 が NULL へ戻すため)
 
 **記帳の冪等性**: cost_ledger への記帳は `INSERT ... ON CONFLICT DO NOTHING` (§5.4 の UNIQUE が実体)。
 記帳前の「記帳済み判別」は同一タスクキー × **batch_job_id IN (発見 job id, 当該 intent_token)** の

@@ -16,6 +16,7 @@ Object 種別:
                [09-mvp-scope.md §3.1](09-mvp-scope.md))
   manifest     normalized instance manifest の確定版 (canonical JCS bytes — §2.1。tree v2/v3 の
                normalize.manifest_hash が指す)
+  toollock     tool-lock.json の確定版 (canonical JCS bytes — §5.2。commit の tool_lock_hash が指す)
   normalized_unit  unit 単位の Markdown (read-only artifact, content hash 不採用)。
                    normalized の正本 (§2.1)
   chunk        normalized から見出し単位で切り出し
@@ -24,7 +25,7 @@ Object 種別:
   commit       tree + parents + metadata
 ```
 
-raw / prepared / image / chunk / embedding / manifest / tree / commit は **CAS object** として `objects/<type>/ab/cd/<digest64>` に保存。hash の算出は object 種別ごとに §8.1 で規定する: raw / prepared / image は**バイト列そのものの content hash**、manifest / tree / commit は **canonical JSON 保存バイト列の content hash** (manifest は §2.1 の JCS bytes)、chunk / embedding は **identity タプルから導出する identity hash**。normalized_unit は **path-named** で `objects/normalized_units/ab/cd/<raw64>.<tool64>.g<gen>/` 配下に保存する (content hash 不採用、§5。詳細は §2.1)。ファイル全文の normalized Markdown は unit を決定論的に結合した **view (再生成可能な cache)** であり、正本ではない。
+raw / prepared / image / chunk / embedding / manifest / toollock / tree / commit は **CAS object** として `objects/<type>/ab/cd/<digest64>` に保存。hash の算出は object 種別ごとに §8.1 で規定する: raw / prepared / image は**バイト列そのものの content hash**、manifest / toollock / tree / commit は **canonical JSON 保存バイト列の content hash** (manifest は §2.1、toollock は §5.2 の JCS bytes)、chunk / embedding は **identity タプルから導出する identity hash**。normalized_unit は **path-named** で `objects/normalized_units/ab/cd/<raw64>.<tool64>.g<gen>/` 配下に保存する (content hash 不採用、§5。詳細は §2.1)。ファイル全文の normalized Markdown は unit を決定論的に結合した **view (再生成可能な cache)** であり、正本ではない。
 
 # 2. .kcs 物理レイアウト
 
@@ -47,6 +48,8 @@ raw / prepared / image / chunk / embedding / manifest / tree / commit は **CAS 
     normalized/ab/cd/<raw64>.<tool64>.g<gen>.md   # 全文 view (cache, 再生成可能)
     manifests/ab/cd/<manifest64>    # manifest の immutable 確定版 (canonical JCS bytes、§2.1。
                                     # tree v2 の normalize.manifest_hash が指す — §8)
+    toollocks/ab/cd/<toollock64>    # tool-lock の immutable 確定版 (canonical JCS bytes、§5.2。
+                                    # commit の tool_lock_hash が指す)
     chunks/ab/cd/<chunk64>
     embeddings/ab/cd/<embedding64>
     trees/ab/cd/<tree64>
@@ -57,6 +60,7 @@ raw / prepared / image / chunk / embedding / manifest / tree / commit は **CAS 
     tags/<logical-name>             # legacy Unix raw-name refs (read-only compatibility)
   tombstones/ab/cd/<raw64>      purge の tombstone lifecycle 記録 (raw_hash ごとの append-only events[] —
                                 purged / retired。active 判定 = 末尾 event。05-runtime.md §3.5。CAS object ではない)
+  purge/epoch         purge の ABA barrier (単調カウンタ — 05-runtime.md §3.5。欠落 = 読取 fail-closed)
   tasks.jsonl         batch タスクストア (04-pipeline.md §5.1。append-only の運用データ、SQLite 非採用)
   chunks.jsonl        chunk association ledger (**truth** — chunk object が持たない世代 association の正本。
                       作成行 = {chunk_id, chunking_config_hash, created_at, first_seen_commit, path}。
@@ -178,7 +182,8 @@ materialize されるため、chunk span と Evidence 解決元がずれない�
 
 - unit object は read-only artifact。書き換え・削除しない (purge を除く)
 - manifest の `units[].status` の遷移は `failed → done` の一方向のみ (部分失敗の再開、§6)。
-  done unit の差し替えは `kcs reindex --force` による新 gen 作成のみ
+  done unit の差し替えは新 gen 作成のみ (`kcs reindex --force`、または prepared_hash 変化起因の
+  自動 gen+1 — 下記 gen 段落の例外)
 - **manifest の各確定版は immutable object として保存する**: manifest の finalize (初回確定と、partial retry で
   `failed → done` を反映した各確定) のたびに、canonical JCS bytes を `objects/manifests/ab/cd/<manifest64>` へ
   content-addressed で書く (post-write verify 対象)。path-named `manifest.json` は**最新版の作業コピー**であり、
@@ -187,7 +192,9 @@ materialize されるため、chunk span と Evidence 解決元がずれない�
   unit 完成状態を正確に列挙・検証できる (fsck の照合 = [10-operations.md §7.5.1](10-operations.md))
 
 **gen (generation)**: 同一 `(raw_hash, tool_profile_hash)` に対する instance の世代番号 (0 起点の整数)。
-通常は `g0` のみ存在する。`kcs reindex --force` だけが `gen = 現最大 + 1` の新 instance を作り、
+通常は `g0` のみ存在する。`gen = 現最大 + 1` の新 instance を作れるのは `kcs reindex --force` と、
+**prepare profile / renderer 変更による `prepared_hash` 変化が駆動する再 Markdownize** (§6 — first-instance-wins の
+第二の合法経路。オンライン課金を伴うため 04 §4.6 と同型の確認プロンプト + budget guardrail の対象) だけであり、
 既存 instance は保全する ([07-adapter-spec.md §9](07-adapter-spec.md))。identity はあくまで
 `(raw_hash, tool_profile_hash)` であり、gen は同一 identity 配下の instance の区別にのみ使う。
 **normalized_hash の代替ではない** (§5: Markdown の content hash は計算・保存・比較しない)。
@@ -248,11 +255,12 @@ cache = scope_registry / aggregator 検索の探索対象一覧 / stale 検出 /
 
 | ストア | 技術 | 区分 | 喪失時 | schema 正本 |
 |---|---|---|---|---|
-| `.kcs/objects/` (raw / prepared / images / normalized_units / manifests / chunks / embeddings / trees / commits) | file (CAS) | **truth** | 復旧不能 (検証: [10-operations.md §7.5](10-operations.md)) | §8 / §2.1 |
+| `.kcs/objects/` (raw / prepared / images / normalized_units / manifests / toollocks / chunks / embeddings / trees / commits) | file (CAS) | **truth** | 復旧不能 (検証: [10-operations.md §7.5](10-operations.md)) | §8 / §2.1 |
 | `.kcs/HEAD` / `refs/` | file (atomic rename) | **truth** | 復旧不能 | §2 |
 | `.kcs/tombstones/` + erase receipt | file | **truth** (purge 証跡) | 復旧不能 | [05-runtime.md §3.5](05-runtime.md) |
 | `.kcs/scope.json` / `config.toml` / `tool-lock.json` | JSON / TOML (schema 検証: [10-operations.md §12.3](10-operations.md)) | **truth** | 復旧不能 | 各 spec |
 | `.kcs/logs/access.jsonl` | JSONL (append-only) | **truth** (access_events の正本) | 復旧不能 | §2 |
+| `.kcs/purge/epoch` | 単調カウンタ (text) | **truth** (purge の ABA barrier) | 欠落 = 読取 fail-closed。次の locked mutation が journal の target_epoch から単調性を回復して再作成 | [05-runtime.md §3.5](05-runtime.md) |
 | `.kcs/manifest.json` | JSON (schema 検証) | working-state cache (永続的真実は tree/commit object) | rescan で再構築 | §8 files |
 | `.kcs/tasks.jsonl` | JSONL (append-only) | 運用データ | 喪失許容 ([04-pipeline.md §5.7](04-pipeline.md)) | [04-pipeline.md §5.1](04-pipeline.md) |
 | `.kcs/chunks.jsonl` | JSONL (append-only) | **truth** (chunk の世代 association / created_at / first_seen_commit / 生成時点 path — chunk object には含めない §8) | 復旧不能 (SQLite rebuild の入力) | §8 / [04-pipeline.md §4.1](04-pipeline.md) |
@@ -342,6 +350,12 @@ tool_lock_hash = "sha256:" + base16(sha256(JCS({
 })))
 ```
 
+**preimage の保存**: tool-lock の materialize ([07-adapter-spec.md §6](07-adapter-spec.md)) 時に、この
+canonical JCS bytes を `objects/toollocks/ab/cd/<hash64>` へ content-addressed で保存する (immutable) —
+commit の `tool_lock_hash` から当時の lock 内容 (model pin・Adapter 定義) を復元・検証できる
+(manifest object と同族。fsck の再 hash 対象 — [10-operations.md §7.5.1](10-operations.md))。
+作業コピー `tool-lock.json` は最新版であり、過去版の解決は toollock object のみが担う。
+
 `cmd`/`args`/`url`/`config_hash`/capabilities は入力に含めない。embedding のみ次元・距離・modality を含めるのは、横断検索互換性 (§7) の決定根拠になるため。optional adapter は未設定なら省略 (null と識別しない)。
 
 ## 5.3 chunking_config_hash 計算規約
@@ -392,7 +406,9 @@ else:
 
 ```
 new            初めて見つかった原文
-up_to_date     最新 Markdown あり
+up_to_date     最新 Markdown あり (unit 段の判定 — chunk 生成の完了は含まない。chunk が期待集合
+               (当該 (raw, profile, gen, config) の決定論的 re-chunk 結果) に達していない間は
+               index_status (05-runtime.md §1.7) が partial として可視化する)
 modified       path 同じだが raw_hash が変わった
 tool_changed   raw_hash 同じだが tool_profile_hash が変わった
 partial        一部 unit の Markdownize が失敗 (成功 unit は検索対象、欠損は kcs status に表示)

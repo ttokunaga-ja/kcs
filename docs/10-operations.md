@@ -430,7 +430,8 @@ UI 文言は、過剰な保証を避ける。
 理由入力
 明示確認
 対象の削除 (raw / prepared / image / normalized / chunk / embedding — 共有派生は live 参照 0 のみ、
-  SQLite 行 (chunks / chunk_config_generations / chunk_vec / embeddings / FTS) と chunks.jsonl 行を含む。
+  SQLite 行 (chunks / chunk_config_generations / chunk_publications / chunk_vec / embeddings / FTS) と、
+  chunks.jsonl の**対象 chunk_id を参照する creation 行・publication event 行の全部**を含む。
   正本一覧は [05-runtime.md §3.5](05-runtime.md))
 pack / cache / index rebuild
 KCS 自身のログのスクラブ (該当行の削除またはマスク) と、その完了有無の結果表示
@@ -450,7 +451,7 @@ KCS 自身のログのスクラブ (該当行の削除またはマスク) と、
 kcs repair --verify-objects
 ```
 
-- `objects/` 配下の全 CAS object (raw / prepared / image / chunk / embedding / manifest / tree / commit) を [03-data-model.md §8.1](03-data-model.md) の per-type algorithm で検証し (embedding は vector 長・有限値・vector digest も — 03 §8.1)、
+- `objects/` 配下の全 CAS object (raw / prepared / image / chunk / embedding / manifest / toollock / tree / commit) を [03-data-model.md §8.1](03-data-model.md) の per-type algorithm で検証し (embedding は vector 長・有限値・vector digest も — 03 §8.1)、
   保存パス・参照 hash と照合する。chunk は object bytes の content hash ではなく semantic identity hash
   と fan-out key、さらに exact `text` / `text_hash` / normalized span を照合する
   ([03-data-model.md §8.1](03-data-model.md))
@@ -483,7 +484,10 @@ kcs repair --verify-objects
 purge との整合: validated tombstone (lifecycle の event が purged / retired の**いずれでも** — retire は
 event を削除せず監査を残すため説明能力を保つ) または fsck-only erase receipt が説明する missing raw と
 その derived (chunk・**当該 (raw_hash, tool_profile_hash) 配下の manifest object**) は正常な dead terminal として数え、
-corruption にしない。**tree 欠落**は `.kcs/gc/shallowed/<commit64>` receipt が説明する場合のみ正常
+corruption にしない。**説明範囲の限定**: tombstone / erase receipt が説明できるのは、当該 purge event の
+時点 (purged_in_commit) **以前**の commit が参照する closure に限る — retire 後に再作成・再公開された
+object の欠落は corruption とする (古い退役 event が新規破損を隠さない)。**tree 欠落**は
+`.kcs/gc/shallowed/<commit64>` receipt が説明する場合のみ正常
 (shallow — [05-runtime.md §2.2](05-runtime.md))、receipt なき欠落は corruption。receipt-covered bytes は working copy から
 自動復元しない。receipt は public pointer API と re-ingest barrier には使わない。purge journal が active
 なら incomplete exit 3。marker 無し missing は ordinary store corruption、malformed / identity-conflicting
@@ -847,14 +851,15 @@ ts        UTC ISO8601 (§12.4)
 level     debug | info | warn | error
 code      error_code (KCS-E-) / event_code (KCS-EV-) / metric_code (KCS-M- — [05-runtime.md §7](05-runtime.md))
 component batch | search | commit | gc | ...
-message   人間可読な短文
+message   人間可読な短文 (非機微テンプレートに限る — query / path / prompt 等の値は context 側に
+          置いて redaction を通す。自由文へ機微値を埋め込まない)
 context   任意の JSON object (tool_profile_hash, commit_hash, raw_hash, scope_id 等 — file_id は廃止済み識別子のため使わない)
 ```
 
 ログのローテーションは日次、保持は 30 日 (config 上書き可)。`redact_logs` の
 デフォルトは **true** であり、`[adapter.policy]` に限らず observability ログ
 (events / metrics / errors) と access.jsonl の全域に適用される。true の場合、
-`context` の `query`, `path`, `prompt` 等の機微フィールドをマスクする。
+`context` の `query`, `path`, `prompt` 等の機微フィールドを、nested な値も含めて同一 policy でマスクする (`message` は上記のとおり非機微テンプレート限定 — マスク対象の値を含めない)。
 false への変更は明示設定のみで行える。
 
 ## 12.7 命名リネーム表 (旧 → 新)
