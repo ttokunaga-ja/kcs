@@ -307,6 +307,9 @@ run は failed (retryable — 同一 mode で 1 回のみ再試行 (§5.2 表)�
 full への自動 fallback は行わない
 (fallback は incremental capability 非互換の場合のみ — 正本 [07-adapter-spec.md §8.1](07-adapter-spec.md))
 Batch 経由の場合の課金記帳・旧 intent の終端・再投入手順は §5.8 相 3 の reject 終端が正本
+(「1 回のみ」も同所の durable 判定に従う)。非 Batch (sync online) 実行の再試行カウントは
+プロセス内で保持する — プロセス喪失後の再発見は新たな 1 回として扱う (有界: 再試行の発火には
+ユーザーの index 実行を要し、無人で反復しない)
 full mode 応答の V5/V6 違反も同様に全体 reject + failed (invalid_input 系は retry しない)
 ```
 
@@ -339,8 +342,9 @@ CREATE TABLE chunks (
 );
 CREATE INDEX idx_chunks_ident ON chunks(raw_hash, tool_profile_hash, gen);
 
-CREATE TABLE chunk_publications (      -- publication relation (cache — commit DAG + tree から再導出可能。
-                                       -- 再導出は親先行 topological walk で決定的: §7 rebuild)
+CREATE TABLE chunk_publications (      -- publication relation (cache — rebuild 正本は chunks.jsonl の
+                                       -- publication event 行 (03 §2)。event 行を欠く旧 store は
+                                       -- 親先行 topological walk で再導出: §7 rebuild)
   chunk_id            TEXT NOT NULL,
   introduction_commit TEXT NOT NULL,   -- この chunk が (再) 導入された commit。単一の first_seen_commit では
                                        -- incomparable な複数導入 (merge の side 枝等) を表現できないため多対多
@@ -359,7 +363,9 @@ CREATE TABLE chunk_config_generations (
   created_at TEXT NOT NULL,
   introduction_commit TEXT NOT NULL,   -- この association が公開された snapshot commit。時点指定検索は
                                        -- association の introduction にも ancestor-or-equal を要求 (05 §1.6)
-  UNIQUE(chunk_id, chunking_config_hash)
+  UNIQUE(chunk_id, chunking_config_hash, introduction_commit)
+                                       -- 3 列 UNIQUE: incomparable な別枝の複数 introduction を行として
+                                       -- 保持する (2 列 UNIQUE では第二枝の insert が矛盾する)
 );
 ```
 
@@ -714,7 +720,7 @@ CREATE TABLE batch_requests (            -- in-flight Batch intent の正本 (§
 - `kcs batch resume --override-budget` で明示的に再開可能 (当月の device cap / folder cap の両方を無視して再開する)。override は markdownize / embedding **両 Adapter の budget 判定に対称に**効く。override 無しの `kcs batch resume` は budget 超過 pause タスクを markdownize / embedding いずれも据え置き (sticky)、他要因の pause のみ再開する
 - ローカル LLM 利用時は単価 0 として記録 (= cap に効かない)
 
-**resume / retry / reindex が駆動する enrichment**: `kcs batch resume` / `kcs batch retry` は online markdownize タスクに加え、**embedding enrichment パスも駆動する** (embedding タスクは現行世代の live chunk 集合から DB 駆動で再検出される。opt-in は Adapter 単位 = embedding は自身の承認行を見る、[07-adapter-spec.md §3](07-adapter-spec.md))。同様に `kcs reindex --force` / `kcs repair --rebuild-db` は rebuild 後に enrichment を実行し、新世代 chunk の embedding を追随させる (§4.6)。offline なら embedding タスクを enqueue のみとし `index_status` ([05-runtime.md §1.7](05-runtime.md)) に pending として可視化する。retry の失敗タスクは backoff / retry 予算 (§5.3) を尊重し、`next_retry_at` 未来または非 retryable の embedding タスクを持つ chunk は enrichment 対象から除外する。**`kcs batch resume` / `retry` / `kcs reindex --force` がオンライン成果 (normalized / chunk) を finalize したときも、`kcs index` 完了時と同じ auto snapshot ([05-runtime.md §8.1](05-runtime.md)) を作成する** — derived 成果の変化は tree entry の `normalize.manifest_hash` / tree の `chunking_config_hash` を変えるため (tree schema v2 — [03-data-model.md §8](03-data-model.md))、tree_hash が変わり通常の no-op 規則のまま commit が生まれる。これが無いと完成した成果が次回 `kcs index` まで検索に現れない (chunk の検索対象化は auto snapshot 後 — [05-runtime.md §1.6](05-runtime.md))
+**resume / retry / reindex が駆動する enrichment**: `kcs batch resume` / `kcs batch retry` は online markdownize タスクに加え、**embedding enrichment パスも駆動する** (embedding タスクは現行世代の live chunk 集合から DB 駆動で再検出される。opt-in は Adapter 単位 = embedding は自身の承認行を見る、[07-adapter-spec.md §3](07-adapter-spec.md))。同様に `kcs reindex --force` / `kcs repair --rebuild-db` は rebuild 後に enrichment を実行し、新世代 chunk の embedding を追随させる (§4.6)。offline なら embedding タスクを enqueue のみとし `index_status` ([05-runtime.md §1.7](05-runtime.md)) に pending として可視化する。retry の失敗タスクは backoff / retry 予算 (§5.3) を尊重し、`next_retry_at` 未来または非 retryable の embedding タスクを持つ chunk は enrichment 対象から除外する。**`kcs batch resume` / `retry` / `kcs reindex --force` がオンライン成果 (normalized / chunk) を finalize したときも、`kcs index` 完了時と同じ auto snapshot ([05-runtime.md §8.1](05-runtime.md)) を作成する** — derived 成果の変化は tree entry の `normalize.manifest_hash` / tree の `chunking_config_hash` / tree の `chunk_set_hash` (公開 chunk 集合 — chunk のみの後着でも変わる) を変えるため (tree schema v2/v3 — [03-data-model.md §8](03-data-model.md))、tree_hash が変わり通常の no-op 規則のまま commit が生まれる。これが無いと完成した成果が次回 `kcs index` まで検索に現れない (chunk の検索対象化は auto snapshot 後 — [05-runtime.md §1.6](05-runtime.md))
 
 ## 5.5 冪等性
 
@@ -748,7 +754,7 @@ chunk の文字数のみ**を対象とし、再利用 chunk (API 非呼出) は�
 ## 5.7 Resume と Repair
 
 - `kcs batch resume`: 中断状態 (running stale, pending) を再開
-- `kcs repair --rebuild-db`: SQLite を objects/ から再構築する (SQLite に存在するのは §4.1〜§4.5 の 8 表のみ。再構築完了時は index_metadata へ新 index_generation ULID を採番する — [05-runtime.md §1.5](05-runtime.md)。**publication の再導出は決定的**: 全 commit を親先行 topological order で走査し、chunk / config association ごとに「既採用 introduction のいずれの子孫でもない commit」のみを introduction として追加する — 結果は ancestor-minimal 集合で walk 順序に依存しない。
+- `kcs repair --rebuild-db`: SQLite を objects/ から再構築する (SQLite に存在するのは §4.1〜§4.5 の 8 表のみ。再構築完了時は index_metadata へ新 index_generation ULID を採番する — [05-runtime.md §1.5](05-runtime.md)。**publication / association introduction の再導出は chunks.jsonl を正本とする**: 作成行の first_seen_commit + publication event 行 (03 §2 — truth) を読み取って復元し、tree の chunk_set_hash は照合のみに使う。event 行を欠く旧 store は fallback として全 commit を親先行 topological order で走査し、chunk / config association ごとに「既採用 introduction のいずれの子孫でもない commit」のみを introduction として追加する (結果は ancestor-minimal 集合で walk 順序に依存しない)。**backfill は行わない** (pre-release — 既存 dev store は rebuild-db が ledger / fallback から再導出する)。
   以下の normalization_runs / prepared_units は SQLite テーブルではなく、manifest / 再 prepare から
   導出される**状態**を指す — [03-data-model.md §8](03-data-model.md) / §4.7)。復元範囲は次の通り:
 
@@ -819,7 +825,10 @@ metadata から intent_token 規約に一致する job を全走査すること�
    確定課金 (provider 報告値) の記帳 + `state=3`・`error='contract_violation'`・completed_at + upload 掃除を
    行い、attempts を耐久更新する。§3.2 の「同一 mode で 1 回のみ再試行」は**この終端 Tx の完了後に**、
    新 intent_token・新 submission_seq の相 1 として開始する (旧 attempt を state=1 のまま放置して
-   再 collect ループに入らない・記帳を落とさない)
+   再 collect ループに入らない・記帳を落とさない)。再投入の mode は原則同一 — tasks.jsonl 喪失で
+   mode が復元不能な場合は full で 1 回 (§5.7 の安全側規定と同型)。**「1 回のみ」の判定は durable**:
+   同一タスクキーに error='contract_violation' の terminal 行 (state=3) が既に存在すれば、
+   新たな再投入は行わず failed permanent とする (tasks.jsonl 喪失後もこの判定は batch_requests から回復できる)
 
 **記帳の冪等性**: cost_ledger への記帳は `INSERT ... ON CONFLICT DO NOTHING` (§5.4 の UNIQUE が実体)。
 記帳前の「記帳済み判別」は同一タスクキー × **batch_job_id IN (発見 job id, 当該 intent_token)** の

@@ -127,9 +127,12 @@ bulk 系 (`kcs evidence verify --batch <pointers.jsonl>`) は従来どおり各�
 
 ```text
 1.  scope の解決 (2 段):
-    a. scope_path が指定され、その .kcs の scope.json の scope_id が pointer と一致 → それを使う
+    a. scope_path が指定され、その .kcs の scope.json の scope_id が pointer と一致 → それを使う —
+       **ただし registry に同一 scope_id の複数 live 登録がある場合は 1a でも選択せず、1b と同じ
+       候補一覧 error とする** (scope_path は表示用 hint でありユーザーの明示選択ではない。
+       URI ⇄ JSON の表現差で alive / error が変わることを防ぐ — [10-operations.md §3](10-operations.md))
     b. 一致しない・存在しない・scope_path 省略 → scope_registry を scope_id で照会し kcs_path を得る
-       (同一 scope_id が複数 **live** 登録されている場合は選択しない — KCS-E-REGISTRY-DUP 系の
+       (同一 scope_id が複数 **live** 登録されている場合は選択しない — `KCS-E-REGISTRY-DUP-001` の
        候補一覧 error で fail-closed とし、dedupe を要求する ([10-operations.md §3](10-operations.md))。
        purge 状態の異なる clone へ黙って解決すると scope 単位 purge の判定を取り違えるため)
     c. どちらも失敗 → KCS-E-EVIDENCE-SCOPE-UNREACHABLE-001 (scope_unreachable, §3.2)
@@ -147,8 +150,17 @@ bulk 系 (`kcs evidence verify --batch <pointers.jsonl>`) は従来どおり各�
 6a. **時点帰属の検証 (v2 tree)**: entry の normalize.manifest_hash が指す manifest object を読み、
     chunk の unit_key が当該 manifest で status=done であることを検証する — done でない unit の
     chunk は当該 commit 時点に存在しない (same-gen retry の後着 chunk を過去 commit の証拠として
-    返さない → not_found)。v1 tree (manifest_hash 欠落) はこの検証を行えない — legacy 解決とし、
+    返さない → not_found)。**v3 tree ではさらに、chunk の publication と config association の
+    introduction ([04-pipeline.md §4.1](04-pipeline.md)) が pointer の commit の ancestor-or-equal で
+    あることも検証する** — manifest で done でも当該 commit 時点で未公開の chunk を証拠にしない
+    (cache 参照のため、この検証の失敗は corruption ではなく not_found — rebuild 後に再評価できる)。
+    v1 tree (manifest_hash 欠落) はこれらの検証を行えない — legacy 解決とし、
     --strict verify は shallow 経路と同じく unverifiable (exit 3) を返す
+6b. entry の manifest object が purge により欠落している場合 (raw_hash の tombstone lifecycle —
+    active / retired を問わず — が説明する欠落): 手順 2a と同じ直接解決へ降格し、レスポンスに
+    `manifest_missing: true` を付す。時点帰属は検証できないため --strict verify は
+    unverifiable (exit 3) — 再 ingest 後の manifest は run_id 等が異なり旧 hash を再生できない
+    ([03-data-model.md §2.1](03-data-model.md)) ので、この降格は恒久である
 7.  chunk_hash で chunk object を解決し byte_start/byte_end の text を取り出す
 8.  **整合検証**: 解決した chunk object の raw_hash / tool_profile_hash が pointer の値と一致し、
     手順 4-6 を経た場合はさらに chunk object の gen が tree entry の gen と一致することを検証する
@@ -222,7 +234,10 @@ receipt は pointer state を tombstoned にせず、re-ingest も阻止しな�
 再 ingest され (明示操作に限らず、working tree 残存原本の自動 scan を含む — [05-runtime.md §3.5](05-runtime.md)
 の残存警告)、同じ identity の chunk が再生成された場合、既存 pointer は再び alive として
 解決される (このとき active tombstone は raw の再 publication と同時に**退役**する — [05-runtime.md §3.5](05-runtime.md)
-の resurrection 規則。退役なしには「tombstone 最優先」の解決と両立しない) (erase は resurrection barrier ではない設計 — [05-runtime.md §3.5](05-runtime.md)。
+の resurrection 規則。退役なしには「tombstone 最優先」の解決と両立しない)。ただし **復活後に解決される
+本文は再生成 instance のものであり、purge 前と byte 同一である保証はない** (Markdown content hash
+不採用の帰結 — [03-data-model.md §5](03-data-model.md))。また purge 前の commit を指す旧 pointer の
+時点検証は、manifest object が purge で失われているため §3.1 手順 6b の降格 (strict = unverifiable) に従う (erase は resurrection barrier ではない設計 — [05-runtime.md §3.5](05-runtime.md)。
 「erase 後も永続的に not_found」と読める保証はしない)。
 
 ## 4.3 検証 API

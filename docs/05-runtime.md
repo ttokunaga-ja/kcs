@@ -198,8 +198,8 @@ history projection / include-deleted のいずれも later `latest_normalize_ref
   全 parent を辿り、side parent にだけ存在して merge 結果から消えた binding も対象にする。
   **walk 中の shallow 化済み commit (tree 破棄済み — §2.2) は skip し、レスポンスに
   `shallow_skipped` 件数を可視化して partial (exit 3) とする** — 黙って欠落させない
-- chunk 行が検索対象になるのは auto snapshot (§8.1 — `kcs index` / batch finalize の成功完了時) 作成後。indexing 途中の chunk はどのモードでも返さない。auto snapshot 作成時に新規 chunk 行へ `first_seen_commit` を刻み、**`chunk_publications` へ `(chunk_id, introduction_commit = 当該 commit)` を追記する** (既存 publication のいずれの子孫でもない tree に同一 chunk が現れた場合も、新しい introduction として追記 — [04-pipeline.md §4.1](04-pipeline.md))。新規の config association も同じ commit を `introduction_commit` として刻む
-- **時点条件 (正式化)**: デフォルト / `--at` の対象は、上記 join に加えて **`chunk_publications` のいずれかの `introduction_commit` が対象 commit の ancestor-or-equal である chunk に限る** (単一の `first_seen_commit` では incomparable な複数導入 — merge の side 枝・独立 import — を表現できないため、判定は publication relation を参照する。relation 自体は SQLite cache であり commit DAG + tree から決定的に再導出できる — [04-pipeline.md §4.1](04-pipeline.md))。**config association にも同条件を適用する** — `chunk_config_generations` の `introduction_commit` が対象 commit の ancestor-or-equal であること (再 chunk 完了前の時点へ後発 association が遡及出現することを防ぐ)。same-gen partial retry の後着 chunk は tree schema v2 ([03-data-model.md §8](03-data-model.md)) により新 commit で公開され、この条件が旧 commit への遡及混入を排除する (ancestry 判定は `--at` の到達可能性 walk と同じ)。**`--include-deleted` の補完 binding にも同条件を適用する** (introduction が当該 binding commit の ancestor-or-equal であること — 削除後に完了した後着 chunk の遡及混入を排除)。**`--all-history` は binding ごとに同判定を行う**
+- chunk 行が検索対象になるのは auto snapshot (§8.1 — `kcs index` / batch finalize の成功完了時) 作成後。indexing 途中の chunk はどのモードでも返さない。auto snapshot 作成時に新規 chunk 行へ `first_seen_commit` を刻み、**`chunk_publications` へ `(chunk_id, introduction_commit = 当該 commit)` を追記する** (既存 publication のいずれの子孫でもない tree に同一 chunk が現れた場合も、新しい introduction として追記 — [04-pipeline.md §4.1](04-pipeline.md))。新規の config association も同じ commit を `introduction_commit` として刻む。**初回以外の追加 introduction は chunks.jsonl へ publication event 行として同時に append する** ([03-data-model.md §2](03-data-model.md) — rebuild の正本)
+- **時点条件 (正式化)**: デフォルト / `--at` の対象は、上記 join に加えて **`chunk_publications` のいずれかの `introduction_commit` が対象 commit の ancestor-or-equal である chunk に限る** (単一の `first_seen_commit` では incomparable な複数導入 — merge の side 枝・独立 import — を表現できないため、判定は publication relation を参照する。relation 自体は SQLite cache であり commit DAG + tree から決定的に再導出できる — [04-pipeline.md §4.1](04-pipeline.md))。**config association にも同条件を適用する** — `chunk_config_generations` の `introduction_commit` が対象 commit の ancestor-or-equal であること (再 chunk 完了前の時点へ後発 association が遡及出現することを防ぐ)。same-gen partial retry の後着 chunk は tree schema v2/v3 (manifest_hash / chunk_set_hash — [03-data-model.md §8](03-data-model.md)) により新 commit で公開され、この条件が旧 commit への遡及混入を排除する (ancestry 判定は `--at` の到達可能性 walk と同じ)。**`--include-deleted` の補完 binding にも同条件を適用する** (introduction が当該 binding commit の ancestor-or-equal であること — 削除後に完了した後着 chunk の遡及混入を排除)。**`--all-history` は binding ごとに同判定を行う**
 - shallow 化済み commit への `--at` の失敗規則は §2.2
 
 History walk の aggregate security bound は exact に次とする (per-object caps に加算):
@@ -638,9 +638,11 @@ preview と完了表示は、対象 raw_hash と同一 bytes の原本が workin
 `.kcsignore` への追加が必要である。
 
 **tombstone の退役 (resurrection)**: 同一 raw_hash の raw object が再 publication された場合、その
-publication と同一の locked mutation 内で active tombstone を**退役 (retire)** させる — 以後の
+publication と同一の locked mutation 内で active tombstone を**退役 (retire)** させる — tombstone
+レコードの events[] へ `retired` を append する (下記 lifecycle 形式)。以後の
 open / view / verify / 解決は alive を返す (退役なしには「tombstone 最優先」の解決規則と上記の
-「再び alive」が両立しない)。purge の監査事実は commit_type=purged の commit と退役記録で追跡できる。
+「再び alive」が両立しない)。purge の監査事実は commit_type=purged の commit と、削除されず残る
+purged/retired event 列で追跡できる。
 search / open / evidence verify / fsck は同一の **active**-tombstone 判定を共有する。
 
 **purge journal (クラッシュ安全の正本)**: purge は複数ストア (objects / SQLite / chunks.jsonl / logs /
@@ -658,14 +660,17 @@ phase 順序    = prepared (closure 確定・記帳)
               → tombstoned (tombstone / erase receipt を先に耐久化 — 削除より前)
               → deleted (objects / SQLite / chunks.jsonl / logs の冪等削除)
               → committed (commit_type=purged の publication)
-              → done (journal 除去)
+              → done (journal 除去 + `.kcs/purge/epoch` の increment — 同一 mutation)
 クラッシュ回復 = 次回の書き込み系コマンド冒頭で journal を検出したら、記録 phase から再開する
               (各 phase は再実行安全 — planned_commit を journal から publish するため同一 hash を
               再現でき、時刻の再計算をしない)。journal が active な間の fsck は incomplete (exit 3 —
               [10-operations.md §7.5.1](10-operations.md))。**読み取り系 (status を除く §6 の全読取
               コマンド — search / log / view / inspect / evidence verify / restore / diff / open) は、
-              冒頭と「本文・存在情報を返す直前」の 2 点で active journal を検出したら KCS-E-PURGE 系
-              retryable (exit 3) で拒否する** (2 点目で検出した場合は取得済み結果を破棄する) —
+              冒頭と「本文・存在情報を返す直前」の 2 点で検査する: 「active journal の不在 **かつ**
+              `.kcs/purge/epoch` (単調カウンタ) が開始時と不変」でなければ KCS-E-PURGE 系
+              retryable (exit 3) で拒否する** (2 点目で検出した場合は取得済み結果を破棄する。
+              epoch 比較が無いと、高速な purge が 2 点の間に journal 作成〜除去まで完走した場合に
+              両検査をすり抜ける — ABA) —
               marker 耐久化後・削除完了前の窓で削除対象の本文を返さないため。読み取り系は lock を
               取らないため、冒頭 1 回の検査では検査後に journal が現れる TOCTOU 窓が残る — 返却直前の
               再検査がこれを閉じる。`kcs status` だけは拒否せず、active journal の存在を状態として
@@ -683,7 +688,7 @@ tombstone 再検査で破棄する ([04-pipeline.md §5.8](04-pipeline.md) 相 3
 tombstone を削除より先に耐久化するのは、「対象 object が消えたのに purge の痕跡が無い」状態
 (corruption と区別不能な markerless absence) を作らないためである。
 
-tombstone は raw_hash をキーとする JSON レコードで、CAS object ではないため `objects/` の外に置く。
+tombstone は raw_hash をキーとする **lifecycle レコード** (append-only の events[] 配列) で、CAS object ではないため `objects/` の外に置く。event は `purged` / `retired` の 2 種で、**active 判定 = 末尾 event が `purged` であること** — retire は末尾に `retired` を append し (上書き・削除しない = 退役監査の保全)、再 purge はさらに `purged` を append する。resolver・fsck・再 purge はこの「末尾 event」規則だけを参照する。events を持たない旧 flat 形式は「purged event 1 件」として読む (legacy)。
 物理 leaf の `<raw64>` は論理 `raw_hash` から `sha256:` を除いた 64 文字の小文字 hex であり、
 JSON 内の `raw_hash` は完全な `sha256:<64hex>` を保持する。旧 Unix store の prefixed leaf は
 [03-data-model.md §2](03-data-model.md) の検証付き compatibility fallback で解決する。purge 実装時は
@@ -692,9 +697,11 @@ canonical / legacy の両 variant が存在する場合に両方を検証し、�
 ```json
 {
   "raw_hash": "sha256:abc...",
-  "purged_at": "2026-04-25T12:00:00Z",
-  "purged_reason": "legal",
-  "purged_in_commit": "sha256:9f2c..."
+  "events": [
+    { "kind": "purged",  "at": "2026-04-25T12:00:00Z", "reason": "legal",
+      "in_commit": "sha256:9f2c..." },
+    { "kind": "retired", "at": "2026-05-01T09:00:00Z", "in_commit": "sha256:1a2b..." }
+  ]
 }
 ```
 

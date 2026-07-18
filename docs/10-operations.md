@@ -268,19 +268,23 @@ CREATE TABLE scopes (
 
 - WAL モード + busy_timeout 5000ms で複数プロセスの書き込みを直列化する
   ([05-runtime.md](05-runtime.md) 同時実行規約)
-- upsert は `(scope_id, kcs_path)` を key に行い、`indexed` は単調 (MAX) にのみ更新する
+- upsert は `(scope_id, kcs_path)` を key に行い、`indexed` は単調 (MAX) にのみ更新する。`root_path` /
+  `kcs_path` は canonical 形で保存する (規則の正本 = [05-runtime.md §1.8](05-runtime.md): 絶対化 →
+  lexical 解決 → 末尾 separator 除去 → realpath、比較は byte 単位)
 - **stale 登録の退役**: `.kcs` を削除して同じ path で `init` し直すと新しい `scope_id` が採番される
   (scope_id は init 時採番の ULID、[03-data-model.md §2](03-data-model.md))。upsert の直前に、同一
   `kcs_path` で `scope_id` が異なる行を削除する。**逆方向 (scope の移動) も同様に退役する**: 同一
   `scope_id` を新しい `kcs_path` で観測 (再発見) したら、同一 scope_id の旧 path 行を削除する —
   **ただし旧 path がなお到達可能 (存在し有効な `.kcs`) な場合は move と認定せず、削除しない**。
   同一 scope_id の複数 live path は clone 併存であり、**fail-closed で扱う**: global search は当該
-  scope_id を skip して `excluded_scopes` に KCS-E-REGISTRY-DUP 系の理由付きで記録し、pointer 解決は
+  scope_id を skip して `excluded_scopes` に `KCS-E-REGISTRY-DUP-001` の理由付きで記録し、pointer 解決は
   候補一覧 error とする ([08-evidence-pointer-spec.md §3.1](08-evidence-pointer-spec.md) — purge 状態の
   異なる clone へ黙って解決しない)。どちらを残すかはユーザーの dedupe に委ねる (複製へ新 scope_id を
   発行する fork は Phase 4+ 予約) —
-  放置すると default 横断検索が旧 path の stale scope を毎回 skip し恒常的に exit 3 になる。放置すると横断検索が同一文書を dead scope_id 経由で
-  二重に返し、その Evidence Pointer は `KCS-E-EVIDENCE-SCOPE-UNREACHABLE-001` で解決不能になる。
+  stale 行 (到達不能な旧 path) を放置すると、default 横断検索が毎回 skip して恒常的に partial (exit 3)
+  になり、その行経由の Evidence Pointer は `KCS-E-EVIDENCE-SCOPE-UNREACHABLE-001` になる — これが退役の
+  理由。live 重複はこれとは別で、上記のとおり fail-closed (search skip + 解決 error) で扱い、
+  黙って二重に返すことはない。
   registry は cache なので削除は常に安全 (live scope は自分を再登録する)
 - device data dir (`~/.local/share/kcs/`) は owner-only (0700) に制限する (best-effort。非 unix は
   no-op。registry / cost-ledger / logs は利用パターンとスコープ地図を含むため)
@@ -476,8 +480,9 @@ kcs repair --verify-objects
 3. exit code: 破損 0 件 または 全件復元 = 0 / missing 残あり = 3
 ```
 
-purge との整合: validated tombstone または fsck-only erase receipt が説明する missing raw とその derived
-(chunk・**当該 (raw_hash, tool_profile_hash) 配下の manifest object**) は正常な dead terminal として数え、
+purge との整合: validated tombstone (lifecycle の event が purged / retired の**いずれでも** — retire は
+event を削除せず監査を残すため説明能力を保つ) または fsck-only erase receipt が説明する missing raw と
+その derived (chunk・**当該 (raw_hash, tool_profile_hash) 配下の manifest object**) は正常な dead terminal として数え、
 corruption にしない。**tree 欠落**は `.kcs/gc/shallowed/<commit64>` receipt が説明する場合のみ正常
 (shallow — [05-runtime.md §2.2](05-runtime.md))、receipt なき欠落は corruption。receipt-covered bytes は working copy から
 自動復元しない。receipt は public pointer API と re-ingest barrier には使わない。purge journal が active
@@ -718,6 +723,7 @@ DOMAIN:
   GC       garbage collection
   PURGE    purge 操作
   EVIDENCE Evidence Pointer 解決 / verify / retarget
+  REGISTRY scope registry (live clone 重複・退役 — [§3])
   SYNC     同期・共有 (v2 予約。MVP では発行しない)
   ADAPTER  Adapter ロード・実行
   EMBED    embedding profile / modality 検証 (KCS-E-EMBED-MODALITY-001 — [03-data-model.md §7](03-data-model.md))

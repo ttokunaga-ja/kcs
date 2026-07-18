@@ -14,6 +14,8 @@ Object 種別:
   prepared     Markdownize 前の中間表現 (page image, sheet etc.)
   image        文書内 embedded image (Markdownize 時に抽出。type は予約済み、実装は Step 2
                [09-mvp-scope.md §3.1](09-mvp-scope.md))
+  manifest     normalized instance manifest の確定版 (canonical JCS bytes — §2.1。tree v2/v3 の
+               normalize.manifest_hash が指す)
   normalized_unit  unit 単位の Markdown (read-only artifact, content hash 不採用)。
                    normalized の正本 (§2.1)
   chunk        normalized から見出し単位で切り出し
@@ -53,11 +55,16 @@ raw / prepared / image / chunk / embedding / manifest / tree / commit は **CAS 
     heads/main
     tags-v1/tag-<digest64>          # canonical: digest64 = sha256(NFC + Unicode lowercase の論理 tag 名)
     tags/<logical-name>             # legacy Unix raw-name refs (read-only compatibility)
-  tombstones/ab/cd/<raw64>      purge の tombstone 記録 (05-runtime.md §3.5。CAS object ではない)
+  tombstones/ab/cd/<raw64>      purge の tombstone lifecycle 記録 (raw_hash ごとの append-only events[] —
+                                purged / retired。active 判定 = 末尾 event。05-runtime.md §3.5。CAS object ではない)
   tasks.jsonl         batch タスクストア (04-pipeline.md §5.1。append-only の運用データ、SQLite 非採用)
   chunks.jsonl        chunk association ledger (**truth** — chunk object が持たない世代 association の正本。
-                      各行 = {chunk_id, chunking_config_hash, created_at, first_seen_commit, path}。
-                      path = chunk 生成時点の path (SQLite chunks.raw_path の rebuild 入力)。append-only、
+                      作成行 = {chunk_id, chunking_config_hash, created_at, first_seen_commit, path}。
+                      path = chunk 生成時点の path (SQLite chunks.raw_path の rebuild 入力)。
+                      **publication event 行** = {event:"publication", chunk_id, chunking_config_hash,
+                      introduction_commit} — 初回以外の追加 introduction (incomparable な別枝での公開、
+                      association の後発公開) を auto snapshot 時に append する。publication relation
+                      (04 §4.1 cache) の rebuild 正本はこの ledger (digest は照合のみ)。append-only、
                       SQLite rebuild の入力 — 04-pipeline.md §4.1/§4.6、本書 §8)
   index/
     sqlite.db         FTS5 + sqlite-vec (query acceleration layer; 真実は objects/)
@@ -579,7 +586,10 @@ embedding_hash = "sha256:" + base16(sha256(JCS({
 //  - tree.chunk_set_hash = この snapshot で公開済みの chunk 集合の digest。canonical bytes =
 //    公開 chunk の chunk_hash 完全表記 ("sha256:<64hex>") を UTF-8 バイト列昇順にソートし LF 連結 +
 //    末尾 LF 1 つ、その sha256。「公開済み」= 本 tree の binding (raw_hash, tool_profile_hash, gen) に
-//    属し、本 tree の chunking_config_hash の association を持つ chunk object の全量 (snapshot 時点)
+//    属し、本 tree の chunking_config_hash の association を持つ chunk object の全量 (snapshot 時点で
+//    **store に存在するもの** — 存在ベース。0 件のときの canonical bytes = LF 1 byte)。chunking の途中
+//    クラッシュで部分集合が manual snapshot に載ることは許容する — chunk は unit 単位で決定的・個々に
+//    完全であり、残りは完了時の finalize commit で introduction を得る (検索の部分性は status が可視化)
 //  - これにより chunk のみが後着した finalize でも chunk_set_hash → tree_hash が変わり、no-op 規則の
 //    まま publication commit が生まれる ([05-runtime.md §8.1](05-runtime.md) 契機 3) — manifest 反映済み
 //    snapshot が先行しても後着 chunk の introduction を刻める
