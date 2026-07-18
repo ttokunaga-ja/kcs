@@ -357,10 +357,12 @@ CREATE TABLE index_metadata (          -- 単一行。05 §1.5 index_generation 
   id               INTEGER PRIMARY KEY CHECK (id = 1),
   index_generation TEXT NOT NULL,      -- ULID (rebuild / purge / enrichment finalize / FTS 内容変化 /
                                        --  tombstone lifecycle 更新で更新 — 05 §1.5)
-  last_lifecycle_rotation_at INTEGER NOT NULL DEFAULT 0
-                                       -- UTC ミリ秒。lifecycle 起因の回転を最後に反映した時刻。
-                                       --  末尾 event がこれより新しい lifecycle record の存在 =
-                                       --  回転未了 → 書き込み系冒頭の回復で補完 (05 §3.5)
+  last_lifecycle_epoch INTEGER NOT NULL DEFAULT 0
+                                       -- lifecycle epoch (.kcs/tombstones/lifecycle-epoch — 単調カウンタ、
+                                       --  event append ごとに +1) のうち回転へ反映済みの値。
+                                       --  counter > この値 = 回転未了 → 書き込み系冒頭の回復で補完。
+                                       --  時刻比較は使わない (同一 ms・時計逆行で補完を見逃す)。
+                                       --  rebuild 完了 Tx で現 counter 値に初期化する (05 §3.5)
 );
 
 CREATE TABLE chunk_config_generations (
@@ -695,9 +697,10 @@ CREATE TABLE cost_ledger (               -- 確定・推定課金の追記台帳
                                          --  DEFAULT 'succeeded' を許すと省略記帳が成功に化け、
                                          --  ON CONFLICT 冪等の下で訂正不能になる)。
                                          --  reset (--reset-violations) 後も違反履歴が台帳に恒久に残る
-    month             TEXT NOT NULL      -- 'YYYY-MM' (確定月配賦 — cap 集計キー。書式も強制 —
-        CHECK (month GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]'),
-                                         --  不正書式は当月合算から漏れ cap を過少判定する)
+    month             TEXT NOT NULL      -- 'YYYY-MM' (確定月配賦 — cap 集計キー。書式と月範囲も強制 —
+        CHECK (month GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]'
+               AND substr(month, 6, 2) BETWEEN '01' AND '12'),
+                                         --  不正書式・00/13〜99 月は当月合算から漏れ cap を過少判定する)
     recorded_at       INTEGER NOT NULL,  -- UTC ミリ秒
     UNIQUE (scope_id, adapter_kind, input_hash, tool_profile_hash, submission_seq)
 );
@@ -783,7 +786,7 @@ chunk の文字数のみ**を対象とし、再利用 chunk (API 非呼出) は�
 ## 5.7 Resume と Repair
 
 - `kcs batch resume`: 中断状態 (running stale, pending) を再開
-- `kcs repair --rebuild-db`: SQLite を objects/ から再構築する (SQLite に存在するのは §4.1〜§4.5 の 8 表のみ。再構築完了時は index_metadata へ新 index_generation ULID を採番する — [05-runtime.md §1.5](05-runtime.md)。**publication / association introduction の再導出は chunks.jsonl を正本とする**: 作成行の first_seen_commit + publication event 行 (03 §2 — truth) を読み取って復元し、tree の chunk_set_hash は照合のみに使う。event 行を欠く旧 store は fallback として全 commit を親先行 topological order で走査し、chunk / config association ごとに「既採用 introduction のいずれの子孫でもない commit」のみを introduction として追加する (結果は ancestor-minimal 集合で walk 順序に依存しない)。**backfill は行わない** (pre-release — 既存 dev store は rebuild-db が ledger / fallback から再導出する)。生存する creation 行 / chunk object を持たない、**または introduction commit が不在・ref から到達不能**な publication event 行は無視する (dangling — [05-runtime.md §8.1](05-runtime.md) の耐久順序で正常に生じ、次回 finalize が冪等に再 append する)。
+- `kcs repair --rebuild-db`: SQLite を objects/ から再構築する (SQLite に存在するのは §4.1〜§4.5 の 8 表のみ。再構築完了時は index_metadata へ新 index_generation ULID を採番し、**同じ完了 Tx で `last_lifecycle_epoch` を現在の lifecycle-epoch counter 値に初期化する** (DEFAULT 0 のままでは全 lifecycle record が回転未了と誤検出され、全走査と不要回転が走る — [05-runtime.md §3.5](05-runtime.md)) — [05-runtime.md §1.5](05-runtime.md)。**publication / association introduction の再導出は chunks.jsonl を正本とする**: 作成行の first_seen_commit + publication event 行 (03 §2 — truth) を読み取って復元し、tree の chunk_set_hash は照合のみに使う。event 行を欠く旧 store は fallback として全 commit を親先行 topological order で走査し、chunk / config association ごとに「既採用 introduction のいずれの子孫でもない commit」のみを introduction として追加する (結果は ancestor-minimal 集合で walk 順序に依存しない)。**backfill は行わない** (pre-release — 既存 dev store は rebuild-db が ledger / fallback から再導出する)。生存する creation 行 / chunk object を持たない、**または introduction commit が不在・ref から到達不能**な publication event 行は無視する (dangling — [05-runtime.md §8.1](05-runtime.md) の耐久順序で正常に生じ、次回 finalize が冪等に再 append する)。
   以下の normalization_runs / prepared_units は SQLite テーブルではなく、manifest / 再 prepare から
   導出される**状態**を指す — [03-data-model.md §8](03-data-model.md) / §4.7)。復元範囲は次の通り:
 
@@ -885,6 +888,12 @@ attempt の終端採番である (どちらも当該 attempt の「回復の再�
 正常完了 = `succeeded` / §3.2 reject 終端 = `contract_violation` / expired 終端 = `expired` /
 abandon = `abandoned` / 拒否課金 provider の submit 拒否 = `submit_rejected` / purge 起因の
 terminal 化 (error='purged') = `purged` / 回復期限超過・照会不能の estimated 確定 = `unknown_settled`。
+
+**記帳値の事前検証**: Adapter 報告値 (usd / unit 数) は INSERT 前に有限・非負の数値であることを
+検証し、違反は §3.2 の contract violation と同経路で reject 終端する (KCS-E-ADAPTER-CONTRACT-001)。
+DDL の CHECK は最終防衛線であり、**CHECK 違反で Tx が失敗した場合は実装エラー
+`KCS-E-STORE-CONSTRAINT-001` (permanent — `ON CONFLICT DO NOTHING` には吸収されず、同じ値での
+再試行はループするだけのため再試行しない)** ([10-operations.md §12.1](10-operations.md) STORE domain)。
 
 **回復** (書き込み系 batch コマンド — `kcs index` / `kcs batch resume` / `kcs batch retry` /
 `kcs batch abandon` — の冒頭。**これらと `kcs reindex` は `.kcs/.lock` を取得する書き込み系であり

@@ -116,12 +116,15 @@ revoke: adapter.policy.allow_network = false に設定する。
         [10-operations.md §12.3](10-operations.md)、truth [03-data-model.md §4.1](03-data-model.md))。
         `(scope_id, tool_id)` 単位の行で、失効・revoke は当該行の **status=revoked + revoked_at への
         更新** (atomic rename) で行う (行は削除しない — 監査保全)。送信 gate は
-        「`allow_network` が false でない **かつ** 現在の execution_mode / tool_profile_hash に一致する
-        `status=active` 行が存在する」の両立とする。
+        「`allow_network` が false でない **かつ** 行の scope_id が当該 scope.json の scope_id と
+        一致し、現在の execution_mode / tool_profile_hash に一致する `status=active` 行が存在する」の
+        両立とする (**scope_id 不一致の行は gate に使わない** — fork 複製由来の旧 scope 行の残存で
+        再承認を迂回させない。[06-cli-spec.md §10](06-cli-spec.md))。
         `approvals[]` 要素の required field = scope_id / tool_id / execution_mode /
         tool_profile_hash / approved_at / approval_method / **status (`active` | `revoked`)** —
         status=revoked の行は **revoked_at** も必須 ([10-operations.md §12.3](10-operations.md) の
-        schema 定義と一致)。
+        schema 定義と一致)。status を持たない legacy 行は `active` として読む (10 §12.3 の
+        要素単位後方互換 — schema error にしない)。
         初回スキャン承認 (10-operations.md §1) の記録とは別物 — あちらは scope 単位の
         取り込み承認、こちらは adapter 単位の network opt-in。
         (b) の config boolean は scope 内の全 online_api Adapter に適用される blanket であり、
@@ -472,7 +475,7 @@ Markdownize / Embedding runtime にはこの dispatcher と承認経路はなく
 ログに残してよいもの:
 
 ```
-task_id, adapter_id, tool_profile_hash, execution_mode
+task_id, adapter_id, tool_profile_hash, execution_mode, scope_id
 input_raw_hash, output_hash
 status, error_code, error_category, retry_after_ms
 network_consent (approvals | cli_online — 送信を伴った実行のみ)

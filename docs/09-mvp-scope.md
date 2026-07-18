@@ -130,7 +130,7 @@ Step 別の目安 (テスト除く):
 | 観測ログ `metrics.jsonl` / `access.jsonl` (M3 の latency 計測に必要) | [06-cli-spec.md §13](06-cli-spec.md) / [05-runtime.md §7](05-runtime.md) | Step 3 |
 | `restore --to` / `--at` / `--all-history` / `--include-deleted` | [05-runtime.md §4](05-runtime.md) | Step 4 |
 | purge 最小形 (tombstone + `commit_type=purged` + 検索除外 + `--erase-tombstone` + ログスクラブ [10-operations.md §7](10-operations.md)) | [05-runtime.md §3](05-runtime.md) / [08-evidence-pointer-spec.md §4.1](08-evidence-pointer-spec.md) | Step 4 |
-| `kcs repair --verify-objects` (CAS object 整合性検証) | [10-operations.md §7.5](10-operations.md) | Step 4 |
+| `kcs repair --verify-objects` (CAS object 整合性検証) / `--prune-orphans` (orphan prepared/image 削除 — 法務 purge の完結手段) | [10-operations.md §7.5](10-operations.md) | Step 4 |
 | `kcs evidence verify <pointer>` (単発) | [08-evidence-pointer-spec.md §4.3](08-evidence-pointer-spec.md) | Step 4 |
 | purge の完全な履歴書き換え (tree/commit 再結線・filename 秘匿ケース) | [05-runtime.md §3.5](05-runtime.md) / [08-evidence-pointer-spec.md §4.2](08-evidence-pointer-spec.md) | v2+ / Phase 4+ |
 | `kcs gc` (on-demand / shallow / prune-unreachable) | [05-runtime.md §2.2-2.3](05-runtime.md) | Phase 4+ |
@@ -267,7 +267,7 @@ Done 条件 = synthetic で各シナリオ Recall@10 >= 0.8
 実装:
   - normalization_run のキャッシュヒット判定で短絡
   - 新 generation (gen+1) の instance 作成は kcs reindex --force、または prepared_hash 変化起因の自動 gen+1 ([03-data-model.md §2.1](03-data-model.md) の例外) のみ許可 (上書き・削除はしない)
-  - 新 generation 作成時は manifest の parent_gen (同一 raw 内) / parent_instance = {raw_hash, tool_profile_hash, gen} (raw 跨ぎ incremental のみ必須 — full では null) でチェーンを残す (parent_run_id は task cache の揮発情報 — 永続 provenance ではない。[03-data-model.md §8](03-data-model.md))
+  - 新 instance 作成時 (raw 跨ぎ incremental の g0 を含む) は manifest の parent_gen (同一 raw 内) / parent_instance = {raw_hash, tool_profile_hash, gen} (raw 跨ぎ incremental のみ必須 — full では null) でチェーンを残す (parent_run_id は task cache の揮発情報 — 永続 provenance ではない。[03-data-model.md §8](03-data-model.md))
   - 過去 commit / 既存 Evidence Pointer は tree entry の gen により旧 instance を参照し続ける
 正本: 03-data-model.md §6, 04-pipeline.md §5.5
 Status: decided (Step 1 着手前確定)
@@ -369,7 +369,7 @@ Status: decided
 | 2 | remarkdownize CLI セマンティクス | draft | --latest のデフォルト挙動 | Phase 4 着手前 |
 | 3 | Dead Evidence Pointer | decided (コア) | bulk verify スループット | Phase 4 着手前 |
 | 4 | Incremental Markdownize プロンプト規約 | decided | なし | Step 1 着手前 (充足済み) |
-| 5 | 検索評価ハーネス (合成コーパス + ゴールデンクエリ、§4.3) | decided | なし (2026-07-03 完了: `eval/` に合成コーパス 305 ファイル / 7 scope + 履歴 fixture + ゴールデンクエリ 50 件 (M3-1: 18 / M3-2: 16 / M3-3: 16)。dry-run 検証済み。以後のクエリ追加・差し替えは §4.2 凍結規律) | Step 3 着手前 (充足済み) |
+| 5 | 検索評価ハーネス (合成コーパス + ゴールデンクエリ、§4.3) | decided | なし (2026-07-03 完了: `eval/` に合成コーパス 305 ファイル / 7 scope + 履歴 fixture + ゴールデンクエリ 50 件 (M3-1: 18 / M3-2: 16 / M3-3: 16)。dry-run 検証済み。以後のクエリ追加・差し替えは §4.2 凍結規律。**M3-1 は Done 判定前に 2 問以上増補して §4.1 の「Q_hard 20 問以上」を満たしてから再凍結する** — 現行 18 問のままでは Done 条件を構成できない) | Step 3 着手前 (充足済み) |
 | 6 | Markdownize Adapter 選定 = Mistral OCR 系 ([07 §5.2](07-adapter-spec.md)) | decided | なし (実地検証 2026-07-03 完了: sync/batch 両モードで表 1.0 / 日本語 CER 0.0 / 画像 1/1 / 数式 LaTeX 化。`experiments/ocr-verification`) | Step 2 着手前 (充足済み) |
 
 Step N の着手条件は「期日が『Step N 着手前』の行がすべて decided」の機械的チェック (§3.2)。2026-07-02 の本改訂適用後、Step 1 のブロッカーは 0 件。#2/#3 の残未決は実装が Phase 4+ に割当てられた機能 (§3.1) にのみ関わるため、Step 1-4 をブロックしない。

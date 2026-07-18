@@ -67,7 +67,8 @@ kcs move --propose <src> <dst>          # 原本移動の提案。Agent はこ�
 kcs move --accept <id> | --reject <id>  # 提案の承認/却下。KCS が原本を mv できる唯一の経路 (03-data-model.md §10)。書き込み境界の予約定義
 kcs evidence verify <pointer> [--strict]
 kcs evidence verify --batch <pointers.jsonl> [--strict]  # <pointer> と --batch は相互排他 (--batch は Step 4+ — §7、08 §4.3)
-kcs evidence retarget <pointer> [--latest|--at <commit>]  # 設計確定後 (09-mvp-scope.md §5.2)
+kcs evidence retarget <pointer> [--latest|--at <commit>]  # 設計確定後 (09-mvp-scope.md §5.2)。
+                                        # --latest の既定挙動 (auto retarget / proposal) は Phase 4 着手前確定 (08 §5 残未決)
 ```
 
 本表はコマンド全量の spec である。MVP での採否・実装 Step の正本は [09-mvp-scope.md §1.2 / §3.1](09-mvp-scope.md) (Phase 4+ のコマンドは行内に注記)。
@@ -273,13 +274,16 @@ kcs evidence verify --strict   全 alive なら 0。tombstoned / not_found が 1
                                unverifiable のみも 3 (reason = commit_shallow / tree_v1 /
                                manifest_missing — 08 §4.3。shallow は unshallow で解消し得るが
                                tree_v1 / manifest_missing は恒久 — reason で判別)。registry_duplicate も 3
-index 再構築中 / sqlite.db 不在      全経路 (verify / open / view / restore / search) で status に混ぜず
+sqlite.db 不在・利用不能       全経路 (verify / open / view / restore / search) で status に混ぜず
                                command-level の retryable error KCS-E-INDEX-REBUILDING-001・exit 3
-                               (verify は検査未完了のため --strict なしでも 0 を返さない。multi-scope
-                               search は当該 scope を excluded_scopes として継続し、全 scope 該当なら
-                               exit 3 — SCOPE-ALL-FAILED (4) より優先。05 §2.6・08 §3.1)
+                               (再構築中でも旧 sqlite.db が読めるなら通常応答 — 05 §6。error は
+                               不在・利用不能の場合のみ。verify は検査未完了のため --strict なしでも
+                               0 を返さない。multi-scope search は当該 scope を excluded_scopes として
+                               継続し、全 scope 該当なら exit 3 — SCOPE-ALL-FAILED (4) より優先。
+                               優先順位は journal → DUP → REBUILDING (10 §3)。05 §2.6・08 §3.1)
 kcs evidence verify --batch <pointers.jsonl>   一括 verify (Step 4+ — 08 §4.3)
-                               (--batch 混在時も 4。内訳は --json の各行 status で判定)
+                               (--batch は --strict の有無に従う — --strict 時: 混在も 4 /
+                                なし: 検査完了で 0。内訳は --json の各行 status で判定 — 08 §4.3)
 kcs open / view / restore      dead pointer (tombstoned / not_found) は 4。scope_unreachable は 3 (retryable — 08 §4.3)
 kcs evidence retarget          対応なし / ambiguous は 4。
                                tool_profile_hash 不一致で chunk 解決不能 (retarget 要) は 8
@@ -380,7 +384,11 @@ kcs import <bundle.kcsz> --to <dir> [--as-new-scope]  # bundle の scope_id が 
                                         # bundle 内の legacy 表現 (旧 Unix raw-name tag ref 等、対象 OS で物理
                                         # leaf を作れないもの) は import 展開時に検証付きで canonical 表現
                                         # (hashed ref + names 行) へ正規化する (in-place rewrite 禁止の例外は
-                                        # import 展開のみ — 03 §2)
+                                        # import 展開のみ — 03 §2)。
+                                        # .kcs/logs/ は継承しない (空で開始 — 旧 scope_id の行は新 scope の
+                                        # purge selector (10 §7) から恒久に漏れる。運用記録は喪失許容)。
+                                        # 旧 scope の in-flight (device-global batch_requests の旧 scope_id 行)
+                                        # は fork と無関係に元 scope の回復に属する — fork は何も引き継がない
 ```
 
 `.kcsz` は `.kcs/` **全体**の bundle 形式 (zip 等 — objects/・refs/ (tags-v1/names.jsonl を含む)・chunks.jsonl 等の truth 一式)。`.kcs` 単位で可搬。別 `.kcs` の object 参照を前提にしないため、同一 raw_hash が別 `.kcs` に存在しても export 単位では重複を許容する。**bundle には scope.json の approvals[]・logs/ の運用記録・登録 path 等の機微 metadata が含まれる** — 共有は同一信頼境界内 (自分の別端末・バックアップ) を想定し、第三者公開用の sanitize (承認・log・path の除去) は Phase 4+ の export mode で扱う。

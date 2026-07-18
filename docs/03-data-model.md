@@ -222,7 +222,7 @@ unit を決定論的に結合した **再生成可能な cache** であり、正
 
 1. manifest.units を `order` 昇順に走査する
 2. `status = done` の unit は、その `markdown` から末尾の連続する改行を除去した文字列を採用する
-3. `status = failed` の unit は、固定文字列 `<!-- KCS-MISSING-UNIT <unit_key> <error_kind> -->` を採用する
+3. `status = failed` の unit は、固定文字列 `<!-- KCS-MISSING-UNIT <unit_key> <error_kind> -->` を採用する (unit_key / error_kind は comment-safe に挿入する — `--` を含む値は percent-encode。生値の挿入は comment を途中終端し view の構造を壊す)
 4. 採用した文字列を `"\n\n"` で結合し、末尾に `"\n"` を 1 つ付す — これが view 本文
 5. §10 のヘッダコメントを本文の前に付す。chunk の byte offset は **unit-local** (当該 unit の
    `markdown` 本文 UTF-8 bytes 先頭を 0 とする byte span、§8.1) であり、全文 view 上の位置・ヘッダ・結合順は
@@ -292,7 +292,7 @@ cache = scope_registry / aggregator 検索の探索対象一覧 / stale 検出 /
 ```
 raw_hash             原文バイト列の同一性 (1 バイト違えば別 object)
 tool_profile_hash    Adapter capability の identity (§5.1)
-tool_lock_hash       tool-lock の canonical 構成 (各 role の tool_id / profile_hash — §5.2 の入力) を畳み込んだ識別子
+tool_lock_hash       tool-lock の canonical 構成 (各 role の tool_id / profile_hash、embedding はさらに dimensions / distance / modality — §5.2 の入力) を畳み込んだ識別子
 semantic_fingerprint 意味的・視覚的・構造的な近さ (page fingerprint, embedding 等)
 ```
 

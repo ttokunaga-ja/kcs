@@ -70,6 +70,11 @@ KCS:   commit + raw_hash + chunk_hash   → ファイル移動・リネーム・
 | `byte_start` / `byte_end` | normalized unit 本文内の UTF-8 byte span (unit-local・0-based half-open、[03-data-model.md §8.1](03-data-model.md)) |
 | `scope_path` | 生成時点の正本 `.kcs` の絶対パス (解決の高速ヒント + 表示用。解決の root 信頼は `scope_id`) |
 
+表示用 field は、解決が成功した場合は**解決結果の canonical 値 (tree / chunk object 由来) を優先して
+表示し、pointer 入力値と相違するときは入力値を無視する** — 正しい必須 tuple に偽の表示 metadata
+(path / heading / span) を付けた pointer が、alive 判定のままそのまま人間向け引用に使われることを
+防ぐ (これらは解決には元々使わない — §3.1 手順 8 の整合検証は必須 tuple のみ)。
+
 `path_at_commit` は **表示用** であり、解決には使わない。実際の解決は `commit + raw_hash` で行う (path はリネーム履歴をまたいでも追えるが、root 信頼は raw_hash 側)。
 
 `scope_path` も `path_at_commit` と同様 **ヒント** であり、解決の root 信頼にしない。`.kcs` の移動・別マシンへの import 後も、`scope_id` が一致する限り pointer は解決可能である。
@@ -291,9 +296,10 @@ commit は不変であり再 snapshot では解消しない。v2/v3 snapshot 後
 では生じない) /
 `manifest_missing` (手順 6b — **恒久**)。exit はいずれも 3 (reason で自動化側が再試行の要否を判断する)。
 live clone 重複は status `registry_duplicate` (候補一覧つき、exit 3 — §3.1 手順 1)。--batch は各行の
-status にこれらをそのまま用いる。**index 再構築中・sqlite.db 不在は status ではなく command-level の
+status にこれらをそのまま用いる。**sqlite.db が不在・利用不能の場合は status ではなく command-level の
 retryable error `KCS-E-INDEX-REBUILDING-001` (exit 3)** — 検査は完了していないため --strict なしでも
-0 を返さない ([06-cli-spec.md §7](06-cli-spec.md)、[05-runtime.md §2.6](05-runtime.md))。
+0 を返さない (再構築中でも旧 sqlite.db が読めるなら通常応答 — [05-runtime.md §6](05-runtime.md)。
+[06-cli-spec.md §7](06-cli-spec.md)、[05-runtime.md §2.6](05-runtime.md))。
 非 strict では従来どおり alive + `commit_shallow: true` で返す。
 
 `--strict`: tombstoned / not_found / scope_unreachable を **error** として扱う (CI / 自動化用)。
@@ -341,6 +347,8 @@ kcs evidence retarget <pointer> [--latest|--at <commit>]
 }
 ```
 
+(上記の `"a" | "b"` は union の schema 表記であり、リテラル JSON ではない — `//` コメント付きの例も同様。Agent はこの fence を JSON として parse しない)
+
 ```json
 // 対応が見つからない場合
 {
@@ -350,7 +358,7 @@ kcs evidence retarget <pointer> [--latest|--at <commit>]
 }
 ```
 
-対応付けは `heading_path` の完全一致 (`heading_path_exact`) → 正規化一致 + span 重なり率 (`heading_path_fuzzy`) の順に試みる。**意味ベースの対応付け (semantic_fingerprint) は MVP に含めない**。chunk レベルの fingerprint 実体が未定義であり、embedding は retarget が必要な場面 (tool_profile 変更) で互換性ルール ([03-data-model.md §7](03-data-model.md)) により新旧比較が成立しない恐れがあるため。導入する場合は Phase 4+ で match_method の MINOR 追加 (§8) として行う。
+対応付けは `heading_path` の完全一致 (`heading_path_exact`) → 正規化一致 + span 重なり率 (`heading_path_fuzzy`) の順に試みる。**span 重なり率は、新旧の normalized text 間で text alignment が成立した領域内でのみ用いる** — 異なる tool_profile の unit-local byte offset は共通座標を持たないため直接比較しない。alignment が成立しない場合は対応なし (ambiguous — fail-closed)。**意味ベースの対応付け (semantic_fingerprint) は MVP に含めない**。chunk レベルの fingerprint 実体が未定義であり、embedding は retarget が必要な場面 (tool_profile 変更) で互換性ルール ([03-data-model.md §7](03-data-model.md)) により新旧比較が成立しない恐れがあるため。導入する場合は Phase 4+ で match_method の MINOR 追加 (§8) として行う。
 
 retarget は **AI Agent からの呼び出しを前提** にしているため、レスポンスは [06-cli-spec.md §4](06-cli-spec.md) の `--json` 契約に従う。Phase 5 で構造化 API を導入する際もこの JSON schema を互換性契約として維持する ([06-cli-spec.md §9](06-cli-spec.md))。
 

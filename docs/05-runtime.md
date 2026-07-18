@@ -94,6 +94,8 @@ MMR 選択則:
 score(c) = λ * relevance(c) - (1-λ) * max_{c' ∈ selected} similarity(c, c')
 similarity = embedding の vector cosine (これのみ。2026-07-03 確定 — embedding が無い場合は
              MMR 自体を適用しないため、代替 similarity は定義しない)
+selected = ∅ の初手は similarity 項を 0 とする (= relevance 最高の候補を既定 tie-break 順で
+             選ぶ — 実装間で初手が揺れない)
 ```
 
 適用範囲と決定性:
@@ -131,7 +133,7 @@ index / batch finalize で `chunk_fts` の内容が変化した場合・tombston
 (単調カウンタではない — sqlite.db の `index_metadata` 表 ([04-pipeline.md §4.1](04-pipeline.md)) に保持するため
 DB 喪失で数が戻っても、ULID なら旧 cursor が偶然一致して誤受理されることがない。FTS 内容変化でも回転する
 理由: FTS5 の bm25() は文書頻度・平均長という**大域統計**を使うため、cursor が chunk 集合を rowid 上限で
-固定しても、後発行の追加で既存行の順位自体が変わり得る — 誤った続きを返すより旧 cursor を拒否する)。**回転はそれを引き起こした SQLite 書込 (FTS 内容を変える INSERT / UPDATE / DELETE、purge の行削除等) と同一の SQLite Tx で行う** — 別 Tx にすると、間の crash で旧 cursor が変化後の stream に受理される (file 側の tombstone lifecycle 更新に伴う回転だけは同一 Tx にできないため、§3.5 の補完規則で crash 窓を閉じる)。**replay 時に現在値と不一致なら
+固定しても、後発行の追加で既存行の順位自体が変わり得る — 誤った続きを返すより旧 cursor を拒否する)。**回転はそれを引き起こした SQLite 書込 (FTS 内容を変える INSERT / UPDATE / DELETE、purge の行削除等) と同一の SQLite Tx で行う** — 別 Tx にすると、間の crash で旧 cursor が変化後の stream に受理される (file 側の tombstone lifecycle 更新に伴う回転だけは同一 Tx にできないため、§3.5 の lifecycle-epoch カウンタ + 補完規則で crash 窓を閉じる)。**replay 時に現在値と不一致なら
 `KCS-E-SEARCH-CURSOR-001` で拒否する** (再検索が正) — rebuild は rowid を再採番し、purge は
 append-only 前提を破って行を削除し、後発 embedding は hybrid の候補集合・順位を変えるため、
 いずれも旧 cursor の `max_rowid` / `consumed` の意味を失わせる。
@@ -325,7 +327,7 @@ score/rank をコピーして、group 内を
    候補として返す。§1.4 の MMR/dedup は scope 内でまだ適用しない
 3. scope 間の統合は **rank ベース** で行う。各 scope の RRF スコア (rank のみから決まる) をそのまま比較して降順マージする。**BM25 / vector の raw スコアを scope 間で比較・正規化してはならない** (コーパス統計が index ごとに異なり比較不能)。pre-alias 同点は immutable `(scope_id,chunk_hash)` で安定化する
 4. diversify (MMR / group_by_raw_hash, §1.4) は統合後の候補列に対して適用する
-5. vector / hybrid の横断条件は [03-data-model.md §7](03-data-model.md) に従う。embedding profile が全 scope で一致しない場合、横断部分は text (BM25 rank) のみで統合し、`fallback_reason` に記録する
+5. vector / hybrid の横断条件は [03-data-model.md §7](03-data-model.md) に従う。embedding profile が全 scope で一致しない場合、横断部分は text (BM25 rank) のみで統合し、`fallback_reason` に記録する (**`--vector` 明示時は fallback しない** — profile 不一致の scope を KCS-E-SEARCH-VEC-INCOMPAT-001 の excluded_scopes として除外し、全 scope 除外なら error — §1.2 の「失敗時は error」と同じ)
 
 既知の限界: rank ベース統合は、関連文書の乏しい scope の 1 位と強い scope の 1 位を同格に扱う。MVP ではこれを容認する (結果に scope_path が必ず含まれるため判別可能)。scope 間の再ランクは v2 以降の検討事項。
 
@@ -663,11 +665,14 @@ append は再 publication の snapshot finalize (§8.1 — chunks.jsonl → SQLi
 の**完了後**に行う。間で crash した場合は tombstone が active のまま残る (安全側 — 解決は
 tombstoned)。retire append の完了時に index_generation を新規採番する (§1.5 — finalize〜retire 間に
 発行された cursor の replay が、退役後の可視集合で別 stream を再計算することを拒否で防ぐ)。
-回転は retire append と同一 locked mutation 内で直後に行い、回転の SQLite Tx は
-index_metadata の **`last_lifecycle_rotation_at`** ([04-pipeline.md §4.1](04-pipeline.md)) も同時に
-更新する — append と回転の間で crash した場合は、書き込み系コマンド冒頭の回復が「いずれかの
-lifecycle record の末尾 event `at` が `last_lifecycle_rotation_at` より新しい」ことを検出して回転を
-補完する (tombstones/ の走査は purge 済み raw 数に有界)。
+回転は retire append と同一 locked mutation 内で直後に行う。lifecycle 更新の検出は**時刻ではなく
+単調カウンタ**で行う: `.kcs/tombstones/lifecycle-epoch` (`.kcs/purge/epoch` と同じ書込規律の単調
+カウンタ) を **event append (retire・再 purge・legacy 変換) ごとに同一 lock 下で +1** し、回転の
+SQLite Tx は index_metadata の **`last_lifecycle_epoch`** ([04-pipeline.md §4.1](04-pipeline.md)) へ
+反映済み counter 値を記録する。append と回転の間で crash した場合は、書き込み系コマンド冒頭の
+回復が **counter > last_lifecycle_epoch** を検出して回転を補完する (UTC ms の時刻比較は同一ミリ秒・
+時計逆行で補完を見逃すため使わない。`kcs repair --rebuild-db` は完了 Tx で現 counter 値に初期化する
+— DEFAULT 0 のままの全件誤検出を防ぐ)。
 次回の locked mutation または fsck が「active tombstone × 同一 raw の ref 到達可能な
 再 publication commit **であって、末尾 purged event の `in_commit` を ancestor に持つもの
 (= 当該 purge より後の publication)**」を検出したら retired event を補完する (erase receipt の
@@ -711,7 +716,10 @@ phase 順序    = prepared (closure 確定・記帳)
               retryable (exit 3) で拒否する** (2 点目で検出した場合は取得済み結果を破棄する。
               epoch 比較が無いと、高速な purge が 2 点の間に journal 作成〜除去まで完走した場合に
               両検査をすり抜ける — ABA。**epoch ファイルの欠落・不正値も同様に拒否する (fail-closed)** —
-              次の locked mutation が journal の target_epoch から単調性を回復して再作成する) —
+              次の locked mutation が journal の target_epoch、journal も無ければ**全 lifecycle
+              event に記録された `epoch` の最大値 + 1** (event が皆無なら 1 — 旧観測値と衝突しない)
+              から単調性を回復して再作成する。purge 完了後に epoch ファイルだけ喪失しても恒久
+              exit 3 にしない) —
               marker 耐久化後・削除完了前の窓で削除対象の本文を返さないため。読み取り系は lock を
               取らないため、冒頭 1 回の検査では検査後に journal が現れる TOCTOU 窓が残る — 返却直前の
               再検査がこれを閉じる。`kcs status` だけは拒否せず、active journal の存在を状態として
@@ -743,7 +751,7 @@ canonical / legacy の両 variant が存在する場合に両方を検証し、�
   "raw_hash": "sha256:abc...",
   "events": [
     { "kind": "purged",  "at": "2026-04-25T12:00:00Z", "reason": "legal", "actor": "user",
-      "in_commit": "sha256:9f2c..." },
+      "in_commit": "sha256:9f2c...", "epoch": 12 },
     { "kind": "retired", "at": "2026-05-01T09:00:00Z", "actor": "user",
       "in_commit": "sha256:1a2b...", "resurrection_commit": "sha256:1a2b..." }
   ]
@@ -759,7 +767,7 @@ fsck が区別できるよう、同じ digest-only fan-out に次の exact bound
   "raw_hash": "sha256:abc...",
   "events": [
     { "kind": "erased",  "at": "2026-04-25T12:00:00Z", "in_commit": "sha256:9f2c...",
-      "actor": "user" },
+      "actor": "user", "epoch": 12 },
     { "kind": "retired", "at": "2026-05-01T09:00:00Z", "actor": "user",
       "in_commit": "sha256:1a2b...", "resurrection_commit": "sha256:1a2b..." }
   ]
@@ -767,7 +775,9 @@ fsck が区別できるよう、同じ digest-only fan-out に次の exact bound
 ```
 
 receipt は path / reason / query / prompt / content を持たず (actor は監査要件のため各 event に持つ —
-[02-philosophy.md §2.4](02-philosophy.md))、raw_hash は immutable tree に既に残る。
+[02-philosophy.md §2.4](02-philosophy.md))、raw_hash は immutable tree に既に残る。**purged / erased
+event には当該 purge の `target_epoch` を `epoch` として記録する** (以後の新規 event で必須 —
+legacy 行の欠落は可。epoch ファイル喪失時の回復源 — 上記 journal 二重検査の回復規則)。
 validity は leaf/raw_hash 一致だけでなく、erased event の `in_commit` が bounded verified CAS 上で
 ref-reachable な `commit_type=purged` commit を指し、`at` が canonical UTC かつ commit `created_at` と
 一致し、fsck invocation の fixed now より未来でないことを要求する。schema_version ごとの定義に

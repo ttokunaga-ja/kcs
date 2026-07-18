@@ -188,7 +188,7 @@ pack/delta 圧縮
 高度な分類器の自動移動 (auto_organize は提案表示のみ)
 ```
 
-これらが「設計に存在しない」のではなく、**MVP の旗印にしない**ということ。設計検討は research ドキュメント上で続けてよいが、Phase 4-5 のラベルを付ける。
+これらが「設計に存在しない」のではなく、**MVP の旗印にしない**ということ。設計検討の経緯は git history で辿り、将来仕様は正本 spec 内で Phase 4-5 のラベルを付けて扱う (旧 research ドキュメントは 2026-07-18 に撤去 — README §5)。
 
 ---
 
@@ -259,7 +259,7 @@ KCS は既存ツールを置き換えない。**横断する**外部アーカイ
 | 既存ワークフロー | KCS の関係 |
 | --- | --- |
 | Obsidian vault | vault を含む親フォルダに `.kcs`。vault 内検索は Smart Connections に任せ、KCS は vault + Documents + Downloads + コードを横断。 |
-| Git リポジトリ | リポジトリ自体には `.kcs` を置かない (Git に管理される)。リポジトリ群を含む親フォルダに `.kcs` で横断検索。この方針は機械化されている — `kcs index` は VCS repo root 配下に既定で子 `.kcs` を作らない ([03-data-model.md §3](03-data-model.md))。 |
+| Git リポジトリ | リポジトリ自体には `.kcs` を置かない (Git に管理される)。`kcs index` は VCS repo root 配下に既定で子 `.kcs` を作らないため、**リポジトリ内のコードは既定では検索対象外** — コードも対象にするには `[scope] index_vcs_repos = true` の明示 opt-in ([03-data-model.md §3](03-data-model.md))。親フォルダの `.kcs` が横断するのは repo 外のファイルと他 scope である (各 `.kcs` は直下のみ管理 — 03 §3)。 |
 | 既存ファイル整理 | Documents / Downloads など散らかった領域を整理せず、横断検索と Evidence で「整理しなくても見つかる」体験を提供。 |
 | Khoj / AnythingLLM | KCS の構造化 API を呼ぶ関係を狙う。チャット UX は彼らに任せる。 |
 

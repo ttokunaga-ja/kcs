@@ -288,6 +288,11 @@ CREATE TABLE scopes (
   online タスク起動 (相 1) も `KCS-E-REGISTRY-DUP-001` で fail-closed とする** — device-global
   `batch_requests` の行 (PK に scope_id) を複数 clone が共有し、回復・終端・課金の帰属が混線するため
   ([04-pipeline.md §5.8](04-pipeline.md))。dedupe 後に再開する。
+  **複合状態の優先順位 (全コマンド共通の preflight 順序)**: (1) purge journal / epoch 検査
+  ([05-runtime.md §3.5](05-runtime.md)) → (2) registry live 重複 (KCS-E-REGISTRY-DUP-001) →
+  (3) index 可用性 (KCS-E-INDEX-REBUILDING-001) → (4) command 固有の検査。同時成立時は先順の
+  error を返し、multi-scope の `excluded_scopes.reason` も同順で決定する (実装順に依存させない —
+  purge 再開・dedupe・rebuild のどれを先に行うべきかを automation が一意に判断できる)。
   registry は cache なので削除は常に安全 (live scope は自分を再登録する)
 - device data dir (`~/.local/share/kcs/`) は owner-only (0700) に制限する (best-effort。非 unix は
   no-op。registry / cost-ledger / logs は利用パターンとスコープ地図を含むため)
@@ -483,6 +488,9 @@ kcs repair --verify-objects
      (復元した raw object は GC 対象外、05-runtime.md §2.6)
 2. 復元手段なし
    → missing として errors.jsonl に KCS-E-STORE-CORRUPT-001 を記録し、
+     (normalized unit の done object 欠落も同様 — same-gen 再生成は行わない (unit object は
+      immutable であり、非決定的な再生成は過去 commit の内容差し替えになる)。復元は backup
+      restore、または明示の新 gen (kcs reindex --force) で行う)
      影響を受ける commit hash の bounded 一覧と
      `external_pointers_may_be_affected=true` を表示する。Evidence Pointer は self-contained で
      registry がないため、存在しない pointer 一覧を推測・捏造しない
@@ -524,6 +532,11 @@ ancestor に持つ (= 当該 purge より後の publication である)** こと�
 からも参照されない orphan prepared / image (公開前 crash の残骸 — [05-runtime.md §3.5](05-runtime.md))
 を列挙し、locked repair として削除する (確認プロンプト必須。live 参照判定は purge closure と同一規則)。
 GC 本体は Phase 4+ のまま、**法務 purge の完結手段のみ前倒しする** (purge 完了表示の注記から誘導)。
+**拒否条件 (fail-closed)**: 当該 scope に state 0/1 の外部実行 (batch_requests — request_kind 不問)・
+pending / running の task・staging 残骸 ([07-adapter-spec.md §8.3](07-adapter-spec.md))・未 finalize の
+manifest 進行状態・active な purge journal のいずれかが存在する間は、prune を実行せず exit 3
+(retryable) で拒否する — **manifest 未確定の正規進行中 prepared / image を orphan と誤認して削除
+しない**ため (相 3 collect の入力を消すと再課金・欠落参照になる。終端・完了後に再実行する)。
 
 MVP では手動実行のみとする。自動定期検証 (スケジューラ連携) は Phase 4+ の論点。
 
@@ -567,7 +580,8 @@ sqlite.db / scope-registry.sqlite は正本から再構築可能な cache であ
 **`cost-ledger.sqlite` はこのデフォルトの対象外** — 再構築不可の運用台帳 (課金記録 + in-flight Batch
 intent、[04-pipeline.md §5.4](04-pipeline.md)) であり、schema 変更は常に下記の in-place migration
 要件に従う (既存行の保全が必須。旧 JSONL 3 ファイル構成からの移行も同要件で一度だけ行う —
-追加列は NULL / DEFAULT で backfill)。
+追加列は NULL / DEFAULT で backfill)。**形状検出は sqlite_master の CREATE 文 (列・CHECK 制約を
+含む) の canonical 比較で行う** — 列存在検査だけでは CHECK 制約の追加・変更を識別できない。
 
 例外として in-place migration を書いてよいのは次の場合のみ:
 
