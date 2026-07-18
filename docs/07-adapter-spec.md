@@ -472,7 +472,7 @@ Markdownize / Embedding runtime にはこの dispatcher と承認経路はなく
 ログに残してよいもの:
 
 ```
-task_id, adapter_id, tool_profile_hash
+task_id, adapter_id, tool_profile_hash, execution_mode
 input_raw_hash, output_hash
 status, error_code, error_category, retry_after_ms
 network_consent (approvals | cli_online — 送信を伴った実行のみ)

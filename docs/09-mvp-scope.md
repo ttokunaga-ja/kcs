@@ -267,7 +267,7 @@ Done 条件 = synthetic で各シナリオ Recall@10 >= 0.8
 実装:
   - normalization_run のキャッシュヒット判定で短絡
   - 新 generation (gen+1) の instance 作成は kcs reindex --force、または prepared_hash 変化起因の自動 gen+1 ([03-data-model.md §2.1](03-data-model.md) の例外) のみ許可 (上書き・削除はしない)
-  - 新 generation 作成時は manifest.parent_instance = {raw_hash, tool_profile_hash, gen} でチェーンを残す (parent_run_id は task cache の揮発情報 — 永続 provenance ではない。[03-data-model.md §8](03-data-model.md))
+  - 新 generation 作成時は manifest の parent_gen (同一 raw 内) / parent_instance = {raw_hash, tool_profile_hash, gen} (raw 跨ぎ incremental のみ必須 — full では null) でチェーンを残す (parent_run_id は task cache の揮発情報 — 永続 provenance ではない。[03-data-model.md §8](03-data-model.md))
   - 過去 commit / 既存 Evidence Pointer は tree entry の gen により旧 instance を参照し続ける
 正本: 03-data-model.md §6, 04-pipeline.md §5.5
 Status: decided (Step 1 着手前確定)

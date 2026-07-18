@@ -99,7 +99,7 @@ similarity = embedding の vector cosine (これのみ。2026-07-03 確定 — e
 適用範囲と決定性:
 
 - MMR は候補プールの RRF 上位 `mmr_depth` 件 (デフォルト 100、`candidate_depth` 以下) に対して **1 回だけ** 適用し、並べ替え済みの**確定順序**を得る。`mmr_depth` 以降の候補は RRF 順のまま末尾に接続する
-- `relevance(c)` = RRF スコアを **MMR 候補プール内で min-max 正規化した値** ([0,1]。全候補が同スコアなら一律 1.0。2026-07-03 確定、step3a §C の決定性論点解消 — 生の RRF スコア (最大 ~1/k) をそのまま使うと mmr_lambda の意味が損なわれるため)。`similarity` は embedding の cosine。embedding が無い場合 (text-only 検索) は MMR を適用せず RRF 順のままとする (ただし `max_per_raw_hash` の dedup は embedding 非依存であり text-only でも適用する)。**hybrid の候補プールに embedding 未付与の chunk が 1 件でも混在する場合 (部分 enrichment) も MMR は適用しない** — pairwise similarity が全対で計算できないため。dedup のみ適用し RRF 順で返す。MMR score の同点は RRF 順、さらに同点は immutable `(scope_id,chunk_hash)` の UTF-8 byte order
+- `relevance(c)` = RRF スコアを **MMR 候補プール内で min-max 正規化した値** ([0,1]。全候補が同スコアなら一律 1.0。2026-07-03 確定、step3a §C の決定性論点解消 — 生の RRF スコア (最大 ~1/k) をそのまま使うと mmr_lambda の意味が損なわれるため)。`similarity` は embedding の cosine。embedding が無い場合 (text-only 検索) は MMR を適用せず RRF 順のままとする (ただし `max_per_raw_hash` の dedup は embedding 非依存であり text-only でも適用する)。**hybrid の候補プールに embedding 未付与、または profile 非互換で cosine を計算できない chunk が 1 件でも混在する場合 (部分 enrichment / §1.8 の profile 不一致 text fallback を含む) も MMR は適用しない** — pairwise similarity が全対で計算できないため。dedup のみ適用し RRF 順で返す。MMR score の同点は RRF 順、さらに同点は immutable `(scope_id,chunk_hash)` の UTF-8 byte order
 - `max_per_raw_hash` は alias 展開**前**の unique semantic chunk stream に適用する (ページを跨いで
   raw_hash あたり最大 N semantic chunks)。retained chunk の historical path aliases は provenance 行で
   あり、この上限へ再カウントせず全件を返す
@@ -131,7 +131,7 @@ index / batch finalize で `chunk_fts` の内容が変化した場合・tombston
 (単調カウンタではない — sqlite.db の `index_metadata` 表 ([04-pipeline.md §4.1](04-pipeline.md)) に保持するため
 DB 喪失で数が戻っても、ULID なら旧 cursor が偶然一致して誤受理されることがない。FTS 内容変化でも回転する
 理由: FTS5 の bm25() は文書頻度・平均長という**大域統計**を使うため、cursor が chunk 集合を rowid 上限で
-固定しても、後発行の追加で既存行の順位自体が変わり得る — 誤った続きを返すより旧 cursor を拒否する)。**replay 時に現在値と不一致なら
+固定しても、後発行の追加で既存行の順位自体が変わり得る — 誤った続きを返すより旧 cursor を拒否する)。**回転はそれを引き起こした SQLite 書込 (FTS 内容を変える INSERT / UPDATE / DELETE、purge の行削除等) と同一の SQLite Tx で行う** — 別 Tx にすると、間の crash で旧 cursor が変化後の stream に受理される (file 側の tombstone lifecycle 更新に伴う回転だけは同一 Tx にできないため、§3.5 の補完規則で crash 窓を閉じる)。**replay 時に現在値と不一致なら
 `KCS-E-SEARCH-CURSOR-001` で拒否する** (再検索が正) — rebuild は rowid を再採番し、purge は
 append-only 前提を破って行を削除し、後発 embedding は hybrid の候補集合・順位を変えるため、
 いずれも旧 cursor の `max_rowid` / `consumed` の意味を失わせる。
@@ -160,7 +160,8 @@ page 1 の `since_cutoff` (UTC ISO8601 + `Z`) も保持する:
 --at <commit>           指定 commit 時点で indexed だった chunks のみ対象
 --at <commit> --vector  指定時点の embedding profile が現在と互換ならOK、
                         非互換なら KCS-E-SEARCH-VEC-INCOMPAT-001
-                        (fail_behavior=fallback で text に落ちる)
+                        (--vector 明示時は fail_behavior に依らず error — §1.2 と同じ。
+                         text への fallback は auto / --hybrid のみ)
 --all-history           全 commit を横断 (削除済み・移動済み含む)
 --include-deleted       現在 working tree に存在しないファイルも対象
 --since <duration>      `--since 7d` のように期間指定
@@ -620,12 +621,14 @@ purge は **object の物理削除 + default tombstone または内部 erase rec
 - 派生 artifact: prepared / **image** / normalized / chunk / embedding
   (normalized は同一 (raw_hash, tool_profile_hash) 配下の全 gen instance を対象とし、
    **manifest object (objects/manifests/ — 当該 (raw_hash, tool_profile_hash) の全 gen・全確定版) を含む**。
-   **共有されうる派生 (image / embedding — text_hash 単位で他 raw の chunk と共有) は、purge 対象外の
-   live 参照が 0 の場合のみ物理削除する** — 無条件削除は非対象文書の検索を破壊する)
+   **共有されうる派生 (prepared / image — content hash 単位で他 raw と共有され得る ([03-data-model.md §1](03-data-model.md)) / embedding — text_hash 単位で他 raw の chunk と共有) は、purge 対象外の
+   live 参照が 0 の場合のみ物理削除する** — 無条件削除は非対象文書の検索・再構築を破壊する)
 - `~/.cache/kcs/open/<raw_hash digest64>/` の一時展開 dir (存在すれば冪等削除 — [06-cli-spec.md §1.1](06-cli-spec.md))
   (closure の列挙正本 = 当該 (raw_hash, tool_profile_hash) の全 gen manifest。**どの manifest からも
    参照されない orphan prepared / image** (公開前 crash の残骸) は解決経路に乗らず、GC の
-   「未参照中間 object」として回収される — purge 完了表示にその旨を注記する)
+   「未参照中間 object」として回収される。**MVP では GC が無いため、削除手段は
+   `kcs repair --verify-objects --prune-orphans`** ([10-operations.md §7.5.1](10-operations.md)) —
+   purge 完了表示にその旨 (残存可能性と掃除手段) を注記する)
 - SQLite の chunks / chunk_config_generations / chunk_publications / chunk_vec / embeddings 行と FTS エントリ
 - chunks.jsonl の**対象 chunk_id を参照する creation 行・publication event 行の全部** (append-only の例外 — purge は法務要件の明示例外として行を落とす)
 ```
@@ -660,6 +663,11 @@ append は再 publication の snapshot finalize (§8.1 — chunks.jsonl → SQLi
 の**完了後**に行う。間で crash した場合は tombstone が active のまま残る (安全側 — 解決は
 tombstoned)。retire append の完了時に index_generation を新規採番する (§1.5 — finalize〜retire 間に
 発行された cursor の replay が、退役後の可視集合で別 stream を再計算することを拒否で防ぐ)。
+回転は retire append と同一 locked mutation 内で直後に行い、回転の SQLite Tx は
+index_metadata の **`last_lifecycle_rotation_at`** ([04-pipeline.md §4.1](04-pipeline.md)) も同時に
+更新する — append と回転の間で crash した場合は、書き込み系コマンド冒頭の回復が「いずれかの
+lifecycle record の末尾 event `at` が `last_lifecycle_rotation_at` より新しい」ことを検出して回転を
+補完する (tombstones/ の走査は purge 済み raw 数に有界)。
 次回の locked mutation または fsck が「active tombstone × 同一 raw の ref 到達可能な
 再 publication commit **であって、末尾 purged event の `in_commit` を ancestor に持つもの
 (= 当該 purge より後の publication)**」を検出したら retired event を補完する (erase receipt の
@@ -767,7 +775,7 @@ ref-reachable な `commit_type=purged` commit を指し、`at` が canonical UTC
 次の mutation で v2 へ locked 変換する — tombstone の legacy 規則と同型)。
 open / view / search / restore / evidence verify / index の resurrection barrier には使わず、fsck だけが
 intentional absence の説明に使う。したがって Evidence verify は従来どおり `not_found` で、同一 bytes の
-後日 ingest (明示操作に限らず、working tree 残存原本の自動 scan を含む — §3.5 の残存警告) は許可する。**erase receipt も tombstone と同じ lifecycle 形式 (events[]) を持ち、raw object の再 publication 成功時は除去せず `retired` event を append する** — 除去すると erase 済み raw の旧 commit が参照する manifest 欠落を説明するものが消え、fsck の corruption 誤判定と手順 6b の不達を生むため (公開 pointer API に使わない・re-ingest barrier にしない性質は不変)。crash で不整合が残った場合は verified raw object を優先し、次の locked mutation で record を整合させる。
+後日 ingest (明示操作に限らず、working tree 残存原本の自動 scan を含む — §3.5 の残存警告) は許可する。**erase receipt も tombstone と同じ lifecycle 形式 (events[]) を持ち、raw object の再 publication 成功時は除去せず `retired` event を append する** — 除去すると erase 済み raw の旧 commit が参照する manifest 欠落を説明するものが消え、fsck の corruption 誤判定と手順 6b の不達を生むため (公開 pointer API に使わない・re-ingest barrier にしない性質は不変)。crash で不整合が残った場合は verified raw object を優先し、次の locked mutation で record を整合させる — **整合の条件は [10-operations.md §7.5.1](10-operations.md) の receipt 整合規則に従う**: 末尾 erased event の `in_commit` を ancestor に持つ ref 到達可能な再 publication commit が存在するときのみ `retired` を append し、commit がまだ無ければ未 finalize の進行状態として保留する (tombstone の補完と同じ因果条件)。
 
 **制約 (明記)**: tree entry の `path` 文字列と `raw_hash` は履歴に残る。ファイル名そのものが秘匿対象であるケース (履歴書き換えが必要) は MVP 非対応。commit / tree の書き換えは content hash の連鎖再計算と無関係ファイルの Evidence Pointer 無効化を伴うため、対応する場合も v2+ の再設計事項とする。
 

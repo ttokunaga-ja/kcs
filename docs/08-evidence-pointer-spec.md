@@ -286,10 +286,14 @@ kcs evidence verify <pointer> [--strict]   # <pointer> の受理形式は §2.3
 ```
 
 `unverifiable` は `--strict` 時の「時点帰属を検証できない解決」であり、`details.reason` で区別する:
-`commit_shallow` (§3.1 手順 8 — 状況により解消し得る) / `tree_v1` (手順 6a — v2/v3 への再 snapshot で解消) /
+`commit_shallow` (§3.1 手順 8 — 状況により解消し得る) / `tree_v1` (手順 6a — **恒久**: 既発行 pointer の
+commit は不変であり再 snapshot では解消しない。v2/v3 snapshot 後に新規発行・明示 retarget した pointer
+では生じない) /
 `manifest_missing` (手順 6b — **恒久**)。exit はいずれも 3 (reason で自動化側が再試行の要否を判断する)。
 live clone 重複は status `registry_duplicate` (候補一覧つき、exit 3 — §3.1 手順 1)。--batch は各行の
-status にこれらをそのまま用いる。
+status にこれらをそのまま用いる。**index 再構築中・sqlite.db 不在は status ではなく command-level の
+retryable error `KCS-E-INDEX-REBUILDING-001` (exit 3)** — 検査は完了していないため --strict なしでも
+0 を返さない ([06-cli-spec.md §7](06-cli-spec.md)、[05-runtime.md §2.6](05-runtime.md))。
 非 strict では従来どおり alive + `commit_shallow: true` で返す。
 
 `--strict`: tombstoned / not_found / scope_unreachable を **error** として扱う (CI / 自動化用)。

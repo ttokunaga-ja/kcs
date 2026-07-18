@@ -24,6 +24,7 @@ kcs batch resume [--override-budget] [--online|--offline]  # 中断タスクの�
 kcs batch retry [--online|--offline] [--reset-violations <selector>]  # failed タスクの再試行 (markdownize + embedding。backoff/retry 予算を尊重)。
                                         # --reset-violations = 検証済み Adapter 更新後に contract_violation_count を 0 へ戻す
                                         # (selector は abandon と同形: intent_token または 4 組タスクキー — 曖昧時は拒否。
+                                        # terminal な sync 行は token NULL 化済みのため 4 組キーで指定 (04 §5.4)。
                                         # 変えるのは count のみ。確認プロンプト必須 — 04 §5.8。監査は cost-ledger の outcome 列に残る)
 kcs batch abandon <intent_token|scope/adapter/input_hash/tool_profile_hash>
                                         # 照合が恒久不能な in-flight Batch job の打ち切り (estimated 記帳 + terminal 化。
@@ -31,8 +32,11 @@ kcs batch abandon <intent_token|scope/adapter/input_hash/tool_profile_hash>
                                         # profile 行と曖昧 — 曖昧時は拒否して token を要求)。tasks.jsonl の task_id は
                                         # 喪失許容のため使わない。kcs status が stalled 行の token を表示。
                                         # 確認プロンプト必須。残骸掃除完了まで intent_token は保持 — 04-pipeline.md §5.8)
-kcs repair [--rebuild-db|--verify-objects] [--online|--offline]  # SQLite 再構築 / CAS 整合性検証 (10-operations.md §7.5)。
-                                        # --rebuild-db は rebuild 後に enrichment を駆動し得るため online/offline 上書きの対象 (07 §3・04 §5.4)
+kcs repair (--rebuild-db [--online|--offline] | --verify-objects [--prune-orphans])
+                                        # SQLite 再構築 / CAS 整合性検証 (10-operations.md §7.5)。操作は exactly-one (省略は usage error)。
+                                        # --rebuild-db は rebuild 後に enrichment を駆動し得るため online/offline 上書きの対象 (07 §3・04 §5.4)。
+                                        # --prune-orphans = どの manifest からも参照されない orphan prepared/image の削除
+                                        # (確認プロンプト必須 — 10 §7.5.1。法務 purge の完結手段)
 kcs commit -m "<message>"               # = kcs snapshot create -m
 kcs snapshot [create] [-m "<message>"]  # create 省略可。-m 省略時は自動 message ("snapshot at <UTC timestamp>")
 kcs snapshot create -m "<message>"      # 正規形
@@ -42,7 +46,9 @@ kcs search "<query>" [options]          # 詳細 §3
 kcs open <pointer|chunk_hash|raw_hash>  # OS 規定アプリで原本を開く。解決規則は §1.1
 kcs view <pointer|path> [--at <commit>]
 kcs inspect <hash>                      # object を JSON で表示
-kcs restore <evidence|path|commit> --to <dir> # 詳細 §5
+kcs restore <evidence|path|commit> --to <dir> [--force] # 詳細 §5
+kcs export <scope> --to <bundle.kcsz>   # Phase 4+ (§10)
+kcs import <bundle.kcsz> --to <dir> [--as-new-scope]  # Phase 4+ (§10)
 kcs tag <name> [<commit>]               # 論理名を refs/tags-v1/names.jsonl (truth) に append してから
                                         # canonical ref を作る (書込順序固定 — 03-data-model.md §2)
 kcs tag --delete <name>                 # canonical ref を .kcs/.lock 下で atomic に除去。names.jsonl の
@@ -54,7 +60,8 @@ kcs reindex [--force] [--at <commit>] [--yes] [--online|--offline]  # --at = 過
                                         # --force = 新 gen で再 normalize / 再 embedding (Step 3)。--force は first-instance-wins の
                                         # 明示経路で gen+1 の新 instance を作る (07-adapter-spec.md §9。もう 1 つの合法経路 =
                                         # prepared_hash 変化起因の自動 gen+1 — 03-data-model.md §2.1)。
-                                        # 上書きチェーンは manifest.parent_instance (三つ組) で永続記録 — parent_run_id は
+                                        # 上書きチェーンは manifest の parent_gen (同一 raw 内) / parent_instance
+                                        # (raw 跨ぎ incremental の三つ組 — full では null) で永続記録 — parent_run_id は
                                         # task cache の揮発情報 (03-data-model.md §8、09-mvp-scope.md §5.1)。--force は確認プロンプト必須 (--yes で省略可)
 kcs move --propose <src> <dst>          # 原本移動の提案。Agent はこちらのみ (Phase 4+、MVP 対象外)
 kcs move --accept <id> | --reject <id>  # 提案の承認/却下。KCS が原本を mv できる唯一の経路 (03-data-model.md §10)。書き込み境界の予約定義
@@ -264,8 +271,13 @@ kcs evidence verify            検査完了で 0 (結果は status フィール�
 kcs evidence verify --strict   全 alive なら 0。tombstoned / not_found が 1 件でもあれば 4。
                                scope_unreachable のみの失敗は 3 (retryable — 08 §4.3)。
                                unverifiable のみも 3 (reason = commit_shallow / tree_v1 /
-                               manifest_missing — 08 §4.3。shallow/tree_v1 は状況変化で解消し得るが
-                               manifest_missing は恒久 — reason で判別)。registry_duplicate も 3
+                               manifest_missing — 08 §4.3。shallow は unshallow で解消し得るが
+                               tree_v1 / manifest_missing は恒久 — reason で判別)。registry_duplicate も 3
+index 再構築中 / sqlite.db 不在      全経路 (verify / open / view / restore / search) で status に混ぜず
+                               command-level の retryable error KCS-E-INDEX-REBUILDING-001・exit 3
+                               (verify は検査未完了のため --strict なしでも 0 を返さない。multi-scope
+                               search は当該 scope を excluded_scopes として継続し、全 scope 該当なら
+                               exit 3 — SCOPE-ALL-FAILED (4) より優先。05 §2.6・08 §3.1)
 kcs evidence verify --batch <pointers.jsonl>   一括 verify (Step 4+ — 08 §4.3)
                                (--batch 混在時も 4。内訳は --json の各行 status で判定)
 kcs open / view / restore      dead pointer (tombstoned / not_found) は 4。scope_unreachable は 3 (retryable — 08 §4.3)
@@ -359,7 +371,16 @@ kcs import <bundle.kcsz> --to <dir> [--as-new-scope]  # bundle の scope_id が 
                                         # 解決する — hash が identity (08 §2、解決手順は §1.1 1a)。bundle 内 object で自足)。
                                         # fork は旧 scope の approvals[]・初回スキャン承認 (scan_approval)・
                                         # adapter.policy.allow_network を引き継がない — 新 scope_id で preview +
-                                        # 取り込み承認と network opt-in を再実施する (安全側。07 §3・10 §1)
+                                        # 取り込み承認と network opt-in を再実施する (安全側。07 §3・10 §1)。
+                                        # import の atomic postcondition: 展開時に scope.json を新 scope_id で
+                                        # 再生成し approvals[]/scan_approval を除去、config の allow_network を
+                                        # false へ reset、旧 root_path を除去 (bundle 内の旧値を残したまま外側の
+                                        # ID だけ変えない)。送信 gate と fsck/schema は approval 行の scope_id が
+                                        # scope.json の scope_id と一致することを検査する (07 §3・10 §12.3)。
+                                        # bundle 内の legacy 表現 (旧 Unix raw-name tag ref 等、対象 OS で物理
+                                        # leaf を作れないもの) は import 展開時に検証付きで canonical 表現
+                                        # (hashed ref + names 行) へ正規化する (in-place rewrite 禁止の例外は
+                                        # import 展開のみ — 03 §2)
 ```
 
 `.kcsz` は `.kcs/` **全体**の bundle 形式 (zip 等 — objects/・refs/ (tags-v1/names.jsonl を含む)・chunks.jsonl 等の truth 一式)。`.kcs` 単位で可搬。別 `.kcs` の object 参照を前提にしないため、同一 raw_hash が別 `.kcs` に存在しても export 単位では重複を許容する。**bundle には scope.json の approvals[]・logs/ の運用記録・登録 path 等の機微 metadata が含まれる** — 共有は同一信頼境界内 (自分の別端末・バックアップ) を想定し、第三者公開用の sanitize (承認・log・path の除去) は Phase 4+ の export mode で扱う。

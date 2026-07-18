@@ -62,7 +62,7 @@ Options:
   [4] このまま続行 (cap 到達時に AI 強化タスクは paused)
 ```
 
-ベースライン index ([07-adapter-spec.md §2.1](07-adapter-spec.md)) は選択肢に依らず先に完了するため、どの選択でも初日の検索は成立する。
+ベースライン index ([07-adapter-spec.md §2.1](07-adapter-spec.md)) は、**明示承認後の実行において** online 強化タスクの成否・budget 状態に依らず先に完了するため、承認初日の検索は成立する。**[2] / [3] の再調整中は raw object 保存を含む一切の取り込みを開始しない** — 上記フローの「明示承認 → 開始」が正 (承認前に archive しない)。
 
 除外候補は提案であり、ユーザーの承認なしに自動除外しない。唯一の例外は secrets 系パターン
 (§1.1 Tier A) で、これは built-in デフォルト除外として最初から「除外済み」状態で preview に
@@ -284,7 +284,10 @@ CREATE TABLE scopes (
   stale 行 (到達不能な旧 path) を放置すると、default 横断検索が毎回 skip して恒常的に partial (exit 3)
   になり、その行経由の Evidence Pointer は `KCS-E-EVIDENCE-SCOPE-UNREACHABLE-001` になる — これが退役の
   理由。live 重複はこれとは別で、上記のとおり fail-closed (search skip + 解決 error) で扱い、
-  黙って二重に返すことはない。
+  黙って二重に返すことはない。**live 重複が解消するまでは、当該 scope_id での書き込み系コマンドと
+  online タスク起動 (相 1) も `KCS-E-REGISTRY-DUP-001` で fail-closed とする** — device-global
+  `batch_requests` の行 (PK に scope_id) を複数 clone が共有し、回復・終端・課金の帰属が混線するため
+  ([04-pipeline.md §5.8](04-pipeline.md))。dedupe 後に再開する。
   registry は cache なので削除は常に安全 (live scope は自分を再登録する)
 - device data dir (`~/.local/share/kcs/`) は owner-only (0700) に制限する (best-effort。非 unix は
   no-op。registry / cost-ledger / logs は利用パターンとスコープ地図を含むため)
@@ -406,7 +409,7 @@ events / errors / metrics) から対象ファイル由来の情報を削除す�
 **snapshot DAG (commit / tree object) は書き換えない** — tree entry のメタデータ (path, raw_hash) は
 履歴に残る (正本 [05-runtime.md §3.5](05-runtime.md)。完全な履歴書き換えは v2+/Phase 4+ —
 [06-cli-spec.md §6](06-cli-spec.md))。
-ログについては、対象の raw_hash / path / query を含む行の削除またはフィールドマスクを行う。
+ログについては、**当該 scope の scope_id を持ち**対象の raw_hash / path / query を含む行の削除またはフィールドマスクを行う (device-global log の**別 scope の同一 raw_hash 行には触れない** — per-.kcs dedup により同一 bytes が独立 scope に併存し得るため。scope 由来の行は scope_id を必須 field とする — §12.6)。
 `redact_logs` デフォルト true (§12.6) の運用では query / path / prompt は元から記録されないため、
 実務上のスクラブ対象は主に raw_hash 参照行に限られ軽量である。
 purge 自体の実行記録 (`commit_type=purged`、tombstone) は監査可能性のため残す ([05-runtime.md §3.2](05-runtime.md))。
@@ -465,9 +468,11 @@ kcs repair --verify-objects
   (不一致 = 破損ではなく「**未 finalize の進行状態**」として incomplete (exit 3) — manifest finalize と
   次回 snapshot の間のクラッシュ窓で正常に生じる。次回 index / batch resume が同期する。corruption と
   するのは manifest object 自体の再 hash 不一致のみ)
-- canonical tag ref (`refs/tags-v1/tag-*`) は対応する `names.jsonl` 行 (論理名の truth —
-  [03-data-model.md §2](03-data-model.md)) の存在を検査し、欠落は corruption として報告する
-  (ref の無い names 行は tag 削除後の残存として正常)
+- canonical tag ref (`refs/tags-v1/tag-*`) と `names.jsonl` (論理名の truth —
+  [03-data-model.md §2](03-data-model.md)) は**全行**を検査する: 各行の schema、`digest64` ↔
+  `logical_name` の対応 (digest 再計算)、torn tail (最終の不完全行のみ切詰め — 途中の malformed 行は
+  corruption)、各 canonical ref ↔ 最終有効行の対応 (03 §2 と同一規則)。対応行の無い canonical ref は
+  corruption (ref の無い names 行は tag 削除後の残存として正常)
 - SQLite index は検証対象外 (破損時は `--rebuild-db` で再構築可能なため)
 
 破損検出時の挙動:
@@ -515,6 +520,11 @@ ancestor に持つ (= 当該 purge より後の publication である)** こと�
 ([05-runtime.md §3.5](05-runtime.md) の読取規則)。**tombstone lifecycle にも同じ event 検証**
 (kind 別必須 field・末尾 event 規則・torn / malformed = corruption) を適用する。
 
+**orphan 掃除 (`--prune-orphans`)**: `kcs repair --verify-objects --prune-orphans` は、どの manifest
+からも参照されない orphan prepared / image (公開前 crash の残骸 — [05-runtime.md §3.5](05-runtime.md))
+を列挙し、locked repair として削除する (確認プロンプト必須。live 参照判定は purge closure と同一規則)。
+GC 本体は Phase 4+ のまま、**法務 purge の完結手段のみ前倒しする** (purge 完了表示の注記から誘導)。
+
 MVP では手動実行のみとする。自動定期検証 (スケジューラ連携) は Phase 4+ の論点。
 
 ## 7.5.2 バックアップ運用
@@ -537,7 +547,8 @@ MVP では手動実行のみとする。自動定期検証 (スケジューラ�
      §5.8 の回復 (reconcile) が完了するまで新規 Batch 投入を行わない ([04-pipeline.md §5.4](04-pipeline.md))
 
 2. kcs export <scope> --to <bundle.kcsz>
-   - .kcsz は公開用と同一の bundle 形式で、バックアップにも使える
+   - .kcsz は export と同一の bundle 形式で、バックアップにも使える (bundle には承認・運用記録・
+     登録 path 等の機微 metadata が含まれる — 共有は同一信頼境界内を想定、[06-cli-spec.md §10](06-cli-spec.md))
    - export の実装は Phase 4+ ([09-mvp-scope.md](09-mvp-scope.md))。MVP のバックアップは
      lock 未取得確認 + ディレクトリコピー (手段 1) のみを提供する
    - 復元は kcs import (同じく Phase 4+)
@@ -793,7 +804,7 @@ dead pointer (tombstoned / not_found) は `4`、**scope_unreachable のみは re
 
 validation 失敗は exit code 2 で停止し、`KCS-E-CONFIG-SCHEMA-NNN` を返す。schema は semver で版管理し、breaking change は migration を要求 (§12.5)。
 
-`scope.schema.json` は少なくとも次の key を定義する: `scope_id` (required)・子 `.kcs` リンク ([03-data-model.md §2](03-data-model.md))・`scan_approval` (optional — §1 の取り込み承認記録。required field は §1 の記録一覧と一致)・`approvals[]` (optional — adapter 単位の network opt-in。要素の required field = scope_id / tool_id / execution_mode / tool_profile_hash / approved_at / approval_method / status (`active` | `revoked`)、status=revoked の行は revoked_at も必須 — [07-adapter-spec.md §3](07-adapter-spec.md))。**未知 key は schema error** (fail-closed)。両 key を欠く旧 scope.json は valid であり、欠落 = 当該承認なしとして扱う (migration 不要の後方互換)。
+`scope.schema.json` は少なくとも次の key を定義する: `scope_id` (required)・子 `.kcs` リンク ([03-data-model.md §2](03-data-model.md))・`scan_approval` (optional — §1 の取り込み承認記録。required field は §1 の記録一覧と一致)・`approvals[]` (optional — adapter 単位の network opt-in。要素の required field = scope_id / tool_id / execution_mode / tool_profile_hash / approved_at / approval_method / status (`active` | `revoked`)、status=revoked の行は revoked_at も必須 — [07-adapter-spec.md §3](07-adapter-spec.md))。**未知 key は schema error** (fail-closed)。両 key を欠く旧 scope.json は valid であり、欠落 = 当該承認なしとして扱う (migration 不要の後方互換)。**要素単位の後方互換**: `status` フィールドを持たない approvals[] 行 (r9 スキーマ以前の承認記録) は schema error にせず **`status='active'` として読む** — 行は明示承認の記録であり、execution_mode / tool_profile_hash の一致検査 (失効判定) は従来どおり効く。次回の locked mutation で `status='active'` を atomic に補完書込みし、補完後は現行 schema で検証する (要素単位の欠落で CLI 全体を exit 2 停止させない)。
 
 `user-config.schema.json` は device cap (`[budget]`、[04-pipeline.md §5.4](04-pipeline.md)) を含む。
 
@@ -870,7 +881,8 @@ code      error_code (KCS-E-) / event_code (KCS-EV-) / metric_code (KCS-M- — [
 component batch | search | commit | gc | ...
 message   人間可読な短文 (非機微テンプレートに限る — query / path / prompt 等の値は context 側に
           置いて redaction を通す。自由文へ機微値を埋め込まない)
-context   任意の JSON object (tool_profile_hash, commit_hash, raw_hash, scope_id 等 — file_id は廃止済み識別子のため使わない)
+context   任意の JSON object (tool_profile_hash, commit_hash, raw_hash, scope_id 等 — file_id は廃止済み識別子のため使わない。
+          **scope 由来の行は scope_id を必須とする** — purge の対象化キー (§7))
 ```
 
 ログのローテーションは日次、保持は 30 日 (config 上書き可)。`redact_logs` の

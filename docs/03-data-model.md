@@ -292,7 +292,7 @@ cache = scope_registry / aggregator 検索の探索対象一覧 / stale 検出 /
 ```
 raw_hash             原文バイト列の同一性 (1 バイト違えば別 object)
 tool_profile_hash    Adapter capability の identity (§5.1)
-tool_lock_hash       tool-lock.json 全体を畳み込んだ識別子 (§5.2)
+tool_lock_hash       tool-lock の canonical 構成 (各 role の tool_id / profile_hash — §5.2 の入力) を畳み込んだ識別子
 semantic_fingerprint 意味的・視覚的・構造的な近さ (page fingerprint, embedding 等)
 ```
 
@@ -353,7 +353,7 @@ null フィールドは hash 入力に含めない (省略と null を識別し�
 
 ## 5.2 tool_lock_hash 計算規約
 
-commit object 等で参照される `tool_lock_hash` は `tool-lock.json` 全体の identity:
+commit object 等で参照される `tool_lock_hash` は tool-lock の canonical 構成の identity (下記入力のみ — 作業コピー `tool-lock.json` 全体ではない。[07-adapter-spec.md §6](07-adapter-spec.md)):
 
 ```
 tool_lock_hash = "sha256:" + base16(sha256(JCS({

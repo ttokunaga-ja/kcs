@@ -102,8 +102,10 @@ normalized 全文 (`report.pdf.md`) は **生成物 (view)** で、unit を決�
 ```text
 unit_key = "<unit_kind>:<selector>"
 page / slide : 1-based の 10 進数、先頭ゼロ無し (page:1, page:12, slide:3)
-sheet        : シート名 (NFC 正規化のみ。空白・大小文字は保持)。同名重複は 2 つ目以降に
-               "#2", "#3" を付す (sheet:Sheet1, sheet:Sheet1#2 — 出現順)
+sheet        : シート名 (NFC 正規化のみ。空白・大小文字は保持)。**元名に含まれる `#` は `##` へ
+               escape** してから、同名重複の 2 つ目以降に "#2", "#3" を付す (可逆・決定的 —
+               sheet:Sheet1, sheet:Sheet1#2 — 出現順。実名 "A#2" は sheet:A##2 となり
+               "A" の 2 枚目 sheet:A#2 と衝突しない)
 doc          : text-native ファイル (Markdown / コード / plain text) は単一 unit "doc:1"。
                heading 単位の分割は chunk (Step 3) の責務であり unit では行わない
 ```
@@ -353,7 +355,12 @@ CREATE TABLE chunk_publications (      -- publication relation (cache — rebuil
 
 CREATE TABLE index_metadata (          -- 単一行。05 §1.5 index_generation の保存先
   id               INTEGER PRIMARY KEY CHECK (id = 1),
-  index_generation TEXT NOT NULL       -- ULID (rebuild / purge / enrichment finalize / FTS 内容変化で更新)
+  index_generation TEXT NOT NULL,      -- ULID (rebuild / purge / enrichment finalize / FTS 内容変化 /
+                                       --  tombstone lifecycle 更新で更新 — 05 §1.5)
+  last_lifecycle_rotation_at INTEGER NOT NULL DEFAULT 0
+                                       -- UTC ミリ秒。lifecycle 起因の回転を最後に反映した時刻。
+                                       --  末尾 event がこれより新しい lifecycle record の存在 =
+                                       --  回転未了 → 書き込み系冒頭の回復で補完 (05 §3.5)
 );
 
 CREATE TABLE chunk_config_generations (
@@ -465,7 +472,7 @@ CREATE VIRTUAL TABLE chunk_vec USING vec0(
 
 `chunk_vec` の次元は採用 profile の **768 (MRL 切り詰め) / cosine に固定** する ([07-adapter-spec.md §5.3](07-adapter-spec.md))。保存 vector と query vector はいずれも L2 正規化済みのため、cosine distance の順位は厳密に一致する。
 
-`embeddings` テーブル (メタデータ + vector BLOB) と `chunk_vec` (vec0 virtual table) は、いずれも `objects/` から再構築可能な加速層であり、真実は `objects/` にある (§4 冒頭)。両テーブル間では **`embeddings` テーブルを正** とし、`chunk_vec` は `embeddings` からの導出物として扱う。不整合を検出した場合および `kcs repair --rebuild-db` では、`objects/` → `embeddings` → `chunk_vec` の順に再構築する。`chunk_vec` の導出は **`chunks.text_hash` と `embeddings.target_id` の結合**で行い、同一 `text_hash` を持つ複数 chunk には同じ embedding を複数の `chunk_vec` 行へ展開する (content ベース再利用 §5.5 の裏面)。**結合は現行 tool-lock の embedding profile に限定する** — `(profile_hash, dimensions, distance, modality)` が現行 lock と一致する embedding 行のみ。複数 profile の embedding が正規に並存し得るため、無条件結合は chunk ごとに複数候補を生み `chunk_vec` の PRIMARY KEY と衝突する (rebuild 停止)。chunk ごとに候補がちょうど 1 件であることを検証する。
+`embeddings` テーブル (メタデータ + vector BLOB) と `chunk_vec` (vec0 virtual table) は、いずれも `objects/` から再構築可能な加速層であり、真実は `objects/` にある (§4 冒頭)。両テーブル間では **`embeddings` テーブルを正** とし、`chunk_vec` は `embeddings` からの導出物として扱う。不整合を検出した場合および `kcs repair --rebuild-db` では、`objects/` → `embeddings` → `chunk_vec` の順に再構築する。`chunk_vec` の導出は **`chunks.text_hash` と `embeddings.target_id` の結合**で行い、同一 `text_hash` を持つ複数 chunk には同じ embedding を複数の `chunk_vec` 行へ展開する (content ベース再利用 §5.5 の裏面)。**結合は現行 tool-lock の embedding profile に限定する** — `(profile_hash, dimensions, distance, modality)` が現行 lock と一致する embedding 行のみ。複数 profile の embedding が正規に並存し得るため、無条件結合は chunk ごとに複数候補を生み `chunk_vec` の PRIMARY KEY と衝突する (rebuild 停止)。chunk ごとに候補が **0 件または 1 件**であることを検証する (0 件 = 未 enrichment — chunk_vec 行を作らず pending として text-only で検索を継続する ([05-runtime.md §1](05-runtime.md)。offline / budget pause 中の rebuild で正常に生じる)。2 件以上のみ corruption として rebuild 停止)。
 
 KCS は Text/Image を分けず **単一マルチモーダル Embedding Adapter** のみを許可する (非 multimodal profile は `KCS-E-EMBED-MODALITY-001` で採用拒否、[03-data-model.md §7](03-data-model.md))。
 
@@ -675,8 +682,11 @@ CREATE TABLE cost_ledger (               -- 確定・推定課金の追記台帳
                                          --  sync 呼出 (Batch 非対応 provider) は provider request id、
                                          --  無ければ当該 attempt の intent_token
     usd               REAL NOT NULL      -- estimated=1 の行は保守的な推定額 (NULL 禁止 — SUM が
-        CHECK (usd >= 0),                --  負値も禁止 (cap の相殺・過少計上を防ぐ)
-                                         --  NULL を無視すると budget 判定が過少 = 安全側の逆になる)
+        CHECK (usd >= 0 AND               --  負値も禁止 (cap の相殺・過少計上を防ぐ)
+               typeof(usd) IN ('integer', 'real')),
+                                         --  NULL を無視すると budget 判定が過少 = 安全側の逆になる。
+                                         --  typeof 検査: REAL affinity は TEXT 混入を通し SUM が 0.0
+                                         --  扱いにする = cap 過少計上のため型も強制する
     estimated         INTEGER NOT NULL DEFAULT 0 CHECK (estimated IN (0, 1)),
     outcome           TEXT NOT NULL      -- DEFAULT を持たない — INSERT での明示を必須にする
         CHECK (outcome IN ('succeeded', 'contract_violation', 'expired', 'abandoned',
@@ -685,7 +695,9 @@ CREATE TABLE cost_ledger (               -- 確定・推定課金の追記台帳
                                          --  DEFAULT 'succeeded' を許すと省略記帳が成功に化け、
                                          --  ON CONFLICT 冪等の下で訂正不能になる)。
                                          --  reset (--reset-violations) 後も違反履歴が台帳に恒久に残る
-    month             TEXT NOT NULL,     -- 'YYYY-MM' (確定月配賦 — cap 集計キー)
+    month             TEXT NOT NULL      -- 'YYYY-MM' (確定月配賦 — cap 集計キー。書式も強制 —
+        CHECK (month GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]'),
+                                         --  不正書式は当月合算から漏れ cap を過少判定する)
     recorded_at       INTEGER NOT NULL,  -- UTC ミリ秒
     UNIQUE (scope_id, adapter_kind, input_hash, tool_profile_hash, submission_seq)
 );
@@ -719,7 +731,9 @@ CREATE TABLE batch_requests (            -- in-flight Batch intent の正本 (§
                                          -- reject 終端 Tx (§5.8 相 3) で increment。相 1 の NULL 戻しの
                                          --  対象外 — 「同一 mode で 1 回のみ」の durable 判定源
     estimated_usd     REAL NOT NULL      -- budget 予約額 (§5.4 判定式)。相 1 作成時に保守見積を必須設定
-        CHECK (estimated_usd >= 0),      --  (NULL/負を許すと SUM が予約を取りこぼし cap を過少判定)
+        CHECK (estimated_usd >= 0 AND    --  (NULL/負を許すと SUM が予約を取りこぼし cap を過少判定。
+               typeof(estimated_usd) IN ('integer', 'real')),
+                                         --   typeof 検査は cost_ledger.usd と同じ理由)
     error             TEXT,              -- 'submit_rejected' | 'expired' | 'abandoned' | ...
                                          --  拒否課金 provider (07 §5.7 条件 6) の submit_rejected は
                                          --  terminal 化と同一 Tx で estimated 記帳 (Adapter 返却の
@@ -849,7 +863,7 @@ metadata から intent_token 規約に一致する job を全走査すること�
    数えない (mode 切替後の違反も加算)。検証済み Adapter 更新後の脱出路として
    `kcs batch retry --reset-violations <selector>` (確認プロンプト必須) が count を 0 に戻す。
    **selector は abandon と同形** (intent_token または 4 組タスクキー — 曖昧な指定は拒否して
-   token を要求)。**reset が変えるのは count のみ** — attempts・submission_seq・cost_ledger は
+   token を要求。**terminal な sync 行は intent_token が NULL 化済みのため 4 組キーで指定する**)。**reset が変えるのは count のみ** — attempts・submission_seq・cost_ledger は
    不変で、reset 後の再投入は旧 attempt の残骸掃除完了後に新 intent_token・新 submission_seq の
    相 1 として開始する (順序規範と同型)。違反の監査履歴は cost-ledger の記帳行に残る
    (**各終端確定行の `outcome` 列** — §5.4 DDL。reset は台帳を書き換えない)。provider が job の **expired** を報告した場合も
