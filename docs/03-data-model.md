@@ -22,7 +22,7 @@ Object 種別:
   commit       tree + parents + metadata
 ```
 
-raw / prepared / image / chunk / embedding / tree / commit は **CAS object** として `objects/<type>/ab/cd/<digest64>` に保存。hash の算出は object 種別ごとに §8.1 で規定する: raw / prepared / image は**バイト列そのものの content hash**、tree / commit は **canonical JSON 保存バイト列の content hash**、chunk / embedding は **identity タプルから導出する identity hash**。normalized_unit は **path-named** で `objects/normalized_units/ab/cd/<raw64>.<tool64>.g<gen>/` 配下に保存する (content hash 不採用、§5。詳細は §2.1)。ファイル全文の normalized Markdown は unit を決定論的に結合した **view (再生成可能な cache)** であり、正本ではない。
+raw / prepared / image / chunk / embedding / manifest / tree / commit は **CAS object** として `objects/<type>/ab/cd/<digest64>` に保存。hash の算出は object 種別ごとに §8.1 で規定する: raw / prepared / image は**バイト列そのものの content hash**、manifest / tree / commit は **canonical JSON 保存バイト列の content hash** (manifest は §2.1 の JCS bytes)、chunk / embedding は **identity タプルから導出する identity hash**。normalized_unit は **path-named** で `objects/normalized_units/ab/cd/<raw64>.<tool64>.g<gen>/` 配下に保存する (content hash 不採用、§5。詳細は §2.1)。ファイル全文の normalized Markdown は unit を決定論的に結合した **view (再生成可能な cache)** であり、正本ではない。
 
 # 2. .kcs 物理レイアウト
 
@@ -241,7 +241,7 @@ cache = scope_registry / aggregator 検索の探索対象一覧 / stale 検出 /
 
 | ストア | 技術 | 区分 | 喪失時 | schema 正本 |
 |---|---|---|---|---|
-| `.kcs/objects/` (raw / prepared / images / normalized_units / chunks / embeddings / trees / commits) | file (CAS) | **truth** | 復旧不能 (検証: [10-operations.md §7.5](10-operations.md)) | §8 / §2.1 |
+| `.kcs/objects/` (raw / prepared / images / normalized_units / manifests / chunks / embeddings / trees / commits) | file (CAS) | **truth** | 復旧不能 (検証: [10-operations.md §7.5](10-operations.md)) | §8 / §2.1 |
 | `.kcs/HEAD` / `refs/` | file (atomic rename) | **truth** | 復旧不能 | §2 |
 | `.kcs/tombstones/` + erase receipt | file | **truth** (purge 証跡) | 復旧不能 | [05-runtime.md §3.5](05-runtime.md) |
 | `.kcs/scope.json` / `config.toml` / `tool-lock.json` | JSON / TOML (schema 検証: [10-operations.md §12.3](10-operations.md)) | **truth** | 復旧不能 | 各 spec |
@@ -561,7 +561,8 @@ embedding_hash = "sha256:" + base16(sha256(JCS({
                      "manifest_hash": "sha256:mani..." }
     }
   ],
-  "chunking_config_hash": "sha256:cfg..."
+  "chunking_config_hash": "sha256:cfg...",
+  "chunk_set_hash": "sha256:cs..."
 }
 // tree schema v2 (2026-07-18 確定 — 実装・store 公開前の schema 確定で MAJOR bump ではない、
 // [10-operations.md §12.5](10-operations.md)):
@@ -574,6 +575,16 @@ embedding_hash = "sha256:" + base16(sha256(JCS({
 //  - v1 tree (両フィールド欠落) は legacy として読取可 (欠落 = 旧 semantics)。新規 commit は v2 で書く
 //  - manifest_hash は objects/manifests/ の immutable manifest object (§2.1) を指す — same-gen retry で
 //    作業コピー manifest.json が更新された後も、過去 commit の manifest bytes はこの object から解決できる
+// tree schema v3 (2026-07-18 確定 — 同じく実装・store 公開前の schema 確定で MAJOR bump ではない):
+//  - tree.chunk_set_hash = この snapshot で公開済みの chunk 集合の digest。canonical bytes =
+//    公開 chunk の chunk_hash 完全表記 ("sha256:<64hex>") を UTF-8 バイト列昇順にソートし LF 連結 +
+//    末尾 LF 1 つ、その sha256。「公開済み」= 本 tree の binding (raw_hash, tool_profile_hash, gen) に
+//    属し、本 tree の chunking_config_hash の association を持つ chunk object の全量 (snapshot 時点)
+//  - これにより chunk のみが後着した finalize でも chunk_set_hash → tree_hash が変わり、no-op 規則の
+//    まま publication commit が生まれる ([05-runtime.md §8.1](05-runtime.md) 契機 3) — manifest 反映済み
+//    snapshot が先行しても後着 chunk の introduction を刻める
+//  - v2 tree (chunk_set_hash 欠落) / v1 tree は legacy として読取可 (欠落 = 旧 semantics)。新規 commit は
+//    v3 で書く。検証は tree 保存バイト列の再 hash に含まれる (集合の意味的再計算は fsck 対象外)
 
 // commit — objects/commits/9f/2c/<commit64> に JCS 形式で保存
 {

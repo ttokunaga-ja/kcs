@@ -129,7 +129,9 @@ bulk 系 (`kcs evidence verify --batch <pointers.jsonl>`) は従来どおり各�
 1.  scope の解決 (2 段):
     a. scope_path が指定され、その .kcs の scope.json の scope_id が pointer と一致 → それを使う
     b. 一致しない・存在しない・scope_path 省略 → scope_registry を scope_id で照会し kcs_path を得る
-       (同一 scope_id が複数登録されている場合は last_seen_at 最新を優先。曖昧なら候補一覧 error)
+       (同一 scope_id が複数 **live** 登録されている場合は選択しない — KCS-E-REGISTRY-DUP 系の
+       候補一覧 error で fail-closed とし、dedupe を要求する ([10-operations.md §3](10-operations.md))。
+       purge 状態の異なる clone へ黙って解決すると scope 単位 purge の判定を取り違えるため)
     c. どちらも失敗 → KCS-E-EVIDENCE-SCOPE-UNREACHABLE-001 (scope_unreachable, §3.2)
 2.  commit を refs / objects/commits/ から取得
 2a. commit が shallow (tree 破棄済み) の場合、手順 3-4 を省略し、手順 5 以降を
@@ -142,6 +144,11 @@ bulk 系 (`kcs evidence verify --batch <pointers.jsonl>`) は従来どおり各�
 5.  raw_hash が tombstone を持つなら → tombstone を返す (§4)
 6.  tree entry の normalize.(tool_profile_hash, gen) で normalized instance (unit object 群) を解決
     (gen フィールド欠落は gen=0 と読む)
+6a. **時点帰属の検証 (v2 tree)**: entry の normalize.manifest_hash が指す manifest object を読み、
+    chunk の unit_key が当該 manifest で status=done であることを検証する — done でない unit の
+    chunk は当該 commit 時点に存在しない (same-gen retry の後着 chunk を過去 commit の証拠として
+    返さない → not_found)。v1 tree (manifest_hash 欠落) はこの検証を行えない — legacy 解決とし、
+    --strict verify は shallow 経路と同じく unverifiable (exit 3) を返す
 7.  chunk_hash で chunk object を解決し byte_start/byte_end の text を取り出す
 8.  **整合検証**: 解決した chunk object の raw_hash / tool_profile_hash が pointer の値と一致し、
     手順 4-6 を経た場合はさらに chunk object の gen が tree entry の gen と一致することを検証する
@@ -214,7 +221,8 @@ receipt は pointer state を tombstoned にせず、re-ingest も阻止しな�
 `not_found` である。**ただしこの保証は当該 bytes が store に不在の間のもの** — 同一 bytes が後日
 再 ingest され (明示操作に限らず、working tree 残存原本の自動 scan を含む — [05-runtime.md §3.5](05-runtime.md)
 の残存警告)、同じ identity の chunk が再生成された場合、既存 pointer は再び alive として
-解決される (erase は resurrection barrier ではない設計 — [05-runtime.md §3.5](05-runtime.md)。
+解決される (このとき active tombstone は raw の再 publication と同時に**退役**する — [05-runtime.md §3.5](05-runtime.md)
+の resurrection 規則。退役なしには「tombstone 最優先」の解決と両立しない) (erase は resurrection barrier ではない設計 — [05-runtime.md §3.5](05-runtime.md)。
 「erase 後も永続的に not_found」と読める保証はしない)。
 
 ## 4.3 検証 API

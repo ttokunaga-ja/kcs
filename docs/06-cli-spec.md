@@ -39,7 +39,8 @@ kcs restore <evidence|path|commit> --to <dir> # 詳細 §5
 kcs tag <name> [<commit>]
 kcs gc [--dry-run|--prune-unreachable] # prune 対象は 05-runtime.md §2.6 (raw/chunk/commit は対象外)。実装は Phase 4+ (09 §3.1)
 kcs purge <path|--raw-hash <h>> --reason <reason> [--erase-tombstone]  # 詳細 §6
-kcs reindex [--force] [--at <commit>]   # 再 normalize / 再 embedding (Step 3)。--force は first-instance-wins の
+kcs reindex [--force] [--at <commit>]   # --at = 過去 snapshot の embedding 再生成 (05-runtime.md §1)。
+                                        # --force = 新 gen で再 normalize / 再 embedding (Step 3)。--force は first-instance-wins の
                                         # 唯一の上書き経路で gen+1 の新 instance を作る (07-adapter-spec.md §9)。
                                         # 上書きチェーンは manifest.parent_instance (三つ組) で永続記録 — parent_run_id は
                                         # task cache の揮発情報 (03-data-model.md §8、09-mvp-scope.md §5.1)。--force は確認プロンプト必須 (--yes で省略可)
@@ -51,7 +52,7 @@ kcs evidence retarget <pointer> [--latest|--at <commit>]  # 設計確定後 (09-
 
 本表はコマンド全量の spec である。MVP での採否・実装 Step の正本は [09-mvp-scope.md §1.2 / §3.1](09-mvp-scope.md) (Phase 4+ のコマンドは行内に注記)。
 
-**`kcs diff` の差分種別**: raw / path の差分に加え、tree schema v2 ([03-data-model.md §8](03-data-model.md)) が生む derived-only の変化 — `normalize_manifest_changed` (unit の failed → done 完成を含む) / `chunking_config_changed` — を差分として表示する (`--json` も同種別を持つ)。derived-only commit を「差分なし」と表示してはならない。片側が v1 tree (フィールド欠落) の場合、derived 差分は `unknown` と表示する。
+**`kcs diff` の差分種別**: raw / path の差分に加え、tree schema v2/v3 ([03-data-model.md §8](03-data-model.md)) が生む derived-only の変化 — `normalize_manifest_changed` (unit の failed → done 完成を含む) / `chunking_config_changed` / `chunk_set_changed` (公開 chunk 集合のみの変化) — を差分として表示する (`--json` も同種別を持つ)。derived-only commit を「差分なし」と表示してはならない。片側が旧版 tree (該当フィールド欠落) の場合、derived 差分は `unknown` と表示する。
 
 `kcs init` は現在フォルダの `.kcs` のみ作成する。子フォルダの `.kcs` は `kcs index` の探索が対象を検出した時点で必要に応じて生成される (**VCS repo root 配下には既定で生成しない**。既定導入以前の既存子 `.kcs` は grandfathered として引き続き有効 — [03-data-model.md §3](03-data-model.md))。この結果、深いフォルダ木では scope 数が多くなる。`kcs search` のデフォルトが全 indexed scope 横断である ([05-runtime.md §1.8](05-runtime.md)) のはこの帰結を受けた設計である。
 
@@ -71,9 +72,9 @@ kcs evidence retarget <pointer> [--latest|--at <commit>]  # 設計確定後 (09-
 
 ```text
 1. pointer を解決して raw_hash を得る (08-evidence-pointer-spec.md §3)
-2. tombstone 判定 (最優先): raw_hash が tombstoned なら、working tree・cache の状態に関わらず
-   §7 の規約どおり exit 4 — purge 済み原本が folder に残っていても KCS 経由では開かない
-   (05-runtime.md §3.5 の残存警告)
+2. tombstone 判定 (最優先): raw_hash に **active な** tombstone があるなら、working tree・cache の状態に
+   関わらず §7 の規約どおり exit 4 — purge 済み原本が folder に残っていても KCS 経由では開かない
+   (退役済み tombstone は対象外 — 再 ingest による退役は 05-runtime.md §3.5 の resurrection 規則)
 3. working tree 解決:
    現在の working tree に同一 raw_hash を持つファイルが存在すれば (path_at_commit と
    異なる path でもよい。リネーム済みケース)、その実ファイルを OS 規定アプリで開く
@@ -140,6 +141,8 @@ kcs search "認証仕様"
 kcs search "..." --scope .                  # カレントフォルダのみ
 kcs search "..." --scope . --descendants    # カレントとその配下
 kcs search "..." --scope ./Research [--descendants]
+# path 引数は canonical 化 (絶対化 → lexical 解決 → 末尾 separator 除去 → realpath) して
+# registry の root_path と byte 比較する (05-runtime.md §1.8)
 kcs search "..." --all-scopes
 
 # モード

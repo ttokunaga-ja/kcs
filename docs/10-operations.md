@@ -274,8 +274,11 @@ CREATE TABLE scopes (
   `kcs_path` で `scope_id` が異なる行を削除する。**逆方向 (scope の移動) も同様に退役する**: 同一
   `scope_id` を新しい `kcs_path` で観測 (再発見) したら、同一 scope_id の旧 path 行を削除する —
   **ただし旧 path がなお到達可能 (存在し有効な `.kcs`) な場合は move と認定せず、削除しない**。
-  同一 scope_id の複数 live path は clone 併存であり、検索・解決時に KCS-E-REGISTRY-DUP 系 warning で
-  可視化する (どちらを残すかはユーザーの dedupe に委ねる。複製へ新 scope_id を発行する fork は Phase 4+ 予約) —
+  同一 scope_id の複数 live path は clone 併存であり、**fail-closed で扱う**: global search は当該
+  scope_id を skip して `excluded_scopes` に KCS-E-REGISTRY-DUP 系の理由付きで記録し、pointer 解決は
+  候補一覧 error とする ([08-evidence-pointer-spec.md §3.1](08-evidence-pointer-spec.md) — purge 状態の
+  異なる clone へ黙って解決しない)。どちらを残すかはユーザーの dedupe に委ねる (複製へ新 scope_id を
+  発行する fork は Phase 4+ 予約) —
   放置すると default 横断検索が旧 path の stale scope を毎回 skip し恒常的に exit 3 になる。放置すると横断検索が同一文書を dead scope_id 経由で
   二重に返し、その Evidence Pointer は `KCS-E-EVIDENCE-SCOPE-UNREACHABLE-001` で解決不能になる。
   registry は cache なので削除は常に安全 (live scope は自分を再登録する)
@@ -450,8 +453,13 @@ kcs repair --verify-objects
 - normalized の unit bytes は content hash を持たない ([03-data-model.md §5](03-data-model.md)) ため hash 検証対象外とし、
   参照整合 (対応する `(raw_hash, tool_profile_hash)` object の実在) のみ確認する。**manifest object
   (objects/manifests/ — [03-data-model.md §2.1](03-data-model.md)) は content-addressed であり再 hash 検証の対象**:
-  各 tree entry の `normalize.manifest_hash` が実在する manifest object を指すこと、HEAD tree の entry に
-  ついては作業コピー manifest.json の canonical JCS hash が一致することも検査する (不一致 = 破損)
+  各 tree entry の `normalize.manifest_hash` が実在する manifest object を指すこと (**tombstone / erase
+  receipt が説明する purge 済み raw の entry を除く** — 下記 dead terminal 規則。purge は manifest object を
+  削除するが tree は書き換えないため、この例外なしには正規 purge 直後の store が必ず corruption になる)、
+  HEAD tree の entry については作業コピー manifest.json の canonical JCS hash が一致することも検査する
+  (不一致 = 破損ではなく「**未 finalize の進行状態**」として incomplete (exit 3) — manifest finalize と
+  次回 snapshot の間のクラッシュ窓で正常に生じる。次回 index / batch resume が同期する。corruption と
+  するのは manifest object 自体の再 hash 不一致のみ)
 - SQLite index は検証対象外 (破損時は `--rebuild-db` で再構築可能なため)
 
 破損検出時の挙動:
@@ -469,7 +477,9 @@ kcs repair --verify-objects
 ```
 
 purge との整合: validated tombstone または fsck-only erase receipt が説明する missing raw とその derived
-chunk は正常な dead terminal として数え、corruption にしない。receipt-covered bytes は working copy から
+(chunk・**当該 (raw_hash, tool_profile_hash) 配下の manifest object**) は正常な dead terminal として数え、
+corruption にしない。**tree 欠落**は `.kcs/gc/shallowed/<commit64>` receipt が説明する場合のみ正常
+(shallow — [05-runtime.md §2.2](05-runtime.md))、receipt なき欠落は corruption。receipt-covered bytes は working copy から
 自動復元しない。receipt は public pointer API と re-ingest barrier には使わない。purge journal が active
 なら incomplete exit 3。marker 無し missing は ordinary store corruption、malformed / identity-conflicting
 receipt も corruption とする。verified raw と stale receipt が共存する場合は raw を正として locked repair
@@ -802,12 +812,13 @@ PATCH bump:
   - typo / コメント修正レベル。意味変更なし。
 ```
 
-**tree schema v2 (2026-07-18 確定)**: tree entry へ `normalize.manifest_hash`、tree object へ
-`chunking_config_hash` を追加した ([03-data-model.md §8](03-data-model.md)) — hash/identity 規約の
-変更だが、[08-evidence-pointer-spec.md §8](08-evidence-pointer-spec.md) の 2026-07 改訂と同じく
-**実装・store 公開前の schema 確定であり MAJOR bump ではない**。既存 dev store の v1 tree (両フィールド
-欠落) は legacy として読取可 (欠落 = 旧 semantics)。Step 1-2 実装の tree hashing は v2 対応の rework が
-必要 ([09-mvp-scope.md](09-mvp-scope.md))。
+**tree schema v2/v3 (2026-07-18 確定)**: tree entry へ `normalize.manifest_hash`、tree object へ
+`chunking_config_hash` (v2) と `chunk_set_hash` (v3 — 公開 chunk 集合の digest) を追加した
+([03-data-model.md §8](03-data-model.md)) — hash/identity 規約の変更だが、
+[08-evidence-pointer-spec.md §8](08-evidence-pointer-spec.md) の 2026-07 改訂と同じく
+**実装・store 公開前の schema 確定であり MAJOR bump ではない**。既存 dev store の v1/v2 tree
+(該当フィールド欠落) は legacy として読取可 (欠落 = 旧 semantics)。Step 1-2 実装の tree hashing は
+v2/v3 対応の rework が必要 ([09-mvp-scope.md](09-mvp-scope.md))。
 
 **Adapter 入出力の `spec_version` bump 規約**: `tool-lock.json` の `spec_version` および Adapter 入出力 schema ([04-pipeline.md §3.1](04-pipeline.md)) の `spec_version` は単調増加の整数とする。bump するのは、フィールドの削除・必須化・意味変更など**旧 Adapter が誤動作しうる変更のみ** (MAJOR 相当。該当 spec と CHANGELOG への明示記載必須)。optional フィールドの追加では bump せず、代わりに Adapter は未知フィールドを無視しなければならない (MUST ignore unknown fields)。不一致時の挙動は分業する: Adapter 側は `invalid_input` として失敗する ([07-adapter-spec.md §8.1](07-adapter-spec.md))。**full fallback が有効なのは incremental capability だけが非互換な場合に限る** — spec_version 自体の非互換は full で呼び直しても同じ拒否を再生するため、当該 online Adapter のタスクを failed permanent (Adapter 更新が必要) とし、同梱 deterministic Adapter のベースラインは影響なく継続する ([07-adapter-spec.md §8.1](07-adapter-spec.md) と同旨)。index 全体の停止を引き起こさないという保証は、このベースライン継続が担う。
 

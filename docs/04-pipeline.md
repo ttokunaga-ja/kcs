@@ -306,6 +306,7 @@ error_code:      KCS-E-ADAPTER-CONTRACT-001
 run は failed (retryable — 同一 mode で 1 回のみ再試行 (§5.2 表)。再違反は failed permanent)。
 full への自動 fallback は行わない
 (fallback は incremental capability 非互換の場合のみ — 正本 [07-adapter-spec.md §8.1](07-adapter-spec.md))
+Batch 経由の場合の課金記帳・旧 intent の終端・再投入手順は §5.8 相 3 の reject 終端が正本
 full mode 応答の V5/V6 違反も同様に全体 reject + failed (invalid_input 系は retry しない)
 ```
 
@@ -338,7 +339,8 @@ CREATE TABLE chunks (
 );
 CREATE INDEX idx_chunks_ident ON chunks(raw_hash, tool_profile_hash, gen);
 
-CREATE TABLE chunk_publications (      -- publication relation (cache — commit DAG + tree から再導出可能)
+CREATE TABLE chunk_publications (      -- publication relation (cache — commit DAG + tree から再導出可能。
+                                       -- 再導出は親先行 topological walk で決定的: §7 rebuild)
   chunk_id            TEXT NOT NULL,
   introduction_commit TEXT NOT NULL,   -- この chunk が (再) 導入された commit。単一の first_seen_commit では
                                        -- incomparable な複数導入 (merge の side 枝等) を表現できないため多対多
@@ -355,6 +357,8 @@ CREATE TABLE chunk_config_generations (
   chunk_id TEXT NOT NULL,
   chunking_config_hash TEXT NOT NULL,
   created_at TEXT NOT NULL,
+  introduction_commit TEXT NOT NULL,   -- この association が公開された snapshot commit。時点指定検索は
+                                       -- association の introduction にも ancestor-or-equal を要求 (05 §1.6)
   UNIQUE(chunk_id, chunking_config_hash)
 );
 ```
@@ -501,7 +505,7 @@ CREATE INDEX idx_tree_entries_ident ON tree_entries(commit_hash, raw_hash, tool_
 
 規範:
 
-- tree_entries は tree object の射影 cache。真実は `objects/trees/`。`gen` は tree entry の `normalize.gen` ([03-data-model.md §8](03-data-model.md)) の射影で、tree entry に `gen` 欠落時は 0 と読む。`manifest_hash` は v2 tree entry の射影 (時点条件の実体は `first_seen_commit` の ancestry — [05-runtime.md §1.6](05-runtime.md))
+- tree_entries は tree object の射影 cache。真実は `objects/trees/`。`gen` は tree entry の `normalize.gen` ([03-data-model.md §8](03-data-model.md)) の射影で、tree entry に `gen` 欠落時は 0 と読む。`manifest_hash` は v2 tree entry の射影 (時点条件は `chunk_publications` の introduction の ancestry — [05-runtime.md §1.6](05-runtime.md)。`first_seen_commit` は便宜列)
 - **常駐必須は HEAD commit 分のみ**。commit 作成時に新 HEAD 分を挿入する。旧 HEAD 分は cache として残してよい
 - `--at <commit>` 検索時、当該 commit 分が無ければ tree object を展開して挿入する。tree は immutable なので展開結果は常に同一
 - `kcs repair --rebuild-db` は HEAD 分のみ再構築する (他 commit 分は次回 `--at` 時に再展開)。旧 HEAD 分の掃除は GC (実行系は Phase 4+、[05-runtime.md §2](05-runtime.md)) が担う。GC が tree_entries 行を消しても raw / chunk object は削除しない ([05-runtime.md §2.6](05-runtime.md))
@@ -744,7 +748,7 @@ chunk の文字数のみ**を対象とし、再利用 chunk (API 非呼出) は�
 ## 5.7 Resume と Repair
 
 - `kcs batch resume`: 中断状態 (running stale, pending) を再開
-- `kcs repair --rebuild-db`: SQLite を objects/ から再構築する (SQLite に存在するのは §4.1〜§4.5 の 8 表のみ。再構築完了時は index_metadata へ新 index_generation ULID を採番する — [05-runtime.md §1.5](05-runtime.md)。
+- `kcs repair --rebuild-db`: SQLite を objects/ から再構築する (SQLite に存在するのは §4.1〜§4.5 の 8 表のみ。再構築完了時は index_metadata へ新 index_generation ULID を採番する — [05-runtime.md §1.5](05-runtime.md)。**publication の再導出は決定的**: 全 commit を親先行 topological order で走査し、chunk / config association ごとに「既採用 introduction のいずれの子孫でもない commit」のみを introduction として追加する — 結果は ancestor-minimal 集合で walk 順序に依存しない。
   以下の normalization_runs / prepared_units は SQLite テーブルではなく、manifest / 再 prepare から
   導出される**状態**を指す — [03-data-model.md §8](03-data-model.md) / §4.7)。復元範囲は次の通り:
 
@@ -808,7 +812,14 @@ metadata から intent_token 規約に一致する job を全走査すること�
    成功後に batch_job_id と state=1 を記録する
 4. **相 3 — collect**: 出力の取得・persist 後、確定課金の cost_ledger 記帳と state=2 + completed_at を
    **同一 Tx** で行い、upload を削除する (**404 = 削除成功**として扱う。削除失敗・クラッシュは次回回復が
-   再試行し、**全削除の完了をもって intent_token を NULL 化**する)
+   再試行し、**全削除の完了をもって intent_token を NULL 化**する)。
+   **persist 直前に対象 raw の tombstone を再検査する** — purge 済みなら出力を破棄し、下記の reject 終端と
+   同形 (error='purged') で閉じる (削除済み派生物を再 persist しない — [05-runtime.md §3.5](05-runtime.md))。
+   **出力が受け入れ検査 (§3.2) で reject された場合 (contract_violation) も persist しない**: 同一 Tx で
+   確定課金 (provider 報告値) の記帳 + `state=3`・`error='contract_violation'`・completed_at + upload 掃除を
+   行い、attempts を耐久更新する。§3.2 の「同一 mode で 1 回のみ再試行」は**この終端 Tx の完了後に**、
+   新 intent_token・新 submission_seq の相 1 として開始する (旧 attempt を state=1 のまま放置して
+   再 collect ループに入らない・記帳を落とさない)
 
 **記帳の冪等性**: cost_ledger への記帳は `INSERT ... ON CONFLICT DO NOTHING` (§5.4 の UNIQUE が実体)。
 記帳前の「記帳済み判別」は同一タスクキー × **batch_job_id IN (発見 job id, 当該 intent_token)** の

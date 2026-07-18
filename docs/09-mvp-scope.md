@@ -74,10 +74,10 @@ Step 2 (2-3ヶ月): kcs-pipeline + kcs-adapter
                   → 同梱 deterministic Adapter でベースライン抽出 (normalized まで。**検索の成立は
                     Step 3 の chunk/FTS/search 実装と合わせて** — §3 の割当が正)
                   → 推奨構成は大手 LLM API による AI 強化 (opt-in)
-                  → 注: tree schema v2 (2026-07-18 — 03 §8) により Step 1-2 実装の tree hashing は
-                    v2 対応 (manifest_hash / chunking_config_hash) の rework が必要
-                    (あわせて manifest object 保存 (03 §2.1)・chunk_publications / index_metadata 表
-                    (04 §4.1) も同期間の実装対象)
+                  → 注: tree schema v2/v3 (2026-07-18 — 03 §8) により Step 1-2 実装の tree hashing は
+                    v2/v3 対応 (manifest_hash / chunking_config_hash / chunk_set_hash) の rework が必要
+                    (あわせて manifest object 保存 (03 §2.1)・chunk_publications / index_metadata 表・
+                    config association の introduction_commit 列 (04 §4.1) も同期間の実装対象)
 Step 3 (2-3ヶ月): kcs-index + kcs-search (hybrid + Evidence Pointer)
 Step 4 (1.5-2ヶ月): restore + --at + time-travel
                     + purge 最小形 (tombstone) + evidence verify (単発)
