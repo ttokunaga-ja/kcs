@@ -658,7 +658,7 @@ monthly_usd_cap = 10.0
 ```
 
 - cap は二層で判定する。**device cap** (`~/.config/kcs/config.toml`、デバイス上の全 `.kcs` の当月合算に適用、既定 $50) が正であり、**folder cap** (`.kcs/config.toml`、その `.kcs` の当月消費のみに適用) は任意の追加制限。folder cap 未設定なら device cap のみが効く
-- 判定式: scope S の新規タスクを起動できるのは `ledger(S, 当月) + candidate < folder_cap(S)` **かつ** `ledger(device, 当月) + candidate < device_cap` のとき (= effective cap は両者の残余の min。candidate = 起動しようとするタスク自身の予約額)。`per_adapter` の下限は **device 層専用** (folder cap は total のみ — folder 側 `[budget.per_adapter]` は定義しない) で、**第三条件として同様に判定する**: `ledger(device, adapter_kind, 当月) + candidate < per_adapter_cap(adapter_kind)` (設定キー名 = adapter_kind と同一 enum: markdownize / embedding / summary。**enum 外の未知キーは schema error** — [10-operations.md §12.3](10-operations.md))。`ledger(...)` は cost_ledger の当月合算 (estimated 行も usd 非 NULL のため数値として効く — §5.8) + 未終端 batch_requests (state 0/1) の `estimated_usd` 合算 (= 予約)。**判定と相 1 の reservation 作成は同一の `BEGIN IMMEDIATE` Tx で行う** (check-then-act の並行超過を防ぐ — cap 超過なら相 1 を作らない)。**sync online 呼出も同じ規律に従う**: 呼出前に estimated 行を cap 判定と同一 Tx で記帳し (reservation 相当)、終端 (成功・billable reject・contract reject・結果不明) で確定行へ settle する (ON CONFLICT 冪等)。複数 external call を行うタスクは request 単位 (provider_request_id、無ければ attempt token) で冪等記帳し、課金済み call の盲目再試行を禁止する — これが無いと呼出後 crash や並列 multi-call の課金が ledger から漏れ、cap を過少判定する
+- 判定式: scope S の新規タスクを起動できるのは `ledger(S, 当月) + candidate < folder_cap(S)` **かつ** `ledger(device, 当月) + candidate < device_cap` のとき (= effective cap は両者の残余の min。candidate = 起動しようとするタスク自身の予約額)。`per_adapter` の下限は **device 層専用** (folder cap は total のみ — folder 側 `[budget.per_adapter]` は定義しない) で、**第三条件として同様に判定する**: `ledger(device, adapter_kind, 当月) + candidate < per_adapter_cap(adapter_kind)` (設定キー名 = adapter_kind と同一 enum: markdownize / embedding / summary。**enum 外の未知キーは schema error** — [10-operations.md §12.3](10-operations.md))。`ledger(...)` は cost_ledger の当月合算 (estimated 行も usd 非 NULL のため数値として効く — §5.8) + 未終端 batch_requests (state 0/1) の `estimated_usd` 合算 (= 予約)。**判定と相 1 の reservation 作成は同一の `BEGIN IMMEDIATE` Tx で行う** (check-then-act の並行超過を防ぐ — cap 超過なら相 1 を作らない)。**sync online 呼出は縮退 2 相に従う**: reservation は cost_ledger ではなく **batch_requests 行**で行う — 相 1 = 行作成 + `estimated_usd` 予約を cap 判定と同一 Tx で (intent_token = attempt token。§5.8 と同じ状態機械の縮約 — upload / job 相は無い)。呼出後、終端 (成功・billable reject・contract reject) の**確定記帳と state=2/3 を同一 Tx** で行い、**cost_ledger へは終端の確定行のみ**を追記する (cost_ledger は追記台帳のため予約 → 確定の書換えはできない — 予約の実体は batch_requests 側が持つ)。複数 external call を行うタスクは request 単位 (provider_request_id、無ければ attempt token) で冪等記帳し、課金済み call の盲目再試行を禁止する。**crash 回収**: 残った state 0/1 の sync 行は、provider_request_id で照会可能なら結果を確定し、照会不能なら unknown として estimated を確定記帳し state=3 で terminal 化する (過大計上を許容 — 未記帳の過少計上より安全側)
 - 累積コストは Adapter 報告値 (input/output token × 単価) を `~/.local/share/kcs/cost-ledger.sqlite` (デバイスグローバル 1 個。WAL + busy_timeout — [05-runtime.md §6](05-runtime.md)) に記録する。folder cap の判定はこの ledger の scope 別集計で行う (`.kcs` 内に ledger は置かない。cache/truth 規約上、課金台帳はデバイスローカルの運用データであり `.kcs` の truth ではないが、**再構築不可のため cache でもない** — [03-data-model.md §4.1](03-data-model.md)、schema 変更は in-place migration 側 [10-operations.md §7.5.3](10-operations.md))
 - store は 2 表で構成し、**以下の DDL を SQL 正本とする** (旧 3 JSONL + lock 構成は 2026-07-18 に廃止 — §5.8 の 2 相プロトコルは UNIQUE 制約・単一 Tx・ON CONFLICT 冪等という SQLite の保証を前提に監査された機構であり、append-only JSONL では等価の保証を構成できない。[10-operations.md §12.7](10-operations.md) リネーム表):
 
@@ -757,7 +757,7 @@ chunk の文字数のみ**を対象とし、再利用 chunk (API 非呼出) は�
 ## 5.7 Resume と Repair
 
 - `kcs batch resume`: 中断状態 (running stale, pending) を再開
-- `kcs repair --rebuild-db`: SQLite を objects/ から再構築する (SQLite に存在するのは §4.1〜§4.5 の 8 表のみ。再構築完了時は index_metadata へ新 index_generation ULID を採番する — [05-runtime.md §1.5](05-runtime.md)。**publication / association introduction の再導出は chunks.jsonl を正本とする**: 作成行の first_seen_commit + publication event 行 (03 §2 — truth) を読み取って復元し、tree の chunk_set_hash は照合のみに使う。event 行を欠く旧 store は fallback として全 commit を親先行 topological order で走査し、chunk / config association ごとに「既採用 introduction のいずれの子孫でもない commit」のみを introduction として追加する (結果は ancestor-minimal 集合で walk 順序に依存しない)。**backfill は行わない** (pre-release — 既存 dev store は rebuild-db が ledger / fallback から再導出する)。生存する creation 行 / chunk object を持たない publication event 行は無視する (dangling — [05-runtime.md §8.1](05-runtime.md) の耐久順序で正常に生じ、次回 finalize が冪等に再 append する)。
+- `kcs repair --rebuild-db`: SQLite を objects/ から再構築する (SQLite に存在するのは §4.1〜§4.5 の 8 表のみ。再構築完了時は index_metadata へ新 index_generation ULID を採番する — [05-runtime.md §1.5](05-runtime.md)。**publication / association introduction の再導出は chunks.jsonl を正本とする**: 作成行の first_seen_commit + publication event 行 (03 §2 — truth) を読み取って復元し、tree の chunk_set_hash は照合のみに使う。event 行を欠く旧 store は fallback として全 commit を親先行 topological order で走査し、chunk / config association ごとに「既採用 introduction のいずれの子孫でもない commit」のみを introduction として追加する (結果は ancestor-minimal 集合で walk 順序に依存しない)。**backfill は行わない** (pre-release — 既存 dev store は rebuild-db が ledger / fallback から再導出する)。生存する creation 行 / chunk object を持たない、**または introduction commit が不在・ref から到達不能**な publication event 行は無視する (dangling — [05-runtime.md §8.1](05-runtime.md) の耐久順序で正常に生じ、次回 finalize が冪等に再 append する)。
   以下の normalization_runs / prepared_units は SQLite テーブルではなく、manifest / 再 prepare から
   導出される**状態**を指す — [03-data-model.md §8](03-data-model.md) / §4.7)。復元範囲は次の通り:
 
@@ -833,7 +833,12 @@ metadata から intent_token 規約に一致する job を全走査すること�
    reject 終端 Tx で `contract_violation_count` を increment する (相 1 の NULL 戻しの対象外)。
    再投入できるのは count == 1 のときだけで、count >= 2 は failed permanent
    (tasks.jsonl 喪失後もこの判定は batch_requests から回復できる。error 列は最新状態の表示であり
-   判定源にしない — 相 1 が NULL へ戻すため)
+   判定源にしない — 相 1 が NULL へ戻すため)。count は**タスクキー単位の通算**であり mode 別に
+   数えない (mode 切替後の違反も加算)。検証済み Adapter 更新後の脱出路として
+   `kcs batch retry --reset-violations <selector>` (確認プロンプト必須) が count を 0 に戻す —
+   違反の監査履歴は cost-ledger の記帳行に残る。provider が job の **expired** を報告した場合も
+   reject 終端と同形: estimated を確定記帳 + state=3 (error='expired') + 掃除。expired 起因の
+   再投入は通常の retry 予算に従い、contract_violation_count は増やさない
 
 **記帳の冪等性**: cost_ledger への記帳は `INSERT ... ON CONFLICT DO NOTHING` (§5.4 の UNIQUE が実体)。
 記帳前の「記帳済み判別」は同一タスクキー × **batch_job_id IN (発見 job id, 当該 intent_token)** の

@@ -124,7 +124,8 @@ kcs search "..." --limit 20 --cursor <token>    # snapshot 越し安全
 scope ごとの sub-cursor は
 `{scope_id, snapshot_commit, index_generation, max_rowid, max_association_rowid, chunking_config_hash, consumed}`。
 `index_generation` は **rebuild (`kcs repair --rebuild-db`)・purge・embedding enrichment の finalize・
-および index / batch finalize で `chunk_fts` の内容が変化した場合の、いずれでも新規採番する ULID**
+index / batch finalize で `chunk_fts` の内容が変化した場合・および GC の shallow 化実行
+(`--all-history` cursor の walk 対象が変わる) の、いずれでも新規採番する ULID**
 (単調カウンタではない — sqlite.db の `index_metadata` 表 ([04-pipeline.md §4.1](04-pipeline.md)) に保持するため
 DB 喪失で数が戻っても、ULID なら旧 cursor が偶然一致して誤受理されることがない。FTS 内容変化でも回転する
 理由: FTS5 の bm25() は文書頻度・平均長という**大域統計**を使うため、cursor が chunk 集合を rowid 上限で
@@ -405,7 +406,7 @@ binding を持たない legacy `v=1` は `KCS-E-SEARCH-CURSOR-001` で拒否す�
   `active_scope_unavailable`、shallow は `KCS-E-COMMIT-SHALLOW-001`、store damage は
   `KCS-E-STORE-CORRUPT-001`)。cursor なしの fresh search を案内する。scope move は同じ `scope_id` として
   継続し、config drift も cursor error とする
-- 次ページは各 scope を `snapshot_commit` に固定して再クエリし、consumed 件を skip してマージを継続する。マージは決定的 (RRF スコア降順 + 辞書順 tie-break) なのでページを跨いで再現可能
+- 次ページは各 scope を `snapshot_commit` に固定して再クエリし、cross-scope merge → global MMR → alias 展開まで再計算した**最終 stream 上で** scope ごとの consumed 件を skip して継続する (per-scope の事前 skip は global 選択を変えるため行わない — §1.5 の consumed 定義が正本)。マージは決定的 (RRF スコア降順 + 辞書順 tie-break) なのでページを跨いで再現可能
 - cursor 中の `snapshot_commit` が shallow 化済み (tree 破棄) の場合、cursor の再計算は `KCS-E-COMMIT-SHALLOW-001` で失敗する (§2.2)。この場合は cursor なしの再検索を案内する
 
 ### 性能目標の前提
@@ -531,6 +532,8 @@ GC が削除してはならないもの:
 ```text
 - commit object (append-only。§2.2)
 - raw object / chunk object — これらを削除する唯一の経路は purge (§3)
+- toollock object — 参照する commit object が存在する限り削除不可 (commit は append-only のため実質恒久。
+  未公開 finalize 由来の未参照 toollock のみ、全 commit 参照走査の後に回収可)
 - manifest object — 参照する tree object が存在する限り削除不可 (削除の唯一の経路は purge。shallow 化で
   未参照になったものの回収は Phase 4 GC の対象 — §2.2 表と同じ tiered retention に従う)
 ```
@@ -614,8 +617,11 @@ purge は **object の物理削除 + default tombstone または内部 erase rec
    **共有されうる派生 (image / embedding — text_hash 単位で他 raw の chunk と共有) は、purge 対象外の
    live 参照が 0 の場合のみ物理削除する** — 無条件削除は非対象文書の検索を破壊する)
 - `~/.cache/kcs/open/<raw_hash digest64>/` の一時展開 dir (存在すれば冪等削除 — [06-cli-spec.md §1.1](06-cli-spec.md))
+  (closure の列挙正本 = 当該 (raw_hash, tool_profile_hash) の全 gen manifest。**どの manifest からも
+   参照されない orphan prepared / image** (公開前 crash の残骸) は解決経路に乗らず、GC の
+   「未参照中間 object」として回収される — purge 完了表示にその旨を注記する)
 - SQLite の chunks / chunk_config_generations / chunk_publications / chunk_vec / embeddings 行と FTS エントリ
-- chunks.jsonl の対象 chunk 行 (append-only の例外 — purge は法務要件の明示例外として行を落とす)
+- chunks.jsonl の**対象 chunk_id を参照する creation 行・publication event 行の全部** (append-only の例外 — purge は法務要件の明示例外として行を落とす)
 ```
 
 残すもの (不変):
@@ -645,8 +651,11 @@ preview と完了表示は、対象 raw_hash と同一 bytes の原本が workin
 publication と同一の locked mutation 内で active tombstone を**退役 (retire)** させる — tombstone
 レコードの events[] へ `retired` を append する (下記 lifecycle 形式)。以後の
 open / view / verify / 解決は alive を返す (退役なしには「tombstone 最優先」の解決規則と上記の
-「再び alive」が両立しない)。purge の監査事実は commit_type=purged の commit と、削除されず残る
-purged/retired event 列で追跡できる。
+「再び alive」が両立しない)。**retired event には `resurrection_commit` (再 publication を刻んだ
+commit — §8.1 no-op 例外 (a)) を記録する** — purge 前 commit を指す旧 pointer の解決は、このリンクを
+介してのみ新 publication を参照できる ([08-evidence-pointer-spec.md §3.1](08-evidence-pointer-spec.md)
+手順 6b。検索の時点条件には影響せず、旧時点への遡及混入は起きない)。purge の監査事実は
+commit_type=purged の commit と、削除されず残る purged/retired event 列で追跡できる。
 search / open / evidence verify / fsck は同一の **active**-tombstone 判定を共有する。
 
 **purge journal (クラッシュ安全の正本)**: purge は複数ストア (objects / SQLite / chunks.jsonl / logs /
@@ -706,9 +715,10 @@ canonical / legacy の両 variant が存在する場合に両方を検証し、�
 {
   "raw_hash": "sha256:abc...",
   "events": [
-    { "kind": "purged",  "at": "2026-04-25T12:00:00Z", "reason": "legal",
+    { "kind": "purged",  "at": "2026-04-25T12:00:00Z", "reason": "legal", "actor": "user",
       "in_commit": "sha256:9f2c..." },
-    { "kind": "retired", "at": "2026-05-01T09:00:00Z", "in_commit": "sha256:1a2b..." }
+    { "kind": "retired", "at": "2026-05-01T09:00:00Z", "in_commit": "sha256:1a2b...",
+      "resurrection_commit": "sha256:1a2b..." }
   ]
 }
 ```
@@ -718,17 +728,24 @@ fsck が区別できるよう、同じ digest-only fan-out に次の exact bound
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "raw_hash": "sha256:abc...",
-  "purged_in_commit": "sha256:9f2c...",
-  "erased_at": "2026-04-25T12:00:00Z"
+  "events": [
+    { "kind": "erased",  "at": "2026-04-25T12:00:00Z", "in_commit": "sha256:9f2c...",
+      "actor": "user" },
+    { "kind": "retired", "at": "2026-05-01T09:00:00Z", "in_commit": "sha256:1a2b...",
+      "resurrection_commit": "sha256:1a2b..." }
+  ]
 }
 ```
 
-receipt は path / reason / actor / query / prompt / content を持たず、raw_hash は immutable tree に既に残る。
-validity は leaf/raw_hash 一致だけでなく、`purged_in_commit` が bounded verified CAS 上で ref-reachable な
-`commit_type=purged` commit を指し、`erased_at` が canonical UTC かつ commit `created_at` と一致し、
-fsck invocation の fixed now より未来でないことを要求する。不一致・extra field は store corruption。
+receipt は path / reason / query / prompt / content を持たず (actor は監査要件のため各 event に持つ —
+[02-philosophy.md §2.4](02-philosophy.md))、raw_hash は immutable tree に既に残る。
+validity は leaf/raw_hash 一致だけでなく、erased event の `in_commit` が bounded verified CAS 上で
+ref-reachable な `commit_type=purged` commit を指し、`at` が canonical UTC かつ commit `created_at` と
+一致し、fsck invocation の fixed now より未来でないことを要求する。schema_version ごとの定義に
+一致しない field・不一致は store corruption (v1 flat 形式は「erased event 1 件」として読み、
+次の mutation で v2 へ locked 変換する — tombstone の legacy 規則と同型)。
 open / view / search / restore / evidence verify / index の resurrection barrier には使わず、fsck だけが
 intentional absence の説明に使う。したがって Evidence verify は従来どおり `not_found` で、同一 bytes の
 後日 ingest (明示操作に限らず、working tree 残存原本の自動 scan を含む — §3.5 の残存警告) は許可する。**erase receipt も tombstone と同じ lifecycle 形式 (events[]) を持ち、raw object の再 publication 成功時は除去せず `retired` event を append する** — 除去すると erase 済み raw の旧 commit が参照する manifest 欠落を説明するものが消え、fsck の corruption 誤判定と手順 6b の不達を生むため (公開 pointer API に使わない・re-ingest barrier にしない性質は不変)。crash で不整合が残った場合は verified raw object を優先し、次の locked mutation で record を整合させる。

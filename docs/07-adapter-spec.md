@@ -122,7 +122,9 @@ revoke: adapter.policy.allow_network = false に設定する。
         取り込み承認、こちらは adapter 単位の network opt-in。
 ```
 
-CLI フラグ `--online` は **その 1 回の実行に限る一時 opt-in** で、永続記録を作らない。
+CLI フラグ `--online` は **その 1 回の実行に限る一時 opt-in** で、永続記録を作らない。適用対象は
+online 作業を駆動し得る全コマンド (`kcs index` / `kcs batch resume` / `kcs batch retry` /
+`kcs reindex --force` — [06-cli-spec.md §1](06-cli-spec.md))。
 優先関係は次のとおり:
 
 ```text
@@ -160,7 +162,9 @@ AdapterRun:
   output_hashes
   status                "pending" | "running" | "done" | "partial" | "failed"
                         (partial = unit 単位の部分失敗, 04-pipeline.md §5.2)
-  error_kind            error_code (06-cli-spec.md §8)
+  error_code            機械判定用 (06-cli-spec.md §8)
+  error_category        transient | permanent | rate_limit — 04 §5.3 の retry 分類の入力
+  retry_after_ms        optional — provider の Retry-After を透過 (rate_limit 時)
 ```
 
 ---
@@ -373,7 +377,9 @@ provider_scope_id()            下記の不変識別子を返す
 
 1. job 一覧照会 (または token による job 発見) と **upload 一覧照会**が可能であること — これが無いと
    未記録 in-flight・未記録 upload 残骸の回復が構造的に不可能になる
-2. job 作成 → 一覧可視化の遅延に上限があること (KCS の可視化猶予 既定 10 分以内)
+2. job 作成 → 一覧可視化の遅延に上限があること (KCS の可視化猶予 既定 10 分以内)。**upload →
+   一覧可視化にも同じ上限を適用する** ([04-pipeline.md §5.8](04-pipeline.md) の upload 照合が前提とする)。
+   upload() は upload_id を返し (返却型必須)、list_uploads は pagination を提供すること
 3. job / 一覧情報の保持期間が KCS の回復期限 (既定 48h) 以上であること
 4. job metadata / filename に client 任意の識別子 (intent_token) を埋め込めること
 5. account / workspace の**安定した**識別子を取得できること (取得不能なら reservation の照合が恒久
@@ -570,7 +576,8 @@ Adapter の完全な再実行決定性は要求しない。KCS が保証する�
 raw_hash 不変                既存 artifact を尊重 (first-instance-wins)
 raw_hash 変化                 新 artifact 候補を作る
 explicit re-normalize         同 (raw_hash, tool_profile_hash) に対して gen+1 の新 normalized
-                              instance を作る (kcs reindex --force のみ許可)。旧 instance は
+                              instance を作る (kcs reindex --force、または prepared_hash 変化起因の
+                              自動 gen+1 — 03-data-model.md §2.1 の例外)。旧 instance は
                               保全され、既存 commit / Evidence Pointer は旧 gen を参照し続ける
                               (03-data-model.md §2.1)
 ```

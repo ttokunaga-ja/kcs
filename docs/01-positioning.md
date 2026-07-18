@@ -90,7 +90,7 @@ kcs open <検索結果の pointer>
 
 ### 4.1 Evidence Pointer
 
-`commit / tree / raw_hash / chunk_hash / span` で根拠を指す。path ではない。ファイル移動・削除・上書きでも根拠は死なない (CAS object store が原文を保持するため)。
+`commit / tree / raw_hash / chunk_hash / span` で根拠を指す。path ではない。ファイル移動・削除・上書きでも根拠は死なない (CAS object store が原文を保持するため。**明示の purge を除く** — [02-philosophy.md §2.4](02-philosophy.md))。
 
 ### 4.2 Markdown 正規化を共通中間表現とする
 

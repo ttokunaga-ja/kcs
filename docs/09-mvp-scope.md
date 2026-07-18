@@ -261,7 +261,7 @@ Done 条件 = synthetic で各シナリオ Recall@10 >= 0.8
 採用: 最初に確定したインスタンスを永続化、以後は再生成しない (first-instance wins)。
 実装:
   - normalization_run のキャッシュヒット判定で短絡
-  - kcs reindex --force のみ新 generation (gen+1) の instance 作成を許可 (上書き・削除はしない)
+  - 新 generation (gen+1) の instance 作成は kcs reindex --force、または prepared_hash 変化起因の自動 gen+1 ([03-data-model.md §2.1](03-data-model.md) の例外) のみ許可 (上書き・削除はしない)
   - 新 generation 作成時は manifest.parent_instance = {raw_hash, tool_profile_hash, gen} でチェーンを残す (parent_run_id は task cache の揮発情報 — 永続 provenance ではない。[03-data-model.md §8](03-data-model.md))
   - 過去 commit / 既存 Evidence Pointer は tree entry の gen により旧 instance を参照し続ける
 正本: 03-data-model.md §6, 04-pipeline.md §5.5
@@ -324,7 +324,7 @@ Status: draft (retarget 実装は Phase 4+ のため、期日は Phase 4 着手�
    tombstone 判定は「active = 末尾 event が purged」であり、存在だけでは dead にしない — 正本 05 §3.5)
 
 正本: 08-evidence-pointer-spec.md §4 / 05-runtime.md §3
-Status: コアセマンティクスは decided。残未決 2 件は Phase 4 着手前確定
+Status: コアセマンティクスは decided。残未決 1 件 (bulk verify スループット) は Phase 4 着手前確定
 ```
 
 ## 5.4 Incremental Markdownize のプロンプト規約
@@ -361,7 +361,7 @@ Status: decided
 | --- | --- | --- | --- | --- |
 | 1 | Markdown 非決定性 = first-instance-wins | decided | なし | Step 1 着手前 (充足済み) |
 | 2 | remarkdownize CLI セマンティクス | draft | --latest のデフォルト挙動 | Phase 4 着手前 |
-| 3 | Dead Evidence Pointer | decided (コア) | bulk verify スループット / 二重 purge | Phase 4 着手前 |
+| 3 | Dead Evidence Pointer | decided (コア) | bulk verify スループット | Phase 4 着手前 |
 | 4 | Incremental Markdownize プロンプト規約 | decided | なし | Step 1 着手前 (充足済み) |
 | 5 | 検索評価ハーネス (合成コーパス + ゴールデンクエリ、§4.3) | decided | なし (2026-07-03 完了: `eval/` に合成コーパス 305 ファイル / 7 scope + 履歴 fixture + ゴールデンクエリ 50 件 (M3-1: 18 / M3-2: 16 / M3-3: 16)。dry-run 検証済み。以後のクエリ追加・差し替えは §4.2 凍結規律) | Step 3 着手前 (充足済み) |
 | 6 | Markdownize Adapter 選定 = Mistral OCR 系 ([07 §5.2](07-adapter-spec.md)) | decided | なし (実地検証 2026-07-03 完了: sync/batch 両モードで表 1.0 / 日本語 CER 0.0 / 画像 1/1 / 数式 LaTeX 化。`experiments/ocr-verification`) | Step 2 着手前 (充足済み) |

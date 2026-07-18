@@ -11,14 +11,17 @@ KCS の CLI 契約。GUI は MVP 範囲外 (Phase 4+) だが、将来の用語�
 `snapshot` を正規コマンド名とし、`commit` は Git に慣れた開発者向け alias。内部的には同じ履歴 object を作る。
 
 ```bash
-kcs init [<path>]                       # 現在フォルダの .kcs を作成
+kcs init [<path>]                       # <path> (省略時 = カレント) の .kcs を作成
 kcs status                              # ファイル状態 / pending タスク / budget
 kcs index [--preview|--approve|--yes] [--online|--offline]  # 取り込み (初回は preview + 承認必須)。
                                         # --online/--offline は当該実行の送信可否を上書き (正本 07-adapter-spec.md §3。
                                         # 優先順位: CLI > scope config > user config)
-kcs batch resume [--override-budget]    # 中断タスクの再開 (budget 超過 pause は --override-budget 必須。04-pipeline.md §5.4/§5.7)。
+kcs batch resume [--override-budget] [--online]  # 中断タスクの再開 (budget 超過 pause は --override-budget 必須。04-pipeline.md §5.4/§5.7)。
+                                        # --online は当該実行限りの一時 opt-in (07 §3 — resume/retry/reindex --force も online 作業を駆動するため)。
                                         # markdownize online タスクと embedding enrichment パスを両方駆動 (04-pipeline.md §5.4)
-kcs batch retry                         # failed タスクの再試行 (markdownize + embedding。backoff/retry 予算を尊重)
+kcs batch retry [--online] [--reset-violations <selector>]  # failed タスクの再試行 (markdownize + embedding。backoff/retry 予算を尊重)。
+                                        # --reset-violations = 検証済み Adapter 更新後に contract_violation_count を 0 へ戻す
+                                        # (確認プロンプト必須 — 04 §5.8。監査は cost-ledger に残る)
 kcs batch abandon <intent_token|scope/adapter/input_hash/tool_profile_hash>
                                         # 照合が恒久不能な in-flight Batch job の打ち切り (estimated 記帳 + terminal 化。
                                         # 指定子は intent_token または batch_requests の 4 組タスクキー (3 組では別
@@ -38,10 +41,11 @@ kcs inspect <hash>                      # object を JSON で表示
 kcs restore <evidence|path|commit> --to <dir> # 詳細 §5
 kcs tag <name> [<commit>]
 kcs gc [--dry-run|--prune-unreachable] # prune 対象は 05-runtime.md §2.6 (raw/chunk/commit は対象外)。実装は Phase 4+ (09 §3.1)
-kcs purge <path|--raw-hash <h>> --reason <reason> [--erase-tombstone]  # 詳細 §6
-kcs reindex [--force] [--at <commit>]   # --at = 過去 snapshot の embedding 再生成 (05-runtime.md §1)。
+kcs purge <path|--raw-hash <h>> --reason <reason> [--erase-tombstone] [--yes]  # 詳細 §6 (確認プロンプト必須 — --yes で省略)
+kcs reindex [--force] [--at <commit>] [--yes] [--online]  # --at = 過去 snapshot の embedding 再生成 (05-runtime.md §1)。
                                         # --force = 新 gen で再 normalize / 再 embedding (Step 3)。--force は first-instance-wins の
-                                        # 唯一の上書き経路で gen+1 の新 instance を作る (07-adapter-spec.md §9)。
+                                        # 明示経路で gen+1 の新 instance を作る (07-adapter-spec.md §9。もう 1 つの合法経路 =
+                                        # prepared_hash 変化起因の自動 gen+1 — 03-data-model.md §2.1)。
                                         # 上書きチェーンは manifest.parent_instance (三つ組) で永続記録 — parent_run_id は
                                         # task cache の揮発情報 (03-data-model.md §8、09-mvp-scope.md §5.1)。--force は確認プロンプト必須 (--yes で省略可)
 kcs move --propose <src> <dst>          # 原本移動の提案。Agent はこちらのみ (Phase 4+、MVP 対象外)
@@ -53,9 +57,9 @@ kcs evidence retarget <pointer> [--latest|--at <commit>]  # 設計確定後 (09-
 
 本表はコマンド全量の spec である。MVP での採否・実装 Step の正本は [09-mvp-scope.md §1.2 / §3.1](09-mvp-scope.md) (Phase 4+ のコマンドは行内に注記)。
 
-**`kcs diff` の差分種別**: raw / path の差分に加え、tree schema v2/v3 ([03-data-model.md §8](03-data-model.md)) が生む derived-only の変化 — `normalize_manifest_changed` (unit の failed → done 完成を含む) / `chunking_config_changed` / `chunk_set_changed` (公開 chunk 集合のみの変化) — を差分として表示する (`--json` も同種別を持つ)。derived-only commit を「差分なし」と表示してはならない。片側が旧版 tree (該当フィールド欠落) の場合、derived 差分は `unknown` と表示する。
+**`kcs diff` の差分種別**: raw / path の差分に加え、tree schema v2/v3 ([03-data-model.md §8](03-data-model.md)) が生む derived-only の変化 — `normalize_manifest_changed` (unit の failed → done 完成を含む) / `chunking_config_changed` / `chunk_set_changed` (公開 chunk 集合のみの変化) / `tool_lock_changed` (旧新 tool_lock_hash と変更 role) / `resurrection_published` (no-op 例外 (a) の publication commit — [05-runtime.md §8.1](05-runtime.md)) — を差分として表示する (`--json` も同種別を持つ)。derived-only commit を「差分なし」と表示してはならない。片側が旧版 tree (該当フィールド欠落) の場合、derived 差分は `unknown` と表示する。
 
-`kcs init` は現在フォルダの `.kcs` のみ作成する。子フォルダの `.kcs` は `kcs index` の探索が対象を検出した時点で必要に応じて生成される (**VCS repo root 配下には既定で生成しない**。既定導入以前の既存子 `.kcs` は grandfathered として引き続き有効 — [03-data-model.md §3](03-data-model.md))。この結果、深いフォルダ木では scope 数が多くなる。`kcs search` のデフォルトが全 indexed scope 横断である ([05-runtime.md §1.8](05-runtime.md)) のはこの帰結を受けた設計である。
+`kcs init` は指定フォルダ (省略時 = カレント) の `.kcs` を 1 つだけ作成する (子孫には作らない)。子フォルダの `.kcs` は `kcs index` の探索が対象を検出した時点で必要に応じて生成される (**VCS repo root 配下には既定で生成しない**。既定導入以前の既存子 `.kcs` は grandfathered として引き続き有効 — [03-data-model.md §3](03-data-model.md))。この結果、深いフォルダ木では scope 数が多くなる。`kcs search` のデフォルトが全 indexed scope 横断である ([05-runtime.md §1.8](05-runtime.md)) のはこの帰結を受けた設計である。
 
 `<pointer>` 引数の受理形式 (URI / inline JSON / stdin / hash 短縮形) は [08-evidence-pointer-spec.md §2.3](08-evidence-pointer-spec.md) を正本とする。
 
@@ -249,7 +253,9 @@ purge は常に**全履歴**の raw 本文・派生 artifact を対象とする 
 kcs evidence verify            検査完了で 0 (結果は status フィールド)。parse 失敗は 2
 kcs evidence verify --strict   全 alive なら 0。tombstoned / not_found が 1 件でもあれば 4。
                                scope_unreachable のみの失敗は 3 (retryable — 08 §4.3)。
-                               shallow 由来の unverifiable のみも 3 (retryable — 08 §3.1 手順 8)
+                               unverifiable のみも 3 (reason = commit_shallow / tree_v1 /
+                               manifest_missing — 08 §4.3。shallow/tree_v1 は状況変化で解消し得るが
+                               manifest_missing は恒久 — reason で判別)。registry_duplicate も 3
 kcs evidence verify --batch <pointers.jsonl>   一括 verify (Step 4+ — 08 §4.3)
                                (--batch 混在時も 4。内訳は --json の各行 status で判定)
 kcs open / view / restore      dead pointer (tombstoned / not_found) は 4。scope_unreachable は 3 (retryable — 08 §4.3)
@@ -338,7 +344,9 @@ kcs export <scope> --to <bundle.kcsz>
 kcs import <bundle.kcsz> --to <dir>     # bundle の scope_id が registry に live 登録済みなら拒否
                                         # (KCS-E-REGISTRY-DUP-001 — clone 併存を正規操作で作らない)。
                                         # 複製として取り込むには --as-new-scope で新 scope_id を採番
-                                        # (fork 相当。以後の Evidence Pointer は新 ID を指す)
+                                        # (fork 相当。以後の Evidence Pointer は新 ID を指す。既存 normalized 内の
+                                        # kcs:// URI が旧 scope_id を含んでいても、自 store に該当 object があれば
+                                        # 解決する — hash が identity (08 §2)。bundle 内 object で自足)
 ```
 
 `.kcsz` は `.kcs/` の bundle 形式 (zip 等)。`.kcs` 単位で公開可能。別 `.kcs` の object 参照を前提にしないため、同一 raw_hash が別 `.kcs` に存在しても export 単位では重複を許容する。

@@ -660,7 +660,7 @@ tree は entries を単一の flat 配列で持つ。スコープ境界規則 (�
 規範:
 
 - 1 scope の直下ファイル数の想定上限は 10,000 (soft limit)。超過時 `kcs index` は警告を表示し、サブフォルダへの分割または ignore を提案する (処理自体は継続する)
-- snapshot 時に tree_hash が現在の HEAD の tree と一致する場合、auto snapshot は commit を作らない (no-op、[05-runtime.md §8](05-runtime.md))。tree は CAS object なので、内容不変なら新規 object も生成されない (tree_hash は保存バイト列の content hash、§8.1)
+- snapshot 時に tree_hash が現在の HEAD の tree と一致する場合、auto snapshot は commit を作らない (no-op。**例外 = resurrection finalize と tool_lock_hash の変化** — no-op 判定は tree_hash と commit の tool_lock_hash の両方を比較する。正本 [05-runtime.md §8.1](05-runtime.md))。tree は CAS object なので、内容不変なら新規 object も生成されない (tree_hash は保存バイト列の content hash、§8.1)
 - 1 ファイルの変更で tree 全体 (上表のサイズ) が新 object として書かれるのは仕様どおりの挙動である。pack/delta 圧縮 (§2, v2+) の導入判断は、この見積りの実測値で再評価する
 
 ## chunk
