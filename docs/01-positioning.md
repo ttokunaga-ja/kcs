@@ -141,7 +141,7 @@ Perkeep は思想的に KCS と最も近い (content-addressed、ローカル中
 KCS が同じ轍を踏まないための行動原則:
 
 1. **最初の体験を即効的にする**: `kcs init → kcs index --approve → kcs search "あの PDF" → kcs open <pointer>` で価値が出る状態。「思想」を最初に売らない。
-2. **ファイルシステムとの関係を明示**: 原本は元の場所にある。`.kcs` は隠しメタデータ。Perkeep のように「全部 blob に持っていく」ことはしない。
+2. **ファイルシステムとの関係を明示**: 原本は元の場所にある。`.kcs` は原本を置き換えない隠しアーカイブ層 (CAS コピー + metadata — 容量は原本相当 + 派生を見込む)。Perkeep のように「blob store を原本の置き場にする」ことはしない。
 3. **content-addressed は手段、Evidence Pointer は目的**: ユーザーに blob/CAS を見せない。見せるのは「根拠が死なない」結果だけ。
 4. **既存ワークフローに乗る**: Obsidian vault / Documents / Downloads を **置き換えず横断する** 外部アーカイブ層として始める (詳細 §8)。
 

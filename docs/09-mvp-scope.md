@@ -97,7 +97,8 @@ Step 別の目安 (テスト除く):
   Step 2   3,500 -  5,000 LOC   pipeline / adapter / budget / resume / retry
   Step 3   3,500 -  5,000 LOC   FTS / vector / hybrid / Evidence Pointer
   Step 4   1,500 -  2,500 LOC   restore / time-travel / purge 最小形 / verify
-  合計    11,000 - 16,500 LOC   (総期間 7-10 ヶ月)
+  合計    11,000 - 16,000 LOC   (総期間 7-10 ヶ月。Step 別最大の単純合計 16,500 は
+                                 総額上限 16,000 に切られる — 全 Step 同時に上限へ達する配分は取らない)
 ```
 
 これを超えるなら設計肥大化の兆候。§3.1 で Phase 4+ に割り当てた機能を Step 1-4 に前倒しした場合も同じ兆候として扱う。テスト除き 16,000 LOC を超えたら削減先を検討する: multi-scope search の設定項目縮小 ([05-runtime.md §1.8](05-runtime.md))、`kcs repair --verify-objects` の自動定期実行の Phase 4+ 送り、export/import 予約行の据え置き等。総額上限 11,000-16,000 LOC 自体は動かさない。7 クレートを一度に書こうとしないこと。Step 1 を書く前に Phase 4-5 の細部を詰めると空中楼閣化する。
@@ -244,6 +245,10 @@ dogfood    開発者自身の実フォルダ (非公開)。数値は公開せず
 
 ```text
 Recall@10 = |expected ∩ 上位10件の distinct (raw_hash, section)| / |expected| のクエリ平均
+            (--all-history シナリオ (M3-2) は distinct 射影と expected 解決を
+             (raw_hash, section, path_at_commit) で行う — リネーム前後の両ヒットを別要素として
+             数える。raw_hash はリネームで不変のため、この拡張なしには M3-2 完了条件
+             「両方ヒット」が計測不能)
 Done 条件 = synthetic で各シナリオ Recall@10 >= 0.8
           + dogfood で 3 シナリオの手動成功確認
 ```
@@ -310,13 +315,14 @@ Status: draft (retarget 実装は Phase 4+ のため、期日は Phase 4 着手�
 
   検出 API:
   kcs evidence verify <pointer> [--strict]
-    → status = alive | tombstoned | not_found
+    → status = 6 値 union (正本 08 §4.3 — alive | tombstoned | not_found |
+               scope_unreachable | unverifiable | registry_duplicate)
 
 決定済み:
   - デフォルトは tombstone。完全削除 (履歴書き換え) は法的要件上必要な場合のみ (正本 08 §4.2)
   - tombstone レスポンス schema (正本 08 §4.1)
   - 完全削除時は KCS-E-PURGE-NOT-FOUND-001 (正本 08 §4.2)
-  - 検出 API: kcs evidence verify <pointer> [--strict] → alive|tombstoned|not_found (正本 08 §4.3)
+  - 検出 API: kcs evidence verify <pointer> [--strict] → 6 値 union (正本 08 §4.3)
 
 残未決:
   - bulk verify (--batch) のスループット要件 (実装自体が Phase 4+)

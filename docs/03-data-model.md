@@ -57,6 +57,8 @@ raw / prepared / image / chunk / embedding / manifest / toollock / tree / commit
   refs/
     heads/main
     tags-v1/tag-<digest64>          # canonical: digest64 = sha256(NFC + Unicode lowercase の論理 tag 名)
+    tags-v1/names.jsonl             # 論理 tag 名の truth (append-only ledger — 下記 tag 規則。
+                                    #  leaf が tag- で始まらないため ref 列挙と衝突しない)
     tags/<logical-name>             # legacy Unix raw-name refs (read-only compatibility)
   tombstones/ab/cd/<raw64>      purge の tombstone lifecycle 記録 (raw_hash ごとの append-only events[] —
                                 purged / retired。active 判定 = 末尾 event。05-runtime.md §3.5。CAS object ではない)
@@ -107,6 +109,16 @@ fallback で読み、canonical と legacy
 が併存するときは全表現が同じ commit を指す場合だけ受理する。履歴 tree 内の `path` は論理名なので、
 Windows で物理 leaf にできない既存 Unix 名も read/inspect は可能とし、restore 等の物理化直前に
 対象 OS の規則を別途検証する。
+
+**論理名の truth**: digest は一方向であり、canonical ref (leaf + commit_hash 値) からは論理 tag 名を
+復元できない。tag 作成時に `refs/tags-v1/names.jsonl` (append-only JSONL) へ
+`{ digest64, logical_name (NFC 原表記), recorded_at }` を append する — これが論理 tag 名の truth
+(chunks.jsonl と同じ追記・fsync 規律 — [04-pipeline.md §1.1](04-pipeline.md))。**書込順序 =
+names 行 append (fsync) → ref 作成** (逆順は crash で名前なし ref を作る)。列挙・表示・export は
+names.jsonl で digest を解決する。対応行の無い canonical ref は fsck が corruption として報告する
+([10-operations.md §7.5.1](10-operations.md))。ref の無い names 行は tag 削除後の残存として正常
+(順序の帰結でもある)。同一 digest の複数行は最終行を表示名とする (NFC + lowercase が同じ名前は
+同一 slot — 表記ゆれの上書きは append で表現)。
 
 **format_version**: 旧称 `VERSION 0.1.0` (旧 research/kcs.md) は `kcs_format_version` に統一。semver は [10-operations.md §12.5](10-operations.md) 参照。**保存場所 = `.kcs/scope.json` の `kcs_format_version` フィールド** (init 時に記録し migration でのみ更新。読めない・欠落した store は旧版とみなし read-only + migration 誘導 — 互換判定の入力)。
 
@@ -266,7 +278,7 @@ cache = scope_registry / aggregator 検索の探索対象一覧 / stale 検出 /
 | `.kcs/chunks.jsonl` | JSONL (append-only) | **truth** (chunk の世代 association / created_at / first_seen_commit / 生成時点 path — chunk object には含めない §8) | 復旧不能 (SQLite rebuild の入力) | §8 / [04-pipeline.md §4.1](04-pipeline.md) |
 | `.kcs/index/sqlite.db` | **SQLite** (chunks / chunk_config_generations / chunk_publications / chunk_fts / embeddings / chunk_vec / tree_entries / index_metadata の 8 表) | cache | `kcs repair --rebuild-db` | [04-pipeline.md §4](04-pipeline.md) |
 | `~/.local/share/kcs/scope-registry.sqlite` | **SQLite** (`scopes` 1 表) | cache | 各 `.kcs` の rescan | [10-operations.md §3](10-operations.md) |
-| `~/.local/share/kcs/cost-ledger.sqlite` | **SQLite** (`cost_ledger` / `batch_requests` の 2 表、WAL) | 運用データ (課金台帳 + **in-flight Batch intent の正本** — [04-pipeline.md §5.8](04-pipeline.md)。tasks.jsonl と異なり喪失許容ではない) | 確定課金は再構築不可 (Adapter 報告値の記録であり再導出元がない)。in-flight は provider job 一覧の intent_token 全走査で回収 | [04-pipeline.md §5.4](04-pipeline.md) (SQL 正本) |
+| `~/.local/share/kcs/cost-ledger.sqlite` | **SQLite** (`cost_ledger` / `batch_requests` の 2 表、WAL) | 運用データ (課金台帳 + **in-flight intent (Batch job / sync request) の正本** — [04-pipeline.md §5.8](04-pipeline.md)。tasks.jsonl と異なり喪失許容ではない) | 確定課金は再構築不可 (Adapter 報告値の記録であり再導出元がない)。in-flight は batch 行が provider job 一覧の intent_token 全走査、sync 行が provider request id 照会 (照会不能は estimated 確定 — [04-pipeline.md §5.4](04-pipeline.md)) で回収 | [04-pipeline.md §5.4](04-pipeline.md) (SQL 正本) |
 
 **SQLite を使うのはこの表の 3 ファイル (計 11 テーブル)**。うち index/sqlite.db と scope-registry.sqlite は正本から再構築可能な検索キャッシュ、**cost-ledger.sqlite だけは再構築不可の運用台帳** (cache ではない — schema 変更は rebuild でなく in-place migration 側、[10-operations.md §7.5.3](10-operations.md))。コンテンツの truth は引き続きファイル (CAS objects/ ほか) が正本であり、tasks.jsonl は喪失許容の JSONL のまま。旧 spec が SQLite テーブルとして定義していた `files` / `normalization_runs` / `prepared_units` は採用しない (§8、[04-pipeline.md §4.7](04-pipeline.md))。課金 + in-flight intent の記録は 2026-07-18 に JSONL 3 ファイル構成から cost-ledger.sqlite へ確定した ([04-pipeline.md §5.4](04-pipeline.md) — 2 相プロトコルが UNIQUE・単一 Tx・ON CONFLICT 冪等の保証を正本要件とするため)。
 
@@ -352,8 +364,11 @@ tool_lock_hash = "sha256:" + base16(sha256(JCS({
 
 **preimage の保存**: tool-lock の materialize ([07-adapter-spec.md §6](07-adapter-spec.md)) 時に、この
 canonical JCS bytes を `objects/toollocks/ab/cd/<hash64>` へ content-addressed で保存する (immutable) —
-commit の `tool_lock_hash` から当時の lock 内容 (model pin・Adapter 定義) を復元・検証できる
-(manifest object と同族。fsck の再 hash 対象 — [10-operations.md §7.5.1](10-operations.md))。
+commit の `tool_lock_hash` から当時の **lock 構成 (各 role の tool_id / profile_hash の組)** を
+復元・検証できる (manifest object と同族。fsck の再 hash 対象 — [10-operations.md §7.5.1](10-operations.md))。
+**profile_hash の preimage (model pin・Adapter 定義本体) はデバイスローカル tools.toml 側にあり、
+hash からの逆算・内容復元は保証しない** — toollock object の目的は identity の検証であって
+過去 profile 内容の再現ではない (§11)。
 作業コピー `tool-lock.json` は最新版であり、過去版の解決は toollock object のみが担う。
 
 `cmd`/`args`/`url`/`config_hash`/capabilities は入力に含めない。embedding のみ次元・距離・modality を含めるのは、横断検索互換性 (§7) の決定根拠になるため。optional adapter は未設定なら省略 (null と識別しない)。

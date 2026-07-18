@@ -170,9 +170,17 @@ bulk 系 (`kcs evidence verify --batch <pointers.jsonl>`) は従来どおり各�
     alive を返してよい** ([05-runtime.md §3.5](05-runtime.md) — 検索の時点条件には影響しない)。
     時点帰属は検証できないため --strict verify は
     unverifiable (exit 3) — 再 ingest 後の manifest は run_id 等が異なり旧 hash を再生できない
-    ([03-data-model.md §2.1](03-data-model.md)) ので、この降格は恒久である。**6b でも 6a の v3 検証
+    ([03-data-model.md §2.1](03-data-model.md)) ので、この降格は恒久である。**6b でも 6a の v2/v3 検証
     (publication / association の introduction ancestry) は実施する** — cache は manifest と独立に
-    参照でき、失敗 = not_found (purge → 再 ingest 後の後着 chunk を旧 commit の証拠にしない)。
+    参照でき、失敗 = not_found。ただし**基準 commit は経路で異なる**: リンクを使わない直接解決は
+    従来どおり pointer の commit を基準にする (purge → 再 ingest 後の後着 chunk を旧 commit の
+    証拠にしない)。**resurrection link 経由の解決は、当該 retired event の `resurrection_commit` を
+    基準に検証する** — リンク先 commit が当該 chunk の publication / config association の
+    introduction を ancestor-or-equal に持つこと (再 ingest の publication は旧 pointer commit の
+    後続にあるため、旧 commit 基準ではリンク経路が恒久に不達になる)。リンクとして有効なのは
+    **末尾が `retired` の lifecycle の最終 retired event のみ** (再 purge 済み = 末尾 `purged` は
+    手順 5 で tombstoned)。リンク先 commit が不在・ref 不達、または上記検証に失敗した場合は
+    リンクを使わず直接解決の規則へ戻る (それも失敗なら not_found)。
     unverifiable になるのは manifest done 検査のみ。`manifest_missing` は `commit_shallow` と
     独立の response field であり併存し得る
 7.  chunk_hash で chunk object を解決し byte_start/byte_end の text を取り出す
@@ -194,8 +202,10 @@ bulk 系 (`kcs evidence verify --batch <pointers.jsonl>`) は従来どおり各�
   - raw object が存在 (purge されていない)
   - chunk object が存在 (= 同一 tool_profile_hash で生成済み)
 
-部分的失敗 (status は 3 値):
+部分的失敗 (代表例 — status union の正本は §4.3):
   - purged raw_hash (tombstone あり):   tombstoned — tombstone を返す (§4.1)
+  - scope 解決の重複 (validated ∪ live 候補 ≥2): registry_duplicate
+                                        — KCS-E-REGISTRY-DUP-001 (§3.1 手順 1a)
   - tombstone なしで raw object 不在:   not_found — KCS-E-PURGE-NOT-FOUND-001 (§4.2)
   - scope の .kcs に到達できない:        scope_unreachable — scope_path 不達かつ
                                         scope_registry に scope_id 未登録

@@ -2,7 +2,7 @@
 
 この文書は、実装・UI・運用へ落とすときに問題になりやすい点を補足する。
 
-> **NOTE (2026-05 改訂)**: ポジショニング・ターゲットユーザー・MVP スコープ・Phase plan は **正本を [01-positioning.md](01-positioning.md) に移した**。本書はその下位の運用ルールを扱う。競合分析は [01-positioning.md §4](01-positioning.md) を参照。
+> **NOTE (2026-05 改訂)**: ポジショニング・ターゲットユーザー・MVP 境界の考え方は **正本を [01-positioning.md](01-positioning.md) に移した** (機能 × Step 割当・実装時期の正本は [09-mvp-scope.md §3.1](09-mvp-scope.md) — README §1)。本書はその下位の運用ルールを扱う。競合分析は [01-positioning.md §4](01-positioning.md) を参照。
 
 MVP は **「Evidence-grounded local knowledge archive」としての最小完全系** として扱う。「全部入りの Git for knowledge」を目指さない。詳細は [01-positioning.md §5](01-positioning.md)。
 
@@ -465,6 +465,9 @@ kcs repair --verify-objects
   (不一致 = 破損ではなく「**未 finalize の進行状態**」として incomplete (exit 3) — manifest finalize と
   次回 snapshot の間のクラッシュ窓で正常に生じる。次回 index / batch resume が同期する。corruption と
   するのは manifest object 自体の再 hash 不一致のみ)
+- canonical tag ref (`refs/tags-v1/tag-*`) は対応する `names.jsonl` 行 (論理名の truth —
+  [03-data-model.md §2](03-data-model.md)) の存在を検査し、欠落は corruption として報告する
+  (ref の無い names 行は tag 削除後の残存として正常)
 - SQLite index は検証対象外 (破損時は `--rebuild-db` で再構築可能なため)
 
 破損検出時の挙動:
@@ -485,18 +488,28 @@ purge との整合: validated tombstone (lifecycle の event が purged / retire
 event を削除せず監査を残すため説明能力を保つ) または fsck-only erase receipt が説明する missing raw と
 その derived (chunk・**当該 (raw_hash, tool_profile_hash) 配下の manifest object**) は正常な dead terminal として数え、
 corruption にしない。**説明範囲の限定**: tombstone / erase receipt が説明できるのは、当該 purge event の
-時点 (purged_in_commit) **以前**の commit が参照する closure に限る — retire 後に再作成・再公開された
+時点 (当該 purged / erased event の `in_commit`) **以前**の commit が参照する closure に限る — retire 後に再作成・再公開された
 object の欠落は corruption とする (古い退役 event が新規破損を隠さない)。**tree 欠落**は
 `.kcs/gc/shallowed/<commit64>` receipt が説明する場合のみ正常
 (shallow — [05-runtime.md §2.2](05-runtime.md))、receipt なき欠落は corruption。receipt-covered bytes は working copy から
 自動復元しない。receipt は public pointer API と re-ingest barrier には使わない。purge journal が active
 なら incomplete exit 3。marker 無し missing は ordinary store corruption、malformed / identity-conflicting
-receipt も corruption とする。verified raw と stale receipt が共存する場合は raw を正として locked repair
-完了時に receipt を除去する。
+receipt も corruption とする。verified raw と receipt の共存は、末尾 event が `retired` の lifecycle なら**正常**
+(resurrection — [05-runtime.md §3.5](05-runtime.md))。末尾 event が `erased` のまま verified raw が
+存在する場合は raw を正とし、locked repair / 次の locked mutation で `retired` event を append して
+整合させる (**receipt は除去しない** — 除去すると旧 commit が参照する manifest 欠落を説明する
+ものが消える)。
 
-erase receipt の validation は strict schema/leaf identity に加え、`purged_in_commit` が bounded verified
-CAS で ref-reachable な `commit_type=purged` commit を指すこと、`erased_at` が canonical UTC でその
-commit の `created_at` と一致し、invocation の fixed now より未来でないことを必須とする。
+erase receipt の validation は schema_version で分岐する。**v2 (events[])**: strict schema / leaf
+identity に加え、各 event が kind 別の必須 field (erased / retired 共通 = `at`・`in_commit`・`actor`、
+retired はさらに `resurrection_commit`) を持つこと、`erased` event の `in_commit` が bounded verified
+CAS で ref-reachable な `commit_type=purged` commit を指すこと、各 `at` が canonical UTC でその event
+の commit `created_at` と一致し invocation の fixed now より未来でないこと、event 列が有効な遷移
+(erased を先頭に erased / retired が交互 — 末尾 event が現況) であること、terminal `retired` の
+`resurrection_commit` が ref-reachable であることを必須とする。**v1 flat (`erased_at` /
+`purged_in_commit`)**: 「erased event 1 件」に正規化してから同じ検証器に通す
+([05-runtime.md §3.5](05-runtime.md) の読取規則)。**tombstone lifecycle にも同じ event 検証**
+(kind 別必須 field・末尾 event 規則・torn / malformed = corruption) を適用する。
 
 MVP では手動実行のみとする。自動定期検証 (スケジューラ連携) は Phase 4+ の論点。
 

@@ -578,7 +578,7 @@ KCS は「原則として忘れない」が、**purge は「忘れる」ので�
 
 ## 3.3 Dead Evidence Pointer のセマンティクス
 
-「Evidence Pointer の不変性」と「法務 purge」の緊張領域。正本は [08-evidence-pointer-spec.md §4](08-evidence-pointer-spec.md)。残未決 (bulk verify スループット / 二重 purge) は [09-mvp-scope.md §5.3](09-mvp-scope.md)。以下は採用済みセマンティクスの要約。
+「Evidence Pointer の不変性」と「法務 purge」の緊張領域。正本は [08-evidence-pointer-spec.md §4](08-evidence-pointer-spec.md)。残未決 (bulk verify スループット — 1 件) は [09-mvp-scope.md §5.3](09-mvp-scope.md)。以下は採用済みセマンティクスの要約。
 
 ```text
 purge 後の pointer 解決:
@@ -595,7 +595,8 @@ purge 後の pointer 解決:
 
 検出 API:
 kcs evidence verify <pointer> [--strict]
-  → status=alive | tombstoned | not_found
+  → status = 6 値 union (alive | tombstoned | not_found | scope_unreachable |
+             unverifiable | registry_duplicate — 正本 08 §4.3)
 ```
 
 ## 3.4 purge スコープは `.kcs` 単位
@@ -649,7 +650,12 @@ preview と完了表示は、対象 raw_hash と同一 bytes の原本が workin
 
 **tombstone の退役 (resurrection)**: 同一 raw_hash の raw object が再 publication された場合、その
 publication と同一の locked mutation 内で active tombstone を**退役 (retire)** させる — tombstone
-レコードの events[] へ `retired` を append する (下記 lifecycle 形式)。以後の
+レコードの events[] へ `retired` を append する (下記 lifecycle 形式)。**耐久順序**: retire の
+append は再 publication の snapshot finalize (§8.1 — chunks.jsonl → SQLite → commit / ref publish)
+の**完了後**に行う。間で crash した場合は tombstone が active のまま残る (安全側 — 解決は
+tombstoned)。次回の locked mutation または fsck が「active tombstone × 同一 raw の ref 到達可能な
+再 publication commit」を検出したら retired event を補完する (erase receipt の crash 整合規則と
+同型)。以後の
 open / view / verify / 解決は alive を返す (退役なしには「tombstone 最優先」の解決規則と上記の
 「再び alive」が両立しない)。**retired event には `resurrection_commit` (再 publication を刻んだ
 commit — §8.1 no-op 例外 (a)) を記録する** — purge 前 commit を指す旧 pointer の解決は、このリンクを
@@ -668,7 +674,8 @@ journal record = { purge_id (ULID), raw_hash 群, reason, actor, started_at, tar
                    marker_kind (tombstone | erase),
                    closure (削除対象の全 object type × hash — 共有派生の live 参照判定の結果を含む),
                    planned_commit (purged commit の canonical bytes — prepared 相で確定し、
-                                   tombstone / receipt の purged_in_commit と一致する hash を先に固定) }
+                                   tombstone / receipt の purged / erased event の in_commit と
+                                   一致する hash を先に固定) }
 phase 順序    = prepared (closure 確定・記帳)
               → tombstoned (tombstone / erase receipt を先に耐久化 — 削除より前)
               → deleted (objects / SQLite / chunks.jsonl / logs の冪等削除)
@@ -717,8 +724,8 @@ canonical / legacy の両 variant が存在する場合に両方を検証し、�
   "events": [
     { "kind": "purged",  "at": "2026-04-25T12:00:00Z", "reason": "legal", "actor": "user",
       "in_commit": "sha256:9f2c..." },
-    { "kind": "retired", "at": "2026-05-01T09:00:00Z", "in_commit": "sha256:1a2b...",
-      "resurrection_commit": "sha256:1a2b..." }
+    { "kind": "retired", "at": "2026-05-01T09:00:00Z", "actor": "user",
+      "in_commit": "sha256:1a2b...", "resurrection_commit": "sha256:1a2b..." }
   ]
 }
 ```
@@ -733,8 +740,8 @@ fsck が区別できるよう、同じ digest-only fan-out に次の exact bound
   "events": [
     { "kind": "erased",  "at": "2026-04-25T12:00:00Z", "in_commit": "sha256:9f2c...",
       "actor": "user" },
-    { "kind": "retired", "at": "2026-05-01T09:00:00Z", "in_commit": "sha256:1a2b...",
-      "resurrection_commit": "sha256:1a2b..." }
+    { "kind": "retired", "at": "2026-05-01T09:00:00Z", "actor": "user",
+      "in_commit": "sha256:1a2b...", "resurrection_commit": "sha256:1a2b..." }
   ]
 }
 ```
@@ -846,7 +853,7 @@ MVP での snapshot 生成契機は次の 3 つのみ (常駐プロセスは持�
 
 **no-op 規則の例外 (2026-07-18 確定)**: (a) **resurrection finalize** (erase / purge 済み raw の再 ingest) は、同一 bytes の再現で tree_hash・chunk_set_hash が HEAD と一致しても publication commit を作る — retire event と introduction を刻む commit が無いと、復活した chunk を検索対象化できないか旧 introduction へ遡及するため。(b) **no-op 判定は tree_hash に加えて commit の `tool_lock_hash` も比較する** — embedding profile のみの更新でも lock が変われば commit を作る (現行 vector index と HEAD の provenance を一致させる)
 
-**snapshot finalize の耐久順序**: (1) chunks.jsonl へ creation / publication event 行を append + fsync → (2) SQLite 反映 → (3) commit / ref publish。(1) と (3) の間の crash で commit 不在の event 行 (dangling) が残った場合、rebuild はそれを無視し、次回 finalize が同内容を冪等に再 append する。chunks.jsonl 末尾の不完全行 (torn tail) は切り詰めて無視する (書込は [04-pipeline.md §1.1](04-pipeline.md) の fsync 規律)
+**snapshot finalize の耐久順序**: (1) chunks.jsonl へ creation / publication event 行を append + fsync → (2) SQLite 反映 → (3) commit / ref publish。(1) と (3) の間の crash で dangling event 行が残った場合、rebuild はそれを無視し ([04-pipeline.md §5.7](04-pipeline.md) と同一条件 — 生存する creation 行 / chunk object を持たない、**または** introduction commit が不在・ref から到達不能な行)、次回 finalize が同内容を冪等に再 append する。chunks.jsonl 末尾の不完全行 (torn tail) は切り詰めて無視する (書込は [04-pipeline.md §1.1](04-pipeline.md) の fsync 規律)
 
 ## 8.2 定期 Auto Snapshot (Phase 4 範囲)
 

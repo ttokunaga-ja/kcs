@@ -307,9 +307,9 @@ run は failed (retryable — 同一 mode で 1 回のみ再試行 (§5.2 表)�
 full への自動 fallback は行わない
 (fallback は incremental capability 非互換の場合のみ — 正本 [07-adapter-spec.md §8.1](07-adapter-spec.md))
 Batch 経由の場合の課金記帳・旧 intent の終端・再投入手順は §5.8 相 3 の reject 終端が正本
-(「1 回のみ」も同所の durable 判定に従う)。非 Batch (sync online) 実行の再試行カウントは
-プロセス内で保持する — プロセス喪失後の再発見は新たな 1 回として扱う (有界: 再試行の発火には
-ユーザーの index 実行を要し、無人で反復しない)
+(「1 回のみ」も同所の durable 判定に従う)。非 Batch (sync online) 実行も縮退 2 相の
+batch_requests 行 (§5.4) を使うため、「1 回のみ」の判定は同じ durable な
+contract_violation_count で行う (§5.8 — プロセス内カウントは持たない)
 full mode 応答の V5/V6 違反も同様に全体 reject + failed (invalid_input 系は retry しない)
 ```
 
@@ -658,7 +658,7 @@ monthly_usd_cap = 10.0
 ```
 
 - cap は二層で判定する。**device cap** (`~/.config/kcs/config.toml`、デバイス上の全 `.kcs` の当月合算に適用、既定 $50) が正であり、**folder cap** (`.kcs/config.toml`、その `.kcs` の当月消費のみに適用) は任意の追加制限。folder cap 未設定なら device cap のみが効く
-- 判定式: scope S の新規タスクを起動できるのは `ledger(S, 当月) + candidate < folder_cap(S)` **かつ** `ledger(device, 当月) + candidate < device_cap` のとき (= effective cap は両者の残余の min。candidate = 起動しようとするタスク自身の予約額)。`per_adapter` の下限は **device 層専用** (folder cap は total のみ — folder 側 `[budget.per_adapter]` は定義しない) で、**第三条件として同様に判定する**: `ledger(device, adapter_kind, 当月) + candidate < per_adapter_cap(adapter_kind)` (設定キー名 = adapter_kind と同一 enum: markdownize / embedding / summary。**enum 外の未知キーは schema error** — [10-operations.md §12.3](10-operations.md))。`ledger(...)` は cost_ledger の当月合算 (estimated 行も usd 非 NULL のため数値として効く — §5.8) + 未終端 batch_requests (state 0/1) の `estimated_usd` 合算 (= 予約)。**判定と相 1 の reservation 作成は同一の `BEGIN IMMEDIATE` Tx で行う** (check-then-act の並行超過を防ぐ — cap 超過なら相 1 を作らない)。**sync online 呼出は縮退 2 相に従う**: reservation は cost_ledger ではなく **batch_requests 行**で行う — 相 1 = 行作成 + `estimated_usd` 予約を cap 判定と同一 Tx で (intent_token = attempt token。§5.8 と同じ状態機械の縮約 — upload / job 相は無い)。呼出後、終端 (成功・billable reject・contract reject) の**確定記帳と state=2/3 を同一 Tx** で行い、**cost_ledger へは終端の確定行のみ**を追記する (cost_ledger は追記台帳のため予約 → 確定の書換えはできない — 予約の実体は batch_requests 側が持つ)。複数 external call を行うタスクは request 単位 (provider_request_id、無ければ attempt token) で冪等記帳し、課金済み call の盲目再試行を禁止する。**crash 回収**: 残った state 0/1 の sync 行は、provider_request_id で照会可能なら結果を確定し、照会不能なら unknown として estimated を確定記帳し state=3 で terminal 化する (過大計上を許容 — 未記帳の過少計上より安全側)
+- 判定式: scope S の新規タスクを起動できるのは `ledger(S, 当月) + candidate < folder_cap(S)` **かつ** `ledger(device, 当月) + candidate < device_cap` のとき (= effective cap は両者の残余の min。candidate = 起動しようとするタスク自身の予約額)。**candidate = 0 のタスク (単価 0 のローカル LLM — 下記) は cap 判定の対象外として起動できる** (cap は外部支出の上限であり、超過状態でも無償タスクは封鎖しない)。`per_adapter` の下限は **device 層専用** (folder cap は total のみ — folder 側 `[budget.per_adapter]` は定義しない) で、**第三条件として同様に判定する**: `ledger(device, adapter_kind, 当月) + candidate < per_adapter_cap(adapter_kind)` (設定キー名 = adapter_kind と同一 enum: markdownize / embedding / summary。**enum 外の未知キーは schema error** — [10-operations.md §12.3](10-operations.md))。`ledger(...)` は cost_ledger の当月合算 (estimated 行も usd 非 NULL のため数値として効く — §5.8) + 未終端 batch_requests (state 0/1) の `estimated_usd` 合算 (= 予約)。**判定と相 1 の reservation 作成は同一の `BEGIN IMMEDIATE` Tx で行う** (check-then-act の並行超過を防ぐ — cap 超過なら相 1 を作らない)。**sync online 呼出は縮退 2 相に従う**: reservation は cost_ledger ではなく **batch_requests 行**で行う — 相 1 = 行作成 + `estimated_usd` 予約を cap 判定と同一 Tx で (intent_token = attempt token。§5.8 と同じ状態機械の縮約 — upload / job 相は無い)。呼出後、終端 (成功・billable reject・contract reject) の**確定記帳と state=2/3 を同一 Tx** で行い、**cost_ledger へは終端の確定行のみ**を追記する (cost_ledger は追記台帳のため予約 → 確定の書換えはできない — 予約の実体は batch_requests 側が持つ)。複数 external call を行うタスクは request を直列化し、request ごとに新しい相 1 (submission_seq = MAX+1) → 終端を完了してから次の request を開始する (request 単位の冪等記帳 — 並行 request は作らない。課金済み call の盲目再試行を禁止)。**provider request id は応答受信直後・終端 Tx より前に行の `batch_job_id` へ耐久記録する** (下記 DDL — sync 行の照会キー)。**crash 回収** (書き込み系コマンド冒頭 — §5.8 の回復と同時): 残った state 0/1 の `request_kind='sync'` 行は、`batch_job_id` (provider request id) が記録済みで照会可能なら結果を確定し、未記録・照会不能なら unknown として estimated を確定記帳し state=3 で terminal 化する (過大計上を許容 — 未記帳の過少計上より安全側)。sync 行は §5.8 の job / upload 照合・可視化猶予・回復期限の対象外 (job / upload 相が無い) だが、abandon (同じ intent_token / 4 組指定) は適用できる
 - 累積コストは Adapter 報告値 (input/output token × 単価) を `~/.local/share/kcs/cost-ledger.sqlite` (デバイスグローバル 1 個。WAL + busy_timeout — [05-runtime.md §6](05-runtime.md)) に記録する。folder cap の判定はこの ledger の scope 別集計で行う (`.kcs` 内に ledger は置かない。cache/truth 規約上、課金台帳はデバイスローカルの運用データであり `.kcs` の truth ではないが、**再構築不可のため cache でもない** — [03-data-model.md §4.1](03-data-model.md)、schema 変更は in-place migration 側 [10-operations.md §7.5.3](10-operations.md))
 - store は 2 表で構成し、**以下の DDL を SQL 正本とする** (旧 3 JSONL + lock 構成は 2026-07-18 に廃止 — §5.8 の 2 相プロトコルは UNIQUE 制約・単一 Tx・ON CONFLICT 冪等という SQLite の保証を前提に監査された機構であり、append-only JSONL では等価の保証を構成できない。[10-operations.md §12.7](10-operations.md) リネーム表):
 
@@ -678,6 +678,11 @@ CREATE TABLE cost_ledger (               -- 確定・推定課金の追記台帳
         CHECK (usd >= 0),                --  負値も禁止 (cap の相殺・過少計上を防ぐ)
                                          --  NULL を無視すると budget 判定が過少 = 安全側の逆になる)
     estimated         INTEGER NOT NULL DEFAULT 0 CHECK (estimated IN (0, 1)),
+    outcome           TEXT NOT NULL DEFAULT 'succeeded'
+        CHECK (outcome IN ('succeeded', 'contract_violation', 'expired', 'abandoned',
+                           'submit_rejected', 'purged', 'unknown_settled')),
+                                         -- 終端確定行の到達理由 (§5.8 の各終端 Tx で必須記載)。
+                                         --  reset (--reset-violations) 後も違反履歴が台帳に恒久に残る
     month             TEXT NOT NULL,     -- 'YYYY-MM' (確定月配賦 — cap 集計キー)
     recorded_at       INTEGER NOT NULL,  -- UTC ミリ秒
     UNIQUE (scope_id, adapter_kind, input_hash, tool_profile_hash, submission_seq)
@@ -692,9 +697,14 @@ CREATE TABLE batch_requests (            -- in-flight Batch intent の正本 (§
     tool_profile_hash TEXT NOT NULL,
     state             INTEGER NOT NULL DEFAULT 0
         CHECK (state IN (0, 1, 2, 3)),   -- 0=投入前/中 1=job 作成済み 2=完了 3=terminal error
+    request_kind      TEXT NOT NULL DEFAULT 'batch'
+        CHECK (request_kind IN ('batch', 'sync')),
+                                         -- 縮退 2 相 (sync online) 行の判別 (§5.4)。回復の適用規則を
+                                         --  分岐する — sync 行は job/upload 照合・猶予・期限の対象外
     intent_token      TEXT,              -- UUIDv7 (相 1 で発行)。NULL 化は残骸掃除の完了時のみ (§5.8)
     upload_id         TEXT,              -- 相 2a 成功直後に記録
-    batch_job_id      TEXT,              -- 相 2b 成功後・または回復の found 自己記述化で記録
+    batch_job_id      TEXT,              -- 相 2b 成功後・または回復の found 自己記述化で記録。
+                                         --  sync 行では provider request id (応答受信直後に記録 — §5.4)
     provider_scope_id TEXT,              -- 相 2a の upload 直前に記録 (§5.8 手順 2 — 非 NULL は
                                          --  「相 2a 着手」の印)。相 1 の再発行で NULL へ戻る (手順 1)
     job_create_started_at INTEGER,       -- UTC ミリ秒。可視化猶予・回復期限の起点 (§5.8)
@@ -835,8 +845,12 @@ metadata から intent_token 規約に一致する job を全走査すること�
    (tasks.jsonl 喪失後もこの判定は batch_requests から回復できる。error 列は最新状態の表示であり
    判定源にしない — 相 1 が NULL へ戻すため)。count は**タスクキー単位の通算**であり mode 別に
    数えない (mode 切替後の違反も加算)。検証済み Adapter 更新後の脱出路として
-   `kcs batch retry --reset-violations <selector>` (確認プロンプト必須) が count を 0 に戻す —
-   違反の監査履歴は cost-ledger の記帳行に残る。provider が job の **expired** を報告した場合も
+   `kcs batch retry --reset-violations <selector>` (確認プロンプト必須) が count を 0 に戻す。
+   **selector は abandon と同形** (intent_token または 4 組タスクキー — 曖昧な指定は拒否して
+   token を要求)。**reset が変えるのは count のみ** — attempts・submission_seq・cost_ledger は
+   不変で、reset 後の再投入は旧 attempt の残骸掃除完了後に新 intent_token・新 submission_seq の
+   相 1 として開始する (順序規範と同型)。違反の監査履歴は cost-ledger の記帳行に残る
+   (**各終端確定行の `outcome` 列** — §5.4 DDL。reset は台帳を書き換えない)。provider が job の **expired** を報告した場合も
    reject 終端と同形: estimated を確定記帳 + state=3 (error='expired') + 掃除。expired 起因の
    再投入は通常の retry 予算に従い、contract_violation_count は増やさない
 
@@ -855,7 +869,10 @@ attempt の終端採番である (どちらも当該 attempt の「回復の再�
 `kcs batch abandon` — の冒頭。**これらと `kcs reindex` は `.kcs/.lock` を取得する書き込み系であり
 ([05-runtime.md §6](05-runtime.md))、相 1〜2b の遷移・token の発行も lock 保持下で行う** — 並行する
 resume/retry が同一行へ別 token を書くと、先行 job が無記録 in-flight になる。未終端の行 (state 0/1) と
-intent_token 非 NULL の終端行 (= 残骸掃除未完) を三値で照合する):
+intent_token 非 NULL の終端行 (= 残骸掃除未完) を三値で照合する。**`request_kind='sync'` の行は
+job / upload 照合の対象外** — §5.4 の crash 回収で終端化する。以下は batch 行の規則。回復の照会・
+出力取得・upload 掃除は既存 request に対する受信・掃除であり**新規送信に当たらない — network
+opt-in / `--online` なしで実行できる** ([07-adapter-spec.md §3](07-adapter-spec.md))):
 
 - **found** (job 取得/一覧で intent_token 一致): 追跡を続行し相 3 へ。batch_job_id 未記録なら発見値を
   行へ書く (自己記述化 — 以後この行は token 照合の対象から外れる)

@@ -16,12 +16,15 @@ kcs status                              # ファイル状態 / pending タスク
 kcs index [--preview|--approve|--yes] [--online|--offline]  # 取り込み (初回は preview + 承認必須)。
                                         # --online/--offline は当該実行の送信可否を上書き (正本 07-adapter-spec.md §3。
                                         # 優先順位: CLI > scope config > user config)
-kcs batch resume [--override-budget] [--online]  # 中断タスクの再開 (budget 超過 pause は --override-budget 必須。04-pipeline.md §5.4/§5.7)。
-                                        # --online は当該実行限りの一時 opt-in (07 §3 — resume/retry/reindex --force も online 作業を駆動するため)。
+kcs batch resume [--override-budget] [--online|--offline]  # 中断タスクの再開 (budget 超過 pause は --override-budget 必須。04-pipeline.md §5.4/§5.7)。
+                                        # --online は当該実行限りの一時 opt-in、--offline は当該実行の新規送信を禁止する逆向き上書き
+                                        # (online 作業は据え置き。07 §3 — resume/retry/reindex も online 作業を駆動するため)。
+                                        # in-flight の照会・出力取得・upload 掃除は新規送信に当たらず opt-in 不要 (04 §5.8 回復)。
                                         # markdownize online タスクと embedding enrichment パスを両方駆動 (04-pipeline.md §5.4)
-kcs batch retry [--online] [--reset-violations <selector>]  # failed タスクの再試行 (markdownize + embedding。backoff/retry 予算を尊重)。
+kcs batch retry [--online|--offline] [--reset-violations <selector>]  # failed タスクの再試行 (markdownize + embedding。backoff/retry 予算を尊重)。
                                         # --reset-violations = 検証済み Adapter 更新後に contract_violation_count を 0 へ戻す
-                                        # (確認プロンプト必須 — 04 §5.8。監査は cost-ledger に残る)
+                                        # (selector は abandon と同形: intent_token または 4 組タスクキー — 曖昧時は拒否。
+                                        # 変えるのは count のみ。確認プロンプト必須 — 04 §5.8。監査は cost-ledger の outcome 列に残る)
 kcs batch abandon <intent_token|scope/adapter/input_hash/tool_profile_hash>
                                         # 照合が恒久不能な in-flight Batch job の打ち切り (estimated 記帳 + terminal 化。
                                         # 指定子は intent_token または batch_requests の 4 組タスクキー (3 組では別
@@ -39,10 +42,11 @@ kcs open <pointer|chunk_hash|raw_hash>  # OS 規定アプリで原本を開く�
 kcs view <pointer|path> [--at <commit>]
 kcs inspect <hash>                      # object を JSON で表示
 kcs restore <evidence|path|commit> --to <dir> # 詳細 §5
-kcs tag <name> [<commit>]
+kcs tag <name> [<commit>]               # 論理名を refs/tags-v1/names.jsonl (truth) に append してから
+                                        # canonical ref を作る (書込順序固定 — 03-data-model.md §2)
 kcs gc [--dry-run|--prune-unreachable] # prune 対象は 05-runtime.md §2.6 (raw/chunk/commit は対象外)。実装は Phase 4+ (09 §3.1)
 kcs purge <path|--raw-hash <h>> --reason <reason> [--erase-tombstone] [--yes]  # 詳細 §6 (確認プロンプト必須 — --yes で省略)
-kcs reindex [--force] [--at <commit>] [--yes] [--online]  # --at = 過去 snapshot の embedding 再生成 (05-runtime.md §1)。
+kcs reindex [--force] [--at <commit>] [--yes] [--online|--offline]  # --at = 過去 snapshot の embedding 再生成 (05-runtime.md §1)。
                                         # --force = 新 gen で再 normalize / 再 embedding (Step 3)。--force は first-instance-wins の
                                         # 明示経路で gen+1 の新 instance を作る (07-adapter-spec.md §9。もう 1 つの合法経路 =
                                         # prepared_hash 変化起因の自動 gen+1 — 03-data-model.md §2.1)。
@@ -341,7 +345,7 @@ Adapter 種別と契約は [07-adapter-spec.md](07-adapter-spec.md)。
 
 ```bash
 kcs export <scope> --to <bundle.kcsz>
-kcs import <bundle.kcsz> --to <dir>     # bundle の scope_id が registry に live 登録済みなら拒否
+kcs import <bundle.kcsz> --to <dir> [--as-new-scope]  # bundle の scope_id が registry に live 登録済みなら拒否
                                         # (KCS-E-REGISTRY-DUP-001 — clone 併存を正規操作で作らない)。
                                         # 複製として取り込むには --as-new-scope で新 scope_id を採番
                                         # (fork 相当。以後の Evidence Pointer は新 ID を指す。既存 normalized 内の

@@ -68,7 +68,7 @@ KCS API の契約は実行形態に依らず同じ。
 KCS core
   → task descriptor (task_id, adapter_kind, input_hash, allowed scope, network permission)
   → device-local Adapter
-  → artifact descriptor (output_hash, status, error_kind)
+  → artifact descriptor (output_hash, status, error_code / error_category)
   → KCS core
 ```
 
@@ -120,11 +120,21 @@ revoke: adapter.policy.allow_network = false に設定する。
         schema 定義と一致)。
         初回スキャン承認 (10-operations.md §1) の記録とは別物 — あちらは scope 単位の
         取り込み承認、こちらは adapter 単位の network opt-in。
+        (b) の config boolean は scope 内の全 online_api Adapter に適用される blanket であり、
+        **次回実行時に現 profile で approvals[] 行を materialize する意思表示**として扱う —
+        行 materialize 後は (a) と同じ照合・失効規則に従う (tool_id 個別の可否は approvals[] が
+        単位。boolean だけでは profile 変化の失効を判定できないため、行なしでの送信は不可)。
 ```
 
-CLI フラグ `--online` は **その 1 回の実行に限る一時 opt-in** で、永続記録を作らない。適用対象は
-online 作業を駆動し得る全コマンド (`kcs index` / `kcs batch resume` / `kcs batch retry` /
-`kcs reindex --force` — [06-cli-spec.md §1](06-cli-spec.md))。
+CLI フラグ `--online` は **その 1 回の実行に限る一時 opt-in** で、**永続的な承認状態
+(`approvals[]` 行) を作らない** (実行の送信記録は §7 の log に残り、consent の由来 —
+approvals / cli_online — を含める)。`--offline` は逆向きの一時上書きで、当該実行の新規送信を
+禁止する (online 作業は据え置き pause)。適用対象は online 作業を駆動し得る全コマンド
+(`kcs index` / `kcs batch resume` / `kcs batch retry` / `kcs reindex` — `--force` / `--at <commit>`
+のいずれも online embedding を駆動し得る。[06-cli-spec.md §1](06-cli-spec.md))。**既存 in-flight
+request の照会・出力取得・upload 掃除 ([04-pipeline.md §5.8](04-pipeline.md) 回復) は新規送信に
+当たらず、opt-in / `--online` なしで実行できる** (opt-in が制御するのは新規 upload・job 作成・
+sync 呼出のみ)。
 優先関係は次のとおり:
 
 ```text
@@ -365,9 +375,10 @@ fetch_output(job_id)
 provider_scope_id()            下記の不変識別子を返す
 ```
 
-- **エラー分類の契約**: Adapter は失敗を transient (429 / 5xx / ネットワーク断 — `Retry-After` があれば
-  透過する) と permanent (内容起因の 4xx) に分類して報告する。分類と retry 予算の対応は
-  [04-pipeline.md §5.3](04-pipeline.md)
+- **エラー分類の契約**: Adapter は失敗を transient (5xx / ネットワーク断)・rate_limit (429 —
+  `Retry-After` があれば `retry_after_ms` で透過する)・permanent (内容起因の 4xx) の 3 分類で
+  報告する (§4 の error_category と同一 enum)。分類と retry 予算の対応は
+  [04-pipeline.md §5.3](04-pipeline.md) (rate_limit は Retry-After を解除条件とする retryable)
 - **課金報告**: task 完了時に実測コスト (または単価計算に足る unit 数) を報告する。報告値が cost ledger
   ([04-pipeline.md §5.4](04-pipeline.md)) の記録源である
 - **provider_scope_id**: `adapter 名前空間 + account 不変 ID (+ workspace 不変 ID)` の連結。表示名・
@@ -455,7 +466,8 @@ Markdownize / Embedding runtime にはこの dispatcher と承認経路はなく
 ```
 task_id, adapter_id, tool_profile_hash
 input_raw_hash, output_hash
-status, error_kind
+status, error_code, error_category, retry_after_ms
+network_consent (approvals | cli_online — 送信を伴った実行のみ)
 started_at, finished_at
 ```
 
