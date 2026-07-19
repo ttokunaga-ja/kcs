@@ -229,7 +229,10 @@ raw / prepared → normalized。非 text-native は文書処理 API 系 Adapter 
 2. raw_hash のみ変化 (tool_profile_hash は不変)
 3. Adapter が capabilities = ["incremental_update"] を宣言
 4. unit_mapping (§2.2) による変化率 < threshold (default 0.30)
-5. 直前 N 回 (default 5) 連続 incremental の場合は full を強制 (style drift 防止)
+5. 直前 N 回 (default 5) 連続 incremental の場合は full を強制 (style drift 防止。カウンタの
+   更新点: accepted された incremental 応答の finalize で +1・accepted された full 応答の
+   finalize で 0 へ reset — 正常な制御応答 (§3.2) と reject された応答はどちらにも数えない。
+   カウンタ喪失時は §5.7 の安全側規定 = full 強制)
 ```
 
 いずれかが満たされなければ自動 fallback to full。
@@ -312,7 +315,7 @@ V6 mode:      mode_used = "full" の場合は full 出力契約として検証:
               full 出力の全成功 unit に適用する** (V1 と同じく failed_units には適用しない)
 ```
 
-**制御応答 (fallback_to_full=true)**: `fallback_to_full=true` の応答は V1〜V6 に**先立ち**制御応答として評価する — unit 配列・unchanged / removed は空であること (非空は contract violation)。KCS は当該応答を成功・失敗のどちらの終端にもせず、**同一 task を `mode=full` で再発行する** (§3.1 の発動条件は再評価しない — Adapter 判断を尊重。full 応答での `fallback_to_full=true` は contract violation = ループ防止)。この評価順が無いと、§8.1 の「短絡」拒否権 ([07-adapter-spec.md §8.1](07-adapter-spec.md)) が V1 被覆違反 → 再試行 → failed permanent の死路になる。
+**制御応答 (fallback_to_full=true)**: `fallback_to_full=true` の応答は V1〜V6 に**先立ち**制御応答として評価する — unit 配列・unchanged / removed は空であること (非空は contract violation)。KCS は当該応答を成功・失敗のどちらの終端にもせず、**同一 task を `mode=full` で再発行する** (§3.1 の発動条件は再評価しない — Adapter 判断を尊重。full 応答での `fallback_to_full=true` は contract violation = ループ防止)。この評価順が無いと、§8.1 の「短絡」拒否権 ([07-adapter-spec.md §8.1](07-adapter-spec.md)) が V1 被覆違反 → 再試行 → failed permanent の死路になる。**終端の単位は request である**: 正常な制御応答の受領は当該 request の終端 (task は非終端) — 実測 usage を `outcome='fallback_to_full'` で確定記帳し state=3 を同一 Tx で行い (§5.4 / §5.8。sync 行は同 Tx で intent_token を NULL 化、batch 行は残骸掃除完了時 = 通常規則)、その後 `mode=full` の新 request を相 1 (submission_seq = MAX+1) として開始する (§5.4 の直列化規範を満たす)。正常な制御応答は `attempts` / `contract_violation_count` のどちらにも数えない (違反ではなく §5.2 の retry でもない) — 発動条件 5 の連続 incremental カウンタにも数えない (§3.1)。
 
 違反時の挙動:
 
@@ -637,6 +640,9 @@ running が heartbeat_at + 5min を超えたら stale。別 worker が pull 可�
   - Adapter が `incremental_update` を持つ場合: `mode=incremental`、
     `hints.changed_unit_keys = 失敗 unit のキー`、`previous = 同一 instance の done unit 群` で再投入
     (§3.1 の発動条件 4 (変化率 < threshold) は失敗 unit 集合に対して評価し、超過時は full で再投入)。
+    **合成 hints の残余 field は `added_unit_keys = []`・`removed_unit_keys = []` と定める** — 元 run で
+    added だった失敗 unit も retry では changed として再投入し、成功出力は `updated_units` 側で返る。
+    §3.2 の V1〜V6 (V2 の removed 完全一致・V4 の added 集合式を含む) はこの合成値に対して評価する。
     この再投入の受け入れ検査 (§3.2) では **N = 合成した hints の集合 (= 失敗 unit のみ)** —
     既 done の unit は N に含まれず、応答への再掲 (unchanged への列挙を含む) も要求しない
   - 持たない場合: `mode=full` で再実行するが、既に done の unit は first-instance-wins で既存を保持し、
@@ -691,6 +697,7 @@ monthly_usd_cap = 10.0
 
 - cap は二層で判定する。**device cap** (`~/.config/kcs/config.toml`、デバイス上の全 `.kcs` の当月合算に適用、既定 $50) が正であり、**folder cap** (`.kcs/config.toml`、その `.kcs` の当月消費のみに適用) は任意の追加制限。folder cap 未設定なら device cap のみが効く
 - 判定式: scope S の新規タスクを起動できるのは `ledger(S, 当月) + candidate < folder_cap(S)` **かつ** `ledger(device, 当月) + candidate < device_cap` のとき (= effective cap は両者の残余の min。candidate = 起動しようとするタスク自身の予約額)。**candidate = 0 のタスク (単価 0 のローカル LLM — 下記) は cap 判定の対象外として起動できる** (cap は外部支出の上限であり、超過状態でも無償タスクは封鎖しない)。`per_adapter` の下限は **device 層専用** (folder cap は total のみ — folder 側 `[budget.per_adapter]` は定義しない) で、**第三条件として同様に判定する**: `ledger(device, adapter_kind, 当月) + candidate < per_adapter_cap(adapter_kind)` (設定キー名 = adapter_kind と同一 enum: markdownize / embedding / summary。**enum 外の未知キーは schema error** — [10-operations.md §12.3](10-operations.md))。`ledger(...)` は cost_ledger の当月合算 (estimated 行も usd 非 NULL のため数値として効く — §5.8) + 未終端 batch_requests (state 0/1) の `estimated_usd` 合算 (= 予約)。**判定と相 1 の reservation 作成は同一の `BEGIN IMMEDIATE` Tx で行う** (check-then-act の並行超過を防ぐ — cap 超過なら相 1 を作らない)。**sync online 呼出は縮退 2 相に従う**: reservation は cost_ledger ではなく **batch_requests 行**で行う — 相 1 = 行作成 + `estimated_usd` 予約を cap 判定と同一 Tx で (intent_token = attempt token。§5.8 と同じ状態機械の縮約 — upload / job 相は無い)。呼出後、終端 (成功・billable reject・contract reject) の**確定記帳と state=2/3 を同一 Tx** で行い、**cost_ledger へは終端の確定行のみ**を追記する (cost_ledger は追記台帳のため予約 → 確定の書換えはできない — 予約の実体は batch_requests 側が持つ)。複数 external call を行うタスクは request を直列化し、request ごとに新しい相 1 (submission_seq = MAX+1) → 終端を完了してから次の request を開始する (request 単位の冪等記帳 — 並行 request は作らない。課金済み call の盲目再試行を禁止)。**provider request id は応答受信直後・終端 Tx より前に行の `batch_job_id` へ耐久記録する** (下記 DDL — sync 行の照会キー)。**crash 回収** (書き込み系コマンド冒頭 — §5.8 の回復と同時): 残った state 0/1 の `request_kind='sync'` 行は、`batch_job_id` (provider request id) が記録済みで照会可能なら結果を確定し、未記録・照会不能なら unknown として estimated を確定記帳し state=3 で terminal 化する (過大計上を許容 — 未記帳の過少計上より安全側)。sync 行は §5.8 の job / upload 照合・可視化猶予・回復期限の対象外 (job / upload 相が無い) だが、abandon (同じ intent_token / 4 組指定) は適用できる。**sync 行は provider 側に残骸 (upload / job) を作らないため、全ての終端 Tx (成功・reject・unknown 精算・abandon) で同一 Tx 内に `intent_token` を NULL 化する** — 「NULL 化は残骸掃除の完了時のみ」(§5.8) は batch 行の規則であり、sync では終端 = 掃除完了である (これが無いと「旧 token の消し込み完了後にのみ再投入可」の順序規範と衝突し、同一タスクキーの再投入が恒久停止する)。複数 request の途中 (前 request 終端済み・次 request 未開始) で crash した場合は、終端済み行 (token NULL) への通常の相 1 (新 token・MAX+1) で次の request から再開する。**crash 回収が確定するのは記帳と state のみ** — 照会で得た出力は persist しない (出力が必要なら新しい相 1 で再実行する。出力を persist する経路は相 3 と同じく persist 直前の tombstone 再検査に従う — [05-runtime.md §3.5](05-runtime.md))
+- **query embedding request** (vector|hybrid 検索の page 1 — [05-runtime.md §1](05-runtime.md)) は `scope_id = 'device'` (予約値 — scope_id は ULID のため実 scope と衝突しない) の `request_kind='sync'` 行として上記縮退 2 相に載せる。`adapter_kind = 'embedding'`・`input_hash = NFC 正規化した query 文字列の sha256` (query 本文は保存しない — [05-runtime.md §1.5](05-runtime.md) と同じ方針)。folder cap 判定 (scope 別集計) には現れず、device cap / `per_adapter` (embedding) の合算には通常どおり含まれる — 判定式は不変。送信可否の consent gate は [05-runtime.md §1.1](05-runtime.md) / [07-adapter-spec.md §3](07-adapter-spec.md)
 - 累積コストは Adapter 報告値 (input/output token × 単価) を `~/.local/share/kcs/cost-ledger.sqlite` (デバイスグローバル 1 個。WAL + busy_timeout — [05-runtime.md §6](05-runtime.md)) に記録する。folder cap の判定はこの ledger の scope 別集計で行う (`.kcs` 内に ledger は置かない。cache/truth 規約上、課金台帳はデバイスローカルの運用データであり `.kcs` の truth ではないが、**再構築不可のため cache でもない** — [03-data-model.md §4.1](03-data-model.md)、schema 変更は in-place migration 側 [10-operations.md §7.5.3](10-operations.md))
 - store は 3 表で構成し、**以下の DDL を SQL 正本とする** (旧 3 JSONL + lock 構成は 2026-07-18 に廃止 — §5.8 の 2 相プロトコルは UNIQUE 制約・単一 Tx・ON CONFLICT 冪等という SQLite の保証を前提に監査された機構であり、append-only JSONL では等価の保証を構成できない。[10-operations.md §12.7](10-operations.md) リネーム表):
 
@@ -715,7 +722,8 @@ CREATE TABLE cost_ledger (               -- 確定・推定課金の追記台帳
     estimated         INTEGER NOT NULL DEFAULT 0 CHECK (estimated IN (0, 1)),
     outcome           TEXT NOT NULL      -- DEFAULT を持たない — INSERT での明示を必須にする
         CHECK (outcome IN ('succeeded', 'contract_violation', 'expired', 'abandoned',
-                           'submit_rejected', 'purged', 'unknown_settled')),
+                           'submit_rejected', 'purged', 'unknown_settled',
+                           'fallback_to_full')),
                                          -- 終端確定行の到達理由 (§5.8 の対応表と同一 Tx で必須記載。
                                          --  DEFAULT 'succeeded' を許すと省略記帳が成功に化け、
                                          --  ON CONFLICT 冪等の下で訂正不能になる)。
@@ -915,7 +923,9 @@ attempt の終端採番である (どちらも当該 attempt の「回復の再�
 **outcome の対応 (各終端 Tx の INSERT で明示必須 — 省略は実装エラー、§5.4 DDL は DEFAULT を持たない)**:
 正常完了 = `succeeded` / §3.2 reject 終端 = `contract_violation` / expired 終端 = `expired` /
 abandon = `abandoned` / 拒否課金 provider の submit 拒否 = `submit_rejected` / purge 起因の
-terminal 化 (error='purged') = `purged` / 回復期限超過・照会不能の estimated 確定 = `unknown_settled`。
+terminal 化 (error='purged') = `purged` / 回復期限超過・照会不能の estimated 確定 = `unknown_settled` /
+正常な制御応答 (`fallback_to_full=true`、§3.2) の request 終端 = `fallback_to_full` (task 非終端 —
+同 Tx 群の完了後に `mode=full` の新 request を相 1 で開始する)。
 
 **記帳値の事前検証**: Adapter 報告値 (usd / unit 数) は INSERT 前に有限・非負の数値であることを
 検証し、違反は §3.2 の contract violation と同経路で reject 終端する (KCS-E-ADAPTER-CONTRACT-001)。

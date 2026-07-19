@@ -809,7 +809,7 @@ DOMAIN:
   AUTH     認証・認可
 ```
 
-例: `KCS-E-BATCH-NET-001`, `KCS-E-SEARCH-VEC-INCOMPAT-001`, `KCS-E-SEARCH-VEC-UNAVAIL-001`, `KCS-E-COMMIT-SHALLOW-001`, `KCS-E-PURGE-NOT-FOUND-001`, `KCS-E-STORE-PATH-001`, `KCS-E-STORE-CORRUPT-001`, `KCS-E-SEARCH-SCOPE-ALL-FAILED-001`, `KCS-E-SEARCH-CURSOR-001`, `KCS-E-INDEX-REBUILDING-001`, `KCS-E-EVIDENCE-SCOPE-UNREACHABLE-001`, `KCS-E-EVIDENCE-RETARGET-AMBIG-001`, `KCS-E-ADAPTER-CONTRACT-001`。各 code の定義箇所は該当 spec (06-cli-spec.md §8 に一覧と参照先) を参照。
+例: `KCS-E-BATCH-NET-001`, `KCS-E-SEARCH-VEC-INCOMPAT-001`, `KCS-E-SEARCH-VEC-UNAVAIL-001`, `KCS-E-SEARCH-VEC-UNAUTHORIZED-001`, `KCS-E-COMMIT-SHALLOW-001`, `KCS-E-PURGE-NOT-FOUND-001`, `KCS-E-STORE-PATH-001`, `KCS-E-STORE-CORRUPT-001`, `KCS-E-SEARCH-SCOPE-ALL-FAILED-001`, `KCS-E-SEARCH-CURSOR-001`, `KCS-E-INDEX-REBUILDING-001`, `KCS-E-EVIDENCE-SCOPE-UNREACHABLE-001`, `KCS-E-EVIDENCE-RETARGET-AMBIG-001`, `KCS-E-ADAPTER-CONTRACT-001`。各 code の定義箇所は該当 spec (06-cli-spec.md §8 に一覧と参照先) を参照。
 
 各 spec が定義した個別エラー (04-pipeline.md / 05-runtime.md / 06-cli-spec.md 等) はこの namespace に従う。新規 code 追加は本書および該当 spec の更新を伴う (破壊的変更扱い)。
 
@@ -849,7 +849,7 @@ dead pointer (tombstoned / not_found) は `4`、**scope_unreachable のみは re
 
 validation 失敗は exit code 2 で停止し、`KCS-E-CONFIG-SCHEMA-NNN` を返す。schema は semver で版管理し、breaking change は migration を要求 (§12.5)。
 
-`scope.schema.json` は少なくとも次の key を定義する: `scope_id` (required)・子 `.kcs` リンク ([03-data-model.md §2](03-data-model.md))・`scan_approval` (optional — §1 の取り込み承認記録。required field は §1 の記録一覧と一致)・`approvals[]` (optional — adapter 単位の network opt-in。要素の required field = scope_id / tool_id / execution_mode / tool_profile_hash / approved_at / approval_method / status (`active` | `revoked`)、status=revoked の行は revoked_at も必須 — [07-adapter-spec.md §3](07-adapter-spec.md))・`approvals_initialized` (optional boolean — 初回承認の行 publish と同一 atomic write で true 化する消費済み marker。true かつ approvals[] 空 = 台帳喪失として blanket 自動 materialize を fail-closed にする、07 §3)。**未知 key は schema error** (fail-closed)。両 key (および marker) を欠く旧 scope.json は valid であり、欠落 = 当該承認なしとして扱う (migration 不要の後方互換)。**要素単位の後方互換**: `status` フィールドを持たない approvals[] 行 (r9 スキーマ以前の承認記録) は schema error にせず **`status='active'` として読む** — 行は明示承認の記録であり、execution_mode / tool_profile_hash の一致検査 (失効判定) は従来どおり効く。次回の locked mutation で `status='active'` を atomic に補完書込みし、補完後は現行 schema で検証する (要素単位の欠落で CLI 全体を exit 2 停止させない)。
+`scope.schema.json` は少なくとも次の key を定義する: `scope_id` (required)・子 `.kcs` リンク ([03-data-model.md §2](03-data-model.md))・`scan_approval` (optional — §1 の取り込み承認記録。required field は §1 の記録一覧と一致)・`approvals[]` (optional — adapter 単位の network opt-in。要素の required field = scope_id / tool_id / execution_mode / tool_profile_hash / approved_at / approval_method / status (`active` | `revoked`)、status=revoked の行は revoked_at も必須 — [07-adapter-spec.md §3](07-adapter-spec.md))・`approvals_initialized` (optional boolean — 初回承認の行 publish と同一 atomic write で true 化する消費済み marker。true かつ approvals[] 空 = 台帳喪失として blanket 自動 materialize を fail-closed にする、07 §3)。**未知 key は schema error** (fail-closed)。この検証は `kcs_format_version` の互換判定より**後**に走る — 自己の対応上限より新しい version の store は schema validation に入らず read-only + 新版誘導で縮退する ([03-data-model.md §2](03-data-model.md))。公開後に scope.schema.json へ key を追加する場合は `kcs_format_version` の MINOR bump を伴う (§12.5 — bump が旧実装をこの縮退経路へ導く。未知 key = schema error 自体は維持する: marker 等 security 意味を持つ key を旧実装が黙って無視すると迂回が復活するため)。両 key (および marker) を欠く旧 scope.json は valid であり、欠落 = 当該承認なしとして扱う (migration 不要の後方互換)。**要素単位の後方互換**: `status` フィールドを持たない approvals[] 行 (r9 スキーマ以前の承認記録) は schema error にせず **`status='active'` として読む** — 行は明示承認の記録であり、execution_mode / tool_profile_hash の一致検査 (失効判定) は従来どおり効く。次回の locked mutation で `status='active'` を atomic に補完書込みし、補完後は現行 schema で検証する (要素単位の欠落で CLI 全体を exit 2 停止させない)。
 
 `user-config.schema.json` は device cap (`[budget]`、[04-pipeline.md §5.4](04-pipeline.md)) を含む。
 
@@ -894,6 +894,8 @@ MINOR bump:
 PATCH bump:
   - typo / コメント修正レベル。意味変更なし。
 ```
+
+**前方互換 (旧 reader × 新 store) の規約**: 上記 MINOR の「default 値で旧データを補える」は後方互換 (新 reader × 旧 store) の条件である。逆向きは store の version 側で受ける — reader は自己の対応上限より新しい `kcs_format_version` の store を **read-only + 新版誘導** で扱い ([03-data-model.md §2](03-data-model.md)、schema validation より先)、**公開後の scope.schema.json への key 追加は必ず MINOR bump を伴う** (§12.3 の「未知 key は schema error」を維持したまま旧実装に定義された降着点を与える)。Adapter I/O の「未知フィールドを無視 (MUST ignore)」規約 (下記) とは対象が異なる — scope.json は承認・security の正本であり無視許容にしない。`approvals_initialized` (§12.3) 自体は実装・store 公開前の schema 確定であり bump しない (tree v2/v3 と同じ扱い — 下記)。
 
 **tree schema v2/v3 (2026-07-18 確定)**: tree entry へ `normalize.manifest_hash`、tree object へ
 `chunking_config_hash` (v2) と `chunk_set_hash` (v3 — 公開 chunk 集合の digest) を追加した

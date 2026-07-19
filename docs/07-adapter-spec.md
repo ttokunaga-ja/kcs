@@ -163,7 +163,10 @@ pending 可視化)。`--override-budget` と併用した場合も budget pause �
 適用対象は online 作業を駆動し得る全コマンド
 (`kcs index` / `kcs batch resume` / `kcs batch retry` / `kcs reindex` — `--force` / `--at <commit>`
 のいずれも online embedding を駆動し得る — / `kcs repair --rebuild-db` (rebuild 後の enrichment —
-[04-pipeline.md §5.4](04-pipeline.md))。[06-cli-spec.md §1](06-cli-spec.md))。**既存 in-flight
+[04-pipeline.md §5.4](04-pipeline.md)) / **`kcs search` — vector|hybrid の page 1 の query embedding**
+([05-runtime.md §1.1](05-runtime.md) の consent gate: payload は query 文字列のみ。送信可否 = 参加
+scope の 1 つ以上に当該 embedding Adapter の active 承認 — 承認ゼロは text fallback / `--vector` は
+error。課金は `scope_id='device'` — [04-pipeline.md §5.4](04-pipeline.md))。[06-cli-spec.md §1](06-cli-spec.md))。**既存 in-flight
 request の照会・出力取得・upload 掃除 ([04-pipeline.md §5.8](04-pipeline.md) 回復) は新規送信に
 当たらず、opt-in / `--online` なしで実行できる** (opt-in が制御するのは新規 upload・job 作成・
 sync 呼出のみ)。

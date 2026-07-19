@@ -127,7 +127,7 @@ names.jsonl で digest を解決する。対応行の無い canonical ref は fs
 names 行は残す [06-cli-spec.md §1](06-cli-spec.md))。同一 digest の複数行は最終行を表示名とする
 (NFC + simple case folding が同じ名前は同一 slot — 表記ゆれの上書きは append で表現)。
 
-**format_version**: 旧称 `VERSION 0.1.0` (旧 research/kcs.md) は `kcs_format_version` に統一。semver は [10-operations.md §12.5](10-operations.md) 参照。**保存場所 = `.kcs/scope.json` の `kcs_format_version` フィールド** (init 時に記録し migration でのみ更新。読めない・欠落した store は旧版とみなし read-only + migration 誘導 — 互換判定の入力)。
+**format_version**: 旧称 `VERSION 0.1.0` (旧 research/kcs.md) は `kcs_format_version` に統一。semver は [10-operations.md §12.5](10-operations.md) 参照。**保存場所 = `.kcs/scope.json` の `kcs_format_version` フィールド** (init 時に記録し migration でのみ更新。読めない・欠落した store は旧版とみなし read-only + migration 誘導 — 互換判定の入力)。**互換判定は scope.json の schema validation より先に評価する** — 自己の対応上限より新しい version の store は未知 key の schema error に入らず **read-only + 新版誘導** で縮退する (前方互換の定義された降着点。公開後の scope.schema.json への key 追加は MINOR bump を伴う — [10-operations.md §12.5](10-operations.md))。
 
 ## 2.1 normalized instance と全文 view
 
