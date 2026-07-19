@@ -41,7 +41,8 @@ raw / prepared / image / chunk / embedding / manifest / toollock / tree / commit
   objects/
     raw/ab/cd/<raw64>
     prepared/ab/cd/<prepared64>
-    images/ab/cd/<image64>          # 文書内 embedded image (type 予約済み、実装 Step 2。
+    image/ab/cd/<image64>           # 文書内 embedded image (type 予約済み、実装 Step 2。
+                                    # dir 名は §1 の objects/<type>/ 公式どおり type 名 (単数形) と一致させる。
                                     # media_type は unit metadata に記録)
     normalized_units/ab/cd/<raw64>.<tool64>.g<gen>/
       manifest.json                    # 順序付き unit 一覧 + unit status (正本, §2.1)

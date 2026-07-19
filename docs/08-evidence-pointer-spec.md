@@ -157,7 +157,9 @@ bulk 系 (`kcs evidence verify --batch <pointers.jsonl>`) は従来どおり各�
     保持するため直接解決できる (03-data-model.md §8)。
     レスポンスに "commit_shallow": true を付す。
 3.  tree (commit.tree) を取得
-4.  tree から raw_hash で entry を検索
+4.  tree から raw_hash で entry を検索 (同一 raw_hash の entry が複数ある場合 — 複数 path への重複配置 —
+    は、pointer の tool_profile_hash / gen と一致する normalize binding の entry を選ぶ。一致 entry が
+    無ければ手順 8 の不一致処理に従う。表示 path の選択は §7 の規則)
 5.  raw_hash に **active な tombstone** (lifecycle の末尾 event が `purged` — [05-runtime.md §3.5](05-runtime.md)) が
     あるなら → tombstone を返す (§4)。**retired (末尾 event = `retired`) は tombstone 扱いしない** — 手順 6 へ進む
     (resurrection 後の旧 pointer を alive に戻すための必須条件)。tombstone / erase receipt が
@@ -373,7 +375,7 @@ kcs evidence retarget <pointer> [--latest|--at <commit>]
 }
 ```
 
-対応付けは `heading_path` の完全一致 (`heading_path_exact`) → 正規化一致 + span 重なり率 (`heading_path_fuzzy`) の順に試みる。**span 重なり率は、新旧の normalized text 間で text alignment が成立した領域内でのみ用いる** — 異なる tool_profile の unit-local byte offset は共通座標を持たないため直接比較しない。alignment が成立しない場合は対応なし (ambiguous — fail-closed)。照合に使う旧側の heading・section・span は、**旧 pointer を解決した canonical 値 (旧 chunk / tree 由来) から取得する** — pointer 入力の optional 欄は使わない (偽 heading による別 section への誘導を防ぐ。§7.2 の表示規則と同じ姿勢)。**意味ベースの対応付け (semantic_fingerprint) は MVP に含めない**。chunk レベルの fingerprint 実体が未定義であり、embedding は retarget が必要な場面 (tool_profile 変更) で互換性ルール ([03-data-model.md §7](03-data-model.md)) により新旧比較が成立しない恐れがあるため。導入する場合は Phase 4+ で match_method の MINOR 追加 (§8) として行う。
+対応付けは `heading_path` の完全一致 (`heading_path_exact`) → 正規化一致 + span 重なり率 (`heading_path_fuzzy`) の順に試みる。**span 重なり率は、新旧の normalized text 間で text alignment が成立した領域内でのみ用いる** — 異なる tool_profile の unit-local byte offset は共通座標を持たないため直接比較しない。alignment が成立しない場合は対応なし (ambiguous — fail-closed)。照合に使う旧側の heading・section・span は、**旧 pointer を解決した canonical 値 (旧 chunk / tree 由来) から取得する** — pointer 入力の optional 欄は使わない (偽 heading による別 section への誘導を防ぐ。§7.2 の表示規則と同じ姿勢)。**retarget の前提は旧 chunk / tree object が CAS に存在すること** (orphan 恒久保持の帰結として通常成立する) — 不在の場合 retarget は実行できず、§3.2 / §4.3 の解決規則に従い not_found / unverifiable 側へ降着する。**意味ベースの対応付け (semantic_fingerprint) は MVP に含めない**。chunk レベルの fingerprint 実体が未定義であり、embedding は retarget が必要な場面 (tool_profile 変更) で互換性ルール ([03-data-model.md §7](03-data-model.md)) により新旧比較が成立しない恐れがあるため。導入する場合は Phase 4+ で match_method の MINOR 追加 (§8) として行う。
 
 retarget は **AI Agent からの呼び出しを前提** にしているため、レスポンスは [06-cli-spec.md §4](06-cli-spec.md) の `--json` 契約に従う。Phase 5 で構造化 API を導入する際もこの JSON schema を互換性契約として維持する ([06-cli-spec.md §9](06-cli-spec.md))。
 

@@ -257,8 +257,11 @@ CREATE TABLE scopes (
   scope_id TEXT NOT NULL,
   kcs_path TEXT NOT NULL,
   root_path TEXT NOT NULL,
-  participates_in_global_search INTEGER NOT NULL DEFAULT 1,
-  indexed INTEGER NOT NULL DEFAULT 0,   -- sqlite.db 構築済み (横断検索の対象候補)
+  participates_in_global_search INTEGER NOT NULL DEFAULT 1
+      CHECK (typeof(participates_in_global_search) = 'integer'
+             AND participates_in_global_search IN (0, 1)),
+  indexed INTEGER NOT NULL DEFAULT 0    -- sqlite.db 構築済み (横断検索の対象候補)
+      CHECK (typeof(indexed) = 'integer' AND indexed IN (0, 1)),
   last_seen_at TEXT NOT NULL,
   PRIMARY KEY (scope_id, kcs_path)
 );
@@ -288,7 +291,10 @@ CREATE TABLE scopes (
   online タスク起動 (相 1) も `KCS-E-REGISTRY-DUP-001` で fail-closed とする** — device-global
   `batch_requests` の行 (PK に scope_id) を複数 clone が共有し、回復・終端・課金の帰属が混線するため
   ([04-pipeline.md §5.8](04-pipeline.md))。dedupe 後に再開する。
-  **複合状態の優先順位 (全コマンド共通の preflight 順序)**: (1) purge journal / epoch 検査
+  **複合状態の優先順位 (全コマンド共通の preflight 順序)**: **(0) `kcs_format_version` 互換判定
+  (§12.5 — 自己より新しい store は read-only 縮退・書き込み系は KCS-E-STORE-VERSION-001。
+  §12.3 の「schema validation より先」と同じ原則で、他のすべての検査に先行する)** →
+  (1) purge journal / epoch 検査
   ([05-runtime.md §3.5](05-runtime.md)) → (2) registry live 重複 (KCS-E-REGISTRY-DUP-001) →
   (3) index 可用性 (KCS-E-INDEX-REBUILDING-001) → (4) command 固有の検査。**(3) は復旧・初期化
   コマンド自身 (`kcs repair --rebuild-db`・index 未作成時の初回 `kcs index`) には適用しない** —
@@ -855,7 +861,7 @@ validation 失敗は exit code 2 で停止し、`KCS-E-CONFIG-SCHEMA-NNN` を返
 
 ## 12.4 時刻・タイムゾーン
 
-すべての永続データ (commit timestamps, normalization_runs, access_events, snapshot lineage 等) の時刻は **UTC ISO8601 拡張形式 + suffix `Z`** に固定する。**例外 = SQLite ストアの内部時刻列** (cost-ledger.sqlite の recorded_at / job_create_started_at / completed_at / created_at / schema_migrations.applied_at — [04-pipeline.md §5.4](04-pipeline.md)): SQL での比較・期限演算のため **UTC epoch ミリ秒の INTEGER** を正とする (JSON / JSONL / UI 境界へ出す際に ISO8601+Z へ変換する)。
+すべての永続データ (commit timestamps, normalization_runs, access_events, snapshot lineage 等) の時刻は **UTC ISO8601 拡張形式 + suffix `Z`** に固定する。**例外 = SQLite ストアの内部時刻列** (cost-ledger.sqlite の recorded_at / job_create_started_at / completed_at / created_at / schema_migrations.applied_at — [04-pipeline.md §5.4](04-pipeline.md)): SQL での比較・期限演算のため **UTC epoch ミリ秒の INTEGER** を正とする (JSON / JSONL / UI 境界へ出す際に ISO8601+Z へ変換する)。**暦の演算も UTC で行う** — `cost_ledger.month` ('YYYY-MM') は `recorded_at` の UTC 暦月から導出し、[04-pipeline.md §5.4](04-pipeline.md) の剪定の「前月以前」判定も UTC 暦月の月初 epoch ms を境界とする (local TZ は UI 表示限定 — 下記)。
 
 ```text
 正:   2026-04-25T12:00:00Z

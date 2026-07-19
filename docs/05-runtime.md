@@ -29,6 +29,8 @@ fail_behavior = "fallback"       # "fallback" | "error" | "warn"
 vector のみ NG → text
 embedding profile_hash 不一致 → text fallback (KCS-E-SEARCH-VEC-INCOMPAT-001)
 embedding 承認なし (下記 consent gate) → text fallback (KCS-E-SEARCH-VEC-UNAUTHORIZED-001)
+--offline 指定 → text fallback (fallback_reason="offline" — 下記)
+同一 query が in-flight ([04-pipeline.md §5.4](04-pipeline.md)) → text fallback (fallback_reason="embedding_in_flight")
 両方不可 → error (KCS-E-SEARCH-VEC-UNAVAIL-001)
 ```
 
@@ -41,10 +43,13 @@ embedding 承認なし (下記 consent gate) → text fallback (KCS-E-SEARCH-VEC
 参加 scope の 1 つ以上に当該 embedding Adapter の active な `approvals[]` 行があること**。承認ゼロ
 (かつ `--online` 一時 opt-in なし) の場合、auto / `--hybrid` は text fallback
 (`fallback_reason="embedding_not_authorized"`)、`--vector` 明示は KCS-E-SEARCH-VEC-UNAUTHORIZED-001
-で error。**この承認由来の text fallback は `fail_behavior` の対象外である** — `fail_behavior` は技術的
-失敗 (INCOMPAT / UNAVAIL 等) への応答方針であり、consent 由来の `embedding_not_authorized` には適用
-しない (設定値に関わらず auto / `--hybrid` は常に text fallback、`--vector` のみ error — §1.2 /
-[06-cli-spec.md §3](06-cli-spec.md) の `--hybrid` 行の注記も同旨)。`--online` / `--offline` は他コマンドと
+で error。**ユーザー意思由来の text fallback は `fail_behavior` の対象外である** — `fail_behavior` は技術的
+失敗 (INCOMPAT / UNAVAIL 等) への応答方針であり、`embedding_not_authorized` (承認なし) と `offline`
+(`--offline` 指定) には適用しない (設定値に関わらず auto / `--hybrid` は常に text fallback、`--vector`
+のみ error — §1.2 / [06-cli-spec.md §3](06-cli-spec.md) の `--hybrid` 行の注記も同旨)。一方
+**`embedding_in_flight` (同一 query の並行実行 — [04-pipeline.md §5.4](04-pipeline.md)) は技術的な
+過渡失敗であり `fail_behavior` の対象**: auto は text fallback、`--hybrid` は fail_behavior に従い、
+`--vector` 明示は KCS-E-SEARCH-VEC-UNAVAIL-001 で error。`--online` / `--offline` は他コマンドと
 同義の当該実行限りの上書き (07 §3)。**`--offline` 指定時は承認の有無に関わらず query embedding を送信
 しない** — auto / `--hybrid` は text fallback (`fallback_reason="offline"`)、`--vector` 明示は
 KCS-E-SEARCH-VEC-UNAVAIL-001 で error。課金は
@@ -57,7 +62,7 @@ KCS-E-SEARCH-VEC-UNAVAIL-001 で error。課金は
 kcs search "..."             # auto
 kcs search "..." --text      # text only
 kcs search "..." --vector    # vector only。失敗時は error
-kcs search "..." --hybrid    # hybrid 強制。vector 失敗時は fail_behavior に従う (承認なし (embedding_not_authorized) は対象外 — §1.1 consent gate が常に text fallback を規定)
+kcs search "..." --hybrid    # hybrid 強制。vector 失敗時は fail_behavior に従う (承認なし・--offline は対象外 — 常に text fallback。embedding_in_flight は対象 — §1.1)
 kcs search "..." --no-vector # 明示無効
 kcs search "..." [--online|--offline]  # query embedding の一時 opt-in / 当該実行の新規送信禁止 (§1.1 consent gate)
 ```
@@ -173,9 +178,9 @@ page 1 の `since_cutoff` (UTC ISO8601 + `Z`) も保持する:
 - `since_cutoff`: `--since` の page 1 で一度だけ計算した下限。page 2 以降は現在時刻から再計算しない
 - `query_hash` (token 全体に 1 つ、§1.8) が不一致の cursor は `KCS-E-SEARCH-CURSOR-001` で拒否する
 
-2 ページ目以降は同一の候補取得 → RRF (§1.3) → MMR (§1.4) を再計算し、consumed 件を skip して続きを返す。**vector / hybrid の replay は page 1 の query vector を再利用する** — query の再 embedding は行わない (provider の非決定性で候補・順位が変わり、consumed の skip が重複・欠落を生む)。page 1 の正規化済み query vector は参加各 scope の `embeddings` 表 (`target_type='query_cache'` — 正本 [04-pipeline.md §4.3](04-pipeline.md)。query 本文は保存しない) に保持し、その digest (= `query_vector_digest`) を **token の独立 field として保持し、かつ §1.8 の query_hash 構成要素にも含める** (query_hash は一方向 hash であり、replay が読み出す行の鍵は token field 側から得る。vector|hybrid のみ — text mode では field 省略)。replay は参加 scope のいずれかから digest 一致行を読み、どの scope にも無ければ `KCS-E-SEARCH-CURSOR-001` (再検索が正)。**読み出した行は vector BLOB の sha256 を `target_id` (= query_vector_digest) と再照合する** — 不一致は corruption として当該行を削除し、同じく `KCS-E-SEARCH-CURSOR-001` (query_cache は objects 非由来で fsck / rebuild の検証が及ばないため、読出し時が唯一の検査点 — [04-pipeline.md §4.3](04-pipeline.md))。順序安定性の根拠は SQLite WAL のスナップショット分離**ではなく**、「commit 単位で固定された chunk 集合 + 決定論的な順位計算 + `index_generation` による FTS 内容不変の保証」である。CLI 呼び出しを跨いでも成立する。
+2 ページ目以降は同一の候補取得 → RRF (§1.3) → MMR (§1.4) を再計算し、consumed 件を skip して続きを返す。**vector / hybrid の replay は page 1 の query vector を再利用する** — query の再 embedding は行わない (provider の非決定性で候補・順位が変わり、consumed の skip が重複・欠落を生む)。page 1 の正規化済み query vector は参加各 scope の `embeddings` 表 (`target_type='query_cache'` — 正本 [04-pipeline.md §4.3](04-pipeline.md)。query 本文は保存しない) に保持し、その digest (= `query_vector_digest`) を **token の独立 field として保持し、かつ §1.8 の query_hash 構成要素にも含める** (query_hash は一方向 hash であり、replay が読み出す行の鍵は token field 側から得る。vector|hybrid のみ — text mode では field 省略)。replay は参加 scope のいずれかから digest 一致行を読み、どの scope にも無ければ `KCS-E-SEARCH-CURSOR-001` (再検索が正)。**読み出した行は vector BLOB の sha256 を `target_id` (= query_vector_digest) と再照合する** — 不一致は corruption として当該行を削除し、同じく `KCS-E-SEARCH-CURSOR-001` (query_cache は objects 非由来で fsck / rebuild の検証が及ばないため、読出し時が唯一の検査点 — [04-pipeline.md §4.3](04-pipeline.md)。ただし `kcs_format_version` が自己の対応上限より新しい scope では削除を行わず CURSOR-001 へ短絡する — 書込ゼロ規範 [10-operations.md §12.5](10-operations.md))。順序安定性の根拠は SQLite WAL のスナップショット分離**ではなく**、「commit 単位で固定された chunk 集合 + 決定論的な順位計算 + `index_generation` による FTS 内容不変の保証」である。CLI 呼び出しを跨いでも成立する。
 
-`--offset` は cursor の糖衣であり、同じ再現規則で確定順序の `offset` 位置から `limit` 件を返す。終端判定は **alias 展開後の final result stream の末尾** — それを超えたら `next_cursor: null` (`--all-history` / `--since` で候補プール末尾を終端にすると最後の alias group を取り残す。default 系は候補プール = final stream で同値)。
+`--offset` は cursor の糖衣であり、同じ再現規則で確定順序の `offset` 位置から `limit` 件を返す。**vector|hybrid の `--offset` は単一実行内の slice である** (当該実行が取得した query vector に対する確定順序 — CLI 呼び出しを跨ぐ継続は cursor が正。再 embedding の非決定性は cursor の digest 再利用でのみ回避される)。終端判定は **alias 展開後の final result stream の末尾** — それを超えたら `next_cursor: null` (`--all-history` / `--since` で候補プール末尾を終端にすると最後の alias group を取り残す。default 系は候補プール = final stream で同値)。
 
 ## 1.6 Snapshot 越し検索 (`--at`)
 
@@ -259,8 +264,8 @@ commit/evidence restore は ancestry walk を必要としない。
   "requested_mode": "auto",
   "resolved_mode": "text",
   "fallback": true,
-  "fallback_reason": "embedding_endpoint_not_configured",
-  "error_code": "KCS-E-SEARCH-VEC-UNAVAIL-001",
+  "fallback_reason": "embedding_not_authorized",
+  "error_code": "KCS-E-SEARCH-VEC-UNAUTHORIZED-001",
   "diversify": { "strategy": "mmr", "mmr_lambda": 0.7 },
   "paging": { "limit": 20, "next_cursor": "eyJ2IjoxLCJzY29wZXMiOl..." },
   "searched_scopes": [
@@ -348,7 +353,7 @@ score/rank をコピーして、group 内を
    候補として返す。§1.4 の MMR/dedup は scope 内でまだ適用しない
 3. scope 間の統合は **rank ベース** で行う。各 scope の RRF スコア (rank のみから決まる) をそのまま比較して降順マージする。**BM25 / vector の raw スコアを scope 間で比較・正規化してはならない** (コーパス統計が index ごとに異なり比較不能)。pre-alias 同点は immutable `(scope_id,chunk_hash)` で安定化する
 4. diversify (MMR / group_by_raw_hash, §1.4) は統合後の候補列に対して適用する
-5. vector / hybrid の横断条件は [03-data-model.md §7](03-data-model.md) に従う。embedding profile が全 scope で一致しない場合、横断部分は text (BM25 rank) のみで統合し、`fallback_reason` に記録する (**`--vector` 明示時は fallback しない** — profile 不一致の scope を KCS-E-SEARCH-VEC-INCOMPAT-001 の excluded_scopes として除外し、全 scope 除外なら error — §1.2 の「失敗時は error」と同じ)。`kcs_format_version` が自己の対応上限より新しい scope も同様に excluded_scopes として除外する (KCS-E-STORE-VERSION-001 を `fallback_reason` に記録・当該 scope へは query_cache を含む一切の書込を行わない — [10-operations.md §12.5](10-operations.md))。embedding 承認の consent gate (§1.1) は**送信 gate であり per-scope の除外条件ではない** — 承認ゼロなら検索全体が text fallback (excluded_scopes には計上しない)。1 つ以上の承認で送信された query vector は profile 互換な全参加 scope の vector 検索に用いる (未承認 scope も含む — 送信は 1 回であり scope 別の再送信は発生しない)
+5. vector / hybrid の横断条件は [03-data-model.md §7](03-data-model.md) に従う。embedding profile が全 scope で一致しない場合、横断部分は text (BM25 rank) のみで統合し、`fallback_reason` に記録する (**`--vector` 明示時は fallback しない** — profile 不一致の scope を KCS-E-SEARCH-VEC-INCOMPAT-001 の excluded_scopes として除外し、全 scope 除外なら error — §1.2 の「失敗時は error」と同じ)。`kcs_format_version` が自己の対応上限より新しい scope も同様に excluded_scopes として除外する (KCS-E-STORE-VERSION-001 を `fallback_reason` に記録・当該 scope へは query_cache を含む一切の書込を行わない — [10-operations.md §12.5](10-operations.md))。**全 scope が STORE-VERSION 除外なら command は KCS-E-STORE-VERSION-001 / exit 8 を返す** (SCOPE-ALL-FAILED (exit 4) より優先 — REBUILDING と同型の昇格、[06-cli-spec.md §7](06-cli-spec.md)。自動化に「新版への更新が必要」を直接伝える)。embedding 承認の consent gate (§1.1) は**送信 gate であり per-scope の除外条件ではない** — 承認ゼロなら検索全体が text fallback (excluded_scopes には計上しない)。1 つ以上の承認で送信された query vector は profile 互換な全参加 scope の vector 検索に用いる (未承認 scope も含む — 送信は 1 回であり scope 別の再送信は発生しない)
 
 既知の限界: rank ベース統合は、関連文書の乏しい scope の 1 位と強い scope の 1 位を同格に扱う。MVP ではこれを容認する (結果に scope_path が必ず含まれるため判別可能)。scope 間の再ランクは v2 以降の検討事項。
 
@@ -888,7 +893,7 @@ batch 系と reindex は外部副作用 (upload / job 作成) と batch_requests
 
 規約:
 
-- 読み取り系 (search / log / view / open / inspect / evidence verify / restore / status / diff) は `.kcs/.lock` を取得しない。`kcs index` と `kcs search` の同時実行は許容 (SQLite WAL でリーダーは旧スナップショット)。例外的に `kcs search` は vector|hybrid の page 1 に限り cost-ledger.sqlite の device 行 (`scope_id='device'`) への相 1 / 回収の書込を行うが、これも `.kcs/.lock` の対象外である — device 行はどの scope にも属さず、直列化は cost-ledger 側の `BEGIN IMMEDIATE` Tx が担う ([04-pipeline.md §5.4](04-pipeline.md))
+- 読み取り系 (search / log / view / open / inspect / evidence verify / restore / status / diff) は `.kcs/.lock` を取得しない。`kcs index` と `kcs search` の同時実行は許容 (SQLite WAL でリーダーは旧スナップショット)。例外的に `kcs search` は vector|hybrid の page 1 に限り cost-ledger.sqlite の device 行 (`scope_id='device'`) への相 1 / stale 回収・剪定の書込を行うが、これも `.kcs/.lock` の対象外である — device 行はどの scope にも属さず、直列化は cost-ledger 側の `BEGIN IMMEDIATE` Tx が担う ([04-pipeline.md §5.4](04-pipeline.md))
 - `.kcs/.lock` を取得できない場合、書き込み系コマンドは**待機せず即座に失敗する**: error code `KCS-E-STORE-LOCKED-001`、exit code 3 (retryable、[06-cli-spec.md §7](06-cli-spec.md))。lock ファイルには保持プロセスの pid と取得時刻を記録し、保持プロセスが存在しない stale lock は次の取得試行時に回収してよい。待機オプション (`--wait <seconds>`) は Phase 4+ 予約
 - refs (refs/heads/main, canonical refs/tags-v1/*) の更新は `.kcs/.lock` 保持下で、temp file 書き込み + atomic rename により行う (部分書き込みを外部に見せない)。legacy refs/tags/* は read-only compatibility とする
 - `kcs repair --verify-objects` の raw object 復旧と repaired commit publication も、同じ lock の下で private temp + hash 再検証 + atomic publish を使う

@@ -31,7 +31,9 @@ kcs batch abandon <intent_token|scope/adapter/input_hash/tool_profile_hash>
                                         # 指定子は intent_token または batch_requests の 4 組タスクキー (3 組では別
                                         # profile 行と曖昧 — 曖昧時は拒否して token を要求)。tasks.jsonl の task_id は
                                         # 喪失許容のため使わない。kcs status が stalled 行の token を表示。
-                                        # 確認プロンプト必須。残骸掃除完了まで intent_token は保持 — 04-pipeline.md §5.8)
+                                        # 確認プロンプト必須。残骸掃除完了まで intent_token は保持 — 04-pipeline.md §5.8。
+                                        # 対象行が無い場合 (terminal 確定済み・device 行の剪定後を含む) は
+                                        # 対象なしの冪等成功 — exit 0 + 「対象なし」表示 (04 §5.4))
 kcs repair (--rebuild-db [--online|--offline] | --verify-objects [--prune-orphans])
                                         # SQLite 再構築 / CAS 整合性検証 (10-operations.md §7.5)。操作は exactly-one (省略は usage error)。
                                         # --rebuild-db は rebuild 後に enrichment を駆動し得るため online/offline 上書きの対象 (07 §3・04 §5.4)。
@@ -177,7 +179,8 @@ kcs search "..."              # auto (hybrid → text fallback)
 kcs search "..." --text       # text only
 kcs search "..." --vector     # vector only。失敗時は error
 kcs search "..." --hybrid     # hybrid 強制。失敗時は fail_behavior 設定に従う
-                              # (承認なし (embedding_not_authorized) は対象外 — 常に text fallback。
+                              # (承認なし (embedding_not_authorized)・--offline は対象外 — 常に text
+                              #  fallback。embedding_in_flight は技術的失敗として対象。
                               #  正本 05-runtime.md §1.1 consent gate)
 kcs search "..." --no-vector
 kcs search "..." [--online|--offline]   # query embedding の一時 opt-in / 当該実行の新規送信禁止
@@ -287,7 +290,9 @@ sqlite.db 不在・利用不能       全経路 (verify / open / view / restore 
                                不在・利用不能の場合のみ。verify は検査未完了のため --strict なしでも
                                0 を返さない。multi-scope search は当該 scope を excluded_scopes として
                                継続し、全 scope 該当なら exit 3 — SCOPE-ALL-FAILED (4) より優先。
-                               優先順位は journal → DUP → REBUILDING (10 §3)。05 §2.6・08 §3.1)
+                               全 scope が STORE-VERSION 除外なら同型の昇格で exit 8 —
+                               KCS-E-STORE-VERSION-001 (05 §1.8 / 10 §12.5)。
+                               優先順位は VERSION → journal → DUP → REBUILDING (10 §3)。05 §2.6・08 §3.1)
 kcs evidence verify --batch <pointers.jsonl>   一括 verify (Step 4+ — 08 §4.3)
                                (--batch は --strict の有無に従う — --strict 時: 混在も 4 /
                                 なし: 検査完了で 0。内訳は --json の各行 status で判定 — 08 §4.3)
@@ -351,6 +356,8 @@ KCS API が保証するもの:
   - 出力 artifact hash を記録
   - tool_profile_hash / agent_profile_hash を記録
   - 検索時は searched_scopes / excluded_scopes / fallback_reason を返す
+    (fallback_reason は自由語彙 — 閉 enum にしない。機械判定は error_code 側が正であり、
+     Agent は未知の fallback_reason 値を無視してよい)
 ```
 
 URL、認証情報、コマンドパス、ライブラリ選択などの実行設定は **device-local config** に置き、`.kcs/` には保存しない。
