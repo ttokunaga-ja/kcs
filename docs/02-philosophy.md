@@ -250,6 +250,7 @@ purge の例外性は次のように担保します:
    - 法令上の削除義務 (個人情報・GDPR の forget 権 等)
    - 機密漏洩への対応 (誤って取り込んだ秘匿文書)
    - 著作権・契約上の保持禁止
+   - 誤取り込みの是正 (取り込むべきでなかった対象 — 秘匿文書に限らない)
 
 3. purge を実行すると、対象内容は消えるが「purge した事実」は残る:
    - commit_type = "purged" の新 commit が記録される
@@ -257,7 +258,7 @@ purge の例外性は次のように担保します:
    - これにより監査可能性は維持される (= 透明な忘却)
 
 4. purge は破壊的操作として、CLI で確認プロンプトを必須とし、
-   `--reason <legal|privacy|misingest|...>` を必須引数とする。
+   `--reason <legal|privacy|misingest|copyright|other>` を必須引数とする (閉 enum — [08-evidence-pointer-spec.md](08-evidence-pointer-spec.md) §4.1 の purged_reason と同一)。
 ```
 
 つまり KCS は「忘れない」を理念としつつ、「忘れる必要があるときは、忘れたことを忘れない」かたちで purge を内包します。詳細手順は [05-runtime.md](05-runtime.md) §3 (Purge) と [06-cli-spec.md](06-cli-spec.md) §6 を正本とする。共有環境での purge 伝播は v2 検討事項 (経緯: 旧 research/synchronization.md — git 履歴)。

@@ -390,7 +390,8 @@ CREATE TABLE chunk_config_generations (
    レベル飛びはそのまま積む)。unit 先頭から見出し未出現の間は heading_path = []
 4. section_id = heading_path の各要素を slug 化し "/" で結合。slug 規則: NFC 正規化 →
    ASCII 英字は小文字化 → 空白列を "-" に → 英数字・ハイフン・アンダースコア・日本語文字
-   (ひらがな/カタカナ/漢字) 以外を除去 → 連続 "-" を 1 つに → 先頭末尾の "-" を除去。
+   (Unicode script property が Hiragana / Katakana / Han の文字 + 長音記号 ー U+30FC・々 U+3005 に
+   固定 — 集合の変更は chunking_config_hash の変更として扱う) 以外を除去 → 連続 "-" を 1 つに → 先頭末尾の "-" を除去。
    同一 unit 内の重複 slug は 2 つ目以降に "#2", "#3" を付す (出現順)
 5. 分割: 見出し区間が max_chars (03 §11 [chunking]) を超える場合、段落境界 (空行) で
    貪欲に max_chars 以下へ分割する。単一段落が max_chars を超える場合のみ文字位置で
@@ -891,6 +892,9 @@ terminal 化 (error='purged') = `purged` / 回復期限超過・照会不能の 
 
 **記帳値の事前検証**: Adapter 報告値 (usd / unit 数) は INSERT 前に有限・非負の数値であることを
 検証し、違反は §3.2 の contract violation と同経路で reject 終端する (KCS-E-ADAPTER-CONTRACT-001)。
+**このとき確定記帳には provider 報告値を使わない** — 行の `estimated_usd` を `estimated=1`・
+`outcome='contract_violation'` で記帳して同一 Tx で terminal 化する (不正値は CHECK を通らず
+Tx を閉じられないため — 報告値が有効な場合のみ provider 値で記帳する)。
 DDL の CHECK は最終防衛線であり、**CHECK 違反で Tx が失敗した場合は実装エラー
 `KCS-E-STORE-CONSTRAINT-001` (permanent — `ON CONFLICT DO NOTHING` には吸収されず、同じ値での
 再試行はループするだけのため再試行しない)** ([10-operations.md §12.1](10-operations.md) STORE domain)。

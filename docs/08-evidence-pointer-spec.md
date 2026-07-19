@@ -347,7 +347,7 @@ kcs evidence retarget <pointer> [--latest|--at <commit>]
 }
 ```
 
-(上記の `"a" | "b"` は union の schema 表記であり、リテラル JSON ではない — `//` コメント付きの例も同様。Agent はこの fence を JSON として parse しない)
+(上記に限らず**本書の json fence 内の `"a" | "b"` は union の schema 表記** — §4.1・§4.3・§5 共通 — であり、リテラル JSON ではない。`//` コメント付きの例も同様。Agent はこれらの fence を JSON として parse しない)
 
 ```json
 // 対応が見つからない場合
@@ -358,7 +358,7 @@ kcs evidence retarget <pointer> [--latest|--at <commit>]
 }
 ```
 
-対応付けは `heading_path` の完全一致 (`heading_path_exact`) → 正規化一致 + span 重なり率 (`heading_path_fuzzy`) の順に試みる。**span 重なり率は、新旧の normalized text 間で text alignment が成立した領域内でのみ用いる** — 異なる tool_profile の unit-local byte offset は共通座標を持たないため直接比較しない。alignment が成立しない場合は対応なし (ambiguous — fail-closed)。**意味ベースの対応付け (semantic_fingerprint) は MVP に含めない**。chunk レベルの fingerprint 実体が未定義であり、embedding は retarget が必要な場面 (tool_profile 変更) で互換性ルール ([03-data-model.md §7](03-data-model.md)) により新旧比較が成立しない恐れがあるため。導入する場合は Phase 4+ で match_method の MINOR 追加 (§8) として行う。
+対応付けは `heading_path` の完全一致 (`heading_path_exact`) → 正規化一致 + span 重なり率 (`heading_path_fuzzy`) の順に試みる。**span 重なり率は、新旧の normalized text 間で text alignment が成立した領域内でのみ用いる** — 異なる tool_profile の unit-local byte offset は共通座標を持たないため直接比較しない。alignment が成立しない場合は対応なし (ambiguous — fail-closed)。照合に使う旧側の heading・section・span は、**旧 pointer を解決した canonical 値 (旧 chunk / tree 由来) から取得する** — pointer 入力の optional 欄は使わない (偽 heading による別 section への誘導を防ぐ。§7.2 の表示規則と同じ姿勢)。**意味ベースの対応付け (semantic_fingerprint) は MVP に含めない**。chunk レベルの fingerprint 実体が未定義であり、embedding は retarget が必要な場面 (tool_profile 変更) で互換性ルール ([03-data-model.md §7](03-data-model.md)) により新旧比較が成立しない恐れがあるため。導入する場合は Phase 4+ で match_method の MINOR 追加 (§8) として行う。
 
 retarget は **AI Agent からの呼び出しを前提** にしているため、レスポンスは [06-cli-spec.md §4](06-cli-spec.md) の `--json` 契約に従う。Phase 5 で構造化 API を導入する際もこの JSON schema を互換性契約として維持する ([06-cli-spec.md §9](06-cli-spec.md))。
 

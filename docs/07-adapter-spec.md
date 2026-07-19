@@ -185,6 +185,8 @@ AdapterRun:
                         (partial = unit 単位の部分失敗, 04-pipeline.md §5.2)
   error_code            機械判定用 (06-cli-spec.md §8)
   error_category        transient | permanent | rate_limit — 04 §5.3 の retry 分類の入力
+                        (集計用の粗分類 — auth / quota / invalid_input 等の細分は error_code が
+                         担い、retry 対応は 04 §5.3 の表が error_code 基準で優先する)
   retry_after_ms        optional — provider の Retry-After を透過 (rate_limit 時)
 ```
 
@@ -482,6 +484,8 @@ network_consent (approvals | cli_online — 送信を伴った実行のみ)
 started_at, finished_at
 ```
 
+`adapter_id` は tools.toml の `tool_id` と同一値である (別 namespace を作らない — approvals[] (§3) の照合キーと一致し、実行 Adapter を承認行へ一意に対応付ける)。
+
 残してはならないもの:
 
 ```
@@ -574,7 +578,9 @@ USER:
 ストリーミング中の unit は staging 領域に persist し、応答完了後に**全体集合が受け入れ検査
 ([04-pipeline.md §3.2](04-pipeline.md)) を通過した時点で manifest へ一括確定する** (検査前の unit は
 公開しない — §3.2 の「違反応答は 1 unit も persist しない」と整合)。ストリーミング失敗時は staging を
-破棄せず、**完了済み unit は保全したまま task を failed (retryable) にする** — manifest には `pending`
+破棄せず、**完了済み unit は保全したまま task を failed (retryable) にする。task が failed permanent または
+abandon で terminal 化したときは、当該 task の staging を同一遷移で冪等に cleanup する (残存は
+`kcs status` に表示し、prune-orphans の blocker として可視化 — [10-operations.md §7.5.1](10-operations.md))** — manifest には `pending`
 という unit 状態は存在しない ([03-data-model.md §2.1](03-data-model.md) の遷移は failed → done のみ)。
 **retry の合成規則**: staging の完了済み bytes は凍結し、retry は**未完了 unit のみ**を返す契約とする。
 KCS が staging + retry 応答を合成し (同一 unit_key の重複は contract violation として reject —

@@ -398,8 +398,10 @@ binding を持たない legacy `v=1` は `KCS-E-SEARCH-CURSOR-001` で拒否す�
 - `snapshot_commit` は当該 scope の検索時点 snapshot (commit_hash)、`max_rowid` / `max_association_rowid`
   は snapshot 時点で index に取り込まれていた chunk / association の上限、`index_generation` は
   page 1 時点の当該 scope の世代 ULID (§1.5 — 不一致は cursor 拒否)、`chunking_config_hash` は
-  page 1 の当該 scope effective config、`consumed` は当該 scope から既に返した件数。page 2 で current
-  config mapping が 1 件でも違えば query hash mismatch として cursor を拒否する。署名検証後も
+  page 1 の当該 scope の**対象 config** (デフォルト = effective config、時点指定 = 対象 tree の値 —
+  §1.5 と同一)、`consumed` は当該 scope から既に返した件数。page 2 で**対象 config** の mapping
+  (保存値と再計算値の比較 — current ではなく対象時点の値) が 1 件でも違えば query hash mismatch として
+  cursor を拒否する。署名検証後も
   いずれかの field 欠落・型違い・範囲外は cursor error
 - cursor 付き呼び出しで selector flag を省略した場合は signed `time_travel` を継承する。1 つでも selector
   flag を再指定した場合は canonicalize 後に token object と完全一致しなければ
@@ -672,7 +674,15 @@ SQLite Tx は index_metadata の **`last_lifecycle_epoch`** ([04-pipeline.md §4
 反映済み counter 値を記録する。append と回転の間で crash した場合は、書き込み系コマンド冒頭の
 回復が **counter > last_lifecycle_epoch** を検出して回転を補完する (UTC ms の時刻比較は同一ミリ秒・
 時計逆行で補完を見逃すため使わない。`kcs repair --rebuild-db` は完了 Tx で現 counter 値に初期化する
-— DEFAULT 0 のままの全件誤検出を防ぐ)。
+— DEFAULT 0 のままの全件誤検出を防ぐ)。**counter の耐久順序と回復**: counter の +1 (fsync) を
+event append より先に行う (逆順は event だけが残り検出不能になる — counter 先行なら余分な補完回転
+だけで無害)。counter ファイルの欠落・不正、または「counter <= last_lifecycle_epoch なのに lifecycle
+record 側に更新痕跡がある」巻き戻り (backup 復元等) を locked mutation 冒頭で検出したら、
+**max(last_lifecycle_epoch, 全 lifecycle event の epoch 最大値) + 1 で counter を再作成し、無条件で
+index_generation を 1 回転する** (取りこぼした可能性のある更新を回転で潰す fail-safe)。**読取系も
+冒頭検査で counter と last_lifecycle_epoch を照合し、counter > 記録値なら KCS-E-INDEX-REBUILDING-001
+と同じ retryable (exit 3) を返す** — 補完回転は書き込み系のみが行うため、crash 後最初のコマンドが
+読取でも旧 cursor を退役後の可視集合へ受理しない。
 次回の locked mutation または fsck が「active tombstone × 同一 raw の ref 到達可能な
 再 publication commit **であって、末尾 purged event の `in_commit` を ancestor に持つもの
 (= 当該 purge より後の publication)**」を検出したら retired event を補完する (erase receipt の

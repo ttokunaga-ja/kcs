@@ -85,7 +85,7 @@ cache = scope_registry / aggregator      検索キャッシュ: 探索対象一�
 Phase 1: Evidence 基盤    raw / normalized / chunk / Evidence Pointer
 Phase 2: 検索             FTS5 / sqlite-vec / hybrid (paging / MMR)
 Phase 3: 履歴             tree / commit / restore / --at / time-travel
-Phase 4: 自動化           auto snapshot / Downloads watch / inbox
+Phase 4: 自動化           定期 auto snapshot (取り込み完了時の auto snapshot は MVP — 05 §8.1) / Downloads watch / inbox
 Phase 5: Agent            agent API / navigation / neighbors / node / edge
 ```
 
@@ -143,12 +143,12 @@ ADR (Architecture Decision Records) フォルダは廃止しました。本プ�
 
 - **形式**: GitHub-flavored Markdown。
 - **言語**: 日本語。固有名詞・コード片は原語のまま。
-- **コードブロック**: 言語タグ必須 (`bash`, `toml`, `json`, `rust`, `sql`, `text`)。
+- **コードブロック**: 言語タグ必須 (`bash`, `toml`, `json`, `rust`, `sql`, `text`)。既存の列挙・図示 block の無タグ fence は `text` 扱い (新規追加時にタグ必須)。
 - **相対リンク**: docs/ ルート相対。
 - **スキーマ変更**: 03-data-model.md / 07-adapter-spec.md の変更は破壊的変更扱い。`tool_profile_hash` / `tool_lock_hash` / `commit_type` enum / Evidence Pointer schema の変更には migration plan を伴う。
 - **発言禁止フレーズ**:
   - ✗ "Git for knowledge" / "個人 AI アシスタント" / "OS 級" / "Knowledge Graph for personal data" / "Notion / Obsidian キラー"
-  - ✗ "offline-first" (誤解を招く。"local-first" を使う)
+  - ✗ "offline-first" (誤解を招く。"local-first" を使う — 禁止はプロダクトの呼称・訴求としての使用であり、否定・対比文での言及は可)
   - ✗ "private AI" / "機密 AI"
   - ✗ "データはあなたのマシンから出ない" (デフォルト構成では偽。「保管と主権はローカル」と言い換える)
 - **採用する語**:

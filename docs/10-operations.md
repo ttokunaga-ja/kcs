@@ -292,7 +292,11 @@ CREATE TABLE scopes (
   ([05-runtime.md §3.5](05-runtime.md)) → (2) registry live 重複 (KCS-E-REGISTRY-DUP-001) →
   (3) index 可用性 (KCS-E-INDEX-REBUILDING-001) → (4) command 固有の検査。同時成立時は先順の
   error を返し、multi-scope の `excluded_scopes.reason` も同順で決定する (実装順に依存させない —
-  purge 再開・dedupe・rebuild のどれを先に行うべきかを automation が一意に判断できる)。
+  purge 再開・dedupe・rebuild のどれを先に行うべきかを automation が一意に判断できる)。読取系は
+  この順序を**冒頭 1 回**適用し、その時点の registry / index 状態を線形化点とする — 返却直前に
+  再検査するのは purge journal / epoch と lifecycle counter のみ ([05-runtime.md §6](05-runtime.md) —
+  不可逆副作用と旧 cursor 受理の防止が目的)。検査後の DUP / REBUILDING の状態変化は次回実行で拾う
+  (fail-closed の再適用はしない)。
   registry は cache なので削除は常に安全 (live scope は自分を再登録する)
 - device data dir (`~/.local/share/kcs/`) は owner-only (0700) に制限する (best-effort。非 unix は
   no-op。registry / cost-ledger / logs は利用パターンとスコープ地図を含むため)
@@ -518,7 +522,8 @@ manifest 欠落を説明するものが消える。**commit がまだ無い場�
 
 erase receipt の validation は schema_version で分岐する。**v2 (events[])**: strict schema / leaf
 identity に加え、各 event が kind 別の必須 field (erased / retired 共通 = `at`・`in_commit`・`actor`、
-retired はさらに `resurrection_commit`) を持つこと、`erased` event の `in_commit` が bounded verified
+retired はさらに `resurrection_commit`。**2026-07-19 以降の新規 purged / erased event は `epoch` も
+必須** — legacy 欠落行は valid だが、epoch 回復の最大値計算には使わない) を持つこと、`erased` event の `in_commit` が bounded verified
 CAS で ref-reachable な `commit_type=purged` commit を指すこと、各 `at` が canonical UTC でその event
 の commit `created_at` と一致し invocation の fixed now より未来でないこと、event 列が有効な遷移
 (erased を先頭に erased / retired が交互 — 末尾 event が現況) であること、terminal `retired` の
@@ -536,7 +541,9 @@ GC 本体は Phase 4+ のまま、**法務 purge の完結手段のみ前倒し�
 pending / running の task・staging 残骸 ([07-adapter-spec.md §8.3](07-adapter-spec.md))・未 finalize の
 manifest 進行状態・active な purge journal のいずれかが存在する間は、prune を実行せず exit 3
 (retryable) で拒否する — **manifest 未確定の正規進行中 prepared / image を orphan と誤認して削除
-しない**ため (相 3 collect の入力を消すと再課金・欠落参照になる。終端・完了後に再実行する)。
+しない**ため (相 3 collect の入力を消すと再課金・欠落参照になる。終端・完了後に再実行する)。拒否応答には
+blocker の種別と対象 (intent_token または 4 組キー) を含め、次操作 (`kcs batch resume` /
+`kcs batch abandon` / journal 回復) を提示する — terminal (state 2/3) の行は blocker にならない。
 
 MVP では手動実行のみとする。自動定期検証 (スケジューラ連携) は Phase 4+ の論点。
 
@@ -596,7 +603,9 @@ intent、[04-pipeline.md §5.4](04-pipeline.md)) であり、schema 変更は常
 in-place migration の要件:
 
 ```text
-- 冪等であること。旧形状の検出は表 / 列の存在検査で行い、再実行しても結果が変わらない
+- 冪等であること。旧形状の検出は表 / 列の存在検査で行い (**cost-ledger.sqlite は例外 — 上記の
+   sqlite_master CREATE 文 canonical 比較のみを用いる。CHECK 差分は列存在では見えない**)、
+   再実行しても結果が変わらない
 - 全体を単一 savepoint で包み、失敗時は rollback して torn state を残さない
 - 移行後に FTS 等の導出インデックスを rebuild する
 ```
@@ -895,8 +904,10 @@ code      error_code (KCS-E-) / event_code (KCS-EV-) / metric_code (KCS-M- — [
 component batch | search | commit | gc | ...
 message   人間可読な短文 (非機微テンプレートに限る — query / path / prompt 等の値は context 側に
           置いて redaction を通す。自由文へ機微値を埋め込まない)
-context   任意の JSON object (tool_profile_hash, commit_hash, raw_hash, scope_id 等 — file_id は廃止済み識別子のため使わない。
-          **scope 由来の行は scope_id を必須とする** — purge の対象化キー (§7))
+context   必須 field (空 object 可) — 値は JSON object (tool_profile_hash, commit_hash, raw_hash,
+          scope_id 等。file_id は廃止済み識別子のため使わない。
+          **scope 由来の行は context.scope_id を必須とする** — purge の対象化キー (§7)。
+          複数 scope に跨る行 (横断検索 metric 等) は scope_id を持たない)
 ```
 
 ログのローテーションは日次、保持は 30 日 (config 上書き可)。`redact_logs` の

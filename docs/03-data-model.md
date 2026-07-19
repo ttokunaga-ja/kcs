@@ -64,6 +64,8 @@ raw / prepared / image / chunk / embedding / manifest / toollock / tree / commit
   tombstones/ab/cd/<raw64>      purge の tombstone lifecycle 記録 (raw_hash ごとの append-only events[] —
                                 purged / retired。active 判定 = 末尾 event。05-runtime.md §3.5。CAS object ではない)
   purge/epoch         purge の ABA barrier (単調カウンタ — 05-runtime.md §3.5。欠落 = 読取 fail-closed)
+  tombstones/lifecycle-epoch    lifecycle 更新 (retire・再 purge・legacy 変換) の単調カウンタ
+                                (05-runtime.md §3.5 — 回転補完の検出源。event append ごとに +1)
   tasks.jsonl         batch タスクストア (04-pipeline.md §5.1。append-only の運用データ、SQLite 非採用)
   chunks.jsonl        chunk association ledger (**truth** — chunk object が持たない世代 association の正本。
                       作成行 = {chunk_id, chunking_config_hash, created_at, first_seen_commit, path}。
@@ -237,7 +239,7 @@ view の存在は使わない。
 
 1. 管理対象は scope フォルダ **直下** のファイルに限る。サブフォルダ配下のファイルは、そのサブフォルダに `.kcs` が存在するか否かに関わらず、親 `.kcs` の管理対象に **ならない** (再帰包含は行わない)。
 2. サブフォルダは常に独立スコープの候補である。対象ファイルを含むサブフォルダには `kcs index` が子 `.kcs` を生成する ([06-cli-spec.md §1](06-cli-spec.md), [10-operations.md §4](10-operations.md))。ignore されたサブツリーには子 `.kcs` を生成しない。**VCS リポジトリ root (`.git` 等の VCS 管理ディレクトリを持つフォルダ) とその配下にも既定では子 `.kcs` を生成しない** (skip + status 表示。`[scope] index_vcs_repos = true` で opt-in) — リポジトリの履歴は VCS 自身が持ち、`.kcs` の自動生成はリポジトリを汚す ([01-positioning.md §8](01-positioning.md) の方針の機械化)。**本既定の導入以前に生成済みの既存子 `.kcs` は grandfathered** — 引き続き有効な scope として index・検索の対象に残る (skip が適用されるのは新規生成の判断のみ)。
-3. したがって tree entry の `path`、Evidence Pointer の `path_at_commit`、task の `input_path` は **パス区切り (`/`) を含まないファイル名** である。`/` を含む path を持つ tree / pointer は schema violation (`KCS-E-STORE-PATH-001`) として拒否する。
+3. したがって tree entry の `path`、Evidence Pointer の `path_at_commit`、task の `input_path` は **パス区切り (`/`) を含まないファイル名** である。`/` を含む path を持つ tree / pointer は schema violation (`KCS-E-STORE-PATH-001`) として拒否する。同様に `\` ・単独の `.` / `..`・NUL・control 文字を含む path も拒否する (tag の portable leaf 規則と同水準 — §2)。restore 等の物理化は canonical join 後に対象ディレクトリ配下であることを検査する ([06-cli-spec.md §5](06-cli-spec.md))。
 
 ファイルの位置は `scope_path` (正本 `.kcs` の絶対パス) + ファイル名で一意に表現される。「フォルダ木を横断してファイルを探す」体験は、個々の `.kcs` の再帰包含ではなく scope_registry を使った横断検索 ([05-runtime.md §1.8](05-runtime.md)) が担う。
 
@@ -277,7 +279,8 @@ cache = scope_registry / aggregator 検索の探索対象一覧 / stale 検出 /
 | `.kcs/tombstones/` + erase receipt | file | **truth** (purge 証跡) | 復旧不能 | [05-runtime.md §3.5](05-runtime.md) |
 | `.kcs/scope.json` / `config.toml` / `tool-lock.json` | JSON / TOML (schema 検証: [10-operations.md §12.3](10-operations.md)) | **truth** | 復旧不能 | 各 spec |
 | `.kcs/logs/access.jsonl` | JSONL (append-only) | **truth** (access_events の正本) | 復旧不能 | §2 |
-| `.kcs/purge/epoch` | 単調カウンタ (text) | **truth** (purge の ABA barrier) | 欠落 = 読取 fail-closed。次の locked mutation が journal の target_epoch から単調性を回復して再作成 | [05-runtime.md §3.5](05-runtime.md) |
+| `.kcs/purge/epoch` | 単調カウンタ (text) | **truth** (purge の ABA barrier) | 欠落 = 読取 fail-closed。次の locked mutation が journal の target_epoch、journal も無ければ全 lifecycle event の `epoch` 最大値 + 1 (event 皆無なら 1) から回復して再作成 ([05-runtime.md §3.5](05-runtime.md)) | [05-runtime.md §3.5](05-runtime.md) |
+| `.kcs/tombstones/lifecycle-epoch` | 単調カウンタ (text) | **truth** (lifecycle 回転補完の検出源) | 欠落・不正・巻き戻りは max(last_lifecycle_epoch, event epoch 最大値) + 1 で再作成 + 無条件 1 回転 ([05-runtime.md §3.5](05-runtime.md)) | [05-runtime.md §3.5](05-runtime.md) |
 | `.kcs/manifest.json` | JSON (schema 検証) | working-state cache (永続的真実は tree/commit object) | rescan で再構築 | §8 files |
 | `.kcs/tasks.jsonl` | JSONL (append-only) | 運用データ | 喪失許容 ([04-pipeline.md §5.7](04-pipeline.md)) | [04-pipeline.md §5.1](04-pipeline.md) |
 | `.kcs/chunks.jsonl` | JSONL (append-only) | **truth** (chunk の世代 association / created_at / first_seen_commit / 生成時点 path — chunk object には含めない §8) | 復旧不能 (SQLite rebuild の入力) | §8 / [04-pipeline.md §4.1](04-pipeline.md) |
@@ -739,7 +742,9 @@ extraction issues              | yes  | yes  | yes          | yes
 `*` 「原本の移動」は `kcs move --accept` 経由でのみ KCS が原本を mv する。原本の **内容** は不変なので write ではなく移動。Agent が `kcs move --accept` を直接呼ぶことは禁止 (`--propose` 経由のみ)。
 
 normalized (unit object および全文 view) は **read-only artifact**。全文 view の生成時に付与する
-Markdown ヘッダ template:
+Markdown ヘッダ template (Source の filename も comment-safe に挿入する — `--` を含む名前は
+percent-encode、§10 の KCS-MISSING-UNIT と同じ規則。生値の挿入は comment を途中終端させ view 冒頭へ
+任意 Markdown を注入できてしまう):
 
 ```markdown
 <!--

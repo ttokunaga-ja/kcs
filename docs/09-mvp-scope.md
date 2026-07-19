@@ -218,7 +218,7 @@ Cost 予実比       preview 概算 vs 実績  目標: 乖離 ±30% 以内 (D1 �
 
 ## 4.2 シナリオ凍結規律
 
-Step 1 着手後は **シナリオの追加・差し替えしない**。Phase 1-3 完了までシナリオを動かさない。例外: 物理的に実装不可能と判明した場合のみ本書で撤回 + 代替採用。
+Step 1 着手後は **シナリオの追加・差し替えしない**。Phase 1-3 完了までシナリオを動かさない。例外: 物理的に実装不可能と判明した場合のみ本書で撤回 + 代替採用。**一回限りの例外**: M3-1 の Q_hard を §4.1 の「20 問以上」へ増補する**追加のみ**、**Step 3 着手前**に限り認める (既存問の差し替えは不可 — 増補後に再凍結し、以後この例外は消滅する)。
 
 ## 4.3 Recall 評価規約 (ゴールデンクエリ)
 
@@ -283,7 +283,7 @@ Status: decided (Step 1 着手前確定)
 設計案:
   kcs evidence retarget <pointer> [--latest|--at <commit>]
   - 同一 raw_hash 配下で最新の Markdownize 結果を取得
-  - heading_path の一致 (exact → fuzzy + span 重なり率) で対応付け
+  - heading_path の一致 (exact → fuzzy + span 重なり率 — fuzzy は text alignment 成立領域のみ、08 §5) で対応付け
   - 意味ベースの対応付け (semantic_fingerprint) は MVP から除外 (Phase 4+ の optional 拡張)
   - 対応が見つかれば新 chunk_hash 返却。曖昧なら候補リスト
   - 元 pointer は不変。新 pointer (retargeted_from を保持) を返す
@@ -310,7 +310,7 @@ Status: draft (retarget 実装は Phase 4+ のため、期日は Phase 4 着手�
 
 設計案:
   1. raw_hash が active な tombstone → tombstone レスポンス
-     { "status": "tombstoned", "purged_at", "purged_reason", "commit", "raw_hash" } (正本 08 §4.1)
+     { "status": "tombstoned", "purged_at", "purged_reason", "purged_in_commit", "raw_hash" } (正本 08 §4.1)
   2. raw_hash が完全削除 → KCS-E-PURGE-NOT-FOUND-001
 
   検出 API:
@@ -369,7 +369,7 @@ Status: decided
 | 2 | remarkdownize CLI セマンティクス | draft | --latest のデフォルト挙動 | Phase 4 着手前 |
 | 3 | Dead Evidence Pointer | decided (コア) | bulk verify スループット | Phase 4 着手前 |
 | 4 | Incremental Markdownize プロンプト規約 | decided | なし | Step 1 着手前 (充足済み) |
-| 5 | 検索評価ハーネス (合成コーパス + ゴールデンクエリ、§4.3) | decided | なし (2026-07-03 完了: `eval/` に合成コーパス 305 ファイル / 7 scope + 履歴 fixture + ゴールデンクエリ 50 件 (M3-1: 18 / M3-2: 16 / M3-3: 16)。dry-run 検証済み。以後のクエリ追加・差し替えは §4.2 凍結規律。**M3-1 は Done 判定前に 2 問以上増補して §4.1 の「Q_hard 20 問以上」を満たしてから再凍結する** — 現行 18 問のままでは Done 条件を構成できない) | Step 3 着手前 (充足済み) |
+| 5 | 検索評価ハーネス (合成コーパス + ゴールデンクエリ、§4.3) | decided | なし (2026-07-03 完了: `eval/` に合成コーパス 305 ファイル / 7 scope + 履歴 fixture + ゴールデンクエリ 50 件 (M3-1: 18 / M3-2: 16 / M3-3: 16)。dry-run 検証済み。以後のクエリ追加・差し替えは §4.2 凍結規律。**M3-1 は Step 3 着手前に 2 問以上増補して §4.1 の「Q_hard 20 問以上」を満たしてから再凍結する (§4.2 の一回限り例外)** — 現行 18 問のままでは Done 条件を構成できない) | Step 3 着手前 (**M3-1 の 2 問増補を除き充足** — 増補完了で完全充足) |
 | 6 | Markdownize Adapter 選定 = Mistral OCR 系 ([07 §5.2](07-adapter-spec.md)) | decided | なし (実地検証 2026-07-03 完了: sync/batch 両モードで表 1.0 / 日本語 CER 0.0 / 画像 1/1 / 数式 LaTeX 化。`experiments/ocr-verification`) | Step 2 着手前 (充足済み) |
 
 Step N の着手条件は「期日が『Step N 着手前』の行がすべて decided」の機械的チェック (§3.2)。2026-07-02 の本改訂適用後、Step 1 のブロッカーは 0 件。#2/#3 の残未決は実装が Phase 4+ に割当てられた機能 (§3.1) にのみ関わるため、Step 1-4 をブロックしない。

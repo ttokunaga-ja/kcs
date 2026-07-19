@@ -192,7 +192,7 @@ pack/delta 圧縮
 
 ---
 
-# 6. Phase Plan (実装順)
+# 6. Phase Plan (価値の柱の区分 — 実装順ではない。実装順の正本は [09-mvp-scope.md §3](09-mvp-scope.md) の Step 計画 / README §2)
 
 ```
 Phase 1: Evidence 基盤
@@ -259,7 +259,7 @@ KCS は既存ツールを置き換えない。**横断する**外部アーカイ
 | 既存ワークフロー | KCS の関係 |
 | --- | --- |
 | Obsidian vault | vault を含む親フォルダに `.kcs`。vault 内検索は Smart Connections に任せ、KCS は vault + Documents + Downloads + コードを横断。 |
-| Git リポジトリ | リポジトリ自体には `.kcs` を置かない (Git に管理される)。`kcs index` は VCS repo root 配下に既定で子 `.kcs` を作らないため、**リポジトリ内のコードは既定では検索対象外** — コードも対象にするには `[scope] index_vcs_repos = true` の明示 opt-in ([03-data-model.md §3](03-data-model.md))。親フォルダの `.kcs` が横断するのは repo 外のファイルと他 scope である (各 `.kcs` は直下のみ管理 — 03 §3)。 |
+| Git リポジトリ | リポジトリ自体には `.kcs` を置かない (Git に管理される)。`kcs index` は VCS repo root 配下に既定で子 `.kcs` を作らないため、**リポジトリ内のコードは既定では検索対象外** — コードも対象にするには `[scope] index_vcs_repos = true` の明示 opt-in ([03-data-model.md §3](03-data-model.md))。検索が横断するのは repo 外のファイルと他 scope である (横断検索は scope_registry 経由の全 scope 検索であり、親 `.kcs` 自体は直下のみ管理 — 03 §3)。 |
 | 既存ファイル整理 | Documents / Downloads など散らかった領域を整理せず、横断検索と Evidence で「整理しなくても見つかる」体験を提供。 |
 | Khoj / AnythingLLM | KCS の構造化 API を呼ぶ関係を狙う。チャット UX は彼らに任せる。 |
 

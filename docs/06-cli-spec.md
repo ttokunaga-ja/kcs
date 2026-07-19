@@ -274,6 +274,8 @@ kcs evidence verify --strict   全 alive なら 0。tombstoned / not_found が 1
                                unverifiable のみも 3 (reason = commit_shallow / tree_v1 /
                                manifest_missing — 08 §4.3。shallow は unshallow で解消し得るが
                                tree_v1 / manifest_missing は恒久 — reason で判別)。registry_duplicate も 3
+KCS-E-STORE-CONSTRAINT-001     記帳 CHECK 到達 = 実装エラー (04 §5.8)。permanent・非再試行で
+                               command を即時中止・exit 4
 sqlite.db 不在・利用不能       全経路 (verify / open / view / restore / search) で status に混ぜず
                                command-level の retryable error KCS-E-INDEX-REBUILDING-001・exit 3
                                (再構築中でも旧 sqlite.db が読めるなら通常応答 — 05 §6。error は
