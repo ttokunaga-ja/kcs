@@ -490,7 +490,8 @@ kcs repair --verify-objects
   `logical_name` の対応 (digest 再計算)、torn tail (最終の不完全行のみ切詰め — 途中の malformed 行は
   corruption)、各 canonical ref ↔ 最終有効行の対応 (03 §2 と同一規則)。対応行の無い canonical ref は
   corruption (ref の無い names 行は tag 削除後の残存として正常)
-- SQLite index は検証対象外 (破損時は `--rebuild-db` で再構築可能なため)
+- SQLite index は検証対象外 (破損時は `--rebuild-db` で再構築可能なため。embeddings の
+  `target_type='query_cache'` 行のみ復元されず破棄 — 影響は cursor 拒否 [04-pipeline.md §4.3](04-pipeline.md))
 
 破損検出時の挙動:
 
@@ -543,7 +544,8 @@ CAS で ref-reachable な `commit_type=purged` commit を指すこと、各 `at`
 (erased を先頭に erased / retired が交互 — 末尾 event が現況) であること、terminal `retired` の
 `resurrection_commit` が ref-reachable で、**直前の erased / purged event の `in_commit` を
 ancestor に持つ (= 当該 purge より後の publication である)** ことを必須とする。**v1 flat (`erased_at` /
-`purged_in_commit`)**: 「erased event 1 件」に正規化してから同じ検証器に通す
+`purged_in_commit`)**: 「erased event 1 件」に正規化してから同じ検証器に通す (v1 に reason は無い —
+変換で `reason: "other"` を合成し legacy 警告として報告、[05-runtime.md §3.5](05-runtime.md) と同一規則)
 ([05-runtime.md §3.5](05-runtime.md) の読取規則)。**tombstone lifecycle にも同じ event 検証**
 (kind 別必須 field・末尾 event 規則・torn / malformed = corruption) を適用する。
 
@@ -847,7 +849,7 @@ dead pointer (tombstoned / not_found) は `4`、**scope_unreachable のみは re
 
 validation 失敗は exit code 2 で停止し、`KCS-E-CONFIG-SCHEMA-NNN` を返す。schema は semver で版管理し、breaking change は migration を要求 (§12.5)。
 
-`scope.schema.json` は少なくとも次の key を定義する: `scope_id` (required)・子 `.kcs` リンク ([03-data-model.md §2](03-data-model.md))・`scan_approval` (optional — §1 の取り込み承認記録。required field は §1 の記録一覧と一致)・`approvals[]` (optional — adapter 単位の network opt-in。要素の required field = scope_id / tool_id / execution_mode / tool_profile_hash / approved_at / approval_method / status (`active` | `revoked`)、status=revoked の行は revoked_at も必須 — [07-adapter-spec.md §3](07-adapter-spec.md))。**未知 key は schema error** (fail-closed)。両 key を欠く旧 scope.json は valid であり、欠落 = 当該承認なしとして扱う (migration 不要の後方互換)。**要素単位の後方互換**: `status` フィールドを持たない approvals[] 行 (r9 スキーマ以前の承認記録) は schema error にせず **`status='active'` として読む** — 行は明示承認の記録であり、execution_mode / tool_profile_hash の一致検査 (失効判定) は従来どおり効く。次回の locked mutation で `status='active'` を atomic に補完書込みし、補完後は現行 schema で検証する (要素単位の欠落で CLI 全体を exit 2 停止させない)。
+`scope.schema.json` は少なくとも次の key を定義する: `scope_id` (required)・子 `.kcs` リンク ([03-data-model.md §2](03-data-model.md))・`scan_approval` (optional — §1 の取り込み承認記録。required field は §1 の記録一覧と一致)・`approvals[]` (optional — adapter 単位の network opt-in。要素の required field = scope_id / tool_id / execution_mode / tool_profile_hash / approved_at / approval_method / status (`active` | `revoked`)、status=revoked の行は revoked_at も必須 — [07-adapter-spec.md §3](07-adapter-spec.md))・`approvals_initialized` (optional boolean — 初回承認の行 publish と同一 atomic write で true 化する消費済み marker。true かつ approvals[] 空 = 台帳喪失として blanket 自動 materialize を fail-closed にする、07 §3)。**未知 key は schema error** (fail-closed)。両 key (および marker) を欠く旧 scope.json は valid であり、欠落 = 当該承認なしとして扱う (migration 不要の後方互換)。**要素単位の後方互換**: `status` フィールドを持たない approvals[] 行 (r9 スキーマ以前の承認記録) は schema error にせず **`status='active'` として読む** — 行は明示承認の記録であり、execution_mode / tool_profile_hash の一致検査 (失効判定) は従来どおり効く。次回の locked mutation で `status='active'` を atomic に補完書込みし、補完後は現行 schema で検証する (要素単位の欠落で CLI 全体を exit 2 停止させない)。
 
 `user-config.schema.json` は device cap (`[budget]`、[04-pipeline.md §5.4](04-pipeline.md)) を含む。
 

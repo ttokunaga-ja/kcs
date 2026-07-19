@@ -298,7 +298,7 @@ kcs evidence retarget          対応なし / ambiguous は 4。
 
 # 8. Error Code Namespace
 
-すべてのエラーは `KCS-E-<DOMAIN>-<SUBDOMAIN>-<NNN>` 形式の `error_code` を持つ。`error_kind` などのフリーテキストはユーザー向け表示専用。機械判定は `error_code`。
+すべてのエラーは `KCS-E-<DOMAIN>-<SUBDOMAIN>-<NNN>` 形式の `error_code` を持つ。`error_kind` などのフリーテキストはユーザー向け表示専用。機械判定は `error_code` (明示例外 = manifest `units[]` / Adapter 出力 `failed_units` の `error_kind` — [04-pipeline.md §5.3](04-pipeline.md) の閉 enum であり unit 単位の retry 可否判定に使う、[10-operations.md §12.1](10-operations.md))。
 
 DOMAIN 一覧の正本は [10-operations.md §12.1](10-operations.md)。本節は同一リストの転記であり、差分が生じた場合は 10 側を正とする。
 
@@ -380,7 +380,7 @@ kcs import <bundle.kcsz> --to <dir> [--as-new-scope]  # bundle の scope_id が 
                                         # adapter.policy.allow_network を引き継がない — 新 scope_id で preview +
                                         # 取り込み承認と network opt-in を再実施する (安全側。07 §3・10 §1)。
                                         # import の atomic postcondition: 展開時に scope.json を新 scope_id で
-                                        # 再生成し approvals[]/scan_approval を除去、config の allow_network を
+                                        # 再生成し approvals[]/scan_approval/approvals_initialized を除去、config の allow_network を
                                         # false へ reset、旧 root_path を除去 (bundle 内の旧値を残したまま外側の
                                         # ID だけ変えない)。送信 gate と fsck/schema は approval 行の scope_id が
                                         # scope.json の scope_id と一致することを検査する (07 §3・10 §12.3)。

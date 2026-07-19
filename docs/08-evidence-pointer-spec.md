@@ -181,7 +181,9 @@ bulk 系 (`kcs evidence verify --batch <pointers.jsonl>`) は従来どおり各�
     --strict verify は shallow 経路と同じく unverifiable (exit 3) を返す
 6b. entry の manifest object が purge により欠落している場合 (raw_hash の **tombstone または
     erase receipt** の lifecycle — active / retired を問わず — が説明する欠落): 手順 2a と同じ
-    直接解決へ降格し、レスポンスに `manifest_missing: true` を付す。**retired event に
+    直接解決へ降格し、レスポンスに `manifest_missing: true` を付す。**ただし 2a と異なり 6b は
+    手順 4 の tree entry を取得済みであり、手順 8 の entry 系照合 (normalize.tool_profile_hash の
+    pointer 一致・gen 一致) は実施する** (降格するのは manifest 依存の検証のみ)。**retired event に
     `resurrection_commit` があれば、そのリンク先 commit の publication を参照して本文を解決し
     alive を返してよい** ([05-runtime.md §3.5](05-runtime.md) — 検索の時点条件には影響しない)。
     時点帰属は検証できないため --strict verify は

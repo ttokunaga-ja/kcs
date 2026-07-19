@@ -275,7 +275,7 @@ raw / prepared → normalized。非 text-native は文書処理 API 系 Adapter 
 }
 ```
 
-Adapter 側に「軽微とは言えない」拒否権あり (`fallback_to_full=true`)。
+Adapter 側に「軽微とは言えない」拒否権あり (`fallback_to_full=true`)。受理側の扱いは §3.2 の**制御応答規則** — unit 検査に先立ち評価し、mode=full で再発行する。
 
 **identity 不変性**: incremental/full で出力が異なっても identity は `(raw_hash, tool_profile_hash)` のまま。`tool_profile_hash` 計算入力に incremental flag は含めない。
 
@@ -288,7 +288,10 @@ unit_mapping (§2.2) の帰結 (`unchanged 候補 ∪ changed ∪ added`)。
 V1 被覆・排他: keys(updated_units) ∪ keys(added_units) ∪ unchanged_unit_keys ∪ keys(failed_units) = N
               かつ 4 集合は互いに素 (unit の返し忘れ / 二重出力の検出。failed_units は persist せず
               manifest 側で failed へ遷移する — §5.2 partial の表現手段。V5 の形式検査は
-              failed_units には適用しない)
+              failed_units には適用しない)。さらに
+              keys(failed_units) ⊆ hints.changed_unit_keys ∪ hints.added_unit_keys
+              (Adapter に渡していない unchanged 候補 — fingerprint-exact 再利用 unit — は
+              KCS 側確定であり failed にできない)
 V2 removed:   removed_unit_keys が hints.removed_unit_keys と完全一致
 V3 越権禁止:  keys(updated_units) ⊆ hints.changed_unit_keys
               (hints に無い unit の書き換え = unchanged unit の再出力違反の検出)
@@ -302,11 +305,14 @@ V5 形式:      各 updated / added unit の markdown が非空文字列で、
               生 HTML / autolink 禁止 — への適合を検査し、違反 unit を含む応答は reject する
 V6 mode:      mode_used = "full" の場合は full 出力契約として検証:
               keys(updated_units) ∪ keys(added_units) ∪ keys(failed_units) = prepared unit 全集合
+              (= 新 raw の prepared 帰結の unit 集合 — V1 の N と同じ母集合)
               かつ 3 集合は互いに素 (unchanged_unit_keys / removed_unit_keys は空 —
               full に増分概念はない。部分失敗は incremental と同じく failed_units で表現し
               manifest 側で failed へ遷移する)。V1〜V4 は適用しないが、**V5 の形式検査は
               full 出力の全成功 unit に適用する** (V1 と同じく failed_units には適用しない)
 ```
+
+**制御応答 (fallback_to_full=true)**: `fallback_to_full=true` の応答は V1〜V6 に**先立ち**制御応答として評価する — unit 配列・unchanged / removed は空であること (非空は contract violation)。KCS は当該応答を成功・失敗のどちらの終端にもせず、**同一 task を `mode=full` で再発行する** (§3.1 の発動条件は再評価しない — Adapter 判断を尊重。full 応答での `fallback_to_full=true` は contract violation = ループ防止)。この評価順が無いと、§8.1 の「短絡」拒否権 ([07-adapter-spec.md §8.1](07-adapter-spec.md)) が V1 被覆違反 → 再試行 → failed permanent の死路になる。
 
 違反時の挙動:
 
@@ -328,7 +334,7 @@ full mode 応答の V5/V6 違反も同様に全体 reject + failed (invalid_inpu
 
 # 4. SQLite Schema (Query Acceleration Layer)
 
-`.kcs/index/sqlite.db`。**真実は objects/、SQLite は再構築可能** (`kcs repair --rebuild-db`)。
+`.kcs/index/sqlite.db`。**真実は objects/、SQLite は再構築可能** (`kcs repair --rebuild-db`。例外 = embeddings の `target_type='query_cache'` 行 — objects に由来せず復元されない、§4.3)。
 
 ## 4.1 chunks
 
@@ -488,7 +494,7 @@ CREATE VIRTUAL TABLE chunk_vec USING vec0(
 
 `embeddings` テーブル (メタデータ + vector BLOB) と `chunk_vec` (vec0 virtual table) は、いずれも `objects/` から再構築可能な加速層であり、真実は `objects/` にある (§4 冒頭。**例外 = `target_type='query_cache'` の行** — 次段落のとおり objects に由来せず、rebuild では復元せず破棄する)。両テーブル間では **`embeddings` テーブルを正** とし、`chunk_vec` は `embeddings` からの導出物として扱う。不整合を検出した場合および `kcs repair --rebuild-db` では、`objects/` → `embeddings` → `chunk_vec` の順に再構築する。`chunk_vec` の導出は **`chunks.text_hash` と `embeddings.target_id` の結合**で行い (**結合対象は `target_type='chunk'` の行のみ** — query_cache 等の他 target_type 行は hash 形式が同じでも chunk へ結合しない)、同一 `text_hash` を持つ複数 chunk には同じ embedding を複数の `chunk_vec` 行へ展開する (content ベース再利用 §5.5 の裏面)。**結合は現行 tool-lock の embedding profile に限定する** — `(profile_hash, dimensions, distance, modality)` が現行 lock と一致する embedding 行のみ。複数 profile の embedding が正規に並存し得るため、無条件結合は chunk ごとに複数候補を生み `chunk_vec` の PRIMARY KEY と衝突する (rebuild 停止)。chunk ごとに候補が **0 件または 1 件**であることを検証する (0 件 = 未 enrichment — chunk_vec 行を作らず pending として text-only で検索を継続する ([05-runtime.md §1](05-runtime.md)。offline / budget pause 中の rebuild で正常に生じる)。2 件以上のみ corruption として rebuild 停止)。
 
-**query cache (`target_type='query_cache'`)**: cursor replay が pin する page 1 の query vector ([05-runtime.md §1.5](05-runtime.md)) の正本。`target_id` = **query_vector_digest** = `"sha256:" + base16(sha256(vector BLOB))`。vector BLOB の canonical 表現は **float32 little-endian の連続配列 (`dimensions` 個、L2 正規化済み)** — chunk embedding の保存表現と同一で、digest はこの bytes に対して計算する。**query 本文・text_hash は保存しない** (保存物は vector と digest のみ — redact 既定 ([10-operations.md §7](10-operations.md)) と整合し、行削除はいつでも安全 = 影響は当該 cursor の拒否のみ)。書込は検索に参加した各 scope の sqlite.db へ行い、上限は **scope あたり 256 行** (超過時は最小 rowid の行から削除)。この行だけは `objects/` から再構築できないため `kcs repair --rebuild-db` では復元せず破棄する (依存 cursor は `KCS-E-SEARCH-CURSOR-001` → 再検索が正)。purge の SQLite 行列挙の候補にも含めない (文書 lifecycle と無関係 — [05-runtime.md §3.5](05-runtime.md))。chunk_vec へは展開しない (検索対象ではない)。
+**query cache (`target_type='query_cache'`)**: cursor replay が pin する page 1 の query vector ([05-runtime.md §1.5](05-runtime.md)) の正本。`target_id` = **query_vector_digest** = `"sha256:" + base16(sha256(vector BLOB))`。`id` は [03-data-model.md §8.1](03-data-model.md) の embedding identity 式を `target_type: "query_cache"` / `target_hash: <query_vector_digest>` で適用して導出する — 同一 (digest, profile) の再挿入は同一 `id` に確定するため `ON CONFLICT(id) DO NOTHING` で冪等。**INSERT と 256 行剪定は同一 SQLite Tx で cursor 返却前に完了する** (剪定が別 Tx だと返却済み cursor の行を直後に消し得る)。vector BLOB の canonical 表現は **float32 little-endian の連続配列 (`dimensions` 個、L2 正規化済み)** — chunk embedding の保存表現と同一で、digest はこの bytes に対して計算する。**query 本文・text_hash は保存しない** (保存物は vector と digest のみ — redact 既定 ([10-operations.md §7](10-operations.md)) と整合し、行削除はいつでも安全 = 影響は当該 cursor の拒否のみ)。書込は検索に参加した各 scope の sqlite.db へ行い、上限は **scope あたり 256 行** (超過時は最小 rowid の行から削除)。この行だけは `objects/` から再構築できないため `kcs repair --rebuild-db` では復元せず破棄する (依存 cursor は `KCS-E-SEARCH-CURSOR-001` → 再検索が正)。purge の SQLite 行列挙の候補にも含めない (文書 lifecycle と無関係 — [05-runtime.md §3.5](05-runtime.md))。chunk_vec へは展開しない (検索対象ではない)。
 
 KCS は Text/Image を分けず **単一マルチモーダル Embedding Adapter** のみを許可する (非 multimodal profile は `KCS-E-EMBED-MODALITY-001` で採用拒否、[03-data-model.md §7](03-data-model.md))。
 

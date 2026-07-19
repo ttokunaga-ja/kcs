@@ -152,7 +152,7 @@ page 1 の `since_cutoff` (UTC ISO8601 + `Z`) も保持する:
 - `since_cutoff`: `--since` の page 1 で一度だけ計算した下限。page 2 以降は現在時刻から再計算しない
 - `query_hash` (token 全体に 1 つ、§1.8) が不一致の cursor は `KCS-E-SEARCH-CURSOR-001` で拒否する
 
-2 ページ目以降は同一の候補取得 → RRF (§1.3) → MMR (§1.4) を再計算し、consumed 件を skip して続きを返す。**vector / hybrid の replay は page 1 の query vector を再利用する** — query の再 embedding は行わない (provider の非決定性で候補・順位が変わり、consumed の skip が重複・欠落を生む)。page 1 の正規化済み query vector は参加各 scope の `embeddings` 表 (`target_type='query_cache'` — 正本 [04-pipeline.md §4.3](04-pipeline.md)。query 本文は保存しない) に保持し、その digest (= `query_vector_digest`、§1.8 の query_hash 構成要素) を token に含める。replay は参加 scope のいずれかから digest 一致行を読み、どの scope にも無ければ `KCS-E-SEARCH-CURSOR-001` (再検索が正)。順序安定性の根拠は SQLite WAL のスナップショット分離**ではなく**、「commit 単位で固定された chunk 集合 + 決定論的な順位計算 + `index_generation` による FTS 内容不変の保証」である。CLI 呼び出しを跨いでも成立する。
+2 ページ目以降は同一の候補取得 → RRF (§1.3) → MMR (§1.4) を再計算し、consumed 件を skip して続きを返す。**vector / hybrid の replay は page 1 の query vector を再利用する** — query の再 embedding は行わない (provider の非決定性で候補・順位が変わり、consumed の skip が重複・欠落を生む)。page 1 の正規化済み query vector は参加各 scope の `embeddings` 表 (`target_type='query_cache'` — 正本 [04-pipeline.md §4.3](04-pipeline.md)。query 本文は保存しない) に保持し、その digest (= `query_vector_digest`) を **token の独立 field として保持し、かつ §1.8 の query_hash 構成要素にも含める** (query_hash は一方向 hash であり、replay が読み出す行の鍵は token field 側から得る。vector|hybrid のみ — text mode では field 省略)。replay は参加 scope のいずれかから digest 一致行を読み、どの scope にも無ければ `KCS-E-SEARCH-CURSOR-001` (再検索が正)。順序安定性の根拠は SQLite WAL のスナップショット分離**ではなく**、「commit 単位で固定された chunk 集合 + 決定論的な順位計算 + `index_generation` による FTS 内容不変の保証」である。CLI 呼び出しを跨いでも成立する。
 
 `--offset` は cursor の糖衣であり、同じ再現規則で確定順序の `offset` 位置から `limit` 件を返す。終端判定は **alias 展開後の final result stream の末尾** — それを超えたら `next_cursor: null` (`--all-history` / `--since` で候補プール末尾を終端にすると最後の alias group を取り残す。default 系は候補プール = final stream で同値)。
 
@@ -373,6 +373,7 @@ per_scope_timeout_seconds = 2   # 超過 scope は excluded_scopes (reason=timeo
   "v": 2,
   "scope_mode": "all",
   "query_hash": "sha256:...",
+  "query_vector_digest": "sha256:...",
   "time_travel": { "all_history": true, "since": "604800s" },
   "since_cutoff": "2026-07-13T00:00:00Z",
   "excluded_scopes": [],
@@ -530,7 +531,9 @@ GC (tiered retention / `kcs gc --prune-unreachable` を含む) が削除して�
 - tree object (shallow 化対象 commit のもの。**ただし同一 tree hash を非 shallow の commit が参照して
   いる場合は削除しない** — tree は content hash 共有されるため、reachability 確認 (全非 shallow commit
   からの参照 0) が削除の前提)
-- SQLite index / FTS など objects/ から再構築可能な cache (index を削除すると再構築までの間、
+- SQLite index / FTS など objects/ から再構築可能な cache (例外 = embeddings の
+  `target_type='query_cache'` 行 — 復元されず破棄、影響は cursor 拒否のみ [04-pipeline.md §4.3](04-pipeline.md)。
+  index を削除すると再構築までの間、
   検索と pointer 解決の 6a/6b 検証は実行不能 — このときの解決は not_found ではなく
   `KCS-E-INDEX-REBUILDING-001` の再構築要求を返す [§6・[08-evidence-pointer-spec.md §3.1](08-evidence-pointer-spec.md)]。
   検証不能を「不在の確定」と混同しない)
@@ -782,7 +785,7 @@ fsck が区別できるよう、同じ digest-only fan-out に次の exact bound
   "raw_hash": "sha256:abc...",
   "events": [
     { "kind": "erased",  "at": "2026-04-25T12:00:00Z", "in_commit": "sha256:9f2c...",
-      "actor": "user", "epoch": 12, "lifecycle_epoch": 41 },
+      "actor": "user", "reason": "privacy", "epoch": 12, "lifecycle_epoch": 41 },
     { "kind": "retired", "at": "2026-05-01T09:00:00Z", "actor": "user",
       "in_commit": "sha256:1a2b...", "resurrection_commit": "sha256:1a2b...", "lifecycle_epoch": 42 }
   ]
@@ -796,7 +799,9 @@ validity は leaf/raw_hash 一致だけでなく、erased event の `in_commit` 
 ref-reachable な `commit_type=purged` commit を指し、`at` が canonical UTC かつ commit `created_at` と
 一致し、fsck invocation の fixed now より未来でないことを要求する。schema_version ごとの定義に
 一致しない field・不一致は store corruption (v1 flat 形式は「erased event 1 件」として読み、
-次の mutation で v2 へ locked 変換する — tombstone の legacy 規則と同型)。
+次の mutation で v2 へ locked 変換する — tombstone の legacy 規則と同型。v1 に reason は存在しない
+ため変換では `reason: "other"` を合成し legacy 警告として報告する — 新規 erased の 5 値 enum 必須
+とは区別。自由文の原値を持つ legacy 変換は従来どおり `legacy_reason` に保存)。
 open / view / search / restore / evidence verify / index の resurrection barrier には使わず、fsck だけが
 intentional absence の説明に使う。したがって Evidence verify は従来どおり `not_found` で、同一 bytes の
 後日 ingest (明示操作に限らず、working tree 残存原本の自動 scan を含む — §3.5 の残存警告) は許可する。**erase receipt も tombstone と同じ lifecycle 形式 (events[]) を持ち、raw object の再 publication 成功時は除去せず `retired` event を append する** — 除去すると erase 済み raw の旧 commit が参照する manifest 欠落を説明するものが消え、fsck の corruption 誤判定と手順 6b の不達を生むため (公開 pointer API に使わない・re-ingest barrier にしない性質は不変)。crash で不整合が残った場合は verified raw object を優先し、次の locked mutation で record を整合させる — **整合の条件は [10-operations.md §7.5.1](10-operations.md) の receipt 整合規則に従う**: 末尾 erased event の `in_commit` を ancestor に持つ ref 到達可能な再 publication commit が存在するときのみ `retired` を append し、commit がまだ無ければ未 finalize の進行状態として保留する (tombstone の補完と同じ因果条件)。

@@ -136,7 +136,13 @@ revoke: adapter.policy.allow_network = false に設定する。
         行 materialize 後は (a) と同じ照合・失効規則に従う (tool_id 個別の可否は approvals[] が
         単位。boolean だけでは profile 変化の失効を判定できないため、行なしでの送信は不可)。
         **materialize が発火するのは当該 scope の approvals[] に行が (tool_id を問わず) 一つも
-        存在しない初回、かつその最初の 1 tool に対してのみ** — 2 個目以降の tool_id や tool_id が
+        存在せず、かつ scope.json に `approvals_initialized` marker が無い初回、その最初の 1 tool に
+        対してのみ**。初回承認 (materialize / --approve のいずれも) は行 publish と**同一 atomic
+        write** で `approvals_initialized: true` を記録する ([10-operations.md §12.3](10-operations.md) の
+        optional key) — 以後 approvals[] が空になっても (手動編集・不整合 backup 復元等)、行ゼロ ×
+        marker あり は真正初回と区別して **fail-closed (明示承認要求)** とする (行ゼロだけでは台帳
+        喪失と初回を区別できない)。marker は行と同時に書かれるため、承認途中の crash 中間 (true ×
+        行なし × marker なし) では self-heal がそのまま成立する。2 個目以降の tool_id や tool_id が
         変わった Adapter は、boolean が true のままでも自動生成せず明示承認 (対話 / --approve) を
         要する (新 identity への blanket 波及を許すと、上記寿命規則の「tool_id が変わった場合は
         失効し、再承認」を『新規行の初回 materialize』として迂回できてしまう)。profile 変更で
@@ -554,6 +560,8 @@ MVP における Adapter の脅威モデルを次のとおり確定する。
    → Markdown の局所一貫性を保つ
 3. heading 構造の変更は KCS には影響しない (chunk side で対応)
 4. Adapter が「軽微とは言えない」と判断したら fallback_to_full=true で短絡
+   (受理側は unit 検査に先立つ制御応答として扱い、同一 task を mode=full で再発行する —
+   [04-pipeline.md §3.2](04-pipeline.md) の制御応答規則。full 応答での本 flag は contract violation)
    閾値の Adapter 側 hint は KCS 側 hint と衝突したら **KCS 側を優先**
 5. spec_version 不一致なら、Adapter は invalid_input として失敗
 6. 出力は KCS 側の受け入れ検査 (04-pipeline.md §3.2) を通過しなければ persist されない。
