@@ -235,7 +235,9 @@ AdapterRun:
                         `{ kind, count }` の閉形式 (kind = "pages" | "tokens_in" | "tokens_out" の
                         閉 enum — 拡張は spec 改訂。count = 非負整数)。単価解決元 = tools.toml の
                         `[pricing]` 単価表 (kind → USD 単価 — [03-data-model.md §11](03-data-model.md)、
-                        **単価の正本は tools.toml** — tool-lock ではない)。**換算は終端 Tx
+                        **単価の正本は tools.toml** — tool-lock ではない。schema 型と billable Adapter の
+                        kind 被覆必須は [10-operations.md §12.3](10-operations.md)、kind の単価が解決
+                        不能な場合の終端は estimated 縮退 — [04-pipeline.md §5.4](04-pipeline.md))。**換算は終端 Tx
                         時点の表で確定し、以後の単価変更で再計算しない** (台帳 UPDATE 禁止と整合)。
                         **billable な terminal 応答 (成功・billable reject・fetch_output・sync 応答・
                         正常な制御応答 (fallback_to_full — [04-pipeline.md §3.2](04-pipeline.md)))
@@ -619,7 +621,7 @@ MVP における Adapter の脅威モデルを次のとおり確定する。
    限り** full に fallback する (spec_version 非互換は下記のとおり fallback しない)
 ```
 
-`spec_version` の bump 規約は [10-operations.md §12.5](10-operations.md) を正とする。**full fallback (§8.4) が有効なのは incremental capability だけが非互換な場合に限る** — full request も同じ `spec_version` を含むため、spec_version 自体の非互換は full で呼び直しても同じ invalid_input を再生するだけである。この場合は `KCS-E-ADAPTER-CONTRACT-001` 系の明示エラーとして当該 online Adapter のタスクを failed permanent (Adapter 更新が必要) にし、同梱 deterministic Adapter のベースライン (§2.1) は影響を受けず継続する。
+`spec_version` の bump 規約は [10-operations.md §12.5](10-operations.md) を正とする。**full fallback (§8.4) が有効なのは incremental capability だけが非互換な場合に限る** — full request も同じ `spec_version` を含むため、spec_version 自体の非互換は full で呼び直しても同じ invalid_input を再生するだけである。この場合は `KCS-E-ADAPTER-SPECVER-001` (§8.1 手順 5 — invalid_input / 非再試行) として当該 online Adapter のタスクを failed permanent (Adapter 更新が必要) にし、同梱 deterministic Adapter のベースライン (§2.1) は影響を受けず継続する。
 
 ## 8.2 推奨プロンプト構造 (frontier AI 系)
 
@@ -652,7 +654,9 @@ USER:
 
 大型 PDF (100+ pages) では TTFB を抑えるためストリーミング出力を許容する。KCS は Adapter からの SSE / chunked JSON を受け取り、unit 完了ごとに persist する。
 
-ストリーミング中の unit は staging 領域に persist し、応答完了後に**全体集合が受け入れ検査
+ストリーミング中の unit は staging 領域に persist し (**配置と耐久 descriptor は
+[03-data-model.md §2](03-data-model.md) の `.kcs/staging/` — purge / status / prune-orphans の
+帰属列挙の正本**)、応答完了後に**全体集合が受け入れ検査
 ([04-pipeline.md §3.2](04-pipeline.md)) を通過した時点で manifest へ一括確定する** (検査前の unit は
 公開しない — §3.2 の「違反応答は 1 unit も persist しない」と整合)。ストリーミング失敗時は staging を
 破棄せず、**完了済み unit は保全したまま task を failed (retryable) にする。task が failed permanent または

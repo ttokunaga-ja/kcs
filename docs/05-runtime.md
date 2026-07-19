@@ -91,13 +91,18 @@ default: k = 60, w_text = 1.0, w_vector = 1.0
 - **短語 fallback**: query の全 token が 3 文字未満で trigram tokenizer の MATCH が成立しない場合
   (例: 1〜2 文字の日本語 query — MATCH は 0 件になる)、text バックエンドは `chunks.text` への
   **bounded LIKE スキャン** (上限 = `candidate_depth`、instr ベースの部分一致) へ fallback する。
-  3 文字以上の token が 1 つでもあれば FTS MATCH を使う。LIKE fallback の順位も決定的に定める:
+  3 文字以上の token が 1 つでもあれば FTS MATCH を使う — ただし **MATCH 式に渡すのは 3 文字以上の
+  token のみ**とし、**3 文字未満の token は同一 bounded query 内の `instr` 条件として LIMIT 前に
+  AND 適用する** (trigram は 3 文字未満の phrase を黙って落とすため、混在 query の短語を MATCH に
+  含めると条件から脱落する — 全 token の条件を保ったまま候補確定する)。LIKE fallback の順位も決定的に定める:
   最初の一致位置 (instr) 昇順、同点は chunk_id 昇順。SQL は ORDER BY 確定後に LIMIT candidate_depth
   を適用する (LIMIT 先行で候補集合が非決定になる形は禁止)
 - **MATCH 式の生成**: user query を FTS5 構文として解釈しない — token 列を各々二重引用符で囲んだ
   phrase / term の並びとして MATCH 式を機械生成する (token 内の `"` は `""` へ escape。`C++` 等の
   記号語が fts5 syntax error にならない)。FTS5 演算子 (AND / OR / NEAR / `*` 等) の直接指定は
-  MVP では提供しない
+  MVP では提供しない。**tokenization は決定的に固定する**: NFC 正規化後の query を Unicode 空白で
+  分割した各非空片が token (長さの単位 = Unicode scalar 数。記号のみの token も phrase として投入可)。
+  token が 0 個の query は KCS-E-CONFIG-USAGE-001 (exit 2)
 - 片方のバックエンドにしか現れない候補は、現れない側の項を 0 とする
 - `RRF_score` の同点は chunk_id 昇順
 - text-only / vector-only モードでは fusion せず当該バックエンドの順位をそのまま使う
@@ -182,7 +187,7 @@ page 1 の `since_cutoff` (UTC ISO8601 + `Z`) も保持する:
 - `max_association_rowid`: cursor 発行時点の `chunk_config_generations` 最大 association rowid。
   現行 config association も `association_rowid <= max_association_rowid` に固定し、page 1 後に追加された
   association が page 2 の候補へ混入することを防ぐ
-- `chunking_config_hash`: page 1 で検索対象にした tree の config (デフォルト = 当該 scope の effective config、時点指定 = 対象 tree の値 — §1.6)。replay 時の対象値と不一致なら拒否する
+- `chunking_config_hash`: page 1 で検索対象にした tree の config (デフォルト = **当該 scope の HEAD tree の値** (通常 = effective config — 移行期間の扱いは [04-pipeline.md §4.6](04-pipeline.md))、時点指定 = 対象 tree の値 — §1.6)。replay 時の対象値と不一致なら拒否する
 - `consumed`: alias expansion 後の final result stream で当該 scope から既に返した hit 数 (semantic chunk
   数ではない)。replay は grouped final stream を完全再計算し、scope ごとにこの件数だけ先頭 hit を skip
   するため、page boundary が 1 chunk の alias group 内でも重複/欠落しない
@@ -221,7 +226,7 @@ page 1 の `since_cutoff` (UTC ISO8601 + `Z`) も保持する:
 
 共通フィルタ: `chunk_config_generations` に**対象 tree の `chunking_config_hash`** の association がある chunk のみ
 (デフォルト = HEAD tree = 現行値。`--at` は対象 tree の値、`--all-history` / `--include-deleted` は各 binding
-tree の値で判定する。v1 tree は config 未記録のため現行値で代替し結果に注記 — [04-pipeline.md §4.1, §4.6](04-pipeline.md))。
+tree の値で判定する。v1 tree は config 未記録のため現行値で代替し結果に注記 (**現行値の association が無い場合は当該 instance の既存 association から `chunking_config_hash` の byte 順最小を決定的に代用** — HEAD 限定再 chunk 後の履歴 instance を `--at` で全脱落させない) — [04-pipeline.md §4.1, §4.6](04-pipeline.md))。
 purge 済み raw_hash の chunk 行は物理削除済みのため自然に除外される。
 **実装規範**: publication / association の時点条件は correlated **EXISTS** (ancestry 判定と
 `association_rowid <= cursor.max_association_rowid` を副問い合わせ内に含む) で評価する — 同一
@@ -364,9 +369,11 @@ score/rank をコピーして、group 内を
    候補として返す。§1.4 の MMR/dedup は scope 内でまだ適用しない
 3. scope 間の統合は **rank ベース** で行う。各 scope の RRF スコア (rank のみから決まる) をそのまま比較して降順マージする。**BM25 / vector の raw スコアを scope 間で比較・正規化してはならない** (コーパス統計が index ごとに異なり比較不能)。pre-alias 同点は immutable `(scope_id,chunk_hash)` で安定化する
 4. diversify (MMR / group_by_raw_hash, §1.4) は統合後の候補列に対して適用する。**multi-scope 検索の
-   `[search]` 実効値 (rrf / diversify / candidate_depth / fail_behavior) は user config (device 層) を
-   用いる** — folder 値は `--scope` 単一指定時のみ適用する (scope 間で異なる folder 値の統合は定義
-   しない。cursor が bind する実効値 (§1.5) もこの解決に従う)
+   `[search]` 実効値 (**default_mode** / rrf / diversify / candidate_depth / fail_behavior) は
+   user config (device 層) を用いる** — folder 値は `--scope` 単一指定時のみ適用する (scope 間で
+   異なる folder 値の統合は定義しない。cursor が bind する実効値 (§1.5) もこの解決に従う —
+   **ただし fail_behavior は挙動方針であり確定順序に影響しないため bind / query_hash preimage の
+   対象外**)
 5. vector / hybrid の横断条件は [03-data-model.md §7](03-data-model.md) に従う。embedding profile が全 scope で一致しない場合、横断部分は text (BM25 rank) のみで統合し、`fallback_reason` に記録する (**`--vector` 明示時は fallback しない** — profile 不一致の scope を KCS-E-SEARCH-VEC-INCOMPAT-001 の excluded_scopes として除外し、全 scope 除外なら error — §1.2 の「失敗時は error」と同じ)。`kcs_format_version` が自己の対応上限より新しい scope も同様に excluded_scopes として除外する (KCS-E-STORE-VERSION-001 を `fallback_reason` に記録・当該 scope へは query_cache を含む一切の書込を行わない — [10-operations.md §12.5](10-operations.md))。**全 scope が STORE-VERSION 除外なら command は KCS-E-STORE-VERSION-001 / exit 8 を返す** (SCOPE-ALL-FAILED (exit 4) より優先 — REBUILDING と同型の昇格、[06-cli-spec.md §7](06-cli-spec.md)。自動化に「新版への更新が必要」を直接伝える)。**全 scope の除外理由が同一 code の場合、command は当該 code とその単独実行時の exit を返す (一般規則)** — VERSION → exit 8・REBUILDING → exit 3・INCOMPAT → exit 8・journal (`KCS-E-PURGE-JOURNAL-ACTIVE-001` — §3.5) → exit 3・DUP → exit 3 (ユーザーの dedupe 後に回復可能 — [08-evidence-pointer-spec.md §4.3](08-evidence-pointer-spec.md) の registry_duplicate = 3 と同一分類)。理由が混在して全 scope 除外となった場合のみ通常の SCOPE-ALL-FAILED (exit 4) とし、個別理由は excluded_scopes[].reason で判別する。embedding 承認の consent gate (§1.1) は**送信 gate であり per-scope の除外条件ではない** — 承認ゼロなら検索全体が text fallback (excluded_scopes には計上しない)。1 つ以上の承認で送信された query vector は profile 互換な全参加 scope の vector 検索に用いる (未承認 scope も含む — 送信は 1 回であり scope 別の再送信は発生しない)
 
 既知の限界: rank ベース統合は、関連文書の乏しい scope の 1 位と強い scope の 1 位を同格に扱う。MVP ではこれを容認する (結果に scope_path が必ず含まれるため判別可能)。scope 間の再ランクは v2 以降の検討事項。
@@ -681,7 +688,7 @@ purge は **object の物理削除 + default tombstone または内部 erase rec
    purge 完了表示にその旨 (残存可能性と掃除手段) を注記する)
 - SQLite の chunks / chunk_config_generations / chunk_publications 行と FTS エントリ。chunk_vec は**対象 chunk_id の行に限定**し、**embeddings 行は object 側と同じく live 参照 0 の場合のみ削除する** (共有 text_hash の行を無条件に消すと、非対象文書の vector 検索が rebuild まで欠ける)。`target_type='query_cache'` の embeddings 行は候補に含めない (文書 lifecycle と無関係 — [04-pipeline.md §4.3](04-pipeline.md)。即時消去したい場合の行削除は常に安全 = 影響は cursor 拒否のみ)
 - chunks.jsonl の**対象 chunk_id を参照する creation 行・publication event 行の全部** (append-only の例外 — purge は法務要件の明示例外として行を落とす。書き換えは [04-pipeline.md §1.1](04-pipeline.md) の耐久書込 primitive (temp + rename) に従う)
-- 対象 raw_hash に帰属する task の **staging** ([07-adapter-spec.md §8.3](07-adapter-spec.md)) — **task の状態を問わず** (retryable failed の保全 staging を含む。以後の再生成は persist 直前の tombstone 再検査が防ぐ)
+- 対象 raw_hash に帰属する task の **staging** ([07-adapter-spec.md §8.3](07-adapter-spec.md)) — **task の状態を問わず** (retryable failed の保全 staging を含む。以後の再生成は persist 直前の tombstone 再検査が防ぐ)。**帰属列挙の正本 = `.kcs/staging/` の耐久 descriptor 全走査** ([03-data-model.md §2](03-data-model.md) — tasks.jsonl 非依存。task 記録の喪失後も削除対象を列挙できる)
 ```
 
 残すもの (不変):

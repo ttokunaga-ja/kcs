@@ -142,7 +142,7 @@ preview 内容:
 - 機微ファイル候補の警告 (secrets Tier A: デフォルト除外済み / Tier B: 要確認。10-operations.md §1.1)
 - network transmission policy (どの Adapter がオンライン送信するか)
 - 別 .kcs と重複する可能性のある容量 (ユーザー配置由来のみ)
-- 推定 LLM コスト (markdownize / embedding 別。tool-lock の Adapter 単価による桁の目安)
+- 推定 LLM コスト (markdownize / embedding 別。現行 `tools.toml` の `[pricing]` 単価による桁の目安 — [10-operations.md §1](10-operations.md))
 - 現行 budget cap での推定完了時期 (cap 超過が予見される場合は承認前に警告 + 選択肢提示。[10-operations.md §1](10-operations.md))
 ```
 
@@ -398,8 +398,9 @@ kcs import <bundle.kcsz> --to <dir> [--as-new-scope]  # bundle の scope_id が 
                                         # adapter.policy.allow_network を引き継がない — 新 scope_id で preview +
                                         # 取り込み承認と network opt-in を再実施する (安全側。07 §3・10 §1)。
                                         # import の atomic postcondition: 展開時に scope.json を新 scope_id で
-                                        # 再生成し approvals[]/scan_approval/approvals_initialized を除去、config の allow_network を
-                                        # false へ reset、旧 root_path を除去 (bundle 内の旧値を残したまま外側の
+                                        # 再生成し approvals[]/scan_approval/approvals_initialized/approval_pending を除去、config の allow_network を
+                                        # false へ reset、旧 root_path を除去 (pending intent を新 scope_id へ
+                                        # 再束縛してはならない — 07 §3) (bundle 内の旧値を残したまま外側の
                                         # ID だけ変えない)。送信 gate と fsck/schema は approval 行の scope_id が
                                         # scope.json の scope_id と一致することを検査する (07 §3・10 §12.3)。
                                         # bundle 内の legacy 表現 (旧 Unix raw-name tag ref 等、対象 OS で物理

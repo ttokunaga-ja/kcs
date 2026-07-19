@@ -54,8 +54,12 @@ hash 再計算の一致) → (3) file fsync → (4) **atomic rename** (immutable
 (HEAD / refs/ の更新) は、参照する closure (commit / tree / 配下 object) の耐久化完了後にのみ行う。
 chunks.jsonl の append は write + fsync (torn tail は読み手が切り詰める — [05-runtime.md §8.1](05-runtime.md))、
 **purge の行削除書き換え ([05-runtime.md §3.5](05-runtime.md)) も本 primitive (temp + rename) に従う**。
-crash が残した temp は次回書き込み系コマンド冒頭で掃除する。03 §2 / 05 §8.1 の「fsync 規律」参照は
-本 ¶ を指す。
+**新規に作成した中間 directory (fan-out shard 等) は、mkdir → 親 directory fsync を既存の耐久済み
+directory に到達するまで連鎖してから、当該 subtree 配下の publish を行う** (直親だけの fsync では
+電源断で上位の directory entry ごと消える)。**削除 (unlink / rmdir — purge の deleted 相等) も同様に、
+各削除後に包含 directory を fsync してから journal phase / postcondition を前進させる** (fsync 前の
+前進は電源断で削除だけが巻き戻る)。crash が残した temp は次回書き込み系コマンド冒頭で掃除する。
+03 §2 / 05 §8.1 の「fsync 規律」参照は本 ¶ を指す。
 
 # 2. Prepared Units と差分判定
 
@@ -569,8 +573,8 @@ CREATE INDEX idx_tree_entries_ident ON tree_entries(commit_hash, raw_hash, tool_
 `[chunking]` 設定 ([03-data-model.md §11](03-data-model.md)) の変更は raw_hash / tool_profile_hash に現れないため、独立した世代判定を行う:
 
 - chunk / embedding 段の最新判定は `(raw_hash, tool_profile_hash, gen, chunking_config_hash)` の一致で行う ([03-data-model.md §5.3](03-data-model.md))。03 §6 の up_to_date 判定 (Markdownize 段) は変更しない
-- デフォルト (HEAD) 検索の対象は **現行 chunking_config_hash の chunk のみ**。時点指定 (`--at` / history 系) は **対象 tree の `chunking_config_hash`** の association で絞る — tree v2 が時点 config を保存する意味はここにある (v1 tree は config 未記録のため現行値で代替し、結果に注記する。[05-runtime.md §1.6](05-runtime.md))
-- 設定変更を検出したら、次回 `kcs index` で **HEAD (現行 tree) が参照する normalized instance** の再 chunk + 再 embedding task を積む。再 chunk はローカル処理で LLM 不要。embedding のみ再課金 (§5.4 budget guardrail の対象)。**履歴 instance は対象外** — 時点指定は対象 tree の `chunking_config_hash` (旧 config) の chunk で検索するため ([05-runtime.md §1.6](05-runtime.md))、新 config での履歴再 chunk はどの tree からも到達不能な chunk と embedding 課金を作るだけになる (03 §2.1 の「新規 chunk は常に最新 gen」とも整合)
+- デフォルト (HEAD) 検索の対象は **HEAD tree の `chunking_config_hash` の chunk のみ** (通常 = 現行値。**config 変更後〜新 tree publish 前の移行期間は旧値のまま検索し、`kcs status` が再生成中を表示する — 現行値への切替は新 tree publish 時**。移行期間に検索を欠けさせない)。時点指定 (`--at` / history 系) は **対象 tree の `chunking_config_hash`** の association で絞る — tree v2 が時点 config を保存する意味はここにある (v1 tree は config 未記録のため現行値で代替し — 現行値の association が無い場合は当該 instance の既存 association から `chunking_config_hash` の byte 順最小を決定的に代用 — 結果に注記する。[05-runtime.md §1.6](05-runtime.md))
+- 設定変更を検出したら、次回 `kcs index` で **HEAD (現行 tree) が参照する normalized instance** の再 chunk + 再 embedding task を積む (unpublished な新 gen が残る crash 窓は、書き込み系冒頭の task 再検出 (§5.2) が当該 instance の publication を先に完遂することで解消する)。再 chunk はローカル処理で LLM 不要。embedding のみ再課金 (§5.4 budget guardrail の対象)。**履歴 instance は対象外** — 時点指定は対象 tree の `chunking_config_hash` (旧 config) の chunk で検索するため ([05-runtime.md §1.6](05-runtime.md))、新 config での履歴再 chunk はどの tree からも到達不能な chunk と embedding 課金を作るだけになる (03 §2.1 の「新規 chunk は常に最新 gen」とも整合)
 - 開始前に再生成対象 chunk 数と embedding 概算コストを提示し確認する (`--yes` で省略)
 - 旧世代 chunk 行は **削除しない**。Evidence Pointer の chunk_hash 解決 ([08-evidence-pointer-spec.md §6](08-evidence-pointer-spec.md)) 用に残置する (デフォルト検索には出ない。時点指定は対象 tree の config で対象になる — [05-runtime.md §1.6](05-runtime.md))
 - 再生成未完了の instance はその間検索から漏れる (index 未完了と同じ扱い。`kcs status` に表示)
@@ -967,7 +971,11 @@ terminal 化 (error='purged') = `purged` / 回復期限超過・照会不能の 
 同一 Tx で terminal 化する** (不正値は CHECK を通らず Tx を閉じられないため — 報告値が有効な場合のみ
 provider 値で記帳する)。**この縮退は usage が必須の応答 ([07-adapter-spec.md §4](07-adapter-spec.md) の
 billable terminal 応答) に限る** — 非 billable な応答 (単価 0 のローカル LLM・拒否課金を宣言しない
-provider の reject 等) の usage 欠落は正当であり、確定額 0 (`usd=0`・`estimated=0`) で記帳する。**課金 field 単独の不良は応答の受否・outcome・`contract_violation_count` を
+provider の reject 等) の usage 欠落は正当であり、確定額 0 (`usd=0`・`estimated=0`) で記帳する。
+**報告された `billable_units.kind` の単価が tools.toml の `[pricing]` で解決できない場合 (未設定・
+表の欠落) も「欠落」と同じ estimated 縮退 + warning とする** (終端 Tx を止めない。0 円確定にはしない —
+billable Adapter の pricing 被覆は送信前に検査される ([10-operations.md §12.3](10-operations.md))
+ため、この経路は途中で表が壊れた場合の防衛線)。**課金 field 単独の不良は応答の受否・outcome・`contract_violation_count` を
 変えない** — 成功は成功のまま、正常な制御応答は `outcome='fallback_to_full'` のまま (構造違反 (§3.2)
 だけが contract violation。課金 field の不良は warning log で可視化する —
 [07-adapter-spec.md §7](07-adapter-spec.md) の `usage_validation` / `billing_source` field と

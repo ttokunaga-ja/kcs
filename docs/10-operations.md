@@ -869,6 +869,8 @@ validation 失敗は exit code 2 で停止し、`KCS-E-CONFIG-SCHEMA-NNN` を返
 
 `folder-config.schema.json` は `[chunking].unicode_version` を **required** とする (省略不可・default なし — `kcs init` が実装同梱の UCD 版 (現在の既定 = 17.0.0) を明示記録する、[03-data-model.md §5.3](03-data-model.md) / [06-cli-spec.md §1](06-cli-spec.md))。**要素単位の後方互換**: これを欠く旧 `.kcs/config.toml` は schema error (exit 2) にせず**実装同梱版 (17.0.0) として読み、次回の locked mutation で atomic に補完書込みする** (approvals[] `status` の補完と同型 — required 化で既存 store の全 CLI を封鎖しない。補完後は現行 schema で検証する)。`[markdownize].bbox_annotation` (boolean、既定 true — [07-adapter-spec.md §5.2](07-adapter-spec.md)、値は tool_profile_hash に畳み込む) も本 schema の正式 key として定義する。
 
+`tools.schema.json` は adapter ごとの `pricing` を定義する: **key = billable_units の kind 閉 enum (pages | tokens_in | tokens_out — [07-adapter-spec.md §4](07-adapter-spec.md))、値 = 有限・非負の USD 単価 (REAL)、未知 key は schema error**。**billable を宣言する Adapter ([07-adapter-spec.md §5.7](07-adapter-spec.md) 条件 6) は、当該 Adapter が報告し得る全 kind の単価被覆を送信前に検査する (欠落は config error — fail-closed)**。終端時に初めて解決不能と判明した場合の縮退は [04-pipeline.md §5.4](04-pipeline.md)。
+
 `user-config.schema.json` は device cap (`[budget]`、[04-pipeline.md §5.4](04-pipeline.md)) を含む。
 
 ## 12.4 時刻・タイムゾーン

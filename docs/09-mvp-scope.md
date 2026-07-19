@@ -238,7 +238,7 @@ dogfood    開発者自身の実フォルダ (非公開)。数値は公開せず
 ゴールデンクエリ:
 
 - シナリオ M3-1 / M3-2 / M3-3 ごとに **15 件以上**、`eval/golden-queries.jsonl` としてリポジトリに保持する
-- 各行: `{ "scenario": "M3-2", "query": "...", "flags": ["--all-history"], "expected": [{ "scope": "research", "file": "auth-spec.md", "section": "api-token" }] }`
+- 各行: `{ "scenario": "M3-2", "query": "...", "flags": ["--all-history"], "expected": [{ "scope": "research", "file": "auth-spec.md", "path_at_commit": "auth-spec.md", "section": "api-token" }] }`
 - expected は `{ scope, file, section }` の分離形式で書く。**M3-2 (rename / 編集を含む履歴シナリオ) の expected 要素には `path_at_commit` (または対象 commit) を併記し、同一 file の版を一意化する** (rename 前後は別の expected 要素) (section = chunk の `section_id` (slug — [04-pipeline.md §4.1](04-pipeline.md))。heading 原文ではない) (path 区切りを含む文字列にしない。スコープ境界は [03-data-model.md §3](03-data-model.md) の「直下のみ」規則)。raw_hash は取り込み後に確定するため、評価ハーネスが取り込み時に `{ scope, file }` → raw_hash / chunk へ解決する
 - M3-2 は `--all-history`、M3-3 は `--include-deleted` で実行する
 

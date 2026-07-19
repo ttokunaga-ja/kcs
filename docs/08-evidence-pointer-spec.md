@@ -244,7 +244,9 @@ bulk 系 (`kcs evidence verify --batch <pointers.jsonl>`) は従来どおり各�
   - purged raw_hash (tombstone あり):   tombstoned — tombstone を返す (§4.1)
   - scope 解決の重複 (validated ∪ live 候補 ≥2): registry_duplicate
                                         — KCS-E-REGISTRY-DUP-001 (§3.1 手順 1a)
-  - tombstone なしで raw object 不在:   not_found — KCS-E-PURGE-NOT-FOUND-001 (§4.2)
+  - tombstone / erase receipt なしで raw object 不在: not_found — KCS-E-STORE-CORRUPT-001
+                                        (corruption の疑い — §3.1 手順 5。repair --verify-objects を案内)
+  - 有効 erase receipt ありで raw object 不在:        not_found — KCS-E-PURGE-NOT-FOUND-001 (§4.2)
   - scope の .kcs に到達できない:        scope_unreachable — scope_path 不達かつ
                                         scope_registry に scope_id 未登録
                                         → KCS-E-EVIDENCE-SCOPE-UNREACHABLE-001

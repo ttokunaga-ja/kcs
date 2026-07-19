@@ -38,6 +38,12 @@ raw / prepared / image / chunk / embedding / manifest / toollock / tree / commit
                       このフォルダ自身・子 .kcs リンク (旧称 folder.json は廃止)
   tool-lock.json      Adapter capability 記録 (cmd/url/auth は含めない)
   manifest.json       working/index state (永続的真実は tree/commit object)
+  staging/            外部実行の streaming staging ([07-adapter-spec.md §8.3](07-adapter-spec.md))。
+                      配置 = `staging/<raw64>.<tool64>.<adapter_kind>/`、各 root 直下に耐久
+                      descriptor.json (scope_id / raw_hash / tool_profile_hash / adapter_kind —
+                      staging 作成と同じ Tx 相当で atomic write)。**purge / status / prune-orphans の
+                      帰属列挙は descriptor の全走査が正本** (tasks.jsonl 非依存 — task 記録の
+                      喪失許容 ([04-pipeline.md §1](04-pipeline.md)) と両立させる唯一の手段)
   objects/
     raw/ab/cd/<raw64>
     prepared/ab/cd/<prepared64>
@@ -277,7 +283,7 @@ cache = scope_registry / aggregator 検索の探索対象一覧 / stale 検出 /
 
 | ストア | 技術 | 区分 | 喪失時 | schema 正本 |
 |---|---|---|---|---|
-| `.kcs/objects/` (raw / prepared / image / normalized_units / manifests / toollocks / chunks / embeddings / trees / commits) | file (CAS) | **truth** | 復旧不能 (検証: [10-operations.md §7.5](10-operations.md)) | §8 / §2.1 |
+| `.kcs/objects/` (raw / prepared / image / normalized_units / manifests / toollocks / chunks / embeddings / trees / commits) | file (CAS — **例外 = normalized_units/ 直下の path-named `manifest.json`**: 最新版の作業コピーで mutable = 置換 rename 側 ([04-pipeline.md §1.1](04-pipeline.md))。確定版は objects/manifests/ の CAS — §2.1) | **truth** | 復旧不能 (検証: [10-operations.md §7.5](10-operations.md)) | §8 / §2.1 |
 | `.kcs/HEAD` / `refs/` | file (atomic rename) | **truth** | 復旧不能 | §2 |
 | `.kcs/tombstones/` + erase receipt | file | **truth** (purge 証跡) | 復旧不能 | [05-runtime.md §3.5](05-runtime.md) |
 | `.kcs/scope.json` / `config.toml` / `tool-lock.json` | JSON / TOML (schema 検証: [10-operations.md §12.3](10-operations.md)) | **truth** | 復旧不能 | 各 spec |
