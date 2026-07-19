@@ -319,7 +319,9 @@ Status: draft (retarget 実装は Phase 4+ のため、期日は Phase 4 着手�
                scope_unreachable | unverifiable | registry_duplicate)
 
 決定済み:
-  - デフォルトは tombstone。完全削除 (履歴書き換え) は法的要件上必要な場合のみ (正本 08 §4.2)
+  - デフォルトは tombstone。完全削除 (`--erase-tombstone` — public tombstone なしの NOT-FOUND 化。
+    tree/commit 再結線・filename 秘匿の履歴書き換えは含まない — §3.1 のとおり v2+/Phase 4+) は
+    法的要件上必要な場合のみ (正本 08 §4.2)
   - tombstone レスポンス schema (正本 08 §4.1)
   - 完全削除時は KCS-E-PURGE-NOT-FOUND-001 (正本 08 §4.2)
   - 検出 API: kcs evidence verify <pointer> [--strict] → 6 値 union (正本 08 §4.3)

@@ -32,13 +32,22 @@ embedding 承認なし (下記 consent gate) → text fallback (KCS-E-SEARCH-VEC
 両方不可 → error (KCS-E-SEARCH-VEC-UNAVAIL-001)
 ```
 
+解決順の列挙は**判定順序**でもある — 複数条件が同時に成立する場合は先に列挙された行の
+`fallback_reason` / error code を採用する (profile 不一致 (INCOMPAT) が承認なし (UNAUTHORIZED) に先行)。
+
 **query embedding の consent gate**: vector | hybrid の page 1 は query embedding (07 §5.3 の
 `input_type: "query"` — sync 呼出) を要し、これは新規送信として [07-adapter-spec.md §3](07-adapter-spec.md)
 の opt-in gate の対象である (payload は query 文字列のみで folder 内容を含まない)。**送信可否 =
 参加 scope の 1 つ以上に当該 embedding Adapter の active な `approvals[]` 行があること**。承認ゼロ
 (かつ `--online` 一時 opt-in なし) の場合、auto / `--hybrid` は text fallback
 (`fallback_reason="embedding_not_authorized"`)、`--vector` 明示は KCS-E-SEARCH-VEC-UNAUTHORIZED-001
-で error。`--online` / `--offline` は他コマンドと同義の当該実行限りの上書き (07 §3)。課金は
+で error。**この承認由来の text fallback は `fail_behavior` の対象外である** — `fail_behavior` は技術的
+失敗 (INCOMPAT / UNAVAIL 等) への応答方針であり、consent 由来の `embedding_not_authorized` には適用
+しない (設定値に関わらず auto / `--hybrid` は常に text fallback、`--vector` のみ error — §1.2 /
+[06-cli-spec.md §3](06-cli-spec.md) の `--hybrid` 行の注記も同旨)。`--online` / `--offline` は他コマンドと
+同義の当該実行限りの上書き (07 §3)。**`--offline` 指定時は承認の有無に関わらず query embedding を送信
+しない** — auto / `--hybrid` は text fallback (`fallback_reason="offline"`)、`--vector` 明示は
+KCS-E-SEARCH-VEC-UNAVAIL-001 で error。課金は
 `scope_id='device'` の sync request として縮退 2 相に記帳する ([04-pipeline.md §5.4](04-pipeline.md)
 — folder cap 対象外・device cap / per_adapter は通常合算)。
 
@@ -48,7 +57,7 @@ embedding 承認なし (下記 consent gate) → text fallback (KCS-E-SEARCH-VEC
 kcs search "..."             # auto
 kcs search "..." --text      # text only
 kcs search "..." --vector    # vector only。失敗時は error
-kcs search "..." --hybrid    # hybrid 強制。vector 失敗時は fail_behavior に従う
+kcs search "..." --hybrid    # hybrid 強制。vector 失敗時は fail_behavior に従う (承認なし (embedding_not_authorized) は対象外 — §1.1 consent gate が常に text fallback を規定)
 kcs search "..." --no-vector # 明示無効
 kcs search "..." [--online|--offline]  # query embedding の一時 opt-in / 当該実行の新規送信禁止 (§1.1 consent gate)
 ```
@@ -339,7 +348,7 @@ score/rank をコピーして、group 内を
    候補として返す。§1.4 の MMR/dedup は scope 内でまだ適用しない
 3. scope 間の統合は **rank ベース** で行う。各 scope の RRF スコア (rank のみから決まる) をそのまま比較して降順マージする。**BM25 / vector の raw スコアを scope 間で比較・正規化してはならない** (コーパス統計が index ごとに異なり比較不能)。pre-alias 同点は immutable `(scope_id,chunk_hash)` で安定化する
 4. diversify (MMR / group_by_raw_hash, §1.4) は統合後の候補列に対して適用する
-5. vector / hybrid の横断条件は [03-data-model.md §7](03-data-model.md) に従う。embedding profile が全 scope で一致しない場合、横断部分は text (BM25 rank) のみで統合し、`fallback_reason` に記録する (**`--vector` 明示時は fallback しない** — profile 不一致の scope を KCS-E-SEARCH-VEC-INCOMPAT-001 の excluded_scopes として除外し、全 scope 除外なら error — §1.2 の「失敗時は error」と同じ)
+5. vector / hybrid の横断条件は [03-data-model.md §7](03-data-model.md) に従う。embedding profile が全 scope で一致しない場合、横断部分は text (BM25 rank) のみで統合し、`fallback_reason` に記録する (**`--vector` 明示時は fallback しない** — profile 不一致の scope を KCS-E-SEARCH-VEC-INCOMPAT-001 の excluded_scopes として除外し、全 scope 除外なら error — §1.2 の「失敗時は error」と同じ)。`kcs_format_version` が自己の対応上限より新しい scope も同様に excluded_scopes として除外する (KCS-E-STORE-VERSION-001 を `fallback_reason` に記録・当該 scope へは query_cache を含む一切の書込を行わない — [10-operations.md §12.5](10-operations.md))。embedding 承認の consent gate (§1.1) は**送信 gate であり per-scope の除外条件ではない** — 承認ゼロなら検索全体が text fallback (excluded_scopes には計上しない)。1 つ以上の承認で送信された query vector は profile 互換な全参加 scope の vector 検索に用いる (未承認 scope も含む — 送信は 1 回であり scope 別の再送信は発生しない)
 
 既知の限界: rank ベース統合は、関連文書の乏しい scope の 1 位と強い scope の 1 位を同格に扱う。MVP ではこれを容認する (結果に scope_path が必ず含まれるため判別可能)。scope 間の再ランクは v2 以降の検討事項。
 
@@ -879,7 +888,7 @@ batch 系と reindex は外部副作用 (upload / job 作成) と batch_requests
 
 規約:
 
-- 読み取り系 (search / log / view / open / inspect / evidence verify / restore / status / diff) は `.kcs/.lock` を取得しない。`kcs index` と `kcs search` の同時実行は許容 (SQLite WAL でリーダーは旧スナップショット)
+- 読み取り系 (search / log / view / open / inspect / evidence verify / restore / status / diff) は `.kcs/.lock` を取得しない。`kcs index` と `kcs search` の同時実行は許容 (SQLite WAL でリーダーは旧スナップショット)。例外的に `kcs search` は vector|hybrid の page 1 に限り cost-ledger.sqlite の device 行 (`scope_id='device'`) への相 1 / 回収の書込を行うが、これも `.kcs/.lock` の対象外である — device 行はどの scope にも属さず、直列化は cost-ledger 側の `BEGIN IMMEDIATE` Tx が担う ([04-pipeline.md §5.4](04-pipeline.md))
 - `.kcs/.lock` を取得できない場合、書き込み系コマンドは**待機せず即座に失敗する**: error code `KCS-E-STORE-LOCKED-001`、exit code 3 (retryable、[06-cli-spec.md §7](06-cli-spec.md))。lock ファイルには保持プロセスの pid と取得時刻を記録し、保持プロセスが存在しない stale lock は次の取得試行時に回収してよい。待機オプション (`--wait <seconds>`) は Phase 4+ 予約
 - refs (refs/heads/main, canonical refs/tags-v1/*) の更新は `.kcs/.lock` 保持下で、temp file 書き込み + atomic rename により行う (部分書き込みを外部に見せない)。legacy refs/tags/* は read-only compatibility とする
 - `kcs repair --verify-objects` の raw object 復旧と repaired commit publication も、同じ lock の下で private temp + hash 再検証 + atomic publish を使う

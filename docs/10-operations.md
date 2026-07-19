@@ -809,7 +809,7 @@ DOMAIN:
   AUTH     認証・認可
 ```
 
-例: `KCS-E-BATCH-NET-001`, `KCS-E-SEARCH-VEC-INCOMPAT-001`, `KCS-E-SEARCH-VEC-UNAVAIL-001`, `KCS-E-SEARCH-VEC-UNAUTHORIZED-001`, `KCS-E-COMMIT-SHALLOW-001`, `KCS-E-PURGE-NOT-FOUND-001`, `KCS-E-STORE-PATH-001`, `KCS-E-STORE-CORRUPT-001`, `KCS-E-SEARCH-SCOPE-ALL-FAILED-001`, `KCS-E-SEARCH-CURSOR-001`, `KCS-E-INDEX-REBUILDING-001`, `KCS-E-EVIDENCE-SCOPE-UNREACHABLE-001`, `KCS-E-EVIDENCE-RETARGET-AMBIG-001`, `KCS-E-ADAPTER-CONTRACT-001`。各 code の定義箇所は該当 spec (06-cli-spec.md §8 に一覧と参照先) を参照。
+例: `KCS-E-BATCH-NET-001`, `KCS-E-SEARCH-VEC-INCOMPAT-001`, `KCS-E-SEARCH-VEC-UNAVAIL-001`, `KCS-E-SEARCH-VEC-UNAUTHORIZED-001`, `KCS-E-COMMIT-SHALLOW-001`, `KCS-E-PURGE-NOT-FOUND-001`, `KCS-E-STORE-PATH-001`, `KCS-E-STORE-CORRUPT-001`, `KCS-E-STORE-VERSION-001` (§12.5 — 新しい `kcs_format_version` の store への書き込み系実行・読解不能), `KCS-E-SEARCH-SCOPE-ALL-FAILED-001`, `KCS-E-SEARCH-CURSOR-001`, `KCS-E-INDEX-REBUILDING-001`, `KCS-E-EVIDENCE-SCOPE-UNREACHABLE-001`, `KCS-E-EVIDENCE-RETARGET-AMBIG-001`, `KCS-E-ADAPTER-CONTRACT-001`。各 code の定義箇所は該当 spec (06-cli-spec.md §8 に一覧と参照先) を参照。
 
 各 spec が定義した個別エラー (04-pipeline.md / 05-runtime.md / 06-cli-spec.md 等) はこの namespace に従う。新規 code 追加は本書および該当 spec の更新を伴う (破壊的変更扱い)。
 
@@ -896,6 +896,8 @@ PATCH bump:
 ```
 
 **前方互換 (旧 reader × 新 store) の規約**: 上記 MINOR の「default 値で旧データを補える」は後方互換 (新 reader × 旧 store) の条件である。逆向きは store の version 側で受ける — reader は自己の対応上限より新しい `kcs_format_version` の store を **read-only + 新版誘導** で扱い ([03-data-model.md §2](03-data-model.md)、schema validation より先)、**公開後の scope.schema.json への key 追加は必ず MINOR bump を伴う** (§12.3 の「未知 key は schema error」を維持したまま旧実装に定義された降着点を与える)。Adapter I/O の「未知フィールドを無視 (MUST ignore)」規約 (下記) とは対象が異なる — scope.json は承認・security の正本であり無視許容にしない。`approvals_initialized` (§12.3) 自体は実装・store 公開前の schema 確定であり bump しない (tree v2/v3 と同じ扱い — 下記)。
+
+**read-only 縮退の具体挙動** (新しい store を検出した旧 reader の降着点): 書き込み系コマンド ([05-runtime.md §6](05-runtime.md) の `.kcs/.lock` 取得一覧が正本) は当該 store に対して**即時拒否** — error_code `KCS-E-STORE-VERSION-001`・exit 8 (incompatible format version)・新版への更新誘導 message を返す。multi-scope search では当該 scope を excluded_scopes として除外する (`fallback_reason` に同 code を記録 — query_cache を含む一切の書込を行わないため検索参加もさせない、[05-runtime.md §1.8](05-runtime.md))。単独 scope 指定の読み取り系 (log / view / open / inspect / evidence verify / status / diff / 単独 search) は store への**書込ゼロ**で best-effort 動作する (自己の知る schema で読解できない場合は同 code で error。単独 search は query_cache へ書けないため cursor replay は保証しない — 再検索が正)。
 
 **tree schema v2/v3 (2026-07-18 確定)**: tree entry へ `normalize.manifest_hash`、tree object へ
 `chunking_config_hash` (v2) と `chunk_set_hash` (v3 — 公開 chunk 集合の digest) を追加した
