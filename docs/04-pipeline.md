@@ -269,6 +269,7 @@ raw / prepared → normalized。非 text-native は文書処理 API 系 Adapter 
   "unchanged_unit_keys": [...],
   "added_units":         [...],
   "removed_unit_keys":   [...],
+  "failed_units":        [{ "unit_key": "...", "error_kind": "..." }],
   "fallback_to_full":    false,
   "reason":              null | "..."
 }
@@ -291,15 +292,20 @@ V1 被覆・排他: keys(updated_units) ∪ keys(added_units) ∪ unchanged_unit
 V2 removed:   removed_unit_keys が hints.removed_unit_keys と完全一致
 V3 越権禁止:  keys(updated_units) ⊆ hints.changed_unit_keys
               (hints に無い unit の書き換え = unchanged unit の再出力違反の検出)
-V4 added:     keys(added_units) = hints.added_unit_keys と完全一致
+V4 added:     keys(added_units) ∪ (keys(failed_units) ∩ hints.added_unit_keys) = hints.added_unit_keys
+              かつ両集合は互いに素 (added unit の部分失敗は failed_units 側で表現する —
+              V1 の 4 集合排他と同時に充足できる形。V3 の ⊆ は changed unit の失敗と元々両立する)
 V5 形式:      各 updated / added unit の markdown が非空文字列で、
               unit_key / unit_type が prepared unit 側と整合。加えて Normalized Markdown v1
               ([07-adapter-spec.md §5.2.1](07-adapter-spec.md) が正本) の機械検証可能な規約 —
               UTF-8 (BOM 禁止)・NFC・LF のみ・trailing space 禁止・ATX 見出し・``` fence・
               生 HTML / autolink 禁止 — への適合を検査し、違反 unit を含む応答は reject する
-V6 mode:      mode_used = "full" の場合は full 出力契約として検証
-              (全 unit が揃っていること。V1〜V4 は適用しないが、**V5 の形式検査は
-              full 出力の全 unit にも適用する**)
+V6 mode:      mode_used = "full" の場合は full 出力契約として検証:
+              keys(updated_units) ∪ keys(added_units) ∪ keys(failed_units) = prepared unit 全集合
+              かつ 3 集合は互いに素 (unchanged_unit_keys / removed_unit_keys は空 —
+              full に増分概念はない。部分失敗は incremental と同じく failed_units で表現し
+              manifest 側で failed へ遷移する)。V1〜V4 は適用しないが、**V5 の形式検査は
+              full 出力の全成功 unit に適用する** (V1 と同じく failed_units には適用しない)
 ```
 
 違反時の挙動:
@@ -480,7 +486,9 @@ CREATE VIRTUAL TABLE chunk_vec USING vec0(
 
 `chunk_vec` の次元は採用 profile の **768 (MRL 切り詰め) / cosine に固定** する ([07-adapter-spec.md §5.3](07-adapter-spec.md))。保存 vector と query vector はいずれも L2 正規化済みのため、cosine distance の順位は厳密に一致する。
 
-`embeddings` テーブル (メタデータ + vector BLOB) と `chunk_vec` (vec0 virtual table) は、いずれも `objects/` から再構築可能な加速層であり、真実は `objects/` にある (§4 冒頭)。両テーブル間では **`embeddings` テーブルを正** とし、`chunk_vec` は `embeddings` からの導出物として扱う。不整合を検出した場合および `kcs repair --rebuild-db` では、`objects/` → `embeddings` → `chunk_vec` の順に再構築する。`chunk_vec` の導出は **`chunks.text_hash` と `embeddings.target_id` の結合**で行い、同一 `text_hash` を持つ複数 chunk には同じ embedding を複数の `chunk_vec` 行へ展開する (content ベース再利用 §5.5 の裏面)。**結合は現行 tool-lock の embedding profile に限定する** — `(profile_hash, dimensions, distance, modality)` が現行 lock と一致する embedding 行のみ。複数 profile の embedding が正規に並存し得るため、無条件結合は chunk ごとに複数候補を生み `chunk_vec` の PRIMARY KEY と衝突する (rebuild 停止)。chunk ごとに候補が **0 件または 1 件**であることを検証する (0 件 = 未 enrichment — chunk_vec 行を作らず pending として text-only で検索を継続する ([05-runtime.md §1](05-runtime.md)。offline / budget pause 中の rebuild で正常に生じる)。2 件以上のみ corruption として rebuild 停止)。
+`embeddings` テーブル (メタデータ + vector BLOB) と `chunk_vec` (vec0 virtual table) は、いずれも `objects/` から再構築可能な加速層であり、真実は `objects/` にある (§4 冒頭。**例外 = `target_type='query_cache'` の行** — 次段落のとおり objects に由来せず、rebuild では復元せず破棄する)。両テーブル間では **`embeddings` テーブルを正** とし、`chunk_vec` は `embeddings` からの導出物として扱う。不整合を検出した場合および `kcs repair --rebuild-db` では、`objects/` → `embeddings` → `chunk_vec` の順に再構築する。`chunk_vec` の導出は **`chunks.text_hash` と `embeddings.target_id` の結合**で行い (**結合対象は `target_type='chunk'` の行のみ** — query_cache 等の他 target_type 行は hash 形式が同じでも chunk へ結合しない)、同一 `text_hash` を持つ複数 chunk には同じ embedding を複数の `chunk_vec` 行へ展開する (content ベース再利用 §5.5 の裏面)。**結合は現行 tool-lock の embedding profile に限定する** — `(profile_hash, dimensions, distance, modality)` が現行 lock と一致する embedding 行のみ。複数 profile の embedding が正規に並存し得るため、無条件結合は chunk ごとに複数候補を生み `chunk_vec` の PRIMARY KEY と衝突する (rebuild 停止)。chunk ごとに候補が **0 件または 1 件**であることを検証する (0 件 = 未 enrichment — chunk_vec 行を作らず pending として text-only で検索を継続する ([05-runtime.md §1](05-runtime.md)。offline / budget pause 中の rebuild で正常に生じる)。2 件以上のみ corruption として rebuild 停止)。
+
+**query cache (`target_type='query_cache'`)**: cursor replay が pin する page 1 の query vector ([05-runtime.md §1.5](05-runtime.md)) の正本。`target_id` = **query_vector_digest** = `"sha256:" + base16(sha256(vector BLOB))`。vector BLOB の canonical 表現は **float32 little-endian の連続配列 (`dimensions` 個、L2 正規化済み)** — chunk embedding の保存表現と同一で、digest はこの bytes に対して計算する。**query 本文・text_hash は保存しない** (保存物は vector と digest のみ — redact 既定 ([10-operations.md §7](10-operations.md)) と整合し、行削除はいつでも安全 = 影響は当該 cursor の拒否のみ)。書込は検索に参加した各 scope の sqlite.db へ行い、上限は **scope あたり 256 行** (超過時は最小 rowid の行から削除)。この行だけは `objects/` から再構築できないため `kcs repair --rebuild-db` では復元せず破棄する (依存 cursor は `KCS-E-SEARCH-CURSOR-001` → 再検索が正)。purge の SQLite 行列挙の候補にも含めない (文書 lifecycle と無関係 — [05-runtime.md §3.5](05-runtime.md))。chunk_vec へは展開しない (検索対象ではない)。
 
 KCS は Text/Image を分けず **単一マルチモーダル Embedding Adapter** のみを許可する (非 multimodal profile は `KCS-E-EMBED-MODALITY-001` で採用拒否、[03-data-model.md §7](03-data-model.md))。
 
@@ -622,11 +630,14 @@ running が heartbeat_at + 5min を超えたら stale。別 worker が pull 可�
 - retry は **失敗 unit のみ** を対象とする:
   - Adapter が `incremental_update` を持つ場合: `mode=incremental`、
     `hints.changed_unit_keys = 失敗 unit のキー`、`previous = 同一 instance の done unit 群` で再投入
-    (§3.1 の発動条件 4 (変化率 < threshold) は失敗 unit 集合に対して評価し、超過時は full で再投入)
+    (§3.1 の発動条件 4 (変化率 < threshold) は失敗 unit 集合に対して評価し、超過時は full で再投入)。
+    この再投入の受け入れ検査 (§3.2) では **N = 合成した hints の集合 (= 失敗 unit のみ)** —
+    既 done の unit は N に含まれず、応答への再掲 (unchanged への列挙を含む) も要求しない
   - 持たない場合: `mode=full` で再実行するが、既に done の unit は first-instance-wins で既存を保持し、
     失敗していた unit の出力のみ採用する
 - manifest の unit status 遷移は `failed → done` の一方向のみ。error_kind が permanent
   (invalid_input 等, §5.3) の unit は再投入せず、partial のまま `kcs status` に表示し続ける
+  (error_kind は §5.3 の閉 enum — [10-operations.md §12.1](10-operations.md) の機械判定規約の明示例外)
 
 `task` テーブルが消えても問題ない設計 (object store と tool profile から再検出可能)。ただし `attempts` 履歴は失われる (リトライ予算がリセットされる) 点を許容。
 
@@ -755,7 +766,7 @@ CREATE TABLE batch_requests (            -- in-flight Batch intent の正本 (§
 ) WITHOUT ROWID;
 
 CREATE TABLE schema_migrations (         -- 一度きりの移行の marker (10 §7.5.3 — JSONL cutover 等)
-    name        TEXT PRIMARY KEY,        -- 例: 'jsonl-cutover'
+    name        TEXT NOT NULL PRIMARY KEY, -- 例: 'jsonl-cutover' (rowid 表の TEXT PRIMARY KEY は NULL を拒否しないため NOT NULL 必須)
     applied_at  INTEGER NOT NULL         -- UTC ミリ秒
 );
 ```
@@ -797,7 +808,7 @@ chunk の文字数のみ**を対象とし、再利用 chunk (API 非呼出) は�
 ## 5.7 Resume と Repair
 
 - `kcs batch resume`: 中断状態 (running stale, pending) を再開
-- `kcs repair --rebuild-db`: SQLite を objects/ から再構築する (SQLite に存在するのは §4.1〜§4.5 の 8 表のみ。再構築完了時は index_metadata へ新 index_generation ULID を採番し、**同じ完了 Tx で `last_lifecycle_epoch` を現在の lifecycle-epoch counter 値に初期化する** (DEFAULT 0 のままでは全 lifecycle record が回転未了と誤検出され、全走査と不要回転が走る — [05-runtime.md §3.5](05-runtime.md)) — [05-runtime.md §1.5](05-runtime.md)。**publication / association introduction の再導出は chunks.jsonl を正本とする**: 作成行の first_seen_commit + publication event 行 (03 §2 — truth) を読み取って復元し、tree の chunk_set_hash は照合のみに使う。event 行を欠く旧 store は fallback として全 commit を親先行 topological order で走査し、chunk / config association ごとに「既採用 introduction のいずれの子孫でもない commit」のみを introduction として追加する (結果は ancestor-minimal 集合で walk 順序に依存しない)。**backfill は行わない** (pre-release — 既存 dev store は rebuild-db が ledger / fallback から再導出する)。生存する creation 行 / chunk object を持たない、**または introduction commit の object が store に存在しない**publication event 行は無視する (dangling — [05-runtime.md §8.1](05-runtime.md) の耐久順序で正常に生じ、次回 finalize が冪等に再 append する)。**commit object が存在するが ref から到達不能な行 (tag 削除後の orphan / disconnected commit — `--at` の正当な明示対象 [05-runtime.md §1.6](05-runtime.md)) は無視しない** — その commit が GC で回収され object 不在になった時点で自然に dangling になる。
+- `kcs repair --rebuild-db`: SQLite を objects/ から再構築する (SQLite に存在するのは §4.1〜§4.5 の 8 表のみ。再構築完了時は index_metadata へ新 index_generation ULID を採番し、**同じ完了 Tx で `last_lifecycle_epoch` を現在の lifecycle-epoch counter 値に初期化する** (DEFAULT 0 のままでは全 lifecycle record が回転未了と誤検出され、全走査と不要回転が走る — [05-runtime.md §3.5](05-runtime.md)) — [05-runtime.md §1.5](05-runtime.md)。**publication / association introduction の再導出は chunks.jsonl を正本とする**: 作成行の first_seen_commit + publication event 行 (03 §2 — truth) を読み取って復元し、tree の chunk_set_hash は照合のみに使う。event 行を欠く旧 store は fallback として全 commit を親先行 topological order で走査し、chunk / config association ごとに「既採用 introduction のいずれの子孫でもない commit」のみを introduction として追加する (結果は ancestor-minimal 集合で walk 順序に依存しない)。**backfill は行わない** (pre-release — 既存 dev store は rebuild-db が ledger / fallback から再導出する)。生存する creation 行 / chunk object を持たない、**または introduction commit の object が store に存在しない**publication event 行は無視する (dangling — [05-runtime.md §8.1](05-runtime.md) の耐久順序で正常に生じ、次回 finalize が冪等に再 append する)。**commit object が存在するが ref から到達不能な行 (tag 削除後の orphan / disconnected commit — `--at` の正当な明示対象 [05-runtime.md §1.6](05-runtime.md)) は無視しない** — commit object は削除されない ([05-runtime.md §2.2](05-runtime.md) の append-only・GC 対象外) ため、この publication 行は恒久に保持される (`--at` / `--all-history` の解決対象であり続ける)。
   以下の normalization_runs / prepared_units は SQLite テーブルではなく、manifest / 再 prepare から
   導出される**状態**を指す — [03-data-model.md §8](03-data-model.md) / §4.7)。復元範囲は次の通り:
 

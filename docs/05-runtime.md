@@ -152,7 +152,7 @@ page 1 の `since_cutoff` (UTC ISO8601 + `Z`) も保持する:
 - `since_cutoff`: `--since` の page 1 で一度だけ計算した下限。page 2 以降は現在時刻から再計算しない
 - `query_hash` (token 全体に 1 つ、§1.8) が不一致の cursor は `KCS-E-SEARCH-CURSOR-001` で拒否する
 
-2 ページ目以降は同一の候補取得 → RRF (§1.3) → MMR (§1.4) を再計算し、consumed 件を skip して続きを返す。**vector / hybrid の replay は page 1 の query vector を再利用する** — query の再 embedding は行わない (provider の非決定性で候補・順位が変わり、consumed の skip が重複・欠落を生む)。page 1 の正規化済み query vector は device-local の query cache に保持し、その digest を token の query_hash 構成に含める。cache に該当 vector が無ければ `KCS-E-SEARCH-CURSOR-001` (再検索が正)。順序安定性の根拠は SQLite WAL のスナップショット分離**ではなく**、「commit 単位で固定された chunk 集合 + 決定論的な順位計算 + `index_generation` による FTS 内容不変の保証」である。CLI 呼び出しを跨いでも成立する。
+2 ページ目以降は同一の候補取得 → RRF (§1.3) → MMR (§1.4) を再計算し、consumed 件を skip して続きを返す。**vector / hybrid の replay は page 1 の query vector を再利用する** — query の再 embedding は行わない (provider の非決定性で候補・順位が変わり、consumed の skip が重複・欠落を生む)。page 1 の正規化済み query vector は参加各 scope の `embeddings` 表 (`target_type='query_cache'` — 正本 [04-pipeline.md §4.3](04-pipeline.md)。query 本文は保存しない) に保持し、その digest (= `query_vector_digest`、§1.8 の query_hash 構成要素) を token に含める。replay は参加 scope のいずれかから digest 一致行を読み、どの scope にも無ければ `KCS-E-SEARCH-CURSOR-001` (再検索が正)。順序安定性の根拠は SQLite WAL のスナップショット分離**ではなく**、「commit 単位で固定された chunk 集合 + 決定論的な順位計算 + `index_generation` による FTS 内容不変の保証」である。CLI 呼び出しを跨いでも成立する。
 
 `--offset` は cursor の糖衣であり、同じ再現規則で確定順序の `offset` 位置から `limit` 件を返す。終端判定は **alias 展開後の final result stream の末尾** — それを超えたら `next_cursor: null` (`--all-history` / `--since` で候補プール末尾を終端にすると最後の alias group を取り残す。default 系は候補プール = final stream で同値)。
 
@@ -390,7 +390,7 @@ per_scope_timeout_seconds = 2   # 超過 scope は excluded_scopes (reason=timeo
 base64url opaque token として返す。Step 4 cursor schema は `v=2`; 必須 config/association/selector
 binding を持たない legacy `v=1` は `KCS-E-SEARCH-CURSOR-001` で拒否する (cursor は durable artifact ではない)。
 
-- `scope_mode` は検索対象 scope の指定方法 (all / `--scope` / `--descendants`)、`query_hash` は次の正準構成 (per-scope の対象 chunking config binding を含む — §1.5 の対象 config と同一): `"sha256:" + base16(sha256(JCS({ query: <NFC 正規化後のクエリ文字列>, mode: <解決後の実効 mode (text|vector|hybrid)>, chunking_configs: <{scope_id,chunking_config_hash} の scope_id UTF-8 byte order 配列>, scope_mode, scopes: <page 1 または直前 replay で実際に参加する active scope_id の昇順配列>, rrf: <[search.rrf] の実効値 (k / candidate_depth / w_text / w_vector — 変更は確定順序を変えるため cursor 誤用検出の対象)>, diversify: <[search.diversify] の実効値>, time_travel: <--at/--all-history/--include-deleted/--since の実効値 (未指定キーは省略)> })))`。`limit` / `--offset` / `--cursor` / `--json` は**含めない** (ページング操作で hash が変わってはならない)。いずれも token 全体に 1 つで、別クエリ・別条件・いずれかの scope の別 chunking config での cursor 誤用検出に使う (不一致は `KCS-E-SEARCH-CURSOR-001` で拒否、§1.5)
+- `scope_mode` は検索対象 scope の指定方法 (all / `--scope` / `--descendants`)、`query_hash` は次の正準構成 (per-scope の対象 chunking config binding を含む — §1.5 の対象 config と同一): `"sha256:" + base16(sha256(JCS({ query: <NFC 正規化後のクエリ文字列>, mode: <解決後の実効 mode (text|vector|hybrid)>, chunking_configs: <{scope_id,chunking_config_hash} の scope_id UTF-8 byte order 配列>, scope_mode, scopes: <page 1 または直前 replay で実際に参加する active scope_id の昇順配列>, rrf: <[search.rrf] の実効値 (k / candidate_depth / w_text / w_vector — 変更は確定順序を変えるため cursor 誤用検出の対象)>, diversify: <[search.diversify] の実効値>, query_vector_digest: <実効 mode が vector|hybrid のときのみ — page 1 の query vector の digest ([04-pipeline.md §4.3](04-pipeline.md) の canonical bytes に対する sha256。text mode ではキー省略>, time_travel: <--at/--all-history/--include-deleted/--since の実効値 (未指定キーは省略)> })))`。`limit` / `--offset` / `--cursor` / `--json` は**含めない** (ページング操作で hash が変わってはならない)。いずれも token 全体に 1 つで、別クエリ・別条件・いずれかの scope の別 chunking config での cursor 誤用検出に使う (不一致は `KCS-E-SEARCH-CURSOR-001` で拒否、§1.5)
 - page 1 の `scopes` / `chunking_configs` は成功して実際に ranking へ参加した scope だけを含む。
   page-1 `excluded_scopes` は bounded `{scope_id,reason}` として signed token に保持するが active scope や
   query hash の config mapping には入れず、その cursor stream へ後から再参加させない。registry に後から
@@ -634,7 +634,7 @@ purge は **object の物理削除 + default tombstone または内部 erase rec
    「未参照中間 object」として回収される。**MVP では GC が無いため、削除手段は
    `kcs repair --verify-objects --prune-orphans`** ([10-operations.md §7.5.1](10-operations.md)) —
    purge 完了表示にその旨 (残存可能性と掃除手段) を注記する)
-- SQLite の chunks / chunk_config_generations / chunk_publications 行と FTS エントリ。chunk_vec は**対象 chunk_id の行に限定**し、**embeddings 行は object 側と同じく live 参照 0 の場合のみ削除する** (共有 text_hash の行を無条件に消すと、非対象文書の vector 検索が rebuild まで欠ける)
+- SQLite の chunks / chunk_config_generations / chunk_publications 行と FTS エントリ。chunk_vec は**対象 chunk_id の行に限定**し、**embeddings 行は object 側と同じく live 参照 0 の場合のみ削除する** (共有 text_hash の行を無条件に消すと、非対象文書の vector 検索が rebuild まで欠ける)。`target_type='query_cache'` の embeddings 行は候補に含めない (文書 lifecycle と無関係 — [04-pipeline.md §4.3](04-pipeline.md)。即時消去したい場合の行削除は常に安全 = 影響は cursor 拒否のみ)
 - chunks.jsonl の**対象 chunk_id を参照する creation 行・publication event 行の全部** (append-only の例外 — purge は法務要件の明示例外として行を落とす)
 ```
 
@@ -680,7 +680,7 @@ event append より先に行い、**全ての新規 lifecycle event (purged・er
 書込) に、その時点の counter 値を `lifecycle_epoch` として必須記録する** (purge の `epoch`
 (target_epoch) とは**別 field** — 2 系統のカウンタを混用しない。legacy 行の欠落は可)。
 **巻き戻り検出は機械条件のみ**: locked mutation 冒頭で
-`counter < max(last_lifecycle_epoch, 全 lifecycle event の lifecycle_epoch 最大値)` なら欠落・不正・
+`counter < max(last_lifecycle_epoch, 全 lifecycle event の lifecycle_epoch 最大値)` (lifecycle_epoch を記録した event が無ければ後者は 0 として評価) なら欠落・不正・
 backup 復元による巻き戻りとみなし、**その max + 1 で counter を再作成して無条件で
 index_generation を 1 回転する** (取りこぼした可能性のある更新を回転で潰す fail-safe。
 「更新痕跡」の判定はこの比較だけで行い、mtime 等の抽象的条件は使わない)。**読取系は冒頭検査で
@@ -731,7 +731,7 @@ phase 順序    = prepared (closure 確定・記帳)
               epoch 比較が無いと、高速な purge が 2 点の間に journal 作成〜除去まで完走した場合に
               両検査をすり抜ける — ABA。**epoch ファイルの欠落・不正値も同様に拒否する (fail-closed)** —
               次の locked mutation が journal の target_epoch、journal も無ければ**全 lifecycle
-              event に記録された `epoch` の最大値 + 1** (event が皆無なら 1 — 旧観測値と衝突しない)
+              event に記録された `epoch` の最大値 + 1** (`epoch` を記録した event が皆無なら 1 — event ゼロの store に加え、全行 legacy で epoch 欠落の lifecycle も含む。旧観測値と衝突しない)
               から単調性を回復して再作成する。purge 完了後に epoch ファイルだけ喪失しても恒久
               exit 3 にしない) —
               marker 耐久化後・削除完了前の窓で削除対象の本文を返さないため。読み取り系は lock を
@@ -789,8 +789,7 @@ fsck が区別できるよう、同じ digest-only fan-out に次の exact bound
 }
 ```
 
-receipt は path / reason / query / prompt / content を持たず (actor は監査要件のため各 event に持つ —
-[02-philosophy.md §2.4](02-philosophy.md))、raw_hash は immutable tree に既に残る。**purged / erased
+receipt は path / query / prompt / content を持たず (actor は全 event、**reason (5 値 enum — 非機微 metadata) は purged / erased event** に監査要件として持つ — [02-philosophy.md §2.4](02-philosophy.md) の「どの正当事由で実行したか」を erase 後も保存する。kind 別の必須列挙は [10-operations.md §7.5.1](10-operations.md))、raw_hash は immutable tree に既に残る。**purged / erased
 event には当該 purge の `target_epoch` を `epoch` として記録する** (以後の新規 event で必須 —
 legacy 行の欠落は可。epoch ファイル喪失時の回復源 — 上記 journal 二重検査の回復規則)。
 validity は leaf/raw_hash 一致だけでなく、erased event の `in_commit` が bounded verified CAS 上で

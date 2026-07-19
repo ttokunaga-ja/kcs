@@ -149,16 +149,20 @@ bulk 系 (`kcs evidence verify --batch <pointers.jsonl>`) は従来どおり各�
        (URI 化で optional path が落ちた場合と結果を変えない))
     c. どちらも失敗 → KCS-E-EVIDENCE-SCOPE-UNREACHABLE-001 (scope_unreachable, §3.2)
 2.  commit を refs / objects/commits/ から取得
-2a. commit が shallow (tree 破棄済み) の場合、手順 3-4 を省略し、手順 5 以降を
-    pointer の raw_hash / tool_profile_hash / chunk_hash で直接行う。
-    chunk object 本体が gen を保持するため、chunk_hash → chunk object → gen で
-    normalized unit instance まで直接解決できる (03-data-model.md §8)。
+2a. commit が shallow (tree 破棄済み) の場合の適用手順は次に限る: **手順 5 (tombstone /
+    raw 存在) → pointer の chunk_hash → chunk object → gen で normalized unit instance を
+    直接解決 → 手順 7 → 手順 8 (tree entry 系の照合句は対象外)**。手順 3-4・6・6a・6b は
+    tree / entry を要するため適用しない — 時点帰属・membership は検証できず、手順 8 の
+    shallow 句のとおり --strict verify は unverifiable (exit 3)。chunk object 本体が gen を
+    保持するため直接解決できる (03-data-model.md §8)。
     レスポンスに "commit_shallow": true を付す。
 3.  tree (commit.tree) を取得
 4.  tree から raw_hash で entry を検索
 5.  raw_hash に **active な tombstone** (lifecycle の末尾 event が `purged` — [05-runtime.md §3.5](05-runtime.md)) が
     あるなら → tombstone を返す (§4)。**retired (末尾 event = `retired`) は tombstone 扱いしない** — 手順 6 へ進む
-    (resurrection 後の旧 pointer を alive に戻すための必須条件)
+    (resurrection 後の旧 pointer を alive に戻すための必須条件)。tombstone / erase receipt が
+    無いのに raw object が不在なら not_found — `KCS-E-PURGE-NOT-FOUND-001` (§3.2 の解決成功条件
+    「raw object が存在」をここで検査する)
 6.  tree entry の normalize.(tool_profile_hash, gen) で normalized instance (unit object 群) を解決
     (gen フィールド欠落は gen=0 と読む)
 6a. **時点帰属の検証 (v2 tree)**: entry の normalize.manifest_hash が指す manifest object を読み、
@@ -189,7 +193,10 @@ bulk 系 (`kcs evidence verify --batch <pointers.jsonl>`) は従来どおり各�
     証拠にしない)。**resurrection link 経由の解決は、当該 retired event の `resurrection_commit` を
     基準に検証する** — リンク先 commit が当該 chunk の publication / config association の
     introduction を ancestor-or-equal に持つこと (再 ingest の publication は旧 pointer commit の
-    後続にあるため、旧 commit 基準ではリンク経路が恒久に不達になる)。リンクとして有効なのは
+    後続にあるため、旧 commit 基準ではリンク経路が恒久に不達になる)。resurrection で alive に
+    戻るのは、リンク先 commit 側で**同一 chunking config** の下に同一 chunk が再公開された場合に
+    限る — config が変わって chunk 境界が消えた場合の not_found は正 (境界非互換の物理的帰結で
+    あり、alive 保証の破れではない)。リンクとして有効なのは
     **末尾が `retired` の lifecycle の最終 retired event のみ** (再 purge 済み = 末尾 `purged` は
     手順 5 で tombstoned)。リンク先 commit が不在・ref 不達、または上記検証に失敗した場合は
     リンクを使わず直接解決の規則へ戻る (それも失敗なら not_found)。
@@ -197,7 +204,11 @@ bulk 系 (`kcs evidence verify --batch <pointers.jsonl>`) は従来どおり各�
     独立の response field であり併存し得る
 7.  chunk_hash で chunk object を解決し byte_start/byte_end の text を取り出す
 8.  **整合検証**: 解決した chunk object の raw_hash / tool_profile_hash が pointer の値と一致し、
-    手順 4-6 を経た場合はさらに chunk object の gen が tree entry の gen と一致することを検証する
+    手順 4-6 を経た場合はさらに **tree entry の normalize.tool_profile_hash が pointer の
+    tool_profile_hash と一致し**、chunk object の gen が tree entry の gen と一致することを検証する
+    (手順 4 は raw_hash だけで entry を引くため、entry 側の tool 一致を要求しないと、同一 raw を
+    別 tool で normalize した commit に対して gen 値の偶然一致 (双方 0 等) だけで別 tool の chunk が
+    当該 commit の証拠として通ってしまう)
     (pointer は gen を持たない — gen の照合対象は tree entry と chunk object 内部のみ)。不一致は
     store corruption として KCS-E-STORE-CORRUPT-001 (not_found 扱い) — cross-wired な pointer が
     別文書の本文を「解決成功」として返すことを防ぐ。**shallow 経路 (2a) は tree membership を検証

@@ -104,7 +104,7 @@ object identity と hash 算出規約は変わらない。
 
 tag の新規物理 leaf は上記の固定 ASCII hash 形式を使う。論理 tag 名は OS 非依存の portable
 leaf 規則 (Windows 予約名、`<>:"/\\|?*`、control、末尾 dot/space を禁止) を満たす必要があり、
-NFC 正規化 + Unicode **simple case folding (locale 非依存 — full folding・locale 別規則は使わない)** が同じ名前は case-insensitive collision として同一 slot を占める (folding は Unicode 安定性方針により割当済み文字で版間不変 — 版の記録は不要)。
+NFC 正規化 + Unicode **simple case folding (locale 非依存 — full folding・locale 別規則は使わない)** が同じ名前は case-insensitive collision として同一 slot を占める (folding は Unicode 安定性方針により割当済み文字で版間不変 — 版の記録は不要)。正規化規則自体の改訂 (旧「Unicode lowercase」実装を含む) は digest の非互換変更であり、`kcs_format_version` の migration 経路 (§2 末尾・[10-operations.md §12.5](10-operations.md)) で names.jsonl の論理名から canonical ref を再導出する — fsck は digest 再計算の不一致を corruption ではなく migration 誘導として報告する。
 `HEAD` の case variant は論理 tag 名として予約する。canonical ref は legacy namespace と分離した
 `refs/tags-v1/tag-<digest64>` に置くため、`tag-<digest64>` に見える旧 raw tag も別の canonical ref と
 誤認せず、その論理名のまま読める。旧 Unix store の `refs/tags/<name>` は bounded・hash 検証付き
@@ -125,7 +125,7 @@ names.jsonl で digest を解決する。対応行の無い canonical ref は fs
 [10-operations.md §7.5.1](10-operations.md))。ref の無い names 行は tag 削除後の残存として正常
 (順序の帰結でもある — 削除 `kcs tag --delete` は `.kcs/.lock` 下で ref のみを atomic に除去し
 names 行は残す [06-cli-spec.md §1](06-cli-spec.md))。同一 digest の複数行は最終行を表示名とする
-(NFC + lowercase が同じ名前は同一 slot — 表記ゆれの上書きは append で表現)。
+(NFC + simple case folding が同じ名前は同一 slot — 表記ゆれの上書きは append で表現)。
 
 **format_version**: 旧称 `VERSION 0.1.0` (旧 research/kcs.md) は `kcs_format_version` に統一。semver は [10-operations.md §12.5](10-operations.md) 参照。**保存場所 = `.kcs/scope.json` の `kcs_format_version` フィールド** (init 時に記録し migration でのみ更新。読めない・欠落した store は旧版とみなし read-only + migration 誘導 — 互換判定の入力)。
 
@@ -200,6 +200,8 @@ materialize されるため、chunk span と Evidence 解決元がずれない�
 不変条件:
 
 - unit object は read-only artifact。書き換え・削除しない (purge を除く)
+- manifest の `units[].error_kind` は [04-pipeline.md §5.3](04-pipeline.md) の閉 enum (フリーテキストではない) —
+  unit 単位の retry 可否の機械判定に使う ([10-operations.md §12.1](10-operations.md) の明示例外)
 - manifest の `units[].status` の遷移は `failed → done` の一方向のみ (部分失敗の再開、§6)。
   done unit の差し替えは新 gen 作成のみ (`kcs reindex --force`、または prepared_hash 変化起因の
   自動 gen+1 — 下記 gen 段落の例外)
@@ -239,7 +241,7 @@ view の存在は使わない。
 
 1. 管理対象は scope フォルダ **直下** のファイルに限る。サブフォルダ配下のファイルは、そのサブフォルダに `.kcs` が存在するか否かに関わらず、親 `.kcs` の管理対象に **ならない** (再帰包含は行わない)。
 2. サブフォルダは常に独立スコープの候補である。対象ファイルを含むサブフォルダには `kcs index` が子 `.kcs` を生成する ([06-cli-spec.md §1](06-cli-spec.md), [10-operations.md §4](10-operations.md))。ignore されたサブツリーには子 `.kcs` を生成しない。**VCS リポジトリ root (`.git` 等の VCS 管理ディレクトリを持つフォルダ) とその配下にも既定では子 `.kcs` を生成しない** (skip + status 表示。`[scope] index_vcs_repos = true` で opt-in) — リポジトリの履歴は VCS 自身が持ち、`.kcs` の自動生成はリポジトリを汚す ([01-positioning.md §8](01-positioning.md) の方針の機械化)。**本既定の導入以前に生成済みの既存子 `.kcs` は grandfathered** — 引き続き有効な scope として index・検索の対象に残る (skip が適用されるのは新規生成の判断のみ)。
-3. したがって tree entry の `path`、Evidence Pointer の `path_at_commit`、task の `input_path` は **パス区切り (`/`) を含まないファイル名** である。`/` を含む path を持つ tree / pointer は schema violation (`KCS-E-STORE-PATH-001`) として拒否する。同様に `\` ・単独の `.` / `..`・NUL・control 文字を含む path も拒否する (tag の portable leaf 規則と同水準 — §2)。restore 等の物理化は canonical join 後に対象ディレクトリ配下であることを検査する ([06-cli-spec.md §5](06-cli-spec.md))。**この拒否は新規 ingest・新規 tree 作成時の forward 規則である** — 本規則以前の既存 tree entry に該当 path が残る場合、read / inspect / search は可能とし (§2 の「Windows で物理 leaf にできない既存 Unix 名」の legacy 読取と同型)、物理化は既存の対象 OS 検査で拒否または安全名 mapping、fsck は corruption ではなく legacy 警告として報告する (immutable tree は書き換えられないため)。
+3. したがって tree entry の `path`、Evidence Pointer の `path_at_commit`、task の `input_path` は **パス区切り (`/`) を含まないファイル名** である。`/` を含む path を持つ tree / pointer は schema violation (`KCS-E-STORE-PATH-001`) として拒否する。同様に `\` ・単独の `.` / `..`・NUL・control 文字を含む path も拒否する (tag の portable leaf 規則と同水準 — §2)。restore 等の物理化は canonical join 後に対象ディレクトリ配下であることを検査する ([06-cli-spec.md §5](06-cli-spec.md))。**この拒否は新規 ingest・新規 tree 作成時の forward 規則である** — 本規則以前の既存 tree entry に該当 path が残る場合、read / inspect / search は可能とし (§2 の「Windows で物理 leaf にできない既存 Unix 名」の legacy 読取と同型)、物理化は既存の対象 OS 検査で拒否または安全名 mapping、fsck は corruption ではなく legacy 警告として報告する (immutable tree は書き換えられないため)。pointer 入力の受理も同様 — 検証済み legacy tree 由来 pointer の `path_at_commit` は [08-evidence-pointer-spec.md §2](08-evidence-pointer-spec.md) の例外に従い本規則で拒否せず受理する (表示専用 field であり resolver には入らない)。
 
 ファイルの位置は `scope_path` (正本 `.kcs` の絶対パス) + ファイル名で一意に表現される。「フォルダ木を横断してファイルを探す」体験は、個々の `.kcs` の再帰包含ではなく scope_registry を使った横断検索 ([05-runtime.md §1.8](05-runtime.md)) が担う。
 
@@ -787,6 +789,7 @@ max_chars = 6000
 # max_chars の計数単位 = Unicode scalar value (code point)。分割規則は 04-pipeline.md §4.1
 # [chunking] の変更は chunking_config_hash (§5.3) の変化として検出され、
 # chunk / embedding のみ再生成される (再 Markdownize しない)。規則は 04-pipeline.md §4.6
+unicode_version = "17.0.0"  # slug 正規化の UCD 版 (§5.3 — 省略不可・default なし。実装が同梱する UCD 版と一致させる)
 [markdownize.incremental]
 enabled = true
 threshold = 0.30

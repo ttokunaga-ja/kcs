@@ -533,8 +533,9 @@ erase receipt の validation は schema_version で分岐する。**v2 (events[]
 identity に加え、各 event が kind 別の必須 field を持つこと (**完全列挙**: purged = `at`・`in_commit`・
 `reason`・`actor` / erased = `at`・`in_commit`・`actor` / retired = `at`・`in_commit`・`actor`・
 `resurrection_commit`。2026-07-19 以降の新規 event は、purged / erased が `epoch` (purge counter)、
-全種が `lifecycle_epoch` (lifecycle counter — 別系統) も必須 — legacy 欠落行は valid だが、各回復の
-最大値計算には使わない。**optional として許可する field = `legacy_reason`** (legacy flat 変換で
+**erased が `reason` (5 値 enum — [02-philosophy.md §2.4](02-philosophy.md) の「どの正当事由で」を
+erase 後も保存する監査要件)**、全種が `lifecycle_epoch` (lifecycle counter — 別系統) も必須 —
+legacy 欠落行は valid だが、各回復の最大値計算には使わない。**optional として許可する field = `legacy_reason`** (legacy flat 変換で
 生成された purged / erased event に限る — 新規 purge では禁止)。reason は 5 値 enum — enum 外は
 legacy 行として警告 (corruption にしない・response は other 扱い))、`erased` event の `in_commit` が bounded verified
 CAS で ref-reachable な `commit_type=purged` commit を指すこと、各 `at` が canonical UTC でその event
@@ -571,7 +572,7 @@ MVP では手動実行のみとする。自動定期検証 (スケジューラ�
      コピー中に kcs コマンドを実行しないことがユーザー前提。厳密な原子性が必要なら
      filesystem スナップショット (APFS/btrfs 等) 上でコピーする。復元後は
      `kcs repair --verify-objects` (§7.5.1) を必ず実行して整合を確認する
-   - sqlite.db は repair --rebuild-db で再構築可能。ただし**最低保全集合は objects/ と refs/ では
+   - sqlite.db は repair --rebuild-db で再構築可能 (例外 = embeddings の `target_type='query_cache'` 行 — 復元されず破棄、喪失影響は cursor 拒否のみ [04-pipeline.md §4.3](04-pipeline.md))。ただし**最低保全集合は objects/ と refs/ では
      なく、[03-data-model.md §4.1](03-data-model.md) の truth 区分の全行** (scope.json / config /
      tool-lock / tombstones + erase receipts / chunks.jsonl / access.jsonl を含む) — これらは
      いずれも喪失時復旧不能である
@@ -593,7 +594,8 @@ MVP では手動実行のみとする。自動定期検証 (スケジューラ�
 
 ## 7.5.3 SQLite schema 変更の規約 (rebuild vs in-place migration)
 
-sqlite.db / scope-registry.sqlite は正本から再構築可能な cache である ([03-data-model.md §4.1](03-data-model.md))。
+sqlite.db / scope-registry.sqlite は正本から再構築可能な cache である ([03-data-model.md §4.1](03-data-model.md)。
+例外 = embeddings の `target_type='query_cache'` 行のみ再構築対象外 — 破棄で足りる、[04-pipeline.md §4.3](04-pipeline.md))。
 したがって schema 変更のデフォルト経路は **migration を書かず再構築する** こと
 (sqlite.db は `kcs repair --rebuild-db`、registry は各 `.kcs` の rescan)。
 
@@ -605,7 +607,8 @@ intent、[04-pipeline.md §5.4](04-pipeline.md)) であり、schema 変更は常
 同一 Tx で行い → (2) 旧 JSONL を `.migrated` へ rename する。再開時は marker の存在で
 import を skip し rename のみ再試行する — savepoint は外部ファイルの rename を含められない。
 空の旧 JSONL でも marker が「0 行 import 済み」と「未 import」を判別する)。**形状検出は sqlite_master の CREATE 文 (列・CHECK 制約を
-含む) の canonical 比較で行う** — 列存在検査だけでは CHECK 制約の追加・変更を識別できない。
+含む) の canonical 比較で行う — 対象は `cost_ledger` / `batch_requests` / `schema_migrations` の
+3 表すべて** ([04-pipeline.md §5.4](04-pipeline.md) の SQL 正本と同数)。列存在検査だけでは CHECK 制約の追加・変更を識別できない。
 
 例外として in-place migration を書いてよいのは次の場合のみ:
 
@@ -784,7 +787,7 @@ Normalized Markdown 形式 spec     → 07-adapter-spec.md §5.2.1 に最小凍�
 
 ## 12.1 エラーコード namespace
 
-すべての error は `KCS-E-<DOMAIN>-<SUBDOMAIN>-<NNN>` 形式の **error_code** を持つ。`error_kind` などのフリーテキストはユーザー向け表示専用で、機械判定には `error_code` を使う。
+すべての error は `KCS-E-<DOMAIN>-<SUBDOMAIN>-<NNN>` 形式の **error_code** を持つ。`error_kind` などのフリーテキストはユーザー向け表示専用で、機械判定には `error_code` を使う (明示例外 = manifest `units[]` / Adapter 出力 `failed_units` の `error_kind` — [04-pipeline.md §5.3](04-pipeline.md) の閉 enum であり、unit 単位の retry 可否判定に使う)。
 
 ```text
 DOMAIN:
@@ -850,7 +853,7 @@ validation 失敗は exit code 2 で停止し、`KCS-E-CONFIG-SCHEMA-NNN` を返
 
 ## 12.4 時刻・タイムゾーン
 
-すべての永続データ (commit timestamps, normalization_runs, access_events, snapshot lineage 等) の時刻は **UTC ISO8601 拡張形式 + suffix `Z`** に固定する。**例外 = SQLite ストアの内部時刻列** (cost-ledger.sqlite の recorded_at / job_create_started_at / completed_at / created_at — [04-pipeline.md §5.4](04-pipeline.md)): SQL での比較・期限演算のため **UTC epoch ミリ秒の INTEGER** を正とする (JSON / JSONL / UI 境界へ出す際に ISO8601+Z へ変換する)。
+すべての永続データ (commit timestamps, normalization_runs, access_events, snapshot lineage 等) の時刻は **UTC ISO8601 拡張形式 + suffix `Z`** に固定する。**例外 = SQLite ストアの内部時刻列** (cost-ledger.sqlite の recorded_at / job_create_started_at / completed_at / created_at / schema_migrations.applied_at — [04-pipeline.md §5.4](04-pipeline.md)): SQL での比較・期限演算のため **UTC epoch ミリ秒の INTEGER** を正とする (JSON / JSONL / UI 境界へ出す際に ISO8601+Z へ変換する)。
 
 ```text
 正:   2026-04-25T12:00:00Z
@@ -954,7 +957,7 @@ Normalized-Hash: <Markdown header> | Tool-Profile-Hash: <Markdown header> | rese
 unit_id                          | unit_key / unit_ref                 | 03-data-model.md §2.1
 last_indexed_git_commit          | (廃止: Git 連携は持たない)             | research/kcs.md §10
 output_hash (in normalization_runs) | (廃止)                            | research/hash.md §3
-cost-ledger.jsonl (+ -reservations / -reclaimed / .lock) | cost-ledger.sqlite (cost_ledger / batch_requests の 2 表) | 04-pipeline.md §5.4
+cost-ledger.jsonl (+ -reservations / -reclaimed / .lock) | cost-ledger.sqlite (cost_ledger / batch_requests / schema_migrations の 3 表) | 04-pipeline.md §5.4
 ```
 
 ## 12.8 推奨 Reading Path

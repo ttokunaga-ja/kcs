@@ -156,4 +156,4 @@ ADR (Architecture Decision Records) フォルダは廃止しました。本プ�
   - ✓ データはローカル、計算は最強の AI を使う。(core 日)
   - ✓ local-first / Evidence-grounded local knowledge archive
   - ✓ Evidence Pointer / time-travel knowledge navigation
-- **凍結中の修正**: ドキュメント統合ゲート ([09-mvp-scope.md §6](09-mvp-scope.md)) 完了後の本文書き換えは、Step 1-4 で実装が物理的に不可能と判明した場合 / 外部 Agent 互換性を破壊する変更 / データ破壊リスク、の 3 ケースに限る。それ以外の「綺麗にする」修正は Step 4 完了後。
+- **凍結中の修正**: ドキュメント統合ゲート ([09-mvp-scope.md §6](09-mvp-scope.md)) 完了後の本文書き換えは、Step 1-4 で実装が物理的に不可能と判明した場合 / 外部 Agent 互換性を破壊する変更 / データ破壊リスク、の 3 ケースに限る (これに加え、[09-mvp-scope.md §4.2](09-mvp-scope.md) の一回限りの Q_hard 増補とその #5 追記の完遂手続きのみ凍結対象外)。それ以外の「綺麗にする」修正は Step 4 完了後。

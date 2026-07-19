@@ -82,7 +82,8 @@ kcs evidence retarget <pointer> [--latest|--at <commit>]  # 設計確定後 (09-
 本節が CLI コマンドの **正本一覧** である。他 spec が新しいコマンド・フラグに言及する場合、本節への追加を伴う (破壊的変更扱い)。
 
 `kcs tag` の新規 `<name>` は OS 非依存の portable leaf 規則に従い、Windows 予約名・禁止文字・
-末尾 dot/space を拒否する。NFC 正規化 + Unicode lowercase が同じ tag は case-insensitive collision
+末尾 dot/space を拒否する。NFC 正規化 + Unicode simple case folding (locale 非依存 —
+[03-data-model.md §2](03-data-model.md) と同一規則) が同じ tag は case-insensitive collision
 として重複作成を拒否し、`HEAD` の case variant は予約する。canonical ref は legacy raw-name ref と
 分離した `refs/tags-v1/tag-<digest64>` に保存する。
 物理 ref leaf と legacy read 規則は [03-data-model.md §2](03-data-model.md) を正本とする。

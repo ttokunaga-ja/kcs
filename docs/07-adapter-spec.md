@@ -130,13 +130,17 @@ revoke: adapter.policy.allow_network = false に設定する。
         要素単位後方互換 — schema error にしない)。
         初回スキャン承認 (10-operations.md §1) の記録とは別物 — あちらは scope 単位の
         取り込み承認、こちらは adapter 単位の network opt-in。
-        (b) の config boolean は scope 内の全 online_api Adapter に適用される blanket であり、
-        **次回実行時に現 profile で approvals[] 行を materialize する意思表示**として扱う —
+        (b) の config boolean は scope 内の全 online_api Adapter の**送信 gate 条件** (false で全停止)
+        であると同時に、**scope で最初に実行される 1 Adapter に限り approvals[] 行を materialize する
+        意思表示**として扱う —
         行 materialize 後は (a) と同じ照合・失効規則に従う (tool_id 個別の可否は approvals[] が
         単位。boolean だけでは profile 変化の失効を判定できないため、行なしでの送信は不可)。
-        **materialize が発火するのは当該 (scope_id, tool_id) に approvals[] 行が一つも存在しない
-        初回のみ** — profile 変更で失効した行や revoked 行が存在する場合は、boolean が true の
-        ままでも自動生成せず再承認 (対話 / --approve) を要する (残存 boolean による失効迂回の禁止)。
+        **materialize が発火するのは当該 scope の approvals[] に行が (tool_id を問わず) 一つも
+        存在しない初回、かつその最初の 1 tool に対してのみ** — 2 個目以降の tool_id や tool_id が
+        変わった Adapter は、boolean が true のままでも自動生成せず明示承認 (対話 / --approve) を
+        要する (新 identity への blanket 波及を許すと、上記寿命規則の「tool_id が変わった場合は
+        失効し、再承認」を『新規行の初回 materialize』として迂回できてしまう)。profile 変更で
+        失効した行や revoked 行が存在する場合も同様に再承認を要する (残存 boolean による失効迂回の禁止)。
         承認操作の書込順は **config.toml (`allow_network = true`) を先に耐久化 → approvals[] 行を
         publish** — 間で crash した中間 (true × 行なし) は上記 materialize の初回規則が次回実行で
         完遂する (self-healing)。revoke は逆順 (行の revoked 化 → boolean false) — 中間
@@ -230,14 +234,16 @@ input:
   prepared_unit_hint          (optional)
   mode                        "full" | "incremental"
   previous (incremental 時のみ): { raw, normalized_units, tool_profile_hash }
-  hints (incremental 時のみ):   { changed_unit_keys, added, removed, page_fingerprints }
+  hints (incremental 時のみ):   { changed_unit_keys, added_unit_keys, removed_unit_keys, page_fingerprints }
   tool_profile_hash
   spec_version
 output:
   mode_used                    "full" | "incremental"
   updated_units / added_units / removed_unit_keys / unchanged_unit_keys
-  failed_units                 [{ unit_key, error_kind }] — 部分失敗の unit (04 §3.2 V1 の被覆に
-                               含める。persist されず manifest 側で failed へ遷移 — partial の表現手段)
+  failed_units                 [{ unit_key, error_kind }] — 部分失敗の unit (error_kind は
+                               [04-pipeline.md §5.3](04-pipeline.md) の閉 enum。04 §3.2 V1 の被覆に
+                               含める (full は V6 の被覆)。persist されず manifest 側で failed へ遷移
+                               — partial の表現手段)
   fallback_to_full             bool
   reason
   # Evidence Pointer は Adapter output に含めない — 必須フィールド (chunk_hash / commit) は
