@@ -108,7 +108,9 @@ opt-in の単位・成立・寿命:
 寿命:   永続 (revoke まで)。ただし対象 Adapter の tool_id または execution_mode が
         変わった場合は失効し、再承認を要する。
 
-revoke: adapter.policy.allow_network = false に設定する。
+revoke: adapter.policy.allow_network = false に設定する (これは **scope 全体の kill switch**)。
+単一 Adapter だけの revoke は approvals[] 当該行の **status=revoked + revoked_at への更新**で行う
+(opt-in 単位 = scope × adapter に対応する既存機構 — 下記)。
         以後、当該 scope の新規オンライン送信 task は発行されない
         (送信済みデータの取り消しは保証しない)。
 
@@ -212,6 +214,12 @@ AdapterRun:
                         (集計用の粗分類 — auth / quota / invalid_input 等の細分は error_code が
                          担い、retry 対応は 04 §5.3 の表が error_code 基準で優先する)
   retry_after_ms        optional — provider の Retry-After を透過 (rate_limit 時)
+  usage                 one-of { usd } | { billable_units } — request 単位の課金報告 (§5.7)。
+                        usd = 有限・非負の実測額。billable_units = 単価計算に足る unit 数
+                        (単価解決元 = tools.toml の単価表)。**billable な terminal 応答
+                        (成功・billable reject・fetch_output・sync 応答) で必須** — 欠落・
+                        不正値は estimated 記帳へ縮退 ([04-pipeline.md §5.4](04-pipeline.md) の
+                        記帳値事前検証と同じ扱い)
 ```
 
 ---
@@ -362,6 +370,8 @@ metadata:
   adapter_id, model_family, version, embedding_profile_hash
 ```
 
+**Embedding 応答の受入検査** (markdownize の V1〜V6 に相当する): (1) `vectors[].id` は入力 id 集合と**全単射** (欠落・過剰・重複は違反)、(2) `dimensions` は profile と一致し全 vector が同次元、(3) 全要素が**有限値** (NaN/Inf 拒否) かつ**非ゼロ vector**、(4) float32 への決定的変換と **L2 正規化は core 側で実施**する (Adapter の正規化有無に依存しない)。違反応答は全体 reject — contract violation として課金・再試行は §5.8 相 3 と同じ規則に従う ([04-pipeline.md §5.3](04-pipeline.md))。
+
 Text Embedding Adapter / Image Embedding Adapter は**採用しない**。同一 Embedding Adapter が同一 profile で多モダリティを単一 vector space へ写像する。
 
 > **実地検証済み — 単一 multimodal profile を採用 (2026-07-03 再検証で確定)**: 初回調査は「Gemini Embedding 2 multimodal は preview で pin 不可」を根拠に text-only 緩和を適用したが、事実誤認 (`gemini-embedding-2` は 2026-04-22 に GA、pinned stable 版あり) が判明し**撤回**。再検証 (`tasks/step3-embedding-verify.md` の再検証節) により本節冒頭の本来の契約どおり **単一マルチモーダル Embedding Adapter** を採用する。確定 profile: **`gemini-embedding-2` (GA 版を Adapter が起動時解決して pin、§6) / 768 次元 (MRL 切り詰め — 切り詰め後次元も profile に固定) / cosine / `modality="multimodal"` / `mode="online"`** (Vertex はバッチ推論非対応のため sync 呼出 — client 側の並列は**タスク間** (別 batch_requests 行) で行い、単一タスク内の複数 request は直列 ([04-pipeline.md §5.4](04-pipeline.md) の縮退 2 相)。429 は rate_limit 分類で backoff — §5.7)。MVP で実際に embed するのは text chunk のみだが、profile を multimodal にしておくことで Phase 4+ の image/audio embedding を [03-data-model.md §7](03-data-model.md) の全 re-index なしに追加できる。text 品質は MTEB で前世代 text 専用モデルを上回り日本語も同格 (再検証節)。コスト: 10 万 chunk 初回 ≈ $10 (単月 budget 内)。**非 multimodal の embedding profile (`modality="text"` 等、別ベクトル空間への埋め込み) は採用不可** — tool-lock materialize / adapter 登録時に `KCS-E-EMBED-MODALITY-001` (exit 2) で拒否する ([03-data-model.md §7](03-data-model.md))。
@@ -423,7 +433,8 @@ provider_scope_id()            下記の不変識別子を返す
 - **課金報告**: **request (job / sync 呼出) 単位** — 各 request の応答 / fetch_output に実測コスト
   (または単価計算に足る unit 数) を含めて報告する ([04-pipeline.md §5.4](04-pipeline.md) / §5.8 の
   request 単位記帳の前提 — 直列多 request task では各 request の終端 Tx が自身の実測 usage を持つ)。
-  報告値が cost ledger の記録源である
+  **機械契約は §4 AdapterRun の `usage` field (one-of: `usd` | `billable_units`) — billable な
+  terminal 応答で必須**。報告値が cost ledger の記録源である
 - **provider_scope_id**: `adapter 名前空間 + account 不変 ID (+ workspace 不変 ID)` の連結。表示名・
   alias 等の可変値は使わない。値は「これから呼び出す client instance」から取得する
 
@@ -512,10 +523,15 @@ input_raw_hash, output_hash
 status, error_code, error_category, retry_after_ms
 network_consent (approvals | cli_online — 送信を伴った実行のみ)
 started_at, finished_at
-intent_token, submission_seq (非機微 — batch_requests / cost_ledger の行との監査突合キー。
-                              CAS で敗れた送信 ([04-pipeline.md §5.4](04-pipeline.md)) は
-                              回収側の unknown_settled 行に対応づく — 送信 log 件数と
-                              cost_ledger 行数が一致しないのは二重課金防止のための意図的挙動)
+adapter_kind, input_hash, intent_token, submission_seq
+                             (非機微。**cost_ledger / batch_requests への到達は 4 組 key
+                              (scope_id, adapter_kind, input_hash, tool_profile_hash) +
+                              submission_seq が正** — intent_token は補助 (成功行の batch_job_id は
+                              provider request id を優先し token を保持しない)。input_raw_hash は
+                              raw 由来 task 用で、device 行 (query embedding) の input identity は
+                              input_hash 側。CAS で敗れた送信 ([04-pipeline.md §5.4](04-pipeline.md))
+                              は回収側の unknown_settled 行に対応づく — 送信 log 件数と cost_ledger
+                              行数が一致しないのは二重課金防止のための意図的挙動)
 ```
 
 `adapter_id` は tools.toml の `tool_id` と同一値である (別 namespace を作らない — approvals[] (§3) の照合キーと一致し、実行 Adapter を承認行へ一意に対応付ける)。

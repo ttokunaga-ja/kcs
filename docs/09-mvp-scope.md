@@ -130,6 +130,7 @@ Step 別の目安 (テスト除く):
 | 観測ログ `metrics.jsonl` / `access.jsonl` (M3 の latency 計測に必要) | [06-cli-spec.md §13](06-cli-spec.md) / [05-runtime.md §7](05-runtime.md) | Step 3 |
 | `restore --to` / `--at` / `--all-history` / `--include-deleted` | [05-runtime.md §4](05-runtime.md) | Step 4 |
 | purge 最小形 (tombstone + `commit_type=purged` + 検索除外 + `--erase-tombstone` + ログスクラブ [10-operations.md §7](10-operations.md)) | [05-runtime.md §3](05-runtime.md) / [08-evidence-pointer-spec.md §4.1](08-evidence-pointer-spec.md) | Step 4 |
+| `kcs repair --rebuild-db` (SQLite index 再構築 — 破損時の復旧経路) | [10-operations.md §7.5.3](10-operations.md) | Step 3 |
 | `kcs repair --verify-objects` (CAS object 整合性検証) / `--prune-orphans` (orphan prepared/image 削除 — 法務 purge の完結手段) | [10-operations.md §7.5](10-operations.md) | Step 4 |
 | `kcs evidence verify <pointer>` (単発) | [08-evidence-pointer-spec.md §4.3](08-evidence-pointer-spec.md) | Step 4 |
 | purge の完全な履歴書き換え (tree/commit 再結線・filename 秘匿ケース) | [05-runtime.md §3.5](05-runtime.md) / [08-evidence-pointer-spec.md §4.2](08-evidence-pointer-spec.md) | v2+ / Phase 4+ |
@@ -253,7 +254,7 @@ Done 条件 = synthetic で各シナリオ Recall@10 >= 0.8
           + dogfood で 3 シナリオの手動成功確認
 ```
 
-クエリ追加は Step 3 着手前まで。以降の追加・差し替えは §4.2 のシナリオ凍結規律に準じる (悪化を隠すための削除は禁止)。
+クエリの追加・差し替えは §4.2 の凍結規律に従う — 認められるのは M3-1 の一回限り増補 (Step 3 着手前) のみで、他のクエリ集合は Step 1 着手後は動かさない (悪化を隠すための削除は禁止)。
 
 ---
 

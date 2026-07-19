@@ -96,7 +96,9 @@ kcs://scope_01J8ZQ.../sha256:9f2c.../sha256:abc123.../sha256:tool1.../sha256:chu
   表示用であり (§2.2)、URI ⇄ JSON の往復で失われてよいのは optional フィールドだけ。
 - `sv` (schema_version) 省略時は `1`。**wire 上の `sv` は MAJOR のみの整数** (MINOR/PATCH は載せない —
   optional フィールド追加は sv 不変で、未知フィールド無視則 (§8) が前方互換を担う)。未知の `sv`
-  (= 未知 MAJOR) は KCS-E-CONFIG-SCHEMA 系 error (exit 2)。
+  (= 未知 MAJOR) は KCS-E-CONFIG-SCHEMA 系 error (exit 2)。**URI は opaque として扱い、authority 位置
+  (scope_id) の大文字小文字を保存する** — 一般 URI 正規化 (authority の小文字化) を適用してはならない。
+  lookup は case-sensitive (registry の TEXT キーと一致 — ULID は大文字表記が正)。
 - 各セグメントは §2 の同名フィールド値をそのまま置く (hash は `sha256:` prefix 込み、commit は commit_hash、
   [03-data-model.md §8.1](03-data-model.md))。percent-encoding は不要 (値域が `[A-Za-z0-9_:.-]` に閉じるため)。
 - 第 2 セグメントがリテラル `object` の URI は **object 参照**であり、Evidence Pointer ではない:
@@ -164,7 +166,7 @@ bulk 系 (`kcs evidence verify --batch <pointers.jsonl>`) は従来どおり各�
     同一 commit 内では同一 (raw, tool_profile) の normalize binding は共有される — は、**pointer の
     tool_profile_hash と一致する binding の entry を選ぶ** (pointer は gen を持たない — gen の整合は
     手順 8 が tree entry と chunk object の間で検証する)。同一 binding の entry が複数残る場合は
-    **path の UTF-8 byte 順最小の entry を決定的に選ぶ** (§7 の表示 path も同じ規則)。一致 entry が
+    **path の UTF-8 byte 順最小の entry を決定的に選ぶ** ([05-runtime.md §1.7](05-runtime.md) の `path_at_commit` と同じ規則 — 表示もこの canonical path を使い、pointer 入力の optional path は使わない)。一致 entry が
     無ければ手順 5〜7 を実行せず KCS-E-STORE-CORRUPT-001 (not_found 扱い — 手順 8 の不一致処理と同じ
     終端) へ短絡する)
 5.  raw_hash に **active な tombstone** (lifecycle の末尾 event が `purged` — [05-runtime.md §3.5](05-runtime.md)) が

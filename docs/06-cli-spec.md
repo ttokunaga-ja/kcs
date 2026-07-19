@@ -152,7 +152,8 @@ preview 内容:
 1. network opt-in を付与しない。opt-in 未成立の scope では、--yes で index を
    開始しても online_api Adapter への送信 task は発行されず pending のまま残る
    (07-adapter-spec.md §3)。非対話環境で opt-in が必要な場合は、事前に
-   adapter.policy.allow_network = true を設定しておく。
+   adapter.policy.allow_network = true を設定しておく (明示 `--online` も当該実行限りの
+   一時 opt-in として非対話環境で有効 — 07-adapter-spec.md §3)。
 2. secrets の built-in デフォルト除外 (10-operations.md §1.1 Tier A) を解除できない。
 3. 承認記録の approval_method に "yes" が記録され、対話承認と事後監査で区別できる。
 ```
@@ -241,7 +242,7 @@ kcs restore <pointer> --to ./recovered/ --force    # 既存上書き許可 (確�
 通常削除 (`rm`) や archive は最新状態から対象を消すだけで、過去履歴は保持する。法務・秘匿・誤取り込みで履歴ごと消す場合のみ `purge` を使う。
 
 ```bash
-kcs purge <path> --reason <legal|privacy|misingest|copyright|other>
+kcs purge <path|--raw-hash <h>> --reason <legal|privacy|misingest|copyright|other>
 kcs purge --raw-hash sha256:abc... --reason misingest --erase-tombstone
 ```
 
@@ -290,9 +291,9 @@ sqlite.db 不在・利用不能       全経路 (verify / open / view / restore 
                                不在・利用不能の場合のみ。verify は検査未完了のため --strict なしでも
                                0 を返さない。multi-scope search は当該 scope を excluded_scopes として
                                継続し、全 scope 該当なら exit 3 — SCOPE-ALL-FAILED (4) より優先。
-                               全 scope が STORE-VERSION 除外なら同型の昇格で exit 8 —
-                               KCS-E-STORE-VERSION-001 (05 §1.8 / 10 §12.5)。昇格は除外理由が
-                               同一 code の場合に限る — 混在は SCOPE-ALL-FAILED / exit 4。
+                               全 scope の除外理由が同一 code なら当該 code の単独時 exit へ昇格
+                               (一般規則 — VERSION→8・REBUILDING→3・INCOMPAT→8・journal 系→3・
+                               DUP→4。05 §1.8 / 10 §12.5)。混在は SCOPE-ALL-FAILED / exit 4。
                                優先順位は VERSION → journal → DUP → REBUILDING (10 §3)。05 §2.6・08 §3.1)
 kcs evidence verify --batch <pointers.jsonl>   一括 verify (Step 4+ — 08 §4.3)
                                (--batch は --strict の有無に従う — --strict 時: 混在も 4 /

@@ -656,7 +656,7 @@ metadata には schema_version を持たせる
 新 type が必要に見える場合は、まず既存 type + metadata で表現できないか確認する
 ```
 
-将来、実運用で固定 enum が強すぎると判明した場合は、既存の互換性を壊さない migration plan を本書および 05-runtime.md に明記する。
+`commit_type` の値域は §12.5 のとおり**永久固定**である — 新しい区別が必要に見える場合も値域は変更せず、既存 type + metadata で表現する (値域変更の migration は行わない)。
 
 ---
 

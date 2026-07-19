@@ -363,7 +363,7 @@ commit object 等で参照される `tool_lock_hash` は tool-lock の canonical
 
 ```
 tool_lock_hash = "sha256:" + base16(sha256(JCS({
-  spec_version: <int>,
+  spec_version: <int — 現在値 = 1>,
   prepare:        { tool_id, profile_hash },
   markdown:       { tool_id, profile_hash },
   embedding:      { tool_id, profile_hash, dimensions, distance, modality },
@@ -390,7 +390,7 @@ chunk 境界は Adapter ではなく core 側の chunking 設定 (`.kcs/config.t
 
 ```text
 chunking_config_hash = "sha256:" + base16(sha256(JCS({
-  spec_version: <int>,
+  spec_version: <int — 現在値 = 1>,
   strategy: <effective [chunking].strategy — 既定 "heading">,
   max_chars: <effective [chunking].max_chars — 既定 6000>,
   unicode_version: <slug 正規化に用いる Unicode (UCD) 版 — 04 §4.1 の固定文字集合と連動。
@@ -401,6 +401,8 @@ chunking_config_hash = "sha256:" + base16(sha256(JCS({
 
 - 対象は `[chunking]` 配下の **chunk 境界に影響する全キー**。キーを追加したら `spec_version` を bump する
 - デフォルト値も明示的に畳み込む (キー省略と明示指定を識別しない)
+- `unicode_version` は **`kcs init` が採用 UCD 版 (現在の既定 = 16.0.0) を config へ明示記録する**
+  (「省略不可・default なし」の充足手段 — 以後の版変更は config 変更として本節の世代判定に乗る)
 - これは同一性 hash であり、identity には使わない。chunk identity は §8.1 のとおり `(raw_hash, tool_profile_hash, gen, unit_key, heading_path, section_id, byte_start, byte_end)` のまま。`chunking_config_hash` は chunk の**世代**を表すメタデータに留める
 
 # 6. Up_to_date 判定

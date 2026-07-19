@@ -36,6 +36,9 @@ embedding 承認なし (下記 consent gate) → text fallback (KCS-E-SEARCH-VEC
 
 解決順の列挙は**判定順序**でもある — 複数条件が同時に成立する場合は先に列挙された行の
 `fallback_reason` / error code を採用する (profile 不一致 (INCOMPAT) が承認なし (UNAUTHORIZED) に先行)。
+`fail_behavior = "warn"` の挙動は **fallback と同じ結果** (text fallback + `fallback_reason`) に加えて
+構造化 warning を stderr / `--json` の `warnings[]` へ出す — exit code も fallback と同じ (error に
+しない)。
 
 **query embedding の consent gate**: vector | hybrid の page 1 は query embedding (07 §5.3 の
 `input_type: "query"` — sync 呼出) を要し、これは新規送信として [07-adapter-spec.md §3](07-adapter-spec.md)
@@ -353,7 +356,7 @@ score/rank をコピーして、group 内を
    候補として返す。§1.4 の MMR/dedup は scope 内でまだ適用しない
 3. scope 間の統合は **rank ベース** で行う。各 scope の RRF スコア (rank のみから決まる) をそのまま比較して降順マージする。**BM25 / vector の raw スコアを scope 間で比較・正規化してはならない** (コーパス統計が index ごとに異なり比較不能)。pre-alias 同点は immutable `(scope_id,chunk_hash)` で安定化する
 4. diversify (MMR / group_by_raw_hash, §1.4) は統合後の候補列に対して適用する
-5. vector / hybrid の横断条件は [03-data-model.md §7](03-data-model.md) に従う。embedding profile が全 scope で一致しない場合、横断部分は text (BM25 rank) のみで統合し、`fallback_reason` に記録する (**`--vector` 明示時は fallback しない** — profile 不一致の scope を KCS-E-SEARCH-VEC-INCOMPAT-001 の excluded_scopes として除外し、全 scope 除外なら error — §1.2 の「失敗時は error」と同じ)。`kcs_format_version` が自己の対応上限より新しい scope も同様に excluded_scopes として除外する (KCS-E-STORE-VERSION-001 を `fallback_reason` に記録・当該 scope へは query_cache を含む一切の書込を行わない — [10-operations.md §12.5](10-operations.md))。**全 scope が STORE-VERSION 除外なら command は KCS-E-STORE-VERSION-001 / exit 8 を返す** (SCOPE-ALL-FAILED (exit 4) より優先 — REBUILDING と同型の昇格、[06-cli-spec.md §7](06-cli-spec.md)。自動化に「新版への更新が必要」を直接伝える)。**昇格は全 scope の除外理由が同一 code のときに限る** — 理由が混在して全 scope 除外となった場合は通常の SCOPE-ALL-FAILED (exit 4) とし、個別理由は excluded_scopes[].reason で判別する (REBUILDING の昇格も同じ同一 code 限定)。embedding 承認の consent gate (§1.1) は**送信 gate であり per-scope の除外条件ではない** — 承認ゼロなら検索全体が text fallback (excluded_scopes には計上しない)。1 つ以上の承認で送信された query vector は profile 互換な全参加 scope の vector 検索に用いる (未承認 scope も含む — 送信は 1 回であり scope 別の再送信は発生しない)
+5. vector / hybrid の横断条件は [03-data-model.md §7](03-data-model.md) に従う。embedding profile が全 scope で一致しない場合、横断部分は text (BM25 rank) のみで統合し、`fallback_reason` に記録する (**`--vector` 明示時は fallback しない** — profile 不一致の scope を KCS-E-SEARCH-VEC-INCOMPAT-001 の excluded_scopes として除外し、全 scope 除外なら error — §1.2 の「失敗時は error」と同じ)。`kcs_format_version` が自己の対応上限より新しい scope も同様に excluded_scopes として除外する (KCS-E-STORE-VERSION-001 を `fallback_reason` に記録・当該 scope へは query_cache を含む一切の書込を行わない — [10-operations.md §12.5](10-operations.md))。**全 scope が STORE-VERSION 除外なら command は KCS-E-STORE-VERSION-001 / exit 8 を返す** (SCOPE-ALL-FAILED (exit 4) より優先 — REBUILDING と同型の昇格、[06-cli-spec.md §7](06-cli-spec.md)。自動化に「新版への更新が必要」を直接伝える)。**全 scope の除外理由が同一 code の場合、command は当該 code とその単独実行時の exit を返す (一般規則)** — VERSION → exit 8・REBUILDING → exit 3・INCOMPAT → exit 8・purge journal 系 → exit 3・DUP → exit 4。理由が混在して全 scope 除外となった場合のみ通常の SCOPE-ALL-FAILED (exit 4) とし、個別理由は excluded_scopes[].reason で判別する。embedding 承認の consent gate (§1.1) は**送信 gate であり per-scope の除外条件ではない** — 承認ゼロなら検索全体が text fallback (excluded_scopes には計上しない)。1 つ以上の承認で送信された query vector は profile 互換な全参加 scope の vector 検索に用いる (未承認 scope も含む — 送信は 1 回であり scope 別の再送信は発生しない)
 
 既知の限界: rank ベース統合は、関連文書の乏しい scope の 1 位と強い scope の 1 位を同格に扱う。MVP ではこれを容認する (結果に scope_path が必ず含まれるため判別可能)。scope 間の再ランクは v2 以降の検討事項。
 
@@ -544,7 +547,9 @@ keep_repaired_per_branch = 5
 ## 2.5 並行性 / power-loss 安全性
 
 ```
-- GC 中の新規 commit 受付は block しない (CoW 風 readonly snapshot 上で走る)
+- GC 中の新規 commit 受付は block しない (CoW 風 readonly snapshot 上で走る)。§6 の lock 表が
+  `kcs gc` を書き込み系に含めるのは MVP の on-demand 実装 (全体 lock 型) の規約 — 本節の並行 GC は
+  Phase 4+ であり、導入時に §6 の表を改訂する
 - object 物理削除は exclusive lock の短い critical section に限定
 - power-loss 中断時は次回起動時に sweep 再開 (.kcs/gc/in_progress マーカーで検出)
 ```
@@ -602,7 +607,7 @@ purge:   履歴から物理的に消す。例外操作。commit_type=purged が�
 CLI:
 
 ```bash
-kcs purge <path|raw_hash> --reason <legal|privacy|misingest|copyright|other>
+kcs purge <path|--raw-hash <h>> --reason <legal|privacy|misingest|copyright|other>
 # --reason は必須。--yes なしなら確認プロンプト
 ```
 
