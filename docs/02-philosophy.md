@@ -572,7 +572,7 @@ RAG対象外:
 
 これは、共有版に存在しない情報を根拠にAIが回答してしまうことを防ぐためです。
 
-なお MVP には修正提案が存在しないため、本節は v2+ で共有機能を導入する際の制約である。MVP の検索対象は folder-local `.kcs` の active な artifact のみ。
+なお MVP には修正提案が存在しないため、本節は v2+ で共有機能を導入する際の制約である。MVP の **default** 検索対象は folder-local `.kcs` の active な artifact (履歴 flag `--at` / `--all-history` / `--include-deleted` は対応する snapshot binding を対象にする — [05-runtime.md](05-runtime.md) §1.6)。
 
 ---
 

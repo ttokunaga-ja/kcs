@@ -57,7 +57,7 @@ raw / prepared / image / chunk / embedding / manifest / toollock / tree / commit
     commits/ab/cd/<commit64>
   refs/
     heads/main
-    tags-v1/tag-<digest64>          # canonical: digest64 = sha256(NFC + Unicode lowercase の論理 tag 名)
+    tags-v1/tag-<digest64>          # canonical: digest64 = sha256(NFC + simple case folding 後の論理 tag 名)
     tags-v1/names.jsonl             # 論理 tag 名の truth (append-only ledger — 下記 tag 規則。
                                     #  leaf が tag- で始まらないため ref 列挙と衝突しない)
     tags/<logical-name>             # legacy Unix raw-name refs (read-only compatibility)
@@ -104,7 +104,7 @@ object identity と hash 算出規約は変わらない。
 
 tag の新規物理 leaf は上記の固定 ASCII hash 形式を使う。論理 tag 名は OS 非依存の portable
 leaf 規則 (Windows 予約名、`<>:"/\\|?*`、control、末尾 dot/space を禁止) を満たす必要があり、
-NFC 正規化 + Unicode lowercase が同じ名前は case-insensitive collision として同一 slot を占める。
+NFC 正規化 + Unicode **simple case folding (locale 非依存 — full folding・locale 別規則は使わない)** が同じ名前は case-insensitive collision として同一 slot を占める (folding は Unicode 安定性方針により割当済み文字で版間不変 — 版の記録は不要)。
 `HEAD` の case variant は論理 tag 名として予約する。canonical ref は legacy namespace と分離した
 `refs/tags-v1/tag-<digest64>` に置くため、`tag-<digest64>` に見える旧 raw tag も別の canonical ref と
 誤認せず、その論理名のまま読める。旧 Unix store の `refs/tags/<name>` は bounded・hash 検証付き
@@ -280,15 +280,15 @@ cache = scope_registry / aggregator 検索の探索対象一覧 / stale 検出 /
 | `.kcs/scope.json` / `config.toml` / `tool-lock.json` | JSON / TOML (schema 検証: [10-operations.md §12.3](10-operations.md)) | **truth** | 復旧不能 | 各 spec |
 | `.kcs/logs/access.jsonl` | JSONL (append-only) | **truth** (access_events の正本) | 復旧不能 | §2 |
 | `.kcs/purge/epoch` | 単調カウンタ (text) | **truth** (purge の ABA barrier) | 欠落 = 読取 fail-closed。次の locked mutation が journal の target_epoch、journal も無ければ全 lifecycle event の `epoch` 最大値 + 1 (event 皆無なら 1) から回復して再作成 ([05-runtime.md §3.5](05-runtime.md)) | [05-runtime.md §3.5](05-runtime.md) |
-| `.kcs/tombstones/lifecycle-epoch` | 単調カウンタ (text) | **truth** (lifecycle 回転補完の検出源) | 欠落・不正・巻き戻りは max(last_lifecycle_epoch, event epoch 最大値) + 1 で再作成 + 無条件 1 回転 ([05-runtime.md §3.5](05-runtime.md)) | [05-runtime.md §3.5](05-runtime.md) |
+| `.kcs/tombstones/lifecycle-epoch` | 単調カウンタ (text) | **truth** (lifecycle 回転補完の検出源) | 欠落・不正・巻き戻りは max(last_lifecycle_epoch, 全 lifecycle event の lifecycle_epoch 最大値) + 1 で再作成 + 無条件 1 回転 (purge の `epoch` は参照しない — 別系統のカウンタ) ([05-runtime.md §3.5](05-runtime.md)) | [05-runtime.md §3.5](05-runtime.md) |
 | `.kcs/manifest.json` | JSON (schema 検証) | working-state cache (永続的真実は tree/commit object) | rescan で再構築 | §8 files |
 | `.kcs/tasks.jsonl` | JSONL (append-only) | 運用データ | 喪失許容 ([04-pipeline.md §5.7](04-pipeline.md)) | [04-pipeline.md §5.1](04-pipeline.md) |
 | `.kcs/chunks.jsonl` | JSONL (append-only) | **truth** (chunk の世代 association / created_at / first_seen_commit / 生成時点 path — chunk object には含めない §8) | 復旧不能 (SQLite rebuild の入力) | §8 / [04-pipeline.md §4.1](04-pipeline.md) |
 | `.kcs/index/sqlite.db` | **SQLite** (chunks / chunk_config_generations / chunk_publications / chunk_fts / embeddings / chunk_vec / tree_entries / index_metadata の 8 表) | cache | `kcs repair --rebuild-db` | [04-pipeline.md §4](04-pipeline.md) |
 | `~/.local/share/kcs/scope-registry.sqlite` | **SQLite** (`scopes` 1 表) | cache | 各 `.kcs` の rescan | [10-operations.md §3](10-operations.md) |
-| `~/.local/share/kcs/cost-ledger.sqlite` | **SQLite** (`cost_ledger` / `batch_requests` の 2 表、WAL) | 運用データ (課金台帳 + **in-flight intent (Batch job / sync request) の正本** — [04-pipeline.md §5.8](04-pipeline.md)。tasks.jsonl と異なり喪失許容ではない) | 確定課金は再構築不可 (Adapter 報告値の記録であり再導出元がない)。in-flight は batch 行が provider job 一覧の intent_token 全走査、sync 行が provider request id 照会 (照会不能は estimated 確定 — [04-pipeline.md §5.4](04-pipeline.md)) で回収 | [04-pipeline.md §5.4](04-pipeline.md) (SQL 正本) |
+| `~/.local/share/kcs/cost-ledger.sqlite` | **SQLite** (`cost_ledger` / `batch_requests` / `schema_migrations` の 3 表、WAL) | 運用データ (課金台帳 + **in-flight intent (Batch job / sync request) の正本** — [04-pipeline.md §5.8](04-pipeline.md)。tasks.jsonl と異なり喪失許容ではない) | 確定課金は再構築不可 (Adapter 報告値の記録であり再導出元がない)。in-flight は batch 行が provider job 一覧の intent_token 全走査、sync 行が provider request id 照会 (照会不能は estimated 確定 — [04-pipeline.md §5.4](04-pipeline.md)) で回収 | [04-pipeline.md §5.4](04-pipeline.md) (SQL 正本) |
 
-**SQLite を使うのはこの表の 3 ファイル (計 11 テーブル)**。うち index/sqlite.db と scope-registry.sqlite は正本から再構築可能な検索キャッシュ、**cost-ledger.sqlite だけは再構築不可の運用台帳** (cache ではない — schema 変更は rebuild でなく in-place migration 側、[10-operations.md §7.5.3](10-operations.md))。コンテンツの truth は引き続きファイル (CAS objects/ ほか) が正本であり、tasks.jsonl は喪失許容の JSONL のまま。旧 spec が SQLite テーブルとして定義していた `files` / `normalization_runs` / `prepared_units` は採用しない (§8、[04-pipeline.md §4.7](04-pipeline.md))。課金 + in-flight intent の記録は 2026-07-18 に JSONL 3 ファイル構成から cost-ledger.sqlite へ確定した ([04-pipeline.md §5.4](04-pipeline.md) — 2 相プロトコルが UNIQUE・単一 Tx・ON CONFLICT 冪等の保証を正本要件とするため)。
+**SQLite を使うのはこの表の 3 ファイル (計 12 テーブル)**。うち index/sqlite.db と scope-registry.sqlite は正本から再構築可能な検索キャッシュ、**cost-ledger.sqlite だけは再構築不可の運用台帳** (cache ではない — schema 変更は rebuild でなく in-place migration 側、[10-operations.md §7.5.3](10-operations.md))。コンテンツの truth は引き続きファイル (CAS objects/ ほか) が正本であり、tasks.jsonl は喪失許容の JSONL のまま。旧 spec が SQLite テーブルとして定義していた `files` / `normalization_runs` / `prepared_units` は採用しない (§8、[04-pipeline.md §4.7](04-pipeline.md))。課金 + in-flight intent の記録は 2026-07-18 に JSONL 3 ファイル構成から cost-ledger.sqlite へ確定した ([04-pipeline.md §5.4](04-pipeline.md) — 2 相プロトコルが UNIQUE・単一 Tx・ON CONFLICT 冪等の保証を正本要件とするため)。
 
 # 5. Identity — hash と semantic_fingerprint の分離
 
@@ -391,7 +391,8 @@ chunking_config_hash = "sha256:" + base16(sha256(JCS({
   strategy: "heading",
   max_chars: 6000,
   unicode_version: <slug 正規化に用いる Unicode (UCD) 版 — 04 §4.1 の固定文字集合と連動。
-                    版差は config 変更として現れる>
+                    版差は config 変更として現れる。**省略不可 (default なし)**。
+                    property は UCD の Script (Script_Extensions は使わない)>
 })))
 ```
 

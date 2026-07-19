@@ -284,8 +284,10 @@ KCS は Adapter の incremental 出力を **persist する前に** 次を検証�
 unit_mapping (§2.2) の帰結 (`unchanged 候補 ∪ changed ∪ added`)。
 
 ```text
-V1 被覆・排他: keys(updated_units) ∪ keys(added_units) ∪ unchanged_unit_keys = N
-              かつ 3 集合は互いに素 (unit の返し忘れ / 二重出力の検出)
+V1 被覆・排他: keys(updated_units) ∪ keys(added_units) ∪ unchanged_unit_keys ∪ keys(failed_units) = N
+              かつ 4 集合は互いに素 (unit の返し忘れ / 二重出力の検出。failed_units は persist せず
+              manifest 側で failed へ遷移する — §5.2 partial の表現手段。V5 の形式検査は
+              failed_units には適用しない)
 V2 removed:   removed_unit_keys が hints.removed_unit_keys と完全一致
 V3 越権禁止:  keys(updated_units) ⊆ hints.changed_unit_keys
               (hints に無い unit の書き換え = unchanged unit の再出力違反の検出)
@@ -390,10 +392,11 @@ CREATE TABLE chunk_config_generations (
    レベル飛びはそのまま積む)。unit 先頭から見出し未出現の間は heading_path = []
 4. section_id = heading_path の各要素を slug 化し "/" で結合。slug 規則: NFC 正規化 →
    ASCII 英字は小文字化 → 空白列を "-" に → 英数字・ハイフン・アンダースコア・日本語文字
-   (Unicode script property が Hiragana / Katakana / Han の文字 + 長音記号 ー U+30FC・々 U+3005 に
+   (**UCD の `Script` property** (Script_Extensions は使わない — U+30FB 等で判定が分かれる) が
+   Hiragana / Katakana / Han の文字 + 長音記号 ー U+30FC・々 U+3005 に
    固定 — 使用する UCD 版は chunking config の `unicode_version` として hash 入力に含める
-   ([03-data-model.md §5.3](03-data-model.md))。集合・版の変更は chunking_config_hash の変更として
-   扱う) 以外を除去 → 連続 "-" を 1 つに → 先頭末尾の "-" を除去。
+   ([03-data-model.md §5.3](03-data-model.md)、省略不可)。集合・版の変更は chunking_config_hash の
+   変更として扱う) 以外を除去 → 連続 "-" を 1 つに → 先頭末尾の "-" を除去。
    同一 unit 内の重複 slug は 2 つ目以降に "#2", "#3" を付す (出現順)
 5. 分割: 見出し区間が max_chars (03 §11 [chunking]) を超える場合、段落境界 (空行) で
    貪欲に max_chars 以下へ分割する。単一段落が max_chars を超える場合のみ文字位置で
@@ -672,7 +675,7 @@ monthly_usd_cap = 10.0
 - cap は二層で判定する。**device cap** (`~/.config/kcs/config.toml`、デバイス上の全 `.kcs` の当月合算に適用、既定 $50) が正であり、**folder cap** (`.kcs/config.toml`、その `.kcs` の当月消費のみに適用) は任意の追加制限。folder cap 未設定なら device cap のみが効く
 - 判定式: scope S の新規タスクを起動できるのは `ledger(S, 当月) + candidate < folder_cap(S)` **かつ** `ledger(device, 当月) + candidate < device_cap` のとき (= effective cap は両者の残余の min。candidate = 起動しようとするタスク自身の予約額)。**candidate = 0 のタスク (単価 0 のローカル LLM — 下記) は cap 判定の対象外として起動できる** (cap は外部支出の上限であり、超過状態でも無償タスクは封鎖しない)。`per_adapter` の下限は **device 層専用** (folder cap は total のみ — folder 側 `[budget.per_adapter]` は定義しない) で、**第三条件として同様に判定する**: `ledger(device, adapter_kind, 当月) + candidate < per_adapter_cap(adapter_kind)` (設定キー名 = adapter_kind と同一 enum: markdownize / embedding / summary。**enum 外の未知キーは schema error** — [10-operations.md §12.3](10-operations.md))。`ledger(...)` は cost_ledger の当月合算 (estimated 行も usd 非 NULL のため数値として効く — §5.8) + 未終端 batch_requests (state 0/1) の `estimated_usd` 合算 (= 予約)。**判定と相 1 の reservation 作成は同一の `BEGIN IMMEDIATE` Tx で行う** (check-then-act の並行超過を防ぐ — cap 超過なら相 1 を作らない)。**sync online 呼出は縮退 2 相に従う**: reservation は cost_ledger ではなく **batch_requests 行**で行う — 相 1 = 行作成 + `estimated_usd` 予約を cap 判定と同一 Tx で (intent_token = attempt token。§5.8 と同じ状態機械の縮約 — upload / job 相は無い)。呼出後、終端 (成功・billable reject・contract reject) の**確定記帳と state=2/3 を同一 Tx** で行い、**cost_ledger へは終端の確定行のみ**を追記する (cost_ledger は追記台帳のため予約 → 確定の書換えはできない — 予約の実体は batch_requests 側が持つ)。複数 external call を行うタスクは request を直列化し、request ごとに新しい相 1 (submission_seq = MAX+1) → 終端を完了してから次の request を開始する (request 単位の冪等記帳 — 並行 request は作らない。課金済み call の盲目再試行を禁止)。**provider request id は応答受信直後・終端 Tx より前に行の `batch_job_id` へ耐久記録する** (下記 DDL — sync 行の照会キー)。**crash 回収** (書き込み系コマンド冒頭 — §5.8 の回復と同時): 残った state 0/1 の `request_kind='sync'` 行は、`batch_job_id` (provider request id) が記録済みで照会可能なら結果を確定し、未記録・照会不能なら unknown として estimated を確定記帳し state=3 で terminal 化する (過大計上を許容 — 未記帳の過少計上より安全側)。sync 行は §5.8 の job / upload 照合・可視化猶予・回復期限の対象外 (job / upload 相が無い) だが、abandon (同じ intent_token / 4 組指定) は適用できる。**sync 行は provider 側に残骸 (upload / job) を作らないため、全ての終端 Tx (成功・reject・unknown 精算・abandon) で同一 Tx 内に `intent_token` を NULL 化する** — 「NULL 化は残骸掃除の完了時のみ」(§5.8) は batch 行の規則であり、sync では終端 = 掃除完了である (これが無いと「旧 token の消し込み完了後にのみ再投入可」の順序規範と衝突し、同一タスクキーの再投入が恒久停止する)。複数 request の途中 (前 request 終端済み・次 request 未開始) で crash した場合は、終端済み行 (token NULL) への通常の相 1 (新 token・MAX+1) で次の request から再開する。**crash 回収が確定するのは記帳と state のみ** — 照会で得た出力は persist しない (出力が必要なら新しい相 1 で再実行する。出力を persist する経路は相 3 と同じく persist 直前の tombstone 再検査に従う — [05-runtime.md §3.5](05-runtime.md))
 - 累積コストは Adapter 報告値 (input/output token × 単価) を `~/.local/share/kcs/cost-ledger.sqlite` (デバイスグローバル 1 個。WAL + busy_timeout — [05-runtime.md §6](05-runtime.md)) に記録する。folder cap の判定はこの ledger の scope 別集計で行う (`.kcs` 内に ledger は置かない。cache/truth 規約上、課金台帳はデバイスローカルの運用データであり `.kcs` の truth ではないが、**再構築不可のため cache でもない** — [03-data-model.md §4.1](03-data-model.md)、schema 変更は in-place migration 側 [10-operations.md §7.5.3](10-operations.md))
-- store は 2 表で構成し、**以下の DDL を SQL 正本とする** (旧 3 JSONL + lock 構成は 2026-07-18 に廃止 — §5.8 の 2 相プロトコルは UNIQUE 制約・単一 Tx・ON CONFLICT 冪等という SQLite の保証を前提に監査された機構であり、append-only JSONL では等価の保証を構成できない。[10-operations.md §12.7](10-operations.md) リネーム表):
+- store は 3 表で構成し、**以下の DDL を SQL 正本とする** (旧 3 JSONL + lock 構成は 2026-07-18 に廃止 — §5.8 の 2 相プロトコルは UNIQUE 制約・単一 Tx・ON CONFLICT 冪等という SQLite の保証を前提に監査された機構であり、append-only JSONL では等価の保証を構成できない。[10-operations.md §12.7](10-operations.md) リネーム表):
 
 ```sql
 CREATE TABLE cost_ledger (               -- 確定・推定課金の追記台帳 (行の UPDATE / DELETE 禁止)
@@ -750,6 +753,11 @@ CREATE TABLE batch_requests (            -- in-flight Batch intent の正本 (§
     created_at        INTEGER NOT NULL,
     PRIMARY KEY (scope_id, adapter_kind, input_hash, tool_profile_hash)
 ) WITHOUT ROWID;
+
+CREATE TABLE schema_migrations (         -- 一度きりの移行の marker (10 §7.5.3 — JSONL cutover 等)
+    name        TEXT PRIMARY KEY,        -- 例: 'jsonl-cutover'
+    applied_at  INTEGER NOT NULL         -- UTC ミリ秒
+);
 ```
 - いずれかの cap 超過時、走行中タスクは完了させ、新規タスクは `paused` 状態へ。`kcs status` は超過した cap の種別 (`device` | `folder`) と scope を表示する
 - `kcs batch resume --override-budget` で明示的に再開可能 (当月の device cap / folder cap の両方を無視して再開する)。override は markdownize / embedding **両 Adapter の budget 判定に対称に**効く。override 無しの `kcs batch resume` は budget 超過 pause タスクを markdownize / embedding いずれも据え置き (sticky)、他要因の pause のみ再開する
@@ -789,7 +797,7 @@ chunk の文字数のみ**を対象とし、再利用 chunk (API 非呼出) は�
 ## 5.7 Resume と Repair
 
 - `kcs batch resume`: 中断状態 (running stale, pending) を再開
-- `kcs repair --rebuild-db`: SQLite を objects/ から再構築する (SQLite に存在するのは §4.1〜§4.5 の 8 表のみ。再構築完了時は index_metadata へ新 index_generation ULID を採番し、**同じ完了 Tx で `last_lifecycle_epoch` を現在の lifecycle-epoch counter 値に初期化する** (DEFAULT 0 のままでは全 lifecycle record が回転未了と誤検出され、全走査と不要回転が走る — [05-runtime.md §3.5](05-runtime.md)) — [05-runtime.md §1.5](05-runtime.md)。**publication / association introduction の再導出は chunks.jsonl を正本とする**: 作成行の first_seen_commit + publication event 行 (03 §2 — truth) を読み取って復元し、tree の chunk_set_hash は照合のみに使う。event 行を欠く旧 store は fallback として全 commit を親先行 topological order で走査し、chunk / config association ごとに「既採用 introduction のいずれの子孫でもない commit」のみを introduction として追加する (結果は ancestor-minimal 集合で walk 順序に依存しない)。**backfill は行わない** (pre-release — 既存 dev store は rebuild-db が ledger / fallback から再導出する)。生存する creation 行 / chunk object を持たない、**または introduction commit が不在・ref から到達不能**な publication event 行は無視する (dangling — [05-runtime.md §8.1](05-runtime.md) の耐久順序で正常に生じ、次回 finalize が冪等に再 append する)。
+- `kcs repair --rebuild-db`: SQLite を objects/ から再構築する (SQLite に存在するのは §4.1〜§4.5 の 8 表のみ。再構築完了時は index_metadata へ新 index_generation ULID を採番し、**同じ完了 Tx で `last_lifecycle_epoch` を現在の lifecycle-epoch counter 値に初期化する** (DEFAULT 0 のままでは全 lifecycle record が回転未了と誤検出され、全走査と不要回転が走る — [05-runtime.md §3.5](05-runtime.md)) — [05-runtime.md §1.5](05-runtime.md)。**publication / association introduction の再導出は chunks.jsonl を正本とする**: 作成行の first_seen_commit + publication event 行 (03 §2 — truth) を読み取って復元し、tree の chunk_set_hash は照合のみに使う。event 行を欠く旧 store は fallback として全 commit を親先行 topological order で走査し、chunk / config association ごとに「既採用 introduction のいずれの子孫でもない commit」のみを introduction として追加する (結果は ancestor-minimal 集合で walk 順序に依存しない)。**backfill は行わない** (pre-release — 既存 dev store は rebuild-db が ledger / fallback から再導出する)。生存する creation 行 / chunk object を持たない、**または introduction commit の object が store に存在しない**publication event 行は無視する (dangling — [05-runtime.md §8.1](05-runtime.md) の耐久順序で正常に生じ、次回 finalize が冪等に再 append する)。**commit object が存在するが ref から到達不能な行 (tag 削除後の orphan / disconnected commit — `--at` の正当な明示対象 [05-runtime.md §1.6](05-runtime.md)) は無視しない** — その commit が GC で回収され object 不在になった時点で自然に dangling になる。
   以下の normalization_runs / prepared_units は SQLite テーブルではなく、manifest / 再 prepare から
   導出される**状態**を指す — [03-data-model.md §8](03-data-model.md) / §4.7)。復元範囲は次の通り:
 
@@ -922,7 +930,10 @@ opt-in / `--online` なしで実行できる** ([07-adapter-spec.md §3](07-adap
 - **unknown** (照会失敗・scope 不一致・部分応答): 何も変更せず保持し、次回再試行する。**回復期限**
   (max(intent_token 時刻, job_create_started_at) + 既定 48h、config で変更可) を超えたら「作成されたが
   確認不能」として **estimated 記帳** (上記の seq+1 行 UPDATE + token キー + usd = 推定額) を冪等に行ってから再投入する
-  (記録喪失より過大計上を許容 — budget 判定は安全側に倒れる)
+  (記録喪失より過大計上を許容 — budget 判定は安全側に倒れる)。**ただし再投入 (新 token の相 1) は、
+  旧 intent_token による upload / job の照合・掃除が完了している場合に限る** — 照会不能のまま
+  掃除未完の行は再投入せず stalled として表示し続ける (恒久 unknown と同じ脱出路 = abandon。
+  旧 token を上書きすると残骸の唯一の発見キーを失い、二重実行・課金・機密残留を発見できなくなる)
 - **恒久 unknown** (資格情報喪失等) の行は `kcs status` に **stalled** として表示し (表示には
   intent_token を含める)、`kcs batch abandon` ([06-cli-spec.md §1](06-cli-spec.md) — **指定子は
   intent_token または (scope, adapter, input_hash, tool_profile_hash) の 4 組タスクキー** — 3 組では

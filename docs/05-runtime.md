@@ -152,9 +152,9 @@ page 1 の `since_cutoff` (UTC ISO8601 + `Z`) も保持する:
 - `since_cutoff`: `--since` の page 1 で一度だけ計算した下限。page 2 以降は現在時刻から再計算しない
 - `query_hash` (token 全体に 1 つ、§1.8) が不一致の cursor は `KCS-E-SEARCH-CURSOR-001` で拒否する
 
-2 ページ目以降は同一の候補取得 → RRF (§1.3) → MMR (§1.4) を再計算し、consumed 件を skip して続きを返す。順序安定性の根拠は SQLite WAL のスナップショット分離**ではなく**、「commit 単位で固定された chunk 集合 + 決定論的な順位計算 + `index_generation` による FTS 内容不変の保証」である。CLI 呼び出しを跨いでも成立する。
+2 ページ目以降は同一の候補取得 → RRF (§1.3) → MMR (§1.4) を再計算し、consumed 件を skip して続きを返す。**vector / hybrid の replay は page 1 の query vector を再利用する** — query の再 embedding は行わない (provider の非決定性で候補・順位が変わり、consumed の skip が重複・欠落を生む)。page 1 の正規化済み query vector は device-local の query cache に保持し、その digest を token の query_hash 構成に含める。cache に該当 vector が無ければ `KCS-E-SEARCH-CURSOR-001` (再検索が正)。順序安定性の根拠は SQLite WAL のスナップショット分離**ではなく**、「commit 単位で固定された chunk 集合 + 決定論的な順位計算 + `index_generation` による FTS 内容不変の保証」である。CLI 呼び出しを跨いでも成立する。
 
-`--offset` は cursor の糖衣であり、同じ再現規則で確定順序の `offset` 位置から `limit` 件を返す。確定順序 (= 候補プール) の末尾を超えたら `next_cursor: null` で終端。
+`--offset` は cursor の糖衣であり、同じ再現規則で確定順序の `offset` 位置から `limit` 件を返す。終端判定は **alias 展開後の final result stream の末尾** — それを超えたら `next_cursor: null` (`--all-history` / `--since` で候補プール末尾を終端にすると最後の alias group を取り残す。default 系は候補プール = final stream で同値)。
 
 ## 1.6 Snapshot 越し検索 (`--at`)
 
@@ -634,7 +634,7 @@ purge は **object の物理削除 + default tombstone または内部 erase rec
    「未参照中間 object」として回収される。**MVP では GC が無いため、削除手段は
    `kcs repair --verify-objects --prune-orphans`** ([10-operations.md §7.5.1](10-operations.md)) —
    purge 完了表示にその旨 (残存可能性と掃除手段) を注記する)
-- SQLite の chunks / chunk_config_generations / chunk_publications / chunk_vec / embeddings 行と FTS エントリ
+- SQLite の chunks / chunk_config_generations / chunk_publications 行と FTS エントリ。chunk_vec は**対象 chunk_id の行に限定**し、**embeddings 行は object 側と同じく live 参照 0 の場合のみ削除する** (共有 text_hash の行を無条件に消すと、非対象文書の vector 検索が rebuild まで欠ける)
 - chunks.jsonl の**対象 chunk_id を参照する creation 行・publication event 行の全部** (append-only の例外 — purge は法務要件の明示例外として行を落とす)
 ```
 
@@ -686,7 +686,7 @@ index_generation を 1 回転する** (取りこぼした可能性のある更�
 「更新痕跡」の判定はこの比較だけで行い、mtime 等の抽象的条件は使わない)。**読取系は冒頭検査で
 counter と last_lifecycle_epoch を照合し、不一致 (> だけでなく < も) なら
 KCS-E-INDEX-REBUILDING-001 と同じ retryable (exit 3) を返す** — 補完回転は書き込み系のみが行うため、
-crash 後最初のコマンドが読取でも旧 cursor を退役後の可視集合へ受理しない。
+crash 後最初のコマンドが読取でも旧 cursor を退役後の可視集合へ受理しない (この retryable への自動再試行は仕様として約束しない — 再試行は呼出側の判断)。
 次回の locked mutation または fsck が「active tombstone × 同一 raw の ref 到達可能な
 再 publication commit **であって、末尾 purged event の `in_commit` を ancestor に持つもの
 (= 当該 purge より後の publication)**」を検出したら retired event を補完する (erase receipt の
@@ -898,7 +898,7 @@ MVP での snapshot 生成契機は次の 3 つのみ (常駐プロセスは持�
 
 **no-op 規則の例外 (2026-07-18 確定)**: (a) **resurrection finalize** (erase / purge 済み raw の再 ingest) は、同一 bytes の再現で tree_hash・chunk_set_hash が HEAD と一致しても publication commit を作る — retire event と introduction を刻む commit が無いと、復活した chunk を検索対象化できないか旧 introduction へ遡及するため。(b) **no-op 判定は tree_hash に加えて commit の `tool_lock_hash` も比較する** — embedding profile のみの更新でも lock が変われば commit を作る (現行 vector index と HEAD の provenance を一致させる)
 
-**snapshot finalize の耐久順序**: (1) chunks.jsonl へ creation / publication event 行を append + fsync → (2) SQLite 反映 → (3) commit / ref publish。(1) と (3) の間の crash で dangling event 行が残った場合、rebuild はそれを無視し ([04-pipeline.md §5.7](04-pipeline.md) と同一条件 — 生存する creation 行 / chunk object を持たない、**または** introduction commit が不在・ref から到達不能な行)、次回 finalize が同内容を冪等に再 append する。chunks.jsonl 末尾の不完全行 (torn tail) は切り詰めて無視する (書込は [04-pipeline.md §1.1](04-pipeline.md) の fsync 規律)
+**snapshot finalize の耐久順序**: (1) chunks.jsonl へ creation / publication event 行を append + fsync → (2) SQLite 反映 → (3) commit / ref publish。(1) と (3) の間の crash で dangling event 行が残った場合、rebuild はそれを無視し ([04-pipeline.md §5.7](04-pipeline.md) と同一条件 — 生存する creation 行 / chunk object を持たない、**または** introduction commit の **object が store に存在しない**行。commit object が存在するが ref 不達の行 (orphan / disconnected — `--at` の正当対象) は無視しない)、次回 finalize が同内容を冪等に再 append する。chunks.jsonl 末尾の不完全行 (torn tail) は切り詰めて無視する (書込は [04-pipeline.md §1.1](04-pipeline.md) の fsync 規律)
 
 ## 8.2 定期 Auto Snapshot (Phase 4 範囲)
 

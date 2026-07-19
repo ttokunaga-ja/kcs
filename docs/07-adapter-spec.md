@@ -134,6 +134,14 @@ revoke: adapter.policy.allow_network = false に設定する。
         **次回実行時に現 profile で approvals[] 行を materialize する意思表示**として扱う —
         行 materialize 後は (a) と同じ照合・失効規則に従う (tool_id 個別の可否は approvals[] が
         単位。boolean だけでは profile 変化の失効を判定できないため、行なしでの送信は不可)。
+        **materialize が発火するのは当該 (scope_id, tool_id) に approvals[] 行が一つも存在しない
+        初回のみ** — profile 変更で失効した行や revoked 行が存在する場合は、boolean が true の
+        ままでも自動生成せず再承認 (対話 / --approve) を要する (残存 boolean による失効迂回の禁止)。
+        承認操作の書込順は **config.toml (`allow_network = true`) を先に耐久化 → approvals[] 行を
+        publish** — 間で crash した中間 (true × 行なし) は上記 materialize の初回規則が次回実行で
+        完遂する (self-healing)。revoke は逆順 (行の revoked 化 → boolean false) — 中間
+        (revoked × true) は gate の AND で送信不能 (安全側)、次回 locked mutation が boolean を
+        false へ整合させる。
 ```
 
 CLI フラグ `--online` は **その 1 回の実行に限る一時 opt-in** で、**永続的な承認状態
@@ -228,6 +236,8 @@ input:
 output:
   mode_used                    "full" | "incremental"
   updated_units / added_units / removed_unit_keys / unchanged_unit_keys
+  failed_units                 [{ unit_key, error_kind }] — 部分失敗の unit (04 §3.2 V1 の被覆に
+                               含める。persist されず manifest 側で failed へ遷移 — partial の表現手段)
   fallback_to_full             bool
   reason
   # Evidence Pointer は Adapter output に含めない — 必須フィールド (chunk_hash / commit) は

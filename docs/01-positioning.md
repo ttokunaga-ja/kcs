@@ -77,7 +77,7 @@ kcs search "あの PDF"
 kcs open <検索結果の pointer>
 ```
 
-これで価値が成立する状態を MVP の Definition of Done に含める。`kcs index` が取り込みと検索 index 構築の唯一の入口であり、成功時に auto snapshot も作られる ([05-runtime.md §8.1](05-runtime.md)) — 明示 `kcs snapshot` は任意。この 4 コマンドは **API キー未設定でも成立する** (同梱 deterministic Adapter によるベースライン index + text 検索。[07-adapter-spec.md §2.1](07-adapter-spec.md))。frontier AI は意味検索・スキャン PDF・画像内テキストへ検索品質を引き上げる推奨 opt-in である。
+これで価値が成立する状態を MVP の Definition of Done に含める。`kcs index` が**初回の**取り込みと検索 index 構築の入口であり (後着の online 成果は batch resume / retry / reindex の finalize が検索対象化する — [05-runtime.md §8.1](05-runtime.md))、成功時に auto snapshot も作られる — 明示 `kcs snapshot` は任意。この 4 コマンドは **API キー未設定でも成立する** (同梱 deterministic Adapter によるベースライン index + text 検索。[07-adapter-spec.md §2.1](07-adapter-spec.md))。frontier AI は意味検索・スキャン PDF・画像内テキストへ検索品質を引き上げる推奨 opt-in である。
 
 即効価値と履歴価値は分けて訴求する。
 

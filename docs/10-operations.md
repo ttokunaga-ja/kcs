@@ -290,7 +290,10 @@ CREATE TABLE scopes (
   ([04-pipeline.md §5.8](04-pipeline.md))。dedupe 後に再開する。
   **複合状態の優先順位 (全コマンド共通の preflight 順序)**: (1) purge journal / epoch 検査
   ([05-runtime.md §3.5](05-runtime.md)) → (2) registry live 重複 (KCS-E-REGISTRY-DUP-001) →
-  (3) index 可用性 (KCS-E-INDEX-REBUILDING-001) → (4) command 固有の検査。同時成立時は先順の
+  (3) index 可用性 (KCS-E-INDEX-REBUILDING-001) → (4) command 固有の検査。**(3) は復旧・初期化
+  コマンド自身 (`kcs repair --rebuild-db`・index 未作成時の初回 `kcs index`) には適用しない** —
+  復旧経路を preflight でブロックすると index 喪失後に恒久停止する。`kcs status` も拒否対象外
+  (journal active 等を拒否せず状態として表示 — [05-runtime.md §3.5](05-runtime.md))。同時成立時は先順の
   error を返し、multi-scope の `excluded_scopes.reason` も同順で決定する (実装順に依存させない —
   purge 再開・dedupe・rebuild のどれを先に行うべきかを automation が一意に判断できる)。読取系は
   この順序を**冒頭 1 回**適用し、その時点の registry / index 状態を線形化点とする — 返却直前の
@@ -504,6 +507,7 @@ kcs repair --verify-objects
      `external_pointers_may_be_affected=true` を表示する。Evidence Pointer は self-contained で
      registry がないため、存在しない pointer 一覧を推測・捏造しない
 3. exit code: 破損 0 件 または 全件復元 = 0 / missing 残あり = 3
+   (legacy 警告 (path / reason) は exit に影響しない — 破損とは別に種別ごとの件数を表示する)
 ```
 
 purge との整合: validated tombstone (lifecycle の event が purged / retired の**いずれでも** — retire は
@@ -526,11 +530,13 @@ manifest 欠落を説明するものが消える。**commit がまだ無い場�
 [05-runtime.md §3.5](05-runtime.md) の因果条件と同型)。
 
 erase receipt の validation は schema_version で分岐する。**v2 (events[])**: strict schema / leaf
-identity に加え、各 event が kind 別の必須 field (erased / retired 共通 = `at`・`in_commit`・`actor`、
-retired はさらに `resurrection_commit`。**2026-07-19 以降の新規 event は、purged / erased が `epoch` (purge counter)、全種 (purged /
-erased / retired) が `lifecycle_epoch` (lifecycle counter — 別系統) も必須** — legacy 欠落行は
-valid だが、各回復の最大値計算には使わない。reason は 5 値 enum — enum 外は legacy 行として
-警告 (corruption にしない・response は other 扱い)) を持つこと、`erased` event の `in_commit` が bounded verified
+identity に加え、各 event が kind 別の必須 field を持つこと (**完全列挙**: purged = `at`・`in_commit`・
+`reason`・`actor` / erased = `at`・`in_commit`・`actor` / retired = `at`・`in_commit`・`actor`・
+`resurrection_commit`。2026-07-19 以降の新規 event は、purged / erased が `epoch` (purge counter)、
+全種が `lifecycle_epoch` (lifecycle counter — 別系統) も必須 — legacy 欠落行は valid だが、各回復の
+最大値計算には使わない。**optional として許可する field = `legacy_reason`** (legacy flat 変換で
+生成された purged / erased event に限る — 新規 purge では禁止)。reason は 5 値 enum — enum 外は
+legacy 行として警告 (corruption にしない・response は other 扱い))、`erased` event の `in_commit` が bounded verified
 CAS で ref-reachable な `commit_type=purged` commit を指すこと、各 `at` が canonical UTC でその event
 の commit `created_at` と一致し invocation の fixed now より未来でないこと、event 列が有効な遷移
 (erased を先頭に erased / retired が交互 — 末尾 event が現況) であること、terminal `retired` の
@@ -594,9 +600,11 @@ sqlite.db / scope-registry.sqlite は正本から再構築可能な cache であ
 **`cost-ledger.sqlite` はこのデフォルトの対象外** — 再構築不可の運用台帳 (課金記録 + in-flight Batch
 intent、[04-pipeline.md §5.4](04-pipeline.md)) であり、schema 変更は常に下記の in-place migration
 要件に従う (既存行の保全が必須。旧 JSONL 3 ファイル構成からの移行も同要件で一度だけ行う —
-追加列は NULL / DEFAULT で backfill。**移行は 2 相**: (1) SQLite への import と migration marker
-行の確定を同一 Tx で行い → (2) 旧 JSONL を `.migrated` へ rename する。再開時は marker の存在で
-import を skip し rename のみ再試行する — savepoint は外部ファイルの rename を含められない)。**形状検出は sqlite_master の CREATE 文 (列・CHECK 制約を
+追加列は NULL / DEFAULT で backfill。**移行は 2 相**: (1) SQLite への import と **`schema_migrations` 表
+(SQL 正本 — [04-pipeline.md §5.4](04-pipeline.md)) への marker 行 (name='jsonl-cutover')** の確定を
+同一 Tx で行い → (2) 旧 JSONL を `.migrated` へ rename する。再開時は marker の存在で
+import を skip し rename のみ再試行する — savepoint は外部ファイルの rename を含められない。
+空の旧 JSONL でも marker が「0 行 import 済み」と「未 import」を判別する)。**形状検出は sqlite_master の CREATE 文 (列・CHECK 制約を
 含む) の canonical 比較で行う** — 列存在検査だけでは CHECK 制約の追加・変更を識別できない。
 
 例外として in-place migration を書いてよいのは次の場合のみ:

@@ -47,7 +47,7 @@ KCS:   commit + raw_hash + chunk_hash   → ファイル移動・リネーム・
 }
 ```
 
-`path_at_commit` は **commit 時点の scope フォルダ直下でのファイル名** であり、パス区切り (`/`) を含まない ([03-data-model.md §3](03-data-model.md))。フォルダ階層上の位置は `scope_path` が示す。人間向け表示ではこの 2 つを組み合わせて表示する (§7.2)。
+`path_at_commit` は **commit 時点の scope フォルダ直下でのファイル名** であり、パス区切り (`/`) を含まない ([03-data-model.md §3](03-data-model.md)。**例外**: 03 §3 の forward 規則以前に作られた検証済み legacy tree 由来の entry に限り、区切り等を含む旧 path をそのまま保持する — 表示専用であり resolver 入力には使わない。物理化時の検査は現行どおり)。フォルダ階層上の位置は `scope_path` が示す。人間向け表示ではこの 2 つを組み合わせて表示する (§7.2)。
 
 ## 2.1 必須フィールド
 
@@ -162,11 +162,13 @@ bulk 系 (`kcs evidence verify --batch <pointers.jsonl>`) は従来どおり各�
 6.  tree entry の normalize.(tool_profile_hash, gen) で normalized instance (unit object 群) を解決
     (gen フィールド欠落は gen=0 と読む)
 6a. **時点帰属の検証 (v2 tree)**: entry の normalize.manifest_hash が指す manifest object を読み、
-    chunk の unit_key が当該 manifest で status=done であることを検証する — done でない unit の
+    chunk の unit_key が当該 manifest で status=done であることを検証する (unit_key は chunk_hash から chunk object の header を読み取って得る — 手順 7 の本文取り出しに先行する read-only 参照) — done でない unit の
     chunk は当該 commit 時点に存在しない (same-gen retry の後着 chunk を過去 commit の証拠として
     返さない → not_found)。**v2/v3 tree ではさらに、chunk の publication と config association の
     introduction ([04-pipeline.md §4.1](04-pipeline.md)) が pointer の commit の ancestor-or-equal で
-    あることも検証する** — manifest で done でも当該 commit 時点で未公開の chunk を証拠にしない
+    あることも検証する** (config association は**対象 tree の `chunking_config_hash` のもの** —
+    [05-runtime.md §1.6](05-runtime.md) の検索側と同一の絞り込み。別 config の association は当該
+    commit への帰属を証明しない) — manifest で done でも当該 commit 時点で未公開の chunk を証拠にしない
     (cache 参照のため、association の**不在**による失敗は corruption ではなく not_found — rebuild 後に
     再評価できる。**sqlite.db 自体の不在・再構築中はこの検証を実行できない — not_found ではなく
     `KCS-E-INDEX-REBUILDING-001` の再構築要求を返し ([05-runtime.md §6](05-runtime.md))、検証不能を
