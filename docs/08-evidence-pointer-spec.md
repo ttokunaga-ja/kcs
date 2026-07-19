@@ -172,8 +172,10 @@ bulk 系 (`kcs evidence verify --batch <pointers.jsonl>`) は従来どおり各�
 5.  raw_hash に **active な tombstone** (lifecycle の末尾 event が `purged` — [05-runtime.md §3.5](05-runtime.md)) が
     あるなら → tombstone を返す (§4)。**retired (末尾 event = `retired`) は tombstone 扱いしない** — 手順 6 へ進む
     (resurrection 後の旧 pointer を alive に戻すための必須条件)。tombstone / erase receipt が
-    無いのに raw object が不在なら not_found — `KCS-E-PURGE-NOT-FOUND-001` (§3.2 の解決成功条件
-    「raw object が存在」をここで検査する)
+    無いのに raw object が不在なら not_found — code は `KCS-E-STORE-CORRUPT-001` (marker なしの欠落は
+    purge の痕跡ではなく **corruption の疑い** — 手順 4 の短絡と同じ not_found 扱いで返し、
+    `kcs repair --verify-objects` を案内する。purge 済みの正規欠落 (marker あり) と混同しない)
+    (§3.2 の解決成功条件「raw object が存在」をここで検査する)
 6.  tree entry の normalize.(tool_profile_hash, gen) で normalized instance (unit object 群) を解決
     (gen フィールド欠落は gen=0 と読む)
 6a. **時点帰属の検証 (v2 tree)**: entry の normalize.manifest_hash が指す manifest object を読み、

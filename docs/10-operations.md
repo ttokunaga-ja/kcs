@@ -50,7 +50,7 @@ estimated embedding cost (USD)
 estimated completion under current budget cap
 ```
 
-コスト概算は、現行 `tool-lock.json` の online Adapter 単価 × 推定ページ数 / トークン数から算出する **桁の目安** であり、保証ではない。概算合計が当月の effective budget cap ([04-pipeline.md §5.4](04-pipeline.md)) を超える場合、preview は承認前に警告し、cap 内での推定完了時期 (月数) とあわせて次の選択肢を提示する。
+コスト概算は、現行 `tools.toml` の `[pricing]` 単価表 ([07-adapter-spec.md §4](07-adapter-spec.md) — 単価の正本は tools.toml であり tool-lock ではない) × 推定ページ数 / トークン数から算出する **桁の目安** であり、保証ではない。概算合計が当月の effective budget cap ([04-pipeline.md §5.4](04-pipeline.md)) を超える場合、preview は承認前に警告し、cap 内での推定完了時期 (月数) とあわせて次の選択肢を提示する。
 
 ```text
 Estimated AI enrichment cost: ~$210 (markdownize ~$180, embedding ~$30)
@@ -181,6 +181,8 @@ Tier A 一致の新規ファイル:
   取り込み自体を保留 (quarantine)。CAS 保存・snapshot への取り込みを行わない。
   kcs status に「取り込み保留 (secrets 候補)」として表示し、
   取り込みには対話確認 または .kcsignore の明示編集を要する。
+  対話確認による取り込みは当該 raw_hash の取り込みとして完結する (再確認は内容変更 =
+  新 raw_hash の時のみ — 変更版を再 quarantine するのは意図的な保守既定)。
 
 Tier B 一致の新規ファイル:
   ローカル取り込み (CAS 保存・ローカル index) は行うが、online_api Adapter への
@@ -351,7 +353,10 @@ kcs index は対象ファイルや子scopeを発見した時点で必要な .kcs
 
 ```text
 symlink               lstat 基準で検出し、**追跡しない** (skip + status 表示)。scope 外への
-                      参照・循環を構造的に排除する
+                      参照・循環を構造的に排除する。**判定と open の TOCTOU も閉じる**: 取り込みの
+                      open は scope root の dirfd からの相対 open + `O_NOFOLLOW` 相当で行い、
+                      open 後の fstat で regular file・同一 device/inode を検証する (lstat 判定後の
+                      symlink 差し替えで scope 外 bytes を取り込まない)
 hardlink              通常ファイルとして扱う (同一 inode でも path ごとに別実体 — dedup は
                       content hash が自然に吸収する)
 外部ドライブ          mount 済みなら通常フォルダと同じ。unmount 中の path は missing 扱い
@@ -484,7 +489,9 @@ kcs repair --verify-objects
 - normalized の unit bytes は content hash を持たない ([03-data-model.md §5](03-data-model.md)) ため hash 検証対象外とし、
   参照整合 (対応する `(raw_hash, tool_profile_hash)` object の実在) のみ確認する。**manifest object
   (objects/manifests/ — [03-data-model.md §2.1](03-data-model.md)) は content-addressed であり再 hash 検証の対象**:
-  各 tree entry の `normalize.manifest_hash` が実在する manifest object を指すこと (**tombstone / erase
+  各 tree entry の `normalize.manifest_hash` が実在する manifest object を指し、**かつ当該 manifest の
+  (raw_hash, tool_profile_hash, gen) が entry 側と一致する**こと (hash が正しいだけの別 instance
+  manifest への誤配線検出) (**tombstone / erase
   receipt が説明する purge 済み raw の entry を除く** — 下記 dead terminal 規則。purge は manifest object を
   削除するが tree は書き換えないため、この例外なしには正規 purge 直後の store が必ず corruption になる)、
   HEAD tree の entry については作業コピー manifest.json の canonical JCS hash が一致することも検査する
@@ -818,7 +825,7 @@ DOMAIN:
   AUTH     認証・認可
 ```
 
-例: `KCS-E-BATCH-NET-001`, `KCS-E-SEARCH-VEC-INCOMPAT-001`, `KCS-E-SEARCH-VEC-UNAVAIL-001`, `KCS-E-SEARCH-VEC-UNAUTHORIZED-001`, `KCS-E-COMMIT-SHALLOW-001`, `KCS-E-PURGE-NOT-FOUND-001`, `KCS-E-PURGE-JOURNAL-ACTIVE-001` (未完了 purge journal / epoch 不変違反の preflight 拒否 — retryable、exit 3、[05-runtime.md §3.5](05-runtime.md)), `KCS-E-STORE-PATH-001`, `KCS-E-STORE-CORRUPT-001`, `KCS-E-STORE-VERSION-001` (§12.5 — 新しい `kcs_format_version` の store への書き込み系実行・読解不能), `KCS-E-SEARCH-SCOPE-ALL-FAILED-001`, `KCS-E-SEARCH-CURSOR-001`, `KCS-E-INDEX-REBUILDING-001`, `KCS-E-EVIDENCE-SCOPE-UNREACHABLE-001`, `KCS-E-EVIDENCE-RETARGET-AMBIG-001`, `KCS-E-ADAPTER-CONTRACT-001`。各 code の定義箇所は該当 spec (06-cli-spec.md §8 に一覧と参照先) を参照。
+例: `KCS-E-BATCH-NET-001`, `KCS-E-SEARCH-VEC-INCOMPAT-001`, `KCS-E-SEARCH-VEC-UNAVAIL-001`, `KCS-E-SEARCH-VEC-UNAUTHORIZED-001`, `KCS-E-COMMIT-SHALLOW-001`, `KCS-E-PURGE-NOT-FOUND-001`, `KCS-E-PURGE-JOURNAL-ACTIVE-001` (未完了 purge journal / epoch 不変違反による**読み取り系** preflight の拒否 (書き込み系は journal 回復を再開) — retryable、exit 3、[05-runtime.md §3.5](05-runtime.md)), `KCS-E-ADAPTER-SPECVER-001` (spec_version 不一致 — invalid_input / 非再試行、[07-adapter-spec.md §8.1](07-adapter-spec.md)), `KCS-E-STORE-PATH-001`, `KCS-E-STORE-CORRUPT-001`, `KCS-E-STORE-VERSION-001` (§12.5 — 新しい `kcs_format_version` の store への書き込み系実行・読解不能), `KCS-E-SEARCH-SCOPE-ALL-FAILED-001`, `KCS-E-SEARCH-CURSOR-001`, `KCS-E-INDEX-REBUILDING-001`, `KCS-E-EVIDENCE-SCOPE-UNREACHABLE-001`, `KCS-E-EVIDENCE-RETARGET-AMBIG-001`, `KCS-E-ADAPTER-CONTRACT-001`。各 code の定義箇所は該当 spec (06-cli-spec.md §8 に一覧と参照先) を参照。
 
 各 spec が定義した個別エラー (04-pipeline.md / 05-runtime.md / 06-cli-spec.md 等) はこの namespace に従う。新規 code 追加は本書および該当 spec の更新を伴う (破壊的変更扱い)。
 
@@ -858,9 +865,9 @@ dead pointer (tombstoned / not_found) は `4`、**scope_unreachable のみは re
 
 validation 失敗は exit code 2 で停止し、`KCS-E-CONFIG-SCHEMA-NNN` を返す。schema は semver で版管理し、breaking change は migration を要求 (§12.5)。
 
-`scope.schema.json` は少なくとも次の key を定義する: `scope_id` (required)・子 `.kcs` リンク ([03-data-model.md §2](03-data-model.md))・`scan_approval` (optional — §1 の取り込み承認記録。required field は §1 の記録一覧と一致)・`approvals[]` (optional — adapter 単位の network opt-in。要素の required field = scope_id / tool_id / execution_mode / tool_profile_hash / approved_at / approval_method / status (`active` | `revoked`)、status=revoked の行は revoked_at も必須 — [07-adapter-spec.md §3](07-adapter-spec.md))・`approvals_initialized` (optional boolean — 初回承認の行 publish と同一 atomic write で true 化する消費済み marker。true かつ approvals[] 空 = 台帳喪失として blanket 自動 materialize を fail-closed にする、07 §3)。**未知 key は schema error** (fail-closed)。この検証は `kcs_format_version` の互換判定より**後**に走る — 自己の対応上限より新しい version の store は schema validation に入らず read-only + 新版誘導で縮退する ([03-data-model.md §2](03-data-model.md))。公開後に scope.schema.json へ key を追加する場合は `kcs_format_version` の MINOR bump を伴う (§12.5 — bump が旧実装をこの縮退経路へ導く。未知 key = schema error 自体は維持する: marker 等 security 意味を持つ key を旧実装が黙って無視すると迂回が復活するため)。両 key (および marker) を欠く旧 scope.json は valid であり、欠落 = 当該承認なしとして扱う (migration 不要の後方互換)。**要素単位の後方互換**: `status` フィールドを持たない approvals[] 行 (r9 スキーマ以前の承認記録) は schema error にせず **`status='active'` として読む** — 行は明示承認の記録であり、execution_mode / tool_profile_hash の一致検査 (失効判定) は従来どおり効く。次回の locked mutation で `status='active'` を atomic に補完書込みし、補完後は現行 schema で検証する (要素単位の欠落で CLI 全体を exit 2 停止させない)。
+`scope.schema.json` は少なくとも次の key を定義する: `scope_id` (required)・子 `.kcs` リンク ([03-data-model.md §2](03-data-model.md))・`scan_approval` (optional — §1 の取り込み承認記録。required field は §1 の記録一覧と一致)・`approvals[]` (optional — adapter 単位の network opt-in。要素の required field = scope_id / tool_id / execution_mode / tool_profile_hash / approved_at / approval_method / status (`active` | `revoked`)、status=revoked の行は revoked_at も必須 — [07-adapter-spec.md §3](07-adapter-spec.md))・`approval_pending` (optional — 承認書込順の pending intent、[07-adapter-spec.md §3](07-adapter-spec.md)。要素の required field = scope_id / tool_id / execution_mode / tool_profile_hash。行 publish と同一 atomic write で除去)・`approvals_initialized` (optional boolean — 初回承認の行 publish と同一 atomic write で true 化する消費済み marker。true かつ approvals[] 空 = 台帳喪失として blanket 自動 materialize を fail-closed にする、07 §3)。**未知 key は schema error** (fail-closed)。この検証は `kcs_format_version` の互換判定より**後**に走る — 自己の対応上限より新しい version の store は schema validation に入らず read-only + 新版誘導で縮退する ([03-data-model.md §2](03-data-model.md))。公開後に scope.schema.json へ key を追加する場合は `kcs_format_version` の MINOR bump を伴う (§12.5 — bump が旧実装をこの縮退経路へ導く。未知 key = schema error 自体は維持する: marker 等 security 意味を持つ key を旧実装が黙って無視すると迂回が復活するため)。両 key (および marker) を欠く旧 scope.json は valid であり、欠落 = 当該承認なしとして扱う (migration 不要の後方互換)。**要素単位の後方互換**: `status` フィールドを持たない approvals[] 行 (r9 スキーマ以前の承認記録) は schema error にせず **`status='active'` として読む** — 行は明示承認の記録であり、execution_mode / tool_profile_hash の一致検査 (失効判定) は従来どおり効く。次回の locked mutation で `status='active'` を atomic に補完書込みし、補完後は現行 schema で検証する (要素単位の欠落で CLI 全体を exit 2 停止させない)。
 
-`folder-config.schema.json` は `[chunking].unicode_version` を **required** とする (省略不可・default なし — `kcs init` が実装同梱の UCD 版 (現在の既定 = 17.0.0) を明示記録する、[03-data-model.md §5.3](03-data-model.md) / [06-cli-spec.md §1](06-cli-spec.md))。
+`folder-config.schema.json` は `[chunking].unicode_version` を **required** とする (省略不可・default なし — `kcs init` が実装同梱の UCD 版 (現在の既定 = 17.0.0) を明示記録する、[03-data-model.md §5.3](03-data-model.md) / [06-cli-spec.md §1](06-cli-spec.md))。**要素単位の後方互換**: これを欠く旧 `.kcs/config.toml` は schema error (exit 2) にせず**実装同梱版 (17.0.0) として読み、次回の locked mutation で atomic に補完書込みする** (approvals[] `status` の補完と同型 — required 化で既存 store の全 CLI を封鎖しない。補完後は現行 schema で検証する)。`[markdownize].bbox_annotation` (boolean、既定 true — [07-adapter-spec.md §5.2](07-adapter-spec.md)、値は tool_profile_hash に畳み込む) も本 schema の正式 key として定義する。
 
 `user-config.schema.json` は device cap (`[budget]`、[04-pipeline.md §5.4](04-pipeline.md)) を含む。
 

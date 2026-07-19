@@ -401,7 +401,7 @@ chunking_config_hash = "sha256:" + base16(sha256(JCS({
 
 - 対象は `[chunking]` 配下の **chunk 境界に影響する全キー**。キーを追加したら `spec_version` を bump する
 - デフォルト値も明示的に畳み込む (キー省略と明示指定を識別しない)
-- `unicode_version` は **`kcs init` が採用 UCD 版 (現在の既定 = 17.0.0 — §11 の設定例と同一。実装が同梱する UCD 版と常に一致させる) を config へ明示記録する** ([06-cli-spec.md §1](06-cli-spec.md) の init 仕様・[10-operations.md §12.3](10-operations.md) の schema required も同旨)
+- `unicode_version` は **`kcs init` が採用 UCD 版 (現在の既定 = 17.0.0 — §11 の設定例と同一。実装が同梱する UCD 版と常に一致させる) を config へ明示記録する** ([06-cli-spec.md §1](06-cli-spec.md) の init 仕様・[10-operations.md §12.3](10-operations.md) の schema required も同旨。これを欠く旧 config の読み込み救済 (同梱版として読み次回補完) も §12.3 側)
   (「省略不可・default なし」の充足手段 — 以後の版変更は config 変更として本節の世代判定に乗る)
 - これは同一性 hash であり、identity には使わない。chunk identity は §8.1 のとおり `(raw_hash, tool_profile_hash, gen, unit_key, heading_path, section_id, byte_start, byte_end)` のまま。`chunking_config_hash` は chunk の**世代**を表すメタデータに留める
 
@@ -780,6 +780,12 @@ kind = "online_api"
 model = "mistral-ocr-latest"        # config では可変 alias 可。tool_profile の pin は解決済み immutable 版 (§5.1)
 profile_hash = "sha256:..."
 capabilities = ["ocr", "layout_detection", "table_extraction"]
+
+[markdown.mistral_ocr_markdownize.pricing]   # 単価の正本 (07 §4 billable_units の換算元 — tool-lock ではない)
+pages = 0.004                                # unit kind → USD 単価。換算は終端 Tx 時点の表で確定 (07 §4)
+
+[embedding.gemini_embedding.pricing]
+tokens_in = 0.00000015
 ```
 
 現行版の認証付き Markdownize / Embedding adapter は KCS 組込み target のみを実行する。`cmd` / `args` / `url` による任意 target は受理せず、旧設定にこれらのキーがある場合は削除して組込み adapter 宣言へ移行する。Summary / Classification / Rerank など未実装 role の外部 dispatch 契約は [07-adapter-spec.md §7](07-adapter-spec.md) の将来仕様であり、現行 runtime が実行できることを意味しない。

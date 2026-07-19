@@ -44,7 +44,9 @@ query embedding 応答が受入検査 ([07-adapter-spec.md §5.3](07-adapter-spe
 **query embedding の consent gate**: vector | hybrid の page 1 は query embedding (07 §5.3 の
 `input_type: "query"` — sync 呼出) を要し、これは新規送信として [07-adapter-spec.md §3](07-adapter-spec.md)
 の opt-in gate の対象である (payload は query 文字列のみで folder 内容を含まない)。**送信可否 =
-参加 scope の 1 つ以上に当該 embedding Adapter の active な `approvals[]` 行があること**。承認ゼロ
+参加 scope の 1 つ以上に当該 embedding Adapter の active な `approvals[]` 行があり、かつ当該 scope に
+明示 revoke (`adapter.policy.allow_network = false` — [07-adapter-spec.md §3](07-adapter-spec.md)) が
+ないこと** (`--online` が開くのは未設定の既定閉鎖のみ — 明示 revoke は上書きしない)。承認ゼロ
 (かつ `--online` 一時 opt-in なし) の場合、auto / `--hybrid` は text fallback
 (`fallback_reason="embedding_not_authorized"`)、`--vector` 明示は KCS-E-SEARCH-VEC-UNAUTHORIZED-001
 で error。**ユーザー意思由来の text fallback は `fail_behavior` の対象外である** — `fail_behavior` は技術的
@@ -92,6 +94,10 @@ default: k = 60, w_text = 1.0, w_vector = 1.0
   3 文字以上の token が 1 つでもあれば FTS MATCH を使う。LIKE fallback の順位も決定的に定める:
   最初の一致位置 (instr) 昇順、同点は chunk_id 昇順。SQL は ORDER BY 確定後に LIMIT candidate_depth
   を適用する (LIMIT 先行で候補集合が非決定になる形は禁止)
+- **MATCH 式の生成**: user query を FTS5 構文として解釈しない — token 列を各々二重引用符で囲んだ
+  phrase / term の並びとして MATCH 式を機械生成する (token 内の `"` は `""` へ escape。`C++` 等の
+  記号語が fts5 syntax error にならない)。FTS5 演算子 (AND / OR / NEAR / `*` 等) の直接指定は
+  MVP では提供しない
 - 片方のバックエンドにしか現れない候補は、現れない側の項を 0 とする
 - `RRF_score` の同点は chunk_id 昇順
 - text-only / vector-only モードでは fusion せず当該バックエンドの順位をそのまま使う
@@ -357,7 +363,10 @@ score/rank をコピーして、group 内を
 2. scope 内では §1.1〜§1.3 までを実行し、RRF 済み unique semantic chunk 上位 candidate_depth 件を
    候補として返す。§1.4 の MMR/dedup は scope 内でまだ適用しない
 3. scope 間の統合は **rank ベース** で行う。各 scope の RRF スコア (rank のみから決まる) をそのまま比較して降順マージする。**BM25 / vector の raw スコアを scope 間で比較・正規化してはならない** (コーパス統計が index ごとに異なり比較不能)。pre-alias 同点は immutable `(scope_id,chunk_hash)` で安定化する
-4. diversify (MMR / group_by_raw_hash, §1.4) は統合後の候補列に対して適用する
+4. diversify (MMR / group_by_raw_hash, §1.4) は統合後の候補列に対して適用する。**multi-scope 検索の
+   `[search]` 実効値 (rrf / diversify / candidate_depth / fail_behavior) は user config (device 層) を
+   用いる** — folder 値は `--scope` 単一指定時のみ適用する (scope 間で異なる folder 値の統合は定義
+   しない。cursor が bind する実効値 (§1.5) もこの解決に従う)
 5. vector / hybrid の横断条件は [03-data-model.md §7](03-data-model.md) に従う。embedding profile が全 scope で一致しない場合、横断部分は text (BM25 rank) のみで統合し、`fallback_reason` に記録する (**`--vector` 明示時は fallback しない** — profile 不一致の scope を KCS-E-SEARCH-VEC-INCOMPAT-001 の excluded_scopes として除外し、全 scope 除外なら error — §1.2 の「失敗時は error」と同じ)。`kcs_format_version` が自己の対応上限より新しい scope も同様に excluded_scopes として除外する (KCS-E-STORE-VERSION-001 を `fallback_reason` に記録・当該 scope へは query_cache を含む一切の書込を行わない — [10-operations.md §12.5](10-operations.md))。**全 scope が STORE-VERSION 除外なら command は KCS-E-STORE-VERSION-001 / exit 8 を返す** (SCOPE-ALL-FAILED (exit 4) より優先 — REBUILDING と同型の昇格、[06-cli-spec.md §7](06-cli-spec.md)。自動化に「新版への更新が必要」を直接伝える)。**全 scope の除外理由が同一 code の場合、command は当該 code とその単独実行時の exit を返す (一般規則)** — VERSION → exit 8・REBUILDING → exit 3・INCOMPAT → exit 8・journal (`KCS-E-PURGE-JOURNAL-ACTIVE-001` — §3.5) → exit 3・DUP → exit 3 (ユーザーの dedupe 後に回復可能 — [08-evidence-pointer-spec.md §4.3](08-evidence-pointer-spec.md) の registry_duplicate = 3 と同一分類)。理由が混在して全 scope 除外となった場合のみ通常の SCOPE-ALL-FAILED (exit 4) とし、個別理由は excluded_scopes[].reason で判別する。embedding 承認の consent gate (§1.1) は**送信 gate であり per-scope の除外条件ではない** — 承認ゼロなら検索全体が text fallback (excluded_scopes には計上しない)。1 つ以上の承認で送信された query vector は profile 互換な全参加 scope の vector 検索に用いる (未承認 scope も含む — 送信は 1 回であり scope 別の再送信は発生しない)
 
 既知の限界: rank ベース統合は、関連文書の乏しい scope の 1 位と強い scope の 1 位を同格に扱う。MVP ではこれを容認する (結果に scope_path が必ず含まれるため判別可能)。scope 間の再ランクは v2 以降の検討事項。
@@ -376,7 +385,7 @@ per_scope_timeout_seconds = 2   # 超過 scope は excluded_scopes (reason=timeo
 | --- | --- | --- |
 | 全 scope 成功 | 通常結果 | 0 |
 | 一部 scope 失敗 / stale / timeout | 結果を返し `excluded_scopes` に記録 | 3 |
-| 全 scope 失敗 | エラー (`KCS-E-SEARCH-SCOPE-ALL-FAILED-001`) | 4 |
+| 全 scope 失敗 (理由混在時 — 除外理由が同一 code なら §1.8 の昇格規則で当該 code の単独時 exit) | エラー (`KCS-E-SEARCH-SCOPE-ALL-FAILED-001`) | 4 |
 
 ### レスポンス契約の拡張
 
@@ -671,7 +680,8 @@ purge は **object の物理削除 + default tombstone または内部 erase rec
    `kcs repair --verify-objects --prune-orphans`** ([10-operations.md §7.5.1](10-operations.md)) —
    purge 完了表示にその旨 (残存可能性と掃除手段) を注記する)
 - SQLite の chunks / chunk_config_generations / chunk_publications 行と FTS エントリ。chunk_vec は**対象 chunk_id の行に限定**し、**embeddings 行は object 側と同じく live 参照 0 の場合のみ削除する** (共有 text_hash の行を無条件に消すと、非対象文書の vector 検索が rebuild まで欠ける)。`target_type='query_cache'` の embeddings 行は候補に含めない (文書 lifecycle と無関係 — [04-pipeline.md §4.3](04-pipeline.md)。即時消去したい場合の行削除は常に安全 = 影響は cursor 拒否のみ)
-- chunks.jsonl の**対象 chunk_id を参照する creation 行・publication event 行の全部** (append-only の例外 — purge は法務要件の明示例外として行を落とす)
+- chunks.jsonl の**対象 chunk_id を参照する creation 行・publication event 行の全部** (append-only の例外 — purge は法務要件の明示例外として行を落とす。書き換えは [04-pipeline.md §1.1](04-pipeline.md) の耐久書込 primitive (temp + rename) に従う)
+- 対象 raw_hash に帰属する task の **staging** ([07-adapter-spec.md §8.3](07-adapter-spec.md)) — **task の状態を問わず** (retryable failed の保全 staging を含む。以後の再生成は persist 直前の tombstone 再検査が防ぐ)
 ```
 
 残すもの (不変):
@@ -785,7 +795,10 @@ phase 順序    = prepared (closure 確定・記帳)
 `request_kind` = batch / sync の両方。表はデバイスグローバルのため、scope_id 条件が無いと同一 raw を
 持つ**別 scope** の実行中 request まで terminal 化・掃除してしまう — purge は `.kcs` 単位) を
 abandon 相当で terminal 化し (estimated 記帳 — [04-pipeline.md §5.8](04-pipeline.md))、
-provider 上の対応 upload (batch 行のみ) を掃除する。purge 後に相 3 collect が出力を得た場合は、persist 直前の
+provider 上の対応 upload (batch 行のみ) を掃除する。**加えて、対象 raw_hash の terminal だが
+`intent_token IS NOT NULL` の行 (残骸掃除未完 — [04-pipeline.md §5.8](04-pipeline.md)) の provider
+残骸掃除も同じ prepared 相で完遂する** (これが無いと terminal 化直後の crash が残した機密 upload が
+次の batch 系実行まで provider 上に残る)。purge 後に相 3 collect が出力を得た場合は、persist 直前の
 tombstone 再検査で破棄する ([04-pipeline.md §5.8](04-pipeline.md) 相 3)。
 
 tombstone を削除より先に耐久化するのは、「対象 object が消えたのに purge の痕跡が無い」状態

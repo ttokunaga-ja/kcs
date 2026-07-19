@@ -74,7 +74,7 @@ KCS core
 
 ## 2.1 同梱 deterministic Adapter (ベースライン index)
 
-KCS は `deterministic_library` の Prepare / Markdownize Adapter を同梱する。対象: plain text / Markdown / コード (passthrough + fence 正規化)、PDF text layer 抽出。OCR・レイアウト解析・画像理解は行わない。
+KCS は `deterministic_library` の Prepare / Markdownize Adapter を同梱する。対象: plain text / Markdown / コード、PDF text layer 抽出。OCR・レイアウト解析・画像理解は行わない。**出力は単純な passthrough ではなく、Normalized Markdown v1 (§5.2.1) への決定的正規化**である — 少なくとも Setext 見出し → ATX 変換・生 HTML block の fenced text 化・改行 / 空白 / fence の正規化を行う (§5.2.1 準拠が受け入れ検査 V5 の通過条件のため、passthrough では通常の Markdown (Setext 等) がオフライン基線 index で全滅する)。
 
 - online Adapter が未設定または network 未承認のとき、Markdownize タスクは同梱 deterministic Adapter で実行する (タスクを止めない)。Embedding タスクは生成しない (検索は text fallback、[05-runtime.md §1](05-runtime.md))
 - この状態を **ベースライン index** と呼ぶ。`init → index --approve → search → open <pointer>` の最低体験ライン ([01-positioning.md §3](01-positioning.md)) はベースライン index のみで成立しなければならない
@@ -145,14 +145,22 @@ revoke: adapter.policy.allow_network = false に設定する (これは **scope 
         optional key) — 以後 approvals[] が空になっても (手動編集・不整合 backup 復元等)、行ゼロ ×
         marker あり は真正初回と区別して **fail-closed (明示承認要求)** とする (行ゼロだけでは台帳
         喪失と初回を区別できない)。marker は行と同時に書かれるため、承認途中の crash 中間 (true ×
-        行なし × marker なし) では self-heal がそのまま成立する。2 個目以降の tool_id や tool_id が
+        行なし × marker なし) では self-heal が成立する — ただし**完遂できるのは下記
+        `approval_pending` (pending intent) と 4 組完全一致の tool のみ** (crash 後に config /
+        Adapter 構成が変わって「最初の 1 tool」が別 identity になっても、承認したのと別の
+        Adapter を materialize しない)。2 個目以降の tool_id や tool_id が
         変わった Adapter は、boolean が true のままでも自動生成せず明示承認 (対話 / --approve) を
         要する (新 identity への blanket 波及を許すと、上記寿命規則の「tool_id が変わった場合は
         失効し、再承認」を『新規行の初回 materialize』として迂回できてしまう)。profile 変更で
         失効した行や revoked 行が存在する場合も同様に再承認を要する (残存 boolean による失効迂回の禁止)。
-        承認操作の書込順は **config.toml (`allow_network = true`) を先に耐久化 → approvals[] 行を
-        publish** — 間で crash した中間 (true × 行なし) は上記 materialize の初回規則が次回実行で
-        完遂する (self-healing)。revoke は逆順 (行の revoked 化 → boolean false) — 中間
+        承認操作の書込順は **(0) pending intent = 承認対象の 4 組 (scope_id / tool_id /
+        execution_mode / tool_profile_hash) を scope.json の `approval_pending` key へ atomic に
+        耐久化 → (1) config.toml (`allow_network = true`) を耐久化 → (2) approvals[] 行 + marker を
+        publish し、同一 atomic write で `approval_pending` を除去** — 途中で crash した中間
+        (true × 行なし) は、次回実行の self-heal が **`approval_pending` と完全一致する場合に限り**
+        行 publish を完遂する (pending 記録が無い・一致しない中間は自動生成せず明示承認 (対話 /
+        --approve) を要求する)。`approval_pending` の schema は
+        [10-operations.md §12.3](10-operations.md)。revoke は逆順 (行の revoked 化 → boolean false) — 中間
         (revoked × true) は gate の AND で送信不能 (安全側)、次回 locked mutation が boolean を
         false へ整合させる。
 ```
@@ -224,8 +232,11 @@ AdapterRun:
   usage                 one-of { usd } | { billable_units } — request 単位の課金報告 (§5.7)。
                         usd = 有限・非負の実測額 (billable reject では provider が宣言する請求額を
                         これに充てる — §5.7 条件 6。第三の field は設けない)。billable_units =
-                        単価計算に足る unit 数 (単価解決元 = tools.toml の単価表 — **換算は終端 Tx
-                        時点の表で確定し、以後の単価変更で再計算しない**。台帳 UPDATE 禁止と整合)。
+                        `{ kind, count }` の閉形式 (kind = "pages" | "tokens_in" | "tokens_out" の
+                        閉 enum — 拡張は spec 改訂。count = 非負整数)。単価解決元 = tools.toml の
+                        `[pricing]` 単価表 (kind → USD 単価 — [03-data-model.md §11](03-data-model.md)、
+                        **単価の正本は tools.toml** — tool-lock ではない)。**換算は終端 Tx
+                        時点の表で確定し、以後の単価変更で再計算しない** (台帳 UPDATE 禁止と整合)。
                         **billable な terminal 応答 (成功・billable reject・fetch_output・sync 応答・
                         正常な制御応答 (fallback_to_full — [04-pipeline.md §3.2](04-pipeline.md)))
                         で必須** — 欠落・不正値は estimated 記帳へ縮退する ([04-pipeline.md §5.4](04-pipeline.md)
@@ -292,7 +303,7 @@ incremental の詳細プロンプト規約は §8 (生成 LLM 系のみ。§8 �
   し (C3 が境界)、ホワイトボード写真風は ~55%、フロー図入りスライドは ~41% を失うことを確認。
   対策として Mistral の **bbox_annotation (+25% コスト) を既定 ON** とし、images[] として返る領域の
   説明+書き起こしを取得して unit metadata に記録し、chunk 化時に image 参照近傍へ検索可能テキスト
-  として取り込む (`.kcs/config.toml` で無効化可)。Markdownize は文書 1 版につき 1 回のコストであり
+  として取り込む (`.kcs/config.toml` の `[markdownize] bbox_annotation = true` (既定) で制御 — folder-config schema の正式 key ([10-operations.md §12.3](10-operations.md))。**値は出力に影響するため tool_profile_hash に畳み込む** = 切替は世代判定に乗る)。Markdownize は文書 1 版につき 1 回のコストであり
   incremental 再利用でさらに希釈されるため +25% は budget 内。生成 LLM (Gemini Vision) による二次
   Markdownize fallback は annotation で不足する場合の Phase 4+ 保留のまま。実装は Step 4 (契約は
   step4a で確定)。
@@ -535,6 +546,9 @@ status, error_code, error_category, retry_after_ms
 network_consent (approvals | cli_online — 送信を伴った実行のみ)
 started_at, finished_at
 adapter_kind, input_hash, intent_token, submission_seq
+usage_validation (missing | invalid), billing_source (estimated)
+                             (非機微 — 課金 field 縮退の warning ([04-pipeline.md §5.4](04-pipeline.md)
+                              の記帳値事前検証)。event code は KCS-EV-ADAPTER-USAGE-001)
                              (非機微。**cost_ledger / batch_requests への到達は 4 組 key
                               (scope_id, adapter_kind, input_hash, tool_profile_hash) +
                               submission_seq が正** — intent_token は補助 (成功行の batch_job_id は
@@ -599,7 +613,7 @@ MVP における Adapter の脅威モデルを次のとおり確定する。
    (受理側は unit 検査に先立つ制御応答として扱い、同一 task を mode=full で再発行する —
    [04-pipeline.md §3.2](04-pipeline.md) の制御応答規則。full 応答での本 flag は contract violation)
    閾値の Adapter 側 hint は KCS 側 hint と衝突したら **KCS 側を優先**
-5. spec_version 不一致なら、Adapter は invalid_input として失敗
+5. spec_version 不一致なら、Adapter は invalid_input として失敗 (`KCS-E-ADAPTER-SPECVER-001` — 汎用 `KCS-E-ADAPTER-CONTRACT-001` (retryable 1 回) と区別し、[04-pipeline.md §5.3](04-pipeline.md) の invalid_input 分類 = max_attempts 0 に一意に対応させる)
 6. 出力は KCS 側の受け入れ検査 (04-pipeline.md §3.2) を通過しなければ persist されない。
    違反は KCS-E-ADAPTER-CONTRACT-001 として reject され、**incremental capability 非互換の場合に
    限り** full に fallback する (spec_version 非互換は下記のとおり fallback しない)
@@ -647,7 +661,10 @@ abandon で terminal 化したときは、当該 task の staging を同一遷�
 という unit 状態は存在しない ([03-data-model.md §2.1](03-data-model.md) の遷移は failed → done のみ)。
 **retry の合成規則**: staging の完了済み bytes は凍結する。retry 応答は**全 unit を含んでよい**
 (未完了 unit のみへの絞り込みは任意の転送最適化 — Adapter は staging の内容を知り得ないため
-KCS は要求しない)。KCS が staging + retry 応答を合成する際、**staging に確定済みの unit_key と
+KCS は要求しない)。**凍結保全と合成が適用されるのは transport 中断 (stream 失敗) からの resume に
+限る** — 受け入れ検査 reject (contract violation — [04-pipeline.md §3.2](04-pipeline.md)) 起因の
+再投入では staging を破棄して開始する (違反 unit を含み得る staging を first-instance-wins で
+勝たせると、修正済み retry 応答が破棄され再違反が確定するため)。KCS が staging + retry 応答を合成する際、**staging に確定済みの unit_key と
 重複する応答 unit は黙って破棄する** (staging 側が first instance — first-instance-wins
 ([03-data-model.md §5](03-data-model.md)) と同型)。合成後の**完成集合に対して**受け入れ検査
 (incremental は V1〜V6、full は full 契約) を適用してから一括公開する。
