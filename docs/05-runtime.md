@@ -94,7 +94,9 @@ default: k = 60, w_text = 1.0, w_vector = 1.0
   3 文字以上の token が 1 つでもあれば FTS MATCH を使う — ただし **MATCH 式に渡すのは 3 文字以上の
   token のみ**とし、**3 文字未満の token は同一 bounded query 内の `instr` 条件として LIMIT 前に
   AND 適用する** (trigram は 3 文字未満の phrase を黙って落とすため、混在 query の短語を MATCH に
-  含めると条件から脱落する — 全 token の条件を保ったまま候補確定する)。LIKE fallback の順位も決定的に定める:
+  含めると条件から脱落する)。**短語 instr 条件は text / vector 両バックエンド共通の eligibility
+  述語であり、各バックエンドの候補確定 (candidate_depth 充足前) に適用する** — 和集合・RRF に
+  短語欠落候補を入れない (全 token の条件を保ったまま候補確定する)。LIKE fallback の順位も決定的に定める:
   最初の一致位置 (instr) 昇順、同点は chunk_id 昇順。SQL は ORDER BY 確定後に LIMIT candidate_depth
   を適用する (LIMIT 先行で候補集合が非決定になる形は禁止)
 - **MATCH 式の生成**: user query を FTS5 構文として解釈しない — token 列を各々二重引用符で囲んだ
@@ -226,7 +228,9 @@ page 1 の `since_cutoff` (UTC ISO8601 + `Z`) も保持する:
 
 共通フィルタ: `chunk_config_generations` に**対象 tree の `chunking_config_hash`** の association がある chunk のみ
 (デフォルト = HEAD tree = 現行値。`--at` は対象 tree の値、`--all-history` / `--include-deleted` は各 binding
-tree の値で判定する。v1 tree は config 未記録のため現行値で代替し結果に注記 (**現行値の association が無い場合は当該 instance の既存 association から `chunking_config_hash` の byte 順最小を決定的に代用** — HEAD 限定再 chunk 後の履歴 instance を `--at` で全脱落させない) — [04-pipeline.md §4.1, §4.6](04-pipeline.md))。
+tree の値で判定する。v1 tree は config 未記録のため現行値で代替し結果に注記 (**現行値の association が無い場合は、対象 commit の ancestor-or-equal な introduction を持つ association (cursor 継続時は `max_association_rowid` 以下も条件) に限定した上で `chunking_config_hash` の byte 順最小を決定的に代用** — 後発 association で代用値が時間変動しない。候補 0 件は注記つき空集合。HEAD 限定再 chunk 後の履歴 instance を `--at` で全脱落させない) — [04-pipeline.md §4.1, §4.6](04-pipeline.md))。
+
+**HEAD 不在 (初回 auto snapshot 前・snapshot finalize 未完) の scope は index 未完了として扱う** — 検索は当該 scope を `KCS-E-INDEX-REBUILDING-001` で excluded_scopes に計上し (単独 scope なら exit 3)、cursor は発行しない。**SQLite に反映済みでも未公開 (commit / ref 未 publish) の行は返さない** (§8.1 の finalize 耐久順序の crash 窓で、未公開 snapshot の内容を検索に見せない)。
 purge 済み raw_hash の chunk 行は物理削除済みのため自然に除外される。
 **実装規範**: publication / association の時点条件は correlated **EXISTS** (ancestry 判定と
 `association_rowid <= cursor.max_association_rowid` を副問い合わせ内に含む) で評価する — 同一
@@ -446,7 +450,8 @@ binding を持たない legacy `v=1` は `KCS-E-SEARCH-CURSOR-001` で拒否す�
 - `snapshot_commit` は当該 scope の検索時点 snapshot (commit_hash)、`max_rowid` / `max_association_rowid`
   は snapshot 時点で index に取り込まれていた chunk / association の上限、`index_generation` は
   page 1 時点の当該 scope の世代 ULID (§1.5 — 不一致は cursor 拒否)、`chunking_config_hash` は
-  page 1 の当該 scope の**対象 config** (デフォルト = effective config、時点指定 = 対象 tree の値 —
+  page 1 の当該 scope の**対象 config** (デフォルト = **当該 scope の HEAD tree の値** (移行期間の
+  扱いは [04-pipeline.md §4.6](04-pipeline.md))、時点指定 = 対象 tree の値 —
   §1.5 と同一)、`consumed` は当該 scope から既に返した件数。page 2 で**対象 config** の mapping
   (保存値と再計算値の比較 — current ではなく対象時点の値) が 1 件でも違えば query hash mismatch として
   cursor を拒否する。署名検証後も

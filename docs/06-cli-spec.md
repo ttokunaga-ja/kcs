@@ -178,7 +178,7 @@ kcs search "..." --scope ./Research [--descendants]
 kcs search "..." --all-scopes
 
 # モード
-kcs search "..."              # auto (hybrid → text fallback)
+kcs search "..."              # 実効 [search].default_mode (既定 auto = hybrid → text fallback — 05 §1.8)
 kcs search "..." --text       # text only
 kcs search "..." --vector     # vector only。失敗時は error
 kcs search "..." --hybrid     # hybrid 強制。失敗時は fail_behavior 設定に従う
@@ -400,7 +400,11 @@ kcs import <bundle.kcsz> --to <dir> [--as-new-scope]  # bundle の scope_id が 
                                         # import の atomic postcondition: 展開時に scope.json を新 scope_id で
                                         # 再生成し approvals[]/scan_approval/approvals_initialized/approval_pending を除去、config の allow_network を
                                         # false へ reset、旧 root_path を除去 (pending intent を新 scope_id へ
-                                        # 再束縛してはならない — 07 §3) (bundle 内の旧値を残したまま外側の
+                                        # 再束縛してはならない — 07 §3)。**展開・sanitize は private
+                                        # directory 内で scope.json / config.toml とも完結させてから
+                                        # 04 §1.1 の primitive で atomic に publish する** (scope.json
+                                        # だけ新・config だけ旧 (allow_network=true 残存) の中間状態を
+                                        # 外部に見せない — 初回 materialize の誤発火防止) (bundle 内の旧値を残したまま外側の
                                         # ID だけ変えない)。送信 gate と fsck/schema は approval 行の scope_id が
                                         # scope.json の scope_id と一致することを検査する (07 §3・10 §12.3)。
                                         # bundle 内の legacy 表現 (旧 Unix raw-name tag ref 等、対象 OS で物理

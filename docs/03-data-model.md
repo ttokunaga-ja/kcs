@@ -40,10 +40,16 @@ raw / prepared / image / chunk / embedding / manifest / toollock / tree / commit
   manifest.json       working/index state (永続的真実は tree/commit object)
   staging/            外部実行の streaming staging ([07-adapter-spec.md §8.3](07-adapter-spec.md))。
                       配置 = `staging/<raw64>.<tool64>.<adapter_kind>/`、各 root 直下に耐久
-                      descriptor.json (scope_id / raw_hash / tool_profile_hash / adapter_kind —
-                      staging 作成と同じ Tx 相当で atomic write)。**purge / status / prune-orphans の
+                      descriptor.json (scope_id / raw_hash / tool_profile_hash / adapter_kind)。
+                      **root の公開 = private temp directory に descriptor ごと完書き → fsync →
+                      root 名へ atomic rename → 親 directory fsync ([04-pipeline.md §1.1](04-pipeline.md)
+                      の primitive) — payload の書込みは公開後にのみ行う** (descriptor より先に
+                      payload が存在する窓を作らない)。**purge / status / prune-orphans の
                       帰属列挙は descriptor の全走査が正本** (tasks.jsonl 非依存 — task 記録の
-                      喪失許容 ([04-pipeline.md §1](04-pipeline.md)) と両立させる唯一の手段)
+                      喪失許容 ([04-pipeline.md §1](04-pipeline.md)) と両立させる唯一の手段)。
+                      **descriptor の無い・path と不整合な root (crash 残骸・旧 store) は fsck /
+                      status が表示し、`--prune-orphans` の削除対象とする** (帰属不明の staging は
+                      安全側 = 削除 — [10-operations.md §7.5.1](10-operations.md))
   objects/
     raw/ab/cd/<raw64>
     prepared/ab/cd/<prepared64>

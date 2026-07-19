@@ -214,6 +214,10 @@ AdapterProfile:
   tool_profile_hash     計算規約は 03-data-model.md §5.1
   version
   capability_flags      ["ocr", "layout_detection", "incremental_update", ...]
+  billable_kinds        billable を宣言する Adapter (§5.7 条件 6) は必須 — 報告し得る
+                        `billable_units.kind` の閉集合 (拒否課金の有無の宣言とは別 field)。
+                        **実行時 usage の kind が宣言集合外なら contract violation**。送信前の
+                        pricing 被覆検査の入力 ([10-operations.md §12.3](10-operations.md))
   allow_network
 
 AdapterRun:
@@ -232,8 +236,10 @@ AdapterRun:
   usage                 one-of { usd } | { billable_units } — request 単位の課金報告 (§5.7)。
                         usd = 有限・非負の実測額 (billable reject では provider が宣言する請求額を
                         これに充てる — §5.7 条件 6。第三の field は設けない)。billable_units =
-                        `{ kind, count }` の閉形式 (kind = "pages" | "tokens_in" | "tokens_out" の
-                        閉 enum — 拡張は spec 改訂。count = 非負整数)。単価解決元 = tools.toml の
+                        **unique-kind の配列** `[{ kind, count }, ...]` (1 要素以上。kind = "pages" |
+                        "tokens_in" | "tokens_out" の閉 enum — 拡張は spec 改訂。count = 非負整数。
+                        **kind の重複は違反**。USD 換算は要素ごとの単価 × count の**合算** —
+                        input/output token 両課金の provider を単一報告で表現する)。単価解決元 = tools.toml の
                         `[pricing]` 単価表 (kind → USD 単価 — [03-data-model.md §11](03-data-model.md)、
                         **単価の正本は tools.toml** — tool-lock ではない。schema 型と billable Adapter の
                         kind 被覆必須は [10-operations.md §12.3](10-operations.md)、kind の単価が解決

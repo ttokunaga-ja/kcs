@@ -564,10 +564,13 @@ ancestor に持つ (= 当該 purge より後の publication である)** こと�
 
 **orphan 掃除 (`--prune-orphans`)**: `kcs repair --verify-objects --prune-orphans` は、どの manifest
 からも参照されない orphan prepared / image (公開前 crash の残骸 — [05-runtime.md §3.5](05-runtime.md))
-を列挙し、locked repair として削除する (確認プロンプト必須。live 参照判定は purge closure と同一規則)。
+と **descriptor の無い・path と不整合な staging root ([03-data-model.md §2](03-data-model.md) —
+帰属不明の crash 残骸)** を列挙し、locked repair として削除する (確認プロンプト必須。live 参照判定は
+purge closure と同一規則)。
 GC 本体は Phase 4+ のまま、**法務 purge の完結手段のみ前倒しする** (purge 完了表示の注記から誘導)。
 **拒否条件 (fail-closed)**: 当該 scope に state 0/1 の外部実行 (batch_requests — request_kind 不問)・
-pending / running の task・staging 残骸 ([07-adapter-spec.md §8.3](07-adapter-spec.md))・未 finalize の
+pending / running の task・**descriptor を持つ** staging ([07-adapter-spec.md §8.3](07-adapter-spec.md)
+— 進行中 task の保全。descriptor の無い残骸は上記の削除対象であり blocker にしない)・未 finalize の
 manifest 進行状態・active な purge journal のいずれかが存在する間は、prune を実行せず exit 3
 (retryable) で拒否する — **manifest 未確定の正規進行中 prepared / image を orphan と誤認して削除
 しない**ため (相 3 collect の入力を消すと再課金・欠落参照になる。終端・完了後に再実行する)。拒否応答には
@@ -869,7 +872,7 @@ validation 失敗は exit code 2 で停止し、`KCS-E-CONFIG-SCHEMA-NNN` を返
 
 `folder-config.schema.json` は `[chunking].unicode_version` を **required** とする (省略不可・default なし — `kcs init` が実装同梱の UCD 版 (現在の既定 = 17.0.0) を明示記録する、[03-data-model.md §5.3](03-data-model.md) / [06-cli-spec.md §1](06-cli-spec.md))。**要素単位の後方互換**: これを欠く旧 `.kcs/config.toml` は schema error (exit 2) にせず**実装同梱版 (17.0.0) として読み、次回の locked mutation で atomic に補完書込みする** (approvals[] `status` の補完と同型 — required 化で既存 store の全 CLI を封鎖しない。補完後は現行 schema で検証する)。`[markdownize].bbox_annotation` (boolean、既定 true — [07-adapter-spec.md §5.2](07-adapter-spec.md)、値は tool_profile_hash に畳み込む) も本 schema の正式 key として定義する。
 
-`tools.schema.json` は adapter ごとの `pricing` を定義する: **key = billable_units の kind 閉 enum (pages | tokens_in | tokens_out — [07-adapter-spec.md §4](07-adapter-spec.md))、値 = 有限・非負の USD 単価 (REAL)、未知 key は schema error**。**billable を宣言する Adapter ([07-adapter-spec.md §5.7](07-adapter-spec.md) 条件 6) は、当該 Adapter が報告し得る全 kind の単価被覆を送信前に検査する (欠落は config error — fail-closed)**。終端時に初めて解決不能と判明した場合の縮退は [04-pipeline.md §5.4](04-pipeline.md)。
+`tools.schema.json` は adapter ごとの `pricing` を定義する: **key = billable_units の kind 閉 enum (pages | tokens_in | tokens_out — [07-adapter-spec.md §4](07-adapter-spec.md))、値 = 有限・非負の USD 単価 (REAL)、未知 key は schema error**。**billable を宣言する Adapter ([07-adapter-spec.md §5.7](07-adapter-spec.md) 条件 6) は、AdapterProfile の `billable_kinds` (報告し得る kind の閉集合の宣言 — [07-adapter-spec.md §4](07-adapter-spec.md)) の全 kind が `pricing` に被覆されること (pricing keys ⊇ billable_kinds) を送信前に検査する (欠落は config error — fail-closed)**。終端時に初めて解決不能と判明した場合の縮退は [04-pipeline.md §5.4](04-pipeline.md)。
 
 `user-config.schema.json` は device cap (`[budget]`、[04-pipeline.md §5.4](04-pipeline.md)) を含む。
 

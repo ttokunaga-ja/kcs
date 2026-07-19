@@ -246,7 +246,10 @@ bulk 系 (`kcs evidence verify --batch <pointers.jsonl>`) は従来どおり各�
                                         — KCS-E-REGISTRY-DUP-001 (§3.1 手順 1a)
   - tombstone / erase receipt なしで raw object 不在: not_found — KCS-E-STORE-CORRUPT-001
                                         (corruption の疑い — §3.1 手順 5。repair --verify-objects を案内)
-  - 有効 erase receipt ありで raw object 不在:        not_found — KCS-E-PURGE-NOT-FOUND-001 (§4.2)
+  - 有効 erase receipt (末尾 event = `erased` の active receipt) ありで raw object 不在:
+                                        not_found — KCS-E-PURGE-NOT-FOUND-001 (§4.2。`retired` 済み
+                                        receipt での欠落は上段の corruption 側 — [10-operations.md §7.5.1](10-operations.md)
+                                        の説明範囲限定と整合)
   - scope の .kcs に到達できない:        scope_unreachable — scope_path 不達かつ
                                         scope_registry に scope_id 未登録
                                         → KCS-E-EVIDENCE-SCOPE-UNREACHABLE-001
