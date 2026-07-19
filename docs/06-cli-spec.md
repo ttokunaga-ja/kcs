@@ -68,7 +68,7 @@ kcs reindex [--force] [--at <commit>] [--yes] [--online|--offline]  # --at = 過
 kcs move --propose <src> <dst>          # 原本移動の提案。Agent はこちらのみ (Phase 4+、MVP 対象外)
 kcs move --accept <id> | --reject <id>  # 提案の承認/却下。KCS が原本を mv できる唯一の経路 (03-data-model.md §10)。書き込み境界の予約定義
 kcs evidence verify <pointer> [--strict]
-kcs evidence verify --batch <pointers.jsonl> [--strict]  # <pointer> と --batch は相互排他 (--batch は Step 4+ — §7、08 §4.3)
+kcs evidence verify --batch <pointers.jsonl> [--strict]  # <pointer> と --batch は相互排他 (--batch は Phase 4+ — §7、08 §4.3)
 kcs evidence retarget <pointer> [--latest|--at <commit>]  # 設計確定後 (09-mvp-scope.md §5.2)。
                                         # --latest の既定挙動 (auto retarget / proposal) は Phase 4 着手前確定 (08 §5 残未決)
 ```
@@ -77,7 +77,7 @@ kcs evidence retarget <pointer> [--latest|--at <commit>]  # 設計確定後 (09-
 
 **`kcs diff` の差分種別**: raw / path の差分に加え、tree schema v2/v3 ([03-data-model.md §8](03-data-model.md)) が生む derived-only の変化 — `normalize_manifest_changed` (unit の failed → done 完成を含む) / `chunking_config_changed` / `chunk_set_changed` (公開 chunk 集合のみの変化) / `tool_lock_changed` (旧新 tool_lock_hash と変更 role) / `resurrection_published` (no-op 例外 (a) の publication commit — [05-runtime.md §8.1](05-runtime.md)) — を差分として表示する (`--json` も同種別を持つ)。derived-only commit を「差分なし」と表示してはならない。片側が旧版 tree (該当フィールド欠落) の場合、derived 差分は `unknown` と表示する。
 
-`kcs init` は指定フォルダ (省略時 = カレント) の `.kcs` を 1 つだけ作成する (子孫には作らない)。子フォルダの `.kcs` は `kcs index` の探索が対象を検出した時点で必要に応じて生成される (**VCS repo root 配下には既定で生成しない**。既定導入以前の既存子 `.kcs` は grandfathered として引き続き有効 — [03-data-model.md §3](03-data-model.md))。この結果、深いフォルダ木では scope 数が多くなる。`kcs search` のデフォルトが全 indexed scope 横断である ([05-runtime.md §1.8](05-runtime.md)) のはこの帰結を受けた設計である。
+`kcs init` は指定フォルダ (省略時 = カレント) の `.kcs` を 1 つだけ作成する (子孫には作らない)。子フォルダの `.kcs` は `kcs index` の探索が対象を検出した時点で必要に応じて生成される (**VCS repo root 配下には既定で生成しない**。既定導入以前の既存子 `.kcs` は grandfathered として引き続き有効 — [03-data-model.md §3](03-data-model.md))。この結果、深いフォルダ木では scope 数が多くなる。`kcs search` のデフォルトが全 indexed scope 横断である ([05-runtime.md §1.8](05-runtime.md)) のはこの帰結を受けた設計である。また `kcs init` は生成する `.kcs/config.toml` の `[chunking] unicode_version` に実装同梱の UCD 版 (現在の既定 = 17.0.0) を明示記録する ([03-data-model.md §5.3](03-data-model.md) — 省略不可・default なし。schema でも required — [10-operations.md §12.3](10-operations.md))。
 
 `<pointer>` 引数の受理形式 (URI / inline JSON / stdin / hash 短縮形) は [08-evidence-pointer-spec.md §2.3](08-evidence-pointer-spec.md) を正本とする。
 
@@ -292,10 +292,12 @@ sqlite.db 不在・利用不能       全経路 (verify / open / view / restore 
                                0 を返さない。multi-scope search は当該 scope を excluded_scopes として
                                継続し、全 scope 該当なら exit 3 — SCOPE-ALL-FAILED (4) より優先。
                                全 scope の除外理由が同一 code なら当該 code の単独時 exit へ昇格
-                               (一般規則 — VERSION→8・REBUILDING→3・INCOMPAT→8・journal 系→3・
-                               DUP→4。05 §1.8 / 10 §12.5)。混在は SCOPE-ALL-FAILED / exit 4。
+                               (一般規則 — VERSION→8・REBUILDING→3・INCOMPAT→8・
+                               journal (KCS-E-PURGE-JOURNAL-ACTIVE-001)→3・
+                               DUP→3 (dedupe 後に回復可能 — 08 §4.3 registry_duplicate と同一分類)。
+                               05 §1.8 / 10 §12.5)。混在は SCOPE-ALL-FAILED / exit 4。
                                優先順位は VERSION → journal → DUP → REBUILDING (10 §3)。05 §2.6・08 §3.1)
-kcs evidence verify --batch <pointers.jsonl>   一括 verify (Step 4+ — 08 §4.3)
+kcs evidence verify --batch <pointers.jsonl>   一括 verify (Phase 4+ — 08 §4.3)
                                (--batch は --strict の有無に従う — --strict 時: 混在も 4 /
                                 なし: 検査完了で 0。内訳は --json の各行 status で判定 — 08 §4.3)
 kcs open / view / restore      dead pointer (tombstoned / not_found) は 4。scope_unreachable は 3 (retryable — 08 §4.3)
@@ -331,7 +333,7 @@ DOMAIN:
   AUTH     認証・認可
 ```
 
-例: `KCS-E-BATCH-NET-001`, `KCS-E-SEARCH-VEC-INCOMPAT-001`, `KCS-E-COMMIT-SHALLOW-001`, `KCS-E-COMMIT-HISTORY-LIMIT-001` (bounded history walk の aggregate cap 超過、単独操作 exit 4 / multi-scope は既存 partial 規則、[05-runtime.md §1.6](05-runtime.md)), `KCS-E-PURGE-NOT-FOUND-001`, `KCS-E-STORE-PATH-001` (パス区切りを含む path の schema violation、[03-data-model.md §3](03-data-model.md)), `KCS-E-SEARCH-SCOPE-ALL-FAILED-001` (multi-scope search の全 scope 失敗、[05-runtime.md §1.8](05-runtime.md)), `KCS-E-SEARCH-CURSOR-001` (別クエリ・別条件の cursor 誤用、[05-runtime.md §1.5](05-runtime.md)), `KCS-E-INDEX-REBUILDING-001` (index 再構築中、[05-runtime.md §6](05-runtime.md)), `KCS-E-EVIDENCE-SCOPE-UNREACHABLE-001` (pointer の scope が scope_path・registry のどちらでも解決不能、[08-evidence-pointer-spec.md §3.2](08-evidence-pointer-spec.md)), `KCS-E-EVIDENCE-RETARGET-AMBIG-001` (retarget 候補が複数で一意に定まらない、[08-evidence-pointer-spec.md §5](08-evidence-pointer-spec.md))、`KCS-E-REGISTRY-DUP-001` (同一 scope_id の複数 live clone — 検索 skip・解決 error、[10-operations.md §3](10-operations.md))、`KCS-E-STORE-CORRUPT-001` (CAS object の content hash 不一致・欠落、`kcs repair --verify-objects`、[10-operations.md §7.5](10-operations.md))、`KCS-E-STORE-LOCKED-001` (`.kcs/.lock` 取得失敗 — 待機せず即失敗、exit 3、[05-runtime.md §6](05-runtime.md))、`KCS-E-STORE-DUP-001` (単一 tree 内の重複 `path`、[03-data-model.md §8.1](03-data-model.md)。`/` 入り path の `KCS-E-STORE-PATH-001` とは区別する)、`KCS-E-CONFIG-USAGE-001` (invalid usage / 不正オペランド — 例: `init` path 不存在、`.kcs` scope 外での実行、不正 hash 引数。schema violation の `KCS-E-CONFIG-SCHEMA-001` とは区別。exit 2)、`KCS-E-EMBED-MODALITY-001` (`modality != "multimodal"` の embedding profile の採用拒否 — tool-lock materialize / adapter 登録時に検証、[03-data-model.md §7](03-data-model.md)。exit 2)、`KCS-E-SEARCH-VEC-UNAUTHORIZED-001` (query embedding の embedding 承認なし — auto/`--hybrid` は text fallback、`--vector` 明示時のみ error、[05-runtime.md §1.1](05-runtime.md))、`KCS-E-STORE-VERSION-001` (自己の対応上限より新しい `kcs_format_version` の store — 書き込み系は即時拒否・読み取り系は書込ゼロの read-only 縮退、正本 [10-operations.md §12.5](10-operations.md)。exit 8)。
+例: `KCS-E-BATCH-NET-001`, `KCS-E-SEARCH-VEC-INCOMPAT-001`, `KCS-E-COMMIT-SHALLOW-001`, `KCS-E-COMMIT-HISTORY-LIMIT-001` (bounded history walk の aggregate cap 超過、単独操作 exit 4 / multi-scope は既存 partial 規則、[05-runtime.md §1.6](05-runtime.md)), `KCS-E-PURGE-NOT-FOUND-001`, `KCS-E-PURGE-JOURNAL-ACTIVE-001` (未完了 purge journal / epoch 不変違反 — 書き込み系・読み取り系 preflight の拒否、retryable exit 3、[05-runtime.md §3.5](05-runtime.md)), `KCS-E-STORE-PATH-001` (パス区切りを含む path の schema violation、[03-data-model.md §3](03-data-model.md)), `KCS-E-SEARCH-SCOPE-ALL-FAILED-001` (multi-scope search の全 scope 失敗、[05-runtime.md §1.8](05-runtime.md)), `KCS-E-SEARCH-CURSOR-001` (別クエリ・別条件の cursor 誤用、[05-runtime.md §1.5](05-runtime.md)), `KCS-E-INDEX-REBUILDING-001` (index 再構築中、[05-runtime.md §6](05-runtime.md)), `KCS-E-EVIDENCE-SCOPE-UNREACHABLE-001` (pointer の scope が scope_path・registry のどちらでも解決不能、[08-evidence-pointer-spec.md §3.2](08-evidence-pointer-spec.md)), `KCS-E-EVIDENCE-RETARGET-AMBIG-001` (retarget 候補が複数で一意に定まらない、[08-evidence-pointer-spec.md §5](08-evidence-pointer-spec.md))、`KCS-E-REGISTRY-DUP-001` (同一 scope_id の複数 live clone — 検索 skip・解決 error、[10-operations.md §3](10-operations.md))、`KCS-E-STORE-CORRUPT-001` (CAS object の content hash 不一致・欠落、`kcs repair --verify-objects`、[10-operations.md §7.5](10-operations.md))、`KCS-E-STORE-LOCKED-001` (`.kcs/.lock` 取得失敗 — 待機せず即失敗、exit 3、[05-runtime.md §6](05-runtime.md))、`KCS-E-STORE-DUP-001` (単一 tree 内の重複 `path`、[03-data-model.md §8.1](03-data-model.md)。`/` 入り path の `KCS-E-STORE-PATH-001` とは区別する)、`KCS-E-CONFIG-USAGE-001` (invalid usage / 不正オペランド — 例: `init` path 不存在、`.kcs` scope 外での実行、不正 hash 引数。schema violation の `KCS-E-CONFIG-SCHEMA-001` とは区別。exit 2)、`KCS-E-EMBED-MODALITY-001` (`modality != "multimodal"` の embedding profile の採用拒否 — tool-lock materialize / adapter 登録時に検証、[03-data-model.md §7](03-data-model.md)。exit 2)、`KCS-E-SEARCH-VEC-UNAUTHORIZED-001` (query embedding の embedding 承認なし — auto/`--hybrid` は text fallback、`--vector` 明示時のみ error、[05-runtime.md §1.1](05-runtime.md))、`KCS-E-STORE-VERSION-001` (自己の対応上限より新しい `kcs_format_version` の store — 書き込み系は即時拒否・読み取り系は書込ゼロの read-only 縮退、正本 [10-operations.md §12.5](10-operations.md)。exit 8)。
 
 新規 code 追加は本書および各 spec の更新を伴う (破壊的変更扱い)。
 

@@ -401,7 +401,7 @@ chunking_config_hash = "sha256:" + base16(sha256(JCS({
 
 - 対象は `[chunking]` 配下の **chunk 境界に影響する全キー**。キーを追加したら `spec_version` を bump する
 - デフォルト値も明示的に畳み込む (キー省略と明示指定を識別しない)
-- `unicode_version` は **`kcs init` が採用 UCD 版 (現在の既定 = 16.0.0) を config へ明示記録する**
+- `unicode_version` は **`kcs init` が採用 UCD 版 (現在の既定 = 17.0.0 — §11 の設定例と同一。実装が同梱する UCD 版と常に一致させる) を config へ明示記録する** ([06-cli-spec.md §1](06-cli-spec.md) の init 仕様・[10-operations.md §12.3](10-operations.md) の schema required も同旨)
   (「省略不可・default なし」の充足手段 — 以後の版変更は config 変更として本節の世代判定に乗る)
 - これは同一性 hash であり、identity には使わない。chunk identity は §8.1 のとおり `(raw_hash, tool_profile_hash, gen, unit_key, heading_path, section_id, byte_start, byte_end)` のまま。`chunking_config_hash` は chunk の**世代**を表すメタデータに留める
 
@@ -415,6 +415,8 @@ inst = latest_instance(current_raw_hash, current_tool_profile_hash)
        # objects/normalized_units/ 配下の最大 gen の manifest (§2.1)
 if inst is None:
     pending
+elif not inst.units:
+    up_to_date       # 空 unit 集合 (空文書) — 次行の all([]) が空虚真で failed に落ちるのを防ぐ
 elif all(u.status == "failed" for u in inst.units):
     failed           # 全滅 — retryable (04-pipeline.md §5.2 の failed → pending と同じ扱い)
 elif any(u.status == "done" and not unit_object_exists(u) for u in inst.units):

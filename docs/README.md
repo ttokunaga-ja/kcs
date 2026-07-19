@@ -145,7 +145,7 @@ ADR (Architecture Decision Records) フォルダは廃止しました。本プ�
 - **言語**: 日本語。固有名詞・コード片は原語のまま。
 - **コードブロック**: 言語タグ必須 (`bash`, `toml`, `json`, `rust`, `sql`, `text`)。既存の列挙・図示 block の無タグ fence は `text` 扱い (新規追加時にタグ必須)。
 - **相対リンク**: docs/ ルート相対。
-- **スキーマ変更**: 03-data-model.md / 07-adapter-spec.md の変更は破壊的変更扱い。`tool_profile_hash` / `tool_lock_hash` / `commit_type` enum / Evidence Pointer schema の変更には migration plan を伴う。
+- **スキーマ変更**: 03-data-model.md / 07-adapter-spec.md の変更は破壊的変更扱い。`tool_profile_hash` / `tool_lock_hash` / Evidence Pointer schema の変更には migration plan を伴う (`commit_type` enum は値域**永久固定** — [10-operations.md §8](10-operations.md)。migration の対象にしない)。
 - **発言禁止フレーズ**:
   - ✗ "Git for knowledge" / "個人 AI アシスタント" / "OS 級" / "Knowledge Graph for personal data" / "Notion / Obsidian キラー"
   - ✗ "offline-first" (誤解を招く。"local-first" を使う — 禁止はプロダクトの呼称・訴求としての使用であり、否定・対比文での言及は可)

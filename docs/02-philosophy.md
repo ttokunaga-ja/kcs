@@ -492,7 +492,7 @@ KCSでは、PDFやPPTXなどの原本ファイルを編集可能なテキスト�
 
 これにより、原本性が守られます。
 
-ただし、法務・秘匿・誤取り込みなどで「過去の履歴からも消す」必要がある場合は例外です。この場合は通常の削除やGCではなく、`purge` を明示的に実行し、**消す事実の記録 (tombstone) を先に耐久化したうえで**、対象ファイルに由来する raw / prepared / image / normalized / chunk / embedding / index の本文を全履歴にわたり物理削除します (共有され得る prepared / image / embedding は他文書からの live 参照が 0 の場合のみ — marker は既定 tombstone、`--erase-tombstone` は fsck 専用 receipt) (順序と対象の正本は [05-runtime.md](05-runtime.md) §3.5 — 記録が先でないと、クラッシュ時に「消えたのに痕跡が無い」状態になります) (commit / tree object 自体の履歴 DAG は書き換えません。詳細は [05-runtime.md](05-runtime.md) §3.5)。MVP では CLI (`kcs purge --reason <...>`、[06-cli-spec.md](06-cli-spec.md) §6) で提供する。ファイル名そのものの秘匿を要する完全な履歴書き換えは v2+ / Phase 4+ ([09-mvp-scope.md](09-mvp-scope.md) §3.1)。GUI での提供は v2+ 構想。
+ただし、法務・秘匿・誤取り込みなどで「過去の履歴からも消す」必要がある場合は例外です。この場合は通常の削除やGCではなく、`purge` を明示的に実行し、**消す事実の記録 (tombstone) を先に耐久化したうえで**、対象ファイルに由来する raw / prepared / image / normalized / chunk / embedding / index の本文を全履歴にわたり物理削除します (共有され得る prepared / image / embedding は他文書からの live 参照が 0 の場合のみ — marker は既定 tombstone、`--erase-tombstone` は fsck 専用 receipt) (順序と対象の正本は [05-runtime.md](05-runtime.md) §3.5 — 記録が先でないと、クラッシュ時に「消えたのに痕跡が無い」状態になります) (commit / tree object 自体の履歴 DAG は書き換えません。詳細は [05-runtime.md](05-runtime.md) §3.5)。MVP では CLI (`kcs purge <path|--raw-hash <h>> --reason <...>`、[06-cli-spec.md](06-cli-spec.md) §6) で提供する。ファイル名そのものの秘匿を要する完全な履歴書き換えは v2+ / Phase 4+ ([09-mvp-scope.md](09-mvp-scope.md) §3.1)。GUI での提供は v2+ 構想。
 
 ---
 

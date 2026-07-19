@@ -29,6 +29,7 @@ fail_behavior = "fallback"       # "fallback" | "error" | "warn"
 embedding profile_hash 不一致 → text fallback (KCS-E-SEARCH-VEC-INCOMPAT-001)
 embedding 承認なし (下記 consent gate) → text fallback (KCS-E-SEARCH-VEC-UNAUTHORIZED-001)
 同一 query が in-flight ([04-pipeline.md §5.4](04-pipeline.md)) → text fallback (fallback_reason="embedding_in_flight")
+query embedding 応答が受入検査 ([07-adapter-spec.md §5.3](07-adapter-spec.md)) で contract violation → text fallback (fallback_reason="embedding_contract_violation")
 上記のいずれにも該当せず vector のみ利用不能 (index 未構築等の技術的理由) → text
 両方利用可能 → hybrid
 両方不可 → error (KCS-E-SEARCH-VEC-UNAVAIL-001)
@@ -50,8 +51,9 @@ embedding 承認なし (下記 consent gate) → text fallback (KCS-E-SEARCH-VEC
 失敗 (INCOMPAT / UNAVAIL 等) への応答方針であり、`embedding_not_authorized` (承認なし) と `offline`
 (`--offline` 指定) には適用しない (設定値に関わらず auto / `--hybrid` は常に text fallback、`--vector`
 のみ error — §1.2 / [06-cli-spec.md §3](06-cli-spec.md) の `--hybrid` 行の注記も同旨)。一方
-**`embedding_in_flight` (同一 query の並行実行 — [04-pipeline.md §5.4](04-pipeline.md)) は技術的な
-過渡失敗であり `fail_behavior` の対象**: auto は text fallback、`--hybrid` は fail_behavior に従い、
+**`embedding_in_flight` (同一 query の並行実行 — [04-pipeline.md §5.4](04-pipeline.md)) と
+`embedding_contract_violation` (query embedding 応答の受入検査違反 — [07-adapter-spec.md §5.3](07-adapter-spec.md))
+は技術的な過渡失敗であり `fail_behavior` の対象**: auto は text fallback、`--hybrid` は fail_behavior に従い、
 `--vector` 明示は KCS-E-SEARCH-VEC-UNAVAIL-001 で error。`--online` / `--offline` は他コマンドと
 同義の当該実行限りの上書き (07 §3)。**`--offline` 指定時は承認の有無に関わらず query embedding を送信
 しない** — auto / `--hybrid` は text fallback (`fallback_reason="offline"`)、`--vector` 明示は
@@ -356,7 +358,7 @@ score/rank をコピーして、group 内を
    候補として返す。§1.4 の MMR/dedup は scope 内でまだ適用しない
 3. scope 間の統合は **rank ベース** で行う。各 scope の RRF スコア (rank のみから決まる) をそのまま比較して降順マージする。**BM25 / vector の raw スコアを scope 間で比較・正規化してはならない** (コーパス統計が index ごとに異なり比較不能)。pre-alias 同点は immutable `(scope_id,chunk_hash)` で安定化する
 4. diversify (MMR / group_by_raw_hash, §1.4) は統合後の候補列に対して適用する
-5. vector / hybrid の横断条件は [03-data-model.md §7](03-data-model.md) に従う。embedding profile が全 scope で一致しない場合、横断部分は text (BM25 rank) のみで統合し、`fallback_reason` に記録する (**`--vector` 明示時は fallback しない** — profile 不一致の scope を KCS-E-SEARCH-VEC-INCOMPAT-001 の excluded_scopes として除外し、全 scope 除外なら error — §1.2 の「失敗時は error」と同じ)。`kcs_format_version` が自己の対応上限より新しい scope も同様に excluded_scopes として除外する (KCS-E-STORE-VERSION-001 を `fallback_reason` に記録・当該 scope へは query_cache を含む一切の書込を行わない — [10-operations.md §12.5](10-operations.md))。**全 scope が STORE-VERSION 除外なら command は KCS-E-STORE-VERSION-001 / exit 8 を返す** (SCOPE-ALL-FAILED (exit 4) より優先 — REBUILDING と同型の昇格、[06-cli-spec.md §7](06-cli-spec.md)。自動化に「新版への更新が必要」を直接伝える)。**全 scope の除外理由が同一 code の場合、command は当該 code とその単独実行時の exit を返す (一般規則)** — VERSION → exit 8・REBUILDING → exit 3・INCOMPAT → exit 8・purge journal 系 → exit 3・DUP → exit 4。理由が混在して全 scope 除外となった場合のみ通常の SCOPE-ALL-FAILED (exit 4) とし、個別理由は excluded_scopes[].reason で判別する。embedding 承認の consent gate (§1.1) は**送信 gate であり per-scope の除外条件ではない** — 承認ゼロなら検索全体が text fallback (excluded_scopes には計上しない)。1 つ以上の承認で送信された query vector は profile 互換な全参加 scope の vector 検索に用いる (未承認 scope も含む — 送信は 1 回であり scope 別の再送信は発生しない)
+5. vector / hybrid の横断条件は [03-data-model.md §7](03-data-model.md) に従う。embedding profile が全 scope で一致しない場合、横断部分は text (BM25 rank) のみで統合し、`fallback_reason` に記録する (**`--vector` 明示時は fallback しない** — profile 不一致の scope を KCS-E-SEARCH-VEC-INCOMPAT-001 の excluded_scopes として除外し、全 scope 除外なら error — §1.2 の「失敗時は error」と同じ)。`kcs_format_version` が自己の対応上限より新しい scope も同様に excluded_scopes として除外する (KCS-E-STORE-VERSION-001 を `fallback_reason` に記録・当該 scope へは query_cache を含む一切の書込を行わない — [10-operations.md §12.5](10-operations.md))。**全 scope が STORE-VERSION 除外なら command は KCS-E-STORE-VERSION-001 / exit 8 を返す** (SCOPE-ALL-FAILED (exit 4) より優先 — REBUILDING と同型の昇格、[06-cli-spec.md §7](06-cli-spec.md)。自動化に「新版への更新が必要」を直接伝える)。**全 scope の除外理由が同一 code の場合、command は当該 code とその単独実行時の exit を返す (一般規則)** — VERSION → exit 8・REBUILDING → exit 3・INCOMPAT → exit 8・journal (`KCS-E-PURGE-JOURNAL-ACTIVE-001` — §3.5) → exit 3・DUP → exit 3 (ユーザーの dedupe 後に回復可能 — [08-evidence-pointer-spec.md §4.3](08-evidence-pointer-spec.md) の registry_duplicate = 3 と同一分類)。理由が混在して全 scope 除外となった場合のみ通常の SCOPE-ALL-FAILED (exit 4) とし、個別理由は excluded_scopes[].reason で判別する。embedding 承認の consent gate (§1.1) は**送信 gate であり per-scope の除外条件ではない** — 承認ゼロなら検索全体が text fallback (excluded_scopes には計上しない)。1 つ以上の承認で送信された query vector は profile 互換な全参加 scope の vector 検索に用いる (未承認 scope も含む — 送信は 1 回であり scope 別の再送信は発生しない)
 
 既知の限界: rank ベース統合は、関連文書の乏しい scope の 1 位と強い scope の 1 位を同格に扱う。MVP ではこれを容認する (結果に scope_path が必ず含まれるため判別可能)。scope 間の再ランクは v2 以降の検討事項。
 
@@ -548,8 +550,8 @@ keep_repaired_per_branch = 5
 
 ```
 - GC 中の新規 commit 受付は block しない (CoW 風 readonly snapshot 上で走る)。§6 の lock 表が
-  `kcs gc` を書き込み系に含めるのは MVP の on-demand 実装 (全体 lock 型) の規約 — 本節の並行 GC は
-  Phase 4+ であり、導入時に §6 の表を改訂する
+  `kcs gc` を書き込み系に含めるのは on-demand 実装 (全体 lock 型 — 実装は Phase 4+ の初期形、§2.2) の
+  規約 — 本節の並行 GC はその後続であり、導入時に §6 の表を改訂する
 - object 物理削除は exclusive lock の短い critical section に限定
 - power-loss 中断時は次回起動時に sweep 再開 (.kcs/gc/in_progress マーカーで検出)
 ```
@@ -760,8 +762,8 @@ phase 順序    = prepared (closure 確定・記帳)
               [10-operations.md §7.5.1](10-operations.md))。**読み取り系 (status を除く §6 の全読取
               コマンド — search / log / view / inspect / evidence verify / restore / diff / open) は、
               冒頭と「本文・存在情報を返す直前」の 2 点で検査する: 「active journal の不在 **かつ**
-              `.kcs/purge/epoch` (単調カウンタ) が開始時と不変」でなければ KCS-E-PURGE 系
-              retryable (exit 3) で拒否する** (2 点目で検出した場合は取得済み結果を破棄する。
+              `.kcs/purge/epoch` (単調カウンタ) が開始時と不変」でなければ `KCS-E-PURGE-JOURNAL-ACTIVE-001`
+              ([10-operations.md §12.1](10-operations.md)) retryable (exit 3) で拒否する** (2 点目で検出した場合は取得済み結果を破棄する。
               epoch 比較が無いと、高速な purge が 2 点の間に journal 作成〜除去まで完走した場合に
               両検査をすり抜ける — ABA。**epoch ファイルの欠落・不正値も同様に拒否する (fail-closed)** —
               次の locked mutation が journal の target_epoch、journal も無ければ**全 lifecycle

@@ -108,7 +108,8 @@ opt-in の単位・成立・寿命:
 寿命:   永続 (revoke まで)。ただし対象 Adapter の tool_id または execution_mode が
         変わった場合は失効し、再承認を要する。
 
-revoke: adapter.policy.allow_network = false に設定する (これは **scope 全体の kill switch**)。
+revoke: adapter.policy.allow_network = false に設定する (これは **scope 全体の kill switch** —
+`--online` の一時 opt-in でも上書きされない。下記「優先関係」の例外)。
 単一 Adapter だけの revoke は approvals[] 当該行の **status=revoked + revoked_at への更新**で行う
 (opt-in 単位 = scope × adapter に対応する既存機構 — 下記)。
         以後、当該 scope の新規オンライン送信 task は発行されない
@@ -178,6 +179,10 @@ sync 呼出のみ)。
 CLI (--online / --offline)  >  .kcs/config.toml (scope)  >  ~/.config/kcs/config.toml (user)
 ```
 
+この優先で `--online` が上書きできるのは **opt-in 未成立 (`allow_network` 未設定) の既定閉鎖**である。
+**明示 revoke (`allow_network = false` の明示設定) は `--online` より優先する** (kill switch の趣旨 —
+解除は config の再変更のみ。`--offline` 側は常に最優先で当該実行の新規送信を禁止する)。
+
 **01-positioning.md との整合**: デフォルト同梱 Adapter は online_api (frontier AI) だが、
 初回スキャン承認で network transmission policy に同意するまで送信は始まらない。
 "frontier AI default" は同梱・推奨構成を指し、"default: no network transmission" は
@@ -208,18 +213,23 @@ AdapterRun:
   input_hashes
   output_hashes
   status                "pending" | "running" | "done" | "partial" | "failed"
-                        (partial = unit 単位の部分失敗, 04-pipeline.md §5.2)
+                        (partial = unit 単位の部分失敗, 04-pipeline.md §5.2。正常な制御応答
+                         (fallback_to_full) は request として成功 = "done" — outcome の区別は
+                         cost_ledger 側 ([04-pipeline.md §3.2](04-pipeline.md)))
   error_code            機械判定用 (06-cli-spec.md §8)
   error_category        transient | permanent | rate_limit — 04 §5.3 の retry 分類の入力
                         (集計用の粗分類 — auth / quota / invalid_input 等の細分は error_code が
                          担い、retry 対応は 04 §5.3 の表が error_code 基準で優先する)
   retry_after_ms        optional — provider の Retry-After を透過 (rate_limit 時)
   usage                 one-of { usd } | { billable_units } — request 単位の課金報告 (§5.7)。
-                        usd = 有限・非負の実測額。billable_units = 単価計算に足る unit 数
-                        (単価解決元 = tools.toml の単価表)。**billable な terminal 応答
-                        (成功・billable reject・fetch_output・sync 応答) で必須** — 欠落・
-                        不正値は estimated 記帳へ縮退 ([04-pipeline.md §5.4](04-pipeline.md) の
-                        記帳値事前検証と同じ扱い)
+                        usd = 有限・非負の実測額 (billable reject では provider が宣言する請求額を
+                        これに充てる — §5.7 条件 6。第三の field は設けない)。billable_units =
+                        単価計算に足る unit 数 (単価解決元 = tools.toml の単価表 — **換算は終端 Tx
+                        時点の表で確定し、以後の単価変更で再計算しない**。台帳 UPDATE 禁止と整合)。
+                        **billable な terminal 応答 (成功・billable reject・fetch_output・sync 応答・
+                        正常な制御応答 (fallback_to_full — [04-pipeline.md §3.2](04-pipeline.md)))
+                        で必須** — 欠落・不正値は estimated 記帳へ縮退する ([04-pipeline.md §5.4](04-pipeline.md)
+                        の記帳値事前検証と同一規範 — **応答の受否・outcome・violation 予算は変えない**)
 ```
 
 ---
@@ -370,7 +380,7 @@ metadata:
   adapter_id, model_family, version, embedding_profile_hash
 ```
 
-**Embedding 応答の受入検査** (markdownize の V1〜V6 に相当する): (1) `vectors[].id` は入力 id 集合と**全単射** (欠落・過剰・重複は違反)、(2) `dimensions` は profile と一致し全 vector が同次元、(3) 全要素が**有限値** (NaN/Inf 拒否) かつ**非ゼロ vector**、(4) float32 への決定的変換と **L2 正規化は core 側で実施**する (Adapter の正規化有無に依存しない)。違反応答は全体 reject — contract violation として課金・再試行は §5.8 相 3 と同じ規則に従う ([04-pipeline.md §5.3](04-pipeline.md))。
+**Embedding 応答の受入検査** (markdownize の V1〜V6 に相当する): (1) `vectors[].id` は入力 id 集合と**全単射** (欠落・過剰・重複は違反)、(2) `dimensions` は profile と一致し全 vector が同次元、(3) 全要素が**有限値** (NaN/Inf 拒否) かつ**非ゼロ vector**、(4) float32 への決定的変換と **L2 正規化は core 側で実施**する (Adapter の正規化有無に依存しない)。**変換・正規化後の最終 vector にも (3) と同じ有限・非ゼロ (かつ単位ノルム — 許容誤差内) を再検査する** (underflow の零 vector / overflow の Inf を index に入れない — 違反は同じ contract violation)。違反応答は全体 reject — contract violation として課金・再試行は §5.8 相 3 と同じ規則に従う ([04-pipeline.md §5.8](04-pipeline.md)。再試行分類は [04-pipeline.md §5.3](04-pipeline.md))。`failed_units` 相当の部分失敗 field を持たない **all-or-nothing 契約は意図的**である (MVP は text chunk のみを embed し、失敗の粒度は request 再投入で足りる — Phase 4+ の multimodal 拡張で再検討)。
 
 Text Embedding Adapter / Image Embedding Adapter は**採用しない**。同一 Embedding Adapter が同一 profile で多モダリティを単一 vector space へ写像する。
 
@@ -450,7 +460,8 @@ provider_scope_id()            下記の不変識別子を返す
 5. account / workspace の**安定した**識別子を取得できること (取得不能なら reservation の照合が恒久
    unknown になり、`kcs batch abandon` 頼みの運用になる)
 6. 投入拒否 (permanent 4xx) にも課金するか否かを宣言すること。**課金する provider の Adapter は、
-   拒否応答時に billable_units または estimated_usd を機械可読で返却する** (この返却義務は Batch 限定で
+   拒否応答時に usage (`usd` = 宣言請求額 | `billable_units` — §4 の one-of と同形、第三の field は
+   設けない) を機械可読で返却する** (この返却義務は Batch 限定で
    なく **sync online Adapter にも共通** — [04-pipeline.md §5.4](04-pipeline.md) の sync 記帳規律が参照する) — KCS は submit_rejected の
    terminal 化と同一 Tx で estimated 記帳する ([04-pipeline.md §5.4](04-pipeline.md) DDL 注記)
 
@@ -634,10 +645,12 @@ USER:
 abandon で terminal 化したときは、当該 task の staging を同一遷移で冪等に cleanup する (残存は
 `kcs status` に表示し、prune-orphans の blocker として可視化 — [10-operations.md §7.5.1](10-operations.md))** — manifest には `pending`
 という unit 状態は存在しない ([03-data-model.md §2.1](03-data-model.md) の遷移は failed → done のみ)。
-**retry の合成規則**: staging の完了済み bytes は凍結し、retry は**未完了 unit のみ**を返す契約とする。
-KCS が staging + retry 応答を合成し (同一 unit_key の重複は contract violation として reject —
-staging 側が first instance)、**完成集合に対して**受け入れ検査 (incremental は V1〜V6、full は full
-契約) を適用してから一括公開する。
+**retry の合成規則**: staging の完了済み bytes は凍結する。retry 応答は**全 unit を含んでよい**
+(未完了 unit のみへの絞り込みは任意の転送最適化 — Adapter は staging の内容を知り得ないため
+KCS は要求しない)。KCS が staging + retry 応答を合成する際、**staging に確定済みの unit_key と
+重複する応答 unit は黙って破棄する** (staging 側が first instance — first-instance-wins
+([03-data-model.md §5](03-data-model.md)) と同型)。合成後の**完成集合に対して**受け入れ検査
+(incremental は V1〜V6、full は full 契約) を適用してから一括公開する。
 
 **staging の物理喪失** (プロセスクラッシュ・task cache 消失) 時は staging 全体を破棄し、未確定 unit
 全体を再取得する — 完了済み bytes の凍結は転送量の最適化であり、正しさは全再取得で常に回復できる
