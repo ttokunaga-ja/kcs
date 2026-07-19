@@ -148,6 +148,9 @@ bulk 系 (`kcs evidence verify --batch <pointers.jsonl>`) は従来どおり各�
        registry 未登録の clone を scope_path で指した場合も、既知 live 行と合わせて 2 以上なら同じ error
        (URI 化で optional path が落ちた場合と結果を変えない))
     c. どちらも失敗 → KCS-E-EVIDENCE-SCOPE-UNREACHABLE-001 (scope_unreachable, §3.2)
+    (1a/1b の「表現差で変えない」の対象は既知候補集合に対する判定 — scope_path が registry 未登録の
+    clone を新たに教える場合に候補が増えて error 側へ倒れるのは fail-closed の意図どおりの**情報差**で
+    あり、表現差ではない)
 2.  commit を refs / objects/commits/ から取得
 2a. commit が shallow (tree 破棄済み) の場合の適用手順は次に限る: **手順 5 (tombstone /
     raw 存在) → pointer の chunk_hash → chunk object → gen で normalized unit instance を
@@ -157,9 +160,13 @@ bulk 系 (`kcs evidence verify --batch <pointers.jsonl>`) は従来どおり各�
     保持するため直接解決できる (03-data-model.md §8)。
     レスポンスに "commit_shallow": true を付す。
 3.  tree (commit.tree) を取得
-4.  tree から raw_hash で entry を検索 (同一 raw_hash の entry が複数ある場合 — 複数 path への重複配置 —
-    は、pointer の tool_profile_hash / gen と一致する normalize binding の entry を選ぶ。一致 entry が
-    無ければ手順 8 の不一致処理に従う。表示 path の選択は §7 の規則)
+4.  tree から raw_hash で entry を検索 (同一 raw_hash の entry が複数ある場合 — 複数 path への重複配置。
+    同一 commit 内では同一 (raw, tool_profile) の normalize binding は共有される — は、**pointer の
+    tool_profile_hash と一致する binding の entry を選ぶ** (pointer は gen を持たない — gen の整合は
+    手順 8 が tree entry と chunk object の間で検証する)。同一 binding の entry が複数残る場合は
+    **path の UTF-8 byte 順最小の entry を決定的に選ぶ** (§7 の表示 path も同じ規則)。一致 entry が
+    無ければ手順 5〜7 を実行せず KCS-E-STORE-CORRUPT-001 (not_found 扱い — 手順 8 の不一致処理と同じ
+    終端) へ短絡する)
 5.  raw_hash に **active な tombstone** (lifecycle の末尾 event が `purged` — [05-runtime.md §3.5](05-runtime.md)) が
     あるなら → tombstone を返す (§4)。**retired (末尾 event = `retired`) は tombstone 扱いしない** — 手順 6 へ進む
     (resurrection 後の旧 pointer を alive に戻すための必須条件)。tombstone / erase receipt が

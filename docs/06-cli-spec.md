@@ -291,7 +291,8 @@ sqlite.db 不在・利用不能       全経路 (verify / open / view / restore 
                                0 を返さない。multi-scope search は当該 scope を excluded_scopes として
                                継続し、全 scope 該当なら exit 3 — SCOPE-ALL-FAILED (4) より優先。
                                全 scope が STORE-VERSION 除外なら同型の昇格で exit 8 —
-                               KCS-E-STORE-VERSION-001 (05 §1.8 / 10 §12.5)。
+                               KCS-E-STORE-VERSION-001 (05 §1.8 / 10 §12.5)。昇格は除外理由が
+                               同一 code の場合に限る — 混在は SCOPE-ALL-FAILED / exit 4。
                                優先順位は VERSION → journal → DUP → REBUILDING (10 §3)。05 §2.6・08 §3.1)
 kcs evidence verify --batch <pointers.jsonl>   一括 verify (Step 4+ — 08 §4.3)
                                (--batch は --strict の有無に従う — --strict 時: 混在も 4 /

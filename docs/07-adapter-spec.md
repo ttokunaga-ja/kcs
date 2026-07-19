@@ -420,8 +420,10 @@ provider_scope_id()            下記の不変識別子を返す
   `Retry-After` があれば `retry_after_ms` で透過する)・permanent (内容起因の 4xx) の 3 分類で
   報告する (§4 の error_category と同一 enum)。分類と retry 予算の対応は
   [04-pipeline.md §5.3](04-pipeline.md) (rate_limit は Retry-After を解除条件とする retryable)
-- **課金報告**: task 完了時に実測コスト (または単価計算に足る unit 数) を報告する。報告値が cost ledger
-  ([04-pipeline.md §5.4](04-pipeline.md)) の記録源である
+- **課金報告**: **request (job / sync 呼出) 単位** — 各 request の応答 / fetch_output に実測コスト
+  (または単価計算に足る unit 数) を含めて報告する ([04-pipeline.md §5.4](04-pipeline.md) / §5.8 の
+  request 単位記帳の前提 — 直列多 request task では各 request の終端 Tx が自身の実測 usage を持つ)。
+  報告値が cost ledger の記録源である
 - **provider_scope_id**: `adapter 名前空間 + account 不変 ID (+ workspace 不変 ID)` の連結。表示名・
   alias 等の可変値は使わない。値は「これから呼び出す client instance」から取得する
 
@@ -510,6 +512,10 @@ input_raw_hash, output_hash
 status, error_code, error_category, retry_after_ms
 network_consent (approvals | cli_online — 送信を伴った実行のみ)
 started_at, finished_at
+intent_token, submission_seq (非機微 — batch_requests / cost_ledger の行との監査突合キー。
+                              CAS で敗れた送信 ([04-pipeline.md §5.4](04-pipeline.md)) は
+                              回収側の unknown_settled 行に対応づく — 送信 log 件数と
+                              cost_ledger 行数が一致しないのは二重課金防止のための意図的挙動)
 ```
 
 `adapter_id` は tools.toml の `tool_id` と同一値である (別 namespace を作らない — approvals[] (§3) の照合キーと一致し、実行 Adapter を承認行へ一意に対応付ける)。

@@ -277,7 +277,7 @@ cache = scope_registry / aggregator 検索の探索対象一覧 / stale 検出 /
 
 | ストア | 技術 | 区分 | 喪失時 | schema 正本 |
 |---|---|---|---|---|
-| `.kcs/objects/` (raw / prepared / images / normalized_units / manifests / toollocks / chunks / embeddings / trees / commits) | file (CAS) | **truth** | 復旧不能 (検証: [10-operations.md §7.5](10-operations.md)) | §8 / §2.1 |
+| `.kcs/objects/` (raw / prepared / image / normalized_units / manifests / toollocks / chunks / embeddings / trees / commits) | file (CAS) | **truth** | 復旧不能 (検証: [10-operations.md §7.5](10-operations.md)) | §8 / §2.1 |
 | `.kcs/HEAD` / `refs/` | file (atomic rename) | **truth** | 復旧不能 | §2 |
 | `.kcs/tombstones/` + erase receipt | file | **truth** (purge 証跡) | 復旧不能 | [05-runtime.md §3.5](05-runtime.md) |
 | `.kcs/scope.json` / `config.toml` / `tool-lock.json` | JSON / TOML (schema 検証: [10-operations.md §12.3](10-operations.md)) | **truth** | 復旧不能 | 各 spec |
@@ -391,8 +391,8 @@ chunk 境界は Adapter ではなく core 側の chunking 設定 (`.kcs/config.t
 ```text
 chunking_config_hash = "sha256:" + base16(sha256(JCS({
   spec_version: <int>,
-  strategy: "heading",
-  max_chars: 6000,
+  strategy: <effective [chunking].strategy — 既定 "heading">,
+  max_chars: <effective [chunking].max_chars — 既定 6000>,
   unicode_version: <slug 正規化に用いる Unicode (UCD) 版 — 04 §4.1 の固定文字集合と連動。
                     版差は config 変更として現れる。**省略不可 (default なし)**。
                     property は UCD の Script (Script_Extensions は使わない)>
