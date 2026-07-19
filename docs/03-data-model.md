@@ -239,7 +239,7 @@ view の存在は使わない。
 
 1. 管理対象は scope フォルダ **直下** のファイルに限る。サブフォルダ配下のファイルは、そのサブフォルダに `.kcs` が存在するか否かに関わらず、親 `.kcs` の管理対象に **ならない** (再帰包含は行わない)。
 2. サブフォルダは常に独立スコープの候補である。対象ファイルを含むサブフォルダには `kcs index` が子 `.kcs` を生成する ([06-cli-spec.md §1](06-cli-spec.md), [10-operations.md §4](10-operations.md))。ignore されたサブツリーには子 `.kcs` を生成しない。**VCS リポジトリ root (`.git` 等の VCS 管理ディレクトリを持つフォルダ) とその配下にも既定では子 `.kcs` を生成しない** (skip + status 表示。`[scope] index_vcs_repos = true` で opt-in) — リポジトリの履歴は VCS 自身が持ち、`.kcs` の自動生成はリポジトリを汚す ([01-positioning.md §8](01-positioning.md) の方針の機械化)。**本既定の導入以前に生成済みの既存子 `.kcs` は grandfathered** — 引き続き有効な scope として index・検索の対象に残る (skip が適用されるのは新規生成の判断のみ)。
-3. したがって tree entry の `path`、Evidence Pointer の `path_at_commit`、task の `input_path` は **パス区切り (`/`) を含まないファイル名** である。`/` を含む path を持つ tree / pointer は schema violation (`KCS-E-STORE-PATH-001`) として拒否する。同様に `\` ・単独の `.` / `..`・NUL・control 文字を含む path も拒否する (tag の portable leaf 規則と同水準 — §2)。restore 等の物理化は canonical join 後に対象ディレクトリ配下であることを検査する ([06-cli-spec.md §5](06-cli-spec.md))。
+3. したがって tree entry の `path`、Evidence Pointer の `path_at_commit`、task の `input_path` は **パス区切り (`/`) を含まないファイル名** である。`/` を含む path を持つ tree / pointer は schema violation (`KCS-E-STORE-PATH-001`) として拒否する。同様に `\` ・単独の `.` / `..`・NUL・control 文字を含む path も拒否する (tag の portable leaf 規則と同水準 — §2)。restore 等の物理化は canonical join 後に対象ディレクトリ配下であることを検査する ([06-cli-spec.md §5](06-cli-spec.md))。**この拒否は新規 ingest・新規 tree 作成時の forward 規則である** — 本規則以前の既存 tree entry に該当 path が残る場合、read / inspect / search は可能とし (§2 の「Windows で物理 leaf にできない既存 Unix 名」の legacy 読取と同型)、物理化は既存の対象 OS 検査で拒否または安全名 mapping、fsck は corruption ではなく legacy 警告として報告する (immutable tree は書き換えられないため)。
 
 ファイルの位置は `scope_path` (正本 `.kcs` の絶対パス) + ファイル名で一意に表現される。「フォルダ木を横断してファイルを探す」体験は、個々の `.kcs` の再帰包含ではなく scope_registry を使った横断検索 ([05-runtime.md §1.8](05-runtime.md)) が担う。
 
@@ -389,7 +389,9 @@ chunk 境界は Adapter ではなく core 側の chunking 設定 (`.kcs/config.t
 chunking_config_hash = "sha256:" + base16(sha256(JCS({
   spec_version: <int>,
   strategy: "heading",
-  max_chars: 6000
+  max_chars: 6000,
+  unicode_version: <slug 正規化に用いる Unicode (UCD) 版 — 04 §4.1 の固定文字集合と連動。
+                    版差は config 変更として現れる>
 })))
 ```
 

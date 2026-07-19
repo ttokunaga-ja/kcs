@@ -99,7 +99,10 @@ opt-in の単位・成立・寿命:
         (どの .kcs のファイルを、どの online_api Adapter (tool_id) に送るか)
 
 成立:   (a) 初回スキャン承認フローで network transmission policy を承認
-            (対話承認 または --approve。--yes では成立しない: 06-cli-spec.md §2)
+            (対話承認 または --approve。--yes では成立しない: 06-cli-spec.md §2)。
+            **承認の成立 = approvals[] 行の materialize と、同一承認操作での scope config
+            `allow_network = true` の設定の両方** (送信 gate は boolean と行の AND —
+            行だけでは送信が有効にならない)
         (b) 明示設定: .kcs/config.toml の adapter.policy.allow_network = true
 
 寿命:   永続 (revoke まで)。ただし対象 Adapter の tool_id または execution_mode が

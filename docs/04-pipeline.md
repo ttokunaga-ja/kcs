@@ -391,7 +391,9 @@ CREATE TABLE chunk_config_generations (
 4. section_id = heading_path の各要素を slug 化し "/" で結合。slug 規則: NFC 正規化 →
    ASCII 英字は小文字化 → 空白列を "-" に → 英数字・ハイフン・アンダースコア・日本語文字
    (Unicode script property が Hiragana / Katakana / Han の文字 + 長音記号 ー U+30FC・々 U+3005 に
-   固定 — 集合の変更は chunking_config_hash の変更として扱う) 以外を除去 → 連続 "-" を 1 つに → 先頭末尾の "-" を除去。
+   固定 — 使用する UCD 版は chunking config の `unicode_version` として hash 入力に含める
+   ([03-data-model.md §5.3](03-data-model.md))。集合・版の変更は chunking_config_hash の変更として
+   扱う) 以外を除去 → 連続 "-" を 1 つに → 先頭末尾の "-" を除去。
    同一 unit 内の重複 slug は 2 つ目以降に "#2", "#3" を付す (出現順)
 5. 分割: 見出し区間が max_chars (03 §11 [chunking]) を超える場合、段落境界 (空行) で
    貪欲に max_chars 以下へ分割する。単一段落が max_chars を超える場合のみ文字位置で

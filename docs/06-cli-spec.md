@@ -233,13 +233,13 @@ kcs restore <pointer> --to ./recovered/ --force    # 既存上書き許可 (確�
 通常削除 (`rm`) や archive は最新状態から対象を消すだけで、過去履歴は保持する。法務・秘匿・誤取り込みで履歴ごと消す場合のみ `purge` を使う。
 
 ```bash
-kcs purge <path> --reason <legal|privacy|misingest|copyright|...>
+kcs purge <path> --reason <legal|privacy|misingest|copyright|other>
 kcs purge --raw-hash sha256:abc... --reason misingest --erase-tombstone
 ```
 
 purge は常に**全履歴**の raw 本文・派生 artifact を対象とする (commit / tree object は書き換えない。[05-runtime.md §3.5](05-runtime.md))。デフォルトでは tombstone を記録し、`--erase-tombstone` は public tombstone を残さない (Evidence Pointer は not_found)。後者の fsck-only non-content erase receipt は pointer state や re-ingest を阻止しない。
 
-- `--reason` は必須引数 (`enum`)
+- `--reason` は必須引数 (5 値の閉 enum: legal | privacy | misingest | copyright | other — [08-evidence-pointer-spec.md §4.1](08-evidence-pointer-spec.md) の purged_reason と同一)
 - 確認 prompt 必須 (`--yes` でスキップ可)
   - (purge の `--yes` は確認プロンプトのスキップのみで、§2 の初回スキャン承認の `--yes` とは
     独立。network opt-in を付与する効果はどちらにもない)

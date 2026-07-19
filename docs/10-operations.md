@@ -293,11 +293,16 @@ CREATE TABLE scopes (
   (3) index 可用性 (KCS-E-INDEX-REBUILDING-001) → (4) command 固有の検査。同時成立時は先順の
   error を返し、multi-scope の `excluded_scopes.reason` も同順で決定する (実装順に依存させない —
   purge 再開・dedupe・rebuild のどれを先に行うべきかを automation が一意に判断できる)。読取系は
-  この順序を**冒頭 1 回**適用し、その時点の registry / index 状態を線形化点とする — 返却直前に
-  再検査するのは purge journal / epoch と lifecycle counter のみ ([05-runtime.md §6](05-runtime.md) —
-  不可逆副作用と旧 cursor 受理の防止が目的)。検査後の DUP / REBUILDING の状態変化は次回実行で拾う
+  この順序を**冒頭 1 回**適用し、その時点の registry / index 状態を線形化点とする — 返却直前の
+  再検査は**冒頭で保存した開始値との不変比較**を固定順で行う: (1) purge journal 不在 →
+  (2) purge epoch = 開始値 → (3) lifecycle counter = 開始値 (**counter が最終の線形化点**)。
+  いずれかの不一致で結果を破棄し retryable (exit 3) — 比較対象は常に開始値であり、最新
+  last_lifecycle_epoch との再照合ではない ([05-runtime.md §6](05-runtime.md) — 不可逆副作用と
+  旧 cursor 受理の防止が目的)。検査後の DUP / REBUILDING の状態変化は次回実行で拾う
   (fail-closed の再適用はしない)。
-  registry は cache なので削除は常に安全 (live scope は自分を再登録する)
+  registry は cache なので削除は解決系には安全 (live scope は自分を再登録する)。**ただし live 重複の
+  検出 (DUP gate) も registry に依存するため、削除直後は gate が一時的に盲目になる** — 各 clone の
+  次回使用で再登録され次第回復する既知の窓 (削除を dedupe の手段にしない)
 - device data dir (`~/.local/share/kcs/`) は owner-only (0700) に制限する (best-effort。非 unix は
   no-op。registry / cost-ledger / logs は利用パターンとスコープ地図を含むため)
 
@@ -522,8 +527,10 @@ manifest 欠落を説明するものが消える。**commit がまだ無い場�
 
 erase receipt の validation は schema_version で分岐する。**v2 (events[])**: strict schema / leaf
 identity に加え、各 event が kind 別の必須 field (erased / retired 共通 = `at`・`in_commit`・`actor`、
-retired はさらに `resurrection_commit`。**2026-07-19 以降の新規 purged / erased event は `epoch` も
-必須** — legacy 欠落行は valid だが、epoch 回復の最大値計算には使わない) を持つこと、`erased` event の `in_commit` が bounded verified
+retired はさらに `resurrection_commit`。**2026-07-19 以降の新規 event は、purged / erased が `epoch` (purge counter)、全種 (purged /
+erased / retired) が `lifecycle_epoch` (lifecycle counter — 別系統) も必須** — legacy 欠落行は
+valid だが、各回復の最大値計算には使わない。reason は 5 値 enum — enum 外は legacy 行として
+警告 (corruption にしない・response は other 扱い)) を持つこと、`erased` event の `in_commit` が bounded verified
 CAS で ref-reachable な `commit_type=purged` commit を指すこと、各 `at` が canonical UTC でその event
 の commit `created_at` と一致し invocation の fixed now より未来でないこと、event 列が有効な遷移
 (erased を先頭に erased / retired が交互 — 末尾 event が現況) であること、terminal `retired` の
@@ -587,7 +594,9 @@ sqlite.db / scope-registry.sqlite は正本から再構築可能な cache であ
 **`cost-ledger.sqlite` はこのデフォルトの対象外** — 再構築不可の運用台帳 (課金記録 + in-flight Batch
 intent、[04-pipeline.md §5.4](04-pipeline.md)) であり、schema 変更は常に下記の in-place migration
 要件に従う (既存行の保全が必須。旧 JSONL 3 ファイル構成からの移行も同要件で一度だけ行う —
-追加列は NULL / DEFAULT で backfill)。**形状検出は sqlite_master の CREATE 文 (列・CHECK 制約を
+追加列は NULL / DEFAULT で backfill。**移行は 2 相**: (1) SQLite への import と migration marker
+行の確定を同一 Tx で行い → (2) 旧 JSONL を `.migrated` へ rename する。再開時は marker の存在で
+import を skip し rename のみ再試行する — savepoint は外部ファイルの rename を含められない)。**形状検出は sqlite_master の CREATE 文 (列・CHECK 制約を
 含む) の canonical 比較で行う** — 列存在検査だけでは CHECK 制約の追加・変更を識別できない。
 
 例外として in-place migration を書いてよいのは次の場合のみ:
@@ -907,7 +916,9 @@ message   人間可読な短文 (非機微テンプレートに限る — query 
 context   必須 field (空 object 可) — 値は JSON object (tool_profile_hash, commit_hash, raw_hash,
           scope_id 等。file_id は廃止済み識別子のため使わない。
           **scope 由来の行は context.scope_id を必須とする** — purge の対象化キー (§7)。
-          複数 scope に跨る行 (横断検索 metric 等) は scope_id を持たない)
+          複数 scope に跨る行 (横断検索 metric 等) は scope_id を持たない — **そのためこれらの行には
+          raw_hash / path / query 等の対象由来値を記録しない** (purge の対象化が届かないため。
+          必要なら行を scope 別に分割する))
 ```
 
 ログのローテーションは日次、保持は 30 日 (config 上書き可)。`redact_logs` の

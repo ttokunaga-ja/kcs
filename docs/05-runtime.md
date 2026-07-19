@@ -390,7 +390,7 @@ per_scope_timeout_seconds = 2   # 超過 scope は excluded_scopes (reason=timeo
 base64url opaque token として返す。Step 4 cursor schema は `v=2`; 必須 config/association/selector
 binding を持たない legacy `v=1` は `KCS-E-SEARCH-CURSOR-001` で拒否する (cursor は durable artifact ではない)。
 
-- `scope_mode` は検索対象 scope の指定方法 (all / `--scope` / `--descendants`)、`query_hash` は次の正準構成 (Step 4 で per-scope current chunk config binding を追加): `"sha256:" + base16(sha256(JCS({ query: <NFC 正規化後のクエリ文字列>, mode: <解決後の実効 mode (text|vector|hybrid)>, chunking_configs: <{scope_id,chunking_config_hash} の scope_id UTF-8 byte order 配列>, scope_mode, scopes: <page 1 または直前 replay で実際に参加する active scope_id の昇順配列>, rrf: <[search.rrf] の実効値 (k / candidate_depth / w_text / w_vector — 変更は確定順序を変えるため cursor 誤用検出の対象)>, diversify: <[search.diversify] の実効値>, time_travel: <--at/--all-history/--include-deleted/--since の実効値 (未指定キーは省略)> })))`。`limit` / `--offset` / `--cursor` / `--json` は**含めない** (ページング操作で hash が変わってはならない)。いずれも token 全体に 1 つで、別クエリ・別条件・いずれかの scope の別 chunking config での cursor 誤用検出に使う (不一致は `KCS-E-SEARCH-CURSOR-001` で拒否、§1.5)
+- `scope_mode` は検索対象 scope の指定方法 (all / `--scope` / `--descendants`)、`query_hash` は次の正準構成 (per-scope の対象 chunking config binding を含む — §1.5 の対象 config と同一): `"sha256:" + base16(sha256(JCS({ query: <NFC 正規化後のクエリ文字列>, mode: <解決後の実効 mode (text|vector|hybrid)>, chunking_configs: <{scope_id,chunking_config_hash} の scope_id UTF-8 byte order 配列>, scope_mode, scopes: <page 1 または直前 replay で実際に参加する active scope_id の昇順配列>, rrf: <[search.rrf] の実効値 (k / candidate_depth / w_text / w_vector — 変更は確定順序を変えるため cursor 誤用検出の対象)>, diversify: <[search.diversify] の実効値>, time_travel: <--at/--all-history/--include-deleted/--since の実効値 (未指定キーは省略)> })))`。`limit` / `--offset` / `--cursor` / `--json` は**含めない** (ページング操作で hash が変わってはならない)。いずれも token 全体に 1 つで、別クエリ・別条件・いずれかの scope の別 chunking config での cursor 誤用検出に使う (不一致は `KCS-E-SEARCH-CURSOR-001` で拒否、§1.5)
 - page 1 の `scopes` / `chunking_configs` は成功して実際に ranking へ参加した scope だけを含む。
   page-1 `excluded_scopes` は bounded `{scope_id,reason}` として signed token に保持するが active scope や
   query hash の config mapping には入れず、その cursor stream へ後から再参加させない。registry に後から
@@ -567,12 +567,13 @@ purge:   履歴から物理的に消す。例外操作。commit_type=purged が�
 - 法令上の削除義務 (個人情報・GDPR の forget 権)
 - 機密漏洩への対応 (誤って取り込んだ秘匿文書)
 - 著作権・契約上の保持禁止
+- 誤取り込みの是正 (取り込むべきでなかった対象 — 秘匿文書に限らない)
 ```
 
 CLI:
 
 ```bash
-kcs purge <path|raw_hash> --reason <legal|privacy|misingest|copyright|...>
+kcs purge <path|raw_hash> --reason <legal|privacy|misingest|copyright|other>
 # --reason は必須。--yes なしなら確認プロンプト
 ```
 
@@ -675,14 +676,17 @@ SQLite Tx は index_metadata の **`last_lifecycle_epoch`** ([04-pipeline.md §4
 回復が **counter > last_lifecycle_epoch** を検出して回転を補完する (UTC ms の時刻比較は同一ミリ秒・
 時計逆行で補完を見逃すため使わない。`kcs repair --rebuild-db` は完了 Tx で現 counter 値に初期化する
 — DEFAULT 0 のままの全件誤検出を防ぐ)。**counter の耐久順序と回復**: counter の +1 (fsync) を
-event append より先に行う (逆順は event だけが残り検出不能になる — counter 先行なら余分な補完回転
-だけで無害)。counter ファイルの欠落・不正、または「counter <= last_lifecycle_epoch なのに lifecycle
-record 側に更新痕跡がある」巻き戻り (backup 復元等) を locked mutation 冒頭で検出したら、
-**max(last_lifecycle_epoch, 全 lifecycle event の epoch 最大値) + 1 で counter を再作成し、無条件で
-index_generation を 1 回転する** (取りこぼした可能性のある更新を回転で潰す fail-safe)。**読取系も
-冒頭検査で counter と last_lifecycle_epoch を照合し、counter > 記録値なら KCS-E-INDEX-REBUILDING-001
-と同じ retryable (exit 3) を返す** — 補完回転は書き込み系のみが行うため、crash 後最初のコマンドが
-読取でも旧 cursor を退役後の可視集合へ受理しない。
+event append より先に行い、**全ての新規 lifecycle event (purged・erased・retired・legacy 変換の
+書込) に、その時点の counter 値を `lifecycle_epoch` として必須記録する** (purge の `epoch`
+(target_epoch) とは**別 field** — 2 系統のカウンタを混用しない。legacy 行の欠落は可)。
+**巻き戻り検出は機械条件のみ**: locked mutation 冒頭で
+`counter < max(last_lifecycle_epoch, 全 lifecycle event の lifecycle_epoch 最大値)` なら欠落・不正・
+backup 復元による巻き戻りとみなし、**その max + 1 で counter を再作成して無条件で
+index_generation を 1 回転する** (取りこぼした可能性のある更新を回転で潰す fail-safe。
+「更新痕跡」の判定はこの比較だけで行い、mtime 等の抽象的条件は使わない)。**読取系は冒頭検査で
+counter と last_lifecycle_epoch を照合し、不一致 (> だけでなく < も) なら
+KCS-E-INDEX-REBUILDING-001 と同じ retryable (exit 3) を返す** — 補完回転は書き込み系のみが行うため、
+crash 後最初のコマンドが読取でも旧 cursor を退役後の可視集合へ受理しない。
 次回の locked mutation または fsck が「active tombstone × 同一 raw の ref 到達可能な
 再 publication commit **であって、末尾 purged event の `in_commit` を ancestor に持つもの
 (= 当該 purge より後の publication)**」を検出したら retired event を補完する (erase receipt の
@@ -732,7 +736,8 @@ phase 順序    = prepared (closure 確定・記帳)
               exit 3 にしない) —
               marker 耐久化後・削除完了前の窓で削除対象の本文を返さないため。読み取り系は lock を
               取らないため、冒頭 1 回の検査では検査後に journal が現れる TOCTOU 窓が残る — 返却直前の
-              再検査がこれを閉じる。`kcs status` だけは拒否せず、active journal の存在を状態として
+              再検査 (journal / purge epoch / **lifecycle counter** の 3 点 — 順序と比較対象は
+              [10-operations.md §3](10-operations.md) の固定順) がこれを閉じる。`kcs status` だけは拒否せず、active journal の存在を状態として
               表示する (クラッシュした purge の回復可視性のため。status は本文を返さない)。
               不可逆な外部副作用を持つ 2 系は検査位置を固定する: restore は private temp へ展開し
               返却直前検査の後に atomic rename で --to へ publish (検出時は temp を削除)、open は
@@ -750,7 +755,7 @@ tombstone 再検査で破棄する ([04-pipeline.md §5.8](04-pipeline.md) 相 3
 tombstone を削除より先に耐久化するのは、「対象 object が消えたのに purge の痕跡が無い」状態
 (corruption と区別不能な markerless absence) を作らないためである。
 
-tombstone は raw_hash をキーとする **lifecycle レコード** (append-only の events[] 配列) で、CAS object ではないため `objects/` の外に置く。event は `purged` / `retired` の 2 種で、**active 判定 = 末尾 event が `purged` であること** — retire は末尾に `retired` を append し (上書き・削除しない = 退役監査の保全)、再 purge はさらに `purged` を append する。resolver・fsck・再 purge はこの「末尾 event」規則だけを参照する。events を持たない旧 flat 形式は「purged event 1 件」として読み、**次の mutation 時に一回だけ events 形式へ変換する** (legacy)。**lifecycle レコードの更新 (retire・再 purge・legacy 変換) は `.kcs/.lock` 下で、temp 書込 → file fsync → atomic rename → 親 directory fsync で行う** ([04-pipeline.md §1.1](04-pipeline.md) と同じ規律)。malformed・途中破損 (torn JSON) の record は `KCS-E-STORE-CORRUPT-001` として fail-closed に扱う。
+tombstone は raw_hash をキーとする **lifecycle レコード** (append-only の events[] 配列) で、CAS object ではないため `objects/` の外に置く。event は `purged` / `retired` の 2 種で、**active 判定 = 末尾 event が `purged` であること** — retire は末尾に `retired` を append し (上書き・削除しない = 退役監査の保全)、再 purge はさらに `purged` を append する。resolver・fsck・再 purge はこの「末尾 event」規則だけを参照する。events を持たない旧 flat 形式は「purged event 1 件」として読み、**次の mutation 時に一回だけ events 形式へ変換する** (legacy)。変換時、5 値 enum ([08-evidence-pointer-spec.md §4.1](08-evidence-pointer-spec.md)) 外の自由文 reason は `other` へ正規化し、原値を optional `legacy_reason` に保全する — 閉 enum は新規書込の規則であり、旧値の読取は other 扱い (表示は原値可・fsck は corruption にせず警告)。**lifecycle レコードの更新 (retire・再 purge・legacy 変換) は `.kcs/.lock` 下で、temp 書込 → file fsync → atomic rename → 親 directory fsync で行う** ([04-pipeline.md §1.1](04-pipeline.md) と同じ規律)。malformed・途中破損 (torn JSON) の record は `KCS-E-STORE-CORRUPT-001` として fail-closed に扱う。
 物理 leaf の `<raw64>` は論理 `raw_hash` から `sha256:` を除いた 64 文字の小文字 hex であり、
 JSON 内の `raw_hash` は完全な `sha256:<64hex>` を保持する。旧 Unix store の prefixed leaf は
 [03-data-model.md §2](03-data-model.md) の検証付き compatibility fallback で解決する。purge 実装時は
@@ -761,9 +766,9 @@ canonical / legacy の両 variant が存在する場合に両方を検証し、�
   "raw_hash": "sha256:abc...",
   "events": [
     { "kind": "purged",  "at": "2026-04-25T12:00:00Z", "reason": "legal", "actor": "user",
-      "in_commit": "sha256:9f2c...", "epoch": 12 },
+      "in_commit": "sha256:9f2c...", "epoch": 12, "lifecycle_epoch": 41 },
     { "kind": "retired", "at": "2026-05-01T09:00:00Z", "actor": "user",
-      "in_commit": "sha256:1a2b...", "resurrection_commit": "sha256:1a2b..." }
+      "in_commit": "sha256:1a2b...", "resurrection_commit": "sha256:1a2b...", "lifecycle_epoch": 42 }
   ]
 }
 ```
@@ -777,9 +782,9 @@ fsck が区別できるよう、同じ digest-only fan-out に次の exact bound
   "raw_hash": "sha256:abc...",
   "events": [
     { "kind": "erased",  "at": "2026-04-25T12:00:00Z", "in_commit": "sha256:9f2c...",
-      "actor": "user", "epoch": 12 },
+      "actor": "user", "epoch": 12, "lifecycle_epoch": 41 },
     { "kind": "retired", "at": "2026-05-01T09:00:00Z", "actor": "user",
-      "in_commit": "sha256:1a2b...", "resurrection_commit": "sha256:1a2b..." }
+      "in_commit": "sha256:1a2b...", "resurrection_commit": "sha256:1a2b...", "lifecycle_epoch": 42 }
   ]
 }
 ```
