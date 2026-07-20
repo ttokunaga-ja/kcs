@@ -47,8 +47,10 @@ raw / prepared / image / chunk / embedding / manifest / toollock / tree / commit
                       payload が存在する窓を作らない)。**purge / status / prune-orphans の
                       帰属列挙は descriptor の全走査が正本** (tasks.jsonl 非依存 — task 記録の
                       喪失許容 ([04-pipeline.md §1](04-pipeline.md)) と両立させる唯一の手段)。
-                      **descriptor の無い・path と不整合な root (crash 残骸・旧 store) は fsck /
-                      status が表示し、`--prune-orphans` の削除対象とする** (帰属不明の staging は
+                      **descriptor の無い root・path と不整合な root (descriptor の有無を問わない —
+                      crash 残骸・旧 store)・terminal 化済み task の残存 root (cleanup 失敗の残骸 —
+                      [07-adapter-spec.md §8.3](07-adapter-spec.md)) は fsck / status が表示し、
+                      `--prune-orphans` の削除対象とする** (帰属不明の staging は
                       安全側 = 削除 — [10-operations.md §7.5.1](10-operations.md))
   objects/
     raw/ab/cd/<raw64>
@@ -338,6 +340,9 @@ sampling              {temperature, top_p, top_k, max_tokens, seed}
 output_schema         期待する Markdown / JSON schema id とバージョン
 render_params         prepare 専用: {renderer_name, renderer_version, dpi, color_space, output_format}
                       (バイト列決定性に影響する全レンダリング設定 — [04-pipeline.md §2.1](04-pipeline.md))
+bbox_annotation       markdownize 専用: boolean — folder config `[markdownize].bbox_annotation` の
+                      実効値を採用時に畳み込む (値は出力に影響する — [07-adapter-spec.md §5.2](07-adapter-spec.md)、
+                      schema key は [10-operations.md §12.3](10-operations.md))
 dimensions / distance / modality   embedding 専用
 runtime_kind          "cloud" | "local" (capability レベル)
 spec_version          この計算規約自体のバージョン

@@ -221,7 +221,8 @@ bulk 系 (`kcs evidence verify --batch <pointers.jsonl>`) は従来どおり各�
 8.  **整合検証**: 解決した chunk object の raw_hash / tool_profile_hash が pointer の値と一致し、
     手順 4-6 を経た場合はさらに **tree entry の normalize.tool_profile_hash が pointer の
     tool_profile_hash と一致し**、chunk object の gen が tree entry の gen と一致することを検証する
-    (手順 4 は raw_hash だけで entry を引くため、entry 側の tool 一致を要求しないと、同一 raw を
+    (手順 4 の tool 一致選択とは独立に、終端で entry 側の tool 一致を再検証する defense-in-depth —
+    この postcondition を欠くと、手順 4 の選択が破損・改変した store 上で迂回された場合に、同一 raw を
     別 tool で normalize した commit に対して gen 値の偶然一致 (双方 0 等) だけで別 tool の chunk が
     当該 commit の証拠として通ってしまう)
     (pointer は gen を持たない — gen の照合対象は tree entry と chunk object 内部のみ)。不一致は

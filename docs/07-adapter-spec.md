@@ -216,8 +216,10 @@ AdapterProfile:
   capability_flags      ["ocr", "layout_detection", "incremental_update", ...]
   billable_kinds        billable を宣言する Adapter (§5.7 条件 6) は必須 — 報告し得る
                         `billable_units.kind` の閉集合 (拒否課金の有無の宣言とは別 field)。
-                        **実行時 usage の kind が宣言集合外なら contract violation**。送信前の
-                        pricing 被覆検査の入力 ([10-operations.md §12.3](10-operations.md))
+                        **実行時 usage の kind が宣言集合外の場合は課金 field の不良として
+                        estimated 縮退 + warning ([04-pipeline.md §5.4](04-pipeline.md) — 応答の
+                        受否・outcome・`contract_violation_count` は変えない)**。宣言集合の執行面は
+                        送信前の pricing 被覆検査の入力 ([10-operations.md §12.3](10-operations.md))
   allow_network
 
 AdapterRun:
@@ -238,7 +240,8 @@ AdapterRun:
                         これに充てる — §5.7 条件 6。第三の field は設けない)。billable_units =
                         **unique-kind の配列** `[{ kind, count }, ...]` (1 要素以上。kind = "pages" |
                         "tokens_in" | "tokens_out" の閉 enum — 拡張は spec 改訂。count = 非負整数。
-                        **kind の重複は違反**。USD 換算は要素ごとの単価 × count の**合算** —
+                        **kind の重複は課金 field の不良 (estimated 縮退 + warning —
+                        [04-pipeline.md §5.4](04-pipeline.md))**。USD 換算は要素ごとの単価 × count の**合算** —
                         input/output token 両課金の provider を単一報告で表現する)。単価解決元 = tools.toml の
                         `[pricing]` 単価表 (kind → USD 単価 — [03-data-model.md §11](03-data-model.md)、
                         **単価の正本は tools.toml** — tool-lock ではない。schema 型と billable Adapter の
@@ -482,7 +485,8 @@ provider_scope_id()            下記の不変識別子を返す
    拒否応答時に usage (`usd` = 宣言請求額 | `billable_units` — §4 の one-of と同形、第三の field は
    設けない) を機械可読で返却する** (この返却義務は Batch 限定で
    なく **sync online Adapter にも共通** — [04-pipeline.md §5.4](04-pipeline.md) の sync 記帳規律が参照する) — KCS は submit_rejected の
-   terminal 化と同一 Tx で estimated 記帳する ([04-pipeline.md §5.4](04-pipeline.md) DDL 注記)
+   terminal 化と同一 Tx で記帳する (**報告値が有効なら provider 値 (`estimated=0`)、無効・欠落は
+   estimated 縮退** — [04-pipeline.md §5.4](04-pipeline.md) の事前検証と DDL 注記)
 
 `mistral_ocr_markdownize` の Batch モードは 2026-07-03 の実地検証 (§5.2 末尾) の範囲でこの条件下で
 採用済み。
@@ -665,9 +669,14 @@ USER:
 帰属列挙の正本**)、応答完了後に**全体集合が受け入れ検査
 ([04-pipeline.md §3.2](04-pipeline.md)) を通過した時点で manifest へ一括確定する** (検査前の unit は
 公開しない — §3.2 の「違反応答は 1 unit も persist しない」と整合)。ストリーミング失敗時は staging を
-破棄せず、**完了済み unit は保全したまま task を failed (retryable) にする。task が failed permanent または
-abandon で terminal 化したときは、当該 task の staging を同一遷移で冪等に cleanup する (残存は
-`kcs status` に表示し、prune-orphans の blocker として可視化 — [10-operations.md §7.5.1](10-operations.md))** — manifest には `pending`
+破棄せず、**完了済み unit は保全したまま task を failed (retryable) にする。task が done (受け入れ検査
+通過 → manifest 一括確定)・failed permanent・abandon のいずれかで terminal 化したときは、当該 task の
+staging を同一遷移で冪等に cleanup する (**遷移内の順序は terminal 状態の耐久化 (done は manifest
+一括確定の耐久化) が先、cleanup が後** — 逆順だと crash 時に公開元 bytes を失う。crash 時は遷移の
+回復 replay で cleanup も再実行される。
+非 terminal task の staging は `kcs status` に表示し、prune-orphans の blocker として可視化する一方、
+terminal 化済み task の残存 root は cleanup 失敗の残骸として prune-orphans の削除対象 —
+[10-operations.md §7.5.1](10-operations.md))** — manifest には `pending`
 という unit 状態は存在しない ([03-data-model.md §2.1](03-data-model.md) の遷移は failed → done のみ)。
 **retry の合成規則**: staging の完了済み bytes は凍結する。retry 応答は**全 unit を含んでよい**
 (未完了 unit のみへの絞り込みは任意の転送最適化 — Adapter は staging の内容を知り得ないため

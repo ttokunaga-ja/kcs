@@ -564,13 +564,17 @@ ancestor に持つ (= 当該 purge より後の publication である)** こと�
 
 **orphan 掃除 (`--prune-orphans`)**: `kcs repair --verify-objects --prune-orphans` は、どの manifest
 からも参照されない orphan prepared / image (公開前 crash の残骸 — [05-runtime.md §3.5](05-runtime.md))
-と **descriptor の無い・path と不整合な staging root ([03-data-model.md §2](03-data-model.md) —
-帰属不明の crash 残骸)** を列挙し、locked repair として削除する (確認プロンプト必須。live 参照判定は
+と **descriptor の無い staging root・path と不整合な staging root (descriptor の有無を問わない)・
+terminal 化済み (done / failed permanent / abandoned) task にのみ対応する staging root
+([03-data-model.md §2](03-data-model.md) — 帰属不明の crash 残骸、および
+[07-adapter-spec.md §8.3](07-adapter-spec.md) cleanup 失敗の残骸)** を列挙し、locked repair として削除する (確認プロンプト必須。live 参照判定は
 purge closure と同一規則)。
 GC 本体は Phase 4+ のまま、**法務 purge の完結手段のみ前倒しする** (purge 完了表示の注記から誘導)。
 **拒否条件 (fail-closed)**: 当該 scope に state 0/1 の外部実行 (batch_requests — request_kind 不問)・
-pending / running の task・**descriptor を持つ** staging ([07-adapter-spec.md §8.3](07-adapter-spec.md)
-— 進行中 task の保全。descriptor の無い残骸は上記の削除対象であり blocker にしない)・未 finalize の
+pending / running の task・**descriptor を持ち path と整合し、非 terminal (pending / running /
+failed retryable) の task に対応する** staging ([07-adapter-spec.md §8.3](07-adapter-spec.md)
+— 進行中 task の保全。対応 task を特定できない descriptor つき root は blocker 側に倒す (fail-closed)。
+descriptor の無い・path 不整合・terminal 化済み task の残骸は上記の削除対象であり blocker にしない)・未 finalize の
 manifest 進行状態・active な purge journal のいずれかが存在する間は、prune を実行せず exit 3
 (retryable) で拒否する — **manifest 未確定の正規進行中 prepared / image を orphan と誤認して削除
 しない**ため (相 3 collect の入力を消すと再課金・欠落参照になる。終端・完了後に再実行する)。拒否応答には
@@ -866,7 +870,7 @@ dead pointer (tombstoned / not_found) は `4`、**scope_unreachable のみは re
 .kcs/manifest.json (簡易管理時)    → schemas/manifest.schema.json
 ```
 
-validation 失敗は exit code 2 で停止し、`KCS-E-CONFIG-SCHEMA-NNN` を返す。schema は semver で版管理し、breaking change は migration を要求 (§12.5)。
+validation 失敗は exit code 2 で停止し、`KCS-E-CONFIG-SCHEMA-001` を返す。schema は semver で版管理し、breaking change は migration を要求 (§12.5)。
 
 `scope.schema.json` は少なくとも次の key を定義する: `scope_id` (required)・子 `.kcs` リンク ([03-data-model.md §2](03-data-model.md))・`scan_approval` (optional — §1 の取り込み承認記録。required field は §1 の記録一覧と一致)・`approvals[]` (optional — adapter 単位の network opt-in。要素の required field = scope_id / tool_id / execution_mode / tool_profile_hash / approved_at / approval_method / status (`active` | `revoked`)、status=revoked の行は revoked_at も必須 — [07-adapter-spec.md §3](07-adapter-spec.md))・`approval_pending` (optional — 承認書込順の pending intent、[07-adapter-spec.md §3](07-adapter-spec.md)。要素の required field = scope_id / tool_id / execution_mode / tool_profile_hash。行 publish と同一 atomic write で除去)・`approvals_initialized` (optional boolean — 初回承認の行 publish と同一 atomic write で true 化する消費済み marker。true かつ approvals[] 空 = 台帳喪失として blanket 自動 materialize を fail-closed にする、07 §3)。**未知 key は schema error** (fail-closed)。この検証は `kcs_format_version` の互換判定より**後**に走る — 自己の対応上限より新しい version の store は schema validation に入らず read-only + 新版誘導で縮退する ([03-data-model.md §2](03-data-model.md))。公開後に scope.schema.json へ key を追加する場合は `kcs_format_version` の MINOR bump を伴う (§12.5 — bump が旧実装をこの縮退経路へ導く。未知 key = schema error 自体は維持する: marker 等 security 意味を持つ key を旧実装が黙って無視すると迂回が復活するため)。両 key (および marker) を欠く旧 scope.json は valid であり、欠落 = 当該承認なしとして扱う (migration 不要の後方互換)。**要素単位の後方互換**: `status` フィールドを持たない approvals[] 行 (r9 スキーマ以前の承認記録) は schema error にせず **`status='active'` として読む** — 行は明示承認の記録であり、execution_mode / tool_profile_hash の一致検査 (失効判定) は従来どおり効く。次回の locked mutation で `status='active'` を atomic に補完書込みし、補完後は現行 schema で検証する (要素単位の欠落で CLI 全体を exit 2 停止させない)。
 

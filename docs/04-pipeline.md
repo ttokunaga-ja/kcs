@@ -309,7 +309,9 @@ unit_mapping (§2.2) の帰結 (`unchanged 候補 ∪ changed ∪ added`)。
 
 ```text
 V1 被覆・排他: keys(updated_units) ∪ keys(added_units) ∪ unchanged_unit_keys ∪ keys(failed_units) = N
-              かつ 4 集合は互いに素 (unit の返し忘れ / 二重出力の検出。failed_units は persist せず
+              かつ 4 集合は互いに素 (unit の返し忘れ / 二重出力の検出。**同一配列内の unit_key 重複も
+              違反** — keys() の集合化では隠れるため、各配列の要素数 = distinct unit_key 数を
+              あわせて検査する。failed_units は persist せず
               manifest 側で failed へ遷移する — §5.2 partial の表現手段。V5 の形式検査は
               failed_units には適用しない)。さらに
               keys(failed_units) ⊆ hints.changed_unit_keys ∪ hints.added_unit_keys
@@ -336,6 +338,11 @@ V6 mode:      mode_used = "full" の場合は full 出力契約として検証:
               manifest 側で failed へ遷移する)。V1〜V4 は適用しないが、**V5 の形式検査は
               full 出力の全成功 unit に適用する** (V1 と同じく failed_units には適用しない)
 ```
+
+**unit_ref 衝突の拒否**: 応答内の異なる `unit_key` 同士、または応答の unit_key と既存 manifest の
+unit との間で、同一 `unit_ref` (`base16(sha256(unit_key))[0:16]` — [03-data-model.md §2](03-data-model.md))
+への写像が衝突する場合、persist 先 `<unit_ref>.json` が競合するため当該応答を whole-response reject
+とする (実用上は起こらない 64bit 衝突の防衛線 — 検査は persist 前の V 検査と同時に行う)。
 
 **制御応答 (fallback_to_full=true)**: `fallback_to_full=true` の応答は V1〜V6 に**先立ち**制御応答として評価する — unit 配列・unchanged / removed は空であること (非空は contract violation)。KCS は当該応答を成功・失敗のどちらの終端にもせず、**同一 task を `mode=full` で再発行する** (§3.1 の発動条件は再評価しない — Adapter 判断を尊重。full 応答での `fallback_to_full=true` は contract violation = ループ防止)。この評価順が無いと、§8.1 の「短絡」拒否権 ([07-adapter-spec.md §8.1](07-adapter-spec.md)) が V1 被覆違反 → 再試行 → failed permanent の死路になる。**終端の単位は request である**: 正常な制御応答の受領は当該 request の終端 (task は非終端) — 実測 usage を `outcome='fallback_to_full'` で確定記帳し state=3 を同一 Tx で行い (§5.4 / §5.8。sync 行は同 Tx で intent_token を NULL 化、batch 行は残骸掃除完了時 = 通常規則)、その後 `mode=full` の新 request を相 1 (submission_seq = MAX+1) として開始する (§5.4 の直列化規範を満たす)。正常な制御応答は `attempts` / `contract_violation_count` のどちらにも数えない (違反ではなく §5.2 の retry でもない) — 発動条件 5 の連続 incremental カウンタにも数えない (§3.1)。
 
@@ -807,10 +814,11 @@ CREATE TABLE batch_requests (            -- in-flight Batch intent の正本 (§
                                          --   typeof 検査は cost_ledger.usd と同じ理由)
     error             TEXT,              -- 'submit_rejected' | 'expired' | 'abandoned' | ...
                                          --  拒否課金 provider (07 §5.7 条件 6) の submit_rejected は
-                                         --  terminal 化と同一 Tx で estimated 記帳 (Adapter 返却の
-                                         --  usage (usd = 宣言請求額 | billable_units — 07 §4)、
-                                         --  無ければ行の estimated_usd
-                                         --  — ledger 0 行のままの terminal 化を許さない)
+                                         --  terminal 化と同一 Tx で記帳 (Adapter 返却の usage
+                                         --  (usd = 宣言請求額 | billable_units — 07 §4) が有効なら
+                                         --  provider 値 (estimated=0)、無効・欠落は行の estimated_usd
+                                         --  を estimated=1 で — §5.4 の事前検証。
+                                         --  ledger 0 行のままの terminal 化を許さない)
     completed_at      INTEGER,           -- state を 2/3 へ確定する全ての UPDATE で同時に書く。
                                          --  未終端は NULL (status の滞留検知に使う)
     created_at        INTEGER NOT NULL,
@@ -968,10 +976,13 @@ terminal 化 (error='purged') = `purged` / 回復期限超過・照会不能の 
 正常な制御応答 (`fallback_to_full=true`、§3.2) の request 終端 = `fallback_to_full` (task 非終端 —
 同 Tx 群の完了後に `mode=full` の新 request を相 1 で開始する)。
 
-**記帳値の事前検証**: Adapter 報告値 (usd / unit 数) は INSERT 前に有限・非負の数値であることを
-検証する。**不正値・欠落は provider 報告値を使わず、行の `estimated_usd` を `estimated=1` で記帳して
-同一 Tx で terminal 化する** (不正値は CHECK を通らず Tx を閉じられないため — 報告値が有効な場合のみ
-provider 値で記帳する)。**この縮退は usage が必須の応答 ([07-adapter-spec.md §4](07-adapter-spec.md) の
+**記帳値の事前検証**: Adapter 報告値は INSERT 前に検証する — `usd` は有限・非負の数値。
+`billable_units` は **1 要素以上の配列で、各要素の `count` が有限・非負の整数、`kind` が閉 enum・
+宣言集合 (`billable_kinds`) 内・配列内で一意、かつ全要素の単価が解決可能であること**
+([07-adapter-spec.md §4](07-adapter-spec.md) の配列契約に対応する要素単位の検査 — 換算は要素ごとの
+単価 × count の合算)。**空配列・kind の重複・宣言集合外の kind・非整数 count を含む不正値・欠落は
+provider 報告値を使わず、行の `estimated_usd` を `estimated=1` で記帳して同一 Tx で terminal 化する**
+(不正値は CHECK を通らず Tx を閉じられないため — 報告値が有効な場合のみ provider 値で記帳する)。**この縮退は usage が必須の応答 ([07-adapter-spec.md §4](07-adapter-spec.md) の
 billable terminal 応答) に限る** — 非 billable な応答 (単価 0 のローカル LLM・拒否課金を宣言しない
 provider の reject 等) の usage 欠落は正当であり、確定額 0 (`usd=0`・`estimated=0`) で記帳する。
 **報告された `billable_units.kind` の単価が tools.toml の `[pricing]` で解決できない場合 (未設定・

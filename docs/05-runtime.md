@@ -96,7 +96,11 @@ default: k = 60, w_text = 1.0, w_vector = 1.0
   AND 適用する** (trigram は 3 文字未満の phrase を黙って落とすため、混在 query の短語を MATCH に
   含めると条件から脱落する)。**短語 instr 条件は text / vector 両バックエンド共通の eligibility
   述語であり、各バックエンドの候補確定 (candidate_depth 充足前) に適用する** — 和集合・RRF に
-  短語欠落候補を入れない (全 token の条件を保ったまま候補確定する)。LIKE fallback の順位も決定的に定める:
+  短語欠落候補を入れない (全 token の条件を保ったまま候補確定する)。vector 側の適用形: `chunk_vec` を
+  `chunks` へ JOIN して instr 述語を適用した母集合に対し distance 順で LIMIT candidate_depth を確定する
+  (brute-force KNN — [10-operations.md §6](10-operations.md)。vec0 の `k =` 構文等、述語適用**前**に
+  内部 top-k を確定させる形は用いない — 述語後の候補が痩せて candidate_depth を満たせなくなるため)。
+  LIKE fallback の順位も決定的に定める:
   最初の一致位置 (instr) 昇順、同点は chunk_id 昇順。SQL は ORDER BY 確定後に LIMIT candidate_depth
   を適用する (LIMIT 先行で候補集合が非決定になる形は禁止)
 - **MATCH 式の生成**: user query を FTS5 構文として解釈しない — token 列を各々二重引用符で囲んだ
@@ -189,7 +193,7 @@ page 1 の `since_cutoff` (UTC ISO8601 + `Z`) も保持する:
 - `max_association_rowid`: cursor 発行時点の `chunk_config_generations` 最大 association rowid。
   現行 config association も `association_rowid <= max_association_rowid` に固定し、page 1 後に追加された
   association が page 2 の候補へ混入することを防ぐ
-- `chunking_config_hash`: page 1 で検索対象にした tree の config (デフォルト = **当該 scope の HEAD tree の値** (通常 = effective config — 移行期間の扱いは [04-pipeline.md §4.6](04-pipeline.md))、時点指定 = 対象 tree の値 — §1.6)。replay 時の対象値と不一致なら拒否する
+- `chunking_config_hash`: page 1 で検索対象にした tree の config (デフォルト = **当該 scope の HEAD tree の値** (移行期間の扱いは [04-pipeline.md §4.6](04-pipeline.md))、時点指定 = 対象 tree の値 — §1.6)。replay 時の対象値と不一致なら拒否する
 - `consumed`: alias expansion 後の final result stream で当該 scope から既に返した hit 数 (semantic chunk
   数ではない)。replay は grouped final stream を完全再計算し、scope ごとにこの件数だけ先頭 hit を skip
   するため、page boundary が 1 chunk の alias group 内でも重複/欠落しない
