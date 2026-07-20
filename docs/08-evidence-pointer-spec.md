@@ -257,12 +257,12 @@ bulk 系 (`kcs evidence verify --batch <pointers.jsonl>`) は従来どおり各�
   - chunk object が存在 (= 同一 tool_profile_hash で生成済み)
 
 部分的失敗 (代表例 — status union の正本は §4.3):
-  - purged raw_hash (tombstone あり):   tombstoned — tombstone を返す (§4.1)
+  - purged raw_hash (canonical final event = `purged` — §3.1 手順 5): tombstoned — tombstone を返す (§4.1)
   - scope 解決の重複 (validated ∪ live 候補 ≥2): registry_duplicate
                                         — KCS-E-REGISTRY-DUP-001 (§3.1 手順 1a)
   - tombstone / erase receipt なしで raw object 不在: not_found — KCS-E-STORE-CORRUPT-001
                                         (corruption の疑い — §3.1 手順 5。repair --verify-objects を案内)
-  - 有効 erase receipt (末尾 event = `erased` の active receipt) ありで raw object 不在:
+  - 有効 erase receipt (canonical final event = `erased` — §3.1 手順 5) ありで raw object 不在:
                                         not_found — KCS-E-PURGE-NOT-FOUND-001 (§4.2。`retired` 済み
                                         receipt での欠落は上段の corruption 側 — [10-operations.md §7.5.1](10-operations.md)
                                         の説明範囲限定と整合)
@@ -285,7 +285,7 @@ cursor 再計算など tree 全体を要する操作に限る ([05-runtime.md §
 
 ## 4.1 Tombstone レスポンス
 
-raw_hash に active な tombstone (末尾 event = `purged`) がある場合 (= purge 済みだが履歴上は記録。retired は該当しない)。レスポンス body の `status` は §4.3 の union と同じ語彙 (`tombstoned`) を使う — purge の事実は `purged_*` フィールドが表す:
+raw_hash の canonical final event が `purged` の場合 (§3.1 手順 5 の全 marker 正本化 — 個別 tombstone の末尾 event だけで判定しない。= purge 済みだが履歴上は記録。canonical が `retired` なら該当しない)。レスポンス body の `status` は §4.3 の union と同じ語彙 (`tombstoned`) を使う — purge の事実は `purged_*` フィールドが表す:
 
 ```json
 {

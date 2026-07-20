@@ -86,7 +86,7 @@ raw / prepared / image / chunk / embedding / manifest / toollock / tree / commit
   tombstones/lifecycle-epoch    lifecycle 更新 (retire・再 purge・legacy 変換) の単調カウンタ
                                 (05-runtime.md §3.5 — 回転補完の検出源。event append ごとに +1)
   tasks.jsonl         batch タスクストア (04-pipeline.md §5.1。append-only の運用データ、SQLite 非採用。
-                      terminal 行の bounded compaction あり — 04 §5.1)
+                      terminal task の行の bounded compaction あり (task 状態 = 最新行) — 04 §5.1)
   chunks.jsonl        chunk association ledger (**truth** — chunk object が持たない世代 association の正本。
                       作成行 = {chunk_id, chunking_config_hash, created_at, first_seen_commit, path}。
                       path = chunk 生成時点の path (SQLite chunks.raw_path の rebuild 入力)。
@@ -449,7 +449,8 @@ elif all(u.status == "failed" for u in inst.units):
         failed       # 全滅 (retryable を含む) — retryable (04-pipeline.md §5.2 の failed → pending と同じ扱い)
 elif any(u.status == "done" and not unit_object_exists(u) for u in inst.units):
     missing_output   # done 宣言 unit の object 欠落 — failed unit と併存しても partial で隠さない
-                     # (回復対象 = 欠落 done ∪ failed の和集合。欠落を先に判定しないと
+                     # (回復対象 = 欠落 done ∪ retryable failed の和集合 — permanent failed は
+                     #  04-pipeline.md §5.2 の settled 扱いのまま再投入しない。欠落を先に判定しないと
                      #  permanent failed の陰で欠落が恒久に再投入されない)
 elif any(u.status == "failed" for u in inst.units):
     partial          # 成功 unit は検索対象。再投入は retryable な失敗 unit のみ (permanent は除く —

@@ -630,7 +630,8 @@ order_index             unit の出現順 (03-data-model.md §2.1 の順序)
 
 タスクストアは `.kcs/tasks.jsonl` (append-only・喪失許容 — §5.7)。**bounded compaction**: 書き込み系
 コマンド冒頭で行数が閾値 (既定 4096 行) を超えていたら、`.kcs/.lock` 下で terminal task の行を落とし
-非 terminal のみを temp 完書き → fsync → atomic rename で再生成する (喪失許容データのため compaction
+(task の現在状態 = 当該 task_id の最新行 — terminal task はその全行 (旧遷移行を含む) を落とす)、
+非 terminal task の行のみを temp 完書き → fsync → atomic rename で再生成する (喪失許容データのため compaction
 は常に安全 — 正確さは object store / cost-ledger からの再検出が担保する。§5.7)。
 
 ```json
@@ -695,7 +696,9 @@ running が heartbeat_at + 5min を超えたら stale。別 worker が pull 可�
     added だった失敗 unit も retry では changed として再投入し、成功出力は `updated_units` 側で返る。
     §3.2 の V1〜V6 (V2 の removed 完全一致・V4 の added 集合式を含む) はこの合成値に対して評価する。
     この再投入の受け入れ検査 (§3.2) では **N = 合成した hints の集合 (= 失敗 unit のみ)** —
-    既 done の unit は N に含まれず、応答への再掲 (unchanged への列挙を含む) も要求しない
+    既 done の unit は N に含まれず、応答への再掲 (unchanged への列挙を含む) も要求しない —
+    **合成 hints に対する §2.2 の unchanged 候補集合は空であり、V1 の完全一致は
+    `unchanged_unit_keys = []` として評価する** (元 run の unchanged 候補集合との一致は要求しない)
     (この N 規定は `mode=incremental` の再投入にのみ適用する — full 再投入の母集合は上記のとおり V6 の通常定義)
   - 持たない場合: `mode=full` で再実行するが、既に done の unit は first-instance-wins で既存を保持し、
     失敗していた unit の出力のみ採用する
@@ -885,7 +888,8 @@ chunk の文字数のみ**を対象とし、再利用 chunk (API 非呼出) は�
 1  汎用 failure
 2  invalid usage / config 不正
 3  retryable な失敗が残っている (部分成功を含む — [06-cli-spec.md §7](06-cli-spec.md))
-4  全タスク failed permanent
+4  permanent な失敗のみが残っている (全失敗 permanent、および settled partial
+   (部分成功 + 残り全 permanent — §5.2) を含む — 再試行で進展しない)
 5  auth_error がある
 6  budget_exceeded により paused
 7  user 中断 (SIGINT/SIGTERM)
@@ -1028,7 +1032,7 @@ DDL の CHECK は最終防衛線であり、**CHECK 違反で Tx が失敗した
 
 **回復** (書き込み系 batch コマンド — `kcs index` / `kcs batch resume` / `kcs batch retry` /
 `kcs batch abandon`・**および online enrichment を駆動し得る `kcs reindex`・
-`kcs repair --rebuild-db`** — の冒頭。**これらと `kcs reindex` は `.kcs/.lock` を取得する書き込み系であり
+`kcs repair --rebuild-db`** — の冒頭。**これらは `.kcs/.lock` を取得する書き込み系であり
 ([05-runtime.md §6](05-runtime.md))、相 1〜2b の遷移・token の発行も lock 保持下で行う** — 並行する
 resume/retry が同一行へ別 token を書くと、先行 job が無記録 in-flight になる。未終端の行 (state 0/1) と
 intent_token 非 NULL の終端行 (= 残骸掃除未完) を三値で照合する。**`request_kind='sync'` の行は

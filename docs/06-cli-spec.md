@@ -34,6 +34,9 @@ kcs adapter revoke (<tool_id> | --all)  # Adapter の network 承認取り消し
                                         # 全ての approval_pending を除去** (boolean は変えない — scope 全体の
                                         # kill switch は allow_network=false 側)。対象なし (行なし・pending なし・
                                         # 既 revoked) は対象なしの冪等成功 — exit 0 + 「対象なし」表示。
+                                        # pending 除去または行 revoked 化を実行した場合、`approvals_initialized`
+                                        # marker 不在なら同一 atomic write で true 化 (初回 materialize 例外の
+                                        # 消費 — 07 §3。対象なしの冪等成功では書かない)。
                                         # `.kcs/.lock` 取得 (05-runtime.md §6) の locked mutation
 kcs batch abandon <intent_token|scope/adapter/input_hash/tool_profile_hash>
                                         # 照合が恒久不能な in-flight Batch job の打ち切り (estimated 記帳 + terminal 化。
@@ -113,9 +116,10 @@ code point を含む名前を拒否し ([03-data-model.md §2](03-data-model.md)
    (fork 複製由来の旧 scope_id URI — §10。hash が identity、08 §2)。自 store に無い場合のみ
    scope_id で通常解決する。image object を ~/.cache/kcs/open/ へ read-only materialize して開く
    (raw と同じ tombstone / journal barrier と purge closure の対象)。以降の手順 2-5 は raw 系入力のみ
-2. tombstone 判定 (最優先): raw_hash に **active な** tombstone があるなら、working tree・cache の状態に
+2. tombstone 判定 (最優先): raw_hash の **canonical final event が `purged`** (全 marker の正本化 —
+   08-evidence-pointer-spec.md §3.1 手順 5) なら、working tree・cache の状態に
    関わらず §7 の規約どおり exit 4 — purge 済み原本が folder に残っていても KCS 経由では開かない
-   (退役済み tombstone は対象外 — 再 ingest による退役は 05-runtime.md §3.5 の resurrection 規則)
+   (canonical が `retired` (退役) なら対象外 — 再 ingest による退役は 05-runtime.md §3.5 の resurrection 規則)
 3. working tree 解決:
    現在の working tree に同一 raw_hash を持つファイルが存在すれば (path_at_commit と
    異なる path でもよい。リネーム済みケース)、その実ファイルを OS 規定アプリで開く
@@ -314,12 +318,13 @@ sqlite.db 不在・利用不能       全経路 (verify / open / view / restore 
                                不変性保証)。error は不在・利用不能・HEAD 不在 (HEAD 依存経路のみ)
                                の場合のみ。verify は検査未完了のため --strict なしでも
                                0 を返さない。multi-scope search は当該 scope を excluded_scopes として
-                               継続し、全 scope 該当なら exit 3 — SCOPE-ALL-FAILED (4) より優先。
+                               継続し、全 scope 該当なら exit 3 — SCOPE-ALL-FAILED (3/4) より優先。
                                全 scope の除外理由が同一 code なら当該 code の単独時 exit へ昇格
                                (一般規則 — VERSION→8・REBUILDING→3・INCOMPAT→8・
                                journal (KCS-E-PURGE-JOURNAL-ACTIVE-001)→3・
                                DUP→3 (dedupe 後に回復可能 — 08 §4.3 registry_duplicate と同一分類)。
-                               05 §1.8 / 10 §12.5)。混在は SCOPE-ALL-FAILED / exit 4。
+                               05 §1.8 / 10 §12.5)。混在は SCOPE-ALL-FAILED — retryable 理由を
+                               含めば exit 3・全て permanent なら exit 4 (05 §1.8)。
                                優先順位は VERSION → journal → DUP → REBUILDING (10 §3)。05 §2.6・08 §3.1)
 kcs evidence verify --batch <pointers.jsonl>   一括 verify (Phase 4+ — 08 §4.3)
                                (--batch は --strict の有無に従う — --strict 時: 混在も 4 /
@@ -488,7 +493,7 @@ metrics.jsonl      数値メトリクス (デフォルト 1h 間隔)
 errors.jsonl       error_code 付きの全エラー
 ```
 
-各行 JSON 必須フィールド: `ts, level, code, component, message, context`。日次ローテーション、保持 30 日 (config 上書き可)。
+各行 JSON 必須フィールド: `ts, level, code, component, message, context`。日次ローテーション、保持 30 日 (config 上書き可 — 正規 key = `[observability] retention_days`、10-operations.md §12.3)。
 
 `redact_logs` のデフォルトは true (ログ全域。正本は [10-operations.md §12.6](10-operations.md))。true 時は `context` の `query`, `path`, `prompt` 等の機微フィールドをマスク。
 

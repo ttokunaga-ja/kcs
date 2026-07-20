@@ -313,7 +313,7 @@ Status: draft (retarget 実装は Phase 4+ のため、期日は Phase 4 着手�
 問題: 「Evidence Pointer の不変性」と「法務 purge」の緊張領域。purge 後の pointer 挙動が未定義。
 
 設計案:
-  1. raw_hash が active な tombstone → tombstone レスポンス
+  1. raw_hash の canonical final event = `purged` (全 marker 正本化 — 08 §3.1 手順 5) → tombstone レスポンス
      { "status": "tombstoned", "purged_at", "purged_reason", "purged_in_commit", "raw_hash" } (正本 08 §4.1)
   2. raw_hash が完全削除 → KCS-E-PURGE-NOT-FOUND-001
 
