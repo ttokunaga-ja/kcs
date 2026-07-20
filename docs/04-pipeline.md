@@ -451,7 +451,10 @@ CREATE TABLE chunk_config_generations (
    変更として扱う) 以外を除去 → 連続 "-" を 1 つに → 先頭末尾の "-" を除去。
    同一 unit 内の重複 slug は 2 つ目以降に "#2", "#3" を付す (出現順)
 5. 分割: 見出し区間が max_chars (03 §11 [chunking]) を超える場合、段落境界 (空行) で
-   貪欲に max_chars 以下へ分割する。単一段落が max_chars を超える場合のみ文字位置で
+   貪欲に max_chars 以下へ分割する (**決定規則**: 空行列 (連続空行は 1 区切り) は区切りであり
+   いずれの分割片の span にも含めない — 全 byte 被覆は不変式ではない。見出し区間の先頭・末尾の
+   空行は捨てる。貪欲 = 先頭から各片に収まる限り次の段落を取り込み、超える直前で切る — 同一入力・
+   同一 max_chars から得られる span 列は一意)。単一段落が max_chars を超える場合のみ文字位置で
    機械分割する。max_chars と「文字位置」の計数単位 = **Unicode scalar value** (code point) であり、
    機械分割は scalar 境界でのみ行う (UTF-8 byte の途中で切らない。grapheme cluster は考慮しない —
    Unicode 版依存を避け、実装非依存の決定性を優先)。分割片は同一 heading_path / section_id を共有し、
@@ -981,7 +984,7 @@ metadata から intent_token 規約に一致する job を全走査すること�
    再 collect ループに入らない・記帳を落とさない)。再投入の mode は原則同一 — tasks.jsonl 喪失で
    mode が復元不能な場合は full で 1 回 (§5.7 の安全側規定と同型)。**「1 回のみ」の判定は durable**:
    reject 終端 Tx で `contract_violation_count` を increment する (相 1 の NULL 戻しの対象外)。
-   再投入できるのは count == 1 のときだけで、count >= 2 は failed permanent
+   再投入できるのは count <= 1 のとき (0 = 未違反・`--reset-violations` 後を含む) だけで、count >= 2 は failed permanent
    (tasks.jsonl 喪失後もこの判定は batch_requests から回復できる。error 列は最新状態の表示であり
    判定源にしない — 相 1 が NULL へ戻すため)。count は**タスクキー単位の通算**であり mode 別に
    数えない (mode 切替後の違反も加算)。検証済み Adapter 更新後の脱出路として
@@ -1072,7 +1075,8 @@ opt-in / `--online` なしで実行できる** ([07-adapter-spec.md §3](07-adap
   記帳 + state=3 (error='abandoned') + completed_at。**intent_token は残骸掃除の完了まで NULL 化しない**
   (intent_token 埋込 filename が upload 残骸の唯一の発見キーであるため、先に消すと掃除が残骸を発見
   できず provider TTL まで機密が残留する。掃除の完了 (404 含む) が NULL 化の条件。恒久に掃除できない
-  場合は既知の残余として表示し続ける)
+  場合は既知の残余として表示し続ける。このとき当該タスクキーの再投入は掃除完了まで開始できない —
+  cleanup-first の帰結であり、機密残骸の追跡を新 attempt より優先する意図された設計)
 
 **残骸掃除**: terminal な task の upload (upload_id 記録分 + intent_token 埋込 filename の一覧照合分) を
 削除する。abandon 済み task は照合・記帳を行わず掃除のみ行う。

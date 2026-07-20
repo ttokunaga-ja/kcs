@@ -197,7 +197,7 @@ Step 1 開始日: **2026-07-16**。本日 (2026-07-02) 時点の Step 1 ブロ�
 検証:  CAS 永続性 / --include-deleted / restore の working tree 非破壊
 完了:  - 削除済みファイルの chunk が結果に出る
        - kcs restore は --to <dir> を必須 (working tree 直接書き戻し禁止)
-       - purge 済み (canonical final event = purged — 08 §3.1 手順 5。commit_type=purged はその監査痕跡) は除外、tombstone を返す
+       - purge 済み (canonical final event = purged — 08 §3.1 手順 5。commit_type=purged はその監査痕跡) は検索結果から除外される (purged chunk 行は物理削除済み — search 経由では到達しない)。tombstone 応答は既存 Evidence Pointer (過去回答の保存分) を restore / verify / open に与えた場合の挙動 (08 §4)
 ```
 
 ## 4.1 計測項目

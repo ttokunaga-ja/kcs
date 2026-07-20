@@ -569,8 +569,13 @@ CAS で ref-reachable な `commit_type=purged` commit を指すこと、各 `at`
 ancestor に持つ (= 当該 purge より後の publication である)** ことを必須とする。**v1 flat (`erased_at` /
 `purged_in_commit`)**: 「erased event 1 件」に正規化してから同じ検証器に通す (v1 に reason は無い —
 変換で `reason: "other"` を合成し legacy 警告として報告、[05-runtime.md §3.5](05-runtime.md) と同一規則)
-([05-runtime.md §3.5](05-runtime.md) の読取規則)。**tombstone lifecycle にも同じ event 検証**
-(kind 別必須 field・末尾 event 規則・torn / malformed = corruption) を適用する。
+([05-runtime.md §3.5](05-runtime.md) の読取規則)。**tombstone lifecycle にも同じ event 検証を適用する**
+(kind 別必須 field・末尾 event 規則・torn / malformed = corruption に加え、**purged event の
+`in_commit` が bounded verified CAS で ref-reachable な `commit_type=purged` commit を指すこと・
+各 `at` の commit `created_at` 一致・terminal `retired` の `resurrection_commit` 検証も erased 側と
+同一に必須**。遷移文法は marker 種別に従う — **tombstone は purged を先頭に purged / retired が交互**
+(erased 開始の文法は receipt 専用)。検証失敗の marker は説明能力を持たず corruption とする —
+偽 `in_commit` を持つ構造的に正しい tombstone が genuine missing を隠さない)。
 
 **orphan 掃除 (`--prune-orphans`)**: `kcs repair --verify-objects --prune-orphans` は、どの manifest
 からも参照されない orphan prepared / image (公開前 crash の残骸 — [05-runtime.md §3.5](05-runtime.md))
@@ -620,7 +625,10 @@ MVP では手動実行のみとする。自動定期検証 (スケジューラ�
      tool-lock / tombstones + erase receipts / chunks.jsonl / access.jsonl を含む) — これらは
      いずれも喪失時復旧不能である
    - **デバイスグローバルの cost-ledger.sqlite は `.kcs` コピーに含まれない** — 別途
-     `sqlite3 cost-ledger.sqlite ".backup <dest>"` (WAL-safe) でバックアップし、復元後は
+     `sqlite3 "<KCS data dir>/cost-ledger.sqlite" ".backup <dest>"` (WAL-safe。**必ず実体の絶対パスで
+     指定する** — 相対パスはカレントに空 DB を新規作成し「正常にバックアップできた」ように見える。
+     **復元後は `PRAGMA integrity_check` と cost_ledger / batch_requests 両表の存在を確認する**) で
+     バックアップし、復元後は
      §5.8 の回復 (reconcile) が完了するまで新規 Batch 投入を行わない ([04-pipeline.md §5.4](04-pipeline.md))
 
 2. kcs export <scope> --to <bundle.kcsz>
@@ -859,7 +867,7 @@ DOMAIN:
   AUTH     認証・認可
 ```
 
-例: `KCS-E-BATCH-NET-001`, `KCS-E-SEARCH-VEC-INCOMPAT-001`, `KCS-E-SEARCH-VEC-UNAVAIL-001`, `KCS-E-SEARCH-VEC-UNAUTHORIZED-001`, `KCS-E-COMMIT-SHALLOW-001`, `KCS-E-PURGE-NOT-FOUND-001`, `KCS-E-PURGE-JOURNAL-ACTIVE-001` (未完了 purge journal / epoch 不変違反による**読み取り系** preflight の拒否 (書き込み系は journal 回復を再開) — retryable、exit 3、[05-runtime.md §3.5](05-runtime.md)), `KCS-E-ADAPTER-SPECVER-001` (spec_version 不一致 — invalid_input / 非再試行、[07-adapter-spec.md §8.1](07-adapter-spec.md)), `KCS-E-STORE-PATH-001`, `KCS-E-STORE-CORRUPT-001`, `KCS-E-STORE-VERSION-001` (§12.5 — 新しい `kcs_format_version` の store への書き込み系実行・読解不能), `KCS-E-SEARCH-SCOPE-ALL-FAILED-001`, `KCS-E-SEARCH-CURSOR-001`, `KCS-E-INDEX-REBUILDING-001`, `KCS-E-EVIDENCE-SCOPE-UNREACHABLE-001`, `KCS-E-EVIDENCE-RETARGET-AMBIG-001`, `KCS-E-ADAPTER-CONTRACT-001`。各 code の定義箇所は該当 spec (06-cli-spec.md §8 に一覧と参照先) を参照。
+例: `KCS-E-BATCH-NET-001`, `KCS-E-SEARCH-VEC-INCOMPAT-001`, `KCS-E-SEARCH-VEC-UNAVAIL-001`, `KCS-E-SEARCH-VEC-UNAUTHORIZED-001`, `KCS-E-COMMIT-SHALLOW-001`, `KCS-E-PURGE-NOT-FOUND-001`, `KCS-E-PURGE-JOURNAL-ACTIVE-001` (未完了 purge journal / epoch 不変違反による**読み取り系** preflight の拒否 (書き込み系は journal 回復を再開)。**restore の rename 後再検査が対象を closure に含む active journal を検出した場合の publish 後巻き戻し終端にも用いる** — retryable、exit 3、[05-runtime.md §3.5](05-runtime.md)), `KCS-E-COMMIT-RESTORE-CONFLICT-001` (restore の publish / 巻き戻しにおける no-replace 競合・dev/inode 不一致 — 両者の所在を context に含む。retryable、exit 3、[05-runtime.md §3.5](05-runtime.md)), `KCS-E-ADAPTER-APPROVAL-CONFLICT-001` (承認 publish 直前の CAS 不一致 — 並行 revoke による pending 除去・再承認が必要。exit 5、[07-adapter-spec.md §3](07-adapter-spec.md)), `KCS-E-ADAPTER-SPECVER-001` (spec_version 不一致 — invalid_input / 非再試行、[07-adapter-spec.md §8.1](07-adapter-spec.md)), `KCS-E-STORE-PATH-001`, `KCS-E-STORE-CORRUPT-001`, `KCS-E-STORE-VERSION-001` (§12.5 — 新しい `kcs_format_version` の store への書き込み系実行・読解不能), `KCS-E-SEARCH-SCOPE-ALL-FAILED-001`, `KCS-E-SEARCH-CURSOR-001`, `KCS-E-INDEX-REBUILDING-001`, `KCS-E-EVIDENCE-SCOPE-UNREACHABLE-001`, `KCS-E-EVIDENCE-RETARGET-AMBIG-001`, `KCS-E-ADAPTER-CONTRACT-001`。各 code の定義箇所は該当 spec (06-cli-spec.md §8 に一覧と参照先) を参照。
 
 各 spec が定義した個別エラー (04-pipeline.md / 05-runtime.md / 06-cli-spec.md 等) はこの namespace に従う。新規 code 追加は本書および該当 spec の更新を伴う (破壊的変更扱い)。
 

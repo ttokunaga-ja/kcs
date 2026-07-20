@@ -562,7 +562,7 @@ max_runtime_seconds = 60
 
 ## 2.4 Tiered Retention
 
-`commit_type=auto` のみ tiered retention を適用する。retention 満了は **shallow 化 (tree 破棄)** であり commit object の削除ではない (`manual/imported/merged/purged` は tree も常に残す)。
+`commit_type=auto` のみ tiered retention を適用する。retention 満了は **shallow 化 (tree 破棄)** であり commit object の削除ではない (`manual/imported/merged/purged` は tree も常に残す)。`migrated` / `repaired` は `[gc.derived_retention]` に従う — branch ごとに最新 `keep_*_per_branch` 個の tree を保持し、超過分を shallow 化する (ref tip は除外・tiered retention (auto) とは別系統)。
 **ref tip 除外**: HEAD・branch・tag が指す commit の tree は、retention 満了でも **shallow 化の対象にしない** — 無変更 scope では auto snapshot が no-op を続け HEAD が古い auto commit に留まり続けるため、除外しないと現在状態の基点 (bare search / restore / cursor) を失う。物理削除の直前にも、ref tip 非該当と「非 shallow commit からの参照ゼロ」を同一 exclusive critical section で再検証する (§2.5):
 
 ```toml
@@ -721,7 +721,8 @@ purge は **object の物理削除 + default tombstone または内部 erase rec
 - tombstone (.kcs/tombstones/ab/cd/<raw64>)。--erase-tombstone 指定時を除く。
 - `--erase-tombstone` では non-public の non-content erase receipt
   (`.kcs/purge/erase-receipts/ab/cd/<raw64>`)。public tombstone としては不可視 — 用途は
-  fsck の欠落説明・08 §3.1 手順 5 (ii)〜(iii) の not_found 分類・6b・resurrection link に限る
+  fsck の欠落説明・08 §3.1 手順 5 (ii)〜(iii) の not_found 分類・6b・resurrection link・
+  同一 marker 自身の lifecycle 管理 (retired / 再 erased の append) に限る
   ([08-evidence-pointer-spec.md §4.2](08-evidence-pointer-spec.md))。
 ```
 
@@ -763,9 +764,10 @@ index_generation を 1 回転する** (取りこぼした可能性のある更�
 counter と last_lifecycle_epoch を照合し、不一致 (> だけでなく < も) なら
 KCS-E-INDEX-REBUILDING-001 と同じ retryable (exit 3) を返す** — 補完回転は書き込み系のみが行うため、
 crash 後最初のコマンドが読取でも旧 cursor を退役後の可視集合へ受理しない (この retryable への自動再試行は仕様として約束しない — 再試行は呼出側の判断)。
-次回の locked mutation または fsck が「canonical final event が `purged` のままの tombstone × 同一 raw の ref 到達可能な
+次回の locked mutation または fsck が「canonical final event が `purged` のままの tombstone × **verified raw (content hash 検証済み) の存在** × 同一 raw の ref 到達可能な
 再 publication commit **であって、canonical final purged event の `in_commit` を ancestor に持つもの
-(= 当該 purge より後の publication)**」を検出したら retired event を補完する (erase receipt の
+(= 当該 purge より後の publication)**」を検出したら retired event を補完する (raw が欠落・破損のままの
+補完は不可 — tombstone を誤って退役させない) (erase receipt の
 crash 整合規則と同型。補完条件の正本は [10-operations.md §7.5.1](10-operations.md) — **この因果条件を
 満たす再 publication commit が無い共存は incomplete purge (exit 3) であり補完しない**。**この因果条件が無いと、再 purge 後も ref に残る過去の resurrection commit を
 誤検出して、新しい tombstone を退役させてしまう**)。以後の
@@ -817,28 +819,39 @@ phase 順序    = prepared (closure 確定・記帳)
               [10-operations.md §3](10-operations.md) の固定順) がこれを閉じる。`kcs status` だけは拒否せず、active journal の存在を状態として
               表示する (クラッシュした purge の回復可視性のため。status は本文を返さない)。
               不可逆な外部副作用を持つ 2 系は検査位置を固定する: restore は private temp へ展開し
-              返却直前検査の後に atomic rename で --to へ publish (検出時は temp を削除)。**publish の
-              rename は非 --force では no-replace 相当 (RENAME_NOREPLACE 等) で行い、競合検出時は無変更で
-              失敗する** (preflight の不存在判定後に現れた第三者ファイルを無断置換しない — 意図的置換は
-              --force の置換 rename のみ)。**--force 上書き時は publish の rename に先立ち、既存ファイルを
-              同一 directory 内の退避名 `<basename>.kcs-restore-bak` へ no-replace rename で保全し、退避名を
-              stderr に表示する** (置換 rename は旧内容を破壊するため、保全なしには下記の巻き戻しが原状回復に
-              ならない。**同名の退避が既に存在する場合は先行 restore の未完残存として拒否し、回復手順
-              (退避の手動復帰または削除) を案内する** — 残存退避はユーザー領域のファイルであり KCS は
-              自動削除しない。crash で退避だけが残っても、次回の同 path への --force restore がこの拒否で
-              検出・案内する)。**restore はさらに rename 完了後に同 3 点を再検査し、変化を検出したら対象 raw の
-              canonical 状態 ([08-evidence-pointer-spec.md §3.1](08-evidence-pointer-spec.md) 手順 5) を
+              返却直前検査の後に atomic rename で --to へ publish (検出時は temp を削除)。**出力名・上書き
+              対象名が `.kcs-restore-bak` で終わる場合は mutation 前に明示拒否する** (commit 展開では全
+              出力 path を publish 前に検査。退避名前空間の予約 — 残存退避を正規対象として再退避・cleanup
+              すると先行 restore の回復コピーを失う。真にその名のファイルを復元する場合は改名復元を案内)。
+              **publish の rename は非 --force・--force とも no-replace 相当 (RENAME_NOREPLACE 等) で行い、
+              競合検出時は無変更で失敗する** (非 --force = preflight の不存在判定後に現れた第三者ファイルを
+              無断置換しない。--force = 下記の退避が destination を空けた直後に現れた第三者ファイルを
+              置換しない — この競合時は退避を元 path へ復帰して終端する。意図的置換は退避 rename だけが
+              担う。restore の競合終端は全て **KCS-E-COMMIT-RESTORE-CONFLICT-001 (retryable exit 3 —
+              context に競合種別と両者の所在)**)。**--force 上書き時は publish の rename に先立ち、既存
+              ファイルを同一 directory 内の退避名 `<basename>.kcs-restore-bak` へ no-replace rename で
+              保全し、退避名を stderr に表示して退避の dev/inode を記録する** (置換 rename は旧内容を破壊
+              するため、保全なしには下記の巻き戻しが原状回復にならない。**同名の退避が既に存在する場合は
+              先行 restore の未完残存として拒否し、回復手順 (退避の手動復帰または削除) を案内する** —
+              残存退避はユーザー領域のファイルであり KCS は自動削除しない。crash で退避だけが残っても、
+              次回の同 path への --force restore がこの拒否で検出・案内する)。**restore はさらに rename
+              完了後に同 3 点を再検査し、変化を検出したら対象 raw の canonical 状態
+              ([08-evidence-pointer-spec.md §3.1](08-evidence-pointer-spec.md) 手順 5) を
               再解決する — 対象が alive のまま (無関係な lifecycle 変化) なら publish を維持して成功。
               対象 raw を closure に含む active journal を検出した場合は下記と同様に巻き戻して
               KCS-E-PURGE-JOURNAL-ACTIVE-001 (retryable exit 3) で終端する (返却直前検査の fail-closed と
-              対称 — purge 意図の耐久化以後は提供しない)。対象の purge が完遂していた場合は publish 済み
-              ファイルを削除し、退避があれば元 path へ no-replace rename で原状復帰して、preflight と
+              対称 — purge 意図の耐久化以後は提供しない)。対象の purge が完遂していた場合は巻き戻す:
+              **publish 済みファイルは unlink せず、private temp 名への no-replace rename で隔離してから
+              fstat の dev/inode 対照で自らの publish と検証する** (一致 = 隔離分を削除・不一致 = 元 path へ
+              戻して競合終端 — 対照→削除の 2 操作では対照後の置換窓が残るため、rename した実体の上で
+              検証する)。**退避があれば記録済み dev/inode と再対照の上** (不一致 = 第三者による退避
+              差し替え — 触れずに競合終端)、**元 path へ no-replace rename で原状復帰して、preflight と
               同一の応答で終端する: canonical = `purged` (tombstone) なら tombstone、`erased` なら
-              KCS-E-PURGE-NOT-FOUND-001** (削除・復帰の前に自らの publish であることを fstat の dev/inode
-              対照で確認し、**競合検出時 (対照不一致・no-replace 失敗) は削除も復帰も行わず、退避を残した
-              まま両者の所在を表示して競合終端する** — 窓内の第三者置換を消さない。成功時は
-              退避を除去する。巻き戻しにより publish の事後取消が --force 上書きを含めて成立 —
-              lock 非取得のまま残余窓を閉じる。purge closure を KCS 自身が破らない)。open は
+              KCS-E-PURGE-NOT-FOUND-001** (**競合検出時 (dev/inode 不一致・no-replace 失敗) は削除も復帰も
+              行わず、退避を残したまま両者の所在を表示して RESTORE-CONFLICT で終端する** — 窓内の第三者
+              置換を消さない。成功時は退避を dev/inode 再対照の上で除去する。巻き戻しにより publish の
+              事後取消が --force 上書きを含めて成立 — lock 非取得のまま残余窓を閉じる。
+              purge closure を KCS 自身が破らない)。open は
               OS アプリ起動の直前に再検査する (起動後は取消不能 — 検査はそこまでに完了させる)
 ```
 
@@ -923,9 +936,14 @@ kcs restore <evidence|path|commit> --to <dir>
 - working tree への直接書き戻しは禁止 (--to <dir> 必須)
 - 既存ファイル上書きは --force 必須 + 確認プロンプト
 - --force 上書きは旧ファイルを同 directory の退避名 `<basename>.kcs-restore-bak` へ no-replace で
-  保全 (同名残存 = 先行未完として拒否 + 回復案内。退避名は stderr に表示) してから publish し、
-  rename 後再検査の purge / erase / journal 終端時のみ原状復帰する (対象 alive の無関係変化は
-  publish 維持 — §3.5。成功時に退避を除去。非 --force の publish・復帰 rename も no-replace)
+  保全 (同名残存 = 先行未完として拒否 + 回復案内。退避名は stderr に表示・dev/inode を記録) して
+  から publish し、rename 後再検査の purge / erase / journal 終端時のみ原状復帰する (対象 alive の
+  無関係変化は publish 維持 — §3.5。成功時に退避を除去)
+- publish (--force 含む)・復帰の rename は全て no-replace。巻き戻しの削除は unlink ではなく
+  private temp への隔離 rename + dev/inode 検証で行う。競合検出時は削除も復帰もせず両所在を
+  表示して KCS-E-COMMIT-RESTORE-CONFLICT-001 (retryable exit 3) で終端 (§3.5)
+- 出力名・上書き対象名が `.kcs-restore-bak` で終わる場合は展開前に明示拒否 (退避名前空間の
+  予約 — 改名復元を案内)
 - restore は raw object をそのまま展開 (再 Markdownize しない)
 - shallow commit からの restore は KCS-E-COMMIT-SHALLOW-001
 - purged 対象は KCS-E-PURGE-NOT-FOUND-001 / tombstone

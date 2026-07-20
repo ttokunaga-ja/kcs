@@ -173,7 +173,7 @@ manifest schema:
     {
       "order": 0,
       "unit_key": "page:1",
-      "unit_ref": "3f2a9c0d1b4e5f60",
+      "unit_ref": "00f081779b832543",
       "unit_type": "page",
       "status": "done",
       "prepared_hash": "sha256:...",
@@ -182,7 +182,7 @@ manifest schema:
     {
       "order": 56,
       "unit_key": "page:57",
-      "unit_ref": "9c1b7788aa02c3d4",
+      "unit_ref": "d2255263b6d52dc8",
       "unit_type": "page",
       "status": "failed",
       "prepared_hash": "sha256:...",
@@ -248,7 +248,7 @@ materialize されるため、chunk span と Evidence 解決元がずれない�
 **全文 view**: `objects/normalized/ab/cd/<raw64>.<tool64>.g<gen>.md` は
 unit を決定論的に結合した **再生成可能な cache** であり、正本ではない。組み立て規則:
 
-1. manifest.units を `order` 昇順に走査する
+1. manifest.units を `order` 昇順に走査する (`order` は unit 間で一意 — 重複は KCS-E-STORE-CORRUPT-001 の corruption。値自体で順序が確定するため tie-break は存在しない)
 2. `status = done` の unit は、その `markdown` から末尾の連続する改行を除去した文字列を採用する
 3. `status = failed` の unit は、固定文字列 `<!-- KCS-MISSING-UNIT <unit_key> <error_kind> -->` を採用する (unit_key / error_kind は comment-safe に挿入する — `--` を含む値は percent-encode。生値の挿入は comment を途中終端し view の構造を壊す)
 4. 採用した文字列を `"\n\n"` で結合し、末尾に `"\n"` を 1 つ付す — これが view 本文
@@ -302,7 +302,7 @@ cache = scope_registry / aggregator 検索の探索対象一覧 / stale 検出 /
 |---|---|---|---|---|
 | `.kcs/objects/` (raw / prepared / image / normalized_units / manifests / toollocks / chunks / embeddings / trees / commits) | file (CAS — **例外 = normalized_units/ 直下の path-named `manifest.json`**: 最新版の作業コピーで mutable = 置換 rename 側 ([04-pipeline.md §1.1](04-pipeline.md))。確定版は objects/manifests/ の CAS — §2.1) | **truth** | 復旧不能 (検証: [10-operations.md §7.5](10-operations.md)) | §8 / §2.1 |
 | `.kcs/HEAD` / `refs/` | file (atomic rename) | **truth** | 復旧不能 | §2 |
-| `.kcs/tombstones/` + erase receipt | file | **truth** (purge 証跡) | 復旧不能 | [05-runtime.md §3.5](05-runtime.md) |
+| `.kcs/tombstones/` + `.kcs/purge/erase-receipts/` (erase receipt) | file | **truth** (purge 証跡) | 復旧不能 | [05-runtime.md §3.5](05-runtime.md) |
 | `.kcs/scope.json` / `config.toml` / `tool-lock.json` | JSON / TOML (schema 検証: [10-operations.md §12.3](10-operations.md)) | **truth** | 復旧不能 | 各 spec |
 | `.kcs/logs/access.jsonl` | JSONL (append-only) | **truth** (access_events の正本) | 復旧不能 | §2 |
 | `.kcs/purge/epoch` | 単調カウンタ (text) | **truth** (purge の ABA barrier) | 欠落 = 読取 fail-closed。次の locked mutation が journal の target_epoch、journal も無ければ全 lifecycle event の `epoch` 最大値 + 1 (event 皆無なら 1) から回復して再作成 ([05-runtime.md §3.5](05-runtime.md)) | [05-runtime.md §3.5](05-runtime.md) |

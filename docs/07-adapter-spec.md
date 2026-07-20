@@ -137,7 +137,8 @@ scope の初回 materialize 経路を revoke の空振りで消費しない)。*
 ([06-cli-spec.md §1](06-cli-spec.md) — `.kcs/.lock` 下の locked mutation、[05-runtime.md §6](05-runtime.md))。
 承認側の行 publish・self-heal も同じ lock 下で行い、**publish の直前に `approval_pending` の存在を
 再検証する** (CAS — 並行する revoke が除去した pending を publish しない)。明示承認コマンド
-(対話 / --approve) はこの再検証の不一致を**明示エラーで終端し再承認を要求する** (無音の no-op
+(対話 / --approve) はこの再検証の不一致を**明示エラー (KCS-E-ADAPTER-APPROVAL-CONFLICT-001 / exit 5 —
+並行 revoke との競合・再承認が必要) で終端する** (無音の no-op
 成功にしない。self-heal は発火条件不成立として非発火のままでよい)。
         新規オンライン送信 task の発行停止は、kill switch では scope 全体・単一 Adapter revoke では
         当該 Adapter 分のみ (送信済みデータの取り消しは、どちらの revoke でも保証しない。**発行停止の
