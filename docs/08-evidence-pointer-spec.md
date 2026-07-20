@@ -173,7 +173,11 @@ bulk 系 (`kcs evidence verify --batch <pointers.jsonl>`) は従来どおり各�
     erase receipt) の最終 event を 1 つに正本化する** — canonical final event = 全 marker 中で
     `lifecycle_epoch` 最大の最終 event ([05-runtime.md §3.5](05-runtime.md)。legacy の epoch 欠落は
     0 とみなし、同値は tombstone 側を優先する決定的 tie-break。resurrection link も canonical
-    final event のものを採用する)。**以下 (i)〜(iv) は canonical final event に対して評価する**
+    final event のものを採用する)。**正本化の入力は event 検証 (kind 別必須 field・遷移文法・
+    `in_commit` / `purged_raws` membership / `at` — [05-runtime.md §3.5](05-runtime.md) の validity、
+    正本は [10-operations.md §7.5.1](10-operations.md)) を通過した marker のみ** — 検証失敗の marker は
+    `KCS-E-STORE-CORRUPT-001` で終端し、canonical 判定に参加させない (fsck と resolver で扱いを
+    割らない)。**以下 (i)〜(iv) は canonical final event に対して評価する**
     (§3.2 の解決成功条件「raw object が存在」をここで検査する — (i) が個別 marker の末尾で先に
     短絡しない: 例えば tombstone 末尾 purged@epoch10 + receipt 末尾 retired@epoch11 は canonical =
     retired であり (iii) 側):

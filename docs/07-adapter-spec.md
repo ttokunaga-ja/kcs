@@ -585,7 +585,7 @@ config (`~/.config/kcs/tools.toml`) では `mistral-ocr-latest` のような可�
 [adapter.policy]
 allow_network = false
 allowed_scope = "."
-max_input_bytes = 104857600        # 100 MB
+max_input_bytes = 104857600        # 100 MiB (= 100 * 1024 * 1024)
 timeout_seconds = 300
 redact_logs = true
 store_request_body = false

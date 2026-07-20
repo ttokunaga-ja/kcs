@@ -81,7 +81,7 @@ kcs open <検索結果の pointer>
 
 即効価値と履歴価値は分けて訴求する。
 
-- **初日から効く**: 意味検索 (語彙一致しない言い換え・スキャン PDF・画像内テキストに届く) と Evidence Pointer 表示。OS 全文検索 (Spotlight / ripgrep-all) が失敗するクエリで勝つことを Done 条件に含める ([09-mvp-scope.md §4](09-mvp-scope.md))。
+- **初日から効く**: 意味検索 (語彙一致しない言い換え・スキャン PDF・画像内テキストに届く) と Evidence Pointer 表示 (意味検索は online Adapter 承認済み構成での Done 条件 — API キー未設定時は text 検索ベースライン)。OS 全文検索 (Spotlight / ripgrep-all) が失敗するクエリで勝つことを Done 条件に含める ([09-mvp-scope.md §4](09-mvp-scope.md))。
 - **使うほど効く**: リネーム横断 (M3-2)・削除済み再発見 (M3-3) は snapshot 履歴の蓄積とともに立ち上がる価値であり、導入初日の差別化としては訴求しない。
 
 ---

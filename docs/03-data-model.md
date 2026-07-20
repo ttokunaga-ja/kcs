@@ -426,7 +426,7 @@ chunking_config_hash = "sha256:" + base16(sha256(JCS({
 })))
 ```
 
-- 対象は `[chunking]` 配下の **chunk 境界に影響する全キー**。キーを追加したら `spec_version` を bump する
+- 対象は `[chunking]` 配下の **chunk 境界に影響する全キー**。キーを追加したら `spec_version` を bump する。**キー不変のまま境界を変える分割意味論の改訂 ([04-pipeline.md §4.1](04-pipeline.md) の決定規則の変更) も bump の対象** — hash 変化が §4.6 の再 chunk を発火する (2026-07 の決定規則明文化は実装・store 公開前の定義確定であり bump しない — 08 の schema_version 規約と同型)
 - デフォルト値も明示的に畳み込む (キー省略と明示指定を識別しない)
 - `unicode_version` は **`kcs init` が採用 UCD 版 (現在の既定 = 17.0.0 — §11 の設定例と同一。実装が同梱する UCD 版と常に一致させる) を config へ明示記録する** ([06-cli-spec.md §1](06-cli-spec.md) の init 仕様・[10-operations.md §12.3](10-operations.md) の schema required も同旨。これを欠く旧 config の読み込み救済 (同梱版として読み次回補完) も §12.3 側)
   (「省略不可・default なし」の充足手段 — 以後の版変更は config 変更として本節の世代判定に乗る)
@@ -697,6 +697,8 @@ embedding_hash = "sha256:" + base16(sha256(JCS({
 ```
 
 JCS ではキー順は canonical 化時に自動決定されるため、上記の記載順は可読性のためのもの。
+
+`commit_type=purged` の commit は **`purged_raws` (当該 purge の対象 raw_hash の昇順配列 — prepared 相の closure から確定、[05-runtime.md §3.5](05-runtime.md) の planned_commit) を必須 field に持つ**。marker 検証 ([10-operations.md §7.5.1](10-operations.md)) は tombstone / receipt の raw_hash がこの配列に含まれることを対照する — 他 raw の正当な purge commit を `in_commit` に流用した偽 marker が genuine missing を隠せない。他の commit_type は本 field を持たない。
 
 tree entry の `normalize` ブロックは **optional**。normalized instance が存在しないファイル (未 Markdownize) の
 entry では `normalize` を**省略**する (省略 = 当該ファイルの normalized / chunk は存在しない。`null` は書かない —

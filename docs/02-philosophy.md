@@ -257,7 +257,7 @@ purge の例外性は次のように担保します:
    - 誰が、いつ、どの正当事由で実行したかを保存
    - これにより監査可能性は維持される (= 透明な忘却)
 
-4. purge は破壊的操作として、CLI で確認プロンプトを必須とし、
+4. purge は破壊的操作として、CLI で明示確認を必須とし (対話の確認プロンプトまたは非対話の `--yes` — [05-runtime.md §3.1](05-runtime.md))、
    `--reason <legal|privacy|misingest|copyright|other>` を必須引数とする (閉 enum — [08-evidence-pointer-spec.md](08-evidence-pointer-spec.md) §4.1 の purged_reason と同一)。
 ```
 

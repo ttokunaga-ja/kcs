@@ -295,7 +295,7 @@ commit/evidence restore は ancestry walk を必要としない。
   "fallback_reason": "embedding_not_authorized",
   "error_code": "KCS-E-SEARCH-VEC-UNAUTHORIZED-001",
   "diversify": { "strategy": "mmr", "mmr_lambda": 0.7 },
-  "paging": { "limit": 20, "next_cursor": "eyJ2IjoxLCJzY29wZXMiOl..." },
+  "paging": { "limit": 20, "next_cursor": "eyJ2IjoyLCJzY29wZXMiOls..." },
   "searched_scopes": [
     { "scope_id": "scope_01J8ZQ...", "scope_path": "/Users/foo/Research/.kcs", "snapshot_at": "sha256:9f2c..." }
   ],
@@ -618,7 +618,8 @@ GC が削除してはならないもの:
 - toollock object — 参照する commit object が存在する限り削除不可 (commit は append-only のため実質恒久。
   未公開 finalize 由来の未参照 toollock のみ、全 commit 参照走査の後に回収可)
 - manifest object — 参照する tree object が存在する限り削除不可 (削除の唯一の経路は purge。shallow 化で
-  未参照になったものの回収は Phase 4 GC の対象 — §2.2 表と同じ tiered retention に従う)
+  未参照になったものの回収は Phase 4 GC の対象 — shallow 化を駆動した系統の retention (§2.2 表の
+  gc_policy: auto = tiered retention・migrated / repaired = `[gc.derived_retention]` — §2.4) に従う)
 ```
 
 raw / chunk を GC 対象外とするのは、Evidence Pointer の永続性契約 ([08-evidence-pointer-spec.md §6](08-evidence-pointer-spec.md)) を「purge されない限り」で成立させるため。ストレージ増は「原則として忘れない」設計の受容済みコスト。
@@ -790,7 +791,10 @@ journal record = { purge_id (ULID), raw_hash 群, reason, actor, started_at, tar
                    closure (削除対象の全 object type × hash — 共有派生の live 参照判定の結果を含む),
                    planned_commit (purged commit の canonical bytes — prepared 相で確定し、
                                    tombstone / receipt の purged / erased event の in_commit と
-                                   一致する hash を先に固定) }
+                                   一致する hash を先に固定。`purged_raws` = 対象 raw_hash 昇順配列を
+                                   必須 field に持つ — [03-data-model.md §4](03-data-model.md)。
+                                   marker の purged / erased event の `at` は planned_commit の
+                                   `created_at` と同一値 — prepared 相で確定した単一 timestamp) }
 phase 順序    = prepared (closure 確定・記帳)
               → tombstoned (tombstone / erase receipt を先に耐久化 — 削除より前)
               → deleted (objects / SQLite / chunks.jsonl / logs の冪等削除)
@@ -820,15 +824,24 @@ phase 順序    = prepared (closure 確定・記帳)
               表示する (クラッシュした purge の回復可視性のため。status は本文を返さない)。
               不可逆な外部副作用を持つ 2 系は検査位置を固定する: restore は private temp へ展開し
               返却直前検査の後に atomic rename で --to へ publish (検出時は temp を削除)。**出力名・上書き
-              対象名が `.kcs-restore-bak` で終わる場合は mutation 前に明示拒否する** (commit 展開では全
-              出力 path を publish 前に検査。退避名前空間の予約 — 残存退避を正規対象として再退避・cleanup
-              すると先行 restore の回復コピーを失う。真にその名のファイルを復元する場合は改名復元を案内)。
+              対象名が `.kcs-restore-bak` / `.kcs-restore-quarantine` で終わる場合は mutation 前に明示
+              拒否する** (commit 展開では全出力 path を publish 前に検査。退避・隔離名前空間の予約 —
+              残存退避を正規対象として再退避・cleanup すると先行 restore の回復コピーを失う。真にその名の
+              ファイルを復元する場合は改名復元を案内)。**出力先の隔離名 `<basename>.kcs-restore-quarantine`
+              に同名ファイルが既に存在する場合も先行 restore の未完残存として mutation 前に拒否し、回復
+              手順 (内容確認の上での手動復帰または削除) を案内する** (crash 残存の隔離物が purge 済み
+              内容の生存コピーか第三者ファイルかは機械判別できない。隔離・退避は `--to` 配下のユーザー
+              領域であり [04-pipeline.md §1.1](04-pipeline.md) の temp 掃除の対象外 — KCS は自動削除
+              しない)。
               **publish の rename は非 --force・--force とも no-replace 相当 (RENAME_NOREPLACE 等) で行い、
               競合検出時は無変更で失敗する** (非 --force = preflight の不存在判定後に現れた第三者ファイルを
               無断置換しない。--force = 下記の退避が destination を空けた直後に現れた第三者ファイルを
-              置換しない — この競合時は退避を元 path へ復帰して終端する。意図的置換は退避 rename だけが
-              担う。restore の競合終端は全て **KCS-E-COMMIT-RESTORE-CONFLICT-001 (retryable exit 3 —
-              context に競合種別と両者の所在)**)。**--force 上書き時は publish の rename に先立ち、既存
+              置換しない — この競合時は退避を元 path へ復帰 (下記の隔離検証方式) して終端する。意図的置換は
+              退避 rename だけが担う。restore の競合終端は全て **KCS-E-COMMIT-RESTORE-CONFLICT-001
+              (retryable exit 3 — context に閉 enum `conflict_kind` (publish_race / quarantine_mismatch /
+              backup_mismatch / restore_rename_race / stale_backup / stale_quarantine) と
+              `retry_disposition` (publish_race / restore_rename_race = transient・他 = manual_action —
+              自動再試行が安全なのは transient のみ)、および両者の所在)**)。**--force 上書き時は publish の rename に先立ち、既存
               ファイルを同一 directory 内の退避名 `<basename>.kcs-restore-bak` へ no-replace rename で
               保全し、退避名を stderr に表示して退避の dev/inode を記録する** (置換 rename は旧内容を破壊
               するため、保全なしには下記の巻き戻しが原状回復にならない。**同名の退避が既に存在する場合は
@@ -841,17 +854,24 @@ phase 順序    = prepared (closure 確定・記帳)
               対象 raw を closure に含む active journal を検出した場合は下記と同様に巻き戻して
               KCS-E-PURGE-JOURNAL-ACTIVE-001 (retryable exit 3) で終端する (返却直前検査の fail-closed と
               対称 — purge 意図の耐久化以後は提供しない)。対象の purge が完遂していた場合は巻き戻す:
-              **publish 済みファイルは unlink せず、private temp 名への no-replace rename で隔離してから
-              fstat の dev/inode 対照で自らの publish と検証する** (一致 = 隔離分を削除・不一致 = 元 path へ
-              戻して競合終端 — 対照→削除の 2 操作では対照後の置換窓が残るため、rename した実体の上で
-              検証する)。**退避があれば記録済み dev/inode と再対照の上** (不一致 = 第三者による退避
-              差し替え — 触れずに競合終端)、**元 path へ no-replace rename で原状復帰して、preflight と
-              同一の応答で終端する: canonical = `purged` (tombstone) なら tombstone、`erased` なら
-              KCS-E-PURGE-NOT-FOUND-001** (**競合検出時 (dev/inode 不一致・no-replace 失敗) は削除も復帰も
-              行わず、退避を残したまま両者の所在を表示して RESTORE-CONFLICT で終端する** — 窓内の第三者
-              置換を消さない。成功時は退避を dev/inode 再対照の上で除去する。巻き戻しにより publish の
-              事後取消が --force 上書きを含めて成立 — lock 非取得のまま残余窓を閉じる。
-              purge closure を KCS 自身が破らない)。open は
+              **publish 済みファイルは unlink せず、同一 directory 内の決定的隔離名
+              `<basename>.kcs-restore-quarantine` への no-replace rename で隔離し (隔離名は stderr に
+              表示)、rename した実体を fstat の dev/inode 対照で自らの publish と検証する** (対照→削除の
+              2 操作では対照後の置換窓が残るため、rename した実体の上で検証する。一致 = 隔離分を削除。
+              不一致 = 第三者ファイル — 元 path へ no-replace rename で復帰を試み、成功・失敗いずれも
+              競合終端 (失敗時は隔離名のまま残す))。**退避の復帰・除去も同じ隔離検証方式で行う** (退避
+              path 上の対照→rename / unlink は同型の置換窓を残す。隔離名は同時に 1 実体 — publish の
+              隔離を処置してから退避の処置に再利用する): 退避を隔離名へ no-replace rename → rename した
+              実体を記録済み dev/inode と対照 → 一致 = 復帰なら元 path へ no-replace rename・除去なら
+              削除。不一致 = 第三者による退避差し替え — 退避名へ no-replace で戻し (失敗 = 隔離名の
+              まま)、それ以上触れずに競合終端。**復帰後は preflight と同一の応答で終端する: canonical =
+              `purged` (tombstone) なら tombstone、`erased` なら KCS-E-PURGE-NOT-FOUND-001** (競合処置は
+              段階別 — --force publish の no-replace 競合 = 退避を復帰して終端 / 隔離実体の対照不一致 =
+              復帰を試みて終端 / 退避の対照不一致・復帰 rename の no-replace 失敗 = 不触で終端。いずれも
+              両者の所在 (隔離名・退避名を含む) を表示して RESTORE-CONFLICT で終端する — 窓内の第三者
+              置換を消さない。crash で隔離だけが残っても、次回の同 path への restore が同名残存の拒否で
+              検出・案内する。巻き戻しにより publish の事後取消が --force 上書きを含めて成立 —
+              lock 非取得のまま残余窓を閉じる。purge closure を KCS 自身が破らない)。open は
               OS アプリ起動の直前に再検査する (起動後は取消不能 — 検査はそこまでに完了させる)
 ```
 
@@ -869,7 +889,7 @@ tombstone 再検査で破棄する ([04-pipeline.md §5.8](04-pipeline.md) 相 3
 tombstone を削除より先に耐久化するのは、「対象 object が消えたのに purge の痕跡が無い」状態
 (corruption と区別不能な markerless absence) を作らないためである。
 
-tombstone は raw_hash をキーとする **lifecycle レコード** (append-only の events[] 配列) で、CAS object ではないため `objects/` の外に置く。event は `purged` / `retired` の 2 種で、**active 判定 = 末尾 event が `purged` であること** — retire は末尾に `retired` を append し (上書き・削除しない = 退役監査の保全)、再 purge はさらに `purged` を append する。fsck・再 purge (marker 自身の lifecycle 管理) はこの「末尾 event」規則を参照する。**pointer 解決 (resolver) は、tombstone と erase receipt が併存する場合、各 marker の末尾 event を [08-evidence-pointer-spec.md §3.1](08-evidence-pointer-spec.md) 手順 5 の canonical final event へ正本化してから評価する** (lifecycle_epoch 最大・同値は tombstone 優先 — 個別 marker の active 判定だけで短絡しない)。events を持たない旧 flat 形式は「purged event 1 件」として読み、**次の mutation 時に一回だけ events 形式へ変換する** (legacy)。変換時、5 値 enum ([08-evidence-pointer-spec.md §4.1](08-evidence-pointer-spec.md)) 外の自由文 reason は `other` へ正規化し、原値を optional `legacy_reason` に保全する — 閉 enum は新規書込の規則であり、旧値の読取は other 扱い (表示は原値可・fsck は corruption にせず警告)。**lifecycle レコードの更新 (retire・再 purge・legacy 変換) は `.kcs/.lock` 下で、temp 書込 → file fsync → atomic rename → 親 directory fsync で行う** ([04-pipeline.md §1.1](04-pipeline.md) と同じ規律)。malformed・途中破損 (torn JSON) の record は `KCS-E-STORE-CORRUPT-001` として fail-closed に扱う。
+tombstone は raw_hash をキーとする **lifecycle レコード** (append-only の events[] 配列) で、CAS object ではないため `objects/` の外に置く。event は `purged` / `retired` の 2 種で、**active 判定 = 末尾 event が `purged` であること** — retire は末尾に `retired` を append し (上書き・削除しない = 退役監査の保全)、再 purge はさらに `purged` を append する。fsck・再 purge (marker 自身の lifecycle 管理) はこの「末尾 event」規則を参照する。**pointer 解決 (resolver) は、tombstone と erase receipt が併存する場合、各 marker の末尾 event を [08-evidence-pointer-spec.md §3.1](08-evidence-pointer-spec.md) 手順 5 の canonical final event へ正本化してから評価する** (lifecycle_epoch 最大・同値は tombstone 優先 — 個別 marker の active 判定だけで短絡しない)。events を持たない旧 flat 形式は「purged event 1 件」として読み、**次の mutation 時に一回だけ events 形式へ変換する** (legacy)。変換時、5 値 enum ([08-evidence-pointer-spec.md §4.1](08-evidence-pointer-spec.md)) 外の自由文 reason は `other` へ正規化し、原値を optional `legacy_reason` に保全する — 閉 enum は新規書込の規則であり、旧値の読取は other 扱い (表示は原値可・fsck は corruption にせず警告)。**lifecycle レコードの更新 (retire・再 purge・legacy 変換) は `.kcs/.lock` 下で、temp 書込 → file fsync → atomic rename → 親 directory fsync で行う** ([04-pipeline.md §1.1](04-pipeline.md) と同じ規律)。malformed・途中破損 (torn JSON) の record は `KCS-E-STORE-CORRUPT-001` として fail-closed に扱う。**validity は receipt (後述) と対称に semantic 検証まで要求する** — purged event の `in_commit` が bounded verified CAS で ref-reachable な `commit_type=purged` commit を指し、当該 commit の `purged_raws` に marker の raw_hash が含まれ、`at` が canonical UTC かつ commit `created_at` と一致すること (kind 別必須 field・遷移文法の正本は [10-operations.md §7.5.1](10-operations.md))。**検証失敗の marker は入口を問わず (fsck・resolver・再 purge) 説明能力を持たない corruption (`KCS-E-STORE-CORRUPT-001`) とする**。
 物理 leaf の `<raw64>` は論理 `raw_hash` から `sha256:` を除いた 64 文字の小文字 hex であり、
 JSON 内の `raw_hash` は完全な `sha256:<64hex>` を保持する。旧 Unix store の prefixed leaf は
 [03-data-model.md §2](03-data-model.md) の検証付き compatibility fallback で解決する。purge 実装時は
@@ -907,8 +927,8 @@ receipt は path / query / prompt / content を持たず (actor は全 event、*
 event には当該 purge の `target_epoch` を `epoch` として記録する** (以後の新規 event で必須 —
 legacy 行の欠落は可。epoch ファイル喪失時の回復源 — 上記 journal 二重検査の回復規則)。
 validity は leaf/raw_hash 一致だけでなく、erased event の `in_commit` が bounded verified CAS 上で
-ref-reachable な `commit_type=purged` commit を指し、`at` が canonical UTC かつ commit `created_at` と
-一致し、fsck invocation の fixed now より未来でないことを要求する。schema_version ごとの定義に
+ref-reachable な `commit_type=purged` commit を指し、当該 commit の `purged_raws` に対象 raw_hash が
+含まれ、`at` が canonical UTC かつ commit `created_at` と一致し、fsck invocation の fixed now より未来でないことを要求する。schema_version ごとの定義に
 一致しない field・不一致は store corruption (v1 flat 形式は「erased event 1 件」として読み、
 次の mutation で v2 へ locked 変換する — tombstone の legacy 規則と同型。v1 に reason は存在しない
 ため変換では `reason: "other"` を合成し legacy 警告として報告する — 新規 erased の 5 値 enum 必須
@@ -939,11 +959,16 @@ kcs restore <evidence|path|commit> --to <dir>
   保全 (同名残存 = 先行未完として拒否 + 回復案内。退避名は stderr に表示・dev/inode を記録) して
   から publish し、rename 後再検査の purge / erase / journal 終端時のみ原状復帰する (対象 alive の
   無関係変化は publish 維持 — §3.5。成功時に退避を除去)
-- publish (--force 含む)・復帰の rename は全て no-replace。巻き戻しの削除は unlink ではなく
-  private temp への隔離 rename + dev/inode 検証で行う。競合検出時は削除も復帰もせず両所在を
-  表示して KCS-E-COMMIT-RESTORE-CONFLICT-001 (retryable exit 3) で終端 (§3.5)
-- 出力名・上書き対象名が `.kcs-restore-bak` で終わる場合は展開前に明示拒否 (退避名前空間の
-  予約 — 改名復元を案内)
+- publish (--force 含む)・隔離・復帰の rename は全て no-replace。巻き戻しの削除も退避の復帰・
+  除去も、path 上の対照ではなく決定的隔離名 `<basename>.kcs-restore-quarantine` への隔離 rename +
+  rename した実体の dev/inode 検証で行う (隔離名は stderr に表示。同名残存 = 先行未完として拒否 +
+  回復案内。隔離・退避はユーザー領域 — 04 §1.1 の temp 掃除の対象外、KCS は自動削除しない)
+- 競合処置は段階別 (--force publish 競合 = 退避を復帰 / 隔離実体の不一致 = 元 path へ復帰を試行 /
+  退避の不一致・復帰 rename 失敗 = 不触) — いずれも両所在を表示して
+  KCS-E-COMMIT-RESTORE-CONFLICT-001 (retryable exit 3、context に conflict_kind・retry_disposition)
+  で終端 (§3.5)
+- 出力名・上書き対象名が `.kcs-restore-bak` / `.kcs-restore-quarantine` で終わる場合は展開前に
+  明示拒否 (退避・隔離名前空間の予約 — 改名復元を案内)
 - restore は raw object をそのまま展開 (再 Markdownize しない)
 - shallow commit からの restore は KCS-E-COMMIT-SHALLOW-001
 - purged 対象は KCS-E-PURGE-NOT-FOUND-001 / tombstone
@@ -988,6 +1013,8 @@ kcs adapter revoke
 承認系の scope.json 更新 — 承認操作 (対話 / `--approve` の行 publish)・approval self-heal・
 `kcs adapter revoke` — は、いずれも上記 lock 下の locked mutation として直列化する
 (並行する approve × revoke の lost update を作らない — [07-adapter-spec.md §3](07-adapter-spec.md))。
+承認 publish 直前の CAS 再検証の不一致は `KCS-E-ADAPTER-APPROVAL-CONFLICT-001` (exit 5 —
+並行 revoke による pending 除去、再承認が必要。[07-adapter-spec.md §3](07-adapter-spec.md)) で終端する。
 
 batch 系と reindex は外部副作用 (upload / job 作成) と batch_requests の状態遷移を伴うため lock 必須
 ([04-pipeline.md §5.8](04-pipeline.md) — 並行 resume が同一行へ別 intent_token を書くと先行 job が
@@ -1001,7 +1028,7 @@ batch 系と reindex は外部副作用 (upload / job 作成) と batch_requests
 - `kcs repair --verify-objects` の raw object 復旧と repaired commit publication も、同じ lock の下で private temp + hash 再検証 + atomic publish を使う
 - `kcs repair --rebuild-db` 実行中の `kcs search` は、再構築完了までの間旧 sqlite.db (存在すれば) を読むか、`KCS-E-INDEX-REBUILDING-001` を返す。再構築の完了も atomic rename (sqlite.db.tmp → sqlite.db) で切り替える
 - scope-registry.sqlite / cost-ledger.sqlite (~/.local/share/kcs/) は WAL モード + busy_timeout (デフォルト 5000ms) で複数プロセスの同時書き込みを直列化する。registry は cache であり ([03-data-model.md §4](03-data-model.md))、破損時は各 `.kcs` の rescan で再構築する (**再構築の入力はユーザーが知る探索 root** — registry 喪失後は `.kcs` の所在一覧も失われるため、各 root での `kcs index` 再実行が再登録を兼ねる。KCS が自力で全ディスクを走査することはしない)。cost-ledger.sqlite は**再構築不可の運用台帳** ([03-data-model.md §4.1](03-data-model.md) / [04-pipeline.md §5.4](04-pipeline.md))
-- purge の log scrub と通常 append/rotation は、device logs では `$XDG_DATA_HOME/kcs/logs/scrub.lock`、scope access logs では `.kcs/logs/access.scrub.lock` を共有する。複合 lock 順序は scope store → cost-ledger.sqlite (Tx) → device observability → scope access とし、逆順取得を禁止する。**scope 由来 log の append 順序**: 読取系が対象の path / query / raw_hash を含む行を append する場合、当該 append は scrub lock を保持したまま、2 点検査 (§6 — journal 不在 + epoch 不変) の**最終検査と同一 critical section** で行う — scrub 完了後の再 append で purge の削除 postcondition を破らない。最終検査で拒否した場合の記録には対象 path / query / raw_hash を含めない
+- purge の log scrub と通常 append/rotation は、device logs では `$XDG_DATA_HOME/kcs/logs/scrub.lock`、scope access logs では `.kcs/logs/access.scrub.lock` を共有する。複合 lock 順序は scope store → cost-ledger.sqlite (Tx) → device observability → scope access とし、逆順取得を禁止する。**scope 由来 log の append 順序**: 読取系が対象の path / query / raw_hash を含む行を append する場合、当該 append は scrub lock を保持したまま、3 点検査 (§6 — journal 不在 + epoch 不変 + lifecycle counter 不変) の**最終検査と同一 critical section** で行う — scrub 完了後の再 append で purge の削除 postcondition を破らない。最終検査で拒否した場合の記録には対象 path / query / raw_hash を含めない
 
 # 7. 観測 (Observability)
 

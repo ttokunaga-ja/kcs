@@ -451,10 +451,12 @@ CREATE TABLE chunk_config_generations (
    変更として扱う) 以外を除去 → 連続 "-" を 1 つに → 先頭末尾の "-" を除去。
    同一 unit 内の重複 slug は 2 つ目以降に "#2", "#3" を付す (出現順)
 5. 分割: 見出し区間が max_chars (03 §11 [chunking]) を超える場合、段落境界 (空行) で
-   貪欲に max_chars 以下へ分割する (**決定規則**: 空行列 (連続空行は 1 区切り) は区切りであり
-   いずれの分割片の span にも含めない — 全 byte 被覆は不変式ではない。見出し区間の先頭・末尾の
-   空行は捨てる。貪欲 = 先頭から各片に収まる限り次の段落を取り込み、超える直前で切る — 同一入力・
-   同一 max_chars から得られる span 列は一意)。単一段落が max_chars を超える場合のみ文字位置で
+   貪欲に max_chars 以下へ分割する (**決定規則**: 空行列 (連続空行は 1 区切り) は区切り判定に用いる。
+   **片の境界となる空行列 — 片と片の間・見出し区間の先頭・末尾 — はいずれの分割片の span にも
+   含めない** (全 byte 被覆は不変式ではない) が、**同一片へ取り込んだ段落間の空行はその片の span に
+   含まれる** — span は連続 byte 区間であり `text_hash` = exact bytes と整合する。貪欲 = 先頭から、
+   片 span 全体 (取り込んだ段落間の空行を含む) の scalar 数が max_chars に収まる限り次の段落を
+   取り込み、超える直前で切る — 同一入力・同一 max_chars から得られる span 列は一意)。単一段落が max_chars を超える場合のみ文字位置で
    機械分割する。max_chars と「文字位置」の計数単位 = **Unicode scalar value** (code point) であり、
    機械分割は scalar 境界でのみ行う (UTF-8 byte の途中で切らない。grapheme cluster は考慮しない —
    Unicode 版依存を避け、実装非依存の決定性を優先)。分割片は同一 heading_path / section_id を共有し、
@@ -715,7 +717,7 @@ running が heartbeat_at + 5min を超えたら stale。別 worker が pull 可�
   staging cleanup ([07-adapter-spec.md §8.3](07-adapter-spec.md) の同一遷移規範・terminal 耐久化が先) を実行し、
   prune-orphans の blocker からも除外する ([10-operations.md §7.5.1](10-operations.md))
 
-`task` テーブルが消えても問題ない設計 (object store と tool profile から再検出可能)。ただし `attempts` 履歴は失われる (リトライ予算がリセットされる) 点を許容。**§5.3 の max_attempts 判定はこの task 側の揮発カウンタで行う**。`batch_requests.attempts` は reject 終端 (§5.8 相 3) で耐久更新される監査・表示用カウンタであり、**「同一 mode で 1 回のみ」再試行の durable 判定源は `contract_violation_count` である** (§5.8 / §5.4 DDL コメントが正本 — 三つのカウンタは役割が異なる: task 側 = §5.3 retry budget、attempts = 監査・表示、contract_violation_count = 「1 回のみ」ゲート)。「1 回のみ」は task 通算である — count==1 のときだけ再投入でき、mode 切替後に別枠は生じない (「mode 切替後の違反も加算」の意図的帰結)。
+`task` テーブルが消えても問題ない設計 (object store と tool profile から再検出可能)。ただし `attempts` 履歴は失われる (リトライ予算がリセットされる) 点を許容。**§5.3 の max_attempts 判定はこの task 側の揮発カウンタで行う**。`batch_requests.attempts` は reject 終端 (§5.8 相 3) で耐久更新される監査・表示用カウンタであり、**「同一 mode で 1 回のみ」再試行の durable 判定源は `contract_violation_count` である** (§5.8 / §5.4 DDL コメントが正本 — 三つのカウンタは役割が異なる: task 側 = §5.3 retry budget、attempts = 監査・表示、contract_violation_count = 「1 回のみ」ゲート)。「1 回のみ」は task 通算である — 再投入できるのは count <= 1 のとき (0 = 未違反・`--reset-violations` 後を含む — §5.8 が正本) だけで、mode 切替後に別枠は生じない (「mode 切替後の違反も加算」の意図的帰結)。
 
 ## 5.3 エラー種別と Retry Budget
 
