@@ -81,12 +81,14 @@ raw / prepared / image / chunk / embedding / manifest / toollock / tree / commit
                                     #  leaf が tag- で始まらないため ref 列挙と衝突しない)
     tags/<logical-name>             # legacy Unix raw-name refs (read-only compatibility)
   tombstones/ab/cd/<raw64>      purge の tombstone lifecycle 記録 (raw_hash ごとの append-only events[] —
-                                purged / retired。active 判定 = 末尾 event。05-runtime.md §3.5。CAS object ではない)
+                                purged / retired。active 判定 = 末尾 event (marker 単独の規則 — 解決時は
+                                08-evidence-pointer-spec.md §3.1 手順 5 の canonical 正本化を経る)。05-runtime.md §3.5。CAS object ではない)
   purge/epoch         purge の ABA barrier (単調カウンタ — 05-runtime.md §3.5。欠落 = 読取 fail-closed)
   tombstones/lifecycle-epoch    lifecycle 更新 (retire・再 purge・legacy 変換) の単調カウンタ
                                 (05-runtime.md §3.5 — 回転補完の検出源。event append ごとに +1)
   tasks.jsonl         batch タスクストア (04-pipeline.md §5.1。append-only の運用データ、SQLite 非採用。
-                      terminal task の行の bounded compaction あり (task 状態 = 最新行) — 04 §5.1)
+                      terminal task の行の bounded compaction あり (task 状態 = 最新行。terminal task は
+                      全行を落とし、非 terminal task は最新行のみ残す) — 04 §5.1)
   chunks.jsonl        chunk association ledger (**truth** — chunk object が持たない世代 association の正本。
                       作成行 = {chunk_id, chunking_config_hash, created_at, first_seen_commit, path}。
                       path = chunk 生成時点の path (SQLite chunks.raw_path の rebuild 入力)。

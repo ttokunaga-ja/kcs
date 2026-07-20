@@ -119,11 +119,15 @@ revoke: adapter.policy.allow_network = false に設定する (これは **scope 
 `--online` の一時 opt-in でも上書きされない。下記「優先関係」の例外)。
 単一 Adapter だけの revoke は approvals[] 当該行の **status=revoked + revoked_at への更新**で行う
 (opt-in 単位 = scope × adapter に対応する既存機構 — 下記)。**効果は当該 Adapter の新規送信停止に
-限り、他 Adapter の active 承認と `allow_network` boolean は変えない**。**revoke は (単一 Adapter・
-scope 全体とも) 4 組一致する `approval_pending` を同一 atomic write で除去し、`--all` は tool を
+限り、他 Adapter の active 承認と `allow_network` boolean は変えない**。**revoke は単一 Adapter では同一
+(scope_id, tool_id) の `approval_pending` を execution_mode / tool_profile_hash 不問で同一 atomic write
+除去し、`--all` は tool を
 問わず存在する全ての `approval_pending` を除去する** — 未 publish の
 pending intent を残さない (行 publish 前に revoke した場合に、次回実行の self-heal が承認を
-復活させる経路の封鎖 — 別 tool の crash 残存 pending も `--all` で残さない)。**加えて、revoke が
+復活させる経路の封鎖 — 別 tool の crash 残存 pending も `--all` で残さない。**4 組一致に限ると**、
+profile 変更後の revoke が旧 profile の pending を取り逃し、config を戻した後の self-heal が
+revoke 直後の承認を復活させる — pending は未 publish の intent であり、広めの除去は再承認要求に
+なるだけで安全側)。**加えて、revoke が
 pending の除去または行の revoked 化を実際に実行した場合、`approvals_initialized` marker が無ければ
 同一 atomic write で `approvals_initialized: true` を記録する** (初回 materialize 例外の消費 —
 pending が唯一の区別子である crash 中間 (true × 行ゼロ × marker 無し) で revoke 後の次回実行の
@@ -135,7 +139,7 @@ scope の初回 materialize 経路を revoke の空振りで消費しない)。*
 再検証する** (CAS — 並行する revoke が除去した pending を publish しない)。
         新規オンライン送信 task の発行停止は、kill switch では scope 全体・単一 Adapter revoke では
         当該 Adapter 分のみ (送信済みデータの取り消しは、どちらの revoke でも保証しない。**発行停止の
-        境界 = 相 1 claim Tx 内の最終再読 ([05-runtime.md §1.1](05-runtime.md)) — 再読後に完了した
+        境界 = 相 1 claim Tx 内 (`BEGIN IMMEDIATE` 保持下) の最終再読 ([05-runtime.md §1.1](05-runtime.md)) — 再読後に完了した
         revoke の当該送信は in-flight として許容**)。
 
 記録:   承認記録に scope_id / tool_id / **execution_mode / tool_profile_hash (承認時点)** /
@@ -190,7 +194,11 @@ scope の初回 materialize 経路を revoke の空振りで消費しない)。*
         --approve) を要求する)。`approval_pending` の schema は
         [10-operations.md §12.3](10-operations.md) — **approved_at / approval_method を欠く legacy
         pending は schema error にしない**: 完全一致不成立として self-heal の対象外であり、次回
-        locked mutation で除去して明示承認を要求する (10 §12.3 の要素単位後方互換)。**scope 全体の revoke** は逆順 (全行の revoked 化 → boolean false) — 中間
+        locked mutation で除去して明示承認を要求する (10 §12.3 の要素単位後方互換)。**この除去も
+        `approvals_initialized` marker が無ければ同一 atomic write で true 化する** (revoke の pending
+        除去と同型の初回 materialize 例外の消費 — 除去だけで marker を残さないと「true × 行ゼロ ×
+        marker 無し」= 真正初回条件が復活し、次回実行の (b) 初回 materialize が「明示承認を要求する」
+        を無音で迂回する。対象なしでは書かない)。**scope 全体の revoke** は逆順 (全行の revoked 化 → boolean false) — 中間
         (revoked × true) は gate の AND で送信不能 (安全側) のまま恒久に安全であり、**boolean の
         false 化は kill switch 操作 (config 編集) 側の責務 — 自動整合はしない** (`kcs adapter revoke
         --all` の終状態 (全行 revoked × true、[06-cli-spec.md §1](06-cli-spec.md) の「boolean は

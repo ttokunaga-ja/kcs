@@ -333,7 +333,8 @@ Status: draft (retarget 実装は Phase 4+ のため、期日は Phase 4 着手�
 残未決:
   - bulk verify (--batch) のスループット要件 (実装自体が Phase 4+)
   (二重 purge は 2026-07-18 に確定済み — 再 purge は lifecycle events[] へ `purged` を追加 append する。
-   tombstone 判定は「active = 末尾 event が purged」であり、存在だけでは dead にしない — 正本 05 §3.5)
+   tombstone 判定は「active = 末尾 event が purged」であり、存在だけでは dead にしない — marker 単独の
+   規則。解決は 08 §3.1 手順 5 の canonical final event に正本化してから評価する — 正本 05 §3.5)
 
 正本: 08-evidence-pointer-spec.md §4 / 05-runtime.md §3
 Status: コアセマンティクスは decided。残未決 1 件 (bulk verify スループット) は Phase 4 着手前確定

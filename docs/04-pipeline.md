@@ -631,7 +631,9 @@ order_index             unit の出現順 (03-data-model.md §2.1 の順序)
 タスクストアは `.kcs/tasks.jsonl` (append-only・喪失許容 — §5.7)。**bounded compaction**: 書き込み系
 コマンド冒頭で行数が閾値 (既定 4096 行) を超えていたら、`.kcs/.lock` 下で terminal task の行を落とし
 (task の現在状態 = 当該 task_id の最新行 — terminal task はその全行 (旧遷移行を含む) を落とす)、
-非 terminal task の行のみを temp 完書き → fsync → atomic rename で再生成する (喪失許容データのため compaction
+非 terminal task は **task_id ごとの最新行 1 行のみ**を temp 完書き → fsync → atomic rename で再生成する
+(旧遷移行も落とす — `rate_limit` は max_attempts=∞ (§5.3) のため全行保持では有界にならない。状態 = 最新行
+であり attempts / next_retry_at も最新行が持つため lossless。喪失許容データのため compaction
 は常に安全 — 正確さは object store / cost-ledger からの再検出が担保する。§5.7)。
 
 ```json
@@ -883,16 +885,18 @@ chunk の文字数のみ**を対象とし、再利用 chunk (API 非呼出) は�
 
 横断規約 ([10-operations.md §12.2](10-operations.md)) に従う:
 
-```
-0  全タスク success または all up_to_date
-1  汎用 failure
-2  invalid usage / config 不正
-3  retryable な失敗が残っている (部分成功を含む — [06-cli-spec.md §7](06-cli-spec.md))
-4  permanent な失敗のみが残っている (全失敗 permanent、および settled partial
-   (部分成功 + 残り全 permanent — §5.2) を含む — 再試行で進展しない)
-5  auth_error がある
-6  budget_exceeded により paused
-7  user 中断 (SIGINT/SIGTERM)
+```text
+0   成功 / 全 up_to_date
+1   汎用 failure (詳細不明)
+2   invalid usage / config 不正 / schema validation 失敗
+3   retryable な失敗が残っている (部分成功・全体 retryable を含む — [06-cli-spec.md §7](06-cli-spec.md))
+4   permanent な失敗のみが残っている (全失敗 permanent、および settled partial
+    (部分成功 + 残り全 permanent — 04-pipeline.md §5.2) を含む — 再試行で進展しない)
+5   auth_error (user action 必要)
+6   budget_exceeded により paused
+7   user 中断 (SIGINT/SIGTERM)
+8   incompatible profile / format version
+9   confirm 拒否 (purge 等の確認プロンプトで no)
 ```
 
 ## 5.7 Resume と Repair
@@ -967,8 +971,10 @@ metadata から intent_token 規約に一致する job を全走査すること�
    **persist 直前に対象 raw の tombstone を再検査する** — purge 済みなら出力を破棄し、下記の reject 終端と
    同形 (error='purged') で閉じる (削除済み派生物を再 persist しない — [05-runtime.md §3.5](05-runtime.md))。
    **出力が受け入れ検査 (§3.2) で reject された場合 (contract_violation) も persist しない**: 同一 Tx で
-   確定課金 (provider 報告値) の記帳 + `state=3`・`error='contract_violation'`・completed_at + upload 掃除を
-   行い、attempts を耐久更新する。§3.2 の「同一 mode で 1 回のみ再試行」は**この終端 Tx の完了後に**、
+   確定課金 (provider 報告値) の記帳 + `state=3`・`error='contract_violation'`・completed_at を行い、
+   attempts を耐久更新する (**upload 掃除は Tx に含めない** — provider 側削除は SQLite Tx に原子参加
+   できない。相 3 collect と同じ回復規則に従い冪等に再試行し (404 = 削除成功)、**全削除の完了をもって
+   intent_token を NULL 化**する)。§3.2 の「同一 mode で 1 回のみ再試行」は**この終端 Tx の完了後に**、
    新 intent_token・新 submission_seq の相 1 として開始する (旧 attempt を state=1 のまま放置して
    再 collect ループに入らない・記帳を落とさない)。再投入の mode は原則同一 — tasks.jsonl 喪失で
    mode が復元不能な場合は full で 1 回 (§5.7 の安全側規定と同型)。**「1 回のみ」の判定は durable**:

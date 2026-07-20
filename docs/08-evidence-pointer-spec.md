@@ -208,7 +208,11 @@ bulk 系 (`kcs evidence verify --batch <pointers.jsonl>`) は従来どおり各�
     v1 tree (manifest_hash 欠落) はこれらの検証を行えない — legacy 解決とし、
     --strict verify は shallow 経路と同じく unverifiable (exit 3) を返す
 6b. entry の manifest object が purge により欠落している場合 (raw_hash の **tombstone または
-    erase receipt** の lifecycle — active / retired を問わず — が説明する欠落): 手順 2a と同じ
+    erase receipt** の lifecycle — active / retired を問わず — が説明する欠落。**説明範囲は fsck と
+    同一** ([10-operations.md §7.5.1](10-operations.md)): 当該 purged / erased event の `in_commit`
+    **以前**の commit が参照する closure に限る — pointer の commit がこの範囲外 (retire 後に再作成・
+    再公開された manifest の欠落) なら 6b を適用せず KCS-E-STORE-CORRUPT-001 (not_found 扱い) とする。
+    古い marker が新規破損を隠さない): 手順 2a と同じ
     直接解決へ降格し、レスポンスに `manifest_missing: true` を付す。**ただし 2a と異なり 6b は
     手順 4 の tree entry を取得済みであり、手順 8 の entry 系照合 (normalize.tool_profile_hash の
     pointer 一致・gen 一致) は実施する** (降格するのは manifest 依存の検証のみ)。**retired event に
@@ -227,7 +231,8 @@ bulk 系 (`kcs evidence verify --batch <pointers.jsonl>`) は従来どおり各�
     戻るのは、リンク先 commit 側で**同一 chunking config** の下に同一 chunk が再公開された場合に
     限る — config が変わって chunk 境界が消えた場合の not_found は正 (境界非互換の物理的帰結で
     あり、alive 保証の破れではない)。リンクとして有効なのは
-    **末尾が `retired` の lifecycle の最終 retired event のみ** (再 purge 済み = 末尾 `purged` は
+    **canonical final event (手順 5) が `retired` の場合の当該 event のみ** (個別 marker の末尾
+    retired では不十分 — 別 marker により再 purge 済み = canonical が `purged` なら
     手順 5 で tombstoned)。リンク先 commit が不在・ref 不達、または上記検証に失敗した場合は
     リンクを使わず直接解決の規則へ戻る (それも失敗なら not_found)。
     unverifiable になるのは manifest done 検査のみ。`manifest_missing` は `commit_shallow` と
@@ -311,7 +316,7 @@ context: { raw_hash, scope_path }
 ```
 
 完全削除は法的要件上必要な場合のみ。デフォルトは tombstone。
-`.kcs/purge/erase-receipts/` の bounded non-content receipt は public の tombstone 判定・re-ingest barrier には使わない (**fsck の欠落説明 ([10-operations.md §7.5.1](10-operations.md))・手順 5 の not_found 分類 (§3.1 (ii)〜(iii))・手順 6b の欠落説明・resurrection link にのみ使用可** — [05-runtime.md §3.5](05-runtime.md)。この列挙が用途の正本)。
+`.kcs/purge/erase-receipts/` の bounded non-content receipt は public の tombstone 判定・re-ingest barrier には使わない (**fsck の欠落説明 ([10-operations.md §7.5.1](10-operations.md))・手順 5 の not_found 分類 (§3.1 (ii)〜(iii))・手順 6b の欠落説明・resurrection link・同一 marker 自身の lifecycle 管理 (retired / 再 erased の append — [05-runtime.md §3.5](05-runtime.md)) にのみ使用可** — [05-runtime.md §3.5](05-runtime.md)。この列挙が用途の正本)。
 receipt は pointer state を tombstoned にせず、re-ingest も阻止しないため、レスポンスは上記
 `not_found` である。**ただしこの保証は当該 bytes が store に不在の間のもの** — 同一 bytes が後日
 再 ingest され (明示操作に限らず、working tree 残存原本の自動 scan を含む — [05-runtime.md §3.5](05-runtime.md)
@@ -419,7 +424,7 @@ retarget は **AI Agent からの呼び出しを前提** にしているため�
 - 既存 Evidence Pointer は KCS によって書き換えられない
 - raw_hash / chunk_hash / tool_profile_hash / commit は append-only
 - pointer の意味する場所 (= 生成時に解決可能だった raw + chunk) は purge されない限り解決可能
-- 解決失敗は schema 上区別される (tombstoned / not_found / scope_unreachable)
+- 解決失敗は schema 上区別される (tombstoned / not_found / scope_unreachable / registry_duplicate。verify はさらに unverifiable — §4.3 の 6 値 union が正本)
 - auto commit の GC (shallow 化) は pointer の解決可能性に影響しない (raw / chunk object は GC で削除されない、[05-runtime.md §2.6](05-runtime.md))
 - "古い pointer" を "最新版" に勝手に飛ばさない (retarget は明示操作)
 ```

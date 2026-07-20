@@ -29,7 +29,10 @@ kcs batch retry [--online|--offline] [--reset-violations <selector>]  # failed �
                                         # terminal な sync 行は token NULL 化済みのため 4 組キーで指定 (04 §5.4)。
                                         # 変えるのは count のみ。確認プロンプト必須 — 04 §5.8。監査は cost-ledger の outcome 列に残る)
 kcs adapter revoke (<tool_id> | --all)  # Adapter の network 承認取り消し (相互排他 — 07 §3 の実行主体)。
-                                        # <tool_id> = 当該行の revoked 化 + 4 組一致 approval_pending の同一 atomic write 除去。
+                                        # <tool_id> = 当該行の revoked 化 + 同一 (scope_id, tool_id) の approval_pending の
+                                        # 同一 atomic write 除去 (execution_mode / tool_profile_hash 不問 — 07 §3。
+                                        # 4 組一致に限ると別 profile で作られた pending が残り、config を戻した後の
+                                        # self-heal が revoke 直後の承認を復活させる)。
                                         # --all = 当該 scope の全 Adapter 行を revoked 化 + **tool を問わず存在する
                                         # 全ての approval_pending を除去** (boolean は変えない — scope 全体の
                                         # kill switch は allow_network=false 側)。対象なし (行なし・pending なし・
@@ -249,6 +252,8 @@ kcs restore <pointer> --to ./recovered/ --force    # 既存上書き許可 (確�
 ```
 - --to <dir> は必須
 - 既存ファイル上書きは --force + 確認 prompt
+- --force 上書きは旧ファイルを同 directory の退避名へ保全してから publish し、rename 後
+  再検査の終端時は原状復帰する (05 §3.5。成功時に退避を除去)
 - restore は raw object をそのまま展開 (再 Markdownize しない)
 - evidence は pointer URI / inline JSON / stdin、path は論理 direct-child 名、commit は HEAD / tag / full commit hash。tag と同名の path は tag を優先する。raw_hash shorthand は restore では受理しない
 - shallow commit からの restore は KCS-E-COMMIT-SHALLOW-001 で拒否
@@ -328,7 +333,9 @@ sqlite.db 不在・利用不能       全経路 (verify / open / view / restore 
                                優先順位は VERSION → journal → DUP → REBUILDING (10 §3)。05 §2.6・08 §3.1)
 kcs evidence verify --batch <pointers.jsonl>   一括 verify (Phase 4+ — 08 §4.3)
                                (--batch は --strict の有無に従う — --strict 時: 混在も 4 /
-                                なし: 検査完了で 0。内訳は --json の各行 status で判定 — 08 §4.3)
+                                なし: 検査完了で 0。内訳は --json の各行 status で判定 — 08 §4.3。
+                                search の retryability 分割 (05 §1.8) とは別 domain の規則 —
+                                pointer 単位の status 混在は retryability を見ず常に 4)
 kcs open / view / restore      dead pointer (tombstoned / not_found) は 4。scope_unreachable は 3 (retryable — 08 §4.3)
 kcs evidence retarget          対応なし / ambiguous は 4。
                                tool_profile_hash 不一致で chunk 解決不能 (retarget 要) は 8

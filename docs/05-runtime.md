@@ -178,7 +178,7 @@ scope ごとの sub-cursor は
 `{scope_id, snapshot_commit, index_generation, max_rowid, max_association_rowid, chunking_config_hash, consumed}`。
 `index_generation` は **rebuild (`kcs repair --rebuild-db`)・purge・embedding enrichment の finalize・
 index / batch finalize で `chunk_fts` の内容が変化した場合・tombstone lifecycle の更新
-(retire・再 purge — active-tombstone 判定が検索の可視集合を変えるため、purge の回転と対称。
+(retire・再 purge — tombstone 状態の判定 (canonical final event — [08-evidence-pointer-spec.md §3.1](08-evidence-pointer-spec.md) 手順 5) が検索の可視集合を変えるため、purge の回転と対称。
 [§3.5](05-runtime.md))・および GC の shallow 化実行
 (`--all-history` cursor の walk 対象が変わる) の、いずれでも新規採番する ULID**
 (単調カウンタではない — sqlite.db の `index_metadata` 表 ([04-pipeline.md §4.1](04-pipeline.md)) に保持するため
@@ -277,7 +277,8 @@ first-parent walk:     100,000 commits / 10,000,000 total tree entries /
 各 walk は counters を独立に持ち、次の object/entry で 1 つでも超える前に停止する。
 `--all-history` / `--since` の scope は candidate/alias を部分返却せず
 `KCS-E-COMMIT-HISTORY-LIMIT-001` (`excluded_scopes[].reason=history_limit_exceeded`) で失敗し、既存の
-multi-scope partial exit 3 / all-failed exit 4 に従う。purge-by-path は all-parent cap、restore-by-path は
+multi-scope partial 規則に従う (部分 = exit 3、全 scope 失敗 = §1.8 の昇格・retryability 分割 —
+同一 code 全滅は当該 code の単独時 exit、混在は retryable 理由を含めば 3・全て permanent なら 4)。purge-by-path は all-parent cap、restore-by-path は
 first-parent cap を同じ error code で fail-before-mutation/publication する。raw-hash purge と explicit
 commit/evidence restore は ancestry walk を必要としない。
 
@@ -403,7 +404,7 @@ per_scope_timeout_seconds = 2   # 超過 scope は excluded_scopes (reason=timeo
 | --- | --- | --- |
 | 全 scope 成功 | 通常結果 | 0 |
 | 一部 scope 失敗 / stale / timeout | 結果を返し `excluded_scopes` に記録 | 3 |
-| 全 scope 失敗 (除外理由が同一 code なら §1.8 の昇格規則で当該 code の単独時 exit。混在時は retryable 理由を含めば 3・全て permanent なら 4 — §1.8) | エラー (`KCS-E-SEARCH-SCOPE-ALL-FAILED-001`) | 3 / 4 |
+| 全 scope 失敗 (除外理由が同一 code なら §1.8 の昇格規則で当該 code の単独時 exit。混在時は retryable 理由を含めば 3・全て permanent なら 4 — §1.8) | エラー (`KCS-E-SEARCH-SCOPE-ALL-FAILED-001`) | 3 / 4 (同一 code 昇格時は当該 code の単独時 exit — 8 等) |
 
 ### レスポンス契約の拡張
 
@@ -773,7 +774,7 @@ commit — §8.1 no-op 例外 (a)) を記録する** — purge 前 commit を指
 介してのみ新 publication を参照できる ([08-evidence-pointer-spec.md §3.1](08-evidence-pointer-spec.md)
 手順 6b。検索の時点条件には影響せず、旧時点への遡及混入は起きない)。purge の監査事実は
 commit_type=purged の commit と、削除されず残る purged/retired event 列で追跡できる。
-search / open / evidence verify / fsck は同一の **active**-tombstone 判定を共有する。
+search / open / evidence verify (resolver 系) は [08-evidence-pointer-spec.md §3.1](08-evidence-pointer-spec.md) 手順 5 の **canonical final event 判定**を共有する。fsck・再 purge (marker lifecycle 管理) は各 marker の末尾 event 規則によるが、**raw 不変条件・修復の判定だけは canonical を基準にする** ([10-operations.md §7.5.1](10-operations.md))。
 
 **purge journal (クラッシュ安全の正本)**: purge は複数ストア (objects / SQLite / chunks.jsonl / logs /
 tombstone / commit) を跨ぐ破壊操作のため、**mutation 前に `.kcs/purge/journal` へ対象 closure と
@@ -815,10 +816,18 @@ phase 順序    = prepared (closure 確定・記帳)
               [10-operations.md §3](10-operations.md) の固定順) がこれを閉じる。`kcs status` だけは拒否せず、active journal の存在を状態として
               表示する (クラッシュした purge の回復可視性のため。status は本文を返さない)。
               不可逆な外部副作用を持つ 2 系は検査位置を固定する: restore は private temp へ展開し
-              返却直前検査の後に atomic rename で --to へ publish (検出時は temp を削除)。**restore は
-              さらに rename 完了後に同 3 点を再検査し、検査後〜rename 間に purge が完遂していた場合は
-              publish 済みファイルを削除して KCS-E-PURGE-NOT-FOUND-001 で終端する** (rename は unlink で
-              事後取消可能 — lock 非取得のまま残余窓を閉じる。purge closure を KCS 自身が破らない)。open は
+              返却直前検査の後に atomic rename で --to へ publish (検出時は temp を削除)。**--force 上書き時は
+              publish の rename に先立ち、既存ファイルを同一 directory 内の退避名へ atomic rename で
+              保全する** (置換 rename は旧内容を破壊するため、保全なしには下記の巻き戻しが原状回復に
+              ならない)。**restore はさらに rename 完了後に同 3 点を再検査し、変化を検出したら対象 raw の
+              canonical 状態 ([08-evidence-pointer-spec.md §3.1](08-evidence-pointer-spec.md) 手順 5) を
+              再解決する — 対象が alive のまま (無関係な lifecycle 変化) なら publish を維持して成功。
+              対象の purge が完遂していた場合は publish 済みファイルを削除し (削除前に自らの publish で
+              あることを fstat の dev/inode 対照で確認 — 窓内の第三者置換を消さない)、退避があれば
+              元 path へ atomic rename で原状復帰して、preflight と同一の応答で終端する: canonical =
+              `purged` (tombstone) なら tombstone、`erased` なら KCS-E-PURGE-NOT-FOUND-001** (成功時は
+              退避を除去する。巻き戻しにより publish の事後取消が --force 上書きを含めて成立 —
+              lock 非取得のまま残余窓を閉じる。purge closure を KCS 自身が破らない)。open は
               OS アプリ起動の直前に再検査する (起動後は取消不能 — 検査はそこまでに完了させる)
 ```
 
@@ -882,9 +891,10 @@ ref-reachable な `commit_type=purged` commit を指し、`at` が canonical UTC
 とは区別。自由文の原値を持つ legacy 変換は従来どおり `legacy_reason` に保存)。
 re-ingest barrier・public tombstone 判定には使わない。使用できるのは fsck の intentional absence
 説明と、pointer 解決内部の not_found 分類 (08 §3.1 手順 5 (ii)〜(iii))・手順 6b の欠落説明・
-resurrection link に限る ([08-evidence-pointer-spec.md §4.2](08-evidence-pointer-spec.md) の列挙が正本)。
+resurrection link・同一 marker 自身の lifecycle 管理 (retired / 再 erased の append — 本節)
+に限る ([08-evidence-pointer-spec.md §4.2](08-evidence-pointer-spec.md) の列挙が正本)。
 したがって Evidence verify の応答は従来どおり `not_found` で、同一 bytes の
-後日 ingest (明示操作に限らず、working tree 残存原本の自動 scan を含む — §3.5 の残存警告) は許可する。**erase receipt も tombstone と同じ lifecycle 形式 (events[]) を持ち、raw object の再 publication 成功時は除去せず `retired` event を append する** — 除去すると erase 済み raw の旧 commit が参照する manifest 欠落を説明するものが消え、fsck の corruption 誤判定と手順 6b の不達を生むため (公開 pointer API に使わない・re-ingest barrier にしない性質は不変)。crash で不整合が残った場合は verified raw object を優先し、次の locked mutation で record を整合させる — **整合の条件は [10-operations.md §7.5.1](10-operations.md) の receipt 整合規則に従う**: 末尾 erased event の `in_commit` を ancestor に持つ ref 到達可能な再 publication commit が存在するときのみ `retired` を append し、commit がまだ無ければ未 finalize の進行状態として保留する (tombstone の補完と同じ因果条件)。
+後日 ingest (明示操作に限らず、working tree 残存原本の自動 scan を含む — §3.5 の残存警告) は許可する。**erase receipt も tombstone と同じ lifecycle 形式 (events[]) を持ち、raw object の再 publication 成功時は除去せず `retired` event を append する** — 除去すると erase 済み raw の旧 commit が参照する manifest 欠落を説明するものが消え、fsck の corruption 誤判定と手順 6b の不達を生むため (公開 pointer API に使わない・re-ingest barrier にしない性質は不変)。crash で不整合が残った場合は verified raw object を優先し、次の locked mutation で record を整合させる — **整合の条件は [10-operations.md §7.5.1](10-operations.md) の receipt 整合規則に従う**: 当該 erased event が全 marker の canonical final event ([08-evidence-pointer-spec.md §3.1](08-evidence-pointer-spec.md) 手順 5) であり、**canonical final event の** `in_commit` を ancestor に持つ ref 到達可能な再 publication commit が存在するときのみ `retired` を append する。canonical が別 marker の `purged` なら incomplete purge として exit 3 で報告する (append しない)。commit がまだ無ければ未 finalize の進行状態として保留する (tombstone の補完と同じ因果条件)。
 
 **制約 (明記)**: tree entry の `path` 文字列と `raw_hash` は履歴に残る。ファイル名そのものが秘匿対象であるケース (履歴書き換えが必要) は MVP 非対応。commit / tree の書き換えは content hash の連鎖再計算と無関係ファイルの Evidence Pointer 無効化を伴うため、対応する場合も v2+ の再設計事項とする。
 
@@ -901,6 +911,8 @@ kcs restore <evidence|path|commit> --to <dir>
 ```
 - working tree への直接書き戻しは禁止 (--to <dir> 必須)
 - 既存ファイル上書きは --force 必須 + 確認プロンプト
+- --force 上書きは旧ファイルを同 directory の退避名へ保全してから publish し、rename 後
+  再検査の終端時は原状復帰する (§3.5。成功時に退避を除去)
 - restore は raw object をそのまま展開 (再 Markdownize しない)
 - shallow commit からの restore は KCS-E-COMMIT-SHALLOW-001
 - purged 対象は KCS-E-PURGE-NOT-FOUND-001 / tombstone
