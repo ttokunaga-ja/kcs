@@ -543,8 +543,12 @@ receipt も corruption とする。verified raw と marker の共存の正常判
 存在する場合は raw を正とし、**その再 publication commit (canonical final event の `in_commit` を
 ancestor に持つ ref 到達可能な commit) が存在するときに**、locked repair / 次の locked mutation で
 `retired` event を append して整合させる。**canonical final event が `purged` (tombstone) なのに
-verified raw が存在する場合は incomplete purge として exit 3 で報告する** (retired を append しない —
-purge 済み内容を fsck が復活させない) (**receipt は除去しない** — 除去すると旧 commit が参照する
+verified raw が存在する場合**: canonical final purged event の `in_commit` を ancestor に持つ
+ref 到達可能な再 publication commit が存在するなら、crash した resurrection の完遂として `retired` を
+append して整合させる ([05-runtime.md §3.5](05-runtime.md) の補完規範と同一の因果条件)。**存在しなければ
+incomplete purge として exit 3 で報告する** (retired を append しない —
+purge 済み内容を fsck が復活させない。回復は同一対象への `kcs purge --raw-hash` の再実行で冪等に
+完遂できる — [09-mvp-scope.md §5.3](09-mvp-scope.md) の再 purge 規範。報告にはこの誘導を含める) (**receipt は除去しない** — 除去すると旧 commit が参照する
 manifest 欠落を説明するものが消える。**commit がまだ無い場合 — snapshot finalize 前の crash — は
 「未 finalize の進行状態」として incomplete (exit 3) とし、append しない** —
 [05-runtime.md §3.5](05-runtime.md) の因果条件と同型)。

@@ -252,8 +252,10 @@ kcs restore <pointer> --to ./recovered/ --force    # 既存上書き許可 (確�
 ```
 - --to <dir> は必須
 - 既存ファイル上書きは --force + 確認 prompt
-- --force 上書きは旧ファイルを同 directory の退避名へ保全してから publish し、rename 後
-  再検査の終端時は原状復帰する (05 §3.5。成功時に退避を除去)
+- --force 上書きは旧ファイルを同 directory の退避名 `<basename>.kcs-restore-bak` へ no-replace で
+  保全 (同名残存 = 先行未完として拒否 + 回復案内。退避名は stderr に表示) してから publish し、
+  rename 後再検査の purge / erase / journal 終端時のみ原状復帰する (対象 alive の無関係変化は
+  publish 維持 — 05 §3.5。成功時に退避を除去。非 --force の publish・復帰 rename も no-replace)
 - restore は raw object をそのまま展開 (再 Markdownize しない)
 - evidence は pointer URI / inline JSON / stdin、path は論理 direct-child 名、commit は HEAD / tag / full commit hash。tag と同名の path は tag を優先する。raw_hash shorthand は restore では受理しない
 - shallow commit からの restore は KCS-E-COMMIT-SHALLOW-001 で拒否

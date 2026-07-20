@@ -974,8 +974,10 @@ metadata から intent_token 規約に一致する job を全走査すること�
    確定課金 (provider 報告値) の記帳 + `state=3`・`error='contract_violation'`・completed_at を行い、
    attempts を耐久更新する (**upload 掃除は Tx に含めない** — provider 側削除は SQLite Tx に原子参加
    できない。相 3 collect と同じ回復規則に従い冪等に再試行し (404 = 削除成功)、**全削除の完了をもって
-   intent_token を NULL 化**する)。§3.2 の「同一 mode で 1 回のみ再試行」は**この終端 Tx の完了後に**、
-   新 intent_token・新 submission_seq の相 1 として開始する (旧 attempt を state=1 のまま放置して
+   intent_token を NULL 化**する)。§3.2 の「同一 mode で 1 回のみ再試行」は**この終端 Tx の完了後、かつ旧 attempt の
+   残骸掃除完了 (upload 全削除 + intent_token NULL 化) 後に**、
+   新 intent_token・新 submission_seq の相 1 として開始する (順序規範 (下記) と同型 — 相 1 の NULL
+   戻しが掃除未完の旧 upload の唯一の locator を消さないため。旧 attempt を state=1 のまま放置して
    再 collect ループに入らない・記帳を落とさない)。再投入の mode は原則同一 — tasks.jsonl 喪失で
    mode が復元不能な場合は full で 1 回 (§5.7 の安全側規定と同型)。**「1 回のみ」の判定は durable**:
    reject 終端 Tx で `contract_violation_count` を increment する (相 1 の NULL 戻しの対象外)。

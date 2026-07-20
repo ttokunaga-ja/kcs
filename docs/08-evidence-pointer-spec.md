@@ -235,8 +235,9 @@ bulk 系 (`kcs evidence verify --batch <pointers.jsonl>`) は従来どおり各�
     retired では不十分 — 別 marker により再 purge 済み = canonical が `purged` なら
     手順 5 で tombstoned)。リンク先 commit が不在・ref 不達、または上記検証に失敗した場合は
     リンクを使わず直接解決の規則へ戻る (それも失敗なら not_found)。
-    unverifiable になるのは manifest done 検査のみ。`manifest_missing` は `commit_shallow` と
-    独立の response field であり併存し得る
+    unverifiable になるのは manifest done 検査のみ。`manifest_missing` は 6b を実行できる
+    non-shallow 解決でのみ設定される — shallow (2a) は 6b を適用しないため `commit_shallow` とは
+    **相互排他** (schema 上は独立 field だが同時に true にならない)
 7.  chunk_hash で chunk object を解決し byte_start/byte_end の text を取り出す
 8.  **整合検証**: 解決した chunk object の raw_hash / tool_profile_hash が pointer の値と一致し、
     手順 4-6 を経た場合はさらに **tree entry の normalize.tool_profile_hash が pointer の

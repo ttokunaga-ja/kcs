@@ -64,7 +64,7 @@ raw / prepared / image / chunk / embedding / manifest / toollock / tree / commit
                                     # media_type は unit metadata に記録)
     normalized_units/ab/cd/<raw64>.<tool64>.g<gen>/
       manifest.json                    # 順序付き unit 一覧 + unit status (正本, §2.1)
-      <unit_ref>.json                  # unit object (unit_ref = base16(sha256(unit_key))[0:16])
+      <unit_ref>.json                  # unit object (unit_ref = base16(sha256(unit_key の UTF-8 バイト列))[0:16] — §8.1 共通規則)
     normalized/ab/cd/<raw64>.<tool64>.g<gen>.md   # 全文 view (cache, 再生成可能)
     manifests/ab/cd/<manifest64>    # manifest の immutable 確定版 (canonical JCS bytes、§2.1。
                                     # tree v2 の normalize.manifest_hash が指す — §8)
@@ -76,7 +76,7 @@ raw / prepared / image / chunk / embedding / manifest / toollock / tree / commit
     commits/ab/cd/<commit64>
   refs/
     heads/main
-    tags-v1/tag-<digest64>          # canonical: digest64 = sha256(NFC + simple case folding 後の論理 tag 名)
+    tags-v1/tag-<digest64>          # canonical: digest64 = sha256(NFC + simple case folding 後の論理 tag 名の UTF-8 バイト列)
     tags-v1/names.jsonl             # 論理 tag 名の truth (append-only ledger — 下記 tag 規則。
                                     #  leaf が tag- で始まらないため ref 列挙と衝突しない)
     tags/<logical-name>             # legacy Unix raw-name refs (read-only compatibility)
@@ -84,6 +84,8 @@ raw / prepared / image / chunk / embedding / manifest / toollock / tree / commit
                                 purged / retired。active 判定 = 末尾 event (marker 単独の規則 — 解決時は
                                 08-evidence-pointer-spec.md §3.1 手順 5 の canonical 正本化を経る)。05-runtime.md §3.5。CAS object ではない)
   purge/epoch         purge の ABA barrier (単調カウンタ — 05-runtime.md §3.5。欠落 = 読取 fail-closed)
+  purge/erase-receipts/ab/cd/<raw64>   erase receipt (non-public marker — events[] lifecycle。§4.1 の
+                                truth・復旧不能。用途列挙の正本は 08-evidence-pointer-spec.md §4.2)
   tombstones/lifecycle-epoch    lifecycle 更新 (retire・再 purge・legacy 変換) の単調カウンタ
                                 (05-runtime.md §3.5 — 回転補完の検出源。event append ごとに +1)
   tasks.jsonl         batch タスクストア (04-pipeline.md §5.1。append-only の運用データ、SQLite 非採用。
@@ -375,7 +377,7 @@ null フィールドは hash 入力に含めない (省略と null を識別し�
 2. normalize line endings to \n (CRLF → \n、単独 CR → \n)
 3. NFC 正規化
 4. 末尾の空行を削除
-5. sha256, "sha256:" プレフィックス
+5. UTF-8 バイト列に対し sha256, "sha256:" プレフィックス
 ```
 
 手順 1-2 の対象文字集合と単独 CR の扱いは 2026-07-03 に確定 (契約テスト設計 step2a §C-4 の決定性論点解消)。
@@ -567,6 +569,7 @@ object hash は artifact identity と Evidence Pointer の永続性 (08 §6) を
 **共通規則**:
 
 - 論理 hash 表記は `"sha256:" + base16(sha256(...))` (小文字 hex)。JSON、SQLite、refs、CLI、URI ではこの完全表記を使う。
+- **文字列を preimage とする hash (unit_ref の unit_key・tag の正規化済み論理名・prompt_template_hash の正規化結果等、JCS 系以外の全 textual preimage) は、規定の正規化を適用した後の UTF-8 バイト列に対して sha256 を計算する** (JCS 系は RFC 8785 が UTF-8 を内包)。encoding 無指定の実装差 (UTF-16 等) は store の可搬性と検証可能性を壊すため許容しない。
 - canonical fan-out パスは `objects/<type>/ab/cd/<digest64>`。`digest64` は論理 hash から `sha256:` を除いた 64 文字の小文字 hex で、`ab` / `cd` はその先頭 2 文字 / 続く 2 文字。normalized basename と tombstone leaf も §2 の digest-only 規則に従う。
 - object 本体は**自身の hash を含めない** (Git 同様、保存キーが ID。旧 `tree_id` / `commit_id` /
   chunk object 内の `chunk_hash` フィールドは廃止)。raw / prepared / image は保存 byte の content key、
