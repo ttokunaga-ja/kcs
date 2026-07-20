@@ -120,7 +120,10 @@ revoke: adapter.policy.allow_network = false に設定する (これは **scope 
 限り、他 Adapter の active 承認と `allow_network` boolean は変えない**。**revoke は (単一 Adapter・
 scope 全体とも) 4 組一致する `approval_pending` を同一 atomic write で除去する** — 未 publish の
 pending intent を残さない (行 publish 前に revoke した場合に、次回実行の self-heal が承認を
-復活させる経路の封鎖)。
+復活させる経路の封鎖)。**単一 Adapter revoke の実行主体 = `kcs adapter revoke <tool_id>`**
+([06-cli-spec.md §1](06-cli-spec.md) — `.kcs/.lock` 下の locked mutation、[05-runtime.md §6](05-runtime.md))。
+承認側の行 publish・self-heal も同じ lock 下で行い、**publish の直前に `approval_pending` の存在を
+再検証する** (CAS — 並行する revoke が除去した pending を publish しない)。
         新規オンライン送信 task の発行停止は、kill switch では scope 全体・単一 Adapter revoke では
         当該 Adapter 分のみ (送信済みデータの取り消しは、どちらの revoke でも保証しない)。
 
@@ -704,8 +707,9 @@ terminal 化済み task の残存 root は cleanup 失敗の残骸として prun
 KCS は要求しない)。**凍結保全と合成が適用されるのは transport 中断 (stream 失敗) からの resume に
 限る** — 受け入れ検査 reject (contract violation — [04-pipeline.md §3.2](04-pipeline.md)) 起因の
 再投入では staging を破棄して開始する (違反 unit を含み得る staging を first-instance-wins で
-勝たせると、修正済み retry 応答が破棄され再違反が確定するため)。KCS が staging + retry 応答を合成する際、**まず生の retry 応答の各配列に V1 / V6 の配列内 unit_key 重複検査を適用し** (staged-key の
-再出現で重複が消える前に契約違反を検出する)、その後 **staging に確定済みの unit_key と
+勝たせると、修正済み retry 応答が破棄され再違反が確定するため)。KCS が staging + retry 応答を合成する際、**まず生の retry 応答の各配列に V1 / V6 の配列内 unit_key 重複検査と配列間の排他検査
+(pairwise disjoint — V1 の 4 集合 / V6 の 3 集合) を適用し** (staged-key の
+再出現で重複・非排他が消える前に契約違反を検出する)、その後 **staging に確定済みの unit_key と
 重複する応答 unit は黙って破棄する** (staging 側が first instance — first-instance-wins
 ([03-data-model.md §5](03-data-model.md)) と同型)。合成後の**完成集合に対して**受け入れ検査
 (incremental は V1〜V6、full は full 契約) を適用してから一括公開する。

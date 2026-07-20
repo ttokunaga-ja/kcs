@@ -28,6 +28,11 @@ kcs batch retry [--online|--offline] [--reset-violations <selector>]  # failed �
                                         # (selector は abandon と同形: intent_token または 4 組タスクキー — 曖昧時は拒否。
                                         # terminal な sync 行は token NULL 化済みのため 4 組キーで指定 (04 §5.4)。
                                         # 変えるのは count のみ。確認プロンプト必須 — 04 §5.8。監査は cost-ledger の outcome 列に残る)
+kcs adapter revoke <tool_id> [--all]    # 単一 Adapter の network 承認取り消し (approvals[] 当該行の revoked 化 +
+                                        # 4 組一致 approval_pending の同一 atomic write 除去 — 07 §3 の実行主体。
+                                        # --all = 当該 scope の全 Adapter 行を revoked 化 (boolean は変えない —
+                                        # scope 全体の kill switch は allow_network=false 側)。`.kcs/.lock` 取得
+                                        # (05-runtime.md §6) の locked mutation
 kcs batch abandon <intent_token|scope/adapter/input_hash/tool_profile_hash>
                                         # 照合が恒久不能な in-flight Batch job の打ち切り (estimated 記帳 + terminal 化。
                                         # 指定子は intent_token または batch_requests の 4 組タスクキー (3 組では別
@@ -36,8 +41,9 @@ kcs batch abandon <intent_token|scope/adapter/input_hash/tool_profile_hash>
                                         # 確認プロンプト必須。残骸掃除完了まで intent_token は保持 — 04-pipeline.md §5.8。
                                         # 対象行が無い場合 (terminal 確定済み・device 行の剪定後を含む) は
                                         # 対象なしの冪等成功 — exit 0 + 「対象なし」表示 (04 §5.4))
-kcs repair (--rebuild-db [--online|--offline] | --verify-objects [--prune-orphans])
+kcs repair (--rebuild-db [--online|--offline] | --verify-objects [--prune-orphans] | --registry-prune)
                                         # SQLite 再構築 / CAS 整合性検証 (10-operations.md §7.5)。操作は exactly-one (省略は usage error)。
+                                        # --registry-prune = 恒久到達不能な registry stale 行の確認付き退役 (10-operations.md §3)
                                         # --rebuild-db は rebuild 後に enrichment を駆動し得るため online/offline 上書きの対象 (07 §3・04 §5.4)。
                                         # --prune-orphans = どの manifest からも参照されない orphan prepared/image の削除
                                         # (確認プロンプト必須 — 10 §7.5.1。法務 purge の完結手段)
@@ -153,9 +159,10 @@ preview 内容:
 ```text
 1. network opt-in を付与しない。opt-in 未成立の scope では、--yes で index を
    開始しても online_api Adapter への送信 task は発行されず pending のまま残る
-   (07-adapter-spec.md §3)。非対話環境で opt-in が必要な場合は、事前に
-   adapter.policy.allow_network = true を設定しておく (明示 `--online` も当該実行限りの
-   一時 opt-in として非対話環境で有効 — 07-adapter-spec.md §3)。
+   (07-adapter-spec.md §3)。非対話環境で永続 opt-in が必要な場合は、事前に対話環境または
+   `--approve` で**承認を成立させておく** (行 + boolean の両方 — boolean
+   `allow_network = true` の手編集**単独では送信 gate を満たさない**、07-adapter-spec.md §3)。
+   明示 `--online` は当該実行限りの一時 opt-in として非対話環境でも有効 (同 §3)。
 2. secrets の built-in デフォルト除外 (10-operations.md §1.1 Tier A) を解除できない。
 3. 承認記録の approval_method に "yes" が記録され、対話承認と事後監査で区別できる。
 ```
@@ -249,7 +256,7 @@ kcs purge <path|--raw-hash <h>> --reason <legal|privacy|misingest|copyright|othe
 kcs purge --raw-hash sha256:abc... --reason misingest --erase-tombstone
 ```
 
-purge は常に**全履歴**の raw 本文・派生 artifact を対象とする (commit / tree object は書き換えない。[05-runtime.md §3.5](05-runtime.md))。デフォルトでは tombstone を記録し、`--erase-tombstone` は public tombstone を残さない (Evidence Pointer は not_found)。後者の fsck-only non-content erase receipt は pointer state や re-ingest を阻止しない。
+purge は常に**全履歴**の raw 本文・派生 artifact を対象とする (commit / tree object は書き換えない。[05-runtime.md §3.5](05-runtime.md))。デフォルトでは tombstone を記録し、`--erase-tombstone` は public tombstone を残さない (Evidence Pointer は not_found)。後者の non-public non-content erase receipt は public tombstone にならず re-ingest も阻止しない (pointer 解決内部の not_found 分類等の用途列挙は [08-evidence-pointer-spec.md §4.2](08-evidence-pointer-spec.md))。
 
 - `--reason` は必須引数 (5 値の閉 enum: legal | privacy | misingest | copyright | other — [08-evidence-pointer-spec.md §4.1](08-evidence-pointer-spec.md) の purged_reason と同一)
 - 確認 prompt 必須 (`--yes` でスキップ可)

@@ -175,15 +175,20 @@ bulk 系 (`kcs evidence verify --batch <pointers.jsonl>`) は従来どおり各�
     あるなら → tombstone を返す (§4)。
     (ii) **active な erase receipt (末尾 event = `erased`) があり raw object が不在**なら not_found —
     `KCS-E-PURGE-NOT-FOUND-001` (§4.2 の表と同一の終端)。
-    (iii) **retired (tombstone・erase receipt とも末尾 event = `retired`) は tombstone 扱いしない**が、
-    手順 6 へ進む**前に raw object の存在を検査する** — 存在すれば手順 6 へ進む (resurrection 後の
-    旧 pointer を alive に戻すための必須条件)。**不在なら not_found — `KCS-E-STORE-CORRUPT-001`**
+    (iii) **存在する lifecycle marker (tombstone / erase receipt) のいずれかの末尾 event が
+    `retired`** (片方のみ存在するのが通常 — 双方が存在して食い違う場合は lifecycle 正本
+    ([05-runtime.md §3.5](05-runtime.md)) の `lifecycle_epoch` 最大の最終 event で判定し、
+    resurrection link も同じ event のものを採用する) なら tombstone 扱いしないが、手順 6 へ進む
+    **前に raw object の存在を検査する** — 存在すれば手順 6 へ進む (resurrection 後の旧 pointer を
+    alive に戻すための必須条件)。**不在なら not_found — `KCS-E-STORE-CORRUPT-001`**
     (retired 後の再作成分の欠落は corruption — [10-operations.md §7.5.1](10-operations.md) と整合。
     chunk object が残存していても本文を返さない)。
     (iv) marker (tombstone / erase receipt) が無いのに raw object が不在なら not_found — code は
     `KCS-E-STORE-CORRUPT-001` (marker なしの欠落は
     purge の痕跡ではなく **corruption の疑い** — 手順 4 の短絡と同じ not_found 扱いで返し、
-    `kcs repair --verify-objects` を案内する。purge 済みの正規欠落 (marker あり) と混同しない)
+    `kcs repair --verify-objects` を案内する。purge 済みの正規欠落 (marker あり) と混同しない)。
+    **(i)〜(iv) のいずれにも該当しない場合** (marker が無い・または active な erase receipt が
+    あっても raw object が存在する場合を含む) は raw object が存在する通常状態であり、手順 6 へ進む
 6.  tree entry の normalize.(tool_profile_hash, gen) で normalized instance (unit object 群) を解決
     (gen フィールド欠落は gen=0 と読む)
 6a. **時点帰属の検証 (v2 tree)**: entry の normalize.manifest_hash が指す manifest object を読み、

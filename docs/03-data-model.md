@@ -123,7 +123,7 @@ object identity と hash 算出規約は変わらない。
 
 tag の新規物理 leaf は上記の固定 ASCII hash 形式を使う。論理 tag 名は OS 非依存の portable
 leaf 規則 (Windows 予約名、`<>:"/\\|?*`、control、末尾 dot/space を禁止) を満たす必要があり、
-NFC 正規化 + Unicode **simple case folding (locale 非依存 — full folding・locale 別規則は使わない)** が同じ名前は case-insensitive collision として同一 slot を占める (folding は Unicode 安定性方針により割当済み文字で版間不変 — 版の記録は不要)。正規化規則自体の改訂 (旧「Unicode lowercase」実装を含む) は digest の非互換変更であり、`kcs_format_version` の migration 経路 (§2 末尾・[10-operations.md §12.5](10-operations.md)) で names.jsonl の論理名から canonical ref を再導出する — fsck は digest 再計算の不一致を corruption ではなく migration 誘導として報告する。
+NFC 正規化 + Unicode **simple case folding (locale 非依存 — full folding・locale 別規則は使わない)** が同じ名前は case-insensitive collision として同一 slot を占める (folding は Unicode 安定性方針により割当済み文字で版間不変 — 版の記録は不要。**実装同梱の UCD 版で未割当の code point を含む tag 名は `KCS-E-CONFIG-USAGE-001` で拒否する** — 未割当→割当の版間遷移は folding を変え得るため、拒否により「割当済みのみ」の安定性前提を全域で成立させる)。正規化規則自体の改訂 (旧「Unicode lowercase」実装を含む) は digest の非互換変更であり、`kcs_format_version` の migration 経路 (§2 末尾・[10-operations.md §12.5](10-operations.md)) で names.jsonl の論理名から canonical ref を再導出する — fsck は digest 再計算の不一致を corruption ではなく migration 誘導として報告する。
 `HEAD` の case variant は論理 tag 名として予約する。canonical ref は legacy namespace と分離した
 `refs/tags-v1/tag-<digest64>` に置くため、`tag-<digest64>` に見える旧 raw tag も別の canonical ref と
 誤認せず、その論理名のまま読める。旧 Unix store の `refs/tags/<name>` は bounded・hash 検証付き
@@ -440,7 +440,11 @@ if inst is None:
 elif not inst.units:
     up_to_date       # 空 unit 集合 (空文書) — 次行の all([]) が空虚真で failed に落ちるのを防ぐ
 elif all(u.status == "failed" for u in inst.units):
-    failed           # 全滅 — retryable (04-pipeline.md §5.2 の failed → pending と同じ扱い)
+    if all(u.error_kind is permanent for u in inst.units):
+        settled      # 全滅かつ全て permanent — terminal。再投入対象なし
+                     # (04-pipeline.md §5.2 の settled partial と同じ扱い — 脱出は新 gen のみ)
+    else:
+        failed       # 全滅 (retryable を含む) — retryable (04-pipeline.md §5.2 の failed → pending と同じ扱い)
 elif any(u.status == "done" and not unit_object_exists(u) for u in inst.units):
     missing_output   # done 宣言 unit の object 欠落 — failed unit と併存しても partial で隠さない
                      # (回復対象 = 欠落 done ∪ failed の和集合。欠落を先に判定しないと
@@ -469,6 +473,8 @@ tool_changed   raw_hash 同じだが tool_profile_hash が変わった
 partial        一部 unit の Markdownize が失敗 (成功 unit は検索対象、欠損は kcs status に表示)
 missing_output manifest は done を記録しているが unit object ファイルが見当たらない
 failed         前回 Markdown 化失敗
+settled        全 unit が失敗かつ全て permanent — terminal (再投入対象なし。脱出は新 gen のみ —
+               04-pipeline.md §5.2 の settled partial と同族)
 pending        実行待ち
 ```
 
@@ -776,8 +782,10 @@ extraction issues              | yes  | yes  | yes          | yes
 
 normalized (unit object および全文 view) は **read-only artifact**。全文 view の生成時に付与する
 Markdown ヘッダ template (Source の filename も comment-safe に挿入する — `--` を含む名前は
-percent-encode、§10 の KCS-MISSING-UNIT と同じ規則。生値の挿入は comment を途中終端させ view 冒頭へ
-任意 Markdown を注入できてしまう):
+percent-encode、§2.1 の KCS-MISSING-UNIT と同じ規則。生値の挿入は comment を途中終端させ view 冒頭へ
+任意 Markdown を注入できてしまう)。**Source の値は生成時点の filename の記録**であり
+first-instance-wins の一部 — 同一 (raw_hash, tool_profile_hash) を別 path・別名で再配置しても
+view は再生成しない (現在の path 表示は view 提供側 (CLI 表示層) の責務で、cache 本文は不変):
 
 ```markdown
 <!--

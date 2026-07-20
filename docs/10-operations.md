@@ -288,7 +288,11 @@ CREATE TABLE scopes (
   発行する fork は Phase 4+ 予約) —
   stale 行 (到達不能な旧 path) を放置すると、default 横断検索が毎回 skip して恒常的に partial (exit 3)
   になり、その行経由の Evidence Pointer は `KCS-E-EVIDENCE-SCOPE-UNREACHABLE-001` になる — これが退役の
-  理由。live 重複はこれとは別で、上記のとおり fail-closed (search skip + 解決 error) で扱い、
+  理由。**再 init・再発見のどちらも起こらない恒久消滅** (ドライブ撤去・`.kcs` ごとの削除等) の
+  stale 行は、`kcs repair --registry-prune` (確認プロンプト付き — 到達不能行を列挙し、live clone
+  検査 (上記) に該当しない行のみ削除。[06-cli-spec.md §1](06-cli-spec.md)) で退役できる —
+  registry は検索キャッシュであり、削除しても truth は失われない (scope が再出現すれば再発見で
+  再登録される)。live 重複はこれとは別で、上記のとおり fail-closed (search skip + 解決 error) で扱い、
   黙って二重に返すことはない。**live 重複が解消するまでは、当該 scope_id での書き込み系コマンドと
   online タスク起動 (相 1) も `KCS-E-REGISTRY-DUP-001` で fail-closed とする** — device-global
   `batch_requests` の行 (PK に scope_id) を複数 clone が共有し、回復・終端・課金の帰属が混線するため
@@ -525,7 +529,7 @@ kcs repair --verify-objects
 ```
 
 purge との整合: validated tombstone (lifecycle の event が purged / retired の**いずれでも** — retire は
-event を削除せず監査を残すため説明能力を保つ) または fsck-only erase receipt が説明する missing raw と
+event を削除せず監査を残すため説明能力を保つ) または erase receipt (non-public — 用途列挙は [08-evidence-pointer-spec.md §4.2](08-evidence-pointer-spec.md)) が説明する missing raw と
 その derived (chunk・**当該 (raw_hash, tool_profile_hash) 配下の manifest object**) は正常な dead terminal として数え、
 corruption にしない。**説明範囲の限定**: tombstone / erase receipt が説明できるのは、当該 purge event の
 時点 (当該 purged / erased event の `in_commit`) **以前**の commit が参照する closure に限る — retire 後に再作成・再公開された
@@ -565,7 +569,7 @@ ancestor に持つ (= 当該 purge より後の publication である)** こと�
 **orphan 掃除 (`--prune-orphans`)**: `kcs repair --verify-objects --prune-orphans` は、どの manifest
 からも参照されない orphan prepared / image (公開前 crash の残骸 — [05-runtime.md §3.5](05-runtime.md))
 と **descriptor の無い staging root・path と不整合な staging root (descriptor の有無を問わない)・
-terminal 化済み (done / failed permanent / abandoned) task にのみ対応する staging root
+terminal 化済み (done / failed permanent / abandoned / settled partial — [04-pipeline.md §5.2](04-pipeline.md)) task にのみ対応する staging root
 ([03-data-model.md §2](03-data-model.md) — 帰属不明の crash 残骸、および
 [07-adapter-spec.md §8.3](07-adapter-spec.md) cleanup 失敗の残骸)** を列挙し、locked repair として削除する (確認プロンプト必須。live 参照判定は
 purge closure と同一規則)。
@@ -976,7 +980,11 @@ context   必須 field (空 object 可) — 値は JSON object (tool_profile_has
           必要なら行を scope 別に分割する))
 ```
 
-ログのローテーションは日次、保持は 30 日 (config 上書き可)。`redact_logs` の
+ログのローテーションは日次、保持は 30 日 (config 上書き可)。**scope-local の
+`.kcs/logs/access.jsonl` も同じ規範の対象とする** (日次 rotation + 保持日数は同 config・既定 30 日 —
+無操作でも検索対象であり続ける scope の unbounded 成長を防ぐ。purge の scrub は**全保持世代**に
+適用する — rotation は scrub の対象範囲を狭めない。access_events の正本性は保持期間内の記録に
+ついて成立し、期間経過後の世代破棄は監査要件に応じ config で延長して調整する)。`redact_logs` の
 デフォルトは **true** であり、`[adapter.policy]` に限らず observability ログ
 (events / metrics / errors) と access.jsonl の全域に適用される。true の場合、
 `context` の `query`, `path`, `prompt` 等の機微フィールドを、nested な値も含めて同一 policy でマスクする (`message` は上記のとおり非機微テンプレート限定 — マスク対象の値を含めない)。

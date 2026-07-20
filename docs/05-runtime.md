@@ -579,6 +579,10 @@ keep_repaired_per_branch = 5
   `kcs gc` を書き込み系に含めるのは on-demand 実装 (全体 lock 型 — 実装は Phase 4+ の初期形、§2.2) の
   規約 — 本節の並行 GC はその後続であり、導入時に §6 の表を改訂する
 - object 物理削除は exclusive lock の短い critical section に限定
+- **generation 採番の順序**: sweep は**最初の tree 物理削除に先立ち** `index_generation` を新規採番・
+  耐久化し、**sweep 完了時にも再採番**する — sweep 前に発行された cursor は開始時採番で、sweep 中に
+  発行された cursor は完了時採番で、いずれも generation 不一致として拒否される (§1.5)。途中 crash
+  しても削除済み tree と旧 generation の組は観測されない (再開 sweep も完了時に再採番する)
 - power-loss 中断時は次回起動時に sweep 再開 (.kcs/gc/in_progress マーカーで検出)
 ```
 
@@ -708,8 +712,10 @@ purge は **object の物理削除 + default tombstone または内部 erase rec
   DAG の再結線・tree entry の削除・連鎖再 hash は行わない。
 - tree entry のメタデータ (path, raw_hash)。raw_hash から原文は復元できない。
 - tombstone (.kcs/tombstones/ab/cd/<raw64>)。--erase-tombstone 指定時を除く。
-- `--erase-tombstone` では fsck 専用の non-content erase receipt
-  (`.kcs/purge/erase-receipts/ab/cd/<raw64>`)。public pointer API からは不可視。
+- `--erase-tombstone` では non-public の non-content erase receipt
+  (`.kcs/purge/erase-receipts/ab/cd/<raw64>`)。public tombstone としては不可視 — 用途は
+  fsck の欠落説明・08 §3.1 手順 5 (ii)〜(iii) の not_found 分類・6b・resurrection link に限る
+  ([08-evidence-pointer-spec.md §4.2](08-evidence-pointer-spec.md))。
 ```
 
 追加されるもの:
@@ -865,8 +871,10 @@ ref-reachable な `commit_type=purged` commit を指し、`at` が canonical UTC
 次の mutation で v2 へ locked 変換する — tombstone の legacy 規則と同型。v1 に reason は存在しない
 ため変換では `reason: "other"` を合成し legacy 警告として報告する — 新規 erased の 5 値 enum 必須
 とは区別。自由文の原値を持つ legacy 変換は従来どおり `legacy_reason` に保存)。
-open / view / search / restore / evidence verify / index の resurrection barrier には使わず、fsck だけが
-intentional absence の説明に使う。したがって Evidence verify は従来どおり `not_found` で、同一 bytes の
+re-ingest barrier・public tombstone 判定には使わない。使用できるのは fsck の intentional absence
+説明と、pointer 解決内部の not_found 分類 (08 §3.1 手順 5 (ii)〜(iii))・手順 6b の欠落説明・
+resurrection link に限る ([08-evidence-pointer-spec.md §4.2](08-evidence-pointer-spec.md) の列挙が正本)。
+したがって Evidence verify の応答は従来どおり `not_found` で、同一 bytes の
 後日 ingest (明示操作に限らず、working tree 残存原本の自動 scan を含む — §3.5 の残存警告) は許可する。**erase receipt も tombstone と同じ lifecycle 形式 (events[]) を持ち、raw object の再 publication 成功時は除去せず `retired` event を append する** — 除去すると erase 済み raw の旧 commit が参照する manifest 欠落を説明するものが消え、fsck の corruption 誤判定と手順 6b の不達を生むため (公開 pointer API に使わない・re-ingest barrier にしない性質は不変)。crash で不整合が残った場合は verified raw object を優先し、次の locked mutation で record を整合させる — **整合の条件は [10-operations.md §7.5.1](10-operations.md) の receipt 整合規則に従う**: 末尾 erased event の `in_commit` を ancestor に持つ ref 到達可能な再 publication commit が存在するときのみ `retired` を append し、commit がまだ無ければ未 finalize の進行状態として保留する (tombstone の補完と同じ因果条件)。
 
 **制約 (明記)**: tree entry の `path` 文字列と `raw_hash` は履歴に残る。ファイル名そのものが秘匿対象であるケース (履歴書き換えが必要) は MVP 非対応。commit / tree の書き換えは content hash の連鎖再計算と無関係ファイルの Evidence Pointer 無効化を伴うため、対応する場合も v2+ の再設計事項とする。
@@ -921,8 +929,13 @@ KCS は **常駐 daemon を持たない**。すべての処理は CLI コマン�
 ```text
 kcs index / kcs snapshot (= kcs commit) / kcs tag (refs/tags-v1 更新) / kcs gc / kcs purge /
 kcs repair --rebuild-db / kcs repair --verify-objects / kcs move --accept /
-kcs batch resume / kcs batch retry / kcs batch abandon / kcs reindex
+kcs batch resume / kcs batch retry / kcs batch abandon / kcs reindex /
+kcs adapter revoke
 ```
+
+承認系の scope.json 更新 — 承認操作 (対話 / `--approve` の行 publish)・approval self-heal・
+`kcs adapter revoke` — は、いずれも上記 lock 下の locked mutation として直列化する
+(並行する approve × revoke の lost update を作らない — [07-adapter-spec.md §3](07-adapter-spec.md))。
 
 batch 系と reindex は外部副作用 (upload / job 作成) と batch_requests の状態遷移を伴うため lock 必須
 ([04-pipeline.md §5.8](04-pipeline.md) — 並行 resume が同一行へ別 intent_token を書くと先行 job が
