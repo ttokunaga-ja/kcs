@@ -291,9 +291,13 @@ KCS-E-STORE-CONSTRAINT-001     記帳 CHECK 到達 = 実装エラー (04 §5.8)�
 sqlite.db 不在・利用不能       全経路 (verify / open / view / restore / search) で status に混ぜず
                                command-level の retryable error KCS-E-INDEX-REBUILDING-001・exit 3
                                (再構築中でも旧 sqlite.db が読めるなら通常応答 — 05 §6。ただし
-                               **HEAD ref 不在の scope は sqlite.db が読めても REBUILDING 扱い**
-                               (05 §1.6 — 未公開行を検索に見せない)。error は
-                               不在・利用不能・HEAD 不在の場合のみ。verify は検査未完了のため --strict なしでも
+                               **HEAD ref 不在の scope は、HEAD 依存経路 (現在状態の search・
+                               sha256: 短縮形 — 08 §2.3 規則 4) に限り、sqlite.db が読めても
+                               REBUILDING 扱い** (05 §1.6 — 未公開行を検索に見せない)。**明示の
+                               commit / Evidence Pointer 指定による verify / open / view / restore
+                               は HEAD 非依存に解決して通常応答する** (08 §3.1 の解決手順・08 §6 の
+                               不変性保証)。error は不在・利用不能・HEAD 不在 (HEAD 依存経路のみ)
+                               の場合のみ。verify は検査未完了のため --strict なしでも
                                0 を返さない。multi-scope search は当該 scope を excluded_scopes として
                                継続し、全 scope 該当なら exit 3 — SCOPE-ALL-FAILED (4) より優先。
                                全 scope の除外理由が同一 code なら当該 code の単独時 exit へ昇格

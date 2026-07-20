@@ -171,7 +171,9 @@ bulk 系 (`kcs evidence verify --batch <pointers.jsonl>`) は従来どおり各�
     終端) へ短絡する)
 5.  raw_hash に **active な tombstone** (lifecycle の末尾 event が `purged` — [05-runtime.md §3.5](05-runtime.md)) が
     あるなら → tombstone を返す (§4)。**retired (末尾 event = `retired`) は tombstone 扱いしない** — 手順 6 へ進む
-    (resurrection 後の旧 pointer を alive に戻すための必須条件)。tombstone / erase receipt が
+    (resurrection 後の旧 pointer を alive に戻すための必須条件)。**active な erase receipt
+    (末尾 event = `erased`) があり raw object が不在なら not_found —
+    `KCS-E-PURGE-NOT-FOUND-001` (§4.2 の表と同一の終端)**。tombstone / erase receipt が
     無いのに raw object が不在なら not_found — code は `KCS-E-STORE-CORRUPT-001` (marker なしの欠落は
     purge の痕跡ではなく **corruption の疑い** — 手順 4 の短絡と同じ not_found 扱いで返し、
     `kcs repair --verify-objects` を案内する。purge 済みの正規欠落 (marker あり) と混同しない)
@@ -465,6 +467,8 @@ PATCH  typo / コメント修正
 ```
 
 `path_at_commit` / `heading_path` 等の optional フィールドは **MINOR 互換** で追加してよい。`raw_hash` / `chunk_hash` / `commit` の意味変更は **MAJOR 扱い** (= migration plan + ユーザー通知)。
+
+**未知 MAJOR の拒否は表現形式に依らない**: reader は自己の対応 MAJOR より新しい `schema_version` を、URI の `sv` (§2.3) と inline / batch JSON の `schema_version` field のどちらで受けても KCS-E-CONFIG-SCHEMA 系 error (exit 2) で拒否する (未知フィールド無視則が担う前方互換は、既知 MAJOR 内の MINOR 追加に限る)。
 
 新 schema は古い解決ロジックでもエラーなく扱えること (forward compatible) を要件とする (= 未知フィールドは無視)。
 

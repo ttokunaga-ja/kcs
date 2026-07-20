@@ -42,7 +42,8 @@ raw / prepared / image / chunk / embedding / manifest / toollock / tree / commit
                       配置 = `staging/<raw64>.<tool64>.<adapter_kind>/`、各 root 直下に耐久
                       descriptor.json (scope_id / raw_hash / tool_profile_hash / adapter_kind)。
                       **root の公開 = private temp directory に descriptor ごと完書き → fsync →
-                      root 名へ atomic rename → 親 directory fsync ([04-pipeline.md §1.1](04-pipeline.md)
+                      root 名へ atomic rename (no-replace — 残存 root への上書き禁止、前置回復は
+                      [07-adapter-spec.md §8.3](07-adapter-spec.md)) → 親 directory fsync ([04-pipeline.md §1.1](04-pipeline.md)
                       の primitive) — payload の書込みは公開後にのみ行う** (descriptor より先に
                       payload が存在する窓を作らない)。**purge / status / prune-orphans の
                       帰属列挙は descriptor の全走査が正本** (tasks.jsonl 非依存 — task 記録の
@@ -51,7 +52,9 @@ raw / prepared / image / chunk / embedding / manifest / toollock / tree / commit
                       crash 残骸・旧 store)・terminal 化済み task の残存 root (cleanup 失敗の残骸 —
                       [07-adapter-spec.md §8.3](07-adapter-spec.md)) は fsck / status が表示し、
                       `--prune-orphans` の削除対象とする** (帰属不明の staging は
-                      安全側 = 削除 — [10-operations.md §7.5.1](10-operations.md))
+                      安全側 = 削除。対応 task 特定不能の root も回復判定 — manifest 全 unit
+                      terminal または in-flight 不在検証 — を経て削除可能 —
+                      [10-operations.md §7.5.1](10-operations.md))
   objects/
     raw/ab/cd/<raw64>
     prepared/ab/cd/<prepared64>
@@ -330,7 +333,8 @@ artifact identity は `(raw_hash, tool_profile_hash)` 単独に依存するた�
 **ハッシュ対象フィールド (capability hash)** — 決定性に影響する情報のみ。`cmd`/`args`/`url`/認証情報は **絶対に含めない**:
 
 ```
-adapter_kind          "markdownize" | "embedding" | "ocr" | ...
+adapter_kind          "prepare" | "markdownize" | "embedding" | ...
+                      (OCR は adapter_kind ではなく capability — 07-adapter-spec.md §1)
 adapter_role          "text" | "image" | "multimodal"
 model_or_tool_family  "gemini-2.5-pro" | "gpt-4o" | "tesseract" の正規化名
 model_version_pin     ベンダー側 immutable tag (latest 等の可変 alias は禁止)

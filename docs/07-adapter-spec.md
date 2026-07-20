@@ -105,15 +105,17 @@ opt-in の単位・成立・寿命:
             行だけでは送信が有効にならない)
         (b) 明示設定: .kcs/config.toml の adapter.policy.allow_network = true
 
-寿命:   永続 (revoke まで)。ただし対象 Adapter の tool_id または execution_mode が
-        変わった場合は失効し、再承認を要する。
+寿命:   永続 (revoke まで)。ただし対象 Adapter の tool_id・execution_mode・tool_profile_hash の
+        いずれかが変わった場合は失効し、再承認を要する (profile に畳み込まれる設定 —
+        `[markdownize].bbox_annotation` 等 — の変更も含む。照合の実体は下記「記録」の送信 gate)。
 
 revoke: adapter.policy.allow_network = false に設定する (これは **scope 全体の kill switch** —
 `--online` の一時 opt-in でも上書きされない。下記「優先関係」の例外)。
 単一 Adapter だけの revoke は approvals[] 当該行の **status=revoked + revoked_at への更新**で行う
-(opt-in 単位 = scope × adapter に対応する既存機構 — 下記)。
-        以後、当該 scope の新規オンライン送信 task は発行されない
-        (送信済みデータの取り消しは保証しない)。
+(opt-in 単位 = scope × adapter に対応する既存機構 — 下記)。**効果は当該 Adapter の新規送信停止に
+限り、他 Adapter の active 承認と `allow_network` boolean は変えない**。
+        新規オンライン送信 task の発行停止は、kill switch では scope 全体・単一 Adapter revoke では
+        当該 Adapter 分のみ (送信済みデータの取り消しは、どちらの revoke でも保証しない)。
 
 記録:   承認記録に scope_id / tool_id / **execution_mode / tool_profile_hash (承認時点)** /
         approved_at / approval_method を残す。送信前に現在の execution_mode / profile と照合し、
@@ -125,7 +127,10 @@ revoke: adapter.policy.allow_network = false に設定する (これは **scope 
         「`allow_network` が false でない **かつ** 行の scope_id が当該 scope.json の scope_id と
         一致し、現在の execution_mode / tool_profile_hash に一致する `status=active` 行が存在する」の
         両立とする (**scope_id 不一致の行は gate に使わない** — fork 複製由来の旧 scope 行の残存で
-        再承認を迂回させない。[06-cli-spec.md §10](06-cli-spec.md))。
+        再承認を迂回させない。[06-cli-spec.md §10](06-cli-spec.md))。**`--online` の一時 opt-in は
+        この gate の唯一の例外** — 「優先関係」のとおり opt-in 未成立の既定閉鎖のみを上書きし
+        (approvals[] 行は作らない)、consent 由来 `cli_online` として §7 の log に記録する。明示
+        revoke (`allow_network = false`・行の revoked) は上書きしない。
         `approvals[]` 要素の required field = scope_id / tool_id / execution_mode /
         tool_profile_hash / approved_at / approval_method / **status (`active` | `revoked`)** —
         status=revoked の行は **revoked_at** も必須 ([10-operations.md §12.3](10-operations.md) の
@@ -160,9 +165,10 @@ revoke: adapter.policy.allow_network = false に設定する (これは **scope 
         (true × 行なし) は、次回実行の self-heal が **`approval_pending` と完全一致する場合に限り**
         行 publish を完遂する (pending 記録が無い・一致しない中間は自動生成せず明示承認 (対話 /
         --approve) を要求する)。`approval_pending` の schema は
-        [10-operations.md §12.3](10-operations.md)。revoke は逆順 (行の revoked 化 → boolean false) — 中間
+        [10-operations.md §12.3](10-operations.md)。**scope 全体の revoke** は逆順 (全行の revoked 化 → boolean false) — 中間
         (revoked × true) は gate の AND で送信不能 (安全側)、次回 locked mutation が boolean を
-        false へ整合させる。
+        false へ整合させる (**単一 Adapter revoke は当該行の更新のみ** — 他に active 行が残る限り
+        boolean は true のまま整合対象にしない)。
 ```
 
 CLI フラグ `--online` は **その 1 回の実行に限る一時 opt-in** で、**永続的な承認状態
@@ -678,6 +684,12 @@ staging を同一遷移で冪等に cleanup する (**遷移内の順序は term
 terminal 化済み task の残存 root は cleanup 失敗の残骸として prune-orphans の削除対象 —
 [10-operations.md §7.5.1](10-operations.md))** — manifest には `pending`
 という unit 状態は存在しない ([03-data-model.md §2.1](03-data-model.md) の遷移は failed → done のみ)。
+**同一 root 名の残存時の前置回復**: 同一 `(raw64, tool64, adapter_kind)` の staging root が既に
+存在する状態で新しい task を開始する場合、root 公開 (atomic rename) の**前**に旧 root の回復を
+lock 下で完了する — 対応 task が terminal なら cleanup を完遂してから公開し、非 terminal なら
+新 task を開始せず当該 task を再開する。root 公開の rename は**既存 root 名への上書きをしない**
+(no-replace — 新旧世代の bytes 混在を防ぐ。世代識別は path に載せない — [03-data-model.md §2](03-data-model.md) の配置は不変)。
+
 **retry の合成規則**: staging の完了済み bytes は凍結する。retry 応答は**全 unit を含んでよい**
 (未完了 unit のみへの絞り込みは任意の転送最適化 — Adapter は staging の内容を知り得ないため
 KCS は要求しない)。**凍結保全と合成が適用されるのは transport 中断 (stream 失敗) からの resume に

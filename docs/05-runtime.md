@@ -234,7 +234,7 @@ page 1 の `since_cutoff` (UTC ISO8601 + `Z`) も保持する:
 (デフォルト = HEAD tree = 現行値。`--at` は対象 tree の値、`--all-history` / `--include-deleted` は各 binding
 tree の値で判定する。v1 tree は config 未記録のため現行値で代替し結果に注記 (**現行値の association が無い場合は、対象 commit の ancestor-or-equal な introduction を持つ association (cursor 継続時は `max_association_rowid` 以下も条件) に限定した上で `chunking_config_hash` の byte 順最小を決定的に代用** — 後発 association で代用値が時間変動しない。候補 0 件は注記つき空集合。HEAD 限定再 chunk 後の履歴 instance を `--at` で全脱落させない) — [04-pipeline.md §4.1, §4.6](04-pipeline.md))。
 
-**HEAD 不在 (初回 auto snapshot 前・snapshot finalize 未完) の scope は index 未完了として扱う** — 検索は当該 scope を `KCS-E-INDEX-REBUILDING-001` で excluded_scopes に計上し (単独 scope なら exit 3)、cursor は発行しない。**SQLite に反映済みでも未公開 (commit / ref 未 publish) の行は返さない** (§8.1 の finalize 耐久順序の crash 窓で、未公開 snapshot の内容を検索に見せない)。
+**HEAD 不在 (初回 auto snapshot 前・snapshot finalize 未完) の scope は index 未完了として扱う** — 検索は当該 scope を `KCS-E-INDEX-REBUILDING-001` で excluded_scopes に計上し (単独 scope なら exit 3)、cursor は発行しない。**SQLite に反映済みでも未公開 (commit / ref 未 publish) の行は返さない** (§8.1 の finalize 耐久順序の crash 窓で、未公開 snapshot の内容を検索に見せない)。この扱いは**現在状態の検索など HEAD 依存の解決経路に限る** — 明示 commit・Evidence Pointer 指定の読取・検証は HEAD 非依存に解決する ([08-evidence-pointer-spec.md §3.1](08-evidence-pointer-spec.md)、[06-cli-spec.md §7](06-cli-spec.md))。
 purge 済み raw_hash の chunk 行は物理削除済みのため自然に除外される。
 **実装規範**: publication / association の時点条件は correlated **EXISTS** (ancestry 判定と
 `association_rowid <= cursor.max_association_rowid` を副問い合わせ内に含む) で評価する — 同一

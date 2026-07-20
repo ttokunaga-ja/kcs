@@ -231,7 +231,7 @@ Phase 5: Agent
 
 # 7. 二層構造: truth と cache
 
-データ・所有権・権限の正本は **各フォルダ直下の `.kcs`** に閉じる。device-local な `scope_registry` や将来の global aggregator は **検索キャッシュ・発見補助** に過ぎない。
+データ・所有権・権限の正本は **各フォルダ直下の `.kcs`** に閉じる。device-local な `scope_registry` や将来の global aggregator は **検索キャッシュ・発見補助** に過ぎない。device-global の例外は **cost-ledger.sqlite** (再構築不可の運用台帳 — cache ではない、[03-data-model.md §4.1](03-data-model.md))。
 
 ```
 truth = folder-local .kcs

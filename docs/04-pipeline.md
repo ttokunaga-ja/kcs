@@ -336,13 +336,19 @@ V6 mode:      mode_used = "full" の場合は full 出力契約として検証:
               かつ 3 集合は互いに素 (unchanged_unit_keys / removed_unit_keys は空 —
               full に増分概念はない。部分失敗は incremental と同じく failed_units で表現し
               manifest 側で failed へ遷移する)。V1〜V4 は適用しないが、**V5 の形式検査は
-              full 出力の全成功 unit に適用する** (V1 と同じく failed_units には適用しない)
+              full 出力の全成功 unit に適用し、V1 の同一配列内 unit_key 重複検査
+              (要素数 = distinct key 数) も full の各配列に適用する**
+              (V1 と同じく failed_units には V5 を適用しない)
 ```
 
-**unit_ref 衝突の拒否**: 応答内の異なる `unit_key` 同士、または応答の unit_key と既存 manifest の
-unit との間で、同一 `unit_ref` (`base16(sha256(unit_key))[0:16]` — [03-data-model.md §2](03-data-model.md))
-への写像が衝突する場合、persist 先 `<unit_ref>.json` が競合するため当該応答を whole-response reject
-とする (実用上は起こらない 64bit 衝突の防衛線 — 検査は persist 前の V 検査と同時に行う)。
+**unit_ref 衝突の拒否**: 衝突とは **異なる `unit_key` が同一 `unit_ref`**
+(`base16(sha256(unit_key))[0:16]` — [03-data-model.md §2](03-data-model.md)) **へ写像されること**を
+いう。同一 unit_key の再出現 (full retry・incremental 更新・staging 凍結分の再受領) は衝突では
+ない — first-instance-wins と凍結規則の側で扱う。検査対象は persist 前に確定する**合成後の最終
+unit 集合** (応答の unit + KCS 合成の unchanged 再利用 unit + 既存 manifest から保持する unit —
+full / incremental / retry 合成のいずれも、合成後の集合に対して unit_key → unit_ref の単射性を
+検査する)。衝突があれば persist 先 `<unit_ref>.json` が競合するため当該応答を whole-response
+reject とする (実用上は起こらない 64bit 衝突の防衛線 — 検査は persist 前の V 検査と同時に行う)。
 
 **制御応答 (fallback_to_full=true)**: `fallback_to_full=true` の応答は V1〜V6 に**先立ち**制御応答として評価する — unit 配列・unchanged / removed は空であること (非空は contract violation)。KCS は当該応答を成功・失敗のどちらの終端にもせず、**同一 task を `mode=full` で再発行する** (§3.1 の発動条件は再評価しない — Adapter 判断を尊重。full 応答での `fallback_to_full=true` は contract violation = ループ防止)。この評価順が無いと、§8.1 の「短絡」拒否権 ([07-adapter-spec.md §8.1](07-adapter-spec.md)) が V1 被覆違反 → 再試行 → failed permanent の死路になる。**終端の単位は request である**: 正常な制御応答の受領は当該 request の終端 (task は非終端) — 実測 usage を `outcome='fallback_to_full'` で確定記帳し state=3 を同一 Tx で行い (§5.4 / §5.8。sync 行は同 Tx で intent_token を NULL 化、batch 行は残骸掃除完了時 = 通常規則)、その後 `mode=full` の新 request を相 1 (submission_seq = MAX+1) として開始する (§5.4 の直列化規範を満たす)。正常な制御応答は `attempts` / `contract_violation_count` のどちらにも数えない (違反ではなく §5.2 の retry でもない) — 発動条件 5 の連続 incremental カウンタにも数えない (§3.1)。
 
@@ -989,8 +995,9 @@ provider の reject 等) の usage 欠落は正当であり、確定額 0 (`usd=
 表の欠落) も「欠落」と同じ estimated 縮退 + warning とする** (終端 Tx を止めない。0 円確定にはしない —
 billable Adapter の pricing 被覆は送信前に検査される ([10-operations.md §12.3](10-operations.md))
 ため、この経路は途中で表が壊れた場合の防衛線)。**課金 field 単独の不良は応答の受否・outcome・`contract_violation_count` を
-変えない** — 成功は成功のまま、正常な制御応答は `outcome='fallback_to_full'` のまま (構造違反 (§3.2)
-だけが contract violation。課金 field の不良は warning log で可視化する —
+変えない** — 成功は成功のまま、正常な制御応答は `outcome='fallback_to_full'` のまま (構造違反 (§3.2、
+Embedding は [07-adapter-spec.md §5.3](07-adapter-spec.md) の受入検査) だけが contract violation。
+課金 field の不良は warning log で可視化する —
 [07-adapter-spec.md §7](07-adapter-spec.md) の `usage_validation` / `billing_source` field と
 event code `KCS-EV-ADAPTER-USAGE-001`。[07-adapter-spec.md §4](07-adapter-spec.md) の「estimated 記帳へ
 縮退」と同一規範)。
