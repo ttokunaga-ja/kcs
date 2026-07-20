@@ -46,7 +46,10 @@ query embedding 応答が受入検査 ([07-adapter-spec.md §5.3](07-adapter-spe
 の opt-in gate の対象である (payload は query 文字列のみで folder 内容を含まない)。**送信可否 =
 参加 scope の 1 つ以上に当該 embedding Adapter の active な `approvals[]` 行があり、かつ当該 scope に
 明示 revoke (`adapter.policy.allow_network = false` — [07-adapter-spec.md §3](07-adapter-spec.md)) が
-ないこと** (`--online` が開くのは未設定の既定閉鎖のみ — 明示 revoke は上書きしない)。承認ゼロ
+ないこと** (`--online` が開くのは未設定の既定閉鎖のみ — 明示 revoke は上書きしない)。**この可否は
+相 1 claim Tx と同一時点で approvals[] / boolean を再読して最終検証する** (読み取り開始時の値を
+使い回さない — 検証後に revoke が完了した場合の当該送信は in-flight として許容 (送信済みの取り消し
+非保証 — [07-adapter-spec.md §3](07-adapter-spec.md)))。承認ゼロ
 (かつ `--online` 一時 opt-in なし) の場合、auto / `--hybrid` は text fallback
 (`fallback_reason="embedding_not_authorized"`)、`--vector` 明示は KCS-E-SEARCH-VEC-UNAUTHORIZED-001
 で error。**ユーザー意思由来の text fallback は `fail_behavior` の対象外である** — `fail_behavior` は技術的
@@ -583,6 +586,9 @@ keep_repaired_per_branch = 5
   耐久化し、**sweep 完了時にも再採番**する — sweep 前に発行された cursor は開始時採番で、sweep 中に
   発行された cursor は完了時採番で、いずれも generation 不一致として拒否される (§1.5)。途中 crash
   しても削除済み tree と旧 generation の組は観測されない (再開 sweep も完了時に再採番する)
+- **sweep 実行中 (in_progress マーカー存在 — crash 残骸を含む) は新規 cursor を発行しない** (page 1 は
+  cursor なし応答 + 注記 — sweep 中に発行した cursor が同一 generation のまま変化する stream へ
+  consumed を適用する窓を作らない。replay は generation 検査で自然に拒否される)
 - power-loss 中断時は次回起動時に sweep 再開 (.kcs/gc/in_progress マーカーで検出)
 ```
 

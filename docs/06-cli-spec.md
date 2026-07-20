@@ -28,11 +28,13 @@ kcs batch retry [--online|--offline] [--reset-violations <selector>]  # failed �
                                         # (selector は abandon と同形: intent_token または 4 組タスクキー — 曖昧時は拒否。
                                         # terminal な sync 行は token NULL 化済みのため 4 組キーで指定 (04 §5.4)。
                                         # 変えるのは count のみ。確認プロンプト必須 — 04 §5.8。監査は cost-ledger の outcome 列に残る)
-kcs adapter revoke <tool_id> [--all]    # 単一 Adapter の network 承認取り消し (approvals[] 当該行の revoked 化 +
-                                        # 4 組一致 approval_pending の同一 atomic write 除去 — 07 §3 の実行主体。
-                                        # --all = 当該 scope の全 Adapter 行を revoked 化 (boolean は変えない —
-                                        # scope 全体の kill switch は allow_network=false 側)。`.kcs/.lock` 取得
-                                        # (05-runtime.md §6) の locked mutation
+kcs adapter revoke (<tool_id> | --all)  # Adapter の network 承認取り消し (相互排他 — 07 §3 の実行主体)。
+                                        # <tool_id> = 当該行の revoked 化 + 4 組一致 approval_pending の同一 atomic write 除去。
+                                        # --all = 当該 scope の全 Adapter 行を revoked 化 + **tool を問わず存在する
+                                        # 全ての approval_pending を除去** (boolean は変えない — scope 全体の
+                                        # kill switch は allow_network=false 側)。対象なし (行なし・pending なし・
+                                        # 既 revoked) は対象なしの冪等成功 — exit 0 + 「対象なし」表示。
+                                        # `.kcs/.lock` 取得 (05-runtime.md §6) の locked mutation
 kcs batch abandon <intent_token|scope/adapter/input_hash/tool_profile_hash>
                                         # 照合が恒久不能な in-flight Batch job の打ち切り (estimated 記帳 + terminal 化。
                                         # 指定子は intent_token または batch_requests の 4 組タスクキー (3 組では別
@@ -91,7 +93,9 @@ kcs evidence retarget <pointer> [--latest|--at <commit>]  # 設計確定後 (09-
 
 本節が CLI コマンドの **正本一覧** である。他 spec が新しいコマンド・フラグに言及する場合、本節への追加を伴う (破壊的変更扱い)。
 
-`kcs tag` の新規 `<name>` は OS 非依存の portable leaf 規則に従い、Windows 予約名・禁止文字・
+`kcs tag` の新規 `<name>` は OS 非依存の portable leaf 規則に従い、実装同梱の UCD 版で未割当の
+code point を含む名前を拒否し ([03-data-model.md §2](03-data-model.md) と同一規則 —
+`KCS-E-CONFIG-USAGE-001`)、Windows 予約名・禁止文字・
 末尾 dot/space を拒否する。NFC 正規化 + Unicode simple case folding (locale 非依存 —
 [03-data-model.md §2](03-data-model.md) と同一規則) が同じ tag は case-insensitive collision
 として重複作成を拒否し、`HEAD` の case variant は予約する。canonical ref は legacy raw-name ref と
@@ -161,7 +165,9 @@ preview 内容:
    開始しても online_api Adapter への送信 task は発行されず pending のまま残る
    (07-adapter-spec.md §3)。非対話環境で永続 opt-in が必要な場合は、事前に対話環境または
    `--approve` で**承認を成立させておく** (行 + boolean の両方 — boolean
-   `allow_network = true` の手編集**単独では送信 gate を満たさない**、07-adapter-spec.md §3)。
+   `allow_network = true` の手編集**単独では送信 gate を満たさない**。例外 = **初回 materialize**:
+   `approvals_initialized` marker が無く approvals[] が空の初回に限り、boolean の事前設定 + 初回
+   実行で最初の 1 tool のみ自動 materialize される、07-adapter-spec.md §3)。
    明示 `--online` は当該実行限りの一時 opt-in として非対話環境でも有効 (同 §3)。
 2. secrets の built-in デフォルト除外 (10-operations.md §1.1 Tier A) を解除できない。
 3. 承認記録の approval_method に "yes" が記録され、対話承認と事後監査で区別できる。
@@ -276,7 +282,8 @@ purge は常に**全履歴**の raw 本文・派生 artifact を対象とする 
 1   汎用 failure (詳細不明)
 2   invalid usage / config 不正 / schema validation 失敗
 3   retryable な失敗が残っている (部分成功を含む。lock 取得失敗のような全体 retryable もここ)
-4   全失敗 permanent
+4   permanent な失敗のみが残っている (全失敗 permanent、および settled partial
+    (部分成功 + 残り全 permanent — 04-pipeline.md §5.2) を含む — 再試行で進展しない)
 5   auth_error (user action 必要)
 6   budget_exceeded により paused
 7   user 中断 (SIGINT/SIGTERM)
@@ -471,7 +478,9 @@ validation 失敗は **exit 2** + `KCS-E-CONFIG-SCHEMA-001`。schema は semver 
 
 # 13. Observability
 
-`logs/access.jsonl` 以外に、以下の構造化ログを `~/.local/share/kcs/logs/` に出力:
+`logs/access.jsonl` 以外に、以下の構造化ログを `~/.local/share/kcs/logs/` に出力
+(scope-local の `.kcs/logs/access.jsonl` 自体も日次 rotation + 保持 config の対象 —
+[10-operations.md §12.6](10-operations.md)):
 
 ```
 events.jsonl       重要イベント (commit, gc, purge, schema migration)

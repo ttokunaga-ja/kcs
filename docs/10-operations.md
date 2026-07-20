@@ -536,7 +536,7 @@ corruption にしない。**説明範囲の限定**: tombstone / erase receipt �
 object の欠落は corruption とする (古い退役 event が新規破損を隠さない)。**tree 欠落**は
 `.kcs/gc/shallowed/<commit64>` receipt が説明する場合のみ正常
 (shallow — [05-runtime.md §2.2](05-runtime.md))、receipt なき欠落は corruption。receipt-covered bytes は working copy から
-自動復元しない。receipt は public pointer API と re-ingest barrier には使わない。purge journal が active
+自動復元しない。この receipt (= `.kcs/gc/shallowed/` の shallow receipt) は public pointer API と re-ingest barrier には使わない (erase receipt の用途列挙は別 — [08-evidence-pointer-spec.md §4.2](08-evidence-pointer-spec.md))。purge journal が active
 なら incomplete exit 3。marker 無し missing は ordinary store corruption、malformed / identity-conflicting
 receipt も corruption とする。verified raw と receipt の共存は、末尾 event が `retired` の lifecycle なら**正常**
 (resurrection — [05-runtime.md §3.5](05-runtime.md))。末尾 event が `erased` のまま verified raw が
@@ -649,6 +649,10 @@ import を skip し rename のみ再試行する — savepoint は外部ファ�
 空の旧 JSONL でも marker が「0 行 import 済み」と「未 import」を判別する)。**形状検出は sqlite_master の CREATE 文 (列・CHECK 制約を
 含む) の canonical 比較で行う — 対象は `cost_ledger` / `batch_requests` / `schema_migrations` の
 3 表すべて** ([04-pipeline.md §5.4](04-pipeline.md) の SQL 正本と同数)。列存在検査だけでは CHECK 制約の追加・変更を識別できない。
+**必須 index (04 §5.4 の CREATE INDEX 文 — `idx_cost_ledger_month`・`idx_batch_requests_inflight`) も
+検出対象とする**: sqlite_master の index 行を同様に canonical 比較し、欠落は同一 savepoint 内で
+`CREATE INDEX IF NOT EXISTS` により補完して `schema_migrations` へ記録する (table が一致し index
+だけ欠ける store を「正常形状」と誤判定して migration を素通りさせない)。
 
 例外として in-place migration を書いてよいのは次の場合のみ:
 
@@ -860,7 +864,8 @@ KCS のすべての CLI コマンドは以下の exit code を返す。
 1   汎用 failure (詳細不明)
 2   invalid usage / config 不正 / schema validation 失敗
 3   retryable な失敗が残っている (部分成功・全体 retryable を含む — [06-cli-spec.md §7](06-cli-spec.md))
-4   全失敗 permanent
+4   permanent な失敗のみが残っている (全失敗 permanent、および settled partial
+    (部分成功 + 残り全 permanent — 04-pipeline.md §5.2) を含む — 再試行で進展しない)
 5   auth_error (user action 必要)
 6   budget_exceeded により paused
 7   user 中断 (SIGINT/SIGTERM)
@@ -887,13 +892,13 @@ dead pointer (tombstoned / not_found) は `4`、**scope_unreachable のみは re
 
 validation 失敗は exit code 2 で停止し、`KCS-E-CONFIG-SCHEMA-001` を返す。schema は semver で版管理し、breaking change は migration を要求 (§12.5)。
 
-`scope.schema.json` は少なくとも次の key を定義する: `scope_id` (required)・子 `.kcs` リンク ([03-data-model.md §2](03-data-model.md))・`scan_approval` (optional — §1 の取り込み承認記録。required field は §1 の記録一覧と一致)・`approvals[]` (optional — adapter 単位の network opt-in。要素の required field = scope_id / tool_id / execution_mode / tool_profile_hash / approved_at / approval_method / status (`active` | `revoked`)、status=revoked の行は revoked_at も必須 — [07-adapter-spec.md §3](07-adapter-spec.md))・`approval_pending` (optional — 承認書込順の pending intent、[07-adapter-spec.md §3](07-adapter-spec.md)。要素の required field = scope_id / tool_id / execution_mode / tool_profile_hash。行 publish と同一 atomic write で除去)・`approvals_initialized` (optional boolean — 初回承認の行 publish と同一 atomic write で true 化する消費済み marker。true かつ approvals[] 空 = 台帳喪失として blanket 自動 materialize を fail-closed にする、07 §3)。**未知 key は schema error** (fail-closed)。この検証は `kcs_format_version` の互換判定より**後**に走る — 自己の対応上限より新しい version の store は schema validation に入らず read-only + 新版誘導で縮退する ([03-data-model.md §2](03-data-model.md))。公開後に scope.schema.json へ key を追加する場合は `kcs_format_version` の MINOR bump を伴う (§12.5 — bump が旧実装をこの縮退経路へ導く。未知 key = schema error 自体は維持する: marker 等 security 意味を持つ key を旧実装が黙って無視すると迂回が復活するため)。両 key (および marker) を欠く旧 scope.json は valid であり、欠落 = 当該承認なしとして扱う (migration 不要の後方互換)。**要素単位の後方互換**: `status` フィールドを持たない approvals[] 行 (r9 スキーマ以前の承認記録) は schema error にせず **`status='active'` として読む** — 行は明示承認の記録であり、execution_mode / tool_profile_hash の一致検査 (失効判定) は従来どおり効く。次回の locked mutation で `status='active'` を atomic に補完書込みし、補完後は現行 schema で検証する (要素単位の欠落で CLI 全体を exit 2 停止させない)。
+`scope.schema.json` は少なくとも次の key を定義する: `scope_id` (required)・子 `.kcs` リンク ([03-data-model.md §2](03-data-model.md))・`scan_approval` (optional — §1 の取り込み承認記録。required field は §1 の記録一覧と一致)・`approvals[]` (optional — adapter 単位の network opt-in。要素の required field = scope_id / tool_id / execution_mode / tool_profile_hash / approved_at / approval_method / status (`active` | `revoked`)、status=revoked の行は revoked_at も必須 — [07-adapter-spec.md §3](07-adapter-spec.md))・`approval_pending` (optional — 承認書込順の pending intent、[07-adapter-spec.md §3](07-adapter-spec.md)。**単一 object (配列にしない — 承認操作は `.kcs/.lock` で直列化され並存しない)**。required field = scope_id / tool_id / execution_mode / tool_profile_hash / **approved_at / approval_method** (公開行の監査値 — self-heal がそのまま publish する)。行 publish と同一 atomic write で除去)・`approvals_initialized` (optional boolean — 初回承認の行 publish と同一 atomic write で true 化する消費済み marker。true かつ approvals[] 空 = 台帳喪失として blanket 自動 materialize を fail-closed にする、07 §3)。**未知 key は schema error** (fail-closed)。この検証は `kcs_format_version` の互換判定より**後**に走る — 自己の対応上限より新しい version の store は schema validation に入らず read-only + 新版誘導で縮退する ([03-data-model.md §2](03-data-model.md))。公開後に scope.schema.json へ key を追加する場合は `kcs_format_version` の MINOR bump を伴う (§12.5 — bump が旧実装をこの縮退経路へ導く。未知 key = schema error 自体は維持する: marker 等 security 意味を持つ key を旧実装が黙って無視すると迂回が復活するため)。両 key (および marker) を欠く旧 scope.json は valid であり、欠落 = 当該承認なしとして扱う (migration 不要の後方互換)。**要素単位の後方互換**: `status` フィールドを持たない approvals[] 行 (r9 スキーマ以前の承認記録) は schema error にせず **`status='active'` として読む** — 行は明示承認の記録であり、execution_mode / tool_profile_hash の一致検査 (失効判定) は従来どおり効く。次回の locked mutation で `status='active'` を atomic に補完書込みし、補完後は現行 schema で検証する (要素単位の欠落で CLI 全体を exit 2 停止させない)。
 
 `folder-config.schema.json` は `[chunking].unicode_version` を **required** とする (省略不可・default なし — `kcs init` が実装同梱の UCD 版 (現在の既定 = 17.0.0) を明示記録する、[03-data-model.md §5.3](03-data-model.md) / [06-cli-spec.md §1](06-cli-spec.md))。**要素単位の後方互換**: これを欠く旧 `.kcs/config.toml` は schema error (exit 2) にせず**実装同梱版 (17.0.0) として読み、次回の locked mutation で atomic に補完書込みする** (approvals[] `status` の補完と同型 — required 化で既存 store の全 CLI を封鎖しない。補完後は現行 schema で検証する)。`[markdownize].bbox_annotation` (boolean、既定 true — [07-adapter-spec.md §5.2](07-adapter-spec.md)、値は tool_profile_hash に畳み込む) も本 schema の正式 key として定義する。
 
-`tools.schema.json` は adapter ごとの `pricing` を定義する: **key = billable_units の kind 閉 enum (pages | tokens_in | tokens_out — [07-adapter-spec.md §4](07-adapter-spec.md))、値 = 有限・非負の USD 単価 (REAL)、未知 key は schema error**。**billable を宣言する Adapter ([07-adapter-spec.md §5.7](07-adapter-spec.md) 条件 6) は、AdapterProfile の `billable_kinds` (報告し得る kind の閉集合の宣言 — [07-adapter-spec.md §4](07-adapter-spec.md)) の全 kind が `pricing` に被覆されること (pricing keys ⊇ billable_kinds) を送信前に検査する (欠落は config error — fail-closed)**。終端時に初めて解決不能と判明した場合の縮退は [04-pipeline.md §5.4](04-pipeline.md)。
+`tools.schema.json` は adapter ごとの `pricing` を定義する: **key = billable_units の kind 閉 enum (pages | tokens_in | tokens_out — [07-adapter-spec.md §4](07-adapter-spec.md))、値 = 有限・非負の USD 単価 (REAL)、未知 key は schema error**。**billable を宣言する Adapter ([07-adapter-spec.md §5.7](07-adapter-spec.md) 条件 6) は、AdapterProfile の `billable_kinds` (報告し得る kind の閉集合の宣言 — [07-adapter-spec.md §4](07-adapter-spec.md)) の全 kind が `pricing` に被覆されること (pricing keys ⊇ billable_kinds) を送信前に検査する (欠落は config error — fail-closed)**。billable 宣言 Adapter の profile required には `reject_billing` (閉 enum — [07-adapter-spec.md §4](07-adapter-spec.md)) も含める。終端時に初めて解決不能と判明した場合の縮退は [04-pipeline.md §5.4](04-pipeline.md)。
 
-`user-config.schema.json` は device cap (`[budget]`、[04-pipeline.md §5.4](04-pipeline.md)) を含む。
+`user-config.schema.json` は device cap (`[budget]`、[04-pipeline.md §5.4](04-pipeline.md)) を含む。**log 保持の正規 key = `[observability] retention_days`** (整数 1〜3650・既定 30 — §12.6 の「config 上書き可」の実体。device logs (events / metrics / errors) と scope-local `.kcs/logs/access.jsonl` の双方に適用する)。
 
 ## 12.4 時刻・タイムゾーン
 

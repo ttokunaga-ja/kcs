@@ -523,6 +523,9 @@ CREATE TABLE embeddings (
   distance TEXT NOT NULL,
   profile_hash TEXT NOT NULL
 );
+CREATE INDEX idx_embeddings_type ON embeddings(target_type);
+-- query_cache の 256 行剪定・列挙が corpus 全 embeddings を SCAN しないための index
+-- (index/sqlite.db は再構築可能な cache — rebuild-db が DDL ごと再生成するため migration 不要)
 
 CREATE VIRTUAL TABLE chunk_vec USING vec0(
   chunk_id TEXT PRIMARY KEY,
@@ -624,6 +627,11 @@ order_index             unit の出現順 (03-data-model.md §2.1 の順序)
 初回大量投入では、deterministic なタスク (Prepare / ベースライン抽出 / FTS index) を online Adapter タスク (Markdownize / Embedding) より優先してスケジュールし、**ベースライン index を先に完了させる**。これにより budget pause ([§5.4](#54-cost-guardrail--kill-switch)) が起きても検索の成立自体は阻害されない。
 
 ## 5.1 タスクモデル
+
+タスクストアは `.kcs/tasks.jsonl` (append-only・喪失許容 — §5.7)。**bounded compaction**: 書き込み系
+コマンド冒頭で行数が閾値 (既定 4096 行) を超えていたら、`.kcs/.lock` 下で terminal task の行を落とし
+非 terminal のみを temp 完書き → fsync → atomic rename で再生成する (喪失許容データのため compaction
+は常に安全 — 正確さは object store / cost-ledger からの再検出が担保する。§5.7)。
 
 ```json
 {
@@ -839,6 +847,9 @@ CREATE TABLE batch_requests (            -- in-flight Batch intent の正本 (§
     created_at        INTEGER NOT NULL,
     PRIMARY KEY (scope_id, adapter_kind, input_hash, tool_profile_hash)
 ) WITHOUT ROWID;
+CREATE INDEX idx_batch_requests_inflight ON batch_requests(state) WHERE state IN (0, 1);
+                                         -- cap 判定の in-flight 予約合算 (state 0/1 の estimated_usd)
+                                         --  を生涯 task 数に依存させない partial index
 
 CREATE TABLE schema_migrations (         -- 一度きりの移行の marker (10 §7.5.3 — JSONL cutover 等)
     name        TEXT NOT NULL PRIMARY KEY, -- 例: 'jsonl-cutover' (rowid 表の TEXT PRIMARY KEY は NULL を拒否しないため NOT NULL 必須)
@@ -999,6 +1010,7 @@ terminal 化 (error='purged') = `purged` / 回復期限超過・照会不能の 
 provider 報告値を使わず、行の `estimated_usd` を `estimated=1` で記帳して同一 Tx で terminal 化する**
 (不正値は CHECK を通らず Tx を閉じられないため — 報告値が有効な場合のみ provider 値で記帳する)。**この縮退は usage が必須の応答 ([07-adapter-spec.md §4](07-adapter-spec.md) の
 billable terminal 応答) に限る** — 非 billable な応答 (単価 0 のローカル LLM・拒否課金を宣言しない
+(`reject_billing = "nonbillable"` — [07-adapter-spec.md §4](07-adapter-spec.md))
 provider の reject 等) の usage 欠落は正当であり、確定額 0 (`usd=0`・`estimated=0`) で記帳する。
 **報告された `billable_units.kind` の単価が tools.toml の `[pricing]` で解決できない場合 (未設定・
 表の欠落) も「欠落」と同じ estimated 縮退 + warning とする** (終端 Tx を止めない。0 円確定にはしない —
@@ -1015,7 +1027,8 @@ DDL の CHECK は最終防衛線であり、**CHECK 違反で Tx が失敗した
 再試行はループするだけのため再試行しない)** ([10-operations.md §12.1](10-operations.md) STORE domain)。
 
 **回復** (書き込み系 batch コマンド — `kcs index` / `kcs batch resume` / `kcs batch retry` /
-`kcs batch abandon` — の冒頭。**これらと `kcs reindex` は `.kcs/.lock` を取得する書き込み系であり
+`kcs batch abandon`・**および online enrichment を駆動し得る `kcs reindex`・
+`kcs repair --rebuild-db`** — の冒頭。**これらと `kcs reindex` は `.kcs/.lock` を取得する書き込み系であり
 ([05-runtime.md §6](05-runtime.md))、相 1〜2b の遷移・token の発行も lock 保持下で行う** — 並行する
 resume/retry が同一行へ別 token を書くと、先行 job が無記録 in-flight になる。未終端の行 (state 0/1) と
 intent_token 非 NULL の終端行 (= 残骸掃除未完) を三値で照合する。**`request_kind='sync'` の行は

@@ -85,7 +85,8 @@ raw / prepared / image / chunk / embedding / manifest / toollock / tree / commit
   purge/epoch         purge の ABA barrier (単調カウンタ — 05-runtime.md §3.5。欠落 = 読取 fail-closed)
   tombstones/lifecycle-epoch    lifecycle 更新 (retire・再 purge・legacy 変換) の単調カウンタ
                                 (05-runtime.md §3.5 — 回転補完の検出源。event append ごとに +1)
-  tasks.jsonl         batch タスクストア (04-pipeline.md §5.1。append-only の運用データ、SQLite 非採用)
+  tasks.jsonl         batch タスクストア (04-pipeline.md §5.1。append-only の運用データ、SQLite 非採用。
+                      terminal 行の bounded compaction あり — 04 §5.1)
   chunks.jsonl        chunk association ledger (**truth** — chunk object が持たない世代 association の正本。
                       作成行 = {chunk_id, chunking_config_hash, created_at, first_seen_commit, path}。
                       path = chunk 生成時点の path (SQLite chunks.raw_path の rebuild 入力)。
@@ -442,7 +443,8 @@ elif not inst.units:
 elif all(u.status == "failed" for u in inst.units):
     if all(u.error_kind is permanent for u in inst.units):
         settled      # 全滅かつ全て permanent — terminal。再投入対象なし
-                     # (04-pipeline.md §5.2 の settled partial と同じ扱い — 脱出は新 gen のみ)
+                     # (04-pipeline.md §5.2 の failed permanent / settled partial と同族の terminal —
+                     #  cleanup・blocker 除外の扱いは同じ。脱出は新 gen のみ)
     else:
         failed       # 全滅 (retryable を含む) — retryable (04-pipeline.md §5.2 の failed → pending と同じ扱い)
 elif any(u.status == "done" and not unit_object_exists(u) for u in inst.units):
@@ -450,7 +452,8 @@ elif any(u.status == "done" and not unit_object_exists(u) for u in inst.units):
                      # (回復対象 = 欠落 done ∪ failed の和集合。欠落を先に判定しないと
                      #  permanent failed の陰で欠落が恒久に再投入されない)
 elif any(u.status == "failed" for u in inst.units):
-    partial          # 成功 unit は検索対象。失敗 unit のみ再投入 (04-pipeline.md §5.2)
+    partial          # 成功 unit は検索対象。再投入は retryable な失敗 unit のみ (permanent は除く —
+                     # done + 残り全 permanent は 04-pipeline.md §5.2 の settled partial として terminal)
 else:
     up_to_date
 # prepare profile の変更は 04 §2.1 の prepared_hash 変化として再投入を駆動する — 本判定は instance の
@@ -584,7 +587,7 @@ image_hash    = "sha256:" + base16(sha256(抽出画像のバイト列))
 - tree の `entries` は `path` の UTF-8 バイト列昇順で一意にソートする。同一 `path` の重複 entry は禁止。
 - commit の `parents` は commit_hash の配列。第一要素は直前 HEAD (first parent)。
 - timestamp は UTC ISO8601 + `Z` ([06-cli-spec.md §12](06-cli-spec.md))。
-- `HEAD` / `refs/heads/*` / canonical `refs/tags-v1/*` / legacy `refs/tags/*` の値は commit_hash。
+- `HEAD` / `refs/heads/*` / canonical `refs/tags-v1/tag-*` / legacy `refs/tags/*` の値は commit_hash (`refs/tags-v1/names.jsonl` は ref ではなく論理名 ledger — この規則の対象外)。
 
 **manifest** — canonical JSON の content hash (§2.1):
 
@@ -785,7 +788,10 @@ Markdown ヘッダ template (Source の filename も comment-safe に挿入す�
 percent-encode、§2.1 の KCS-MISSING-UNIT と同じ規則。生値の挿入は comment を途中終端させ view 冒頭へ
 任意 Markdown を注入できてしまう)。**Source の値は生成時点の filename の記録**であり
 first-instance-wins の一部 — 同一 (raw_hash, tool_profile_hash) を別 path・別名で再配置しても
-view は再生成しない (現在の path 表示は view 提供側 (CLI 表示層) の責務で、cache 本文は不変):
+view は再生成しない (現在の path 表示は view 提供側 (CLI 表示層) の責務で、cache 本文は不変)。
+**view 喪失後の再生成 (`kcs repair`) では Source に再生成時点の filename を用いてよい** — view の
+content は identity を持たない (§5 の normalized_hash 不採用) ため、Source 行は informational で
+あり不変条件ではない:
 
 ```markdown
 <!--

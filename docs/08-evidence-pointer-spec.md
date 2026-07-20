@@ -169,16 +169,18 @@ bulk 系 (`kcs evidence verify --batch <pointers.jsonl>`) は従来どおり各�
     **path の UTF-8 byte 順最小の entry を決定的に選ぶ** ([05-runtime.md §1.7](05-runtime.md) の `path_at_commit` と同じ規則 — 表示もこの canonical path を使い、pointer 入力の optional path は使わない)。一致 entry が
     無ければ手順 5〜7 を実行せず KCS-E-STORE-CORRUPT-001 (not_found 扱い — 手順 8 の不一致処理と同じ
     終端) へ短絡する)
-5.  raw_hash の marker と raw object の存在を、次の評価順で判定する
-    (§3.2 の解決成功条件「raw object が存在」をここで検査する):
-    (i) **active な tombstone** (lifecycle の末尾 event が `purged` — [05-runtime.md §3.5](05-runtime.md)) が
-    あるなら → tombstone を返す (§4)。
-    (ii) **active な erase receipt (末尾 event = `erased`) があり raw object が不在**なら not_found —
+5.  raw_hash の marker と raw object の存在を判定する。**まず、存在する全 marker (tombstone /
+    erase receipt) の最終 event を 1 つに正本化する** — canonical final event = 全 marker 中で
+    `lifecycle_epoch` 最大の最終 event ([05-runtime.md §3.5](05-runtime.md)。legacy の epoch 欠落は
+    0 とみなし、同値は tombstone 側を優先する決定的 tie-break。resurrection link も canonical
+    final event のものを採用する)。**以下 (i)〜(iv) は canonical final event に対して評価する**
+    (§3.2 の解決成功条件「raw object が存在」をここで検査する — (i) が個別 marker の末尾で先に
+    短絡しない: 例えば tombstone 末尾 purged@epoch10 + receipt 末尾 retired@epoch11 は canonical =
+    retired であり (iii) 側):
+    (i) canonical final event = `purged` (active な tombstone) なら → tombstone を返す (§4)。
+    (ii) canonical final event = `erased` (active な erase receipt) で raw object が不在なら not_found —
     `KCS-E-PURGE-NOT-FOUND-001` (§4.2 の表と同一の終端)。
-    (iii) **存在する lifecycle marker (tombstone / erase receipt) のいずれかの末尾 event が
-    `retired`** (片方のみ存在するのが通常 — 双方が存在して食い違う場合は lifecycle 正本
-    ([05-runtime.md §3.5](05-runtime.md)) の `lifecycle_epoch` 最大の最終 event で判定し、
-    resurrection link も同じ event のものを採用する) なら tombstone 扱いしないが、手順 6 へ進む
+    (iii) canonical final event = `retired` なら tombstone 扱いしないが、手順 6 へ進む
     **前に raw object の存在を検査する** — 存在すれば手順 6 へ進む (resurrection 後の旧 pointer を
     alive に戻すための必須条件)。**不在なら not_found — `KCS-E-STORE-CORRUPT-001`**
     (retired 後の再作成分の欠落は corruption — [10-operations.md §7.5.1](10-operations.md) と整合。
@@ -309,7 +311,7 @@ context: { raw_hash, scope_path }
 ```
 
 完全削除は法的要件上必要な場合のみ。デフォルトは tombstone。
-`.kcs/purge/erase-receipts/` の bounded non-content receipt は public の tombstone 判定・re-ingest barrier には使わない (**手順 5 の not_found 分類 (§3.1 (ii)〜(iii))・手順 6b の欠落説明・resurrection link にのみ使用可** — [05-runtime.md §3.5](05-runtime.md))。
+`.kcs/purge/erase-receipts/` の bounded non-content receipt は public の tombstone 判定・re-ingest barrier には使わない (**fsck の欠落説明 ([10-operations.md §7.5.1](10-operations.md))・手順 5 の not_found 分類 (§3.1 (ii)〜(iii))・手順 6b の欠落説明・resurrection link にのみ使用可** — [05-runtime.md §3.5](05-runtime.md)。この列挙が用途の正本)。
 receipt は pointer state を tombstoned にせず、re-ingest も阻止しないため、レスポンスは上記
 `not_found` である。**ただしこの保証は当該 bytes が store に不在の間のもの** — 同一 bytes が後日
 再 ingest され (明示操作に限らず、working tree 残存原本の自動 scan を含む — [05-runtime.md §3.5](05-runtime.md)

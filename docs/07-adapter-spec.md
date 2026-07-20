@@ -106,8 +106,10 @@ opt-in の単位・成立・寿命:
         (b) 明示設定: .kcs/config.toml の adapter.policy.allow_network = true —
             **boolean 単独では送信 gate (boolean × 行の AND) を満たさない**。行の materialize は
             承認操作 (対話 / --approve) のみで、config の手編集は kill switch の解除・意思表示に
-            留まる (crash 中間 (true × 行なし) との区別のため自動 materialize はしない —
-            送信可能化には (a) の承認操作を要する)
+            留まる (**例外 = 下記の初回 materialize**: `approvals_initialized` marker が無く
+            approvals[] が空の**初回に限り**、最初の 1 tool を自動 materialize する — それ以外は
+            crash 中間 (true × 行なし) との区別のため自動 materialize をせず、送信可能化には
+            (a) の承認操作を要する)
 
 寿命:   永続 (revoke まで)。ただし対象 Adapter の tool_id・execution_mode・tool_profile_hash の
         いずれかが変わった場合は失効し、再承認を要する (profile に畳み込まれる設定 —
@@ -118,9 +120,11 @@ revoke: adapter.policy.allow_network = false に設定する (これは **scope 
 単一 Adapter だけの revoke は approvals[] 当該行の **status=revoked + revoked_at への更新**で行う
 (opt-in 単位 = scope × adapter に対応する既存機構 — 下記)。**効果は当該 Adapter の新規送信停止に
 限り、他 Adapter の active 承認と `allow_network` boolean は変えない**。**revoke は (単一 Adapter・
-scope 全体とも) 4 組一致する `approval_pending` を同一 atomic write で除去する** — 未 publish の
+scope 全体とも) 4 組一致する `approval_pending` を同一 atomic write で除去し、`--all` は tool を
+問わず存在する全ての `approval_pending` を除去する** — 未 publish の
 pending intent を残さない (行 publish 前に revoke した場合に、次回実行の self-heal が承認を
-復活させる経路の封鎖)。**単一 Adapter revoke の実行主体 = `kcs adapter revoke <tool_id>`**
+復活させる経路の封鎖 — 別 tool の crash 残存 pending も `--all` で残さない)。対象なし (行なし・
+pending なし・既 revoked) は冪等成功 (exit 0 + 「対象なし」表示)。**単一 Adapter revoke の実行主体 = `kcs adapter revoke <tool_id>`**
 ([06-cli-spec.md §1](06-cli-spec.md) — `.kcs/.lock` 下の locked mutation、[05-runtime.md §6](05-runtime.md))。
 承認側の行 publish・self-heal も同じ lock 下で行い、**publish の直前に `approval_pending` の存在を
 再検証する** (CAS — 並行する revoke が除去した pending を publish しない)。
@@ -169,9 +173,11 @@ pending intent を残さない (行 publish 前に revoke した場合に、次�
         失効し、再承認」を『新規行の初回 materialize』として迂回できてしまう)。profile 変更で
         失効した行や revoked 行が存在する場合も同様に再承認を要する (残存 boolean による失効迂回の禁止)。
         承認操作の書込順は **(0) pending intent = 承認対象の 4 組 (scope_id / tool_id /
-        execution_mode / tool_profile_hash) を scope.json の `approval_pending` key へ atomic に
+        execution_mode / tool_profile_hash) + 公開行の監査値 (`approved_at` / `approval_method`) を
+        scope.json の `approval_pending` key へ atomic に
         耐久化 → (1) config.toml (`allow_network = true`) を耐久化 → (2) approvals[] 行 + marker を
-        publish し、同一 atomic write で `approval_pending` を除去** — 途中で crash した中間
+        publish し、同一 atomic write で `approval_pending` を除去** (self-heal は pending の payload
+        をそのまま publish する — 監査値を補完・捏造しない) — 途中で crash した中間
         (true × 行なし) は、次回実行の self-heal が **`approval_pending` と完全一致する場合に限り**
         行 publish を完遂する (pending 記録が無い・一致しない中間は自動生成せず明示承認 (対話 /
         --approve) を要求する)。`approval_pending` の schema は
@@ -231,11 +237,17 @@ AdapterProfile:
   version
   capability_flags      ["ocr", "layout_detection", "incremental_update", ...]
   billable_kinds        billable を宣言する Adapter (§5.7 条件 6) は必須 — 報告し得る
-                        `billable_units.kind` の閉集合 (拒否課金の有無の宣言とは別 field)。
+                        `billable_units.kind` の閉集合 (拒否課金の有無の宣言 = 下記 `reject_billing`)。
                         **実行時 usage の kind が宣言集合外の場合は課金 field の不良として
                         estimated 縮退 + warning ([04-pipeline.md §5.4](04-pipeline.md) — 応答の
                         受否・outcome・`contract_violation_count` は変えない)**。宣言集合の執行面は
                         送信前の pricing 被覆検査の入力 ([10-operations.md §12.3](10-operations.md))
+  reject_billing        billable を宣言する Adapter (§5.7 条件 6) は必須 — "billable" | "nonbillable"
+                        の閉 enum (投入拒否 (permanent 4xx) に課金する provider か否かの機械可読宣言。
+                        billable_kinds と同じく出力非影響 = tool_profile_hash 非対象。legacy / 未知値
+                        は fail-closed = "billable" として扱う)。usage 欠落の permanent 4xx を
+                        「正当な非課金 reject (確定額 0)」と「billable provider の欠落 (estimated
+                        縮退)」に分離する判定源 ([04-pipeline.md §5.4](04-pipeline.md))
   allow_network
 
 AdapterRun:
