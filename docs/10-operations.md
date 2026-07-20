@@ -572,11 +572,17 @@ purge closure と同一規則)。
 GC 本体は Phase 4+ のまま、**法務 purge の完結手段のみ前倒しする** (purge 完了表示の注記から誘導)。
 **拒否条件 (fail-closed)**: 当該 scope に state 0/1 の外部実行 (batch_requests — request_kind 不問)・
 pending / running の task・**descriptor を持ち path と整合し、非 terminal (pending / running /
-partial / failed retryable) の task に対応する** staging ([07-adapter-spec.md §8.3](07-adapter-spec.md)
+partial / failed retryable) の task に対応する** staging (partial は**再投入可能な failed unit が
+残る場合のみ** — 全 unit terminal の settled partial ([04-pipeline.md §5.2](04-pipeline.md)) は
+07 §8.3 の cleanup 対象であり blocker にしない) ([07-adapter-spec.md §8.3](07-adapter-spec.md)
 — 進行中 task の保全。対応 task を特定できない descriptor つき root は blocker 側に倒す (fail-closed)。
 **特定不能の退出経路** (task 記録の喪失許容 — [04-pipeline.md §1](04-pipeline.md) — で blocker が恒久化しないための経路):
-(1) descriptor の (raw_hash, tool_profile_hash) が指す normalized instance の manifest が存在し
-全 unit が terminal (done / failed permanent) なら、terminal 残骸とみなし削除対象へ移す。
+(1) descriptor の (raw_hash, tool_profile_hash) 配下に**存在する全て**の normalized instance
+(全 gen — descriptor は gen を持たず世代を特定しないため) の manifest で全 unit が terminal
+(done / failed permanent) であり、**かつ同 key の state 0/1 batch_requests 行が無い**なら、
+terminal 残骸とみなし削除対象へ移す (どの世代の root かを問わず削除が安全になる条件 —
+進行中世代があれば「manifest 未 terminal」か「state 0/1 行」のどちらかが必ず塞ぐ。in-flight
+信号は喪失許容の task 記録でなく cost-ledger 側を使う)。
 (2) それ以外は、同 key の state 0/1 batch_requests 行と pending / running task の不在を lock 下で
 検証したうえ、確認プロンプト付きの locked repair として削除できる。
 descriptor の無い・path 不整合・terminal 化済み task の残骸は上記の削除対象であり blocker にしない)・未 finalize の

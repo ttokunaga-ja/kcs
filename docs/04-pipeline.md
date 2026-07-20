@@ -304,7 +304,9 @@ Adapter 側に「軽微とは言えない」拒否権あり (`fallback_to_full=t
 
 ## 3.2 incremental 出力の受け入れ検査 (KCS 側 validation)
 
-KCS は Adapter の incremental 出力を **persist する前に** 次を検証する。新 unit 全集合 `N` は
+KCS は Adapter の incremental 出力を **manifest / objects へ確定 persist (publish) する前に** 次を
+検証する (受け入れ検査前の staging への耐久 persist ([07-adapter-spec.md §8.3](07-adapter-spec.md))
+は禁止対象ではない — 「検査前の unit は公開しない」の「公開」がこの確定 persist)。新 unit 全集合 `N` は
 unit_mapping (§2.2) の帰結 (`unchanged 候補 ∪ changed ∪ added`)。
 
 ```text
@@ -691,7 +693,11 @@ running が heartbeat_at + 5min を超えたら stale。別 worker が pull 可�
     失敗していた unit の出力のみ採用する
 - manifest の unit status 遷移は `failed → done` の一方向のみ。error_kind が permanent
   (invalid_input 等, §5.3) の unit は再投入せず、partial のまま `kcs status` に表示し続ける
-  (error_kind は §5.3 の閉 enum — [10-operations.md §12.1](10-operations.md) の機械判定規約の明示例外)
+  (error_kind は §5.3 の閉 enum — [10-operations.md §12.1](10-operations.md) の機械判定規約の明示例外)。
+  **partial の settled 化**: 全 unit が terminal (done / failed permanent) となり再投入対象が尽きた
+  partial task は、表示上は partial のまま **task としては terminal (settled) として扱う** —
+  staging cleanup ([07-adapter-spec.md §8.3](07-adapter-spec.md) の同一遷移規範・terminal 耐久化が先) を実行し、
+  prune-orphans の blocker からも除外する ([10-operations.md §7.5.1](10-operations.md))
 
 `task` テーブルが消えても問題ない設計 (object store と tool profile から再検出可能)。ただし `attempts` 履歴は失われる (リトライ予算がリセットされる) 点を許容。**§5.3 の max_attempts 判定はこの task 側の揮発カウンタで行う**。`batch_requests.attempts` は reject 終端 (§5.8 相 3) で耐久更新される監査・表示用カウンタであり、**「同一 mode で 1 回のみ」再試行の durable 判定源は `contract_violation_count` である** (§5.8 / §5.4 DDL コメントが正本 — 三つのカウンタは役割が異なる: task 側 = §5.3 retry budget、attempts = 監査・表示、contract_violation_count = 「1 回のみ」ゲート)。「1 回のみ」は task 通算である — count==1 のときだけ再投入でき、mode 切替後に別枠は生じない (「mode 切替後の違反も加算」の意図的帰結)。
 

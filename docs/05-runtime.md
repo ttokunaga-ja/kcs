@@ -234,7 +234,7 @@ page 1 の `since_cutoff` (UTC ISO8601 + `Z`) も保持する:
 (デフォルト = HEAD tree = 現行値。`--at` は対象 tree の値、`--all-history` / `--include-deleted` は各 binding
 tree の値で判定する。v1 tree は config 未記録のため現行値で代替し結果に注記 (**現行値の association が無い場合は、対象 commit の ancestor-or-equal な introduction を持つ association (cursor 継続時は `max_association_rowid` 以下も条件) に限定した上で `chunking_config_hash` の byte 順最小を決定的に代用** — 後発 association で代用値が時間変動しない。候補 0 件は注記つき空集合。HEAD 限定再 chunk 後の履歴 instance を `--at` で全脱落させない) — [04-pipeline.md §4.1, §4.6](04-pipeline.md))。
 
-**HEAD 不在 (初回 auto snapshot 前・snapshot finalize 未完) の scope は index 未完了として扱う** — 検索は当該 scope を `KCS-E-INDEX-REBUILDING-001` で excluded_scopes に計上し (単独 scope なら exit 3)、cursor は発行しない。**SQLite に反映済みでも未公開 (commit / ref 未 publish) の行は返さない** (§8.1 の finalize 耐久順序の crash 窓で、未公開 snapshot の内容を検索に見せない)。この扱いは**現在状態の検索など HEAD 依存の解決経路に限る** — 明示 commit・Evidence Pointer 指定の読取・検証は HEAD 非依存に解決する ([08-evidence-pointer-spec.md §3.1](08-evidence-pointer-spec.md)、[06-cli-spec.md §7](06-cli-spec.md))。
+**HEAD 不在 (初回 auto snapshot 前・snapshot finalize 未完) の scope は index 未完了として扱う** — 検索は当該 scope を `KCS-E-INDEX-REBUILDING-001` で excluded_scopes に計上し (単独 scope なら exit 3)、cursor は発行しない。**SQLite に反映済みでも未公開 (commit / ref 未 publish) の行は返さない** (§8.1 の finalize 耐久順序の crash 窓で、未公開 snapshot の内容を検索に見せない)。この扱いは**bare (--at なし) の現在状態検索など HEAD 依存の解決経路に限る** — 明示 commit・Evidence Pointer 指定の読取・検証 (単一 scope の search `--at <commit>` を含む) は HEAD 非依存に解決する ([08-evidence-pointer-spec.md §3.1](08-evidence-pointer-spec.md)、[06-cli-spec.md §7](06-cli-spec.md))。
 purge 済み raw_hash の chunk 行は物理削除済みのため自然に除外される。
 **実装規範**: publication / association の時点条件は correlated **EXISTS** (ancestry 判定と
 `association_rowid <= cursor.max_association_rowid` を副問い合わせ内に含む) で評価する — 同一
@@ -558,7 +558,8 @@ max_runtime_seconds = 60
 
 ## 2.4 Tiered Retention
 
-`commit_type=auto` のみ tiered retention を適用する。retention 満了は **shallow 化 (tree 破棄)** であり commit object の削除ではない (`manual/imported/merged/purged` は tree も常に残す):
+`commit_type=auto` のみ tiered retention を適用する。retention 満了は **shallow 化 (tree 破棄)** であり commit object の削除ではない (`manual/imported/merged/purged` は tree も常に残す)。
+**ref tip 除外**: HEAD・branch・tag が指す commit の tree は、retention 満了でも **shallow 化の対象にしない** — 無変更 scope では auto snapshot が no-op を続け HEAD が古い auto commit に留まり続けるため、除外しないと現在状態の基点 (bare search / restore / cursor) を失う。物理削除の直前にも、ref tip 非該当と「非 shallow commit からの参照ゼロ」を同一 exclusive critical section で再検証する (§2.5):
 
 ```toml
 [gc.auto_retention]
@@ -935,7 +936,7 @@ batch 系と reindex は外部副作用 (upload / job 作成) と batch_requests
 - `kcs repair --verify-objects` の raw object 復旧と repaired commit publication も、同じ lock の下で private temp + hash 再検証 + atomic publish を使う
 - `kcs repair --rebuild-db` 実行中の `kcs search` は、再構築完了までの間旧 sqlite.db (存在すれば) を読むか、`KCS-E-INDEX-REBUILDING-001` を返す。再構築の完了も atomic rename (sqlite.db.tmp → sqlite.db) で切り替える
 - scope-registry.sqlite / cost-ledger.sqlite (~/.local/share/kcs/) は WAL モード + busy_timeout (デフォルト 5000ms) で複数プロセスの同時書き込みを直列化する。registry は cache であり ([03-data-model.md §4](03-data-model.md))、破損時は各 `.kcs` の rescan で再構築する (**再構築の入力はユーザーが知る探索 root** — registry 喪失後は `.kcs` の所在一覧も失われるため、各 root での `kcs index` 再実行が再登録を兼ねる。KCS が自力で全ディスクを走査することはしない)。cost-ledger.sqlite は**再構築不可の運用台帳** ([03-data-model.md §4.1](03-data-model.md) / [04-pipeline.md §5.4](04-pipeline.md))
-- purge の log scrub と通常 append/rotation は、device logs では `$XDG_DATA_HOME/kcs/logs/scrub.lock`、scope access logs では `.kcs/logs/access.scrub.lock` を共有する。複合 lock 順序は scope store → cost-ledger.sqlite (Tx) → device observability → scope access とし、逆順取得を禁止する
+- purge の log scrub と通常 append/rotation は、device logs では `$XDG_DATA_HOME/kcs/logs/scrub.lock`、scope access logs では `.kcs/logs/access.scrub.lock` を共有する。複合 lock 順序は scope store → cost-ledger.sqlite (Tx) → device observability → scope access とし、逆順取得を禁止する。**scope 由来 log の append 順序**: 読取系が対象の path / query / raw_hash を含む行を append する場合、当該 append は scrub lock を保持したまま、2 点検査 (§6 — journal 不在 + epoch 不変) の**最終検査と同一 critical section** で行う — scrub 完了後の再 append で purge の削除 postcondition を破らない。最終検査で拒否した場合の記録には対象 path / query / raw_hash を含めない
 
 # 7. 観測 (Observability)
 
@@ -975,7 +976,7 @@ MVP での snapshot 生成契機は次の 3 つのみ (常駐プロセスは持�
   .kcs/.lock で排他する (§6)
 - snapshot 対象は indexed scope の現在 working tree
 - auto commit は tiered retention で減衰する (§2.4)
-- manual commit は auto を吸収しない (auto は tiered retention 満了で shallow 化され tree を失うが、commit object は履歴 DAG の中間点として残る。§2.2)
+- manual commit は auto を吸収しない (auto は tiered retention 満了で shallow 化され tree を失うが — ref tip が指すものは除外 (§2.4) — commit object は履歴 DAG の中間点として残る。§2.2)
 - tree_hash 不変なら no-op (§8.1 と同じ)
 ```
 

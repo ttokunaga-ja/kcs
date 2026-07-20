@@ -103,7 +103,11 @@ opt-in の単位・成立・寿命:
             **承認の成立 = approvals[] 行の materialize と、同一承認操作での scope config
             `allow_network = true` の設定の両方** (送信 gate は boolean と行の AND —
             行だけでは送信が有効にならない)
-        (b) 明示設定: .kcs/config.toml の adapter.policy.allow_network = true
+        (b) 明示設定: .kcs/config.toml の adapter.policy.allow_network = true —
+            **boolean 単独では送信 gate (boolean × 行の AND) を満たさない**。行の materialize は
+            承認操作 (対話 / --approve) のみで、config の手編集は kill switch の解除・意思表示に
+            留まる (crash 中間 (true × 行なし) との区別のため自動 materialize はしない —
+            送信可能化には (a) の承認操作を要する)
 
 寿命:   永続 (revoke まで)。ただし対象 Adapter の tool_id・execution_mode・tool_profile_hash の
         いずれかが変わった場合は失効し、再承認を要する (profile に畳み込まれる設定 —
@@ -113,7 +117,10 @@ revoke: adapter.policy.allow_network = false に設定する (これは **scope 
 `--online` の一時 opt-in でも上書きされない。下記「優先関係」の例外)。
 単一 Adapter だけの revoke は approvals[] 当該行の **status=revoked + revoked_at への更新**で行う
 (opt-in 単位 = scope × adapter に対応する既存機構 — 下記)。**効果は当該 Adapter の新規送信停止に
-限り、他 Adapter の active 承認と `allow_network` boolean は変えない**。
+限り、他 Adapter の active 承認と `allow_network` boolean は変えない**。**revoke は (単一 Adapter・
+scope 全体とも) 4 組一致する `approval_pending` を同一 atomic write で除去する** — 未 publish の
+pending intent を残さない (行 publish 前に revoke した場合に、次回実行の self-heal が承認を
+復活させる経路の封鎖)。
         新規オンライン送信 task の発行停止は、kill switch では scope 全体・単一 Adapter revoke では
         当該 Adapter 分のみ (送信済みデータの取り消しは、どちらの revoke でも保証しない)。
 
@@ -676,7 +683,8 @@ USER:
 ([04-pipeline.md §3.2](04-pipeline.md)) を通過した時点で manifest へ一括確定する** (検査前の unit は
 公開しない — §3.2 の「違反応答は 1 unit も persist しない」と整合)。ストリーミング失敗時は staging を
 破棄せず、**完了済み unit は保全したまま task を failed (retryable) にする。task が done (受け入れ検査
-通過 → manifest 一括確定)・failed permanent・abandon のいずれかで terminal 化したときは、当該 task の
+通過 → manifest 一括確定)・failed permanent・abandon・settled partial (全 unit が terminal —
+[04-pipeline.md §5.2](04-pipeline.md)) のいずれかで terminal 化したときは、当該 task の
 staging を同一遷移で冪等に cleanup する (**遷移内の順序は terminal 状態の耐久化 (done は manifest
 一括確定の耐久化) が先、cleanup が後** — 逆順だと crash 時に公開元 bytes を失う。crash 時は遷移の
 回復 replay で cleanup も再実行される。
@@ -685,8 +693,9 @@ terminal 化済み task の残存 root は cleanup 失敗の残骸として prun
 [10-operations.md §7.5.1](10-operations.md))** — manifest には `pending`
 という unit 状態は存在しない ([03-data-model.md §2.1](03-data-model.md) の遷移は failed → done のみ)。
 **同一 root 名の残存時の前置回復**: 同一 `(raw64, tool64, adapter_kind)` の staging root が既に
-存在する状態で新しい task を開始する場合、root 公開 (atomic rename) の**前**に旧 root の回復を
-lock 下で完了する — 対応 task が terminal なら cleanup を完遂してから公開し、非 terminal なら
+存在する状態で新しい task を開始する場合、root 公開 (atomic rename) の**前**に旧 root の回復を、
+**呼び出し元コマンドが既に保持する `.kcs/.lock` の同一 critical section 内で**完了する
+(04 §5.8 と同水準 — 別 lock の再取得はしない) — 対応 task が terminal なら cleanup を完遂してから公開し、非 terminal なら
 新 task を開始せず当該 task を再開する。root 公開の rename は**既存 root 名への上書きをしない**
 (no-replace — 新旧世代の bytes 混在を防ぐ。世代識別は path に載せない — [03-data-model.md §2](03-data-model.md) の配置は不変)。
 
@@ -695,7 +704,8 @@ lock 下で完了する — 対応 task が terminal なら cleanup を完遂し
 KCS は要求しない)。**凍結保全と合成が適用されるのは transport 中断 (stream 失敗) からの resume に
 限る** — 受け入れ検査 reject (contract violation — [04-pipeline.md §3.2](04-pipeline.md)) 起因の
 再投入では staging を破棄して開始する (違反 unit を含み得る staging を first-instance-wins で
-勝たせると、修正済み retry 応答が破棄され再違反が確定するため)。KCS が staging + retry 応答を合成する際、**staging に確定済みの unit_key と
+勝たせると、修正済み retry 応答が破棄され再違反が確定するため)。KCS が staging + retry 応答を合成する際、**まず生の retry 応答の各配列に V1 / V6 の配列内 unit_key 重複検査を適用し** (staged-key の
+再出現で重複が消える前に契約違反を検出する)、その後 **staging に確定済みの unit_key と
 重複する応答 unit は黙って破棄する** (staging 側が first instance — first-instance-wins
 ([03-data-model.md §5](03-data-model.md)) と同型)。合成後の**完成集合に対して**受け入れ検査
 (incremental は V1〜V6、full は full 契約) を適用してから一括公開する。

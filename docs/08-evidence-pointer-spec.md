@@ -169,15 +169,21 @@ bulk 系 (`kcs evidence verify --batch <pointers.jsonl>`) は従来どおり各�
     **path の UTF-8 byte 順最小の entry を決定的に選ぶ** ([05-runtime.md §1.7](05-runtime.md) の `path_at_commit` と同じ規則 — 表示もこの canonical path を使い、pointer 入力の optional path は使わない)。一致 entry が
     無ければ手順 5〜7 を実行せず KCS-E-STORE-CORRUPT-001 (not_found 扱い — 手順 8 の不一致処理と同じ
     終端) へ短絡する)
-5.  raw_hash に **active な tombstone** (lifecycle の末尾 event が `purged` — [05-runtime.md §3.5](05-runtime.md)) が
-    あるなら → tombstone を返す (§4)。**retired (末尾 event = `retired`) は tombstone 扱いしない** — 手順 6 へ進む
-    (resurrection 後の旧 pointer を alive に戻すための必須条件)。**active な erase receipt
-    (末尾 event = `erased`) があり raw object が不在なら not_found —
-    `KCS-E-PURGE-NOT-FOUND-001` (§4.2 の表と同一の終端)**。tombstone / erase receipt が
-    無いのに raw object が不在なら not_found — code は `KCS-E-STORE-CORRUPT-001` (marker なしの欠落は
+5.  raw_hash の marker と raw object の存在を、次の評価順で判定する
+    (§3.2 の解決成功条件「raw object が存在」をここで検査する):
+    (i) **active な tombstone** (lifecycle の末尾 event が `purged` — [05-runtime.md §3.5](05-runtime.md)) が
+    あるなら → tombstone を返す (§4)。
+    (ii) **active な erase receipt (末尾 event = `erased`) があり raw object が不在**なら not_found —
+    `KCS-E-PURGE-NOT-FOUND-001` (§4.2 の表と同一の終端)。
+    (iii) **retired (tombstone・erase receipt とも末尾 event = `retired`) は tombstone 扱いしない**が、
+    手順 6 へ進む**前に raw object の存在を検査する** — 存在すれば手順 6 へ進む (resurrection 後の
+    旧 pointer を alive に戻すための必須条件)。**不在なら not_found — `KCS-E-STORE-CORRUPT-001`**
+    (retired 後の再作成分の欠落は corruption — [10-operations.md §7.5.1](10-operations.md) と整合。
+    chunk object が残存していても本文を返さない)。
+    (iv) marker (tombstone / erase receipt) が無いのに raw object が不在なら not_found — code は
+    `KCS-E-STORE-CORRUPT-001` (marker なしの欠落は
     purge の痕跡ではなく **corruption の疑い** — 手順 4 の短絡と同じ not_found 扱いで返し、
     `kcs repair --verify-objects` を案内する。purge 済みの正規欠落 (marker あり) と混同しない)
-    (§3.2 の解決成功条件「raw object が存在」をここで検査する)
 6.  tree entry の normalize.(tool_profile_hash, gen) で normalized instance (unit object 群) を解決
     (gen フィールド欠落は gen=0 と読む)
 6a. **時点帰属の検証 (v2 tree)**: entry の normalize.manifest_hash が指す manifest object を読み、
@@ -298,7 +304,7 @@ context: { raw_hash, scope_path }
 ```
 
 完全削除は法的要件上必要な場合のみ。デフォルトは tombstone。
-`.kcs/purge/erase-receipts/` の bounded non-content receipt は public の tombstone 判定・re-ingest barrier には使わない (**手順 6b の欠落説明と resurrection link にのみ使用可** — [05-runtime.md §3.5](05-runtime.md))。
+`.kcs/purge/erase-receipts/` の bounded non-content receipt は public の tombstone 判定・re-ingest barrier には使わない (**手順 5 の not_found 分類 (§3.1 (ii)〜(iii))・手順 6b の欠落説明・resurrection link にのみ使用可** — [05-runtime.md §3.5](05-runtime.md))。
 receipt は pointer state を tombstoned にせず、re-ingest も阻止しないため、レスポンスは上記
 `not_found` である。**ただしこの保証は当該 bytes が store に不在の間のもの** — 同一 bytes が後日
 再 ingest され (明示操作に限らず、working tree 残存原本の自動 scan を含む — [05-runtime.md §3.5](05-runtime.md)
@@ -470,6 +476,6 @@ PATCH  typo / コメント修正
 
 **未知 MAJOR の拒否は表現形式に依らない**: reader は自己の対応 MAJOR より新しい `schema_version` を、URI の `sv` (§2.3) と inline / batch JSON の `schema_version` field のどちらで受けても KCS-E-CONFIG-SCHEMA 系 error (exit 2) で拒否する (未知フィールド無視則が担う前方互換は、既知 MAJOR 内の MINOR 追加に限る)。
 
-新 schema は古い解決ロジックでもエラーなく扱えること (forward compatible) を要件とする (= 未知フィールドは無視)。
+**既知 MAJOR 内の MINOR 追加による**新 schema は古い解決ロジックでもエラーなく扱えること (forward compatible) を要件とする (= 未知フィールドは無視。未知 MAJOR は上記のとおり拒否 — この要件の対象外)。
 
 本仕様の 2026-07 改訂 (`scope_id` 必須化・`scope_path` の optional 降格) は、実装・pointer 発行前の `schema_version = 1` の定義確定であり、MAJOR bump ではない。公開後に同種の変更を行う場合は上記規約どおり MAJOR (migration plan + ユーザー通知) となる。

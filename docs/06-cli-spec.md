@@ -294,7 +294,8 @@ sqlite.db 不在・利用不能       全経路 (verify / open / view / restore 
                                **HEAD ref 不在の scope は、HEAD 依存経路 (現在状態の search・
                                sha256: 短縮形 — 08 §2.3 規則 4) に限り、sqlite.db が読めても
                                REBUILDING 扱い** (05 §1.6 — 未公開行を検索に見せない)。**明示の
-                               commit / Evidence Pointer 指定による verify / open / view / restore
+                               commit / Evidence Pointer 指定による verify / open / view / restore・
+                               単一 scope の search `--at <commit>`
                                は HEAD 非依存に解決して通常応答する** (08 §3.1 の解決手順・08 §6 の
                                不変性保証)。error は不在・利用不能・HEAD 不在 (HEAD 依存経路のみ)
                                の場合のみ。verify は検査未完了のため --strict なしでも

@@ -52,8 +52,9 @@ raw / prepared / image / chunk / embedding / manifest / toollock / tree / commit
                       crash 残骸・旧 store)・terminal 化済み task の残存 root (cleanup 失敗の残骸 —
                       [07-adapter-spec.md §8.3](07-adapter-spec.md)) は fsck / status が表示し、
                       `--prune-orphans` の削除対象とする** (帰属不明の staging は
-                      安全側 = 削除。対応 task 特定不能の root も回復判定 — manifest 全 unit
-                      terminal または in-flight 不在検証 — を経て削除可能 —
+                      安全側 = 削除。対応 task 特定不能の root も回復判定 — 全世代の instance
+                      manifest が terminal + 同 key の in-flight 不在、または確認付き in-flight
+                      不在検証 — を経て削除可能 —
                       [10-operations.md §7.5.1](10-operations.md))
   objects/
     raw/ab/cd/<raw64>
