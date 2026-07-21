@@ -15,7 +15,7 @@ use crate::online_task::targets_standard_online_markdownize;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, OpenOptions};
-use std::io::{IsTerminal, Read, Write};
+use std::io::{BufRead, IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process;
 use std::time::Instant;
@@ -65,6 +65,12 @@ use kcs_pipeline::budget::{
     utc_month, BudgetCapKind, BudgetCaps, BudgetEstimate, CostLedger, MonthlyCostLedgerEntry,
     ReservationRecord,
 };
+use kcs_pipeline::ledger::ops::{execute_abandon, uuid_v7_timestamp_millis};
+use kcs_pipeline::ledger::ops::{
+    reset_contract_violations, resolve_abandon_selector, stalled_rows, AbandonExecution,
+    AbandonResolution, AbandonSelector,
+};
+use kcs_pipeline::ledger::{LedgerDb, TaskKey as LedgerTaskKey};
 use kcs_pipeline::markdownize::{
     choose_markdownize_mode, load_validated_normalized_instance, persist_normalized_instance,
     validate_markdownize_response, IncrementalHints, IncrementalModeDecision, IncrementalModeInput,
@@ -264,13 +270,31 @@ struct BatchArgs {
 #[derive(Debug, Subcommand)]
 enum BatchCommand {
     Resume(ResumeArgs),
-    Retry,
+    Retry(RetryArgs),
+    /// `kcs batch abandon <intent_token|scope/adapter/input_hash/tool_profile_hash>`
+    /// (06-cli-spec.md §1 / 04-pipeline.md §5.8 恒久 unknown 脱出路).
+    Abandon(AbandonArgs),
 }
 
 #[derive(Debug, Args)]
 struct ResumeArgs {
     #[arg(long)]
     override_budget: bool,
+}
+
+#[derive(Debug, Args)]
+struct RetryArgs {
+    /// §M note-4: no `--yes` — the confirmation prompt has no non-interactive
+    /// bypass (06-cli-spec.md §1's `--reset-violations` line specifies none).
+    #[arg(long, value_name = "SELECTOR")]
+    reset_violations: Option<String>,
+}
+
+#[derive(Debug, Args)]
+struct AbandonArgs {
+    /// `intent_token` or a `scope_id/adapter_kind/input_hash/tool_profile_hash`
+    /// (3-tuple accepted too, but rejected if ambiguous — CL62).
+    selector: String,
 }
 
 #[derive(Debug, Args)]
@@ -519,6 +543,10 @@ fn run(cli: Cli) -> Result<Value> {
                 "unsupported_inputs": unsupported_inputs,
                 "unsupported_inputs_complete": unsupported_inputs_complete,
                 "budget": budget_status_json(&repo)?,
+                // CL37/CL68: permanently-stalled (settled but residue-cleanup-
+                // pending) cost-ledger.sqlite batch_requests rows, device-global
+                // — not scoped to this folder, since the ledger itself is not.
+                "stalled_batch": stalled_batch_status_json()?,
             }))
         }
         Command::Snapshot(args) => {
@@ -2043,9 +2071,15 @@ fn purge_blocks_raw(target: &ScopeTarget, raw_hash: &str) -> Result<bool> {
         || PurgeState::new(&target.kcs_dir).barrier_blocks(raw_hash)?)
 }
 
-/// Mutation-side purge gate. Public tombstones permanently reject identical-byte
-/// re-ingest, while an active post-visibility journal is a retryable incomplete
-/// purge. Fsck-only erase receipts deliberately do not block explicit ingest.
+/// Mutation-side purge gate. U19/LC22: a public tombstone (active or
+/// retired) no longer permanently rejects identical-byte re-ingest — that
+/// block is reversed into the resurrection flow (re-publication is allowed;
+/// the same locked mutation that republishes the raw retires the marker,
+/// `Repository::snapshot_with_type`'s resurrection scan). Only an active
+/// post-`prepared` journal barrier for this exact raw_hash (an in-progress,
+/// not-yet-complete purge) still gates ingest here — orthogonal to, and kept
+/// unchanged by, the resurrection reversal. Fsck-only erase receipts likewise
+/// never block explicit ingest.
 fn ensure_raw_ingest_allowed(repo: &Repository, raw_hash: &str) -> Result<()> {
     let purge = PurgeState::new(repo.kcs_dir());
     if purge.barrier_blocks(raw_hash)? {
@@ -2056,14 +2090,6 @@ fn ensure_raw_ingest_allowed(repo: &Repository, raw_hash: &str) -> Result<()> {
             ExitCode::PartialFailure,
         ));
     }
-    if let Some(record) = purge.read_tombstone(raw_hash)? {
-        let value =
-            serde_json::to_value(record).map_err(|error| KcsError::schema(error.to_string()))?;
-        return Err(tombstone_error(value));
-    }
-    // Read and validate a receipt, but do not treat it as a liveness decision.
-    // The store-locked raw publication boundary retires it after verified write.
-    let _ = purge.read_erase_receipt(raw_hash)?;
     Ok(())
 }
 
@@ -6540,100 +6566,31 @@ fn read_cas_byte_object(
     Ok(None)
 }
 
-fn tombstone_path(kcs_dir: &Path, raw_hash: &str) -> Result<PathBuf> {
-    fanout_path(kcs_dir.join("tombstones"), raw_hash)
-}
-
-#[cfg(not(windows))]
-fn legacy_tombstone_path(kcs_dir: &Path, raw_hash: &str) -> Result<PathBuf> {
-    let digest = hash_path_component(raw_hash)?;
-    Ok(kcs_dir
-        .join("tombstones")
-        .join(&digest[0..2])
-        .join(&digest[2..4])
-        .join(raw_hash))
-}
-
-fn read_optional_file(path: &Path) -> Result<Option<Vec<u8>>> {
-    const MAX_TOMBSTONE_BYTES: u64 = 64 * 1024;
-    match fs::symlink_metadata(path) {
-        Ok(_) => read_bounded_regular_file(path, MAX_TOMBSTONE_BYTES).map(Some),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(KcsError::io(error.to_string(), path.display().to_string())),
-    }
-}
-
-fn parse_tombstone(
-    bytes: &[u8],
-    path: &Path,
-    raw_hash: &str,
-    require_identity: bool,
-) -> Result<Value> {
-    let mut value: Value =
-        serde_json::from_slice(bytes).map_err(|err| KcsError::schema(err.to_string()))?;
-    let object = value
-        .as_object_mut()
-        .ok_or_else(|| KcsError::schema("tombstone must be a JSON object"))?;
-    match object.get("raw_hash") {
-        Some(Value::String(stored)) if stored == raw_hash => {}
-        Some(_) => {
-            return Err(store_corrupt_error(
-                path,
-                "tombstone identity does not match its storage key",
-            ))
-        }
-        None if require_identity => {
-            return Err(store_corrupt_error(
-                path,
-                "legacy tombstone is missing its raw_hash identity",
-            ))
-        }
-        None => {
-            object.insert("raw_hash".to_owned(), json!(raw_hash));
-        }
-    }
-    Ok(value)
-}
-
-/// `.kcs/tombstones/ab/cd/<raw-digest>` (05 §3.5). `Ok(None)` when no tombstone
-/// exists. The returned value is the on-disk tombstone JSON augmented with the
-/// resolved `scope_path` (08 §4.1 response shape).
+/// `.kcs/tombstones/ab/cd/<raw-digest>` (05 §3.5). `Ok(None)` when no
+/// tombstone exists *or* its canonical state is not active (LC1:
+/// `is_active()` false — e.g. retired by resurrection, U19; a retired
+/// tombstone must resolve as alive, not as a dead pointer). Delegates to
+/// `kcs_core::purge::PurgeState` for the v1-flat/v2-`events[]` dispatch and
+/// structural validation (LC5/LC15), then projects the tail `purged` event
+/// into the flat `purged_at`/`purged_reason`/`purged_in_commit` response
+/// shape (08 §4.1) that callers (`tombstone_error`,
+/// `enforce_purge_read_barrier`) expect, augmented with the resolved
+/// `scope_path`.
 fn read_tombstone(target: &ScopeTarget, raw_hash: &str) -> Result<Option<Value>> {
-    let canonical = tombstone_path(&target.kcs_dir, raw_hash)?;
-    let canonical_value = read_optional_file(&canonical)?
-        .map(|bytes| parse_tombstone(&bytes, &canonical, raw_hash, false))
-        .transpose()?;
-
-    #[cfg(not(windows))]
-    let legacy_value = {
-        let legacy = legacy_tombstone_path(&target.kcs_dir, raw_hash)?;
-        read_optional_file(&legacy)?
-            .map(|bytes| parse_tombstone(&bytes, &legacy, raw_hash, true))
-            .transpose()?
-    };
-
-    #[cfg(not(windows))]
-    if let (Some(portable), Some(legacy)) = (&canonical_value, &legacy_value) {
-        if portable != legacy {
-            return Err(store_corrupt_error(
-                &canonical,
-                "portable and legacy tombstones disagree",
-            ));
-        }
-    }
-
-    #[cfg(not(windows))]
-    let mut value = canonical_value.or(legacy_value);
-    #[cfg(windows)]
-    let mut value = canonical_value;
-    let Some(value) = value.as_mut() else {
+    let Some(record) = PurgeState::new(&target.kcs_dir).read_tombstone(raw_hash)? else {
         return Ok(None);
     };
-    value.as_object_mut().expect("validated above").insert(
-        "scope_path".to_owned(),
-        json!(target.kcs_dir.display().to_string()),
-    );
-    Ok(Some(value.take()))
+    if !record.is_active() {
+        return Ok(None);
+    }
+    let tail = record.tail();
+    Ok(Some(json!({
+        "raw_hash": record.raw_hash,
+        "purged_at": tail.at,
+        "purged_reason": tail.reason,
+        "purged_in_commit": tail.in_commit,
+        "scope_path": target.kcs_dir.display().to_string(),
+    })))
 }
 
 /// Enforce the purge visibility boundary on every raw-derived read surface.
@@ -6650,10 +6607,14 @@ fn enforce_purge_read_barrier(target: &ScopeTarget, raw_hash: &str) -> Result<()
 }
 
 /// 08 §4.1 tombstone response as an exit-4 error (open/view surface it as a
-/// dead pointer). `context` carries the full `status="purged"` tombstone body.
+/// dead pointer). `context` carries the full `status="tombstoned"` tombstone
+/// body. LC11: renamed from `"purged"` so this path agrees with
+/// `verify_objects.rs`'s evidence-verify response (both must say
+/// `"tombstoned"` — the fact of the purge itself is carried separately by the
+/// `purged_*` fields).
 fn tombstone_error(mut tombstone: Value) -> KcsError {
     if let Some(object) = tombstone.as_object_mut() {
-        object.insert("status".to_owned(), json!("purged"));
+        object.insert("status".to_owned(), json!("tombstoned"));
     }
     KcsError::new(
         "KCS-E-PURGE-TOMBSTONED-001",
@@ -7056,7 +7017,15 @@ fn run_batch(args: BatchArgs) -> Result<Value> {
             apply_batch_exit_override(&mut output, &outcome);
             Ok(output)
         }
-        Some(BatchCommand::Retry) => {
+        Some(BatchCommand::Retry(retry_args)) => {
+            // CL62-CL68/§M note-4: `--reset-violations <selector>` is a distinct
+            // sub-mode — it targets exactly one cost-ledger.sqlite batch_requests
+            // row (by intent_token or task-key selector, same form as `abandon`),
+            // not the bulk tasks.jsonl retry scan below. Confirmation required,
+            // no `--yes` bypass (non-interactive always rejects — exit 9).
+            if let Some(selector) = retry_args.reset_violations.as_deref() {
+                return run_batch_reset_violations(selector);
+            }
             // R9-4: `batch retry` also recovers Partial online markdownize tasks
             // (docs/04 §5.2 `partial -> done`). A Partial task has some Done and
             // some Failed units; re-drive it (Pending) with `unit_keys` scoped to
@@ -7098,8 +7067,197 @@ fn run_batch(args: BatchArgs) -> Result<Value> {
             apply_batch_exit_override(&mut output, &outcome);
             Ok(output)
         }
+        Some(BatchCommand::Abandon(abandon_args)) => run_batch_abandon(&abandon_args.selector),
         None => Err(KcsError::not_implemented("batch command")),
     }
+}
+
+/// `$XDG_DATA_HOME/kcs/cost-ledger.sqlite` (04 §5.4 / CL70). Deliberately a new
+/// function rather than a `cost_ledger_path()` rename — that JSONL path is still
+/// the live store for the F8 reservation/charge flow (`budget::CostLedger`), and
+/// this session did not attempt the much larger migration of every one of its
+/// ~40 call sites onto the SQLite ledger (see the implementation report).
+fn ledger_db_path() -> PathBuf {
+    data_home().join("kcs/cost-ledger.sqlite")
+}
+
+/// Open the device-global `cost-ledger.sqlite`.
+///
+/// Deliberately does **not** call [`migrate_jsonl_if_needed`] here: with
+/// `budget::CostLedger` (JSONL) still the live store for the F8
+/// reservation/charge flow this session did not retire (see
+/// `ledger_db_path`'s doc comment), running the cutover as a side effect of
+/// any command that happens to touch the new store — `kcs status`,
+/// `kcs batch abandon` — would rename `cost-ledger.jsonl` out from under the
+/// still-active old reader/writer the first time either ran, silently
+/// zeroing out `CostLedger::monthly_total`'s view of real spend for the rest
+/// of the process's life (found the hard way: it broke 3 pre-existing
+/// `step2_p0_contract.rs` budget/task-identity tests when first wired this
+/// way). The migration function itself is correct and fully tested
+/// (`ledger::migrate`'s CL09-CL12 tests) — it just must not run until the
+/// JSONL call sites are actually retired. Whoever completes that retirement
+/// should call it once, here, as part of that change.
+fn open_ledger_db() -> Result<LedgerDb> {
+    LedgerDb::open(ledger_db_path()).map_err(pipeline_to_kcs)
+}
+
+/// `kcs batch abandon` / `--reset-violations`'s shared selector grammar (06
+/// §1 L44/L26-30, CL62): an `intent_token` (no `/`), or a `scope_id/adapter_kind/
+/// input_hash[/tool_profile_hash]` task-key path (3-tuple accepted; resolution
+/// rejects it if ambiguous).
+fn parse_batch_selector(input: &str) -> Result<AbandonSelector> {
+    if !input.contains('/') {
+        return Ok(AbandonSelector::IntentToken(input.to_owned()));
+    }
+    let parts: Vec<&str> = input.split('/').collect();
+    match parts.as_slice() {
+        [scope_id, adapter_kind, input_hash] => Ok(AbandonSelector::ThreeTuple {
+            scope_id: (*scope_id).to_owned(),
+            adapter_kind: (*adapter_kind).to_owned(),
+            input_hash: (*input_hash).to_owned(),
+        }),
+        [scope_id, adapter_kind, input_hash, tool_profile_hash] => Ok(AbandonSelector::TaskKey(
+            LedgerTaskKey::new(*scope_id, *adapter_kind, *input_hash, *tool_profile_hash),
+        )),
+        _ => Err(KcsError::invalid_usage(
+            "selector must be an intent_token or scope_id/adapter_kind/input_hash[/tool_profile_hash]",
+        )),
+    }
+}
+
+/// CL65 / §M note-4: confirmation is mandatory with no `--yes` bypass. A
+/// non-interactive caller (stdin at EOF, or piped-empty) reads an empty line,
+/// which fails the exact `y`/`yes` match below and is rejected the same as an
+/// explicit "no" — satisfying "non-interactive always exits 9" without a
+/// separate `IsTerminal` branch (the same technique `kcs purge`'s `confirm`
+/// uses).
+fn confirm_batch_action(prompt: &str) -> Result<bool> {
+    eprint!("{prompt} [y/N] ");
+    std::io::stderr()
+        .flush()
+        .map_err(|error| KcsError::io(error.to_string(), "stderr"))?;
+    let stdin = std::io::stdin();
+    let mut response = String::new();
+    stdin
+        .lock()
+        .take(64)
+        .read_line(&mut response)
+        .map_err(|error| KcsError::io(error.to_string(), "stdin"))?;
+    Ok(matches!(
+        response.trim().to_ascii_lowercase().as_str(),
+        "y" | "yes"
+    ))
+}
+
+fn batch_confirmation_rejected(message: &str) -> KcsError {
+    KcsError::new(
+        "KCS-E-BATCH-CONFIRMATION-REJECTED-001",
+        message,
+        json!({}),
+        ExitCode::ConfirmationRejected,
+    )
+}
+
+/// `kcs batch abandon <selector>` (06 §1 / 04 §5.8 恒久 unknown 脱出路,
+/// CL62-CL68). Runs inside `run_batch`'s already-acquired `.kcs/.lock`.
+fn run_batch_abandon(selector_input: &str) -> Result<Value> {
+    let selector = parse_batch_selector(selector_input)?;
+    let ledger = open_ledger_db()?;
+    let resolution =
+        resolve_abandon_selector(ledger.connection(), &selector).map_err(pipeline_to_kcs)?;
+    match resolution {
+        // CL66: no matching row (terminal-confirmed / device-row pruned /
+        // already abandoned-and-cleaned / never existed) is an idempotent
+        // exit-0 success — no confirmation prompt needed, nothing to abandon.
+        AbandonResolution::NotFound => Ok(json!({ "status": "no_target" })),
+        AbandonResolution::Ambiguous => Err(KcsError::invalid_usage(
+            "abandon selector is ambiguous (multiple tool_profile_hash rows match this \
+             scope/adapter/input_hash) — specify the intent_token or the full 4-tuple",
+        )),
+        AbandonResolution::Found(key) => {
+            if !confirm_batch_action(&format!(
+                "Abandon in-flight batch request for {}/{}/{}?",
+                key.scope_id, key.adapter_kind, key.input_hash
+            ))? {
+                return Err(batch_confirmation_rejected(
+                    "batch abandon confirmation was rejected",
+                ));
+            }
+            let execution = execute_abandon(ledger.connection(), &key).map_err(pipeline_to_kcs)?;
+            Ok(json!({
+                "status": match execution {
+                    AbandonExecution::NoTarget => "no_target",
+                    AbandonExecution::Abandoned => "abandoned",
+                },
+                "scope_id": key.scope_id,
+                "adapter_kind": key.adapter_kind,
+                "input_hash": key.input_hash,
+            }))
+        }
+    }
+}
+
+/// `kcs batch retry --reset-violations <selector>` (06 §1 L26-30, §M note-6).
+fn run_batch_reset_violations(selector_input: &str) -> Result<Value> {
+    let selector = parse_batch_selector(selector_input)?;
+    let ledger = open_ledger_db()?;
+    let resolution =
+        resolve_abandon_selector(ledger.connection(), &selector).map_err(pipeline_to_kcs)?;
+    match resolution {
+        AbandonResolution::NotFound => Ok(json!({ "status": "no_target" })),
+        AbandonResolution::Ambiguous => Err(KcsError::invalid_usage(
+            "--reset-violations selector is ambiguous (multiple tool_profile_hash rows match \
+             this scope/adapter/input_hash) — specify the intent_token or the full 4-tuple",
+        )),
+        AbandonResolution::Found(key) => {
+            if !confirm_batch_action(&format!(
+                "Reset contract_violation_count for {}/{}/{}?",
+                key.scope_id, key.adapter_kind, key.input_hash
+            ))? {
+                return Err(batch_confirmation_rejected(
+                    "--reset-violations confirmation was rejected",
+                ));
+            }
+            // §M note-6: count==0 (or an in-flight state 0/1 row, excluded by
+            // the SQL) is a no-op success; only a terminal, non-zero-count row
+            // actually changes.
+            let did_reset =
+                reset_contract_violations(ledger.connection(), &key).map_err(pipeline_to_kcs)?;
+            Ok(json!({
+                "status": if did_reset { "reset" } else { "unchanged" },
+                "scope_id": key.scope_id,
+                "adapter_kind": key.adapter_kind,
+                "input_hash": key.input_hash,
+            }))
+        }
+    }
+}
+
+/// `kcs status`'s stalled-batch section (CL37/CL68): permanently-unresolvable
+/// `batch_requests` rows (settled but residue cleanup still pending), each with
+/// its `intent_token` so it can be passed straight to `kcs batch abandon`.
+fn stalled_batch_status_json() -> Result<Vec<Value>> {
+    let ledger = open_ledger_db()?;
+    let rows = stalled_rows(ledger.connection()).map_err(pipeline_to_kcs)?;
+    Ok(rows
+        .into_iter()
+        .map(|row| {
+            let issued_at_ms = row
+                .intent_token
+                .as_deref()
+                .and_then(uuid_v7_timestamp_millis);
+            json!({
+                "scope_id": row.key.scope_id,
+                "adapter_kind": row.key.adapter_kind,
+                "input_hash": row.key.input_hash,
+                "tool_profile_hash": row.key.tool_profile_hash,
+                "intent_token": row.intent_token,
+                "error": row.error,
+                "estimated_usd": row.estimated_usd,
+                "issued_at_ms": issued_at_ms,
+            })
+        })
+        .collect())
 }
 
 /// Q3: reclaim orphaned `Running` tasks back to `Pending`. A task is flipped to
@@ -13665,7 +13823,11 @@ mod tests {
                 vec![raw_hash.clone()],
                 PurgeReason::Privacy,
                 TombstoneMode::Default,
+                "user",
                 "2026-07-13T00:00:00Z",
+                1,
+                kcs_pipeline::prepare::hash_bytes(b"planned purge commit"),
+                kcs_core::scope::new_ulid(dir.path()),
             )
             .unwrap()
         {
@@ -13678,7 +13840,7 @@ mod tests {
         ensure_no_visible_purge_journal(&kcs_dir).unwrap();
         assert!(!purge_blocks_rebuild_raw(&kcs_dir, &raw_hash).unwrap());
         state
-            .advance_phase(&journal, PurgePhase::BarrierPublished)
+            .advance_phase(&journal, PurgePhase::Tombstoned)
             .unwrap();
         let error = ensure_no_visible_purge_journal(&kcs_dir).unwrap_err();
         assert_eq!(error.error_code(), "KCS-E-PURGE-INCOMPLETE-001");
@@ -13693,16 +13855,19 @@ mod tests {
         let raw_hash = kcs_pipeline::prepare::hash_bytes(b"explicitly reintroduced raw");
         let profile_hash = kcs_pipeline::prepare::hash_bytes(b"profile");
         let commit_hash = kcs_pipeline::prepare::hash_bytes(b"commit");
-        let receipt = kcs_core::purge::EraseReceipt::new(
-            raw_hash.clone(),
-            commit_hash.clone(),
-            "2026-07-13T00:00:00Z",
-        )
-        .unwrap();
         let purge = kcs_core::purge::PurgeState::new(&kcs_dir);
-        let receipt_path = purge.erase_receipt_path(&raw_hash).unwrap();
-        std::fs::create_dir_all(receipt_path.parent().unwrap()).unwrap();
-        std::fs::write(&receipt_path, serde_json::to_vec(&receipt).unwrap()).unwrap();
+        purge
+            .append_erase_receipt_event(
+                &raw_hash,
+                kcs_core::purge::LifecycleEvent::erased(
+                    "2026-07-13T00:00:00Z",
+                    commit_hash.clone(),
+                    kcs_core::purge::PurgeReason::Legal,
+                    "user",
+                    1,
+                ),
+            )
+            .unwrap();
 
         let conn = rusqlite::Connection::open_in_memory().unwrap();
         conn.execute_batch(
@@ -15216,18 +15381,28 @@ mod tests {
 
     #[cfg(not(windows))]
     #[test]
-    fn tombstone_reader_reuses_verified_legacy_and_rejects_conflict() {
-        use super::{
-            hash_bytes, legacy_tombstone_path, read_tombstone, tombstone_path, ScopeTarget,
-        };
+    fn tombstone_reader_projects_v1_legacy_flat_and_rejects_dual_path_conflict() {
+        use super::{hash_bytes, read_tombstone, ScopeTarget};
 
         let dir = tempfile::tempdir().unwrap();
         let kcs_dir = dir.path().join(".kcs");
         std::fs::create_dir(&kcs_dir).unwrap();
         let raw_hash = hash_bytes(b"purged raw");
-        let legacy = legacy_tombstone_path(&kcs_dir, &raw_hash).unwrap();
+        let digest = raw_hash.strip_prefix("sha256:").unwrap();
+        let legacy = kcs_dir
+            .join("tombstones")
+            .join(&digest[0..2])
+            .join(&digest[2..4])
+            .join(&raw_hash);
         std::fs::create_dir_all(legacy.parent().unwrap()).unwrap();
-        let record = serde_json::json!({"raw_hash": raw_hash, "reason": "privacy"});
+        // LC5: a pre-Step4b v1 flat record (no `events` key) is read-only
+        // converted and projected into the same flat response shape.
+        let record = serde_json::json!({
+            "raw_hash": raw_hash,
+            "purged_at": "2026-07-13T00:00:00Z",
+            "purged_reason": "privacy",
+            "purged_in_commit": hash_bytes(b"purge commit"),
+        });
         std::fs::write(&legacy, serde_json::to_vec(&record).unwrap()).unwrap();
         let target = ScopeTarget {
             repo_root: dir.path().to_path_buf(),
@@ -15236,14 +15411,22 @@ mod tests {
         };
         let loaded = read_tombstone(&target, &raw_hash).unwrap().unwrap();
         assert_eq!(loaded["raw_hash"], raw_hash);
-        assert_eq!(loaded["reason"], "privacy");
+        assert_eq!(loaded["purged_reason"], "privacy");
+        assert_eq!(loaded["purged_at"], "2026-07-13T00:00:00Z");
 
-        let canonical = tombstone_path(&kcs_dir, &raw_hash).unwrap();
+        // Dual-path (canonical vs legacy leaf) disagreement fails closed.
+        let canonical = kcs_dir
+            .join("tombstones")
+            .join(&digest[0..2])
+            .join(&digest[2..4])
+            .join(digest);
         std::fs::write(
-            canonical,
+            &canonical,
             serde_json::to_vec(&serde_json::json!({
                 "raw_hash": raw_hash,
-                "reason": "legal"
+                "purged_at": "2026-07-13T00:00:00Z",
+                "purged_reason": "legal",
+                "purged_in_commit": hash_bytes(b"purge commit"),
             }))
             .unwrap(),
         )

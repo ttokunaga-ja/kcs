@@ -68,11 +68,11 @@ fn files_named(root: &std::path::Path, name: &str) -> Vec<std::path::PathBuf> {
     found
 }
 
-fn write_purged_commit(dir: &TempDir, timestamp: &str) -> String {
+fn write_purged_commit(dir: &TempDir, timestamp: &str, purged_raws: &[String]) -> String {
     let repo = kcs_core::scope::Repository::open(dir.path()).unwrap();
     let parent_hash = repo.head_commit_hash().unwrap().unwrap();
     let parent = repo.read_commit(&parent_hash).unwrap();
-    let purged = CommitObject::new(
+    let purged = CommitObject::new_purged(
         parent.tree,
         vec![parent_hash],
         timestamp.to_owned(),
@@ -83,7 +83,7 @@ fn write_purged_commit(dir: &TempDir, timestamp: &str) -> String {
             files_modified: 0,
             files_deleted: 0,
         },
-        CommitType::Purged,
+        purged_raws.to_vec(),
     )
     .unwrap();
     ObjectStore::new(dir.path().join(".kcs"))
@@ -372,7 +372,7 @@ fn ct4_verify_and_fsck_accept_valid_tombstone_terminal() {
     let parent_hash = repo.head_commit_hash().unwrap().unwrap();
     let parent = repo.read_commit(&parent_hash).unwrap();
     let purged_at = "2026-07-13T00:00:00Z";
-    let purged = CommitObject::new(
+    let purged = CommitObject::new_purged(
         parent.tree,
         vec![parent_hash],
         purged_at.to_owned(),
@@ -383,7 +383,7 @@ fn ct4_verify_and_fsck_accept_valid_tombstone_terminal() {
             files_modified: 0,
             files_deleted: 0,
         },
-        CommitType::Purged,
+        vec![raw_hash.to_owned()],
     )
     .unwrap();
     let store = ObjectStore::new(dir.path().join(".kcs"));
@@ -471,7 +471,7 @@ fn ct4_fsck_accepts_erase_receipt_reachable_only_from_canonical_tag() {
     let (dir, pointer, _) = fixture();
     let raw_hash = pointer["raw_hash"].as_str().unwrap();
     let timestamp = "2026-07-13T00:00:00Z";
-    let purged_hash = write_purged_commit(&dir, timestamp);
+    let purged_hash = write_purged_commit(&dir, timestamp, &[raw_hash.to_owned()]);
     tag_commit(&dir, "purged-only", &purged_hash);
     write_receipt(&dir, raw_hash, &purged_hash, timestamp);
     let store = ObjectStore::new(dir.path().join(".kcs"));
@@ -483,20 +483,94 @@ fn ct4_fsck_accepts_erase_receipt_reachable_only_from_canonical_tag() {
     assert_eq!(output["dead_by_erase_receipt_count"], 1);
 }
 
+/// LC36 (§F): verified raw + a canonical `erased` marker whose `in_commit` has
+/// no ref-reachable, ancestor-respecting republication commit is an
+/// *incomplete purge* (exit 3) — the receipt is never silently removed nor
+/// retired without that causal justification (reversal of the old
+/// "verified raw always wins" rule).
 #[test]
-fn ct4_fsck_live_raw_retires_valid_stale_receipt_without_commit() {
+fn ct4_fsck_live_raw_with_stale_receipt_and_no_republication_commit_is_incomplete_purge() {
     let (dir, pointer, _) = fixture();
     let raw_hash = pointer["raw_hash"].as_str().unwrap();
     let timestamp = "2026-07-13T00:00:00Z";
-    let purged_hash = write_purged_commit(&dir, timestamp);
+    let purged_hash = write_purged_commit(&dir, timestamp, &[raw_hash.to_owned()]);
     tag_commit(&dir, "stale-receipt", &purged_hash);
     let receipt = write_receipt(&dir, raw_hash, &purged_hash, timestamp);
+    let receipt_before = fs::read(&receipt).unwrap();
     let head_before = fs::read(dir.path().join(".kcs/HEAD")).unwrap();
+    let stdout = kcs(&dir, &["repair", "--verify-objects"])
+        .arg("--json")
+        .assert()
+        .code(3)
+        .get_output()
+        .stdout
+        .clone();
+    let output: Value = serde_json::from_slice(&stdout).unwrap();
+    assert_eq!(output["error_code"], "KCS-E-PURGE-INCOMPLETE-001");
+    assert!(output["remaining_findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|finding| finding["kind"] == "purge_incomplete"));
+    assert_eq!(output["repaired_commit_hash"], Value::Null);
+    assert!(receipt.exists());
+    assert_eq!(fs::read(&receipt).unwrap(), receipt_before);
+    assert_eq!(fs::read(dir.path().join(".kcs/HEAD")).unwrap(), head_before);
+}
+
+/// LC27/LC35 (§F): the positive case — a ref-reachable commit that descends
+/// from the erased event's `in_commit` (a republication) lets fsck backfill
+/// `retired` (append-only; the receipt file is not removed, LC33).
+#[test]
+fn ct4_fsck_live_raw_with_republication_commit_backfills_retired_receipt() {
+    let (dir, pointer, _) = fixture();
+    let raw_hash = pointer["raw_hash"].as_str().unwrap().to_owned();
+    let timestamp = "2026-07-13T00:00:00Z";
+    let purged_hash = write_purged_commit(&dir, timestamp, std::slice::from_ref(&raw_hash));
+    write_receipt(&dir, &raw_hash, &purged_hash, timestamp);
+
+    // A republication commit: a normal child of the purge commit, tagged so
+    // both it and its ancestor (the purge commit) are ref-reachable.
+    let repo = kcs_core::scope::Repository::open(dir.path()).unwrap();
+    let purged_commit_object = repo.read_commit(&purged_hash).unwrap();
+    let republication = CommitObject::new(
+        purged_commit_object.tree.clone(),
+        vec![purged_hash.clone()],
+        "2026-07-14T00:00:00Z".to_owned(),
+        "republished".to_owned(),
+        purged_commit_object.tool_lock_hash.clone(),
+        CommitStats {
+            files_added: 0,
+            files_modified: 0,
+            files_deleted: 0,
+        },
+        CommitType::Manual,
+    )
+    .unwrap();
+    let store = ObjectStore::new(dir.path().join(".kcs"));
+    let (republication_hash, _) = store
+        .write_json(
+            ObjectKind::Commit,
+            &serde_json::to_value(&republication).unwrap(),
+        )
+        .unwrap();
+    tag_commit(&dir, "republication", &republication_hash);
+
     let output = success(&dir, &["repair", "--verify-objects"]);
     assert_eq!(output["status"], "ok", "{output}");
-    assert_eq!(output["repaired_commit_hash"], Value::Null);
-    assert!(!receipt.exists());
-    assert_eq!(fs::read(dir.path().join(".kcs/HEAD")).unwrap(), head_before);
+    assert!(!output["remaining_findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|finding| finding["kind"] == "purge_incomplete"));
+
+    let state = PurgeState::new(dir.path().join(".kcs"));
+    let receipt = state.read_erase_receipt(&raw_hash).unwrap().unwrap();
+    assert!(!receipt.is_active());
+    assert_eq!(
+        receipt.tail().resurrection_commit.as_deref(),
+        Some(republication_hash.as_str())
+    );
 }
 
 #[test]
@@ -509,7 +583,11 @@ fn ct4_fsck_active_journal_suppresses_raw_recovery_and_ref_mutation() {
             vec![raw_hash.clone()],
             PurgeReason::Legal,
             TombstoneMode::Default,
+            "user",
             "2026-07-13T00:00:00Z",
+            1,
+            kcs_pipeline::prepare::hash_bytes(b"planned purge commit placeholder"),
+            kcs_core::scope::new_ulid(dir.path()),
         )
         .unwrap();
     let journal_before = fs::read(purge.journal_path()).unwrap();
@@ -562,12 +640,18 @@ fn ct4_fsck_rejects_linked_object_namespace_without_traversing_it() {
         .any(|finding| finding["kind"] == "non_regular_object"));
 }
 
+/// §F/LC38: a verified raw coexisting with a tombstone (or with both a
+/// tombstone and an erase receipt) is no longer an unconditional
+/// `tombstone_conflict`/`purge_marker_conflict` finding — canonical-final-event
+/// judgment (§C) decides. With no ref-reachable republication commit for the
+/// canonical `purged` event, both scenarios here are `purge_incomplete`
+/// (LC36), and neither marker is silently mutated.
 #[test]
-fn ct4_fsck_rejects_live_raw_tombstone_and_dual_terminal_markers() {
+fn ct4_fsck_live_raw_tombstone_and_dual_terminal_markers_are_incomplete_purge_not_conflict() {
     let (dir, pointer, _) = fixture();
     let raw_hash = pointer["raw_hash"].as_str().unwrap();
     let timestamp = "2026-07-13T00:00:00Z";
-    let purged_hash = write_purged_commit(&dir, timestamp);
+    let purged_hash = write_purged_commit(&dir, timestamp, &[raw_hash.to_owned()]);
     tag_commit(&dir, "marker-conflict", &purged_hash);
     let tombstone = write_tombstone(&dir, raw_hash, &purged_hash, timestamp);
     let stdout = kcs(&dir, &["repair", "--verify-objects"])
@@ -578,27 +662,33 @@ fn ct4_fsck_rejects_live_raw_tombstone_and_dual_terminal_markers() {
         .stdout
         .clone();
     let output: Value = serde_json::from_slice(&stdout).unwrap();
-    assert!(output["remaining_findings"]
+    assert!(!output["remaining_findings"]
         .as_array()
         .unwrap()
         .iter()
         .any(|finding| finding["kind"] == "tombstone_conflict"));
-
-    let store = ObjectStore::new(dir.path().join(".kcs"));
-    fs::remove_file(store.object_path(ObjectKind::Raw, raw_hash).unwrap()).unwrap();
-    write_receipt(&dir, raw_hash, &purged_hash, timestamp);
-    assert!(tombstone.exists());
-    let stdout = kcs(&dir, &["repair", "--verify-objects"])
-        .arg("--json")
-        .assert()
-        .code(3)
-        .get_output()
-        .stdout
-        .clone();
-    let output: Value = serde_json::from_slice(&stdout).unwrap();
     assert!(output["remaining_findings"]
         .as_array()
         .unwrap()
         .iter()
+        .any(|finding| finding["kind"] == "purge_incomplete"));
+    assert!(tombstone.exists());
+
+    // Raw removed: this is no longer a "live raw + marker" incomplete-purge
+    // scenario — canonical (tombstone, tie-break winner over the receipt per
+    // LC8) is a normal, fully-explained dead terminal (exit 0).
+    let store = ObjectStore::new(dir.path().join(".kcs"));
+    fs::remove_file(store.object_path(ObjectKind::Raw, raw_hash).unwrap()).unwrap();
+    write_receipt(&dir, raw_hash, &purged_hash, timestamp);
+    assert!(tombstone.exists());
+    let output = success(&dir, &["repair", "--verify-objects"]);
+    assert!(!output["remaining_findings"]
+        .as_array()
+        .unwrap()
+        .iter()
         .any(|finding| finding["kind"] == "purge_marker_conflict"));
+    // Raw is no longer verified here, so the canonical marker (tombstone,
+    // tie-break winner over the receipt per LC8) is a normal dead terminal.
+    assert_eq!(output["status"], "ok", "{output}");
+    assert_eq!(output["dead_by_tombstone_count"], 1);
 }

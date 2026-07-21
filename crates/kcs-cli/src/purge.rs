@@ -19,8 +19,7 @@ use kcs_core::dag::CommitType;
 use kcs_core::dag::TreeEntry;
 use kcs_core::history::HistoryReader;
 use kcs_core::purge::{
-    BeginOutcome, EraseReceipt, PurgeJournal, PurgePhase, PurgeReason, PurgeState, TombstoneMode,
-    TombstoneRecord,
+    BeginOutcome, LifecycleEvent, PurgeJournal, PurgePhase, PurgeReason, PurgeState, TombstoneMode,
 };
 use kcs_core::scope::{
     append_event_log, cleanup_orphan_raw_ingest_temps, now_utc_seconds, Repository, StoreLock,
@@ -150,9 +149,28 @@ pub(crate) fn run(args: PurgeArgs) -> Result<Value> {
     execute_phase_machine(&repo, &args, &preview)
 }
 
+/// The actor recorded on new journal/lifecycle records (05-runtime.md §3.5's
+/// `actor` field). Matches the existing `KCS-PURGE-COMPLETED` log convention.
+fn current_actor() -> String {
+    std::env::var("USER").unwrap_or_else(|_| "local-user".to_owned())
+}
+
 /// Run the durable phase machine. This is kept separate from preview so there
 /// is no mutation before confirmation and so an under-lock target re-plan can be
 /// compared byte-for-byte with the previewed authority.
+///
+/// LC46-LC51: the journal's phase vocabulary is `prepared -> tombstoned ->
+/// deleted -> committed`, then `done` (journal removed). `prepared` fixes
+/// `purge_id`/`target_epoch`/`planned_commit`/`closure` once — the last two
+/// via a non-publishing dry-run snapshot (`Repository::purged_snapshot(...,
+/// publish_ref=false)`, LC48) — *before* any marker is durable, so the
+/// tombstone/erase-receipt's `in_commit` can reference the eventual purged
+/// commit's hash while it still only exists content-addressed in the CAS
+/// (not yet ref-reachable). `tombstoned` publishes that marker — durable
+/// *before* any physical deletion (LC49). `deleted` performs the physical
+/// deletion. `committed` re-derives the identical commit (content-addressed,
+/// deterministic — the store lock has been held throughout) and publishes it
+/// for real, making it ref-reachable for the first time.
 fn execute_phase_machine(
     repo: &Repository,
     args: &PurgeArgs,
@@ -203,12 +221,66 @@ fn execute_phase_machine(
         return Ok(completed_report(&locked_plan, completed));
     }
 
-    let started_at = now_utc_seconds();
+    // A resumed journal (matching target/reason/mode) reuses every `prepared`
+    // field verbatim (LC48/LC50: fixed once, never recomputed). Only a fresh
+    // start computes new ones — `target_epoch` from the current purge-epoch
+    // counter (recovered if missing, LC40) plus one, and `planned_commit` via
+    // the non-publishing dry-run snapshot above.
+    let resuming = active.as_ref().is_some_and(|journal| {
+        journal.target_raw_hashes == {
+            let mut sorted = locked_plan.target_raw_hashes.clone();
+            sorted.sort();
+            sorted.dedup();
+            sorted
+        } && journal.reason == locked_plan.reason
+            && journal.tombstone_mode == locked_plan.tombstone_mode
+    });
+    let (started_at, target_epoch, planned_commit, purge_id) = if resuming {
+        let journal = active.as_ref().expect("resuming implies active.is_some()");
+        (
+            journal.started_at.clone(),
+            journal.target_epoch,
+            journal.planned_commit.clone(),
+            journal.purge_id.clone(),
+        )
+    } else {
+        let started_at = now_utc_seconds();
+        let recovery_target = state
+            .max_recorded_purge_epoch()?
+            .map_or(1, |max| max.saturating_add(1));
+        let current_epoch = state.ensure_purge_epoch(recovery_target)?;
+        let target_epoch = current_epoch.saturating_add(1);
+        let dry_run = repo.purged_snapshot(
+            &locked_plan.reason.to_string(),
+            Some(&started_at),
+            &locked_plan.target_raw_hashes,
+            false,
+        )?;
+        let planned_commit = dry_run.commit_hash.ok_or_else(|| {
+            KcsError::new(
+                "KCS-E-STORE-CORRUPT-001",
+                "purged snapshot dry run did not return a planned commit hash",
+                json!({}),
+                ExitCode::PermanentFailure,
+            )
+        })?;
+        (
+            started_at,
+            target_epoch,
+            planned_commit,
+            kcs_core::scope::new_ulid(repo.kcs_dir()),
+        )
+    };
+
     let (mut journal, newly_started) = match state.begin(
         locked_plan.target_raw_hashes.clone(),
         locked_plan.reason,
         locked_plan.tombstone_mode,
+        current_actor(),
         started_at,
+        target_epoch,
+        planned_commit,
+        purge_id,
     )? {
         BeginOutcome::Started(journal) => (journal, true),
         BeginOutcome::Resumed(journal) => (journal, false),
@@ -216,7 +288,7 @@ fn execute_phase_machine(
             let completed = CompletedTerminal {
                 purged_in_commit: tombstones
                     .first()
-                    .map(|record| record.purged_in_commit.clone())
+                    .map(|record| record.tail().in_commit.clone())
                     .unwrap_or_default(),
                 tombstone_count: u64::try_from(tombstones.len()).unwrap_or(u64::MAX),
                 erase_receipt_count: 0,
@@ -231,20 +303,9 @@ fn execute_phase_machine(
         }
         return Err(error);
     }
-    let allow_commit_reconcile = journal.phase.is_barrier_visible();
-    if journal.phase == PurgePhase::Prepared {
-        journal = state.advance_phase(&journal, PurgePhase::BarrierPublished)?;
-    }
 
     let mut report = load_phase_report(repo.kcs_dir())?.unwrap_or_default();
-    let result = execute_visible_phases(
-        repo,
-        &state,
-        &locked_plan,
-        &mut journal,
-        &mut report,
-        allow_commit_reconcile,
-    );
+    let result = execute_visible_phases(repo, &state, &locked_plan, &mut journal, &mut report);
     match result {
         Ok(()) => Ok(success_report(&locked_plan, &report)),
         Err(error) => Ok(incomplete_report(&locked_plan, &journal, &report, &error)),
@@ -257,40 +318,36 @@ fn execute_visible_phases(
     plan: &PurgePlan,
     journal: &mut PurgeJournal,
     report: &mut PurgeReport,
-    allow_commit_reconcile: bool,
 ) -> Result<()> {
-    maybe_inject_fault("barrier_published")?;
+    maybe_inject_fault("prepared_visible")?;
 
-    if journal.phase == PurgePhase::BarrierPublished {
-        let commit_hash =
-            create_or_reconcile_purged_commit(repo, plan, journal, allow_commit_reconcile)?;
-        verify_purged_commit(repo, &commit_hash, &plan.target_raw_hashes)?;
-        *journal = state.bind_purged_commit(journal, commit_hash, journal.started_at.clone())?;
+    if journal.phase == PurgePhase::Prepared {
+        // LC49: the marker is durable *before* any physical deletion, using
+        // the already-fixed `planned_commit` (the purged commit is not yet
+        // ref-published — see the module doc on `execute_phase_machine`).
+        publish_terminal_records(state, journal, report)?;
+        *journal = state.advance_phase(journal, PurgePhase::Tombstoned)?;
+        store_phase_report(repo.kcs_dir(), report)?;
     }
-    report.purged_in_commit = journal.purged_in_commit.clone();
-    publish_terminal_records(state, journal, report)?;
-    maybe_inject_fault("purged_commit_created")?;
+    maybe_inject_fault("tombstoned")?;
 
-    if journal.phase == PurgePhase::PurgedCommitCreated {
+    if journal.phase == PurgePhase::Tombstoned {
         delete_content_surfaces(repo, plan, report)?;
-        *journal = state.advance_phase(journal, PurgePhase::ContentDeleted)?;
-        store_phase_report(repo.kcs_dir(), report)?;
-    }
-    maybe_inject_fault("content_deleted")?;
-
-    if journal.phase == PurgePhase::ContentDeleted {
         delete_derived_surfaces(repo, plan, report)?;
-        *journal = state.advance_phase(journal, PurgePhase::DerivedDeleted)?;
-        store_phase_report(repo.kcs_dir(), report)?;
-    }
-    maybe_inject_fault("derived_deleted")?;
-
-    if journal.phase == PurgePhase::DerivedDeleted {
         scrub_logs(repo, plan, journal, report)?;
-        *journal = state.advance_phase(journal, PurgePhase::LogsScrubbed)?;
+        *journal = state.advance_phase(journal, PurgePhase::Deleted)?;
         store_phase_report(repo.kcs_dir(), report)?;
     }
-    maybe_inject_fault("logs_scrubbed")?;
+    maybe_inject_fault("deleted")?;
+
+    if journal.phase == PurgePhase::Deleted {
+        let commit_hash = publish_planned_commit(repo, plan, journal)?;
+        verify_purged_commit(repo, &commit_hash, &plan.target_raw_hashes)?;
+        report.purged_in_commit = Some(commit_hash);
+        *journal = state.advance_phase(journal, PurgePhase::Committed)?;
+        store_phase_report(repo.kcs_dir(), report)?;
+    }
+    maybe_inject_fault("committed")?;
 
     // Final scrub closes the append race before the visibility barrier is
     // removed. The audit row is identifier-free and is appended while both scrub
@@ -299,28 +356,24 @@ fn execute_visible_phases(
     Ok(())
 }
 
-fn create_or_reconcile_purged_commit(
+/// `committed` phase: re-derive (deterministic, content-addressed — the
+/// working tree cannot have changed under the held store lock) and publish
+/// for real the commit whose hash was already fixed as `journal.planned_commit`
+/// at `prepared`. A mismatch is `KCS-E-STORE-CORRUPT-001` (defense-in-depth;
+/// the only legitimate cause would be an external, non-KCS-mediated edit to
+/// the working tree between `prepared` and `committed`, which the store lock
+/// cannot prevent).
+fn publish_planned_commit(
     repo: &Repository,
     plan: &PurgePlan,
     journal: &PurgeJournal,
-    allow_reconcile: bool,
 ) -> Result<String> {
-    let current_head = repo
-        .head_commit_hash()?
-        .ok_or_else(|| KcsError::invalid_usage("cannot purge an unborn scope"))?;
-    let current = repo.read_commit(&current_head)?;
-    if allow_reconcile
-        && current.commit_type == CommitType::Purged
-        && current.message == journal.reason.to_string()
-        && current.created_at == journal.started_at
-    {
-        return Ok(current_head);
-    }
-
-    // `purged_snapshot` captures the locked, rechecked working tree and forces a
-    // child even if it is byte-identical to its parent. The journal timestamp
-    // makes retry after commit-CAS publication deterministic.
-    let outcome = repo.purged_snapshot(&plan.reason.to_string(), Some(&journal.started_at))?;
+    let outcome = repo.purged_snapshot(
+        &plan.reason.to_string(),
+        Some(&journal.started_at),
+        &plan.target_raw_hashes,
+        true,
+    )?;
     if outcome.noop
         || outcome.commit.as_ref().map(|commit| commit.commit_type) != Some(CommitType::Purged)
     {
@@ -331,14 +384,23 @@ fn create_or_reconcile_purged_commit(
             ExitCode::PermanentFailure,
         ));
     }
-    outcome.commit_hash.ok_or_else(|| {
+    let commit_hash = outcome.commit_hash.ok_or_else(|| {
         KcsError::new(
             "KCS-E-STORE-CORRUPT-001",
             "purged snapshot did not return its commit hash",
             json!({}),
             ExitCode::PermanentFailure,
         )
-    })
+    })?;
+    if commit_hash != journal.planned_commit {
+        return Err(KcsError::new(
+            "KCS-E-STORE-CORRUPT-001",
+            "purged commit hash diverged from the journal's planned_commit",
+            json!({ "planned_commit": journal.planned_commit, "actual": commit_hash }),
+            ExitCode::PermanentFailure,
+        ));
+    }
+    Ok(commit_hash)
 }
 
 fn verify_purged_commit(repo: &Repository, commit_hash: &str, targets: &[String]) -> Result<()> {
@@ -365,30 +427,37 @@ fn verify_purged_commit(repo: &Repository, commit_hash: &str, targets: &[String]
     Ok(())
 }
 
+/// `prepared -> tombstoned`: append `purged`/`erased` to each target's marker,
+/// referencing `journal.planned_commit` (LC49). Idempotent on resume
+/// (`PurgeState::append_*_event`'s `events_are_equivalent` check).
 fn publish_terminal_records(
     state: &PurgeState,
     journal: &PurgeJournal,
     report: &mut PurgeReport,
 ) -> Result<()> {
-    let commit = journal
-        .purged_in_commit
-        .as_deref()
-        .ok_or_else(|| KcsError::schema("purge journal is missing its commit"))?;
-    let purged_at = journal
-        .purged_at
-        .as_deref()
-        .ok_or_else(|| KcsError::schema("purge journal is missing its timestamp"))?;
     for raw_hash in &journal.target_raw_hashes {
         match journal.tombstone_mode {
             TombstoneMode::Default => {
-                let record = TombstoneRecord::new(raw_hash, purged_at, journal.reason, commit)?;
-                state.publish_tombstone(journal, &record)?;
+                let event = LifecycleEvent::purged(
+                    journal.started_at.clone(),
+                    journal.planned_commit.clone(),
+                    journal.reason,
+                    journal.actor.clone(),
+                    journal.target_epoch,
+                );
+                state.append_tombstone_event(raw_hash, event)?;
                 report.tombstone_count =
                     u64::try_from(journal.target_raw_hashes.len()).unwrap_or(u64::MAX);
             }
             TombstoneMode::Erase => {
-                let receipt = EraseReceipt::new(raw_hash, commit, purged_at)?;
-                state.publish_erase_receipt(journal, &receipt)?;
+                let event = LifecycleEvent::erased(
+                    journal.started_at.clone(),
+                    journal.planned_commit.clone(),
+                    journal.reason,
+                    journal.actor.clone(),
+                    journal.target_epoch,
+                );
+                state.append_erase_receipt_event(raw_hash, event)?;
                 report.erase_receipt_count =
                     u64::try_from(journal.target_raw_hashes.len()).unwrap_or(u64::MAX);
             }
@@ -1047,14 +1116,14 @@ fn scrub_logs(
     report.log_rows_removed = report.log_rows_removed.saturating_add(pass_rows);
     report.log_fields_masked = report.log_fields_masked.saturating_add(pass_fields);
 
-    if journal.phase == PurgePhase::DerivedDeleted {
+    if journal.phase == PurgePhase::Tombstoned {
         append_event_log(
             "KCS-PURGE-COMPLETED",
             "purge removed content from KCS-managed history",
             json!({
-                "actor": std::env::var("USER").unwrap_or_else(|_| "local-user".to_owned()),
+                "actor": journal.actor,
                 "reason": plan.reason,
-                "purged_in_commit": journal.purged_in_commit,
+                "purged_in_commit": journal.planned_commit,
                 "target_raw_count": plan.target_raw_hashes.len(),
                 "deleted_counts": report.deleted,
             }),
@@ -1485,7 +1554,7 @@ fn incomplete_report(
 ) -> Value {
     let mut value = success_report(plan, report);
     value["status"] = json!("purge_incomplete");
-    value["logs_scrubbed"] = json!(journal.phase >= PurgePhase::LogsScrubbed);
+    value["logs_scrubbed"] = json!(journal.phase >= PurgePhase::Deleted);
     value["error_code"] = json!("KCS-E-PURGE-INCOMPLETE-001");
     value["message"] = json!("purge is incomplete and will resume on the next identical command");
     value["failure_phase"] = json!(journal.phase);
@@ -1733,6 +1802,12 @@ fn resolve_plan(repo: &Repository, args: &PurgeArgs) -> Result<PurgePlan> {
     })
 }
 
+/// LC58-LC60: presence of a marker no longer means "dead" — only an *active*
+/// tail (LC1/LC2) does. A retired marker is not terminal state; re-running
+/// this exact purge against it starts a fresh purge (its own new `purged`/
+/// `erased` event). M-ruling #2 (LC60): re-purging an active tombstone/receipt
+/// has no reason-match requirement (dropped from the pre-Step4b flat-schema
+/// rejection).
 fn inspect_terminal_state(
     state: &PurgeState,
     plan: &PurgePlan,
@@ -1741,32 +1816,31 @@ fn inspect_terminal_state(
     let mut receipts = Vec::new();
     for raw_hash in &plan.target_raw_hashes {
         if let Some(tombstone) = state.read_tombstone(raw_hash)? {
-            if plan.tombstone_mode == TombstoneMode::Erase {
-                return Err(KcsError::invalid_usage(
-                    "converting an existing tombstone to erase mode is not supported",
-                ));
+            if tombstone.is_active() {
+                if plan.tombstone_mode == TombstoneMode::Erase {
+                    return Err(KcsError::invalid_usage(
+                        "converting an existing active tombstone to erase mode is not supported",
+                    ));
+                }
+                tombstones.push(tombstone);
             }
-            if tombstone.purged_reason != plan.reason {
-                return Err(KcsError::invalid_usage(
-                    "an existing tombstone has a different purge reason",
-                ));
-            }
-            tombstones.push(tombstone);
         }
         if let Some(receipt) = state.read_erase_receipt(raw_hash)? {
-            receipts.push(receipt);
+            if receipt.is_active() {
+                receipts.push(receipt);
+            }
         }
     }
 
     let target_count = plan.target_raw_hashes.len();
     let completed = match plan.tombstone_mode {
         TombstoneMode::Default if tombstones.len() == target_count => Some(CompletedTerminal {
-            purged_in_commit: tombstones[0].purged_in_commit.clone(),
+            purged_in_commit: tombstones[0].tail().in_commit.clone(),
             tombstone_count: u64::try_from(tombstones.len()).unwrap_or(u64::MAX),
             erase_receipt_count: 0,
         }),
         TombstoneMode::Erase if receipts.len() == target_count => Some(CompletedTerminal {
-            purged_in_commit: receipts[0].purged_in_commit.clone(),
+            purged_in_commit: receipts[0].tail().in_commit.clone(),
             tombstone_count: 0,
             erase_receipt_count: u64::try_from(receipts.len()).unwrap_or(u64::MAX),
         }),

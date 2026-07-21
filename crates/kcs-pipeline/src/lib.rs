@@ -1,6 +1,7 @@
 //! Pipeline contracts and deterministic Step 2 helpers.
 
 pub mod budget;
+pub mod ledger;
 pub mod markdownize;
 pub mod prepare;
 pub mod scan;
@@ -40,6 +41,12 @@ pub enum PipelineError {
     /// file and send it to an online adapter (P1).
     #[error("KCS-E-STORE-PATH-001: task input_path is not a scope-local file name: {path}")]
     Path { path: String },
+    /// `cost-ledger.sqlite` (04 §5.4) transport error from `rusqlite`. Most call
+    /// sites reclassify a `SQLITE_CONSTRAINT_CHECK` failure into
+    /// [`PipelineError::contract`] `KCS-E-STORE-CONSTRAINT-001` (04 §5.8 / 06 §7)
+    /// before it reaches this variant — this is the residual (busy/io/etc.).
+    #[error("cost ledger sqlite error: {0}")]
+    Sqlite(#[from] rusqlite::Error),
 }
 
 impl PipelineError {

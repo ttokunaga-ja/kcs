@@ -9,7 +9,10 @@ use kcs_core::cas::{
     ContentObjectKind, ObjectKind, ObjectStore, MAX_RAW_OBJECT_BYTES,
 };
 use kcs_core::dag::{CommitObject, CommitType, TreeObject};
-use kcs_core::purge::{EraseReceipt, PurgeState, TombstoneRecord, MAX_PURGE_RECORD_BYTES};
+use kcs_core::purge::{
+    canonical_final_event, CanonicalFinalEvent, EventKind, LifecycleEvent, PurgeState,
+    TombstoneMode, MAX_PURGE_RECORD_BYTES,
+};
 use kcs_core::scope::{now_utc_seconds, Repository};
 use kcs_core::{KcsError, Result};
 use kcs_pipeline::markdownize::{
@@ -665,54 +668,60 @@ fn verify_objects_with_limits(
         .union(&receipt_hashes)
         .cloned()
         .collect::<BTreeSet<_>>();
-    let mut receipts_to_retire = BTreeSet::new();
+    // (raw_hash, marker_kind, purge/erase event `in_commit`) queued for a
+    // `retired` append once the corresponding physical-object pass completes
+    // (LC27/LC35: verified raw + a ref-reachable, ancestor-respecting
+    // republication commit of the canonical purged/erased event).
+    let mut retirements_to_backfill = Vec::<(String, TombstoneMode, String)>::new();
     for raw_hash in marker_hashes {
         if raw_affected.contains_key(&raw_hash) {
             continue;
         }
-        let tombstone = match purge.read_tombstone(&raw_hash) {
-            Ok(value) => value,
-            Err(error) => {
-                state.finding("tombstone_corrupt", &raw_hash, &error.to_string(), &[]);
-                continue;
-            }
-        };
-        let receipt = match purge.read_erase_receipt(&raw_hash) {
-            Ok(value) => value,
-            Err(error) => {
-                state.finding("erase_receipt_corrupt", &raw_hash, &error.to_string(), &[]);
-                continue;
-            }
-        };
-        if tombstone.is_some() && receipt.is_some() {
-            state.finding(
-                "purge_marker_conflict",
-                &raw_hash,
-                "tombstone and erase receipt coexist",
-                &[],
-            );
-            continue;
+        let lookup = canonical_lookup(&purge, &raw_hash, &commits, &reachable, &invocation_time);
+        if let Some(reason) = lookup.tombstone_error {
+            state.finding("tombstone_corrupt", &raw_hash, &reason, &[]);
         }
+        if let Some(reason) = lookup.receipt_error {
+            state.finding("erase_receipt_corrupt", &raw_hash, &reason, &[]);
+        }
+        let Some(canonical) = lookup.canonical else {
+            continue;
+        };
         let raw_alive = verified_raws.contains(&raw_hash);
-        if let Some(record) = tombstone {
-            match validate_tombstone(&record, &commits, &reachable, &invocation_time) {
-                Ok(()) if raw_alive => state.finding(
-                    "tombstone_conflict",
-                    &raw_hash,
-                    "verified raw object coexists with a tombstone",
-                    &[],
-                ),
-                Ok(()) => state.dead_by_tombstone_count += 1,
-                Err(reason) => state.finding("tombstone_corrupt", &raw_hash, &reason, &[]),
-            }
-        } else if let Some(receipt) = receipt {
-            match validate_erase_receipt(&receipt, &commits, &reachable, &invocation_time) {
-                Ok(()) if raw_alive && repairs_allowed && !state.exceeded_bounds => {
-                    receipts_to_retire.insert(raw_hash.clone());
+        match (canonical.event.kind, raw_alive) {
+            // LC34/F34: canonical = retired is normal coexistence (resurrection).
+            (EventKind::Retired, _) => {}
+            (EventKind::Purged, false) => state.dead_by_tombstone_count += 1,
+            (EventKind::Erased, false) => state.dead_by_erase_receipt_count += 1,
+            (EventKind::Purged | EventKind::Erased, true) => {
+                // LC35/LC36 (§F): verified raw + canonical purged/erased.
+                // Backfill `retired` only when a ref-reachable, ancestor-
+                // respecting republication commit exists; otherwise this is
+                // an incomplete purge (exit 3), not a corruption, and is
+                // never silently "fixed" by resurrecting the tombstone.
+                if repairs_allowed && !state.exceeded_bounds {
+                    match find_republication_commit(&canonical.event.in_commit, &commits, &reachable)
+                    {
+                        Some(republication_commit) => retirements_to_backfill.push((
+                            raw_hash.clone(),
+                            canonical.marker_kind,
+                            republication_commit,
+                        )),
+                        None => state.finding(
+                            "purge_incomplete",
+                            &raw_hash,
+                            "verified raw exists but no causal republication commit was found (09 §5.3: re-run kcs purge --raw-hash to complete idempotently)",
+                            &[],
+                        ),
+                    }
+                } else {
+                    state.finding(
+                        "purge_incomplete",
+                        &raw_hash,
+                        "resurrection backfill suppressed while purge state is active or corrupt",
+                        &[],
+                    );
                 }
-                Ok(()) if raw_alive => {}
-                Ok(()) => state.dead_by_erase_receipt_count += 1,
-                Err(reason) => state.finding("erase_receipt_corrupt", &raw_hash, &reason, &[]),
             }
         }
     }
@@ -726,76 +735,77 @@ fn verify_objects_with_limits(
             .cloned()
             .collect::<Vec<_>>();
         if verified_raws.contains(raw_hash) {
-            if check_live_raw_markers(
-                &purge,
-                raw_hash,
-                &commits,
-                &reachable,
-                &invocation_time,
-                repairs_allowed,
-                &affected,
-                &mut state,
-            ) {
-                receipts_to_retire.insert(raw_hash.clone());
+            // §F (LC34-LC38): canonical final event basis, not marker-pair
+            // presence — a tombstone and erase receipt coexisting is not
+            // itself a finding (§C computes canonical over both).
+            let lookup = canonical_lookup(&purge, raw_hash, &commits, &reachable, &invocation_time);
+            if let Some(reason) = lookup.tombstone_error {
+                state.finding("tombstone_corrupt", raw_hash, &reason, &affected);
+            }
+            if let Some(reason) = lookup.receipt_error {
+                state.finding("erase_receipt_corrupt", raw_hash, &reason, &affected);
+            }
+            if let Some(canonical) = lookup.canonical {
+                match canonical.event.kind {
+                    EventKind::Retired => {} // LC34: normal coexistence.
+                    EventKind::Purged | EventKind::Erased => {
+                        if repairs_allowed && !state.exceeded_bounds {
+                            match find_republication_commit(
+                                &canonical.event.in_commit,
+                                &commits,
+                                &reachable,
+                            ) {
+                                Some(republication_commit) => retirements_to_backfill.push((
+                                    raw_hash.clone(),
+                                    canonical.marker_kind,
+                                    republication_commit,
+                                )),
+                                None => state.finding(
+                                    "purge_incomplete",
+                                    raw_hash,
+                                    "verified raw exists but no causal republication commit was found (09 §5.3: re-run kcs purge --raw-hash to complete idempotently)",
+                                    &affected,
+                                ),
+                            }
+                        } else {
+                            state.finding(
+                                "purge_incomplete",
+                                raw_hash,
+                                "resurrection backfill suppressed while purge state is active or corrupt",
+                                &affected,
+                            );
+                        }
+                    }
+                }
             }
             continue;
         }
-        match purge.read_tombstone(raw_hash) {
-            Ok(Some(record)) => {
-                match validate_tombstone(&record, &commits, &reachable, &invocation_time) {
-                    Ok(()) => {
-                        match purge.read_erase_receipt(raw_hash) {
-                            Ok(Some(_)) => state.finding(
-                                "purge_marker_conflict",
-                                raw_hash,
-                                "tombstone and erase receipt coexist",
-                                &affected,
-                            ),
-                            Ok(None) => state.dead_by_tombstone_count += 1,
-                            Err(error) => state.finding(
-                                "erase_receipt_corrupt",
-                                raw_hash,
-                                &error.to_string(),
-                                &affected,
-                            ),
-                        }
-                        continue;
-                    }
-                    Err(reason) => {
-                        state.finding("tombstone_corrupt", raw_hash, &reason, &affected);
-                        continue;
-                    }
-                }
-            }
-            Ok(None) => {}
-            Err(error) => {
-                state.finding("tombstone_corrupt", raw_hash, &error.to_string(), &affected);
-                continue;
-            }
+        // Raw is *not* verified-present: a canonical `purged`/`erased` marker
+        // is the normal, explained dead terminal (10 §7.5.1). A canonical
+        // `retired` here means the marker asserts the raw should be alive
+        // again but it is missing — that is not a valid explanation (LC13's
+        // resolver-side rule is the same corruption class), so it falls
+        // through to the recovery/`missing_raw` path below like an unmarked
+        // absence would.
+        let lookup = canonical_lookup(&purge, raw_hash, &commits, &reachable, &invocation_time);
+        if let Some(reason) = lookup.tombstone_error {
+            state.finding("tombstone_corrupt", raw_hash, &reason, &affected);
+            continue;
         }
-        match purge.read_erase_receipt(raw_hash) {
-            Ok(Some(receipt)) => {
-                match validate_erase_receipt(&receipt, &commits, &reachable, &invocation_time) {
-                    Ok(()) => {
-                        state.dead_by_erase_receipt_count += 1;
-                        continue;
-                    }
-                    Err(reason) => {
-                        state.finding("erase_receipt_corrupt", raw_hash, &reason, &affected);
-                        continue;
-                    }
-                }
-            }
-            Ok(None) => {}
-            Err(error) => {
-                state.finding(
-                    "erase_receipt_corrupt",
-                    raw_hash,
-                    &error.to_string(),
-                    &affected,
-                );
+        if let Some(reason) = lookup.receipt_error {
+            state.finding("erase_receipt_corrupt", raw_hash, &reason, &affected);
+            continue;
+        }
+        match lookup.canonical.map(|canonical| canonical.event.kind) {
+            Some(EventKind::Purged) => {
+                state.dead_by_tombstone_count += 1;
                 continue;
             }
+            Some(EventKind::Erased) => {
+                state.dead_by_erase_receipt_count += 1;
+                continue;
+            }
+            Some(EventKind::Retired) | None => {}
         }
         if !repairs_allowed {
             state.finding(
@@ -911,9 +921,34 @@ fn verify_objects_with_limits(
     for (raw_hash, bytes) in &staged_raws {
         store.repair_raw(raw_hash, bytes)?;
     }
-    for raw_hash in receipts_to_retire {
-        if let Err(error) = purge.retire_erase_receipt(&raw_hash) {
-            state.finding("erase_receipt_corrupt", &raw_hash, &error.to_string(), &[]);
+    // LC27/LC35 backfill: append `retired` to whichever marker was canonical,
+    // linking the republication commit found above as `resurrection_commit`.
+    let repair_actor = std::env::var("USER").unwrap_or_else(|_| "local-user".to_owned());
+    for (raw_hash, marker_kind, republication_commit) in retirements_to_backfill {
+        let outcome = match marker_kind {
+            TombstoneMode::Default => purge
+                .retire_tombstone(
+                    &raw_hash,
+                    &republication_commit,
+                    &invocation_time,
+                    &repair_actor,
+                )
+                .map(|_| ()),
+            TombstoneMode::Erase => purge
+                .retire_erase_receipt(
+                    &raw_hash,
+                    &republication_commit,
+                    &invocation_time,
+                    &repair_actor,
+                )
+                .map(|_| ()),
+        };
+        if let Err(error) = outcome {
+            let kind = match marker_kind {
+                TombstoneMode::Default => "tombstone_corrupt",
+                TombstoneMode::Erase => "erase_receipt_corrupt",
+            };
+            state.finding(kind, &raw_hash, &error.to_string(), &[]);
         }
     }
     let repaired = staged_raws.len() as u64;
@@ -1436,21 +1471,226 @@ fn commit_roots(repo: &Repository, state: &mut State) -> Result<BTreeSet<String>
     Ok(roots)
 }
 
-fn validate_tombstone(
-    record: &TombstoneRecord,
+/// LC8-LC10 (§C): canonical final event across both markers for `raw_hash`,
+/// after LC9's "only validated markers participate" gate. A marker whose
+/// `events[]` fails structural (`kcs_core::purge`, already applied by
+/// `PurgeState::read_tombstone`/`read_erase_receipt`) or semantic (this
+/// module's DAG-bound `validate_marker_events`) validation does not
+/// contribute its tail — its failure reason is returned separately so the
+/// caller can still surface a `*_corrupt` finding for it (LC21: fsck and the
+/// resolver never disagree about which markers explain state).
+struct CanonicalLookup {
+    canonical: Option<CanonicalFinalEvent>,
+    tombstone_error: Option<String>,
+    receipt_error: Option<String>,
+}
+
+fn canonical_lookup(
+    purge: &PurgeState,
+    raw_hash: &str,
+    commits: &BTreeMap<String, CommitObject>,
+    reachable: &BTreeSet<String>,
+    invocation_time: &str,
+) -> CanonicalLookup {
+    let mut tombstone_tail = None;
+    let mut tombstone_error = None;
+    match purge.read_tombstone(raw_hash) {
+        Ok(Some(record)) => {
+            match validate_marker_events(
+                raw_hash,
+                &record.events,
+                commits,
+                reachable,
+                invocation_time,
+            ) {
+                Ok(()) => tombstone_tail = Some(record.tail().clone()),
+                Err(reason) => tombstone_error = Some(reason),
+            }
+        }
+        Ok(None) => {}
+        Err(error) => tombstone_error = Some(error.to_string()),
+    }
+    let mut receipt_tail = None;
+    let mut receipt_error = None;
+    match purge.read_erase_receipt(raw_hash) {
+        Ok(Some(receipt)) => {
+            match validate_marker_events(
+                raw_hash,
+                &receipt.events,
+                commits,
+                reachable,
+                invocation_time,
+            ) {
+                Ok(()) => receipt_tail = Some(receipt.tail().clone()),
+                Err(reason) => receipt_error = Some(reason),
+            }
+        }
+        Ok(None) => {}
+        Err(error) => receipt_error = Some(error.to_string()),
+    }
+    CanonicalLookup {
+        canonical: canonical_final_event(tombstone_tail.as_ref(), receipt_tail.as_ref()),
+        tombstone_error,
+        receipt_error,
+    }
+}
+
+/// LC17/LC18/LC20/LC21 (10 §7.5.1): the DAG-bound semantic checks on top of
+/// `kcs_core::purge`'s structural validation (kind closure, required-field
+/// matrix, transition grammar). Applied identically to tombstone and erase
+/// receipt events (10 §7.5.1: "tombstone lifecycle にも同じ event 検証を適用する").
+fn validate_marker_events(
+    raw_hash: &str,
+    events: &[LifecycleEvent],
     commits: &BTreeMap<String, CommitObject>,
     reachable: &BTreeSet<String>,
     invocation_time: &str,
 ) -> std::result::Result<(), String> {
-    validate_terminal_commit(
-        &record.purged_in_commit,
-        &record.purged_at,
-        commits,
-        reachable,
-        invocation_time,
-    )
+    for (index, event) in events.iter().enumerate() {
+        match event.kind {
+            EventKind::Purged | EventKind::Erased => {
+                validate_purge_or_erase_in_commit(
+                    raw_hash,
+                    event,
+                    commits,
+                    reachable,
+                    invocation_time,
+                )?;
+            }
+            EventKind::Retired => {
+                let previous_index = index
+                    .checked_sub(1)
+                    .ok_or_else(|| "retired event has no preceding event".to_owned())?;
+                let previous = events
+                    .get(previous_index)
+                    .ok_or_else(|| "retired event has no preceding event".to_owned())?;
+                validate_retired_event(event, &previous.in_commit, commits, reachable)?;
+            }
+        }
+    }
+    Ok(())
 }
 
+/// LC17/LC18: a `purged`/`erased` event's `in_commit` must be a bounded
+/// verified CAS object, ref-reachable, `commit_type=purged`, whose
+/// `purged_raws` includes this marker's raw_hash (03 §8: forged-`in_commit`
+/// defense — a purge commit for a *different* raw cannot explain this one's
+/// absence), with `at` equal to that commit's `created_at` and not in the
+/// future relative to the fixed invocation time.
+fn validate_purge_or_erase_in_commit(
+    raw_hash: &str,
+    event: &LifecycleEvent,
+    commits: &BTreeMap<String, CommitObject>,
+    reachable: &BTreeSet<String>,
+    invocation_time: &str,
+) -> std::result::Result<(), String> {
+    if !reachable.contains(&event.in_commit) {
+        return Err("lifecycle event in_commit is not ref-reachable".to_owned());
+    }
+    let commit = commits
+        .get(&event.in_commit)
+        .ok_or_else(|| "lifecycle event in_commit object is missing or corrupt".to_owned())?;
+    if commit.commit_type != CommitType::Purged {
+        return Err("lifecycle event in_commit commit_type is not purged".to_owned());
+    }
+    if !commit.purged_raws.iter().any(|hash| hash == raw_hash) {
+        return Err(
+            "lifecycle event in_commit purged_raws does not include this raw_hash".to_owned(),
+        );
+    }
+    if commit.created_at != event.at {
+        return Err("lifecycle event at does not equal commit created_at".to_owned());
+    }
+    if timestamp_is_after(&event.at, invocation_time)? {
+        return Err("lifecycle event at is in the future".to_owned());
+    }
+    Ok(())
+}
+
+/// LC20: terminal `retired`'s `resurrection_commit` must be ref-reachable and
+/// a (strict) descendant of the immediately-preceding `purged`/`erased`
+/// event's `in_commit` — i.e. the republication happened *after* that purge.
+/// The tree-membership leaf defense-in-depth check (08 §3.1 step 8-equivalent,
+/// skipped when the resurrection commit's tree has been shallow-discarded) is
+/// not implemented here — a documented gap (fsck still validates ancestry and
+/// ref-reachability, just not the extra leaf re-check).
+fn validate_retired_event(
+    event: &LifecycleEvent,
+    previous_in_commit: &str,
+    commits: &BTreeMap<String, CommitObject>,
+    reachable: &BTreeSet<String>,
+) -> std::result::Result<(), String> {
+    let resurrection_commit = event
+        .resurrection_commit
+        .as_deref()
+        .ok_or_else(|| "retired event is missing its resurrection_commit".to_owned())?;
+    if !reachable.contains(resurrection_commit) {
+        return Err("retired event resurrection_commit is not ref-reachable".to_owned());
+    }
+    if !commits.contains_key(resurrection_commit) {
+        return Err("retired event resurrection_commit object is missing or corrupt".to_owned());
+    }
+    if resurrection_commit == previous_in_commit
+        || !is_ancestor(commits, previous_in_commit, resurrection_commit)
+    {
+        return Err(
+            "retired event resurrection_commit does not descend from the preceding purge/erase event"
+                .to_owned(),
+        );
+    }
+    Ok(())
+}
+
+/// Strict-descendant test over the fsck-scanned commit map's parent chains
+/// (`ancestor != descendant`; every commit is reachable from itself only via
+/// its own chain, never treated as its own ancestor here since callers always
+/// want "happened strictly after").
+fn is_ancestor(commits: &BTreeMap<String, CommitObject>, ancestor: &str, descendant: &str) -> bool {
+    let mut pending = vec![descendant.to_owned()];
+    let mut visited = BTreeSet::new();
+    while let Some(hash) = pending.pop() {
+        let Some(commit) = commits.get(&hash) else {
+            continue;
+        };
+        for parent in &commit.parents {
+            if parent == ancestor {
+                return true;
+            }
+            if visited.insert(parent.clone()) {
+                pending.push(parent.clone());
+            }
+        }
+    }
+    false
+}
+
+/// LC27/LC29/LC35/LC36: search the ref-reachable set for a commit that
+/// causally republished `raw_hash` after `purge_in_commit` — a strict
+/// descendant of it. Deterministic (lexicographically smallest hash) when
+/// more than one candidate exists; this is an existence/ancestry check only
+/// (it does not additionally re-verify that the candidate's tree still
+/// carries a live leaf for the raw_hash — a documented simplification).
+fn find_republication_commit(
+    purge_in_commit: &str,
+    commits: &BTreeMap<String, CommitObject>,
+    reachable: &BTreeSet<String>,
+) -> Option<String> {
+    reachable
+        .iter()
+        .filter(|candidate| {
+            candidate.as_str() != purge_in_commit
+                && commits.contains_key(candidate.as_str())
+                && is_ancestor(commits, purge_in_commit, candidate)
+        })
+        .min()
+        .cloned()
+}
+
+/// LC17: `dead_raws` (skips normalized/manifest/chunk verification for a
+/// purged raw_hash) now follows the canonical final event, not per-marker
+/// presence — a `retired` canonical means the raw is alive again and must
+/// NOT be treated as an explained dead terminal even if a (superseded)
+/// tombstone/receipt event still exists earlier in that marker's history.
 fn valid_dead_terminal(
     verified_raws: &BTreeSet<String>,
     purge: &PurgeState,
@@ -1462,124 +1702,11 @@ fn valid_dead_terminal(
     if verified_raws.contains(raw_hash) {
         return false;
     }
-    match (
-        purge.read_tombstone(raw_hash),
-        purge.read_erase_receipt(raw_hash),
-    ) {
-        (Ok(Some(record)), Ok(None)) => {
-            validate_tombstone(&record, commits, reachable, invocation_time).is_ok()
-        }
-        (Ok(None), Ok(Some(receipt))) => {
-            validate_erase_receipt(&receipt, commits, reachable, invocation_time).is_ok()
-        }
-        _ => false,
-    }
-}
-
-fn validate_erase_receipt(
-    receipt: &EraseReceipt,
-    commits: &BTreeMap<String, CommitObject>,
-    reachable: &BTreeSet<String>,
-    invocation_time: &str,
-) -> std::result::Result<(), String> {
-    validate_terminal_commit(
-        &receipt.purged_in_commit,
-        &receipt.erased_at,
-        commits,
-        reachable,
-        invocation_time,
+    let lookup = canonical_lookup(purge, raw_hash, commits, reachable, invocation_time);
+    matches!(
+        lookup.canonical.map(|canonical| canonical.event.kind),
+        Some(EventKind::Purged) | Some(EventKind::Erased)
     )
-}
-
-#[allow(clippy::too_many_arguments)]
-fn check_live_raw_markers(
-    purge: &PurgeState,
-    raw_hash: &str,
-    commits: &BTreeMap<String, CommitObject>,
-    reachable: &BTreeSet<String>,
-    invocation_time: &str,
-    repairs_allowed: bool,
-    affected: &[String],
-    state: &mut State,
-) -> bool {
-    let tombstone = purge.read_tombstone(raw_hash);
-    let receipt = purge.read_erase_receipt(raw_hash);
-    match (tombstone, receipt) {
-        (Ok(Some(_)), Ok(Some(_))) => state.finding(
-            "purge_marker_conflict",
-            raw_hash,
-            "tombstone and erase receipt coexist",
-            affected,
-        ),
-        (Ok(Some(record)), Ok(None)) => {
-            match validate_tombstone(&record, commits, reachable, invocation_time) {
-                Ok(()) => state.finding(
-                    "tombstone_conflict",
-                    raw_hash,
-                    "verified raw object coexists with a tombstone",
-                    affected,
-                ),
-                Err(reason) => state.finding("tombstone_corrupt", raw_hash, &reason, affected),
-            }
-        }
-        (Ok(None), Ok(Some(receipt))) => {
-            match validate_erase_receipt(&receipt, commits, reachable, invocation_time) {
-                Ok(()) if repairs_allowed => return true,
-                Ok(()) => {}
-                Err(reason) => state.finding("erase_receipt_corrupt", raw_hash, &reason, affected),
-            }
-        }
-        (Ok(None), Ok(None)) => {}
-        (Err(tombstone_error), Err(receipt_error)) => {
-            state.finding(
-                "tombstone_corrupt",
-                raw_hash,
-                &tombstone_error.to_string(),
-                affected,
-            );
-            state.finding(
-                "erase_receipt_corrupt",
-                raw_hash,
-                &receipt_error.to_string(),
-                affected,
-            );
-        }
-        (Err(error), Ok(_)) => {
-            state.finding("tombstone_corrupt", raw_hash, &error.to_string(), affected)
-        }
-        (Ok(_), Err(error)) => state.finding(
-            "erase_receipt_corrupt",
-            raw_hash,
-            &error.to_string(),
-            affected,
-        ),
-    }
-    false
-}
-
-fn validate_terminal_commit(
-    commit_hash: &str,
-    timestamp: &str,
-    commits: &BTreeMap<String, CommitObject>,
-    reachable: &BTreeSet<String>,
-    invocation_time: &str,
-) -> std::result::Result<(), String> {
-    if !reachable.contains(commit_hash) {
-        return Err("purge marker commit is not ref-reachable".to_owned());
-    }
-    let commit = commits
-        .get(commit_hash)
-        .ok_or_else(|| "purge marker commit object is missing or corrupt".to_owned())?;
-    if commit.commit_type != CommitType::Purged {
-        return Err("purge marker commit_type is not purged".to_owned());
-    }
-    if commit.created_at != timestamp {
-        return Err("purge marker timestamp does not equal commit created_at".to_owned());
-    }
-    if timestamp_is_after(timestamp, invocation_time)? {
-        return Err("purge marker timestamp is in the future".to_owned());
-    }
-    Ok(())
 }
 
 fn timestamp_is_after(left: &str, right: &str) -> std::result::Result<bool, String> {
@@ -1727,50 +1854,104 @@ mod tests {
         .unwrap()
     }
 
+    fn purged_commit(created_at: &str, purged_raws: Vec<String>) -> CommitObject {
+        CommitObject::new_purged(
+            hash('a'),
+            Vec::new(),
+            created_at.to_owned(),
+            "marker test".to_owned(),
+            hash('b'),
+            CommitStats {
+                files_added: 0,
+                files_modified: 0,
+                files_deleted: 0,
+            },
+            purged_raws,
+        )
+        .unwrap()
+    }
+
+    fn purged_event(in_commit: &str, at: &str) -> LifecycleEvent {
+        LifecycleEvent::purged(
+            at,
+            in_commit,
+            kcs_core::purge::PurgeReason::Legal,
+            "user",
+            1,
+        )
+    }
+
     #[test]
-    fn purge_terminal_binding_requires_reachable_purged_exact_non_future_commit() {
+    fn lc17_in_commit_binding_requires_reachable_purged_exact_non_future_commit_and_purged_raws_membership(
+    ) {
         let commit_hash = hash('c');
+        let target_raw = hash('9');
         let created_at = "2026-07-13T00:00:00.25Z";
-        let mut commits =
-            BTreeMap::from([(commit_hash.clone(), commit(CommitType::Purged, created_at))]);
+        let mut commits = BTreeMap::from([(
+            commit_hash.clone(),
+            purged_commit(created_at, vec![target_raw.clone()]),
+        )]);
         let reachable = BTreeSet::from([commit_hash.clone()]);
-        assert!(validate_terminal_commit(
-            &commit_hash,
-            created_at,
+        let event = purged_event(&commit_hash, created_at);
+
+        assert!(validate_purge_or_erase_in_commit(
+            &target_raw,
+            &event,
             &commits,
             &reachable,
             "2026-07-13T00:00:01Z"
         )
         .is_ok());
-        assert!(validate_terminal_commit(
-            &commit_hash,
-            created_at,
+        // Not ref-reachable.
+        assert!(validate_purge_or_erase_in_commit(
+            &target_raw,
+            &event,
             &commits,
             &BTreeSet::new(),
             "2026-07-13T00:00:01Z"
         )
         .is_err());
-        assert!(validate_terminal_commit(
-            &commit_hash,
-            "2026-07-13T00:00:00Z",
+        // `at` does not equal commit.created_at.
+        let mismatched_at = purged_event(&commit_hash, "2026-07-13T00:00:00Z");
+        assert!(validate_purge_or_erase_in_commit(
+            &target_raw,
+            &mismatched_at,
             &commits,
             &reachable,
             "2026-07-13T00:00:01Z"
         )
         .is_err());
+        // commit_type is not purged.
         commits.insert(commit_hash.clone(), commit(CommitType::Manual, created_at));
-        assert!(validate_terminal_commit(
-            &commit_hash,
-            created_at,
+        assert!(validate_purge_or_erase_in_commit(
+            &target_raw,
+            &event,
             &commits,
             &reachable,
             "2026-07-13T00:00:01Z"
         )
         .is_err());
-        commits.insert(commit_hash.clone(), commit(CommitType::Purged, created_at));
-        assert!(validate_terminal_commit(
-            &commit_hash,
-            created_at,
+        // purged_raws does not include this raw_hash (borrowed marker defense).
+        commits.insert(
+            commit_hash.clone(),
+            purged_commit(created_at, vec![hash('8')]),
+        );
+        assert!(validate_purge_or_erase_in_commit(
+            &target_raw,
+            &event,
+            &commits,
+            &reachable,
+            "2026-07-13T00:00:01Z"
+        )
+        .is_err());
+        // `at` in the future relative to the fixed invocation time.
+        commits.insert(
+            commit_hash.clone(),
+            purged_commit(created_at, vec![target_raw.clone()]),
+        );
+        assert!(validate_purge_or_erase_in_commit(
+            &target_raw,
+            &event,
             &commits,
             &reachable,
             "2026-07-13T00:00:00.2Z"
@@ -1853,7 +2034,11 @@ mod tests {
                 vec![hash_bytes(contents)],
                 kcs_core::purge::PurgeReason::Legal,
                 kcs_core::purge::TombstoneMode::Default,
+                "user",
                 "2026-07-13T00:00:01Z",
+                1,
+                hash_bytes(b"planned commit placeholder"),
+                kcs_core::scope::new_ulid(dir.path()),
             )
             .unwrap();
 

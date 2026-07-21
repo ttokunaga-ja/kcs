@@ -197,8 +197,9 @@ fn ct4_purge_typed_path_preview_live_refusal_and_all_versions() {
                 .read_tombstone(raw_hash)
                 .unwrap()
                 .unwrap()
-                .purged_reason,
-            PurgeReason::Legal
+                .tail()
+                .reason,
+            Some(PurgeReason::Legal)
         );
     }
     let repo = Repository::open(dir.path()).unwrap();
@@ -403,7 +404,7 @@ fn ct4_purge_erase_leaves_only_private_receipt_and_is_repeatable() {
         .read_erase_receipt(&fixture.raw_hash)
         .unwrap()
         .unwrap();
-    assert_eq!(receipt.purged_in_commit, output["purged_in_commit"]);
+    assert_eq!(receipt.tail().in_commit, output["purged_in_commit"]);
     assert!(state.read_journal().unwrap().is_none());
 
     let pointer = fixture.pointer.to_string();
@@ -574,13 +575,13 @@ fn ct4_purge_faults_publish_no_prebarrier_state_and_resume_every_visible_phase()
         .join(".kcs/purge/in-progress.json")
         .exists());
 
-    for phase in [
-        "barrier_published",
-        "purged_commit_created",
-        "content_deleted",
-        "derived_deleted",
-        "logs_scrubbed",
-    ] {
+    // LC46/LC47: the journal's phase vocabulary is now `prepared -> tombstoned
+    // -> deleted -> committed`. `tombstoned` is the first point at which the
+    // barrier is visible (marker durable, LC49) — a fault injected earlier, at
+    // `prepared_visible` (before any marker exists), has nothing yet to hide
+    // and is intentionally not exercised by this "content must already be
+    // hidden on resume" loop.
+    for phase in ["tombstoned", "deleted", "committed"] {
         let fixture = indexed_fixture();
         fs::remove_file(fixture.dir.path().join("doc.md")).unwrap();
         let partial = json_partial_with_fault(&fixture.dir, &fixture.raw_hash, phase);

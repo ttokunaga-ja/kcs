@@ -528,15 +528,16 @@ impl Repository {
             staged.push(staged_file);
         }
 
-        // Discover and validate every candidate barrier before the first raw CAS
-        // publication. Thus a later path carrying a tombstoned identity cannot
-        // leave earlier, otherwise-valid candidates partially archived.
+        // Discover every candidate barrier before the first raw CAS publication.
+        // Thus a later path carrying an incomplete-purge identity cannot leave
+        // earlier, otherwise-valid candidates partially archived. A public
+        // tombstone or fsck-only erase receipt no longer blocks publication
+        // (U19/LC22: the permanent re-ingest rejection is reversed into a
+        // resurrection flow) — only an active purge journal barrier
+        // (incomplete purge in progress) still gates ingest here.
         let purge = PurgeState::new(&self.kcs_dir);
-        let mut receipts = BTreeSet::new();
         for file in &staged {
-            if ensure_raw_publication_allowed(&purge, &file.raw_hash)? {
-                receipts.insert(file.raw_hash.clone());
-            }
+            ensure_raw_publication_allowed(&purge, &file.raw_hash)?;
         }
 
         let mut entries = Vec::with_capacity(staged.len());
@@ -550,9 +551,6 @@ impl Repository {
                 .write_raw_reader(&mut staged_file.file, staged_file.size_bytes)?;
             if published_hash != staged_file.raw_hash || published_size != staged_file.size_bytes {
                 return Err(scope_file_changed(&staged_file.candidate.file_name));
-            }
-            if receipts.remove(&published_hash) {
-                purge.retire_erase_receipt(&published_hash)?;
             }
             let mut tree_entry =
                 TreeEntry::raw_file(staged_file.candidate.file_name.clone(), published_hash)?;
@@ -723,6 +721,8 @@ impl Repository {
             &BTreeMap::new(),
             explicitly_allowed_tier_a_paths,
             false,
+            &[],
+            true,
         )
     }
 
@@ -740,6 +740,8 @@ impl Repository {
             &BTreeMap::new(),
             &BTreeSet::new(),
             false,
+            &[],
+            true,
         )
     }
 
@@ -780,6 +782,8 @@ impl Repository {
             normalize_by_path,
             explicitly_allowed_tier_a_paths,
             false,
+            &[],
+            true,
         )
     }
 
@@ -928,10 +932,23 @@ impl Repository {
     /// `commit_type=purged` child even when the tree equals HEAD. Unchanged
     /// files retain their existing normalize bindings; changed/new files do not
     /// inherit stale normalization metadata.
+    ///
+    /// `publish_ref=false` (05-runtime.md §3.5's `prepared` phase, LC48)
+    /// computes and durably CAS-writes the commit object — fixing its hash as
+    /// `planned_commit` — without publishing `refs/heads/main`/`HEAD` or
+    /// running the resurrection-retire scan; the purge orchestration (this
+    /// journal's `prepared` step) uses this to fix `planned_commit` before any
+    /// tombstone/erase-receipt is durable. `publish_ref=true` (the journal's
+    /// `committed` phase) re-derives the identical commit (deterministic,
+    /// content-addressed — the store lock has been held across the whole
+    /// operation so the working tree cannot have changed) and publishes it for
+    /// real.
     pub fn purged_snapshot(
         &self,
         reason: &str,
         fixed_now: Option<&str>,
+        purged_raws: &[String],
+        publish_ref: bool,
     ) -> Result<SnapshotOutcome> {
         self.validate()?;
         let _lock = StoreLock::acquire(&self.kcs_dir)?;
@@ -963,6 +980,8 @@ impl Repository {
             &normalize_by_path,
             &BTreeSet::new(),
             true,
+            purged_raws,
+            publish_ref,
         )
     }
 
@@ -1016,6 +1035,8 @@ impl Repository {
         normalize_by_path: &BTreeMap<String, PendingNormalizeRef>,
         explicitly_allowed_tier_a_paths: &BTreeSet<String>,
         force_commit: bool,
+        purged_raws: &[String],
+        publish_ref: bool,
     ) -> Result<SnapshotOutcome> {
         self.validate()?;
         let _lock = StoreLock::acquire(&self.kcs_dir)?;
@@ -1030,6 +1051,38 @@ impl Repository {
                 ArchiveLimits::default(),
             )?
             .tree;
+
+        // U19/LC22-LC26: a raw_hash that is both (a) present in the tree we are
+        // about to commit and (b) currently the target of an *active*
+        // tombstone/erase-receipt is a resurrection candidate — raw CAS bytes
+        // were just (re)published for it above (`build_working_tree_...`'s
+        // `archive_staged_working_tree`, content-addressed and therefore
+        // idempotent whether or not the object already existed). This purge
+        // commit's own snapshot (`commit_type == Purged`) is excluded: its
+        // tree still carries the entry being purged in the *same* operation
+        // (DAG is not rewritten — 05 §3.5), and no tombstone for it exists yet
+        // at this point in the purge orchestration, so the guard is defensive
+        // (keeps a mid-purge re-run of this method, e.g. re-purge, from ever
+        // retiring the marker it is itself about to create).
+        let resurrection_candidates = if commit_type == CommitType::Purged {
+            BTreeSet::new()
+        } else {
+            let purge = PurgeState::new(&self.kcs_dir);
+            let mut candidates = BTreeSet::new();
+            for entry in &working.entries {
+                let tombstoned = purge
+                    .read_tombstone(&entry.raw_hash)?
+                    .is_some_and(|record| record.is_active());
+                let erased = purge
+                    .read_erase_receipt(&entry.raw_hash)?
+                    .is_some_and(|receipt| receipt.is_active());
+                if tombstoned || erased {
+                    candidates.insert(entry.raw_hash.clone());
+                }
+            }
+            candidates
+        };
+
         let tree_value =
             serde_json::to_value(&working).map_err(|err| KcsError::schema(err.to_string()))?;
         let (tree_hash, _) = self.store.write_json(ObjectKind::Tree, &tree_value)?;
@@ -1075,7 +1128,16 @@ impl Repository {
         };
         let stats = commit_stats(prior_tree.as_ref(), &working);
 
-        if !force_commit && head_tree_hash.as_deref() == Some(tree_hash.as_str()) {
+        // A resurrection candidate forces a real commit even when the tree is
+        // byte-identical to HEAD's (LC22-26): otherwise the raw bytes we just
+        // republished into CAS above would have no distinguishing
+        // `resurrection_commit` to retire the marker against, and the
+        // tombstone/receipt would stay active indefinitely despite the raw
+        // object being alive again.
+        if !force_commit
+            && resurrection_candidates.is_empty()
+            && head_tree_hash.as_deref() == Some(tree_hash.as_str())
+        {
             return Ok(SnapshotOutcome {
                 noop: true,
                 message: "snapshot noop: tree unchanged".to_owned(),
@@ -1097,18 +1159,46 @@ impl Repository {
                 _ => format!("snapshot at {created_at}"),
             });
         let parents = head_hash.into_iter().collect::<Vec<_>>();
-        let commit = CommitObject::new(
-            tree_hash.clone(),
-            parents,
-            created_at,
-            message,
-            self.tool_lock_hash()?,
-            stats.clone(),
-            commit_type,
-        )?;
+        let commit = if commit_type == CommitType::Purged {
+            CommitObject::new_purged(
+                tree_hash.clone(),
+                parents,
+                created_at,
+                message,
+                self.tool_lock_hash()?,
+                stats.clone(),
+                purged_raws.to_vec(),
+            )?
+        } else {
+            CommitObject::new(
+                tree_hash.clone(),
+                parents,
+                created_at,
+                message,
+                self.tool_lock_hash()?,
+                stats.clone(),
+                commit_type,
+            )?
+        };
         let commit_value =
             serde_json::to_value(&commit).map_err(|err| KcsError::schema(err.to_string()))?;
+        // Content-addressed and therefore harmless/idempotent even when
+        // `publish_ref` is false: the object becomes durable in the CAS but is
+        // not yet reachable from any ref (05-runtime.md §3.5's `planned_commit`
+        // — LC48 — computed and fixed once at the purge journal's `prepared`
+        // phase, published for real later at `committed`).
         let (commit_hash, _) = self.store.write_json(ObjectKind::Commit, &commit_value)?;
+
+        if !publish_ref {
+            return Ok(SnapshotOutcome {
+                noop: false,
+                message: "snapshot computed (ref not published)".to_owned(),
+                tree_hash,
+                commit_hash: Some(commit_hash),
+                commit: Some(commit),
+                stats,
+            });
+        }
 
         // Known limitation (WS1c S6, 2026-07-03): refs/heads/main and HEAD are
         // advanced by two separate atomic renames. Each rename is individually
@@ -1123,6 +1213,24 @@ impl Repository {
         )?;
         atomic_overwrite(&self.kcs_dir.join("HEAD"), commit_hash.as_bytes())?;
         self.write_manifest(&working, prior_tree.as_ref())?;
+
+        // U19/LC23-LC25: retire is appended only *after* this snapshot's
+        // finalize (commit + ref publish + manifest, all now durable above) —
+        // "same locked mutation" is satisfied because `_lock` (reentrant) is
+        // still held. A crash before this point leaves the tombstone/receipt
+        // active (LC24, safe side); the next locked mutation touching this
+        // raw_hash (this same code path, naturally re-run) or an explicit
+        // `kcs repair --verify-objects` backfill (LC27) completes it later.
+        if !resurrection_candidates.is_empty() {
+            let purge = PurgeState::new(&self.kcs_dir);
+            let actor = std::env::var("USER").unwrap_or_else(|_| "local-user".to_owned());
+            purge.retire_resurrected(
+                &resurrection_candidates,
+                &commit_hash,
+                &commit.created_at,
+                &actor,
+            )?;
+        }
 
         Ok(SnapshotOutcome {
             noop: false,
@@ -2925,7 +3033,13 @@ fn orphan_raw_ingest_error(path: &Path, message: &str) -> KcsError {
     )
 }
 
-fn ensure_raw_publication_allowed(purge: &PurgeState, raw_hash: &str) -> Result<bool> {
+/// U19/LC22: a public tombstone (or fsck-only erase receipt) no longer
+/// permanently rejects identical-byte re-ingest — that block is reversed into
+/// the resurrection flow (retire-on-republish, see
+/// [`Repository::retire_resurrected_after_publish`]). Only an active
+/// post-`prepared` purge journal barrier for this exact raw_hash (an
+/// in-progress, not-yet-complete purge) still gates publication.
+fn ensure_raw_publication_allowed(purge: &PurgeState, raw_hash: &str) -> Result<()> {
     if purge.barrier_blocks(raw_hash)? {
         return Err(KcsError::new(
             "KCS-E-PURGE-INCOMPLETE-001",
@@ -2934,15 +3048,7 @@ fn ensure_raw_publication_allowed(purge: &PurgeState, raw_hash: &str) -> Result<
             ExitCode::PartialFailure,
         ));
     }
-    if purge.read_tombstone(raw_hash)?.is_some() {
-        return Err(KcsError::new(
-            "KCS-E-PURGE-TOMBSTONED-001",
-            "raw publication is blocked by a public tombstone",
-            json!({ "component": "raw_ingest" }),
-            ExitCode::PermanentFailure,
-        ));
-    }
-    Ok(purge.read_erase_receipt(raw_hash)?.is_some())
+    Ok(())
 }
 
 fn attach_pending_normalize(
@@ -3414,7 +3520,7 @@ fn hex_prefix(bytes: &[u8], chars: usize) -> String {
     out
 }
 
-fn is_ulid(value: &str) -> bool {
+pub(crate) fn is_ulid(value: &str) -> bool {
     value.len() == 26
         && value
             .bytes()
@@ -4250,7 +4356,12 @@ mod tests {
         let parent_tree = repo.read_commit(&parent).unwrap().tree;
 
         let outcome = repo
-            .purged_snapshot("legal", Some("2026-07-13T00:00:00Z"))
+            .purged_snapshot(
+                "legal",
+                Some("2026-07-13T00:00:00Z"),
+                &[hash_bytes(b"retained")],
+                true,
+            )
             .unwrap();
         assert!(!outcome.noop);
         let commit_hash = outcome.commit_hash.unwrap();
@@ -4260,6 +4371,47 @@ mod tests {
         assert_eq!(commit.parents, vec![parent]);
         assert_eq!(commit.tree, parent_tree);
         assert_eq!(commit.created_at, "2026-07-13T00:00:00Z");
+        assert_eq!(commit.purged_raws, vec![hash_bytes(b"retained")]);
+    }
+
+    #[test]
+    fn lc48_purged_snapshot_dry_run_computes_planned_commit_without_publishing_ref() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = Repository::init(dir.path()).unwrap();
+        fs::write(dir.path().join("doc.txt"), b"retained").unwrap();
+        let parent = repo
+            .snapshot(Some("initial"), Some("2026-07-12T00:00:00Z"))
+            .unwrap()
+            .commit_hash
+            .unwrap();
+
+        let dry = repo
+            .purged_snapshot(
+                "legal",
+                Some("2026-07-13T00:00:00Z"),
+                &[hash_bytes(b"retained")],
+                false,
+            )
+            .unwrap();
+        let planned_commit = dry.commit_hash.clone().unwrap();
+        // The commit object is durably content-addressed (readable by hash)...
+        let commit = repo.read_commit(&planned_commit).unwrap();
+        assert_eq!(commit.commit_type, CommitType::Purged);
+        // ...but HEAD/refs were not advanced onto it.
+        assert_eq!(repo.head_commit_hash().unwrap(), Some(parent.clone()));
+
+        // Publishing for real re-derives the identical hash (deterministic,
+        // content-addressed) and advances HEAD.
+        let real = repo
+            .purged_snapshot(
+                "legal",
+                Some("2026-07-13T00:00:00Z"),
+                &[hash_bytes(b"retained")],
+                true,
+            )
+            .unwrap();
+        assert_eq!(real.commit_hash, Some(planned_commit.clone()));
+        assert_eq!(repo.head_commit_hash().unwrap(), Some(planned_commit));
     }
 
     #[test]
@@ -4276,7 +4428,12 @@ mod tests {
         fs::remove_file(dir.path().join("removed.txt")).unwrap();
 
         let outcome = repo
-            .purged_snapshot("privacy", Some("2026-07-13T00:00:00Z"))
+            .purged_snapshot(
+                "privacy",
+                Some("2026-07-13T00:00:00Z"),
+                &[hash_bytes(b"remove before purge")],
+                true,
+            )
             .unwrap();
         let commit = outcome.commit.unwrap();
         let tree = repo.read_tree(&commit.tree).unwrap();

@@ -1911,7 +1911,7 @@ fn ct3_evidence_005_shallow_commit_resolves_directly() {
 
 #[test]
 fn ct3_evidence_006_three_valued_resolution_failures() {
-    // (a) tombstoned -> status="purged" response, open exit 4.
+    // (a) tombstoned -> status="tombstoned" response, open exit 4.
     let dir = indexed_scope();
     let search = json_success(&dir, &["search", "トークン TTL 3600"]);
     let pointer = first_result(&search)["evidence_pointer"].clone();
@@ -1934,7 +1934,7 @@ fn ct3_evidence_006_three_valued_resolution_failures() {
     let ptr = pointer.to_string();
     let err = json_failure(&dir, &["open", &ptr], 4);
     assert_eq!(err["error_code"], "KCS-E-PURGE-TOMBSTONED-001");
-    assert_eq!(err["context"]["status"], "purged");
+    assert_eq!(err["context"]["status"], "tombstoned");
     assert_eq!(err["context"]["purged_reason"], "legal");
     assert_eq!(err["context"]["raw_hash"], raw_hash);
 

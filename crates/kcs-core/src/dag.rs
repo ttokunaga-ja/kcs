@@ -192,6 +192,14 @@ pub struct CommitObject {
     pub stats: CommitStats,
     pub tool_lock_hash: String,
     pub tree: String,
+    /// Required, non-empty, strictly-sorted-ascending raw_hash list when
+    /// `commit_type == Purged`; absent (never serialized) for every other
+    /// commit type (03 §8 L705). Marker validity (10 §7.5.1) cross-references a
+    /// tombstone/erase-receipt event's raw_hash against this field so a purge
+    /// commit borrowed as `in_commit` for an unrelated raw cannot mask a
+    /// genuine missing object.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub purged_raws: Vec<String>,
 }
 
 impl CommitObject {
@@ -213,6 +221,37 @@ impl CommitObject {
             stats,
             tool_lock_hash,
             tree,
+            purged_raws: Vec::new(),
+        };
+        commit.validate()?;
+        Ok(commit)
+    }
+
+    /// Construct a `commit_type=purged` commit. `purged_raws` is the purge's
+    /// target raw_hash set; it is sorted and deduplicated here so callers never
+    /// need to pre-sort (05-runtime.md §3.5's journal already keeps the target
+    /// list sorted, but this constructor does not trust that invariant blindly).
+    pub fn new_purged(
+        tree: String,
+        parents: Vec<String>,
+        created_at: String,
+        message: String,
+        tool_lock_hash: String,
+        stats: CommitStats,
+        mut purged_raws: Vec<String>,
+    ) -> Result<Self> {
+        purged_raws.sort();
+        purged_raws.dedup();
+        let commit = Self {
+            commit_type: CommitType::Purged,
+            created_at,
+            message,
+            object_type: "commit".to_owned(),
+            parents,
+            stats,
+            tool_lock_hash,
+            tree,
+            purged_raws,
         };
         commit.validate()?;
         Ok(commit)
@@ -242,6 +281,31 @@ impl CommitObject {
         if !is_valid_created_at(&self.created_at) {
             return Err(KcsError::schema(
                 "created_at must be UTC ISO8601 YYYY-MM-DDTHH:MM:SSZ",
+            ));
+        }
+        if self.commit_type == CommitType::Purged {
+            if self.purged_raws.is_empty() {
+                return Err(KcsError::schema(
+                    "commit_type=purged requires a non-empty purged_raws",
+                ));
+            }
+            let mut previous: Option<&str> = None;
+            for raw_hash in &self.purged_raws {
+                if !is_hash(raw_hash) {
+                    return Err(KcsError::schema(
+                        "purged_raws entries must be sha256 lowercase hex",
+                    ));
+                }
+                if previous.is_some_and(|value| value >= raw_hash.as_str()) {
+                    return Err(KcsError::schema(
+                        "purged_raws must be strictly sorted ascending",
+                    ));
+                }
+                previous = Some(raw_hash);
+            }
+        } else if !self.purged_raws.is_empty() {
+            return Err(KcsError::schema(
+                "purged_raws is only valid on a commit_type=purged commit",
             ));
         }
         Ok(())

@@ -1,3 +1,9 @@
+//! U19/LC22-LC33: tombstone/erase-receipt resurrection. Step4b reverses the
+//! old "public tombstone permanently rejects identical-byte re-ingest" rule:
+//! re-publication is now allowed, and the same locked mutation that
+//! republishes the raw retires the marker (appends `retired`; never deletes
+//! it — LC33).
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 
@@ -89,58 +95,109 @@ fn fake_pdf(text: &str) -> String {
     )
 }
 
+/// LC22/LC23/LC25: re-ingest of an identical-byte, actively-tombstoned raw is
+/// now *allowed* (not `KCS-E-PURGE-TOMBSTONED-001`) — both at the
+/// `Repository` primitive level and through the CLI — and the tombstone is
+/// retired (LC24: `is_active()` flips false) with a `resurrection_commit`
+/// pointing at the republishing commit, in the same operation.
 #[test]
-fn ct4_purge_default_tombstone_rejects_reingest_before_any_raw_publication() {
+fn ct4_purge_reingest_after_default_tombstone_republishes_and_retires() {
     let dir = tempfile::tempdir().unwrap();
-    let blocked_bytes = b"# Blocked\n\ndefault tombstone identity\n";
-    fs::write(dir.path().join("z-blocked.md"), blocked_bytes).unwrap();
+    let bytes = b"# Reintroduced\n\ndefault tombstone allows resurrection\n";
+    let raw_hash = hash_bytes(bytes);
+    fs::write(dir.path().join("doc.md"), bytes).unwrap();
     json_success(&dir, &["init"]);
     json_success(&dir, &["index", "--offline", "--approve"]);
-    let blocked_hash = current_raw(&dir, "z-blocked.md");
-    fs::remove_file(dir.path().join("z-blocked.md")).unwrap();
+    assert_eq!(current_raw(&dir, "doc.md"), raw_hash);
+    fs::remove_file(dir.path().join("doc.md")).unwrap();
     json_success(
         &dir,
         &[
             "purge",
             "--raw-hash",
-            &blocked_hash,
+            &raw_hash,
             "--reason",
             "privacy",
             "--yes",
         ],
     );
-    assert!(!raw_exists(&dir, &blocked_hash));
-    let head = fs::read(dir.path().join(".kcs/HEAD")).unwrap();
+    assert!(!raw_exists(&dir, &raw_hash));
+    let purge = PurgeState::new(dir.path().join(".kcs"));
+    assert!(purge
+        .read_tombstone(&raw_hash)
+        .unwrap()
+        .unwrap()
+        .is_active());
 
-    let allowed_bytes = b"# Allowed\n\nmust not publish before complete gate\n";
-    let allowed_hash = hash_bytes(allowed_bytes);
-    fs::write(dir.path().join("a-allowed.md"), allowed_bytes).unwrap();
-    fs::write(dir.path().join("z-blocked.md"), blocked_bytes).unwrap();
-
-    // Exercise the core boundary directly: every candidate is staged and gated
-    // before the first raw publication, independent of directory iteration order.
+    // Repository-primitive path (auto_snapshot_with_bound_normalize, the same
+    // entry point `kcs index` uses): re-ingest succeeds, does not error.
+    fs::write(dir.path().join("doc.md"), bytes).unwrap();
     let repo = Repository::open(dir.path()).unwrap();
-    let error = repo
+    let outcome = repo
         .auto_snapshot_with_bound_normalize(
-            Some("must fail"),
+            Some("resurrection"),
             None,
             &BTreeSet::new(),
             &BTreeMap::new(),
             &BTreeSet::new(),
         )
-        .unwrap_err();
-    assert_eq!(error.error_code(), "KCS-E-PURGE-TOMBSTONED-001");
-    assert!(!raw_exists(&dir, &allowed_hash));
-    assert!(!raw_exists(&dir, &blocked_hash));
+        .unwrap();
+    assert!(!outcome.noop);
+    let resurrection_commit = outcome.commit_hash.unwrap();
+    assert!(raw_exists(&dir, &raw_hash));
     assert!(ingest_temps(&dir).is_empty());
-    assert_eq!(fs::read(dir.path().join(".kcs/HEAD")).unwrap(), head);
 
-    let cli_error = json_failure(&dir, &["index", "--offline", "--approve"], 4);
-    assert_eq!(cli_error["error_code"], "KCS-E-PURGE-TOMBSTONED-001");
-    assert!(!raw_exists(&dir, &allowed_hash));
-    assert!(ingest_temps(&dir).is_empty());
+    // Same locked mutation retired the tombstone (LC22-LC26).
+    let record = purge.read_tombstone(&raw_hash).unwrap().unwrap();
+    assert!(!record.is_active(), "{record:?}");
+    assert_eq!(record.tail().kind, kcs_core::purge::EventKind::Retired);
+    assert_eq!(
+        record.tail().resurrection_commit.as_deref(),
+        Some(resurrection_commit.as_str())
+    );
+
+    // The lifecycle-epoch counter advanced (LC26) and the CLI itself now
+    // resolves the raw as alive (not a dead pointer).
+    assert_eq!(current_raw(&dir, "doc.md"), raw_hash);
+    let status = json_success(&dir, &["status"]);
+    assert!(status["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|file| file["relative_path"] == "doc.md"));
+
+    // Full CLI round trip too: purge again, then `kcs index` (not just the
+    // repository primitive) republishes and retires.
+    fs::remove_file(dir.path().join("doc.md")).unwrap();
+    json_success(
+        &dir,
+        &[
+            "purge",
+            "--raw-hash",
+            &raw_hash,
+            "--reason",
+            "legal",
+            "--yes",
+        ],
+    );
+    assert!(purge
+        .read_tombstone(&raw_hash)
+        .unwrap()
+        .unwrap()
+        .is_active());
+    fs::write(dir.path().join("doc.md"), bytes).unwrap();
+    let index_output = json_success(&dir, &["index", "--offline", "--approve"]);
+    assert!(index_output.get("error_code").is_none(), "{index_output}");
+    assert!(raw_exists(&dir, &raw_hash));
+    assert!(!purge
+        .read_tombstone(&raw_hash)
+        .unwrap()
+        .unwrap()
+        .is_active());
 }
 
+/// LC33: an erase receipt is retired the same way (appended `retired`, never
+/// removed — reversing the old "delete the receipt on republish" rule).
 #[test]
 fn ct4_purge_erase_receipt_is_ignored_then_retired_by_explicit_ingest() {
     let dir = tempfile::tempdir().unwrap();
@@ -167,7 +224,11 @@ fn ct4_purge_erase_receipt_is_ignored_then_retired_by_explicit_ingest() {
         ],
     );
     let purge = PurgeState::new(dir.path().join(".kcs"));
-    assert!(purge.read_erase_receipt(&raw_hash).unwrap().is_some());
+    assert!(purge
+        .read_erase_receipt(&raw_hash)
+        .unwrap()
+        .unwrap()
+        .is_active());
 
     let historical = json_success(&dir, &["reindex", "--at", &historical_head]);
     assert_eq!(historical["blocked_raw_hashes"], 0);
@@ -175,10 +236,18 @@ fn ct4_purge_erase_receipt_is_ignored_then_retired_by_explicit_ingest() {
     fs::write(dir.path().join("doc.md"), bytes).unwrap();
     json_success(&dir, &["index", "--offline", "--approve"]);
     assert!(raw_exists(&dir, &raw_hash));
-    assert!(purge.read_erase_receipt(&raw_hash).unwrap().is_none());
+    // LC33: the receipt file persists (append-only), now retired rather than
+    // deleted — it still explains any older commit's manifest gap (LC17).
+    let receipt = purge.read_erase_receipt(&raw_hash).unwrap().unwrap();
+    assert!(!receipt.is_active());
+    assert_eq!(receipt.tail().kind, kcs_core::purge::EventKind::Retired);
     assert_eq!(current_raw(&dir, "doc.md"), raw_hash);
 }
 
+/// The *orthogonal* barrier (LC22's note: `barrier_blocks` from an active,
+/// not-yet-`done` purge journal) is unrelated to the resurrection reversal
+/// and still blocks ingest with `KCS-E-PURGE-INCOMPLETE-001` while a purge
+/// transaction is genuinely in flight.
 #[test]
 fn ct4_purge_active_barrier_blocks_index_and_leaves_no_raw_or_temp() {
     let dir = tempfile::tempdir().unwrap();
@@ -199,7 +268,7 @@ fn ct4_purge_active_barrier_blocks_index_and_leaves_no_raw_or_temp() {
             "--yes",
         ],
     )
-    .env("KCS_TEST_PURGE_FAIL_AFTER_PHASE", "barrier_published")
+    .env("KCS_TEST_PURGE_FAIL_AFTER_PHASE", "tombstoned")
     .arg("--json")
     .assert()
     .code(3)
