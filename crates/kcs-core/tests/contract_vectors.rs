@@ -333,6 +333,7 @@ fn vector_tree() -> kcs_core::dag::TreeObject {
             normalize: Some(NormalizeRef {
                 tool_profile_hash: TOOL_PROFILE.to_owned(),
                 gen: 0,
+                manifest_hash: None,
             }),
         },
         TreeEntry {
@@ -342,6 +343,7 @@ fn vector_tree() -> kcs_core::dag::TreeObject {
             normalize: Some(NormalizeRef {
                 tool_profile_hash: TOOL_PROFILE.to_owned(),
                 gen: 0,
+                manifest_hash: None,
             }),
         },
     ])

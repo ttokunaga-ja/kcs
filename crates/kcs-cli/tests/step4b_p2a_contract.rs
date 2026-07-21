@@ -1092,20 +1092,19 @@ fn pa36_log_scrub_never_touches_a_different_scopes_row_sharing_the_same_raw_hash
 #[test]
 fn pa37_pa38_pa39_working_tree_residual_warns_instead_of_the_retired_hard_block() {
     // Full end-to-end completion while a purge target's exact bytes remain
-    // live in the working tree additionally requires the purged commit's own
-    // snapshot construction to skip re-publishing that still-present raw
-    // object (its archival step otherwise collides with the SAME active
-    // purge journal's own barrier — a separate, pre-existing gap in
+    // live in the working tree required the purged commit's own snapshot
+    // construction to skip re-publishing that still-present raw object (its
+    // archival step otherwise collided with the SAME active purge journal's
+    // own barrier — a P2-A-identified gap in
     // `Repository::snapshot_with_type`/`purged_snapshot`
-    // (crates/kcs-core/src/scope.rs), newly reachable now that ruling #1
-    // removed the hard block that used to make this scenario unreachable,
-    // but out of this contract's file-editing scope to fix (kcs-core/scope.rs
-    // is concurrently owned by another workstream this session). This test
-    // therefore pins the OBSERVABLE, in-scope part of ruling #1: the prior
-    // `KCS-E-PURGE-WORKING-COPY-001` hard block (exit 4) is gone, and the
-    // `working_tree_warning` is computed and surfaced even on the resulting
-    // `purge_incomplete` (exit 3) response — not that full completion with a
-    // live residual is bug-free end-to-end (tracked separately).
+    // (crates/kcs-core/src/scope.rs), reachable once ruling #1 removed the
+    // hard block that used to make this scenario unreachable). That gap is
+    // now fixed (`archive_staged_working_tree` excludes a purge's own
+    // targets from its own snapshot rebuild instead of barrier-blocking
+    // them), so this test now pins full end-to-end completion: the prior
+    // `KCS-E-PURGE-WORKING-COPY-001` hard block is gone, purge reaches
+    // `status: "purged"` (not `purge_incomplete`), and the
+    // `working_tree_warning` is still surfaced on that success response.
     let dir = tempfile::tempdir().unwrap();
     fs::write(dir.path().join("report-v1.pdf"), b"pa37 shared bytes").unwrap();
     init(&dir);
@@ -1115,7 +1114,7 @@ fn pa37_pa38_pa39_working_tree_residual_warns_instead_of_the_retired_hard_block(
     fs::write(dir.path().join("backup-copy.pdf"), b"pa37 shared bytes").unwrap();
     json_success(&dir, &["index", "--offline", "--approve"]);
 
-    let output = kcs(
+    let output = json_success(
         &dir,
         &[
             "purge",
@@ -1125,14 +1124,8 @@ fn pa37_pa38_pa39_working_tree_residual_warns_instead_of_the_retired_hard_block(
             "legal",
             "--yes",
         ],
-    )
-    .arg("--json")
-    .assert()
-    .code(3)
-    .get_output()
-    .stdout
-    .clone();
-    let output: Value = serde_json::from_slice(&output).unwrap();
+    );
+    assert_eq!(output["status"], "purged");
     assert_ne!(
         output["error_code"], "KCS-E-PURGE-WORKING-COPY-001",
         "§R ruling #1: the prior hard block must never fire, exit 4 or otherwise"
@@ -1148,6 +1141,20 @@ fn pa37_pa38_pa39_working_tree_residual_warns_instead_of_the_retired_hard_block(
         fs::read(dir.path().join("backup-copy.pdf")).unwrap(),
         b"pa37 shared bytes"
     );
+    assert_eq!(
+        fs::read(dir.path().join("report-v1.pdf")).unwrap(),
+        b"pa37 shared bytes"
+    );
+
+    // The purged raw_hash's tree entries are gone even though its bytes are
+    // still physically present under both paths — 05 §3.5's "purge 実行後の
+    // working tree" excludes the target, it does not mirror the untouched
+    // filesystem verbatim.
+    let repo = Repository::open(dir.path()).unwrap();
+    let head = repo.head_commit_hash().unwrap().unwrap();
+    let commit = repo.read_commit(&head).unwrap();
+    let tree = repo.read_tree(&commit.tree).unwrap();
+    assert!(tree.entries.iter().all(|entry| entry.raw_hash != raw_hash));
 
     // The SAME purge, without any working-tree residual, completes normally
     // and carries no warning at all — confirming the warning is specific to

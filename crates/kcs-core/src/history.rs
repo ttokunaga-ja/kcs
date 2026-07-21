@@ -981,6 +981,7 @@ mod tests {
         NormalizeRef {
             tool_profile_hash: hash_bytes(b"profile"),
             gen: 7,
+            manifest_hash: None,
         }
     }
 

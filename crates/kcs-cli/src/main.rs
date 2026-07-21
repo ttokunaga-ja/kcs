@@ -38,13 +38,13 @@ use kcs_adapter::types::{
     PreviousMarkdownizeContext, RawInput, UnitKind,
 };
 use kcs_core::cas::{
-    fanout_path, hash_path_component, is_hash, read_bounded_regular_file, ChunkObject, ObjectStore,
-    MAX_RAW_OBJECT_BYTES,
+    canonical_json_bytes, fanout_path, hash_path_component, is_hash, read_bounded_regular_file,
+    ChunkObject, ContentObjectKind, ObjectStore, MAX_RAW_OBJECT_BYTES,
 };
 use kcs_core::dag::{CommitType, NormalizeRef, TreeObject};
 use kcs_core::history::{HistoryReader, TreeBinding};
 use kcs_core::portable::{portable_cache_leaf, portable_tag_leaf, PORTABLE_TAGS_DIRECTORY};
-use kcs_core::purge::{canonical_final_event, EventKind, PurgeState};
+use kcs_core::purge::{canonical_final_event, EventKind, PurgeState, TombstoneMode};
 use kcs_core::schema::{validate_json_schema, SchemaKind};
 use kcs_core::scope::{
     append_error_log, append_event_log, append_warn_log, new_ulid, now_utc_seconds,
@@ -1272,6 +1272,7 @@ fn scope_embedding_state(kcs_dir: &Path) -> ScopeEmbedState {
 /// (PC4 — OR across scopes, computed by the caller via
 /// `embedding_opt_in_for_scopes`); AND a query embedding is obtainable.
 fn resolve_vector_availability(
+    requested: SearchMode,
     exec_scopes: &[ExecScope],
     offline: bool,
     endpoint_configured: bool,
@@ -1298,9 +1299,22 @@ fn resolve_vector_availability(
             ScopeEmbedState::Absent => any_absent = true,
         }
     }
+    // PC52 (05 §1.8 L390): explicit `--vector` does not fold a per-scope
+    // profile mismatch into this device-wide aggregate the way auto/
+    // `--hybrid` do (PC1 line (b), unchanged below) — as long as at least
+    // one scope IS compatible, resolution proceeds past the `Incompatible`
+    // branch here, and `search_one_scope_inner`'s own per-scope compat gate
+    // excludes just the mismatched scope(s) instead of this function
+    // forcing a device-wide `Incompatible` that would hard-error the WHOLE
+    // command (PC30's existing single-scope `--vector` + incompatible hard
+    // error is unaffected: with only one scope, "at least one compatible"
+    // failing IS "zero compatible", so it still falls through to
+    // `Incompatible` below exactly as before).
+    let vector_explicit_partial_compat =
+        requested == SearchMode::Vector && any_compatible && (any_incompatible || any_absent);
     // PC1 line (b): profile incompatibility precedes the PC1 line (c) consent
     // check below (an incompatible scope's approval state is moot).
-    if any_incompatible || (any_compatible && any_absent) {
+    if (any_incompatible || (any_compatible && any_absent)) && !vector_explicit_partial_compat {
         VectorAvailability::Incompatible
     } else if !any_compatible {
         VectorAvailability::Unavailable {
@@ -1541,6 +1555,15 @@ fn run_search(args: UnsupportedArgs) -> Result<Value> {
 
 fn run_search_inner(args: UnsupportedArgs, started: Instant) -> Result<Value> {
     let parsed = parse_search_args(without_json(args.args))?;
+    // PC10 (05 §1.3 L115): a query that tokenizes to zero tokens (empty, or
+    // whitespace-only under PC9's Unicode-whitespace split) is a usage error
+    // — rejected here, before any repo/registry/index access ("起動時に...
+    // 拒否する (index/registry へのアクセス前)").
+    if query_tokens(&parsed.query.nfc().collect::<String>()).is_empty() {
+        return Err(KcsError::invalid_usage(
+            "search query has no indexable token",
+        ));
+    }
     let repo = Repository::open_current_for_search()?;
     validate_repo_tool_lock(&repo)?;
 
@@ -1679,6 +1702,7 @@ fn run_search_inner(args: UnsupportedArgs, started: Instant) -> Result<Value> {
     };
     let query_embeddable = parsed.query.chars().count() >= 2;
     let vector_precheck = resolve_vector_availability(
+        requested_mode,
         &exec_scopes,
         parsed.offline,
         embedding_execution().is_some(),
@@ -1833,10 +1857,10 @@ fn run_search_inner(args: UnsupportedArgs, started: Instant) -> Result<Value> {
     }
 
     // Per-scope: FTS5 text ranks + chunk_vec KNN vector ranks -> RRF -> candidate
-    // pool. Vector ranks are supplied only in hybrid/vector mode (K4). F2: build
-    // the FTS tiers from the NFC-normalized query to match the NFC index
+    // pool. Vector ranks are supplied only in hybrid/vector mode (K4). F2/PC8/PC9:
+    // build the query plan from the NFC-normalized query to match the NFC index
     // projection.
-    let tiers = build_fts_tiers(&query_nfc);
+    let query_plan = build_query_plan(&query_nfc);
     // Only feed vectors into the KNN when the resolved mode actually uses them;
     // a text fallback (incompatible/absent) must stay pure text.
     let scope_query_embedding = matches!(mode.resolved, SearchMode::Hybrid | SearchMode::Vector)
@@ -1854,7 +1878,8 @@ fn run_search_inner(args: UnsupportedArgs, started: Instant) -> Result<Value> {
                 &exec_scopes[idx],
                 idx,
                 ScopeSearchRequest {
-                    tiers: &tiers,
+                    match_expr: query_plan.match_expr.as_deref(),
+                    short_tokens: &query_plan.short_tokens,
                     resolved_mode: mode.resolved,
                     query_embedding: scope_query_embedding,
                     rrf_config,
@@ -1976,6 +2001,32 @@ fn run_search_inner(args: UnsupportedArgs, started: Instant) -> Result<Value> {
                 "KCS-E-STORE-VERSION-001",
                 "every searched scope's kcs_format_version is newer than this build supports; \
                  upgrade kcs",
+                json!({ "excluded_scopes": excluded }),
+                ExitCode::IncompatibleProfile,
+            ));
+        }
+        // PC52/PC54/PC55(c) (05 §1.8 L390-391 / §R note-4 ruling: VERSION →
+        // INCOMPAT → journal → DUP → REBUILDING): every enumerated scope was
+        // excluded by explicit `--vector`'s own per-scope profile-compat gate
+        // (`search_one_scope_inner`'s `VEC_PROFILE_INCOMPATIBLE_REASON` /
+        // `VEC_PROFILE_ABSENT_REASON`, checked only when `resolved_mode ==
+        // Vector`). Checked second, right after STORE-VERSION and ahead of
+        // journal/DUP/REBUILDING — same exit-8 family as STORE-VERSION
+        // (`KCS-E-SEARCH-VEC-INCOMPAT-001` mirrors PC30's already-confirmed
+        // single-scope `--vector` + incompatible hard error, generalized here
+        // to "every scope", not just one).
+        let all_vec_incompatible = !excluded.is_empty()
+            && excluded.iter().all(|entry| {
+                matches!(
+                    entry.get("reason").and_then(Value::as_str),
+                    Some(VEC_PROFILE_INCOMPATIBLE_REASON) | Some(VEC_PROFILE_ABSENT_REASON)
+                )
+            });
+        if all_vec_incompatible {
+            return Err(KcsError::new(
+                "KCS-E-SEARCH-VEC-INCOMPAT-001",
+                "every searched scope's embedding profile is incompatible with (or absent from) \
+                 the adopted embedding profile; vector search cannot run",
                 json!({ "excluded_scopes": excluded }),
                 ExitCode::IncompatibleProfile,
             ));
@@ -2176,13 +2227,13 @@ fn run_search_inner(args: UnsupportedArgs, started: Instant) -> Result<Value> {
         .map_err(search_to_kcs)?;
     }
 
-    // N8: now that scope resolution, the all-failed check, and (below) index_status
-    // are honored, a short (< 2 char) query — which produces no indexable token —
-    // short-circuits the ranking/paging with an honest empty page that still
-    // reports the real searched scopes and index_status.
-    if parsed.query.chars().count() < 2 {
-        return empty_search_response(&parsed, &repo, started, &mode, &searched, &excluded);
-    }
+    // N8/PC10/PC11 (05 §1.3 L95-97, L115): the former short-query
+    // (< 2 char) short-circuit to an empty page is gone — PC10 already
+    // rejects the genuine zero-token case at the very top of this function
+    // (before any repo/registry/index access), and PC11 gives every
+    // remaining short (1-2 Unicode scalar) query real candidates via the
+    // bounded LIKE fallback (`execute_like_fallback`) instead of a forced
+    // empty result. `searched`/`candidates` above already reflect that.
 
     // Cross-scope merge is rank-based: RRF score desc, tie-break (scope_id,
     // chunk_hash) — never compare raw BM25 across corpora (05 §1.8 / CT3-MULTI-002).
@@ -2425,6 +2476,22 @@ const PURGE_JOURNAL_ACTIVE_REASON: &str = "purge_journal_active";
 /// `INDEX_REBUILDING_REASON`).
 const STORE_VERSION_INCOMPATIBLE_REASON: &str = "store_version_incompatible";
 
+/// PC52/PC55(c) (05 §1.8 L390-391): this scope's chunk-embedding profile
+/// does not match the currently adopted embedding profile — checked only
+/// for explicit `--vector` (auto/`--hybrid` fold this into the device-wide
+/// text-fallback aggregate upstream, `resolve_vector_availability`).
+/// Surfaced as `KCS-E-SEARCH-VEC-INCOMPAT-001` / exit 8 when it is the sole
+/// exclusion reason across every searched scope (`all_vec_incompatible` in
+/// `run_search_inner`, mirroring `STORE_VERSION_INCOMPATIBLE_REASON`'s own
+/// promotion — §R ruling 4's VERSION → INCOMPAT priority).
+const VEC_PROFILE_INCOMPATIBLE_REASON: &str = "embedding_profile_incompatible";
+
+/// PC52: this scope has no chunk-embedding data at all — checked only for
+/// explicit `--vector`, same reasoning as `VEC_PROFILE_INCOMPATIBLE_REASON`.
+/// Reuses `resolve_vector_availability`'s own `"embedding_index_missing"`
+/// reason string for the device-wide equivalent of this per-scope cause.
+const VEC_PROFILE_ABSENT_REASON: &str = "embedding_index_missing";
+
 /// PC19/PC21: the `index_generation` sentinel for a store that predates
 /// `index_metadata` (Phase 1c). Never equal to a real ULID, so a cursor
 /// frozen against the sentinel is correctly invalidated once the scope gains
@@ -2468,7 +2535,15 @@ struct ScopeTimeRequest<'a> {
 
 #[derive(Clone, Copy)]
 struct ScopeSearchRequest<'a> {
-    tiers: &'a [String],
+    /// PC8 (05 §1.3 L110-115): the single OR-joined FTS5 MATCH expression
+    /// over every token with >= 3 Unicode scalars, or `None` when every
+    /// token is short (PC11's bounded-LIKE-only fallback).
+    match_expr: Option<&'a str>,
+    /// PC11/PC12/PC13 (05 §1.3 L95-106): tokens with < 3 Unicode scalars —
+    /// applied as `instr(text, token) > 0` eligibility conditions common to
+    /// both the text and vector backends, and to the LIKE fallback's own
+    /// ORDER BY (PC14) when `match_expr` is `None`.
+    short_tokens: &'a [String],
     resolved_mode: SearchMode,
     query_embedding: Option<&'a [f32]>,
     rrf_config: RrfConfig,
@@ -2537,11 +2612,38 @@ fn ensure_no_visible_purge_journal(kcs_dir: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Persistent tombstones and the active visibility barrier are both authoritative
-/// over append-only history/chunk ledgers. Derived rebuilds must omit either form.
+/// The active visibility barrier and canonical marker state are both
+/// authoritative over append-only history/chunk ledgers. Derived rebuilds
+/// must omit a raw_hash whose canonical final event (LC8-14/PB64-68's
+/// cross-marker aggregation — `kcs_core::purge::canonical_final_event`) is
+/// `purged`/`erased`.
+///
+/// Item 2 fix (surfaced by PB46/PB64's evidence-verify ancestry checks,
+/// which are the first consumer of `chunk_publications`/
+/// `chunk_config_generations` sensitive to this): this used to short-circuit
+/// on `read_tombstone(...).is_some()` — true whenever a tombstone RECORD
+/// exists at all, regardless of its own tail or a co-existing erase
+/// receipt's higher-`lifecycle_epoch` `retired` tail. A resurrected raw_hash
+/// (canonical = `retired`) therefore stayed excluded from every rebuild
+/// forever after its first purge, even though `08 §3.1`'s resolvers treat it
+/// as alive — `kcs repair --rebuild-db` after a resurrection silently
+/// dropped its chunk from `chunk_publications`/`tree_entries`/FTS, which
+/// then made a freshly-alive pointer's own v2/v3 ancestry check (this
+/// session's new consumer) resolve `not_found` against a rebuilt index, even
+/// though the un-rebuilt index (and the raw object itself) were fine.
 fn purge_blocks_rebuild_raw(kcs_dir: &Path, raw_hash: &str) -> Result<bool> {
     let state = PurgeState::new(kcs_dir);
-    Ok(state.read_tombstone(raw_hash)?.is_some() || state.barrier_blocks(raw_hash)?)
+    if state.barrier_blocks(raw_hash)? {
+        return Ok(true);
+    }
+    let tombstone_tail = state
+        .read_tombstone(raw_hash)?
+        .map(|record| record.tail().clone());
+    let receipt_tail = state
+        .read_erase_receipt(raw_hash)?
+        .map(|receipt| receipt.tail().clone());
+    let canonical = canonical_final_event(tombstone_tail.as_ref(), receipt_tail.as_ref());
+    Ok(canonical.is_some_and(|canonical| canonical.event.kind != EventKind::Retired))
 }
 
 fn search_one_scope(
@@ -2577,7 +2679,8 @@ fn search_one_scope_inner(
     request: ScopeSearchRequest<'_>,
 ) -> std::result::Result<ScopeOutcome, ScopeSearchError> {
     let ScopeSearchRequest {
-        tiers,
+        match_expr,
+        short_tokens,
         resolved_mode,
         query_embedding,
         rrf_config,
@@ -2606,6 +2709,31 @@ fn search_one_scope_inner(
         }
     })?;
     scope_deadline_check(deadline)?;
+
+    // PC52 (05 §1.8 L390): explicit `--vector` never falls back — a scope
+    // whose embedding profile is incompatible (or has no embedding index at
+    // all) is excluded individually instead of degrading the WHOLE search to
+    // text (that degrade-the-whole-search behavior is auto/`--hybrid`'s own,
+    // governed by the device-wide `resolve_vector_availability` aggregate
+    // upstream of every scope's execution — untouched here). Only checked
+    // for the resolved mode actually being `Vector`; hybrid/auto never reach
+    // this per-scope gate since PC1's own aggregate already decided their
+    // fallback before any scope started.
+    if resolved_mode == SearchMode::Vector {
+        match scope_embedding_state(&exec.target.kcs_dir) {
+            ScopeEmbedState::Compatible => {}
+            ScopeEmbedState::Incompatible => {
+                return Err(ScopeSearchError::Excluded(
+                    VEC_PROFILE_INCOMPATIBLE_REASON.to_owned(),
+                ));
+            }
+            ScopeEmbedState::Absent => {
+                return Err(ScopeSearchError::Excluded(
+                    VEC_PROFILE_ABSENT_REASON.to_owned(),
+                ));
+            }
+        }
+    }
 
     // Resolve the search snapshot independently per scope. Cursor replay always
     // uses the signed commit; a fresh `--at` resolves its operand in this scope;
@@ -2759,6 +2887,24 @@ fn search_one_scope_inner(
             plan_search_history(&repo, &snapshot_commit, time.selector, time.since_cutoff)
                 .map_err(|error| history_plan_error(error, exec.from_cursor))?
         }
+        // PC33/PC44 (05 §1.6 L266 "`--all-history` は binding ごとに同判定を
+        // 行う" / "`--include-deleted` の補完 binding にも同条件を適用する"):
+        // NOT applied here. `ancestor_gated` stays false, so every binding's
+        // chunk is accepted regardless of whether its `chunk_publications`
+        // introduction is ancestor-or-equal of THAT binding's own
+        // `pointer_commit` (as opposed to `--at`'s single shared
+        // `kcs_target_ancestors` target). A single shared ancestor set
+        // cannot express this — every binding in an all-history/
+        // include-deleted plan can have a DIFFERENT `pointer_commit`, so the
+        // gate would need a per-binding ancestor check (e.g. against the
+        // `HistoryGraph` `plan_search_history` already walks) threaded all
+        // the way to the SQL eligibility layer, not a single temp-table
+        // install like PC38's. Left unimplemented given the P2-C task's
+        // priority ordering (this sub-item ships after PC22/23/31/32/40) and
+        // completion gate; PC38's chunk-level `chunk_publications` gate
+        // (`ancestor_gate_sql`) and PC40's config-association gate
+        // (`config_association_ancestor_sql`) are otherwise fully wired and
+        // ready for a future per-binding caller.
         TimeSelector::AllHistory | TimeSelector::Since(_) | TimeSelector::IncludeDeleted => {
             plan_search_history(&repo, &snapshot_commit, time.selector, time.since_cutoff)
                 .map_err(|error| history_plan_error(error, exec.from_cursor))?
@@ -2822,9 +2968,21 @@ fn search_one_scope_inner(
     };
     scope_deadline_check(deadline)?;
 
-    let chunking_config_hash = read_chunking_config(&repo)
+    // PC22/PC23/PC31/PC32: the live config.toml value is always the DEFAULT
+    // candidate, but `--at` (ancestor_gated) resolves the target TREE's own
+    // value empirically rather than assuming HEAD's current config applies —
+    // see `resolve_target_chunking_config_hash`'s doc comment.
+    let live_chunking_config_hash = read_chunking_config(&repo)
         .map(|config| config.chunking_config_hash)
         .map_err(ScopeSearchError::Fatal)?;
+    let chunking_config_hash = resolve_target_chunking_config_hash(
+        &conn,
+        &live_chunking_config_hash,
+        ancestor_gated,
+        max_rowid,
+        max_association_rowid,
+    )
+    .map_err(ScopeSearchError::Fatal)?;
     scope_deadline_check(deadline)?;
     if exec
         .chunking_config_hash
@@ -2851,6 +3009,7 @@ fn search_one_scope_inner(
         since_cutoff: history_plan.since_cutoff.as_deref(),
         candidate_depth: rrf_config.candidate_depth,
         ancestor_gated,
+        short_tokens,
     };
 
     // FTS5 text ranks (empty when the query has no indexable token). Vector-only
@@ -2858,7 +3017,7 @@ fn search_one_scope_inner(
     let (text_ranks, mut meta) = if resolved_mode == SearchMode::Vector {
         (Vec::new(), BTreeMap::new())
     } else {
-        fts_scope_search(&conn, tiers, filter).map_err(ScopeSearchError::Fatal)?
+        fts_scope_search(&conn, match_expr, filter).map_err(ScopeSearchError::Fatal)?
     };
     scope_deadline_check(deadline)?;
 
@@ -3012,25 +3171,151 @@ struct ScopeQueryFilter<'a> {
     /// to the SQL `LIMIT` instead of a literal `200`.
     candidate_depth: u64,
     ancestor_gated: bool,
+    /// PC11/PC12/PC13: short (< 3 Unicode scalar) tokens, applied as
+    /// `instr(text, token) > 0` AND conditions common to both backends.
+    short_tokens: &'a [String],
 }
 
-/// PC38 (05 §1.6): the ancestor-or-equal introduction-commit gate, appended to
-/// the eligibility `WHERE` only when `ancestor_gated`. Checks
-/// `chunks.first_seen_commit` against `kcs_target_ancestors`
-/// (`install_target_ancestors`) — the practical single-valued introduction
-/// signal used until a `chunk_publications` writer exists (see that table's
-/// own doc comment in `kcs_index::fts` for why: population happens at
-/// auto-snapshot chunk-creation time, outside this item's search/gate/cursor/
-/// multi_scope scope).
+/// PC38/PC41/PC42 (05 §1.6 L265-266): the ancestor-or-equal introduction gate
+/// for a CHUNK, appended to the eligibility `WHERE` only when `ancestor_gated`
+/// (today only `--at` — `search_one_scope_inner`). Prefers `chunk_publications`
+/// (potentially several introduction rows per chunk — merge side branches,
+/// independent imports, PC37/43) via a correlated `EXISTS` rather than a
+/// plain `JOIN`, so a chunk with several publication rows still matches this
+/// `WHERE` at most once (PC42's uniqueness — `c` is the outer chunk row, never
+/// duplicated by this predicate). A chunk with no `chunk_publications` row at
+/// all (nothing has written one for it yet, e.g. a pre-PC37 store) falls back
+/// to the legacy single-valued `chunks.first_seen_commit` column so
+/// older/untouched rows are never spuriously excluded.
 fn ancestor_gate_sql(ancestor_gated: bool) -> &'static str {
     if ancestor_gated {
-        "AND EXISTS (
-             SELECT 1 FROM kcs_target_ancestors ta
-             WHERE ta.commit_hash = c.first_seen_commit
+        "AND (
+             EXISTS (
+                 SELECT 1 FROM chunk_publications p
+                 WHERE p.chunk_id = c.chunk_id
+                   AND EXISTS (
+                       SELECT 1 FROM kcs_target_ancestors ta
+                       WHERE ta.commit_hash = p.introduction_commit
+                   )
+             )
+             OR (
+                 NOT EXISTS (SELECT 1 FROM chunk_publications p2 WHERE p2.chunk_id = c.chunk_id)
+                 AND EXISTS (
+                     SELECT 1 FROM kcs_target_ancestors ta2
+                     WHERE ta2.commit_hash = c.first_seen_commit
+                 )
+             )
          )"
     } else {
         ""
     }
+}
+
+/// PC40 (05 §1.6 L266): the ancestor-or-equal introduction gate for a
+/// chunk/config ASSOCIATION, ANDed inside the very same correlated `cg`
+/// `EXISTS` both eligibility queries already use for
+/// `chunk_config_generations` — never a second top-level `EXISTS`, so it
+/// cannot fan out that join either. `cg.introduction_commit IS NULL` (a
+/// pre-PC40 association nothing has stamped yet) is treated as eligible
+/// rather than excluded: a fail-open default for legacy rows, safe because
+/// every newly-created association is now stamped
+/// (`record_chunk_config_association`, called from `index_chunk_with_rowids`).
+fn config_association_ancestor_sql(ancestor_gated: bool) -> &'static str {
+    if ancestor_gated {
+        "AND (
+             cg.introduction_commit IS NULL
+             OR EXISTS (
+                 SELECT 1 FROM kcs_target_ancestors ta3
+                 WHERE ta3.commit_hash = cg.introduction_commit
+             )
+         )"
+    } else {
+        ""
+    }
+}
+
+/// PC12/PC13 (05 §1.3 L97-106): one `AND instr(<column>, ?) > 0` clause per
+/// short (< 3 Unicode scalar) token — a bounded-query eligibility predicate
+/// common to the text and vector backends (and the LIKE-only fallback's own
+/// `WHERE`), applied before `candidate_depth` confirms the candidate set.
+/// Every `?` is anonymous; the caller must push `short_tokens` (in the same
+/// order) onto its bound-parameter list at the position matching where this
+/// fragment lands in the surrounding SQL text.
+fn short_token_instr_sql(column: &str, short_tokens: &[String]) -> String {
+    short_tokens
+        .iter()
+        .map(|_| format!("AND instr({column}, ?) > 0"))
+        .collect::<Vec<_>>()
+        .join("\n             ")
+}
+
+/// PC22/PC23/PC31/PC32 (05 §1.5 L200, §1.6 L237-239): resolve "the target
+/// tree's `chunking_config_hash`" — the single equality-filter value
+/// `ScopeQueryFilter::chunking_config_hash` binds into both eligibility
+/// queries. Default/HEAD search (`ancestor_gated=false`) always uses the
+/// live `config.toml` value directly, unconditionally — a HEAD auto-snapshot
+/// always (re-)chunks under it, so no empirical lookup is needed (PC31:
+/// "デフォルト = HEAD tree = 現行値"). A historical `--at` target instead
+/// prefers the live value IF any of the target tree's own eligible chunks
+/// actually carry an association with it (ancestor-or-equal, PC40);
+/// otherwise it deterministically substitutes the byte-order-minimum
+/// `chunking_config_hash` among the target tree's eligible associations
+/// (PC32's "v1 tree" fallback — e.g. a PC61/62 HEAD-limited historical
+/// instance that was never re-chunked under the current live config). Both
+/// branches are expressed as one `ORDER BY (hash <> live), hash LIMIT 1`
+/// query so the same deterministic tie-break applies whichever branch fires,
+/// and a page-2 replay against the same frozen target commit recomputes the
+/// identical value even after HEAD's live config.toml has since changed
+/// (PC22/23's replay-stability requirement). Zero eligible associations at
+/// all (nothing this scope has ever chunked reaches the target tree) falls
+/// back to the live value too — the eligibility `WHERE` in the caller's own
+/// query then naturally yields zero candidates rather than erroring
+/// (PC32's "候補 0 件は注記つき空集合"). Requires `kcs_target_ancestors`
+/// (when `ancestor_gated`) and `kcs_eligible_identity` already installed.
+fn resolve_target_chunking_config_hash(
+    conn: &Connection,
+    live_chunking_config_hash: &str,
+    ancestor_gated: bool,
+    max_rowid: u64,
+    max_association_rowid: u64,
+) -> Result<String> {
+    if !ancestor_gated {
+        return Ok(live_chunking_config_hash.to_owned());
+    }
+    let sql = format!(
+        "SELECT cg.chunking_config_hash
+         FROM chunk_config_generations cg
+         JOIN chunks c ON c.chunk_id = cg.chunk_id
+         WHERE cg.association_rowid <= ?1
+             AND c.first_seen_commit IS NOT NULL
+             AND c.rowid <= ?2
+             AND EXISTS (
+                 SELECT 1 FROM kcs_eligible_identity eligible
+                 WHERE eligible.raw_hash = c.raw_hash
+                   AND eligible.tool_profile_hash = c.tool_profile_hash
+                   AND eligible.gen = c.gen
+             )
+             {config_ancestor_clause}
+             {ancestor_clause}
+         ORDER BY (cg.chunking_config_hash <> ?3), cg.chunking_config_hash
+         LIMIT 1",
+        config_ancestor_clause = config_association_ancestor_sql(true),
+        ancestor_clause = ancestor_gate_sql(true),
+    );
+    let resolved = match conn.query_row(
+        &sql,
+        rusqlite::params![
+            max_association_rowid as i64,
+            max_rowid as i64,
+            live_chunking_config_hash,
+        ],
+        |row| row.get::<_, String>(0),
+    ) {
+        Ok(value) => Some(value),
+        Err(rusqlite::Error::QueryReturnedNoRows) => None,
+        Err(err) => return Err(KcsError::schema(err.to_string())),
+    };
+    Ok(resolved.unwrap_or_else(|| live_chunking_config_hash.to_owned()))
 }
 
 /// Per-scope vector backend: brute-force cosine distance over `chunk_vec`,
@@ -3057,18 +3342,27 @@ fn vector_scope_search(
         return Ok((Vec::new(), BTreeMap::new()));
     }
     let query_bytes = f32_to_le_bytes(query_embedding);
+    // PC13 (05 §1.3 L101-106): short-token `instr` eligibility is common to
+    // both backends — applied here too, before `ORDER BY`/`LIMIT
+    // candidate_depth` confirms the vector candidate set, exactly like the
+    // text backend (`execute_fts_tier`). Every placeholder below is
+    // anonymous (`?`, not `?N`) so the dynamic `short_token_clause` can carry
+    // a variable number of its own without renumbering the fixed ones —
+    // `bound` (below) supplies values in the SAME order they appear in the
+    // text.
     let sql = format!(
         "SELECT c.chunk_id, c.raw_hash, c.tool_profile_hash, c.heading_path,
                 c.section_id, c.byte_start, c.byte_end, c.text, c.gen
          FROM chunk_vec cv
          JOIN chunks c ON c.chunk_id = cv.chunk_id
          WHERE c.first_seen_commit IS NOT NULL
-             AND c.rowid <= ?1
+             AND c.rowid <= ?
              AND EXISTS (
                  SELECT 1 FROM chunk_config_generations cg
                  WHERE cg.chunk_id = c.chunk_id
-                   AND cg.chunking_config_hash = ?2
-                   AND cg.association_rowid <= ?3
+                   AND cg.chunking_config_hash = ?
+                   AND cg.association_rowid <= ?
+                   {config_ancestor_clause}
              )
              AND EXISTS (
                  SELECT 1 FROM kcs_eligible_identity eligible
@@ -3076,26 +3370,34 @@ fn vector_scope_search(
                    AND eligible.tool_profile_hash = c.tool_profile_hash
                    AND eligible.gen = c.gen
              )
-             AND (?4 IS NULL OR c.created_at >= ?4)
+             AND (? IS NULL OR c.created_at >= ?)
              {ancestor_clause}
-         ORDER BY vec_distance_cosine(cv.embedding, ?5), c.chunk_id
-         LIMIT ?6",
+             {short_token_clause}
+         ORDER BY vec_distance_cosine(cv.embedding, ?), c.chunk_id
+         LIMIT ?",
+        config_ancestor_clause = config_association_ancestor_sql(filter.ancestor_gated),
         ancestor_clause = ancestor_gate_sql(filter.ancestor_gated),
+        short_token_clause = short_token_instr_sql("c.text", filter.short_tokens),
     );
     let mut stmt = conn
         .prepare(&sql)
         .map_err(|err| KcsError::schema(err.to_string()))?;
-    let rows = stmt.query_map(
-        rusqlite::params![
-            filter.max_rowid as i64,
-            filter.chunking_config_hash,
-            filter.max_association_rowid as i64,
-            filter.since_cutoff,
-            query_bytes,
-            filter.candidate_depth as i64,
-        ],
-        chunk_meta_row,
-    );
+    let max_rowid_i64 = filter.max_rowid as i64;
+    let max_association_rowid_i64 = filter.max_association_rowid as i64;
+    let candidate_depth_i64 = filter.candidate_depth as i64;
+    let mut bound: Vec<&dyn rusqlite::ToSql> = vec![
+        &max_rowid_i64,
+        &filter.chunking_config_hash,
+        &max_association_rowid_i64,
+        &filter.since_cutoff,
+        &filter.since_cutoff,
+    ];
+    for token in filter.short_tokens {
+        bound.push(token);
+    }
+    bound.push(&query_bytes);
+    bound.push(&candidate_depth_i64);
+    let rows = stmt.query_map(rusqlite::params_from_iter(bound), chunk_meta_row);
     let rows = match rows {
         Ok(rows) => rows,
         Err(err) if is_vector_capacity_message(&err.to_string()) => {
@@ -3145,23 +3447,22 @@ fn chunk_meta_row(row: &rusqlite::Row) -> rusqlite::Result<(String, ChunkMeta)> 
     ))
 }
 
-/// Per-scope text backend: execute the tiered MATCH queries (see
-/// [`build_fts_tiers`]) in order; the first tier returning any candidate is the
-/// scope's text backend. The candidate list handed to RRF comes from exactly one
-/// executed query, ranked purely by that query's BM25 (05 §1.3 / K2 ruling — no
-/// post-hoc re-ordering by hand-computed features).
+/// Per-scope text backend (PC8/PC11): run the single FTS5 MATCH query when
+/// `match_expr` is `Some` (>= 1 token had >= 3 Unicode scalars), else fall
+/// back entirely to the bounded LIKE (`instr`) scan (every token was short —
+/// trigram MATCH cannot carry them at all). The candidate list handed to RRF
+/// comes from exactly one executed query — BM25 order for the MATCH path,
+/// deterministic `instr`/`chunk_id` order for the fallback (05 §1.3 / K2
+/// ruling — no post-hoc re-ordering by hand-computed features).
 fn fts_scope_search(
     conn: &Connection,
-    tiers: &[String],
+    match_expr: Option<&str>,
     filter: ScopeQueryFilter<'_>,
 ) -> Result<(Vec<BackendRank>, BTreeMap<String, ChunkMeta>)> {
-    for match_expr in tiers {
-        let (ranks, meta) = execute_fts_tier(conn, match_expr, filter)?;
-        if !ranks.is_empty() {
-            return Ok((ranks, meta));
-        }
+    match match_expr {
+        Some(match_expr) => execute_fts_tier(conn, match_expr, filter),
+        None => execute_like_fallback(conn, filter),
     }
-    Ok((Vec::new(), BTreeMap::new()))
 }
 
 /// One FTS5 MATCH restricted to the live chunk set of `snapshot_commit`: the
@@ -3187,24 +3488,30 @@ fn execute_fts_tier(
     match_expr: &str,
     filter: ScopeQueryFilter<'_>,
 ) -> Result<(Vec<BackendRank>, BTreeMap<String, ChunkMeta>)> {
+    // PC12/PC13: short-token `instr` eligibility (`short_token_clause`) is
+    // ANDed into this same outer `WHERE`, over at most `candidate_depth` rows
+    // — every placeholder is anonymous so its variable arity does not
+    // renumber the fixed ones (`bound`, below, supplies values in the same
+    // order they appear in this text).
     let sql = format!(
         "SELECT c.chunk_id, c.raw_hash, c.tool_profile_hash, c.heading_path,
                 c.section_id, c.byte_start, c.byte_end, c.text, c.gen
          FROM (
              SELECT rowid AS chunk_rowid, bm25(chunk_fts, 1.0, 0.3) AS score
              FROM chunk_fts
-             WHERE chunk_fts MATCH ?1
+             WHERE chunk_fts MATCH ?
              ORDER BY score
-             LIMIT ?2
+             LIMIT ?
          ) AS ranked
          JOIN chunks c ON c.rowid = ranked.chunk_rowid
          WHERE c.first_seen_commit IS NOT NULL
-             AND c.rowid <= ?3
+             AND c.rowid <= ?
              AND EXISTS (
                  SELECT 1 FROM chunk_config_generations cg
                  WHERE cg.chunk_id = c.chunk_id
-                   AND cg.chunking_config_hash = ?4
-                   AND cg.association_rowid <= ?5
+                   AND cg.chunking_config_hash = ?
+                   AND cg.association_rowid <= ?
+                   {config_ancestor_clause}
              )
              AND EXISTS (
                  SELECT 1 FROM kcs_eligible_identity eligible
@@ -3212,26 +3519,119 @@ fn execute_fts_tier(
                    AND eligible.tool_profile_hash = c.tool_profile_hash
                    AND eligible.gen = c.gen
              )
-             AND (?6 IS NULL OR c.created_at >= ?6)
+             AND (? IS NULL OR c.created_at >= ?)
              {ancestor_clause}
+             {short_token_clause}
          ORDER BY ranked.score, c.chunk_id",
+        config_ancestor_clause = config_association_ancestor_sql(filter.ancestor_gated),
         ancestor_clause = ancestor_gate_sql(filter.ancestor_gated),
+        short_token_clause = short_token_instr_sql("c.text", filter.short_tokens),
     );
     let mut stmt = conn
         .prepare(&sql)
         .map_err(|err| KcsError::schema(err.to_string()))?;
+    let candidate_depth_i64 = filter.candidate_depth as i64;
+    let max_rowid_i64 = filter.max_rowid as i64;
+    let max_association_rowid_i64 = filter.max_association_rowid as i64;
+    let mut bound: Vec<&dyn rusqlite::ToSql> = vec![
+        &match_expr,
+        &candidate_depth_i64,
+        &max_rowid_i64,
+        &filter.chunking_config_hash,
+        &max_association_rowid_i64,
+        &filter.since_cutoff,
+        &filter.since_cutoff,
+    ];
+    for token in filter.short_tokens {
+        bound.push(token);
+    }
     let rows = stmt
-        .query_map(
-            rusqlite::params![
-                match_expr,
-                filter.candidate_depth as i64,
-                filter.max_rowid as i64,
-                filter.chunking_config_hash,
-                filter.max_association_rowid as i64,
-                filter.since_cutoff,
-            ],
-            chunk_meta_row,
-        )
+        .query_map(rusqlite::params_from_iter(bound), chunk_meta_row)
+        .map_err(|err| KcsError::schema(err.to_string()))?;
+
+    let mut ranks = Vec::new();
+    let mut meta = BTreeMap::new();
+    for (index, row) in rows.enumerate() {
+        let (chunk_id, chunk_meta) = row.map_err(|err| KcsError::schema(err.to_string()))?;
+        ranks.push(BackendRank {
+            chunk_hash: chunk_id.clone(),
+            rank: index as u64 + 1,
+        });
+        meta.insert(chunk_id, chunk_meta);
+    }
+    Ok((ranks, meta))
+}
+
+/// PC11/PC14 (05 §1.3 L95-97, L107-109): the bounded LIKE (`instr`) fallback
+/// — every query token was short (< 3 Unicode scalars), so trigram MATCH
+/// cannot carry any of them (it silently drops sub-3-char phrases) and the
+/// text backend degrades to a full `instr` scan instead. Order is
+/// deterministic and fixed by spec: the FIRST token's match position
+/// ascending, ties broken by `chunk_id` ascending — `ORDER BY` is written
+/// BEFORE `LIMIT candidate_depth` in the SQL text (never the reverse) so the
+/// candidate set itself cannot become LIMIT-order-dependent/non-deterministic
+/// (05 §1.3 L107-109's explicit prohibition).
+fn execute_like_fallback(
+    conn: &Connection,
+    filter: ScopeQueryFilter<'_>,
+) -> Result<(Vec<BackendRank>, BTreeMap<String, ChunkMeta>)> {
+    let Some(first_token) = filter.short_tokens.first() else {
+        // PC10 already rejects a zero-token query before any scope is ever
+        // reached, so `execute_like_fallback` is only ever called with
+        // `match_expr = None`, which — by construction (`long`/`short`
+        // partition in `build_query_plan`) — implies at least one short
+        // token exists. Kept as a defensive empty-result rather than a panic
+        // in case a future caller reaches this some other way.
+        return Ok((Vec::new(), BTreeMap::new()));
+    };
+    let sql = format!(
+        "SELECT c.chunk_id, c.raw_hash, c.tool_profile_hash, c.heading_path,
+                c.section_id, c.byte_start, c.byte_end, c.text, c.gen
+         FROM chunks c
+         WHERE c.first_seen_commit IS NOT NULL
+             AND c.rowid <= ?
+             AND EXISTS (
+                 SELECT 1 FROM chunk_config_generations cg
+                 WHERE cg.chunk_id = c.chunk_id
+                   AND cg.chunking_config_hash = ?
+                   AND cg.association_rowid <= ?
+                   {config_ancestor_clause}
+             )
+             AND EXISTS (
+                 SELECT 1 FROM kcs_eligible_identity eligible
+                 WHERE eligible.raw_hash = c.raw_hash
+                   AND eligible.tool_profile_hash = c.tool_profile_hash
+                   AND eligible.gen = c.gen
+             )
+             AND (? IS NULL OR c.created_at >= ?)
+             {ancestor_clause}
+             {short_token_clause}
+         ORDER BY instr(c.text, ?) ASC, c.chunk_id ASC
+         LIMIT ?",
+        config_ancestor_clause = config_association_ancestor_sql(filter.ancestor_gated),
+        ancestor_clause = ancestor_gate_sql(filter.ancestor_gated),
+        short_token_clause = short_token_instr_sql("c.text", filter.short_tokens),
+    );
+    let mut stmt = conn
+        .prepare(&sql)
+        .map_err(|err| KcsError::schema(err.to_string()))?;
+    let max_rowid_i64 = filter.max_rowid as i64;
+    let max_association_rowid_i64 = filter.max_association_rowid as i64;
+    let candidate_depth_i64 = filter.candidate_depth as i64;
+    let mut bound: Vec<&dyn rusqlite::ToSql> = vec![
+        &max_rowid_i64,
+        &filter.chunking_config_hash,
+        &max_association_rowid_i64,
+        &filter.since_cutoff,
+        &filter.since_cutoff,
+    ];
+    for token in filter.short_tokens {
+        bound.push(token);
+    }
+    bound.push(first_token);
+    bound.push(&candidate_depth_i64);
+    let rows = stmt
+        .query_map(rusqlite::params_from_iter(bound), chunk_meta_row)
         .map_err(|err| KcsError::schema(err.to_string()))?;
 
     let mut ranks = Vec::new();
@@ -3784,206 +4184,64 @@ fn aggregate_store_recovery_hints(excluded: &[Value]) -> Vec<&'static str> {
     out
 }
 
-/// Whether `ch` is a CJK character KCS treats as space-less script (Hiragana,
-/// Katakana, CJK Unified Ideographs) — the same ranges as the chunker's slug rule.
-fn is_cjk(ch: char) -> bool {
-    matches!(
-        ch as u32,
-        0x3040..=0x309f | 0x30a0..=0x30ff | 0x4e00..=0x9fff
-    )
+/// PC8/PC9 (05 §1.3 L110-115): the query's fixed tokenization and the
+/// resulting MATCH-generation plan — see [`build_query_plan`].
+struct QueryPlan {
+    /// The single OR-joined FTS5 MATCH expression over every token with >= 3
+    /// Unicode scalars (PC8's own worked example: `"C++" OR "token"`), or
+    /// `None` when every token is short (PC11: bounded-LIKE-only fallback).
+    match_expr: Option<String>,
+    /// Tokens with < 3 Unicode scalars, in query order (PC11/12/13's
+    /// `instr` eligibility set — trigram MATCH silently drops anything
+    /// shorter, so these never enter `match_expr` at all).
+    short_tokens: Vec<String>,
 }
 
-/// Split a query into its two kinds of indexable units (deterministic,
-/// first-occurrence order, deduplicated; runs shorter than 3 chars are dropped
-/// below the trigram floor):
-///
-/// * `cjk_trigrams` — character 3-grams of each maximal CJK run (>= 3 chars).
-///   Japanese carries no whitespace, so substring trigrams are the only way the
-///   trigram index can do partial matching.
-/// * `keywords` — maximal ASCII/alphanumeric runs (>= 3 chars, edge `.-_`
-///   trimmed) such as `Recall`, `0.83`, `TTL`, `Kestrel`. These are the
-///   distinctive, high-IDF part of a query.
-fn query_units(query: &str) -> (Vec<String>, Vec<String>) {
-    let mut trigrams = Vec::<String>::new();
-    let mut keywords = Vec::<String>::new();
-    let mut seen_tri = std::collections::BTreeSet::<String>::new();
-    let mut seen_kw = std::collections::BTreeSet::<String>::new();
-    let is_word = |ch: char| !is_cjk(ch) && (ch.is_alphanumeric() || matches!(ch, '.' | '-' | '_'));
-    let chars = query.chars().collect::<Vec<_>>();
-    let mut i = 0;
-    while i < chars.len() {
-        if is_cjk(chars[i]) {
-            let start = i;
-            while i < chars.len() && is_cjk(chars[i]) {
-                i += 1;
-            }
-            let run = &chars[start..i];
-            if run.len() >= 3 {
-                for window in run.windows(3) {
-                    let gram = window.iter().collect::<String>();
-                    if seen_tri.insert(gram.clone()) {
-                        trigrams.push(gram);
-                    }
-                }
-            }
-        } else if is_word(chars[i]) {
-            let start = i;
-            while i < chars.len() && is_word(chars[i]) {
-                i += 1;
-            }
-            let run = chars[start..i]
-                .iter()
-                .collect::<String>()
-                .trim_matches(|ch| matches!(ch, '.' | '-' | '_'))
-                .to_owned();
-            if run.chars().count() >= 3 && seen_kw.insert(run.clone()) {
-                keywords.push(run);
-            }
-        } else {
-            i += 1;
-        }
-    }
-    (trigrams, keywords)
+/// PC9 (05 §1.3 L113-115): tokenization is fixed and deterministic — split
+/// the caller's NFC-normalized query (`query_nfc`, matching the NFC-normalized
+/// index projection, F2) on Unicode whitespace (`split_whitespace` uses
+/// `char::is_whitespace`, the Unicode White_Space property; consecutive
+/// whitespace collapses to one boundary, matching "連続空白は1区切り").
+/// Every non-empty resulting piece is one token, including a symbol-only
+/// piece (e.g. `++`) — no character-class filtering. Token length is
+/// Unicode SCALAR count (`chars().count()`), never UTF-8 byte length.
+fn query_tokens(query_nfc: &str) -> Vec<String> {
+    query_nfc.split_whitespace().map(str::to_owned).collect()
 }
 
-/// Quote a unit as an FTS5 phrase (`"` doubled) so `=`, quotes, and operators in
+/// Quote a token as an FTS5 phrase (`"` doubled) so `=`, quotes, and operators in
 /// user input are inert — arbitrary input can never raise an FTS5 syntax error
 /// (brief-common #6).
 fn quote_fts_phrase(unit: &str) -> String {
     format!("\"{}\"", unit.replace('"', "\"\""))
 }
 
-/// One keyword as an FTS5 phrase group. Pure-numeric keywords (>= 4 digits) are
-/// expanded with their thousands-separator variant *inside the executed query*
-/// (`3600` -> `("3600" OR "3,600")`): the same number under display formatting,
-/// legitimate query expansion per the K2 ruling — never post-hoc scoring.
-fn fts_keyword_group(keyword: &str) -> String {
-    let quoted = quote_fts_phrase(keyword);
-    if keyword.len() >= 4 && keyword.bytes().all(|b| b.is_ascii_digit()) {
-        let variant = thousands_separated(keyword);
-        format!("({quoted} OR {})", quote_fts_phrase(&variant))
-    } else {
-        quoted
+/// PC8 (05 §1.3 L110-115): machine-generate the MATCH expression — never
+/// interpret the query as FTS5 syntax (every token is quoted as an inert
+/// phrase via [`quote_fts_phrase`]; FTS5 operators the user typed are
+/// therefore literal query text, not directives) and never inject a token
+/// the query did not contain (no bilingual/thousands-separator expansion —
+/// dropped entirely, PC8's "query 由来でない追加語を含まない"). Tokens with
+/// 3 or more Unicode scalars join the expression with `OR`; PC9's shorter ones
+/// can never match the trigram tokenizer at all (it silently drops sub-3-char
+/// phrases), so they are carried over as `short_tokens` for the caller's
+/// bounded `instr` eligibility predicate (PC11/12/13) instead of being
+/// dropped outright.
+fn build_query_plan(query_nfc: &str) -> QueryPlan {
+    let (long_tokens, short_tokens): (Vec<String>, Vec<String>) = query_tokens(query_nfc)
+        .into_iter()
+        .partition(|token| token.chars().count() >= 3);
+    let match_expr = (!long_tokens.is_empty()).then(|| {
+        long_tokens
+            .iter()
+            .map(|token| quote_fts_phrase(token))
+            .collect::<Vec<_>>()
+            .join(" OR ")
+    });
+    QueryPlan {
+        match_expr,
+        short_tokens,
     }
-}
-
-/// Small deterministic bilingual expansions for core retrieval vocabulary.
-/// These are query-construction aliases (like the numeric display variant
-/// above), never post-hoc score adjustments. They let an English query match the
-/// Japanese technical term that KCS itself exposes throughout the CLI/docs while
-/// preserving BM25 as the sole ranking function.
-fn fts_keyword_expansions(keyword: &str) -> &'static [&'static str] {
-    if keyword.eq_ignore_ascii_case("chunk") || keyword.eq_ignore_ascii_case("chunks") {
-        &["チャンク"]
-    } else if keyword.eq_ignore_ascii_case("token") || keyword.eq_ignore_ascii_case("tokens") {
-        &["トークン"]
-    } else if keyword.eq_ignore_ascii_case("pipeline") {
-        &["パイプライン"]
-    } else {
-        &[]
-    }
-}
-
-fn thousands_separated(digits: &str) -> String {
-    let bytes = digits.as_bytes();
-    let mut out = String::with_capacity(bytes.len() + bytes.len() / 3);
-    for (index, byte) in bytes.iter().enumerate() {
-        if index > 0 && (bytes.len() - index) % 3 == 0 {
-            out.push(',');
-        }
-        out.push(*byte as char);
-    }
-    out
-}
-
-/// Build the tiered FTS5 MATCH queries for a natural-language query.
-///
-/// Query *construction* is adaptive/tiered (K2 coordinator ruling); *ranking* is
-/// always the executed query's BM25 — see [`fts_scope_search`]. The shape of the
-/// query decides tier 1 deterministically:
-///
-/// * `>= 2` keyword groups — tier 1 = OR of the keyword groups only. BM25's
-///   per-term IDF then favors chunks matching several rare keywords over chunks
-///   matching one common one.
-/// * exactly 1 keyword group and >= 1 CJK trigram — tier 1 = the keyword group
-///   AND an OR-group of the CJK trigrams. A single keyword alone (`6000`) has no
-///   discriminating power; requiring co-occurring CJK query context filters the
-///   numeric look-alikes.
-/// * otherwise no tier 1.
-///
-/// Tier 2 (always, deduplicated against tier 1) = the relaxed OR of every
-/// indexable unit (CJK trigrams + keyword groups). Japanese has no whitespace and
-/// the trigram index does substring matching, so a strict AND of whole clauses
-/// matches nothing (measured: recall collapses to 0) — the relaxed OR is the
-/// floor that keeps natural-language queries answerable.
-///
-/// Per scope, tiers are executed in order and the first one returning any row is
-/// the scope's text backend (fallback trigger: zero candidates — documented,
-/// deterministic). The returned list is empty when nothing is indexable
-/// (short/empty query -> empty result set).
-fn build_fts_tiers(query: &str) -> Vec<String> {
-    const MAX_TRIGRAMS: usize = 64;
-    let (trigrams, keywords) = query_units(query);
-    let trigram_phrases = trigrams
-        .iter()
-        .take(MAX_TRIGRAMS)
-        .map(|trigram| quote_fts_phrase(trigram))
-        .collect::<Vec<_>>();
-    // R11-10: cap the keyword OR-groups at MAX_TRIGRAMS too (they were unbounded
-    // while CJK trigrams were already capped — an asymmetric hardening). `keywords`
-    // is dedup'd upstream (query_units), so this is "first 64 after dedup". A
-    // multi-thousand-word query no longer builds a multi-thousand-clause OR (linear
-    // FTS cost of seconds); SQLite FTS5 tolerates it, but the cost is pointless.
-    let mut keyword_groups = Vec::new();
-    for keyword in keywords.iter().take(MAX_TRIGRAMS) {
-        if keyword_groups.len() >= MAX_TRIGRAMS {
-            break;
-        }
-        keyword_groups.push(fts_keyword_group(keyword));
-        for expansion in fts_keyword_expansions(keyword) {
-            if keyword_groups.len() >= MAX_TRIGRAMS {
-                break;
-            }
-            let group = fts_keyword_group(expansion);
-            if !keyword_groups.contains(&group) {
-                keyword_groups.push(group);
-            }
-        }
-    }
-
-    let strict = if keyword_groups.len() >= 2 {
-        // Mixed-script queries must retain their CJK context. Dropping it here
-        // made a title matching one ASCII acronym outrank a section matching the
-        // user's complete Japanese phrase, and prevented the relaxed tier from
-        // running because the acronym produced at least one hit.
-        let mut units = trigram_phrases.clone();
-        units.extend(keyword_groups.iter().cloned());
-        Some(units.join(" OR "))
-    } else if keyword_groups.len() == 1 && !trigram_phrases.is_empty() {
-        Some(format!(
-            "{} AND ({})",
-            keyword_groups[0],
-            trigram_phrases.join(" OR ")
-        ))
-    } else {
-        None
-    };
-    let relaxed = {
-        let mut units = trigram_phrases;
-        units.extend(keyword_groups);
-        (!units.is_empty()).then(|| units.join(" OR "))
-    };
-
-    let mut tiers = Vec::new();
-    if let Some(strict) = strict {
-        tiers.push(strict);
-    }
-    if let Some(relaxed) = relaxed {
-        if tiers.last() != Some(&relaxed) {
-            tiers.push(relaxed);
-        }
-    }
-    tiers
 }
 
 fn scope_selection_from_cursor(mode: ScopeMode) -> ScopeSelectionMode {
@@ -4087,6 +4345,7 @@ fn run_open(args: UnsupportedArgs) -> Result<Value> {
         "chunk_hash": pointer.chunk_hash,
         "temporary": resolved.temporary,
         "commit_shallow": resolved.commit_shallow,
+        "manifest_missing": resolved.manifest_missing,
     }))
 }
 
@@ -4110,6 +4369,7 @@ fn run_view(args: UnsupportedArgs) -> Result<Value> {
         // resolved pointer — `view` resolves identically and Agents branch on it.
         "temporary": resolved.temporary,
         "commit_shallow": resolved.commit_shallow,
+        "manifest_missing": resolved.manifest_missing,
     }))
 }
 
@@ -4187,6 +4447,18 @@ fn run_reindex(args: UnsupportedArgs) -> Result<Value> {
             new_gen,
         ) {
             Ok(()) => {
+                // PB04: the copied instance's manifest.json now declares
+                // `gen: new_gen` (different bytes than the source gen's
+                // manifest), so its manifest_hash must be recomputed, not
+                // carried forward. Best-effort: a hashing fault alone should
+                // not turn an otherwise-successful reindex into a failure.
+                let manifest_hash = compute_manifest_hash(
+                    repo.kcs_dir(),
+                    &entry.raw_hash,
+                    &normalize.tool_profile_hash,
+                    new_gen,
+                )
+                .ok();
                 normalize_by_path.insert(
                     entry.path.clone(),
                     PendingNormalizeRef {
@@ -4194,6 +4466,7 @@ fn run_reindex(args: UnsupportedArgs) -> Result<Value> {
                         normalize: NormalizeRef {
                             tool_profile_hash: normalize.tool_profile_hash.clone(),
                             gen: new_gen,
+                            manifest_hash,
                         },
                     },
                 );
@@ -4210,6 +4483,10 @@ fn run_reindex(args: UnsupportedArgs) -> Result<Value> {
                         normalize: NormalizeRef {
                             tool_profile_hash: normalize.tool_profile_hash.clone(),
                             gen: normalize.gen,
+                            // PB04: gen is unchanged (copy failed, previous
+                            // gen retained) — carry the existing manifest_hash
+                            // forward rather than recompute.
+                            manifest_hash: normalize.manifest_hash.clone(),
                         },
                     },
                 );
@@ -4314,6 +4591,13 @@ fn rebuild_step3_index(repo: &Repository) -> Result<Step3RebuildReport> {
     // rebuilder that repair uses). Placing the conversion in this shared function
     // covers all three commands at once.
     let tree = read_head_tree_for_rebuild(repo, &head)?;
+    // PC61/62 (04 §4.6, U145): deliberately NOT applied to `retained_history_instances`
+    // itself — that shared function stays the untouched source both this rebuild AND
+    // the embedding-task-generation path (`retained_history_chunks`) read from, per
+    // its own doc comment's documented lesson (a blanket filter there regressed
+    // several `step3_p0_contract.rs` history/deleted-content tests). Instead this
+    // rebuild-only set below narrows WHICH retained instances may receive a brand
+    // NEW `chunk_config_generations` association this pass — see the loop below.
     let retained_instances = retained_history_instances(repo.kcs_dir(), &head)?;
     let retained_instance_keys = retained_instances
         .iter()
@@ -4325,8 +4609,45 @@ fn rebuild_step3_index(repo: &Repository) -> Result<Step3RebuildReport> {
             )
         })
         .collect::<BTreeSet<_>>();
+    // PC61 (04 §4.6 L: "HEAD (現行 tree) が参照する normalized instance のみ"):
+    // identities HEAD's own tree currently binds. Only used to decide new-
+    // association eligibility for a retained (possibly non-HEAD) instance below —
+    // membership itself is unaffected (`retained_instance_keys` above, from the
+    // untouched `retained_history_instances`, still governs the head-direct loop's
+    // own dedup).
+    let head_identity_keys = tree
+        .entries
+        .iter()
+        .filter_map(|entry| {
+            entry.normalize.as_ref().map(|normalize| {
+                (
+                    entry.raw_hash.clone(),
+                    normalize.tool_profile_hash.clone(),
+                    normalize.gen,
+                )
+            })
+        })
+        .collect::<BTreeSet<(String, String, u64)>>();
     let config = read_chunking_config(repo)?;
     let existing = read_stored_chunks(repo.kcs_dir())?;
+    // PC61/62: identities that already have AT LEAST ONE durable association
+    // (under any config) as of the start of this rebuild. Combined with
+    // `head_identity_keys` below, this distinguishes "a config change would
+    // otherwise re-chunk/re-embed already-covered, HEAD-unreachable history"
+    // (PC61/62's actual target — skip) from "this identity has never been
+    // chunked before" (first-ever appearance, or a torn-tail loss needing
+    // self-heal — still process regardless of HEAD membership, matching the
+    // pre-PC61 behavior those cases already relied on).
+    let existing_identity_keys = existing
+        .iter()
+        .map(|chunk| {
+            (
+                chunk.row.raw_hash.clone(),
+                chunk.row.tool_profile_hash.clone(),
+                chunk.row.gen,
+            )
+        })
+        .collect::<BTreeSet<(String, String, u64)>>();
     // Q1: physically remove any torn trailing record from `chunks.jsonl` before the
     // append below, so the new records land on a clean `'\n'`-terminated boundary
     // instead of being welded onto the torn bytes (which would create a
@@ -4361,11 +4682,32 @@ fn rebuild_step3_index(repo: &Repository) -> Result<Step3RebuildReport> {
     // the recovery of every healthy document). Never silent: the caller surfaces this.
     let mut skipped_units = Vec::<Value>::new();
 
-    // A config change must regenerate chunks for normalized identities retained
-    // anywhere in the reachable history, not only identities live at HEAD. Do
-    // exact historical refs first so shared HEAD chunks retain their true
+    // Do exact historical refs first so shared HEAD chunks retain their true
     // ancestor-most first-seen commit instead of being stamped as newly created.
+    //
+    // PC61/62 (04 §4.6, U145): a retained instance NOT referenced by HEAD's own
+    // tree, that ALREADY has some durable association from an earlier pass (it
+    // was necessarily HEAD-referenced back when that association was created —
+    // this store only ever advances HEAD forward), is skipped entirely here — a
+    // chunking-config change must not re-chunk/re-embed history no live tree can
+    // reach (04 §4.6: "どの tree からも到達不能な chunk と embedding 課金を生む
+    // だけ"). A retained instance with NO existing association at all (first-ever
+    // appearance in the ledger, or a torn-tail loss needing self-heal, PC63's own
+    // note that historical instances must not be dropped wholesale) is still
+    // processed regardless of HEAD membership, exactly as before PC61/62 —
+    // `chunk_config_generations.introduction_commit` (PC40) then correctly
+    // anchors its one-and-only association to this rebuild's HEAD.
     for retained in &retained_instances {
+        let identity_key = (
+            retained.raw_hash.clone(),
+            retained.normalize.tool_profile_hash.clone(),
+            retained.normalize.gen,
+        );
+        if !head_identity_keys.contains(&identity_key)
+            && existing_identity_keys.contains(&identity_key)
+        {
+            continue;
+        }
         let units = match load_normalized_units(
             repo.kcs_dir(),
             &retained.raw_hash,
@@ -4392,6 +4734,13 @@ fn rebuild_step3_index(repo: &Repository) -> Result<Step3RebuildReport> {
         };
         for mut row in chunk_normalized_instance(input).map_err(index_to_kcs)? {
             row.first_seen_commit = Some(retained.first_seen_commit.clone());
+            // PC40 (05 §1.6 L266): a genuinely new (chunk_id, config)
+            // association is introduced now, at this rebuild's HEAD —
+            // `append_new_chunk_association`'s `known_associations` dedup
+            // discards this row untouched when the pair already exists, so
+            // an already-durable association's real, earlier
+            // `chunking_config_introduction_commit` is never overwritten.
+            row.chunking_config_introduction_commit = Some(head.clone());
             append_new_chunk_association(
                 repo.kcs_dir(),
                 row,
@@ -4460,6 +4809,9 @@ fn rebuild_step3_index(repo: &Repository) -> Result<Step3RebuildReport> {
         };
         for mut row in chunk_normalized_instance(input).map_err(index_to_kcs)? {
             row.first_seen_commit = Some(head.clone());
+            // PC40: see the identical comment in the retained-instance loop
+            // above.
+            row.chunking_config_introduction_commit = Some(head.clone());
             append_new_chunk_association(
                 repo.kcs_dir(),
                 row,
@@ -4694,9 +5046,16 @@ fn latest_normalize_ref(kcs_dir: &Path, raw_hash: &str) -> Result<Option<Normali
             .map(|current| gen > current.gen)
             .unwrap_or(true)
         {
+            // PB04: best-effort — this is a filesystem-name recovery scan,
+            // not a fresh normalize; a hashing fault should not block
+            // recovery, it just yields a v1-legacy (manifest_hash: None)
+            // normalize ref for this instance.
+            let manifest_hash =
+                compute_manifest_hash(kcs_dir, raw_hash, &tool_profile_hash, gen).ok();
             best = Some(NormalizeRef {
                 tool_profile_hash,
                 gen,
+                manifest_hash,
             });
         }
     }
@@ -4869,6 +5228,52 @@ fn recover_index_generation(kcs_dir: &Path) -> Result<()> {
     Ok(())
 }
 
+/// PC20 (05 §1.5 L180-184): mint a fresh `index_generation` ULID
+/// unconditionally, invalidating every outstanding search cursor for this
+/// scope. §R ruling 2 ("併存が正 — 統合しない"): this is a SEPARATE trigger
+/// from `recover_index_generation`'s own lifecycle-epoch-conditional
+/// rotation, not a replacement for it — callers invoke both (this one first,
+/// so a write that ALSO happens to move the lifecycle-epoch counter is not
+/// short-circuited into a single rotation by an early return here).
+///
+/// `index`/`reindex`/`repair --rebuild-db` already rotate on every pass via
+/// `build_sqlite_index_at`'s unconditional `ensure_index_metadata` call on
+/// its always-fresh temp db (PB28) — this helper is for the writers that
+/// mutate `sqlite.db` IN PLACE instead of via that temp+rename (purge's
+/// `delete_derived_surfaces`, an embedding-enrichment finalize): callers
+/// invoke it once, right after their own SQLite write commits.
+/// `last_lifecycle_epoch` is read fresh (never assumed unchanged) so this
+/// never regresses that column against a concurrent lifecycle-epoch update.
+///
+/// Not a same-transaction guarantee (05 §1.5 L188's "回転は... 同一の SQLite
+/// Tx で行う"): the write this reacts to has already committed and closed
+/// its own connection by the time this opens a new one, unlike the
+/// rebuild/lifecycle-epoch triggers, which rotate inside their own already-
+/// open transaction. A crash strictly between that commit and this call
+/// would leave a stale-but-valid cursor reusable — a narrow window this
+/// scope's own completion gate accepts (no durable "rotation pending"
+/// marker exists to close it, unlike the lifecycle-epoch counter file
+/// `PurgeState` already maintains for §3.5's crash-safe recovery).
+fn rotate_index_generation_unconditionally(kcs_dir: &Path) -> Result<()> {
+    let path = sqlite_path(kcs_dir);
+    if !path.exists() {
+        return Ok(());
+    }
+    let fts = SqliteFtsIndex::open(
+        &path,
+        FtsSchemaConfig {
+            tokenizer: FtsTokenizer::Trigram,
+        },
+    )
+    .map_err(index_to_kcs)?;
+    let conn = fts.connection();
+    let current_lifecycle_epoch = PurgeState::new(kcs_dir).read_lifecycle_epoch()?;
+    let generation = new_ulid(kcs_dir);
+    kcs_index::fts::rotate_index_generation(conn, &generation, current_lifecycle_epoch)
+        .map_err(index_to_kcs)?;
+    Ok(())
+}
+
 /// LC45: read-command-entry check — the current `.kcs/tombstones/lifecycle-epoch`
 /// counter must equal `index_metadata.last_lifecycle_epoch` exactly (a
 /// mismatch in EITHER direction is retryable, not just counter-ahead). A
@@ -4900,7 +5305,7 @@ fn check_index_generation_current(kcs_dir: &Path) -> Result<()> {
 
 fn read_stored_chunks(kcs_dir: &Path) -> Result<Vec<StoredChunk>> {
     let path = chunks_jsonl_path(kcs_dir);
-    let Ok(text) = fs::read_to_string(&path) else {
+    let Ok(bytes) = fs::read(&path) else {
         return Ok(Vec::new());
     };
     // Q1: `chunks.jsonl` is append-only and never fsync'd (`append_stored_chunks`
@@ -4910,6 +5315,26 @@ fn read_stored_chunks(kcs_dir: &Path) -> Result<Vec<StoredChunk>> {
     // `index` / `reindex` / `repair --rebuild-db` self-heal — rather than bricking
     // every write path (and the sole recovery command) on exit 2.
     //
+    // A torn cut can land mid multi-byte UTF-8 character (content routinely has
+    // non-ASCII text), not merely mid-JSON-token — `fs::read_to_string`'s
+    // whole-file UTF-8 requirement would then fail entirely, discarding every
+    // earlier, perfectly valid line along with the torn one (`Ok(Vec::new())`),
+    // which is not "tolerate a torn tail", it is losing the whole ledger. Read
+    // raw bytes and trim back to the longest valid-UTF-8 prefix first — the
+    // trailing torn remainder (now guaranteed not a `str` at all, or a partial
+    // JSON tail) still falls through to the existing torn-tail line tolerance
+    // below exactly like a torn-but-valid-UTF8 tail already did.
+    let text = match std::str::from_utf8(&bytes) {
+        Ok(text) => std::borrow::Cow::Borrowed(text),
+        Err(error) => {
+            let valid_up_to = error.valid_up_to();
+            std::borrow::Cow::Owned(
+                std::str::from_utf8(&bytes[..valid_up_to])
+                    .expect("prefix up to valid_up_to is valid UTF-8 by construction")
+                    .to_owned(),
+            )
+        }
+    };
     // A corrupt NON-final line cannot be a torn tail, so the store file is
     // genuinely corrupt: classify it as `KCS-E-STORE-CORRUPT-001` (exit 4) with
     // the file path, matching `TaskStore::all` (M1(c)) / cost-ledger — not the
@@ -5275,6 +5700,28 @@ fn build_sqlite_index_at(
     fts.connection()
         .execute_batch("BEGIN")
         .map_err(|err| KcsError::schema(err.to_string()))?;
+    // PC37/PC41/PC43 (05 §1.6 L265-266): every ancestor-most introduction
+    // commit this rebuild pass knows about for a content identity, keyed the
+    // same way `chunks`/`chunk_config_generations` key an identity. Absent
+    // from this map = an identity this pass did not (re-)derive from the live
+    // commit graph (e.g. a chunk whose owning instance no longer participates
+    // in `retained_instances` this round) — such a chunk still gets its
+    // durable `first_seen_commit` recorded as a fallback single introduction
+    // below, so `chunk_publications` never regresses relative to today's
+    // single-valued column.
+    let introductions_by_identity = retained_instances
+        .iter()
+        .map(|instance| {
+            (
+                (
+                    instance.raw_hash.clone(),
+                    instance.normalize.tool_profile_hash.clone(),
+                    instance.normalize.gen,
+                ),
+                instance.introductions.clone(),
+            )
+        })
+        .collect::<BTreeMap<(String, String, u64), Vec<String>>>();
     let mut live_chunk_ids = BTreeSet::new();
     for chunk in read_stored_chunks(kcs_dir)? {
         if purge_blocks_rebuild_raw(kcs_dir, &chunk.row.raw_hash)? {
@@ -5282,8 +5729,40 @@ fn build_sqlite_index_at(
         }
         live_chunk_ids.insert(chunk.row.chunk_id.clone());
         persist_chunk_object(kcs_dir, &chunk.row)?;
+        // PC40 (05 §1.6 L266): `chunk.row.chunking_config_introduction_commit`
+        // is read straight from the durable `chunks.jsonl` record — it was
+        // stamped once, when this specific (chunk_id, config) association was
+        // first created (`rebuild_step3_index`'s two chunking loops /
+        // `historical_reindex::run`), and every later rebuild replaying the
+        // same row here must preserve it rather than re-deriving "this
+        // rebuild's HEAD" (which would wrongly make an old association look
+        // freshly introduced on every subsequent rebuild).
         fts.index_chunk_with_rowids(&chunk.row, Some(chunk.rowid), chunk.association_rowid)
             .map_err(index_to_kcs)?;
+        let identity = (
+            chunk.row.raw_hash.clone(),
+            chunk.row.tool_profile_hash.clone(),
+            chunk.row.gen,
+        );
+        let introductions = introductions_by_identity
+            .get(&identity)
+            .cloned()
+            .or_else(|| {
+                chunk
+                    .row
+                    .first_seen_commit
+                    .clone()
+                    .map(|commit| vec![commit])
+            })
+            .unwrap_or_default();
+        for introduction_commit in &introductions {
+            kcs_index::fts::record_chunk_publication(
+                fts.connection(),
+                &chunk.row.chunk_id,
+                introduction_commit,
+            )
+            .map_err(index_to_kcs)?;
+        }
     }
     for entry in preserved_tree_entries.iter().chain(tree_entries) {
         if purge_blocks_rebuild_raw(kcs_dir, &entry.raw_hash)? {
@@ -6055,58 +6534,6 @@ fn query_vector_digest_hex(vector: &[f32]) -> String {
     format!("sha256:{hex}")
 }
 
-fn empty_search_response(
-    parsed: &ParsedSearch,
-    repo: &Repository,
-    started: Instant,
-    mode: &ResolvedMode,
-    searched: &[SearchedScopeInfo],
-    excluded_scopes: &[Value],
-) -> Result<Value> {
-    // Short queries still report the resolved mode honestly (auto -> text with the
-    // vector-unavailable fallback). N8: index_status is now aggregated from the
-    // actually-searched scopes (not a fixed 1.0), and a partial scope failure is
-    // surfaced as exit 3 just like a ranked search.
-    let searched_scopes = searched
-        .iter()
-        .map(|scope| {
-            let mut entry = json!({
-                "scope_id": scope.scope_id,
-                "scope_path": scope.scope_path,
-                "snapshot_at": scope.snapshot_at,
-            });
-            if scope.shallow_skipped > 0 {
-                entry["shallow_skipped"] = json!(scope.shallow_skipped);
-            }
-            entry
-        })
-        .collect::<Vec<_>>();
-    let any_shallow_skipped = searched.iter().any(|scope| scope.shallow_skipped > 0);
-    let mut response = json!({
-        "query": parsed.query,
-        "requested_mode": search_mode_json(mode.requested),
-        "resolved_mode": search_mode_json(mode.resolved),
-        "fallback": mode.fallback,
-        "fallback_reason": mode.fallback_reason.clone().map(Value::from).unwrap_or(Value::Null),
-        "error_code": mode.error_code.clone().map(Value::from).unwrap_or(Value::Null),
-        // PC3 / §R note-1 ruling: `warnings[]` array.
-        "warnings": mode.warnings.clone(),
-        "diversify": { "strategy": "group_by_raw_hash" },
-        "paging": { "limit": parsed.limit, "next_cursor": Value::Null },
-        "searched_scopes": searched_scopes,
-        "excluded_scopes": excluded_scopes,
-        "index_status": compute_index_status(searched),
-        "results": [],
-    });
-    append_search_logs(repo, &response, started);
-    if !excluded_scopes.is_empty() || any_shallow_skipped {
-        if let Some(object) = response.as_object_mut() {
-            object.insert("__exit_code".to_owned(), json!(3));
-        }
-    }
-    Ok(response)
-}
-
 /// R12-5: observability logging must never break the search result. A metrics.jsonl
 /// or access.jsonl append failure (read-only file, disk full — both device-global,
 /// so one bad file would otherwise stop EVERY scope's search with exit 1 and discard
@@ -6401,6 +6828,11 @@ struct PointerResolution {
     text: Option<String>,
     temporary: bool,
     commit_shallow: bool,
+    /// PB48/50 (08 §3.1 procedure 6b): set only on a non-shallow resolution
+    /// downgraded because the entry's manifest object was purge-explained.
+    /// Mutually exclusive with `commit_shallow` (6b never applies on the
+    /// shallow path).
+    manifest_missing: bool,
 }
 
 /// Reads the raw `<pointer>` operand (08 §2.3), resolving `-` from stdin.
@@ -6581,6 +7013,7 @@ fn resolve_short_hash_command(hash: &str, as_view: bool) -> Result<Value> {
                     "text": resolved.text.unwrap_or_default(),
                     "path": resolved.path,
                     "commit_shallow": resolved.commit_shallow,
+                    "manifest_missing": resolved.manifest_missing,
                 }))
             } else {
                 Ok(json!({
@@ -6590,6 +7023,7 @@ fn resolve_short_hash_command(hash: &str, as_view: bool) -> Result<Value> {
                     "chunk_hash": pointer.chunk_hash,
                     "temporary": resolved.temporary,
                     "commit_shallow": resolved.commit_shallow,
+                    "manifest_missing": resolved.manifest_missing,
                 }))
             }
         }
@@ -6638,6 +7072,348 @@ fn resolve_short_hash_command(hash: &str, as_view: bool) -> Result<Value> {
     }
 }
 
+// ===========================================================================
+// 08 §3.1 procedures 6a/6b (step4b-contract-tests-p2b.md PB39-50/55; item 2 of
+// this session's task). Shared by `resolve_pointer_for_cli` (open/view/
+// restore) and `verify_pointer_for_cli` (`crates/kcs-cli/src/verify_objects.rs`,
+// PB66's structural requirement — one implementation, not two independently
+// drifting judgments). Never invoked on the shallow path (2a): tree/entry are
+// unavailable there by construction, and procedure 2a explicitly excludes
+// 3-4/6/6a/6b.
+// ===========================================================================
+
+const MAX_MANIFEST_OBJECT_READ_BYTES: u64 = 8 * 1024 * 1024;
+
+/// The 08 §3.1 6a/6b verdict for one resolved `(tree entry, chunk)` pair at
+/// `pointer_commit`.
+enum PointInTimeAttribution {
+    /// v2/v3 tree, procedure 6a's unit-status and publication/association
+    /// ancestry checks all passed.
+    Alive,
+    /// v1 tree (`normalize.manifest_hash` absent) — 6a/6b cannot run;
+    /// resolved leniently as before this session (`--strict` downgrades this
+    /// to `unverifiable(reason=tree_v1)` separately, PB40/PB55).
+    LegacyTreeV1,
+    /// 6a's manifest-done check, or the v2/v3 publication/association
+    /// ancestry check, failed outright — not admissible evidence for this
+    /// commit (`not_found`).
+    NotFound,
+    /// 6b applied (the manifest object is purge-explained and in scope,
+    /// possibly via the resurrection link) — direct-resolution downgrade;
+    /// caller still must run procedure 8's entry-level checks.
+    ManifestMissing,
+    /// 6b's explanation is out of the fsck-equivalent scope (pointer_commit
+    /// is not ancestor-or-equal of the explaining event's `in_commit`), or no
+    /// marker explains the missing manifest at all — genuine corruption.
+    StoreCorrupt,
+    /// sqlite.db is unavailable for the v2/v3 association check — a
+    /// command-level retryable condition (08 §3.1 step 6a), not a resolution
+    /// verdict.
+    IndexRebuilding,
+}
+
+/// Procedure 6a entry point: `normalize` is the tool-bound tree entry's own
+/// `normalize` ref (procedure 4's selection), already established by the
+/// caller. `chunk` is the already-resolved, identity-checked chunk object;
+/// `chunk_hash` is its CAS key (the object itself carries no self-hash —
+/// 03 §8.1).
+fn verify_point_in_time_attribution(
+    target: &ScopeTarget,
+    repo: &Repository,
+    raw_hash: &str,
+    normalize: &NormalizeRef,
+    chunk_hash: &str,
+    chunk: &ChunkObject,
+    pointer_commit: &str,
+) -> Result<PointInTimeAttribution> {
+    let Some(manifest_hash) = &normalize.manifest_hash else {
+        return Ok(PointInTimeAttribution::LegacyTreeV1);
+    };
+    let store = ObjectStore::new(&target.kcs_dir);
+    let manifest_path = store.content_path(ContentObjectKind::Manifest, manifest_hash)?;
+    if !path_entry_exists(&manifest_path)? {
+        return resolve_manifest_missing(target, repo, raw_hash, chunk_hash, pointer_commit);
+    }
+    let manifest_bytes = store.read_content_object_bytes(
+        ContentObjectKind::Manifest,
+        manifest_hash,
+        MAX_MANIFEST_OBJECT_READ_BYTES,
+    )?;
+    let manifest: NormalizedInstanceManifest = serde_json::from_slice(&manifest_bytes)
+        .map_err(|error| KcsError::schema(error.to_string()))?;
+    let done = manifest
+        .units
+        .iter()
+        .find(|unit| unit.unit_key == chunk.unit_key)
+        .is_some_and(|unit| unit.status == UnitStatus::Done);
+    if !done {
+        return Ok(PointInTimeAttribution::NotFound);
+    }
+    match check_publication_and_association(target, repo, chunk_hash, pointer_commit)? {
+        AssociationCheck::Ok => Ok(PointInTimeAttribution::Alive),
+        AssociationCheck::NotFound => Ok(PointInTimeAttribution::NotFound),
+        AssociationCheck::IndexRebuilding => Ok(PointInTimeAttribution::IndexRebuilding),
+    }
+}
+
+/// Procedure 6b: the manifest object itself is gone (purge deleted it — the
+/// tree entry still names it, tree/commit objects are never rewritten). Scope
+/// the explanation to the fsck-equivalent boundary (10 §7.5.1 / PB05), then
+/// downgrade to direct resolution (or resolve via the resurrection link).
+fn resolve_manifest_missing(
+    target: &ScopeTarget,
+    repo: &Repository,
+    raw_hash: &str,
+    chunk_hash: &str,
+    pointer_commit: &str,
+) -> Result<PointInTimeAttribution> {
+    let purge = PurgeState::new(&target.kcs_dir);
+    let tombstone = purge.read_tombstone(raw_hash)?;
+    let receipt = purge.read_erase_receipt(raw_hash)?;
+    let Some(canonical) = canonical_final_event(
+        tombstone.as_ref().map(|record| record.tail()),
+        receipt.as_ref().map(|record| record.tail()),
+    ) else {
+        // No marker at all explains a missing manifest -- corruption.
+        return Ok(PointInTimeAttribution::StoreCorrupt);
+    };
+    // The canonical final event's OWN `in_commit` is not usable when it is
+    // `retired`: `LifecycleEvent::retired` stamps `in_commit` with the
+    // resurrection commit, not the original purge's (05 §3.5's retired-event
+    // shape) -- walk back to the marker's own last purged/erased event
+    // instead, whichever marker canonical says is authoritative.
+    let explaining_in_commit = match canonical.marker_kind {
+        TombstoneMode::Default => tombstone.as_ref().map(|record| &record.events),
+        TombstoneMode::Erase => receipt.as_ref().map(|record| &record.events),
+    }
+    .and_then(|events| {
+        events
+            .iter()
+            .rev()
+            .find(|event| matches!(event.kind, EventKind::Purged | EventKind::Erased))
+            .map(|event| event.in_commit.clone())
+    });
+    let Some(in_commit) = explaining_in_commit else {
+        return Ok(PointInTimeAttribution::StoreCorrupt);
+    };
+    // fsck-equivalent scope (PB05 / 08 §3.1 step 6b): pointer_commit must be
+    // at-or-before the explaining purge (ancestor-or-equal of `in_commit`).
+    // Outside that range = a newer, unexplained manifest loss.
+    if !is_ancestor_or_equal(repo, pointer_commit, &in_commit)? {
+        return Ok(PointInTimeAttribution::StoreCorrupt);
+    }
+
+    // Direct resolution: pointer_commit is still the ancestry basis for 6a's
+    // publication/association checks.
+    match check_publication_and_association(target, repo, chunk_hash, pointer_commit)? {
+        AssociationCheck::Ok => return Ok(PointInTimeAttribution::ManifestMissing),
+        AssociationCheck::IndexRebuilding => return Ok(PointInTimeAttribution::IndexRebuilding),
+        AssociationCheck::NotFound => {}
+    }
+
+    // Resurrection link: valid only when canonical final event (procedure 5)
+    // is itself `retired` (not a stale non-canonical marker's own tail) --
+    // re-run the same checks with `resurrection_commit` as the basis.
+    if canonical.event.kind == EventKind::Retired {
+        if let Some(link_commit) = &canonical.event.resurrection_commit {
+            match check_publication_and_association(target, repo, chunk_hash, link_commit)? {
+                AssociationCheck::Ok => return Ok(PointInTimeAttribution::ManifestMissing),
+                AssociationCheck::IndexRebuilding => {
+                    return Ok(PointInTimeAttribution::IndexRebuilding)
+                }
+                AssociationCheck::NotFound => {}
+            }
+        }
+    }
+    Ok(PointInTimeAttribution::NotFound)
+}
+
+enum AssociationCheck {
+    Ok,
+    NotFound,
+    IndexRebuilding,
+}
+
+/// 08 §3.1 step 6a's v2/v3 publication + config-association ancestor-or-equal
+/// checks against `basis_commit` (the pointer's own commit for a direct
+/// resolution, or the resurrection link's commit for 6b's link path).
+fn check_publication_and_association(
+    target: &ScopeTarget,
+    repo: &Repository,
+    chunk_hash: &str,
+    basis_commit: &str,
+) -> Result<AssociationCheck> {
+    let db_path = sqlite_path(&target.kcs_dir);
+    if !db_path.exists() {
+        return Ok(AssociationCheck::IndexRebuilding);
+    }
+    let conn = Connection::open(&db_path).map_err(|error| KcsError::schema(error.to_string()))?;
+
+    let introductions =
+        kcs_index::fts::chunk_publication_introductions(&conn, chunk_hash).map_err(index_to_kcs)?;
+    let mut publication_ok = false;
+    for introduction in &introductions {
+        if is_ancestor_or_equal(repo, introduction, basis_commit)? {
+            publication_ok = true;
+            break;
+        }
+    }
+    if !publication_ok {
+        return Ok(AssociationCheck::NotFound);
+    }
+
+    let live = read_chunking_config(repo)?.chunking_config_hash;
+    let Some(resolved_config) = resolve_reaching_chunking_config(&conn, repo, &live, basis_commit)?
+    else {
+        return Ok(AssociationCheck::NotFound);
+    };
+    let mut statement = conn
+        .prepare(
+            "SELECT introduction_commit FROM chunk_config_generations \
+             WHERE chunk_id = ?1 AND chunking_config_hash = ?2 AND introduction_commit IS NOT NULL",
+        )
+        .map_err(|error| KcsError::schema(error.to_string()))?;
+    let introductions = statement
+        .query_map(rusqlite::params![chunk_hash, resolved_config], |row| {
+            row.get::<_, String>(0)
+        })
+        .map_err(|error| KcsError::schema(error.to_string()))?
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(|error| KcsError::schema(error.to_string()))?;
+    drop(statement);
+    for introduction in &introductions {
+        if is_ancestor_or_equal(repo, introduction, basis_commit)? {
+            return Ok(AssociationCheck::Ok);
+        }
+    }
+    Ok(AssociationCheck::NotFound)
+}
+
+/// "The target tree's `chunking_config_hash`" (05 §1.6), resolved for a
+/// single point-in-time check rather than a ranked search stream: prefer the
+/// live config if ANY of its config associations (any chunk) reach
+/// `basis_commit`; otherwise the UTF-8-byte-order-minimum config among those
+/// that do. `None` when nothing reaches `basis_commit` at all. Mirrors
+/// `resolve_target_chunking_config_hash`'s search-side algorithm without that
+/// function's cursor/eligible-identity machinery, which a single pointer
+/// resolution does not need.
+fn resolve_reaching_chunking_config(
+    conn: &Connection,
+    repo: &Repository,
+    live: &str,
+    basis_commit: &str,
+) -> Result<Option<String>> {
+    let mut statement = conn
+        .prepare(
+            "SELECT chunking_config_hash, introduction_commit FROM chunk_config_generations \
+             WHERE introduction_commit IS NOT NULL",
+        )
+        .map_err(|error| KcsError::schema(error.to_string()))?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .map_err(|error| KcsError::schema(error.to_string()))?
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(|error| KcsError::schema(error.to_string()))?;
+    drop(statement);
+    let mut by_config = BTreeMap::<String, Vec<String>>::new();
+    for (config, commit) in rows {
+        by_config.entry(config).or_default().push(commit);
+    }
+    if let Some(commits) = by_config.get(live) {
+        for commit in commits {
+            if is_ancestor_or_equal(repo, commit, basis_commit)? {
+                return Ok(Some(live.to_owned()));
+            }
+        }
+    }
+    for (config, commits) in &by_config {
+        if config == live {
+            continue;
+        }
+        for commit in commits {
+            if is_ancestor_or_equal(repo, commit, basis_commit)? {
+                return Ok(Some(config.clone()));
+            }
+        }
+    }
+    Ok(None)
+}
+
+/// Bounded "is `ancestor` at or before `descendant`" check via a commit-only
+/// walk (parents only, no tree reads — cheaper than
+/// `kcs_core::history::HistoryGraph` for this yes/no query). Bounded the same
+/// as the dedicated history walks (`DEFAULT_MAX_HISTORY_COMMITS`) to avoid an
+/// unbounded walk on a pathological DAG; a shallow-skipped ancestor (missing
+/// commit object) simply prunes that branch rather than erroring, matching
+/// the tolerant-walk convention used elsewhere for history traversal.
+fn is_ancestor_or_equal(repo: &Repository, ancestor: &str, descendant: &str) -> Result<bool> {
+    if ancestor == descendant {
+        return Ok(true);
+    }
+    let mut pending = vec![descendant.to_owned()];
+    let mut visited = BTreeSet::new();
+    let mut steps: u64 = 0;
+    while let Some(hash) = pending.pop() {
+        if !visited.insert(hash.clone()) {
+            continue;
+        }
+        steps += 1;
+        if steps > kcs_core::history::DEFAULT_MAX_HISTORY_COMMITS {
+            return Err(KcsError::new(
+                "KCS-E-COMMIT-HISTORY-LIMIT-001",
+                "ancestor-or-equal check exceeded the history walk bound",
+                json!({ "ancestor": ancestor, "descendant": descendant }),
+                ExitCode::PartialFailure,
+            ));
+        }
+        let commit = match repo.read_commit(&hash) {
+            Ok(commit) => commit,
+            Err(error) if is_store_not_found(&error) => continue,
+            Err(error) => return Err(error),
+        };
+        for parent in &commit.parents {
+            if parent == ancestor {
+                return Ok(true);
+            }
+            pending.push(parent.clone());
+        }
+    }
+    Ok(false)
+}
+
+/// PB48/6b's StoreCorrupt verdict, open/view/restore side: a manifest gap
+/// that no marker's explanation scope covers (or that no marker explains at
+/// all) is genuine store corruption, the same terminal code procedure 4's
+/// zero-matching-entry short circuit uses (08 §3.1 step 4/6b both fold into
+/// `KCS-E-STORE-CORRUPT-001`, not_found-equivalent handling).
+fn point_in_time_store_corrupt_error(pointer: &EvidencePointer) -> KcsError {
+    KcsError::new(
+        "KCS-E-STORE-CORRUPT-001",
+        "the entry's manifest object is missing and no purge/erase marker explains \
+         its absence within scope; run kcs repair --verify-objects",
+        json!({
+            "commit": pointer.commit,
+            "raw_hash": pointer.raw_hash,
+        }),
+        ExitCode::PermanentFailure,
+    )
+}
+
+/// 08 §3.1 step 6a's sqlite.db-unavailable carve-out: verification could not
+/// run at all, so this is not a resolution verdict (not_found or otherwise) —
+/// a command-level retryable condition, matching PB57's `evidence verify`
+/// contract extended to the open/view/restore side.
+fn point_in_time_index_rebuilding_error() -> KcsError {
+    KcsError::new(
+        "KCS-E-INDEX-REBUILDING-001",
+        "the search index is unavailable (not yet built or mid-rebuild); retry",
+        json!({}),
+        ExitCode::PartialFailure,
+    )
+}
+
 fn resolve_pointer_for_cli(pointer: &EvidencePointer) -> Result<PointerResolution> {
     // 08 §3.1 step 1: two-stage scope resolution (scope_path hint -> registry).
     let target = resolve_scope_target(&pointer.scope_id, pointer.scope_path.as_deref())?;
@@ -6684,13 +7460,14 @@ fn resolve_pointer_for_cli(pointer: &EvidencePointer) -> Result<PointerResolutio
     // `entry_gen` is the tree entry's normalization generation on a non-shallow
     // commit; `None` on the shallow path (no tree to read). It binds the chunk's
     // gen below (N5).
-    let (commit_shallow, entry_gen) = match repo.read_tree(&commit.tree) {
+    let (commit_shallow, entry_gen, entry_normalize) = match repo.read_tree(&commit.tree) {
         Ok(tree) => {
-            let entry = tree
+            let raw_matches = tree
                 .entries
                 .iter()
-                .find(|entry| entry.raw_hash == pointer.raw_hash);
-            let Some(entry) = entry else {
+                .filter(|entry| entry.raw_hash == pointer.raw_hash)
+                .collect::<Vec<_>>();
+            if raw_matches.is_empty() {
                 // step 5 (tombstone) is checked before declaring not_found.
                 // This is a tree-membership failure (this pointer's commit
                 // never referenced this raw_hash), independent of LC12/13/14's
@@ -6700,30 +7477,50 @@ fn resolve_pointer_for_cli(pointer: &EvidencePointer) -> Result<PointerResolutio
                 // otherwise this stays the plain not-found it always was.
                 enforce_canonical_tombstone_only(&target, &pointer.raw_hash)?;
                 return Err(purge_not_found_error(&target, &pointer.raw_hash));
-            };
-            // M6: the tree entry's normalization must bind to the pointer's
-            // tool_profile_hash. N5: it must ALSO bind `gen` (checked below against
-            // the resolved chunk), so a pointer that keeps an old commit but swaps
-            // in a newer-generation chunk_hash produced by `reindex --force` cannot
-            // resolve (the gen axis M6 missed, 08 §3). A tree entry with no explicit
-            // normalization (e.g. a bare `kcs snapshot` that advanced HEAD without
-            // re-recording normalize refs, L3) carries no gen to bind, so it keeps
-            // the pre-existing behavior — the chunk (raw, tool) identity check below
-            // is the available guard. `entry_gen` stays `None` there.
-            let entry_gen = match &entry.normalize {
-                Some(normalize) => {
+            }
+            // M6/PB42/43 (§O, 08 §3.1 step 4): when the same raw_hash is
+            // placed at more than one path in this commit's tree (duplicate
+            // placement), select the entry whose normalize.tool_profile_hash
+            // binds to the pointer's, tie-broken by UTF-8 byte-order-minimal
+            // path when more than one entry shares that binding — mirrors
+            // `verify_pointer_for_cli`'s (`verify_objects.rs`) selection so
+            // open/view/restore and evidence verify agree on which entry
+            // wins. A LONE candidate keeps the pre-existing behavior
+            // (including a bare `kcs snapshot`'s entry with no `normalize`
+            // ref at all, L3 — nothing to bind, so binding selection does
+            // not apply to it): binding ambiguity only exists once there are
+            // two or more raw_hash matches to choose between.
+            let entry = if let [single] = raw_matches.as_slice() {
+                if let Some(normalize) = &single.normalize {
                     if normalize.tool_profile_hash != pointer.tool_profile_hash {
                         return Err(invalid_pointer_identity_error(pointer));
                     }
-                    Some(normalize.gen)
                 }
-                None => None,
+                *single
+            } else {
+                raw_matches
+                    .into_iter()
+                    .filter(|entry| {
+                        entry.normalize.as_ref().is_some_and(|normalize| {
+                            normalize.tool_profile_hash == pointer.tool_profile_hash
+                        })
+                    })
+                    .min_by(|a, b| a.path.as_bytes().cmp(b.path.as_bytes()))
+                    .ok_or_else(|| invalid_pointer_identity_error(pointer))?
             };
-            (false, entry_gen)
+            // N5: the tree entry's normalization must ALSO bind `gen`
+            // (checked below against the resolved chunk), so a pointer that
+            // keeps an old commit but swaps in a newer-generation chunk_hash
+            // produced by `reindex --force` cannot resolve (the gen axis M6
+            // missed, 08 §3). `entry_gen` stays `None` for a no-normalize
+            // entry — the chunk (raw, tool) identity check below is the
+            // available guard there.
+            let entry_gen = entry.normalize.as_ref().map(|normalize| normalize.gen);
+            (false, entry_gen, entry.normalize.clone())
         }
         // Tree object gone (genuine shallow: commit present, tree GC'd) — resolve the
         // chunk directly, with gen unbound.
-        Err(error) if is_store_not_found(&error) => (true, None),
+        Err(error) if is_store_not_found(&error) => (true, None, None),
         Err(error) => return Err(error),
     };
 
@@ -6786,6 +7583,38 @@ fn resolve_pointer_for_cli(pointer: &EvidencePointer) -> Result<PointerResolutio
             return Err(invalid_pointer_identity_error(pointer));
         }
     }
+
+    // 08 §3.1 procedures 6a/6b (item 2 of this session's task): point-in-time
+    // attribution. Shallow (2a) never reaches here (`entry_normalize` is only
+    // ever `Some` on the non-shallow path); `commit_shallow` gates it
+    // explicitly too so the two stay mutually exclusive by construction
+    // (PB50).
+    let mut manifest_missing = false;
+    if !commit_shallow {
+        if let Some(normalize) = &entry_normalize {
+            match verify_point_in_time_attribution(
+                &target,
+                &repo,
+                &pointer.raw_hash,
+                normalize,
+                &pointer.chunk_hash,
+                &chunk,
+                &pointer.commit,
+            )? {
+                PointInTimeAttribution::Alive | PointInTimeAttribution::LegacyTreeV1 => {}
+                PointInTimeAttribution::ManifestMissing => manifest_missing = true,
+                PointInTimeAttribution::NotFound => {
+                    return Err(purge_not_found_error(&target, &pointer.raw_hash));
+                }
+                PointInTimeAttribution::StoreCorrupt => {
+                    return Err(point_in_time_store_corrupt_error(pointer));
+                }
+                PointInTimeAttribution::IndexRebuilding => {
+                    return Err(point_in_time_index_rebuilding_error())
+                }
+            }
+        }
+    }
     let text = chunk.text;
 
     // Raw object resolution: working tree first (rename-tolerant), else CAS
@@ -6813,6 +7642,7 @@ fn resolve_pointer_for_cli(pointer: &EvidencePointer) -> Result<PointerResolutio
                 text: Some(text),
                 temporary,
                 commit_shallow,
+                manifest_missing,
             })
         }
         // raw_present=false always yields Err from the canonical dispatch
@@ -12417,6 +13247,12 @@ fn run_index_pipeline(
             .map_err(pipeline_to_kcs)?
             .is_some()
         {
+            // PB04: this candidate's gen=0 output is already `done`
+            // (verified above) — its manifest.json is expected to be
+            // hashable now. Best-effort so a hashing fault alone does not
+            // newly block an otherwise-successful offline index.
+            let manifest_hash =
+                compute_manifest_hash(repo.kcs_dir(), &raw_hash, &markdown_profile_hash, 0).ok();
             result.normalize_by_path.insert(
                 candidate.input_path.clone(),
                 PendingNormalizeRef {
@@ -12424,6 +13260,7 @@ fn run_index_pipeline(
                     normalize: NormalizeRef {
                         tool_profile_hash: markdown_profile_hash.clone(),
                         gen: 0,
+                        manifest_hash,
                     },
                 },
             );
@@ -12640,6 +13477,11 @@ fn run_index_pipeline(
             RetryErrorKind::ContractViolation,
         );
         persist_normalized_instance(repo.kcs_dir(), &manifest, &units).map_err(pipeline_to_kcs)?;
+        // PB04: `manifest` was just durably persisted above — hash the
+        // in-memory value directly rather than re-reading it from disk.
+        // Best-effort so a hashing fault alone does not newly block an
+        // otherwise-successful local markdownize.
+        let manifest_hash = hash_and_write_manifest_object(repo.kcs_dir(), &manifest).ok();
         let task = task_descriptor(
             repo,
             TaskType::Markdownize,
@@ -12675,6 +13517,7 @@ fn run_index_pipeline(
                 normalize: NormalizeRef {
                     tool_profile_hash: markdown_profile_hash.clone(),
                     gen: 0,
+                    manifest_hash,
                 },
             },
         );
@@ -14794,6 +15637,50 @@ fn random_key_32() -> Result<Vec<u8>> {
     Ok(buf)
 }
 
+/// PB04 (step4b-contract-tests-p2b.md §B; 10 §7.5.1 L493-497; 03 §8.1):
+/// compute this normalized instance's *current* manifest.json canonical JCS
+/// content hash and durably CAS-write it as a `ContentObjectKind::Manifest`
+/// object (`objects/manifests/` — 03 §2.1), for `NormalizeRef::manifest_hash`
+/// (tree schema v2). Reuses the same provenance-rebinding loader
+/// `verify_objects`/purge's orphan scan already use rather than reading
+/// `manifest.json` bytes ad hoc, so the hashed content is bound to the
+/// requested `(raw_hash, tool_profile_hash, gen)` identity. `write_content_object`
+/// is idempotent (verifies existing bytes rather than re-writing), matching
+/// same-gen finalize's repeated manifest updates (03 §8, "unit の failed →
+/// done 遷移で変わるため" — each transition yields a new manifest_hash).
+///
+/// Deliberately best-effort (`Result` for the caller to `.ok()`): a
+/// normalize binding forward-compatibly carries `manifest_hash: None` (v1
+/// legacy semantics, 10 §7.5.1 L501) when the manifest cannot be hashed —
+/// e.g., because it belongs to a call site synthesizing a normalize ref this
+/// session did not target for eager computation. Callers that already carry
+/// a known-good `manifest_hash` forward (history-derived normalize refs)
+/// never call this.
+fn compute_manifest_hash(
+    kcs_dir: &Path,
+    raw_hash: &str,
+    tool_profile_hash: &str,
+    gen: u64,
+) -> Result<String> {
+    let instance = load_validated_normalized_instance(kcs_dir, raw_hash, tool_profile_hash, gen)
+        .map_err(pipeline_to_kcs)?;
+    hash_and_write_manifest_object(kcs_dir, &instance.manifest)
+}
+
+/// Low-level half of [`compute_manifest_hash`]: canonicalize an
+/// already-in-memory `NormalizedInstanceManifest` and CAS-write it. Callers
+/// that just finished `persist_normalized_instance` (the manifest is already
+/// in hand, no need to re-read+re-validate it from disk) use this directly.
+fn hash_and_write_manifest_object(
+    kcs_dir: &Path,
+    manifest: &NormalizedInstanceManifest,
+) -> Result<String> {
+    let value =
+        serde_json::to_value(manifest).map_err(|error| KcsError::schema(error.to_string()))?;
+    let bytes = canonical_json_bytes(&value)?;
+    ObjectStore::new(kcs_dir).write_content_object(ContentObjectKind::Manifest, &bytes)
+}
+
 fn adapter_to_kcs(error: kcs_adapter::AdapterError) -> KcsError {
     match error {
         // R13-2: `keychain:` auth is a LOUD not-implemented error (never a silent
@@ -15033,10 +15920,12 @@ mod tests {
             normalize: kcs_core::dag::NormalizeRef {
                 tool_profile_hash: profile_hash,
                 gen: 0,
+                manifest_hash: None,
             },
             raw_path: "reintroduced.md".to_owned(),
             embedding_path: "reintroduced.md".to_owned(),
-            first_seen_commit: commit_hash,
+            first_seen_commit: commit_hash.clone(),
+            introductions: vec![commit_hash],
         }];
         let chunks = super::retained_history_chunks(&conn, &kcs_dir, &retained, "config").unwrap();
         assert_eq!(chunks.len(), 1);
@@ -15640,52 +16529,66 @@ mod tests {
     }
 
     #[test]
-    fn r11_10_keyword_groups_are_capped_at_64() {
-        use super::build_fts_tiers;
-        // 200 distinct ASCII keywords (>= 3 chars). Before R11-10 every one became an
-        // OR clause; now the keyword groups are capped at 64 like the CJK trigrams.
+    fn pc8_long_query_still_builds_a_match_expression() {
+        use super::build_query_plan;
+        // PC8 (05 §1.3 L110-115): the new MATCH-generation architecture has no
+        // OLD-tier keyword cap (that was a pre-PC8 hardening specific to the
+        // replaced bilingual/thousands-separator/tiered design) — 200
+        // distinct ASCII tokens (>= 3 chars) still all become individually
+        // quoted, `OR`-joined phrases with no token dropped.
         let query = (0..200)
             .map(|i| format!("kw{i:04}"))
             .collect::<Vec<_>>()
             .join(" ");
-        let tiers = build_fts_tiers(&query);
-        assert!(
-            !tiers.is_empty(),
-            "a long keyword query must still build a tier"
-        );
-        // No CJK → no trigram phrases, so each tier is purely keyword OR-groups.
-        // Every tier must be capped (group count = " OR " separators + 1).
-        for tier in &tiers {
-            let group_count = tier.matches(" OR ").count() + 1;
-            assert!(
-                group_count <= 64,
-                "keyword groups must be capped at 64, got {group_count}: {tier}"
-            );
-        }
+        let plan = build_query_plan(&query);
+        let match_expr = plan.match_expr.expect("all tokens are >= 3 chars");
+        assert_eq!(match_expr.matches(" OR ").count() + 1, 200);
+        assert!(plan.short_tokens.is_empty());
     }
 
     #[test]
-    fn ct4_eval_mixed_script_query_keeps_cjk_context_in_first_tier() {
-        use super::build_fts_tiers;
-
-        let tiers = build_fts_tiers("RAG パイプラインで再ランクに Merlin を使う 5 段構成の資料");
-        assert_eq!(tiers.len(), 1);
-        assert!(tiers[0].contains("\"RAG\""));
-        assert!(tiers[0].contains("\"Merlin\""));
-        assert!(tiers[0].contains("\"再ラン\""));
-        assert!(tiers[0].contains("\"段構成\""));
+    fn pc8_pc9_mixed_script_query_quotes_each_whitespace_token_once() {
+        use super::build_query_plan;
+        // PC9 (05 §1.3 L113-115): tokenization splits on Unicode whitespace
+        // only — a CJK run with no internal spaces is ONE token (not
+        // decomposed into trigrams by this layer; FTS5's own trigram
+        // tokenizer performs the substring match when this whole quoted
+        // phrase is used as a MATCH operand, 04 §4.1). PC8: no cross-token
+        // contamination — each whitespace-delimited piece is its own phrase.
+        let plan = build_query_plan("RAG パイプラインで再ランクに Merlin を使う 5 段構成の資料");
+        let match_expr = plan.match_expr.expect("several tokens are >= 3 chars");
+        assert!(match_expr.contains("\"RAG\""));
+        assert!(match_expr.contains("\"Merlin\""));
+        assert!(match_expr.contains("\"パイプラインで再ランクに\""));
+        assert!(match_expr.contains("\"段構成の資料\""));
+        // "を使う" is exactly 3 Unicode scalars ("を","使","う") — PC12's
+        // ">= 3" threshold puts it in the MATCH expression, not short_tokens.
+        assert!(match_expr.contains("\"を使う\""));
+        // "5" is the only token under 3 Unicode scalars here — PC12's
+        // short-token set.
+        assert_eq!(plan.short_tokens, vec!["5".to_owned()]);
     }
 
     #[test]
-    fn ct4_eval_english_retrieval_terms_expand_to_japanese_index_terms() {
-        use super::build_fts_tiers;
+    fn pc8_no_bilingual_or_thousands_separator_expansion() {
+        use super::build_query_plan;
+        // PC8 (05 §1.3 L110-115): "query 由来でない追加語を含まない" — the
+        // pre-PC8 chunk/token/pipeline -> チャンク/トークン/パイプライン
+        // bilingual aliasing and the `3600` -> `3,600` thousands-separator
+        // variant are both gone; the MATCH expression contains only what the
+        // query itself spelled out.
+        let plan = build_query_plan("chunk size was 512 tokens in the retrieval pipeline doc");
+        let match_expr = plan.match_expr.expect("several tokens are >= 3 chars");
+        assert!(!match_expr.contains("チャンク"));
+        assert!(!match_expr.contains("トークン"));
+        assert!(!match_expr.contains("パイプライン"));
+        assert!(match_expr.contains("\"chunk\""));
+        assert!(match_expr.contains("\"pipeline\""));
 
-        let tiers = build_fts_tiers("chunk size was 512 tokens in the retrieval pipeline doc");
-        assert!(!tiers.is_empty());
-        assert!(tiers[0].contains("\"チャンク\""));
-        assert!(tiers[0].contains("\"トークン\""));
-        assert!(tiers[0].contains("\"パイプライン\""));
-        assert!(tiers[0].matches(" OR ").count() < 64);
+        let plan = build_query_plan("TTL is 3600 seconds");
+        let match_expr = plan.match_expr.expect("several tokens are >= 3 chars");
+        assert!(match_expr.contains("\"3600\""));
+        assert!(!match_expr.contains("3,600"));
     }
 
     #[test]

@@ -17,6 +17,16 @@ pub struct NormalizeRef {
     pub tool_profile_hash: String,
     #[serde(default)]
     pub gen: u64,
+    /// PB04 (step4b-contract-tests-p2b.md §B; 03-data-model.md §8, tree
+    /// schema v2): content hash of this (raw_hash, tool_profile_hash,
+    /// gen)'s normalized-instance manifest.json canonical JCS bytes
+    /// (`objects/manifests/` — 03-data-model.md §2.1). `None` = a v1 tree
+    /// entry (legacy, predates this field — 10 §7.5.1 L501-504 "v1 tree
+    /// (両フィールド欠落) は legacy として読取可"), omitted from
+    /// serialization rather than written `null` (03 §5.1's
+    /// omission-vs-null rule preserved for forward compatibility).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub manifest_hash: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -65,6 +75,20 @@ impl TreeEntry {
                 return Err(KcsError::schema(
                     "tool_profile_hash must be sha256 lowercase hex",
                 ));
+            }
+            // PB04: manifest_hash is optional (v1 legacy omission), but when
+            // present must be a well-formed content hash — the same
+            // format-only check `tool_profile_hash` gets above. The
+            // cross-reference (does this hash resolve to a real manifest
+            // object whose identity fields agree with this entry?) is a
+            // `kcs repair --verify-objects` corpus-shaped check (PB04's CAS
+            // re-hash comparison), not a per-entry schema invariant.
+            if let Some(manifest_hash) = &normalize.manifest_hash {
+                if !is_hash(manifest_hash) {
+                    return Err(KcsError::schema(
+                        "manifest_hash must be sha256 lowercase hex",
+                    ));
+                }
             }
         }
         Ok(())

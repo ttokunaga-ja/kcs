@@ -90,6 +90,13 @@ pub(super) struct RetainedNormalizedInstance {
     pub(super) raw_path: String,
     pub(super) embedding_path: String,
     pub(super) first_seen_commit: String,
+    /// PC37/PC41/PC43 (05 §1.6 L265-266): every ancestor-most (mutually
+    /// incomparable) introduction commit for this content identity, sorted by
+    /// full commit hash — `first_seen_commit` is always `introductions[0]`
+    /// (the deterministic byte-order-min winner already used for display /
+    /// the legacy single-valued column). A merge side-branch or independent
+    /// import produces more than one entry; the common case has exactly one.
+    pub(super) introductions: Vec<String>,
 }
 
 /// Resolve every exact normalized instance retained by the bounded all-parent
@@ -137,6 +144,12 @@ pub(super) fn retained_history_instances(
         .map(|appearance| appearance.binding)
         .filter(|binding| binding.normalize.is_some())
         .collect::<BTreeSet<TreeBinding>>();
+    // PC37/PC41/PC43 (05 §1.6 L265-266): collect EVERY ancestor-most
+    // introduction per exact binding (not just its own byte-min winner via
+    // `canonical_introduction`) so a content identity reachable through
+    // several incomparable paths/roots (rename/copy aliases, merge side
+    // branches, independent imports) keeps every one of them as a candidate
+    // before the group-level reduction below.
     let mut by_instance = BTreeMap::<(String, String, u64), Vec<(TreeBinding, String)>>::new();
     for binding in exact_bindings {
         if purge_blocks_rebuild_raw(kcs_dir, &binding.raw_hash)? {
@@ -146,51 +159,61 @@ pub(super) fn retained_history_instances(
             .normalize
             .as_ref()
             .expect("normalize=None bindings were filtered");
-        let introduction = graph.canonical_introduction(&binding).ok_or_else(|| {
-            KcsError::schema("retained history binding has no introduction commit")
-        })?;
-        by_instance
-            .entry((
-                binding.raw_hash.clone(),
-                normalize.tool_profile_hash.clone(),
-                normalize.gen,
-            ))
-            .or_default()
-            .push((binding, introduction.commit_hash));
+        let key = (
+            binding.raw_hash.clone(),
+            normalize.tool_profile_hash.clone(),
+            normalize.gen,
+        );
+        let introductions = graph.ancestor_most_introductions(&binding);
+        if introductions.is_empty() {
+            return Err(KcsError::schema(
+                "retained history binding has no introduction commit",
+            ));
+        }
+        let entry = by_instance.entry(key).or_default();
+        for introduction in introductions {
+            entry.push((binding.clone(), introduction.commit_hash));
+        }
     }
 
     let mut instances = Vec::with_capacity(by_instance.len());
     for ((raw_hash, tool_profile_hash, gen), candidates) in by_instance {
-        // A rename/copy can introduce several exact path bindings for one
-        // content identity. Keep only ancestor-most introductions; incomparable
-        // roots use the frozen full-hash/path byte order.
-        let mut ancestor_most = candidates
+        // Several bindings (distinct paths) can share the same introduction
+        // commit; keep one representative binding per distinct commit before
+        // the ancestor-most reduction below.
+        let mut binding_by_commit = BTreeMap::<String, TreeBinding>::new();
+        for (binding, commit) in candidates {
+            binding_by_commit.entry(commit).or_insert(binding);
+        }
+        let commits = binding_by_commit.keys().cloned().collect::<Vec<_>>();
+        // A rename/copy/independent-import can introduce several mutually
+        // incomparable introduction commits for one content identity. Keep
+        // every ancestor-most one (PC37/41/43's multi-introduction case);
+        // the frozen full-hash byte order both breaks ties deterministically
+        // and gives `introductions[0]` as the legacy single-valued winner.
+        let mut ancestor_most = commits
             .iter()
-            .filter(|(_, candidate_commit)| {
-                !candidates.iter().any(|(_, other_commit)| {
-                    other_commit != candidate_commit
+            .filter(|candidate_commit| {
+                !commits.iter().any(|other_commit| {
+                    other_commit != *candidate_commit
                         && graph.is_ancestor(other_commit, candidate_commit)
                 })
             })
             .cloned()
             .collect::<Vec<_>>();
-        ancestor_most.sort_by(
-            |(left_binding, left_commit), (right_binding, right_commit)| {
-                left_commit
-                    .as_bytes()
-                    .cmp(right_commit.as_bytes())
-                    .then_with(|| {
-                        left_binding
-                            .path
-                            .as_bytes()
-                            .cmp(right_binding.path.as_bytes())
-                    })
-            },
-        );
-        let (binding, first_seen_commit) = ancestor_most
-            .into_iter()
-            .next()
-            .ok_or_else(|| KcsError::schema("retained normalized instance has no introduction"))?;
+        ancestor_most.sort_by(|left, right| left.as_bytes().cmp(right.as_bytes()));
+        if ancestor_most.is_empty() {
+            return Err(KcsError::schema(
+                "retained normalized instance has no introduction",
+            ));
+        }
+        let first_seen_commit = ancestor_most[0].clone();
+        let binding = binding_by_commit
+            .get(&first_seen_commit)
+            .cloned()
+            .ok_or_else(|| {
+                KcsError::schema("retained normalized instance winner has no binding")
+            })?;
         let all_paths = all_paths_by_raw
             .get(&raw_hash)
             .ok_or_else(|| KcsError::schema("retained raw identity has no historical path"))?;
@@ -210,10 +233,19 @@ pub(super) fn retained_history_instances(
             normalize: NormalizeRef {
                 tool_profile_hash,
                 gen,
+                // PB04: carried forward from the winning binding's own
+                // normalize ref, not recomputed — this instance's manifest
+                // identity was fixed when its introducing commit was
+                // written.
+                manifest_hash: binding
+                    .normalize
+                    .as_ref()
+                    .and_then(|normalize| normalize.manifest_hash.clone()),
             },
             raw_path: binding.path,
             embedding_path,
             first_seen_commit,
+            introductions: ancestor_most,
         });
     }
     Ok(instances)
@@ -358,6 +390,15 @@ pub(super) fn run(repo: &Repository, operand: &str) -> Result<Value> {
                 // The selected immutable commit is its historical witness.
                 row.first_seen_commit = Some(selected_commit.clone());
             }
+            // PC40 (05 §1.6 L266): if this specific (chunk_id, config) pair is
+            // genuinely new, its association is introduced now, at the
+            // explicit selected commit — this narrow, single-target-commit
+            // path's only possible introduction. `append_new_chunk_association`
+            // discards this row entirely when the pair already exists (its
+            // `known_associations` dedup), so an already-durable association's
+            // real, earlier `chunking_config_introduction_commit` is never
+            // overwritten by this line.
+            row.chunking_config_introduction_commit = Some(selected_commit.clone());
             append_new_chunk_association(
                 repo.kcs_dir(),
                 row,
@@ -379,6 +420,10 @@ pub(super) fn run(repo: &Repository, operand: &str) -> Result<Value> {
             raw_path: instance.raw_path,
             embedding_path: instance.embedding_path,
             first_seen_commit: selected_commit.clone(),
+            // A targeted `--at <commit>` reindex has exactly one explicit
+            // target commit, so its introduction is trivially single-valued
+            // (no multi-introduction ambiguity like the general rebuild path).
+            introductions: vec![selected_commit.clone()],
         })
         .collect::<Vec<_>>();
     project_selected_snapshot(
@@ -486,6 +531,16 @@ fn project_selected_snapshot(
             persist_chunk_object(repo.kcs_dir(), &chunk.row)?;
             fts.index_chunk_with_rowids(&chunk.row, Some(chunk.rowid), chunk.association_rowid)
                 .map_err(index_to_kcs)?;
+            // PC37 (05 §1.6 L265): a targeted historical reindex introduces
+            // (or re-affirms, idempotently) this chunk as of the explicit
+            // selected commit — the only introduction candidate this narrow,
+            // single-commit path can ever produce.
+            kcs_index::fts::record_chunk_publication(
+                fts.connection(),
+                &chunk.row.chunk_id,
+                selected_commit,
+            )
+            .map_err(index_to_kcs)?;
         }
         fts.connection()
             .execute(

@@ -451,7 +451,16 @@ impl Repository {
             // operation even for direct callers of this public builder. Snapshot
             // callers already hold this reentrant lock.
             let _lock = StoreLock::acquire(&self.kcs_dir)?;
-            return self.archive_staged_working_tree(candidates, normalize_by_path, limits);
+            // Every caller of this public builder except `snapshot_with_type`'s
+            // purge path is a non-purge write (`purge_self_targets` empty —
+            // see `archive_staged_working_tree`'s doc comment): the barrier
+            // applies unconditionally here, as it always has.
+            return self.archive_staged_working_tree(
+                candidates,
+                normalize_by_path,
+                limits,
+                &BTreeSet::new(),
+            );
         }
         let mut entries = Vec::new();
         let mut consumed_scope_bytes = 0_u64;
@@ -507,6 +516,7 @@ impl Repository {
         candidates: Vec<WorkingFileCandidate>,
         normalize_by_path: &BTreeMap<String, PendingNormalizeRef>,
         limits: ArchiveLimits,
+        purge_self_targets: &BTreeSet<String>,
     ) -> Result<WorkingTree> {
         // The caller holds `.kcs/.lock`, so no live KCS writer can own an
         // `.ingest-*` leaf. Remove crash-orphaned raw bytes before creating any
@@ -537,13 +547,42 @@ impl Repository {
         // (U19/LC22: the permanent re-ingest rejection is reversed into a
         // resurrection flow) — only an active purge journal barrier
         // (incomplete purge in progress) still gates ingest here.
+        //
+        // P2-A finding / 05 §3.5 L741 ("working tree の原本には触れない"):
+        // `purge_self_targets` is non-empty ONLY when this call is itself
+        // `Repository::purged_snapshot`'s own working-tree rebuild (the sole
+        // producer — see its call site in `snapshot_with_type`), and its
+        // members are exactly THIS journal's own `target_raw_hashes`. A
+        // single `.kcs` scope holds at most one active purge journal at a
+        // time (the store lock this method's caller already holds
+        // serializes purge with every other write), so any raw_hash this
+        // barrier would block during a purge's own snapshot is necessarily
+        // this same purge's own journal — never a foreign one. Purge
+        // deliberately never deletes the working-tree original (05 §3.5),
+        // so a residual copy of a purge target's exact bytes legitimately
+        // reappears here on the SAME pass that is finalizing that target's
+        // removal; treating it as a blocked *ingest* would wrongly fail the
+        // purge's own completing commit. It is excluded below instead —
+        // neither re-published to CAS nor added to the resulting tree — so
+        // `commit_type=purged`'s tree never carries the entry it is purging
+        // (matching `verify_purged_commit`'s postcondition), while every
+        // OTHER (non-self) raw_hash still gets the barrier's full
+        // protection. Re-ingestion of a residual original is deferred to
+        // the next ordinary `kcs index` (05 §3.5 L743), once no journal
+        // remains to block it.
         let purge = PurgeState::new(&self.kcs_dir);
         for file in &staged {
+            if purge_self_targets.contains(&file.raw_hash) {
+                continue;
+            }
             ensure_raw_publication_allowed(&purge, &file.raw_hash)?;
         }
 
         let mut entries = Vec::with_capacity(staged.len());
         for mut staged_file in staged {
+            if purge_self_targets.contains(&staged_file.raw_hash) {
+                continue;
+            }
             staged_file
                 .file
                 .seek(SeekFrom::Start(0))
@@ -1044,15 +1083,36 @@ impl Repository {
         let _lock = StoreLock::acquire(&self.kcs_dir)?;
         maybe_hold_lock_for_tests();
 
-        let working = self
-            .build_working_tree_with_bound_normalize_and_limits(
-                true,
-                excluded_paths,
+        // P2-A finding (05 §3.5 L741, `archive_staged_working_tree`'s doc
+        // comment): a `commit_type=purged` snapshot's own `purged_raws` are
+        // self-owned targets, not a foreign barrier to respect — bypass the
+        // public `build_working_tree_with_bound_normalize_and_limits`
+        // wrapper (which always applies the barrier unconditionally) and
+        // call the two lower-level steps directly so `purge_self_targets`
+        // can be threaded through. Every other `commit_type` gets an empty
+        // set here and this is exactly equivalent to the wrapper call it
+        // replaces.
+        let purge_self_targets: BTreeSet<String> = if commit_type == CommitType::Purged {
+            purged_raws.iter().cloned().collect()
+        } else {
+            BTreeSet::new()
+        };
+        let working_candidates = self.working_file_candidates(
+            excluded_paths,
+            explicitly_allowed_tier_a_paths,
+            true,
+            ArchiveLimits::default(),
+        )?;
+        let working = {
+            let _archive_lock = StoreLock::acquire(&self.kcs_dir)?;
+            self.archive_staged_working_tree(
+                working_candidates,
                 normalize_by_path,
-                explicitly_allowed_tier_a_paths,
                 ArchiveLimits::default(),
+                &purge_self_targets,
             )?
-            .tree;
+        }
+        .tree;
 
         // U19/LC22-LC26: a raw_hash that is both (a) present in the tree we are
         // about to commit and (b) currently the target of an *active*
@@ -1061,11 +1121,14 @@ impl Repository {
         // `archive_staged_working_tree`, content-addressed and therefore
         // idempotent whether or not the object already existed). This purge
         // commit's own snapshot (`commit_type == Purged`) is excluded: its
-        // tree still carries the entry being purged in the *same* operation
-        // (DAG is not rewritten — 05 §3.5), and no tombstone for it exists yet
-        // at this point in the purge orchestration, so the guard is defensive
-        // (keeps a mid-purge re-run of this method, e.g. re-purge, from ever
-        // retiring the marker it is itself about to create).
+        // own targets never even reach `working.entries` any more (the
+        // `purge_self_targets` exclusion just above), so there is nothing of
+        // this purge's own making to treat as resurrected, and no tombstone
+        // for it exists yet at this point in the purge orchestration (the
+        // `prepared`-phase dry run runs before either is durable) — the guard
+        // stays defensive (keeps a mid-purge re-run of this method, e.g.
+        // re-purge, from ever retiring the marker it is itself about to
+        // create).
         let resurrection_candidates = if commit_type == CommitType::Purged {
             BTreeSet::new()
         } else {
@@ -3674,6 +3737,7 @@ mod tests {
     };
     use crate::cas::{hash_bytes, ObjectKind, ObjectStore};
     use crate::dag::{CommitType, NormalizeRef};
+    use crate::purge::PurgeState;
     use serde_json::json;
     use std::collections::{BTreeMap, BTreeSet};
     use std::fs;
@@ -4179,6 +4243,7 @@ mod tests {
         let normalize = NormalizeRef {
             tool_profile_hash: hash_bytes(b"profile"),
             gen: 0,
+            manifest_hash: None,
         };
         let pending = BTreeMap::from([(
             "doc.txt".to_owned(),
@@ -4379,11 +4444,21 @@ mod tests {
 
     #[test]
     fn purge_snapshot_forces_protected_child_when_tree_is_unchanged() {
+        // P2-A / journal-barrier fix: purging a raw_hash that HEAD's tree no
+        // longer references at all (superseded by a later edit) is the
+        // "tree genuinely unchanged" case — `doc.txt` currently holds
+        // "version two", so the working-tree scan never stages a "version
+        // one" candidate and `purge_self_targets`' exclusion has nothing to
+        // do. This is also the realistic shape of this scenario: purging an
+        // old historical version while today's content is untouched.
         let dir = tempfile::tempdir().unwrap();
         let repo = Repository::init(dir.path()).unwrap();
-        fs::write(dir.path().join("doc.txt"), b"retained").unwrap();
+        fs::write(dir.path().join("doc.txt"), b"version one").unwrap();
+        repo.snapshot(Some("v1"), Some("2026-07-11T00:00:00Z"))
+            .unwrap();
+        fs::write(dir.path().join("doc.txt"), b"version two").unwrap();
         let parent = repo
-            .snapshot(Some("initial"), Some("2026-07-12T00:00:00Z"))
+            .snapshot(Some("v2"), Some("2026-07-12T00:00:00Z"))
             .unwrap()
             .commit_hash
             .unwrap();
@@ -4393,7 +4468,7 @@ mod tests {
             .purged_snapshot(
                 "legal",
                 Some("2026-07-13T00:00:00Z"),
-                &[hash_bytes(b"retained")],
+                &[hash_bytes(b"version one")],
                 true,
             )
             .unwrap();
@@ -4405,7 +4480,101 @@ mod tests {
         assert_eq!(commit.parents, vec![parent]);
         assert_eq!(commit.tree, parent_tree);
         assert_eq!(commit.created_at, "2026-07-13T00:00:00Z");
-        assert_eq!(commit.purged_raws, vec![hash_bytes(b"retained")]);
+        assert_eq!(commit.purged_raws, vec![hash_bytes(b"version one")]);
+    }
+
+    /// P2-A finding fix (05 §3.5 L741; `archive_staged_working_tree`'s doc
+    /// comment): purge's own final `publish_ref=true` snapshot must succeed
+    /// — and its tree must NOT carry the purged entry — even while the
+    /// purge target's exact bytes are still physically present in the
+    /// working tree (KCS never deletes the working-tree original). Before
+    /// the fix, this raw publication attempt hit `archive_staged_working_tree`'s
+    /// barrier check (an active journal targeting this same raw_hash) and the
+    /// whole snapshot failed with `KCS-E-PURGE-INCOMPLETE-001` — reachable any
+    /// time a real purge orchestration republishes its planned commit after
+    /// the tombstone/journal phase has advanced past `prepared`, i.e. every
+    /// ordinary purge whose target's working-tree residual was never deleted.
+    #[test]
+    fn purge_snapshot_succeeds_and_excludes_the_entry_while_journal_barrier_is_active() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = Repository::init(dir.path()).unwrap();
+        fs::write(dir.path().join("keep.txt"), b"keep").unwrap();
+        fs::write(dir.path().join("residual.txt"), b"purge target bytes").unwrap();
+        let raw_hash = hash_bytes(b"purge target bytes");
+        repo.snapshot(Some("initial"), Some("2026-07-12T00:00:00Z"))
+            .unwrap();
+
+        // Simulate the real orchestration's post-`prepared` state: an active
+        // purge journal whose barrier now covers this raw_hash (05 §3.5's
+        // `tombstoned`/`deleted` phases), WITHOUT deleting the working-tree
+        // original (purge never does — this is the residual).
+        let purge = PurgeState::new(repo.kcs_dir());
+        let closure = crate::purge::PurgeClosure::new(
+            "01ARZ3NDEKTSV4RRFFQ69G5FAV".to_owned(),
+            vec![crate::purge::ClosureItem {
+                object_type: "raw".to_owned(),
+                hash: raw_hash.clone(),
+            }],
+            Vec::new(),
+        )
+        .unwrap();
+        purge.write_closure(&closure).unwrap();
+        let closure_hash = crate::purge::closure_content_hash(&closure).unwrap();
+        let (journal, _) = match purge
+            .begin(
+                vec![raw_hash.clone()],
+                crate::purge::PurgeReason::Legal,
+                crate::purge::TombstoneMode::Default,
+                "test-actor".to_owned(),
+                "2026-07-13T00:00:00Z".to_owned(),
+                1,
+                // `planned_commit` only needs to be a well-formed hash here —
+                // this test does not exercise `publish_planned_commit`'s
+                // cross-check against it (that belongs to the CLI-level
+                // orchestration tests).
+                hash_bytes(b"planned"),
+                closure_hash,
+                "01ARZ3NDEKTSV4RRFFQ69G5FAW".to_owned(),
+            )
+            .unwrap()
+        {
+            crate::purge::BeginOutcome::Started(journal) => (journal, true),
+            other => panic!("expected a fresh journal start, got {other:?}"),
+        };
+        let journal = purge
+            .advance_phase(&journal, crate::purge::PurgePhase::Tombstoned)
+            .unwrap();
+        purge
+            .advance_phase(&journal, crate::purge::PurgePhase::Deleted)
+            .unwrap();
+        assert!(purge.barrier_blocks(&raw_hash).unwrap());
+
+        let outcome = repo
+            .purged_snapshot(
+                "legal",
+                Some("2026-07-13T00:00:00Z"),
+                std::slice::from_ref(&raw_hash),
+                true,
+            )
+            .expect("purge's own snapshot must not trip its own journal barrier");
+        let commit = outcome.commit.unwrap();
+        assert_eq!(commit.commit_type, CommitType::Purged);
+        let tree = repo.read_tree(&commit.tree).unwrap();
+        assert_eq!(
+            tree.entries
+                .iter()
+                .map(|entry| entry.path.as_str())
+                .collect::<Vec<_>>(),
+            vec!["keep.txt"],
+            "the purge target's entry must be excluded even though its working-tree \
+             bytes are still physically present"
+        );
+        // The residual original is untouched — 05 §3.5's "working tree の
+        // 原本には触れない" — re-ingestion is deferred to the next `kcs index`.
+        assert_eq!(
+            fs::read(dir.path().join("residual.txt")).unwrap(),
+            b"purge target bytes"
+        );
     }
 
     #[test]

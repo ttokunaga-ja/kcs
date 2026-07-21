@@ -1,17 +1,16 @@
 //! Contract tests for `tasks/step4b-contract-tests-p2b.md` (fsck expansion /
 //! evidence pointer resolve-verify-retarget, P2-B). Test names embed the PB
-//! number they lock down. Sections not covered here (§B/§J's tree-cross-
-//! reference and publication-introduction pieces, §O/§P/§Q's open/view side,
-//! §M/§L's display-field pieces) depend on prerequisites this implementation
-//! pass deliberately deferred — see the module doc comment on
-//! `verify_pointer_for_cli` in `src/verify_objects.rs` for the exact gap
-//! list. This file does not fabricate coverage for those.
+//! number they lock down. §M/§L's display-field pieces (PB34-36) remain
+//! outside this pass's scope (they need `path_at_commit`/`heading_path`
+//! output fields `resolve_pointer_for_cli` does not produce yet). This file
+//! does not fabricate coverage for those.
 
 use std::fs;
 use std::path::Path;
 
 use assert_cmd::Command;
 use kcs_core::cas::{hash_bytes, ContentObjectKind, ObjectKind, ObjectStore};
+use kcs_core::dag::{build_tree, CommitObject, CommitStats, CommitType, NormalizeRef, TreeEntry};
 use kcs_core::purge::{PurgeReason, PurgeState, TombstoneMode};
 use kcs_core::scope::Repository;
 use kcs_index::registry::{RegistryDb, RegistryEntry};
@@ -236,7 +235,12 @@ fn pb02_manifest_and_toollock_join_the_verification_closure() {
 
     let (code, output) = run(&dir, &["repair", "--verify-objects"]);
     assert_eq!(code, 3, "{output}");
-    assert_eq!(output["checked"]["manifests"], 1, "{output}");
+    // PB04: `fixture()`'s own `kcs index` now durably CAS-writes ITS
+    // normalized instance's genuine manifest object too (NormalizeRef's new
+    // `manifest_hash` field, computed at index time) — one real manifest
+    // from the fixture's indexing plus this test's own synthetic
+    // `manifest-fixture` object above, so the closure now counts 2, not 1.
+    assert_eq!(output["checked"]["manifests"], 2, "{output}");
     assert!(output["remaining_findings"]
         .as_array()
         .unwrap()
@@ -743,22 +747,49 @@ fn pb45_chunk_backed_by_non_done_unit_resolves_not_found() {
         .find(|entry| entry.raw_hash == pointer["raw_hash"].as_str().unwrap())
         .unwrap();
     let normalize = entry.normalize.as_ref().unwrap();
-    // `objects/normalized_units/<raw[0:2]>/<raw[2:4]>/<raw_digest>.<tool_profile_digest>.g<gen>/manifest.json`
-    // — bare (no `sha256:` prefix) digests in the instance leaf name.
-    let raw_digest = entry.raw_hash.trim_start_matches("sha256:");
-    let tool_digest = normalize.tool_profile_hash.trim_start_matches("sha256:");
-    let instance_leaf = format!("{raw_digest}.{tool_digest}.g{}", normalize.gen);
-    let manifest_path = kcs_dir(&dir)
-        .join("objects/normalized_units")
-        .join(&raw_digest[0..2])
-        .join(&raw_digest[2..4])
-        .join(instance_leaf)
-        .join("manifest.json");
-    let mut manifest: Value = serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
-    for unit in manifest["units"].as_array_mut().unwrap() {
-        unit["status"] = serde_json::json!("failed");
+
+    // PB04: a v2/v3 tree entry's `normalize.manifest_hash` pins the manifest
+    // object as it existed at commit time — 6a reads THAT frozen CAS object,
+    // not the mutable working-copy `manifest.json` a same-gen retry may have
+    // since moved on (03 §8's "unit の failed → done 遷移で変わるため, past
+    // resolution only through the manifest object"). Mutate the CAS object
+    // directly (fsck-style fixture — `read_content_object_bytes` does not
+    // itself re-verify the digest) so this test exercises the actual
+    // same-gen-retry scenario 6a guards against, not a stale read path.
+    if let Some(manifest_hash) = &normalize.manifest_hash {
+        let manifest_path = content_path(
+            &kcs_dir(&dir),
+            ContentObjectKind::Manifest.directory(),
+            manifest_hash,
+        );
+        let mut manifest: Value =
+            serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+        for unit in manifest["units"].as_array_mut().unwrap() {
+            unit["status"] = serde_json::json!("failed");
+        }
+        fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+    } else {
+        // v1 legacy fallback (no `manifest_hash`): mutate the live
+        // working-copy manifest.json directly — the only source 6a's
+        // lenient legacy resolution ever reads.
+        // `objects/normalized_units/<raw[0:2]>/<raw[2:4]>/<raw_digest>.<tool_profile_digest>.g<gen>/manifest.json`
+        // — bare (no `sha256:` prefix) digests in the instance leaf name.
+        let raw_digest = entry.raw_hash.trim_start_matches("sha256:");
+        let tool_digest = normalize.tool_profile_hash.trim_start_matches("sha256:");
+        let instance_leaf = format!("{raw_digest}.{tool_digest}.g{}", normalize.gen);
+        let manifest_path = kcs_dir(&dir)
+            .join("objects/normalized_units")
+            .join(&raw_digest[0..2])
+            .join(&raw_digest[2..4])
+            .join(instance_leaf)
+            .join("manifest.json");
+        let mut manifest: Value =
+            serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+        for unit in manifest["units"].as_array_mut().unwrap() {
+            unit["status"] = serde_json::json!("failed");
+        }
+        fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
     }
-    fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
 
     let pointer_json = serde_json::to_string(&pointer).unwrap();
     let output = success(&dir, &["evidence", "verify", &pointer_json]);
@@ -1074,4 +1105,178 @@ fn pb68_verify_and_open_agree_on_canonical_erased_raw_absent() {
         "verify's not_found <-> open's error_code must agree: {open_output}"
     );
     assert_eq!(verify_output["error_code"], open_output["error_code"]);
+}
+
+// ===========================================================================
+// §Q — procedure 6b: manifest-missing direct-resolution downgrade and
+// resurrection-link fallback (U55).
+// ===========================================================================
+
+/// PB48/PB49: an old pointer whose commit precedes a purge (`in_commit`)
+/// cannot resolve directly once the purge deletes its manifest object AND
+/// `chunk_publications`/`chunk_config_generations` rows (05 §3.5) — but once
+/// the raw is resurrected (re-ingested with byte-identical content, same
+/// deterministic `--offline` markdownize reproducing the same chunk_hash at
+/// gen 0), canonical final event becomes `retired` with a
+/// `resurrection_commit`, and 6b's link path re-runs the SAME
+/// publication/association ancestry check against that later commit. The old
+/// pointer resolves alive again (`manifest_missing: true`) through `open`,
+/// `view`, and `evidence verify` alike (PB68's cross-command agreement).
+#[test]
+fn pb48_pb49_manifest_missing_resolves_via_resurrection_link_after_reingest() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(
+        dir.path().join("evidence.md"),
+        "# Evidence\n\nTTL is 3600 seconds.\n",
+    )
+    .unwrap();
+    success(&dir, &["init"]);
+    success(&dir, &["index", "--offline", "--approve"]);
+    let search = success(&dir, &["search", "3600", "--text"]);
+    let old_pointer = search["results"][0]["evidence_pointer"].clone();
+    let old_pointer_json = serde_json::to_string(&old_pointer).unwrap();
+    let raw_hash = old_pointer["raw_hash"].as_str().unwrap().to_owned();
+
+    // Confirm the pre-purge pointer resolves normally (sanity baseline).
+    let baseline = success(&dir, &["evidence", "verify", &old_pointer_json]);
+    assert_eq!(baseline["status"], "alive", "{baseline}");
+
+    success(
+        &dir,
+        &[
+            "purge",
+            "--raw-hash",
+            &raw_hash,
+            "--reason",
+            "legal",
+            "--yes",
+        ],
+    );
+
+    // Purged: canonical final event is (still active) `purged` at the
+    // raw_hash level, which procedure 5 short-circuits to `tombstoned`
+    // regardless of which commit the pointer names -- 6b (commit-scoped)
+    // never even runs yet. It starts mattering once resurrection makes the
+    // canonical event `retired` below.
+    let purged = success(&dir, &["evidence", "verify", &old_pointer_json]);
+    assert_eq!(purged["status"], "tombstoned", "{purged}");
+
+    // KCS never deletes the working-tree original (05 §3.5), so the exact
+    // same bytes are still sitting in evidence.md -- the next `kcs index`
+    // re-ingests and resurrects (retires the tombstone) in the same locked
+    // mutation, reproducing the identical chunk_hash at gen 0.
+    success(&dir, &["index", "--offline", "--approve"]);
+
+    for args in [
+        vec![
+            "evidence".to_owned(),
+            "verify".to_owned(),
+            old_pointer_json.clone(),
+        ],
+        vec!["open".to_owned(), old_pointer_json.clone()],
+        vec!["view".to_owned(), old_pointer_json.clone()],
+    ] {
+        let args_ref = args.iter().map(String::as_str).collect::<Vec<_>>();
+        let output = success(&dir, &args_ref);
+        if args_ref[0] == "evidence" {
+            assert_eq!(output["status"], "alive", "{output}");
+            assert_eq!(
+                output["details"]["manifest_missing"], true,
+                "resurrection-link resolution must still surface manifest_missing: {output}"
+            );
+        } else {
+            assert_eq!(output["manifest_missing"], true, "{output}");
+            assert_eq!(output["commit_shallow"], false, "{output}");
+        }
+    }
+}
+
+// ===========================================================================
+// §O — decisive entry selection (U52), open/view side
+// (`resolve_pointer_for_cli`, main.rs).
+// ===========================================================================
+
+/// PB42 (open/view side): when the same raw_hash is duplicate-placed in a
+/// commit's tree under two different `tool_profile_hash` bindings, selection
+/// must bind to the pointer's own `tool_profile_hash` — not to whichever
+/// entry a naive `tree.entries.iter().find(...)` happens to reach first.
+/// The synthetic alias entry here is a UTF-8-byte-order-earlier path
+/// (`a-alias.md` < `evidence.md`) with a DIFFERENT `tool_profile_hash`/`gen`
+/// than the pointer's own: before PB42's fix, `resolve_pointer_for_cli`
+/// picked the first raw_hash match regardless of binding, mismatched the
+/// pointer's `tool_profile_hash` against the alias's, and rejected a
+/// perfectly valid pointer as `invalid_pointer_identity` (misreported
+/// corruption). `kcs open`/`kcs view` must succeed, resolving through the
+/// correctly-bound `evidence.md` entry instead.
+#[test]
+fn pb42_open_view_side_binds_to_pointer_tool_profile_hash_not_first_raw_hash_match() {
+    let (dir, pointer, _) = fixture();
+    let repo = Repository::open(dir.path()).unwrap();
+    let head = repo.head_commit_hash().unwrap().unwrap();
+    let commit = repo.read_commit(&head).unwrap();
+    let tree = repo.read_tree(&commit.tree).unwrap();
+    let real_entry = tree
+        .entries
+        .iter()
+        .find(|entry| entry.raw_hash == pointer["raw_hash"].as_str().unwrap())
+        .unwrap()
+        .clone();
+    let real_normalize = real_entry.normalize.clone().unwrap();
+
+    // A byte-order-earlier alias path, same raw_hash, a DIFFERENT (fake)
+    // tool_profile_hash/gen binding -- exactly the "duplicate placement"
+    // shape PB42 describes, engineered so a naive first-match `.find()`
+    // reaches the wrong (alias) entry first.
+    let alias_normalize = NormalizeRef {
+        tool_profile_hash: hash_bytes(b"a different tool profile entirely"),
+        gen: real_normalize.gen + 7,
+        manifest_hash: None,
+    };
+    let mut alias_entry = TreeEntry::raw_file("a-alias.md", real_entry.raw_hash.clone()).unwrap();
+    alias_entry.normalize = Some(alias_normalize);
+    assert!(alias_entry.path.as_bytes() < real_entry.path.as_bytes());
+
+    let mut entries = tree.entries.clone();
+    entries.push(alias_entry);
+    let new_tree = build_tree(entries).unwrap();
+    let store = ObjectStore::new(kcs_dir(&dir));
+    let (new_tree_hash, _) = store
+        .write_json(ObjectKind::Tree, &serde_json::to_value(&new_tree).unwrap())
+        .unwrap();
+    let new_commit = CommitObject::new(
+        new_tree_hash,
+        vec![head],
+        "2026-07-21T00:00:00Z".to_owned(),
+        "pb42 fixture: duplicate raw_hash placement".to_owned(),
+        commit.tool_lock_hash.clone(),
+        CommitStats {
+            files_added: 1,
+            files_modified: 0,
+            files_deleted: 0,
+        },
+        CommitType::Manual,
+    )
+    .unwrap();
+    let (new_commit_hash, _) = store
+        .write_json(
+            ObjectKind::Commit,
+            &serde_json::to_value(&new_commit).unwrap(),
+        )
+        .unwrap();
+    fs::write(kcs_dir(&dir).join("refs/heads/main"), &new_commit_hash).unwrap();
+    fs::write(kcs_dir(&dir).join("HEAD"), &new_commit_hash).unwrap();
+
+    let mut new_pointer = pointer.clone();
+    new_pointer["commit"] = Value::String(new_commit_hash);
+    let pointer_json = serde_json::to_string(&new_pointer).unwrap();
+
+    let open_output = success(&dir, &["open", &pointer_json]);
+    assert_eq!(open_output["status"], "opened", "{open_output}");
+    let view_output = success(&dir, &["view", &pointer_json]);
+    assert_eq!(view_output["status"], "viewed", "{view_output}");
+
+    // Cross-command agreement (PB66/68's principle applied to §O): evidence
+    // verify resolves the same pointer through the same binding.
+    let verify_output = success(&dir, &["evidence", "verify", &pointer_json]);
+    assert_eq!(verify_output["status"], "alive", "{verify_output}");
 }

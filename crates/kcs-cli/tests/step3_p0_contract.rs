@@ -1036,11 +1036,22 @@ fn ct3_cursor_006_end_of_stream_has_null_next_cursor() {
     assert!(search["paging"]["next_cursor"].is_null());
 }
 
+/// PC11 (step4b-contract-tests-p2c.md §C; 05-runtime.md §1.3 L95-97): a
+/// single short (< 3 Unicode scalar) CJK token no longer forces zero results
+/// — trigram MATCH can't carry it (0 rows) so the text backend falls back to
+/// a bounded `instr` scan of `chunks.text`, which finds it. Supersedes the
+/// pre-PC11 `ct3_fts_003_two_character_query_is_skipped_with_zero_results`,
+/// which asserted the opposite (a deliberate short-circuit this rewrite
+/// removed).
 #[test]
-fn ct3_fts_003_two_character_query_is_skipped_with_zero_results() {
+fn pc11_short_cjk_query_falls_back_to_bounded_like_and_finds_the_substring() {
     let dir = indexed_scope();
     let search = json_success(&dir, &["search", "認"]);
-    assert!(search["results"].as_array().unwrap().is_empty());
+    let results = search["results"].as_array().unwrap();
+    assert!(
+        !results.is_empty(),
+        "a single-char CJK query must fall back to a bounded LIKE scan: {search}"
+    );
 }
 
 // Real-machine scenario (a): default (no flag) search crosses sibling scopes via

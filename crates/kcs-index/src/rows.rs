@@ -20,6 +20,17 @@ pub struct ChunkRow {
     pub text_hash: String,
     pub text: String,
     pub first_seen_commit: Option<String>,
+    /// PC40 (05-runtime.md §1.6 L266): the commit at which THIS row's
+    /// `(chunk_id, chunking_config_hash)` association was durably created —
+    /// stamped once by the write path that first appends this row to
+    /// `chunks.jsonl`, and never touched again by a later rebuild replaying
+    /// the same row (`chunks.jsonl` is append-only; a rebuild's SQLite
+    /// replay must read this value back rather than re-deriving "today's
+    /// HEAD", or an association created long ago would appear freshly
+    /// introduced on every later rebuild — breaking the PC38/§1.6
+    /// ancestor-or-equal gate for an `--at` search of an ancestor commit).
+    /// `None` for a pre-PC40 row (fail-open, `config_association_ancestor_sql`).
+    pub chunking_config_introduction_commit: Option<String>,
     pub created_at: String,
 }
 

@@ -404,6 +404,19 @@ fn plan_online_markdownize_promotion(
     let normalize_by_path = selected
         .into_iter()
         .map(|candidate| {
+            // PB04: this online candidate's normalized instance was just
+            // materialized (`validated_online_promotions` above already
+            // opened and validated its manifest/units), so its manifest.json
+            // is expected to be hashable here — best-effort (`.ok()`) rather
+            // than a hard failure so a manifest-hash computation fault alone
+            // does not newly block a promotion that was otherwise valid.
+            let manifest_hash = crate::compute_manifest_hash(
+                repo.kcs_dir(),
+                &candidate.raw_hash,
+                &candidate.tool_profile_hash,
+                candidate.gen,
+            )
+            .ok();
             (
                 candidate.input_path,
                 PendingNormalizeRef {
@@ -411,6 +424,7 @@ fn plan_online_markdownize_promotion(
                     normalize: NormalizeRef {
                         tool_profile_hash: candidate.tool_profile_hash,
                         gen: candidate.gen,
+                        manifest_hash,
                     },
                 },
             )

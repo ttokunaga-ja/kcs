@@ -58,6 +58,7 @@ mod tests {
             text_hash: "sha256:text".to_owned(),
             text: "sample text".to_owned(),
             first_seen_commit: None,
+            chunking_config_introduction_commit: None,
             created_at: "2026-07-03T00:00:00Z".to_owned(),
         };
 

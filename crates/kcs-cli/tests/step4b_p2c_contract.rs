@@ -7,20 +7,33 @@
 //! `pc4_multiscope_query_embedding_sent_when_any_target_scope_opts_in`,
 //! `pc59_search_at_without_scope_is_invalid_usage`).
 //!
-//! Not covered here (deferred by the P2-C implementation pass itself — see
-//! its final report): PC8-14 (§C tokenizer/MATCH-generation rewrite, left on
-//! the pre-existing architecture), PC6/PC7's exact adapter-failure injection
-//! (no seam for a mid-claim revoke race or a contract-violation response in
-//! this harness), PC20's full 6-trigger `index_generation` rotation wiring
-//! (rebuild/purge/embedding-finalize triggers live outside this item's
-//! search/gate/cursor/multi_scope scope), PC25/26 (query-vector-cache reuse
-//! on replay — not implemented), PC31-33/40-44 (per-tree/per-binding
-//! chunking-config-hash and introduction-commit ancestor checks beyond the
-//! `--at` case PC38/39 cover), PC52 (per-scope `--vector` profile-incompat
-//! exclusion — not implemented, so PC55(c)/PC56's INCOMPAT slot is
-//! unreachable), PC61-63 (§P HEAD-limited rebuild — reverted after it broke
-//! existing historical-embedding coverage, see `historical_reindex.rs`'s
-//! `retained_history_instances` doc comment).
+//! §R-ruling-2026-07-22 (P2-C 仕上げロット E) landed PC8-14 (§C tokenizer/
+//! MATCH-generation rewrite — `query_tokens`/`build_query_plan`,
+//! `execute_like_fallback`), PC22/23/31/32/40 (§F/§H tree-scoped
+//! `chunking_config_hash`, `resolve_target_chunking_config_hash`), PC37-39/
+//! 41-43 (§J `chunk_publications` write side — multi-introduction via
+//! `HistoryGraph::ancestor_most_introductions`, `ancestor_gate_sql`'s
+//! correlated `EXISTS`), PC52 (§N per-scope `--vector` profile-incompat
+//! exclusion, `VEC_PROFILE_INCOMPATIBLE_REASON`/`VEC_PROFILE_ABSENT_REASON`),
+//! and PC61-63 (§P rebuild-only HEAD-limited re-association, scoped to
+//! `rebuild_step3_index`'s own loop per `historical_reindex.rs`'s documented
+//! lesson — `retained_history_instances` itself is untouched).
+//!
+//! Still not covered here (deferred by this pass too — see its final
+//! report): PC6/PC7's exact adapter-failure injection (no seam for a
+//! mid-claim revoke race or a contract-violation response in this harness),
+//! PC20's embedding-enrichment-finalize / index-batch-finalize / GC-shallow
+//! rotation triggers (GC doesn't exist yet in this codebase; the
+//! rebuild and purge triggers ARE wired — `build_sqlite_index_at`'s
+//! unconditional per-rebuild mint, PB28, and
+//! `rotate_index_generation_unconditionally` called from `purge.rs`),
+//! PC25/26 (query-vector-cache reuse on cursor replay — not implemented),
+//! PC33/44 (`--all-history`/`--include-deleted` PER-BINDING introduction
+//! ancestor check — needs a per-binding ancestor predicate against each
+//! binding's own `pointer_commit`, not the single shared
+//! `kcs_target_ancestors` `--at` installs; see the doc comment on the
+//! `TimeSelector::AllHistory | TimeSelector::Since(_) | TimeSelector::IncludeDeleted`
+//! match arm in `search_one_scope_inner`).
 
 use std::fs;
 
@@ -886,14 +899,22 @@ fn pc59_at_without_scope_is_invalid_usage_with_multiple_registered_scopes() {
 // Schema completeness (PC37) — `chunk_publications` exists and is queryable.
 // ---------------------------------------------------------------------------
 
-/// PC37 (04 §4.1 / 05 §1.6): the `chunk_publications` table exists in the
-/// index schema after a normal index run (schema-readiness check; population
-/// during auto-snapshot chunk creation is index-pipeline code outside this
-/// item's search/gate/cursor/multi_scope scope — see `kcs_index::fts`'s
-/// `record_chunk_publication` doc comment).
+/// PC37 (04 §4.1 / 05 §1.6): the `chunk_publications` table exists AND is
+/// populated by a normal index run — every live chunk has at least one
+/// `(chunk_id, introduction_commit)` row, and `introduction_commit` names an
+/// actual ancestor-or-equal commit of HEAD (`build_sqlite_index_at`'s
+/// `record_chunk_publication` calls, wired from `retained_history_instances`/
+/// `RetainedNormalizedInstance::introductions`).
 #[test]
-fn pc37_chunk_publications_table_exists_after_index() {
-    let dir = indexed_scope();
+fn pc37_chunk_publications_table_exists_and_is_populated_after_index() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("a.md"), "# A\n\nintroductioncontenttoken\n").unwrap();
+    init(&dir);
+    let head = success(&dir, &["index", "--offline", "--approve"])["commit_hash"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
     let conn = rusqlite::Connection::open(sqlite_path(&dir)).unwrap();
     let exists: i64 = conn
         .query_row(
@@ -903,4 +924,469 @@ fn pc37_chunk_publications_table_exists_after_index() {
         )
         .unwrap();
     assert_eq!(exists, 1);
+
+    let chunk_count: i64 = conn
+        .query_row("SELECT count(*) FROM chunks", [], |row| row.get(0))
+        .unwrap();
+    assert!(chunk_count > 0, "the fixture must produce live chunks");
+    let published_count: i64 = conn
+        .query_row(
+            "SELECT count(DISTINCT chunk_id) FROM chunk_publications",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        published_count, chunk_count,
+        "every live chunk must have a chunk_publications row"
+    );
+
+    let introduction: String = conn
+        .query_row(
+            "SELECT introduction_commit FROM chunk_publications LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        introduction, head,
+        "a fresh single-commit scope's only possible introduction is HEAD itself"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// §H/§J — chunk_config_generations.introduction_commit (PC40)
+// ---------------------------------------------------------------------------
+
+/// PC40 (05 §1.6 L266): a fresh `chunk_config_generations` association is
+/// stamped with the commit at which it was created, and a no-op rebuild
+/// (`repair --rebuild-db` with no source change) must NOT re-stamp an
+/// already-durable association's `introduction_commit` with a later HEAD —
+/// `record_chunk_config_association`'s existing-row branch leaves it
+/// untouched, and `index_chunk_with_rowids` reads it back from the durable
+/// `chunks.jsonl` record (`ChunkRow::chunking_config_introduction_commit`)
+/// rather than re-deriving "today's HEAD" on every replay.
+#[test]
+fn pc40_config_association_introduction_commit_is_stamped_and_immutable() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("a.md"), "# A\n\nconfigintroductiontoken\n").unwrap();
+    init(&dir);
+    let ca = success(&dir, &["index", "--offline", "--approve"])["commit_hash"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    let (chunk_id, introduction) = {
+        let conn = rusqlite::Connection::open(sqlite_path(&dir)).unwrap();
+        conn.query_row(
+            "SELECT chunk_id, introduction_commit FROM chunk_config_generations LIMIT 1",
+            [],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        )
+        .unwrap()
+    };
+    assert_eq!(introduction, ca);
+
+    success(&dir, &["repair", "--rebuild-db", "--yes"]);
+    // Reopen: `repair --rebuild-db` replaces sqlite.db via temp+rename (P5),
+    // so a connection opened before this would keep reading the pre-rebuild
+    // inode on POSIX rather than the freshly-published file.
+    let after: String = {
+        let conn = rusqlite::Connection::open(sqlite_path(&dir)).unwrap();
+        conn.query_row(
+            "SELECT introduction_commit FROM chunk_config_generations WHERE chunk_id = ?1",
+            [&chunk_id],
+            |row| row.get(0),
+        )
+        .unwrap()
+    };
+    assert_eq!(
+        after, ca,
+        "an already-durable association's introduction_commit must never change"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// §F/§H — tree-scoped chunking_config_hash (PC22/PC23/PC31/PC32)
+// ---------------------------------------------------------------------------
+
+/// PC22/PC23/PC31/PC32 (05 §1.5 L200, §1.6 L237-239): `--at <commit>`
+/// resolves the TARGET tree's own `chunking_config_hash`, not whatever
+/// config.toml currently says. Observed indirectly through chunk SHAPE
+/// (`searched_scopes[]` does not expose the hash itself — only the cursor
+/// preimage and `query_hash` computation consume it internally): shrinking
+/// `max_chars` re-splits a long paragraph into more, differently-hashed
+/// chunks. HEAD/bare search must see the re-split (new-config) chunks;
+/// `--at Ca` must keep resolving Ca's own pre-split (old-config) shape.
+#[test]
+fn pc22_pc23_pc31_pc32_at_uses_the_target_trees_config_not_current() {
+    let dir = tempfile::tempdir().unwrap();
+    let long_body = "atreeconfigtoken ".repeat(50);
+    fs::write(dir.path().join("a.md"), format!("# A\n\n{long_body}\n")).unwrap();
+    init(&dir);
+    let ca = success(&dir, &["index", "--offline", "--approve"])["commit_hash"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let at_ca_before = success(
+        &dir,
+        &[
+            "search",
+            "atreeconfigtoken",
+            "--at",
+            &ca,
+            "--text",
+            "--scope",
+            ".",
+        ],
+    );
+    let chunks_before = chunk_hash_set(&at_ca_before);
+    assert_eq!(
+        chunks_before.len(),
+        1,
+        "the default max_chars must keep this paragraph as a single chunk: {at_ca_before}"
+    );
+
+    // a.md stays HEAD-referenced (nothing deletes it), so it picks up a NEW
+    // association under the changed config on top of its untouched old one
+    // (PC61/62 does not apply here — this is not a history-only identity).
+    // A much smaller max_chars forces the SAME paragraph to re-split, so the
+    // new generation's chunk_hash (byte_start/byte_end shift) genuinely
+    // differs from the old one — not a same-hash no-op reindex. A second
+    // file is ALSO added so HEAD genuinely advances past Ca (a config-only
+    // change with no tracked-content change never advances HEAD at all,
+    // which would make "Ca" and "current HEAD" the same commit and give
+    // PC32's ancestor-or-equal fallback nothing to distinguish).
+    fs::write(
+        dir.path().join(".kcs/config.toml"),
+        "kcs_format_version = \"0.1.0\"\n[chunking]\nstrategy = \"heading\"\nmax_chars = 30\n",
+    )
+    .unwrap();
+    fs::write(dir.path().join("b.md"), "# B\n\nunrelated filler content\n").unwrap();
+    success(&dir, &["index", "--offline", "--approve"]);
+
+    let bare = success(&dir, &["search", "atreeconfigtoken", "--text"]);
+    let chunks_bare = chunk_hash_set(&bare);
+    assert!(
+        chunks_bare.len() > 1,
+        "current/HEAD search must see the re-split (new-config) chunks: {bare}"
+    );
+    assert!(
+        chunks_bare.is_disjoint(&chunks_before),
+        "the new-config chunks must be genuinely different from the old one"
+    );
+
+    let at_ca_after = success(
+        &dir,
+        &[
+            "search",
+            "atreeconfigtoken",
+            "--at",
+            &ca,
+            "--text",
+            "--scope",
+            ".",
+        ],
+    );
+    let chunks_at_ca_after = chunk_hash_set(&at_ca_after);
+    assert_eq!(
+        chunks_at_ca_after, chunks_before,
+        "--at Ca must keep resolving Ca's OWN (old-config, single-chunk) shape, \
+         not HEAD's current (re-split) one: {at_ca_after}"
+    );
+}
+
+fn chunk_hash_set(search: &Value) -> std::collections::BTreeSet<String> {
+    search["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|result| result["chunk_hash"].as_str().unwrap().to_owned())
+        .collect()
+}
+
+// ---------------------------------------------------------------------------
+// §P — rebuild-only HEAD-limited re-association (PC61/PC62/PC63)
+// ---------------------------------------------------------------------------
+
+/// PC61/PC62/PC63 (04 §4.6, U145): a chunking-config change only creates a
+/// NEW `chunk_config_generations` association for HEAD-referenced content —
+/// a history-only identity (its file was deleted before the config changed)
+/// keeps its old association only (no wasted re-chunk/re-embed of content no
+/// live tree can reach), yet a `--at` search of the commit where it was
+/// still live still finds it via PC32's byte-order-min fallback over its one
+/// remaining (old-config) association — U145's re-chunk narrowing and U69's
+/// substitution rule must both hold at once, or historical search silently
+/// regresses.
+#[test]
+fn pc61_pc62_pc63_head_limited_reassociation_still_leaves_at_searchable() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("a.md"), "# A\n\nheadonlytoken content\n").unwrap();
+    fs::write(dir.path().join("b.md"), "# B\n\nhistoryonlytoken content\n").unwrap();
+    init(&dir);
+    let c1 = success(&dir, &["index", "--offline", "--approve"])["commit_hash"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    fs::remove_file(dir.path().join("b.md")).unwrap();
+    success(&dir, &["index", "--offline", "--approve"]);
+
+    fs::write(
+        dir.path().join(".kcs/config.toml"),
+        "kcs_format_version = \"0.1.0\"\n[chunking]\nstrategy = \"heading\"\nmax_chars = 42\n",
+    )
+    .unwrap();
+    success(&dir, &["index", "--offline", "--approve"]);
+
+    let conn = rusqlite::Connection::open(sqlite_path(&dir)).unwrap();
+    let a_config_count: i64 = conn
+        .query_row(
+            "SELECT count(DISTINCT g.chunking_config_hash) FROM chunks c \
+             JOIN chunk_config_generations g ON g.chunk_id = c.chunk_id \
+             WHERE c.raw_path = 'a.md'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        a_config_count, 2,
+        "a.md is HEAD-referenced and must pick up the new config association"
+    );
+    let b_config_count: i64 = conn
+        .query_row(
+            "SELECT count(DISTINCT g.chunking_config_hash) FROM chunks c \
+             JOIN chunk_config_generations g ON g.chunk_id = c.chunk_id \
+             WHERE c.raw_path = 'b.md'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        b_config_count, 1,
+        "b.md is history-only and must NOT pick up the new config association (PC61/62)"
+    );
+    drop(conn);
+
+    let at_c1 = success(
+        &dir,
+        &[
+            "search",
+            "historyonlytoken",
+            "--at",
+            &c1,
+            "--text",
+            "--scope",
+            ".",
+        ],
+    );
+    assert!(
+        !at_c1["results"].as_array().unwrap().is_empty(),
+        "PC32's fallback must still resolve b.md's only (old-config) association: {at_c1}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// §N — per-scope `--vector` profile-incompat exclusion (PC52)
+// ---------------------------------------------------------------------------
+
+/// PC52 (05 §1.8 L390): explicit `--vector` excludes only the scope whose
+/// embedding profile is incompatible — it does not fall back (auto/
+/// `--hybrid`'s device-wide behavior) or hard-error the whole multi-scope
+/// search the way a single incompatible scope still does (`ct3_embed_002`,
+/// confirmed unaffected by this change).
+#[test]
+fn pc52_explicit_vector_excludes_only_the_incompatible_scope() {
+    let parent = tempfile::tempdir().unwrap();
+    let data_home = parent.path().join("xdg");
+    let a = parent.path().join("a");
+    let b = parent.path().join("b");
+    fs::create_dir_all(&a).unwrap();
+    fs::create_dir_all(&b).unwrap();
+    fs::write(a.join("a.md"), "# A\n\n## One\ncompatiblescopetoken\n").unwrap();
+    fs::write(b.join("b.md"), "# B\n\n## Two\nincompatiblescopetoken\n").unwrap();
+
+    fn embed_command(dir: &std::path::Path, data_home: &std::path::Path, embed: &str) -> Command {
+        let mut command = Command::cargo_bin("kcs").unwrap();
+        command
+            .current_dir(dir)
+            .env("XDG_CONFIG_HOME", data_home.join("config"))
+            .env("XDG_DATA_HOME", data_home.join("data"))
+            .env("XDG_CACHE_HOME", data_home.join("cache"))
+            .env(kcs_adapter::catalog::TEST_ADOPTED_EMBEDDING_ENV, embed)
+            .env_remove("KCS_FIXED_NOW");
+        command
+    }
+    fn run_embed(dir: &std::path::Path, data_home: &std::path::Path, embed: &str, args: &[&str]) {
+        embed_command(dir, data_home, embed)
+            .args(args)
+            .arg("--json")
+            .assert()
+            .success();
+    }
+
+    run_embed(&a, &data_home, "mock", &["init"]);
+    run_embed(&b, &data_home, "mock", &["init"]);
+    run_embed(&a, &data_home, "mock", &["index", "--approve"]);
+    run_embed(
+        &b,
+        &data_home,
+        "incompatible_profile",
+        &["index", "--approve"],
+    );
+
+    let output = embed_command(&a, &data_home, "mock")
+        .args(["search", "compatiblescopetoken", "--vector", "--all-scopes"])
+        .arg("--json")
+        .output()
+        .unwrap();
+    let code = output.status.code().unwrap();
+    let stream: &[u8] = if !output.stdout.is_empty() {
+        &output.stdout
+    } else {
+        &output.stderr
+    };
+    let search: Value = serde_json::from_slice(stream).unwrap();
+    assert_eq!(
+        code, 3,
+        "one incompatible scope among several must PARTIAL-fail (exit 3), not hard-error: {search}"
+    );
+    assert!(!search["results"].as_array().unwrap().is_empty());
+    let excluded = search["excluded_scopes"].as_array().unwrap();
+    assert!(
+        excluded
+            .iter()
+            .any(|entry| entry["reason"] == "embedding_profile_incompatible"),
+        "the incompatible scope must be named in excluded_scopes: {search}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// §F — index_generation rotation, purge trigger (PC20)
+// ---------------------------------------------------------------------------
+
+/// PC20 (05 §1.5 L180-184): purge is one of the listed rotation triggers —
+/// deleted chunk/config/vector rows change the search-visible set, so an
+/// outstanding cursor must not silently keep reading the pre-purge world.
+/// `rebuild`/`index`/`reindex` already rotate on every pass (PB28,
+/// `build_sqlite_index_at`'s own unconditional mint); this is purge's own,
+/// separate trigger (`rotate_index_generation_unconditionally`, called from
+/// `purge.rs`).
+#[test]
+fn pc20_purge_rotates_index_generation() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("a.md"), "# A\n\npurgerotationtoken\n").unwrap();
+    init(&dir);
+    success(&dir, &["index", "--offline", "--approve"]);
+
+    let before: String = {
+        let conn = rusqlite::Connection::open(sqlite_path(&dir)).unwrap();
+        conn.query_row(
+            "SELECT index_generation FROM index_metadata WHERE id = 1",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap()
+    };
+
+    success(&dir, &["purge", "a.md", "--reason", "legal", "--yes"]);
+
+    let after: String = {
+        let conn = rusqlite::Connection::open(sqlite_path(&dir)).unwrap();
+        conn.query_row(
+            "SELECT index_generation FROM index_metadata WHERE id = 1",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap()
+    };
+    assert_ne!(
+        before, after,
+        "purge must mint a fresh index_generation (PC20)"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// §C — tokenizer / MATCH generation (PC8-14)
+// ---------------------------------------------------------------------------
+
+/// PC12/PC13 (05 §1.3 L97-106): a short (< 3 Unicode scalar) token never
+/// enters the FTS5 MATCH expression (PC9 — trigram MATCH can't carry it) but
+/// still acts as a real `instr` AND-eligibility filter — a chunk matching
+/// the long token alone, without the short one, must not leak into results.
+#[test]
+fn pc12_pc13_short_token_is_an_and_filter_not_silently_dropped() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(
+        dir.path().join("with_ai.md"),
+        "# Doc1\n\nauthentication uses AI heuristics here.\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.path().join("without_ai.md"),
+        "# Doc2\n\nauthentication is handled by a separate module.\n",
+    )
+    .unwrap();
+    init(&dir);
+    success(&dir, &["index", "--offline", "--approve"]);
+
+    let search = success(&dir, &["search", "authentication AI", "--text"]);
+    let results = search["results"].as_array().unwrap();
+    assert!(
+        !results.is_empty(),
+        "the AND-filtered query must still match something: {search}"
+    );
+    for result in results {
+        let path = result["evidence_pointer"]["path_at_commit"]
+            .as_str()
+            .unwrap_or_default();
+        assert!(
+            path.contains("with_ai"),
+            "a result missing the short token 'AI' leaked through PC12's instr filter: {result}"
+        );
+    }
+}
+
+/// PC11 (05 §1.3 L95-97): a query where every token is short (< 3 Unicode
+/// scalars) has no MATCH expression at all (PC8's `match_expr = None`) and
+/// falls back entirely to the bounded LIKE (`instr`) scan.
+#[test]
+fn pc11_all_short_tokens_use_the_bounded_like_fallback_only() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("a.md"), "# A\n\nan ai driven doc\n").unwrap();
+    init(&dir);
+    success(&dir, &["index", "--offline", "--approve"]);
+
+    // "an" and "ai" are both 2 Unicode scalars — no token reaches the
+    // trigram MATCH threshold, so this must resolve via LIKE alone.
+    let search = success(&dir, &["search", "an ai", "--text"]);
+    assert!(
+        !search["results"].as_array().unwrap().is_empty(),
+        "an all-short-token query must still find a bounded-LIKE match: {search}"
+    );
+}
+
+/// PC8 (05 §1.3 L110-113): user query text is never interpreted as FTS5
+/// syntax — a query containing FTS5 operator keywords and a literal quote
+/// character matches literally (as a phrase) rather than raising a syntax
+/// error or being parsed as boolean operators.
+#[test]
+fn pc8_fts5_operator_keywords_and_quotes_are_literal_not_syntax() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(
+        dir.path().join("a.md"),
+        "# A\n\nThe \"OR\" operator combines conditions in boolean logic.\n",
+    )
+    .unwrap();
+    init(&dir);
+    success(&dir, &["index", "--offline", "--approve"]);
+
+    // A raw double quote inside the query must be escaped (`""`) rather than
+    // breaking the generated MATCH expression's own quoting.
+    let (code, search) = run(&dir, &["search", "\"OR\" operator", "--text"]);
+    assert_eq!(
+        code, 0,
+        "an FTS5-operator-shaped query must not error: {search}"
+    );
+    assert!(!search["results"].as_array().unwrap().is_empty());
 }

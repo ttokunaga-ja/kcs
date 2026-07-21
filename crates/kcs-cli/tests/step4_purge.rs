@@ -168,15 +168,16 @@ fn ct4_purge_typed_path_preview_warns_on_live_working_copy_and_purges_all_versio
     // working-tree copy of a purge target is now a WARNING, carried on
     // whatever response purge produces, rather than a categorical refusal.
     // (Full completion while the residual is STILL present at commit-publish
-    // time additionally depends on `Repository::snapshot_with_type`'s
+    // time additionally depended on `Repository::snapshot_with_type`'s
     // archival step and `planned_commit`'s LC48 fixed-at-`prepared` value
-    // both being reconciled with the residual — a separate, pre-existing
-    // interaction this ruling newly makes reachable but which is out of this
-    // contract's file-editing scope to resolve; see
+    // both being reconciled with the residual — a P2-A-identified,
+    // pre-existing `archive_staged_working_tree` self-barrier gap, now fixed
+    // in `kcs-core/src/scope.rs`: `commit_type=purged`'s own targets are
+    // excluded from its own snapshot rebuild rather than treated as a
+    // blocked ingest. Purge now reaches `status: "purged"` even with the
+    // residual present; see
     // `pa37_pa38_pa39_working_tree_residual_warns_instead_of_the_retired_hard_block`
-    // in `step4b_p2a_contract.rs` for the fuller note and the same
-    // observable check this test makes: the hard block is gone and the
-    // warning is surfaced on whatever (possibly retryable) response results.)
+    // in `step4b_p2a_contract.rs` for the fuller note.)
     let dir = tempfile::tempdir().unwrap();
     fs::write(dir.path().join("doc.md"), "version one").unwrap();
     json_success(&dir, &["init"]);
@@ -199,16 +200,11 @@ fn ct4_purge_typed_path_preview_warns_on_live_working_copy_and_purges_all_versio
     assert!(!dir.path().join(".kcs/purge/in-progress.json").exists());
 
     // "version two" (raw_two) is still live in doc.md here — the retired
-    // hard block must not fire; the warning is carried on the resulting
-    // (retryable) response instead, and the file itself is never touched.
-    let output = kcs(&dir, &["purge", "doc.md", "--reason", "legal", "--yes"])
-        .arg("--json")
-        .assert()
-        .code(3)
-        .get_output()
-        .stdout
-        .clone();
-    let output: Value = serde_json::from_slice(&output).unwrap();
+    // hard block must not fire, and (journal-barrier fix) purge now
+    // completes fully despite the live residual: the warning is carried on
+    // the SUCCESS response, and the file itself is never touched.
+    let output = json_success(&dir, &["purge", "doc.md", "--reason", "legal", "--yes"]);
+    assert_eq!(output["status"], "purged");
     assert_ne!(output["error_code"], "KCS-E-PURGE-WORKING-COPY-001");
     assert_eq!(output["working_tree_warning"]["live_alias_count"], 1);
     assert_eq!(fs::read(dir.path().join("doc.md")).unwrap(), b"version two");

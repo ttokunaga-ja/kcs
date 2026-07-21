@@ -80,6 +80,9 @@ impl SqliteFtsIndex {
     /// Fresh indexing passes `None` and lets SQLite allocate the monotonically
     /// increasing association rowid. Durable-ledger replay may pass the recorded
     /// rowid so a rebuilt database preserves cursor ordering exactly.
+    /// `row.chunking_config_introduction_commit` (PC40) is recorded exactly as
+    /// [`Self::index_chunk_with_rowids`] does — `None` unless the caller's
+    /// `row` carries one.
     pub fn index_chunk_with_association_rowid(
         &mut self,
         row: &ChunkRow,
@@ -94,12 +97,24 @@ impl SqliteFtsIndex {
     /// `chunk_rowid` is shared by every association record for the immutable
     /// chunk. Both explicit rowids are collision-checked inside one savepoint so
     /// a malformed ledger cannot partially publish either side of the relation.
+    ///
+    /// `row.chunking_config_introduction_commit` (PC40, 05 §1.6 L266) is the
+    /// commit at which THIS `(chunk_id, chunking_config_hash)` association was
+    /// created — read from the row rather than taken as a separate parameter
+    /// so a rebuild replaying an already-durable `chunks.jsonl` record cannot
+    /// accidentally re-stamp it with "today's HEAD" (it is stamped only when
+    /// the association is genuinely new, matching
+    /// `record_chunk_config_association`'s existing-row branch, which never
+    /// touches an already-existing row's `introduction_commit`). Chunk-level
+    /// publication events (PC37, potentially several per chunk) are a
+    /// separate, caller-driven concern — see [`record_chunk_publication`].
     pub fn index_chunk_with_rowids(
         &mut self,
         row: &ChunkRow,
         chunk_rowid: Option<u64>,
         association_rowid: Option<u64>,
     ) -> Result<(u64, u64)> {
+        let association_introduction_commit = row.chunking_config_introduction_commit.as_deref();
         if chunk_rowid == Some(0) {
             return Err(IndexError::Contract(
                 "chunk rowid must be positive".to_owned(),
@@ -219,6 +234,7 @@ impl SqliteFtsIndex {
                 &row.chunking_config_hash,
                 &row.created_at,
                 association_rowid,
+                association_introduction_commit,
             )?;
             Ok((sql_u64_rowid(actual_chunk_rowid)?, association_rowid))
         })
@@ -344,12 +360,18 @@ impl SqliteFtsIndex {
 /// explicit rowid is supplied (during durable-ledger rebuild), both the pair and
 /// rowid must agree with an existing record; a collision is a contract error
 /// rather than a silent renumbering that could invalidate signed cursors.
+///
+/// `introduction_commit` (PC40, 05 §1.6 L266) is stamped only on a genuinely
+/// new association row — an already-existing pair's `introduction_commit`
+/// never changes on replay, matching every other immutable-once-set column
+/// this function's existing-row branch already leaves untouched.
 pub fn record_chunk_config_association(
     conn: &Connection,
     chunk_id: &str,
     chunking_config_hash: &str,
     created_at: &str,
     association_rowid: Option<u64>,
+    introduction_commit: Option<&str>,
 ) -> Result<u64> {
     if association_rowid == Some(0) {
         return Err(IndexError::Contract(
@@ -411,17 +433,29 @@ pub fn record_chunk_config_association(
         }
         conn.execute(
             "INSERT INTO chunk_config_generations(
-                association_rowid, chunk_id, chunking_config_hash, created_at
-             ) VALUES (?1, ?2, ?3, ?4)",
-            params![requested_rowid, chunk_id, chunking_config_hash, created_at],
+                association_rowid, chunk_id, chunking_config_hash, created_at, introduction_commit
+             ) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                requested_rowid,
+                chunk_id,
+                chunking_config_hash,
+                created_at,
+                introduction_commit
+            ],
         )?;
         return sql_u64_rowid(requested_rowid);
     }
 
     conn.execute(
-        "INSERT INTO chunk_config_generations(chunk_id, chunking_config_hash, created_at)
-         VALUES (?1, ?2, ?3)",
-        params![chunk_id, chunking_config_hash, created_at],
+        "INSERT INTO chunk_config_generations(
+            chunk_id, chunking_config_hash, created_at, introduction_commit
+         ) VALUES (?1, ?2, ?3, ?4)",
+        params![
+            chunk_id,
+            chunking_config_hash,
+            created_at,
+            introduction_commit
+        ],
     )?;
     sql_u64_rowid(conn.last_insert_rowid())
 }
@@ -874,6 +908,7 @@ mod tests {
                 .to_owned(),
             text: text.to_owned(),
             first_seen_commit: None,
+            chunking_config_introduction_commit: None,
             created_at: "2026-07-03T00:00:00Z".to_owned(),
         }
     }

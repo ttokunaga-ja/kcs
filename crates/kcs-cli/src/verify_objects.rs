@@ -19,7 +19,7 @@ use kcs_core::scope::{names_jsonl_path, now_utc_seconds, Repository};
 use kcs_core::{KcsError, Result};
 use kcs_pipeline::markdownize::{
     load_validated_normalized_instance, normalized_instance_read_budget,
-    NormalizedInstanceIdentity, UnitStatus, ValidatedNormalizedInstance,
+    NormalizedInstanceIdentity, ValidatedNormalizedInstance,
 };
 use serde::Serialize;
 
@@ -107,18 +107,13 @@ fn parse_evidence_verify_args(args: Vec<String>) -> Result<(String, bool)> {
 /// journal (PB58, unchanged), and genuine store corruption (LC13/LC14 via the
 /// shared canonical dispatch) — still propagate as a raw `KcsError`.
 ///
-/// **Known residual gap** (documented, not silently dropped): `unverifiable`'s
-/// `tree_v1` and `manifest_missing` reasons (08§3.1 procedures 6a/6b, U54/U55)
-/// depend on `normalize.manifest_hash` (PB04's prerequisite schema field) and
-/// the `chunk_publications` introduction table (PB29-31, U144) — neither is
-/// implemented this session (P2-B scope boundary: both require touching
-/// `NormalizeRef` construction call sites scattered across the open/restore/
-/// index write paths this session stayed out of). The reason dispatch below
-/// is wired for all three so a future patch flips a bool, not this function's
-/// structure. `commit_shallow` and PB45's unit-status `not_found` (the part of
-/// procedure 6a reachable without `manifest_hash`, since it reads the tree
-/// entry's *existing* `(raw_hash, tool_profile_hash, gen)`-keyed manifest) are
-/// both fully implemented.
+/// Procedures 6a/6b (08§3.1, PB45-50/55) are implemented via the shared
+/// `verify_point_in_time_attribution` (main.rs) — `unverifiable`'s `tree_v1`
+/// and `manifest_missing` reasons, the v2/v3 publication/config-association
+/// ancestor-or-equal checks, and 6b's in_commit-scoped manifest-missing
+/// downgrade (with resurrection-link fallback) all flow through the same
+/// judgment `resolve_pointer_for_cli` (open/view/restore) uses — PB66's
+/// structural requirement.
 fn verify_pointer_for_cli(pointer: &EvidencePointer, strict: bool) -> Result<Value> {
     let target = match resolve_scope_target(&pointer.scope_id, pointer.scope_path.as_deref()) {
         Ok(target) => target,
@@ -169,7 +164,7 @@ fn verify_pointer_for_cli(pointer: &EvidencePointer, strict: bool) -> Result<Val
         Err(error) => return Err(error),
     };
     let store = ObjectStore::new(&target.kcs_dir);
-    let (commit_shallow, entry_gen) = match repo.read_tree(&commit.tree) {
+    let (commit_shallow, entry_gen, entry_normalize) = match repo.read_tree(&commit.tree) {
         Ok(tree) => {
             // PB42/43/44 (§O, verify side): select the entry whose
             // `normalize.tool_profile_hash` binds to the pointer's (not just
@@ -200,9 +195,9 @@ fn verify_pointer_for_cli(pointer: &EvidencePointer, strict: bool) -> Result<Val
                 return Err(invalid_pointer_identity_error(pointer));
             };
             let entry_gen = entry.normalize.as_ref().map(|normalize| normalize.gen);
-            (false, entry_gen)
+            (false, entry_gen, entry.normalize.clone())
         }
-        Err(error) if is_store_not_found(&error) => (true, None),
+        Err(error) if is_store_not_found(&error) => (true, None, None),
         Err(error) => return Err(error),
     };
 
@@ -246,32 +241,39 @@ fn verify_pointer_for_cli(pointer: &EvidencePointer, strict: bool) -> Result<Val
         return Err(invalid_pointer_identity_error(pointer));
     }
 
-    // PB45 (§P procedure 6a's unit-status check, the part reachable without
-    // `normalize.manifest_hash`): a chunk whose backing unit is not
-    // `status: done` in the tree entry's own (raw_hash, tool_profile_hash,
-    // gen)-keyed normalized-instance manifest did not exist at this commit's
-    // point in time (a same-gen retry's later-arriving chunk) — not_found,
-    // unconditionally (not merely an `unverifiable` degrade).
+    // 08 §3.1 procedures 6a/6b (PB45-50/55, §P/§Q; item 2 of this session's
+    // task): point-in-time attribution, shared with `resolve_pointer_for_cli`
+    // (main.rs, PB66's structural requirement) rather than a parallel
+    // judgment. `PB45`'s unit-status check is folded into this shared path —
+    // a v1 tree still gets the same lenient (no-manifest-hash) resolution it
+    // always did, now expressed as `LegacyTreeV1` rather than a bespoke
+    // best-effort read here.
+    let mut manifest_missing = false;
+    let mut tree_v1 = false;
     if !commit_shallow {
-        if let Some(gen) = entry_gen {
-            if let Ok(instance) = load_validated_normalized_instance(
-                &target.kcs_dir,
+        if let Some(normalize) = &entry_normalize {
+            match verify_point_in_time_attribution(
+                &target,
+                &repo,
                 &pointer.raw_hash,
-                &pointer.tool_profile_hash,
-                gen,
-            ) {
-                let done = instance
-                    .manifest
-                    .units
-                    .iter()
-                    .find(|unit| unit.unit_key == chunk.unit_key)
-                    .is_some_and(|unit| unit.status == UnitStatus::Done);
-                if !done {
+                normalize,
+                &pointer.chunk_hash,
+                &chunk,
+                &pointer.commit,
+            )? {
+                PointInTimeAttribution::Alive => {}
+                PointInTimeAttribution::LegacyTreeV1 => tree_v1 = true,
+                PointInTimeAttribution::ManifestMissing => manifest_missing = true,
+                PointInTimeAttribution::NotFound => {
                     return checkpoint.finish(verify_exit_override(
                         not_found_verify_output(&target, &pointer.raw_hash),
                         if strict { 4 } else { 0 },
                     ));
                 }
+                PointInTimeAttribution::StoreCorrupt => {
+                    return Err(store_corrupt_pointer_entry_missing_error(pointer));
+                }
+                PointInTimeAttribution::IndexRebuilding => return Err(index_rebuilding_error()),
             }
         }
     }
@@ -290,11 +292,6 @@ fn verify_pointer_for_cli(pointer: &EvidencePointer, strict: bool) -> Result<Val
     }
 
     // PB55/56 (§S/§N): the closed 3-value `unverifiable` reason union.
-    // `tree_v1`/`manifest_missing` never become true this session (see the
-    // module doc comment above) — wired through so a future patch only needs
-    // to set the flag.
-    let manifest_missing = false;
-    let tree_v1 = false;
     if strict && (commit_shallow || manifest_missing || tree_v1) {
         let reason = if manifest_missing {
             "manifest_missing"
@@ -334,6 +331,7 @@ fn verify_pointer_for_cli(pointer: &EvidencePointer, strict: bool) -> Result<Val
             "tool_profile_hash": pointer.tool_profile_hash,
             "chunk_hash": pointer.chunk_hash,
             "commit_shallow": commit_shallow,
+            "manifest_missing": manifest_missing,
         }
     }))
 }

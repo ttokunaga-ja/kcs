@@ -200,6 +200,7 @@ pub fn chunk_normalized_instance(input: ChunkingInput) -> Result<Vec<ChunkRow>> 
                     text_hash: hash_bytes(text.as_bytes()),
                     text,
                     first_seen_commit: None,
+                    chunking_config_introduction_commit: None,
                     created_at: input.created_at.clone(),
                 };
                 row.chunk_id = chunk_hash(&row)?;
@@ -410,6 +411,7 @@ mod tests {
             text_hash: "sha256:text".to_owned(),
             text: String::new(),
             first_seen_commit: None,
+            chunking_config_introduction_commit: None,
             created_at: "2026-07-03T00:00:00Z".to_owned(),
         }
     }
@@ -449,6 +451,7 @@ mod tests {
             text_hash: "sha256:text".to_owned(),
             text: String::new(),
             first_seen_commit: None,
+            chunking_config_introduction_commit: None,
             created_at: "2026-07-03T00:00:00Z".to_owned(),
         };
         let omitted = chunk_hash(&row).unwrap();

@@ -126,6 +126,11 @@ struct DeletedCounts {
     cache_directories: u64,
     #[serde(default)]
     staging_descriptors: u64,
+    /// PB04/item 3: `objects/manifests/` CAS objects removed for this
+    /// purge's target instances. Distinct from `manifest_rows` (the
+    /// scope-level `.kcs/manifest.json` file-inventory row count).
+    #[serde(default)]
+    manifest_objects: u64,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -228,6 +233,16 @@ fn compute_purge_closure(
     for hash in inventory.target_images.difference(&shared_images) {
         items.push(ClosureItem {
             object_type: "image".to_owned(),
+            hash: hash.clone(),
+        });
+    }
+    // PB04/item 3: manifest objects are never shared across raws (unlike
+    // prepared/image, keyed by their own instance's exact JCS bytes), so
+    // every target manifest hash is unconditionally removable — no
+    // surviving/preserved split to compute.
+    for hash in &inventory.target_manifest_hashes {
+        items.push(ClosureItem {
+            object_type: "manifest".to_owned(),
             hash: hash.clone(),
         });
     }
@@ -452,6 +467,12 @@ fn execute_phase_machine(
     );
     match result {
         Ok(()) => {
+            // PC20 (05 §1.5 L180-184): purge is one of the 6 listed
+            // `index_generation` rotation triggers in its own right (deleted
+            // chunk/config/vector rows change the search-visible set,
+            // independent of whether this purge also happened to move the
+            // lifecycle-epoch counter) — rotate unconditionally first.
+            crate::rotate_index_generation_unconditionally(repo.kcs_dir())?;
             // LC42-LC44 (item 2): purge's own `tombstoned`-phase marker
             // append (and any resurrection retire folded into the same
             // mutation) advances `.kcs/tombstones/lifecycle-epoch` directly
@@ -755,6 +776,13 @@ struct DerivedInventory {
     target_images: BTreeSet<String>,
     surviving_prepared: BTreeSet<String>,
     surviving_images: BTreeSet<String>,
+    /// PB04/item 3 follow-through (05 §3.5 L701-703 "normalized は...manifest
+    /// object...を含む"): every target instance's manifest CAS object hash
+    /// (`objects/manifests/` — never shared across raws, unlike
+    /// prepared/image, so no surviving/target split is needed). Absent from
+    /// this set when the instance predates `NormalizeRef::manifest_hash`
+    /// (v1 legacy — nothing to compute or delete).
+    target_manifest_hashes: BTreeSet<String>,
 }
 
 fn delete_derived_surfaces(
@@ -843,6 +871,15 @@ fn delete_derived_surfaces(
             report.deleted.image_objects = report.deleted.image_objects.saturating_add(1);
         }
     }
+    // PB04/item 3 (05 §3.5 L701-703): the target instances' own manifest CAS
+    // objects, fixed in the closure at `prepared` like prepared/image above —
+    // never shared, so no live-reference check is needed here, only the
+    // idempotent removal itself.
+    for hash in closure.hashes_for("manifest") {
+        if store.remove_content(ContentObjectKind::Manifest, &hash)? {
+            report.deleted.manifest_objects = report.deleted.manifest_objects.saturating_add(1);
+        }
+    }
 
     for directory in &inventory.target_instance_dirs {
         if remove_tree_nofollow(directory)? {
@@ -923,6 +960,17 @@ fn scan_derived_inventory(kcs_dir: &Path, targets: &BTreeSet<&str>) -> Result<De
         let target = targets.contains(manifest.raw_hash.as_str());
         if target {
             inventory.target_instance_dirs.insert(leaf.clone());
+            // PB04/item 3: the manifest CAS object hash this instance's tree
+            // entries would carry as `normalize.manifest_hash` — computed
+            // the same way indexing writes it (canonical JCS bytes of the
+            // manifest struct), not read back from a tree entry (a purge
+            // target's raw need not currently be bound in HEAD's tree at
+            // all, e.g. a historical-only raw-hash purge).
+            let value = serde_json::to_value(&manifest)
+                .map_err(|error| KcsError::schema(error.to_string()))?;
+            inventory
+                .target_manifest_hashes
+                .insert(kcs_core::cas::hash_json(&value)?);
         }
         if !identities.insert(identity.clone()) {
             // A canonical/legacy duplicate is validated together by the loader;
