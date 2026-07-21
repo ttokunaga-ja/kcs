@@ -29,7 +29,7 @@ impl ContentObjectKind {
     pub const fn directory(self) -> &'static str {
         match self {
             Self::Prepared => "prepared",
-            Self::Image => "images",
+            Self::Image => "image",
         }
     }
 
@@ -65,10 +65,11 @@ pub struct ChunkObject {
     pub heading_path: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub section_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub char_start: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub char_end: Option<u64>,
+    /// Unit-local UTF-8 byte offset, 0-based half-open (03 §8.1). Always
+    /// present in a valid chunk object — part of the identity tuple, not an
+    /// optional field like `section_id`.
+    pub byte_start: u64,
+    pub byte_end: u64,
     pub text_hash: String,
     pub text: String,
 }
@@ -78,14 +79,8 @@ impl ChunkObject {
     pub fn identity_hash(&self) -> Result<String> {
         self.validate()?;
         let mut value = Map::new();
-        value.insert(
-            "char_end".to_owned(),
-            self.char_end.map_or(Value::Null, Value::from),
-        );
-        value.insert(
-            "char_start".to_owned(),
-            self.char_start.map_or(Value::Null, Value::from),
-        );
+        value.insert("byte_end".to_owned(), Value::from(self.byte_end));
+        value.insert("byte_start".to_owned(), Value::from(self.byte_start));
         value.insert("gen".to_owned(), Value::from(self.gen));
         value.insert(
             "heading_path".to_owned(),
@@ -129,15 +124,11 @@ impl ChunkObject {
                 None,
             ));
         }
-        match (self.char_start, self.char_end) {
-            (Some(start), Some(end)) if start <= end => {}
-            (None, None) => {}
-            _ => {
-                return Err(chunk_corrupt_error(
-                    "chunk char_start/char_end must be an ordered pair",
-                    None,
-                ))
-            }
+        if self.byte_start > self.byte_end {
+            return Err(chunk_corrupt_error(
+                "chunk byte_start/byte_end must be an ordered pair",
+                None,
+            ));
         }
         if hash_bytes(self.text.as_bytes()) != self.text_hash {
             return Err(chunk_corrupt_error(
@@ -2783,8 +2774,8 @@ mod tests {
             unit_key: "page:12".to_owned(),
             heading_path: vec!["Auth".to_owned()],
             section_id: Some("auth".to_owned()),
-            char_start: Some(0),
-            char_end: Some(text.chars().count() as u64),
+            byte_start: 0,
+            byte_end: text.len() as u64,
             text_hash: hash_bytes(text.as_bytes()),
             text: text.to_owned(),
         }

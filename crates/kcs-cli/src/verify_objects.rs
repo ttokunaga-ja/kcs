@@ -885,28 +885,26 @@ fn verify_objects_with_limits(
             );
             continue;
         };
-        let (Some(start), Some(end)) = (chunk.char_start, chunk.char_end) else {
-            state.finding(
-                "chunk_span_invalid",
-                chunk_hash,
-                "chunk span is absent",
-                &[],
-            );
-            continue;
-        };
-        let exact = unit
-            .markdown
-            .chars()
-            .skip(start as usize)
-            .take(end.saturating_sub(start) as usize)
-            .collect::<String>();
-        if exact != chunk.text || hash_bytes(exact.as_bytes()) != chunk.text_hash {
-            state.finding(
-                "chunk_span_mismatch",
-                chunk_hash,
-                "chunk text does not match normalized span",
-                &[],
-            );
+        // byte_start/byte_end are unit-local UTF-8 byte offsets (03 §8.1), always
+        // present and ordered by construction — `ChunkObject::validate()` already
+        // rejected any object with byte_start > byte_end before it reached this
+        // map (cas.rs `read_chunk_path_accounted`). `str::get` on a byte range
+        // additionally guards against an out-of-bounds span or one that doesn't
+        // land on a UTF-8 char boundary — either is exact-span corruption
+        // surfaced as a finding here, not a panic.
+        let start = chunk.byte_start as usize;
+        let end = chunk.byte_end as usize;
+        match unit.markdown.get(start..end) {
+            Some(exact)
+                if exact == chunk.text && hash_bytes(exact.as_bytes()) == chunk.text_hash => {}
+            _ => {
+                state.finding(
+                    "chunk_span_mismatch",
+                    chunk_hash,
+                    "chunk text does not match normalized span",
+                    &[],
+                );
+            }
         }
     }
 

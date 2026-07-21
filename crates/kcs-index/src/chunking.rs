@@ -59,8 +59,8 @@ pub fn chunking_config_hash(strategy: &str, max_chars: u64) -> Result<String> {
 
 pub fn chunk_hash(row: &ChunkRow) -> Result<String> {
     let mut map = Map::new();
-    map.insert("char_end".to_owned(), json!(row.char_end.unwrap_or(0)));
-    map.insert("char_start".to_owned(), json!(row.char_start.unwrap_or(0)));
+    map.insert("byte_end".to_owned(), json!(row.byte_end));
+    map.insert("byte_start".to_owned(), json!(row.byte_start));
     map.insert("gen".to_owned(), json!(row.gen));
     map.insert(
         "heading_path".to_owned(),
@@ -126,6 +126,20 @@ pub fn chunk_normalized_instance(input: ChunkingInput) -> Result<Vec<ChunkRow>> 
         // only the quadratic span slicing moves to the Vec<char>. Output bytes are
         // unchanged — `unit_chars[a..b]` collects the same String as before.
         let unit_chars: Vec<char> = unit.markdown.chars().collect();
+        // 03 §8.1 / §8: the *stored* span is the unit-local UTF-8 byte offset
+        // (0-based half-open), not the Unicode scalar (char) index used above for
+        // max_chars accounting (04 §4.1 rule 5 fixes the split-boundary unit as
+        // scalar value, independent of the persisted byte span). `char_indices()`
+        // yields exactly `unit_chars.len()` byte offsets in the same order as
+        // `chars()`, so this table converts a char index directly to its byte
+        // offset in O(1) per lookup; the sentinel entry (total byte length) covers
+        // an `end` that lands on the unit's tail.
+        let char_byte_offsets: Vec<usize> = unit
+            .markdown
+            .char_indices()
+            .map(|(byte_offset, _)| byte_offset)
+            .chain(std::iter::once(unit.markdown.len()))
+            .collect();
         let sections = section_ranges(&unit.markdown);
         let mut duplicate_counts = BTreeMap::<String, u64>::new();
         for section in sections {
@@ -163,7 +177,14 @@ pub fn chunk_normalized_instance(input: ChunkingInput) -> Result<Vec<ChunkRow>> 
                 if start >= end {
                     continue;
                 }
-                let text = slice_chars(&unit_chars, start, end);
+                // `char_byte_offsets[i]` is always a valid UTF-8 char boundary (it
+                // comes straight from `char_indices()` plus the whole-string
+                // length sentinel), so slicing `unit.markdown` by the translated
+                // byte range can never land mid-codepoint — this is an exact byte
+                // copy of the span, not a re-encoding of collected chars.
+                let byte_start = char_byte_offsets[start];
+                let byte_end = char_byte_offsets[end];
+                let text = unit.markdown[byte_start..byte_end].to_owned();
                 let mut row = ChunkRow {
                     chunk_id: String::new(),
                     raw_hash: unit.raw_hash.clone(),
@@ -174,8 +195,8 @@ pub fn chunk_normalized_instance(input: ChunkingInput) -> Result<Vec<ChunkRow>> 
                     raw_path: input.raw_path.clone(),
                     heading_path: Some(section.heading_path.clone()),
                     section_id: section_id.clone(),
-                    char_start: Some(start as u64),
-                    char_end: Some(end as u64),
+                    byte_start: byte_start as u64,
+                    byte_end: byte_end as u64,
                     text_hash: hash_bytes(text.as_bytes()),
                     text,
                     first_seen_commit: None,
@@ -384,8 +405,8 @@ mod tests {
             raw_path: "report.pdf".to_owned(),
             heading_path: Some(heading_path.into_iter().map(str::to_owned).collect()),
             section_id: section_id.map(str::to_owned),
-            char_start: Some(1200),
-            char_end: Some(1500),
+            byte_start: 1200,
+            byte_end: 1500,
             text_hash: "sha256:text".to_owned(),
             text: String::new(),
             first_seen_commit: None,
@@ -398,7 +419,7 @@ mod tests {
         let row = fixture_row(0, Some("認証仕様/api-token"), vec!["認証仕様", "API Token"]);
         assert_eq!(
             chunk_hash(&row).unwrap(),
-            "sha256:c5e31f10da04b722769bdbbd60a55b94c177b5f3bf9c64e5341be7281d115c3d"
+            "sha256:dd0fcce91922d28404fc036213d176a6bc8d8a5d5635575a9804bed3ee3b19dc"
         );
     }
 
@@ -407,7 +428,7 @@ mod tests {
         let row = fixture_row(3, Some("認証仕様/api-token"), vec!["認証仕様", "API Token"]);
         assert_eq!(
             chunk_hash(&row).unwrap(),
-            "sha256:688cc82734bed7cb37ff1e40674dfdf4e48670bfde263962aabaac4f88d75e54"
+            "sha256:4c9576771a9dc4d3cd6197feda6510a7ef65381ef74588eacc6fa79f27a23442"
         );
     }
 
@@ -423,8 +444,8 @@ mod tests {
             raw_path: "report.pdf".to_owned(),
             heading_path: Some(Vec::new()),
             section_id: None,
-            char_start: Some(0),
-            char_end: Some(600),
+            byte_start: 0,
+            byte_end: 600,
             text_hash: "sha256:text".to_owned(),
             text: String::new(),
             first_seen_commit: None,
@@ -435,7 +456,7 @@ mod tests {
         assert_eq!(chunk_hash(&row).unwrap(), omitted);
         assert_eq!(
             omitted,
-            "sha256:d1fe73cef624a76949293ca550ae305ce8a2c46517a83e7d52b2bcc700b2c8d6"
+            "sha256:2d6d42758c3f7f22e87422a5ca7e9d0a0c8ee18425915d661b3bd21c6664d0ae"
         );
     }
 
@@ -487,15 +508,15 @@ mod tests {
             created_at: "2026-07-03T00:00:00Z".to_owned(),
         };
         let rows = chunk_normalized_instance(input).unwrap();
-        assert_eq!(rows[0].char_start, Some(0));
-        assert_eq!(rows[0].char_end, Some(4));
-        assert_eq!(rows[1].char_start, Some(4));
+        assert_eq!(rows[0].byte_start, 0);
+        assert_eq!(rows[0].byte_end, 4);
+        assert_eq!(rows[1].byte_start, 4);
     }
 
     // CT3-CHUNK-005 (gap fill): the spec's Given is explicitly a unit "combined at
     // the tail side of a full-text view" — a single-unit fixture can't distinguish
     // "span is unit-local" from "span happens to start at 0 because there's only
-    // one unit". A second, later unit must restart char_start at 0 rather than
+    // one unit". A second, later unit must restart byte_start at 0 rather than
     // continuing from the first unit's end, and its heading stack must not inherit
     // the first unit's headings (chunk does not cross the unit boundary, 04 §4.1
     // rule 1 / A.1 offset independence).
@@ -528,8 +549,8 @@ mod tests {
             .iter()
             .find(|row| row.unit_key == "doc:2")
             .expect("second unit must produce a chunk");
-        // Restarted at 0, not continuing from the first unit's ~34-char length.
-        assert_eq!(second_unit_row.char_start, Some(0));
+        // Restarted at 0, not continuing from the first unit's ~34-byte length.
+        assert_eq!(second_unit_row.byte_start, 0);
         // No heading appears before it in doc:2, so heading_path must be empty —
         // not `["First"]` leaked across the unit boundary.
         assert_eq!(second_unit_row.heading_path, Some(Vec::new()));
@@ -574,16 +595,18 @@ mod tests {
             "expected max_chars to force a split, got {} chunk(s)",
             section_rows.len()
         );
-        // Every char span stays within max_chars, and split pieces share
+        // Every span stays within max_chars (this fixture is pure ASCII, so byte
+        // count and scalar count coincide — the multibyte fixtures below pin the
+        // general byte-vs-scalar distinction), and split pieces share
         // heading_path / section_id but are distinguished by span.
         for row in &section_rows {
-            let span = row.char_end.unwrap() - row.char_start.unwrap();
+            let span = row.byte_end - row.byte_start;
             assert!(span <= 20, "split chunk exceeds max_chars: {span}");
             assert_eq!(row.heading_path, Some(vec!["Heading".to_owned()]));
         }
         let mut spans = section_rows
             .iter()
-            .map(|row| (row.char_start.unwrap(), row.char_end.unwrap()))
+            .map(|row| (row.byte_start, row.byte_end))
             .collect::<Vec<_>>();
         spans.sort_unstable();
         // Contiguous, non-overlapping coverage (greedy split, no gaps beyond the
@@ -598,6 +621,114 @@ mod tests {
             chunking_config_hash("heading", 6000).unwrap(),
             "sha256:7810328ffa7f0dd9a558294e166f20d8038d8d779809ee519582e3d6ba1b98ea"
         );
+    }
+
+    // U97: 03 §8.1/§8 fixes the persisted span as the UTF-8 BYTE offset into the
+    // unit's markdown (unit-local, 0-based half-open) — the Unicode SCALAR (char)
+    // index used above only to enforce max_chars (04 §4.1 rule 5). Every prior
+    // test in this module is ASCII, where the two counts are numerically
+    // identical and this distinction is invisible. These two tests pin the byte
+    // semantics with multibyte (Japanese) fixtures where char count and byte
+    // count provably diverge.
+    #[test]
+    fn u97_byte_span_is_utf8_byte_offset_not_scalar_count_at_section_boundary() {
+        let config = default_chunking_config().unwrap();
+        // "あ\n" is 2 Unicode scalars but 4 UTF-8 bytes (あ = U+3042 encodes to 3
+        // bytes, \n to 1). The heading section "# 見出し\nbody" is 10 scalars but
+        // 16 bytes (見/出/し are each 3 bytes).
+        let markdown = "あ\n# 見出し\nbody".to_owned();
+        let input = ChunkingInput {
+            raw_path: "a.md".to_owned(),
+            units: vec![NormalizedUnitInput {
+                raw_hash: RAW.to_owned(),
+                tool_profile_hash: TOOL.to_owned(),
+                gen: 0,
+                unit_key: "doc:1".to_owned(),
+                markdown: markdown.clone(),
+            }],
+            config,
+            created_at: "2026-07-03T00:00:00Z".to_owned(),
+        };
+        let rows = chunk_normalized_instance(input).unwrap();
+        assert_eq!(rows.len(), 2);
+
+        assert_eq!(rows[0].byte_start, 0);
+        assert_eq!(rows[0].byte_end, 4);
+        assert_eq!(rows[0].text, "あ\n");
+        assert_eq!(rows[0].heading_path, Some(Vec::new()));
+
+        assert_eq!(rows[1].byte_start, 4);
+        assert_eq!(rows[1].byte_end, 20);
+        assert_eq!(rows[1].text, "# 見出し\nbody");
+        assert_eq!(rows[1].heading_path, Some(vec!["見出し".to_owned()]));
+        // If the span were still scalar-indexed (the pre-U97 bug), byte_end -
+        // byte_start would equal the 10-scalar count below, not the 16-byte one.
+        assert_eq!(
+            rows[1].byte_end - rows[1].byte_start,
+            rows[1].text.len() as u64
+        );
+        assert_ne!(
+            rows[1].byte_end - rows[1].byte_start,
+            rows[1].text.chars().count() as u64
+        );
+
+        // Sanity: the whole unit is 20 UTF-8 bytes, matching the final chunk's
+        // byte_end (no gap, no over/under-count at the unit tail).
+        assert_eq!(markdown.len(), 20);
+        assert_eq!(rows[1].byte_end, markdown.len() as u64);
+    }
+
+    #[test]
+    fn u97_byte_span_recovers_exact_text_via_direct_byte_slice_across_hard_splits() {
+        // A small max_chars over a paragraph-boundary-free CJK body forces
+        // several hard splits (04 §4.1 rule 5) away from any section boundary —
+        // Test 1 above only exercises one split, at a section edge. Every
+        // resulting byte_start/byte_end must let a resolver recover `text` by
+        // slicing the ORIGINAL unit markdown's UTF-8 bytes directly (08 §3.1
+        // step 7 / 03 §8.1): a scalar-indexed span would slice the wrong bytes
+        // (or panic mid-codepoint) for every interior chunk here, since every
+        // character — heading kanji included — is a multi-byte CJK codepoint.
+        let config = ChunkingConfig {
+            chunking_config_hash: chunking_config_hash("heading", 5).unwrap(),
+            strategy: "heading".to_owned(),
+            max_chars: 5,
+        };
+        let body = "漢字".repeat(20);
+        let markdown = format!("# 表題\n{body}");
+        let input = ChunkingInput {
+            raw_path: "a.md".to_owned(),
+            units: vec![NormalizedUnitInput {
+                raw_hash: RAW.to_owned(),
+                tool_profile_hash: TOOL.to_owned(),
+                gen: 0,
+                unit_key: "doc:1".to_owned(),
+                markdown: markdown.clone(),
+            }],
+            config,
+            created_at: "2026-07-03T00:00:00Z".to_owned(),
+        };
+        let rows = chunk_normalized_instance(input).unwrap();
+        assert!(
+            rows.len() > 5,
+            "max_chars=5 over a {}-scalar CJK body must force several splits, got {} chunk(s)",
+            body.chars().count(),
+            rows.len()
+        );
+        for row in &rows {
+            let start = row.byte_start as usize;
+            let end = row.byte_end as usize;
+            assert!(start < end);
+            // Every chunk here mixes in or is entirely 3-byte CJK text, so its
+            // byte span must be strictly wider than its scalar count — the
+            // signature of a genuine byte offset (a mislabeled scalar offset
+            // would make this equality hold instead).
+            assert_ne!(end - start, row.text.chars().count());
+            // The round trip Evidence Pointer resolution and fsck rely on:
+            // slicing the ORIGINAL unit markdown's bytes at [byte_start,
+            // byte_end) reproduces the chunk's exact stored text and hash.
+            assert_eq!(&markdown[start..end], row.text.as_str());
+            assert_eq!(row.text_hash, hash_bytes(row.text.as_bytes()));
+        }
     }
 
     fn time_chunk(n: usize) -> std::time::Duration {

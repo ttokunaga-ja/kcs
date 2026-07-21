@@ -115,9 +115,9 @@ pub struct EvidencePointer {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub section_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub char_start: Option<u64>,
+    pub byte_start: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub char_end: Option<u64>,
+    pub byte_end: Option<u64>,
     pub scope_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub scope_path: Option<String>,
@@ -134,8 +134,8 @@ struct UncheckedEvidencePointer {
     path_at_commit: Option<String>,
     heading_path: Option<Vec<String>>,
     section_id: Option<String>,
-    char_start: Option<u64>,
-    char_end: Option<u64>,
+    byte_start: Option<u64>,
+    byte_end: Option<u64>,
     scope_id: String,
     scope_path: Option<String>,
 }
@@ -154,8 +154,8 @@ impl TryFrom<UncheckedEvidencePointer> for EvidencePointer {
             path_at_commit: value.path_at_commit,
             heading_path: value.heading_path,
             section_id: value.section_id,
-            char_start: value.char_start,
-            char_end: value.char_end,
+            byte_start: value.byte_start,
+            byte_end: value.byte_end,
             scope_id: value.scope_id,
             scope_path: value.scope_path,
         };
@@ -200,8 +200,8 @@ pub struct EvidencePointerIssueRequest {
     pub path_at_commit: Option<String>,
     pub heading_path: Option<Vec<String>>,
     pub section_id: Option<String>,
-    pub char_start: Option<u64>,
-    pub char_end: Option<u64>,
+    pub byte_start: Option<u64>,
+    pub byte_end: Option<u64>,
 }
 
 pub fn issue_evidence_pointer(request: EvidencePointerIssueRequest) -> Result<EvidencePointer> {
@@ -215,8 +215,8 @@ pub fn issue_evidence_pointer(request: EvidencePointerIssueRequest) -> Result<Ev
         path_at_commit: request.path_at_commit,
         heading_path: request.heading_path,
         section_id: request.section_id,
-        char_start: request.char_start,
-        char_end: request.char_end,
+        byte_start: request.byte_start,
+        byte_end: request.byte_end,
         scope_id: request.scope_id,
         scope_path: request.scope_path,
     };
@@ -281,8 +281,8 @@ pub fn parse_evidence_pointer_uri(uri: &str) -> Result<EvidencePointer> {
         path_at_commit: None,
         heading_path: None,
         section_id: None,
-        char_start: None,
-        char_end: None,
+        byte_start: None,
+        byte_end: None,
         scope_path: None,
     };
     pointer.validate()?;
@@ -311,8 +311,8 @@ mod tests {
             path_at_commit: Some("report.pdf".to_owned()),
             heading_path: Some(vec!["認証仕様".to_owned(), "API Token".to_owned()]),
             section_id: Some("認証仕様/api-token".to_owned()),
-            char_start: Some(1200),
-            char_end: Some(1500),
+            byte_start: Some(1200),
+            byte_end: Some(1500),
             scope_id: "scope_01J8ZQABCDEFGHJKMNPQRS".to_owned(),
             scope_path: Some("/tmp/scope".to_owned()),
         }
@@ -325,7 +325,7 @@ mod tests {
         assert!(uri.starts_with("kcs://scope_01J8ZQ"));
         assert_eq!(pointer.schema_version, 1);
         assert!(pointer.heading_path.is_some());
-        assert!(pointer.char_start.is_some());
+        assert!(pointer.byte_start.is_some());
     }
 
     #[test]

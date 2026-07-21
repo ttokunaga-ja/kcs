@@ -142,7 +142,7 @@ fn add_image_reference(dir: &TempDir, raw_hash: &str, image_bytes: &[u8]) -> Str
     )
     .unwrap();
     let image_hash = hash_bytes(image_bytes);
-    let image_path = fanout_path(repo.kcs_dir().join("objects/images"), &image_hash).unwrap();
+    let image_path = fanout_path(repo.kcs_dir().join("objects/image"), &image_hash).unwrap();
     fs::create_dir_all(image_path.parent().unwrap()).unwrap();
     fs::write(&image_path, image_bytes).unwrap();
     instance.units[0]
@@ -214,7 +214,7 @@ fn ct4_purge_default_deletes_all_surfaces_blocks_reads_and_is_idempotent() {
     let fixture = indexed_fixture();
     let kcs_dir = fixture.dir.path().join(".kcs");
     let image_hash = add_image_reference(&fixture.dir, &fixture.raw_hash, b"private image bytes");
-    let image_path = fanout_path(kcs_dir.join("objects/images"), &image_hash).unwrap();
+    let image_path = fanout_path(kcs_dir.join("objects/image"), &image_hash).unwrap();
 
     fs::write(
         kcs_dir.join("unsupported-inputs.jsonl"),

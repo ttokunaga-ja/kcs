@@ -1350,7 +1350,7 @@ fn image_hash_digest(hash: &str) -> Result<&str> {
 fn image_object_path(kcs_dir: &Path, hash: &str) -> Result<PathBuf> {
     let digest = image_hash_digest(hash)?;
     Ok(kcs_dir
-        .join("objects/images")
+        .join("objects/image")
         .join(&digest[0..2])
         .join(&digest[2..4])
         .join(digest))
@@ -1360,7 +1360,7 @@ fn image_object_path(kcs_dir: &Path, hash: &str) -> Result<PathBuf> {
 fn legacy_image_object_path(kcs_dir: &Path, hash: &str) -> Result<PathBuf> {
     let digest = image_hash_digest(hash)?;
     Ok(kcs_dir
-        .join("objects/images")
+        .join("objects/image")
         .join(&digest[0..2])
         .join(&digest[2..4])
         .join(hash))
@@ -1703,7 +1703,7 @@ mod tests {
         let path = image_object_path(Path::new(".kcs"), &hash).unwrap();
         assert_eq!(
             path,
-            PathBuf::from(".kcs/objects/images")
+            PathBuf::from(".kcs/objects/image")
                 .join(&digest[0..2])
                 .join(&digest[2..4])
                 .join(digest)
@@ -2244,7 +2244,7 @@ mod tests {
         };
         let err = persist_image_refs_bounded(dir.path(), &[&first, &second], 7).unwrap_err();
         assert!(matches!(err, AdapterError::QuotaExceeded(_)));
-        assert!(!dir.path().join("objects/images").exists());
+        assert!(!dir.path().join("objects/image").exists());
     }
 
     #[derive(Debug, Clone)]

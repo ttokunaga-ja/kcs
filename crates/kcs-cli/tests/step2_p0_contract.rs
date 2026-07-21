@@ -1420,7 +1420,7 @@ fn ct2_adapter_013_baseline_and_ai_artifacts_coexist() {
         collect_files(&baseline_root).intersection(&before).count(),
         before.len()
     );
-    assert!(dir.path().join(".kcs/objects/images").is_dir());
+    assert!(dir.path().join(".kcs/objects/image").is_dir());
     assert!(collect_files(&baseline_root).len() > before.len());
 }
 

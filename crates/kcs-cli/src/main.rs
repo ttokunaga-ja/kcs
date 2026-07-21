@@ -1253,8 +1253,11 @@ struct ChunkMeta {
     gen: u64,
     heading_path: Option<Vec<String>>,
     section_id: Option<String>,
-    char_start: Option<u64>,
-    char_end: Option<u64>,
+    /// Unit-local UTF-8 byte offset (03 §8.1). NOT NULL in `chunks` — always
+    /// present, unlike the Evidence Pointer wire field it feeds (optional there,
+    /// 08 §2.2).
+    byte_start: u64,
+    byte_end: u64,
     text: String,
 }
 
@@ -1921,8 +1924,8 @@ fn run_search_inner(args: UnsupportedArgs, started: Instant) -> Result<Value> {
             path_at_commit: Some(binding.path_at_commit.clone()),
             heading_path: candidate.meta.heading_path.clone(),
             section_id: candidate.meta.section_id.clone(),
-            char_start: candidate.meta.char_start,
-            char_end: candidate.meta.char_end,
+            byte_start: Some(candidate.meta.byte_start),
+            byte_end: Some(candidate.meta.byte_end),
         })
         .map_err(search_to_kcs)?;
         let uri = evidence_pointer_to_uri(&pointer).map_err(search_to_kcs)?;
@@ -2533,7 +2536,7 @@ fn fetch_live_meta(
     let placeholders = chunk_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
     let sql = format!(
         "SELECT c.chunk_id, c.raw_hash, c.tool_profile_hash, c.heading_path,
-                c.section_id, c.char_start, c.char_end, c.text, c.gen
+                c.section_id, c.byte_start, c.byte_end, c.text, c.gen
          FROM chunks c
          WHERE c.first_seen_commit IS NOT NULL
              AND c.rowid <= ?2
@@ -2594,8 +2597,8 @@ fn chunk_meta_row(row: &rusqlite::Row) -> rusqlite::Result<(String, ChunkMeta)> 
             section_id: row
                 .get::<_, Option<String>>(4)?
                 .filter(|value| !value.is_empty()),
-            char_start: row.get::<_, Option<i64>>(5)?.map(|value| value as u64),
-            char_end: row.get::<_, Option<i64>>(6)?.map(|value| value as u64),
+            byte_start: row.get::<_, i64>(5)? as u64,
+            byte_end: row.get::<_, i64>(6)? as u64,
             text: row.get(7)?,
         },
     ))
@@ -2646,7 +2649,7 @@ fn execute_fts_tier(
     since_cutoff: Option<&str>,
 ) -> Result<(Vec<BackendRank>, BTreeMap<String, ChunkMeta>)> {
     let sql = "SELECT c.chunk_id, c.raw_hash, c.tool_profile_hash, c.heading_path,
-                      c.section_id, c.char_start, c.char_end, c.text, c.gen,
+                      c.section_id, c.byte_start, c.byte_end, c.text, c.gen,
                       bm25(chunk_fts, 1.0, 0.3) AS score
                FROM chunk_fts f
                JOIN chunks c ON c.rowid = f.rowid
@@ -4356,8 +4359,8 @@ fn persist_chunk_object(kcs_dir: &Path, row: &ChunkRow) -> Result<()> {
         unit_key: row.unit_key.clone(),
         heading_path: row.heading_path.clone().unwrap_or_default(),
         section_id: row.section_id.clone().filter(|value| !value.is_empty()),
-        char_start: row.char_start,
-        char_end: row.char_end,
+        byte_start: row.byte_start,
+        byte_end: row.byte_end,
         text_hash: row.text_hash.clone(),
         text: row.text.clone(),
     };
@@ -5745,8 +5748,8 @@ fn classify_short_hash(hash: &str) -> Result<ShortHash> {
                 path_at_commit: Some(chunk.path_at_commit.clone()),
                 heading_path: chunk.row.heading_path.clone(),
                 section_id: chunk.row.section_id.clone(),
-                char_start: chunk.row.char_start,
-                char_end: chunk.row.char_end,
+                byte_start: Some(chunk.row.byte_start),
+                byte_end: Some(chunk.row.byte_end),
             })
             .map_err(search_to_kcs)?;
             enforce_purge_read_barrier(&target, &chunk.row.raw_hash)?;
@@ -6094,7 +6097,7 @@ fn open_raw_object(
 
 /// Open a CAS byte object (03 §2: raw / prepared / image), expanding it read-only
 /// under `$XDG_CACHE_HOME/kcs/open` when it lives only in the store. `subdir`
-/// selects the CAS type directory ("raw" / "prepared" / "images"). For `raw` the
+/// selects the CAS type directory ("raw" / "prepared" / "image"). For `raw` the
 /// working tree is checked first (rename tolerant, 05 §4.2); derived byte objects
 /// live only in the CAS. Returns `Ok(None)` when the object is absent.
 fn open_cas_byte_object(
@@ -6835,14 +6838,14 @@ fn resolve_object_uri(object: &ObjectUri, as_view: bool) -> Result<Value> {
     // M7: dispatch each object_type to its correct CAS directory (03 §2 / 07 §5.2)
     // instead of routing every byte object through objects/raw:
     //   raw      -> objects/raw       (working-tree-first, rename tolerant)
-    //   image    -> objects/images    (embedded document images, 07 §5.2)
+    //   image    -> objects/image     (embedded document images, 07 §5.2)
     //   prepared -> objects/prepared  (pre-Markdownize intermediate)
     // `normalized` is the full-text view, path-named by
     // `<raw_hash>.<tool_profile_hash>.g<gen>` (03 §2.1) and not addressable by a
     // single content hash, so it is not resolvable through an object URI.
     let (subdir, scan_working_tree) = match object.object_type.as_str() {
         "raw" => ("raw", true),
-        "image" => ("images", false),
+        "image" => ("image", false),
         "prepared" => ("prepared", false),
         other => {
             return Err(KcsError::invalid_usage(format!(
@@ -14944,8 +14947,8 @@ mod tests {
             "raw_path": "a.md",
             "heading_path": ["H"],
             "section_id": "h",
-            "char_start": 0,
-            "char_end": 4,
+            "byte_start": 0,
+            "byte_end": 4,
             "text_hash": format!("sha256:{}", "d".repeat(64)),
             "text": "body",
             "first_seen_commit": null,

@@ -110,7 +110,7 @@ impl SqliteFtsIndex {
         // would be silently unsearchable even though `index` reported success.
         // Strip NULs from the value bound into the external-content `text` column
         // (which feeds `chunk_fts`) so the whole chunk is tokenizable. Identity /
-        // evidence are untouched: `chunk_id`, `text_hash`, `char_start/end` and the
+        // evidence are untouched: `chunk_id`, `text_hash`, `byte_start/end` and the
         // persisted `chunks.jsonl` / normalized markdown all still carry the
         // original bytes — only this derived search index projection is sanitized.
         //
@@ -163,7 +163,7 @@ impl SqliteFtsIndex {
                         self.conn.execute(
                             "INSERT INTO chunks(
                                 rowid, chunk_id, raw_hash, tool_profile_hash, gen, unit_key,
-                                raw_path, heading_path, section_id, char_start, char_end,
+                                raw_path, heading_path, section_id, byte_start, byte_end,
                                 text_hash, text, first_seen_commit, created_at
                              ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
                             params![
@@ -176,8 +176,8 @@ impl SqliteFtsIndex {
                                 row.raw_path,
                                 heading_path,
                                 row.section_id,
-                                row.char_start,
-                                row.char_end,
+                                row.byte_start,
+                                row.byte_end,
                                 row.text_hash,
                                 indexed_text,
                                 row.first_seen_commit,
@@ -189,7 +189,7 @@ impl SqliteFtsIndex {
                         self.conn.execute(
                             "INSERT INTO chunks(
                                 chunk_id, raw_hash, tool_profile_hash, gen, unit_key,
-                                raw_path, heading_path, section_id, char_start, char_end,
+                                raw_path, heading_path, section_id, byte_start, byte_end,
                                 text_hash, text, first_seen_commit, created_at
                              ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
                             params![
@@ -201,8 +201,8 @@ impl SqliteFtsIndex {
                                 row.raw_path,
                                 heading_path,
                                 row.section_id,
-                                row.char_start,
-                                row.char_end,
+                                row.byte_start,
+                                row.byte_end,
                                 row.text_hash,
                                 indexed_text,
                                 row.first_seen_commit,
@@ -509,8 +509,8 @@ pub fn ensure_schema_on_connection(conn: &Connection, config: FtsSchemaConfig) -
             raw_path TEXT NOT NULL,
             heading_path TEXT NOT NULL,
             section_id TEXT,
-            char_start INTEGER,
-            char_end INTEGER,
+            byte_start INTEGER NOT NULL,
+            byte_end INTEGER NOT NULL,
             text_hash TEXT NOT NULL,
             text TEXT NOT NULL,
             first_seen_commit TEXT,
@@ -615,8 +615,8 @@ fn migrate_legacy_chunk_config_column(conn: &Connection) -> Result<bool> {
                 raw_path TEXT NOT NULL,
                 heading_path TEXT NOT NULL,
                 section_id TEXT,
-                char_start INTEGER,
-                char_end INTEGER,
+                byte_start INTEGER NOT NULL,
+                byte_end INTEGER NOT NULL,
                 text_hash TEXT NOT NULL,
                 text TEXT NOT NULL,
                 first_seen_commit TEXT,
@@ -624,12 +624,12 @@ fn migrate_legacy_chunk_config_column(conn: &Connection) -> Result<bool> {
             );
             INSERT INTO chunks(
                 rowid, chunk_id, raw_hash, tool_profile_hash, gen, unit_key,
-                raw_path, heading_path, section_id, char_start, char_end,
+                raw_path, heading_path, section_id, byte_start, byte_end,
                 text_hash, text, first_seen_commit, created_at
             )
             SELECT
                 rowid, chunk_id, raw_hash, tool_profile_hash, gen, unit_key,
-                raw_path, heading_path, section_id, char_start, char_end,
+                raw_path, heading_path, section_id, byte_start, byte_end,
                 text_hash, text, first_seen_commit, created_at
             FROM chunks_legacy_chunk_config
             ORDER BY rowid;
@@ -735,8 +735,8 @@ mod tests {
             raw_path: "a.md".to_owned(),
             heading_path: Some(vec!["認証仕様".to_owned()]),
             section_id: Some("認証仕様".to_owned()),
-            char_start: Some(0),
-            char_end: Some(text.chars().count() as u64),
+            byte_start: 0,
+            byte_end: text.len() as u64,
             text_hash: "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
                 .to_owned(),
             text: text.to_owned(),
@@ -1130,8 +1130,8 @@ mod tests {
                     raw_path TEXT NOT NULL,
                     heading_path TEXT NOT NULL,
                     section_id TEXT,
-                    char_start INTEGER,
-                    char_end INTEGER,
+                    byte_start INTEGER NOT NULL,
+                    byte_end INTEGER NOT NULL,
                     text_hash TEXT NOT NULL,
                     text TEXT NOT NULL,
                     first_seen_commit TEXT,
@@ -1162,7 +1162,7 @@ mod tests {
                 INSERT INTO chunks(
                     rowid, chunk_id, raw_hash, tool_profile_hash, gen, unit_key,
                     chunking_config_hash, raw_path, heading_path, section_id,
-                    char_start, char_end, text_hash, text, first_seen_commit, created_at
+                    byte_start, byte_end, text_hash, text, first_seen_commit, created_at
                 ) VALUES
                     (7, 'c7', 'sha256:raw7', 'sha256:profile', 0, 'doc:7',
                      'sha256:cfg7', 'seven.md', '[]', NULL, 0, 16,

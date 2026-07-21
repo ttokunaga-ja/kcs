@@ -881,7 +881,7 @@ mod tests {
             unit.metadata["bbox_annotations"][0]["transcribed_text"],
             "KCS bbox label page\\:1 value 1000"
         );
-        let images = temp.path().join("objects/images");
+        let images = temp.path().join("objects/image");
         assert!(
             images.exists(),
             "mock image bytes remain persisted in image CAS"

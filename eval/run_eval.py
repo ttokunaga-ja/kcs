@@ -614,9 +614,14 @@ def _hash_bytes(data):
 
 
 def _chunk_identity_hash(chunk):
+    # 03-data-model.md §8.1: byte_start/byte_end are the unit-local UTF-8 byte
+    # span (2026-07 rename from char_start/char_end). This must track
+    # crates/kcs-core/src/cas.rs ChunkObject::identity_hash() exactly, or a real
+    # on-disk chunk object (produced by the compiled `kcs` binary, which the
+    # PointerAttestor below reads and re-verifies) would silently mismatch here.
     identity_fields = (
         "spec_version", "raw_hash", "tool_profile_hash", "gen", "unit_key",
-        "heading_path", "section_id", "char_start", "char_end",
+        "heading_path", "section_id", "byte_start", "byte_end",
     )
     identity = {field: chunk[field] for field in identity_fields if field in chunk}
     return _hash_bytes(_canonical_json_bytes(identity))

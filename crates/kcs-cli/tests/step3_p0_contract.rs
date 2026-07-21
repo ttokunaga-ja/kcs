@@ -434,8 +434,8 @@ fn ct3_evidence_001_search_results_include_pointer_and_uri() {
     // M3-1 completion condition: search-issued pointers additionally carry
     // heading_path + span.
     assert_eq!(pointer["heading_path"][1], "API Token");
-    assert!(pointer["char_start"].as_u64().is_some());
-    assert!(pointer["char_end"].as_u64().is_some());
+    assert!(pointer["byte_start"].as_u64().is_some());
+    assert!(pointer["byte_end"].as_u64().is_some());
     assert!(result["evidence_uri"]
         .as_str()
         .unwrap()
@@ -794,7 +794,7 @@ fn ct3_chunk_007_search_only_serves_current_chunking_config_generation() {
         .to_owned();
 
     // A much smaller max_chars forces this section to actually re-split, so the
-    // new generation's chunk_hash (char_start/char_end shift) differs from the
+    // new generation's chunk_hash (byte_start/byte_end shift) differs from the
     // stale one — this isn't a same-hash no-op reindex.
     fs::write(
         dir.path().join(".kcs/config.toml"),
@@ -2690,7 +2690,7 @@ fn m6_tampered_pointer_identity_mismatch_is_rejected() {
 }
 
 // M7: an `object` URI dispatches to the CORRECT CAS type directory. An image
-// object lives only under objects/images; it resolves via object/image/<hash>
+// object lives only under objects/image; it resolves via object/image/<hash>
 // and is NOT found via object/raw/<hash> (which previously mis-served all types).
 #[test]
 fn m7_object_uri_dispatches_by_type_directory() {
@@ -2704,11 +2704,11 @@ fn m7_object_uri_dispatches_by_type_directory() {
     let kcs_dir = dir.path().join(".kcs");
     let bytes = b"fake-embedded-image-bytes";
     let image_hash = hash_bytes(bytes);
-    let image_obj = object_path(&kcs_dir, "images", &image_hash);
+    let image_obj = object_path(&kcs_dir, "image", &image_hash);
     fs::create_dir_all(image_obj.parent().unwrap()).unwrap();
     fs::write(&image_obj, bytes).unwrap();
 
-    // Correct dispatch: image resolves from objects/images.
+    // Correct dispatch: image resolves from objects/image.
     let opened = json_success(
         &dir,
         &[
@@ -2718,7 +2718,7 @@ fn m7_object_uri_dispatches_by_type_directory() {
     );
     assert_eq!(opened["object_type"], "image");
     assert!(Path::new(opened["path"].as_str().unwrap()).is_file());
-    // Same hash under object/raw must NOT resolve (the bytes live only in images).
+    // Same hash under object/raw must NOT resolve (the bytes live only under image).
     json_failure(
         &dir,
         &["open", &format!("kcs://{scope_id}/object/raw/{image_hash}")],

@@ -13,8 +13,10 @@ pub struct ChunkRow {
     pub raw_path: String,
     pub heading_path: Option<Vec<String>>,
     pub section_id: Option<String>,
-    pub char_start: Option<u64>,
-    pub char_end: Option<u64>,
+    /// Unit-local UTF-8 byte offset, 0-based half-open (03 §8.1). Always
+    /// present — part of the chunk identity tuple, not an optional field.
+    pub byte_start: u64,
+    pub byte_end: u64,
     pub text_hash: String,
     pub text: String,
     pub first_seen_commit: Option<String>,
