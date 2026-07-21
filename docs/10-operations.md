@@ -614,11 +614,15 @@ blocker の種別と対象 (intent_token または 4 組キー) を含め、次�
 `kcs batch abandon` / journal 回復) を提示する — terminal (state 2/3) の行は blocker にならない。
 
 **purge 済み raw の open cache 残骸**: `--prune-orphans` は、当該 scope で canonical final event が
-`purged` である各 raw_hash について `~/.cache/kcs/open/<raw_hash digest64>/` の残存も検査し、
-存在すれば同じ locked repair の削除対象に含める ([06-cli-spec.md §1.1](06-cli-spec.md) の
+`purged` **または `erased`** である各 raw_hash について `~/.cache/kcs/open/<raw_hash digest64>/` の
+残存も検査し、存在すれば同じ locked repair の削除対象に含める ([06-cli-spec.md §1.1](06-cli-spec.md) の
 cache publish と起動直前検査の間の crash は、publish 済み cache を除去主体なしに残し得る —
 purge 完遂後の平文残存の回収経路。cache は再生成可能な非 truth であり、同一 raw が他 scope に
-live で存在しても削除は安全 — 次回の open が再展開する)。
+live で存在しても削除は安全 — 次回の open が再展開する)。**image cache も同様に回収する**:
+orphan image の削除時は対応する `~/.cache/kcs/open/image/<image_hash digest64>/`
+([06-cli-spec.md §1.1](06-cli-spec.md)) を削除対象に含め、当該 scope のどの live manifest からも
+参照されない image の cache dir 残存も同じ検査で回収する (crash 窓の残存は raw と同型 —
+live 参照が残る共有 image の cache dir は削除しない)。
 
 MVP では手動実行のみとする。自動定期検証 (スケジューラ連携) は Phase 4+ の論点。
 

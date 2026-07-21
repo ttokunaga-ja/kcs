@@ -705,7 +705,8 @@ purge は **object の物理削除 + default tombstone または内部 erase rec
    live 参照が 0 の場合のみ物理削除する** — 無条件削除は非対象文書の検索・再構築を破壊する)
 - `~/.cache/kcs/open/<raw_hash digest64>/` の一時展開 dir (存在すれば冪等削除 — [06-cli-spec.md §1.1](06-cli-spec.md))。
   **本 closure で物理削除対象となった image (live 参照 0)** の一時展開 dir
-  `~/.cache/kcs/open/<image_hash digest64>/` ([06-cli-spec.md §1.1](06-cli-spec.md)) も同様に冪等削除する
+  `~/.cache/kcs/open/image/<image_hash digest64>/` ([06-cli-spec.md §1.1](06-cli-spec.md) — `image/` の
+  type segment で raw 系 dir と分離) も同様に冪等削除する
   (live 参照が残る共有 image の cache dir は削除しない — 当該 raw に帰属しない)
   (closure の列挙正本 = 当該 (raw_hash, tool_profile_hash) の全 gen manifest。**どの manifest からも
    参照されない orphan prepared / image** (公開前 crash の残骸) は解決経路に乗らず、GC の
@@ -942,7 +943,7 @@ event には当該 purge の `target_epoch` を `epoch` として記録する** 
 legacy 行の欠落は可。epoch ファイル喪失時の回復源 — 上記 journal 二重検査の回復規則)。
 validity は leaf/raw_hash 一致だけでなく、erased event の `in_commit` が bounded verified CAS 上で
 ref-reachable な `commit_type=purged` commit を指し、当該 commit の `purged_raws` に対象 raw_hash が
-含まれ、`at` が canonical UTC かつ commit `created_at` と一致し、fsck invocation の fixed now より未来でないことを要求する。schema_version ごとの定義に
+含まれ、`at` が canonical UTC かつ commit `created_at` と一致し、invocation の fixed now より未来でないことを要求する。schema_version ごとの定義に
 一致しない field・不一致は store corruption (v1 flat 形式は「erased event 1 件」として読み、
 次の mutation で v2 へ locked 変換する — tombstone の legacy 規則と同型。v1 に reason は存在しない
 ため変換では `reason: "other"` を合成し legacy 警告として報告する — 新規 erased の 5 値 enum 必須

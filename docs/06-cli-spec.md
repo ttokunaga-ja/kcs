@@ -117,9 +117,11 @@ code point を含む名前を拒否し ([03-data-model.md §2](03-data-model.md)
 1a. object URI (kcs://<scope_id>/object/image/<image_hash> — 08 §2) の場合: type / hash を検証し、
    scope_id が文脈 store と不一致でも**自 store に該当 hash の object があればそれを解決する**
    (fork 複製由来の旧 scope_id URI — §10。hash が identity、08 §2)。自 store に無い場合のみ
-   scope_id で通常解決する。image object を `~/.cache/kcs/open/<image_hash digest64>/` へ read-only
-   materialize して開く (dir キーは image_hash — raw の `<raw_hash digest64>/` と同一の導出規則。
-   hash が identity のため raw 系 dir と衝突しない。raw と同じ tombstone / journal barrier の対象で、
+   scope_id で通常解決する。image object を `~/.cache/kcs/open/image/<image_hash digest64>/` へ
+   read-only materialize して開く (dir キーは image_hash — **`image/` の type segment で raw 系 dir と
+   分離する**。raw と image は同一バイト列で同一 digest になり得るため ([03-data-model.md §1](03-data-model.md)
+   のバイト列 content hash — CAS は `objects/<type>/` が分離を担うが cache は担わない)、segment なしの
+   平坦 namespace では衝突する。raw と同じ tombstone / journal barrier の対象で、
    purge closure には「closure で物理削除対象となった live 参照 0 の image」の cache dir として
    含まれる — [05-runtime.md §3.5](05-runtime.md))。以降の手順 2-5 は raw 系入力のみ
 2. tombstone 判定 (最優先): raw_hash の **canonical final event が `purged`** (全 marker の正本化 —
@@ -137,7 +139,7 @@ code point を含む名前を拒否し ([03-data-model.md §2](03-data-model.md)
 5. raw object が not_found → §7 の規約どおり exit 4
 ```
 
-一時展開は **restore ではない**: working tree に書かず read-only であるため、[§5](06-cli-spec.md) の安全要件 (`--to` 必須 / `--force`) の対象外。**展開は同じ `<raw_hash digest64>/` 配下の private temp に書き (purge closure が temp ごと掃く)、cache path へ no-replace で publish してから、起動直前の最終検査 ([05-runtime.md §3.5](05-runtime.md) の 3 点) を行い、通過した場合のみ起動する — 検査で拒否した場合は publish 済み cache を dev/inode 対照 (自らの publish と検証) の上で除去し、temp も残さない** ([04-pipeline.md §1.1](04-pipeline.md) の temp 掃除規約)。**publish が既存 cache と衝突 (EEXIST) した場合** — MVP では cache が自動掃除されないため同一 raw の再 open で通常発生する — は [04-pipeline.md §1.1](04-pipeline.md) の no-replace 規則と同じく既存との内容一致を照合して自分の temp を破棄し、既存 cache を対象に起動直前の最終検査以降を続行する (この経路の検査拒否では cache を除去しない — 除去は自らの publish と検証できた場合に限る。削除主体は purge closure と [10-operations.md §7.5.1](10-operations.md) の残骸回収)。publish 後検査により purge 完遂後の平文 cache の**起動**を閉じる (publish と検査の間の crash による cache 残存は起動には至らず、`kcs repair --verify-objects --prune-orphans` が purge 済み raw の cache 残骸として回収する — [10-operations.md §7.5.1](10-operations.md)。検査通過後の purge は並行 reader の既 open fd と同格)。展開先はキャッシュであり、GC (on_idle、Phase 4+) の掃除対象。MVP では自動掃除されないため、必要ならユーザーが削除してよい (正本は `objects/` に無傷)。**purge はこの展開 cache を削除 closure に含める** ([05-runtime.md §3.5](05-runtime.md))。永続的なコピーが必要な場合は `kcs restore <pointer> --to <dir>` を使う。一時展開で開いた場合、CLI は「原本は working tree に存在しない (削除または過去版)。永続コピーは kcs restore --to」の注記を stderr に表示する。
+一時展開は **restore ではない**: working tree に書かず read-only であるため、[§5](06-cli-spec.md) の安全要件 (`--to` 必須 / `--force`) の対象外。**展開は同じ `<raw_hash digest64>/` 配下の private temp に書き (purge closure が temp ごと掃く)、cache path へ no-replace で publish してから、起動直前の最終検査 ([05-runtime.md §3.5](05-runtime.md) の 3 点) を行い、通過した場合のみ起動する — 検査で拒否した場合は publish 済み cache を dev/inode 対照 (自らの publish と検証) の上で除去し、temp も残さない** ([04-pipeline.md §1.1](04-pipeline.md) の temp 掃除規約)。**publish が既存 cache と衝突 (EEXIST) した場合** — MVP では cache が自動掃除されないため同一 raw の再 open で通常発生する — は [04-pipeline.md §1.1](04-pipeline.md) の no-replace 規則と同じく既存との内容一致を照合して自分の temp を破棄し、既存 cache を対象に起動直前の最終検査以降を続行する (**照合 = 既存 cache leaf の内容 sha256 が dir key の raw_hash と一致することの再計算** — 展開 leaf は raw object の byte 列そのもの。**不一致は改変・破損の残骸として fail-closed に終端する** — 既存 cache には触れず自 temp も残さない。cache はユーザー削除可の既定 (下記) を案内し、削除後の再実行で回復する。この経路の検査拒否では cache を除去しない — 除去は自らの publish と検証できた場合に限る。削除主体は purge closure と [10-operations.md §7.5.1](10-operations.md) の残骸回収)。publish 後検査により purge 完遂後の平文 cache の**起動**を閉じる (publish と検査の間の crash による cache 残存は起動には至らず、`kcs repair --verify-objects --prune-orphans` が purge 済み raw の cache 残骸として回収する — [10-operations.md §7.5.1](10-operations.md)。検査通過後の purge は並行 reader の既 open fd と同格)。展開先はキャッシュであり、GC (on_idle、Phase 4+) の掃除対象。MVP では自動掃除されないため、必要ならユーザーが削除してよい (正本は `objects/` に無傷)。**purge はこの展開 cache を削除 closure に含める** ([05-runtime.md §3.5](05-runtime.md))。永続的なコピーが必要な場合は `kcs restore <pointer> --to <dir>` を使う。一時展開で開いた場合、CLI は「原本は working tree に存在しない (削除または過去版)。永続コピーは kcs restore --to」の注記を stderr に表示する。
 
 ---
 
