@@ -47,7 +47,7 @@ query embedding 応答が受入検査 ([07-adapter-spec.md §5.3](07-adapter-spe
 参加 scope の 1 つ以上に当該 embedding Adapter の active な `approvals[]` 行があり、かつ当該 scope の
 実効 `allow_network` が true であること** (未設定・設定 key の喪失は gate 不成立 —
 [07-adapter-spec.md §3](07-adapter-spec.md) と同一規範。`--online` が開くのは未設定の既定閉鎖のみ —
-明示 revoke (`allow_network = false`) は上書きしない)。**この可否は
+明示 revoke (`allow_network = false`・行の revoked) は上書きしない)。**この可否は
 相 1 claim Tx 内 (`BEGIN IMMEDIATE` 保持下) で approvals[] / boolean を再読して最終検証する** (読み取り開始時の値を
 使い回さない — 検証後に revoke が完了した場合の当該送信は in-flight として許容 (送信済みの取り消し
 非保証 — [07-adapter-spec.md §3](07-adapter-spec.md)))。承認ゼロ
@@ -387,7 +387,7 @@ score/rank をコピーして、group 内を
    異なる folder 値の統合は定義しない。cursor が bind する実効値 (§1.5) もこの解決に従う —
    **ただし fail_behavior は挙動方針であり確定順序に影響しないため bind / query_hash preimage の
    対象外**)
-5. vector / hybrid の横断条件は [03-data-model.md §7](03-data-model.md) に従う。embedding profile が全 scope で一致しない場合、横断部分は text (BM25 rank) のみで統合し、`fallback_reason` に記録する (**`--vector` 明示時は fallback しない** — profile 不一致の scope を KCS-E-SEARCH-VEC-INCOMPAT-001 の excluded_scopes として除外し、全 scope 除外なら error — §1.2 の「失敗時は error」と同じ)。`kcs_format_version` が自己の対応上限より新しい scope も同様に excluded_scopes として除外する (KCS-E-STORE-VERSION-001 を `fallback_reason` に記録・当該 scope へは query_cache を含む一切の書込を行わない — [10-operations.md §12.5](10-operations.md))。**全 scope が STORE-VERSION 除外なら command は KCS-E-STORE-VERSION-001 / exit 8 を返す** (SCOPE-ALL-FAILED (3/4 — 下記) より優先 — REBUILDING と同型の昇格、[06-cli-spec.md §7](06-cli-spec.md)。自動化に「新版への更新が必要」を直接伝える)。**全 scope の除外理由が同一 code の場合、command は当該 code とその単独実行時の exit を返す (一般規則)** — VERSION → exit 8・REBUILDING → exit 3・INCOMPAT → exit 8・journal (`KCS-E-PURGE-JOURNAL-ACTIVE-001` — §3.5) → exit 3・DUP → exit 3 (ユーザーの dedupe 後に回復可能 — [08-evidence-pointer-spec.md §4.3](08-evidence-pointer-spec.md) の registry_duplicate = 3 と同一分類)。理由が混在して全 scope 除外となった場合は通常の SCOPE-ALL-FAILED とし、**exit は除外理由の retryability で分割する — 単独時 exit 3 の code (REBUILDING・journal・DUP・timeout 等の retryable 系) を 1 つでも含めば exit 3、全て permanent 系なら exit 4** (横断規約の「4 = 再試行で進展しない」([06-cli-spec.md §7](06-cli-spec.md)) と整合 — retryable 理由の scope は再試行で回復し得る)。個別理由は excluded_scopes[].reason で判別する。embedding 承認の consent gate (§1.1) は**送信 gate であり per-scope の除外条件ではない** — 承認ゼロなら検索全体が text fallback (excluded_scopes には計上しない)。1 つ以上の承認で送信された query vector は profile 互換な全参加 scope の vector 検索に用いる (未承認 scope も含む — 送信は 1 回であり scope 別の再送信は発生しない)
+5. vector / hybrid の横断条件は [03-data-model.md §7](03-data-model.md) に従う。embedding profile が全 scope で一致しない場合、横断部分は text (BM25 rank) のみで統合し、`fallback_reason` に記録する (**`--vector` 明示時は fallback しない** — profile 不一致の scope を KCS-E-SEARCH-VEC-INCOMPAT-001 の excluded_scopes として除外し、全 scope 除外なら error — §1.2 の「失敗時は error」と同じ)。`kcs_format_version` が自己の対応上限より新しい scope も同様に excluded_scopes として除外する (KCS-E-STORE-VERSION-001 を `fallback_reason` に記録・当該 scope へは query_cache を含む一切の書込を行わない — [10-operations.md §12.5](10-operations.md))。**全 scope が STORE-VERSION 除外なら command は KCS-E-STORE-VERSION-001 / exit 8 を返す** (SCOPE-ALL-FAILED (3/4 — 下記) より優先 — REBUILDING と同型の昇格、[06-cli-spec.md §7](06-cli-spec.md)。自動化に「新版への更新が必要」を直接伝える)。**全 scope の除外理由が同一 code の場合、command は当該 code とその単独実行時の exit を返す (一般規則)** — VERSION → exit 8・REBUILDING → exit 3・INCOMPAT → exit 8・journal (`KCS-E-PURGE-JOURNAL-ACTIVE-001` — §3.5) → exit 3・DUP → exit 3 (ユーザーの dedupe 後に回復可能 — [08-evidence-pointer-spec.md §4.3](08-evidence-pointer-spec.md) の registry_duplicate = 3 と同一分類)。理由が混在して全 scope 除外となった場合は通常の SCOPE-ALL-FAILED とし、**exit は除外理由の retryability で分割する — 単独時 exit 3 の code (REBUILDING・journal・DUP・timeout 等の retryable 系) を 1 つでも含めば exit 3、全て permanent 系なら exit 4** (横断規約の「4 = 再試行で進展しない」([06-cli-spec.md §7](06-cli-spec.md)) と整合 — retryable 理由の scope は再試行で回復し得る)。個別理由は excluded_scopes[].reason で判別する。embedding 承認の consent gate (§1.1) は**送信 gate であり per-scope の除外条件ではない** — 承認ゼロなら検索全体が text fallback (excluded_scopes には計上しない)。§1.1 の送信 gate を満たして送信された query vector は profile 互換な全参加 scope の vector 検索に用いる (未承認 scope も含む — 送信は 1 回であり scope 別の再送信は発生しない)
 
 既知の限界: rank ベース統合は、関連文書の乏しい scope の 1 位と強い scope の 1 位を同格に扱う。MVP ではこれを容認する (結果に scope_path が必ず含まれるため判別可能)。scope 間の再ランクは v2 以降の検討事項。
 
@@ -703,7 +703,10 @@ purge は **object の物理削除 + default tombstone または内部 erase rec
    **manifest object (objects/manifests/ — 当該 (raw_hash, tool_profile_hash) の全 gen・全確定版) を含む**。
    **共有されうる派生 (prepared / image — content hash 単位で他 raw と共有され得る ([03-data-model.md §1](03-data-model.md)) / embedding — text_hash 単位で他 raw の chunk と共有) は、purge 対象外の
    live 参照が 0 の場合のみ物理削除する** — 無条件削除は非対象文書の検索・再構築を破壊する)
-- `~/.cache/kcs/open/<raw_hash digest64>/` の一時展開 dir (存在すれば冪等削除 — [06-cli-spec.md §1.1](06-cli-spec.md))
+- `~/.cache/kcs/open/<raw_hash digest64>/` の一時展開 dir (存在すれば冪等削除 — [06-cli-spec.md §1.1](06-cli-spec.md))。
+  **本 closure で物理削除対象となった image (live 参照 0)** の一時展開 dir
+  `~/.cache/kcs/open/<image_hash digest64>/` ([06-cli-spec.md §1.1](06-cli-spec.md)) も同様に冪等削除する
+  (live 参照が残る共有 image の cache dir は削除しない — 当該 raw に帰属しない)
   (closure の列挙正本 = 当該 (raw_hash, tool_profile_hash) の全 gen manifest。**どの manifest からも
    参照されない orphan prepared / image** (公開前 crash の残骸) は解決経路に乗らず、GC の
    「未参照中間 object」として回収される。**MVP では GC が無いため、削除手段は
@@ -900,7 +903,7 @@ tombstone 再検査で破棄する ([04-pipeline.md §5.8](04-pipeline.md) 相 3
 tombstone を削除より先に耐久化するのは、「対象 object が消えたのに purge の痕跡が無い」状態
 (corruption と区別不能な markerless absence) を作らないためである。
 
-tombstone は raw_hash をキーとする **lifecycle レコード** (append-only の events[] 配列) で、CAS object ではないため `objects/` の外に置く。event は `purged` / `retired` の 2 種で、**active 判定 = 末尾 event が `purged` であること** — retire は末尾に `retired` を append し (上書き・削除しない = 退役監査の保全)、再 purge はさらに `purged` を append する。fsck・再 purge (marker 自身の lifecycle 管理) はこの「末尾 event」規則を参照する。**pointer 解決 (resolver) は、tombstone と erase receipt が併存する場合、各 marker の末尾 event を [08-evidence-pointer-spec.md §3.1](08-evidence-pointer-spec.md) 手順 5 の canonical final event へ正本化してから評価する** (lifecycle_epoch 最大・同値は tombstone 優先 — 個別 marker の active 判定だけで短絡しない)。events を持たない旧 flat 形式は「purged event 1 件」として読み、**次の mutation 時に一回だけ events 形式へ変換する** (legacy)。変換時、5 値 enum ([08-evidence-pointer-spec.md §4.1](08-evidence-pointer-spec.md)) 外の自由文 reason は `other` へ正規化し、原値を optional `legacy_reason` に保全する — 閉 enum は新規書込の規則であり、旧値の読取は other 扱い (表示は原値可・fsck は corruption にせず警告)。**lifecycle レコードの更新 (retire・再 purge・legacy 変換) は `.kcs/.lock` 下で、temp 書込 → file fsync → atomic rename → 親 directory fsync で行う** ([04-pipeline.md §1.1](04-pipeline.md) と同じ規律)。malformed・途中破損 (torn JSON) の record は `KCS-E-STORE-CORRUPT-001` として fail-closed に扱う。**validity は receipt (後述) と対称に semantic 検証まで要求する** — purged event の `in_commit` が bounded verified CAS で ref-reachable な `commit_type=purged` commit を指し、当該 commit の `purged_raws` に marker の raw_hash が含まれ、`at` が canonical UTC かつ commit `created_at` と一致すること (kind 別必須 field・遷移文法の正本は [10-operations.md §7.5.1](10-operations.md))。**検証失敗の marker は入口を問わず (fsck・resolver・再 purge) 説明能力を持たない corruption (`KCS-E-STORE-CORRUPT-001`) とする**。
+tombstone は raw_hash をキーとする **lifecycle レコード** (append-only の events[] 配列) で、CAS object ではないため `objects/` の外に置く。event は `purged` / `retired` の 2 種で、**active 判定 = 末尾 event が `purged` であること** — retire は末尾に `retired` を append し (上書き・削除しない = 退役監査の保全)、再 purge はさらに `purged` を append する。fsck・再 purge (marker 自身の lifecycle 管理) はこの「末尾 event」規則を参照する。**pointer 解決 (resolver) は、tombstone と erase receipt が併存する場合、各 marker の末尾 event を [08-evidence-pointer-spec.md §3.1](08-evidence-pointer-spec.md) 手順 5 の canonical final event へ正本化してから評価する** (lifecycle_epoch 最大・同値は tombstone 優先 — 個別 marker の active 判定だけで短絡しない)。events を持たない旧 flat 形式は「purged event 1 件」として読み、**次の mutation 時に一回だけ events 形式へ変換する** (legacy)。変換時、5 値 enum ([08-evidence-pointer-spec.md §4.1](08-evidence-pointer-spec.md)) 外の自由文 reason は `other` へ正規化し、原値を optional `legacy_reason` に保全する — 閉 enum は新規書込の規則であり、旧値の読取は other 扱い (表示は原値可・fsck は corruption にせず警告)。**lifecycle レコードの更新 (retire・再 purge・legacy 変換) は `.kcs/.lock` 下で、temp 書込 → file fsync → atomic rename → 親 directory fsync で行う** ([04-pipeline.md §1.1](04-pipeline.md) と同じ規律)。malformed・途中破損 (torn JSON) の record は `KCS-E-STORE-CORRUPT-001` として fail-closed に扱う。**validity は receipt (後述) と対称に semantic 検証まで要求する** — purged event の `in_commit` が bounded verified CAS で ref-reachable な `commit_type=purged` commit を指し、当該 commit の `purged_raws` に marker の raw_hash が含まれ、`at` が canonical UTC かつ commit `created_at` と一致し、invocation の fixed now より未来でないこと (erased 側 (下記 receipt) および [10-operations.md §7.5.1](10-operations.md) と同一。kind 別必須 field・遷移文法の正本は [10-operations.md §7.5.1](10-operations.md))。**検証失敗の marker は入口を問わず (fsck・resolver・再 purge) 説明能力を持たない corruption (`KCS-E-STORE-CORRUPT-001`) とする**。
 物理 leaf の `<raw64>` は論理 `raw_hash` から `sha256:` を除いた 64 文字の小文字 hex であり、
 JSON 内の `raw_hash` は完全な `sha256:<64hex>` を保持する。旧 Unix store の prefixed leaf は
 [03-data-model.md §2](03-data-model.md) の検証付き compatibility fallback で解決する。purge 実装時は
@@ -991,7 +994,9 @@ kcs restore <evidence|path|commit> --to <dir>
 - purged 対象は KCS-E-PURGE-NOT-FOUND-001 / tombstone
 - 展開は検証済み --to ディレクトリの dirfd 配下で no-follow (symlink を辿らない) に行い、
   private temp → atomic rename で publish する。**containment 判定と展開の同一実体束縛**: --to を
-  O_DIRECTORY で open し、fstat (dev/inode) を canonical 解決先の lstat と対照して同一実体を確認
+  O_DIRECTORY で open し、fstat (dev/inode) を canonical 解決先の lstat (**containment 判定時に
+  取得した値** — 対照時の再取得は判定後の中間 component 差し替えで移動した実体を正当化するため
+  用いない) と対照して同一実体を確認
   してから、以後の temp 作成・rename を全て同一 dirfd 配下に限定する (判定後の path 差し替えで
   別実体を指させない)。対照不一致は KCS-E-CONFIG-USAGE-001 (exit 2) で mutation 前に拒否する
   (--to 実体の検証失敗 = 不正オペランド)。絶対 path・「..」を含む復元エントリは拒否

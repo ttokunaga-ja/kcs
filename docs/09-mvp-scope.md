@@ -290,13 +290,13 @@ Status: decided (Step 1 着手前確定)
   - heading_path の一致 (exact → fuzzy + span 重なり率 — fuzzy は text alignment 成立領域のみ、08 §5) で対応付け
   - 意味ベースの対応付け (semantic_fingerprint) は MVP から除外 (Phase 4+ の optional 拡張)
   - 対応が見つかれば新 chunk_hash 返却。曖昧なら候補リスト
-  - 元 pointer は不変。新 pointer (retargeted_from を保持) を返す
+  - 元 pointer は不変。新 pointer と retargeted_from (response 直下 — pointer 外) を返す
 
 決定済み:
   - CLI 形: kcs evidence retarget <pointer> [--latest|--at <commit>] (正本 08 §5)
   - 対応なし (曖昧) 時のエラーコード: KCS-E-EVIDENCE-RETARGET-AMBIG-001 (正本 08 §5)
   - AI Agent からの API 形: 06-cli-spec.md §4 の --json 契約に従う (正本 08 §5)
-  - 元 pointer は不変。新 pointer (retargeted_from 保持) を返す (正本 08 §5)
+  - 元 pointer は不変。新 pointer と retargeted_from (response 直下 — pointer 外) を返す (正本 08 §5)
 
 残未決:
   - --latest のデフォルト挙動 (auto retarget か proposal か)

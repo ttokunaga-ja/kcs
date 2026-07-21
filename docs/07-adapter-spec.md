@@ -526,7 +526,7 @@ provider_scope_id()            下記の不変識別子を返す
 - **provider_scope_id**: `adapter 名前空間 + account 不変 ID (+ workspace 不変 ID)` の連結。表示名・
   alias 等の可変値は使わない。値は「これから呼び出す client instance」から取得する
 
-**Batch プロバイダ採用条件** (満たさない provider は sync 呼出のみで採用するか、採用しない):
+**Batch プロバイダ採用条件** (満たさない provider は sync 呼出のみで採用するか、採用しない。**例外 = 条件 7 は sync fallback の免除対象外**: sync 呼出も provider request id を同じ記帳キー (`batch_job_id` 列) と cost_ledger 恒久突合に使うため ([04-pipeline.md §5.4](04-pipeline.md))、条件 7 を満たさない provider は sync でも採用しない):
 
 1. job 一覧照会 (または token による job 発見) と **upload 一覧照会**が可能であること — これが無いと
    未記録 in-flight・未記録 upload 残骸の回復が構造的に不可能になる

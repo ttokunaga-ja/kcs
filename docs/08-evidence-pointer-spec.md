@@ -213,7 +213,8 @@ bulk 系 (`kcs evidence verify --batch <pointers.jsonl>`) は従来どおり各�
     `KCS-E-INDEX-REBUILDING-001` の再構築要求を返し ([05-runtime.md §6](05-runtime.md))、検証不能を
     「不在の確定」と混同しない**)。
     v1 tree (manifest_hash 欠落) はこれらの検証を行えない — legacy 解決とし、
-    --strict verify は shallow 経路と同じく unverifiable (exit 3) を返す
+    --strict verify は shallow 経路と同じ降格で unverifiable を返す (reason = tree_v1 は恒久のため
+    exit は 4 — §4.3)
 6b. entry の manifest object が purge により欠落している場合 (raw_hash の **tombstone または
     erase receipt** の lifecycle — active / retired を問わず — が説明する欠落。**説明範囲は fsck と
     同一** ([10-operations.md §7.5.1](10-operations.md)): 当該 purged / erased event の `in_commit`
@@ -226,7 +227,8 @@ bulk 系 (`kcs evidence verify --batch <pointers.jsonl>`) は従来どおり各�
     `resurrection_commit` があれば、そのリンク先 commit の publication を参照して本文を解決し
     alive を返してよい** ([05-runtime.md §3.5](05-runtime.md) — 検索の時点条件には影響しない)。
     時点帰属は検証できないため --strict verify は
-    unverifiable (exit 3) — 再 ingest 後の manifest は run_id 等が異なり旧 hash を再生できない
+    unverifiable (reason = manifest_missing は恒久のため exit は 4 — §4.3) — 再 ingest 後の
+    manifest は run_id 等が異なり旧 hash を再生できない
     ([03-data-model.md §2.1](03-data-model.md)) ので、この降格は恒久である。**6b でも 6a の v2/v3 検証
     (publication / association の introduction ancestry) は実施する** — cache は manifest と独立に
     参照でき、失敗 = not_found。ただし**基準 commit は経路で異なる**: リンクを使わない直接解決は
@@ -356,7 +358,7 @@ kcs evidence verify <pointer> [--strict]   # <pointer> の受理形式は §2.3
 `commit_shallow` (§3.1 手順 8 — 状況により解消し得る) / `tree_v1` (手順 6a — **恒久**: 既発行 pointer の
 commit は不変であり再 snapshot では解消しない。v2/v3 snapshot 後に新規発行・明示 retarget した pointer
 では生じない) /
-`manifest_missing` (手順 6b — **恒久**)。exit はいずれも 3 (reason で自動化側が再試行の要否を判断する)。
+`manifest_missing` (手順 6b — **恒久**)。exit は reason の再試行可能性に従い分岐する — `commit_shallow` のみなら 3 (unshallow で解消し得る)、`tree_v1` / `manifest_missing` を 1 件でも含めば **4** (恒久 — 再試行で進展しない。[06-cli-spec.md §7](06-cli-spec.md) / [10-operations.md §12.2](10-operations.md) の横断規約「4 = 再試行で進展しない」どおり。details.reason は引き続き全 reason を返す)。
 live clone 重複は status `registry_duplicate` (候補一覧つき、exit 3 — §3.1 手順 1)。--batch は各行の
 status にこれらをそのまま用いる。**sqlite.db が不在・利用不能の場合は status ではなく command-level の
 retryable error `KCS-E-INDEX-REBUILDING-001` (exit 3)** — 検査は完了していないため --strict なしでも
@@ -420,7 +422,7 @@ kcs evidence retarget <pointer> [--latest|--at <commit>]
 }
 ```
 
-対応付けは `heading_path` の完全一致 (`heading_path_exact`) → 正規化一致 + span 重なり率 (`heading_path_fuzzy`) の順に試みる。**完全一致が複数 chunk に成立する場合も一意に定まらないため `KCS-E-EVIDENCE-RETARGET-AMBIG-001` (fail-closed — 先勝ちで選ばない)**。**span 重なり率は、新旧の normalized text 間で text alignment が成立した領域内でのみ用いる** — 異なる tool_profile の unit-local byte offset は共通座標を持たないため直接比較しない。alignment が成立しない場合は対応なし (ambiguous — fail-closed)。照合に使う旧側の heading・section・span は、**旧 pointer を解決した canonical 値 (旧 chunk / tree 由来) から取得する** — pointer 入力の optional 欄は使わない (偽 heading による別 section への誘導を防ぐ。§7.2 の表示規則と同じ姿勢)。**retarget の前提は旧 chunk / tree object が CAS に存在すること** (orphan 恒久保持の帰結として通常成立する) — 不在の場合 retarget は実行できず、§3.2 / §4.3 の解決規則に従い not_found / unverifiable 側へ降着する。**意味ベースの対応付け (semantic_fingerprint) は MVP に含めない**。chunk レベルの fingerprint 実体が未定義であり、embedding は retarget が必要な場面 (tool_profile 変更) で互換性ルール ([03-data-model.md §7](03-data-model.md)) により新旧比較が成立しない恐れがあるため。導入する場合は Phase 4+ で match_method の MINOR 追加 (§8) として行う。
+対応付けは `heading_path` の完全一致 (`heading_path_exact`) → 正規化一致 + span 重なり率 (`heading_path_fuzzy`) の順に試みる。**完全一致が複数 chunk に成立する場合も一意に定まらないため `KCS-E-EVIDENCE-RETARGET-AMBIG-001` (fail-closed — 先勝ちで選ばない)**。**span 重なり率は、新旧の normalized text 間で text alignment が成立した領域内でのみ用いる** — 異なる tool_profile の unit-local byte offset は共通座標を持たないため直接比較しない。alignment が成立しない場合は対応なし (ambiguous — fail-closed)。照合に使う旧側の heading・section・span は、**旧 pointer を解決した canonical 値 (旧 chunk / tree 由来) から取得する** — pointer 入力の optional 欄は使わない (偽 heading による別 section への誘導を防ぐ。§7.2 の表示規則と同じ姿勢)。**retarget の前提は旧 chunk / tree object が CAS に存在すること** (orphan 恒久保持の帰結として通常成立する) — 不在の場合 retarget は実行できず、§3.2 / §4.3 の解決規則に従い not_found / unverifiable 側へ降着する。**意味ベースの対応付け (semantic_fingerprint) は MVP に含めない**。chunk レベルの fingerprint 実体が未定義であり、embedding は retarget が必要な場面 (tool_profile 変更) で互換性ルール ([03-data-model.md §7](03-data-model.md)) により新旧比較が成立しない恐れがあるため。導入する場合は Phase 4+ で match_method の値追加として行う (§8 の互換規約上は MINOR 相当 — match_method は retarget response 限りの field で resolver 入力ではないため、旧実装は §8 の未知フィールドと同様に未知値を無視できる。pointer schema 本体への field 追加ではない)。
 
 retarget は **AI Agent からの呼び出しを前提** にしているため、レスポンスは [06-cli-spec.md §4](06-cli-spec.md) の `--json` 契約に従う。Phase 5 で構造化 API を導入する際もこの JSON schema を互換性契約として維持する ([06-cli-spec.md §9](06-cli-spec.md))。
 

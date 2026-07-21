@@ -16,7 +16,7 @@ kcs status                              # ファイル状態 / pending タスク
 kcs index [--preview|--approve|--yes] [--online|--offline]  # 取り込み (初回は preview + 承認必須)。
                                         # --online/--offline は当該実行の送信可否を上書き (正本 07-adapter-spec.md §3。
                                         # 優先順位: CLI > scope config > user config — ただし**明示 revoke
-                                        # (allow_network = false) は --online より優先** (kill switch、07 §3)。
+                                        # (allow_network = false・行の revoked) は --online より優先** (kill switch、07 §3)。
                                         # --online が開くのは未設定の既定閉鎖のみ)
 kcs batch resume [--override-budget] [--online|--offline]  # 中断タスクの再開 (budget 超過 pause は --override-budget 必須。04-pipeline.md §5.4/§5.7)。
                                         # --online は当該実行限りの一時 opt-in、--offline は当該実行の新規送信を禁止する逆向き上書き
@@ -117,8 +117,11 @@ code point を含む名前を拒否し ([03-data-model.md §2](03-data-model.md)
 1a. object URI (kcs://<scope_id>/object/image/<image_hash> — 08 §2) の場合: type / hash を検証し、
    scope_id が文脈 store と不一致でも**自 store に該当 hash の object があればそれを解決する**
    (fork 複製由来の旧 scope_id URI — §10。hash が identity、08 §2)。自 store に無い場合のみ
-   scope_id で通常解決する。image object を ~/.cache/kcs/open/ へ read-only materialize して開く
-   (raw と同じ tombstone / journal barrier と purge closure の対象)。以降の手順 2-5 は raw 系入力のみ
+   scope_id で通常解決する。image object を `~/.cache/kcs/open/<image_hash digest64>/` へ read-only
+   materialize して開く (dir キーは image_hash — raw の `<raw_hash digest64>/` と同一の導出規則。
+   hash が identity のため raw 系 dir と衝突しない。raw と同じ tombstone / journal barrier の対象で、
+   purge closure には「closure で物理削除対象となった live 参照 0 の image」の cache dir として
+   含まれる — [05-runtime.md §3.5](05-runtime.md))。以降の手順 2-5 は raw 系入力のみ
 2. tombstone 判定 (最優先): raw_hash の **canonical final event が `purged`** (全 marker の正本化 —
    08-evidence-pointer-spec.md §3.1 手順 5) なら、working tree・cache の状態に
    関わらず §7 の規約どおり exit 4 — purge 済み原本が folder に残っていても KCS 経由では開かない
@@ -134,7 +137,7 @@ code point を含む名前を拒否し ([03-data-model.md §2](03-data-model.md)
 5. raw object が not_found → §7 の規約どおり exit 4
 ```
 
-一時展開は **restore ではない**: working tree に書かず read-only であるため、[§5](06-cli-spec.md) の安全要件 (`--to` 必須 / `--force`) の対象外。**展開は同じ `<raw_hash digest64>/` 配下の private temp に書き (purge closure が temp ごと掃く)、cache path へ no-replace で publish してから、起動直前の最終検査 ([05-runtime.md §3.5](05-runtime.md) の 3 点) を行い、通過した場合のみ起動する — 検査で拒否した場合は publish 済み cache を dev/inode 対照 (自らの publish と検証) の上で除去し、temp も残さない** ([04-pipeline.md §1.1](04-pipeline.md) の temp 掃除規約。publish 後検査により purge 完遂後の平文 cache 残存・起動を閉じる — 検査通過後の purge は並行 reader の既 open fd と同格)。展開先はキャッシュであり、GC (on_idle、Phase 4+) の掃除対象。MVP では自動掃除されないため、必要ならユーザーが削除してよい (正本は `objects/` に無傷)。**purge はこの展開 cache を削除 closure に含める** ([05-runtime.md §3.5](05-runtime.md))。永続的なコピーが必要な場合は `kcs restore <pointer> --to <dir>` を使う。一時展開で開いた場合、CLI は「原本は working tree に存在しない (削除または過去版)。永続コピーは kcs restore --to」の注記を stderr に表示する。
+一時展開は **restore ではない**: working tree に書かず read-only であるため、[§5](06-cli-spec.md) の安全要件 (`--to` 必須 / `--force`) の対象外。**展開は同じ `<raw_hash digest64>/` 配下の private temp に書き (purge closure が temp ごと掃く)、cache path へ no-replace で publish してから、起動直前の最終検査 ([05-runtime.md §3.5](05-runtime.md) の 3 点) を行い、通過した場合のみ起動する — 検査で拒否した場合は publish 済み cache を dev/inode 対照 (自らの publish と検証) の上で除去し、temp も残さない** ([04-pipeline.md §1.1](04-pipeline.md) の temp 掃除規約)。**publish が既存 cache と衝突 (EEXIST) した場合** — MVP では cache が自動掃除されないため同一 raw の再 open で通常発生する — は [04-pipeline.md §1.1](04-pipeline.md) の no-replace 規則と同じく既存との内容一致を照合して自分の temp を破棄し、既存 cache を対象に起動直前の最終検査以降を続行する (この経路の検査拒否では cache を除去しない — 除去は自らの publish と検証できた場合に限る。削除主体は purge closure と [10-operations.md §7.5.1](10-operations.md) の残骸回収)。publish 後検査により purge 完遂後の平文 cache の**起動**を閉じる (publish と検査の間の crash による cache 残存は起動には至らず、`kcs repair --verify-objects --prune-orphans` が purge 済み raw の cache 残骸として回収する — [10-operations.md §7.5.1](10-operations.md)。検査通過後の purge は並行 reader の既 open fd と同格)。展開先はキャッシュであり、GC (on_idle、Phase 4+) の掃除対象。MVP では自動掃除されないため、必要ならユーザーが削除してよい (正本は `objects/` に無傷)。**purge はこの展開 cache を削除 closure に含める** ([05-runtime.md §3.5](05-runtime.md))。永続的なコピーが必要な場合は `kcs restore <pointer> --to <dir>` を使う。一時展開で開いた場合、CLI は「原本は working tree に存在しない (削除または過去版)。永続コピーは kcs restore --to」の注記を stderr に表示する。
 
 ---
 
@@ -324,9 +327,9 @@ purge は常に**全履歴**の raw 本文・派生 artifact を対象とする 
 kcs evidence verify            検査完了で 0 (結果は status フィールド)。parse 失敗は 2
 kcs evidence verify --strict   全 alive なら 0。tombstoned / not_found が 1 件でもあれば 4。
                                scope_unreachable のみの失敗は 3 (retryable — 08 §4.3)。
-                               unverifiable のみも 3 (reason = commit_shallow / tree_v1 /
-                               manifest_missing — 08 §4.3。shallow は unshallow で解消し得るが
-                               tree_v1 / manifest_missing は恒久 — reason で判別)。registry_duplicate も 3
+                               unverifiable は reason で分岐 (08 §4.3): tree_v1 / manifest_missing を
+                               1 件でも含めば 4 (恒久 — 再試行で進展しない)、commit_shallow のみなら 3
+                               (unshallow で解消し得る)。registry_duplicate も 3
 KCS-E-STORE-CONSTRAINT-001     記帳 CHECK 到達 = 実装エラー (04 §5.8)。permanent・非再試行で
                                command を即時中止・exit 4
 sqlite.db 不在・利用不能       全経路 (verify / open / view / restore / search) で status に混ぜず
