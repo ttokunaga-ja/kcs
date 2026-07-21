@@ -44,9 +44,10 @@ query embedding 応答が受入検査 ([07-adapter-spec.md §5.3](07-adapter-spe
 **query embedding の consent gate**: vector | hybrid の page 1 は query embedding (07 §5.3 の
 `input_type: "query"` — sync 呼出) を要し、これは新規送信として [07-adapter-spec.md §3](07-adapter-spec.md)
 の opt-in gate の対象である (payload は query 文字列のみで folder 内容を含まない)。**送信可否 =
-参加 scope の 1 つ以上に当該 embedding Adapter の active な `approvals[]` 行があり、かつ当該 scope に
-明示 revoke (`adapter.policy.allow_network = false` — [07-adapter-spec.md §3](07-adapter-spec.md)) が
-ないこと** (`--online` が開くのは未設定の既定閉鎖のみ — 明示 revoke は上書きしない)。**この可否は
+参加 scope の 1 つ以上に当該 embedding Adapter の active な `approvals[]` 行があり、かつ当該 scope の
+実効 `allow_network` が true であること** (未設定・設定 key の喪失は gate 不成立 —
+[07-adapter-spec.md §3](07-adapter-spec.md) と同一規範。`--online` が開くのは未設定の既定閉鎖のみ —
+明示 revoke (`allow_network = false`) は上書きしない)。**この可否は
 相 1 claim Tx 内 (`BEGIN IMMEDIATE` 保持下) で approvals[] / boolean を再読して最終検証する** (読み取り開始時の値を
 使い回さない — 検証後に revoke が完了した場合の当該送信は in-flight として許容 (送信済みの取り消し
 非保証 — [07-adapter-spec.md §3](07-adapter-spec.md)))。承認ゼロ
@@ -880,7 +881,9 @@ phase 順序    = prepared (closure 確定・記帳)
               置換を消さない。crash で隔離だけが残っても、次回の同 path への restore が同名残存の拒否で
               検出・案内する。巻き戻しにより publish の事後取消が --force 上書きを含めて成立 —
               lock 非取得のまま残余窓を閉じる。purge closure を KCS 自身が破らない)。open は
-              OS アプリ起動の直前に再検査する (起動後は取消不能 — 検査はそこまでに完了させる)
+              OS アプリ起動の直前 (一時展開の cache publish 後) に再検査する (起動後は取消不能 —
+              検査はそこまでに完了させる。拒否時は当該一時展開 — publish 済み cache を含む — を
+              dev/inode 対照の上で除去して終端する。[06-cli-spec.md §1](06-cli-spec.md))
 ```
 
 **in-flight 外部実行との整合**: prepared 相で、**当該 scope (purge を実行する `.kcs` の scope_id) の**
@@ -990,7 +993,8 @@ kcs restore <evidence|path|commit> --to <dir>
   private temp → atomic rename で publish する。**containment 判定と展開の同一実体束縛**: --to を
   O_DIRECTORY で open し、fstat (dev/inode) を canonical 解決先の lstat と対照して同一実体を確認
   してから、以後の temp 作成・rename を全て同一 dirfd 配下に限定する (判定後の path 差し替えで
-  別実体を指させない)。絶対 path・「..」を含む復元エントリは拒否
+  別実体を指させない)。対照不一致は KCS-E-CONFIG-USAGE-001 (exit 2) で mutation 前に拒否する
+  (--to 実体の検証失敗 = 不正オペランド)。絶対 path・「..」を含む復元エントリは拒否
   (既存 symlink 経由で復元先の外部を上書きさせない)
 ```
 

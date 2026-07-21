@@ -222,7 +222,8 @@ pending 可視化)。`--override-budget` と併用した場合も budget pause �
 のいずれも online embedding を駆動し得る — / `kcs repair --rebuild-db` (rebuild 後の enrichment —
 [04-pipeline.md §5.4](04-pipeline.md)) / **`kcs search` — vector|hybrid の page 1 の query embedding**
 ([05-runtime.md §1.1](05-runtime.md) の consent gate: payload は query 文字列のみ。送信可否 = 参加
-scope の 1 つ以上に当該 embedding Adapter の active 承認 — 承認ゼロは text fallback / `--vector` は
+scope の 1 つ以上に当該 embedding Adapter の active 承認 + 当該 scope の実効 `allow_network` = true
+(§3 の gate と同一規範 — 未設定・key 喪失は不成立)。承認ゼロ・gate 不成立は text fallback / `--vector` は
 error。課金は `scope_id='device'` — [04-pipeline.md §5.4](04-pipeline.md))。[06-cli-spec.md §1](06-cli-spec.md))。**既存 in-flight
 request の照会・出力取得・upload 掃除 ([04-pipeline.md §5.8](04-pipeline.md) 回復) は新規送信に
 当たらず、opt-in / `--online` なしで実行できる** (opt-in が制御するのは新規 upload・job 作成・
@@ -543,9 +544,10 @@ provider_scope_id()            下記の不変識別子を返す
    terminal 化と同一 Tx で記帳する (**報告値が有効なら provider 値 (`estimated=0`)、無効・欠落は
    estimated 縮退** — [04-pipeline.md §5.4](04-pipeline.md) の事前検証と DDL 注記)
 
-7. job id / provider request id が、同一 adapter_kind 内で account / workspace を跨いで KCS の
-   回復期限 (既定 48h) 内に再利用されないこと (実質一意 — [04-pipeline.md §5.8](04-pipeline.md) の
-   記帳済み判別が task key × job id を突合キーとする前提)
+7. job id / provider request id が、同一 adapter_kind 内で account / workspace を跨いで**恒久に
+   実質再利用されない**こと ([04-pipeline.md §5.8](04-pipeline.md) の記帳済み判別が task key × job id
+   を**恒久保持の cost_ledger 全履歴**に対して突合するため — 期限付きの一意性では期限超の再利用が
+   過去行と誤合致して確定記帳を落とす)
 
 `mistral_ocr_markdownize` の Batch モードは 2026-07-03 の実地検証 (§5.2 末尾) の範囲でこの条件下で
 採用済み。

@@ -577,7 +577,8 @@ commit は shallow 化で tree を失い得るため tree 不在時は本検証�
 ([05-runtime.md §3.5](05-runtime.md) の読取規則)。**tombstone lifecycle にも同じ event 検証を適用する**
 (kind 別必須 field・末尾 event 規則・torn / malformed = corruption に加え、**purged event の
 `in_commit` が bounded verified CAS で ref-reachable な `commit_type=purged` commit を指すこと・
-当該 commit の `purged_raws` への raw_hash membership・各 `at` の commit `created_at` 一致・
+当該 commit の `purged_raws` への raw_hash membership・各 `at` の commit `created_at` 一致
+(canonical UTC・invocation の fixed now より未来でないことも erased 側と同一)・
 terminal `retired` の `resurrection_commit` 検証も erased 側と同一に必須**。遷移文法は marker 種別に従う — **tombstone は purged を先頭に purged / retired が交互**
 (erased 開始の文法は receipt 専用)。検証失敗の marker は説明能力を持たず corruption とする —
 偽 `in_commit` を持つ構造的に正しい tombstone が genuine missing を隠さない)。

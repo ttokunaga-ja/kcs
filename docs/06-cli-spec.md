@@ -134,7 +134,7 @@ code point を含む名前を拒否し ([03-data-model.md §2](03-data-model.md)
 5. raw object が not_found → §7 の規約どおり exit 4
 ```
 
-一時展開は **restore ではない**: working tree に書かず read-only であるため、[§5](06-cli-spec.md) の安全要件 (`--to` 必須 / `--force`) の対象外。**展開は private temp に書き、起動直前の最終検査 ([05-runtime.md §3.5](05-runtime.md)) を通過してから cache path へ publish する — 検査で拒否した場合は temp を残さない** ([04-pipeline.md §1.1](04-pipeline.md) の temp 掃除規約。purge 完遂後に書きかけの平文 cache を残さない)。展開先はキャッシュであり、GC (on_idle、Phase 4+) の掃除対象。MVP では自動掃除されないため、必要ならユーザーが削除してよい (正本は `objects/` に無傷)。**purge はこの展開 cache を削除 closure に含める** ([05-runtime.md §3.5](05-runtime.md))。永続的なコピーが必要な場合は `kcs restore <pointer> --to <dir>` を使う。一時展開で開いた場合、CLI は「原本は working tree に存在しない (削除または過去版)。永続コピーは kcs restore --to」の注記を stderr に表示する。
+一時展開は **restore ではない**: working tree に書かず read-only であるため、[§5](06-cli-spec.md) の安全要件 (`--to` 必須 / `--force`) の対象外。**展開は同じ `<raw_hash digest64>/` 配下の private temp に書き (purge closure が temp ごと掃く)、cache path へ no-replace で publish してから、起動直前の最終検査 ([05-runtime.md §3.5](05-runtime.md) の 3 点) を行い、通過した場合のみ起動する — 検査で拒否した場合は publish 済み cache を dev/inode 対照 (自らの publish と検証) の上で除去し、temp も残さない** ([04-pipeline.md §1.1](04-pipeline.md) の temp 掃除規約。publish 後検査により purge 完遂後の平文 cache 残存・起動を閉じる — 検査通過後の purge は並行 reader の既 open fd と同格)。展開先はキャッシュであり、GC (on_idle、Phase 4+) の掃除対象。MVP では自動掃除されないため、必要ならユーザーが削除してよい (正本は `objects/` に無傷)。**purge はこの展開 cache を削除 closure に含める** ([05-runtime.md §3.5](05-runtime.md))。永続的なコピーが必要な場合は `kcs restore <pointer> --to <dir>` を使う。一時展開で開いた場合、CLI は「原本は working tree に存在しない (削除または過去版)。永続コピーは kcs restore --to」の注記を stderr に表示する。
 
 ---
 
@@ -253,7 +253,8 @@ kcs restore <pointer> --to ./recovered/ --force    # 既存上書き許可 (確�
 - --to <dir> は必須 (canonical 解決先が当該 scope root 配下 (`.kcs` 含む) は KCS-E-CONFIG-USAGE-001
   (exit 2) で拒否 — working tree への直接書き戻し禁止の迂回を許さない。canonical 解決は
   05 §1.8 の算出規則と同一 (realpath 含む)。展開前に --to を open した fd の実体 (dev/inode) を
-  canonical 解決先と対照し、以後の展開は同一 fd 配下に限定する — 05 §4)
+  canonical 解決先と対照し (不一致 = KCS-E-CONFIG-USAGE-001 で mutation 前拒否)、以後の展開は
+  同一 fd 配下に限定する — 05 §4)
 - 全出力 path の退避 / 隔離の同名残存は --force の有無・宛先の存否に関わらず mutation 前に検査し、
   残存 = 先行未完として拒否 + 回復案内 (正本 05 §3.5)
 - 既存ファイル上書きは --force + 確認 prompt
