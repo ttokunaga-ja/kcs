@@ -148,14 +148,17 @@ fn verify_pointer_for_cli(pointer: &EvidencePointer, strict: bool) -> Result<Val
     if !sqlite_path(&target.kcs_dir).exists() {
         return Err(index_rebuilding_error());
     }
-    // §I checkpoint 1 (LC53). Evidence verify's whole response IS existence
-    // information (08 §4.3 — it never returns body), so checkpoint 2 below
-    // (LC54/LC55) gates every return point, not only a single "success" path.
-    let checkpoint = ReadBarrierCheckpoint::open(&target.kcs_dir)?;
-    // LC45 (item 2): a separate check from §I's checkpoint — see
-    // `check_index_generation_current`'s doc comment.
-    check_index_generation_current(&target.kcs_dir)?;
+    // QB6 (step4b-contract-tests-p3b.md §A, 10 §3 L300-305): (0)
+    // kcs_format_version compatibility, checked before (1)/(3) below — this
+    // used to open second, so a format-incompatible scope with an active
+    // purge journal surfaced the lower-priority
+    // `KCS-E-PURGE-JOURNAL-ACTIVE-001` instead of `KCS-E-STORE-VERSION-001`.
     let repo = Repository::open(&target.repo_root)?;
+    // QB5/QB6/裁定1: shared (1)+(3) preflight pair. Evidence verify's whole
+    // response IS existence information (08 §4.3 — it never returns body),
+    // so checkpoint 2 below (LC54/LC55) gates every return point, not only a
+    // single "success" path.
+    let checkpoint = preflight_barrier_and_index(&target.kcs_dir)?;
     let commit = match repo.read_commit(&pointer.commit) {
         Ok(commit) => commit,
         Err(error) if is_store_not_found(&error) => {

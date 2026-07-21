@@ -241,10 +241,12 @@ impl Repository {
 
         atomic_write(&kcs_dir.join("HEAD"), b"")?;
         atomic_write(&kcs_dir.join("refs/heads/main"), b"")?;
-        atomic_write(
-            &kcs_dir.join("config.toml"),
-            format!("kcs_format_version = \"{FORMAT_VERSION}\"\n").as_bytes(),
-        )?;
+        // 裁定2 (step4b-contract-tests-p3b.md §Z2): `kcs_format_version` is a
+        // scope.json-only concept (03 §2 L154) — config.toml no longer
+        // carries a redundant copy. An empty config.toml is a valid, fully
+        // default configuration under `config.schema.json` (no required
+        // keys).
+        atomic_write(&kcs_dir.join("config.toml"), b"")?;
         atomic_write(
             &kcs_dir.join("scope.json"),
             serde_json::to_string_pretty(&json!({
@@ -342,6 +344,42 @@ impl Repository {
     #[must_use]
     pub fn kcs_dir(&self) -> &Path {
         &self.kcs_dir
+    }
+
+    /// QA5 (step4b-contract-tests-p3a.md §B, 10 §1 L97-113): record the
+    /// one-time scope-level scan approval into `.kcs/scope.json`'s
+    /// `scan_approval` key — distinct from the adapter-level network opt-in
+    /// (`approvals.jsonl`/`consents.jsonl`, 07 §3). Idempotent: a scope is
+    /// approved once, so an existing `scan_approval` key is left untouched
+    /// (`Ok(false)`); the first call materializes it (`Ok(true)`). `fields`
+    /// must be a JSON object shaped per 10 §1 L101-113 (scope_id / root_path /
+    /// approved_at / actor / approval_method / kcs_version /
+    /// effective_ignore_hash / estimated_file_count / estimated_total_bytes /
+    /// estimated_markdownize_usd / estimated_embedding_usd).
+    pub fn record_scan_approval(&self, fields: Value) -> Result<bool> {
+        let path = self.kcs_dir.join("scope.json");
+        let mut value: Value = serde_json::from_str(&fs::read_to_string(&path).kcs_io(&path)?)
+            .map_err(|err| KcsError::schema(err.to_string()))?;
+        let Some(object) = value.as_object_mut() else {
+            return Err(KcsError::schema("scope.json must be an object"));
+        };
+        if object.contains_key("scan_approval") {
+            return Ok(false);
+        }
+        object.insert("scan_approval".to_owned(), fields);
+        validate_json_schema(SchemaKind::Scope, &value)?;
+        // `atomic_write` is CAS-only semantics (a no-op when `path` already
+        // exists, R9-8) — wrong here since `scope.json` already exists from
+        // `Repository::init` and this call must actually replace its
+        // content. `atomic_overwrite` is the mutable-file primitive already
+        // used for HEAD/manifest.json elsewhere in this file.
+        atomic_overwrite(
+            &path,
+            serde_json::to_string_pretty(&value)
+                .map_err(|err| KcsError::schema(err.to_string()))?
+                .as_bytes(),
+        )?;
+        Ok(true)
     }
 
     /// Return the portable scope ID together with the canonical local root.
@@ -1308,9 +1346,24 @@ impl Repository {
     }
 
     pub fn log(&self) -> Result<LogReport> {
+        self.log_from(None)
+    }
+
+    /// QB50 (step4b-contract-tests-p3b.md §D, 06 §1 L61 + 裁定5's adopted
+    /// analogy to `--at`'s established "resolve the operand, then treat it
+    /// as the walk's basis" semantics elsewhere — search 06 §3 L226 /
+    /// 05-runtime.md §1.6 L214): `kcs log --at <commit>` walks from an
+    /// explicit, already-`resolve_commit`-resolved starting commit instead
+    /// of HEAD. `start = None` (plain `kcs log`) is exactly the prior `log`
+    /// behavior (QB53's non-breaking regression requirement) — first-parent
+    /// walk from HEAD, truncating (not failing) on a missing ancestor.
+    pub fn log_from(&self, start: Option<String>) -> Result<LogReport> {
         self.validate()?;
         let mut entries = Vec::new();
-        let mut next = self.head_commit_hash()?;
+        let mut next = match start {
+            Some(hash) => Some(hash),
+            None => self.head_commit_hash()?,
+        };
         let mut truncated = false;
         while let Some(hash) = next {
             // R16-1: a missing ancestor commit object (shallow / external corruption)
@@ -1692,6 +1745,16 @@ impl Repository {
         }
     }
 
+    /// QB8 §Z2 / 裁定2 (step4b-contract-tests-p3b.md): `kcs_format_version`
+    /// compatibility is a `.kcs/scope.json`-only concept (03 §2 L154 names
+    /// only that file as the field's storage location). `config.toml` no
+    /// longer carries or enforces its own copy — `Repository::init` stopped
+    /// writing it, and this function no longer reads it — so scope.json via
+    /// [`Self::validated_scope_id`] is the sole compatibility authority. Any
+    /// leftover `kcs_format_version` key in an old `config.toml` on disk is
+    /// inert (the schema still accepts it, unread, for no-op backward
+    /// tolerance) rather than rejected, per the ruling's "no compat debt"
+    /// re-init stance (no migration is required either way).
     fn validate_config(&self) -> Result<()> {
         let path = self.kcs_dir.join("config.toml");
         let value = fs::read_to_string(&path).kcs_io(&path)?;
@@ -1704,23 +1767,32 @@ impl Repository {
         // type-check (e.g. `allowed_scope != "."`) LOUDLY, so a scope config never
         // silently ignores a policy the user set.
         enforce_config_semantics(&json_value)?;
-        let version = match json_value.get("kcs_format_version") {
-            Some(value) => value
-                .as_str()
-                .ok_or_else(|| KcsError::schema("kcs_format_version must be a string"))?,
-            None => FORMAT_VERSION,
-        };
-        validate_format_version(version)
+        Ok(())
     }
 
     fn validate_scope(&self) -> Result<()> {
         self.validated_scope_id().map(|_| ())
     }
 
+    /// QB8 (step4b-contract-tests-p3b.md §A, 03 §2 L154 / 10 §12.3 L948): the
+    /// `kcs_format_version` compatibility judgment runs BEFORE JSON Schema
+    /// validation, not after. A store from a newer MINOR version may add
+    /// schema keys this build does not know about; reading the version first
+    /// lets that case degrade to `KCS-E-STORE-VERSION-001` / exit 8
+    /// (read-only + upgrade guidance) instead of being misclassified as a
+    /// `KCS-E-CONFIG-SCHEMA-001` unknown-key schema error. The previous
+    /// ordering ran schema validation first, so an unknown key masked the
+    /// real (version) problem behind a generic schema failure.
     fn validated_scope_id(&self) -> Result<String> {
         let path = self.kcs_dir.join("scope.json");
         let value: Value = serde_json::from_str(&fs::read_to_string(&path).kcs_io(&path)?)
             .map_err(|err| KcsError::schema(err.to_string()))?;
+        if let Some(version) = value.get("kcs_format_version") {
+            let version = version
+                .as_str()
+                .ok_or_else(|| KcsError::schema("kcs_format_version must be a string"))?;
+            validate_format_version(version)?;
+        }
         validate_json_schema(SchemaKind::Scope, &value)?;
         let Some(scope_id) = value.get("scope_id").and_then(Value::as_str) else {
             return Err(KcsError::schema("scope.json missing scope_id"));
@@ -1730,12 +1802,6 @@ impl Repository {
         }
         if !is_ulid(scope_id) {
             return Err(KcsError::schema("scope_id must be a ULID"));
-        }
-        if let Some(version) = value.get("kcs_format_version") {
-            let version = version
-                .as_str()
-                .ok_or_else(|| KcsError::schema("kcs_format_version must be a string"))?;
-            validate_format_version(version)?;
         }
         Ok(scope_id.to_owned())
     }
@@ -2030,12 +2096,23 @@ pub const DEFAULT_LOG_RETENTION_DAYS: u32 = 30;
 /// 30-day default. The key is schema-validated (`config.schema.json`) at startup,
 /// so a bad value would already have been rejected; this read is defensive.
 #[must_use]
+/// QB18 (step4b-contract-tests-p3b.md §B, 10 §12.3 L954): the canonical key
+/// is `[observability] retention_days` — checked first. `[logs]
+/// retention_days` (the pre-QB18 key) is still read as a fallback when
+/// `[observability]` is absent, so an existing config that only sets `[logs]`
+/// keeps working unchanged; a config that sets both prefers
+/// `[observability]`.
 pub fn read_logs_retention_days(config_toml_path: &Path) -> Option<u32> {
     let text = fs::read_to_string(config_toml_path).ok()?;
     let value: toml::Value = toml::from_str(&text).ok()?;
+    retention_days_from_section(&value, "observability")
+        .or_else(|| retention_days_from_section(&value, "logs"))
+}
+
+fn retention_days_from_section(value: &toml::Value, section: &str) -> Option<u32> {
     value
-        .get("logs")
-        .and_then(|logs| logs.get("retention_days"))
+        .get(section)
+        .and_then(|section| section.get("retention_days"))
         .and_then(toml::Value::as_integer)
         .and_then(|days| u32::try_from(days).ok())
         .filter(|days| *days >= 1)
@@ -2451,22 +2528,12 @@ pub fn enforce_config_semantics(config: &Value) -> Result<()> {
             }
         }
     }
-    // markdownize.incremental.include_neighbors has no implementation concept
-    // (R12-1); only the documented default (1) is a no-op — anything else is
-    // rejected loudly. `enabled`/`threshold`/`max_consecutive` ARE wired at index
-    // time, so they are not checked here.
-    if let Some(incremental) = config
-        .get("markdownize")
-        .and_then(|markdownize| markdownize.get("incremental"))
-    {
-        if let Some(neighbors) = incremental.get("include_neighbors").and_then(Value::as_i64) {
-            if neighbors != 1 {
-                return Err(KcsError::not_implemented(
-                    "markdownize.incremental.include_neighbors other than 1",
-                ));
-            }
-        }
-    }
+    // QA61 (step4b-contract-tests-p3a.md §R, arbitration #7): `include_neighbors`
+    // was removed from `config.schema.json` entirely (it disappeared from the
+    // documented config example with no implementation concept, R12-1) — an
+    // unknown key is now a schema error at the JSON-schema layer
+    // (`additionalProperties: false`), so this function no longer needs a
+    // dedicated NOT-IMPLEMENTED check for it.
     Ok(())
 }
 
@@ -2703,6 +2770,21 @@ fn data_home() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("."))
 }
 
+/// QA7 (step4b-contract-tests-p3a.md §B, arbitration #1): the built-in Tier A
+/// pattern set as data, not just imperative comparisons — the single source
+/// both [`is_tier_a_secret_name`] and [`tier_a_template_text`] (10 §1.1's
+/// `effective_ignore_hash` input) consult, so a pattern-list edit is
+/// mechanically guaranteed to change the hash instead of relying on someone
+/// remembering to bump a version literal.
+const TIER_A_EXACT_PATHS: &[&str] = &[".kube/config", ".docker/config.json"];
+const TIER_A_PATH_PREFIXES: &[&str] = &[".ssh/", ".gnupg/", ".aws/", ".kube/", ".docker/"];
+const TIER_A_EXACT_NAMES: &[&str] = &[
+    ".env", ".ssh", ".gnupg", ".aws", ".kube", ".docker", ".netrc", ".npmrc", ".pypirc",
+];
+const TIER_A_NAME_PREFIXES: &[&str] = &[".env.", "id_rsa", "id_ecdsa", "id_ed25519"];
+const TIER_A_NAME_SUFFIXES: &[&str] = &[".pem", ".key", ".p12", ".pfx", ".keystore", ".tfstate"];
+const TIER_A_NAME_CONTAINS: &[&str] = &[".tfstate."];
+
 /// Built-in Tier-A name policy applied again at the closing archive read.
 /// Keep this predicate aligned with `kcs_pipeline::scan::classify_secret`;
 /// callers pass explicitly unignored Tier-A paths separately.
@@ -2712,34 +2794,50 @@ pub fn is_tier_a_secret_name(path: &str) -> bool {
     let name = normalized.rsplit('/').next().unwrap_or(&normalized);
     let lower = name.to_ascii_lowercase();
     let lower_path = normalized.to_ascii_lowercase();
-    let tier_a_path = lower_path == ".kube/config"
-        || lower_path == ".docker/config.json"
-        || lower_path.starts_with(".ssh/")
-        || lower_path.starts_with(".gnupg/")
-        || lower_path.starts_with(".aws/")
-        || lower_path.starts_with(".kube/")
-        || lower_path.starts_with(".docker/");
-    lower == ".env"
-        || lower.starts_with(".env.")
-        || lower == ".ssh"
-        || lower == ".gnupg"
-        || lower == ".aws"
-        || lower == ".kube"
-        || lower == ".docker"
-        || lower.ends_with(".pem")
-        || lower.ends_with(".key")
-        || lower.ends_with(".p12")
-        || lower.ends_with(".pfx")
-        || lower.starts_with("id_rsa")
-        || lower.starts_with("id_ecdsa")
-        || lower.starts_with("id_ed25519")
-        || lower.ends_with(".keystore")
-        || lower == ".netrc"
-        || lower == ".npmrc"
-        || lower == ".pypirc"
-        || lower.ends_with(".tfstate")
-        || lower.contains(".tfstate.")
-        || tier_a_path
+    TIER_A_EXACT_PATHS.contains(&lower_path.as_str())
+        || TIER_A_PATH_PREFIXES
+            .iter()
+            .any(|prefix| lower_path.starts_with(prefix))
+        || TIER_A_EXACT_NAMES.contains(&lower.as_str())
+        || TIER_A_NAME_PREFIXES
+            .iter()
+            .any(|prefix| lower.starts_with(prefix))
+        || TIER_A_NAME_SUFFIXES
+            .iter()
+            .any(|suffix| lower.ends_with(suffix))
+        || TIER_A_NAME_CONTAINS
+            .iter()
+            .any(|needle| lower.contains(needle))
+}
+
+/// QA7: a canonical, deterministic text rendering of every built-in Tier
+/// A/B pattern (this module's Tier A arrays plus
+/// `kcs_pipeline::scan::TIER_B_NEEDLES`) — the input to 10 §1.1's
+/// `effective_ignore_hash` (`hash_bytes(tier_a_template_text().as_bytes())`
+/// at the call site). A pattern addition/removal/edit in any of these arrays
+/// changes this text, so it changes the hash — the property 10 §1.1
+/// requires ("パターン更新が承認記録の同一性判定に反映される") that a fixed
+/// version-string literal could not guarantee.
+#[must_use]
+pub fn tier_a_template_text(tier_b_needles: &[&str]) -> String {
+    let mut text = String::new();
+    for (label, patterns) in [
+        ("exact_paths", TIER_A_EXACT_PATHS),
+        ("path_prefixes", TIER_A_PATH_PREFIXES),
+        ("exact_names", TIER_A_EXACT_NAMES),
+        ("name_prefixes", TIER_A_NAME_PREFIXES),
+        ("name_suffixes", TIER_A_NAME_SUFFIXES),
+        ("name_contains", TIER_A_NAME_CONTAINS),
+    ] {
+        text.push_str(label);
+        text.push(':');
+        text.push_str(&patterns.join(","));
+        text.push('\n');
+    }
+    text.push_str("tier_b_needles:");
+    text.push_str(&tier_b_needles.join(","));
+    text.push('\n');
+    text
 }
 
 fn validate_store_directory(kcs_dir: &Path) -> Result<()> {

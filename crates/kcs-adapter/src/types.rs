@@ -34,6 +34,25 @@ pub enum AdapterRunStatus {
     Failed,
 }
 
+/// QA18 (step4b-contract-tests-p3a.md §F): the closed `usage.billable_units[].kind`
+/// enum (07 §4 L294) — extension is a spec revision, not adapter-declared.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BillableUnitKind {
+    Pages,
+    TokensIn,
+    TokensOut,
+}
+
+/// QA18: "billable" | "nonbillable" (07 §4 L270-275). Whether a billable
+/// Adapter's provider charges for a permanent-4xx submission rejection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BillingDeclaration {
+    Billable,
+    Nonbillable,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AdapterProfile {
     pub adapter_kind: AdapterKind,
@@ -43,15 +62,93 @@ pub struct AdapterProfile {
     pub version: String,
     pub capability_flags: Vec<String>,
     pub allow_network: bool,
+    /// QA18: required when this adapter declares a billable capability
+    /// (07 §5.7 condition 6) — the closed set of `usage.billable_units[].kind`
+    /// values it may report. Empty for a non-billable adapter. Output-inert
+    /// (not part of `tool_profile_hash`, `identity::PROFILE_FIELDS`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub billable_kinds: Vec<BillableUnitKind>,
+    /// QA18: required when this adapter declares a billable capability.
+    /// `None` for a non-billable adapter. Output-inert, same as
+    /// `billable_kinds`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reject_billing: Option<BillingDeclaration>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// QA16 (step4b-contract-tests-p3a.md §F): `transient | permanent | rate_limit`
+/// (07 §4 L287) — the coarse retry-classification input for 04-pipeline.md
+/// §5.3's table. `error_code` carries the fine-grained machine code; this
+/// field is only the coarse bucket the retry table keys off.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ErrorCategory {
+    Transient,
+    Permanent,
+    RateLimit,
+}
+
+/// QA17: one `usage.billable_units[]` entry (07 §4 L294). `count` is a
+/// non-negative unit count; USD conversion is the caller's per-kind price ×
+/// count, summed across entries (`kind` duplicates are a billing-field
+/// defect — see [`AdapterUsage::is_well_formed`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BillableUnit {
+    pub kind: BillableUnitKind,
+    pub count: u64,
+}
+
+/// QA17: `usage one-of { usd } | { billable_units }` (07 §4 L291-307) —
+/// request-scoped billing report on a terminal `AdapterRun`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum AdapterUsage {
+    Usd { usd: f64 },
+    BillableUnits { billable_units: Vec<BillableUnit> },
+}
+
+impl AdapterUsage {
+    /// QA17: structural well-formedness (07 §4 L291-307) — `usd` must be a
+    /// finite, non-negative amount; `billable_units` must be non-empty with
+    /// unique `kind`s. A malformed `usage` is not itself a contract
+    /// violation (it degrades to an `estimated` charge with a warning,
+    /// 04-pipeline.md §5.4) — callers use this to decide that degrade, not
+    /// to reject the response.
+    #[must_use]
+    pub fn is_well_formed(&self) -> bool {
+        match self {
+            Self::Usd { usd } => usd.is_finite() && *usd >= 0.0,
+            Self::BillableUnits { billable_units } => {
+                !billable_units.is_empty() && {
+                    let mut kinds = billable_units.iter().map(|unit| unit.kind);
+                    let mut seen = std::collections::BTreeSet::new();
+                    kinds.all(|kind| seen.insert(format!("{kind:?}")))
+                }
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AdapterRun {
     pub task_id: String,
     pub input_hashes: Vec<String>,
     pub output_hashes: Vec<String>,
     pub status: AdapterRunStatus,
     pub error_kind: Option<String>,
+    /// QA16: machine-judgeable error code (06 §8), independent of the coarse
+    /// `error_category` bucket.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_code: Option<String>,
+    /// QA16: `transient | permanent | rate_limit` — see [`ErrorCategory`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_category: Option<ErrorCategory>,
+    /// QA16: provider `Retry-After`, verbatim in milliseconds, when present
+    /// on a rate-limited run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_after_ms: Option<u64>,
+    /// QA17: request-scoped billing report — see [`AdapterUsage`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<AdapterUsage>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -190,6 +287,17 @@ const fn default_bbox_annotation_enabled() -> bool {
     true
 }
 
+/// QA36 (step4b-contract-tests-p3a.md §K): one partially-failed unit (04 §3
+/// L295, 07 §5.2 L345-348). `error_kind` must be a member of
+/// `kcs_pipeline::task::RetryErrorKind`'s closed enum (04 §3.2 V6) — checked
+/// by the pipeline crate's `validate_markdownize_response` (this crate has no
+/// dependency on `kcs-pipeline`, so the membership check lives there).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FailedUnit {
+    pub unit_key: String,
+    pub error_kind: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MarkdownizeResponse {
     pub mode_used: MarkdownizeMode,
@@ -197,7 +305,10 @@ pub struct MarkdownizeResponse {
     pub unchanged_unit_keys: Vec<String>,
     pub added_units: Vec<MarkdownUnit>,
     pub removed_unit_keys: Vec<String>,
-    pub evidence_pointers: Vec<Value>,
+    /// QA36: partially-failed units (04 §3.2 V1/V4/V6) — not persisted; the
+    /// pipeline transitions the named unit to `failed` in the manifest.
+    #[serde(default)]
+    pub failed_units: Vec<FailedUnit>,
     pub fallback_to_full: bool,
     pub reason: Option<String>,
 }
@@ -238,6 +349,14 @@ pub struct EmbeddingResponse {
     pub dimensions: u32,
     pub distance: String,
     pub modality: String,
+    /// QA49 (step4b-contract-tests-p3a.md §N): the adapter's
+    /// `tool_profile_hash` at response time, so the consumer can reject a
+    /// same-dimension vector from an unexpected embedding profile (07 §5.3
+    /// (5)) instead of trusting `dimensions`/`distance`/`modality` alone.
+    /// `None` for an adapter that predates this field (degrades to the old
+    /// dimensions/distance/modality-only check).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub embedding_profile_hash: Option<String>,
 }
 
 /// Validate the numeric domain required by cosine distance. Width alone is not

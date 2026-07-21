@@ -122,7 +122,15 @@ fn markdown_unit(key: &str, text: &str) -> kcs_adapter::types::MarkdownUnit {
     kcs_adapter::types::MarkdownUnit {
         unit_key: key.to_owned(),
         unit_type: kcs_adapter::types::UnitKind::Page,
-        markdown: text.to_owned(),
+        // QA41: non-empty content must satisfy Normalized Markdown v1 (07
+        // §5.2.1) — exactly one trailing LF. An empty `text` stays empty so
+        // `ct2_accept_005_rejects_empty_markdown` still exercises the
+        // separate "markdown must be non-empty" rule.
+        markdown: if text.is_empty() {
+            String::new()
+        } else {
+            format!("{text}\n")
+        },
         metadata: BTreeMap::new(),
     }
 }
@@ -154,7 +162,7 @@ fn response_incremental(
         unchanged_unit_keys: unchanged.into_iter().map(str::to_owned).collect(),
         added_units: added,
         removed_unit_keys: removed.into_iter().map(str::to_owned).collect(),
-        evidence_pointers: Vec::new(),
+        failed_units: Vec::new(),
         fallback_to_full: false,
         reason: None,
     }
@@ -659,7 +667,7 @@ fn ct2_accept_006_full_mode_uses_full_contract() {
         unchanged_unit_keys: Vec::new(),
         added_units: Vec::new(),
         removed_unit_keys: Vec::new(),
-        evidence_pointers: Vec::new(),
+        failed_units: Vec::new(),
         fallback_to_full: false,
         reason: None,
     };
@@ -1458,8 +1466,16 @@ fn ct2_budget_005_online_success_records_ledger_and_caps_next_task() {
     });
     assert!(online_entry.is_some());
 
+    // QA11/QA12 (step4b-contract-tests-p3a.md §D): `[budget.per_adapter]` is
+    // DEVICE-layer only (04 §5.4 L768 — "folder cap は total のみ"); the
+    // folder `.kcs/config.toml` no longer accepts this key at all (schema
+    // error). Set the cap in the device config
+    // (`$XDG_CONFIG_HOME/kcs/config.toml`), mirroring
+    // `r11_2_batch_resume_budget_pause_exits_6` below.
+    let device_config_dir = dir.path().join(".test-config/kcs");
+    fs::create_dir_all(&device_config_dir).unwrap();
     fs::write(
-        dir.path().join(".kcs/config.toml"),
+        device_config_dir.join("config.toml"),
         "[budget]\nmonthly_usd_cap = 50\n[budget.per_adapter]\nmarkdownize = 0.0\n",
     )
     .unwrap();
@@ -1473,7 +1489,9 @@ fn ct2_budget_005_online_success_records_ledger_and_caps_next_task() {
             && task["fallback_reason"] == "budget_exceeded"
     }));
     assert!(status["budget"]["cap_kind"].as_str().is_some());
-    assert_eq!(status["budget"]["folder_per_adapter"]["markdownize"], 0.0);
+    assert_eq!(status["budget"]["device_per_adapter"]["markdownize"], 0.0);
+    // The (now nonexistent) folder-layer key must not appear in the report.
+    assert!(status["budget"].get("folder_per_adapter").is_none());
 }
 
 // R11-2: the batch-side Then of CT2-BUDGET-005 (tasks/step2a-contract-tests.md) —
@@ -1516,7 +1534,15 @@ fn r11_2_batch_resume_budget_pause_exits_6() {
         task["input_path"] == "a.pdf"
             && task["status"] == "paused"
             && task["fallback_reason"] == "budget_exceeded"
+            // QA1 (step4b-contract-tests-p3a.md §A): a budget-paused task
+            // carries the closed `hold_reason` enum value.
+            && task["hold_reason"] == "budget"
     }));
+    // QA4: `kcs status`'s paused breakdown counts this task under "budget".
+    assert_eq!(
+        status["paused_by_hold_reason"]["budget"].as_u64().unwrap(),
+        1
+    );
 }
 
 // F1 (04 §5.4): offline/deterministic markdownize is billed at unit price 0, so

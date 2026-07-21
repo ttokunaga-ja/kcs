@@ -191,60 +191,99 @@ class TestPointerAttestation(unittest.TestCase):
             run_eval._read_json_bounded(self.temp.name, 1024, "test object")
 
 
-def _pointer(raw_hash, section_id=None, heading_path=None):
+def _pointer(raw_hash, section_id=None, heading_path=None, path_at_commit=None):
     p = {"raw_hash": raw_hash}
     if section_id is not None:
         p["section_id"] = section_id
     if heading_path is not None:
         p["heading_path"] = heading_path
+    if path_at_commit is not None:
+        p["path_at_commit"] = path_at_commit
     return {"evidence_pointer": p}
 
 
 class TestRecallAtK(unittest.TestCase):
+    """QB24/裁定4 (step4b-contract-tests-p3b.md §B): 射影は
+    (raw_hash, section, path_at_commit) の 3 要素 — リネーム前後を
+    別要素として数える。
+    """
+
     def test_half_recall(self):
         # expected 2 件、うち 1 件ヒット -> 0.5
-        expected = {("sha256:aaa", "回収率と精度"), ("sha256:ccc", "テールレイテンシ")}
+        expected = {
+            ("sha256:aaa", "回収率と精度", "doc-a.md"),
+            ("sha256:ccc", "テールレイテンシ", "doc-c.md"),
+        }
         response = {"results": [
-            _pointer("sha256:aaa", section_id="doc-a/回収率と精度"),   # hit
-            _pointer("sha256:zzz", section_id="noise/ノイズ"),          # miss
+            _pointer("sha256:aaa", section_id="doc-a/回収率と精度", path_at_commit="doc-a.md"),  # hit
+            _pointer("sha256:zzz", section_id="noise/ノイズ", path_at_commit="noise.md"),          # miss
         ]}
         self.assertEqual(run_eval.recall_at_k(response, expected, k=10), 0.5)
 
     def test_full_recall_via_heading_path(self):
-        expected = {("sha256:aaa", "回収率と精度"), ("sha256:bbb", "テールレイテンシ")}
+        expected = {
+            ("sha256:aaa", "回収率と精度", "doc-a.md"),
+            ("sha256:bbb", "テールレイテンシ", "doc-b.md"),
+        }
         response = {"results": [
-            _pointer("sha256:aaa", heading_path=["Doc A", "回収率と精度"]),
-            _pointer("sha256:bbb", heading_path=["Doc B", "テールレイテンシ"]),
+            _pointer("sha256:aaa", heading_path=["Doc A", "回収率と精度"], path_at_commit="doc-a.md"),
+            _pointer("sha256:bbb", heading_path=["Doc B", "テールレイテンシ"], path_at_commit="doc-b.md"),
         ]}
         self.assertEqual(run_eval.recall_at_k(response, expected, k=10), 1.0)
 
     def test_zero_recall(self):
-        expected = {("sha256:aaa", "回収率と精度")}
-        response = {"results": [_pointer("sha256:xxx", section_id="a/b")]}
+        expected = {("sha256:aaa", "回収率と精度", "doc-a.md")}
+        response = {"results": [_pointer("sha256:xxx", section_id="a/b", path_at_commit="x.md")]}
         self.assertEqual(run_eval.recall_at_k(response, expected, k=10), 0.0)
 
     def test_section_mismatch_same_raw_is_miss(self):
-        # raw_hash 一致でも section が違えば (raw_hash, section) pair はミス
-        expected = {("sha256:aaa", "回収率と精度")}
-        response = {"results": [_pointer("sha256:aaa", section_id="a/スループットとメモリ")]}
+        # raw_hash・path 一致でも section が違えば 3 要素 key はミス
+        expected = {("sha256:aaa", "回収率と精度", "doc-a.md")}
+        response = {"results": [
+            _pointer("sha256:aaa", section_id="a/スループットとメモリ", path_at_commit="doc-a.md")
+        ]}
         self.assertEqual(run_eval.recall_at_k(response, expected, k=10), 0.0)
+
+    def test_path_at_commit_mismatch_same_raw_and_section_is_miss(self):
+        # QB24 の核心: raw_hash・section が一致しても path_at_commit が
+        # 違えば (リネーム前後) 別要素としてミス扱いになる。
+        expected = {("sha256:aaa", "回収率と精度", "old-name.md")}
+        response = {"results": [
+            _pointer("sha256:aaa", section_id="a/回収率と精度", path_at_commit="new-name.md")
+        ]}
+        self.assertEqual(run_eval.recall_at_k(response, expected, k=10), 0.0)
+
+    def test_rename_old_and_new_path_count_as_distinct_hits(self):
+        # 旧名・新名の両方が返れば、それぞれが expected の別要素として満たされる。
+        expected = {
+            ("sha256:aaa", "回収率と精度", "old-name.md"),
+            ("sha256:aaa", "回収率と精度", "new-name.md"),
+        }
+        response = {"results": [
+            _pointer("sha256:aaa", section_id="a/回収率と精度", path_at_commit="old-name.md"),
+            _pointer("sha256:aaa", section_id="a/回収率と精度", path_at_commit="new-name.md"),
+        ]}
+        self.assertEqual(run_eval.recall_at_k(response, expected, k=10), 1.0)
 
     def test_k_truncation(self):
         # 11 件目 (index 10) のヒットは k=10 では数えない
-        noise = [_pointer(f"sha256:n{i}", section_id="x/y") for i in range(10)]
-        hit = _pointer("sha256:aaa", section_id="a/回収率と精度")
-        expected = {("sha256:aaa", "回収率と精度")}
+        noise = [_pointer(f"sha256:n{i}", section_id="x/y", path_at_commit=f"n{i}.md") for i in range(10)]
+        hit = _pointer("sha256:aaa", section_id="a/回収率と精度", path_at_commit="doc-a.md")
+        expected = {("sha256:aaa", "回収率と精度", "doc-a.md")}
         response = {"results": noise + [hit]}
         self.assertEqual(run_eval.recall_at_k(response, expected, k=10), 0.0)
         # k=11 なら数える
         self.assertEqual(run_eval.recall_at_k(response, expected, k=11), 1.0)
 
     def test_distinct_dedup(self):
-        # 同一 (raw_hash, section) が 2 件でも distinct 1 件として数える
-        expected = {("sha256:aaa", "回収率と精度"), ("sha256:bbb", "テールレイテンシ")}
+        # 同一 (raw_hash, section, path_at_commit) が 2 件でも distinct 1 件として数える
+        expected = {
+            ("sha256:aaa", "回収率と精度", "doc-a.md"),
+            ("sha256:bbb", "テールレイテンシ", "doc-b.md"),
+        }
         response = {"results": [
-            _pointer("sha256:aaa", section_id="a/回収率と精度"),
-            _pointer("sha256:aaa", section_id="a/回収率と精度"),
+            _pointer("sha256:aaa", section_id="a/回収率と精度", path_at_commit="doc-a.md"),
+            _pointer("sha256:aaa", section_id="a/回収率と精度", path_at_commit="doc-a.md"),
         ]}
         # 1/2 = 0.5
         self.assertEqual(run_eval.recall_at_k(response, expected, k=10), 0.5)
@@ -294,20 +333,29 @@ class TestResolver(unittest.TestCase):
             spec.render_anchor(a).encode("utf-8")).hexdigest()
 
     def test_m3_1_stable(self):
-        raw, sid = self.resolver.resolve_one("research", "embedding-benchmark.md", "recall")
+        # QB24/裁定4: resolve_one は (raw_hash, section_id, path_at_commit) の
+        # 3 要素を返す — path_at_commit は解決元の file_ そのもの。
+        raw, sid, path = self.resolver.resolve_one(
+            "research", "embedding-benchmark.md", "recall")
         self.assertEqual(sid, "回収率と精度")
         self.assertEqual(raw, self._expected_raw("research", "embedding-benchmark.md"))
+        self.assertEqual(path, "embedding-benchmark.md")
 
     def test_m3_2_renamed_by_old_name(self):
-        # golden は旧名 auth-spec.md で覚えている
-        raw, sid = self.resolver.resolve_one("research", "auth-spec.md", "api-token")
+        # golden は旧名 auth-spec.md で覚えている — path_at_commit も旧名になる
+        # (M3-2 は --all-history でその版を recall するはずなので、この
+        # 旧名こそが期待される path_at_commit)。
+        raw, sid, path = self.resolver.resolve_one("research", "auth-spec.md", "api-token")
         self.assertEqual(sid, "api-トークン")
         self.assertEqual(raw, self._expected_raw("research", "auth-spec.md"))
+        self.assertEqual(path, "auth-spec.md")
 
     def test_m3_3_deleted(self):
-        raw, sid = self.resolver.resolve_one("research", "deprecated-approach.md", "method")
+        raw, sid, path = self.resolver.resolve_one(
+            "research", "deprecated-approach.md", "method")
         self.assertEqual(sid, "旧手法")
         self.assertEqual(raw, self._expected_raw("research", "deprecated-approach.md"))
+        self.assertEqual(path, "deprecated-approach.md")
 
     def test_unknown_mnemonic_raises(self):
         with self.assertRaises(run_eval.ResolveError):
@@ -326,8 +374,9 @@ class TestResolver(unittest.TestCase):
         for q in queries:
             resolved, errs = self.resolver.resolve_expected(q["expected"])
             errors.extend(errs)
-            for _, sid in resolved:
+            for _, sid, path_at_commit in resolved:
                 self.assertTrue(sid, "section_id が空")
+                self.assertTrue(path_at_commit, "path_at_commit が空")
         self.assertEqual(errors, [], f"解決エラー: {errors}")
 
 
@@ -373,9 +422,11 @@ class TestStep4EvalGates(unittest.TestCase):
     @staticmethod
     def _record(results, expected_set=None):
         if expected_set is None:
+            # QB24/裁定4: 3 要素射影 (raw_hash, section, path_at_commit).
             expected_set = {
                 (result["evidence_pointer"]["raw_hash"],
-                 run_eval._pointer_section(result["evidence_pointer"]))
+                 run_eval._pointer_section(result["evidence_pointer"]),
+                 result["evidence_pointer"].get("path_at_commit"))
                 for result in results
             }
         return {"response": {"results": results}, "expected_set": expected_set}
@@ -454,7 +505,7 @@ class TestStep4EvalGates(unittest.TestCase):
         self.assertEqual(coverage["edited_old_missing"], [])
 
         noise = run_eval.assess_history_coverage(
-            {"M3-2": [self._record(results, {("sha256:other", "y")})]}, history)
+            {"M3-2": [self._record(results, {("sha256:other", "y", None)})]}, history)
         self.assertEqual(len(noise["edited_old_missing"]), 3)
 
     def test_rename_requires_old_and_new_snapshot_paths_with_current_alias(self):

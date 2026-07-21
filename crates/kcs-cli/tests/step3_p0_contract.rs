@@ -528,10 +528,13 @@ fn r11_9_view_json_exposes_temporary_field() {
 }
 
 #[test]
-fn ct3_open_003_dead_pointer_returns_exit_4() {
+fn ct3_open_003_scope_unreachable_returns_exit_3() {
+    // QB1 (step4b-contract-tests-p3b.md §A, 06 §7 L370 / 10 §12.2 L931):
+    // scope_unreachable is retryable (exit 3), distinct from a dead pointer
+    // (tombstoned/not_found) within a reachable scope, which stays exit 4.
     let dir = indexed_scope();
     let bad = "kcs://missing/sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc/sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
-    let err = json_failure(&dir, &["open", bad], 4);
+    let err = json_failure(&dir, &["open", bad], 3);
     assert_eq!(err["error_code"], "KCS-E-EVIDENCE-SCOPE-UNREACHABLE-001");
 }
 
@@ -1843,11 +1846,12 @@ fn ct3_evidence_003_scope_resolves_via_path_then_registry() {
     assert!(viewed["text"].as_str().unwrap().contains("トークン TTL"));
 
     // (c) broken scope_path + unknown scope_id + registry miss -> scope_unreachable.
+    // QB1: scope_unreachable is retryable, exit 3 (not the dead-pointer exit 4).
     let mut orphan = pointer.clone();
     orphan["scope_path"] = serde_json::json!(parent.path().join("gone/.kcs").display().to_string());
     orphan["scope_id"] = serde_json::json!("scope_does_not_exist");
     let (code, err) = run_json(&elsewhere, &data_home, &["view", &orphan.to_string()]);
-    assert_eq!(code, 4);
+    assert_eq!(code, 3);
     assert_eq!(err["error_code"], "KCS-E-EVIDENCE-SCOPE-UNREACHABLE-001");
 }
 
@@ -2002,10 +2006,10 @@ fn ct3_evidence_006_three_valued_resolution_failures() {
     let err_b = json_failure(&dir_b, &["open", &ptr_b], 4);
     assert_eq!(err_b["error_code"], "KCS-E-STORE-CORRUPT-001");
 
-    // (c) scope unreachable.
+    // (c) scope unreachable. QB1: retryable, exit 3 (not the dead-pointer exit 4).
     let dir_c = indexed_scope();
     let bad = "kcs://scope_missing/sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc/sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
-    let err_c = json_failure(&dir_c, &["open", bad], 4);
+    let err_c = json_failure(&dir_c, &["open", bad], 3);
     assert_eq!(err_c["error_code"], "KCS-E-EVIDENCE-SCOPE-UNREACHABLE-001");
 }
 
@@ -2872,8 +2876,13 @@ fn pc60_search_at_with_descendants_is_invalid_usage() {
 /// verification, so none of those completed paths belongs here.
 #[test]
 fn r9_6_not_implemented_exit_code_is_uniform() {
+    // QB50-58 (step4b-contract-tests-p3b.md §D) implemented `kcs log
+    // --at/--since` (see step4b_p3b_contract.rs's qb5x tests) — this
+    // regression now exercises `kcs gc`, a still-genuine Phase 4+ command
+    // placeholder (`Command::Gc`'s own doc comment), to keep pinning the
+    // not-implemented exit-code convention itself.
     let dir = indexed_scope();
-    let args = ["log", "--at", "HEAD"];
+    let args = ["gc"];
     let err = json_failure(&dir, &args, 1);
     assert_eq!(err["error_code"], "KCS-E-CONFIG-NOT-IMPLEMENTED-001");
 }
@@ -4817,17 +4826,23 @@ fn r12_1_multi_scope_config_is_wired_and_bounded() {
     assert_eq!(error["error_code"], "KCS-E-CONFIG-SCHEMA-001");
 }
 
-// include_neighbors has no implementation concept: a non-default value is a loud
-// NOT-IMPLEMENTED (exit 1), the documented default (1) is a no-op accept.
+// QA61 (step4b-contract-tests-p3a.md §R, arbitration #7): `include_neighbors`
+// was removed from config.schema.json entirely (it dropped out of the
+// documented config example with no implementation concept ever assigned,
+// R12-1) — ANY value (including the old documented default, 1) is now an
+// unknown-key schema error, superseding the old "1 is a no-op accept, other
+// values are NOT-IMPLEMENTED" behavior this test used to cover.
 #[test]
-fn r12_1_incremental_include_neighbors_non_default_rejected() {
+fn qa61_incremental_include_neighbors_key_is_removed_from_schema() {
     let dir = multi_chunk_scope();
-    write_scope_config(&dir, "[markdownize.incremental]\ninclude_neighbors = 2\n");
-    let err = json_failure(&dir, &["status"], 1);
-    assert_eq!(err["error_code"], "KCS-E-CONFIG-NOT-IMPLEMENTED-001");
-    // The documented default (1) is accepted.
-    write_scope_config(&dir, "[markdownize.incremental]\ninclude_neighbors = 1\n");
-    json_success(&dir, &["status"]);
+    for value in [1, 2] {
+        write_scope_config(
+            &dir,
+            &format!("[markdownize.incremental]\ninclude_neighbors = {value}\n"),
+        );
+        let err = json_failure(&dir, &["status"], 2);
+        assert_eq!(err["error_code"], "KCS-E-CONFIG-SCHEMA-001");
+    }
 }
 
 // ===========================================================================
@@ -7820,6 +7835,7 @@ fn r22_5_legacy_octet_stream_text_task_is_retired_not_sent() {
         fallback_reason: Some("ready_for_online_adapter".to_owned()),
         created_at: "2026-07-01T00:00:00Z".to_owned(),
         bbox_annotation_enabled: None,
+        hold_reason: None,
         reserved_usd: None,
         reserved_month: None,
         reservation_id: None,

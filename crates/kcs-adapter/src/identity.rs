@@ -15,6 +15,15 @@ const PROFILE_FIELDS: &[&str] = &[
     "prompt_template_hash",
     "sampling",
     "output_schema",
+    // QA34 (step4b-contract-tests-p3a.md §J, 03 §5.1 L355-356): prepare-only —
+    // {renderer_name, renderer_version, dpi, color_space, output_format}, all
+    // rendering settings that affect byte-level determinism (04 §2.1). No
+    // current built-in Prepare Adapter renders page images (the bundled one
+    // is PDF text-layer extraction only), so this key is absent from every
+    // existing profile input and does not perturb the frozen hash vectors
+    // below — it is schema/calc-convention groundwork ahead of a rendering
+    // Prepare Adapter (04 §2.1's "採用要件", confirmed with no grace period).
+    "render_params",
     "dimensions",
     "distance",
     "modality",
@@ -243,5 +252,70 @@ mod tests {
             "spec_version": 1
         });
         assert!(tool_profile_hash(&profile).is_err());
+    }
+
+    // QA34 (step4b-contract-tests-p3a.md §J, 03 §5.1 L355-356): `render_params`
+    // is a hash input — a renderer setting change perturbs `tool_profile_hash`
+    // (04 §2.1's prepared-Adapter byte-stability requirement rests on this).
+    #[test]
+    fn qa34_render_params_perturbs_tool_profile_hash() {
+        let base = json!({
+            "adapter_kind": "prepare",
+            "adapter_role": "text",
+            "model_or_tool_family": "kcs-render-prepare",
+            "model_version_pin": "1.0.0",
+            "runtime_kind": "local",
+            "spec_version": 1,
+            "render_params": {
+                "renderer_name": "kcs-pdfium",
+                "renderer_version": "1.0.0",
+                "dpi": 300,
+                "color_space": "srgb",
+                "output_format": "png"
+            }
+        });
+        let higher_dpi = json!({
+            "adapter_kind": "prepare",
+            "adapter_role": "text",
+            "model_or_tool_family": "kcs-render-prepare",
+            "model_version_pin": "1.0.0",
+            "runtime_kind": "local",
+            "spec_version": 1,
+            "render_params": {
+                "renderer_name": "kcs-pdfium",
+                "renderer_version": "1.0.0",
+                "dpi": 600,
+                "color_space": "srgb",
+                "output_format": "png"
+            }
+        });
+        assert_ne!(
+            tool_profile_hash(&base).unwrap(),
+            tool_profile_hash(&higher_dpi).unwrap()
+        );
+        // Absent `render_params` (every existing built-in profile) is
+        // unaffected — the frozen `profile_hash_vectors_match_step2a` vectors
+        // above prove this by never including the key.
+        let without = json!({
+            "adapter_kind": "prepare",
+            "adapter_role": "text",
+            "model_or_tool_family": "kcs-render-prepare",
+            "model_version_pin": "1.0.0",
+            "runtime_kind": "local",
+            "spec_version": 1,
+            "render_params": null
+        });
+        assert_eq!(
+            tool_profile_hash(&without).unwrap(),
+            jcs_hash(&json!({
+                "adapter_kind": "prepare",
+                "adapter_role": "text",
+                "model_or_tool_family": "kcs-render-prepare",
+                "model_version_pin": "1.0.0",
+                "runtime_kind": "local",
+                "spec_version": 1
+            }))
+            .unwrap()
+        );
     }
 }

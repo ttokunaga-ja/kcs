@@ -523,6 +523,10 @@ impl<C: MistralOcrClient> MarkdownizeAdapter for MistralOcrMarkdownizeAdapter<C>
                 "incremental_update".to_owned(),
             ],
             allow_network: true,
+            // QA18: Mistral OCR bills per page (03 §11's `[pricing] pages =
+            // 0.004` example); there is no separate token leg.
+            billable_kinds: vec![crate::types::BillableUnitKind::Pages],
+            reject_billing: Some(crate::types::BillingDeclaration::Billable),
         }
     }
 
@@ -655,7 +659,7 @@ impl<C: MistralOcrClient> MarkdownizeAdapter for MistralOcrMarkdownizeAdapter<C>
             unchanged_unit_keys: Vec::new(),
             added_units: Vec::new(),
             removed_unit_keys: Vec::new(),
-            evidence_pointers: Vec::new(),
+            failed_units: Vec::new(),
             fallback_to_full: false,
             reason: None,
         })

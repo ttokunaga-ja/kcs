@@ -61,7 +61,13 @@ pub struct BudgetCaps {
     pub device_monthly_usd_cap: f64,
     pub folder_monthly_usd_cap: Option<f64>,
     pub device_per_adapter: BTreeMap<String, f64>,
-    pub folder_per_adapter: BTreeMap<String, f64>,
+    // QA11/QA12 (step4b-contract-tests-p3a.md §D, arbitration #2): folder-layer
+    // `[budget.per_adapter]` does not exist as a concept (04 §5.4 L768 —
+    // `per_adapter` is device-layer only, folder cap is total-only) — there is
+    // deliberately no `folder_per_adapter` field here for any code to read.
+    // `read_budget_config` rejects a non-empty `[budget.per_adapter]` on the
+    // FOLDER path outright (`KCS-E-CONFIG-SCHEMA-001`) rather than parsing it
+    // into a value nothing may act on.
     /// F5: `false` = soft-stop (record the charge and continue over cap); `true`
     /// (default) = hard pause at the cap. The folder `.kcs/config.toml` value
     /// overrides the device value when present.
@@ -138,14 +144,27 @@ pub fn read_budget_policy(
     folder_config_path: impl AsRef<Path>,
 ) -> Result<BudgetCaps> {
     let device = read_budget_config(device_config_path)?;
+    let folder_path_display = folder_config_path.as_ref().display().to_string();
     let folder = read_budget_config(folder_config_path)?;
+    // QA12 (step4b-contract-tests-p3a.md §D, arbitration #2): folder
+    // `.kcs/config.toml` does not define `[budget.per_adapter]` (04 §5.4
+    // L768) — reject it as a config schema error rather than silently
+    // dropping it (the earlier behavior QA11 fixes: it used to be parsed and
+    // fed into the enqueue-time pre-check, narrowing remaining budget for a
+    // constraint that does not exist at the folder layer).
+    if !folder.per_adapter.is_empty() {
+        return Err(PipelineError::Schema(format!(
+            "budget.per_adapter is not defined for folder config (device-layer only, 04 §5.4) \
+             at {folder_path_display}: {:?}",
+            folder.per_adapter.keys().collect::<Vec<_>>()
+        )));
+    }
     Ok(BudgetCaps {
         device_monthly_usd_cap: device
             .monthly_usd_cap
             .unwrap_or(DEFAULT_DEVICE_MONTHLY_USD_CAP),
         folder_monthly_usd_cap: folder.monthly_usd_cap,
         device_per_adapter: device.per_adapter,
-        folder_per_adapter: folder.per_adapter,
         // F5: the more specific folder config overrides the device config; absent
         // both, the historical default (hard pause / warn at 80%).
         hard_stop: folder
@@ -364,7 +383,6 @@ mod tests {
             device_monthly_usd_cap: 100.0,
             folder_monthly_usd_cap: Some(10.0),
             device_per_adapter: BTreeMap::new(),
-            folder_per_adapter: BTreeMap::new(),
             hard_stop: true,
             warn_at_percent: 80,
         };
@@ -415,6 +433,28 @@ mod tests {
         std::fs::write(&device, "[budget]\nwarn_at_percent = 150\n").unwrap();
         let err = read_budget_policy(&device, &folder).unwrap_err();
         assert!(matches!(err, PipelineError::Schema(_)), "got {err:?}");
+    }
+
+    // QA12 (step4b-contract-tests-p3a.md §D, arbitration #2): folder
+    // `.kcs/config.toml` does not define `[budget.per_adapter]` (04 §5.4
+    // L768 — device-layer only) — a folder config setting it is a schema
+    // error, not a silently-ignored key. The identical key on the DEVICE
+    // config still parses (regression check against `cl61_*` below).
+    #[test]
+    fn qa12_folder_per_adapter_is_a_schema_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let device = dir.path().join("device.toml");
+        let folder = dir.path().join("folder.toml");
+        std::fs::write(&folder, "[budget.per_adapter]\nmarkdownize = 0.0\n").unwrap();
+        let err = read_budget_policy(&device, &folder).unwrap_err();
+        assert!(matches!(err, PipelineError::Schema(_)), "got {err:?}");
+        assert!(err.to_string().contains("budget.per_adapter"));
+
+        // The device-side equivalent is unaffected.
+        std::fs::remove_file(&folder).unwrap();
+        std::fs::write(&device, "[budget.per_adapter]\nmarkdownize = 0.0\n").unwrap();
+        let ok = read_budget_policy(&device, &folder).unwrap();
+        assert_eq!(ok.device_per_adapter.get("markdownize"), Some(&0.0));
     }
 
     // CL61 (04 §5.4 L768): `[budget.per_adapter]` keys are the closed

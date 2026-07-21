@@ -571,7 +571,10 @@ pub fn ensure_schema_on_connection(conn: &Connection, config: FtsSchemaConfig) -
     conn.execute_batch(
         r#"
         CREATE TABLE IF NOT EXISTS chunks (
-            chunk_id TEXT PRIMARY KEY,
+            -- QB29 (step4b-contract-tests-p3b.md §C, 04 §4.1 L385-386 /
+            -- 03-data-model.md §8, U98): a rowid table's `TEXT PRIMARY KEY`
+            -- does NOT imply NOT NULL by itself — spelled out explicitly.
+            chunk_id TEXT NOT NULL PRIMARY KEY,
             raw_hash TEXT NOT NULL,
             tool_profile_hash TEXT NOT NULL,
             gen INTEGER NOT NULL,
@@ -605,7 +608,9 @@ pub fn ensure_schema_on_connection(conn: &Connection, config: FtsSchemaConfig) -
         CREATE INDEX IF NOT EXISTS idx_chunk_publications_chunk_id
             ON chunk_publications(chunk_id);
         CREATE TABLE IF NOT EXISTS embeddings (
-            id TEXT PRIMARY KEY,
+            -- QB29: see the `chunks.chunk_id` comment above — same rowid-table
+            -- TEXT PRIMARY KEY nullability gap, closed explicitly.
+            id TEXT NOT NULL PRIMARY KEY,
             target_type TEXT NOT NULL,
             target_id TEXT NOT NULL,
             modality TEXT NOT NULL,
@@ -614,6 +619,10 @@ pub fn ensure_schema_on_connection(conn: &Connection, config: FtsSchemaConfig) -
             distance TEXT NOT NULL,
             profile_hash TEXT NOT NULL
         );
+        -- QB32 (step4b-contract-tests-p3b.md §C, 04 §4.3 L534-536): so the
+        -- query_cache 256-row prune/enumerate (once wired, QB33/34) does not
+        -- SCAN the full corpus-sized `embeddings` table to find its rows.
+        CREATE INDEX IF NOT EXISTS idx_embeddings_type ON embeddings(target_type);
         CREATE TABLE IF NOT EXISTS tree_entries (
             commit_hash TEXT NOT NULL,
             path TEXT NOT NULL,
@@ -774,7 +783,9 @@ fn migrate_legacy_chunk_config_column(conn: &Connection) -> Result<bool> {
 
             ALTER TABLE chunks RENAME TO chunks_legacy_chunk_config;
             CREATE TABLE chunks (
-                chunk_id TEXT PRIMARY KEY,
+                -- QB29: matches ensure_schema_on_connection's corrected DDL —
+                -- a migrated table gets the same NOT NULL fix a fresh one does.
+                chunk_id TEXT NOT NULL PRIMARY KEY,
                 raw_hash TEXT NOT NULL,
                 tool_profile_hash TEXT NOT NULL,
                 gen INTEGER NOT NULL,

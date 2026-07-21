@@ -28,6 +28,54 @@ pub const BUDGET_EXCEEDED_REASON: &str = "budget_exceeded";
 pub const SECRETS_TIER_B_HOLD_REASON: &str = "secrets_tier_b_hold";
 pub const RETIRED_NON_LIVE_REASON: &str = "retired_non_live";
 
+/// step4b-contract-tests-p3a.md QA1: the closed `hold_reason` enum for a
+/// `Paused` task (04 §5.2 L679-683: `hold_reason = budget | auth |
+/// tier_b_approval`), distinct from `fallback_reason`'s `RetryErrorKind`
+/// classification for `Failed` tasks. `Auth` is wired into the enum now so
+/// [`hold_reason_for_reason`] and `kcs status`'s breakdown (QA4) are
+/// spec-shaped, but no call site currently *transitions* an auth failure into
+/// `Paused` — that would additionally require changing the online-send
+/// failure handler's unconditional `TaskStatus::Failed` (`main.rs`, the send
+/// dispatch loop) and `RetryErrorKind::AuthError`'s `retry_policy`, which in
+/// turn would break `batch retry`'s Failed-only task selection and >20
+/// existing regression tests (`r16_7_*`, `r17_3_*`, `r19_*`) that assert
+/// `status=Failed` + `attempts` advancing for `rate_limit`/`auth_error`
+/// sends (docs/04 §5.3 R16-7). QA2/QA3 (the status-machine transition itself)
+/// are consequently deferred — not implemented, not tested here — pending a
+/// dedicated pass that re-verifies that suite alongside the transition.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HoldReason {
+    Budget,
+    Auth,
+    TierBApproval,
+}
+
+impl HoldReason {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Budget => "budget",
+            Self::Auth => "auth",
+            Self::TierBApproval => "tier_b_approval",
+        }
+    }
+}
+
+/// Map a `fallback_reason` string to the [`HoldReason`] it represents when the
+/// task is (or is about to become) `Paused`. `None` for any reason that does
+/// not correspond to a hold (e.g. a `RetryErrorKind` reason on a `Failed`
+/// task).
+#[must_use]
+pub fn hold_reason_for_reason(reason: &str) -> Option<HoldReason> {
+    match reason {
+        BUDGET_EXCEEDED_REASON => Some(HoldReason::Budget),
+        SECRETS_TIER_B_HOLD_REASON => Some(HoldReason::TierBApproval),
+        "auth_error" => Some(HoldReason::Auth),
+        _ => None,
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TaskType {
@@ -80,6 +128,13 @@ pub struct TaskDescriptor {
     /// default-on work.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bbox_annotation_enabled: Option<bool>,
+    /// QA1 (step4b-contract-tests-p3a.md §A): the closed hold reason for a
+    /// `Paused` task (04 §5.2). `None` for any non-paused task, and for a
+    /// legacy `Paused` row written before this field existed (deserialization
+    /// default; `kcs status`'s breakdown falls back to re-deriving it from
+    /// `fallback_reason` via [`hold_reason_for_reason`] for those rows).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hold_reason: Option<HoldReason>,
     // R17-3: the exact F8 reservation this task currently holds (amount + the
     // ledger `month` it landed in), stamped when a FRESH charge is reserved in the
     // batch send path and left untouched on the RateLimit/Quota re-reservation-skip
@@ -910,11 +965,19 @@ pub fn retry_policy(error_kind: RetryErrorKind) -> RetryPolicy {
             error_code: "KCS-E-BATCH-INPUT-001".to_owned(),
             paused: false,
         },
+        // QA45 (step4b-contract-tests-p3a.md §M): 04 §5.3 L738-740 —
+        // `retryable, max_attempts=1` (one same-mode retry for output jitter;
+        // a repeat violation is failed permanent — an Adapter bug, not a
+        // transient condition). No automatic fallback to `full` here (that
+        // is only for incremental-capability incompatibility, 07 §8.1). This
+        // is the LOCAL/offline display value; the durable "1 回のみ" judge
+        // for the online/Batch path is `batch_requests.contract_violation_count`
+        // (04 §5.2 L723, CL21 — already correct, untouched by this change).
         RetryErrorKind::ContractViolation => RetryPolicy {
             error_kind,
-            retryable: false,
-            max_attempts: Some(0),
-            backoff: "full_fallback_once".to_owned(),
+            retryable: true,
+            max_attempts: Some(1),
+            backoff: "immediate".to_owned(),
             error_code: "KCS-E-ADAPTER-CONTRACT-001".to_owned(),
             paused: false,
         },
@@ -958,6 +1021,7 @@ mod tests {
             fallback_reason: None,
             created_at: "2026-04-25T12:00:00Z".to_owned(),
             bbox_annotation_enabled: None,
+            hold_reason: None,
             reserved_usd: None,
             reserved_month: None,
             reservation_id: None,
@@ -985,6 +1049,7 @@ mod tests {
             fallback_reason: None,
             created_at: "2026-04-25T12:00:00Z".to_owned(),
             bbox_annotation_enabled: None,
+            hold_reason: None,
             reserved_usd: None,
             reserved_month: None,
             reservation_id: None,
@@ -1069,6 +1134,7 @@ mod tests {
             fallback_reason: None,
             created_at: "2026-04-25T12:00:00Z".to_owned(),
             bbox_annotation_enabled: None,
+            hold_reason: None,
             reserved_usd: None,
             reserved_month: None,
             reservation_id: None,
@@ -1115,6 +1181,7 @@ mod tests {
             fallback_reason: None,
             created_at: "2026-04-25T12:00:00Z".to_owned(),
             bbox_annotation_enabled: None,
+            hold_reason: None,
             reserved_usd: None,
             reserved_month: None,
             reservation_id: None,
@@ -1149,6 +1216,45 @@ mod tests {
             stray.is_empty(),
             "R9-8: temp not cleaned up on failure: {stray:?}"
         );
+    }
+
+    /// QA1 (step4b-contract-tests-p3a.md §A): the closed `hold_reason` enum
+    /// round-trips the 3 spec values and the currently-wired 2 of 3 reasons
+    /// (`budget_exceeded`/`secrets_tier_b_hold`) map onto it; `auth_error`
+    /// maps too (the enum value exists) even though no production call site
+    /// transitions an auth failure into `Paused` yet (see the `HoldReason`
+    /// doc comment — QA2/QA3 deferred).
+    #[test]
+    fn qa1_hold_reason_closed_enum_serializes_and_maps_from_fallback_reason() {
+        assert_eq!(serde_json::to_value(HoldReason::Budget).unwrap(), "budget");
+        assert_eq!(serde_json::to_value(HoldReason::Auth).unwrap(), "auth");
+        assert_eq!(
+            serde_json::to_value(HoldReason::TierBApproval).unwrap(),
+            "tier_b_approval"
+        );
+        assert_eq!(
+            hold_reason_for_reason(BUDGET_EXCEEDED_REASON),
+            Some(HoldReason::Budget)
+        );
+        assert_eq!(
+            hold_reason_for_reason(SECRETS_TIER_B_HOLD_REASON),
+            Some(HoldReason::TierBApproval)
+        );
+        assert_eq!(hold_reason_for_reason("auth_error"), Some(HoldReason::Auth));
+        assert_eq!(hold_reason_for_reason("network_error"), None);
+        assert_eq!(hold_reason_for_reason("rate_limit"), None);
+
+        // A legacy Paused row without `hold_reason` deserializes to `None`
+        // (backward compatible with a pre-QA1 `tasks.jsonl`).
+        let mut task = valid_task();
+        task.status = TaskStatus::Paused;
+        task.fallback_reason = Some(BUDGET_EXCEEDED_REASON.to_owned());
+        task.hold_reason = Some(HoldReason::Budget);
+        let mut value = serde_json::to_value(&task).unwrap();
+        assert_eq!(value["hold_reason"], "budget");
+        value.as_object_mut().unwrap().remove("hold_reason");
+        let legacy: TaskDescriptor = serde_json::from_value(value).unwrap();
+        assert_eq!(legacy.hold_reason, None);
     }
 
     #[test]

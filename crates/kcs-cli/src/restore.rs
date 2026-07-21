@@ -71,16 +71,20 @@ pub(super) fn run(args: RestoreArgs) -> Result<Value> {
         ));
     }
 
+    // (0) kcs_format_version compatibility is already checked inside
+    // `resolve_source` (both `resolve_evidence_source` and
+    // `resolve_local_source` open a `Repository` before returning), so it
+    // runs ahead of the shared (1)+(3) pair below — QB5 (step4b-contract-
+    // tests-p3b.md §A): this ordering was already correct, unlike
+    // open/view/evidence-verify (QB6).
     let source = resolve_source(&args.source)?;
-    // §I checkpoint 1 (LC53), opened as soon as the source scope is known.
-    // LC57: restore's checkpoint 2 (below, in `publish_all`) fires per file,
-    // immediately before that file's atomic rename — after the private-temp
-    // staging completes and before the irreversible publish, matching the
-    // spec's fixed "expand -> recheck -> publish" order.
-    let checkpoint = ReadBarrierCheckpoint::open(&source.target.kcs_dir)?;
-    // LC45 (item 2): a separate check from §I's checkpoint — see
-    // `check_index_generation_current`'s doc comment.
-    super::check_index_generation_current(&source.target.kcs_dir)?;
+    // QB5/QB6/裁定1: shared (1)+(3) preflight pair, opened as soon as the
+    // source scope is known. LC57: restore's checkpoint 2 (below, in
+    // `publish_all`) fires per file, immediately before that file's atomic
+    // rename — after the private-temp staging completes and before the
+    // irreversible publish, matching the spec's fixed "expand -> recheck ->
+    // publish" order.
+    let checkpoint = super::preflight_barrier_and_index(&source.target.kcs_dir)?;
     let validated_destination = validate_destination(&args.to, &source.target)?;
     let _initial_preflight = preflight(&source, &validated_destination.path, args.force)?;
 

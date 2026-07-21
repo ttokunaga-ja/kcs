@@ -105,6 +105,13 @@
       },
       "additionalProperties": false
     },
+    "observability": {
+      "type": "object",
+      "properties": {
+        "retention_days": { "type": "integer", "minimum": 1, "maximum": 3650 }
+      },
+      "additionalProperties": false
+    },
     "markdownize": {
       "type": "object",
       "properties": {
@@ -113,18 +120,11 @@
           "properties": {
             "enabled": { "type": "boolean" },
             "threshold": { "type": "number", "minimum": 0, "maximum": 1 },
-            "max_consecutive": { "type": "integer", "minimum": 0 },
-            "include_neighbors": { "type": "integer", "minimum": 0 }
+            "max_consecutive": { "type": "integer", "minimum": 0 }
           },
           "additionalProperties": false
         },
-        "bbox_annotation": {
-          "type": "object",
-          "properties": {
-            "enabled": { "type": "boolean" }
-          },
-          "additionalProperties": false
-        }
+        "bbox_annotation": { "type": "boolean" }
       },
       "additionalProperties": false
     },

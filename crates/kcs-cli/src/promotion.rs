@@ -619,6 +619,7 @@ mod tests {
             fallback_reason: Some("online_adapter_done".to_owned()),
             created_at: "2026-07-13T00:00:00Z".to_owned(),
             bbox_annotation_enabled: Some(true),
+            hold_reason: None,
             reserved_usd: None,
             reserved_month: None,
             reservation_id: None,

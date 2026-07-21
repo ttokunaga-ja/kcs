@@ -598,6 +598,12 @@ pub fn load_config_ignore(scope_path: &Path) -> Result<Vec<IgnoreRule>> {
         .collect())
 }
 
+/// QA7 (step4b-contract-tests-p3a.md §B): the Tier B needle set, exposed so
+/// `kcs_core::scope::tier_a_template_text`'s `effective_ignore_hash` input
+/// (10 §1.1) can include it — kept in this one place so [`classify_secret`]
+/// and the hash template can never drift.
+pub const TIER_B_NEEDLES: &[&str] = &["credentials", "secret", "token", "apikey", "password"];
+
 #[must_use]
 pub fn classify_secret(path: &str) -> Option<SecretTier> {
     let normalized = path.trim_start_matches('/').replace('\\', "/");
@@ -606,9 +612,7 @@ pub fn classify_secret(path: &str) -> Option<SecretTier> {
     if kcs_core::scope::is_tier_a_secret_name(path) {
         return Some(SecretTier::TierA);
     }
-    let tier_b = ["credentials", "secret", "token", "apikey", "password"]
-        .iter()
-        .any(|needle| lower.contains(needle));
+    let tier_b = TIER_B_NEEDLES.iter().any(|needle| lower.contains(needle));
     tier_b.then_some(SecretTier::TierB)
 }
 

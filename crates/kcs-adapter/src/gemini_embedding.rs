@@ -212,6 +212,22 @@ fn parse_embeddings(
             "embedding response count does not match request".to_owned(),
         ));
     }
+    // QA47 (step4b-contract-tests-p3a.md §N, arbitration #5): Gemini's
+    // `batchEmbedContents` carries no per-item id, so each output id is
+    // synthesized positionally from the matching request item below. That
+    // positional synthesis is only a true bijection over the input id set
+    // when the input ids are themselves unique — otherwise two distinct
+    // request items collapse onto one id and the "bijection" is vacuous.
+    // Reject the duplicate up front rather than silently accept it.
+    let unique_ids: std::collections::BTreeSet<&str> =
+        items.iter().map(|item| item.id.as_str()).collect();
+    if unique_ids.len() != items.len() {
+        return Err(AdapterError::ContractViolation(
+            "embedding request ids are not unique; a positionally-synthesized \
+             response id cannot form a bijection over a duplicated input id set"
+                .to_owned(),
+        ));
+    }
     items
         .iter()
         .zip(embeddings)
@@ -316,6 +332,10 @@ impl<C: GeminiEmbeddingClient> EmbeddingAdapter for GeminiEmbeddingAdapter<C> {
             version: env!("CARGO_PKG_VERSION").to_owned(),
             capability_flags: vec!["text".to_owned(), "multimodal".to_owned()],
             allow_network: true,
+            // QA18: Gemini embedding bills per input token; there is no
+            // output-token leg for an embedding response.
+            billable_kinds: vec![crate::types::BillableUnitKind::TokensIn],
+            reject_billing: Some(crate::types::BillingDeclaration::Billable),
         }
     }
 
@@ -342,6 +362,9 @@ impl<C: GeminiEmbeddingClient> EmbeddingAdapter for GeminiEmbeddingAdapter<C> {
             dimensions: self.dimensions,
             distance: "cosine".to_owned(),
             modality: "multimodal".to_owned(),
+            // QA49: the profile in force for this response, so the consumer
+            // can reject a same-dimension vector from an unexpected profile.
+            embedding_profile_hash: tool_profile_hash(&self.profile_value()).ok(),
         })
     }
 }

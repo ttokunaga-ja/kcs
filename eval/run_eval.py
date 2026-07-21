@@ -4,19 +4,27 @@
 golden-queries.jsonl を読み、`kcs search --json` を叩いて Recall@10 を
 シナリオ別 (M3-1 / M3-2 / M3-3) に集計し、results.json + report.md を出力する。
 
-判定 (docs/09 §4.3):
-    Recall@10 = |expected ∩ 上位10件の distinct (raw_hash, section_id)| / |expected| のクエリ平均
+判定 (docs/09 §4.3、射影は step4b-contract-tests-p3b.md QB24/裁定4 で 3 要素化):
+    Recall@10 = |expected ∩ 上位10件の distinct (raw_hash, section, path_at_commit)|
+                / |expected| のクエリ平均
     Done 条件 = synthetic で各シナリオ Recall@10 >= 0.8
+    旧射影 (raw_hash, section) のみだと、リネーム前後で raw_hash・section が
+    同一のチャンクが 1 要素に畳み込まれ、M3-2 (--all-history) がリネーム前後
+    どちらの版を実際に recall したかを区別できない。path_at_commit を加えた
+    3 要素射影はリネーム前後を別要素として数える。
 
-解決層 (2026-07-03 J2 裁定):
+解決層 (2026-07-03 J2 裁定、2026-07-22 QB24 拡張):
     golden-queries の expected.section は英語ニーモニック (例 "recall") であり、
     実 section_id ではない。実 section_id は docs/04 §4.1 の slug 規則で
     「見出しテキスト」から導く (例: 見出し「回収率と精度」→ section_id "回収率と精度")。
     ハーネスは corpus_spec の anchor 定義 (ニーモニック ↔ 見出し ↔ ファイル) を
     corpus-manifest.json / history-manifest.json 経由で参照し、
       expected {scope, file, section(ニーモニック)}
-        -> (raw_hash="sha256:"+raw_sha256, section_id=slugify(heading))
+        -> (raw_hash="sha256:"+raw_sha256, section_id=slugify(heading),
+            path_at_commit=file)
     に解決する。raw_sha256 は corpus/history manifest がファイル bytes から記録する。
+    path_at_commit は expected.file そのもの (スコープ相対パス、KCS の
+    evidence_pointer.path_at_commit と同じ空間)。
 
 exit コード (2026-07-03 J2 裁定):
     - `KCS-E-*-NOT-IMPLEMENTED*` 系 error_code のクエリ: unimplemented (採点対象外)。
@@ -321,7 +329,15 @@ class Resolver:
             }
 
     def resolve_one(self, scope, file_, mnemonic):
-        """(raw_hash, section_id) を返す。解決不能なら ResolveError."""
+        """(raw_hash, section_id, path_at_commit) を返す。解決不能なら ResolveError.
+
+        U142 (step4b-contract-tests-p3b.md QB24, 裁定4): 射影キーに
+        `path_at_commit` (= 解決元の `file_`、リネーム前後で別要素になる
+        スコープ相対パス) を含める。旧 2 要素射影 (raw_hash, section_id) は
+        リネーム前後で同一 raw_hash・同一 section のチャンクを 1 要素に
+        畳み込み、M3-2 (--all-history) がリネーム前後どちらの版を実際に
+        recall したかを区別できなかった。
+        """
         info = self.by_key.get((scope, file_))
         if info is None:
             raise ResolveError(f"file が anchor manifest に不在: {scope}/{file_}")
@@ -338,10 +354,14 @@ class Resolver:
             raise ResolveError(
                 f"slugify(heading={headings[mnemonic]!r}) が空: "
                 f"{scope}/{file_}#{mnemonic}")
-        return ("sha256:" + raw, section_id)
+        return ("sha256:" + raw, section_id, file_)
 
     def resolve_expected(self, expected):
-        """(resolved_set, errors) を返す。resolved_set は {(raw_hash, section_id)}."""
+        """(resolved_set, errors) を返す。
+
+        resolved_set は {(raw_hash, section_id, path_at_commit)}
+        (QB24/裁定4: 3 要素射影)。
+        """
         resolved = set()
         errors = []
         for e in expected:
@@ -557,21 +577,26 @@ def _pointer_section(pointer):
 
 
 def _result_keys(response, k):
-    """上位 k 件の distinct (raw_hash, section) を返す (docs/05 §1.7 / 08 §2)."""
+    """上位 k 件の distinct (raw_hash, section, path_at_commit) を返す
+    (docs/05 §1.7 / 08 §2、射影は QB24/裁定4 で 3 要素化 — リネーム前後を
+    別要素として数える)。
+    """
     keys = set()
     for r in (response.get("results") or [])[:k]:
         pointer = r.get("evidence_pointer") or {}
         raw_hash = pointer.get("raw_hash")
         if not raw_hash:
             continue
-        keys.add((raw_hash, _pointer_section(pointer)))
+        keys.add((raw_hash, _pointer_section(pointer), pointer.get("path_at_commit")))
     return keys
 
 
 def recall_at_k(response, expected_set, k=10):
-    """Recall@k = |expected ∩ 上位 k 件の distinct (raw_hash, section)| / |expected|.
+    """Recall@k = |expected ∩ 上位 k 件の distinct (raw_hash, section, path_at_commit)|
+    / |expected|.
 
-    expected_set は解決済み {(raw_hash, section_id)}。
+    expected_set は解決済み {(raw_hash, section_id, path_at_commit)}
+    (QB24/裁定4: 3 要素射影)。
     """
     if not expected_set:
         return 0.0
@@ -833,7 +858,13 @@ def assess_history_coverage(responses_by_scenario, history_manifest):
             expected = record.get("expected_set") or set()
             for result in (record.get("response", {}).get("results") or [])[:10]:
                 pointer = result.get("evidence_pointer") or {}
-                identity = (pointer.get("raw_hash"), _pointer_section(pointer))
+                # QB24/裁定4: expected_set は 3 要素射影 (raw_hash, section,
+                # path_at_commit) — identity もそれに合わせる。
+                identity = (
+                    pointer.get("raw_hash"),
+                    _pointer_section(pointer),
+                    pointer.get("path_at_commit"),
+                )
                 if identity in expected:
                     recalled.append(result)
         return recalled

@@ -397,7 +397,7 @@ fn ct4_promotion_respects_bbox_disabled_profile_identity() {
     init(&dir);
     let config_path = dir.path().join(".kcs/config.toml");
     let mut config = fs::read_to_string(&config_path).unwrap();
-    config.push_str("\n[markdownize.bbox_annotation]\nenabled = false\n");
+    config.push_str("\n[markdownize]\nbbox_annotation = false\n");
     fs::write(config_path, config).unwrap();
     fs::write(
         dir.path().join("no-bbox.pdf"),
@@ -433,7 +433,7 @@ fn ct4_idempotent_mixed_profile_resume_uses_current_bbox_policy() {
 
     let config_path = dir.path().join(".kcs/config.toml");
     let mut config = fs::read_to_string(&config_path).unwrap();
-    config.push_str("\n[markdownize.bbox_annotation]\nenabled = false\n");
+    config.push_str("\n[markdownize]\nbbox_annotation = false\n");
     fs::write(&config_path, config).unwrap();
     fs::write(dir.path().join("b.pdf"), fake_pdf(&["bbox false second"])).unwrap();
     json_success(&dir, &["index", "--approve"], None);
@@ -459,7 +459,7 @@ fn ct4_idempotent_mixed_profile_resume_uses_current_bbox_policy() {
     let mixed_head = head(&dir);
     let config = fs::read_to_string(&config_path)
         .unwrap()
-        .replace("enabled = false", "enabled = true");
+        .replace("bbox_annotation = false", "bbox_annotation = true");
     fs::write(&config_path, config).unwrap();
 
     json_success(&dir, &["batch", "resume"], Some("mock"));

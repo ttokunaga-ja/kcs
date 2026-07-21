@@ -8,6 +8,7 @@ use crate::types::{
 };
 use crate::{AdapterError, Result};
 use serde_json::json;
+use unicode_normalization::UnicodeNormalization;
 
 pub const MAX_DETERMINISTIC_PDF_PAGES: usize = 256;
 
@@ -45,6 +46,11 @@ impl DeterministicAdapter {
             version: env!("CARGO_PKG_VERSION").to_owned(),
             capability_flags,
             allow_network: false,
+            // The built-in deterministic adapter never bills (local, no
+            // network) — QA18's `billable_kinds`/`reject_billing` are only
+            // required for a billable adapter (07 §5.7 condition 6).
+            billable_kinds: Vec::new(),
+            reject_billing: None,
         }
     }
 }
@@ -200,7 +206,7 @@ fn markdownize_with_source(
             removed_unit_keys: incremental
                 .map(|hints| hints.removed_unit_keys)
                 .unwrap_or_default(),
-            evidence_pointers: Vec::new(),
+            failed_units: Vec::new(),
             fallback_to_full: false,
             reason: None,
         });
@@ -215,7 +221,7 @@ fn markdownize_with_source(
         unchanged_unit_keys: Vec::new(),
         added_units: Vec::new(),
         removed_unit_keys: Vec::new(),
-        evidence_pointers: Vec::new(),
+        failed_units: Vec::new(),
         fallback_to_full: false,
         reason: None,
     })
@@ -244,6 +250,16 @@ fn default_hint(raw_hash: &str) -> PreparedUnitHint {
     }
 }
 
+/// QA41/QA42 (step4b-contract-tests-p3a.md §L): the sentinel used when there is
+/// nothing to extract for a unit (no source, or extracted text is empty/not
+/// real text). Deliberately plain text, not an HTML comment — an HTML
+/// comment is a raw-HTML block under Normalized Markdown v1 (07 §5.2.1) and
+/// would be rejected by the same v1 structural check this baseline must
+/// satisfy (04 §3.2 V5).
+fn baseline_placeholder(unit_key: &str, prepared_hash: &str) -> String {
+    format!("KCS deterministic baseline: {unit_key} {prepared_hash}\n")
+}
+
 fn markdown_unit_from_hint(
     hint: &PreparedUnitHint,
     request: &MarkdownizeRequest,
@@ -268,23 +284,84 @@ fn markdown_unit_from_hint(
             format!("{}\n", page_text.trim())
         }
         Some(SourceDocument::Text(text)) => text.to_owned(),
-        None => format!(
-            "<!-- KCS deterministic baseline {} {} -->\n",
-            hint.unit_key, hint.prepared_hash
-        ),
+        None => baseline_placeholder(&hint.unit_key, &hint.prepared_hash),
+    };
+    let markdown = if markdown.trim().is_empty() {
+        baseline_placeholder(&hint.unit_key, &hint.prepared_hash)
+    } else {
+        markdown
     };
     MarkdownUnit {
         unit_key: hint.unit_key.clone(),
         unit_type: hint.unit_kind,
-        markdown: if markdown.trim().is_empty() {
-            format!(
-                "<!-- KCS deterministic baseline {} {} -->\n",
-                hint.unit_key, hint.prepared_hash
-            )
-        } else {
-            markdown
-        },
+        // QA42: decisive normalization to Normalized Markdown v1 (07 §5.2.1),
+        // not passthrough — at minimum Setext -> ATX plus the encoding rules
+        // (BOM/CRLF/NFC/trailing-space/final-LF), applied as the last step so
+        // every branch above (raw passthrough, fenced code, PDF-extracted
+        // text, the baseline sentinel) is covered uniformly.
+        markdown: normalize_to_markdown_v1(&markdown),
         metadata: Default::default(),
+    }
+}
+
+/// QA42: decisive normalization to Normalized Markdown v1 (07 §5.2.1) —
+/// BOM strip, CRLF/CR -> LF, Unicode NFC, per-line trailing-space strip
+/// (applied inside a fenced code block too — encoding rules are not
+/// fence-exempt, only *syntactic* transforms like the Setext rewrite are),
+/// exactly one trailing LF, and Setext heading -> ATX heading conversion
+/// (skipped inside a fenced code block, where a `---`/`===` line is data,
+/// not a heading underline).
+fn normalize_to_markdown_v1(text: &str) -> String {
+    let no_bom = text.strip_prefix('\u{feff}').unwrap_or(text);
+    let lf_only = no_bom.replace("\r\n", "\n").replace('\r', "\n");
+    let nfc: String = lf_only.nfc().collect();
+    let source_lines: Vec<&str> = nfc.split('\n').collect();
+    let mut lines: Vec<String> = Vec::with_capacity(source_lines.len());
+    let mut in_fence = false;
+    let mut index = 0;
+    while index < source_lines.len() {
+        let line = source_lines[index];
+        if line.trim_start_matches(' ').starts_with("```") {
+            in_fence = !in_fence;
+            lines.push(strip_trailing_space(line));
+            index += 1;
+            continue;
+        }
+        if !in_fence && !line.trim().is_empty() {
+            if let Some(next) = source_lines.get(index + 1) {
+                if let Some(level) = setext_level(next) {
+                    lines.push(format!("{} {}", "#".repeat(level), line.trim()));
+                    index += 2;
+                    continue;
+                }
+            }
+        }
+        lines.push(strip_trailing_space(line));
+        index += 1;
+    }
+    let mut result = lines.join("\n");
+    while result.ends_with('\n') {
+        result.pop();
+    }
+    result.push('\n');
+    result
+}
+
+fn strip_trailing_space(line: &str) -> String {
+    line.trim_end_matches([' ', '\t']).to_owned()
+}
+
+/// The Setext heading level (1 = `=`, 2 = `-`) for an underline candidate
+/// line, or `None`. A `-` underline requires 2+ characters so a lone `-`
+/// (ambiguous with other single-dash usage) is never reclassified.
+fn setext_level(line: &str) -> Option<usize> {
+    let trimmed = line.trim_start_matches(' ').trim_end_matches([' ', '\t']);
+    if !trimmed.is_empty() && trimmed.bytes().all(|byte| byte == b'=') {
+        Some(1)
+    } else if trimmed.len() >= 2 && trimmed.bytes().all(|byte| byte == b'-') {
+        Some(2)
+    } else {
+        None
     }
 }
 
@@ -638,6 +715,66 @@ mod tests {
             .collect();
         assert!(!is_probably_real_text(&garbage));
         assert!(!is_probably_real_text(""));
+    }
+
+    // QA42 (step4b-contract-tests-p3a.md §L): the built-in deterministic
+    // adapter converts a Setext H1/H2 to ATX (04 §3.2 V5 / 07 §5.2.1) instead
+    // of a straight passthrough.
+    #[test]
+    fn qa42_setext_headings_are_converted_to_atx() {
+        assert_eq!(
+            normalize_to_markdown_v1("Title\n=====\n\nBody text\n"),
+            "# Title\n\nBody text\n"
+        );
+        assert_eq!(
+            normalize_to_markdown_v1("Subtitle\n--------\n"),
+            "## Subtitle\n"
+        );
+        // A lone `-` is never reclassified (ambiguous with other single-dash
+        // usage — the underline heuristic requires 2+ characters).
+        assert_eq!(normalize_to_markdown_v1("Line\n-\n"), "Line\n-\n");
+        // A `---`/`===` line inside a fenced code block is data, not a
+        // heading underline.
+        assert_eq!(
+            normalize_to_markdown_v1("```\nTitle\n=====\n```\n"),
+            "```\nTitle\n=====\n```\n"
+        );
+    }
+
+    // QA41/QA42: the encoding-level Normalized Markdown v1 rules (07 §5.2.1)
+    // are applied unconditionally — BOM strip, CRLF -> LF, NFC, per-line
+    // trailing-space strip (including inside a fence — only syntactic
+    // transforms like Setext are fence-exempt), and exactly one trailing LF.
+    #[test]
+    fn qa41_encoding_rules_are_normalized_even_inside_a_fence() {
+        assert_eq!(
+            normalize_to_markdown_v1("\u{feff}# Heading\r\n\r\nBody\r\n"),
+            "# Heading\n\nBody\n"
+        );
+        assert_eq!(
+            normalize_to_markdown_v1("Trailing space here   \nNext line\t\n"),
+            "Trailing space here\nNext line\n"
+        );
+        assert_eq!(
+            normalize_to_markdown_v1("```\nlet x = 1;   \n```"),
+            "```\nlet x = 1;\n```\n"
+        );
+        // NFD combining sequence (e already knows the Step2a fixture: e +
+        // U+0301) normalizes to the precomposed NFC form.
+        assert_eq!(normalize_to_markdown_v1("cafe\u{0301}\n"), "caf\u{e9}\n");
+        // Multiple trailing blank lines collapse to exactly one trailing LF.
+        assert_eq!(normalize_to_markdown_v1("Body\n\n\n"), "Body\n");
+    }
+
+    // QA41: the offline baseline placeholder itself must satisfy Normalized
+    // Markdown v1 (07 §5.2.1) — plain text, not an HTML comment (an HTML
+    // comment is a raw-HTML block, forbidden by 04 §3.2 V5).
+    #[test]
+    fn qa41_baseline_placeholder_is_plain_text_not_raw_html() {
+        let placeholder = baseline_placeholder("page:1", "sha256:abc");
+        assert!(!placeholder.contains('<'));
+        assert!(!placeholder.contains('>'));
+        assert_eq!(normalize_to_markdown_v1(&placeholder), placeholder);
     }
 
     #[test]

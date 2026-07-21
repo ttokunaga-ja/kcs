@@ -48,7 +48,8 @@ use kcs_core::purge::{canonical_final_event, EventKind, PurgeState, TombstoneMod
 use kcs_core::schema::{validate_json_schema, SchemaKind};
 use kcs_core::scope::{
     append_error_log, append_event_log, append_warn_log, new_ulid, now_utc_seconds,
-    InspectedObject, PendingNormalizeRef, Repository, StoreLock, DEFAULT_MAX_ARCHIVE_SCOPE_BYTES,
+    parse_utc_seconds, InspectedObject, PendingNormalizeRef, Repository, StoreLock,
+    DEFAULT_MAX_ARCHIVE_SCOPE_BYTES,
 };
 use kcs_core::{ExitCode, KcsError, Result};
 use kcs_index::chunking::{
@@ -91,8 +92,8 @@ use kcs_pipeline::scan::{
     read_verified_scan_input, ScanCandidate, ScanPreview, ScanPreviewRequest,
 };
 use kcs_pipeline::task::{
-    retry_policy, task_can_complete_from_materialized_output, task_can_enter_secret_hold,
-    task_status_from_unit_counts, RetryErrorKind,
+    hold_reason_for_reason, retry_policy, task_can_complete_from_materialized_output,
+    task_can_enter_secret_hold, task_status_from_unit_counts, HoldReason, RetryErrorKind,
 };
 use kcs_pipeline::task::{
     validate_task_output_ref, TaskDescriptor, TaskOutputRef, TaskStatus, TaskStore, TaskType,
@@ -132,8 +133,8 @@ use crate::search_history::{
     SearchHistoryBinding,
 };
 use crate::search_time::{
-    reconcile_cursor_selector, since_cutoff_utc, validate_cursor_cutoff, TimeSelector,
-    TimeSelectorFlags,
+    reconcile_cursor_selector, since_cutoff_seconds, since_cutoff_utc, validate_cursor_cutoff,
+    PositiveDuration, TimeSelector, TimeSelectorFlags,
 };
 
 // clap のパースエラーは exit code 2 で終了する。これは docs/06-cli-spec.md §7 の
@@ -543,11 +544,17 @@ fn run(cli: Cli) -> Result<Value> {
             } else {
                 (current_unsupported_inputs(&repo)?, true)
             };
+            let tasks = task_store.all().map_err(pipeline_to_kcs)?;
             Ok(json!({
                 "scope_path": repo.kcs_dir(),
                 "files": status.files,
                 "head_shallow": status.head_shallow,
-                "tasks": task_store.all().map_err(pipeline_to_kcs)?,
+                // QA4 (step4b-contract-tests-p3a.md §A, 10 §1 L117): the
+                // paused-task count broken down by hold_reason (budget/auth/
+                // tier_b_approval), alongside the raw task list callers
+                // previously had to filter client-side themselves.
+                "paused_by_hold_reason": paused_tasks_by_hold_reason(&tasks),
+                "tasks": tasks,
                 "quarantine": quarantine_status_records(&repo)?,
                 "unsupported_inputs": unsupported_inputs,
                 "unsupported_inputs_complete": unsupported_inputs_complete,
@@ -621,44 +628,75 @@ fn run(cli: Cli) -> Result<Value> {
             }))
         }
         Command::Log(args) => {
-            if args.at.is_some() || args.since.is_some() {
-                return Err(KcsError::not_implemented("log --at/--since"));
-            }
-            let repo = Repository::open_current()?;
+            let repo = Repository::open_current()?; // (0) kcs_format_version
             validate_repo_tool_lock(&repo)?;
-            // §I checkpoint 1 (LC53).
-            let checkpoint = ReadBarrierCheckpoint::open(repo.kcs_dir())?;
-            // LC45 (item 2): a separate check from §I's checkpoint — see
-            // `check_index_generation_current`'s doc comment.
-            check_index_generation_current(repo.kcs_dir())?;
+            // QB5/QB6/裁定1: shared (1)+(3) preflight pair.
+            let checkpoint = preflight_barrier_and_index(repo.kcs_dir())?;
+            // QB50/QB51/QB54 (step4b-contract-tests-p3b.md §D, 裁定5): `--at
+            // <commit>` resolves through the same HEAD/tag/hash operand
+            // grammar `diff`/`tag`/`restore` already use
+            // (`Repository::resolve_commit`) and becomes the history walk's
+            // starting point instead of HEAD. QB51: a shallow-but-present
+            // commit is a fine `--at` target — `log` only walks the
+            // commit-object parent chain, never a tree, so tree discard is
+            // irrelevant here (unlike `restore`/`search --at`).
+            let start = args
+                .at
+                .as_deref()
+                .map(|value| repo.resolve_commit(value))
+                .transpose()?;
             // R16-1: `log` degrades on a missing ancestor commit — it returns the
-            // healthy prefix from HEAD plus `truncated` rather than dying on a raw
+            // healthy prefix plus `truncated` rather than dying on a raw
             // KCS-E-STORE-NOT-FOUND-001.
-            let report = repo.log()?;
-            // §I checkpoint 2 (LC54/LC55).
-            checkpoint.finish(json!({ "commits": report.entries, "truncated": report.truncated }))
+            let report = repo.log_from(start)?;
+            // QB52/QB55/QB56 (§D, 裁定5): `--since <dur>` filters the walked
+            // entries to `commit.created_at >= now - <dur>`, reusing search's
+            // duration grammar (`PositiveDuration` — accepts `s`/`m`/`h`/`d`/`w`
+            // units). Composes with `--at` as an intersection (recommendation
+            // (a) — narrows whatever `--at` already selected as the walk's
+            // origin, rather than picking a competing origin of its own); the
+            // default HEAD-rooted walk origin is unchanged when `--at` is
+            // absent (QB52's non-breaking requirement).
+            let entries = match args.since.as_deref() {
+                Some(duration) => {
+                    let duration = PositiveDuration::parse(duration)?;
+                    let now = parse_utc_seconds(&now_utc_seconds()).ok_or_else(|| {
+                        KcsError::schema("current time is not canonical UTC seconds")
+                    })?;
+                    let cutoff = since_cutoff_seconds(now, duration)?;
+                    report
+                        .entries
+                        .into_iter()
+                        .filter(|entry| {
+                            parse_utc_seconds(&entry.commit.created_at)
+                                .is_some_and(|created_at| created_at >= cutoff)
+                        })
+                        .collect::<Vec<_>>()
+                }
+                None => report.entries,
+            };
+            // §I checkpoint 2 (LC54/LC55). QB57: the wire shape (`commits` +
+            // `truncated`) is unchanged by `--at`/`--since` — they narrow
+            // which commits are listed, not the response shape.
+            checkpoint.finish(json!({ "commits": entries, "truncated": report.truncated }))
         }
         Command::Diff(args) => {
-            let repo = Repository::open_current()?;
+            let repo = Repository::open_current()?; // (0) kcs_format_version
             validate_repo_tool_lock(&repo)?;
-            // §I checkpoint 1 (LC53).
-            let checkpoint = ReadBarrierCheckpoint::open(repo.kcs_dir())?;
-            // LC45 (item 2).
-            check_index_generation_current(repo.kcs_dir())?;
+            // QB5/QB6/裁定1: shared (1)+(3) preflight pair.
+            let checkpoint = preflight_barrier_and_index(repo.kcs_dir())?;
             let changes = repo.diff(&args.a, &args.b)?;
             // §I checkpoint 2 (LC54/LC55).
             checkpoint.finish(json!({ "changes": changes }))
         }
         Command::Inspect(args) => {
-            let repo = Repository::open_current()?;
+            let repo = Repository::open_current()?; // (0) kcs_format_version
             validate_repo_tool_lock(&repo)?;
             let target = scope_target(repo.root())?;
-            // §I checkpoint 1 (LC53). Distinct from the per-raw_hash
-            // `enforce_purge_read_barrier` calls below (LC11-14 tombstone
-            // dispatch) — see `ReadBarrierCheckpoint`'s doc comment.
-            let checkpoint = ReadBarrierCheckpoint::open(&target.kcs_dir)?;
-            // LC45 (item 2).
-            check_index_generation_current(&target.kcs_dir)?;
+            // QB5/QB6/裁定1: shared (1)+(3) preflight pair. Distinct from the
+            // per-raw_hash `enforce_purge_read_barrier` calls below (LC11-14
+            // tombstone dispatch) — see `ReadBarrierCheckpoint`'s doc comment.
+            let checkpoint = preflight_barrier_and_index(&target.kcs_dir)?;
             enforce_purge_read_barrier(&target, &args.hash)?;
             match repo.inspect(&args.hash)? {
                 InspectedObject::Tree(tree) => {
@@ -2687,27 +2725,37 @@ fn search_one_scope_inner(
         time,
         deadline,
     } = request;
-    // §I checkpoint 1 (LC53). Opened before the repo/index reads below so this
-    // scope's linearization point precedes the work it gates (see
-    // `checkpoint_scope_error`'s doc comment for the per-scope isolation
-    // rationale).
-    let checkpoint =
-        ReadBarrierCheckpoint::open(&exec.target.kcs_dir).map_err(checkpoint_scope_error)?;
-    // PC53 (05 §1.8 / 10 §12.5): a `kcs_format_version` newer than this build's
-    // supported ceiling is distinguished from a generic "unreachable" open
-    // failure — `Repository::open_for_search`'s `scope.json`/`config.toml`
-    // validation already raises `KCS-E-CONFIG-FORMAT-001` for it
-    // (`validate_format_version`); surface that as its own exclusion reason so
-    // PC54/PC55's all-scope-STORE-VERSION promotion (in `run_search_inner`)
-    // can recognize it. No query_cache or any other write happens on this
-    // path (open failed before any write), satisfying the write-zero rule.
+    // QB6 (step4b-contract-tests-p3b.md §A, 10 §3 L300-305): (0)
+    // kcs_format_version compatibility is checked before (1) the purge read
+    // barrier below — this used to open the checkpoint first, so a scope
+    // that was both format-incompatible and mid-purge-journal excluded with
+    // the lower-priority `purge_journal_active` reason instead of
+    // `store_version_incompatible`. PC53 (05 §1.8 / 10 §12.5):
+    // `Repository::open_for_search`'s `scope.json` validation (QB8: version
+    // checked before schema validation, scope.json is the sole authority per
+    // §Z2/裁定2) raises `KCS-E-STORE-VERSION-001` for it
+    // (`validate_format_version`); surface that as its own exclusion reason
+    // so PC54/PC55's all-scope-STORE-VERSION promotion (in
+    // `run_search_inner`) can recognize it. No query_cache or any other write
+    // happens on this path (open failed before any write), satisfying the
+    // write-zero rule.
     let repo = Repository::open_for_search(&exec.target.repo_root).map_err(|error| {
-        if error.error_code() == "KCS-E-CONFIG-FORMAT-001" {
+        if error.error_code() == "KCS-E-STORE-VERSION-001" {
             ScopeSearchError::Excluded(STORE_VERSION_INCOMPATIBLE_REASON.to_owned())
         } else {
             ScopeSearchError::Excluded("unreachable".to_owned())
         }
     })?;
+    // §I checkpoint 1 (LC53). Opened before the remaining index reads below
+    // so this scope's linearization point precedes the work it gates (see
+    // `checkpoint_scope_error`'s doc comment for the per-scope isolation
+    // rationale). `check_index_generation_current` ((3)) is intentionally
+    // NOT folded in here — search's per-scope (3) equivalent is its own
+    // bespoke `INDEX_REBUILDING_REASON` exclusion further below (already
+    // contracted, PC19-PC44 in step4b-contract-tests-p2c.md), not this
+    // shared helper.
+    let checkpoint =
+        ReadBarrierCheckpoint::open(&exec.target.kcs_dir).map_err(checkpoint_scope_error)?;
     scope_deadline_check(deadline)?;
 
     // PC52 (05 §1.8 L390): explicit `--vector` never falls back — a scope
@@ -6719,10 +6767,13 @@ fn read_bbox_annotation_config(path: &Path) -> Result<Option<bool>> {
             path.display()
         ))
     })?;
+    // QA33 (step4b-contract-tests-p3a.md §J, arbitration #4): the spec's
+    // literal TOML example is a flat `[markdownize] bbox_annotation = true`
+    // key (07 §5.2), not a nested `[markdownize.bbox_annotation] enabled =
+    // true` table — the schema now matches (config.schema.json).
     Ok(value
         .get("markdownize")
         .and_then(|markdownize| markdownize.get("bbox_annotation"))
-        .and_then(|bbox| bbox.get("enabled"))
         .and_then(toml::Value::as_bool))
 }
 
@@ -7417,17 +7468,22 @@ fn point_in_time_index_rebuilding_error() -> KcsError {
 fn resolve_pointer_for_cli(pointer: &EvidencePointer) -> Result<PointerResolution> {
     // 08 §3.1 step 1: two-stage scope resolution (scope_path hint -> registry).
     let target = resolve_scope_target(&pointer.scope_id, pointer.scope_path.as_deref())?;
-    // §I checkpoint 1 (LC53), opened as soon as the target scope is known —
-    // brackets every canonical-marker dispatch below (LC8-14/item 3), so
-    // those calls no longer need their own `PurgeState::barrier_blocks`
-    // in-flight-journal check: an active journal targeting this raw_hash
-    // implies an active journal, which this checkpoint (and its checkpoint-2
-    // recheck at the bottom of this function) already catches more broadly,
-    // ABA-safe via the purge-epoch/lifecycle-epoch comparison (LC54).
-    let checkpoint = ReadBarrierCheckpoint::open(&target.kcs_dir)?;
-    // LC45 (item 2).
-    check_index_generation_current(&target.kcs_dir)?;
+    // QB6 (step4b-contract-tests-p3b.md §A, 10 §3 L300-305): (0)
+    // kcs_format_version compatibility must be checked BEFORE (1) the purge
+    // read barrier — this used to open the checkpoint first, so a scope that
+    // was both format-incompatible and mid-purge-journal surfaced the lower-
+    // priority `KCS-E-PURGE-JOURNAL-ACTIVE-001` instead of
+    // `KCS-E-STORE-VERSION-001`.
     let repo = Repository::open(&target.repo_root)?;
+    // QB5/QB6/裁定1: shared (1)+(3) preflight pair, opened as soon as the
+    // target scope is known — brackets every canonical-marker dispatch below
+    // (LC8-14/item 3), so those calls no longer need their own
+    // `PurgeState::barrier_blocks` in-flight-journal check: an active journal
+    // targeting this raw_hash implies an active journal, which this
+    // checkpoint (and its checkpoint-2 recheck at the bottom of this
+    // function) already catches more broadly, ABA-safe via the
+    // purge-epoch/lifecycle-epoch comparison (LC54).
+    let checkpoint = preflight_barrier_and_index(&target.kcs_dir)?;
 
     // 08 §3.1 step 2: fetch the commit object. R17-1: a MISSING commit object
     // (never existed / externally deleted — e.g. a `view`/`open` pointer whose
@@ -7673,6 +7729,21 @@ fn resolve_scope_id_in_registry(scope_id: &str) -> Result<Option<ScopeTarget>> {
     resolve_scope_id_in_registry_with_hint(scope_id, None)
 }
 
+/// QA67 (step4b-contract-tests-p3a.md §T, PB24, 10 §3 L297-299): fail-closed
+/// (`KCS-E-REGISTRY-DUP-001`) when `scope_id` resolves to more than one live
+/// `.kcs` clone, for a write path that is about to touch a device-global
+/// ledger row keyed by this `scope_id`. A no-op for the reserved
+/// `LedgerTaskKey::DEVICE_SCOPE_ID` pseudo-scope (never a real registered
+/// scope) and for any `scope_id` the registry does not resolve at all
+/// (`resolve_scope_id_in_registry_with_hint` already treats "no live
+/// duplicate" and "not found" identically — `Ok(None)`).
+fn registry_duplicate_guard(scope_id: &str) -> Result<()> {
+    if scope_id == LedgerTaskKey::DEVICE_SCOPE_ID {
+        return Ok(());
+    }
+    resolve_scope_id_in_registry(scope_id).map(|_| ())
+}
+
 /// PB23 (08 §3.1 step 1b L156-158): `extra_live` folds a scope_path-hinted
 /// candidate into the SAME live-duplicate candidate pool as the registry rows
 /// (deduplicated by canonical `.kcs` path) — a registry-unregistered clone
@@ -7745,7 +7816,72 @@ fn resolve_scope_target(scope_id: &str, scope_path_hint: Option<&str>) -> Result
             }
         }
     }
+    // QB6 (step4b-contract-tests-p3b.md §A, 10 §3 L300-305): every path above
+    // resolves a candidate through `scope_target` / `Repository::open_current`,
+    // which FULLY validates the store (`kcs_format_version` included) — so a
+    // scope that exists but is format-incompatible is indistinguishable from
+    // one that does not exist at all, and silently drops out of every
+    // candidate pool above. That conflates two materially different
+    // diagnoses: "cannot find this scope" vs. "found it, but it needs an
+    // upgrade" (0). Before reporting the generic scope_unreachable, take one
+    // more direct, unvalidated peek at each candidate's `scope.json` (the
+    // hint, every registry row for this scope_id, and the CWD) so a
+    // genuinely-incompatible-version scope is reported as
+    // `KCS-E-STORE-VERSION-001` — outranking scope_unreachable, matching (0)'s
+    // priority over every other preflight condition.
+    let mut candidate_roots: Vec<PathBuf> = Vec::new();
+    if let Some(hint) = scope_path_hint {
+        candidate_roots.push(PathBuf::from(hint));
+    }
+    if let Ok(registry) = RegistryDb::open_default() {
+        if let Ok(entries) = registry.lookup_scope_id(scope_id) {
+            candidate_roots.extend(
+                entries
+                    .into_iter()
+                    .map(|entry| PathBuf::from(entry.root_path)),
+            );
+        }
+    }
+    if let Ok(cwd) = std::env::current_dir() {
+        candidate_roots.push(cwd);
+    }
+    for root in candidate_roots {
+        if let Some(version) = peek_incompatible_format_version(&root, scope_id) {
+            return Err(KcsError::incompatible_format(version));
+        }
+    }
     Err(scope_unreachable_error(scope_id))
+}
+
+/// QB6: reads `scope.json` directly (no `Repository::open*` — deliberately
+/// skips JSON Schema validation and every other store check) for one
+/// resolution candidate, so `resolve_scope_target`'s final fallback can
+/// diagnose "found, but a newer kcs_format_version than this build supports"
+/// distinctly from "does not exist" without paying for (or risking a false
+/// positive from) full validation. `candidate_root` may be either a scope
+/// root or its `.kcs` directory (mirrors `open_scope_from_hint`). Returns
+/// the found version string only when the scope_id matches AND the version
+/// is incompatible — every other case (missing file, schema mismatch,
+/// scope_id mismatch, compatible version) returns `None`, so this can never
+/// invent a false STORE-VERSION-001 for a scope that is simply absent.
+fn peek_incompatible_format_version(candidate_root: &Path, scope_id: &str) -> Option<String> {
+    let scope_json_path = if candidate_root.file_name() == Some(std::ffi::OsStr::new(".kcs")) {
+        candidate_root.join("scope.json")
+    } else {
+        candidate_root.join(".kcs/scope.json")
+    };
+    let text = fs::read_to_string(&scope_json_path).ok()?;
+    let value: Value = serde_json::from_str(&text).ok()?;
+    if value.get("scope_id").and_then(Value::as_str) != Some(scope_id) {
+        return None;
+    }
+    let version = value.get("kcs_format_version")?.as_str()?.to_owned();
+    // Mirrors `kcs_core::scope`'s private `validate_format_version` (major
+    // component > 0 is beyond this build's supported ceiling) — not exported,
+    // so the trivial comparison is duplicated here rather than widening
+    // kcs-core's public surface for one caller.
+    let major: u64 = version.split('.').next()?.parse().ok()?;
+    (major > 0).then_some(version)
 }
 
 /// Opens a `ScopeTarget` from a hint that is either a scope root or a `.kcs`
@@ -8332,6 +8468,24 @@ impl ReadBarrierCheckpoint {
     }
 }
 
+/// QB5/QB6/QB7 §Z1 / 裁定1 (step4b-contract-tests-p3b.md, 10-operations.md §3
+/// L300-311): the shared (1)+(3) read-path preflight pair — §I checkpoint 1
+/// (purge journal / epoch, LC53) immediately followed by index (sqlite.db)
+/// availability (LC45) — as ONE implementation every read-path command calls,
+/// instead of each hand-rolling the same two-line sequence (and risking
+/// re-deriving it out of order, as QB6 found `open`/`view`/`kcs evidence
+/// verify` had). Callers MUST complete step (0) (`kcs_format_version`
+/// compatibility, via `Repository::open`/`open_for_search`) BEFORE calling
+/// this — 10 §3's fixed cross-command order places (0) ahead of (1), and a
+/// command that checked this pair first used to surface
+/// `KCS-E-PURGE-JOURNAL-ACTIVE-001` instead of the higher-priority
+/// `KCS-E-STORE-VERSION-001` when a scope violated both at once.
+fn preflight_barrier_and_index(kcs_dir: &Path) -> Result<ReadBarrierCheckpoint> {
+    let checkpoint = ReadBarrierCheckpoint::open(kcs_dir)?;
+    check_index_generation_current(kcs_dir)?;
+    Ok(checkpoint)
+}
+
 /// 05-runtime.md §3.5 / 10-operations.md §12.1: retryable (exit 3) rejection
 /// for either §I checkpoint. Carries no context beyond the error itself — the
 /// violation is about scope-wide purge-transaction state, not about any one
@@ -8548,13 +8702,18 @@ fn unresolvable_commit_pointer_error(pointer: &EvidencePointer) -> KcsError {
 }
 
 /// 08 §3.2 — scope `.kcs` unreachable (scope_path unreachable and scope_id not
-/// registered).
+/// registered). QB1 (step4b-contract-tests-p3b.md §A, 06 §7 L370 / 10 §12.2
+/// L931): dead pointers (tombstoned / not_found) are exit 4, but
+/// scope_unreachable alone is retryable (the scope may simply be unmounted) —
+/// exit 3 (`PartialFailure`), not 4. This is the single shared helper behind
+/// `open`/`view` (via `resolve_scope_target`) and `restore`
+/// (`resolve_evidence_source`), so the fix here covers all three callers.
 fn scope_unreachable_error(scope_id: &str) -> KcsError {
     KcsError::new(
         "KCS-E-EVIDENCE-SCOPE-UNREACHABLE-001",
         "evidence scope unreachable",
         json!({ "scope_id": scope_id }),
-        ExitCode::PermanentFailure,
+        ExitCode::PartialFailure,
     )
 }
 
@@ -8687,10 +8846,16 @@ fn resolve_object_uri(object: &ObjectUri, as_view: bool) -> Result<Value> {
         }
         Err(error) => return Err(error),
     };
-    // §I checkpoint 1 (LC53).
-    let checkpoint = ReadBarrierCheckpoint::open(&target.kcs_dir)?;
-    // LC45 (item 2).
-    check_index_generation_current(&target.kcs_dir)?;
+    // QB6 (step4b-contract-tests-p3b.md §A, 10 §3 L300-305): (0)
+    // kcs_format_version compatibility, checked before (1)/(3) below. This
+    // object-URI path previously never opened a `Repository` at all — every
+    // read went straight through `target`/CAS — so a format-incompatible
+    // scope's object URIs resolved with zero version enforcement; validate
+    // (and discard, this path has no further use for the `Repository`
+    // handle) exactly as the pointer/short-hash resolution paths do.
+    Repository::open(&target.repo_root)?;
+    // QB5/QB6/裁定1: shared (1)+(3) preflight pair.
+    let checkpoint = preflight_barrier_and_index(&target.kcs_dir)?;
     if object.object_type == "chunk" {
         let chunk = read_stored_chunks(&target.kcs_dir)?
             .into_iter()
@@ -9727,6 +9892,7 @@ fn execute_pending_markdownize_tasks(
                         if candidate.task_id == task_id {
                             candidate.status = TaskStatus::Paused;
                             candidate.fallback_reason = Some("budget_exceeded".to_owned());
+                            candidate.hold_reason = Some(HoldReason::Budget);
                             true
                         } else {
                             false
@@ -10506,7 +10672,7 @@ fn try_online_incremental_markdownize(
                 unchanged_unit_keys: Vec::new(),
                 added_units: Vec::new(),
                 removed_unit_keys: Vec::new(),
-                evidence_pointers: Vec::new(),
+                failed_units: Vec::new(),
                 fallback_to_full: false,
                 reason: None,
             },
@@ -11657,6 +11823,12 @@ fn apply_embedding_transitions(
             };
             task.status = transition.status;
             task.fallback_reason = Some(transition.reason.to_owned());
+            // QA1 (step4b-contract-tests-p3a.md §A): the closed hold_reason
+            // enum accompanies every Paused task (currently only
+            // `embedding_pause_transition`'s `budget_exceeded`).
+            task.hold_reason = (transition.status == TaskStatus::Paused)
+                .then(|| hold_reason_for_reason(transition.reason))
+                .flatten();
             if let Some((usd, month, reservation_id)) = reserved.get(&task.output_ref) {
                 task.reserved_usd = Some(*usd);
                 task.reserved_month = Some(month.clone());
@@ -12234,6 +12406,9 @@ fn hold_secret_embedding_tasks(
             fallback_reason: Some(SECRETS_TIER_B_HOLD.to_owned()),
             created_at: now.to_owned(),
             bbox_annotation_enabled: None,
+            // QA1 (step4b-contract-tests-p3a.md §A): the closed hold_reason
+            // enum accompanies every Paused task.
+            hold_reason: Some(HoldReason::TierBApproval),
             reserved_usd: None,
             reserved_month: None,
             reservation_id: None,
@@ -12251,6 +12426,7 @@ fn hold_secret_embedding_tasks(
                 {
                     task.status = TaskStatus::Paused;
                     task.fallback_reason = Some(SECRETS_TIER_B_HOLD.to_owned());
+                    task.hold_reason = Some(HoldReason::TierBApproval);
                     task.attempts = 0;
                     task.next_retry_at = None;
                     task.heartbeat_at = None;
@@ -12292,6 +12468,7 @@ fn hold_secret_embedding_tasks(
                 task.clear_reservation();
                 task.status = TaskStatus::Paused;
                 task.fallback_reason = Some(SECRETS_TIER_B_HOLD.to_owned());
+                task.hold_reason = Some(HoldReason::TierBApproval);
                 task.input_path = current_path.clone();
                 task.attempts = 0;
                 task.next_retry_at = None;
@@ -12397,6 +12574,7 @@ fn enqueue_embedding_tasks(
             fallback_reason: Some(reason.to_owned()),
             created_at: now.to_owned(),
             bbox_annotation_enabled: None,
+            hold_reason: None,
             reserved_usd: None,
             reserved_month: None,
             reservation_id: None,
@@ -12636,6 +12814,36 @@ fn media_type_for_cli_path(path: &Path) -> &'static str {
     }
 }
 
+/// QA4 (step4b-contract-tests-p3a.md §A, 10 §1 L117): `kcs status`'s paused
+/// count broken down by the closed `hold_reason` enum (QA1) — `"unknown"`
+/// covers a Paused task with no `hold_reason` stamp (a legacy row from
+/// before QA1, or the still-unimplemented auth hold, QA2). The 3 named
+/// buckets always appear (even at 0) so a caller does not need to guard
+/// against a missing key.
+fn paused_tasks_by_hold_reason(tasks: &[TaskDescriptor]) -> Value {
+    let mut budget = 0u64;
+    let mut auth = 0u64;
+    let mut tier_b_approval = 0u64;
+    let mut unknown = 0u64;
+    for task in tasks {
+        if task.status != TaskStatus::Paused {
+            continue;
+        }
+        match task.hold_reason {
+            Some(HoldReason::Budget) => budget += 1,
+            Some(HoldReason::Auth) => auth += 1,
+            Some(HoldReason::TierBApproval) => tier_b_approval += 1,
+            None => unknown += 1,
+        }
+    }
+    json!({
+        "budget": budget,
+        "auth": auth,
+        "tier_b_approval": tier_b_approval,
+        "unknown": unknown,
+    })
+}
+
 /// R9-2: whether `media_type` is text-native (Markdown / plain text / code) — the
 /// deterministic Adapter's domain (docs/07 §2.1). Text-native files are
 /// markdownized locally and must never enqueue an online Mistral-OCR task: docs/07
@@ -12680,7 +12888,9 @@ fn budget_status_json(repo: &Repository) -> Result<Value> {
             BudgetCapKind::Folder => "folder",
         },
         "device_per_adapter": caps.device_per_adapter,
-        "folder_per_adapter": caps.folder_per_adapter,
+        // QA11 (step4b-contract-tests-p3a.md §D): folder per_adapter does not
+        // exist (04 §5.4 — device-layer only), so `kcs status` must not
+        // present a constraint that is not real.
         "hard_stop": caps.hard_stop,
         "warn_at_percent": caps.warn_at_percent,
         "warned": warning.is_some(),
@@ -12874,6 +13084,8 @@ impl MarkdownizeAdapter for TestIncrementalMarkdownizeAdapter {
             version: env!("CARGO_PKG_VERSION").to_owned(),
             capability_flags: vec!["incremental_update".to_owned()],
             allow_network: false,
+            billable_kinds: Vec::new(),
+            reject_billing: None,
         }
     }
 
@@ -12918,7 +13130,7 @@ impl MarkdownizeAdapter for TestIncrementalMarkdownizeAdapter {
                     .map(|hint| test_markdown_unit(hint, "incremental-added"))
                     .collect(),
                 removed_unit_keys: incremental.removed_unit_keys,
-                evidence_pointers: Vec::new(),
+                failed_units: Vec::new(),
                 fallback_to_full: false,
                 reason: None,
             });
@@ -12936,7 +13148,7 @@ impl MarkdownizeAdapter for TestIncrementalMarkdownizeAdapter {
             unchanged_unit_keys: Vec::new(),
             added_units: Vec::new(),
             removed_unit_keys: Vec::new(),
-            evidence_pointers: Vec::new(),
+            failed_units: Vec::new(),
             fallback_to_full: false,
             reason: None,
         })
@@ -13851,6 +14063,12 @@ fn task_descriptor(
         fallback_reason: fallback_reason.map(str::to_owned),
         created_at: created_at.to_owned(),
         bbox_annotation_enabled: None,
+        // QA1 (step4b-contract-tests-p3a.md §A): derive the closed hold_reason
+        // from `fallback_reason` whenever this descriptor is Paused; `None`
+        // for any other status or an unrecognized reason.
+        hold_reason: (status == TaskStatus::Paused)
+            .then(|| fallback_reason.and_then(hold_reason_for_reason))
+            .flatten(),
         reserved_usd: None,
         reserved_month: None,
         reservation_id: None,
@@ -14328,6 +14546,12 @@ fn reserve_or_reuse_task_charge(
     caps: &BudgetCapConfig,
     bypass_cap_denial: bool,
 ) -> Result<TaskChargeOutcome> {
+    // QA67 (step4b-contract-tests-p3a.md §T, PB24): online task phase 1 must
+    // fail-closed on a live registry scope_id duplicate (10 §3 L297-299) —
+    // two `.kcs` clones sharing this device-global `batch_requests` row's PK
+    // (scope_id, adapter_kind, input_hash, tool_profile_hash) mix up which
+    // clone owns the reservation's recovery/settlement/billing attribution.
+    registry_duplicate_guard(&key.scope_id)?;
     with_immediate_transaction(ledger.connection(), || {
         if let Some(existing) = get_batch_request(ledger.connection(), key)? {
             if existing.state.is_inflight() {
@@ -14466,6 +14690,10 @@ fn release_task_charge_if_open(ledger: &LedgerDb, key: &LedgerTaskKey) -> Result
 /// the cap judgement entirely (`check_then_reserve`'s `ExemptZeroCost` path via
 /// `reserve_or_reuse_task_charge`), so this always succeeds and never pauses.
 fn record_free_local_charge(ledger: &LedgerDb, key: &LedgerTaskKey) -> Result<()> {
+    // QA67: same fail-closed guard as `reserve_or_reuse_task_charge` — this
+    // path also writes a device-global `batch_requests` row keyed by
+    // `key.scope_id` (the local deterministic-baseline $0 provenance record).
+    registry_duplicate_guard(&key.scope_id)?;
     let outcome = with_immediate_transaction(ledger.connection(), || {
         phase1_intent(
             ledger.connection(),
@@ -14714,23 +14942,20 @@ fn budget_remaining_for_adapter(
         ledger_month_total(conn, Some(scope_id), None, &month).map_err(pipeline_to_kcs)?;
     let device_adapter_spent =
         ledger_month_total(conn, None, Some(adapter_kind), &month).map_err(pipeline_to_kcs)?;
-    let folder_adapter_spent = ledger_month_total(conn, Some(scope_id), Some(adapter_kind), &month)
-        .map_err(pipeline_to_kcs)?;
     let mut device_remaining = budget_caps.device_monthly_usd_cap - device_spent;
     if let Some(adapter_cap) = budget_caps.device_per_adapter.get(adapter_kind) {
         device_remaining = device_remaining.min(adapter_cap - device_adapter_spent);
     }
-    let mut folder_remaining = budget_caps
+    // QA11 (step4b-contract-tests-p3a.md §D): folder per_adapter does not
+    // exist (04 §5.4 — "folder cap は total のみ"); this estimate must not
+    // narrow `folder_remaining` for a constraint the Tx-atomic gate
+    // (`check_then_reserve`/`BudgetCapConfig`) never applies either — a real
+    // 2-condition gate (device cap, folder total cap) staying consistent
+    // with a 3-condition estimate silently added a THIRD gate here that
+    // could pause a task the atomic check would have allowed.
+    let folder_remaining = budget_caps
         .folder_monthly_usd_cap
         .map(|cap| cap - folder_spent);
-    if let Some(adapter_cap) = budget_caps.folder_per_adapter.get(adapter_kind) {
-        let adapter_remaining = adapter_cap - folder_adapter_spent;
-        folder_remaining = Some(
-            folder_remaining
-                .map(|remaining| remaining.min(adapter_remaining))
-                .unwrap_or(adapter_remaining),
-        );
-    }
     Ok((device_remaining, folder_remaining))
 }
 
@@ -15254,12 +15479,42 @@ fn quarantine_status_records(repo: &Repository) -> Result<Vec<Value>> {
         .collect())
 }
 
+/// QA7 (step4b-contract-tests-p3a.md §B, arbitration #1, 10 §1.1 L128-130):
+/// `effective_ignore_hash` hashes the ACTUAL Tier A/B pattern content (via
+/// `kcs_core::scope::tier_a_template_text`), not a hand-maintained version
+/// literal — a pattern-list edit changes this hash automatically.
+fn effective_ignore_hash() -> String {
+    hash_bytes(kcs_core::scope::tier_a_template_text(kcs_pipeline::scan::TIER_B_NEEDLES).as_bytes())
+}
+
 fn write_approval_record(
     repo: &Repository,
     preview: &ScanPreview,
     approval_method: &str,
     network_opt_in: bool,
 ) -> Result<()> {
+    // QA5 (step4b-contract-tests-p3a.md §B, 10 §1 L97-113): the one-time
+    // scope-level scan approval, distinct from the adapter-level opt-in rows
+    // below (`approvals.jsonl`/`consents.jsonl`) — `record_scan_approval` is
+    // idempotent, so calling it again on a later `index --approve` with no
+    // NEW adapter to opt in (the `pending.is_empty()` early return below) is
+    // harmless. Cost estimates are 0.0: no `[pricing]` table is wired yet
+    // (QA19, step4b-contract-tests-p3a.md §F — a separate, larger gap), so
+    // there is currently no non-zero estimate to report honestly.
+    repo.record_scan_approval(json!({
+        "scope_id": preview.scope_id,
+        "root_path": repo.root().display().to_string(),
+        "approved_at": now_utc_seconds(),
+        "actor": std::env::var("USER").unwrap_or_else(|_| "unknown".to_owned()),
+        "approval_method": approval_method,
+        "kcs_version": env!("CARGO_PKG_VERSION"),
+        "effective_ignore_hash": effective_ignore_hash(),
+        "estimated_file_count": preview.candidates.iter().filter(|candidate| !candidate.ignored).count(),
+        "estimated_total_bytes": preview.candidates.iter().filter(|candidate| !candidate.ignored).map(|candidate| candidate.size_bytes).sum::<u64>(),
+        "estimated_markdownize_usd": 0.0,
+        "estimated_embedding_usd": 0.0,
+    }))?;
+
     let path = repo.kcs_dir().join("approvals.jsonl");
     // One approval row per configured online adapter (07 §3: opt-in unit is
     // scope × adapter, L4). Adapter IDs are sourced from AdapterProfile rather
@@ -15296,7 +15551,9 @@ fn write_approval_record(
         "actor": std::env::var("USER").unwrap_or_else(|_| "unknown".to_owned()),
         "approval_method": approval_method,
         "kcs_version": env!("CARGO_PKG_VERSION"),
-        "effective_ignore_hash": hash_bytes(b"built-in-tier-a-v1"),
+        // QA7: same real pattern-content hash as `scan_approval` above (was a
+        // fixed version-literal hash independently of that fix).
+        "effective_ignore_hash": effective_ignore_hash(),
         "estimated_file_count": preview.candidates.iter().filter(|candidate| !candidate.ignored).count(),
         "estimated_size_bytes": preview.candidates.iter().filter(|candidate| !candidate.ignored).map(|candidate| candidate.size_bytes).sum::<u64>(),
         "network_opt_in": network_opt_in,
@@ -16080,6 +16337,7 @@ mod tests {
                 fallback_reason: Some("contract_violation".to_owned()),
                 created_at: "2026-07-12T00:00:00Z".to_owned(),
                 bbox_annotation_enabled: None,
+                hold_reason: None,
                 reserved_usd: None,
                 reserved_month: None,
                 reservation_id: None,
@@ -16151,10 +16409,14 @@ mod tests {
             fallback_reason: Some("contract_violation".to_owned()),
             created_at: "2026-07-12T00:00:00Z".to_owned(),
             bbox_annotation_enabled: None,
+            hold_reason: None,
             reserved_usd: None,
             reserved_month: None,
             reservation_id: None,
         };
+        // QA1: `legacy_hold` deliberately keeps `hold_reason: None` after the
+        // clone (a Paused row written before the field existed) to cover the
+        // backward-compat deserialization path.
         let mut legacy_hold = terminal.clone();
         legacy_hold.task_id = "task_later_hold".to_owned();
         legacy_hold.status = TaskStatus::Paused;
@@ -16237,6 +16499,7 @@ mod tests {
                 fallback_reason: Some("network_error".to_owned()),
                 created_at: "2026-07-12T00:00:00Z".to_owned(),
                 bbox_annotation_enabled: None,
+                hold_reason: None,
                 reserved_usd: None,
                 reserved_month: None,
                 reservation_id: None,
@@ -16341,6 +16604,7 @@ mod tests {
             fallback_reason: Some("ready_for_online_adapter".to_owned()),
             created_at: "2026-07-12T00:00:00Z".to_owned(),
             bbox_annotation_enabled: None,
+            hold_reason: None,
             reserved_usd: None,
             reserved_month: None,
             reservation_id: None,
@@ -16446,11 +16710,11 @@ mod tests {
         assert!(effective_bbox_annotation_policy(&scope, &user).unwrap());
         assert_eq!(read_bbox_annotation_config(&scope).unwrap(), None);
 
-        std::fs::write(&user, "[markdownize.bbox_annotation]\nenabled = false\n").unwrap();
+        std::fs::write(&user, "[markdownize]\nbbox_annotation = false\n").unwrap();
         assert_eq!(read_bbox_annotation_config(&user).unwrap(), Some(false));
         assert!(!effective_bbox_annotation_policy(&scope, &user).unwrap());
 
-        std::fs::write(&scope, "[markdownize.bbox_annotation]\nenabled = true\n").unwrap();
+        std::fs::write(&scope, "[markdownize]\nbbox_annotation = true\n").unwrap();
         assert!(effective_bbox_annotation_policy(&scope, &user).unwrap());
     }
 
@@ -16485,11 +16749,7 @@ mod tests {
         assert_eq!(error.error_code(), "KCS-E-CONFIG-SCHEMA-001");
 
         let valid_user = dir.path().join("valid-user.toml");
-        std::fs::write(
-            &valid_user,
-            "[markdownize.bbox_annotation]\nenabled = false\n",
-        )
-        .unwrap();
+        std::fs::write(&valid_user, "[markdownize]\nbbox_annotation = false\n").unwrap();
         assert!(effective_bbox_annotation_policy(&invalid_toml, &valid_user).is_err());
     }
 
@@ -16503,7 +16763,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let target = dir.path().join("target.toml");
         let link = dir.path().join("link.toml");
-        std::fs::write(&target, "[markdownize.bbox_annotation]\nenabled = true\n").unwrap();
+        std::fs::write(&target, "[markdownize]\nbbox_annotation = true\n").unwrap();
         symlink(&target, &link).unwrap();
 
         let error = read_bbox_annotation_config(&link).unwrap_err();
@@ -16686,12 +16946,20 @@ mod tests {
         let plan = partial_retry_plan_from_manifest(&manifest(None, Some("invalid_input")));
         assert!(plan.retryable_units.is_empty());
 
-        // Mixed: only the retryable unit survives; a contract_violation is dropped.
+        // Mixed: QA45 (step4b-contract-tests-p3a.md §M, 04 §5.3 L738-740) made
+        // contract_violation retryable (max_attempts=1, same-mode retry for
+        // output jitter) instead of dropped — both units now survive, and
+        // the plan's ceiling is the min across them (1, tighter than
+        // network_error's 5).
         let plan = partial_retry_plan_from_manifest(&manifest(
             Some("contract_violation"),
             Some("network_error"),
         ));
-        assert_eq!(plan.retryable_units, vec!["page:2".to_owned()]);
+        assert_eq!(
+            plan.retryable_units,
+            vec!["page:1".to_owned(), "page:2".to_owned()]
+        );
+        assert_eq!(plan.max_attempts, Some(1));
     }
 
     #[test]
@@ -16955,7 +17223,6 @@ mod tests {
             device_monthly_usd_cap: 1.0,
             folder_monthly_usd_cap: None,
             device_per_adapter: BTreeMap::new(),
-            folder_per_adapter: BTreeMap::new(),
             hard_stop: true,
             warn_at_percent: 80,
         };
@@ -17412,6 +17679,7 @@ mod tests {
             fallback_reason: Some("ready_for_online_adapter".to_owned()),
             created_at: "2026-07-04T00:00:00Z".to_owned(),
             bbox_annotation_enabled: None,
+            hold_reason: None,
             reserved_usd: None,
             reserved_month: None,
             reservation_id: None,

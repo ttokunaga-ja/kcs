@@ -11,7 +11,38 @@
       "type": "string",
       "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$"
     },
-    "scope_path": { "type": "string", "minLength": 1 }
+    "scope_path": { "type": "string", "minLength": 1 },
+    "scan_approval": {
+      "type": "object",
+      "description": "QA5 (step4b-contract-tests-p3a.md §B, 10 §1 L97-113): the one-time scope-level scan approval record, distinct from the adapter-level network opt-in (`approvals[]`).",
+      "properties": {
+        "scope_id": { "type": "string" },
+        "root_path": { "type": "string" },
+        "approved_at": { "type": "string" },
+        "actor": { "type": "string" },
+        "approval_method": { "type": "string", "enum": ["interactive", "approve", "yes"] },
+        "kcs_version": { "type": "string" },
+        "effective_ignore_hash": { "type": "string" },
+        "estimated_file_count": { "type": "integer", "minimum": 0 },
+        "estimated_total_bytes": { "type": "integer", "minimum": 0 },
+        "estimated_markdownize_usd": { "type": "number", "minimum": 0 },
+        "estimated_embedding_usd": { "type": "number", "minimum": 0 }
+      },
+      "required": [
+        "scope_id",
+        "root_path",
+        "approved_at",
+        "actor",
+        "approval_method",
+        "kcs_version",
+        "effective_ignore_hash",
+        "estimated_file_count",
+        "estimated_total_bytes",
+        "estimated_markdownize_usd",
+        "estimated_embedding_usd"
+      ],
+      "additionalProperties": false
+    }
   },
   "additionalProperties": false
 }

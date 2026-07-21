@@ -124,10 +124,17 @@ impl KcsError {
         )
     }
 
+    /// QB8/QB9 (step4b-contract-tests-p3b.md §A, 06 §8 / 10 §12.5): the
+    /// canonical, spec-listed error code for an incompatible
+    /// `kcs_format_version` is `KCS-E-STORE-VERSION-001` (exit 8), not a
+    /// bespoke `KCS-E-CONFIG-FORMAT-001` — the latter never appeared in the
+    /// error code namespace tables and was only recognized by one internal
+    /// caller (`search_one_scope_inner`'s per-scope translation), which is
+    /// now redundant and has been removed.
     #[must_use]
     pub fn incompatible_format(found: impl Into<String>) -> Self {
         Self::new(
-            "KCS-E-CONFIG-FORMAT-001",
+            "KCS-E-STORE-VERSION-001",
             "incompatible kcs_format_version",
             json!({ "found": found.into() }),
             ExitCode::IncompatibleProfile,

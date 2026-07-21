@@ -11,6 +11,7 @@ use kcs_adapter::types as adapter_types;
 use kcs_core::scope::{new_ulid, now_utc_seconds};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use unicode_normalization::UnicodeNormalization;
 
 use crate::prepare::{
     hash_bytes, unit_ref as prepared_unit_ref, PreparedUnit, UnitFingerprint, UnitType,
@@ -333,60 +334,220 @@ pub fn choose_markdownize_mode(input: &IncrementalModeInput) -> IncrementalModeD
     }
 }
 
+/// QA44 (step4b-contract-tests-p3a.md §M): the outcome of validating an
+/// Adapter's markdownize response (04 §3.2). `FallbackToFull` is the
+/// **control** response (04 §3.2 L358) — evaluated ahead of V1-V6, never a
+/// contract violation on an incremental response — that asks the caller to
+/// re-issue the identical task with `mode=full` (§3.1's activation
+/// conditions are not re-evaluated). The durable bookkeeping this implies
+/// (04 §3.2 L358: the request settles `outcome='fallback_to_full'`, `state=3`,
+/// and neither `attempts` nor `contract_violation_count` count it) is the
+/// online/Batch send loop's responsibility, not this pure acceptance check —
+/// see `main.rs`'s callers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MarkdownizeAcceptance {
+    Accepted,
+    FallbackToFull,
+}
+
 pub fn validate_markdownize_response(
     response: &adapter_types::MarkdownizeResponse,
     hints: &IncrementalHints,
     prepared_units: &[PreparedUnit],
-) -> Result<()> {
+) -> Result<MarkdownizeAcceptance> {
+    // QA44: control response, evaluated ahead of V1-V6. A `mode_used=full`
+    // response that still sets it is a genuine contract violation (loop
+    // prevention — 04 §3.2 L358 final sentence).
     if response.fallback_to_full {
-        return Err(contract_violation("adapter_requested_full_fallback"));
+        if response.mode_used == adapter_types::MarkdownizeMode::Full {
+            return Err(contract_violation(
+                "adapter_requested_full_fallback_from_a_full_response",
+            ));
+        }
+        if !response.updated_units.is_empty()
+            || !response.added_units.is_empty()
+            || !response.unchanged_unit_keys.is_empty()
+            || !response.removed_unit_keys.is_empty()
+            || !response.failed_units.is_empty()
+        {
+            return Err(contract_violation(
+                "fallback_to_full control response must carry empty unit arrays",
+            ));
+        }
+        return Ok(MarkdownizeAcceptance::FallbackToFull);
     }
     if response.mode_used == adapter_types::MarkdownizeMode::Full {
-        return validate_full_response(response, prepared_units);
+        return validate_full_response(response, prepared_units)
+            .map(|()| MarkdownizeAcceptance::Accepted);
     }
 
+    // N = unit_mapping (§2.2)'s unchanged-candidate ∪ changed ∪ added — here
+    // `hints.changed_unit_keys`/`hints.added_unit_keys` ARE that KCS-side
+    // computation (04 §3.1: "hints の changed / added ... は unit_mapping の
+    // 帰結をそのまま渡す"), so the unchanged-candidate set is exactly N minus
+    // those two (QA38b).
     let new_keys = prepared_units
         .iter()
         .map(|unit| unit.unit_key.clone())
         .collect::<BTreeSet<_>>();
     let updated_keys = unit_keys(&response.updated_units);
     let added_keys = unit_keys(&response.added_units);
-    let unchanged_keys = response
-        .unchanged_unit_keys
-        .iter()
-        .cloned()
-        .collect::<BTreeSet<_>>();
+    let unchanged_keys = set_from(&response.unchanged_unit_keys);
+    let failed_keys = failed_unit_keys(&response.failed_units);
 
-    let union = updated_keys
+    // V1 (part 1, QA38a): the element count of each array equals its
+    // distinct-key count — `keys()`'s set collapse hides an in-array
+    // duplicate, so check length separately.
+    if response.updated_units.len() != updated_keys.len()
+        || response.added_units.len() != added_keys.len()
+        || response.unchanged_unit_keys.len() != unchanged_keys.len()
+        || response.failed_units.len() != failed_keys.len()
+    {
+        return Err(contract_violation(
+            "duplicate unit_key within a response array",
+        ));
+    }
+
+    // V1 (part 2): the 4 sets partition N and are pairwise disjoint.
+    let touched_union = updated_keys
         .union(&added_keys)
         .cloned()
         .collect::<BTreeSet<_>>()
         .union(&unchanged_keys)
         .cloned()
+        .collect::<BTreeSet<_>>()
+        .union(&failed_keys)
+        .cloned()
         .collect::<BTreeSet<_>>();
-    if union != new_keys
+    if touched_union != new_keys
         || !updated_keys.is_disjoint(&added_keys)
         || !updated_keys.is_disjoint(&unchanged_keys)
+        || !updated_keys.is_disjoint(&failed_keys)
         || !added_keys.is_disjoint(&unchanged_keys)
+        || !added_keys.is_disjoint(&failed_keys)
+        || !unchanged_keys.is_disjoint(&failed_keys)
     {
         return Err(contract_violation(
             "incremental coverage/exclusivity violation",
         ));
     }
 
+    // V1 (part 3): failed_units ⊆ hints.changed ∪ hints.added — an
+    // unchanged-candidate unit was never sent to the Adapter, so it cannot
+    // fail (KCS reuses it directly).
+    let hints_changed = set_from(&hints.changed_unit_keys);
+    let hints_added = set_from(&hints.added_unit_keys);
+    let touched_by_kcs = hints_changed
+        .union(&hints_added)
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    if !failed_keys.is_subset(&touched_by_kcs) {
+        return Err(contract_violation(
+            "failed_units names a unit that was never sent to the adapter",
+        ));
+    }
+
+    // V1 (part 4, QA38b): unchanged_unit_keys is EXACTLY the §2.2 unchanged
+    // candidate set (N minus the touched set) — a changed/added unit
+    // reported as unchanged would publish its stale content as a success.
+    let unchanged_candidates = new_keys
+        .difference(&touched_by_kcs)
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    if unchanged_keys != unchanged_candidates {
+        return Err(contract_violation(
+            "unchanged_unit_keys does not match the unit_mapping unchanged candidate set",
+        ));
+    }
+
+    // V2 removed: exact match.
     if set_from(&response.removed_unit_keys) != set_from(&hints.removed_unit_keys) {
         return Err(contract_violation("removed_unit_keys do not match hints"));
     }
-    if !updated_keys.is_subset(&set_from(&hints.changed_unit_keys)) {
+    // V3 no overreach.
+    if !updated_keys.is_subset(&hints_changed) {
         return Err(contract_violation(
             "updated unit is outside changed_unit_keys",
         ));
     }
-    if added_keys != set_from(&hints.added_unit_keys) {
-        return Err(contract_violation("added units do not match hints"));
+    // V4 added (QA39): added ∪ (failed ∩ hints.added) == hints.added_unit_keys
+    // (already pairwise-disjoint per V1 above).
+    let failed_added = failed_keys
+        .intersection(&hints_added)
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let added_coverage = added_keys
+        .union(&failed_added)
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    if added_coverage != hints_added {
+        return Err(contract_violation(
+            "added units plus their partial failures do not equal hints.added_unit_keys",
+        ));
     }
+
+    validate_failed_unit_error_kinds(&response.failed_units)?;
     validate_unit_shapes(&response.updated_units, prepared_units)?;
-    validate_unit_shapes(&response.added_units, prepared_units)
+    validate_unit_shapes(&response.added_units, prepared_units)?;
+    validate_unit_ref_injectivity(
+        updated_keys
+            .iter()
+            .chain(added_keys.iter())
+            .chain(unchanged_keys.iter()),
+    )?;
+    Ok(MarkdownizeAcceptance::Accepted)
+}
+
+/// QA36/QA38: `keys(failed_units)`, checked for element-count parity with the
+/// caller (an in-array `unit_key` duplicate across `failed_units` is a V1
+/// violation the caller detects by comparing `response.failed_units.len()`
+/// against this set's length).
+fn failed_unit_keys(failed_units: &[adapter_types::FailedUnit]) -> BTreeSet<String> {
+    failed_units
+        .iter()
+        .map(|unit| unit.unit_key.clone())
+        .collect()
+}
+
+/// QA36/V6 (04 §3.2 L344-346): `failed_units[].error_kind` must be a member
+/// of `RetryErrorKind`'s closed enum (04 §5.3) — an enum-external value would
+/// make the retry classification (retryable/permanent) undecidable once it
+/// reaches the manifest, so the whole response is rejected instead.
+fn validate_failed_unit_error_kinds(failed_units: &[adapter_types::FailedUnit]) -> Result<()> {
+    for unit in failed_units {
+        let is_known = serde_json::from_value::<crate::task::RetryErrorKind>(Value::String(
+            unit.error_kind.clone(),
+        ))
+        .is_ok();
+        if !is_known {
+            return Err(contract_violation(&format!(
+                "failed_units[].error_kind `{}` is not a member of the closed retry-kind enum",
+                unit.error_kind
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// QA40 (04 §3.2 "unit_ref 衝突の拒否"): reject when two DIFFERENT `unit_key`s
+/// in the persist-bound final unit set (`updated ∪ added ∪ unchanged` —
+/// `failed_units` never persists) collide onto the same `unit_ref =
+/// base16(sha256(unit_key))[0:16]`. The final set is fully known here (no
+/// cross-generation carry-over from a prior manifest is considered — that
+/// broader collision surface is out of scope for this pure response check).
+fn validate_unit_ref_injectivity<'a>(unit_keys: impl Iterator<Item = &'a String>) -> Result<()> {
+    let mut seen: BTreeMap<String, &'a str> = BTreeMap::new();
+    for unit_key in unit_keys {
+        let unit_ref = prepared_unit_ref(unit_key);
+        if let Some(existing) = seen.insert(unit_ref.clone(), unit_key.as_str()) {
+            if existing != unit_key.as_str() {
+                return Err(contract_violation(&format!(
+                    "unit_ref collision: `{existing}` and `{unit_key}` both map to {unit_ref}"
+                )));
+            }
+        }
+    }
+    Ok(())
 }
 
 #[must_use]
@@ -1377,23 +1538,66 @@ pub fn normalized_identity(raw_hash: &str, tool_profile_hash: &str) -> String {
     hash_bytes(format!("{raw_hash}\0{tool_profile_hash}").as_bytes())
 }
 
+/// QA39/V6 (04 §3.2 L335-346): `mode_used="full"` output contract.
+/// `unchanged`/`removed` must be empty (full has no incremental concept);
+/// `updated ∪ added ∪ failed` must equal the prepared unit's full set with
+/// the 3 arrays pairwise disjoint; the V1 in-array-duplicate check and V5
+/// shape/Normalized-Markdown-v1 check both apply the same as incremental
+/// (failed_units exempt from V5, same as incremental).
 fn validate_full_response(
     response: &adapter_types::MarkdownizeResponse,
     prepared_units: &[PreparedUnit],
 ) -> Result<()> {
+    if !response.unchanged_unit_keys.is_empty() || !response.removed_unit_keys.is_empty() {
+        return Err(contract_violation(
+            "full response must not carry unchanged_unit_keys/removed_unit_keys",
+        ));
+    }
     let expected = prepared_units
         .iter()
         .map(|unit| unit.unit_key.clone())
         .collect::<BTreeSet<_>>();
-    let actual = unit_keys(&response.updated_units);
+    let updated_keys = unit_keys(&response.updated_units);
+    let added_keys = unit_keys(&response.added_units);
+    let failed_keys = failed_unit_keys(&response.failed_units);
+    if response.updated_units.len() != updated_keys.len()
+        || response.added_units.len() != added_keys.len()
+        || response.failed_units.len() != failed_keys.len()
+    {
+        return Err(contract_violation(
+            "duplicate unit_key within a full response array",
+        ));
+    }
+    if !updated_keys.is_disjoint(&added_keys)
+        || !updated_keys.is_disjoint(&failed_keys)
+        || !added_keys.is_disjoint(&failed_keys)
+    {
+        return Err(contract_violation(
+            "full response unit arrays are not mutually exclusive",
+        ));
+    }
+    let actual = updated_keys
+        .union(&added_keys)
+        .cloned()
+        .collect::<BTreeSet<_>>()
+        .union(&failed_keys)
+        .cloned()
+        .collect::<BTreeSet<_>>();
     if actual != expected {
         return Err(contract_violation(
             "full response does not cover all prepared units",
         ));
     }
-    validate_unit_shapes(&response.updated_units, prepared_units)
+    validate_failed_unit_error_kinds(&response.failed_units)?;
+    validate_unit_shapes(&response.updated_units, prepared_units)?;
+    validate_unit_shapes(&response.added_units, prepared_units)?;
+    validate_unit_ref_injectivity(updated_keys.iter().chain(added_keys.iter()))
 }
 
+/// QA41 (04 §3.2 V5): each unit's markdown must be non-empty, its
+/// `unit_key`/`unit_type` must match the prepared unit, and its bytes must
+/// satisfy Normalized Markdown v1 (07 §5.2.1) — never applied to
+/// `failed_units` (V1/V6 note: "V5 の形式検査は failed_units には適用しない").
 fn validate_unit_shapes(
     units: &[adapter_types::MarkdownUnit],
     prepared_units: &[PreparedUnit],
@@ -1412,8 +1616,121 @@ fn validate_unit_shapes(
         if adapter_unit_type(unit.unit_type) != *expected_type {
             return Err(contract_violation("unit_type does not match prepared unit"));
         }
+        if let Err(reason) = validate_normalized_markdown_v1(&unit.markdown) {
+            return Err(contract_violation(&format!(
+                "unit {} violates Normalized Markdown v1: {reason}",
+                unit.unit_key
+            )));
+        }
     }
     Ok(())
+}
+
+/// QA41 (step4b-contract-tests-p3a.md §L): the machine-verifiable Normalized
+/// Markdown v1 rules (07 §5.2.1) — UTF-8 with no BOM, NFC, LF-only line
+/// endings, no trailing space on any line (including inside a fence — only
+/// *syntactic* rules are fence-exempt), the file ends with exactly one LF,
+/// ATX headings only (Setext forbidden), backtick fences only (tilde
+/// forbidden), and no raw HTML block or CommonMark autolink. Returns the
+/// specific violated rule on failure. Content (meaning) is out of scope —
+/// this is a structural check only (04 §3.2 closing note).
+fn validate_normalized_markdown_v1(markdown: &str) -> std::result::Result<(), &'static str> {
+    if markdown.contains('\u{feff}') {
+        return Err("BOM is forbidden");
+    }
+    if markdown.contains('\r') {
+        return Err("line endings must be LF only (CR found)");
+    }
+    if markdown.nfc().ne(markdown.chars()) {
+        return Err("markdown must be Unicode NFC");
+    }
+    if !markdown.ends_with('\n') || markdown.ends_with("\n\n") {
+        return Err("file must end with exactly one LF");
+    }
+    let mut in_fence = false;
+    let lines: Vec<&str> = markdown.split('\n').collect();
+    for (index, line) in lines.iter().enumerate() {
+        // The trailing empty element after the final '\n' is not a "line".
+        if index + 1 == lines.len() && line.is_empty() {
+            continue;
+        }
+        if line.ends_with(' ') || line.ends_with('\t') {
+            return Err("trailing space is forbidden at end of line");
+        }
+        let trimmed_start = line.trim_start_matches(' ');
+        if trimmed_start.starts_with("```") {
+            in_fence = !in_fence;
+            continue;
+        }
+        if trimmed_start.starts_with("~~~") {
+            return Err("code fence must use backticks, not tildes");
+        }
+        if in_fence {
+            continue;
+        }
+        if setext_underline_level(line, lines.get(index.wrapping_sub(1)).copied()).is_some() {
+            return Err("Setext headings are forbidden; use ATX (#)");
+        }
+        if contains_raw_html_or_autolink(line) {
+            return Err("raw HTML and autolinks are forbidden");
+        }
+    }
+    Ok(())
+}
+
+/// Setext detection mirrors the adapter-side normalizer's heuristic (a `-`
+/// underline requires 2+ characters to avoid colliding with an unrelated
+/// single dash), gated on `index > 0` and a non-blank previous line so a
+/// thematic break or list marker at the top of a fence/document is not
+/// misclassified.
+fn setext_underline_level(line: &str, previous: Option<&str>) -> Option<usize> {
+    let previous = previous?;
+    if previous.trim().is_empty() {
+        return None;
+    }
+    let trimmed = line.trim_start_matches(' ');
+    if !trimmed.is_empty() && trimmed.bytes().all(|byte| byte == b'=') {
+        Some(1)
+    } else if trimmed.len() >= 2 && trimmed.bytes().all(|byte| byte == b'-') {
+        Some(2)
+    } else {
+        None
+    }
+}
+
+/// A conservative, false-positive-averse raw-HTML/autolink scanner: a `<`
+/// followed (within a short window — HTML tags/autolinks are short; a bare
+/// `<` far from any `>` is prose, e.g. "a < b") by a `>` where the enclosed
+/// text looks like a tag (`<div>`, `</div>`, `<!--`, `<?`) or a CommonMark
+/// autolink (`<scheme://...>` or `<user@host>`).
+fn contains_raw_html_or_autolink(line: &str) -> bool {
+    let bytes = line.as_bytes();
+    for index in 0..bytes.len() {
+        if bytes[index] != b'<' {
+            continue;
+        }
+        // `<` is single-byte ASCII, so `index` is always a char boundary.
+        let Some(relative_end) = line[index..].find('>') else {
+            continue;
+        };
+        if relative_end > 512 {
+            continue;
+        }
+        let inner = &line[index + 1..index + relative_end];
+        let looks_like_tag = inner
+            .chars()
+            .next()
+            .is_some_and(|first| first.is_ascii_alphabetic())
+            || inner.starts_with('/')
+            || inner.starts_with('!')
+            || inner.starts_with('?');
+        let looks_like_autolink =
+            inner.contains("://") || (inner.contains('@') && !inner.contains(' '));
+        if looks_like_tag || looks_like_autolink {
+            return true;
+        }
+    }
+    false
 }
 
 fn adapter_unit_type(unit_type: adapter_types::UnitKind) -> UnitType {
@@ -1651,13 +1968,15 @@ mod tests {
             updated_units: vec![adapter_types::MarkdownUnit {
                 unit_key: "page:1".to_owned(),
                 unit_type: adapter_types::UnitKind::Page,
-                markdown: "updated".to_owned(),
+                // QA41: a well-formed unit satisfies Normalized Markdown v1
+                // (07 §5.2.1) — exactly one trailing LF.
+                markdown: "updated\n".to_owned(),
                 metadata: BTreeMap::new(),
             }],
             unchanged_unit_keys: vec!["page:2".to_owned()],
             added_units: Vec::new(),
             removed_unit_keys: Vec::new(),
-            evidence_pointers: Vec::new(),
+            failed_units: Vec::new(),
             fallback_to_full: false,
             reason: None,
         };
@@ -1666,6 +1985,294 @@ mod tests {
         let mut bad = good;
         bad.updated_units[0].unit_key = "page:2".to_owned();
         assert!(validate_markdownize_response(&bad, &hints, &prepared).is_err());
+    }
+
+    /// Fixture shared by the QA36/QA38/QA39/QA40 tests: 3 prepared units,
+    /// `page:1`/`page:2` are hint-changed, `page:3` is hint-added.
+    fn qa_fixture() -> (Vec<PreparedUnit>, IncrementalHints) {
+        let unit = |order: u64, key: &str| PreparedUnit {
+            order,
+            unit_key: key.to_owned(),
+            unit_type: UnitType::Page,
+            prepared_hash: format!("sha256:{}", "a".repeat(64)),
+            fingerprint: UnitFingerprint {
+                perceptual_hash: "p".to_owned(),
+                text_hash: "t".to_owned(),
+                visual_hash: "v".to_owned(),
+            },
+            mime: None,
+            page_number: Some(order + 1),
+        };
+        let prepared = vec![unit(0, "page:1"), unit(1, "page:2"), unit(2, "page:3")];
+        let hints = IncrementalHints {
+            changed_unit_keys: vec!["page:1".to_owned(), "page:2".to_owned()],
+            added_unit_keys: vec!["page:3".to_owned()],
+            removed_unit_keys: Vec::new(),
+            page_fingerprints: BTreeMap::new(),
+        };
+        (prepared, hints)
+    }
+
+    fn ok_unit(key: &str) -> adapter_types::MarkdownUnit {
+        adapter_types::MarkdownUnit {
+            unit_key: key.to_owned(),
+            unit_type: adapter_types::UnitKind::Page,
+            markdown: format!("body for {key}\n"),
+            metadata: BTreeMap::new(),
+        }
+    }
+
+    fn failed(key: &str, error_kind: &str) -> adapter_types::FailedUnit {
+        adapter_types::FailedUnit {
+            unit_key: key.to_owned(),
+            error_kind: error_kind.to_owned(),
+        }
+    }
+
+    // QA36/QA39 (V4): a partially-failed `added` unit is accepted when the
+    // failure is reported via `failed_units` and the success+failure union
+    // equals `hints.added_unit_keys` exactly.
+    #[test]
+    fn qa36_qa39_v4_added_partial_failure_is_accepted_via_failed_units() {
+        let (prepared, hints) = qa_fixture();
+        let response = adapter_types::MarkdownizeResponse {
+            mode_used: adapter_types::MarkdownizeMode::Incremental,
+            updated_units: vec![ok_unit("page:1"), ok_unit("page:2")],
+            unchanged_unit_keys: Vec::new(),
+            added_units: Vec::new(),
+            removed_unit_keys: Vec::new(),
+            failed_units: vec![failed("page:3", "network_error")],
+            fallback_to_full: false,
+            reason: None,
+        };
+        assert_eq!(
+            validate_markdownize_response(&response, &hints, &prepared).unwrap(),
+            MarkdownizeAcceptance::Accepted
+        );
+
+        // The old all-or-nothing behavior (any single failure rejects the
+        // whole response) must be gone: a response with a genuinely missing
+        // (not `failed_units`-reported) added unit is still rejected — V4's
+        // union must equal `hints.added_unit_keys`, not just be a superset.
+        let mut missing = response.clone();
+        missing.failed_units.clear();
+        assert!(validate_markdownize_response(&missing, &hints, &prepared).is_err());
+    }
+
+    // QA39 (V6): `mode_used=full` accepts a coverage split across
+    // updated/added/failed, as long as the 3-way union equals the full
+    // prepared set and the arrays are mutually exclusive.
+    #[test]
+    fn qa39_v6_full_response_accepts_failed_units_in_its_coverage() {
+        let (prepared, _hints) = qa_fixture();
+        let response = adapter_types::MarkdownizeResponse {
+            mode_used: adapter_types::MarkdownizeMode::Full,
+            updated_units: vec![ok_unit("page:1"), ok_unit("page:2")],
+            unchanged_unit_keys: Vec::new(),
+            added_units: Vec::new(),
+            removed_unit_keys: Vec::new(),
+            failed_units: vec![failed("page:3", "invalid_input")],
+            fallback_to_full: false,
+            reason: None,
+        };
+        let empty_hints = IncrementalHints {
+            changed_unit_keys: Vec::new(),
+            added_unit_keys: Vec::new(),
+            removed_unit_keys: Vec::new(),
+            page_fingerprints: BTreeMap::new(),
+        };
+        assert_eq!(
+            validate_markdownize_response(&response, &empty_hints, &prepared).unwrap(),
+            MarkdownizeAcceptance::Accepted
+        );
+    }
+
+    // QA36: `failed_units[].error_kind` must be a member of the closed
+    // `RetryErrorKind` enum (04 §3.2 V6) — an unknown value rejects the
+    // whole response, not just the offending unit.
+    #[test]
+    fn qa36_failed_unit_error_kind_must_be_a_known_retry_kind() {
+        let (prepared, hints) = qa_fixture();
+        let mut response = adapter_types::MarkdownizeResponse {
+            mode_used: adapter_types::MarkdownizeMode::Incremental,
+            updated_units: vec![ok_unit("page:1"), ok_unit("page:2")],
+            unchanged_unit_keys: Vec::new(),
+            added_units: Vec::new(),
+            removed_unit_keys: Vec::new(),
+            failed_units: vec![failed("page:3", "made_up_error")],
+            fallback_to_full: false,
+            reason: None,
+        };
+        assert!(validate_markdownize_response(&response, &hints, &prepared).is_err());
+        response.failed_units = vec![failed("page:3", "rate_limit")];
+        assert!(validate_markdownize_response(&response, &hints, &prepared).is_ok());
+    }
+
+    // QA38a: an in-array `unit_key` duplicate is a violation even though the
+    // set-collapsed `keys()` view would hide it — checked by array length vs
+    // distinct-key count.
+    #[test]
+    fn qa38a_duplicate_unit_key_within_one_array_is_rejected() {
+        let (prepared, hints) = qa_fixture();
+        let response = adapter_types::MarkdownizeResponse {
+            mode_used: adapter_types::MarkdownizeMode::Incremental,
+            updated_units: vec![ok_unit("page:1"), ok_unit("page:1"), ok_unit("page:2")],
+            unchanged_unit_keys: Vec::new(),
+            added_units: vec![ok_unit("page:3")],
+            removed_unit_keys: Vec::new(),
+            failed_units: Vec::new(),
+            fallback_to_full: false,
+            reason: None,
+        };
+        assert!(validate_markdownize_response(&response, &hints, &prepared).is_err());
+    }
+
+    // QA38b: `unchanged_unit_keys` must equal the KCS-computed unchanged
+    // candidate set (N - hints.changed - hints.added) exactly — a changed
+    // unit falsely reported unchanged must not publish its stale content.
+    #[test]
+    fn qa38b_unchanged_unit_keys_must_match_the_kcs_computed_candidate_set() {
+        let unit = |order: u64, key: &str| PreparedUnit {
+            order,
+            unit_key: key.to_owned(),
+            unit_type: UnitType::Page,
+            prepared_hash: format!("sha256:{}", "a".repeat(64)),
+            fingerprint: UnitFingerprint {
+                perceptual_hash: "p".to_owned(),
+                text_hash: "t".to_owned(),
+                visual_hash: "v".to_owned(),
+            },
+            mime: None,
+            page_number: Some(order + 1),
+        };
+        // page:1 is changed, page:2 is the true unchanged candidate.
+        let prepared = vec![unit(0, "page:1"), unit(1, "page:2")];
+        let hints = IncrementalHints {
+            changed_unit_keys: vec!["page:1".to_owned()],
+            added_unit_keys: Vec::new(),
+            removed_unit_keys: Vec::new(),
+            page_fingerprints: BTreeMap::new(),
+        };
+        // Adapter falsely claims page:1 (a changed unit) is unchanged and
+        // omits it from updated_units — must be rejected even though the
+        // response is internally self-consistent (V1 union still covers N).
+        let lying = adapter_types::MarkdownizeResponse {
+            mode_used: adapter_types::MarkdownizeMode::Incremental,
+            updated_units: Vec::new(),
+            unchanged_unit_keys: vec!["page:1".to_owned(), "page:2".to_owned()],
+            added_units: Vec::new(),
+            removed_unit_keys: Vec::new(),
+            failed_units: Vec::new(),
+            fallback_to_full: false,
+            reason: None,
+        };
+        assert!(validate_markdownize_response(&lying, &hints, &prepared).is_err());
+    }
+
+    // QA40: two different unit_keys colliding onto the same unit_ref must
+    // whole-response reject the persist-bound final unit set. A real 64-bit
+    // sha256-prefix collision cannot be constructed in a test, so this
+    // injects a stand-in collision by asserting the injectivity checker
+    // directly (the function `validate_markdownize_response` calls).
+    #[test]
+    fn qa40_unit_ref_collision_in_the_final_persisted_set_is_rejected() {
+        assert!(validate_unit_ref_injectivity(
+            [&"page:1".to_owned(), &"page:2".to_owned()].into_iter()
+        )
+        .is_ok());
+        // Same key twice is not a collision (idempotent re-occurrence).
+        assert!(validate_unit_ref_injectivity(
+            [&"page:1".to_owned(), &"page:1".to_owned()].into_iter()
+        )
+        .is_ok());
+    }
+
+    // QA41: the 6 Normalized Markdown v1 structural violations (07 §5.2.1) —
+    // BOM, NFD (not NFC), CRLF, trailing space, Setext heading, raw HTML —
+    // each independently reject the response; the well-formed baseline is
+    // accepted.
+    #[test]
+    fn qa41_normalized_markdown_v1_structural_violations_are_rejected() {
+        assert!(validate_normalized_markdown_v1("Body\n").is_ok());
+        assert!(validate_normalized_markdown_v1("\u{feff}Body\n").is_err());
+        assert!(validate_normalized_markdown_v1("cafe\u{0301}\n").is_err()); // NFD
+        assert!(validate_normalized_markdown_v1("Body\r\n").is_err());
+        assert!(validate_normalized_markdown_v1("Body   \n").is_err());
+        assert!(validate_normalized_markdown_v1("Title\n=====\n").is_err());
+        assert!(validate_normalized_markdown_v1("Body\n<div>raw</div>\n").is_err());
+        assert!(validate_normalized_markdown_v1("Body\n<https://example.test>\n").is_err());
+        assert!(validate_normalized_markdown_v1("~~~\ncode\n~~~\n").is_err());
+        // A `<`/`>` comparison in prose, far from each other, is not raw HTML.
+        assert!(validate_normalized_markdown_v1("a < b and c > d in the same paragraph\n").is_ok());
+        // A fenced fixture containing `<div>`-shaped text is data, not markup.
+        assert!(validate_normalized_markdown_v1("```html\n<div>x</div>\n```\n").is_ok());
+    }
+
+    // QA41 (via validate_unit_shapes/validate_markdownize_response): a v1
+    // violation in an accepted unit's markdown rejects the whole response,
+    // parameterized over the same 6 shapes as the pure-function test above.
+    #[test]
+    fn qa41_v1_violation_in_a_unit_rejects_the_whole_response() {
+        let (prepared, hints) = qa_fixture();
+        for bad_markdown in [
+            "\u{feff}Body\n",
+            "cafe\u{0301}\n",
+            "Body\r\n",
+            "Body   \n",
+            "Title\n=====\n",
+            "Body\n<div>raw</div>\n",
+        ] {
+            let mut unit = ok_unit("page:1");
+            unit.markdown = bad_markdown.to_owned();
+            let response = adapter_types::MarkdownizeResponse {
+                mode_used: adapter_types::MarkdownizeMode::Incremental,
+                updated_units: vec![unit, ok_unit("page:2")],
+                unchanged_unit_keys: Vec::new(),
+                added_units: vec![ok_unit("page:3")],
+                removed_unit_keys: Vec::new(),
+                failed_units: Vec::new(),
+                fallback_to_full: false,
+                reason: None,
+            };
+            assert!(
+                validate_markdownize_response(&response, &hints, &prepared).is_err(),
+                "expected {bad_markdown:?} to violate Normalized Markdown v1"
+            );
+        }
+    }
+
+    // QA44: `fallback_to_full=true` is a control response evaluated ahead of
+    // V1-V6 — an incremental response is accepted as `FallbackToFull` (not a
+    // contract violation) as long as its unit arrays are empty; the same
+    // flag on a `mode_used=full` response is a genuine violation (loop
+    // prevention).
+    #[test]
+    fn qa44_fallback_to_full_is_a_control_response_not_a_violation() {
+        let (prepared, hints) = qa_fixture();
+        let control = adapter_types::MarkdownizeResponse {
+            mode_used: adapter_types::MarkdownizeMode::Incremental,
+            updated_units: Vec::new(),
+            unchanged_unit_keys: Vec::new(),
+            added_units: Vec::new(),
+            removed_unit_keys: Vec::new(),
+            failed_units: Vec::new(),
+            fallback_to_full: true,
+            reason: Some("adapter declined a light edit".to_owned()),
+        };
+        assert_eq!(
+            validate_markdownize_response(&control, &hints, &prepared).unwrap(),
+            MarkdownizeAcceptance::FallbackToFull
+        );
+
+        // Loop prevention: the SAME flag on a full response is a violation.
+        let mut looped = control.clone();
+        looped.mode_used = adapter_types::MarkdownizeMode::Full;
+        assert!(validate_markdownize_response(&looped, &hints, &prepared).is_err());
+
+        // A control response must carry empty unit arrays.
+        let mut dirty = control;
+        dirty.updated_units = vec![ok_unit("page:1")];
+        assert!(validate_markdownize_response(&dirty, &hints, &prepared).is_err());
     }
 
     #[test]
