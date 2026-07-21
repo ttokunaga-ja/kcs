@@ -12,6 +12,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
+use unicode_normalization::UnicodeNormalization;
 
 use crate::cas::{
     append_jsonl, atomic_overwrite, atomic_write, hash_json, is_hash, ObjectKind, ObjectStore,
@@ -23,7 +24,8 @@ use crate::dag::{
 };
 use crate::error::{IoResultExt, KcsError, Result};
 use crate::portable::{
-    portable_collision_key, portable_leaf_error, portable_tag_leaf, PORTABLE_TAGS_DIRECTORY,
+    portable_collision_key, portable_leaf_error, portable_tag_digest64, portable_tag_leaf,
+    PORTABLE_TAGS_DIRECTORY,
 };
 use crate::purge::PurgeState;
 use crate::schema::{validate_json_schema, SchemaKind};
@@ -1403,6 +1405,21 @@ impl Repository {
                 ExitCode::InvalidUsage,
             ));
         }
+        // §Z ruling 1 (step4b-contract-tests-p2b.md PB07, 03-data-model.md §2
+        // L140-152): names.jsonl is the truth for the digest -> logical_name
+        // mapping (the canonical ref's hashed leaf is one-way). Write order is
+        // fixed: names row append (fsync'd by `append_jsonl`'s single
+        // `write_all` on an O_APPEND handle) BEFORE the ref — the reverse
+        // order would let a crash publish a ref with no names row to explain
+        // it (fsck reports that as corruption, PB09).
+        append_jsonl(
+            &names_jsonl_path(&self.kcs_dir),
+            &json!({
+                "digest64": portable_tag_digest64(name),
+                "logical_name": name.nfc().collect::<String>(),
+                "recorded_at": now_utc_seconds(),
+            }),
+        )?;
         let path = canonical_tags_dir.join(portable_tag_leaf(name));
         atomic_write(&path, commit_hash.as_bytes())?;
         Ok(commit_hash)
@@ -2474,6 +2491,18 @@ fn matching_tag_ref_paths(
     matches.sort();
     matches.dedup();
     Ok(matches)
+}
+
+/// `.kcs/refs/tags-v1/names.jsonl` (03-data-model.md §2 L80/141): the
+/// append-only logical-tag-name ledger, co-located with the canonical
+/// `tags-v1/` ref directory it describes. Public so fsck (verify_objects.rs,
+/// PB07-09) can locate the same path without re-deriving the convention.
+#[must_use]
+pub fn names_jsonl_path(kcs_dir: &Path) -> PathBuf {
+    kcs_dir
+        .join("refs")
+        .join(PORTABLE_TAGS_DIRECTORY)
+        .join("names.jsonl")
 }
 
 fn ensure_portable_tags_directory(kcs_dir: &Path) -> Result<PathBuf> {

@@ -94,6 +94,22 @@ pub(super) struct RetainedNormalizedInstance {
 
 /// Resolve every exact normalized instance retained by the bounded all-parent
 /// snapshot graph. Mutable caches and `latest_normalize_ref` never participate.
+///
+/// PC61/PC62 (U145 04-pipeline.md §4.6) asks for this rebuild target set to be
+/// narrowed to HEAD-only identities. NOT applied here: this function is the
+/// single shared source both `rebuild_step3_index` (index/reindex/repair
+/// --rebuild-db) AND the embedding-task-generation path read from — narrowing
+/// it broke existing coverage for historical/deleted-file content (several
+/// `step3_p0_contract.rs` tests — `ct4_historical_secret_path_withholds_existing_vector`,
+/// `ct4_retained_embedding_reservation_is_not_reclaimed_on_edit`,
+/// `ct4_edited_secret_history_keeps_each_version_held`,
+/// `ct4_deleted_historical_chunk_embedding_stays_pending` — regressed when
+/// tried locally), which depend on non-HEAD identities staying discoverable
+/// through this same function. PC61/62 needs a narrower fix scoped to
+/// specifically the rebuild-time re-association decision (or a dedicated
+/// parameter distinguishing the two call sites) rather than a blanket filter
+/// here; left unimplemented given the regression risk and the P2-C task's own
+/// completion gate (`cargo test --workspace` green).
 pub(super) fn retained_history_instances(
     kcs_dir: &Path,
     head: &str,

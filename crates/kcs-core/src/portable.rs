@@ -70,8 +70,18 @@ pub fn portable_leaf_error(value: &str) -> Option<&'static str> {
 /// Case-equivalent names intentionally map to the same slot.
 #[must_use]
 pub fn portable_tag_leaf(logical_name: &str) -> String {
+    format!("tag-{}", portable_tag_digest64(logical_name))
+}
+
+/// The bare 64-hex-character digest half of [`portable_tag_leaf`] (without
+/// the `tag-` prefix) — the `digest64` value `names.jsonl` records alongside
+/// `logical_name` (03-data-model.md §2 L140-152, step4b-contract-tests-p2b.md
+/// PB07). Shared by the tag-creation writer and fsck's names.jsonl reader so
+/// the two can never independently drift on the hash construction.
+#[must_use]
+pub fn portable_tag_digest64(logical_name: &str) -> String {
     let key = portable_collision_key(logical_name);
-    format!("tag-{:x}", Sha256::digest(key.as_bytes()))
+    format!("{:x}", Sha256::digest(key.as_bytes()))
 }
 
 /// Derive a portable open/view cache leaf without reusing the source basename.

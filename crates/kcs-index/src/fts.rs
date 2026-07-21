@@ -490,6 +490,42 @@ pub fn current_config_eligible_chunk_ids(
         .map_err(IndexError::from)
 }
 
+/// PC37 (04 §4.1 / 05 §1.6): append one `(chunk_id, introduction_commit)` row —
+/// idempotent (`INSERT OR IGNORE`, `UNIQUE(chunk_id, introduction_commit)`), so
+/// re-publishing the same chunk at the same commit (a resurrection, a repeated
+/// rebuild pass) never duplicates a row. Distinct commits for the same
+/// `chunk_id` accumulate (the multi-introduction case — merge side branches,
+/// independent imports — a single `chunks.first_seen_commit` cannot represent).
+pub fn record_chunk_publication(
+    conn: &Connection,
+    chunk_id: &str,
+    introduction_commit: &str,
+) -> Result<()> {
+    conn.execute(
+        "INSERT OR IGNORE INTO chunk_publications(chunk_id, introduction_commit)
+         VALUES (?1, ?2)",
+        params![chunk_id, introduction_commit],
+    )?;
+    Ok(())
+}
+
+/// Every recorded introduction commit for `chunk_id`, in byte order (PC32's
+/// deterministic tie-break for a "no directly-matching current value"
+/// fallback selects the byte-order-minimum among these). Empty when the chunk
+/// has no `chunk_publications` row yet — search callers fall back to
+/// `chunks.first_seen_commit` in that case (04 §4.1's "便宜列" — the single-
+/// valued convenience column `chunk_publications` supersedes as the time-point
+/// source of truth once populated).
+pub fn chunk_publication_introductions(conn: &Connection, chunk_id: &str) -> Result<Vec<String>> {
+    let mut stmt = conn.prepare(
+        "SELECT introduction_commit FROM chunk_publications
+         WHERE chunk_id = ?1 ORDER BY introduction_commit",
+    )?;
+    let rows = stmt.query_map(params![chunk_id], |row| row.get::<_, String>(0))?;
+    rows.collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(IndexError::from)
+}
+
 pub fn ensure_fts_external_content_schema(config: FtsSchemaConfig) -> Result<()> {
     let conn = Connection::open_in_memory()?;
     ensure_schema_on_connection(&conn, config)
@@ -523,8 +559,17 @@ pub fn ensure_schema_on_connection(conn: &Connection, config: FtsSchemaConfig) -
             chunk_id TEXT NOT NULL,
             chunking_config_hash TEXT NOT NULL,
             created_at TEXT NOT NULL,
+            introduction_commit TEXT,
             UNIQUE(chunk_id, chunking_config_hash)
         );
+        CREATE TABLE IF NOT EXISTS chunk_publications (
+            publication_rowid INTEGER PRIMARY KEY AUTOINCREMENT,
+            chunk_id TEXT NOT NULL,
+            introduction_commit TEXT NOT NULL,
+            UNIQUE(chunk_id, introduction_commit)
+        );
+        CREATE INDEX IF NOT EXISTS idx_chunk_publications_chunk_id
+            ON chunk_publications(chunk_id);
         CREATE TABLE IF NOT EXISTS embeddings (
             id TEXT PRIMARY KEY,
             target_type TEXT NOT NULL,
@@ -849,6 +894,35 @@ mod tests {
         assert_eq!(fts.search("認証仕様", 10).unwrap()[0].chunk_id, "c1");
         fts.delete_chunk("c1").unwrap();
         assert!(fts.search("認証仕様", 10).unwrap().is_empty());
+    }
+
+    /// PC37 (04 §4.1): `chunk_publications` accepts multiple distinct
+    /// introduction commits per `chunk_id` (the multi-introduction case), is
+    /// idempotent on a repeated `(chunk_id, introduction_commit)` pair, and
+    /// reads back in byte order (PC32's deterministic tie-break input).
+    #[test]
+    fn pc37_chunk_publications_records_multiple_introductions_idempotently() {
+        let mut fts = SqliteFtsIndex::in_memory(FtsSchemaConfig {
+            tokenizer: FtsTokenizer::Trigram,
+        })
+        .unwrap();
+        fts.index_chunk(&row("c1", "merge introduction test"))
+            .unwrap();
+        let conn = fts.connection();
+        record_chunk_publication(conn, "c1", "sha256:cccccccc").unwrap();
+        record_chunk_publication(conn, "c1", "sha256:aaaaaaaa").unwrap();
+        // Re-publishing the same (chunk_id, introduction_commit) pair (a
+        // resurrection or a repeated rebuild pass) does not duplicate the row.
+        record_chunk_publication(conn, "c1", "sha256:aaaaaaaa").unwrap();
+
+        let introductions = chunk_publication_introductions(conn, "c1").unwrap();
+        assert_eq!(
+            introductions,
+            vec!["sha256:aaaaaaaa".to_owned(), "sha256:cccccccc".to_owned()]
+        );
+        assert!(chunk_publication_introductions(conn, "c-never-published")
+            .unwrap()
+            .is_empty());
     }
 
     #[test]

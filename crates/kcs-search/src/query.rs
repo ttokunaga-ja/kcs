@@ -111,6 +111,13 @@ pub struct QueryHashInput {
     pub rrf_w_vector: f64,
     pub chunking_configs: Vec<ChunkingConfigBinding>,
     pub time_travel: TimeTravelSelector,
+    /// PC24 (05 §1.5/§1.8): the page-1 query vector's digest, included in the hash
+    /// preimage only when the effective mode is vector|hybrid. `None` in text mode
+    /// (and for every pre-PC24 caller), which omits the JSON key entirely so the
+    /// hash of an unrelated (text-mode) query is byte-for-byte unchanged from
+    /// before this field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub query_vector_digest: Option<String>,
 }
 
 pub fn query_hash(input: &QueryHashInput) -> Result<String> {
@@ -123,9 +130,17 @@ pub fn query_hash(input: &QueryHashInput) -> Result<String> {
     chunking_configs.sort_by(|a, b| a.scope_id.cmp(&b.scope_id));
     validate_chunking_configs(&scopes, &chunking_configs)?;
 
+    if let Some(digest) = &input.query_vector_digest {
+        if !is_sha256_hash(digest) {
+            return Err(SearchError::Contract(
+                "query_vector_digest must be sha256: plus 64 lowercase hex digits".to_owned(),
+            ));
+        }
+    }
+
     let time_travel = serde_json::to_value(&input.time_travel)
         .map_err(|err| SearchError::Contract(err.to_string()))?;
-    let value = json!({
+    let mut value = json!({
         "chunking_configs": chunking_configs,
         "diversify": {
             "enabled": input.diversify.strategy != DiversifyStrategy::Off,
@@ -146,6 +161,14 @@ pub fn query_hash(input: &QueryHashInput) -> Result<String> {
         "scopes": scopes,
         "time_travel": time_travel,
     });
+    // PC24: the key itself is absent (not `null`) in text mode, so a text-mode
+    // hash preimage is byte-identical to before this field was added.
+    if let Some(digest) = &input.query_vector_digest {
+        value
+            .as_object_mut()
+            .expect("value is always a JSON object")
+            .insert("query_vector_digest".to_owned(), json!(digest));
+    }
     let bytes = serde_jcs::to_vec(&value).map_err(|err| SearchError::Contract(err.to_string()))?;
     Ok(hash_bytes(&bytes))
 }
@@ -324,6 +347,7 @@ mod tests {
             rrf_w_text: 1.0,
             rrf_w_vector: 1.0,
             time_travel,
+            query_vector_digest: None,
         }
     }
 
@@ -352,12 +376,49 @@ mod tests {
                 config("scope_01J8ZQABCDEFGHJKMNPQRS", 'c'),
             ],
             time_travel: TimeTravelSelector::default(),
+            query_vector_digest: None,
         })
         .unwrap();
         assert_eq!(
             hash,
             "sha256:bfd9387844c90e9d7f58ac8c9b0775c8fd20d4a2ee01936785795375dd2a93aa"
         );
+    }
+
+    /// PC24/PC27: `query_vector_digest` changes the hash only when present (a
+    /// vector|hybrid page 1), and text-mode callers that never set it get the
+    /// exact pre-PC24 hash (the pinned vector above stays green with the field
+    /// defaulted to `None`).
+    #[test]
+    fn pc24_query_vector_digest_changes_hash_only_when_present() {
+        let base = input(
+            ScopeSelectionMode::All,
+            vec!["scope_a", "scope_b"],
+            TimeTravelSelector::default(),
+        );
+        let mut with_digest = base.clone();
+        with_digest.mode = SearchMode::Hybrid;
+        with_digest.query_vector_digest = Some(format!("sha256:{}", "a".repeat(64)));
+        assert_ne!(
+            query_hash(&base).unwrap(),
+            query_hash(&with_digest).unwrap()
+        );
+
+        // Two different digests (e.g. two different query embeddings) hash
+        // differently — the digest is a real component of the preimage, not a
+        // decorative flag.
+        let mut other_digest = with_digest.clone();
+        other_digest.query_vector_digest = Some(format!("sha256:{}", "b".repeat(64)));
+        assert_ne!(
+            query_hash(&with_digest).unwrap(),
+            query_hash(&other_digest).unwrap()
+        );
+
+        // Malformed digests are rejected rather than silently hashed as opaque
+        // strings (keeps the cursor's replay-time re-derivation trustworthy).
+        let mut malformed = with_digest.clone();
+        malformed.query_vector_digest = Some("not-a-digest".to_owned());
+        assert!(query_hash(&malformed).is_err());
     }
 
     #[test]

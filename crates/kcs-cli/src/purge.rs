@@ -19,7 +19,8 @@ use kcs_core::dag::CommitType;
 use kcs_core::dag::TreeEntry;
 use kcs_core::history::HistoryReader;
 use kcs_core::purge::{
-    BeginOutcome, LifecycleEvent, PurgeJournal, PurgePhase, PurgeReason, PurgeState, TombstoneMode,
+    closure_content_hash, BeginOutcome, ClosureItem, LifecycleEvent, PurgeClosure, PurgeJournal,
+    PurgePhase, PurgeReason, PurgeState, TombstoneMode,
 };
 use kcs_core::scope::{
     append_event_log, cleanup_orphan_raw_ingest_temps, now_utc_seconds, Repository, StoreLock,
@@ -27,10 +28,10 @@ use kcs_core::scope::{
 use kcs_core::{ExitCode, KcsError, Result};
 use kcs_index::fts::{FtsSchemaConfig, FtsTokenizer, SqliteFtsIndex};
 use kcs_pipeline::ledger::ops::{
-    get_batch_request, recovery_settle_unknown, resolve_abandon_selector, AbandonResolution,
-    AbandonSelector,
+    get_batch_request, recovery_finish_cleanup, recovery_settle_unknown, resolve_abandon_selector,
+    AbandonResolution, AbandonSelector,
 };
-use kcs_pipeline::ledger::LedgerDb;
+use kcs_pipeline::ledger::{LedgerDb, TaskKey};
 use kcs_pipeline::markdownize::{
     load_validated_normalized_instance, NormalizedInstanceManifest, NormalizedUnitObject,
 };
@@ -98,6 +99,10 @@ struct CompletedTerminal {
 struct PurgePreview {
     plan: PurgePlan,
     completed: Option<CompletedTerminal>,
+    /// PA37 (§K, U34; §R ruling #1): count of working-tree entries whose
+    /// bytes match a purge target — informational only (ruling #1 retired
+    /// the prior hard block).
+    working_tree_alias_count: u64,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -119,6 +124,8 @@ struct DeletedCounts {
     unsupported_rows: u64,
     quarantine_rows: u64,
     cache_directories: u64,
+    #[serde(default)]
+    staging_descriptors: u64,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -157,6 +164,89 @@ pub(crate) fn run(args: PurgeArgs) -> Result<Value> {
 /// `actor` field). Matches the existing `KCS-PURGE-COMPLETED` log convention.
 fn current_actor() -> String {
     std::env::var("USER").unwrap_or_else(|_| "local-user".to_owned())
+}
+
+/// PA43-46 (§N, §R ruling #2): compute the full purge closure once, at
+/// `prepared` — the same shared-vs-removable classification
+/// `delete_derived_surfaces` used to recompute live on every entry (fresh
+/// *and* resumed) is now computed exactly once, here, and durably fixed via
+/// the `.kcs/purge/journal-closure` sidecar before the journal referencing it
+/// (by content hash) is created. `chunk` items are the raw-hash-membership
+/// target set (deterministic — this purge's own targets only, no cross-purge
+/// drift risk, unlike `prepared`/`image` sharing with OTHER raws). SQLite's
+/// own internal orphan-embedding decision inside `index.purge_raw` stays
+/// live-computed at deletion time — §R ruling #2 explicitly leaves the
+/// SQLite/staging sidecar-vs-recompute split to implementation discretion,
+/// and that portion carries no cross-purge drift risk of its own (the target
+/// chunk_id set is fixed here; only which shared *embedding* rows survive is
+/// still decided live, by `SqliteFtsIndex::purge_raw`'s own transaction).
+fn compute_purge_closure(
+    repo: &Repository,
+    plan: &PurgePlan,
+    purge_id: &str,
+) -> Result<PurgeClosure> {
+    let targets = plan
+        .target_raw_hashes
+        .iter()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    let mut items = plan
+        .target_raw_hashes
+        .iter()
+        .map(|raw_hash| ClosureItem {
+            object_type: "raw".to_owned(),
+            hash: raw_hash.clone(),
+        })
+        .collect::<Vec<_>>();
+
+    for stored in &crate::read_stored_chunks(repo.kcs_dir())? {
+        if targets.contains(stored.row.raw_hash.as_str()) {
+            items.push(ClosureItem {
+                object_type: "chunk".to_owned(),
+                hash: stored.row.chunk_id.clone(),
+            });
+        }
+    }
+
+    let inventory = scan_derived_inventory(repo.kcs_dir(), &targets)?;
+    let shared_prepared = inventory
+        .target_prepared
+        .intersection(&inventory.surviving_prepared)
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let shared_images = inventory
+        .target_images
+        .intersection(&inventory.surviving_images)
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    for hash in inventory.target_prepared.difference(&shared_prepared) {
+        items.push(ClosureItem {
+            object_type: "prepared".to_owned(),
+            hash: hash.clone(),
+        });
+    }
+    for hash in inventory.target_images.difference(&shared_images) {
+        items.push(ClosureItem {
+            object_type: "image".to_owned(),
+            hash: hash.clone(),
+        });
+    }
+
+    let mut preserved = Vec::new();
+    for hash in &shared_prepared {
+        preserved.push(ClosureItem {
+            object_type: "prepared".to_owned(),
+            hash: hash.clone(),
+        });
+    }
+    for hash in &shared_images {
+        preserved.push(ClosureItem {
+            object_type: "image".to_owned(),
+            hash: hash.clone(),
+        });
+    }
+
+    PurgeClosure::new(purge_id.to_owned(), items, preserved)
 }
 
 /// Run the durable phase machine. This is kept separate from preview so there
@@ -200,18 +290,17 @@ fn execute_phase_machine(
 
     let state = PurgeState::new(repo.kcs_dir());
     let active = state.read_journal()?;
-    if let Err(error) =
-        refuse_live_working_copy_for_phase(repo, &locked_plan.target_raw_hashes, active.as_ref())
-    {
-        if let Some(journal) = active
-            .as_ref()
-            .filter(|journal| journal.phase.is_barrier_visible())
-        {
-            let report = load_phase_report(repo.kcs_dir())?.unwrap_or_default();
-            return Ok(incomplete_report(&locked_plan, journal, &report, &error));
-        }
-        return Err(error);
-    }
+    // PA37-39 (§K, U34; §R ruling #1): a working-tree residual of the exact
+    // same bytes is a WARNING, never a purge-blocking hard failure — "KCS
+    // does not delete the user's files" cuts the other way here: purge must
+    // still complete (05 §3.5 L741 "working tree の原本には触れない" — this
+    // check exists to warn, not to hold the object-store side hostage to a
+    // working-tree file purge is contractually forbidden from touching
+    // anyway). §R ruling #1 explicitly retires the prior
+    // `KCS-E-PURGE-WORKING-COPY-001` hard block. No same-path/renamed-alias
+    // distinction (ruling #1) — `detect_live_working_copy` already matches by
+    // raw_hash content identity regardless of the alias's current name.
+    let working_tree_alias_count = detect_live_working_copy(repo, &locked_plan.target_raw_hashes)?;
     let completed = if active.is_none() {
         inspect_terminal_state(&state, &locked_plan)?
     } else {
@@ -222,7 +311,10 @@ fn execute_phase_machine(
     };
     verify_targets_exist(repo, &locked_plan, active.is_some(), completed.is_some())?;
     if let Some(completed) = completed {
-        return Ok(completed_report(&locked_plan, completed));
+        return Ok(attach_working_tree_warning(
+            completed_report(&locked_plan, completed),
+            working_tree_alias_count,
+        ));
     }
 
     // A resumed journal (matching target/reason/mode) reuses every `prepared`
@@ -239,12 +331,16 @@ fn execute_phase_machine(
         } && journal.reason == locked_plan.reason
             && journal.tombstone_mode == locked_plan.tombstone_mode
     });
-    let (started_at, target_epoch, planned_commit, purge_id) = if resuming {
+    let (started_at, target_epoch, planned_commit, closure_hash, purge_id) = if resuming {
         let journal = active.as_ref().expect("resuming implies active.is_some()");
         (
             journal.started_at.clone(),
             journal.target_epoch,
             journal.planned_commit.clone(),
+            // PA44: never recomputed on resume — the sidecar
+            // `state.begin` below is about to (re-)discover was already
+            // written durably before this journal was ever created.
+            journal.closure_hash.clone(),
             journal.purge_id.clone(),
         )
     } else {
@@ -268,11 +364,20 @@ fn execute_phase_machine(
                 ExitCode::PermanentFailure,
             )
         })?;
+        let purge_id = kcs_core::scope::new_ulid(repo.kcs_dir());
+        // PA43/44 (§R ruling #2): compute + durably write the closure sidecar
+        // BEFORE `state.begin` below creates the journal that references its
+        // content hash — so the journal can never point at a closure that
+        // is not yet durable.
+        let closure = compute_purge_closure(repo, &locked_plan, &purge_id)?;
+        state.write_closure(&closure)?;
+        let closure_hash = closure_content_hash(&closure)?;
         (
             started_at,
             target_epoch,
             planned_commit,
-            kcs_core::scope::new_ulid(repo.kcs_dir()),
+            closure_hash,
+            purge_id,
         )
     };
 
@@ -284,6 +389,7 @@ fn execute_phase_machine(
         started_at,
         target_epoch,
         planned_commit,
+        closure_hash,
         purge_id,
     )? {
         BeginOutcome::Started(journal) => (journal, true),
@@ -297,7 +403,10 @@ fn execute_phase_machine(
                 tombstone_count: u64::try_from(tombstones.len()).unwrap_or(u64::MAX),
                 erase_receipt_count: 0,
             };
-            return Ok(completed_report(&locked_plan, completed));
+            return Ok(attach_working_tree_warning(
+                completed_report(&locked_plan, completed),
+                working_tree_alias_count,
+            ));
         }
     };
 
@@ -308,8 +417,39 @@ fn execute_phase_machine(
         return Err(error);
     }
 
+    // PA44/45: read the closure sidecar back and bind it to the journal by
+    // content hash before trusting its contents for any destructive
+    // decision — on both the fresh-start and resumed paths alike, so a
+    // resumed `deleted` phase reuses exactly the same removable/preserved
+    // determination the original `prepared` phase fixed, never a live
+    // rescan (`delete_derived_surfaces` below consumes this, not
+    // `scan_derived_inventory` directly, for its shared-vs-removable split).
+    let closure = state.read_closure()?.ok_or_else(|| {
+        KcsError::new(
+            "KCS-E-STORE-CORRUPT-001",
+            "purge journal references a closure sidecar that does not exist",
+            json!({ "closure_hash": journal.closure_hash }),
+            ExitCode::PermanentFailure,
+        )
+    })?;
+    if closure_content_hash(&closure)? != journal.closure_hash {
+        return Err(KcsError::new(
+            "KCS-E-STORE-CORRUPT-001",
+            "purge closure sidecar content hash does not match the journal's closure_hash",
+            json!({ "closure_hash": journal.closure_hash }),
+            ExitCode::PermanentFailure,
+        ));
+    }
+
     let mut report = load_phase_report(repo.kcs_dir())?.unwrap_or_default();
-    let result = execute_visible_phases(repo, &state, &locked_plan, &mut journal, &mut report);
+    let result = execute_visible_phases(
+        repo,
+        &state,
+        &locked_plan,
+        &closure,
+        &mut journal,
+        &mut report,
+    );
     match result {
         Ok(()) => {
             // LC42-LC44 (item 2): purge's own `tombstoned`-phase marker
@@ -324,9 +464,15 @@ fn execute_phase_machine(
             // every read command until an unrelated index-touching write
             // happened to run.
             crate::recover_index_generation(repo.kcs_dir())?;
-            Ok(success_report(&locked_plan, &report))
+            Ok(attach_working_tree_warning(
+                success_report(&locked_plan, &report),
+                working_tree_alias_count,
+            ))
         }
-        Err(error) => Ok(incomplete_report(&locked_plan, &journal, &report, &error)),
+        Err(error) => Ok(attach_working_tree_warning(
+            incomplete_report(&locked_plan, &journal, &report, &error),
+            working_tree_alias_count,
+        )),
     }
 }
 
@@ -334,12 +480,22 @@ fn execute_visible_phases(
     repo: &Repository,
     state: &PurgeState,
     plan: &PurgePlan,
+    closure: &PurgeClosure,
     journal: &mut PurgeJournal,
     report: &mut PurgeReport,
 ) -> Result<()> {
     maybe_inject_fault("prepared_visible")?;
 
     if journal.phase == PurgePhase::Prepared {
+        // PA40/41 (§L, U37): settle in-flight/orphaned-cleanup ledger
+        // reservations for this purge's own scope+targets BEFORE the
+        // tombstone/erase-receipt is published (let alone physical deletion
+        // or commit publish) — strictly within the `prepared` phase, same as
+        // `publish_terminal_records` below but ordered first. Idempotent on
+        // resume: a row already settled by an earlier pass through this
+        // block is simply no longer in-flight/cleanup-pending the second
+        // time, so it is skipped rather than re-settled.
+        settle_inflight_reservations_for_purge(repo, &plan.target_raw_hashes, report)?;
         // LC49: the marker is durable *before* any physical deletion, using
         // the already-fixed `planned_commit` (the purged commit is not yet
         // ref-published — see the module doc on `execute_phase_machine`).
@@ -350,8 +506,8 @@ fn execute_visible_phases(
     maybe_inject_fault("tombstoned")?;
 
     if journal.phase == PurgePhase::Tombstoned {
-        delete_content_surfaces(repo, plan, report)?;
-        delete_derived_surfaces(repo, plan, report)?;
+        delete_content_surfaces(repo, plan, closure, report)?;
+        delete_derived_surfaces(repo, plan, closure, report)?;
         scrub_logs(repo, plan, journal, report)?;
         *journal = state.advance_phase(journal, PurgePhase::Deleted)?;
         store_phase_report(repo.kcs_dir(), report)?;
@@ -487,6 +643,7 @@ fn publish_terminal_records(
 fn delete_content_surfaces(
     repo: &Repository,
     plan: &PurgePlan,
+    closure: &PurgeClosure,
     report: &mut PurgeReport,
 ) -> Result<()> {
     let targets = plan
@@ -494,12 +651,10 @@ fn delete_content_surfaces(
         .iter()
         .map(String::as_str)
         .collect::<BTreeSet<_>>();
-    let stored = crate::read_stored_chunks(repo.kcs_dir())?;
-    let chunk_ids = stored
-        .iter()
-        .filter(|stored| targets.contains(stored.row.raw_hash.as_str()))
-        .map(|stored| stored.row.chunk_id.clone())
-        .collect::<BTreeSet<_>>();
+    // PA43/46: the target chunk_id set is fixed in the closure at `prepared`
+    // (raw-hash membership, no cross-purge drift risk) rather than rescanned
+    // from `chunks.jsonl` here on every entry (fresh or resumed).
+    let chunk_ids = closure.hashes_for("chunk");
     store_phase_chunk_ids(
         repo.kcs_dir(),
         &chunk_ids.iter().cloned().collect::<Vec<_>>(),
@@ -517,6 +672,7 @@ fn delete_content_surfaces(
         }
     }
 
+    let stored = crate::read_stored_chunks(repo.kcs_dir())?;
     let kept = stored
         .into_iter()
         .filter(|stored| !targets.contains(stored.row.raw_hash.as_str()))
@@ -604,6 +760,7 @@ struct DerivedInventory {
 fn delete_derived_surfaces(
     repo: &Repository,
     plan: &PurgePlan,
+    closure: &PurgeClosure,
     report: &mut PurgeReport,
 ) -> Result<()> {
     let targets = plan
@@ -659,30 +816,23 @@ fn delete_derived_surfaces(
         }
     }
 
-    let inventory = scan_derived_inventory(repo.kcs_dir(), &targets)?;
-    let shared_prepared = inventory
-        .target_prepared
-        .intersection(&inventory.surviving_prepared)
-        .cloned()
-        .collect::<BTreeSet<_>>();
-    let shared_images = inventory
-        .target_images
-        .intersection(&inventory.surviving_images)
-        .cloned()
-        .collect::<BTreeSet<_>>();
-    report.shared.prepared_objects = u64::try_from(shared_prepared.len()).unwrap_or(u64::MAX);
-    report.shared.image_objects = u64::try_from(shared_images.len()).unwrap_or(u64::MAX);
+    // PA44 (§N, §R ruling #2): the shared-vs-removable live-reference
+    // judgment for `prepared`/`image` is fixed once, in the closure, at
+    // `prepared` — read back here (both fresh and resumed) rather than
+    // recomputed via a live `scan_derived_inventory` diff, so a crash-resume
+    // cannot let an intervening `kcs index`/other purge change which objects
+    // this purge deletes (the exact scenario PA44 fixes). Only
+    // `target_instance_dirs` — deterministic from this purge's own raw
+    // targets alone, with no cross-purge drift risk — is still taken from a
+    // live scan below.
+    let removable_prepared = closure.hashes_for("prepared");
+    let removable_images = closure.hashes_for("image");
+    report.shared.prepared_objects =
+        u64::try_from(closure.preserved_hashes_for("prepared").len()).unwrap_or(u64::MAX);
+    report.shared.image_objects =
+        u64::try_from(closure.preserved_hashes_for("image").len()).unwrap_or(u64::MAX);
 
-    let removable_prepared = inventory
-        .target_prepared
-        .difference(&shared_prepared)
-        .cloned()
-        .collect::<BTreeSet<_>>();
-    let removable_images = inventory
-        .target_images
-        .difference(&shared_images)
-        .cloned()
-        .collect::<BTreeSet<_>>();
+    let inventory = scan_derived_inventory(repo.kcs_dir(), &targets)?;
     for hash in &removable_prepared {
         if store.remove_content(ContentObjectKind::Prepared, hash)? {
             report.deleted.prepared_objects = report.deleted.prepared_objects.saturating_add(1);
@@ -706,15 +856,22 @@ fn delete_derived_surfaces(
     report.deleted.manifest_rows = scrub_manifest(repo.kcs_dir(), &targets)?;
     report.deleted.unsupported_rows = scrub_unsupported(repo.kcs_dir(), &targets)?;
     report.deleted.quarantine_rows = scrub_quarantine(repo.kcs_dir(), &plan.historical_paths)?;
+    report.deleted.staging_descriptors = delete_target_staging(repo.kcs_dir(), &targets)?;
 
-    let mut cache_hashes = plan
+    // PA03/PA12/PA13: `image` cache directories live under a distinct
+    // `open/image/<hash>/` type segment (raw/prepared share the flat
+    // `open/<hash>/` namespace they always have) — the eviction side must
+    // mirror the same split `open_cache_path`/`open_cas_byte_object` use on
+    // the materialize side, or a same-digest raw/image pair's cache entries
+    // collide and an eviction for one wrongly removes the other's cache.
+    let mut flat_cache_hashes = plan
         .target_raw_hashes
         .iter()
         .cloned()
         .collect::<BTreeSet<_>>();
-    cache_hashes.extend(removable_prepared);
-    cache_hashes.extend(removable_images);
-    report.deleted.cache_directories = evict_open_cache(&cache_hashes)?;
+    flat_cache_hashes.extend(removable_prepared);
+    report.deleted.cache_directories = evict_open_cache(&flat_cache_hashes, false)?
+        .saturating_add(evict_open_cache(&removable_images, true)?);
     Ok(())
 }
 
@@ -936,6 +1093,142 @@ fn remove_target_normalized_views(kcs_dir: &Path, targets: &BTreeSet<&str>) -> R
     Ok(deleted)
 }
 
+/// PA40/41 (§L, U37): settle in-flight/orphaned-cleanup ledger reservations
+/// for this purge's own scope+targets. Called from `execute_visible_phases`
+/// strictly within the `prepared` phase — before the tombstone/erase-receipt
+/// is published, physical deletion happens, or the purged commit is
+/// published (PA40) — so `tasks.jsonl` is still fully intact when this runs
+/// (source (a) below depends on that).
+///
+/// Two independently scope_id-gated sources, neither reconstructing the
+/// ledger's 4-tuple key from CURRENT config (purge must not guess a provider
+/// adapter_kind / tool_profile_hash from mutable configuration that may have
+/// changed since the reservation was made):
+///  (a) `tasks.jsonl` rows still present, looked up by `task.reservation_id`
+///      (the `intent_token` persisted at charge time) — the original
+///      mechanism, unchanged, just moved earlier.
+///  (b) PA41(b): a direct `batch_requests` scan by `(scope_id, input_hash)`,
+///      catching `intent_token` residue whose `tasks.jsonl` row is already
+///      gone (source (a) alone cannot discover these — there is no task left
+///      to iterate). Both in-flight (state 0/1, settled via
+///      `recovery_settle_unknown`) and terminal-but-cleanup-pending (state
+///      2/3 with `intent_token` still set, cleared via
+///      `recovery_finish_cleanup` — no re-settlement, since an outcome was
+///      already recorded) rows are handled, whichever applies.
+/// `scope_id`-gating on (b) is what keeps a *different* scope's in-flight
+/// request that happens to share the same raw_hash (`input_hash`) untouched
+/// (PA41(a)) — (a) is inherently scope-safe already, since it is keyed by
+/// THIS scope's own task's own `reservation_id` token value (globally
+/// unique), never by raw_hash. `request_kind` (batch/sync) is not filtered on
+/// — both apply uniformly (PA41(c)).
+fn settle_inflight_reservations_for_purge(
+    repo: &Repository,
+    target_raw_hashes: &[String],
+    report: &mut PurgeReport,
+) -> Result<()> {
+    let targets = target_raw_hashes
+        .iter()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    let scope_id = crate::scope_id(repo.kcs_dir())?;
+    let ledger = LedgerDb::open(crate::ledger_db_path()).map_err(crate::pipeline_to_kcs)?;
+    let mut settled = 0_u64;
+    let mut handled = BTreeSet::<TaskKey>::new();
+
+    // (a) tasks.jsonl-driven.
+    let tasks_path = repo.kcs_dir().join("tasks.jsonl");
+    if path_exists(&tasks_path)? {
+        validate_existing_regular(&tasks_path, Some(MAX_TASK_STORE_BYTES))?;
+    }
+    for task in TaskStore::new(repo.kcs_dir())
+        .all()
+        .map_err(crate::pipeline_to_kcs)?
+    {
+        let attributed = targets.contains(task.input_hash.as_str())
+            || task
+                .previous_raw_hash
+                .as_deref()
+                .is_some_and(|hash| targets.contains(hash));
+        if !attributed {
+            continue;
+        }
+        let Some(token) = task.reservation_id.as_deref() else {
+            continue;
+        };
+        let resolution = resolve_abandon_selector(
+            ledger.connection(),
+            &AbandonSelector::IntentToken(token.to_owned()),
+        )
+        .map_err(crate::pipeline_to_kcs)?;
+        let AbandonResolution::Found(key) = resolution else {
+            // Already terminal + cleaned (or the token never resolved) —
+            // nothing left to settle, an idempotent no-op.
+            continue;
+        };
+        if !handled.insert(key.clone()) {
+            continue;
+        }
+        let Some(row) =
+            get_batch_request(ledger.connection(), &key).map_err(crate::pipeline_to_kcs)?
+        else {
+            continue;
+        };
+        if row.state.is_inflight() {
+            recovery_settle_unknown(ledger.connection(), &key, token, row.estimated_usd, true)
+                .map_err(crate::pipeline_to_kcs)?;
+            settled = settled.saturating_add(1);
+        }
+    }
+
+    // (b) direct ledger scan for rows tasks.jsonl no longer references.
+    let orphans = (|| -> kcs_pipeline::Result<Vec<(String, String, String)>> {
+        let mut statement = ledger.connection().prepare(
+            "SELECT adapter_kind, input_hash, tool_profile_hash FROM batch_requests \
+             WHERE scope_id = ?1 AND intent_token IS NOT NULL",
+        )?;
+        let rows = statement
+            .query_map([&scope_id], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    })()
+    .map_err(crate::pipeline_to_kcs)?;
+    for (adapter_kind, input_hash, tool_profile_hash) in orphans {
+        if !targets.contains(input_hash.as_str()) {
+            continue;
+        }
+        let key = TaskKey::new(
+            scope_id.clone(),
+            adapter_kind,
+            input_hash,
+            tool_profile_hash,
+        );
+        if handled.contains(&key) {
+            continue;
+        }
+        let Some(row) =
+            get_batch_request(ledger.connection(), &key).map_err(crate::pipeline_to_kcs)?
+        else {
+            continue;
+        };
+        let Some(token) = row.intent_token.clone() else {
+            continue;
+        };
+        if row.state.is_inflight() {
+            recovery_settle_unknown(ledger.connection(), &key, &token, row.estimated_usd, true)
+                .map_err(crate::pipeline_to_kcs)?;
+            settled = settled.saturating_add(1);
+        } else if row.cleanup_pending() {
+            recovery_finish_cleanup(ledger.connection(), &key, &token)
+                .map_err(crate::pipeline_to_kcs)?;
+        }
+    }
+
+    report.deleted.reservations = report.deleted.reservations.saturating_add(settled);
+    Ok(())
+}
+
 fn delete_target_tasks(
     repo: &Repository,
     targets: &BTreeSet<&str>,
@@ -969,56 +1262,9 @@ fn delete_target_tasks(
         }
     }
 
-    // 04-pipeline.md §5.4/§5.8: a purged task's still-open sync-row ledger
-    // reservation (the online markdownize/embedding degenerate 2-phase, §5.4) can
-    // never be settled by any future attempt or recovery pass once its task row is
-    // gone — there is no task left to retry or reconcile it. Settle it now as
-    // `unknown_settled` (the same conservative "cannot confirm, so bill the
-    // reservation estimate" outcome the ledger's own crash recovery uses, CL45)
-    // rather than leaving a permanently-orphaned open row. Looked up by
-    // `intent_token` (persisted in `task.reservation_id` at charge time — see
-    // `main.rs`'s task-charge helpers), NOT by reconstructing the ledger's 4-tuple
-    // key from CURRENT config: purge must not guess a provider adapter_kind /
-    // tool_profile_hash from mutable configuration that may have changed since the
-    // reservation was made (the same constraint the retired JSONL
-    // `close_for_purge` documented for its adapter-kind-blind lookup).
-    let mut settled_reservations = 0u64;
-    if removed.iter().any(|task| task.reservation_id.is_some()) {
-        let ledger = LedgerDb::open(crate::ledger_db_path()).map_err(crate::pipeline_to_kcs)?;
-        for task in &removed {
-            let Some(token) = task.reservation_id.as_deref() else {
-                continue;
-            };
-            let resolution = resolve_abandon_selector(
-                ledger.connection(),
-                &AbandonSelector::IntentToken(token.to_owned()),
-            )
-            .map_err(crate::pipeline_to_kcs)?;
-            let AbandonResolution::Found(key) = resolution else {
-                // Already terminal + cleaned (or the token never resolved) —
-                // nothing left to settle, an idempotent no-op.
-                continue;
-            };
-            let Some(row) =
-                get_batch_request(ledger.connection(), &key).map_err(crate::pipeline_to_kcs)?
-            else {
-                continue;
-            };
-            if !row.state.is_inflight() {
-                // Sync rows clear `intent_token` on every terminal Tx (CL47), so a
-                // resolved-but-terminal row cannot actually occur here in
-                // practice; skip defensively rather than re-settling a charge.
-                continue;
-            }
-            recovery_settle_unknown(ledger.connection(), &key, token, row.estimated_usd, true)
-                .map_err(crate::pipeline_to_kcs)?;
-            settled_reservations += 1;
-        }
-    }
-    report.deleted.reservations = report
-        .deleted
-        .reservations
-        .saturating_add(settled_reservations);
+    // Ledger reservation settlement already happened in the `prepared` phase
+    // (`settle_inflight_reservations_for_purge`, PA40/41) — this is now pure
+    // task-row removal.
     if !removed.is_empty() {
         store.replace_all(&kept).map_err(crate::pipeline_to_kcs)?;
         report.deleted.tasks = report
@@ -1062,6 +1308,51 @@ fn scrub_unsupported(kcs_dir: &Path, targets: &BTreeSet<&str>) -> Result<u64> {
             .and_then(Value::as_str)
             .is_none_or(|hash| !targets.contains(hash))
     })
+}
+
+/// PA35 (§I, U32): staging descriptor attribution is enumerated by walking
+/// `.kcs/staging/` directly (05 §3.5 L718 — the durable-descriptor directory
+/// itself, 03-data-model.md §2), **not** by reading `tasks.jsonl` — a task
+/// whose record was already lost (compaction, prior failure) still leaves its
+/// staging descriptor discoverable and deletable this way. Each descriptor is
+/// a small JSON object; a descriptor attributed to one of `targets` (by its
+/// `raw_hash` field) is removed regardless of the originating task's current
+/// status (retryable-failed staging is included, same as any other). Missing
+/// `.kcs/staging/` (no producer has ever populated it in this scope) is a
+/// vacuous zero, not an error — this walk is written against the directory's
+/// *contract*, independent of whether any current call site produces it yet.
+fn delete_target_staging(kcs_dir: &Path, targets: &BTreeSet<&str>) -> Result<u64> {
+    let root = kcs_dir.join("staging");
+    if !path_exists(&root)? {
+        return Ok(0);
+    }
+    validate_real_directory(&root)?;
+    let mut removed = 0_u64;
+    for path in read_real_directory(&root)? {
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| store_corrupt(&path, "staging descriptor name is not valid UTF-8"))?;
+        if !name.ends_with(".json") {
+            continue;
+        }
+        let Some(bytes) = read_bounded_regular(&path, 8 * 1024 * 1024)? else {
+            continue;
+        };
+        let value: Value = serde_json::from_slice(&bytes).map_err(|error| {
+            store_corrupt(&path, &format!("invalid staging descriptor: {error}"))
+        })?;
+        let attributed = value
+            .get("raw_hash")
+            .and_then(Value::as_str)
+            .is_some_and(|hash| targets.contains(hash));
+        if attributed {
+            fs::remove_file(&path)
+                .map_err(|error| KcsError::io(error.to_string(), path.display().to_string()))?;
+            removed = removed.saturating_add(1);
+        }
+    }
+    Ok(removed)
 }
 
 fn scrub_quarantine(kcs_dir: &Path, historical_paths: &[String]) -> Result<u64> {
@@ -1108,8 +1399,16 @@ fn rewrite_jsonl_filter(
     Ok(removed)
 }
 
-fn evict_open_cache(hashes: &BTreeSet<String>) -> Result<u64> {
-    let root = crate::cache_home().join("kcs/open");
+/// PA03/PA11-13: `open_cache_path` (main.rs) nests `image` hashes under an
+/// extra `image/` type segment so a same-digest raw/image pair never shares
+/// one cache directory; eviction must target the same namespace or it either
+/// misses an image's cache dir entirely or (worse) deletes a same-digest
+/// raw/prepared cache dir that a live, non-target image object still needs.
+fn evict_open_cache(hashes: &BTreeSet<String>, is_image: bool) -> Result<u64> {
+    let mut root = crate::cache_home().join("kcs/open");
+    if is_image {
+        root = root.join("image");
+    }
     if !path_exists(&root)? {
         return Ok(0);
     }
@@ -1141,15 +1440,26 @@ fn scrub_logs(
         .chain(plan.historical_paths.iter())
         .map(String::as_str)
         .collect::<BTreeSet<_>>();
-    let mut files = collect_log_files(&device_root, &["events", "errors", "metrics"])?;
-    files.extend(collect_log_files(&scope_root, &["access"])?);
-    files.sort();
-    files.dedup();
+    // PA36 (§J, U33): `events`/`errors`/`metrics` are device-global (shared by
+    // every scope on the device) — a row is only in scope for THIS purge if
+    // its own `scope_id` field equals this scope's (a row with no `scope_id`
+    // field at all — not yet retrofitted to carry one — stays eligible, the
+    // conservative pre-PA36 behavior, rather than silently becoming
+    // permanently unscrubbable). `access` logs live under this scope's own
+    // `.kcs/logs/`, already scoped by directory location, so no additional
+    // gate is needed there.
+    let scope_id = crate::scope_id(repo.kcs_dir())?;
     let mut pass_files = 0_u64;
     let mut pass_rows = 0_u64;
     let mut pass_fields = 0_u64;
-    for path in files {
-        let (rows, fields) = scrub_one_log(&path, &identifiers)?;
+    for path in collect_log_files(&device_root, &["events", "errors", "metrics"])? {
+        let (rows, fields) = scrub_one_log(&path, &identifiers, Some(scope_id.as_str()))?;
+        pass_files = pass_files.saturating_add(1);
+        pass_rows = pass_rows.saturating_add(rows);
+        pass_fields = pass_fields.saturating_add(fields);
+    }
+    for path in collect_log_files(&scope_root, &["access"])? {
+        let (rows, fields) = scrub_one_log(&path, &identifiers, None)?;
         pass_files = pass_files.saturating_add(1);
         pass_rows = pass_rows.saturating_add(rows);
         pass_fields = pass_fields.saturating_add(fields);
@@ -1213,7 +1523,15 @@ fn collect_log_files(root: &Path, prefixes: &[&str]) -> Result<Vec<PathBuf>> {
     Ok(output)
 }
 
-fn scrub_one_log(path: &Path, identifiers: &BTreeSet<&str>) -> Result<(u64, u64)> {
+/// `scope_gate`: `Some(scope_id)` restricts deletion/masking to rows whose own
+/// `scope_id` field equals it (a row with no `scope_id` field at all stays
+/// eligible — PA36's device-global gate; see `scrub_logs`). `None` disables
+/// gating (used for scope-local log directories, already scoped by path).
+fn scrub_one_log(
+    path: &Path,
+    identifiers: &BTreeSet<&str>,
+    scope_gate: Option<&str>,
+) -> Result<(u64, u64)> {
     let Some(bytes) = read_bounded_regular(path, 64 * 1024 * 1024)? else {
         return Ok((0, 0));
     };
@@ -1227,11 +1545,18 @@ fn scrub_one_log(path: &Path, identifiers: &BTreeSet<&str>) -> Result<(u64, u64)
         let mut row: Value = serde_json::from_slice(line).map_err(|error| {
             store_corrupt(path, &format!("invalid log row {}: {error}", index + 1))
         })?;
-        if value_contains_identifier(&row, identifiers) {
+        let in_scope = scope_gate.is_none_or(|scope_id| {
+            row.get("scope_id")
+                .and_then(Value::as_str)
+                .is_none_or(|row_scope_id| row_scope_id == scope_id)
+        });
+        if in_scope && value_contains_identifier(&row, identifiers) {
             removed = removed.saturating_add(1);
             continue;
         }
-        mask_sensitive_log_fields(&mut row, &mut masked);
+        if in_scope {
+            mask_sensitive_log_fields(&mut row, &mut masked);
+        }
         serde_json::to_writer(&mut output, &row)
             .map_err(|error| KcsError::schema(error.to_string()))?;
         output.push(b'\n');
@@ -1534,23 +1859,32 @@ fn store_corrupt(path: &Path, message: &str) -> KcsError {
     )
 }
 
-fn refuse_live_working_copy_for_phase(
-    repo: &Repository,
-    targets: &[String],
-    journal: Option<&PurgeJournal>,
-) -> Result<()> {
-    match refuse_live_working_copy(repo, targets) {
-        Ok(()) => Ok(()),
-        Err(_error) if journal.is_some_and(|active| active.phase.is_barrier_visible()) => {
-            Err(KcsError::new(
-                "KCS-E-PURGE-INCOMPLETE-001",
-                "target bytes reappeared while a purge barrier is active",
-                json!({ "target_raw_count": targets.len() }),
-                ExitCode::PartialFailure,
-            ))
+/// PA37 (§K, U34; §R ruling #1): the warning text both the interactive
+/// preview (stderr) and the structured report (`working_tree_warning` field)
+/// carry — "will be re-ingested on the next `kcs index`" plus the two ways to
+/// permanently exclude it.
+fn working_tree_warning_text(alias_count: u64) -> String {
+    format!(
+        "warning: {alias_count} working-tree file(s) still contain the exact bytes being \
+         purged. The next `kcs index` will re-discover and re-ingest them, making their \
+         pointer alive again. To permanently exclude them, delete the file(s) or add them to \
+         `.kcsignore`."
+    )
+}
+
+fn attach_working_tree_warning(mut value: Value, alias_count: u64) -> Value {
+    if alias_count > 0 {
+        if let Some(object) = value.as_object_mut() {
+            object.insert(
+                "working_tree_warning".to_owned(),
+                json!({
+                    "live_alias_count": alias_count,
+                    "message": working_tree_warning_text(alias_count),
+                }),
+            );
         }
-        Err(error) => Err(error),
     }
+    value
 }
 
 fn completed_report(plan: &PurgePlan, completed: CompletedTerminal) -> Value {
@@ -1757,18 +2091,15 @@ fn preflight(repo: &Repository, args: &PurgeArgs) -> Result<PurgePreview> {
         None
     };
     verify_targets_exist(repo, &plan, journal.is_some(), completed.is_some())?;
-    // A visible transaction must reach the locked phase-machine wrapper so a
-    // reappeared working file returns the bounded incomplete report (exit 3)
-    // without dropping its journal. Fresh/Prepared operations still fail before
-    // any barrier or mutation.
-    if !journal
-        .as_ref()
-        .is_some_and(|active| active.phase.is_barrier_visible())
-    {
-        refuse_live_working_copy(repo, &plan.target_raw_hashes)?;
-    }
+    // PA37 (§K, U34; §R ruling #1): warning-only, computed for the preview
+    // display — never blocks the preview itself.
+    let working_tree_alias_count = detect_live_working_copy(repo, &plan.target_raw_hashes)?;
 
-    Ok(PurgePreview { plan, completed })
+    Ok(PurgePreview {
+        plan,
+        completed,
+        working_tree_alias_count,
+    })
 }
 
 fn resolve_plan(repo: &Repository, args: &PurgeArgs) -> Result<PurgePlan> {
@@ -1922,7 +2253,13 @@ fn verify_targets_exist(
     Ok(())
 }
 
-fn refuse_live_working_copy(repo: &Repository, targets: &[String]) -> Result<()> {
+/// PA37-39 (§K, U34; §R ruling #1): count working-tree entries whose bytes
+/// match a purge target, by raw_hash content identity — matches regardless of
+/// the entry's current path/name (ruling #1: no same-path-vs-renamed-alias
+/// distinction; both are the same "same bytes residual" case). Purely
+/// informational: the caller attaches this as a warning, never as a block —
+/// `KCS-E-PURGE-WORKING-COPY-001` (the prior hard block) is retired.
+fn detect_live_working_copy(repo: &Repository, targets: &[String]) -> Result<u64> {
     let targets = targets.iter().map(String::as_str).collect::<BTreeSet<_>>();
     let working_tree = repo.build_working_tree(false)?;
     let live_alias_count = working_tree
@@ -1931,15 +2268,7 @@ fn refuse_live_working_copy(repo: &Repository, targets: &[String]) -> Result<()>
         .iter()
         .filter(|entry| targets.contains(entry.raw_hash.as_str()))
         .count();
-    if live_alias_count == 0 {
-        return Ok(());
-    }
-    Err(KcsError::new(
-        "KCS-E-PURGE-WORKING-COPY-001",
-        "purge refuses to delete bytes that remain in the working tree",
-        json!({ "live_alias_count": live_alias_count }),
-        ExitCode::PermanentFailure,
-    ))
+    Ok(u64::try_from(live_alias_count).unwrap_or(u64::MAX))
 }
 
 fn purge_not_found() -> KcsError {
@@ -1971,6 +2300,14 @@ fn confirm(preview: &PurgePreview, yes: bool) -> Result<()> {
     if preview.completed.is_some() {
         writeln!(stderr, "This exact purge is already complete.")
             .map_err(|error| KcsError::io(error.to_string(), "stderr"))?;
+    }
+    if preview.working_tree_alias_count > 0 {
+        writeln!(
+            stderr,
+            "{}",
+            working_tree_warning_text(preview.working_tree_alias_count)
+        )
+        .map_err(|error| KcsError::io(error.to_string(), "stderr"))?;
     }
     write!(
         stderr,

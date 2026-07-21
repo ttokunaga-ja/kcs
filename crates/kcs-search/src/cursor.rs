@@ -29,6 +29,12 @@ pub enum ScopeMode {
 pub struct ScopeCursor {
     pub scope_id: String,
     pub snapshot_commit: String,
+    /// PC19/PC21 (05 §1.5): the scope's `index_metadata.index_generation` ULID at
+    /// page-1 issuance. Replay re-reads the current value and rejects the cursor
+    /// (`KCS-E-SEARCH-CURSOR-001`) on any mismatch — a rebuild/purge/enrichment
+    /// finalize/tombstone-lifecycle update that changed this scope's index since
+    /// invalidates the frozen `max_rowid`/`consumed` bookkeeping below.
+    pub index_generation: String,
     pub max_rowid: u64,
     pub max_association_rowid: u64,
     pub chunking_config_hash: String,
@@ -53,6 +59,12 @@ pub struct CursorToken {
     pub version: u64,
     pub scope_mode: ScopeMode,
     pub query_hash: String,
+    /// PC24 (05 §1.5/§1.8): the page-1 query vector's digest, a token-level field
+    /// (not per-scope — one query embedding is shared by every participating
+    /// scope, 05 §1.8 "送信は 1 回であり scope 別の再送信は発生しない"). Present
+    /// only for a vector|hybrid page 1; omitted (not `null`) in text mode.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub query_vector_digest: Option<String>,
     pub time_travel: TimeTravelSelector,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub since_cutoff: Option<String>,
@@ -78,6 +90,13 @@ impl CursorToken {
         }
         if !is_sha256_hash(&self.query_hash) {
             return Err("query_hash must be sha256: plus 64 lowercase hex digits".to_owned());
+        }
+        if let Some(digest) = &self.query_vector_digest {
+            if !is_sha256_hash(digest) {
+                return Err(
+                    "query_vector_digest must be sha256: plus 64 lowercase hex digits".to_owned(),
+                );
+            }
         }
         self.time_travel
             .validate_contract()
@@ -115,6 +134,10 @@ impl CursorToken {
                     "chunking_config_hash must be sha256: plus 64 lowercase hex digits".to_owned(),
                 );
             }
+            // PC19: `index_generation` is an opaque ULID string minted by the index
+            // layer (`kcs_index::fts::index_metadata`) — bounded/control-free like
+            // every other cursor string, but not a sha256 digest.
+            validate_cursor_string("scopes.index_generation", &scope.index_generation, 64)?;
             if scope.max_rowid > MAX_SQLITE_ROWID
                 || scope.max_association_rowid > MAX_SQLITE_ROWID
                 || scope.consumed > MAX_SQLITE_ROWID
@@ -327,6 +350,7 @@ mod tests {
             version: CursorToken::VERSION,
             scope_mode: ScopeMode::All,
             query_hash: hash('e'),
+            query_vector_digest: None,
             time_travel: TimeTravelSelector::default(),
             since_cutoff: None,
             excluded_scopes: vec![CursorExcludedScope {
@@ -336,6 +360,7 @@ mod tests {
             scopes: vec![ScopeCursor {
                 scope_id: "scope_01".to_owned(),
                 snapshot_commit: hash('a'),
+                index_generation: "01J8ZQEXAMPLEGENERATION0".to_owned(),
                 max_rowid: 42,
                 max_association_rowid: 48,
                 chunking_config_hash: hash('c'),
@@ -463,6 +488,7 @@ mod tests {
         token.scopes.push(ScopeCursor {
             scope_id: "scope_00".to_owned(),
             snapshot_commit: hash('b'),
+            index_generation: "01J8ZQEXAMPLEGENERATION1".to_owned(),
             max_rowid: 1,
             max_association_rowid: 1,
             chunking_config_hash: hash('d'),
@@ -477,5 +503,46 @@ mod tests {
         let mut token = sample_token();
         token.scopes[0].max_association_rowid = i64::MAX as u64 + 1;
         assert!(token.validate().is_err());
+    }
+
+    /// PC19/PC21: `index_generation` is a required, non-empty per-scope field —
+    /// a v2 cursor without it (e.g. a hand-forged payload, or a pre-PC19 token
+    /// shape) is rejected the same way a missing `chunking_config_hash` already
+    /// is (`strict_decode_rejects_legacy_unknown_or_incomplete_v2_payloads`).
+    #[test]
+    fn pc19_index_generation_is_required_and_nonempty() {
+        let mut token = sample_token();
+        token.scopes[0].index_generation = String::new();
+        assert!(token.validate().is_err());
+
+        let key = b"pc19-key";
+        let mut value = serde_json::to_value(sample_token()).unwrap();
+        value["scopes"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("index_generation");
+        assert!(decode_cursor_token(&signed_json(&value, key), key).is_err());
+    }
+
+    /// PC24/PC27: a top-level `query_vector_digest` round-trips for a vector page
+    /// 1 and is rejected if malformed; a text-mode token (the pre-PC24 shape,
+    /// field omitted) still round-trips unchanged.
+    #[test]
+    fn pc24_query_vector_digest_round_trips_and_validates() {
+        let key = b"pc24-key";
+        let mut token = sample_token();
+        token.query_vector_digest = Some(hash('f'));
+        let encoded = encode_cursor_token(&token, key).unwrap();
+        assert_eq!(decode_cursor_token(&encoded, key).unwrap(), token);
+
+        token.query_vector_digest = Some("not-a-digest".to_owned());
+        assert!(token.validate().is_err());
+
+        // text mode (field omitted): unchanged round trip, matching every
+        // pre-PC24 cursor already in the field.
+        let text_mode = sample_token();
+        assert_eq!(text_mode.query_vector_digest, None);
+        let encoded_text = encode_cursor_token(&text_mode, key).unwrap();
+        assert_eq!(decode_cursor_token(&encoded_text, key).unwrap(), text_mode);
     }
 }

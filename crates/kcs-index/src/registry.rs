@@ -172,6 +172,31 @@ impl RegistryDb {
         Ok(entry)
     }
 
+    /// Every registration, deterministic order — PB25's `--registry-prune`
+    /// (step4b-contract-tests-p2b.md §H) enumerates the whole table to find
+    /// unreachable rows, not just search targets or one scope_id's rows.
+    pub fn all_entries(&self) -> Result<Vec<RegistryEntry>> {
+        self.query_entries(
+            "SELECT scope_id, kcs_path, root_path,
+                    participates_in_global_search, indexed, last_seen_at
+             FROM scopes
+             ORDER BY root_path, scope_id",
+            params![],
+        )
+    }
+
+    /// PB25: remove one `(scope_id, kcs_path)` registration — used only for a
+    /// row proven unreachable (no re-init, no re-discovery possible); a live
+    /// duplicate is never removed here (PB21's fail-closed dedupe is a user
+    /// decision, not automatic).
+    pub fn remove(&self, scope_id: &str, kcs_path: &str) -> Result<bool> {
+        let removed = self.conn.execute(
+            "DELETE FROM scopes WHERE scope_id = ?1 AND kcs_path = ?2",
+            params![scope_id, kcs_path],
+        )?;
+        Ok(removed > 0)
+    }
+
     fn query_entries(
         &self,
         sql: &str,
@@ -316,5 +341,24 @@ mod tests {
         db.upsert(&new).unwrap();
         let found = db.lookup_scope_id("scope_a").unwrap();
         assert_eq!(found[0].root_path, "/tmp/new");
+    }
+
+    // PB25 (step4b-contract-tests-p2b.md §H): `all_entries`/`remove` are the
+    // primitives `kcs repair --registry-prune` uses to enumerate the whole
+    // table and delete a proven-unreachable row.
+    #[test]
+    fn all_entries_lists_every_row_and_remove_deletes_exactly_one() {
+        let (_dir, db) = open_temp();
+        db.upsert(&entry("scope_a", "/tmp/a", true, true)).unwrap();
+        db.upsert(&entry("scope_b", "/tmp/b", true, true)).unwrap();
+        assert_eq!(db.all_entries().unwrap().len(), 2);
+
+        assert!(db.remove("scope_a", "/tmp/a/.kcs").unwrap());
+        let remaining = db.all_entries().unwrap();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].scope_id, "scope_b");
+
+        // Idempotent: removing an already-absent row is `false`, not an error.
+        assert!(!db.remove("scope_a", "/tmp/a/.kcs").unwrap());
     }
 }

@@ -199,25 +199,38 @@ fn ct4_verify_rejects_non_pointer_and_ambiguous_cli_forms() {
         .code(2);
 }
 
+// step4b-contract-tests-p2b.md PB65(c) / LC14(a): a raw object missing with
+// NO tombstone/erase-receipt marker at all to explain the absence is
+// unmarked corruption (`KCS-E-STORE-CORRUPT-001`, a raw command error, exit
+// 4) — distinct from the expected-absence `not_found` status this used to
+// report unconditionally. `not_found` is now reserved for a canonical
+// `erased`/`purged` explanation (PB65(a), see
+// crates/kcs-cli/tests/step4b_p2b_contract.rs's pb65_* tests); an *unmarked*
+// absence is corruption regardless of `--strict`, matching fsck's own
+// long-standing `missing_raw` finding for the identical unmarked-absence
+// case.
 #[test]
-fn ct4_verify_missing_raw_is_completed_not_found_and_strict_exit_four() {
+fn ct4_verify_missing_raw_with_no_marker_is_store_corrupt_regardless_of_strict() {
     let (dir, pointer, _) = fixture();
     let raw_hash = pointer["raw_hash"].as_str().unwrap();
     let store = ObjectStore::new(dir.path().join(".kcs"));
     fs::remove_file(store.object_path(ObjectKind::Raw, raw_hash).unwrap()).unwrap();
     let pointer = serde_json::to_string(&pointer).unwrap();
 
-    let output = success(&dir, &["evidence", "verify", &pointer]);
-    assert_eq!(output["status"], "not_found");
-    let strict = kcs(&dir, &["evidence", "verify", &pointer, "--strict"])
-        .arg("--json")
-        .assert()
-        .code(4)
-        .get_output()
-        .stdout
-        .clone();
-    let strict: Value = serde_json::from_slice(&strict).unwrap();
-    assert_eq!(strict["status"], "not_found");
+    for args in [
+        vec!["evidence", "verify", pointer.as_str()],
+        vec!["evidence", "verify", pointer.as_str(), "--strict"],
+    ] {
+        let output = kcs(&dir, &args)
+            .arg("--json")
+            .assert()
+            .code(4)
+            .get_output()
+            .stderr
+            .clone();
+        let output: Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(output["error_code"], "KCS-E-STORE-CORRUPT-001", "{output}");
+    }
 }
 
 #[test]
@@ -587,6 +600,7 @@ fn ct4_fsck_active_journal_suppresses_raw_recovery_and_ref_mutation() {
             "2026-07-13T00:00:00Z",
             1,
             kcs_pipeline::prepare::hash_bytes(b"planned purge commit placeholder"),
+            kcs_pipeline::prepare::hash_bytes(b"planned purge closure placeholder"),
             kcs_core::scope::new_ulid(dir.path()),
         )
         .unwrap();

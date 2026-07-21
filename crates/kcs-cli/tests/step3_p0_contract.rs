@@ -371,12 +371,17 @@ fn write_search_config(dir: &TempDir, body: &str) {
 fn r11_7_default_mode_config_seeds_requested_mode() {
     let dir = indexed_scope();
     write_search_config(&dir, "default_mode = \"hybrid\"\n");
+    // PC49/PC50 (05 §1.8 L384-387): folder config.toml applies only for a
+    // single, non-`--descendants` `--scope` — a multi-scope search (the bare
+    // default used here previously) now uses the user (device) layer only.
+    // `--scope .` keeps this test's folder-config premise valid under the new
+    // rule.
     // No CLI mode flag → the config default_mode is adopted as requested_mode
     // (previously ignored: requested_mode was always the hardcoded "auto").
-    let search = json_success(&dir, &["search", "トークン TTL"]);
+    let search = json_success(&dir, &["search", "トークン TTL", "--scope", "."]);
     assert_eq!(search["requested_mode"], "hybrid");
     // An explicit flag still wins over the config default.
-    let text = json_success(&dir, &["search", "トークン TTL", "--text"]);
+    let text = json_success(&dir, &["search", "トークン TTL", "--text", "--scope", "."]);
     assert_eq!(text["requested_mode"], "text");
 }
 
@@ -384,24 +389,40 @@ fn r11_7_default_mode_config_seeds_requested_mode() {
 fn r11_7_fail_behavior_error_makes_hybrid_hard_error() {
     let dir = indexed_scope();
     write_search_config(&dir, "fail_behavior = \"error\"\n");
+    // PC49/PC50: `--scope .` (single scope) keeps folder config effective —
+    // see `r11_7_default_mode_config_seeds_requested_mode`.
     // --hybrid with no vector backend + fail_behavior=error is now the same hard
     // error the explicit --vector path returns, not a silent exit-0 text fallback.
-    let err = json_failure(&dir, &["search", "トークン TTL", "--hybrid"], 1);
+    let err = json_failure(
+        &dir,
+        &["search", "トークン TTL", "--hybrid", "--scope", "."],
+        1,
+    );
     assert_eq!(err["error_code"], "KCS-E-SEARCH-VEC-UNAVAIL-001");
 }
 
 #[test]
-fn r11_7_fail_behavior_warn_falls_back_with_warning() {
+fn r11_7_fail_behavior_warn_falls_back_with_warnings() {
     let dir = indexed_scope();
     write_search_config(&dir, "fail_behavior = \"warn\"\n");
-    let search = json_success(&dir, &["search", "トークン TTL", "--hybrid"]);
+    // PC49/PC50: `--scope .` (single scope) keeps folder config effective —
+    // see `r11_7_default_mode_config_seeds_requested_mode`.
+    let search = json_success(
+        &dir,
+        &["search", "トークン TTL", "--hybrid", "--scope", "."],
+    );
     assert_eq!(search["resolved_mode"], "text");
     assert_eq!(search["fallback"], true);
+    // PC3 / §R note-1 ruling (2026-07-22): `warnings[]` array, replacing the
+    // pre-ruling singular `warning` field.
+    let warnings = search["warnings"]
+        .as_array()
+        .expect("warnings must be an array");
     assert!(
-        search["warning"]
+        warnings.iter().any(|w| w
             .as_str()
-            .is_some_and(|w| w.contains("vector search unavailable")),
-        "warn must surface a warning field: {search}"
+            .is_some_and(|w| w.contains("vector search unavailable"))),
+        "warn must surface a warnings[] entry: {search}"
     );
 }
 
@@ -1369,7 +1390,11 @@ fn ct3_multi_006_timeout_preserves_fresh_all_failed_and_cursor_contracts() {
     assert!(partial.get("__exit_code").is_none());
 
     // With only the delayed scope selected, the same reason participates in the
-    // established all-scopes-failed exit 4 aggregation.
+    // all-scopes-failed aggregation — PC57 (05 §1.8 L392 / 06 §7 L362-363)
+    // splits this by retryability rather than always landing on exit 4:
+    // `timeout` is one of the explicitly retryable reasons (a retry might
+    // simply not hit the deadline next time), so this all-timeout case is
+    // exit 3, not the old unconditional exit 4.
     let b_arg = b.display().to_string();
     let all_failed = hermetic_kcs_command()
         .current_dir(&a)
@@ -1380,7 +1405,7 @@ fn ct3_multi_006_timeout_preserves_fresh_all_failed_and_cursor_contracts() {
         .env("KCS_TEST_SCOPE_SEARCH_DELAY_MS", "2500")
         .args(["search", "timeouttoken", "--scope", &b_arg, "--json"])
         .assert()
-        .code(4)
+        .code(3)
         .get_output()
         .stderr
         .clone();
@@ -1570,13 +1595,26 @@ fn ct3_obs_003_access_log_has_required_envelope_fields() {
 // Real-machine scenario (c): a cursor freezes the chunk set by max_rowid; chunks
 // indexed after the cursor was issued do not leak into page 2.
 #[test]
-fn ct3_cursor_002_max_rowid_excludes_post_cursor_chunks() {
+fn pc19_pc21_index_generation_rotation_rejects_a_cursor_after_new_content_is_indexed() {
+    // PC19/PC21 (05 §1.5 L180-191): `index_generation` rotates whenever
+    // `chunk_fts` content changes (one of the 6 listed triggers — "index /
+    // batch finalize で chunk_fts の内容が変化した場合"), and a page-2 replay
+    // whose frozen `index_generation` no longer matches the scope's current
+    // value is rejected with `KCS-E-SEARCH-CURSOR-001` ("再検索が正") rather
+    // than silently degrading via `max_rowid` alone — later-indexed content
+    // can shift the BM25 ranking of already-existing rows (FTS5's `bm25()`
+    // uses corpus-wide document-frequency/average-length statistics), so a
+    // `max_rowid` freeze alone is not sufficient to keep a page-2 replay
+    // correct. This supersedes the pre-PC19 contract (a `max_rowid`-only
+    // freeze that let a page-2 replay silently continue after new content was
+    // indexed, filtering out only the new rows by rowid).
     let dir = indexed_scope();
     let first = json_success(&dir, &["search", "認証仕様", "--limit", "1"]);
     let cursor = first["paging"]["next_cursor"].as_str().unwrap().to_owned();
 
-    // Append a new file that also matches the query, then re-index (HEAD advances,
-    // new chunk rows get rowid > the cursor's max_rowid).
+    // Append a new file that also matches the query, then re-index (HEAD
+    // advances, chunk_fts content changes — one of PC20's 6 rotation
+    // triggers).
     fs::write(
         dir.path().join("addendum.md"),
         "# 認証仕様の追補\n\n## 追補\nposttoken マーカー を追加しました。\n",
@@ -1593,17 +1631,15 @@ fn ct3_cursor_002_max_rowid_excludes_post_cursor_chunks() {
         .any(|r| r["snippet"].as_str().unwrap_or("").contains("posttoken"));
     assert!(fresh_has_new, "fresh search must include the new chunk");
 
-    // ...but page 2 via the frozen cursor must not.
-    let page2 = json_success(
+    // ...and the frozen page-1 cursor is now rejected (re-search is correct),
+    // not silently replayed with the new content filtered out by rowid alone.
+    let err = json_failure(
         &dir,
         &["search", "認証仕様", "--cursor", &cursor, "--limit", "100"],
+        2,
     );
-    let leaked = page2["results"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|r| r["snippet"].as_str().unwrap_or("").contains("posttoken"));
-    assert!(!leaked, "post-cursor chunk must not appear on page 2");
+    assert_eq!(err["error_code"], "KCS-E-SEARCH-CURSOR-001");
+    assert_eq!(err["context"]["reason"], "index_generation_mismatch");
 }
 
 #[test]
@@ -1963,17 +1999,18 @@ fn ct3_evidence_006_three_valued_resolution_failures() {
 }
 
 #[test]
-fn ct3_uri_002_open_resolves_object_raw_uri() {
+fn ct3_uri_002_open_rejects_object_raw_uri() {
+    // Step4b P2-A PA01 (§A, U22): MVP object URIs accept only `image` type —
+    // a `raw`-type object URI is now rejected at parse time (exit 2),
+    // superseding this test's old "raw URIs resolve" expectation.
     let dir = indexed_scope();
     let search = json_success(&dir, &["search", "トークン TTL 3600"]);
     let pointer = &first_result(&search)["evidence_pointer"];
     let scope_id = pointer["scope_id"].as_str().unwrap();
     let raw_hash = pointer["raw_hash"].as_str().unwrap();
     let uri = format!("kcs://{scope_id}/object/raw/{raw_hash}");
-    let opened = json_success(&dir, &["open", &uri]);
-    assert_eq!(opened["status"], "opened");
-    assert_eq!(opened["object_type"], "raw");
-    assert!(opened["path"].as_str().unwrap().ends_with("auth.md"));
+    let error = json_failure(&dir, &["open", &uri], 2);
+    assert_eq!(error["error_code"], "KCS-E-CONFIG-USAGE-001");
 }
 
 #[test]
@@ -2724,12 +2761,15 @@ fn m7_object_uri_dispatches_by_type_directory() {
     );
     assert_eq!(opened["object_type"], "image");
     assert!(Path::new(opened["path"].as_str().unwrap()).is_file());
-    // Same hash under object/raw must NOT resolve (the bytes live only under image).
-    json_failure(
+    // Same hash under object/raw must NOT resolve — PA01 (§A, U22) now
+    // rejects `raw`-type object URIs categorically at parse time (exit 2),
+    // superseding the old not-found-at-resolution (exit 4) expectation.
+    let raw_uri_error = json_failure(
         &dir,
         &["open", &format!("kcs://{scope_id}/object/raw/{image_hash}")],
-        4,
+        2,
     );
+    assert_eq!(raw_uri_error["error_code"], "KCS-E-CONFIG-USAGE-001");
     // `normalized` is path-named (not single-hash addressable) -> invalid usage.
     json_failure(
         &dir,
@@ -2769,12 +2809,51 @@ fn m8_user_config_valid_budget_cap_accepted() {
 #[test]
 fn ct4_search_at_head_is_implemented() {
     let dir = indexed_scope();
-    let result = json_success(&dir, &["search", "認証仕様", "--at", "HEAD"]);
+    // PC59/PC60 (06 §3 L226-227): `--at` requires a single, non-`--descendants`
+    // `--scope` — an explicit commit cannot be resolved against more than one
+    // independent scope DAG. `indexed_scope()` is a single scope, so `--scope .`
+    // satisfies the requirement without changing what this test exercises.
+    let result = json_success(
+        &dir,
+        &["search", "認証仕様", "--at", "HEAD", "--scope", "."],
+    );
     assert!(!result["results"].as_array().unwrap().is_empty());
     assert_eq!(
         result["results"][0]["evidence_pointer"]["commit"],
         result["searched_scopes"][0]["snapshot_at"]
     );
+}
+
+/// PC59 (06 §3 L226-227): `--at` without an explicit single `--scope` is
+/// invalid usage (exit 2) — the default multi-scope enumeration cannot
+/// resolve one commit across independent scope DAGs.
+#[test]
+fn pc59_search_at_without_scope_is_invalid_usage() {
+    let dir = indexed_scope();
+    let err = json_failure(&dir, &["search", "認証仕様", "--at", "HEAD"], 2);
+    assert_eq!(err["error_code"], "KCS-E-CONFIG-USAGE-001");
+}
+
+/// PC60(a): `--at` combined with `--scope --descendants` (potentially
+/// multiple scopes) is also invalid usage, even though a single `--scope`
+/// alone (PC60(b), exercised by `ct4_search_at_head_is_implemented`) is fine.
+#[test]
+fn pc60_search_at_with_descendants_is_invalid_usage() {
+    let dir = indexed_scope();
+    let err = json_failure(
+        &dir,
+        &[
+            "search",
+            "認証仕様",
+            "--at",
+            "HEAD",
+            "--scope",
+            ".",
+            "--descendants",
+        ],
+        2,
+    );
+    assert_eq!(err["error_code"], "KCS-E-CONFIG-USAGE-001");
 }
 
 /// R9-6: every remaining KCS-E-CONFIG-NOT-IMPLEMENTED-001 path exits with the
@@ -2788,8 +2867,13 @@ fn r9_6_not_implemented_exit_code_is_uniform() {
     assert_eq!(err["error_code"], "KCS-E-CONFIG-NOT-IMPLEMENTED-001");
 }
 
-// Minor: previously-untested error code KCS-E-EVIDENCE-SCOPE-AMBIGUOUS-001 — a
-// scope_id registered against two distinct .kcs with the same last_seen_at.
+// step4b-contract-tests-p2b.md PB21/22: a scope_id registered against two
+// distinct .kcs is fail-closed (KCS-E-REGISTRY-DUP-001), regardless of
+// last_seen_at — this fixture happens to also share the newest timestamp,
+// which used to be the ONLY duplicate shape the old
+// KCS-E-EVIDENCE-SCOPE-AMBIGUOUS-001 code detected (PB21 widens detection to
+// every live duplicate; PB22 retires the old code in favor of the new
+// REGISTRY namespace).
 #[test]
 fn minor_evidence_scope_ambiguous_error_code_is_emitted() {
     let parent = tempfile::tempdir().unwrap();
@@ -2845,7 +2929,7 @@ fn minor_evidence_scope_ambiguous_error_code_is_emitted() {
     orphan["scope_path"] = serde_json::json!(parent.path().join("gone/.kcs").display().to_string());
     let (code, err) = run_json(&elsewhere, &data_home, &["view", &orphan.to_string()]);
     assert_eq!(code, 4, "ambiguous scope must fail: {err}");
-    assert_eq!(err["error_code"], "KCS-E-EVIDENCE-SCOPE-AMBIGUOUS-001");
+    assert_eq!(err["error_code"], "KCS-E-REGISTRY-DUP-001");
 }
 
 // ===========================================================================
@@ -3266,7 +3350,8 @@ fn o6_short_sha256_operand_is_usage_error() {
 
 // (g) / O7: a scope_id collision (a wholesale `.kcs` copy) makes a cursor replay
 // ambiguous — detected the same way the Evidence path is
-// (KCS-E-EVIDENCE-SCOPE-AMBIGUOUS-001), not silently pinned to one copy.
+// (KCS-E-REGISTRY-DUP-001, step4b-contract-tests-p2b.md PB21/22), not
+// silently pinned to one copy.
 #[test]
 fn o7_cursor_replay_detects_scope_id_collision() {
     let parent = tempfile::tempdir().unwrap();
@@ -3325,7 +3410,7 @@ fn o7_cursor_replay_detects_scope_id_collision() {
 
     let (code, err) = run_json(&a, &data_home, &["search", "認証仕様", "--cursor", &cursor]);
     assert_eq!(code, 4, "ambiguous cursor scope must fail: {err}");
-    assert_eq!(err["error_code"], "KCS-E-EVIDENCE-SCOPE-AMBIGUOUS-001");
+    assert_eq!(err["error_code"], "KCS-E-REGISTRY-DUP-001");
 }
 
 // ---------------------------------------------------------------------------
@@ -4233,7 +4318,14 @@ fn r7_empty_secrets_approval_file_does_not_lift_tier_b_hold() {
 }
 
 #[test]
-fn r7_multiscope_query_embedding_requires_every_target_scope_opt_in() {
+fn pc4_multiscope_query_embedding_sent_when_any_target_scope_opts_in() {
+    // PC4 (05 §1.1 L46-48 / 07 §3 L224-226): the send consent gate is an OR
+    // across participating scopes, not an AND — one approved scope is enough
+    // to send the query embedding, and the resulting vector is then usable
+    // against every profile-compatible participating scope (05 §1.8 "送信は
+    // 1 回であり scope 別の再送信は発生しない"). This replaces the pre-PC4
+    // AND-gate contract (a single unapproved scope no longer silently vetoes
+    // sending for an already-approved sibling).
     let data_home = tempfile::tempdir().unwrap();
     let a = tempfile::tempdir().unwrap();
     let b = tempfile::tempdir().unwrap();
@@ -4270,11 +4362,13 @@ fn r7_multiscope_query_embedding_requires_every_target_scope_opt_in() {
         .stdout
         .clone();
     let search: Value = serde_json::from_slice(&output).unwrap();
-    assert_eq!(search["resolved_mode"], "text");
-    assert_eq!(search["fallback_reason"], "embedding_opt_in_required");
+    // A's persistent opt-in alone satisfies the OR gate, so auto resolves to
+    // hybrid (not a text fallback) even though B never persistently opted in.
+    assert_eq!(search["resolved_mode"], "hybrid");
+    assert_eq!(search["fallback"], false);
     assert!(
-        !trace.exists(),
-        "query embedding must not be sent when any searched scope lacks opt-in"
+        trace.exists(),
+        "query embedding must be sent once at least one searched scope has opt-in"
     );
 }
 
@@ -4613,14 +4707,18 @@ fn write_scope_config(dir: &TempDir, body: &str) {
 #[test]
 fn r12_1_diversify_config_controls_dedup() {
     let dir = multi_chunk_scope();
+    // PC49/PC50 (05 §1.8 L384-387): folder config.toml applies only for a
+    // single, non-`--descendants` `--scope` — the bare default (multi-scope
+    // enumeration) now uses the user (device) layer only. `--scope .` keeps
+    // this test's folder-config premise valid under the new rule.
 
     // Default (no config): text-only -> MMR skipped -> max_per_raw_hash=3 cap.
-    let default = json_success(&dir, &["search", "sharedtoken"]);
+    let default = json_success(&dir, &["search", "sharedtoken", "--scope", "."]);
     assert_eq!(default["results"].as_array().unwrap().len(), 3);
 
     // strategy = "off": diversification disabled entirely -> every matching chunk.
     write_scope_config(&dir, "[search.diversify]\nstrategy = \"off\"\n");
-    let off = json_success(&dir, &["search", "sharedtoken"]);
+    let off = json_success(&dir, &["search", "sharedtoken", "--scope", "."]);
     assert!(
         off["results"].as_array().unwrap().len() >= 4,
         "off must return more than the default cap of 3: {}",
@@ -4630,7 +4728,7 @@ fn r12_1_diversify_config_controls_dedup() {
 
     // max_per_raw_hash = 1: cap the raw_hash to a single chunk.
     write_scope_config(&dir, "[search.diversify]\nmax_per_raw_hash = 1\n");
-    let capped = json_success(&dir, &["search", "sharedtoken"]);
+    let capped = json_success(&dir, &["search", "sharedtoken", "--scope", "."]);
     assert_eq!(capped["results"].as_array().unwrap().len(), 1);
 }
 
@@ -4640,20 +4738,43 @@ fn r12_1_diversify_config_controls_dedup() {
 #[test]
 fn r12_1_query_hash_depends_on_rrf_config() {
     let dir = multi_chunk_scope();
-    let page1 = json_success(&dir, &["search", "sharedtoken", "--limit", "1"]);
+    // PC49/PC50: `--scope .` (single scope) keeps folder config effective —
+    // see `r12_1_diversify_config_controls_dedup`.
+    let page1 = json_success(
+        &dir,
+        &["search", "sharedtoken", "--limit", "1", "--scope", "."],
+    );
     let cursor = page1["paging"]["next_cursor"]
         .as_str()
         .expect("cursor present");
     // Same config -> the cursor replays fine (sanity).
     json_success(
         &dir,
-        &["search", "sharedtoken", "--limit", "1", "--cursor", cursor],
+        &[
+            "search",
+            "sharedtoken",
+            "--limit",
+            "1",
+            "--cursor",
+            cursor,
+            "--scope",
+            ".",
+        ],
     );
     // Change the effective rrf -> query_hash changes -> the old cursor is rejected.
     write_scope_config(&dir, "[search.rrf]\nk = 1\n");
     let err = json_failure(
         &dir,
-        &["search", "sharedtoken", "--limit", "1", "--cursor", cursor],
+        &[
+            "search",
+            "sharedtoken",
+            "--limit",
+            "1",
+            "--cursor",
+            cursor,
+            "--scope",
+            ".",
+        ],
         2,
     );
     assert_eq!(err["error_code"], "KCS-E-SEARCH-CURSOR-001");

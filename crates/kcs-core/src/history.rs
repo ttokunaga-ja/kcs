@@ -213,6 +213,11 @@ impl HistoryGraph {
     /// Introduction candidates with every descendant re-introduction removed.
     /// The result is sorted by full commit hash, giving the frozen incomparable
     /// introduction tie order.
+    ///
+    /// Same boundary-node generalization as [`validate_acyclic`] (a
+    /// module-private free function): a parent hash absent from `self.nodes`
+    /// (a shallow-skipped ancestor on a tolerant graph, PC45) does not count
+    /// against its children's readiness. This is a no-op for a complete graph.
     #[must_use]
     pub fn ancestor_most_introductions(&self, binding: &TreeBinding) -> Vec<HistoryBinding> {
         let candidates = self.introduction_candidates(binding);
@@ -223,11 +228,22 @@ impl HistoryGraph {
         let mut remaining_parents = self
             .nodes
             .iter()
-            .map(|(hash, node)| (hash.clone(), node.commit.parents.len()))
+            .map(|(hash, node)| {
+                let present = node
+                    .commit
+                    .parents
+                    .iter()
+                    .filter(|parent| self.nodes.contains_key(parent.as_str()))
+                    .count();
+                (hash.clone(), present)
+            })
             .collect::<BTreeMap<_, _>>();
         let mut children = BTreeMap::<&str, Vec<&str>>::new();
         for (child_hash, node) in &self.nodes {
             for parent in &node.commit.parents {
+                if !self.nodes.contains_key(parent.as_str()) {
+                    continue;
+                }
                 children
                     .entry(parent)
                     .or_default()
@@ -408,6 +424,55 @@ impl HistoryReader {
         })
     }
 
+    /// PC45/PC46 (05 §1.6 / §2.2): the all-parent walk used by `--all-history` /
+    /// `--since`, tolerant of a shallow (tree-discarded) *ancestor* — it is
+    /// skipped (recorded in the returned `shallow_skipped` list, sorted/deduped)
+    /// and the walk continues through that commit's parents (still readable from
+    /// its commit object, which shallow GC never discards, §2.2). The **start**
+    /// commit itself is never tolerated this way: if its own tree is gone the
+    /// call hard-fails exactly like `all_parents` (PC47 — a cursor's or `--at`'s
+    /// snapshot commit needs its whole tree, so there is no partial degradation
+    /// to fall back to). A missing *commit* object (not just its tree) is never
+    /// shallow-tolerated either — shallow GC only ever discards trees (§2.2), so
+    /// a missing commit is corruption, and this call fails exactly like
+    /// `all_parents` in that case too.
+    pub fn all_parents_tolerant(&self, start_commit: &str) -> Result<(HistoryGraph, Vec<String>)> {
+        let walk = self.walk_tolerant(start_commit, ParentMode::All)?;
+        // `validate_acyclic` counts only parent hashes that are themselves keys
+        // of `nodes` (a no-op generalization for a complete, non-tolerant graph,
+        // where every referenced parent is always present) — a shallow-skipped
+        // ancestor is simply not a "remaining parent" any walked descendant
+        // needs to wait on.
+        validate_acyclic(&walk.nodes)?;
+        Ok((
+            HistoryGraph {
+                start_commit: start_commit.to_owned(),
+                nodes: walk.nodes,
+                visit_order: walk.order,
+                stats: walk.stats,
+            },
+            walk.shallow_skipped,
+        ))
+    }
+
+    /// The `first_parent` counterpart of [`Self::all_parents_tolerant`], used by
+    /// `--include-deleted`'s first-parent ancestry walk.
+    pub fn first_parent_tolerant(
+        &self,
+        start_commit: &str,
+    ) -> Result<(FirstParentHistory, Vec<String>)> {
+        let walk = self.walk_tolerant(start_commit, ParentMode::First)?;
+        Ok((
+            FirstParentHistory {
+                start_commit: start_commit.to_owned(),
+                nodes: walk.nodes,
+                newest_first: walk.order,
+                stats: walk.stats,
+            },
+            walk.shallow_skipped,
+        ))
+    }
+
     fn walk(&self, start_commit: &str, mode: ParentMode) -> Result<WalkState> {
         let mut state = WalkState::default();
         let mut pending = vec![start_commit.to_owned()];
@@ -435,6 +500,66 @@ impl HistoryReader {
             state.nodes.insert(commit_hash, node);
         }
 
+        Ok(state)
+    }
+
+    /// Same traversal as [`Self::walk`], except a shallow (tree-missing) commit
+    /// other than `start_commit` is skipped instead of failing the whole walk
+    /// (PC45). The commit object of a skipped node is still required (it is
+    /// where the parent list to keep walking comes from) — only the tree read is
+    /// tolerated. Skipped hashes are still counted against `HistoryStats` for
+    /// their commit bytes (their tree contributes zero entries/bytes, same as a
+    /// legitimately empty tree would).
+    fn walk_tolerant(&self, start_commit: &str, mode: ParentMode) -> Result<TolerantWalkState> {
+        let mut state = TolerantWalkState::default();
+        let mut pending = vec![start_commit.to_owned()];
+        let mut scheduled = BTreeSet::from([start_commit.to_owned()]);
+
+        while let Some(commit_hash) = pending.pop() {
+            let is_start = commit_hash == start_commit;
+            let outcome = self.read_node_tolerant(&commit_hash, state.stats, is_start)?;
+            let (parents, next_stats) = match outcome {
+                TolerantNodeOutcome::Full(node, next_stats) => {
+                    let parents = match mode {
+                        ParentMode::All => node.commit.parents.clone(),
+                        ParentMode::First => {
+                            node.commit.parents.get(..1).unwrap_or_default().to_vec()
+                        }
+                    };
+                    state.order.push(commit_hash.clone());
+                    state.nodes.insert(commit_hash.clone(), *node);
+                    (parents, next_stats)
+                }
+                TolerantNodeOutcome::ShallowSkipped { parents, stats } => {
+                    state.shallow_skipped.push(commit_hash.clone());
+                    let parents = match mode {
+                        ParentMode::All => parents,
+                        ParentMode::First => parents.get(..1).unwrap_or_default().to_vec(),
+                    };
+                    // A shallow ancestor still occupies a position in the
+                    // newest-first / visit order for `--include-deleted`'s
+                    // `nodes_newest_first()` — but that method already
+                    // filter_maps through `self.nodes`, so a hash with no node
+                    // is silently and correctly skipped there. Do not push it
+                    // into `order` — nothing downstream needs it and every
+                    // consumer indexes through `self.nodes` first.
+                    (parents, stats)
+                }
+            };
+            for parent in parents.iter().rev() {
+                if scheduled.insert(parent.clone()) {
+                    pending.push(parent.clone());
+                } else if matches!(mode, ParentMode::First) {
+                    return Err(KcsError::schema(
+                        "commit history contains a first-parent cycle",
+                    ));
+                }
+            }
+            state.stats = next_stats;
+        }
+
+        state.shallow_skipped.sort();
+        state.shallow_skipped.dedup();
         Ok(state)
     }
 
@@ -518,6 +643,118 @@ impl HistoryReader {
             Err(error) => Err(error),
         }
     }
+
+    /// [`Self::read_node`]'s shallow-tolerant counterpart (PC45): the commit
+    /// object is always required (shallow GC never discards commits, only trees
+    /// — §2.2 — so a missing commit is corruption regardless of `is_start`), but
+    /// a missing *tree* is tolerated for any node other than `is_start` (the
+    /// walk's own starting commit, whose full tree PC47 always requires).
+    fn read_node_tolerant(
+        &self,
+        commit_hash: &str,
+        stats: HistoryStats,
+        is_start: bool,
+    ) -> Result<TolerantNodeOutcome> {
+        let next_commit_count = checked_total(stats.commits, 1);
+        if next_commit_count > self.limits.max_commits {
+            return Err(history_limit_error(
+                "commits",
+                stats,
+                self.limits,
+                next_commit_count,
+            ));
+        }
+
+        let commit_object = self.read_required(ObjectKind::Commit, commit_hash, commit_hash)?;
+        let commit_bytes = commit_object.bytes.len() as u64;
+        let after_commit_bytes = checked_total(stats.verified_bytes, commit_bytes);
+        if after_commit_bytes > self.limits.max_verified_bytes {
+            return Err(history_limit_error(
+                "verified_bytes",
+                stats,
+                self.limits,
+                after_commit_bytes,
+            ));
+        }
+        let commit = decode_commit(commit_object)?;
+
+        let tree_object = match self.store.read_object(ObjectKind::Tree, &commit.tree) {
+            Ok(object) => object,
+            Err(error) if error.error_code() == "KCS-E-STORE-NOT-FOUND-001" => {
+                if is_start {
+                    return Err(history_shallow_error(
+                        commit_hash,
+                        ObjectKind::Tree,
+                        &commit.tree,
+                    ));
+                }
+                return Ok(TolerantNodeOutcome::ShallowSkipped {
+                    parents: commit.parents,
+                    stats: HistoryStats {
+                        commits: next_commit_count,
+                        tree_entries: stats.tree_entries,
+                        verified_bytes: after_commit_bytes,
+                    },
+                });
+            }
+            Err(error) => return Err(error),
+        };
+        let tree_bytes = tree_object.bytes.len() as u64;
+        let next_verified_bytes = checked_total(after_commit_bytes, tree_bytes);
+        if next_verified_bytes > self.limits.max_verified_bytes {
+            return Err(history_limit_error(
+                "verified_bytes",
+                stats,
+                self.limits,
+                next_verified_bytes,
+            ));
+        }
+        let tree = decode_tree(tree_object)?;
+        let next_tree_entries = checked_total(stats.tree_entries, tree.entries.len() as u64);
+        if next_tree_entries > self.limits.max_tree_entries {
+            return Err(history_limit_error(
+                "tree_entries",
+                stats,
+                self.limits,
+                next_tree_entries,
+            ));
+        }
+
+        Ok(TolerantNodeOutcome::Full(
+            Box::new(HistoryNode {
+                commit_hash: commit_hash.to_owned(),
+                commit,
+                tree,
+                commit_bytes,
+                tree_bytes,
+            }),
+            HistoryStats {
+                commits: next_commit_count,
+                tree_entries: next_tree_entries,
+                verified_bytes: next_verified_bytes,
+            },
+        ))
+    }
+}
+
+enum TolerantNodeOutcome {
+    // Boxed: `HistoryNode` is much larger than `ShallowSkipped`'s fields, and
+    // this enum is returned by value on every walked commit.
+    Full(Box<HistoryNode>, HistoryStats),
+    ShallowSkipped {
+        parents: Vec<String>,
+        stats: HistoryStats,
+    },
+}
+
+#[derive(Debug, Default)]
+struct TolerantWalkState {
+    nodes: BTreeMap<String, HistoryNode>,
+    order: Vec<String>,
+    stats: HistoryStats,
+    /// Commit hashes skipped because their tree was gone (PC45/PC46), sorted +
+    /// deduped once the walk completes.
+    shallow_skipped: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -557,14 +794,36 @@ fn decode_tree(object: StoredObject) -> Result<TreeObject> {
     Ok(tree)
 }
 
+/// Kahn's-algorithm cycle check. Counts only parent hashes that are themselves
+/// keys of `nodes` — for a *complete* graph (every `all_parents()` caller today)
+/// this is a no-op, because a walk that referenced an unread parent would
+/// already have failed with an `Err` before reaching this call. It is a real
+/// generalization for `all_parents_tolerant`'s graph (PC45), where a
+/// shallow-skipped ancestor is a legitimate "boundary" node: present as a
+/// parent reference in its children's commit objects, but deliberately absent
+/// from `nodes` (its tree was never read). Such a boundary parent must not
+/// block its children from ever becoming "ready" — it contributes no further
+/// ancestor information (its own tree is gone), so it is correct to treat it as
+/// if it were not there at all for topological-order purposes.
 fn validate_acyclic(nodes: &BTreeMap<String, HistoryNode>) -> Result<()> {
     let mut remaining_parents = nodes
         .iter()
-        .map(|(hash, node)| (hash.clone(), node.commit.parents.len()))
+        .map(|(hash, node)| {
+            let present = node
+                .commit
+                .parents
+                .iter()
+                .filter(|parent| nodes.contains_key(parent.as_str()))
+                .count();
+            (hash.clone(), present)
+        })
         .collect::<BTreeMap<_, _>>();
     let mut children = BTreeMap::<&str, Vec<&str>>::new();
     for (child_hash, node) in nodes {
         for parent in &node.commit.parents {
+            if !nodes.contains_key(parent.as_str()) {
+                continue;
+            }
             children
                 .entry(parent)
                 .or_default()
@@ -986,5 +1245,133 @@ mod tests {
             .unwrap();
         assert!(all.node(&main).is_some());
         assert!(all.node(&side).is_some());
+    }
+
+    /// PC45: an all-parent walk with a shallow (tree-discarded) *ancestor*
+    /// skips it and keeps walking through commits reachable beyond it, instead
+    /// of failing the whole walk the way plain `all_parents` still does
+    /// (regression guard: the non-tolerant path is unchanged).
+    #[test]
+    fn pc45_all_parents_tolerant_skips_a_shallow_ancestor_and_keeps_walking() {
+        let fixture = Fixture::new();
+        let root_tree = fixture.tree(vec![entry("root.md", b"root", Some(profile()))]);
+        let root = fixture.commit("root", &root_tree, Vec::new());
+        let missing_tree = hash_bytes(b"pc45-missing-tree");
+        let shallow_mid = fixture.commit("shallow-mid", &missing_tree, vec![root.clone()]);
+        let head_tree = fixture.tree(vec![entry("head.md", b"head", Some(profile()))]);
+        let head = fixture.commit("head", &head_tree, vec![shallow_mid.clone()]);
+
+        // Unchanged baseline: the non-tolerant walk still hard-fails.
+        let error = HistoryReader::new(&fixture.kcs_dir)
+            .all_parents(&head)
+            .unwrap_err();
+        assert_eq!(error.error_code(), "KCS-E-COMMIT-SHALLOW-001");
+
+        let (graph, shallow_skipped) = HistoryReader::new(&fixture.kcs_dir)
+            .all_parents_tolerant(&head)
+            .unwrap();
+        assert_eq!(shallow_skipped, vec![shallow_mid.clone()]);
+        // The walk continued past the shallow node to its own parent.
+        assert!(graph.node(&root).is_some());
+        assert!(graph.node(&head).is_some());
+        assert!(graph.node(&shallow_mid).is_none());
+        // The root's binding is still reachable through the shallow boundary —
+        // `canonical_introduction` (which depends on the generalized
+        // `ancestor_most_introductions` topology) resolves it correctly rather
+        // than silently dropping it.
+        let binding = TreeBinding {
+            path: "root.md".to_owned(),
+            raw_hash: hash_bytes(b"root"),
+            normalize: Some(profile()),
+        };
+        assert_eq!(
+            graph.canonical_introduction(&binding).unwrap().commit_hash,
+            root
+        );
+    }
+
+    /// PC47: the *start* commit of a tolerant walk still hard-fails when its own
+    /// tree is shallow — only a deeper ancestor is tolerated (PC45's skip is not
+    /// a blanket exemption; a `--cursor` replay or `--at <shallow-commit>` needs
+    /// the whole tree of the exact commit it targets).
+    #[test]
+    fn pc47_all_parents_tolerant_still_hard_fails_when_the_start_commit_itself_is_shallow() {
+        let fixture = Fixture::new();
+        let missing_tree = hash_bytes(b"pc47-missing-tree");
+        let shallow_head = fixture.commit("shallow-head", &missing_tree, Vec::new());
+        let error = HistoryReader::new(&fixture.kcs_dir)
+            .all_parents_tolerant(&shallow_head)
+            .unwrap_err();
+        assert_eq!(error.error_code(), "KCS-E-COMMIT-SHALLOW-001");
+        assert_eq!(error.context()["commit_hash"], json!(shallow_head));
+    }
+
+    /// PC45's `first_parent` counterpart (used by `--include-deleted`): a
+    /// shallow ancestor on the first-parent chain is skipped and the walk keeps
+    /// going through commits beyond it.
+    #[test]
+    fn pc45_first_parent_tolerant_skips_a_shallow_ancestor() {
+        let fixture = Fixture::new();
+        let root_tree = fixture.tree(Vec::new());
+        let root = fixture.commit("root", &root_tree, Vec::new());
+        let missing_tree = hash_bytes(b"pc45-fp-missing-tree");
+        let shallow_mid = fixture.commit("shallow-mid", &missing_tree, vec![root.clone()]);
+        let head_tree = fixture.tree(Vec::new());
+        let head = fixture.commit("head", &head_tree, vec![shallow_mid.clone()]);
+
+        let (history, shallow_skipped) = HistoryReader::new(&fixture.kcs_dir)
+            .first_parent_tolerant(&head)
+            .unwrap();
+        assert_eq!(shallow_skipped, vec![shallow_mid]);
+        assert!(history.node(&root).is_some());
+        assert!(history.node(&head).is_some());
+    }
+
+    /// A commit object that is itself missing (as opposed to just its tree) is
+    /// never shallow-tolerated, at any position in the walk — shallow GC only
+    /// ever discards trees (§2.2), so a missing commit is corruption.
+    #[test]
+    fn pc45_tolerant_walk_does_not_tolerate_a_missing_commit_object() {
+        let fixture = Fixture::new();
+        let tree = fixture.tree(Vec::new());
+        let missing_parent = hash_bytes(b"pc45-missing-commit");
+        let head = fixture.commit("head", &tree, vec![missing_parent.clone()]);
+        let error = HistoryReader::new(&fixture.kcs_dir)
+            .all_parents_tolerant(&head)
+            .unwrap_err();
+        assert_eq!(error.error_code(), "KCS-E-COMMIT-SHALLOW-001");
+        assert_eq!(error.context()["missing_object_kind"], json!("commit"));
+        assert_eq!(error.context()["commit_hash"], json!(missing_parent));
+    }
+
+    /// Two independent branches each carrying a shallow ancestor still merge
+    /// and topologically resolve correctly (the `ancestor_most_introductions`
+    /// generalization holds even with multiple boundary nodes, and duplicate
+    /// shallow hashes reached via different paths are deduped).
+    #[test]
+    fn pc45_tolerant_walk_handles_shallow_ancestors_on_both_merge_branches() {
+        let fixture = Fixture::new();
+        let empty = fixture.tree(Vec::new());
+        let root = fixture.commit("root", &empty, Vec::new());
+        let missing_tree_left = hash_bytes(b"pc45-merge-left-missing");
+        let missing_tree_right = hash_bytes(b"pc45-merge-right-missing");
+        let shallow_left = fixture.commit("shallow-left", &missing_tree_left, vec![root.clone()]);
+        let shallow_right =
+            fixture.commit("shallow-right", &missing_tree_right, vec![root.clone()]);
+        let merge = fixture.commit(
+            "merge",
+            &empty,
+            vec![shallow_left.clone(), shallow_right.clone()],
+        );
+
+        let (graph, mut shallow_skipped) = HistoryReader::new(&fixture.kcs_dir)
+            .all_parents_tolerant(&merge)
+            .unwrap();
+        shallow_skipped.sort();
+        let mut expected = vec![shallow_left, shallow_right];
+        expected.sort();
+        assert_eq!(shallow_skipped, expected);
+        assert!(graph.node(&root).is_some());
+        assert!(graph.node(&merge).is_some());
     }
 }

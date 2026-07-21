@@ -127,8 +127,9 @@ use crate::promotion::{
     recover_pending_online_promotion,
 };
 use crate::search_history::{
-    current_history_plan_from_cache, exact_project_snapshot, install_eligible_identities,
-    plan_search_history, SearchContentKey, SearchHistoryBinding,
+    at_target_ancestors, current_history_plan_from_cache, exact_project_snapshot,
+    install_eligible_identities, install_target_ancestors, plan_search_history, SearchContentKey,
+    SearchHistoryBinding,
 };
 use crate::search_time::{
     reconcile_cursor_selector, since_cutoff_utc, validate_cursor_cutoff, TimeSelector,
@@ -922,17 +923,32 @@ struct ParsedSearch {
     offset: Option<u64>,
     cursor: Option<String>,
     time_selector_flags: TimeSelectorFlags,
+    /// PC5 (05 §1.2 / 07 §3): a one-shot opt-in that opens the send consent
+    /// gate for this invocation only (no persisted approval row). Mutually
+    /// exclusive with `offline`.
+    online: bool,
+    /// PC5: forces the new-send prohibition for this invocation regardless of
+    /// any recorded approval — auto/`--hybrid` fall back to text
+    /// (`fallback_reason="offline"`), `--vector` explicit errors.
+    offline: bool,
 }
 
 fn run_repair(args: UnsupportedArgs) -> Result<Value> {
     let args = without_json(args.args);
     let mode = parse_repair_args(args)?;
+    // PB25: `--registry-prune` operates on the device-global scope-registry,
+    // not any one scope's `.kcs` — it must not require the CWD to be inside a
+    // scope at all (unlike every other repair mode).
+    if mode == RepairMode::RegistryPrune {
+        let report = verify_objects::registry_prune()?;
+        return serde_json::to_value(report).map_err(|error| KcsError::schema(error.to_string()));
+    }
     let repo = Repository::open_current_without_head_repair()?;
     // M1(a): serialize the DB rebuild against concurrent index/repair/reindex.
     let _lock = repo.lock_store()?;
     repo.self_heal_head_for_repair()?;
     validate_repo_tool_lock(&repo)?;
-    if mode == RepairMode::VerifyObjects {
+    if mode == RepairMode::VerifyObjects || mode == RepairMode::VerifyObjectsPruneOrphans {
         let report = verify_objects::verify_objects(&repo)?;
         let has_findings = report.has_remaining_findings();
         let purge_incomplete = report
@@ -952,6 +968,21 @@ fn run_repair(args: UnsupportedArgs) -> Result<Value> {
                     }),
                 );
                 object.insert("__exit_code".to_owned(), json!(3));
+            }
+            // PB15: never prune on top of an unverified/corrupt store.
+            return Ok(output);
+        }
+        // PB12-17: `--prune-orphans` runs only after a clean verify pass.
+        if mode == RepairMode::VerifyObjectsPruneOrphans {
+            let prune = verify_objects::prune_orphans(&repo)?;
+            if let (Some(object), Ok(prune_value)) = (
+                output.as_object_mut(),
+                serde_json::to_value(&prune).map_err(|error| KcsError::schema(error.to_string())),
+            ) {
+                object.insert("prune_orphans".to_owned(), prune_value);
+                if prune.status == "blocked" {
+                    object.insert("__exit_code".to_owned(), json!(3));
+                }
             }
         }
         return Ok(output);
@@ -1004,8 +1035,17 @@ fn run_repair(args: UnsupportedArgs) -> Result<Value> {
 enum RepairMode {
     RebuildDb,
     VerifyObjects,
+    /// PB12 (step4b-contract-tests-p2b.md §E, 10-operations.md §7.5.1
+    /// L586-626): `--verify-objects --prune-orphans` — `--prune-orphans` is a
+    /// modifier on `--verify-objects`, never valid alone or with
+    /// `--rebuild-db`.
+    VerifyObjectsPruneOrphans,
+    /// PB25 (§H, 10 §3 L291-293): `kcs repair --registry-prune`.
+    RegistryPrune,
 }
 
+/// PB12: `kcs repair` accepts exactly one of `--rebuild-db [--online|--offline]`,
+/// `--verify-objects [--prune-orphans]`, or `--registry-prune`.
 fn parse_repair_args(args: Vec<String>) -> Result<RepairMode> {
     if args.is_empty() {
         return Err(KcsError::invalid_usage(
@@ -1014,6 +1054,8 @@ fn parse_repair_args(args: Vec<String>) -> Result<RepairMode> {
     }
     let mut rebuild_db = false;
     let mut verify_objects = false;
+    let mut prune_orphans = false;
+    let mut registry_prune = false;
     for arg in &args {
         // R12-7: accept `--flag=value` before matching so an existing flag is not
         // misreported as unknown. R16-6: every repair flag is boolean, so an inline
@@ -1042,6 +1084,26 @@ fn parse_repair_args(args: Vec<String>) -> Result<RepairMode> {
                     "repair accepts --verify-objects only once",
                 ));
             }
+            "--prune-orphans" if !prune_orphans => {
+                reject_inline_value(flag, inline)?;
+                prune_orphans = true;
+            }
+            "--prune-orphans" => {
+                reject_inline_value(flag, inline)?;
+                return Err(KcsError::invalid_usage(
+                    "repair accepts --prune-orphans only once",
+                ));
+            }
+            "--registry-prune" if !registry_prune => {
+                reject_inline_value(flag, inline)?;
+                registry_prune = true;
+            }
+            "--registry-prune" => {
+                reject_inline_value(flag, inline)?;
+                return Err(KcsError::invalid_usage(
+                    "repair accepts --registry-prune only once",
+                ));
+            }
             value if value.starts_with('-') => {
                 return Err(KcsError::invalid_usage(format!(
                     "unknown repair flag: {value}"
@@ -1054,13 +1116,30 @@ fn parse_repair_args(args: Vec<String>) -> Result<RepairMode> {
             }
         }
     }
-    if rebuild_db == verify_objects {
+    // PB12: exactly one of the three primary modes.
+    let primary_count = [rebuild_db, verify_objects, registry_prune]
+        .iter()
+        .filter(|value| **value)
+        .count();
+    if primary_count != 1 {
         return Err(KcsError::invalid_usage(
-            "repair requires exactly one of --rebuild-db or --verify-objects",
+            "repair requires exactly one of --rebuild-db, --verify-objects, or --registry-prune",
         ));
     }
-    Ok(if rebuild_db {
-        RepairMode::RebuildDb
+    // PB12: `--prune-orphans` is a `--verify-objects`-only modifier.
+    if prune_orphans && !verify_objects {
+        return Err(KcsError::invalid_usage(
+            "--prune-orphans requires --verify-objects",
+        ));
+    }
+    if registry_prune {
+        return Ok(RepairMode::RegistryPrune);
+    }
+    if rebuild_db {
+        return Ok(RepairMode::RebuildDb);
+    }
+    Ok(if prune_orphans {
+        RepairMode::VerifyObjectsPruneOrphans
     } else {
         RepairMode::VerifyObjects
     })
@@ -1073,10 +1152,13 @@ struct ResolvedMode {
     fallback: bool,
     fallback_reason: Option<String>,
     error_code: Option<String>,
-    /// R11-7: a non-null human warning when `[search].fail_behavior = "warn"` turned
-    /// an auto/--hybrid vector-unavailable case into a text fallback. `None` for the
-    /// silent default (`fallback`) and when no fallback occurred.
-    warning: Option<String>,
+    /// PC3 / §R note-1 ruling (2026-07-22): `warnings[]` is the array form the
+    /// 05 §1.1 regnorm text specifies ("構造化 warning を...`warnings[]` へ出す")
+    /// — the pre-ruling singular `warning: Option<String>` field is retired.
+    /// Empty when `[search].fail_behavior = "warn"` did not fire (the silent
+    /// `fallback` default, or no fallback at all); MVP is pre-freeze so this is
+    /// a breaking `--json` shape change, not a compatibility shim.
+    warnings: Vec<String>,
 }
 
 /// R11-7: `[search].fail_behavior` (config.schema.json §search) — what an auto or
@@ -1085,7 +1167,7 @@ struct ResolvedMode {
 enum SearchFailBehavior {
     /// Default (05 §1.7): silently fall back to text.
     Fallback,
-    /// Fall back to text but surface a `warning` field in the response.
+    /// Fall back to text but surface a `warnings[]` entry in the response.
     Warn,
     /// Hard error, identical to the explicit `--vector` path (KCS-E-SEARCH-VEC-*).
     Error,
@@ -1094,22 +1176,45 @@ enum SearchFailBehavior {
 /// Vector backend availability across the searched scopes (the K4 embedding
 /// seam, now live). Resolved from the actual per-scope embedding state and query
 /// embedding availability (03 §7 / 05 §1.1).
+///
+/// PC1 (05 §1.1 L25-36): variant order here mirrors the spec's 7-line
+/// resolution order, which is also judgment order — `resolve_search_mode`
+/// consults the first-listed condition that holds. `Offline` and
+/// `Unauthorized` are pulled out of the old single `Unavailable` bucket
+/// because PC2 gives them different `fail_behavior` semantics (never
+/// escalated to a hard error under `fail_behavior = "error"`, unlike every
+/// `Unavailable`/`Incompatible` reason).
 enum VectorAvailability {
     /// Every searched scope has a compatible embedding index and a query
     /// embedding is obtainable → hybrid is offered.
     Available,
-    /// No usable vector backend → text. `reason` names the actual cause
-    /// (05 §1.7 fallback_reason): `embedding_endpoint_not_configured` (no
-    /// adapter env/config at all), `embedding_index_missing` (endpoint
-    /// configured but no searched scope carries chunk embeddings),
-    /// `query_embedding_unavailable` (endpoint + index fine, but the query
-    /// embedding could not be computed — short query or adapter failure), or
-    /// `embedding_in_flight` (04 §5.4 §H / CL54: another process already holds
-    /// a live claim on this exact query's device row — page 1 only).
-    Unavailable { reason: &'static str },
-    /// Embedding present but the profile is incompatible, or scopes disagree on
-    /// embedding profile (03 §7 / 05 §1.8(5)) → text fallback + fallback_reason.
+    /// PC1 line (a) / PC5: `--offline` was given for this invocation — no
+    /// query embedding is sent regardless of any recorded approval. No
+    /// dedicated `error_code` (05 §1.1 names one only for INCOMPAT/
+    /// UNAUTHORIZED); `--vector` explicit still hard-errors
+    /// (KCS-E-SEARCH-VEC-UNAVAIL-001, the shared fallback code).
+    Offline,
+    /// PC1 line (b): embedding present but the profile is incompatible, or
+    /// scopes disagree on embedding profile (03 §7 / 05 §1.8(5)) → text
+    /// fallback + fallback_reason (KCS-E-SEARCH-VEC-INCOMPAT-001).
     Incompatible,
+    /// PC1 line (c) / PC4/PC6: no participating scope satisfies the send
+    /// consent gate (05 §1.1 — an OR across scopes) and no `--online`
+    /// one-shot opt-in opened it. KCS-E-SEARCH-VEC-UNAUTHORIZED-001.
+    Unauthorized,
+    /// PC1 lines (d)-(f): a technical, transient/structural unavailability —
+    /// `reason` names the actual cause (05 §1.7 fallback_reason):
+    /// `embedding_endpoint_not_configured` (no adapter env/config at all),
+    /// `embedding_index_missing` (endpoint configured but no searched scope
+    /// carries chunk embeddings), `query_embedding_unavailable` (endpoint +
+    /// index fine, but the query embedding could not be computed), or
+    /// `embedding_in_flight` (04 §5.4 §H / CL54: another process already
+    /// holds a live claim on this exact query's device row — page 1 only) or
+    /// `embedding_contract_violation` (PC7 — the adapter response failed its
+    /// 07 §5.3 acceptance check). PC2: unlike `Offline`/`Unauthorized`, ALL of
+    /// these (including `Incompatible` above) are subject to `fail_behavior`
+    /// for auto/`--hybrid`.
+    Unavailable { reason: &'static str },
 }
 
 /// One scope's chunk-embedding disposition (03 §7 compat).
@@ -1157,19 +1262,27 @@ fn scope_embedding_state(kcs_dir: &Path) -> ScopeEmbedState {
     }
 }
 
-/// K4: aggregate embedding availability across the searched scopes. Vector search
-/// is offered only when the endpoint is configured, every searched scope has a
-/// compatible embedding index (03 §7), AND a query embedding is obtainable. Any
-/// incompatible scope, or a mix of embedded and un-embedded scopes (cross-scope
-/// inconsistency, 05 §1.8(5)), downgrades to a text fallback. The `Unavailable`
-/// reason names the first structural cause in precedence order: endpoint →
-/// scope index → query embedding.
+/// K4: aggregate embedding availability across the searched scopes (PC1, 05
+/// §1.1's 7-line resolution order — this function's own `if`/`else if` chain
+/// IS that judgment order, first-listed-condition-wins per PC1's "解決順の
+/// 列挙は判定順序でもある"). Vector search is offered only when: not
+/// `--offline`; the endpoint is configured; every searched scope has a
+/// compatible embedding index (03 §7, cross-scope inconsistency also counts
+/// as incompatible per 05 §1.8(5)); the send consent gate is satisfied
+/// (PC4 — OR across scopes, computed by the caller via
+/// `embedding_opt_in_for_scopes`); AND a query embedding is obtainable.
 fn resolve_vector_availability(
     exec_scopes: &[ExecScope],
+    offline: bool,
     endpoint_configured: bool,
     embedding_opt_in: bool,
     query_embeddable: bool,
 ) -> VectorAvailability {
+    // PC1 line (a) / PC5: checked first, unconditionally — offline is a user
+    // decision, not a technical probe result.
+    if offline {
+        return VectorAvailability::Offline;
+    }
     if !endpoint_configured {
         return VectorAvailability::Unavailable {
             reason: "embedding_endpoint_not_configured",
@@ -1185,6 +1298,8 @@ fn resolve_vector_availability(
             ScopeEmbedState::Absent => any_absent = true,
         }
     }
+    // PC1 line (b): profile incompatibility precedes the PC1 line (c) consent
+    // check below (an incompatible scope's approval state is moot).
     if any_incompatible || (any_compatible && any_absent) {
         VectorAvailability::Incompatible
     } else if !any_compatible {
@@ -1192,11 +1307,11 @@ fn resolve_vector_availability(
             reason: "embedding_index_missing",
         }
     } else if !embedding_opt_in {
-        // O2: a compatible index exists, but sending the query embedding needs the
-        // scope's embedding opt-in (07 §3). Without it, offer text, never a send.
-        VectorAvailability::Unavailable {
-            reason: "embedding_opt_in_required",
-        }
+        // PC1 line (c) / PC4/PC6: a compatible index exists, but sending the
+        // query embedding needs the OR-across-scopes send consent gate (07
+        // §3). Without it, offer text, never a send — this is a user-consent
+        // gap, not a technical failure (PC2).
+        VectorAvailability::Unauthorized
     } else if !query_embeddable {
         VectorAvailability::Unavailable {
             reason: "query_embedding_unavailable",
@@ -1212,19 +1327,38 @@ fn resolve_search_mode(
     fail_behavior: SearchFailBehavior,
 ) -> Result<ResolvedMode> {
     let vector_ok = matches!(vector, VectorAvailability::Available);
-    let (reason, error_code) = match vector {
-        VectorAvailability::Available => (None, None),
-        VectorAvailability::Unavailable { reason } => (
-            Some((*reason).to_owned()),
-            Some("KCS-E-SEARCH-VEC-UNAVAIL-001".to_owned()),
+    // PC2: whether this cause is subject to `fail_behavior` at all for
+    // auto/`--hybrid`. `Offline` and `Unauthorized` are user-intent
+    // degradations ("ユーザー意思由来の text fallback は fail_behavior の対象外
+    // である") — always a silent text fallback for auto/`--hybrid`, never
+    // escalated to a hard error by `fail_behavior = "error"`. Every other
+    // cause (`Incompatible`, and every `Unavailable` reason including
+    // `embedding_in_flight`/`embedding_contract_violation`) is a technical
+    // failure and IS governed by `fail_behavior`.
+    let (reason, error_code, user_intent) = match vector {
+        VectorAvailability::Available => (None, None, false),
+        VectorAvailability::Offline => (Some("offline".to_owned()), None, true),
+        VectorAvailability::Unauthorized => (
+            Some("embedding_not_authorized".to_owned()),
+            Some("KCS-E-SEARCH-VEC-UNAUTHORIZED-001".to_owned()),
+            true,
         ),
         VectorAvailability::Incompatible => (
             Some("embedding_profile_incompatible".to_owned()),
             Some("KCS-E-SEARCH-VEC-INCOMPAT-001".to_owned()),
+            false,
+        ),
+        VectorAvailability::Unavailable { reason } => (
+            Some((*reason).to_owned()),
+            Some("KCS-E-SEARCH-VEC-UNAVAIL-001".to_owned()),
+            false,
         ),
     };
     // The hard-error envelope shared by explicit `--vector` and R11-7's
     // `fail_behavior = "error"` (same error_code taxonomy, 03 §7 / 05 §1.2).
+    // `--vector` explicit errors unconditionally for EVERY non-Available cause
+    // (05 §1.2), including offline/unauthorized — only auto/`--hybrid` treat
+    // those two as immune to escalation.
     let vector_unavailable_error = || {
         KcsError::new(
             error_code
@@ -1242,7 +1376,7 @@ fn resolve_search_mode(
             fallback: false,
             fallback_reason: None,
             error_code: None,
-            warning: None,
+            warnings: Vec::new(),
         }),
         SearchMode::Vector => {
             if vector_ok {
@@ -1252,7 +1386,7 @@ fn resolve_search_mode(
                     fallback: false,
                     fallback_reason: None,
                     error_code: None,
-                    warning: None,
+                    warnings: Vec::new(),
                 })
             } else {
                 // --vector with no usable vector backend is a hard error (05 §1.2);
@@ -1268,39 +1402,52 @@ fn resolve_search_mode(
                     fallback: false,
                     fallback_reason: None,
                     error_code: None,
-                    warning: None,
+                    warnings: Vec::new(),
+                })
+            } else if user_intent {
+                // PC2: offline/unauthorized always silently fall back for
+                // auto/--hybrid, regardless of fail_behavior.
+                Ok(ResolvedMode {
+                    requested,
+                    resolved: SearchMode::Text,
+                    fallback: true,
+                    fallback_reason: reason,
+                    error_code,
+                    warnings: Vec::new(),
                 })
             } else {
-                // R11-7: auto / --hybrid vector-unavailable behavior is governed by
-                // `[search].fail_behavior` (default = silent text fallback).
+                // R11-7: auto / --hybrid vector-unavailable behavior for every
+                // TECHNICAL cause is governed by `[search].fail_behavior`
+                // (default = silent text fallback).
                 match fail_behavior {
                     // The user asked for vectors and declared "error on failure" — make
                     // it the same hard error the explicit --vector path already returns,
                     // instead of a silent exit-0 text result.
                     SearchFailBehavior::Error => Err(vector_unavailable_error()),
-                    // Fall back to text but surface a loud warning field in the response.
+                    // Fall back to text but surface a loud warnings[] entry (PC3 / §R
+                    // note-1 ruling: array, not a singular field).
                     SearchFailBehavior::Warn => {
-                        let warning = Some(format!(
+                        let warning = format!(
                             "vector search unavailable ({}); fell back to text",
                             reason.as_deref().unwrap_or("unknown")
-                        ));
+                        );
                         Ok(ResolvedMode {
                             requested,
                             resolved: SearchMode::Text,
                             fallback: true,
                             fallback_reason: reason,
                             error_code,
-                            warning,
+                            warnings: vec![warning],
                         })
                     }
-                    // Default: silent text fallback (05 §1.7), warning stays null.
+                    // Default: silent text fallback (05 §1.7), warnings[] stays empty.
                     SearchFailBehavior::Fallback => Ok(ResolvedMode {
                         requested,
                         resolved: SearchMode::Text,
                         fallback: true,
                         fallback_reason: reason,
                         error_code,
-                        warning: None,
+                        warnings: Vec::new(),
                     }),
                 }
             }
@@ -1320,6 +1467,9 @@ struct ExecScope {
     max_association_rowid: Option<u64>,
     /// Effective per-scope chunking config frozen by a v2 cursor.
     chunking_config_hash: Option<String>,
+    /// PC19/PC21: the scope's `index_generation` ULID frozen by a v2 cursor.
+    /// `None` on a fresh page 1 (nothing to compare against yet).
+    index_generation: Option<String>,
     from_cursor: bool,
 }
 
@@ -1366,6 +1516,13 @@ struct SearchedScopeInfo {
     max_rowid: u64,
     max_association_rowid: u64,
     chunking_config_hash: String,
+    /// PC19/PC21: this scope's `index_metadata.index_generation` ULID at the
+    /// moment it was searched — frozen into the next page's cursor.
+    index_generation: String,
+    /// PC45/PC46 (§R note-3 ruling): shallow ancestors this scope's history
+    /// walk skipped rather than hard-failing on, for `--all-history` /
+    /// `--since` / `--include-deleted`. Zero for every other selector.
+    shallow_skipped: u64,
 }
 
 fn run_search(args: UnsupportedArgs) -> Result<Value> {
@@ -1387,33 +1544,19 @@ fn run_search_inner(args: UnsupportedArgs, started: Instant) -> Result<Value> {
     let repo = Repository::open_current_for_search()?;
     validate_repo_tool_lock(&repo)?;
 
-    // R11-7: apply the `[search]` config (config.schema.json §search). `default_mode`
-    // seeds the requested mode ONLY when no CLI `--text`/`--vector`/`--hybrid` was
-    // given (the flag always wins); `fail_behavior` governs what auto/--hybrid does
-    // when no vector backend is available. Both were schema-valid + documented but
-    // entirely unwired before (the [search] version of the R10-2 config drift).
-    let (config_default_mode, config_fail_behavior) = effective_search_config(&repo)?;
-    // R12-1: effective `[search.rrf]` / `[search.diversify]` (05 §1.3/§1.4). These
-    // were documented + schema-valid but hardcoded at every call site (RRF fuse,
-    // diversify, query_hash) — the tuning keys were dead. Read them once and thread
-    // them through so config actually changes ranking/dedup AND invalidates a stale
-    // cursor via query_hash.
-    let (rrf_config, diversify_request) = effective_search_tuning(&repo)?;
     let multi_scope_settings = multi_scope::effective_settings(
         &repo.kcs_dir().join("config.toml"),
         &user_config_toml_path(),
     )?;
-    let requested_mode = if parsed.explicit_mode {
-        parsed.requested_mode
-    } else {
-        config_default_mode.unwrap_or(parsed.requested_mode)
-    };
-    let fail_behavior = config_fail_behavior.unwrap_or(SearchFailBehavior::Fallback);
 
     // Page 1 enumerates scopes (registry-based, K3); later pages replay the frozen
     // scope set stored in the cursor (05 §1.8 — the cursor scope set is truth).
     // The scope set must be known before mode resolution (K4), because vector
     // availability depends on the actual per-scope embedding indexes (03 §7).
+    // PC49/PC50: it must ALSO be known before `[search]` config resolution
+    // (moved below this block, was above it) — whether folder config may
+    // apply at all depends on whether this is a single-scope or multi-scope
+    // search (05 §1.8 L384-387).
     // O1(b): cursors are HMAC-signed with a device-local key; decode verifies the
     // signature, so a forged / tampered token is rejected (KCS-E-SEARCH-CURSOR-001)
     // before its frozen scope set is ever trusted.
@@ -1486,6 +1629,7 @@ fn run_search_inner(args: UnsupportedArgs, started: Instant) -> Result<Value> {
                     max_rowid: None,
                     max_association_rowid: None,
                     chunking_config_hash: None,
+                    index_generation: None,
                     from_cursor: false,
                 })
                 .collect::<Vec<_>>();
@@ -1493,18 +1637,50 @@ fn run_search_inner(args: UnsupportedArgs, started: Instant) -> Result<Value> {
         }
     };
 
+    // PC49/PC50 (05 §1.8 L384-387): folder config.toml applies only for a
+    // single, non-`--descendants` `--scope <path>` — every other scope_mode
+    // (All / Descendants) uses the user (device) layer exclusively, even when
+    // the CWD itself happens to be one of the searched scopes and carries its
+    // own folder override.
+    let single_scope_kcs_dir = (scope_mode == ScopeSelectionMode::Scope)
+        .then(|| exec_scopes.first().map(|exec| exec.target.kcs_dir.clone()))
+        .flatten();
+    // R11-7: apply the `[search]` config (config.schema.json §search). `default_mode`
+    // seeds the requested mode ONLY when no CLI `--text`/`--vector`/`--hybrid` was
+    // given (the flag always wins); `fail_behavior` governs what auto/--hybrid does
+    // when no vector backend is available. Both were schema-valid + documented but
+    // entirely unwired before (the [search] version of the R10-2 config drift).
+    let (config_default_mode, config_fail_behavior) =
+        effective_search_config(single_scope_kcs_dir.as_deref())?;
+    // R12-1: effective `[search.rrf]` / `[search.diversify]` (05 §1.3/§1.4). These
+    // were documented + schema-valid but hardcoded at every call site (RRF fuse,
+    // diversify, query_hash) — the tuning keys were dead. Read them once and thread
+    // them through so config actually changes ranking/dedup AND invalidates a stale
+    // cursor via query_hash.
+    let (rrf_config, diversify_request) = effective_search_tuning(single_scope_kcs_dir.as_deref())?;
+    let requested_mode = if parsed.explicit_mode {
+        parsed.requested_mode
+    } else {
+        config_default_mode.unwrap_or(parsed.requested_mode)
+    };
+    let fail_behavior = config_fail_behavior.unwrap_or(SearchFailBehavior::Fallback);
+
     // Mode resolution (05 §1.1). O2: the query embedding is SENT to the online
     // embedding endpoint, so it must not be computed until the resolved mode
     // actually uses vectors AND the scope's embedding opt-in (07 §3) is granted.
     // Judge vector availability from cheap predicates (endpoint + opt-in + query
     // length + per-scope compat) — never by eagerly calling the adapter.
-    let embedding_opt_in = active_embedding_adapter_id()?
-        .map(|adapter_id| embedding_opt_in_for_scopes(&exec_scopes, &adapter_id))
-        .transpose()?
-        .unwrap_or(false);
+    let adapter_id = active_embedding_adapter_id()?;
+    // PC4/PC5: OR-across-scopes consent (embedding_opt_in_for_scopes), folding
+    // in the one-shot `--online` opt-in per scope.
+    let embedding_opt_in = match &adapter_id {
+        Some(id) => embedding_opt_in_for_scopes(&exec_scopes, id, parsed.online)?,
+        None => false,
+    };
     let query_embeddable = parsed.query.chars().count() >= 2;
     let vector_precheck = resolve_vector_availability(
         &exec_scopes,
+        parsed.offline,
         embedding_execution().is_some(),
         embedding_opt_in,
         query_embeddable,
@@ -1527,15 +1703,36 @@ fn run_search_inner(args: UnsupportedArgs, started: Instant) -> Result<Value> {
     // query-embedding row — a cursor replay (page 2+) keeps the pre-existing,
     // unmetered `compute_query_embedding` path unchanged.
     let mut vector_unavailable_reason = "query_embedding_unavailable";
+    let mut post_attempt_unauthorized = false;
     let query_embedding = if uses_vectors {
         if decoded_cursor.is_none() {
-            match compute_query_embedding_page1(&query_nfc)? {
+            match compute_query_embedding_page1(
+                &query_nfc,
+                &exec_scopes,
+                adapter_id.as_deref().unwrap_or_default(),
+                parsed.online,
+            )? {
                 Some(QueryEmbeddingOutcome::Vector(vector)) => Some(vector),
                 // CL54: a live in-flight claim from another process already
                 // holds this exact query — text fallback, distinct reason from
                 // a plain adapter failure.
                 Some(QueryEmbeddingOutcome::InFlight) => {
                     vector_unavailable_reason = "embedding_in_flight";
+                    None
+                }
+                // PC7: the adapter's response failed its 07 §5.3 acceptance
+                // check — a distinct technical failure from a generic
+                // "unavailable" (both are fail_behavior-governed, PC2).
+                Some(QueryEmbeddingOutcome::ContractViolation) => {
+                    vector_unavailable_reason = "embedding_contract_violation";
+                    None
+                }
+                // PC6: the claim-Tx re-read found the send no longer
+                // authorized (a revoke completed between the precheck above
+                // and the re-read) — this is the same user-intent category as
+                // the precheck's own Unauthorized, not a technical failure.
+                Some(QueryEmbeddingOutcome::NotAuthorized) => {
+                    post_attempt_unauthorized = true;
                     None
                 }
                 None => None,
@@ -1549,13 +1746,22 @@ fn run_search_inner(args: UnsupportedArgs, started: Instant) -> Result<Value> {
     // A live adapter failure (auth/rate) after the send still degrades vector→text
     // so `--vector` errors and auto/hybrid falls back, exactly as before O2.
     let vector = if uses_vectors && query_embedding.is_none() {
-        VectorAvailability::Unavailable {
-            reason: vector_unavailable_reason,
+        if post_attempt_unauthorized {
+            VectorAvailability::Unauthorized
+        } else {
+            VectorAvailability::Unavailable {
+                reason: vector_unavailable_reason,
+            }
         }
     } else {
         vector_precheck
     };
     let mode = resolve_search_mode(requested_mode, &vector, fail_behavior)?;
+    // PC24 (05 §1.5/§1.8): the page-1 query vector's digest — present only
+    // when a vector was actually obtained (vector|hybrid), matching
+    // `query_embedding`'s own condition exactly. `None` in text mode omits
+    // the cursor/query_hash field entirely (PC27).
+    let query_vector_digest = query_embedding.as_deref().map(query_vector_digest_hex);
 
     // N8: the short-query short-circuit is NOT taken here — it must run after scope
     // resolution, the all-failed check, and index_status aggregation below, or a
@@ -1610,6 +1816,10 @@ fn run_search_inner(args: UnsupportedArgs, started: Instant) -> Result<Value> {
             rrf_w_vector: rrf_config.w_vector,
             chunking_configs,
             time_travel: selector_for_search(&time_selector),
+            // PC24: replay recomputes using the token's OWN recorded digest —
+            // this hash check verifies the rest of the preimage against the
+            // signed cursor's self-reported value, not a freshly-derived one.
+            query_vector_digest: cursor.query_vector_digest.clone(),
         })
         .map_err(search_to_kcs)?;
         if cursor.query_hash != qhash {
@@ -1673,6 +1883,8 @@ fn run_search_inner(args: UnsupportedArgs, started: Instant) -> Result<Value> {
                     max_rowid: outcome.max_rowid,
                     max_association_rowid: outcome.max_association_rowid,
                     chunking_config_hash: outcome.chunking_config_hash.clone(),
+                    index_generation: outcome.index_generation.clone(),
+                    shallow_skipped: outcome.shallow_skipped,
                 });
                 candidates.extend(outcome.candidates);
             }
@@ -1746,6 +1958,28 @@ fn run_search_inner(args: UnsupportedArgs, started: Instant) -> Result<Value> {
     }
 
     if searched.is_empty() {
+        // PC53/PC54/PC55(a)/PC56 (05 §1.8 L390-391 / §R note-4 ruling,
+        // 2026-07-22: priority order VERSION → INCOMPAT → journal → DUP →
+        // REBUILDING): every enumerated scope has a `kcs_format_version`
+        // newer than this build's supported ceiling. Checked FIRST, ahead of
+        // the journal/REBUILDING promotions below — a store-version mismatch
+        // is a more fundamental, permanent-until-upgrade incompatibility than
+        // either transient state (matches REBUILDING's own promotion shape,
+        // but at the STORE-VERSION exit 8, not exit 3).
+        let all_store_version_incompatible = !excluded.is_empty()
+            && excluded.iter().all(|entry| {
+                entry.get("reason").and_then(Value::as_str)
+                    == Some(STORE_VERSION_INCOMPATIBLE_REASON)
+            });
+        if all_store_version_incompatible {
+            return Err(KcsError::new(
+                "KCS-E-STORE-VERSION-001",
+                "every searched scope's kcs_format_version is newer than this build supports; \
+                 upgrade kcs",
+                json!({ "excluded_scopes": excluded }),
+                ExitCode::IncompatibleProfile,
+            ));
+        }
         // §I (LC52-56): every enumerated scope hit an active purge journal, or
         // its journal/purge-epoch/lifecycle-epoch triple changed between its
         // checkpoint 1 and checkpoint 2. Surface the command-level
@@ -1884,9 +2118,28 @@ fn run_search_inner(args: UnsupportedArgs, started: Instant) -> Result<Value> {
                 ExitCode::PermanentFailure,
             ));
         }
-        return Err(scope_all_failed_error(
+        // PC57 (05 §1.8 L392 / 06 §7 L362-363): a mixed-reason all-scopes
+        // failure (none of the homogeneous promotions above matched) splits
+        // by retryability instead of always landing on the generic exit 4 —
+        // one retryable reason anywhere in the set is enough to promise a
+        // retry MIGHT make progress (exit 3); an all-permanent mix cannot
+        // (exit 4).
+        let any_retryable = excluded.iter().any(|entry| {
+            entry
+                .get("reason")
+                .and_then(Value::as_str)
+                .is_some_and(is_retryable_scope_reason)
+        });
+        let exit = if any_retryable {
+            ExitCode::PartialFailure
+        } else {
+            ExitCode::PermanentFailure
+        };
+        return Err(KcsError::new(
+            "KCS-E-SEARCH-SCOPE-ALL-FAILED-001",
             "all searched scopes failed",
-            excluded,
+            json!({ "excluded_scopes": excluded }),
+            exit,
         ));
     }
 
@@ -1918,6 +2171,7 @@ fn run_search_inner(args: UnsupportedArgs, started: Instant) -> Result<Value> {
             rrf_w_vector: rrf_config.w_vector,
             chunking_configs: active_configs,
             time_travel: selector_for_search(&time_selector),
+            query_vector_digest: query_vector_digest.clone(),
         })
         .map_err(search_to_kcs)?;
     }
@@ -2012,6 +2266,7 @@ fn run_search_inner(args: UnsupportedArgs, started: Instant) -> Result<Value> {
                 Some(ScopeCursor {
                     scope_id: exec.target.scope_id.clone(),
                     snapshot_commit: searched_scope.snapshot_at.clone(),
+                    index_generation: searched_scope.index_generation.clone(),
                     max_rowid: searched_scope.max_rowid,
                     max_association_rowid: searched_scope.max_association_rowid,
                     chunking_config_hash: searched_scope.chunking_config_hash.clone(),
@@ -2020,12 +2275,20 @@ fn run_search_inner(args: UnsupportedArgs, started: Instant) -> Result<Value> {
             })
             .collect::<Vec<_>>();
         sub_cursors.sort_by(|a, b| a.scope_id.cmp(&b.scope_id));
+        // PC24: the cursor being replayed already carries its own digest
+        // (validated above); a fresh page 1 signs the digest just computed
+        // from this run's actual query embedding (`None` in text mode).
+        let cursor_query_vector_digest = match &decoded_cursor {
+            Some(cursor) => cursor.query_vector_digest.clone(),
+            None => query_vector_digest.clone(),
+        };
         Some(
             encode_cursor_token(
                 &CursorToken {
                     version: CursorToken::VERSION,
                     scope_mode: cursor_mode_from_selection(scope_mode),
                     query_hash: qhash,
+                    query_vector_digest: cursor_query_vector_digest,
                     time_travel: selector_for_search(&time_selector),
                     since_cutoff: since_cutoff.clone(),
                     excluded_scopes: signed_exclusions,
@@ -2080,15 +2343,28 @@ fn run_search_inner(args: UnsupportedArgs, started: Instant) -> Result<Value> {
     let searched_scopes = searched
         .iter()
         .map(|scope| {
-            json!({
+            let mut entry = json!({
                 "scope_id": scope.scope_id,
                 "scope_path": scope.scope_path,
                 "snapshot_at": scope.snapshot_at,
-            })
+            });
+            // PC46 / §R note-3 ruling (2026-07-22): a per-scope field, count
+            // omitted when zero — not a top-level aggregate, not folded into
+            // excluded_scopes (the scope is not excluded, only partially
+            // degraded).
+            if scope.shallow_skipped > 0 {
+                entry["shallow_skipped"] = json!(scope.shallow_skipped);
+            }
+            entry
         })
         .collect::<Vec<_>>();
     let index_status = compute_index_status(&searched);
-    let partial_failure = !excluded.is_empty();
+    // PC45/PC46: a scope that skipped shallow ancestors mid-walk is not fully
+    // complete even though it was not excluded — same partial-failure
+    // treatment (exit 3) as an excluded_scopes entry (05 §1.6 "黙って欠落
+    // させない").
+    let any_shallow_skipped = searched.iter().any(|scope| scope.shallow_skipped > 0);
+    let partial_failure = !excluded.is_empty() || any_shallow_skipped;
 
     let mut response = json!({
         "query": parsed.query,
@@ -2097,8 +2373,10 @@ fn run_search_inner(args: UnsupportedArgs, started: Instant) -> Result<Value> {
         "fallback": mode.fallback,
         "fallback_reason": mode.fallback_reason.clone().map(Value::from).unwrap_or(Value::Null),
         "error_code": mode.error_code.clone().map(Value::from).unwrap_or(Value::Null),
-        // R11-7: non-null only under [search].fail_behavior = "warn" text fallback.
-        "warning": mode.warning.clone().map(Value::from).unwrap_or(Value::Null),
+        // PC3 / §R note-1 ruling: `warnings[]` array (replaces the retired
+        // singular `warning` field) — non-empty only under
+        // [search].fail_behavior = "warn" text fallback.
+        "warnings": mode.warnings.clone(),
         "diversify": diversify_summary,
         "paging": { "limit": parsed.limit, "next_cursor": next_cursor },
         "searched_scopes": searched_scopes,
@@ -2108,8 +2386,9 @@ fn run_search_inner(args: UnsupportedArgs, started: Instant) -> Result<Value> {
     });
     append_search_logs(&repo, &response, started);
     if partial_failure {
-        // Some scopes were excluded but others succeeded: emit results on stdout
-        // and exit 3 (05 §1.8 partial-failure row, CT3-MULTI-005).
+        // Some scopes were excluded, or a searched scope skipped shallow
+        // ancestors, but others succeeded: emit results on stdout and exit 3
+        // (05 §1.8 partial-failure row, CT3-MULTI-005; PC45/PC46).
         if let Some(object) = response.as_object_mut() {
             object.insert("__exit_code".to_owned(), json!(3));
         }
@@ -2139,6 +2418,19 @@ const INDEX_REBUILDING_REASON: &str = "index_rebuilding";
 /// `INDEX_REBUILDING_REASON`'s all-scopes promotion below).
 const PURGE_JOURNAL_ACTIVE_REASON: &str = "purge_journal_active";
 
+/// PC53/PC54/PC55(a) (05 §1.8 / 10 §12.5): this scope's `kcs_format_version`
+/// is newer than this build's supported ceiling. Surfaced as
+/// `KCS-E-STORE-VERSION-001` / exit 8 when it is the sole failure mode across
+/// every searched scope (promoted ahead of the generic SCOPE-ALL-FAILED, like
+/// `INDEX_REBUILDING_REASON`).
+const STORE_VERSION_INCOMPATIBLE_REASON: &str = "store_version_incompatible";
+
+/// PC19/PC21: the `index_generation` sentinel for a store that predates
+/// `index_metadata` (Phase 1c). Never equal to a real ULID, so a cursor
+/// frozen against the sentinel is correctly invalidated once the scope gains
+/// a real row (any of PC20's 6 rotation triggers).
+const LEGACY_INDEX_GENERATION: &str = "legacy-no-index-metadata";
+
 /// Convert a `ReadBarrierCheckpoint` failure into the right `ScopeSearchError`
 /// variant: the expected `KCS-E-PURGE-JOURNAL-ACTIVE-001` becomes a per-scope
 /// `Excluded` (05-runtime.md §3.5 / 10-operations.md §3's multi-scope
@@ -2160,6 +2452,11 @@ struct ScopeOutcome {
     max_rowid: u64,
     max_association_rowid: u64,
     chunking_config_hash: String,
+    /// PC19/PC21: this scope's `index_metadata.index_generation` ULID as of
+    /// this search (05 §1.5).
+    index_generation: String,
+    /// PC45/PC46: shallow ancestors skipped during this scope's history walk.
+    shallow_skipped: u64,
     candidates: Vec<ScoredCandidate>,
 }
 
@@ -2293,8 +2590,21 @@ fn search_one_scope_inner(
     // rationale).
     let checkpoint =
         ReadBarrierCheckpoint::open(&exec.target.kcs_dir).map_err(checkpoint_scope_error)?;
-    let repo = Repository::open_for_search(&exec.target.repo_root)
-        .map_err(|_| ScopeSearchError::Excluded("unreachable".to_owned()))?;
+    // PC53 (05 §1.8 / 10 §12.5): a `kcs_format_version` newer than this build's
+    // supported ceiling is distinguished from a generic "unreachable" open
+    // failure — `Repository::open_for_search`'s `scope.json`/`config.toml`
+    // validation already raises `KCS-E-CONFIG-FORMAT-001` for it
+    // (`validate_format_version`); surface that as its own exclusion reason so
+    // PC54/PC55's all-scope-STORE-VERSION promotion (in `run_search_inner`)
+    // can recognize it. No query_cache or any other write happens on this
+    // path (open failed before any write), satisfying the write-zero rule.
+    let repo = Repository::open_for_search(&exec.target.repo_root).map_err(|error| {
+        if error.error_code() == "KCS-E-CONFIG-FORMAT-001" {
+            ScopeSearchError::Excluded(STORE_VERSION_INCOMPATIBLE_REASON.to_owned())
+        } else {
+            ScopeSearchError::Excluded("unreachable".to_owned())
+        }
+    })?;
     scope_deadline_check(deadline)?;
 
     // Resolve the search snapshot independently per scope. Cursor replay always
@@ -2313,10 +2623,17 @@ fn search_one_scope_inner(
                 }
                 Err(error) => return Err(ScopeSearchError::Fatal(error)),
             },
+            // PC34/PC36 (05 §1.6 L241): HEAD unset (bare scope — no
+            // successful auto snapshot yet) is index-not-yet-complete, the
+            // same user-facing situation `INDEX_REBUILDING_REASON` already
+            // names (P10's mid-reindex window) — reusing it lets this reason
+            // participate in the SAME homogeneous exit-3 promotion below
+            // instead of falling through to the generic permanent
+            // SCOPE-ALL-FAILED (exit 4) a bare/never-indexed scope is not.
             None => repo
                 .head_commit_hash()
                 .map_err(|_| ScopeSearchError::Excluded("unreachable".to_owned()))?
-                .ok_or_else(|| ScopeSearchError::Excluded("not_indexed".to_owned()))?,
+                .ok_or_else(|| ScopeSearchError::Excluded(INDEX_REBUILDING_REASON.to_owned()))?,
         },
     };
     scope_deadline_check(deadline)?;
@@ -2355,7 +2672,7 @@ fn search_one_scope_inner(
     let index_metadata = kcs_index::fts::read_index_metadata(&conn)
         .map_err(index_to_kcs)
         .map_err(ScopeSearchError::Fatal)?;
-    if let Some(metadata) = index_metadata {
+    if let Some(metadata) = &index_metadata {
         let current = PurgeState::new(&exec.target.kcs_dir)
             .read_lifecycle_epoch()
             .map_err(ScopeSearchError::Fatal)?;
@@ -2365,7 +2682,37 @@ fn search_one_scope_inner(
             ));
         }
     }
+    // PC19/PC21 (05 §1.5): this scope's `index_generation` as of this search
+    // (§R note-2 ruling: coexists with, does not replace, the
+    // `last_lifecycle_epoch` check just above). A pre-Phase-1c store with no
+    // `index_metadata` row is pinned to a stable sentinel rather than left
+    // empty (`ScopeCursor.index_generation` must be non-empty) — a real
+    // `index_metadata` row later appearing correctly reads as a change and
+    // invalidates any cursor issued against the sentinel.
+    let current_index_generation = index_metadata
+        .as_ref()
+        .map(|metadata| metadata.index_generation.clone())
+        .unwrap_or_else(|| LEGACY_INDEX_GENERATION.to_owned());
+    if exec
+        .index_generation
+        .as_deref()
+        .is_some_and(|frozen| frozen != current_index_generation.as_str())
+    {
+        return Err(ScopeSearchError::Fatal(KcsError::new(
+            "KCS-E-SEARCH-CURSOR-001",
+            "search cursor index generation changed",
+            json!({
+                "scope_id": exec.target.scope_id,
+                "reason": "index_generation_mismatch",
+            }),
+            ExitCode::InvalidUsage,
+        )));
+    }
 
+    // PC38/PC39: whether the eligibility SQL below must additionally check
+    // `kcs_target_ancestors` (only `--at`, installed inside the match below).
+    let mut ancestor_gated = false;
+    let mut at_shallow_skipped = 0u64;
     // Build the immutable eligible binding relation. Default search retains the
     // established shallow-cache read degradation; every explicit historical mode
     // reads verified commit/tree CAS and therefore rejects incomplete ancestry.
@@ -2396,6 +2743,19 @@ fn search_one_scope_inner(
                     ScopeSearchError::Fatal(error)
                 }
             })?;
+            // PC38/PC39 (05 §1.6): install the target commit's ancestor-or-
+            // equal set — `execute_fts_tier`/the vector query below gate
+            // eligibility on it (`ancestor_gated = true`) so a chunk whose
+            // introduction postdates `snapshot_commit` (a descendant-only
+            // publication) is excluded, instead of the current bare
+            // `first_seen_commit IS NOT NULL` check that ignores ancestry
+            // entirely. Tolerant of a shallow ancestor beyond the target
+            // itself (PC45's same policy) — see `at_target_ancestors`.
+            let (ancestors, skipped) =
+                at_target_ancestors(&repo, &snapshot_commit).map_err(ScopeSearchError::Fatal)?;
+            install_target_ancestors(&conn, &ancestors).map_err(ScopeSearchError::Fatal)?;
+            ancestor_gated = true;
+            at_shallow_skipped = skipped.len() as u64;
             plan_search_history(&repo, &snapshot_commit, time.selector, time.since_cutoff)
                 .map_err(|error| history_plan_error(error, exec.from_cursor))?
         }
@@ -2480,35 +2840,32 @@ fn search_one_scope_inner(
     }
 
     let want_vector = matches!(resolved_mode, SearchMode::Hybrid | SearchMode::Vector);
+    // PC15/PC16/PC38: the shared eligibility + ranking-depth bundle. PC17's
+    // combined regression (candidate_depth actually reaching both backends)
+    // follows directly from both `execute_fts_tier` and `vector_scope_search`
+    // reading `candidate_depth` from the same `filter` value.
+    let filter = ScopeQueryFilter {
+        chunking_config_hash: &chunking_config_hash,
+        max_rowid,
+        max_association_rowid,
+        since_cutoff: history_plan.since_cutoff.as_deref(),
+        candidate_depth: rrf_config.candidate_depth,
+        ancestor_gated,
+    };
 
     // FTS5 text ranks (empty when the query has no indexable token). Vector-only
     // mode skips the text backend entirely (05 §1.3: no fusion, use vector order).
     let (text_ranks, mut meta) = if resolved_mode == SearchMode::Vector {
         (Vec::new(), BTreeMap::new())
     } else {
-        fts_scope_search(
-            &conn,
-            tiers,
-            &chunking_config_hash,
-            max_rowid,
-            max_association_rowid,
-            history_plan.since_cutoff.as_deref(),
-        )
-        .map_err(ScopeSearchError::Fatal)?
+        fts_scope_search(&conn, tiers, filter).map_err(ScopeSearchError::Fatal)?
     };
     scope_deadline_check(deadline)?;
 
     // chunk_vec KNN vector ranks (hybrid/vector mode with a query embedding).
     let vector_ranks = if want_vector {
         if let Some(query_vec) = query_embedding {
-            let (ranks, vmeta) = match vector_scope_search(
-                &conn,
-                query_vec,
-                &chunking_config_hash,
-                max_rowid,
-                max_association_rowid,
-                history_plan.since_cutoff.as_deref(),
-            ) {
+            let (ranks, vmeta) = match vector_scope_search(&conn, query_vec, filter) {
                 Ok(result) => result,
                 // R10-1(a): a sqlite-vec capacity limit degrades THIS scope's vector
                 // backend to text-only (05 §1.8 per-scope isolation) instead of a
@@ -2603,26 +2960,26 @@ fn search_one_scope_inner(
         max_rowid,
         max_association_rowid,
         chunking_config_hash,
+        index_generation: current_index_generation,
+        // PC45/PC46: shallow ancestors skipped during this scope's history
+        // walk (`--all-history`/`--since`/`--include-deleted`) plus the
+        // `--at` ancestor-set walk's own tolerant skips (PC38/39's ancestor
+        // computation, which also never hard-fails on a boundary shallow
+        // commit).
+        shallow_skipped: history_plan.shallow_skipped.len() as u64 + at_shallow_skipped,
         candidates,
     })
 }
-
-/// sqlite-vec's hard upper bound on a KNN `LIMIT ?` (`k`). A query above it fails
-/// the whole statement; R10-1 caps the over-fetch here.
-const VECTOR_KNN_MAX_K: u64 = 4096;
 
 /// Error code for a per-scope vector-backend capacity limit (R10-1(a)). Never
 /// surfaced to the user: `search_one_scope` intercepts it and degrades that scope
 /// to text-only so one scope's limit can't abort the device-wide search.
 const VECTOR_CAPACITY_ERROR_CODE: &str = "KCS-E-SEARCH-VEC-CAPACITY-001";
 
-/// Whether an index error is a sqlite-vec / SQLite capacity limit (KNN `k` ceiling
-/// or bound-variable ceiling) rather than a genuine schema/contract fault.
-fn is_vector_capacity_error(error: &kcs_index::IndexError) -> bool {
-    is_vector_capacity_message(&error.to_string())
-}
-
-/// Message classifier for [`is_vector_capacity_error`], split out for unit testing.
+/// Message classifier for a sqlite-vec / SQLite capacity-limit failure message
+/// (kept even though this exact query shape no longer has an unbounded
+/// per-chunk placeholder list or a `vec0` `k=` ceiling to hit — a defensive,
+/// unit-tested backstop against a future capacity mode).
 fn is_vector_capacity_message(message: &str) -> bool {
     // sqlite-vec: "k value in knn query too large, provided N and the limit is 4096".
     // SQLite:     "too many SQL variables".
@@ -2641,94 +2998,76 @@ fn vector_capacity_error() -> KcsError {
     )
 }
 
-/// Per-scope vector backend: the query embedding's KNN over `chunk_vec`, filtered
-/// to the same live chunk set as the text backend (current `chunking_config_hash`,
-/// HEAD `tree_entries`, and `rowid <= max_rowid`). Because sqlite-vec applies the
-/// KNN `LIMIT` before the liveness join, we over-fetch every `chunk_vec` row and
-/// filter in Rust (correct at MVP scale; a future optimization is sqlite-vec
-/// metadata partitioning). Ranks are 1-based over the surviving candidates ordered
-/// by (cosine distance, chunk_id) and truncated to `candidate_depth` (05 §1.3).
+/// The shared per-scope eligibility + ranking-depth bundle both backends read
+/// (05 §1.3/§1.6). `ancestor_gated` toggles PC38's correlated `EXISTS` against
+/// the `kcs_target_ancestors` temp table the caller installs before running
+/// any query with this set — today only `--at` (`search_one_scope_inner`).
+#[derive(Debug, Clone, Copy)]
+struct ScopeQueryFilter<'a> {
+    chunking_config_hash: &'a str,
+    max_rowid: u64,
+    max_association_rowid: u64,
+    since_cutoff: Option<&'a str>,
+    /// PC15/PC16/PC17: `[search.rrf].candidate_depth`, threaded all the way
+    /// to the SQL `LIMIT` instead of a literal `200`.
+    candidate_depth: u64,
+    ancestor_gated: bool,
+}
+
+/// PC38 (05 §1.6): the ancestor-or-equal introduction-commit gate, appended to
+/// the eligibility `WHERE` only when `ancestor_gated`. Checks
+/// `chunks.first_seen_commit` against `kcs_target_ancestors`
+/// (`install_target_ancestors`) — the practical single-valued introduction
+/// signal used until a `chunk_publications` writer exists (see that table's
+/// own doc comment in `kcs_index::fts` for why: population happens at
+/// auto-snapshot chunk-creation time, outside this item's search/gate/cursor/
+/// multi_scope scope).
+fn ancestor_gate_sql(ancestor_gated: bool) -> &'static str {
+    if ancestor_gated {
+        "AND EXISTS (
+             SELECT 1 FROM kcs_target_ancestors ta
+             WHERE ta.commit_hash = c.first_seen_commit
+         )"
+    } else {
+        ""
+    }
+}
+
+/// Per-scope vector backend: brute-force cosine distance over `chunk_vec`,
+/// joined to `chunks` and filtered by the SAME eligibility predicate the text
+/// backend uses (PC16 — eligibility applies BEFORE the distance ordering and
+/// `candidate_depth` LIMIT, never via `vec0`'s own `MATCH ... k=` internal
+/// top-k, which would let a distance-unfavorable-but-eligible tail starve
+/// out). `chunk_vec` has no ANN index configured (04 §4.3's plain
+/// `float[dim] distance_metric=cosine` vec0 declaration), so `vec0`'s own KNN
+/// query is *already* an unindexed linear scan under the hood — routing
+/// through the `vec_distance_cosine` scalar function directly instead costs
+/// nothing extra and lets the eligibility `WHERE` run first. Ranks are
+/// 1-based over the (distance, chunk_id) order.
 fn vector_scope_search(
     conn: &Connection,
     query_embedding: &[f32],
-    chunking_config_hash: &str,
-    max_rowid: u64,
-    max_association_rowid: u64,
-    since_cutoff: Option<&str>,
+    filter: ScopeQueryFilter<'_>,
 ) -> Result<(Vec<BackendRank>, BTreeMap<String, ChunkMeta>)> {
+    if query_embedding.len() != CHUNK_VEC_DIMENSIONS {
+        return Ok((Vec::new(), BTreeMap::new()));
+    }
     let total = embedding_store::chunk_vec_count(conn).map_err(index_to_kcs)?;
-    if total == 0 || query_embedding.len() != CHUNK_VEC_DIMENSIONS {
+    if total == 0 {
         return Ok((Vec::new(), BTreeMap::new()));
     }
     let query_bytes = f32_to_le_bytes(query_embedding);
-    // R10-1: sqlite-vec rejects a KNN `k` above its hard 4096 ceiling, so a scope
-    // that embedded >4096 chunks would explode the whole (multi-scope) search with a
-    // spurious `KCS-E-CONFIG-SCHEMA-001` exit 2 — taking every healthy scope down
-    // with it. Cap `k` at the ceiling: only `candidate_depth` (200) rows survive
-    // downstream anyway, and the 4096 window keeps recall high even when stale-gen
-    // rows pad the table (paging is the eventual real fix). `chunk_ids <= k <= 4096`
-    // also keeps `fetch_live_meta` well under SQLite's 32 766 bound-variable limit.
-    let k = total.min(VECTOR_KNN_MAX_K);
-    let knn = match embedding_store::knn_chunk_distances(conn, &query_bytes, k) {
-        Ok(knn) => knn,
-        // R10-1(a): any residual sqlite-vec capacity limit (a corrupt vec index, a
-        // future call path) is a per-scope degradation, not a device-wide Fatal —
-        // surface a recognizable code the caller maps to a text-only fallback so the
-        // 05 §1.8 isolation contract holds and no false CONFIG-SCHEMA is emitted.
-        Err(err) if is_vector_capacity_error(&err) => return Err(vector_capacity_error()),
-        Err(err) => return Err(index_to_kcs(err)),
-    };
-    let chunk_ids = knn.iter().map(|(id, _)| id.clone()).collect::<Vec<_>>();
-    let meta = fetch_live_meta(
-        conn,
-        &chunk_ids,
-        chunking_config_hash,
-        max_rowid,
-        max_association_rowid,
-        since_cutoff,
-    )?;
-    let mut kept = knn
-        .into_iter()
-        .filter(|(id, _)| meta.contains_key(id))
-        .collect::<Vec<_>>();
-    kept.sort_by(|a, b| a.1.total_cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
-    kept.truncate(200);
-    let ranks = kept
-        .iter()
-        .enumerate()
-        .map(|(index, (chunk_id, _))| BackendRank {
-            chunk_hash: chunk_id.clone(),
-            rank: index as u64 + 1,
-        })
-        .collect();
-    Ok((ranks, meta))
-}
-
-/// Fetch [`ChunkMeta`] for `chunk_ids` restricted to the live chunk set of
-/// `snapshot_commit` (same predicates as [`execute_fts_tier`]). Chunk ids not in
-/// the live set are simply absent from the result.
-fn fetch_live_meta(
-    conn: &Connection,
-    chunk_ids: &[String],
-    chunking_config_hash: &str,
-    max_rowid: u64,
-    max_association_rowid: u64,
-    since_cutoff: Option<&str>,
-) -> Result<BTreeMap<String, ChunkMeta>> {
-    if chunk_ids.is_empty() {
-        return Ok(BTreeMap::new());
-    }
-    let placeholders = chunk_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
     let sql = format!(
         "SELECT c.chunk_id, c.raw_hash, c.tool_profile_hash, c.heading_path,
                 c.section_id, c.byte_start, c.byte_end, c.text, c.gen
-         FROM chunks c
+         FROM chunk_vec cv
+         JOIN chunks c ON c.chunk_id = cv.chunk_id
          WHERE c.first_seen_commit IS NOT NULL
-             AND c.rowid <= ?2
+             AND c.rowid <= ?1
              AND EXISTS (
                  SELECT 1 FROM chunk_config_generations cg
                  WHERE cg.chunk_id = c.chunk_id
-                   AND cg.chunking_config_hash = ?1
+                   AND cg.chunking_config_hash = ?2
                    AND cg.association_rowid <= ?3
              )
              AND EXISTS (
@@ -2738,33 +3077,50 @@ fn fetch_live_meta(
                    AND eligible.gen = c.gen
              )
              AND (?4 IS NULL OR c.created_at >= ?4)
-             AND c.chunk_id IN ({placeholders})"
+             {ancestor_clause}
+         ORDER BY vec_distance_cosine(cv.embedding, ?5), c.chunk_id
+         LIMIT ?6",
+        ancestor_clause = ancestor_gate_sql(filter.ancestor_gated),
     );
-    let mut params: Vec<Box<dyn rusqlite::ToSql>> = vec![
-        Box::new(chunking_config_hash.to_owned()),
-        Box::new(max_rowid as i64),
-        Box::new(max_association_rowid as i64),
-        Box::new(since_cutoff.map(str::to_owned)),
-    ];
-    for chunk_id in chunk_ids {
-        params.push(Box::new(chunk_id.clone()));
-    }
-    let param_refs = params
-        .iter()
-        .map(std::convert::AsRef::as_ref)
-        .collect::<Vec<&dyn rusqlite::ToSql>>();
     let mut stmt = conn
         .prepare(&sql)
         .map_err(|err| KcsError::schema(err.to_string()))?;
-    let rows = stmt
-        .query_map(param_refs.as_slice(), chunk_meta_row)
-        .map_err(|err| KcsError::schema(err.to_string()))?;
+    let rows = stmt.query_map(
+        rusqlite::params![
+            filter.max_rowid as i64,
+            filter.chunking_config_hash,
+            filter.max_association_rowid as i64,
+            filter.since_cutoff,
+            query_bytes,
+            filter.candidate_depth as i64,
+        ],
+        chunk_meta_row,
+    );
+    let rows = match rows {
+        Ok(rows) => rows,
+        Err(err) if is_vector_capacity_message(&err.to_string()) => {
+            return Err(vector_capacity_error())
+        }
+        Err(err) => return Err(KcsError::schema(err.to_string())),
+    };
+
+    let mut ranks = Vec::new();
     let mut meta = BTreeMap::new();
-    for row in rows {
-        let (chunk_id, chunk_meta) = row.map_err(|err| KcsError::schema(err.to_string()))?;
+    for (index, row) in rows.enumerate() {
+        let (chunk_id, chunk_meta) = match row {
+            Ok(value) => value,
+            Err(err) if is_vector_capacity_message(&err.to_string()) => {
+                return Err(vector_capacity_error())
+            }
+            Err(err) => return Err(KcsError::schema(err.to_string())),
+        };
+        ranks.push(BackendRank {
+            chunk_hash: chunk_id.clone(),
+            rank: index as u64 + 1,
+        });
         meta.insert(chunk_id, chunk_meta);
     }
-    Ok(meta)
+    Ok((ranks, meta))
 }
 
 /// Parse the shared 9-column chunk-meta projection into `(chunk_id, ChunkMeta)`.
@@ -2797,20 +3153,10 @@ fn chunk_meta_row(row: &rusqlite::Row) -> rusqlite::Result<(String, ChunkMeta)> 
 fn fts_scope_search(
     conn: &Connection,
     tiers: &[String],
-    chunking_config_hash: &str,
-    max_rowid: u64,
-    max_association_rowid: u64,
-    since_cutoff: Option<&str>,
+    filter: ScopeQueryFilter<'_>,
 ) -> Result<(Vec<BackendRank>, BTreeMap<String, ChunkMeta>)> {
     for match_expr in tiers {
-        let (ranks, meta) = execute_fts_tier(
-            conn,
-            match_expr,
-            chunking_config_hash,
-            max_rowid,
-            max_association_rowid,
-            since_cutoff,
-        )?;
+        let (ranks, meta) = execute_fts_tier(conn, match_expr, filter)?;
         if !ranks.is_empty() {
             return Ok((ranks, meta));
         }
@@ -2825,48 +3171,64 @@ fn fts_scope_search(
 /// down-weighted so a parent heading that propagates to every child chunk does
 /// not dominate the chunk body (legitimate BM25 configuration per the K2 ruling).
 /// Ties break on chunk_id.
+///
+/// PC15/PC17: `candidate_depth` bounds the INNER subquery — a plain FTS5
+/// `MATCH ... ORDER BY score LIMIT` scan with no join/eligibility filter
+/// mixed in, so it stays eligible for fts5's own top-k early-termination path
+/// (the previous single-query shape forced bm25 scoring + the
+/// `chunk_config_generations`/`kcs_eligible_identity` correlated `EXISTS`
+/// checks across *every* matching row before the literal `LIMIT 200` could
+/// apply, regardless of how many of those matches were ever eligible — 05
+/// §1.3's "VM step 1,074 → 70,374" cost). The eligibility predicate (including
+/// PC38's ancestor gate) is applied in the OUTER query, over at most
+/// `candidate_depth` rows.
 fn execute_fts_tier(
     conn: &Connection,
     match_expr: &str,
-    chunking_config_hash: &str,
-    max_rowid: u64,
-    max_association_rowid: u64,
-    since_cutoff: Option<&str>,
+    filter: ScopeQueryFilter<'_>,
 ) -> Result<(Vec<BackendRank>, BTreeMap<String, ChunkMeta>)> {
-    let sql = "SELECT c.chunk_id, c.raw_hash, c.tool_profile_hash, c.heading_path,
-                      c.section_id, c.byte_start, c.byte_end, c.text, c.gen,
-                      bm25(chunk_fts, 1.0, 0.3) AS score
-               FROM chunk_fts f
-               JOIN chunks c ON c.rowid = f.rowid
-               WHERE chunk_fts MATCH ?1
-                   AND c.first_seen_commit IS NOT NULL
-                   AND c.rowid <= ?3
-                   AND EXISTS (
-                       SELECT 1 FROM chunk_config_generations cg
-                       WHERE cg.chunk_id = c.chunk_id
-                         AND cg.chunking_config_hash = ?2
-                         AND cg.association_rowid <= ?4
-                   )
-                   AND EXISTS (
-                       SELECT 1 FROM kcs_eligible_identity eligible
-                       WHERE eligible.raw_hash = c.raw_hash
-                         AND eligible.tool_profile_hash = c.tool_profile_hash
-                         AND eligible.gen = c.gen
-                   )
-                   AND (?5 IS NULL OR c.created_at >= ?5)
-               ORDER BY score, c.chunk_id
-               LIMIT 200";
+    let sql = format!(
+        "SELECT c.chunk_id, c.raw_hash, c.tool_profile_hash, c.heading_path,
+                c.section_id, c.byte_start, c.byte_end, c.text, c.gen
+         FROM (
+             SELECT rowid AS chunk_rowid, bm25(chunk_fts, 1.0, 0.3) AS score
+             FROM chunk_fts
+             WHERE chunk_fts MATCH ?1
+             ORDER BY score
+             LIMIT ?2
+         ) AS ranked
+         JOIN chunks c ON c.rowid = ranked.chunk_rowid
+         WHERE c.first_seen_commit IS NOT NULL
+             AND c.rowid <= ?3
+             AND EXISTS (
+                 SELECT 1 FROM chunk_config_generations cg
+                 WHERE cg.chunk_id = c.chunk_id
+                   AND cg.chunking_config_hash = ?4
+                   AND cg.association_rowid <= ?5
+             )
+             AND EXISTS (
+                 SELECT 1 FROM kcs_eligible_identity eligible
+                 WHERE eligible.raw_hash = c.raw_hash
+                   AND eligible.tool_profile_hash = c.tool_profile_hash
+                   AND eligible.gen = c.gen
+             )
+             AND (?6 IS NULL OR c.created_at >= ?6)
+             {ancestor_clause}
+         ORDER BY ranked.score, c.chunk_id",
+        ancestor_clause = ancestor_gate_sql(filter.ancestor_gated),
+    );
     let mut stmt = conn
-        .prepare(sql)
+        .prepare(&sql)
         .map_err(|err| KcsError::schema(err.to_string()))?;
     let rows = stmt
         .query_map(
             rusqlite::params![
                 match_expr,
-                chunking_config_hash,
-                max_rowid as i64,
-                max_association_rowid as i64,
-                since_cutoff,
+                filter.candidate_depth as i64,
+                filter.max_rowid as i64,
+                filter.chunking_config_hash,
+                filter.max_association_rowid as i64,
+                filter.since_cutoff,
             ],
             chunk_meta_row,
         )
@@ -3341,6 +3703,23 @@ fn scope_all_failed_error(message: &str, excluded: Vec<Value>) -> KcsError {
     )
 }
 
+/// PC57 (05 §1.8 L392 / 06 §7 L362-363): whether a per-scope exclusion reason
+/// belongs to the "retryable" set for the mixed-reason all-scopes-failed
+/// split — exactly the reasons whose OWN homogeneous promotion (PC55) is exit
+/// 3: `index_rebuilding` (P10), `purge_journal_active` (§I), `timeout`
+/// (05 §1.8's per-scope timeout), and `registry_duplicate` (PC55(e) —
+/// `KCS-E-REGISTRY-DUP-001`; not yet produced by any exclusion path, kept
+/// here so the classification is ready once it is). Every other reason
+/// (store corruption, missing/corrupt index, incompatible profile/format
+/// version, unreachable, not-yet-indexed) is permanent here — re-running the
+/// identical command will not, by itself, change the outcome.
+fn is_retryable_scope_reason(reason: &str) -> bool {
+    matches!(
+        reason,
+        "index_rebuilding" | "purge_journal_active" | "timeout" | "registry_duplicate"
+    )
+}
+
 /// R17-4/R18-4: the class-specific recovery hint for a store-corruption search
 /// exclusion reason (`store_corrupt` / `snapshot_shallow`), or `None` for any other
 /// reason (`index_missing`/`index_corrupt` recover via the exit-1 VEC-UNAVAIL path,
@@ -3672,6 +4051,7 @@ fn resolve_cursor_exec_scopes(cursor: &CursorToken) -> Result<(Vec<ExecScope>, V
                 max_rowid: Some(sub.max_rowid),
                 max_association_rowid: Some(sub.max_association_rowid),
                 chunking_config_hash: Some(sub.chunking_config_hash.clone()),
+                index_generation: Some(sub.index_generation.clone()),
                 from_cursor: true,
             }),
             None => {
@@ -4958,6 +5338,26 @@ fn build_sqlite_index_at(
         );
     }
     embedding_store::rebuild_chunk_vec(fts.connection(), &held_chunk_ids).map_err(index_to_kcs)?;
+    // PB28 (step4b-contract-tests-p2b.md §J, §Z ruling 4; 04-pipeline.md §5.7
+    // L913 / 05-runtime.md §3.5 L760-761): mint a fresh `index_generation` and
+    // initialize `last_lifecycle_epoch` to the CURRENT counter value, in the
+    // SAME transaction as the rest of this rebuild — not a separate step
+    // afterward (the old `recover_index_generation` call after this function
+    // returns left a crash window in which the new temp db could be renamed
+    // in with a stale/absent generation). This build targets a brand-new temp
+    // db (`SqliteFtsIndex::open` created its `index_metadata` table moments
+    // ago, always empty), so `ensure_index_metadata`'s "insert only if
+    // absent" is exactly the unconditional first write wanted here.
+    // `recover_index_generation`'s later call (still invoked by every
+    // `run_repair`/`run_index`/`run_reindex` caller) becomes a no-op in the
+    // common case and remains as defense-in-depth self-heal for a crash
+    // between this COMMIT and that later call.
+    kcs_index::fts::ensure_index_metadata(
+        fts.connection(),
+        &new_ulid(kcs_dir),
+        PurgeState::new(kcs_dir).read_lifecycle_epoch()?,
+    )
+    .map_err(index_to_kcs)?;
     fts.connection()
         .execute_batch("COMMIT")
         .map_err(|err| KcsError::schema(err.to_string()))?;
@@ -5020,6 +5420,8 @@ fn parse_search_args(args: Vec<String>) -> Result<ParsedSearch> {
     let mut offset = None;
     let mut cursor = None;
     let mut time_selector_flags = TimeSelectorFlags::default();
+    let mut online = false;
+    let mut offline = false;
     let mut i = 0usize;
     while i < args.len() {
         // R12-7: accept `--flag=value` before matching (the manual parser used to
@@ -5109,6 +5511,21 @@ fn parse_search_args(args: Vec<String>) -> Result<ParsedSearch> {
             "--cursor" => {
                 cursor = Some(flag_value(&args, &mut i, inline, "--cursor")?);
             }
+            // PC5 (05 §1.2 / 07 §3): one-shot send-consent overrides.
+            "--online" => {
+                reject_inline_value(flag, inline)?;
+                if online {
+                    return Err(KcsError::invalid_usage("--online may be specified once"));
+                }
+                online = true;
+            }
+            "--offline" => {
+                reject_inline_value(flag, inline)?;
+                if offline {
+                    return Err(KcsError::invalid_usage("--offline may be specified once"));
+                }
+                offline = true;
+            }
             value if value.starts_with('-') => {
                 return Err(KcsError::invalid_usage(format!(
                     "unknown search flag: {value}"
@@ -5124,8 +5541,25 @@ fn parse_search_args(args: Vec<String>) -> Result<ParsedSearch> {
         }
         i += 1;
     }
+    if online && offline {
+        return Err(KcsError::invalid_usage(
+            "--online and --offline are mutually exclusive",
+        ));
+    }
     // Validate selector exclusivity/duration before repository or DB access.
     time_selector_flags.canonicalize()?;
+    // PC59/PC60 (06 §3): `--at` needs a single, non-`--descendants` `--scope`
+    // — an explicit commit cannot be resolved against more than one
+    // independent scope DAG (05 §1.6). Checked here (usage-level, before any
+    // repository/registry access) rather than after scope enumeration, so it
+    // is a uniform `KCS-E-CONFIG-USAGE-001`/exit 2 regardless of what is or
+    // is not registered.
+    if time_selector_flags.at.is_some() && (scope.is_none() || descendants) {
+        return Err(KcsError::invalid_usage(
+            "--at requires a single --scope <path> (without --descendants); \
+             multi-scope search cannot resolve one commit across independent scope DAGs",
+        ));
+    }
     Ok(ParsedSearch {
         query: query.ok_or_else(|| KcsError::invalid_usage("search query is required"))?,
         requested_mode,
@@ -5137,6 +5571,8 @@ fn parse_search_args(args: Vec<String>) -> Result<ParsedSearch> {
         offset,
         cursor,
         time_selector_flags,
+        online,
+        offline,
     })
 }
 
@@ -5162,14 +5598,23 @@ fn read_search_config(path: &Path) -> Result<(Option<SearchMode>, Option<SearchF
     Ok((default_mode, fail_behavior))
 }
 
-/// R11-7: effective `[search]` settings — the scope config.toml takes precedence
-/// over the user config.toml (same precedence direction the acceptance uses for
-/// other scoped overrides). Multi-scope execution settings are resolved by the
-/// focused `multi_scope` module.
+/// PC49/PC50 (05 §1.8 L384-387): effective `[search]` settings. A folder
+/// config.toml wins over the user (device) config PER KEY only when
+/// `single_scope_kcs_dir` is `Some` — the search is a single, non-
+/// `--descendants` `--scope <path>` (that scope's own folder value, which may
+/// differ from the CWD's — PC50's `--scope /work/other` case). For every
+/// multi-scope search (default / `--all-scopes` / `--descendants`),
+/// `single_scope_kcs_dir` is `None` and only the user (device) layer is ever
+/// consulted — "scope 間で異なる folder 値の統合は定義しない". Multi-scope
+/// execution settings ([search.multi_scope] itself) are a separate namespace,
+/// resolved by the focused `multi_scope` module regardless of this rule.
 fn effective_search_config(
-    repo: &Repository,
+    single_scope_kcs_dir: Option<&Path>,
 ) -> Result<(Option<SearchMode>, Option<SearchFailBehavior>)> {
-    let (scope_mode, scope_fail) = read_search_config(&repo.kcs_dir().join("config.toml"))?;
+    let (scope_mode, scope_fail) = match single_scope_kcs_dir {
+        Some(kcs_dir) => read_search_config(&kcs_dir.join("config.toml"))?,
+        None => (None, None),
+    };
     let (user_mode, user_fail) = read_search_config(&user_config_toml_path())?;
     Ok((scope_mode.or(user_mode), scope_fail.or(user_fail)))
 }
@@ -5254,13 +5699,20 @@ fn read_search_tuning(path: &Path) -> Result<SearchTuning> {
     })
 }
 
-/// R12-1: effective `[search.rrf]` + `[search.diversify]` (05 §1.3/§1.4). Scope
-/// config wins over user config per key (same precedence as `effective_search_config`),
-/// each falling back to the documented default. These feed BOTH the ranking/dedup
-/// call sites AND the cursor `query_hash` (05 §1.8 requires the effective values, so
-/// a tuning change invalidates a stale cursor).
-fn effective_search_tuning(repo: &Repository) -> Result<(RrfConfig, DiversifyRequest)> {
-    let scope = read_search_tuning(&repo.kcs_dir().join("config.toml"))?;
+/// R12-1 / PC49/PC50: effective `[search.rrf]` + `[search.diversify]` (05
+/// §1.3/§1.4/§1.8). Same `single_scope_kcs_dir` rule as
+/// [`effective_search_config`] — `None` (multi-scope) consults only the user
+/// (device) layer; `Some` additionally lets that one scope's folder value win
+/// per key. These feed BOTH the ranking/dedup call sites AND the cursor
+/// `query_hash` (05 §1.8 requires the effective values, so a tuning change
+/// invalidates a stale cursor).
+fn effective_search_tuning(
+    single_scope_kcs_dir: Option<&Path>,
+) -> Result<(RrfConfig, DiversifyRequest)> {
+    let scope = match single_scope_kcs_dir {
+        Some(kcs_dir) => read_search_tuning(&kcs_dir.join("config.toml"))?,
+        None => SearchTuning::default(),
+    };
     let user = read_search_tuning(&user_config_toml_path())?;
     let rrf = RrfConfig {
         k: scope.rrf_k.or(user.rrf_k).unwrap_or(60),
@@ -5589,6 +6041,20 @@ fn search_mode_json(mode: SearchMode) -> &'static str {
     }
 }
 
+/// PC24/PC25 (05 §1.5): `sha256(canonical query vector bytes)` — the same
+/// little-endian float32 canonical form `chunk_vec` stores vectors in
+/// (`f32_to_le_bytes`), so this digest is stable and comparable with a future
+/// `embeddings(target_type='query_cache')` row's own `target_id`.
+fn query_vector_digest_hex(vector: &[f32]) -> String {
+    let bytes = f32_to_le_bytes(vector);
+    let digest = Sha256::digest(&bytes);
+    let mut hex = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        hex.push_str(&format!("{byte:02x}"));
+    }
+    format!("sha256:{hex}")
+}
+
 fn empty_search_response(
     parsed: &ParsedSearch,
     repo: &Repository,
@@ -5604,13 +6070,18 @@ fn empty_search_response(
     let searched_scopes = searched
         .iter()
         .map(|scope| {
-            json!({
+            let mut entry = json!({
                 "scope_id": scope.scope_id,
                 "scope_path": scope.scope_path,
                 "snapshot_at": scope.snapshot_at,
-            })
+            });
+            if scope.shallow_skipped > 0 {
+                entry["shallow_skipped"] = json!(scope.shallow_skipped);
+            }
+            entry
         })
         .collect::<Vec<_>>();
+    let any_shallow_skipped = searched.iter().any(|scope| scope.shallow_skipped > 0);
     let mut response = json!({
         "query": parsed.query,
         "requested_mode": search_mode_json(mode.requested),
@@ -5618,8 +6089,8 @@ fn empty_search_response(
         "fallback": mode.fallback,
         "fallback_reason": mode.fallback_reason.clone().map(Value::from).unwrap_or(Value::Null),
         "error_code": mode.error_code.clone().map(Value::from).unwrap_or(Value::Null),
-        // R11-7: non-null only under [search].fail_behavior = "warn" text fallback.
-        "warning": mode.warning.clone().map(Value::from).unwrap_or(Value::Null),
+        // PC3 / §R note-1 ruling: `warnings[]` array.
+        "warnings": mode.warnings.clone(),
         "diversify": { "strategy": "group_by_raw_hash" },
         "paging": { "limit": parsed.limit, "next_cursor": Value::Null },
         "searched_scopes": searched_scopes,
@@ -5628,7 +6099,7 @@ fn empty_search_response(
         "results": [],
     });
     append_search_logs(repo, &response, started);
-    if !excluded_scopes.is_empty() {
+    if !excluded_scopes.is_empty() || any_shallow_skipped {
         if let Some(object) = response.as_object_mut() {
             object.insert("__exit_code".to_owned(), json!(3));
         }
@@ -6358,16 +6829,45 @@ fn resolve_pointer_for_cli(pointer: &EvidencePointer) -> Result<PointerResolutio
 /// Two-stage scope resolution (08 §3.1 step 1). Root trust is `scope_id`; the
 /// `scope_path` hint and the scope-registry are both non-authoritative caches
 /// (05 §1.7 truth vs cache).
-/// Registry lookup of a `scope_id` with the same tie-detection the Evidence path
-/// uses (08 §3.1 step 1b): the newest `last_seen_at` wins, but two distinct
-/// `.kcs` sharing that newest timestamp are ambiguous
-/// (KCS-E-EVIDENCE-SCOPE-AMBIGUOUS-001). `Ok(None)` when no registered `.kcs`
-/// still resolves to this scope_id. Shared by `resolve_scope_target` (Evidence)
-/// and `resolve_cursor_exec_scopes` (search cursor) so a `.kcs`-copy collision is
+///
+/// PB21 (step4b-contract-tests-p2b.md §H, 10 §3 L284-285 / 08 §3.1 step 1b
+/// L152-155): fail-closed on ANY live scope_id duplicate, not only a
+/// `last_seen_at` tie — the old tie-only check left a silent "newest wins"
+/// auto-selection live whenever two clones' timestamps merely differed,
+/// which can resolve to a purge-stale clone and misjudge scope-wide purge
+/// state. `Ok(None)` when no registered `.kcs` still resolves to this
+/// scope_id. Shared by `resolve_scope_target` (Evidence) and
+/// `resolve_cursor_exec_scopes` (search cursor) so a `.kcs`-copy collision is
 /// detected identically on both paths (O7).
 fn resolve_scope_id_in_registry(scope_id: &str) -> Result<Option<ScopeTarget>> {
-    let registry = match RegistryDb::open_default() {
-        Ok(registry) => registry,
+    resolve_scope_id_in_registry_with_hint(scope_id, None)
+}
+
+/// PB23 (08 §3.1 step 1b L156-158): `extra_live` folds a scope_path-hinted
+/// candidate into the SAME live-duplicate candidate pool as the registry rows
+/// (deduplicated by canonical `.kcs` path) — a registry-unregistered clone
+/// named only via `scope_path` counts toward the duplicate check exactly like
+/// a registered one, so the JSON-pointer (`scope_path` present) and URI
+/// (`scope_path` dropped) representations of the same pointer never disagree
+/// about whether a scope_id is live-duplicated.
+fn resolve_scope_id_in_registry_with_hint(
+    scope_id: &str,
+    extra_live: Option<ScopeTarget>,
+) -> Result<Option<ScopeTarget>> {
+    let mut live = Vec::<ScopeTarget>::new();
+    live.extend(extra_live);
+    match RegistryDb::open_default() {
+        Ok(registry) => {
+            if let Ok(entries) = registry.lookup_scope_id(scope_id) {
+                for entry in &entries {
+                    if let Some(target) = open_scope_from_hint(&entry.root_path) {
+                        if target.scope_id == scope_id {
+                            live.push(target);
+                        }
+                    }
+                }
+            }
+        }
         // P6: a registry *open* failure is not "scope_id absent". Surface it (the
         // caller still falls back to the scope_path hint) instead of silently
         // conflating it with a genuine registry miss; WAL + busy_timeout makes the
@@ -6377,50 +6877,32 @@ fn resolve_scope_id_in_registry(scope_id: &str) -> Result<Option<ScopeTarget>> {
                 "warning: scope registry unavailable (search cache); \
                  resolving evidence scope via the scope_path hint only"
             );
-            return Ok(None);
-        }
-    };
-    let Ok(entries) = registry.lookup_scope_id(scope_id) else {
-        return Ok(None);
-    };
-    let mut resolved: Vec<(String, ScopeTarget)> = Vec::new();
-    for entry in &entries {
-        if let Some(target) = open_scope_from_hint(&entry.root_path) {
-            if target.scope_id == scope_id {
-                resolved.push((entry.last_seen_at.clone(), target));
-            }
         }
     }
-    if resolved.is_empty() {
+    if live.is_empty() {
         return Ok(None);
     }
-    // Entries arrive newest-first (ORDER BY last_seen_at DESC); a tie across
-    // distinct .kcs at that newest timestamp is ambiguous.
-    let newest = resolved[0].0.clone();
-    let mut newest_dirs = resolved
+    let mut unique_dirs = live
         .iter()
-        .filter(|(seen, _)| *seen == newest)
-        .map(|(_, target)| target.kcs_dir.clone())
+        .map(|target| target.kcs_dir.clone())
         .collect::<Vec<_>>();
-    newest_dirs.sort();
-    newest_dirs.dedup();
-    if newest_dirs.len() > 1 {
-        return Err(scope_ambiguous_error(scope_id, &newest_dirs));
+    unique_dirs.sort();
+    unique_dirs.dedup();
+    if unique_dirs.len() > 1 {
+        return Err(registry_duplicate_error(scope_id, &unique_dirs));
     }
-    Ok(Some(resolved.remove(0).1))
+    Ok(live.into_iter().next())
 }
 
 fn resolve_scope_target(scope_id: &str, scope_path_hint: Option<&str>) -> Result<ScopeTarget> {
-    // 1a. scope_path hint whose .kcs/scope.json matches scope_id.
-    if let Some(hint) = scope_path_hint {
-        if let Some(target) = open_scope_from_hint(hint) {
-            if target.scope_id == scope_id {
-                return Ok(target);
-            }
-        }
-    }
-    // 1b. scope-registry lookup by scope_id (last_seen_at newest first).
-    if let Some(target) = resolve_scope_id_in_registry(scope_id)? {
+    // PB23: a scope_path hint that itself resolves live to this scope_id is
+    // folded into the registry-duplicate candidate pool below rather than
+    // short-circuiting before that check ever runs (the old 1a/1b ordering
+    // let a valid hint bypass duplicate detection entirely).
+    let hinted = scope_path_hint
+        .and_then(open_scope_from_hint)
+        .filter(|target| target.scope_id == scope_id);
+    if let Some(target) = resolve_scope_id_in_registry_with_hint(scope_id, hinted)? {
         return Ok(target);
     }
     // Pragmatic fallback: the current working directory when it *is* the scope.
@@ -6493,12 +6975,18 @@ fn open_cas_byte_object(
     let basename = path_hint.unwrap_or("object");
     // P9 (06 §1.1): the read-only expansion cache belongs under $XDG_CACHE_HOME
     // (regenerable, safe to purge), not $XDG_DATA_HOME (durable truth/state).
-    let cache = open_cache_path(basename, hash);
-    // M5: the open cache is idempotent. A prior open already materialized this
-    // object read-only; a second open must reuse it, not `fs::copy` onto a
-    // read-only destination (EACCES). Reuse the cached file when it already
-    // exists (the CAS object is immutable, so the content is identical).
+    let cache = open_cache_path(subdir, basename, hash);
+    // M5/PA08 (06 §1.1 L150): the open cache is idempotent. A prior open
+    // already materialized this object read-only; a second open must reuse
+    // it, not `fs::copy` onto a read-only destination (EACCES). But reuse is
+    // never based on existence alone — the cache leaf's OWN content sha256
+    // is re-verified against the dir key (`hash`) on EVERY reuse, not just at
+    // first materialization (an externally-modified or torn-write cache leaf
+    // must never be served as authentic Evidence). A mismatch fails closed
+    // (`KCS-E-STORE-CORRUPT-001`, exit 4) WITHOUT touching the existing cache
+    // file — recovery is the user deleting the cache themselves.
     if cache.is_file() {
+        verify_bounded_cas_object(&cache, hash, MAX_RAW_OBJECT_BYTES)?;
         // R9-3: a cache dir/file materialized by an earlier (world-readable) build
         // is corrected in place on reuse — harden the subtree to 0700 and the file
         // to 0400 so document bytes written before this fix stop leaking to
@@ -6628,11 +7116,22 @@ fn read_or_verify_bounded_cas_object(
 /// The read-only open/view expansion cache path for a CAS object. R10-6: the
 /// per-object directory is the FULL `sha256` hex (not a 12-char/48-bit prefix), so
 /// two objects that share a 12-hex prefix and a basename can no longer collide onto
-/// one cache file.
-fn open_cache_path(basename: &str, hash: &str) -> PathBuf {
-    cache_home()
-        .join("kcs/open")
-        .join(hash.trim_start_matches("sha256:"))
+/// one cache file. PA03 (§A, U22)/PA12-13 (§C, U24): `subdir == "image"` nests
+/// under an extra `image/` type segment (`~/.cache/kcs/open/image/<hash>/...`),
+/// separating it from the flat `raw`/`prepared` namespace (`~/.cache/kcs/open/
+/// <hash>/...`) — a raw object and an image object can share the same digest
+/// (identical byte content ingested both ways), and without this segment their
+/// cache directories would collide and one materialize would silently serve/
+/// overwrite the other's cache entry. `subdir` is the same CAS type
+/// discriminator `open_cas_byte_object` already threads through
+/// (`"raw"`/`"prepared"`/`"image"`), so purge's eviction side (`evict_open_cache`,
+/// kcs-cli/purge.rs) mirrors this exact split via its own `is_image` flag.
+fn open_cache_path(subdir: &str, basename: &str, hash: &str) -> PathBuf {
+    let mut root = cache_home().join("kcs/open");
+    if subdir == "image" {
+        root = root.join("image");
+    }
+    root.join(hash.trim_start_matches("sha256:"))
         .join(portable_cache_leaf(basename))
 }
 
@@ -7229,12 +7728,21 @@ fn scope_unreachable_error(scope_id: &str) -> KcsError {
     )
 }
 
-/// 08 §3.1 step 1b — the scope_id maps to multiple registered scopes that share
-/// the newest `last_seen_at`, so the winner is ambiguous.
-fn scope_ambiguous_error(scope_id: &str, candidates: &[PathBuf]) -> KcsError {
+/// PB21/22 (step4b-contract-tests-p2b.md §H, 10 §3 L284-287): a scope_id
+/// resolves to more than one LIVE registered `.kcs` — fail-closed, dedupe
+/// required. `KCS-E-REGISTRY-DUP-001` (namespace REGISTRY) replaces the old
+/// `KCS-E-EVIDENCE-SCOPE-AMBIGUOUS-001` (PB22's "実装時に確定が必要" resolved:
+/// one code, not two overlapping ones, now that PB21 widens detection from
+/// "last_seen_at tie only" to "more than one live match at all" — the old
+/// code's narrower condition is now a strict subset of this one's). Default
+/// exit is `PermanentFailure` (4, matching every other pointer-resolution
+/// ambiguity/corruption code in this module); `kcs evidence verify` overrides
+/// this to exit 3 for its own status-union response (PB54 — registry_duplicate
+/// is retryable there regardless of `--strict`).
+fn registry_duplicate_error(scope_id: &str, candidates: &[PathBuf]) -> KcsError {
     KcsError::new(
-        "KCS-E-EVIDENCE-SCOPE-AMBIGUOUS-001",
-        "evidence scope_id maps to multiple registered scopes",
+        "KCS-E-REGISTRY-DUP-001",
+        "scope_id resolves to more than one live registered .kcs; dedupe before retrying",
         json!({
             "scope_id": scope_id,
             "candidates": candidates
@@ -7296,7 +7804,15 @@ fn parse_object_uri(input: &str) -> Result<Option<ObjectUri>> {
     if scope_id.is_empty() {
         return Err(KcsError::invalid_usage("object URI is missing scope_id"));
     }
-    const VALID_TYPES: [&str; 5] = ["raw", "image", "chunk", "normalized", "prepared"];
+    // PA01 (§A, U22): MVP only issues/accepts `image` object URIs (06 §1.1
+    // L117-119, 08 §2.3 L110-113) — every other type (`raw`/`chunk`/
+    // `prepared`/`normalized`) is rejected here, at parse time, with
+    // `KCS-E-CONFIG-USAGE-001` (exit 2). This intentionally makes
+    // `resolve_object_uri`'s `raw`/`chunk`/`prepared` dispatch branches
+    // unreachable from a real object URI today (kept, not deleted — MVP
+    // scoping, not a permanent design decision) rather than duplicating the
+    // type gate at two separate layers.
+    const VALID_TYPES: [&str; 1] = ["image"];
     if !VALID_TYPES.contains(&object_type) {
         return Err(KcsError::invalid_usage(format!(
             "unknown object type in URI: {object_type}"
@@ -7318,7 +7834,29 @@ fn parse_object_uri(input: &str) -> Result<Option<ObjectUri>> {
 /// This is a distinct path from Evidence Pointer resolution.
 fn resolve_object_uri(object: &ObjectUri, as_view: bool) -> Result<Value> {
     let status = if as_view { "viewed" } else { "opened" };
-    let target = resolve_scope_target(&object.scope_id, None)?;
+    // PA02 (§A, U22): a fork-duplicate (`kcs import --as-new-scope`) can carry
+    // an OLD `scope_id` in a copied-forward image object URI that no longer
+    // resolves via either the scope_path hint or the registry — hash is the
+    // sole identity that matters for a CAS object (08 §2), so when the
+    // scope_id itself is entirely unreachable, fall back to the CURRENT
+    // (self) store: if it shares the same `image_hash`, resolve there rather
+    // than surfacing `scope_unreachable`. Only for `image` — the type this
+    // URI kind is scoped to (PA01) — and only when scope_id resolution fails
+    // outright (a resolvable-but-wrong scope_id must still resolve normally
+    // and is never silently redirected).
+    let target = match resolve_scope_target(&object.scope_id, None) {
+        Ok(target) => target,
+        Err(error)
+            if object.object_type == "image"
+                && error.error_code() == "KCS-E-EVIDENCE-SCOPE-UNREACHABLE-001" =>
+        {
+            match Repository::open_current().and_then(|repo| scope_target(repo.root())) {
+                Ok(fallback) => fallback,
+                Err(_) => return Err(error),
+            }
+        }
+        Err(error) => return Err(error),
+    };
     // §I checkpoint 1 (LC53).
     let checkpoint = ReadBarrierCheckpoint::open(&target.kcs_dir)?;
     // LC45 (item 2).
@@ -8534,13 +9072,41 @@ fn approval_row_present_in_kcs_dir(kcs_dir: &Path, tool_id: Option<&str>) -> Res
     trusted_consent_present(kcs_dir, tool_id, ConsentOperation::Network)
 }
 
-fn embedding_opt_in_for_scopes(exec_scopes: &[ExecScope], tool_id: &str) -> Result<bool> {
+/// PC4 (05 §1.1 / 07 §3): the query-embedding send consent gate is an OR
+/// across the participating scopes — "参加 scope の 1 つ以上に...active な
+/// approvals[] 行があり、かつ当該 scope の実効 allow_network が true である
+/// こと". One approved scope opens the send for the WHOLE query (05 §1.8:
+/// "送信は 1 回であり scope 別の再送信は発生しない" — the resulting vector is
+/// then usable against every profile-compatible participating scope, approved
+/// or not). This replaced an AND-over-scopes bug where a single unapproved
+/// scope silently vetoed sending for every other, already-approved scope.
+///
+/// PC5/PC6: `online` is the per-invocation `--online` one-shot opt-in (07 §3
+/// — "未設定の既定閉鎖のみ" opens, never overriding an explicit revoke, so
+/// it is folded in per-scope via [`online_opt_in_opens_scope`] rather than a
+/// blanket short-circuit).
+fn embedding_opt_in_for_scopes(
+    exec_scopes: &[ExecScope],
+    tool_id: &str,
+    online: bool,
+) -> Result<bool> {
     for exec in exec_scopes {
-        if !persistent_network_allowed_for_kcs_dir(&exec.target.kcs_dir, tool_id)? {
-            return Ok(false);
+        let persisted = persistent_network_allowed_for_kcs_dir(&exec.target.kcs_dir, tool_id)?;
+        let opened = persisted || (online && online_opt_in_opens_scope(&exec.target.kcs_dir)?);
+        if opened {
+            return Ok(true);
         }
     }
-    Ok(!exec_scopes.is_empty())
+    Ok(false)
+}
+
+/// PC5 (05 §1.1 L49-50 / 07 §3): whether `--online` opens *this* scope's gate
+/// for the current invocation — true unless the scope carries an explicit
+/// revoke (`allow_network = false`, `write_network_revoke_record`'s marker).
+/// `--online` only lifts the default-closed (never-decided) state; it is not
+/// a kill-switch override.
+fn online_opt_in_opens_scope(kcs_dir: &Path) -> Result<bool> {
+    Ok(!network_revoked_kcs_dir(kcs_dir)?)
 }
 
 /// Whether the embedding adapter may call the network in this pass (L4). Gated
@@ -9414,6 +9980,15 @@ enum QueryEmbeddingOutcome {
     /// holds this exact query's device row — never send, never overwrite its
     /// token.
     InFlight,
+    /// PC7 (05 §1.1 L32 / 07-adapter-spec.md §5.3): the adapter's response
+    /// failed its acceptance check (e.g. a dimension mismatch) — a distinct
+    /// technical failure from a plain adapter error.
+    ContractViolation,
+    /// PC6 (05 §1.1 L50-53 / 07 §3 L144-146): the claim-Tx re-read found the
+    /// send consent gate no longer satisfied (a revoke completed between the
+    /// caller's precheck and this re-read) — refuse the send. Maps to
+    /// `VectorAvailability::Unauthorized`, not `Unavailable`, at the caller.
+    NotAuthorized,
 }
 
 /// vector|hybrid search page 1's query embedding call, wired onto the sync
@@ -9441,7 +10016,23 @@ enum QueryEmbeddingOutcome {
 /// session's ledger migration (item 2 of the implementation instructions scopes
 /// the device-row protocol to "page 1" specifically; 04 §5.4 §H's own text is
 /// page-1-scoped: "vector|hybrid 検索 page 1 の query embedding 呼出").
-fn compute_query_embedding_page1(query: &str) -> Result<Option<QueryEmbeddingOutcome>> {
+///
+/// `exec_scopes`/`tool_id`/`online` are PC6's claim-Tx re-read inputs: the
+/// caller already ran the same [`embedding_opt_in_for_scopes`] OR-across-
+/// scopes check once as a cheap precheck (before this function is even
+/// called), but 05 §1.1 requires the *final* verification to happen
+/// immediately ahead of spending the claim, narrowing the window in which a
+/// concurrent `kcs adapter revoke` could otherwise let a since-revoked send
+/// through undetected (a revoke completing strictly before this re-read is
+/// honored; one completing after is allowed to be in-flight, matching the
+/// spec's own "検証後に revoke が完了した場合の当該送信は in-flight として
+/// 許容").
+fn compute_query_embedding_page1(
+    query: &str,
+    exec_scopes: &[ExecScope],
+    tool_id: &str,
+    online: bool,
+) -> Result<Option<QueryEmbeddingOutcome>> {
     if query.chars().count() < 2 {
         return Ok(None);
     }
@@ -9469,6 +10060,12 @@ fn compute_query_embedding_page1(query: &str) -> Result<Option<QueryEmbeddingOut
         Ok(())
     })
     .map_err(pipeline_to_kcs)?;
+
+    // PC6: the final consent re-read, immediately ahead of the claim Tx that
+    // is about to spend the device row (05 §1.1 L50-53 / 07 §3 L144-146).
+    if !embedding_opt_in_for_scopes(exec_scopes, tool_id, online)? {
+        return Ok(Some(QueryEmbeddingOutcome::NotAuthorized));
+    }
 
     // §M note-2: the "effective timeout" is max(participating scopes' resolved
     // `timeout_seconds`) — currently a no-op maximum, since
@@ -9516,10 +10113,16 @@ fn compute_query_embedding_page1(query: &str) -> Result<Option<QueryEmbeddingOut
                 .next()
                 .map(|vector| QueryEmbeddingOutcome::Vector(vector.vector)))
         }
-        Err(_) => {
+        Err(failure) => {
             let billed_usd = estimate_embedding_cost(query.chars().count() as u64);
             settle_task_charge_unknown(&ledger, &key, &intent_token, billed_usd)?;
-            Ok(None)
+            // PC7: classify a contract-violation adapter failure distinctly
+            // from a generic technical unavailability.
+            if failure.retry_kind == RetryErrorKind::ContractViolation {
+                Ok(Some(QueryEmbeddingOutcome::ContractViolation))
+            } else {
+                Ok(None)
+            }
         }
     }
 }
@@ -14349,6 +14952,7 @@ mod tests {
                 "2026-07-13T00:00:00Z",
                 1,
                 kcs_pipeline::prepare::hash_bytes(b"planned purge commit"),
+                kcs_pipeline::prepare::hash_bytes(b"planned purge closure"),
                 kcs_core::scope::new_ulid(dir.path()),
             )
             .unwrap()
@@ -14493,6 +15097,8 @@ mod tests {
                 max_rowid: 0,
                 max_association_rowid: 0,
                 chunking_config_hash: "sha256:config".to_owned(),
+                index_generation: "01TEST0000000000000000000".to_owned(),
+                shallow_skipped: 0,
             },
             SearchedScopeInfo {
                 scope_id: "corrupt".to_owned(),
@@ -14501,6 +15107,8 @@ mod tests {
                 max_rowid: 0,
                 max_association_rowid: 0,
                 chunking_config_hash: "sha256:config".to_owned(),
+                index_generation: "01TEST0000000000000000000".to_owned(),
+                shallow_skipped: 0,
             },
             SearchedScopeInfo {
                 scope_id: "vanished".to_owned(),
@@ -14509,6 +15117,8 @@ mod tests {
                 max_rowid: 0,
                 max_association_rowid: 0,
                 chunking_config_hash: "sha256:config".to_owned(),
+                index_generation: "01TEST0000000000000000000".to_owned(),
+                shallow_skipped: 0,
             },
         ];
 
@@ -15195,7 +15805,7 @@ mod tests {
         // R10-6: the per-object cache dir is the FULL 64-hex sha256, not a 12-char
         // prefix, so a prefix+basename collision can't serve the wrong object.
         let hash = format!("sha256:{}", "a".repeat(64));
-        let path = open_cache_path("doc.md", &hash);
+        let path = open_cache_path("raw", "doc.md", &hash);
         let dir = path
             .parent()
             .unwrap()

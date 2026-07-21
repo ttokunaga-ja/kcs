@@ -35,10 +35,20 @@ pub const MAX_PURGE_TARGETS: usize = 100_000;
 /// one element per retire/re-purge/legacy-conversion (LC4).
 pub const MAX_PURGE_RECORD_BYTES: u64 = 64 * 1024;
 pub const MAX_PURGE_JOURNAL_BYTES: u64 = 8 * 1024 * 1024;
+/// Bound on the `.kcs/purge/journal-closure` sidecar (step4b-contract-tests-p2a.md
+/// PA43-46, §R ruling #2). Kept separate from and larger than
+/// `MAX_PURGE_JOURNAL_BYTES` — a scope with a large fan-out of chunk/prepared/
+/// image objects destined for deletion can have a closure item enumeration far
+/// bigger than the journal's own fixed-size fields, but this is still a
+/// torn/DoS defense bound, not an unbounded allocation.
+pub const MAX_PURGE_CLOSURE_BYTES: u64 = 64 * 1024 * 1024;
 /// Bound on the two single-line monotonic counter files (LC39/LC41).
 pub const MAX_EPOCH_COUNTER_BYTES: u64 = 64;
 
-const JOURNAL_SCHEMA_VERSION: u64 = 2;
+// v3 (PA43-46, §R ruling #2): `closure: Vec<ClosureItem>` replaced by
+// `closure_hash: String`, a content-hash reference to the new
+// `.kcs/purge/journal-closure` sidecar ([`PurgeClosure`]).
+const JOURNAL_SCHEMA_VERSION: u64 = 3;
 const RECEIPT_SCHEMA_VERSION: u64 = 2;
 const LEGACY_RECEIPT_SCHEMA_VERSION: u64 = 1;
 /// Actor recorded for an event materialized purely by the v1-flat -> v2
@@ -593,17 +603,138 @@ pub fn canonical_final_event(
     }
 }
 
-/// LC46's `closure` field, simplified to the purge's own raw_hash targets
-/// (`object_type: "raw"`). The full "every object type × hash destined for
-/// deletion, including shared-derived live-reference resolution" enumeration
-/// (U29/U30) is out of this module's scope; this keeps the field structurally
-/// present and fixed-at-`prepared` (LC48) without duplicating that inventory
-/// logic.
+/// LC46/PA43's `closure` item: one `(object_type, hash)` deletion target.
+/// `object_type` is one of `"raw"`, `"prepared"`, `"image"`, or `"chunk"`
+/// (`hash` is a `chunk_id`, which is itself a canonical `sha256:` hash — see
+/// `crate::cas::is_hash`). The full enumeration — including the
+/// shared-derived live-reference resolution result for `prepared`/`image` —
+/// lives in the [`PurgeClosure`] sidecar (step4b-contract-tests-p2a.md
+/// PA43-46, §R ruling #2), not inline in the journal.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ClosureItem {
     pub object_type: String,
     pub hash: String,
+}
+
+/// PA43-46 (§R ruling #2): the durable `.kcs/purge/journal-closure` sidecar.
+/// Holds the full "every object type × hash destined for deletion" enumeration
+/// — including the *result* of the shared-derived (`prepared`/`image`)
+/// live-reference judgment — computed once, durably written *before* the
+/// journal that references it (by content hash, [`PurgeJournal::closure_hash`])
+/// is created. A resumed purge reads this sidecar back and reuses its
+/// contents verbatim; it never recomputes the live-reference judgment (the
+/// same "fixed at `prepared`, never recomputed on resume" principle LC48
+/// established for `planned_commit`). Bound to its journal by `purge_id` (an
+/// independent check from the content-hash binding — belt and suspenders
+/// against a sidecar left by an unrelated purge_id somehow surviving a
+/// non-atomic step).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PurgeClosure {
+    pub schema_version: u64,
+    pub purge_id: String,
+    pub items: Vec<ClosureItem>,
+    /// Shared-derived (`prepared`/`image`) objects the same live-reference
+    /// judgment (fixed here, at `prepared`) decided to *preserve* rather than
+    /// delete (a surviving reference from a non-target raw). Kept separate
+    /// from `items` — which PA45 requires be exactly the deletion set, no
+    /// more and no less — purely so a resumed purge can still report an
+    /// accurate `shared_artifacts_preserved` count without a live rescan.
+    #[serde(default)]
+    pub preserved: Vec<ClosureItem>,
+}
+
+const CLOSURE_SCHEMA_VERSION: u64 = 1;
+
+impl PurgeClosure {
+    /// Construct and validate a fresh closure for `purge_id`. `items`/
+    /// `preserved` need not be pre-sorted; this normalizes (sorts + dedups)
+    /// them the same way `PurgeJournal::new` used to normalize the raw-only
+    /// closure.
+    pub fn new(
+        purge_id: impl Into<String>,
+        mut items: Vec<ClosureItem>,
+        mut preserved: Vec<ClosureItem>,
+    ) -> Result<Self> {
+        let sort_key = |item: &ClosureItem| (item.object_type.clone(), item.hash.clone());
+        items.sort_by_key(sort_key);
+        items.dedup();
+        preserved.sort_by_key(sort_key);
+        preserved.dedup();
+        let closure = Self {
+            schema_version: CLOSURE_SCHEMA_VERSION,
+            purge_id: purge_id.into(),
+            items,
+            preserved,
+        };
+        closure.validate()?;
+        Ok(closure)
+    }
+
+    fn validate(&self) -> Result<()> {
+        if self.schema_version != CLOSURE_SCHEMA_VERSION {
+            return Err(corrupt_state("purge closure schema_version is invalid"));
+        }
+        if !crate::scope::is_ulid(&self.purge_id) {
+            return Err(corrupt_state("purge closure purge_id must be a ULID"));
+        }
+        let cap = MAX_PURGE_TARGETS.saturating_mul(8);
+        if self.items.len() > cap || self.preserved.len() > cap {
+            return Err(corrupt_state("purge closure item count is invalid"));
+        }
+        Self::validate_sorted_items(&self.items, "purge closure item")?;
+        Self::validate_sorted_items(&self.preserved, "purge closure preserved item")?;
+        Ok(())
+    }
+
+    fn validate_sorted_items(items: &[ClosureItem], label: &str) -> Result<()> {
+        let mut previous: Option<(&str, &str)> = None;
+        for item in items {
+            if item.object_type.is_empty() {
+                return Err(corrupt_state(format!("{label} type is empty")));
+            }
+            validate_hash(&format!("{label} hash"), &item.hash)?;
+            let key = (item.object_type.as_str(), item.hash.as_str());
+            if previous.is_some_and(|value| value >= key) {
+                return Err(corrupt_state(format!(
+                    "{label}s must be strictly sorted and de-duplicated"
+                )));
+            }
+            previous = Some(key);
+        }
+        Ok(())
+    }
+
+    /// The subset of `items` for one `object_type` ("raw" / "prepared" /
+    /// "image" / "chunk"), as an owned set of hashes/ids.
+    #[must_use]
+    pub fn hashes_for(&self, object_type: &str) -> BTreeSet<String> {
+        Self::hashes_for_in(&self.items, object_type)
+    }
+
+    /// The subset of `preserved` for one `object_type` ("prepared" / "image").
+    #[must_use]
+    pub fn preserved_hashes_for(&self, object_type: &str) -> BTreeSet<String> {
+        Self::hashes_for_in(&self.preserved, object_type)
+    }
+
+    fn hashes_for_in(items: &[ClosureItem], object_type: &str) -> BTreeSet<String> {
+        items
+            .iter()
+            .filter(|item| item.object_type == object_type)
+            .map(|item| item.hash.clone())
+            .collect()
+    }
+}
+
+/// Content hash of a closure's canonical-JSON bytes (RFC 8785, matching
+/// `crate::cas::canonical_json_bytes`'s object-hash contract). The journal
+/// stores only this hash ([`PurgeJournal::closure_hash`]); the full
+/// enumeration lives solely in the sidecar file, read back and verified
+/// against this hash before every consumer trusts its contents.
+pub fn closure_content_hash(closure: &PurgeClosure) -> Result<String> {
+    Ok(crate::cas::hash_bytes(&record_bytes(closure)?))
 }
 
 /// LC47: `prepared -> tombstoned -> deleted -> committed`, then `done` (the
@@ -635,8 +766,13 @@ impl PurgePhase {
 
 /// Owner-private resumable transaction state (LC46/LC48). Target hashes are
 /// strictly sorted so a retry cannot silently change the aggregate operation.
-/// `planned_commit` and `closure` are fixed once, in `prepared`
-/// (`PurgeState::begin`), and never recomputed on resume (LC48/LC50).
+/// `planned_commit` and `closure_hash` are fixed once, in `prepared`
+/// (`PurgeState::begin`), and never recomputed on resume (LC48/LC50). The
+/// journal itself carries only `closure_hash` — a content-hash reference to
+/// the `.kcs/purge/journal-closure` sidecar ([`PurgeClosure`],
+/// [`closure_content_hash`]) that holds the actual full enumeration (§R
+/// ruling #2). The sidecar is written durably *before* the journal that
+/// references it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PurgeJournal {
@@ -648,7 +784,7 @@ pub struct PurgeJournal {
     pub actor: String,
     pub started_at: String,
     pub target_epoch: u64,
-    pub closure: Vec<ClosureItem>,
+    pub closure_hash: String,
     pub planned_commit: String,
     pub phase: PurgePhase,
 }
@@ -663,21 +799,11 @@ impl PurgeJournal {
         started_at: String,
         target_epoch: u64,
         planned_commit: String,
+        closure_hash: String,
         purge_id: String,
     ) -> Result<Self> {
         target_raw_hashes.sort();
         target_raw_hashes.dedup();
-        let mut closure = target_raw_hashes
-            .iter()
-            .map(|raw_hash| ClosureItem {
-                object_type: "raw".to_owned(),
-                hash: raw_hash.clone(),
-            })
-            .collect::<Vec<_>>();
-        closure.sort_by(|a, b| {
-            (a.object_type.as_str(), a.hash.as_str())
-                .cmp(&(b.object_type.as_str(), b.hash.as_str()))
-        });
         let journal = Self {
             schema_version: JOURNAL_SCHEMA_VERSION,
             purge_id,
@@ -687,7 +813,7 @@ impl PurgeJournal {
             actor,
             started_at,
             target_epoch,
-            closure,
+            closure_hash,
             planned_commit,
             phase: PurgePhase::Prepared,
         };
@@ -720,12 +846,7 @@ impl PurgeJournal {
         }
         validate_timestamp("purge journal started_at", &self.started_at)?;
         validate_hash("purge journal planned_commit", &self.planned_commit)?;
-        for item in &self.closure {
-            if item.object_type.is_empty() {
-                return Err(corrupt_state("purge journal closure item type is empty"));
-            }
-            validate_hash("purge journal closure item hash", &item.hash)?;
-        }
+        validate_hash("purge journal closure_hash", &self.closure_hash)?;
         Ok(())
     }
 
@@ -774,6 +895,55 @@ impl PurgeState {
         self.kcs_dir.join("purge/in-progress.json")
     }
 
+    /// PA43-46 (§R ruling #2): the `.kcs/purge/journal-closure` sidecar path —
+    /// a single JSON file, same temp+rename+fsync discipline as the journal
+    /// (`write_private_replace`), holding the full closure enumeration that
+    /// `PurgeJournal::closure_hash` references by content hash.
+    #[must_use]
+    pub fn closure_path(&self) -> PathBuf {
+        self.kcs_dir.join("purge/journal-closure")
+    }
+
+    /// Durably write the closure sidecar. The caller must do this *before*
+    /// calling [`Self::begin`] on a fresh start, so the journal never
+    /// references a closure_hash whose sidecar is not yet durable.
+    pub fn write_closure(&self, closure: &PurgeClosure) -> Result<()> {
+        closure.validate()?;
+        write_private_replace(
+            &self.kcs_dir,
+            &self.closure_path(),
+            &closure_bytes(closure)?,
+            MAX_PURGE_CLOSURE_BYTES,
+        )
+    }
+
+    /// Read back the closure sidecar. Callers that trust its contents for a
+    /// destructive decision must additionally compare
+    /// [`closure_content_hash`] of the result against the active journal's
+    /// `closure_hash` (this method only enforces internal structural
+    /// validity, not the binding to any particular journal).
+    pub fn read_closure(&self) -> Result<Option<PurgeClosure>> {
+        let Some(bytes) = read_bounded_regular(&self.closure_path(), MAX_PURGE_CLOSURE_BYTES)?
+        else {
+            return Ok(None);
+        };
+        ensure_owner_private(&self.closure_path())?;
+        let closure: PurgeClosure = parse_record(&bytes, "purge closure")?;
+        closure.validate()?;
+        Ok(Some(closure))
+    }
+
+    /// Remove the closure sidecar (LC51-style: quarantine-then-unlink, same as
+    /// the journal itself). Called once the purge reaches `done` — mirrors
+    /// `remove_purge_sidecars`' cleanup of the CLI-owned chunk-id/report
+    /// sidecars, for the core-owned closure sidecar.
+    pub fn remove_closure(&self) -> Result<()> {
+        if read_bounded_regular(&self.closure_path(), MAX_PURGE_CLOSURE_BYTES)?.is_none() {
+            return Ok(());
+        }
+        quarantine_then_unlink(&self.closure_path(), MAX_PURGE_CLOSURE_BYTES)
+    }
+
     pub fn tombstone_path(&self, raw_hash: &str) -> Result<PathBuf> {
         fanout_path(self.kcs_dir.join("tombstones"), raw_hash)
     }
@@ -800,6 +970,13 @@ impl PurgeState {
     /// caller must hold the scope store lock for this and all mutation methods
     /// below. `planned_commit` must already be computed by the caller (LC48:
     /// fixed once, in `prepared`) — this module has no DAG/CAS access.
+    /// `closure_hash` (PA43-46, §R ruling #2) must be the content hash
+    /// ([`closure_content_hash`]) of a [`PurgeClosure`] the caller has
+    /// *already durably written* via [`Self::write_closure`] before calling
+    /// this — on a fresh start the sidecar must exist before the journal that
+    /// references it can be considered durable; on resume the value is
+    /// ignored in favor of the existing journal's own `closure_hash` (the
+    /// `Resumed`/`AlreadyComplete` outcomes never look at this parameter).
     #[allow(clippy::too_many_arguments)]
     pub fn begin(
         &self,
@@ -810,6 +987,7 @@ impl PurgeState {
         started_at: impl Into<String>,
         target_epoch: u64,
         planned_commit: impl Into<String>,
+        closure_hash: impl Into<String>,
         purge_id: impl Into<String>,
     ) -> Result<BeginOutcome> {
         let desired = PurgeJournal::new(
@@ -820,6 +998,7 @@ impl PurgeState {
             started_at.into(),
             target_epoch,
             planned_commit.into(),
+            closure_hash.into(),
             purge_id.into(),
         )?;
         if let Some(existing) = self.read_journal()? {
@@ -1372,6 +1551,14 @@ fn journal_bytes(journal: &PurgeJournal) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
+fn closure_bytes(closure: &PurgeClosure) -> Result<Vec<u8>> {
+    let bytes = record_bytes(closure)?;
+    if bytes.len() as u64 > MAX_PURGE_CLOSURE_BYTES {
+        return Err(corrupt_state("purge closure exceeds its size limit"));
+    }
+    Ok(bytes)
+}
+
 fn record_bytes<T: Serialize>(record: &T) -> Result<Vec<u8>> {
     canonical_json_bytes(
         &serde_json::to_value(record).map_err(|error| corrupt_state(error.to_string()))?,
@@ -1887,7 +2074,27 @@ mod tests {
         crate::scope::new_ulid(Path::new("/tmp/purge-id-seed"))
     }
 
+    /// PA43-46 test helper: build+validate a single-raw closure, durably write
+    /// it as the sidecar (mirroring the real CLI orchestration's "write the
+    /// sidecar, THEN begin() referencing its hash" order), and return its
+    /// content hash.
+    fn test_closure_hash(state: &PurgeState, purge_id: &str, raw_hash: &str) -> String {
+        let closure = PurgeClosure::new(
+            purge_id.to_owned(),
+            vec![ClosureItem {
+                object_type: "raw".to_owned(),
+                hash: raw_hash.to_owned(),
+            }],
+            Vec::new(),
+        )
+        .unwrap();
+        state.write_closure(&closure).unwrap();
+        closure_content_hash(&closure).unwrap()
+    }
+
     fn started(state: &PurgeState) -> PurgeJournal {
+        let id = purge_id();
+        let closure_hash = test_closure_hash(state, &id, &raw());
         match state
             .begin(
                 vec![raw()],
@@ -1897,7 +2104,8 @@ mod tests {
                 NOW,
                 1,
                 commit(),
-                purge_id(),
+                closure_hash,
+                id,
             )
             .unwrap()
         {
@@ -2213,7 +2421,7 @@ mod tests {
         assert!(!journal.purge_id.is_empty());
         assert_eq!(journal.actor, "user");
         assert_eq!(journal.target_epoch, 1);
-        assert_eq!(journal.closure.len(), 1);
+        assert!(is_hash(&journal.closure_hash));
         assert_eq!(journal.planned_commit, commit());
 
         let tombstoned = state
@@ -2239,6 +2447,12 @@ mod tests {
     fn lc48_closure_and_planned_commit_are_fixed_at_prepared_and_unchanged_on_resume() {
         let (_dir, state) = setup();
         let journal = started(&state);
+        // A resumed `begin` call is deliberately fed a DIFFERENT (bogus, never
+        // written) closure_hash — proving the resumed outcome ignores it
+        // entirely and returns the original journal's own closure_hash
+        // unchanged (LC48's "fixed once, never recomputed on resume"
+        // extended to the closure reference).
+        let bogus_closure_hash = hash_bytes(b"a closure_hash that was never written");
         let resumed = match state
             .begin(
                 vec![raw()],
@@ -2248,6 +2462,7 @@ mod tests {
                 NOW,
                 1,
                 commit(),
+                bogus_closure_hash,
                 journal.purge_id.clone(),
             )
             .unwrap()
@@ -2255,8 +2470,18 @@ mod tests {
             BeginOutcome::Resumed(resumed) => resumed,
             other => panic!("unexpected begin outcome: {other:?}"),
         };
-        assert_eq!(resumed.closure, journal.closure);
+        assert_eq!(resumed.closure_hash, journal.closure_hash);
         assert_eq!(resumed.planned_commit, journal.planned_commit);
+
+        // The sidecar the original `started()` wrote is still there, still
+        // matches the journal's closure_hash, and its contents (the single
+        // raw target) are exactly what PA43 requires be enumerated.
+        let closure = state.read_closure().unwrap().unwrap();
+        assert_eq!(
+            closure_content_hash(&closure).unwrap(),
+            journal.closure_hash
+        );
+        assert_eq!(closure.hashes_for("raw"), BTreeSet::from([raw()]));
     }
 
     #[test]
@@ -2333,6 +2558,8 @@ mod tests {
 
         // Judgment uses the tombstone's own tail (still `purged`), not a
         // cross-marker canonical final event (§C) — LC59's stated basis.
+        // `AlreadyComplete` never touches the closure sidecar, so this
+        // closure_hash is deliberately never written anywhere.
         let outcome = state
             .begin(
                 vec![raw()],
@@ -2342,6 +2569,7 @@ mod tests {
                 LATER,
                 2,
                 other_commit(),
+                hash_bytes(b"unused closure_hash: already-complete short-circuits first"),
                 purge_id(),
             )
             .unwrap();
@@ -2442,6 +2670,9 @@ mod tests {
                     NOW,
                     1,
                     commit(),
+                    // `Resumed` ignores this parameter (the existing journal's
+                    // own closure_hash wins) — deliberately bogus.
+                    hash_bytes(b"unused closure_hash: resume keeps the original"),
                     journal.purge_id.clone(),
                 )
                 .unwrap(),

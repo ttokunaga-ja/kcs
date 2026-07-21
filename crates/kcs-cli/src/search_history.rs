@@ -69,6 +69,10 @@ pub struct SearchHistoryPlan {
     /// commit/tree CAS data.
     pub since_cutoff: Option<String>,
     pub bindings: Vec<SearchHistoryBinding>,
+    /// PC45/PC46 (05 §1.6/§2.2): shallow ancestors this plan's history walk
+    /// skipped rather than hard-failing on (sorted, deduped). Always empty for
+    /// `Current`/`At`, which never walk ancestry.
+    pub shallow_skipped: Vec<String>,
 }
 
 impl SearchHistoryPlan {
@@ -125,6 +129,7 @@ pub(super) fn current_history_plan_from_cache(
         snapshot_commit: snapshot_commit.to_owned(),
         since_cutoff: None,
         bindings: by_key.into_values().collect(),
+        shallow_skipped: Vec::new(),
     })
 }
 
@@ -209,6 +214,7 @@ pub fn plan_search_history(
 ) -> Result<SearchHistoryPlan> {
     validate_cursor_cutoff(selector, since_cutoff)?;
     let reader = HistoryReader::new(repo.kcs_dir());
+    let mut shallow_skipped = Vec::new();
     let bindings = match selector {
         TimeSelector::Current | TimeSelector::At(_) => {
             let snapshot = reader.snapshot(snapshot_commit)?;
@@ -244,11 +250,20 @@ pub fn plan_search_history(
             }
             live_by_key.into_values().collect()
         }
+        // PC45/PC46 (05 §1.6/§2.2): a shallow ancestor beyond the walk's own
+        // start commit is skipped and recorded rather than hard-failing the
+        // whole scope — `all_parents_tolerant`/`first_parent_tolerant` still
+        // hard-fail exactly like the non-tolerant path when the *start*
+        // commit itself (`snapshot_commit`) is shallow (PC47).
         TimeSelector::AllHistory | TimeSelector::Since(_) => {
-            plan_all_history(&reader.all_parents(snapshot_commit)?)?
+            let (graph, skipped) = reader.all_parents_tolerant(snapshot_commit)?;
+            shallow_skipped = skipped;
+            plan_all_history(&graph)?
         }
         TimeSelector::IncludeDeleted => {
-            plan_include_deleted(&reader.first_parent(snapshot_commit)?)?
+            let (history, skipped) = reader.first_parent_tolerant(snapshot_commit)?;
+            shallow_skipped = skipped;
+            plan_include_deleted(&history)?
         }
     };
 
@@ -256,9 +271,66 @@ pub fn plan_search_history(
         snapshot_commit: snapshot_commit.to_owned(),
         since_cutoff: since_cutoff.map(str::to_owned),
         bindings,
+        shallow_skipped,
     };
     sort_bindings(&mut plan.bindings);
     Ok(plan)
+}
+
+/// PC38/PC39 (05 §1.6): the ancestor-or-equal commit set of `--at`'s target
+/// commit — the population source for the `kcs_target_ancestors` temp table
+/// `install_target_ancestors` installs, which the search SQL layer joins
+/// against to enforce the "introduction is ancestor-or-equal of the target"
+/// time-point condition (against `chunks.first_seen_commit` — the practical
+/// stand-in used until a `chunk_publications` writer exists, see that table's
+/// doc comment in `kcs_index::fts`). Tolerant of a shallow ancestor beyond the
+/// target itself, exactly like [`plan_search_history`]'s `--all-history` walk
+/// (PC45's skip-and-continue policy) — `shallow_skipped` names what was
+/// skipped; a shallow-skipped commit is conservatively absent from the
+/// returned set (a chunk introduced there fails the ancestor check rather
+/// than the whole `--at` query hard-failing over an unrelated shallow
+/// ancestor).
+pub fn at_target_ancestors(
+    repo: &Repository,
+    commit: &str,
+) -> Result<(BTreeSet<String>, Vec<String>)> {
+    let (graph, shallow_skipped) =
+        HistoryReader::new(repo.kcs_dir()).all_parents_tolerant(commit)?;
+    let ancestors = graph
+        .nodes_in_visit_order()
+        .map(|node| node.commit_hash.clone())
+        .collect::<BTreeSet<_>>();
+    Ok((ancestors, shallow_skipped))
+}
+
+/// Install (or replace) the `kcs_target_ancestors` temp table the ancestor-
+/// or-equal correlated `EXISTS` clauses join against (PC38/PC41: correlated
+/// `EXISTS`, never a plain `JOIN`, per 05 §1.6's implementation rule — the
+/// callers in `main.rs` follow that rule; this only populates the lookup
+/// table they query).
+pub(super) fn install_target_ancestors(
+    conn: &Connection,
+    ancestors: &BTreeSet<String>,
+) -> Result<()> {
+    let tx = conn
+        .unchecked_transaction()
+        .map_err(|error| KcsError::schema(error.to_string()))?;
+    tx.execute_batch(
+        "DROP TABLE IF EXISTS temp.kcs_target_ancestors;
+         CREATE TEMP TABLE kcs_target_ancestors (
+             commit_hash TEXT PRIMARY KEY
+         ) WITHOUT ROWID;",
+    )
+    .map_err(|error| KcsError::schema(error.to_string()))?;
+    for commit_hash in ancestors {
+        tx.execute(
+            "INSERT INTO kcs_target_ancestors(commit_hash) VALUES (?1)",
+            rusqlite::params![commit_hash],
+        )
+        .map_err(|error| KcsError::schema(error.to_string()))?;
+    }
+    tx.commit()
+        .map_err(|error| KcsError::schema(error.to_string()))
 }
 
 fn plan_all_history(graph: &HistoryGraph) -> Result<Vec<SearchHistoryBinding>> {

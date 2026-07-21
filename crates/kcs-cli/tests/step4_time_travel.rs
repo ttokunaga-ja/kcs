@@ -622,10 +622,17 @@ fn ct4_timetravel_004_include_deleted_uses_final_version_and_frozen_tree() {
         .collect::<Vec<_>>();
     assert_eq!(b_paths, ["survivor.md"]);
 
-    // Make the derived manifest unusable. Cursor replay must use the signed
-    // snapshot/tree, not current HEAD and never manifest.json as truth.
-    fs::write(dir.path().join(".kcs/manifest.json"), b"{}\n").unwrap();
-    let page2_after = json_success(
+    // PC19/PC21 (05 §1.5 L180-191): the re-index above changed `chunk_fts`
+    // content (one of PC20's 6 `index_generation` rotation triggers), so the
+    // page-1 cursor from before it is now rejected — "再検索が正" — instead
+    // of silently replaying against a stale snapshot whose BM25 ranking basis
+    // (corpus-wide document-frequency/average-length statistics) has since
+    // shifted. This supersedes the pre-PC19 "cursor replay uses the signed
+    // snapshot/tree, never current HEAD/manifest.json" contract this test
+    // used to exercise past this exact same re-index — that invariant still
+    // holds for anything short of an index_generation change, but a `chunk_fts`
+    // content change is no longer one of the cases a frozen cursor survives.
+    let err = json_failure(
         &dir,
         &[
             "search",
@@ -638,8 +645,13 @@ fn ct4_timetravel_004_include_deleted_uses_final_version_and_frozen_tree() {
             "--limit",
             "1",
         ],
+        2,
     );
-    assert_eq!(page2_before["results"], page2_after["results"]);
+    assert_eq!(err["error_code"], "KCS-E-SEARCH-CURSOR-001");
+    assert_eq!(err["context"]["reason"], "index_generation_mismatch");
+    // `page2_before` (replayed prior to the re-index) is untouched by this —
+    // still a normal, valid page.
+    assert!(!page2_before["results"].as_array().unwrap().is_empty());
 }
 
 #[test]
@@ -1300,12 +1312,55 @@ fn ct4_timetravel_007_shallow_history_rejects_cached_tree_rows() {
     drop(conn);
     discard_commit_tree(&dir, &c1);
 
-    for selector in [vec!["--at", c1.as_str()], vec!["--all-history"]] {
-        let mut args = vec!["search", "shallowhistoryfixture", "--scope", ".", "--text"];
-        args.extend(selector);
-        let error = json_failure(&dir, &args, 1);
-        assert_eq!(error["error_code"], "KCS-E-COMMIT-SHALLOW-001");
-    }
+    // `--at c1` targets the shallow commit itself (PC47 — 05 §2.2 "kcs search
+    // --at <shallow-commit>" — still hard-fails: the exact target's whole tree
+    // is required, so there is no partial degradation to fall back to).
+    let error = json_failure(
+        &dir,
+        &[
+            "search",
+            "shallowhistoryfixture",
+            "--scope",
+            ".",
+            "--text",
+            "--at",
+            c1.as_str(),
+        ],
+        1,
+    );
+    assert_eq!(error["error_code"], "KCS-E-COMMIT-SHALLOW-001");
+
+    // PC45/PC46 (05 §1.6/§2.2): `--all-history` walks FROM HEAD (C2, not
+    // shallow) and encounters the shallow c1 only as an *ancestor* mid-walk —
+    // that is skipped and counted (`shallow_skipped`) rather than hard-failing
+    // the whole scope/command, superseding the pre-PC45 contract this loop
+    // used to assert (a shallow ancestor anywhere in the walk was a command-
+    // wide `KCS-E-COMMIT-SHALLOW-001`/exit 1, taking down even an unrelated
+    // healthy sibling scope in a multi-scope search). The fixture's only
+    // occurrence of the search term lived in c1's (now-shallow) content, so
+    // the walk finds nothing else, but it still returns a normal (empty)
+    // partial page instead of erroring.
+    let all_history = kcs(
+        &dir,
+        &[
+            "search",
+            "shallowhistoryfixture",
+            "--scope",
+            ".",
+            "--text",
+            "--all-history",
+        ],
+        None,
+    )
+    .arg("--json")
+    .assert()
+    .code(3)
+    .get_output()
+    .stdout
+    .clone();
+    let all_history: Value = serde_json::from_slice(&all_history).unwrap();
+    assert!(results(&all_history).is_empty());
+    assert_eq!(all_history["searched_scopes"][0]["shallow_skipped"], 1);
 
     // A cursor snapshot that becomes shallow also hard-fails; it cannot serve a
     // partial page from cached HEAD rows.

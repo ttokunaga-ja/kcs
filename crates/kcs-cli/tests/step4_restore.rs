@@ -72,11 +72,15 @@ fn path_text(path: &std::path::Path) -> String {
 #[test]
 fn ct4_restore_commit_restores_verified_files_and_empty_commit() {
     let dir = TempDir::new().unwrap();
+    // PA16/17 (§D, U25): `--to` must resolve OUTSIDE the scope root
+    // entirely (not merely outside `.kcs`) — a sibling TempDir stands in for
+    // "some other directory on disk" throughout this file.
+    let out = TempDir::new().unwrap();
     init(&dir);
     fs::write(dir.path().join("a.md"), b"alpha").unwrap();
     fs::write(dir.path().join("b.md"), b"beta").unwrap();
     let commit = snapshot(&dir, "two files");
-    let destination = dir.path().join("recovered");
+    let destination = out.path().join("recovered");
     let output = json_success(
         &dir,
         &["restore", &commit, "--to", &path_text(&destination)],
@@ -92,7 +96,7 @@ fn ct4_restore_commit_restores_verified_files_and_empty_commit() {
     fs::remove_file(dir.path().join("a.md")).unwrap();
     fs::remove_file(dir.path().join("b.md")).unwrap();
     let empty = snapshot(&dir, "empty");
-    let empty_destination = dir.path().join("empty-recovered");
+    let empty_destination = out.path().join("empty-recovered");
     let output = json_success(
         &dir,
         &["restore", &empty, "--to", &path_text(&empty_destination)],
@@ -104,13 +108,14 @@ fn ct4_restore_commit_restores_verified_files_and_empty_commit() {
 #[test]
 fn ct4_restore_deleted_path_uses_newest_first_parent_binding() {
     let dir = TempDir::new().unwrap();
+    let out = TempDir::new().unwrap();
     init(&dir);
     fs::write(dir.path().join("deleted.md"), b"historical").unwrap();
     let old_commit = snapshot(&dir, "old");
     fs::remove_file(dir.path().join("deleted.md")).unwrap();
     snapshot(&dir, "deleted");
 
-    let destination = dir.path().join("path-restore");
+    let destination = out.path().join("path-restore");
     let output = json_success(
         &dir,
         &["restore", "deleted.md", "--to", &path_text(&destination)],
@@ -127,11 +132,12 @@ fn ct4_restore_deleted_path_uses_newest_first_parent_binding() {
 #[test]
 fn ct4_restore_preflight_no_clobber_and_force_confirmation() {
     let dir = TempDir::new().unwrap();
+    let out = TempDir::new().unwrap();
     init(&dir);
     fs::write(dir.path().join("a.md"), b"alpha").unwrap();
     fs::write(dir.path().join("b.md"), b"beta").unwrap();
     let commit = snapshot(&dir, "source");
-    let destination = dir.path().join("conflict");
+    let destination = out.path().join("conflict");
     fs::create_dir(&destination).unwrap();
     fs::write(destination.join("b.md"), b"existing").unwrap();
 
@@ -177,6 +183,7 @@ fn ct4_restore_preflight_no_clobber_and_force_confirmation() {
 #[test]
 fn ct4_restore_source_preflight_is_atomic_and_raw_shorthand_is_invalid() {
     let dir = TempDir::new().unwrap();
+    let out = TempDir::new().unwrap();
     init(&dir);
     fs::write(dir.path().join("a.md"), b"alpha").unwrap();
     fs::write(dir.path().join("b.md"), b"beta").unwrap();
@@ -197,21 +204,26 @@ fn ct4_restore_source_preflight_is_atomic_and_raw_shorthand_is_invalid() {
     );
     assert_eq!(raw_error["error_code"], "KCS-E-CONFIG-USAGE-001");
 
+    // PA47-50 (§O): the raw object is gone with NO purge marker (tombstone
+    // or erase receipt) at all — LC14(a)/PA48(c)'s unmarked-absence
+    // corruption suspicion, not the old generic not-found every raw absence
+    // used to collapse into.
     let store = ObjectStore::new(dir.path().join(".kcs"));
     fs::remove_file(store.object_path(ObjectKind::Raw, &raw_hash).unwrap()).unwrap();
-    let destination = dir.path().join("missing-raw");
+    let destination = out.path().join("missing-raw");
     let error = json_failure(
         &dir,
         &["restore", &commit, "--to", &path_text(&destination)],
         4,
     );
-    assert_eq!(error["error_code"], "KCS-E-PURGE-NOT-FOUND-001");
+    assert_eq!(error["error_code"], "KCS-E-STORE-CORRUPT-001");
     assert!(!destination.exists());
 }
 
 #[test]
 fn ct4_restore_source_authorization_is_serialized_by_purge_publication_lock() {
     let dir = TempDir::new().unwrap();
+    let out = TempDir::new().unwrap();
     init(&dir);
     fs::write(dir.path().join("doc.md"), b"authorized bytes").unwrap();
     let commit = snapshot(&dir, "source");
@@ -229,7 +241,7 @@ fn ct4_restore_source_authorization_is_serialized_by_purge_publication_lock() {
         .unwrap(),
     )
     .unwrap();
-    let destination = dir.path().join("must-not-publish");
+    let destination = out.path().join("must-not-publish");
     let error = json_failure(
         &dir,
         &["restore", &commit, "--to", &path_text(&destination)],
@@ -243,6 +255,7 @@ fn ct4_restore_source_authorization_is_serialized_by_purge_publication_lock() {
 #[test]
 fn ct4_restore_rejects_shallow_tombstoned_and_store_destinations() {
     let tombstoned = TempDir::new().unwrap();
+    let tombstoned_out = TempDir::new().unwrap();
     init(&tombstoned);
     fs::write(tombstoned.path().join("doc.md"), b"secret").unwrap();
     let commit = snapshot(&tombstoned, "source");
@@ -271,12 +284,16 @@ fn ct4_restore_rejects_shallow_tombstoned_and_store_destinations() {
             "restore",
             &commit,
             "--to",
-            &path_text(&tombstoned.path().join("dead")),
+            &path_text(&tombstoned_out.path().join("dead")),
         ],
         4,
     );
     assert_eq!(error["error_code"], "KCS-E-PURGE-TOMBSTONED-001");
 
+    // PA16/17 (§D, U25): the scope-root/`.kcs`-descendant destination
+    // rejection now uses `KCS-E-CONFIG-USAGE-001` (exit 2), not the generic
+    // `KCS-E-COMMIT-RESTORE-UNSAFE-001` (exit 1) every other structural
+    // rejection in this test file still uses.
     for forbidden in [
         tombstoned.path().to_path_buf(),
         tombstoned.path().join(".kcs/restore"),
@@ -284,12 +301,13 @@ fn ct4_restore_rejects_shallow_tombstoned_and_store_destinations() {
         let error = json_failure(
             &tombstoned,
             &["restore", &commit, "--to", &path_text(&forbidden)],
-            1,
+            2,
         );
-        assert_eq!(error["error_code"], "KCS-E-COMMIT-RESTORE-UNSAFE-001");
+        assert_eq!(error["error_code"], "KCS-E-CONFIG-USAGE-001");
     }
 
     let shallow = TempDir::new().unwrap();
+    let shallow_out = TempDir::new().unwrap();
     init(&shallow);
     fs::write(shallow.path().join("doc.md"), b"content").unwrap();
     let commit = snapshot(&shallow, "source");
@@ -305,7 +323,7 @@ fn ct4_restore_rejects_shallow_tombstoned_and_store_destinations() {
             "restore",
             &commit,
             "--to",
-            &path_text(&shallow.path().join("shallow")),
+            &path_text(&shallow_out.path().join("shallow")),
         ],
         1,
     );
@@ -315,6 +333,7 @@ fn ct4_restore_rejects_shallow_tombstoned_and_store_destinations() {
 #[test]
 fn ct4_restore_tag_wins_over_same_named_historical_path() {
     let dir = TempDir::new().unwrap();
+    let out = TempDir::new().unwrap();
     init(&dir);
     fs::write(dir.path().join("tagged.md"), b"tag target").unwrap();
     let tagged_commit = snapshot(&dir, "tag target");
@@ -322,7 +341,7 @@ fn ct4_restore_tag_wins_over_same_named_historical_path() {
     fs::write(dir.path().join("same"), b"path target").unwrap();
     snapshot(&dir, "path exists");
 
-    let destination = dir.path().join("tag-precedence");
+    let destination = out.path().join("tag-precedence");
     let output = json_success(&dir, &["restore", "same", "--to", &path_text(&destination)]);
     assert_eq!(output["source_kind"], "commit");
     assert_eq!(output["source_commit"], tagged_commit);
@@ -336,6 +355,7 @@ fn ct4_restore_tag_wins_over_same_named_historical_path() {
 #[test]
 fn ct4_restore_evidence_uses_exact_attested_commit_path_and_raw() {
     let dir = TempDir::new().unwrap();
+    let out = TempDir::new().unwrap();
     init(&dir);
     fs::write(dir.path().join("evidence.md"), b"attested bytes").unwrap();
     json_success(&dir, &["index", "--offline", "--approve"]);
@@ -378,7 +398,7 @@ fn ct4_restore_evidence_uses_exact_attested_commit_path_and_raw() {
     })
     .to_string();
     fs::remove_file(dir.path().join("evidence.md")).unwrap();
-    let destination = dir.path().join("evidence-restore");
+    let destination = out.path().join("evidence-restore");
     let output = json_success(
         &dir,
         &["restore", &pointer, "--to", &path_text(&destination)],
@@ -390,7 +410,7 @@ fn ct4_restore_evidence_uses_exact_attested_commit_path_and_raw() {
         b"attested bytes"
     );
 
-    let stdin_destination = dir.path().join("evidence-stdin");
+    let stdin_destination = out.path().join("evidence-stdin");
     let stdin_output = kcs(
         &dir,
         &["restore", "-", "--to", &path_text(&stdin_destination)],
@@ -409,7 +429,7 @@ fn ct4_restore_evidence_uses_exact_attested_commit_path_and_raw() {
         b"attested bytes"
     );
 
-    let uri_destination = dir.path().join("evidence-uri");
+    let uri_destination = out.path().join("evidence-uri");
     let uri_output = json_success(
         &dir,
         &["restore", &uri, "--to", &path_text(&uri_destination)],
@@ -457,13 +477,14 @@ fn ct4_restore_refuses_symlink_and_hardlink_destination_leaves() {
     use std::os::unix::fs::symlink;
 
     let dir = TempDir::new().unwrap();
+    let out = TempDir::new().unwrap();
     init(&dir);
     fs::write(dir.path().join("doc.md"), b"restored").unwrap();
     let commit = snapshot(&dir, "source");
     let outside = dir.path().join("outside.txt");
     fs::write(&outside, b"outside").unwrap();
 
-    let symlink_destination = dir.path().join("symlink-dest");
+    let symlink_destination = out.path().join("symlink-dest");
     fs::create_dir(&symlink_destination).unwrap();
     symlink(&outside, symlink_destination.join("doc.md")).unwrap();
     let error = json_failure(
@@ -481,7 +502,7 @@ fn ct4_restore_refuses_symlink_and_hardlink_destination_leaves() {
     assert_eq!(error["error_code"], "KCS-E-COMMIT-RESTORE-UNSAFE-001");
     assert_eq!(fs::read(&outside).unwrap(), b"outside");
 
-    let hardlink_destination = dir.path().join("hardlink-dest");
+    let hardlink_destination = out.path().join("hardlink-dest");
     fs::create_dir(&hardlink_destination).unwrap();
     fs::hard_link(&outside, hardlink_destination.join("doc.md")).unwrap();
     let error = json_failure(

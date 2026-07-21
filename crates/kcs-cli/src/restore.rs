@@ -25,6 +25,9 @@ const MAX_POINTER_INPUT_BYTES: u64 = 1024 * 1024;
 const MAX_RESTORE_TOTAL_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 const MAX_DESTINATION_ENTRIES: usize = 100_000;
 const MAX_DESTINATION_NAME_BYTES: u64 = 16 * 1024 * 1024;
+/// §E (U26) reserved evacuation/quarantine namespace suffixes (PA20-26).
+const RESTORE_BACKUP_SUFFIX: &str = ".kcs-restore-bak";
+const RESTORE_QUARANTINE_SUFFIX: &str = ".kcs-restore-quarantine";
 
 #[derive(Debug, Clone)]
 struct RestoreItem {
@@ -78,14 +81,18 @@ pub(super) fn run(args: RestoreArgs) -> Result<Value> {
     // LC45 (item 2): a separate check from §I's checkpoint — see
     // `check_index_generation_current`'s doc comment.
     super::check_index_generation_current(&source.target.kcs_dir)?;
-    let destination = validate_destination(&args.to, &source.target)?;
-    let _initial_preflight = preflight(&source, &destination, args.force)?;
+    let validated_destination = validate_destination(&args.to, &source.target)?;
+    let _initial_preflight = preflight(&source, &validated_destination.path, args.force)?;
 
     if args.force && !args.yes {
         confirm_force()?;
     }
 
-    let destination_dir = open_destination_dir(&destination, true)?;
+    let destination_dir = open_destination_dir(
+        &validated_destination.path,
+        true,
+        validated_destination.identity.as_ref(),
+    )?;
     // Capability-directory handles close destination path races but do not
     // serialize source authorization against purge. Restore intentionally stays
     // off `.kcs/.lock`; instead it shares this narrow publication lock with
@@ -147,9 +154,13 @@ fn resolve_evidence_source(operand: &str) -> Result<RestoreSource> {
     };
     // Dead-source visibility wins over derivative availability/corruption.
     // The evidence pointer's exact raw identity is known before any normalized
-    // chunk is read, so apply the purge gates at this point.
-    check_purge_state(&target, &pointer.raw_hash)?;
+    // chunk is read, so apply the purge gates at this point. PA47-50: raw
+    // presence is resolved FIRST so the canonical dispatch inside
+    // `check_purge_state` can distinguish an ordinary `erased` absence
+    // (PA48(a)) from a `retired`/unmarked absence (PA48(b)/(c), corruption).
     let store = ObjectStore::new(&target.kcs_dir);
+    let raw_present = raw_present_now(&target, &pointer.raw_hash)?;
+    check_purge_state(&target, &pointer.raw_hash, raw_present)?;
     match store.inspect_object(ObjectKind::Raw, &pointer.raw_hash) {
         Ok(_) => {}
         Err(error) if super::is_store_not_found(&error) => {
@@ -355,20 +366,24 @@ fn preflight(
     let mut files = Vec::with_capacity(source.files.len());
 
     for item in &source.files {
-        check_purge_state(&source.target, &item.raw_hash)?;
-        let size_bytes = match verified_raws.get(&item.raw_hash) {
-            Some(size) => *size,
+        // PA47-50: raw presence resolved first, fed to the canonical
+        // dispatch (replacing the old "check_purge_state then separately
+        // fall back to a generic not-found on any absence" 2-stage shape).
+        let (size_bytes, raw_present) = match verified_raws.get(&item.raw_hash) {
+            Some(size) => (*size, true),
             None => match store.inspect_object(ObjectKind::Raw, &item.raw_hash) {
                 Ok(metadata) => {
                     verified_raws.insert(item.raw_hash.clone(), metadata.size_bytes);
-                    metadata.size_bytes
+                    (metadata.size_bytes, true)
                 }
-                Err(error) if super::is_store_not_found(&error) => {
-                    return Err(missing_live_raw_error(&source.target, &item.raw_hash));
-                }
+                Err(error) if super::is_store_not_found(&error) => (0, false),
                 Err(error) => return Err(error),
             },
         };
+        check_purge_state(&source.target, &item.raw_hash, raw_present)?;
+        // PA21: same-name evacuation/quarantine residue is checked before any
+        // mutation, independent of `--force`/destination existence.
+        check_no_stale_evacuation_namespace_std(destination, &item.path_at_commit)?;
         total_bytes = total_bytes.saturating_add(size_bytes);
         if total_bytes > MAX_RESTORE_TOTAL_BYTES {
             return Err(KcsError::new(
@@ -437,20 +452,23 @@ fn preflight_in_dir(
     let mut files = Vec::with_capacity(source.files.len());
 
     for item in &source.files {
-        check_purge_state(&source.target, &item.raw_hash)?;
-        let size_bytes = match verified_raws.get(&item.raw_hash) {
-            Some(size) => *size,
+        // PA47-50: raw presence resolved first, fed to the canonical
+        // dispatch.
+        let (size_bytes, raw_present) = match verified_raws.get(&item.raw_hash) {
+            Some(size) => (*size, true),
             None => match store.inspect_object(ObjectKind::Raw, &item.raw_hash) {
                 Ok(metadata) => {
                     verified_raws.insert(item.raw_hash.clone(), metadata.size_bytes);
-                    metadata.size_bytes
+                    (metadata.size_bytes, true)
                 }
-                Err(error) if super::is_store_not_found(&error) => {
-                    return Err(missing_live_raw_error(&source.target, &item.raw_hash));
-                }
+                Err(error) if super::is_store_not_found(&error) => (0, false),
                 Err(error) => return Err(error),
             },
         };
+        check_purge_state(&source.target, &item.raw_hash, raw_present)?;
+        // PA21: same-name evacuation/quarantine residue is checked before any
+        // mutation, independent of `--force`/destination existence.
+        check_no_stale_evacuation_namespace(destination, &item.path_at_commit)?;
         total_bytes = total_bytes.saturating_add(size_bytes);
         if total_bytes > MAX_RESTORE_TOTAL_BYTES {
             return Err(KcsError::new(
@@ -527,6 +545,19 @@ fn validate_source_names(files: &[RestoreItem]) -> Result<()> {
 }
 
 fn validate_restore_name(path: &str, raw_hash: &str) -> Result<()> {
+    // PA20 (§E, U26): the evacuation/quarantine namespace is reserved —
+    // refuse before any expansion (not even a private temp) rather than let
+    // a historically-legitimate file with this literal suffix collide with
+    // the bak/quarantine protocol below.
+    if path.ends_with(RESTORE_BACKUP_SUFFIX) || path.ends_with(RESTORE_QUARANTINE_SUFFIX) {
+        return Err(KcsError::new(
+            "KCS-E-COMMIT-RESTORE-UNSAFE-001",
+            "restore source name uses the reserved evacuation/quarantine namespace; \
+             restore it under a different name instead",
+            json!({ "path_at_commit": path }),
+            ExitCode::Failure,
+        ));
+    }
     let entry = TreeEntry {
         path: path.to_owned(),
         entry_type: "file".to_owned(),
@@ -543,7 +574,24 @@ fn validate_restore_name(path: &str, raw_hash: &str) -> Result<()> {
     })
 }
 
-fn validate_destination(input: &Path, target: &ScopeTarget) -> Result<PathBuf> {
+/// PA16/17 (§D, U25): the canonically-resolved `--to` destination, plus the
+/// `lstat` (dev/inode) identity captured at THIS containment-check moment —
+/// PA18 requires `open_destination_dir` compare against this exact value
+/// (never re-fetched), so a TOCTOU component swap between this check and the
+/// open below is caught rather than silently trusted.
+struct ValidatedDestination {
+    path: PathBuf,
+    /// `None` when the canonical destination does not exist yet (a normal
+    /// case — `effective_destination` canonicalizes only the deepest
+    /// EXISTING ancestor and re-appends the still-missing suffix;
+    /// `open_destination_dir` creates the rest). PA18's containment binding
+    /// only applies once there is a pre-existing entity to bind to; a
+    /// freshly-created leaf has no prior identity to have been swapped away
+    /// from.
+    identity: Option<DestinationIdentity>,
+}
+
+fn validate_destination(input: &Path, target: &ScopeTarget) -> Result<ValidatedDestination> {
     let destination = normalize_absolute(input)?;
     verify_destination_input_chain(&destination, target)?;
     let destination = effective_destination(&destination)?;
@@ -552,17 +600,37 @@ fn validate_destination(input: &Path, target: &ScopeTarget) -> Result<PathBuf> {
         .repo_root
         .canonicalize()
         .map_err(|error| KcsError::io(error.to_string(), target.repo_root.display().to_string()))?;
-    let kcs_dir = target
-        .kcs_dir
-        .canonicalize()
-        .map_err(|error| KcsError::io(error.to_string(), target.kcs_dir.display().to_string()))?;
-    if destination == scope_root || destination == kcs_dir || destination.starts_with(&kcs_dir) {
-        return Err(unsafe_restore_error(
-            &destination,
-            "restore destination must not be the scope root, .kcs, or a .kcs descendant",
+    // PA16(d): "scope root 配下" is checked in full — not just the narrower
+    // `.kcs` descendant test the prior implementation used — so an ordinary
+    // subdirectory of the scope root (not `.kcs` at all) is caught too.
+    // PA16/17: `KCS-E-CONFIG-USAGE-001` (exit 2), not the generic
+    // `KCS-E-COMMIT-RESTORE-UNSAFE-001` (exit 1) `unsafe_restore_error`
+    // gives every other structural-safety rejection in this module — the new
+    // rule specifically wants the usage-error family so automation can
+    // recognize "this destination is categorically forbidden" distinctly
+    // from "this destination had a transient/OS-level problem".
+    if destination == scope_root || destination.starts_with(&scope_root) {
+        return Err(KcsError::new(
+            "KCS-E-CONFIG-USAGE-001",
+            "restore destination must not be the scope root or a scope-root descendant (.kcs included)",
+            json!({ "path": destination }),
+            ExitCode::InvalidUsage,
         ));
     }
-    Ok(destination)
+    let identity = match fs::symlink_metadata(&destination) {
+        Ok(_) => Some(destination_lstat_identity(&destination)?),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => {
+            return Err(KcsError::io(
+                error.to_string(),
+                destination.display().to_string(),
+            ));
+        }
+    };
+    Ok(ValidatedDestination {
+        path: destination,
+        identity,
+    })
 }
 
 /// macOS commonly exposes a canonical scope under `/private/var/...` through
@@ -722,7 +790,18 @@ fn effective_destination(path: &Path) -> Result<PathBuf> {
     Ok(canonical)
 }
 
-fn open_destination_dir(path: &Path, create_missing: bool) -> Result<DestinationDir> {
+/// `expected_identity`: PA18 (§D, U25) — when set, the dev/inode of the
+/// directory this call actually opens must match the value
+/// [`destination_lstat_identity`] captured at `validate_destination`'s
+/// containment-check moment (never re-fetched here — re-fetching would defeat
+/// the point, since it would just re-observe whatever a TOCTOU swap left
+/// behind). `None` skips the check (used by call sites, and tests, that never
+/// went through `validate_destination`).
+fn open_destination_dir(
+    path: &Path,
+    create_missing: bool,
+    expected_identity: Option<&DestinationIdentity>,
+) -> Result<DestinationDir> {
     let mut root = PathBuf::new();
     let mut descendants = Vec::<OsString>::new();
     let mut saw_root = false;
@@ -804,6 +883,16 @@ fn open_destination_dir(path: &Path, create_missing: bool) -> Result<Destination
             path,
             "destination ancestor is not a real non-reparse directory",
         ));
+    }
+    if let Some(expected) = expected_identity {
+        if !expected.matches_opened(&metadata) {
+            return Err(KcsError::new(
+                "KCS-E-CONFIG-USAGE-001",
+                "restore destination identity changed between validation and open",
+                json!({ "path": path }),
+                ExitCode::InvalidUsage,
+            ));
+        }
     }
     Ok(DestinationDir {
         path: path.to_path_buf(),
@@ -976,6 +1065,78 @@ fn unsafe_restore_error(path: &Path, message: &str) -> KcsError {
     )
 }
 
+/// PA18 (§D, U25): the dev/inode identity captured by `lstat` at
+/// `validate_destination`'s containment-check moment. Compared, never
+/// re-derived, against the directory `open_destination_dir` actually opens.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DestinationIdentity {
+    #[cfg(unix)]
+    dev: u64,
+    #[cfg(unix)]
+    ino: u64,
+    #[cfg(windows)]
+    volume_serial_number: u32,
+    #[cfg(windows)]
+    file_index: u64,
+    #[cfg(not(any(unix, windows)))]
+    len: u64,
+}
+
+impl DestinationIdentity {
+    #[cfg(unix)]
+    fn matches_opened(&self, opened: &fs::Metadata) -> bool {
+        use std::os::unix::fs::MetadataExt;
+        self.dev == opened.dev() && self.ino == opened.ino()
+    }
+
+    #[cfg(windows)]
+    fn matches_opened(&self, opened: &fs::Metadata) -> bool {
+        use std::os::windows::fs::MetadataExt;
+        Some(self.volume_serial_number) == opened.volume_serial_number()
+            && Some(self.file_index) == opened.file_index()
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    fn matches_opened(&self, opened: &fs::Metadata) -> bool {
+        self.len == opened.len()
+    }
+}
+
+fn destination_lstat_identity(path: &Path) -> Result<DestinationIdentity> {
+    let metadata = fs::symlink_metadata(path)
+        .map_err(|error| KcsError::io(error.to_string(), path.display().to_string()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        Ok(DestinationIdentity {
+            dev: metadata.dev(),
+            ino: metadata.ino(),
+        })
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        let (Some(volume_serial_number), Some(file_index)) =
+            (metadata.volume_serial_number(), metadata.file_index())
+        else {
+            return Err(unsafe_restore_error(
+                path,
+                "destination identity is unavailable for this filesystem",
+            ));
+        };
+        Ok(DestinationIdentity {
+            volume_serial_number,
+            file_index,
+        })
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        Ok(DestinationIdentity {
+            len: metadata.len(),
+        })
+    }
+}
+
 fn confirm_force() -> Result<()> {
     if !std::io::stdin().is_terminal() || !std::io::stderr().is_terminal() {
         return Err(confirmation_rejected(
@@ -1009,6 +1170,162 @@ fn confirmation_rejected(message: &str) -> KcsError {
     )
 }
 
+/// PA27-29 (§F, U27): the closed 7-value `conflict_kind` enum every restore
+/// conflict termination carries. `retry_disposition` follows mechanically:
+/// `transient` iff `PublishRace` (a competing-write race that leaves no
+/// residue blocking the next preflight), `manual_action` for every other
+/// value (PA29).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RestoreConflictKind {
+    PublishRace,
+    QuarantineRenameRace,
+    QuarantineMismatch,
+    BackupMismatch,
+    RestoreRenameRace,
+    StaleBackup,
+    StaleQuarantine,
+}
+
+impl RestoreConflictKind {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::PublishRace => "publish_race",
+            Self::QuarantineRenameRace => "quarantine_rename_race",
+            Self::QuarantineMismatch => "quarantine_mismatch",
+            Self::BackupMismatch => "backup_mismatch",
+            Self::RestoreRenameRace => "restore_rename_race",
+            Self::StaleBackup => "stale_backup",
+            Self::StaleQuarantine => "stale_quarantine",
+        }
+    }
+
+    const fn retry_disposition(self) -> &'static str {
+        match self {
+            Self::PublishRace => "transient",
+            _ => "manual_action",
+        }
+    }
+}
+
+/// PA27 (§F, U27): every restore competing-write/evacuation/quarantine
+/// termination uses this single error code + retryable exit 3, distinguished
+/// only by `context.conflict_kind` (PA28) — never a scenario-specific code.
+fn restore_conflict_error(kind: RestoreConflictKind, path: &Path) -> KcsError {
+    KcsError::new(
+        "KCS-E-COMMIT-RESTORE-CONFLICT-001",
+        "restore encountered a conflicting destination state",
+        json!({
+            "path": path,
+            "conflict_kind": kind.as_str(),
+            "retry_disposition": kind.retry_disposition(),
+        }),
+        ExitCode::PartialFailure,
+    )
+}
+
+/// PA20/PA21 reserved-namespace suffix helpers.
+fn backup_name(path_at_commit: &str) -> String {
+    format!("{path_at_commit}{RESTORE_BACKUP_SUFFIX}")
+}
+
+fn quarantine_name(path_at_commit: &str) -> String {
+    format!("{path_at_commit}{RESTORE_QUARANTINE_SUFFIX}")
+}
+
+/// PA21 (§E, U26): a same-name evacuation/quarantine residue is checked
+/// before ANY mutation, regardless of `--force` or destination existence
+/// (limiting the check to `--force` would let a non-`--force` retry, after
+/// the destination itself disappeared, silently walk past a still-present
+/// stale backup/quarantine from an earlier crashed attempt).
+fn check_no_stale_evacuation_namespace_std(destination: &Path, path_at_commit: &str) -> Result<()> {
+    for (suffix, kind) in [
+        (RESTORE_BACKUP_SUFFIX, RestoreConflictKind::StaleBackup),
+        (
+            RESTORE_QUARANTINE_SUFFIX,
+            RestoreConflictKind::StaleQuarantine,
+        ),
+    ] {
+        let candidate = destination.join(format!("{path_at_commit}{suffix}"));
+        match fs::symlink_metadata(&candidate) {
+            Ok(_) => return Err(restore_conflict_error(kind, &candidate)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(KcsError::io(
+                    error.to_string(),
+                    candidate.display().to_string(),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn check_no_stale_evacuation_namespace(
+    destination: &DestinationDir,
+    path_at_commit: &str,
+) -> Result<()> {
+    for (suffix, kind) in [
+        (RESTORE_BACKUP_SUFFIX, RestoreConflictKind::StaleBackup),
+        (
+            RESTORE_QUARANTINE_SUFFIX,
+            RestoreConflictKind::StaleQuarantine,
+        ),
+    ] {
+        let name = format!("{path_at_commit}{suffix}");
+        match cap_fs::stat(
+            &destination.handle,
+            Path::new(&name),
+            cap_fs::FollowSymlinks::No,
+        ) {
+            Ok(_) => {
+                return Err(restore_conflict_error(kind, &destination.path.join(&name)));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(KcsError::io(
+                    error.to_string(),
+                    destination.path.join(&name).display().to_string(),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+#[derive(Debug)]
+enum MoveOutcome {
+    AlreadyExists,
+    Io(KcsError),
+}
+
+/// PA22/23/25/26: a portable no-replace rename, built from the same
+/// hard-link-then-unlink idiom `publish_one`'s non-overwrite path already
+/// used (`cap_fs` has no `RENAME_NOREPLACE`/`renamex_np(RENAME_EXCL)`
+/// wrapper — this achieves the same atomicity: `hard_link` fails
+/// `AlreadyExists` without touching `from` if `to` already exists, so `from`
+/// is only unlinked once the new name is confirmed exclusively claimed).
+fn no_replace_move(
+    destination: &DestinationDir,
+    from: &Path,
+    to: &Path,
+) -> std::result::Result<(), MoveOutcome> {
+    match cap_fs::hard_link(&destination.handle, from, &destination.handle, to) {
+        Ok(()) => cap_fs::remove_file(&destination.handle, from).map_err(|error| {
+            MoveOutcome::Io(KcsError::io(
+                error.to_string(),
+                destination.path.join(from).display().to_string(),
+            ))
+        }),
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            Err(MoveOutcome::AlreadyExists)
+        }
+        Err(error) => Err(MoveOutcome::Io(KcsError::io(
+            error.to_string(),
+            destination.path.join(to).display().to_string(),
+        ))),
+    }
+}
+
 fn missing_live_raw_error(target: &ScopeTarget, raw_hash: &str) -> KcsError {
     KcsError::new(
         "KCS-E-PURGE-NOT-FOUND-001",
@@ -1027,14 +1344,37 @@ fn missing_live_raw_error(target: &ScopeTarget, raw_hash: &str) -> KcsError {
 /// receipt (LC10's worked example), so checking the tombstone alone can
 /// wrongly reject a restore source canonical dispatch would allow, and the
 /// reverse (a tombstone's own tail already `retired`, but a later-epoch
-/// receipt is canonically `purged`) can wrongly let one through. Only the
-/// `purged` branch (LC11) is handled here — restore's other call sites into
-/// this function do not uniformly know the target raw's current CAS
-/// presence, so the raw-presence-dependent LC12/13/14 branches
-/// (`enforce_canonical_marker_barrier`'s fuller dispatch, used by
-/// open/view) are not replicated here; `barrier_blocks` below keeps its
-/// existing in-progress-journal behavior unchanged.
-fn check_purge_state(target: &ScopeTarget, raw_hash: &str) -> Result<()> {
+/// receipt is canonically `purged`) can wrongly let one through.
+///
+/// PA47-50 (§O): all four branches (i)-(iv) of `main.rs`'s
+/// `enforce_canonical_marker_barrier` — the dispatch `open`/`view` use — are
+/// now replicated here (not just branch (i)/LC11 as before), fixing PA48's
+/// gap: branches (ii)/(iii)/(iv) used to collapse into each call site's own
+/// generic "raw absent -> KCS-E-PURGE-NOT-FOUND-001" fallback, giving a
+/// `retired`-with-raw-missing or an unmarked (no marker at all) absence the
+/// SAME error/exit as a perfectly ordinary `erased` absence — hiding real
+/// store corruption from any automation watching exit_code/error_code to
+/// tell "purge did this on purpose" apart from "something is broken, run
+/// `kcs repair --verify-objects`". This is an INDEPENDENT implementation with
+/// the SAME decision table (05 §3.5 L907's "入口を問わず...同じ" requirement)
+/// — reusing `main.rs`'s own error constructors via `super::` for
+/// byte-identical error codes/bodies — rather than a call-through to
+/// `enforce_canonical_marker_barrier` itself, specifically so this keeps its
+/// erase-receipt-parse-failure leniency below (erase receipts are
+/// fsck-only/non-public; `enforce_canonical_marker_barrier`'s own version
+/// does not have this leniency and must not gain a NEW way to break restore
+/// on a malformed record it has no business inspecting —
+/// `missing_raw_is_dead_source_without_receipt_disclosure` below pins this).
+///
+/// `raw_present` is the caller's own already-resolved answer (mirroring
+/// `enforce_canonical_marker_barrier`'s own parameter) — restore determines
+/// it differently at each of its 3 canonical call sites (PA50:
+/// `preflight`/`preflight_in_dir`/`publish_all`'s per-file loop), so this
+/// takes it rather than re-deriving it a second way. `barrier_blocks` below
+/// keeps its existing in-progress-journal behavior unchanged — it is a
+/// DIFFERENT check (an active-but-not-yet-terminal transaction) from the
+/// canonical-marker dispatch above it.
+fn check_purge_state(target: &ScopeTarget, raw_hash: &str, raw_present: bool) -> Result<()> {
     let state = PurgeState::new(&target.kcs_dir);
     let tombstone_tail = state
         .read_tombstone(raw_hash)?
@@ -1042,17 +1382,16 @@ fn check_purge_state(target: &ScopeTarget, raw_hash: &str) -> Result<()> {
     // Erase receipts are fsck-only/non-public (unlike tombstones, whose parse
     // failure above still propagates): a receipt that fails to read or parse
     // simply does not participate in the canonical computation, rather than
-    // breaking restore on a malformed record it has no business inspecting
-    // (`missing_raw_is_dead_source_without_receipt_disclosure` below pins
-    // this — a garbage receipt file must never surface from this function).
+    // breaking restore on a malformed record it has no business inspecting.
     let receipt_tail = state
         .read_erase_receipt(raw_hash)
         .ok()
         .flatten()
         .map(|receipt| receipt.tail().clone());
-    if let Some(canonical) = canonical_final_event(tombstone_tail.as_ref(), receipt_tail.as_ref()) {
-        if canonical.event.kind == EventKind::Purged {
-            let event = canonical.event;
+    let canonical_event =
+        canonical_final_event(tombstone_tail.as_ref(), receipt_tail.as_ref()).map(|c| c.event);
+    match canonical_event {
+        Some(event) if event.kind == EventKind::Purged => {
             return Err(super::tombstone_error(json!({
                 "raw_hash": raw_hash,
                 "purged_at": event.at,
@@ -1061,6 +1400,16 @@ fn check_purge_state(target: &ScopeTarget, raw_hash: &str) -> Result<()> {
                 "scope_path": target.kcs_dir.display().to_string(),
             })));
         }
+        Some(event) if event.kind == EventKind::Erased && !raw_present => {
+            return Err(super::purge_not_found_error(target, raw_hash));
+        }
+        Some(event) if event.kind == EventKind::Retired && !raw_present => {
+            return Err(super::retired_raw_missing_error(target, raw_hash));
+        }
+        None if !raw_present => {
+            return Err(super::unmarked_missing_raw_error(target, raw_hash));
+        }
+        _ => {}
     }
     if state.barrier_blocks(raw_hash)? {
         return Err(KcsError::new(
@@ -1077,6 +1426,16 @@ fn check_purge_state(target: &ScopeTarget, raw_hash: &str) -> Result<()> {
     Ok(())
 }
 
+/// PA47-50 helper: the caller's own fresh answer to "does the raw CAS object
+/// currently exist", fed to [`check_purge_state`].
+fn raw_present_now(target: &ScopeTarget, raw_hash: &str) -> Result<bool> {
+    match ObjectStore::new(&target.kcs_dir).inspect_object(ObjectKind::Raw, raw_hash) {
+        Ok(_) => Ok(true),
+        Err(error) if super::is_store_not_found(&error) => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
 fn stage_all(
     source: &RestoreSource,
     files: Vec<PreflightFile>,
@@ -1087,7 +1446,13 @@ fn stage_all(
     let result = (|| -> Result<()> {
         for file in files {
             validate_destination_handle(destination)?;
-            check_purge_state(&source.target, &file.source.raw_hash)?;
+            // Not one of PA50's 3 named canonical-dispatch call sites — raw
+            // presence was already verified moments ago by
+            // `preflight_in_dir`, and `copy_object_to`'s own not-found
+            // handling below independently covers a "went absent right now"
+            // race; this recheck's purpose is the tombstone/journal-barrier
+            // gate, which does not depend on `raw_present`.
+            check_purge_state(&source.target, &file.source.raw_hash, true)?;
             let (temp, mut output) = create_private_temp(destination)?;
             let copied =
                 match store.copy_object_to(ObjectKind::Raw, &file.source.raw_hash, &mut output) {
@@ -1212,10 +1577,12 @@ fn publish_all(
     let mut remaining = staged.into_iter();
     while let Some(file) = remaining.next() {
         // §I checkpoint 2 (LC54/LC55), combined with the per-raw_hash
-        // canonical-marker recheck (LC8-14/item 3) immediately before this
-        // file's atomic, irreversible publish (LC57).
-        if let Err(error) = check_purge_state(&source.target, &file.preflight.source.raw_hash)
-            .and_then(|()| checkpoint.recheck())
+        // canonical-marker recheck (LC8-14/item 3, PA50) immediately before
+        // this file's atomic, irreversible publish (LC57).
+        let raw_present = raw_present_now(&source.target, &file.preflight.source.raw_hash)?;
+        if let Err(error) =
+            check_purge_state(&source.target, &file.preflight.source.raw_hash, raw_present)
+                .and_then(|()| checkpoint.recheck())
         {
             cleanup_one(destination, &file.temp);
             for pending in remaining {
@@ -1234,7 +1601,44 @@ fn publish_all(
             ));
         }
         match publish_one(destination, &file) {
-            Ok(()) => {
+            Ok(backup) => {
+                // PA24 (§E, U26): rename completed — re-resolve the target
+                // raw's canonical state one more time (a second, independent
+                // check from the pre-publish one above). A change detected
+                // here (e.g. the purge that just completed on another
+                // process, serialized against this one only by the
+                // publication lock) rolls the publication back (PA25/26)
+                // rather than leaving purged/hidden bytes sitting published.
+                let post_publish_raw_present =
+                    raw_present_now(&source.target, &file.preflight.source.raw_hash)?;
+                if let Err(recheck_error) = check_purge_state(
+                    &source.target,
+                    &file.preflight.source.raw_hash,
+                    post_publish_raw_present,
+                )
+                .and_then(|()| checkpoint.recheck())
+                {
+                    let error = rollback_published_file(
+                        destination,
+                        &file.preflight,
+                        backup.as_deref(),
+                        recheck_error,
+                    );
+                    for pending in remaining {
+                        cleanup_one(destination, &pending.temp);
+                    }
+                    if published.is_empty() {
+                        return Err(error);
+                    }
+                    return Ok(partial_output(
+                        source,
+                        &destination.path,
+                        published,
+                        overwritten_count,
+                        &file.preflight,
+                        error,
+                    ));
+                }
                 overwritten_count += u64::from(file.preflight.overwritten);
                 published.push(file.preflight);
             }
@@ -1282,10 +1686,15 @@ fn publish_all(
     ))
 }
 
+/// PA22/23: `publish_one`'s outcome on success — `Some(bak_name)` when an
+/// existing file was evacuated first (so `publish_all`'s post-publish
+/// recheck, PA24-26, knows there is a backup to restore on rollback).
+type PublishSuccess = Option<String>;
+
 fn publish_one(
     destination: &DestinationDir,
     file: &StagedFile,
-) -> std::result::Result<(), (KcsError, bool)> {
+) -> std::result::Result<PublishSuccess, (KcsError, bool)> {
     verify_open_file(
         &file.temp_file,
         &destination.path.join(&file.temp),
@@ -1293,10 +1702,12 @@ fn publish_one(
         file.preflight.size_bytes,
     )
     .map_err(|error| (error, false))?;
+    let path_at_commit = Path::new(&file.preflight.source.path_at_commit);
+    let mut backup_name_opt: PublishSuccess = None;
     if file.preflight.overwritten {
         let metadata = cap_fs::stat(
             &destination.handle,
-            Path::new(&file.preflight.source.path_at_commit),
+            path_at_commit,
             cap_fs::FollowSymlinks::No,
         )
         .map_err(|error| {
@@ -1310,147 +1721,231 @@ fn publish_one(
         })?;
         validate_replaceable_metadata(&file.preflight.destination, &metadata)
             .map_err(|error| (error, false))?;
-        atomic_replace_handle(
-            destination,
-            &file.temp,
-            &file.temp_file,
-            Path::new(&file.preflight.source.path_at_commit),
-        )
-        .map_err(|error| (error, false))?;
-    } else {
-        match cap_fs::hard_link(
-            &destination.handle,
-            Path::new(&file.temp),
-            &destination.handle,
-            Path::new(&file.preflight.source.path_at_commit),
-        ) {
-            Ok(()) => {
-                cap_fs::remove_file(&destination.handle, Path::new(&file.temp)).map_err(
-                    |error| {
-                        (
-                            KcsError::io(
-                                error.to_string(),
-                                destination.path.join(&file.temp).display().to_string(),
-                            ),
-                            true,
-                        )
-                    },
-                )?;
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+        // PA22: evacuate the existing file to `<name>.kcs-restore-bak` via a
+        // no-replace move BEFORE publish — the intentional replacement is
+        // performed only by this evacuation rename; the publish step right
+        // below is always a no-replace claim of a (now-)empty name, uniform
+        // with the non-overwrite branch.
+        let bak_name = backup_name(&file.preflight.source.path_at_commit);
+        match no_replace_move(destination, path_at_commit, Path::new(&bak_name)) {
+            Ok(()) => {}
+            Err(MoveOutcome::AlreadyExists) => {
                 return Err((
-                    KcsError::new(
-                        "KCS-E-COMMIT-RESTORE-CONFLICT-001",
-                        "destination file appeared during restore publication",
-                        json!({ "path": file.preflight.destination }),
-                        ExitCode::Failure,
+                    restore_conflict_error(
+                        RestoreConflictKind::StaleBackup,
+                        &destination.path.join(&bak_name),
                     ),
                     false,
                 ));
             }
-            Err(error) => {
-                return Err((
+            Err(MoveOutcome::Io(error)) => return Err((error, false)),
+        }
+        eprintln!(
+            "restore: evacuated existing '{}' to '{bak_name}'",
+            file.preflight.source.path_at_commit
+        );
+        backup_name_opt = Some(bak_name);
+    }
+    // PA23: no-replace publish (uniform for both branches now — overwrite
+    // publishes into the name evacuation just emptied, non-overwrite
+    // publishes into a name preflight found absent). A competing third-party
+    // file that appeared since is detected here, never silently replaced.
+    match cap_fs::hard_link(
+        &destination.handle,
+        Path::new(&file.temp),
+        &destination.handle,
+        path_at_commit,
+    ) {
+        Ok(()) => {
+            cap_fs::remove_file(&destination.handle, Path::new(&file.temp)).map_err(|error| {
+                (
                     KcsError::io(
                         error.to_string(),
-                        file.preflight.destination.display().to_string(),
+                        destination.path.join(&file.temp).display().to_string(),
                     ),
-                    false,
-                ));
+                    true,
+                )
+            })?;
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            // PA23(b): a prior evacuation emptied the name; put it back
+            // (best-effort — either outcome still terminates as a conflict,
+            // 05 §3.5 L843-846's "この競合時は退避を元 path へ復帰").
+            if let Some(bak_name) = &backup_name_opt {
+                let _ = no_replace_move(destination, Path::new(bak_name.as_str()), path_at_commit);
             }
+            return Err((
+                restore_conflict_error(
+                    RestoreConflictKind::PublishRace,
+                    &file.preflight.destination,
+                ),
+                false,
+            ));
+        }
+        Err(error) => {
+            return Err((
+                KcsError::io(
+                    error.to_string(),
+                    file.preflight.destination.display().to_string(),
+                ),
+                backup_name_opt.is_some(),
+            ));
         }
     }
     verify_restored_entry(
         destination,
-        Path::new(&file.preflight.source.path_at_commit),
+        path_at_commit,
         &file.temp_file,
         &file.preflight.source.raw_hash,
         file.preflight.size_bytes,
     )
     .map_err(|error| (error, true))?;
-    Ok(())
+    Ok(backup_name_opt)
 }
 
-#[cfg(not(windows))]
-fn atomic_replace_handle(
+/// PA24/25 (§E, U26): the just-published file is renamed (not unlinked) to
+/// the decided quarantine name `<basename>.kcs-restore-quarantine`, and the
+/// entity that landed under that quarantine name is verified by dev/inode
+/// against the publication this function itself just observed (never a
+/// separately re-fetched value — a check-then-delete without re-verifying on
+/// the renamed entity would leave a TOCTOU window for a third party to swap
+/// in between the check and the delete). A match means the quarantined
+/// entity really is what this restore just published, so it is safe to
+/// delete outright and (PA26) restore any evacuated backup; a mismatch means
+/// a third party's file got quarantined by accident, so it is put back
+/// (best-effort) and reported as a fresh conflict instead of the original
+/// recheck failure.
+fn rollback_published_file(
     destination: &DestinationDir,
-    source: &OsString,
-    _source_file: &File,
-    destination_name: &Path,
+    preflight: &PreflightFile,
+    backup: Option<&str>,
+    recheck_error: KcsError,
+) -> KcsError {
+    let path_at_commit = Path::new(&preflight.source.path_at_commit);
+    let published_identity = match cap_fs::stat(
+        &destination.handle,
+        path_at_commit,
+        cap_fs::FollowSymlinks::No,
+    ) {
+        Ok(metadata) => metadata,
+        // Already gone by some other means — nothing left to roll back;
+        // surface the original cause rather than inventing a new one.
+        Err(_) => return recheck_error,
+    };
+    let quarantine = quarantine_name(&preflight.source.path_at_commit);
+    match no_replace_move(destination, path_at_commit, Path::new(&quarantine)) {
+        Ok(()) => {}
+        Err(MoveOutcome::AlreadyExists) => {
+            return restore_conflict_error(
+                RestoreConflictKind::QuarantineRenameRace,
+                &preflight.destination,
+            );
+        }
+        Err(MoveOutcome::Io(_)) => return recheck_error,
+    }
+    let quarantined_identity = match cap_fs::stat(
+        &destination.handle,
+        Path::new(&quarantine),
+        cap_fs::FollowSymlinks::No,
+    ) {
+        Ok(metadata) => metadata,
+        Err(_) => {
+            return restore_conflict_error(
+                RestoreConflictKind::QuarantineRenameRace,
+                &preflight.destination,
+            );
+        }
+    };
+    if !same_cap_file_identity(&published_identity, &quarantined_identity) {
+        // Third-party swap between the stat above and this rename: put the
+        // quarantined entity (whatever it now is) back, and do not touch it
+        // further either way.
+        let _ = no_replace_move(destination, Path::new(&quarantine), path_at_commit);
+        return restore_conflict_error(
+            RestoreConflictKind::QuarantineMismatch,
+            &preflight.destination,
+        );
+    }
+    eprintln!(
+        "restore: rolled back publish of '{}' via quarantine '{quarantine}' ({})",
+        preflight.source.path_at_commit,
+        recheck_error.error_code()
+    );
+    let _ = cap_fs::remove_file(&destination.handle, Path::new(&quarantine));
+    if let Some(bak_name) = backup {
+        if let Err(error) =
+            restore_evacuated_backup(destination, bak_name, &preflight.source.path_at_commit)
+        {
+            return error;
+        }
+    }
+    // PA26: terminate with the SAME response a preflight encountering this
+    // canonical state from the start would have given (tombstone / not-found
+    // / journal-active) — not a fresh conflict, now that the rollback itself
+    // succeeded.
+    recheck_error
+}
+
+/// PA26 (§E, U26): restore an evacuated `.kcs-restore-bak` file back to its
+/// original name, via the identical quarantine-then-verify dance
+/// [`rollback_published_file`] uses for the publication itself.
+fn restore_evacuated_backup(
+    destination: &DestinationDir,
+    bak_name: &str,
+    path_at_commit: &str,
 ) -> Result<()> {
-    cap_fs::rename(
+    let backup_identity = cap_fs::stat(
         &destination.handle,
-        Path::new(source),
-        &destination.handle,
-        destination_name,
+        Path::new(bak_name),
+        cap_fs::FollowSymlinks::No,
     )
     .map_err(|error| {
         KcsError::io(
             error.to_string(),
-            destination
-                .path
-                .join(destination_name)
-                .display()
-                .to_string(),
+            destination.path.join(bak_name).display().to_string(),
         )
-    })
-}
-
-#[cfg(windows)]
-fn atomic_replace_handle(
-    destination: &DestinationDir,
-    _source: &OsString,
-    source_file: &File,
-    destination_name: &Path,
-) -> Result<()> {
-    use std::os::windows::ffi::OsStrExt;
-    use std::os::windows::io::AsRawHandle;
-    use std::ptr;
-    use windows_sys::Wdk::Storage::FileSystem::{
-        FileRenameInformation, NtSetInformationFile, FILE_RENAME_INFORMATION,
-    };
-    use windows_sys::Win32::Foundation::RtlNtStatusToDosError;
-    use windows_sys::Win32::System::IO::IO_STATUS_BLOCK;
-
-    let name = destination_name
-        .as_os_str()
-        .encode_wide()
-        .collect::<Vec<_>>();
-    // The Win32 SetFileInformationByHandle wrapper requires RootDirectory to
-    // be null. Use the native user-mode entry point so the validated held
-    // destination directory remains the authority for this relative rename.
-    let bytes =
-        std::mem::size_of::<FILE_RENAME_INFORMATION>() + name.len() * std::mem::size_of::<u16>();
-    let words = bytes.div_ceil(std::mem::size_of::<usize>());
-    let mut storage = vec![0_usize; words];
-    let info = storage.as_mut_ptr().cast::<FILE_RENAME_INFORMATION>();
-    unsafe {
-        (*info).Anonymous.ReplaceIfExists = true;
-        (*info).RootDirectory = destination.handle.as_raw_handle();
-        (*info).FileNameLength = (name.len() * std::mem::size_of::<u16>()) as u32;
-        ptr::copy_nonoverlapping(name.as_ptr(), (*info).FileName.as_mut_ptr(), name.len());
+    })?;
+    let quarantine = quarantine_name(path_at_commit);
+    match no_replace_move(destination, Path::new(bak_name), Path::new(&quarantine)) {
+        Ok(()) => {}
+        Err(MoveOutcome::AlreadyExists) => {
+            return Err(restore_conflict_error(
+                RestoreConflictKind::QuarantineRenameRace,
+                &destination.path.join(bak_name),
+            ));
+        }
+        Err(MoveOutcome::Io(error)) => return Err(error),
     }
-    let mut io_status = IO_STATUS_BLOCK::default();
-    let status = unsafe {
-        NtSetInformationFile(
-            source_file.as_raw_handle(),
-            &mut io_status,
-            info.cast(),
-            bytes as u32,
-            FileRenameInformation,
+    let quarantined_identity = cap_fs::stat(
+        &destination.handle,
+        Path::new(&quarantine),
+        cap_fs::FollowSymlinks::No,
+    )
+    .map_err(|error| {
+        KcsError::io(
+            error.to_string(),
+            destination.path.join(&quarantine).display().to_string(),
         )
-    };
-    if status < 0 {
-        let os_error = unsafe { RtlNtStatusToDosError(status) };
-        return Err(KcsError::io(
-            std::io::Error::from_raw_os_error(os_error as i32).to_string(),
-            destination
-                .path
-                .join(destination_name)
-                .display()
-                .to_string(),
+    })?;
+    if !same_cap_file_identity(&backup_identity, &quarantined_identity) {
+        let _ = no_replace_move(destination, Path::new(&quarantine), Path::new(bak_name));
+        return Err(restore_conflict_error(
+            RestoreConflictKind::BackupMismatch,
+            &destination.path.join(bak_name),
         ));
     }
-    Ok(())
+    match no_replace_move(
+        destination,
+        Path::new(&quarantine),
+        Path::new(path_at_commit),
+    ) {
+        Ok(()) => Ok(()),
+        Err(MoveOutcome::AlreadyExists) => Err(restore_conflict_error(
+            RestoreConflictKind::RestoreRenameRace,
+            &destination.path.join(path_at_commit),
+        )),
+        Err(MoveOutcome::Io(error)) => Err(error),
+    }
 }
 
 fn validate_destination_handle(destination: &DestinationDir) -> Result<()> {
@@ -1707,7 +2202,7 @@ mod tests {
     use std::io::Write;
 
     use super::{
-        atomic_replace_handle, check_purge_state, create_private_temp, missing_live_raw_error,
+        check_purge_state, create_private_temp, missing_live_raw_error, no_replace_move,
         normalize_absolute, open_destination_dir, sync_directory_handle, validate_source_names,
         RestoreItem, ScopeTarget,
     };
@@ -1743,7 +2238,7 @@ mod tests {
     fn destination_directory_sync_uses_a_syncable_capability_descriptor() {
         let temp = tempfile::TempDir::new().unwrap();
         let destination =
-            open_destination_dir(&temp.path().canonicalize().unwrap(), false).unwrap();
+            open_destination_dir(&temp.path().canonicalize().unwrap(), false, None).unwrap();
 
         sync_directory_handle(&destination).unwrap();
     }
@@ -1765,7 +2260,23 @@ mod tests {
             scope_id: "scope-test".to_owned(),
         };
 
-        check_purge_state(&target, &raw_hash).unwrap();
+        // PA47-50/PA48(c): raw absent + no VALID marker (the garbage erase
+        // receipt fails to parse and is swallowed, exactly like "no marker
+        // at all") is LC14(a)'s unmarked-missing corruption suspicion, not a
+        // silent pass-through — this is the corrected behavior the old
+        // LC11-only `check_purge_state` could not distinguish from a normal
+        // absence. The still-load-bearing property this test pins: the
+        // resulting error must not disclose the fsck-private receipt's
+        // existence or contents either way.
+        let error = check_purge_state(&target, &raw_hash, false).unwrap_err();
+        assert_eq!(error.error_code(), "KCS-E-STORE-CORRUPT-001");
+        assert_eq!(error.exit_code(), kcs_core::ExitCode::PermanentFailure);
+        assert!(!error.context().to_string().contains("receipt"));
+        assert!(!error
+            .context()
+            .to_string()
+            .contains("private receipt contents"));
+
         let error = missing_live_raw_error(&target, &raw_hash);
         assert_eq!(error.error_code(), "KCS-E-PURGE-NOT-FOUND-001");
         assert_eq!(error.exit_code(), kcs_core::ExitCode::PermanentFailure);
@@ -1784,20 +2295,23 @@ mod tests {
         let outside_path = root.join("outside");
         fs::create_dir(&destination_path).unwrap();
         fs::create_dir(&outside_path).unwrap();
-        fs::write(destination_path.join("doc.md"), b"old destination").unwrap();
         fs::write(outside_path.join("doc.md"), b"outside sentinel").unwrap();
 
-        let destination = open_destination_dir(&destination_path, false).unwrap();
+        let destination = open_destination_dir(&destination_path, false, None).unwrap();
         fs::rename(&destination_path, &moved_path).unwrap();
         symlink(&outside_path, &destination_path).unwrap();
 
+        // PA23: publish is a no-replace move (`no_replace_move`), not a
+        // replace-capable rename — `doc.md` must be absent under the held
+        // directory for this to succeed, matching real publish's use (the
+        // name was either never occupied or just evacuated to a `.kcs-
+        // restore-bak` name by the same primitive).
         let (temp_name, mut staged) = create_private_temp(&destination).unwrap();
         staged.write_all(b"restored bytes").unwrap();
         staged.sync_all().unwrap();
-        atomic_replace_handle(
+        no_replace_move(
             &destination,
-            &temp_name,
-            &staged,
+            std::path::Path::new(&temp_name),
             std::path::Path::new("doc.md"),
         )
         .unwrap();

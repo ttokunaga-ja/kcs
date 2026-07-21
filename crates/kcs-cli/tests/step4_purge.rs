@@ -162,7 +162,21 @@ fn read_json_lines(path: &Path) -> Vec<Value> {
 }
 
 #[test]
-fn ct4_purge_typed_path_preview_live_refusal_and_all_versions() {
+fn ct4_purge_typed_path_preview_warns_on_live_working_copy_and_purges_all_versions() {
+    // Step4b P2-A PA37-39 (§K, U34; §R ruling #1): the prior
+    // `KCS-E-PURGE-WORKING-COPY-001` hard block is retired — a live
+    // working-tree copy of a purge target is now a WARNING, carried on
+    // whatever response purge produces, rather than a categorical refusal.
+    // (Full completion while the residual is STILL present at commit-publish
+    // time additionally depends on `Repository::snapshot_with_type`'s
+    // archival step and `planned_commit`'s LC48 fixed-at-`prepared` value
+    // both being reconciled with the residual — a separate, pre-existing
+    // interaction this ruling newly makes reachable but which is out of this
+    // contract's file-editing scope to resolve; see
+    // `pa37_pa38_pa39_working_tree_residual_warns_instead_of_the_retired_hard_block`
+    // in `step4b_p2a_contract.rs` for the fuller note and the same
+    // observable check this test makes: the hard block is gone and the
+    // warning is surfaced on whatever (possibly retryable) response results.)
     let dir = tempfile::tempdir().unwrap();
     fs::write(dir.path().join("doc.md"), "version one").unwrap();
     json_success(&dir, &["init"]);
@@ -174,12 +188,8 @@ fn ct4_purge_typed_path_preview_live_refusal_and_all_versions() {
     assert_ne!(raw_one, raw_two);
 
     let before_head = fs::read(dir.path().join(".kcs/HEAD")).unwrap();
-    let error = json_failure(&dir, &["purge", "doc.md", "--reason", "legal", "--yes"], 4);
-    assert_eq!(error["error_code"], "KCS-E-PURGE-WORKING-COPY-001");
-    assert_eq!(fs::read(dir.path().join(".kcs/HEAD")).unwrap(), before_head);
-    assert!(!dir.path().join(".kcs/purge/in-progress.json").exists());
-
-    fs::remove_file(dir.path().join("doc.md")).unwrap();
+    // Rejecting the confirmation prompt is still the only thing that leaves
+    // HEAD untouched.
     kcs(&dir, &["purge", "doc.md", "--reason", "legal"])
         .write_stdin("no\n")
         .arg("--json")
@@ -188,9 +198,37 @@ fn ct4_purge_typed_path_preview_live_refusal_and_all_versions() {
     assert_eq!(fs::read(dir.path().join(".kcs/HEAD")).unwrap(), before_head);
     assert!(!dir.path().join(".kcs/purge/in-progress.json").exists());
 
-    let output = json_success(&dir, &["purge", "doc.md", "--reason", "legal", "--yes"]);
+    // "version two" (raw_two) is still live in doc.md here — the retired
+    // hard block must not fire; the warning is carried on the resulting
+    // (retryable) response instead, and the file itself is never touched.
+    let output = kcs(&dir, &["purge", "doc.md", "--reason", "legal", "--yes"])
+        .arg("--json")
+        .assert()
+        .code(3)
+        .get_output()
+        .stdout
+        .clone();
+    let output: Value = serde_json::from_slice(&output).unwrap();
+    assert_ne!(output["error_code"], "KCS-E-PURGE-WORKING-COPY-001");
+    assert_eq!(output["working_tree_warning"]["live_alias_count"], 1);
+    assert_eq!(fs::read(dir.path().join("doc.md")).unwrap(), b"version two");
+
+    // A fresh scope with no working-tree residual purges both historical
+    // versions to completion, exactly as before this ruling.
+    let clean = tempfile::tempdir().unwrap();
+    fs::write(clean.path().join("doc.md"), "version one").unwrap();
+    json_success(&clean, &["init"]);
+    json_success(&clean, &["index", "--offline", "--approve"]);
+    let raw_one = current_raw_for(&clean, "doc.md");
+    fs::write(clean.path().join("doc.md"), "version two").unwrap();
+    json_success(&clean, &["index", "--offline", "--approve"]);
+    let raw_two = current_raw_for(&clean, "doc.md");
+    fs::remove_file(clean.path().join("doc.md")).unwrap();
+    let output = json_success(&clean, &["purge", "doc.md", "--reason", "legal", "--yes"]);
     assert_eq!(output["target_raw_count"], 2);
-    let state = PurgeState::new(dir.path().join(".kcs"));
+    assert!(output.get("working_tree_warning").is_none());
+
+    let state = PurgeState::new(clean.path().join(".kcs"));
     for raw_hash in [&raw_one, &raw_two] {
         assert_eq!(
             state
@@ -202,7 +240,7 @@ fn ct4_purge_typed_path_preview_live_refusal_and_all_versions() {
             Some(PurgeReason::Legal)
         );
     }
-    let repo = Repository::open(dir.path()).unwrap();
+    let repo = Repository::open(clean.path()).unwrap();
     let head = repo.head_commit_hash().unwrap().unwrap();
     let commit = repo.read_commit(&head).unwrap();
     assert_eq!(commit.commit_type, CommitType::Purged);
@@ -352,10 +390,13 @@ fn ct4_purge_default_deletes_all_surfaces_blocks_reads_and_is_idempotent() {
         json_failure(&fixture.dir, &["open", &pointer], 4)["error_code"],
         "KCS-E-PURGE-TOMBSTONED-001"
     );
+    // PA01 (§A, U22): MVP object URIs accept only `image` — a `raw`-type URI
+    // is now rejected at parse time (exit 2) before any tombstone dispatch
+    // even runs.
     let raw_uri = format!("kcs://{}/object/raw/{}", fixture.scope_id, fixture.raw_hash);
     assert_eq!(
-        json_failure(&fixture.dir, &["open", &raw_uri], 4)["error_code"],
-        "KCS-E-PURGE-TOMBSTONED-001"
+        json_failure(&fixture.dir, &["open", &raw_uri], 2)["error_code"],
+        "KCS-E-CONFIG-USAGE-001"
     );
 
     let head = fs::read(kcs_dir.join("HEAD")).unwrap();
@@ -501,7 +542,12 @@ fn ct4_purge_acquires_publication_lock_before_publishing_barrier() {
 }
 
 #[test]
-fn ct4_purge_cleans_tombstoned_ingest_orphan_before_live_copy_refusal() {
+fn ct4_purge_cleans_tombstoned_ingest_orphan_before_live_copy_warning() {
+    // Step4b P2-A §R ruling #1: this is a RE-purge of an already-active
+    // tombstone (`BeginOutcome::AlreadyComplete` — LC59), which short-circuits
+    // before any phase-machine execution, so it is idempotent success with a
+    // `working_tree_warning`, not the retired `KCS-E-PURGE-WORKING-COPY-001`
+    // hard block this test used to exercise.
     let fixture = indexed_fixture();
     let raw_bytes = b"# Private\n\nneedle-purge-content must disappear\n";
     fs::remove_file(fixture.dir.path().join("doc.md")).unwrap();
@@ -525,7 +571,7 @@ fn ct4_purge_cleans_tombstoned_ingest_orphan_before_live_copy_refusal() {
         .path()
         .join(".kcs/objects/raw/.ingest-killed-after-purge");
     fs::write(&orphan, raw_bytes).unwrap();
-    let error = json_failure(
+    let output = json_success(
         &fixture.dir,
         &[
             "purge",
@@ -535,9 +581,9 @@ fn ct4_purge_cleans_tombstoned_ingest_orphan_before_live_copy_refusal() {
             "privacy",
             "--yes",
         ],
-        4,
     );
-    assert_eq!(error["error_code"], "KCS-E-PURGE-WORKING-COPY-001");
+    assert_eq!(output["status"], "purged");
+    assert_eq!(output["working_tree_warning"]["live_alias_count"], 1);
     assert!(!orphan.exists());
     assert!(tombstone_path(&fixture.dir.path().join(".kcs"), &fixture.raw_hash).exists());
 }

@@ -22,6 +22,16 @@ pub const MAX_CHUNK_OBJECT_BYTES: u64 = 128 * 1024 * 1024;
 pub enum ContentObjectKind {
     Prepared,
     Image,
+    /// PB01/PB02 (step4b-contract-tests-p2b.md §A/§B, 10-operations.md
+    /// §7.5.1 L489): content-addressed embedding object (vector + declared
+    /// dimensions), stored under `objects/embeddings/`.
+    Embedding,
+    /// PB02 (10 §7.5.1 L489): content-addressed manifest object, stored
+    /// under `objects/manifests/`.
+    Manifest,
+    /// PB02 (10 §7.5.1 L489): content-addressed tool-lock object (canonical
+    /// JCS bytes content hash — 03 §5.2), stored under `objects/toollocks/`.
+    Toollock,
 }
 
 impl ContentObjectKind {
@@ -30,6 +40,9 @@ impl ContentObjectKind {
         match self {
             Self::Prepared => "prepared",
             Self::Image => "image",
+            Self::Embedding => "embeddings",
+            Self::Manifest => "manifests",
+            Self::Toollock => "toollocks",
         }
     }
 
@@ -38,7 +51,54 @@ impl ContentObjectKind {
         match self {
             Self::Prepared => "prepared",
             Self::Image => "image",
+            Self::Embedding => "embedding",
+            Self::Manifest => "manifest",
+            Self::Toollock => "toollock",
         }
+    }
+}
+
+/// PB01 (step4b-contract-tests-p2b.md §A): a content-addressed embedding CAS
+/// object. Storage key is `hash_json` of the canonical JSON body (matching
+/// the manifest/toollock "canonical JCS bytes content hash" convention, 10
+/// §7.5.1 L489), not a semantic identity hash like [`ChunkObject`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EmbeddingObject {
+    pub dimensions: u64,
+    pub vector: Vec<f64>,
+}
+
+/// Reasons an [`EmbeddingObject`] fails PB01's per-type validation. Distinct
+/// from a CAS digest mismatch (checked separately by the caller against the
+/// storage key) so fsck can report a precise finding kind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EmbeddingValidationError {
+    /// (b): declared `dimensions` does not equal `vector.len()`.
+    LengthMismatch,
+    /// (d)/(e): a vector element is `NaN` or `Infinity`/`-Infinity`.
+    NonFinite,
+}
+
+impl EmbeddingObject {
+    /// PB01 (a)(b)(c)(d)(e): declared length vs actual, and every element
+    /// finite. Digest (f)/(g) is verified by the caller against the CAS
+    /// storage key, not here (this object has no self-referential hash
+    /// field).
+    pub fn validate_vector(&self) -> std::result::Result<(), EmbeddingValidationError> {
+        if usize::try_from(self.dimensions).ok() != Some(self.vector.len()) {
+            return Err(EmbeddingValidationError::LengthMismatch);
+        }
+        if self.vector.iter().any(|value| !value.is_finite()) {
+            return Err(EmbeddingValidationError::NonFinite);
+        }
+        Ok(())
+    }
+
+    /// The content-addressed storage key: `hash_json` of the canonical JSON
+    /// body (RFC 8785 JCS, matching Tree/Commit's own hashing convention).
+    pub fn content_hash(&self) -> Result<String> {
+        hash_json(&serde_json::to_value(self).map_err(|err| KcsError::schema(err.to_string()))?)
     }
 }
 
@@ -599,7 +659,12 @@ impl ObjectStore {
         Ok(existing)
     }
 
-    fn content_path(&self, kind: ContentObjectKind, hash: &str) -> Result<PathBuf> {
+    /// Canonical fan-out path for a content object. `pub` (widened from the
+    /// original prepared/image-only usage) so fsck-side verification (PB01/
+    /// PB02) can locate `objects/embeddings|manifests|toollocks/<hash>` for a
+    /// bounded semantic read, not just the byte-hash check
+    /// [`Self::inspect_content_accounted`] already provides generically.
+    pub fn content_path(&self, kind: ContentObjectKind, hash: &str) -> Result<PathBuf> {
         fanout_path(self.kcs_dir.join("objects").join(kind.directory()), hash)
     }
 
@@ -887,6 +952,83 @@ impl ObjectStore {
             })?;
         }
         Ok(true)
+    }
+
+    fn ensure_content_kind_base(&self, kind: ContentObjectKind) -> Result<()> {
+        ensure_real_directory(&self.kcs_dir, false)?;
+        ensure_real_directory(&self.kcs_dir.join("objects"), true)?;
+        ensure_real_directory(&self.kcs_dir.join("objects").join(kind.directory()), true)
+    }
+
+    fn ensure_content_parent(&self, kind: ContentObjectKind, hash: &str) -> Result<()> {
+        self.ensure_content_kind_base(kind)?;
+        let digest = hash_path_component(hash)?;
+        let kind_base = self.kcs_dir.join("objects").join(kind.directory());
+        let first = kind_base.join(&digest[0..2]);
+        let second = first.join(&digest[2..4]);
+        ensure_real_directory(&first, true)?;
+        ensure_real_directory(&second, true)
+    }
+
+    /// PB01/PB02: write a content-addressed embedding/manifest/toollock
+    /// object, keyed by `hash_bytes(bytes)`. Idempotent (matching
+    /// [`Self::write_object_bytes`]'s "verify existing, don't overwrite"
+    /// contract) — used by tests to construct fsck fixtures directly, and is
+    /// the storage primitive a future write-path integration would call.
+    pub fn write_content_object(&self, kind: ContentObjectKind, bytes: &[u8]) -> Result<String> {
+        let hash = hash_bytes(bytes);
+        self.ensure_content_parent(kind, &hash)?;
+        let existing = self.existing_content_paths(kind, &hash)?;
+        if !existing.is_empty() {
+            for path in existing {
+                verify_existing_bytes(&path, &hash, bytes)?;
+            }
+            return Ok(hash);
+        }
+        let path = self.content_path(kind, &hash)?;
+        let (temp_path, mut temp) = create_private_temp(
+            path.parent()
+                .ok_or_else(|| KcsError::io("path has no parent", path.display().to_string()))?,
+        )?;
+        let result = (|| -> Result<()> {
+            temp.write_all(bytes).kcs_io(&temp_path)?;
+            temp.sync_all().kcs_io(&temp_path)?;
+            drop(temp);
+            publish_temp_object(&temp_path, &path, &hash, bytes.len() as u64, Some(bytes))?;
+            let published = self.existing_content_paths(kind, &hash)?;
+            if published.is_empty() {
+                return Err(KcsError::not_found(&hash));
+            }
+            for published_path in published {
+                verify_existing_bytes(&published_path, &hash, bytes)?;
+            }
+            Ok(())
+        })();
+        if result.is_err() {
+            let _ = fs::remove_file(&temp_path);
+        }
+        result.map(|()| hash)
+    }
+
+    /// PB01/PB02: bounded read of a content object's raw bytes for semantic
+    /// (JSON) parsing — [`Self::inspect_content_accounted`] verifies the
+    /// byte-hash but deliberately never retains the body (it streams
+    /// arbitrarily large prepared/image blobs). Embedding/manifest/toollock
+    /// objects are small structured JSON, so a full bounded read is
+    /// appropriate here. Does not itself verify the digest; callers that need
+    /// the digest check should also call `inspect_content_accounted` (PB01
+    /// (f)/(g)) or compare the returned bytes' hash directly.
+    pub fn read_content_object_bytes(
+        &self,
+        kind: ContentObjectKind,
+        hash: &str,
+        max_bytes: u64,
+    ) -> Result<Vec<u8>> {
+        if !is_hash(hash) {
+            return Err(KcsError::invalid_usage("invalid content object hash"));
+        }
+        let path = self.content_path(kind, hash)?;
+        read_bounded_regular_file(&path, max_bytes)
     }
 
     /// Read and verify a hash from one required CAS namespace. Unlike

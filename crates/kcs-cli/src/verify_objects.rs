@@ -6,18 +6,20 @@ use std::path::{Path, PathBuf};
 
 use kcs_core::cas::{
     hash_bytes, is_hash, read_bounded_regular_file, AccountedReadError, ChunkObject,
-    ContentObjectKind, ObjectKind, ObjectStore, MAX_RAW_OBJECT_BYTES,
+    ContentObjectKind, EmbeddingObject, EmbeddingValidationError, ObjectKind, ObjectStore,
+    MAX_RAW_OBJECT_BYTES,
 };
 use kcs_core::dag::{CommitObject, CommitType, TreeObject};
+use kcs_core::portable::portable_tag_digest64;
 use kcs_core::purge::{
     canonical_final_event, CanonicalFinalEvent, EventKind, LifecycleEvent, PurgeState,
     TombstoneMode, MAX_PURGE_RECORD_BYTES,
 };
-use kcs_core::scope::{now_utc_seconds, Repository};
+use kcs_core::scope::{names_jsonl_path, now_utc_seconds, Repository};
 use kcs_core::{KcsError, Result};
 use kcs_pipeline::markdownize::{
     load_validated_normalized_instance, normalized_instance_read_budget,
-    NormalizedInstanceIdentity, ValidatedNormalizedInstance,
+    NormalizedInstanceIdentity, UnitStatus, ValidatedNormalizedInstance,
 };
 use serde::Serialize;
 
@@ -37,13 +39,7 @@ pub(super) fn run_evidence(args: UnsupportedArgs) -> Result<Value> {
         ));
     }
     let pointer = parse_pointer_text(&raw)?;
-    let mut output = verify_pointer_for_cli(&pointer)?;
-    if strict && output.get("status").and_then(Value::as_str) != Some("alive") {
-        if let Some(object) = output.as_object_mut() {
-            object.insert("__exit_code".to_owned(), json!(4));
-        }
-    }
-    Ok(output)
+    verify_pointer_for_cli(&pointer, strict)
 }
 
 fn parse_evidence_verify_args(args: Vec<String>) -> Result<(String, bool)> {
@@ -93,8 +89,70 @@ fn parse_evidence_verify_args(args: Vec<String>) -> Result<(String, bool)> {
 /// Read-only, content-free Evidence liveness check (08 §4.3). This deliberately
 /// does not call `resolve_pointer_for_cli`: open/view may materialize an open-cache
 /// file and return chunk text, both forbidden for verify.
-fn verify_pointer_for_cli(pointer: &EvidencePointer) -> Result<Value> {
-    let target = resolve_scope_target(&pointer.scope_id, pointer.scope_path.as_deref())?;
+///
+/// PB64-68 (step4b-contract-tests-p2b.md §X, LC21 principle extended past
+/// malformed-marker corruption to canonical-event *aggregation*): the
+/// tombstone/erase-receipt dispatch below calls `enforce_canonical_marker_barrier`
+/// (main.rs) — the SAME function `open`/`view`/`restore` use — instead of a
+/// parallel, narrower single-marker (`read_tombstone(...).is_some()`) judgment.
+/// A canonical `retired` tail (tombstone says `purged`, but the erase receipt
+/// or a later tombstone event says `retired` with the greater lifecycle_epoch)
+/// therefore resolves as alive here exactly as it does for `open`, per PB64's
+/// LC10 worked example.
+///
+/// PB53-57 (§S): returns the full 6-value `status` union
+/// (`alive|tombstoned|not_found|scope_unreachable|unverifiable|registry_duplicate`)
+/// as a structured `Ok(Value)` wherever 08§4.3 specifies one. Only genuine
+/// command-level conditions — sqlite.db unavailable (PB57), an active purge
+/// journal (PB58, unchanged), and genuine store corruption (LC13/LC14 via the
+/// shared canonical dispatch) — still propagate as a raw `KcsError`.
+///
+/// **Known residual gap** (documented, not silently dropped): `unverifiable`'s
+/// `tree_v1` and `manifest_missing` reasons (08§3.1 procedures 6a/6b, U54/U55)
+/// depend on `normalize.manifest_hash` (PB04's prerequisite schema field) and
+/// the `chunk_publications` introduction table (PB29-31, U144) — neither is
+/// implemented this session (P2-B scope boundary: both require touching
+/// `NormalizeRef` construction call sites scattered across the open/restore/
+/// index write paths this session stayed out of). The reason dispatch below
+/// is wired for all three so a future patch flips a bool, not this function's
+/// structure. `commit_shallow` and PB45's unit-status `not_found` (the part of
+/// procedure 6a reachable without `manifest_hash`, since it reads the tree
+/// entry's *existing* `(raw_hash, tool_profile_hash, gen)`-keyed manifest) are
+/// both fully implemented.
+fn verify_pointer_for_cli(pointer: &EvidencePointer, strict: bool) -> Result<Value> {
+    let target = match resolve_scope_target(&pointer.scope_id, pointer.scope_path.as_deref()) {
+        Ok(target) => target,
+        // PB53: a structured `status`, not a raw command failure — exit 0
+        // unless `--strict` (PB56 promotes it to 3).
+        Err(error) if error.error_code() == "KCS-E-EVIDENCE-SCOPE-UNREACHABLE-001" => {
+            return Ok(verify_exit_override(
+                json!({
+                    "status": "scope_unreachable",
+                    "error_code": error.error_code(),
+                    "details": error.context().clone(),
+                }),
+                if strict { 3 } else { 0 },
+            ));
+        }
+        // PB54: live registry duplicate — exit 3 regardless of --strict.
+        Err(error) if error.error_code() == "KCS-E-REGISTRY-DUP-001" => {
+            return Ok(verify_exit_override(
+                json!({
+                    "status": "registry_duplicate",
+                    "error_code": error.error_code(),
+                    "details": error.context().clone(),
+                }),
+                3,
+            ));
+        }
+        Err(error) => return Err(error),
+    };
+    // PB57: sqlite.db missing/unavailable is a command-level retryable error
+    // (never a `status` field), independent of `--strict` — the verification
+    // itself has not run, so there is nothing to report as a result.
+    if !sqlite_path(&target.kcs_dir).exists() {
+        return Err(index_rebuilding_error());
+    }
     // §I checkpoint 1 (LC53). Evidence verify's whole response IS existence
     // information (08 §4.3 — it never returns body), so checkpoint 2 below
     // (LC54/LC55) gates every return point, not only a single "success" path.
@@ -110,48 +168,61 @@ fn verify_pointer_for_cli(pointer: &EvidencePointer) -> Result<Value> {
         }
         Err(error) => return Err(error),
     };
+    let store = ObjectStore::new(&target.kcs_dir);
     let (commit_shallow, entry_gen) = match repo.read_tree(&commit.tree) {
         Ok(tree) => {
-            let Some(entry) = tree
+            // PB42/43/44 (§O, verify side): select the entry whose
+            // `normalize.tool_profile_hash` binds to the pointer's (not just
+            // the first raw_hash match), tie-broken by UTF-8 byte-order-
+            // minimal path (05 §1.7's `path_at_commit` rule) when more than
+            // one entry shares that binding. Zero matching entries at all
+            // short-circuits straight to KCS-E-STORE-CORRUPT-001 WITHOUT
+            // consulting the tombstone/erase-receipt markers (PB44) — the DAG
+            // is never rewritten by purge, so a genuinely absent entry is
+            // corruption, not an explainable purge outcome.
+            let candidates = tree
                 .entries
                 .iter()
-                .find(|entry| entry.raw_hash == pointer.raw_hash)
+                .filter(|entry| entry.raw_hash == pointer.raw_hash)
+                .collect::<Vec<_>>();
+            if candidates.is_empty() {
+                return Err(store_corrupt_pointer_entry_missing_error(pointer));
+            }
+            let Some(entry) = candidates
+                .into_iter()
+                .filter(|entry| {
+                    entry.normalize.as_ref().is_some_and(|normalize| {
+                        normalize.tool_profile_hash == pointer.tool_profile_hash
+                    })
+                })
+                .min_by(|a, b| a.path.as_bytes().cmp(b.path.as_bytes()))
             else {
-                if let Some(tombstone) = read_tombstone(&target, &pointer.raw_hash)? {
-                    return checkpoint.finish(tombstoned_verify_output(tombstone));
-                }
-                return checkpoint.finish(not_found_verify_output(&target, &pointer.raw_hash));
+                return Err(invalid_pointer_identity_error(pointer));
             };
-            let entry_gen = match &entry.normalize {
-                Some(normalize) => {
-                    if normalize.tool_profile_hash != pointer.tool_profile_hash {
-                        return Err(invalid_pointer_identity_error(pointer));
-                    }
-                    Some(normalize.gen)
-                }
-                None => None,
-            };
+            let entry_gen = entry.normalize.as_ref().map(|normalize| normalize.gen);
             (false, entry_gen)
         }
         Err(error) if is_store_not_found(&error) => (true, None),
         Err(error) => return Err(error),
     };
 
-    if let Some(tombstone) = read_tombstone(&target, &pointer.raw_hash)? {
-        return checkpoint.finish(tombstoned_verify_output(tombstone));
-    }
-    if PurgeState::new(&target.kcs_dir).barrier_blocks(&pointer.raw_hash)? {
-        return checkpoint.finish(not_found_verify_output(&target, &pointer.raw_hash));
+    let raw_present = match store.inspect_object(ObjectKind::Raw, &pointer.raw_hash) {
+        Ok(_) => true,
+        Err(error) if is_store_not_found(&error) => false,
+        Err(error) => return Err(error),
+    };
+    if let Err(marker_error) =
+        enforce_canonical_marker_barrier(&target, &pointer.raw_hash, raw_present)
+    {
+        return dispatch_marker_barrier_error(
+            &checkpoint,
+            &target,
+            &pointer.raw_hash,
+            marker_error,
+            strict,
+        );
     }
 
-    let store = ObjectStore::new(&target.kcs_dir);
-    match store.inspect_object(ObjectKind::Raw, &pointer.raw_hash) {
-        Ok(_) => {}
-        Err(error) if is_store_not_found(&error) => {
-            return checkpoint.finish(not_found_verify_output(&target, &pointer.raw_hash));
-        }
-        Err(error) => return Err(error),
-    }
     let chunk = match store.read_chunk(&pointer.chunk_hash) {
         Ok(chunk) => chunk,
         Err(error) if is_store_not_found(&error) => {
@@ -174,11 +245,83 @@ fn verify_pointer_for_cli(pointer: &EvidencePointer) -> Result<Value> {
     {
         return Err(invalid_pointer_identity_error(pointer));
     }
-    if let Some(tombstone) = read_tombstone(&target, &pointer.raw_hash)? {
-        return checkpoint.finish(tombstoned_verify_output(tombstone));
+
+    // PB45 (§P procedure 6a's unit-status check, the part reachable without
+    // `normalize.manifest_hash`): a chunk whose backing unit is not
+    // `status: done` in the tree entry's own (raw_hash, tool_profile_hash,
+    // gen)-keyed normalized-instance manifest did not exist at this commit's
+    // point in time (a same-gen retry's later-arriving chunk) — not_found,
+    // unconditionally (not merely an `unverifiable` degrade).
+    if !commit_shallow {
+        if let Some(gen) = entry_gen {
+            if let Ok(instance) = load_validated_normalized_instance(
+                &target.kcs_dir,
+                &pointer.raw_hash,
+                &pointer.tool_profile_hash,
+                gen,
+            ) {
+                let done = instance
+                    .manifest
+                    .units
+                    .iter()
+                    .find(|unit| unit.unit_key == chunk.unit_key)
+                    .is_some_and(|unit| unit.status == UnitStatus::Done);
+                if !done {
+                    return checkpoint.finish(verify_exit_override(
+                        not_found_verify_output(&target, &pointer.raw_hash),
+                        if strict { 4 } else { 0 },
+                    ));
+                }
+            }
+        }
     }
-    if PurgeState::new(&target.kcs_dir).barrier_blocks(&pointer.raw_hash)? {
-        return checkpoint.finish(not_found_verify_output(&target, &pointer.raw_hash));
+
+    // Defense-in-depth: re-run the identical canonical dispatch after the
+    // chunk read, in case a purge raced the resolution above (mirrors the
+    // pre-existing double-check this function has always performed).
+    if let Err(marker_error) = enforce_canonical_marker_barrier(&target, &pointer.raw_hash, true) {
+        return dispatch_marker_barrier_error(
+            &checkpoint,
+            &target,
+            &pointer.raw_hash,
+            marker_error,
+            strict,
+        );
+    }
+
+    // PB55/56 (§S/§N): the closed 3-value `unverifiable` reason union.
+    // `tree_v1`/`manifest_missing` never become true this session (see the
+    // module doc comment above) — wired through so a future patch only needs
+    // to set the flag.
+    let manifest_missing = false;
+    let tree_v1 = false;
+    if strict && (commit_shallow || manifest_missing || tree_v1) {
+        let reason = if manifest_missing {
+            "manifest_missing"
+        } else if tree_v1 {
+            "tree_v1"
+        } else {
+            "commit_shallow"
+        };
+        // PB41/56: `commit_shallow` alone is retryable (unshallow may
+        // resolve it, exit 3); `tree_v1`/`manifest_missing` are permanent
+        // (exit 4).
+        let exit = if manifest_missing || tree_v1 { 4 } else { 3 };
+        return checkpoint.finish(verify_exit_override(
+            json!({
+                "status": "unverifiable",
+                "details": {
+                    "scope_id": pointer.scope_id,
+                    "scope_path": target.kcs_dir.display().to_string(),
+                    "commit": pointer.commit,
+                    "raw_hash": pointer.raw_hash,
+                    "tool_profile_hash": pointer.tool_profile_hash,
+                    "chunk_hash": pointer.chunk_hash,
+                    "reason": reason,
+                },
+            }),
+            exit,
+        ));
     }
 
     checkpoint.finish(json!({
@@ -193,6 +336,84 @@ fn verify_pointer_for_cli(pointer: &EvidencePointer) -> Result<Value> {
             "commit_shallow": commit_shallow,
         }
     }))
+}
+
+/// PB64-68: translate an `enforce_canonical_marker_barrier` `Err` into the
+/// SAME `status` shapes verify has always returned for tombstoned/not_found —
+/// this is the one place that bridges main.rs's shared canonical dispatch
+/// (which returns `KcsError`, appropriate for `open`/`view`/`restore`'s "fail
+/// the whole command" contract) into verify's "return a structured status,
+/// don't fail the command" contract (08 §4.3). `KCS-E-STORE-CORRUPT-001`
+/// (LC13/LC14 — a `retired` marker or no marker at all with the raw absent)
+/// is not a `status` value in the 6-value union (§S) and propagates as-is.
+fn dispatch_marker_barrier_error(
+    checkpoint: &ReadBarrierCheckpoint,
+    target: &ScopeTarget,
+    raw_hash: &str,
+    error: KcsError,
+    strict: bool,
+) -> Result<Value> {
+    // PB56 (§S/§N exit table): under `--strict`, `tombstoned`/`not_found`
+    // are permanent (exit 4) — both are `KCS-E-PURGE-*-001` error-code
+    // marker states, never transient. Non-strict always stays exit 0 (a
+    // structured status, not a command failure).
+    let exit = if strict { 4 } else { 0 };
+    match error.error_code() {
+        "KCS-E-PURGE-TOMBSTONED-001" => checkpoint.finish(verify_exit_override(
+            tombstoned_verify_output(error.context().clone()),
+            exit,
+        )),
+        "KCS-E-PURGE-NOT-FOUND-001" => checkpoint.finish(verify_exit_override(
+            not_found_verify_output(target, raw_hash),
+            exit,
+        )),
+        _ => Err(error),
+    }
+}
+
+/// PB53/54/56: embed the private `__exit_code` marker `main()` strips before
+/// printing (matching the existing convention `run_repair`/search partial
+/// failure already use) so a structured status response can still request a
+/// non-zero exit.
+fn verify_exit_override(mut value: Value, exit: u64) -> Value {
+    if exit != 0 {
+        if let Some(object) = value.as_object_mut() {
+            object.insert("__exit_code".to_owned(), json!(exit));
+        }
+    }
+    value
+}
+
+/// PB57: sqlite.db is missing/unavailable — the same retryable code
+/// `check_index_generation_current`'s cursor-mismatch branch and search's
+/// exclusion path already use (main.rs), reused here rather than minted
+/// fresh so verify and search agree on what "index rebuilding" means.
+fn index_rebuilding_error() -> KcsError {
+    KcsError::new(
+        "KCS-E-INDEX-REBUILDING-001",
+        "the search index is unavailable (not yet built or mid-rebuild); retry",
+        json!({}),
+        ExitCode::PartialFailure,
+    )
+}
+
+/// PB44: zero tree entries name this pointer's raw_hash at this commit — the
+/// DAG is never rewritten by purge (02-philosophy §2.4), so this is genuine
+/// corruption, not an explainable purge outcome. Distinct from
+/// `invalid_pointer_identity_error` (entries exist but none bind to this
+/// pointer's tool_profile_hash) — same downstream `not_found`-class handling
+/// (08 §3.1 step 8), different corruption code per PB44.
+fn store_corrupt_pointer_entry_missing_error(pointer: &EvidencePointer) -> KcsError {
+    KcsError::new(
+        "KCS-E-STORE-CORRUPT-001",
+        "no tree entry at this commit names the pointer's raw_hash; the DAG is never \
+         rewritten by purge, so this is corruption rather than a purge outcome",
+        json!({
+            "commit": pointer.commit,
+            "raw_hash": pointer.raw_hash,
+        }),
+        ExitCode::PermanentFailure,
+    )
 }
 
 fn tombstoned_verify_output(mut tombstone: Value) -> Value {
@@ -224,6 +445,15 @@ pub struct CheckedObjects {
     pub trees: u64,
     pub commits: u64,
     pub normalized_instances: u64,
+    /// PB01 (§A, U39): `objects/embeddings/` CAS objects verified (digest +
+    /// declared-length/finite-vector).
+    pub embeddings: u64,
+    /// PB02 (§B, U39): `objects/manifests/` CAS objects verified (content
+    /// hash).
+    pub manifests: u64,
+    /// PB02 (§B, U39): `objects/toollocks/` CAS objects verified (canonical
+    /// JCS content hash — 03 §5.2).
+    pub toollocks: u64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -345,6 +575,44 @@ fn verify_objects_with_limits(
     }
     if state.unsafe_namespace {
         return Ok(finish_report(state, 0, None));
+    }
+
+    // PB01/PB02 (§A/§B, 10 §7.5.1 L489): embedding/manifest/toollock CAS
+    // objects join the verification closure. These are inventoried
+    // standalone (not tree-cross-referenced — that requires
+    // `normalize.manifest_hash`, PB04's prerequisite schema field, not
+    // implemented this session; see this module's PB64-68 doc comment for
+    // the analogous, explicitly-documented gap on the resolver side).
+    verify_embeddings(&store, repo.kcs_dir(), &mut state)?;
+    if state.exceeded_bounds {
+        return Ok(finish_limit_report(state));
+    }
+    verify_content_hash_closure(
+        &store,
+        repo.kcs_dir(),
+        ContentObjectKind::Manifest,
+        "manifest_corrupt",
+        &mut state,
+    )?;
+    if state.exceeded_bounds {
+        return Ok(finish_limit_report(state));
+    }
+    verify_content_hash_closure(
+        &store,
+        repo.kcs_dir(),
+        ContentObjectKind::Toollock,
+        "toollock_corrupt",
+        &mut state,
+    )?;
+    if state.exceeded_bounds {
+        return Ok(finish_limit_report(state));
+    }
+
+    // §C (U41, PB07-09): names.jsonl full-line verification + canonical tag
+    // ref correspondence.
+    verify_names_jsonl(repo.kcs_dir(), &mut state)?;
+    if state.exceeded_bounds {
+        return Ok(finish_limit_report(state));
     }
 
     let mut corrupt_raws = BTreeMap::<String, String>::new();
@@ -992,6 +1260,247 @@ fn verify_objects_with_limits(
     Ok(finish_report(state, repaired, repaired_commit_hash))
 }
 
+/// PB01 (§A, 10 §7.5.1 L489): `objects/embeddings/` CAS objects — content
+/// digest (a)(c)(f)(g) via [`ObjectStore::inspect_content_accounted`] (the
+/// same byte-hash check every other content-addressed kind uses), plus the
+/// declared-length/finite-vector semantic check (b)(d)(e) via
+/// [`EmbeddingObject::validate_vector`]. A digest mismatch and a vector
+/// validation failure are reported as the same `embedding_corrupt` finding
+/// kind (the contract does not require distinguishing them, only that both
+/// are detected — PB01's (b)(d)(e)(g) are each individually parameterized as
+/// separate test fixtures, not separate finding kinds).
+fn verify_embeddings(store: &ObjectStore, kcs_dir: &Path, state: &mut State) -> Result<()> {
+    let hashes = inventory(kcs_dir, ContentObjectKind::Embedding.directory(), state)?;
+    if state.exceeded_bounds || state.unsafe_namespace {
+        return Ok(());
+    }
+    for hash in hashes {
+        state.count_object();
+        if state.exceeded_bounds {
+            return Ok(());
+        }
+        match store.inspect_content_accounted(ContentObjectKind::Embedding, &hash) {
+            Ok(metadata) => {
+                state.add_bytes(metadata.size_bytes);
+                if state.exceeded_bounds {
+                    return Ok(());
+                }
+            }
+            Err(failure) => {
+                state.add_bytes(failure.consumed_bytes);
+                if state.exceeded_bounds {
+                    return Ok(());
+                }
+                state.finding("embedding_corrupt", &hash, &failure.error.to_string(), &[]);
+                continue;
+            }
+        }
+        let bytes =
+            match store.read_content_object_bytes(ContentObjectKind::Embedding, &hash, 1 << 20) {
+                Ok(bytes) => bytes,
+                Err(error) => {
+                    state.finding("embedding_corrupt", &hash, &error.to_string(), &[]);
+                    continue;
+                }
+            };
+        match serde_json::from_slice::<EmbeddingObject>(&bytes) {
+            Ok(embedding) => match embedding.validate_vector() {
+                Ok(()) => state.checked.embeddings += 1,
+                Err(EmbeddingValidationError::LengthMismatch) => state.finding(
+                    "embedding_corrupt",
+                    &hash,
+                    "declared dimensions does not match vector length",
+                    &[],
+                ),
+                Err(EmbeddingValidationError::NonFinite) => state.finding(
+                    "embedding_corrupt",
+                    &hash,
+                    "vector contains a non-finite element (NaN/Infinity)",
+                    &[],
+                ),
+            },
+            Err(error) => {
+                state.finding("embedding_corrupt", &hash, &error.to_string(), &[]);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// PB02 (§B, 10 §7.5.1 L489): the standalone (non-tree-cross-referenced —
+/// see the module-level PB64-68 doc comment's gap note on
+/// `normalize.manifest_hash`) part of manifest/toollock verification: every
+/// object under `objects/<kind>/` is content-addressed and its stored bytes
+/// must hash to its own leaf name, exactly like prepared/image already are.
+fn verify_content_hash_closure(
+    store: &ObjectStore,
+    kcs_dir: &Path,
+    kind: ContentObjectKind,
+    finding_kind: &str,
+    state: &mut State,
+) -> Result<()> {
+    let hashes = inventory(kcs_dir, kind.directory(), state)?;
+    if state.exceeded_bounds || state.unsafe_namespace {
+        return Ok(());
+    }
+    for hash in hashes {
+        state.count_object();
+        if state.exceeded_bounds {
+            return Ok(());
+        }
+        match store.inspect_content_accounted(kind, &hash) {
+            Ok(metadata) => {
+                state.add_bytes(metadata.size_bytes);
+                if state.exceeded_bounds {
+                    return Ok(());
+                }
+                match kind {
+                    ContentObjectKind::Manifest => state.checked.manifests += 1,
+                    ContentObjectKind::Toollock => state.checked.toollocks += 1,
+                    _ => {}
+                }
+            }
+            Err(failure) => {
+                state.add_bytes(failure.consumed_bytes);
+                if state.exceeded_bounds {
+                    return Ok(());
+                }
+                state.finding(finding_kind, &hash, &failure.error.to_string(), &[]);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// One parsed `names.jsonl` line (PB07-09, 03-data-model.md §2 L140-152).
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NamesJsonlRecord {
+    digest64: String,
+    logical_name: String,
+    recorded_at: String,
+}
+
+/// §C (U41, PB07-09): `refs/tags-v1/names.jsonl` full-line verification and
+/// its correspondence with the canonical tag refs `commit_roots` already
+/// inventoried into `roots` — but this function re-derives the canonical ref
+/// leaf set independently (a bounded directory listing, not a mutation of
+/// `commit_roots`'s return shape) so it stays a self-contained, orthogonal
+/// check.
+///
+/// - PB07: every line's schema is valid and `digest64` equals
+///   `portable_tag_digest64(logical_name)` (a mismatch — schema-valid but
+///   wrong digest — is corruption distinct from a schema-invalid line, but
+///   both are reported under the same `names_jsonl_corrupt` finding kind,
+///   matching PB07's framing of both as corruption without requiring a
+///   third finding kind).
+/// - PB08: only the FINAL line may be a torn (truncated) tail; a malformed
+///   line anywhere else is corruption.
+/// - PB09: a canonical ref with no corresponding names.jsonl line is
+///   corruption; a names.jsonl line with no corresponding canonical ref is
+///   normal (tag-delete residue, append-only by design).
+fn verify_names_jsonl(kcs_dir: &Path, state: &mut State) -> Result<()> {
+    // Bounded like every other fsck read in this module (never an unbounded
+    // read of a file an attacker/bug could grow without limit).
+    const MAX_NAMES_JSONL_BYTES: u64 = 64 * 1024 * 1024;
+    let path = names_jsonl_path(kcs_dir);
+    // A scope with no tags at all has no names.jsonl yet — normal, not a
+    // finding (checked before the open so ENOENT is never ambiguous with a
+    // genuine I/O failure on an existing path).
+    if fs::symlink_metadata(&path).is_err() {
+        return Ok(());
+    }
+    let text = match read_bounded_regular_file(&path, MAX_NAMES_JSONL_BYTES) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            state.finding("names_jsonl_corrupt", "", &error.to_string(), &[]);
+            return Ok(());
+        }
+    };
+    state.add_bytes(text.len() as u64);
+    if state.exceeded_bounds {
+        return Ok(());
+    }
+    let raw_lines = text
+        .split(|byte| *byte == b'\n')
+        .map(|line| String::from_utf8_lossy(line).into_owned())
+        .collect::<Vec<_>>();
+    // PB08: a JSONL file ending in `\n` has one trailing empty split segment
+    // (not a torn tail); a file NOT ending in `\n` has a genuinely torn final
+    // line, tolerated (silently truncated) here exactly like `chunks.jsonl`
+    // (Q1) and `PurgeState`'s own record parsing.
+    let mut lines = raw_lines;
+    let torn_tail = !text.is_empty() && text.last() != Some(&b'\n');
+    // Either the well-terminated case's trailing empty split segment, or the
+    // torn-tail case's genuinely incomplete final line — both are dropped by
+    // the same `pop()`, just for different reasons (see the comment above).
+    if torn_tail || lines.last().is_some_and(String::is_empty) {
+        lines.pop();
+    }
+
+    let mut last_valid_by_digest = BTreeMap::<String, String>::new();
+    for line in &lines {
+        if line.trim().is_empty() {
+            continue;
+        }
+        state.count_object();
+        if state.exceeded_bounds {
+            return Ok(());
+        }
+        match serde_json::from_str::<NamesJsonlRecord>(line) {
+            Ok(record) => {
+                let expected_digest = portable_tag_digest64(&record.logical_name);
+                if record.digest64 != expected_digest {
+                    state.finding(
+                        "names_jsonl_corrupt",
+                        &record.digest64,
+                        "names.jsonl digest64 does not match the recomputed logical_name digest",
+                        &[],
+                    );
+                } else if record.recorded_at.is_empty() {
+                    state.finding(
+                        "names_jsonl_corrupt",
+                        &record.digest64,
+                        "names.jsonl row is missing recorded_at",
+                        &[],
+                    );
+                } else {
+                    last_valid_by_digest.insert(record.digest64.clone(), record.logical_name);
+                }
+            }
+            Err(error) => {
+                state.finding("names_jsonl_corrupt", "", &error.to_string(), &[]);
+            }
+        }
+    }
+
+    // PB09: canonical ref <-> names.jsonl correspondence. A ref with no
+    // matching (schema-valid) names row is corruption; the reverse (a names
+    // row with no matching ref) is normal tag-delete residue.
+    let canonical_dir = kcs_dir.join("refs/tags-v1");
+    let Ok(entries) = fs::read_dir(&canonical_dir) else {
+        return Ok(());
+    };
+    for entry in entries.flatten() {
+        let leaf = entry.file_name().to_string_lossy().into_owned();
+        if leaf == "names.jsonl" {
+            continue;
+        }
+        let Some(digest) = leaf.strip_prefix("tag-") else {
+            continue;
+        };
+        if !last_valid_by_digest.contains_key(digest) {
+            state.finding(
+                "names_jsonl_corrupt",
+                digest,
+                "canonical tag ref has no corresponding names.jsonl row",
+                &[],
+            );
+        }
+    }
+    Ok(())
+}
+
 fn finish_report(
     state: State,
     repaired_raw_count: u64,
@@ -1247,6 +1756,12 @@ fn marker_inventory(kcs_dir: &Path, relative: &str, state: &mut State) -> Result
                 continue;
             }
             let leaf = entry.file_name().to_string_lossy().into_owned();
+            if relative == "tombstones" && directory == base && leaf == "lifecycle-epoch" {
+                // `.kcs/tombstones/lifecycle-epoch` is the monotonic lifecycle
+                // counter (03 §4.1 / 05 §3.5), not a marker record — it lives at
+                // the inventory root, outside the fan-out namespace.
+                continue;
+            }
             let digest = if relative == "tombstones" {
                 leaf.strip_prefix("sha256:").unwrap_or(&leaf)
             } else {
@@ -1427,6 +1942,12 @@ fn commit_roots(repo: &Repository, state: &mut State) -> Result<BTreeSet<String>
                     state.finding("ref_non_regular", "", "ref is not a real regular file", &[]);
                     continue;
                 }
+                if relative == "refs/tags-v1" && entry.file_name() == "names.jsonl" {
+                    // §C (PB07-09): names.jsonl co-resides in refs/tags-v1/
+                    // (03 §2 L80) but is a ledger, not a tag ref — its own
+                    // verification lives in `verify_names_jsonl`, not here.
+                    continue;
+                }
                 if relative == "refs/tags-v1" {
                     let leaf = entry.file_name().to_string_lossy().into_owned();
                     let valid = leaf.strip_prefix("tag-").is_some_and(|digest| {
@@ -1498,6 +2019,286 @@ fn commit_roots(repo: &Repository, state: &mut State) -> Result<BTreeSet<String>
         }
     }
     Ok(roots)
+}
+
+// ===========================================================================
+// `kcs repair --verify-objects --prune-orphans` (step4b-contract-tests-p2b.md
+// §E, U43, 10-operations.md §7.5.1 L586-626).
+// ===========================================================================
+
+#[derive(Debug, Default, Serialize)]
+pub struct PruneOrphansReport {
+    /// `"pruned"` or `"blocked"` (PB15 fail-closed refusal).
+    pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub blocked_by: Option<String>,
+    pub pruned_prepared_count: u64,
+    pub pruned_image_count: u64,
+    pub pruned_open_cache_count: u64,
+}
+
+/// PB12-17 (§E): `kcs repair --verify-objects --prune-orphans`.
+///
+/// **Implemented this session**: PB13 (orphan prepared/image — referenced by
+/// no live manifest across the FULL reachable commit history, not just HEAD),
+/// two of PB15's four fail-closed blocker conditions (active purge journal;
+/// pending/running task), and PB17 (open-cache residue for canonically
+/// `purged`/`erased` raw_hashes, image cache included and type-separated per
+/// `open/image/<digest64>/`).
+///
+/// **NOT implemented this session — documented gap, not a silent omission**:
+/// PB14/16 (staging-root descriptor 3-way classification and the terminal-
+/// task escape hatch — depends on staging-root/task-descriptor internals this
+/// session did not have scope to research safely) and the remaining two of
+/// PB15's four blockers (state 0/1 `batch_requests` rows, which need
+/// cost-ledger.sqlite schema this module does not touch; unfinalized-manifest
+/// progress, which needs the `normalize.manifest_hash` prerequisite §B defers
+/// this session). Callers must NOT treat this function's `"pruned"` status as
+/// a complete PB15 fail-closed guarantee — it is a conservative subset that
+/// only ever deletes strictly-unreferenced prepared/image/cache objects, never
+/// a false-positive orphan, but it can still run while one of the two
+/// unimplemented blocker conditions is true.
+pub fn prune_orphans(repo: &Repository) -> Result<PruneOrphansReport> {
+    let purge = PurgeState::new(repo.kcs_dir());
+    if purge.read_journal()?.is_some() {
+        return Ok(PruneOrphansReport {
+            status: "blocked".to_owned(),
+            blocked_by: Some("active_purge_journal".to_owned()),
+            ..Default::default()
+        });
+    }
+    let tasks = kcs_pipeline::task::TaskStore::new(repo.kcs_dir())
+        .all()
+        .map_err(pipeline_to_kcs)?;
+    if tasks.iter().any(|task| {
+        matches!(
+            task.status,
+            kcs_pipeline::task::TaskStatus::Pending | kcs_pipeline::task::TaskStatus::Running
+        )
+    }) {
+        return Ok(PruneOrphansReport {
+            status: "blocked".to_owned(),
+            blocked_by: Some("non_terminal_task".to_owned()),
+            ..Default::default()
+        });
+    }
+
+    let invocation_time = now_utc_seconds();
+    let mut root_state = State::default();
+    let roots = commit_roots(repo, &mut root_state)?;
+    if root_state.exceeded_bounds || !root_state.findings.is_empty() {
+        // A ref/inventory anomaly means the live set below cannot be trusted
+        // — refuse to prune rather than risk deleting something still live.
+        return Ok(PruneOrphansReport {
+            status: "blocked".to_owned(),
+            blocked_by: Some("ref_inventory_unsafe".to_owned()),
+            ..Default::default()
+        });
+    }
+    let mut commits = BTreeMap::<String, CommitObject>::new();
+    let mut trees = BTreeMap::<String, TreeObject>::new();
+    let mut reachable = BTreeSet::<String>::new();
+    let mut queue: VecDeque<String> = roots.into_iter().collect();
+    while let Some(hash) = queue.pop_front() {
+        if !reachable.insert(hash.clone()) {
+            continue;
+        }
+        let commit = repo.read_commit(&hash)?;
+        queue.extend(commit.parents.iter().cloned());
+        if let Ok(tree) = repo.read_tree(&commit.tree) {
+            trees.insert(commit.tree.clone(), tree);
+        }
+        commits.insert(hash, commit);
+    }
+
+    let mut live_prepared = BTreeSet::<String>::new();
+    let mut live_images = BTreeSet::<String>::new();
+    for commit_hash in &reachable {
+        let Some(commit) = commits.get(commit_hash) else {
+            continue;
+        };
+        let Some(tree) = trees.get(&commit.tree) else {
+            continue;
+        };
+        for entry in &tree.entries {
+            let Some(normalize) = &entry.normalize else {
+                continue;
+            };
+            let Ok(instance) = load_validated_normalized_instance(
+                repo.kcs_dir(),
+                &entry.raw_hash,
+                &normalize.tool_profile_hash,
+                normalize.gen,
+            ) else {
+                // A missing/corrupt normalized instance is fsck's concern
+                // (`kcs repair --verify-objects` without `--prune-orphans`);
+                // prune-orphans conservatively treats it as "cannot prove
+                // orphan-ness" rather than compounding a corruption finding
+                // with a deletion.
+                continue;
+            };
+            for unit_manifest in &instance.manifest.units {
+                live_prepared.insert(unit_manifest.prepared_hash.clone());
+            }
+            for unit in &instance.units {
+                let _ =
+                    collect_unit_image_references(&unit.metadata, &unit.markdown, &mut live_images);
+            }
+        }
+    }
+
+    let store = ObjectStore::new(repo.kcs_dir());
+    let mut pruned_prepared = 0u64;
+    for hash in inventory_content_dir(repo.kcs_dir(), ContentObjectKind::Prepared)? {
+        if !live_prepared.contains(&hash)
+            && store
+                .remove_content(ContentObjectKind::Prepared, &hash)
+                .unwrap_or(false)
+        {
+            pruned_prepared += 1;
+        }
+    }
+    let mut pruned_images = 0u64;
+    for hash in inventory_content_dir(repo.kcs_dir(), ContentObjectKind::Image)? {
+        if !live_images.contains(&hash)
+            && store
+                .remove_content(ContentObjectKind::Image, &hash)
+                .unwrap_or(false)
+        {
+            pruned_images += 1;
+        }
+    }
+
+    // PB17: open-cache residue for raw_hashes whose canonical final event is
+    // `purged`/`erased` (the publish-then-check crash window, 05 §4.2), plus
+    // any image cache entry no live manifest references (mirrors the
+    // prepared/image CAS orphan judgment above; the raw/image cache-type
+    // separation itself is C-territory, out of this contract's scope — PB17
+    // only fixes that `--prune-orphans` triggers the cleanup).
+    let mut pruned_cache = 0u64;
+    let mut marker_state = State::default();
+    let tombstone_hashes = marker_inventory(repo.kcs_dir(), "tombstones", &mut marker_state)?;
+    let receipt_hashes =
+        marker_inventory(repo.kcs_dir(), "purge/erase-receipts", &mut marker_state)?;
+    for raw_hash in tombstone_hashes.union(&receipt_hashes) {
+        let lookup = canonical_lookup(
+            &purge,
+            raw_hash,
+            &commits,
+            &trees,
+            &reachable,
+            &invocation_time,
+        );
+        let retired = matches!(
+            lookup.canonical.map(|canonical| canonical.event.kind),
+            Some(EventKind::Purged) | Some(EventKind::Erased)
+        );
+        if !retired {
+            continue;
+        }
+        if let Ok(digest) = kcs_core::cas::hash_path_component(raw_hash) {
+            let cache_dir = crate::cache_home().join("kcs/open").join(digest);
+            if cache_dir.exists() {
+                fs::remove_dir_all(&cache_dir).map_err(|error| {
+                    KcsError::io(error.to_string(), cache_dir.display().to_string())
+                })?;
+                pruned_cache += 1;
+            }
+        }
+    }
+    let image_cache_root = crate::cache_home().join("kcs/open/image");
+    if let Ok(entries) = fs::read_dir(&image_cache_root) {
+        for entry in entries.flatten() {
+            let leaf = entry.file_name().to_string_lossy().into_owned();
+            let candidate_hash = format!("sha256:{leaf}");
+            if is_hash(&candidate_hash) && !live_images.contains(&candidate_hash) {
+                let path = entry.path();
+                if fs::remove_dir_all(&path).is_ok() {
+                    pruned_cache += 1;
+                }
+            }
+        }
+    }
+
+    Ok(PruneOrphansReport {
+        status: "pruned".to_owned(),
+        blocked_by: None,
+        pruned_prepared_count: pruned_prepared,
+        pruned_image_count: pruned_images,
+        pruned_open_cache_count: pruned_cache,
+    })
+}
+
+/// Non-recursive fan-out inventory of one `ContentObjectKind` directory —
+/// lighter-weight than `inventory()` (no byte/object bounds accounting,
+/// `--prune-orphans` is an explicit maintenance operation, not the routine
+/// fsck hot path).
+fn inventory_content_dir(kcs_dir: &Path, kind: ContentObjectKind) -> Result<BTreeSet<String>> {
+    let base = kcs_dir.join("objects").join(kind.directory());
+    let mut hashes = BTreeSet::new();
+    if !base.exists() {
+        return Ok(hashes);
+    }
+    let mut stack = vec![base];
+    while let Some(directory) = stack.pop() {
+        for entry in fs::read_dir(&directory)
+            .map_err(|error| KcsError::io(error.to_string(), directory.display().to_string()))?
+        {
+            let entry = entry.map_err(|error| {
+                KcsError::io(error.to_string(), directory.display().to_string())
+            })?;
+            let path = entry.path();
+            let file_type = entry
+                .file_type()
+                .map_err(|error| KcsError::io(error.to_string(), path.display().to_string()))?;
+            if file_type.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            let leaf = entry.file_name().to_string_lossy().into_owned();
+            let digest = leaf.strip_prefix("sha256:").unwrap_or(&leaf);
+            let hash = format!("sha256:{digest}");
+            if is_hash(&hash) {
+                hashes.insert(hash);
+            }
+        }
+    }
+    Ok(hashes)
+}
+
+// ===========================================================================
+// `kcs repair --registry-prune` (step4b-contract-tests-p2b.md §H, U46,
+// 10-operations.md §3 L291-293).
+// ===========================================================================
+
+#[derive(Debug, Default, Serialize)]
+pub struct RegistryPruneReport {
+    pub pruned_count: u64,
+}
+
+/// PB25: delete registry rows whose `.kcs` is unreachable (no re-init, no
+/// re-discovery possible) — NOT rows that are merely live-duplicated (PB21's
+/// concern; dedupe there is a user decision, never automatic here). A row is
+/// unreachable when `open_scope_from_hint` cannot open it AT ALL (the `.kcs`
+/// itself does not validate), independent of whether its `scope_id` matches
+/// what the registry row claims (a mismatched-but-openable `.kcs` is a stale
+/// registration for a DIFFERENT purpose — R15-3's `retire_stale_kcs_path`
+/// already owns that case on the next `init`/`index`, not this command).
+pub fn registry_prune() -> Result<RegistryPruneReport> {
+    let registry = RegistryDb::open_default().map_err(index_to_kcs)?;
+    let mut pruned = 0u64;
+    for entry in registry.all_entries().map_err(index_to_kcs)? {
+        let reachable = crate::open_scope_from_hint(&entry.root_path).is_some();
+        if !reachable {
+            registry
+                .remove(&entry.scope_id, &entry.kcs_path)
+                .map_err(index_to_kcs)?;
+            pruned += 1;
+        }
+    }
+    Ok(RegistryPruneReport {
+        pruned_count: pruned,
+    })
 }
 
 /// LC8-LC10 (§C): canonical final event across both markers for `raw_hash`,
@@ -2102,6 +2903,7 @@ mod tests {
                 "2026-07-13T00:00:01Z",
                 1,
                 hash_bytes(b"planned commit placeholder"),
+                hash_bytes(b"planned closure placeholder"),
                 kcs_core::scope::new_ulid(dir.path()),
             )
             .unwrap();
