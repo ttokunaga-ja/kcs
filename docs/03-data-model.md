@@ -698,7 +698,7 @@ embedding_hash = "sha256:" + base16(sha256(JCS({
 
 JCS ではキー順は canonical 化時に自動決定されるため、上記の記載順は可読性のためのもの。
 
-`commit_type=purged` の commit は **`purged_raws` (当該 purge の対象 raw_hash の昇順配列 — prepared 相の closure から確定、[05-runtime.md §3.5](05-runtime.md) の planned_commit) を必須 field に持つ**。marker 検証 ([10-operations.md §7.5.1](10-operations.md)) は tombstone / receipt の raw_hash がこの配列に含まれることを対照する — 他 raw の正当な purge commit を `in_commit` に流用した偽 marker が genuine missing を隠せない。他の commit_type は本 field を持たない。
+`commit_type=purged` の commit は **`purged_raws` (当該 purge の対象 raw_hash の昇順配列 — prepared 相の closure から確定、[05-runtime.md §3.5](05-runtime.md) の planned_commit) を必須 field に持つ**。marker 検証 ([10-operations.md §7.5.1](10-operations.md)) は tombstone / receipt の raw_hash がこの配列に含まれることを対照する — 他 raw の正当な purge commit を `in_commit` に流用した偽 marker が genuine missing を隠せない。他の commit_type は本 field を持たない。**本 field は store format の初版から必須であり、これを欠く `commit_type=purged` commit は存在しない** (欠落 = corruption。2026-07 の field 追加は実装・store 公開前の定義確定。v1 flat marker の変換規範 ([05-runtime.md §3.5](05-runtime.md)) は marker 表現の互換であって、参照先 commit の形式は初版から一定)。
 
 tree entry の `normalize` ブロックは **optional**。normalized instance が存在しないファイル (未 Markdownize) の
 entry では `normalize` を**省略**する (省略 = 当該ファイルの normalized / chunk は存在しない。`null` は書かない —

@@ -640,6 +640,9 @@ MVP における Adapter の脅威モデルを次のとおり確定する。
 
 2. [adapter.policy] は「KCS 側の入力制御 + 事後監査」の規約であり、
    sandbox による強制保証ではない。
+   - `max_input_bytes` は **AdapterRun 1 回の入力 (prepared input の canonical bytes 合計)** に
+     適用する — 超過は送信前に当該 task を terminal failed (invalid_input・非再試行) とし、
+     送信しない (課金なし)
    - KCS は allowed_scope 外のファイルを Adapter に渡さない (入力制御)
    - KCS は allow_network=false の Adapter にオンライン送信前提の task を発行しない
    - AdapterRun (task_id / input_hashes / output_hashes / status) を監査ログとして残す

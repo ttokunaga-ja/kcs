@@ -563,11 +563,15 @@ legacy 欠落行は valid だが、各回復の最大値計算には使わない
 生成された purged / erased event に限る — 新規 purge では禁止)。reason は 5 値 enum — enum 外は
 legacy 行として警告 (corruption にしない・response は other 扱い))、`erased` event の `in_commit` が bounded verified
 CAS で ref-reachable な `commit_type=purged` commit を指すこと、当該 commit の `purged_raws` に対象
-raw_hash が含まれること ([03-data-model.md §4](03-data-model.md))、各 `at` が canonical UTC でその event
+raw_hash が含まれること ([03-data-model.md §8](03-data-model.md) — `purged_raws` は store format の
+初版から必須であり、欠落 commit は存在しない。欠落 = corruption)、各 `at` が canonical UTC でその event
 の commit `created_at` と一致し invocation の fixed now より未来でないこと、event 列が有効な遷移
 (erased を先頭に erased / retired が交互 — 末尾 event が現況) であること、terminal `retired` の
 `resurrection_commit` が ref-reachable で、**直前の erased / purged event の `in_commit` を
-ancestor に持つ (= 当該 purge より後の publication である)** ことを必須とする。**v1 flat (`erased_at` /
+ancestor に持つ (= 当該 purge より後の publication である)** ことを必須とする (**resurrection_commit の
+verified tree が同一 raw_hash の leaf を含むことを tree 存置時に限り検証する** — auto 型 publication
+commit は shallow 化で tree を失い得るため tree 不在時は本検証を省略する。defense-in-depth、
+[08-evidence-pointer-spec.md](08-evidence-pointer-spec.md) 手順 8 と同型)。**v1 flat (`erased_at` /
 `purged_in_commit`)**: 「erased event 1 件」に正規化してから同じ検証器に通す (v1 に reason は無い —
 変換で `reason: "other"` を合成し legacy 警告として報告、[05-runtime.md §3.5](05-runtime.md) と同一規則)
 ([05-runtime.md §3.5](05-runtime.md) の読取規則)。**tombstone lifecycle にも同じ event 検証を適用する**
@@ -628,15 +632,21 @@ MVP では手動実行のみとする。自動定期検証 (スケジューラ�
    - **デバイスグローバルの cost-ledger.sqlite は `.kcs` コピーに含まれない** — 別途
      `sqlite3 "<KCS data dir>/cost-ledger.sqlite" ".backup <dest>"` (WAL-safe。**必ず実体の絶対パスで
      指定する** — 相対パスはカレントに空 DB を新規作成し「正常にバックアップできた」ように見える。
-     例: `sqlite3 "$XDG_DATA_HOME/kcs/cost-ledger.sqlite" ".backup /backups/kcs-cost-ledger.sqlite"` —
+     例: `sqlite3 "${XDG_DATA_HOME:-$HOME/.local/share}/kcs/cost-ledger.sqlite" ".backup /backups/kcs-cost-ledger.sqlite"` —
      `<...>` は展開後も絶対パスであること。
      **復元後は `PRAGMA integrity_check` と cost_ledger / batch_requests 両表の存在を確認する**) で
      バックアップし、復元は KCS プロセス非実行中に行い、復元後は
      §5.8 の回復 (reconcile) が完了するまで新規 Batch 投入を行わない ([04-pipeline.md §5.4](04-pipeline.md))。
      **復元した DB は backup 以後の投入記録を失っている** — 復元後の初回回復では、記録済み provider
-     scope の全ページ一覧 ([04-pipeline.md §5.8](04-pipeline.md) の confirmed-absent と同じ走査) に
-     現れる KCS 形式 token のうち `batch_requests` に対応行が無い job / upload を orphan として報告し、
-     手動での結果取得・削除を案内する (自動再投入・自動削除はしない — 二重課金と orphan 課金の可視化)
+     scope の全ページ一覧 ([04-pipeline.md §5.8](04-pipeline.md) の confirmed-absent と同じ走査) のうち
+     `batch_requests` に対応行が無い job / upload を次の帰属規則で報告する (**帰属は token 形式ではなく
+     job metadata の task key 4 組が担う** — [04-pipeline.md §5.8](04-pipeline.md) の帰属規範と同一。
+     UUIDv7 token 単独では帰属できない): metadata の scope_id がローカル構成の scope に一致する job は
+     orphan 候補として報告し、結果取得 (読み取りのみで安全) と、**他 KCS インスタンスとの provider
+     scope 共有がないことを確認した上での**削除を案内する。metadata が一致しない・読めない job と、
+     filename の token しか持たない upload は**帰属不能 (unknown) として報告のみ** — 削除案内を出さない
+     (他インスタンス・他ツール由来があり得る)。自動再投入・自動削除はしない (二重課金と orphan 課金の
+     可視化)
 
 2. kcs export <scope> --to <bundle.kcsz>
    - .kcsz は export と同一の bundle 形式で、バックアップにも使える (bundle には承認・運用記録・

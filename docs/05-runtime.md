@@ -792,7 +792,7 @@ journal record = { purge_id (ULID), raw_hash 群, reason, actor, started_at, tar
                    planned_commit (purged commit の canonical bytes — prepared 相で確定し、
                                    tombstone / receipt の purged / erased event の in_commit と
                                    一致する hash を先に固定。`purged_raws` = 対象 raw_hash 昇順配列を
-                                   必須 field に持つ — [03-data-model.md §4](03-data-model.md)。
+                                   必須 field に持つ — [03-data-model.md §8](03-data-model.md)。
                                    marker の purged / erased event の `at` は planned_commit の
                                    `created_at` と同一値 — prepared 相で確定した単一 timestamp) }
 phase 順序    = prepared (closure 確定・記帳)
@@ -827,9 +827,11 @@ phase 順序    = prepared (closure 確定・記帳)
               対象名が `.kcs-restore-bak` / `.kcs-restore-quarantine` で終わる場合は mutation 前に明示
               拒否する** (commit 展開では全出力 path を publish 前に検査。退避・隔離名前空間の予約 —
               残存退避を正規対象として再退避・cleanup すると先行 restore の回復コピーを失う。真にその名の
-              ファイルを復元する場合は改名復元を案内)。**出力先の隔離名 `<basename>.kcs-restore-quarantine`
-              に同名ファイルが既に存在する場合も先行 restore の未完残存として mutation 前に拒否し、回復
-              手順 (内容確認の上での手動復帰または削除) を案内する** (crash 残存の隔離物が purge 済み
+              ファイルを復元する場合は改名復元を案内)。**出力先の退避名 `<basename>.kcs-restore-bak`・隔離名 `<basename>.kcs-restore-quarantine`
+              に同名ファイルが既に存在する場合は、--force の有無・宛先の存否に関わらず先行 restore の
+              未完残存として mutation 前に拒否し、回復手順 (内容確認の上での手動復帰または削除) を
+              案内する** (bak / quarantine とも出力 path ごとの mutation 前検査 — --force 限定にすると
+              先行 crash で宛先が消えた後の非 --force 再実行が stale 退避を素通しする) (crash 残存の隔離物が purge 済み
               内容の生存コピーか第三者ファイルかは機械判別できない。隔離・退避は `--to` 配下のユーザー
               領域であり [04-pipeline.md §1.1](04-pipeline.md) の temp 掃除の対象外 — KCS は自動削除
               しない)。
@@ -838,9 +840,10 @@ phase 順序    = prepared (closure 確定・記帳)
               無断置換しない。--force = 下記の退避が destination を空けた直後に現れた第三者ファイルを
               置換しない — この競合時は退避を元 path へ復帰 (下記の隔離検証方式) して終端する。意図的置換は
               退避 rename だけが担う。restore の競合終端は全て **KCS-E-COMMIT-RESTORE-CONFLICT-001
-              (retryable exit 3 — context に閉 enum `conflict_kind` (publish_race / quarantine_mismatch /
-              backup_mismatch / restore_rename_race / stale_backup / stale_quarantine) と
-              `retry_disposition` (publish_race / restore_rename_race = transient・他 = manual_action —
+              (retryable exit 3 — context に閉 enum `conflict_kind` (publish_race /
+              quarantine_rename_race / quarantine_mismatch / backup_mismatch / restore_rename_race /
+              stale_backup / stale_quarantine) と `retry_disposition` (**transient = publish_race のみ** —
+              transient は「次回 preflight を妨げる残存物を作らない競合」に限る。他は全て manual_action。
               自動再試行が安全なのは transient のみ)、および両者の所在)**)。**--force 上書き時は publish の rename に先立ち、既存
               ファイルを同一 directory 内の退避名 `<basename>.kcs-restore-bak` へ no-replace rename で
               保全し、退避名を stderr に表示して退避の dev/inode を記録する** (置換 rename は旧内容を破壊
@@ -857,7 +860,10 @@ phase 順序    = prepared (closure 確定・記帳)
               **publish 済みファイルは unlink せず、同一 directory 内の決定的隔離名
               `<basename>.kcs-restore-quarantine` への no-replace rename で隔離し (隔離名は stderr に
               表示)、rename した実体を fstat の dev/inode 対照で自らの publish と検証する** (対照→削除の
-              2 操作では対照後の置換窓が残るため、rename した実体の上で検証する。一致 = 隔離分を削除。
+              2 操作では対照後の置換窓が残るため、rename した実体の上で検証する。一致 = 隔離分を削除
+              (**削除は pathname に対する操作であり、fstat〜削除間の隔離名への第三者置換は検出できない —
+              操作中の予約名前空間への第三者書込は保護契約外とし、この残余窓は許容する** (並行 reader の
+              既 open fd と同格の残余。POSIX に identity 束縛の削除は存在しない))。
               不一致 = 第三者ファイル — 元 path へ no-replace rename で復帰を試み、成功・失敗いずれも
               競合終端 (失敗時は隔離名のまま残す))。**退避の復帰・除去も同じ隔離検証方式で行う** (退避
               path 上の対照→rename / unlink は同型の置換窓を残す。隔離名は同時に 1 実体 — publish の
@@ -866,7 +872,9 @@ phase 順序    = prepared (closure 確定・記帳)
               削除。不一致 = 第三者による退避差し替え — 退避名へ no-replace で戻し (失敗 = 隔離名の
               まま)、それ以上触れずに競合終端。**復帰後は preflight と同一の応答で終端する: canonical =
               `purged` (tombstone) なら tombstone、`erased` なら KCS-E-PURGE-NOT-FOUND-001** (競合処置は
-              段階別 — --force publish の no-replace 競合 = 退避を復帰して終端 / 隔離実体の対照不一致 =
+              段階別 — --force publish の no-replace 競合 = 退避を復帰して終端 / **隔離 rename (publish
+              巻き戻し・退避処置とも) の no-replace 失敗 = preflight 後に隔離名へ現れた第三者ファイル —
+              双方不触で終端 (quarantine_rename_race)** / 隔離実体の対照不一致 =
               復帰を試みて終端 / 退避の対照不一致・復帰 rename の no-replace 失敗 = 不触で終端。いずれも
               両者の所在 (隔離名・退避名を含む) を表示して RESTORE-CONFLICT で終端する — 窓内の第三者
               置換を消さない。crash で隔離だけが残っても、次回の同 path への restore が同名残存の拒否で
@@ -953,7 +961,9 @@ kcs restore <evidence|path|commit> --to <dir>
 **安全要件**:
 
 ```
-- working tree への直接書き戻しは禁止 (--to <dir> 必須)
+- working tree への直接書き戻しは禁止 (--to <dir> 必須。**--to の canonical 解決先が当該 scope root
+  配下 (`.kcs` 含む) の場合は KCS-E-CONFIG-USAGE-001 (exit 2) で拒否** — `--to .` による禁止の迂回を
+  許さない)
 - 既存ファイル上書きは --force 必須 + 確認プロンプト
 - --force 上書きは旧ファイルを同 directory の退避名 `<basename>.kcs-restore-bak` へ no-replace で
   保全 (同名残存 = 先行未完として拒否 + 回復案内。退避名は stderr に表示・dev/inode を記録) して

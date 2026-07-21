@@ -250,7 +250,8 @@ kcs restore <pointer> --to ./recovered/ --force    # 既存上書き許可 (確�
 安全要件:
 
 ```
-- --to <dir> は必須
+- --to <dir> は必須 (canonical 解決先が当該 scope root 配下 (`.kcs` 含む) は KCS-E-CONFIG-USAGE-001
+  (exit 2) で拒否 — working tree への直接書き戻し禁止の迂回を許さない)
 - 既存ファイル上書きは --force + 確認 prompt
 - --force 上書きは旧ファイルを同 directory の退避名 `<basename>.kcs-restore-bak` へ no-replace で
   保全 (同名残存 = 先行未完として拒否 + 回復案内。退避名は stderr に表示・dev/inode を記録) して
