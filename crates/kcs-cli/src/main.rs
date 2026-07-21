@@ -44,7 +44,7 @@ use kcs_core::cas::{
 use kcs_core::dag::{CommitType, NormalizeRef, TreeObject};
 use kcs_core::history::{HistoryReader, TreeBinding};
 use kcs_core::portable::{portable_cache_leaf, portable_tag_leaf, PORTABLE_TAGS_DIRECTORY};
-use kcs_core::purge::PurgeState;
+use kcs_core::purge::{canonical_final_event, EventKind, PurgeState};
 use kcs_core::schema::{validate_json_schema, SchemaKind};
 use kcs_core::scope::{
     append_error_log, append_event_log, append_warn_log, new_ulid, now_utc_seconds,
@@ -62,15 +62,20 @@ use kcs_index::{
 };
 use kcs_pipeline::budget::{
     budget_warning, estimate_local_baseline_cost, evaluate_budget_with_caps, read_budget_policy,
-    utc_month, BudgetCapKind, BudgetCaps, BudgetEstimate, CostLedger, MonthlyCostLedgerEntry,
-    ReservationRecord,
+    utc_month, BudgetCapKind, BudgetCaps, BudgetEstimate,
+};
+use kcs_pipeline::ledger::ops::{
+    check_then_reserve, device_claim, device_input_hash, execute_bounded_sweep, get_batch_request,
+    ledger_month_total, phase1_intent, plan_bounded_sweep, recovery_settle_unknown,
+    reset_contract_violations, resolve_abandon_selector, stalled_rows,
+    sync_record_provider_request_id, sync_recovery_candidates, terminal_transaction,
+    with_immediate_transaction, AbandonExecution, AbandonResolution, AbandonSelector, BilledAmount,
+    BudgetCapConfig, CapCheckResult, ClaimOutcome, TerminalWrite,
 };
 use kcs_pipeline::ledger::ops::{execute_abandon, uuid_v7_timestamp_millis};
-use kcs_pipeline::ledger::ops::{
-    reset_contract_violations, resolve_abandon_selector, stalled_rows, AbandonExecution,
-    AbandonResolution, AbandonSelector,
+use kcs_pipeline::ledger::{
+    migrate_jsonl_if_needed, BatchState, LedgerDb, Outcome, RequestKind, TaskKey as LedgerTaskKey,
 };
-use kcs_pipeline::ledger::{LedgerDb, TaskKey as LedgerTaskKey};
 use kcs_pipeline::markdownize::{
     choose_markdownize_mode, load_validated_normalized_instance, persist_normalized_instance,
     validate_markdownize_response, IncrementalHints, IncrementalModeDecision, IncrementalModeInput,
@@ -90,8 +95,7 @@ use kcs_pipeline::task::{
     task_status_from_unit_counts, RetryErrorKind,
 };
 use kcs_pipeline::task::{
-    validate_task_output_ref, TaskDescriptor, TaskOutputRef, TaskReservationClaim, TaskStatus,
-    TaskStore, TaskType,
+    validate_task_output_ref, TaskDescriptor, TaskOutputRef, TaskStatus, TaskStore, TaskType,
 };
 use kcs_pipeline::unsupported::{
     UnsupportedInputDisposition, UnsupportedInputStore, UNSUPPORTED_REASON_RESOLVED,
@@ -499,6 +503,10 @@ fn run(cli: Cli) -> Result<Value> {
                 Vec::new()
             };
             let repo = Repository::init(&path)?;
+            // LC39/LC40: seed `.kcs/purge/epoch` from scope creation onward, so
+            // no read command ever fail-closes on a file that simply was never
+            // created (see `ensure_purge_epoch_initialized`'s doc comment).
+            ensure_purge_epoch_initialized(repo.kcs_dir())?;
             // Register the scope in the device-local registry so multi-scope search
             // can enumerate it (05 §1.8). `indexed=false` until `kcs index` runs.
             // The registry is a cache, never truth (03 §4): a write failure is a
@@ -547,12 +555,24 @@ fn run(cli: Cli) -> Result<Value> {
                 // pending) cost-ledger.sqlite batch_requests rows, device-global
                 // — not scoped to this folder, since the ledger itself is not.
                 "stalled_batch": stalled_batch_status_json()?,
+                // 05 §3.5 / LC51: `status` is the one read command the §I barrier
+                // does NOT reject on an active journal — it shows the journal as
+                // state instead, for recovery visibility into a crashed purge.
+                "active_purge_journal": PurgeState::new(repo.kcs_dir())
+                    .read_journal()?
+                    .map(serde_json::to_value)
+                    .transpose()
+                    .map_err(|err| KcsError::schema(err.to_string()))?,
             }))
         }
         Command::Snapshot(args) => {
             let _action = args.action;
             let repo = Repository::open_current()?;
             validate_repo_tool_lock(&repo)?;
+            // LC39/LC40 (see `ensure_purge_epoch_initialized`'s doc comment): a
+            // scope created before this session's read-barrier wiring, or one
+            // whose epoch file was otherwise lost, self-heals on its next write.
+            ensure_purge_epoch_initialized(repo.kcs_dir())?;
             // N2: a manual snapshot must exclude the same Tier A secrets `kcs index`
             // does, or `.env`/`*.pem` plaintext lands irreversibly in objects/raw and
             // the latest tree. Compute the exclusion set from the scan preview (the
@@ -605,28 +625,52 @@ fn run(cli: Cli) -> Result<Value> {
             }
             let repo = Repository::open_current()?;
             validate_repo_tool_lock(&repo)?;
+            // §I checkpoint 1 (LC53).
+            let checkpoint = ReadBarrierCheckpoint::open(repo.kcs_dir())?;
+            // LC45 (item 2): a separate check from §I's checkpoint — see
+            // `check_index_generation_current`'s doc comment.
+            check_index_generation_current(repo.kcs_dir())?;
             // R16-1: `log` degrades on a missing ancestor commit — it returns the
             // healthy prefix from HEAD plus `truncated` rather than dying on a raw
             // KCS-E-STORE-NOT-FOUND-001.
             let report = repo.log()?;
-            Ok(json!({ "commits": report.entries, "truncated": report.truncated }))
+            // §I checkpoint 2 (LC54/LC55).
+            checkpoint.finish(json!({ "commits": report.entries, "truncated": report.truncated }))
         }
         Command::Diff(args) => {
             let repo = Repository::open_current()?;
             validate_repo_tool_lock(&repo)?;
-            Ok(json!({ "changes": repo.diff(&args.a, &args.b)? }))
+            // §I checkpoint 1 (LC53).
+            let checkpoint = ReadBarrierCheckpoint::open(repo.kcs_dir())?;
+            // LC45 (item 2).
+            check_index_generation_current(repo.kcs_dir())?;
+            let changes = repo.diff(&args.a, &args.b)?;
+            // §I checkpoint 2 (LC54/LC55).
+            checkpoint.finish(json!({ "changes": changes }))
         }
         Command::Inspect(args) => {
             let repo = Repository::open_current()?;
             validate_repo_tool_lock(&repo)?;
             let target = scope_target(repo.root())?;
+            // §I checkpoint 1 (LC53). Distinct from the per-raw_hash
+            // `enforce_purge_read_barrier` calls below (LC11-14 tombstone
+            // dispatch) — see `ReadBarrierCheckpoint`'s doc comment.
+            let checkpoint = ReadBarrierCheckpoint::open(&target.kcs_dir)?;
+            // LC45 (item 2).
+            check_index_generation_current(&target.kcs_dir)?;
             enforce_purge_read_barrier(&target, &args.hash)?;
             match repo.inspect(&args.hash)? {
                 InspectedObject::Tree(tree) => {
-                    serde_json::to_value(tree).map_err(|err| KcsError::schema(err.to_string()))
+                    let value = serde_json::to_value(tree)
+                        .map_err(|err| KcsError::schema(err.to_string()))?;
+                    // §I checkpoint 2 (LC54/LC55).
+                    checkpoint.finish(value)
                 }
                 InspectedObject::Commit(commit) => {
-                    serde_json::to_value(commit).map_err(|err| KcsError::schema(err.to_string()))
+                    let value = serde_json::to_value(commit)
+                        .map_err(|err| KcsError::schema(err.to_string()))?;
+                    // §I checkpoint 2 (LC54/LC55).
+                    checkpoint.finish(value)
                 }
                 InspectedObject::Raw {
                     raw_hash,
@@ -635,7 +679,8 @@ fn run(cli: Cli) -> Result<Value> {
                     // Recheck after the metadata read so a barrier published in
                     // the inspect window cannot leak even the raw object's size.
                     enforce_purge_read_barrier(&target, &raw_hash)?;
-                    Ok(json!({
+                    // §I checkpoint 2 (LC54/LC55).
+                    checkpoint.finish(json!({
                         "object_type": "raw",
                         "raw_hash": raw_hash,
                         "size_bytes": size_bytes,
@@ -734,6 +779,12 @@ fn run_index(args: IndexArgs) -> Result<Value> {
     if recover_pending_online_promotion(&repo)? {
         finish_pending_online_promotion(&repo)?;
     }
+    // CL45/item 5: reconcile any stale `request_kind='sync'` cost-ledger.sqlite
+    // rows left by a crashed prior run, same write-command-entry point as the
+    // online-promotion recovery just above.
+    recover_stale_sync_rows(&open_ledger_db()?, &scope_id(repo.kcs_dir())?)?;
+    // LC39/LC40 (see `ensure_purge_epoch_initialized`'s doc comment).
+    ensure_purge_epoch_initialized(repo.kcs_dir())?;
     materialize_tool_lock(&repo)?;
     let mut index_result = run_index_pipeline(&repo, &preview, &args)?;
     // A prior batch may already have produced a complete accepted online
@@ -767,6 +818,9 @@ fn run_index(args: IndexArgs) -> Result<Value> {
         )?;
     }
     let rebuild_report = rebuild_step3_index(&repo)?;
+    // LC42-LC44: after the rebuild's temp-build-then-rename lands the final
+    // `sqlite.db`, reconcile `index_metadata` (item 2).
+    recover_index_generation(repo.kcs_dir())?;
     // Generate chunk embeddings behind the online opt-in / budget / cost-ledger
     // guardrails (K4). No-op unless an embedding adapter is configured. R11-2: keep
     // the ExecOutcome (was discarded) so the embedding enrichment result is disclosed
@@ -902,12 +956,20 @@ fn run_repair(args: UnsupportedArgs) -> Result<Value> {
         }
         return Ok(output);
     }
+    // CL45/item 5: reconcile any stale `request_kind='sync'` cost-ledger.sqlite
+    // rows left by a crashed prior run — `--rebuild-db` only (CL32/CL45 do not
+    // list `--verify-objects`, handled by the early return above).
+    recover_stale_sync_rows(&open_ledger_db()?, &scope_id(repo.kcs_dir())?)?;
+    // LC39/LC40 (see `ensure_purge_epoch_initialized`'s doc comment).
+    ensure_purge_epoch_initialized(repo.kcs_dir())?;
     let promotion_rebuild_pending = recover_pending_online_promotion(&repo)?;
     let db = repo.kcs_dir().join("index/sqlite.db");
     // `rebuild_sqlite_index` drops and rebuilds chunks/FTS/tree_entries in place
     // while preserving the `embeddings` rows and re-deriving `chunk_vec` from them
     // (04 §4.3). It is not pre-deleted here so vector search survives the rebuild.
     let report = rebuild_step3_index(&repo)?;
+    // LC42-LC44 (item 2), same ordering rationale as `run_index`'s call.
+    recover_index_generation(repo.kcs_dir())?;
     if promotion_rebuild_pending {
         maybe_inject_promotion_fault("after_index_swap")?;
         clear_promotion_state(repo.kcs_dir())?;
@@ -1039,9 +1101,11 @@ enum VectorAvailability {
     /// No usable vector backend → text. `reason` names the actual cause
     /// (05 §1.7 fallback_reason): `embedding_endpoint_not_configured` (no
     /// adapter env/config at all), `embedding_index_missing` (endpoint
-    /// configured but no searched scope carries chunk embeddings), or
+    /// configured but no searched scope carries chunk embeddings),
     /// `query_embedding_unavailable` (endpoint + index fine, but the query
-    /// embedding could not be computed — short query or adapter failure).
+    /// embedding could not be computed — short query or adapter failure), or
+    /// `embedding_in_flight` (04 §5.4 §H / CL54: another process already holds
+    /// a live claim on this exact query's device row — page 1 only).
     Unavailable { reason: &'static str },
     /// Embedding present but the profile is incompatible, or scopes disagree on
     /// embedding profile (03 §7 / 05 §1.8(5)) → text fallback + fallback_reason.
@@ -1459,8 +1523,26 @@ fn run_search_inner(args: UnsupportedArgs, started: Instant) -> Result<Value> {
     // normalizes internally, so the cursor hash is unaffected; only the MATCH /
     // vector inputs need this. Display fields keep the caller's original `query`.
     let query_nfc = parsed.query.nfc().collect::<String>();
+    // 04 §5.4 §H (CL48-55): only a FRESH page 1 (no cursor) writes the device
+    // query-embedding row — a cursor replay (page 2+) keeps the pre-existing,
+    // unmetered `compute_query_embedding` path unchanged.
+    let mut vector_unavailable_reason = "query_embedding_unavailable";
     let query_embedding = if uses_vectors {
-        compute_query_embedding(&query_nfc)?
+        if decoded_cursor.is_none() {
+            match compute_query_embedding_page1(&query_nfc)? {
+                Some(QueryEmbeddingOutcome::Vector(vector)) => Some(vector),
+                // CL54: a live in-flight claim from another process already
+                // holds this exact query — text fallback, distinct reason from
+                // a plain adapter failure.
+                Some(QueryEmbeddingOutcome::InFlight) => {
+                    vector_unavailable_reason = "embedding_in_flight";
+                    None
+                }
+                None => None,
+            }
+        } else {
+            compute_query_embedding(&query_nfc)?
+        }
     } else {
         None
     };
@@ -1468,7 +1550,7 @@ fn run_search_inner(args: UnsupportedArgs, started: Instant) -> Result<Value> {
     // so `--vector` errors and auto/hybrid falls back, exactly as before O2.
     let vector = if uses_vectors && query_embedding.is_none() {
         VectorAvailability::Unavailable {
-            reason: "query_embedding_unavailable",
+            reason: vector_unavailable_reason,
         }
     } else {
         vector_precheck
@@ -1664,6 +1746,26 @@ fn run_search_inner(args: UnsupportedArgs, started: Instant) -> Result<Value> {
     }
 
     if searched.is_empty() {
+        // §I (LC52-56): every enumerated scope hit an active purge journal, or
+        // its journal/purge-epoch/lifecycle-epoch triple changed between its
+        // checkpoint 1 and checkpoint 2. Surface the command-level
+        // KCS-E-PURGE-JOURNAL-ACTIVE-001 (retryable exit 3) instead of a false
+        // permanent all-failed — mirrors `all_rebuilding` below, and is
+        // checked first per 10-operations.md §3's priority order ((1) purge
+        // journal/epoch precedes (3) index availability).
+        let all_purge_journal_active = !excluded.is_empty()
+            && excluded.iter().all(|entry| {
+                entry.get("reason").and_then(Value::as_str) == Some(PURGE_JOURNAL_ACTIVE_REASON)
+            });
+        if all_purge_journal_active {
+            return Err(KcsError::new(
+                "KCS-E-PURGE-JOURNAL-ACTIVE-001",
+                "an incomplete purge transaction is active, or completed while this read was in \
+                 flight, in every searched scope; retry",
+                json!({ "excluded_scopes": excluded }),
+                ExitCode::PartialFailure,
+            ));
+        }
         // P10: every enumerated scope is mid-reindex (HEAD advanced, rebuilt sqlite
         // not yet swapped in). This is transient — the complete result set returns
         // on retry once the atomic rename lands — so surface the honest
@@ -2030,6 +2132,29 @@ enum ScopeSearchError {
 /// live. Surfaced as `KCS-E-INDEX-REBUILDING-001` when it is the sole failure mode.
 const INDEX_REBUILDING_REASON: &str = "index_rebuilding";
 
+/// §I (LC52-56) exclusion reason: this scope's `ReadBarrierCheckpoint` found
+/// an active purge journal, or the journal/purge-epoch/lifecycle-epoch triple
+/// changed between this scope's checkpoint 1 and checkpoint 2. Surfaced as
+/// `KCS-E-PURGE-JOURNAL-ACTIVE-001` when it is the sole failure mode (mirrors
+/// `INDEX_REBUILDING_REASON`'s all-scopes promotion below).
+const PURGE_JOURNAL_ACTIVE_REASON: &str = "purge_journal_active";
+
+/// Convert a `ReadBarrierCheckpoint` failure into the right `ScopeSearchError`
+/// variant: the expected `KCS-E-PURGE-JOURNAL-ACTIVE-001` becomes a per-scope
+/// `Excluded` (05-runtime.md §3.5 / 10-operations.md §3's multi-scope
+/// `excluded_scopes.reason` treatment — search isolates a purge barrier hit to
+/// the one scope instead of aborting the whole command); any other error (a
+/// genuinely corrupt journal/epoch file, `KCS-E-STORE-CORRUPT-001`/`-IO-001`)
+/// stays `Fatal` so the existing `is_store_corrupt_class` per-scope-isolation
+/// downgrade in `run_search_inner`'s dispatch loop still applies uniformly.
+fn checkpoint_scope_error(error: KcsError) -> ScopeSearchError {
+    if error.error_code() == "KCS-E-PURGE-JOURNAL-ACTIVE-001" {
+        ScopeSearchError::Excluded(PURGE_JOURNAL_ACTIVE_REASON.to_owned())
+    } else {
+        ScopeSearchError::Fatal(error)
+    }
+}
+
 struct ScopeOutcome {
     snapshot_commit: String,
     max_rowid: u64,
@@ -2162,6 +2287,12 @@ fn search_one_scope_inner(
         time,
         deadline,
     } = request;
+    // §I checkpoint 1 (LC53). Opened before the repo/index reads below so this
+    // scope's linearization point precedes the work it gates (see
+    // `checkpoint_scope_error`'s doc comment for the per-scope isolation
+    // rationale).
+    let checkpoint =
+        ReadBarrierCheckpoint::open(&exec.target.kcs_dir).map_err(checkpoint_scope_error)?;
     let repo = Repository::open_for_search(&exec.target.repo_root)
         .map_err(|_| ScopeSearchError::Excluded("unreachable".to_owned()))?;
     scope_deadline_check(deadline)?;
@@ -2210,6 +2341,30 @@ fn search_one_scope_inner(
         Err(_) => return Err(ScopeSearchError::Excluded("index_corrupt".to_owned())),
     }
     scope_deadline_check(deadline)?;
+
+    // LC45 (item 2): a separate check from §I's checkpoint above — folded
+    // into the existing `INDEX_REBUILDING_REASON` exclusion/aggregation
+    // (P10's HEAD-generation check below uses the same reason for the same
+    // underlying user-facing situation: "the index is between generations,
+    // retry"). Reuses `conn` (already validated corruption-free by the probe
+    // just above) instead of `check_index_generation_current`'s own
+    // freshly-opened connection, so a corrupt sqlite.db is classified
+    // Excluded("index_corrupt") by that probe, not raised as a Fatal
+    // KCS-E-CONFIG-SCHEMA-001 from a second, unvalidated open of the same
+    // file.
+    let index_metadata = kcs_index::fts::read_index_metadata(&conn)
+        .map_err(index_to_kcs)
+        .map_err(ScopeSearchError::Fatal)?;
+    if let Some(metadata) = index_metadata {
+        let current = PurgeState::new(&exec.target.kcs_dir)
+            .read_lifecycle_epoch()
+            .map_err(ScopeSearchError::Fatal)?;
+        if current != metadata.last_lifecycle_epoch {
+            return Err(ScopeSearchError::Excluded(
+                INDEX_REBUILDING_REASON.to_owned(),
+            ));
+        }
+    }
 
     // Build the immutable eligible binding relation. Default search retains the
     // established shallow-cache read degradation; every explicit historical mode
@@ -2438,6 +2593,10 @@ fn search_one_scope_inner(
             .unwrap_or(false)
     });
     scope_deadline_check(deadline)?;
+
+    // §I checkpoint 2 (LC54/LC55): the last gate before this scope's
+    // candidates cross the response boundary.
+    checkpoint.recheck().map_err(checkpoint_scope_error)?;
 
     Ok(ScopeOutcome {
         snapshot_commit,
@@ -3587,6 +3746,12 @@ fn run_reindex(args: UnsupportedArgs) -> Result<Value> {
     // only, but still appends to the chunk ledger and SQLite projection.
     let _lock = repo.lock_store()?;
     validate_repo_tool_lock(&repo)?;
+    // CL45/item 5: reconcile any stale `request_kind='sync'` cost-ledger.sqlite
+    // rows left by a crashed prior run — applies uniformly to both the
+    // historical (`--at`) and HEAD (`--force`) reindex modes below.
+    recover_stale_sync_rows(&open_ledger_db()?, &scope_id(repo.kcs_dir())?)?;
+    // LC39/LC40 (see `ensure_purge_epoch_initialized`'s doc comment).
+    ensure_purge_epoch_initialized(repo.kcs_dir())?;
     if let Some(at) = parsed.at.as_deref() {
         return historical_reindex::run(&repo, at);
     }
@@ -3699,6 +3864,8 @@ fn run_reindex(args: UnsupportedArgs) -> Result<Value> {
         &explicitly_allowed_tier_a,
     )?;
     let mut report = rebuild_step3_index(&repo)?;
+    // LC42-LC44 (item 2), same ordering rationale as `run_index`'s call.
+    recover_index_generation(repo.kcs_dir())?;
     // R17-2: fold the re-normalization loop's skips into the rebuild report so the one
     // `attach_skipped_units` disclosure below covers both phases. Dedup by raw_hash: a
     // skipped document whose kept previous gen is ALSO unloadable is already reported by
@@ -4233,6 +4400,122 @@ fn chunks_jsonl_path(kcs_dir: &Path) -> PathBuf {
 
 fn sqlite_path(kcs_dir: &Path) -> PathBuf {
     index_dir(kcs_dir).join("sqlite.db")
+}
+
+/// LC39/LC40: `.kcs/purge/epoch` is fail-closed on read (`PurgeState::
+/// read_purge_epoch`, already implemented in `kcs-core::purge` and now
+/// actually exercised by every §I read-barrier checkpoint this session
+/// wired) — a scope that has never gone through `kcs purge`'s own
+/// `execute_phase_machine` (the only pre-existing caller of
+/// `PurgeState::ensure_purge_epoch`) never had this file created at all, so
+/// wiring the read barrier alone would permanently fail-closed EVERY read on
+/// EVERY scope that has never been purged. LC40's recovery-target priority
+/// (active journal's `target_epoch`, else `max_recorded_purge_epoch() + 1`,
+/// else `1`) is the same computation `execute_phase_machine` already does
+/// inline; this is the general-write-command-entry counterpart LC40's own
+/// "回復は書込系のみの責務" (recovery is write-side-only) puts outside the
+/// purge command specifically. Idempotent — a no-op once the file exists.
+fn ensure_purge_epoch_initialized(kcs_dir: &Path) -> Result<()> {
+    let state = PurgeState::new(kcs_dir);
+    let recovery_target = match state.read_journal()? {
+        Some(journal) => journal.target_epoch,
+        None => state
+            .max_recorded_purge_epoch()?
+            .map_or(1, |max| max.saturating_add(1)),
+    };
+    state.ensure_purge_epoch(recovery_target)?;
+    Ok(())
+}
+
+/// LC25/LC42-LC44: writer-side `index_metadata` synchronization — the
+/// SQLite half of the lifecycle-epoch rotation whose counter/detection
+/// logic (`PurgeState::recover_lifecycle_epoch`/`max_recorded_lifecycle_epoch`)
+/// is already implemented in `kcs-core::purge`. Called both from every write
+/// command that actually touches the search index (`kcs index`/`kcs
+/// reindex`/`kcs repair --rebuild-db`, after `rebuild_step3_index` — whose
+/// temp-build-then-rename replaces `sqlite.db` wholesale, so writing
+/// `index_metadata` any earlier in the same command would be silently
+/// discarded by that rename) and from `kcs purge` (whose own marker-append
+/// writes `sqlite.db` in place, no rename involved, so this runs right after
+/// its phase machine completes). `kcs batch *` never rebuilds or otherwise
+/// touches the index, so it has no stale `index_metadata` to reconcile. A
+/// never-yet-initialized row (a fresh store, or a `sqlite.db` that predates
+/// this table) is seeded to the *current* lifecycle-epoch counter (LC42)
+/// rather than misread as a rollback from the column's own `DEFAULT 0`.
+fn recover_index_generation(kcs_dir: &Path) -> Result<()> {
+    let fts = SqliteFtsIndex::open(
+        sqlite_path(kcs_dir),
+        FtsSchemaConfig {
+            tokenizer: FtsTokenizer::Trigram,
+        },
+    )
+    .map_err(index_to_kcs)?;
+    let conn = fts.connection();
+    let purge = PurgeState::new(kcs_dir);
+    match kcs_index::fts::read_index_metadata(conn).map_err(index_to_kcs)? {
+        None => {
+            let generation = new_ulid(kcs_dir);
+            let current = purge.read_lifecycle_epoch()?;
+            kcs_index::fts::ensure_index_metadata(conn, &generation, current)
+                .map_err(index_to_kcs)?;
+        }
+        Some(metadata) => {
+            // LC43: `max(last_lifecycle_epoch, max event lifecycle_epoch)`.
+            let max_event_lifecycle_epoch = purge.max_recorded_lifecycle_epoch()?;
+            let recovery = purge.recover_lifecycle_epoch(
+                metadata.last_lifecycle_epoch,
+                max_event_lifecycle_epoch,
+            )?;
+            // Rotate whenever the tracked value is out of sync with the
+            // counter — either because `recover_lifecycle_epoch` detected
+            // and repaired a genuine rollback (`rotated=true`; LC44's
+            // "unconditional 1 rotation", `recovery.value` = the
+            // freshly-recreated `max+1` counter), or simply because a
+            // normal retire/re-purge/legacy-conversion advanced the counter
+            // since this row was last written (`rotated=false`, but
+            // `recovery.value` — the current counter — still differs from
+            // the stale `metadata.last_lifecycle_epoch`). LC25 requires a
+            // rotation on EVERY lifecycle event, not only a crash-recovered
+            // one ("回転は retire append と同一 locked mutation 内で直後に行う" —
+            // any of them can invalidate an outstanding search cursor), so
+            // both cases take the same unconditional-rotation path here.
+            if recovery.value != metadata.last_lifecycle_epoch {
+                let generation = new_ulid(kcs_dir);
+                kcs_index::fts::rotate_index_generation(conn, &generation, recovery.value)
+                    .map_err(index_to_kcs)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// LC45: read-command-entry check — the current `.kcs/tombstones/lifecycle-epoch`
+/// counter must equal `index_metadata.last_lifecycle_epoch` exactly (a
+/// mismatch in EITHER direction is retryable, not just counter-ahead). A
+/// never-yet-initialized `index_metadata` (no write command has visited this
+/// scope's index yet, or it predates this table) has nothing to roll back
+/// from, so it is not a violation — `recover_index_generation`'s write-side
+/// seeding is what will populate it, not this read-only check.
+fn check_index_generation_current(kcs_dir: &Path) -> Result<()> {
+    let db_path = sqlite_path(kcs_dir);
+    if !db_path.exists() {
+        return Ok(());
+    }
+    let conn = Connection::open(&db_path)
+        .map_err(|error| KcsError::io(error.to_string(), db_path.display().to_string()))?;
+    let Some(metadata) = kcs_index::fts::read_index_metadata(&conn).map_err(index_to_kcs)? else {
+        return Ok(());
+    };
+    let current = PurgeState::new(kcs_dir).read_lifecycle_epoch()?;
+    if current != metadata.last_lifecycle_epoch {
+        return Err(KcsError::new(
+            "KCS-E-INDEX-REBUILDING-001",
+            "the search index's lifecycle-epoch bookkeeping is out of date; retry",
+            json!({}),
+            ExitCode::PartialFailure,
+        ));
+    }
+    Ok(())
 }
 
 fn read_stored_chunks(kcs_dir: &Path) -> Result<Vec<StoredChunk>> {
@@ -5762,7 +6045,14 @@ fn classify_short_hash(hash: &str) -> Result<ShortHash> {
         )),
         (true, false) => {
             let chunk = chunk_match.expect("chunk_match is Some");
-            enforce_purge_read_barrier(&target, &chunk.row.raw_hash)?;
+            // LC8-LC14/item 3: no barrier check here (this used to run a
+            // single-marker `enforce_purge_read_barrier` pre-check, which can
+            // disagree with the cross-marker canonical final event — LC10's
+            // worked example — and wrongly reject a hash canonical dispatch
+            // would allow). `resolve_short_hash_command`'s `ShortHash::Chunk`
+            // arm immediately calls `resolve_pointer_for_cli`, whose own
+            // `enforce_canonical_marker_barrier` checks are the authoritative,
+            // complete gate for this raw_hash.
             let pointer = issue_evidence_pointer(EvidencePointerIssueRequest {
                 scope_id: chunk.scope_id.clone(),
                 scope_path: Some(chunk.scope_path.display().to_string()),
@@ -5778,11 +6068,12 @@ fn classify_short_hash(hash: &str) -> Result<ShortHash> {
                 byte_end: Some(chunk.row.byte_end),
             })
             .map_err(search_to_kcs)?;
-            enforce_purge_read_barrier(&target, &chunk.row.raw_hash)?;
             Ok(ShortHash::Chunk(Box::new(pointer)))
         }
         (false, true) => {
-            enforce_purge_read_barrier(&target, hash)?;
+            // Same rationale as the chunk arm above: `resolve_short_hash_command`'s
+            // `ShortHash::Raw` arm runs the authoritative canonical check
+            // itself, once it has resolved the raw object's actual presence.
             Ok(ShortHash::Raw {
                 target,
                 raw_hash: hash.to_owned(),
@@ -5835,32 +6126,60 @@ fn resolve_short_hash_command(hash: &str, as_view: bool) -> Result<Value> {
             target,
             raw_hash,
             path_hint,
-        } => match open_raw_object(&target, &raw_hash, path_hint.as_deref())? {
-            // A raw object has no chunk text; open/view surface only its path.
-            Some((path, temporary)) => {
-                if let Err(error) = enforce_purge_read_barrier(&target, &raw_hash) {
-                    if temporary {
-                        let _ = fs::remove_file(&path);
+        } => {
+            // §I checkpoint 1 (LC53).
+            let checkpoint = ReadBarrierCheckpoint::open(&target.kcs_dir)?;
+            // LC45 (item 2).
+            check_index_generation_current(&target.kcs_dir)?;
+            match open_raw_object(&target, &raw_hash, path_hint.as_deref())? {
+                // A raw object has no chunk text; open/view surface only its path.
+                Some((path, temporary)) => {
+                    // LC8-LC14 canonical dispatch (item 3) + §I checkpoint 2
+                    // (LC54/LC55), combined: either failure discards the temp
+                    // open-cache this may have just published (LC57's cache
+                    // publish-then-final-check ordering).
+                    if let Err(error) = enforce_canonical_marker_barrier(&target, &raw_hash, true)
+                        .and_then(|()| checkpoint.recheck())
+                    {
+                        if temporary {
+                            let _ = fs::remove_file(&path);
+                        }
+                        return Err(error);
                     }
-                    return Err(error);
+                    let status = if as_view { "viewed" } else { "opened" };
+                    Ok(json!({
+                        "status": status,
+                        "object_type": "raw",
+                        "raw_hash": raw_hash,
+                        "path": path,
+                        "temporary": temporary,
+                    }))
                 }
-                let status = if as_view { "viewed" } else { "opened" };
-                Ok(json!({
-                    "status": status,
-                    "object_type": "raw",
-                    "raw_hash": raw_hash,
-                    "path": path,
-                    "temporary": temporary,
-                }))
+                // raw_present=false always yields Err from the canonical
+                // dispatch (LC12/13/14 jointly cover every marker state), so
+                // this recovers the precise code (not-found / store-corrupt)
+                // in place of the old unconditional purge-not-found guess.
+                None => Err(enforce_canonical_marker_barrier(&target, &raw_hash, false)
+                    .err()
+                    .unwrap_or_else(|| purge_not_found_error(&target, &raw_hash))),
             }
-            None => Err(purge_not_found_error(&target, &raw_hash)),
-        },
+        }
     }
 }
 
 fn resolve_pointer_for_cli(pointer: &EvidencePointer) -> Result<PointerResolution> {
     // 08 §3.1 step 1: two-stage scope resolution (scope_path hint -> registry).
     let target = resolve_scope_target(&pointer.scope_id, pointer.scope_path.as_deref())?;
+    // §I checkpoint 1 (LC53), opened as soon as the target scope is known —
+    // brackets every canonical-marker dispatch below (LC8-14/item 3), so
+    // those calls no longer need their own `PurgeState::barrier_blocks`
+    // in-flight-journal check: an active journal targeting this raw_hash
+    // implies an active journal, which this checkpoint (and its checkpoint-2
+    // recheck at the bottom of this function) already catches more broadly,
+    // ABA-safe via the purge-epoch/lifecycle-epoch comparison (LC54).
+    let checkpoint = ReadBarrierCheckpoint::open(&target.kcs_dir)?;
+    // LC45 (item 2).
+    check_index_generation_current(&target.kcs_dir)?;
     let repo = Repository::open(&target.repo_root)?;
 
     // 08 §3.1 step 2: fetch the commit object. R17-1: a MISSING commit object
@@ -5902,7 +6221,13 @@ fn resolve_pointer_for_cli(pointer: &EvidencePointer) -> Result<PointerResolutio
                 .find(|entry| entry.raw_hash == pointer.raw_hash);
             let Some(entry) = entry else {
                 // step 5 (tombstone) is checked before declaring not_found.
-                enforce_purge_read_barrier(&target, &pointer.raw_hash)?;
+                // This is a tree-membership failure (this pointer's commit
+                // never referenced this raw_hash), independent of LC12/13/14's
+                // raw-CAS-presence branches — the raw itself may be perfectly
+                // present elsewhere. Only escalate to the tombstone response
+                // when canonical dispatch actually says `purged` (LC11);
+                // otherwise this stays the plain not-found it always was.
+                enforce_canonical_tombstone_only(&target, &pointer.raw_hash)?;
                 return Err(purge_not_found_error(&target, &pointer.raw_hash));
             };
             // M6: the tree entry's normalization must bind to the pointer's
@@ -5931,14 +6256,20 @@ fn resolve_pointer_for_cli(pointer: &EvidencePointer) -> Result<PointerResolutio
         Err(error) => return Err(error),
     };
 
-    // 08 §3.1 step 5: purged raw_hash carrying a tombstone -> tombstone response.
-    enforce_purge_read_barrier(&target, &pointer.raw_hash)?;
-
-    // Erase-mode purge intentionally leaves no public marker. Resolve raw
-    // liveness before chunk/profile availability so an old pointer whose raw and
-    // derivatives were deleted reports the required purge not-found state rather
+    // 08 §3.1 step 5-6a: canonical final event dispatch (LC8-14/item 3),
+    // fed the actual raw-CAS-or-working-tree presence answer up front so it
+    // can distinguish LC12's expected erased-and-gone from LC13's
+    // retired-but-corrupt and LC14's unmarked corruption — the three used to
+    // collapse into the same generic `purge_not_found_error` under the old
+    // two-step "barrier check, then separately check raw presence" shape.
+    // Resolved before chunk/profile availability so an old pointer whose raw
+    // and derivatives were deleted reports the purge/corruption state rather
     // than the unrelated retarget-required profile error.
-    if !raw_object_present(&target, &pointer.raw_hash)? {
+    let raw_present = raw_object_present(&target, &pointer.raw_hash)?;
+    enforce_canonical_marker_barrier(&target, &pointer.raw_hash, raw_present)?;
+    if !raw_present {
+        // Every canonical state with raw_present=false already returned Err
+        // above (LC12/13/14 jointly cover it); defensive fallback only.
         return Err(purge_not_found_error(&target, &pointer.raw_hash));
     }
 
@@ -5994,7 +6325,13 @@ fn resolve_pointer_for_cli(pointer: &EvidencePointer) -> Result<PointerResolutio
         pointer.path_at_commit.as_deref(),
     )? {
         Some((path, temporary)) => {
-            if let Err(error) = enforce_purge_read_barrier(&target, &pointer.raw_hash) {
+            // LC8-LC14 canonical dispatch (item 3) + §I checkpoint 2
+            // (LC54/LC55), combined: either failure discards the resolved
+            // text/path and any temp open-cache this call may have just
+            // published (LC57's cache publish-then-final-check ordering).
+            if let Err(error) = enforce_canonical_marker_barrier(&target, &pointer.raw_hash, true)
+                .and_then(|()| checkpoint.recheck())
+            {
                 if temporary {
                     let _ = fs::remove_file(&path);
                 }
@@ -6007,7 +6344,14 @@ fn resolve_pointer_for_cli(pointer: &EvidencePointer) -> Result<PointerResolutio
                 commit_shallow,
             })
         }
-        None => Err(purge_not_found_error(&target, &pointer.raw_hash)),
+        // raw_present=false always yields Err from the canonical dispatch
+        // (LC12/13/14 jointly cover every marker state); this recovers the
+        // precise code in place of the old unconditional not-found guess.
+        None => Err(
+            enforce_canonical_marker_barrier(&target, &pointer.raw_hash, false)
+                .err()
+                .unwrap_or_else(|| purge_not_found_error(&target, &pointer.raw_hash)),
+        ),
     }
 }
 
@@ -6593,6 +6937,200 @@ fn read_tombstone(target: &ScopeTarget, raw_hash: &str) -> Result<Option<Value>>
     })))
 }
 
+/// §I read barrier (LC52-56, 10-operations.md §3's "複合状態の優先順位" /
+/// "返却直前の再検査"): the (active journal, `purge/epoch`, lifecycle-epoch)
+/// triple observed once at a read command's start (checkpoint 1, LC53) and
+/// reverified — in this fixed order — unchanged immediately before the
+/// command returns body or existence information (checkpoint 2, LC54/LC55).
+///
+/// This is a SEPARATE mechanism from `enforce_purge_read_barrier`'s
+/// per-raw_hash tombstone/journal-target check (LC11-14 and the mutation-side
+/// `barrier_blocks`): that answers "is THIS raw_hash visible"; this answers
+/// "did a purge transaction start or complete on ANY raw_hash in this scope
+/// while this read was in flight" (05-runtime.md §3.5's explicit warning not
+/// to conflate the two barriers, echoed at §G's LC45 vs LC54 boundary).
+#[derive(Debug, Clone)]
+struct ReadBarrierCheckpoint {
+    kcs_dir: PathBuf,
+    purge_epoch: u64,
+    lifecycle_epoch: u64,
+}
+
+impl ReadBarrierCheckpoint {
+    /// Checkpoint 1 (LC53): reject an already-active journal, then snapshot
+    /// `purge/epoch` (fail-closed, LC39) and the raw lifecycle-epoch counter
+    /// as this invocation's linearization point.
+    fn open(kcs_dir: &Path) -> Result<Self> {
+        let purge = PurgeState::new(kcs_dir);
+        if purge.read_barrier_active()? {
+            return Err(purge_journal_active_error());
+        }
+        Ok(Self {
+            kcs_dir: kcs_dir.to_path_buf(),
+            purge_epoch: purge.read_purge_epoch()?,
+            lifecycle_epoch: purge.read_lifecycle_epoch()?,
+        })
+    }
+
+    /// Checkpoint 2 (LC54/LC55): fixed order — journal absence, then purge
+    /// epoch == the checkpoint-1 value, then lifecycle counter == the
+    /// checkpoint-1 value. Compares only against the values `open` captured
+    /// on this same struct — never against a freshly-read `last_lifecycle_epoch`
+    /// (LC54's explicit warning against reusing the §G/LC45 rollback
+    /// comparison here, which would silently swap in the *current* SQLite
+    /// value instead of the invocation's own frozen baseline).
+    fn recheck(&self) -> Result<()> {
+        let purge = PurgeState::new(&self.kcs_dir);
+        if purge.read_barrier_active()? {
+            return Err(purge_journal_active_error());
+        }
+        if purge.read_purge_epoch()? != self.purge_epoch {
+            return Err(purge_journal_active_error());
+        }
+        if !purge.lifecycle_epoch_matches(self.lifecycle_epoch)? {
+            return Err(purge_journal_active_error());
+        }
+        Ok(())
+    }
+
+    /// LC55: run checkpoint 2 and only on success hand back `value` — an Err
+    /// here drops `value` by construction (Rust's normal `?`/return-value
+    /// semantics), so "discard the already-obtained result" holds without
+    /// relying on caller discipline at each of the many return sites.
+    fn finish<T>(&self, value: T) -> Result<T> {
+        self.recheck()?;
+        Ok(value)
+    }
+}
+
+/// 05-runtime.md §3.5 / 10-operations.md §12.1: retryable (exit 3) rejection
+/// for either §I checkpoint. Carries no context beyond the error itself — the
+/// violation is about scope-wide purge-transaction state, not about any one
+/// object, so there is nothing object-specific to disclose (unlike
+/// `tombstone_error`/`purge_not_found_error`, which are about one raw_hash).
+fn purge_journal_active_error() -> KcsError {
+    KcsError::new(
+        "KCS-E-PURGE-JOURNAL-ACTIVE-001",
+        "an incomplete purge transaction is active, or completed while this read was in flight; retry",
+        json!({}),
+        ExitCode::PartialFailure,
+    )
+}
+
+/// LC8-LC14 (§C): cross-marker canonical-final-event dispatch for the
+/// `open`/`view`/`restore` tombstone gate (item 3 of this session's task).
+/// Replaces those three commands' prior use of `enforce_purge_read_barrier`'s
+/// single-marker `TombstoneRecord::is_active()` check with
+/// `kcs_core::purge::canonical_final_event` fed by BOTH markers' tail events
+/// (each already structurally validated — LC1-3/15/16/19 — by
+/// `PurgeState::read_tombstone`/`read_erase_receipt`'s parse path).
+///
+/// `raw_present` is the caller's own already-resolved answer to "does the raw
+/// CAS object exist" — LC13/LC14 both branch on it, and each call site
+/// determines it differently (a working-tree-or-CAS scan for open/view,
+/// `ObjectStore::inspect_object` for restore's evidence-source path), so this
+/// takes it rather than re-deriving it a second way.
+///
+/// - (i) canonical = `purged` -> `Err` tombstone response (LC11,
+///   `status:"tombstoned"`), regardless of `raw_present`.
+/// - (ii) canonical = `erased` and `!raw_present` -> `Err`
+///   `KCS-E-PURGE-NOT-FOUND-001` (LC12 — erase receipts are never disclosed).
+/// - (iii) canonical = `retired` and `!raw_present` -> `Err`
+///   `KCS-E-STORE-CORRUPT-001` (LC13 — a retired marker's raw MUST exist;
+///   its absence is corruption, a different code from LC12's expected
+///   erased-and-gone).
+/// - (iv) no marker at all and `!raw_present` -> `Err`
+///   `KCS-E-STORE-CORRUPT-001` (LC14(a) — an unmarked absence is a
+///   corruption suspicion).
+/// - every other combination (canonical = `erased`/`retired`/none with
+///   `raw_present` true) -> `Ok(())`, the normal continue-resolving path
+///   (LC14(b)/(c)).
+///
+/// Known residual scope gap (noted for the implementation report): the other
+/// 5 barrier commands (`search`/`log`/`diff`/`inspect`/`evidence verify`)
+/// still resolve tombstone visibility via the single-marker
+/// `enforce_purge_read_barrier`/`verify_pointer_for_cli`'s own
+/// `read_tombstone(...).is_some()` check, not this canonical dispatch — the
+/// task instructions scoped LC12-14's replacement to open/view/restore only.
+fn enforce_canonical_marker_barrier(
+    target: &ScopeTarget,
+    raw_hash: &str,
+    raw_present: bool,
+) -> Result<()> {
+    let purge = PurgeState::new(&target.kcs_dir);
+    let tombstone_tail = purge
+        .read_tombstone(raw_hash)?
+        .map(|record| record.tail().clone());
+    let receipt_tail = purge
+        .read_erase_receipt(raw_hash)?
+        .map(|receipt| receipt.tail().clone());
+    let canonical_event =
+        canonical_final_event(tombstone_tail.as_ref(), receipt_tail.as_ref()).map(|c| c.event);
+    match canonical_event {
+        Some(event) if event.kind == EventKind::Purged => Err(tombstone_error(json!({
+            "raw_hash": raw_hash,
+            "purged_at": event.at,
+            "purged_reason": event.reason,
+            "purged_in_commit": event.in_commit,
+            "scope_path": target.kcs_dir.display().to_string(),
+        }))),
+        Some(event) if event.kind == EventKind::Erased && !raw_present => {
+            Err(purge_not_found_error(target, raw_hash))
+        }
+        Some(event) if event.kind == EventKind::Retired && !raw_present => {
+            Err(retired_raw_missing_error(target, raw_hash))
+        }
+        None if !raw_present => Err(unmarked_missing_raw_error(target, raw_hash)),
+        _ => Ok(()),
+    }
+}
+
+/// LC8-LC11 only: does canonical dispatch say this raw_hash is currently
+/// `purged`? For a caller that has ALREADY independently determined
+/// "not found" for a reason unrelated to raw CAS/working-tree presence — a
+/// tree-membership failure (this pointer's commit never referenced this
+/// raw_hash at all; LC12/13/14's raw-presence branches do not apply, since
+/// the raw itself may be perfectly present elsewhere, just not in THIS
+/// commit's tree) — and only wants the more specific tombstone response when
+/// that is the actual reason. Equivalent to calling
+/// `enforce_canonical_marker_barrier` with `raw_present=true`: that
+/// unconditionally suppresses branches (ii)/(iii)/(iv) (LC12/13/14 all
+/// require `raw_present=false` to fire), leaving only branch (i) live.
+fn enforce_canonical_tombstone_only(target: &ScopeTarget, raw_hash: &str) -> Result<()> {
+    enforce_canonical_marker_barrier(target, raw_hash, true)
+}
+
+/// LC13: canonical final event = `retired` but the raw object is absent —
+/// corruption (a retired marker's raw MUST have been re-published by the
+/// same locked mutation that appended `retired`), distinct from LC12's
+/// expected-absence `KCS-E-PURGE-NOT-FOUND-001`.
+fn retired_raw_missing_error(target: &ScopeTarget, raw_hash: &str) -> KcsError {
+    KcsError::new(
+        "KCS-E-STORE-CORRUPT-001",
+        "tombstone lifecycle records a resurrection but the raw object is missing",
+        json!({
+            "raw_hash": raw_hash,
+            "scope_path": target.kcs_dir.display().to_string(),
+        }),
+        ExitCode::PermanentFailure,
+    )
+}
+
+/// LC14(a): no tombstone/erase-receipt marker at all, yet the raw object is
+/// absent — an unmarked absence is a corruption suspicion (`kcs repair
+/// --verify-objects` is the recommended next step), not a normal purge.
+fn unmarked_missing_raw_error(target: &ScopeTarget, raw_hash: &str) -> KcsError {
+    KcsError::new(
+        "KCS-E-STORE-CORRUPT-001",
+        "raw object is missing with no purge marker to explain the absence; run kcs repair --verify-objects",
+        json!({
+            "raw_hash": raw_hash,
+            "scope_path": target.kcs_dir.display().to_string(),
+        }),
+        ExitCode::PermanentFailure,
+    )
+}
+
 /// Enforce the purge visibility boundary on every raw-derived read surface.
 /// Erase receipts are deliberately absent here: they are fsck-only and must not
 /// prevent a later verified re-ingest of identical bytes.
@@ -6781,19 +7319,24 @@ fn parse_object_uri(input: &str) -> Result<Option<ObjectUri>> {
 fn resolve_object_uri(object: &ObjectUri, as_view: bool) -> Result<Value> {
     let status = if as_view { "viewed" } else { "opened" };
     let target = resolve_scope_target(&object.scope_id, None)?;
+    // §I checkpoint 1 (LC53).
+    let checkpoint = ReadBarrierCheckpoint::open(&target.kcs_dir)?;
+    // LC45 (item 2).
+    check_index_generation_current(&target.kcs_dir)?;
     if object.object_type == "chunk" {
         let chunk = read_stored_chunks(&target.kcs_dir)?
             .into_iter()
             .find(|chunk| chunk.row.chunk_id == object.hash)
             .ok_or_else(|| KcsError::not_found(object.hash.clone()))?;
-        enforce_purge_read_barrier(&target, &chunk.row.raw_hash)?;
-        let text = chunk.row.text;
-        enforce_purge_read_barrier(&target, &chunk.row.raw_hash)?;
+        // LC8-LC14 canonical dispatch (item 3) + §I checkpoint 2 (LC54/LC55).
+        let raw_present = raw_object_present(&target, &chunk.row.raw_hash)?;
+        enforce_canonical_marker_barrier(&target, &chunk.row.raw_hash, raw_present)?;
+        checkpoint.recheck()?;
         return Ok(json!({
             "status": status,
             "object_type": "chunk",
             "hash": object.hash,
-            "text": text,
+            "text": chunk.row.text,
         }));
     }
     // M7: dispatch each object_type to its correct CAS directory (03 §2 / 07 §5.2)
@@ -6814,16 +7357,20 @@ fn resolve_object_uri(object: &ObjectUri, as_view: bool) -> Result<Value> {
             )));
         }
     };
-    if object.object_type == "raw" {
-        enforce_purge_read_barrier(&target, &object.hash)?;
-    } else if PurgeState::new(&target.kcs_dir)
-        .read_journal()?
-        .is_some_and(|journal| journal.phase.is_barrier_visible())
+    // Image/prepared object URIs carry only the derived-object hash, so no
+    // trustworthy raw association can be recovered at this boundary. During
+    // the short destructive window, fail the whole derived-object surface
+    // closed; normal reads resume after terminal publication/deletion. The
+    // `raw` branch's own pre-`open_cas_byte_object` barrier check is
+    // deliberately NOT duplicated here (item 3): raw presence is not yet
+    // known at this point, and LC57's cache-publish-then-final-check
+    // ordering means the authoritative canonical dispatch belongs after
+    // `open_cas_byte_object` resolves it either way, not before.
+    if object.object_type != "raw"
+        && PurgeState::new(&target.kcs_dir)
+            .read_journal()?
+            .is_some_and(|journal| journal.phase.is_barrier_visible())
     {
-        // Image/prepared object URIs carry only the derived-object hash, so no
-        // trustworthy raw association can be recovered at this boundary. During
-        // the short destructive window, fail the whole derived-object surface
-        // closed; normal reads resume after terminal publication/deletion.
         return Err(KcsError::new(
             "KCS-E-PURGE-NOT-FOUND-001",
             "derived object access is hidden by an in-progress purge barrier",
@@ -6838,8 +7385,12 @@ fn resolve_object_uri(object: &ObjectUri, as_view: bool) -> Result<Value> {
     }
     match open_cas_byte_object(&target, subdir, scan_working_tree, &object.hash, None)? {
         Some((path, temporary)) => {
+            // LC8-LC14 canonical dispatch (item 3, `raw` only) + §I
+            // checkpoint 2 (LC54/LC55, every object type).
             let blocked_after_open = if object.object_type == "raw" {
-                enforce_purge_read_barrier(&target, &object.hash).err()
+                enforce_canonical_marker_barrier(&target, &object.hash, true)
+                    .and_then(|()| checkpoint.recheck())
+                    .err()
             } else if PurgeState::new(&target.kcs_dir)
                 .read_journal()?
                 .is_some_and(|journal| journal.phase.is_barrier_visible())
@@ -6856,7 +7407,7 @@ fn resolve_object_uri(object: &ObjectUri, as_view: bool) -> Result<Value> {
                     ExitCode::PermanentFailure,
                 ))
             } else {
-                None
+                checkpoint.recheck().err()
             };
             if let Some(error) = blocked_after_open {
                 if temporary {
@@ -6872,7 +7423,15 @@ fn resolve_object_uri(object: &ObjectUri, as_view: bool) -> Result<Value> {
                 "temporary": temporary,
             }))
         }
-        None if object.object_type == "raw" => Err(purge_not_found_error(&target, &object.hash)),
+        // raw_present=false always yields Err from the canonical dispatch
+        // (LC12/13/14 jointly cover every marker state).
+        None if object.object_type == "raw" => {
+            Err(
+                enforce_canonical_marker_barrier(&target, &object.hash, false)
+                    .err()
+                    .unwrap_or_else(|| purge_not_found_error(&target, &object.hash)),
+            )
+        }
         None => Err(KcsError::not_found(object.hash.clone())),
     }
 }
@@ -6972,6 +7531,12 @@ fn run_batch(args: BatchArgs) -> Result<Value> {
     // mutating tasks, so resume/retry cannot bypass the same adapter policy used by
     // index and repair paths.
     require_repo_tool_lock(&repo)?;
+    // CL45/item 5: reconcile any stale `request_kind='sync'` cost-ledger.sqlite
+    // rows left by a crashed prior run — applies uniformly to resume/retry/
+    // abandon, all of which reach this point before their own dispatch.
+    recover_stale_sync_rows(&open_ledger_db()?, &scope_id(repo.kcs_dir())?)?;
+    // LC39/LC40 (see `ensure_purge_epoch_initialized`'s doc comment).
+    ensure_purge_epoch_initialized(repo.kcs_dir())?;
     let store = TaskStore::new(repo.kcs_dir());
     // N1: a Tier B online hold is only lifted by an explicit `--send-secrets`
     // approval, never by a plain `batch resume`. Without this, resume's
@@ -7072,33 +7637,75 @@ fn run_batch(args: BatchArgs) -> Result<Value> {
     }
 }
 
-/// `$XDG_DATA_HOME/kcs/cost-ledger.sqlite` (04 §5.4 / CL70). Deliberately a new
-/// function rather than a `cost_ledger_path()` rename — that JSONL path is still
-/// the live store for the F8 reservation/charge flow (`budget::CostLedger`), and
-/// this session did not attempt the much larger migration of every one of its
-/// ~40 call sites onto the SQLite ledger (see the implementation report).
+/// `$XDG_DATA_HOME/kcs/cost-ledger.sqlite` (04 §5.4 / CL70) — the device-global
+/// ledger, sole store for every reservation/charge this CLI records (2026-07-21:
+/// the JSONL `budget::CostLedger`/`ReservationLedger` design this replaces is
+/// fully retired; see the implementation report for the migration's scope).
 fn ledger_db_path() -> PathBuf {
     data_home().join("kcs/cost-ledger.sqlite")
 }
 
-/// Open the device-global `cost-ledger.sqlite`.
-///
-/// Deliberately does **not** call [`migrate_jsonl_if_needed`] here: with
-/// `budget::CostLedger` (JSONL) still the live store for the F8
-/// reservation/charge flow this session did not retire (see
-/// `ledger_db_path`'s doc comment), running the cutover as a side effect of
-/// any command that happens to touch the new store — `kcs status`,
-/// `kcs batch abandon` — would rename `cost-ledger.jsonl` out from under the
-/// still-active old reader/writer the first time either ran, silently
-/// zeroing out `CostLedger::monthly_total`'s view of real spend for the rest
-/// of the process's life (found the hard way: it broke 3 pre-existing
-/// `step2_p0_contract.rs` budget/task-identity tests when first wired this
-/// way). The migration function itself is correct and fully tested
-/// (`ledger::migrate`'s CL09-CL12 tests) — it just must not run until the
-/// JSONL call sites are actually retired. Whoever completes that retirement
-/// should call it once, here, as part of that change.
+/// Open the device-global `cost-ledger.sqlite`, running the one-time JSONL
+/// cutover (10-operations.md §7.5.3 / CL09-CL12) first if it has not already
+/// happened on this device. Every ledger-touching command (`kcs status`,
+/// `kcs batch *`, `kcs index`, `kcs search --vector`/`--hybrid` page 1, `kcs
+/// purge`) opens the ledger through this one function, so the cutover is
+/// guaranteed to run before any of them reads or writes it — there is no
+/// remaining code path that reads or writes the legacy JSONL files directly
+/// (CL71), so running the cutover here can never race a still-active old
+/// reader/writer.
 fn open_ledger_db() -> Result<LedgerDb> {
-    LedgerDb::open(ledger_db_path()).map_err(pipeline_to_kcs)
+    let ledger = LedgerDb::open(ledger_db_path()).map_err(pipeline_to_kcs)?;
+    migrate_jsonl_if_needed(ledger.connection(), &data_home().join("kcs"))
+        .map_err(pipeline_to_kcs)?;
+    Ok(ledger)
+}
+
+/// CL45/§5.4 sync crash recovery — the write-command-entry pass 04 §5.8's
+/// batch recovery (CL32) runs alongside, but explicitly excludes
+/// `request_kind='sync'` rows from (item 5 of this session's task: the
+/// ledger-side settlement primitive, `recovery_settle_unknown`, is already
+/// implemented and already reused for exactly this purpose by
+/// `settle_task_charge_unknown` — this function is the write-entry caller
+/// that was still missing).
+///
+/// No Adapter in this codebase exposes a post-hoc "query a past sync call's
+/// result by provider request id" capability (confirmed by grep of
+/// `kcs-adapter`'s traits — the same fact `settle_task_charge_unknown`'s own
+/// doc comment already records), so CL45's "batch_job_id 記録済みで照会可能"
+/// branch is unreachable today: every stale sync row this finds settles via
+/// the "未記録・照会不能" branch — `estimated_usd` billed with `estimated=1`,
+/// `state=3`, `intent_token` cleared in the same Tx (CL47: sync rows have no
+/// upload/job residue to wait on, unlike batch rows).
+///
+/// Scoped to `scope_id` (a sync row belongs to one scope; only that scope's
+/// `.kcs/.lock` holder reconciles it) and gated on `stale_after_at`
+/// (`sync_recovery_candidates`'s own doc comment) so a genuinely live
+/// concurrent sync call from another process is never raced.
+fn recover_stale_sync_rows(ledger: &LedgerDb, scope_id: &str) -> Result<u64> {
+    let now_ms = kcs_pipeline::ledger::time::now_millis();
+    let candidates =
+        sync_recovery_candidates(ledger.connection(), scope_id, now_ms).map_err(pipeline_to_kcs)?;
+    let mut settled = 0_u64;
+    for row in candidates {
+        let Some(intent_token) = row.intent_token.as_deref() else {
+            // A state 0/1 row always carries an intent_token by construction
+            // (`phase1_intent` always sets one on the same INSERT/UPDATE that
+            // sets state=0); skip defensively rather than panic if this
+            // invariant is ever violated.
+            continue;
+        };
+        recovery_settle_unknown(
+            ledger.connection(),
+            &row.key,
+            intent_token,
+            row.estimated_usd,
+            true,
+        )
+        .map_err(pipeline_to_kcs)?;
+        settled += 1;
+    }
+    Ok(settled)
 }
 
 /// `kcs batch abandon` / `--reset-violations`'s shared selector grammar (06
@@ -7590,7 +8197,7 @@ fn execute_pending_markdownize_tasks(
     let budget_caps =
         read_budget_policy(user_config_toml_path(), repo.kcs_dir().join("config.toml"))
             .map_err(pipeline_to_kcs)?;
-    let cost_ledger = CostLedger::new(cost_ledger_path());
+    let ledger = open_ledger_db()?;
     let month = utc_month(&now_utc_seconds());
     let scope_id = repo.scope_id_for_adapter();
     // N1a (defense in depth): even a Pending online markdownize task must not be
@@ -7602,13 +8209,14 @@ fn execute_pending_markdownize_tasks(
     // R22-6(a): R21-6 gave the embedding pipeline a live-AuthError revive but never wired
     // the markdownize twin, so a 401/403 left its task Failed(`auth_error`) — non-retryable
     // (`max_attempts:0`), hence invisible to `batch retry` and to this Pending filter — with
-    // its F8 phantom reservation eating the month's cap. Fixing the credentials resumed
-    // nothing. Revive here, BEFORE the Pending set is built, so the repaired credentials are
-    // used on this very pass. Only a task whose precondition is not `Retire` (file present,
-    // unedited, within the cap) is revived; a genuinely stale one is retired by the loop
-    // below as before. 401/403 is refused before billing (R20-3), so its reservation is a
-    // reclaimable phantom.
-    let markdown_adapter_kind = adapter_kind_budget_key(online_profile.adapter_kind);
+    // its reservation eating the month's cap. Fixing the credentials resumed nothing. Revive
+    // here, BEFORE the Pending set is built, so the repaired credentials are used on this
+    // very pass. Only a task whose precondition is not `Retire` (file present, unedited,
+    // within the cap) is revived; a genuinely stale one is retired by the loop below as
+    // before. 401/403 is refused before billing (R20-3), so releasing its still-open ledger
+    // row (if any) settles it `unknown_settled` rather than leaving it stranded open.
+    let markdownize_adapter_kind = "markdownize";
+    let markdown_profile_hash = online_profile.tool_profile_hash.clone();
     let auth_revivable = if allow_auth_revive {
         store
             .all()
@@ -7631,14 +8239,15 @@ fn execute_pending_markdownize_tasks(
         BTreeSet::new()
     };
     if !auth_revivable.is_empty() {
-        let mut reclaims: Vec<MonthlyCostLedgerEntry> = Vec::new();
         for task in store.all().map_err(pipeline_to_kcs)? {
             if auth_revivable.contains(&task.task_id) {
-                if let Some(entry) =
-                    settle_task_reservation(&cost_ledger, &task, &scope_id, markdown_adapter_kind)?
-                {
-                    reclaims.push(entry);
-                }
+                let key = task_ledger_key(
+                    &scope_id,
+                    markdownize_adapter_kind,
+                    &task.input_hash,
+                    &markdown_profile_hash,
+                );
+                release_task_charge_if_open(&ledger, &key)?;
             }
         }
         store
@@ -7655,12 +8264,6 @@ fn execute_pending_markdownize_tasks(
                 true
             })
             .map_err(pipeline_to_kcs)?;
-        let reclaim_ledger = cost_ledger.reclaim_ledger();
-        for entry in &reclaims {
-            reclaim_ledger
-                .append_monthly(entry)
-                .map_err(pipeline_to_kcs)?;
-        }
     }
     let tasks = store
         .all()
@@ -7683,15 +8286,21 @@ fn execute_pending_markdownize_tasks(
     let mut counts = ExecOutcome::default();
     for task in tasks {
         let task_id = task.task_id.clone();
-        // R15-2: verify the network-free preconditions BEFORE reserving the cost. F8
-        // charges under the device-global lock BEFORE the send, but a stale (edited-
-        // after-enqueue), text-native, or unpreparable task is superseded by R14-2
-        // inside the executor WITHOUT ever calling the adapter — so charging first is a
-        // phantom charge that double-bills and can exhaust the markdownize cap, falsely
-        // pausing the valid task. Fail the task here (non-retryable invalid_input; the
-        // recovery is a re-index, not a retry) instead of charging + entering the
-        // executor. This mirrors the executor's own R14-2/R9-2 guards, hoisted ahead of
-        // the charge.
+        let key = task_ledger_key(
+            &scope_id,
+            markdownize_adapter_kind,
+            &task.input_hash,
+            &markdown_profile_hash,
+        );
+        // R15-2: verify the network-free preconditions BEFORE reserving the cost. The
+        // reservation lands under a `BEGIN IMMEDIATE` Tx BEFORE the send, but a stale
+        // (edited-after-enqueue), text-native, or unpreparable task is superseded by
+        // R14-2 inside the executor WITHOUT ever calling the adapter — so charging
+        // first is a phantom charge that double-bills and can exhaust the markdownize
+        // cap, falsely pausing the valid task. Fail the task here (non-retryable
+        // invalid_input; the recovery is a re-index, not a retry) instead of charging
+        // + entering the executor. This mirrors the executor's own R14-2/R9-2 guards,
+        // hoisted ahead of the charge.
         let prepared_input = match classify_online_markdownize_precondition(repo, &task) {
             OnlineMarkdownizePrecondition::Send(prepared_input) => prepared_input,
             OnlineMarkdownizePrecondition::AwaitConversion => {
@@ -7700,16 +8309,13 @@ fn execute_pending_markdownize_tasks(
                 continue;
             }
             OnlineMarkdownizePrecondition::Retire => {
-                // R18-2: this task may carry a kept RateLimit/Quota phantom from a PRIOR
-                // failed send (its file was deleted/edited after that attempt). Reclaim it
-                // here — `batch retry` preserved `fallback_reason`, so the failure kind is
-                // still intact — BEFORE the retirement overwrites the reason to
-                // invalid_input; otherwise the R18-2 index sweep (which reads the failure
-                // kind) can no longer tell it was a non-billable phantom. No NEW charge is
-                // reserved this pass (the precondition failed before the charge).
-                let markdown_adapter_kind = adapter_kind_budget_key(online_profile.adapter_kind);
-                let reclaim =
-                    settle_task_reservation(&cost_ledger, &task, &scope_id, markdown_adapter_kind)?;
+                // R18-2: this task may carry a still-open reservation from a PRIOR
+                // failed send (its file was deleted/edited after that attempt).
+                // Release it here — settling `unknown_settled` at the reservation
+                // estimate if a row is still open, a no-op otherwise — BEFORE the
+                // retirement below; no NEW charge is reserved this pass (the
+                // precondition failed before the charge).
+                release_task_charge_if_open(&ledger, &key)?;
                 store
                     .update_matching(|candidate| {
                         if candidate.task_id == task_id {
@@ -7721,176 +8327,83 @@ fn execute_pending_markdownize_tasks(
                         }
                     })
                     .map_err(pipeline_to_kcs)?;
-                if let Some(entry) = reclaim {
-                    cost_ledger
-                        .reclaim_ledger()
-                        .append_monthly(&entry)
-                        .map_err(pipeline_to_kcs)?;
-                }
                 counts.failed += 1;
                 continue;
             }
         };
-        // R16-7: error-kind-aware re-reservation gate. When THIS task instance is a
-        // re-send whose PREVIOUS recorded failure was a non-billable rejection
-        // (RateLimit / QuotaExceeded — the backend refuses the request before it
-        // processes or bills anything), skip the reservation: the prior attempt's F8
-        // reservation (kept on failure) already covers this send. Without the gate a
-        // RateLimit retry (task.rs `retry_policy`: max_attempts = None, unbounded)
-        // re-reserves the FULL document cost on every attempt, so one logical operation
-        // bills N times and can exhaust the device month cap — falsely pausing unrelated
-        // tasks in other scopes (R15-2's harm, reproduced on the retry path).
-        //
-        // Only RateLimit/QuotaExceeded skip — deliberately NOT "reserve once for the
-        // task's lifetime" (Opus's rejected `cost_reserved` proposal): a NetworkError
-        // re-send may have been billed server-side (the request can reach the backend
-        // before the socket drops), so it reserves afresh each attempt, bounded by
-        // max_attempts = 5. Reserving once would let real spend exceed the reserved cap
-        // on server-side-billed retries — the silent cap bypass R15-5 flagged as major,
-        // the opposite failure. A crash mid-send (Q3 reclaim, Running -> Pending) also
-        // re-reserves: the Running flip below clears `fallback_reason` so a reclaimed
-        // task reaches the charge path here rather than inheriting this attempt's
-        // "rate_limit" skip — its send's billing outcome is unknown after a crash, so we
-        // stay conservative (bounded by the attempts policy).
-        let previous_failure_kind = retry_kind_from_reason(task.fallback_reason.as_deref());
-        let reservation_already_covers_resend = if matches!(
-            previous_failure_kind,
-            RetryErrorKind::RateLimit | RetryErrorKind::QuotaExceeded
-        ) {
-            match task.reservation_claim() {
-                Some(claim) => cost_ledger
-                    .reservation_ledger()
-                    .activate_for_retry(claim, &scope_id, markdown_adapter_kind)
-                    .map_err(pipeline_to_kcs)?,
-                None => false,
+        let file_size = prepared_input.bytes.len() as u64;
+        // R11-6: prorate the reserved cost of a UNIT-SCOPED retry by the fraction of
+        // the document actually re-sent — `unit_keys` names the still-failed units,
+        // and `execute_online_markdownize_task` requests only those. A full send
+        // (`unit_keys == None`) still bills the whole document. Without this, a
+        // 1-page retry of a 500-page PDF re-billed all 500 pages. Only used as the
+        // *candidate* for a FRESH reservation below — CL42/CL44: an already-open row
+        // from a prior attempt (`reserve_or_reuse_task_charge`'s reuse path) is
+        // billed at ITS OWN stored `estimated_usd`, not recomputed here.
+        let candidate_usd = prorated_markdownize_cost(
+            &task,
+            file_size,
+            prepared_input.prepared_units.len(),
+            task.bbox_annotation_enabled.unwrap_or(false),
+        );
+        let caps = budget_cap_config(&budget_caps, &scope_id, markdownize_adapter_kind);
+        // F5: `hard_stop = false` (soft-stop) bypasses a cap denial exactly like
+        // `--override-budget` does — see `reserve_or_reuse_task_charge`'s doc.
+        let bypass_cap_denial = override_budget || !budget_caps.hard_stop;
+        let charge =
+            reserve_or_reuse_task_charge(&ledger, &key, candidate_usd, &caps, bypass_cap_denial)?;
+        let (intent_token, reserved_usd) = match charge {
+            TaskChargeOutcome::BudgetExceeded => {
+                store
+                    .update_matching(|candidate| {
+                        if candidate.task_id == task_id {
+                            candidate.status = TaskStatus::Paused;
+                            candidate.fallback_reason = Some("budget_exceeded".to_owned());
+                            true
+                        } else {
+                            false
+                        }
+                    })
+                    .map_err(pipeline_to_kcs)?;
+                // R11-2: a Pending task budget-paused THIS pass → docs/04 §5.6 exit 6.
+                counts.paused += 1;
+                continue;
             }
-        } else {
-            false
-        };
-        // R17-3: the exact amount of a FRESH reservation made this pass (None on the
-        // RateLimit/Quota skip, which reuses the prior reservation). Stamped onto the
-        // task below so that, if this task later fails RateLimit/Quota and is then
-        // superseded by an edit, the supersede can reclaim precisely this phantom.
-        let mut fresh_reserved: Option<ReservationRecord> = None;
-        let charge = if reservation_already_covers_resend {
-            // The previous attempt's reservation stands in for this send's charge.
-            ChargeOutcome::Charged
-        } else {
-            let file_size = prepared_input.bytes.len() as u64;
-            // R11-6: prorate the reserved (== billed, F8) cost of a UNIT-SCOPED retry by
-            // the fraction of the document actually re-sent — `unit_keys` names the
-            // still-failed units, and `execute_online_markdownize_task` requests only
-            // those. A full send (`unit_keys == None`) still bills the whole document.
-            // Without this, a 1-page retry of a 500-page PDF re-billed all 500 pages.
-            let estimated_usd = prorated_markdownize_cost(
-                &task,
-                file_size,
-                prepared_input.prepared_units.len(),
-                task.bbox_annotation_enabled.unwrap_or(false),
-            );
-            let estimate = BudgetEstimate {
-                scope_id: scope_id.clone(),
-                task_type: TaskType::Markdownize,
+            TaskChargeOutcome::Reserved {
+                intent_token,
                 estimated_usd,
-                adapter_id: Some(online_profile.adapter_id.clone()),
-            };
-            let adapter_kind = adapter_kind_budget_key(online_profile.adapter_kind);
-            let reservation = ReservationRecord {
-                reservation_id: format!("res_{}", new_ulid(repo.root())),
-                task_id: task_id.clone(),
-                month: month.clone(),
-                scope_id: scope_id.clone(),
-                adapter_kind: adapter_kind.to_owned(),
-                usd: estimated_usd,
-            };
-            // F8: reserve the charge under the device-global cost-ledger lock BEFORE
-            // execution, serializing the budget read-check-append against every other
-            // scope. The executor bills exactly this estimate under the "markdown" key
-            // (the previous post-execution append recomputed the same value), so the
-            // reserved row is identical. The adapter call runs outside the lock; a
-            // failure keeps the reservation (see helper docs).
-            let outcome = charge_cost_ledger_under_lock(
-                &cost_ledger,
-                cost_ledger_lock_path(),
-                &budget_caps,
-                CostChargeRequest {
-                    month: &month,
-                    adapter_kind,
-                    estimate: &estimate,
-                    override_budget,
-                    reservations: std::slice::from_ref(&reservation),
-                },
-            )?;
-            // R17-3: record the fresh reservation amount ONLY when it actually landed
-            // (a BudgetExceeded outcome appended nothing, so there is no phantom to
-            // reclaim). Equals the exact `estimated_usd` row so the future reclaim
-            // cancels it precisely.
-            if matches!(outcome, ChargeOutcome::Charged) {
-                fresh_reserved = Some(reservation);
             }
-            outcome
+            | TaskChargeOutcome::Reused {
+                intent_token,
+                estimated_usd,
+            } => (intent_token, estimated_usd),
         };
-        if matches!(charge, ChargeOutcome::BudgetExceeded) {
-            store
-                .update_matching(|candidate| {
-                    if candidate.task_id == task_id {
-                        candidate.status = TaskStatus::Paused;
-                        candidate.fallback_reason = Some("budget_exceeded".to_owned());
-                        true
-                    } else {
-                        false
-                    }
-                })
-                .map_err(pipeline_to_kcs)?;
-            // R11-2: a Pending task budget-paused THIS pass → docs/04 §5.6 exit 6.
-            counts.paused += 1;
-            continue;
-        }
         store
             .update_matching(|candidate| {
                 if candidate.task_id == task_id {
                     candidate.status = TaskStatus::Running;
                     candidate.heartbeat_at = Some(now_utc_seconds());
-                    // R16-7: entering the send clears the retry-kind marker so a crash
-                    // mid-send (reclaimed by Q3 to Pending) re-reserves on the next pass
-                    // rather than inheriting this attempt's "rate_limit"/"quota_exceeded"
-                    // skip — a crashed send's billing outcome is unknown, so the earlier
-                    // reservation may already be consumed and we must charge afresh. On a
-                    // recorded failure the reason is re-set below, so the skip gate still
-                    // sees it for a normal (non-crash) retry.
                     candidate.fallback_reason = None;
-                    // R17-3: stamp the live reservation (amount + its ledger month) so a
-                    // later supersede can reclaim this phantom if the send fails
-                    // RateLimit/Quota. Only overwrite on a FRESH charge; the RateLimit/
-                    // Quota skip keeps the original stamp (the single reservation the
-                    // R16-7 skip gate still relies on). Persisted here, alongside the
-                    // Running flip, so it survives the subsequent Failed transition.
-                    if let Some(reservation) = &fresh_reserved {
-                        candidate.reserved_usd = Some(reservation.usd);
-                        candidate.reserved_month = Some(reservation.month.clone());
-                        candidate.reservation_id = Some(reservation.reservation_id.clone());
-                    }
+                    // Stamp the live reservation's ledger selector (purge and any
+                    // future diagnostics look it up by `intent_token`, not by
+                    // reconstructing the ledger key from possibly-since-changed
+                    // config — see `purge.rs`'s `delete_target_tasks`). `reserved_usd`/
+                    // `reserved_month` accompany it only because
+                    // `task::validate_task_descriptor` requires all three stamps
+                    // present together or all absent; the ledger's own
+                    // `batch_requests.estimated_usd` is the actual source of truth.
+                    candidate.reservation_id = Some(intent_token.clone());
+                    candidate.reserved_usd = Some(reserved_usd);
+                    candidate.reserved_month = Some(month.clone());
                     true
                 } else {
                     false
                 }
             })
             .map_err(pipeline_to_kcs)?;
-        let active_claim = fresh_reserved
-            .as_ref()
-            .map(ReservationRecord::claim)
-            .or_else(|| task.reservation_claim())
-            .ok_or_else(|| KcsError::schema("charged markdownize task has no reservation"))?;
         match execute_online_markdownize_task(repo, &task, prepared_input) {
             Ok(outcome) => {
-                // Charge already reserved under the device-global lock above (F8).
-                transition_reservation_after_outcome(
-                    &cost_ledger,
-                    active_claim,
-                    &scope_id,
-                    markdown_adapter_kind,
-                    None,
-                )?;
+                settle_task_charge_success(&ledger, &key, &intent_token, reserved_usd)?;
                 store
                     .update_matching(|candidate| {
                         if candidate.task_id == task_id {
@@ -7898,6 +8411,7 @@ fn execute_pending_markdownize_tasks(
                             candidate.output_ref = outcome.output_ref.clone();
                             candidate.fallback_reason = Some("online_adapter_done".to_owned());
                             candidate.heartbeat_at = None;
+                            candidate.clear_reservation();
                             // R19-5: a unit-scoped retry that still returns Partial (units
                             // missing) consumed one re-drive of the retry budget — advance
                             // `attempts` HERE, the single accounting point, so it converges
@@ -7924,13 +8438,6 @@ fn execute_pending_markdownize_tasks(
                 counts.executed += 1;
             }
             Err(error) => {
-                transition_reservation_after_outcome(
-                    &cost_ledger,
-                    active_claim,
-                    &scope_id,
-                    markdown_adapter_kind,
-                    Some(error.retry_kind),
-                )?;
                 let policy = retry_policy(error.retry_kind);
                 let attempts_after = task.attempts.saturating_add(1);
                 let next_retry_at = (policy.retryable
@@ -7939,6 +8446,17 @@ fn execute_pending_markdownize_tasks(
                         .map(|max| attempts_after < max)
                         .unwrap_or(true))
                 .then(|| scheduled_retry_at(&now_utc_seconds(), &policy.backoff, attempts_after));
+                // CL42/CL44/CL45: a retry is coming — leave the ledger row open (it
+                // already covers the resend, `reserve_or_reuse_task_charge`'s reuse
+                // path) rather than settling now. Only a definitive outcome (no more
+                // retries left) settles `unknown_settled` at the reservation estimate
+                // — this Adapter integration has no post-hoc result-query capability
+                // (see `settle_task_charge_unknown`'s doc comment), so a permanently
+                // failed send is never billed less than its reservation.
+                let settles_now = next_retry_at.is_none();
+                if settles_now {
+                    settle_task_charge_unknown(&ledger, &key, &intent_token, reserved_usd)?;
+                }
                 let reason = retry_reason(error.retry_kind).to_owned();
                 store
                     .update_matching(|candidate| {
@@ -7948,6 +8466,9 @@ fn execute_pending_markdownize_tasks(
                             candidate.heartbeat_at = None;
                             candidate.attempts = candidate.attempts.saturating_add(1);
                             candidate.next_retry_at = next_retry_at.clone();
+                            if settles_now {
+                                candidate.clear_reservation();
+                            }
                             true
                         } else {
                             false
@@ -8884,11 +9405,133 @@ fn clone_adapter_error(error: &kcs_adapter::AdapterError) -> kcs_adapter::Adapte
     }
 }
 
+/// The `fallback_reason`s [`compute_query_embedding_page1`] can report through
+/// `VectorAvailability::Unavailable` beyond the pre-existing
+/// `query_embedding_unavailable` (05 §1.7).
+enum QueryEmbeddingOutcome {
+    Vector(Vec<f32>),
+    /// CL54: a live (non-stale) in-flight claim from another process already
+    /// holds this exact query's device row — never send, never overwrite its
+    /// token.
+    InFlight,
+}
+
+/// vector|hybrid search page 1's query embedding call, wired onto the sync
+/// degenerate 2-phase device row (04 §5.4 §H, CL48-55 in
+/// tasks/step4b-contract-tests-ledger.md): a bounded sweep of stale/prunable
+/// device rows first (CL52 — own key unconditionally, pruning >= 128 of the
+/// shared 256-row cap), then phase 1 claim (`device_claim`: CL54 in-flight
+/// text-fallback, or a fresh/reclaimed-and-fresh `stale_after_at` reservation),
+/// the response's provider request id recorded durably BEFORE the terminal Tx
+/// (CL43 — this Adapter integration reports no real id, so the intent_token is
+/// used, the DDL's own documented fallback), and a terminal settlement
+/// (success billed at the reservation estimate, or `unknown_settled` on
+/// adapter failure — CL45/CL69's "no post-hoc query capability" posture, same
+/// as the task-charge helpers above). Device rows are exempt from the
+/// device/per_adapter cap DENIAL check `ops::device_claim` performs no cap
+/// judgement at all — only `ops::check_then_reserve` (used by task charges)
+/// can return `Denied`; a device row's `estimated_usd` merely *contributes to*
+/// those other checks' sums (CL48), matching this session's read of
+/// `kcs_pipeline::ledger::ops`'s existing, already-contract-tested API surface
+/// (extending it to also cap-deny query embeddings is out of this item's
+/// scope — flagged in the report).
+///
+/// Only called for a FRESH page 1 (no cursor) — a cursor replay (page 2+) calls
+/// the unmetered [`compute_query_embedding`] unchanged, exactly as before this
+/// session's ledger migration (item 2 of the implementation instructions scopes
+/// the device-row protocol to "page 1" specifically; 04 §5.4 §H's own text is
+/// page-1-scoped: "vector|hybrid 検索 page 1 の query embedding 呼出").
+fn compute_query_embedding_page1(query: &str) -> Result<Option<QueryEmbeddingOutcome>> {
+    if query.chars().count() < 2 {
+        return Ok(None);
+    }
+    let Some(execution) = embedding_execution() else {
+        return Ok(None);
+    };
+    let profile = declared_embedding_profile(execution);
+    let ledger = open_ledger_db()?;
+    let conn = ledger.connection();
+    let key = LedgerTaskKey::new(
+        LedgerTaskKey::DEVICE_SCOPE_ID,
+        EMBEDDING_ADAPTER_KIND,
+        device_input_hash(query),
+        profile.profile_hash.clone(),
+    );
+
+    // CL52: bounded sweep BEFORE the claim — own key's stale row (if any) is
+    // swept unconditionally (outside the 256 cap), pruning gets >= 128 of the
+    // shared cap, decided by `allocate_sweep_capacity`'s fixed, deterministic
+    // rule. Never queries the provider (CL53 — search stays responsive).
+    let now = kcs_pipeline::ledger::time::now_millis();
+    with_immediate_transaction(conn, || {
+        let plan = plan_bounded_sweep(conn, Some(&key), now)?;
+        execute_bounded_sweep(conn, &plan, now)?;
+        Ok(())
+    })
+    .map_err(pipeline_to_kcs)?;
+
+    // §M note-2: the "effective timeout" is max(participating scopes' resolved
+    // `timeout_seconds`) — currently a no-op maximum, since
+    // `adapter.policy.timeout_seconds` other than the documented default (300)
+    // is loud-rejected at config load (`kcs_core::scope`'s R12-2 decision: real
+    // per-adapter timeout wiring is a separate, larger change no scope's config
+    // can currently deviate from), so every participating scope's resolved
+    // value is always exactly 300 and the max is trivially 300 too.
+    let claim = with_immediate_transaction(conn, || {
+        device_claim(
+            conn,
+            &key,
+            estimate_embedding_cost(query.chars().count() as u64),
+            TASK_SYNC_EFFECTIVE_TIMEOUT_SECONDS,
+        )
+    })
+    .map_err(pipeline_to_kcs)?;
+    let intent_token = match claim {
+        ClaimOutcome::InFlight => return Ok(Some(QueryEmbeddingOutcome::InFlight)),
+        ClaimOutcome::Claimed(outcome) => outcome.intent_token,
+    };
+
+    // O2 regression seam: mark that the query is about to be SENT to the embedding
+    // endpoint, so a test can prove `--text` never reaches this path. No-op unless
+    // the env var is set (mirrors the KCS_TEST_* adapter seams).
+    record_query_embed_trace(query);
+    let items = vec![EmbeddingItem {
+        id: "query".to_owned(),
+        text: Some(query.to_owned()),
+        path: None,
+        mime: None,
+    }];
+    match run_embedding_adapter(execution, items, EmbeddingInputType::Query) {
+        Ok(vectors) => {
+            // CL43: durably record the (fallback) provider id immediately on
+            // response receipt, strictly before the terminal Tx below — a crash
+            // in between still leaves a queryable `batch_job_id` for the next
+            // write-command's crash recovery.
+            sync_record_provider_request_id(conn, &key, &intent_token, &intent_token)
+                .map_err(pipeline_to_kcs)?;
+            let billed_usd = estimate_embedding_cost(query.chars().count() as u64);
+            settle_task_charge_success(&ledger, &key, &intent_token, billed_usd)?;
+            Ok(vectors
+                .into_iter()
+                .next()
+                .map(|vector| QueryEmbeddingOutcome::Vector(vector.vector)))
+        }
+        Err(_) => {
+            let billed_usd = estimate_embedding_cost(query.chars().count() as u64);
+            settle_task_charge_unknown(&ledger, &key, &intent_token, billed_usd)?;
+            Ok(None)
+        }
+    }
+}
+
 /// Compute the query embedding once per search (05 §1.1). Returns `None` when no
 /// adapter is configured or the query is too short to embed. A failing adapter
 /// call (auth/rate) degrades to `None` → text fallback rather than erroring the
-/// whole search. Query-embedding cost is not metered in the MVP (negligible; the
-/// budget guardrails target bulk index enrichment).
+/// whole search. Used for a cursor-driven page 2+ replay, which does not
+/// participate in the device row protocol (`compute_query_embedding_page1`'s
+/// doc comment) — this call's cost is not separately metered (unchanged from
+/// before this session; flagged in the report as a pre-existing gap, not one
+/// this item's scope covers).
 fn compute_query_embedding(query: &str) -> Result<Option<Vec<f32>>> {
     if query.chars().count() < 2 {
         return Ok(None);
@@ -9119,6 +9762,7 @@ fn run_embedding_enrichment_for_instances(
     if profile.modality != "multimodal" {
         return Ok(ExecOutcome::default());
     }
+    let ledger = open_ledger_db()?;
     let db_path = sqlite_path(repo.kcs_dir());
     if !db_path.exists() {
         return Ok(ExecOutcome::default());
@@ -9163,10 +9807,12 @@ fn run_embedding_enrichment_for_instances(
         reconcile_committed_embedding_tasks(
             repo,
             &task_store,
+            &ledger,
             EmbeddingReconcileContext {
                 active_chunk_ids: &active_chunk_ids,
                 pending: &pending,
                 now: &now,
+                profile_hash: &profile.profile_hash,
                 allow_auth_revive,
             },
         )?;
@@ -9187,7 +9833,7 @@ fn run_embedding_enrichment_for_instances(
             // (excluded at ingest), so `.is_some()` newly gates only lifted Tier A.
             !secrets_approved && chunk.requires_secret_approval
         });
-    hold_secret_embedding_tasks(&task_store, repo, &held, &now)?;
+    hold_secret_embedding_tasks(&task_store, repo, &ledger, &profile, &held, &now)?;
     if sendable.is_empty() {
         return Ok(ExecOutcome::default());
     }
@@ -9206,7 +9852,6 @@ fn run_embedding_enrichment_for_instances(
     }
 
     let mut outcome = ExecOutcome::default();
-    let cost_ledger = CostLedger::new(cost_ledger_path());
     let budget_caps =
         read_budget_policy(user_config_toml_path(), repo.kcs_dir().join("config.toml"))
             .map_err(pipeline_to_kcs)?;
@@ -9313,242 +9958,167 @@ fn run_embedding_enrichment_for_instances(
         if plan.to_send.is_empty() {
             continue;
         }
-        let reservation_ledger = cost_ledger.reservation_ledger();
-        let mut covered_groups = BTreeSet::new();
-        let mut activated_claims = Vec::<TaskReservationClaim<'_>>::new();
-        for (group_index, group) in plan.to_send.iter().enumerate() {
-            let mut covered = false;
-            for chunk in &group.members {
-                let output_ref = embedding_task_output_ref(&chunk.chunk_id);
-                let Some(task) = embedding_tasks_by_ref.get(&output_ref) else {
-                    continue;
-                };
-                if !matches!(
-                    retry_kind_from_reason(task.fallback_reason.as_deref()),
-                    RetryErrorKind::RateLimit | RetryErrorKind::QuotaExceeded
-                ) {
-                    continue;
-                }
-                let Some(claim) = task.reservation_claim() else {
-                    continue;
-                };
-                if reservation_ledger
-                    .activate_for_retry(claim, &scope_id, EMBEDDING_ADAPTER_KIND)
-                    .map_err(pipeline_to_kcs)?
-                {
-                    activated_claims.push(claim);
-                    covered = true;
-                }
-            }
-            if covered {
-                covered_groups.insert(group_index);
-            }
+        // Each `to_send` GROUP (one deduplicated content identity —
+        // `embedding_hash`, fanned out to every member chunk sharing that exact
+        // text) is ONE ledger reservation, keyed by its representative task's own
+        // `input_hash` (`chunk.text_hash` — identical across every member of the
+        // group by construction, since `embedding_hash` is derived from it) —
+        // never per-member: a group's members share ONE estimate
+        // (`group.representative.text.chars().count()`), matching the retired
+        // JSONL design's "only the representative gets a reservation stamp"
+        // shape. `reserve_or_reuse_task_charge`'s own live-row check (CL42/CL44)
+        // is what replaces the retired design's manual
+        // `activate_for_retry`/`fallback_reason` RateLimit/QuotaExceeded
+        // detection — a group whose representative task still has an open ledger
+        // row from a prior attempt is reused (and therefore never denied by the
+        // cap check below), independent of why that prior attempt left it open.
+        struct GroupCharge {
+            key: LedgerTaskKey,
+            intent_token: String,
+            reserved_usd: f64,
         }
-
-        // L5 + R16-7: bill only identities that do not carry a trusted, atomically
-        // reactivated reservation from a prior non-billable response.
-        let sent_chars: u64 = plan
-            .to_send
-            .iter()
-            .enumerate()
-            .filter(|(index, _)| !covered_groups.contains(index))
-            .map(|(_, group)| group.representative.text.chars().count() as u64)
-            .sum();
-        let mut fresh_by_ref = BTreeMap::<String, ReservationRecord>::new();
-        for (group_index, group) in plan.to_send.iter().enumerate() {
-            if covered_groups.contains(&group_index) {
-                continue;
-            }
+        let mut charge_by_group: Vec<Option<GroupCharge>> = Vec::with_capacity(plan.to_send.len());
+        for group in &plan.to_send {
             let output_ref = embedding_task_output_ref(&group.representative.chunk_id);
-            let task = embedding_tasks_by_ref.get(&output_ref).ok_or_else(|| {
+            let representative_task = embedding_tasks_by_ref.get(&output_ref).ok_or_else(|| {
                 KcsError::schema("embedding send has no matching task reservation owner")
             })?;
-            fresh_by_ref.insert(
-                output_ref,
-                ReservationRecord {
-                    reservation_id: format!("res_{}", new_ulid(repo.root())),
-                    task_id: task.task_id.clone(),
-                    month: month.clone(),
-                    scope_id: scope_id.clone(),
-                    adapter_kind: EMBEDDING_ADAPTER_KIND.to_owned(),
-                    usd: estimate_embedding_cost(group.representative.text.chars().count() as u64),
-                },
+            let key = task_ledger_key(
+                &scope_id,
+                EMBEDDING_ADAPTER_KIND,
+                &representative_task.input_hash,
+                &profile.profile_hash,
             );
-        }
-        let fresh_reservations = fresh_by_ref.values().cloned().collect::<Vec<_>>();
-        let charge = if sent_chars == 0 {
-            // Every to-send chunk is a RateLimit/Quota resend already reserved by its
-            // prior attempt — skip the reservation entirely (no $0 ledger row).
-            ChargeOutcome::Charged
-        } else {
-            let estimate = BudgetEstimate {
-                scope_id: scope_id.clone(),
-                task_type: TaskType::Embedding,
-                estimated_usd: estimate_embedding_cost(sent_chars),
-                adapter_id: Some(profile.tool_id.clone()),
-            };
-            // F8: reserve the charge under the device-global cost-ledger lock BEFORE
-            // sending, so a concurrent scope observes this spend and cannot also pass
-            // the cap (TOCTOU). The adapter call stays outside the lock.
-            charge_cost_ledger_under_lock(
-                &cost_ledger,
-                cost_ledger_lock_path(),
-                &budget_caps,
-                CostChargeRequest {
-                    month: &month,
-                    adapter_kind: EMBEDDING_ADAPTER_KIND,
-                    estimate: &estimate,
-                    override_budget,
-                    reservations: &fresh_reservations,
-                },
-            )?
-        };
-        if matches!(charge, ChargeOutcome::BudgetExceeded) {
-            // A batch may mix retry groups already covered by a trusted prior
-            // reservation with fresh groups whose new charge exceeds the cap.
-            // The covered retries remain authorized and must still run; pausing
-            // the whole batch would strand historical rate-limit work forever.
-            let covered_to_send = plan
-                .to_send
-                .iter()
-                .enumerate()
-                .filter(|(index, _)| covered_groups.contains(index))
-                .map(|(_, group)| group.clone())
-                .collect::<Vec<_>>();
-            if !covered_to_send.is_empty() {
-                match send_embed_batch(&conn, execution, &profile, &covered_to_send) {
-                    Ok(()) => {
-                        for claim in &activated_claims {
-                            transition_reservation_after_outcome(
-                                &cost_ledger,
-                                *claim,
-                                &scope_id,
-                                EMBEDDING_ADAPTER_KIND,
-                                None,
-                            )?;
-                        }
-                        record_embedding_transitions(
-                            &mut transitions,
-                            covered_to_send
-                                .iter()
-                                .flat_map(|group| group.members.iter().copied()),
-                            embedding_done_transition(),
-                        );
-                        outcome.executed += covered_to_send
-                            .iter()
-                            .map(|group| group.members.len())
-                            .sum::<usize>();
-                    }
-                    Err(failure) => {
-                        for claim in &activated_claims {
-                            transition_reservation_after_outcome(
-                                &cost_ledger,
-                                *claim,
-                                &scope_id,
-                                EMBEDDING_ADAPTER_KIND,
-                                Some(failure.retry_kind),
-                            )?;
-                        }
-                        record_embedding_transitions(
-                            &mut transitions,
-                            covered_to_send
-                                .iter()
-                                .flat_map(|group| group.members.iter().copied()),
-                            embedding_fail_transition(failure.retry_kind),
-                        );
-                        count_embedding_failure(
-                            &mut outcome,
-                            failure.retry_kind,
-                            covered_to_send
-                                .iter()
-                                .map(|group| group.members.len())
-                                .sum(),
-                        );
-                    }
+            let candidate_usd =
+                estimate_embedding_cost(group.representative.text.chars().count() as u64);
+            let caps = budget_cap_config(&budget_caps, &scope_id, EMBEDDING_ADAPTER_KIND);
+            // F5: `hard_stop = false` (soft-stop) bypasses a cap denial exactly like
+            // `--override-budget` does — see `reserve_or_reuse_task_charge`'s doc.
+            let bypass_cap_denial = override_budget || !budget_caps.hard_stop;
+            let charge = reserve_or_reuse_task_charge(
+                &ledger,
+                &key,
+                candidate_usd,
+                &caps,
+                bypass_cap_denial,
+            )?;
+            charge_by_group.push(match charge {
+                TaskChargeOutcome::BudgetExceeded => None,
+                TaskChargeOutcome::Reserved {
+                    intent_token,
+                    estimated_usd,
                 }
-            }
-            // Budget exhausted: pause only fresh, uncovered groups. Already-linked
-            // reuse and covered retry groups retain their independently-set state.
+                | TaskChargeOutcome::Reused {
+                    intent_token,
+                    estimated_usd,
+                } => Some(GroupCharge {
+                    key,
+                    intent_token,
+                    reserved_usd: estimated_usd,
+                }),
+            });
+        }
+        let denied_indices: Vec<usize> = (0..plan.to_send.len())
+            .filter(|&index| charge_by_group[index].is_none())
+            .collect();
+        if !denied_indices.is_empty() {
+            // R11-2: budget-paused this pass → docs/04 §5.6 exit 6. Only these
+            // specific over-cap groups pause; groups whose reservation was
+            // reused or freshly fit the cap proceed below regardless of batch
+            // position (no whole-batch/whole-pass abort on a partial denial —
+            // unlike the retired design, each group here was independently and
+            // atomically cap-checked, so a later, cheaper group in a later batch
+            // may still fit).
             record_embedding_transitions(
                 &mut transitions,
-                plan.to_send
+                denied_indices
                     .iter()
-                    .enumerate()
-                    .filter(|(index, _)| !covered_groups.contains(index))
-                    .flat_map(|(_, group)| group.members.iter().copied()),
+                    .flat_map(|&index| plan.to_send[index].members.iter().copied()),
                 embedding_pause_transition(),
             );
-            // R11-2: budget-paused this pass → docs/04 §5.6 exit 6.
-            outcome.paused += plan
-                .to_send
+            outcome.paused += denied_indices
                 .iter()
-                .enumerate()
-                .filter(|(index, _)| !covered_groups.contains(index))
-                .map(|(_, group)| group.members.len())
+                .map(|&index| plan.to_send[index].members.len())
                 .sum::<usize>();
-            break;
         }
-        // R18-1: a fresh charge landed (`sent_chars > 0`, ChargeOutcome::Charged). Record
-        // each FRESHLY-charged chunk's exact reservation so its task is stamped in the
-        // end-of-pass write-back. `estimate_embedding_cost` is linear in chars, so the
-        // per-chunk amounts sum to exactly the batch charge — the reclaim (R18-1) of a
-        // stranded phantom then cancels it precisely. RateLimit/Quota resends covered by a
-        // prior reservation are excluded (they keep their original single stamp).
-        for (output_ref, reservation) in &fresh_by_ref {
-            reserved_by_ref.insert(
-                output_ref.clone(),
-                (
-                    reservation.usd,
-                    reservation.month.clone(),
-                    reservation.reservation_id.clone(),
-                ),
-            );
+        let charged_indices: Vec<usize> = (0..plan.to_send.len())
+            .filter(|&index| charge_by_group[index].is_some())
+            .collect();
+        if charged_indices.is_empty() {
+            continue;
         }
-        match send_embed_batch(&conn, execution, &profile, &plan.to_send) {
+        let to_send: Vec<EmbeddingSendGroup<'_>> = charged_indices
+            .iter()
+            .map(|&index| plan.to_send[index].clone())
+            .collect();
+        match send_embed_batch(&conn, execution, &profile, &to_send) {
             Ok(()) => {
-                // Charge already reserved under the lock above (F8).
-                for claim in activated_claims
-                    .iter()
-                    .copied()
-                    .chain(fresh_reservations.iter().map(ReservationRecord::claim))
-                {
-                    transition_reservation_after_outcome(
-                        &cost_ledger,
-                        claim,
-                        &scope_id,
-                        EMBEDDING_ADAPTER_KIND,
-                        None,
+                for &index in &charged_indices {
+                    let charge = charge_by_group[index]
+                        .as_ref()
+                        .expect("charged_indices only contains Some entries");
+                    settle_task_charge_success(
+                        &ledger,
+                        &charge.key,
+                        &charge.intent_token,
+                        charge.reserved_usd,
                     )?;
+                    // R18-1's stamp, still needed so `reconcile_committed_embedding_tasks`
+                    // et al. can find this group's ledger selector via
+                    // `task.reservation_id` without reconstructing the key from
+                    // possibly-since-changed config.
+                    reserved_by_ref.insert(
+                        embedding_task_output_ref(&plan.to_send[index].representative.chunk_id),
+                        (
+                            charge.reserved_usd,
+                            month.clone(),
+                            charge.intent_token.clone(),
+                        ),
+                    );
                 }
                 record_embedding_transitions(
                     &mut transitions,
-                    plan.send_chunks(),
+                    to_send
+                        .iter()
+                        .flat_map(|group| group.members.iter().copied()),
                     embedding_done_transition(),
                 );
-                outcome.executed += plan.send_count();
+                outcome.executed += to_send
+                    .iter()
+                    .map(|group| group.members.len())
+                    .sum::<usize>();
             }
             Err(failure) => {
-                for claim in activated_claims
-                    .iter()
-                    .copied()
-                    .chain(fresh_reservations.iter().map(ReservationRecord::claim))
-                {
-                    transition_reservation_after_outcome(
-                        &cost_ledger,
-                        claim,
-                        &scope_id,
-                        EMBEDDING_ADAPTER_KIND,
-                        Some(failure.retry_kind),
-                    )?;
-                }
+                // CL42/CL44: leave every charged group's reservation OPEN on
+                // failure, exactly like markdownize — a retry (of this same task
+                // key, whichever member drives it) REUSES it via
+                // `reserve_or_reuse_task_charge`'s live-row check, so a
+                // rate_limit/quota/network_error/auth failure never re-reserves
+                // per attempt (matching the retired JSONL design's R16-7 gate,
+                // now applied uniformly instead of only to specific error
+                // kinds — see `r16_7_network_error_retry_does_not_reaccrue_charge`).
+                // The reservation still counts toward the cap the entire time it
+                // stays open (`ledger_month_total`'s unterminated-`batch_requests`
+                // term), so this is never an under-charge. It is eventually
+                // released — settled `unknown_settled`, a real charge — once the
+                // chunk goes non-live (`reconcile_committed_embedding_tasks`'s
+                // `release_task_charge_if_open` call); until then a
+                // still-live-but-exhausted chunk's reservation simply stays open
+                // and counted, forever conservative.
                 // Enrichment failure is non-fatal: mark the sent chunks failed and
                 // stop (search sees no embeddings → text). Never fails `kcs index`.
                 record_embedding_transitions(
                     &mut transitions,
-                    plan.send_chunks(),
+                    to_send
+                        .iter()
+                        .flat_map(|group| group.members.iter().copied()),
                     embedding_fail_transition(failure.retry_kind),
                 );
-                count_embedding_failure(&mut outcome, failure.retry_kind, plan.send_count());
+                count_embedding_failure(
+                    &mut outcome,
+                    failure.retry_kind,
+                    to_send.iter().map(|group| group.members.len()).sum(),
+                );
                 break;
             }
         }
@@ -9693,18 +10263,6 @@ struct EmbeddingSendGroup<'a> {
     embedding_hash: String,
     representative: &'a EmbeddableChunk,
     members: Vec<&'a EmbeddableChunk>,
-}
-
-impl<'a> EmbedBatchPlan<'a> {
-    fn send_chunks(&'a self) -> impl Iterator<Item = &'a EmbeddableChunk> + 'a {
-        self.to_send
-            .iter()
-            .flat_map(|group| group.members.iter().copied())
-    }
-
-    fn send_count(&self) -> usize {
-        self.to_send.iter().map(|group| group.members.len()).sum()
-    }
 }
 
 /// Classify a batch into reuse vs. to-send by probing the content-addressed
@@ -9945,12 +10503,18 @@ struct EmbeddingReconcileContext<'a> {
     active_chunk_ids: &'a BTreeSet<String>,
     pending: &'a [EmbeddableChunk],
     now: &'a str,
+    /// The active embedding profile's `tool_profile_hash` — one of the ledger
+    /// `TaskKey`'s 4 fields (04 §5.4 L768: "input_hash = §5.5 のタスク同一性
+    /// キーと同じ組"); this reconcile pass needs it to look up/release a task's
+    /// ledger row by key.
+    profile_hash: &'a str,
     allow_auth_revive: bool,
 }
 
 fn reconcile_committed_embedding_tasks(
     repo: &Repository,
     task_store: &TaskStore,
+    ledger: &LedgerDb,
     context: EmbeddingReconcileContext<'_>,
 ) -> Result<()> {
     let pending_ids: BTreeSet<&str> = context
@@ -9959,19 +10523,15 @@ fn reconcile_committed_embedding_tasks(
         .map(|chunk| chunk.chunk_id.as_str())
         .collect();
     let live_ids = context.active_chunk_ids;
-    // R18-1: reclaim the F8 phantom of a NON-LIVE embedding task whose send failed
-    // RateLimit/Quota. Embedding charges before the send (like markdownize, F8) but had NO
-    // reclaim path — `reserved_usd`/`reserved_month` are now stamped at charge time
-    // (apply_embedding_transitions), and once the chunk is edited/deleted (non-live) the
-    // task can never be retried, so its non-billable (RateLimit/Quota) phantom would eat
-    // the embedding per-adapter/device cap for the rest of the month and falsely pause
-    // unrelated embeddings — the embedding twin of the markdownize R17-3/R18-2 fix. This
-    // in-place pass runs BEFORE the transitions loop below (which then re-reads and skips
-    // these now-terminal tasks). Only Pending/Running/Failed STAMPED tasks are eligible: a
-    // Done task's stamp is REAL spend (its vector is stored), never a phantom. A
-    // NetworkError stamp is terminalized but NOT reclaimed (may have billed; R16-7). The
-    // reclaim uses the task's stamped `reserved_month`, so month accounting matches the
-    // charge.
+    // R18-1: release the ledger reservation of a NON-LIVE embedding task whose send
+    // is now stranded. Once the chunk is edited/deleted (non-live) the task can
+    // never be retried, so an open ledger row would eat the embedding
+    // per-adapter/device cap for the rest of the month and falsely pause unrelated
+    // embeddings — the embedding twin of the markdownize R17-3/R18-2 fix. This
+    // in-place pass runs BEFORE the transitions loop below (which then re-reads and
+    // skips these now-terminal tasks). Only Pending/Running/Failed STAMPED tasks are
+    // eligible: a Done task's stamp is REAL spend (its vector is stored), never a
+    // charge to release.
     let reservation_scope_id = repo.scope_id_for_adapter();
     #[derive(Clone, Copy)]
     enum ReconcileReservationAction {
@@ -9980,8 +10540,6 @@ fn reconcile_committed_embedding_tasks(
         Retire,
     }
     let mut actions = BTreeMap::<String, ReconcileReservationAction>::new();
-    let mut reclaims: Vec<MonthlyCostLedgerEntry> = Vec::new();
-    let cost_ledger = CostLedger::new(cost_ledger_path());
     for task in task_store.all().map_err(pipeline_to_kcs)? {
         if task.task_type != TaskType::Embedding {
             continue;
@@ -10024,14 +10582,13 @@ fn reconcile_committed_embedding_tasks(
         } else {
             ReconcileReservationAction::Retire
         };
-        if let Some(entry) = settle_task_reservation(
-            &cost_ledger,
-            &task,
+        let key = task_ledger_key(
             &reservation_scope_id,
             EMBEDDING_ADAPTER_KIND,
-        )? {
-            reclaims.push(entry);
-        }
+            &task.input_hash,
+            context.profile_hash,
+        );
+        release_task_charge_if_open(ledger, &key)?;
         actions.insert(task.task_id.clone(), action);
     }
     task_store
@@ -10059,14 +10616,6 @@ fn reconcile_committed_embedding_tasks(
             true
         })
         .map_err(pipeline_to_kcs)?;
-    if !reclaims.is_empty() {
-        let reclaim_ledger = cost_ledger.reclaim_ledger();
-        for entry in &reclaims {
-            reclaim_ledger
-                .append_monthly(entry)
-                .map_err(pipeline_to_kcs)?;
-        }
-    }
     let mut transitions: BTreeMap<String, EmbeddingTransition> = BTreeMap::new();
     for task in task_store.all().map_err(pipeline_to_kcs)? {
         if task.task_type != TaskType::Embedding {
@@ -10130,6 +10679,8 @@ fn reconcile_committed_embedding_tasks(
 fn hold_secret_embedding_tasks(
     task_store: &TaskStore,
     repo: &Repository,
+    ledger: &LedgerDb,
+    profile: &DeclaredEmbeddingProfile,
     held: &[EmbeddableChunk],
     now: &str,
 ) -> Result<()> {
@@ -10281,24 +10832,20 @@ fn hold_secret_embedding_tasks(
     // R22-2: demote an existing non-held task (Pending / Running / Failed / budget-Paused)
     // whose chunk is now classified secret. The hold takes precedence over budget and
     // network reasons (the same precedence `enqueue_online_placeholder_task` applies at
-    // creation). A demoted task's kept F8 reservation now buys nothing — its send is
-    // blocked by the hold — so reclaim it under the established error-kind policy
-    // (RateLimit/Quota/Auth are non-billable ⇒ reclaimable; a NetworkError stamp may have
-    // billed server-side, so it is conservatively retained: R16-7).
+    // creation). A demoted task's still-open ledger reservation now buys nothing — its
+    // send is blocked by the hold — so release it (settles `unknown_settled` at the
+    // reservation estimate if a row is still open, a no-op otherwise).
     if !to_demote.is_empty() {
         let reservation_scope_id = repo.scope_id_for_adapter();
-        let mut reclaims: Vec<MonthlyCostLedgerEntry> = Vec::new();
-        let cost_ledger = CostLedger::new(cost_ledger_path());
         for task in &all_tasks {
             if task.task_type == TaskType::Embedding && to_demote.contains_key(&task.output_ref) {
-                if let Some(entry) = settle_task_reservation(
-                    &cost_ledger,
-                    task,
+                let key = task_ledger_key(
                     &reservation_scope_id,
                     EMBEDDING_ADAPTER_KIND,
-                )? {
-                    reclaims.push(entry);
-                }
+                    &task.input_hash,
+                    &profile.profile_hash,
+                );
+                release_task_charge_if_open(ledger, &key)?;
             }
         }
         task_store
@@ -10319,14 +10866,6 @@ fn hold_secret_embedding_tasks(
                 true
             })
             .map_err(pipeline_to_kcs)?;
-        if !reclaims.is_empty() {
-            let reclaim_ledger = cost_ledger.reclaim_ledger();
-            for entry in &reclaims {
-                reclaim_ledger
-                    .append_monthly(entry)
-                    .map_err(pipeline_to_kcs)?;
-            }
-        }
     }
     Ok(())
 }
@@ -10680,13 +11219,12 @@ fn budget_status_json(repo: &Repository) -> Result<Value> {
         .map_err(pipeline_to_kcs)?;
     let now = now_utc_seconds();
     let month = utc_month(&now);
-    let ledger = CostLedger::new(cost_ledger_path());
+    let ledger = open_ledger_db()?;
     let scope_id = repo.scope_id_for_adapter();
-    // R18-3: report NET spend (charges − reclaimed phantoms), matching the enforcement
-    // gate `budget_remaining_for_adapter`. Reading gross here made `kcs status`
-    // over-report spend / under-report remaining after a reclaim.
-    let device_spent = net_monthly_spent(&ledger, &month, None, None)?;
-    let folder_spent = net_monthly_spent(&ledger, &month, Some(&scope_id), None)?;
+    let conn = ledger.connection();
+    let device_spent = ledger_month_total(conn, None, None, &month).map_err(pipeline_to_kcs)?;
+    let folder_spent =
+        ledger_month_total(conn, Some(&scope_id), None, &month).map_err(pipeline_to_kcs)?;
     let device_remaining = caps.device_monthly_usd_cap - device_spent;
     let folder_remaining = caps.folder_monthly_usd_cap.map(|cap| cap - folder_spent);
     let cap_kind = match folder_remaining {
@@ -10723,12 +11261,12 @@ fn scope_budget_warning(repo: &Repository) -> Result<Option<String>> {
     let caps = read_budget_policy(user_config_toml_path(), repo.kcs_dir().join("config.toml"))
         .map_err(pipeline_to_kcs)?;
     let month = utc_month(&now_utc_seconds());
-    let ledger = CostLedger::new(cost_ledger_path());
+    let ledger = open_ledger_db()?;
     let scope_id = repo.scope_id_for_adapter();
-    // R18-3: NET spend (charges − reclaimed), matching enforcement, so the warning
-    // does not fire on a reclaimed phantom.
-    let device_spent = net_monthly_spent(&ledger, &month, None, None)?;
-    let folder_spent = net_monthly_spent(&ledger, &month, Some(&scope_id), None)?;
+    let conn = ledger.connection();
+    let device_spent = ledger_month_total(conn, None, None, &month).map_err(pipeline_to_kcs)?;
+    let folder_spent =
+        ledger_month_total(conn, Some(&scope_id), None, &month).map_err(pipeline_to_kcs)?;
     Ok(budget_warning(&caps, device_spent, folder_spent))
 }
 
@@ -10838,17 +11376,6 @@ fn online_markdownize_profile_for(repo: &Repository) -> Result<AdapterProfile> {
     Ok(standard_online_markdownize_profile_with_bbox(
         bbox_annotation_enabled(repo)?,
     ))
-}
-
-fn adapter_kind_budget_key(kind: AdapterKind) -> &'static str {
-    match kind {
-        AdapterKind::Prepare => "prepare",
-        AdapterKind::Markdownize => "markdown",
-        AdapterKind::Embedding => "embedding",
-        AdapterKind::Summary => "summary",
-        AdapterKind::Classification => "classification",
-        AdapterKind::Rerank => "rerank",
-    }
 }
 
 fn active_markdown_adapter(_repo: &Repository) -> Box<dyn MarkdownizeAdapter> {
@@ -11011,25 +11538,25 @@ fn run_index_pipeline(
     let markdown_profile = markdown_adapter.profile();
     let markdown_profile_hash = markdown_profile.tool_profile_hash.clone();
     let network_allowed = network_allowed(repo, args)?;
-    let cost_ledger = CostLedger::new(cost_ledger_path());
+    let ledger = open_ledger_db()?;
     let budget_caps =
         read_budget_policy(user_config_toml_path(), repo.kcs_dir().join("config.toml"))
             .map_err(pipeline_to_kcs)?;
-    let month = utc_month(&now);
 
-    // R18-2: reclaim phantoms of DELETED / renamed files. R17-3's enqueue supersede
-    // reclaims a stale RateLimit/Quota phantom only when the SAME path is re-scanned
+    // R18-2: release the ledger reservation of DELETED / renamed files' orphaned
+    // tasks. R17-3's enqueue supersede (`enqueue_online_placeholder_task`) releases
+    // a stale task's reservation only when the SAME path is re-scanned
     // (`task.input_path == candidate.input_path`); a DELETED or renamed file never
-    // reappears as a scan candidate, so its Failed(rate_limit/quota) phantom would eat the
-    // per-adapter markdown cap for the rest of the month and falsely pause unrelated tasks
-    // (the same harm R17-3 fixed, surviving on the delete path). With the full live-
-    // candidate set in hand, retire + reclaim any retryable Failed online markdownize task
-    // whose input_path is no longer a live candidate. Runs before the enqueue loop so the
-    // freed cap is available to this index's tasks.
+    // reappears as a scan candidate, so its Failed task's still-open ledger row
+    // would eat the per-adapter markdownize cap for the rest of the month and
+    // falsely pause unrelated tasks (the same harm R17-3 fixed, surviving on the
+    // delete path). With the full live-candidate set in hand, retire + release any
+    // retryable Failed online markdownize task whose input_path is no longer a
+    // live candidate. Runs before the enqueue loop so the freed cap is available to
+    // this index's tasks.
     {
         let online_profile = online_markdownize_profile_for(repo)?;
         let placeholder_output_ref = online_output_ref(&online_profile.adapter_id);
-        let markdown_adapter_kind = adapter_kind_budget_key(online_profile.adapter_kind);
         let reservation_scope_id = repo.scope_id_for_adapter();
         let live_paths: BTreeSet<&str> = preview
             .candidates
@@ -11037,7 +11564,6 @@ fn run_index_pipeline(
             .filter(|candidate| !candidate.ignored && candidate.media_type != "inode/directory")
             .map(|candidate| candidate.input_path.as_str())
             .collect();
-        let mut orphan_reclaims: Vec<MonthlyCostLedgerEntry> = Vec::new();
         let mut orphan_ids = BTreeSet::new();
         for task in task_store.all().map_err(pipeline_to_kcs)? {
             let orphaned = task.task_type == TaskType::Markdownize
@@ -11052,14 +11578,13 @@ fn run_index_pipeline(
             if !orphaned {
                 continue;
             }
-            if let Some(entry) = settle_task_reservation(
-                &cost_ledger,
-                &task,
+            let key = task_ledger_key(
                 &reservation_scope_id,
-                markdown_adapter_kind,
-            )? {
-                orphan_reclaims.push(entry);
-            }
+                "markdownize",
+                &task.input_hash,
+                &online_profile.tool_profile_hash,
+            );
+            release_task_charge_if_open(&ledger, &key)?;
             orphan_ids.insert(task.task_id);
         }
         task_store
@@ -11071,14 +11596,6 @@ fn run_index_pipeline(
                 true
             })
             .map_err(pipeline_to_kcs)?;
-        if !orphan_reclaims.is_empty() {
-            let reclaim_ledger = cost_ledger.reclaim_ledger();
-            for entry in &orphan_reclaims {
-                reclaim_ledger
-                    .append_monthly(entry)
-                    .map_err(pipeline_to_kcs)?;
-            }
-        }
     }
 
     let mut result = IndexPipelineResult {
@@ -11240,9 +11757,8 @@ fn run_index_pipeline(
                     args,
                     &now,
                     &mut result,
-                    &cost_ledger,
+                    &ledger,
                     &budget_caps,
-                    &month,
                 )?;
             } else {
                 // R22-4: the R21-4 skip left NO trace — no task, no counter, no event — so a
@@ -11328,9 +11844,8 @@ fn run_index_pipeline(
                     args,
                     &now,
                     &mut result,
-                    &cost_ledger,
+                    &ledger,
                     &budget_caps,
-                    &month,
                 )?;
             }
             continue;
@@ -11561,20 +12076,20 @@ fn run_index_pipeline(
             },
         );
         result.normalized_files += 1;
-        cost_ledger
-            .append_monthly(&MonthlyCostLedgerEntry {
-                month: month.clone(),
-                scope_id: scope_id.clone(),
-                adapter_kind: "deterministic_baseline".to_owned(),
-                // F1 (04 §5.4): local deterministic markdownize is recorded at unit
-                // price 0, so free local indexing never consumes the device/folder
-                // USD cap. `device_spent = monthly_total(None)` sums every
-                // adapter_kind, so a non-zero baseline cost here would silently pause
-                // paid enrichment and inflate `status.budget.device_spent`. The row is
-                // still appended (provenance of the baseline work), just at usd = 0.
-                usd: 0.0,
-            })
-            .map_err(pipeline_to_kcs)?;
+        // F1 (04 §5.4): local deterministic markdownize is recorded at unit price 0,
+        // so free local indexing never consumes the device/folder USD cap — a
+        // provenance-only ledger record (CL58's `candidate_usd == 0` cap-judgement
+        // exemption). A non-zero baseline cost here would silently pause paid
+        // enrichment and inflate `status.budget.device_spent`.
+        record_free_local_charge(
+            &ledger,
+            &task_ledger_key(
+                &scope_id,
+                "deterministic_baseline",
+                &raw_hash,
+                &markdown_profile_hash,
+            ),
+        )?;
         // R21-4: only a real text-layer PDF warrants an online OCR "enhancement" task after
         // a successful local markdownize. A TEXT file folded to `application/octet-stream`
         // (`.yaml`/`.json`/`Dockerfile`/uppercase-extension text-native) is fully handled
@@ -11592,9 +12107,8 @@ fn run_index_pipeline(
                 args,
                 &now,
                 &mut result,
-                &cost_ledger,
+                &ledger,
                 &budget_caps,
-                &month,
             )?;
         }
     }
@@ -12255,82 +12769,268 @@ fn manifest_from_units(
 /// to InvalidInput), so it is never re-driven and never counts as pending work.
 const RETIRED_NON_LIVE: &str = "retired_non_live";
 
-/// R17-3/R18-1/R18-2: retire a stale-or-orphaned online adapter `task` (markdownize OR
-/// embedding) to a non-retryable `retired_non_live` failure, and — if its kept F8
-/// reservation was a NON-billable (RateLimit/Quota) phantom with an exact stamp — return
-/// the reclaim entry for the sibling reclaim ledger (the caller appends it AFTER this
-/// retirement is durable, so a crash between can only leave the phantom conservatively in
-/// place). A NetworkError reservation is deliberately NOT reclaimed (it may have billed
-/// server-side; keeping it is the cap-safe invariant R16-7 maintains, guarding the R15-5
-/// silent-cap-bypass). The stamp is cleared on EVERY retirement so a task can never be
-/// reclaimed twice. Shared by the markdownize same-path enqueue supersede (R17-3), the
-/// deleted/renamed-path index sweep (R18-2), the batch-retry precondition retirement
-/// (R18-2), and the embedding non-live reclaim in `reconcile_committed_embedding_tasks`
-/// (R18-1) — so a phantom is reclaimed at whichever retirement fires first. MUST run
-/// BEFORE `fallback_reason` is overwritten to `invalid_input` — the reclaim decision
-/// reads the still-intact failure kind (`batch retry` preserves `fallback_reason` across
-/// the Failed->Pending flip). `markdown_adapter_kind` is the adapter's ledger key
-/// (`"markdown"` or `EMBEDDING_ADAPTER_KIND`), so the reclaim nets the correct cap.
-/// R19-4: compute the reclaim ledger entry for a task's F8 reservation WITHOUT mutating
-/// the task. A NON-billable (RateLimit/Quota/Auth) reservation with an exact stamp is
-/// reclaimable; NetworkError (may have billed server-side) and all other kinds are not.
-/// R20-3: AuthError (401/403) is refused at the auth layer BEFORE the backend processes
-/// or bills the request — even earlier than a 429 RateLimit — so its F8 phantom is
-/// non-billable exactly like RateLimit/Quota and must be reclaimed when the task goes
-/// non-live; the reclaim series (R16-7→R19-2) had never included it, so an auth phantom
-/// ate the per-adapter cap for the month. NetworkError stays out (it may have billed).
-/// Shared by `retire_online_task_reclaiming` (which then retires the task) and the
-/// embedding live-embedded convergence (which then completes the task as Done).
-fn settle_task_reservation(
-    cost_ledger: &CostLedger,
-    task: &TaskDescriptor,
-    reservation_scope_id: &str,
-    adapter_kind: &str,
-) -> Result<Option<MonthlyCostLedgerEntry>> {
-    let Some(claim) = task.reservation_claim() else {
-        return Ok(None);
-    };
-    let ledger = cost_ledger.reservation_ledger();
-    if matches!(
-        retry_kind_from_reason(task.fallback_reason.as_deref()),
-        RetryErrorKind::RateLimit | RetryErrorKind::QuotaExceeded | RetryErrorKind::AuthError
-    ) {
-        if let Some(entry) = ledger
-            .consume(claim, reservation_scope_id, adapter_kind)
-            .map_err(pipeline_to_kcs)?
-        {
-            return Ok(Some(entry));
-        }
-    }
-    // Active reservations represent successful or billing-ambiguous attempts and
-    // can never authorize credit. Unknown/copied claims simply produce `false`.
-    ledger
-        .close(claim, reservation_scope_id, adapter_kind)
-        .map_err(pipeline_to_kcs)?;
-    Ok(None)
+// ---------------------------------------------------------------------------
+// cost-ledger.sqlite task-charge helpers (04-pipeline.md §5.4's sync degenerate
+// 2-phase — CL41-47/CL56-61 in tasks/step4b-contract-tests-ledger.md). Replaces
+// the retired JSONL `budget::CostLedger`/`ReservationLedger` F8 reservation flow
+// (2026-07-21) — see the implementation report for the behavior changes this
+// entails (a "markdownize"/"embedding" TASK's online adapter call is now itself
+// one `batch_requests` sync row per §G, instead of a JSONL charge plus a
+// side-channel reservation-lifecycle ledger).
+// ---------------------------------------------------------------------------
+
+/// Effective `timeout_seconds` this session applies to a markdownize/embedding
+/// TASK sync row's `stale_after_at` (CL49's formula, 07-adapter-spec.md §7's
+/// documented `[adapter.policy]` default). This implementation's device
+/// query-embedding row (§H, `compute_query_embedding`) resolves the effective
+/// timeout per §M note-2's config-layer rule; TASK rows use this fixed default
+/// instead — the same "conservative fixed constant, not a live adapter-config
+/// re-read" posture `estimate_online_markdownize_cost`/`estimate_embedding_cost`
+/// already use for the *amount* side of the charge. Flagged in the
+/// implementation report as unfinished per-scope timeout resolution for task rows.
+const TASK_SYNC_EFFECTIVE_TIMEOUT_SECONDS: i64 = 300;
+
+/// One markdownize/embedding TASK's `cost-ledger.sqlite` row identity — every
+/// online adapter call this module drives (as opposed to the device
+/// query-embedding row, §H) is a `request_kind='sync'` row under this key (04
+/// §5.4 L768 / CL42). `adapter_kind` must be one of
+/// `kcs_pipeline::ledger::ops::PER_ADAPTER_KIND_ENUM` (CL61) — this module uses
+/// the literals `"markdownize"` / `EMBEDDING_ADAPTER_KIND` directly rather than
+/// the retired `adapter_kind_budget_key` helper, whose
+/// `AdapterKind::Markdownize => "markdown"` mapping was the retired JSONL
+/// ledger's key spelling (the unrelated tool-lock JSON schema hardcodes its own
+/// literal `"markdown"` key directly in `materialize_tool_lock` and never used
+/// that helper — CL61's "markdown"→"markdownize" rename is scoped to the
+/// budget/ledger namespace only).
+fn task_ledger_key(
+    scope_id: &str,
+    adapter_kind: &'static str,
+    input_hash: &str,
+    tool_profile_hash: &str,
+) -> LedgerTaskKey {
+    LedgerTaskKey::new(scope_id, adapter_kind, input_hash, tool_profile_hash)
 }
 
-fn transition_reservation_after_outcome(
-    cost_ledger: &CostLedger,
-    claim: TaskReservationClaim<'_>,
-    reservation_scope_id: &str,
-    adapter_kind: &str,
-    failure_kind: Option<RetryErrorKind>,
-) -> Result<()> {
-    let ledger = cost_ledger.reservation_ledger();
-    if matches!(
-        failure_kind,
-        Some(RetryErrorKind::RateLimit | RetryErrorKind::QuotaExceeded | RetryErrorKind::AuthError)
-    ) {
-        ledger
-            .mark_reclaimable(claim, reservation_scope_id, adapter_kind)
-            .map_err(pipeline_to_kcs)?;
-    } else {
-        ledger
-            .close(claim, reservation_scope_id, adapter_kind)
-            .map_err(pipeline_to_kcs)?;
+/// CL57's third condition / CL61: `[budget.per_adapter]`'s device-layer-only cap
+/// for `adapter_kind` (`caps.device_per_adapter`'s keys are already validated
+/// against the closed enum by `budget::read_budget_config`).
+fn per_adapter_cap_for(caps: &BudgetCaps, adapter_kind: &str) -> Option<f64> {
+    caps.device_per_adapter.get(adapter_kind).copied()
+}
+
+#[must_use]
+fn budget_cap_config(
+    caps: &BudgetCaps,
+    scope_id: &str,
+    adapter_kind: &'static str,
+) -> BudgetCapConfig {
+    let _ = scope_id; // folder cap is scope-independent in shape (CL56); kept for call-site symmetry
+    BudgetCapConfig {
+        device_cap: caps.device_monthly_usd_cap,
+        folder_cap: caps.folder_monthly_usd_cap,
+        device_per_adapter_cap: per_adapter_cap_for(caps, adapter_kind),
     }
-    Ok(())
+}
+
+/// Outcome of [`reserve_or_reuse_task_charge`].
+enum TaskChargeOutcome {
+    /// A brand-new phase 1 (or the `candidate_usd == 0` exemption, CL58) landed.
+    Reserved {
+        intent_token: String,
+        estimated_usd: f64,
+    },
+    /// An earlier attempt's reservation is still open and covers this resend
+    /// (CL42/CL44) — the ledger was not touched.
+    Reused {
+        intent_token: String,
+        estimated_usd: f64,
+    },
+    /// The device/folder/per_adapter cap would be exceeded (CL56-58).
+    BudgetExceeded,
+}
+
+/// CL41-44/CL56-61: reserve (phase 1, check-then-reserve, atomic with the cap
+/// check) — or, if a live (non-terminal) row already exists for `key`, reuse its
+/// `intent_token` without any ledger write at all. This single check replaces the
+/// retired JSONL design's task-side `fallback_reason`-driven "RateLimit/
+/// QuotaExceeded resend reuses the prior reservation" special case (formerly
+/// R16-7): under the SQLite ledger, a non-terminal row IS the live reservation —
+/// `phase1_intent`'s own cleanup guard refuses a second phase 1 while one is open
+/// (04 §5.8 順序規範) — so "does an open row already exist for this task key" is
+/// the whole rule, independent of which retryable error kind left it open.
+///
+/// `bypass_cap_denial` folds together the two documented reasons a Denied cap
+/// check must still proceed to a real reservation (docs/04 §5.4):
+/// `kcs batch resume --override-budget` (applied "symmetrically" to
+/// markdownize/embedding — a one-shot, per-invocation override), and
+/// `[budget] hard_stop = false` (F5's persistent soft-stop config: "record the
+/// charge and continue over cap" instead of pausing). Both are applied HERE at
+/// the call site rather than inside `ops::check_then_reserve` itself: that
+/// function's own `BudgetCapConfig`/CL56-61 contract tests pin an
+/// unconditional check-then-reserve with no override or hard_stop parameter of
+/// its own (this session's read of `kcs_pipeline::ledger::ops`'s existing,
+/// already-contract-tested API surface — extending it is out of this item's
+/// scope, flagged in the report), so a Denied result under either bypass
+/// condition falls through to the same `phase1_intent` the Allowed/
+/// ExemptZeroCost arms use, skipping only the cap comparison — the
+/// reservation itself, and everything downstream of it (settlement,
+/// `intent_token`, `stale_after_at`), is unchanged.
+fn reserve_or_reuse_task_charge(
+    ledger: &LedgerDb,
+    key: &LedgerTaskKey,
+    candidate_usd: f64,
+    caps: &BudgetCapConfig,
+    bypass_cap_denial: bool,
+) -> Result<TaskChargeOutcome> {
+    with_immediate_transaction(ledger.connection(), || {
+        if let Some(existing) = get_batch_request(ledger.connection(), key)? {
+            if existing.state.is_inflight() {
+                let intent_token = existing
+                    .intent_token
+                    .clone()
+                    .expect("an in-flight batch_requests row always carries an intent_token");
+                return Ok(TaskChargeOutcome::Reused {
+                    intent_token,
+                    estimated_usd: existing.estimated_usd,
+                });
+            }
+        }
+        let result = check_then_reserve(
+            ledger.connection(),
+            key,
+            candidate_usd,
+            caps,
+            RequestKind::Sync,
+            Some(TASK_SYNC_EFFECTIVE_TIMEOUT_SECONDS),
+        )?;
+        Ok(match result {
+            CapCheckResult::Allowed(outcome) | CapCheckResult::ExemptZeroCost(outcome) => {
+                TaskChargeOutcome::Reserved {
+                    intent_token: outcome.intent_token,
+                    estimated_usd: candidate_usd,
+                }
+            }
+            CapCheckResult::Denied(_layer) if bypass_cap_denial => {
+                let outcome = phase1_intent(
+                    ledger.connection(),
+                    key,
+                    RequestKind::Sync,
+                    candidate_usd,
+                    Some(TASK_SYNC_EFFECTIVE_TIMEOUT_SECONDS),
+                )?;
+                TaskChargeOutcome::Reserved {
+                    intent_token: outcome.intent_token,
+                    estimated_usd: candidate_usd,
+                }
+            }
+            CapCheckResult::Denied(_layer) => TaskChargeOutcome::BudgetExceeded,
+        })
+    })
+    .map_err(pipeline_to_kcs)
+}
+
+/// CL18/CL26/CL47: settle a task's sync row as a successful terminal charge,
+/// billed at `billed_usd` — this codebase's Adapters never report real
+/// provider-confirmed usage/billable_units (07-adapter-spec.md's Batch trait
+/// does not exist here yet — confirmed by grep, `ledger::ops`'s own module doc),
+/// so every charge this module records is `estimated=1` (the reservation
+/// estimate), never a provider-confirmed value. `intent_token` clears in the
+/// same Tx — sync rows always clear immediately on ANY terminal Tx, unlike batch
+/// rows (CL47).
+fn settle_task_charge_success(
+    ledger: &LedgerDb,
+    key: &LedgerTaskKey,
+    intent_token: &str,
+    billed_usd: f64,
+) -> Result<()> {
+    terminal_transaction(
+        ledger.connection(),
+        &TerminalWrite {
+            key,
+            outcome: Outcome::Succeeded,
+            billed: BilledAmount {
+                usd: billed_usd,
+                estimated: true,
+            },
+            // DDL's 3-way `batch_job_id` rule (04 §5.4): a sync call with no
+            // provider request id falls back to the attempt's own intent_token.
+            ledger_batch_job_id: intent_token,
+            next_state: BatchState::Completed,
+            error: None,
+            increment_contract_violation: false,
+            attempts_delta: 1,
+            clear_intent_token: true,
+            intent_token_guard: None,
+            reseat_submission_seq: false,
+        },
+    )
+    .map_err(pipeline_to_kcs)
+    .map(|_| ())
+}
+
+/// CL45's "cannot confirm the outcome" settlement (`outcome='unknown_settled'`,
+/// billed at the conservative reservation estimate — "over-count safer than
+/// under-count"). Used both for a task's definitively-failed send (retry budget
+/// exhausted, or a non-retryable error kind) and for releasing a task's charge
+/// without ever resending (superseded by an edit, deleted, purged, demoted to a
+/// secrets hold, …). This codebase's Adapters have no post-hoc result-query
+/// capability at all (CL45: an Adapter without one "常に...unknown 精算になる"),
+/// so `unknown_settled` is this module's uniform non-success terminal outcome —
+/// see the implementation report for how this differs from the retired JSONL
+/// design's surgical reclaim-to-zero of specifically-non-billable error kinds
+/// (RateLimit/QuotaExceeded/AuthError): every other terminal outcome in the
+/// closed 8-value enum (CL26) either requires data this module never has
+/// (`contract_violation`/`purged`/`submit_rejected`/`fallback_to_full` all
+/// presuppose an Adapter-reported structured signal this sync integration does
+/// not produce) or is a distinct CLI-driven action (`abandoned`, CL64).
+fn settle_task_charge_unknown(
+    ledger: &LedgerDb,
+    key: &LedgerTaskKey,
+    intent_token: &str,
+    estimated_usd: f64,
+) -> Result<()> {
+    recovery_settle_unknown(ledger.connection(), key, intent_token, estimated_usd, true)
+        .map_err(pipeline_to_kcs)
+        .map(|_| ())
+}
+
+/// If a live (non-terminal) sync row exists for `key`, settle it unknown
+/// (`settle_task_charge_unknown`). A no-op returning `false` when no such row
+/// exists (already terminal-and-cleaned, or never reserved) — idempotent,
+/// mirroring CL66's "target-less op is a success" posture. Used by every
+/// "release this task's charge without resending" call site (supersede,
+/// purge-adjacent demotes, auth-revive, non-live retirement, …) that the retired
+/// JSONL design drove through `settle_task_reservation`.
+fn release_task_charge_if_open(ledger: &LedgerDb, key: &LedgerTaskKey) -> Result<bool> {
+    let Some(row) = get_batch_request(ledger.connection(), key).map_err(pipeline_to_kcs)? else {
+        return Ok(false);
+    };
+    if !row.state.is_inflight() {
+        return Ok(false);
+    }
+    let Some(intent_token) = row.intent_token.clone() else {
+        return Ok(false);
+    };
+    settle_task_charge_unknown(ledger, key, &intent_token, row.estimated_usd)?;
+    Ok(true)
+}
+
+/// F1/CL42/CL58: a $0 provenance record for free local deterministic work (04
+/// §5.4: "ローカル LLM 利用時は単価 0 として記録"). `candidate_usd == 0.0` bypasses
+/// the cap judgement entirely (`check_then_reserve`'s `ExemptZeroCost` path via
+/// `reserve_or_reuse_task_charge`), so this always succeeds and never pauses.
+fn record_free_local_charge(ledger: &LedgerDb, key: &LedgerTaskKey) -> Result<()> {
+    let outcome = with_immediate_transaction(ledger.connection(), || {
+        phase1_intent(
+            ledger.connection(),
+            key,
+            RequestKind::Sync,
+            0.0,
+            Some(TASK_SYNC_EFFECTIVE_TIMEOUT_SECONDS),
+        )
+    })
+    .map_err(pipeline_to_kcs)?;
+    settle_task_charge_success(ledger, key, &outcome.intent_token, 0.0)
 }
 
 fn retire_online_task(task: &mut TaskDescriptor) {
@@ -12353,9 +13053,8 @@ fn enqueue_online_placeholder_task(
     args: &IndexArgs,
     created_at: &str,
     result: &mut IndexPipelineResult,
-    cost_ledger: &CostLedger,
+    ledger: &LedgerDb,
     budget_caps: &BudgetCaps,
-    month: &str,
 ) -> Result<()> {
     // R9-2: text-native files (Markdown / plain text / code) are fully handled by
     // the deterministic Adapter (07 §2.1) and must never enqueue an online OCR task
@@ -12371,38 +13070,27 @@ fn enqueue_online_placeholder_task(
     // R15-2: supersede any stale online markdownize task for THIS path whose
     // `input_hash` differs from the current content. The file was edited after that
     // task was enqueued, so it is stale: `batch resume` would R14-2-supersede a
-    // Pending/Paused one at send time (adapter never called) but only AFTER the F8
-    // pre-send charge already landed (the phantom charge), and left unretired these
-    // stale tasks accumulate and eat the per-adapter markdownize cap, falsely pausing
-    // the current (valid) task. Retire them here (non-retryable `invalid_input`; the
-    // state machine has no "superseded" state and the recovery is this fresh re-index,
-    // not a retry). Runs before the idempotency check so it fires even when a same-hash
-    // task also exists.
+    // Pending/Paused one at send time (adapter never called) but only AFTER the
+    // pre-send reservation already landed, and left unretired these stale tasks
+    // accumulate and eat the per-adapter markdownize cap, falsely pausing the
+    // current (valid) task. Retire them here (non-retryable `invalid_input`; the
+    // state machine has no "superseded" state and the recovery is this fresh
+    // re-index, not a retry). Runs before the idempotency check so it fires even
+    // when a same-hash task also exists.
     //
-    // R17-3: extend the retirement to a RETRYABLE `Failed` task (gated by
-    // `task_retry_allowed`, so a permanently-failed task is left alone). A task that
-    // FAILED RateLimit/Quota already sent and KEPT its F8 reservation, which R16-7
-    // established is a phantom (those errors are refused before the backend bills). The
-    // original R15-2 retired only Pending/Paused, so this Failed(rate_limit) phantom
-    // lingered after an edit and budget-paused the new task (R15-2 × R16-7 confluence).
-    // When we retire such a task we also RECLAIM its phantom: a NON-billable
-    // (RateLimit/Quota) reservation is canceled by appending its exact stamped
-    // (usd, month) to the sibling reclaim ledger — F3-compatible (no negative row in
-    // the charge ledger; the positive reclaim is netted out in
-    // `budget_remaining_for_adapter`). NetworkError reservations are deliberately NOT
-    // reclaimed: a NetworkError send may have been billed server-side, so keeping the
-    // reservation preserves the cap-safe invariant (guarding the R15-5 silent-cap-
-    // bypass, the opposite failure) — the same asymmetry R16-7's re-reservation gate
-    // maintains. The reclaim is recorded AFTER the retirement is durably written (the
-    // flip clears the stamp and makes the task non-retryable, so it can never match
-    // again): if the reclaim-append then fails we leave the phantom conservatively in
-    // place rather than risk double-reclaiming.
-    let markdown_adapter_kind = adapter_kind_budget_key(online_profile.adapter_kind);
-    // Reclaim under the SAME scope_id source the batch send path reserves with
-    // (`repo.scope_id_for_adapter()`), so the reclaim cancels the phantom at the
+    // R17-3 (still applicable under the SQLite ledger): extend the retirement to a
+    // RETRYABLE `Failed` task (gated by `task_retry_allowed`, so a
+    // permanently-failed task is left alone) — a Failed(rate_limit/…) task keeps
+    // its ledger row open across retries (`reserve_or_reuse_task_charge`'s reuse
+    // path), so it must be explicitly released here or the stale row lingers,
+    // eating the per-adapter markdownize cap. Released via
+    // `release_task_charge_if_open` (settles `unknown_settled` at the reservation
+    // estimate if a row is still open; a no-op otherwise) — under the same
+    // `reservation_scope_id` the send path reserves with
+    // (`repo.scope_id_for_adapter()`), so the release nets out at the
     // folder-scoped totals too, not just the device total.
+    let markdownize_adapter_kind = "markdownize";
     let reservation_scope_id = repo.scope_id_for_adapter();
-    let mut reclaims: Vec<MonthlyCostLedgerEntry> = Vec::new();
     let mut stale_ids = BTreeSet::new();
     for task in task_store.all().map_err(pipeline_to_kcs)? {
         let stale = task.task_type == TaskType::Markdownize
@@ -12415,14 +13103,13 @@ fn enqueue_online_placeholder_task(
         if !stale {
             continue;
         }
-        if let Some(entry) = settle_task_reservation(
-            cost_ledger,
-            &task,
+        let key = task_ledger_key(
             &reservation_scope_id,
-            markdown_adapter_kind,
-        )? {
-            reclaims.push(entry);
-        }
+            markdownize_adapter_kind,
+            &task.input_hash,
+            &online_profile.tool_profile_hash,
+        );
+        release_task_charge_if_open(ledger, &key)?;
         stale_ids.insert(task.task_id);
     }
     task_store
@@ -12434,18 +13121,6 @@ fn enqueue_online_placeholder_task(
             true
         })
         .map_err(pipeline_to_kcs)?;
-    // Record the reclaims positively in the sibling reclaim ledger AFTER the durable
-    // retirement above. F3-safe: the charge ledger is never given a negative row; each
-    // reclaim row is positive and is subtracted in `budget_remaining_for_adapter`,
-    // clamped at 0 there.
-    if !reclaims.is_empty() {
-        let reclaim_ledger = cost_ledger.reclaim_ledger();
-        for entry in &reclaims {
-            reclaim_ledger
-                .append_monthly(entry)
-                .map_err(pipeline_to_kcs)?;
-        }
-    }
     // Idempotency (Step2c I1, 04 §5.5): never enqueue a second online task for an
     // identity `(input_path, input_hash)` that already has an online task in any
     // live lifecycle state. Without the completed-state check, every unchanged
@@ -12511,13 +13186,8 @@ fn enqueue_online_placeholder_task(
         ),
         adapter_id: Some(online_profile.adapter_id.clone()),
     };
-    let (device_remaining, folder_remaining) = budget_remaining_for_adapter(
-        cost_ledger,
-        budget_caps,
-        month,
-        scope_id,
-        adapter_kind_budget_key(online_profile.adapter_kind),
-    )?;
+    let (device_remaining, folder_remaining) =
+        budget_remaining_for_adapter(ledger, budget_caps, scope_id, markdownize_adapter_kind)?;
     let budget = evaluate_budget_with_caps(
         &estimate,
         device_remaining,
@@ -12572,61 +13242,34 @@ fn matches_batch_override(_args: &IndexArgs) -> bool {
     false
 }
 
-/// R17-3/R18-3: this month's NET spend for the `(scope, adapter)` filter — gross
-/// charges minus the R17-3 reclaimed phantoms recorded in the sibling reclaim ledger,
-/// clamped at 0. The single source of truth shared by the enforcement gate
-/// (`budget_remaining_for_adapter`) and the status/warning reports
-/// (`budget_status_json` / `scope_budget_warning`), so a reclaimed phantom stops eating
-/// the cap in BOTH the enforced remaining and the displayed spend. `.max(0.0)` is pure
-/// defense against a corrupt reclaim ledger — in correct operation reclaimed never
-/// exceeds the phantom charges it cancels, so `net >= real spend` holds (never
-/// fail-open). `None` scope/adapter means "device-wide / all adapters".
-fn net_monthly_spent(
-    cost_ledger: &CostLedger,
-    month: &str,
-    scope_id: Option<&str>,
-    adapter_kind: Option<&str>,
-) -> Result<f64> {
-    let gross = cost_ledger
-        .monthly_total_for_adapter(month, scope_id, adapter_kind)
-        .map_err(pipeline_to_kcs)?;
-    let reclaimed = cost_ledger
-        .reclaim_ledger()
-        .monthly_total_for_adapter(month, scope_id, adapter_kind)
-        .map_err(pipeline_to_kcs)?;
-    let net = gross - reclaimed;
-    // R20-11: `reclaimed > gross` is impossible in normal operation — every reclaim row
-    // corresponds to a kept charge, and stamps are cleared on retirement so a reservation
-    // is reclaimed at most once. A meaningfully-negative net therefore signals an anomaly
-    // (reclaim-ledger corruption, or an over-reclaim bug like R20-2's duplicate-output_ref
-    // double-reclaim). The old `.max(0.0)` clamp fail-OPENED the cap (net=0 → the full cap
-    // reads as available); fail CLOSED instead by ignoring the untrustworthy reclaim credit
-    // and charging the honest gross — the same fail-closed posture F1/F3 gave the charge
-    // ledger. The −1e-9 threshold is far below a single (~1e-6) charge yet far above f64
-    // summation noise, so only a real over-reclaim (>= one charge) trips it.
-    if net < -1e-9 {
-        return Ok(gross.max(0.0));
-    }
-    Ok(net.max(0.0))
-}
-
+/// This month's remaining `(device, folder)` budget for the `(scope, adapter)`
+/// filter, shared by the enqueue-time pre-check
+/// (`enqueue_online_placeholder_task`/`enqueue_embedding_tasks`'s siblings), the
+/// send-time check-then-reserve (`reserve_or_reuse_task_charge`, which
+/// independently re-checks atomically inside its own `BEGIN IMMEDIATE` Tx — this
+/// function is for the READ-ONLY enqueue-time estimate, not a substitute for
+/// that atomicity), and the status/warning reports (`budget_status_json` /
+/// `scope_budget_warning`). `ledger_month_total` (CL59) already sums confirmed
+/// `cost_ledger` charges plus unterminated `batch_requests` reservations — the
+/// retired JSONL design's separate reclaim-ledger netting
+/// (`net_monthly_spent`/R17-3/R18-3) has no equivalent here: this ledger never
+/// records a charge until a definitive terminal Tx, so there is nothing to
+/// reclaim after the fact (see the implementation report).
 fn budget_remaining_for_adapter(
-    cost_ledger: &CostLedger,
+    ledger: &LedgerDb,
     budget_caps: &BudgetCaps,
-    month: &str,
     scope_id: &str,
     adapter_kind: &str,
 ) -> Result<(f64, Option<f64>)> {
-    // R17-3/R18-3: spend is NET of reclaimed phantoms (gross charges − reclaim ledger,
-    // clamped), computed by the shared `net_monthly_spent` helper so this enforcement
-    // gate and the status/warning REPORTS (`budget_status_json`/`scope_budget_warning`)
-    // use one identical netting — before R18-3 only enforcement netted, so `kcs status`
-    // over-reported spend after a reclaim.
-    let device_spent = net_monthly_spent(cost_ledger, month, None, None)?;
-    let folder_spent = net_monthly_spent(cost_ledger, month, Some(scope_id), None)?;
-    let device_adapter_spent = net_monthly_spent(cost_ledger, month, None, Some(adapter_kind))?;
-    let folder_adapter_spent =
-        net_monthly_spent(cost_ledger, month, Some(scope_id), Some(adapter_kind))?;
+    let month = utc_month(&now_utc_seconds());
+    let conn = ledger.connection();
+    let device_spent = ledger_month_total(conn, None, None, &month).map_err(pipeline_to_kcs)?;
+    let folder_spent =
+        ledger_month_total(conn, Some(scope_id), None, &month).map_err(pipeline_to_kcs)?;
+    let device_adapter_spent =
+        ledger_month_total(conn, None, Some(adapter_kind), &month).map_err(pipeline_to_kcs)?;
+    let folder_adapter_spent = ledger_month_total(conn, Some(scope_id), Some(adapter_kind), &month)
+        .map_err(pipeline_to_kcs)?;
     let mut device_remaining = budget_caps.device_monthly_usd_cap - device_spent;
     if let Some(adapter_cap) = budget_caps.device_per_adapter.get(adapter_kind) {
         device_remaining = device_remaining.min(adapter_cap - device_adapter_spent);
@@ -12643,115 +13286,6 @@ fn budget_remaining_for_adapter(
         );
     }
     Ok((device_remaining, folder_remaining))
-}
-
-/// Result of an atomic (device-globally-serialized) cost-ledger charge attempt.
-#[derive(Debug)]
-enum ChargeOutcome {
-    /// The estimate fit the cap under the lock and was appended (reserved).
-    Charged,
-    /// The re-read under the lock showed the cap would be exceeded; nothing was
-    /// appended. The caller must not send.
-    BudgetExceeded,
-}
-
-struct CostChargeRequest<'a> {
-    month: &'a str,
-    adapter_kind: &'a str,
-    estimate: &'a BudgetEstimate,
-    override_budget: bool,
-    reservations: &'a [ReservationRecord],
-}
-
-/// F8: atomically reserve a charge against the device-global cost-ledger.
-///
-/// The ledger is device-global while `StoreLock` (`.kcs/.lock`) is scope-scoped,
-/// so before this the budget read-check and the append were not serialized across
-/// scopes: two concurrent `index` runs could each pass the cap check and both
-/// append, exceeding the monthly cap (TOCTOU). This takes a single device-global
-/// lock (`cost-ledger.lock`), RE-READS the ledger under it to re-evaluate the cap
-/// against any spend a concurrent scope just committed, and only then appends the
-/// estimate — so the reservation is visible to the next charger before its check.
-///
-/// The reservation is taken BEFORE the adapter call (which the caller issues only
-/// on `Charged`, OUTSIDE this lock) so the device is not serialized on network
-/// I/O. A send failure intentionally keeps the reservation: a hard safety cap must
-/// never be exceeded, and F3 forbids negative compensating entries. Lock
-/// contention surfaces as `KCS-E-STORE-LOCKED-001` (fail-closed), never an
-/// unrecorded charge.
-fn charge_cost_ledger_under_lock(
-    cost_ledger: &CostLedger,
-    lock_path: PathBuf,
-    budget_caps: &BudgetCaps,
-    request: CostChargeRequest<'_>,
-) -> Result<ChargeOutcome> {
-    // The reserved row is derived from the same `(month, estimate.scope_id,
-    // adapter_kind, estimate.estimated_usd)` used for the cap check, so the
-    // checked and appended `adapter_kind`/amount can never diverge.
-    let scope_id = request.estimate.scope_id.as_str();
-    let _ledger_lock = StoreLock::acquire_path(lock_path)?;
-    let (device_remaining, folder_remaining) = budget_remaining_for_adapter(
-        cost_ledger,
-        budget_caps,
-        request.month,
-        scope_id,
-        request.adapter_kind,
-    )?;
-    let budget = evaluate_budget_with_caps(
-        request.estimate,
-        device_remaining,
-        folder_remaining,
-        request.override_budget,
-    );
-    // F5: `hard_stop` (default true) pauses at the cap as before. `hard_stop=false`
-    // is a soft-stop: over cap we still append the real charge and continue, so the
-    // ledger reflects actual spend and `warn_at_percent` can surface it. The append
-    // stays inside the F8 lock region either way.
-    if !budget.allowed && budget_caps.hard_stop {
-        return Ok(ChargeOutcome::BudgetExceeded);
-    }
-    let mut reservation_ids = BTreeSet::new();
-    let mut task_ids = BTreeSet::new();
-    let mut reservation_total = 0.0_f64;
-    for reservation in request.reservations {
-        if reservation.month != request.month
-            || reservation.scope_id != scope_id
-            || reservation.adapter_kind != request.adapter_kind
-            || !reservation_ids.insert(reservation.reservation_id.as_str())
-            || !task_ids.insert(reservation.task_id.as_str())
-        {
-            return Err(KcsError::schema(
-                "cost reservation identity does not match the charged request",
-            ));
-        }
-        reservation_total += reservation.usd;
-    }
-    let tolerance = 1e-12_f64.max(request.estimate.estimated_usd.abs() * 1e-12);
-    if request.reservations.is_empty()
-        || !reservation_total.is_finite()
-        || (reservation_total - request.estimate.estimated_usd).abs() > tolerance
-    {
-        return Err(KcsError::schema(
-            "cost reservation total does not match the charged amount",
-        ));
-    }
-    // Issue reclaim authority before the charge row while the global cost lock is
-    // held. Newly issued reservations are Active and cannot produce credit; if the
-    // following charge append fails, the residue therefore fails closed.
-    cost_ledger
-        .reservation_ledger()
-        .issue_all(request.reservations)
-        .map_err(pipeline_to_kcs)?;
-    cost_ledger
-        .append_monthly(&MonthlyCostLedgerEntry {
-            month: request.month.to_owned(),
-            scope_id: scope_id.to_owned(),
-            adapter_kind: request.adapter_kind.to_owned(),
-            usd: request.estimate.estimated_usd,
-        })
-        .map_err(pipeline_to_kcs)?;
-    Ok(ChargeOutcome::Charged)
-    // `_ledger_lock` drops here, releasing the device-global lock.
 }
 
 fn materialize_tool_lock(repo: &Repository) -> Result<()> {
@@ -13596,18 +14130,6 @@ fn ensure_device_dirs_resolvable() -> Result<()> {
     Ok(())
 }
 
-fn cost_ledger_path() -> PathBuf {
-    data_home().join("kcs/cost-ledger.jsonl")
-}
-
-/// F8: the device-global lock guarding the cost-ledger budget read-check-append.
-/// The ledger is shared by every scope on the device, so its own `.kcs/.lock`
-/// (scope-scoped) cannot serialize two scopes charging concurrently. This single
-/// file lock does.
-fn cost_ledger_lock_path() -> PathBuf {
-    data_home().join("kcs/cost-ledger.lock")
-}
-
 /// Device-local HMAC key that signs search cursors (O1(b)). Stored at
 /// `$XDG_DATA_HOME/kcs/cursor-key` (0600), generated from the operating system's
 /// cryptographically secure random source on first use. Signing binds a cursor
@@ -14021,12 +14543,22 @@ mod tests {
             embedding_task_output_ref, hold_secret_embedding_tasks, release_secret_holds,
             EmbeddableChunk,
         };
+        use kcs_adapter::catalog::DeclaredEmbeddingProfile;
         use kcs_core::scope::Repository;
+        use kcs_pipeline::ledger::LedgerDb;
         use kcs_pipeline::task::{TaskDescriptor, TaskStatus, TaskStore, TaskType};
 
         let root = tempfile::tempdir().unwrap();
         let repo = Repository::init(root.path()).unwrap();
         let store = TaskStore::new(repo.kcs_dir());
+        let ledger = LedgerDb::open(root.path().join("cost-ledger.sqlite")).unwrap();
+        let profile = DeclaredEmbeddingProfile {
+            tool_id: "test_embedding".to_owned(),
+            dimensions: 768,
+            distance: "cosine".to_owned(),
+            modality: "multimodal".to_owned(),
+            profile_hash: format!("sha256:{}", "e".repeat(64)),
+        };
         let chunk_id = format!("sha256:{}", "a".repeat(64));
         let output_ref = embedding_task_output_ref(&chunk_id);
         store
@@ -14058,6 +14590,8 @@ mod tests {
         hold_secret_embedding_tasks(
             &store,
             &repo,
+            &ledger,
+            &profile,
             &[EmbeddableChunk {
                 chunk_id,
                 text: "secret".to_owned(),
@@ -14166,12 +14700,22 @@ mod tests {
     #[test]
     fn r23_secret_classification_preserves_retry_backoff_state() {
         use super::{embedding_task_output_ref, hold_secret_embedding_tasks, EmbeddableChunk};
+        use kcs_adapter::catalog::DeclaredEmbeddingProfile;
         use kcs_core::scope::Repository;
+        use kcs_pipeline::ledger::LedgerDb;
         use kcs_pipeline::task::{TaskDescriptor, TaskStatus, TaskStore, TaskType};
 
         let root = tempfile::tempdir().unwrap();
         let repo = Repository::init(root.path()).unwrap();
         let store = TaskStore::new(repo.kcs_dir());
+        let ledger = LedgerDb::open(root.path().join("cost-ledger.sqlite")).unwrap();
+        let profile = DeclaredEmbeddingProfile {
+            tool_id: "test_embedding".to_owned(),
+            dimensions: 768,
+            distance: "cosine".to_owned(),
+            modality: "multimodal".to_owned(),
+            profile_hash: format!("sha256:{}", "e".repeat(64)),
+        };
         let chunk_id = format!("sha256:{}", "e".repeat(64));
         let output_ref = embedding_task_output_ref(&chunk_id);
         store
@@ -14203,6 +14747,8 @@ mod tests {
         hold_secret_embedding_tasks(
             &store,
             &repo,
+            &ledger,
+            &profile,
             &[EmbeddableChunk {
                 chunk_id,
                 text: "retryable".to_owned(),
@@ -14877,29 +15423,21 @@ mod tests {
         assert_ne!(a, other, "different seeds must differ");
     }
 
-    // F8: two serial charges must re-read the ledger under the device-global lock,
-    // so the second sees the first's reservation and is denied when it would
-    // exceed the cap — the cap is never breached even without concurrency, and the
-    // ledger is not double-appended.
+    // CL56-58: two serial task charges must re-read the ledger inside their own
+    // `BEGIN IMMEDIATE` Tx (`reserve_or_reuse_task_charge`), so the second sees the
+    // first's reservation and is denied when it would exceed the cap — the cap is
+    // never breached even without concurrency, and nothing is double-reserved.
     #[test]
-    fn f8_charge_serializes_reread_and_enforces_cap() {
+    fn serial_task_charges_reread_and_enforce_the_cap() {
         use super::{
-            charge_cost_ledger_under_lock, BudgetCaps, BudgetEstimate, ChargeOutcome,
-            CostChargeRequest, CostLedger, ReservationRecord, TaskType,
-        };
-        let reservation = |id: &str, task_id: &str| ReservationRecord {
-            reservation_id: id.to_owned(),
-            task_id: task_id.to_owned(),
-            month: "2026-07".to_owned(),
-            scope_id: "scope".to_owned(),
-            adapter_kind: "embedding".to_owned(),
-            usd: 0.6,
+            budget_cap_config, reserve_or_reuse_task_charge, task_ledger_key, BudgetCaps,
+            TaskChargeOutcome,
         };
         use std::collections::BTreeMap;
 
         let tmp = tempfile::tempdir().unwrap();
-        let ledger = CostLedger::new(tmp.path().join("kcs/cost-ledger.jsonl"));
-        let lock_path = tmp.path().join("kcs/cost-ledger.lock");
+        let ledger =
+            kcs_pipeline::ledger::LedgerDb::open(tmp.path().join("cost-ledger.sqlite")).unwrap();
         let caps = BudgetCaps {
             device_monthly_usd_cap: 1.0,
             folder_monthly_usd_cap: None,
@@ -14908,155 +15446,53 @@ mod tests {
             hard_stop: true,
             warn_at_percent: 80,
         };
-        let estimate = BudgetEstimate {
-            scope_id: "scope".to_owned(),
-            task_type: TaskType::Embedding,
-            estimated_usd: 0.6,
-            adapter_id: Some("gemini".to_owned()),
-        };
+        let cap_config = budget_cap_config(&caps, "scope", "embedding");
 
-        // First charge: 0.6 <= 1.0 remaining → Charged and appended.
-        let first = charge_cost_ledger_under_lock(
-            &ledger,
-            lock_path.clone(),
-            &caps,
-            CostChargeRequest {
-                month: "2026-07",
-                adapter_kind: "embedding",
-                estimate: &estimate,
-                override_budget: false,
-                reservations: &[reservation("res_first", "task_first")],
-            },
-        )
-        .unwrap();
-        assert!(matches!(first, ChargeOutcome::Charged));
+        // First charge: 0.6 <= 1.0 remaining → Reserved.
+        let first_key = task_ledger_key("scope", "embedding", "sha256:first", "profile");
+        let first =
+            reserve_or_reuse_task_charge(&ledger, &first_key, 0.6, &cap_config, false).unwrap();
+        assert!(matches!(first, TaskChargeOutcome::Reserved { .. }));
 
-        // Second charge re-reads under the lock: spent=0.6, remaining=0.4 < 0.6 →
-        // BudgetExceeded, nothing appended (serial charges cannot exceed the cap).
-        let second = charge_cost_ledger_under_lock(
-            &ledger,
-            lock_path.clone(),
-            &caps,
-            CostChargeRequest {
-                month: "2026-07",
-                adapter_kind: "embedding",
-                estimate: &estimate,
-                override_budget: false,
-                reservations: &[reservation("res_second", "task_second")],
-            },
-        )
-        .unwrap();
-        assert!(matches!(second, ChargeOutcome::BudgetExceeded));
-        assert_eq!(ledger.monthly_total("2026-07", None).unwrap(), 0.6);
+        // Second charge re-reads inside its own Tx: spent=0.6, remaining=0.4 < 0.6 →
+        // BudgetExceeded (serial charges cannot exceed the cap even without
+        // concurrent writers).
+        let second_key = task_ledger_key("scope", "embedding", "sha256:second", "profile");
+        let second =
+            reserve_or_reuse_task_charge(&ledger, &second_key, 0.6, &cap_config, false).unwrap();
+        assert!(matches!(second, TaskChargeOutcome::BudgetExceeded));
+
+        // `override_budget` bypasses the same denial (docs/04 §5.4 `kcs batch resume
+        // --override-budget`).
+        let overridden =
+            reserve_or_reuse_task_charge(&ledger, &second_key, 0.6, &cap_config, true).unwrap();
+        assert!(matches!(overridden, TaskChargeOutcome::Reserved { .. }));
     }
 
     #[test]
-    fn reservation_ledger_lock_preserves_retryable_cli_error_contract() {
+    fn store_lock_preserves_retryable_cli_error_contract() {
         use super::{pipeline_to_kcs, ExitCode};
 
         let err = pipeline_to_kcs(kcs_pipeline::PipelineError::locked(
-            "/tmp/cost-ledger-reservations.jsonl.lock",
+            "/tmp/example-device-lock.lock",
         ));
         assert_eq!(err.error_code(), "KCS-E-STORE-LOCKED-001");
         assert_eq!(err.exit_code(), ExitCode::PartialFailure);
     }
 
-    // F8: the charge path is gated by the device-global ledger lock. A held lock
-    // (here an existing lock file) makes the charge fail-closed (STORE-LOCKED)
-    // rather than appending while another charger holds the ledger.
+    // `release_task_charge_if_open` (the retired JSONL design's
+    // `settle_task_reservation` twin) must be a safe, idempotent no-op when no
+    // ledger row exists for the key at all — a forged/stale task-side stamp (or
+    // simply a task that was never charged) can never manufacture a settlement.
     #[test]
-    fn f8_charge_is_gated_by_the_device_global_lock() {
-        use super::{
-            charge_cost_ledger_under_lock, BudgetCaps, BudgetEstimate, CostChargeRequest,
-            CostLedger, ReservationRecord, TaskType,
-        };
-        use std::collections::BTreeMap;
+    fn release_task_charge_if_open_is_a_no_op_without_a_matching_row() {
+        use super::{release_task_charge_if_open, task_ledger_key};
 
         let tmp = tempfile::tempdir().unwrap();
-        let ledger = CostLedger::new(tmp.path().join("kcs/cost-ledger.jsonl"));
-        let lock_path = tmp.path().join("kcs/cost-ledger.lock");
-        std::fs::create_dir_all(lock_path.parent().unwrap()).unwrap();
-        std::fs::write(&lock_path, b"held by a concurrent charge").unwrap();
-        let caps = BudgetCaps {
-            device_monthly_usd_cap: 50.0,
-            folder_monthly_usd_cap: None,
-            device_per_adapter: BTreeMap::new(),
-            folder_per_adapter: BTreeMap::new(),
-            hard_stop: true,
-            warn_at_percent: 80,
-        };
-        let estimate = BudgetEstimate {
-            scope_id: "scope".to_owned(),
-            task_type: TaskType::Embedding,
-            estimated_usd: 0.01,
-            adapter_id: Some("gemini".to_owned()),
-        };
-        let reservation = ReservationRecord {
-            reservation_id: "res_locked".to_owned(),
-            task_id: "task_locked".to_owned(),
-            month: "2026-07".to_owned(),
-            scope_id: "scope".to_owned(),
-            adapter_kind: "embedding".to_owned(),
-            usd: 0.01,
-        };
-        let err = charge_cost_ledger_under_lock(
-            &ledger,
-            lock_path.clone(),
-            &caps,
-            CostChargeRequest {
-                month: "2026-07",
-                adapter_kind: "embedding",
-                estimate: &estimate,
-                override_budget: false,
-                reservations: &[reservation],
-            },
-        )
-        .unwrap_err();
-        assert_eq!(err.error_code(), "KCS-E-STORE-LOCKED-001");
-        // Nothing was charged while the lock was held.
-        assert_eq!(ledger.monthly_total("2026-07", None).unwrap(), 0.0);
-    }
-
-    #[test]
-    fn r23_cand_048_forged_task_stamp_cannot_create_reclaim_credit() {
-        use super::{settle_task_reservation, CostLedger, TaskDescriptor, TaskStatus, TaskType};
-
-        let tmp = tempfile::tempdir().unwrap();
-        let ledger = CostLedger::new(tmp.path().join("cost-ledger.jsonl"));
-        let task = TaskDescriptor {
-            task_id: "task_forged".to_owned(),
-            task_type: TaskType::Markdownize,
-            mode: None,
-            input_path: "doc.pdf".to_owned(),
-            input_hash: format!("sha256:{}", "a".repeat(64)),
-            previous_raw_hash: None,
-            parent_run_id: None,
-            changed_unit_keys: Vec::new(),
-            output_ref: "online:mistral_ocr_markdownize".to_owned(),
-            unit_keys: None,
-            status: TaskStatus::Failed,
-            attempts: 1,
-            next_retry_at: None,
-            deadline: None,
-            heartbeat_at: None,
-            fallback_reason: Some("rate_limit".to_owned()),
-            created_at: "2026-07-01T00:00:00Z".to_owned(),
-            bbox_annotation_enabled: None,
-            reserved_usd: Some(49.0),
-            reserved_month: Some("2026-07".to_owned()),
-            reservation_id: Some("res_forged".to_owned()),
-        };
-
-        assert!(settle_task_reservation(&ledger, &task, "scope", "markdown")
-            .unwrap()
-            .is_none());
-        assert_eq!(
-            ledger
-                .reclaim_ledger()
-                .monthly_total("2026-07", None)
-                .unwrap(),
-            0.0
-        );
+        let ledger =
+            kcs_pipeline::ledger::LedgerDb::open(tmp.path().join("cost-ledger.sqlite")).unwrap();
+        let key = task_ledger_key("scope", "markdownize", "sha256:never-charged", "profile");
+        assert!(!release_task_charge_if_open(&ledger, &key).unwrap());
     }
 
     #[test]

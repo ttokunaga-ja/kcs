@@ -1938,7 +1938,13 @@ fn ct3_evidence_006_three_valued_resolution_failures() {
     assert_eq!(err["context"]["purged_reason"], "legal");
     assert_eq!(err["context"]["raw_hash"], raw_hash);
 
-    // (b) no tombstone but the raw object is gone -> not_found.
+    // (b) no marker at all (no tombstone, no erase receipt) but the raw object
+    // is gone -> an UNMARKED absence, which Step4b's LC14(a) (08 §3.1 step 5
+    // branch (iv)(a)) defines as a corruption suspicion, not a normal purge:
+    // "marker が一切存在せず raw object も CAS に存在しない...KCS-E-STORE-CORRUPT-001
+    // (marker なしの欠落は corruption の疑い)" — distinct from LC12's branch (ii)
+    // (an ACTIVE erase receipt explains the absence), which still reports
+    // KCS-E-PURGE-NOT-FOUND-001. The exit code (4) is unchanged.
     let dir_b = indexed_scope();
     let search_b = json_success(&dir_b, &["search", "トークン TTL 3600"]);
     let pointer_b = first_result(&search_b)["evidence_pointer"].clone();
@@ -1947,7 +1953,7 @@ fn ct3_evidence_006_three_valued_resolution_failures() {
     fs::remove_file(object_path(&dir_b.path().join(".kcs"), "raw", &raw_hash_b)).unwrap();
     let ptr_b = pointer_b.to_string();
     let err_b = json_failure(&dir_b, &["open", &ptr_b], 4);
-    assert_eq!(err_b["error_code"], "KCS-E-PURGE-NOT-FOUND-001");
+    assert_eq!(err_b["error_code"], "KCS-E-STORE-CORRUPT-001");
 
     // (c) scope unreachable.
     let dir_c = indexed_scope();
@@ -6021,17 +6027,77 @@ fn run_markdownize_seam(
     serde_json::from_slice(&output).unwrap_or(Value::Null)
 }
 
-/// Count the online-markdownize (`adapter_kind = "markdown"`) reservation rows in the
-/// device-global cost ledger. The harness roots `$XDG_DATA_HOME` at `.test-data`.
+/// `cost-ledger.sqlite`, opened read-only-in-spirit (queries only) for test
+/// assertions. The harness roots `$XDG_DATA_HOME` at `.test-data`.
+fn ledger_db(dir: &TempDir) -> kcs_pipeline::ledger::LedgerDb {
+    kcs_pipeline::ledger::LedgerDb::open(dir.path().join(".test-data/kcs/cost-ledger.sqlite"))
+        .unwrap()
+}
+
+/// Count of DISTINCT task-key reservations EVER made for `adapter_kind` — open
+/// or terminal (`batch_requests` rows are never pruned for non-device task
+/// rows in this implementation, only `scope_id='device'` rows are, §H/CL55).
+/// The SQLite-era analog of the retired JSONL charge ledger's "line count",
+/// which also only ever grew (a reservation there was an immediate, permanent
+/// append). Under the SQLite ledger a reservation is instead one
+/// `batch_requests` row that starts open and later turns terminal in place —
+/// this counts the row regardless of which state it is currently in.
+fn reservation_row_count(dir: &TempDir, adapter_kind: &str) -> usize {
+    let db = ledger_db(dir);
+    db.connection()
+        .query_row(
+            "SELECT COUNT(*) FROM batch_requests WHERE adapter_kind = ?1",
+            [adapter_kind],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap() as usize
+}
+
+/// Count of STILL-OPEN (non-terminal, `state IN (0,1)`) reservations for
+/// `adapter_kind` — used to confirm a stranded reservation was actually
+/// released (settled terminal), not left dangling open forever.
+fn open_reservation_count(dir: &TempDir, adapter_kind: &str) -> usize {
+    let db = ledger_db(dir);
+    db.connection()
+        .query_row(
+            "SELECT COUNT(*) FROM batch_requests WHERE adapter_kind = ?1 AND state IN (0, 1)",
+            [adapter_kind],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap() as usize
+}
+
+/// Total USD for `adapter_kind`: confirmed (`cost_ledger`, any month — these
+/// tests do not care about calendar-month boundaries) plus still-open
+/// (`batch_requests.estimated_usd` for a non-terminal row) — the SQLite-era
+/// analog of the retired JSONL charge ledger's "sum of every charged row",
+/// which counted a reservation from the moment it was MADE (JSONL wrote a
+/// real charge line immediately on reserve). `cost_ledger` alone only gains a
+/// row at terminal settlement, so a still-open reservation must be added from
+/// `batch_requests` to match the old helper's "as-reserved" semantics.
+fn reservation_or_charged_usd(dir: &TempDir, adapter_kind: &str) -> f64 {
+    let db = ledger_db(dir);
+    let conn = db.connection();
+    let confirmed: f64 = conn
+        .query_row(
+            "SELECT COALESCE(SUM(usd), 0) FROM cost_ledger WHERE adapter_kind = ?1",
+            [adapter_kind],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let open: f64 = conn
+        .query_row(
+            "SELECT COALESCE(SUM(estimated_usd), 0) FROM batch_requests \
+             WHERE adapter_kind = ?1 AND state IN (0, 1)",
+            [adapter_kind],
+            |row| row.get(0),
+        )
+        .unwrap();
+    confirmed + open
+}
+
 fn markdown_ledger_rows(dir: &TempDir) -> usize {
-    let path = dir.path().join(".test-data/kcs/cost-ledger.jsonl");
-    let Ok(text) = fs::read_to_string(&path) else {
-        return 0;
-    };
-    text.lines()
-        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
-        .filter(|row| row["adapter_kind"] == "markdown")
-        .count()
+    reservation_row_count(dir, "markdownize")
 }
 
 // Discriminator (a): rate_limit ×N retry keeps the online markdownize charge row at 1
@@ -6090,11 +6156,24 @@ fn r16_7_rate_limit_retry_does_not_reaccrue_charge() {
     );
 }
 
-// Discriminator (b): a NetworkError resend re-reserves each attempt (it may have been
-// billed server-side; bounded by max_attempts=5). The charge row count must GROW —
-// the contrast that proves the gate is error-kind-aware, not a blanket "reserve once".
+// Discriminator (b), UPDATED for cost-ledger.sqlite (2026-07-21): under the retired
+// JSONL ledger a NetworkError resend re-reserved (and immediately, permanently
+// charged) each attempt, because a "reservation" there WAS an irrevocable JSONL
+// append — RateLimit/QuotaExceeded got a special reuse gate (R16-7) precisely to
+// avoid that growth; NetworkError was deliberately left OUT of the gate ("may have
+// billed server-side"). Under the SQLite ledger a reservation is instead one
+// `batch_requests` row that starts open and does not become a real `cost_ledger`
+// charge until a definitive terminal Tx — `reserve_or_reuse_task_charge` reuses ANY
+// still-open row for a retry, uniformly across every retryable error kind (CL42/
+// CL44: "does an open row already exist for this task key" is the whole rule,
+// independent of which kind left it open). This does not reintroduce the R15-5
+// silent-cap-bypass NetworkError's old re-reserve-every-attempt behavior guarded
+// against: the ONE open reservation stays counted in the cap for the entire retry
+// window (`ledger_month_total`'s unterminated-`batch_requests` term), so the risk
+// the old gate/growth was managing (real spend silently exceeding what the ledger
+// reflects) does not reappear — it is simply no longer visible as row-count growth.
 #[test]
-fn r16_7_network_error_retry_reaccrues_charge() {
+fn r16_7_network_error_retry_does_not_reaccrue_charge() {
     let dir = tempfile::tempdir().unwrap();
     fs::write(
         dir.path().join("doc.pdf"),
@@ -6104,7 +6183,7 @@ fn r16_7_network_error_retry_reaccrues_charge() {
     kcs(&dir, &["init"]).assert().success();
     run_markdownize_seam(&dir, "mock", None, &["index", "--approve"]);
 
-    // First send fails NetworkError: one charge.
+    // First send fails NetworkError: one open reservation.
     run_markdownize_seam(
         &dir,
         "network_error",
@@ -6114,62 +6193,49 @@ fn r16_7_network_error_retry_reaccrues_charge() {
     assert_eq!(
         markdown_ledger_rows(&dir),
         1,
-        "the first online send reserves one charge"
+        "the first online send reserves one row"
     );
 
-    // Each retry reserves afresh → the charge count grows one per attempt.
-    let mut expected = 1;
+    // Each retry REUSES the same open reservation — the row count stays 1 (no
+    // growth, and no cap erosion either: the single open row is still counted the
+    // whole time it stays open).
     for minute in 1..=3 {
         let now = format!("2026-07-03T00:0{minute}:30Z");
         run_markdownize_seam(&dir, "network_error", Some(&now), &["batch", "retry"]);
-        expected += 1;
         assert_eq!(
             markdown_ledger_rows(&dir),
-            expected,
-            "network_error retry #{minute} must reserve a fresh charge (not skipped)"
+            1,
+            "network_error retry #{minute} must reuse the open reservation, not grow"
         );
     }
 }
 
 // ===========================================================================
-// R17-3: a rate_limit-Failed online markdownize task keeps its F8 reservation, which
-// R16-7 established is a phantom (rate_limit/quota never bill). R15-2's enqueue-time
+// R17-3, UPDATED for cost-ledger.sqlite (2026-07-21): a rate_limit-Failed online
+// markdownize task keeps its ledger reservation open, which R16-7 (retired form)
+// established is a phantom (rate_limit/quota never bill). R15-2's enqueue-time
 // supersede retired only Pending/Paused, so after the file was edited the stale
-// Failed(rate_limit) task lingered and its phantom reservation exhausted the per-
-// adapter markdownize cap, falsely pausing the re-indexed (valid) task. The fix
-// retires the retryable-Failed task AND reclaims the phantom into a sibling positive-
-// only reclaim ledger (F3: the charge ledger is never negatively amended). The
-// discriminator pair below proves the reclaim is error-kind-aware: a rate_limit
-// phantom is reclaimed (the edited doc is Pending), a NetworkError reservation is
-// conservatively kept (the edited doc is budget-Paused, cap-safe) — the same
-// asymmetry R16-7 maintains, because a NetworkError send may have billed server-side.
+// Failed(rate_limit) task lingered — under the retired JSONL design its phantom
+// reservation exhausted the per-adapter markdownize cap, falsely pausing the
+// re-indexed (valid) task, and the fix reclaimed it into a sibling positive-only
+// ledger (F3: the charge ledger was never negatively amended) so the edited doc
+// could proceed. `cost-ledger.sqlite` has no reclaim mechanism at all (CL45: an
+// Adapter with no post-hoc query capability always settles `unknown_settled` — the
+// conservative reservation estimate becomes a REAL, PERMANENT charge, never
+// credited back) — `enqueue_online_placeholder_task`'s stale-task supersede now
+// calls `release_task_charge_if_open`, which settles the phantom for real rather
+// than reclaiming it. The discriminator pair below therefore now CONVERGES: both
+// rate_limit and NetworkError phantoms become a real settled charge on supersede,
+// so the edited doc is budget-Paused in both cases (a strictly MORE conservative
+// outcome than the retired design's error-kind-aware reclaim — never an
+// under-charge, per the ledger's "over-count is safer" posture).
 // ===========================================================================
 
-/// Sum the usd of the online-markdownize (`adapter_kind = "markdown"`) rows in the
-/// device-global CHARGE ledger — the exact per-document reservation cost, used to
+/// Sum the usd of the online-markdownize (`adapter_kind = "markdownize"`) rows,
+/// confirmed or still-open — the exact per-document reservation cost, used to
 /// size a per-adapter cap between one and two documents.
 fn markdown_ledger_usd(dir: &TempDir) -> f64 {
-    markdown_rows_usd_at(&dir.path().join(".test-data/kcs/cost-ledger.jsonl"))
-}
-
-/// Sum the usd of the markdown rows in the device-global RECLAIM ledger (R17-3).
-/// Zero when no phantom has been reclaimed (or the file does not yet exist).
-fn markdown_reclaim_usd(dir: &TempDir) -> f64 {
-    markdown_rows_usd_at(
-        &dir.path()
-            .join(".test-data/kcs/cost-ledger-reclaimed.jsonl"),
-    )
-}
-
-fn markdown_rows_usd_at(path: &Path) -> f64 {
-    let Ok(text) = fs::read_to_string(path) else {
-        return 0.0;
-    };
-    text.lines()
-        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
-        .filter(|row| row["adapter_kind"] == "markdown")
-        .filter_map(|row| row["usd"].as_f64())
-        .sum()
+    reservation_or_charged_usd(dir, "markdownize")
 }
 
 /// Pin a DEVICE per-adapter markdown cap sized to fit exactly ONE document cost but
@@ -6180,7 +6246,7 @@ fn set_markdown_adapter_cap(dir: &TempDir, cap: f64) {
     fs::create_dir_all(config.parent().unwrap()).unwrap();
     fs::write(
         &config,
-        format!("[budget]\nmonthly_usd_cap = 1000\n[budget.per_adapter]\nmarkdown = {cap}\n"),
+        format!("[budget]\nmonthly_usd_cap = 1000\n[budget.per_adapter]\nmarkdownize = {cap}\n"),
     )
     .unwrap();
 }
@@ -6192,12 +6258,12 @@ fn set_markdown_adapter_cap(dir: &TempDir, cap: f64) {
 const R17_3_BODY_V1: &str = "R17-3 phantom reclaim regression 本文あいうえお A";
 const R17_3_BODY_V2: &str = "R17-3 phantom reclaim regression 本文あいうえお B";
 
-// Discriminator (a): rate_limit phantom → edit → re-index. The phantom is reclaimed,
-// so the edited doc's online task is Pending (matches the control where rate_limit
-// never happened), NOT budget-Paused. The charge ledger is untouched (F3); the
-// reclaim ledger carries the exact canceling amount.
+// Discriminator (a): rate_limit phantom → edit → re-index. The phantom settles as a
+// real, permanent `unknown_settled` charge (never reclaimed), so the edited doc's
+// online task is budget-Paused under a cap sized for only one document — the same
+// outcome as discriminator (b) below (the two converge under the new ledger).
 #[test]
-fn r17_3_rate_limit_phantom_reclaimed_frees_cap_for_edited_doc() {
+fn r17_3_rate_limit_phantom_settles_and_still_pauses_edited_doc() {
     let dir = tempfile::tempdir().unwrap();
     assert_eq!(
         R17_3_BODY_V1.len(),
@@ -6208,7 +6274,7 @@ fn r17_3_rate_limit_phantom_reclaimed_frees_cap_for_edited_doc() {
     kcs(&dir, &["init"]).assert().success();
     run_markdownize_seam(&dir, "mock", None, &["index", "--approve"]);
 
-    // First real send under rate_limit: v1 -> Failed(rate_limit), one phantom row.
+    // First real send under rate_limit: v1 -> Failed(rate_limit), one open reservation.
     run_markdownize_seam(
         &dir,
         "rate_limit",
@@ -6218,15 +6284,23 @@ fn r17_3_rate_limit_phantom_reclaimed_frees_cap_for_edited_doc() {
     assert_eq!(
         markdown_ledger_rows(&dir),
         1,
-        "the rate_limit send reserves exactly one (phantom) charge"
+        "the rate_limit send reserves exactly one row"
+    );
+    assert_eq!(
+        open_reservation_count(&dir, "markdownize"),
+        1,
+        "the rate_limit reservation stays open (not yet a confirmed charge)"
     );
     let doc_cost = markdown_ledger_usd(&dir);
     assert!(doc_cost > 0.0, "the reservation must be a positive cost");
 
-    // Cap fits ONE document but not two: phantom (1×) + edited doc (1×) would exceed.
+    // Cap fits ONE document but not two: the settled phantom (1×) + edited doc (1×)
+    // would exceed it.
     set_markdown_adapter_cap(&dir, doc_cost * 1.5);
 
-    // Edit (new raw_hash, identical size) and re-index in the SAME ledger month.
+    // Edit (new raw_hash, identical size) and re-index. The stale v1 task is retired,
+    // which settles its still-open reservation as `unknown_settled` — a real charge at
+    // the original estimate, not a reclaim-to-zero.
     fs::write(dir.path().join("doc.pdf"), fake_pdf(&[R17_3_BODY_V2])).unwrap();
     run_markdownize_seam(
         &dir,
@@ -6235,36 +6309,28 @@ fn r17_3_rate_limit_phantom_reclaimed_frees_cap_for_edited_doc() {
         &["index", "--approve"],
     );
 
-    // The phantom is reclaimed by exactly its reserved cost (F3-safe positive row).
-    assert!(
-        (markdown_reclaim_usd(&dir) - doc_cost).abs() < 1e-12,
-        "the rate_limit phantom must be reclaimed by exactly its reserved cost"
-    );
-    // F3: the charge ledger is never negatively amended — the phantom row still stands
-    // and the reclaim nets it out at read time instead.
     assert_eq!(
-        markdown_ledger_rows(&dir),
-        1,
-        "the charge ledger keeps the phantom row (no negative compensating entry, F3)"
+        open_reservation_count(&dir, "markdownize"),
+        0,
+        "the stale reservation must be settled (released), not left open forever"
+    );
+    assert!(
+        (markdown_ledger_usd(&dir) - doc_cost).abs() < 1e-9,
+        "the settled phantom's charge must equal exactly its original reservation \
+         estimate: {} vs {doc_cost}",
+        markdown_ledger_usd(&dir)
     );
 
     let status = run_markdownize_seam(&dir, "mock", Some("2026-07-05T00:00:00Z"), &["status"]);
     let markdownize = tasks_of_type(&status, "markdownize");
-    let pending = markdownize
-        .iter()
-        .filter(|task| task["status"] == "pending")
-        .count();
     let paused_budget = markdownize
         .iter()
         .filter(|task| task["status"] == "paused" && task["fallback_reason"] == "budget_exceeded")
         .count();
     assert_eq!(
-        pending, 1,
-        "the edited doc's online task must be Pending (phantom reclaimed): {status}"
-    );
-    assert_eq!(
-        paused_budget, 0,
-        "no online task may be budget-paused after the reclaim: {status}"
+        paused_budget, 1,
+        "the edited doc must be budget-paused: the settled phantom permanently \
+         consumes the per-adapter cap (no reclaim under the new ledger): {status}"
     );
     // The stale v1 task is retired (non-retryable retired_non_live), not left rate_limit.
     let still_rate_limited = markdownize
@@ -6287,30 +6353,29 @@ fn r17_3_rate_limit_phantom_reclaimed_frees_cap_for_edited_doc() {
     );
 }
 
-// Discriminator (b): NetworkError phantom → edit → re-index. A NetworkError send may
-// have billed server-side, so its reservation is NOT reclaimed (keeping the cap-safe
-// invariant, the R15-5 silent-bypass guard). The stale task is still retired, but the
-// reservation stands, so the edited doc's online task is budget-Paused — the contrast
-// that proves the reclaim is error-kind-aware, not a blanket "reclaim on supersede".
+// Discriminator (b): NetworkError phantom → edit → re-index. Its reservation settles
+// as a real, permanent charge on supersede — exactly like discriminator (a)'s
+// rate_limit case now (`r17_3_rate_limit_phantom_settles_and_still_pauses_edited_doc`):
+// the retired design's error-kind-aware reclaim/keep asymmetry does not exist under
+// `cost-ledger.sqlite` (CL45 — no Adapter here has post-hoc query capability, so
+// every non-success sync settlement is uniformly `unknown_settled`). Kept as its own
+// test to pin that a NetworkError phantom's fate is unchanged by this migration (it
+// was never reclaimed even under the retired design).
 #[test]
-fn r17_3_network_error_reservation_kept_pauses_edited_doc() {
+fn r17_3_network_error_reservation_settles_pauses_edited_doc() {
     let dir = tempfile::tempdir().unwrap();
     fs::write(dir.path().join("doc.pdf"), fake_pdf(&[R17_3_BODY_V1])).unwrap();
     kcs(&dir, &["init"]).assert().success();
     run_markdownize_seam(&dir, "mock", None, &["index", "--approve"]);
 
-    // First real send under network_error: v1 -> Failed(network_error), one reserved row.
+    // First real send under network_error: v1 -> Failed(network_error), one open row.
     run_markdownize_seam(
         &dir,
         "network_error",
         Some("2026-07-03T00:00:00Z"),
         &["batch", "resume"],
     );
-    assert_eq!(
-        markdown_ledger_rows(&dir),
-        1,
-        "the send reserves one charge"
-    );
+    assert_eq!(markdown_ledger_rows(&dir), 1, "the send reserves one row");
     let doc_cost = markdown_ledger_usd(&dir);
     assert!(doc_cost > 0.0, "the reservation must be a positive cost");
     set_markdown_adapter_cap(&dir, doc_cost * 1.5);
@@ -6324,16 +6389,17 @@ fn r17_3_network_error_reservation_kept_pauses_edited_doc() {
         &["index", "--approve"],
     );
 
-    // The NetworkError reservation is conservatively KEPT (not reclaimed).
+    // The NetworkError reservation settles as a real charge (never reclaimed, under
+    // either the retired or the current design) and is no longer open.
     assert_eq!(
-        markdown_reclaim_usd(&dir),
-        0.0,
-        "a NetworkError reservation must NOT be reclaimed (may have billed server-side)"
+        open_reservation_count(&dir, "markdownize"),
+        0,
+        "the stale reservation must be settled, not left open forever"
     );
     assert_eq!(
         markdown_ledger_rows(&dir),
         1,
-        "the reservation stands in the charge ledger (cap-safe)"
+        "the settled reservation still counts toward the cap"
     );
 
     let status = run_markdownize_seam(&dir, "mock", Some("2026-07-05T00:00:00Z"), &["status"]);
@@ -6356,48 +6422,25 @@ fn r17_3_network_error_reservation_kept_pauses_edited_doc() {
 }
 
 // ===========================================================================
-// R18-1: the EMBEDDING pipeline had NO reclaim path (only markdownize did, R17-3). An
-// embedding send charges before the send (F8) and keeps its reservation on a
-// RateLimit/Quota failure (R16-7); once the chunk is edited/deleted (non-live) the task
-// can never be retried, so its phantom ate the embedding per-adapter cap for the rest of
-// the month and falsely paused unrelated future embeddings. R18-1 stamps the per-chunk
-// reservation (`apply_embedding_transitions`) and reclaims a non-live RateLimit/Quota
-// phantom in `reconcile_committed_embedding_tasks`. The discriminator pair mirrors R17-3:
-// rate_limit is reclaimed (the edited doc embeds), NetworkError is conservatively kept
-// (the edited doc is budget-paused, cap-safe).
+// R18-1, UPDATED for cost-ledger.sqlite (2026-07-21): the EMBEDDING pipeline had NO
+// reclaim path (only markdownize did, R17-3). An embedding send reserves before the
+// send and keeps its reservation OPEN on a RateLimit/Quota failure (R16-7); once the
+// chunk is edited/deleted (non-live) the task can never be retried, so a stranded
+// reservation would eat the embedding per-adapter cap for the rest of the month and
+// falsely pause unrelated future embeddings. `reconcile_committed_embedding_tasks`
+// still releases a non-live task's reservation the same way R18-1 originally did —
+// via `release_task_charge_if_open`, which settles it `unknown_settled` (a real,
+// permanent charge) rather than reclaiming it to zero (CL45's "no post-hoc query
+// capability → always unknown_settled" posture, uniform across every error kind —
+// see r17_3's updated tests for the markdownize twin of this same convergence).
 // ===========================================================================
 
-fn embedding_rows_usd_at(path: &Path) -> f64 {
-    let Ok(text) = fs::read_to_string(path) else {
-        return 0.0;
-    };
-    text.lines()
-        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
-        .filter(|row| row["adapter_kind"] == "embedding")
-        .filter_map(|row| row["usd"].as_f64())
-        .sum()
-}
-
 fn embedding_ledger_rows(dir: &TempDir) -> usize {
-    let path = dir.path().join(".test-data/kcs/cost-ledger.jsonl");
-    let Ok(text) = fs::read_to_string(&path) else {
-        return 0;
-    };
-    text.lines()
-        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
-        .filter(|row| row["adapter_kind"] == "embedding")
-        .count()
+    reservation_row_count(dir, "embedding")
 }
 
 fn embedding_ledger_usd(dir: &TempDir) -> f64 {
-    embedding_rows_usd_at(&dir.path().join(".test-data/kcs/cost-ledger.jsonl"))
-}
-
-fn embedding_reclaim_usd(dir: &TempDir) -> f64 {
-    embedding_rows_usd_at(
-        &dir.path()
-            .join(".test-data/kcs/cost-ledger-reclaimed.jsonl"),
-    )
+    reservation_or_charged_usd(dir, "embedding")
 }
 
 fn set_embedding_adapter_cap(dir: &TempDir, cap: f64) {
@@ -6456,10 +6499,25 @@ fn ct4_retained_embedding_reservation_is_not_reclaimed_on_edit() {
         .assert()
         .code(6);
 
+    // The retained chunk is still LIVE (history retains commit 1, the rate_limit
+    // failure's parent), so it is never superseded/retired via the non-live sweep.
+    // UPDATED for Step4b's CL45 write-command-entry sync-row recovery (this
+    // session): the phantom's `batch_requests` row is now well past its own
+    // `stale_after_at` by the second `index` call (2 real days later, versus a
+    // ~10 minute floor) — `kcs index`'s entry recovery pass (04 §5.4/CL45,
+    // "残った state 0/1 の...行は...unknown として estimated を確定記帳し state=3
+    // で terminal 化する（過大計上を許容）") settles it to a permanent charge
+    // BEFORE `run_index_pipeline` ever gets a chance to reuse it (CL39's
+    // ordering norm: the old attempt's reconciliation must complete before a
+    // new phase 1 may start). So the retained task's own retry now needs a
+    // FRESH reservation rather than reusing the settled one — its open
+    // reservation is gone (settled, not lingering), but so is the free
+    // reuse the old "not reclaimed" story relied on.
     assert_eq!(
-        embedding_reclaim_usd(&dir),
-        0.0,
-        "a retained historical send reservation is still live and cannot be reclaimed"
+        open_reservation_count(&dir, "embedding"),
+        0,
+        "the retained reservation must resolve to a terminal settlement (CL45 \
+         recovery, or normal success), not linger open"
     );
 
     let status = json_success_embed_at(&dir, "mock", "2026-07-05T00:00:00Z", &["status"]);
@@ -6468,17 +6526,15 @@ fn ct4_retained_embedding_reservation_is_not_reclaimed_on_edit() {
         .iter()
         .filter(|task| task["status"] == "paused" && task["fallback_reason"] == "budget_exceeded")
         .count();
+    // Both the retained task's fresh retry reservation AND the new chunk's
+    // reservation now compete for the same 1.5x-single-document cap: CL45's
+    // settlement of the stale phantom (an over-count, not a fresh spend)
+    // already consumes headroom the retry itself would have needed, so
+    // neither reservation clears the cap this pass.
     assert_eq!(
-        paused_budget, 1,
-        "the newer chunk waits because retained historical work owns the cap: {status}"
-    );
-    let done = embedding
-        .iter()
-        .filter(|task| task["status"] == "done")
-        .count();
-    assert!(
-        done >= 1,
-        "the retained rate-limited historical chunk should complete on retry: {status}"
+        paused_budget, 2,
+        "CL45's stale-phantom settlement plus the retry's fresh reservation \
+         exhaust the single-document cap for both chunks: {status}"
     );
 }
 
@@ -6491,13 +6547,18 @@ fn ct4_retained_embedding_reservation_is_not_reclaimed_on_edit() {
 // path passes `EMBEDDING_ADAPTER_KIND` into that identical helper, so its NetworkError
 // branch is covered by construction.
 
-// R18-2: markdownize's R17-3 reclaim only fired for a re-scanned SAME path. A DELETED (or
-// renamed) file never reappears as a scan candidate, so its Failed(rate_limit) phantom was
-// never reclaimed and kept eating the markdown cap. R18-2 sweeps deleted-path phantoms
-// during `index`. Delete doc.pdf (phantom) + add an equal-cost doc2.pdf under a cap that
-// fits ONE document: without the reclaim doc2 is budget-paused; with it, doc2 completes.
+// R18-2, UPDATED for cost-ledger.sqlite (2026-07-21): markdownize's R17-3 supersede
+// only fired for a re-scanned SAME path. A DELETED (or renamed) file never reappears
+// as a scan candidate, so its Failed(rate_limit) phantom lingered open and kept
+// eating the markdownize cap. `run_index_pipeline`'s orphan-sweep releases a
+// deleted-path phantom the same way R18-2 originally did — but "release" now means
+// `release_task_charge_if_open` settling it `unknown_settled` (a real, permanent
+// charge), not a reclaim to zero. So the sweep still runs (the reservation stops
+// being silently invisible/open-forever), but under a cap sized for only one
+// document, doc2 is budget-paused rather than completing (CL45's conservative
+// posture: never an under-charge).
 #[test]
-fn r18_2_markdownize_deleted_file_phantom_reclaimed_frees_cap() {
+fn r18_2_markdownize_deleted_file_phantom_settles_still_pauses_doc2() {
     let dir = tempfile::tempdir().unwrap();
     fs::write(dir.path().join("doc.pdf"), fake_pdf(&[R17_3_BODY_V1])).unwrap();
     kcs(&dir, &["init"]).assert().success();
@@ -6508,25 +6569,33 @@ fn r18_2_markdownize_deleted_file_phantom_reclaimed_frees_cap() {
         Some("2026-07-03T00:00:00Z"),
         &["batch", "resume"],
     );
-    assert_eq!(markdown_ledger_rows(&dir), 1, "one phantom charge");
+    assert_eq!(markdown_ledger_rows(&dir), 1, "one open reservation");
     let doc_cost = markdown_ledger_usd(&dir);
     assert!(doc_cost > 0.0);
     set_markdown_adapter_cap(&dir, doc_cost * 1.5);
 
-    // DELETE doc.pdf (its phantom must be reclaimed) and add an equal-cost doc2.pdf.
+    // DELETE doc.pdf (its phantom must be settled/released) and add an equal-cost
+    // doc2.pdf.
     fs::remove_file(dir.path().join("doc.pdf")).unwrap();
     fs::write(dir.path().join("doc2.pdf"), fake_pdf(&[R17_3_BODY_V2])).unwrap();
-    // index sweeps the deleted-path phantom, then batch resume charges doc2 against the
-    // freed cap.
+    // index sweeps the deleted-path phantom (settling it for real) before evaluating
+    // doc2's own cap-check.
     run_markdownize_seam(
         &dir,
         "mock",
         Some("2026-07-05T00:00:00Z"),
         &["index", "--approve"],
     );
+    assert_eq!(
+        open_reservation_count(&dir, "markdownize"),
+        0,
+        "the deleted file's phantom must be settled (released), not left open forever"
+    );
     assert!(
-        (markdown_reclaim_usd(&dir) - doc_cost).abs() < 1e-12,
-        "the deleted file's rate_limit phantom must be reclaimed by its exact cost"
+        (markdown_ledger_usd(&dir) - doc_cost).abs() < 1e-9,
+        "the settled phantom's charge must equal exactly its original reservation \
+         estimate: {} vs {doc_cost}",
+        markdown_ledger_usd(&dir)
     );
     run_markdownize_seam(
         &dir,
@@ -6541,26 +6610,24 @@ fn r18_2_markdownize_deleted_file_phantom_reclaimed_frees_cap() {
         .filter(|task| task["status"] == "paused" && task["fallback_reason"] == "budget_exceeded")
         .count();
     assert_eq!(
-        paused_budget, 0,
-        "doc2 must not be budget-paused (deleted-file phantom reclaimed): {status}"
-    );
-    let doc2_done = markdownize.iter().any(|task| {
-        task["input_path"] == "doc2.pdf"
-            && task["status"] == "done"
-            && task["fallback_reason"] == "online_adapter_done"
-    });
-    assert!(
-        doc2_done,
-        "doc2's online markdownize must complete: {status}"
+        paused_budget, 1,
+        "doc2 must be budget-paused: the settled phantom permanently consumes the \
+         per-adapter cap (no reclaim under the new ledger): {status}"
     );
 }
 
-// R18-3: R17-3's reclaim ledger was netted by the enforcement gate but NOT by the
-// status/warning reports, so `kcs status` over-reported spend after a reclaim. After a
-// rate_limit phantom is reclaimed (charge == reclaim, so effective spend is 0 for that
-// document), the status budget must report the NET spend, not the gross charge.
+// R18-3, UPDATED for cost-ledger.sqlite (2026-07-21): R17-3's reclaim ledger was
+// netted by the enforcement gate but NOT by the status/warning reports, so
+// `kcs status` over-reported spend after a reclaim. `cost-ledger.sqlite` has no
+// reclaim/netting concept at all — `budget_status_json`/`scope_budget_warning` and
+// the enforcement gate (`budget_remaining_for_adapter`) now share the exact same
+// `ledger_month_total` read, so they can never diverge (the original R18-3 bug
+// class — enforcement and reporting reading two different sums — is structurally
+// impossible here, not just fixed for this one case). This test now instead pins
+// that a settled phantom's charge IS visible in `device_spent_usd` (the honest,
+// conservative complement to the retired design's netting).
 #[test]
-fn r18_3_status_budget_nets_reclaim_ledger() {
+fn r18_3_status_budget_reports_settled_phantom_as_real_spend() {
     let dir = tempfile::tempdir().unwrap();
     fs::write(dir.path().join("doc.pdf"), fake_pdf(&[R17_3_BODY_V1])).unwrap();
     kcs(&dir, &["init"]).assert().success();
@@ -6574,8 +6641,8 @@ fn r18_3_status_budget_nets_reclaim_ledger() {
     let doc_cost = markdown_ledger_usd(&dir);
     assert!(doc_cost > 0.0);
 
-    // Edit → re-index: the same-path supersede reclaims the phantom. The new task is
-    // Pending (not yet charged), so charge == reclaim == doc_cost and net spend is 0.
+    // Edit → re-index: the same-path supersede settles the stale phantom for real
+    // (`unknown_settled`, billed at its original reservation estimate).
     fs::write(dir.path().join("doc.pdf"), fake_pdf(&[R17_3_BODY_V2])).unwrap();
     run_markdownize_seam(
         &dir,
@@ -6583,17 +6650,18 @@ fn r18_3_status_budget_nets_reclaim_ledger() {
         Some("2026-07-05T00:00:00Z"),
         &["index", "--approve"],
     );
-    assert!(
-        (markdown_reclaim_usd(&dir) - doc_cost).abs() < 1e-12,
-        "the phantom must be reclaimed (precondition for the netting check)"
+    assert_eq!(
+        open_reservation_count(&dir, "markdownize"),
+        0,
+        "the phantom must be settled (precondition for the spend-visibility check)"
     );
 
     let status = run_markdownize_seam(&dir, "mock", Some("2026-07-05T00:00:00Z"), &["status"]);
     let device_spent = status["budget"]["device_spent_usd"].as_f64().unwrap();
     assert!(
-        device_spent < doc_cost * 0.5,
-        "status must report NET spend (charge − reclaim ≈ 0), not the gross phantom \
-         charge {doc_cost}: device_spent_usd={device_spent}"
+        (device_spent - doc_cost).abs() < 1e-9,
+        "status must report the settled phantom as REAL spend (no netting exists in \
+         cost-ledger.sqlite): expected ≈{doc_cost}, got device_spent_usd={device_spent}"
     );
 }
 
@@ -6819,9 +6887,13 @@ fn ct4_reverted_chunk_reuses_retained_embedding_task() {
 // R19-4: when two docs share an identical section (same text_hash, different chunk_id),
 // and one's embedding fails rate_limit while the other succeeds, `rebuild_chunk_vec`
 // links the failed chunk's vector via the content-hash twin. The reconcile must then
-// CONVERGE that live-and-embedded Failed task to Done and reclaim its phantom — before
-// R19-4 it stayed Failed forever (reconcile's live->Done loop skipped Failed), stuck at
-// pending_enrichment == 1 with a phantom reservation eating the cap.
+// CONVERGE that live-and-embedded Failed task to Done and release its stranded
+// reservation — before R19-4 it stayed Failed forever (reconcile's live->Done loop
+// skipped Failed), stuck at pending_enrichment == 1 with an open reservation eating
+// the cap. UPDATED for cost-ledger.sqlite (2026-07-21): "release" now settles
+// `unknown_settled` (a real charge) rather than reclaiming to zero — this test checks
+// that the reservation no longer sits open, not that it was credited back (see r17_3's
+// updated tests for why: CL45, no Adapter here has post-hoc query capability).
 #[test]
 fn r19_4_duplicate_content_failed_chunk_converges_via_twin() {
     let dir = tempfile::tempdir().unwrap();
@@ -6852,10 +6924,17 @@ fn r19_4_duplicate_content_failed_chunk_converges_via_twin() {
     // the NEXT pass that links a.md's shared chunk_id to the twin's now-persisted vector —
     // and the reconcile then converges a.md's stuck Failed chunk (self-heal on re-index).
     json_success_embed_at(&dir, "mock", now, &["index", "--approve", "--online"]);
-    assert!(
-        embedding_reclaim_usd(&dir) > 0.0,
-        "R19-4: the twin-embedded rate_limit phantom must be reclaimed (got {})",
-        embedding_reclaim_usd(&dir)
+    // a.md has TWO chunks (its own heading + the shared section) and both opened a
+    // reservation on the rate_limit pass. The heading is unique to a.md, so it never
+    // finds a twin and — with the clock pinned — never becomes retry-due either: it
+    // stays open/pending for the rest of this test, by design (unrelated to R19-4).
+    // Only the SHARED section's reservation is expected to release via the twin
+    // convergence, so the open count must drop from 2 to exactly 1.
+    assert_eq!(
+        open_reservation_count(&dir, "embedding"),
+        1,
+        "R19-4: the twin-embedded rate_limit reservation must be released (settled), \
+         leaving only a.md's unrelated (never-retried) heading chunk open"
     );
     let status = json_success_embed_at(&dir, "mock", now, &["status"]);
     let a_done = tasks_of_type(&status, "embedding")
@@ -6868,13 +6947,17 @@ fn r19_4_duplicate_content_failed_chunk_converges_via_twin() {
     );
 }
 
-// R19-2: an exhausted-quota (QuotaExceeded, attempts >= max) online markdownize phantom
-// must still be reclaimed by the deleted/renamed sweep. Before R19-2 the sweep gated on
-// `task_retry_allowed` (false once the finite quota budget is spent), stranding the
-// phantom reservation for the month. Quota has no test seam, so the terminal state is
-// crafted directly (as the round's control repro did).
+// R19-2, UPDATED for cost-ledger.sqlite (2026-07-21): an exhausted-quota
+// (QuotaExceeded, attempts >= max) online markdownize phantom must still be released
+// by the deleted/renamed sweep. Before R19-2 the sweep gated on `task_retry_allowed`
+// (false once the finite quota budget is spent), stranding the phantom reservation
+// for the month — `is_reservation_bearing_send_failure`'s sweep-eligibility check in
+// `run_index_pipeline`'s orphan sweep does not consult `task_retry_allowed` either,
+// so the fix carries over unchanged; only the "release" mechanism changed (settles
+// `unknown_settled`, a real charge, instead of reclaiming to zero). Quota has no test
+// seam, so the terminal state is crafted directly (as the round's control repro did).
 #[test]
-fn r19_2_exhausted_quota_phantom_reclaimed_on_sweep() {
+fn r19_2_exhausted_quota_phantom_settled_on_sweep() {
     let dir = tempfile::tempdir().unwrap();
     fs::write(dir.path().join("doc.pdf"), fake_pdf(&[R17_3_BODY_V1])).unwrap();
     kcs(&dir, &["init"]).assert().success();
@@ -6924,10 +7007,11 @@ fn r19_2_exhausted_quota_phantom_reclaimed_on_sweep() {
         &["index", "--approve"],
     );
 
-    assert!(
-        markdown_reclaim_usd(&dir) > 0.0,
-        "R19-2: the exhausted-quota phantom must be reclaimed by the sweep (got {})",
-        markdown_reclaim_usd(&dir)
+    assert_eq!(
+        open_reservation_count(&dir, "markdownize"),
+        0,
+        "R19-2: the exhausted-quota phantom must be released (settled) by the sweep, \
+         not left stranded open"
     );
 }
 

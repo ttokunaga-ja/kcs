@@ -3251,11 +3251,15 @@ impl StoreLock {
     }
 
     /// Acquire a lock at an explicit file path. Used for device-global locks that
-    /// live outside any single `.kcs` store — notably the cost-ledger lock
-    /// (`$XDG_DATA_HOME/kcs/cost-ledger.lock`, F8), which must serialize the
-    /// budget read-check-append across every scope on the device. Same reentrancy
-    /// (thread-local depth, keyed by the lock path) and stale-reclaim semantics as
-    /// [`acquire`]; the parent directory is created if missing.
+    /// live outside any single `.kcs` store (F8) — e.g. serializing a
+    /// budget/cost read-check-append across every scope on the device (the
+    /// pre-2026-07-18 JSONL cost ledger used this for exactly that; the current
+    /// `cost-ledger.sqlite`, `kcs_pipeline::ledger`, instead serializes writers via
+    /// its own `BEGIN IMMEDIATE` transactions — 04-pipeline.md §5.4/§5.8 — so this
+    /// primitive no longer has a live device-global caller, but remains available
+    /// for any future one). Same reentrancy (thread-local depth, keyed by the lock
+    /// path) and stale-reclaim semantics as [`acquire`]; the parent directory is
+    /// created if missing.
     pub fn acquire_path(path: PathBuf) -> Result<Self> {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).kcs_io(parent)?;
@@ -3656,14 +3660,15 @@ mod tests {
         assert!(!process_is_alive(0));
     }
 
-    // F8: the device-global cost-ledger lock is acquired via `acquire_path` at an
-    // arbitrary path outside any `.kcs`. It must create the parent dir, remove the
-    // lock on drop, and refuse to acquire while a lock file already holds the path.
+    // F8: a device-global lock (e.g. the pre-2026-07-18 JSONL cost ledger's) is
+    // acquired via `acquire_path` at an arbitrary path outside any `.kcs`. It must
+    // create the parent dir, remove the lock on drop, and refuse to acquire while
+    // a lock file already holds the path.
     #[test]
     fn f8_acquire_path_is_device_global_and_excludes_a_held_lock() {
         let dir = tempfile::tempdir().unwrap();
         // Nested path whose parent does not exist yet — acquire_path must create it.
-        let lock_path = dir.path().join("kcs/cost-ledger.lock");
+        let lock_path = dir.path().join("kcs/device-example.lock");
         {
             let _guard = StoreLock::acquire_path(lock_path.clone()).unwrap();
             assert!(

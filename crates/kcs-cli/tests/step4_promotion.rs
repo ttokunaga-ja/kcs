@@ -79,8 +79,71 @@ fn fake_pdf(pages: &[&str]) -> String {
     out
 }
 
-fn cost_ledger(dir: &TempDir) -> Vec<u8> {
-    fs::read(dir.path().join(".test-data/kcs/cost-ledger.jsonl")).unwrap_or_default()
+/// A full, deterministically-ordered snapshot of `cost-ledger.sqlite`'s two
+/// tables, for byte-for-byte-style before/after equality checks (the retired
+/// JSONL charge ledger's `fs::read` comparison this replaces relied on the
+/// file being append-only — comparing every row of both tables here is the
+/// direct SQLite-era equivalent of "nothing new was charged or reserved").
+fn cost_ledger(dir: &TempDir) -> Vec<String> {
+    let db =
+        kcs_pipeline::ledger::LedgerDb::open(dir.path().join(".test-data/kcs/cost-ledger.sqlite"))
+            .unwrap();
+    let conn = db.connection();
+    let mut rows = Vec::new();
+    let mut stmt = conn
+        .prepare(
+            "SELECT scope_id, adapter_kind, input_hash, tool_profile_hash, submission_seq, \
+             batch_job_id, usd, estimated, outcome, month FROM cost_ledger \
+             ORDER BY scope_id, adapter_kind, input_hash, tool_profile_hash, submission_seq",
+        )
+        .unwrap();
+    let mapped = stmt
+        .query_map([], |row| {
+            Ok(format!(
+                "cost_ledger:{}|{}|{}|{}|{}|{}|{}|{}|{}|{}",
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, i64>(4)?,
+                row.get::<_, String>(5)?,
+                row.get::<_, f64>(6)?,
+                row.get::<_, i64>(7)?,
+                row.get::<_, String>(8)?,
+                row.get::<_, String>(9)?,
+            ))
+        })
+        .unwrap();
+    for row in mapped {
+        rows.push(row.unwrap());
+    }
+    drop(stmt);
+    let mut stmt = conn
+        .prepare(
+            "SELECT scope_id, adapter_kind, input_hash, tool_profile_hash, state, \
+             request_kind, estimated_usd, error FROM batch_requests \
+             ORDER BY scope_id, adapter_kind, input_hash, tool_profile_hash",
+        )
+        .unwrap();
+    let mapped = stmt
+        .query_map([], |row| {
+            Ok(format!(
+                "batch_requests:{}|{}|{}|{}|{}|{}|{}|{}",
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, i64>(4)?,
+                row.get::<_, String>(5)?,
+                row.get::<_, f64>(6)?,
+                row.get::<_, Option<String>>(7)?.unwrap_or_default(),
+            ))
+        })
+        .unwrap();
+    for row in mapped {
+        rows.push(row.unwrap());
+    }
+    rows
 }
 
 fn promotion_state_path(dir: &TempDir) -> std::path::PathBuf {

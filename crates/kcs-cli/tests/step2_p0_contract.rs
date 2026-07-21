@@ -306,13 +306,30 @@ fn normalized_units(dir: &TempDir) -> Vec<NormalizedUnitObject> {
         .collect()
 }
 
+/// Every `cost_ledger` row (04-pipeline.md §5.4), shaped like the retired
+/// JSONL `MonthlyCostLedgerEntry` (`month`/`scope_id`/`adapter_kind`/`usd`) so
+/// existing filters/assertions need no restructuring — only the `adapter_kind`
+/// values changed (CL61's "markdown"→"markdownize" rename). `LedgerDb::open`
+/// creates the (empty) schema if the file does not exist yet, matching the old
+/// helper's `unwrap_or_default()` on a missing file.
 fn ledger_lines(dir: &TempDir) -> Vec<Value> {
-    let path = dir.path().join(".test-data/kcs/cost-ledger.jsonl");
-    let text = fs::read_to_string(path).unwrap_or_default();
-    text.lines()
-        .filter(|line| !line.trim().is_empty())
-        .map(|line| serde_json::from_str(line).unwrap())
-        .collect()
+    let path = dir.path().join(".test-data/kcs/cost-ledger.sqlite");
+    let db = kcs_pipeline::ledger::LedgerDb::open(&path).unwrap();
+    let mut stmt = db
+        .connection()
+        .prepare("SELECT scope_id, adapter_kind, usd, month FROM cost_ledger ORDER BY recorded_at, submission_seq")
+        .unwrap();
+    let rows = stmt
+        .query_map([], |row| {
+            Ok(json!({
+                "scope_id": row.get::<_, String>(0)?,
+                "adapter_kind": row.get::<_, String>(1)?,
+                "usd": row.get::<_, f64>(2)?,
+                "month": row.get::<_, String>(3)?,
+            }))
+        })
+        .unwrap();
+    rows.map(|row| row.unwrap()).collect()
 }
 
 #[test]
@@ -1437,13 +1454,13 @@ fn ct2_budget_005_online_success_records_ledger_and_caps_next_task() {
         &[(TEST_STANDARD_ONLINE_MARKDOWNIZE_ENV, "mock")],
     );
     let online_entry = ledger_lines(&dir).into_iter().find(|entry| {
-        entry["adapter_kind"] == "markdown" && entry["usd"].as_f64().unwrap_or_default() > 0.0
+        entry["adapter_kind"] == "markdownize" && entry["usd"].as_f64().unwrap_or_default() > 0.0
     });
     assert!(online_entry.is_some());
 
     fs::write(
         dir.path().join(".kcs/config.toml"),
-        "[budget]\nmonthly_usd_cap = 50\n[budget.per_adapter]\nmarkdown = 0.0\n",
+        "[budget]\nmonthly_usd_cap = 50\n[budget.per_adapter]\nmarkdownize = 0.0\n",
     )
     .unwrap();
     fs::write(dir.path().join("b.pdf"), fake_pdf(&["second online cost"])).unwrap();
@@ -1456,7 +1473,7 @@ fn ct2_budget_005_online_success_records_ledger_and_caps_next_task() {
             && task["fallback_reason"] == "budget_exceeded"
     }));
     assert!(status["budget"]["cap_kind"].as_str().is_some());
-    assert_eq!(status["budget"]["folder_per_adapter"]["markdown"], 0.0);
+    assert_eq!(status["budget"]["folder_per_adapter"]["markdownize"], 0.0);
 }
 
 // R11-2: the batch-side Then of CT2-BUDGET-005 (tasks/step2a-contract-tests.md) —
@@ -1470,10 +1487,18 @@ fn r11_2_batch_resume_budget_pause_exits_6() {
     fs::write(dir.path().join("a.pdf"), fake_pdf(&["budget pause body"])).unwrap();
     // `--approve` records a persistent opt-in, so the online task is Pending-ready.
     json_success(&dir, ["index", "--approve"]);
-    // Zero the markdown cap so the pending online send is over budget on resume.
+    // Zero the markdownize per_adapter cap so the pending online send is over budget
+    // on resume. CL57 (04 §5.4): per_adapter is DEVICE-layer only ("folder cap は
+    // total のみ") — `ops::check_then_reserve`'s third condition reads
+    // `caps.device_per_adapter` exclusively, so the cap must be set in the DEVICE
+    // config (`$XDG_CONFIG_HOME/kcs/config.toml`), not the folder's `.kcs/config.toml`
+    // (a folder-level `[budget.per_adapter]` is parsed but never consulted by the
+    // per-adapter condition — U4's folder-side-removal scope, not this fix's).
+    let device_config_dir = dir.path().join(".test-config/kcs");
+    fs::create_dir_all(&device_config_dir).unwrap();
     fs::write(
-        dir.path().join(".kcs/config.toml"),
-        "[budget]\nmonthly_usd_cap = 50\n[budget.per_adapter]\nmarkdown = 0.0\n",
+        device_config_dir.join("config.toml"),
+        "[budget]\nmonthly_usd_cap = 50\n[budget.per_adapter]\nmarkdownize = 0.0\n",
     )
     .unwrap();
     let resumed = json_code_stdout_with_env(
@@ -1562,7 +1587,7 @@ fn f5_soft_stop_runs_over_cap_and_records_charge() {
         &[(TEST_STANDARD_ONLINE_MARKDOWNIZE_ENV, "mock")],
     );
     let charged = ledger_lines(&dir).into_iter().any(|entry| {
-        entry["adapter_kind"] == "markdown" && entry["usd"].as_f64().unwrap_or_default() > 0.0
+        entry["adapter_kind"] == "markdownize" && entry["usd"].as_f64().unwrap_or_default() > 0.0
     });
     assert!(
         charged,
@@ -1594,13 +1619,22 @@ fn f5_warn_at_percent_surfaces_non_blocking_warning() {
     )
     .unwrap();
     // Seed 0.9 spent this month → 90% of cap (>= 80%, but < 100% so not over cap).
-    let ledger = dir.path().join(".test-data/kcs/cost-ledger.jsonl");
-    fs::create_dir_all(ledger.parent().unwrap()).unwrap();
-    fs::write(
-        &ledger,
-        "{\"month\":\"2026-07\",\"scope_id\":\"seed\",\"adapter_kind\":\"embedding\",\"usd\":0.9}\n",
-    )
-    .unwrap();
+    // Seeded directly into `cost_ledger` (rather than via a legacy JSONL file +
+    // migration side effect) — CL71 forbids the retired JSONL filenames outside
+    // `ledger/migrate.rs`.
+    let ledger_path = dir.path().join(".test-data/kcs/cost-ledger.sqlite");
+    fs::create_dir_all(ledger_path.parent().unwrap()).unwrap();
+    kcs_pipeline::ledger::LedgerDb::open(&ledger_path)
+        .unwrap()
+        .connection()
+        .execute(
+            "INSERT INTO cost_ledger (scope_id, adapter_kind, input_hash, tool_profile_hash, \
+             submission_seq, batch_job_id, usd, estimated, outcome, month, recorded_at) \
+             VALUES ('seed', 'embedding', 'sha256:seed', 'seed-profile', 1, 'seed-job', 0.9, 0, \
+             'succeeded', '2026-07', 0)",
+            [],
+        )
+        .unwrap();
 
     let status = json_success_with_env(&dir, ["status"], &[("KCS_FIXED_NOW", fixed_now)]);
     assert_eq!(
@@ -2015,7 +2049,7 @@ fn r11_6_unit_scoped_retry_prorates_cost_and_preserves_done_units() {
         ledger_lines(dir)
             .iter()
             .filter(|entry| {
-                entry["adapter_kind"] == "markdown" && entry["usd"].as_f64().unwrap_or(0.0) > 0.0
+                entry["adapter_kind"] == "markdownize" && entry["usd"].as_f64().unwrap_or(0.0) > 0.0
             })
             .map(|entry| entry["usd"].as_f64().unwrap())
             .collect()
@@ -3031,7 +3065,7 @@ fn r15_2_stale_online_task_supersede_does_not_phantom_charge() {
         ledger_lines(dir)
             .iter()
             .filter(|entry| {
-                entry["adapter_kind"] == "markdown" && entry["usd"].as_f64().unwrap_or(0.0) > 0.0
+                entry["adapter_kind"] == "markdownize" && entry["usd"].as_f64().unwrap_or(0.0) > 0.0
             })
             .count()
     };

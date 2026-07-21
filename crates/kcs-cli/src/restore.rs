@@ -13,13 +13,13 @@ use kcs_core::cas::{hash_bytes, is_hash, ObjectKind, ObjectStore, MAX_RAW_OBJECT
 use kcs_core::dag::{CommitType, TreeEntry};
 use kcs_core::history::HistoryReader;
 use kcs_core::portable::portable_collision_key;
-use kcs_core::purge::PurgeState;
+use kcs_core::purge::{canonical_final_event, EventKind, PurgeState};
 use kcs_core::scope::{Repository, StoreLock};
 use kcs_core::{ExitCode, KcsError, Result};
 use serde_json::{json, Value};
 use sha2::Digest;
 
-use super::{RestoreArgs, ScopeTarget};
+use super::{ReadBarrierCheckpoint, RestoreArgs, ScopeTarget};
 
 const MAX_POINTER_INPUT_BYTES: u64 = 1024 * 1024;
 const MAX_RESTORE_TOTAL_BYTES: u64 = 4 * 1024 * 1024 * 1024;
@@ -69,6 +69,15 @@ pub(super) fn run(args: RestoreArgs) -> Result<Value> {
     }
 
     let source = resolve_source(&args.source)?;
+    // §I checkpoint 1 (LC53), opened as soon as the source scope is known.
+    // LC57: restore's checkpoint 2 (below, in `publish_all`) fires per file,
+    // immediately before that file's atomic rename — after the private-temp
+    // staging completes and before the irreversible publish, matching the
+    // spec's fixed "expand -> recheck -> publish" order.
+    let checkpoint = ReadBarrierCheckpoint::open(&source.target.kcs_dir)?;
+    // LC45 (item 2): a separate check from §I's checkpoint — see
+    // `check_index_generation_current`'s doc comment.
+    super::check_index_generation_current(&source.target.kcs_dir)?;
     let destination = validate_destination(&args.to, &source.target)?;
     let _initial_preflight = preflight(&source, &destination, args.force)?;
 
@@ -91,7 +100,7 @@ pub(super) fn run(args: RestoreArgs) -> Result<Value> {
     // Re-run the complete leaf check before staging any content.
     let preflight_files = preflight_in_dir(&source, &destination_dir, args.force)?;
     let staged = stage_all(&source, preflight_files, &destination_dir)?;
-    publish_all(&source, &destination_dir, staged)
+    publish_all(&source, &destination_dir, staged, &checkpoint)
 }
 
 fn resolve_source(operand: &str) -> Result<RestoreSource> {
@@ -1012,19 +1021,46 @@ fn missing_live_raw_error(target: &ScopeTarget, raw_hash: &str) -> KcsError {
     )
 }
 
+/// LC8-LC10/item 3: the tombstone gate uses the cross-marker canonical final
+/// event, not this marker's own tail — a tombstone whose own tail is
+/// `purged` can be superseded by a later-`lifecycle_epoch` `retired` erase
+/// receipt (LC10's worked example), so checking the tombstone alone can
+/// wrongly reject a restore source canonical dispatch would allow, and the
+/// reverse (a tombstone's own tail already `retired`, but a later-epoch
+/// receipt is canonically `purged`) can wrongly let one through. Only the
+/// `purged` branch (LC11) is handled here — restore's other call sites into
+/// this function do not uniformly know the target raw's current CAS
+/// presence, so the raw-presence-dependent LC12/13/14 branches
+/// (`enforce_canonical_marker_barrier`'s fuller dispatch, used by
+/// open/view) are not replicated here; `barrier_blocks` below keeps its
+/// existing in-progress-journal behavior unchanged.
 fn check_purge_state(target: &ScopeTarget, raw_hash: &str) -> Result<()> {
     let state = PurgeState::new(&target.kcs_dir);
-    if let Some(record) = state.read_tombstone(raw_hash)? {
-        let mut tombstone =
-            serde_json::to_value(record).map_err(|error| KcsError::schema(error.to_string()))?;
-        tombstone
-            .as_object_mut()
-            .expect("tombstone record serializes as an object")
-            .insert(
-                "scope_path".to_owned(),
-                json!(target.kcs_dir.display().to_string()),
-            );
-        return Err(super::tombstone_error(tombstone));
+    let tombstone_tail = state
+        .read_tombstone(raw_hash)?
+        .map(|record| record.tail().clone());
+    // Erase receipts are fsck-only/non-public (unlike tombstones, whose parse
+    // failure above still propagates): a receipt that fails to read or parse
+    // simply does not participate in the canonical computation, rather than
+    // breaking restore on a malformed record it has no business inspecting
+    // (`missing_raw_is_dead_source_without_receipt_disclosure` below pins
+    // this — a garbage receipt file must never surface from this function).
+    let receipt_tail = state
+        .read_erase_receipt(raw_hash)
+        .ok()
+        .flatten()
+        .map(|receipt| receipt.tail().clone());
+    if let Some(canonical) = canonical_final_event(tombstone_tail.as_ref(), receipt_tail.as_ref()) {
+        if canonical.event.kind == EventKind::Purged {
+            let event = canonical.event;
+            return Err(super::tombstone_error(json!({
+                "raw_hash": raw_hash,
+                "purged_at": event.at,
+                "purged_reason": event.reason,
+                "purged_in_commit": event.in_commit,
+                "scope_path": target.kcs_dir.display().to_string(),
+            })));
+        }
     }
     if state.barrier_blocks(raw_hash)? {
         return Err(KcsError::new(
@@ -1169,12 +1205,18 @@ fn publish_all(
     source: &RestoreSource,
     destination: &DestinationDir,
     staged: Vec<StagedFile>,
+    checkpoint: &ReadBarrierCheckpoint,
 ) -> Result<Value> {
     let mut published = Vec::new();
     let mut overwritten_count = 0_u64;
     let mut remaining = staged.into_iter();
     while let Some(file) = remaining.next() {
-        if let Err(error) = check_purge_state(&source.target, &file.preflight.source.raw_hash) {
+        // §I checkpoint 2 (LC54/LC55), combined with the per-raw_hash
+        // canonical-marker recheck (LC8-14/item 3) immediately before this
+        // file's atomic, irreversible publish (LC57).
+        if let Err(error) = check_purge_state(&source.target, &file.preflight.source.raw_hash)
+            .and_then(|()| checkpoint.recheck())
+        {
             cleanup_one(destination, &file.temp);
             for pending in remaining {
                 cleanup_one(destination, &pending.temp);

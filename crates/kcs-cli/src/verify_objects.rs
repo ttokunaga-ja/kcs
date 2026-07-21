@@ -95,6 +95,13 @@ fn parse_evidence_verify_args(args: Vec<String>) -> Result<(String, bool)> {
 /// file and return chunk text, both forbidden for verify.
 fn verify_pointer_for_cli(pointer: &EvidencePointer) -> Result<Value> {
     let target = resolve_scope_target(&pointer.scope_id, pointer.scope_path.as_deref())?;
+    // §I checkpoint 1 (LC53). Evidence verify's whole response IS existence
+    // information (08 §4.3 — it never returns body), so checkpoint 2 below
+    // (LC54/LC55) gates every return point, not only a single "success" path.
+    let checkpoint = ReadBarrierCheckpoint::open(&target.kcs_dir)?;
+    // LC45 (item 2): a separate check from §I's checkpoint — see
+    // `check_index_generation_current`'s doc comment.
+    check_index_generation_current(&target.kcs_dir)?;
     let repo = Repository::open(&target.repo_root)?;
     let commit = match repo.read_commit(&pointer.commit) {
         Ok(commit) => commit,
@@ -111,9 +118,9 @@ fn verify_pointer_for_cli(pointer: &EvidencePointer) -> Result<Value> {
                 .find(|entry| entry.raw_hash == pointer.raw_hash)
             else {
                 if let Some(tombstone) = read_tombstone(&target, &pointer.raw_hash)? {
-                    return Ok(tombstoned_verify_output(tombstone));
+                    return checkpoint.finish(tombstoned_verify_output(tombstone));
                 }
-                return Ok(not_found_verify_output(&target, &pointer.raw_hash));
+                return checkpoint.finish(not_found_verify_output(&target, &pointer.raw_hash));
             };
             let entry_gen = match &entry.normalize {
                 Some(normalize) => {
@@ -131,17 +138,17 @@ fn verify_pointer_for_cli(pointer: &EvidencePointer) -> Result<Value> {
     };
 
     if let Some(tombstone) = read_tombstone(&target, &pointer.raw_hash)? {
-        return Ok(tombstoned_verify_output(tombstone));
+        return checkpoint.finish(tombstoned_verify_output(tombstone));
     }
     if PurgeState::new(&target.kcs_dir).barrier_blocks(&pointer.raw_hash)? {
-        return Ok(not_found_verify_output(&target, &pointer.raw_hash));
+        return checkpoint.finish(not_found_verify_output(&target, &pointer.raw_hash));
     }
 
     let store = ObjectStore::new(&target.kcs_dir);
     match store.inspect_object(ObjectKind::Raw, &pointer.raw_hash) {
         Ok(_) => {}
         Err(error) if is_store_not_found(&error) => {
-            return Ok(not_found_verify_output(&target, &pointer.raw_hash));
+            return checkpoint.finish(not_found_verify_output(&target, &pointer.raw_hash));
         }
         Err(error) => return Err(error),
     }
@@ -168,13 +175,13 @@ fn verify_pointer_for_cli(pointer: &EvidencePointer) -> Result<Value> {
         return Err(invalid_pointer_identity_error(pointer));
     }
     if let Some(tombstone) = read_tombstone(&target, &pointer.raw_hash)? {
-        return Ok(tombstoned_verify_output(tombstone));
+        return checkpoint.finish(tombstoned_verify_output(tombstone));
     }
     if PurgeState::new(&target.kcs_dir).barrier_blocks(&pointer.raw_hash)? {
-        return Ok(not_found_verify_output(&target, &pointer.raw_hash));
+        return checkpoint.finish(not_found_verify_output(&target, &pointer.raw_hash));
     }
 
-    Ok(json!({
+    checkpoint.finish(json!({
         "status": "alive",
         "details": {
             "scope_id": pointer.scope_id,
@@ -484,6 +491,7 @@ fn verify_objects_with_limits(
                 &purge,
                 raw_hash,
                 &commits,
+                &trees,
                 &reachable,
                 &invocation_time,
             )
@@ -677,7 +685,14 @@ fn verify_objects_with_limits(
         if raw_affected.contains_key(&raw_hash) {
             continue;
         }
-        let lookup = canonical_lookup(&purge, &raw_hash, &commits, &reachable, &invocation_time);
+        let lookup = canonical_lookup(
+            &purge,
+            &raw_hash,
+            &commits,
+            &trees,
+            &reachable,
+            &invocation_time,
+        );
         if let Some(reason) = lookup.tombstone_error {
             state.finding("tombstone_corrupt", &raw_hash, &reason, &[]);
         }
@@ -738,7 +753,14 @@ fn verify_objects_with_limits(
             // §F (LC34-LC38): canonical final event basis, not marker-pair
             // presence — a tombstone and erase receipt coexisting is not
             // itself a finding (§C computes canonical over both).
-            let lookup = canonical_lookup(&purge, raw_hash, &commits, &reachable, &invocation_time);
+            let lookup = canonical_lookup(
+                &purge,
+                raw_hash,
+                &commits,
+                &trees,
+                &reachable,
+                &invocation_time,
+            );
             if let Some(reason) = lookup.tombstone_error {
                 state.finding("tombstone_corrupt", raw_hash, &reason, &affected);
             }
@@ -787,7 +809,14 @@ fn verify_objects_with_limits(
         // resolver-side rule is the same corruption class), so it falls
         // through to the recovery/`missing_raw` path below like an unmarked
         // absence would.
-        let lookup = canonical_lookup(&purge, raw_hash, &commits, &reachable, &invocation_time);
+        let lookup = canonical_lookup(
+            &purge,
+            raw_hash,
+            &commits,
+            &trees,
+            &reachable,
+            &invocation_time,
+        );
         if let Some(reason) = lookup.tombstone_error {
             state.finding("tombstone_corrupt", raw_hash, &reason, &affected);
             continue;
@@ -1489,6 +1518,7 @@ fn canonical_lookup(
     purge: &PurgeState,
     raw_hash: &str,
     commits: &BTreeMap<String, CommitObject>,
+    trees: &BTreeMap<String, TreeObject>,
     reachable: &BTreeSet<String>,
     invocation_time: &str,
 ) -> CanonicalLookup {
@@ -1500,6 +1530,7 @@ fn canonical_lookup(
                 raw_hash,
                 &record.events,
                 commits,
+                trees,
                 reachable,
                 invocation_time,
             ) {
@@ -1518,6 +1549,7 @@ fn canonical_lookup(
                 raw_hash,
                 &receipt.events,
                 commits,
+                trees,
                 reachable,
                 invocation_time,
             ) {
@@ -1543,6 +1575,7 @@ fn validate_marker_events(
     raw_hash: &str,
     events: &[LifecycleEvent],
     commits: &BTreeMap<String, CommitObject>,
+    trees: &BTreeMap<String, TreeObject>,
     reachable: &BTreeSet<String>,
     invocation_time: &str,
 ) -> std::result::Result<(), String> {
@@ -1564,7 +1597,14 @@ fn validate_marker_events(
                 let previous = events
                     .get(previous_index)
                     .ok_or_else(|| "retired event has no preceding event".to_owned())?;
-                validate_retired_event(event, &previous.in_commit, commits, reachable)?;
+                validate_retired_event(
+                    raw_hash,
+                    event,
+                    &previous.in_commit,
+                    commits,
+                    trees,
+                    reachable,
+                )?;
             }
         }
     }
@@ -1610,14 +1650,23 @@ fn validate_purge_or_erase_in_commit(
 /// LC20: terminal `retired`'s `resurrection_commit` must be ref-reachable and
 /// a (strict) descendant of the immediately-preceding `purged`/`erased`
 /// event's `in_commit` — i.e. the republication happened *after* that purge.
-/// The tree-membership leaf defense-in-depth check (08 §3.1 step 8-equivalent,
-/// skipped when the resurrection commit's tree has been shallow-discarded) is
-/// not implemented here — a documented gap (fsck still validates ancestry and
-/// ref-reachability, just not the extra leaf re-check).
+/// Additionally (defense-in-depth, 08-evidence-pointer-spec.md step 8's own
+/// tree-membership re-check), when the resurrection commit's tree has NOT
+/// been shallow-discarded, that tree must actually contain a leaf entry for
+/// this same `raw_hash` — a `retired` event whose resurrection commit exists,
+/// is ref-reachable, and descends correctly, but whose tree simply never
+/// carried this raw_hash at all, is still corruption (a forged/mismatched
+/// resurrection link). `trees` mirrors this module's own inventory-scanned
+/// tree map (`fsck`'s `trees`, keyed by tree hash — physically-absent trees,
+/// including a shallow-discarded one, are simply absent from it, so the leaf
+/// check is skipped rather than misreported as corruption for a legitimately
+/// shallow auto-type publication commit).
 fn validate_retired_event(
+    raw_hash: &str,
     event: &LifecycleEvent,
     previous_in_commit: &str,
     commits: &BTreeMap<String, CommitObject>,
+    trees: &BTreeMap<String, TreeObject>,
     reachable: &BTreeSet<String>,
 ) -> std::result::Result<(), String> {
     let resurrection_commit = event
@@ -1627,9 +1676,9 @@ fn validate_retired_event(
     if !reachable.contains(resurrection_commit) {
         return Err("retired event resurrection_commit is not ref-reachable".to_owned());
     }
-    if !commits.contains_key(resurrection_commit) {
+    let Some(commit) = commits.get(resurrection_commit) else {
         return Err("retired event resurrection_commit object is missing or corrupt".to_owned());
-    }
+    };
     if resurrection_commit == previous_in_commit
         || !is_ancestor(commits, previous_in_commit, resurrection_commit)
     {
@@ -1638,6 +1687,20 @@ fn validate_retired_event(
                 .to_owned(),
         );
     }
+    if let Some(tree) = trees.get(&commit.tree) {
+        if !tree.entries.iter().any(|entry| entry.raw_hash == raw_hash) {
+            return Err(
+                "retired event resurrection_commit tree does not contain a leaf for this raw_hash"
+                    .to_owned(),
+            );
+        }
+    }
+    // `trees.get(&commit.tree) == None`: the resurrection commit's tree is
+    // not physically present (shallow-discarded, or GC'd) — LC20's explicit
+    // "tree 不在時は本検証を省略する" carve-out. A tree that IS present but
+    // fails to parse already produced its own `tree_corrupt` finding
+    // elsewhere in the fsck scan that built `trees`, independent of this
+    // function.
     Ok(())
 }
 
@@ -1696,13 +1759,14 @@ fn valid_dead_terminal(
     purge: &PurgeState,
     raw_hash: &str,
     commits: &BTreeMap<String, CommitObject>,
+    trees: &BTreeMap<String, TreeObject>,
     reachable: &BTreeSet<String>,
     invocation_time: &str,
 ) -> bool {
     if verified_raws.contains(raw_hash) {
         return false;
     }
-    let lookup = canonical_lookup(purge, raw_hash, commits, reachable, invocation_time);
+    let lookup = canonical_lookup(purge, raw_hash, commits, trees, reachable, invocation_time);
     matches!(
         lookup.canonical.map(|canonical| canonical.event.kind),
         Some(EventKind::Purged) | Some(EventKind::Erased)

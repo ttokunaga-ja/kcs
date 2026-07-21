@@ -2493,18 +2493,14 @@ fn cl70_device_global_path_and_wal_busy_timeout() {
 /// outside the migration module itself (which legitimately references them as
 /// strings to rename `.migrated`).
 ///
-/// **Known-failing, intentionally `#[ignore]`d — not silently dropped.** This
-/// session kept `budget::CostLedger`/`ReservationLedger` (the old JSONL
-/// read-write path) and its ~40 call sites across `main.rs` in place rather
-/// than attempting that much larger, separately-scoped migration (see the
-/// implementation report's "unfinished" section) — `budget.rs`/`main.rs` and
-/// several pre-existing test fixtures still reference the legacy names for
-/// real, not just historically. The scan mechanism itself is correct and
-/// ready: once a follow-up subagent completes the JSONL rip-out, remove
-/// `#[ignore]` and this contract becomes a real regression guard.
+/// 2026-07-21: the JSONL rip-out is complete — `budget::CostLedger`/
+/// `ReservationLedger` (the old JSONL read-write path) and every one of their
+/// ~40 call sites across `main.rs` (F8 reservation/charge flow), plus
+/// `purge.rs`'s reservation-close call site, are retired in favor of
+/// `kcs_pipeline::ledger` (`cost-ledger.sqlite`). `budget.rs` now holds only
+/// the ledger-storage-independent config/decision pieces. This contract is no
+/// longer `#[ignore]`d — it is a live regression guard from here on.
 #[test]
-#[ignore = "CL71 not yet satisfied: budget::CostLedger/ReservationLedger (JSONL) still in \
-            use by main.rs's F8 reservation flow — see the implementation report"]
 fn cl71_legacy_jsonl_names_absent_outside_the_migration_module() {
     let legacy_names = [
         "cost-ledger.jsonl",
@@ -2512,7 +2508,16 @@ fn cl71_legacy_jsonl_names_absent_outside_the_migration_module() {
         "cost-ledger-reclaimed.jsonl",
         "cost-ledger.lock",
     ];
-    let allowed_files = ["ledger/migrate.rs", "ledger/migrate.rs.bak"];
+    // `migrate.rs` legitimately references the legacy names as strings to rename
+    // `.migrated`; this test file itself legitimately references them too, in the
+    // `legacy_names` array literal directly below (self-exclusion — without it this
+    // scan would always find itself, regardless of whether the rest of `crates/` is
+    // clean).
+    let allowed_files = [
+        "ledger/migrate.rs",
+        "ledger/migrate.rs.bak",
+        "kcs-cli/tests/step4b_ledger_contract.rs",
+    ];
     let crates_dir = workspace_root().join("crates");
     let mut offending = Vec::new();
     walk_rust_files(&crates_dir, &mut |path, contents| {

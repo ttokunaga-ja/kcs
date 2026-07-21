@@ -793,9 +793,32 @@ fn is_safe_logical_id(value: &str) -> bool {
 
 #[must_use]
 pub fn is_valid_reservation_id(value: &str) -> bool {
-    value.len() <= MAX_TASK_ID_BYTES
+    (value.len() <= MAX_TASK_ID_BYTES
         && (value.starts_with("res_") || value.starts_with("reservation_"))
-        && is_safe_logical_id(value)
+        && is_safe_logical_id(value))
+        || is_uuid_shaped(value)
+}
+
+/// Whether `value` is a canonical hyphenated UUID (`8-4-4-4-12` lowercase hex).
+/// Accepts any UUID version — `cost-ledger.sqlite`'s `intent_token` (a UUIDv7,
+/// `kcs_pipeline::ledger::ops::new_intent_token`) is now stored in
+/// `TaskDescriptor::reservation_id` as the durable ledger row selector (the
+/// `res_`/`reservation_` prefix forms above are the legacy `budget.rs`
+/// JSONL-ledger identity, kept only so a pre-existing `tasks.jsonl` line is not
+/// misclassified as corrupt after the migration — `tasks.jsonl` is loss-tolerant
+/// (docs/04-pipeline.md §5.1), so no live code ever mints that shape anymore).
+#[must_use]
+fn is_uuid_shaped(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    bytes.len() == 36
+        && bytes[8] == b'-'
+        && bytes[13] == b'-'
+        && bytes[18] == b'-'
+        && bytes[23] == b'-'
+        && bytes
+            .iter()
+            .enumerate()
+            .all(|(index, byte)| matches!(index, 8 | 13 | 18 | 23) || byte.is_ascii_hexdigit())
 }
 
 fn is_utc_month(value: &str) -> bool {

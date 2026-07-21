@@ -879,6 +879,43 @@ pub fn recovery_candidates(conn: &Connection) -> Result<Vec<BatchRequestRow>> {
     Ok(out)
 }
 
+/// CL45 (04 §5.4): the `request_kind = 'sync'` counterpart of
+/// [`recovery_candidates`] — rows `recovery_candidates` itself explicitly
+/// excludes (its own doc comment: "handled by §G's own crash-recovery pass,
+/// not job/upload matching"). Scoped to one `scope_id` (a sync row belongs to
+/// exactly one scope; only that scope's `.kcs/.lock` holder has authority to
+/// reconcile it — unlike the device-global bounded sweep of §H, which is a
+/// separate mechanism for `scope_id='device'` rows only) and gated on
+/// `stale_after_at` (NULL — a row from before `sync_effective_timeout_seconds`
+/// was threaded through, or a caller that never supplied one — is always
+/// eligible, matching `phase1_intent`'s own lenient default): a row whose
+/// `stale_after_at` has not yet elapsed may still be a live, in-flight sync
+/// call from a concurrent process and must not be raced.
+pub fn sync_recovery_candidates(
+    conn: &Connection,
+    scope_id: &str,
+    now_ms: i64,
+) -> Result<Vec<BatchRequestRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT scope_id, adapter_kind, input_hash, tool_profile_hash, state, request_kind,
+                intent_token, upload_id, batch_job_id, provider_scope_id, job_create_started_at,
+                stale_after_at, submission_seq, attempts, contract_violation_count, estimated_usd,
+                error, completed_at, created_at
+         FROM batch_requests
+         WHERE request_kind = 'sync'
+           AND state IN (0, 1)
+           AND scope_id = ?1
+           AND (stale_after_at IS NULL OR stale_after_at <= ?2)
+         ORDER BY adapter_kind, input_hash, tool_profile_hash",
+    )?;
+    let rows = stmt.query_map(params![scope_id, now_ms], row_to_batch_request)?;
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row?);
+    }
+    Ok(out)
+}
+
 /// CL34 — `found`: self-describe `batch_job_id` if a prior crash left it
 /// unrecorded (relevant only when the row was already at `state=1` with
 /// `batch_job_id IS NULL` — a crash right after phase 2b's job-create call

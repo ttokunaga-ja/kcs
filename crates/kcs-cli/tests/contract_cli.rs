@@ -377,11 +377,16 @@ fn m1_concurrent_index_loser_is_locked_and_store_intact() {
             }
         }
     }
-    let ledger = device_home.path().join("data/kcs/cost-ledger.jsonl");
-    if let Ok(text) = fs::read_to_string(&ledger) {
-        for line in text.lines().filter(|line| !line.trim().is_empty()) {
-            serde_json::from_str::<Value>(line).expect("corrupt cost-ledger JSONL line");
-        }
+    let ledger_path = device_home.path().join("data/kcs/cost-ledger.sqlite");
+    if ledger_path.exists() {
+        // A genuinely-openable SQLite file (not a torn/partial write) is the
+        // SQLite-era equivalent of the retired JSONL ledger's "every line still
+        // parses" check.
+        rusqlite::Connection::open(&ledger_path)
+            .and_then(|conn| {
+                conn.query_row("PRAGMA schema_version", [], |row| row.get::<_, i64>(0))
+            })
+            .expect("cost-ledger.sqlite must remain a valid, openable database");
     }
 }
 
@@ -413,32 +418,19 @@ fn m1c_corrupt_tasks_jsonl_is_store_corrupt_not_schema() {
         .ends_with("tasks.jsonl"));
 }
 
-// M1(c): the same for the device-global cost-ledger.jsonl (read via budget
-// status). Uses a dedicated XDG home so the shared test data home is untouched.
-#[test]
-fn m1c_corrupt_cost_ledger_is_store_corrupt_not_schema() {
-    let temp = tempfile::tempdir().unwrap();
-    let device_home = tempfile::tempdir().unwrap();
-    let mk = || assert_command_with_device_home(device_home.path());
-    mk().arg("init").current_dir(temp.path()).assert().success();
-    let ledger = device_home.path().join("data/kcs/cost-ledger.jsonl");
-    fs::create_dir_all(ledger.parent().unwrap()).unwrap();
-    fs::write(&ledger, "garbage not json\n").unwrap();
-    let out = mk()
-        .args(["status", "--json"])
-        .current_dir(temp.path())
-        .assert()
-        .code(4)
-        .get_output()
-        .stderr
-        .clone();
-    let err: Value = serde_json::from_slice(&out).unwrap();
-    assert_eq!(err["error_code"], "KCS-E-STORE-CORRUPT-001");
-    assert!(err["context"]["path"]
-        .as_str()
-        .unwrap()
-        .ends_with("cost-ledger.jsonl"));
-}
+// M1(c) note (2026-07-21): this test's exact premise ("a corrupt legacy JSONL
+// charge ledger file → KCS-E-STORE-CORRUPT-001 exit 4") was retired along with
+// that JSONL ledger.
+// `cost-ledger.sqlite`'s corruption mode is entirely different (a `rusqlite`
+// open/query failure, not a JSON parse failure), and `pipeline_to_kcs`'s
+// `PipelineError::Sqlite` arm currently falls through to its generic
+// `KcsError::schema` mapping (exit 2 KCS-E-CONFIG-SCHEMA-001) rather than a
+// dedicated STORE-CORRUPT classification — reclassifying a corrupt/unopenable
+// `cost-ledger.sqlite` file as exit 4 (matching this retired test's intent) is
+// flagged as a follow-up item in the implementation report; it is out of this
+// session's 3-item scope (JSONL rip-out / device-row wiring / CL61) and touches
+// error-code semantics shared with legitimate BUSY/LOCKED SQLite conditions that
+// must NOT be reclassified as STORE-CORRUPT, so it needs its own careful pass.
 
 #[test]
 fn ct_lock_003_read_commands_do_not_acquire_lock() {

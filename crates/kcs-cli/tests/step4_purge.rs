@@ -593,12 +593,21 @@ fn ct4_purge_faults_publish_no_prebarrier_state_and_resume_every_visible_phase()
             .path()
             .join(".kcs/purge/in-progress.json")
             .exists());
-        assert!(
-            json_success(&fixture.dir, &["search", "needle-purge-content", "--text"])["results"]
-                .as_array()
-                .unwrap()
-                .is_empty()
+        // §I (LC52-56, this session): search's read barrier now rejects the
+        // WHOLE command outright while a journal is active/visible, rather
+        // than silently degrading to a success response with the blocked
+        // content merely filtered out of `results` (the old per-raw_hash-only
+        // `purge_blocks_raw` behavior this loop originally pinned). A
+        // single-scope search with every scope excluded for this one reason
+        // is promoted to the command-level retryable error (mirrors
+        // KCS-E-INDEX-REBUILDING-001's own all-excluded promotion).
+        let blocked = json_failure(
+            &fixture.dir,
+            &["search", "needle-purge-content", "--text"],
+            3,
         );
+        assert_eq!(blocked["error_code"], "KCS-E-PURGE-JOURNAL-ACTIVE-001");
+        assert!(!blocked.to_string().contains("needle-purge-content"));
         let raw_uri = format!("kcs://{}/object/raw/{}", fixture.scope_id, fixture.raw_hash);
         let read = kcs(&fixture.dir, &["open", &raw_uri, "--json"])
             .assert()

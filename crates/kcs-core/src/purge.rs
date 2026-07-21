@@ -1223,10 +1223,28 @@ impl PurgeState {
         Ok(next)
     }
 
-    /// LC45: read-side check. `last_lifecycle_epoch` is the caller's
-    /// `index_metadata` value (owned by kcs-index, outside this crate); any
-    /// mismatch in either direction is retryable
-    /// (`KCS-E-INDEX-REBUILDING-001`-class).
+    /// §I checkpoint 1 (LC53): the current `.kcs/tombstones/lifecycle-epoch`
+    /// counter value, captured as the read barrier's baseline for the later
+    /// checkpoint-2 comparison (LC54, via [`Self::lifecycle_epoch_matches`]
+    /// called with the value this returns). A missing file reads as 0 (LC41:
+    /// never-created means zero lifecycle events have ever been recorded —
+    /// this is the same lenient-default semantics `lifecycle_epoch_matches`
+    /// and `recover_lifecycle_epoch` already use, not the fail-closed rule
+    /// LC39 requires of `purge/epoch`).
+    pub fn read_lifecycle_epoch(&self) -> Result<u64> {
+        Ok(self.read_lifecycle_epoch_lenient()?.unwrap_or(0))
+    }
+
+    /// LC45/LC54: read-side check. `last_lifecycle_epoch` is either the
+    /// caller's `index_metadata` value (owned by kcs-index, outside this
+    /// crate — LC45's read-command rollback check) or a §I checkpoint-1
+    /// baseline this same struct captured via [`Self::read_lifecycle_epoch`]
+    /// (LC54's checkpoint-2 unchanged-since-start check) — both are "does the
+    /// counter still equal X" and share this one comparison. Any mismatch is
+    /// retryable (`KCS-E-INDEX-REBUILDING-001`-class for LC45,
+    /// `KCS-E-PURGE-JOURNAL-ACTIVE-001` for LC54 — same numeric check, two
+    /// different callers/error codes; see docs/05-runtime.md §3.5's own note
+    /// not to conflate the two).
     pub fn lifecycle_epoch_matches(&self, last_lifecycle_epoch: u64) -> Result<bool> {
         Ok(self.read_lifecycle_epoch_lenient()?.unwrap_or(0) == last_lifecycle_epoch)
     }

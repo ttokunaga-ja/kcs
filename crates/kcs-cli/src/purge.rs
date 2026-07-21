@@ -26,7 +26,11 @@ use kcs_core::scope::{
 };
 use kcs_core::{ExitCode, KcsError, Result};
 use kcs_index::fts::{FtsSchemaConfig, FtsTokenizer, SqliteFtsIndex};
-use kcs_pipeline::budget::CostLedger;
+use kcs_pipeline::ledger::ops::{
+    get_batch_request, recovery_settle_unknown, resolve_abandon_selector, AbandonResolution,
+    AbandonSelector,
+};
+use kcs_pipeline::ledger::LedgerDb;
 use kcs_pipeline::markdownize::{
     load_validated_normalized_instance, NormalizedInstanceManifest, NormalizedUnitObject,
 };
@@ -307,7 +311,21 @@ fn execute_phase_machine(
     let mut report = load_phase_report(repo.kcs_dir())?.unwrap_or_default();
     let result = execute_visible_phases(repo, &state, &locked_plan, &mut journal, &mut report);
     match result {
-        Ok(()) => Ok(success_report(&locked_plan, &report)),
+        Ok(()) => {
+            // LC42-LC44 (item 2): purge's own `tombstoned`-phase marker
+            // append (and any resurrection retire folded into the same
+            // mutation) advances `.kcs/tombstones/lifecycle-epoch` directly
+            // (unlike `kcs index`/`reindex`/`repair --rebuild-db`, purge
+            // writes `sqlite.db` in place — `delete_derived_surfaces`'s
+            // `SqliteFtsIndex::open` on the live path, no temp+rename — so
+            // there is no later rename to discard this write). Without this,
+            // `index_metadata.last_lifecycle_epoch` goes stale the moment
+            // this purge completes and LC45's read-side check would reject
+            // every read command until an unrelated index-touching write
+            // happened to run.
+            crate::recover_index_generation(repo.kcs_dir())?;
+            Ok(success_report(&locked_plan, &report))
+        }
         Err(error) => Ok(incomplete_report(&locked_plan, &journal, &report, &error)),
     }
 }
@@ -951,18 +969,56 @@ fn delete_target_tasks(
         }
     }
 
-    let scope_id = read_scope_id(repo.kcs_dir())?;
-    let reservation_ledger = CostLedger::new(crate::cost_ledger_path()).reservation_ledger();
-    for task in &removed {
-        if let Some(claim) = task.reservation_claim() {
-            if reservation_ledger
-                .close_for_purge(claim, &scope_id)
-                .map_err(crate::pipeline_to_kcs)?
-            {
-                report.deleted.reservations = report.deleted.reservations.saturating_add(1);
+    // 04-pipeline.md §5.4/§5.8: a purged task's still-open sync-row ledger
+    // reservation (the online markdownize/embedding degenerate 2-phase, §5.4) can
+    // never be settled by any future attempt or recovery pass once its task row is
+    // gone — there is no task left to retry or reconcile it. Settle it now as
+    // `unknown_settled` (the same conservative "cannot confirm, so bill the
+    // reservation estimate" outcome the ledger's own crash recovery uses, CL45)
+    // rather than leaving a permanently-orphaned open row. Looked up by
+    // `intent_token` (persisted in `task.reservation_id` at charge time — see
+    // `main.rs`'s task-charge helpers), NOT by reconstructing the ledger's 4-tuple
+    // key from CURRENT config: purge must not guess a provider adapter_kind /
+    // tool_profile_hash from mutable configuration that may have changed since the
+    // reservation was made (the same constraint the retired JSONL
+    // `close_for_purge` documented for its adapter-kind-blind lookup).
+    let mut settled_reservations = 0u64;
+    if removed.iter().any(|task| task.reservation_id.is_some()) {
+        let ledger = LedgerDb::open(crate::ledger_db_path()).map_err(crate::pipeline_to_kcs)?;
+        for task in &removed {
+            let Some(token) = task.reservation_id.as_deref() else {
+                continue;
+            };
+            let resolution = resolve_abandon_selector(
+                ledger.connection(),
+                &AbandonSelector::IntentToken(token.to_owned()),
+            )
+            .map_err(crate::pipeline_to_kcs)?;
+            let AbandonResolution::Found(key) = resolution else {
+                // Already terminal + cleaned (or the token never resolved) —
+                // nothing left to settle, an idempotent no-op.
+                continue;
+            };
+            let Some(row) =
+                get_batch_request(ledger.connection(), &key).map_err(crate::pipeline_to_kcs)?
+            else {
+                continue;
+            };
+            if !row.state.is_inflight() {
+                // Sync rows clear `intent_token` on every terminal Tx (CL47), so a
+                // resolved-but-terminal row cannot actually occur here in
+                // practice; skip defensively rather than re-settling a charge.
+                continue;
             }
+            recovery_settle_unknown(ledger.connection(), &key, token, row.estimated_usd, true)
+                .map_err(crate::pipeline_to_kcs)?;
+            settled_reservations += 1;
         }
     }
+    report.deleted.reservations = report
+        .deleted
+        .reservations
+        .saturating_add(settled_reservations);
     if !removed.is_empty() {
         store.replace_all(&kept).map_err(crate::pipeline_to_kcs)?;
         report.deleted.tasks = report
@@ -971,20 +1027,6 @@ fn delete_target_tasks(
             .saturating_add(u64::try_from(removed.len()).unwrap_or(u64::MAX));
     }
     Ok(())
-}
-
-fn read_scope_id(kcs_dir: &Path) -> Result<String> {
-    let path = kcs_dir.join("scope.json");
-    let bytes = read_bounded_regular(&path, 64 * 1024)?
-        .ok_or_else(|| store_corrupt(&path, "scope identity is missing"))?;
-    let value: Value =
-        serde_json::from_slice(&bytes).map_err(|error| store_corrupt(&path, &error.to_string()))?;
-    value
-        .get("scope_id")
-        .and_then(Value::as_str)
-        .filter(|scope_id| !scope_id.is_empty())
-        .map(str::to_owned)
-        .ok_or_else(|| store_corrupt(&path, "scope identity is invalid"))
 }
 
 fn scrub_manifest(kcs_dir: &Path, targets: &BTreeSet<&str>) -> Result<u64> {

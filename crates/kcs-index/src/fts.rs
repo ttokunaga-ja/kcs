@@ -543,6 +543,11 @@ pub fn ensure_schema_on_connection(conn: &Connection, config: FtsSchemaConfig) -
             gen INTEGER NOT NULL DEFAULT 0,
             PRIMARY KEY (commit_hash, path)
         );
+        CREATE TABLE IF NOT EXISTS index_metadata (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            index_generation TEXT NOT NULL,
+            last_lifecycle_epoch INTEGER NOT NULL DEFAULT 0
+        );
         "#,
     )?;
 
@@ -588,6 +593,89 @@ pub fn ensure_schema_on_connection(conn: &Connection, config: FtsSchemaConfig) -
             embedding float[{CHUNK_VEC_DIMENSIONS}] distance_metric=cosine
         );"
     ))?;
+    Ok(())
+}
+
+/// `index_metadata`'s single row (04-pipeline.md §4.1 / Step4b LC42-45): the
+/// search-cursor-generation ULID and the lifecycle-epoch value this row was
+/// last synchronized against. `kcs_core::purge` owns the counter files this
+/// mirrors; this crate only stores the caller-supplied snapshot.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IndexMetadata {
+    pub index_generation: String,
+    pub last_lifecycle_epoch: u64,
+}
+
+/// The one `index_metadata` row, or `None` on a store that predates this
+/// table (LC42) — the table only ever holds zero or one row (`id=1`), never
+/// a partial one. Tolerates the table itself being absent (an
+/// un-schema'd connection, or a pre-Step4b `sqlite.db`) the same way as a
+/// present-but-empty table, so callers do not each need their own
+/// `table_exists` probe before this call.
+pub fn read_index_metadata(conn: &Connection) -> Result<Option<IndexMetadata>> {
+    if !table_exists(conn, "index_metadata")? {
+        return Ok(None);
+    }
+    Ok(conn
+        .query_row(
+            "SELECT index_generation, last_lifecycle_epoch FROM index_metadata WHERE id = 1",
+            [],
+            |row| {
+                let last_lifecycle_epoch: i64 = row.get(1)?;
+                Ok(IndexMetadata {
+                    index_generation: row.get(0)?,
+                    last_lifecycle_epoch: u64::try_from(last_lifecycle_epoch).unwrap_or(0),
+                })
+            },
+        )
+        .optional()?)
+}
+
+/// LC42: create the single `index_metadata` row only if absent — never
+/// overwrites an existing row (a fresh store's first write-command visit, or
+/// a pre-Step4b store's first encounter with this table). `generation` is
+/// the caller-minted ULID; `last_lifecycle_epoch` must be the *current*
+/// `.kcs/tombstones/lifecycle-epoch` counter value at the moment of this
+/// call — never the column's own `DEFAULT 0`, which LC42 explicitly warns
+/// would falsely read as a permanent rollback on every subsequent LC45
+/// read-side check.
+pub fn ensure_index_metadata(
+    conn: &Connection,
+    generation: &str,
+    last_lifecycle_epoch: u64,
+) -> Result<()> {
+    conn.execute(
+        "INSERT OR IGNORE INTO index_metadata (id, index_generation, last_lifecycle_epoch)
+         VALUES (1, ?1, ?2)",
+        params![
+            generation,
+            i64::try_from(last_lifecycle_epoch).unwrap_or(i64::MAX)
+        ],
+    )?;
+    Ok(())
+}
+
+/// LC25/LC44: unconditionally replace `index_metadata`'s row — a fresh
+/// `index_generation` ULID (retiring every outstanding search cursor, LC25)
+/// paired with the lifecycle-epoch value this rotation is now synchronized
+/// to (LC44's post-rollback-recovery write). Callers hold `.kcs/.lock` (a
+/// write command) when calling this; never called from a read-only path.
+pub fn rotate_index_generation(
+    conn: &Connection,
+    generation: &str,
+    last_lifecycle_epoch: u64,
+) -> Result<()> {
+    conn.execute(
+        "INSERT INTO index_metadata (id, index_generation, last_lifecycle_epoch)
+         VALUES (1, ?1, ?2)
+         ON CONFLICT (id) DO UPDATE SET
+             index_generation = excluded.index_generation,
+             last_lifecycle_epoch = excluded.last_lifecycle_epoch",
+        params![
+            generation,
+            i64::try_from(last_lifecycle_epoch).unwrap_or(i64::MAX)
+        ],
+    )?;
     Ok(())
 }
 
