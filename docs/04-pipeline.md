@@ -340,7 +340,10 @@ V6 mode:      mode_used = "full" の場合は full 出力契約として検証:
               manifest 側で failed へ遷移する)。V1〜V4 は適用しないが、**V5 の形式検査は
               full 出力の全成功 unit に適用し、V1 の同一配列内 unit_key 重複検査
               (要素数 = distinct key 数) も full の各配列に適用する**
-              (V1 と同じく failed_units には V5 を適用しない)
+              (V1 と同じく failed_units には V5 を適用しない — この免除は markdown 形式検査に
+              限る。**failed_units[].error_kind は §5.3 の閉 enum との membership を必ず検査し、
+              enum 外は contract violation として全体 reject する** — enum 外値が manifest に
+              到達すると retry 分類 (retryable / permanent) が機械判定不能になるため)
 ```
 
 **unit_ref 衝突の拒否**: 衝突とは **異なる `unit_key` が同一 `unit_ref`**

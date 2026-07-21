@@ -531,7 +531,7 @@ gc_policy(commit_type):
 receipt が説明する tree 欠落を正常 (shallow) として扱い、receipt なき欠落を corruption とする
 ([10-operations.md §7.5.1](10-operations.md)。これが無いと正規 GC と tree の偶発喪失を区別できない)。
 
-`shallow` 後の commit を `kcs view <commit>` した場合:
+`shallow` 後の commit を対象に view した場合 (`kcs view <path> --at <commit>` — 文法の正本は [06-cli-spec.md §1](06-cli-spec.md)。commit の metadata 表示は `kcs log` / `kcs inspect` 系が担う):
 
 ```text
 - メタ情報 (commit_hash, parents, message, timestamp, commit_type) は表示

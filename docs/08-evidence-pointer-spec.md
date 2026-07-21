@@ -107,7 +107,11 @@ kcs://scope_01J8ZQ.../sha256:9f2c.../sha256:abc123.../sha256:tool1.../sha256:chu
 - 第 2 セグメントがリテラル `object` の URI は **object 参照**であり、Evidence Pointer ではない:
   `kcs://<scope_id>/object/<type>/<hash>` (例: normalized view 内の画像参照
   `kcs://<scope_id>/object/image/<image_hash>`、[07-adapter-spec.md §5.2](07-adapter-spec.md))。
-  `kcs open` はこれを受理して該当 object を解決する。Evidence Pointer URI の第 2 セグメント (commit) は
+  `kcs open` はこれを受理して該当 object を解決する (**MVP で発行・受理される object URI は
+  type=image のみ** — 発行面は [07-adapter-spec.md §5.2](07-adapter-spec.md) の画像参照置換だけで、
+  他 type の URI は発行されない。受理側も image 以外は拒否 — [06-cli-spec.md §1.1](06-cli-spec.md)
+  手順 1a。type を追加する場合は 06 §1.1 に open semantics を定義してから)。Evidence Pointer URI の
+  第 2 セグメント (commit) は
   常に `sha256:` prefix を持つため、リテラル `object` と衝突しない。fork 複製 (`kcs import
   --as-new-scope`) 内の旧 scope_id を含む object URI は、文脈 store に該当 hash の object があれば
   自 store で解決する ([06-cli-spec.md §1.1](06-cli-spec.md) 手順 1a — hash が identity)。
