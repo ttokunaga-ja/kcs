@@ -152,7 +152,9 @@ scope の初回 materialize 経路を revoke の空振りで消費しない)。*
         [10-operations.md §12.3](10-operations.md)、truth [03-data-model.md §4.1](03-data-model.md))。
         `(scope_id, tool_id)` 単位の行で、失効・revoke は当該行の **status=revoked + revoked_at への
         更新** (atomic rename) で行う (行は削除しない — 監査保全)。送信 gate は
-        「`allow_network` が false でない **かつ** 行の scope_id が当該 scope.json の scope_id と
+        「`allow_network` の実効設定が true であり (**未設定・設定 key の喪失は gate 不成立** —
+        active 行が現存する場合は config へ true を再設定するだけで回復し、再承認は不要)、**かつ**
+        行の scope_id が当該 scope.json の scope_id と
         一致し、現在の execution_mode / tool_profile_hash に一致する `status=active` 行が存在する」の
         両立とする (**scope_id 不一致の行は gate に使わない** — fork 複製由来の旧 scope 行の残存で
         再承認を迂回させない。[06-cli-spec.md §10](06-cli-spec.md))。**`--online` の一時 opt-in は
@@ -452,7 +454,7 @@ metadata:
   adapter_id, model_family, version, embedding_profile_hash
 ```
 
-**Embedding 応答の受入検査** (markdownize の V1〜V6 に相当する): (1) `vectors[].id` は入力 id 集合と**全単射** (欠落・過剰・重複は違反)、(2) `dimensions` は profile と一致し全 vector が同次元、(3) 全要素が**有限値** (NaN/Inf 拒否) かつ**非ゼロ vector**、(4) float32 への決定的変換と **L2 正規化は core 側で実施**する (Adapter の正規化有無に依存しない)。**変換・正規化後の最終 vector にも (3) と同じ有限・非ゼロ (かつ単位ノルム — 許容誤差内) を再検査する** (underflow の零 vector / overflow の Inf を index に入れない — 違反は同じ contract violation)。違反応答は全体 reject — contract violation として課金・再試行は §5.8 相 3 と同じ規則に従う ([04-pipeline.md §5.8](04-pipeline.md)。再試行分類は [04-pipeline.md §5.3](04-pipeline.md))。`failed_units` 相当の部分失敗 field を持たない **all-or-nothing 契約は意図的**である (MVP は text chunk のみを embed し、失敗の粒度は request 再投入で足りる — Phase 4+ の multimodal 拡張で再検討)。
+**Embedding 応答の受入検査** (markdownize の V1〜V6 に相当する): (1) `vectors[].id` は入力 id 集合と**全単射** (欠落・過剰・重複は違反)、(2) `dimensions` は profile と一致し全 vector が同次元、(3) 全要素が**有限値** (NaN/Inf 拒否) かつ**非ゼロ vector**、(4) float32 への決定的変換と **L2 正規化は core 側で実施**する (Adapter の正規化有無に依存しない)。**変換・正規化後の最終 vector にも (3) と同じ有限・非ゼロ (かつ単位ノルム — 許容誤差内) を再検査する** (underflow の零 vector / overflow の Inf を index に入れない — 違反は同じ contract violation)、(5) 応答 metadata の `embedding_profile_hash`・`modality`・`distance` が期待 profile と一致する (同次元の別 vector space の混入を契約で拒否する — 不一致は同じ contract violation)。違反応答は全体 reject — contract violation として課金・再試行は §5.8 相 3 と同じ規則に従う ([04-pipeline.md §5.8](04-pipeline.md)。再試行分類は [04-pipeline.md §5.3](04-pipeline.md))。`failed_units` 相当の部分失敗 field を持たない **all-or-nothing 契約は意図的**である (MVP は text chunk のみを embed し、失敗の粒度は request 再投入で足りる — Phase 4+ の multimodal 拡張で再検討)。
 
 Text Embedding Adapter / Image Embedding Adapter は**採用しない**。同一 Embedding Adapter が同一 profile で多モダリティを単一 vector space へ写像する。
 
@@ -500,11 +502,14 @@ Batch モードを持つ online Adapter (Markdownize / Embedding) は、[04-pipe
 ```
 upload(bytes, filename)        client 指定の filename を受理する (intent_token 埋込のため)
 create_job(inputs, metadata)   client 任意の metadata (intent_token + タスクキー 4 組) を job に付与できる
-get_job(job_id) / list_jobs()  list は account/workspace scope 内の全件を pagination 走査できる
+get_job(job_id) / list_jobs()  list は account/workspace scope 内の全件を pagination 走査でき、
+                               どちらも create_job で付与した metadata を完全・不変に返却する
+                               (帰属・orphan 報告の前提 — [04-pipeline.md §5.8](04-pipeline.md))
 list_uploads()                 scope 内の upload を pagination 走査でき、filename (intent_token 埋込) で
                                照合できる — upload_id 記録前クラッシュの残骸発見の唯一の経路
 delete_upload(upload_id)       404 (不存在) は削除成功として報告する
-fetch_output(job_id)
+fetch_output(job_id)           出力 JSONL は入力ごとの custom_id (= unit_key) を保存して返却する
+                               ([04-pipeline.md §5.8](04-pipeline.md) の unit 復元の前提)
 provider_scope_id()            下記の不変識別子を返す
 ```
 
@@ -537,6 +542,10 @@ provider_scope_id()            下記の不変識別子を返す
    なく **sync online Adapter にも共通** — [04-pipeline.md §5.4](04-pipeline.md) の sync 記帳規律が参照する) — KCS は submit_rejected の
    terminal 化と同一 Tx で記帳する (**報告値が有効なら provider 値 (`estimated=0`)、無効・欠落は
    estimated 縮退** — [04-pipeline.md §5.4](04-pipeline.md) の事前検証と DDL 注記)
+
+7. job id / provider request id が、同一 adapter_kind 内で account / workspace を跨いで KCS の
+   回復期限 (既定 48h) 内に再利用されないこと (実質一意 — [04-pipeline.md §5.8](04-pipeline.md) の
+   記帳済み判別が task key × job id を突合キーとする前提)
 
 `mistral_ocr_markdownize` の Batch モードは 2026-07-03 の実地検証 (§5.2 末尾) の範囲でこの条件下で
 採用済み。
@@ -641,8 +650,9 @@ MVP における Adapter の脅威モデルを次のとおり確定する。
 2. [adapter.policy] は「KCS 側の入力制御 + 事後監査」の規約であり、
    sandbox による強制保証ではない。
    - `max_input_bytes` は **AdapterRun 1 回の入力 (prepared input の canonical bytes 合計)** に
-     適用する — 超過は送信前に当該 task を terminal failed (invalid_input・非再試行) とし、
-     送信しない (課金なし)
+     適用する (**AdapterRun = 1 回の Adapter 呼出 = 1 request / job** — §4・§5.7 の課金報告と同一
+     単位。task 全体の総量上限ではない — 総量は budget cap 側が律する) — 超過は送信前に当該 task を
+     terminal failed (invalid_input・非再試行) とし、送信しない (課金なし)
    - KCS は allowed_scope 外のファイルを Adapter に渡さない (入力制御)
    - KCS は allow_network=false の Adapter にオンライン送信前提の task を発行しない
    - AdapterRun (task_id / input_hashes / output_hashes / status) を監査ログとして残す
@@ -775,4 +785,4 @@ explicit re-normalize         同 (raw_hash, tool_profile_hash) に対して gen
                               (03-data-model.md §2.1)
 ```
 
-Markdown の content hash は持たない ([03-data-model.md §5](03-data-model.md))。同一 `(raw_hash, tool_profile_hash)` から複数回生成した結果が異なっても、**最初に確定したインスタンスを永続化** し、以後は再生成しない (first-instance-wins)。
+Markdown の content hash は持たない ([03-data-model.md §5](03-data-model.md))。同一 `(raw_hash, tool_profile_hash)` から複数回生成した結果が異なっても、**最初に確定したインスタンスを永続化** し、以後は再生成しない (first-instance-wins — 上記 explicit re-normalize の gen+1 は新 instance の追加であり、確定済み instance の置換・再生成ではない)。

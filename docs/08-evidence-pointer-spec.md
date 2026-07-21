@@ -53,7 +53,7 @@ KCS:   commit + raw_hash + chunk_hash   → ファイル移動・リネーム・
 
 | フィールド | 役割 | 不変条件 |
 | --- | --- | --- |
-| `schema_version` | Evidence Pointer schema の semver | breaking change で bump |
+| `schema_version` | Evidence Pointer schema の version — **wire 上は URI の `sv` (§2.3) と同じく MAJOR のみの整数** (semver の MINOR/PATCH は載せない — §8) | breaking change (MAJOR) で bump |
 | `commit` | commit object の content hash (commit_hash, [03-data-model.md §8.1](03-data-model.md)) | append-only。GC (shallow 化) でも失われない |
 | `raw_hash` | 原文バイト列の identity | 移動・リネームで不変 |
 | `tool_profile_hash` | Markdownize Adapter capability の identity | tool 変更で別 chunk に飛ばない保証 |
@@ -73,7 +73,10 @@ KCS:   commit + raw_hash + chunk_hash   → ファイル移動・リネーム・
 表示用 field は、解決が成功した場合は**解決結果の canonical 値 (tree / chunk object 由来) を優先して
 表示し、pointer 入力値と相違するときは入力値を無視する** — 正しい必須 tuple に偽の表示 metadata
 (path / heading / span) を付けた pointer が、alive 判定のままそのまま人間向け引用に使われることを
-防ぐ (これらは解決には元々使わない — §3.1 手順 8 の整合検証は必須 tuple のみ)。
+防ぐ (これらは解決には元々使わない — §3.1 手順 8 の整合検証は必須 tuple のみ)。**shallow 解決
+(§3.1 手順 2a) では tree 由来の canonical 値が得られない field (`path_at_commit`) を pointer 入力値で
+代替表示しない** — `path unavailable (commit_shallow)` 等の欠落表示とする (chunk object 由来の field は
+通常どおり canonical 値を表示する)。
 
 `path_at_commit` は **表示用** であり、解決には使わない。実際の解決は `commit + raw_hash` で行う (path はリネーム履歴をまたいでも追えるが、root 信頼は raw_hash 側)。
 
@@ -417,7 +420,7 @@ kcs evidence retarget <pointer> [--latest|--at <commit>]
 }
 ```
 
-対応付けは `heading_path` の完全一致 (`heading_path_exact`) → 正規化一致 + span 重なり率 (`heading_path_fuzzy`) の順に試みる。**span 重なり率は、新旧の normalized text 間で text alignment が成立した領域内でのみ用いる** — 異なる tool_profile の unit-local byte offset は共通座標を持たないため直接比較しない。alignment が成立しない場合は対応なし (ambiguous — fail-closed)。照合に使う旧側の heading・section・span は、**旧 pointer を解決した canonical 値 (旧 chunk / tree 由来) から取得する** — pointer 入力の optional 欄は使わない (偽 heading による別 section への誘導を防ぐ。§7.2 の表示規則と同じ姿勢)。**retarget の前提は旧 chunk / tree object が CAS に存在すること** (orphan 恒久保持の帰結として通常成立する) — 不在の場合 retarget は実行できず、§3.2 / §4.3 の解決規則に従い not_found / unverifiable 側へ降着する。**意味ベースの対応付け (semantic_fingerprint) は MVP に含めない**。chunk レベルの fingerprint 実体が未定義であり、embedding は retarget が必要な場面 (tool_profile 変更) で互換性ルール ([03-data-model.md §7](03-data-model.md)) により新旧比較が成立しない恐れがあるため。導入する場合は Phase 4+ で match_method の MINOR 追加 (§8) として行う。
+対応付けは `heading_path` の完全一致 (`heading_path_exact`) → 正規化一致 + span 重なり率 (`heading_path_fuzzy`) の順に試みる。**完全一致が複数 chunk に成立する場合も一意に定まらないため `KCS-E-EVIDENCE-RETARGET-AMBIG-001` (fail-closed — 先勝ちで選ばない)**。**span 重なり率は、新旧の normalized text 間で text alignment が成立した領域内でのみ用いる** — 異なる tool_profile の unit-local byte offset は共通座標を持たないため直接比較しない。alignment が成立しない場合は対応なし (ambiguous — fail-closed)。照合に使う旧側の heading・section・span は、**旧 pointer を解決した canonical 値 (旧 chunk / tree 由来) から取得する** — pointer 入力の optional 欄は使わない (偽 heading による別 section への誘導を防ぐ。§7.2 の表示規則と同じ姿勢)。**retarget の前提は旧 chunk / tree object が CAS に存在すること** (orphan 恒久保持の帰結として通常成立する) — 不在の場合 retarget は実行できず、§3.2 / §4.3 の解決規則に従い not_found / unverifiable 側へ降着する。**意味ベースの対応付け (semantic_fingerprint) は MVP に含めない**。chunk レベルの fingerprint 実体が未定義であり、embedding は retarget が必要な場面 (tool_profile 変更) で互換性ルール ([03-data-model.md §7](03-data-model.md)) により新旧比較が成立しない恐れがあるため。導入する場合は Phase 4+ で match_method の MINOR 追加 (§8) として行う。
 
 retarget は **AI Agent からの呼び出しを前提** にしているため、レスポンスは [06-cli-spec.md §4](06-cli-spec.md) の `--json` 契約に従う。Phase 5 で構造化 API を導入する際もこの JSON schema を互換性契約として維持する ([06-cli-spec.md §9](06-cli-spec.md))。
 

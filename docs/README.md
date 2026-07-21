@@ -17,6 +17,7 @@ KCS は **local-first** な知識アーカイブ。データの主権はあな�
 1. Evidence Pointer        path ではなく commit / tree / raw_hash / chunk_hash / span で根拠を指す
 2. Markdown 正規化         全ファイル種別を Normalized Markdown に変換、人間と AI が同じビューを使う
 3. Content-addressed CAS   全ファイルを CAS object として保存。削除済み・過去版・移動済みでも到達可能
+                           (ユーザー明示の purge / erase を除く)
 ```
 
 最低体験ライン:

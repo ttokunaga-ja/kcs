@@ -416,7 +416,7 @@ MVP の標準全文検索バックエンドは SQLite FTS5 とする。Vector �
 
 Tantivy など他の BM25 / full-text backend は将来候補として扱い、採用する場合は本書を更新する (破壊的変更扱い)。
 
-> **リスク注記 (sqlite-vec)**: sqlite-vec は v0 系で API 未安定、ANN index を持たない全件 brute-force KNN であり、成熟度リスクがある。M3-1 の性能目標 (20 scopes / 合計 10 万 chunk で p95 < 5 秒、[09-mvp-scope.md §4.1](09-mvp-scope.md)) は brute-force で達成可能な規模であり、text fallback ([05-runtime.md §1.1](05-runtime.md)) と本節の Future 差し替え経路が設計済みのため、MVP では標準として維持する。Step 3 の最初のタスクとして (1) 使用する sqlite-vec のバージョンを pin し、(2) 合計 10 万 chunk 規模での brute-force レイテンシ計測 spike を行う。目標未達の場合も MVP では対応せず、Future バックエンドの採用判断材料として記録する。
+> **リスク注記 (sqlite-vec)**: sqlite-vec は v0 系で API 未安定、ANN index を持たない全件 brute-force KNN であり、成熟度リスクがある。M3-1 の性能目標 (20 scopes / 合計 10 万 chunk で p95 < 5 秒、[09-mvp-scope.md §4.1](09-mvp-scope.md)) は brute-force で達成可能な規模であり、text fallback ([05-runtime.md §1.1](05-runtime.md)) と本節の Future 差し替え経路が設計済みのため、MVP では標準として維持する。Step 3 の最初のタスクとして (1) 使用する sqlite-vec のバージョンを pin し、(2) 合計 10 万 chunk 規模での brute-force レイテンシ計測 spike を行う。目標未達の場合も MVP では**バックエンドの差し替えでは**対応せず (query-path の通常の実装最適化は妨げない)、Future バックエンドの採用判断材料として記録する。
 
 ```text
 MVP:
@@ -637,16 +637,23 @@ MVP では手動実行のみとする。自動定期検証 (スケジューラ�
      **復元後は `PRAGMA integrity_check` と cost_ledger / batch_requests 両表の存在を確認する**) で
      バックアップし、復元は KCS プロセス非実行中に行い、復元後は
      §5.8 の回復 (reconcile) が完了するまで新規 Batch 投入を行わない ([04-pipeline.md §5.4](04-pipeline.md))。
-     **復元した DB は backup 以後の投入記録を失っている** — 復元後の初回回復では、記録済み provider
-     scope の全ページ一覧 ([04-pipeline.md §5.8](04-pipeline.md) の confirmed-absent と同じ走査) のうち
-     `batch_requests` に対応行が無い job / upload を次の帰属規則で報告する (**帰属は token 形式ではなく
-     job metadata の task key 4 組が担う** — [04-pipeline.md §5.8](04-pipeline.md) の帰属規範と同一。
-     UUIDv7 token 単独では帰属できない): metadata の scope_id がローカル構成の scope に一致する job は
+     **復元した DB は backup 以後の投入記録を失っている** — 復元後の初回回復では、**記録済み provider
+     scope と現在構成の各 Batch client の provider_scope_id を合わせた集合**の全ページ一覧
+     ([04-pipeline.md §5.8](04-pipeline.md) の confirmed-absent と同じ走査 — backup 後に初使用した
+     provider scope を取りこぼさない。どちらにも無い scope は原理的に走査できない) のうち
+     `batch_requests` に対応行が無い job / upload を次の帰属規則で報告する (**job の帰属は token 形式では
+     なく job metadata の task key 4 組が担う** — [04-pipeline.md §5.8](04-pipeline.md) の帰属規範と同一。
+     UUIDv7 token 単独では帰属できない。出力 unit の対応付けに使う custom_id は別層 — 同 §5.8)。
+     **「ローカル構成の scope」= 判定時点の scope_registry の行のうち、root_path の `.kcs/scope.json` を
+     実地検証 (読取 + scope_id 一致) できた scope_id 集合** (registry は cache — 喪失・prune 済みなら
+     [05-runtime.md §6](05-runtime.md) の再構築 (ユーザー既知 root での再登録) を先行させる。未再登録
+     scope の job は unknown 側に落ち、再登録後の再実行で orphan 候補へ移る — 報告は冪等):
+     metadata の task key 4 組が完全に読め、かつ scope_id がこの集合に一致する job は
      orphan 候補として報告し、結果取得 (読み取りのみで安全) と、**他 KCS インスタンスとの provider
      scope 共有がないことを確認した上での**削除を案内する。metadata が一致しない・読めない job と、
-     filename の token しか持たない upload は**帰属不能 (unknown) として報告のみ** — 削除案内を出さない
-     (他インスタンス・他ツール由来があり得る)。自動再投入・自動削除はしない (二重課金と orphan 課金の
-     可視化)
+     filename の token しか持たない upload は**帰属不能 (unknown) として報告のみ** — 結果取得・削除の
+     どちらも案内しない (他インスタンス・他ツール由来があり得る)。自動再投入・自動削除はしない
+     (二重課金と orphan 課金の可視化)
 
 2. kcs export <scope> --to <bundle.kcsz>
    - .kcsz は export と同一の bundle 形式で、バックアップにも使える (bundle には承認・運用記録・

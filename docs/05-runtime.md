@@ -329,7 +329,7 @@ commit/evidence restore は ancestry walk を必要としない。
 }
 ```
 
-`evidence_pointer` は [08-evidence-pointer-spec.md §2](08-evidence-pointer-spec.md) の schema を **そのまま** 埋め込む。root (`.kcs`) の信頼は `evidence_pointer.scope_id` を正とし、`results[].scope_path` は解決を高速化する表示・ヒント用の絶対パスである (truth vs cache の不変条件。解決手順は [08-evidence-pointer-spec.md §3.1](08-evidence-pointer-spec.md))。
+**成功応答 (exit 0) の `error_code` は縮退原因の機械可読分類であり、失敗判定には使わない** — 失敗判定は exit code (非 0) が正 ([06-cli-spec.md §7](06-cli-spec.md)。上例は vector 未承認の text fallback で、`results` は有効な結果である)。`evidence_pointer` は [08-evidence-pointer-spec.md §2](08-evidence-pointer-spec.md) の schema を **そのまま** 埋め込む。root (`.kcs`) の信頼は `evidence_pointer.scope_id` を正とし、`results[].scope_path` は解決を高速化する表示・ヒント用の絶対パスである (truth vs cache の不変条件。解決手順は [08-evidence-pointer-spec.md §3.1](08-evidence-pointer-spec.md))。
 
 `evidence_uri` は Evidence Pointer の正規テキスト形 ([08-evidence-pointer-spec.md §2.3](08-evidence-pointer-spec.md)) であり、そのまま `kcs open` / `kcs view` / `kcs evidence verify` の引数に渡せる。
 
@@ -963,7 +963,11 @@ kcs restore <evidence|path|commit> --to <dir>
 ```
 - working tree への直接書き戻しは禁止 (--to <dir> 必須。**--to の canonical 解決先が当該 scope root
   配下 (`.kcs` 含む) の場合は KCS-E-CONFIG-USAGE-001 (exit 2) で拒否** — `--to .` による禁止の迂回を
-  許さない)
+  許さない。canonical 解決は §1.8 の canonical root_path 算出規則と同一 (realpath 含む) を --to と
+  scope root の双方に適用する)
+- **全出力 path について、退避 (`<basename>.kcs-restore-bak`) / 隔離 (`<basename>.kcs-restore-quarantine`)
+  の同名残存を --force の有無・宛先の存否に関わらず mutation 前に検査し、残存 = 先行 restore の
+  未完として拒否 + 回復案内する** (正本 §3.5 — --force 文脈に限定しない)
 - 既存ファイル上書きは --force 必須 + 確認プロンプト
 - --force 上書きは旧ファイルを同 directory の退避名 `<basename>.kcs-restore-bak` へ no-replace で
   保全 (同名残存 = 先行未完として拒否 + 回復案内。退避名は stderr に表示・dev/inode を記録) して
@@ -983,7 +987,10 @@ kcs restore <evidence|path|commit> --to <dir>
 - shallow commit からの restore は KCS-E-COMMIT-SHALLOW-001
 - purged 対象は KCS-E-PURGE-NOT-FOUND-001 / tombstone
 - 展開は検証済み --to ディレクトリの dirfd 配下で no-follow (symlink を辿らない) に行い、
-  private temp → atomic rename で publish する。絶対 path・「..」を含む復元エントリは拒否
+  private temp → atomic rename で publish する。**containment 判定と展開の同一実体束縛**: --to を
+  O_DIRECTORY で open し、fstat (dev/inode) を canonical 解決先の lstat と対照して同一実体を確認
+  してから、以後の temp 作成・rename を全て同一 dirfd 配下に限定する (判定後の path 差し替えで
+  別実体を指させない)。絶対 path・「..」を含む復元エントリは拒否
   (既存 symlink 経由で復元先の外部を上書きさせない)
 ```
 
@@ -1038,7 +1045,7 @@ batch 系と reindex は外部副作用 (upload / job 作成) と batch_requests
 - `kcs repair --verify-objects` の raw object 復旧と repaired commit publication も、同じ lock の下で private temp + hash 再検証 + atomic publish を使う
 - `kcs repair --rebuild-db` 実行中の `kcs search` は、再構築完了までの間旧 sqlite.db (存在すれば) を読むか、`KCS-E-INDEX-REBUILDING-001` を返す。再構築の完了も atomic rename (sqlite.db.tmp → sqlite.db) で切り替える
 - scope-registry.sqlite / cost-ledger.sqlite (~/.local/share/kcs/) は WAL モード + busy_timeout (デフォルト 5000ms) で複数プロセスの同時書き込みを直列化する。registry は cache であり ([03-data-model.md §4](03-data-model.md))、破損時は各 `.kcs` の rescan で再構築する (**再構築の入力はユーザーが知る探索 root** — registry 喪失後は `.kcs` の所在一覧も失われるため、各 root での `kcs index` 再実行が再登録を兼ねる。KCS が自力で全ディスクを走査することはしない)。cost-ledger.sqlite は**再構築不可の運用台帳** ([03-data-model.md §4.1](03-data-model.md) / [04-pipeline.md §5.4](04-pipeline.md))
-- purge の log scrub と通常 append/rotation は、device logs では `$XDG_DATA_HOME/kcs/logs/scrub.lock`、scope access logs では `.kcs/logs/access.scrub.lock` を共有する。複合 lock 順序は scope store → cost-ledger.sqlite (Tx) → device observability → scope access とし、逆順取得を禁止する。**scope 由来 log の append 順序**: 読取系が対象の path / query / raw_hash を含む行を append する場合、当該 append は scrub lock を保持したまま、3 点検査 (§6 — journal 不在 + epoch 不変 + lifecycle counter 不変) の**最終検査と同一 critical section** で行う — scrub 完了後の再 append で purge の削除 postcondition を破らない。最終検査で拒否した場合の記録には対象 path / query / raw_hash を含めない
+- purge の log scrub と通常 append/rotation は、device logs では `${XDG_DATA_HOME:-$HOME/.local/share}/kcs/logs/scrub.lock`、scope access logs では `.kcs/logs/access.scrub.lock` を共有する。複合 lock 順序は scope store → cost-ledger.sqlite (Tx) → device observability → scope access とし、逆順取得を禁止する。**scope 由来 log の append 順序**: 読取系が対象の path / query / raw_hash を含む行を append する場合、当該 append は scrub lock を保持したまま、3 点検査 (§6 — journal 不在 + epoch 不変 + lifecycle counter 不変) の**最終検査と同一 critical section** で行う — scrub 完了後の再 append で purge の削除 postcondition を破らない。最終検査で拒否した場合の記録には対象 path / query / raw_hash を含めない
 
 # 7. 観測 (Observability)
 

@@ -134,7 +134,7 @@ code point を含む名前を拒否し ([03-data-model.md §2](03-data-model.md)
 5. raw object が not_found → §7 の規約どおり exit 4
 ```
 
-一時展開は **restore ではない**: working tree に書かず read-only であるため、[§5](06-cli-spec.md) の安全要件 (`--to` 必須 / `--force`) の対象外。展開先はキャッシュであり、GC (on_idle、Phase 4+) の掃除対象。MVP では自動掃除されないため、必要ならユーザーが削除してよい (正本は `objects/` に無傷)。**purge はこの展開 cache を削除 closure に含める** ([05-runtime.md §3.5](05-runtime.md))。永続的なコピーが必要な場合は `kcs restore <pointer> --to <dir>` を使う。一時展開で開いた場合、CLI は「原本は working tree に存在しない (削除または過去版)。永続コピーは kcs restore --to」の注記を stderr に表示する。
+一時展開は **restore ではない**: working tree に書かず read-only であるため、[§5](06-cli-spec.md) の安全要件 (`--to` 必須 / `--force`) の対象外。**展開は private temp に書き、起動直前の最終検査 ([05-runtime.md §3.5](05-runtime.md)) を通過してから cache path へ publish する — 検査で拒否した場合は temp を残さない** ([04-pipeline.md §1.1](04-pipeline.md) の temp 掃除規約。purge 完遂後に書きかけの平文 cache を残さない)。展開先はキャッシュであり、GC (on_idle、Phase 4+) の掃除対象。MVP では自動掃除されないため、必要ならユーザーが削除してよい (正本は `objects/` に無傷)。**purge はこの展開 cache を削除 closure に含める** ([05-runtime.md §3.5](05-runtime.md))。永続的なコピーが必要な場合は `kcs restore <pointer> --to <dir>` を使う。一時展開で開いた場合、CLI は「原本は working tree に存在しない (削除または過去版)。永続コピーは kcs restore --to」の注記を stderr に表示する。
 
 ---
 
@@ -251,7 +251,11 @@ kcs restore <pointer> --to ./recovered/ --force    # 既存上書き許可 (確�
 
 ```
 - --to <dir> は必須 (canonical 解決先が当該 scope root 配下 (`.kcs` 含む) は KCS-E-CONFIG-USAGE-001
-  (exit 2) で拒否 — working tree への直接書き戻し禁止の迂回を許さない)
+  (exit 2) で拒否 — working tree への直接書き戻し禁止の迂回を許さない。canonical 解決は
+  05 §1.8 の算出規則と同一 (realpath 含む)。展開前に --to を open した fd の実体 (dev/inode) を
+  canonical 解決先と対照し、以後の展開は同一 fd 配下に限定する — 05 §4)
+- 全出力 path の退避 / 隔離の同名残存は --force の有無・宛先の存否に関わらず mutation 前に検査し、
+  残存 = 先行未完として拒否 + 回復案内 (正本 05 §3.5)
 - 既存ファイル上書きは --force + 確認 prompt
 - --force 上書きは旧ファイルを同 directory の退避名 `<basename>.kcs-restore-bak` へ no-replace で
   保全 (同名残存 = 先行未完として拒否 + 回復案内。退避名は stderr に表示・dev/inode を記録) して
@@ -360,7 +364,7 @@ kcs evidence retarget          対応なし / ambiguous は 4。
 
 # 8. Error Code Namespace
 
-すべてのエラーは `KCS-E-<DOMAIN>-<SUBDOMAIN>-<NNN>` 形式の `error_code` を持つ。`error_kind` などのフリーテキストはユーザー向け表示専用。機械判定は `error_code` (明示例外 = manifest `units[]` / Adapter 出力 `failed_units` の `error_kind` — [04-pipeline.md §5.3](04-pipeline.md) の閉 enum であり unit 単位の retry 可否判定に使う、[10-operations.md §12.1](10-operations.md))。
+すべてのエラーは `KCS-E-<DOMAIN>-<SUBDOMAIN>-<NNN>` 形式の `error_code` を持つ。`error_kind` などのフリーテキストはユーザー向け表示専用。機械判定は `error_code` (明示例外 = manifest `units[]` / Adapter 出力 `failed_units` の `error_kind` — [04-pipeline.md §5.3](04-pipeline.md) の閉 enum であり unit 単位の retry 可否判定に使う、[10-operations.md §12.1](10-operations.md))。**成功応答 (exit 0) に載る `error_code` は縮退原因の分類であり、失敗判定には使わない** — 失敗判定は exit code (非 0) が正 (例 = text fallback の [05-runtime.md §1.7](05-runtime.md) 応答契約)。
 
 DOMAIN 一覧の正本は [10-operations.md §12.1](10-operations.md)。本節は同一リストの転記であり、差分が生じた場合は 10 側を正とする。
 

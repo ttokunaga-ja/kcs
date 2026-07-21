@@ -282,7 +282,10 @@ truth = folder-local .kcs           raw object / normalized / chunks / commits /
 cache = scope_registry / aggregator 検索の探索対象一覧 / stale 検出 / UI 統合
 ```
 
-`scope_registry` 保存先: `~/.local/share/kcs/scope-registry.sqlite`。
+`scope_registry` 保存先: `~/.local/share/kcs/scope-registry.sqlite`。**device data dir の実体は
+`${XDG_DATA_HOME:-$HOME/.local/share}/kcs` であり、本仕様の `~/.local/share/kcs/` 表記は全て
+この解決結果を指す表記規約とする** (backup 例 [10-operations.md §7.5.2](10-operations.md) と
+実体が分裂しない — runtime と backup が同じ path 解決を共有する)。
 
 不変条件:
 
