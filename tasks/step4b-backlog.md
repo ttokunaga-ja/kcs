@@ -55,7 +55,26 @@ eval (offline) と北極星 3 シナリオはこれら無しで Done に到達�
   migrate.rs の JSONL cutover import は write_seq 非 bump (方向安全・一回性の歴史 import)。
 - その他: render_params identity (QA34) ほか
 
-### 1-B. QB 残 19 (26/27/34-48/63-65)
+### 1-A2. Office 変換層 (棚卸し漏れの未実装要件 — 2026-07-23 発見・同日実装完了 `9f58cab`)
+p3a/p3b カタログに変換層本体の契約が無かった (QB27 が sheet 名の角のみ)。要件正本 =
+11 §90 / 04 §2 表 (DOCX = 変換 PDF 経由) / 07 §5.1-5.2。**実装済み**: soffice headless 変換
+(07 §5.1 追記 = 実装フィードバック枠)・決定論化 (揮発メタデータ同長固定 — 実 LibreOffice
+26.2.4.2 で 2 回変換バイト同一を実証)・DOCX→page:N / PPTX→slide:N・offline text-layer 検索・
+OCR へ変換 bytes 送出・変換器欠如 = enqueue 抑止 + `office_conversion_unavailable` 可視化・
+変換失敗 = contract_violation・**QB41 同梱** (prepared_hash ドリフト → `--yes` 確認付き
+offline gen+1。判定は鋳造点ガード 2 枚 = 空 prepare 非判定 + key 集合同一時のみ)。
+**残余 (順に優先度高)**:
+1. **FlateDecode 展開の決定論抽出器対応** — 現行抽出器は圧縮 stream を読めず、実世界の
+   text-layer PDF (TeX/soffice 出力) は offline 抽出が空 → OCR 依存。`miniz_oxide` 追加が
+   最小構成 (flate2 系は依存木に不在)。eval の TeX 生成コーパスを offline で成立させる鍵
+2. QB41 の online 再結線 — enqueue dedup が (input_path, input_hash) キーで新 gen の
+   online 再 enrichment を塞ぐ (offline gen+1 は生成済み。online lane の gen 認識は独立変更)
+3. PPTX online 往復の専用テスト (offline は office_02、DOCX online は office_03 で被覆済み)
+4. 頁数が変わる renderer 更新のドリフトは非検知 (`kcs reindex --force` の領分 — ガード (b) の
+   意図的帰結)。office incremental は mode=Full 固定 (identity 対応関係が未定義のため)
+5. XLSX (sheet 描画意味論 + QB27) / 音声 — 変換機構未定義のまま繰延 (07 §5.1 追記に明記)
+
+### 1-B. QB 残 18 (26/27/34-40/42-48/63-65 — 41 は 1-A2 で消化)
 import/export (fork/kcsz)・observability 深部・J 領域残。MVP 機能面への影響なし。
 
 ### 1-C. 監査で存在が再確認された既知未実装 (backlog 済み)
