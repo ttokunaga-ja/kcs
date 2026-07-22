@@ -3989,6 +3989,20 @@ pub fn network_approval_row_present(kcs_dir: &Path, tool_id: &str) -> Result<boo
     }))
 }
 
+/// The single in-flight `approval_pending` object, or `None` when absent (07
+/// §3 L191-205, 10 §12.3: the write-order's step (0) pending intent — a
+/// single object, never an array, since approval operations are serialized
+/// under `.kcs/.lock`). Does not distinguish a well-formed pending from a
+/// legacy one missing `approved_at`/`approval_method` — that shape check is
+/// the caller's job (`try_self_heal_network_approval` in `kcs-cli`), matching
+/// this module's other plain readers (`read_network_approvals`,
+/// `network_approvals_initialized`).
+pub fn read_network_approval_pending(kcs_dir: &Path) -> Result<Option<Value>> {
+    Ok(read_scope_json_value(kcs_dir)?
+        .get("approval_pending")
+        .cloned())
+}
+
 /// 07 §3 step (0) of the approval write-order: durably record the pending
 /// approval intent BEFORE `config.toml` is touched, so a crash between
 /// steps leaves a recoverable trail and a concurrent `kcs adapter revoke`
@@ -4192,13 +4206,48 @@ pub fn revoke_network_approval(
     Ok(outcome)
 }
 
+/// 07 §3 L199-205 / 10 §12.3: locked-mutation cleanup for a LEGACY
+/// `approval_pending` — one missing `approved_at`/`approval_method` (10
+/// §12.3's element-level backward compat keeps this from being a schema
+/// error on write/read, but it can never exact-match self-heal's 4-tuple
+/// -plus-audit-values condition). Removes `approval_pending` and, in the SAME
+/// atomic write, sets `approvals_initialized: true` if it is not already —
+/// mirroring [`revoke_network_approval`]'s pending-removal tail (07 §3:
+/// "この除去も approvals_initialized marker が無ければ同一 atomic write で
+/// true 化する" — otherwise "true × 行ゼロ × marker 無し" reverts to a
+/// genuine first-time state, and the next run's initial-materialize
+/// exception would silently bypass the explicit-approval requirement this
+/// cleanup exists to enforce).
+///
+/// Callers MUST only invoke this when a pending is actually present (07 §3:
+/// "対象なしでは書かない") — unlike [`revoke_network_approval`], this
+/// function does not itself check for a no-op case.
+pub fn discard_network_approval_pending(kcs_dir: &Path) -> Result<()> {
+    let mut value = read_scope_json_value(kcs_dir)?;
+    let Some(object) = value.as_object_mut() else {
+        return Err(KcsError::schema("scope.json must be an object"));
+    };
+    object.remove("approval_pending");
+    let already_initialized = object
+        .get("approvals_initialized")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    if !already_initialized {
+        object.insert("approvals_initialized".to_owned(), json!(true));
+    }
+    validate_json_schema(SchemaKind::Scope, &value)?;
+    overwrite_scope_json_value(kcs_dir, &value)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        append_jsonl_rotating, civil_from_days, format_unix_seconds, format_utc_seconds,
+        append_jsonl_rotating, civil_from_days, discard_network_approval_pending,
+        format_unix_seconds, format_utc_seconds, network_approvals_initialized,
         open_scope_file_nofollow, parse_utc_seconds, process_is_alive, prune_rotated_logs,
-        read_logs_retention_days, redact_context, redact_message_paths, rotate_stale_log,
-        ArchiveLimits, PendingNormalizeRef, Repository, StoreLock, DEFAULT_MAX_ARCHIVE_FILE_BYTES,
+        read_logs_retention_days, read_network_approval_pending, redact_context,
+        redact_message_paths, rotate_stale_log, write_network_approval_pending, ArchiveLimits,
+        PendingNormalizeRef, Repository, StoreLock, DEFAULT_MAX_ARCHIVE_FILE_BYTES,
         MAX_COMMIT_PARENTS, MAX_TREE_ENTRIES,
     };
     use crate::cas::{hash_bytes, ObjectKind, ObjectStore};
@@ -4207,6 +4256,121 @@ mod tests {
     use serde_json::json;
     use std::collections::{BTreeMap, BTreeSet};
     use std::fs;
+
+    // =======================================================================
+    // 07 §3 L191-205 / 10 §12.3: `read_network_approval_pending` /
+    // `discard_network_approval_pending` — the self-heal fallthrough's
+    // read/legacy-cleanup helpers (`kcs-cli`'s
+    // `try_self_heal_network_approval` is the write-side caller these back;
+    // exercised end-to-end in `kcs-cli`'s
+    // `step4b_selfheal_contract.rs`).
+    // =======================================================================
+
+    #[test]
+    fn read_network_approval_pending_returns_none_when_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = Repository::init(dir.path()).unwrap();
+        assert_eq!(read_network_approval_pending(repo.kcs_dir()).unwrap(), None);
+    }
+
+    #[test]
+    fn read_network_approval_pending_returns_the_stored_object_verbatim() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = Repository::init(dir.path()).unwrap();
+        let scope_id = repo.scope_identity().unwrap().scope_id;
+        let pending = json!({
+            "scope_id": scope_id,
+            "tool_id": "mistral_ocr_markdownize",
+            "execution_mode": "online_api",
+            "tool_profile_hash": format!("sha256:{}", "a".repeat(64)),
+            "approved_at": "2026-07-22T00:00:00Z",
+            "approval_method": "approve",
+        });
+        write_network_approval_pending(repo.kcs_dir(), pending.clone()).unwrap();
+        assert_eq!(
+            read_network_approval_pending(repo.kcs_dir()).unwrap(),
+            Some(pending)
+        );
+    }
+
+    /// A legacy pending (missing `approved_at`/`approval_method`, 10 §12.3
+    /// element-level backward compat) removes cleanly and, since no marker
+    /// existed yet, sets `approvals_initialized: true` in the same write (07
+    /// §3 L202-205 — the removal-consumes-the-initial-materialize-exception
+    /// rule shared with `revoke_network_approval`'s pending-removal tail).
+    #[test]
+    fn discard_network_approval_pending_removes_pending_and_sets_absent_marker() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = Repository::init(dir.path()).unwrap();
+        let scope_id = repo.scope_identity().unwrap().scope_id;
+        let legacy_pending = json!({
+            "scope_id": scope_id,
+            "tool_id": "mistral_ocr_markdownize",
+            "execution_mode": "online_api",
+            "tool_profile_hash": format!("sha256:{}", "a".repeat(64)),
+        });
+        write_network_approval_pending(repo.kcs_dir(), legacy_pending).unwrap();
+        assert!(!network_approvals_initialized(repo.kcs_dir()).unwrap());
+
+        discard_network_approval_pending(repo.kcs_dir()).unwrap();
+
+        assert_eq!(
+            read_network_approval_pending(repo.kcs_dir()).unwrap(),
+            None,
+            "the pending key must be removed"
+        );
+        assert!(
+            network_approvals_initialized(repo.kcs_dir()).unwrap(),
+            "an absent marker must be set true in the same write"
+        );
+    }
+
+    /// When `approvals_initialized` is ALREADY `true` (e.g. a different
+    /// tool_id in this scope was already explicitly approved), discarding a
+    /// legacy pending must leave the marker as `true` — not error, not flip
+    /// it, not write a second conflicting key.
+    #[test]
+    fn discard_network_approval_pending_leaves_an_already_true_marker_untouched() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = Repository::init(dir.path()).unwrap();
+        let scope_id = repo.scope_identity().unwrap().scope_id;
+        let legacy_pending = json!({
+            "scope_id": scope_id,
+            "tool_id": "mistral_ocr_markdownize",
+            "execution_mode": "online_api",
+            "tool_profile_hash": format!("sha256:{}", "a".repeat(64)),
+        });
+        write_network_approval_pending(repo.kcs_dir(), legacy_pending).unwrap();
+
+        // Hand-set the marker directly: every public writer that sets it
+        // also clears `approval_pending` in the same atomic write, so none
+        // of them can build a "marker true AND pending still present"
+        // fixture on their own.
+        let scope_path = repo.kcs_dir().join("scope.json");
+        let mut value: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&scope_path).unwrap()).unwrap();
+        value["approvals_initialized"] = json!(true);
+        fs::write(&scope_path, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
+
+        discard_network_approval_pending(repo.kcs_dir()).unwrap();
+
+        assert_eq!(
+            read_network_approval_pending(repo.kcs_dir()).unwrap(),
+            None,
+            "the pending key must still be removed"
+        );
+        assert!(
+            network_approvals_initialized(repo.kcs_dir()).unwrap(),
+            "an already-true marker must stay true"
+        );
+        let after: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&scope_path).unwrap()).unwrap();
+        assert_eq!(
+            after["approvals_initialized"],
+            json!(true),
+            "the marker must remain the plain boolean true, not be duplicated or altered"
+        );
+    }
 
     #[test]
     fn process_liveness_recognizes_current_process() {

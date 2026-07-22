@@ -31,18 +31,36 @@ pub const RETIRED_NON_LIVE_REASON: &str = "retired_non_live";
 /// step4b-contract-tests-p3a.md QA1: the closed `hold_reason` enum for a
 /// `Paused` task (04 §5.2 L679-683: `hold_reason = budget | auth |
 /// tier_b_approval`), distinct from `fallback_reason`'s `RetryErrorKind`
-/// classification for `Failed` tasks. `Auth` is wired into the enum now so
-/// [`hold_reason_for_reason`] and `kcs status`'s breakdown (QA4) are
-/// spec-shaped, but no call site currently *transitions* an auth failure into
-/// `Paused` — that would additionally require changing the online-send
-/// failure handler's unconditional `TaskStatus::Failed` (`main.rs`, the send
-/// dispatch loop) and `RetryErrorKind::AuthError`'s `retry_policy`, which in
-/// turn would break `batch retry`'s Failed-only task selection and >20
-/// existing regression tests (`r16_7_*`, `r17_3_*`, `r19_*`) that assert
-/// `status=Failed` + `attempts` advancing for `rate_limit`/`auth_error`
-/// sends (docs/04 §5.3 R16-7). QA2/QA3 (the status-machine transition itself)
-/// are consequently deferred — not implemented, not tested here — pending a
-/// dedicated pass that re-verifies that suite alongside the transition.
+/// classification for `Failed` tasks.
+///
+/// QA2/QA3 (step4b-contract-tests-p3a.md §A, 04 §5.2/§5.3, implemented): the
+/// status-machine transitions this enum enables are wired at every send site
+/// (markdownize's online-send failure handler and the embedding batch-send
+/// handler in `kcs-cli`'s `main.rs`):
+///
+/// - QA2 `auth_error`: lands `Paused` with `hold_reason = Some(Auth)` (never
+///   `Failed`) — `retry_policy(AuthError).paused == true` now truthfully
+///   describes this. `attempts` is left UNCHANGED (a pause is not a
+///   retry-budget event — `max_attempts=0` means "no retry", not "budget
+///   already spent"), so a later revival via `batch resume` (or the
+///   dedicated markdownize auth-revive pre-pass, `task_auth_revival_allowed`
+///   below) does not find the budget exhausted. `batch retry` remains a
+///   no-op for it (its Failed-only task selection naturally skips a Paused
+///   row — CT2-TASK-005).
+/// - QA3 `rate_limit`: stays `Pending` (never `Paused`, never `Failed` — 04
+///   §5.2 L682-683 says explicitly "paused ではなく pending + next_retry_at
+///   で表現する") with `next_retry_at` derived from the provider's
+///   `Retry-After` header when present (`AdapterError::RateLimit`'s
+///   `retry_after_ms`), else a synthetic +2s backoff. `attempts` is likewise
+///   UNCHANGED (`max_attempts=None` = unbounded retries, 04 §5.3), and a
+///   Pending task's send-eligibility now additionally honors this
+///   `next_retry_at` (`task_retry_due`) so an unelapsed backoff is not
+///   bypassed just because the task never became `Failed`.
+///
+/// This flipped >20 existing regression tests (`r16_7_*`, `r17_3_*`,
+/// `r19_*`, `ct2_task_00[5-9]`, etc.) that used to assert `status=Failed` for
+/// `rate_limit`/`auth_error` sends — see `step2_p0_contract.rs`/
+/// `step3_p0_contract.rs` for the updated assertions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum HoldReason {
@@ -684,22 +702,31 @@ pub fn task_can_enter_secret_hold(task: &TaskDescriptor) -> bool {
     task.task_type == TaskType::Embedding && task.status == TaskStatus::Pending
 }
 
-/// Materialized output can converge ordinary work and budget pauses to `Done`.
-/// Secret and unknown holds remain sticky because they may represent an
-/// unsatisfied authorization boundary.
+/// Materialized output can converge ordinary work, budget pauses, AND (QA2,
+/// step4b-contract-tests-p3a.md §A) auth pauses to `Done` — a chunk/unit
+/// whose vector or normalized output already exists (e.g. via a
+/// content-identity twin) satisfies an auth-paused task the same way it
+/// satisfies a budget-paused one, since the auth hold never blocked anything
+/// but THIS task's own send. Secret and unknown holds remain sticky because
+/// they may represent an unsatisfied authorization boundary.
 #[must_use]
 pub fn task_can_complete_from_materialized_output(task: &TaskDescriptor) -> bool {
     match task.status {
         TaskStatus::Pending | TaskStatus::Running | TaskStatus::Failed => true,
-        TaskStatus::Paused => task.fallback_reason.as_deref() == Some(BUDGET_EXCEEDED_REASON),
+        TaskStatus::Paused => matches!(
+            task.fallback_reason.as_deref(),
+            Some(BUDGET_EXCEEDED_REASON) | Some("auth_error")
+        ),
         TaskStatus::Done | TaskStatus::Partial => false,
     }
 }
 
+/// QA2 (step4b-contract-tests-p3a.md §A, 04 §5.2): an auth failure now lands
+/// `Paused` (never `Failed`), so revival on `batch resume` is Paused-based.
 #[must_use]
 pub fn task_auth_revival_allowed(task: &TaskDescriptor, mode: TaskRecoveryMode) -> bool {
     mode == TaskRecoveryMode::Resume
-        && task.status == TaskStatus::Failed
+        && task.status == TaskStatus::Paused
         && task_retry_kind(task) == RetryErrorKind::AuthError
 }
 
@@ -941,13 +968,18 @@ pub fn retry_policy(error_kind: RetryErrorKind) -> RetryPolicy {
             error_code: "KCS-E-BATCH-RATE-001".to_owned(),
             paused: false,
         },
+        // QA2 (step4b-contract-tests-p3a.md §A, 04 §5.2 L679): `paused: true`
+        // now truthfully describes the wired transition — an auth failure
+        // lands `Paused(hold_reason=auth)`, not `Failed`. The send handlers
+        // (kcs-cli `main.rs`) branch on `error.retry_kind` directly rather
+        // than reading this field, but it is no longer a dead abstraction.
         RetryErrorKind::AuthError => RetryPolicy {
             error_kind,
             retryable: false,
             max_attempts: Some(0),
             backoff: "user_action".to_owned(),
             error_code: "KCS-E-BATCH-AUTH-001".to_owned(),
-            paused: false,
+            paused: true,
         },
         RetryErrorKind::QuotaExceeded => RetryPolicy {
             error_kind,
@@ -1219,11 +1251,10 @@ mod tests {
     }
 
     /// QA1 (step4b-contract-tests-p3a.md §A): the closed `hold_reason` enum
-    /// round-trips the 3 spec values and the currently-wired 2 of 3 reasons
-    /// (`budget_exceeded`/`secrets_tier_b_hold`) map onto it; `auth_error`
-    /// maps too (the enum value exists) even though no production call site
-    /// transitions an auth failure into `Paused` yet (see the `HoldReason`
-    /// doc comment — QA2/QA3 deferred).
+    /// round-trips the 3 spec values, and all 3 reasons
+    /// (`budget_exceeded`/`secrets_tier_b_hold`/`auth_error`) map onto it —
+    /// QA2 wires the `auth_error` -> `Paused` transition itself (see the
+    /// `HoldReason` doc comment).
     #[test]
     fn qa1_hold_reason_closed_enum_serializes_and_maps_from_fallback_reason() {
         assert_eq!(serde_json::to_value(HoldReason::Budget).unwrap(), "budget");
@@ -1661,10 +1692,15 @@ mod tests {
         task.fallback_reason = Some(SECRETS_TIER_B_HOLD_REASON.to_owned());
         assert!(!task_can_complete_from_materialized_output(&task));
 
-        task.status = TaskStatus::Failed;
+        // QA2: an auth failure lands Paused(hold_reason=auth), not Failed.
+        task.status = TaskStatus::Paused;
         task.fallback_reason = Some("auth_error".to_owned());
+        task.hold_reason = Some(HoldReason::Auth);
         assert!(!task_auth_revival_allowed(&task, TaskRecoveryMode::Retry));
         assert!(task_auth_revival_allowed(&task, TaskRecoveryMode::Resume));
+        // QA2: a materialized twin output also satisfies an auth-paused task
+        // (only secret/unknown holds stay sticky).
+        assert!(task_can_complete_from_materialized_output(&task));
     }
 
     #[test]

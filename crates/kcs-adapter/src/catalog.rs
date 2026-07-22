@@ -167,6 +167,17 @@ pub fn run_standard_online_markdownize_with_bytes(
     {
         Some("auth_error") => return Err(AdapterError::Auth("mock auth failure".to_owned())),
         Some("rate_limit") => return Err(AdapterError::rate_limit("mock 429")),
+        // QA3 (step4b-contract-tests-p3a.md §A, 04 §5.3): a rate limit WITH a
+        // provider `Retry-After` header (30s), proving `retry_after_ms`
+        // wiring end-to-end into `next_retry_at` — unlike the headerless
+        // "rate_limit" seam above, which exercises the synthetic +2s
+        // fallback.
+        Some("rate_limit_after") => {
+            return Err(AdapterError::RateLimit {
+                message: "mock 429".to_owned(),
+                retry_after_ms: Some(30_000),
+            })
+        }
         // R16-7: a retryable NetworkError (mapped from `AdapterError::Network`) — unlike
         // rate_limit it may have been billed server-side, so each retry re-reserves.
         Some("network_error") => {
@@ -339,6 +350,13 @@ pub fn resolve_standard_online_markdownize_profile_with_bbox(
     {
         Some("auth_error") => return Err(AdapterError::Auth("mock auth failure".to_owned())),
         Some("rate_limit") => return Err(AdapterError::rate_limit("mock 429")),
+        // QA3: keep the seam arms in sync with `run_standard_online_markdownize`.
+        Some("rate_limit_after") => {
+            return Err(AdapterError::RateLimit {
+                message: "mock 429".to_owned(),
+                retry_after_ms: Some(30_000),
+            })
+        }
         // R16-7: keep the seam arms in sync with `run_standard_online_markdownize`.
         Some("network_error") => {
             return Err(AdapterError::Network("mock network failure".to_owned()))
@@ -498,6 +516,11 @@ pub enum AdoptedEmbeddingExecution {
     NonMultimodal,
     AuthError,
     RateLimit,
+    /// QA3 (step4b-contract-tests-p3a.md §A, 04 §5.3): a rate limit WITH a
+    /// provider `Retry-After` header (30s) — proves `retry_after_ms` wiring
+    /// into `next_retry_at`, unlike `RateLimit` above (headerless, synthetic
+    /// +2s backoff).
+    RateLimitAfter,
     Real,
 }
 
@@ -509,6 +532,7 @@ pub fn active_adopted_embedding_execution() -> Option<AdoptedEmbeddingExecution>
         Some("non_multimodal") => Some(AdoptedEmbeddingExecution::NonMultimodal),
         Some("auth_error") => Some(AdoptedEmbeddingExecution::AuthError),
         Some("rate_limit") => Some(AdoptedEmbeddingExecution::RateLimit),
+        Some("rate_limit_after") => Some(AdoptedEmbeddingExecution::RateLimitAfter),
         Some(_) => None,
         // R13-2: activate the Real path when EITHER a `tools.toml` `[embedding]`
         // adapter is declared (its auth is resolved at execution — keychain there
@@ -655,6 +679,12 @@ impl GeminiEmbeddingClient for MockAdoptedEmbeddingClient {
             }
             AdoptedEmbeddingExecution::RateLimit => {
                 return Err(AdapterError::rate_limit("mock 429"))
+            }
+            AdoptedEmbeddingExecution::RateLimitAfter => {
+                return Err(AdapterError::RateLimit {
+                    message: "mock 429".to_owned(),
+                    retry_after_ms: Some(30_000),
+                })
             }
             _ => {}
         }

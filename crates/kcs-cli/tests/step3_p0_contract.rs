@@ -2155,6 +2155,10 @@ fn pointer_for_path<'a>(search: &'a Value, path: &str) -> &'a Value {
 }
 
 #[test]
+// QA3 (step4b-contract-tests-p3a.md §A, 04 §5.2 L682-683): rate_limit lands
+// `pending` + `next_retry_at`, never `failed`, and `attempts` is NOT consumed
+// (max_attempts=∞, 04 §5.3) — this test used to find the tasks via
+// `status=="failed"` with `attempts>0`.
 fn ct3_embed_009_batch_retry_and_resume_execute_pending_embedding_tasks() {
     // 2026-07-04 実運用で発見した gap の回帰ガード: rate limit で Pending に
     // 積まれた embedding タスクは、`batch retry`/`resume` の executor が
@@ -2171,17 +2175,17 @@ fn ct3_embed_009_batch_retry_and_resume_execute_pending_embedding_tasks() {
         .as_array()
         .unwrap()
         .iter()
-        .filter(|t| t["type"] == "embedding" && t["status"] == "failed")
+        .filter(|t| t["type"] == "embedding" && t["status"] == "pending")
         .collect();
     assert!(
         !failed.is_empty(),
-        "rate_limit seam should leave failed embedding tasks"
+        "rate_limit seam should leave pending embedding tasks"
     );
     assert!(
         failed
             .iter()
-            .all(|t| t["attempts"].as_u64().unwrap() > 0 && t["next_retry_at"].is_string()),
-        "rate_limit failures must persist retry backoff: {status}"
+            .all(|t| t["attempts"].as_u64().unwrap() == 0 && t["next_retry_at"].is_string()),
+        "rate_limit failures must persist retry backoff without consuming attempts: {status}"
     );
     let retry_at = failed[0]["next_retry_at"].as_str().unwrap();
 
@@ -2210,8 +2214,10 @@ fn ct3_embed_009_batch_retry_and_resume_execute_pending_embedding_tasks() {
 // R11-5: the enrichment pass now aggregates every embedding task-store update into
 // ONE write-back at the end (was a full all()+replace_all per 32-chunk batch =
 // O(N²)). The aggregation must not lose per-chunk `fallback_reason`: a rate_limit
-// failure must still land the task Failed with reason "rate_limit" and a scheduled
+// failure must still land the task with reason "rate_limit" and a scheduled
 // retry (the paused-side reason "budget_exceeded" is covered by ct3_l2).
+// QA3 (step4b-contract-tests-p3a.md §A, 04 §5.2): the landing status is
+// `pending`, not `failed` — this test used to assert `status=="failed"`.
 #[test]
 fn r11_5_aggregated_writeback_preserves_embedding_fallback_reason() {
     let dir = tempfile::tempdir().unwrap();
@@ -2231,17 +2237,24 @@ fn r11_5_aggregated_writeback_preserves_embedding_fallback_reason() {
     let emb = tasks_of_type(&status, "embedding");
     assert!(!emb.is_empty(), "must enqueue embedding tasks: {status}");
     assert!(
-        emb.iter().all(|task| task["status"] == "failed"
+        emb.iter().all(|task| task["status"] == "pending"
             && task["fallback_reason"] == "rate_limit"
             && task["next_retry_at"].is_string()),
         "aggregated write-back must preserve each task's rate_limit reason + retry: {status}"
     );
 }
 
-// R11-8: a retryable Failed enrichment task (rate_limit, recoverable by `batch
-// retry`) must count toward `index_status.pending_enrichment_tasks` — otherwise the
-// scope reports enriched_ratio<1.0 with pending=0 and budget_paused=false, a dead
-// end an Agent can't act on (the dual of R9-4's "Partial counts as incomplete").
+// R11-8: a retryable, not-yet-recovered enrichment task (rate_limit,
+// recoverable by `batch retry`) must count toward
+// `index_status.pending_enrichment_tasks` — otherwise the scope reports
+// enriched_ratio<1.0 with pending=0 and budget_paused=false, a dead end an
+// Agent can't act on (the dual of R9-4's "Partial counts as incomplete").
+// QA3 (step4b-contract-tests-p3a.md §A, 04 §5.2): rate_limit now lands
+// `pending` (not `failed`), so it is counted by `compute_index_status`'s
+// plain `TaskStatus::Pending` arm rather than by the `TaskStatus::Failed if
+// task_retry_allowed(..)` arm this test originally exercised (that arm now
+// covers network_error/quota_exceeded instead) — the counting BEHAVIOR this
+// test pins is unchanged either way.
 #[test]
 fn r11_8_retryable_failed_enrichment_counts_as_pending_in_index_status() {
     let dir = tempfile::tempdir().unwrap();
@@ -2268,6 +2281,9 @@ fn r11_8_retryable_failed_enrichment_counts_as_pending_in_index_status() {
     assert_eq!(index_status["budget_paused"], false);
 }
 
+// QA3 (step4b-contract-tests-p3a.md §A, 04 §5.2): the rate-limited task is
+// read from the PENDING task (never `failed`) — this test used to find it
+// via `status=="failed"`.
 #[test]
 fn ct3_embed_010_retry_executes_after_snapshot_advances_head() {
     // 2026-07-04 実運用バグ #2 の回帰ガード: `kcs snapshot` は tree_entries を
@@ -2281,7 +2297,7 @@ fn ct3_embed_010_retry_executes_after_snapshot_advances_head() {
     let status = json_success_embed(&dir, "rate_limit", &["status"]);
     let retry_at = tasks_of_type(&status, "embedding")
         .into_iter()
-        .find(|t| t["status"] == "failed")
+        .find(|t| t["status"] == "pending")
         .and_then(|t| t["next_retry_at"].as_str())
         .unwrap()
         .to_owned();
@@ -2503,7 +2519,9 @@ fn ct4_deleted_historical_chunk_embedding_stays_pending() {
 // reported exit 0 with no embedding keys — a silent enrichment failure. It must now
 // exit 5 (docs/04 §5.6, user re-auth) with the full result JSON on stdout: local
 // index succeeded (`status: indexed`), embedding failures disclosed, and the failure
-// visible in `status` as well.
+// visible in `status` as well. QA2 (step4b-contract-tests-p3a.md §A, 04 §5.2): the
+// task lands `paused` with `hold_reason="auth"`, never `failed` — this test used to
+// assert `status=="failed"`.
 #[test]
 fn r11_2_index_embedding_auth_error_exits_5() {
     let dir = tempfile::tempdir().unwrap();
@@ -2524,10 +2542,12 @@ fn r11_2_index_embedding_auth_error_exits_5() {
     );
     let status = json_success_embed(&dir, "auth_error", &["status"]);
     assert!(
-        tasks_of_type(&status, "embedding")
-            .iter()
-            .any(|task| task["status"] == "failed" && task["fallback_reason"] == "auth_error"),
-        "status must show the failed embedding task: {status}"
+        tasks_of_type(&status, "embedding").iter().any(|task| {
+            task["status"] == "paused"
+                && task["hold_reason"] == "auth"
+                && task["fallback_reason"] == "auth_error"
+        }),
+        "status must show the paused(auth) embedding task: {status}"
     );
 }
 
@@ -6358,8 +6378,12 @@ fn markdown_ledger_rows(dir: &TempDir) -> usize {
     reservation_row_count(dir, "markdownize")
 }
 
-// Discriminator (a): rate_limit ×N retry keeps the online markdownize charge row at 1
-// (attempts still advance). Before R16-7 each resend re-reserved the full cost.
+// Discriminator (a): rate_limit ×N retry keeps the online markdownize charge row at 1.
+// Before R16-7 each resend re-reserved the full cost. QA3 (step4b-contract-tests-p3a.md
+// §A, 04 §5.2/§5.3): the charge-stays-1 core is UNCHANGED by QA3 (ledger reuse keys on
+// the still-open row, not on task status) — but the task itself now stays `pending`
+// (never `failed`) throughout, and `attempts` is NOT consumed (max_attempts=∞) —
+// this test used to assert `attempts >= 2` after N retries.
 #[test]
 fn r16_7_rate_limit_retry_does_not_reaccrue_charge() {
     let dir = tempfile::tempdir().unwrap();
@@ -6377,7 +6401,8 @@ fn r16_7_rate_limit_retry_does_not_reaccrue_charge() {
         "index must not reserve a markdownize charge before any send"
     );
 
-    // First real send under the rate_limit seam: one charge reserved, task -> Failed.
+    // First real send under the rate_limit seam: one charge reserved, task -> Pending
+    // (QA3: never Failed) with `next_retry_at` set.
     run_markdownize_seam(
         &dir,
         "rate_limit",
@@ -6390,8 +6415,10 @@ fn r16_7_rate_limit_retry_does_not_reaccrue_charge() {
         "the first online send reserves exactly one charge"
     );
 
-    // Retry past the backoff repeatedly. RateLimit is refused before billing, so the
-    // prior reservation covers each resend — the charge count must stay 1 (the fix).
+    // Retry past the backoff repeatedly (each iteration is a minute apart, well past
+    // the 2s synthetic backoff, so the Pending-selection loop re-sends it each time).
+    // RateLimit is refused before billing, so the prior reservation covers each
+    // resend — the charge count must stay 1 (the fix).
     for minute in 1..=4 {
         let now = format!("2026-07-03T00:0{minute}:30Z");
         run_markdownize_seam(&dir, "rate_limit", Some(&now), &["batch", "retry"]);
@@ -6402,15 +6429,19 @@ fn r16_7_rate_limit_retry_does_not_reaccrue_charge() {
         );
     }
 
-    // The attempts counter still advanced (retries happened; only the charge is gated).
+    // QA3: attempts is NOT consumed by rate_limit (max_attempts=∞, 04 §5.3) — the
+    // task stays pending with attempts==0 even after repeated resends; only the
+    // charge-stays-1 core is the invariant this test pins.
     let status = run_markdownize_seam(&dir, "rate_limit", None, &["status"]);
     let online = tasks_of_type(&status, "markdownize")
         .into_iter()
         .find(|task| task["fallback_reason"] == "rate_limit")
         .expect("a rate-limited online markdownize task");
-    assert!(
-        online["attempts"].as_u64().unwrap() >= 2,
-        "retries must advance attempts even while the charge stays 1: {status}"
+    assert_eq!(online["status"], "pending");
+    assert_eq!(
+        online["attempts"].as_u64().unwrap(),
+        0,
+        "rate_limit retries must not consume the retry budget: {status}"
     );
 }
 
@@ -7145,13 +7176,19 @@ fn ct4_reverted_chunk_reuses_retained_embedding_task() {
 // R19-4: when two docs share an identical section (same text_hash, different chunk_id),
 // and one's embedding fails rate_limit while the other succeeds, `rebuild_chunk_vec`
 // links the failed chunk's vector via the content-hash twin. The reconcile must then
-// CONVERGE that live-and-embedded Failed task to Done and release its stranded
-// reservation — before R19-4 it stayed Failed forever (reconcile's live->Done loop
+// CONVERGE that live-and-embedded task to Done and release its stranded reservation —
+// before R19-4 the (then-Failed) task stayed stuck forever (reconcile's live->Done loop
 // skipped Failed), stuck at pending_enrichment == 1 with an open reservation eating
 // the cap. UPDATED for cost-ledger.sqlite (2026-07-21): "release" now settles
 // `unknown_settled` (a real charge) rather than reclaiming to zero — this test checks
 // that the reservation no longer sits open, not that it was credited back (see r17_3's
-// updated tests for why: CL45, no Adapter here has post-hoc query capability).
+// updated tests for why: CL45, no Adapter here has post-hoc query capability). UPDATED
+// again for QA3 (step4b-contract-tests-p3a.md §A, 04 §5.2): a rate_limit failure now
+// lands `Pending` (never `Failed`), and the "never retry-due" premise below is what
+// keeps it from completing via a normal resend instead of the twin — the pre-QA3
+// Pending arm of `embeddable_task_state` already needed the SAME `next_retry_at` gate
+// this task exercises (04 §876: "next_retry_at 未来 … の embedding タスクを持つ chunk
+// は enrichment 対象から除外する", wired via §A's new gate).
 #[test]
 fn r19_4_duplicate_content_failed_chunk_converges_via_twin() {
     let dir = tempfile::tempdir().unwrap();
@@ -7168,7 +7205,7 @@ fn r19_4_duplicate_content_failed_chunk_converges_via_twin() {
     // twin convergence, not a normal mock retry. (A later wall-clock would just re-embed it
     // via retry and never exercise the bug.)
     let now = "2026-07-03T00:00:00Z";
-    // a.md's chunks fail rate_limit (phantom reservations).
+    // a.md's chunks fail rate_limit -> Pending (phantom reservations, QA3).
     json_success_embed_at(&dir, "rate_limit", now, &["index", "--approve", "--online"]);
     // b.md carries the IDENTICAL section (same text_hash, different chunk_id). Indexing it
     // with mock embeds the shared text into the `embeddings` table.
@@ -7201,7 +7238,7 @@ fn r19_4_duplicate_content_failed_chunk_converges_via_twin() {
         .count();
     assert!(
         a_done >= 1,
-        "R19-4: a.md's twin-embedded chunk must CONVERGE to Done, not stay Failed: {status}"
+        "R19-4: a.md's twin-embedded chunk must CONVERGE to Done, not stay Pending: {status}"
     );
 }
 
@@ -7220,7 +7257,10 @@ fn r19_2_exhausted_quota_phantom_settled_on_sweep() {
     fs::write(dir.path().join("doc.pdf"), fake_pdf(&[R17_3_BODY_V1])).unwrap();
     kcs(&dir, &["init"]).assert().success();
     run_markdownize_seam(&dir, "mock", None, &["index", "--approve"]);
-    // Fail the online send under rate_limit -> Failed(rate_limit) with a phantom reservation.
+    // Fail the online send under rate_limit -> Pending(rate_limit) with a phantom
+    // reservation (QA3, 04 §5.2: never Failed). The row is rewritten to a crafted
+    // Failed(quota_exceeded) terminal state below anyway, so this precondition's
+    // exact landing status is immaterial to the sweep this test exercises.
     run_markdownize_seam(
         &dir,
         "rate_limit",
@@ -7472,7 +7512,9 @@ fn r21_4_uppercase_and_octet_stream_text_enqueue_no_online_ocr() {
 }
 
 /// CAND-013/R21-6: AuthError revival requires explicit `batch resume`; ordinary indexing
-/// must not silently revive a failed online operation.
+/// must not silently revive a failed online operation. QA2 (step4b-contract-tests-p3a.md
+/// §A, 04 §5.2): the precondition task now lands `paused` (hold_reason=auth), never
+/// `failed` — this test used to assert `status=="failed"`.
 #[test]
 fn r21_6_auth_error_live_task_recovers_after_credentials_fixed() {
     let dir = tempfile::tempdir().unwrap();
@@ -7491,8 +7533,8 @@ fn r21_6_auth_error_live_task_recovers_after_credentials_fixed() {
     assert!(
         tasks_of_type(&status, "embedding")
             .iter()
-            .any(|t| t["status"] == "failed" && t["fallback_reason"] == "auth_error"),
-        "R21-6: precondition — an AuthError embedding task must exist: {status}"
+            .any(|t| t["status"] == "paused" && t["fallback_reason"] == "auth_error"),
+        "R21-6: precondition — a Paused(auth) embedding task must exist: {status}"
     );
     // Credentials fixed (mock succeeds) -> explicit resume recovers it.
     json_success_embed(&dir, "mock", &["batch", "resume"]);
@@ -7980,10 +8022,13 @@ fn r22_5_legacy_octet_stream_text_task_is_retired_not_sent() {
     );
 }
 
-/// R22-6 [major]: R21-6's AuthError live-stuck revive must extend to the MARKDOWNIZE
-/// pipeline. A 401/403 leaves the online task Failed(`auth_error`) — non-retryable, so
-/// `batch retry` (CT2-TASK-005: `max_attempts=0` is that command's contract) must NOT revive
-/// it; only `batch resume` ("carry on, credentials fixed") may revive and execute it.
+/// R22-6 [major], UPDATED for QA2 (step4b-contract-tests-p3a.md §A, 04 §5.2):
+/// R21-6's AuthError live-stuck revive must extend to the MARKDOWNIZE pipeline. A
+/// 401/403 now leaves the online task `Paused(hold_reason=auth)` — never `Failed` —
+/// so `batch retry` (CT2-TASK-005: `max_attempts=0` is that command's contract, and
+/// its task-selection loop is Failed-only, which now trivially excludes a Paused
+/// row) must NOT revive it; only `batch resume` ("carry on, credentials fixed") may
+/// revive and execute it. This test used to assert `status=="failed"` throughout.
 #[test]
 fn r22_6_auth_error_markdownize_revives_on_resume_not_retry() {
     let dir = tempfile::tempdir().unwrap();
@@ -8002,14 +8047,16 @@ fn r22_6_auth_error_markdownize_revives_on_resume_not_retry() {
         Some("2026-07-03T00:00:00Z"),
         &["batch", "resume"],
     );
-    let has_auth_error = |status: &Value| {
-        tasks_of_type(status, "markdownize")
-            .iter()
-            .any(|t| t["status"] == "failed" && t["fallback_reason"] == "auth_error")
+    let has_paused_auth_error = |status: &Value| {
+        tasks_of_type(status, "markdownize").iter().any(|t| {
+            t["status"] == "paused"
+                && t["hold_reason"] == "auth"
+                && t["fallback_reason"] == "auth_error"
+        })
     };
     assert!(
-        has_auth_error(&run_markdownize_seam(&dir, "mock", None, &["status"])),
-        "R22-6 precondition: the online markdownize task must be Failed(auth_error)"
+        has_paused_auth_error(&run_markdownize_seam(&dir, "mock", None, &["status"])),
+        "R22-6 precondition: the online markdownize task must be Paused(hold_reason=auth)"
     );
     // `batch retry` must NOT revive an auth_error task (CT2-TASK-005).
     let retry = run_markdownize_seam(
@@ -8023,8 +8070,8 @@ fn r22_6_auth_error_markdownize_revives_on_resume_not_retry() {
         "R22-6: batch retry must not execute the auth_error task: {retry}"
     );
     assert!(
-        has_auth_error(&run_markdownize_seam(&dir, "mock", None, &["status"])),
-        "R22-6: batch retry must leave the auth_error task Failed (contract of that command)"
+        has_paused_auth_error(&run_markdownize_seam(&dir, "mock", None, &["status"])),
+        "R22-6: batch retry must leave the auth_error task Paused (contract of that command)"
     );
     // `batch resume` with fixed credentials (mock) must revive AND execute it.
     let resumed = run_markdownize_seam(

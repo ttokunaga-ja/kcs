@@ -26,6 +26,7 @@ use std::path::Path;
 
 use assert_cmd::Command;
 use kcs_adapter::bbox_annotation::mistral_markdownize_profile;
+use kcs_adapter::catalog::{TEST_ADOPTED_EMBEDDING_ENV, TEST_STANDARD_ONLINE_MARKDOWNIZE_ENV};
 use kcs_adapter::identity::tool_profile_hash;
 use kcs_adapter::tool_lock::{canonical_tool_lock_value, tool_lock_hash};
 use kcs_core::scope::{
@@ -98,8 +99,8 @@ fn scope_json(dir: &TempDir) -> Value {
 }
 
 // ===========================================================================
-// §A task 状態機械 (U1, QA1/QA4 — QA2/QA3 deferred, see the pipeline crate's
-// `HoldReason` doc comment for why)
+// §A task 状態機械 (U1, QA1-QA4 — all implemented; see the pipeline crate's
+// `HoldReason` doc comment for the QA2/QA3 transition mapping)
 // ===========================================================================
 
 /// QA1 (partial) + QA4: a budget-paused task carries `hold_reason="budget"`
@@ -122,6 +123,256 @@ fn qa1_qa4_status_reports_budget_paused_task_with_hold_reason() {
     }
     // No paused task yet in this fresh scope.
     assert_eq!(breakdown["budget"], 0);
+}
+
+/// Run `kcs <args> --json` with the online markdownize seam pinned to `seam` and an
+/// optional frozen clock, tolerating ANY exit (batch resume/retry return non-zero on
+/// a retry-able failure while still printing their JSON result to stdout). Mirrors
+/// `step3_p0_contract.rs`'s helper of the same name/shape.
+fn run_markdownize_seam(
+    dir: &TempDir,
+    seam: &str,
+    fixed_now: Option<&str>,
+    args: &[&str],
+) -> Value {
+    let mut command = kcs(dir, args);
+    command.env(TEST_STANDARD_ONLINE_MARKDOWNIZE_ENV, seam);
+    if let Some(now) = fixed_now {
+        command.env("KCS_FIXED_NOW", now);
+    }
+    let output = command.arg("--json").assert().get_output().stdout.clone();
+    serde_json::from_slice(&output).unwrap_or(Value::Null)
+}
+
+/// The embedding-seam analog of [`run_markdownize_seam`] (QA3's embedding twin).
+fn run_embedding_seam(dir: &TempDir, seam: &str, fixed_now: Option<&str>, args: &[&str]) -> Value {
+    let mut command = kcs(dir, args);
+    command.env(TEST_ADOPTED_EMBEDDING_ENV, seam);
+    if let Some(now) = fixed_now {
+        command.env("KCS_FIXED_NOW", now);
+    }
+    let output = command.arg("--json").assert().get_output().stdout.clone();
+    serde_json::from_slice(&output).unwrap_or(Value::Null)
+}
+
+/// The online-OCR markdownize task — distinguished from the LOCAL deterministic
+/// markdownize task a text-layer `fake_pdf` fixture also creates, both before
+/// completion (`output_ref` still the `"online:"` placeholder) and after
+/// (`output_ref` rewritten to the normalized-instance path, but
+/// `fallback_reason="online_adapter_done"`).
+fn online_markdownize_task(status: &Value) -> Value {
+    status["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|task| {
+            task["type"] == "markdownize"
+                && (task["output_ref"]
+                    .as_str()
+                    .is_some_and(|output_ref| output_ref.starts_with("online:"))
+                    || task["fallback_reason"] == "online_adapter_done")
+        })
+        .cloned()
+        .unwrap_or_else(|| panic!("no online markdownize task in {status}"))
+}
+
+/// QA2 (step4b-contract-tests-p3a.md §A, 04 §5.2 L679-683): an auth_error
+/// online-markdownize send lands `paused` with `hold_reason="auth"` — never
+/// `failed` — and does not consume the retry budget (`attempts` stays 0, so a
+/// later revival is not budget-exhausted, and `next_retry_at` stays unset).
+/// `batch retry` remains a no-op (CT2-TASK-005: its Failed-only selection
+/// naturally skips a Paused row); `batch resume` (credentials fixed) revives
+/// and completes it.
+#[test]
+fn qa2_auth_error_send_lands_paused_hold_reason_auth() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("a.pdf"), fake_pdf(&["hello qa2"])).unwrap();
+    init(&dir);
+    run_markdownize_seam(&dir, "mock", None, &["index", "--approve"]);
+
+    kcs(&dir, &["batch", "resume"])
+        .env(TEST_STANDARD_ONLINE_MARKDOWNIZE_ENV, "auth_error")
+        .arg("--json")
+        .assert()
+        .code(5);
+
+    let status = run_markdownize_seam(&dir, "mock", None, &["status"]);
+    let task = online_markdownize_task(&status);
+    assert_eq!(task["status"], "paused", "{status}");
+    assert_eq!(task["hold_reason"], "auth", "{status}");
+    assert_eq!(task["fallback_reason"], "auth_error", "{status}");
+    assert_eq!(task["attempts"], 0, "{status}");
+    assert!(task["next_retry_at"].is_null(), "{status}");
+
+    // `batch retry` must not revive it (CT2-TASK-005).
+    let retry = run_markdownize_seam(&dir, "mock", None, &["batch", "retry"]);
+    assert_eq!(retry["tasks_executed"], 0, "{retry}");
+    let status = run_markdownize_seam(&dir, "mock", None, &["status"]);
+    assert_eq!(online_markdownize_task(&status)["status"], "paused");
+
+    // `batch resume` with fixed credentials (mock) revives and completes it.
+    let resumed = run_markdownize_seam(&dir, "mock", None, &["batch", "resume"]);
+    assert_eq!(resumed["tasks_executed"], 1, "{resumed}");
+    let status = run_markdownize_seam(&dir, "mock", None, &["status"]);
+    let task = online_markdownize_task(&status);
+    assert!(
+        task["status"] == "done" || task["status"] == "partial",
+        "{status}"
+    );
+}
+
+/// QA3 (step4b-contract-tests-p3a.md §A, 04 §5.3): rate_limit WITH a provider
+/// `Retry-After` header lands `pending` + `next_retry_at` set EXACTLY
+/// `retry_after_ms` in the future — the `retry_after_ms -> next_retry_at`
+/// wiring's proof (the `rate_limit_after` seam supplies 30_000ms). `attempts`
+/// is not consumed (max_attempts=∞, 04 §5.3); an unelapsed resume is gated by
+/// `next_retry_at`, and an elapsed one completes.
+#[test]
+fn qa3_rate_limit_send_stays_pending_with_retry_after() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(
+        dir.path().join("a.pdf"),
+        fake_pdf(&["hello qa3 retry after"]),
+    )
+    .unwrap();
+    init(&dir);
+    run_markdownize_seam(&dir, "mock", None, &["index", "--approve"]);
+
+    kcs(&dir, &["batch", "resume"])
+        .env(TEST_STANDARD_ONLINE_MARKDOWNIZE_ENV, "rate_limit_after")
+        .env("KCS_FIXED_NOW", "2026-07-03T00:00:00Z")
+        .arg("--json")
+        .assert()
+        .code(3);
+
+    let status = run_markdownize_seam(&dir, "mock", None, &["status"]);
+    let task = online_markdownize_task(&status);
+    assert_eq!(task["status"], "pending", "{status}");
+    assert_eq!(task["attempts"], 0, "{status}");
+    assert_eq!(
+        task["next_retry_at"], "2026-07-03T00:00:30Z",
+        "the Retry-After header (30_000ms) must be honored EXACTLY: {status}"
+    );
+
+    // Unelapsed resume (10s later, before the 30s Retry-After): the gate holds.
+    let early = run_markdownize_seam(
+        &dir,
+        "mock",
+        Some("2026-07-03T00:00:10Z"),
+        &["batch", "resume"],
+    );
+    assert_eq!(early["tasks_executed"], 0, "{early}");
+
+    // Elapsed resume (31s later): completes.
+    let resumed = run_markdownize_seam(
+        &dir,
+        "mock",
+        Some("2026-07-03T00:00:31Z"),
+        &["batch", "resume"],
+    );
+    assert_eq!(resumed["tasks_executed"], 1, "{resumed}");
+}
+
+/// QA3: a rate_limit send with NO `Retry-After` header (the headerless
+/// `"rate_limit"` seam, as opposed to `"rate_limit_after"`) falls back to the
+/// synthetic +2s backoff.
+#[test]
+fn qa3_rate_limit_headerless_uses_synthetic_backoff() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(
+        dir.path().join("a.pdf"),
+        fake_pdf(&["hello qa3 headerless"]),
+    )
+    .unwrap();
+    init(&dir);
+    run_markdownize_seam(&dir, "mock", None, &["index", "--approve"]);
+
+    kcs(&dir, &["batch", "resume"])
+        .env(TEST_STANDARD_ONLINE_MARKDOWNIZE_ENV, "rate_limit")
+        .env("KCS_FIXED_NOW", "2026-07-03T00:00:00Z")
+        .arg("--json")
+        .assert()
+        .code(3);
+
+    let status = run_markdownize_seam(&dir, "mock", None, &["status"]);
+    let task = online_markdownize_task(&status);
+    assert_eq!(task["status"], "pending", "{status}");
+    assert_eq!(
+        task["next_retry_at"], "2026-07-03T00:00:02Z",
+        "a headerless rate_limit must fall back to the synthetic +2s backoff: {status}"
+    );
+}
+
+/// QA3 embedding twin (04 §5.2/§5.3, 04 §876): a rate-limited embedding send
+/// lands `pending` + `next_retry_at` honoring `Retry-After` (never `failed`),
+/// and — the wiring's enrichment-gate proof — an unelapsed resend of that
+/// chunk is excluded from the very next enrichment pass
+/// (`embeddable_task_state`'s new Pending arm). Drives to `done` once the
+/// backoff elapses.
+#[test]
+fn qa3_embedding_rate_limit_pending_and_gated() {
+    let dir = tempfile::tempdir().unwrap();
+    // A single flat section (no sub-heading) so this chunks to exactly one
+    // embedding task — a nested `##` sub-heading (as in some other fixtures)
+    // would split into multiple chunks/tasks here.
+    fs::write(
+        dir.path().join("a.md"),
+        "# Doc\n\nQA3 embedding twin regression body text.\n",
+    )
+    .unwrap();
+    init(&dir);
+    run_embedding_seam(
+        &dir,
+        "rate_limit_after",
+        Some("2026-07-03T00:00:00Z"),
+        &["index", "--approve"],
+    );
+
+    let status = run_embedding_seam(&dir, "mock", None, &["status"]);
+    let embedding_tasks: Vec<&Value> = status["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|task| task["type"] == "embedding")
+        .collect();
+    assert!(!embedding_tasks.is_empty(), "no embedding task in {status}");
+    assert!(
+        embedding_tasks
+            .iter()
+            .all(|task| task["status"] == "pending"
+                && task["attempts"] == 0
+                && task["next_retry_at"] == "2026-07-03T00:00:30Z"),
+        "the Retry-After header (30_000ms) must be honored EXACTLY: {status}"
+    );
+    let expected_count = embedding_tasks.len() as u64;
+
+    // An immediate second enrichment pass (10s later, before the 30s
+    // Retry-After) must exclude them all — the new `embeddable_task_state`
+    // Pending gate's proof (without it, a Pending task was always re-sent
+    // regardless of `next_retry_at`).
+    let early = run_embedding_seam(
+        &dir,
+        "mock",
+        Some("2026-07-03T00:00:10Z"),
+        &["batch", "resume"],
+    );
+    assert_eq!(early["tasks_executed"], 0, "{early}");
+
+    // Past the backoff: all complete.
+    let resumed = run_embedding_seam(
+        &dir,
+        "mock",
+        Some("2026-07-03T00:00:31Z"),
+        &["batch", "resume"],
+    );
+    assert_eq!(resumed["tasks_executed"], expected_count, "{resumed}");
+    let status = run_embedding_seam(&dir, "mock", None, &["status"]);
+    assert!(status["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|task| task["type"] == "embedding")
+        .all(|task| task["status"] == "done"));
 }
 
 // ===========================================================================

@@ -1759,6 +1759,14 @@ fn ct2_image_003_cli_mock_preserves_links_when_replacing_images() {
     assert!(!unit.markdown.contains("](img-0.png)"));
 }
 
+/// QA2 (step4b-contract-tests-p3a.md §A, 04 §5.2 L679-683): an auth failure
+/// lands `paused` with `hold_reason="auth"`, never `failed` — this test used
+/// to assert `status=="failed"` + `attempts==1` (the pre-QA2 shape). Under
+/// QA2 a pause is not a retry-budget event, so `attempts` stays 0 (a later
+/// `batch resume` revival must not find the budget already spent); `batch
+/// retry` is still a no-op for it (CT2-TASK-005: its Failed-only task
+/// selection naturally skips a Paused row now, instead of matching-then
+/// -declining via `max_attempts=0`).
 #[test]
 fn ct2_task_005_auth_error_task_is_not_retried() {
     let dir = scope();
@@ -1775,9 +1783,10 @@ fn ct2_task_005_auth_error_task_is_not_retried() {
     assert_eq!(resumed["tasks_failed"], 1);
     let status = json_success(&dir, ["status"]);
     let online_task = first_online_task(&status);
-    assert_eq!(online_task["status"], "failed");
+    assert_eq!(online_task["status"], "paused");
+    assert_eq!(online_task["hold_reason"], "auth");
     assert_eq!(online_task["fallback_reason"], "auth_error");
-    assert_eq!(online_task["attempts"], 1);
+    assert_eq!(online_task["attempts"], 0);
 
     let retry = json_success_with_env(
         &dir,
@@ -1787,15 +1796,21 @@ fn ct2_task_005_auth_error_task_is_not_retried() {
     assert_eq!(retry["tasks_updated"], 0);
     let status = json_success(&dir, ["status"]);
     let online_task = first_online_task(&status);
-    assert_eq!(online_task["status"], "failed");
-    assert_eq!(online_task["attempts"], 1);
+    assert_eq!(online_task["status"], "paused");
+    assert_eq!(online_task["attempts"], 0);
 }
 
+/// QA3 (step4b-contract-tests-p3a.md §A, 04 §5.2 L682-683): rate_limit stays
+/// `pending` + `next_retry_at` (never `failed`) — this test used to find the
+/// task via `status=="failed"`; it now finds it via
+/// `fallback_reason=="rate_limit"` and asserts `status=="pending"`. The
+/// dedup-on-reindex behavior itself is unchanged (idempotency's
+/// `Pending | Paused` arm already covers this status).
 #[test]
 fn ct2_task_009_failed_online_task_is_not_reenqueued_by_reindex() {
-    // I2 クロスレビュー指摘の回帰ガード: retryable Failed task が存在する状態で
+    // I2 クロスレビュー指摘の回帰ガード: retryable な online task が存在する状態で
     // 未変更ファイルを再 index しても、新しい Pending online task が積まれて
-    // backoff ゲートを迂回できないこと (Failed の再試行は batch retry の責務)。
+    // backoff ゲートを迂回できないこと (Pending の再試行は batch retry の責務)。
     let dir = scope();
     // R9-2: PDF fixture so a retryable online task exists to guard against reindex
     // re-enqueue.
@@ -1815,21 +1830,22 @@ fn ct2_task_009_failed_online_task_is_not_reenqueued_by_reindex() {
         .as_array()
         .unwrap()
         .iter()
-        .find(|task| task["status"] == "failed")
-        .expect("rate_limit mock should leave a failed online task");
+        .find(|task| task["fallback_reason"] == "rate_limit")
+        .expect("rate_limit mock should leave a pending online task");
+    assert_eq!(failed["status"], "pending");
     assert!(failed["next_retry_at"].is_string());
 
     // 未変更で再 index — task 総数が増えない (新規 online task が発行されない)
     json_success(&dir, ["index", "--yes"]);
     let status = json_success(&dir, ["status"]);
     assert_eq!(status["tasks"].as_array().unwrap().len(), tasks_after_fail);
-    let failed_count = status["tasks"]
+    let rate_limited_count = status["tasks"]
         .as_array()
         .unwrap()
         .iter()
-        .filter(|task| task["status"] == "failed")
+        .filter(|task| task["fallback_reason"] == "rate_limit")
         .count();
-    assert_eq!(failed_count, 1);
+    assert_eq!(rate_limited_count, 1);
 }
 
 #[test]
@@ -2177,9 +2193,10 @@ fn r9_7_batch_retry_reports_failed_attempts_in_json() {
         retry["tasks_failed"], 1,
         "the failure must be reported: {retry}"
     );
-    // The task really transitioned Pending -> Failed (the send was attempted).
+    // QA2 (04 §5.2): the task really transitioned Pending -> Paused(auth) (the
+    // send was attempted; auth_error never lands Failed).
     let status = json_success(&dir, ["status"]);
-    assert_eq!(first_online_task(&status)["status"], "failed");
+    assert_eq!(first_online_task(&status)["status"], "paused");
 }
 
 /// R9-2: text-native files (Markdown / plain text / code) must NOT enqueue an
@@ -2313,6 +2330,13 @@ fn ct2_task_007_online_task_not_reissued_for_completed_identity() {
     );
 }
 
+/// QA3 (step4b-contract-tests-p3a.md §A, 04 §5.2 L682-683): rate_limit stays
+/// `pending` + `next_retry_at` (never `failed`), and `attempts` is NOT
+/// consumed (was `1` pre-QA3; max_attempts=∞, 04 §5.3). `late["tasks_updated"]`
+/// also flips `1 -> 0`: that counter is `batch retry`'s Failed->Pending
+/// backoff-reset step specifically, and there is nothing left to reset — the
+/// task was ALREADY sitting Pending the whole time (it never became Failed),
+/// so only `tasks_executed` (the actual send) fires once the backoff elapses.
 #[test]
 fn ct2_task_008_retryable_failure_defers_until_backoff_elapses() {
     // Step2c I2: a retryable failure schedules `next_retry_at` in the future
@@ -2333,15 +2357,16 @@ fn ct2_task_008_retryable_failure_defers_until_backoff_elapses() {
         .code(3);
     let status = json_success(&dir, ["status"]);
     let failed = first_online_task(&status);
-    assert_eq!(failed["status"], "failed");
-    assert_eq!(failed["attempts"], 1);
+    assert_eq!(failed["status"], "pending");
+    assert_eq!(failed["attempts"], 0);
     let next_retry_at = failed["next_retry_at"].as_str().unwrap();
     assert!(
         next_retry_at > "2026-07-03T00:00:00Z",
         "backoff must schedule a future retry, got {next_retry_at}"
     );
 
-    // Retry at the same instant: backoff has not elapsed, nothing runs.
+    // Retry at the same instant: backoff has not elapsed, nothing runs (the
+    // Pending selection loop honors `next_retry_at` too, Step2c I2).
     let early = json_success_with_env(
         &dir,
         ["batch", "retry"],
@@ -2357,7 +2382,7 @@ fn ct2_task_008_retryable_failure_defers_until_backoff_elapses() {
         .as_array()
         .unwrap()
         .iter()
-        .any(|task| is_online_output_ref(task) && task["status"] == "failed"));
+        .any(|task| is_online_output_ref(task) && task["status"] == "pending"));
 
     // Advance the clock past the backoff window: the task becomes due and runs.
     let late = json_success_with_env(
@@ -2368,7 +2393,7 @@ fn ct2_task_008_retryable_failure_defers_until_backoff_elapses() {
             ("KCS_FIXED_NOW", "2026-07-03T01:00:00Z"),
         ],
     );
-    assert_eq!(late["tasks_updated"], 1);
+    assert_eq!(late["tasks_updated"], 0);
     assert_eq!(late["tasks_executed"], 1);
     let resolved = json_success(&dir, ["status"]);
     // On success the online task's output_ref is rewritten to the normalized

@@ -4542,13 +4542,18 @@ fn compute_index_status(searched: &[SearchedScopeInfo]) -> Value {
                         budget_paused = true;
                     }
                 }
-                // R11-8: a RETRYABLE Failed enrichment task (rate_limit etc., holding
-                // next_retry_at, recoverable by `batch retry`) is outstanding work —
-                // count it as pending. Otherwise the scope reads enriched_ratio<1.0
-                // with pending_enrichment_tasks=0 and budget_paused=false, an
-                // impossible-looking dead end an Agent cannot act on (the dual of
-                // R9-4). A NON-retryable Failed task (permanent gap) stays excluded:
-                // it surfaces only as ratio<1.0, never as actionable pending work.
+                // R11-8: a RETRYABLE Failed enrichment task (network_error/
+                // quota_exceeded etc., holding next_retry_at, recoverable by
+                // `batch retry`) is outstanding work — count it as pending.
+                // (rate_limit no longer reaches this arm at all under QA3,
+                // 04 §5.3: it stays Pending — already counted by the
+                // `TaskStatus::Partial | TaskStatus::Pending | TaskStatus::Running`
+                // arm above — never Failed.) Otherwise the scope reads
+                // enriched_ratio<1.0 with pending_enrichment_tasks=0 and
+                // budget_paused=false, an impossible-looking dead end an Agent
+                // cannot act on (the dual of R9-4). A NON-retryable Failed task
+                // (permanent gap) stays excluded: it surfaces only as
+                // ratio<1.0, never as actionable pending work.
                 TaskStatus::Failed if task_retry_allowed(&task) => pending += 1,
                 TaskStatus::Failed => {}
             }
@@ -10110,6 +10115,11 @@ fn run_batch(args: BatchArgs) -> Result<Value> {
             let changed = store
                 .update_matching(|task| {
                     let held_secret = task.fallback_reason.as_deref() == Some(SECRETS_TIER_B_HOLD);
+                    // QA2 (step4b-contract-tests-p3a.md §A, 04 §5.2): this generic
+                    // flip already covers an auth hold (`hold_reason=auth`) — any
+                    // non-budget, non-secret Paused task, auth included — so
+                    // `batch resume` is the release for auth_error too, not just
+                    // budget/tier_b.
                     if task.status == TaskStatus::Paused
                         && (resume.override_budget
                             || task.fallback_reason.as_deref() != Some("budget_exceeded"))
@@ -10117,6 +10127,7 @@ fn run_batch(args: BatchArgs) -> Result<Value> {
                     {
                         task.status = TaskStatus::Pending;
                         task.fallback_reason = None;
+                        task.hold_reason = None;
                         true
                     } else {
                         false
@@ -10846,15 +10857,22 @@ fn execute_pending_markdownize_tasks(
     let secrets_approved = secrets_send_approved(repo);
     let online_profile = online_markdownize_profile_for(repo)?;
     let output_ref = online_output_ref(&online_profile.adapter_id);
-    // R22-6(a): R21-6 gave the embedding pipeline a live-AuthError revive but never wired
-    // the markdownize twin, so a 401/403 left its task Failed(`auth_error`) — non-retryable
-    // (`max_attempts:0`), hence invisible to `batch retry` and to this Pending filter — with
-    // its reservation eating the month's cap. Fixing the credentials resumed nothing. Revive
-    // here, BEFORE the Pending set is built, so the repaired credentials are used on this
-    // very pass. Only a task whose precondition is not `Retire` (file present, unedited,
-    // within the cap) is revived; a genuinely stale one is retired by the loop below as
-    // before. 401/403 is refused before billing (R20-3), so releasing its still-open ledger
-    // row (if any) settles it `unknown_settled` rather than leaving it stranded open.
+    // R22-6(a), updated for QA2 (step4b-contract-tests-p3a.md §A, 04 §5.2):
+    // R21-6 gave the embedding pipeline a live-AuthError revive but never wired
+    // the markdownize twin, so a 401/403 left its task stranded — with its
+    // reservation eating the month's cap. Under QA2 an auth failure lands
+    // `Paused(hold_reason=auth)` (never `Failed`), and `run_batch`'s Resume arm
+    // already generically flips ANY non-budget non-secret Paused task back to
+    // Pending BEFORE this function runs — so that flip is normally what revives
+    // it. This block is the belt-and-braces for a caller that reaches
+    // `execute_pending_markdownize_tasks` WITHOUT going through that flip (and
+    // for any Paused(auth) row the flip's own iteration order left unrevived
+    // this same pass), and it still uniquely owns the ledger release: 401/403
+    // is refused before billing (R20-3), so releasing its still-open ledger row
+    // (if any) settles it `unknown_settled` rather than leaving it stranded
+    // open. Only a task whose precondition is not `Retire` (file present,
+    // unedited, within the cap) is revived; a genuinely stale one is retired by
+    // the loop below as before.
     let markdownize_adapter_kind = "markdownize";
     let markdown_profile_hash = online_profile.tool_profile_hash.clone();
     let auth_revivable = if allow_auth_revive {
@@ -10865,7 +10883,7 @@ fn execute_pending_markdownize_tasks(
             .filter(|task| {
                 task.task_type == TaskType::Markdownize
                     && targets_standard_online_markdownize(store.kcs_dir(), task, &output_ref)
-                    && task.status == TaskStatus::Failed
+                    && task.status == TaskStatus::Paused
                     && retry_kind_from_reason(task.fallback_reason.as_deref())
                         == RetryErrorKind::AuthError
                     && !matches!(
@@ -10898,6 +10916,7 @@ fn execute_pending_markdownize_tasks(
                 task.clear_reservation();
                 task.status = TaskStatus::Pending;
                 task.fallback_reason = Some("ready_for_online_adapter".to_owned());
+                task.hold_reason = None;
                 task.attempts = 0;
                 task.next_retry_at = None;
                 task.heartbeat_at = None;
@@ -11095,58 +11114,124 @@ fn execute_pending_markdownize_tasks(
                     .map_err(pipeline_to_kcs)?;
                 counts.executed += 1;
             }
-            Err(error) => {
-                let policy = retry_policy(error.retry_kind);
-                let attempts_after = task.attempts.saturating_add(1);
-                let next_retry_at = (policy.retryable
-                    && policy
-                        .max_attempts
-                        .map(|max| attempts_after < max)
-                        .unwrap_or(true))
-                .then(|| scheduled_retry_at(&now_utc_seconds(), &policy.backoff, attempts_after));
-                // CL42/CL44/CL45: a retry is coming — leave the ledger row open (it
-                // already covers the resend, `reserve_or_reuse_task_charge`'s reuse
-                // path) rather than settling now. Only a definitive outcome (no more
-                // retries left) settles `unknown_settled` at the reservation estimate
-                // — this Adapter integration has no post-hoc result-query capability
-                // (see `settle_task_charge_unknown`'s doc comment), so a permanently
-                // failed send is never billed less than its reservation.
-                let settles_now = next_retry_at.is_none();
-                if settles_now {
-                    settle_task_charge_unknown(&ledger, &key, &intent_token, reserved_usd)?;
-                }
-                let reason = retry_reason(error.retry_kind).to_owned();
-                store
-                    .update_matching(|candidate| {
-                        if candidate.task_id == task_id {
-                            candidate.status = TaskStatus::Failed;
-                            candidate.fallback_reason = Some(reason.clone());
-                            candidate.heartbeat_at = None;
-                            candidate.attempts = candidate.attempts.saturating_add(1);
-                            candidate.next_retry_at = next_retry_at.clone();
-                            if settles_now {
-                                candidate.clear_reservation();
+            // QA2/QA3 (step4b-contract-tests-p3a.md §A, 04 §5.2/§5.3): the
+            // send failure is a 3-way branch on `error.retry_kind` — rate_limit
+            // and auth_error each get a dedicated non-Failed landing state;
+            // every other kind keeps today's Failed/backoff logic.
+            Err(error) => match error.retry_kind {
+                RetryErrorKind::RateLimit => {
+                    // QA3 (04 §5.2 L682-683): "paused ではなく pending +
+                    // next_retry_at" — stays Pending, never Failed. `attempts`
+                    // is NOT consumed (max_attempts=∞, 04 §5.3). CL42/CL44/CL45:
+                    // a retry is coming — leave the ledger row open (same
+                    // rationale as the settles_now=false case below); the
+                    // reservation stamp is left untouched.
+                    let next_retry_at =
+                        rate_limit_retry_at(&now_utc_seconds(), error.retry_after_ms);
+                    let reason = retry_reason(RetryErrorKind::RateLimit).to_owned();
+                    store
+                        .update_matching(|candidate| {
+                            if candidate.task_id == task_id {
+                                candidate.status = TaskStatus::Pending;
+                                candidate.fallback_reason = Some(reason.clone());
+                                candidate.hold_reason = None;
+                                candidate.heartbeat_at = None;
+                                candidate.next_retry_at = Some(next_retry_at.clone());
+                                true
+                            } else {
+                                false
                             }
-                            true
-                        } else {
-                            false
-                        }
-                    })
-                    .map_err(pipeline_to_kcs)?;
-                // R9-7: a driven task that failed still attempted an online send
-                // (rate-limit / auth / charge consumed) — count it so `batch` JSON
-                // surfaces the attempt instead of reporting only successes.
-                counts.failed += 1;
-                // R11-2: classify the failure for the batch exit code. Auth needs
-                // user action (exit 5); a scheduled `next_retry_at` marks the task
-                // retry-eligible (exit 3, else it counts toward all-permanent = 4).
-                if error.retry_kind == RetryErrorKind::AuthError {
-                    counts.auth_failed += 1;
-                }
-                if next_retry_at.is_some() {
+                        })
+                        .map_err(pipeline_to_kcs)?;
+                    // R9-7: a driven task that failed still attempted an online
+                    // send — count it so `batch` JSON surfaces the attempt.
+                    counts.failed += 1;
+                    // R11-2/04 §5.6 exit 3: retryable work remains.
                     counts.failed_retryable += 1;
                 }
-            }
+                RetryErrorKind::AuthError => {
+                    // QA2 (04 §5.2 L679-683): lands Paused(hold_reason=auth),
+                    // never Failed. `attempts` is NOT consumed (a pause is not
+                    // a retry-budget event — max_attempts=0 means "no retry",
+                    // not "budget already spent"), so a later revival (`batch
+                    // resume`) does not find the budget exhausted. Ledger:
+                    // EXACTLY the pre-QA2 definitive-failure behavior (settle
+                    // `unknown_settled` + clear the reservation) — a later
+                    // revival reserves fresh.
+                    settle_task_charge_unknown(&ledger, &key, &intent_token, reserved_usd)?;
+                    let reason = retry_reason(RetryErrorKind::AuthError).to_owned();
+                    store
+                        .update_matching(|candidate| {
+                            if candidate.task_id == task_id {
+                                candidate.status = TaskStatus::Paused;
+                                candidate.hold_reason = Some(HoldReason::Auth);
+                                candidate.fallback_reason = Some(reason.clone());
+                                candidate.heartbeat_at = None;
+                                candidate.next_retry_at = None;
+                                candidate.clear_reservation();
+                                true
+                            } else {
+                                false
+                            }
+                        })
+                        .map_err(pipeline_to_kcs)?;
+                    counts.failed += 1;
+                    // R11-2/04 §5.6 exit 5: auth_error needs user action.
+                    counts.auth_failed += 1;
+                }
+                _ => {
+                    let policy = retry_policy(error.retry_kind);
+                    let attempts_after = task.attempts.saturating_add(1);
+                    let next_retry_at = (policy.retryable
+                        && policy
+                            .max_attempts
+                            .map(|max| attempts_after < max)
+                            .unwrap_or(true))
+                    .then(|| {
+                        scheduled_retry_at(&now_utc_seconds(), &policy.backoff, attempts_after)
+                    });
+                    // CL42/CL44/CL45: a retry is coming — leave the ledger row open (it
+                    // already covers the resend, `reserve_or_reuse_task_charge`'s reuse
+                    // path) rather than settling now. Only a definitive outcome (no more
+                    // retries left) settles `unknown_settled` at the reservation estimate
+                    // — this Adapter integration has no post-hoc result-query capability
+                    // (see `settle_task_charge_unknown`'s doc comment), so a permanently
+                    // failed send is never billed less than its reservation.
+                    let settles_now = next_retry_at.is_none();
+                    if settles_now {
+                        settle_task_charge_unknown(&ledger, &key, &intent_token, reserved_usd)?;
+                    }
+                    let reason = retry_reason(error.retry_kind).to_owned();
+                    store
+                        .update_matching(|candidate| {
+                            if candidate.task_id == task_id {
+                                candidate.status = TaskStatus::Failed;
+                                candidate.fallback_reason = Some(reason.clone());
+                                // A Failed task is not a hold.
+                                candidate.hold_reason = None;
+                                candidate.heartbeat_at = None;
+                                candidate.attempts = candidate.attempts.saturating_add(1);
+                                candidate.next_retry_at = next_retry_at.clone();
+                                if settles_now {
+                                    candidate.clear_reservation();
+                                }
+                                true
+                            } else {
+                                false
+                            }
+                        })
+                        .map_err(pipeline_to_kcs)?;
+                    // R9-7: a driven task that failed still attempted an online send
+                    // (charge consumed) — count it so `batch` JSON surfaces the
+                    // attempt instead of reporting only successes.
+                    counts.failed += 1;
+                    // R11-2: a scheduled `next_retry_at` marks the task retry-eligible
+                    // (exit 3), else it counts toward all-permanent (exit 4).
+                    if next_retry_at.is_some() {
+                        counts.failed_retryable += 1;
+                    }
+                }
+            },
         }
     }
     Ok(counts)
@@ -11191,6 +11276,18 @@ fn persistent_network_allowed_for(
 /// `false` without touching any row, "config へ true を再設定するだけで回
 /// 復し、再承認は不要" (07 §3) holds naturally: the row survives a revoke,
 /// so restoring just the boolean reopens the gate.
+///
+/// 07 §3 L191-206 (crash self-heal): when no `active` row matches, the
+/// fallthrough is keyed on whether an `approval_pending` is currently
+/// present — its presence proves SOME approval flow already started for
+/// this scope, which is exactly the case the "初回 materialize" exception
+/// (`try_materialize_initial_network_approval`) must NOT fire for (that
+/// exception is a distinct, no-pending-involved UX shortcut, and firing it
+/// here would materialize a row for whatever `tool_id`/`tool_profile_hash`
+/// this call happens to carry — a possibly DIFFERENT identity than the one
+/// actually pending). `try_self_heal_network_approval` owns the entire
+/// pending-present branch (well-formed-and-matching / well-formed-but
+/// -mismatched / legacy).
 fn persistent_network_allowed_for_kcs_dir(
     kcs_dir: &Path,
     tool_id: &str,
@@ -11207,7 +11304,11 @@ fn persistent_network_allowed_for_kcs_dir(
     )? {
         return Ok(true);
     }
-    try_materialize_initial_network_approval(kcs_dir, tool_id, tool_profile_hash)
+    if kcs_core::scope::read_network_approval_pending(kcs_dir)?.is_none() {
+        try_materialize_initial_network_approval(kcs_dir, tool_id, tool_profile_hash)
+    } else {
+        try_self_heal_network_approval(kcs_dir, tool_id, tool_profile_hash)
+    }
 }
 
 /// `07 §3`'s single execution mode every currently-relevant online adapter
@@ -11273,6 +11374,98 @@ fn try_materialize_initial_network_approval(
         None,
     )?;
     Ok(true)
+}
+
+/// 07 §3 L191-206 (crash self-heal): reached from
+/// `persistent_network_allowed_for_kcs_dir` only when an `approval_pending`
+/// IS currently present — materialize (above) never fires in that branch,
+/// since a pending proves a prior approval flow already started for THIS
+/// scope, and blanket-materializing here could fabricate a row for a
+/// DIFFERENT identity than the one actually pending (07 §3: "自動生成せず
+/// 明示承認を要求する").
+///
+/// Re-reads `approval_pending` itself (rather than trusting the caller's
+/// presence check) — same defensive-independence style as
+/// `try_materialize_initial_network_approval` re-checking the boolean its
+/// own caller already checked. Three cases, checked in this order:
+///
+/// (a) **Legacy** — `approved_at`/`approval_method` absent or non-string (10
+///     §12.3 element-level backward compat: not a schema error, but never
+///     eligible for self-heal's exact-match). Cleaned up via
+///     `discard_network_approval_pending`, which removes the pending AND
+///     sets `approvals_initialized` in the same atomic write if it was not
+///     already set (07 §3 L202-205 — otherwise "true × 行ゼロ × marker 無
+///     し" reverts to a genuine first-time state and the NEXT call's
+///     initial-materialize exception would silently bypass the explicit
+///     -approval requirement this cleanup enforces). This check runs BEFORE
+///     the tuple-match check below regardless of what the tuple would have
+///     matched — a legacy pending is unconditionally self-heal-ineligible.
+///     Returns `Ok(false)`.
+/// (b) **Well-formed AND 4-tuple-matching** — `scope_id` (against THIS
+///     scope's current `scope.json`), `tool_id`, `execution_mode` (against
+///     [`NETWORK_APPROVAL_EXECUTION_MODE`]), and `tool_profile_hash` all
+///     equal the caller's current values exactly. Self-heal: publish the
+///     pending's payload VERBATIM plus `"status": "active"` — `approved_at`/
+///     `approval_method` are copied as-is, never re-stamped (07 §3 L195-196:
+///     "self-heal は pending の payload をそのまま publish する — 監査値を
+///     補完・捏造しない"). The publish re-verifies (CAS) that
+///     `approval_pending` still equals the exact value just read (07 §3
+///     L138-142); a concurrent `kcs adapter revoke` winning that race
+///     surfaces as `KCS-E-ADAPTER-APPROVAL-CONFLICT-001`, which self-heal
+///     treats as its trigger condition having evaporated — `Ok(false)`,
+///     NOT propagated as an error (07 §3 L142: "self-heal は発火条件不成立
+///     として非発火のままでよい" — only the EXPLICIT approval commands turn
+///     this CAS conflict into a hard error/exit 5). Any other error
+///     propagates via `?`.
+/// (c) **Well-formed but tuple-mismatched** — leave the pending untouched
+///     and return `Ok(false)`; explicit approval is required, and that
+///     approval's own step (0) overwrites this stale pending (07 §3
+///     L191-198).
+///
+/// Locking posture: identical to `try_materialize_initial_network_approval`
+/// — no lock is acquired here. Both functions perform a single atomic-rename
+/// overwrite of `scope.json` (`publish_network_approval`/
+/// `discard_network_approval_pending`), the same durability unit
+/// `try_materialize_...` already relied on from this exact call path without
+/// a dedicated lock.
+fn try_self_heal_network_approval(
+    kcs_dir: &Path,
+    tool_id: &str,
+    tool_profile_hash: &str,
+) -> Result<bool> {
+    let Some(pending) = kcs_core::scope::read_network_approval_pending(kcs_dir)? else {
+        return Ok(false);
+    };
+    let has_audit_values = pending.get("approved_at").and_then(Value::as_str).is_some()
+        && pending
+            .get("approval_method")
+            .and_then(Value::as_str)
+            .is_some();
+    if !has_audit_values {
+        kcs_core::scope::discard_network_approval_pending(kcs_dir)?;
+        return Ok(false);
+    }
+    let Ok(this_scope_id) = scope_id(kcs_dir) else {
+        return Ok(false);
+    };
+    let tuple_matches = pending.get("scope_id").and_then(Value::as_str)
+        == Some(this_scope_id.as_str())
+        && pending.get("tool_id").and_then(Value::as_str) == Some(tool_id)
+        && pending.get("execution_mode").and_then(Value::as_str)
+            == Some(NETWORK_APPROVAL_EXECUTION_MODE)
+        && pending.get("tool_profile_hash").and_then(Value::as_str) == Some(tool_profile_hash);
+    if !tuple_matches {
+        return Ok(false);
+    }
+    let mut row = pending.clone();
+    if let Some(object) = row.as_object_mut() {
+        object.insert("status".to_owned(), json!("active"));
+    }
+    match kcs_core::scope::publish_network_approval(kcs_dir, row, Some(&pending)) {
+        Ok(()) => Ok(true),
+        Err(error) if error.error_code() == "KCS-E-ADAPTER-APPROVAL-CONFLICT-001" => Ok(false),
+        Err(error) => Err(error),
+    }
 }
 
 /// True when `consents.jsonl` (device-global) carries an online opt-in row
@@ -11446,6 +11639,12 @@ impl OnlineExecutionOutcome {
 #[derive(Debug, Clone)]
 struct TaskExecutionFailure {
     retry_kind: RetryErrorKind,
+    // QA3 (step4b-contract-tests-p3a.md §A, 04 §5.3): the provider's
+    // `Retry-After` in milliseconds, carried from `AdapterError::RateLimit`
+    // through to the send handler so `next_retry_at` can honor it
+    // (`rate_limit_retry_at`). `None` for every non-adapter construction
+    // site and for an adapter error that is not `RateLimit` with a header.
+    retry_after_ms: Option<u64>,
 }
 
 /// R11-6: the online-markdownize cost to reserve/bill for `task`. A full send bills
@@ -11652,6 +11851,7 @@ fn execute_online_markdownize_task(
     if !current_scan_policy_allows_file(repo.root(), &task.input_path).unwrap_or(false) {
         return Err(TaskExecutionFailure {
             retry_kind: RetryErrorKind::InvalidInput,
+            retry_after_ms: None,
         });
     }
     // R9-2 (defense in depth): never send a text-native file to online OCR even if
@@ -11661,6 +11861,7 @@ fn execute_online_markdownize_task(
     if is_text_native_media(&media_type) {
         return Err(TaskExecutionFailure {
             retry_kind: RetryErrorKind::InvalidInput,
+            retry_after_ms: None,
         });
     }
     // R22-5 (defense in depth, mirroring the R9-2 guard above): never ship octet-stream TEXT
@@ -11669,6 +11870,7 @@ fn execute_online_markdownize_task(
     if is_local_passthrough_text(&media_type, &prepared_units) {
         return Err(TaskExecutionFailure {
             retry_kind: RetryErrorKind::InvalidInput,
+            retry_after_ms: None,
         });
     }
     let scope_id = repo.scope_id_for_adapter();
@@ -11733,6 +11935,7 @@ fn execute_online_markdownize_task(
         if retry_units.is_some() {
             return Err(TaskExecutionFailure {
                 retry_kind: RetryErrorKind::ContractViolation,
+                retry_after_ms: None,
             });
         }
         prepared_units = prepared_units_from_ocr_discovery(
@@ -11743,6 +11946,7 @@ fn execute_online_markdownize_task(
         )
         .map_err(|_| TaskExecutionFailure {
             retry_kind: RetryErrorKind::ContractViolation,
+            retry_after_ms: None,
         })?;
         // No page artifact exists before OCR for a scanned PDF. The already-verified
         // immutable raw object is the bounded prepared source shared by each discovered
@@ -11750,6 +11954,7 @@ fn execute_online_markdownize_task(
         write_cas_object_or_reuse_legacy(repo.kcs_dir(), "prepared", &task.input_hash, &bytes)
             .map_err(|_| TaskExecutionFailure {
                 retry_kind: persist_failure_retry_kind(),
+                retry_after_ms: None,
             })?;
     }
     let profile = outcome.profile;
@@ -11787,6 +11992,7 @@ fn execute_online_markdownize_task(
     )
     .map_err(|_| TaskExecutionFailure {
         retry_kind: RetryErrorKind::ContractViolation,
+        retry_after_ms: None,
     })?;
     // R11-6: merge in the previously-done units the retry did not target. The retry
     // request omitted them, so the adapter never returned them — keep the FIRST
@@ -11818,6 +12024,7 @@ fn execute_online_markdownize_task(
     if units.is_empty() {
         return Err(TaskExecutionFailure {
             retry_kind: RetryErrorKind::NetworkError,
+            retry_after_ms: None,
         });
     }
     let done = units.len();
@@ -11848,6 +12055,7 @@ fn execute_online_markdownize_task(
     persist_normalized_instance(repo.kcs_dir(), &manifest, &units).map_err(|_| {
         TaskExecutionFailure {
             retry_kind: persist_failure_retry_kind(),
+            retry_after_ms: None,
         }
     })?;
     Ok(OnlineExecutionOutcome::full(
@@ -11877,6 +12085,7 @@ fn try_online_incremental_markdownize(
 ) -> std::result::Result<Option<OnlineExecutionOutcome>, TaskExecutionFailure> {
     let invalid = || TaskExecutionFailure {
         retry_kind: RetryErrorKind::InvalidInput,
+        retry_after_ms: None,
     };
     let incremental_config = effective_incremental_config(repo).map_err(|_| invalid())?;
     if !incremental_config.enabled {
@@ -12063,6 +12272,7 @@ fn try_online_incremental_markdownize(
     persist_normalized_instance(repo.kcs_dir(), &manifest, &units).map_err(|_| {
         TaskExecutionFailure {
             retry_kind: persist_failure_retry_kind(),
+            retry_after_ms: None,
         }
     })?;
     Ok(Some(OnlineExecutionOutcome {
@@ -12162,6 +12372,10 @@ fn persist_failure_retry_kind() -> RetryErrorKind {
 }
 
 fn task_failure_from_adapter(error: kcs_adapter::AdapterError) -> TaskExecutionFailure {
+    // QA3: capture BEFORE `match error` moves it — `Some` only for a
+    // `RateLimit` whose provider response carried a parseable `Retry-After`
+    // header (kcs-adapter's `AdapterError::retry_after_ms`).
+    let retry_after_ms = error.retry_after_ms();
     let retry_kind = match error {
         kcs_adapter::AdapterError::Auth(_) => RetryErrorKind::AuthError,
         kcs_adapter::AdapterError::RateLimit { .. } => RetryErrorKind::RateLimit,
@@ -12175,7 +12389,10 @@ fn task_failure_from_adapter(error: kcs_adapter::AdapterError) -> TaskExecutionF
         // transient — never retry/re-bill it.
         kcs_adapter::AdapterError::NotImplemented(_) => RetryErrorKind::InvalidInput,
     };
-    TaskExecutionFailure { retry_kind }
+    TaskExecutionFailure {
+        retry_kind,
+        retry_after_ms,
+    }
 }
 
 // ===========================================================================
@@ -13019,12 +13236,23 @@ fn run_embedding_enrichment_for_instances(
                 // and counted, forever conservative.
                 // Enrichment failure is non-fatal: mark the sent chunks failed and
                 // stop (search sees no embeddings → text). Never fails `kcs index`.
+                // QA2/QA3 (04 §5.2/§5.3): rate_limit/auth_error each land a
+                // dedicated non-Failed transition (mirrors the markdownize send
+                // handler's 3-way branch) — every other kind keeps the generic
+                // Failed transition.
+                let transition = match failure.retry_kind {
+                    RetryErrorKind::RateLimit => {
+                        embedding_rate_limit_transition(failure.retry_after_ms)
+                    }
+                    RetryErrorKind::AuthError => embedding_auth_pause_transition(),
+                    _ => embedding_fail_transition(failure.retry_kind),
+                };
                 record_embedding_transitions(
                     &mut transitions,
                     to_send
                         .iter()
                         .flat_map(|group| group.members.iter().copied()),
-                    embedding_fail_transition(failure.retry_kind),
+                    transition,
                 );
                 count_embedding_failure(
                     &mut outcome,
@@ -13050,6 +13278,10 @@ struct EmbeddingTransition {
     status: TaskStatus,
     reason: &'static str,
     failure_kind: Option<RetryErrorKind>,
+    // QA3: the provider's `Retry-After` (ms) for a `"rate_limit"` transition —
+    // `apply_embedding_transitions` reads this to build `next_retry_at` via
+    // `rate_limit_retry_at`. `None` for every other transition.
+    retry_after_ms: Option<u64>,
 }
 
 fn embedding_done_transition() -> EmbeddingTransition {
@@ -13057,6 +13289,7 @@ fn embedding_done_transition() -> EmbeddingTransition {
         status: TaskStatus::Done,
         reason: "embedding_adapter_done",
         failure_kind: None,
+        retry_after_ms: None,
     }
 }
 
@@ -13065,6 +13298,7 @@ fn embedding_pause_transition() -> EmbeddingTransition {
         status: TaskStatus::Paused,
         reason: "budget_exceeded",
         failure_kind: None,
+        retry_after_ms: None,
     }
 }
 
@@ -13073,6 +13307,35 @@ fn embedding_fail_transition(kind: RetryErrorKind) -> EmbeddingTransition {
         status: TaskStatus::Failed,
         reason: retry_reason(kind),
         failure_kind: Some(kind),
+        retry_after_ms: None,
+    }
+}
+
+/// QA3 (step4b-contract-tests-p3a.md §A, 04 §5.2/§5.3): a rate-limited
+/// embedding send stays Pending (never Failed/Paused) — mirrors the
+/// markdownize send handler's RateLimit branch. `apply_embedding_transitions`
+/// reads `retry_after_ms` to honor the provider's `Retry-After` header (else
+/// the synthetic +2s fallback), and does not bump `attempts`.
+fn embedding_rate_limit_transition(retry_after_ms: Option<u64>) -> EmbeddingTransition {
+    EmbeddingTransition {
+        status: TaskStatus::Pending,
+        reason: "rate_limit",
+        failure_kind: None,
+        retry_after_ms,
+    }
+}
+
+/// QA2 (step4b-contract-tests-p3a.md §A, 04 §5.2): an auth-failed embedding
+/// send lands Paused(hold_reason=auth) (never Failed) — mirrors the
+/// markdownize send handler's AuthError branch. `apply_embedding_transitions`
+/// does not bump `attempts` and clears `next_retry_at`; `hold_reason` is
+/// auto-stamped by the existing QA1 `hold_reason_for_reason` block.
+fn embedding_auth_pause_transition() -> EmbeddingTransition {
+    EmbeddingTransition {
+        status: TaskStatus::Paused,
+        reason: "auth_error",
+        failure_kind: None,
+        retry_after_ms: None,
     }
 }
 
@@ -13084,6 +13347,7 @@ fn embedding_retired_non_live_transition() -> EmbeddingTransition {
         status: TaskStatus::Failed,
         reason: RETIRED_NON_LIVE,
         failure_kind: None,
+        retry_after_ms: None,
     }
 }
 
@@ -13161,6 +13425,17 @@ fn apply_embedding_transitions(
                 if retryable {
                     failed_retryable += 1;
                 }
+            } else if transition.reason == "rate_limit" {
+                // QA3 (04 §5.3): max_attempts=∞ — `attempts` is NOT consumed.
+                // `next_retry_at` honors the provider's `Retry-After` (or the
+                // synthetic +2s fallback when absent).
+                task.next_retry_at = Some(rate_limit_retry_at(now, transition.retry_after_ms));
+                failed_retryable += 1;
+            } else if transition.reason == "auth_error" {
+                // QA2: a pause is not a retry-budget event — `attempts` is NOT
+                // consumed. `hold_reason` is already auto-stamped above via
+                // `hold_reason_for_reason`.
+                task.next_retry_at = None;
             }
             true
         })
@@ -13196,6 +13471,7 @@ fn plan_embed_batch<'a>(
         let embedding_hash =
             chunk_embedding_hash(chunk, profile).map_err(|_| TaskExecutionFailure {
                 retry_kind: RetryErrorKind::ContractViolation,
+                retry_after_ms: None,
             })?;
         match embedding_store::content_vector(conn, &embedding_hash) {
             Ok(Some(bytes)) => reuse.push((chunk, bytes)),
@@ -13203,6 +13479,7 @@ fn plan_embed_batch<'a>(
             Err(_) => {
                 return Err(TaskExecutionFailure {
                     retry_kind: RetryErrorKind::ContractViolation,
+                    retry_after_ms: None,
                 })
             }
         }
@@ -13228,6 +13505,7 @@ fn link_reused_chunks(
         embedding_store::link_chunk_vec(conn, &chunk.chunk_id, bytes, profile.dimensions).map_err(
             |_| TaskExecutionFailure {
                 retry_kind: RetryErrorKind::ContractViolation,
+                retry_after_ms: None,
             },
         )?;
     }
@@ -13261,6 +13539,7 @@ fn send_embed_batch(
         let Some(vector) = by_id.get(&chunk.chunk_id) else {
             return Err(TaskExecutionFailure {
                 retry_kind: RetryErrorKind::ContractViolation,
+                retry_after_ms: None,
             });
         };
         let bytes = f32_to_le_bytes(vector);
@@ -13277,6 +13556,7 @@ fn send_embed_batch(
         )
         .map_err(|_| TaskExecutionFailure {
             retry_kind: RetryErrorKind::ContractViolation,
+            retry_after_ms: None,
         })?;
         embedding_store::link_chunk_vecs_to_content_vector(
             conn,
@@ -13286,16 +13566,19 @@ fn send_embed_batch(
         )
         .map_err(|_| TaskExecutionFailure {
             retry_kind: RetryErrorKind::ContractViolation,
+            retry_after_ms: None,
         })?;
     }
     Ok(())
 }
 
 /// L2(ii)/L7 target selection: drop chunks whose embedding task must not run in
-/// this pass — a sticky budget-Paused task (unless `override_budget`), or a Failed
+/// this pass — a sticky budget-Paused task (unless `override_budget`), a Failed
 /// task that is not retry-eligible (unelapsed `next_retry_at`, or non-retryable /
-/// attempts exhausted). Failed retry-eligible tasks are left in; `batch retry`
-/// resets them to Pending before the pass so they flow through normally.
+/// attempts exhausted), or (QA3, step4b-contract-tests-p3a.md §A) a rate-limited
+/// Pending task whose `next_retry_at` backoff has not yet elapsed. Failed
+/// retry-eligible tasks are left in; `batch retry` resets them to Pending before
+/// the pass so they flow through normally.
 fn filter_embeddable_by_task_state(
     task_store: &TaskStore,
     pending: Vec<EmbeddableChunk>,
@@ -13341,12 +13624,26 @@ fn embeddable_task_state(task: &TaskDescriptor, override_budget: bool) -> bool {
             // the R21-1 JOIN dedup so the hold cannot be bypassed even if a same
             // output_ref collision re-appears from another source.
             Some(SECRETS_TIER_B_HOLD) => false,
+            // QA2 (step4b-contract-tests-p3a.md §A): an auth hold is released
+            // only by the dedicated revive pre-pass
+            // (`reconcile_committed_embedding_tasks`'s `auth_revive_candidate`,
+            // gated on `batch resume`'s `allow_auth_revive`) — never by being
+            // re-driven directly from this generic sendable-chunk path.
+            Some("auth_error") => false,
             // Any other Paused reason is safe to re-drive.
             _ => true,
         },
         // Failed embeddings are owned by `batch retry` (L7): skip unless the
         // backoff has elapsed AND the error is still retryable.
         TaskStatus::Failed => task_retry_due(task) && task_retry_allowed(task),
+        // QA3 (step4b-contract-tests-p3a.md §A, 04 §876): a rate-limited
+        // Pending chunk (`next_retry_at` in the future) must not be re-driven
+        // before its backoff elapses — "next_retry_at 未来 … の embedding
+        // タスクを持つ chunk は enrichment 対象から除外する". Mirrors the
+        // markdownize send-selection loop's own `task_retry_due` guard on its
+        // Pending arm. A fresh Pending task (`next_retry_at = None`) is
+        // unaffected (`task_retry_due` defaults to due).
+        TaskStatus::Pending => task_retry_due(task),
         _ => true,
     }
 }
@@ -13464,7 +13761,14 @@ fn reconcile_committed_embedding_tasks(
         }
         let budget_paused = task.status == TaskStatus::Paused
             && task.fallback_reason.as_deref() == Some("budget_exceeded");
+        // QA2 (step4b-contract-tests-p3a.md §A): an auth failure now lands
+        // Paused (never Failed) — admit it here the SAME way `budget_paused`
+        // is admitted, otherwise a Paused(auth) task on a non-live chunk
+        // strands its open reservation forever (the R18-1/R22-3 bug class).
+        let auth_paused = task.status == TaskStatus::Paused
+            && retry_kind_from_reason(task.fallback_reason.as_deref()) == RetryErrorKind::AuthError;
         if !budget_paused
+            && !auth_paused
             && !matches!(
                 task.status,
                 TaskStatus::Pending | TaskStatus::Running | TaskStatus::Failed
@@ -13472,9 +13776,10 @@ fn reconcile_committed_embedding_tasks(
         {
             continue;
         }
-        let auth_revive_candidate = context.allow_auth_revive
-            && task.status == TaskStatus::Failed
-            && retry_kind_from_reason(task.fallback_reason.as_deref()) == RetryErrorKind::AuthError;
+        // QA2: Paused-based now (was Failed-based) — an auth failure never
+        // lands Failed anymore, so no legacy Failed-auth compat is needed
+        // (再 init 方針).
+        let auth_revive_candidate = context.allow_auth_revive && auth_paused;
         let Some(chunk_id) = task.output_ref.strip_prefix("embedding:") else {
             continue;
         };
@@ -13519,6 +13824,7 @@ fn reconcile_committed_embedding_tasks(
                 ReconcileReservationAction::Revive => {
                     task.status = TaskStatus::Pending;
                     task.fallback_reason = None;
+                    task.hold_reason = None;
                     task.attempts = 0;
                     task.next_retry_at = None;
                     task.heartbeat_at = None;
@@ -14032,6 +14338,27 @@ fn scheduled_retry_at(now: &str, backoff: &str, attempts: u32) -> String {
         .unwrap_or_else(|| now.to_owned())
 }
 
+/// QA3 (step4b-contract-tests-p3a.md §A, 04 §5.3): `next_retry_at` for a
+/// rate-limited send. `Some(ms)` honors the provider's `Retry-After` header
+/// exactly — rounded up to whole seconds, floored at 1s so a sub-second
+/// header value still schedules strictly in the future. `None` (header
+/// absent or unparseable) falls back to the synthetic +2s schedule via
+/// `scheduled_retry_at`'s `"retry_after"` backoff descriptor — with this
+/// wiring in place, that descriptor's only remaining caller is this
+/// fallback, so `retry_backoff_seconds`'s "no server header" comment on it
+/// is now literally true rather than merely defensive. Falls back to `now`
+/// itself when the clock string cannot be parsed (same posture as
+/// `scheduled_retry_at`).
+fn rate_limit_retry_at(now: &str, retry_after_ms: Option<u64>) -> String {
+    let Some(ms) = retry_after_ms else {
+        return scheduled_retry_at(now, "retry_after", 1);
+    };
+    let delay_seconds = i64::try_from(ms.div_ceil(1000).max(1)).unwrap_or(i64::MAX);
+    kcs_core::scope::parse_utc_seconds(now)
+        .map(|secs| kcs_core::scope::format_utc_seconds(secs.saturating_add(delay_seconds)))
+        .unwrap_or_else(|| now.to_owned())
+}
+
 /// Backoff delay (seconds) for a failed task's next retry, derived from the
 /// `RetryPolicy.backoff` descriptor in `crates/kcs-pipeline/src/task.rs`.
 /// Jitter is intentionally omitted for deterministic scheduling / testing
@@ -14512,13 +14839,21 @@ fn run_index_pipeline(
     // tasks. R17-3's enqueue supersede (`enqueue_online_placeholder_task`) releases
     // a stale task's reservation only when the SAME path is re-scanned
     // (`task.input_path == candidate.input_path`); a DELETED or renamed file never
-    // reappears as a scan candidate, so its Failed task's still-open ledger row
-    // would eat the per-adapter markdownize cap for the rest of the month and
-    // falsely pause unrelated tasks (the same harm R17-3 fixed, surviving on the
-    // delete path). With the full live-candidate set in hand, retire + release any
-    // retryable Failed online markdownize task whose input_path is no longer a
+    // reappears as a scan candidate, so its still-open ledger row would eat the
+    // per-adapter markdownize cap for the rest of the month and falsely pause
+    // unrelated tasks (the same harm R17-3 fixed, surviving on the delete path).
+    // With the full live-candidate set in hand, retire + release any
+    // reservation-bearing online markdownize task whose input_path is no longer a
     // live candidate. Runs before the enqueue loop so the freed cap is available to
     // this index's tasks.
+    //
+    // QA2/QA3 (step4b-contract-tests-p3a.md §A, 04 §5.2/§5.3): a
+    // reservation-bearing send failure no longer always lands `Failed` —
+    // rate_limit stays `Pending` and auth_error lands `Paused`. Admit both
+    // statuses here too (`is_reservation_bearing_send_failure` already scopes
+    // this to the 4 kinds that actually carry an open reservation, so a fresh
+    // never-attempted Pending task or a budget/secrets Paused hold — neither
+    // reservation-bearing — is unaffected).
     {
         let online_profile = online_markdownize_profile_for(repo)?;
         let placeholder_output_ref = online_output_ref(&online_profile.adapter_id);
@@ -14537,7 +14872,10 @@ fn run_index_pipeline(
                     &task,
                     &placeholder_output_ref,
                 )
-                && task.status == TaskStatus::Failed
+                && matches!(
+                    task.status,
+                    TaskStatus::Failed | TaskStatus::Pending | TaskStatus::Paused
+                )
                 && is_reservation_bearing_send_failure(&task)
                 && !live_paths.contains(task.input_path.as_str());
             if !orphaned {
@@ -16096,6 +16434,10 @@ fn record_free_local_charge(ledger: &LedgerDb, key: &LedgerTaskKey) -> Result<()
 fn retire_online_task(task: &mut TaskDescriptor) {
     task.status = TaskStatus::Failed;
     task.fallback_reason = Some(RETIRED_NON_LIVE.to_owned());
+    // A Failed task is not a hold — this shared helper can now retire a
+    // Paused(auth) row too (QA2/QA3's supersede-on-edit / R18-2 orphan-sweep
+    // callers admit Paused), so it must clear `hold_reason` itself.
+    task.hold_reason = None;
     task.next_retry_at = None;
     task.heartbeat_at = None;
     task.clear_reservation();
