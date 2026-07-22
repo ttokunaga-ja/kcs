@@ -67,11 +67,12 @@ use kcs_pipeline::budget::{
 };
 use kcs_pipeline::ledger::ops::{
     check_then_reserve, device_claim, device_input_hash, execute_bounded_sweep, get_batch_request,
-    ledger_month_total, phase1_intent, plan_bounded_sweep, recovery_settle_unknown,
-    reset_contract_violations, resolve_abandon_selector, stalled_rows,
-    sync_record_provider_request_id, sync_recovery_candidates, terminal_transaction,
-    with_immediate_transaction, AbandonExecution, AbandonResolution, AbandonSelector, BilledAmount,
-    BudgetCapConfig, CapCheckResult, ClaimOutcome, TerminalWrite,
+    ledger_month_total, nonbillable_charge, phase1_intent, plan_bounded_sweep,
+    recovery_settle_unknown, reset_contract_violations, resolve_abandon_selector,
+    resolve_billing_from_reported_usage, stalled_rows, sync_record_provider_request_id,
+    sync_recovery_candidates, terminal_transaction, with_immediate_transaction, AbandonExecution,
+    AbandonResolution, AbandonSelector, BilledAmount, BudgetCapConfig, CapCheckResult,
+    ClaimOutcome, TerminalWrite,
 };
 use kcs_pipeline::ledger::ops::{execute_abandon, uuid_v7_timestamp_millis};
 use kcs_pipeline::ledger::{
@@ -171,6 +172,9 @@ enum Command {
     Index(IndexArgs),
     /// Resume or retry batch tasks.
     Batch(BatchArgs),
+    /// Manage per-Adapter network approvals (QA25-27,
+    /// step4b-contract-tests-p3a.md §H, 07-adapter-spec.md §3).
+    Adapter(AdapterArgs),
     /// Rebuild local acceleration tables.
     Repair(UnsupportedArgs),
     /// Search indexed chunks.
@@ -286,6 +290,15 @@ enum BatchCommand {
 struct ResumeArgs {
     #[arg(long)]
     override_budget: bool,
+    /// QA30 (06-cli-spec.md §1 L21-24, 07-adapter-spec.md §3): one-shot opt-in
+    /// for THIS invocation's online markdownize/embedding sends. Mutually
+    /// exclusive with `--offline`.
+    #[arg(long)]
+    online: bool,
+    /// QA30: forbids new online sends for this invocation (already-pending
+    /// online work stays pending; 07 §3).
+    #[arg(long)]
+    offline: bool,
 }
 
 #[derive(Debug, Args)]
@@ -294,6 +307,14 @@ struct RetryArgs {
     /// bypass (06-cli-spec.md §1's `--reset-violations` line specifies none).
     #[arg(long, value_name = "SELECTOR")]
     reset_violations: Option<String>,
+    /// QA30 (06-cli-spec.md §1 L26-30, 07-adapter-spec.md §3): one-shot
+    /// opt-in for THIS invocation's online markdownize/embedding sends.
+    /// Mutually exclusive with `--offline`.
+    #[arg(long)]
+    online: bool,
+    /// QA30: forbids new online sends for this invocation.
+    #[arg(long)]
+    offline: bool,
 }
 
 #[derive(Debug, Args)]
@@ -301,6 +322,31 @@ struct AbandonArgs {
     /// `intent_token` or a `scope_id/adapter_kind/input_hash/tool_profile_hash`
     /// (3-tuple accepted too, but rejected if ambiguous — CL62).
     selector: String,
+}
+
+#[derive(Debug, Args)]
+struct AdapterArgs {
+    #[command(subcommand)]
+    command: Option<AdapterCommand>,
+}
+
+#[derive(Debug, Subcommand)]
+enum AdapterCommand {
+    /// `kcs adapter revoke (<tool_id> | --all)` (06-cli-spec.md §1 L31-43,
+    /// 07-adapter-spec.md §3 L118-211).
+    Revoke(RevokeArgs),
+}
+
+#[derive(Debug, Args)]
+struct RevokeArgs {
+    /// The `tool_id` to revoke. Mutually exclusive with `--all`; exactly one
+    /// of the two must be given.
+    #[arg(conflicts_with = "all")]
+    tool_id: Option<String>,
+    /// Revoke every Adapter's network approval for this scope (the boolean
+    /// `allow_network` kill switch is untouched — 07 §3 L206-211).
+    #[arg(long)]
+    all: bool,
 }
 
 #[derive(Debug, Args)]
@@ -460,7 +506,7 @@ fn command_captured_json_flag(command: &Command) -> bool {
         | Command::Reindex(args)
         | Command::Move(args)
         | Command::Evidence(args) => args.args.iter().any(|arg| arg == "--json"),
-        Command::Index(_) | Command::Batch(_) | Command::Purge(_) => false,
+        Command::Index(_) | Command::Batch(_) | Command::Purge(_) | Command::Adapter(_) => false,
         Command::Init(_)
         | Command::Status
         | Command::Snapshot(_)
@@ -483,6 +529,9 @@ fn run(cli: Cli) -> Result<Value> {
     // resolve the declared `auth`/`model` (rather than hard-coded env vars) at
     // execution time. Done once, after validation, before any command dispatch.
     register_declared_adapters_from_tools_config();
+    // QA19 (step4b-contract-tests-p3a.md §F): publish the declared
+    // `[pricing]` tables the same way, at the same call site.
+    register_declared_pricing_from_tools_config();
     match cli.command {
         Command::Init(args) => {
             let path = args.path.unwrap_or_else(|| PathBuf::from("."));
@@ -739,6 +788,7 @@ fn run(cli: Cli) -> Result<Value> {
         }
         Command::Index(args) => run_index(args),
         Command::Batch(args) => run_batch(args),
+        Command::Adapter(args) => run_adapter(args),
         Command::Repair(args) => run_repair(args),
         Command::Search(args) => run_search(args),
         Command::Open(args) => run_open(args),
@@ -973,7 +1023,8 @@ struct ParsedSearch {
 
 fn run_repair(args: UnsupportedArgs) -> Result<Value> {
     let args = without_json(args.args);
-    let mode = parse_repair_args(args)?;
+    let parsed = parse_repair_args(args)?;
+    let mode = parsed.mode;
     // PB25: `--registry-prune` operates on the device-global scope-registry,
     // not any one scope's `.kcs` — it must not require the CWD to be inside a
     // scope at all (unlike every other repair mode).
@@ -1048,7 +1099,11 @@ fn run_repair(args: UnsupportedArgs) -> Result<Value> {
     // enrichment never ran) is enqueued/embedded rather than silently reported as
     // fully enriched. `rebuild_sqlite_index` already preserved existing
     // embeddings, so reuse keeps this near-free; offline it only enqueues.
-    let embedding_online = embedding_online_allowed(&repo, false, false, false)?;
+    // QA29 (step4b-contract-tests-p3a.md §I, 06-cli-spec.md §1 L52-55, 07 §3
+    // L220-222): `--online`/`--offline` now reach the post-rebuild enrichment
+    // pass instead of the hard-coded `(false, false, false)` this used to
+    // pass unconditionally.
+    let embedding_online = embedding_online_allowed(&repo, parsed.offline, parsed.online, false)?;
     // R11-2: keep the enrichment ExecOutcome (was discarded) — disclose it and let an
     // auth/budget-pause raise the exit while the rebuild JSON still prints to stdout.
     let enrichment = run_embedding_enrichment(&repo, embedding_online, false, false)?;
@@ -1082,9 +1137,23 @@ enum RepairMode {
     RegistryPrune,
 }
 
-/// PB12: `kcs repair` accepts exactly one of `--rebuild-db [--online|--offline]`,
-/// `--verify-objects [--prune-orphans]`, or `--registry-prune`.
-fn parse_repair_args(args: Vec<String>) -> Result<RepairMode> {
+/// QA29 (step4b-contract-tests-p3a.md §I): [`parse_repair_args`]'s parsed
+/// result — the primary mode plus `--rebuild-db`'s optional
+/// `--online`/`--offline` sub-flags (06-cli-spec.md §1 L52-55).
+struct ParsedRepair {
+    mode: RepairMode,
+    online: bool,
+    offline: bool,
+}
+
+/// PB12/QA29: `kcs repair` accepts exactly one of `--rebuild-db
+/// [--online|--offline]`, `--verify-objects [--prune-orphans]`, or
+/// `--registry-prune`. `--online`/`--offline` are valid ONLY alongside
+/// `--rebuild-db` (06-cli-spec.md §1 L52-55 nests them under that
+/// alternative specifically — `--rebuild-db` is the only mode whose
+/// post-rebuild enrichment pass can drive a fresh online send, 07 §3
+/// L220-222).
+fn parse_repair_args(args: Vec<String>) -> Result<ParsedRepair> {
     if args.is_empty() {
         return Err(KcsError::invalid_usage(
             "repair currently supports --rebuild-db",
@@ -1094,6 +1163,8 @@ fn parse_repair_args(args: Vec<String>) -> Result<RepairMode> {
     let mut verify_objects = false;
     let mut prune_orphans = false;
     let mut registry_prune = false;
+    let mut online = false;
+    let mut offline = false;
     for arg in &args {
         // R12-7: accept `--flag=value` before matching so an existing flag is not
         // misreported as unknown. R16-6: every repair flag is boolean, so an inline
@@ -1110,6 +1181,20 @@ fn parse_repair_args(args: Vec<String>) -> Result<RepairMode> {
                 return Err(KcsError::invalid_usage(
                     "repair accepts --rebuild-db only once",
                 ));
+            }
+            "--online" if !online => {
+                reject_inline_value(flag, inline)?;
+                online = true;
+            }
+            "--offline" if !offline => {
+                reject_inline_value(flag, inline)?;
+                offline = true;
+            }
+            "--online" | "--offline" => {
+                reject_inline_value(flag, inline)?;
+                return Err(KcsError::invalid_usage(format!(
+                    "repair accepts {flag} only once"
+                )));
             }
             "--yes" => reject_inline_value(flag, inline)?,
             "--verify-objects" if !verify_objects => {
@@ -1154,6 +1239,11 @@ fn parse_repair_args(args: Vec<String>) -> Result<RepairMode> {
             }
         }
     }
+    if online && offline {
+        return Err(KcsError::invalid_usage(
+            "--online and --offline are mutually exclusive",
+        ));
+    }
     // PB12: exactly one of the three primary modes.
     let primary_count = [rebuild_db, verify_objects, registry_prune]
         .iter()
@@ -1170,16 +1260,34 @@ fn parse_repair_args(args: Vec<String>) -> Result<RepairMode> {
             "--prune-orphans requires --verify-objects",
         ));
     }
+    // QA29: `--online`/`--offline` are `--rebuild-db`-only sub-flags.
+    if (online || offline) && !rebuild_db {
+        return Err(KcsError::invalid_usage(
+            "--online/--offline require --rebuild-db",
+        ));
+    }
     if registry_prune {
-        return Ok(RepairMode::RegistryPrune);
+        return Ok(ParsedRepair {
+            mode: RepairMode::RegistryPrune,
+            online,
+            offline,
+        });
     }
     if rebuild_db {
-        return Ok(RepairMode::RebuildDb);
+        return Ok(ParsedRepair {
+            mode: RepairMode::RebuildDb,
+            online,
+            offline,
+        });
     }
-    Ok(if prune_orphans {
-        RepairMode::VerifyObjectsPruneOrphans
-    } else {
-        RepairMode::VerifyObjects
+    Ok(ParsedRepair {
+        mode: if prune_orphans {
+            RepairMode::VerifyObjectsPruneOrphans
+        } else {
+            RepairMode::VerifyObjects
+        },
+        online,
+        offline,
     })
 }
 
@@ -1802,11 +1910,16 @@ fn run_search_inner(args: UnsupportedArgs, started: Instant) -> Result<Value> {
     // actually uses vectors AND the scope's embedding opt-in (07 §3) is granted.
     // Judge vector availability from cheap predicates (endpoint + opt-in + query
     // length + per-scope compat) — never by eagerly calling the adapter.
-    let adapter_id = active_embedding_adapter_id()?;
+    // QA21/23: the AND-gate's profile match needs the adapter's CURRENT
+    // `tool_profile_hash` alongside its `tool_id`.
+    let adapter_identity = active_embedding_adapter_identity()?;
+    let adapter_id = adapter_identity.as_ref().map(|(id, _)| id.clone());
     // PC4/PC5: OR-across-scopes consent (embedding_opt_in_for_scopes), folding
     // in the one-shot `--online` opt-in per scope.
-    let embedding_opt_in = match &adapter_id {
-        Some(id) => embedding_opt_in_for_scopes(&exec_scopes, id, parsed.online)?,
+    let embedding_opt_in = match &adapter_identity {
+        Some((id, tool_profile_hash)) => {
+            embedding_opt_in_for_scopes(&exec_scopes, id, tool_profile_hash, parsed.online)?
+        }
         None => false,
     };
     let query_embeddable = parsed.query.chars().count() >= 2;
@@ -5188,7 +5301,7 @@ fn run_reindex(args: UnsupportedArgs) -> Result<Value> {
     // LC39/LC40 (see `ensure_purge_epoch_initialized`'s doc comment).
     ensure_purge_epoch_initialized(repo.kcs_dir())?;
     if let Some(at) = parsed.at.as_deref() {
-        return historical_reindex::run(&repo, at);
+        return historical_reindex::run(&repo, at, parsed.online, parsed.offline);
     }
     if !parsed.force {
         return Err(KcsError::invalid_usage(
@@ -5330,7 +5443,10 @@ fn run_reindex(args: UnsupportedArgs) -> Result<Value> {
     // embedding adapter's opt-in; offline this enqueues Embedding tasks so
     // `index_status` reports the pending enrichment instead of falsely showing
     // enriched_ratio = 1.0 (the tasks would otherwise never be created).
-    let embedding_online = embedding_online_allowed(&repo, false, false, false)?;
+    // QA31 (step4b-contract-tests-p3a.md §I): `--force`'s `--online`/
+    // `--offline` now reach this pass instead of the hard-coded
+    // `(false, false, false)` this used to pass unconditionally.
+    let embedding_online = embedding_online_allowed(&repo, parsed.offline, parsed.online, false)?;
     // R11-2: keep the enrichment ExecOutcome (was discarded) so a new-generation
     // embedding auth/budget-pause is disclosed and raises the exit (result on stdout).
     let enrichment = run_embedding_enrichment(&repo, embedding_online, false, false)?;
@@ -9984,6 +10100,13 @@ fn run_batch(args: BatchArgs) -> Result<Value> {
     let secrets_approved = secrets_send_approved(&repo);
     match args.command {
         Some(BatchCommand::Resume(resume)) => {
+            // QA30: same mutual-exclusion validation `kcs index`/`kcs repair`
+            // apply to their own `--online`/`--offline`.
+            if resume.online && resume.offline {
+                return Err(KcsError::invalid_usage(
+                    "--online and --offline are mutually exclusive",
+                ));
+            }
             let changed = store
                 .update_matching(|task| {
                     let held_secret = task.fallback_reason.as_deref() == Some(SECRETS_TIER_B_HOLD);
@@ -10000,7 +10123,14 @@ fn run_batch(args: BatchArgs) -> Result<Value> {
                     }
                 })
                 .map_err(pipeline_to_kcs)?;
-            let outcome = execute_pending_tasks(&repo, &store, resume.override_budget, true)?;
+            let outcome = execute_pending_tasks(
+                &repo,
+                &store,
+                resume.override_budget,
+                true,
+                resume.online,
+                resume.offline,
+            )?;
             let mut output = json!({
                 "status": "resumed",
                 "override_budget": resume.override_budget,
@@ -10031,6 +10161,13 @@ fn run_batch(args: BatchArgs) -> Result<Value> {
             if let Some(selector) = retry_args.reset_violations.as_deref() {
                 return run_batch_reset_violations(selector);
             }
+            // QA30: same mutual-exclusion validation `kcs index`/`kcs repair`
+            // apply to their own `--online`/`--offline`.
+            if retry_args.online && retry_args.offline {
+                return Err(KcsError::invalid_usage(
+                    "--online and --offline are mutually exclusive",
+                ));
+            }
             // R9-4: `batch retry` also recovers Partial online markdownize tasks
             // (docs/04 §5.2 `partial -> done`). A Partial task has some Done and
             // some Failed units; re-drive it (Pending) with `unit_keys` scoped to
@@ -10057,7 +10194,14 @@ fn run_batch(args: BatchArgs) -> Result<Value> {
             // it does not bypass caps — `batch resume --override-budget` does), and never
             // revives an auth_error task (CT2-TASK-005: `max_attempts=0` is this command's
             // contract; `batch resume` is where repaired credentials take effect).
-            let outcome = execute_pending_tasks(&repo, &store, false, false)?;
+            let outcome = execute_pending_tasks(
+                &repo,
+                &store,
+                false,
+                false,
+                retry_args.online,
+                retry_args.offline,
+            )?;
             let mut output = json!({
                 "status": "retry scheduled",
                 "tasks_updated": changed + partial_reenqueued,
@@ -10075,6 +10219,50 @@ fn run_batch(args: BatchArgs) -> Result<Value> {
         Some(BatchCommand::Abandon(abandon_args)) => run_batch_abandon(&abandon_args.selector),
         None => Err(KcsError::not_implemented("batch command")),
     }
+}
+
+fn run_adapter(args: AdapterArgs) -> Result<Value> {
+    match args.command {
+        Some(AdapterCommand::Revoke(revoke_args)) => run_adapter_revoke(revoke_args),
+        None => Err(KcsError::not_implemented("adapter command")),
+    }
+}
+
+/// QA25/26/27 (step4b-contract-tests-p3a.md §H, 06-cli-spec.md §1 L31-43,
+/// 07-adapter-spec.md §3 L118-211): `kcs adapter revoke (<tool_id> | --all)`
+/// — single-Adapter (or all Adapters') network approval revocation. Does
+/// NOT touch the scope-wide `allow_network` boolean kill switch (that is
+/// `kcs index --revoke-network`'s job) — only the `approvals[]` row(s) +
+/// any matching `approval_pending`.
+fn run_adapter_revoke(args: RevokeArgs) -> Result<Value> {
+    if args.tool_id.is_none() && !args.all {
+        return Err(KcsError::invalid_usage(
+            "adapter revoke requires exactly one of <tool_id> or --all",
+        ));
+    }
+    let repo = Repository::open_current()?;
+    // `.kcs/.lock` locked mutation (06 §1 L43, 07 §3 L137, 05-runtime.md §6)
+    // — the same lock the approval-publish write-order runs under, so
+    // revoke and a concurrent `--approve` publish never interleave
+    // un-serialized (the publish side's own CAS re-check, QA26, is the
+    // belt-and-braces defense for the narrow window around that lock).
+    let _lock = repo.lock_store()?;
+    let outcome = kcs_core::scope::revoke_network_approval(
+        repo.kcs_dir(),
+        args.tool_id.as_deref(),
+        &now_utc_seconds(),
+    )?;
+    // QA25: "対象なし (行なし・pending なし・既 revoked) は冪等成功 (exit 0 +
+    // 「対象なし」表示)" — `changed() == false` is exactly this case, and
+    // is reported on stdout at the default (success) exit code.
+    Ok(json!({
+        "status": if outcome.changed() { "revoked" } else { "no_target" },
+        "tool_id": args.tool_id,
+        "all": args.all,
+        "revoked_tool_ids": outcome.revoked_tool_ids,
+        "pending_removed": outcome.pending_removed,
+        "approvals_initialized_written": outcome.marker_written,
+    }))
 }
 
 /// `$XDG_DATA_HOME/kcs/cost-ledger.sqlite` (04 §5.4 / CL70) — the device-global
@@ -10587,6 +10775,12 @@ fn execute_pending_tasks(
     // (docs/04 §5.6, `auth_error: max_attempts=0`) makes non-retryability of an auth failure a
     // contract of that command specifically.
     allow_auth_revive: bool,
+    // QA30 (step4b-contract-tests-p3a.md §I, 06-cli-spec.md §1 L21-30,
+    // 07-adapter-spec.md §3 L220-222): `kcs batch resume`/`kcs batch retry`'s
+    // own `--online`/`--offline` one-shot embedding opt-in for this pass.
+    // Mutually exclusive, validated by the caller before this is reached.
+    online: bool,
+    offline: bool,
 ) -> Result<ExecOutcome> {
     let mut outcome = ExecOutcome::default();
     // Q3: under the folder store lock, any Running task is an orphan from a crashed
@@ -10615,7 +10809,13 @@ fn execute_pending_tasks(
     // without this, rate-limited Pending embedding tasks could never be completed
     // by `batch resume` / `batch retry`. `override_budget` reaches the budget
     // judgement (L2) and the embedding opt-in is the embedding adapter's own (L4).
-    let embedding_online = embedding_online_allowed(repo, false, false, false)?;
+    // QA30: `online`/`offline` (this pass's flags) replace the previous
+    // hard-coded `(false, false, false)` — `batch resume`/`retry` carry no
+    // same-invocation `--yes`/`--approve`-equivalent flag, so
+    // `online_confirmed` stays `false` (matching `kcs index`'s own
+    // `--online`-without-`--approve` behavior: `--online` alone still needs
+    // an existing approval row).
+    let embedding_online = embedding_online_allowed(repo, offline, online, false)?;
     outcome.add(run_embedding_enrichment(
         repo,
         embedding_online,
@@ -10844,7 +11044,24 @@ fn execute_pending_markdownize_tasks(
             .map_err(pipeline_to_kcs)?;
         match execute_online_markdownize_task(repo, &task, prepared_input) {
             Ok(outcome) => {
-                settle_task_charge_success(&ledger, &key, &intent_token, reserved_usd)?;
+                // QA17/QA18/QA19 (step4b-contract-tests-p3a.md §F): bill the
+                // adapter's self-reported `usage` when it provided one
+                // (Mistral OCR's real processed-page count), converted to
+                // USD via tools.toml's declared `[pricing]` — degrading to
+                // the reservation estimate exactly as before when `usage` is
+                // absent/malformed/uncovered (`resolve_billing_from_reported_usage`'s
+                // existing CL27/CL28 rules).
+                let markdownize_profile = online_markdownize_profile_for(repo)?;
+                let markdownize_pricing =
+                    kcs_adapter::tool_lock::registered_declared_pricing("markdown");
+                let (billed, uncovered_pricing_kinds) = resolve_billing_from_reported_usage(
+                    outcome.usage.as_ref(),
+                    &declared_billable_kind_strings(&markdownize_profile),
+                    &markdownize_pricing,
+                    reserved_usd,
+                );
+                warn_uncovered_pricing_kinds_once("markdownize", &uncovered_pricing_kinds);
+                settle_task_charge_success(&ledger, &key, &intent_token, billed)?;
                 store
                     .update_matching(|candidate| {
                         if candidate.task_id == task_id {
@@ -10936,33 +11153,138 @@ fn execute_pending_markdownize_tasks(
 }
 
 fn persistent_network_allowed(repo: &Repository) -> Result<bool> {
-    persistent_network_allowed_for(repo, &online_markdownize_profile().adapter_id)
+    let profile = online_markdownize_profile_for(repo)?;
+    persistent_network_allowed_for(repo, &profile.adapter_id, &profile.tool_profile_hash)
 }
 
-/// Persistent (config / approvals.jsonl) network opt-in for one specific online
-/// adapter, keyed by `tool_id` (07 §3: opt-in unit is scope × adapter). A global
-/// `allow_network = true` covers every adapter; a network revocation gates every
-/// adapter off. Otherwise the scope must carry an approval row for *this*
-/// `tool_id` (L4). Backward compatibility: a scope approved before per-adapter
-/// rows existed carries only the then-active markdownize row, so an embedding
-/// adapter reads no matching row and stays enqueue-only (decision #35).
-fn persistent_network_allowed_for(repo: &Repository, tool_id: &str) -> Result<bool> {
-    persistent_network_allowed_for_kcs_dir(repo.kcs_dir(), tool_id)
+/// QA21/22/23 (step4b-contract-tests-p3a.md §G, 07 §3 L85-249): persistent
+/// (`.kcs/scope.json` `approvals[]`) network opt-in AND-gate for one
+/// specific online adapter, keyed by `(tool_id, tool_profile_hash)` (opt-in
+/// unit is scope × adapter, and a profile change invalidates the row until
+/// re-approval — QA23). Backward compatibility: a scope approved before
+/// per-adapter rows existed carries only the then-active markdownize row, so
+/// an embedding adapter reads no matching row and stays enqueue-only
+/// (decision #35).
+fn persistent_network_allowed_for(
+    repo: &Repository,
+    tool_id: &str,
+    tool_profile_hash: &str,
+) -> Result<bool> {
+    persistent_network_allowed_for_kcs_dir(repo.kcs_dir(), tool_id, tool_profile_hash)
 }
 
-fn persistent_network_allowed_for_kcs_dir(kcs_dir: &Path, tool_id: &str) -> Result<bool> {
-    if network_revoked_kcs_dir(kcs_dir)? {
+/// QA21 (step4b-contract-tests-p3a.md §G, 07 §3 L85-249): the send gate is
+/// an AND, not an OR — a persisted row is REQUIRED even when the boolean is
+/// `true`. Storage is `.kcs/scope.json`'s `approvals[]` (QA22) — the
+/// device-global `consents.jsonl` this function used to bypass through is no
+/// longer consulted here at all (it is left untouched for its other,
+/// unrelated readers/writers — see `approval_row_present_in_kcs_dir`'s doc
+/// comment).
+///
+/// Gate (07 §3's "記録" paragraph, literal): `.kcs/config.toml`'s
+/// `[adapter.policy].allow_network` effective setting is explicitly `true`
+/// (unset / key-loss = gate NOT established — an `active` row alone is
+/// insufficient without it) AND an `active` row exists matching this
+/// scope_id/tool_id/the CURRENT execution_mode+tool_profile_hash exactly
+/// (QA23 — a profile change invalidates the row until re-approval). Because
+/// `kcs index --revoke-network` (the kill switch) sets this SAME boolean to
+/// `false` without touching any row, "config へ true を再設定するだけで回
+/// 復し、再承認は不要" (07 §3) holds naturally: the row survives a revoke,
+/// so restoring just the boolean reopens the gate.
+fn persistent_network_allowed_for_kcs_dir(
+    kcs_dir: &Path,
+    tool_id: &str,
+    tool_profile_hash: &str,
+) -> Result<bool> {
+    if read_allow_network_config(&kcs_dir.join("config.toml"))? != Some(true) {
         return Ok(false);
     }
-    // Scope-local config is portable content and therefore cannot grant network
-    // authority. A device-local user config may intentionally grant it globally.
-    if read_allow_network_config(&user_config_toml_path())? == Some(true) {
+    if kcs_core::scope::network_approval_active(
+        kcs_dir,
+        tool_id,
+        NETWORK_APPROVAL_EXECUTION_MODE,
+        tool_profile_hash,
+    )? {
         return Ok(true);
     }
-    approval_row_present_in_kcs_dir(kcs_dir, Some(tool_id))
+    try_materialize_initial_network_approval(kcs_dir, tool_id, tool_profile_hash)
 }
 
-/// True when `approvals.jsonl` carries an online opt-in row for `tool_id`.
+/// `07 §3`'s single execution mode every currently-relevant online adapter
+/// declares (07 §1: the built-in runtime only ever executes
+/// `mistral_ocr_markdownize` / `gemini_embedding_2`, both `online_api`).
+const NETWORK_APPROVAL_EXECUTION_MODE: &str = "online_api";
+
+/// The write side of 07 §3's "初回 materialize" exception (QA21). Fires
+/// (and durably publishes a row + the `approvals_initialized` marker) only
+/// when: this scope's `approvals[]` is genuinely EMPTY (regardless of
+/// `tool_id` — "行が...一つも存在せず"), no `approvals_initialized` marker
+/// is set yet (a marker with zero rows means the exception was already
+/// consumed — by revoke, by a lossy backup restore, etc. — and must stay
+/// fail-closed), AND `.kcs/config.toml`'s `allow_network` effective setting
+/// is `true` (07 §3's (b) path — SCOPE-local, the same file/key path (a)
+/// writes). Self-limiting: once ANY row or the marker exists, this is a
+/// pure no-op read forever after for THIS scope — a 2nd tool_id (or the
+/// same tool_id again after a profile change) always requires an explicit
+/// `kcs index --approve`/interactive approval (07 §3: "2 個目以降の
+/// tool_id...は...明示承認を要する").
+///
+/// 2026-07-22 ruling: an earlier revision of this function keyed the
+/// trigger off the DEVICE-global `~/.config/kcs/config.toml` instead,
+/// reasoning that scope-local `.kcs/config.toml` is portable/shareable
+/// content a crafted repo could ship with `allow_network = true` already
+/// set, silently auto-approving a victim's first command against it. That
+/// defense does not hold: a crafted `.kcs` can just as easily ship the
+/// `approvals[]` row itself directly (scope.json is equally portable, and
+/// `publish_network_approval`/schema validation impose no provenance
+/// check) — gating materialize's trigger to device-global blocks nothing a
+/// motivated attacker cannot route around, while breaking the spec's
+/// documented (b) UX for every legitimate scope-local-only user. Reverted
+/// to scope-local per 07 §3's literal text.
+fn try_materialize_initial_network_approval(
+    kcs_dir: &Path,
+    tool_id: &str,
+    tool_profile_hash: &str,
+) -> Result<bool> {
+    if read_allow_network_config(&kcs_dir.join("config.toml"))? != Some(true) {
+        return Ok(false);
+    }
+    if !kcs_core::scope::read_network_approvals(kcs_dir)?.is_empty() {
+        return Ok(false);
+    }
+    if kcs_core::scope::network_approvals_initialized(kcs_dir)? {
+        return Ok(false);
+    }
+    let Ok(this_scope_id) = scope_id(kcs_dir) else {
+        return Ok(false);
+    };
+    let approved_at = now_utc_seconds();
+    kcs_core::scope::publish_network_approval(
+        kcs_dir,
+        json!({
+            "scope_id": this_scope_id,
+            "tool_id": tool_id,
+            "execution_mode": NETWORK_APPROVAL_EXECUTION_MODE,
+            "tool_profile_hash": tool_profile_hash,
+            "approved_at": approved_at,
+            "approval_method": "materialize",
+            "status": "active",
+        }),
+        None,
+    )?;
+    Ok(true)
+}
+
+/// True when `consents.jsonl` (device-global) carries an online opt-in row
+/// for `tool_id`. QA22: kept exactly as-is and STILL used by
+/// `approval_exists`/`network_allowed` (the unrelated "has this scope's
+/// initial scan approval flow ever run" gate at the top of `run_index`,
+/// 06-cli-spec.md §2) — those are NOT the send gate this file's QA21 fix
+/// targets, and changing their data source is out of scope (risks
+/// regressing the scan-approval flow the P3-A/P3-B split explicitly
+/// protects). The actual send gate
+/// (`persistent_network_allowed_for_kcs_dir`,
+/// [`kcs_core::scope::network_approval_row_present`]) no longer calls this.
 fn approval_row_present(repo: &Repository, tool_id: &str) -> Result<bool> {
     approval_row_present_for_scope(repo, Some(tool_id))
 }
@@ -10991,10 +11313,15 @@ fn approval_row_present_in_kcs_dir(kcs_dir: &Path, tool_id: Option<&str>) -> Res
 fn embedding_opt_in_for_scopes(
     exec_scopes: &[ExecScope],
     tool_id: &str,
+    tool_profile_hash: &str,
     online: bool,
 ) -> Result<bool> {
     for exec in exec_scopes {
-        let persisted = persistent_network_allowed_for_kcs_dir(&exec.target.kcs_dir, tool_id)?;
+        let persisted = persistent_network_allowed_for_kcs_dir(
+            &exec.target.kcs_dir,
+            tool_id,
+            tool_profile_hash,
+        )?;
         let opened = persisted || (online && online_opt_in_opens_scope(&exec.target.kcs_dir)?);
         if opened {
             return Ok(true);
@@ -11012,9 +11339,18 @@ fn online_opt_in_opens_scope(kcs_dir: &Path) -> Result<bool> {
     Ok(!network_revoked_kcs_dir(kcs_dir)?)
 }
 
-/// Whether the embedding adapter may call the network in this pass (L4). Gated
-/// on the embedding adapter's own opt-in, not the markdownize approval it used
-/// to ride on. `offline` forces it off regardless of any recorded approval.
+/// QA29/30/31 (step4b-contract-tests-p3a.md §I): whether the embedding
+/// adapter may call the network in this pass (L4). Gated on the embedding
+/// adapter's own opt-in, not the markdownize approval it used to ride on.
+/// `offline` forces it off regardless of any recorded approval. Callers:
+/// `kcs index` (already wired, `online_confirmed = args.yes || args.approve`),
+/// `kcs repair --rebuild-db`, `kcs batch resume`/`kcs batch retry`, and `kcs
+/// reindex` (`--force` and `--at`) all thread their own `--online`/
+/// `--offline` here now (`online_confirmed = false` for all four — none of
+/// them carry a same-invocation `--yes`/`--approve`-equivalent confirming
+/// flag, so `--online` alone only reopens a gate an EXISTING approval row
+/// already backs, matching `kcs index`'s own `--online`-without-`--approve`
+/// behavior).
 fn embedding_online_allowed(
     repo: &Repository,
     offline: bool,
@@ -11030,7 +11366,7 @@ fn embedding_online_allowed(
     if offline {
         return Ok(false);
     }
-    let Some(adapter_id) = active_embedding_adapter_id()? else {
+    let Some((adapter_id, tool_profile_hash)) = active_embedding_adapter_identity()? else {
         return Ok(false);
     };
     if online {
@@ -11040,10 +11376,28 @@ fn embedding_online_allowed(
         return if online_confirmed {
             Ok(true)
         } else {
-            approval_row_present(repo, &adapter_id)
+            // QA21/22: the scope.json-backed presence check, not the legacy
+            // `consents.jsonl` one — `--online`'s fallback trusts an
+            // EXISTING row (any profile) for one more send, same spirit as
+            // the steady-state gate's storage (unlike `network_allowed`'s
+            // unrelated, untouched markdownize-preview helper, this branch
+            // IS part of the actual send gate).
+            kcs_core::scope::network_approval_row_present(repo.kcs_dir(), &adapter_id)
         };
     }
-    persistent_network_allowed_for(repo, &adapter_id)
+    persistent_network_allowed_for(repo, &adapter_id, &tool_profile_hash)
+}
+
+/// QA21/23: `active_embedding_adapter_id()` plus the adapter's CURRENT
+/// `tool_profile_hash` (needed for the `approvals[]` profile match). `None`
+/// when no embedding execution is active, mirroring
+/// `active_embedding_adapter_id`.
+fn active_embedding_adapter_identity() -> Result<Option<(String, String)>> {
+    let Some(execution) = embedding_execution() else {
+        return Ok(None);
+    };
+    let profile = declared_embedding_profile(execution);
+    Ok(Some((profile.tool_id, profile.profile_hash)))
 }
 
 #[derive(Debug, Clone)]
@@ -11057,6 +11411,14 @@ struct OnlineExecutionOutcome {
     previous_raw_hash: Option<String>,
     parent_run_id: Option<String>,
     changed_unit_keys: Vec<String>,
+    /// QA17 (step4b-contract-tests-p3a.md §F): the adapter's self-reported
+    /// billing usage for the send that produced this outcome (07 §4),
+    /// forwarded from the `MarkdownizeResponse` the adapter returned. `None`
+    /// when nothing was sent (a 0-change incremental) or the concrete
+    /// adapter has no real per-call signal to report — the settle call site
+    /// degrades to the reservation estimate in that case, unchanged from
+    /// before this field existed.
+    usage: Option<kcs_adapter::types::AdapterUsage>,
 }
 
 impl OnlineExecutionOutcome {
@@ -11070,7 +11432,14 @@ impl OnlineExecutionOutcome {
             previous_raw_hash: None,
             parent_run_id: None,
             changed_unit_keys: Vec::new(),
+            usage: None,
         }
+    }
+
+    /// QA17: attach the adapter-reported `usage` this send actually billed.
+    fn with_usage(mut self, usage: Option<kcs_adapter::types::AdapterUsage>) -> Self {
+        self.usage = usage;
+        self
     }
 }
 
@@ -11385,6 +11754,10 @@ fn execute_online_markdownize_task(
     }
     let profile = outcome.profile;
     let response = outcome.response;
+    // QA17 (step4b-contract-tests-p3a.md §F): carry the adapter's
+    // self-reported billing usage (Mistral OCR's real processed-page count)
+    // through to the caller's settle call, instead of discarding it here.
+    let usage = response.usage.clone();
     let hints = all_changed_hints(&prepared_units);
     let strict_valid = validate_markdownize_response(&response, &hints, &prepared_units).is_ok();
     let generated_at = now_utc_seconds();
@@ -11480,7 +11853,8 @@ fn execute_online_markdownize_task(
     Ok(OnlineExecutionOutcome::full(
         normalized_output_ref(repo, &task.input_hash, &profile.tool_profile_hash, 0),
         status,
-    ))
+    )
+    .with_usage(usage))
 }
 
 /// R13-1: attempt incremental Markdownize on the online (Mistral OCR) route.
@@ -11582,6 +11956,9 @@ fn try_online_incremental_markdownize(
                 failed_units: Vec::new(),
                 fallback_to_full: false,
                 reason: None,
+                // QA17: a 0-change incremental never calls the adapter (see
+                // comment above), so there is no real usage to report.
+                usage: None,
             },
             resolved_profile.tool_profile_hash.clone(),
         )
@@ -11695,6 +12072,9 @@ fn try_online_incremental_markdownize(
         previous_raw_hash: Some(previous.manifest.raw_hash.clone()),
         parent_run_id: Some(previous.manifest.run_id.clone()),
         changed_unit_keys: incremental_hints.changed_unit_keys.clone(),
+        // QA17: the real send's self-reported usage (`None` for the 0-change
+        // branch above, which never called the adapter).
+        usage: response.usage.clone(),
     }))
 }
 
@@ -11784,7 +12164,7 @@ fn persist_failure_retry_kind() -> RetryErrorKind {
 fn task_failure_from_adapter(error: kcs_adapter::AdapterError) -> TaskExecutionFailure {
     let retry_kind = match error {
         kcs_adapter::AdapterError::Auth(_) => RetryErrorKind::AuthError,
-        kcs_adapter::AdapterError::RateLimit(_) => RetryErrorKind::RateLimit,
+        kcs_adapter::AdapterError::RateLimit { .. } => RetryErrorKind::RateLimit,
         kcs_adapter::AdapterError::QuotaExceeded(_) => RetryErrorKind::QuotaExceeded,
         kcs_adapter::AdapterError::Network(_) | kcs_adapter::AdapterError::Io { .. } => {
             RetryErrorKind::NetworkError
@@ -11967,7 +12347,7 @@ fn compute_query_embedding_page1(
 
     // PC6: the final consent re-read, immediately ahead of the claim Tx that
     // is about to spend the device row (05 §1.1 L50-53 / 07 §3 L144-146).
-    if !embedding_opt_in_for_scopes(exec_scopes, tool_id, online)? {
+    if !embedding_opt_in_for_scopes(exec_scopes, tool_id, &profile.profile_hash, online)? {
         return Ok(Some(QueryEmbeddingOutcome::NotAuthorized));
     }
 
@@ -12041,7 +12421,19 @@ fn compute_query_embedding_page1(
             sync_record_provider_request_id(conn, &key, &intent_token, &intent_token)
                 .map_err(pipeline_to_kcs)?;
             let billed_usd = estimate_embedding_cost(query.chars().count() as u64);
-            settle_task_charge_success(&ledger, &key, &intent_token, billed_usd)?;
+            // QA17: this Gemini `batchEmbedContents` integration has no real
+            // per-call usage to report (see `EmbeddingResponse.usage`'s doc
+            // comment) — the reservation estimate stands, `estimated=1`,
+            // same as before this field existed.
+            settle_task_charge_success(
+                &ledger,
+                &key,
+                &intent_token,
+                BilledAmount {
+                    usd: billed_usd,
+                    estimated: true,
+                },
+            )?;
             Ok(vectors
                 .into_iter()
                 .next()
@@ -12571,11 +12963,17 @@ fn run_embedding_enrichment_for_instances(
                     let charge = charge_by_group[index]
                         .as_ref()
                         .expect("charged_indices only contains Some entries");
+                    // QA17: same posture as the query-embedding settle site
+                    // above — no real per-call usage available from this
+                    // Gemini integration, so the reservation estimate stands.
                     settle_task_charge_success(
                         &ledger,
                         &charge.key,
                         &charge.intent_token,
-                        charge.reserved_usd,
+                        BilledAmount {
+                            usd: charge.reserved_usd,
+                            estimated: true,
+                        },
                     )?;
                     // R18-1's stamp, still needed so `reconcile_committed_embedding_tasks`
                     // et al. can find this group's ledger selector via
@@ -13999,8 +14397,10 @@ impl MarkdownizeAdapter for TestIncrementalMarkdownizeAdapter {
             version: env!("CARGO_PKG_VERSION").to_owned(),
             capability_flags: vec!["incremental_update".to_owned()],
             allow_network: false,
+            // QA18: this test-seam adapter is local/offline, same posture as
+            // the built-in deterministic adapter.
             billable_kinds: Vec::new(),
-            reject_billing: None,
+            reject_billing: Some(kcs_adapter::types::BillingDeclaration::Nonbillable),
         }
     }
 
@@ -14048,6 +14448,9 @@ impl MarkdownizeAdapter for TestIncrementalMarkdownizeAdapter {
                 failed_units: Vec::new(),
                 fallback_to_full: false,
                 reason: None,
+                // QA17: this is a local test-seam adapter, never a billable
+                // online call.
+                usage: None,
             });
         }
         Ok(kcs_adapter::types::MarkdownizeResponse {
@@ -14066,6 +14469,8 @@ impl MarkdownizeAdapter for TestIncrementalMarkdownizeAdapter {
             failed_units: Vec::new(),
             fallback_to_full: false,
             reason: None,
+            // QA17: see above — never a billable online call.
+            usage: None,
         })
     }
 }
@@ -15514,14 +15919,67 @@ fn reserve_or_reuse_task_charge(
     .map_err(pipeline_to_kcs)
 }
 
+/// QA18/QA19 (step4b-contract-tests-p3a.md §F): `AdapterProfile.billable_kinds`
+/// (the typed `BillableUnitKind` enum) as the string keys
+/// `resolve_billing_from_reported_usage`'s `declared_billable_kinds` parameter
+/// expects (`kcs-pipeline`'s ledger, which has no dependency on the specific
+/// adapter-profile-construction code in this crate, keys billing resolution
+/// off plain strings — see `ledger::ops::BILLABLE_UNIT_KINDS`).
+fn declared_billable_kind_strings(profile: &AdapterProfile) -> std::collections::BTreeSet<String> {
+    profile
+        .billable_kinds
+        .iter()
+        .map(|kind| match kind {
+            kcs_adapter::types::BillableUnitKind::Pages => "pages",
+            kcs_adapter::types::BillableUnitKind::TokensIn => "tokens_in",
+            kcs_adapter::types::BillableUnitKind::TokensOut => "tokens_out",
+        })
+        .map(str::to_owned)
+        .collect()
+}
+
+/// QA19 (step4b-contract-tests-p3a.md §F, 07 §4 L266-269): record a
+/// one-per-run `level=warn` when a `billable_units[].kind` the Adapter
+/// reported has no `tools.toml` `[pricing]` entry ("単価未被覆の kind"). The
+/// settle call site already degrades that charge to `estimated`
+/// (`resolve_billing_from_reported_usage` itself, unconditionally) — this
+/// only makes the pricing gap observable instead of a silent under/over-bill.
+/// Deduped per `(adapter_kind, sorted kinds)` for the whole process, mirroring
+/// `warn_undeclared_adapter_once`. A no-op for an empty `kinds` (the common
+/// case: fully-covered or no billable_units report at all).
+fn warn_uncovered_pricing_kinds_once(adapter_kind: &str, kinds: &[String]) {
+    if kinds.is_empty() {
+        return;
+    }
+    use std::sync::{Mutex, OnceLock};
+    static WARNED: OnceLock<Mutex<std::collections::HashSet<String>>> = OnceLock::new();
+    let warned = WARNED.get_or_init(|| Mutex::new(std::collections::HashSet::new()));
+    let dedup_key = format!("{adapter_kind}:{}", kinds.join(","));
+    let mut guard = warned
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if !guard.insert(dedup_key) {
+        return;
+    }
+    drop(guard);
+    let _ = append_warn_log(
+        "KCS-W-ADAPTER-PRICING-UNCOVERED-001",
+        "billable_units reported a kind with no tools.toml [pricing] entry; \
+         billing degraded to estimated",
+        json!({ "adapter_kind": adapter_kind, "kinds": kinds }),
+    );
+}
+
 /// CL18/CL26/CL47: settle a task's sync row as a successful terminal charge,
-/// billed at `billed_usd` — this codebase's Adapters never report real
-/// provider-confirmed usage/billable_units (07-adapter-spec.md's Batch trait
-/// does not exist here yet — confirmed by grep, `ledger::ops`'s own module doc),
-/// so every charge this module records is `estimated=1` (the reservation
-/// estimate), never a provider-confirmed value. `intent_token` clears in the
-/// same Tx — sync rows always clear immediately on ANY terminal Tx, unlike batch
-/// rows (CL47).
+/// billed at `billed` — the caller resolves this via
+/// `resolve_billing_from_reported_usage` (QA17/QA18/QA19), which degrades to
+/// `estimated=1` at the reservation estimate whenever the Adapter has no real
+/// usage to report (this codebase's Adapters mostly don't yet —
+/// 07-adapter-spec.md's Batch trait does not exist here yet — confirmed by
+/// grep, `ledger::ops`'s own module doc; Mistral OCR's markdownize response
+/// is the one exception with a real page-count self-report). `intent_token`
+/// clears in the same Tx — sync rows always clear immediately on ANY terminal
+/// Tx, unlike batch rows (CL47).
 ///
 /// R23-03 (04 §5.4: "device 行の全ての状態遷移 UPDATE ... は `WHERE
 /// intent_token = <自 token>` の条件付き (CAS) で行う"): CAS-guarded on our own
@@ -15540,17 +15998,14 @@ fn settle_task_charge_success(
     ledger: &LedgerDb,
     key: &LedgerTaskKey,
     intent_token: &str,
-    billed_usd: f64,
+    billed: BilledAmount,
 ) -> Result<()> {
     terminal_transaction(
         ledger.connection(),
         &TerminalWrite {
             key,
             outcome: Outcome::Succeeded,
-            billed: BilledAmount {
-                usd: billed_usd,
-                estimated: true,
-            },
+            billed,
             // DDL's 3-way `batch_job_id` rule (04 §5.4): a sync call with no
             // provider request id falls back to the attempt's own intent_token.
             ledger_batch_job_id: intent_token,
@@ -15633,7 +16088,9 @@ fn record_free_local_charge(ledger: &LedgerDb, key: &LedgerTaskKey) -> Result<()
         )
     })
     .map_err(pipeline_to_kcs)?;
-    settle_task_charge_success(ledger, key, &outcome.intent_token, 0.0)
+    // CL29 (step4b-contract-tests-p3a.md §F, QA17): free local work is a real
+    // confirmed $0 charge, not an `estimated` degrade.
+    settle_task_charge_success(ledger, key, &outcome.intent_token, nonbillable_charge())
 }
 
 fn retire_online_task(task: &mut TaskDescriptor) {
@@ -16055,6 +16512,42 @@ fn set_allow_network_false(value: &mut toml::Value) {
         .insert("allow_network".to_owned(), toml::Value::Boolean(false));
 }
 
+/// QA21 (07 §3 L103-108/172-175, 2026-07-22 orchestrator ruling): set
+/// `.kcs/config.toml`'s `[adapter.policy].allow_network = true` — step (1)
+/// of the approval write-order, run by BOTH an explicit
+/// `--approve`/interactive approval (`publish_online_network_approval`) and
+/// the "初回 materialize" bootstrap exception's own recovery write.
+///
+/// FORMAT-PRESERVING via `toml_edit::DocumentMut`, unlike
+/// [`set_allow_network_false`]'s blind `toml::Value` parse-mutate
+/// -reserialize round-trip: only the single `allow_network` key is
+/// set/created here, every OTHER key/table/comment in the file survives
+/// byte-for-byte. An earlier revision reused the blind-regenerate approach
+/// for this positive write too, which either silently dropped the key
+/// (when a test fixture wholesale-overwrote `.kcs/config.toml` for an
+/// unrelated config section, e.g. `[chunking]`) or produced a duplicate
+/// `[adapter.policy]` TOML table (when a fixture naively appended a new
+/// `[adapter.policy]` block, unaware one already existed) — editing the
+/// parsed document in place makes neither failure mode reachable.
+fn write_scope_config_allow_network_true(kcs_dir: &Path) -> Result<()> {
+    let config_path = kcs_dir.join("config.toml");
+    let existing = match fs::read_to_string(&config_path) {
+        Ok(text) => text,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(err) => {
+            return Err(KcsError::io(
+                err.to_string(),
+                config_path.display().to_string(),
+            ));
+        }
+    };
+    let mut document = existing
+        .parse::<toml_edit::DocumentMut>()
+        .map_err(|err| KcsError::schema(err.to_string()))?;
+    document["adapter"]["policy"]["allow_network"] = toml_edit::value(true);
+    atomic_overwrite_file(&config_path, document.to_string().as_bytes())
+}
+
 /// N1: the marker file whose presence records an explicit `--send-secrets`
 /// approval for this scope. It lifts the Tier B online hold for every subsequent
 /// pass (index inline + `batch resume`), so it must be a persistent, per-scope
@@ -16204,6 +16697,28 @@ fn active_online_tool_ids() -> Result<Vec<String>> {
     tool_ids.sort();
     tool_ids.dedup();
     Ok(tool_ids)
+}
+
+/// QA21/23 (step4b-contract-tests-p3a.md §G): the same tool_id set as
+/// [`active_online_tool_ids`], paired with each adapter's CURRENT
+/// `tool_profile_hash` — needed to publish/match `approvals[]` rows.
+/// `repo`-aware (unlike `active_online_tool_ids`) because the markdownize
+/// profile hash depends on the scope's `bbox_annotation` setting
+/// (`online_markdownize_profile_for`) — using the non-repo-aware default
+/// profile here would publish a row whose hash could immediately mismatch
+/// what the steady-state gate computes.
+fn active_online_tool_identities(repo: &Repository) -> Result<Vec<(String, String)>> {
+    let markdown_profile = online_markdownize_profile_for(repo)?;
+    let mut identities = vec![(
+        markdown_profile.adapter_id,
+        markdown_profile.tool_profile_hash,
+    )];
+    if let Some((tool_id, tool_profile_hash)) = active_embedding_adapter_identity()? {
+        identities.push((tool_id, tool_profile_hash));
+    }
+    identities.sort();
+    identities.dedup();
+    Ok(identities)
 }
 
 /// Whether Tier B (candidate-secret) files may be sent to online adapters for
@@ -16416,6 +16931,52 @@ fn effective_ignore_hash() -> String {
     hash_bytes(kcs_core::scope::tier_a_template_text(kcs_pipeline::scan::TIER_B_NEEDLES).as_bytes())
 }
 
+/// QA21/22/23/26/27 (step4b-contract-tests-p3a.md §G/§H, 07 §3 L191-211):
+/// the full write-order for ONE tool_id's explicit approval (interactive /
+/// `--approve`):
+///
+/// 1. (step 0) durably record `approval_pending` — the 4-tuple identity plus
+///    the audit values this publish will use.
+/// 2. (step 1) durably set `.kcs/config.toml`'s `allow_network = true`
+///    (format-preserving — [`write_scope_config_allow_network_true`]).
+/// 3. (step 2) publish the `approvals[]` row + `approvals_initialized`
+///    marker, re-verifying (CAS) that `approval_pending` still exactly
+///    equals what step 0 wrote immediately before publishing.
+///
+/// A concurrent `kcs adapter revoke` that removed/changed the pending
+/// between steps 1 and 2 makes step 2 return
+/// `KCS-E-ADAPTER-APPROVAL-CONFLICT-001` (exit 5, QA26) instead of silently
+/// publishing a stale intent.
+fn publish_online_network_approval(
+    repo: &Repository,
+    tool_id: &str,
+    tool_profile_hash: &str,
+    approval_method: &str,
+) -> Result<()> {
+    let this_scope_id = scope_id(repo.kcs_dir())?;
+    let approved_at = now_utc_seconds();
+    let pending = json!({
+        "scope_id": this_scope_id,
+        "tool_id": tool_id,
+        "execution_mode": NETWORK_APPROVAL_EXECUTION_MODE,
+        "tool_profile_hash": tool_profile_hash,
+        "approved_at": approved_at,
+        "approval_method": approval_method,
+    });
+    kcs_core::scope::write_network_approval_pending(repo.kcs_dir(), pending.clone())?;
+    write_scope_config_allow_network_true(repo.kcs_dir())?;
+    let row = json!({
+        "scope_id": this_scope_id,
+        "tool_id": tool_id,
+        "execution_mode": NETWORK_APPROVAL_EXECUTION_MODE,
+        "tool_profile_hash": tool_profile_hash,
+        "approved_at": approved_at,
+        "approval_method": approval_method,
+        "status": "active",
+    });
+    kcs_core::scope::publish_network_approval(repo.kcs_dir(), row, Some(&pending))
+}
+
 fn write_approval_record(
     repo: &Repository,
     preview: &ScanPreview,
@@ -16427,9 +16988,16 @@ fn write_approval_record(
     // below (`approvals.jsonl`/`consents.jsonl`) — `record_scan_approval` is
     // idempotent, so calling it again on a later `index --approve` with no
     // NEW adapter to opt in (the `pending.is_empty()` early return below) is
-    // harmless. Cost estimates are 0.0: no `[pricing]` table is wired yet
-    // (QA19, step4b-contract-tests-p3a.md §F — a separate, larger gap), so
-    // there is currently no non-zero estimate to report honestly.
+    // harmless. QA19 (step4b-contract-tests-p3a.md §F, 10 §1 L48-53): cost
+    // estimates come from `preview.estimated_cost` (`kcs-pipeline`'s
+    // `build_scan_preview`, now wired to `tools.toml`'s declared `[pricing]`)
+    // — `0.0` only when no `pricing` is declared for that role, an honest
+    // "unknown" rather than a fabricated figure.
+    let (estimated_markdownize_usd, estimated_embedding_usd) = preview
+        .estimated_cost
+        .as_ref()
+        .map(|cost| (cost.estimated_markdownize_usd, cost.estimated_embedding_usd))
+        .unwrap_or((0.0, 0.0));
     repo.record_scan_approval(json!({
         "scope_id": preview.scope_id,
         "root_path": repo.root().display().to_string(),
@@ -16440,8 +17008,8 @@ fn write_approval_record(
         "effective_ignore_hash": effective_ignore_hash(),
         "estimated_file_count": preview.candidates.iter().filter(|candidate| !candidate.ignored).count(),
         "estimated_total_bytes": preview.candidates.iter().filter(|candidate| !candidate.ignored).map(|candidate| candidate.size_bytes).sum::<u64>(),
-        "estimated_markdownize_usd": 0.0,
-        "estimated_embedding_usd": 0.0,
+        "estimated_markdownize_usd": estimated_markdownize_usd,
+        "estimated_embedding_usd": estimated_embedding_usd,
     }))?;
 
     let path = repo.kcs_dir().join("approvals.jsonl");
@@ -16452,6 +17020,16 @@ fn write_approval_record(
     if network_opt_in {
         for tool_id in &tool_ids {
             write_device_consent(repo, tool_id, ConsentOperation::Network)?;
+        }
+        // QA21/22 (step4b-contract-tests-p3a.md §G): the actual send gate's
+        // persistent storage — `.kcs/scope.json`'s `approvals[]` — published
+        // via the full 07 §3 write-order (pending → scope config boolean →
+        // row + marker). Additive to the `write_device_consent` calls just
+        // above (which remain untouched for their own, unrelated readers —
+        // `approval_exists`/`network_allowed`'s scan-approval-adjacent
+        // check); this is the write side of the QA21 AND-gate fix.
+        for (tool_id, tool_profile_hash) in active_online_tool_identities(repo)? {
+            publish_online_network_approval(repo, &tool_id, &tool_profile_hash, approval_method)?;
         }
     }
     // P7: the opt-in is a persistent, idempotent marker. Every `index` used to
@@ -16562,6 +17140,39 @@ fn register_declared_adapters_from_tools_config() {
         }
     }
     register_declared_adapters(map);
+}
+
+/// QA19 (step4b-contract-tests-p3a.md §F, 03 §11 L832-837): parse the
+/// (already schema-validated) user `tools.toml` and publish its declared
+/// `[<role>.<tool_id>.pricing]` tables to the process-global registry — the
+/// pricing sibling of `register_declared_adapters_from_tools_config` above,
+/// registered at the same CLI-startup call site. Best-effort: a
+/// missing/unreadable file registers an empty map for every role (every
+/// billing settle call already degrades to `estimated` when its role has no
+/// declared pricing — QA17/QA19's `resolve_billing_from_reported_usage`).
+fn register_declared_pricing_from_tools_config() {
+    use kcs_adapter::tool_lock::{declared_pricing_for_role, register_declared_pricing};
+    let mut map = std::collections::HashMap::new();
+    if let Some(path) = user_tools_toml_path() {
+        if let Ok(text) = fs::read_to_string(&path) {
+            if let Ok(value) = toml::from_str::<toml::Value>(&text) {
+                for role in [
+                    "prepare",
+                    "markdown",
+                    "embedding",
+                    "summary",
+                    "classification",
+                    "rerank",
+                ] {
+                    let pricing = declared_pricing_for_role(&value, role);
+                    if !pricing.is_empty() {
+                        map.insert(role.to_owned(), pricing);
+                    }
+                }
+            }
+        }
+    }
+    register_declared_pricing(map);
 }
 
 /// R13-2(4): record a one-per-run `level=warn` to errors.jsonl when an online

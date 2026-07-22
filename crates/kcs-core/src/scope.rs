@@ -3873,6 +3873,325 @@ pub fn parse_utc_seconds(value: &str) -> Option<i64> {
     Some(days_from_civil(year, month, day) * 86_400 + hour * 3_600 + minute * 60 + second)
 }
 
+// ===========================================================================
+// QA21/22/23/24/25/26/27 (step4b-contract-tests-p3a.md §G/§H, 07-adapter-spec.md
+// §3 L85-249, 10-operations.md §12.3): the adapter-level network opt-in gate's
+// persistent storage — `.kcs/scope.json`'s `approvals[]` / `approval_pending` /
+// `approvals_initialized`. This is the sole persistent source of truth the
+// send gate reads (QA22 — device-global `consents.jsonl` is untouched by this
+// module and is no longer consulted for the send decision). Free functions
+// (not `Repository` methods) so a multi-scope caller (e.g. the query-embedding
+// consent OR-across-scopes check) can evaluate a scope it has not opened as a
+// full `Repository` for.
+// ===========================================================================
+
+/// `07 §3`'s single execution mode every currently-gate-relevant online
+/// adapter (the built-in `mistral_ocr_markdownize` / `gemini_embedding_2`
+/// targets, `07 §1`) declares. Kept as a named constant (rather than
+/// threading `kcs_adapter::types::ExecutionMode` into this crate) because
+/// `approvals[]` rows store it as the plain string `AdapterProfile` already
+/// serializes it to.
+pub const NETWORK_APPROVAL_EXECUTION_MODE: &str = "online_api";
+
+fn read_scope_json_value(kcs_dir: &Path) -> Result<Value> {
+    let path = kcs_dir.join("scope.json");
+    serde_json::from_str(&fs::read_to_string(&path).kcs_io(&path)?)
+        .map_err(|err| KcsError::schema(err.to_string()))
+}
+
+fn overwrite_scope_json_value(kcs_dir: &Path, value: &Value) -> Result<()> {
+    let path = kcs_dir.join("scope.json");
+    atomic_overwrite(
+        &path,
+        serde_json::to_string_pretty(value)
+            .map_err(|err| KcsError::schema(err.to_string()))?
+            .as_bytes(),
+    )
+}
+
+/// Current `.kcs/scope.json` `approvals[]` rows. Empty when the key is
+/// absent (no adapter has ever been approved for this scope) — migration
+/// -free backward compatibility (10 §12.3).
+pub fn read_network_approvals(kcs_dir: &Path) -> Result<Vec<Value>> {
+    Ok(read_scope_json_value(kcs_dir)?
+        .get("approvals")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default())
+}
+
+/// The `approvals_initialized` consumed-marker (07 §3 L176-205): true once
+/// this scope's initial approval — explicit or the one-time "materialize"
+/// exception — has been recorded, independent of whether any row currently
+/// remains (a subsequent revoke or a lost/restored backup must not
+/// resurrect the initial-materialize exception).
+pub fn network_approvals_initialized(kcs_dir: &Path) -> Result<bool> {
+    Ok(read_scope_json_value(kcs_dir)?
+        .get("approvals_initialized")
+        .and_then(Value::as_bool)
+        .unwrap_or(false))
+}
+
+/// Whether an `active` `approvals[]` row exists for `tool_id` whose
+/// `scope_id`/`execution_mode`/`tool_profile_hash` match the CURRENT values
+/// exactly (07 §3's send-gate AND condition: "現在の execution_mode/
+/// tool_profile_hash に一致する status=active 行が存在する" — a profile
+/// change invalidates the row until re-approval, QA23). A row's absent
+/// `status` reads as `active` (10 §12.3 element-level backward
+/// compatibility for a pre-r9-schema row).
+pub fn network_approval_active(
+    kcs_dir: &Path,
+    tool_id: &str,
+    execution_mode: &str,
+    tool_profile_hash: &str,
+) -> Result<bool> {
+    let value = read_scope_json_value(kcs_dir)?;
+    let Some(scope_id) = value.get("scope_id").and_then(Value::as_str) else {
+        return Ok(false);
+    };
+    let Some(approvals) = value.get("approvals").and_then(Value::as_array) else {
+        return Ok(false);
+    };
+    Ok(approvals.iter().any(|row| {
+        row.get("scope_id").and_then(Value::as_str) == Some(scope_id)
+            && row.get("tool_id").and_then(Value::as_str) == Some(tool_id)
+            && row.get("execution_mode").and_then(Value::as_str) == Some(execution_mode)
+            && row.get("tool_profile_hash").and_then(Value::as_str) == Some(tool_profile_hash)
+            && row
+                .get("status")
+                .and_then(Value::as_str)
+                .unwrap_or("active")
+                == "active"
+    }))
+}
+
+/// Whether ANY `active` `approvals[]` row currently exists for `tool_id` in
+/// this scope, regardless of `execution_mode`/`tool_profile_hash` — the
+/// coarser presence check `--online`'s one-shot branch uses to "trust an
+/// existing row for one more send" even across a profile change (07 §3),
+/// distinct from [`network_approval_active`]'s strict steady-state match.
+pub fn network_approval_row_present(kcs_dir: &Path, tool_id: &str) -> Result<bool> {
+    let value = read_scope_json_value(kcs_dir)?;
+    let Some(scope_id) = value.get("scope_id").and_then(Value::as_str) else {
+        return Ok(false);
+    };
+    let Some(approvals) = value.get("approvals").and_then(Value::as_array) else {
+        return Ok(false);
+    };
+    Ok(approvals.iter().any(|row| {
+        row.get("scope_id").and_then(Value::as_str) == Some(scope_id)
+            && row.get("tool_id").and_then(Value::as_str) == Some(tool_id)
+            && row
+                .get("status")
+                .and_then(Value::as_str)
+                .unwrap_or("active")
+                == "active"
+    }))
+}
+
+/// 07 §3 step (0) of the approval write-order: durably record the pending
+/// approval intent BEFORE `config.toml` is touched, so a crash between
+/// steps leaves a recoverable trail and a concurrent `kcs adapter revoke`
+/// has something to detect/remove (QA26/27).
+pub fn write_network_approval_pending(kcs_dir: &Path, pending: Value) -> Result<()> {
+    let mut value = read_scope_json_value(kcs_dir)?;
+    let Some(object) = value.as_object_mut() else {
+        return Err(KcsError::schema("scope.json must be an object"));
+    };
+    object.insert("approval_pending".to_owned(), pending);
+    validate_json_schema(SchemaKind::Scope, &value)?;
+    overwrite_scope_json_value(kcs_dir, &value)
+}
+
+/// 07 §3 step (2) (QA21/23/26/27): publish the `approvals[]` row — upserted
+/// by `(scope_id, tool_id)` (existing rows are updated in place, never
+/// deleted, matching "行は削除しない — 監査保全"), set the
+/// `approvals_initialized` marker, and remove `approval_pending` in the SAME
+/// atomic write.
+///
+/// `expected_pending` is the exact pending payload the caller durably wrote
+/// in step (0) via [`write_network_approval_pending`] (or `None` when
+/// materializing with no separate pending step — QA21's initial-materialize
+/// exception publishes directly). This function re-reads scope.json and
+/// requires the CURRENTLY-persisted `approval_pending` to equal
+/// `expected_pending` exactly (CAS) before publishing — a mismatch means a
+/// concurrent `kcs adapter revoke` already removed/changed it, and the
+/// publish must not resurrect a stale intent. Returns
+/// `KCS-E-ADAPTER-APPROVAL-CONFLICT-001` (exit 5, QA26) on mismatch without
+/// writing anything.
+pub fn publish_network_approval(
+    kcs_dir: &Path,
+    row: Value,
+    expected_pending: Option<&Value>,
+) -> Result<()> {
+    let mut value = read_scope_json_value(kcs_dir)?;
+    let Some(object) = value.as_object_mut() else {
+        return Err(KcsError::schema("scope.json must be an object"));
+    };
+    let current_pending = object.get("approval_pending").cloned();
+    if current_pending.as_ref() != expected_pending {
+        return Err(KcsError::new(
+            "KCS-E-ADAPTER-APPROVAL-CONFLICT-001",
+            "approval_pending changed or was removed by a concurrent kcs adapter revoke; re-approval is required",
+            json!({}),
+            ExitCode::AuthError,
+        ));
+    }
+    let row_scope_id = row
+        .get("scope_id")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    let row_tool_id = row
+        .get("tool_id")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    let mut approvals = object
+        .get("approvals")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let mut replaced = false;
+    for existing in &mut approvals {
+        let existing_scope_id = existing
+            .get("scope_id")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        let existing_tool_id = existing
+            .get("tool_id")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        if existing_scope_id == row_scope_id && existing_tool_id == row_tool_id {
+            *existing = row.clone();
+            replaced = true;
+            break;
+        }
+    }
+    if !replaced {
+        approvals.push(row);
+    }
+    object.insert("approvals".to_owned(), Value::Array(approvals));
+    object.insert("approvals_initialized".to_owned(), Value::Bool(true));
+    object.remove("approval_pending");
+    validate_json_schema(SchemaKind::Scope, &value)?;
+    overwrite_scope_json_value(kcs_dir, &value)
+}
+
+/// QA25/26/27: the outcome of a `kcs adapter revoke` scope.json mutation.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct NetworkRevokeOutcome {
+    /// `tool_id`s whose `approvals[]` row was flipped `status=revoked` by
+    /// this call (already-revoked rows are left alone and not repeated
+    /// here).
+    pub revoked_tool_ids: Vec<String>,
+    /// Whether a matching `approval_pending` was removed by this call.
+    pub pending_removed: bool,
+    /// Whether this call wrote the `approvals_initialized` marker (only
+    /// happens when it was previously absent AND this call actually
+    /// changed something — 07 §3: a no-op revoke never writes it).
+    pub marker_written: bool,
+}
+
+impl NetworkRevokeOutcome {
+    /// Whether this call changed anything at all — the idempotent
+    /// "no target" case (07 §3: "対象なし...は冪等成功") is `false`.
+    #[must_use]
+    pub fn changed(&self) -> bool {
+        !self.revoked_tool_ids.is_empty() || self.pending_removed
+    }
+}
+
+/// QA25/26/27 (step4b-contract-tests-p3a.md §H, 07 §3 L118-211): `kcs adapter
+/// revoke (<tool_id> | --all)`'s scope.json mutation. `tool_id = None` means
+/// `--all`.
+///
+/// - Revoke updates the matching `active` `approvals[]` row(s) to
+///   `status="revoked"` + `revoked_at` (rows are never deleted).
+/// - Pending removal is `(scope_id, tool_id)`-only — `execution_mode`/
+///   `tool_profile_hash` are UNQUESTIONED (07 §3 L123-130, QA27): a 4-tuple
+///   -exact match would miss a pending left behind by a since-changed
+///   profile, letting a later self-heal resurrect the very approval this
+///   revoke meant to stop. `--all` (`tool_id = None`) removes any pending
+///   regardless of which tool it names.
+/// - Idempotent: when nothing actually changes (no matching active row, no
+///   matching pending), returns a `changed() == false` outcome and does
+///   **not** write the `approvals_initialized` marker (07 §3: "対象なしの
+///   冪等成功では書かない" — an unused scope's initial-materialize
+///   exception must not be consumed by a no-op revoke).
+/// - When something DID change, the marker is set in the SAME atomic write
+///   if it was not already (07 §3's initial-materialize-exception
+///   consumption, shared with the approval-publish path).
+pub fn revoke_network_approval(
+    kcs_dir: &Path,
+    tool_id: Option<&str>,
+    revoked_at: &str,
+) -> Result<NetworkRevokeOutcome> {
+    let mut value = read_scope_json_value(kcs_dir)?;
+    let Some(scope_id) = value
+        .get("scope_id")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+    else {
+        return Err(KcsError::schema("scope.json missing scope_id"));
+    };
+    let Some(object) = value.as_object_mut() else {
+        return Err(KcsError::schema("scope.json must be an object"));
+    };
+    let mut outcome = NetworkRevokeOutcome::default();
+    if let Some(Value::Array(approvals)) = object.get_mut("approvals") {
+        for row in approvals.iter_mut() {
+            let row_scope_id = row.get("scope_id").and_then(Value::as_str);
+            let row_tool_id = row
+                .get("tool_id")
+                .and_then(Value::as_str)
+                .map(str::to_owned);
+            let is_active = row
+                .get("status")
+                .and_then(Value::as_str)
+                .unwrap_or("active")
+                == "active";
+            let matches_target = match tool_id {
+                Some(target) => row_tool_id.as_deref() == Some(target),
+                None => true,
+            };
+            if row_scope_id == Some(scope_id.as_str()) && is_active && matches_target {
+                if let Some(row_object) = row.as_object_mut() {
+                    row_object.insert("status".to_owned(), json!("revoked"));
+                    row_object.insert("revoked_at".to_owned(), json!(revoked_at));
+                }
+                if let Some(row_tool_id) = row_tool_id {
+                    outcome.revoked_tool_ids.push(row_tool_id);
+                }
+            }
+        }
+    }
+    if let Some(pending) = object.get("approval_pending").cloned() {
+        let pending_scope_id = pending.get("scope_id").and_then(Value::as_str);
+        let pending_tool_id = pending.get("tool_id").and_then(Value::as_str);
+        let matches_target = match tool_id {
+            Some(target) => pending_tool_id == Some(target),
+            None => true,
+        };
+        if pending_scope_id == Some(scope_id.as_str()) && matches_target {
+            object.remove("approval_pending");
+            outcome.pending_removed = true;
+        }
+    }
+    if !outcome.changed() {
+        return Ok(outcome);
+    }
+    let already_initialized = object
+        .get("approvals_initialized")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    if !already_initialized {
+        object.insert("approvals_initialized".to_owned(), json!(true));
+        outcome.marker_written = true;
+    }
+    validate_json_schema(SchemaKind::Scope, &value)?;
+    overwrite_scope_json_value(kcs_dir, &value)?;
+    Ok(outcome)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{

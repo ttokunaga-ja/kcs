@@ -12,6 +12,13 @@ pub(super) struct ParsedReindex {
     pub(super) force: bool,
     pub(super) yes: bool,
     pub(super) at: Option<String>,
+    /// QA31 (step4b-contract-tests-p3a.md §I, 06-cli-spec.md §1 L77-83,
+    /// 07-adapter-spec.md §3 L220-222): one-shot embedding opt-in for THIS
+    /// reindex — both `--force` and `--at` can drive online embedding
+    /// enrichment. Mutually exclusive with `offline`.
+    pub(super) online: bool,
+    /// QA31: forbids new online sends for this reindex.
+    pub(super) offline: bool,
 }
 
 pub(super) fn parse_args(args: Vec<String>) -> Result<ParsedReindex> {
@@ -29,6 +36,14 @@ pub(super) fn parse_args(args: Vec<String>) -> Result<ParsedReindex> {
             "--yes" => {
                 reject_inline_value(flag, inline)?;
                 parsed.yes = true;
+            }
+            "--online" => {
+                reject_inline_value(flag, inline)?;
+                parsed.online = true;
+            }
+            "--offline" => {
+                reject_inline_value(flag, inline)?;
+                parsed.offline = true;
             }
             "--at" => {
                 let value = flag_value(&args, &mut i, inline, "--at")?;
@@ -49,6 +64,11 @@ pub(super) fn parse_args(args: Vec<String>) -> Result<ParsedReindex> {
             }
         }
         i += 1;
+    }
+    if parsed.online && parsed.offline {
+        return Err(KcsError::invalid_usage(
+            "--online and --offline are mutually exclusive",
+        ));
     }
     Ok(parsed)
 }
@@ -251,7 +271,7 @@ pub(super) fn retained_history_instances(
     Ok(instances)
 }
 
-pub(super) fn run(repo: &Repository, operand: &str) -> Result<Value> {
+pub(super) fn run(repo: &Repository, operand: &str, online: bool, offline: bool) -> Result<Value> {
     ensure_no_visible_purge_journal(repo.kcs_dir())?;
     let head_before = repo
         .head_commit_hash()?
@@ -443,7 +463,12 @@ pub(super) fn run(repo: &Repository, operand: &str) -> Result<Value> {
         &config.chunking_config_hash,
     )?;
 
-    let embedding_online = embedding_online_allowed(repo, false, false, false)?;
+    // QA31 (step4b-contract-tests-p3a.md §I): `--online`/`--offline` now
+    // reach `--at`'s historical-enrichment pass instead of the hard-coded
+    // `(false, false, false)` this used to pass unconditionally.
+    // `online_confirmed = false`: `kcs reindex` carries no same-invocation
+    // `--yes`/`--approve`-equivalent confirming flag.
+    let embedding_online = embedding_online_allowed(repo, offline, online, false)?;
     let enrichment =
         run_historical_embedding_enrichment(repo, embedding_online, &selected_instances)?;
 

@@ -166,7 +166,7 @@ pub fn run_standard_online_markdownize_with_bytes(
         .as_deref()
     {
         Some("auth_error") => return Err(AdapterError::Auth("mock auth failure".to_owned())),
-        Some("rate_limit") => return Err(AdapterError::RateLimit("mock 429".to_owned())),
+        Some("rate_limit") => return Err(AdapterError::rate_limit("mock 429")),
         // R16-7: a retryable NetworkError (mapped from `AdapterError::Network`) — unlike
         // rate_limit it may have been billed server-side, so each retry re-reserves.
         Some("network_error") => {
@@ -338,7 +338,7 @@ pub fn resolve_standard_online_markdownize_profile_with_bbox(
         .as_deref()
     {
         Some("auth_error") => return Err(AdapterError::Auth("mock auth failure".to_owned())),
-        Some("rate_limit") => return Err(AdapterError::RateLimit("mock 429".to_owned())),
+        Some("rate_limit") => return Err(AdapterError::rate_limit("mock 429")),
         // R16-7: keep the seam arms in sync with `run_standard_online_markdownize`.
         Some("network_error") => {
             return Err(AdapterError::Network("mock network failure".to_owned()))
@@ -654,7 +654,7 @@ impl GeminiEmbeddingClient for MockAdoptedEmbeddingClient {
                 return Err(AdapterError::Auth("mock auth failure".to_owned()))
             }
             AdoptedEmbeddingExecution::RateLimit => {
-                return Err(AdapterError::RateLimit("mock 429".to_owned()))
+                return Err(AdapterError::rate_limit("mock 429"))
             }
             _ => {}
         }
@@ -774,7 +774,7 @@ mod tests {
                 Vec::new(),
                 EmbeddingInputType::Query,
             ),
-            Err(AdapterError::RateLimit(_))
+            Err(AdapterError::RateLimit { .. })
         ));
     }
 

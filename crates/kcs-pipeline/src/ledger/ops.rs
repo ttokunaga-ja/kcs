@@ -652,6 +652,86 @@ pub fn resolve_billing_from_billable_units(
     }
 }
 
+/// QA17/QA18/QA19 (step4b-contract-tests-p3a.md §F): resolve a terminal
+/// task's billed amount from the Adapter's self-reported `usage` (07 §4
+/// L291-307's one-of `usd`|`billable_units`), the Adapter's declared
+/// `billable_kinds` (QA18), and `tools.toml`'s `[pricing]` table (QA19) — the
+/// single call site that joins all three contracts. Wraps
+/// [`resolve_billing_from_usd_field`]/[`resolve_billing_from_billable_units`]
+/// (CL27/CL28's existing degrade rules, unchanged) so a missing or malformed
+/// `usage` degrades exactly as it always has — `estimated=1` at
+/// `fallback_estimated_usd` (the caller's reservation amount).
+///
+/// Returns the billed amount plus the distinct `billable_units[].kind`
+/// values that were reported but had no `pricing` entry (QA19's "単価未被覆の
+/// kind" — the caller logs ONE warning line naming them; this function stays
+/// pure/IO-free so it is unit-testable without a logging seam. Note this list
+/// can be non-empty even when `billed.estimated` is `false`: e.g. two
+/// declared kinds are reported, one priced and one not — CL28's "every kind
+/// must have a resolvable price" rule still degrades the WHOLE report, so in
+/// practice a non-empty list and `estimated=true` always coincide for this
+/// specific defect, but the two are computed independently on purpose so a
+/// future partial-billing relaxation would not silently need this wired
+/// again).
+#[must_use]
+pub fn resolve_billing_from_reported_usage(
+    usage: Option<&kcs_adapter::types::AdapterUsage>,
+    declared_billable_kinds: &std::collections::BTreeSet<String>,
+    pricing: &BTreeMap<String, f64>,
+    fallback_estimated_usd: f64,
+) -> (BilledAmount, Vec<String>) {
+    use kcs_adapter::types::AdapterUsage;
+    match usage {
+        None => (
+            BilledAmount {
+                usd: fallback_estimated_usd,
+                estimated: true,
+            },
+            Vec::new(),
+        ),
+        Some(AdapterUsage::Usd { usd }) => (
+            resolve_billing_from_usd_field(*usd, fallback_estimated_usd),
+            Vec::new(),
+        ),
+        Some(AdapterUsage::BillableUnits { billable_units }) => {
+            let uncovered: Vec<String> = billable_units
+                .iter()
+                .map(|unit| billable_unit_kind_name(unit.kind).to_owned())
+                .filter(|kind| !pricing.contains_key(kind))
+                .collect::<std::collections::BTreeSet<_>>()
+                .into_iter()
+                .collect();
+            let reported: Vec<ReportedBillableUnit> = billable_units
+                .iter()
+                .map(|unit| ReportedBillableUnit {
+                    kind: billable_unit_kind_name(unit.kind).to_owned(),
+                    count: unit.count as f64,
+                })
+                .collect();
+            let billed = resolve_billing_from_billable_units(
+                &reported,
+                declared_billable_kinds,
+                pricing,
+                fallback_estimated_usd,
+            );
+            (billed, uncovered)
+        }
+    }
+}
+
+/// The [`BILLABLE_UNIT_KINDS`] string for an Adapter-reported
+/// `BillableUnitKind` (07 §4's closed enum). `kcs-pipeline` depends on
+/// `kcs-adapter`, so this is the single conversion point between the two
+/// crates' representations (the typed enum vs. the ledger's string keys).
+fn billable_unit_kind_name(kind: kcs_adapter::types::BillableUnitKind) -> &'static str {
+    use kcs_adapter::types::BillableUnitKind;
+    match kind {
+        BillableUnitKind::Pages => "pages",
+        BillableUnitKind::TokensIn => "tokens_in",
+        BillableUnitKind::TokensOut => "tokens_out",
+    }
+}
+
 // ---------------------------------------------------------------------------
 // §D/§C — terminal transaction: idempotent recording + state 2/3 (CL18-CL25)
 // ---------------------------------------------------------------------------
@@ -1984,6 +2064,125 @@ mod tests {
                 usd: 0.0,
                 estimated: false
             }
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // QA17/QA18/QA19 (step4b-contract-tests-p3a.md §F): the AdapterRun-usage
+    // -> BilledAmount join point, `resolve_billing_from_reported_usage`.
+    // ------------------------------------------------------------------
+
+    /// QA17: `usage: None` (an Adapter with no real per-call signal to
+    /// report, e.g. this codebase's Gemini embedding integration) degrades
+    /// to the reservation estimate — exactly the behavior every settle call
+    /// site had before this field existed. No uncovered-kind warning either
+    /// (there is no billable_units report to inspect).
+    #[test]
+    fn qa17_no_usage_degrades_to_estimated_reservation() {
+        let declared: BTreeSet<String> = BTreeSet::new();
+        let pricing = BTreeMap::new();
+        let (billed, uncovered) =
+            resolve_billing_from_reported_usage(None, &declared, &pricing, 7.5);
+        assert_eq!(
+            billed,
+            BilledAmount {
+                usd: 7.5,
+                estimated: true
+            }
+        );
+        assert!(uncovered.is_empty());
+    }
+
+    /// QA17: a `usd`-shaped usage report resolves through
+    /// `resolve_billing_from_usd_field` unchanged (CL27's rules) — a valid,
+    /// finite non-negative value bills at that exact figure.
+    #[test]
+    fn qa17_usd_usage_resolves_via_existing_cl27_rule() {
+        let declared: BTreeSet<String> = BTreeSet::new();
+        let pricing = BTreeMap::new();
+        let usage = kcs_adapter::types::AdapterUsage::Usd { usd: 1.23 };
+        let (billed, uncovered) =
+            resolve_billing_from_reported_usage(Some(&usage), &declared, &pricing, 9.0);
+        assert_eq!(
+            billed,
+            BilledAmount {
+                usd: 1.23,
+                estimated: false
+            }
+        );
+        assert!(uncovered.is_empty());
+    }
+
+    /// QA17/QA19: a `billable_units` report whose kind IS declared and IS
+    /// priced bills the real amount (`count * pricing[kind]`) — the Mistral
+    /// OCR "processed N pages" self-report shape.
+    #[test]
+    fn qa17_qa19_billable_units_with_full_coverage_bills_real_amount() {
+        let declared: BTreeSet<String> = ["pages"].into_iter().map(str::to_owned).collect();
+        let mut pricing = BTreeMap::new();
+        pricing.insert("pages".to_owned(), 0.004);
+        let usage = kcs_adapter::types::AdapterUsage::BillableUnits {
+            billable_units: vec![kcs_adapter::types::BillableUnit {
+                kind: kcs_adapter::types::BillableUnitKind::Pages,
+                count: 12,
+            }],
+        };
+        let (billed, uncovered) =
+            resolve_billing_from_reported_usage(Some(&usage), &declared, &pricing, 5.0);
+        assert!(!billed.estimated);
+        assert!((billed.usd - 0.048).abs() < 1e-12, "got {}", billed.usd);
+        assert!(uncovered.is_empty());
+    }
+
+    /// QA19: a `billable_units` kind with NO `tools.toml` price ("単価未被覆の
+    /// kind") degrades to the reservation estimate (CL30, unchanged) AND is
+    /// named in the returned uncovered-kind list so the caller can log the
+    /// one warning line — this is the field this function adds over calling
+    /// `resolve_billing_from_billable_units` directly.
+    #[test]
+    fn qa19_uncovered_pricing_kind_degrades_and_is_reported() {
+        let declared: BTreeSet<String> = ["tokens_in"].into_iter().map(str::to_owned).collect();
+        let pricing = BTreeMap::new(); // tokens_in declared but NOT priced
+        let usage = kcs_adapter::types::AdapterUsage::BillableUnits {
+            billable_units: vec![kcs_adapter::types::BillableUnit {
+                kind: kcs_adapter::types::BillableUnitKind::TokensIn,
+                count: 500,
+            }],
+        };
+        let (billed, uncovered) =
+            resolve_billing_from_reported_usage(Some(&usage), &declared, &pricing, 3.0);
+        assert_eq!(
+            billed,
+            BilledAmount {
+                usd: 3.0,
+                estimated: true
+            }
+        );
+        assert_eq!(uncovered, vec!["tokens_in".to_owned()]);
+    }
+
+    /// QA19: an undeclared/unknown kind (not a pricing-coverage defect) still
+    /// degrades billing (CL28, unchanged) but is NOT reported as an
+    /// "uncovered pricing kind" — the uncovered-kind list is scoped
+    /// specifically to "declared and reportable, but tools.toml has no
+    /// price for it", not every reason a report can degrade.
+    #[test]
+    fn qa19_undeclared_kind_degrades_without_a_pricing_warning() {
+        let declared: BTreeSet<String> = BTreeSet::new(); // pages NOT declared
+        let mut pricing = BTreeMap::new();
+        pricing.insert("pages".to_owned(), 0.004); // priced, but not declared
+        let usage = kcs_adapter::types::AdapterUsage::BillableUnits {
+            billable_units: vec![kcs_adapter::types::BillableUnit {
+                kind: kcs_adapter::types::BillableUnitKind::Pages,
+                count: 3,
+            }],
+        };
+        let (billed, uncovered) =
+            resolve_billing_from_reported_usage(Some(&usage), &declared, &pricing, 2.0);
+        assert!(billed.estimated);
+        assert!(
+            uncovered.is_empty(),
+            "a priced-but-undeclared kind is not a pricing-coverage defect"
         );
     }
 

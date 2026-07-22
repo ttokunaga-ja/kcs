@@ -626,6 +626,17 @@ impl<C: MistralOcrClient> MarkdownizeAdapter for MistralOcrMarkdownizeAdapter<C>
                 OcrResponsePolicy::default().max_persisted_image_bytes,
             )?;
         }
+        // QA17 (step4b-contract-tests-p3a.md §F, 07 §4 L291-307): Mistral OCR
+        // bills per page processed, and `hints` is exactly the set of pages
+        // this request asked for AND that `pages_by_index` (above) confirmed
+        // the response actually returned — a real, provider-response-derived
+        // count, not a fabricated one. `hints` is non-empty here: an empty
+        // `prepared_unit_hint` takes the `discovered_unit_hints` path, which
+        // itself errors on zero pages before reaching this point.
+        let billable_units = vec![crate::types::BillableUnit {
+            kind: crate::types::BillableUnitKind::Pages,
+            count: hints.len() as u64,
+        }];
         Ok(MarkdownizeResponse {
             mode_used: request.mode,
             updated_units: hints
@@ -662,6 +673,7 @@ impl<C: MistralOcrClient> MarkdownizeAdapter for MistralOcrMarkdownizeAdapter<C>
             failed_units: Vec::new(),
             fallback_to_full: false,
             reason: None,
+            usage: Some(crate::types::AdapterUsage::BillableUnits { billable_units }),
         })
     }
 }
@@ -1247,8 +1259,18 @@ fn http_error(error: ureq::Error) -> AdapterError {
         ureq::Error::Status(401 | 403, response) => {
             AdapterError::Auth(format!("Mistral OCR HTTP auth: {}", response.status_text()))
         }
+        // QA16: capture a real `Retry-After` header when the provider sent
+        // one — never a fabricated value (`parse_retry_after_ms` returns
+        // `None` for an absent/unparseable header, same as before this
+        // field existed).
         ureq::Error::Status(429, response) => {
-            AdapterError::RateLimit(format!("Mistral OCR HTTP 429: {}", response.status_text()))
+            let retry_after_ms = response
+                .header("Retry-After")
+                .and_then(crate::http_policy::parse_retry_after_ms);
+            AdapterError::RateLimit {
+                message: format!("Mistral OCR HTTP 429: {}", response.status_text()),
+                retry_after_ms,
+            }
         }
         ureq::Error::Status(402, response) => AdapterError::QuotaExceeded(format!(
             "Mistral OCR HTTP quota: {}",

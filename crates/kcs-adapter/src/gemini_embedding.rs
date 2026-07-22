@@ -365,6 +365,12 @@ impl<C: GeminiEmbeddingClient> EmbeddingAdapter for GeminiEmbeddingAdapter<C> {
             // QA49: the profile in force for this response, so the consumer
             // can reject a same-dimension vector from an unexpected profile.
             embedding_profile_hash: tool_profile_hash(&self.profile_value()).ok(),
+            // QA17: `batchEmbedContents`'s response carries no per-request
+            // token count (unlike `generateContent`'s `usageMetadata`), so
+            // there is no real signal to self-report here. `None` degrades
+            // to the caller's reservation estimate — the same behavior as
+            // before this field existed, not a regression.
+            usage: None,
         })
     }
 }
@@ -375,10 +381,19 @@ fn http_error(error: ureq::Error) -> AdapterError {
             "Gemini embedding HTTP auth: {}",
             response.status_text()
         )),
-        ureq::Error::Status(429, response) => AdapterError::RateLimit(format!(
-            "Gemini embedding HTTP 429: {}",
-            response.status_text()
-        )),
+        // QA16: capture a real `Retry-After` header when the provider sent
+        // one — never a fabricated value (`parse_retry_after_ms` returns
+        // `None` for an absent/unparseable header, same as before this
+        // field existed).
+        ureq::Error::Status(429, response) => {
+            let retry_after_ms = response
+                .header("Retry-After")
+                .and_then(crate::http_policy::parse_retry_after_ms);
+            AdapterError::RateLimit {
+                message: format!("Gemini embedding HTTP 429: {}", response.status_text()),
+                retry_after_ms,
+            }
+        }
         ureq::Error::Status(402, response) => AdapterError::QuotaExceeded(format!(
             "Gemini embedding HTTP quota: {}",
             response.status_text()

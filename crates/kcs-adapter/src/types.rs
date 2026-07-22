@@ -298,7 +298,10 @@ pub struct FailedUnit {
     pub error_kind: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+// QA17: no longer `Eq` — `usage: Option<AdapterUsage>` can carry an `f64` USD
+// amount, and `f64` has no total order (NaN), so it cannot derive `Eq`.
+// `PartialEq` (used by every `assert_eq!` call site) is unaffected.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MarkdownizeResponse {
     pub mode_used: MarkdownizeMode,
     pub updated_units: Vec<MarkdownUnit>,
@@ -311,6 +314,14 @@ pub struct MarkdownizeResponse {
     pub failed_units: Vec<FailedUnit>,
     pub fallback_to_full: bool,
     pub reason: Option<String>,
+    /// QA17 (step4b-contract-tests-p3a.md §F, 07 §4 L291-307): this request's
+    /// self-reported billing usage, when the concrete Adapter can determine
+    /// one from the provider's own response (e.g. Mistral OCR's processed
+    /// page count). `None` when no real signal is available — the caller
+    /// degrades to the reservation estimate exactly as it did before this
+    /// field existed (04-pipeline.md §5.4's `estimated=1` path).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<AdapterUsage>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -357,6 +368,14 @@ pub struct EmbeddingResponse {
     /// dimensions/distance/modality-only check).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub embedding_profile_hash: Option<String>,
+    /// QA17: this request's self-reported billing usage (07 §4 L291-307).
+    /// `None` when the concrete Adapter has no real per-call signal to report
+    /// (e.g. this codebase's Gemini `batchEmbedContents` integration — the
+    /// endpoint's response carries no per-request token count) — the caller
+    /// degrades to the reservation estimate, same as before this field
+    /// existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<AdapterUsage>,
 }
 
 /// Validate the numeric domain required by cosine distance. Width alone is not

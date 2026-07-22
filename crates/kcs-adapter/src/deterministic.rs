@@ -48,9 +48,15 @@ impl DeterministicAdapter {
             allow_network: false,
             // The built-in deterministic adapter never bills (local, no
             // network) — QA18's `billable_kinds`/`reject_billing` are only
-            // required for a billable adapter (07 §5.7 condition 6).
+            // REQUIRED for a billable adapter (07 §5.7 condition 6). Per the
+            // QA18 ruling, a non-billable adapter still states its billing
+            // posture explicitly (`Nonbillable`) rather than leaving
+            // `reject_billing` at `None` — `None` is reserved for a legacy
+            // profile predating this field, which a consumer must fail-closed
+            // interpret as "billable" (07 §4: "legacy/未知値は fail-closed =
+            // billable として扱う"). This adapter is not legacy; it declares.
             billable_kinds: Vec::new(),
-            reject_billing: None,
+            reject_billing: Some(crate::types::BillingDeclaration::Nonbillable),
         }
     }
 }
@@ -209,6 +215,10 @@ fn markdownize_with_source(
             failed_units: Vec::new(),
             fallback_to_full: false,
             reason: None,
+            // QA17: the deterministic adapter never bills (local, no
+            // network) — it settles via `record_free_local_charge`'s
+            // `nonbillable_charge()`, not this codepath's `usage` field.
+            usage: None,
         });
     }
 
@@ -224,6 +234,8 @@ fn markdownize_with_source(
         failed_units: Vec::new(),
         fallback_to_full: false,
         reason: None,
+        // QA17: see the Incremental branch above — this adapter never bills.
+        usage: None,
     })
 }
 

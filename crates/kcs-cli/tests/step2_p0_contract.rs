@@ -157,6 +157,7 @@ fn response_incremental(
     removed: Vec<&str>,
 ) -> kcs_adapter::types::MarkdownizeResponse {
     kcs_adapter::types::MarkdownizeResponse {
+        usage: None,
         mode_used: kcs_adapter::types::MarkdownizeMode::Incremental,
         updated_units: updated,
         unchanged_unit_keys: unchanged.into_iter().map(str::to_owned).collect(),
@@ -662,6 +663,7 @@ fn ct2_accept_005_rejects_empty_markdown() {
 fn ct2_accept_006_full_mode_uses_full_contract() {
     let (prepared, hints) = acceptance_context();
     let response = kcs_adapter::types::MarkdownizeResponse {
+        usage: None,
         mode_used: kcs_adapter::types::MarkdownizeMode::Full,
         updated_units: vec![markdown_unit("page:1", "a"), markdown_unit("page:2", "b")],
         unchanged_unit_keys: Vec::new(),
@@ -1258,8 +1260,27 @@ fn ct2_network_002_approve_grants_opt_in_yes_does_not() {
     assert!(approvals.contains(r#""network_opt_in":false"#));
 }
 
+/// QA21 (step4b-contract-tests-p3a.md §G, 07-adapter-spec.md §3 L106-112/
+/// 176-190, 2026-07-22 orchestrator ruling): a scope-local
+/// `.kcs/config.toml` `allow_network = true` pre-set on a genuinely fresh
+/// scope (no `approvals[]` row, no `approvals_initialized` marker) DOES
+/// bootstrap the first-ever tool's opt-in via the "初回 materialize"
+/// exception — even under `--yes` (which never itself WRITES the boolean,
+/// but does not block a pre-existing one from being observed at gate-check
+/// time).
+///
+/// This test used to assert the opposite (named
+/// `..._portable_scope_config_cannot_grant_network_consent`) on the theory
+/// that scope-local config is "portable" `.kcs` content and must never
+/// unilaterally grant network authority. That defense was reconsidered and
+/// rejected: 07 §3's (b) path is explicit that THIS file/key is the
+/// materialize trigger, and a crafted `.kcs` could ship the `approvals[]`
+/// row directly instead of relying on materialize at all — gating the
+/// trigger to a different (e.g. device-global) file blocks nothing a
+/// motivated attacker cannot route around, while breaking the spec's
+/// documented (b) UX for every legitimate scope-local-only user.
 #[test]
-fn ct2_network_004_portable_scope_config_cannot_grant_network_consent() {
+fn ct2_network_004_scope_local_config_bootstraps_first_tool_via_materialize() {
     let dir = scope();
     fs::write(
         dir.path().join(".kcs/config.toml"),
@@ -1270,14 +1291,16 @@ fn ct2_network_004_portable_scope_config_cannot_grant_network_consent() {
     // no longer enqueue online tasks).
     fs::write(dir.path().join("a.pdf"), fake_pdf(&["hello"])).unwrap();
     let output = json_success(&dir, ["index", "--yes"]);
-    assert_eq!(output["network_allowed"], false);
-    assert_eq!(output["network_opt_in"], false);
-    let status = json_success(&dir, ["status"]);
-    assert!(status["tasks"].as_array().unwrap().iter().any(|task| {
-        task["input_path"] == "a.pdf"
-            && task["status"] == "pending"
-            && task["fallback_reason"] == "network_opt_in_required"
-    }));
+    assert_eq!(output["network_opt_in"], true);
+    let scope: Value =
+        serde_json::from_str(&fs::read_to_string(dir.path().join(".kcs/scope.json")).unwrap())
+            .unwrap();
+    let approvals = scope["approvals"]
+        .as_array()
+        .expect("approvals[] must exist after materialize");
+    assert_eq!(approvals.len(), 1);
+    assert_eq!(approvals[0]["approval_method"], "materialize");
+    assert_eq!(approvals[0]["status"], "active");
 }
 
 #[test]

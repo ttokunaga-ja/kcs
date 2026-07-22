@@ -2373,9 +2373,16 @@ fn ct3_l1_reindex_enriches_new_generation_embeddings() {
 
     // Force a genuine re-split so the new chunks have text unseen by the embedding
     // store (otherwise the DB rebuild would reuse content vectors by text_hash).
+    // QA21 (step4b-contract-tests-p3a.md §G, 07-adapter-spec.md §3): the
+    // network-approval gate's positive condition needs
+    // `[adapter.policy].allow_network = true` to remain SET after this
+    // wholesale config.toml rewrite (unset/lost = gate not established) —
+    // `indexed_scope_embed`'s earlier `--approve` already set it, so this
+    // full overwrite must carry it forward explicitly or the scope silently
+    // loses its persisted opt-in.
     fs::write(
         dir.path().join(".kcs/config.toml"),
-        "kcs_format_version = \"0.1.0\"\n[chunking]\nstrategy = \"heading\"\nmax_chars = 10\n",
+        "kcs_format_version = \"0.1.0\"\n[chunking]\nstrategy = \"heading\"\nmax_chars = 10\n[adapter.policy]\nallow_network = true\n",
     )
     .unwrap();
     let out = json_success_embed(&dir, "mock", &["reindex", "--force", "--yes"]);
@@ -7321,12 +7328,20 @@ fn r19_8_lowered_max_input_bytes_blocks_queued_online_send() {
     kcs(&dir, &["init"]).assert().success();
     // Enqueue the online markdownize task under the default (generous) cap.
     run_markdownize_seam(&dir, "mock", None, &["index", "--approve"]);
-    // Tighten the cap below the file size in the scope config.
+    // Tighten the cap below the file size in the scope config. QA21
+    // (step4b-contract-tests-p3a.md §G, 07-adapter-spec.md §3): `--approve`
+    // already wrote `[adapter.policy]\nallow_network = true` (the network
+    // -approval gate's positive condition — unset/lost = gate not
+    // established), so this can no longer blindly APPEND a second
+    // `[adapter.policy]` header (a duplicate-table TOML parse error) —
+    // merge `max_input_bytes` into the existing table via `toml_edit`
+    // instead, which also preserves `allow_network` untouched.
     let cap = pdf.len() - 5;
     let cfg = dir.path().join(".kcs/config.toml");
-    let mut content = fs::read_to_string(&cfg).unwrap_or_default();
-    content.push_str(&format!("\n[adapter.policy]\nmax_input_bytes = {cap}\n"));
-    fs::write(&cfg, content).unwrap();
+    let existing = fs::read_to_string(&cfg).unwrap_or_default();
+    let mut document = existing.parse::<toml_edit::DocumentMut>().unwrap();
+    document["adapter"]["policy"]["max_input_bytes"] = toml_edit::value(cap as i64);
+    fs::write(&cfg, document.to_string()).unwrap();
     // batch resume must NOT send the now-oversized task (no online charge).
     run_markdownize_seam(
         &dir,

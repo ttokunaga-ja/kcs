@@ -1174,9 +1174,16 @@ fn ct4_timetravel_011_historical_reindex_enriches_only_selected_snapshot() {
     let head_before = fs::read(dir.path().join(".kcs/HEAD")).unwrap();
     let branch_before = fs::read(dir.path().join(".kcs/refs/heads/main")).unwrap();
 
+    // QA21 (step4b-contract-tests-p3a.md §G, 07-adapter-spec.md §3): the
+    // network-approval gate's positive condition needs
+    // `[adapter.policy].allow_network = true` to remain SET after this
+    // wholesale config.toml rewrite (unset/lost = gate not established) —
+    // the two `--approve` calls above already set it, so this full
+    // overwrite must carry it forward explicitly or the scope silently
+    // loses its persisted opt-in.
     fs::write(
         dir.path().join(".kcs/config.toml"),
-        "kcs_format_version = \"0.1.0\"\n[chunking]\nstrategy = \"heading\"\nmax_chars = 48\n",
+        "kcs_format_version = \"0.1.0\"\n[chunking]\nstrategy = \"heading\"\nmax_chars = 48\n[adapter.policy]\nallow_network = true\n",
     )
     .unwrap();
     let current_config = kcs_index::chunking::chunking_config_hash("heading", 48).unwrap();

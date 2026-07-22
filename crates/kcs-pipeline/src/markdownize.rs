@@ -1964,6 +1964,7 @@ mod tests {
             page_fingerprints: BTreeMap::new(),
         };
         let good = adapter_types::MarkdownizeResponse {
+            usage: None,
             mode_used: adapter_types::MarkdownizeMode::Incremental,
             updated_units: vec![adapter_types::MarkdownUnit {
                 unit_key: "page:1".to_owned(),
@@ -2036,6 +2037,7 @@ mod tests {
     fn qa36_qa39_v4_added_partial_failure_is_accepted_via_failed_units() {
         let (prepared, hints) = qa_fixture();
         let response = adapter_types::MarkdownizeResponse {
+            usage: None,
             mode_used: adapter_types::MarkdownizeMode::Incremental,
             updated_units: vec![ok_unit("page:1"), ok_unit("page:2")],
             unchanged_unit_keys: Vec::new(),
@@ -2066,6 +2068,7 @@ mod tests {
     fn qa39_v6_full_response_accepts_failed_units_in_its_coverage() {
         let (prepared, _hints) = qa_fixture();
         let response = adapter_types::MarkdownizeResponse {
+            usage: None,
             mode_used: adapter_types::MarkdownizeMode::Full,
             updated_units: vec![ok_unit("page:1"), ok_unit("page:2")],
             unchanged_unit_keys: Vec::new(),
@@ -2094,6 +2097,7 @@ mod tests {
     fn qa36_failed_unit_error_kind_must_be_a_known_retry_kind() {
         let (prepared, hints) = qa_fixture();
         let mut response = adapter_types::MarkdownizeResponse {
+            usage: None,
             mode_used: adapter_types::MarkdownizeMode::Incremental,
             updated_units: vec![ok_unit("page:1"), ok_unit("page:2")],
             unchanged_unit_keys: Vec::new(),
@@ -2115,6 +2119,7 @@ mod tests {
     fn qa38a_duplicate_unit_key_within_one_array_is_rejected() {
         let (prepared, hints) = qa_fixture();
         let response = adapter_types::MarkdownizeResponse {
+            usage: None,
             mode_used: adapter_types::MarkdownizeMode::Incremental,
             updated_units: vec![ok_unit("page:1"), ok_unit("page:1"), ok_unit("page:2")],
             unchanged_unit_keys: Vec::new(),
@@ -2157,6 +2162,7 @@ mod tests {
         // omits it from updated_units — must be rejected even though the
         // response is internally self-consistent (V1 union still covers N).
         let lying = adapter_types::MarkdownizeResponse {
+            usage: None,
             mode_used: adapter_types::MarkdownizeMode::Incremental,
             updated_units: Vec::new(),
             unchanged_unit_keys: vec!["page:1".to_owned(), "page:2".to_owned()],
@@ -2225,6 +2231,7 @@ mod tests {
             let mut unit = ok_unit("page:1");
             unit.markdown = bad_markdown.to_owned();
             let response = adapter_types::MarkdownizeResponse {
+                usage: None,
                 mode_used: adapter_types::MarkdownizeMode::Incremental,
                 updated_units: vec![unit, ok_unit("page:2")],
                 unchanged_unit_keys: Vec::new(),
@@ -2250,6 +2257,7 @@ mod tests {
     fn qa44_fallback_to_full_is_a_control_response_not_a_violation() {
         let (prepared, hints) = qa_fixture();
         let control = adapter_types::MarkdownizeResponse {
+            usage: None,
             mode_used: adapter_types::MarkdownizeMode::Incremental,
             updated_units: Vec::new(),
             unchanged_unit_keys: Vec::new(),

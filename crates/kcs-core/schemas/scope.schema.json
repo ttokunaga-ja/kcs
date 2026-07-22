@@ -42,6 +42,50 @@
         "estimated_embedding_usd"
       ],
       "additionalProperties": false
+    },
+    "approvals": {
+      "type": "array",
+      "description": "QA21-27 (step4b-contract-tests-p3a.md §G/§H, 07 §3 L148-168, 10 §12.3): adapter-level network opt-in rows, distinct from `scan_approval`. One row per (scope_id, tool_id); revoke/invalidation updates `status` in place (rows are never deleted, for audit). `status` is intentionally NOT required at the element level: a legacy row (r9-schema-and-earlier, before `status` existed) reads as `active` (10 §12.3 element-level backward compat) rather than failing schema validation.",
+      "items": {
+        "type": "object",
+        "properties": {
+          "scope_id": { "type": "string" },
+          "tool_id": { "type": "string", "minLength": 1 },
+          "execution_mode": { "type": "string" },
+          "tool_profile_hash": { "type": "string" },
+          "approved_at": { "type": "string" },
+          "approval_method": { "type": "string" },
+          "status": { "type": "string", "enum": ["active", "revoked"] },
+          "revoked_at": { "type": "string" }
+        },
+        "required": [
+          "scope_id",
+          "tool_id",
+          "execution_mode",
+          "tool_profile_hash",
+          "approved_at",
+          "approval_method"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "approval_pending": {
+      "type": "object",
+      "description": "QA21/25-27 (07 §3 L191-205, 10 §12.3): the single in-flight approval write-order's pending intent (a single object, not an array — approval operations are serialized under `.kcs/.lock`). `approved_at`/`approval_method` are intentionally NOT required at the element level: a legacy pending missing them is not a schema error (10 §12.3 element-level backward compat) — it simply never exact-matches for self-heal/CAS purposes and is cleaned up on the next locked mutation.",
+      "properties": {
+        "scope_id": { "type": "string" },
+        "tool_id": { "type": "string", "minLength": 1 },
+        "execution_mode": { "type": "string" },
+        "tool_profile_hash": { "type": "string" },
+        "approved_at": { "type": "string" },
+        "approval_method": { "type": "string" }
+      },
+      "required": ["scope_id", "tool_id", "execution_mode", "tool_profile_hash"],
+      "additionalProperties": false
+    },
+    "approvals_initialized": {
+      "type": "boolean",
+      "description": "QA21/25-27 (07 §3 L176-205): consumed-marker for the one-time 'initial materialize' exception — set true in the same atomic write as the scope's first approval row publish (explicit or materialized), or as a revoke/self-heal-cleanup that actually removed a pending / revoked a row. `true` with `approvals` empty means the exception is already consumed (fail-closed for blanket auto-materialize), not a fresh scope."
     }
   },
   "additionalProperties": false

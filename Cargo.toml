@@ -24,6 +24,11 @@ jsonschema = { version = "0.26", default-features = false }
 sha2 = "0.10"
 thiserror = "1"
 toml = "0.8"
+# QA21 (2026-07-22 orchestrator ruling): format-preserving single-key TOML
+# edits for the network-approval write path (`.kcs/config.toml`'s
+# `[adapter.policy].allow_network`) — `toml 0.8` already vendors this crate
+# internally, so pinning the same version adds no new dependency weight.
+toml_edit = "0.22"
 unicode-normalization = "0.1"
 base64 = "0.22"
 getrandom = "0.3"

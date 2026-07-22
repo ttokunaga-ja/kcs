@@ -89,6 +89,26 @@ pub(crate) fn read_json_bounded(
     parse_json_bytes_bounded(&body, max_bytes, context)
 }
 
+/// QA16 (step4b-contract-tests-p3a.md §F, 07 §4 L290): parse an HTTP
+/// `Retry-After` header value into milliseconds. Only the numeric
+/// delay-seconds form (RFC 9110 §10.2.3) is supported — the rarer HTTP-date
+/// form is not parsed and degrades to `None`, same as a missing header
+/// (`AdapterRun.retry_after_ms` is documented `optional`; callers already
+/// fall back to the existing exponential backoff when it is absent).
+/// Negative, non-finite, or overflowing input also returns `None` rather than
+/// a fabricated delay.
+pub(crate) fn parse_retry_after_ms(header_value: &str) -> Option<u64> {
+    let seconds: f64 = header_value.trim().parse().ok()?;
+    if !seconds.is_finite() || seconds < 0.0 {
+        return None;
+    }
+    let millis = (seconds * 1000.0).round();
+    if millis > u64::MAX as f64 {
+        return None;
+    }
+    Some(millis as u64)
+}
+
 pub(crate) fn parse_json_bytes_bounded(
     body: &[u8],
     max_bytes: usize,
@@ -106,6 +126,25 @@ pub(crate) fn parse_json_bytes_bounded(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn retry_after_ms_parses_numeric_seconds_form() {
+        assert_eq!(parse_retry_after_ms("30"), Some(30_000));
+        assert_eq!(parse_retry_after_ms("0"), Some(0));
+        assert_eq!(parse_retry_after_ms("  120  "), Some(120_000));
+        assert_eq!(parse_retry_after_ms("2.5"), Some(2_500));
+    }
+
+    #[test]
+    fn retry_after_ms_rejects_invalid_or_unsupported_forms() {
+        // Negative, non-finite, and the (rare, unsupported) HTTP-date form all
+        // degrade to `None` rather than a fabricated delay.
+        assert_eq!(parse_retry_after_ms("-1"), None);
+        assert_eq!(parse_retry_after_ms("NaN"), None);
+        assert_eq!(parse_retry_after_ms("Wed, 21 Oct 2026 07:28:00 GMT"), None);
+        assert_eq!(parse_retry_after_ms(""), None);
+        assert_eq!(parse_retry_after_ms("inf"), None);
+    }
 
     #[test]
     fn bounded_json_accepts_exact_limit_and_rejects_one_over() {

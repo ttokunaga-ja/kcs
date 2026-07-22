@@ -1,5 +1,6 @@
 //! Scan preview contracts.
 
+use std::collections::BTreeMap;
 use std::fs::File;
 #[cfg(not(windows))]
 use std::fs::Metadata;
@@ -34,9 +35,23 @@ pub struct ScanPreview {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CostPreview {
+    /// `estimated_markdownize_usd + estimated_embedding_usd` (kept as a
+    /// combined figure for existing display call sites).
     pub estimated_usd: f64,
     pub budget_cap_usd: Option<f64>,
     pub budget_warning: Option<String>,
+    /// QA19 (step4b-contract-tests-p3a.md §F, 10 §1 L48-53): `tools.toml`'s
+    /// `[markdown.*.pricing]` unit price × an estimated page count derived
+    /// from non-text-native candidate bytes. `0.0` when no `pricing` is
+    /// declared for the markdownize role — an honest "unknown" rather than a
+    /// fabricated figure.
+    #[serde(default)]
+    pub estimated_markdownize_usd: f64,
+    /// QA19: `tools.toml`'s `[embedding.*.pricing]` unit price × an estimated
+    /// token count derived from all included candidate bytes. `0.0` when no
+    /// `pricing` is declared for the embedding role.
+    #[serde(default)]
+    pub estimated_embedding_usd: f64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -76,21 +91,65 @@ pub fn build_scan_preview(request: ScanPreviewRequest) -> Result<ScanPreview> {
         &mut candidates,
     )?;
     candidates.sort_by(|a, b| a.input_path.cmp(&b.input_path));
-    let estimated_usd = candidates
-        .iter()
-        .filter(|candidate| !candidate.ignored)
-        .map(|candidate| candidate.size_bytes as f64 / 1_000_000.0 * 0.01)
-        .sum::<f64>();
+    let markdownize_pricing = kcs_adapter::tool_lock::registered_declared_pricing("markdown");
+    let embedding_pricing = kcs_adapter::tool_lock::registered_declared_pricing("embedding");
+    let (estimated_markdownize_usd, estimated_embedding_usd) =
+        estimated_enrichment_cost_usd(&candidates, &markdownize_pricing, &embedding_pricing);
     Ok(ScanPreview {
         scope_id: scope_id_from_scope_json(&scope_path).unwrap_or_else(|| "unknown".to_owned()),
         candidates,
         estimated_cost: Some(CostPreview {
-            estimated_usd,
+            estimated_usd: estimated_markdownize_usd + estimated_embedding_usd,
             budget_cap_usd: None,
             budget_warning: None,
+            estimated_markdownize_usd,
+            estimated_embedding_usd,
         }),
         approval_required: request.require_network_approval,
     })
+}
+
+/// QA19 (step4b-contract-tests-p3a.md §F, 10 §1 L48-53, 07 §4 L298-303):
+/// "コスト概算は…tools.toml の [pricing] 単価表 × 推定ページ数/トークン数から算出
+/// する桁の目安" — the declared unit price (`markdownize_pricing`/
+/// `embedding_pricing`, sourced by the caller from `kcs-adapter`'s
+/// `tool_lock::registered_declared_pricing`) times a rough page/token count
+/// derived from candidate byte sizes. Takes pricing as parameters (rather
+/// than reading the process-global registry itself) so this arithmetic is
+/// unit-testable without depending on `tool_lock`'s once-per-process
+/// registration. Deliberately independent of `kcs-cli`'s task-execution
+/// reservation heuristics (`estimate_online_markdownize_cost`/
+/// `estimate_embedding_cost`, which stay untouched — this function does not
+/// gate any spend, only a pre-approval display figure the spec itself calls
+/// "a ballpark, not a guarantee"). Returns `(markdownize_usd, embedding_usd)`;
+/// either is `0.0` when its role has no declared `pricing` — an honest
+/// "unknown", not a fabricated number.
+fn estimated_enrichment_cost_usd(
+    candidates: &[ScanCandidate],
+    markdownize_pricing: &BTreeMap<String, f64>,
+    embedding_pricing: &BTreeMap<String, f64>,
+) -> (f64, f64) {
+    // Mirrors `kcs-cli`'s `is_text_native_media` exactly (docs/04 §2: text-
+    // native files skip Markdownize/OCR and are indexed as-is).
+    const TEXT_NATIVE_MEDIA_TYPES: [&str; 3] = ["text/markdown", "text/plain", "text/x-code"];
+    // Rough, order-of-magnitude assumptions for THIS preview estimate only
+    // (10 §1's own framing — not a precision requirement).
+    const ESTIMATED_BYTES_PER_PAGE: f64 = 3_000.0;
+    const ESTIMATED_BYTES_PER_TOKEN: f64 = 4.0;
+
+    let included: Vec<&ScanCandidate> = candidates.iter().filter(|c| !c.ignored).collect();
+    let markdownize_bytes: u64 = included
+        .iter()
+        .filter(|c| !TEXT_NATIVE_MEDIA_TYPES.contains(&c.media_type.as_str()))
+        .map(|c| c.size_bytes)
+        .sum();
+    let embedding_bytes: u64 = included.iter().map(|c| c.size_bytes).sum();
+
+    let estimated_markdownize_usd = markdownize_pricing.get("pages").copied().unwrap_or(0.0)
+        * (markdownize_bytes as f64 / ESTIMATED_BYTES_PER_PAGE).ceil();
+    let estimated_embedding_usd = embedding_pricing.get("tokens_in").copied().unwrap_or(0.0)
+        * (embedding_bytes as f64 / ESTIMATED_BYTES_PER_TOKEN);
+    (estimated_markdownize_usd, estimated_embedding_usd)
 }
 
 fn collect_direct_candidates(
@@ -849,6 +908,98 @@ mod tests {
 
         let value = serde_json::to_value(candidate).expect("serialize scan candidate");
         assert_eq!(value["input_path"], "report.pdf");
+    }
+
+    // ------------------------------------------------------------------
+    // QA19 (step4b-contract-tests-p3a.md §F): preview cost estimate wired to
+    // tools.toml's declared [pricing].
+    // ------------------------------------------------------------------
+
+    fn candidate(media_type: &str, size_bytes: u64, ignored: bool) -> ScanCandidate {
+        ScanCandidate {
+            input_path: format!("f.{media_type}"),
+            media_type: media_type.to_owned(),
+            size_bytes,
+            raw_hash: None,
+            ignored,
+            quarantine_reason: None,
+        }
+    }
+
+    /// QA19: no declared pricing for either role -> both estimates are `0.0`
+    /// (an honest "unknown", the same posture `write_approval_record` had
+    /// before this fix — never a fabricated non-zero figure).
+    #[test]
+    fn qa19_no_pricing_declared_yields_zero_estimates() {
+        let candidates = vec![candidate("application/pdf", 300_000, false)];
+        let (markdownize_usd, embedding_usd) =
+            estimated_enrichment_cost_usd(&candidates, &BTreeMap::new(), &BTreeMap::new());
+        assert_eq!(markdownize_usd, 0.0);
+        assert_eq!(embedding_usd, 0.0);
+    }
+
+    /// QA19: a declared markdownize `pages` price is multiplied by the
+    /// estimated page count of non-text-native candidates only — a
+    /// text-native candidate (skips OCR entirely, docs/04 §2) contributes
+    /// bytes to the embedding estimate but NOT the markdownize one.
+    #[test]
+    fn qa19_markdownize_estimate_excludes_text_native_candidates() {
+        let mut markdownize_pricing = BTreeMap::new();
+        markdownize_pricing.insert("pages".to_owned(), 0.004);
+        let candidates = vec![
+            // 6_000 bytes / 3_000 bytes-per-page ~= 2 pages -> 2 * 0.004.
+            candidate("application/pdf", 6_000, false),
+            // Text-native: excluded from the markdownize byte sum.
+            candidate("text/plain", 1_000_000, false),
+            // Ignored: excluded from both sums.
+            candidate("application/pdf", 1_000_000, true),
+        ];
+        let (markdownize_usd, _embedding_usd) =
+            estimated_enrichment_cost_usd(&candidates, &markdownize_pricing, &BTreeMap::new());
+        assert!(
+            (markdownize_usd - 0.008).abs() < 1e-9,
+            "got {markdownize_usd}"
+        );
+    }
+
+    /// QA19: a declared embedding `tokens_in` price is multiplied by the
+    /// estimated token count of ALL included candidates (text-native
+    /// candidates DO get embedded, unlike markdownize).
+    #[test]
+    fn qa19_embedding_estimate_includes_text_native_candidates() {
+        let mut embedding_pricing = BTreeMap::new();
+        embedding_pricing.insert("tokens_in".to_owned(), 0.00000015);
+        let candidates = vec![
+            candidate("text/markdown", 4_000, false),   // 1_000 tokens
+            candidate("application/pdf", 4_000, false), // 1_000 tokens
+        ];
+        let (_markdownize_usd, embedding_usd) =
+            estimated_enrichment_cost_usd(&candidates, &BTreeMap::new(), &embedding_pricing);
+        assert!(
+            (embedding_usd - 2_000.0 * 0.00000015).abs() < 1e-12,
+            "got {embedding_usd}"
+        );
+    }
+
+    /// QA19: `build_scan_preview`'s `CostPreview.estimated_usd` is the sum of
+    /// the two split fields (a regression-lock on the combined figure's
+    /// definition, for any existing display call site that only reads it).
+    #[test]
+    fn qa19_combined_estimated_usd_is_the_sum_of_the_split_fields() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.pdf"), vec![0_u8; 100]).unwrap();
+        let preview = build_scan_preview(ScanPreviewRequest {
+            scope_path: dir.path().display().to_string(),
+            include_raw_hashes: false,
+            require_network_approval: false,
+        })
+        .unwrap();
+        let cost = preview.estimated_cost.expect("cost preview present");
+        assert!(
+            (cost.estimated_usd - (cost.estimated_markdownize_usd + cost.estimated_embedding_usd))
+                .abs()
+                < 1e-9
+        );
     }
 
     #[test]

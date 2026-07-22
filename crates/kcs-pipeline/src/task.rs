@@ -1284,6 +1284,79 @@ mod tests {
         );
     }
 
+    /// QA16 (step4b-contract-tests-p3a.md §F, 07 §4 L286-290): `AdapterError`
+    /// lives in `kcs-adapter`, which cannot depend on `kcs-pipeline`, so
+    /// `AdapterError::error_code`/`error_category` independently duplicate
+    /// this crate's `retry_policy`/`RetryErrorKind` classification instead of
+    /// deriving from it. This is the "接続" (connection) proof: every
+    /// `AdapterError` variant's `error_code()` matches the `error_code` this
+    /// crate's `retry_policy` assigns to the `RetryErrorKind`
+    /// `task_failure_from_adapter` (kcs-cli) maps it to — the two tables
+    /// cannot silently drift apart without failing this test. `error_category`
+    /// is cross-checked against `retry_policy(...).retryable`: `Permanent`
+    /// <-> non-retryable, `RateLimit`/`Transient` <-> retryable (07 §4 L287:
+    /// error_category is the coarse rollup, not an independent classifier).
+    #[test]
+    fn qa16_adapter_error_code_matches_retry_policy() {
+        use kcs_adapter::types::ErrorCategory;
+        use kcs_adapter::AdapterError;
+
+        // (AdapterError, the RetryErrorKind `task_failure_from_adapter` maps
+        // it to in crates/kcs-cli/src/main.rs).
+        let cases: &[(AdapterError, RetryErrorKind)] = &[
+            (
+                AdapterError::Auth("x".to_owned()),
+                RetryErrorKind::AuthError,
+            ),
+            (AdapterError::rate_limit("x"), RetryErrorKind::RateLimit),
+            (
+                AdapterError::QuotaExceeded("x".to_owned()),
+                RetryErrorKind::QuotaExceeded,
+            ),
+            (
+                AdapterError::Network("x".to_owned()),
+                RetryErrorKind::NetworkError,
+            ),
+            (
+                AdapterError::Io {
+                    path: "p".to_owned(),
+                    message: "m".to_owned(),
+                },
+                RetryErrorKind::NetworkError,
+            ),
+            (
+                AdapterError::ContractViolation("x".to_owned()),
+                RetryErrorKind::ContractViolation,
+            ),
+            (
+                AdapterError::ConfigSchema("x".to_owned()),
+                RetryErrorKind::ContractViolation,
+            ),
+            (
+                AdapterError::NotImplemented("x".to_owned()),
+                RetryErrorKind::InvalidInput,
+            ),
+        ];
+        for (error, retry_kind) in cases {
+            let policy = retry_policy(*retry_kind);
+            assert_eq!(
+                error.error_code(),
+                policy.error_code,
+                "{error:?} <-> {retry_kind:?}: error_code must match retry_policy's"
+            );
+            match error.error_category() {
+                ErrorCategory::Permanent => assert!(
+                    !policy.retryable,
+                    "{error:?}: Permanent must mean retry_policy says non-retryable"
+                ),
+                ErrorCategory::Transient | ErrorCategory::RateLimit => assert!(
+                    policy.retryable,
+                    "{error:?}: Transient/RateLimit must mean retry_policy says retryable"
+                ),
+            }
+        }
+    }
+
     #[test]
     fn cand_050_task_store_rejects_oversized_file_before_reading() {
         let dir = tempfile::tempdir().unwrap();
