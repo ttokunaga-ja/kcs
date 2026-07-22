@@ -1042,6 +1042,22 @@ impl PurgeState {
         if !existing_tombstones.is_empty()
             && existing_tombstones.len() == desired.target_raw_hashes.len()
         {
+            // R23-11 (05-runtime.md §3.5 L942, "検証失敗の marker は入口を
+            // 問わず (fsck・resolver・再 purge) ... corruption とする"): a
+            // re-purge that is about to short-circuit as `AlreadyComplete` --
+            // reporting success without appending anything -- must not trust
+            // each active tombstone's `purged` claim blindly. Bounded (O(1)
+            // per marker, no ref-reachability walk -- matching the resolver-
+            // weight contract, since this is a per-invocation check, not
+            // fsck's own bulk scan).
+            for record in &existing_tombstones {
+                verify_marker_binding_bounded(
+                    &self.kcs_dir,
+                    &record.raw_hash,
+                    record.tail(),
+                    &desired.started_at,
+                )?;
+            }
             return Ok(BeginOutcome::AlreadyComplete(existing_tombstones));
         }
 
@@ -1493,40 +1509,64 @@ impl PurgeState {
 }
 
 /// Reconstruct the canonical `sha256:<64hex>` raw_hash from a fanout leaf
-/// path's file name (LC's fanout leaves are named by the bare 64-hex digest).
+/// path's file name. R23-23 (03-data-model.md §2 L118-121): a leaf under a
+/// scan-walked fanout directory can be EITHER a canonical portable leaf
+/// (bare 64-hex digest, no prefix) or a legacy Unix-store leaf (the literal
+/// `sha256:<64hex>` string as its own file name — [`legacy_tombstone_path`]
+/// builds exactly this). Blindly prepending `sha256:` therefore double-
+/// prefixed every legacy leaf (`sha256:sha256:<hex>`, 71 chars — not a valid
+/// hash per [`crate::cas::is_hash`]), which made [`PurgeState::scan_all_events`]
+/// (the epoch-recovery max-scans) treat a legitimate legacy store as
+/// `KCS-E-STORE-CORRUPT-001`. Stripping an existing `sha256:` prefix first
+/// (a no-op for the canonical bare-digest case) normalizes either input to
+/// the same single-prefixed form.
 fn leaf_raw_hash(path: &Path) -> String {
-    format!(
-        "sha256:{}",
-        path.file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("")
-    )
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("");
+    let digest = name.strip_prefix("sha256:").unwrap_or(name);
+    format!("sha256:{digest}")
 }
 
 /// Enumerate every leaf file under a two-level fanout directory
 /// (`base/xx/yy/<leaf>`), tolerating a missing `base` (nothing recorded yet)
 /// or non-directory siblings (e.g. `tombstones/lifecycle-epoch`, a flat file
-/// directly under `tombstones/`, is skipped by the top-level directory check).
+/// directly under `tombstones/`, is skipped by the top-level directory
+/// check). R23-23: only `NotFound` is tolerated at every level — any other
+/// `read_dir` error (permission denied, I/O error, a path component that
+/// changed into a non-directory mid-walk) is propagated fail-closed rather
+/// than silently treated as "nothing here." A silently-skipped fanout bucket
+/// previously caused the epoch-recovery max-scans
+/// ([`PurgeState::max_recorded_purge_epoch`]/[`PurgeState::max_recorded_lifecycle_epoch`])
+/// to undercount, letting a rollback-recovery step reissue an already-used
+/// epoch value (an ABA collision) instead of surfacing the I/O failure.
 fn walk_fanout_leaves(base: &Path) -> Result<Vec<PathBuf>> {
     let mut leaves = Vec::new();
-    let Ok(top_entries) = fs::read_dir(base) else {
-        return Ok(leaves);
+    let top_entries = match fs::read_dir(base) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(leaves),
+        Err(error) => return Err(state_io(error)),
     };
     for top in top_entries {
         let top = top.map_err(state_io)?;
         if !top.file_type().map_err(state_io)?.is_dir() {
             continue;
         }
-        let Ok(mid_entries) = fs::read_dir(top.path()) else {
-            continue;
+        let mid_entries = match fs::read_dir(top.path()) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(state_io(error)),
         };
         for mid in mid_entries {
             let mid = mid.map_err(state_io)?;
             if !mid.file_type().map_err(state_io)?.is_dir() {
                 continue;
             }
-            let Ok(leaf_entries) = fs::read_dir(mid.path()) else {
-                continue;
+            let leaf_entries = match fs::read_dir(mid.path()) {
+                Ok(entries) => entries,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(state_io(error)),
             };
             for leaf in leaf_entries {
                 let leaf = leaf.map_err(state_io)?;
@@ -1537,6 +1577,140 @@ fn walk_fanout_leaves(base: &Path) -> Result<Vec<PathBuf>> {
         }
     }
     Ok(leaves)
+}
+
+/// R23-11 (05-runtime.md §3.5 L934/L942, 10-operations.md §7.5.1): the pure
+/// half of the marker "semantic validity" contract shared by every consumer
+/// that trusts a `purged`/`erased` tail event to hide content -- fsck,
+/// re-purge, and the resolver. A structurally well-formed
+/// ([`LifecycleEvent::validate_fields`]) but semantically fabricated marker
+/// (an `in_commit` that is not `commit_type=purged`, does not list this
+/// raw_hash in `purged_raws`, or whose `at` disagrees with the commit's
+/// `created_at` / is from the future) must not be trusted to hide genuine
+/// content.
+///
+/// Given an already-resolved `commit`, this performs every check that does
+/// not require a DAG walk. Full ref-reachability against the scope's refs --
+/// the remaining piece of 05 §934's contract -- is intentionally NOT here:
+/// fsck (`verify_objects.rs`) already has a bounded all-parent walk built
+/// for its own purposes and checks reachability itself, on top of this
+/// function (via its own pre-scanned commit map), rather than this crate
+/// (which deliberately has no DAG-walk machinery of its own -- see this
+/// module's top doc comment) re-deriving one. [`verify_marker_binding_bounded`]
+/// is the resolver/re-purge-weight wrapper that fetches `commit` with a
+/// single verified CAS read (no walk) and calls this.
+pub fn verify_marker_binding(
+    raw_hash: &str,
+    event: &LifecycleEvent,
+    commit: &crate::dag::CommitObject,
+    now: &str,
+) -> Result<()> {
+    if commit.commit_type != crate::dag::CommitType::Purged {
+        return Err(corrupt_state(
+            "lifecycle event in_commit commit_type is not purged",
+        ));
+    }
+    if !commit.purged_raws.iter().any(|hash| hash == raw_hash) {
+        return Err(corrupt_state(
+            "lifecycle event in_commit purged_raws does not include this raw_hash",
+        ));
+    }
+    if commit.created_at != event.at {
+        return Err(corrupt_state(
+            "lifecycle event at does not equal commit created_at",
+        ));
+    }
+    if timestamp_is_after(&event.at, now)? {
+        return Err(corrupt_state("lifecycle event at is in the future"));
+    }
+    Ok(())
+}
+
+/// R23-11: resolver/re-purge weight wrapper -- one verified CAS read of
+/// `event.in_commit` (bounded, O(1); no ref-reachability walk, see
+/// [`verify_marker_binding`]'s doc comment), then the shared checks. A
+/// no-op for `retired` (it re-affirms the marker inactive; its own
+/// `resurrection_commit` ancestry/tree-leaf check is fsck's
+/// `validate_retired_event`, gated on "tree 存置時に限り" -- not an O(1)
+/// resolver-weight check, so it is out of scope here). Callers: the
+/// resolver's `read_tombstone` wrapper (`main.rs`) and [`PurgeState::begin`]'s
+/// `AlreadyComplete` short-circuit (a re-purge target whose tombstone is
+/// already active).
+pub fn verify_marker_binding_bounded(
+    kcs_dir: &Path,
+    raw_hash: &str,
+    event: &LifecycleEvent,
+    now: &str,
+) -> Result<()> {
+    if !matches!(event.kind, EventKind::Purged | EventKind::Erased) {
+        return Ok(());
+    }
+    let object = crate::cas::ObjectStore::new(kcs_dir)
+        .read_by_hash(&event.in_commit)
+        .map_err(|_| {
+            corrupt_state("lifecycle event in_commit does not resolve to a verified commit object")
+        })?;
+    if object.kind != crate::cas::ObjectKind::Commit {
+        return Err(corrupt_state(
+            "lifecycle event in_commit does not identify a commit object",
+        ));
+    }
+    let commit: crate::dag::CommitObject = serde_json::from_slice(&object.bytes)
+        .map_err(|_| corrupt_state("lifecycle event in_commit is not a valid commit object"))?;
+    commit
+        .validate()
+        .map_err(|_| corrupt_state("lifecycle event in_commit is not a valid commit object"))?;
+    verify_marker_binding(raw_hash, event, &commit, now)
+}
+
+/// Digit-exact fractional-second "is `left` after `right`" comparison,
+/// shared with fsck's own `in_commit`/`at` semantic checks
+/// (`verify_objects.rs`'s `validate_purge_or_erase_in_commit`, which calls
+/// this as `kcs_core::purge::timestamp_is_after` instead of keeping its own
+/// copy). Naive string comparison is wrong here: `"...T00:00:00.5Z"` and
+/// `"...T00:00:00.50Z"` denote the same instant but differ as strings, and
+/// `"...T00:00:01Z"` (no fraction) sorts *before* `"...T00:00:00.999999Z"`
+/// under plain `str` `Ord` (`.` < `Z` in ASCII) even though it is later.
+/// Comparing the whole-second part numerically (via
+/// [`crate::scope::parse_utc_seconds`]) and the fractional part digit-by-
+/// digit (zero-padded on the shorter side) avoids both traps.
+pub fn timestamp_is_after(left: &str, right: &str) -> Result<bool> {
+    let (left_seconds, left_fraction) = timestamp_parts(left)?;
+    let (right_seconds, right_fraction) = timestamp_parts(right)?;
+    if left_seconds != right_seconds {
+        return Ok(left_seconds > right_seconds);
+    }
+    let width = left_fraction.len().max(right_fraction.len());
+    for index in 0..width {
+        let left_digit = left_fraction.as_bytes().get(index).copied().unwrap_or(b'0');
+        let right_digit = right_fraction
+            .as_bytes()
+            .get(index)
+            .copied()
+            .unwrap_or(b'0');
+        if left_digit != right_digit {
+            return Ok(left_digit > right_digit);
+        }
+    }
+    Ok(false)
+}
+
+fn timestamp_parts(value: &str) -> Result<(i64, &str)> {
+    let Some(body) = value.strip_suffix('Z') else {
+        return Err(corrupt_state("timestamp is not canonical UTC"));
+    };
+    let (seconds_form, fraction) = match body.split_once('.') {
+        Some((seconds, fraction))
+            if !fraction.is_empty() && fraction.bytes().all(|byte| byte.is_ascii_digit()) =>
+        {
+            (format!("{seconds}Z"), fraction)
+        }
+        Some(_) => return Err(corrupt_state("timestamp fractional seconds are invalid")),
+        None => (value.to_owned(), ""),
+    };
+    let seconds = crate::scope::parse_utc_seconds(&seconds_form)
+        .ok_or_else(|| corrupt_state("timestamp is not canonical UTC"))?;
+    Ok((seconds, fraction))
 }
 
 fn parse_counter(bytes: &[u8]) -> Option<u64> {
@@ -1722,7 +1896,11 @@ fn write_private_replace(kcs_dir: &Path, path: &Path, bytes: &[u8], max_bytes: u
         temp.sync_all().map_err(state_io)?;
         drop(temp);
         replace_file(&temp_path, path)?;
-        sync_directory(&parent);
+        // R23-07: propagate a failed parent-directory fsync instead of
+        // treating it as success -- callers (marker append, epoch-counter
+        // write, journal phase advance) must not proceed to the next phase
+        // (object deletion, journal removal) on an unconfirmed rename.
+        sync_directory(&parent).map_err(state_io)?;
         Ok(())
     })();
     if result.is_err() {
@@ -1875,12 +2053,22 @@ fn quarantine_then_unlink(path: &Path, max_bytes: u64) -> Result<()> {
         }
     }
     fs::remove_file(&quarantine).map_err(state_io)?;
-    sync_directory(parent);
+    // R23-07: an unpropagated fsync failure here previously let `finish()`
+    // (05 §3.5's `done` step: epoch bump then journal removal) and
+    // `abort_before_barrier()` report success while the journal's removal
+    // was not yet durable -- exactly the "journal 不在 × 旧 epoch" ABA
+    // window §3.5's fixed `done` ordering exists to close.
+    sync_directory(parent).map_err(state_io)?;
     Ok(())
 }
 
 /// Best-effort fail-closed recovery for a remove race. Never overwrites a path
-/// another actor published while the state file was quarantined.
+/// another actor published while the state file was quarantined. R23-07:
+/// `sync_directory` now returns a `Result`; this function's own contract
+/// (best-effort, caller already discards `result`) is unchanged, but the
+/// call itself must use `?` rather than the old bare void call so a failed
+/// fsync is at least captured in `result` (still discarded below) instead of
+/// silently type-checking as success.
 fn restore_private_no_clobber(parent: &Path, path: &Path, expected_bytes: &[u8]) {
     let Ok((temp_path, mut temp)) = create_private_temp(parent) else {
         return;
@@ -1890,7 +2078,7 @@ fn restore_private_no_clobber(parent: &Path, path: &Path, expected_bytes: &[u8])
         temp.sync_all()?;
         drop(temp);
         match fs::hard_link(&temp_path, path) {
-            Ok(()) => sync_directory(parent),
+            Ok(()) => sync_directory(parent)?,
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
             Err(error) => return Err(error),
         }
@@ -2001,10 +2189,19 @@ fn same_windows_private_file(left: &File, right: &File) -> bool {
         && right.dwFileAttributes & forbidden == 0
 }
 
-fn sync_directory(path: &Path) {
-    if let Ok(directory) = File::open(path) {
-        let _ = directory.sync_all();
-    }
+/// Fsync a directory so a prior rename/unlink within it is durable (R23-07,
+/// 05-runtime.md §3.5 L834-836 "temp 書込 → file fsync → atomic rename →
+/// 親 directory fsync" and L843-845 "journal を除去 + directory fsync").
+/// Must propagate failure to its caller: silently swallowing a failed
+/// open/fsync here let [`write_private_replace`] report success for a
+/// tombstone/erase-receipt marker append whose directory entry was never
+/// actually made durable, and let [`quarantine_then_unlink`] report success
+/// for a journal removal with the same gap — either opens exactly the
+/// "markerless absence" / "journal reappears after crash" window §3.5
+/// exists to close (LC49's ordering guarantee already depended on this
+/// being durable; only the failure path was silently discarded).
+fn sync_directory(path: &Path) -> std::io::Result<()> {
+    File::open(path)?.sync_all()
 }
 
 fn corrupt_state(message: impl Into<String>) -> KcsError {
@@ -2112,6 +2309,63 @@ mod tests {
             BeginOutcome::Started(journal) => journal,
             other => panic!("unexpected begin outcome: {other:?}"),
         }
+    }
+
+    /// R23-11 test helper: a non-purged commit object (this module's tests
+    /// otherwise never construct real `dag::CommitObject` values -- they
+    /// exercise only the marker/journal storage layer, which is
+    /// deliberately CAS/DAG-agnostic; see the module's top doc comment).
+    fn test_commit(kind: crate::dag::CommitType, created_at: &str) -> crate::dag::CommitObject {
+        crate::dag::CommitObject::new(
+            hash_bytes(b"tree"),
+            Vec::new(),
+            created_at.to_owned(),
+            "marker test".to_owned(),
+            hash_bytes(b"toollock"),
+            crate::dag::CommitStats {
+                files_added: 0,
+                files_modified: 0,
+                files_deleted: 0,
+            },
+            kind,
+        )
+        .unwrap()
+    }
+
+    /// R23-11 test helper: a `commit_type=purged` commit object naming
+    /// `purged_raws`.
+    fn test_purged_commit(created_at: &str, purged_raws: Vec<String>) -> crate::dag::CommitObject {
+        crate::dag::CommitObject::new_purged(
+            hash_bytes(b"tree"),
+            Vec::new(),
+            created_at.to_owned(),
+            "marker test".to_owned(),
+            hash_bytes(b"toollock"),
+            crate::dag::CommitStats {
+                files_added: 0,
+                files_modified: 0,
+                files_deleted: 0,
+            },
+            purged_raws,
+        )
+        .unwrap()
+    }
+
+    /// R23-11 test helper: durably write [`test_purged_commit`]'s output as a
+    /// real CAS commit object and return its hash, for exercising
+    /// [`verify_marker_binding_bounded`]'s single verified CAS read.
+    fn write_purged_commit_object(
+        kcs_dir: &Path,
+        created_at: &str,
+        raw_hashes: Vec<String>,
+    ) -> String {
+        let commit = test_purged_commit(created_at, raw_hashes);
+        let bytes = canonical_json_bytes(&serde_json::to_value(&commit).unwrap()).unwrap();
+        let hash = hash_bytes(&bytes);
+        crate::cas::ObjectStore::new(kcs_dir)
+            .write_object_bytes(crate::cas::ObjectKind::Commit, &hash, &bytes)
+            .unwrap();
+        hash
     }
 
     #[test]
@@ -2552,8 +2806,17 @@ mod tests {
 
     #[test]
     fn lc59_re_purging_a_still_active_tombstone_is_already_complete_not_a_second_purged_event() {
-        let (_dir, state) = setup();
-        let first = LifecycleEvent::purged(NOW, commit(), PurgeReason::Legal, "user", 1);
+        let (dir, state) = setup();
+        let kcs_dir = dir.path().join(".kcs");
+        // R23-11: `begin()`'s `AlreadyComplete` short-circuit now
+        // semantically validates the active tombstone's tail before
+        // trusting it, so `in_commit` must resolve to a real
+        // `commit_type=purged` commit naming this raw_hash (unlike every
+        // other test in this module, which uses the bare, unbacked
+        // `commit()`/`other_commit()` hash literals since they never reach
+        // this check).
+        let purge_commit = write_purged_commit_object(&kcs_dir, NOW, vec![raw()]);
+        let first = LifecycleEvent::purged(NOW, &purge_commit, PurgeReason::Legal, "user", 1);
         state.append_tombstone_event(&raw(), first).unwrap();
 
         // Judgment uses the tombstone's own tail (still `purged`), not a
@@ -2579,6 +2842,103 @@ mod tests {
             state.read_tombstone(&raw()).unwrap().unwrap().events.len(),
             1
         );
+    }
+
+    #[test]
+    fn r23_11_begin_already_complete_rejects_a_semantically_fabricated_tombstone() {
+        let (_dir, state) = setup();
+        // The tombstone's `in_commit` (`commit()`) is a bare hash literal
+        // that was never durably written as a CAS commit object at all —
+        // AUD-09/A-07's "structurally valid but semantically fabricated
+        // marker" scenario. Before R23-11, `begin()`'s `AlreadyComplete`
+        // short-circuit trusted the tail event's `is_active()` alone and
+        // reported success without ever checking whether `in_commit` names
+        // a real, matching `commit_type=purged` commit.
+        let first = LifecycleEvent::purged(NOW, commit(), PurgeReason::Legal, "user", 1);
+        state.append_tombstone_event(&raw(), first).unwrap();
+
+        let error = state
+            .begin(
+                vec![raw()],
+                PurgeReason::Privacy,
+                TombstoneMode::Default,
+                "user",
+                LATER,
+                2,
+                other_commit(),
+                hash_bytes(b"unused closure_hash: rejected before it would matter"),
+                purge_id(),
+            )
+            .unwrap_err();
+        assert_eq!(error.error_code(), "KCS-E-STORE-CORRUPT-001");
+    }
+
+    #[test]
+    fn r23_11_verify_marker_binding_checks_type_membership_at_and_future() {
+        let target_raw = raw();
+        let purged = test_purged_commit(NOW, vec![target_raw.clone()]);
+        let event = LifecycleEvent::purged(NOW, commit(), PurgeReason::Legal, "user", 1);
+        assert!(verify_marker_binding(&target_raw, &event, &purged, LATER).is_ok());
+
+        // Wrong commit_type: not commit_type=purged.
+        let manual = test_commit(crate::dag::CommitType::Manual, NOW);
+        assert!(verify_marker_binding(&target_raw, &event, &manual, LATER).is_err());
+
+        // purged_raws does not include this raw_hash (forged-in_commit
+        // defense — 03-data-model.md §8).
+        let unrelated_raw = hash_bytes(b"unrelated raw");
+        let other_raw_only = test_purged_commit(NOW, vec![unrelated_raw]);
+        assert!(verify_marker_binding(&target_raw, &event, &other_raw_only, LATER).is_err());
+
+        // `at` does not equal commit.created_at.
+        let mismatched_at = LifecycleEvent::purged(LATER, commit(), PurgeReason::Legal, "user", 1);
+        assert!(verify_marker_binding(&target_raw, &mismatched_at, &purged, LATER).is_err());
+
+        // `at` is in the future relative to the fixed invocation `now`.
+        assert!(
+            verify_marker_binding(&target_raw, &event, &purged, "2026-07-12T23:59:59Z").is_err()
+        );
+    }
+
+    #[test]
+    fn r23_11_verify_marker_binding_bounded_reads_cas_and_skips_retired() {
+        let (dir, _state) = setup();
+        let kcs_dir = dir.path().join(".kcs");
+        let target_raw = raw();
+        let real_commit = write_purged_commit_object(&kcs_dir, NOW, vec![target_raw.clone()]);
+
+        let valid = LifecycleEvent::purged(NOW, &real_commit, PurgeReason::Legal, "user", 1);
+        assert!(verify_marker_binding_bounded(&kcs_dir, &target_raw, &valid, LATER).is_ok());
+
+        // `in_commit` names a hash with no CAS object at all.
+        let dangling = LifecycleEvent::purged(NOW, commit(), PurgeReason::Legal, "user", 1);
+        assert_eq!(
+            verify_marker_binding_bounded(&kcs_dir, &target_raw, &dangling, LATER)
+                .unwrap_err()
+                .error_code(),
+            "KCS-E-STORE-CORRUPT-001"
+        );
+
+        // `retired` is out of scope for this bounded check (its own
+        // resurrection_commit/tree-leaf validation is fsck-only) — proven
+        // with a dangling `resurrection_commit` hash: if the kind guard did
+        // not skip the CAS read entirely, this would fail the same way
+        // `dangling` does above.
+        let retired = LifecycleEvent::retired(NOW, commit(), "user");
+        assert!(verify_marker_binding_bounded(&kcs_dir, &target_raw, &retired, LATER).is_ok());
+    }
+
+    #[test]
+    fn r23_11_timestamp_is_after_compares_fractional_seconds_numerically() {
+        // Naive string comparison would get both of these backwards: "01Z"
+        // (no fraction) vs ".999999Z" sorts '.'  < 'Z' in plain `str` `Ord`,
+        // and "0.5" vs "0.50" differ as strings despite being equal.
+        assert!(timestamp_is_after("2026-07-13T00:00:01Z", "2026-07-13T00:00:00.999999Z").unwrap());
+        assert!(
+            !timestamp_is_after("2026-07-13T00:00:00.999999Z", "2026-07-13T00:00:01Z").unwrap()
+        );
+        assert!(!timestamp_is_after("2026-07-13T00:00:00.5Z", "2026-07-13T00:00:00.50Z").unwrap());
+        assert!(timestamp_is_after("2026-07-13T00:00:00.51Z", "2026-07-13T00:00:00.50Z").unwrap());
     }
 
     #[test]
@@ -2696,5 +3056,85 @@ mod tests {
                 .error_code(),
             "KCS-E-PURGE-INCOMPLETE-001"
         );
+    }
+
+    #[test]
+    fn r23_07_sync_directory_propagates_a_failed_open() {
+        // A path that does not exist -- `File::open` fails, and unlike the
+        // pre-fix version (`if let Ok(directory) = File::open(path) { let _
+        // = directory.sync_all(); }`, which silently no-oped on either an
+        // open OR a sync failure), the failure must now surface to callers
+        // (`write_private_replace`/`quarantine_then_unlink`).
+        let (dir, _state) = setup();
+        let missing = dir.path().join("does-not-exist");
+        assert!(sync_directory(&missing).is_err());
+        // The success path is unaffected: an existing directory syncs fine.
+        assert!(sync_directory(dir.path()).is_ok());
+    }
+
+    #[test]
+    fn r23_23_leaf_raw_hash_normalizes_bare_and_legacy_prefixed_leaves() {
+        let digest = "c".repeat(64);
+        // Canonical portable leaf: bare digest, no prefix.
+        let bare = Path::new(&digest);
+        assert_eq!(leaf_raw_hash(bare), format!("sha256:{digest}"));
+
+        // Legacy Unix-store leaf: the literal `sha256:<hex>` string as the
+        // leaf's own file name (`legacy_tombstone_path` builds exactly
+        // this). Pre-R23-23, blindly prepending `sha256:` doubled this to
+        // `sha256:sha256:<hex>` (71 chars, fails `is_hash`).
+        let legacy_name = format!("sha256:{digest}");
+        let legacy = Path::new(&legacy_name);
+        assert_eq!(leaf_raw_hash(legacy), format!("sha256:{digest}"));
+    }
+
+    #[test]
+    fn r23_23_scan_all_events_reads_legacy_prefixed_leaves_without_double_prefixing() {
+        let (dir, state) = setup();
+        let kcs_dir = dir.path().join(".kcs");
+        let raw_hash = raw();
+        let digest = raw_hash.strip_prefix("sha256:").unwrap();
+        // Write directly to the LEGACY leaf path (literal "sha256:<hex>" as
+        // the leaf's own file name) -- the canonical write API
+        // (`append_tombstone_event`) only ever writes the portable
+        // bare-digest path, so a legacy-store record must be planted
+        // manually to exercise the compatibility-fallback scan this test
+        // targets.
+        let mut event = LifecycleEvent::purged(NOW, commit(), PurgeReason::Legal, "user", 7);
+        event.lifecycle_epoch = Some(9);
+        let record = TombstoneRecord {
+            raw_hash: raw_hash.clone(),
+            events: vec![event],
+        };
+        let legacy_path = kcs_dir
+            .join("tombstones")
+            .join(&digest[0..2])
+            .join(&digest[2..4])
+            .join(&raw_hash);
+        fs::create_dir_all(legacy_path.parent().unwrap()).unwrap();
+        fs::write(&legacy_path, record_bytes(&record).unwrap()).unwrap();
+
+        // Before R23-23: `leaf_raw_hash` double-prefixed this leaf's name,
+        // which fails `is_hash`, so `parse_tombstone_bytes`'s identity check
+        // rejected it and the whole scan failed closed as corrupt instead of
+        // finding this legitimate legacy record.
+        assert_eq!(state.max_recorded_lifecycle_epoch().unwrap(), 9);
+        assert_eq!(state.max_recorded_purge_epoch().unwrap(), Some(7));
+    }
+
+    #[test]
+    fn r23_23_walk_fanout_leaves_fails_closed_on_non_notfound_errors() {
+        let (dir, state) = setup();
+        let kcs_dir = dir.path().join(".kcs");
+        // `tombstones` exists but is a regular file, not a directory --
+        // `read_dir` fails with something other than `NotFound`, which must
+        // propagate (fail-closed) instead of being silently treated as
+        // "nothing recorded yet" (the pre-fix `let Ok(top_entries) =
+        // fs::read_dir(base) else { return Ok(leaves) }` pattern swallowed
+        // every error, not just `NotFound` -- an undercounted epoch-recovery
+        // max-scan can reissue an already-used epoch value).
+        fs::write(kcs_dir.join("tombstones"), b"not a directory").unwrap();
+        let error = state.max_recorded_lifecycle_epoch().unwrap_err();
+        assert_eq!(error.error_code(), "KCS-E-STORE-IO-001");
     }
 }

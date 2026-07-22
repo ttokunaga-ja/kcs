@@ -9,7 +9,7 @@ use kcs_core::cas::{
     ContentObjectKind, EmbeddingObject, EmbeddingValidationError, ObjectKind, ObjectStore,
     MAX_RAW_OBJECT_BYTES,
 };
-use kcs_core::dag::{CommitObject, CommitType, TreeObject};
+use kcs_core::dag::{CommitObject, TreeObject};
 use kcs_core::portable::portable_tag_digest64;
 use kcs_core::purge::{
     canonical_final_event, CanonicalFinalEvent, EventKind, LifecycleEvent, PurgeState,
@@ -945,11 +945,12 @@ fn verify_objects_with_limits(
         .union(&receipt_hashes)
         .cloned()
         .collect::<BTreeSet<_>>();
-    // (raw_hash, marker_kind, purge/erase event `in_commit`) queued for a
-    // `retired` append once the corresponding physical-object pass completes
-    // (LC27/LC35: verified raw + a ref-reachable, ancestor-respecting
-    // republication commit of the canonical purged/erased event).
-    let mut retirements_to_backfill = Vec::<(String, TombstoneMode, String)>::new();
+    // (raw_hash, marker_kind, republication commit hash, republication
+    // commit `created_at`) queued for a `retired` append once the
+    // corresponding physical-object pass completes (LC27/LC35: verified raw
+    // + a ref-reachable, ancestor-respecting, raw-carrying republication
+    // commit of the canonical purged/erased event -- R23-08).
+    let mut retirements_to_backfill = Vec::<(String, TombstoneMode, String, String)>::new();
     for raw_hash in marker_hashes {
         if raw_affected.contains_key(&raw_hash) {
             continue;
@@ -984,13 +985,21 @@ fn verify_objects_with_limits(
                 // an incomplete purge (exit 3), not a corruption, and is
                 // never silently "fixed" by resurrecting the tombstone.
                 if repairs_allowed && !state.exceeded_bounds {
-                    match find_republication_commit(&canonical.event.in_commit, &commits, &reachable)
-                    {
-                        Some(republication_commit) => retirements_to_backfill.push((
-                            raw_hash.clone(),
-                            canonical.marker_kind,
-                            republication_commit,
-                        )),
+                    match find_republication_commit(
+                        &raw_hash,
+                        &canonical.event.in_commit,
+                        &commits,
+                        &trees,
+                        &reachable,
+                    ) {
+                        Some((republication_commit, republication_created_at)) => {
+                            retirements_to_backfill.push((
+                                raw_hash.clone(),
+                                canonical.marker_kind,
+                                republication_commit,
+                                republication_created_at,
+                            ));
+                        }
                         None => state.finding(
                             "purge_incomplete",
                             &raw_hash,
@@ -1042,15 +1051,20 @@ fn verify_objects_with_limits(
                     EventKind::Purged | EventKind::Erased => {
                         if repairs_allowed && !state.exceeded_bounds {
                             match find_republication_commit(
+                                raw_hash,
                                 &canonical.event.in_commit,
                                 &commits,
+                                &trees,
                                 &reachable,
                             ) {
-                                Some(republication_commit) => retirements_to_backfill.push((
-                                    raw_hash.clone(),
-                                    canonical.marker_kind,
-                                    republication_commit,
-                                )),
+                                Some((republication_commit, republication_created_at)) => {
+                                    retirements_to_backfill.push((
+                                        raw_hash.clone(),
+                                        canonical.marker_kind,
+                                        republication_commit,
+                                        republication_created_at,
+                                    ));
+                                }
                                 None => state.finding(
                                     "purge_incomplete",
                                     raw_hash,
@@ -1221,14 +1235,21 @@ fn verify_objects_with_limits(
     }
     // LC27/LC35 backfill: append `retired` to whichever marker was canonical,
     // linking the republication commit found above as `resurrection_commit`.
+    // R23-08: `at` is that commit's OWN `created_at` (05-runtime.md §3.5's
+    // "その event の commit created_at と一致" requirement), never this fsck
+    // invocation's own clock -- `find_republication_commit` now returns it
+    // paired with the winning hash so this loop never has to re-derive it.
     let repair_actor = std::env::var("USER").unwrap_or_else(|_| "local-user".to_owned());
-    for (raw_hash, marker_kind, republication_commit) in retirements_to_backfill {
+    let mut any_retired = false;
+    for (raw_hash, marker_kind, republication_commit, republication_created_at) in
+        retirements_to_backfill
+    {
         let outcome = match marker_kind {
             TombstoneMode::Default => purge
                 .retire_tombstone(
                     &raw_hash,
                     &republication_commit,
-                    &invocation_time,
+                    &republication_created_at,
                     &repair_actor,
                 )
                 .map(|_| ()),
@@ -1236,18 +1257,38 @@ fn verify_objects_with_limits(
                 .retire_erase_receipt(
                     &raw_hash,
                     &republication_commit,
-                    &invocation_time,
+                    &republication_created_at,
                     &repair_actor,
                 )
                 .map(|_| ()),
         };
-        if let Err(error) = outcome {
-            let kind = match marker_kind {
-                TombstoneMode::Default => "tombstone_corrupt",
-                TombstoneMode::Erase => "erase_receipt_corrupt",
-            };
-            state.finding(kind, &raw_hash, &error.to_string(), &[]);
+        match outcome {
+            Ok(()) => any_retired = true,
+            Err(error) => {
+                let kind = match marker_kind {
+                    TombstoneMode::Default => "tombstone_corrupt",
+                    TombstoneMode::Erase => "erase_receipt_corrupt",
+                };
+                state.finding(kind, &raw_hash, &error.to_string(), &[]);
+            }
         }
+    }
+    // R23-09/R23-22 (05-runtime.md §1.5 L215-219 "tombstone lifecycle の
+    // 更新 (retire・再 purge)" is one of the six named `index_generation`
+    // rotation triggers, and §3.5 L792-799's counter-rollback recovery must
+    // run at every locked-mutation entry point that can advance the
+    // lifecycle-epoch counter): a backfilled `retired` above bumps that
+    // counter exactly like the index/reindex/purge paths' own retire events
+    // do, but fsck had no call to `recover_index_generation` at all --
+    // `index_metadata.last_lifecycle_epoch`/`index_generation` stayed stale
+    // (and any genuine counter rollback undetected) until an unrelated
+    // index-touching write happened to run. Only when `sqlite.db` already
+    // exists: fsck must not conjure a fresh, empty index for a scope that
+    // was never indexed (`recover_index_generation` has no existence guard
+    // of its own -- its other callers run only after `rebuild_step3_index`
+    // already guarantees the file is there).
+    if any_retired && sqlite_path(repo.kcs_dir()).exists() {
+        recover_index_generation(repo.kcs_dir())?;
     }
     let repaired = staged_raws.len() as u64;
     let repaired_commit_hash = if repaired > 0 && repairs_allowed && !state.exceeded_bounds {
@@ -2432,21 +2473,15 @@ fn validate_purge_or_erase_in_commit(
     let commit = commits
         .get(&event.in_commit)
         .ok_or_else(|| "lifecycle event in_commit object is missing or corrupt".to_owned())?;
-    if commit.commit_type != CommitType::Purged {
-        return Err("lifecycle event in_commit commit_type is not purged".to_owned());
-    }
-    if !commit.purged_raws.iter().any(|hash| hash == raw_hash) {
-        return Err(
-            "lifecycle event in_commit purged_raws does not include this raw_hash".to_owned(),
-        );
-    }
-    if commit.created_at != event.at {
-        return Err("lifecycle event at does not equal commit created_at".to_owned());
-    }
-    if timestamp_is_after(&event.at, invocation_time)? {
-        return Err("lifecycle event at is in the future".to_owned());
-    }
-    Ok(())
+    // R23-11: the type / purged_raws-membership / at-equality / not-future
+    // checks are the shared validator (`kcs_core::purge::verify_marker_binding`)
+    // also used by the resolver's `read_tombstone` wrapper and
+    // `PurgeState::begin`'s re-purge short-circuit — only the
+    // ref-reachability check above (this module's own bounded all-parent
+    // walk) stays local, matching that function's documented
+    // "resolver/re-purge-weight vs fsck-weight" split.
+    kcs_core::purge::verify_marker_binding(raw_hash, event, commit, invocation_time)
+        .map_err(|error| error.to_string())
 }
 
 /// LC20: terminal `retired`'s `resurrection_commit` must be ref-reachable and
@@ -2529,26 +2564,51 @@ fn is_ancestor(commits: &BTreeMap<String, CommitObject>, ancestor: &str, descend
     false
 }
 
-/// LC27/LC29/LC35/LC36: search the ref-reachable set for a commit that
-/// causally republished `raw_hash` after `purge_in_commit` — a strict
-/// descendant of it. Deterministic (lexicographically smallest hash) when
-/// more than one candidate exists; this is an existence/ancestry check only
-/// (it does not additionally re-verify that the candidate's tree still
-/// carries a live leaf for the raw_hash — a documented simplification).
+/// LC27/LC29/LC35/LC36 (R23-08): search the ref-reachable set for a commit
+/// that causally republished `raw_hash` after `purge_in_commit` — a strict
+/// descendant of it whose tree, when present, actually carries a live leaf
+/// for `raw_hash` (10-operations.md §7.5.1's "resurrection_commit の
+/// verified tree が同一 raw_hash の leaf を含むことを tree 存置時に限り
+/// 検証する" — an ancestry-only match could pick an unrelated LATER commit
+/// that never republished this raw at all, which `validate_retired_event`
+/// would then flag as corruption on the very next fsck run: this function
+/// used to be the one caller that skipped its own module's leaf check). A
+/// tree that is not present at all (shallow-discarded — an `auto`-type
+/// publication commit can lose its tree to shallow GC) does not penalize
+/// the candidate, matching `validate_retired_event`'s own carve-out.
+/// Deterministic (lexicographically smallest hash) when more than one
+/// candidate exists. Returns the candidate's own `created_at` alongside its
+/// hash — the backfilled `retired` event's `at` must be that commit's
+/// `created_at` (05-runtime.md §3.5's "その event の commit created_at と
+/// 一致"), never the fsck invocation's own clock.
 fn find_republication_commit(
+    raw_hash: &str,
     purge_in_commit: &str,
     commits: &BTreeMap<String, CommitObject>,
+    trees: &BTreeMap<String, TreeObject>,
     reachable: &BTreeSet<String>,
-) -> Option<String> {
+) -> Option<(String, String)> {
     reachable
         .iter()
         .filter(|candidate| {
             candidate.as_str() != purge_in_commit
-                && commits.contains_key(candidate.as_str())
-                && is_ancestor(commits, purge_in_commit, candidate)
+                && commits.get(candidate.as_str()).is_some_and(|commit| {
+                    is_ancestor(commits, purge_in_commit, candidate)
+                        && trees.get(&commit.tree).is_none_or(|tree| {
+                            tree.entries.iter().any(|entry| entry.raw_hash == raw_hash)
+                        })
+                })
         })
         .min()
         .cloned()
+        .map(|winner| {
+            let created_at = commits
+                .get(&winner)
+                .expect("filtered candidates are always present in `commits`")
+                .created_at
+                .clone();
+            (winner, created_at)
+        })
 }
 
 /// LC17: `dead_raws` (skips normalized/manifest/chunk verification for a
@@ -2573,45 +2633,6 @@ fn valid_dead_terminal(
         lookup.canonical.map(|canonical| canonical.event.kind),
         Some(EventKind::Purged) | Some(EventKind::Erased)
     )
-}
-
-fn timestamp_is_after(left: &str, right: &str) -> std::result::Result<bool, String> {
-    let (left_seconds, left_fraction) = timestamp_parts(left)?;
-    let (right_seconds, right_fraction) = timestamp_parts(right)?;
-    if left_seconds != right_seconds {
-        return Ok(left_seconds > right_seconds);
-    }
-    let width = left_fraction.len().max(right_fraction.len());
-    for index in 0..width {
-        let left_digit = left_fraction.as_bytes().get(index).copied().unwrap_or(b'0');
-        let right_digit = right_fraction
-            .as_bytes()
-            .get(index)
-            .copied()
-            .unwrap_or(b'0');
-        if left_digit != right_digit {
-            return Ok(left_digit > right_digit);
-        }
-    }
-    Ok(false)
-}
-
-fn timestamp_parts(value: &str) -> std::result::Result<(i64, &str), String> {
-    let Some(body) = value.strip_suffix('Z') else {
-        return Err("timestamp is not canonical UTC".to_owned());
-    };
-    let (seconds_form, fraction) = match body.split_once('.') {
-        Some((seconds, fraction))
-            if !fraction.is_empty() && fraction.bytes().all(|byte| byte.is_ascii_digit()) =>
-        {
-            (format!("{seconds}Z"), fraction)
-        }
-        Some(_) => return Err("timestamp fractional seconds are invalid".to_owned()),
-        None => (value.to_owned(), ""),
-    };
-    let seconds = kcs_core::scope::parse_utc_seconds(&seconds_form)
-        .ok_or_else(|| "timestamp is not canonical UTC".to_owned())?;
-    Ok((seconds, fraction))
 }
 
 fn collect_unit_image_references(
@@ -2697,7 +2718,7 @@ fn recover_raw(path: &Path, expected_hash: &str, remaining_bytes: u64) -> Result
 #[cfg(test)]
 mod tests {
     use super::*;
-    use kcs_core::dag::CommitStats;
+    use kcs_core::dag::{CommitStats, CommitType, TreeEntry};
 
     fn hash(byte: char) -> String {
         format!("sha256:{}", byte.to_string().repeat(64))
@@ -2745,6 +2766,143 @@ mod tests {
             "user",
             1,
         )
+    }
+
+    /// R23-08 test helper: [`commit`], parameterized on `tree`/`parents` so a
+    /// candidate republication commit's tree membership and ancestry can be
+    /// controlled independently.
+    fn commit_with_tree(
+        kind: CommitType,
+        created_at: &str,
+        tree: &str,
+        parents: Vec<String>,
+    ) -> CommitObject {
+        CommitObject::new(
+            tree.to_owned(),
+            parents,
+            created_at.to_owned(),
+            "marker test".to_owned(),
+            hash('b'),
+            CommitStats {
+                files_added: 0,
+                files_modified: 0,
+                files_deleted: 0,
+            },
+            kind,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn r23_08_find_republication_commit_requires_a_raw_leaf_and_returns_created_at() {
+        let purge_commit_hash = hash('c');
+        let target_raw = hash('9');
+        let other_raw = hash('8');
+        let purge_created_at = "2026-07-13T00:00:00Z";
+        let commits_only_purge = BTreeMap::from([(
+            purge_commit_hash.clone(),
+            purged_commit(purge_created_at, vec![target_raw.clone()]),
+        )]);
+
+        // A candidate that is ref-reachable and a strict descendant of the
+        // purge commit, but whose tree does NOT carry a leaf for the target
+        // raw_hash, must be rejected -- ancestry alone is not enough (it
+        // could be an unrelated later commit that never republished this
+        // raw at all).
+        let bad_candidate_hash = hash('d');
+        let bad_tree_hash = hash('e');
+        let mut commits = commits_only_purge.clone();
+        commits.insert(
+            bad_candidate_hash.clone(),
+            commit_with_tree(
+                CommitType::Auto,
+                "2026-07-14T00:00:00Z",
+                &bad_tree_hash,
+                vec![purge_commit_hash.clone()],
+            ),
+        );
+        let trees = BTreeMap::from([(
+            bad_tree_hash.clone(),
+            TreeObject {
+                entries: vec![TreeEntry::raw_file("unrelated.txt", other_raw.clone()).unwrap()],
+                object_type: "tree".to_owned(),
+            },
+        )]);
+        let reachable = BTreeSet::from([purge_commit_hash.clone(), bad_candidate_hash.clone()]);
+        assert!(find_republication_commit(
+            &target_raw,
+            &purge_commit_hash,
+            &commits,
+            &trees,
+            &reachable,
+        )
+        .is_none());
+
+        // A candidate whose tree DOES carry the leaf is accepted, and its
+        // OWN `created_at` -- not the caller's invocation time -- is
+        // returned alongside its hash (R23-08).
+        let good_candidate_hash = hash('f');
+        let good_tree_hash = hash('0');
+        let good_created_at = "2026-07-15T00:00:00Z";
+        commits.insert(
+            good_candidate_hash.clone(),
+            commit_with_tree(
+                CommitType::Auto,
+                good_created_at,
+                &good_tree_hash,
+                vec![purge_commit_hash.clone()],
+            ),
+        );
+        let mut trees_with_good = trees.clone();
+        trees_with_good.insert(
+            good_tree_hash.clone(),
+            TreeObject {
+                entries: vec![TreeEntry::raw_file("resurrected.txt", target_raw.clone()).unwrap()],
+                object_type: "tree".to_owned(),
+            },
+        );
+        let reachable_both = BTreeSet::from([
+            purge_commit_hash.clone(),
+            bad_candidate_hash.clone(),
+            good_candidate_hash.clone(),
+        ]);
+        let (winner, winner_created_at) = find_republication_commit(
+            &target_raw,
+            &purge_commit_hash,
+            &commits,
+            &trees_with_good,
+            &reachable_both,
+        )
+        .expect("a valid resurrection candidate exists");
+        assert_eq!(winner, good_candidate_hash);
+        assert_eq!(winner_created_at, good_created_at);
+
+        // A candidate whose tree is absent (shallow-discarded) is not
+        // penalized -- "tree 存置時に限り検証する" (05-runtime.md §3.5 /
+        // 10-operations.md §7.5.1).
+        let shallow_candidate_hash = hash('1');
+        let shallow_tree_hash = hash('2');
+        let mut commits_shallow = commits_only_purge.clone();
+        commits_shallow.insert(
+            shallow_candidate_hash.clone(),
+            commit_with_tree(
+                CommitType::Auto,
+                "2026-07-16T00:00:00Z",
+                &shallow_tree_hash,
+                vec![purge_commit_hash.clone()],
+            ),
+        );
+        let reachable_shallow =
+            BTreeSet::from([purge_commit_hash.clone(), shallow_candidate_hash.clone()]);
+        let (winner, _) = find_republication_commit(
+            &target_raw,
+            &purge_commit_hash,
+            &commits_shallow,
+            &BTreeMap::new(), // no trees inventoried -- shallow
+            &reachable_shallow,
+        )
+        .expect("a shallow-tree candidate is still accepted (tree absent skips the leaf check)");
+        assert_eq!(winner, shallow_candidate_hash);
     }
 
     #[test]

@@ -1358,6 +1358,25 @@ impl Repository {
     /// behavior (QB53's non-breaking regression requirement) — first-parent
     /// walk from HEAD, truncating (not failing) on a missing ancestor.
     pub fn log_from(&self, start: Option<String>) -> Result<LogReport> {
+        self.log_from_with_limit(start, crate::history::DEFAULT_MAX_HISTORY_COMMITS)
+    }
+
+    /// [`Self::log_from`]'s implementation, parameterized on the
+    /// first-parent walk's aggregate commit-count cap (R23-29,
+    /// 05-runtime.md §1.6 L304-313) so tests can exercise the exact
+    /// boundary without materializing `DEFAULT_MAX_HISTORY_COMMITS`
+    /// (100,000) real commits. Shares `history::DEFAULT_MAX_HISTORY_COMMITS`
+    /// with the `HistoryReader`-based all-parent/first-parent walks
+    /// (`crate::history`) so the bound is exact and identically sized
+    /// everywhere it is named, not a locally re-guessed constant. Unlike
+    /// those walks, this one never reads tree objects at all -- only commit
+    /// objects -- so the aggregate bound's other two components (tree
+    /// entries / verified bytes) do not independently apply: a commit
+    /// object holds only metadata (tree hash, parents, timestamp, message,
+    /// stats), so reaching the 4 GiB byte bound from `commits.len()` commit
+    /// objects alone would require an implausible ~40 KiB average commit
+    /// size -- the commit-count cap below always fires first.
+    fn log_from_with_limit(&self, start: Option<String>, max_commits: u64) -> Result<LogReport> {
         self.validate()?;
         let mut entries = Vec::new();
         let mut next = match start {
@@ -1365,7 +1384,21 @@ impl Repository {
             None => self.head_commit_hash()?,
         };
         let mut truncated = false;
+        let mut commit_count: u64 = 0;
         while let Some(hash) = next {
+            commit_count += 1;
+            if commit_count > max_commits {
+                return Err(KcsError::new(
+                    "KCS-E-COMMIT-HISTORY-LIMIT-001",
+                    "history walk aggregate limit exceeded",
+                    json!({
+                        "exceeded": "commits",
+                        "attempted": commit_count,
+                        "max_commits": max_commits,
+                    }),
+                    ExitCode::PermanentFailure,
+                ));
+            }
             // R16-1: a missing ancestor commit object (shallow / external corruption)
             // truncates the history at that point instead of bricking the whole `log`
             // on a raw KCS-E-STORE-NOT-FOUND-001. The healthy prefix from HEAD is
@@ -3789,22 +3822,38 @@ pub fn format_utc_seconds(secs: i64) -> String {
     format_unix_seconds(secs)
 }
 
-/// Parse an RFC3339 UTC-seconds timestamp (`YYYY-MM-DDTHH:MM:SSZ`, the shape
-/// produced by [`now_utc_seconds`]) into Unix seconds. Returns `None` when the
-/// input does not match that fixed-width shape. Used to schedule retry backoff
-/// deadlines relative to the current (possibly `KCS_FIXED_NOW`) time.
+/// Parse an RFC3339 UTC timestamp (`YYYY-MM-DDTHH:MM:SSZ`, the shape produced
+/// by [`now_utc_seconds`], or `YYYY-MM-DDTHH:MM:SS.<digits>Z` with an
+/// optional fractional-seconds suffix -- `docs/06-cli-spec.md` §12's other
+/// persisted-timestamp shape, e.g. commit `created_at`) into Unix seconds.
+/// Returns `None` when the input matches neither shape. Sub-second digits are
+/// validated but discarded: this function's return unit is whole seconds
+/// (unchanged by R23-16 -- only the accepted input shape widened).
 #[must_use]
 pub fn parse_utc_seconds(value: &str) -> Option<i64> {
     let bytes = value.as_bytes();
-    if bytes.len() != 20
+    if bytes.len() < 20
         || bytes[4] != b'-'
         || bytes[7] != b'-'
         || bytes[10] != b'T'
         || bytes[13] != b':'
         || bytes[16] != b':'
-        || bytes[19] != b'Z'
+        || bytes[bytes.len() - 1] != b'Z'
     {
         return None;
+    }
+    // R23-16 (06 §12 L513, "正: 2026-04-25T12:00:00.123456Z"): byte 19 is
+    // either the terminating `Z` (the original fixed 20-byte shape, already
+    // confirmed by the trailing-byte check above) or the start of `.` + >=1
+    // ASCII digit + the same trailing `Z`. A parser that rejected the
+    // fractional shape outright silently dropped every persisted timestamp
+    // that happened to carry sub-second precision (e.g. `--since` filtering
+    // commit `created_at`).
+    if bytes.len() > 20 {
+        let digits = &bytes[20..bytes.len() - 1];
+        if bytes[19] != b'.' || digits.is_empty() || !digits.iter().all(u8::is_ascii_digit) {
+            return None;
+        }
     }
     let field = |start: usize, end: usize| value.get(start..end)?.parse::<i64>().ok();
     let year = field(0, 4)?;
@@ -3982,6 +4031,33 @@ mod tests {
         assert_eq!(parse_utc_seconds("2026-07-03T00:00:00"), None);
         assert_eq!(parse_utc_seconds("2026-13-03T00:00:00Z"), None);
         assert_eq!(parse_utc_seconds("not-a-timestamp"), None);
+    }
+
+    /// R23-16 (06 §12 L513): a fractional-seconds suffix is a valid persisted
+    /// timestamp shape ("正: 2026-04-25T12:00:00.123456Z") that the parser
+    /// used to reject outright (exact 20-byte match only) -- silently
+    /// excluding any record whose `created_at` carried sub-second precision
+    /// from callers like `kcs log --since`.
+    #[test]
+    fn r23_16_parse_utc_seconds_accepts_fractional_suffix() {
+        let whole = parse_utc_seconds("2026-07-03T00:00:00Z").unwrap();
+        // Sub-second digits parse to the SAME whole-second value regardless of
+        // digit count -- the return unit stays whole seconds.
+        assert_eq!(
+            parse_utc_seconds("2026-07-03T00:00:00.123456Z"),
+            Some(whole)
+        );
+        assert_eq!(parse_utc_seconds("2026-07-03T00:00:00.1Z"), Some(whole));
+        assert_eq!(
+            parse_utc_seconds("2026-07-03T00:00:00.000000001Z"),
+            Some(whole)
+        );
+        // Still rejects shapes that only superficially resemble the
+        // fractional form.
+        assert_eq!(parse_utc_seconds("2026-07-03T00:00:00.Z"), None); // no digits
+        assert_eq!(parse_utc_seconds("2026-07-03T00:00:00.123456"), None); // no trailing Z
+        assert_eq!(parse_utc_seconds("2026-07-03T00:00:00.12x456Z"), None); // non-digit
+        assert_eq!(parse_utc_seconds("2026-07-03T00:00:00,123456Z"), None); // wrong separator
     }
 
     // R13-3: a live log whose last-written day differs from "today" is rotated to
@@ -4748,5 +4824,38 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["keep.txt"]
         );
+    }
+
+    #[test]
+    fn r23_29_log_from_stops_before_exceeding_the_first_parent_commit_cap() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = Repository::init(dir.path()).unwrap();
+        for index in 0..4 {
+            fs::write(dir.path().join("file.txt"), format!("v{index}")).unwrap();
+            repo.snapshot(Some(&format!("commit {index}")), None)
+                .unwrap();
+        }
+
+        let report = repo.log_from_with_limit(None, 1_000).unwrap();
+        assert!(!report.truncated);
+        let total = report.entries.len() as u64;
+        assert!(total >= 4);
+
+        // One below the actual first-parent chain length: R23-29 stops
+        // BEFORE crossing (05-runtime.md §1.6 L313's "次の object/entry で
+        // 1 つでも超える前に停止する"), never returning a partial log.
+        let error = repo.log_from_with_limit(None, total - 1).unwrap_err();
+        assert_eq!(error.error_code(), "KCS-E-COMMIT-HISTORY-LIMIT-001");
+        assert_eq!(error.context()["exceeded"], json!("commits"));
+
+        // Exactly at the true chain length still succeeds.
+        let exact = repo.log_from_with_limit(None, total).unwrap();
+        assert_eq!(exact.entries.len() as u64, total);
+        assert!(!exact.truncated);
+
+        // The public `log_from`/`log` entry points thread the real default
+        // (100,000 -- `history::DEFAULT_MAX_HISTORY_COMMITS`), confirmed not
+        // to trip for this tiny chain.
+        assert!(!repo.log().unwrap().truncated);
     }
 }

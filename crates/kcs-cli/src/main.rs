@@ -55,7 +55,7 @@ use kcs_core::{ExitCode, KcsError, Result};
 use kcs_index::chunking::{
     chunk_normalized_instance, ChunkingConfig, ChunkingInput, NormalizedUnitInput,
 };
-use kcs_index::embedding_store::{self, f32_to_le_bytes};
+use kcs_index::embedding_store::{self, f32_from_le_bytes, f32_to_le_bytes};
 use kcs_index::fts::{FtsSchemaConfig, FtsTokenizer, SqliteFtsIndex, CHUNK_VEC_DIMENSIONS};
 use kcs_index::registry::{RegistryDb, RegistryEntry};
 use kcs_index::{
@@ -1412,13 +1412,23 @@ fn resolve_search_mode(
     // (05 §1.2), including offline/unauthorized — only auto/`--hybrid` treat
     // those two as immune to escalation.
     let vector_unavailable_error = || {
+        // R23-14(a) (05 §1.8 L425 / 06 §7 L330 "INCOMPAT → exit 8"): an
+        // incompatible embedding profile is `IncompatibleProfile` (8) even
+        // through this shared hard-error envelope -- every other cause here
+        // (UNAVAIL / UNAUTHORIZED reached via `fail_behavior = "error"`)
+        // keeps the generic exit 1.
+        let exit = if error_code.as_deref() == Some("KCS-E-SEARCH-VEC-INCOMPAT-001") {
+            ExitCode::IncompatibleProfile
+        } else {
+            ExitCode::Failure
+        };
         KcsError::new(
             error_code
                 .as_deref()
                 .unwrap_or("KCS-E-SEARCH-VEC-UNAVAIL-001"),
             "vector search requested but no compatible embedding index is available",
             json!({ "fallback_reason": reason }),
-            ExitCode::Failure,
+            exit,
         )
     };
     match requested {
@@ -1563,7 +1573,13 @@ struct ExpandedCandidate<'a> {
 
 struct SearchedScopeInfo {
     scope_id: String,
+    /// R23-20 (03 §4 L296): the canonical `.kcs` directory — the value
+    /// relayed into `searched_scopes[].scope_path` (display/hint only).
     scope_path: PathBuf,
+    /// The scope's filesystem root (parent of `scope_path`), kept separately
+    /// for functional use (`Repository::open`, `compute_index_status`) now
+    /// that `scope_path` itself is the `.kcs` directory, not its parent.
+    repo_root: PathBuf,
     snapshot_at: String,
     max_rowid: u64,
     max_association_rowid: u64,
@@ -1648,7 +1664,31 @@ fn run_search_inner(args: UnsupportedArgs, started: Instant) -> Result<Value> {
     };
     let (scope_mode, exec_scopes, cursor_excluded) = match &decoded_cursor {
         Some(cursor) => {
-            let (exec, excluded) = resolve_cursor_exec_scopes(cursor)?;
+            // R23-25 (05 §1.8 L425 / 06 §7 L361 "DUP → exit 3"): a live
+            // registry scope_id duplicate discovered while re-resolving a
+            // frozen cursor scope (`resolve_cursor_exec_scopes` ->
+            // `resolve_scope_id_in_registry`) is retryable (dedupe, then
+            // retry) -- the same search-domain classification §1.8's
+            // homogeneous-reason promotion and the multi-scope aggregation
+            // below give it. The SHARED `registry_duplicate_error`
+            // constructor keeps its own `PermanentFailure` (4) default for
+            // its other callers (open/view/restore's Evidence resolution,
+            // the write-path `registry_duplicate_guard` preflight -- both
+            // already exit 4 by design, per their own tests), so the
+            // remapping happens only here, at this search-specific call
+            // site, not in the constructor itself.
+            let (exec, excluded) = match resolve_cursor_exec_scopes(cursor) {
+                Ok(pair) => pair,
+                Err(error) if error.error_code() == "KCS-E-REGISTRY-DUP-001" => {
+                    return Err(KcsError::new(
+                        error.error_code().to_owned(),
+                        error.message().to_owned(),
+                        error.context().clone(),
+                        ExitCode::PartialFailure,
+                    ));
+                }
+                Err(error) => return Err(error),
+            };
             // O1(a): a cursor must not bypass the caller's --scope/--descendants
             // restriction. Compute the scopes this invocation is allowed to reach
             // and intersect the cursor's frozen scope set with it; a cursor scope
@@ -1694,7 +1734,38 @@ fn run_search_inner(args: UnsupportedArgs, started: Instant) -> Result<Value> {
                     from_cursor: false,
                 })
                 .collect::<Vec<_>>();
-            (scope_mode, exec, Vec::new())
+            // R23-27 (10 §3 L284-299): report the scope_id groups
+            // `registry_all_targets` fail-closed out of the enumeration
+            // above, so a live clone pair is surfaced (excluded_scopes,
+            // reason=registry_duplicate, KCS-E-REGISTRY-DUP-001) instead of
+            // silently vanishing from the response. `--scope`/`--descendants`
+            // restrict enumeration by path, which this device-wide duplicate
+            // listing does not filter by — attaching it there would report
+            // an unrelated duplicate as if this search had tried to reach
+            // it, so it is scoped to the unrestricted default enumeration
+            // (registry open failure best-effort: `Ok(None)` is already
+            // reflected in `enumerate_scope_targets`'s own P6 fallback
+            // above, so this simply adds nothing in that case).
+            let dup_excluded = if parsed.scope.is_none() && !parsed.descendants {
+                registry_duplicate_groups()?
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|(scope_id, candidates)| {
+                        json!({
+                            "scope_id": scope_id,
+                            "scope_path": Value::Null,
+                            "reason": "registry_duplicate",
+                            "candidates": candidates
+                                .iter()
+                                .map(|path| path.display().to_string())
+                                .collect::<Vec<_>>(),
+                        })
+                    })
+                    .collect::<Vec<_>>()
+            } else {
+                Vec::new()
+            };
+            (scope_mode, exec, dup_excluded)
         }
     };
 
@@ -1762,8 +1833,8 @@ fn run_search_inner(args: UnsupportedArgs, started: Instant) -> Result<Value> {
     // vector inputs need this. Display fields keep the caller's original `query`.
     let query_nfc = parsed.query.nfc().collect::<String>();
     // 04 §5.4 §H (CL48-55): only a FRESH page 1 (no cursor) writes the device
-    // query-embedding row — a cursor replay (page 2+) keeps the pre-existing,
-    // unmetered `compute_query_embedding` path unchanged.
+    // query-embedding row. R23-01 (05 §1.5 L234): a cursor replay (page 2+)
+    // no longer computes a query embedding at all — see the `else` arm below.
     let mut vector_unavailable_reason = "query_embedding_unavailable";
     let mut post_attempt_unauthorized = false;
     let query_embedding = if uses_vectors {
@@ -1800,7 +1871,22 @@ fn run_search_inner(args: UnsupportedArgs, started: Instant) -> Result<Value> {
                 None => None,
             }
         } else {
-            compute_query_embedding(&query_nfc)?
+            // R23-01 (05 §1.5 L234 "vector / hybrid の replay は page 1 の
+            // query vector を再利用する — query の再 embedding は行わない"):
+            // reuse page 1's vector via its device-local cache, verified by
+            // the cursor's own signed `query_vector_digest`. This branch is
+            // reachable only when `decoded_cursor.is_some()` (the
+            // `if decoded_cursor.is_none()` arm above took the page-1 path
+            // otherwise). No code path from here can reach
+            // `run_embedding_adapter`/`compute_query_embedding` — replay
+            // NEVER re-sends the query, regardless of provider
+            // non-determinism or cache staleness (both fail closed to
+            // `KCS-E-SEARCH-CURSOR-001`, never a silent resend).
+            let digest = decoded_cursor
+                .as_ref()
+                .and_then(|cursor| cursor.query_vector_digest.as_deref())
+                .ok_or_else(cursor_query_vector_error)?;
+            Some(replay_query_vector(digest)?)
         }
     } else {
         None
@@ -1824,6 +1910,15 @@ fn run_search_inner(args: UnsupportedArgs, started: Instant) -> Result<Value> {
     // `query_embedding`'s own condition exactly. `None` in text mode omits
     // the cursor/query_hash field entirely (PC27).
     let query_vector_digest = query_embedding.as_deref().map(query_vector_digest_hex);
+    // R23-01: seed the replay cache on a FRESH page 1 that actually obtained
+    // a vector (a replay's own vector is already cached from ITS page 1 —
+    // re-writing the identical bytes under the identical digest-derived path
+    // is harmless but pointless). Best-effort (see `persist_query_vector_cache`).
+    if decoded_cursor.is_none() {
+        if let (Some(vector), Some(digest)) = (&query_embedding, &query_vector_digest) {
+            persist_query_vector_cache(digest, vector);
+        }
+    }
 
     // N8: the short-query short-circuit is NOT taken here — it must run after scope
     // resolution, the all-failed check, and index_status aggregation below, or a
@@ -1833,7 +1928,33 @@ fn run_search_inner(args: UnsupportedArgs, started: Instant) -> Result<Value> {
         // Cursor replay where no frozen scope resolves any more → all failed
         // (exit 4) with the unresolvable scopes disclosed. Fresh search with an
         // empty registry keeps the guidance message.
+        //
+        // R23-27: a fresh (non-cursor) search whose only registered scope_id(s)
+        // were ALL fail-closed as live registry duplicates at enumeration
+        // (`registry_all_targets`'s dedup, above) also lands here with 0
+        // executable scopes — the per-scope execution loop and its
+        // `searched.is_empty()` homogeneous-promotion aggregation below never
+        // run in that case (nothing to iterate), so the SAME
+        // code-preservation promotion is inlined here. `cursor_excluded` is
+        // this match's third tuple element regardless of which arm produced
+        // it (misnamed for the fresh-search case, which populates it with
+        // ONLY `registry_duplicate` entries or leaves it empty — never a
+        // mix), so this check is unambiguous for both origins: an actual
+        // cursor whose EVERY frozen scope also happens to be a live
+        // duplicate is equally entitled to the canonical code.
         if !cursor_excluded.is_empty() {
+            let all_registry_duplicate = cursor_excluded.iter().all(|entry| {
+                entry.get("reason").and_then(Value::as_str) == Some("registry_duplicate")
+            });
+            if all_registry_duplicate {
+                return Err(KcsError::new(
+                    "KCS-E-REGISTRY-DUP-001",
+                    "every searched scope's scope_id is a live registry duplicate; dedupe \
+                     before retrying",
+                    json!({ "excluded_scopes": cursor_excluded }),
+                    ExitCode::PartialFailure,
+                ));
+            }
             return Err(scope_all_failed_error(
                 "no scope in the cursor is resolvable any more; re-run the search without a cursor",
                 cursor_excluded,
@@ -1909,6 +2030,9 @@ fn run_search_inner(args: UnsupportedArgs, started: Instant) -> Result<Value> {
     // excluded (reason "unreachable") before per-scope execution starts.
     let mut excluded = cursor_excluded;
     let mut candidates = Vec::<ScoredCandidate>::new();
+    // R23-12: (scope_index, position in `searched`, checkpoint) per completed
+    // scope — consumed by the response-time barrier recheck below.
+    let mut late_barriers = Vec::<(usize, usize, ReadBarrierCheckpoint)>::new();
 
     let scope_executions =
         multi_scope::run_ordered(exec_scopes.len(), multi_scope_settings, |idx, deadline| {
@@ -1941,7 +2065,11 @@ fn run_search_inner(args: UnsupportedArgs, started: Instant) -> Result<Value> {
             Ok(outcome) => {
                 searched.push(SearchedScopeInfo {
                     scope_id: exec.target.scope_id.clone(),
-                    scope_path: exec.target.repo_root.clone(),
+                    // R23-20 (03 §4 L296): canonical `.kcs` path, matching
+                    // `searched_scopes[].scope_path`'s documented example
+                    // value (05 §1.7/§1.8, "/Users/foo/Research/.kcs").
+                    scope_path: exec.target.kcs_dir.clone(),
+                    repo_root: exec.target.repo_root.clone(),
                     snapshot_at: outcome.snapshot_commit.clone(),
                     max_rowid: outcome.max_rowid,
                     max_association_rowid: outcome.max_association_rowid,
@@ -1949,6 +2077,7 @@ fn run_search_inner(args: UnsupportedArgs, started: Instant) -> Result<Value> {
                     index_generation: outcome.index_generation.clone(),
                     shallow_skipped: outcome.shallow_skipped,
                 });
+                late_barriers.push((idx, searched.len() - 1, outcome.checkpoint));
                 candidates.extend(outcome.candidates);
             }
             Err(ScopeSearchError::Shallow) => {
@@ -1981,7 +2110,10 @@ fn run_search_inner(args: UnsupportedArgs, started: Instant) -> Result<Value> {
                 // skipped) is still agent-detectable.
                 let mut entry = json!({
                     "scope_id": exec.target.scope_id,
-                    "scope_path": exec.target.repo_root,
+                    // R23-20 (03 §4 L296): canonical `.kcs` path, matching
+                    // `excluded_scopes[].scope_path`'s documented example
+                    // value (05 §1.8, "/Volumes/ext/Research/.kcs").
+                    "scope_path": exec.target.kcs_dir,
                     "reason": reason,
                 });
                 if let Some(hint) = store_corruption_recovery_hint(&reason) {
@@ -2006,7 +2138,8 @@ fn run_search_inner(args: UnsupportedArgs, started: Instant) -> Result<Value> {
                     // R18-4: same per-entry recovery hint as the Excluded arm above.
                     let mut entry = json!({
                         "scope_id": exec.target.scope_id,
-                        "scope_path": exec.target.repo_root,
+                        // R23-20 (03 §4 L296): canonical `.kcs` path.
+                        "scope_path": exec.target.kcs_dir,
                         "reason": "store_corrupt",
                     });
                     if let Some(hint) = store_corruption_recovery_hint("store_corrupt") {
@@ -2089,47 +2222,79 @@ fn run_search_inner(args: UnsupportedArgs, started: Instant) -> Result<Value> {
                 ExitCode::PartialFailure,
             ));
         }
-        // P10: every enumerated scope is mid-reindex (HEAD advanced, rebuilt sqlite
-        // not yet swapped in). This is transient — the complete result set returns
-        // on retry once the atomic rename lands — so surface the honest
-        // KCS-E-INDEX-REBUILDING-001 (docs/05:564) with the retryable exit 3
-        // (05 §6, as KCS-E-STORE-LOCKED-001 does), never a false permanent
-        // all-failed or a silent empty page.
-        let all_rebuilding = !excluded.is_empty()
+        // R23-27 (10 §3 L284-299 priority (2) / 06 §7 L361 "DUP → exit 3"):
+        // every enumerated scope was excluded because its scope_id is a live
+        // registry duplicate (`registry_all_targets`'s own dedup below, or a
+        // cursor-replay scope that became ambiguous — R23-25 above). Checked
+        // ahead of (3) index availability, matching 10 §3's documented
+        // preflight priority (VERSION → journal → DUP → REBUILDING).
+        let all_registry_duplicate = !excluded.is_empty()
             && excluded.iter().all(|entry| {
-                entry.get("reason").and_then(Value::as_str) == Some(INDEX_REBUILDING_REASON)
+                entry.get("reason").and_then(Value::as_str) == Some("registry_duplicate")
             });
-        if all_rebuilding {
+        if all_registry_duplicate {
             return Err(KcsError::new(
-                "KCS-E-INDEX-REBUILDING-001",
-                "the search index is being rebuilt (reindex in progress); retry the search",
+                "KCS-E-REGISTRY-DUP-001",
+                "every searched scope's scope_id is a live registry duplicate; dedupe before \
+                 retrying",
                 json!({ "excluded_scopes": excluded }),
                 ExitCode::PartialFailure,
             ));
         }
-        // Every enumerated scope was excluded. When every exclusion reason is
-        // "the scope's sqlite.db is unusable" (missing/corrupt), BOTH backends
-        // are structurally gone — text and vector live in the same index file —
-        // which is CT3-HYBRID-003's "両方不可": KCS-E-SEARCH-VEC-UNAVAIL-001,
-        // exit 1 (05 §1.1). Any other reason (unreachable / not_indexed / stale /
-        // timeout) keeps the multi-scope all-failed contract:
-        // KCS-E-SEARCH-SCOPE-ALL-FAILED-001, exit 4 (05 §1.8 / CT3-MULTI-005(b)).
-        let index_unusable = !excluded.is_empty()
+        // P10: every enumerated scope is mid-reindex (HEAD advanced, rebuilt sqlite
+        // not yet swapped in), OR its sqlite.db is missing/unusable (R23-14(b), 06
+        // §7 L345-346: "sqlite.db 不在・利用不能 ... 全経路(verify/open/view/restore/
+        // search) ... KCS-E-INDEX-REBUILDING-001・exit 3" — both are "the index
+        // needs (re)building, retry" and share ONE promotion. A missing/corrupt
+        // sqlite.db used to earn its own permanent-looking
+        // KCS-E-SEARCH-VEC-UNAVAIL-001/exit 1 below (removed — text and vector
+        // both live in that one file, so losing it is never actually a
+        // "vector-only" unavailability, and it is exactly as recoverable as a
+        // mid-rebuild window). This is transient — the complete result set
+        // returns on retry once the atomic rename lands, or once `kcs repair
+        // --rebuild-db` runs — so surface the honest KCS-E-INDEX-REBUILDING-001
+        // (docs/05:564) with the retryable exit 3 (05 §6, as
+        // KCS-E-STORE-LOCKED-001 does), never a false permanent all-failed or a
+        // silent empty page.
+        let all_rebuilding = !excluded.is_empty()
             && excluded.iter().all(|entry| {
                 matches!(
                     entry.get("reason").and_then(Value::as_str),
-                    Some("index_missing") | Some("index_corrupt")
+                    Some(INDEX_REBUILDING_REASON) | Some("index_missing") | Some("index_corrupt")
                 )
             });
-        if index_unusable {
-            // R20-8: attach a top-level `context.recovery` (not only the per-entry hints),
-            // so the exit-1 index-unusable response is structurally consistent with the
-            // store-corruption aggregate below.
+        if all_rebuilding {
             return Err(KcsError::new(
-                "KCS-E-SEARCH-VEC-UNAVAIL-001",
-                "text and vector search are both unavailable: the search index (sqlite.db) is missing or corrupt in every scope; run `kcs repair --rebuild-db`",
-                json!({ "excluded_scopes": excluded, "recovery": aggregate_store_recovery_hints(&excluded) }),
-                ExitCode::Failure,
+                "KCS-E-INDEX-REBUILDING-001",
+                "the search index (sqlite.db) is missing, unusable, or being rebuilt in every \
+                 searched scope; retry, or run `kcs repair --rebuild-db` if the problem persists",
+                json!({
+                    "excluded_scopes": excluded,
+                    "recovery": aggregate_store_recovery_hints(&excluded),
+                }),
+                ExitCode::PartialFailure,
+            ));
+        }
+        // R23-15 (06 §8 L403 "単独操作 exit 4" / 05 §1.6 L307-310): every
+        // enumerated scope hit the bounded history-walk aggregate cap
+        // (`--all-history`/`--since`, `history_plan_error`'s non-cursor
+        // `Excluded("history_limit_exceeded")` arm) — promote to the
+        // canonical KCS-E-COMMIT-HISTORY-LIMIT-001 at its own single-
+        // operation exit (4, PermanentFailure) instead of losing the code
+        // identity to the generic SCOPE-ALL-FAILED-001 the final PC57
+        // fallback below would otherwise assign it (same exit either way,
+        // since this reason is not retryable — re-running the identical
+        // query cannot shrink the walk — but the CODE must survive).
+        let all_history_limit_exceeded = !excluded.is_empty()
+            && excluded.iter().all(|entry| {
+                entry.get("reason").and_then(Value::as_str) == Some("history_limit_exceeded")
+            });
+        if all_history_limit_exceeded {
+            return Err(KcsError::new(
+                "KCS-E-COMMIT-HISTORY-LIMIT-001",
+                "the bounded history walk aggregate cap was exceeded in every searched scope",
+                json!({ "excluded_scopes": excluded }),
+                ExitCode::PermanentFailure,
             ));
         }
         // R17-4: when every scope was excluded for a store-corruption class (R16-2's
@@ -2193,6 +2358,19 @@ fn run_search_inner(args: UnsupportedArgs, started: Instant) -> Result<Value> {
                     e.get("reason").and_then(Value::as_str),
                     Some(reason) if store_corruption_recovery_hint(reason).is_some()
                 )
+            })
+            // R23-14(b): `store_corruption_recovery_hint` also answers for
+            // `index_missing`/`index_corrupt`, which (unlike `store_corrupt`/
+            // `snapshot_shallow`) are now retryable (folded into
+            // `all_rebuilding` above). A HETEROGENEOUS mix of one of those
+            // with a genuinely permanent reason must not be swept into this
+            // block's flat exit 4 — defer to the PC57 split below, which
+            // promotes such a mix to the retryable exit 3 per 05 §1.8's
+            // "retryable 理由を含めば exit 3" rule.
+            && !excluded.iter().any(|e| {
+                e.get("reason")
+                    .and_then(Value::as_str)
+                    .is_some_and(is_retryable_scope_reason)
             });
         if all_recoverable {
             let recovery = aggregate_store_recovery_hints(&excluded);
@@ -2310,6 +2488,60 @@ fn run_search_inner(args: UnsupportedArgs, started: Instant) -> Result<Value> {
                 .into_iter()
                 .map(|binding| ExpandedCandidate { candidate, binding }),
         );
+    }
+
+    // R23-12 (05 §3.5 L841-855): the third, response-time barrier recheck —
+    // 「本文・存在情報を返す直前」. The per-scope checkpoint-2 recheck runs at
+    // scope completion, but global MMR / alias expansion / response assembly
+    // still execute after it; a purge completing in that window must not let
+    // this response emit the purged content. A scope failing here has its
+    // already-obtained results discarded (LC55) and is excluded as
+    // purge_journal_active (retryable) — same fixed 3-tuple comparison
+    // (journal, purge/epoch, lifecycle counter) as checkpoints 1/2.
+    let mut late_failed = std::collections::BTreeSet::<usize>::new();
+    let mut searched_drop = Vec::<usize>::new();
+    for (scope_index, searched_pos, checkpoint) in &late_barriers {
+        if checkpoint.recheck().is_ok() {
+            continue;
+        }
+        let exec = &exec_scopes[*scope_index];
+        if exec.from_cursor {
+            // CT3-CURSOR-005 posture: a replayed scope that just became
+            // unavailable is a hard cursor failure, same as the Excluded arm.
+            return Err(KcsError::new(
+                "KCS-E-SEARCH-CURSOR-001",
+                "search cursor active scope is no longer available; re-run without a cursor",
+                json!({
+                    "reason": "active_scope_unavailable",
+                    "cause": "purge_journal_active",
+                    "scope_id": exec.target.scope_id,
+                }),
+                ExitCode::InvalidUsage,
+            ));
+        }
+        late_failed.insert(*scope_index);
+        searched_drop.push(*searched_pos);
+        excluded.push(json!({
+            "scope_id": exec.target.scope_id,
+            "scope_path": exec.target.kcs_dir,
+            "reason": "purge_journal_active",
+        }));
+    }
+    if !late_failed.is_empty() {
+        expanded.retain(|hit| !late_failed.contains(&hit.candidate.scope_index));
+        searched_drop.sort_unstable_by(|left, right| right.cmp(left));
+        for position in searched_drop {
+            searched.remove(position);
+        }
+        if searched.is_empty() {
+            return Err(KcsError::new(
+                "KCS-E-PURGE-JOURNAL-ACTIVE-001",
+                "an incomplete purge transaction is active, or completed while this read was \
+                 in flight, in every searched scope; retry",
+                json!({ "excluded_scopes": excluded }),
+                ExitCode::PartialFailure,
+            ));
+        }
     }
 
     // Global skip: cursor consumed (summed across scopes) or --offset (05 §1.5).
@@ -2563,6 +2795,11 @@ struct ScopeOutcome {
     /// PC45/PC46: shallow ancestors skipped during this scope's history walk.
     shallow_skipped: u64,
     candidates: Vec<ScoredCandidate>,
+    /// R23-12 (05 §3.5 L841-855 「本文・存在情報を返す直前」): this scope's §I
+    /// read-barrier checkpoint, kept alive past scope completion so the
+    /// response assembler can run one final recheck immediately before the
+    /// scope's candidates cross the response boundary.
+    checkpoint: ReadBarrierCheckpoint,
 }
 
 #[derive(Clone, Copy)]
@@ -2691,6 +2928,39 @@ fn purge_blocks_rebuild_raw(kcs_dir: &Path, raw_hash: &str) -> Result<bool> {
         .map(|receipt| receipt.tail().clone());
     let canonical = canonical_final_event(tombstone_tail.as_ref(), receipt_tail.as_ref());
     Ok(canonical.is_some_and(|canonical| canonical.event.kind != EventKind::Retired))
+}
+
+/// R23-10: the narrower sibling of [`purge_blocks_rebuild_raw`], for
+/// `kcs reindex --at <commit>` (`historical_reindex::run`) specifically.
+/// Unlike the primary full-rebuild/embedding-generation path
+/// (`retained_history_instances`/`retained_history_chunks`, which
+/// intentionally exclude BOTH canonical `purged` and `erased` from the
+/// always-searched/always-embedded index), an explicit historical `--at`
+/// enrichment is not one of the erase receipt's five whitelisted uses
+/// (08-evidence-pointer-spec.md §4.2: "public の tombstone 判定・re-ingest
+/// barrier には使わない") — it must gate ONLY on the PUBLIC tombstone's
+/// canonical state, never on a non-public erase receipt
+/// (`ct4_purge_erase_receipt_is_ignored_then_retired_by_explicit_ingest`
+/// re-indexes a pre-erase historical commit and expects zero
+/// `blocked_raw_hashes`). Still resolves the cross-marker
+/// `canonical_final_event` (not single-marker existence), so a resurrected
+/// tombstone, or a higher-lifecycle-epoch `retired` receipt superseding an
+/// older active tombstone, is not wrongly excluded either (AUD-08's other
+/// worked example — the same "existence vs canonical" bug this whole fix
+/// targets).
+fn purge_blocks_historical_reindex_raw(kcs_dir: &Path, raw_hash: &str) -> Result<bool> {
+    let state = PurgeState::new(kcs_dir);
+    if state.barrier_blocks(raw_hash)? {
+        return Ok(true);
+    }
+    let tombstone_tail = state
+        .read_tombstone(raw_hash)?
+        .map(|record| record.tail().clone());
+    let receipt_tail = state
+        .read_erase_receipt(raw_hash)?
+        .map(|receipt| receipt.tail().clone());
+    let canonical = canonical_final_event(tombstone_tail.as_ref(), receipt_tail.as_ref());
+    Ok(canonical.is_some_and(|canonical| canonical.event.kind == EventKind::Purged))
 }
 
 fn search_one_scope(
@@ -3106,9 +3376,20 @@ fn search_one_scope_inner(
     scope_deadline_check(deadline)?;
 
     // R12-1: fuse with the effective `[search.rrf]` (was hardcoded 60/1/1/200).
-    let fused = fuse_rrf(&text_ranks, &vector_ranks, rrf_config)
+    let mut fused = fuse_rrf(&text_ranks, &vector_ranks, rrf_config)
         .map_err(search_to_kcs)
         .map_err(ScopeSearchError::Fatal)?;
+    // R23-21 (05 §1.8 L416-417 "RRF 済み unique semantic chunk 上位
+    // candidate_depth 件を候補として返す"): `fuse_rrf` unions each backend's
+    // OWN top-`candidate_depth` (05 §1.3's candidate pool step), which is not
+    // yet bounded by `candidate_depth` itself -- when the text and vector
+    // top-N barely overlap, the union can carry up to 2x `candidate_depth`
+    // candidates into the cross-scope merge/global MMR below, exceeding the
+    // per-scope contract this scope's caller returns. `fused` is already
+    // sorted by descending `rrf_score` with the documented chunk_id
+    // tie-break (`fuse_rrf`'s own sort), so truncating here keeps exactly the
+    // top `candidate_depth` by that same order.
+    fused.truncate(rrf_config.candidate_depth as usize);
 
     let grouped_bindings = history_plan.grouped_bindings();
     let mut candidates = Vec::new();
@@ -3129,7 +3410,11 @@ fn search_one_scope_inner(
         candidates.push(ScoredCandidate {
             scope_index,
             scope_id: exec.target.scope_id.clone(),
-            scope_path: exec.target.repo_root.clone(),
+            // R23-20 (03 §4 L296 "検索結果メタには「正本の .kcs パス」を必ず含める"):
+            // the canonical `.kcs` directory, not its parent `repo_root` --
+            // relayed unchanged into both `results[].scope_path` and the
+            // Evidence Pointer issue request's `scope_path` hint below.
+            scope_path: exec.target.kcs_dir.clone(),
             chunk_hash: candidate.chunk_hash,
             rrf_score: candidate.rrf_score,
             meta: chunk_meta.clone(),
@@ -3184,6 +3469,7 @@ fn search_one_scope_inner(
         // commit).
         shallow_skipped: history_plan.shallow_skipped.len() as u64 + at_shallow_skipped,
         candidates,
+        checkpoint,
     })
 }
 
@@ -3596,7 +3882,10 @@ fn fts_scope_search(
 /// apply, regardless of how many of those matches were ever eligible — 05
 /// §1.3's "VM step 1,074 → 70,374" cost). The eligibility predicate (including
 /// PC38's ancestor gate) is applied in the OUTER query, over at most
-/// `candidate_depth` rows.
+/// `candidate_depth` rows. R23-17: when non-eligible rows dominate the inner
+/// LIMIT window and starve eligible ones out of it, the inner LIMIT
+/// escalates x4 (bounded, up to 2 extra attempts) — see the bounded-escalation
+/// comment inside the function body.
 fn execute_fts_tier(
     conn: &Connection,
     match_expr: &str,
@@ -3657,32 +3946,54 @@ fn execute_fts_tier(
     // Query-normalization (05 §1.3 L116-123): see `vector_scope_search`'s
     // identical comment — same flattened order `short_token_clause` expects.
     let short_token_forms = short_token_bind_values(filter.short_tokens);
-    let mut bound: Vec<&dyn rusqlite::ToSql> = vec![
-        &match_expr,
-        &candidate_depth_i64,
-        &max_rowid_i64,
-        &filter.chunking_config_hash,
-        &max_association_rowid_i64,
-        &filter.since_cutoff,
-        &filter.since_cutoff,
-    ];
-    for form in &short_token_forms {
-        bound.push(form);
-    }
-    let rows = stmt
-        .query_map(rusqlite::params_from_iter(bound), chunk_meta_row)
-        .map_err(|err| KcsError::schema(err.to_string()))?;
 
-    let mut ranks = Vec::new();
-    let mut meta = BTreeMap::new();
-    for (index, row) in rows.enumerate() {
-        let (chunk_id, chunk_meta) = row.map_err(|err| KcsError::schema(err.to_string()))?;
-        ranks.push(BackendRank {
-            chunk_hash: chunk_id.clone(),
-            rank: index as u64 + 1,
-        });
-        meta.insert(chunk_id, chunk_meta);
-    }
+    // R23-17 (05 §1.3 L146-157, 2026-07-22 feedback #3 "有界エスカレーション"):
+    // the inner subquery's LIMIT bounds cost (PC15/PC17 above) but excludes
+    // eligibility (config generation / identity / time / ancestor), so a
+    // MATCH whose bm25-top rows are mostly non-eligible can starve eligible
+    // rows out of that LIMIT window entirely — the L83-84 contract promises
+    // "検索対象集合内の上位 candidate_depth 件", not "raw MATCH top
+    // candidate_depth, eligibility be damned". When the eligible count after
+    // the outer WHERE is still short of `candidate_depth`, re-execute with
+    // the inner LIMIT x4, deterministically, up to 2 extra times (3 attempts
+    // total; worst-case cost <= 1x + 4x + 16x = 21x candidate_depth — still
+    // bounded, per PC15's own cost concern). The common case (>=
+    // candidate_depth eligible on attempt 1) stays exactly one execution.
+    // Row ORDER (bm25 -> chunk_id) is unchanged by escalation; only the
+    // candidate SET's completeness does.
+    let mut inner_limit = candidate_depth_i64;
+    let (ranks, meta) = loop {
+        let mut ranks = Vec::new();
+        let mut meta = BTreeMap::new();
+        let mut bound: Vec<&dyn rusqlite::ToSql> = vec![
+            &match_expr,
+            &inner_limit,
+            &max_rowid_i64,
+            &filter.chunking_config_hash,
+            &max_association_rowid_i64,
+            &filter.since_cutoff,
+            &filter.since_cutoff,
+        ];
+        for form in &short_token_forms {
+            bound.push(form);
+        }
+        let rows = stmt
+            .query_map(rusqlite::params_from_iter(bound), chunk_meta_row)
+            .map_err(|err| KcsError::schema(err.to_string()))?;
+        for (index, row) in rows.enumerate() {
+            let (chunk_id, chunk_meta) = row.map_err(|err| KcsError::schema(err.to_string()))?;
+            ranks.push(BackendRank {
+                chunk_hash: chunk_id.clone(),
+                rank: index as u64 + 1,
+            });
+            meta.insert(chunk_id, chunk_meta);
+        }
+        let short_of_depth = (ranks.len() as u64) < filter.candidate_depth;
+        if !short_of_depth || inner_limit >= candidate_depth_i64.saturating_mul(16) {
+            break (ranks, meta);
+        }
+        inner_limit = inner_limit.saturating_mul(4);
+    };
     Ok((ranks, meta))
 }
 
@@ -4067,8 +4378,10 @@ fn compute_index_status(searched: &[SearchedScopeInfo]) -> Value {
     let mut task_errors = Vec::new();
 
     for scope in searched {
-        let kcs_dir = scope.scope_path.join(".kcs");
-        let store = TaskStore::new(&kcs_dir);
+        // R23-20 (03 §4 L296): `scope.scope_path` is now the canonical `.kcs`
+        // directory itself (was the parent repo root before the fix, hence
+        // the `.join(".kcs")` this used to need here).
+        let store = TaskStore::new(&scope.scope_path);
         let tasks = match store.all() {
             Ok(tasks) => tasks,
             Err(error) => {
@@ -4127,7 +4440,10 @@ fn compute_index_status(searched: &[SearchedScopeInfo]) -> Value {
                 TaskStatus::Failed => {}
             }
         }
-        match Repository::open(&scope.scope_path) {
+        // R23-20: `scope.scope_path` is the `.kcs` directory; `Repository::open`
+        // wants the scope ROOT (it appends `.kcs` itself), so this uses the
+        // separately-carried `repo_root` field.
+        match Repository::open(&scope.repo_root) {
             Ok(repo) => {
                 match current_unsupported_inputs(&repo) {
                     Ok(dispositions) => {
@@ -4240,25 +4556,34 @@ fn scope_all_failed_error(message: &str, excluded: Vec<Value>) -> KcsError {
 
 /// PC57 (05 §1.8 L392 / 06 §7 L362-363): whether a per-scope exclusion reason
 /// belongs to the "retryable" set for the mixed-reason all-scopes-failed
-/// split — exactly the reasons whose OWN homogeneous promotion (PC55) is exit
-/// 3: `index_rebuilding` (P10), `purge_journal_active` (§I), `timeout`
-/// (05 §1.8's per-scope timeout), and `registry_duplicate` (PC55(e) —
-/// `KCS-E-REGISTRY-DUP-001`; not yet produced by any exclusion path, kept
-/// here so the classification is ready once it is). Every other reason
-/// (store corruption, missing/corrupt index, incompatible profile/format
+/// split — exactly the reasons whose OWN homogeneous promotion is exit 3:
+/// `index_rebuilding` (P10), `index_missing`/`index_corrupt` (R23-14(b) — a
+/// missing/unusable sqlite.db is folded into the SAME `all_rebuilding`
+/// promotion as `index_rebuilding`, 06 §7 L345-346), `purge_journal_active`
+/// (§I), `timeout` (05 §1.8's per-scope timeout), and `registry_duplicate`
+/// (R23-27 — `KCS-E-REGISTRY-DUP-001`, now produced by `registry_all_targets`'s
+/// dedup and the cursor-replay remap, R23-25). Every other reason (store
+/// corruption, `history_limit_exceeded` (R23-15), incompatible profile/format
 /// version, unreachable, not-yet-indexed) is permanent here — re-running the
 /// identical command will not, by itself, change the outcome.
 fn is_retryable_scope_reason(reason: &str) -> bool {
     matches!(
         reason,
-        "index_rebuilding" | "purge_journal_active" | "timeout" | "registry_duplicate"
+        "index_rebuilding"
+            | "index_missing"
+            | "index_corrupt"
+            | "purge_journal_active"
+            | "timeout"
+            | "registry_duplicate"
     )
 }
 
 /// R17-4/R18-4: the class-specific recovery hint for a store-corruption search
 /// exclusion reason (`store_corrupt` / `snapshot_shallow`), or `None` for any other
-/// reason (`index_missing`/`index_corrupt` recover via the exit-1 VEC-UNAVAIL path,
-/// transient reasons need no guidance). Attached both to each individual
+/// reason (transient reasons need no guidance). `index_missing`/`index_corrupt`
+/// also answer here (their hint is folded into `all_rebuilding`'s exit-3
+/// KCS-E-INDEX-REBUILDING-001 response — R23-14(b) — not a separate exit-1 path
+/// as before that fix). Attached both to each individual
 /// `excluded_scopes` entry (R18-4 — so a PARTIAL multi-scope exclusion, where healthy
 /// scopes keep `searched` non-empty and skip the all-failed aggregate, is still
 /// agent-recoverable) and aggregated into the all-scopes-failed SCOPE-ALL-FAILED
@@ -4336,9 +4661,11 @@ struct QueryPlan {
     /// every short unit outright rather than AND-filtering candidates on it
     /// (the predicate this replaced excluded documents that never spelled a
     /// natural-sentence particle/function word — eval M3-2/M3-3's dominant
-    /// Recall@10 failure mode). **Equal to the RAW token list** (not the
-    /// segmented/deduplicated unit list) for a PURE-SHORT query — unchanged
-    /// from the pre-feedback-#2 behavior.
+    /// Recall@10 failure mode). **The RAW token list, first-occurrence
+    /// deduplicated** (not the segmented unit list) for a PURE-SHORT query
+    /// (R23-28 — 05 §1.3 L129-131's "全 unit 集合から重複を除く" was never
+    /// exempted for this branch; dedup preserves the first token unchanged,
+    /// so PC14's ORDER BY tie-break is unaffected).
     short_tokens: Vec<String>,
 }
 
@@ -4385,10 +4712,16 @@ fn classify_script_char(ch: char) -> ScriptClass {
     if (0x3041..=0x309F).contains(&cp) {
         return ScriptClass::Hiragana;
     }
-    if (0x30A0..=0x30FF).contains(&cp) || (0x31F0..=0x31FF).contains(&cp) {
-        // Covers both ー (U+30FC, handled specially by the caller before this
-        // function is ever reached for it) and ヶ (U+30F6) — ヶ needs no
-        // separate case since 0x30A0..=0x30FF already contains it.
+    // R23-06 (05 §1.3, 2026-07-22 spec feedback #2 correction): U+30FB (・,
+    // katakana middle dot) is Unicode script=Common, NOT script=Katakana,
+    // despite sitting inside the katakana Unicode BLOCK (U+30A0-U+30FF) —
+    // excluded here so it falls through to `Other` (a separator) below.
+    // Without this, "アクセス・トークン" stays one unsplittable unit and
+    // never matches either half. U+30FD/U+30FE (ヽ/ヾ, katakana iteration
+    // marks) and U+30F6 (ヶ) ARE script=Katakana and stay in this range
+    // unchanged; ー (U+30FC) is handled specially by the caller before this
+    // function is ever reached for it, per the doc comment above.
+    if cp != 0x30FB && ((0x30A0..=0x30FF).contains(&cp) || (0x31F0..=0x31FF).contains(&cp)) {
         return ScriptClass::Katakana;
     }
     // cp == 0x3005 is 々 (iteration mark), cp == 0x3006 is 〆 (closing mark) —
@@ -4418,10 +4751,11 @@ fn classify_script_char(ch: char) -> ScriptClass {
 /// token byte-for-byte.
 ///
 /// Class rules (fixed at the `char` level — one Unicode scalar each):
-/// - Hiragana (U+3041-U+309F), Katakana (U+30A0-U+30FF, U+31F0-U+31FF — ヶ
-///   included), Han (U+3400-U+4DBF, U+4E00-U+9FFF, U+F900-U+FAFF,
-///   U+20000-U+3FFFF, plus 々/〆), ASCII alnum (`[0-9A-Za-z]`), else `Other`
-///   ([`classify_script_char`]).
+/// - Hiragana (U+3041-U+309F), Katakana (U+30A0-U+30FF, U+31F0-U+31FF — ヶ/
+///   ヽ/ヾ included, **U+30FB (・) excluded** — script=Common despite the
+///   block, falls to `Other` below, R23-06), Han (U+3400-U+4DBF,
+///   U+4E00-U+9FFF, U+F900-U+FAFF, U+20000-U+3FFFF, plus 々/〆), ASCII alnum
+///   (`[0-9A-Za-z]`), else `Other` ([`classify_script_char`]).
 /// - U+30FC (ー) is the one context-sensitive exception: it continues the
 ///   IMMEDIATELY PRECEDING character's own RESOLVED class when that class is
 ///   Hiragana or Katakana (so `ローテーション`'s two ー never split its run);
@@ -4666,10 +5000,26 @@ fn build_query_plan(query_nfc: &str) -> QueryPlan {
 
     if long_units.is_empty() {
         // Pure-short query: every unit (and therefore every original token)
-        // is short. Preserve the pre-feedback-#2 behavior byte-for-byte.
+        // is short. Preserve the pre-feedback-#2 behavior, EXCEPT for R23-28's
+        // first-occurrence dedup (05 §1.3 L129-131 "全 unit 集合から重複を除く"
+        // applies here too — a pure-short query was never exempted, but the
+        // pre-feedback-#2 code never deduped this branch). A query repeating
+        // one short token thousands of times used to generate one SQLite bind
+        // parameter per repetition (`short_token_instr_sql`/
+        // `short_token_bind_values` iterate `short_tokens` once per element),
+        // risking the SQLite bound-variable limit. Dedup preserves
+        // first-occurrence order, so PC14's "first token" ORDER BY tie-break
+        // rule is unaffected — the first token survives dedup unchanged.
+        let mut deduped_tokens: Vec<String> = Vec::with_capacity(tokens.len());
+        let mut seen_tokens: BTreeSet<String> = BTreeSet::new();
+        for token in tokens {
+            if seen_tokens.insert(token.clone()) {
+                deduped_tokens.push(token);
+            }
+        }
         return QueryPlan {
             match_expr: None,
-            short_tokens: tokens,
+            short_tokens: deduped_tokens,
         };
     }
 
@@ -6722,14 +7072,11 @@ fn enumerate_scope_targets(
     Ok((ScopeSelectionMode::All, targets))
 }
 
-/// All indexed, participating scopes from the registry (deterministic order).
-/// `Ok(None)` when the registry could not be *opened* (transient lock or real
-/// error) — deliberately distinct from `Ok(Some(vec![]))` (registry opened, no
-/// eligible scopes). The caller degrades an open failure to the current scope
-/// instead of a misleading "no indexed scopes registered" that would erase the
-/// healthy scope the user is standing in (P6, Opus F2); an empty registry keeps
-/// the exit-4 guidance.
-fn registry_all_targets() -> Result<Option<Vec<ScopeTarget>>> {
+/// Shared by [`registry_all_targets`] and [`registry_duplicate_groups`]
+/// (R23-27): the registry rows that pass `registry_entry_is_live`'s
+/// stale-duplicate check, from ONE registry read. `Ok(None)` mirrors
+/// `registry_all_targets`'s "registry could not be opened" signal.
+fn live_registry_entries() -> Result<Option<Vec<RegistryEntry>>> {
     let Ok(db) = RegistryDb::open_default() else {
         return Ok(None);
     };
@@ -6746,8 +7093,73 @@ fn registry_all_targets() -> Result<Option<Vec<ScopeTarget>>> {
             // does on the Evidence-resolution side (removing the search/resolve
             // asymmetry).
             .filter(registry_entry_is_live)
+            .collect(),
+    ))
+}
+
+/// All indexed, participating scopes from the registry (deterministic order).
+/// `Ok(None)` when the registry could not be *opened* (transient lock or real
+/// error) — deliberately distinct from `Ok(Some(vec![]))` (registry opened, no
+/// eligible scopes). The caller degrades an open failure to the current scope
+/// instead of a misleading "no indexed scopes registered" that would erase the
+/// healthy scope the user is standing in (P6, Opus F2); an empty registry keeps
+/// the exit-4 guidance.
+///
+/// R23-27 (10 §3 L284-299): a scope_id with more than one LIVE registered
+/// path is a clone pair — fail-closed, never search either one silently. Such
+/// groups are dropped from this healthy list entirely (see
+/// [`registry_duplicate_groups`] for the caller-facing `excluded_scopes`
+/// reporting of what was dropped and why).
+fn registry_all_targets() -> Result<Option<Vec<ScopeTarget>>> {
+    let Some(live) = live_registry_entries()? else {
+        return Ok(None);
+    };
+    let mut by_scope_id: BTreeMap<String, Vec<RegistryEntry>> = BTreeMap::new();
+    for entry in live {
+        by_scope_id
+            .entry(entry.scope_id.clone())
+            .or_default()
+            .push(entry);
+    }
+    Ok(Some(
+        by_scope_id
+            .into_values()
+            .filter(|group| group.len() == 1)
+            .flatten()
             .map(registry_entry_target)
             .filter(|target| participates_in_global_search(&target.kcs_dir))
+            .collect(),
+    ))
+}
+
+/// R23-27 (10 §3 L284-299 "同一 scope_id の複数 live path は clone 併存...
+/// global search は当該 scope_id を skip して excluded_scopes に
+/// KCS-E-REGISTRY-DUP-001 の理由付きで記録"): the live scope_id groups
+/// `registry_all_targets` drops for having more than one live path, paired
+/// with each candidate's `.kcs` path — for the caller to record as
+/// `excluded_scopes` entries. `Ok(None)` mirrors `registry_all_targets`'s
+/// "registry could not be opened" signal.
+type RegistryDuplicateGroups = Vec<(String, Vec<PathBuf>)>;
+
+fn registry_duplicate_groups() -> Result<Option<RegistryDuplicateGroups>> {
+    let Some(live) = live_registry_entries()? else {
+        return Ok(None);
+    };
+    let mut by_scope_id: BTreeMap<String, Vec<PathBuf>> = BTreeMap::new();
+    for entry in live {
+        by_scope_id
+            .entry(entry.scope_id)
+            .or_default()
+            .push(PathBuf::from(entry.kcs_path));
+    }
+    Ok(Some(
+        by_scope_id
+            .into_iter()
+            .filter(|(_, paths)| paths.len() > 1)
+            .map(|(scope_id, mut paths)| {
+                paths.sort();
+                (scope_id, paths)
+            })
             .collect(),
     ))
 }
@@ -6898,7 +7310,17 @@ fn load_searchable_chunks(target: &ScopeTarget) -> Result<Vec<SearchableChunk>> 
     // right after a snapshot (search succeeded on the same input — the asymmetry).
     let db_path = sqlite_path(&target.kcs_dir);
     if !db_path.exists() {
-        return Ok(Vec::new());
+        // R23-33 (06 §7 L345-346, same class as R23-14(b)): a missing
+        // sqlite.db on the short-hash/pointer resolution path is "the index
+        // needs (re)building — retry", never a silent empty set that the
+        // caller then misreports as "not found".
+        return Err(KcsError::new(
+            "KCS-E-INDEX-REBUILDING-001",
+            "the search index (sqlite.db) is missing or being rebuilt in this scope; retry, \
+             or run `kcs repair --rebuild-db` if the problem persists",
+            json!({ "scope_path": target.kcs_dir.display().to_string() }),
+            ExitCode::PartialFailure,
+        ));
     }
     let conn = Connection::open(&db_path).map_err(|err| KcsError::schema(err.to_string()))?;
     ensure_snapshot_tree_entries(&repo, &conn, &head)?;
@@ -6977,6 +7399,78 @@ fn query_vector_digest_hex(vector: &[f32]) -> String {
         hex.push_str(&format!("{byte:02x}"));
     }
     format!("sha256:{hex}")
+}
+
+/// R23-01 (05 §1.5 L234 "vector / hybrid の replay は page 1 の query vector
+/// を再利用する — query の再 embedding は行わない"): the device-local cache
+/// directory for page-1 query vectors, keyed by [`query_vector_digest_hex`]'s
+/// digest. A pragmatic device-local-file stand-in for this session's fix wave
+/// (spec's literal mechanism is a per-scope `embeddings(target_type=
+/// 'query_cache')` row, 05 §1.5) — same contract the spec text requires
+/// (digest-keyed, digest reverified on every read, missing/corrupt fails
+/// closed to `KCS-E-SEARCH-CURSOR-001`, never falls back to re-embedding),
+/// simpler storage that stays entirely within the search/CLI surface instead
+/// of touching the per-scope `sqlite.db` schema.
+fn query_vector_cache_path(digest: &str) -> PathBuf {
+    cache_home()
+        .join("kcs/search-query-cache")
+        .join(digest.trim_start_matches("sha256:"))
+}
+
+/// Persists page 1's query vector so a later cursor replay can reuse it
+/// (never re-embed, R23-01). Best-effort by design: a write failure here
+/// must not fail page 1 itself (the cache is a pure optimization/durability
+/// aid for a FUTURE page) — a subsequent replay that finds nothing simply
+/// fails closed with `KCS-E-SEARCH-CURSOR-001` (honest and retryable via a
+/// fresh search), never silently re-sending the query.
+fn persist_query_vector_cache(digest: &str, vector: &[f32]) {
+    let path = query_vector_cache_path(digest);
+    let Some(parent) = path.parent() else {
+        return;
+    };
+    if fs::create_dir_all(parent).is_err() {
+        return;
+    }
+    // R9-3-style hardening (mirrors `open_cache_path`'s tree): this cache
+    // holds derived query-vector bytes, not secrets, but the containing
+    // `$XDG_CACHE_HOME/kcs` subtree convention is owner-only throughout.
+    harden_open_cache_subtree(parent);
+    let _ = write_open_cache_atomic(&path, &f32_to_le_bytes(vector));
+}
+
+/// R23-01: cursor replay's ONLY path to a query vector — reads page 1's
+/// vector back from its device-local cache file, re-verifying the digest on
+/// every read (an externally-modified or torn cache leaf must never be
+/// trusted, mirroring the CAS open-cache's own M5 reuse posture — this
+/// cache has no CAS backing to fsck, so a mismatch is handled by deleting
+/// the untrustworthy leaf here instead). Missing or mismatched is
+/// `KCS-E-SEARCH-CURSOR-001`, matching every other cursor-invalidity cause
+/// in this module (05 §1.5's own text: "欠落・不一致は... 同じく
+/// KCS-E-SEARCH-CURSOR-001"). Deliberately has **no** fallback to
+/// `run_embedding_adapter`/`compute_query_embedding`: a page 2+ that resent
+/// the query would bypass the sync-embedding cost-ledger guardrail entirely
+/// (04 §5.4) and could return a DIFFERENT vector than page 1 used
+/// (non-deterministic providers), corrupting the `consumed`-skip pagination
+/// contract this cache exists to protect.
+fn replay_query_vector(digest: &str) -> Result<Vec<f32>> {
+    let path = query_vector_cache_path(digest);
+    let bytes = fs::read(&path).map_err(|_| cursor_query_vector_error())?;
+    let vector = f32_from_le_bytes(&bytes);
+    if query_vector_digest_hex(&vector) != digest {
+        let _ = fs::remove_file(&path);
+        return Err(cursor_query_vector_error());
+    }
+    Ok(vector)
+}
+
+fn cursor_query_vector_error() -> KcsError {
+    KcsError::new(
+        "KCS-E-SEARCH-CURSOR-001",
+        "search cursor's page-1 query vector is missing or no longer verifiable; re-run the \
+         search without a cursor",
+        json!({ "reason": "query_vector_unavailable" }),
+        ExitCode::InvalidUsage,
+    )
 }
 
 /// R12-5: observability logging must never break the search result. A metrics.jsonl
@@ -8782,6 +9276,16 @@ fn read_cas_byte_object(
 /// shape (08 §4.1) that callers (`tombstone_error`,
 /// `enforce_purge_read_barrier`) expect, augmented with the resolved
 /// `scope_path`.
+///
+/// R23-11 (05-runtime.md §3.5 L934/L942): before trusting an active tail to
+/// hide content, this — the primary resolver entry point
+/// (`purge_blocks_raw`/`enforce_purge_read_barrier`'s shared dependency) —
+/// now also runs the shared bounded (O(1), no ref-reachability walk)
+/// semantic check: `in_commit` must resolve to a real, verified
+/// `commit_type=purged` commit that actually lists this raw_hash and whose
+/// `created_at` matches `at`. A structurally valid but semantically
+/// fabricated marker (AUD-09/A-07) surfaces as `KCS-E-STORE-CORRUPT-001`
+/// instead of silently hiding genuine content.
 fn read_tombstone(target: &ScopeTarget, raw_hash: &str) -> Result<Option<Value>> {
     let Some(record) = PurgeState::new(&target.kcs_dir).read_tombstone(raw_hash)? else {
         return Ok(None);
@@ -8790,6 +9294,12 @@ fn read_tombstone(target: &ScopeTarget, raw_hash: &str) -> Result<Option<Value>>
         return Ok(None);
     }
     let tail = record.tail();
+    kcs_core::purge::verify_marker_binding_bounded(
+        &target.kcs_dir,
+        raw_hash,
+        tail,
+        &now_utc_seconds(),
+    )?;
     Ok(Some(json!({
         "raw_hash": record.raw_hash,
         "purged_at": tail.at,
@@ -11395,14 +11905,15 @@ enum QueryEmbeddingOutcome {
 /// used, the DDL's own documented fallback), and a terminal settlement
 /// (success billed at the reservation estimate, or `unknown_settled` on
 /// adapter failure — CL45/CL69's "no post-hoc query capability" posture, same
-/// as the task-charge helpers above). Device rows are exempt from the
-/// device/per_adapter cap DENIAL check `ops::device_claim` performs no cap
-/// judgement at all — only `ops::check_then_reserve` (used by task charges)
-/// can return `Denied`; a device row's `estimated_usd` merely *contributes to*
-/// those other checks' sums (CL48), matching this session's read of
-/// `kcs_pipeline::ledger::ops`'s existing, already-contract-tested API surface
-/// (extending it to also cap-deny query embeddings is out of this item's
-/// scope — flagged in the report).
+/// as the task-charge helpers above). R23-02: device rows are NOT exempt from
+/// the device/per_adapter(embedding) cap — `ops::device_claim` now performs
+/// that judgement itself, inside the same claim Tx, and returns `Denied` on
+/// exceedance (04 §5.4: "device cap / per_adapter (embedding) の合算には通常
+/// どおり含まれる — 判定式は不変"). Only folder cap does not apply, matching
+/// the same clause's "folder cap 判定 ... には現れず" — this claim has no
+/// single owning `.kcs` folder to read one from (`exec_scopes` may span zero,
+/// one, or many), so only the device-layer config (`~/.config/kcs/config.toml`)
+/// is consulted, never a folder's `.kcs/config.toml`.
 ///
 /// Only called for a FRESH page 1 (no cursor) — a cursor replay (page 2+) calls
 /// the unmetered [`compute_query_embedding`] unchanged, exactly as before this
@@ -11467,17 +11978,47 @@ fn compute_query_embedding_page1(
     // per-adapter timeout wiring is a separate, larger change no scope's config
     // can currently deviate from), so every participating scope's resolved
     // value is always exactly 300 and the max is trivially 300 too.
+    //
+    // R23-02: resolve the device-layer cap config (no folder cap — this claim
+    // has no single owning `.kcs` folder). `read_budget_policy` requires a
+    // second (folder) path argument that this call has no legitimate value
+    // for; a deliberately-nonexistent sentinel path reads back as an empty
+    // `ParsedBudgetConfig::default()` (`NotFound` → defaults, `budget.rs`'s own
+    // documented behavior), and `budget_cap_config`'s resulting `folder_cap` is
+    // never read below — only `device_cap`/`device_per_adapter_cap` are used.
+    let device_config_path = user_config_toml_path();
+    let no_folder_cap_sentinel =
+        device_config_path.with_file_name("__kcs_device_claim_no_folder_cap__.toml");
+    let budget_caps = read_budget_policy(&device_config_path, &no_folder_cap_sentinel)
+        .map_err(pipeline_to_kcs)?;
+    let device_cap_config = budget_cap_config(
+        &budget_caps,
+        LedgerTaskKey::DEVICE_SCOPE_ID,
+        EMBEDDING_ADAPTER_KIND,
+    );
     let claim = with_immediate_transaction(conn, || {
         device_claim(
             conn,
             &key,
             estimate_embedding_cost(query.chars().count() as u64),
             TASK_SYNC_EFFECTIVE_TIMEOUT_SECONDS,
+            device_cap_config.device_cap,
+            device_cap_config.device_per_adapter_cap,
         )
     })
     .map_err(pipeline_to_kcs)?;
     let intent_token = match claim {
         ClaimOutcome::InFlight => return Ok(Some(QueryEmbeddingOutcome::InFlight)),
+        // R23-02: cap exceeded — no reservation was made; fall back to text
+        // search via the existing bare-`None` branch at the search command's
+        // own call site (`vector_unavailable_reason` stays at its default
+        // `"query_embedding_unavailable"`). A dedicated `"budget_denied"`
+        // reason would need a new `QueryEmbeddingOutcome` variant, which would
+        // widen the exhaustive match at that call site (main.rs ~L1771) —
+        // that call site is outside this item's assigned main.rs range and is
+        // owned by a parallel agent for this fix wave, so it is left
+        // unmodified and this is flagged in the report.
+        ClaimOutcome::Denied(_layer) => return Ok(None),
         ClaimOutcome::Claimed(outcome) => outcome.intent_token,
     };
 
@@ -11517,37 +12058,6 @@ fn compute_query_embedding_page1(
                 Ok(None)
             }
         }
-    }
-}
-
-/// Compute the query embedding once per search (05 §1.1). Returns `None` when no
-/// adapter is configured or the query is too short to embed. A failing adapter
-/// call (auth/rate) degrades to `None` → text fallback rather than erroring the
-/// whole search. Used for a cursor-driven page 2+ replay, which does not
-/// participate in the device row protocol (`compute_query_embedding_page1`'s
-/// doc comment) — this call's cost is not separately metered (unchanged from
-/// before this session; flagged in the report as a pre-existing gap, not one
-/// this item's scope covers).
-fn compute_query_embedding(query: &str) -> Result<Option<Vec<f32>>> {
-    if query.chars().count() < 2 {
-        return Ok(None);
-    }
-    let Some(execution) = embedding_execution() else {
-        return Ok(None);
-    };
-    // O2 regression seam: mark that the query is about to be SENT to the embedding
-    // endpoint, so a test can prove `--text` never reaches this path. No-op unless
-    // the env var is set (mirrors the KCS_TEST_* adapter seams).
-    record_query_embed_trace(query);
-    let items = vec![EmbeddingItem {
-        id: "query".to_owned(),
-        text: Some(query.to_owned()),
-        path: None,
-        mime: None,
-    }];
-    match run_embedding_adapter(execution, items, EmbeddingInputType::Query) {
-        Ok(vectors) => Ok(vectors.into_iter().next().map(|vector| vector.vector)),
-        Err(_) => Ok(None),
     }
 }
 
@@ -11616,9 +12126,17 @@ fn retained_history_chunks(
         .iter()
         .map(|instance| instance.raw_hash.clone())
         .collect::<BTreeSet<_>>();
+    // R23-10 (05-runtime.md §3.5 L813/L934): `purge.read_tombstone(...).is_some()`
+    // blocks on marker EXISTENCE (any tombstone at all, even a
+    // retired/resurrected one), not the canonical final event across both
+    // markers -- `purge_blocks_rebuild_raw` is the same canonical-final-event
+    // predicate the rest of the historical-reindex/embedding path already
+    // uses (`historical_reindex::retained_history_instances`,
+    // `historical_reindex::project_selected_snapshot`), so a resurrected
+    // raw_hash is not excluded from retained-history embedding forever after
+    // its first purge.
     for raw_hash in raw_hashes {
-        let tombstoned = purge.read_tombstone(&raw_hash)?.is_some();
-        if tombstoned {
+        if purge_blocks_rebuild_raw(kcs_dir, &raw_hash)? {
             blocked_raw_hashes.insert(raw_hash);
         }
     }
@@ -15004,6 +15522,20 @@ fn reserve_or_reuse_task_charge(
 /// estimate), never a provider-confirmed value. `intent_token` clears in the
 /// same Tx — sync rows always clear immediately on ANY terminal Tx, unlike batch
 /// rows (CL47).
+///
+/// R23-03 (04 §5.4: "device 行の全ての状態遷移 UPDATE ... は `WHERE
+/// intent_token = <自 token>` の条件付き (CAS) で行う"): CAS-guarded on our own
+/// `intent_token`. This function is shared by both scope-keyed task charges
+/// (serialized by `.kcs/.lock` — the guard is a harmless no-op there, since no
+/// concurrent writer can have changed the row) and the device query-embedding
+/// row (§H — NOT lock-serialized; a concurrent stale-sweep recoverer can
+/// reclaim this exact row under a NEW token while this call's own adapter
+/// call is still in flight). A 0-row CAS miss means our claim was already
+/// reclaimed — record nothing (the reclaimer's own `unknown_settled` already
+/// covers this attempt); the vector this call already received from the
+/// adapter is still returned to the caller for THIS search's own result,
+/// independent of billing (same 04 §5.4 clause: "受信済み vector を当該検索の
+/// 結果に使うことは課金と独立に可").
 fn settle_task_charge_success(
     ledger: &LedgerDb,
     key: &LedgerTaskKey,
@@ -15027,7 +15559,7 @@ fn settle_task_charge_success(
             increment_contract_violation: false,
             attempts_delta: 1,
             clear_intent_token: true,
-            intent_token_guard: None,
+            intent_token_guard: Some(intent_token),
             reseat_submission_seq: false,
         },
     )
@@ -16371,8 +16903,22 @@ fn pipeline_to_kcs(error: kcs_pipeline::PipelineError) -> KcsError {
         ),
         kcs_pipeline::PipelineError::Locked { path } => KcsError::locked(path),
         kcs_pipeline::PipelineError::Io { path, message } => KcsError::io(message, path),
+        // R23-13 (06 §7 L343-344 "KCS-E-STORE-CONSTRAINT-001 ... permanent・
+        // 非再試行で command を即時中止・exit 4"): a ledger CHECK constraint
+        // reached at runtime is an implementation-bug signal (pre-write
+        // validation should have prevented it, `classify_check_violation`'s
+        // own doc comment) — never user-actionable, so it is permanent, not
+        // the generic exit 1 every OTHER `Contract` code here still gets
+        // (scan.rs/prepare.rs/markdownize.rs's contract violations keep
+        // their existing exit 1 — this is scoped to the one code 06 §7
+        // pins to exit 4).
         kcs_pipeline::PipelineError::Contract { code, message } => {
-            KcsError::new(code, message, json!({}), ExitCode::Failure)
+            let exit = if code == "KCS-E-STORE-CONSTRAINT-001" {
+                ExitCode::PermanentFailure
+            } else {
+                ExitCode::Failure
+            };
+            KcsError::new(code, message, json!({}), exit)
         }
         other => KcsError::schema(other.to_string()),
     }
@@ -16474,6 +17020,35 @@ mod tests {
 
     use super::{command_captured_json_flag, terminal_safe_text, Cli, Command};
 
+    /// R23-13 (06 §7 L343-344 "KCS-E-STORE-CONSTRAINT-001 ... permanent・
+    /// 非再試行で command を即時中止・exit 4"): `pipeline_to_kcs` maps this ONE
+    /// `Contract` code to `PermanentFailure` (4), while every OTHER
+    /// `Contract` code (scan.rs/prepare.rs/markdownize.rs's contract
+    /// violations) keeps the generic `Failure` (1) it had before the fix —
+    /// scoped, not a blanket exit-4 promotion for the whole variant.
+    #[test]
+    fn r23_13_store_constraint_contract_error_is_permanent_failure_exit_4() {
+        use super::pipeline_to_kcs;
+
+        let constraint = pipeline_to_kcs(kcs_pipeline::PipelineError::contract(
+            "KCS-E-STORE-CONSTRAINT-001",
+            "cost_ledger/batch_requests CHECK constraint violated",
+        ));
+        assert_eq!(constraint.error_code(), "KCS-E-STORE-CONSTRAINT-001");
+        assert_eq!(constraint.exit_code(), kcs_core::ExitCode::PermanentFailure);
+
+        let other = pipeline_to_kcs(kcs_pipeline::PipelineError::contract(
+            "KCS-E-ADAPTER-CONTRACT-001",
+            "adapter response failed its acceptance check",
+        ));
+        assert_eq!(other.error_code(), "KCS-E-ADAPTER-CONTRACT-001");
+        assert_eq!(
+            other.exit_code(),
+            kcs_core::ExitCode::Failure,
+            "only KCS-E-STORE-CONSTRAINT-001 is promoted to exit 4, not every Contract code"
+        );
+    }
+
     #[test]
     fn ct4_rebuild_refuses_visible_purge_and_filters_its_raw() {
         use super::{ensure_no_visible_purge_journal, purge_blocks_rebuild_raw};
@@ -16515,7 +17090,130 @@ mod tests {
     }
 
     #[test]
-    fn ct4_purge_004_erase_receipt_is_not_retained_embedding_liveness() {
+    fn r23_10_purge_blocks_historical_reindex_raw_uses_canonical_not_existence() {
+        use super::purge_blocks_historical_reindex_raw;
+        use kcs_core::purge::{LifecycleEvent, PurgeReason, PurgeState};
+
+        let dir = tempfile::tempdir().unwrap();
+        let kcs_dir = dir.path().join(".kcs");
+        std::fs::create_dir_all(&kcs_dir).unwrap();
+        let state = PurgeState::new(&kcs_dir);
+
+        // A canonical `purged` tombstone blocks.
+        let purged_raw = kcs_pipeline::prepare::hash_bytes(b"purged only");
+        state
+            .append_tombstone_event(
+                &purged_raw,
+                LifecycleEvent::purged(
+                    "2026-07-13T00:00:00Z",
+                    kcs_pipeline::prepare::hash_bytes(b"purge commit"),
+                    PurgeReason::Legal,
+                    "user",
+                    1,
+                ),
+            )
+            .unwrap();
+        assert!(purge_blocks_historical_reindex_raw(&kcs_dir, &purged_raw).unwrap());
+
+        // AUD-08 scenario 1: the SAME tombstone later retired (resurrection)
+        // -- canonical is now `retired` (alive), so it must stop blocking,
+        // unlike the pre-fix `read_tombstone(...).is_some()` (existence
+        // only) check that excluded it forever after its first purge.
+        state
+            .retire_tombstone(
+                &purged_raw,
+                &kcs_pipeline::prepare::hash_bytes(b"resurrection commit"),
+                "2026-07-14T00:00:00Z",
+                "user",
+            )
+            .unwrap();
+        assert!(!purge_blocks_historical_reindex_raw(&kcs_dir, &purged_raw).unwrap());
+
+        // AUD-08 scenario 2: a tombstone's tail is `purged`, but a
+        // CO-EXISTING erase receipt's tail is `retired` at a HIGHER
+        // lifecycle_epoch (the receipt was independently resurrected later)
+        // -- canonical (max-epoch across both markers) is the receipt's
+        // `retired`, so this must NOT block, even though the tombstone
+        // alone still looks active in isolation.
+        let coexist_raw = kcs_pipeline::prepare::hash_bytes(b"tombstone and receipt coexist");
+        state
+            .append_tombstone_event(
+                &coexist_raw,
+                LifecycleEvent::purged(
+                    "2026-07-13T00:00:00Z",
+                    kcs_pipeline::prepare::hash_bytes(b"purge commit 2"),
+                    PurgeReason::Legal,
+                    "user",
+                    1,
+                ),
+            )
+            .unwrap();
+        state
+            .append_erase_receipt_event(
+                &coexist_raw,
+                LifecycleEvent::erased(
+                    "2026-07-13T00:00:00Z",
+                    kcs_pipeline::prepare::hash_bytes(b"erase commit"),
+                    PurgeReason::Legal,
+                    "user",
+                    1,
+                ),
+            )
+            .unwrap();
+        state
+            .retire_erase_receipt(
+                &coexist_raw,
+                &kcs_pipeline::prepare::hash_bytes(b"resurrection via receipt"),
+                "2026-07-15T00:00:00Z",
+                "user",
+            )
+            .unwrap();
+        // The tombstone alone (in isolation) still looks active...
+        assert!(state
+            .read_tombstone(&coexist_raw)
+            .unwrap()
+            .unwrap()
+            .is_active());
+        // ...but canonical across both markers is the receipt's
+        // higher-epoch `retired`, so this must not block.
+        assert!(!purge_blocks_historical_reindex_raw(&kcs_dir, &coexist_raw).unwrap());
+
+        // An erase receipt with no tombstone at all -- canonical `erased`,
+        // not `purged` -- must NOT block (erase receipts are not a
+        // re-ingest/visibility barrier outside their closed use-list,
+        // 08-evidence-pointer-spec.md §4.2).
+        let erased_only_raw = kcs_pipeline::prepare::hash_bytes(b"erased only");
+        state
+            .append_erase_receipt_event(
+                &erased_only_raw,
+                LifecycleEvent::erased(
+                    "2026-07-13T00:00:00Z",
+                    kcs_pipeline::prepare::hash_bytes(b"erase commit 2"),
+                    PurgeReason::Privacy,
+                    "user",
+                    1,
+                ),
+            )
+            .unwrap();
+        assert!(!purge_blocks_historical_reindex_raw(&kcs_dir, &erased_only_raw).unwrap());
+    }
+
+    #[test]
+    fn r23_10_erase_receipt_blocks_retained_embedding_liveness() {
+        // R23-10 (05-runtime.md §3.5 L934/L813, AUD-08's shrunk finding):
+        // this test used to be named `..._is_not_retained_embedding_liveness`
+        // and asserted the OPPOSITE (`chunks.len() == 1`) — it pinned the
+        // pre-fix bug where `retained_history_chunks` only checked tombstone
+        // EXISTENCE (`purge.read_tombstone(...).is_some()`), which is `None`
+        // for a raw whose only marker is an erase receipt, so its text kept
+        // flowing into embedding generation. That is a privacy-relevant gap:
+        // content erased for legal/privacy reasons must not be sent to an
+        // external embedding provider. `purge_blocks_rebuild_raw`'s
+        // canonical-final-event check (`kcs_core::purge::canonical_final_event`,
+        // combining both markers) is the same predicate every other
+        // rebuild/embedding call site on this path already uses
+        // (`historical_reindex::retained_history_instances`,
+        // `historical_reindex::project_selected_snapshot`).
         let dir = tempfile::tempdir().unwrap();
         let kcs_dir = dir.path().join(".kcs");
         std::fs::create_dir_all(&kcs_dir).unwrap();
@@ -16582,8 +17280,7 @@ mod tests {
             introductions: vec![commit_hash],
         }];
         let chunks = super::retained_history_chunks(&conn, &kcs_dir, &retained, "config").unwrap();
-        assert_eq!(chunks.len(), 1);
-        assert_eq!(chunks[0].chunk_id, chunk_id);
+        assert_eq!(chunks.len(), 0);
     }
 
     #[test]
@@ -16632,10 +17329,14 @@ mod tests {
         )
         .unwrap();
 
+        // R23-20: `SearchedScopeInfo.scope_path` is the canonical `.kcs`
+        // directory; `repo_root` (added by the same fix) carries the parent
+        // scope root `compute_index_status` needs for `Repository::open`.
         let searched = [
             SearchedScopeInfo {
                 scope_id: "healthy".to_owned(),
-                scope_path: healthy_root.path().to_path_buf(),
+                scope_path: healthy_root.path().join(".kcs"),
+                repo_root: healthy_root.path().to_path_buf(),
                 snapshot_at: "sha256:healthy".to_owned(),
                 max_rowid: 0,
                 max_association_rowid: 0,
@@ -16645,7 +17346,8 @@ mod tests {
             },
             SearchedScopeInfo {
                 scope_id: "corrupt".to_owned(),
-                scope_path: corrupt_root.path().to_path_buf(),
+                scope_path: corrupt_root.path().join(".kcs"),
+                repo_root: corrupt_root.path().to_path_buf(),
                 snapshot_at: "sha256:corrupt".to_owned(),
                 max_rowid: 0,
                 max_association_rowid: 0,
@@ -16655,7 +17357,8 @@ mod tests {
             },
             SearchedScopeInfo {
                 scope_id: "vanished".to_owned(),
-                scope_path: vanished_root.path().to_path_buf(),
+                scope_path: vanished_root.path().join(".kcs"),
+                repo_root: vanished_root.path().to_path_buf(),
                 snapshot_at: "sha256:vanished".to_owned(),
                 max_rowid: 0,
                 max_association_rowid: 0,
@@ -16675,9 +17378,9 @@ mod tests {
         );
         for field in ["task_errors", "unsupported_input_errors"] {
             assert!(status[field].as_array().unwrap().iter().any(|error| {
-                error["scope_path"]
-                    .as_str()
-                    .is_some_and(|path| std::path::Path::new(path) == vanished_root.path())
+                error["scope_path"].as_str().is_some_and(|path| {
+                    std::path::Path::new(path) == vanished_root.path().join(".kcs")
+                })
             }));
         }
         assert!(status["task_errors"][0]["error_code"]
@@ -17321,6 +18024,33 @@ mod tests {
     }
 
     #[test]
+    fn r23_06_katakana_middle_dot_is_other_not_katakana() {
+        use super::segment_script_runs;
+        // 05 §1.3 2026-07-22 spec feedback #2 correction: U+30FB (・,
+        // katakana middle dot) is script=Common, not script=Katakana,
+        // despite sitting inside the katakana Unicode block -- classified
+        // `Other` (a separator) so it splits the surrounding katakana runs
+        // instead of gluing them into one unit that never matches either
+        // half.
+        assert_eq!(
+            segment_script_runs("アクセス・トークン"),
+            vec!["アクセス", "トークン"]
+        );
+        // ー (U+30FC, the existing long-vowel special case) is unaffected --
+        // still continues a preceding katakana run on either side of ・.
+        assert_eq!(
+            segment_script_runs("キー・バリュー"),
+            vec!["キー", "バリュー"]
+        );
+        // ヽ/ヾ (U+30FD/FE, katakana iteration marks) and ヶ (U+30F6) remain
+        // Katakana and do NOT split their run -- only U+30FB changes class.
+        assert_eq!(
+            segment_script_runs("アヶヽヾイ"),
+            vec!["アヶヽヾイ".to_owned()]
+        );
+    }
+
+    #[test]
     fn feedback2_mixed_query_drops_short_units_entirely_not_and_filtered() {
         use super::build_query_plan;
         // 05 §1.3 2026-07-22 feedback #2 / step4b-contract-tests-p2c.md
@@ -17364,7 +18094,8 @@ mod tests {
         // since no segmented piece can be longer than its own token, is
         // equivalent to "every original token is short"), `match_expr` stays
         // `None` and `short_tokens` is the RAW token list — unchanged from
-        // the pre-feedback-#2 behavior (PC11/PC14's bounded LIKE fallback).
+        // the pre-feedback-#2 behavior (PC11/PC14's bounded LIKE fallback),
+        // except for R23-28's first-occurrence dedup (below).
         let plan = build_query_plan("AI 認");
         assert!(plan.match_expr.is_none());
         assert_eq!(plan.short_tokens, vec!["AI".to_owned(), "認".to_owned()]);
@@ -17373,12 +18104,38 @@ mod tests {
         let plan = build_query_plan("認証");
         assert!(plan.match_expr.is_none());
         assert_eq!(plan.short_tokens, vec!["認証".to_owned()]);
+    }
 
-        // Duplicate short tokens are preserved verbatim (no dedup) — the
-        // pre-feedback-#2 `partition` never deduplicated either.
+    /// R23-28 (05 §1.3 L129-131 "全 unit 集合から重複を除く"): a pure-short
+    /// query's `short_tokens` is now first-occurrence deduplicated — a
+    /// regression the pre-fix `partition` never applied to this branch (only
+    /// the long-unit `units` list deduped). Undeduplicated, a query
+    /// repeating one short token thousands of times fed one SQLite bind
+    /// parameter per repetition to `short_token_instr_sql`/
+    /// `short_token_bind_values`, risking the bound-variable limit.
+    #[test]
+    fn r23_28_pure_short_query_dedups_short_tokens_first_occurrence() {
+        use super::build_query_plan;
         let plan = build_query_plan("ai ai");
         assert!(plan.match_expr.is_none());
-        assert_eq!(plan.short_tokens, vec!["ai".to_owned(), "ai".to_owned()]);
+        assert_eq!(plan.short_tokens, vec!["ai".to_owned()]);
+
+        // First-occurrence order is preserved (PC14's ORDER BY tie-break
+        // keys on the FIRST token, so it must survive dedup unchanged) even
+        // when a later-occurring token repeats first.
+        let plan = build_query_plan("ai to ai to in");
+        assert!(plan.match_expr.is_none());
+        assert_eq!(
+            plan.short_tokens,
+            vec!["ai".to_owned(), "to".to_owned(), "in".to_owned()]
+        );
+
+        // A pathological many-repeat query collapses to one bind value
+        // instead of thousands.
+        let many = "ai ".repeat(40_000);
+        let plan = build_query_plan(many.trim());
+        assert!(plan.match_expr.is_none());
+        assert_eq!(plan.short_tokens, vec!["ai".to_owned()]);
     }
 
     #[test]
@@ -18228,6 +18985,8 @@ mod tests {
     #[test]
     fn tombstone_reader_projects_v1_legacy_flat_and_rejects_dual_path_conflict() {
         use super::{hash_bytes, read_tombstone, ScopeTarget};
+        use kcs_core::cas::{canonical_json_bytes, ObjectKind, ObjectStore};
+        use kcs_core::dag::{CommitObject, CommitStats};
 
         let dir = tempfile::tempdir().unwrap();
         let kcs_dir = dir.path().join(".kcs");
@@ -18240,13 +18999,41 @@ mod tests {
             .join(&digest[2..4])
             .join(&raw_hash);
         std::fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+        // R23-11: `read_tombstone` now semantically validates an active
+        // tail's `in_commit` against a real, verified commit object, so the
+        // legacy flat record's `purged_in_commit` must resolve to one
+        // (unlike before, when it was an arbitrary, never-verified hash
+        // literal — this test is about LC5's legacy-conversion projection
+        // and the dual-path conflict below, not marker semantics, so the
+        // backing commit only needs to be valid, not otherwise interesting).
+        let purge_commit = CommitObject::new_purged(
+            hash_bytes(b"tree"),
+            Vec::new(),
+            "2026-07-13T00:00:00Z".to_owned(),
+            "purge".to_owned(),
+            hash_bytes(b"toollock"),
+            CommitStats {
+                files_added: 0,
+                files_modified: 0,
+                files_deleted: 0,
+            },
+            vec![raw_hash.clone()],
+        )
+        .unwrap();
+        let commit_bytes =
+            canonical_json_bytes(&serde_json::to_value(&purge_commit).unwrap()).unwrap();
+        let commit_hash = hash_bytes(&commit_bytes);
+        ObjectStore::new(&kcs_dir)
+            .write_object_bytes(ObjectKind::Commit, &commit_hash, &commit_bytes)
+            .unwrap();
+
         // LC5: a pre-Step4b v1 flat record (no `events` key) is read-only
         // converted and projected into the same flat response shape.
         let record = serde_json::json!({
             "raw_hash": raw_hash,
             "purged_at": "2026-07-13T00:00:00Z",
             "purged_reason": "privacy",
-            "purged_in_commit": hash_bytes(b"purge commit"),
+            "purged_in_commit": commit_hash,
         });
         std::fs::write(&legacy, serde_json::to_vec(&record).unwrap()).unwrap();
         let target = ScopeTarget {

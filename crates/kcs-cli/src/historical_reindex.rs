@@ -262,15 +262,24 @@ pub(super) fn run(repo: &Repository, operand: &str) -> Result<Value> {
     // shallow, per-object, no-cache semantics as `search --at`.
     let snapshot = HistoryReader::new(repo.kcs_dir()).snapshot(&selected_commit)?;
     let config = read_chunking_config(repo)?;
-    let purge = PurgeState::new(repo.kcs_dir());
 
     let mut tree_entries = Vec::<TreeEntryRow>::with_capacity(snapshot.tree.entries.len());
     let mut selected = BTreeMap::<(String, String, u64), SelectedInstance>::new();
     let mut blocked_raw_hashes = BTreeSet::<String>::new();
     for entry in &snapshot.tree.entries {
-        if purge.barrier_blocks(&entry.raw_hash)?
-            || purge.read_tombstone(&entry.raw_hash)?.is_some()
-        {
+        // R23-10 (05-runtime.md §3.5 L813/L934, AUD-08's shrunk finding):
+        // `purge.read_tombstone(...).is_some()` blocked on marker EXISTENCE
+        // (any tombstone at all, even a retired/resurrected one), not the
+        // canonical final event across both markers.
+        // `purge_blocks_historical_reindex_raw` fixes that while staying
+        // narrower than `purge_blocks_rebuild_raw` (used by
+        // `project_selected_snapshot` below and `retained_history_instances`
+        // for the primary full-rebuild/embedding index): an explicit `--at`
+        // historical enrichment gates only on the PUBLIC tombstone's
+        // canonical state, never on a non-public erase receipt
+        // (08-evidence-pointer-spec.md §4.2's closed use-list for erase
+        // receipts excludes this).
+        if purge_blocks_historical_reindex_raw(repo.kcs_dir(), &entry.raw_hash)? {
             blocked_raw_hashes.insert(entry.raw_hash.clone());
             continue;
         }

@@ -747,7 +747,13 @@ fn pa23_non_force_publish_race_is_a_transient_conflict_leaving_destination_untou
     // adjacent, always-reachable "found present already" ordinary case and
     // asserts NOTHING was written to the winning destination the first time
     // (a stand-in for the same no-replace-publish invariant: preflight
-    // rejection never partially writes).
+    // rejection never partially writes). R23-26 (06 §5 L282-285): this
+    // ordinary "no --force" preflight rejection is not itself the
+    // `conflict_kind=publish_race` race it stands in for (that kind, and its
+    // `transient` disposition, are reserved for the actual publish-time race
+    // `restore_conflict_error` classifies) -- it shares
+    // KCS-E-COMMIT-RESTORE-CONFLICT-001's exit 3 but carries
+    // `retry_disposition=manual_action` (add --force), not `transient`.
     let dir = tempfile::tempdir().unwrap();
     init(&dir);
     fs::write(dir.path().join("a.md"), b"alpha").unwrap();
@@ -761,11 +767,13 @@ fn pa23_non_force_publish_race_is_a_transient_conflict_leaving_destination_untou
     fs::create_dir(&destination).unwrap();
     fs::write(destination.join("b.md"), b"existing").unwrap();
 
-    json_failure(
+    let error = json_failure(
         &dir,
         &["restore", &commit, "--to", &path_text(&destination)],
-        1,
+        3,
     );
+    assert_eq!(error["error_code"], "KCS-E-COMMIT-RESTORE-CONFLICT-001");
+    assert_eq!(error["context"]["retry_disposition"], "manual_action");
     assert!(!destination.join("a.md").exists());
     assert_eq!(fs::read(destination.join("b.md")).unwrap(), b"existing");
 }

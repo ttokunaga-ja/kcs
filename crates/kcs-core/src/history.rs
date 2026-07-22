@@ -868,6 +868,16 @@ fn checked_total(current: u64, increment: u64) -> u64 {
     current.saturating_add(increment)
 }
 
+/// R23-15 (06 §8 L403 "単独操作 exit 4" / 05 §1.6 L307-310): a bounded
+/// history-walk aggregate cap overrun is a PERMANENT failure for a standalone
+/// walk (restore/purge's ancestor checks, or any other direct
+/// `HistoryReader` caller) -- re-running the identical command cannot change
+/// the outcome, so `ExitCode::PermanentFailure` (4), not the generic
+/// `ExitCode::Failure` (1) this constructor returned before the fix. Search's
+/// own multi-scope aggregation (`crates/kcs-cli/src/main.rs`) computes ITS
+/// exit independently across all searched scopes and does not read this
+/// field for that computation, so widening it here cannot regress the
+/// existing partial-failure behavior there.
 fn history_limit_error(
     exceeded: &str,
     stats: HistoryStats,
@@ -887,7 +897,7 @@ fn history_limit_error(
             "max_tree_entries": limits.max_tree_entries,
             "max_verified_bytes": limits.max_verified_bytes,
         }),
-        ExitCode::Failure,
+        ExitCode::PermanentFailure,
     )
 }
 
@@ -1170,6 +1180,36 @@ mod tests {
                 assert_eq!(error.error_code(), "KCS-E-COMMIT-HISTORY-LIMIT-001");
                 assert_eq!(error.context()["exceeded"], json!(expected_dimension));
             }
+        }
+    }
+
+    /// R23-15 (06 §8 L403 "単独操作 exit 4"): a standalone history walk
+    /// (this is the same `HistoryReader` call restore/purge use directly for
+    /// their own ancestor checks) that overruns the aggregate cap is a
+    /// PERMANENT failure -- exit 4, not the generic exit 1
+    /// `history_limit_error` returned before the fix.
+    #[test]
+    fn r23_15_history_limit_error_is_permanent_failure_exit_4() {
+        let fixture = Fixture::new();
+        let tree = fixture.tree(vec![entry("x.md", b"x", Some(profile()))]);
+        let root = fixture.commit("root", &tree, Vec::new());
+        let head = fixture.commit("head", &tree, vec![root]);
+        let baseline = HistoryReader::new(&fixture.kcs_dir)
+            .all_parents(&head)
+            .unwrap()
+            .stats();
+        let limits = HistoryLimits::new(
+            baseline.commits - 1,
+            baseline.tree_entries,
+            baseline.verified_bytes,
+        );
+        let reader = HistoryReader::with_limits(&fixture.kcs_dir, limits);
+        for error in [
+            reader.all_parents(&head).unwrap_err(),
+            reader.first_parent(&head).unwrap_err(),
+        ] {
+            assert_eq!(error.error_code(), "KCS-E-COMMIT-HISTORY-LIMIT-001");
+            assert_eq!(error.exit_code(), crate::ExitCode::PermanentFailure);
         }
     }
 

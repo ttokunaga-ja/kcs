@@ -419,8 +419,27 @@ fn preflight(
                     return Err(KcsError::new(
                         "KCS-E-COMMIT-RESTORE-CONFLICT-001",
                         "destination file already exists; use --force to replace it",
-                        json!({ "path": target }),
-                        ExitCode::Failure,
+                        json!({
+                            "path": target,
+                            // R23-26 (06 §5 L282-285): RESTORE-CONFLICT-001 is
+                            // documented as always-retryable exit 3 -- this
+                            // preflight rejection (no mutation attempted yet)
+                            // shares the code with the publish/rollback race
+                            // terminations `restore_conflict_error` classifies
+                            // below, but "no --force given" is not itself one
+                            // of that constructor's 7 closed `conflict_kind`
+                            // race/residue values (spec-closed enum: docs/05
+                            // §3.5 L883-885 name the same 7 verbatim) --
+                            // fabricating an 8th value, or a wrong existing
+                            // one, would misclassify a deterministic
+                            // usage gap as a transient/residue race.
+                            // `retry_disposition` alone is still accurate and
+                            // actionable without it: passing --force is
+                            // unambiguously a manual action, never resolved by
+                            // an identical retry.
+                            "retry_disposition": "manual_action",
+                        }),
+                        ExitCode::PartialFailure,
                     ));
                 }
                 true
@@ -508,8 +527,27 @@ fn preflight_in_dir(
                     return Err(KcsError::new(
                         "KCS-E-COMMIT-RESTORE-CONFLICT-001",
                         "destination file already exists; use --force to replace it",
-                        json!({ "path": target }),
-                        ExitCode::Failure,
+                        json!({
+                            "path": target,
+                            // R23-26 (06 §5 L282-285): RESTORE-CONFLICT-001 is
+                            // documented as always-retryable exit 3 -- this
+                            // preflight rejection (no mutation attempted yet)
+                            // shares the code with the publish/rollback race
+                            // terminations `restore_conflict_error` classifies
+                            // below, but "no --force given" is not itself one
+                            // of that constructor's 7 closed `conflict_kind`
+                            // race/residue values (spec-closed enum: docs/05
+                            // §3.5 L883-885 name the same 7 verbatim) --
+                            // fabricating an 8th value, or a wrong existing
+                            // one, would misclassify a deterministic
+                            // usage gap as a transient/residue race.
+                            // `retry_disposition` alone is still accurate and
+                            // actionable without it: passing --force is
+                            // unambiguously a manual action, never resolved by
+                            // an identical retry.
+                            "retry_disposition": "manual_action",
+                        }),
+                        ExitCode::PartialFailure,
                     ));
                 }
                 true

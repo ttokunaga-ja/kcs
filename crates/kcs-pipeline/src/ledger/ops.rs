@@ -425,15 +425,31 @@ pub fn phase2a_record_upload_id(
     )
 }
 
-/// CL17(b): when the current client instance's own provider scope does not
-/// match the row's recorded `provider_scope_id`, phase 2b must not call job
-/// creation — clear the stale upload handle so phase 2a restarts cleanly (a new
-/// `provider_scope_id` gets recorded before a fresh upload).
+/// CL17(b) / R23-19 (04 §5.8 手順 2: "現 instance の scope が記録値と一致しない
+/// 場合は呼び出さず、旧 upload を掃除して相 2a からやり直す"): when the current
+/// client instance's own provider scope does not match the row's recorded
+/// `provider_scope_id`, phase 2b must not call job creation — this clears the
+/// stale upload handle so phase 2a restarts cleanly (a new `provider_scope_id`
+/// gets recorded before a fresh upload), but ONLY once the caller has confirmed
+/// the OLD upload (in the OLD, recorded scope — `row.upload_id`/
+/// `row.provider_scope_id`, read before calling this) is actually gone
+/// (deletion succeeded, or 404). Clearing the locator columns FIRST would
+/// destroy the only discovery key a later cleanup pass has for that upload —
+/// the same residue-tracking invariant [`recovery_finish_cleanup`]'s own doc
+/// comment states ("once its upload(s) are confirmed deleted"). R23-19: prior
+/// to this fix the clear was unconditional, with no way for a caller to even
+/// express "not yet confirmed" — `old_upload_deletion_confirmed = false` is a
+/// no-op (`Ok(false)`, locators left intact) so the caller must retry deletion
+/// before calling this again.
 pub fn phase2a_restart_after_scope_mismatch(
     conn: &Connection,
     key: &TaskKey,
     intent_token: &str,
+    old_upload_deletion_confirmed: bool,
 ) -> Result<bool> {
+    if !old_upload_deletion_confirmed {
+        return Ok(false);
+    }
     cas_update_one(
         conn,
         "UPDATE batch_requests SET upload_id = NULL, provider_scope_id = NULL
@@ -962,10 +978,28 @@ pub fn recovery_deadline_passed(row: &BatchRequestRow, now_ms: i64, deadline_ms:
 /// classification must additionally satisfy on top of a full-page provider scan.
 pub const DEFAULT_VISIBILITY_GRACE_PERIOD_MS: i64 = 10 * 60 * 1_000;
 
+/// R23-05 (04 §5.4 DDL: "`job_create_started_at` INTEGER ... batch 行 = 可視化
+/// 猶予・回復期限の起点"): the grace period is measured from the row's own
+/// durable `job_create_started_at`, not from the `intent_token`'s embedded
+/// UUIDv7 issue time. The two diverge whenever phase 2a (upload) takes long
+/// enough that job creation starts well after the token was minted (04 §5.8
+/// AUD-13's failure scenario: a 20-minute upload followed by a crash 1 minute
+/// into job creation would already read as 21 minutes token-age-stale even
+/// though the job itself has been visible-or-not for only 1 minute). A row
+/// whose `job_create_started_at` is still `NULL` (phase 2b never started) has
+/// no basis to measure from and must never be treated as grace-elapsed — 04
+/// §5.8's own confirmed-absent rule already excludes these rows from job-list
+/// matching ("相 2b 未着手 (`job_create_started_at` IS NULL) の行は job 一覧
+/// 照合の対象にしない — job 不存在は記録から確定している"), and this
+/// function's `false` keeps a caller that ignores that gate from mistakenly
+/// concluding grace has elapsed on a NULL basis.
 #[must_use]
-pub fn visibility_grace_period_elapsed(token: &str, now_ms: i64, grace_ms: i64) -> bool {
-    uuid_v7_timestamp_millis(token)
-        .is_some_and(|issued_at| now_ms.saturating_sub(issued_at) >= grace_ms)
+pub fn visibility_grace_period_elapsed(
+    job_create_started_at: Option<i64>,
+    now_ms: i64,
+    grace_ms: i64,
+) -> bool {
+    job_create_started_at.is_some_and(|started_at| now_ms.saturating_sub(started_at) >= grace_ms)
 }
 
 /// CL23/CL24/CL36(b)/CL45(b)(c)/§H's inline sweep/abandon: the "job id unknown"
@@ -975,6 +1009,19 @@ pub fn visibility_grace_period_elapsed(token: &str, now_ms: i64, grace_ms: i64) 
 /// residue — if any could exist — has been confirmed cleaned up; sync/device
 /// rows and phase-1-only batch rows are always "already complete" since no
 /// upload could exist).
+///
+/// R23-03 (04 §5.4: "device 行の全ての状態遷移 UPDATE ... は `WHERE
+/// intent_token = <自 token>` の条件付き (CAS) で行う — 0 行更新 = 他プロセス
+/// に回収済みであり、自プロセスは応答・課金のどちらも記帳しない"): CAS-guarded
+/// on the exact `intent_token` this call believes it is settling. Every
+/// existing caller already reads that token from the row immediately before
+/// calling this (either within the same `BEGIN IMMEDIATE`/savepoint as the
+/// read, or — for the device sync callers this fix targets — across a real
+/// network call with no such atomicity) — so the guard is a no-op for the
+/// former (the token cannot have changed) and closes a real double-settlement
+/// race for the latter (a stale-sweep recoverer already reclaimed the row
+/// under a NEW token; this call must not settle the reclaimer's newer
+/// generation under the OLD token).
 pub fn recovery_settle_unknown(
     conn: &Connection,
     key: &TaskKey,
@@ -997,7 +1044,7 @@ pub fn recovery_settle_unknown(
             increment_contract_violation: false,
             attempts_delta: 0,
             clear_intent_token: cleanup_already_complete,
-            intent_token_guard: None,
+            intent_token_guard: Some(intent_token),
             reseat_submission_seq: true,
         },
     )
@@ -1068,19 +1115,31 @@ pub enum ClaimOutcome {
     /// fall back to text search (`fallback_reason = "embedding_in_flight"`),
     /// never issue a second phase 1 for the same key.
     InFlight,
+    /// R23-02 (04 §5.4 / AUD-11 / A-14): the device or per_adapter(embedding)
+    /// cap would be exceeded — no reservation is made; the caller must fall
+    /// back to text search rather than send.
+    Denied(CapLayer),
 }
 
-/// CL48-CL54: claim a device row for a query-embedding sync request. Must run
-/// inside the caller's `BEGIN IMMEDIATE` Tx together with the budget-cap check,
-/// same as any other phase 1 (`§I`). If an existing in-flight claim for this
-/// exact key is stale, it is swept first (`§53`'s inline rule: never queries the
-/// provider, always settles `unknown`) so the fresh claim can proceed
-/// immediately rather than being blocked by [`phase1_intent`]'s cleanup guard.
+/// CL48-CL54 / R23-02: claim a device row for a query-embedding sync request.
+/// Must run inside the caller's `BEGIN IMMEDIATE` Tx together with the
+/// budget-cap check, same as any other phase 1 (`§I`) — as of R23-02 the cap
+/// check is performed INSIDE this function rather than left to the caller, so
+/// it cannot be silently skipped: device rows are NOT exempt from the device /
+/// per_adapter (embedding) cap, only from folder cap (04 §5.4: "folder cap
+/// 判定 (scope 別集計) には現れず、device cap / per_adapter (embedding) の
+/// 合算には通常どおり含まれる — 判定式は不変"). If an existing in-flight claim
+/// for this exact key is stale, it is swept first (`§53`'s inline rule: never
+/// queries the provider, always settles `unknown`) so the fresh claim can
+/// proceed immediately rather than being blocked by [`phase1_intent`]'s
+/// cleanup guard.
 pub fn device_claim(
     conn: &Connection,
     key: &TaskKey,
     estimated_usd: f64,
     effective_timeout_seconds: i64,
+    device_cap: f64,
+    device_per_adapter_cap: Option<f64>,
 ) -> Result<ClaimOutcome> {
     let now = now_millis();
     if let Some(existing) = get_batch_request(conn, key)? {
@@ -1093,6 +1152,24 @@ pub fn device_claim(
             }
             if let Some(token) = existing.intent_token.clone() {
                 recovery_settle_unknown(conn, key, &token, existing.estimated_usd, true)?;
+            }
+        }
+    }
+    // R23-02: `estimated_usd == 0.0` (a zero-priced local adapter) is exempt
+    // from the cap check entirely, mirroring `check_then_reserve`'s own
+    // `ExemptZeroCost` rule (04 §5.4: "candidate = 0 のタスク ... は cap 判定
+    // の対象外"). Device rows never participate in folder cap (excluded above
+    // by construction — this function never reads a folder_cap parameter).
+    if estimated_usd != 0.0 {
+        let month = utc_month_of(now);
+        let device_total = ledger_month_total(conn, None, None, &month)?;
+        if device_total + estimated_usd >= device_cap {
+            return Ok(ClaimOutcome::Denied(CapLayer::Device));
+        }
+        if let Some(per_adapter_cap) = device_per_adapter_cap {
+            let adapter_total = ledger_month_total(conn, None, Some(&key.adapter_kind), &month)?;
+            if adapter_total + estimated_usd >= per_adapter_cap {
+                return Ok(ClaimOutcome::Denied(CapLayer::PerAdapter));
             }
         }
     }
@@ -1117,7 +1194,14 @@ pub enum ExtendOutcome {
 /// CL50: `stale_after_at := max(current, now + safe(Retry-After) + timeout + 60s)`
 /// computed and applied atomically in one `UPDATE` (avoiding a read-then-write
 /// race), CAS-guarded on `intent_token`. An invalid `retry_after_seconds`
-/// (non-finite or negative) substitutes 3600s; a valid value is never clamped.
+/// (non-finite or negative) substitutes 3600s; a valid value is never clamped
+/// — R23-30 (04 §5.4: "有効な実値は clamp しない"): a fractional
+/// `retry_after_seconds` (e.g. `600.5`) rounds UP (`ceil`), never truncates.
+/// Truncating would compute a protection deadline strictly SHORTER than the
+/// provider's actual requested wait, reopening exactly the double-invocation
+/// window this deadline exists to close (a stale-sweep recoverer could then
+/// reclaim and re-call the provider while the original holder is still
+/// legitimately waiting out its Retry-After).
 pub fn device_extend_stale_after(
     conn: &Connection,
     key: &TaskKey,
@@ -1127,7 +1211,7 @@ pub fn device_extend_stale_after(
 ) -> Result<ExtendOutcome> {
     let now = now_millis();
     let safe_retry_after = if retry_after_seconds.is_finite() && retry_after_seconds >= 0.0 {
-        retry_after_seconds as i64
+        retry_after_seconds.ceil() as i64
     } else {
         3600
     };
@@ -1208,9 +1292,17 @@ const SWEEP_PRUNE_MIN: usize = 128;
 /// of this table is an explicit Phase 4+ item per 04 §5.4).
 const SWEEP_CANDIDATE_FETCH_LIMIT: i64 = 10_000;
 
-/// CL52: plan (without applying) the next bounded sweep. `own_key` is the exact
-/// 4-tuple about to be claimed, if any (device rows only; `None` for a
-/// standalone sweep pass with no specific claim in progress).
+/// CL52 / R23-04: plan (without applying) the next bounded sweep. `own_key` is
+/// the exact 4-tuple about to be claimed, if any (device rows only; `None` for
+/// a standalone sweep pass with no specific claim in progress). The own-key /
+/// general-pool split below matches on the FULL 4-tuple
+/// (`adapter_kind`/`input_hash`/`tool_profile_hash`) — 04 §5.4's own-key rule
+/// ("自 key (今回 claim する 4 組 key) の stale 行は上限枠外で常に最優先に回収
+/// する") is scoped to the exact key about to be claimed, not merely the same
+/// `(adapter_kind, input_hash)` pair with a DIFFERENT `tool_profile_hash` (a
+/// distinct task identity per §5.5 — matching on only 2 of the 4 identity
+/// columns would let an unrelated profile's stale rows ride the unbounded
+/// own-key exemption instead of the capped general pool).
 pub fn plan_bounded_sweep(
     conn: &Connection,
     own_key: Option<&TaskKey>,
@@ -1224,9 +1316,16 @@ pub fn plan_bounded_sweep(
             "SELECT scope_id, adapter_kind, input_hash, tool_profile_hash FROM batch_requests
              WHERE scope_id = 'device' AND state IN (0, 1) AND stale_after_at IS NOT NULL
                AND stale_after_at <= ?1 AND adapter_kind = ?2 AND input_hash = ?3
+               AND tool_profile_hash = ?4
              ORDER BY job_create_started_at ASC, scope_id, adapter_kind, input_hash, tool_profile_hash
-             LIMIT ?4",
-            params![now_ms, key.adapter_kind, key.input_hash, SWEEP_CANDIDATE_FETCH_LIMIT],
+             LIMIT ?5",
+            params![
+                now_ms,
+                key.adapter_kind,
+                key.input_hash,
+                key.tool_profile_hash,
+                SWEEP_CANDIDATE_FETCH_LIMIT
+            ],
         )?
     } else {
         Vec::new()
@@ -1237,10 +1336,17 @@ pub fn plan_bounded_sweep(
             conn,
             "SELECT scope_id, adapter_kind, input_hash, tool_profile_hash FROM batch_requests
              WHERE scope_id = 'device' AND state IN (0, 1) AND stale_after_at IS NOT NULL
-               AND stale_after_at <= ?1 AND NOT (adapter_kind = ?2 AND input_hash = ?3)
+               AND stale_after_at <= ?1
+               AND NOT (adapter_kind = ?2 AND input_hash = ?3 AND tool_profile_hash = ?4)
              ORDER BY job_create_started_at ASC, scope_id, adapter_kind, input_hash, tool_profile_hash
-             LIMIT ?4",
-            params![now_ms, key.adapter_kind, key.input_hash, SWEEP_CANDIDATE_FETCH_LIMIT],
+             LIMIT ?5",
+            params![
+                now_ms,
+                key.adapter_kind,
+                key.input_hash,
+                key.tool_profile_hash,
+                SWEEP_CANDIDATE_FETCH_LIMIT
+            ],
         )?
     } else {
         query_device_keys(
@@ -1558,6 +1664,16 @@ pub enum AbandonExecution {
 /// phase 2a keeps it set until the caller separately confirms cleanup via
 /// [`recovery_finish_cleanup`] (sync rows always take the immediate-clear path,
 /// since `provider_scope_id` is never set for `request_kind = 'sync'` — CL47).
+///
+/// R23-18 (04 §5.4: "剪定・確定済みの 4 組 key への `kcs batch abandon` は対象
+/// なしの冪等成功"): a `state=2` (Completed) row already has its terminal
+/// charge durably recorded under its own `submission_seq` — abandon must not
+/// re-settle it (no new `submission_seq`, no additional `cost_ledger` row).
+/// This differs from the `intent_token IS NULL` short-circuit above only in
+/// that residue cleanup (upload deletion → `provider_scope_id IS NULL`) may
+/// still be outstanding for a successful row; when it is, only that cleanup
+/// proceeds — the same immediate-vs-deferred split note-5 (above) describes
+/// for the non-Completed path — never a re-charge.
 pub fn execute_abandon(conn: &Connection, key: &TaskKey) -> Result<AbandonExecution> {
     with_savepoint(conn, "kcs_ledger_abandon", || {
         let Some(row) = get_batch_request(conn, key)? else {
@@ -1572,6 +1688,18 @@ pub fn execute_abandon(conn: &Connection, key: &TaskKey) -> Result<AbandonExecut
             // practice, but treated as an idempotent no-op rather than panicking.
             return Ok(AbandonExecution::NoTarget);
         };
+        if row.state == BatchState::Completed {
+            // R23-18: the success charge is already final — only clear the
+            // residual token once no upload could possibly remain (the same
+            // `provider_scope_id IS NULL` test the re-settle path below uses).
+            // A non-NULL `provider_scope_id` means cleanup is still pending;
+            // that is resolved out-of-band via `recovery_finish_cleanup` once
+            // deletion is confirmed, never by this call re-charging.
+            if row.provider_scope_id.is_none() {
+                recovery_finish_cleanup(conn, key, &token)?;
+            }
+            return Ok(AbandonExecution::Abandoned);
+        }
         let cleanup_already_complete = row.provider_scope_id.is_none();
         terminal_transaction(
             conn,
@@ -1687,6 +1815,31 @@ mod tests {
         // Invalid (negative) substitutes 3600: 3600 + 300 + 60 = 3960s.
         let substituted = now + (3600 + timeout + 60) * 1000;
         assert_eq!(substituted, now + 3_960_000);
+    }
+
+    // CL35 / R23-05: the grace-period basis is `job_create_started_at`, not
+    // the (now-removed) `intent_token` parameter — a pure `Option<i64>` in,
+    // `bool` out predicate. A `None` basis (phase 2b never started) can never
+    // report elapsed, matching 04 §5.8's own rule excluding such rows from
+    // confirmed-absent job-list matching entirely.
+    #[test]
+    fn cl35_r23_05_visibility_grace_period_is_pure_and_null_basis_never_elapses() {
+        let started_at = 5_000_000_i64;
+        assert!(!visibility_grace_period_elapsed(
+            Some(started_at),
+            started_at + DEFAULT_VISIBILITY_GRACE_PERIOD_MS - 1,
+            DEFAULT_VISIBILITY_GRACE_PERIOD_MS
+        ));
+        assert!(visibility_grace_period_elapsed(
+            Some(started_at),
+            started_at + DEFAULT_VISIBILITY_GRACE_PERIOD_MS,
+            DEFAULT_VISIBILITY_GRACE_PERIOD_MS
+        ));
+        assert!(!visibility_grace_period_elapsed(
+            None,
+            i64::MAX,
+            DEFAULT_VISIBILITY_GRACE_PERIOD_MS
+        ));
     }
 
     // CL27: usd-field pre-validation.

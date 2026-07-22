@@ -27,7 +27,6 @@
 //! rebuild and purge triggers ARE wired — `build_sqlite_index_at`'s
 //! unconditional per-rebuild mint, PB28, and
 //! `rotate_index_generation_unconditionally` called from `purge.rs`),
-//! PC25/26 (query-vector-cache reuse on cursor replay — not implemented),
 //! PC33/44 (`--all-history`/`--include-deleted` PER-BINDING introduction
 //! ancestor check — needs a per-binding ancestor predicate against each
 //! binding's own `pointer_commit`, not the single shared
@@ -304,6 +303,73 @@ fn pc15_pc17_candidate_depth_configuration_is_not_hardcoded_to_200() {
     );
 }
 
+/// R23-17 (05 §1.3 L146-157, 2026-07-22 feedback #3 "有界エスカレーション"):
+/// the inner FTS LIMIT excludes eligibility (config generation / identity /
+/// time), so non-eligible rows with strong bm25 can starve eligible rows out
+/// of a small `candidate_depth` window entirely. Fixture: 4 "victim"
+/// documents repeat the query term densely (dominant bm25, ranked 1-4) and
+/// are then deleted from the working tree (their chunks stay in `chunks`/
+/// `chunk_fts` — append-only — but drop out of `kcs_eligible_identity` once
+/// HEAD advances past them); 1 "survivor" document mentions the term once
+/// (weak bm25, ranked 5th — beyond a `candidate_depth=2` window) and stays
+/// live. Without escalation, the inner LIMIT=2 window is entirely consumed
+/// by the 4 non-eligible victims, so zero eligible rows ever reach the outer
+/// filter and the search returns empty; the bounded escalation (LIMIT x4, up
+/// to 2 extra attempts) must widen enough to surface the survivor.
+#[test]
+fn r23_17_bounded_escalation_recovers_eligible_row_starved_by_inner_limit() {
+    let dir = tempfile::tempdir().unwrap();
+    for i in 0..4 {
+        fs::write(
+            dir.path().join(format!("victim{i}.md")),
+            format!("# Victim {i}\n\n{}\n", "escalationprobe ".repeat(20)),
+        )
+        .unwrap();
+    }
+    fs::write(
+        dir.path().join("survivor.md"),
+        "# Survivor\n\nOne mention of escalationprobe amid unrelated padding words here.\n",
+    )
+    .unwrap();
+    init(&dir);
+    success(&dir, &["index", "--offline", "--approve"]);
+
+    // Sanity: with the default (large) candidate_depth, all 5 rank and the
+    // survivor is present.
+    let baseline = success(
+        &dir,
+        &["search", "escalationprobe", "--text", "--scope", "."],
+    );
+    assert_eq!(baseline["results"].as_array().unwrap().len(), 5);
+
+    // Delete the 4 victims and advance HEAD — their chunks remain FTS-indexed
+    // (append-only `chunks`/`chunk_fts`) but drop out of `kcs_eligible_identity`.
+    for i in 0..4 {
+        fs::remove_file(dir.path().join(format!("victim{i}.md"))).unwrap();
+    }
+    success(&dir, &["snapshot", "-m", "delete victims"]);
+
+    fs::write(
+        dir.path().join(".kcs/config.toml"),
+        "kcs_format_version = \"0.1.0\"\n[search.rrf]\ncandidate_depth = 2\n",
+    )
+    .unwrap();
+    let escalated = success(
+        &dir,
+        &["search", "escalationprobe", "--text", "--scope", "."],
+    );
+    let results = escalated["results"].as_array().unwrap();
+    assert_eq!(
+        results.len(),
+        1,
+        "escalation must recover exactly the surviving eligible row: {escalated}"
+    );
+    assert!(
+        results[0]["title"].as_str().unwrap().contains("survivor"),
+        "the recovered row must be the survivor, not a resurrected victim: {escalated}"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // §F — cursor schema (PC19, PC21, PC24, PC27)
 // ---------------------------------------------------------------------------
@@ -392,6 +458,413 @@ fn pc21_cursor_replay_rejects_a_stale_index_generation() {
     );
     assert_eq!(code, 2);
     assert_eq!(err["error_code"], "KCS-E-SEARCH-CURSOR-001");
+}
+
+/// R23-25 (05 §1.8 L425 / 06 §7 L361 "DUP → exit 3"): a live registry
+/// scope_id duplicate that appears BETWEEN page 1 and a cursor replay is
+/// `KCS-E-REGISTRY-DUP-001` at the retryable exit 3 (dedupe, then retry) —
+/// the shared `registry_duplicate_error` constructor's exit-4 default stays
+/// correct for its OTHER callers (open/view/restore's Evidence resolution,
+/// the write-path registry-duplicate preflight guard), so this only proves
+/// the remap at the search cursor-replay call site.
+#[test]
+fn r23_25_cursor_replay_registry_duplicate_is_exit_3() {
+    let dir_a = tempfile::tempdir().unwrap();
+    for name in ["a.md", "b.md", "c.md"] {
+        fs::write(
+            dir_a.path().join(name),
+            format!("# {name}\n\nduplicateprobeterm {name}\n"),
+        )
+        .unwrap();
+    }
+    init(&dir_a);
+    success(&dir_a, &["index", "--offline", "--approve"]);
+    let page1 = success(
+        &dir_a,
+        &[
+            "search",
+            "duplicateprobeterm",
+            "--limit",
+            "1",
+            "--scope",
+            ".",
+        ],
+    );
+    let cursor = page1["paging"]["next_cursor"]
+        .as_str()
+        .expect("3-document fixture must page at limit=1")
+        .to_owned();
+    let scope_id = read_scope_id(&dir_a);
+
+    // Clone dir_a's scope_id into a second, independently-live `.kcs`
+    // sharing dir_a's registry.
+    let _dir_b = clone_scope_id_into(&dir_a, &scope_id);
+
+    // Replay dir_a's still-valid page-1 cursor: its own scope_id is now a
+    // live registry duplicate.
+    let (code, err) = run(
+        &dir_a,
+        &[
+            "search",
+            "duplicateprobeterm",
+            "--limit",
+            "1",
+            "--cursor",
+            &cursor,
+            "--scope",
+            ".",
+        ],
+    );
+    assert_eq!(code, 3, "{err}");
+    assert_eq!(err["error_code"], "KCS-E-REGISTRY-DUP-001");
+}
+
+fn read_scope_id(dir: &TempDir) -> String {
+    let text = fs::read_to_string(dir.path().join(".kcs/scope.json")).unwrap();
+    let value: Value = serde_json::from_str(&text).unwrap();
+    value["scope_id"].as_str().unwrap().to_owned()
+}
+
+/// Clones `scope_id` into a second, independently-live `.kcs` sharing
+/// `dir_a`'s registry (mirrors step4b_p3a_contract.rs's /
+/// step4b_p3b_contract.rs's `make_registry_duplicate`: XDG_DATA_HOME is
+/// per-TempDir, so the new dir's own `init`/`index` are pointed at `dir_a`'s
+/// data home to make the two `.kcs` clones share one live registry).
+fn clone_scope_id_into(dir_a: &TempDir, scope_id: &str) -> TempDir {
+    let dir_b = tempfile::tempdir().unwrap();
+    fs::write(dir_b.path().join("other.md"), "# Other\n\nOther body.\n").unwrap();
+    let xdg_config = dir_a.path().join(".test-config");
+    let xdg_data = dir_a.path().join(".test-data");
+    let xdg_cache = dir_a.path().join(".test-cache");
+    Command::cargo_bin("kcs")
+        .unwrap()
+        .current_dir(dir_b.path())
+        .env("XDG_CONFIG_HOME", &xdg_config)
+        .env("XDG_DATA_HOME", &xdg_data)
+        .env("XDG_CACHE_HOME", &xdg_cache)
+        .env_remove("GEMINI_API_KEY")
+        .env_remove("MISTRAL_API_KEY")
+        .env_remove("KCS_FIXED_NOW")
+        .args(["init"])
+        .assert()
+        .success();
+    let scope_path_b = dir_b.path().join(".kcs/scope.json");
+    let mut value: Value =
+        serde_json::from_str(&fs::read_to_string(&scope_path_b).unwrap()).unwrap();
+    value["scope_id"] = Value::String(scope_id.to_owned());
+    fs::write(&scope_path_b, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
+    Command::cargo_bin("kcs")
+        .unwrap()
+        .current_dir(dir_b.path())
+        .env("XDG_CONFIG_HOME", &xdg_config)
+        .env("XDG_DATA_HOME", &xdg_data)
+        .env("XDG_CACHE_HOME", &xdg_cache)
+        .env_remove("GEMINI_API_KEY")
+        .env_remove("MISTRAL_API_KEY")
+        .env_remove("KCS_FIXED_NOW")
+        .args(["index", "--offline", "--approve"])
+        .assert()
+        .success();
+    dir_b
+}
+
+/// R23-27 (10 §3 L284-299 "同一 scope_id の複数 live path は clone 併存...
+/// global search は当該 scope_id を skip して excluded_scopes に
+/// KCS-E-REGISTRY-DUP-001 の理由付きで記録"): a fresh (non-cursor) default
+/// search excludes a live-duplicated scope_id instead of silently returning
+/// results from one of the ambiguous clones. With only one scope_id
+/// registered (now duplicated), every enumerated scope is excluded for this
+/// reason — R23-15/R23-14(b)'s sibling homogeneous promotion (this session)
+/// surfaces the canonical KCS-E-REGISTRY-DUP-001 at its own exit 3, not the
+/// generic SCOPE-ALL-FAILED-001.
+#[test]
+fn r23_27_default_search_excludes_live_registry_duplicate_scope() {
+    let dir_a = tempfile::tempdir().unwrap();
+    fs::write(
+        dir_a.path().join("a.md"),
+        "# A\n\nglobalduplicateprobe body\n",
+    )
+    .unwrap();
+    init(&dir_a);
+    success(&dir_a, &["index", "--offline", "--approve"]);
+    let scope_id = read_scope_id(&dir_a);
+    let _dir_b = clone_scope_id_into(&dir_a, &scope_id);
+
+    // Bare default search (no --scope/--descendants): the only registered
+    // scope_id is now a live duplicate, so every enumerated scope is
+    // excluded and the homogeneous promotion fires.
+    let (code, err) = run(&dir_a, &["search", "globalduplicateprobe"]);
+    assert_eq!(code, 3, "{err}");
+    assert_eq!(err["error_code"], "KCS-E-REGISTRY-DUP-001");
+    let excluded = err["context"]["excluded_scopes"].as_array().unwrap();
+    assert_eq!(excluded.len(), 1);
+    assert_eq!(excluded[0]["scope_id"], scope_id);
+    assert_eq!(excluded[0]["reason"], "registry_duplicate");
+    let candidates = excluded[0]["candidates"].as_array().unwrap();
+    assert_eq!(
+        candidates.len(),
+        2,
+        "both live .kcs clones are named: {err}"
+    );
+}
+
+/// R23-27 companion: a SECOND, healthy scope_id must still search normally
+/// (partial success, exit 3) when a DIFFERENT scope_id is live-duplicated —
+/// proving `registry_all_targets`'s dedup drops only the duplicated group,
+/// not every enumerated target.
+#[test]
+fn r23_27_default_search_partial_excludes_only_the_duplicate_scope() {
+    let dir_a = tempfile::tempdir().unwrap();
+    fs::write(
+        dir_a.path().join("a.md"),
+        "# A\n\npartialduplicateprobe healthy body\n",
+    )
+    .unwrap();
+    init(&dir_a);
+    success(&dir_a, &["index", "--offline", "--approve"]);
+    let scope_id_a = read_scope_id(&dir_a);
+
+    let dir_c = tempfile::tempdir().unwrap();
+    fs::write(
+        dir_c.path().join("c.md"),
+        "# C\n\npartialduplicateprobe duplicated body\n",
+    )
+    .unwrap();
+    Command::cargo_bin("kcs")
+        .unwrap()
+        .current_dir(dir_c.path())
+        .env("XDG_CONFIG_HOME", dir_a.path().join(".test-config"))
+        .env("XDG_DATA_HOME", dir_a.path().join(".test-data"))
+        .env("XDG_CACHE_HOME", dir_a.path().join(".test-cache"))
+        .env_remove("GEMINI_API_KEY")
+        .env_remove("MISTRAL_API_KEY")
+        .env_remove("KCS_FIXED_NOW")
+        .args(["init"])
+        .assert()
+        .success();
+    Command::cargo_bin("kcs")
+        .unwrap()
+        .current_dir(dir_c.path())
+        .env("XDG_CONFIG_HOME", dir_a.path().join(".test-config"))
+        .env("XDG_DATA_HOME", dir_a.path().join(".test-data"))
+        .env("XDG_CACHE_HOME", dir_a.path().join(".test-cache"))
+        .env_remove("GEMINI_API_KEY")
+        .env_remove("MISTRAL_API_KEY")
+        .env_remove("KCS_FIXED_NOW")
+        .args(["index", "--offline", "--approve"])
+        .assert()
+        .success();
+    let scope_id_c = read_scope_id(&dir_c);
+    // `clone_scope_id_into`'s first argument supplies the SHARED registry's
+    // XDG paths — must be `dir_a` (the registry every search below actually
+    // queries), not `dir_c` (which would register the clone into its own,
+    // unrelated registry that dir_a's searches never see).
+    let _dir_c2 = clone_scope_id_into(&dir_a, &scope_id_c);
+
+    let (code, response) = run(&dir_a, &["search", "partialduplicateprobe"]);
+    assert_eq!(code, 3, "{response}");
+    assert_eq!(
+        response["searched_scopes"].as_array().unwrap().len(),
+        1,
+        "healthy scope A must still be searched: {response}"
+    );
+    assert_eq!(
+        response["searched_scopes"][0]["scope_id"], scope_id_a,
+        "{response}"
+    );
+    assert!(
+        !response["results"].as_array().unwrap().is_empty(),
+        "healthy scope A's document must still be found: {response}"
+    );
+    let excluded = response["excluded_scopes"].as_array().unwrap();
+    assert_eq!(excluded.len(), 1);
+    assert_eq!(excluded[0]["scope_id"], scope_id_c);
+    assert_eq!(excluded[0]["reason"], "registry_duplicate");
+}
+
+// ---------------------------------------------------------------------------
+// R23-01 — cursor replay reuses page 1's query vector, never re-embeds
+// ---------------------------------------------------------------------------
+
+/// R23-01 (05 §1.5 L234 "vector / hybrid の replay は page 1 の query vector
+/// を再利用する — query の再 embedding は行わない"): a cursor replay reuses
+/// page 1's query vector from its device-local cache (`replay_query_vector`)
+/// and never calls the embedding adapter again. Proven directly via the
+/// `KCS_TEST_QUERY_EMBED_TRACE` seam (`record_query_embed_trace`, now called
+/// ONLY from `compute_query_embedding_page1` — the fix deleted the old,
+/// always-re-embedding `compute_query_embedding`): the trace file gains
+/// exactly one line at page 1 and gains NO further line across a page-2
+/// replay. The replay also advances to a genuinely different hit (not a
+/// repeat of page 1's), proving the cache round-trip actually produced a
+/// usable ranking, not merely "didn't crash."
+#[test]
+fn r23_01_cursor_replay_never_re_embeds_the_query() {
+    let dir = tempfile::tempdir().unwrap();
+    for i in 0..3 {
+        fs::write(
+            dir.path().join(format!("doc{i}.md")),
+            format!("# Doc {i}\n\nreplaycacheterm entry number {i}\n"),
+        )
+        .unwrap();
+    }
+    kcs(&dir, &["init"])
+        .env(kcs_adapter::catalog::TEST_ADOPTED_EMBEDDING_ENV, "mock")
+        .assert()
+        .success();
+    kcs(&dir, &["index", "--approve"])
+        .env(kcs_adapter::catalog::TEST_ADOPTED_EMBEDDING_ENV, "mock")
+        .assert()
+        .success();
+
+    let trace = dir.path().join("query-embed.trace");
+    let page1_output = kcs(
+        &dir,
+        &["search", "replaycacheterm", "--hybrid", "--limit", "1"],
+    )
+    .env(kcs_adapter::catalog::TEST_ADOPTED_EMBEDDING_ENV, "mock")
+    .env("KCS_TEST_QUERY_EMBED_TRACE", &trace)
+    .arg("--json")
+    .assert()
+    .success()
+    .get_output()
+    .stdout
+    .clone();
+    let page1: Value = serde_json::from_slice(&page1_output).unwrap();
+    assert_eq!(page1["resolved_mode"], "hybrid", "{page1}");
+    let cursor = page1["paging"]["next_cursor"]
+        .as_str()
+        .expect("3-document fixture must page at limit=1")
+        .to_owned();
+    let page1_chunk = page1["results"][0]["chunk_hash"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    let after_page1 = fs::read_to_string(&trace).unwrap();
+    assert_eq!(
+        after_page1.lines().count(),
+        1,
+        "page 1 must send the query embedding exactly once: {after_page1:?}"
+    );
+
+    let page2_output = kcs(
+        &dir,
+        &[
+            "search",
+            "replaycacheterm",
+            "--hybrid",
+            "--limit",
+            "1",
+            "--cursor",
+            &cursor,
+        ],
+    )
+    .env(kcs_adapter::catalog::TEST_ADOPTED_EMBEDDING_ENV, "mock")
+    .env("KCS_TEST_QUERY_EMBED_TRACE", &trace)
+    .arg("--json")
+    .assert()
+    .success()
+    .get_output()
+    .stdout
+    .clone();
+    let page2: Value = serde_json::from_slice(&page2_output).unwrap();
+    assert_eq!(page2["resolved_mode"], "hybrid", "{page2}");
+
+    // The trace file gained NO new lines: replay never re-embedded.
+    let after_page2 = fs::read_to_string(&trace).unwrap();
+    assert_eq!(
+        after_page2.lines().count(),
+        1,
+        "cursor replay must NOT send a second query embedding: {after_page2:?}"
+    );
+
+    // The replay's own hit differs from page 1's, proving it genuinely
+    // advanced using a working (reused) ranking, not a stalled repeat.
+    let page2_chunk = page2["results"][0]["chunk_hash"].as_str().unwrap();
+    assert_ne!(
+        page1_chunk, page2_chunk,
+        "page 2 must advance past page 1's hit: page1={page1} page2={page2}"
+    );
+}
+
+/// R23-01 (05 §1.5 L234 "欠落・不一致は... KCS-E-SEARCH-CURSOR-001"): a cursor
+/// replay whose page-1 query-vector cache has gone missing (evicted /
+/// `$XDG_CACHE_HOME` cleared / etc.) fails closed with
+/// `KCS-E-SEARCH-CURSOR-001` — it must NEVER fall back to re-embedding the
+/// query. Proven via the same trace seam as the sibling test above: the
+/// trace file gains no second line even on this failure path.
+#[test]
+fn r23_01_cursor_replay_with_evicted_cache_fails_closed_not_re_embed() {
+    let dir = tempfile::tempdir().unwrap();
+    for i in 0..3 {
+        fs::write(
+            dir.path().join(format!("doc{i}.md")),
+            format!("# Doc {i}\n\nevictedcacheterm entry number {i}\n"),
+        )
+        .unwrap();
+    }
+    kcs(&dir, &["init"])
+        .env(kcs_adapter::catalog::TEST_ADOPTED_EMBEDDING_ENV, "mock")
+        .assert()
+        .success();
+    kcs(&dir, &["index", "--approve"])
+        .env(kcs_adapter::catalog::TEST_ADOPTED_EMBEDDING_ENV, "mock")
+        .assert()
+        .success();
+
+    let trace = dir.path().join("query-embed.trace");
+    let page1_output = kcs(
+        &dir,
+        &["search", "evictedcacheterm", "--hybrid", "--limit", "1"],
+    )
+    .env(kcs_adapter::catalog::TEST_ADOPTED_EMBEDDING_ENV, "mock")
+    .env("KCS_TEST_QUERY_EMBED_TRACE", &trace)
+    .arg("--json")
+    .assert()
+    .success()
+    .get_output()
+    .stdout
+    .clone();
+    let page1: Value = serde_json::from_slice(&page1_output).unwrap();
+    let cursor = page1["paging"]["next_cursor"]
+        .as_str()
+        .expect("3-document fixture must page at limit=1")
+        .to_owned();
+    assert_eq!(fs::read_to_string(&trace).unwrap().lines().count(), 1);
+
+    // Evict the device-local query-vector cache entirely (simulates a
+    // cleared/pruned $XDG_CACHE_HOME between page 1 and the replay).
+    fs::remove_dir_all(dir.path().join(".test-cache")).unwrap();
+
+    let page2_output = kcs(
+        &dir,
+        &[
+            "search",
+            "evictedcacheterm",
+            "--hybrid",
+            "--limit",
+            "1",
+            "--cursor",
+            &cursor,
+        ],
+    )
+    .env(kcs_adapter::catalog::TEST_ADOPTED_EMBEDDING_ENV, "mock")
+    .env("KCS_TEST_QUERY_EMBED_TRACE", &trace)
+    .arg("--json")
+    .assert()
+    .code(2)
+    .get_output()
+    .stderr
+    .clone();
+    let page2: Value = serde_json::from_slice(&page2_output).unwrap();
+    assert_eq!(page2["error_code"], "KCS-E-SEARCH-CURSOR-001", "{page2}");
+
+    // Still exactly one line: the failure path never re-embedded either.
+    assert_eq!(
+        fs::read_to_string(&trace).unwrap().lines().count(),
+        1,
+        "a cache-miss replay must fail closed, never fall back to re-embedding"
+    );
 }
 
 /// PC24/PC27 (05 §1.5 L207 / §1.8): `query_vector_digest` is present at the
@@ -594,12 +1067,14 @@ fn pc48_scope_flag_is_exact_match_not_string_prefix() {
         &["search", "prefixmatchterm", "--scope", &a_str, "--text"],
     );
     assert_eq!(result["searched_scopes"].as_array().unwrap().len(), 1);
+    // R23-20 (03 §4 L296): scope_path is the canonical `.kcs` directory, not
+    // the scope root `a` itself.
     assert_eq!(
         result["searched_scopes"][0]["scope_path"]
             .as_str()
             .map(std::path::Path::new)
             .and_then(|p| p.canonicalize().ok()),
-        a.canonicalize().ok()
+        a.join(".kcs").canonicalize().ok()
     );
 }
 

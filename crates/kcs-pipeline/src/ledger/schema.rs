@@ -171,11 +171,12 @@ impl LedgerDb {
 }
 
 /// Create the 3-table schema on a fresh store, or self-heal a missing/malformed
-/// required index on an existing one (CL08 / 10 §7.5.3). Table-shape migration
-/// beyond the one-time JSONL cutover is deliberately not attempted here — this
-/// store is greenfield (no prior `cost-ledger.sqlite` releases exist to diverge
-/// from), so the only legitimate "existing but wrong" case in practice is an
-/// index left behind by an interrupted earlier run of this same routine.
+/// required index on an existing one (CL08 / 10 §7.5.3). Table-shape MIGRATION
+/// beyond the one-time JSONL cutover is deliberately not attempted here (R23-24
+/// reduced scope — see [`detect_table_shape_mismatch`]'s doc comment): the only
+/// self-healing this routine performs on an existing store is the index repair
+/// below. A table whose shape does not match this build's DDL-of-record is
+/// detected and refused (fail-closed), not silently migrated in place.
 fn ensure_schema(conn: &Connection) -> Result<()> {
     let tables = table_names(conn)?;
     let has_any = tables.contains("cost_ledger")
@@ -192,6 +193,10 @@ fn ensure_schema(conn: &Connection) -> Result<()> {
         })?;
         return Ok(());
     }
+    // R23-24: fail-closed on a table-shape mismatch (or a partial table set)
+    // BEFORE any index self-heal DDL runs against a store this build cannot
+    // verify the row invariants of.
+    detect_table_shape_mismatch(conn)?;
     // CL08: repair a missing or shape-mismatched required index without
     // touching the tables themselves.
     repair_index_shape(
@@ -206,6 +211,57 @@ fn ensure_schema(conn: &Connection) -> Result<()> {
         "batch_requests",
         CREATE_IDX_BATCH_REQUESTS_INFLIGHT_SQL,
     )?;
+    Ok(())
+}
+
+/// R23-24 (10 §7.5.3: "形状検出は sqlite_master の CREATE 文 (列・CHECK 制約を
+/// 含む) の canonical 比較で行う — 対象は `cost_ledger` / `batch_requests` /
+/// `schema_migrations` の 3 表すべて"; reduced adjudicated scope — the
+/// in-place table-shape MIGRATION 10 §7.5.3 also describes is explicit backlog,
+/// not implemented here): on an EXISTING store (this is only called once
+/// `ensure_schema` has already established at least one of the 3 tables is
+/// present), every one of the 3 tables must both exist and canonical-compare
+/// equal to this build's DDL-of-record. A table existing with a non-canonical
+/// shape (an added/removed/retyped column, a changed CHECK constraint, ...)
+/// means the store was created or migrated by a different code version than
+/// this build expects — this build's row invariants (the CHECK constraints
+/// `classify_check_violation`/§5.8's "1 回のみ" durability rely on, among
+/// others) cannot be trusted to hold, so this refuses to open rather than
+/// operate silently against an unverified shape. A table missing while
+/// `ensure_schema`'s caller already determined `has_any` is torn/partial store
+/// state no legitimate code path produces (all 3 tables are always created
+/// together, in one savepoint) — treated identically to a shape mismatch.
+fn detect_table_shape_mismatch(conn: &Connection) -> Result<()> {
+    for (table_name, create_sql) in [
+        ("cost_ledger", CREATE_COST_LEDGER_SQL),
+        ("batch_requests", CREATE_BATCH_REQUESTS_SQL),
+        ("schema_migrations", CREATE_SCHEMA_MIGRATIONS_SQL),
+    ] {
+        let current = object_sql(conn, "table", table_name)?.ok_or_else(|| {
+            PipelineError::corrupt(
+                table_name,
+                format!(
+                    "cost-ledger.sqlite is missing table `{table_name}` while other \
+                     cost-ledger.sqlite tables already exist (10-operations.md §7.5.3 shape \
+                     detection) — a legitimate store always creates all 3 tables together in one \
+                     savepoint; this is a torn or hand-edited store, not a supported partial shape."
+                ),
+            )
+        })?;
+        if canonical_sql_tokens(&current) != canonical_sql_tokens(create_sql) {
+            return Err(PipelineError::corrupt(
+                table_name,
+                format!(
+                    "cost-ledger.sqlite table `{table_name}` shape does not match this build's \
+                     DDL-of-record (04-pipeline.md §5.4 SQL 正本) — refusing to open a store whose \
+                     row invariants this build cannot verify (10-operations.md §7.5.3 canonical \
+                     shape detection: table/column/CHECK constraint comparison). In-place \
+                     table-shape migration is not implemented; recovery requires a \
+                     schema-compatible build."
+                ),
+            ));
+        }
+    }
     Ok(())
 }
 
@@ -471,5 +527,105 @@ mod tests {
         let a = "CREATE INDEX foo ON t(a); -- trailing comment\n";
         let b = "CREATE   INDEX\nfoo\nON\nt(a);";
         assert_eq!(canonical_sql_tokens(a), canonical_sql_tokens(b));
+    }
+
+    // R23-24 (10 §7.5.3 shape detection, reduced scope: detection only, no
+    // in-place migration): a `cost_ledger` table that exists but is missing the
+    // `usd` CHECK constraint entirely (same columns, weaker invariants — the
+    // exact "CHECK differs, column existence check would miss it" case 10
+    // §7.5.3 calls out) must refuse to open rather than silently trust a
+    // shape this build never validated.
+    #[test]
+    fn r23_24_table_shape_mismatch_refuses_to_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cost-ledger.sqlite");
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE cost_ledger (
+                    scope_id          TEXT NOT NULL,
+                    adapter_kind      TEXT NOT NULL,
+                    input_hash        TEXT NOT NULL,
+                    tool_profile_hash TEXT NOT NULL,
+                    submission_seq    INTEGER NOT NULL,
+                    batch_job_id      TEXT NOT NULL,
+                    usd               REAL NOT NULL,
+                    estimated         INTEGER NOT NULL DEFAULT 0 CHECK (estimated IN (0, 1)),
+                    outcome           TEXT NOT NULL,
+                    month             TEXT NOT NULL,
+                    recorded_at       INTEGER NOT NULL,
+                    UNIQUE (scope_id, adapter_kind, input_hash, tool_profile_hash, submission_seq)
+                );",
+            )
+            .unwrap();
+            conn.execute_batch(CREATE_IDX_COST_LEDGER_MONTH_SQL)
+                .unwrap();
+            conn.execute_batch(CREATE_BATCH_REQUESTS_SQL).unwrap();
+            conn.execute_batch(CREATE_IDX_BATCH_REQUESTS_INFLIGHT_SQL)
+                .unwrap();
+            conn.execute_batch(CREATE_SCHEMA_MIGRATIONS_SQL).unwrap();
+        }
+        // `LedgerDb` does not implement `Debug` (its `rusqlite::Connection`
+        // field does not), so `.unwrap_err()` (which requires `T: Debug`) is
+        // not usable here — match instead.
+        let err = match LedgerDb::open(&path) {
+            Ok(_) => panic!("expected LedgerDb::open to refuse a shape-mismatched cost_ledger"),
+            Err(err) => err,
+        };
+        assert!(
+            err.to_string().contains("KCS-E-STORE-CORRUPT-001"),
+            "got {err:?}"
+        );
+    }
+
+    // R23-24: a store with only SOME of the 3 required tables (a torn/partial
+    // shape no legitimate code path produces — `ensure_schema`'s fresh-create
+    // branch always creates all 3 together in one savepoint) must also refuse
+    // to open, rather than let a later `CREATE INDEX ... ON <missing table>`
+    // fail with an opaque, uncategorized SQL error.
+    #[test]
+    fn r23_24_partial_table_set_refuses_to_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cost-ledger.sqlite");
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(CREATE_COST_LEDGER_SQL).unwrap();
+            conn.execute_batch(CREATE_IDX_COST_LEDGER_MONTH_SQL)
+                .unwrap();
+            // batch_requests and schema_migrations deliberately omitted.
+        }
+        let err = match LedgerDb::open(&path) {
+            Ok(_) => panic!("expected LedgerDb::open to refuse a partial table set"),
+            Err(err) => err,
+        };
+        assert!(
+            err.to_string().contains("KCS-E-STORE-CORRUPT-001"),
+            "got {err:?}"
+        );
+    }
+
+    // R23-24: a store whose 3 tables exactly match the DDL-of-record must open
+    // normally and still reach the existing CL08 index self-heal — the new
+    // detection must not false-positive on a legitimately-shaped store (every
+    // OTHER test in this module already exercises this implicitly; this test
+    // names the R23-24 non-regression explicitly).
+    #[test]
+    fn r23_24_matching_table_shape_opens_and_still_self_heals_index() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cost-ledger.sqlite");
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(CREATE_COST_LEDGER_SQL).unwrap();
+            conn.execute_batch(CREATE_IDX_COST_LEDGER_MONTH_SQL)
+                .unwrap();
+            conn.execute_batch(CREATE_BATCH_REQUESTS_SQL).unwrap();
+            conn.execute_batch(CREATE_SCHEMA_MIGRATIONS_SQL).unwrap();
+            // idx_batch_requests_inflight deliberately omitted — proves shape
+            // detection runs (and passes) BEFORE the pre-existing index repair.
+        }
+        let db = LedgerDb::open(&path).unwrap();
+        assert!(object_sql(&db.conn, "index", "idx_batch_requests_inflight")
+            .unwrap()
+            .is_some());
     }
 }

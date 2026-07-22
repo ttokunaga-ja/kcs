@@ -141,12 +141,16 @@ fn ct4_restore_preflight_no_clobber_and_force_confirmation() {
     fs::create_dir(&destination).unwrap();
     fs::write(destination.join("b.md"), b"existing").unwrap();
 
+    // R23-26 (06 §5 L282-285): KCS-E-COMMIT-RESTORE-CONFLICT-001 is
+    // documented as always-retryable exit 3, not the generic exit 1 this
+    // preflight rejection used before the fix.
     let error = json_failure(
         &dir,
         &["restore", &commit, "--to", &path_text(&destination)],
-        1,
+        3,
     );
     assert_eq!(error["error_code"], "KCS-E-COMMIT-RESTORE-CONFLICT-001");
+    assert_eq!(error["context"]["retry_disposition"], "manual_action");
     assert!(!destination.join("a.md").exists());
     assert_eq!(fs::read(destination.join("b.md")).unwrap(), b"existing");
 
@@ -178,6 +182,46 @@ fn ct4_restore_preflight_no_clobber_and_force_confirmation() {
     assert_eq!(output["overwritten_count"], 1);
     assert_eq!(fs::read(destination.join("a.md")).unwrap(), b"alpha");
     assert_eq!(fs::read(destination.join("b.md")).unwrap(), b"beta");
+}
+
+/// R23-26 (06 §5 L282-285): the plain "no --force, destination file already
+/// exists" preflight rejection carries `KCS-E-COMMIT-RESTORE-CONFLICT-001`'s
+/// documented exit 3 (retryable) and a `retry_disposition` in context, not
+/// the generic exit 1 + bare `{"path": ...}` context it returned before the
+/// fix. Distinct from `ct4_restore_preflight_no_clobber_and_force_confirmation`
+/// above, which exercises the same rejection only as a setup step before its
+/// own `--force`/`--yes` assertions.
+#[test]
+fn r23_26_restore_conflict_no_force_is_exit_3_with_retry_disposition() {
+    let dir = TempDir::new().unwrap();
+    let out = TempDir::new().unwrap();
+    init(&dir);
+    fs::write(dir.path().join("notes.md"), b"fresh content").unwrap();
+    let commit = snapshot(&dir, "source");
+    let destination = out.path().join("r23-26-out");
+    fs::create_dir(&destination).unwrap();
+    fs::write(destination.join("notes.md"), b"pre-existing content").unwrap();
+
+    let error = json_failure(
+        &dir,
+        &["restore", &commit, "--to", &path_text(&destination)],
+        3,
+    );
+    assert_eq!(error["error_code"], "KCS-E-COMMIT-RESTORE-CONFLICT-001");
+    assert_eq!(error["context"]["retry_disposition"], "manual_action");
+    // context.path names the conflicting destination leaf (exact string may be
+    // realpath-canonicalized on platforms with a symlinked temp dir, e.g.
+    // macOS's /var -> /private/var, so this checks the suffix rather than an
+    // exact match).
+    assert!(error["context"]["path"]
+        .as_str()
+        .unwrap()
+        .ends_with("r23-26-out/notes.md"));
+    // Preflight rejection must not have touched the pre-existing file.
+    assert_eq!(
+        fs::read(destination.join("notes.md")).unwrap(),
+        b"pre-existing content"
+    );
 }
 
 #[test]

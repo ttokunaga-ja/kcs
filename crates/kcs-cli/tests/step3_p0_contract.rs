@@ -338,11 +338,13 @@ fn ct3_embed_002_incompatible_profile_falls_back_or_errors() {
     assert_eq!(auto["resolved_mode"], "text");
     assert_eq!(auto["fallback"], true);
     assert_eq!(auto["error_code"], "KCS-E-SEARCH-VEC-INCOMPAT-001");
+    // R23-14(a) (05 §1.8 L425 / 06 §7 L330): explicit --vector's INCOMPAT
+    // hard error is exit 8 (IncompatibleProfile), not the generic exit 1.
     let err = json_failure_embed(
         &dir,
         "incompatible_profile",
         &["search", "トークン", "--vector"],
-        1,
+        8,
     );
     assert_eq!(err["error_code"], "KCS-E-SEARCH-VEC-INCOMPAT-001");
 }
@@ -1094,15 +1096,17 @@ fn ct3_multi_001_default_searches_participating_indexed_scopes() {
     }
     // Default search (no --all-scopes) from scope a still reaches sibling b.
     let search = json_success_path(&a, &data_home, &["search", "unique sibling 4242"]);
+    // R23-20 (03 §4 L296): scope_path is now the canonical `.kcs` directory,
+    // not its parent — the suffix check widens to the last two components.
     assert!(value_path_ends_with(
         &first_result(&search)["scope_path"],
-        "b"
+        "b/.kcs"
     ));
     let searched = search["searched_scopes"].as_array().unwrap();
     assert_eq!(searched.len(), 2, "c (participates=false) must be excluded");
     assert!(searched
         .iter()
-        .all(|scope| !value_path_ends_with(&scope["scope_path"], "c")));
+        .all(|scope| !value_path_ends_with(&scope["scope_path"], "c/.kcs")));
 }
 
 #[test]
@@ -1128,9 +1132,10 @@ fn ct3_multi_008_all_scopes_flag_targets_all_indexed_scopes() {
         &data_home,
         &["search", "unique sibling 4242", "--all-scopes"],
     );
+    // R23-20 (03 §4 L296): scope_path is the canonical `.kcs` directory.
     assert!(value_path_ends_with(
         &first_result(&search)["scope_path"],
-        "b"
+        "b/.kcs"
     ));
     assert_eq!(search["searched_scopes"].as_array().unwrap().len(), 2);
 }
@@ -1214,9 +1219,10 @@ fn ct3_multi_002_cross_scope_merge_is_rank_based() {
     let expected = 1.0f64 / 61.0;
     assert!((results[0]["score"].as_f64().unwrap() - expected).abs() < 1e-12);
     // Deterministic tie-break by scope_id: b's low id precedes a's high id even
-    // though registry/input order is path a then path b.
-    assert!(value_path_ends_with(&results[0]["scope_path"], "b"));
-    assert!(value_path_ends_with(&results[1]["scope_path"], "a"));
+    // though registry/input order is path a then path b. R23-20 (03 §4 L296):
+    // scope_path is the canonical `.kcs` directory.
+    assert!(value_path_ends_with(&results[0]["scope_path"], "b/.kcs"));
+    assert!(value_path_ends_with(&results[1]["scope_path"], "a/.kcs"));
 }
 
 #[test]
@@ -1340,7 +1346,8 @@ fn ct3_multi_005_partial_failure_returns_results_with_exit_3() {
     assert_eq!(search["searched_scopes"].as_array().unwrap().len(), 1);
     let excluded = search["excluded_scopes"].as_array().unwrap();
     assert_eq!(excluded.len(), 1);
-    assert!(value_path_ends_with(&excluded[0]["scope_path"], "b"));
+    // R23-20 (03 §4 L296): scope_path is the canonical `.kcs` directory.
+    assert!(value_path_ends_with(&excluded[0]["scope_path"], "b/.kcs"));
     // 05 §1.8: excluded_scopes[] = {scope_id, scope_path, reason} — the reason
     // must be recorded, not just the fact of exclusion.
     assert!(!excluded[0]["reason"].as_str().unwrap().is_empty());
@@ -1694,9 +1701,13 @@ fn ct3_obs_001_index_status_reports_partial_enrichment() {
     assert_eq!(status["budget_paused"], false);
 }
 
-// CT3-HYBRID-003: "text も vector も不可 → error" on a PLAIN auto search (no
-// flags). Both backends live in sqlite.db, so deleting it makes them both
-// structurally unavailable → KCS-E-SEARCH-VEC-UNAVAIL-001, exit 1 (05 §1.1).
+// CT3-HYBRID-003: "text も vector も不可" on a PLAIN auto search (no flags).
+// Both backends live in sqlite.db, so deleting it makes them both
+// structurally unavailable. R23-14(b) (06 §7 L345-346 "sqlite.db 不在・利用不能
+// ... 全経路 ... KCS-E-INDEX-REBUILDING-001・exit 3"): this used to be the
+// permanent-looking KCS-E-SEARCH-VEC-UNAVAIL-001 / exit 1 — now the same
+// retryable classification a mid-rebuild window gets (`kcs repair
+// --rebuild-db` resolves it, same as waiting out a rebuild).
 #[test]
 fn ct3_hybrid_003_text_and_vector_unavailable_is_an_error() {
     let dir = indexed_scope();
@@ -1705,8 +1716,8 @@ fn ct3_hybrid_003_text_and_vector_unavailable_is_an_error() {
     assert!(!before["results"].as_array().unwrap().is_empty());
     // Remove the search index: text (FTS5) and vector (chunk_vec) are both gone.
     fs::remove_file(dir.path().join(".kcs/index/sqlite.db")).unwrap();
-    let err = json_failure(&dir, &["search", "認証仕様"], 1);
-    assert_eq!(err["error_code"], "KCS-E-SEARCH-VEC-UNAVAIL-001");
+    let err = json_failure(&dir, &["search", "認証仕様"], 3);
+    assert_eq!(err["error_code"], "KCS-E-INDEX-REBUILDING-001");
     // The excluded scope list discloses why (index_missing).
     assert_eq!(
         err["context"]["excluded_scopes"][0]["reason"],
@@ -1728,18 +1739,102 @@ fn ct3_obs_002_metrics_use_search_namespace_code_and_component() {
 }
 
 // K8 / CT3-FTS-004: search is served from sqlite.db; deleting it disables search
-// (both backends unavailable → VEC-UNAVAIL, exit 1 — CT3-HYBRID-003 conformance),
-// and `repair --rebuild-db` re-derives the FTS index from chunks.
+// (both backends unavailable — R23-14(b): KCS-E-INDEX-REBUILDING-001 / exit 3,
+// CT3-HYBRID-003 conformance), and `repair --rebuild-db` re-derives the FTS
+// index from chunks.
 #[test]
 fn ct3_fts_004_rebuild_db_reenables_fts_search() {
     let dir = indexed_scope();
     fs::remove_file(dir.path().join(".kcs/index/sqlite.db")).unwrap();
     // With the only scope's index gone, text and vector are both unavailable.
-    let err = json_failure(&dir, &["search", "認証仕様"], 1);
-    assert_eq!(err["error_code"], "KCS-E-SEARCH-VEC-UNAVAIL-001");
+    let err = json_failure(&dir, &["search", "認証仕様"], 3);
+    assert_eq!(err["error_code"], "KCS-E-INDEX-REBUILDING-001");
     json_success(&dir, &["repair", "--rebuild-db"]);
     let after = json_success(&dir, &["search", "認証仕様"]);
     assert!(!after["results"].as_array().unwrap().is_empty());
+}
+
+/// R23-21 (05 §1.8 L416-417 "RRF 済み unique semantic chunk 上位
+/// candidate_depth 件を候補として返す"): when the text and vector backends'
+/// own top-N are DISJOINT, `fuse_rrf`'s union can carry up to 2x
+/// `candidate_depth` candidates out of a single scope — more than the
+/// per-scope contract promises the cross-scope merge / global MMR. Proven
+/// with candidate_depth=1 and two documents constructed so each backend's
+/// sole top-1 pick differs: one document's body is byte-identical to the
+/// query (the SHA256-seeded mock embedding has no partial-similarity
+/// structure, so identical text is the only way to force cosine=1.0,
+/// unbeatable vector rank 1); the other repeats the query term densely
+/// (unbeatable BM25 text rank 1) while textually differing from the query
+/// (so its mock vector is uncorrelated — effectively random relative to the
+/// query's).
+#[test]
+fn r23_21_hybrid_per_scope_candidates_are_truncated_to_candidate_depth() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(
+        dir.path().join("vector_favored.md"),
+        "# V\n\ndepthprobe divergence fixture\n",
+    )
+    .unwrap();
+    let filler = "depthprobe ".repeat(30);
+    fs::write(
+        dir.path().join("text_favored.md"),
+        format!("# T\n\n{filler}unrelated padding words here\n"),
+    )
+    .unwrap();
+    kcs(&dir, &["init"]).assert().success();
+    json_success_embed(&dir, "mock", &["index", "--approve"]);
+
+    // Empirically confirm the fixture gives the two backends disjoint top-1
+    // picks (deterministic given the SHA256-seeded mock embedding above, not
+    // a coin flip).
+    let text_only = json_success_embed(
+        &dir,
+        "mock",
+        &["search", "depthprobe divergence fixture", "--text"],
+    );
+    let vector_only = json_success_embed(
+        &dir,
+        "mock",
+        &["search", "depthprobe divergence fixture", "--vector"],
+    );
+    let text_top1 = text_only["results"][0]["chunk_hash"].as_str().unwrap();
+    let vector_top1 = vector_only["results"][0]["chunk_hash"].as_str().unwrap();
+    assert_ne!(
+        text_top1, vector_top1,
+        "fixture must give the two backends disjoint top-1 picks: text={text_only} \
+         vector={vector_only}"
+    );
+
+    // candidate_depth=1: without the R23-21 truncate, `fuse_rrf`'s union of
+    // both backends' disjoint top-1s would carry 2 candidates out of this
+    // one scope. PC49/PC50 (05 §1.8 L384-387): the folder config only
+    // applies for a single, non-`--descendants` `--scope <path>` search, so
+    // `--scope .` is required here for `candidate_depth = 1` to take effect
+    // (a bare default search would use the user/device layer instead).
+    fs::write(
+        dir.path().join(".kcs/config.toml"),
+        "kcs_format_version = \"0.1.0\"\n[search.rrf]\ncandidate_depth = 1\n",
+    )
+    .unwrap();
+    let hybrid = json_success_embed(
+        &dir,
+        "mock",
+        &[
+            "search",
+            "depthprobe divergence fixture",
+            "--hybrid",
+            "--limit",
+            "20",
+            "--scope",
+            ".",
+        ],
+    );
+    assert_eq!(
+        hybrid["results"].as_array().unwrap().len(),
+        1,
+        "candidate_depth=1 must cap the per-scope candidate pool to 1 even when text/vector \
+         top-1 disagree: {hybrid}"
+    );
 }
 
 fn line_count(path: impl AsRef<Path>) -> usize {
@@ -2672,12 +2767,16 @@ fn m4_corrupt_sqlite_scope_excluded_multiscope_exit_3() {
     assert_eq!(search["searched_scopes"].as_array().unwrap().len(), 1);
     let excluded = search["excluded_scopes"].as_array().unwrap();
     assert_eq!(excluded.len(), 1);
-    assert!(value_path_ends_with(&excluded[0]["scope_path"], "b"));
+    // R23-20 (03 §4 L296): scope_path is the canonical `.kcs` directory.
+    assert!(value_path_ends_with(&excluded[0]["scope_path"], "b/.kcs"));
     assert_eq!(excluded[0]["reason"], "index_corrupt");
 }
 
-// M4: a single corrupt-index scope lands on the existing VEC-UNAVAIL branch
-// (exit 1) rather than an exit-2 config-schema lie, with reason "index_corrupt".
+// M4: a single corrupt-index scope lands on the KCS-E-INDEX-REBUILDING-001
+// branch (R23-14(b), 06 §7 L345-346: sqlite.db unusable is retryable exit 3,
+// same as `index_missing` and a mid-rebuild window — `kcs repair
+// --rebuild-db` resolves it) rather than an exit-2 config-schema lie, with
+// reason "index_corrupt".
 #[test]
 fn m4_single_corrupt_sqlite_is_vec_unavailable() {
     let dir = indexed_scope();
@@ -2686,8 +2785,8 @@ fn m4_single_corrupt_sqlite_is_vec_unavailable() {
         b"not a sqlite database at all",
     )
     .unwrap();
-    let err = json_failure(&dir, &["search", "認証仕様"], 1);
-    assert_eq!(err["error_code"], "KCS-E-SEARCH-VEC-UNAVAIL-001");
+    let err = json_failure(&dir, &["search", "認証仕様"], 3);
+    assert_eq!(err["error_code"], "KCS-E-INDEX-REBUILDING-001");
     assert_eq!(
         err["context"]["excluded_scopes"][0]["reason"],
         "index_corrupt"
@@ -3371,7 +3470,10 @@ fn o6_short_sha256_operand_is_usage_error() {
 // (g) / O7: a scope_id collision (a wholesale `.kcs` copy) makes a cursor replay
 // ambiguous — detected the same way the Evidence path is
 // (KCS-E-REGISTRY-DUP-001, step4b-contract-tests-p2b.md PB21/22), not
-// silently pinned to one copy.
+// silently pinned to one copy. R23-25 (05 §1.8 L425 / 06 §7 L361 "DUP →
+// exit 3"): the search-domain occurrence of this code is retryable exit 3
+// (dedupe, then retry) — distinct from the Evidence-resolution path's own
+// exit 4 default (`registry_duplicate_error`, unaffected by this fix).
 #[test]
 fn o7_cursor_replay_detects_scope_id_collision() {
     let parent = tempfile::tempdir().unwrap();
@@ -3429,7 +3531,7 @@ fn o7_cursor_replay_detects_scope_id_collision() {
     }
 
     let (code, err) = run_json(&a, &data_home, &["search", "認証仕様", "--cursor", &cursor]);
-    assert_eq!(code, 4, "ambiguous cursor scope must fail: {err}");
+    assert_eq!(code, 3, "ambiguous cursor scope must fail: {err}");
     assert_eq!(err["error_code"], "KCS-E-REGISTRY-DUP-001");
 }
 
@@ -5593,7 +5695,8 @@ fn r16_2_one_scope_store_corruption_is_partial_not_all_failed() {
     let excluded = search["excluded_scopes"].as_array().unwrap();
     assert_eq!(excluded.len(), 1);
     assert_eq!(excluded[0]["reason"], "store_corrupt");
-    assert!(value_path_ends_with(&excluded[0]["scope_path"], "b"));
+    // R23-20 (03 §4 L296): scope_path is the canonical `.kcs` directory.
+    assert!(value_path_ends_with(&excluded[0]["scope_path"], "b/.kcs"));
 }
 
 // R16-3: a fresh search against a scope whose HEAD advanced via a bare `snapshot`
@@ -5653,7 +5756,8 @@ fn r16_3_fresh_search_shallow_no_rows_excludes_not_silent_empty() {
     let excluded = search["excluded_scopes"].as_array().unwrap();
     assert_eq!(excluded.len(), 1);
     assert_eq!(excluded[0]["reason"], "snapshot_shallow");
-    assert!(value_path_ends_with(&excluded[0]["scope_path"], "b"));
+    // R23-20 (03 §4 L296): scope_path is the canonical `.kcs` directory.
+    assert!(value_path_ends_with(&excluded[0]["scope_path"], "b/.kcs"));
 }
 
 // R16-4(a): `repair --rebuild-db` — the only implemented recovery command — must not

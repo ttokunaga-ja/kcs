@@ -70,6 +70,14 @@ fn key(scope: &str, adapter: &str, hash: &str) -> TaskKey {
     TaskKey::new(scope, adapter, hash, "tool-profile-1")
 }
 
+/// R23-02: a `device_cap` value pre-existing `device_claim` call sites in this
+/// file pass when they are testing something else (in-flight/claim-lost
+/// mechanics, not the cap check itself) and always call with `estimated_usd =
+/// 0.0` — the `ExemptZeroCost`-equivalent path bypasses the cap check
+/// entirely regardless of this value, so any value works; a large one
+/// documents "this test does not care about the cap."
+const R23_02_NEVER_DENY_DEVICE_CAP: f64 = 1_000_000.0;
+
 fn plain_terminal_write<'a>(
     task_key: &'a TaskKey,
     outcome: Outcome,
@@ -738,7 +746,9 @@ fn cl16_phase2a_upload_ordering_and_residue_survives_job_create_failure() {
 }
 
 /// CL17: phase 2b's `job_create_started_at` durable pre-write, then
-/// `batch_job_id`+`state=1` on success; scope-mismatch restarts phase 2a.
+/// `batch_job_id`+`state=1` on success; scope-mismatch restarts phase 2a —
+/// R23-19: only once the caller confirms the old upload's deletion (an
+/// unconfirmed attempt is a no-op that preserves the locators).
 #[test]
 fn cl17_phase2b_job_create_started_then_created_and_scope_mismatch_restart() {
     let (_dir, db) = open_temp_ledger();
@@ -792,7 +802,10 @@ fn cl17_phase2b_job_create_started_then_created_and_scope_mismatch_restart() {
     assert_eq!(done.batch_job_id.as_deref(), Some("provider-job-1"));
 
     // (b) scope mismatch on a fresh attempt: job is never called; upload is
-    // cleared so phase 2a restarts.
+    // cleared so phase 2a restarts — but (R23-19) ONLY once the caller
+    // confirms the old upload is actually gone. An unconfirmed attempt must
+    // leave the locators intact (the only discovery key a later cleanup pass
+    // has for that upload).
     let (_dir2, db2) = open_temp_ledger();
     let key2 = key("s2", "markdownize", "h2");
     let intent2 = phase1_intent(db2.connection(), &key2, RequestKind::Batch, 1.0, None).unwrap();
@@ -806,10 +819,30 @@ fn cl17_phase2b_job_create_started_then_created_and_scope_mismatch_restart() {
     phase2a_record_upload_id(db2.connection(), &key2, &intent2.intent_token, "upload-old").unwrap();
     let row2 = get_batch_request(db2.connection(), &key2).unwrap().unwrap();
     assert!(!phase2b_scope_matches(&row2, "prov-scope-new"));
-    assert!(
-        phase2a_restart_after_scope_mismatch(db2.connection(), &key2, &intent2.intent_token)
-            .unwrap()
+
+    // R23-19: unconfirmed deletion — a no-op, locators must survive.
+    assert!(!phase2a_restart_after_scope_mismatch(
+        db2.connection(),
+        &key2,
+        &intent2.intent_token,
+        false
+    )
+    .unwrap());
+    let unconfirmed = get_batch_request(db2.connection(), &key2).unwrap().unwrap();
+    assert_eq!(unconfirmed.upload_id.as_deref(), Some("upload-old"));
+    assert_eq!(
+        unconfirmed.provider_scope_id.as_deref(),
+        Some("prov-scope-old")
     );
+
+    // Confirmed deletion — now the restart proceeds.
+    assert!(phase2a_restart_after_scope_mismatch(
+        db2.connection(),
+        &key2,
+        &intent2.intent_token,
+        true
+    )
+    .unwrap());
     let restarted = get_batch_request(db2.connection(), &key2).unwrap().unwrap();
     assert!(restarted.upload_id.is_none());
     assert!(restarted.provider_scope_id.is_none());
@@ -1077,6 +1110,146 @@ fn cl24_abandon_settlement_also_bumps_seq_by_one() {
     assert!(ledger_rows[0].estimated);
     assert_eq!(ledger_rows[0].outcome, Outcome::Abandoned);
     assert_eq!(ledger_rows[0].batch_job_id, intent.intent_token);
+}
+
+/// R23-18 (04 §5.4 / AUD-16: "剪定・確定済みの 4 組 key への `kcs batch
+/// abandon` は対象なしの冪等成功"): a `state=2` (Completed) row whose success
+/// charge is already durably recorded, but whose residual `intent_token` is
+/// still set (upload cleanup crashed before completing), must NOT be
+/// re-settled by abandon — no new `submission_seq`, no additional
+/// `cost_ledger` row. Before this fix `execute_abandon` walked such a row
+/// through the same reseat-and-charge path as any other in-flight/terminal
+/// row (CL24's `reseat_submission_seq: true` + a fresh `abandoned` INSERT),
+/// double-billing an already-succeeded task. `provider_scope_id` stays
+/// non-NULL here (an upload may still exist) — cleanup stays pending, exactly
+/// mirroring the ORIGINAL (non-Completed) abandon path's own note-5 split.
+#[test]
+fn r23_18_abandon_on_completed_row_with_residual_token_does_not_recharge() {
+    let (_dir, db) = open_temp_ledger();
+    let task_key = key("s", "markdownize", "h");
+    let intent = phase1_intent(db.connection(), &task_key, RequestKind::Batch, 3.0, None).unwrap();
+    phase2a_record_provider_scope(db.connection(), &task_key, &intent.intent_token, "prov")
+        .unwrap();
+    phase2a_record_upload_id(db.connection(), &task_key, &intent.intent_token, "up").unwrap();
+    phase2b_record_job_create_started(db.connection(), &task_key, &intent.intent_token).unwrap();
+    phase2b_record_job_created(db.connection(), &task_key, &intent.intent_token, "job-1").unwrap();
+
+    // Success lands (state=2), but a crash before upload cleanup completes
+    // leaves intent_token set (clear_intent_token=false simulates this —
+    // same override `cl37`'s stalled-row test uses).
+    terminal_transaction(
+        db.connection(),
+        &TerminalWrite {
+            clear_intent_token: false,
+            ..plain_terminal_write(
+                &task_key,
+                Outcome::Succeeded,
+                BilledAmount {
+                    usd: 3.0,
+                    estimated: false,
+                },
+                "job-1",
+                BatchState::Completed,
+                None,
+            )
+        },
+    )
+    .unwrap();
+    let before = get_batch_request(db.connection(), &task_key)
+        .unwrap()
+        .unwrap();
+    assert_eq!(before.state, BatchState::Completed);
+    assert!(
+        before.intent_token.is_some(),
+        "residual token — cleanup still pending"
+    );
+
+    let execution = execute_abandon(db.connection(), &task_key).unwrap();
+    assert_eq!(execution, AbandonExecution::Abandoned);
+
+    // No re-charge: still exactly the ONE succeeded row, same seq.
+    let ledger_rows = cost_ledger_rows_for_key(db.connection(), &task_key).unwrap();
+    assert_eq!(ledger_rows.len(), 1, "abandon must not add a second charge");
+    assert_eq!(ledger_rows[0].outcome, Outcome::Succeeded);
+    assert_eq!(ledger_rows[0].usd, 3.0);
+    assert_eq!(ledger_rows[0].submission_seq, intent.submission_seq);
+
+    let after = get_batch_request(db.connection(), &task_key)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        after.state,
+        BatchState::Completed,
+        "state must stay Completed, not become Terminal"
+    );
+    // provider_scope_id is still Some (upload never confirmed deleted), so
+    // per note-5 the token cleanup stays pending too.
+    assert!(after.provider_scope_id.is_some());
+    assert!(after.intent_token.is_some());
+}
+
+/// R23-18 companion: when the residual row's `provider_scope_id` is already
+/// NULL (no upload could possibly exist — sync rows never set it, CL47),
+/// abandon on a Completed row DOES clear the token (pure residue cleanup,
+/// note-5's immediate-clear case), still without any re-charge.
+#[test]
+fn r23_18_abandon_on_completed_sync_row_clears_token_without_recharge() {
+    let (_dir, db) = open_temp_ledger();
+    let task_key = key("s", "embedding", "h2");
+    let intent = phase1_intent(
+        db.connection(),
+        &task_key,
+        RequestKind::Sync,
+        1.5,
+        Some(300),
+    )
+    .unwrap();
+    terminal_transaction(
+        db.connection(),
+        &TerminalWrite {
+            clear_intent_token: false,
+            ..plain_terminal_write(
+                &task_key,
+                Outcome::Succeeded,
+                BilledAmount {
+                    usd: 1.5,
+                    estimated: true,
+                },
+                &intent.intent_token,
+                BatchState::Completed,
+                None,
+            )
+        },
+    )
+    .unwrap();
+    let before = get_batch_request(db.connection(), &task_key)
+        .unwrap()
+        .unwrap();
+    assert!(
+        before.provider_scope_id.is_none(),
+        "sync rows never set provider_scope_id"
+    );
+    assert!(before.intent_token.is_some());
+
+    let execution = execute_abandon(db.connection(), &task_key).unwrap();
+    assert_eq!(execution, AbandonExecution::Abandoned);
+
+    let after = get_batch_request(db.connection(), &task_key)
+        .unwrap()
+        .unwrap();
+    assert_eq!(after.state, BatchState::Completed);
+    assert!(
+        after.intent_token.is_none(),
+        "no upload could exist — cleanup completes immediately"
+    );
+
+    let ledger_rows = cost_ledger_rows_for_key(db.connection(), &task_key).unwrap();
+    assert_eq!(
+        ledger_rows.len(),
+        1,
+        "still just the one succeeded charge, no re-settlement"
+    );
+    assert_eq!(ledger_rows[0].outcome, Outcome::Succeeded);
 }
 
 /// CL25: `cost_ledger` has no UPDATE code path — the implementation's only
@@ -1382,23 +1555,43 @@ fn cl36_recovery_deadline_uses_the_later_of_token_time_and_job_create_started() 
 }
 
 /// CL35 (visibility grace period half — the full-page-scan half is an external
-/// provider-listing concern this module does not own): the default 10-minute
-/// grace period is measured from the token's embedded issue time.
+/// provider-listing concern this module does not own) / R23-05: the default
+/// 10-minute grace period is measured from the row's own durable
+/// `job_create_started_at` (04 §5.4 DDL: "batch 行 = 可視化猶予・回復期限の
+/// 起点") — NOT from the `intent_token`'s embedded UUIDv7 issue time, which
+/// this test used before R23-05 (AUD-13's failure scenario: a slow phase 2a
+/// upload makes the token issue time diverge from when job creation actually
+/// started, understating the true in-flight window and reporting grace as
+/// elapsed too early — a double-invocation risk). A `job_create_started_at
+/// IS NULL` row (phase 2b never started) has no basis to measure from and
+/// must never report elapsed, matching 04 §5.8's own rule that such rows are
+/// excluded from job-list confirmed-absent matching entirely.
 #[test]
-fn cl35_visibility_grace_period_measured_from_token_issue_time() {
-    let (_dir, db) = open_temp_ledger();
-    let task_key = key("s", "markdownize", "h");
-    let intent = phase1_intent(db.connection(), &task_key, RequestKind::Batch, 1.0, None).unwrap();
-    let now = now_millis();
+fn cl35_r23_05_visibility_grace_period_measured_from_job_create_started_at() {
+    let job_create_started_at = 1_700_000_000_000_i64;
     assert!(!visibility_grace_period_elapsed(
-        &intent.intent_token,
-        now,
+        Some(job_create_started_at),
+        job_create_started_at,
         DEFAULT_VISIBILITY_GRACE_PERIOD_MS
     ));
-    let after_grace = now + DEFAULT_VISIBILITY_GRACE_PERIOD_MS + 1_000;
+    let almost_grace = job_create_started_at + DEFAULT_VISIBILITY_GRACE_PERIOD_MS - 1;
+    assert!(!visibility_grace_period_elapsed(
+        Some(job_create_started_at),
+        almost_grace,
+        DEFAULT_VISIBILITY_GRACE_PERIOD_MS
+    ));
+    let after_grace = job_create_started_at + DEFAULT_VISIBILITY_GRACE_PERIOD_MS + 1_000;
     assert!(visibility_grace_period_elapsed(
-        &intent.intent_token,
+        Some(job_create_started_at),
         after_grace,
+        DEFAULT_VISIBILITY_GRACE_PERIOD_MS
+    ));
+
+    // R23-05: NULL basis (phase 2b never started) can never be "elapsed",
+    // however large `now` is.
+    assert!(!visibility_grace_period_elapsed(
+        None,
+        i64::MAX,
         DEFAULT_VISIBILITY_GRACE_PERIOD_MS
     ));
 }
@@ -1859,7 +2052,15 @@ fn cl51_extend_after_claim_lost_reports_claim_lost() {
         "q-hash",
         "embed-profile",
     );
-    let claim = device_claim(db.connection(), &task_key, 0.0, 300).unwrap();
+    let claim = device_claim(
+        db.connection(),
+        &task_key,
+        0.0,
+        300,
+        R23_02_NEVER_DENY_DEVICE_CAP,
+        None,
+    )
+    .unwrap();
     let ClaimOutcome::Claimed(outcome) = claim else {
         panic!("expected a fresh claim");
     };
@@ -1925,11 +2126,27 @@ fn cl54_same_key_live_inflight_falls_back_without_a_second_phase1() {
         "shared-q",
         "embed-profile",
     );
-    let first = device_claim(db.connection(), &task_key, 0.0, 300).unwrap();
+    let first = device_claim(
+        db.connection(),
+        &task_key,
+        0.0,
+        300,
+        R23_02_NEVER_DENY_DEVICE_CAP,
+        None,
+    )
+    .unwrap();
     let ClaimOutcome::Claimed(first_outcome) = first else {
         panic!("expected the first claim to succeed");
     };
-    let second = device_claim(db.connection(), &task_key, 0.0, 300).unwrap();
+    let second = device_claim(
+        db.connection(),
+        &task_key,
+        0.0,
+        300,
+        R23_02_NEVER_DENY_DEVICE_CAP,
+        None,
+    )
+    .unwrap();
     assert_eq!(second, ClaimOutcome::InFlight);
     let row = get_batch_request(db.connection(), &task_key)
         .unwrap()
@@ -2030,6 +2247,264 @@ fn seed_terminal_device_row(
             ],
         )
         .unwrap();
+}
+
+/// R23-02 (04 §5.4 / AUD-11 / A-14): `device_claim` denies (no reservation
+/// made) when the DEVICE cap would be exceeded — mirroring
+/// `check_then_reserve`'s CL56-58 cap semantics for task charges, which
+/// `device_claim` previously bypassed entirely (the fix-report-flagged gap
+/// this session closes).
+#[test]
+fn r23_02_device_claim_denies_on_device_cap_exceeded() {
+    let (_dir, db) = open_temp_ledger();
+    seed_confirmed_charge(&db, "some-folder-x", "embedding", 48.0);
+    let task_key = TaskKey::new(
+        TaskKey::DEVICE_SCOPE_ID,
+        "embedding",
+        "over-device-cap",
+        "embed-profile",
+    );
+    let claim = with_immediate_transaction(db.connection(), || {
+        device_claim(db.connection(), &task_key, 5.0, 300, 50.0, None)
+    })
+    .unwrap();
+    assert_eq!(claim, ClaimOutcome::Denied(CapLayer::Device));
+    assert!(
+        get_batch_request(db.connection(), &task_key)
+            .unwrap()
+            .is_none(),
+        "a denied claim must not create a phase-1 row"
+    );
+}
+
+/// R23-02: the per_adapter(embedding) layer denies independently of a
+/// (much larger) device cap — 04 §5.4's third condition, applied to device
+/// rows for the first time by this fix.
+#[test]
+fn r23_02_device_claim_denies_on_per_adapter_cap_exceeded() {
+    let (_dir, db) = open_temp_ledger();
+    seed_confirmed_charge(&db, "some-folder-x", "embedding", 13.0);
+    let task_key = TaskKey::new(
+        TaskKey::DEVICE_SCOPE_ID,
+        "embedding",
+        "over-per-adapter-cap",
+        "embed-profile",
+    );
+    let claim = with_immediate_transaction(db.connection(), || {
+        device_claim(db.connection(), &task_key, 5.0, 300, 1000.0, Some(15.0))
+    })
+    .unwrap();
+    assert_eq!(claim, ClaimOutcome::Denied(CapLayer::PerAdapter));
+    assert!(get_batch_request(db.connection(), &task_key)
+        .unwrap()
+        .is_none());
+}
+
+/// R23-02: `estimated_usd == 0.0` (a zero-priced local embedding adapter)
+/// bypasses the device-row cap check entirely, mirroring CL58's task-charge
+/// exemption — even caps of `0.0` must still allow the claim.
+#[test]
+fn r23_02_device_claim_zero_cost_bypasses_cap_even_when_over() {
+    let (_dir, db) = open_temp_ledger();
+    seed_confirmed_charge(&db, "some-folder-x", "embedding", 999.0);
+    let task_key = TaskKey::new(
+        TaskKey::DEVICE_SCOPE_ID,
+        "embedding",
+        "free-claim",
+        "embed-profile",
+    );
+    let claim = with_immediate_transaction(db.connection(), || {
+        device_claim(db.connection(), &task_key, 0.0, 300, 0.0, Some(0.0))
+    })
+    .unwrap();
+    assert!(matches!(claim, ClaimOutcome::Claimed(_)));
+}
+
+/// R23-03 (04 §5.4 / AUD-12 / A-15): once another process's stale-sweep
+/// reclaims a device row (settling the original token `unknown_settled` and
+/// clearing `intent_token`), the ORIGINAL holder's own terminal write — still
+/// carrying the now-superseded token, arriving after a slow adapter call
+/// returns — must be CAS-guarded and record NOTHING: no new `cost_ledger`
+/// row, no disturbance of the reclaimer's already-settled row. Before this
+/// fix, the write path used `intent_token_guard: None` and would have
+/// unconditionally landed a second charge on the reclaimer's newer
+/// generation.
+#[test]
+fn r23_03_settle_after_reclaim_does_not_double_charge() {
+    let (_dir, db) = open_temp_ledger();
+    let task_key = TaskKey::new(
+        TaskKey::DEVICE_SCOPE_ID,
+        "embedding",
+        "raced-query",
+        "embed-profile",
+    );
+    let claim = with_immediate_transaction(db.connection(), || {
+        device_claim(
+            db.connection(),
+            &task_key,
+            0.02,
+            300,
+            R23_02_NEVER_DENY_DEVICE_CAP,
+            None,
+        )
+    })
+    .unwrap();
+    let ClaimOutcome::Claimed(original) = claim else {
+        panic!("expected the first claim to succeed");
+    };
+
+    // Another process's stale sweep reclaims this exact row — settles the
+    // original token unknown and clears intent_token (what
+    // `execute_bounded_sweep` does to a row whose `stale_after_at` elapsed
+    // while the original holder's adapter call was still in flight).
+    recovery_settle_unknown(
+        db.connection(),
+        &task_key,
+        &original.intent_token,
+        0.02, // the claim's own estimated_usd (Phase1Outcome does not carry it back)
+        true,
+    )
+    .unwrap();
+    let after_reclaim = get_batch_request(db.connection(), &task_key)
+        .unwrap()
+        .unwrap();
+    assert!(after_reclaim.intent_token.is_none());
+    let rows_after_reclaim = cost_ledger_rows_for_key(db.connection(), &task_key).unwrap();
+    assert_eq!(rows_after_reclaim.len(), 1);
+    assert_eq!(rows_after_reclaim[0].outcome, Outcome::UnknownSettled);
+
+    // The ORIGINAL holder's adapter call finally "returns" — its terminal
+    // write, still using the now-superseded token, must be CAS-guarded
+    // (mirrors `settle_task_charge_success`'s `intent_token_guard:
+    // Some(intent_token)` after R23-03).
+    let receipt = terminal_transaction(
+        db.connection(),
+        &TerminalWrite {
+            key: &task_key,
+            outcome: Outcome::Succeeded,
+            billed: BilledAmount {
+                usd: 0.02,
+                estimated: true,
+            },
+            ledger_batch_job_id: &original.intent_token,
+            next_state: BatchState::Completed,
+            error: None,
+            increment_contract_violation: false,
+            attempts_delta: 1,
+            clear_intent_token: true,
+            intent_token_guard: Some(&original.intent_token),
+            reseat_submission_seq: false,
+        },
+    )
+    .unwrap();
+    assert!(
+        !receipt.recorded,
+        "CAS-guarded write on a superseded token must record nothing"
+    );
+    assert!(!receipt.row_updated);
+
+    // No second cost_ledger row: still exactly the reclaimer's one
+    // unknown_settled row.
+    let rows_final = cost_ledger_rows_for_key(db.connection(), &task_key).unwrap();
+    assert_eq!(
+        rows_final.len(),
+        1,
+        "must still be exactly the reclaimer's one row"
+    );
+    assert_eq!(rows_final[0].outcome, Outcome::UnknownSettled);
+}
+
+/// R23-04 (04 §5.4 / AUD-15 / A-16): the own-key bounded-sweep pool matches
+/// the FULL 4-tuple (including `tool_profile_hash`), not just
+/// `(adapter_kind, input_hash)` — a stale row sharing only the first two with
+/// the key about to be claimed is a DIFFERENT task identity (§5.5) and
+/// belongs in the capped general pool, never the unbounded own-key pool.
+#[test]
+fn r23_04_own_key_sweep_requires_full_four_tuple_match() {
+    let (_dir, db) = open_temp_ledger();
+    let claiming_key = TaskKey::new(
+        TaskKey::DEVICE_SCOPE_ID,
+        "embedding",
+        "shared-input-hash",
+        "profile-a",
+    );
+    let other_profile_key = TaskKey::new(
+        TaskKey::DEVICE_SCOPE_ID,
+        "embedding",
+        "shared-input-hash",
+        "profile-b",
+    );
+    for k in [&claiming_key, &other_profile_key] {
+        phase1_intent(db.connection(), k, RequestKind::Sync, 0.0, Some(300)).unwrap();
+    }
+    // Force both stale.
+    db.connection()
+        .execute(
+            "UPDATE batch_requests SET stale_after_at = ?1 WHERE input_hash = 'shared-input-hash'",
+            params![now_millis() - 1],
+        )
+        .unwrap();
+
+    let plan = plan_bounded_sweep(db.connection(), Some(&claiming_key), now_millis()).unwrap();
+    assert!(
+        plan.own_key_stale.contains(&claiming_key),
+        "the exact claiming key belongs in the unbounded own-key pool"
+    );
+    assert!(
+        !plan.own_key_stale.contains(&other_profile_key),
+        "R23-04: a different tool_profile_hash must NOT ride the own-key exemption"
+    );
+    assert!(
+        plan.general_stale.contains(&other_profile_key),
+        "a different tool_profile_hash belongs in the capped general pool instead"
+    );
+}
+
+/// R23-30 (04 §5.4 / A-21): a fractional `retry_after_seconds` (e.g. `600.5`)
+/// rounds UP (`ceil`), never truncates — truncating computes a protection
+/// deadline strictly SHORTER than the provider's actual requested wait,
+/// reopening the double-invocation window this deadline exists to close.
+#[test]
+fn r23_30_retry_after_fractional_seconds_rounds_up_not_down() {
+    let (_dir, db) = open_temp_ledger();
+    let task_key = TaskKey::new(
+        TaskKey::DEVICE_SCOPE_ID,
+        "embedding",
+        "fractional-retry-after",
+        "embed-profile",
+    );
+    let claim = device_claim(
+        db.connection(),
+        &task_key,
+        0.0,
+        300,
+        R23_02_NEVER_DENY_DEVICE_CAP,
+        None,
+    )
+    .unwrap();
+    let ClaimOutcome::Claimed(outcome) = claim else {
+        panic!("expected a fresh claim");
+    };
+    let before = now_millis();
+    let extension = device_extend_stale_after(
+        db.connection(),
+        &task_key,
+        &outcome.intent_token,
+        600.5,
+        300,
+    )
+    .unwrap();
+    let ExtendOutcome::Extended(new_value) = extension else {
+        panic!("expected the extension to succeed");
+    };
+    // ceil(600.5) = 601 (not truncated 600) -> 601 + 300 + 60 = 961s margin.
+    let lower_bound = before + 961_000;
+    let upper_bound = lower_bound + 5_000; // generous slack for test execution time
+    assert!(
+        (lower_bound..=upper_bound).contains(&new_value),
+        "got {new_value}, expected roughly {lower_bound} (601s Retry-After ceiling, \
+         not the 600s a truncating cast would compute)"
+    );
 }
 
 // ---------------------------------------------------------------------------
