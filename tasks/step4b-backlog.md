@@ -46,8 +46,14 @@ eval (offline) と北極星 3 シナリオはこれら無しで Done に到達�
   除去 + marker 消費 / pending 存在中の materialize 抑止)。ledger 演算不変 (auth = settle+clear、
   rate_limit = row open 維持 — r16_7 課金 1 行が生存)。既存テスト 18 本を最終規範へ反転、
   +12 本 (qa2/qa3 ×4・selfheal_01-04・scope 単体 ×4)。1,172/0。
-- その他: idempotency key (QA13)、ledger バックアップ/復元 (QA14/15)、orphan 帰属 (QA15)、
-  render_params identity (QA34) ほか
+- ~~idempotency key (QA13)、ledger バックアップ/復元 (QA14/15)、orphan 帰属 (QA15)~~ →
+  **2026-07-22 実装完了 (`b1a815b`)**: ProviderIdempotency 宣言 (非 identity field) ×
+  intent_token 送出の条件分岐 (両 built-in は NotProvided = 縮退 2 相のみ、seam で機構実証)・
+  user_version + companion file の復元検知 → KCS-E-BATCH-RESTORE-RECONCILE-001 ゲート
+  (Reused 行は通す)・`kcs ledger reconcile` 新設 (sync 回復 + batch 回復 walk 初配線 +
+  10 §7.5.2 帰属規則の orphan/unknown 逆方向照合、報告のみ・冪等)。既知の残し:
+  migrate.rs の JSONL cutover import は write_seq 非 bump (方向安全・一回性の歴史 import)。
+- その他: render_params identity (QA34) ほか
 
 ### 1-B. QB 残 19 (26/27/34-48/63-65)
 import/export (fork/kcsz)・observability 深部・J 領域残。MVP 機能面への影響なし。
@@ -73,6 +79,11 @@ import/export (fork/kcsz)・observability 深部・J 領域残。MVP 機能面�
 2. purged 終端 × contract_violation_count の 1 句 (Phase 3 メモ)
 3. `kcs batch abandon --yes` (非対話運用)
 4. ALTER TABLE 系 lint (10 §7.5.3 隣接)
+5. 10 §12.1 の BATCH 表へ `KCS-E-BATCH-RESTORE-RECONCILE-001` を追記 (QA14 ゲート —
+   CLEANUP-PENDING と同型、exit 1)
+6. 06-cli-spec §1 へ `kcs ledger reconcile` を追記 (JSON 形状・冪等・network opt-in 不要)
+7. 10 §7.5.2 へ復元検知の具体機構 1 句 (PRAGMA user_version 書込カウンタ + `.write-seq`
+   companion 照合 — 挙動規範は既存のまま、検知手段の明文化)
 
 適用済み: #1 決定的 query 正規化 (`1c6a55d`) / #2 スクリプト境界細分 + 短語 drop (`d6e8e85`) +
 ・U+30FB 補正 (`58cea60`) / #3 FTS 有界エスカレーション (`58cea60`)。
