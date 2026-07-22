@@ -28,10 +28,17 @@ fresh corpus / `eval/run_eval.py` 全 3 シナリオ):
 ### 1-A. オンライン Adapter/課金/承認機構 (QA 系の大半) — v1.0 スコープ判断待ち
 eval (offline) と北極星 3 シナリオはこれら無しで Done に到達済み。**online 課金運用を
 始める前には必須**の層。優先席:
-- **安全性直結 P0 (先行推奨)**: QA21 (送信 gate OR→AND — consent 意味論)、QA22 (承認永続化先の
-  spec 乖離)、QA25/26/27 (`kcs adapter revoke` CLI + CAS + pending 除去)、QA29/30/31
-  (`--online/--offline` 未配線 3 面)、QA16-19 (AdapterRun 課金記帳の型・pricing 表)
-- **破壊的変更を伴う P0**: QA2/3 (task 状態機械) — 単独ラウンド推奨
+- ~~**安全性直結 P0 (先行推奨)**: QA21/22/25-27/29-31/16-19~~ → **2026-07-22 実装完了
+  (`5dba4e5`)**: 送信 gate AND 化 (未設定 = 不成立)・approvals[] の scope.json 移設
+  (QA23/24 field 同梱、consents.jsonl は移行せず再承認方針)・`kcs adapter revoke` +
+  APPROVAL-CONFLICT-001/exit 5 + pending 4 組不問除去 + marker 消費・`--online|--offline`
+  4 コマンド配線・AdapterRun error 3 field + usage one-of・pricing 表 + USD 換算。
+  toml_edit で config boolean を書式保存書込。Step 2 世代の `ct2_network_004` は 07 §3 (b)
+  初回 materialize 例外 (最終規範) に合わせて反転更新。
+- **破壊的変更を伴う P0**: QA2/3 (task 状態機械) — 単独ラウンド推奨。**同梱予定の残り 2 点**
+  (5dba4e5 で意図的見送り): (1) AdapterRun.retry_after_ms → `next_retry_at` スケジューリング
+  結線、(2) 07 §3 のフル crash self-heal (任意コマンドからの pending 完遂 — 現状は revoke の
+  pending 除去 + publish 直前 CAS のみ)。
 - その他: idempotency key (QA13)、ledger バックアップ/復元 (QA14/15)、orphan 帰属 (QA15)、
   render_params identity (QA34) ほか
 
