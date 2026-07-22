@@ -1189,6 +1189,15 @@ U142 の Recall@10 射影変更 (`(raw_hash, section)` → `(raw_hash, section, 
 field) の存在確認までに限定し、`eval/` 配下の実際の計算式が新射影を採用しているかどうかの検証は
 本書の対象範囲内か外かを含めて未確定のまま残す。
 
+**Z4-決着 (2026-07-22 Phase 4 回帰補修)**: 懸念は的中した — `eval/run_eval.py` の Recall@10 射影は
+QB24 の 3 要素へ更新済みだったが、同ファイル内 `assess_history_coverage` の rename 網羅ガード
+(`{old_file, new_file} ⊆ correctly_recalled の paths`) に非伝播だった。golden は旧名しか記さないため
+新 path の alias 行は expected_set 経由で correctly recalled になり得ず、ガードは**構造的に充足不能**
+(Recall 32/32 = 1.0 でも `passes_m3_2 = false` に固定)。補修 = 新 path 側を「旧 identity の
+`new_file` 双子」として当該 raw を expected に持つ query 自身の top-10 から直接クレジット
+(無関係 query のノイズでは満たせない原則・Recall 指標本体・edited/deleted ガードは不変)。
+「fix が開けた穴」36 例目 (射影 fix → 下流ガード非伝播)。
+
 ### Z5. `kcs log --at/--since` の意味論全体 (QB50/51/52/54/55/56 関連)
 06-cli-spec.md における `kcs log` の規範は §1 L61 の 1 行 (フラグの存在のみ) に尽きる。§D の
 6 契約 (QB50: `--at` の history walk 起点変更、QB51: shallow commit 指定時の拒否要否、QB52:

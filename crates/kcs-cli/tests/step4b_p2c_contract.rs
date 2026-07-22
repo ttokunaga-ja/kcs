@@ -1310,12 +1310,18 @@ fn pc20_purge_rotates_index_generation() {
 // §C — tokenizer / MATCH generation (PC8-14)
 // ---------------------------------------------------------------------------
 
-/// PC12/PC13 (05 §1.3 L97-106): a short (< 3 Unicode scalar) token never
-/// enters the FTS5 MATCH expression (PC9 — trigram MATCH can't carry it) but
-/// still acts as a real `instr` AND-eligibility filter — a chunk matching
-/// the long token alone, without the short one, must not leak into results.
+/// PC12/PC13, reversed by the R-追記 (step4b-contract-tests-p2c.md,
+/// 2026-07-22 spec feedback #2 — 05 §1.3 L120-134): a short (< 3 Unicode
+/// scalar) unit in a MIXED query (>= 1 long unit) no longer enters the FTS5
+/// MATCH expression (PC9 — trigram MATCH can't carry it) NOR acts as an
+/// `instr` AND-eligibility filter — it is dropped outright. A chunk matching
+/// only the long token, without the short one, must still surface (the
+/// superseded PC12/13 AND-instr filter this replaced structurally excluded
+/// exactly this shape of document — natural-sentence chunks that never
+/// happen to spell a short function word/particle — which eval M3-2/M3-3
+/// measured as the dominant Recall@10 failure mode).
 #[test]
-fn pc12_pc13_short_token_is_an_and_filter_not_silently_dropped() {
+fn pc12_pc13_short_token_in_mixed_query_is_dropped_not_an_and_filter() {
     let dir = tempfile::tempdir().unwrap();
     fs::write(
         dir.path().join("with_ai.md"),
@@ -1334,17 +1340,26 @@ fn pc12_pc13_short_token_is_an_and_filter_not_silently_dropped() {
     let results = search["results"].as_array().unwrap();
     assert!(
         !results.is_empty(),
-        "the AND-filtered query must still match something: {search}"
+        "the long unit alone must still match something: {search}"
     );
-    for result in results {
-        let path = result["evidence_pointer"]["path_at_commit"]
-            .as_str()
-            .unwrap_or_default();
-        assert!(
-            path.contains("with_ai"),
-            "a result missing the short token 'AI' leaked through PC12's instr filter: {result}"
-        );
-    }
+    let paths: Vec<&str> = results
+        .iter()
+        .map(|result| {
+            result["evidence_pointer"]["path_at_commit"]
+                .as_str()
+                .unwrap_or_default()
+        })
+        .collect();
+    assert!(
+        paths.iter().any(|path| path.contains("with_ai")),
+        "the document containing both terms must be found: {search}"
+    );
+    assert!(
+        paths.iter().any(|path| path.contains("without_ai")),
+        "a document matching only the long unit 'authentication' — lacking \
+         the short unit 'AI' entirely — must no longer be excluded now that \
+         mixed-query short units are dropped instead of AND-filtered: {search}"
+    );
 }
 
 /// PC11 (05 §1.3 L95-97): a query where every token is short (< 3 Unicode
@@ -1455,5 +1470,97 @@ fn pc8_deterministic_numeric_and_bilingual_equivalence_forms_are_restored() {
         path_matches(&bilingual_query, "bilingual"),
         "an English query must find a doc using only the fixed チャンク/トークン \
          dictionary translation: {bilingual_query}"
+    );
+}
+
+/// R-追記 (step4b-contract-tests-p2c.md, 2026-07-22 spec feedback #2 — 05
+/// §1.3 L120-134): a document whose body never spells the query's
+/// agglutinated particle ("トークン**の**"/"...が") is still found. The query
+/// token "認証仕様のトークン" script-segments into 認証仕様 / の / トークン,
+/// and "秒だった資料" into 秒 / だった / 資料 — the document text below hits
+/// several of those segmented long units ("トークン", "TTL", "3,600")
+/// directly, and the segmentation-derived short units ("の", "が", "秒",
+/// "資料") are dropped outright rather than AND-filtered (this is a MIXED
+/// query — several long units exist). Pre-feedback-#2, the query's own short
+/// token "が" would have AND-instr-excluded this document (it uses "は",
+/// never "が").
+#[test]
+fn r_addendum_feedback2_mixed_query_short_particle_does_not_exclude_a_document_lacking_it() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(
+        dir.path().join("token-ttl.md"),
+        "# Auth spec\n\n## Token\nトークン TTL は 3,600 秒、リフレッシュは 24 時間ごと。\n",
+    )
+    .unwrap();
+    init(&dir);
+    success(&dir, &["index", "--offline", "--approve"]);
+
+    let search = success(
+        &dir,
+        &[
+            "search",
+            "認証仕様のトークン TTL が 3600 秒だった資料",
+            "--text",
+        ],
+    );
+    let results = search["results"].as_array().unwrap();
+    assert!(
+        !results.is_empty(),
+        "a document lacking the query's short particle 'が' must still be found \
+         once script-boundary segmentation feeds long sub-pieces into MATCH and \
+         mixed-query short-unit drop stops AND-filtering on 'が': {search}"
+    );
+    assert!(
+        results
+            .iter()
+            .any(|result| result["evidence_pointer"]["path_at_commit"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("token-ttl")),
+        "the token-ttl document itself must be among the results: {search}"
+    );
+}
+
+/// R-追記 (step4b-contract-tests-p2c.md, 2026-07-22 spec feedback #2 — 05
+/// §1.3 L120-134): a symbol-joined query token (`read/write/admin`)
+/// script-segments into read / write / admin, matching a document that
+/// spells the same enumeration with spaces around the slashes
+/// (`read / write / admin`) — and the query's own short particle "が"
+/// (from "スコープが" -> スコープ / が) is dropped rather than AND-filtered,
+/// so a document using "は" instead is not excluded.
+#[test]
+fn r_addendum_feedback2_mixed_query_slash_joined_unit_and_short_particle() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(
+        dir.path().join("scope-kinds.md"),
+        "# Auth memo\n\n## Scopes\nスコープは read / write / admin の 3 種類。\n",
+    )
+    .unwrap();
+    init(&dir);
+    success(&dir, &["index", "--offline", "--approve"]);
+
+    let search = success(
+        &dir,
+        &[
+            "search",
+            "スコープが read/write/admin の 3 種類だった認証メモ",
+            "--text",
+        ],
+    );
+    let results = search["results"].as_array().unwrap();
+    assert!(
+        !results.is_empty(),
+        "a slash-joined query token must still find a document that spells the \
+         same words with spaces around the slashes, and lacking 'が' must not \
+         exclude it: {search}"
+    );
+    assert!(
+        results
+            .iter()
+            .any(|result| result["evidence_pointer"]["path_at_commit"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("scope-kinds")),
+        "the scope-kinds document itself must be among the results: {search}"
     );
 }

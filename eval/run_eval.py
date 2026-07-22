@@ -883,16 +883,46 @@ def assess_history_coverage(responses_by_scenario, history_manifest):
     edited_missing = sorted(edited_required - m32_raws)
 
     rename_failures = []
+    m32_records = responses_by_scenario.get("M3-2", [])
     for entry in history_manifest.get("renamed", []):
         raw_hash = "sha256:" + entry["raw_sha256"]
         hits = [result for result in m32_results
                 if (result.get("evidence_pointer") or {}).get("raw_hash") == raw_hash]
-        paths = {(result.get("evidence_pointer") or {}).get("path_at_commit") for result in hits}
+        # QB24/裁定4 (U142) の 3 要素射影の帰結: golden は旧名しか記さないため
+        # expected_set 経由 (= m32_results) では新 path の alias 行が correctly
+        # recalled になり得ず、旧実装の {old,new} ⊆ paths は構造的に充足不能
+        # だった (射影変更の本ガードへの非伝播 — 2026-07-22 回帰補修)。新 path
+        # 側は「旧 identity の new_file 双子」として、当該 raw を expected に
+        # 持つ query 自身の top-10 から直接クレジットする (無関係 query の
+        # ノイズでは満たせない、という本ガードの原則は維持)。
+        twin_hits = []
+        for record in m32_records:
+            expected = record.get("expected_set") or set()
+            twin_identities = {
+                (raw, section, entry["new_file"])
+                for (raw, section, path) in expected
+                if raw == raw_hash and path == entry["old_file"]
+            }
+            if not twin_identities:
+                continue
+            for result in (record.get("response", {}).get("results") or [])[:10]:
+                pointer = result.get("evidence_pointer") or {}
+                identity = (
+                    pointer.get("raw_hash"),
+                    _pointer_section(pointer),
+                    pointer.get("path_at_commit"),
+                )
+                if identity in twin_identities:
+                    twin_hits.append(result)
+        paths = {(result.get("evidence_pointer") or {}).get("path_at_commit")
+                 for result in hits}
+        paths.update((result.get("evidence_pointer") or {}).get("path_at_commit")
+                     for result in twin_hits)
         required_paths = {entry["old_file"], entry["new_file"]}
         aliases_valid = bool(hits) and all(
             result.get("current_paths") == [entry["new_file"]]
             and result.get("current_path") == entry["new_file"]
-            for result in hits)
+            for result in hits + twin_hits)
         if not required_paths.issubset(paths) or not aliases_valid:
             rename_failures.append({
                 "scope": entry["scope"], "raw_hash": raw_hash,

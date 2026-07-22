@@ -2573,17 +2573,23 @@ struct ScopeTimeRequest<'a> {
 
 #[derive(Clone, Copy)]
 struct ScopeSearchRequest<'a> {
-    /// PC8 (05 §1.3 L110-115): the single OR-joined FTS5 MATCH expression
-    /// over every token with >= 3 Unicode scalars (each contributing its own
-    /// deterministic equivalence forms too, 05 §1.3 L116-123 —
-    /// `build_query_plan`), or `None` when every token is short (PC11's
-    /// bounded-LIKE-only fallback).
+    /// PC8/PC9 (05 §1.3 L110-115, L120-134): the single OR-joined FTS5 MATCH
+    /// expression over every UNIT (an original token or one of its
+    /// script-boundary sub-pieces, 2026-07-22 feedback #2 —
+    /// `segment_script_runs`) with >= 3 Unicode scalars (each contributing
+    /// its own deterministic equivalence forms too, 05 §1.3 L116-123 —
+    /// `build_query_plan`), or `None` when every unit is short (PC11's
+    /// bounded-LIKE-only fallback, a pure-short query).
     match_expr: Option<&'a str>,
-    /// PC11/PC12/PC13 (05 §1.3 L95-106): tokens with < 3 Unicode scalars —
-    /// applied as `instr(text, token) > 0` eligibility conditions common to
-    /// both the text and vector backends, and to the LIKE fallback's own
-    /// ORDER BY (PC14) when `match_expr` is `None`. `short_token_instr_sql`
-    /// expands each token's own equivalence forms here too.
+    /// PC11/PC14 (05 §1.3 L95-97, L107-109): applied as
+    /// `instr(text, token) > 0` eligibility conditions common to both the
+    /// text and vector backends, and to the LIKE fallback's own ORDER BY
+    /// when `match_expr` is `None`. `short_token_instr_sql` expands each
+    /// token's own equivalence forms here too. **Always empty when
+    /// `match_expr` is `Some`** (2026-07-22 feedback #2 — a mixed query's
+    /// short units are dropped outright, not AND-filtered; see
+    /// `build_query_plan`'s doc comment) — the raw token list only when
+    /// `match_expr` is `None` (pure-short query, every token short).
     short_tokens: &'a [String],
     resolved_mode: SearchMode,
     query_embedding: Option<&'a [f32]>,
@@ -3222,10 +3228,12 @@ struct ScopeQueryFilter<'a> {
     /// to the SQL `LIMIT` instead of a literal `200`.
     candidate_depth: u64,
     ancestor_gated: bool,
-    /// PC11/PC12/PC13: short (< 3 Unicode scalar) tokens, applied as
+    /// PC11/PC14: short (< 3 Unicode scalar) tokens, applied as
     /// `instr(text, token) > 0` AND conditions common to both backends —
     /// equivalence-form-expanded per token by `short_token_instr_sql` (05
-    /// §1.3 L116-123).
+    /// §1.3 L116-123). **Always empty for a mixed query** (>= 1 long unit,
+    /// 2026-07-22 feedback #2 — `build_query_plan`'s doc comment); non-empty
+    /// only for a pure-short query, where it carries the raw token list.
     short_tokens: &'a [String],
 }
 
@@ -3306,6 +3314,14 @@ fn config_association_ancestor_sql(ancestor_gated: bool) -> &'static str {
 /// `short_token_bind_values(short_tokens)` (same flattened per-token order)
 /// onto its bound-parameter list at the position matching where this
 /// fragment lands in the surrounding SQL text.
+///
+/// 2026-07-22 spec feedback #2 narrowed WHEN a caller ever passes a
+/// non-empty `short_tokens` here: `build_query_plan` now empties it outright
+/// for a mixed query (>= 1 long unit) instead of carrying its short leftover
+/// units, so in practice this only ever renders a real clause for a
+/// pure-short query (every token short) — this function itself is unchanged
+/// and stays agnostic to that; it just renders whatever it is given (`""`
+/// for an empty slice).
 fn short_token_instr_sql(column: &str, short_tokens: &[String]) -> String {
     short_tokens
         .iter()
@@ -3432,7 +3448,12 @@ fn vector_scope_search(
     // PC13 (05 §1.3 L101-106): short-token `instr` eligibility is common to
     // both backends — applied here too, before `ORDER BY`/`LIMIT
     // candidate_depth` confirms the vector candidate set, exactly like the
-    // text backend (`execute_fts_tier`). Every placeholder below is
+    // text backend (`execute_fts_tier`). Since 2026-07-22 feedback #2,
+    // `filter.short_tokens` is only ever non-empty for a PURE-SHORT query
+    // (`build_query_plan` empties it outright for a mixed query instead), so
+    // this predicate now only ever fires there — still correct as written,
+    // since it is a pure pass-through of whatever `short_tokens` it is
+    // given. Every placeholder below is
     // anonymous (`?`, not `?N`) so the dynamic `short_token_clause` can carry
     // a variable number of its own without renumbering the fixed ones —
     // `bound` (below) supplies values in the SAME order they appear in the
@@ -3539,12 +3560,14 @@ fn chunk_meta_row(row: &rusqlite::Row) -> rusqlite::Result<(String, ChunkMeta)> 
 }
 
 /// Per-scope text backend (PC8/PC11): run the single FTS5 MATCH query when
-/// `match_expr` is `Some` (>= 1 token had >= 3 Unicode scalars), else fall
-/// back entirely to the bounded LIKE (`instr`) scan (every token was short —
-/// trigram MATCH cannot carry them at all). The candidate list handed to RRF
-/// comes from exactly one executed query — BM25 order for the MATCH path,
-/// deterministic `instr`/`chunk_id` order for the fallback (05 §1.3 / K2
-/// ruling — no post-hoc re-ordering by hand-computed features).
+/// `match_expr` is `Some` (>= 1 unit — an original token or one of its
+/// script-boundary sub-pieces, 2026-07-22 feedback #2 — had >= 3 Unicode
+/// scalars), else fall back entirely to the bounded LIKE (`instr`) scan
+/// (every unit was short — trigram MATCH cannot carry them at all, a
+/// pure-short query). The candidate list handed to RRF comes from exactly
+/// one executed query — BM25 order for the MATCH path, deterministic
+/// `instr`/`chunk_id` order for the fallback (05 §1.3 / K2 ruling — no
+/// post-hoc re-ordering by hand-computed features).
 fn fts_scope_search(
     conn: &Connection,
     match_expr: Option<&str>,
@@ -3583,7 +3606,14 @@ fn execute_fts_tier(
     // ANDed into this same outer `WHERE`, over at most `candidate_depth` rows
     // — every placeholder is anonymous so its variable arity does not
     // renumber the fixed ones (`bound`, below, supplies values in the same
-    // order they appear in this text).
+    // order they appear in this text). Since 2026-07-22 feedback #2,
+    // `execute_fts_tier` only ever runs with `filter.short_tokens` empty
+    // (`fts_scope_search` only reaches here when `build_query_plan` produced
+    // a `match_expr`, which by construction means a mixed query, whose
+    // short units it drops entirely) — `short_token_clause` below is
+    // therefore always `""` in practice today. Left as a live pass-through
+    // (not special-cased away) so this stays correct unchanged if that
+    // invariant ever loosens.
     let sql = format!(
         "SELECT c.chunk_id, c.raw_hash, c.tool_profile_hash, c.heading_path,
                 c.section_id, c.byte_start, c.byte_end, c.text, c.gen
@@ -3672,10 +3702,11 @@ fn execute_like_fallback(
     let Some(first_token) = filter.short_tokens.first() else {
         // PC10 already rejects a zero-token query before any scope is ever
         // reached, so `execute_like_fallback` is only ever called with
-        // `match_expr = None`, which — by construction (`long`/`short`
-        // partition in `build_query_plan`) — implies at least one short
-        // token exists. Kept as a defensive empty-result rather than a panic
-        // in case a future caller reaches this some other way.
+        // `match_expr = None`, which — by construction (`build_query_plan`'s
+        // pure-short branch, 2026-07-22 feedback #2) — sets `short_tokens`
+        // to the query's own (non-empty) raw token list. Kept as a
+        // defensive empty-result rather than a panic in case a future
+        // caller reaches this some other way.
         return Ok((Vec::new(), BTreeMap::new()));
     };
     let sql = format!(
@@ -4288,16 +4319,26 @@ fn aggregate_store_recovery_hints(excluded: &[Value]) -> Vec<&'static str> {
     out
 }
 
-/// PC8/PC9 (05 §1.3 L110-115): the query's fixed tokenization and the
-/// resulting MATCH-generation plan — see [`build_query_plan`].
+/// PC8/PC9 (05 §1.3 L110-115) + deterministic script-boundary segmentation
+/// (05 §1.3 L120-134, 2026-07-22 spec feedback #2): the query's fixed
+/// tokenization/unit-generation and the resulting MATCH-generation plan —
+/// see [`build_query_plan`].
 struct QueryPlan {
-    /// The single OR-joined FTS5 MATCH expression over every token with >= 3
-    /// Unicode scalars (PC8's own worked example: `"C++" OR "token"`), or
-    /// `None` when every token is short (PC11: bounded-LIKE-only fallback).
+    /// The single OR-joined FTS5 MATCH expression over every UNIT (an
+    /// original whitespace token, or one of its [`segment_script_runs`]
+    /// pieces) with >= 3 Unicode scalars, or `None` when every unit is short
+    /// (PC11: bounded-LIKE-only fallback — a PURE-SHORT query, which by
+    /// construction means every original token was short too, since no
+    /// segmented piece can be longer than its own token).
     match_expr: Option<String>,
-    /// Tokens with < 3 Unicode scalars, in query order (PC11/12/13's
-    /// `instr` eligibility set — trigram MATCH silently drops anything
-    /// shorter, so these never enter `match_expr` at all).
+    /// The bounded-LIKE `instr` eligibility set (PC11/PC14). **Empty** for a
+    /// MIXED query (>= 1 long unit): 05 §1.3's 2026-07-22 feedback #2 drops
+    /// every short unit outright rather than AND-filtering candidates on it
+    /// (the predicate this replaced excluded documents that never spelled a
+    /// natural-sentence particle/function word — eval M3-2/M3-3's dominant
+    /// Recall@10 failure mode). **Equal to the RAW token list** (not the
+    /// segmented/deduplicated unit list) for a PURE-SHORT query — unchanged
+    /// from the pre-feedback-#2 behavior.
     short_tokens: Vec<String>,
 }
 
@@ -4318,6 +4359,118 @@ fn query_tokens(query_nfc: &str) -> Vec<String> {
 /// (brief-common #6).
 fn quote_fts_phrase(unit: &str) -> String {
     format!("\"{}\"", unit.replace('"', "\"\""))
+}
+
+/// Unicode script class used by [`segment_script_runs`]'s deterministic
+/// sub-token boundaries (05 §1.3 2026-07-22 spec feedback #2, "決定的
+/// スクリプト境界分割"). An `Other` run is never emitted as a unit — it is a
+/// pure separator (the original token, which the caller always keeps as its
+/// own unit alongside the segmented pieces, already preserves a symbol like
+/// `C++`'s trailing `+`s as an exact-phrase signal).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum ScriptClass {
+    Hiragana,
+    Katakana,
+    Han,
+    Alnum,
+    Other,
+}
+
+/// `ch`'s script class, EXCLUDING U+30FC (ー, the katakana-block long vowel
+/// mark) and the digit-neighbor `.`/`,` exception — both are
+/// context-sensitive on neighboring characters and are resolved by
+/// [`segment_script_runs`] itself before falling back to this function.
+fn classify_script_char(ch: char) -> ScriptClass {
+    let cp = ch as u32;
+    if (0x3041..=0x309F).contains(&cp) {
+        return ScriptClass::Hiragana;
+    }
+    if (0x30A0..=0x30FF).contains(&cp) || (0x31F0..=0x31FF).contains(&cp) {
+        // Covers both ー (U+30FC, handled specially by the caller before this
+        // function is ever reached for it) and ヶ (U+30F6) — ヶ needs no
+        // separate case since 0x30A0..=0x30FF already contains it.
+        return ScriptClass::Katakana;
+    }
+    // cp == 0x3005 is 々 (iteration mark), cp == 0x3006 is 〆 (closing mark) —
+    // both join an adjacent Han run per 05 §1.3's class list.
+    if (0x3400..=0x4DBF).contains(&cp)
+        || (0x4E00..=0x9FFF).contains(&cp)
+        || (0xF900..=0xFAFF).contains(&cp)
+        || (0x20000..=0x3FFFF).contains(&cp)
+        || cp == 0x3005
+        || cp == 0x3006
+    {
+        return ScriptClass::Han;
+    }
+    if ch.is_ascii_alphanumeric() {
+        return ScriptClass::Alnum;
+    }
+    ScriptClass::Other
+}
+
+/// PC8's unit-generation input (05 §1.3 2026-07-22 spec feedback #2,
+/// "決定的スクリプト境界分割"): split `token` at every Unicode-script-class
+/// transition and return each non-`Other` run, in input order. This is the
+/// deterministic sub-token piece list [`build_query_plan`] OR-alongside the
+/// token itself, so an agglutinated particle (query `スコープが` vs. corpus
+/// `スコープは`) or a symbol-joined enumeration (query `read/write/admin` vs.
+/// corpus `read / write / admin`) no longer has to match the whitespace
+/// token byte-for-byte.
+///
+/// Class rules (fixed at the `char` level — one Unicode scalar each):
+/// - Hiragana (U+3041-U+309F), Katakana (U+30A0-U+30FF, U+31F0-U+31FF — ヶ
+///   included), Han (U+3400-U+4DBF, U+4E00-U+9FFF, U+F900-U+FAFF,
+///   U+20000-U+3FFFF, plus 々/〆), ASCII alnum (`[0-9A-Za-z]`), else `Other`
+///   ([`classify_script_char`]).
+/// - U+30FC (ー) is the one context-sensitive exception: it continues the
+///   IMMEDIATELY PRECEDING character's own RESOLVED class when that class is
+///   Hiragana or Katakana (so `ローテーション`'s two ー never split its run);
+///   at the start of the token, or after any other class, it is Katakana
+///   (its own block's default).
+/// - `.`/`,` join an Alnum run only when the character immediately before
+///   AND immediately after it are both ASCII digits (`99.9`, `3,600`,
+///   `3.2GB` are each one run); otherwise they are `Other` (a bare
+///   separator, dropped).
+/// - `Other` runs are dropped entirely — never returned as a unit.
+fn segment_script_runs(token: &str) -> Vec<String> {
+    let chars: Vec<char> = token.chars().collect();
+    let len = chars.len();
+    let mut classes: Vec<ScriptClass> = Vec::with_capacity(len);
+    for (index, &ch) in chars.iter().enumerate() {
+        let class = if ch == '\u{30FC}' {
+            match classes.last() {
+                Some(ScriptClass::Hiragana) => ScriptClass::Hiragana,
+                Some(ScriptClass::Katakana) => ScriptClass::Katakana,
+                _ => ScriptClass::Katakana,
+            }
+        } else if (ch == '.' || ch == ',')
+            && index > 0
+            && index + 1 < len
+            && chars[index - 1].is_ascii_digit()
+            && chars[index + 1].is_ascii_digit()
+        {
+            ScriptClass::Alnum
+        } else {
+            classify_script_char(ch)
+        };
+        classes.push(class);
+    }
+    // Run-length grouping: every character in `[run_start, index)` shares
+    // `classes[run_start]`'s class by construction (a new run only starts
+    // right after a detected transition), so comparing the newest class
+    // against `classes[run_start]` is equivalent to — and cheaper than —
+    // comparing against `classes[index - 1]`.
+    let mut units = Vec::new();
+    let mut run_start = 0usize;
+    for index in 1..=len {
+        if index == len || classes[index] != classes[run_start] {
+            if classes[run_start] != ScriptClass::Other {
+                units.push(chars[run_start..index].iter().collect());
+            }
+            run_start = index;
+        }
+    }
+    units
 }
 
 /// Deterministic query normalization (05 §1.3 L116-123, 2026-07-22 spec
@@ -4444,38 +4597,95 @@ fn token_equivalence_forms(token: &str) -> Vec<String> {
 }
 
 /// PC8 (05 §1.3 L110-115) + deterministic query normalization (L116-123,
-/// 2026-07-22 spec feedback #1): machine-generate the MATCH expression —
-/// never interpret the query as FTS5 syntax (every form is quoted as an
-/// inert phrase via [`quote_fts_phrase`]; FTS5 operators the user typed are
-/// therefore literal query text, not directives) and never inject a word
-/// with no fixed, deterministic derivation from the input (PC8's "query 由来
-/// でない追加語を含まない" bans GUESSED words — synonym injection, history,
-/// context — not a token's own numeral/dictionary equivalence form, which
-/// the spec now names explicitly as query-derived). Every long token
-/// contributes itself plus `token_equivalence_forms`'s extra forms (if any)
-/// as additional `OR` arms — OR being associative, this flat per-token
-/// expansion is equivalent to (and simpler than) wrapping each token's own
-/// forms in their own parenthesized group. Tokens with 3 or more Unicode
-/// scalars join the expression this way; PC9's shorter ones can never match
-/// the trigram tokenizer at all (it silently drops sub-3-char phrases), so
-/// they are carried over as `short_tokens` for the caller's bounded `instr`
-/// eligibility predicate (PC11/12/13, itself also equivalence-form-aware —
-/// `short_token_instr_sql`) instead of being dropped outright.
+/// 2026-07-22 spec feedback #1) + deterministic script-boundary segmentation
+/// (L120-134, 2026-07-22 spec feedback #2): machine-generate the MATCH
+/// expression — never interpret the query as FTS5 syntax (every form is
+/// quoted as an inert phrase via [`quote_fts_phrase`]; FTS5 operators the
+/// user typed are therefore literal query text, not directives) and never
+/// inject a word with no fixed, deterministic derivation from the input
+/// (PC8's "query 由来でない追加語を含まない" bans GUESSED words — synonym
+/// injection, history, context — not a token's own numeral/dictionary
+/// equivalence form or script-boundary sub-piece, both of which the spec
+/// names explicitly as query-derived).
+///
+/// Unit generation (feedback #2): each whitespace token ([`query_tokens`])
+/// contributes itself FIRST, then its [`segment_script_runs`] pieces —
+/// preserving the token's own exact-phrase signal (`C++` stays matchable as
+/// `C++`) while the segmented pieces absorb agglutinated particles (query
+/// `スコープが` vs. corpus `スコープは`) and symbol-joined runs (query
+/// `read/write/admin` vs. corpus `read / write / admin`). Every token's
+/// candidates are concatenated in query order, then deduplicated keeping
+/// each string's first occurrence — a token whose segmentation reproduces
+/// itself exactly (e.g. `RAG`, one uniform Alnum run) contributes no
+/// separate duplicate entry, since that second, identical insertion attempt
+/// is simply absorbed by this same first-occurrence dedup (equivalent to,
+/// and simpler than, special-casing "segmentation == original token" up
+/// front). Each resulting unit then gets its own `token_equivalence_forms`
+/// — segmentation runs BEFORE equivalence expansion, never the reverse
+/// ("同値形は再細分しない").
+///
+/// long/short is decided PER UNIT (>= 3 Unicode scalars, PC9's trigram-MATCH
+/// floor), not per original token:
+/// - MIXED query (>= 1 long unit): every long unit — plus its own
+///   equivalence forms — becomes an OR arm of the single MATCH expression
+///   (OR being associative, this flat per-unit expansion is equivalent to,
+///   and simpler than, wrapping each unit's own forms in their own
+///   parenthesized group). Every short unit is dropped OUTRIGHT:
+///   `short_tokens` comes back empty, so the caller's bounded `instr`
+///   eligibility predicate (`short_token_instr_sql`) never fires for this
+///   query at all (05 §1.3 2026-07-22 feedback #2 — the AND-filter this
+///   superseded excluded documents that never spelled a natural-sentence
+///   particle/function word, eval M3-2/M3-3's dominant Recall@10 failure
+///   mode).
+/// - PURE-SHORT query (every unit < 3 Unicode scalars — equivalently, every
+///   ORIGINAL token is < 3, since no segmented piece can ever be longer than
+///   its own token): `match_expr` stays `None` (PC11's full bounded-LIKE
+///   fallback) and `short_tokens` is the RAW token list from
+///   [`query_tokens`] — NOT the segmented/deduplicated unit list — exactly
+///   the pre-feedback-#2 behavior (PC14's deterministic LIKE-fallback
+///   ordering is unaffected).
 fn build_query_plan(query_nfc: &str) -> QueryPlan {
-    let (long_tokens, short_tokens): (Vec<String>, Vec<String>) = query_tokens(query_nfc)
+    let tokens = query_tokens(query_nfc);
+
+    let mut units: Vec<String> = Vec::new();
+    let mut seen: BTreeSet<String> = BTreeSet::new();
+    for token in &tokens {
+        let mut candidates = vec![token.clone()];
+        candidates.extend(segment_script_runs(token));
+        for candidate in candidates {
+            if seen.insert(candidate.clone()) {
+                units.push(candidate);
+            }
+        }
+    }
+
+    let long_units: Vec<String> = units
         .into_iter()
-        .partition(|token| token.chars().count() >= 3);
-    let match_expr = (!long_tokens.is_empty()).then(|| {
-        long_tokens
+        .filter(|unit| unit.chars().count() >= 3)
+        .collect();
+
+    if long_units.is_empty() {
+        // Pure-short query: every unit (and therefore every original token)
+        // is short. Preserve the pre-feedback-#2 behavior byte-for-byte.
+        return QueryPlan {
+            match_expr: None,
+            short_tokens: tokens,
+        };
+    }
+
+    let match_expr = Some(
+        long_units
             .iter()
-            .flat_map(|token| token_equivalence_forms(token))
+            .flat_map(|unit| token_equivalence_forms(unit))
             .map(|form| quote_fts_phrase(&form))
             .collect::<Vec<_>>()
-            .join(" OR ")
-    });
+            .join(" OR "),
+    );
     QueryPlan {
         match_expr,
-        short_tokens,
+        // Mixed query: short units are fully discarded (see doc comment
+        // above) — never fed to the AND-instr eligibility predicate.
+        short_tokens: Vec::new(),
     }
 }
 
@@ -17002,18 +17212,173 @@ mod tests {
         // tokenizer performs the substring match when this whole quoted
         // phrase is used as a MATCH operand, 04 §4.1). PC8: no cross-token
         // contamination — each whitespace-delimited piece is its own phrase.
+        // 2026-07-22 feedback #2: each token's own script-boundary pieces
+        // (`segment_script_runs`) additionally OR-join alongside it.
         let plan = build_query_plan("RAG パイプラインで再ランクに Merlin を使う 5 段構成の資料");
         let match_expr = plan.match_expr.expect("several tokens are >= 3 chars");
+        // The original whitespace tokens are still present as their own
+        // exact-phrase units.
         assert!(match_expr.contains("\"RAG\""));
         assert!(match_expr.contains("\"Merlin\""));
         assert!(match_expr.contains("\"パイプラインで再ランクに\""));
         assert!(match_expr.contains("\"段構成の資料\""));
         // "を使う" is exactly 3 Unicode scalars ("を","使","う") — PC12's
-        // ">= 3" threshold puts it in the MATCH expression, not short_tokens.
+        // ">= 3" threshold puts it in the MATCH expression, not dropped as
+        // short. It stays as a single unit: segmenting hiragana/han/hiragana
+        // gives 3 sub-3-char pieces ("を","使","う"), none of which changes
+        // the outcome, but the ORIGINAL token itself is what qualifies here.
         assert!(match_expr.contains("\"を使う\""));
-        // "5" is the only token under 3 Unicode scalars here — PC12's
-        // short-token set.
-        assert_eq!(plan.short_tokens, vec!["5".to_owned()]);
+        // Script-boundary segmentation of "パイプラインで再ランクに"
+        // (katakana「パイプライン」/ hiragana「で」/ han「再」/
+        // katakana「ランク」/ hiragana「に」) additionally OR-joins its own
+        // >= 3 char pieces alongside the original token.
+        assert!(
+            match_expr.contains("\"パイプライン\""),
+            "the katakana run must also be OR-joined as its own unit: {match_expr}"
+        );
+        assert!(
+            match_expr.contains("\"ランク\""),
+            "the second katakana run must also be OR-joined as its own unit: {match_expr}"
+        );
+        // Script-boundary segmentation of "段構成の資料" (han「段構成」/
+        // hiragana「の」/ han「資料」) OR-joins its own >= 3 char piece too.
+        assert!(
+            match_expr.contains("\"段構成\""),
+            "the leading han run must also be OR-joined as its own unit: {match_expr}"
+        );
+        // "5" is the only ORIGINAL token under 3 Unicode scalars here, but
+        // this is a MIXED query (several long units exist) — 2026-07-22
+        // feedback #2 drops every short unit outright rather than carrying
+        // it as an AND-eligibility filter, so short_tokens comes back empty
+        // (not `vec!["5"]`, the pre-feedback-#2 value).
+        assert!(plan.short_tokens.is_empty());
+        assert!(!match_expr.contains('5'));
+    }
+
+    #[test]
+    fn feedback2_segment_script_runs_splits_at_script_class_boundaries() {
+        use super::segment_script_runs;
+        // 05 §1.3 L120-134 (2026-07-22 spec feedback #2), worked examples.
+
+        // han run + hiragana run + katakana run (ー continues the preceding
+        // katakana run rather than forcing its own split).
+        assert_eq!(
+            segment_script_runs("認証仕様のトークン"),
+            vec!["認証仕様", "の", "トークン"]
+        );
+        // katakana run (ー continues it) + hiragana run.
+        assert_eq!(segment_script_runs("スコープが"), vec!["スコープ", "が"]);
+        // A run entirely inside one script class, with TWO internal ー, never
+        // splits — "長音1片".
+        assert_eq!(
+            segment_script_runs("ローテーション"),
+            vec!["ローテーション"]
+        );
+        // Digit-neighbor '.'/',' stay inside the Alnum run — each one whole
+        // unit ("1 片").
+        assert_eq!(segment_script_runs("3.2GB"), vec!["3.2GB"]);
+        assert_eq!(segment_script_runs("99.9"), vec!["99.9"]);
+        assert_eq!(segment_script_runs("3,600"), vec!["3,600"]);
+        // '/' is `Other` — a pure separator, dropped, splitting the
+        // surrounding Alnum runs.
+        assert_eq!(
+            segment_script_runs("read/write/admin"),
+            vec!["read", "write", "admin"]
+        );
+        // `+` is also `Other` — "C" is the only Alnum run in "C++" (the
+        // trailing "++" is dropped as a separator run). The ORIGINAL token
+        // "C++" itself still becomes a unit in `build_query_plan` (below) —
+        // segmentation never removes the token's own exact-phrase form.
+        assert_eq!(segment_script_runs("C++"), vec!["C".to_owned()]);
+
+        // `build_query_plan` keeps the ORIGINAL token "C++" as its own unit
+        // (it is 3 Unicode scalars, so it is itself long and enters
+        // `match_expr` verbatim) even though its only segmented piece "C" is
+        // short and gets dropped (mixed-query short-unit rule, tested
+        // separately below).
+        let plan = super::build_query_plan("C++");
+        let match_expr = plan.match_expr.expect("\"C++\" is 3 Unicode scalars");
+        assert_eq!(match_expr, "\"C++\"");
+        assert!(plan.short_tokens.is_empty());
+    }
+
+    #[test]
+    fn feedback2_segment_script_runs_edge_cases() {
+        use super::segment_script_runs;
+        // A `.`/`,` NOT flanked by digits on both sides is `Other` (dropped),
+        // not folded into the neighboring Alnum run.
+        assert_eq!(segment_script_runs("a.b"), vec!["a", "b"]);
+        assert_eq!(segment_script_runs(".5"), vec!["5".to_owned()]);
+        assert_eq!(segment_script_runs("5."), vec!["5".to_owned()]);
+        assert_eq!(segment_script_runs(","), Vec::<String>::new());
+        // ー at the very start of a token (no preceding character at all)
+        // defaults to Katakana, per spec ("先頭含む").
+        assert_eq!(segment_script_runs("ーテスト"), vec!["ーテスト"]);
+        // Empty input yields no units.
+        assert_eq!(segment_script_runs(""), Vec::<String>::new());
+        // 々 (U+3005) and 〆 (U+3006) are Han, joining an adjacent Han run.
+        assert_eq!(segment_script_runs("時々"), vec!["時々".to_owned()]);
+    }
+
+    #[test]
+    fn feedback2_mixed_query_drops_short_units_entirely_not_and_filtered() {
+        use super::build_query_plan;
+        // 05 §1.3 2026-07-22 feedback #2 / step4b-contract-tests-p2c.md
+        // R-追記: a mixed query (>= 1 long unit) fully discards every short
+        // unit — it never enters `match_expr`, and (unlike the superseded
+        // PC12/13 AND-instr eligibility predicate) never enters
+        // `short_tokens` either.
+        let plan = build_query_plan("authentication AI");
+        let match_expr = plan.match_expr.expect("\"authentication\" is long");
+        assert!(match_expr.contains("\"authentication\""));
+        assert!(
+            !match_expr.contains("\"AI\""),
+            "a short unit must never enter the MATCH expression: {match_expr}"
+        );
+        assert!(
+            plan.short_tokens.is_empty(),
+            "a mixed query's short units must be fully discarded, not carried \
+             as an AND-eligibility filter: {:?}",
+            plan.short_tokens
+        );
+
+        // A short unit produced BY SEGMENTATION (not an original whitespace
+        // token) is dropped the same way: "スコープが" splits into long
+        // "スコープ" + short "が" — "が" must not surface anywhere.
+        let plan = build_query_plan("スコープが read/write/admin");
+        let match_expr = plan.match_expr.expect("several long units exist");
+        assert!(match_expr.contains("\"スコープ\""));
+        assert!(match_expr.contains("\"read\""));
+        assert!(
+            !match_expr.contains("\"が\""),
+            "a segmentation-derived short unit must never enter the MATCH \
+             expression: {match_expr}"
+        );
+        assert!(plan.short_tokens.is_empty());
+    }
+
+    #[test]
+    fn feedback2_pure_short_query_preserves_pre_feedback2_behavior() {
+        use super::build_query_plan;
+        // 05 §1.3 2026-07-22 feedback #2: when EVERY unit is short (which,
+        // since no segmented piece can be longer than its own token, is
+        // equivalent to "every original token is short"), `match_expr` stays
+        // `None` and `short_tokens` is the RAW token list — unchanged from
+        // the pre-feedback-#2 behavior (PC11/PC14's bounded LIKE fallback).
+        let plan = build_query_plan("AI 認");
+        assert!(plan.match_expr.is_none());
+        assert_eq!(plan.short_tokens, vec!["AI".to_owned(), "認".to_owned()]);
+
+        // A single short CJK token (PC11's own worked example).
+        let plan = build_query_plan("認証");
+        assert!(plan.match_expr.is_none());
+        assert_eq!(plan.short_tokens, vec!["認証".to_owned()]);
+
+        // Duplicate short tokens are preserved verbatim (no dedup) — the
+        // pre-feedback-#2 `partition` never deduplicated either.
+        let plan = build_query_plan("ai ai");
+        assert!(plan.match_expr.is_none());
+        assert_eq!(plan.short_tokens, vec!["ai".to_owned(), "ai".to_owned()]);
     }
 
     #[test]

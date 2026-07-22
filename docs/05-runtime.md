@@ -95,12 +95,16 @@ default: k = 60, w_text = 1.0, w_vector = 1.0
 - **短語 fallback**: query の全 token が 3 文字未満で trigram tokenizer の MATCH が成立しない場合
   (例: 1〜2 文字の日本語 query — MATCH は 0 件になる)、text バックエンドは `chunks.text` への
   **bounded LIKE スキャン** (上限 = `candidate_depth`、instr ベースの部分一致) へ fallback する。
-  3 文字以上の token が 1 つでもあれば FTS MATCH を使う — ただし **MATCH 式に渡すのは 3 文字以上の
-  token のみ**とし、**3 文字未満の token は同一 bounded query 内の `instr` 条件として LIMIT 前に
-  AND 適用する** (trigram は 3 文字未満の phrase を黙って落とすため、混在 query の短語を MATCH に
-  含めると条件から脱落する)。**短語 instr 条件は text / vector 両バックエンド共通の eligibility
-  述語であり、各バックエンドの候補確定 (candidate_depth 充足前) に適用する** — 和集合・RRF に
-  短語欠落候補を入れない (全 token の条件を保ったまま候補確定する)。vector 側の適用形: `chunk_vec` を
+  3 文字以上の unit が 1 つでもあれば FTS MATCH を使う — **MATCH 式に渡すのは 3 文字以上の
+  unit のみ**とし、**3 文字未満の unit は混在 query では候補確定に用いない (drop —
+  2026-07-22 実装フィードバック #2)**: trigram は 3 文字未満の phrase を黙って落とすため MATCH には
+  載らず、旧規範 (「同一 bounded query 内の `instr` 条件として LIMIT 前に AND 適用」) は自然文
+  query の助詞 (「が」「の」) や英語機能語 (`in` `to`) を全候補への hard filter に変え、それらを
+  含まない簡潔な文体の本命 chunk を構造的に排除した (eval M3-2/M3-3 実測 — 本命が bm25 首位でも
+  候補集合から消える)。混在 query の短語は bm25 に寄与しない stopword として扱う。
+  **全 unit が 3 文字未満の場合のみ**、従来どおり短語 instr 条件を text / vector 両バックエンド
+  共通の eligibility 述語として候補確定 (candidate_depth 充足前) に AND 適用する — 和集合・RRF に
+  短語欠落候補を入れない。vector 側の適用形 (pure-short 時): `chunk_vec` を
   `chunks` へ JOIN して instr 述語を適用した母集合に対し distance 順で LIMIT candidate_depth を確定する
   (brute-force KNN — [10-operations.md §6](10-operations.md)。vec0 の `k =` 構文等、述語適用**前**に
   内部 top-k を確定させる形は用いない — 述語後の候補が痩せて candidate_depth を満たせなくなるため)。
@@ -113,8 +117,23 @@ default: k = 60, w_text = 1.0, w_vector = 1.0
   MVP では提供しない。**tokenization は決定的に固定する**: NFC 正規化後の query を Unicode 空白で
   分割した各非空片が token (長さの単位 = Unicode scalar 数。記号のみの token も phrase として投入可)。
   token が 0 個の query は KCS-E-CONFIG-USAGE-001 (exit 2)。
+  **決定的スクリプト境界分割 (tokenization の後段・2026-07-22 実装フィードバック #2)**: 空白分割で
+  得た各 token をさらに Unicode スクリプト境界で決定的に細分し、**元 token と細分片の両方**を
+  MATCH 生成の単位 (unit) とする — 元 token の phrase は正確な連接一致の信号として保持し、細分片が
+  膠着形 (query「スコープが」 vs 本文「スコープは」) や記号連結 (query `read/write/admin` vs 本文
+  `read / write / admin`) の表記ゆれを吸収する。細分規則 (実装リリースに固定):
+  (1) 文字クラス = ひらがな / カタカナ (U+30FC 長音は直前のかな run に付随) / 漢字 (々・〆 含む) /
+  英数 run (`[0-9A-Za-z]`。数字に挟まれた `.` `,` は run 内に保持 — `99.9` / `3,600` / `3.2GB` は
+  1 unit) / その他 (記号等)。(2) クラス遷移点で分割し、「その他」クラスの片は separator として
+  unit にしない (元 token 側の phrase には残るため `C++` 等の記号語の一致性は失わない)。
+  (3) 細分の結果が元 token と同一なら重複させず、全 unit 集合から重複を除く。細分は入力 token の
+  文字列だけから固定規則で決まる — query 由来性はフィードバック #1 と同一の原理。3 文字以上の
+  unit が phrase として MATCH 式に入り、3 文字未満の unit は上記「短語 fallback」の規則 (混在
+  query では drop) に従う。この細分と短語 drop が無いと、自然文 query の膠着 token・機能語が
+  exact phrase / hard filter として働き [09-mvp-scope.md §4.3](09-mvp-scope.md) の Recall 目標を
+  構造的に割る (eval M3-2/M3-3 実測で失敗 14 件全てがこの 2 構造に帰着)
   **決定的 query 正規化 (MATCH 生成の前段・2026-07-22 実装フィードバック #1)**: 生成に先立ち、
-  各 token に決定的な同値展開を適用してよい — (1) 4 桁以上の純数値 token の桁区切り同値形
+  各 token (フィードバック #2 の細分後は各 unit) に決定的な同値展開を適用してよい — (1) 4 桁以上の純数値 token の桁区切り同値形
   (`3600` ↔ `3,600`)、(2) KCS 同梱の固定対訳辞書 (実装リリースに固定・実行時変更不可) による
   用語の対訳形。展開結果は当該 token と同値 phrase の OR 並置として投入する。
   「query 由来でない追加語」の禁止が指すのは入力に由来しない語 (推測・履歴・文脈からの注入) で

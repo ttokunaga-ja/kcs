@@ -1107,6 +1107,25 @@ ancestor-or-equal である chunk」に限る — 現状は publish 済みなら
 3. **PC46**: **searched_scopes[] の各要素に per-scope の `shallow_skipped` (件数・0 は省略)** — どの scope の履歴が浅いかという行動可能情報を保つ。トップレベル合算・excluded_scopes への配置はしない。
 4. **PC56**: **(b) 判定順序を正とする** — 05 §1.8 が「理由混在の全 scope 除外 = SCOPE-ALL-FAILED (retryability 分割)」を明文化しているため、(a) の「混在時の特別 exit 選択」は発生しない。単一 scope が複数理由に同時該当する場合の分類順 = **VERSION → INCOMPAT → journal → DUP → REBUILDING** (INCOMPAT は spec のリスト外だが VERSION と同じ exit 8 系のため隣接に置く — 本裁定で確定)。
 
+### R-追記 (2026-07-22 実装フィードバック #2 による PC8-14 系の規範更新 — Phase 4 eval 起点)
+
+eval M3-2/M3-3 (09 §4.3 Recall@10 >= 0.8) の失敗 14 件が全て次の 2 構造に帰着することを実測で確認し
+(本命 chunk が bm25 首位でも候補集合から消える)、05 §1.3 を凍結解除後の実装フィードバック枠で更新した:
+
+1. **短語 AND 述語の混在時撤廃**: 旧 PC11/PC12/PC13 の「3 文字未満 token を instr 条件として両バック
+   エンドの候補確定前に AND 適用」は、自然文 query の助詞 (「が」「の」)・英語機能語 (`in` `to`) を
+   hard filter 化し本命を排除する。新規範: **混在 query では 3 文字未満 unit は候補確定に用いない
+   (stopword 扱いで drop)**。全 unit が 3 文字未満の場合 (PC14 の pure-short fallback) のみ従来どおり
+   AND 適用 — PC14 と LIKE fallback の決定的順序規範は不変。
+2. **決定的スクリプト境界分割**: 空白分割後の各 token をスクリプト境界 (ひらがな/カタカナ/漢字/英数/
+   その他) で細分し、**元 token + 細分片の両方**を unit として MATCH に OR 並置する。膠着形
+   (「スコープが」 vs 本文「スコープは」)・記号連結 (`read/write/admin`) の表記ゆれを吸収する。
+   フィードバック #1 の同値展開 (数値桁区切り・固定対訳辞書) は細分後の各 unit に適用する。
+
+これに伴い PC8 の MATCH 式生成契約は「token 列の phrase OR 並置」から「unit 集合の phrase OR 並置」へ
+拡張され、PC11-13 の混在時 AND 挙動を固定していたテストは新規範側に更新する (pure-short 側 PC14 は
+据え置き)。正本は 05 §1.3 の 2026-07-22 フィードバック #1/#2 ブロック。
+
 ---
 
 ## 集計 (報告用)
