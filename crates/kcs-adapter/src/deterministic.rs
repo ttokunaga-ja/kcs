@@ -57,6 +57,11 @@ impl DeterministicAdapter {
             // billable として扱う"). This adapter is not legacy; it declares.
             billable_kinds: Vec::new(),
             reject_billing: Some(crate::types::BillingDeclaration::Nonbillable),
+            // QA13 (step4b-contract-tests-p3a.md §E, 04 §5.5 L880): this
+            // adapter is local/offline (never a sync provider call), so
+            // there is no provider idempotency posture to declare beyond the
+            // default.
+            provider_idempotency: crate::types::ProviderIdempotency::NotProvided,
         }
     }
 }
@@ -841,6 +846,7 @@ mod tests {
             bbox_annotation_enabled: false,
             tool_profile_hash: format!("sha256:{}", "1".repeat(64)),
             spec_version: 1,
+            idempotency_token: None,
         };
         let response = MarkdownizeAdapter::markdownize(&DeterministicAdapter, request).unwrap();
         let markdown = &response.updated_units[0].markdown;
@@ -910,6 +916,7 @@ stream\nBT (/Type /Page and /PageX) Tj ET\nendstream\nendobj\n";
             bbox_annotation_enabled: false,
             tool_profile_hash: "sha256:tool".to_owned(),
             spec_version: 1,
+            idempotency_token: None,
         };
         let response = markdownize_from_bytes(request, pdf).unwrap();
         assert_eq!(response.updated_units.len(), 2);

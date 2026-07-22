@@ -46,6 +46,15 @@ pub fn with_immediate_transaction<T>(
     match operation() {
         Ok(value) => {
             conn.execute_batch("COMMIT;")?;
+            // QA14: this is always the genuinely-outermost transaction (it
+            // opens its own `BEGIN IMMEDIATE`, so nothing can be nested
+            // above it) — after COMMIT, `conn.is_autocommit()` is
+            // unconditionally true, so this durably captures whatever
+            // `user_version` the closure's own bump sites (`phase1_intent`/
+            // `terminal_transaction`/`cas_update_one`, each already a no-op
+            // here since they were nested and deferred their own sync call)
+            // left it at.
+            crate::ledger::schema::sync_write_seq_companion_if_committed(conn);
             Ok(value)
         }
         Err(err) => {
@@ -296,6 +305,22 @@ pub fn phase1_intent(
             ));
         }
     }
+    // QA14 (10-operations.md §7.5.2): `phase1_intent` is the SOLE INSERT into
+    // `batch_requests` (every other write is a CAS UPDATE/DELETE against an
+    // already-existing row), so gating here — rather than at each of its
+    // several callers (`check_then_reserve`'s two branches, `device_claim`,
+    // `record_free_local_charge`, and the direct `bypass_cap_denial` call in
+    // `reserve_or_reuse_task_charge`) — covers every path that could start a
+    // brand-new online submission. An already-open row (the "Reused" path in
+    // `reserve_or_reuse_task_charge`, which never reaches this function at
+    // all) stays allowed — resending an EXISTING intent is not a 新規投入.
+    if crate::ledger::schema::restore_reconcile_marker_present(conn)? {
+        return Err(PipelineError::contract(
+            "KCS-E-BATCH-RESTORE-RECONCILE-001",
+            "cost-ledger was restored from a backup; run `kcs ledger reconcile` before new \
+             online submissions (10-operations.md §7.5.2)",
+        ));
+    }
     let now = now_millis();
     let existing_seq = get_batch_request(conn, key)?.map_or(0, |row| row.submission_seq);
     let submission_seq = next_submission_seq(conn, key, existing_seq)?;
@@ -308,48 +333,64 @@ pub fn phase1_intent(
             (RequestKind::Sync, None) => (Some(now), None),
             (RequestKind::Batch, _) => (None, None),
         };
-    conn.execute(
-        "INSERT INTO batch_requests (
-            scope_id, adapter_kind, input_hash, tool_profile_hash,
-            state, request_kind, intent_token, upload_id, batch_job_id,
-            provider_scope_id, job_create_started_at, stale_after_at,
-            submission_seq, attempts, contract_violation_count, estimated_usd,
-            error, completed_at, created_at
-        ) VALUES (
-            ?1, ?2, ?3, ?4,
-            0, ?5, ?6, NULL, NULL,
-            NULL, ?7, ?8,
-            ?9, 0, 0, ?10,
-            NULL, NULL, ?11
+    // QA14: own SAVEPOINT around the INSERT + write-seq bump so the two land
+    // atomically together regardless of whether the caller already has an
+    // ambient transaction open (every current production caller does — see
+    // the doc comments on those callers — but this function's own documented
+    // contract has never required it, and at least one existing test file
+    // calls `phase1_intent` directly on a bare connection). Nested inside an
+    // already-open `BEGIN IMMEDIATE` (the normal case), this SAVEPOINT simply
+    // merges into the ambient transaction; `sync_write_seq_companion_if_committed`
+    // below correctly no-ops until whichever transaction is genuinely
+    // outermost actually commits.
+    with_savepoint(conn, "kcs_ledger_phase1", || {
+        conn.execute(
+            "INSERT INTO batch_requests (
+                scope_id, adapter_kind, input_hash, tool_profile_hash,
+                state, request_kind, intent_token, upload_id, batch_job_id,
+                provider_scope_id, job_create_started_at, stale_after_at,
+                submission_seq, attempts, contract_violation_count, estimated_usd,
+                error, completed_at, created_at
+            ) VALUES (
+                ?1, ?2, ?3, ?4,
+                0, ?5, ?6, NULL, NULL,
+                NULL, ?7, ?8,
+                ?9, 0, 0, ?10,
+                NULL, NULL, ?11
+            )
+            ON CONFLICT (scope_id, adapter_kind, input_hash, tool_profile_hash) DO UPDATE SET
+                state = 0,
+                request_kind = excluded.request_kind,
+                intent_token = excluded.intent_token,
+                upload_id = NULL,
+                batch_job_id = NULL,
+                provider_scope_id = NULL,
+                job_create_started_at = excluded.job_create_started_at,
+                stale_after_at = excluded.stale_after_at,
+                submission_seq = excluded.submission_seq,
+                estimated_usd = excluded.estimated_usd,
+                error = NULL,
+                completed_at = NULL",
+            params![
+                key.scope_id,
+                key.adapter_kind,
+                key.input_hash,
+                key.tool_profile_hash,
+                request_kind.as_str(),
+                intent_token,
+                job_create_started_at,
+                stale_after_at,
+                submission_seq,
+                estimated_usd,
+                now,
+            ],
         )
-        ON CONFLICT (scope_id, adapter_kind, input_hash, tool_profile_hash) DO UPDATE SET
-            state = 0,
-            request_kind = excluded.request_kind,
-            intent_token = excluded.intent_token,
-            upload_id = NULL,
-            batch_job_id = NULL,
-            provider_scope_id = NULL,
-            job_create_started_at = excluded.job_create_started_at,
-            stale_after_at = excluded.stale_after_at,
-            submission_seq = excluded.submission_seq,
-            estimated_usd = excluded.estimated_usd,
-            error = NULL,
-            completed_at = NULL",
-        params![
-            key.scope_id,
-            key.adapter_kind,
-            key.input_hash,
-            key.tool_profile_hash,
-            request_kind.as_str(),
-            intent_token,
-            job_create_started_at,
-            stale_after_at,
-            submission_seq,
-            estimated_usd,
-            now,
-        ],
-    )
-    .map_err(classify_check_violation)?;
+        .map_err(classify_check_violation)?;
+        // Every call always writes exactly one row (fresh INSERT or the
+        // ON CONFLICT DO UPDATE reissue) — unconditional bump.
+        crate::ledger::schema::bump_write_seq(conn)
+    })?;
+    crate::ledger::schema::sync_write_seq_companion_if_committed(conn);
     Ok(Phase1Outcome {
         intent_token,
         submission_seq,
@@ -548,8 +589,33 @@ pub fn sync_record_provider_request_id(
     )
 }
 
+/// QA14's 3rd (and lowest-common-denominator) write-seq bump site: every
+/// standalone CAS UPDATE/DELETE in this module (`phase2a_record_provider_scope`,
+/// `phase2a_record_upload_id`, `phase2a_restart_after_scope_mismatch`,
+/// `phase2b_record_job_create_started`, `phase2b_record_job_created`,
+/// `sync_record_provider_request_id`, `recovery_mark_found`,
+/// `recovery_finish_cleanup`, `reset_contract_violations`,
+/// `device_extend_stale_after`'s UPDATE, and `execute_bounded_sweep`'s prune
+/// DELETE — all refactored onto this one shared helper) funnels through here.
+/// These are documented (`phase2b_record_job_create_started`'s doc comment,
+/// among others) to commit the instant they return, with no ambient `BEGIN`
+/// — a bare `conn.execute` and a THEN-issued bump would be two separate
+/// autocommit statements (a crash between them loses the bump), so the
+/// UPDATE/DELETE and the conditional bump are wrapped in one SAVEPOINT here,
+/// preserving "commits the instant this returns" while making the two
+/// atomic with each other. The bump is conditional on `changed` — a 0-row
+/// CAS miss (a lost claim) is a common, expected, genuinely-no-op outcome
+/// that must not be counted as a mutation.
 fn cas_update_one(conn: &Connection, sql: &str, params: impl rusqlite::Params) -> Result<bool> {
-    Ok(conn.execute(sql, params)? > 0)
+    let changed = with_savepoint(conn, "kcs_ledger_cas_update", || {
+        let changed = conn.execute(sql, params)? > 0;
+        if changed {
+            crate::ledger::schema::bump_write_seq(conn)?;
+        }
+        Ok(changed)
+    })?;
+    crate::ledger::schema::sync_write_seq_companion_if_committed(conn);
+    Ok(changed)
 }
 
 // ---------------------------------------------------------------------------
@@ -781,7 +847,7 @@ pub fn terminal_transaction(
     conn: &Connection,
     write: &TerminalWrite<'_>,
 ) -> Result<TerminalReceipt> {
-    with_savepoint(conn, "kcs_ledger_terminal", || {
+    let receipt = with_savepoint(conn, "kcs_ledger_terminal", || {
         let Some(current) = get_batch_request(conn, write.key)? else {
             return Ok(TerminalReceipt {
                 recorded: false,
@@ -819,6 +885,14 @@ pub fn terminal_transaction(
                 row_updated: false,
             });
         }
+
+        // QA14: every early-return guard above has now been passed, so a real
+        // `cost_ledger` INSERT + `batch_requests` terminal UPDATE (at minimum
+        // the latter — `apply_terminal_update`, below, unconditionally
+        // updates `state`/`error`/`completed_at`) is about to happen. Bump
+        // once here, inside this same SAVEPOINT, so it commits atomically
+        // with whatever follows.
+        crate::ledger::schema::bump_write_seq(conn)?;
 
         let mut seq = current.submission_seq;
         if write.reseat_submission_seq && !already_recorded {
@@ -874,7 +948,14 @@ pub fn terminal_transaction(
             submission_seq: seq,
             row_updated,
         })
-    })
+    })?;
+    // QA14: no-ops unless this SAVEPOINT happened to be genuinely outermost
+    // (see the doc comment on `sync_write_seq_companion_if_committed`) — the
+    // common case (called from within `execute_abandon`/`execute_bounded_sweep`'s
+    // own outer SAVEPOINT, or a caller's `with_immediate_transaction`) defers
+    // the actual sync to whichever of those is truly outermost.
+    crate::ledger::schema::sync_write_seq_companion_if_committed(conn);
+    Ok(receipt)
 }
 
 fn apply_terminal_update(
@@ -1005,6 +1086,27 @@ pub fn sync_recovery_candidates(
          ORDER BY adapter_kind, input_hash, tool_profile_hash",
     )?;
     let rows = stmt.query_map(params![scope_id, now_ms], row_to_batch_request)?;
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row?);
+    }
+    Ok(out)
+}
+
+/// QA14/QA15 (`kcs ledger reconcile`, 10 §7.5.2): every distinct `scope_id`
+/// carrying at least one `request_kind='sync'` row — including the reserved
+/// `TaskKey::DEVICE_SCOPE_ID` pseudo-scope (query-embedding device rows are
+/// `request_kind='sync'` too, §H). [`sync_recovery_candidates`] itself is
+/// scoped to one `scope_id` at a time (normally only that scope's
+/// `.kcs/.lock` holder has authority to reconcile it — that function's own
+/// doc comment); `kcs ledger reconcile` is a device-global maintenance
+/// command with no single owning scope, so its caller sweeps every scope_id
+/// this returns in turn.
+pub fn distinct_scope_ids_with_sync_rows(conn: &Connection) -> Result<Vec<String>> {
+    let mut stmt = conn.prepare(
+        "SELECT DISTINCT scope_id FROM batch_requests WHERE request_kind = 'sync' ORDER BY scope_id",
+    )?;
+    let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
     let mut out = Vec::new();
     for row in rows {
         out.push(row?);
@@ -1296,7 +1398,12 @@ pub fn device_extend_stale_after(
         3600
     };
     let candidate = now + (safe_retry_after + effective_timeout_seconds + 60) * 1000;
-    let changed = conn.execute(
+    // QA14: routed through `cas_update_one` (rather than a bare `conn.execute`)
+    // so this mutation participates in the write-seq bump — the read-back
+    // SELECT just below is unaffected (a plain autocommit read of what this
+    // call just durably committed).
+    let changed = cas_update_one(
+        conn,
         "UPDATE batch_requests SET stale_after_at = MAX(COALESCE(stale_after_at, 0), ?1)
          WHERE scope_id = ?2 AND adapter_kind = ?3 AND input_hash = ?4 AND tool_profile_hash = ?5
            AND intent_token = ?6",
@@ -1309,7 +1416,7 @@ pub fn device_extend_stale_after(
             intent_token
         ],
     )?;
-    if changed == 0 {
+    if !changed {
         return Ok(ExtendOutcome::ClaimLost);
     }
     let new_value: i64 = conn.query_row(
@@ -1500,7 +1607,7 @@ pub fn execute_bounded_sweep(
     plan: &SweepPlan,
     now_ms: i64,
 ) -> Result<SweepReport> {
-    with_savepoint(conn, "kcs_ledger_device_sweep", || {
+    let report = with_savepoint(conn, "kcs_ledger_device_sweep", || {
         let mut settled = Vec::new();
         for key in plan.own_key_stale.iter().chain(plan.general_stale.iter()) {
             if let Some(row) = get_batch_request(conn, key)? {
@@ -1513,19 +1620,30 @@ pub fn execute_bounded_sweep(
         let month_start = crate::ledger::time::current_month_start_millis(now_ms);
         let mut pruned = Vec::new();
         for key in &plan.prune {
-            let changed = conn.execute(
+            // QA14: routed through `cas_update_one` (rather than a bare
+            // `conn.execute`) so a pruning DELETE also participates in the
+            // write-seq bump.
+            let changed = cas_update_one(
+                conn,
                 "DELETE FROM batch_requests
                  WHERE scope_id = ?1 AND adapter_kind = ?2 AND input_hash = ?3 AND tool_profile_hash = ?4
                    AND state IN (2, 3) AND intent_token IS NULL AND contract_violation_count = 0
                    AND completed_at < ?5",
                 params![key.scope_id, key.adapter_kind, key.input_hash, key.tool_profile_hash, month_start],
             )?;
-            if changed > 0 {
+            if changed {
                 pruned.push(key.clone());
             }
         }
         Ok(SweepReport { settled, pruned })
-    })
+    })?;
+    // QA14: no-op unless this SAVEPOINT was genuinely outermost (see doc
+    // comment on `sync_write_seq_companion_if_committed`) — covers the
+    // standalone-call case; the `with_immediate_transaction`-nested case
+    // (this function's own current production caller) defers to that
+    // wrapper's own sync call.
+    crate::ledger::schema::sync_write_seq_companion_if_committed(conn);
+    Ok(report)
 }
 
 // ---------------------------------------------------------------------------
@@ -1755,7 +1873,7 @@ pub enum AbandonExecution {
 /// proceeds — the same immediate-vs-deferred split note-5 (above) describes
 /// for the non-Completed path — never a re-charge.
 pub fn execute_abandon(conn: &Connection, key: &TaskKey) -> Result<AbandonExecution> {
-    with_savepoint(conn, "kcs_ledger_abandon", || {
+    let outcome = with_savepoint(conn, "kcs_ledger_abandon", || {
         let Some(row) = get_batch_request(conn, key)? else {
             return Ok(AbandonExecution::NoTarget);
         };
@@ -1801,14 +1919,27 @@ pub fn execute_abandon(conn: &Connection, key: &TaskKey) -> Result<AbandonExecut
             },
         )?;
         Ok(AbandonExecution::Abandoned)
-    })
+    })?;
+    // QA14: the mutations this function performs (`recovery_finish_cleanup`/
+    // `terminal_transaction`, both already-instrumented bump sites) are
+    // nested inside this SAVEPOINT — sync only fires once it is confirmed
+    // genuinely outermost (see doc comment on
+    // `sync_write_seq_companion_if_committed`), which is the normal case for
+    // this function's production caller (`run_batch_abandon`, called
+    // directly, not nested inside `with_immediate_transaction`).
+    crate::ledger::schema::sync_write_seq_companion_if_committed(conn);
+    Ok(outcome)
 }
 
 /// CL55: `contract_violation_count` reset for `--reset-violations` (§M note-6):
 /// a `count == 0` row is a no-op success; an in-flight (`state IN (0,1)`) row is
 /// skipped (only terminal rows are reset). Returns whether the row was reset.
+///
+/// QA14: routed through `cas_update_one` (rather than a bare `conn.execute`,
+/// as before) so this mutation also participates in the write-seq bump.
 pub fn reset_contract_violations(conn: &Connection, key: &TaskKey) -> Result<bool> {
-    let changed = conn.execute(
+    let changed = cas_update_one(
+        conn,
         "UPDATE batch_requests SET contract_violation_count = 0
          WHERE scope_id = ?1 AND adapter_kind = ?2 AND input_hash = ?3 AND tool_profile_hash = ?4
            AND state IN (2, 3) AND contract_violation_count != 0",
@@ -1819,7 +1950,7 @@ pub fn reset_contract_violations(conn: &Connection, key: &TaskKey) -> Result<boo
             key.tool_profile_hash
         ],
     )?;
-    Ok(changed > 0)
+    Ok(changed)
 }
 
 // ---------------------------------------------------------------------------
@@ -2253,5 +2384,114 @@ mod tests {
         );
         assert!(device_input_hash(precomposed).starts_with("sha256:"));
         assert!(!device_input_hash(precomposed).contains("café"));
+    }
+
+    // -----------------------------------------------------------------
+    // QA14 — the restore-reconcile gate inside `phase1_intent`/`device_claim`
+    // (step4b-contract-tests-p3a.md L307-321, 10-operations.md §7.5.2)
+    // -----------------------------------------------------------------
+
+    fn open_temp_ledger_for_gate_tests() -> (tempfile::TempDir, crate::ledger::schema::LedgerDb) {
+        let dir = tempfile::tempdir().unwrap();
+        let db =
+            crate::ledger::schema::LedgerDb::open(dir.path().join("cost-ledger.sqlite")).unwrap();
+        (dir, db)
+    }
+
+    /// `phase1_intent` is the SOLE `batch_requests` INSERT — gating it here
+    /// covers every caller (`check_then_reserve`'s two branches,
+    /// `device_claim`, and `kcs-cli`'s `record_free_local_charge`/
+    /// `reserve_or_reuse_task_charge` bypass branch). No row is created —
+    /// the gate refuses BEFORE the INSERT runs.
+    #[test]
+    fn qa14_phase1_intent_refuses_a_new_submission_while_restore_marker_present() {
+        let (_dir, db) = open_temp_ledger_for_gate_tests();
+        let conn = db.connection();
+        crate::ledger::migrate::record_marker(
+            conn,
+            crate::ledger::schema::RESTORE_RECONCILE_PENDING_MARKER,
+        )
+        .unwrap();
+        let key = TaskKey::new("scope-a", "markdownize", "hash-a", "profile-a");
+        let err = match phase1_intent(conn, &key, RequestKind::Batch, 1.0, None) {
+            Ok(outcome) => panic!("expected the restore gate to refuse, got {outcome:?}"),
+            Err(err) => err,
+        };
+        assert!(
+            err.to_string()
+                .contains("KCS-E-BATCH-RESTORE-RECONCILE-001"),
+            "got {err}"
+        );
+        assert!(
+            get_batch_request(conn, &key).unwrap().is_none(),
+            "the gate must refuse BEFORE any row is inserted"
+        );
+    }
+
+    /// `device_claim` (the query-embedding device row) funnels its own
+    /// reservation through `phase1_intent` too, so it inherits the same
+    /// gate without any separate check of its own.
+    #[test]
+    fn qa14_device_claim_refuses_a_new_submission_while_restore_marker_present() {
+        let (_dir, db) = open_temp_ledger_for_gate_tests();
+        let conn = db.connection();
+        crate::ledger::migrate::record_marker(
+            conn,
+            crate::ledger::schema::RESTORE_RECONCILE_PENDING_MARKER,
+        )
+        .unwrap();
+        let key = TaskKey::new(TaskKey::DEVICE_SCOPE_ID, "embedding", "hash-a", "profile-a");
+        let err = match device_claim(conn, &key, 1.0, 300, 1_000_000.0, None) {
+            Ok(outcome) => panic!("expected the restore gate to refuse, got {outcome:?}"),
+            Err(err) => err,
+        };
+        assert!(
+            err.to_string()
+                .contains("KCS-E-BATCH-RESTORE-RECONCILE-001"),
+            "got {err}"
+        );
+    }
+
+    /// The "Reused arm stays allowed" contract (`kcs-cli`'s
+    /// `reserve_or_reuse_task_charge`: "an existing intent is not a
+    /// 新規投入"): an already-open reservation made BEFORE a restore was
+    /// detected remains fully readable via `get_batch_request` afterward —
+    /// `get_batch_request` never consults the marker at all. This is
+    /// exactly the mechanism that lets `reserve_or_reuse_task_charge` bypass
+    /// `phase1_intent` (and therefore this gate) entirely when a live row
+    /// already exists: it checks `get_batch_request` FIRST and only calls
+    /// `phase1_intent` when no such row is found. A GENUINELY fresh
+    /// `phase1_intent` call for the SAME key, by contrast, is still refused
+    /// — by the pre-existing CLEANUP-PENDING precedent this time (the row's
+    /// residue cleanup has not completed), confirming this key is not
+    /// somehow exempt from gating in general.
+    #[test]
+    fn qa14_existing_open_row_stays_reachable_without_a_new_phase1_intent_call() {
+        let (_dir, db) = open_temp_ledger_for_gate_tests();
+        let conn = db.connection();
+        let key = TaskKey::new("scope-a", "markdownize", "hash-a", "profile-a");
+        let outcome = phase1_intent(conn, &key, RequestKind::Batch, 1.0, None).unwrap();
+
+        crate::ledger::migrate::record_marker(
+            conn,
+            crate::ledger::schema::RESTORE_RECONCILE_PENDING_MARKER,
+        )
+        .unwrap();
+
+        let existing = get_batch_request(conn, &key).unwrap().unwrap();
+        assert_eq!(
+            existing.intent_token.as_deref(),
+            Some(outcome.intent_token.as_str())
+        );
+        assert!(existing.state.is_inflight());
+
+        let err = match phase1_intent(conn, &key, RequestKind::Batch, 1.0, None) {
+            Ok(_) => panic!("a fresh phase1_intent call for this key must still be refused"),
+            Err(err) => err,
+        };
+        assert!(
+            err.to_string().contains("KCS-E-BATCH-CLEANUP-PENDING-001"),
+            "got {err}"
+        );
     }
 }

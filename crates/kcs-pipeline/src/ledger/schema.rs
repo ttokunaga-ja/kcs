@@ -156,7 +156,73 @@ impl LedgerDb {
         conn.busy_timeout(Duration::from_millis(5000))?;
         let _journal_mode: String =
             conn.query_row("PRAGMA journal_mode=WAL", [], |row| row.get(0))?;
+
+        // QA14 (10-operations.md §7.5.2, step4b-contract-tests-p3a.md L307-321):
+        // restore-from-backup detection. `PRAGMA user_version` is a monotonic
+        // write-sequence counter this module bumps on every mutating ledger
+        // operation (see `ops::phase1_intent`/`ops::terminal_transaction`/
+        // `ops::cas_update_one`'s doc comments for the exact — and, between
+        // them, exhaustive — bump sites). Unlike an in-table column, the
+        // counter lives in the SQLite file HEADER, so it travels with the raw
+        // file 10 §7.5.2's documented `sqlite3 ... .backup` procedure copies.
+        // A companion file next to the DB (`<path>.write-seq`) records the
+        // highest value THIS device has observed. If the DB we just opened
+        // reports a value LOWER than the companion remembers, the file must
+        // have been replaced by an older snapshot (ordinary forward operation
+        // only ever increases the counter) — flag it.
+        let current_write_seq = read_write_seq(&conn)?;
+        let companion_path = write_seq_companion_path(path);
+        let restored = match read_write_seq_companion(&companion_path) {
+            // Companion absent: first run on this device, or this feature was
+            // just introduced against a pre-existing store — adopt the
+            // current value as the new baseline rather than flagging
+            // (operator-honesty mechanism, not a security boundary: the
+            // documented 10 §7.5.2 backup/restore procedure replaces only the
+            // DB file, which is exactly the case this detects; there is
+            // nothing to compare the very first observation against).
+            None => false,
+            Some(companion_value) => current_write_seq < companion_value,
+        };
+        if restored {
+            // 10 §7.5.2 L650: report a corrupt restore as corrupt BEFORE
+            // anything else — integrity_check runs first, so a truncated or
+            // partial backup file is diagnosed clearly rather than surfacing
+            // as a confusing table-shape mismatch (`ensure_schema`, below) or
+            // an opaque SQL error (the marker INSERT below needs
+            // `schema_migrations` to already be verified).
+            let integrity = integrity_check(&conn)?;
+            if integrity != "ok" {
+                return Err(PipelineError::corrupt(
+                    path.display().to_string(),
+                    format!(
+                        "PRAGMA integrity_check reported corruption after a detected \
+                         restore-from-backup (10-operations.md §7.5.2): {integrity}"
+                    ),
+                ));
+            }
+        }
+
         ensure_schema(&conn)?;
+
+        if restored {
+            // Idempotent: `record_marker` uses a bare INSERT (schema_migrations.name
+            // is PRIMARY KEY) — guard with `marker_present` so a marker already
+            // persisted by an earlier detection (not yet cleared by `kcs ledger
+            // reconcile`) cannot cause a duplicate-key error on a later `open`.
+            if !crate::ledger::migrate::marker_present(&conn, RESTORE_RECONCILE_PENDING_MARKER)? {
+                crate::ledger::migrate::record_marker(&conn, RESTORE_RECONCILE_PENDING_MARKER)?;
+            }
+        }
+        // Refresh the companion to the DB's current value in every case
+        // (first-run adoption, ordinary forward progress that left the
+        // companion trailing from a crash between a prior commit and its
+        // companion write, or the post-detection re-arm so the flag does not
+        // re-fire on the next open — the PERSISTED marker above is the gate's
+        // durable source of truth from here on). Best-effort: never fails
+        // `open` — the companion is an operator-honesty aid, not a
+        // correctness requirement of the writes it trails.
+        let _ = write_write_seq_companion(&companion_path, current_write_seq);
+
         Ok(Self { conn })
     }
 
@@ -168,6 +234,146 @@ impl LedgerDb {
     pub fn connection(&self) -> &Connection {
         &self.conn
     }
+}
+
+// ---------------------------------------------------------------------------
+// QA14 — write-sequence counter (`PRAGMA user_version`) + restore-from-backup
+// detection (10-operations.md §7.5.2, step4b-contract-tests-p3a.md L307-321)
+// ---------------------------------------------------------------------------
+
+/// Marker recorded in `schema_migrations` (reusing `migrate.rs`'s generic
+/// `marker_present`/`record_marker` — both already take a `name: &str`, so no
+/// new SQL/table is needed here) when [`LedgerDb::open`] detects a
+/// restored-from-backup DB. `schema_migrations` is this store's one existing
+/// generic "operational marker" table (see `JSONL_CUTOVER_MARKER`), and this
+/// marker is exactly that shape: a durable, idempotent completion flag — not
+/// ledger row DATA, so it does not belong in `cost_ledger`/`batch_requests`.
+/// While present, `ops::phase1_intent` refuses new online submissions
+/// (`KCS-E-BATCH-RESTORE-RECONCILE-001`). Cleared by `kcs ledger reconcile`
+/// (`clear_restore_reconcile_marker`) once the 10 §7.5.2 recovery walk
+/// completes — unlike [`JSONL_CUTOVER_MARKER`], which is permanent.
+pub const RESTORE_RECONCILE_PENDING_MARKER: &str = "restore-reconcile-pending";
+
+/// Clear the QA14 restore-reconcile marker (idempotent — `false` when it was
+/// already absent, e.g. a `kcs ledger reconcile` run when no restore was ever
+/// detected).
+pub fn clear_restore_reconcile_marker(conn: &Connection) -> Result<bool> {
+    let changed = conn.execute(
+        "DELETE FROM schema_migrations WHERE name = ?1",
+        rusqlite::params![RESTORE_RECONCILE_PENDING_MARKER],
+    )?;
+    Ok(changed > 0)
+}
+
+/// Whether the QA14 restore-reconcile marker is currently set — the gate
+/// `ops::phase1_intent` checks before issuing a new submission. A thin,
+/// crate-public wrapper over `migrate::marker_present` so `ops.rs` does not
+/// need to depend on `migrate.rs`'s module path directly for this one call.
+pub(crate) fn restore_reconcile_marker_present(conn: &Connection) -> Result<bool> {
+    crate::ledger::migrate::marker_present(conn, RESTORE_RECONCILE_PENDING_MARKER)
+}
+
+/// Runs `PRAGMA integrity_check`, returning the raw result string (`"ok"` on
+/// a healthy store; otherwise SQLite's own description of the first problem
+/// found). Exposed (not just used internally by [`LedgerDb::open`]'s
+/// restore-detection) so `kcs ledger reconcile` (QA14 design step a) can run
+/// the same check explicitly as its own first action, independent of whether
+/// `open` already ran it this process.
+pub fn integrity_check(conn: &Connection) -> Result<String> {
+    conn.query_row("PRAGMA integrity_check", [], |row| row.get(0))
+        .map_err(Into::into)
+}
+
+/// Read the DB's current write-sequence counter (`PRAGMA user_version`) — a
+/// plain 32-bit signed integer stored in the SQLite file header (present on
+/// every valid SQLite file regardless of whether this crate's tables exist
+/// yet, and read here strictly BEFORE `ensure_schema` runs).
+fn read_write_seq(conn: &Connection) -> Result<i64> {
+    conn.query_row("PRAGMA user_version", [], |row| row.get(0))
+        .map_err(Into::into)
+}
+
+/// Bump the write-sequence counter by 1, saturating at `i32::MAX` (`PRAGMA
+/// user_version` is a 32-bit SIGNED integer — SQLite truncates/wraps a value
+/// written past that range rather than rejecting it, so the cap must be
+/// enforced here). `PRAGMA user_version = <literal>` does not accept a bound
+/// parameter, but `next` is always a value this function computed itself
+/// (never attacker/user-controlled text), so string interpolation is safe.
+///
+/// **Transactional by construction** (verified by
+/// `ops::qa14_bump_write_seq_is_rolled_back_with_its_transaction`): the
+/// user_version field is part of the database file's normal page/header
+/// state, so a write to it inside an open transaction or SAVEPOINT commits or
+/// rolls back with everything else in that same transaction — no different
+/// from an ordinary table UPDATE. Callers rely on this to keep the counter
+/// bump atomic with the row mutation it accompanies (see `ops.rs`'s 3 call
+/// sites: `phase1_intent`, `terminal_transaction`, `cas_update_one`).
+pub(crate) fn bump_write_seq(conn: &Connection) -> Result<()> {
+    let current = read_write_seq(conn)?;
+    let next = current.saturating_add(1).min(i64::from(i32::MAX));
+    conn.execute_batch(&format!("PRAGMA user_version = {next};"))?;
+    Ok(())
+}
+
+/// `<db path>.write-seq` — the companion file design point 2 names literally
+/// (e.g. `cost-ledger.sqlite.write-seq`).
+pub(crate) fn write_seq_companion_path(db_path: &Path) -> PathBuf {
+    let mut os = db_path.as_os_str().to_owned();
+    os.push(".write-seq");
+    PathBuf::from(os)
+}
+
+/// `None` on any I/O or parse failure — treated identically to "absent" by
+/// [`LedgerDb::open`]'s caller (a malformed companion is exactly as
+/// uninformative as a missing one; this is an operator-honesty aid, not a
+/// security boundary, so failing open rather than degrading would be the
+/// wrong tradeoff).
+fn read_write_seq_companion(companion_path: &Path) -> Option<i64> {
+    std::fs::read_to_string(companion_path)
+        .ok()?
+        .trim()
+        .parse::<i64>()
+        .ok()
+}
+
+/// Write the companion file atomically (temp file + rename, so a concurrent
+/// reader never observes a torn/partial write) — best-effort: I/O errors are
+/// the caller's to decide whether to ignore (every call site in this crate
+/// does, per the companion's "advisory, not correctness-bearing" contract).
+fn write_write_seq_companion(companion_path: &Path, value: i64) -> std::io::Result<()> {
+    let mut tmp_os = companion_path.as_os_str().to_owned();
+    tmp_os.push(".tmp");
+    let tmp_path = PathBuf::from(tmp_os);
+    std::fs::write(&tmp_path, value.to_string())?;
+    std::fs::rename(&tmp_path, companion_path)
+}
+
+/// Best-effort: after a mutating ledger call's own SAVEPOINT (or the outer
+/// `BEGIN IMMEDIATE` transaction it may be nested inside) has fully released,
+/// refresh the write-seq companion file to match the CURRENT `user_version`
+/// — but only when `conn.is_autocommit()` reports there is no ambient
+/// transaction still pending above the caller. A released SAVEPOINT does not
+/// mean "durably committed to disk" when it is nested inside an outer,
+/// still-open transaction (e.g. `phase1_intent` called from within
+/// `with_immediate_transaction`) — writing the companion at that point would
+/// advance it past a value the DB could still roll back to, which is exactly
+/// the dangerous self-inflicted false positive this guard exists to prevent
+/// (a later, genuinely-outermost commit calls this again and captures the
+/// final state correctly). A no-op when the connection has no backing file
+/// (`:memory:`/temp — no companion concept applies) or when `user_version`
+/// cannot be read. Never propagates an error — see [`write_write_seq_companion`].
+pub(crate) fn sync_write_seq_companion_if_committed(conn: &Connection) {
+    if !conn.is_autocommit() {
+        return;
+    }
+    let Some(db_path) = conn.path().filter(|path| !path.is_empty()) else {
+        return;
+    };
+    let db_path = PathBuf::from(db_path);
+    let Ok(current) = read_write_seq(conn) else {
+        return;
+    };
+    let _ = write_write_seq_companion(&write_seq_companion_path(&db_path), current);
 }
 
 /// Create the 3-table schema on a fresh store, or self-heal a missing/malformed
@@ -627,5 +833,181 @@ mod tests {
         assert!(object_sql(&db.conn, "index", "idx_batch_requests_inflight")
             .unwrap()
             .is_some());
+    }
+
+    // -----------------------------------------------------------------
+    // QA14 — write-sequence counter + restore-from-backup detection
+    // (step4b-contract-tests-p3a.md L307-321, 10-operations.md §7.5.2)
+    // -----------------------------------------------------------------
+
+    /// `PRAGMA user_version` writes participate in the ambient transaction
+    /// like any ordinary table write — a `bump_write_seq` call inside a
+    /// transaction that later ROLLS BACK must leave the counter unchanged
+    /// (this is what makes `phase1_intent`/`terminal_transaction`/
+    /// `cas_update_one`'s own SAVEPOINT-wrapped bumps safe: an error midway
+    /// through the wrapped write correctly un-bumps too).
+    #[test]
+    fn qa14_bump_write_seq_is_rolled_back_with_its_transaction() {
+        let (_dir, db) = open_temp();
+        let before = read_write_seq(&db.conn).unwrap();
+        db.conn.execute_batch("BEGIN;").unwrap();
+        bump_write_seq(&db.conn).unwrap();
+        assert_eq!(
+            read_write_seq(&db.conn).unwrap(),
+            before + 1,
+            "the bump is visible within its own still-open transaction"
+        );
+        db.conn.execute_batch("ROLLBACK;").unwrap();
+        assert_eq!(
+            read_write_seq(&db.conn).unwrap(),
+            before,
+            "a rolled-back transaction must not leave the bump in place"
+        );
+    }
+
+    /// The COMMIT-side counterpart: a bump inside a transaction that
+    /// actually commits persists (sanity check the rollback test above is
+    /// exercising a real transactional property, not merely "writes never
+    /// stick").
+    #[test]
+    fn qa14_bump_write_seq_persists_across_commit() {
+        let (_dir, db) = open_temp();
+        let before = read_write_seq(&db.conn).unwrap();
+        db.conn.execute_batch("BEGIN;").unwrap();
+        bump_write_seq(&db.conn).unwrap();
+        db.conn.execute_batch("COMMIT;").unwrap();
+        assert_eq!(read_write_seq(&db.conn).unwrap(), before + 1);
+    }
+
+    /// `bump_write_seq` saturates at `i32::MAX` rather than wrapping past it.
+    #[test]
+    fn qa14_bump_write_seq_saturates_at_i32_max() {
+        let (_dir, db) = open_temp();
+        db.conn
+            .execute_batch(&format!("PRAGMA user_version = {};", i32::MAX))
+            .unwrap();
+        bump_write_seq(&db.conn).unwrap();
+        assert_eq!(read_write_seq(&db.conn).unwrap(), i64::from(i32::MAX));
+    }
+
+    /// The companion file: absent -> `None`; written -> read back exactly;
+    /// atomic (temp+rename leaves no `.tmp` litter behind).
+    #[test]
+    fn qa14_write_seq_companion_roundtrips_and_absent_reads_as_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("cost-ledger.sqlite");
+        let companion_path = write_seq_companion_path(&db_path);
+        assert_eq!(read_write_seq_companion(&companion_path), None);
+
+        write_write_seq_companion(&companion_path, 42).unwrap();
+        assert_eq!(read_write_seq_companion(&companion_path), Some(42));
+
+        write_write_seq_companion(&companion_path, 43).unwrap();
+        assert_eq!(read_write_seq_companion(&companion_path), Some(43));
+
+        let mut tmp_os = companion_path.as_os_str().to_owned();
+        tmp_os.push(".tmp");
+        assert!(
+            !PathBuf::from(tmp_os).exists(),
+            "the temp file must be renamed away, not left behind"
+        );
+    }
+
+    /// A fresh store (no companion, no prior observation) never flags a
+    /// restore — first-run adoption — and leaves a companion behind for the
+    /// next open to compare against.
+    #[test]
+    fn qa14_fresh_store_first_open_adopts_baseline_without_flagging() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cost-ledger.sqlite");
+        let db = LedgerDb::open(&path).unwrap();
+        assert!(!restore_reconcile_marker_present(&db.conn).unwrap());
+        let companion = write_seq_companion_path(&path);
+        assert_eq!(
+            read_write_seq_companion(&companion),
+            Some(read_write_seq(&db.conn).unwrap())
+        );
+    }
+
+    /// The full QA14 detection flow, driven purely through this module's own
+    /// primitives (no dependency on `ops.rs`): open once (baseline
+    /// companion=0) -> the DB's `user_version` is advanced (simulating any
+    /// mutating ledger operation) -> the companion is refreshed to observe
+    /// that advance (simulating the post-commit sync every real bump site
+    /// performs) -> the DB is rolled back to an OLDER `user_version` without
+    /// touching the companion (simulating a `.backup`/restore, which is
+    /// indistinguishable at this layer from "someone rewrote the header") ->
+    /// the next `open` must flag it, persist the marker (idempotently on a
+    /// THIRD open), and re-arm the companion to the restored value.
+    #[test]
+    fn qa14_open_detects_restore_persists_marker_and_refreshes_companion() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cost-ledger.sqlite");
+        let companion = write_seq_companion_path(&path);
+
+        {
+            let db = LedgerDb::open(&path).unwrap();
+            assert_eq!(read_write_seq(&db.conn).unwrap(), 0);
+        }
+        assert_eq!(read_write_seq_companion(&companion), Some(0));
+
+        // Simulate ordinary forward operation advancing the counter, and the
+        // post-commit companion sync every real bump site performs.
+        {
+            let db = LedgerDb::open(&path).unwrap();
+            db.conn.execute_batch("PRAGMA user_version = 5;").unwrap();
+            write_write_seq_companion(&companion, 5).unwrap();
+        }
+        assert_eq!(read_write_seq_companion(&companion), Some(5));
+
+        // Simulate a restore: the DB file now reports an OLDER value than
+        // the companion last observed, with the companion itself untouched
+        // (a real `.backup`/restore only ever replaces the DB file).
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch("PRAGMA user_version = 2;").unwrap();
+        }
+        assert_eq!(read_write_seq_companion(&companion), Some(5));
+
+        let db2 = LedgerDb::open(&path).unwrap();
+        assert!(
+            restore_reconcile_marker_present(&db2.conn).unwrap(),
+            "user_version regressing (2 < companion's 5) must flag a restore"
+        );
+        assert_eq!(
+            read_write_seq_companion(&companion),
+            Some(2),
+            "the companion must re-arm to the (restored) DB's current value"
+        );
+        drop(db2);
+
+        // A THIRD open (no further tampering): the companion now equals the
+        // DB's value, so detection does not re-fire — but the marker,
+        // already persisted, is the durable source of truth and must still
+        // be present (and re-persisting it must not panic on the
+        // schema_migrations PRIMARY KEY — this is the idempotency guard).
+        let db3 = LedgerDb::open(&path).unwrap();
+        assert!(restore_reconcile_marker_present(&db3.conn).unwrap());
+    }
+
+    /// `clear_restore_reconcile_marker`: idempotent (`false` when absent),
+    /// and actually removes a present marker.
+    #[test]
+    fn qa14_clear_restore_reconcile_marker_is_idempotent() {
+        let (_dir, db) = open_temp();
+        assert!(!clear_restore_reconcile_marker(&db.conn).unwrap());
+        crate::ledger::migrate::record_marker(&db.conn, RESTORE_RECONCILE_PENDING_MARKER).unwrap();
+        assert!(restore_reconcile_marker_present(&db.conn).unwrap());
+        assert!(clear_restore_reconcile_marker(&db.conn).unwrap());
+        assert!(!restore_reconcile_marker_present(&db.conn).unwrap());
+        // A second clear on an already-absent marker is a no-op, not an error.
+        assert!(!clear_restore_reconcile_marker(&db.conn).unwrap());
+    }
+
+    /// `PRAGMA integrity_check` on a healthy store reports `"ok"`.
+    #[test]
+    fn qa14_integrity_check_reports_ok_on_a_healthy_store() {
+        let (_dir, db) = open_temp();
+        assert_eq!(integrity_check(&db.conn).unwrap(), "ok");
     }
 }

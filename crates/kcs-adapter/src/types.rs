@@ -53,6 +53,23 @@ pub enum BillingDeclaration {
     Nonbillable,
 }
 
+/// QA13 (step4b-contract-tests-p3a.md §E, 04 §5.5 L880): whether this
+/// adapter's provider offers a request-level idempotency mechanism for a
+/// SYNC call. `HttpHeader(name)` names the HTTP header a caller must set to
+/// request it; `NotProvided` is the common case — neither built-in adapter's
+/// pinned endpoint offers one (04 §5.5: "job 作成に idempotency key の無い
+/// provider が現実"), so dedup rests solely on the ledger's own §5.4/§5.8
+/// 2-phase (`batch_requests` row) protocol. This is a declaration of what the
+/// PROVIDER offers, never a blanket Adapter-layer requirement (04 §5.5:
+/// "Adapter 層への idempotency_key 一律要求はしない").
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderIdempotency {
+    #[default]
+    NotProvided,
+    HttpHeader(String),
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AdapterProfile {
     pub adapter_kind: AdapterKind,
@@ -73,6 +90,16 @@ pub struct AdapterProfile {
     /// `billable_kinds`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reject_billing: Option<BillingDeclaration>,
+    /// QA13 (step4b-contract-tests-p3a.md §E, 04 §5.5 L880): sync-call
+    /// provider idempotency declaration — see [`ProviderIdempotency`].
+    /// Output-inert (not part of `tool_profile_hash`, `identity::PROFILE_FIELDS`),
+    /// same posture as `billable_kinds`/`reject_billing` above. `#[serde(default)]`
+    /// so existing JSON fixtures (built before this field existed) keep
+    /// parsing — they degrade to `NotProvided`, the correct legacy reading (no
+    /// adapter declared a provider idempotency key before this contract
+    /// existed).
+    #[serde(default)]
+    pub provider_idempotency: ProviderIdempotency,
 }
 
 /// QA16 (step4b-contract-tests-p3a.md §F): `transient | permanent | rate_limit`
@@ -281,6 +308,17 @@ pub struct MarkdownizeRequest {
     pub bbox_annotation_enabled: bool,
     pub tool_profile_hash: String,
     pub spec_version: u64,
+    /// QA13 (step4b-contract-tests-p3a.md §E, 04 §5.5 L880): the ledger
+    /// phase-1 `intent_token` (04 §5.8 相 1, UUIDv7) — stable across a
+    /// crash-window resend because `reserve_or_reuse_task_charge` returns the
+    /// SAME token while the row stays open, which is exactly the dedup
+    /// property a provider-side idempotency key needs. Carried only when the
+    /// executing adapter's profile declares
+    /// `ProviderIdempotency::HttpHeader` (the ledger's own §5.4/§5.8 2-phase
+    /// record is the sole guard otherwise). `None` for a send with no ledger
+    /// charge (e.g. the offline/free-local Markdownize path).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idempotency_token: Option<String>,
 }
 
 const fn default_bbox_annotation_enabled() -> bool {
@@ -346,6 +384,12 @@ pub struct EmbeddingItem {
 pub struct EmbeddingRequest {
     pub input_type: EmbeddingInputType,
     pub items: Vec<EmbeddingItem>,
+    /// QA13 (step4b-contract-tests-p3a.md §E, 04 §5.5 L880): see
+    /// `MarkdownizeRequest::idempotency_token`'s doc — same semantics,
+    /// carried only when the executing adapter's profile declares
+    /// `ProviderIdempotency::HttpHeader`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idempotency_token: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -470,6 +514,7 @@ mod tests {
             bbox_annotation_enabled: true,
             tool_profile_hash: "sha256:tool".to_owned(),
             spec_version: 1,
+            idempotency_token: None,
         };
 
         let value = serde_json::to_value(request).expect("serialize markdownize request");

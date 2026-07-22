@@ -175,6 +175,9 @@ enum Command {
     /// Manage per-Adapter network approvals (QA25-27,
     /// step4b-contract-tests-p3a.md §H, 07-adapter-spec.md §3).
     Adapter(AdapterArgs),
+    /// Cost-ledger maintenance (QA14/QA15, step4b-contract-tests-p3a.md
+    /// L307-338, 10-operations.md §7.5.2 backup/restore recovery).
+    Ledger(LedgerArgs),
     /// Rebuild local acceleration tables.
     Repair(UnsupportedArgs),
     /// Search indexed chunks.
@@ -350,6 +353,26 @@ struct RevokeArgs {
 }
 
 #[derive(Debug, Args)]
+struct LedgerArgs {
+    #[command(subcommand)]
+    command: Option<LedgerCommand>,
+}
+
+#[derive(Debug, Subcommand)]
+enum LedgerCommand {
+    /// `kcs ledger reconcile` (QA14/QA15, 10-operations.md §7.5.2 / 04-pipeline.md
+    /// §5.8): restore-from-backup recovery — integrity check, the stale-sync and
+    /// batch-row crash-recovery walks, and the provider-side orphan/unknown
+    /// job-attribution walk. Read-only against provider state (result fetch /
+    /// deletion are never automatic) and idempotent (safe to rerun; also runnable
+    /// standalone when no restore was ever detected).
+    Reconcile(ReconcileArgs),
+}
+
+#[derive(Debug, Args)]
+struct ReconcileArgs {}
+
+#[derive(Debug, Args)]
 struct UnsupportedArgs {
     #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
     args: Vec<String>,
@@ -506,7 +529,11 @@ fn command_captured_json_flag(command: &Command) -> bool {
         | Command::Reindex(args)
         | Command::Move(args)
         | Command::Evidence(args) => args.args.iter().any(|arg| arg == "--json"),
-        Command::Index(_) | Command::Batch(_) | Command::Purge(_) | Command::Adapter(_) => false,
+        Command::Index(_)
+        | Command::Batch(_)
+        | Command::Purge(_)
+        | Command::Adapter(_)
+        | Command::Ledger(_) => false,
         Command::Init(_)
         | Command::Status
         | Command::Snapshot(_)
@@ -789,6 +816,7 @@ fn run(cli: Cli) -> Result<Value> {
         Command::Index(args) => run_index(args),
         Command::Batch(args) => run_batch(args),
         Command::Adapter(args) => run_adapter(args),
+        Command::Ledger(args) => run_ledger(args),
         Command::Repair(args) => run_repair(args),
         Command::Search(args) => run_search(args),
         Command::Open(args) => run_open(args),
@@ -10276,6 +10304,375 @@ fn run_adapter_revoke(args: RevokeArgs) -> Result<Value> {
     }))
 }
 
+fn run_ledger(args: LedgerArgs) -> Result<Value> {
+    match args.command {
+        Some(LedgerCommand::Reconcile(_)) => run_ledger_reconcile(),
+        None => Err(KcsError::not_implemented("ledger command")),
+    }
+}
+
+/// `kcs ledger reconcile` (QA14/QA15, step4b-contract-tests-p3a.md L307-338,
+/// 10-operations.md §7.5.2 / 04-pipeline.md §5.8). Unlike `kcs batch *`/
+/// `kcs adapter *`, this command is device-global — it does not operate on
+/// the current directory's `.kcs` scope (there may not even be one), so it
+/// takes no `Repository::open_current()` and holds no `.kcs/.lock` (the same
+/// device-global-read posture `stalled_batch_status_json` already has;
+/// unlike that function, this one also writes, but every write it makes
+/// funnels through the same CAS/savepoint-guarded primitives every other
+/// ledger writer uses, so no additional locking is needed here). Runnable
+/// whether or not a restore was ever detected — see `LedgerCommand::Reconcile`'s
+/// doc comment: idempotent, and useful standalone.
+fn run_ledger_reconcile() -> Result<Value> {
+    let ledger = open_ledger_db()?;
+    let conn = ledger.connection();
+
+    // Design step (a): integrity check, run as reconcile's own first action
+    // regardless of whether `LedgerDb::open` already ran one this process
+    // (it only does so "on detection" of a restore — reconcile always
+    // checks). Table/index shape is already verified by `open`
+    // (`ensure_schema`), so it is not re-checked here.
+    let integrity = kcs_pipeline::ledger::schema::integrity_check(conn).map_err(pipeline_to_kcs)?;
+    if integrity != "ok" {
+        // The restore-reconcile marker (if any) is deliberately left in
+        // place — reconcile did not complete, so the gate must keep refusing
+        // new submissions until a clean run succeeds.
+        return Err(pipeline_to_kcs(kcs_pipeline::PipelineError::corrupt(
+            "cost-ledger.sqlite",
+            format!(
+                "PRAGMA integrity_check reported corruption \
+                 (10-operations.md §7.5.2): {integrity}"
+            ),
+        )));
+    }
+
+    // Design step (b): the existing sync-row crash recovery
+    // (`recover_stale_sync_rows`), swept across every scope_id that carries
+    // a sync row — this device-global command has no single owning scope to
+    // scope that sweep to (see `distinct_scope_ids_with_sync_rows`'s doc
+    // comment).
+    let sync_scope_ids = kcs_pipeline::ledger::ops::distinct_scope_ids_with_sync_rows(conn)
+        .map_err(pipeline_to_kcs)?;
+    let mut sync_settled = 0_u64;
+    for scope_id in &sync_scope_ids {
+        sync_settled += recover_stale_sync_rows(&ledger, scope_id)?;
+    }
+
+    // The provider inventory drives both the batch-row recovery walk (design
+    // step c: existing local rows -> does the provider have this job?) and
+    // the orphan/unknown-attribution walk (steps d+e: provider jobs/uploads
+    // -> is there a local row for this?) — fetched once, shared by both.
+    let inventories =
+        kcs_adapter::batch_inventory::configured_inventories().map_err(adapter_to_kcs)?;
+
+    let batch_walk = run_batch_recovery_walk(conn, &inventories)?;
+    let orphan_walk = run_orphan_attribution_walk(conn, &inventories)?;
+
+    // Design step (f): clear the marker + emit the report. Steps (a)-(e) all
+    // ran without the early corrupt-store return above, so this point is
+    // always reached on success — orphan/unknown counts are report CONTENT,
+    // never failures.
+    let marker_cleared = kcs_pipeline::ledger::schema::clear_restore_reconcile_marker(conn)
+        .map_err(pipeline_to_kcs)?;
+
+    Ok(json!({
+        // `print_output`'s non-JSON fallback renders a one-line summary for
+        // any payload carrying a `status` string (06-cli-spec.md §4's own
+        // "human output = short summary" convention every other command
+        // here already follows).
+        "status": "reconciled",
+        "integrity": integrity,
+        "sync_settled": sync_settled,
+        "batch_found": batch_walk.found,
+        "batch_found_keys": batch_walk.found_keys,
+        "batch_settled_unknown": batch_walk.settled_unknown,
+        "batch_settled_unknown_keys": batch_walk.settled_unknown_keys,
+        "unlistable": batch_walk.unlistable,
+        "unlistable_keys": batch_walk.unlistable_keys,
+        // Additive beyond the QA14 design's minimum JSON shape (04 §5.8
+        // L1063-1066's "相 2b 未着手行は job 一覧照合の対象外" rows — reported,
+        // not silently dropped, since no upload-cleanup machinery exists yet
+        // to do anything else with them).
+        "phase2b_not_started": batch_walk.not_job_matchable,
+        "phase2b_not_started_keys": batch_walk.not_job_matchable_keys,
+        "orphans": orphan_walk.orphans,
+        "unknown": orphan_walk.unknown,
+        "unknown_uploads": orphan_walk.unknown_uploads,
+        "reconcile_marker_cleared": marker_cleared,
+    }))
+}
+
+/// `scope_id/adapter_kind/input_hash/tool_profile_hash` — the same 4-tuple
+/// selector shape `parse_batch_selector` accepts, used here only for
+/// human/machine-readable reporting (never re-parsed).
+fn task_key_selector_string(key: &LedgerTaskKey) -> String {
+    format!(
+        "{}/{}/{}/{}",
+        key.scope_id, key.adapter_kind, key.input_hash, key.tool_profile_hash
+    )
+}
+
+/// QA15 design step (c) — `kcs ledger reconcile`'s batch-row recovery walk:
+/// the FIRST production wiring of `recovery_candidates` (previously
+/// test-only, per this session's recon — see the implementation report). For
+/// each candidate row: an inventory covering its `provider_scope_id` that
+/// lists a job matching the row's `intent_token` -> `found` (self-describes
+/// `batch_job_id` via `recovery_mark_found` if not already recorded); no
+/// match, but the recovery deadline AND visibility grace period have both
+/// elapsed (04 §5.8 confirmed-absent) -> `unknown_settled`
+/// (`recovery_settle_unknown`); a row whose `provider_scope_id` has no
+/// configured inventory at all -> `unlistable` (10 §7.5.2: "どちらにも無い
+/// scope は原理的に走査できない" — no state change, retried on a later run).
+/// Rows with `provider_scope_id IS NULL` (相 2b 未着手) are excluded from
+/// job-matching entirely per 04 §5.8 L1063-1066 ("job 不存在は記録から確定
+/// している") and reported separately (`not_job_matchable`) — no
+/// upload-cleanup machinery exists yet for them, so reconcile reports them
+/// rather than attempting anything.
+struct BatchRecoveryWalkReport {
+    found: u64,
+    found_keys: Vec<String>,
+    settled_unknown: u64,
+    settled_unknown_keys: Vec<String>,
+    unlistable: u64,
+    unlistable_keys: Vec<String>,
+    not_job_matchable: u64,
+    not_job_matchable_keys: Vec<String>,
+}
+
+fn run_batch_recovery_walk(
+    conn: &Connection,
+    inventories: &[kcs_adapter::batch_inventory::ProviderInventory],
+) -> Result<BatchRecoveryWalkReport> {
+    let now_ms = kcs_pipeline::ledger::time::now_millis();
+    let candidates =
+        kcs_pipeline::ledger::ops::recovery_candidates(conn).map_err(pipeline_to_kcs)?;
+    let mut report = BatchRecoveryWalkReport {
+        found: 0,
+        found_keys: Vec::new(),
+        settled_unknown: 0,
+        settled_unknown_keys: Vec::new(),
+        unlistable: 0,
+        unlistable_keys: Vec::new(),
+        not_job_matchable: 0,
+        not_job_matchable_keys: Vec::new(),
+    };
+    for row in candidates {
+        let selector = task_key_selector_string(&row.key);
+        let Some(provider_scope_id) = row.provider_scope_id.clone() else {
+            report.not_job_matchable += 1;
+            report.not_job_matchable_keys.push(selector);
+            continue;
+        };
+        let Some(inventory) = inventories
+            .iter()
+            .find(|inventory| inventory.provider_scope_id == provider_scope_id)
+        else {
+            report.unlistable += 1;
+            report.unlistable_keys.push(selector);
+            continue;
+        };
+        let matched_job = row.intent_token.as_deref().and_then(|token| {
+            inventory
+                .jobs
+                .iter()
+                .find(|job| job.intent_token.as_deref() == Some(token))
+        });
+        if let Some(job) = matched_job {
+            kcs_pipeline::ledger::ops::recovery_mark_found(conn, &row.key, &job.job_id)
+                .map_err(pipeline_to_kcs)?;
+            report.found += 1;
+            report.found_keys.push(selector);
+            continue;
+        }
+        let deadline_passed = kcs_pipeline::ledger::ops::recovery_deadline_passed(
+            &row,
+            now_ms,
+            kcs_pipeline::ledger::ops::DEFAULT_RECOVERY_DEADLINE_MS,
+        );
+        let grace_elapsed = kcs_pipeline::ledger::ops::visibility_grace_period_elapsed(
+            row.job_create_started_at,
+            now_ms,
+            kcs_pipeline::ledger::ops::DEFAULT_VISIBILITY_GRACE_PERIOD_MS,
+        );
+        if deadline_passed && grace_elapsed {
+            if let Some(token) = row.intent_token.clone() {
+                // `provider_scope_id` is `Some` in this branch by
+                // construction (the early-continue guard above), so upload
+                // cleanup can never already be confirmed complete here —
+                // mirrors `execute_abandon`'s own
+                // `row.provider_scope_id.is_none()` rule for the same
+                // `cleanup_already_complete` argument.
+                recovery_settle_unknown(conn, &row.key, &token, row.estimated_usd, false)
+                    .map_err(pipeline_to_kcs)?;
+                report.settled_unknown += 1;
+                report.settled_unknown_keys.push(selector);
+            }
+        }
+        // else: neither found nor confirmed-absent yet — 04 §5.8's "unknown"
+        // bullet ("何も変更せず保持し、次回再試行する"): leave untouched,
+        // retried on a later `kcs ledger reconcile` run.
+    }
+    Ok(report)
+}
+
+/// 10 §7.5.2 L660-663's "ローカル構成の scope" set: every `scope_registry` row
+/// whose `root_path/.kcs/scope.json` can be read AND whose `scope_id` equals
+/// the registry row's own — "実地検証 (読取 + scope_id 一致) できた scope_id
+/// 集合". An unreadable or mismatched row is excluded (its jobs fall to
+/// `unknown`, not `orphans` — 10 §7.5.2: "未再登録 scope の job は unknown 側
+/// に落ち、再登録後の再実行で orphan 候補へ移る", which is exactly what
+/// happens the next time this function runs after re-registration — the
+/// walk is idempotent and self-correcting, not a one-shot classification).
+/// Registry-open/read failure degrades to an empty set (everything falls to
+/// `unknown`) rather than failing the whole reconcile — the registry is a
+/// recoverable search cache (03-data-model.md §4), never truth.
+fn verified_local_scope_ids() -> BTreeSet<String> {
+    let mut verified = BTreeSet::new();
+    let Ok(registry) = RegistryDb::open_default() else {
+        return verified;
+    };
+    let Ok(entries) = registry.all_entries() else {
+        return verified;
+    };
+    for entry in entries {
+        let kcs_dir = PathBuf::from(&entry.root_path).join(".kcs");
+        if let Ok(found_scope_id) = scope_id(&kcs_dir) {
+            if found_scope_id == entry.scope_id {
+                verified.insert(entry.scope_id);
+            }
+        }
+    }
+    verified
+}
+
+struct OrphanAttributionReport {
+    orphans: Vec<Value>,
+    unknown: Vec<Value>,
+    unknown_uploads: Vec<Value>,
+}
+
+/// QA15 design steps (d)+(e) — `kcs ledger reconcile`'s orphan/unknown-
+/// attribution walk (10 §7.5.2): the OTHER direction of matching from
+/// `run_batch_recovery_walk` ("does the provider have a job with no local
+/// row", not "does my row have a matching provider job"). Read-only —
+/// nothing here mutates `batch_requests`/`cost_ledger`, so rerunning
+/// reconcile produces an identical report (10 §7.5.2: "報告は冪等"). Nothing
+/// is auto-resubmitted or auto-deleted, matching 10 §7.5.2's explicit rule.
+fn run_orphan_attribution_walk(
+    conn: &Connection,
+    inventories: &[kcs_adapter::batch_inventory::ProviderInventory],
+) -> Result<OrphanAttributionReport> {
+    let verified_scopes = verified_local_scope_ids();
+    let mut orphans = Vec::new();
+    let mut unknown = Vec::new();
+    let mut unknown_uploads = Vec::new();
+
+    for inventory in inventories {
+        for job in &inventory.jobs {
+            if job_is_accounted_for(conn, job)? {
+                continue;
+            }
+            match &job.task_key {
+                Some(task_key) if verified_scopes.contains(&task_key.scope_id) => {
+                    orphans.push(json!({
+                        "provider_scope_id": inventory.provider_scope_id,
+                        "job_id": job.job_id,
+                        "task_key": {
+                            "scope_id": task_key.scope_id,
+                            "adapter_kind": task_key.adapter_kind,
+                            "input_hash": task_key.input_hash,
+                            "tool_profile_hash": task_key.tool_profile_hash,
+                        },
+                        "guidance": {
+                            "result_fetch": "read-only-safe: fetching this job's result does not create new state",
+                            "deletion": "delete only after confirming no other KCS instance shares this provider scope",
+                        },
+                    }));
+                }
+                Some(task_key) => {
+                    unknown.push(json!({
+                        "provider_scope_id": inventory.provider_scope_id,
+                        "job_id": job.job_id,
+                        "task_key": {
+                            "scope_id": task_key.scope_id,
+                            "adapter_kind": task_key.adapter_kind,
+                            "input_hash": task_key.input_hash,
+                            "tool_profile_hash": task_key.tool_profile_hash,
+                        },
+                        "reason": "task_key.scope_id is not a locally-verified registered scope",
+                    }));
+                }
+                None => {
+                    unknown.push(json!({
+                        "provider_scope_id": inventory.provider_scope_id,
+                        "job_id": job.job_id,
+                        "task_key": Value::Null,
+                        "reason": "job metadata carries no task_key (unreadable or absent)",
+                    }));
+                }
+            }
+        }
+        for upload in &inventory.uploads {
+            let accounted_for = match &upload.filename_token {
+                Some(token) => matches!(
+                    resolve_abandon_selector(conn, &AbandonSelector::IntentToken(token.clone()))
+                        .map_err(pipeline_to_kcs)?,
+                    AbandonResolution::Found(_)
+                ),
+                None => false,
+            };
+            if !accounted_for {
+                unknown_uploads.push(json!({
+                    "provider_scope_id": inventory.provider_scope_id,
+                    "upload_id": upload.upload_id,
+                    "filename_token": upload.filename_token,
+                }));
+            }
+        }
+    }
+
+    Ok(OrphanAttributionReport {
+        orphans,
+        unknown,
+        unknown_uploads,
+    })
+}
+
+/// Whether some local `batch_requests` row already accounts for `job` — by
+/// its `task_key`'s exact 4-tuple PRIMARY KEY match first (10 §7.5.2's
+/// primary attribution rule: "job の帰属は...job metadata の task key 4 組が
+/// 担う"), then, secondarily, by `intent_token` (04 §5.8's found/
+/// confirmed-absent matching key — a defense-in-depth check for a job whose
+/// `task_key` this fixture/provider never populated but whose token still
+/// resolves).
+fn job_is_accounted_for(
+    conn: &Connection,
+    job: &kcs_adapter::batch_inventory::ProviderJobRecord,
+) -> Result<bool> {
+    if let Some(task_key) = &job.task_key {
+        let key = LedgerTaskKey::new(
+            task_key.scope_id.clone(),
+            task_key.adapter_kind.clone(),
+            task_key.input_hash.clone(),
+            task_key.tool_profile_hash.clone(),
+        );
+        if get_batch_request(conn, &key)
+            .map_err(pipeline_to_kcs)?
+            .is_some()
+        {
+            return Ok(true);
+        }
+    }
+    if let Some(token) = &job.intent_token {
+        if let AbandonResolution::Found(_) =
+            resolve_abandon_selector(conn, &AbandonSelector::IntentToken(token.clone()))
+                .map_err(pipeline_to_kcs)?
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 /// `$XDG_DATA_HOME/kcs/cost-ledger.sqlite` (04 §5.4 / CL70) — the device-global
 /// ledger, sole store for every reservation/charge this CLI records (2026-07-21:
 /// the JSONL `budget::CostLedger`/`ReservationLedger` design this replaces is
@@ -11061,7 +11458,17 @@ fn execute_pending_markdownize_tasks(
                 }
             })
             .map_err(pipeline_to_kcs)?;
-        match execute_online_markdownize_task(repo, &task, prepared_input) {
+        // QA13 (step4b-contract-tests-p3a.md §E, 04 §5.5 L880): thread this
+        // send's ledger `intent_token` (stable across a crash-window resend —
+        // see `MarkdownizeRequest::idempotency_token`'s doc) into the adapter
+        // boundary, so a provider that declares a sync idempotency key can be
+        // required to carry it.
+        match execute_online_markdownize_task(
+            repo,
+            &task,
+            prepared_input,
+            Some(intent_token.clone()),
+        ) {
             Ok(outcome) => {
                 // QA17/QA18/QA19 (step4b-contract-tests-p3a.md §F): bill the
                 // adapter's self-reported `usage` when it provided one
@@ -11827,6 +12234,11 @@ fn execute_online_markdownize_task(
     repo: &Repository,
     task: &TaskDescriptor,
     prepared_input: PreparedOnlineMarkdownizeInput,
+    // QA13 (step4b-contract-tests-p3a.md §E, 04 §5.5 L880): the caller's
+    // ledger `intent_token` for this send, threaded into every
+    // `MarkdownizeRequest` this call builds (both the incremental and Full
+    // paths below) — see `MarkdownizeRequest::idempotency_token`'s doc.
+    idempotency_token: Option<String>,
 ) -> std::result::Result<OnlineExecutionOutcome, TaskExecutionFailure> {
     let PreparedOnlineMarkdownizeInput {
         path,
@@ -11897,6 +12309,7 @@ fn execute_online_markdownize_task(
             &media_type,
             &path,
             &bytes,
+            idempotency_token.clone(),
         )? {
             return Ok(outcome);
         }
@@ -11927,6 +12340,9 @@ fn execute_online_markdownize_task(
             // send (`retry_units.is_none()`) leaves this false → whole document, no `pages`.
             restrict_to_hint_pages: retry_units.is_some(),
             bbox_annotation_enabled: task.bbox_annotation_enabled.unwrap_or(false),
+            // QA13 (04 §5.5 L880): see this function's `idempotency_token`
+            // param doc.
+            idempotency_token,
         },
         &bytes,
     )
@@ -12074,6 +12490,7 @@ fn execute_online_markdownize_task(
 /// error and re-bill, so propagate). Only the changed+added pages are sent to the
 /// API; unchanged pages are reused from the prior instance (`reused_from`), which
 /// is the cost fix (a light revision no longer re-sends/re-bills every page).
+#[allow(clippy::too_many_arguments)]
 fn try_online_incremental_markdownize(
     repo: &Repository,
     task: &TaskDescriptor,
@@ -12082,6 +12499,9 @@ fn try_online_incremental_markdownize(
     media_type: &str,
     path: &Path,
     verified_raw_bytes: &[u8],
+    // QA13 (step4b-contract-tests-p3a.md §E, 04 §5.5 L880): forwarded from
+    // `execute_online_markdownize_task` — see its doc.
+    idempotency_token: Option<String>,
 ) -> std::result::Result<Option<OnlineExecutionOutcome>, TaskExecutionFailure> {
     let invalid = || TaskExecutionFailure {
         retry_kind: RetryErrorKind::InvalidInput,
@@ -12198,6 +12618,9 @@ fn try_online_incremental_markdownize(
                 // Incremental already scopes pages via `mode`; the retry-only signal stays off.
                 restrict_to_hint_pages: false,
                 bbox_annotation_enabled: task.bbox_annotation_enabled.unwrap_or(false),
+                // QA13 (04 §5.5 L880): see this function's `idempotency_token`
+                // param doc.
+                idempotency_token,
             },
             verified_raw_bytes,
         )
@@ -12435,8 +12858,12 @@ fn run_embedding_adapter(
     execution: AdoptedEmbeddingExecution,
     items: Vec<EmbeddingItem>,
     input_type: EmbeddingInputType,
+    // QA13 (step4b-contract-tests-p3a.md §E, 04 §5.5 L880): the caller's
+    // ledger `intent_token` for this send — see
+    // `kcs_adapter::types::EmbeddingRequest::idempotency_token`'s doc.
+    idempotency_token: Option<String>,
 ) -> std::result::Result<Vec<kcs_adapter::types::EmbeddingVector>, TaskExecutionFailure> {
-    run_adopted_embedding(execution, items, input_type).map_err(|error| {
+    run_adopted_embedding(execution, items, input_type, idempotency_token).map_err(|error| {
         // R13-2(e): a `keychain:` (not-implemented) auth must be LOUD — the query
         // path degrades to text fallback and the index path only counts a failed
         // task, so without this the specific misconfig never reaches any log. Record
@@ -12629,7 +13056,16 @@ fn compute_query_embedding_page1(
         path: None,
         mime: None,
     }];
-    match run_embedding_adapter(execution, items, EmbeddingInputType::Query) {
+    // QA13 (step4b-contract-tests-p3a.md §E, 04 §5.5 L880): a single-item
+    // sync query embed with its own single ledger reservation — the cleanest
+    // 1-token-to-1-HTTP-call site (contrast `send_embed_batch`'s multi-group
+    // batch, main.rs's embedding charge/send region).
+    match run_embedding_adapter(
+        execution,
+        items,
+        EmbeddingInputType::Query,
+        Some(intent_token.clone()),
+    ) {
         Ok(vectors) => {
             // CL43: durably record the (fallback) provider id immediately on
             // response receipt, strictly before the terminal Tx below — a crash
@@ -13174,7 +13610,30 @@ fn run_embedding_enrichment_for_instances(
             .iter()
             .map(|&index| plan.to_send[index].clone())
             .collect();
-        match send_embed_batch(&conn, execution, &profile, &to_send) {
+        // QA13 (step4b-contract-tests-p3a.md §E, 04 §5.5 L880): this ONE
+        // adapter call carries every charged group's item in a single
+        // `EmbeddingRequest` (Gemini's `:batchEmbedContents` batches
+        // client-side, 07 §5.3), but each group holds its OWN independently
+        // reserved `intent_token`. A provider idempotency key is a per-HTTP-
+        // call identifier, so there is no single token that represents every
+        // group in a multi-group batch — thread the FIRST charged group's
+        // token as this call's representative (the common case is exactly
+        // one group per batch, where this is simply that group's own token).
+        // Dormant in production either way: the real Gemini profile always
+        // declares `ProviderIdempotency::NotProvided` (04 §5.5), so this
+        // value is never actually attached to a header outside the
+        // `require_idempotency_token` test seam.
+        let batch_idempotency_token = charged_indices
+            .first()
+            .and_then(|&index| charge_by_group[index].as_ref())
+            .map(|charge| charge.intent_token.clone());
+        match send_embed_batch(
+            &conn,
+            execution,
+            &profile,
+            &to_send,
+            batch_idempotency_token,
+        ) {
             Ok(()) => {
                 for &index in &charged_indices {
                     let charge = charge_by_group[index]
@@ -13518,6 +13977,10 @@ fn send_embed_batch(
     execution: AdoptedEmbeddingExecution,
     profile: &DeclaredEmbeddingProfile,
     to_send: &[EmbeddingSendGroup<'_>],
+    // QA13 (step4b-contract-tests-p3a.md §E, 04 §5.5 L880): see the call
+    // site's doc for why this is a single representative token, not one per
+    // group.
+    idempotency_token: Option<String>,
 ) -> std::result::Result<(), TaskExecutionFailure> {
     let items = to_send
         .iter()
@@ -13528,7 +13991,12 @@ fn send_embed_batch(
             mime: None,
         })
         .collect::<Vec<_>>();
-    let vectors = run_embedding_adapter(execution, items, EmbeddingInputType::MarkdownChunk)?;
+    let vectors = run_embedding_adapter(
+        execution,
+        items,
+        EmbeddingInputType::MarkdownChunk,
+        idempotency_token,
+    )?;
     let by_id = vectors
         .into_iter()
         .map(|vector| (vector.id, vector.vector))
@@ -14728,6 +15196,9 @@ impl MarkdownizeAdapter for TestIncrementalMarkdownizeAdapter {
             // the built-in deterministic adapter.
             billable_kinds: Vec::new(),
             reject_billing: Some(kcs_adapter::types::BillingDeclaration::Nonbillable),
+            // QA13 (step4b-contract-tests-p3a.md §E, 04 §5.5 L880): local/
+            // offline test seam, never a sync provider call.
+            provider_idempotency: kcs_adapter::types::ProviderIdempotency::NotProvided,
         }
     }
 
@@ -15252,6 +15723,10 @@ fn run_index_pipeline(
             bbox_annotation_enabled: false,
             tool_profile_hash: markdown_profile_hash.clone(),
             spec_version: 1,
+            // QA13 (step4b-contract-tests-p3a.md §E, 04 §5.5 L880): this is
+            // the free/local (no ledger charge) offline Markdownize path —
+            // there is no `intent_token` to carry.
+            idempotency_token: None,
         };
 
         let mut response = offline_markdownize_from_verified_bytes(

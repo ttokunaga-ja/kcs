@@ -5,6 +5,7 @@ use std::time::Duration;
 
 use serde_json::Value;
 
+use crate::types::ProviderIdempotency;
 use crate::{AdapterError, Result};
 
 pub(crate) const MODEL_CATALOG_MAX_BYTES: usize = 1024 * 1024;
@@ -107,6 +108,35 @@ pub(crate) fn parse_retry_after_ms(header_value: &str) -> Option<u64> {
         return None;
     }
     Some(millis as u64)
+}
+
+/// QA13 (step4b-contract-tests-p3a.md §E, 04 §5.5 L880): resolve the
+/// idempotency header a sync provider call must carry, or fail closed.
+/// `NotProvided` never inspects `idempotency_token` — the ledger's own
+/// §5.4/§5.8 2-phase record (a `batch_requests` row) is the sole dedup guard,
+/// and Adapter-layer idempotency is never required unconditionally (04 §5.5:
+/// "Adapter 層への idempotency_key 一律要求はしない"). `HttpHeader(name)`
+/// REQUIRES a token; a missing one is fail-closed (04 §5.5 「要求」), never a
+/// silent unauthenticated send. Factored out as a pure function (no `ureq`
+/// dependency) so both real clients' header assembly is unit-testable
+/// without a live HTTP request.
+pub(crate) fn resolve_idempotency_header(
+    provider_idempotency: &ProviderIdempotency,
+    idempotency_token: Option<&str>,
+) -> Result<Option<(String, String)>> {
+    match provider_idempotency {
+        ProviderIdempotency::NotProvided => Ok(None),
+        ProviderIdempotency::HttpHeader(name) => {
+            let token = idempotency_token.ok_or_else(|| {
+                AdapterError::ContractViolation(
+                    "provider declares an idempotency key but the caller supplied no token — \
+                     04 §5.5 要求 fail-closed"
+                        .to_owned(),
+                )
+            })?;
+            Ok(Some((name.clone(), token.to_owned())))
+        }
+    }
 }
 
 pub(crate) fn parse_json_bytes_bounded(
@@ -285,6 +315,52 @@ mod tests {
         );
         let err = result.expect_err("slow response must time out");
         assert!(matches!(err, ureq::Error::Transport(_)));
+    }
+
+    // QA13 (step4b-contract-tests-p3a.md §E, 04 §5.5 L880): the pure
+    // idempotency-header resolution function's 3 cases — see kcs-adapter unit
+    // tests (a)/(b)/(c) in the implementation report.
+    #[test]
+    fn qa13_http_header_with_token_resolves_the_declared_header() {
+        let resolved = resolve_idempotency_header(
+            &ProviderIdempotency::HttpHeader("Idempotency-Key".to_owned()),
+            Some("intent-token-abc"),
+        )
+        .unwrap();
+        assert_eq!(
+            resolved,
+            Some(("Idempotency-Key".to_owned(), "intent-token-abc".to_owned()))
+        );
+    }
+
+    #[test]
+    fn qa13_http_header_without_token_is_a_fail_closed_contract_violation() {
+        let error = resolve_idempotency_header(
+            &ProviderIdempotency::HttpHeader("Idempotency-Key".to_owned()),
+            None,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(error, AdapterError::ContractViolation(_)),
+            "a provider that declares an idempotency key must fail closed when the \
+             caller supplies no token, not silently send unauthenticated: {error:?}"
+        );
+    }
+
+    #[test]
+    fn qa13_not_provided_ignores_a_present_token_and_never_errors() {
+        // NotProvided must ignore the field entirely — with a token present...
+        assert_eq!(
+            resolve_idempotency_header(&ProviderIdempotency::NotProvided, Some("intent-token-abc"))
+                .unwrap(),
+            None
+        );
+        // ...and with no token, the common real-adapter case (04 §5.5: neither
+        // built-in adapter's pinned endpoint offers a provider idempotency key).
+        assert_eq!(
+            resolve_idempotency_header(&ProviderIdempotency::NotProvided, None).unwrap(),
+            None
+        );
     }
 
     #[test]

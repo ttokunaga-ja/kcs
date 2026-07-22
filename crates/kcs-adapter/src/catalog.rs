@@ -19,7 +19,7 @@ use crate::traits::{EmbeddingAdapter, MarkdownizeAdapter, PrepareAdapter};
 use crate::types::{
     AdapterProfile, EmbeddingInputType, EmbeddingItem, EmbeddingRequest, EmbeddingVector,
     IncrementalHints, MarkdownizeMode, MarkdownizeRequest, MarkdownizeResponse, PreparedUnitHint,
-    PreviousMarkdownizeContext, RawInput,
+    PreviousMarkdownizeContext, ProviderIdempotency, RawInput,
 };
 use crate::{AdapterError, Result};
 
@@ -80,6 +80,12 @@ pub struct StandardOnlineMarkdownizeRequest<'a> {
     /// A fresh full send leaves this `false`.
     pub restrict_to_hint_pages: bool,
     pub bbox_annotation_enabled: bool,
+    /// QA13 (step4b-contract-tests-p3a.md §E, 04 §5.5 L880): the ledger
+    /// phase-1 `intent_token` for this send — see
+    /// `MarkdownizeRequest::idempotency_token`'s doc. `None` when this call
+    /// has no ledger charge (e.g. a resolve-only profile lookup site never
+    /// reaches this struct at all — only an actual send does).
+    pub idempotency_token: Option<String>,
 }
 
 pub struct StandardOnlineMarkdownizeOutcome {
@@ -160,6 +166,11 @@ pub fn run_standard_online_markdownize_with_bytes(
         bbox_annotation_enabled: request.bbox_annotation_enabled,
         tool_profile_hash: String::new(),
         spec_version: 1,
+        // QA13 (step4b-contract-tests-p3a.md §E, 04 §5.5 L880): thread the
+        // caller's ledger `intent_token` through so the Adapter boundary can
+        // enforce/attach a provider idempotency header when the resolved
+        // profile declares one.
+        idempotency_token: request.idempotency_token,
     };
     match std::env::var(TEST_STANDARD_ONLINE_MARKDOWNIZE_ENV)
         .ok()
@@ -230,6 +241,38 @@ pub fn run_standard_online_markdownize_with_bytes(
             {
                 response.updated_units.pop();
             }
+            return Ok(StandardOnlineMarkdownizeOutcome {
+                profile,
+                response,
+                effective_prepared_unit_hints,
+            });
+        }
+        // QA13 (step4b-contract-tests-p3a.md §E, 04 §5.5 L880): behaves like
+        // "mock", but the adapter declares `ProviderIdempotency::HttpHeader`
+        // — proving the CLI threads `idempotency_token` end-to-end. A missing
+        // token surfaces as `AdapterError::ContractViolation` (fail closed,
+        // before any send); a present one lets the mock send succeed exactly
+        // like "mock" does. Never true for the real, shipped Mistral profile
+        // (`MistralOcrMarkdownizeAdapter::default` stays `NotProvided`).
+        Some("require_idempotency_token") => {
+            let client = MockStandardOnlineMarkdownizeClient;
+            let model_pin = client.resolve_model_pin("mistral-ocr-latest")?;
+            let adapter = MistralOcrMarkdownizeAdapter::new(client, model_pin, request.scope_id)
+                .with_image_store(request.kcs_dir)
+                .with_bbox_annotation(request.bbox_annotation_enabled)
+                .with_verified_raw_bytes(verified_raw_bytes.to_vec())
+                .with_provider_idempotency(ProviderIdempotency::HttpHeader(
+                    "Idempotency-Key".to_owned(),
+                ));
+            let profile = adapter.profile();
+            let mut adapter_request = adapter_request;
+            adapter_request.tool_profile_hash = profile.tool_profile_hash.clone();
+            let response = adapter.markdownize(adapter_request)?;
+            let effective_prepared_unit_hints = effective_prepared_unit_hints(
+                &requested_prepared_unit_hints,
+                request.raw_hash,
+                &response,
+            )?;
             return Ok(StandardOnlineMarkdownizeOutcome {
                 profile,
                 response,
@@ -375,6 +418,19 @@ pub fn resolve_standard_online_markdownize_profile_with_bbox(
                     .profile(),
             );
         }
+        // QA13: keep the seam arms in sync with `run_standard_online_markdownize`.
+        Some("require_idempotency_token") => {
+            let client = MockStandardOnlineMarkdownizeClient;
+            let model_pin = client.resolve_model_pin("mistral-ocr-latest")?;
+            return Ok(
+                MistralOcrMarkdownizeAdapter::new(client, model_pin, scope_id)
+                    .with_bbox_annotation(bbox_annotation_enabled)
+                    .with_provider_idempotency(ProviderIdempotency::HttpHeader(
+                        "Idempotency-Key".to_owned(),
+                    ))
+                    .profile(),
+            );
+        }
         _ => {}
     }
     let client = EnvMistralOcrClient::new();
@@ -409,6 +465,7 @@ impl MistralOcrClient for MockStandardOnlineMarkdownizeClient {
         request: &MarkdownizeRequest,
         model_pin: &str,
         _verified_raw_bytes: &[u8],
+        _idempotency_header: Option<(&str, &str)>,
     ) -> Result<OcrResponse> {
         // R14-6: under `pin_changed`, an INCREMENTAL send must never reach the adapter —
         // the gate resolves the changed pin first and falls back to Full. If one is
@@ -521,6 +578,12 @@ pub enum AdoptedEmbeddingExecution {
     /// into `next_retry_at`, unlike `RateLimit` above (headerless, synthetic
     /// +2s backoff).
     RateLimitAfter,
+    /// QA13 (step4b-contract-tests-p3a.md §E, 04 §5.5 L880): behaves like
+    /// `Mock`, but the adapter declares `ProviderIdempotency::HttpHeader` —
+    /// proving the CLI threads `EmbeddingRequest.idempotency_token`
+    /// end-to-end (a missing token surfaces as `ContractViolation`). Never
+    /// true for the real, shipped Gemini profile.
+    RequireIdempotencyToken,
     Real,
 }
 
@@ -533,6 +596,9 @@ pub fn active_adopted_embedding_execution() -> Option<AdoptedEmbeddingExecution>
         Some("auth_error") => Some(AdoptedEmbeddingExecution::AuthError),
         Some("rate_limit") => Some(AdoptedEmbeddingExecution::RateLimit),
         Some("rate_limit_after") => Some(AdoptedEmbeddingExecution::RateLimitAfter),
+        Some("require_idempotency_token") => {
+            Some(AdoptedEmbeddingExecution::RequireIdempotencyToken)
+        }
         Some(_) => None,
         // R13-2: activate the Real path when EITHER a `tools.toml` `[embedding]`
         // adapter is declared (its auth is resolved at execution — keychain there
@@ -602,8 +668,17 @@ pub fn run_adopted_embedding(
     execution: AdoptedEmbeddingExecution,
     items: Vec<EmbeddingItem>,
     input_type: EmbeddingInputType,
+    // QA13 (step4b-contract-tests-p3a.md §E, 04 §5.5 L880): the caller's
+    // ledger `intent_token` for this send — see
+    // `EmbeddingRequest::idempotency_token`'s doc. `None` for a call with no
+    // ledger charge.
+    idempotency_token: Option<String>,
 ) -> Result<Vec<EmbeddingVector>> {
-    let request = EmbeddingRequest { input_type, items };
+    let request = EmbeddingRequest {
+        input_type,
+        items,
+        idempotency_token,
+    };
     let response = match execution {
         AdoptedEmbeddingExecution::Real => {
             let declared = crate::tool_lock::registered_declared_adapter("embedding");
@@ -620,6 +695,19 @@ pub fn run_adopted_embedding(
             )
             .embed(request)
         }
+        // QA13: behaves like the generic mock arm below, but the adapter
+        // declares a provider idempotency header so a missing
+        // `idempotency_token` surfaces as `ContractViolation` — proving the
+        // CLI threads it end-to-end.
+        AdoptedEmbeddingExecution::RequireIdempotencyToken => GeminiEmbeddingAdapter::new(
+            MockAdoptedEmbeddingClient { execution },
+            ADOPTED_MODEL_PIN,
+            ADOPTED_DIMENSIONS,
+        )
+        .with_provider_idempotency(ProviderIdempotency::HttpHeader(
+            "Idempotency-Key".to_owned(),
+        ))
+        .embed(request),
         other => GeminiEmbeddingAdapter::new(
             MockAdoptedEmbeddingClient { execution: other },
             ADOPTED_MODEL_PIN,
@@ -672,6 +760,7 @@ impl GeminiEmbeddingClient for MockAdoptedEmbeddingClient {
         items: &[EmbeddingItem],
         _model_pin: &str,
         dimensions: u32,
+        _idempotency_header: Option<(&str, &str)>,
     ) -> Result<Vec<EmbeddingVector>> {
         match self.execution {
             AdoptedEmbeddingExecution::AuthError => {
@@ -781,6 +870,7 @@ mod tests {
                 },
             ],
             EmbeddingInputType::MarkdownChunk,
+            None,
         )
         .unwrap();
         assert_eq!(vectors.len(), 2);
@@ -795,6 +885,7 @@ mod tests {
                 AdoptedEmbeddingExecution::AuthError,
                 Vec::new(),
                 EmbeddingInputType::Query,
+                None,
             ),
             Err(AdapterError::Auth(_))
         ));
@@ -803,6 +894,7 @@ mod tests {
                 AdoptedEmbeddingExecution::RateLimit,
                 Vec::new(),
                 EmbeddingInputType::Query,
+                None,
             ),
             Err(AdapterError::RateLimit { .. })
         ));
@@ -836,6 +928,7 @@ mod tests {
             hints: None,
             restrict_to_hint_pages: false,
             bbox_annotation_enabled: false,
+            idempotency_token: None,
         })
         .unwrap();
         std::env::remove_var(TEST_STANDARD_ONLINE_MARKDOWNIZE_ENV);
@@ -857,6 +950,7 @@ mod tests {
             hints: None,
             restrict_to_hint_pages: false,
             bbox_annotation_enabled: false,
+            idempotency_token: None,
         })
         .unwrap();
         std::env::remove_var(TEST_STANDARD_ONLINE_MARKDOWNIZE_ENV);
@@ -897,6 +991,7 @@ mod tests {
             hints: None,
             restrict_to_hint_pages: false,
             bbox_annotation_enabled: true,
+            idempotency_token: None,
         })
         .unwrap();
         std::env::remove_var(TEST_STANDARD_ONLINE_MARKDOWNIZE_ENV);

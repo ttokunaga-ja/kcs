@@ -12,14 +12,18 @@
 //! wiring: config/schema behavior, `kcs status`/`kcs index` end-to-end
 //! effects, and cross-crate structural checks that need a real build tree.
 //!
-//! Coverage is partial by design: several QA items (§E idempotency/backup,
-//! §O Batch trait, §Q streaming, §U Batch content recovery) are large,
-//! independent features deferred out of this pass — see the implementation
-//! report, not this file, for the full QA-by-QA accounting. §G/§H (the
-//! online opt-in AND-gate, `.kcs/scope.json` `approvals[]` storage, and
-//! `kcs adapter revoke`) and §I (`--online`/`--offline` wiring for
-//! `repair`/`batch resume`/`batch retry`/`reindex`) ARE covered — QA21/22/
-//! 25/26/27/29/30/31 near the end of this file.
+//! Coverage is partial by design: several QA items (§E QA14/15 cost-ledger
+//! backup/restore/orphan detection, §O Batch trait, §Q streaming, §U Batch
+//! content recovery) are large, independent features deferred out of this
+//! pass — see the implementation report, not this file, for the full
+//! QA-by-QA accounting. §G/§H (the online opt-in AND-gate, `.kcs/scope.json`
+//! `approvals[]` storage, and `kcs adapter revoke`) and §I
+//! (`--online`/`--offline` wiring for `repair`/`batch resume`/`batch
+//! retry`/`reindex`) ARE covered — QA21/22/25/26/27/29/30/31 near the end of
+//! this file. §E QA13 (the provider-idempotency conditional) IS covered —
+//! see the `qa13_*` tests just below §D (the header-assembly/fail-closed
+//! mechanics themselves are `kcs-adapter` unit tests; this file only proves
+//! the CLI-to-Adapter-boundary wiring).
 
 use std::fs;
 use std::path::Path;
@@ -506,6 +510,79 @@ fn qa11_status_budget_report_has_no_folder_per_adapter_key() {
     assert!(
         budget.get("folder_per_adapter").is_none(),
         "folder_per_adapter must not be reported: {budget}"
+    );
+}
+
+// ===========================================================================
+// §E LLM API idempotency 二段階 (U11, QA13 — QA14/15 backup/restore/orphan
+// detection remain deferred, see this file's header note)
+// ===========================================================================
+
+/// QA13 (step4b-contract-tests-p3a.md §E, 04 §5.5 L880): a sync markdownize
+/// send under the `require_idempotency_token` seam SUCCEEDS — the seam's
+/// adapter declares `ProviderIdempotency::HttpHeader` and fails closed with
+/// `ContractViolation` on a missing token, so a completed task proves the
+/// CLI threaded the ledger's `intent_token` all the way to the Adapter
+/// boundary (`kcs-adapter` unit tests cover the header-assembly/fail-closed
+/// mechanics directly; this is the end-to-end CLI wiring proof).
+#[test]
+fn qa13_sync_send_threads_intent_token_to_adapter() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("a.pdf"), fake_pdf(&["hello qa13"])).unwrap();
+    init(&dir);
+    // R14-2: the online markdownize send is deferred — `index --approve`
+    // only enqueues it (mirrors QA2/QA3's two-step flow above).
+    run_markdownize_seam(&dir, "mock", None, &["index", "--approve"]);
+
+    let resumed = run_markdownize_seam(
+        &dir,
+        "require_idempotency_token",
+        None,
+        &["batch", "resume"],
+    );
+    assert_eq!(resumed["tasks_executed"], 1, "{resumed}");
+
+    let status = run_markdownize_seam(&dir, "mock", None, &["status"]);
+    let task = online_markdownize_task(&status);
+    assert!(
+        task["status"] == "done" || task["status"] == "partial",
+        "the ledger intent_token must reach the adapter boundary so the seam's \
+         idempotency gate is satisfied and the send succeeds: {status}"
+    );
+}
+
+/// QA13's embedding twin: `index --approve` runs embedding enrichment
+/// synchronously (unlike markdownize's deferred online task), so the
+/// `require_idempotency_token` seam's proof is a single command — every
+/// embedding task must land `done`, never a `ContractViolation` failure.
+#[test]
+fn qa13_embedding_sync_send_threads_intent_token_to_adapter() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(
+        dir.path().join("a.md"),
+        "# Doc\n\nQA13 embedding idempotency threading body text.\n",
+    )
+    .unwrap();
+    init(&dir);
+    run_embedding_seam(
+        &dir,
+        "require_idempotency_token",
+        None,
+        &["index", "--approve"],
+    );
+
+    let status = run_embedding_seam(&dir, "mock", None, &["status"]);
+    let embedding_tasks: Vec<&Value> = status["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|task| task["type"] == "embedding")
+        .collect();
+    assert!(!embedding_tasks.is_empty(), "no embedding task in {status}");
+    assert!(
+        embedding_tasks.iter().all(|task| task["status"] == "done"),
+        "the ledger intent_token must reach the adapter boundary so the seam's \
+         idempotency gate is satisfied and the send succeeds: {status}"
     );
 }
 

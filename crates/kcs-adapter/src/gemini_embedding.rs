@@ -36,12 +36,19 @@ pub trait GeminiEmbeddingClient: Clone {
     /// version at startup (07 §6: mutable aliases must never be pinned).
     fn resolve_model_pin(&self, configured_model: &str) -> Result<String>;
 
-    /// Embed the batch of items, returning one vector per item (order preserved).
+    /// Embed the batch of items, returning one vector per item (order
+    /// preserved). QA13 (step4b-contract-tests-p3a.md §E, 04 §5.5 L880):
+    /// `idempotency_header` is the ADAPTER-resolved `(header name, token)`
+    /// pair (see `crate::http_policy::resolve_idempotency_header`) to attach
+    /// to the outgoing HTTP request when `Some` — `None` when the profile
+    /// declares `ProviderIdempotency::NotProvided` (the real built-in
+    /// adapter's permanent posture; see [`GeminiEmbeddingAdapter::profile`]).
     fn embed(
         &self,
         items: &[EmbeddingItem],
         model_pin: &str,
         dimensions: u32,
+        idempotency_header: Option<(&str, &str)>,
     ) -> Result<Vec<EmbeddingVector>>;
 }
 
@@ -163,6 +170,7 @@ impl GeminiEmbeddingClient for EnvGeminiEmbeddingClient {
         items: &[EmbeddingItem],
         model_pin: &str,
         dimensions: u32,
+        idempotency_header: Option<(&str, &str)>,
     ) -> Result<Vec<EmbeddingVector>> {
         let api_key = Self::api_key()?;
         // `:batchEmbedContents` embeds the whole batch in one request. Vertex has
@@ -177,14 +185,23 @@ impl GeminiEmbeddingClient for EnvGeminiEmbeddingClient {
                 })
             })
             .collect::<Vec<_>>();
-        let response = authenticated_agent(self.http_policy)
+        let mut http_request = authenticated_agent(self.http_policy)
             .post(&format!(
                 "{}/v1beta/models/{model_pin}:batchEmbedContents",
                 self.base_url()
             ))
             .set("x-goog-api-key", &api_key)
             .set("Content-Type", "application/json")
-            .set("Accept-Encoding", "identity")
+            .set("Accept-Encoding", "identity");
+        // QA13 (step4b-contract-tests-p3a.md §E, 04 §5.5 L880): attach the
+        // provider idempotency header only when the profile resolved one —
+        // dormant in production (the real Gemini embedding profile always
+        // declares `ProviderIdempotency::NotProvided`), reachable via a test
+        // profile.
+        if let Some((name, value)) = idempotency_header {
+            http_request = http_request.set(name, value);
+        }
+        let response = http_request
             .send_json(json!({ "requests": requests }))
             .map_err(http_error)?;
         let response = read_json_bounded(
@@ -272,6 +289,11 @@ pub struct GeminiEmbeddingAdapter<C = EnvGeminiEmbeddingClient> {
     client: C,
     configured_model: String,
     dimensions: u32,
+    /// QA13 (step4b-contract-tests-p3a.md §E, 04 §5.5 L880): defaults to
+    /// `NotProvided` (the real, shipped Gemini `:batchEmbedContents`
+    /// endpoint offers no provider idempotency key) — see
+    /// [`Self::with_provider_idempotency`].
+    provider_idempotency: crate::types::ProviderIdempotency,
 }
 
 impl Default for GeminiEmbeddingAdapter<EnvGeminiEmbeddingClient> {
@@ -290,7 +312,22 @@ impl<C> GeminiEmbeddingAdapter<C> {
             client,
             configured_model: configured_model.into(),
             dimensions,
+            provider_idempotency: crate::types::ProviderIdempotency::NotProvided,
         }
+    }
+
+    /// QA13 (step4b-contract-tests-p3a.md §E, 04 §5.5 L880): declare the
+    /// provider's sync-call idempotency posture — see
+    /// [`crate::types::ProviderIdempotency`]. The real, shipped Gemini
+    /// embedding adapter never calls this (it stays at the `::new()`
+    /// default, `NotProvided`) — only a test-seam profile does.
+    #[must_use]
+    pub fn with_provider_idempotency(
+        mut self,
+        provider_idempotency: crate::types::ProviderIdempotency,
+    ) -> Self {
+        self.provider_idempotency = provider_idempotency;
+        self
     }
 
     /// The adopted profile JSON value (07 §5.3).
@@ -336,14 +373,36 @@ impl<C: GeminiEmbeddingClient> EmbeddingAdapter for GeminiEmbeddingAdapter<C> {
             // output-token leg for an embedding response.
             billable_kinds: vec![crate::types::BillableUnitKind::TokensIn],
             reject_billing: Some(crate::types::BillingDeclaration::Billable),
+            // QA13 (04 §5.5 L880): the real Gemini `:batchEmbedContents`
+            // endpoint offers no idempotency parameter — "job 作成に
+            // idempotency key の無い provider が現実" — so the shipped
+            // adapter's `::new()` default, `NotProvided`, flows straight
+            // through here. Only a test-seam adapter overrides it via
+            // `with_provider_idempotency`.
+            provider_idempotency: self.provider_idempotency.clone(),
         }
     }
 
     fn embed(&self, request: EmbeddingRequest) -> Result<EmbeddingResponse> {
+        // QA13 (step4b-contract-tests-p3a.md §E, 04 §5.5 L880): resolve (and
+        // fail closed on) the provider idempotency header BEFORE any network
+        // call — a `HttpHeader`-declaring provider with no caller-supplied
+        // token must never reach the model-pin lookup or the embed call.
+        // `NotProvided` (the real, shipped adapter's permanent posture) never
+        // inspects `request.idempotency_token` and never errors here.
+        let idempotency_header = crate::http_policy::resolve_idempotency_header(
+            &self.provider_idempotency,
+            request.idempotency_token.as_deref(),
+        )?;
         let model_pin = self.client.resolve_model_pin(&self.configured_model)?;
-        let vectors = self
-            .client
-            .embed(&request.items, &model_pin, self.dimensions)?;
+        let vectors = self.client.embed(
+            &request.items,
+            &model_pin,
+            self.dimensions,
+            idempotency_header
+                .as_ref()
+                .map(|(name, value)| (name.as_str(), value.as_str())),
+        )?;
         if vectors.len() != request.items.len() {
             return Err(AdapterError::ContractViolation(
                 "embedding response count does not match request".to_owned(),
@@ -424,6 +483,7 @@ mod tests {
             items: &[EmbeddingItem],
             _model_pin: &str,
             dimensions: u32,
+            _idempotency_header: Option<(&str, &str)>,
         ) -> Result<Vec<EmbeddingVector>> {
             Ok(items
                 .iter()
@@ -451,6 +511,57 @@ mod tests {
         assert!(adapter.profile().allow_network);
     }
 
+    // QA13 (step4b-contract-tests-p3a.md §E, 04 §5.5 L880), test (d): the
+    // real, shipped Gemini embedding adapter declares `NotProvided` — its
+    // pinned `:batchEmbedContents` endpoint offers no provider idempotency
+    // key.
+    #[test]
+    fn qa13_default_gemini_profile_declares_not_provided() {
+        let adapter =
+            GeminiEmbeddingAdapter::new(StubClient, ADOPTED_MODEL_PIN, ADOPTED_DIMENSIONS);
+        assert_eq!(
+            adapter.profile().provider_idempotency,
+            crate::types::ProviderIdempotency::NotProvided
+        );
+    }
+
+    // QA13: `embed()`'s generic idempotency gate — a `HttpHeader`-declaring
+    // profile rejects a request with no token BEFORE the client is ever
+    // reached (fail closed, no billed call), and accepts one once the caller
+    // supplies a token.
+    #[test]
+    fn qa13_embed_enforces_provider_idempotency_header_requirement() {
+        let adapter =
+            GeminiEmbeddingAdapter::new(StubClient, ADOPTED_MODEL_PIN, ADOPTED_DIMENSIONS)
+                .with_provider_idempotency(crate::types::ProviderIdempotency::HttpHeader(
+                    "Idempotency-Key".to_owned(),
+                ));
+        let item = EmbeddingItem {
+            id: "a".to_owned(),
+            text: Some("hello".to_owned()),
+            path: None,
+            mime: None,
+        };
+        let missing_token_request = EmbeddingRequest {
+            input_type: EmbeddingInputType::MarkdownChunk,
+            items: vec![item.clone()],
+            idempotency_token: None,
+        };
+        let error = adapter.clone().embed(missing_token_request).unwrap_err();
+        assert!(
+            matches!(error, AdapterError::ContractViolation(_)),
+            "expected ContractViolation, got {error:?}"
+        );
+
+        let with_token_request = EmbeddingRequest {
+            input_type: EmbeddingInputType::MarkdownChunk,
+            items: vec![item],
+            idempotency_token: Some("intent-token-xyz".to_owned()),
+        };
+        let response = adapter.embed(with_token_request).unwrap();
+        assert_eq!(response.vectors.len(), 1);
+    }
+
     #[test]
     fn embed_returns_one_vector_per_item() {
         let adapter =
@@ -472,6 +583,7 @@ mod tests {
                         mime: None,
                     },
                 ],
+                idempotency_token: None,
             })
             .unwrap();
         assert_eq!(response.vectors.len(), 2);

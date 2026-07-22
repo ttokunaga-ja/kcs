@@ -80,11 +80,18 @@ pub struct OcrResponse {
 pub trait MistralOcrClient: Clone {
     fn resolve_model_pin(&self, configured_model: &str) -> Result<String>;
 
+    /// QA13 (step4b-contract-tests-p3a.md §E, 04 §5.5 L880): `idempotency_header`
+    /// is the ADAPTER-resolved `(header name, token)` pair (see
+    /// `crate::http_policy::resolve_idempotency_header`) to attach to the
+    /// outgoing HTTP request when `Some` — `None` when the profile declares
+    /// `ProviderIdempotency::NotProvided` (the real built-in adapter's
+    /// permanent posture; see [`MistralOcrMarkdownizeAdapter::profile`]).
     fn ocr_markdown(
         &self,
         request: &MarkdownizeRequest,
         model_pin: &str,
         verified_raw_bytes: &[u8],
+        idempotency_header: Option<(&str, &str)>,
     ) -> Result<OcrResponse>;
 }
 
@@ -196,6 +203,7 @@ impl MistralOcrClient for EnvMistralOcrClient {
         request: &MarkdownizeRequest,
         model_pin: &str,
         verified_raw_bytes: &[u8],
+        idempotency_header: Option<(&str, &str)>,
     ) -> Result<OcrResponse> {
         let api_key = Self::api_key()?;
         // R14-4: in incremental mode, restrict the OCR request to the changed+added
@@ -204,11 +212,19 @@ impl MistralOcrClient for EnvMistralOcrClient {
         // mode sends no `pages` (process the entire document).
         let pages = request_pages(request)?;
         let expected_pages = expected_page_indices(request)?;
-        let response = authenticated_agent(self.http_policy)
+        let mut http_request = authenticated_agent(self.http_policy)
             .post(&format!("{}/v1/ocr", self.base_url()))
             .set("Authorization", &format!("Bearer {api_key}"))
             .set("Content-Type", "application/json")
-            .set("Accept-Encoding", "identity")
+            .set("Accept-Encoding", "identity");
+        // QA13 (step4b-contract-tests-p3a.md §E, 04 §5.5 L880): attach the
+        // provider idempotency header only when the profile resolved one —
+        // dormant in production (the real Mistral OCR profile always declares
+        // `ProviderIdempotency::NotProvided`), reachable via a test profile.
+        if let Some((name, value)) = idempotency_header {
+            http_request = http_request.set(name, value);
+        }
+        let response = http_request
             .send_json(ocr_request_body(
                 &request.media_type,
                 verified_raw_bytes,
@@ -438,6 +454,10 @@ pub struct MistralOcrMarkdownizeAdapter<C = EnvMistralOcrClient> {
     image_store_dir: Option<PathBuf>,
     verified_raw_bytes: Option<Vec<u8>>,
     bbox_annotation_enabled: bool,
+    /// QA13 (step4b-contract-tests-p3a.md §E, 04 §5.5 L880): defaults to
+    /// `NotProvided` (the real, shipped Mistral OCR `/v1/ocr` endpoint offers
+    /// no provider idempotency key) — see [`Self::with_provider_idempotency`].
+    provider_idempotency: crate::types::ProviderIdempotency,
 }
 
 impl Default for MistralOcrMarkdownizeAdapter<EnvMistralOcrClient> {
@@ -460,6 +480,7 @@ impl<C> MistralOcrMarkdownizeAdapter<C> {
             image_store_dir: None,
             verified_raw_bytes: None,
             bbox_annotation_enabled: false,
+            provider_idempotency: crate::types::ProviderIdempotency::NotProvided,
         }
     }
 
@@ -478,6 +499,20 @@ impl<C> MistralOcrMarkdownizeAdapter<C> {
     #[must_use]
     pub fn with_bbox_annotation(mut self, enabled: bool) -> Self {
         self.bbox_annotation_enabled = enabled;
+        self
+    }
+
+    /// QA13 (step4b-contract-tests-p3a.md §E, 04 §5.5 L880): declare the
+    /// provider's sync-call idempotency posture — see
+    /// [`crate::types::ProviderIdempotency`]. The real, shipped Mistral OCR
+    /// adapter never calls this (it stays at the `::new()` default,
+    /// `NotProvided`) — only a test-seam profile does.
+    #[must_use]
+    pub fn with_provider_idempotency(
+        mut self,
+        provider_idempotency: crate::types::ProviderIdempotency,
+    ) -> Self {
+        self.provider_idempotency = provider_idempotency;
         self
     }
 }
@@ -527,6 +562,12 @@ impl<C: MistralOcrClient> MarkdownizeAdapter for MistralOcrMarkdownizeAdapter<C>
             // 0.004` example); there is no separate token leg.
             billable_kinds: vec![crate::types::BillableUnitKind::Pages],
             reject_billing: Some(crate::types::BillingDeclaration::Billable),
+            // QA13 (04 §5.5 L880): the real Mistral `/v1/ocr` endpoint offers
+            // no idempotency parameter — "job 作成に idempotency key の無い
+            // provider が現実" — so the shipped adapter's `::new()` default,
+            // `NotProvided`, flows straight through here. Only a test-seam
+            // adapter overrides it via `with_provider_idempotency`.
+            provider_idempotency: self.provider_idempotency.clone(),
         }
     }
 
@@ -576,10 +617,25 @@ impl<C: MistralOcrClient> MarkdownizeAdapter for MistralOcrMarkdownizeAdapter<C>
                 request.raw.raw_hash
             )));
         }
+        // QA13 (step4b-contract-tests-p3a.md §E, 04 §5.5 L880): resolve (and
+        // fail closed on) the provider idempotency header BEFORE any network
+        // call — a `HttpHeader`-declaring provider with no caller-supplied
+        // token must never reach the model-pin lookup or the OCR upload.
+        // `NotProvided` (the real, shipped adapter's permanent posture) never
+        // inspects `request.idempotency_token` and never errors here.
+        let idempotency_header = crate::http_policy::resolve_idempotency_header(
+            &self.provider_idempotency,
+            request.idempotency_token.as_deref(),
+        )?;
         let model_pin = self.client.resolve_model_pin(&self.configured_model)?;
-        let ocr = self
-            .client
-            .ocr_markdown(&request, &model_pin, raw_bytes.as_ref())?;
+        let ocr = self.client.ocr_markdown(
+            &request,
+            &model_pin,
+            raw_bytes.as_ref(),
+            idempotency_header
+                .as_ref()
+                .map(|(name, value)| (name.as_str(), value.as_str())),
+        )?;
         if self.bbox_annotation_enabled {
             let mut total = 0_usize;
             for page in &ocr.pages {
@@ -1693,6 +1749,18 @@ mod tests {
         assert_eq!(profile.adapter_id, "mistral_ocr_markdownize");
     }
 
+    // QA13 (step4b-contract-tests-p3a.md §E, 04 §5.5 L880), test (d): the
+    // real, shipped Mistral OCR adapter declares `NotProvided` — its pinned
+    // `/v1/ocr` endpoint offers no provider idempotency key.
+    #[test]
+    fn qa13_default_mistral_profile_declares_not_provided() {
+        let profile = MistralOcrMarkdownizeAdapter::default().profile();
+        assert_eq!(
+            profile.provider_idempotency,
+            crate::types::ProviderIdempotency::NotProvided
+        );
+    }
+
     #[test]
     fn image_placeholders_become_object_uris_in_order() {
         let markdown = "![a](placeholder-1)\n\n![b](placeholder-2)\n";
@@ -1905,6 +1973,7 @@ mod tests {
             bbox_annotation_enabled: false,
             tool_profile_hash: String::new(),
             spec_version: 1,
+            idempotency_token: None,
         }
     }
 
@@ -2286,6 +2355,7 @@ mod tests {
             _request: &MarkdownizeRequest,
             model_pin: &str,
             verified_raw_bytes: &[u8],
+            _idempotency_header: Option<(&str, &str)>,
         ) -> Result<OcrResponse> {
             self.0.lock().unwrap().push(verified_raw_bytes.to_vec());
             Ok(OcrResponse {
@@ -2317,6 +2387,7 @@ mod tests {
             _request: &MarkdownizeRequest,
             model_pin: &str,
             _verified_raw_bytes: &[u8],
+            _idempotency_header: Option<(&str, &str)>,
         ) -> Result<OcrResponse> {
             self.network_calls
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -2342,6 +2413,7 @@ mod tests {
             bbox_annotation_enabled: false,
             tool_profile_hash: String::new(),
             spec_version: 1,
+            idempotency_token: None,
         }
     }
 
@@ -2490,5 +2562,48 @@ mod tests {
             .with_verified_raw_bytes(replacement.to_vec());
         assert!(adapter.markdownize(request).is_err());
         assert!(captured.lock().unwrap().is_empty());
+    }
+
+    // QA13 (step4b-contract-tests-p3a.md §E, 04 §5.5 L880): `markdownize()`'s
+    // generic idempotency gate (shared by every `C: MistralOcrClient`, real or
+    // test) — a `HttpHeader`-declaring profile rejects a request with no
+    // token BEFORE the client is ever reached (fail closed, no upload/bill),
+    // and accepts one once the caller supplies a token.
+    #[test]
+    fn qa13_markdownize_enforces_provider_idempotency_header_requirement() {
+        let bytes = b"verified raw";
+        let build_adapter = || {
+            let captured = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+            let client = CaptureBytesClient(captured.clone());
+            let adapter = MistralOcrMarkdownizeAdapter::new(client, "mistral-ocr-2505", "scope")
+                .with_bbox_annotation(false)
+                .with_verified_raw_bytes(bytes.to_vec())
+                .with_provider_idempotency(crate::types::ProviderIdempotency::HttpHeader(
+                    "Idempotency-Key".to_owned(),
+                ));
+            (adapter, captured)
+        };
+
+        let mut missing_token_request =
+            markdownize_request(MarkdownizeMode::Full, vec![hint("page:1", 0)]);
+        missing_token_request.raw.raw_hash = crate::identity::hash_bytes(bytes);
+        let (adapter, captured) = build_adapter();
+        let error = adapter.markdownize(missing_token_request).unwrap_err();
+        assert!(
+            matches!(error, AdapterError::ContractViolation(_)),
+            "expected ContractViolation, got {error:?}"
+        );
+        assert!(
+            captured.lock().unwrap().is_empty(),
+            "the HTTP client must never be reached before the fail-closed gate"
+        );
+
+        let mut with_token_request =
+            markdownize_request(MarkdownizeMode::Full, vec![hint("page:1", 0)]);
+        with_token_request.raw.raw_hash = crate::identity::hash_bytes(bytes);
+        with_token_request.idempotency_token = Some("intent-token-xyz".to_owned());
+        let (adapter, _captured) = build_adapter();
+        let response = adapter.markdownize(with_token_request).unwrap();
+        assert_eq!(response.updated_units[0].markdown, "verified");
     }
 }
