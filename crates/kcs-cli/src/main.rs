@@ -23,13 +23,14 @@ use std::time::Instant;
 use clap::{Args, Parser, Subcommand};
 use kcs_adapter::catalog::{
     active_adopted_embedding_execution, adopted_embedding_profile,
-    builtin_offline_markdownize_adapter, builtin_prepare_profile,
+    builtin_offline_markdownize_adapter, builtin_prepare_profile, convert_office_to_pdf,
     declared_adopted_embedding_profile, resolve_standard_online_markdownize_profile_with_bbox,
     run_adopted_embedding, run_standard_online_markdownize_with_bytes,
     standard_online_markdownize_profile, standard_online_markdownize_profile_with_bbox,
     AdoptedEmbeddingExecution, DeclaredEmbeddingProfile, StandardOnlineMarkdownizeRequest,
 };
 use kcs_adapter::identity::tool_profile_hash;
+use kcs_adapter::office_convert::{is_office_media, resolve_office_converter};
 use kcs_adapter::tool_lock::{load_tool_lock, validate_tools_toml};
 use kcs_adapter::traits::MarkdownizeAdapter;
 use kcs_adapter::types::{
@@ -82,7 +83,7 @@ use kcs_pipeline::markdownize::{
     choose_markdownize_mode, load_validated_normalized_instance, persist_normalized_instance,
     validate_markdownize_response, IncrementalHints, IncrementalModeDecision, IncrementalModeInput,
     MarkdownizeMode, NormalizedInstanceManifest, NormalizedUnitManifestEntry, NormalizedUnitObject,
-    UnitStatus,
+    UnitStatus, ValidatedNormalizedInstance,
 };
 use kcs_pipeline::prepare::{
     hash_bytes, map_units, pdf_text_pages_bounded, prepare_units_from_bytes, unit_ref,
@@ -137,6 +138,16 @@ use crate::search_time::{
     reconcile_cursor_selector, since_cutoff_seconds, since_cutoff_utc, validate_cursor_cutoff,
     PositiveDuration, TimeSelector, TimeSelectorFlags,
 };
+
+/// 07-adapter-spec.md §5.1: `UnsupportedInputDisposition.reason` recorded for an
+/// Office (DOCX/PPTX) file when no converter (`KCS_OFFICE_CONVERTER` / PATH
+/// `soffice`) resolves at `kcs index` time -- no online task is enqueued for it
+/// (no doomed task), and `compute_index_status`'s `office_conversion_unavailable`
+/// surfaces it. Shares the `UnsupportedInputStore` (`UNSUPPORTED_INPUTS_FILE`)
+/// used for `UNSUPPORTED_REASON_UNRECOGNIZED_BINARY` -- `reason` is a free-form
+/// `String`, not a closed enum, so this is a plain sibling value, not a change to
+/// `kcs-pipeline`.
+const OFFICE_CONVERSION_UNAVAILABLE_REASON: &str = "office_conversion_unavailable";
 
 // clap のパースエラーは exit code 2 で終了する。これは docs/06-cli-spec.md §7 の
 // invalid usage (= 2) と一致するため、そのまま採用する。
@@ -4517,6 +4528,7 @@ fn compute_index_status(searched: &[SearchedScopeInfo]) -> Value {
     let mut unsupported_inputs = Vec::new();
     let mut unsupported_input_errors = Vec::new();
     let mut task_errors = Vec::new();
+    let mut office_conversion_unavailable_inputs = Vec::new();
 
     for scope in searched {
         // R23-20 (03 §4 L296): `scope.scope_path` is now the canonical `.kcs`
@@ -4591,10 +4603,28 @@ fn compute_index_status(searched: &[SearchedScopeInfo]) -> Value {
         // separately-carried `repo_root` field.
         match Repository::open(&scope.repo_root) {
             Ok(repo) => {
-                match current_unsupported_inputs(&repo) {
+                // 07 §5.1: a single shared read (`current_dispositions`) feeds
+                // BOTH `unsupported_inputs` and the new `office_conversion_unavailable`
+                // field -- they partition the SAME underlying `UnsupportedInputStore`
+                // read/tree-liveness check by `reason`, so a single corrupt/
+                // unreadable scope must report exactly ONE error here, not one
+                // per output field (two independent re-reads of the identical
+                // failing store would double-count it).
+                match current_dispositions(&repo) {
                     Ok(dispositions) => {
-                        total = total.saturating_add(dispositions.len() as u64);
-                        unsupported_inputs.extend(dispositions.into_iter().map(|disposition| {
+                        let (office_unavailable, unsupported): (Vec<_>, Vec<_>) =
+                            dispositions.into_iter().partition(|disposition| {
+                                disposition.reason == OFFICE_CONVERSION_UNAVAILABLE_REASON
+                            });
+                        let unsupported: Vec<_> = unsupported
+                            .into_iter()
+                            .filter(|disposition| {
+                                disposition.reason == UNSUPPORTED_REASON_UNRECOGNIZED_BINARY
+                            })
+                            .collect();
+                        total = total.saturating_add(unsupported.len() as u64);
+                        total = total.saturating_add(office_unavailable.len() as u64);
+                        unsupported_inputs.extend(unsupported.into_iter().map(|disposition| {
                             json!({
                                 "scope_path": scope.scope_path,
                                 "path": disposition.path,
@@ -4604,6 +4634,26 @@ fn compute_index_status(searched: &[SearchedScopeInfo]) -> Value {
                                 "reason": disposition.reason,
                             })
                         }));
+                        // 07 §5.1: an Office file with no resolvable converter has
+                        // NO enrichment task at all (item 1's enqueue gate) -- it
+                        // is exactly as "not enriched" as an `unsupported_inputs`
+                        // entry, so it also counts toward `total` (denominator)
+                        // without counting toward `done`. Kept in its OWN field
+                        // (not folded into `unsupported_inputs`) because the
+                        // reason and the recovery action (install a converter)
+                        // differ.
+                        office_conversion_unavailable_inputs.extend(
+                            office_unavailable.into_iter().map(|disposition| {
+                                json!({
+                                    "scope_path": scope.scope_path,
+                                    "path": disposition.path,
+                                    "raw_hash": disposition.raw_hash,
+                                    "media_type": disposition.media_type,
+                                    "size_bytes": disposition.size_bytes,
+                                    "reason": disposition.reason,
+                                })
+                            }),
+                        );
                     }
                     Err(error) => unsupported_input_errors.push(json!({
                         "scope_path": scope.scope_path,
@@ -4653,10 +4703,34 @@ fn compute_index_status(searched: &[SearchedScopeInfo]) -> Value {
         "unsupported_inputs_complete": unsupported_inputs_complete,
         "task_errors": task_errors,
         "tasks_complete": tasks_complete,
+        // 07 §5.1: Office (DOCX/PPTX) files skipped for online enrichment
+        // because no converter (`KCS_OFFICE_CONVERTER` / PATH `soffice`)
+        // resolved at `kcs index` time -- no doomed task was enqueued for
+        // them (item 1's enqueue gate). Disappears once a converter is
+        // installed and the file is re-indexed (the disposition transitions
+        // to `resolved`, dropping it from this "still live" view).
+        "office_conversion_unavailable": {
+            "count": office_conversion_unavailable_inputs.len(),
+            "files": office_conversion_unavailable_inputs,
+        },
     })
 }
 
 fn current_unsupported_inputs(repo: &Repository) -> Result<Vec<UnsupportedInputDisposition>> {
+    Ok(current_dispositions(repo)?
+        .into_iter()
+        .filter(|disposition| disposition.reason == UNSUPPORTED_REASON_UNRECOGNIZED_BINARY)
+        .collect())
+}
+
+/// Shared body for [`current_unsupported_inputs`] / `compute_index_status`'s
+/// own combined read (which partitions by `reason` itself — including 07
+/// §5.1's `OFFICE_CONVERSION_UNAVAILABLE_REASON` — in one pass, so a single
+/// corrupt/unreadable scope reports exactly one error rather than one per
+/// reason): every `UnsupportedInputStore` disposition (any reason) still LIVE
+/// at HEAD with the SAME `raw_hash` the disposition recorded (a reverted /
+/// deleted / re-hashed file's stale disposition must not keep surfacing).
+fn current_dispositions(repo: &Repository) -> Result<Vec<UnsupportedInputDisposition>> {
     let store = UnsupportedInputStore::new(repo.kcs_dir());
     let dispositions = store.latest_by_path().map_err(pipeline_to_kcs)?;
     let Some(head) = repo.head_commit_hash()? else {
@@ -4671,10 +4745,7 @@ fn current_unsupported_inputs(repo: &Repository) -> Result<Vec<UnsupportedInputD
         .collect::<BTreeMap<_, _>>();
     Ok(dispositions
         .into_iter()
-        .filter(|disposition| {
-            disposition.reason == UNSUPPORTED_REASON_UNRECOGNIZED_BINARY
-                && live.get(&disposition.path) == Some(&disposition.raw_hash)
-        })
+        .filter(|disposition| live.get(&disposition.path) == Some(&disposition.raw_hash))
         .collect())
 }
 
@@ -11386,6 +11457,46 @@ fn execute_pending_markdownize_tasks(
                 counts.failed += 1;
                 continue;
             }
+            OnlineMarkdownizePrecondition::ConversionFailed => {
+                // 07 §5.1: mirrors the generic `TaskExecutionFailure` retry-kind
+                // handling below (the `_ => {...}` arm after the adapter send),
+                // applied here because the failure was discovered BEFORE any
+                // adapter call — the same contract_violation retry accounting
+                // (04 §5.3: retryable, one retry), but no ledger charge was ever
+                // reserved this pass (mirrors `Retire` immediately above: only a
+                // still-open reservation from a PRIOR attempt is released).
+                release_task_charge_if_open(&ledger, &key)?;
+                let policy = retry_policy(RetryErrorKind::ContractViolation);
+                let attempts_after = task.attempts.saturating_add(1);
+                let next_retry_at = (policy.retryable
+                    && policy
+                        .max_attempts
+                        .map(|max| attempts_after < max)
+                        .unwrap_or(true))
+                .then(|| scheduled_retry_at(&now_utc_seconds(), &policy.backoff, attempts_after));
+                let reason = retry_reason(RetryErrorKind::ContractViolation).to_owned();
+                store
+                    .update_matching(|candidate| {
+                        if candidate.task_id == task_id {
+                            candidate.status = TaskStatus::Failed;
+                            candidate.fallback_reason = Some(reason.clone());
+                            candidate.hold_reason = None;
+                            candidate.heartbeat_at = None;
+                            candidate.attempts = attempts_after;
+                            candidate.next_retry_at = next_retry_at.clone();
+                            candidate.clear_reservation();
+                            true
+                        } else {
+                            false
+                        }
+                    })
+                    .map_err(pipeline_to_kcs)?;
+                counts.failed += 1;
+                if next_retry_at.is_some() {
+                    counts.failed_retryable += 1;
+                }
+                continue;
+            }
         };
         let file_size = prepared_input.bytes.len() as u64;
         // R11-6: prorate the reserved cost of a UNIT-SCOPED retry by the fraction of
@@ -12097,6 +12208,13 @@ enum OnlineMarkdownizePrecondition {
     /// conversion contract that can feed it to the OCR adapter. Keep it Pending without
     /// charging or sending; currently this is the Office-container path.
     AwaitConversion,
+    /// 07 §5.1: an Office (DOCX/PPTX) file's runtime conversion (re-)attempt
+    /// failed while re-preparing this task's precondition -- never reached
+    /// the adapter, never billed. Distinct from `Retire`: this "joins"
+    /// contract_violation semantics (04 §5.3, retryable once) rather than a
+    /// permanent retirement, since a renderer hiccup is not the same kind of
+    /// failure as a genuinely stale/edited-since-enqueue file.
+    ConversionFailed,
 }
 
 struct PreparedOnlineMarkdownizeInput {
@@ -12173,14 +12291,34 @@ fn classify_online_markdownize_precondition(
     }
     let prepare_profile_hash = builtin_prepare_profile().tool_profile_hash;
     let input_path = path.display().to_string();
-    let Ok(prepare) = prepare_units_from_bytes(PrepareStageBytesRequest {
+    let prepare = match prepare_units_from_bytes(PrepareStageBytesRequest {
         raw_hash: &task.input_hash,
         media_type: &media_type,
         input_path: &input_path,
         tool_profile_hash: &prepare_profile_hash,
         bytes: &verified.bytes,
-    }) else {
-        return OnlineMarkdownizePrecondition::Retire;
+    }) {
+        Ok(prepare) => prepare,
+        Err(error) => {
+            // 07 §5.1: a runtime Office conversion failure discovered while
+            // re-preparing this task's precondition (the SAME converter
+            // resolution + `convert_to_pdf` this file's earlier successful
+            // enqueue-time prepare used, now failing -- a renderer hiccup,
+            // the fixture/binary having gone away mid-run, etc.) "joins"
+            // contract_violation semantics (04 §5.3: retryable, one retry)
+            // rather than a permanent Retire -- a transient failure should
+            // get one more chance, unlike a genuinely stale/edited-since-
+            // enqueue file. Every OTHER prepare failure (a corrupt/oversized
+            // file, an unrelated contract error) keeps today's Retire
+            // behavior unchanged.
+            let is_office_conversion_failure =
+                pipeline_to_kcs(error).error_code() == "KCS-E-PREPARE-OFFICE-CONVERT-001";
+            return if is_office_conversion_failure {
+                OnlineMarkdownizePrecondition::ConversionFailed
+            } else {
+                OnlineMarkdownizePrecondition::Retire
+            };
+        }
     };
     if prepare.prepared_units.is_empty() {
         // A supported non-text-native file reaches the provider without local unit
@@ -12300,7 +12438,19 @@ fn execute_online_markdownize_task(
     // Returns Some on success; None when it doesn't apply or the acceptance check
     // fails (fall through to the Full send below); Err on an adapter auth/rate error
     // (a Full re-send would hit the same error, so propagate).
-    if retry_units.is_none() && !prepared_units.is_empty() {
+    //
+    // 07 §5.1 scope-trim: Office (DOCX/PPTX) media always sends `mode=Full`. The
+    // prior online instance's `PreviousMarkdownizeContext.raw.raw_hash` (built
+    // from `previous.manifest.raw_hash`, the ORIGINAL file's raw_hash) has no
+    // sound relationship to a fresh per-send CONVERTED-PDF identity
+    // (`run_standard_online_markdownize_with_bytes` computes a NEW hash from a
+    // freshly reconverted PDF on every call, §5.1's converted-PDF path) --
+    // reusing it for an incremental "diff against the previous document" send
+    // would need the OCR adapter/provider to understand two DIFFERENT converted
+    // PDFs' page correspondence, which nothing in this contract establishes.
+    // Full re-markdownize is correct and safe; see the implementation report for
+    // the fuller incremental-office design space this defers.
+    if retry_units.is_none() && !prepared_units.is_empty() && !is_office_media(&media_type) {
         if let Some(outcome) = try_online_incremental_markdownize(
             repo,
             task,
@@ -12403,6 +12553,7 @@ fn execute_online_markdownize_task(
         previous.as_ref(),
         &task.input_hash,
         &profile.tool_profile_hash,
+        0,
         MarkdownizeMode::Full,
         &generated_at,
     )
@@ -12459,6 +12610,7 @@ fn execute_online_markdownize_task(
         &units,
         &task.input_hash,
         &profile.tool_profile_hash,
+        0,
         None,
         &run_id,
         &generated_at,
@@ -12665,6 +12817,7 @@ fn try_online_incremental_markdownize(
         Some(&previous),
         &task.input_hash,
         &profile_tool_hash,
+        0,
         MarkdownizeMode::Incremental,
         &generated_at,
     ) {
@@ -12687,6 +12840,7 @@ fn try_online_incremental_markdownize(
         &units,
         &task.input_hash,
         &profile_tool_hash,
+        0,
         Some(previous.manifest.gen),
         &run_id,
         &generated_at,
@@ -15163,7 +15317,40 @@ fn offline_markdownize_from_verified_bytes(
     ) {
         return adapter.markdownize(request);
     }
+    // 07 §5.1: DOCX/PPTX get an offline baseline too, sourced from the SAME
+    // converted-PDF page/slide text `write_prepared_objects` already verified
+    // against Prepare's declared `prepared_hash` -- not the raw OOXML zip bytes
+    // (which `markdownize_from_bytes`'s generic non-PDF fallback would otherwise
+    // lossy-UTF8-decode as unsearchable garbage). This candidate only reaches
+    // here with non-empty prepared units, i.e. a converter resolved for it at
+    // Prepare time in this same `kcs index` pass; absence here is the same rare
+    // mid-run race `write_prepared_objects` already tolerates as a well-defined
+    // (never crashing) failure rather than a silent corruption stand-in.
+    if let Some(unit_kind) = office_unit_kind(&request.media_type) {
+        let converted = convert_office_to_pdf(verified_raw_bytes, &request.media_type)?;
+        return kcs_adapter::deterministic::markdownize_converted_office(
+            request, &converted, unit_kind,
+        );
+    }
     kcs_adapter::deterministic::markdownize_from_bytes(request, verified_raw_bytes)
+}
+
+/// 07-adapter-spec.md §5.1: which `UnitKind` an Office media type's
+/// converted-PDF units use -- DOCX enumerates `page:N` (the converted PDF's
+/// pages themselves), PPTX enumerates `slide:N` (1 converted-PDF page = 1
+/// slide). `None` for every other media type, including XLSX (the sheet
+/// conversion mechanism is explicitly out of this addendum's scope, 07 §5.1
+/// closing sentence).
+fn office_unit_kind(media_type: &str) -> Option<UnitKind> {
+    match media_type {
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document" => {
+            Some(UnitKind::Page)
+        }
+        "application/vnd.openxmlformats-officedocument.presentationml.presentation" => {
+            Some(UnitKind::Slide)
+        }
+        _ => None,
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -15388,6 +15575,14 @@ fn run_index_pipeline(
         .filter(|entry| entry.reason == UNSUPPORTED_REASON_UNRECOGNIZED_BINARY)
         .map(|entry| entry.path.clone())
         .collect::<BTreeSet<_>>();
+    // 07 §5.1: mirrors `unsupported_paths` above, scoped to the
+    // office-conversion-unavailable reason so `enqueue_online_placeholder_task`
+    // can record the resolved-transition once a converter becomes available.
+    let mut office_conversion_unavailable_paths = unsupported_by_path
+        .values()
+        .filter(|entry| entry.reason == OFFICE_CONVERSION_UNAVAILABLE_REASON)
+        .map(|entry| entry.path.clone())
+        .collect::<BTreeSet<_>>();
     // N1a: a Tier B (candidate-secret) file is ingested locally but its online
     // task is held unless the scope carries an explicit `--send-secrets` approval.
     let secrets_approved = secrets_send_approved(repo);
@@ -15533,6 +15728,9 @@ fn run_index_pipeline(
                     &mut result,
                     &ledger,
                     &budget_caps,
+                    &unsupported_store,
+                    &mut unsupported_by_path,
+                    &mut office_conversion_unavailable_paths,
                 )?;
             } else {
                 // R22-4: the R21-4 skip left NO trace — no task, no counter, no event — so a
@@ -15588,6 +15786,60 @@ fn run_index_pipeline(
             .map_err(pipeline_to_kcs)?
             .is_some()
         {
+            // QB41 (03 §2.1's second legal gen+1 path, 07 §5.1): raw_hash is
+            // UNCHANGED (a done/partial gen-0 instance already exists for it),
+            // but `prepare` above (already computed fresh THIS pass, for THIS
+            // candidate -- no extra corpus scan) may still disagree with that
+            // instance's per-unit `prepared_hash`: a prepare profile /
+            // renderer version change (the Office converted-PDF path is the
+            // motivating case) can change `prepared_hash` without changing
+            // raw_hash at all. Detect and gate it BEFORE the unconditional
+            // reuse below would otherwise silently keep serving the STALE
+            // generation forever.
+            if let Some(new_gen) = prepared_hash_drift_new_gen(
+                repo.kcs_dir(),
+                &raw_hash,
+                &markdown_profile_hash,
+                &prepare.prepared_units,
+            ) {
+                // Mirrors `kcs reindex --force`'s confirmation gate exactly
+                // (same error code / exit code / `--yes` flag) -- this
+                // codebase has no real interactive (TTY) confirmation prompt
+                // anywhere yet (`run_index`'s own top-level approval flow
+                // says so explicitly), so non-interactive `--yes` is the only
+                // accepted consent, matching that existing precedent rather
+                // than inventing a new interaction model here.
+                if !args.yes {
+                    return Err(KcsError::new(
+                        "KCS-E-CONFIRM-REJECTED-001",
+                        "prepared_hash changed for an unchanged raw_hash (prepare profile / \
+                         renderer drift); re-markdownize at a new generation requires \
+                         confirmation -- pass --yes in non-interactive mode",
+                        json!({
+                            "input_path": candidate.input_path,
+                            "new_gen": new_gen,
+                        }),
+                        ExitCode::ConfirmationRejected,
+                    ));
+                }
+                create_prepared_hash_drift_instance(
+                    repo,
+                    &task_store,
+                    markdown_adapter.as_ref(),
+                    candidate,
+                    &path,
+                    &raw_hash,
+                    &markdown_profile_hash,
+                    &prepare.prepared_units,
+                    &verified.bytes,
+                    new_gen,
+                    &ledger,
+                    &scope_id,
+                    &now,
+                    &mut result,
+                )?;
+                continue;
+            }
             // PB04: this candidate's gen=0 output is already `done`
             // (verified above) — its manifest.json is expected to be
             // hashable now. Best-effort so a hashing fault alone does not
@@ -15607,13 +15859,15 @@ fn run_index_pipeline(
             );
             result.normalized_files += 1;
             // R21-4: an online OCR "enhancement" task after a SUCCESSFUL local markdownize
-            // is only meaningful for a real text-layer PDF (docs/07 §8). A non-`.md`/non-
-            // code TEXT file folded to `application/octet-stream` (a `.yaml` / `.json` /
-            // `Dockerfile`, or an uppercase-extension text-native file) is already fully and
-            // finally handled by the local passthrough — enqueuing an OCR task shipped its
-            // bytes to the external API under `--online` (R9-2 routing violation) and, when
-            // offline, left a permanent phantom pending that deflated enriched_ratio.
-            if candidate.media_type == "application/pdf" {
+            // is only meaningful for a real text-layer PDF (docs/07 §8) or, per 07 §5.1, an
+            // Office file whose converter resolved (the enqueue gate itself decides whether
+            // to actually enqueue -- item 1's `enqueue_online_placeholder_task` early-return).
+            // A non-`.md`/non-code TEXT file folded to `application/octet-stream` (a `.yaml` /
+            // `.json` / `Dockerfile`, or an uppercase-extension text-native file) is already
+            // fully and finally handled by the local passthrough — enqueuing an OCR task
+            // shipped its bytes to the external API under `--online` (R9-2 routing violation)
+            // and, when offline, left a permanent phantom pending that deflated enriched_ratio.
+            if candidate.media_type == "application/pdf" || is_office_media(&candidate.media_type) {
                 enqueue_online_placeholder_task(
                     repo,
                     &task_store,
@@ -15627,6 +15881,9 @@ fn run_index_pipeline(
                     &mut result,
                     &ledger,
                     &budget_caps,
+                    &unsupported_store,
+                    &mut unsupported_by_path,
+                    &mut office_conversion_unavailable_paths,
                 )?;
             }
             continue;
@@ -15805,6 +16062,7 @@ fn run_index_pipeline(
             previous.as_ref(),
             &raw_hash,
             &markdown_profile_hash,
+            0,
             final_mode,
             &generated_at,
         )?;
@@ -15813,6 +16071,7 @@ fn run_index_pipeline(
             &units,
             &raw_hash,
             &markdown_profile_hash,
+            0,
             previous.as_ref().map(|previous| previous.manifest.gen),
             &run_id,
             &generated_at,
@@ -15881,12 +16140,14 @@ fn run_index_pipeline(
                 &markdown_profile_hash,
             ),
         )?;
-        // R21-4: only a real text-layer PDF warrants an online OCR "enhancement" task after
-        // a successful local markdownize. A TEXT file folded to `application/octet-stream`
+        // R21-4: only a real text-layer PDF, or (07 §5.1) an Office file whose converter
+        // resolved, warrants an online OCR "enhancement" task after a successful local
+        // markdownize -- the enqueue gate itself (item 1) decides whether to actually
+        // enqueue an Office file. A TEXT file folded to `application/octet-stream`
         // (`.yaml`/`.json`/`Dockerfile`/uppercase-extension text-native) is fully handled
         // locally; enqueuing OCR sent its bytes online (R9-2 violation) or left an offline
         // phantom pending.
-        if candidate.media_type == "application/pdf" {
+        if candidate.media_type == "application/pdf" || is_office_media(&candidate.media_type) {
             enqueue_online_placeholder_task(
                 repo,
                 &task_store,
@@ -15900,10 +16161,267 @@ fn run_index_pipeline(
                 &mut result,
                 &ledger,
                 &budget_caps,
+                &unsupported_store,
+                &mut unsupported_by_path,
+                &mut office_conversion_unavailable_paths,
             )?;
         }
     }
     Ok(result)
+}
+
+/// QB41 (03 §2.1's second legal gen+1 path, 07 §5.1): the newest existing
+/// normalized instance for `(raw_hash, tool_profile_hash)`, found by a bounded
+/// linear probe from gen 0 upward. Mirrors `kcs reindex --force`'s own gen-walk
+/// tolerance (`copy_normalized_instance_gen`'s caller, `run_reindex`): a
+/// missing OR unreadable gen N is treated as "N-1 was the latest", the same
+/// forward-degradation this codebase already accepts elsewhere for a
+/// corrupt/partial gen (R17-2's doc comment on the analogous reindex loop).
+fn latest_normalized_instance(
+    kcs_dir: &Path,
+    raw_hash: &str,
+    tool_profile_hash: &str,
+) -> kcs_pipeline::Result<ValidatedNormalizedInstance> {
+    // Gen numbers are always small in practice (only `kcs reindex --force` and
+    // this QB41 path ever create gen > 0) -- this bound only protects against a
+    // pathological/adversarial store, not a real workload.
+    const MAX_GEN_PROBE: u64 = 4096;
+    let mut latest = load_validated_normalized_instance(kcs_dir, raw_hash, tool_profile_hash, 0)?;
+    for gen in 1..MAX_GEN_PROBE {
+        match load_validated_normalized_instance(kcs_dir, raw_hash, tool_profile_hash, gen) {
+            Ok(instance) => latest = instance,
+            Err(_) => break,
+        }
+    }
+    Ok(latest)
+}
+
+/// QB41: `Some(new_gen)` when the LATEST existing normalized instance's
+/// per-unit `prepared_hash` set disagrees with `fresh_prepared_units` (the
+/// SAME-pass, already-computed fresh Prepare output for this candidate -- no
+/// extra corpus scan) -- a prepare profile / renderer version change drove a
+/// `prepared_hash` change without any `raw_hash` change at all (03 §2.1:
+/// "`gen = 現最大 + 1` の新 instance を作れるのは `kcs reindex --force` と、prepare
+/// profile / renderer 変更による `prepared_hash` 変化が駆動する再 Markdownize...
+/// だけ"; 07 §5.1's Office converted-PDF renderer-drift is the motivating
+/// case). `None` when they agree (the ordinary reuse path is unaffected) OR
+/// when the existing instance cannot be loaded at all (graceful degrade --
+/// this detector must never be a NEW source of a hard `kcs index` failure for
+/// a corruption it did not cause; the existing reuse/rebuild paths already
+/// handle that case on their own terms).
+fn prepared_hash_drift_new_gen(
+    kcs_dir: &Path,
+    raw_hash: &str,
+    tool_profile_hash: &str,
+    fresh_prepared_units: &[PreparedUnit],
+) -> Option<u64> {
+    // Guard (a) — defense in depth: an EMPTY fresh prepare is never a drift
+    // verdict. The local extractor legitimately yields zero units for content
+    // it cannot read (R20-4 garbage-gates every FlateDecode-compressed
+    // real-world PDF, including real soffice-converted Office output) while a
+    // done ONLINE instance discovered its units from the OCR response —
+    // comparing those would flag such files as "drifted" on every `kcs index`
+    // (exit 9 without --yes; with --yes an offline gen+1 built from unreadable
+    // input would shadow the OCR content as the latest generation). TODAY this
+    // state cannot reach the caller at all — run_index_pipeline's R20-5
+    // empty-prepare arm peels these candidates off into the online-enqueue
+    // path before the done-instance branch (verified by revert-testing
+    // office_07 with this guard disabled) — but that reachability is one
+    // refactor (or a FlateDecode-capable extractor changing what "empty"
+    // means) away from silently flipping, so the invariant is enforced here
+    // where the verdict is minted, not assumed from caller topology.
+    if fresh_prepared_units.is_empty() {
+        return None;
+    }
+    let latest = latest_normalized_instance(kcs_dir, raw_hash, tool_profile_hash).ok()?;
+    let existing: BTreeMap<&str, &str> = latest
+        .manifest
+        .units
+        .iter()
+        .map(|unit| (unit.unit_key.as_str(), unit.prepared_hash.as_str()))
+        .collect();
+    let fresh: BTreeMap<&str, &str> = fresh_prepared_units
+        .iter()
+        .map(|unit| (unit.unit_key.as_str(), unit.prepared_hash.as_str()))
+        .collect();
+    // Guard (b): only a hash-only disagreement on an IDENTICAL unit-key set is
+    // a safe renderer-drift verdict. A key-set difference is indistinguishable
+    // from an OCR-discovered manifest whose unit set never came from the local
+    // prepare basis (OCR-from-scratch discovery mints placeholder prepared
+    // hashes for pages the extractor never produced) — treating that as drift
+    // would re-prompt on every index instead of once. With the current
+    // hint-echoing adapters a key-set mismatch is not end-to-end constructible
+    // (hints round-trip verbatim; OCR-from-scratch implies the empty-prepare
+    // arm), so like guard (a) this enforces the invariant at the mint rather
+    // than trusting adapter topology to keep it true. A renderer update that
+    // changes pagination therefore stays `kcs reindex --force` territory
+    // (documented residual, step4b backlog).
+    if existing.keys().ne(fresh.keys()) {
+        return None;
+    }
+    (existing != fresh).then(|| latest.manifest.gen.saturating_add(1))
+}
+
+/// QB41 (03 §2.1's second legal gen+1 path): create a FRESH normalized
+/// instance at `new_gen` for a `raw_hash` whose prepare output drifted from
+/// the existing instance's (`prepared_hash_drift_new_gen` already confirmed
+/// the drift, and the caller already gated confirmation -- `--yes`, mirroring
+/// `kcs reindex --force`'s `KCS-E-CONFIRM-REJECTED-001` pattern). Deliberately
+/// FULL mode only (no incremental): this is a rare, renderer-drift-driven
+/// event, not a hot path, and the OLD instance's per-unit content has no sound
+/// correspondence to the NEW prepare output for incremental-reuse purposes
+/// (mirrors `execute_online_markdownize_task`'s office incremental-skip doc,
+/// the analogous online-side reasoning). The OLD gen is left completely
+/// untouched (first-instance-wins) -- only a NEW `g<new_gen>` directory is
+/// created; `write_prepared_objects` already durably wrote the (gen-independent,
+/// content-addressed) prepared CAS objects earlier in this same candidate's
+/// pass, so this function does not repeat that step.
+///
+/// Scope-trim (documented, not a silent gap -- see the implementation report):
+/// this does not ALSO drive a fresh online-adapter send for the new
+/// generation. `enqueue_online_placeholder_task`'s idempotency keys off
+/// `(input_path, input_hash)` only (not gen), so an already-Done online task
+/// for this raw_hash would dedup-skip a fresh enqueue even though its content
+/// is now stale for `new_gen`. Making the online lane gen-aware is a larger,
+/// independent change deferred out of this pass.
+#[allow(clippy::too_many_arguments)]
+fn create_prepared_hash_drift_instance(
+    repo: &Repository,
+    task_store: &TaskStore,
+    markdown_adapter: &dyn MarkdownizeAdapter,
+    candidate: &ScanCandidate,
+    path: &Path,
+    raw_hash: &str,
+    tool_profile_hash: &str,
+    fresh_prepared_units: &[PreparedUnit],
+    verified_bytes: &[u8],
+    new_gen: u64,
+    ledger: &LedgerDb,
+    scope_id: &str,
+    now: &str,
+    result: &mut IndexPipelineResult,
+) -> Result<()> {
+    let output_ref = normalized_output_ref(repo, raw_hash, tool_profile_hash, new_gen);
+    let request = MarkdownizeRequest {
+        raw: RawInput {
+            raw_hash: raw_hash.to_owned(),
+            path: Some(path.display().to_string()),
+        },
+        media_type: candidate.media_type.clone(),
+        prepared_unit_hint: Some(prepared_unit_hints(fresh_prepared_units)),
+        mode: AdapterMarkdownizeMode::Full,
+        previous: None,
+        hints: None,
+        restrict_to_hint_pages: false,
+        bbox_annotation_enabled: false,
+        tool_profile_hash: tool_profile_hash.to_owned(),
+        spec_version: 1,
+        idempotency_token: None,
+    };
+    let response =
+        match offline_markdownize_from_verified_bytes(markdown_adapter, request, verified_bytes) {
+            Ok(response) => response,
+            Err(_) => {
+                append_failed_markdownize_task(
+                    repo,
+                    task_store,
+                    candidate,
+                    raw_hash,
+                    &output_ref,
+                    "contract_violation",
+                    now,
+                )?;
+                result.failed_files += 1;
+                return Ok(());
+            }
+        };
+    let full_hints = all_changed_hints(fresh_prepared_units);
+    if response.fallback_to_full
+        || validate_markdownize_response(&response, &full_hints, fresh_prepared_units).is_err()
+    {
+        append_failed_markdownize_task(
+            repo,
+            task_store,
+            candidate,
+            raw_hash,
+            &output_ref,
+            "contract_violation",
+            now,
+        )?;
+        result.failed_files += 1;
+        return Ok(());
+    }
+    let generated_at = now_utc_seconds();
+    let run_id = format!("run_{}", new_ulid(repo.root()));
+    let units = normalized_units_from_response(
+        &response,
+        fresh_prepared_units,
+        None,
+        raw_hash,
+        tool_profile_hash,
+        new_gen,
+        MarkdownizeMode::Full,
+        &generated_at,
+    )?;
+    let manifest = manifest_from_units(
+        fresh_prepared_units,
+        &units,
+        raw_hash,
+        tool_profile_hash,
+        new_gen,
+        Some(new_gen.saturating_sub(1)),
+        &run_id,
+        &generated_at,
+        RetryErrorKind::ContractViolation,
+    );
+    persist_normalized_instance(repo.kcs_dir(), &manifest, &units).map_err(pipeline_to_kcs)?;
+    // PB04: best-effort, same posture as the ordinary offline markdownize path
+    // -- a hashing fault alone must not newly block an otherwise-successful
+    // `kcs index`.
+    let manifest_hash = hash_and_write_manifest_object(repo.kcs_dir(), &manifest).ok();
+    let mut task = task_descriptor(
+        repo,
+        TaskType::Markdownize,
+        Some(MarkdownizeMode::Full),
+        candidate,
+        raw_hash,
+        &output_ref,
+        TaskStatus::Done,
+        Some("prepared_hash_drift_gen_bump"),
+        &generated_at,
+    );
+    task.unit_keys = Some(
+        fresh_prepared_units
+            .iter()
+            .map(|unit| unit.unit_key.clone())
+            .collect(),
+    );
+    task_store.append(&task).map_err(pipeline_to_kcs)?;
+    result.normalize_by_path.insert(
+        candidate.input_path.clone(),
+        PendingNormalizeRef {
+            expected_raw_hash: raw_hash.to_owned(),
+            normalize: NormalizeRef {
+                tool_profile_hash: tool_profile_hash.to_owned(),
+                gen: new_gen,
+                manifest_hash,
+            },
+        },
+    );
+    result.normalized_files += 1;
+    // F1 (04 §5.4): same free-local-charge posture as the ordinary offline
+    // markdownize path -- this is the built-in deterministic adapter, never
+    // billed, so it never consumes the device/folder USD cap.
+    record_free_local_charge(
+        ledger,
+        &task_ledger_key(
+            scope_id,
+            "deterministic_baseline",
+            raw_hash,
+            tool_profile_hash,
+        ),
+    )?;
+    Ok(())
 }
 
 /// Q2: crash-atomic write of a derived CAS byte object (prepared / image). Writes
@@ -16114,8 +16632,20 @@ fn write_prepared_objects(
             "prepared unit and object hash cardinalities differ",
         ));
     }
+    // 07 §5.1: a DOCX/PPTX unit is a page/slide of the CONVERTED PDF, not the
+    // original file -- its declared `prepared_hash` (kcs-pipeline's
+    // `prepare_units_from_bytes`, which converts+extracts the same way) is the
+    // per-page TEXT of that converted PDF, exactly like the `application/pdf`
+    // branch below but sourced from a freshly reconverted PDF (deterministic
+    // renderer output, 07 §5.1) instead of `bytes` itself. The `!is_empty()`
+    // guard skips conversion entirely when Prepare already reported no units
+    // (no converter resolved, or a non-Office/media caller) -- nothing to write
+    // and no need to invoke (and possibly fail on) a converter for a no-op.
     let pdf_pages = if media_type == "application/pdf" {
         Some(pdf_text_pages_bounded(bytes).map_err(pipeline_to_kcs)?)
+    } else if is_office_media(media_type) && !prepared_units.is_empty() {
+        let converted = convert_office_to_pdf(bytes, media_type).map_err(adapter_to_kcs)?;
+        Some(pdf_text_pages_bounded(&converted).map_err(pipeline_to_kcs)?)
     } else {
         None
     };
@@ -16432,12 +16962,20 @@ fn consecutive_incremental_count(task_store: &TaskStore, input_path: &str) -> Re
     Ok(count)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn normalized_units_from_response(
     response: &kcs_adapter::types::MarkdownizeResponse,
     prepared_units: &[PreparedUnit],
     previous: Option<&PreviousInstance>,
     raw_hash: &str,
     tool_profile_hash: &str,
+    // QB41 (03 §2.1's second legal gen+1 path, 07 §5.1): every EXISTING call
+    // site passes `0` (first-instance-wins: a fresh `(raw_hash,
+    // tool_profile_hash)` identity always starts at gen 0). The ONLY caller
+    // that passes non-zero is `create_prepared_hash_drift_instance` -- a
+    // prepared_hash drift under an UNCHANGED raw_hash is the second gen+1
+    // path this field newly makes representable.
+    gen: u64,
     mode: MarkdownizeMode,
     generated_at: &str,
 ) -> Result<Vec<NormalizedUnitObject>> {
@@ -16468,7 +17006,7 @@ fn normalized_units_from_response(
                 raw_hash: raw_hash.to_owned(),
                 prepared_hash: prepared.prepared_hash.clone(),
                 tool_profile_hash: tool_profile_hash.to_owned(),
-                gen: 0,
+                gen,
                 mode,
                 markdown: unit.markdown.clone(),
                 metadata: unit.metadata.clone(),
@@ -16490,7 +17028,7 @@ fn normalized_units_from_response(
             raw_hash: raw_hash.to_owned(),
             prepared_hash: prepared.prepared_hash.clone(),
             tool_profile_hash: tool_profile_hash.to_owned(),
-            gen: 0,
+            gen,
             mode,
             markdown: previous_unit.markdown.clone(),
             metadata: previous_unit.metadata.clone(),
@@ -16517,6 +17055,9 @@ fn manifest_from_units(
     units: &[NormalizedUnitObject],
     raw_hash: &str,
     tool_profile_hash: &str,
+    // QB41 (03 §2.1's second legal gen+1 path): see `normalized_units_from_response`'s
+    // matching `gen` doc -- every existing call site passes `0`.
+    gen: u64,
     parent_gen: Option<u64>,
     run_id: &str,
     generated_at: &str,
@@ -16529,7 +17070,7 @@ fn manifest_from_units(
     NormalizedInstanceManifest {
         raw_hash: raw_hash.to_owned(),
         tool_profile_hash: tool_profile_hash.to_owned(),
-        gen: 0,
+        gen,
         parent_gen,
         run_id: run_id.to_owned(),
         units: prepared_units
@@ -16932,6 +17473,9 @@ fn enqueue_online_placeholder_task(
     result: &mut IndexPipelineResult,
     ledger: &LedgerDb,
     budget_caps: &BudgetCaps,
+    unsupported_store: &UnsupportedInputStore,
+    unsupported_by_path: &mut BTreeMap<String, UnsupportedInputDisposition>,
+    office_conversion_unavailable_paths: &mut BTreeSet<String>,
 ) -> Result<()> {
     // R9-2: text-native files (Markdown / plain text / code) are fully handled by
     // the deterministic Adapter (07 §2.1) and must never enqueue an online OCR task
@@ -16940,6 +17484,44 @@ fn enqueue_online_placeholder_task(
     // billed task for a `.md` / `.txt` / code file.
     if is_text_native_media(&candidate.media_type) {
         return Ok(());
+    }
+    // 07 §5.1: an Office (DOCX/PPTX) file whose converter is not resolvable
+    // right now must NEVER get a doomed online task -- there is no converted
+    // PDF to send. Record the skip (idempotent: `record_unsupported_if_changed`
+    // no-ops when the same disposition is already the latest row for this
+    // path) so `compute_index_status`'s `office_conversion_unavailable`
+    // discloses WHY this file has no enrichment task, instead of a silent gap.
+    // Once a converter resolves (a later `kcs index`), fall through to the
+    // normal enqueue path below and record the transition back to resolved.
+    if is_office_media(&candidate.media_type) {
+        if resolve_office_converter().is_none() {
+            record_unsupported_if_changed(
+                unsupported_store,
+                unsupported_by_path,
+                UnsupportedInputDisposition {
+                    path: candidate.input_path.clone(),
+                    raw_hash: raw_hash.to_owned(),
+                    media_type: candidate.media_type.clone(),
+                    size_bytes: candidate.size_bytes,
+                    reason: OFFICE_CONVERSION_UNAVAILABLE_REASON.to_owned(),
+                },
+            )?;
+            office_conversion_unavailable_paths.insert(candidate.input_path.clone());
+            return Ok(());
+        }
+        if office_conversion_unavailable_paths.remove(&candidate.input_path) {
+            record_unsupported_if_changed(
+                unsupported_store,
+                unsupported_by_path,
+                UnsupportedInputDisposition {
+                    path: candidate.input_path.clone(),
+                    raw_hash: raw_hash.to_owned(),
+                    media_type: candidate.media_type.clone(),
+                    size_bytes: candidate.size_bytes,
+                    reason: UNSUPPORTED_REASON_RESOLVED.to_owned(),
+                },
+            )?;
+        }
     }
     let online_profile = online_markdownize_profile_for(repo)?;
     let output_ref = online_output_ref(&online_profile.adapter_id);

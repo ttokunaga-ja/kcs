@@ -326,6 +326,22 @@ metadata:
 
 PDF page image、Office intermediate、抽出済み image など、後続 Markdownize / Embedding が扱いやすい単位を作る。
 
+**Office intermediate の変換機構 (DOCX / PPTX — 実装フィードバック 2026-07-23)**: DOCX / PPTX の
+unit 化 ([04-pipeline.md §2](04-pipeline.md) の表) は外部 renderer (LibreOffice headless
+`soffice --convert-to pdf`。解決順 = `KCS_OFFICE_CONVERTER` env → PATH 上の `soffice`) による
+**変換 PDF 経由**とする。DOCX は変換 PDF の page を `page:N`、PPTX は 1 page = 1 slide の対応で
+`slide:N` として列挙する。**変換出力は決定論化する** — PDF の `/CreationDate` `/ModDate` `/ID` 等の
+揮発メタデータを同長固定値へ正規化してから hash する (xref offset を壊さない)。これにより同一
+renderer 版内で prepared_hash が安定し、renderer 更新による出力変化は
+[03-data-model.md §2.1](03-data-model.md) の「prepare profile / renderer 変更による prepared_hash
+変化が駆動する再 Markdownize」(gen+1 の第二の合法経路 — 確認プロンプト + budget guardrail) が
+そのまま吸収する。renderer の名称・版は provenance として記録し、hash 入力にはしない (同一 bytes =
+同一 identity)。**renderer が環境に存在しない場合、当該 Office ファイルの online タスクは enqueue
+しない** (doomed task を作らない) — `index_status` ([05-runtime.md §1.7](05-runtime.md)) に理由付きで
+可視化する。実行時の変換失敗は contract_violation ([04-pipeline.md §5.3](04-pipeline.md) — 同一入力の
+再試行 1 回) に合流する。XLSX (sheet) と音声の変換機構は本追記の対象外 (未定義のまま — 将来ラウンド。
+sheet 名の正準化規則は step4b QB27 参照)。
+
 ## 5.2 Markdownize
 
 OCR は独立 Adapter ではなく **本 Adapter の capability** として表現する。

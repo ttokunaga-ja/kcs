@@ -15,6 +15,7 @@ use crate::mistral_ocr::{
     EnvMistralOcrClient, MistralOcrClient, MistralOcrMarkdownizeAdapter, OcrImage, OcrPage,
     OcrResponse,
 };
+use crate::office_convert::{is_office_media, resolve_office_converter};
 use crate::traits::{EmbeddingAdapter, MarkdownizeAdapter, PrepareAdapter};
 use crate::types::{
     AdapterProfile, EmbeddingInputType, EmbeddingItem, EmbeddingRequest, EmbeddingVector,
@@ -122,6 +123,30 @@ pub fn run_standard_online_markdownize_with_bytes(
             request.raw_hash
         )));
     }
+    // 07 §5.1: the identity check above proved `verified_raw_bytes` is the
+    // untampered ORIGINAL file content. For Office media, convert THAT verified
+    // buffer to PDF now (never reopen/reread) -- the online adapter media gate
+    // (`supports_ocr_from_scratch`, and the real Mistral client) only accepts
+    // PDF/images, so Office bytes must never reach it directly. `send_raw_hash`
+    // describes the CONVERTED bytes for the adapter's own internal tamper-check
+    // (mistral_ocr.rs hashes what it is about to upload); it is purely internal
+    // to this call -- output storage identity stays `request.raw_hash` (the
+    // ORIGINAL file's raw_hash) at every caller, since callers persist under
+    // `task.input_hash`/`raw_hash` directly and never read this function's
+    // internal `adapter_request.raw.raw_hash` back out.
+    let converted_pdf = is_office_media(request.media_type)
+        .then(|| convert_office_to_pdf(verified_raw_bytes, request.media_type))
+        .transpose()?;
+    let effective_media_type: &str = if converted_pdf.is_some() {
+        "application/pdf"
+    } else {
+        request.media_type
+    };
+    let send_bytes: &[u8] = converted_pdf.as_deref().unwrap_or(verified_raw_bytes);
+    let send_raw_hash: String = converted_pdf
+        .as_ref()
+        .map(|bytes| crate::identity::hash_bytes(bytes))
+        .unwrap_or_else(|| request.raw_hash.to_owned());
     if request.prepared_unit_hints.is_empty() {
         // Discovery is only a fresh, whole-document operation. Reject unsupported
         // media and contradictory retry/incremental fields before constructing a real
@@ -135,10 +160,9 @@ pub fn run_standard_online_markdownize_with_bytes(
                 "OCR-from-scratch requires a fresh unrestricted Full request".to_owned(),
             ));
         }
-        if !supports_ocr_from_scratch(request.media_type) {
+        if !supports_ocr_from_scratch(effective_media_type) {
             return Err(AdapterError::ContractViolation(format!(
-                "OCR-from-scratch media type is unsupported: {}",
-                request.media_type
+                "OCR-from-scratch media type is unsupported: {effective_media_type}"
             )));
         }
     }
@@ -147,10 +171,10 @@ pub fn run_standard_online_markdownize_with_bytes(
         (!request.prepared_unit_hints.is_empty()).then_some(request.prepared_unit_hints);
     let adapter_request = MarkdownizeRequest {
         raw: RawInput {
-            raw_hash: request.raw_hash.to_owned(),
+            raw_hash: send_raw_hash.clone(),
             path: Some(request.path.display().to_string()),
         },
-        media_type: request.media_type.to_owned(),
+        media_type: effective_media_type.to_owned(),
         // An empty local Prepare result is meaningful for scanned PDFs and images:
         // the online OCR adapter must discover the page/unit set
         // from the provider response. Preserve that distinction as `None`; `Some([])`
@@ -208,7 +232,7 @@ pub fn run_standard_online_markdownize_with_bytes(
             let adapter = MistralOcrMarkdownizeAdapter::new(client, model_pin, request.scope_id)
                 .with_image_store(request.kcs_dir)
                 .with_bbox_annotation(request.bbox_annotation_enabled)
-                .with_verified_raw_bytes(verified_raw_bytes.to_vec());
+                .with_verified_raw_bytes(send_bytes.to_vec());
             let profile = adapter.profile();
             let mut adapter_request = adapter_request;
             adapter_request.tool_profile_hash = profile.tool_profile_hash.clone();
@@ -219,7 +243,7 @@ pub fn run_standard_online_markdownize_with_bytes(
             // disappear from the manifest instead of remaining a retryable Failed unit.
             let effective_prepared_unit_hints = effective_prepared_unit_hints(
                 &requested_prepared_unit_hints,
-                request.raw_hash,
+                &send_raw_hash,
                 &response,
             )?;
             // Test-only KCS response seams run after the provider page mapping has
@@ -260,7 +284,7 @@ pub fn run_standard_online_markdownize_with_bytes(
             let adapter = MistralOcrMarkdownizeAdapter::new(client, model_pin, request.scope_id)
                 .with_image_store(request.kcs_dir)
                 .with_bbox_annotation(request.bbox_annotation_enabled)
-                .with_verified_raw_bytes(verified_raw_bytes.to_vec())
+                .with_verified_raw_bytes(send_bytes.to_vec())
                 .with_provider_idempotency(ProviderIdempotency::HttpHeader(
                     "Idempotency-Key".to_owned(),
                 ));
@@ -270,7 +294,7 @@ pub fn run_standard_online_markdownize_with_bytes(
             let response = adapter.markdownize(adapter_request)?;
             let effective_prepared_unit_hints = effective_prepared_unit_hints(
                 &requested_prepared_unit_hints,
-                request.raw_hash,
+                &send_raw_hash,
                 &response,
             )?;
             return Ok(StandardOnlineMarkdownizeOutcome {
@@ -291,18 +315,40 @@ pub fn run_standard_online_markdownize_with_bytes(
     let adapter = MistralOcrMarkdownizeAdapter::new(client, model_pin, request.scope_id)
         .with_image_store(request.kcs_dir)
         .with_bbox_annotation(request.bbox_annotation_enabled)
-        .with_verified_raw_bytes(verified_raw_bytes.to_vec());
+        .with_verified_raw_bytes(send_bytes.to_vec());
     let profile = adapter.profile();
     let mut adapter_request = adapter_request;
     adapter_request.tool_profile_hash = profile.tool_profile_hash.clone();
     let response = adapter.markdownize(adapter_request)?;
     let effective_prepared_unit_hints =
-        effective_prepared_unit_hints(&requested_prepared_unit_hints, request.raw_hash, &response)?;
+        effective_prepared_unit_hints(&requested_prepared_unit_hints, &send_raw_hash, &response)?;
     Ok(StandardOnlineMarkdownizeOutcome {
         profile,
         response,
         effective_prepared_unit_hints,
     })
+}
+
+/// 07-adapter-spec.md §5.1: convert Office (DOCX/PPTX) `bytes` to PDF via the
+/// resolved `OfficeConverter`, mapping EVERY failure mode (no converter
+/// resolvable, or a runtime conversion fault) to `ContractViolation` -- "実行時の
+/// 変換失敗は contract_violation ([04-pipeline.md §5.3] -- 同一入力の再試行 1 回) に
+/// 合流する". Callers that must never enqueue/spend when no converter is
+/// installed at all (the `kcs index` enqueue gate) check
+/// `resolve_office_converter().is_none()` THEMSELVES first and never call this
+/// helper in that case; reaching here with no converter means the precondition
+/// that led to this call (an earlier successful resolve, e.g. at enqueue time)
+/// no longer holds -- a rare race this helper still turns into the same
+/// well-defined retryable failure rather than a panic or a stuck task.
+pub fn convert_office_to_pdf(bytes: &[u8], media_type: &str) -> Result<Vec<u8>> {
+    let converter = resolve_office_converter().ok_or_else(|| {
+        AdapterError::ContractViolation(format!(
+            "office converter unavailable for {media_type} at execution time"
+        ))
+    })?;
+    converter
+        .convert_to_pdf(bytes, media_type)
+        .map_err(|err| AdapterError::ContractViolation(format!("office conversion failed: {err}")))
 }
 
 fn supports_ocr_from_scratch(media_type: &str) -> bool {
@@ -464,9 +510,28 @@ impl MistralOcrClient for MockStandardOnlineMarkdownizeClient {
         &self,
         request: &MarkdownizeRequest,
         model_pin: &str,
-        _verified_raw_bytes: &[u8],
+        verified_raw_bytes: &[u8],
         _idempotency_header: Option<(&str, &str)>,
     ) -> Result<OcrResponse> {
+        // Step4b office contract (07 §5.1 item 3): when set, the env var's
+        // VALUE is a file path this test-only mock writes
+        // "<media_type>\n<starts_with_%PDF magic>\n" to -- the only way a
+        // black-box CLI test can observe what media_type/bytes actually
+        // crossed the (mocked) OCR client boundary (proving Office media was
+        // converted to `application/pdf` before this call, never the
+        // original OOXML bytes). Gated behind this env var so it never
+        // perturbs the exact-match markdown-TEXT assertions other existing
+        // tests already make against this mock's ordinary output.
+        if let Ok(capture_path) = std::env::var("KCS_TEST_CAPTURE_SENT_MEDIA") {
+            let _ = std::fs::write(
+                capture_path,
+                format!(
+                    "{}\n{}\n",
+                    request.media_type,
+                    verified_raw_bytes.starts_with(b"%PDF")
+                ),
+            );
+        }
         // R14-6: under `pin_changed`, an INCREMENTAL send must never reach the adapter —
         // the gate resolves the changed pin first and falls back to Full. If one is
         // attempted (a regression that sends before gating), fail loudly so the test

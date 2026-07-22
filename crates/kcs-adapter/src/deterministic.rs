@@ -154,6 +154,65 @@ pub fn markdownize_from_bytes(
     markdownize_with_source(request, Some(&source))
 }
 
+/// Markdownize a converted-PDF intermediate for an Office document
+/// (DOCX/PPTX — [07-adapter-spec.md §5.1](../../../docs/07-adapter-spec.md)).
+/// `converted_pdf` is the deterministically-normalized output of
+/// [`crate::office_convert::OfficeConverter::convert_to_pdf`] — NOT the
+/// original raw office bytes — so unlike [`markdownize_from_bytes`] this
+/// does NOT run `source_document_from_verified_bytes`'s raw_hash check:
+/// `request.raw.raw_hash` identifies the ORIGINAL office file, not this
+/// derived converted-PDF artifact, so comparing the two would always
+/// (correctly, but uselessly) fail.
+///
+/// `unit_kind` is `Page` (DOCX) or `Slide` (PPTX): when
+/// `request.prepared_unit_hint` is absent this mints one hint per converted
+/// page, keyed `page:N` / `slide:N` accordingly. When hints ARE supplied
+/// (the expected shape once the caller wires this to real prepared units —
+/// 07 §5.1 / 04 §2's unit table), they are used as-is. Either way, the
+/// page-to-markdown production itself reuses the SAME PDF text-layer path
+/// used for `application/pdf` (`extract_pdf_text_pages_bounded` feeding
+/// `markdown_unit_from_hint`'s `SourceDocument::PdfPages` branch) — it is
+/// not forked; only `page_index_from_unit_key`'s prefix recognition was
+/// generalized (`page:` and `slide:` both resolve to a 1-based page index)
+/// to keep that single code path correct for both unit kinds.
+pub fn markdownize_converted_office(
+    mut request: MarkdownizeRequest,
+    converted_pdf: &[u8],
+    unit_kind: UnitKind,
+) -> Result<MarkdownizeResponse> {
+    let pages = extract_pdf_text_pages_bounded(converted_pdf, MAX_DETERMINISTIC_PDF_PAGES)?;
+    if request.prepared_unit_hint.is_none() {
+        request.prepared_unit_hint = Some(office_unit_hints(&pages, unit_kind));
+    }
+    let source = SourceDocument::PdfPages(pages);
+    markdownize_with_source(request, Some(&source))
+}
+
+/// One hint per converted-PDF page, keyed `page:N` / `slide:N` per
+/// `unit_kind`. Used by [`markdownize_converted_office`] only when the
+/// caller did not already supply `prepared_unit_hint` (the real pipeline
+/// wiring is expected to pass hints derived from the actual `PreparedUnit`
+/// list instead — this is the self-sufficient fallback).
+fn office_unit_hints(pages: &[String], unit_kind: UnitKind) -> Vec<PreparedUnitHint> {
+    let prefix = if unit_kind == UnitKind::Slide {
+        "slide"
+    } else {
+        "page"
+    };
+    let count = pages.len().max(1);
+    (0..count)
+        .map(|index| {
+            let text = pages.get(index).map(String::as_str).unwrap_or("");
+            PreparedUnitHint {
+                unit_key: format!("{prefix}:{}", index + 1),
+                prepared_hash: crate::identity::hash_bytes(text.as_bytes()),
+                unit_kind,
+                order: index as u64,
+            }
+        })
+        .collect()
+}
+
 #[derive(Debug, Clone)]
 enum SourceDocument {
     Text(String),
@@ -696,9 +755,16 @@ fn find_endstream_bytes(bytes: &[u8], from: usize) -> Option<usize> {
     None
 }
 
+/// The 0-based page index a `page:N` OR `slide:N` unit key refers to (both
+/// prefixes share the same 1-based-decimal selector convention — 04 §2's
+/// unit_key rule — so both resolve identically here; the `slide:` case
+/// exists for [`markdownize_converted_office`]'s PPTX units, which reuse
+/// this exact PDF-page-text lookup instead of forking it).
 fn page_index_from_unit_key(unit_key: &str) -> Option<usize> {
-    unit_key
-        .strip_prefix("page:")?
+    let selector = unit_key
+        .strip_prefix("page:")
+        .or_else(|| unit_key.strip_prefix("slide:"))?;
+    selector
         .parse::<usize>()
         .ok()
         .and_then(|page| page.checked_sub(1))
@@ -922,5 +988,132 @@ stream\nBT (/Type /Page and /PageX) Tj ET\nendstream\nendobj\n";
         assert_eq!(response.updated_units.len(), 2);
         assert!(response.updated_units[0].markdown.contains("First page"));
         assert!(response.updated_units[1].markdown.contains("Second page"));
+    }
+
+    fn office_request(
+        raw_hash: &str,
+        unit_hint: Option<Vec<PreparedUnitHint>>,
+    ) -> MarkdownizeRequest {
+        use crate::types::RawInput;
+        MarkdownizeRequest {
+            raw: RawInput {
+                raw_hash: raw_hash.to_owned(),
+                // The ORIGINAL office file's path — never reopened by
+                // markdownize_converted_office (it only reads converted_pdf).
+                path: Some("/path/that/must/not/be/opened.docx".to_owned()),
+            },
+            media_type: "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                .to_owned(),
+            prepared_unit_hint: unit_hint,
+            mode: MarkdownizeMode::Full,
+            previous: None,
+            hints: None,
+            restrict_to_hint_pages: false,
+            bbox_annotation_enabled: false,
+            tool_profile_hash: "sha256:tool".to_owned(),
+            spec_version: 1,
+            idempotency_token: None,
+        }
+    }
+
+    // A converted-PDF's identity is unrelated to the ORIGINAL office file's
+    // raw_hash (they are different artifacts entirely) — markdownize_converted_office
+    // must not run the raw_hash-equality check markdownize_from_bytes does.
+    #[test]
+    fn markdownize_converted_office_does_not_check_raw_hash_against_converted_pdf() {
+        let converted_pdf = b"%PDF-1.4\n\
+1 0 obj << /Type /Pages /Count 1 >> endobj\n\
+2 0 obj << /Type /Page >> stream\nBT (Only page) Tj ET\nendstream\nendobj\n";
+        let request = office_request("sha256:original-office-file-hash", None);
+        let response =
+            markdownize_converted_office(request, converted_pdf, UnitKind::Page).unwrap();
+        assert_eq!(response.updated_units.len(), 1);
+        assert!(response.updated_units[0].markdown.contains("Only page"));
+    }
+
+    // DOCX: UnitKind::Page mints page:N hints (1-based) with no caller-supplied
+    // prepared_unit_hint, and reuses the existing PDF text-layer production
+    // per page (not forked).
+    #[test]
+    fn markdownize_converted_office_docx_mints_page_keys_for_every_converted_page() {
+        let converted_pdf = b"%PDF-1.4\n\
+1 0 obj << /Type /Pages /Count 2 >> endobj\n\
+2 0 obj << /Type /Page >> stream\nBT (First converted page) Tj ET\nendstream\nendobj\n\
+3 0 obj << /Type /Page >> stream\nBT (Second converted page) Tj ET\nendstream\nendobj\n";
+        let request = office_request("sha256:docx-raw", None);
+        let response =
+            markdownize_converted_office(request, converted_pdf, UnitKind::Page).unwrap();
+        assert_eq!(response.updated_units.len(), 2);
+        assert_eq!(response.updated_units[0].unit_key, "page:1");
+        assert_eq!(response.updated_units[0].unit_type, UnitKind::Page);
+        assert!(response.updated_units[0]
+            .markdown
+            .contains("First converted page"));
+        assert_eq!(response.updated_units[1].unit_key, "page:2");
+        assert!(response.updated_units[1]
+            .markdown
+            .contains("Second converted page"));
+    }
+
+    // PPTX: UnitKind::Slide mints slide:N hints instead — same converted-PDF
+    // text-layer machinery, only the unit-key family differs.
+    #[test]
+    fn markdownize_converted_office_pptx_mints_slide_keys_for_every_converted_page() {
+        let converted_pdf = b"%PDF-1.4\n\
+1 0 obj << /Type /Pages /Count 2 >> endobj\n\
+2 0 obj << /Type /Page >> stream\nBT (First slide) Tj ET\nendstream\nendobj\n\
+3 0 obj << /Type /Page >> stream\nBT (Second slide) Tj ET\nendstream\nendobj\n";
+        let request = office_request("sha256:pptx-raw", None);
+        let response =
+            markdownize_converted_office(request, converted_pdf, UnitKind::Slide).unwrap();
+        assert_eq!(response.updated_units.len(), 2);
+        assert_eq!(response.updated_units[0].unit_key, "slide:1");
+        assert_eq!(response.updated_units[0].unit_type, UnitKind::Slide);
+        assert!(response.updated_units[0].markdown.contains("First slide"));
+        assert_eq!(response.updated_units[1].unit_key, "slide:2");
+        assert!(response.updated_units[1].markdown.contains("Second slide"));
+    }
+
+    // When the caller DOES supply prepared_unit_hint (the expected real-pipeline
+    // shape, derived from the actual PreparedUnit list), those hints are used
+    // as-is rather than the page-count-derived fallback.
+    #[test]
+    fn markdownize_converted_office_honors_caller_supplied_hints() {
+        let converted_pdf = b"%PDF-1.4\n\
+1 0 obj << /Type /Pages /Count 2 >> endobj\n\
+2 0 obj << /Type /Page >> stream\nBT (First slide) Tj ET\nendstream\nendobj\n\
+3 0 obj << /Type /Page >> stream\nBT (Second slide) Tj ET\nendstream\nendobj\n";
+        let hints = vec![
+            PreparedUnitHint {
+                unit_key: "slide:1".to_owned(),
+                prepared_hash: "sha256:caller-page-1".to_owned(),
+                unit_kind: UnitKind::Slide,
+                order: 0,
+            },
+            PreparedUnitHint {
+                unit_key: "slide:2".to_owned(),
+                prepared_hash: "sha256:caller-page-2".to_owned(),
+                unit_kind: UnitKind::Slide,
+                order: 1,
+            },
+        ];
+        let request = office_request("sha256:pptx-raw", Some(hints));
+        let response =
+            markdownize_converted_office(request, converted_pdf, UnitKind::Slide).unwrap();
+        assert_eq!(response.updated_units.len(), 2);
+        assert!(response.updated_units[0].markdown.contains("First slide"));
+        assert!(response.updated_units[1].markdown.contains("Second slide"));
+    }
+
+    // page_index_from_unit_key (shared by both application/pdf and converted
+    // Office markdownize) resolves the slide: prefix identically to page:.
+    #[test]
+    fn page_index_from_unit_key_resolves_both_page_and_slide_prefixes() {
+        assert_eq!(page_index_from_unit_key("page:1"), Some(0));
+        assert_eq!(page_index_from_unit_key("page:12"), Some(11));
+        assert_eq!(page_index_from_unit_key("slide:1"), Some(0));
+        assert_eq!(page_index_from_unit_key("slide:7"), Some(6));
+        assert_eq!(page_index_from_unit_key("sheet:Sheet1"), None);
+        assert_eq!(page_index_from_unit_key("doc:1"), None);
     }
 }

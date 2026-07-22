@@ -118,7 +118,13 @@ pub fn prepare_units_from_bytes(
     let media_type = request.media_type;
     let is_text_native = matches!(media_type, "text/markdown" | "text/plain" | "text/x-code");
     let is_pdf = media_type == "application/pdf";
-    if !is_text_native && !is_pdf && media_type != "application/octet-stream" {
+    // 07 §5.1 (2026-07-23 addendum): DOCX/PPTX route through the Office
+    // converter below instead of the octet-stream/text gates — they are
+    // recognized binary formats with their own unit-ization path, not a
+    // passthrough or an OCR-only dead end. XLSX stays untouched/excluded
+    // (`is_office_media`'s contract) and keeps today's OCR-routing behavior.
+    let is_office = kcs_adapter::office_convert::is_office_media(media_type);
+    if !is_text_native && !is_pdf && !is_office && media_type != "application/octet-stream" {
         return Ok(empty_prepare_output());
     }
     let bytes = request.bytes;
@@ -132,13 +138,49 @@ pub fn prepare_units_from_bytes(
             ),
         ));
     }
-    if !is_text_native && !is_pdf && !bytes_are_text(bytes) {
-        // Binary octet-stream (a DOCX-as-unknown-ext, a compiled blob): do NOT evidence its
+    if !is_text_native && !is_pdf && !is_office && !bytes_are_text(bytes) {
+        // Binary octet-stream (an unrecognized-extension binary blob): do NOT evidence its
         // raw bytes as text — route to OCR like the other non-text-native media above.
+        // (Office media is binary too, but never reaches this text-passthrough check either
+        // way — the `is_office` exemption above skips it in favor of the conversion path.)
         return Ok(empty_prepare_output());
     }
     let unit_type = unit_type_for_media_type(request.media_type);
-    let pdf_pages = if request.media_type == "application/pdf" {
+    // 07 §5.1 (2026-07-23 addendum): DOCX/PPTX unit-ize via a converted-PDF
+    // intermediate produced by an external renderer (LibreOffice `soffice`).
+    // No renderer in this environment → stay silent/crash-free — the exact
+    // same empty shape as the R20-4 scanned-PDF route below (the CLI layer
+    // gates online enqueue/visibility separately via `index_status`, 05
+    // §1.7 — prepare itself must never enqueue a doomed task, nor crash).
+    // A runtime conversion failure surfaces as a prepare-stage contract
+    // error (07 §5.1: "実行時の変換失敗は contract_violation に合流する" — any
+    // KCS-E-PREPARE-* code the task-retry classifier does not specifically
+    // recognize falls through to the `ContractViolation` bucket already,
+    // `kcs_pipeline::task::task_retry_kind`'s catch-all arm).
+    let office_converted_pdf = if is_office {
+        match kcs_adapter::office_convert::resolve_office_converter() {
+            None => return Ok(empty_prepare_output()),
+            Some(converter) => {
+                Some(converter.convert_to_pdf(bytes, media_type).map_err(|err| {
+                    crate::PipelineError::contract(
+                        "KCS-E-PREPARE-OFFICE-CONVERT-001",
+                        err.to_string(),
+                    )
+                })?)
+            }
+        }
+    } else {
+        None
+    };
+    // Page AND Slide are both "paginated" unit types once Office conversion
+    // is in the mix (previously only Page was — Slide's unit_count was
+    // hardcoded to 1, which was moot before this change because PPTX never
+    // reached this far: the very first gate above always returned empty for
+    // it). `pdf_pages` below is populated for either a native PDF or a
+    // successfully-converted Office document; per-unit hashes/fingerprints
+    // downstream key off `paginated`, not `unit_type == UnitType::Page`.
+    let paginated = matches!(unit_type, UnitType::Page | UnitType::Slide);
+    let pdf_pages = if is_pdf {
         let pages = pdf_text_pages_bounded(bytes)?;
         // R20-4: `pdf_has_text_layer` and the stream/literal extractors match on raw
         // (undecompressed) bytes, so a scanned PDF's compressed image streams yield garbage
@@ -154,14 +196,19 @@ pub fn prepare_units_from_bytes(
         // markdownize adapter (`read_pdf_page_text`), which is what actually produces the
         // page markdown / chunk text — `prepare_units` only builds the unit skeleton.
         pages
+    } else if let Some(converted_pdf) = office_converted_pdf.as_deref() {
+        let pages = pdf_text_pages_bounded(converted_pdf)?;
+        // Same R20-4 garbage-suppression gate as the native-PDF branch above,
+        // applied to the CONVERTED PDF's text layer instead of the raw
+        // office bytes.
+        if pages.iter().all(|page| !is_probably_real_text(page)) {
+            return Ok(empty_prepare_output());
+        }
+        pages
     } else {
         Vec::new()
     };
-    let unit_count = if unit_type == UnitType::Page {
-        pdf_pages.len().max(1)
-    } else {
-        1
-    };
+    let unit_count = if paginated { pdf_pages.len().max(1) } else { 1 };
     let mut prepared_units = Vec::new();
     for index in 0..unit_count {
         let selector = match unit_type {
@@ -175,14 +222,19 @@ pub fn prepare_units_from_bytes(
             .get(index)
             .map(|page| page.as_bytes())
             .unwrap_or(bytes);
-        let unit_prepared_hash = if unit_type == UnitType::Page {
+        // `paginated` (Page OR Slide) hashes/fingerprints off the PAGE bytes —
+        // for is_pdf that is the native PDF's own page text; for is_office it is
+        // the CONVERTED page text, so renderer drift changes prepared_hash (03
+        // §2.1's prepare-profile/renderer-driven gen+1 path is what absorbs
+        // that). mime stays the ORIGINAL office media type either way (below).
+        let unit_prepared_hash = if paginated {
             hash_bytes(page_bytes)
         } else if unit_count == 1 {
             prepared_hash.clone()
         } else {
             hash_bytes(format!("{prepared_hash}\0{unit_key}").as_bytes())
         };
-        let fingerprint = if unit_type == UnitType::Page {
+        let fingerprint = if paginated {
             fingerprint_for_bytes(page_bytes, page_bytes)
         } else {
             fingerprint_for_bytes(bytes, unit_prepared_hash.as_bytes())
@@ -194,6 +246,15 @@ pub fn prepare_units_from_bytes(
             prepared_hash: unit_prepared_hash,
             fingerprint,
             mime: Some(request.media_type.to_owned()),
+            // Only Page carries page_number, unchanged from before this
+            // change (Slide never did either, for the same PPTX-via-`_`
+            // reason DOCX now no longer falls into). Kept that way here too:
+            // `page_number`'s only downstream reader is the PDF-page-image
+            // path (07 §5.1's `metadata: unit_kind, page_number, ...`,
+            // scoped to `page` unit_kind), and 04 §2's unit table gives
+            // Slide its own `slide:N` identity — a redundant page_number
+            // would just restate the `slide:N` ordinal under a PDF-specific
+            // name.
             page_number: (unit_type == UnitType::Page).then_some(index as u64 + 1),
         });
     }
@@ -356,6 +417,9 @@ fn unit_type_for_media_type(media_type: &str) -> UnitType {
     match media_type {
         "application/pdf" => UnitType::Page,
         "image/png" | "image/jpeg" | "image/webp" | "image/gif" => UnitType::Image,
+        // 07 §5.1 (2026-07-23 addendum): DOCX unit-izes as `page` via a
+        // converted-PDF intermediate (04 §2's unit table), not `File`.
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document" => UnitType::Page,
         "application/vnd.ms-excel"
         | "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" => UnitType::Sheet,
         "application/vnd.ms-powerpoint"
@@ -638,5 +702,243 @@ mod tests {
         let bytes = vec![0xa5; 256 * 1024 + 17];
         let streamed = hash_reader(std::io::Cursor::new(&bytes)).unwrap();
         assert_eq!(streamed, hash_bytes(&bytes));
+    }
+
+    // ---- Office (DOCX/PPTX) prepare via converted-PDF intermediate ----------
+    // 07 §5.1 (2026-07-23 addendum). This crate had no env-var-mutating test
+    // yet, so this adds the first local guard/mutex pair (mirrors the
+    // pattern already used in `kcs_adapter::office_convert`'s own tests —
+    // duplicated here, not shared, since these are different crates).
+
+    static OFFICE_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    struct EnvVarGuard {
+        key: &'static str,
+        previous: Option<String>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let previous = std::env::var(key).ok();
+            std::env::set_var(key, value);
+            Self { key, previous }
+        }
+
+        fn remove(key: &'static str) -> Self {
+            let previous = std::env::var(key).ok();
+            std::env::remove_var(key);
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            match &self.previous {
+                Some(value) => std::env::set_var(self.key, value),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
+
+    const DOCX_MEDIA_TYPE: &str =
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+    const PPTX_MEDIA_TYPE: &str =
+        "application/vnd.openxmlformats-officedocument.presentationml.presentation";
+
+    /// Mirrors the hand-crafted uncompressed pseudo-PDF style the existing
+    /// PDF-path tests above already use (e.g.
+    /// `r23_cand_006_prepare_rejects_pdf_page_count_over_limit`,
+    /// `kcs-adapter`'s `verified_pdf_bytes_are_reused_for_all_hints`) — a
+    /// structural `/Type /Page` marker per page plus a literal `(text) Tj`
+    /// content stream the deterministic extractor can read directly.
+    fn multi_page_fixture_pdf(pages: &[&str]) -> Vec<u8> {
+        let mut pdf = format!(
+            "%PDF-1.4\n1 0 obj << /Type /Pages /Count {} >> endobj\n",
+            pages.len()
+        )
+        .into_bytes();
+        for (index, text) in pages.iter().enumerate() {
+            pdf.extend_from_slice(
+                format!(
+                    "{} 0 obj << /Type /Page >> stream\nBT ({text}) Tj ET\nendstream\nendobj\n",
+                    index + 2
+                )
+                .as_bytes(),
+            );
+        }
+        pdf
+    }
+
+    #[test]
+    fn office_docx_seam_prepares_page_units_from_converted_pdf() {
+        let _lock = OFFICE_ENV_LOCK.lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let fixture_path = dir.path().join("converted.pdf");
+        let fixture_pdf =
+            multi_page_fixture_pdf(&["First converted page", "Second converted page"]);
+        std::fs::write(&fixture_path, &fixture_pdf).unwrap();
+        let _seam = EnvVarGuard::set(
+            kcs_adapter::office_convert::TEST_OFFICE_CONVERT_ENV,
+            &fixture_path.display().to_string(),
+        );
+
+        let raw_docx = b"fake docx bytes (content irrelevant under the seam)";
+        let raw_hash = hash_bytes(raw_docx);
+        let output = prepare_units_from_bytes(PrepareStageBytesRequest {
+            raw_hash: &raw_hash,
+            media_type: DOCX_MEDIA_TYPE,
+            input_path: "doc.docx",
+            tool_profile_hash: "sha256:test",
+            bytes: raw_docx,
+        })
+        .unwrap();
+
+        assert_eq!(output.prepared_units.len(), 2);
+        assert_eq!(output.prepared_units[0].unit_key, "page:1");
+        assert_eq!(output.prepared_units[0].unit_type, UnitType::Page);
+        assert_eq!(output.prepared_units[0].page_number, Some(1));
+        // mime stays the ORIGINAL office media type, never application/pdf.
+        assert_eq!(
+            output.prepared_units[0].mime.as_deref(),
+            Some(DOCX_MEDIA_TYPE)
+        );
+        assert_eq!(output.prepared_units[1].unit_key, "page:2");
+        assert_eq!(output.prepared_units[1].page_number, Some(2));
+
+        // prepared_hash derives from the CONVERTED page bytes, not the raw
+        // (fake) docx bytes — renderer drift is meant to change this hash.
+        let expected_page1_hash = hash_bytes("First converted page".as_bytes());
+        assert_eq!(output.prepared_units[0].prepared_hash, expected_page1_hash);
+        assert_ne!(output.prepared_units[0].prepared_hash, raw_hash);
+
+        // prepared_object_hashes mirrors the existing application/pdf route
+        // exactly: just the per-unit hashes, no separate whole-file entry
+        // (the existing route has no analogous whole-file entry either).
+        assert_eq!(
+            output.prepared_object_hashes,
+            output
+                .prepared_units
+                .iter()
+                .map(|unit| unit.prepared_hash.clone())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn office_pptx_seam_prepares_slide_units_from_converted_pdf() {
+        let _lock = OFFICE_ENV_LOCK.lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let fixture_path = dir.path().join("converted.pdf");
+        let fixture_pdf = multi_page_fixture_pdf(&["First slide", "Second slide", "Third slide"]);
+        std::fs::write(&fixture_path, &fixture_pdf).unwrap();
+        let _seam = EnvVarGuard::set(
+            kcs_adapter::office_convert::TEST_OFFICE_CONVERT_ENV,
+            &fixture_path.display().to_string(),
+        );
+
+        let raw_pptx = b"fake pptx bytes (content irrelevant under the seam)";
+        let raw_hash = hash_bytes(raw_pptx);
+        let output = prepare_units_from_bytes(PrepareStageBytesRequest {
+            raw_hash: &raw_hash,
+            media_type: PPTX_MEDIA_TYPE,
+            input_path: "deck.pptx",
+            tool_profile_hash: "sha256:test",
+            bytes: raw_pptx,
+        })
+        .unwrap();
+
+        assert_eq!(output.prepared_units.len(), 3);
+        assert_eq!(output.prepared_units[0].unit_key, "slide:1");
+        assert_eq!(output.prepared_units[0].unit_type, UnitType::Slide);
+        // Slide does not carry page_number (unchanged from before this change).
+        assert_eq!(output.prepared_units[0].page_number, None);
+        assert_eq!(output.prepared_units[1].unit_key, "slide:2");
+        assert_eq!(output.prepared_units[2].unit_key, "slide:3");
+        assert_eq!(
+            output.prepared_units[0].mime.as_deref(),
+            Some(PPTX_MEDIA_TYPE)
+        );
+        let expected_slide1_hash = hash_bytes("First slide".as_bytes());
+        assert_eq!(output.prepared_units[0].prepared_hash, expected_slide1_hash);
+    }
+
+    #[test]
+    fn office_converter_absent_yields_empty_output_not_an_error() {
+        let _lock = OFFICE_ENV_LOCK.lock().unwrap();
+        let _clear_seam = EnvVarGuard::remove(kcs_adapter::office_convert::TEST_OFFICE_CONVERT_ENV);
+        let _clear_explicit =
+            EnvVarGuard::remove(kcs_adapter::office_convert::OFFICE_CONVERTER_ENV);
+        // This dev machine has a real soffice on PATH — scrub PATH so this
+        // test exercises "no converter available" regardless of environment
+        // (also matches CI without LibreOffice installed).
+        let _scrub_path = EnvVarGuard::set("PATH", "/nonexistent-kcs-test-path");
+
+        let raw_docx = b"fake docx bytes, no converter available";
+        let raw_hash = hash_bytes(raw_docx);
+        let output = prepare_units_from_bytes(PrepareStageBytesRequest {
+            raw_hash: &raw_hash,
+            media_type: DOCX_MEDIA_TYPE,
+            input_path: "doc.docx",
+            tool_profile_hash: "sha256:test",
+            bytes: raw_docx,
+        })
+        .unwrap();
+
+        // Same empty shape as the R20-4 scanned-PDF / any other silently-skipped
+        // route — prepare stays crash-free (07 §5.1: "doomed task を作らない").
+        assert!(output.prepared_units.is_empty());
+        assert!(output.prepared_object_hashes.is_empty());
+        assert!(output.image_object_hashes.is_empty());
+    }
+
+    #[test]
+    fn office_conversion_failure_surfaces_as_a_prepare_contract_error() {
+        let _lock = OFFICE_ENV_LOCK.lock().unwrap();
+        // The seam "converter" points at a fixture path that does not exist:
+        // convert_to_pdf's file read fails with AdapterError::ContractViolation,
+        // which prepare.rs must map into its OWN KCS-E-PREPARE-OFFICE-CONVERT-001
+        // contract error (07 §5.1: joins contract_violation semantics) rather
+        // than panicking or silently succeeding.
+        let _seam = EnvVarGuard::set(
+            kcs_adapter::office_convert::TEST_OFFICE_CONVERT_ENV,
+            "/definitely/not/a/real/kcs-fixture-path.pdf",
+        );
+
+        let raw_docx = b"fake docx bytes";
+        let raw_hash = hash_bytes(raw_docx);
+        let error = prepare_units_from_bytes(PrepareStageBytesRequest {
+            raw_hash: &raw_hash,
+            media_type: DOCX_MEDIA_TYPE,
+            input_path: "doc.docx",
+            tool_profile_hash: "sha256:test",
+            bytes: raw_docx,
+        })
+        .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("KCS-E-PREPARE-OFFICE-CONVERT-001"));
+    }
+
+    #[test]
+    fn office_xlsx_is_unaffected_and_still_prepares_empty_output() {
+        // Regression pin: XLSX is explicitly excluded from `is_office_media`
+        // (deferred — 07 §5.1), so it must still hit the very first gate and
+        // return empty output unconditionally, byte-identical to this
+        // function's behavior before the Office-conversion change
+        // (`unit_type_for_media_type`'s Sheet arm remains unreachable from
+        // `prepare_units_from_bytes`, exactly as it was before).
+        let raw_xlsx = b"fake xlsx bytes";
+        let raw_hash = hash_bytes(raw_xlsx);
+        let output = prepare_units_from_bytes(PrepareStageBytesRequest {
+            raw_hash: &raw_hash,
+            media_type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            input_path: "sheet.xlsx",
+            tool_profile_hash: "sha256:test",
+            bytes: raw_xlsx,
+        })
+        .unwrap();
+        assert!(output.prepared_units.is_empty());
+        assert!(output.prepared_object_hashes.is_empty());
+        assert!(output.image_object_hashes.is_empty());
     }
 }
