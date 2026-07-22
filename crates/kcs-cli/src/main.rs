@@ -2574,13 +2574,16 @@ struct ScopeTimeRequest<'a> {
 #[derive(Clone, Copy)]
 struct ScopeSearchRequest<'a> {
     /// PC8 (05 §1.3 L110-115): the single OR-joined FTS5 MATCH expression
-    /// over every token with >= 3 Unicode scalars, or `None` when every
-    /// token is short (PC11's bounded-LIKE-only fallback).
+    /// over every token with >= 3 Unicode scalars (each contributing its own
+    /// deterministic equivalence forms too, 05 §1.3 L116-123 —
+    /// `build_query_plan`), or `None` when every token is short (PC11's
+    /// bounded-LIKE-only fallback).
     match_expr: Option<&'a str>,
     /// PC11/PC12/PC13 (05 §1.3 L95-106): tokens with < 3 Unicode scalars —
     /// applied as `instr(text, token) > 0` eligibility conditions common to
     /// both the text and vector backends, and to the LIKE fallback's own
-    /// ORDER BY (PC14) when `match_expr` is `None`.
+    /// ORDER BY (PC14) when `match_expr` is `None`. `short_token_instr_sql`
+    /// expands each token's own equivalence forms here too.
     short_tokens: &'a [String],
     resolved_mode: SearchMode,
     query_embedding: Option<&'a [f32]>,
@@ -3220,7 +3223,9 @@ struct ScopeQueryFilter<'a> {
     candidate_depth: u64,
     ancestor_gated: bool,
     /// PC11/PC12/PC13: short (< 3 Unicode scalar) tokens, applied as
-    /// `instr(text, token) > 0` AND conditions common to both backends.
+    /// `instr(text, token) > 0` AND conditions common to both backends —
+    /// equivalence-form-expanded per token by `short_token_instr_sql` (05
+    /// §1.3 L116-123).
     short_tokens: &'a [String],
 }
 
@@ -3282,19 +3287,53 @@ fn config_association_ancestor_sql(ancestor_gated: bool) -> &'static str {
     }
 }
 
-/// PC12/PC13 (05 §1.3 L97-106): one `AND instr(<column>, ?) > 0` clause per
-/// short (< 3 Unicode scalar) token — a bounded-query eligibility predicate
-/// common to the text and vector backends (and the LIKE-only fallback's own
-/// `WHERE`), applied before `candidate_depth` confirms the candidate set.
-/// Every `?` is anonymous; the caller must push `short_tokens` (in the same
-/// order) onto its bound-parameter list at the position matching where this
+/// PC12/PC13 (05 §1.3 L97-106) + deterministic query normalization (L116-123,
+/// 2026-07-22 spec feedback #1): one `AND (instr(<column>, ?) > 0 [OR
+/// instr(<column>, ?) > 0 ...])` clause per short (< 3 Unicode scalar) token
+/// — a bounded-query eligibility predicate common to the text and vector
+/// backends (and the LIKE-only fallback's own `WHERE`), applied before
+/// `candidate_depth` confirms the candidate set. Each token's own
+/// `token_equivalence_forms` are OR'd inside that token's own clause — the
+/// SAME equivalence forms the MATCH side gets (`build_query_plan`) — so a
+/// short token's AND-eligibility still passes when a chunk contains an
+/// equivalent spelling instead of the literal token (today this is a no-op:
+/// every numeral/dictionary equivalence form is itself >= 3 Unicode scalars,
+/// so no short token actually has one — kept general rather than assuming
+/// that never changes). A token with no extra forms emits the exact
+/// single-clause text this produced before (`AND instr(<column>, ?) > 0`,
+/// no wrapping parens), so the common case's generated SQL is unchanged
+/// byte-for-byte. Every `?` is anonymous; the caller must push
+/// `short_token_bind_values(short_tokens)` (same flattened per-token order)
+/// onto its bound-parameter list at the position matching where this
 /// fragment lands in the surrounding SQL text.
 fn short_token_instr_sql(column: &str, short_tokens: &[String]) -> String {
     short_tokens
         .iter()
-        .map(|_| format!("AND instr({column}, ?) > 0"))
+        .map(|token| {
+            let forms = token_equivalence_forms(token);
+            if forms.len() == 1 {
+                format!("AND instr({column}, ?) > 0")
+            } else {
+                let arms = forms
+                    .iter()
+                    .map(|_| format!("instr({column}, ?) > 0"))
+                    .collect::<Vec<_>>()
+                    .join(" OR ");
+                format!("AND ({arms})")
+            }
+        })
         .collect::<Vec<_>>()
         .join("\n             ")
+}
+
+/// The bound values for [`short_token_instr_sql`]'s generated placeholders,
+/// flattened in the same per-token order (each token's own
+/// `token_equivalence_forms`, in that order).
+fn short_token_bind_values(short_tokens: &[String]) -> Vec<String> {
+    short_tokens
+        .iter()
+        .flat_map(|token| token_equivalence_forms(token))
+        .collect()
 }
 
 /// PC22/PC23/PC31/PC32 (05 §1.5 L200, §1.6 L237-239): resolve "the target
@@ -3433,6 +3472,10 @@ fn vector_scope_search(
     let max_rowid_i64 = filter.max_rowid as i64;
     let max_association_rowid_i64 = filter.max_association_rowid as i64;
     let candidate_depth_i64 = filter.candidate_depth as i64;
+    // Query-normalization (05 §1.3 L116-123): each short token's own
+    // equivalence forms, flattened in the exact order `short_token_clause`
+    // (above) expects — see `short_token_bind_values`.
+    let short_token_forms = short_token_bind_values(filter.short_tokens);
     let mut bound: Vec<&dyn rusqlite::ToSql> = vec![
         &max_rowid_i64,
         &filter.chunking_config_hash,
@@ -3440,8 +3483,8 @@ fn vector_scope_search(
         &filter.since_cutoff,
         &filter.since_cutoff,
     ];
-    for token in filter.short_tokens {
-        bound.push(token);
+    for form in &short_token_forms {
+        bound.push(form);
     }
     bound.push(&query_bytes);
     bound.push(&candidate_depth_i64);
@@ -3581,6 +3624,9 @@ fn execute_fts_tier(
     let candidate_depth_i64 = filter.candidate_depth as i64;
     let max_rowid_i64 = filter.max_rowid as i64;
     let max_association_rowid_i64 = filter.max_association_rowid as i64;
+    // Query-normalization (05 §1.3 L116-123): see `vector_scope_search`'s
+    // identical comment — same flattened order `short_token_clause` expects.
+    let short_token_forms = short_token_bind_values(filter.short_tokens);
     let mut bound: Vec<&dyn rusqlite::ToSql> = vec![
         &match_expr,
         &candidate_depth_i64,
@@ -3590,8 +3636,8 @@ fn execute_fts_tier(
         &filter.since_cutoff,
         &filter.since_cutoff,
     ];
-    for token in filter.short_tokens {
-        bound.push(token);
+    for form in &short_token_forms {
+        bound.push(form);
     }
     let rows = stmt
         .query_map(rusqlite::params_from_iter(bound), chunk_meta_row)
@@ -3666,6 +3712,16 @@ fn execute_like_fallback(
     let max_rowid_i64 = filter.max_rowid as i64;
     let max_association_rowid_i64 = filter.max_association_rowid as i64;
     let candidate_depth_i64 = filter.candidate_depth as i64;
+    // Query-normalization (05 §1.3 L116-123): the AND-eligibility side gets
+    // every short token's equivalence forms (same as `execute_fts_tier`'s
+    // and `vector_scope_search`'s identical comment). The ORDER BY tie-break
+    // below stays keyed on the literal `first_token` — PC14's "first token's
+    // match position" is a deterministic ordering contract over the query's
+    // OWN tokens, not over whichever equivalence form happened to match, and
+    // no equivalence form is ever a short token in practice (every numeral/
+    // dictionary form is itself >= 3 Unicode scalars), so this is a no-op
+    // simplification, not a behavior gap.
+    let short_token_forms = short_token_bind_values(filter.short_tokens);
     let mut bound: Vec<&dyn rusqlite::ToSql> = vec![
         &max_rowid_i64,
         &filter.chunking_config_hash,
@@ -3673,8 +3729,8 @@ fn execute_like_fallback(
         &filter.since_cutoff,
         &filter.since_cutoff,
     ];
-    for token in filter.short_tokens {
-        bound.push(token);
+    for form in &short_token_forms {
+        bound.push(form);
     }
     bound.push(first_token);
     bound.push(&candidate_depth_i64);
@@ -4264,17 +4320,147 @@ fn quote_fts_phrase(unit: &str) -> String {
     format!("\"{}\"", unit.replace('"', "\"\""))
 }
 
-/// PC8 (05 §1.3 L110-115): machine-generate the MATCH expression — never
-/// interpret the query as FTS5 syntax (every token is quoted as an inert
-/// phrase via [`quote_fts_phrase`]; FTS5 operators the user typed are
-/// therefore literal query text, not directives) and never inject a token
-/// the query did not contain (no bilingual/thousands-separator expansion —
-/// dropped entirely, PC8's "query 由来でない追加語を含まない"). Tokens with
-/// 3 or more Unicode scalars join the expression with `OR`; PC9's shorter ones
-/// can never match the trigram tokenizer at all (it silently drops sub-3-char
-/// phrases), so they are carried over as `short_tokens` for the caller's
-/// bounded `instr` eligibility predicate (PC11/12/13) instead of being
-/// dropped outright.
+/// Deterministic query normalization (05 §1.3 L116-123, 2026-07-22 spec
+/// feedback #1): the thousands-separator twin of a >= 4 digit numeral, in
+/// EITHER direction — plain digits gain a comma-grouped form (`3600` ->
+/// `3,600`) and a well-formed comma-grouped numeral loses its commas
+/// (`3,600` -> `3600`). `None` when `token` doesn't qualify (fewer than 4
+/// digits, or not a numeral at all), so a caller never OR-injects a
+/// redundant arm equal to `token` itself. This restores (byte-for-byte,
+/// forward direction) the grouping algorithm the pre-PC8
+/// `fts_keyword_group`/`thousands_separated` pair used
+/// (`git show e3f2a94^:crates/kcs-cli/src/main.rs`) before PC8 (05 §1.3's
+/// original, too-strict "query 由来でない追加語を含まない" reading) deleted
+/// it — eval M3-2/M3-3 (09 §4.3's Recall@10 >= 0.8 gate) then measured 13/14
+/// failures traced to exactly this dropped equivalence (query "3600" vs.
+/// corpus "3,600").
+fn numeric_equivalent_form(token: &str) -> Option<String> {
+    if token.bytes().all(|b| b.is_ascii_digit()) {
+        return (token.len() >= 4).then(|| thousands_separated(token));
+    }
+    if is_well_formed_grouped_numeral(token) {
+        let digits: String = token.chars().filter(|ch| *ch != ',').collect();
+        if digits.len() >= 4 {
+            return Some(digits);
+        }
+    }
+    None
+}
+
+/// A comma-grouped ASCII numeral in standard thousands form: 1-3 leading
+/// digits, then one or more groups of EXACTLY 3 digits, each separated by a
+/// single comma (`3,600` / `30,000` / `1,234,567`). Anything else (a bare
+/// digit run with no comma at all, a group that isn't exactly 3 digits, a
+/// leading/trailing/doubled comma) is not a numeral this rule recognizes —
+/// returning `false` leaves `token` untouched rather than risk mangling it
+/// into a bogus phrase.
+fn is_well_formed_grouped_numeral(token: &str) -> bool {
+    let mut groups = token.split(',');
+    let Some(first) = groups.next() else {
+        return false;
+    };
+    if first.is_empty() || first.len() > 3 || !first.bytes().all(|b| b.is_ascii_digit()) {
+        return false;
+    }
+    let mut saw_group = false;
+    for group in groups {
+        saw_group = true;
+        if group.len() != 3 || !group.bytes().all(|b| b.is_ascii_digit()) {
+            return false;
+        }
+    }
+    saw_group
+}
+
+/// The pre-PC8 grouping algorithm, recovered unchanged
+/// (`git show e3f2a94^:crates/kcs-cli/src/main.rs`): insert a comma every 3
+/// digits counting from the right. `digits` must already be all-ASCII-digit
+/// (callers only ever pass a token `numeric_equivalent_form` has already
+/// classified as such).
+fn thousands_separated(digits: &str) -> String {
+    let bytes = digits.as_bytes();
+    let mut out = String::with_capacity(bytes.len() + bytes.len() / 3);
+    for (index, byte) in bytes.iter().enumerate() {
+        if index > 0 && (bytes.len() - index) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(*byte as char);
+    }
+    out
+}
+
+/// Deterministic query normalization (05 §1.3 L116-123, 2026-07-22 spec
+/// feedback #1): KCS's own fixed, release-pinned bilingual vocabulary —
+/// recovered unchanged from the pre-PC8 `fts_keyword_expansions`
+/// (`git show e3f2a94^:crates/kcs-cli/src/main.rs`), which this restores.
+/// Forward direction only (English keyword -> Japanese term, matching the
+/// recovered content exactly): eval M3-2's failing query "chunk size was
+/// 512 tokens in the retrieval pipeline doc" must reach a chunk whose only
+/// text is "チャンクは 512 トークン、オーバーラップ 64。" — the direction the
+/// recovered dictionary already provides. A Japanese-term -> English reverse
+/// lookup was considered and deliberately left out: no eval query needs it,
+/// and it would touch every existing "トークン"-only query fixture across
+/// `step3_p0_contract.rs` (~80 occurrences) for zero Recall benefit.
+const BILINGUAL_TERMS: &[(&str, &str)] = &[
+    ("chunk", "チャンク"),
+    ("chunks", "チャンク"),
+    ("token", "トークン"),
+    ("tokens", "トークン"),
+    ("pipeline", "パイプライン"),
+];
+
+/// `token`'s fixed-dictionary translation(s), case-insensitive on the ASCII
+/// side (matching `fts_keyword_expansions`'s original comparison). Empty
+/// when `token` isn't one of `BILINGUAL_TERMS`'s English keys.
+fn bilingual_equivalents(token: &str) -> Vec<&'static str> {
+    let mut out = Vec::new();
+    for (en, ja) in BILINGUAL_TERMS {
+        if token.eq_ignore_ascii_case(en) && !out.contains(ja) {
+            out.push(*ja);
+        }
+    }
+    out
+}
+
+/// `token` together with every deterministic equivalence form it has (05
+/// §1.3 L116-123): a >= 4 digit numeral's thousands-grouped twin
+/// (`numeric_equivalent_form`) and/or a fixed-dictionary translation
+/// (`bilingual_equivalents`). Always returns >= 1 element (`token` itself,
+/// first — stable order, so the generated SQL text never depends on
+/// iteration order) so a caller can treat "one form" and "several forms"
+/// uniformly. These are the SAME forms injected on both sides the spec
+/// names: the FTS5 MATCH expression (`build_query_plan`, below) and the
+/// short-token `instr` eligibility predicate (`short_token_instr_sql`) — one
+/// rule, two call sites. A token can match at most one of the two rules in
+/// practice (a numeral is never a `BILINGUAL_TERMS` key), but the function
+/// stays generic rather than assuming that.
+fn token_equivalence_forms(token: &str) -> Vec<String> {
+    let mut forms = vec![token.to_owned()];
+    if let Some(numeric) = numeric_equivalent_form(token) {
+        forms.push(numeric);
+    }
+    forms.extend(bilingual_equivalents(token).into_iter().map(str::to_owned));
+    forms
+}
+
+/// PC8 (05 §1.3 L110-115) + deterministic query normalization (L116-123,
+/// 2026-07-22 spec feedback #1): machine-generate the MATCH expression —
+/// never interpret the query as FTS5 syntax (every form is quoted as an
+/// inert phrase via [`quote_fts_phrase`]; FTS5 operators the user typed are
+/// therefore literal query text, not directives) and never inject a word
+/// with no fixed, deterministic derivation from the input (PC8's "query 由来
+/// でない追加語を含まない" bans GUESSED words — synonym injection, history,
+/// context — not a token's own numeral/dictionary equivalence form, which
+/// the spec now names explicitly as query-derived). Every long token
+/// contributes itself plus `token_equivalence_forms`'s extra forms (if any)
+/// as additional `OR` arms — OR being associative, this flat per-token
+/// expansion is equivalent to (and simpler than) wrapping each token's own
+/// forms in their own parenthesized group. Tokens with 3 or more Unicode
+/// scalars join the expression this way; PC9's shorter ones can never match
+/// the trigram tokenizer at all (it silently drops sub-3-char phrases), so
+/// they are carried over as `short_tokens` for the caller's bounded `instr`
+/// eligibility predicate (PC11/12/13, itself also equivalence-form-aware —
+/// `short_token_instr_sql`) instead of being dropped outright.
 fn build_query_plan(query_nfc: &str) -> QueryPlan {
     let (long_tokens, short_tokens): (Vec<String>, Vec<String>) = query_tokens(query_nfc)
         .into_iter()
@@ -4282,7 +4468,8 @@ fn build_query_plan(query_nfc: &str) -> QueryPlan {
     let match_expr = (!long_tokens.is_empty()).then(|| {
         long_tokens
             .iter()
-            .map(|token| quote_fts_phrase(token))
+            .flat_map(|token| token_equivalence_forms(token))
+            .map(|form| quote_fts_phrase(&form))
             .collect::<Vec<_>>()
             .join(" OR ")
     });
@@ -16830,25 +17017,102 @@ mod tests {
     }
 
     #[test]
-    fn pc8_no_bilingual_or_thousands_separator_expansion() {
+    fn pc8_deterministic_equivalence_expansion_is_query_derived() {
         use super::build_query_plan;
-        // PC8 (05 §1.3 L110-115): "query 由来でない追加語を含まない" — the
-        // pre-PC8 chunk/token/pipeline -> チャンク/トークン/パイプライン
-        // bilingual aliasing and the `3600` -> `3,600` thousands-separator
-        // variant are both gone; the MATCH expression contains only what the
-        // query itself spelled out.
+        // 05 §1.3 L116-123 (2026-07-22 spec feedback #1): PC8's original
+        // "query 由来でない追加語を含まない" reading was too strict — it
+        // banned a token's own deterministic numeral/dictionary equivalence
+        // form along with genuinely GUESSED words (synonyms, history,
+        // context). Both are now restored as OR-injected forms; eval
+        // M3-2/M3-3 (09 §4.3's Recall@10 >= 0.8 gate) measured 13/14
+        // failures tracing to exactly this gap before the spec fix.
         let plan = build_query_plan("chunk size was 512 tokens in the retrieval pipeline doc");
         let match_expr = plan.match_expr.expect("several tokens are >= 3 chars");
-        assert!(!match_expr.contains("チャンク"));
-        assert!(!match_expr.contains("トークン"));
-        assert!(!match_expr.contains("パイプライン"));
+        assert!(
+            match_expr.contains("\"チャンク\""),
+            "chunk -> チャンク must be OR-injected: {match_expr}"
+        );
+        assert!(
+            match_expr.contains("\"トークン\""),
+            "tokens -> トークン must be OR-injected: {match_expr}"
+        );
+        assert!(
+            match_expr.contains("\"パイプライン\""),
+            "pipeline -> パイプライン must be OR-injected: {match_expr}"
+        );
         assert!(match_expr.contains("\"chunk\""));
         assert!(match_expr.contains("\"pipeline\""));
 
+        // Plain digits gain their thousands-grouped twin.
         let plan = build_query_plan("TTL is 3600 seconds");
         let match_expr = plan.match_expr.expect("several tokens are >= 3 chars");
         assert!(match_expr.contains("\"3600\""));
-        assert!(!match_expr.contains("3,600"));
+        assert!(
+            match_expr.contains("\"3,600\""),
+            "a >= 4 digit numeral must gain its thousands-separated twin: {match_expr}"
+        );
+
+        // Bidirectional: a well-formed comma-grouped numeral loses its commas too.
+        let plan = build_query_plan("total is 3,600 units");
+        let match_expr = plan.match_expr.expect("several tokens are >= 3 chars");
+        assert!(
+            match_expr.contains("\"3600\""),
+            "a grouped numeral must gain its plain twin: {match_expr}"
+        );
+    }
+
+    #[test]
+    fn pc8_numeric_equivalent_form_is_bidirectional_and_bounded() {
+        use super::numeric_equivalent_form;
+        // (a) plain digits >= 4 gain the grouped twin.
+        assert_eq!(numeric_equivalent_form("3600").as_deref(), Some("3,600"));
+        assert_eq!(numeric_equivalent_form("30000").as_deref(), Some("30,000"));
+        assert_eq!(numeric_equivalent_form("4096").as_deref(), Some("4,096"));
+        assert_eq!(
+            numeric_equivalent_form("1234567").as_deref(),
+            Some("1,234,567")
+        );
+        // (b) reverse: a well-formed grouped numeral loses its commas.
+        assert_eq!(numeric_equivalent_form("3,600").as_deref(), Some("3600"));
+        assert_eq!(numeric_equivalent_form("30,000").as_deref(), Some("30000"));
+        assert_eq!(
+            numeric_equivalent_form("1,234,567").as_deref(),
+            Some("1234567")
+        );
+        // (c) below the 4-digit floor, real thousands grouping never
+        // applies (no comma in "999") — no equivalence form either direction.
+        assert_eq!(numeric_equivalent_form("999"), None);
+        assert_eq!(numeric_equivalent_form("12"), None);
+        // (d) not a numeral at all, or a malformed grouping (not exactly
+        // 3-digit trailing groups) — left untouched, never reinterpreted.
+        assert_eq!(numeric_equivalent_form("abcd"), None);
+        assert_eq!(numeric_equivalent_form("12,3"), None);
+        assert_eq!(numeric_equivalent_form("1,23"), None);
+        assert_eq!(numeric_equivalent_form(",600"), None);
+        assert_eq!(numeric_equivalent_form("600,"), None);
+        assert_eq!(numeric_equivalent_form("3,6000"), None);
+    }
+
+    #[test]
+    fn pc8_bilingual_equivalents_are_exact_and_forward_only() {
+        use super::bilingual_equivalents;
+        // Exact, case-insensitive-on-ASCII match against the recovered
+        // dictionary (chunk/chunks/token/tokens/pipeline).
+        assert_eq!(bilingual_equivalents("chunk"), vec!["チャンク"]);
+        assert_eq!(bilingual_equivalents("Chunk"), vec!["チャンク"]);
+        assert_eq!(bilingual_equivalents("CHUNKS"), vec!["チャンク"]);
+        assert_eq!(bilingual_equivalents("token"), vec!["トークン"]);
+        assert_eq!(bilingual_equivalents("tokens"), vec!["トークン"]);
+        assert_eq!(bilingual_equivalents("pipeline"), vec!["パイプライン"]);
+        // No guessed/fuzzy injection: a word that merely CONTAINS a
+        // dictionary entry as a substring (not an exact token) gets nothing,
+        // and an unrelated word gets nothing.
+        assert!(bilingual_equivalents("chunky").is_empty());
+        assert!(bilingual_equivalents("pipelines").is_empty());
+        assert!(bilingual_equivalents("database").is_empty());
+        // Forward-only by design (05 §1.3 doc comment on `BILINGUAL_TERMS`):
+        // the Japanese term itself has no reverse entry.
+        assert!(bilingual_equivalents("チャンク").is_empty());
     }
 
     #[test]

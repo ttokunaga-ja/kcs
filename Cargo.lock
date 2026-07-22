@@ -695,6 +695,7 @@ name = "kcs-cli"
 version = "0.1.0"
 dependencies = [
  "assert_cmd",
+ "base64",
  "cap-primitives",
  "clap",
  "getrandom 0.3.4",
@@ -705,6 +706,7 @@ dependencies = [
  "kcs-search",
  "rusqlite",
  "serde",
+ "serde_jcs",
  "serde_json",
  "sha2",
  "tempfile",
@@ -751,6 +753,7 @@ version = "0.1.0"
 dependencies = [
  "kcs-adapter",
  "kcs-core",
+ "rusqlite",
  "serde",
  "serde_jcs",
  "serde_json",

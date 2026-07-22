@@ -1390,3 +1390,70 @@ fn pc8_fts5_operator_keywords_and_quotes_are_literal_not_syntax() {
     );
     assert!(!search["results"].as_array().unwrap().is_empty());
 }
+
+/// Deterministic query normalization (05 §1.3 L116-123, 2026-07-22 spec
+/// feedback #1): restores the numeral/bilingual equivalence forms PC8's
+/// original implementation dropped entirely — eval M3-2/M3-3 (09 §4.3's
+/// Recall@10 >= 0.8 gate) measured 13/14 failures tracing to exactly this
+/// gap. A plain-digit query still finds a document that only ever spelled
+/// the number with thousands separators (and the reverse), and an English
+/// query still finds a document that only ever used KCS's own fixed
+/// Japanese vocabulary for the same term — without any hand-authored
+/// synonym/history/context injection (PC8's actual, narrower ban).
+#[test]
+fn pc8_deterministic_numeric_and_bilingual_equivalence_forms_are_restored() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(
+        dir.path().join("numeral-grouped.md"),
+        "# Numeral grouped\n\n## Body\nThe retry budget expires after 3,600 idle units.\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.path().join("numeral-plain.md"),
+        "# Numeral plain\n\n## Body\nThe queue depth peaked at 30000 items overnight.\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.path().join("bilingual.md"),
+        "# Bilingual\n\n## Body\nチャンクは 512 トークン、オーバーラップ 64。\n",
+    )
+    .unwrap();
+    init(&dir);
+    success(&dir, &["index", "--offline", "--approve"]);
+
+    let path_matches = |search: &Value, needle: &str| {
+        search["results"].as_array().unwrap().iter().any(|result| {
+            result["evidence_pointer"]["path_at_commit"]
+                .as_str()
+                .unwrap_or_default()
+                .contains(needle)
+        })
+    };
+
+    // A plain-digit query finds the doc that only spells the number with a
+    // thousands separator.
+    let plain_query = success(&dir, &["search", "3600 idle units", "--text"]);
+    assert!(
+        path_matches(&plain_query, "numeral-grouped"),
+        "a plain-digit query must find a doc that only spells the number with a \
+         thousands separator: {plain_query}"
+    );
+
+    // The reverse direction: a comma-grouped query finds the doc that only
+    // spells the number without separators.
+    let grouped_query = success(&dir, &["search", "queue depth 30,000", "--text"]);
+    assert!(
+        path_matches(&grouped_query, "numeral-plain"),
+        "a comma-grouped query must find a doc that only spells the number \
+         without separators: {grouped_query}"
+    );
+
+    // An English query finds a doc using only KCS's own fixed チャンク/トークン
+    // dictionary translation.
+    let bilingual_query = success(&dir, &["search", "chunk size 512 token", "--text"]);
+    assert!(
+        path_matches(&bilingual_query, "bilingual"),
+        "an English query must find a doc using only the fixed チャンク/トークン \
+         dictionary translation: {bilingual_query}"
+    );
+}
