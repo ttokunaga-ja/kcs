@@ -112,7 +112,15 @@ default: k = 60, w_text = 1.0, w_vector = 1.0
   記号語が fts5 syntax error にならない)。FTS5 演算子 (AND / OR / NEAR / `*` 等) の直接指定は
   MVP では提供しない。**tokenization は決定的に固定する**: NFC 正規化後の query を Unicode 空白で
   分割した各非空片が token (長さの単位 = Unicode scalar 数。記号のみの token も phrase として投入可)。
-  token が 0 個の query は KCS-E-CONFIG-USAGE-001 (exit 2)
+  token が 0 個の query は KCS-E-CONFIG-USAGE-001 (exit 2)。
+  **決定的 query 正規化 (MATCH 生成の前段・2026-07-22 実装フィードバック #1)**: 生成に先立ち、
+  各 token に決定的な同値展開を適用してよい — (1) 4 桁以上の純数値 token の桁区切り同値形
+  (`3600` ↔ `3,600`)、(2) KCS 同梱の固定対訳辞書 (実装リリースに固定・実行時変更不可) による
+  用語の対訳形。展開結果は当該 token と同値 phrase の OR 並置として投入する。
+  「query 由来でない追加語」の禁止が指すのは入力に由来しない語 (推測・履歴・文脈からの注入) で
+  あり、**入力 token から固定規則で決定的に導出される同値形は query 由来である** — この展開が
+  無いと数値・対訳表記の不一致が [09-mvp-scope.md §4.3](09-mvp-scope.md) の Recall 目標を
+  構造的に割る (eval M3-2/M3-3 実測で確認)
 - 片方のバックエンドにしか現れない候補は、現れない側の項を 0 とする
 - `RRF_score` の同点は chunk_id 昇順
 - text-only / vector-only モードでは fusion せず当該バックエンドの順位をそのまま使う
