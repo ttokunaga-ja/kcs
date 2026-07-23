@@ -67,11 +67,16 @@ impl DeterministicAdapter {
 }
 
 pub fn deterministic_markdown_profile_value() -> serde_json::Value {
+    // 1.1.0 (2026-07-23): FlateDecode + ToUnicode CMap decoding changed what
+    // this adapter extracts from compressed text-layer PDFs. Same input bytes
+    // now normalize differently, so the semantics change rides a new
+    // tool_profile_hash (07 §2.1/§9 — a fresh gen-0 identity, never a silent
+    // prepared_hash drift inside the old profile).
     json!({
         "adapter_kind": "markdownize",
         "adapter_role": "text",
         "model_or_tool_family": "kcs-deterministic-text",
-        "model_version_pin": "1.0.0",
+        "model_version_pin": "1.1.0",
         "output_schema": "kcs-markdown-v1",
         "runtime_kind": "local",
         "spec_version": 1
@@ -79,11 +84,14 @@ pub fn deterministic_markdown_profile_value() -> serde_json::Value {
 }
 
 pub fn deterministic_prepare_profile_value() -> serde_json::Value {
+    // 1.1.0 (2026-07-23): same FlateDecode/ToUnicode bump as the markdownize
+    // profile above — prepared unit hashes are hashes of extracted page text,
+    // so the prepare identity moves together with the extractor.
     json!({
         "adapter_kind": "prepare",
         "adapter_role": "text",
         "model_or_tool_family": "kcs-deterministic-prepare",
-        "model_version_pin": "1.0.0",
+        "model_version_pin": "1.1.0",
         "runtime_kind": "local",
         "spec_version": 1
     })
@@ -476,6 +484,15 @@ pub fn extract_pdf_text_pages_bounded(bytes: &[u8], max_pages: usize) -> Result<
         return Ok(vec![String::from_utf8_lossy(bytes).into_owned()]);
     }
     let structural_count = structural_pdf_page_count(bytes, max_pages)?;
+    // 07 §2.1 (2026-07-23 FlateDecode addendum): real-world text-layer PDFs
+    // (TeX / LibreOffice output) carry compressed content streams and CID
+    // glyph indices; the graph decoder inflates and maps them through each
+    // font's ToUnicode CMap. It declines (None) on anything it cannot decode
+    // confidently, so every previously-extractable PDF keeps taking the
+    // legacy scanner path below with byte-identical results.
+    if let Some(pages) = crate::pdf_decode::decode_pdf_pages(bytes, max_pages)? {
+        return Ok(normalize_pdf_page_count(pages, structural_count.max(1)));
+    }
     let stream_pages = pdf_stream_text_pages_bounded(bytes, max_pages)?;
     // A missing structural page tree is malformed/ambiguous. Keep a single
     // conservative document unit instead of letting arbitrary stream count
@@ -672,7 +689,7 @@ fn structural_pdf_page_count(bytes: &[u8], max_pages: usize) -> Result<usize> {
     Ok(page_count)
 }
 
-fn skip_pdf_literal_string(bytes: &[u8], start: usize) -> usize {
+pub(crate) fn skip_pdf_literal_string(bytes: &[u8], start: usize) -> usize {
     let mut index = start + 1;
     let mut depth = 1_usize;
     while index < bytes.len() {
@@ -695,7 +712,7 @@ fn skip_pdf_literal_string(bytes: &[u8], start: usize) -> usize {
     index
 }
 
-fn skip_pdf_space_and_comments(bytes: &[u8], mut index: usize) -> usize {
+pub(crate) fn skip_pdf_space_and_comments(bytes: &[u8], mut index: usize) -> usize {
     loop {
         while bytes
             .get(index)
@@ -714,7 +731,7 @@ fn skip_pdf_space_and_comments(bytes: &[u8], mut index: usize) -> usize {
     }
 }
 
-fn pdf_name_at(bytes: &[u8], index: usize, name: &[u8]) -> bool {
+pub(crate) fn pdf_name_at(bytes: &[u8], index: usize, name: &[u8]) -> bool {
     bytes.get(index) == Some(&b'/')
         && bytes.get(index + 1..index + 1 + name.len()) == Some(name)
         && bytes
@@ -722,7 +739,7 @@ fn pdf_name_at(bytes: &[u8], index: usize, name: &[u8]) -> bool {
             .is_none_or(|byte| is_pdf_delimiter(*byte))
 }
 
-fn pdf_keyword_at(bytes: &[u8], index: usize, keyword: &[u8]) -> bool {
+pub(crate) fn pdf_keyword_at(bytes: &[u8], index: usize, keyword: &[u8]) -> bool {
     bytes.get(index..index + keyword.len()) == Some(keyword)
         && (index == 0 || is_pdf_delimiter(bytes[index - 1]))
         && bytes
@@ -730,7 +747,7 @@ fn pdf_keyword_at(bytes: &[u8], index: usize, keyword: &[u8]) -> bool {
             .is_none_or(|byte| is_pdf_delimiter(*byte))
 }
 
-fn is_pdf_delimiter(byte: u8) -> bool {
+pub(crate) fn is_pdf_delimiter(byte: u8) -> bool {
     byte.is_ascii_whitespace()
         || matches!(
             byte,
@@ -738,7 +755,7 @@ fn is_pdf_delimiter(byte: u8) -> bool {
         )
 }
 
-fn find_endstream_bytes(bytes: &[u8], from: usize) -> Option<usize> {
+pub(crate) fn find_endstream_bytes(bytes: &[u8], from: usize) -> Option<usize> {
     const TOKEN: &[u8] = b"endstream";
     let mut index = from;
     while index + TOKEN.len() <= bytes.len() {

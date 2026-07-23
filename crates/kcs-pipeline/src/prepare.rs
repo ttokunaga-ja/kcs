@@ -431,7 +431,14 @@ fn unit_type_for_media_type(media_type: &str) -> UnitType {
 }
 
 fn pdf_has_text_layer(bytes: &[u8]) -> bool {
-    !bytes.starts_with(b"%PDF") || bytes.windows(2).any(|window| window == b"BT")
+    !bytes.starts_with(b"%PDF")
+        || bytes.windows(2).any(|window| window == b"BT")
+        // 07 §2.1 (2026-07-23 FlateDecode addendum): a compressed text-layer
+        // PDF (TeX / LibreOffice output) has no literal `BT` in its raw
+        // bytes — the probe inflates FlateDecode streams (bounded) and asks
+        // the graph decoder whether they carry real, ToUnicode-mappable
+        // text. Scanned/image-only PDFs stay `false` and keep OCR routing.
+        || kcs_adapter::pdf_decode::pdf_compressed_text_probe(bytes)
 }
 
 /// R20-4: heuristic for whether extracted PDF text is REAL text vs binary garbage

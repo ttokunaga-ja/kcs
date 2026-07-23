@@ -9,6 +9,7 @@ mod http_policy;
 pub mod identity;
 mod mistral_ocr;
 pub mod office_convert;
+pub mod pdf_decode;
 pub mod tool_lock;
 pub mod traits;
 pub mod types;

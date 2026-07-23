@@ -76,6 +76,19 @@ KCS core
 
 KCS は `deterministic_library` の Prepare / Markdownize Adapter を同梱する。対象: plain text / Markdown / コード、PDF text layer 抽出。OCR・レイアウト解析・画像理解は行わない。**出力は単純な passthrough ではなく、Normalized Markdown v1 (§5.2.1) への決定的正規化**である — 少なくとも Setext 見出し → ATX 変換・生 HTML block の fenced text 化・改行 / 空白 / fence の正規化を行う (§5.2.1 準拠が受け入れ検査 V5 の通過条件のため、passthrough では通常の Markdown (Setext 等) がオフライン基線 index で全滅する)。
 
+> **PDF text layer 抽出の範囲 (実装フィードバック 2026-07-23)**: 実世界の text-layer PDF
+> (TeX / LibreOffice 出力) は FlateDecode 圧縮 content stream + subset font の glyph index +
+> font ごとの ToUnicode CMap (TeX Live はさらに `/Type /ObjStm` 内へ辞書を格納) で構成される。
+> deterministic Adapter の text layer 抽出はここまでを対象とする: **FlateDecode の有界展開**
+> (stream あたり 16 MiB 上限 — 超過は既存の 256 page 上限と同型の contract 違反)、`/Type /ObjStm`
+> の展開、Page → Resources → Font → ToUnicode の解決、CMap (`bfchar`/`bfrange`) による glyph
+> index 復号。**確信を持って復号できないファイルは空抽出へ縮退し (fail-empty)、従来どおり
+> online OCR ルーティングに乗る** — FlateDecode 以外の filter (DCTDecode 等)・ToUnicode を
+> 持たない font の glyph 列・スキャン/画像系は引き続き OCR の領分である。この抽出意味論の
+> 変更は deterministic profile の `model_version_pin` 1.0.0 → 1.1.0 として**新
+> `tool_profile_hash`** に載せた (§9 / [03-data-model.md §5.1](03-data-model.md) — 既存
+> instance 内の prepared_hash drift ではなく新 identity としての基線再構築)。
+
 - online Adapter が未設定または network 未承認のとき、Markdownize タスクは同梱 deterministic Adapter で実行する (タスクを止めない)。Embedding タスクは生成しない (検索は text fallback、[05-runtime.md §1](05-runtime.md))
 - この状態を **ベースライン index** と呼ぶ。`init → index --approve → search → open <pointer>` の最低体験ライン ([01-positioning.md §3](01-positioning.md)) はベースライン index のみで成立しなければならない
 - online Adapter を承認した後の AI 強化は、別 `tool_profile_hash` の artifact として通常の Markdownize / Embedding タスクで生成する (identity 規約 [03-data-model.md §5](03-data-model.md) のとおり。ベースライン artifact とその Evidence Pointer は不変のまま残る)

@@ -31,6 +31,11 @@ toml = "0.8"
 toml_edit = "0.22"
 unicode-normalization = "0.1"
 base64 = "0.22"
+# Offline PDF text extraction (07 §2.1): real-world text-layer PDFs
+# (TeX / LibreOffice output) carry FlateDecode-compressed content streams and
+# ToUnicode CMaps; miniz_oxide is the bounded inflate primitive. Pure Rust,
+# no C build, already the narrow-waist inflate crate of the flate2 ecosystem.
+miniz_oxide = "0.8"
 getrandom = "0.3"
 ureq = { version = "2", default-features = false, features = ["json"] }
 rusqlite = { version = "0.32", features = ["bundled"] }

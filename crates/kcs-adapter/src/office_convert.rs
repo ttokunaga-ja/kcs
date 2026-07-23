@@ -850,6 +850,22 @@ mod tests {
             "normalized converted-PDF bytes must be identical across \
              independent conversions of the same input"
         );
+
+        // FlateDecode round (07 §2.1, 2026-07-23 addendum): a real soffice
+        // PDF carries its text as FlateDecode-compressed CID glyph runs.
+        // The graph decoder must recover the body text offline — this is
+        // the acceptance property the round exists for, and it was NOT
+        // covered before (only byte determinism was asserted).
+        let pages = crate::deterministic::extract_pdf_text_pages_bounded(
+            &first,
+            crate::deterministic::MAX_DETERMINISTIC_PDF_PAGES,
+        )
+        .expect("extract converted-PDF text layer");
+        let joined = pages.join("\n");
+        assert!(
+            joined.contains("office") && joined.contains("convert"),
+            "converted-PDF compressed text layer must decode offline; got {joined:?}"
+        );
     }
 
     /// Same determinism property as the DOCX test above, for PPTX. The
