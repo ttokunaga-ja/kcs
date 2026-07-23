@@ -38,7 +38,19 @@ qhard 8 問は測定前に凍結投入 — miss 2 問 (qa02 hard1 / qa07 hard3) 
   invalid_input 化した task の復活が未配線 (fixture では手動 flip で代替した)。(7) built-in
   mistral の tools.toml pricing 宣言ガイダンス (`pages = 0.002`) — 無宣言だと確定記帳が常に
   estimated 縮退で過大計上。
-- 残るユーザー側 Done: baseline (mdfind/rga) 比較と dogfood。
+- **baseline 比較を実測 (2026-07-23、`eval/run_baseline.py` + 凍結 24 問 `golden-queries-fixture-b.jsonl`)**:
+  Recall@10 = **KCS 8/24 (0.333) / mdfind 0/24 / rga 0/24** (rga は pandoc 導入 + 断片採点の
+  上振れ運用でも 0 — Q_hard の設計どおり字句エンジンは全滅)。**差 >= 0.3 は両者に対し成立、
+  KCS >= 0.8 の腕が未達 = ゲート OPEN**。クラス別 KCS: hard1 3/8・hard2 5/8・hard3 0/8。
+  診断 (実験 = 多様化 off / vector 単独 / text 単独の順位追跡): 候補には入るが**ランキングで
+  20 位圏外** — vector 単独でも圏外 (自然文 query と thin 文書 + boilerplate filler 群の
+  embedding 近接が answer を上回る)、text は漢字複合断片 (切替判断/時間条件 等) が
+  それ以上分解されず不一致。qhard 環境の 6/8 は競合 24 ファイルの小ささによる。
+  **次ラウンド = 検索品質 (実データ規模)**: 候補 (a) 漢字複合語の構成語 OR 展開
+  (スクリプト境界細分の深化 — FB#2 の延長線)、(b) ファイル名 token の索引/加点、
+  (c) fusion 重みと boilerplate 抑制 (df ペナルティ等)。凍結 24 問は変更せず、
+  改善は一般規則のみ (golden 過適合禁止) で再測定する。
+- 残るユーザー側 Done: baseline ゲートの充足 (上記ラウンド後の再測定) と dogfood。
 
 ## 1. 残余契約 84 件 (QA 65 + QB 19 = P0 45 / P1 32 / P2 7) の選別
 
