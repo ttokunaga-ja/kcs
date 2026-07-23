@@ -21,11 +21,16 @@ from pathlib import Path
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 
-def env_for(fixture_root: Path, env_name: str):
+def env_for(fixture_root: Path, env_name: str, online_query: bool):
     base = fixture_root / "env" / env_name
     env = os.environ.copy()
     for name in tuple(env):
-        if name.startswith("KCS_TEST_") or name in ("MISTRAL_API_KEY", "GEMINI_API_KEY"):
+        if name.startswith("KCS_TEST_"):
+            env.pop(name, None)
+        elif name in ("MISTRAL_API_KEY", "GEMINI_API_KEY") and not online_query:
+            # hard1/hard3 の自然文クエリは字句非一致が設計そのもの — 検索時
+            # query embedding (vector レーン) が正規の解答経路なので、
+            # --online-query では資格情報を素通しする。
             env.pop(name, None)
     env["XDG_CONFIG_HOME"] = str(base / "xdg-config")
     env["XDG_DATA_HOME"] = str(base / "xdg-data")
@@ -49,12 +54,14 @@ def main(argv=None):
     ap.add_argument("--bin", default="target/release/kcs")
     ap.add_argument("--out", default=os.path.join(HERE, "qhard-results.json"))
     ap.add_argument("--k", type=int, default=10)
+    ap.add_argument("--online-query", action="store_true",
+                    help="検索時の query embedding を許可 (GEMINI_API_KEY を環境から素通し)")
     args = ap.parse_args(argv)
 
     fixture_root = Path(args.fixture_root)
     goldens = [json.loads(l) for l in open(args.golden, encoding="utf-8") if l.strip()]
     cwd = first_scope_dir(fixture_root, args.tree)
-    env = env_for(fixture_root, args.env_name)
+    env = env_for(fixture_root, args.env_name, args.online_query)
     bin_path = os.path.abspath(args.bin)
 
     rows = []

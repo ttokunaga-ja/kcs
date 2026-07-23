@@ -20,6 +20,26 @@ fresh corpus / `eval/run_eval.py` 全 3 シナリオ):
 1. M3-1 Q_hard の一回限り増補 (18 → 20 問以上) + 再凍結 (件数と digest を 09 §5.5 #5 行へ追記)
 2. 実コーパスでの対 Spotlight (mdfind) / ripgrep-all baseline 比較 (KCS >= 0.8 かつ差 >= 0.3)
 
+## 0.5 実データ fixture での M3-1 増補ゲートと online 実走 (2026-07-23)
+
+**M3-1 合算ゲート PASS: 23/26 = 0.885 >= 0.8** (run_eval 合成 17/18 + qhard 実データ 6/8。
+qhard 8 問は測定前に凍結投入 — miss 2 問 (qa02 hard1 / qa07 hard3) は真の困難例として記録)。
+実走の要点:
+- 登録: 20 人格 400 leaf + qhard 8 leaf、failures 0。pending online 235 = manifest 期待一致。
+- batch OCR (裁定 = Batch のみ): 251 task 全成功 (実 API 契約試験を兼ねる — submit/poll/collect/
+  upload 削除/token NULL 化まで実機確認)。台帳 $1.17 (pricing 未宣言のため §5.4 estimated 縮退の
+  安全側過大 — 実請求は Mistral 側で約 $0.5 以下見込み)。
+- 厳密 bijection が **ObjStm 盲目の頁数切り詰めバグを検出** (`1257069` で修正、prepare 1.2.0 /
+  markdownize 1.3.0)。登録が炙り出した 2 バグ (`acf4f23`) と合わせ、実データが監査 19 ラウンドの
+  盲点 3 つを 1 日で回収。
+- embedding (sync): 2,321 task 全成功、$0.0096。検索時 query embedding で hard 自然文が
+  vector レーン解答 (run_qhard --online-query)。
+- **1-A3 残余追加**: (6) batch reject 後の task 再駆動動線 — reset-violations は台帳のみで、
+  invalid_input 化した task の復活が未配線 (fixture では手動 flip で代替した)。(7) built-in
+  mistral の tools.toml pricing 宣言ガイダンス (`pages = 0.002`) — 無宣言だと確定記帳が常に
+  estimated 縮退で過大計上。
+- 残るユーザー側 Done: baseline (mdfind/rga) 比較と dogfood。
+
 ## 1. 残余契約 84 件 (QA 65 + QB 19 = P0 45 / P1 32 / P2 7) の選別
 
 棚卸し方法: 契約書の全 ID − crates/ 内の実装参照 (2026-07-22 grep)。ID 一覧は
