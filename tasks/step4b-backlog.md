@@ -64,9 +64,16 @@ OCR へ変換 bytes 送出・変換器欠如 = enqueue 抑止 + `office_conversi
 変換失敗 = contract_violation・**QB41 同梱** (prepared_hash ドリフト → `--yes` 確認付き
 offline gen+1。判定は鋳造点ガード 2 枚 = 空 prepare 非判定 + key 集合同一時のみ)。
 **残余 (順に優先度高)**:
-1. **FlateDecode 展開の決定論抽出器対応** — 現行抽出器は圧縮 stream を読めず、実世界の
-   text-layer PDF (TeX/soffice 出力) は offline 抽出が空 → OCR 依存。`miniz_oxide` 追加が
-   最小構成 (flate2 系は依存木に不在)。eval の TeX 生成コーパスを offline で成立させる鍵
+1. ~~**FlateDecode 展開の決定論抽出器対応**~~ → **2026-07-23 実装完了 (`28a6c6d`)**。
+   当初の「`miniz_oxide` 追加が最小構成」は**不正確だった**: 実 PDF (lualatex/soffice) は
+   glyph index + ToUnicode CMap + (TeX Live は) `/Type /ObjStm` 格納のため、展開だけでは
+   1 文字も読めない。実装 = `kcs-adapter/src/pdf_decode.rs` の有界 graph decoder
+   (object index + ObjStm 展開 + Page→Font→ToUnicode 解決 + bfchar/bfrange + content-op
+   復号、fail-empty で legacy 経路とバイト同一共存、inflate 16 MiB 上限のみ hard error)。
+   deterministic profile は 1.0.0→1.1.0 bump (意味論変更 = 新 tool_profile_hash、07 §2.1
+   追記 = FB 枠)。実機実証: eval-gen の lualatex PDF (luatexja) が offline 索引され
+   `read`/`境界`/`3600` 全ヒット、実 soffice 変換 PDF の抽出アサーション追加。
+   テスト 1,237/0・eval 回帰ゼロ
 2. QB41 の online 再結線 — enqueue dedup が (input_path, input_hash) キーで新 gen の
    online 再 enrichment を塞ぐ (offline gen+1 は生成済み。online lane の gen 認識は独立変更)
 3. PPTX online 往復の専用テスト (offline は office_02、DOCX online は office_03 で被覆済み)
