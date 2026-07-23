@@ -50,7 +50,32 @@ qhard 8 問は測定前に凍結投入 — miss 2 問 (qa02 hard1 / qa07 hard3) 
   (スクリプト境界細分の深化 — FB#2 の延長線)、(b) ファイル名 token の索引/加点、
   (c) fusion 重みと boilerplate 抑制 (df ペナルティ等)。凍結 24 問は変更せず、
   改善は一般規則のみ (golden 過適合禁止) で再測定する。
-- 残るユーザー側 Done: baseline ゲートの充足 (上記ラウンド後の再測定) と dogfood。
+- **検索品質ラウンド r1 = contextual chunk embedding を実装・実測 (2026-07-24、`451431c`)**:
+  chunk の埋め込み入力を `{人間化ファイル名}\n\n{本文}` に変更 (07 §5.3 addendum)。fixture 全
+  2,321 chunk を新 profile (`09ff0784`) で再埋め込み ($0.0096)。**凍結 24 問を再測定 = KCS
+  9/24 (hard1 4・hard2 1・hard3 4)** — 8→9 の微増、かつ hard2 が 5→1 に**後退**。差 >= 0.3 は
+  両 baseline に対し成立継続、`KCS >= 0.8` は依然 OPEN。
+  - **診断 (airtight)**: 各解答文書の**スコープ内** vector 順位を測ると、`--all-scopes ヒット
+    ⟺ スコープ内順位 == 1` が 24/24 で完全一致。9 ヒットは全て within-rank 1、15 ミスは全て
+    within-rank >= 2。contextual 化は within-scope の vector 品質を確かに改善し (解答が
+    rank 2〜4 に浮上)、単一スコープ検索・完全一致テキスト検索は正しく解答を rank 1 に返す。
+    しかし **`--all-scopes` の cross-scope マージが per-scope RRF の rrf_score (順位由来) で
+    プールを整列する**ため、あるスコープの rank-2 は他スコープ約 20 個の rank-1 に必ず負けて
+    top-10 圏外に沈む。cosine はプロファイル同一で cross-scope 比較可能なのに順位 RRF が
+    その絶対情報を捨てている。
+  - **なぜ contextual 化単体では閉じないか**: 事前プレビュー (global file-level max-cosine =
+    score ベース擬似マージ) は non-contextual 14/24 → contextual **23/24**。つまり
+    contextual 化の利得は「score ベース cross-scope マージ」を前提に初めて顕在化する。
+    現行の rank-1-only マージ下では利得がマスクされ、意味の近いファイル名の decoy
+    (例: 「修復作業」query に対し `service-restoration.md`) が同スコープ内で解答を rank-2 に
+    押し下げると逆効果になり得る (hard2 後退の正体)。
+  - **次ラウンド = cross-scope マージの score 化 (05 §1.8)**: vector/hybrid で cross-scope
+    プールを global cosine (プロファイル同一で比較可能) で再ランク、または global RRF
+    (各 backend の順位をスコープ横断でプールしてから融合)。**カーソル/RRF/MMR の
+    決定性契約 (PC8〜PC50・214 本の step3 契約) に触れる spec レベル変更**のため独立
+    ラウンドで慎重に設計・検証する。contextual 化 (`451431c`) はその土台として維持。
+    測定は `eval/baseline-results-2026-07-24.json`。
+- 残るユーザー側 Done: baseline ゲートの充足 (cross-scope マージ score 化ラウンド後の再測定) と dogfood。
 
 ## 1. 残余契約 84 件 (QA 65 + QB 19 = P0 45 / P1 32 / P2 7) の選別
 

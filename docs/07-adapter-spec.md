@@ -496,6 +496,35 @@ embedding の SQLite schema (`embeddings` / `chunk_vec`) の正本は [04-pipeli
 
 sqlite-vec の制約で vector table を物理分割してもよいが、概念上は単一の Embedding Adapter / 単一の `profile_hash`。profile が一致しない場合、KCS は vector 検索を強行せず再生成または text fallback。
 
+> **実装フィードバック — chunk 埋め込みの contextual 化 (2026-07-24)**: MVP の実データ
+> ベースライン評価 (09 §4.1) で、vector レーンが「本文 1〜2 文＋定型 filler」の実機規模
+> (人格あたり 50 ファイル) で薄い解答本文を浮上させられず、`KCS ≥ 0.8` 腕が未達だった。
+> **ファイル名はユーザーが付けた意図信号**であるため、chunk の埋め込み**入力**を
+> `{humanized filename}\n\n{chunk 本文}` とする (contextual retrieval)。`humanized filename`
+> は basename stem の決定的変換 (`-`/`_`→空白、ASCII camelCase 境界→空白、空白畳み込み。
+> 英数字を含まない純記号名は変換不能として prefix なし)。凍結 24 問での事前計測: vector 単独
+> file-level Recall@10 が **14/24 → 23/24**。query 側は従来どおり素の埋め込み (ファイル名を
+> 持たない)。
+>
+> - **同一性**: chunk ベクトルは `(text_hash, context, profile)` の関数になるため、
+>   content-addressed identity (`embedding_hash`) に `context` を畳み込む (`None` = 従来と
+>   バイト同一のハッシュ)。異なるファイル名の同一本文が同じ `id` に衝突して 1 ベクトルを
+>   共有する事故を防ぐ。
+> - **profile**: 本節の profile が `input_construction = "chunk_filename_context_v1"` を宣言する
+>   (04 §4.1 の識別フィールド許可リストに追加、embedding 専用で他 profile のハッシュ不変)。
+>   これにより (a) 03 §7 の互換ゲートが非 contextual な旧ベクトル空間を **incompatible** と
+>   正しく判定し、(b) profile hash 変化が全 chunk の再埋め込みを再起動する。
+> - **content dedup の縮退**: cross-file の content-twin 再利用 (CT3-EMBED-006 / R19-4) は
+>   同一 `(text_hash, context)` = 実質同一ファイル名に縮退する。これは意図した挙動 (contextual
+>   ベクトルはファイルごとに異なるべき)。twin 収束の自己修復経路自体はコード上は健在
+>   (同一 context の twin で発火)。
+> - **rebuild/snapshot**: 1 つの `text_hash` が複数 `embeddings` 行を持ち得るため、
+>   `embeddings.context_key` 列で chunk ごとに正しい行を選ぶ (単一候補は従来どおり素通り =
+>   pre-addendum ストア不変)。
+>
+> deferred: (1) context に heading path を併記する変種 (今回は stem のみが最良で不採用)、
+> (2) 純記号ファイル名や意味の薄いファイル名 (`IMG_1234`) での寄与低下の定量化。
+
 ## 5.4 Summary (optional)
 
 ```
