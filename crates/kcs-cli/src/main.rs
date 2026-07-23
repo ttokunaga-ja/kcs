@@ -18664,11 +18664,19 @@ fn collect_batch_markdownize_output(
     );
     let (response, effective_hints) = match converted {
         Ok(converted) => converted,
-        Err(_reason) => {
+        Err(reason) => {
             // §3.2 acceptance reject (04 §5.8 相 3): terminal with the durable
             // contract_violation count. The provider usage report is part of
             // the very body that failed to parse, so the charge degrades to
-            // the reservation estimate (§5.4 事前検証の縮退と同形).
+            // the reservation estimate (§5.4 事前検証の縮退と同形). The
+            // reason string lands in the event log — a silent reject cost a
+            // live probe to diagnose on the 2026-07-23 OCR run (same lesson
+            // as the offline `let _ = error` fix).
+            append_event_log(
+                "KCS-E-ADAPTER-CONTRACT-001",
+                "batch OCR output failed acceptance; settled as contract_violation",
+                json!({ "input_path": task.input_path, "detail": reason }),
+            )?;
             return settle_batch_contract_reject(
                 store,
                 ledger,
@@ -18696,6 +18704,11 @@ fn collect_batch_markdownize_output(
     let outcome = match materialized {
         Ok(outcome) => outcome,
         Err(failure) if failure.retry_kind == RetryErrorKind::ContractViolation => {
+            append_event_log(
+                "KCS-E-ADAPTER-CONTRACT-001",
+                "batch OCR materialize failed acceptance; settled as contract_violation",
+                json!({ "input_path": task.input_path, "detail": format!("materialize reject: {:?}", failure.retry_kind) }),
+            )?;
             return settle_batch_contract_reject(
                 store,
                 ledger,

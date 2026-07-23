@@ -71,14 +71,14 @@ pub fn deterministic_markdown_profile_value() -> serde_json::Value {
     // this adapter extracts from compressed text-layer PDFs.
     // 1.2.0 (2026-07-23, same day): non-markdown text (text/plain + sniffed
     // octet-stream TEXT) is now fence-wrapped — raw passthrough violated the
-    // v1 "raw HTML forbidden" acceptance for XML/HTML corpus files. Output
-    // semantics change => new tool_profile_hash (07 §9); the prepare profile
-    // stays at 1.1.0 because prepared units are unchanged.
+    // v1 "raw HTML forbidden" acceptance for XML/HTML corpus files.
+    // 1.3.0 (2026-07-23, same day): multi-page markdown follows the graph
+    // decoder's page authority (ObjStm-aware) — see the prepare 1.2.0 note.
     json!({
         "adapter_kind": "markdownize",
         "adapter_role": "text",
         "model_or_tool_family": "kcs-deterministic-text",
-        "model_version_pin": "1.2.0",
+        "model_version_pin": "1.3.0",
         "output_schema": "kcs-markdown-v1",
         "runtime_kind": "local",
         "spec_version": 1
@@ -86,14 +86,16 @@ pub fn deterministic_markdown_profile_value() -> serde_json::Value {
 }
 
 pub fn deterministic_prepare_profile_value() -> serde_json::Value {
-    // 1.1.0 (2026-07-23): same FlateDecode/ToUnicode bump as the markdownize
-    // profile above — prepared unit hashes are hashes of extracted page text,
-    // so the prepare identity moves together with the extractor.
+    // 1.1.0 (2026-07-23): FlateDecode/ToUnicode bump (extracted page text).
+    // 1.2.0 (2026-07-23, same day): the graph decoder's page count became
+    // the page authority — the raw structural scan is ObjStm-blind and
+    // truncated multi-page TeX PDFs to one prepared unit. Unit cardinality
+    // changes => prepare identity moves (07 §9).
     json!({
         "adapter_kind": "prepare",
         "adapter_role": "text",
         "model_or_tool_family": "kcs-deterministic-prepare",
-        "model_version_pin": "1.1.0",
+        "model_version_pin": "1.2.0",
         "runtime_kind": "local",
         "spec_version": 1
     })
@@ -515,7 +517,15 @@ pub fn extract_pdf_text_pages_bounded(bytes: &[u8], max_pages: usize) -> Result<
     // confidently, so every previously-extractable PDF keeps taking the
     // legacy scanner path below with byte-identical results.
     if let Some(pages) = crate::pdf_decode::decode_pdf_pages(bytes, max_pages)? {
-        return Ok(normalize_pdf_page_count(pages, structural_count.max(1)));
+        // Graph pages ARE the page authority: the decoder enumerates
+        // /Type /Page objects INCLUDING those packed inside compressed
+        // /Type /ObjStm containers, while `structural_pdf_page_count` below
+        // scans raw bytes only and is ObjStm-blind. Normalizing graph output
+        // to the raw count truncated real multi-page TeX Live documents to
+        // page:1 (pages 2+ silently lost from the offline index) — caught
+        // 2026-07-23 by the Batch collect bijection rejecting "OCR 3 pages
+        // vs requested 1" on all 69 multi-page text PDFs of the fixture.
+        return Ok(pages);
     }
     let stream_pages = pdf_stream_text_pages_bounded(bytes, max_pages)?;
     // A missing structural page tree is malformed/ambiguous. Keep a single

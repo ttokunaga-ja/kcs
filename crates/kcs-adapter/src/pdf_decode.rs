@@ -1247,6 +1247,69 @@ mod tests {
         assert!(pdf_compressed_text_probe(&pdf));
     }
 
+    /// 2026-07-23 fleet-OCR regression: TeX Live packs every /Type /Page
+    /// dictionary (often beyond the linearized first page) inside a
+    /// compressed /Type /ObjStm, so the RAW structural scan undercounts and
+    /// `extract_pdf_text_pages_bounded` used to truncate the graph decoder's
+    /// correct N pages down to that wrong count — silently dropping pages
+    /// 2+ from the offline index. The Batch collect bijection ("OCR 3 pages
+    /// vs requested 1") is what surfaced it. Pin: graph pages are the page
+    /// authority end to end.
+    #[test]
+    fn multi_page_objstm_pages_survive_extract_without_truncation() {
+        let members: Vec<(u32, Vec<u8>)> = (0..3)
+            .map(|index| {
+                (
+                    11 + index,
+                    format!("<< /Type /Page /Contents {} 0 R >>", 21 + index).into_bytes(),
+                )
+            })
+            .collect();
+        let mut header = String::new();
+        let mut packed = Vec::new();
+        let mut offsets = Vec::new();
+        for (number, body) in &members {
+            offsets.push((number, packed.len()));
+            packed.extend_from_slice(body);
+            packed.push(b'\n');
+        }
+        for (number, offset) in &offsets {
+            header.push_str(&format!("{number} {offset} "));
+        }
+        let first = header.len();
+        let mut objstm_data = header.into_bytes();
+        objstm_data.extend_from_slice(&packed);
+        let objstm = zlib(&objstm_data);
+
+        let mut pdf = b"%PDF-1.6\n".to_vec();
+        pdf.extend(stream_obj(
+            1,
+            &format!(
+                "<< /Type /ObjStm /N 3 /First {first} /Length {} /Filter /FlateDecode >>",
+                objstm.len()
+            ),
+            &objstm,
+        ));
+        for index in 0..3u32 {
+            let text = format!("BT (objstm page {} body) Tj ET", index + 1);
+            pdf.extend(stream_obj(
+                21 + index,
+                &format!("<< /Length {} >>", text.len()),
+                text.as_bytes(),
+            ));
+        }
+        pdf.extend_from_slice(b"%%EOF\n");
+
+        let pages = decode_pdf_pages(&pdf, 16).expect("decode").expect("pages");
+        assert_eq!(pages.len(), 3, "{pages:?}");
+        // End to end through the extract entry (raw structural count here is
+        // ZERO — the old normalization would have truncated to 1).
+        let extracted =
+            crate::deterministic::extract_pdf_text_pages_bounded(&pdf, 16).expect("extract");
+        assert_eq!(extracted.len(), 3, "{extracted:?}");
+        assert!(extracted[2].contains("objstm page 3 body"), "{extracted:?}");
+    }
+
     #[test]
     fn image_only_flate_contents_do_not_decode_to_text() {
         let pixels = zlib(&[0xffu8; 4096]);
