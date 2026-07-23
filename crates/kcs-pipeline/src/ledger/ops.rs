@@ -1056,6 +1056,45 @@ pub fn recovery_candidates(conn: &Connection) -> Result<Vec<BatchRequestRow>> {
     Ok(out)
 }
 
+/// Batch-lane POLL candidates (04 §5.8 相 3 collect; the send-lane wiring's
+/// counterpart of [`recovery_candidates`]): one scope + adapter's
+/// `request_kind='batch'` rows whose provider job id is already durably known
+/// (`batch_job_id IS NOT NULL`) and whose charge is still open
+/// (`state IN (0, 1)`). `state = 0` rows are included deliberately — a
+/// crash between phase 2b's successful job-create call and its own
+/// `phase2b_record_job_created` write is recovered by the reconcile walk's
+/// `recovery_mark_found` self-description (04 §5.8 "found ... batch_job_id
+/// 未記録なら発見値を行へ書く"), which records the id WITHOUT flipping
+/// `state` to 1; excluding those rows would strand a discovered job forever.
+/// Rows with `batch_job_id IS NULL` stay owned by the recovery walk's
+/// token-matching (found / confirmed-absent / unknown) and are never polled
+/// here.
+pub fn batch_poll_candidates(
+    conn: &Connection,
+    scope_id: &str,
+    adapter_kind: &str,
+) -> Result<Vec<BatchRequestRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT scope_id, adapter_kind, input_hash, tool_profile_hash, state, request_kind,
+                intent_token, upload_id, batch_job_id, provider_scope_id, job_create_started_at,
+                stale_after_at, submission_seq, attempts, contract_violation_count, estimated_usd,
+                error, completed_at, created_at
+         FROM batch_requests
+         WHERE request_kind = 'batch'
+           AND state IN (0, 1)
+           AND batch_job_id IS NOT NULL
+           AND scope_id = ?1
+           AND adapter_kind = ?2
+         ORDER BY input_hash, tool_profile_hash",
+    )?;
+    let rows = stmt.query_map(params![scope_id, adapter_kind], row_to_batch_request)?;
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row?);
+    }
+    Ok(out)
+}
+
 /// CL45 (04 §5.4): the `request_kind = 'sync'` counterpart of
 /// [`recovery_candidates`] — rows `recovery_candidates` itself explicitly
 /// excludes (its own doc comment: "handled by §G's own crash-recovery pass,

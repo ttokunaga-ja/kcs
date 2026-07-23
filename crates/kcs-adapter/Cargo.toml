@@ -18,6 +18,9 @@ toml.workspace = true
 unicode-normalization.workspace = true
 base64.workspace = true
 miniz_oxide.workspace = true
+# Batch upload multipart boundaries (07 §5.7): OS-entropy boundary strings so
+# a boundary can never be predicted from (or collide with) the payload.
+getrandom.workspace = true
 # Authenticated adapter responses use identity encoding so wire and decoded
 # byte ceilings cannot be bypassed through transparent decompression.
 ureq = { version = "2", default-features = false, features = ["json", "tls"] }

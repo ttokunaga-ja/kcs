@@ -581,6 +581,23 @@ provider_scope_id()            下記の不変識別子を返す
 `mistral_ocr_markdownize` の Batch モードは 2026-07-03 の実地検証 (§5.2 末尾) の範囲でこの条件下で
 採用済み。
 
+> **Batch レーンの実装確定 (実装フィードバック 2026-07-23)**: `mistral_ocr_markdownize` の
+> 本番送信は Batch レーンに固定した (同日ユーザー裁定「OCR の課金は Batch 実行のみ許可」 —
+> $2/1,000 pages。**bbox 有効タスクも例外にしない** — bbox annotation は既定 ON のため、例外に
+> すると本番が sync に留まり裁定が空文化する。batch 入力 body は sync と同じ
+> `bbox_annotation_format` を同梱)。レーン選択 = 「Batch client が構成済み (markdown role の
+> 認証解決可) なら Batch」。`request_kind='sync'` の生存予約行のみ §5.8 の回復意味論保全のため
+> sync で完遂する。v1 確定事項: **1 job = 1 task** (`batch_job_id` 列がそのまま回復キー)、
+> custom_id = task の input_hash、job metadata = flat 5 key (`intent_token` / `scope_id` /
+> `adapter_kind` / `input_hash` / `tool_profile_hash`)、upload filename = `kcs-<intent_token>.jsonl`。
+> 単価はコード内に per-page 定数の正本が無いため、tools.toml の `[pricing] pages = 0.002`
+> (batch 単価) 宣言を推奨する。終端の記帳: provider `TIMEOUT_EXCEEDED` は出力を読めず実費不明 =
+> `expired` として**予約額の estimated 記帳** (§5.8 と同じ over-count 安全側)、`FAILED`/`CANCELLED`
+> は未完了 entry 非課金の前提で 0 記帳。繰延 (backlog 記録): incremental Markdownize の batch 化
+> (v1 は Full 送信へ縮退)、batch 出力の埋め込み画像の CAS 保存、`provider_scope_id` /
+> `list_uploads` / pagination の実 API 契約試験 (§5.2 の未実施項目 — v1 は
+> `KCS_MISTRAL_WORKSPACE_ID` 上書き + 既定 `"mistral:default"`)。
+
 ---
 
 # 6. tool-lock.json

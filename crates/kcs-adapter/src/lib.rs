@@ -1,5 +1,6 @@
 //! Adapter trait, identity helpers, and built-in Step 2 adapters.
 
+pub mod batch_client;
 pub mod batch_inventory;
 pub mod bbox_annotation;
 pub mod catalog;

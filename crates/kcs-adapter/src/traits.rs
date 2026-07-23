@@ -17,6 +17,24 @@ pub trait MarkdownizeAdapter {
     fn profile(&self) -> AdapterProfile;
 
     fn markdownize(&self, request: MarkdownizeRequest) -> Result<MarkdownizeResponse>;
+
+    /// Which request lane this adapter's online sends should take (07 §5.7).
+    /// Default = Sync (single request/response round trip). The built-in
+    /// Mistral OCR adapter overrides this to Batch: the 2026-07-23 user
+    /// ruling permits OCR spending on the Batch lane only ($2/1,000 pages),
+    /// so its production sends must never take the sync lane. A trait
+    /// default (not an `AdapterProfile` field) keeps the lane OUT of
+    /// identity — same posture as `ProviderIdempotency` (QA13).
+    fn preferred_request_kind(&self) -> PreferredRequestKind {
+        PreferredRequestKind::Sync
+    }
+}
+
+/// Online send lane selector (07 §5.7; ledger `batch_requests.request_kind`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PreferredRequestKind {
+    Sync,
+    Batch,
 }
 
 pub trait EmbeddingAdapter {

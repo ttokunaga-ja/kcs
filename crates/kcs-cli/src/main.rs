@@ -21,6 +21,10 @@ use std::process;
 use std::time::Instant;
 
 use clap::{Args, Parser, Subcommand};
+use kcs_adapter::batch_client::{
+    batch_input_line, batch_upload_filename, configured_mistral_batch_client, ocr_batch_body,
+    BatchJobStatus, BatchOutputLine, MistralBatchClient,
+};
 use kcs_adapter::catalog::{
     active_adopted_embedding_execution, adopted_embedding_profile,
     builtin_offline_markdownize_adapter, builtin_prepare_profile, convert_office_to_pdf,
@@ -67,17 +71,20 @@ use kcs_pipeline::budget::{
     utc_month, BudgetCapKind, BudgetCaps, BudgetEstimate,
 };
 use kcs_pipeline::ledger::ops::{
-    check_then_reserve, device_claim, device_input_hash, execute_bounded_sweep, get_batch_request,
-    ledger_month_total, nonbillable_charge, phase1_intent, plan_bounded_sweep,
-    recovery_settle_unknown, reset_contract_violations, resolve_abandon_selector,
-    resolve_billing_from_reported_usage, stalled_rows, sync_record_provider_request_id,
-    sync_recovery_candidates, terminal_transaction, with_immediate_transaction, AbandonExecution,
-    AbandonResolution, AbandonSelector, BilledAmount, BudgetCapConfig, CapCheckResult,
-    ClaimOutcome, TerminalWrite,
+    batch_poll_candidates, check_then_reserve, device_claim, device_input_hash,
+    execute_bounded_sweep, get_batch_request, ledger_month_total, nonbillable_charge,
+    phase1_intent, phase2a_record_provider_scope, phase2a_record_upload_id,
+    phase2b_record_job_create_started, phase2b_record_job_created, plan_bounded_sweep,
+    recovery_finish_cleanup, recovery_settle_unknown, reset_contract_violations,
+    resolve_abandon_selector, resolve_billing_from_reported_usage, stalled_rows,
+    sync_record_provider_request_id, sync_recovery_candidates, terminal_transaction,
+    with_immediate_transaction, AbandonExecution, AbandonResolution, AbandonSelector, BilledAmount,
+    BudgetCapConfig, CapCheckResult, ClaimOutcome, TerminalWrite,
 };
 use kcs_pipeline::ledger::ops::{execute_abandon, uuid_v7_timestamp_millis};
 use kcs_pipeline::ledger::{
-    migrate_jsonl_if_needed, BatchState, LedgerDb, Outcome, RequestKind, TaskKey as LedgerTaskKey,
+    migrate_jsonl_if_needed, BatchRequestRow, BatchState, LedgerDb, Outcome, RequestKind,
+    TaskKey as LedgerTaskKey,
 };
 use kcs_pipeline::markdownize::{
     choose_markdownize_mode, load_validated_normalized_instance, persist_normalized_instance,
@@ -911,6 +918,12 @@ fn run_index(args: IndexArgs) -> Result<Value> {
     // rows left by a crashed prior run, same write-command-entry point as the
     // online-promotion recovery just above.
     recover_stale_sync_rows(&open_ledger_db()?, &scope_id(repo.kcs_dir())?)?;
+    // 04 §5.8 相 3: poll/collect this scope's in-flight Batch markdownize jobs
+    // at the same write-command entry point (receive/cleanup of existing
+    // requests — no new send, no network opt-in needed). Results collected
+    // here land as Done tasks that `apply_online_promotion_to_index` below
+    // folds into this run's single snapshot.
+    poll_batch_markdownize_jobs(&repo, &TaskStore::new(repo.kcs_dir()), &open_ledger_db()?)?;
     // LC39/LC40 (see `ensure_purge_epoch_initialized`'s doc comment).
     ensure_purge_epoch_initialized(repo.kcs_dir())?;
     materialize_tool_lock(&repo)?;
@@ -1119,6 +1132,9 @@ fn run_repair(args: UnsupportedArgs) -> Result<Value> {
     // rows left by a crashed prior run — `--rebuild-db` only (CL32/CL45 do not
     // list `--verify-objects`, handled by the early return above).
     recover_stale_sync_rows(&open_ledger_db()?, &scope_id(repo.kcs_dir())?)?;
+    // 04 §5.8 相 3: poll/collect in-flight Batch markdownize jobs at the same
+    // write-command entry point (see `poll_batch_markdownize_jobs`).
+    poll_batch_markdownize_jobs(&repo, &TaskStore::new(repo.kcs_dir()), &open_ledger_db()?)?;
     // LC39/LC40 (see `ensure_purge_epoch_initialized`'s doc comment).
     ensure_purge_epoch_initialized(repo.kcs_dir())?;
     let promotion_rebuild_pending = recover_pending_online_promotion(&repo)?;
@@ -5402,6 +5418,9 @@ fn run_reindex(args: UnsupportedArgs) -> Result<Value> {
     // rows left by a crashed prior run — applies uniformly to both the
     // historical (`--at`) and HEAD (`--force`) reindex modes below.
     recover_stale_sync_rows(&open_ledger_db()?, &scope_id(repo.kcs_dir())?)?;
+    // 04 §5.8 相 3: poll/collect in-flight Batch markdownize jobs at the same
+    // write-command entry point (see `poll_batch_markdownize_jobs`).
+    poll_batch_markdownize_jobs(&repo, &TaskStore::new(repo.kcs_dir()), &open_ledger_db()?)?;
     // LC39/LC40 (see `ensure_purge_epoch_initialized`'s doc comment).
     ensure_purge_epoch_initialized(repo.kcs_dir())?;
     if let Some(at) = parsed.at.as_deref() {
@@ -10198,6 +10217,12 @@ fn run_batch(args: BatchArgs) -> Result<Value> {
     // LC39/LC40 (see `ensure_purge_epoch_initialized`'s doc comment).
     ensure_purge_epoch_initialized(repo.kcs_dir())?;
     let store = TaskStore::new(repo.kcs_dir());
+    // 04 §5.8 相 3: poll/collect this scope's in-flight Batch markdownize jobs
+    // BEFORE dispatch, so a Success job lands its task Done ahead of the
+    // Resume/Retry pass below (whose promotion step then publishes it), and a
+    // still-queued job extends its poll schedule. Folded into the Resume/Retry
+    // ExecOutcome so "in-flight のみ残" maps to the batch exit-3 semantics.
+    let batch_poll_outcome = poll_batch_markdownize_jobs(&repo, &store, &open_ledger_db()?)?;
     // N1: a Tier B online hold is only lifted by an explicit `--send-secrets`
     // approval, never by a plain `batch resume`. Without this, resume's
     // Paused -> Pending flip would silently un-hold the candidate-secret task.
@@ -10233,7 +10258,7 @@ fn run_batch(args: BatchArgs) -> Result<Value> {
                     }
                 })
                 .map_err(pipeline_to_kcs)?;
-            let outcome = execute_pending_tasks(
+            let mut outcome = execute_pending_tasks(
                 &repo,
                 &store,
                 resume.override_budget,
@@ -10241,6 +10266,7 @@ fn run_batch(args: BatchArgs) -> Result<Value> {
                 resume.online,
                 resume.offline,
             )?;
+            outcome.add(batch_poll_outcome);
             let mut output = json!({
                 "status": "resumed",
                 "override_budget": resume.override_budget,
@@ -10254,6 +10280,9 @@ fn run_batch(args: BatchArgs) -> Result<Value> {
                 // R11-2: pauses this pass are a real state change (previously invisible
                 // — `tasks_updated` reported 0 while the store flipped to paused).
                 "tasks_paused": outcome.paused,
+                // Batch lane (04 §5.8): jobs submitted or still queued/running
+                // provider-side after this pass — completed by a later resume's poll.
+                "tasks_inflight": outcome.inflight,
             });
             // R11-2: report the batch exit code (docs/04 §5.6) from what this pass did
             // — auth (5) / budget-paused (6) / partial (3) / all-permanent (4) — while
@@ -10304,7 +10333,7 @@ fn run_batch(args: BatchArgs) -> Result<Value> {
             // it does not bypass caps — `batch resume --override-budget` does), and never
             // revives an auth_error task (CT2-TASK-005: `max_attempts=0` is this command's
             // contract; `batch resume` is where repaired credentials take effect).
-            let outcome = execute_pending_tasks(
+            let mut outcome = execute_pending_tasks(
                 &repo,
                 &store,
                 false,
@@ -10312,6 +10341,7 @@ fn run_batch(args: BatchArgs) -> Result<Value> {
                 retry_args.online,
                 retry_args.offline,
             )?;
+            outcome.add(batch_poll_outcome);
             let mut output = json!({
                 "status": "retry scheduled",
                 "tasks_updated": changed + partial_reenqueued,
@@ -10321,6 +10351,8 @@ fn run_batch(args: BatchArgs) -> Result<Value> {
                 "tasks_failed": outcome.failed,
                 // R11-2: pause transitions this pass (docs/04 §5.6 visibility).
                 "tasks_paused": outcome.paused,
+                // Batch lane (04 §5.8): see the Resume arm's `tasks_inflight`.
+                "tasks_inflight": outcome.inflight,
             });
             // R14-5: batch-owned error_code on the Partial(3)/Permanent(4) override.
             apply_batch_exit_override(&mut output, &outcome);
@@ -10432,6 +10464,10 @@ fn run_ledger_reconcile() -> Result<Value> {
     // step c: existing local rows -> does the provider have this job?) and
     // the orphan/unknown-attribution walk (steps d+e: provider jobs/uploads
     // -> is there a local row for this?) — fetched once, shared by both.
+    // Batch send lane (07 §5.7 / 10 §7.5.2): `configured_inventories` itself
+    // consults the configured Batch client (mock seam or the real Mistral
+    // lane) and maps job metadata's 5-key contract onto these attribution
+    // records — no CLI-side merge needed.
     let inventories =
         kcs_adapter::batch_inventory::configured_inventories().map_err(adapter_to_kcs)?;
 
@@ -11154,6 +11190,13 @@ struct ExecOutcome {
     /// left). `failed - failed_retryable` is the permanently-failed remainder; the
     /// split drives the batch exit-code choice 3 (some retryable) vs 4 (all permanent).
     failed_retryable: usize,
+    /// Batch-lane tasks left in flight by this pass (04 §5.8): freshly
+    /// submitted jobs and polled still-QUEUED/RUNNING jobs. Excluded from
+    /// `attempted()` (nothing terminal happened), but counted as
+    /// retryable-remaining for the batch exit choice — "in-flight のみ残"
+    /// exits 3 exactly like a retryable failure would, since a later
+    /// `kcs batch resume` is what makes progress.
+    inflight: usize,
 }
 
 impl ExecOutcome {
@@ -11167,6 +11210,7 @@ impl ExecOutcome {
         self.paused += other.paused;
         self.auth_failed += other.auth_failed;
         self.failed_retryable += other.failed_retryable;
+        self.inflight += other.inflight;
     }
 }
 
@@ -11182,7 +11226,11 @@ fn batch_exit_override(outcome: &ExecOutcome) -> Option<ExitCode> {
         Some(ExitCode::AuthError)
     } else if outcome.paused > 0 {
         Some(ExitCode::BudgetExceeded)
-    } else if outcome.failed_retryable > 0 {
+    } else if outcome.failed_retryable > 0 || outcome.inflight > 0 {
+        // Batch-lane in-flight jobs (submitted/queued/running — 04 §5.8) are
+        // retryable-remaining work in exactly the docs/04 §5.6 exit-3 sense:
+        // "retryable な失敗が残っている" — a later `kcs batch resume` poll is
+        // what completes them.
         Some(ExitCode::PartialFailure)
     } else if outcome.failed > 0 {
         Some(ExitCode::PermanentFailure)
@@ -11411,6 +11459,10 @@ fn execute_pending_markdownize_tasks(
         })
         .collect::<Vec<_>>();
     let mut counts = ExecOutcome::default();
+    // Batch send lane (04 §5.8 / 07 §5.7): resolved once per pass — `Some`
+    // exactly when this pass can drive upload → job-create against a
+    // configured (mock or real) Batch client.
+    let batch_client = batch_markdownize_lane_client()?;
     for task in tasks {
         let task_id = task.task_id.clone();
         let key = task_ledger_key(
@@ -11517,8 +11569,42 @@ fn execute_pending_markdownize_tasks(
         // F5: `hard_stop = false` (soft-stop) bypasses a cap denial exactly like
         // `--override-budget` does — see `reserve_or_reuse_task_charge`'s doc.
         let bypass_cap_denial = override_budget || !budget_caps.hard_stop;
-        let charge =
-            reserve_or_reuse_task_charge(&ledger, &key, candidate_usd, &caps, bypass_cap_denial)?;
+        // Lane selection (04 §5.8 / 07 §5.7): decided BEFORE the reservation so
+        // phase 1 records the matching `request_kind` ('batch' rows are what the
+        // §5.8 recovery/poll machinery keys on).
+        let existing_row = get_batch_request(ledger.connection(), &key).map_err(pipeline_to_kcs)?;
+        if existing_row
+            .as_ref()
+            .is_some_and(|row| row.state.is_terminal() && row.intent_token.is_some())
+        {
+            // §5.8 順序規範 (cleanup-first): a terminal row whose residue
+            // cleanup is still outstanding blocks re-submission — a fresh
+            // phase 1 would be refused (KCS-E-BATCH-CLEANUP-PENDING-001), so
+            // skip the task this pass instead of failing the whole command.
+            // The stalled row is visible in `kcs status`; the poll pass's
+            // cleanup replay, `kcs ledger reconcile`, or `kcs batch abandon`
+            // complete the cleanup and unblock the resend.
+            counts.inflight += 1;
+            continue;
+        }
+        let lane = markdownize_send_lane(batch_client.is_some(), existing_row.as_ref());
+        if lane == MarkdownizeSendLane::DeferToRecovery {
+            counts.inflight += 1;
+            continue;
+        }
+        let request_kind = if lane == MarkdownizeSendLane::Batch {
+            RequestKind::Batch
+        } else {
+            RequestKind::Sync
+        };
+        let charge = reserve_or_reuse_task_charge(
+            &ledger,
+            &key,
+            candidate_usd,
+            &caps,
+            bypass_cap_denial,
+            request_kind,
+        )?;
         let (intent_token, reserved_usd) = match charge {
             TaskChargeOutcome::BudgetExceeded => {
                 store
@@ -11546,6 +11632,64 @@ fn execute_pending_markdownize_tasks(
                 estimated_usd,
             } => (intent_token, estimated_usd),
         };
+        if lane == MarkdownizeSendLane::Batch {
+            let client = batch_client
+                .as_deref()
+                .expect("Batch lane selection guarantees a configured client");
+            match submit_batch_markdownize_job(
+                client,
+                &ledger,
+                &key,
+                &intent_token,
+                &task,
+                &prepared_input,
+            )? {
+                Ok(()) => {
+                    // Submitted (or already in flight): the task stays Pending
+                    // with the poll cadence as its schedule — a later pass's
+                    // `poll_batch_markdownize_jobs` collects it. The
+                    // reservation stamps mirror the sync Running flip so purge
+                    // and diagnostics can find the live ledger row.
+                    let poll_at = batch_poll_retry_at();
+                    store
+                        .update_matching(|candidate| {
+                            if candidate.task_id == task_id {
+                                candidate.status = TaskStatus::Pending;
+                                candidate.fallback_reason = Some(BATCH_SUBMITTED_REASON.to_owned());
+                                candidate.hold_reason = None;
+                                candidate.heartbeat_at = None;
+                                candidate.next_retry_at = Some(poll_at.clone());
+                                candidate.reservation_id = Some(intent_token.clone());
+                                candidate.reserved_usd = Some(reserved_usd);
+                                candidate.reserved_month = Some(month.clone());
+                                true
+                            } else {
+                                false
+                            }
+                        })
+                        .map_err(pipeline_to_kcs)?;
+                    counts.inflight += 1;
+                }
+                Err(error) => {
+                    // 相 2a/2b records stay in place (= the §5.8 crash window a
+                    // later recovery reconciles), so the ledger row is NEVER
+                    // settled here — `settle_on_terminal: false`.
+                    record_online_send_failure(
+                        store,
+                        &ledger,
+                        &key,
+                        &intent_token,
+                        reserved_usd,
+                        &task_id,
+                        task.attempts,
+                        &error,
+                        &mut counts,
+                        false,
+                    )?;
+                }
+            }
+            continue;
+        }
         store
             .update_matching(|candidate| {
                 if candidate.task_id == task_id {
@@ -11632,127 +11776,167 @@ fn execute_pending_markdownize_tasks(
                     .map_err(pipeline_to_kcs)?;
                 counts.executed += 1;
             }
-            // QA2/QA3 (step4b-contract-tests-p3a.md §A, 04 §5.2/§5.3): the
-            // send failure is a 3-way branch on `error.retry_kind` — rate_limit
-            // and auth_error each get a dedicated non-Failed landing state;
-            // every other kind keeps today's Failed/backoff logic.
-            Err(error) => match error.retry_kind {
-                RetryErrorKind::RateLimit => {
-                    // QA3 (04 §5.2 L682-683): "paused ではなく pending +
-                    // next_retry_at" — stays Pending, never Failed. `attempts`
-                    // is NOT consumed (max_attempts=∞, 04 §5.3). CL42/CL44/CL45:
-                    // a retry is coming — leave the ledger row open (same
-                    // rationale as the settles_now=false case below); the
-                    // reservation stamp is left untouched.
-                    let next_retry_at =
-                        rate_limit_retry_at(&now_utc_seconds(), error.retry_after_ms);
-                    let reason = retry_reason(RetryErrorKind::RateLimit).to_owned();
-                    store
-                        .update_matching(|candidate| {
-                            if candidate.task_id == task_id {
-                                candidate.status = TaskStatus::Pending;
-                                candidate.fallback_reason = Some(reason.clone());
-                                candidate.hold_reason = None;
-                                candidate.heartbeat_at = None;
-                                candidate.next_retry_at = Some(next_retry_at.clone());
-                                true
-                            } else {
-                                false
-                            }
-                        })
-                        .map_err(pipeline_to_kcs)?;
-                    // R9-7: a driven task that failed still attempted an online
-                    // send — count it so `batch` JSON surfaces the attempt.
-                    counts.failed += 1;
-                    // R11-2/04 §5.6 exit 3: retryable work remains.
-                    counts.failed_retryable += 1;
-                }
-                RetryErrorKind::AuthError => {
-                    // QA2 (04 §5.2 L679-683): lands Paused(hold_reason=auth),
-                    // never Failed. `attempts` is NOT consumed (a pause is not
-                    // a retry-budget event — max_attempts=0 means "no retry",
-                    // not "budget already spent"), so a later revival (`batch
-                    // resume`) does not find the budget exhausted. Ledger:
-                    // EXACTLY the pre-QA2 definitive-failure behavior (settle
-                    // `unknown_settled` + clear the reservation) — a later
-                    // revival reserves fresh.
-                    settle_task_charge_unknown(&ledger, &key, &intent_token, reserved_usd)?;
-                    let reason = retry_reason(RetryErrorKind::AuthError).to_owned();
-                    store
-                        .update_matching(|candidate| {
-                            if candidate.task_id == task_id {
-                                candidate.status = TaskStatus::Paused;
-                                candidate.hold_reason = Some(HoldReason::Auth);
-                                candidate.fallback_reason = Some(reason.clone());
-                                candidate.heartbeat_at = None;
-                                candidate.next_retry_at = None;
-                                candidate.clear_reservation();
-                                true
-                            } else {
-                                false
-                            }
-                        })
-                        .map_err(pipeline_to_kcs)?;
-                    counts.failed += 1;
-                    // R11-2/04 §5.6 exit 5: auth_error needs user action.
-                    counts.auth_failed += 1;
-                }
-                _ => {
-                    let policy = retry_policy(error.retry_kind);
-                    let attempts_after = task.attempts.saturating_add(1);
-                    let next_retry_at = (policy.retryable
-                        && policy
-                            .max_attempts
-                            .map(|max| attempts_after < max)
-                            .unwrap_or(true))
-                    .then(|| {
-                        scheduled_retry_at(&now_utc_seconds(), &policy.backoff, attempts_after)
-                    });
-                    // CL42/CL44/CL45: a retry is coming — leave the ledger row open (it
-                    // already covers the resend, `reserve_or_reuse_task_charge`'s reuse
-                    // path) rather than settling now. Only a definitive outcome (no more
-                    // retries left) settles `unknown_settled` at the reservation estimate
-                    // — this Adapter integration has no post-hoc result-query capability
-                    // (see `settle_task_charge_unknown`'s doc comment), so a permanently
-                    // failed send is never billed less than its reservation.
-                    let settles_now = next_retry_at.is_none();
-                    if settles_now {
-                        settle_task_charge_unknown(&ledger, &key, &intent_token, reserved_usd)?;
-                    }
-                    let reason = retry_reason(error.retry_kind).to_owned();
-                    store
-                        .update_matching(|candidate| {
-                            if candidate.task_id == task_id {
-                                candidate.status = TaskStatus::Failed;
-                                candidate.fallback_reason = Some(reason.clone());
-                                // A Failed task is not a hold.
-                                candidate.hold_reason = None;
-                                candidate.heartbeat_at = None;
-                                candidate.attempts = candidate.attempts.saturating_add(1);
-                                candidate.next_retry_at = next_retry_at.clone();
-                                if settles_now {
-                                    candidate.clear_reservation();
-                                }
-                                true
-                            } else {
-                                false
-                            }
-                        })
-                        .map_err(pipeline_to_kcs)?;
-                    // R9-7: a driven task that failed still attempted an online send
-                    // (charge consumed) — count it so `batch` JSON surfaces the
-                    // attempt instead of reporting only successes.
-                    counts.failed += 1;
-                    // R11-2: a scheduled `next_retry_at` marks the task retry-eligible
-                    // (exit 3), else it counts toward all-permanent (exit 4).
-                    if next_retry_at.is_some() {
-                        counts.failed_retryable += 1;
-                    }
-                }
-            },
+            Err(error) => {
+                record_online_send_failure(
+                    store,
+                    &ledger,
+                    &key,
+                    &intent_token,
+                    reserved_usd,
+                    &task_id,
+                    task.attempts,
+                    &error,
+                    &mut counts,
+                    true,
+                )?;
+            }
         }
     }
     Ok(counts)
+}
+
+/// QA2/QA3 (step4b-contract-tests-p3a.md §A, 04 §5.2/§5.3): the shared
+/// send-failure mapping — a 3-way branch on `error.retry_kind`. rate_limit
+/// and auth_error each get a dedicated non-Failed landing state; every other
+/// kind keeps the Failed/backoff logic. Extracted from the sync send site
+/// verbatim so the Batch submit lane joins the SAME classification
+/// (04 §5.8 送信途中の Adapter エラー).
+///
+/// `settle_on_terminal`: `true` for the sync lane (unchanged behavior — a
+/// definitive failure settles `unknown_settled` at the reservation estimate);
+/// `false` for the Batch lane, whose phases 2a/2b records must stay open as
+/// the §5.8 crash window a later recovery (poll / `kcs ledger reconcile` /
+/// abandon) reconciles — settling here would clear `intent_token` while
+/// provider residue (upload/job) may still exist.
+#[allow(clippy::too_many_arguments)]
+fn record_online_send_failure(
+    store: &TaskStore,
+    ledger: &LedgerDb,
+    key: &LedgerTaskKey,
+    intent_token: &str,
+    reserved_usd: f64,
+    task_id: &str,
+    task_attempts: u32,
+    error: &TaskExecutionFailure,
+    counts: &mut ExecOutcome,
+    settle_on_terminal: bool,
+) -> Result<()> {
+    match error.retry_kind {
+        RetryErrorKind::RateLimit => {
+            // QA3 (04 §5.2 L682-683): "paused ではなく pending +
+            // next_retry_at" — stays Pending, never Failed. `attempts`
+            // is NOT consumed (max_attempts=∞, 04 §5.3). CL42/CL44/CL45:
+            // a retry is coming — leave the ledger row open (same
+            // rationale as the settles_now=false case below); the
+            // reservation stamp is left untouched.
+            let next_retry_at = rate_limit_retry_at(&now_utc_seconds(), error.retry_after_ms);
+            let reason = retry_reason(RetryErrorKind::RateLimit).to_owned();
+            store
+                .update_matching(|candidate| {
+                    if candidate.task_id == task_id {
+                        candidate.status = TaskStatus::Pending;
+                        candidate.fallback_reason = Some(reason.clone());
+                        candidate.hold_reason = None;
+                        candidate.heartbeat_at = None;
+                        candidate.next_retry_at = Some(next_retry_at.clone());
+                        true
+                    } else {
+                        false
+                    }
+                })
+                .map_err(pipeline_to_kcs)?;
+            // R9-7: a driven task that failed still attempted an online
+            // send — count it so `batch` JSON surfaces the attempt.
+            counts.failed += 1;
+            // R11-2/04 §5.6 exit 3: retryable work remains.
+            counts.failed_retryable += 1;
+        }
+        RetryErrorKind::AuthError => {
+            // QA2 (04 §5.2 L679-683): lands Paused(hold_reason=auth),
+            // never Failed. `attempts` is NOT consumed (a pause is not
+            // a retry-budget event — max_attempts=0 means "no retry",
+            // not "budget already spent"), so a later revival (`batch
+            // resume`) does not find the budget exhausted. Ledger:
+            // EXACTLY the pre-QA2 definitive-failure behavior (settle
+            // `unknown_settled` + clear the reservation) — a later
+            // revival reserves fresh. Batch lane: no settle — the open
+            // row (and any 2a/2b residue) belongs to §5.8 recovery.
+            if settle_on_terminal {
+                settle_task_charge_unknown(ledger, key, intent_token, reserved_usd)?;
+            }
+            let reason = retry_reason(RetryErrorKind::AuthError).to_owned();
+            store
+                .update_matching(|candidate| {
+                    if candidate.task_id == task_id {
+                        candidate.status = TaskStatus::Paused;
+                        candidate.hold_reason = Some(HoldReason::Auth);
+                        candidate.fallback_reason = Some(reason.clone());
+                        candidate.heartbeat_at = None;
+                        candidate.next_retry_at = None;
+                        candidate.clear_reservation();
+                        true
+                    } else {
+                        false
+                    }
+                })
+                .map_err(pipeline_to_kcs)?;
+            counts.failed += 1;
+            // R11-2/04 §5.6 exit 5: auth_error needs user action.
+            counts.auth_failed += 1;
+        }
+        _ => {
+            let policy = retry_policy(error.retry_kind);
+            let attempts_after = task_attempts.saturating_add(1);
+            let next_retry_at = (policy.retryable
+                && policy
+                    .max_attempts
+                    .map(|max| attempts_after < max)
+                    .unwrap_or(true))
+            .then(|| scheduled_retry_at(&now_utc_seconds(), &policy.backoff, attempts_after));
+            // CL42/CL44/CL45: a retry is coming — leave the ledger row open (it
+            // already covers the resend, `reserve_or_reuse_task_charge`'s reuse
+            // path) rather than settling now. Only a definitive outcome (no more
+            // retries left) settles `unknown_settled` at the reservation estimate
+            // — this Adapter integration has no post-hoc result-query capability
+            // (see `settle_task_charge_unknown`'s doc comment), so a permanently
+            // failed send is never billed less than its reservation. Batch lane:
+            // never settles here (see `settle_on_terminal`'s doc).
+            let settles_now = settle_on_terminal && next_retry_at.is_none();
+            if settles_now {
+                settle_task_charge_unknown(ledger, key, intent_token, reserved_usd)?;
+            }
+            let reason = retry_reason(error.retry_kind).to_owned();
+            store
+                .update_matching(|candidate| {
+                    if candidate.task_id == task_id {
+                        candidate.status = TaskStatus::Failed;
+                        candidate.fallback_reason = Some(reason.clone());
+                        // A Failed task is not a hold.
+                        candidate.hold_reason = None;
+                        candidate.heartbeat_at = None;
+                        candidate.attempts = candidate.attempts.saturating_add(1);
+                        candidate.next_retry_at = next_retry_at.clone();
+                        if settles_now {
+                            candidate.clear_reservation();
+                        }
+                        true
+                    } else {
+                        false
+                    }
+                })
+                .map_err(pipeline_to_kcs)?;
+            // R9-7: a driven task that failed still attempted an online send
+            // (charge consumed) — count it so `batch` JSON surfaces the
+            // attempt instead of reporting only successes.
+            counts.failed += 1;
+            // R11-2: a scheduled `next_retry_at` marks the task retry-eligible
+            // (exit 3), else it counts toward all-permanent (exit 4).
+            if next_retry_at.is_some() {
+                counts.failed_retryable += 1;
+            }
+        }
+    }
+    Ok(())
 }
 
 fn persistent_network_allowed(repo: &Repository) -> Result<bool> {
@@ -12382,7 +12566,7 @@ fn execute_online_markdownize_task(
         path,
         media_type,
         bytes,
-        mut prepared_units,
+        prepared_units,
     } = prepared_input;
     // R14-2: an online markdownize task is always deferred — one pass enqueues it and
     // a later `batch resume` / `index --online` executes it — so the file may have been
@@ -12497,6 +12681,39 @@ fn execute_online_markdownize_task(
         &bytes,
     )
     .map_err(task_failure_from_adapter)?;
+    materialize_online_markdownize_response(
+        repo,
+        task,
+        prepared_units,
+        &media_type,
+        &bytes,
+        retry_units.as_ref(),
+        outcome.profile.tool_profile_hash.clone(),
+        outcome.response,
+        &outcome.effective_prepared_unit_hints,
+    )
+}
+
+/// The response half of [`execute_online_markdownize_task`] — everything that
+/// happens AFTER a `MarkdownizeResponse` is in hand: OCR-from-scratch unit
+/// discovery, first-instance-wins merge for a unit-scoped retry, unit
+/// validation, and manifest + normalized-instance persistence. Split out so
+/// the Batch collect lane (04 §5.8 相 3 — `poll_batch_markdownize_jobs`)
+/// drives the EXACT same verification/materialization path as the sync lane:
+/// the two lanes differ only in where the response came from (a synchronous
+/// POST vs a fetched batch-output line).
+#[allow(clippy::too_many_arguments)]
+fn materialize_online_markdownize_response(
+    repo: &Repository,
+    task: &TaskDescriptor,
+    mut prepared_units: Vec<PreparedUnit>,
+    media_type: &str,
+    bytes: &[u8],
+    retry_units: Option<&BTreeSet<String>>,
+    profile_tool_hash: String,
+    response: kcs_adapter::types::MarkdownizeResponse,
+    effective_prepared_unit_hints: &[PreparedUnitHint],
+) -> std::result::Result<OnlineExecutionOutcome, TaskExecutionFailure> {
     if prepared_units.is_empty() {
         if retry_units.is_some() {
             return Err(TaskExecutionFailure {
@@ -12505,10 +12722,10 @@ fn execute_online_markdownize_task(
             });
         }
         prepared_units = prepared_units_from_ocr_discovery(
-            &outcome.effective_prepared_unit_hints,
-            &media_type,
+            effective_prepared_unit_hints,
+            media_type,
             &task.input_hash,
-            &bytes,
+            bytes,
         )
         .map_err(|_| TaskExecutionFailure {
             retry_kind: RetryErrorKind::ContractViolation,
@@ -12517,14 +12734,12 @@ fn execute_online_markdownize_task(
         // No page artifact exists before OCR for a scanned PDF. The already-verified
         // immutable raw object is the bounded prepared source shared by each discovered
         // unit; publish it under the same content hash before the manifest can refer to it.
-        write_cas_object_or_reuse_legacy(repo.kcs_dir(), "prepared", &task.input_hash, &bytes)
+        write_cas_object_or_reuse_legacy(repo.kcs_dir(), "prepared", &task.input_hash, bytes)
             .map_err(|_| TaskExecutionFailure {
                 retry_kind: persist_failure_retry_kind(),
                 retry_after_ms: None,
             })?;
     }
-    let profile = outcome.profile;
-    let response = outcome.response;
     // QA17 (step4b-contract-tests-p3a.md §F): carry the adapter's
     // self-reported billing usage (Mistral OCR's real processed-page count)
     // through to the caller's settle call, instead of discarding it here.
@@ -12537,13 +12752,8 @@ fn execute_online_markdownize_task(
     // gen 0). Regenerating a done unit under Markdown non-determinism would churn its
     // fingerprint → needless re-embedding + Evidence churn (docs/04 §5.2).
     let previous = if retry_units.is_some() {
-        load_previous_instance_identity(
-            repo.kcs_dir(),
-            &task.input_hash,
-            &profile.tool_profile_hash,
-            0,
-        )
-        .ok()
+        load_previous_instance_identity(repo.kcs_dir(), &task.input_hash, &profile_tool_hash, 0)
+            .ok()
     } else {
         None
     };
@@ -12552,7 +12762,7 @@ fn execute_online_markdownize_task(
         &prepared_units,
         previous.as_ref(),
         &task.input_hash,
-        &profile.tool_profile_hash,
+        &profile_tool_hash,
         0,
         MarkdownizeMode::Full,
         &generated_at,
@@ -12609,7 +12819,7 @@ fn execute_online_markdownize_task(
         &prepared_units,
         &units,
         &task.input_hash,
-        &profile.tool_profile_hash,
+        &profile_tool_hash,
         0,
         None,
         &run_id,
@@ -12627,7 +12837,7 @@ fn execute_online_markdownize_task(
         }
     })?;
     Ok(OnlineExecutionOutcome::full(
-        normalized_output_ref(repo, &task.input_hash, &profile.tool_profile_hash, 0),
+        normalized_output_ref(repo, &task.input_hash, &profile_tool_hash, 0),
         status,
     )
     .with_usage(usage))
@@ -13714,6 +13924,7 @@ fn run_embedding_enrichment_for_instances(
                 candidate_usd,
                 &caps,
                 bypass_cap_denial,
+                RequestKind::Sync,
             )?;
             charge_by_group.push(match charge {
                 TaskChargeOutcome::BudgetExceeded => None,
@@ -17219,6 +17430,14 @@ fn reserve_or_reuse_task_charge(
     candidate_usd: f64,
     caps: &BudgetCapConfig,
     bypass_cap_denial: bool,
+    // Batch-lane wiring (04 §5.8 相 1): the fresh reservation's
+    // `batch_requests.request_kind`. Every pre-existing caller passes
+    // `RequestKind::Sync` (behavior unchanged — `stale_after_at` computed from
+    // the sync effective timeout exactly as before); the Batch send lane
+    // passes `RequestKind::Batch`, for which `phase1_intent` records no
+    // `stale_after_at`/`job_create_started_at` (§5.8's own recovery-deadline
+    // mechanism covers batch rows instead — see `ops::phase1_intent`'s doc).
+    request_kind: RequestKind,
 ) -> Result<TaskChargeOutcome> {
     // QA67 (step4b-contract-tests-p3a.md §T, PB24): online task phase 1 must
     // fail-closed on a live registry scope_id duplicate (10 §3 L297-299) —
@@ -17226,6 +17445,8 @@ fn reserve_or_reuse_task_charge(
     // (scope_id, adapter_kind, input_hash, tool_profile_hash) mix up which
     // clone owns the reservation's recovery/settlement/billing attribution.
     registry_duplicate_guard(&key.scope_id)?;
+    let sync_timeout =
+        (request_kind == RequestKind::Sync).then_some(TASK_SYNC_EFFECTIVE_TIMEOUT_SECONDS);
     with_immediate_transaction(ledger.connection(), || {
         if let Some(existing) = get_batch_request(ledger.connection(), key)? {
             if existing.state.is_inflight() {
@@ -17244,8 +17465,8 @@ fn reserve_or_reuse_task_charge(
             key,
             candidate_usd,
             caps,
-            RequestKind::Sync,
-            Some(TASK_SYNC_EFFECTIVE_TIMEOUT_SECONDS),
+            request_kind,
+            sync_timeout,
         )?;
         Ok(match result {
             CapCheckResult::Allowed(outcome) | CapCheckResult::ExemptZeroCost(outcome) => {
@@ -17258,9 +17479,9 @@ fn reserve_or_reuse_task_charge(
                 let outcome = phase1_intent(
                     ledger.connection(),
                     key,
-                    RequestKind::Sync,
+                    request_kind,
                     candidate_usd,
-                    Some(TASK_SYNC_EFFECTIVE_TIMEOUT_SECONDS),
+                    sync_timeout,
                 )?;
                 TaskChargeOutcome::Reserved {
                     intent_token: outcome.intent_token,
@@ -17409,6 +17630,13 @@ fn settle_task_charge_unknown(
 /// "release this task's charge without resending" call site (supersede,
 /// purge-adjacent demotes, auth-revive, non-live retirement, …) that the retired
 /// JSONL design drove through `settle_task_reservation`.
+///
+/// Batch-lane rows (04 §5.8): a `request_kind='batch'` row that reached phase
+/// 2a (`provider_scope_id` recorded) may hold provider residue (upload/job)
+/// whose ONLY discovery key is the filename-embedded `intent_token` — the
+/// settlement here must NOT clear the token in the same Tx (cleanup-first;
+/// same `provider_scope_id IS NULL` rule as `execute_abandon`'s note-5).
+/// Reconcile/abandon complete the residue cleanup and the eventual NULL-out.
 fn release_task_charge_if_open(ledger: &LedgerDb, key: &LedgerTaskKey) -> Result<bool> {
     let Some(row) = get_batch_request(ledger.connection(), key).map_err(pipeline_to_kcs)? else {
         return Ok(false);
@@ -17419,8 +17647,1192 @@ fn release_task_charge_if_open(ledger: &LedgerDb, key: &LedgerTaskKey) -> Result
     let Some(intent_token) = row.intent_token.clone() else {
         return Ok(false);
     };
-    settle_task_charge_unknown(ledger, key, &intent_token, row.estimated_usd)?;
+    let cleanup_already_complete =
+        row.request_kind != RequestKind::Batch || row.provider_scope_id.is_none();
+    recovery_settle_unknown(
+        ledger.connection(),
+        key,
+        &intent_token,
+        row.estimated_usd,
+        cleanup_already_complete,
+    )
+    .map_err(pipeline_to_kcs)?;
     Ok(true)
+}
+
+// ---------------------------------------------------------------------------
+// Mistral OCR Batch lane (04 §5.8 / 07 §5.7): submit + poll/collect
+// ---------------------------------------------------------------------------
+
+/// Poll cadence for an in-flight batch job (task `next_retry_at` extension per
+/// submit/poll pass).
+const BATCH_POLL_INTERVAL_MS: u64 = 60_000;
+
+/// `fallback_reason` stamped on a Pending task whose send this pass took the
+/// Batch lane (job created, awaiting collect). Deliberately NOT one of the
+/// retry-failure reasons: `retry_kind_from_reason` maps it to its
+/// ContractViolation default, but no code path reads a PENDING task's reason
+/// as a retry kind (`task_retry_allowed` is Failed-only), and
+/// `is_reservation_bearing_send_failure`'s sweep set does not include it — an
+/// in-flight batch task must never be retired as a stale send failure while
+/// its provider job is live.
+const BATCH_SUBMITTED_REASON: &str = "batch_submitted";
+
+/// The configured Batch client, if the Batch lane is available at all.
+///
+/// Lane availability deliberately equals "`configured_mistral_batch_client()`
+/// returned a client". 07 §5.7 frames the lane choice as the adapter's
+/// `preferred_request_kind()` declaration AND a configured client, but the
+/// concrete `MistralOcrMarkdownizeAdapter` type is module-private to
+/// `kcs-adapter` (no catalog constructor returns it as a `dyn
+/// MarkdownizeAdapter`), so this crate cannot instantiate one to ask. The
+/// frozen resolver embodies the declaration instead: it returns `Some`
+/// exactly when the hermetic mock seam (`KCS_TEST_MISTRAL_BATCH`) is present
+/// — the test path — or (once the adapter-side env client lands) when the
+/// Batch-declaring Mistral profile is configured for production.
+fn batch_markdownize_lane_client() -> Result<Option<Box<dyn MistralBatchClient>>> {
+    configured_mistral_batch_client().map_err(adapter_to_kcs)
+}
+
+/// Which lane one Pending online-markdownize task's send takes this pass.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MarkdownizeSendLane {
+    Sync,
+    Batch,
+    /// An open `request_kind='batch'` ledger row exists but no batch client is
+    /// configured this pass (e.g. the mock seam vanished): neither lane can
+    /// act without either racing §5.8 recovery or hiding provider residue, so
+    /// the task is left untouched (counted in-flight) for reconcile/abandon.
+    DeferToRecovery,
+}
+
+fn markdownize_send_lane(
+    batch_client_present: bool,
+    open_row: Option<&BatchRequestRow>,
+) -> MarkdownizeSendLane {
+    let open_row_kind = open_row
+        .filter(|row| row.state.is_inflight())
+        .map(|row| row.request_kind);
+    match (batch_client_present, open_row_kind) {
+        // A prior sync attempt's live reservation is reused on the sync lane
+        // regardless of batch availability: driving phases 2a/2b against a
+        // `request_kind='sync'` row would hide its upload/job from §5.8
+        // recovery (sync rows are exempt from job/upload matching — 04 §5.4).
+        (_, Some(RequestKind::Sync)) => MarkdownizeSendLane::Sync,
+        (false, Some(RequestKind::Batch)) => MarkdownizeSendLane::DeferToRecovery,
+        (true, Some(RequestKind::Batch)) => MarkdownizeSendLane::Batch,
+        (false, None) => MarkdownizeSendLane::Sync,
+        // 2026-07-23 ruling: OCR spending is batch-only, WITHOUT a bbox
+        // carve-out — and bbox annotation defaults to ON
+        // (`effective_bbox_annotation_policy`), so a bbox exception here
+        // would silently keep production on the sync lane. `ocr_batch_body`
+        // carries `bbox_annotation_format` exactly like the sync request.
+        (true, None) => MarkdownizeSendLane::Batch,
+    }
+}
+
+/// The model string a batch job is created with (`create_job`'s second
+/// argument — the model rides the JOB, not the input line, 07 §5.7).
+fn batch_job_model() -> String {
+    let declared = kcs_adapter::tool_lock::registered_declared_adapter("markdown")
+        .and_then(|declared| declared.model)
+        .unwrap_or_else(|| "mistral-ocr-latest".to_owned());
+    if !declared.ends_with("-latest") {
+        return declared;
+    }
+    // A mutable alias must be resolved to a versioned pin before the call
+    // (07 §6). The alias resolver lives on the module-private sync OCR
+    // client, unreachable from this crate; under the hermetic mock seam use
+    // the same pin the KCS_TEST_MISTRAL_OCR mock resolves to so tests stay
+    // network-free and profile-consistent. The real lane's alias resolution
+    // is expected from the adapter-side EnvMistralBatchClient (in progress);
+    // until it lands `configured_mistral_batch_client()` returns None in
+    // production, so the alias fallback below can only reach a mock.
+    if std::env::var(kcs_adapter::batch_client::TEST_MISTRAL_BATCH_ENV).is_ok() {
+        "mistral-ocr-2505".to_owned()
+    } else {
+        declared
+    }
+}
+
+/// `next_retry_at` for the next batch poll (`now + 60s`, KCS_FIXED_NOW-aware
+/// via `now_utc_seconds`).
+fn batch_poll_retry_at() -> String {
+    rate_limit_retry_at(&now_utc_seconds(), Some(BATCH_POLL_INTERVAL_MS))
+}
+
+/// Submit one online-markdownize task on the Batch lane (04 §5.8 手順 2-3).
+///
+/// The ledger write order is the §5.8 norm exactly: `provider_scope_id`
+/// immediately BEFORE the upload → `upload_id` immediately after → a
+/// standalone durable `job_create_started_at` → `create_job` →
+/// `batch_job_id` + state=1. A crash (or provider error) between any two
+/// steps leaves a row the §5.8 recovery walk can reconcile — that is why a
+/// mid-submit adapter error returns the failure WITHOUT rolling any of those
+/// records back.
+///
+/// Outer `Err` = local store/ledger fault (propagates); inner `Err` = the
+/// adapter-boundary failure to feed the shared send-failure mapping.
+#[allow(clippy::too_many_arguments)]
+fn submit_batch_markdownize_job(
+    client: &dyn MistralBatchClient,
+    ledger: &LedgerDb,
+    key: &LedgerTaskKey,
+    intent_token: &str,
+    task: &TaskDescriptor,
+    prepared_input: &PreparedOnlineMarkdownizeInput,
+) -> Result<std::result::Result<(), TaskExecutionFailure>> {
+    let conn = ledger.connection();
+    let Some(row) = get_batch_request(conn, key).map_err(pipeline_to_kcs)? else {
+        return Err(KcsError::schema(
+            "batch submit reached without a phase-1 batch_requests row",
+        ));
+    };
+    if row.intent_token.as_deref() != Some(intent_token) {
+        // Claim superseded between reserve and submit — nothing was sent.
+        return Ok(Ok(()));
+    }
+    if row.batch_job_id.is_some() {
+        // Already created (a reused in-flight attempt) — the poll lane owns it.
+        return Ok(Ok(()));
+    }
+    if row.provider_scope_id.is_some() {
+        // Phase 2a already started under THIS token by an earlier crashed
+        // pass. Re-uploading would duplicate provider residue under one
+        // token; §5.8 recovery (upload matching / reconcile) owns the row
+        // until it is cleaned or self-described. Conservative: skip.
+        return Ok(Ok(()));
+    }
+    // Same input material as the sync lane (07 §5.1): Office media is sent as
+    // its converted PDF; storage identity stays the ORIGINAL file's raw_hash.
+    let (effective_media_type, send_bytes): (String, Vec<u8>) =
+        if is_office_media(&prepared_input.media_type) {
+            match convert_office_to_pdf(&prepared_input.bytes, &prepared_input.media_type) {
+                Ok(converted) => ("application/pdf".to_owned(), converted),
+                Err(error) => return Ok(Err(task_failure_from_adapter(error))),
+            }
+        } else {
+            (
+                prepared_input.media_type.clone(),
+                prepared_input.bytes.clone(),
+            )
+        };
+    // A unit-scoped retry sends only the still-failed subset's pages, exactly
+    // like the sync lane's `restrict_to_hint_pages` (R15-5); a full send (or
+    // OCR-from-scratch discovery, empty prepared units) sends no `pages`.
+    let retry_units: Option<BTreeSet<String>> = task
+        .unit_keys
+        .as_ref()
+        .map(|keys| keys.iter().cloned().collect());
+    let pages: Option<Vec<u32>> = match &retry_units {
+        Some(keys) => {
+            let mut orders = Vec::new();
+            for unit in prepared_input
+                .prepared_units
+                .iter()
+                .filter(|unit| keys.contains(&unit.unit_key))
+            {
+                let Ok(order) = u32::try_from(unit.order) else {
+                    return Ok(Err(TaskExecutionFailure {
+                        retry_kind: RetryErrorKind::InvalidInput,
+                        retry_after_ms: None,
+                    }));
+                };
+                orders.push(order);
+            }
+            if orders.is_empty() {
+                // The precondition check already validated the subset against
+                // the prepared units; an empty projection means the task is
+                // stale — never send an unbounded full-document job for it.
+                return Ok(Err(TaskExecutionFailure {
+                    retry_kind: RetryErrorKind::InvalidInput,
+                    retry_after_ms: None,
+                }));
+            }
+            Some(orders)
+        }
+        None => None,
+    };
+    let body = ocr_batch_body(
+        &effective_media_type,
+        &send_bytes,
+        pages.as_deref(),
+        task.bbox_annotation_enabled.unwrap_or(false),
+    );
+    // custom_id = the task's FULL input_hash (帰属 key for output-line
+    // matching — 04 §5.8; the ledger row + job metadata carry the rest).
+    let mut jsonl = batch_input_line(&task.input_hash, &body).into_bytes();
+    jsonl.push(b'\n');
+    let filename = batch_upload_filename(intent_token);
+    // The 5-key metadata contract shared with the adapter-side inventory
+    // (10 §7.5.2 帰属規範): intent_token + the 4-tuple task key, nothing else.
+    let metadata = json!({
+        "intent_token": intent_token,
+        "scope_id": key.scope_id,
+        "adapter_kind": key.adapter_kind,
+        "input_hash": key.input_hash,
+        "tool_profile_hash": key.tool_profile_hash,
+    });
+    let provider_scope_id = match client.provider_scope_id() {
+        Ok(value) => value,
+        Err(error) => return Ok(Err(task_failure_from_adapter(error))),
+    };
+    if !phase2a_record_provider_scope(conn, key, intent_token, &provider_scope_id)
+        .map_err(pipeline_to_kcs)?
+    {
+        return Ok(Ok(())); // CAS miss: claim superseded — nothing sent.
+    }
+    let upload_id = match client.upload_batch_input(&jsonl, &filename) {
+        Ok(value) => value,
+        Err(error) => return Ok(Err(task_failure_from_adapter(error))),
+    };
+    if !phase2a_record_upload_id(conn, key, intent_token, &upload_id).map_err(pipeline_to_kcs)? {
+        return Ok(Ok(()));
+    }
+    if !phase2b_record_job_create_started(conn, key, intent_token).map_err(pipeline_to_kcs)? {
+        return Ok(Ok(()));
+    }
+    let job = match client.create_job(&upload_id, &batch_job_model(), &metadata) {
+        Ok(value) => value,
+        Err(error) => return Ok(Err(task_failure_from_adapter(error))),
+    };
+    phase2b_record_job_created(conn, key, intent_token, &job.job_id).map_err(pipeline_to_kcs)?;
+    Ok(Ok(()))
+}
+
+/// §5.8 残骸掃除, cleanup-first: delete the upload (404 = success per the
+/// trait contract), and only then NULL the `intent_token`
+/// (`recovery_finish_cleanup`). A failed deletion leaves the token in place —
+/// the filename-embedded token is the upload's only discovery key, and the
+/// next pass (or reconcile/abandon) retries.
+///
+/// `provider_scope_recorded` (= the row's `provider_scope_id IS NOT NULL`):
+/// when phase 2a started but `upload_id` was never recorded (the
+/// upload-id-unrecorded crash window), an upload MAY exist that only the
+/// `list_uploads` filename-token matching can find — clearing the token here
+/// would make it permanently undiscoverable (04 §5.8 confirmed-absent note),
+/// so this case keeps the token and defers to reconcile/abandon.
+fn cleanup_batch_residue(
+    ledger: &LedgerDb,
+    client: &dyn MistralBatchClient,
+    key: &LedgerTaskKey,
+    intent_token: &str,
+    upload_id: Option<&str>,
+    provider_scope_recorded: bool,
+) -> Result<()> {
+    match upload_id {
+        Some(upload_id) if client.delete_upload(upload_id).is_err() => return Ok(()),
+        Some(_) => {}
+        None if provider_scope_recorded => return Ok(()),
+        None => {}
+    }
+    recovery_finish_cleanup(ledger.connection(), key, intent_token).map_err(pipeline_to_kcs)?;
+    Ok(())
+}
+
+/// One parsed page of a batch-output OCR body.
+struct BatchOcrPage {
+    index: usize,
+    markdown: String,
+}
+
+/// Bounded parse of a batch output line's `body` (the same OCR response JSON
+/// the sync lane receives — 07 §5.7 verified shape). Byte/count ceilings
+/// mirror the sync client's response policy. The sync lane's full parser
+/// (image decode, bbox annotation, placeholder rewrite) is module-private to
+/// `kcs-adapter`, so this lane parses markdown text + page indices only:
+/// embedded images are NOT persisted to the image CAS in lane v1 (the lane is
+/// bbox-disabled by construction — see `markdownize_send_lane` — and search
+/// truth is the markdown text; flagged in the implementation report).
+fn parse_batch_ocr_body(body: &Value) -> std::result::Result<(Vec<BatchOcrPage>, String), String> {
+    const MAX_PAGES: usize = 10_000;
+    const MAX_MARKDOWN_BYTES_PER_PAGE: usize = 4 * 1024 * 1024;
+    const MAX_MARKDOWN_BYTES_TOTAL: usize = 32 * 1024 * 1024;
+    // The batch job's model rides the job, and the verified output body echoes
+    // it; without it there is no provenance pin for the persisted units —
+    // conservative reject rather than fabricating one.
+    let model = body
+        .get("model")
+        .and_then(Value::as_str)
+        .ok_or("batch OCR body is missing its model field")?;
+    let pages = body
+        .get("pages")
+        .and_then(Value::as_array)
+        .ok_or("batch OCR body is missing pages")?;
+    if pages.len() > MAX_PAGES {
+        return Err(format!("batch OCR body has more than {MAX_PAGES} pages"));
+    }
+    let explicit_count = pages
+        .iter()
+        .filter(|page| page.get("index").is_some())
+        .count();
+    if explicit_count != 0 && explicit_count != pages.len() {
+        return Err("batch OCR body mixes explicit and omitted page indices".to_owned());
+    }
+    let mut total_markdown = 0_usize;
+    let mut seen = BTreeSet::new();
+    let mut parsed = Vec::with_capacity(pages.len());
+    for (position, page) in pages.iter().enumerate() {
+        let markdown = page
+            .get("markdown")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        if markdown.len() > MAX_MARKDOWN_BYTES_PER_PAGE {
+            return Err("batch OCR page markdown exceeds per-page limit".to_owned());
+        }
+        total_markdown = total_markdown
+            .checked_add(markdown.len())
+            .filter(|total| *total <= MAX_MARKDOWN_BYTES_TOTAL)
+            .ok_or("batch OCR markdown exceeds aggregate limit")?;
+        let index = match page.get("index") {
+            Some(index) => index
+                .as_u64()
+                .and_then(|raw| usize::try_from(raw).ok())
+                .ok_or("batch OCR page index must be a non-negative integer")?,
+            None => position,
+        };
+        if !seen.insert(index) {
+            return Err(format!("duplicate batch OCR page index {index}"));
+        }
+        parsed.push(BatchOcrPage {
+            index,
+            markdown: markdown.to_owned(),
+        });
+    }
+    Ok((parsed, model.to_owned()))
+}
+
+/// Convert a parsed batch output body into the same `MarkdownizeResponse`
+/// shape the sync adapter returns, plus the effective prepared-unit hints
+/// (the discovery set for a scanned/from-scratch document). Exact page
+/// bijection against the requested units is enforced here, mirroring the sync
+/// client's expected-pages rule.
+fn batch_markdownize_response_from_body(
+    body: &Value,
+    prepared_units: &[PreparedUnit],
+    retry_units: Option<&BTreeSet<String>>,
+    media_type: &str,
+    raw_hash: &str,
+) -> std::result::Result<
+    (
+        kcs_adapter::types::MarkdownizeResponse,
+        Vec<PreparedUnitHint>,
+    ),
+    String,
+> {
+    let (pages, model) = parse_batch_ocr_body(body)?;
+    let request_units: Vec<&PreparedUnit> = match retry_units {
+        Some(keys) => prepared_units
+            .iter()
+            .filter(|unit| keys.contains(&unit.unit_key))
+            .collect(),
+        None => prepared_units.iter().collect(),
+    };
+    let hints: Vec<PreparedUnitHint> = if request_units.is_empty() {
+        // OCR-from-scratch (scanned PDF / standalone image): the provider page
+        // set is the first trusted unit boundary. Mirrors the sync adapter's
+        // discovered-unit rules: contiguous 0-based indices, single page for a
+        // standalone image, unit keys page:N/image:N.
+        if retry_units.is_some() {
+            return Err("unit-scoped retry without recoverable prepared units".to_owned());
+        }
+        if pages.is_empty() {
+            return Err("OCR-from-scratch batch output returned no pages".to_owned());
+        }
+        let kind = match media_type {
+            "application/pdf" => UnitKind::Page,
+            "image/png" | "image/jpeg" | "image/webp" | "image/gif" => UnitKind::Image,
+            other => {
+                return Err(format!(
+                    "OCR-from-scratch media type is unsupported: {other}"
+                ))
+            }
+        };
+        if kind == UnitKind::Image && pages.len() != 1 {
+            return Err("standalone-image OCR must return exactly one page".to_owned());
+        }
+        let mut ordered: Vec<&BatchOcrPage> = pages.iter().collect();
+        ordered.sort_by_key(|page| page.index);
+        for (expected, page) in ordered.iter().enumerate() {
+            if page.index != expected {
+                return Err("OCR-from-scratch page indices must be contiguous from zero".to_owned());
+            }
+        }
+        ordered
+            .iter()
+            .map(|page| PreparedUnitHint {
+                unit_key: match kind {
+                    UnitKind::Image => format!("image:{}", page.index),
+                    _ => format!("page:{}", page.index + 1),
+                },
+                // No local page artifact exists before OCR; the verified raw
+                // object is the shared prepared source (sync-lane rule).
+                prepared_hash: raw_hash.to_owned(),
+                unit_kind: kind,
+                order: page.index as u64,
+            })
+            .collect()
+    } else {
+        request_units
+            .iter()
+            .map(|unit| PreparedUnitHint {
+                unit_key: unit.unit_key.clone(),
+                prepared_hash: unit.prepared_hash.clone(),
+                unit_kind: adapter_unit_kind(unit.unit_type),
+                order: unit.order,
+            })
+            .collect()
+    };
+    // Exact bijection: every requested page present, no extras.
+    let by_index: BTreeMap<usize, &BatchOcrPage> =
+        pages.iter().map(|page| (page.index, page)).collect();
+    if by_index.len() != hints.len() {
+        return Err(format!(
+            "batch OCR page count {} does not match the requested unit count {}",
+            by_index.len(),
+            hints.len()
+        ));
+    }
+    let mut updated_units = Vec::new();
+    for hint in &hints {
+        let index = usize::try_from(hint.order)
+            .map_err(|_| "prepared page order exceeds platform range".to_owned())?;
+        let page = by_index
+            .get(&index)
+            .ok_or_else(|| format!("batch OCR output is missing page index {index}"))?;
+        let mut metadata = BTreeMap::new();
+        metadata.insert("model_version_pin".to_owned(), json!(model));
+        updated_units.push(MarkdownUnit {
+            unit_key: hint.unit_key.clone(),
+            unit_type: hint.unit_kind,
+            markdown: page.markdown.clone(),
+            metadata,
+        });
+    }
+    // Same usage report the sync adapter attaches: Mistral OCR bills per
+    // processed page, and `hints` is exactly the page set this job requested
+    // AND returned (the bijection above).
+    let usage = kcs_adapter::types::AdapterUsage::BillableUnits {
+        billable_units: vec![kcs_adapter::types::BillableUnit {
+            kind: kcs_adapter::types::BillableUnitKind::Pages,
+            count: hints.len() as u64,
+        }],
+    };
+    Ok((
+        kcs_adapter::types::MarkdownizeResponse {
+            mode_used: AdapterMarkdownizeMode::Full,
+            updated_units,
+            unchanged_unit_keys: Vec::new(),
+            added_units: Vec::new(),
+            removed_unit_keys: Vec::new(),
+            failed_units: Vec::new(),
+            fallback_to_full: false,
+            reason: None,
+            usage: Some(usage),
+        },
+        hints,
+    ))
+}
+
+/// 04 §5.8 相 3 terminal for a batch row, WITHOUT clearing `intent_token`
+/// (cleanup-first: the token clears only via [`cleanup_batch_residue`] once
+/// the upload deletion is confirmed). `ledger_batch_job_id` follows the §5.4
+/// DDL 3-way rule: the REAL job id whenever it is known.
+#[allow(clippy::too_many_arguments)]
+fn settle_batch_charge_terminal(
+    ledger: &LedgerDb,
+    key: &LedgerTaskKey,
+    intent_token: &str,
+    ledger_batch_job_id: &str,
+    outcome: Outcome,
+    next_state: BatchState,
+    error: Option<&str>,
+    billed: BilledAmount,
+    increment_contract_violation: bool,
+) -> Result<()> {
+    terminal_transaction(
+        ledger.connection(),
+        &TerminalWrite {
+            key,
+            outcome,
+            billed,
+            ledger_batch_job_id,
+            next_state,
+            error,
+            increment_contract_violation,
+            attempts_delta: 1,
+            // §5.8: NULL 化は残骸掃除の完了時のみ — never in the collect Tx.
+            clear_intent_token: false,
+            intent_token_guard: Some(intent_token),
+            reseat_submission_seq: false,
+        },
+    )
+    .map_err(pipeline_to_kcs)
+    .map(|_| ())
+}
+
+/// What one polled batch row did to this pass's `ExecOutcome`.
+enum BatchPollDisposition {
+    Collected,
+    InFlight,
+    FailedPermanent,
+    FailedRetryable,
+    Retired,
+}
+
+/// 04 §5.8 相 3 (poll + collect) for this scope's in-flight batch markdownize
+/// jobs — rows with a durably-known `batch_job_id` (`state IN (0,1)`; state=0
+/// rows are reconcile-self-described crash windows, see
+/// `ops::batch_poll_candidates`). Runs from `kcs batch *` and the other
+/// write-command entry points alongside `recover_stale_sync_rows`; polling is
+/// receive/cleanup of an EXISTING request, never a new send, so it needs no
+/// network opt-in (04 §5.8 回復 note). Rows whose job id is still unknown
+/// stay owned by the §5.8 recovery walk (`kcs ledger reconcile`) — no overlap
+/// by construction.
+fn poll_batch_markdownize_jobs(
+    repo: &Repository,
+    store: &TaskStore,
+    ledger: &LedgerDb,
+) -> Result<ExecOutcome> {
+    let mut counts = ExecOutcome::default();
+    let Some(client) = batch_markdownize_lane_client()? else {
+        return Ok(counts);
+    };
+    let scope_id = repo.scope_id_for_adapter();
+    let rows = batch_poll_candidates(ledger.connection(), &scope_id, "markdownize")
+        .map_err(pipeline_to_kcs)?;
+    if !rows.is_empty() {
+        let online_profile = online_markdownize_profile_for(repo)?;
+        let placeholder_ref = online_output_ref(&online_profile.adapter_id);
+        let tasks = store.all().map_err(pipeline_to_kcs)?;
+        for row in rows {
+            let disposition = poll_one_batch_markdownize_row(
+                repo,
+                store,
+                ledger,
+                client.as_ref(),
+                &row,
+                &online_profile,
+                &placeholder_ref,
+                &tasks,
+            )?;
+            match disposition {
+                BatchPollDisposition::Collected => counts.executed += 1,
+                BatchPollDisposition::InFlight => counts.inflight += 1,
+                BatchPollDisposition::FailedPermanent | BatchPollDisposition::Retired => {
+                    counts.failed += 1;
+                }
+                BatchPollDisposition::FailedRetryable => {
+                    counts.failed += 1;
+                    counts.failed_retryable += 1;
+                }
+            }
+        }
+    }
+    // §5.8 cleanup replay: this scope's terminal rows whose residue cleanup
+    // did not complete (delete_upload failed, or a crash landed between the
+    // terminal Tx and the cleanup) retry deletion here — "削除失敗・クラッシュ
+    // は次回回復が再試行し、全削除の完了をもって intent_token を NULL 化する".
+    for row in kcs_pipeline::ledger::ops::recovery_candidates(ledger.connection())
+        .map_err(pipeline_to_kcs)?
+    {
+        if row.key.scope_id != scope_id
+            || row.key.adapter_kind != "markdownize"
+            || !row.state.is_terminal()
+        {
+            continue;
+        }
+        let Some(token) = row.intent_token.clone() else {
+            continue;
+        };
+        cleanup_batch_residue(
+            ledger,
+            client.as_ref(),
+            &row.key,
+            &token,
+            row.upload_id.as_deref(),
+            row.provider_scope_id.is_some(),
+        )?;
+    }
+    Ok(counts)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn poll_one_batch_markdownize_row(
+    repo: &Repository,
+    store: &TaskStore,
+    ledger: &LedgerDb,
+    client: &dyn MistralBatchClient,
+    row: &BatchRequestRow,
+    online_profile: &AdapterProfile,
+    placeholder_ref: &str,
+    tasks: &[TaskDescriptor],
+) -> Result<BatchPollDisposition> {
+    let Some(job_id) = row.batch_job_id.clone() else {
+        return Ok(BatchPollDisposition::InFlight);
+    };
+    let Some(intent_token) = row.intent_token.clone() else {
+        // A state 0/1 row always carries a token by construction — defensive.
+        return Ok(BatchPollDisposition::InFlight);
+    };
+    if row.key.tool_profile_hash != online_profile.tool_profile_hash {
+        // A row reserved under a different (older) profile configuration:
+        // this pass cannot attribute it to a live task; reconcile/abandon own
+        // it (04 §5.8 unknown — leave untouched).
+        return Ok(BatchPollDisposition::InFlight);
+    }
+    let task = tasks.iter().find(|task| {
+        task.task_type == TaskType::Markdownize
+            && task.input_hash == row.key.input_hash
+            && matches!(
+                task.status,
+                TaskStatus::Pending | TaskStatus::Failed | TaskStatus::Running
+            )
+            && targets_standard_online_markdownize(store.kcs_dir(), task, placeholder_ref)
+    });
+    let Some(task) = task else {
+        // tasks.jsonl is loss-tolerated (04 §5.8): confirming + persisting an
+        // output without a descriptor is the ledger-only recovery path
+        // (gen/unit re-derivation), deliberately not wired in lane v1 —
+        // `kcs ledger reconcile` / `kcs batch abandon` remain the owners.
+        return Ok(BatchPollDisposition::InFlight);
+    };
+    let job = match client.get_job(&job_id) {
+        Ok(job) => job,
+        Err(_) => {
+            // §5.8 unknown: 何も変更せず保持し、次回再試行する。
+            return Ok(BatchPollDisposition::InFlight);
+        }
+    };
+    if job.status.is_in_flight() {
+        extend_batch_poll_schedule(store, &task.task_id)?;
+        return Ok(BatchPollDisposition::InFlight);
+    }
+    if job.status != BatchJobStatus::Success {
+        return settle_failed_batch_job(
+            store,
+            ledger,
+            client,
+            row,
+            &intent_token,
+            &job_id,
+            task,
+            &job.status,
+        );
+    }
+    let Some(output_file_id) = job.output_file_id.clone() else {
+        // SUCCESS without an output handle is a provider anomaly — treat as
+        // still-unknown and re-poll rather than guessing.
+        return Ok(BatchPollDisposition::InFlight);
+    };
+    let lines = match client.fetch_output(&output_file_id) {
+        Ok(lines) => lines,
+        Err(_) => return Ok(BatchPollDisposition::InFlight),
+    };
+    let line = lines
+        .into_iter()
+        .find(|line| line.custom_id == row.key.input_hash);
+    collect_batch_markdownize_output(
+        repo,
+        store,
+        ledger,
+        client,
+        row,
+        &intent_token,
+        &job_id,
+        task,
+        online_profile,
+        line,
+    )
+}
+
+/// Terminal (non-success) provider job status → reject terminal (04 §5.8 相 3
+/// reject 同形). Billed 0 confirmed (`usd=0`, `estimated=0`): Mistral does not
+/// bill failed/cancelled batch entries (2026-07-03 verification premise;
+/// orchestrator ruling for this lane — conservative in the "no phantom spend
+/// held against the cap" direction; a resubmission is a human-driven fresh
+/// phase 1). Outcome mapping inside the closed §5.4 enum: TIMEOUT_EXCEEDED is
+/// the provider's job-expiry shape → `expired`; FAILED/CANCELLED/other →
+/// `submit_rejected` (the provider-refused-the-work bucket — the enum has no
+/// dedicated provider-job-failed value). `contract_violation_count` is NOT
+/// incremented (a provider-side failure is not a §3.2 acceptance reject).
+#[allow(clippy::too_many_arguments)]
+fn settle_failed_batch_job(
+    store: &TaskStore,
+    ledger: &LedgerDb,
+    client: &dyn MistralBatchClient,
+    row: &BatchRequestRow,
+    intent_token: &str,
+    job_id: &str,
+    task: &TaskDescriptor,
+    status: &BatchJobStatus,
+) -> Result<BatchPollDisposition> {
+    let (outcome, error, billed) = match status {
+        // Provider TIMEOUT_EXCEEDED: no output to read a real usage from —
+        // the same unknown-cost epistemic state as a KCS-deadline expiry, so
+        // it books the RESERVED estimate (04 §5.8 "expired = estimated 記帳",
+        // over-count-safe) instead of assuming zero.
+        BatchJobStatus::TimeoutExceeded => (
+            Outcome::Expired,
+            "expired",
+            BilledAmount {
+                usd: row.estimated_usd,
+                estimated: true,
+            },
+        ),
+        // FAILED / CANCELLED: the provider terminated the entry without
+        // completing it; Mistral does not bill uncompleted batch entries, so
+        // these settle at zero (comment pinned by contract test b4).
+        BatchJobStatus::Cancelled => (
+            Outcome::SubmitRejected,
+            "cancelled",
+            BilledAmount {
+                usd: 0.0,
+                estimated: false,
+            },
+        ),
+        _ => (
+            Outcome::SubmitRejected,
+            "failed",
+            BilledAmount {
+                usd: 0.0,
+                estimated: false,
+            },
+        ),
+    };
+    settle_batch_charge_terminal(
+        ledger,
+        &row.key,
+        intent_token,
+        job_id,
+        outcome,
+        BatchState::Terminal,
+        Some(error),
+        billed,
+        false,
+    )?;
+    cleanup_batch_residue(
+        ledger,
+        client,
+        &row.key,
+        intent_token,
+        row.upload_id.as_deref(),
+        row.provider_scope_id.is_some(),
+    )?;
+    mark_batch_task_failed_permanent(store, &task.task_id)?;
+    Ok(BatchPollDisposition::FailedPermanent)
+}
+
+/// Provider job failure → the task joins the existing PERMANENT failure
+/// mapping ("既存の失敗写像に合流"): `invalid_input` is the codebase's
+/// non-retryable reason bucket (`retry_policy(InvalidInput).max_attempts=0`),
+/// so `batch retry` does not auto-revive it — resubmission is a deliberate
+/// human step (fresh phase 1 after re-index / explicit re-enqueue).
+fn mark_batch_task_failed_permanent(store: &TaskStore, task_id: &str) -> Result<usize> {
+    store
+        .update_matching(|candidate| {
+            if candidate.task_id == task_id {
+                candidate.status = TaskStatus::Failed;
+                candidate.fallback_reason =
+                    Some(retry_reason(RetryErrorKind::InvalidInput).to_owned());
+                candidate.hold_reason = None;
+                candidate.heartbeat_at = None;
+                candidate.attempts = candidate.attempts.saturating_add(1);
+                candidate.next_retry_at = None;
+                candidate.clear_reservation();
+                true
+            } else {
+                false
+            }
+        })
+        .map_err(pipeline_to_kcs)
+}
+
+/// Extend a Pending batch task's poll schedule by one interval. A Failed task
+/// (e.g. a crashed submit awaiting reconcile self-description) keeps its own
+/// retry-policy schedule untouched.
+fn extend_batch_poll_schedule(store: &TaskStore, task_id: &str) -> Result<()> {
+    let poll_at = batch_poll_retry_at();
+    store
+        .update_matching(|candidate| {
+            if candidate.task_id == task_id && candidate.status == TaskStatus::Pending {
+                candidate.next_retry_at = Some(poll_at.clone());
+                true
+            } else {
+                false
+            }
+        })
+        .map_err(pipeline_to_kcs)?;
+    Ok(())
+}
+
+/// The Success + fetched-output half of one polled row: verify + materialize
+/// through the SAME response half the sync lane uses, then run the §5.8 相 3
+/// terminal Tx (成功 = usage-based charge like the sync settle; §3.2 reject =
+/// contract_violation with the durable count), then cleanup-first residue
+/// deletion, then the task transition.
+#[allow(clippy::too_many_arguments)]
+fn collect_batch_markdownize_output(
+    repo: &Repository,
+    store: &TaskStore,
+    ledger: &LedgerDb,
+    client: &dyn MistralBatchClient,
+    row: &BatchRequestRow,
+    intent_token: &str,
+    job_id: &str,
+    task: &TaskDescriptor,
+    online_profile: &AdapterProfile,
+    line: Option<BatchOutputLine>,
+) -> Result<BatchPollDisposition> {
+    let estimated = BilledAmount {
+        usd: row.estimated_usd,
+        estimated: true,
+    };
+    let Some(line) = line else {
+        // A SUCCESS job whose output carries no line for our custom_id: a
+        // transfer gap indistinguishable from provider data loss (04 §5.8's
+        // 転送欠落 note). Conservative: settle at the reservation estimate
+        // (over-count-safe), clean up, and leave the task permanently failed
+        // for a human-driven fresh submission.
+        settle_batch_charge_terminal(
+            ledger,
+            &row.key,
+            intent_token,
+            job_id,
+            Outcome::UnknownSettled,
+            BatchState::Terminal,
+            Some("unknown_settled"),
+            estimated,
+            false,
+        )?;
+        cleanup_batch_residue(
+            ledger,
+            client,
+            &row.key,
+            intent_token,
+            row.upload_id.as_deref(),
+            row.provider_scope_id.is_some(),
+        )?;
+        mark_batch_task_failed_permanent(store, &task.task_id)?;
+        return Ok(BatchPollDisposition::FailedPermanent);
+    };
+    if line.status_code != 200 {
+        // Per-entry provider failure inside a SUCCESS job — same reject
+        // terminal as a failed job (Mistral does not bill failed entries).
+        settle_batch_charge_terminal(
+            ledger,
+            &row.key,
+            intent_token,
+            job_id,
+            Outcome::SubmitRejected,
+            BatchState::Terminal,
+            Some("failed"),
+            BilledAmount {
+                usd: 0.0,
+                estimated: false,
+            },
+            false,
+        )?;
+        cleanup_batch_residue(
+            ledger,
+            client,
+            &row.key,
+            intent_token,
+            row.upload_id.as_deref(),
+            row.provider_scope_id.is_some(),
+        )?;
+        mark_batch_task_failed_permanent(store, &task.task_id)?;
+        return Ok(BatchPollDisposition::FailedPermanent);
+    }
+    // §5.8 相 3: persist 直前の tombstone 再検査 — purge 済みなら出力破棄、
+    // reject 終端と同形 (error='purged')。課金は provider 報告値だが、この
+    // lane の 報告値 (page count) は body の parse 成功が前提 — parse 前の
+    // ここでは保守的に reservation estimate で確定する (over-count-safe)。
+    if raw_ingest_is_purge_blocked(repo, &task.input_hash) {
+        settle_batch_charge_terminal(
+            ledger,
+            &row.key,
+            intent_token,
+            job_id,
+            Outcome::Purged,
+            BatchState::Terminal,
+            Some("purged"),
+            estimated,
+            false,
+        )?;
+        cleanup_batch_residue(
+            ledger,
+            client,
+            &row.key,
+            intent_token,
+            row.upload_id.as_deref(),
+            row.provider_scope_id.is_some(),
+        )?;
+        retire_batch_task(store, &task.task_id)?;
+        return Ok(BatchPollDisposition::Retired);
+    }
+    // Re-materialize the same input the submit used (the same precondition
+    // gate the sync send runs): the output is persisted under the SUBMIT-time
+    // identity (input_hash), so an edited/removed working file retires the
+    // task instead of persisting under a stale identity.
+    let prepared_input = match classify_online_markdownize_precondition(repo, task) {
+        OnlineMarkdownizePrecondition::Send(prepared_input) => prepared_input,
+        OnlineMarkdownizePrecondition::AwaitConversion
+        | OnlineMarkdownizePrecondition::ConversionFailed => {
+            // Transient local-material gap (e.g. office converter hiccup):
+            // leave the row open and re-collect on a later pass.
+            extend_batch_poll_schedule(store, &task.task_id)?;
+            return Ok(BatchPollDisposition::InFlight);
+        }
+        OnlineMarkdownizePrecondition::Retire => {
+            // Superseded (edited/deleted since submit). The provider DID
+            // complete the job; without a persistable target the charge is
+            // settled at the conservative reservation estimate
+            // (unknown_settled — the codebase's uniform non-success terminal)
+            // and the residue is cleaned up.
+            settle_batch_charge_terminal(
+                ledger,
+                &row.key,
+                intent_token,
+                job_id,
+                Outcome::UnknownSettled,
+                BatchState::Terminal,
+                Some("unknown_settled"),
+                estimated,
+                false,
+            )?;
+            cleanup_batch_residue(
+                ledger,
+                client,
+                &row.key,
+                intent_token,
+                row.upload_id.as_deref(),
+                row.provider_scope_id.is_some(),
+            )?;
+            retire_batch_task(store, &task.task_id)?;
+            return Ok(BatchPollDisposition::Retired);
+        }
+    };
+    // Persist identity: the resolved online profile (same resolution the sync
+    // lane records instances under — seam-aware, network-free under the OCR
+    // mock env). If resolution fails (e.g. no credentials in a passive
+    // write-command entry poll), defer — never guess an identity.
+    let resolved_profile = match resolve_standard_online_markdownize_profile_with_bbox(
+        &row.key.scope_id,
+        task.bbox_annotation_enabled.unwrap_or(false),
+    ) {
+        Ok(profile) => profile,
+        Err(_) => {
+            extend_batch_poll_schedule(store, &task.task_id)?;
+            return Ok(BatchPollDisposition::InFlight);
+        }
+    };
+    let retry_units: Option<BTreeSet<String>> = task
+        .unit_keys
+        .as_ref()
+        .map(|keys| keys.iter().cloned().collect());
+    let converted = batch_markdownize_response_from_body(
+        &line.body,
+        &prepared_input.prepared_units,
+        retry_units.as_ref(),
+        &prepared_input.media_type,
+        &task.input_hash,
+    );
+    let (response, effective_hints) = match converted {
+        Ok(converted) => converted,
+        Err(_reason) => {
+            // §3.2 acceptance reject (04 §5.8 相 3): terminal with the durable
+            // contract_violation count. The provider usage report is part of
+            // the very body that failed to parse, so the charge degrades to
+            // the reservation estimate (§5.4 事前検証の縮退と同形).
+            return settle_batch_contract_reject(
+                store,
+                ledger,
+                client,
+                row,
+                intent_token,
+                job_id,
+                task,
+                estimated,
+            );
+        }
+    };
+    let usage = response.usage.clone();
+    let materialized = materialize_online_markdownize_response(
+        repo,
+        task,
+        prepared_input.prepared_units.clone(),
+        &prepared_input.media_type,
+        &prepared_input.bytes,
+        retry_units.as_ref(),
+        resolved_profile.tool_profile_hash.clone(),
+        response,
+        &effective_hints,
+    );
+    let outcome = match materialized {
+        Ok(outcome) => outcome,
+        Err(failure) if failure.retry_kind == RetryErrorKind::ContractViolation => {
+            return settle_batch_contract_reject(
+                store,
+                ledger,
+                client,
+                row,
+                intent_token,
+                job_id,
+                task,
+                estimated,
+            );
+        }
+        Err(_failure) => {
+            // Persist-side fault (I/O etc.): the ledger row stays open and the
+            // fetched output is re-collected on a later pass (the §5.8 crash
+            // window between collect and the terminal Tx, replayed).
+            extend_batch_poll_schedule(store, &task.task_id)?;
+            return Ok(BatchPollDisposition::InFlight);
+        }
+    };
+    // Success terminal: bill exactly as the sync settle does — the adapter
+    // usage report resolved through declared kinds + tools.toml pricing,
+    // degrading to the reservation estimate.
+    let markdownize_pricing = kcs_adapter::tool_lock::registered_declared_pricing("markdown");
+    let (billed, uncovered_pricing_kinds) = resolve_billing_from_reported_usage(
+        usage.as_ref(),
+        &declared_billable_kind_strings(online_profile),
+        &markdownize_pricing,
+        row.estimated_usd,
+    );
+    warn_uncovered_pricing_kinds_once("markdownize", &uncovered_pricing_kinds);
+    settle_batch_charge_terminal(
+        ledger,
+        &row.key,
+        intent_token,
+        job_id,
+        Outcome::Succeeded,
+        BatchState::Completed,
+        None,
+        billed,
+        false,
+    )?;
+    cleanup_batch_residue(
+        ledger,
+        client,
+        &row.key,
+        intent_token,
+        row.upload_id.as_deref(),
+        row.provider_scope_id.is_some(),
+    )?;
+    let task_id = task.task_id.clone();
+    store
+        .update_matching(|candidate| {
+            if candidate.task_id == task_id {
+                candidate.status = outcome.status;
+                candidate.output_ref = outcome.output_ref.clone();
+                candidate.fallback_reason = Some("online_adapter_done".to_owned());
+                candidate.hold_reason = None;
+                candidate.heartbeat_at = None;
+                candidate.next_retry_at = None;
+                candidate.clear_reservation();
+                if outcome.status == TaskStatus::Partial {
+                    // Mirrors the sync Ok arm (R19-5): a Partial completion
+                    // consumed one re-drive of the retry budget.
+                    candidate.attempts = candidate.attempts.saturating_add(1);
+                }
+                candidate.mode = Some(outcome.mode);
+                candidate.previous_raw_hash = outcome.previous_raw_hash.clone();
+                candidate.parent_run_id = outcome.parent_run_id.clone();
+                candidate.changed_unit_keys = outcome.changed_unit_keys.clone();
+                true
+            } else {
+                false
+            }
+        })
+        .map_err(pipeline_to_kcs)?;
+    Ok(BatchPollDisposition::Collected)
+}
+
+/// §3.2 acceptance reject at collect time (04 §5.8 相 3): terminal Tx with
+/// `error='contract_violation'` + the durable `contract_violation_count`
+/// increment, charge at the conservative reservation estimate, cleanup-first
+/// residue deletion, and the task joins the ordinary contract_violation retry
+/// mapping (retryable once — a fresh phase 1 under a new token/seq).
+#[allow(clippy::too_many_arguments)]
+fn settle_batch_contract_reject(
+    store: &TaskStore,
+    ledger: &LedgerDb,
+    client: &dyn MistralBatchClient,
+    row: &BatchRequestRow,
+    intent_token: &str,
+    job_id: &str,
+    task: &TaskDescriptor,
+    estimated: BilledAmount,
+) -> Result<BatchPollDisposition> {
+    settle_batch_charge_terminal(
+        ledger,
+        &row.key,
+        intent_token,
+        job_id,
+        Outcome::ContractViolation,
+        BatchState::Terminal,
+        Some("contract_violation"),
+        estimated,
+        true,
+    )?;
+    cleanup_batch_residue(
+        ledger,
+        client,
+        &row.key,
+        intent_token,
+        row.upload_id.as_deref(),
+        row.provider_scope_id.is_some(),
+    )?;
+    let policy = retry_policy(RetryErrorKind::ContractViolation);
+    let attempts_after = task.attempts.saturating_add(1);
+    let next_retry_at = (policy.retryable
+        && policy
+            .max_attempts
+            .map(|max| attempts_after < max)
+            .unwrap_or(true))
+    .then(|| scheduled_retry_at(&now_utc_seconds(), &policy.backoff, attempts_after));
+    let reason = retry_reason(RetryErrorKind::ContractViolation).to_owned();
+    let task_id = task.task_id.clone();
+    let retryable = next_retry_at.is_some();
+    store
+        .update_matching(|candidate| {
+            if candidate.task_id == task_id {
+                candidate.status = TaskStatus::Failed;
+                candidate.fallback_reason = Some(reason.clone());
+                candidate.hold_reason = None;
+                candidate.heartbeat_at = None;
+                candidate.attempts = attempts_after;
+                candidate.next_retry_at = next_retry_at.clone();
+                candidate.clear_reservation();
+                true
+            } else {
+                false
+            }
+        })
+        .map_err(pipeline_to_kcs)?;
+    Ok(if retryable {
+        BatchPollDisposition::FailedRetryable
+    } else {
+        BatchPollDisposition::FailedPermanent
+    })
+}
+
+/// Retire a batch task whose collect-time precondition failed (superseded /
+/// purged) — same shape as the send-time `Retire` path.
+fn retire_batch_task(store: &TaskStore, task_id: &str) -> Result<usize> {
+    store
+        .update_matching(|candidate| {
+            if candidate.task_id == task_id {
+                retire_online_task(candidate);
+                candidate.attempts = candidate.attempts.saturating_add(1);
+                true
+            } else {
+                false
+            }
+        })
+        .map_err(pipeline_to_kcs)
 }
 
 /// F1/CL42/CL58: a $0 provenance record for free local deterministic work (04
@@ -20264,6 +21676,7 @@ mod tests {
             paused: 1,
             auth_failed: 1,
             failed_retryable: 1,
+            inflight: 0,
         };
         assert_eq!(batch_exit_override(&all), Some(ExitCode::AuthError));
         assert_eq!(
@@ -20610,6 +22023,7 @@ mod tests {
             budget_cap_config, reserve_or_reuse_task_charge, task_ledger_key, BudgetCaps,
             TaskChargeOutcome,
         };
+        use kcs_pipeline::ledger::RequestKind;
         use std::collections::BTreeMap;
 
         let tmp = tempfile::tempdir().unwrap();
@@ -20626,22 +22040,43 @@ mod tests {
 
         // First charge: 0.6 <= 1.0 remaining → Reserved.
         let first_key = task_ledger_key("scope", "embedding", "sha256:first", "profile");
-        let first =
-            reserve_or_reuse_task_charge(&ledger, &first_key, 0.6, &cap_config, false).unwrap();
+        let first = reserve_or_reuse_task_charge(
+            &ledger,
+            &first_key,
+            0.6,
+            &cap_config,
+            false,
+            RequestKind::Sync,
+        )
+        .unwrap();
         assert!(matches!(first, TaskChargeOutcome::Reserved { .. }));
 
         // Second charge re-reads inside its own Tx: spent=0.6, remaining=0.4 < 0.6 →
         // BudgetExceeded (serial charges cannot exceed the cap even without
         // concurrent writers).
         let second_key = task_ledger_key("scope", "embedding", "sha256:second", "profile");
-        let second =
-            reserve_or_reuse_task_charge(&ledger, &second_key, 0.6, &cap_config, false).unwrap();
+        let second = reserve_or_reuse_task_charge(
+            &ledger,
+            &second_key,
+            0.6,
+            &cap_config,
+            false,
+            RequestKind::Sync,
+        )
+        .unwrap();
         assert!(matches!(second, TaskChargeOutcome::BudgetExceeded));
 
         // `override_budget` bypasses the same denial (docs/04 §5.4 `kcs batch resume
         // --override-budget`).
-        let overridden =
-            reserve_or_reuse_task_charge(&ledger, &second_key, 0.6, &cap_config, true).unwrap();
+        let overridden = reserve_or_reuse_task_charge(
+            &ledger,
+            &second_key,
+            0.6,
+            &cap_config,
+            true,
+            RequestKind::Sync,
+        )
+        .unwrap();
         assert!(matches!(overridden, TaskChargeOutcome::Reserved { .. }));
     }
 

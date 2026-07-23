@@ -9,7 +9,7 @@ use crate::http_policy::{
     OCR_RESPONSE_MAX_BYTES,
 };
 use crate::identity::hash_bytes;
-use crate::traits::MarkdownizeAdapter;
+use crate::traits::{MarkdownizeAdapter, PreferredRequestKind};
 use crate::types::{
     AdapterKind, AdapterProfile, ExecutionMode, MarkdownUnit, MarkdownizeMode, MarkdownizeRequest,
     MarkdownizeResponse, PreparedUnitHint,
@@ -559,7 +559,12 @@ impl<C: MistralOcrClient> MarkdownizeAdapter for MistralOcrMarkdownizeAdapter<C>
             ],
             allow_network: true,
             // QA18: Mistral OCR bills per page (03 §11's `[pricing] pages =
-            // 0.004` example); there is no separate token leg.
+            // 0.004` example); there is no separate token leg. 2026-07-23
+            // ユーザー裁定: production sends take the Batch lane only, whose
+            // page rate is $2/1,000 pages (= `pages = 0.002`) — half the sync
+            // rate. No built-in price constant exists to flip: the 単価の正本
+            // is the user `tools.toml [pricing]` table (07 §4), which users
+            // should now declare at the batch rate.
             billable_kinds: vec![crate::types::BillableUnitKind::Pages],
             reject_billing: Some(crate::types::BillingDeclaration::Billable),
             // QA13 (04 §5.5 L880): the real Mistral `/v1/ocr` endpoint offers
@@ -569,6 +574,14 @@ impl<C: MistralOcrClient> MarkdownizeAdapter for MistralOcrMarkdownizeAdapter<C>
             // adapter overrides it via `with_provider_idempotency`.
             provider_idempotency: self.provider_idempotency.clone(),
         }
+    }
+
+    /// 2026-07-23 ユーザー裁定: OCR 課金は Batch レーンのみ許可 ($2/1,000
+    /// pages) — sync レーンを本番送信に使わない。The lane is a trait-level
+    /// declaration (not an `AdapterProfile` field), so it never enters
+    /// `tool_profile_hash` — same posture as `ProviderIdempotency` (QA13).
+    fn preferred_request_kind(&self) -> PreferredRequestKind {
+        PreferredRequestKind::Batch
     }
 
     fn markdownize(&self, request: MarkdownizeRequest) -> Result<MarkdownizeResponse> {
@@ -1310,7 +1323,12 @@ fn page_metadata(model_version_pin: &str, images: Option<&[OcrImage]>) -> BTreeM
     metadata
 }
 
-fn http_error(error: ureq::Error) -> AdapterError {
+/// Shared Mistral HTTP error mapping (401/403 → Auth, 429 → RateLimit with a
+/// real `Retry-After` parse, 402 → QuotaExceeded, other statuses → Network,
+/// transport faults → Network). `pub(crate)` because the Batch lane client
+/// (`batch_client::EnvMistralBatchClient`, 07 §5.7) reuses the exact same
+/// mapping for its own requests.
+pub(crate) fn http_error(error: ureq::Error) -> AdapterError {
     match error {
         ureq::Error::Status(401 | 403, response) => {
             AdapterError::Auth(format!("Mistral OCR HTTP auth: {}", response.status_text()))
@@ -1759,6 +1777,28 @@ mod tests {
             profile.provider_idempotency,
             crate::types::ProviderIdempotency::NotProvided
         );
+    }
+
+    /// 2026-07-23 ユーザー裁定 (07 §5.7): the built-in Mistral OCR adapter's
+    /// production sends take the Batch lane only ($2/1,000 pages); the
+    /// offline deterministic adapter keeps the trait default (Sync). The
+    /// lane declaration must not perturb adapter identity.
+    #[test]
+    fn mistral_adapter_prefers_the_batch_lane_without_changing_identity() {
+        let adapter = MistralOcrMarkdownizeAdapter::default();
+        assert_eq!(
+            adapter.preferred_request_kind(),
+            PreferredRequestKind::Batch
+        );
+        assert_eq!(
+            MarkdownizeAdapter::preferred_request_kind(&crate::deterministic::DeterministicAdapter),
+            PreferredRequestKind::Sync,
+            "the trait default stays Sync for non-Batch adapters"
+        );
+        // Identity guard: the lane rides the trait, never the profile hash
+        // (the frozen CT4 hash below is asserted elsewhere; here it is enough
+        // that profile() still succeeds and stays a markdownize profile).
+        assert_eq!(adapter.profile().adapter_id, "mistral_ocr_markdownize");
     }
 
     #[test]

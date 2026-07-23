@@ -53,11 +53,16 @@ fn effective_overall_timeout(policy: HttpPolicy) -> Duration {
         .min(policy.write_timeout)
 }
 
-pub(crate) fn read_json_bounded(
+/// Read a response body under `max_bytes` with the shared identity-encoding
+/// posture (reject any transparent decompression, precheck `Content-Length`,
+/// hard-stop the wire read at the ceiling). Returns the raw bytes for
+/// non-JSON payloads (e.g. the Batch output-file JSONL, 07 §5.7);
+/// [`read_json_bounded`] layers JSON parsing on top for everything else.
+pub(crate) fn read_bytes_bounded(
     response: ureq::Response,
     max_bytes: usize,
     context: &str,
-) -> Result<Value> {
+) -> Result<Vec<u8>> {
     if response
         .header("Content-Encoding")
         .is_some_and(|encoding| !encoding.eq_ignore_ascii_case("identity"))
@@ -87,6 +92,20 @@ pub(crate) fn read_json_bounded(
         .take(read_limit as u64)
         .read_to_end(&mut body)
         .map_err(|err| AdapterError::Network(format!("{context} read failed: {err}")))?;
+    if body.len() > max_bytes {
+        return Err(AdapterError::ContractViolation(format!(
+            "{context} exceeds {max_bytes} bytes"
+        )));
+    }
+    Ok(body)
+}
+
+pub(crate) fn read_json_bounded(
+    response: ureq::Response,
+    max_bytes: usize,
+    context: &str,
+) -> Result<Value> {
+    let body = read_bytes_bounded(response, max_bytes, context)?;
     parse_json_bytes_bounded(&body, max_bytes, context)
 }
 

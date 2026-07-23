@@ -685,6 +685,7 @@ name = "kcs-adapter"
 version = "0.1.0"
 dependencies = [
  "base64",
+ "getrandom 0.3.4",
  "miniz_oxide",
  "serde",
  "serde_jcs",
