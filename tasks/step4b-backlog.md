@@ -81,6 +81,30 @@ offline gen+1。判定は鋳造点ガード 2 枚 = 空 prepare 非判定 + key 
    意図的帰結)。office incremental は mode=Full 固定 (identity 対応関係が未定義のため)
 5. XLSX (sheet 描画意味論 + QB27) / 音声 — 変換機構未定義のまま繰延 (07 §5.1 追記に明記)
 
+### 1-A3. Mistral Batch 送信レーン (2026-07-23 実装完了 `18b9a7f` — 「OCR はバッチのみ許可」裁定の前提実装)
+§5.8 台帳状態機械は QA13-15 時点で完全実装済みだったが相 2a/2b の本番 caller はゼロ =
+送信レーンだけが未実装だった。**実装済み**: 07 §5.7 の client 契約 8 操作 (実 REST +
+hermetic mock seam `KCS_TEST_MISTRAL_BATCH`、実 API 形状は experiments/ocr-verification の
+2026-07-03 実測が正)・§5.8 書込順序どおりの submit (1 job = 1 task、metadata 5 key、
+custom_id = input_hash、filename = kcs-<token>.jsonl)・poll/collect を batch resume + 書込系
+preamble 4 箇所に配線 (回収は sync と同一 materialize 経路を共有)・cleanup-first (upload 削除
+完了まで intent_token 保持)・bbox 有効 task も batch (bbox 既定 ON のため例外化は裁定の空文化)・
+TIMEOUT_EXCEEDED = expired で予約額 estimated 記帳 / FAILED・CANCELLED = 0 記帳。
+07 §5.7 に FB 追記。契約テスト 5 本 (submit 順序 / collect+検索 / crash 窓→reconcile found→
+回収 / failed 終端 / in-flight exit 3)。テスト 1,260/0・eval 回帰ゼロ。
+**残余 (順に優先度高)**:
+1. **実 API 契約試験** (provider_scope_id / list_uploads / pagination — 07 §5.2 既記載の
+   Step 3 実測分。初回オンライン実行 = eval corpus の batch OCR pass で消化するのが最短。
+   v1 の provider_scope_id は `KCS_MISTRAL_WORKSPACE_ID` 上書き + 既定 "mistral:default")
+2. incremental Markdownize の batch 化 (v1 は Full 送信へ縮退 — 小差分編集の再 enrichment が
+   全頁課金になる。sync 時代の頁 prorate を回復するには collect 側 acceptance の非同期化が必要)
+3. batch 出力に埋め込まれた画像の CAS 保存 (sync レーンとの成果物差 — bbox annotation は
+   レーン非依存で機能するが、埋め込み画像の evidence 開封が batch 経由分だけ欠ける)
+4. tasks.jsonl 喪失時の台帳のみからの persist 回復 (§5.8 の gen 規則再導出) — poll は task
+   記述子なし行を skip (reconcile/abandon の領分)
+5. 相 2a 着手済み・upload_id 未記録行の list_uploads 照合掃除 (現状 reconcile は報告のみ、
+   abandon が脱出路)
+
 ### 1-B. QB 残 18 (26/27/34-40/42-48/63-65 — 41 は 1-A2 で消化)
 import/export (fork/kcsz)・observability 深部・J 領域残。MVP 機能面への影響なし。
 
