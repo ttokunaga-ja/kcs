@@ -1771,17 +1771,25 @@ fn ct3_fts_004_rebuild_db_reenables_fts_search() {
 #[test]
 fn r23_21_hybrid_per_scope_candidates_are_truncated_to_candidate_depth() {
     let dir = tempfile::tempdir().unwrap();
-    fs::write(
-        dir.path().join("vector_favored.md"),
-        "# V\n\ndepthprobe divergence fixture\n",
-    )
-    .unwrap();
-    let filler = "depthprobe ".repeat(30);
-    fs::write(
-        dir.path().join("text_favored.md"),
-        format!("# T\n\n{filler}unrelated padding words here\n"),
-    )
-    .unwrap();
+    // Contextual-embedding addendum (07 §5.3, 2026-07-24): the mock vector is
+    // `deterministic_embedding_vector(item.text)`, and the send path now prepends
+    // the humanized filename to a chunk's body. This doc must be the VECTOR top-1,
+    // so (a) its filename stem humanizes to nothing (`_` → no alphanumerics →
+    // `chunk_embedding_context` is `None`), leaving it embedded bare, and (b) it
+    // carries NO heading, so its lone chunk body is the query phrase itself — the
+    // embedded seed closest to the plainly-embedded query. `text_favored` below
+    // repeats the whole query and so decisively owns the (trigram) TEXT lane; the
+    // two lanes' deterministic top-1 picks are therefore disjoint.
+    fs::write(dir.path().join("_.md"), "depthprobe divergence fixture\n").unwrap();
+    // Contextual-embedding addendum (07 §5.3, 2026-07-24): repeat the WHOLE query
+    // (not just one of its terms) so this doc dominates the TRIGRAM text lane for
+    // every query trigram. Otherwise `_.md` — which uniquely carries the
+    // `divergence`/`fixture` trigrams (once) — would out-rank a one-term-dense doc
+    // in the text lane too, and the two backends would no longer be disjoint. Its
+    // mock vector (a hash of this repeated text, not the bare query) stays far
+    // from the query, so it never challenges `_.md`'s cosine-1.0 vector rank 1.
+    let filler = "depthprobe divergence fixture ".repeat(30);
+    fs::write(dir.path().join("text_favored.md"), format!("# T\n\n{filler}\n")).unwrap();
     kcs(&dir, &["init"]).assert().success();
     json_success_embed(&dir, "mock", &["index", "--approve"]);
 
@@ -7195,33 +7203,35 @@ fn r19_4_duplicate_content_failed_chunk_converges_via_twin() {
     let dir = tempfile::tempdir().unwrap();
     let shared =
         "## 共有セクション\n\n共有される段落です。十分な長さの本文をここに置きます。あいうえお かきくけこ さしすせそ。\n";
-    fs::write(
-        dir.path().join("a.md"),
-        format!("# 見出し AAAA\n\n{shared}"),
-    )
-    .unwrap();
+    // Contextual-embedding addendum (07 §5.3, 2026-07-24): a content twin now
+    // requires the same body AND the same humanized filename context. Two DIFFERENT
+    // filenames normally embed to DIFFERENT identities (no cross-file twin — the
+    // correct new behavior), so to keep exercising the twin-convergence path these
+    // two files use CONTEXT-FREE names (`_.md` / `__.md`, stems that humanize to
+    // nothing → `chunk_embedding_context` is `None`). Their shared section is then
+    // embedded bare under one identical `embedding_hash`, exactly as the pre-
+    // addendum `a.md`/`b.md` pair did. (KCS indexes only a scope's own directory,
+    // not subfolders, so same-basename files in sibling subdirs are not an option.)
+    fs::write(dir.path().join("_.md"), format!("# 見出し AAAA\n\n{shared}")).unwrap();
     kcs(&dir, &["init"]).assert().success();
-    // Pin ALL passes to one instant so a.md's rate_limit chunks are never retry-DUE (their
+    // Pin ALL passes to one instant so _.md's rate_limit chunks are never retry-DUE (their
     // 2s backoff never elapses) — the ONLY way its shared chunk can complete is the R19-4
     // twin convergence, not a normal mock retry. (A later wall-clock would just re-embed it
     // via retry and never exercise the bug.)
     let now = "2026-07-03T00:00:00Z";
-    // a.md's chunks fail rate_limit -> Pending (phantom reservations, QA3).
+    // _.md's chunks fail rate_limit -> Pending (phantom reservations, QA3).
     json_success_embed_at(&dir, "rate_limit", now, &["index", "--approve", "--online"]);
-    // b.md carries the IDENTICAL section (same text_hash, different chunk_id). Indexing it
-    // with mock embeds the shared text into the `embeddings` table.
-    fs::write(
-        dir.path().join("b.md"),
-        format!("# 見出し BBBB\n\n{shared}"),
-    )
-    .unwrap();
+    // __.md carries the IDENTICAL section under an equally context-free name (same
+    // text_hash, same `None` context, different chunk_id). Indexing it with mock embeds
+    // the shared text into the `embeddings` table under the identity _.md's chunk shares.
+    fs::write(dir.path().join("__.md"), format!("# 見出し BBBB\n\n{shared}")).unwrap();
     json_success_embed_at(&dir, "mock", now, &["index", "--approve", "--online"]);
     // `rebuild_chunk_vec` runs BEFORE embedding enrichment in a given index pass, so it is
     // the NEXT pass that links a.md's shared chunk_id to the twin's now-persisted vector —
-    // and the reconcile then converges a.md's stuck Failed chunk (self-heal on re-index).
+    // and the reconcile then converges x/note.md's stuck Failed chunk (self-heal on re-index).
     json_success_embed_at(&dir, "mock", now, &["index", "--approve", "--online"]);
-    // a.md has TWO chunks (its own heading + the shared section) and both opened a
-    // reservation on the rate_limit pass. The heading is unique to a.md, so it never
+    // _.md has TWO chunks (its own heading + the shared section) and both opened a
+    // reservation on the rate_limit pass. The heading is unique to _.md, so it never
     // finds a twin and — with the clock pinned — never becomes retry-due either: it
     // stays open/pending for the rest of this test, by design (unrelated to R19-4).
     // Only the SHARED section's reservation is expected to release via the twin
@@ -7230,16 +7240,16 @@ fn r19_4_duplicate_content_failed_chunk_converges_via_twin() {
         open_reservation_count(&dir, "embedding"),
         1,
         "R19-4: the twin-embedded rate_limit reservation must be released (settled), \
-         leaving only a.md's unrelated (never-retried) heading chunk open"
+         leaving only _.md's unrelated (never-retried) heading chunk open"
     );
     let status = json_success_embed_at(&dir, "mock", now, &["status"]);
     let a_done = tasks_of_type(&status, "embedding")
         .iter()
-        .filter(|t| t["input_path"] == "a.md" && t["status"] == "done")
+        .filter(|t| t["input_path"] == "_.md" && t["status"] == "done")
         .count();
     assert!(
         a_done >= 1,
-        "R19-4: a.md's twin-embedded chunk must CONVERGE to Done, not stay Pending: {status}"
+        "R19-4: _.md's twin-embedded chunk must CONVERGE to Done, not stay Pending: {status}"
     );
 }
 

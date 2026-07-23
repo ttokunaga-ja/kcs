@@ -6831,6 +6831,10 @@ fn build_sqlite_index_at(
             &row.distance,
             &row.modality,
             &row.profile_hash,
+            // Contextual-embedding addendum (07 §5.3, 2026-07-24): replay the
+            // recorded filename context so the rebuilt DB disambiguates a
+            // shared `text_hash` exactly as the original write did.
+            row.context_key.as_deref(),
         )
         .map_err(index_to_kcs)?;
     }
@@ -14347,13 +14351,24 @@ fn send_embed_batch(
     // group.
     idempotency_token: Option<String>,
 ) -> std::result::Result<(), TaskExecutionFailure> {
+    // Contextual-embedding addendum (07 §5.3, 2026-07-24): the adapter input is
+    // the humanized filename context prepended to the chunk body. Every member
+    // of a group shares one `embedding_hash` = one `(text_hash, context,
+    // profile)`, so the representative's context is the whole group's context.
     let items = to_send
         .iter()
-        .map(|group| EmbeddingItem {
-            id: group.representative.chunk_id.clone(),
-            text: Some(group.representative.text.clone()),
-            path: None,
-            mime: None,
+        .map(|group| {
+            let context =
+                embedding_store::chunk_embedding_context(&group.representative.raw_path);
+            EmbeddingItem {
+                id: group.representative.chunk_id.clone(),
+                text: Some(embedding_store::contextualized_embedding_input(
+                    context.as_deref(),
+                    &group.representative.text,
+                )),
+                path: None,
+                mime: None,
+            }
         })
         .collect::<Vec<_>>();
     let vectors = run_embedding_adapter(
@@ -14376,6 +14391,7 @@ fn send_embed_batch(
             });
         };
         let bytes = f32_to_le_bytes(vector);
+        let context_key = embedding_store::chunk_embedding_context(&chunk.raw_path);
         embedding_store::write_chunk_embedding(
             conn,
             &group.embedding_hash,
@@ -14386,6 +14402,7 @@ fn send_embed_batch(
             &profile.distance,
             &profile.modality,
             &profile.profile_hash,
+            context_key.as_deref(),
         )
         .map_err(|_| TaskExecutionFailure {
             retry_kind: RetryErrorKind::ContractViolation,
@@ -14487,6 +14504,12 @@ fn chunk_embedding_hash(
     chunk: &EmbeddableChunk,
     profile: &DeclaredEmbeddingProfile,
 ) -> Result<String> {
+    // Contextual-embedding addendum (07 §5.3, 2026-07-24): fold the chunk's
+    // humanized filename context into the content-addressed identity, matching
+    // the context prepended to the adapter input in `send_embed_batch`. Two
+    // chunks with identical bodies but different filenames therefore get
+    // distinct `embedding_hash`es (and distinct vectors), never a shared one.
+    let context = embedding_store::chunk_embedding_context(&chunk.raw_path);
     embedding_store::embedding_hash(
         EmbeddingTargetType::Chunk,
         &chunk.text_hash,
@@ -14494,6 +14517,7 @@ fn chunk_embedding_hash(
         EmbeddingDistance::Cosine,
         EmbeddingModality::Multimodal,
         &profile.profile_hash,
+        context.as_deref(),
     )
     .map_err(index_to_kcs)
 }

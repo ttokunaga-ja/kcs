@@ -617,7 +617,12 @@ pub fn ensure_schema_on_connection(conn: &Connection, config: FtsSchemaConfig) -
             vector BLOB NOT NULL,
             dimensions INTEGER NOT NULL,
             distance TEXT NOT NULL,
-            profile_hash TEXT NOT NULL
+            profile_hash TEXT NOT NULL,
+            -- 2026-07-24 (07 §5.3 contextual-embedding addendum): the humanized
+            -- filename context a chunk vector was embedded with, so a rebuild
+            -- can disambiguate several rows sharing one `target_id` (text_hash).
+            -- NULL for non-contextual (legacy / symbolic-name) chunk embeddings.
+            context_key TEXT
         );
         -- QB32 (step4b-contract-tests-p3b.md §C, 04 §4.3 L534-536): so the
         -- query_cache 256-row prune/enumerate (once wired, QB33/34) does not
@@ -638,6 +643,15 @@ pub fn ensure_schema_on_connection(conn: &Connection, config: FtsSchemaConfig) -
         );
         "#,
     )?;
+
+    // 2026-07-24 (07 §5.3 contextual-embedding addendum): a pre-addendum store's
+    // `embeddings` table predates `context_key`; `CREATE TABLE IF NOT EXISTS`
+    // above leaves it untouched, so add the column in place. Idempotent (guarded
+    // by the column probe); existing rows read back as NULL (non-contextual),
+    // which the single-candidate rebuild path handles unchanged.
+    if table_exists(conn, "embeddings")? && !table_has_column(conn, "embeddings", "context_key")? {
+        conn.execute_batch("ALTER TABLE embeddings ADD COLUMN context_key TEXT;")?;
+    }
 
     let tokenizer = match config.tokenizer {
         FtsTokenizer::Trigram => "trigram",
@@ -1009,6 +1023,7 @@ mod tests {
             "cosine",
             "multimodal",
             "sha256:profile",
+            None,
         )
         .unwrap();
         crate::embedding_store::write_chunk_embedding(
@@ -1021,6 +1036,7 @@ mod tests {
             "cosine",
             "multimodal",
             "sha256:profile",
+            None,
         )
         .unwrap();
         crate::embedding_store::write_chunk_embedding(
@@ -1033,6 +1049,7 @@ mod tests {
             "cosine",
             "multimodal",
             "sha256:profile",
+            None,
         )
         .unwrap();
 
@@ -1119,6 +1136,7 @@ mod tests {
             "cosine",
             "multimodal",
             "sha256:profile",
+            None,
         )
         .unwrap();
         fts.connection()

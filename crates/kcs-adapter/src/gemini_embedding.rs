@@ -348,6 +348,15 @@ impl<C> GeminiEmbeddingAdapter<C> {
             "adapter_role": "multimodal",
             "dimensions": self.dimensions,
             "distance": "cosine",
+            // 2026-07-24 (07 §5.3 contextual-embedding addendum): KCS prepends a
+            // chunk's humanized filename to the embedded text
+            // (`embedding_store::contextualized_embedding_input`). That changes
+            // what a chunk vector MEANS, so it is part of the vector-space
+            // identity the profile hash pins (03 §7 compat gate): a store of
+            // pre-addendum, non-contextual vectors must read as INCOMPATIBLE with
+            // a contextual query profile, and bumping this field is what makes it
+            // so (and re-triggers a full re-embed on the next online index).
+            "input_construction": "chunk_filename_context_v1",
             "modality": "multimodal",
             "model_or_tool_family": ADOPTED_MODEL_FAMILY,
             "model_version_pin": model_pin,
@@ -505,7 +514,10 @@ mod tests {
             GeminiEmbeddingAdapter::new(StubClient, ADOPTED_MODEL_PIN, ADOPTED_DIMENSIONS);
         assert_eq!(
             adapter.profile().tool_profile_hash,
-            "sha256:66aff638f38a099ff989ca97675ebd3c573a40ee53cc1cdfe05fb06102d2bb09"
+            // 2026-07-24: bumped from `66aff638…` by the contextual-embedding
+            // addendum (07 §5.3) — the profile now declares
+            // `input_construction=chunk_filename_context_v1`.
+            "sha256:09ff078458a30dc1607a66f996cb5261cd16dc8d16c267c9a67245ca5fd66f90"
         );
         assert_eq!(adapter.profile().adapter_kind, AdapterKind::Embedding);
         assert!(adapter.profile().allow_network);
