@@ -16225,7 +16225,21 @@ fn run_index_pipeline(
                     &now,
                 )?;
                 result.failed_files += 1;
-                let _ = error;
+                // The validation verdict used to be silently discarded here,
+                // which made every such failure a blind "contract_violation"
+                // task (2026-07-23 fixture registration: 48 opaque failures
+                // whose real cause — unfenced raw HTML in octet-text
+                // passthrough — took a live probe to recover). Keep the
+                // task-record shape, but preserve the actual reason in the
+                // event log.
+                append_event_log(
+                    "KCS-E-ADAPTER-CONTRACT-001",
+                    "offline markdownize response failed acceptance; task recorded as contract_violation",
+                    json!({
+                        "input_path": candidate.input_path,
+                        "detail": error.to_string(),
+                    }),
+                )?;
                 continue;
             }
             let mut full_request = request;
@@ -16852,7 +16866,17 @@ fn write_prepared_objects(
     // guard skips conversion entirely when Prepare already reported no units
     // (no converter resolved, or a non-Office/media caller) -- nothing to write
     // and no need to invoke (and possibly fail on) a converter for a no-op.
-    let pdf_pages = if media_type == "application/pdf" {
+    // The `!prepared_units.is_empty()` guard (both arms) skips the page
+    // recompute when Prepare already reported no units: there is nothing to
+    // write, and re-running the extractor here can DISAGREE with Prepare's
+    // verdict — a scanned/raster PDF whose compressed bytes contain a chance
+    // "BT" passes the text-layer gate and lossy-scans to one garbage page,
+    // which Prepare's R20-4 garbage gate then rejects (0 units). Comparing
+    // that recomputed 1 against 0 declared hashes failed the whole `kcs
+    // index` with KCS-E-CONFIG-SCHEMA-001 (found on real img2pdf rasters,
+    // 2026-07-23 fixture registration). The office arm always had this
+    // guard; the PDF arm was the asymmetry.
+    let pdf_pages = if media_type == "application/pdf" && !prepared_units.is_empty() {
         Some(pdf_text_pages_bounded(bytes).map_err(pipeline_to_kcs)?)
     } else if is_office_media(media_type) && !prepared_units.is_empty() {
         let converted = convert_office_to_pdf(bytes, media_type).map_err(adapter_to_kcs)?;

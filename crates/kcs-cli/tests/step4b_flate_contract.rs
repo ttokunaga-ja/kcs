@@ -281,6 +281,67 @@ fn flate_01_compressed_cid_pdf_indexes_offline_with_enhancement_pending() {
 }
 
 // ===========================================================================
+// flate_03 — a raster PDF whose COMPRESSED bytes contain a chance "BT" (and
+// whose raw bytes carry printable `(...)` metadata literals) must index as an
+// empty-prepare OCR placeholder — never fail the command with the
+// write_prepared_objects page/hash cardinality error (2026-07-23 fixture
+// registration regression: real img2pdf rasters hit exactly this).
+// ===========================================================================
+
+#[test]
+fn flate_03_chance_bt_raster_pdf_routes_to_ocr_without_schema_error() {
+    let dir = tempfile::tempdir().unwrap();
+    // Structure mirrors an img2pdf raster: one /Type /Page whose content
+    // stream draws an image XObject; the "pixel" stream is raw binary noise
+    // (NOT valid deflate) that embeds a bare "BT" so the raw text-layer scan
+    // chance-hits; document-info literals are printable and would lossy-scan
+    // into a garbage "page" if the write path re-extracted.
+    let mut noise = vec![0x91_u8, 0x02, 0x7f, 0x33];
+    noise.extend_from_slice(b"BT");
+    noise.extend(vec![0x8e_u8; 64]);
+    let mut pdf = b"%PDF-1.4\n".to_vec();
+    pdf.extend(obj(1, b"<< /Count 1 /Kids [ 2 0 R ] /Type /Pages >>"));
+    pdf.extend(obj(
+        2,
+        b"<< /Type /Page /Parent 1 0 R /Contents 3 0 R /Resources << /XObject << /Im0 4 0 R >> >> >>",
+    ));
+    pdf.extend(stream_obj(
+        3,
+        "<< /Length 28 >>",
+        b"q 100 0 0 100 0 0 cm /Im0 Do Q",
+    ));
+    pdf.extend(stream_obj(
+        4,
+        &format!(
+            "<< /Subtype /Image /Width 8 /Height 8 /Filter /FlateDecode /Length {} >>",
+            noise.len()
+        ),
+        &noise,
+    ));
+    pdf.extend(obj(
+        5,
+        b"<< /CreationDate (D:20260723082757Z) /Producer (img2pdf 0.6.1) >>",
+    ));
+    pdf.extend_from_slice(b"%%EOF\n");
+    fs::write(dir.path().join("scan-like.pdf"), pdf).unwrap();
+    init(&dir);
+
+    kcs(&dir, &["index", "--approve"])
+        .arg("--json")
+        .assert()
+        .success();
+
+    // Empty prepare → no offline instance; the online enhancement
+    // placeholder owns the file (R20-5).
+    let units_root = dir.path().join(".kcs/objects/normalized_units");
+    assert!(gen_dirs_under(&units_root).is_empty());
+    let status = json_success(&dir, &["status"]);
+    let online_task = online_markdownize_task_for(&status, "scan-like.pdf")
+        .unwrap_or_else(|| panic!("OCR placeholder missing: {status}"));
+    assert_eq!(online_task["status"], "pending", "{status}");
+}
+
+// ===========================================================================
 // flate_02 — ObjStm-packed dictionaries + 2-byte codes decode and search
 // ===========================================================================
 

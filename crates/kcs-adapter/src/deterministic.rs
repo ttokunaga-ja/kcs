@@ -68,15 +68,17 @@ impl DeterministicAdapter {
 
 pub fn deterministic_markdown_profile_value() -> serde_json::Value {
     // 1.1.0 (2026-07-23): FlateDecode + ToUnicode CMap decoding changed what
-    // this adapter extracts from compressed text-layer PDFs. Same input bytes
-    // now normalize differently, so the semantics change rides a new
-    // tool_profile_hash (07 §2.1/§9 — a fresh gen-0 identity, never a silent
-    // prepared_hash drift inside the old profile).
+    // this adapter extracts from compressed text-layer PDFs.
+    // 1.2.0 (2026-07-23, same day): non-markdown text (text/plain + sniffed
+    // octet-stream TEXT) is now fence-wrapped — raw passthrough violated the
+    // v1 "raw HTML forbidden" acceptance for XML/HTML corpus files. Output
+    // semantics change => new tool_profile_hash (07 §9); the prepare profile
+    // stays at 1.1.0 because prepared units are unchanged.
     json!({
         "adapter_kind": "markdownize",
         "adapter_role": "text",
         "model_or_tool_family": "kcs-deterministic-text",
-        "model_version_pin": "1.1.0",
+        "model_version_pin": "1.2.0",
         "output_schema": "kcs-markdown-v1",
         "runtime_kind": "local",
         "spec_version": 1
@@ -367,7 +369,16 @@ fn markdown_unit_from_hint(
             };
             format!("{}\n", page_text.trim())
         }
-        Some(SourceDocument::Text(text)) => text.to_owned(),
+        // text/plain and sniffed octet-stream TEXT (R20-6 passthrough:
+        // .xml/.html/.eml/.csv/...) — fence it exactly like code. Raw
+        // passthrough put markup-bearing files (XML/HTML) in violation of
+        // Normalized Markdown v1's "raw HTML and autolinks are forbidden"
+        // acceptance check (04 §3.2 V5), which failed every such file's
+        // offline markdownize at index time (found on the 2026-07-23
+        // fixture registration: 48/48 failures were exactly the .xml and
+        // .html corpus files). A fence is the V5-safe literal carrier for
+        // ALL non-markdown text, independent of content.
+        Some(SourceDocument::Text(text)) => fence_code(text, request.raw.path.as_deref()),
         None => baseline_placeholder(&hint.unit_key, &hint.prepared_hash),
     };
     let markdown = if markdown.trim().is_empty() {
@@ -471,7 +482,20 @@ fn fence_code(text: &str, path: Option<&str>) -> String {
         .and_then(|path| std::path::Path::new(path).extension())
         .and_then(|extension| extension.to_str())
         .unwrap_or("");
-    format!("```{lang}\n{}\n```\n", text.trim_end())
+    // CommonMark: the fence must be strictly longer than any backtick run
+    // the content itself starts a line with, or an embedded ``` would close
+    // the fence early and leak the remainder as raw markdown (the same V5
+    // rejection this fencing exists to prevent).
+    let longest_run = text
+        .lines()
+        .map(|line| {
+            let trimmed = line.trim_start();
+            trimmed.bytes().take_while(|byte| *byte == b'`').count()
+        })
+        .max()
+        .unwrap_or(0);
+    let fence = "`".repeat(longest_run.max(2) + 1);
+    format!("{fence}{lang}\n{}\n{fence}\n", text.trim_end())
 }
 
 pub fn extract_pdf_text_pages_bounded(bytes: &[u8], max_pages: usize) -> Result<Vec<String>> {
@@ -790,6 +814,29 @@ fn page_index_from_unit_key(unit_key: &str) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 2026-07-23 fixture-registration regression: sniffed octet-stream TEXT
+    /// (XML/HTML/...) must come out FENCED — raw passthrough tripped the
+    /// Normalized Markdown v1 "raw HTML forbidden" acceptance check.
+    #[test]
+    fn octet_text_markdownize_is_fenced() {
+        let text = "<record><title>x</title></record>";
+        let fenced = fence_code(text, Some("a/record-037.xml"));
+        assert!(fenced.starts_with("```xml\n<record>"), "{fenced}");
+        assert!(fenced.trim_end().ends_with("```"), "{fenced}");
+    }
+
+    /// CommonMark fence-length rule: content with its own ``` runs needs a
+    /// LONGER fence, or the embedded run closes the block early and the
+    /// remainder leaks as raw markdown.
+    #[test]
+    fn fence_grows_past_embedded_backtick_runs() {
+        let text = "line\n````\ninner\n````";
+        let fenced = fence_code(text, None);
+        assert!(fenced.starts_with("`````\n"), "{fenced}");
+        assert!(fenced.trim_end().ends_with("`````"), "{fenced}");
+    }
+
     use crate::traits::MarkdownizeAdapter;
 
     // R21-5: a mixed PDF's real text page passes `is_probably_real_text`; a scanned page's
