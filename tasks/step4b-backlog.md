@@ -75,7 +75,24 @@ qhard 8 問は測定前に凍結投入 — miss 2 問 (qa02 hard1 / qa07 hard3) 
     決定性契約 (PC8〜PC50・214 本の step3 契約) に触れる spec レベル変更**のため独立
     ラウンドで慎重に設計・検証する。contextual 化 (`451431c`) はその土台として維持。
     測定は `eval/baseline-results-2026-07-24.json`。
-- 残るユーザー側 Done: baseline ゲートの充足 (cross-scope マージ score 化ラウンド後の再測定) と dogfood。
+- **検索品質ラウンド r2 = cross-scope マージの vector score 化を実装・実測 (2026-07-24、`06e327e`)**:
+  05 §1.8 step 3 を改訂 = cross-scope RRF の **vector 項のみ global cosine 順位で振り直す**
+  (`regrade_vector_rank_globally`)。text 項は per-scope rank 維持 (BM25 非比較 = CT3-MULTI-002 不変)。
+  全 scope は単一 embedding profile を共有 (03 §7) するため cosine は cross-scope 比較可能、という
+  原理。決定的・ページ跨ぎ安定 (query vector は R23-01 でバイト同一 replay)。**単一 scope は
+  global==per-scope なので振り直さない** (浮動小数 tie-flip 回避) → 既存単一 scope vector テスト不変、
+  text-only 不変 → **workspace 1268/0・回帰ゼロ**。単体テスト
+  `cross_scope_merge_regrades_vector_term_by_global_cosine` で「scope A rank-2 (高 cosine) が
+  scope B rank-1 (低 cosine) を上回る」を basis vector で固定。
+  - **凍結 24 問を再測定 = KCS 8→9→**`22/24 (0.917)`** — hard1 8/8・hard2 8/8・hard3 6/8。
+    差 >= 0.3 両成立 + `KCS >= 0.8` 達成 = 09 §4.1 baseline ゲート PASS (`gate.pass=true`)**。
+    残 2 ミスは hard3 の画像系 (qb23=OCR 抽出不能の画像 husk・qb09)。測定
+    `eval/baseline-results-2026-07-24b.json`。
+  - **合算 M3-1 ゲートも改善**: qhard `6/8 → 8/8`。synthetic M3-1 (18 問・text-only・本変更の対象外)
+    と合算 = 17+8=25/26 >= 21 で PASS 継続 (`eval/qhard-results.json`)。
+  - **2 ラウンドの相補性**: contextual embedding (within-scope 品質) + cross-scope score 化
+    (絶対 cosine を横断で活かす) の**両方が揃って初めて**利得が顕在化 (プレビュー 14→23 の実機再現)。
+- 残るユーザー側 Done: **baseline ゲート充足済み (`22/24`, `06e327e`)**。残 = dogfood (ユーザー実フォルダ)。
 
 ## 1. 残余契約 84 件 (QA 65 + QB 19 = P0 45 / P1 32 / P2 7) の選別
 
