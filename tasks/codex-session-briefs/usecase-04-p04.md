@@ -7,10 +7,10 @@
 
 ## 0. 絶対規則 — 違反したらこのセッションの成果物は破棄
 
-1. **`.kcs` を作らない・触らない・書かない。** KCS の内部 (objects / index / sqlite / manifest 相当) を
+1. **`.kio` を作らない・触らない・書かない。** KIO の内部 (objects / index / sqlite / manifest 相当) を
    自分で作ることは全面禁止。あなたが作るのは **普通のファイルとフォルダだけ**。
 2. **OCR・Office→PDF 変換・embedding・索引化を自分で実行しない。** それらは後段の
-   実 KCS パイプライン (`kcs init` / `kcs index --approve --online`) だけが行う。
+   実 KIO パイプライン (`kio init` / `kio index --approve --online`) だけが行う。
 3. **骨格を変えない。** 下表の **パス・ファイル名・形式・件数・ページ/スライド数** は確定済み契約。
    増減・改名・移動・形式変更は禁止。**変えてよいのは中身 (本文・図表・コード) の realism だけ。**
 4. **正解 (answer) と distractor の契約を壊さない** (§4)。埋め込む fact は指定の値・出現 1 回のみ。
@@ -57,7 +57,7 @@
 
 ## 2. 生成対象ファイル (完全リスト) — `corpus/p04/home/` の 20 scope leaf
 
-各 leaf は **1 つの KCS scope** になります。ファイルは **leaf 直下**に置いてください。
+各 leaf は **1 つの KIO scope** になります。ファイルは **leaf 直下**に置いてください。
 
 #### 1. `home/archive/closed/experiment-runs` — 2 件
 
@@ -250,7 +250,7 @@ fact は絶対に置かないこと。realism のためだけに存在します�
 | structured-json | 直接記述 | 実務の設定/エクスポート JSON。 |
 | structured-xml | 直接記述 | 実務の XML (設定/エクスポート/フィード)。 |
 | structured-yaml | 直接記述 | 実務の設定 YAML (CI/インフラ/アプリ設定)。 |
-| xlsx-realism | Excel プラグイン | Excel プラグインで実務の表。**KCS は索引しない** (realism 専用・正解に使わない)。 |
+| xlsx-realism | Excel プラグイン | Excel プラグインで実務の表。**KIO は索引しない** (realism 専用・正解に使わない)。 |
 
 **共通の realism 方針**
 
@@ -369,7 +369,7 @@ fact は絶対に置かないこと。realism のためだけに存在します�
 ## 6. セッション完了前の自己検査 (すべて満たすこと)
 
 - [ ] 生成したファイルは **`corpus/p04/` と `qhard-a/p04/` の中だけ**。他 persona 0 件。
-- [ ] **`.kcs` を 1 つも作っていない**。KCS の内部形式を一切書いていない。
+- [ ] **`.kio` を 1 つも作っていない**。KIO の内部形式を一切書いていない。
 - [ ] OCR / Office→PDF 変換 / embedding / 索引化を **実行していない**。
 - [ ] ファイル数が **B=50 (home 45 / ambient 5)** **A=3** と完全一致。
 - [ ] パス・ファイル名・形式が §2 の表と完全一致 (改名・追加・削除なし)。
@@ -383,8 +383,8 @@ fact は絶対に置かないこと。realism のためだけに存在します�
 
 ## 7. 引き渡し
 
-生成物は **普通のファイルのみ**。この後、オペレータ側で実 KCS パイプラインが
-`kcs init` → `kcs index --approve --online` を実行し、`.kcs` 生成・Office→PDF 変換・
+生成物は **普通のファイルのみ**。この後、オペレータ側で実 KIO パイプラインが
+`kio init` → `kio index --approve --online` を実行し、`.kio` 生成・Office→PDF 変換・
 OCR (Mistral Batch)・CAS 保存・embedding (Gemini)・索引化を行います。
 さらにその後、別セッションで **編集・追加・削除・フォルダ移動**を行い、実パイプラインで
 履歴 (time-travel / `--all-history` / `--include-deleted`) を生成します。

@@ -22,9 +22,9 @@ Spark (範囲限定=R18 reclaim 新配線の網羅性) は **0 新規の健全�
 **エンジン**: Claude-Opus (実機再現)。**脈**: Tier B/approval 再掃 (runbook R19 候補的中)。**型**: bughunt2 N1 の hold ゲート述語が Tier B マーカーのみを見る「fix が開ける穴」。
 
 **根本原因 (file:line)**:
-- `crates/kcs-pipeline/src/scan.rs:136-140` — `quarantine_reason` の match は `Some(TierA) if ignored` のみに `secrets_tier_a_excluded` を付与し、**解除 (TierA かつ `ignored=false`) は `_ => None` に落ちる**。
-- `crates/kcs-cli/src/main.rs:8393-8394` — online markdownize の hold ゲートは `quarantine_reason == Some("secrets_tier_b_warning")` のみ。lifted Tier A は `None` なので `secrets_hold=false`。
-- `crates/kcs-cli/src/main.rs:7059-7062` — embedding の hold ゲートは `classify_secret(&chunk.raw_path) == Some(SecretTier::TierB)` のみ。lifted Tier A は `TierA` を返すため素通り。
+- `crates/kio-pipeline/src/scan.rs:136-140` — `quarantine_reason` の match は `Some(TierA) if ignored` のみに `secrets_tier_a_excluded` を付与し、**解除 (TierA かつ `ignored=false`) は `_ => None` に落ちる**。
+- `crates/kio-cli/src/main.rs:8393-8394` — online markdownize の hold ゲートは `quarantine_reason == Some("secrets_tier_b_warning")` のみ。lifted Tier A は `None` なので `secrets_hold=false`。
+- `crates/kio-cli/src/main.rs:7059-7062` — embedding の hold ゲートは `classify_secret(&chunk.raw_path) == Some(SecretTier::TierB)` のみ。lifted Tier A は `TierA` を返すため素通り。
 
 **docs 契約**: docs/10 §1.1:120 は secrets 機構の目的を「取り込み・**オンライン送信事故**を防ぐため」と明記。§1.1:178-181 は Tier B (低リスク) を「ローカル取り込みは行うが online 送信 task は保留・要 `--send-secrets`」と規定。Tier A (最高機微) を解除すると両オンライン経路が無ゲート・無監査で送信されるのは目的違反かつ勾配逆転。
 
@@ -47,10 +47,10 @@ Spark (範囲限定=R18 reclaim 新配線の網羅性) は **0 新規の健全�
 **エンジン**: Claude-Sonnet-A (control 実機 + file:line 4 箇所)。**脈/型**: R18 fix が開ける穴 (R17-3/R18-2 の配線対象の絞り漏れ)。R15-2×R16-7 合流の R17-3 が rate_limit を塞いだ隣で quota が残った。
 
 **根本原因 (file:line)**:
-- `crates/kcs-pipeline/src/task.rs:346-353` — `QuotaExceeded` は `retryable:true, max_attempts:Some(3)` (RateLimit は `max_attempts:None`)。
-- `crates/kcs-cli/src/main.rs:7890-7898` — `task_retry_allowed` は `retryable && attempts < max_attempts`。quota は 3 回失敗で恒久 `false`。
-- `crates/kcs-cli/src/main.rs:8333-8337` (R18-2 sweep) と `main.rs:9317-9322` (R17-3 supersede) は共に Failed の退役条件に `task_retry_allowed(task)` を含む → exhausted quota を除外。
-- `crates/kcs-cli/src/main.rs:5525-5550` (batch retry) も同ゲートで Failed→Pending を拒否。
+- `crates/kio-pipeline/src/task.rs:346-353` — `QuotaExceeded` は `retryable:true, max_attempts:Some(3)` (RateLimit は `max_attempts:None`)。
+- `crates/kio-cli/src/main.rs:7890-7898` — `task_retry_allowed` は `retryable && attempts < max_attempts`。quota は 3 回失敗で恒久 `false`。
+- `crates/kio-cli/src/main.rs:8333-8337` (R18-2 sweep) と `main.rs:9317-9322` (R17-3 supersede) は共に Failed の退役条件に `task_retry_allowed(task)` を含む → exhausted quota を除外。
+- `crates/kio-cli/src/main.rs:5525-5550` (batch retry) も同ゲートで Failed→Pending を拒否。
 - **対照 (非対称の傍証)**: embedding 側 `reconcile_committed_embedding_tasks` (`main.rs:7659-7667`) は reclaim 判定に `task_retry_allowed` を一切使わず `status ∈ {Pending,Running,Failed} && reserved_usd.is_some()` のみ。embedding はこの穴が無い。
 
 **期待 vs 実際**: R17-3 契約「rate_limit/quota で失敗し非課金の F8 予約は対象が非 live 化したら reclaim」。実際 = quota は「retryable だが有限回で尽きる」中間状態に落ち、3 回失敗後は全退役経路から排除され `cost-ledger-reclaimed.jsonl` に行が生成されず per-adapter cap を当月食い潰す。Sonnet-A が control 実機 (rate_limit phantom は編集で reclaim される / quota-exhausted は reclaim されず新規タスク誤 Paused) で確定。
@@ -64,9 +64,9 @@ Spark (範囲限定=R18 reclaim 新配線の網羅性) は **0 新規の健全�
 **エンジン**: Claude-Sonnet-B (control 実機 RRF 1/61)。**脈/型**: R18 fix が開ける穴 (R18-1 が「非 live = 恒久」を前提したが content-addressing では可逆)。
 
 **根本原因 (file:line)**:
-- `crates/kcs-cli/src/main.rs:7642-7690` — R18-1 の reclaim pass は非 live Failed(rate_limit/quota) を `retire_online_task_reclaiming` で `invalid_input` (非 retryable) に終端化。
-- `crates/kcs-cli/src/main.rs:7817-7833` — `enqueue_embedding_tasks` は **status を問わず** 全 embedding task の output_ref を集め (`7821`)、`existing.contains(&output_ref)` なら新規 Pending を作らず `continue` (`7831-7832`)。終端化 task が同一 chunk_id を永久ブロック。
-- `crates/kcs-cli/src/main.rs:7696-7698` — R15-7 の transitions loop は Pending/Running のみ処理。R18-1 以前は Failed(rate_limit) は `max_attempts:None` で retryable のまま残り、chunk 復活時に retry で埋め込まれた。R18-1 の invalid_input 化がこの回復を潰した。
+- `crates/kio-cli/src/main.rs:7642-7690` — R18-1 の reclaim pass は非 live Failed(rate_limit/quota) を `retire_online_task_reclaiming` で `invalid_input` (非 retryable) に終端化。
+- `crates/kio-cli/src/main.rs:7817-7833` — `enqueue_embedding_tasks` は **status を問わず** 全 embedding task の output_ref を集め (`7821`)、`existing.contains(&output_ref)` なら新規 Pending を作らず `continue` (`7831-7832`)。終端化 task が同一 chunk_id を永久ブロック。
+- `crates/kio-cli/src/main.rs:7696-7698` — R15-7 の transitions loop は Pending/Running のみ処理。R18-1 以前は Failed(rate_limit) は `max_attempts:None` で retryable のまま残り、chunk 復活時に retry で埋め込まれた。R18-1 の invalid_input 化がこの回復を潰した。
 
 **期待 vs 実際 (control 実機再現)**:
 ```
@@ -86,8 +86,8 @@ search "ALPHA" → n_results=1 (字句検索可) だが score=0.01639=1/61 = 純
 **エンジン**: Claude-Sonnet-C (独自 sqlite-vec 拡張ビルドで chunk_vec 直接検証 + control 実機)。**型**: 「データレベルの完成 (content-addressing) と タスクレベルの完成 (status 遷移) の乖離」を reconcile が部分的にしか吸収していない構造の縫い目。
 
 **根本原因 (file:line)**:
-- `crates/kcs-index/src/embedding_store.rs:152-171` — `rebuild_chunk_vec` は `chunks c JOIN embeddings e ON e.target_id = c.text_hash` の **タスク非依存な content-hash 結合** で chunk_vec を無条件再構築。
-- `crates/kcs-cli/src/main.rs:647` — `run_index` が embedding enrichment (`652`) より **前** に毎回無条件で `rebuild_chunk_vec` を呼ぶ。→ 双子 (b.md) の成功送信で `embeddings` に乗った共有本文 vector を使い、a.md 側 Failed タスクの chunk_id が本人の再送/reuse 判定を経ずに chunk_vec へリンク。
+- `crates/kio-index/src/embedding_store.rs:152-171` — `rebuild_chunk_vec` は `chunks c JOIN embeddings e ON e.target_id = c.text_hash` の **タスク非依存な content-hash 結合** で chunk_vec を無条件再構築。
+- `crates/kio-cli/src/main.rs:647` — `run_index` が embedding enrichment (`652`) より **前** に毎回無条件で `rebuild_chunk_vec` を呼ぶ。→ 双子 (b.md) の成功送信で `embeddings` に乗った共有本文 vector を使い、a.md 側 Failed タスクの chunk_id が本人の再送/reuse 判定を経ずに chunk_vec へリンク。
 - `live_chunks_without_embedding` (`main.rs:7606-7611`) は「chunk_vec に行がある = 仕事なし」で pending から除外。
 - `reconcile_committed_embedding_tasks` の live→Done 補完ループ (`main.rs:7696-7698`) は `matches!(status, Pending|Running)` のみで **Failed を除外** → 固着タスクを拾えない。
 - 唯一回復する batch retry (`5525-5550`) は `embedding_done_transition()` を素通しするだけで reclaim を経ず、非課金 rate_limit phantom が Done タスクへ永久残留 (R18-1 の reclaim は Failed のみ対象・Done は「常に real spend」前提だが本ケースはその前提を破る)。
@@ -100,7 +100,7 @@ backoff 経過 + index --online mock ×2:
   title chunk (unique)   → done (正常 retry で回復)
   shared chunk (duplicate) → failed rate_limit reserved=5.2875e-6 のまま恒久固着
 ```
-`kcs index` を何度回しても shared chunk は不変、`pending_enrichment_tasks` 恒久 1。
+`kio index` を何度回しても shared chunk は不変、`pending_enrichment_tasks` 恒久 1。
 
 **修正案**: `main.rs:7696` の状態ガードを `Pending | Running | Failed` に拡張し、chunk_vec に既にリンク済みの live chunk を status に関わらず Done へ収束させる。あわせて非課金 rate_limit/quota スタンプは Done 化前に `retire_online_task_reclaiming` 相当で reclaim (phantom を残さない)。
 
@@ -111,9 +111,9 @@ backoff 経過 + index --online mock ×2:
 **エンジン**: GPT-5.5 (静的 file:line)。**脈**: R10-4/R11-6 の task 会計残余。
 
 **根本原因 (file:line)**:
-- `crates/kcs-cli/src/main.rs:5636-5643` — `reenqueue_partial_markdownize_tasks` が Pending 復帰時に `attempts += 1` (`5643`) + `next_retry_at = None` (`5640`)。
-- `crates/kcs-cli/src/main.rs:6094` — 再 enqueue されたタスクが online executor へ流れ adapter 失敗すると `attempts += 1` を **再度** 実行 → 1 回の送信で二重消費。
-- `crates/kcs-cli/src/main.rs:6053-6075` — Ok(Partial) 復帰経路は status/output_ref のみ書き戻し attempts/next_retry_at 未更新。reenqueue には次_retry_at ゲートが無い (`5603-5647`) → 次の batch retry が backoff を見ず即再投入。
+- `crates/kio-cli/src/main.rs:5636-5643` — `reenqueue_partial_markdownize_tasks` が Pending 復帰時に `attempts += 1` (`5643`) + `next_retry_at = None` (`5640`)。
+- `crates/kio-cli/src/main.rs:6094` — 再 enqueue されたタスクが online executor へ流れ adapter 失敗すると `attempts += 1` を **再度** 実行 → 1 回の送信で二重消費。
+- `crates/kio-cli/src/main.rs:6053-6075` — Ok(Partial) 復帰経路は status/output_ref のみ書き戻し attempts/next_retry_at 未更新。reenqueue には次_retry_at ゲートが無い (`5603-5647`) → 次の batch retry が backoff を見ず即再投入。
 
 **期待 vs 実際**: 期待 = 実 adapter 送信 1 回につき attempts 1 回・retryable Partial 残存には next_retry_at 設定。実際 = no-send (budget pause/precondition) でも re-enqueue で消費、adapter 失敗で二重消費、Partial 再失敗は backoff 無し即 retry 可。影響は「retry が ~2x 早く枯渇 + partial 間 backoff なし」で有界・fail-safe 側 → minor。
 
@@ -126,22 +126,22 @@ backoff 経過 + index --online mock ×2:
 **エンジン**: Claude-Sonnet-D (実機 3 パターン)。**型**: 「fix が追い越す」(R18-4 が store_corrupt/snapshot_shallow だけを構造化 recovery に格上げし、R17-4 コメントの参照元だった index 系を置き去り)。
 
 **根本原因 (file:line)**:
-- `crates/kcs-cli/src/main.rs:2479-2491` — `store_corruption_recovery_hint()` の match は `store_corrupt`/`snapshot_shallow` の 2 reason のみ扱い `index_missing`/`index_corrupt` は `_ => None`。
-- `crates/kcs-cli/src/main.rs:1438-1451` (index_unusable 集約) — 同種全滅時に `message` へ repair 文言を埋めるが `context.recovery` は付かない。
-- `crates/kcs-cli/src/main.rs:1469-1497` (store_corruption 集約) — 異種混在 (index_corrupt + store_corrupt、健全 scope ゼロ) はどちらの同種集約にも該当せず素の "all searched scopes failed" (ガイダンス文言ゼロ) にフォールバック。
+- `crates/kio-cli/src/main.rs:2479-2491` — `store_corruption_recovery_hint()` の match は `store_corrupt`/`snapshot_shallow` の 2 reason のみ扱い `index_missing`/`index_corrupt` は `_ => None`。
+- `crates/kio-cli/src/main.rs:1438-1451` (index_unusable 集約) — 同種全滅時に `message` へ repair 文言を埋めるが `context.recovery` は付かない。
+- `crates/kio-cli/src/main.rs:1469-1497` (store_corruption 集約) — 異種混在 (index_corrupt + store_corrupt、健全 scope ゼロ) はどちらの同種集約にも該当せず素の "all searched scopes failed" (ガイダンス文言ゼロ) にフォールバック。
 
 **期待 vs 実際 (実機 3 パターン)**: (1) 単一 index_corrupt = message あるが context.recovery なし、(2) partial exclusion = 健全 scope 生存下で index_corrupt entry が recovery なし・同一レスポンス内で store_corrupt entry だけ recovery 付きの非対称、(3) 異種混在全滅 = exit 4 でガイダンス文言ゼロ。
 
-**修正案**: `store_corruption_recovery_hint()` に `"index_missing" | "index_corrupt" => Some("... kcs repair --rebuild-db ...")` arm を追加 (既存 per-entry 配線と index_unusable 集約の両方がこの関数を経由するよう揃える)。新エラーコード導入は避ける (R17-4 の教訓)。
+**修正案**: `store_corruption_recovery_hint()` に `"index_missing" | "index_corrupt" => Some("... kio repair --rebuild-db ...")` arm を追加 (既存 per-entry 配線と index_unusable 集約の両方がこの関数を経由するよう揃える)。新エラーコード導入は避ける (R17-4 の教訓)。
 
 ---
 
-### R19-7 [minor] `--send-secrets` 承認後も quarantine.jsonl の disposition が `hold` 固定 — `kcs status` が承認・送信済みファイルを未承認と誤報
+### R19-7 [minor] `--send-secrets` 承認後も quarantine.jsonl の disposition が `hold` 固定 — `kio status` が承認・送信済みファイルを未承認と誤報
 
 **エンジン**: Claude-Opus (実機再現)。
 
 **根本原因 (file:line)**:
-- `crates/kcs-cli/src/main.rs:9853` — `record_quarantine_candidates` は `if existing.contains(&candidate.input_path) { continue; }` で **path 既存なら一切スキップ** → `hold`→`send_approved` の遷移行が永久に追記されない。
+- `crates/kio-cli/src/main.rs:9853` — `record_quarantine_candidates` は `if existing.contains(&candidate.input_path) { continue; }` で **path 既存なら一切スキップ** → `hold`→`send_approved` の遷移行が永久に追記されない。
 - `main.rs:9838-9850` のコメントは disposition 更新 (`hold` until `--send-secrets`, then `send_approved`) を意図しているが path-only dedup がこれを阻止。
 
 **期待 vs 実際 (実機)**: `--send-secrets` で embedding/markdownize task が `done` (送信済み) になっても quarantine record は `approval_method: "hold"` のまま → 07 §122 の「どの file/task を送信対象にしたか」の監査整合を崩す。
@@ -150,13 +150,13 @@ backoff 経過 + index --online mock ×2:
 
 ---
 
-### R19-8 [minor・borderline-intended] `adapter.policy.max_input_bytes` は enqueue 時 (`kcs index`) のみ検査され、送信時 (`batch resume`/`retry`) に再検査されない — cap を後から絞ってもキュー済みタスクは新 cap を無視して送信・課金
+### R19-8 [minor・borderline-intended] `adapter.policy.max_input_bytes` は enqueue 時 (`kio index`) のみ検査され、送信時 (`batch resume`/`retry`) に再検査されない — cap を後から絞ってもキュー済みタスクは新 cap を無視して送信・課金
 
 **エンジン**: Claude-Sonnet-A (control 実機)。**裁定**: minor (borderline)。R12-2 設計メモが「prepare/enqueue 前のサイズ検査」と記し docs/07 §7.1:352-355 も継続強制保証に `allowed_scope`/`allow_network` のみ列挙 (max_input_bytes は未規定) = enqueue-time 限定は意図の範囲内とも読める。ただし同 policy ブロックの姉妹キー `allow_network` は送信毎に再検査 (`main.rs:5817-5846`) される非対称があり、送信時再検査は無回帰の防御改善。
 
 **根本原因 (file:line)**:
-- `crates/kcs-cli/src/main.rs:8372-8391` — `run_index_pipeline` が `effective_max_input_bytes` を候補ループ内で 1 回検査 (唯一の enforcement)。
-- `crates/kcs-cli/src/main.rs:6296-6318` — `online_markdownize_precondition_ok` (Pending 送信直前の唯一ゲート) は existence/hash/text-native/prepared_units のみ検査し size を見ない。
+- `crates/kio-cli/src/main.rs:8372-8391` — `run_index_pipeline` が `effective_max_input_bytes` を候補ループ内で 1 回検査 (唯一の enforcement)。
+- `crates/kio-cli/src/main.rs:6296-6318` — `online_markdownize_precondition_ok` (Pending 送信直前の唯一ゲート) は existence/hash/text-native/prepared_units のみ検査し size を見ない。
 
 **期待 vs 実際 (control 実機)**: 245 バイトの pending task 作成後 config に `max_input_bytes=244` を追記 → `batch resume` で送信・課金 (`device_spent_usd:2.45e-05`)。cap を最初から 244 にすると `skipped_oversized_files:1` で正しく機能。
 

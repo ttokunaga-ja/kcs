@@ -1,8 +1,8 @@
 """Canonical W0 ledgers for the synthetic persona-PC fixture.
 
 The generator writes one shard per direct-file scope.  Rows contain only
-portable, persona-home-relative identities: absolute roots, KCS scope IDs,
-commit hashes, mtimes, and actual KCS chunk hashes belong in later receipts.
+portable, persona-home-relative identities: absolute roots, KIO scope IDs,
+commit hashes, mtimes, and actual KIO chunk hashes belong in later receipts.
 
 The three immutable ledgers deliberately separate:
 
@@ -33,18 +33,18 @@ except ImportError:  # pragma: no cover
 
 
 SCHEMA_VERSION = 1
-PHYSICAL_ROW_SCHEMA = "kcs.persona.w0.physical-raw/v1"
-LOGICAL_ROW_SCHEMA = "kcs.persona.w0.logical-item/v1"
-SEARCHABLE_ROW_SCHEMA = "kcs.persona.w0.searchable-expectation/v1"
-SCOPE_MANIFEST_SCHEMA = "kcs.persona.w0.scope-shard/v1"
-SUITE_MANIFEST_SCHEMA = "kcs.persona.w0.suite/v1"
+PHYSICAL_ROW_SCHEMA = "kio.persona.w0.physical-raw/v1"
+LOGICAL_ROW_SCHEMA = "kio.persona.w0.logical-item/v1"
+SEARCHABLE_ROW_SCHEMA = "kio.persona.w0.searchable-expectation/v1"
+SCOPE_MANIFEST_SCHEMA = "kio.persona.w0.scope-shard/v1"
+SUITE_MANIFEST_SCHEMA = "kio.persona.w0.suite/v1"
 
 PHYSICAL_LEDGER_NAME = "w0-physical-raw.jsonl"
 LOGICAL_LEDGER_NAME = "w0-logical-items.jsonl"
 SEARCHABLE_LEDGER_NAME = "w0-searchable-expectations.jsonl"
 SCOPE_MANIFEST_NAME = "w0-scope-manifest.json"
 SUITE_MANIFEST_NAME = "w0-suite-manifest.json"
-RENDERER_ID = "kcs-persona-renderer"
+RENDERER_ID = "kio-persona-renderer"
 RENDERER_SCHEMA_VERSION = 1
 
 GATE_ROLES = (
@@ -639,10 +639,10 @@ def ledger_roots(validated):
     }
     return {
         "semantic_root_sha256": _root(
-            "kcs.persona.w0.semantic-root/v1", rows, _semantic_projection
+            "kio.persona.w0.semantic-root/v1", rows, _semantic_projection
         ),
         "state_root_sha256": _root(
-            "kcs.persona.w0.state-root/v1", rows, _state_projection
+            "kio.persona.w0.state-root/v1", rows, _state_projection
         ),
     }
 
@@ -1273,7 +1273,7 @@ def build_w0_suite_manifest(
         ),
     }
     semantic_root = hashlib.sha256(canonical_json_bytes({
-        "domain": "kcs.persona.w0.suite-semantic-root/v1",
+        "domain": "kio.persona.w0.suite-semantic-root/v1",
         "shards": [
             {
                 "persona_id": row["persona_id"],
@@ -1284,7 +1284,7 @@ def build_w0_suite_manifest(
         ],
     })).hexdigest()
     state_root = hashlib.sha256(canonical_json_bytes({
-        "domain": "kcs.persona.w0.suite-state-root/v1", "shards": shards
+        "domain": "kio.persona.w0.suite-state-root/v1", "shards": shards
     })).hexdigest()
     return {
         "schema": SUITE_MANIFEST_SCHEMA,

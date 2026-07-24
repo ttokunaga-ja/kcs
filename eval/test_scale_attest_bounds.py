@@ -177,11 +177,11 @@ class TestSqlReadBounds(unittest.TestCase):
         conn = sqlite3.connect(":memory:")
         conn.execute(
             "CREATE TABLE scopes ("
-            "scope_id TEXT, kcs_path TEXT, root_path TEXT, "
+            "scope_id TEXT, kio_path TEXT, root_path TEXT, "
             "participates_in_global_search INTEGER, indexed INTEGER)"
         )
         conn.executemany(
-            "INSERT INTO scopes VALUES (?, '/kcs', '/root', 1, 1)",
+            "INSERT INTO scopes VALUES (?, '/kio', '/root', 1, 1)",
             [(f"scope-{index}",) for index in range(100)],
         )
         statements = []

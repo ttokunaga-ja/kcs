@@ -1,4 +1,4 @@
-# Step3a 契約テスト仕様書: Step 3 (kcs-index + kcs-search)
+# Step3a 契約テスト仕様書: Step 3 (kio-index + kio-search)
 
 > 本書は **実装より先にテストを固定する** ためのケース仕様。Rust 実装コードは含まない。
 > Step 3 実装者 (別エージェント) はこの仕様を「動かしてはならない契約」として消化する。
@@ -29,19 +29,19 @@
 > CT3-MULTI-008 `--all-scopes`)。§C は stale の「eval/ 未存在」項を削除し 9 件に再編 (要-spec 4 件)。
 > §D 末尾に Step 3 Done gate (M3-1 の 18 クエリ + P0 全緑 / M3-2・M3-3 の Recall 判定は Step 4) を明記。
 
-対象クレート (Step 3): `kcs-index` + `kcs-search`
+対象クレート (Step 3): `kio-index` + `kio-search`
 実装範囲の正本: `docs/09-mvp-scope.md §3.1` の **Step 3 行** —
 chunk / Embedding / FTS5 / sqlite-vec / hybrid search (RRF / MMR / paging / cursor) /
-Evidence Pointer 発行・解決 / `kcs open` / `kcs view` / `kcs search --json` + `index_status` /
-`kcs reindex` (gen+1) / 観測ログ `metrics.jsonl` / `access.jsonl`。
+Evidence Pointer 発行・解決 / `kio open` / `kio view` / `kio search --json` + `index_status` /
+`kio reindex` (gen+1) / 観測ログ `metrics.jsonl` / `access.jsonl`。
 
 **Step 境界の明示 (最重要)**: time-travel 検索フラグ (`--at` / `--all-history` / `--include-deleted` /
 `--since`) とその chunk 集合 join 意味論 (`05 §1.6`)、`restore`、`purge` の**実行**、
-`kcs evidence verify` **CLI** (単発) は `09 §3.1` により **Step 4**。Step 3 が作るのは
+`kio evidence verify` **CLI** (単発) は `09 §3.1` により **Step 4**。Step 3 が作るのは
 その基盤 (tree_entries の HEAD 射影 `04 §4.5`、chunks append-only `04 §4.1`、
 auto snapshot 時の `first_seen_commit` 刻印 `05 §1.6`) と、**デフォルト検索 (HEAD join)** のみ。
 北極星シナリオ M3-2 / M3-3 は time-travel フラグを要するため **Step 4 完了扱い**、Step 3 の Done 条件は
-M3-1 (hybrid + Evidence Pointer + `kcs open`) が担う。根拠と除外リストは §D。
+M3-1 (hybrid + Evidence Pointer + `kio open`) が担う。根拠と除外リストは §D。
 
 ---
 
@@ -54,12 +54,12 @@ M3-1 (hybrid + Evidence Pointer + `kcs open`) が担う。根拠と除外リス�
 | `CT3-FTS-*` | FTS5 外部 content + trigger 同期 / `chunks_au` 限定 / trigram (CJK) / rebuild-db 再構築 | `04 §4.1, §4.2, §5.7` |
 | `CT3-HYBRID-*` | mode 解決 (auto→hybrid→text fallback) / fail_behavior / fallback_reason / RRF 決定論 (同点 chunk_id 昇順) | `05 §1.1, §1.3, §1.7` |
 | `CT3-MMR-*` | MMR 選択則 / 決定性 / mmr_depth / max_per_raw_hash (ページ跨ぎ) / group_by_raw_hash | `05 §1.4` |
-| `CT3-CURSOR-*` | ページング再現性 / max_rowid 固定 / query_hash 不一致 `KCS-E-SEARCH-CURSOR-001` / shallow `KCS-E-COMMIT-SHALLOW-001` | `05 §1.5, §1.8, §2.2` |
+| `CT3-CURSOR-*` | ページング再現性 / max_rowid 固定 / query_hash 不一致 `KIO-E-SEARCH-CURSOR-001` / shallow `KIO-E-COMMIT-SHALLOW-001` | `05 §1.5, §1.8, §2.2` |
 | `CT3-MULTI-*` | multi-scope: 並列列挙 / rank ベース統合 (raw スコア比較禁止) / searched_scopes / excluded_scopes / 部分失敗 exit 3 / 全失敗 exit 4 / 性能前提 | `05 §1.8` / `09 §4.1` |
 | `CT3-EVIDENCE-*` | pointer 発行 (必須フィールド + evidence_uri) / 解決手順 (scope 2 段 / gen / working tree / CAS / tombstoned / not_found / scope_unreachable) | `08 §2, §3` / `05 §1.7` |
 | `CT3-URI-*` | URI 正規形 / JSON⇄URI 往復 (optional 脱落) / object 参照区別 / `sv` / 受理規則 | `08 §2.3` |
-| `CT3-OPEN-*` | `kcs open` 解決順 (working tree 優先 → 一時展開) / dead pointer exit 4 / `kcs view` 過去 object | `06 §1.1, §7` / `05 §4.2` |
-| `CT3-REINDEX-*` | `kcs reindex --force`: gen+1 / 旧 gen 残置 / Evidence Pointer 不変 / 確認プロンプト | `07 §9` / `03 §2.1` / `06 §1` |
+| `CT3-OPEN-*` | `kio open` 解決順 (working tree 優先 → 一時展開) / dead pointer exit 4 / `kio view` 過去 object | `06 §1.1, §7` / `05 §4.2` |
+| `CT3-REINDEX-*` | `kio reindex --force`: gen+1 / 旧 gen 残置 / Evidence Pointer 不変 / 確認プロンプト | `07 §9` / `03 §2.1` / `06 §1` |
 | `CT3-OBS-*` | `index_status` (部分 index 可視化) / `metrics.jsonl` (latency) / `access.jsonl` | `05 §1.7, §7` / `06 §13` |
 
 **優先度**
@@ -107,7 +107,7 @@ canonical: {"char_end":1500,"char_start":1200,"gen":0,"heading_path":["認証仕
 chunk_hash = sha256:c5e31f10da04b722769bdbbd60a55b94c177b5f3bf9c64e5341be7281d115c3d
 ```
 
-**CHUNK-2 (gen=3, 他は CHUNK-1 と同一) — `kcs reindex --force` の gen+1 で別 identity になることの固定**:
+**CHUNK-2 (gen=3, 他は CHUNK-1 と同一) — `kio reindex --force` の gen+1 で別 identity になることの固定**:
 
 ```text
 canonical: {"char_end":1500,"char_start":1200,"gen":3,"heading_path":["認証仕様","API Token"],"raw_hash":"sha256:74bcb92d8088c950e45e4c43563332da2ca1e04b25d6d4016aa43f830d4cca8a","section_id":"認証仕様/api-token","spec_version":1,"tool_profile_hash":"sha256:e067e42e6634b8043f46a4b7f55257ab10ca6266be80cc47b6a68a5aacd2c8f0","unit_key":"page:12"}
@@ -246,7 +246,7 @@ JSON (完全形, 13 フィールド):
   path_at_commit, heading_path, section_id, char_start, char_end, scope_id, scope_path
 
 URI (正規テキスト形。chunk_hash は A.1 CHUNK-1 の r3 値):
-kcs://scope_01J8ZQABCDEFGHJKMNPQRS/sha256:9f2c1a7b04dee5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e/sha256:74bcb92d8088c950e45e4c43563332da2ca1e04b25d6d4016aa43f830d4cca8a/sha256:e067e42e6634b8043f46a4b7f55257ab10ca6266be80cc47b6a68a5aacd2c8f0/sha256:c5e31f10da04b722769bdbbd60a55b94c177b5f3bf9c64e5341be7281d115c3d
+kio://scope_01J8ZQABCDEFGHJKMNPQRS/sha256:9f2c1a7b04dee5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e/sha256:74bcb92d8088c950e45e4c43563332da2ca1e04b25d6d4016aa43f830d4cca8a/sha256:e067e42e6634b8043f46a4b7f55257ab10ca6266be80cc47b6a68a5aacd2c8f0/sha256:c5e31f10da04b722769bdbbd60a55b94c177b5f3bf9c64e5341be7281d115c3d
 
 URI → JSON (必須フィールドのみ復元, sv 省略 = 1):
   { schema_version=1, scope_id, commit, raw_hash, tool_profile_hash, chunk_hash }
@@ -256,7 +256,7 @@ URI → JSON (必須フィールドのみ復元, sv 省略 = 1):
 ```
 
 全セグメントが `[A-Za-z0-9_:.-]` に閉じるため percent-encoding 不要 (`08 §2.3`)。
-`sv` 省略時は `1`、未知 `sv` は `KCS-E-CONFIG-SCHEMA` 系 error (exit 2) (`08 §2.3`)。
+`sv` 省略時は `1`、未知 `sv` は `KIO-E-CONFIG-SCHEMA` 系 error (exit 2) (`08 §2.3`)。
 
 ### A.7 query_hash 固定ベクタ (`05 §1.8` 正準構成 — r3 新設)
 
@@ -352,7 +352,7 @@ query_hash = sha256:08820fbe38f26821717a56fde4cc1db4e104c5ff1221f62477127c070503
 
 **CT3-CHUNK-007** — P0 — chunking_config 変更で再 chunk + 旧世代 chunk 行残置
 - Given: `chunking_config_hash` = H1 で chunk 済みの instance。`[chunking] max_chars` を変更し H2 になる。
-- When: 次回 `kcs index`。
+- When: 次回 `kio index`。
 - Then: 全 normalized instance に H2 の再 chunk + 再 embedding task を積む。**旧 H1 の chunk 行は削除しない**
   (Evidence Pointer の chunk_hash 解決用に残置)。検索対象は現行 `chunking_config_hash` の chunk のみ。
   再 chunk はローカル処理 (LLM 不要)、embedding のみ再課金。
@@ -363,18 +363,18 @@ query_hash = sha256:08820fbe38f26821717a56fde4cc1db4e104c5ff1221f62477127c070503
 - Given: chunk 済みファイルを更新・リネーム・OS 削除する。
 - When: 次回 index。
 - Then: 既存 chunk 行を DELETE / 変更しない。新 raw の chunk は新行として追加。既存行への UPDATE は
-  `first_seen_commit` 付与のみ許可。chunk 行を物理削除する経路は `kcs purge` のみ (Step 4)。
-- 根拠: `04 §4.1` (「chunks 行は append-only … 削除する経路は kcs purge のみ … UPDATE は first_seen_commit
+  `first_seen_commit` 付与のみ許可。chunk 行を物理削除する経路は `kio purge` のみ (Step 4)。
+- 根拠: `04 §4.1` (「chunks 行は append-only … 削除する経路は kio purge のみ … UPDATE は first_seen_commit
   の付与のみ許可」)。
 - 補足: append-only が time-travel (`--at`/`--all-history`/`--include-deleted`) の実体だが、それらの検索
   フラグ自体は Step 4 (§D)。本テストは「Step 3 の index が既存 chunk 行を破壊しない」不変条件のみ。
 
 **CT3-CHUNK-009** — P0 — chunk 行が検索対象になるのは auto snapshot 作成後 + first_seen_commit 刻印
-- Given: `kcs index` 実行中 (auto snapshot 前) の chunk と、成功完了後の chunk。
+- Given: `kio index` 実行中 (auto snapshot 前) の chunk と、成功完了後の chunk。
 - When: 検索対象集合を確認。
-- Then: indexing 途中の chunk はどのモードでも返さない。`kcs index` 成功完了時の auto snapshot 作成後に
+- Then: indexing 途中の chunk はどのモードでも返さない。`kio index` 成功完了時の auto snapshot 作成後に
   検索対象化し、その時点で新規 chunk 行に `first_seen_commit` (当該 commit_hash) を刻む。
-- 根拠: `05 §1.6` (「chunk 行が検索対象になるのは kcs index 成功完了時の auto snapshot 作成後 …
+- 根拠: `05 §1.6` (「chunk 行が検索対象になるのは kio index 成功完了時の auto snapshot 作成後 …
   auto snapshot 作成時に新規 chunk 行へ first_seen_commit を刻む」) / `04 §4.1`。
 
 **CT3-CHUNK-010** — P0 — tree_entries HEAD 射影 (デフォルト検索の liveness join)
@@ -397,16 +397,16 @@ query_hash = sha256:08820fbe38f26821717a56fde4cc1db4e104c5ff1221f62477127c070503
 
 **CT3-CHUNK-012** — P0 (r2 で P1→P0 昇格) — rebuild-db end-to-end: sqlite.db 消去 → 再構築 → 検索結果等価
 - Given: chunk / embedding / FTS / tree_entries 構築済みの scope。検索クエリ Q の確定順序
-  (results / evidence_pointer) を記録してから `.kcs/index/sqlite.db` を消去。
-- When: `kcs repair --rebuild-db` → 同一クエリ Q を再実行。
+  (results / evidence_pointer) を記録してから `.kio/index/sqlite.db` を消去。
+- When: `kio repair --rebuild-db` → 同一クエリ Q を再実行。
 - Then: (a) chunks / embeddings / FTS index が normalized instance から再導出される。
   (b) `chunk_vec` は `objects/ → embeddings → chunk_vec` の順で再構築される。
   (c) `tree_entries` は HEAD commit 分が再構築される (他 commit 分は `--at` 時の再展開 = Step 4)。
   (d) クエリ Q の検索結果 (確定順序・evidence_pointer) が消去前と**等価**。真実は objects/。
 - 根拠: `04 §4` 冒頭 (「真実は objects/、SQLite は再構築可能」) / `04 §5.7` (復元範囲に chunks/embeddings/FTS) /
-  `04 §4.3` (embeddings → chunk_vec の再構築順) / `04 §4.5` (「kcs repair --rebuild-db は HEAD 分のみ再構築」) /
+  `04 §4.3` (embeddings → chunk_vec の再構築順) / `04 §4.5` (「kio repair --rebuild-db は HEAD 分のみ再構築」) /
   `05 §1.4-1.5` (決定論的確定順序 — 同一 chunk 集合 + 同一設定なら同一結果)。
-- 補足: `kcs repair --rebuild-db` コマンド枠は step2a CT2-TASK-010 で担保済み。本書は Step 3 artifact の
+- 補足: `kio repair --rebuild-db` コマンド枠は step2a CT2-TASK-010 で担保済み。本書は Step 3 artifact の
   再導出と検索等価性を end-to-end で追加検証する。
 
 ### CT3-EMBED-* — embedding identity / 互換性 / fallback (`03 §7, §8.1` / `04 §4.3, §5.5` / `07 §5.3`)
@@ -424,11 +424,11 @@ query_hash = sha256:08820fbe38f26821717a56fde4cc1db4e104c5ff1221f62477127c070503
 **CT3-EMBED-002** — P0 — 互換性不一致で vector 検索拒否 → text fallback
 - Given: query embedding profile と index 側 embedding の `dimensions`/`distance`/`modality`/`profile_hash`
   のいずれかが不一致。`fail_behavior="fallback"`。
-- When: `kcs search`（auto/hybrid）。
+- When: `kio search`（auto/hybrid）。
 - Then: vector 検索を強行せず text (BM25) に fallback。`resolved_mode="text"`, `fallback=true`,
-  `fallback_reason` 記録、`error_code=KCS-E-SEARCH-VEC-INCOMPAT-001`。
+  `fallback_reason` 記録、`error_code=KIO-E-SEARCH-VEC-INCOMPAT-001`。
 - 根拠: `03 §7` (互換性ルール: dim/distance/modality/profile_hash 全一致が条件) / `05 §1.1` (auto 解決:
-  profile_hash 不一致 → text fallback `KCS-E-SEARCH-VEC-INCOMPAT-001`) / `07 §5.3` (profile 不一致で再生成/text fallback)。
+  profile_hash 不一致 → text fallback `KIO-E-SEARCH-VEC-INCOMPAT-001`) / `07 §5.3` (profile 不一致で再生成/text fallback)。
 
 **CT3-EMBED-003** — P0 — 横断 vector 検索の互換性条件 (全 scope 一致でなければ text 統合)
 - Given: multi-scope 検索で embedding profile が全 scope で一致しない。
@@ -455,29 +455,29 @@ query_hash = sha256:08820fbe38f26821717a56fde4cc1db4e104c5ff1221f62477127c070503
 **CT3-EMBED-008** — P0 — 非 multimodal embedding profile の採用拒否 (2026-07-03 追加)
 - Given: `modality != "multimodal"` の embedding adapter profile (例: `modality="text"`)。
 - When: tool-lock への materialize / adapter 登録 / embedding 生成のいずれかの経路で当該 profile を使おうとする。
-- Then: `KCS-E-EMBED-MODALITY-001` (exit 2) で**拒否**され、embeddings 行も chunk_vec 行も生成されない。
+- Then: `KIO-E-EMBED-MODALITY-001` (exit 2) で**拒否**され、embeddings 行も chunk_vec 行も生成されない。
   エラーメッセージは採用可能な modality が "multimodal" のみであることを示す。
 - 根拠: `03 §7` (modality="multimodal" 固定の強制) / `07 §5.3` (単一 multimodal profile 採用) /
-  `06 §8` (`KCS-E-EMBED-MODALITY-001`)。別ベクトル空間 (text 専用等) の profile 採用を構造的に不可能にする。
+  `06 §8` (`KIO-E-EMBED-MODALITY-001`)。別ベクトル空間 (text 専用等) の profile 採用を構造的に不可能にする。
 
 **CT3-EMBED-005** — P1 — embeddings 正 / chunk_vec 導出 (rebuild 順序)
-- Given: `embeddings` テーブルと `chunk_vec` (vec0) の不整合、または `kcs repair --rebuild-db`。
+- Given: `embeddings` テーブルと `chunk_vec` (vec0) の不整合、または `kio repair --rebuild-db`。
 - When: 再構築。
 - Then: `objects/ → embeddings → chunk_vec` の順に再構築する。`embeddings` を正とし `chunk_vec` は導出物。
 - 根拠: `04 §4.3` (「embeddings テーブルを正とし chunk_vec は導出物 … objects/ → embeddings → chunk_vec の順に再構築」)。
 
 **CT3-EMBED-006** — P1 — content ベース再利用 (同一 text_hash × profile で Adapter を呼ばない)
-- Given: `(text_hash, embedding profile_hash, dimensions, distance, modality)` 一致の既存 embedding が同一 .kcs 内。
+- Given: `(text_hash, embedding profile_hash, dimensions, distance, modality)` 一致の既存 embedding が同一 .kio 内。
 - When: embedding task。
 - Then: Adapter を呼ばず既存 vector を再利用。incremental Markdownize 後の unchanged unit 由来で本文不変の
   chunk は embedding を再生成しない。
 - 根拠: `04 §5.5` (embedding の content ベース再利用) / `03 §8` (text_hash は抽出範囲のみの hash)。
 
 **CT3-EMBED-007** — P1 — vector-only モードで互換性 NG は error (fallback しない)
-- Given: `kcs search --vector` で embedding 互換性 NG。
+- Given: `kio search --vector` で embedding 互換性 NG。
 - When: 検索。
 - Then: text に fallback せず error (`--vector` は失敗時 error)。auto/hybrid の fallback とは分岐する。
-- 根拠: `05 §1.2` (「--vector … 失敗時は error」) / `05 §1.1` (両方不可 → error `KCS-E-SEARCH-VEC-UNAVAIL-001`)。
+- 根拠: `05 §1.2` (「--vector … 失敗時は error」) / `05 §1.1` (両方不可 → error `KIO-E-SEARCH-VEC-UNAVAIL-001`)。
 
 ### CT3-FTS-* — FTS5 外部 content + trigger + trigram (`04 §4.1, §4.2, §5.7`)
 
@@ -507,7 +507,7 @@ query_hash = sha256:08820fbe38f26821717a56fde4cc1db4e104c5ff1221f62477127c070503
   `[search.fts]` config (`04 §4.2`)。
 
 **CT3-FTS-004** — P0 — FTS index は rebuild-db で chunks から再構築
-- Given: FTS index を破棄し `kcs repair --rebuild-db`。
+- Given: FTS index を破棄し `kio repair --rebuild-db`。
 - When: 再構築。
 - Then: `chunks` から FTS を再導出する (真実は objects/ 由来の chunks)。
 - 根拠: `04 §5.7` (復元範囲に FTS index) / `04 §4` 冒頭。
@@ -516,22 +516,22 @@ query_hash = sha256:08820fbe38f26821717a56fde4cc1db4e104c5ff1221f62477127c070503
 
 **CT3-HYBRID-001** — P0 — auto 解決: 両方利用可能 → hybrid
 - Given: text + vector 両方利用可能 (embedding 互換性 OK)、`default_mode="auto"`。
-- When: `kcs search "..."`。
+- When: `kio search "..."`。
 - Then: `resolved_mode="hybrid"`。RRF(text, vector) で融合する。
 - 根拠: `05 §1.1` (auto 解決順: 両方利用可能 → hybrid)。
 
 **CT3-HYBRID-002** — P0 — auto 解決: vector のみ NG → text fallback + 可視化
 - Given: vector 不可 (embedding 未設定 or 互換性 NG)、`fail_behavior="fallback"`。
-- When: `kcs search`。
+- When: `kio search`。
 - Then: `requested_mode="auto"`, `resolved_mode="text"`, `fallback=true`, `fallback_reason` (例
-  `"embedding_endpoint_not_configured"`), `error_code` (該当時 `KCS-E-SEARCH-VEC-*`)。fallback を隠さない。
+  `"embedding_endpoint_not_configured"`), `error_code` (該当時 `KIO-E-SEARCH-VEC-*`)。fallback を隠さない。
 - 根拠: `05 §1.1` (vector のみ NG → text) / `05 §1.7` (レスポンス schema: fallback / fallback_reason / error_code)。
 
 **CT3-HYBRID-003** — P0 — 両方不可 → error
 - Given: text も vector も不可。
-- When: `kcs search`。
-- Then: error (`KCS-E-SEARCH-VEC-UNAVAIL-001`)。
-- 根拠: `05 §1.1` (両方不可 → error `KCS-E-SEARCH-VEC-UNAVAIL-001`)。
+- When: `kio search`。
+- Then: error (`KIO-E-SEARCH-VEC-UNAVAIL-001`)。
+- 根拠: `05 §1.1` (両方不可 → error `KIO-E-SEARCH-VEC-UNAVAIL-001`)。
 
 **CT3-HYBRID-004** — P0 — RRF 融合スコアと最終順位 (数値ベクタ)
 - Given: A.4 の rank 表 (text: c1..c4, vector: c2,c3,c1,c5)、`k=60, w_text=w_vector=1.0`。
@@ -558,7 +558,7 @@ query_hash = sha256:08820fbe38f26821717a56fde4cc1db4e104c5ff1221f62477127c070503
 - 根拠: `05 §1.3` (「1 クエリで返しうる結果の上限は候補プール件数 (ページングしても超えない)」)。
 
 **CT3-HYBRID-008** — P1 — `--hybrid` 強制時の vector 失敗は fail_behavior に従う
-- Given: `kcs search --hybrid`、vector 失敗、`fail_behavior ∈ {fallback, error, warn}`。
+- Given: `kio search --hybrid`、vector 失敗、`fail_behavior ∈ {fallback, error, warn}`。
 - When: 検索。
 - Then: `fallback` → text へ、`error` → error、`warn` → 警告付きで text。設定に従い分岐する。
 - 根拠: `05 §1.2` (「--hybrid … vector 失敗時は fail_behavior に従う」) / `05 §1.1` (fail_behavior)。
@@ -620,15 +620,15 @@ query_hash = sha256:08820fbe38f26821717a56fde4cc1db4e104c5ff1221f62477127c070503
 - 根拠: `05 §1.5` (「max_rowid: cursor 発行時点の chunks 最大 rowid … chunks 行は append-only なので単調増加」) /
   `05 §1.8` (cursor の per-scope sub-cursor に `max_rowid`)。
 
-**CT3-CURSOR-003** — P0 — query_hash 不一致の cursor は `KCS-E-SEARCH-CURSOR-001` で拒否
+**CT3-CURSOR-003** — P0 — query_hash 不一致の cursor は `KIO-E-SEARCH-CURSOR-001` で拒否
 - Given: あるクエリ・条件で発行した cursor を、別クエリ (または別 mode/diversify/rrf/time-travel 条件) の
   検索に渡す。
 - When: cursor を使う。
-- Then: token 全体の `query_hash` 不一致を検出し `KCS-E-SEARCH-CURSOR-001` で拒否 (exit は横断規約)。
+- Then: token 全体の `query_hash` 不一致を検出し `KIO-E-SEARCH-CURSOR-001` で拒否 (exit は横断規約)。
   query_hash の算出は A.7 の正準構成 (`JCS({query, mode, scope_mode, scopes, diversify, rrf, time_travel})`)
   に一致し、A.7 fixture の入力なら `sha256:08820fbe…d773`。`limit`/`--offset`/`--cursor`/`--json` の違いでは
   hash は変わらない (拒否しない)。
-- 根拠: `05 §1.5` (「query_hash が不一致の cursor は KCS-E-SEARCH-CURSOR-001 で拒否」) / `05 §1.8`
+- 根拠: `05 §1.5` (「query_hash が不一致の cursor は KIO-E-SEARCH-CURSOR-001 で拒否」) / `05 §1.8`
   (query_hash の正準構成 — 2026-07-03 確定、§C-2 解消。`rrf` キーを含む最終形は発注側裁定 — A.7 注記)。
 - 補足 (r3): r2 の「canonical 入力構成が未定義につき hash 値は固定しない」は解消 — A.7 の固定ベクタで
   値まで assert する。
@@ -640,12 +640,12 @@ query_hash = sha256:08820fbe38f26821717a56fde4cc1db4e104c5ff1221f62477127c070503
   各 sub-cursor は `{scope_id, snapshot_commit, max_rowid, consumed}`。
 - 根拠: `05 §1.8` (cursor の multi-scope 拡張 / opaque token)。
 
-**CT3-CURSOR-005** — P0 — shallow 化 commit を snapshot とする cursor 再計算は `KCS-E-COMMIT-SHALLOW-001`
+**CT3-CURSOR-005** — P0 — shallow 化 commit を snapshot とする cursor 再計算は `KIO-E-COMMIT-SHALLOW-001`
 - Given: cursor 中の `snapshot_commit` が shallow 化済み (tree 破棄)。
 - When: 次ページの再計算。
-- Then: `KCS-E-COMMIT-SHALLOW-001` で失敗し、cursor なしの再検索を案内する。
+- Then: `KIO-E-COMMIT-SHALLOW-001` で失敗し、cursor なしの再検索を案内する。
 - 根拠: `05 §1.8` (「cursor 中の snapshot_commit が shallow 化済みの場合、cursor の再計算は
-  KCS-E-COMMIT-SHALLOW-001 で失敗する」) / `05 §2.2`。
+  KIO-E-COMMIT-SHALLOW-001 で失敗する」) / `05 §2.2`。
 - 補足: shallow 化の**生成**は GC (Phase 4+、§D)。本テストは手置きの shallow commit (tree object 不在) に
   対する **再計算失敗の契約**のみ検証する。
 
@@ -659,7 +659,7 @@ query_hash = sha256:08820fbe38f26821717a56fde4cc1db4e104c5ff1221f62477127c070503
 
 **CT3-MULTI-001** — P0 — デフォルトは全 indexed scope 横断、対象は participates_in_global_search=true
 - Given: scope_registry に複数 scope (一部 `participates_in_global_search=false`)。
-- When: `kcs search "..."` (scope 指定なし)。
+- When: `kio search "..."` (scope 指定なし)。
 - Then: `participates_in_global_search=true` の scope を列挙して横断検索。`--scope <path>` / `--descendants`
   指定時は root_path 前方一致で絞り込む。
 - 根拠: `05 §1.8` (対象 scope の列挙 1-2) / `06 §3` (デフォルト全 indexed scope 横断)。
@@ -687,10 +687,10 @@ query_hash = sha256:08820fbe38f26821717a56fde4cc1db4e104c5ff1221f62477127c070503
 - 根拠: `05 §1.8` (レスポンス契約の拡張 / 対象 scope の列挙 3: excluded_scopes に理由付き記録) /
   `05 §1.7` / `06 §9` (Agent API 保証: searched_scopes / excluded_scopes / fallback_reason)。
 
-**CT3-MULTI-005** — P0 — 部分失敗は結果を返し exit 3、全失敗は `KCS-E-SEARCH-SCOPE-ALL-FAILED-001` exit 4
+**CT3-MULTI-005** — P0 — 部分失敗は結果を返し exit 3、全失敗は `KIO-E-SEARCH-SCOPE-ALL-FAILED-001` exit 4
 - Given: (a) 一部 scope 失敗 / stale / timeout、(b) 全 scope 失敗。
 - When: 検索。
-- Then: (a) 結果を返し `excluded_scopes` に記録、exit 3。(b) error `KCS-E-SEARCH-SCOPE-ALL-FAILED-001`、exit 4。
+- Then: (a) 結果を返し `excluded_scopes` に記録、exit 3。(b) error `KIO-E-SEARCH-SCOPE-ALL-FAILED-001`、exit 4。
 - 根拠: `05 §1.8` (部分失敗と exit code 表: 一部失敗=3 / 全失敗=`SCOPE-ALL-FAILED-001`=4) / `06 §7`。
 
 **CT3-MULTI-006** — P1 — 並列度と per-scope timeout
@@ -712,7 +712,7 @@ query_hash = sha256:08820fbe38f26821717a56fde4cc1db4e104c5ff1221f62477127c070503
 
 **CT3-MULTI-008** — P1 (r2 新設) — `--all-scopes` の受理と対象範囲
 - Given: scope_registry に複数 scope。カレントディレクトリは特定 scope 内。
-- When: `kcs search "..." --all-scopes`。
+- When: `kio search "..." --all-scopes`。
 - Then: フラグを受理し、全 indexed scope を対象として横断検索する (デフォルト = 全 indexed scope 横断
   `06 §3` と同一の対象列挙)。`searched_scopes` に対象 scope を全列挙する。
 - 根拠: `06 §3` (`--all-scopes` 構文 / デフォルトは全 indexed scope 横断) / `05 §1.8` (列挙規則)。
@@ -730,7 +730,7 @@ query_hash = sha256:08820fbe38f26821717a56fde4cc1db4e104c5ff1221f62477127c070503
   `char_start` / `char_end` を持つ (M3-1 完了条件「Evidence Pointer に commit + raw_hash + chunk_hash +
   heading_path + span」)。`tree` / `path_at_commit` / `section_id` / `scope_path` は optional (`08 §2.2`)
   であり、存在を必須 assert しない (存在する場合は §2 schema に整合すること)。`evidence_uri` は
-  §2.3 正規テキスト形で、そのまま `kcs open`/`kcs view` に渡せる。
+  §2.3 正規テキスト形で、そのまま `kio open`/`kio view` に渡せる。
 - 根拠: `08 §2.1` (必須 6 フィールド) / `08 §2.2` (optional — 必須化しない) / `05 §1.7` (レスポンス schema /
   evidence_uri / evidence_pointer をそのまま埋め込む) / `09 §4.1` (Evidence 必須フィールド充足率 100%) /
   `09 §M3-1` (heading_path + span は検索発行 pointer の完了条件)。
@@ -748,9 +748,9 @@ query_hash = sha256:08820fbe38f26821717a56fde4cc1db4e104c5ff1221f62477127c070503
 **CT3-EVIDENCE-003** — P0 — 解決手順: scope 2 段解決 (scope_path → registry)
 - Given: pointer の (a) scope_path が有効で scope_id 一致 / (b) scope_path 不達だが registry に scope_id 登録あり。
 - When: pointer を解決。
-- Then: (a) scope_path の .kcs を使う。(b) scope_registry を scope_id で照会し kcs_path を得る (同一 scope_id
+- Then: (a) scope_path の .kio を使う。(b) scope_registry を scope_id で照会し kio_path を得る (同一 scope_id
   複数登録は last_seen_at 最新優先、曖昧なら候補一覧 error)。どちらも失敗 →
-  `KCS-E-EVIDENCE-SCOPE-UNREACHABLE-001` (scope_unreachable)。root 信頼は scope_id。
+  `KIO-E-EVIDENCE-SCOPE-UNREACHABLE-001` (scope_unreachable)。root 信頼は scope_id。
 - 根拠: `08 §3.1` 手順1 (scope の 2 段解決) / `08 §3.2` (scope_unreachable) / `05 §1.7` (root 信頼は scope_id)。
 
 **CT3-EVIDENCE-004** — P0 — 解決手順: commit → tree → raw_hash entry → gen で normalized instance → chunk text
@@ -776,14 +776,14 @@ query_hash = sha256:08820fbe38f26821717a56fde4cc1db4e104c5ff1221f62477127c070503
 - Given: (a) raw_hash が tombstone を持つ / (b) tombstone なしで raw object 不在 / (c) scope 不達。
 - When: 解決。
 - Then: (a) `status="purged"` の tombstone レスポンス (`purged_at/purged_reason/purged_in_commit/raw_hash`)。
-  (b) `KCS-E-PURGE-NOT-FOUND-001` (not_found)。(c) `KCS-E-EVIDENCE-SCOPE-UNREACHABLE-001` (scope_unreachable)。
+  (b) `KIO-E-PURGE-NOT-FOUND-001` (not_found)。(c) `KIO-E-EVIDENCE-SCOPE-UNREACHABLE-001` (scope_unreachable)。
 - 根拠: `08 §3.2` (部分的失敗 3 値) / `08 §4.1` (tombstone schema) / `08 §4.2` (not_found)。
-- 補足: tombstone の**生成** (`kcs purge`) は Step 4 (§D)。本テストは `05 §3.5` の tombstone ファイル形式
-  (`.kcs/tombstones/ab/cd/<raw_hash>`) を**手置き**して、Step 3 の resolver が tombstone/not_found を
-  正しく返すことを検証する (`kcs open` の dead pointer exit 4 が Step 3 で必要なため resolver は Step 3)。
+- 補足: tombstone の**生成** (`kio purge`) は Step 4 (§D)。本テストは `05 §3.5` の tombstone ファイル形式
+  (`.kio/tombstones/ab/cd/<raw_hash>`) を**手置き**して、Step 3 の resolver が tombstone/not_found を
+  正しく返すことを検証する (`kio open` の dead pointer exit 4 が Step 3 で必要なため resolver は Step 3)。
 
 **CT3-EVIDENCE-007** — P1 — results[].scope_path は表示・高速化ヒント (解決の root 信頼にしない)
-- Given: pointer の scope_path が実際の .kcs 位置と食い違う (移動後) が scope_id は一致。
+- Given: pointer の scope_path が実際の .kio 位置と食い違う (移動後) が scope_id は一致。
 - When: 解決。
 - Then: scope_id が一致する限り解決可能 (registry 経由)。scope_path は解決の root 信頼にしない。
 - 根拠: `08 §2.2` (「scope_path も … ヒントであり、解決の root 信頼にしない … scope_id が一致する限り
@@ -796,7 +796,7 @@ query_hash = sha256:08820fbe38f26821717a56fde4cc1db4e104c5ff1221f62477127c070503
 - 根拠: `08 §8` (「新 schema は古い解決ロジックでもエラーなく扱える (forward compatible) … 未知フィールドは無視」)。
 
 **CT3-EVIDENCE-009** — P0 (r2 新設) — eval 結合点: raw_hash / section_id は results[].evidence_pointer から読む
-- Given: `kcs search --json` の結果と、eval ハーネス (`eval/run_eval.py`) の Recall@10 判定。
+- Given: `kio search --json` の結果と、eval ハーネス (`eval/run_eval.py`) の Recall@10 判定。
 - When: eval ハーネスが上位 10 件の distinct `(raw_hash, section)` を数える。
 - Then: `results[]` の各要素は top-level に `chunk_hash / evidence_pointer / evidence_uri / score /
   scope_path` を持ち (`05 §1.7` の例と同形)、`raw_hash` / `section_id` / `heading_path` は
@@ -819,92 +819,92 @@ query_hash = sha256:08820fbe38f26821717a56fde4cc1db4e104c5ff1221f62477127c070503
 - 根拠: `08 §2.3` (「URI は必須フィールドのみ … 往復で失われてよいのは optional フィールドだけ」)。
 
 **CT3-URI-002** — P0 — object 参照 URI (第 2 セグメント `object`) を Evidence Pointer と区別
-- Given: `kcs://<scope_id>/object/image/<image_hash>` と Evidence Pointer URI
-  (`kcs://<scope_id>/sha256:.../.../.../...`)。
+- Given: `kio://<scope_id>/object/image/<image_hash>` と Evidence Pointer URI
+  (`kio://<scope_id>/sha256:.../.../.../...`)。
 - When: URI を判別。
 - Then: 第 2 セグメントがリテラル `object` なら object 参照、`sha256:` prefix なら Evidence Pointer。
-  Evidence Pointer の第 2 セグメント (commit) は常に `sha256:` prefix を持つため衝突しない。`kcs open` は
+  Evidence Pointer の第 2 セグメント (commit) は常に `sha256:` prefix を持つため衝突しない。`kio open` は
   object 参照も受理して該当 object を解決する。
 - 根拠: `08 §2.3` (第 2 セグメント `object` の区別 / commit は常に sha256: prefix) / step2a CT2-IMAGE-002/003
   (object 参照 URI の生成は Step 2、解決は Step 3)。
 
 **CT3-URI-003** — P0 — `<pointer>` 受理規則 (prefix 優先順位)
-- Given: (1) `-` (stdin) / (2) `kcs://` (URI) / (3) `{` (inline JSON) / (4) `sha256:` (短縮形) / (5) その他。
+- Given: (1) `-` (stdin) / (2) `kio://` (URI) / (3) `{` (inline JSON) / (4) `sha256:` (短縮形) / (5) その他。
 - When: CLI の `<pointer>` 引数を解釈。
-- Then: prefix 優先順で判定。(4) 短縮形は `kcs open`/`kcs view` のみで object store を照会し種別判別
+- Then: prefix 優先順で判定。(4) 短縮形は `kio open`/`kio view` のみで object store を照会し種別判別
   (chunk_hash/raw_hash)、多義なら候補一覧 error。(5) parse 失敗 → exit 2 (invalid usage)。
 - 根拠: `08 §2.3` (CLI `<pointer>` 受理規則 5 分岐) / `06 §1` (受理形式は 08 §2.3 を正本)。
 
 **CT3-URI-004** — P1 — `sv` 省略 = 1、未知 sv は exit 2
 - Given: (a) `?sv` なし URI / (b) `?sv=99` (未知)。
 - When: parse。
-- Then: (a) `schema_version=1`。(b) `KCS-E-CONFIG-SCHEMA` 系 error、exit 2。
-- 根拠: `08 §2.3` (「sv 省略時は 1。未知の sv は KCS-E-CONFIG-SCHEMA 系 error (exit 2)」)。
+- Then: (a) `schema_version=1`。(b) `KIO-E-CONFIG-SCHEMA` 系 error、exit 2。
+- 根拠: `08 §2.3` (「sv 省略時は 1。未知の sv は KIO-E-CONFIG-SCHEMA 系 error (exit 2)」)。
 
-### CT3-OPEN-* — kcs open / kcs view (`06 §1.1, §7` / `05 §4.2`)
+### CT3-OPEN-* — kio open / kio view (`06 §1.1, §7` / `05 §4.2`)
 
 **CT3-OPEN-001** — P0 — 解決順: working tree に同一 raw_hash があればそれを開く (リネーム耐性)
 - Given: pointer を解決した raw_hash を持つファイルが working tree に存在 (path_at_commit と異なる path でもよい)。
-- When: `kcs open <pointer>`。
+- When: `kio open <pointer>`。
 - Then: その実ファイルを OS 規定アプリで開く (一時展開しない)。
 - 根拠: `06 §1.1` 手順 1-2 (「pointer を解決して raw_hash … working tree に同一 raw_hash を持つファイルが
   存在すれば … その実ファイルを OS 規定アプリで開く」)。
 
 **CT3-OPEN-002** — P0 — 一時展開: working tree に無ければ CAS から read-only 展開して開く
 - Given: working tree に該当 raw_hash が無い (削除済み / 過去版 / raw_hash 直指定)。
-- When: `kcs open`。
-- Then: raw object を `~/.cache/kcs/open/<raw_hash 先頭 12 桁>/<path_at_commit の basename>` に
+- When: `kio open`。
+- Then: raw object を `~/.cache/kio/open/<raw_hash 先頭 12 桁>/<path_at_commit の basename>` に
   read-only 展開し OS 規定アプリで開く。restore ではない (working tree に書かない)。stderr に
-  「原本は working tree に存在しない … 永続コピーは kcs restore --to」を表示。
+  「原本は working tree に存在しない … 永続コピーは kio restore --to」を表示。
 - 根拠: `06 §1.1` 手順 3 (一時展開 / read-only / 展開先) / 一時展開は restore ではない旨。
 
 **CT3-OPEN-003** — P0 — dead pointer (tombstoned / not_found / scope_unreachable) は exit 4
 - Given: 解決が tombstoned / not_found / scope_unreachable のいずれか。
-- When: `kcs open` / `kcs view` / `kcs restore`。
+- When: `kio open` / `kio view` / `kio restore`。
 - Then: exit 4。
-- 根拠: `06 §7` (「kcs open / view / restore  dead pointer (tombstoned / not_found / scope_unreachable) は 4」) /
+- 根拠: `06 §7` (「kio open / view / restore  dead pointer (tombstoned / not_found / scope_unreachable) は 4」) /
   `06 §1.1` 手順 4。
-- 補足: `kcs restore` 自体は Step 4 だが、`kcs open`/`kcs view` の dead pointer exit 4 は Step 3。本テストは
+- 補足: `kio restore` 自体は Step 4 だが、`kio open`/`kio view` の dead pointer exit 4 は Step 3。本テストは
   open/view で検証 (restore は §D)。
 
-**CT3-OPEN-004** — P0 — `kcs view` は過去版 object をそのまま返す (再 Markdownize しない)
+**CT3-OPEN-004** — P0 — `kio view` は過去版 object をそのまま返す (再 Markdownize しない)
 - Given: pointer / path を指す chunk / normalized unit。
-- When: `kcs view <pointer>`。
+- When: `kio view <pointer>`。
 - Then: 当該 commit の object をそのまま返す (再 Markdownize / 再生成しない)。
 - 根拠: `05 §4.2` (「過去 commit 時点の Markdown を再生成せず、当該 commit の object をそのまま返す」) /
-  `08 §7.1` (`kcs view <pointer>` = 該当 chunk の Markdown 取得)。
-- 補足: `kcs view <path> --at <commit>` の `--at` は time-travel につき Step 4 (§D)。本テストは pointer 指定の
+  `08 §7.1` (`kio view <pointer>` = 該当 chunk の Markdown 取得)。
+- 補足: `kio view <path> --at <commit>` の `--at` は time-travel につき Step 4 (§D)。本テストは pointer 指定の
   過去 object 返却 (再生成しない契約) のみ。
 
-**CT3-OPEN-005** — P1 — 短縮形 `sha256:` を kcs open が種別判別して解決
-- Given: `kcs open sha256:<chunk_hash>` / `kcs open sha256:<raw_hash>`。
+**CT3-OPEN-005** — P1 — 短縮形 `sha256:` を kio open が種別判別して解決
+- Given: `kio open sha256:<chunk_hash>` / `kio open sha256:<raw_hash>`。
 - When: 解決。
 - Then: object store を照会して種別を判別し、chunk_hash なら chunk、raw_hash なら raw として
-  カレント .kcs + HEAD 文脈に解決。多義なら候補一覧 error。
-- 根拠: `08 §2.3` (受理規則 4 / 短縮形は kcs open / kcs view のみ)。
+  カレント .kio + HEAD 文脈に解決。多義なら候補一覧 error。
+- 根拠: `08 §2.3` (受理規則 4 / 短縮形は kio open / kio view のみ)。
 
-### CT3-REINDEX-* — kcs reindex --force (`07 §9` / `03 §2.1` / `06 §1`)
+### CT3-REINDEX-* — kio reindex --force (`07 §9` / `03 §2.1` / `06 §1`)
 
 **CT3-REINDEX-001** — P0 — `--force` は gen+1 の新 instance を作り旧 gen を残置
 - Given: `g0` instance が存在する `(raw_hash, tool_profile_hash)`。
-- When: `kcs reindex --force`。
+- When: `kio reindex --force`。
 - Then: `gen = 現最大 + 1` (= g1) の新 normalized instance を作る。既存 `g0` instance (manifest / unit object)
   は保全 (上書き・削除しない)。`--force` は first-instance-wins の唯一の上書き経路。
 - 根拠: `07 §9` (「explicit re-normalize … gen+1 の新 normalized instance … 旧 instance は保全」) /
-  `03 §2.1` (gen / 「kcs reindex --force だけが gen = 現最大 + 1 の新 instance を作り、既存 instance は保全」) /
+  `03 §2.1` (gen / 「kio reindex --force だけが gen = 現最大 + 1 の新 instance を作り、既存 instance は保全」) /
   `06 §1` (reindex --force)。
 
 **CT3-REINDEX-002** — P0 — Evidence Pointer 不変: 過去 commit の tree entry は旧 gen を参照し続ける
-- Given: `g0` を指す既存 Evidence Pointer / 過去 commit の tree entry。`kcs reindex --force` で g1 を作成。
-- When: 過去 commit の tree entry / 既存 pointer を解決 (`kcs view --at 相当の gen 保全)。
+- Given: `g0` を指す既存 Evidence Pointer / 過去 commit の tree entry。`kio reindex --force` で g1 を作成。
+- When: 過去 commit の tree entry / 既存 pointer を解決 (`kio view --at 相当の gen 保全)。
 - Then: 過去 commit の tree entry は旧 gen (g0) を指し続け、既存 pointer は g0 の chunk を解決する。
   新規参照 (新 commit の tree entry / 新 chunk) のみ最新 gen (g1) を使う。
-- 根拠: `03 §2.1` (「kcs reindex --force 後も過去 commit の tree entry は旧 gen を指し続ける」/
-  「新規参照は常に最新 gen」) / `03 §8` (tree entry の gen 保全で `kcs view --at` と pointer 不変性が成立) /
+- 根拠: `03 §2.1` (「kio reindex --force 後も過去 commit の tree entry は旧 gen を指し続ける」/
+  「新規参照は常に最新 gen」) / `03 §8` (tree entry の gen 保全で `kio view --at` と pointer 不変性が成立) /
   `08 §6` (不変性保証)。
 
 **CT3-REINDEX-003** — P0 — `--force` は確認プロンプト必須 (--yes で省略可)
-- Given: `kcs reindex --force` を対話環境で実行。
+- Given: `kio reindex --force` を対話環境で実行。
 - When: 実行。
 - Then: 確認プロンプトを表示 (拒否で exit 9)。`--yes` で省略可。
 - 根拠: `06 §1` (「--force は確認プロンプト必須 (--yes で省略可)」) / `06 §7` (exit 9 = confirm 拒否)。
@@ -919,7 +919,7 @@ query_hash = sha256:08820fbe38f26821717a56fde4cc1db4e104c5ff1221f62477127c070503
 
 **CT3-OBS-001** — P0 — index_status: 部分 index (AI 強化未完了) を可視化
 - Given: AI 強化 (Markdownize / Embedding) が全対象に行き渡っていない (`enriched_ratio < 1.0`)。
-- When: `kcs search --json`。
+- When: `kio search --json`。
 - Then: `index_status = { enriched_ratio, pending_enrichment_tasks, budget_paused }` を返す
   (enriched_ratio < 1.0 のときのみ必須)。人間向けは「AI 強化 42% (budget により一時停止中)」の 1 行に翻訳。
 - 根拠: `05 §1.7` (index_status / enriched_ratio < 1.0 のとき必須 / 人間向け翻訳) / `09 §3.1` (index_status = Step 3)。
@@ -927,8 +927,8 @@ query_hash = sha256:08820fbe38f26821717a56fde4cc1db4e104c5ff1221f62477127c070503
   「部分 index 時に index_status を返し done/pending/paused を隠さない」ことのみ assert。
 
 **CT3-OBS-002** — P0 — metrics.jsonl への per-search latency 記録 (M3 計測の一次データ)
-- Given: `kcs search` を複数回実行 (redact_logs 既定 true)。
-- When: `~/.local/share/kcs/logs/metrics.jsonl` を読む。
+- Given: `kio search` を複数回実行 (redact_logs 既定 true)。
+- When: `~/.local/share/kio/logs/metrics.jsonl` を読む。
 - Then: **1 回の検索実行ごとに 1 行**が追記され、各行は envelope 必須フィールド `ts, level, code,
   component, message, context` (`ts` は UTC ISO8601+Z) に加え **`metric: "search.latency_ms"` /
   `value: <実測 ms>`** を持ち、`context` に `mode` (実効 mode) / `scope_count` / `result_count` を含む。
@@ -940,8 +940,8 @@ query_hash = sha256:08820fbe38f26821717a56fde4cc1db4e104c5ff1221f62477127c070503
 - 補足 (r3): r2 の保留マーク (§C-4 要-spec) は `05 §7` への spec 追記で解除。per-search 記録が firm 契約。
 
 **CT3-OBS-003** — P0 — access.jsonl に検索アクセスを記録 (redact_logs 既定 true)
-- Given: `kcs search`。
-- When: `.kcs/logs/access.jsonl` を読む。
+- Given: `kio search`。
+- When: `.kio/logs/access.jsonl` を読む。
 - Then: 検索アクセスログ行が追記される。`redact_logs` 既定 true のとき `context` の `query` 等機微
   フィールドをマスクする。行は JSON 必須フィールド `ts, level, code, component, message, context` を持つ。
 - 根拠: `05 §7` (access.jsonl / redact_logs 既定 true) / `06 §13` (必須フィールド / redact_logs) / `09 §3.1`
@@ -996,7 +996,7 @@ query_hash = sha256:08820fbe38f26821717a56fde4cc1db4e104c5ff1221f62477127c070503
    CT3-MMR-001 同期済み。
 
 4. **[解消済み r3] per-search latency の metrics.jsonl 記録 schema** — `05 §7` (2026-07-03 追記) で確定:
-   `kcs search` は 1 回の実行ごとに metrics.jsonl へ 1 行を追記 — envelope 必須フィールド (`ts, level,
+   `kio search` は 1 回の実行ごとに metrics.jsonl へ 1 行を追記 — envelope 必須フィールド (`ts, level,
    code, component, message, context`) に加え `metric: "search.latency_ms"` / `value: <実測 ms>` /
    `context: {mode, scope_count, result_count}`。redact_logs 既定に従いクエリ本文・path は記録しない。
    1h 間隔の集計メトリクスはこの一次データから導出してよい。反映: CT3-OBS-002 の保留マーク解除、firm 契約化。
@@ -1016,7 +1016,7 @@ query_hash = sha256:08820fbe38f26821717a56fde4cc1db4e104c5ff1221f62477127c070503
    2 文字 CJK クエリで索引を使うか linear scan に落ちるかが未定義。影響: CT3-FTS-003。実装者判断
    (firm 契約は 3 文字以上の部分一致)。
 
-8. **CLI オペランド・フラグの細部** — (a) `kcs reindex [--force] [--at <commit>]` (`06 §1`) の対象
+8. **CLI オペランド・フラグの細部** — (a) `kio reindex [--force] [--at <commit>]` (`06 §1`) の対象
    (path 指定 / scope 全体 / 特定 raw_hash) の既定が未定義 (`--at` は time-travel 系につき Step 4 寄り、§D)。
    (b) `--all-scopes` (`06 §3`) とデフォルト (全 indexed scope 横断) の差分意味論
    (`participates_in_global_search=false` を含めるか) が未定義。影響: CT3-REINDEX-* / CT3-MULTI-008。実装者判断。
@@ -1035,20 +1035,20 @@ query_hash = sha256:08820fbe38f26821717a56fde4cc1db4e104c5ff1221f62477127c070503
 | --- | --- |
 | time-travel 検索フラグ `--at` / `--all-history` / `--include-deleted` / `--since` と、その chunk 集合 join 意味論 (`05 §1.6`: `chunks ⨝ tree_entries(<commit>)` / `files[status='deleted']` / 全 chunk / created_at フィルタ) | `09 §3.1` line 125: **Step 4** (`restore --to` / `--at` / `--all-history` / `--include-deleted` は同一行で Step 4)。Step 3 は基盤 (tree_entries HEAD 射影 `04 §4.5` / chunks append-only `04 §4.1` / first_seen_commit 刻印 `05 §1.6`) を作り、**デフォルト検索 (HEAD join) のみ**を検証 (CT3-CHUNK-008/009/010)。M3-2 (`--all-history`) / M3-3 (`--include-deleted`) は time-travel を要するため **Step 4 完了扱い**。Step 3 の Done は M3-1 |
 | 非 HEAD commit の tree_entries 展開 (`--at` 時の tree object 展開挿入) | `04 §4.5` (「--at <commit> 検索時、当該 commit 分が無ければ tree object を展開して挿入」) は time-travel の一部 → Step 4。Step 3 は HEAD 分の常駐のみ (CT3-CHUNK-010) |
-| `restore --to` / `--force` / working tree 非破壊 | `09 §3.1` line 125: Step 4 (`05 §4`)。`kcs open` の一時展開 (restore ではない、`06 §1.1`) は Step 3 (CT3-OPEN-002) として区別 |
-| `kcs view <path> --at <commit>` の `--at` 分岐 | `--at` は time-travel → Step 4。Step 3 は pointer 指定の過去 object 返却 (再生成しない契約、CT3-OPEN-004) のみ |
-| purge の**実行** (tombstone 発行 / `commit_type=purged` commit / `--erase-tombstone` / chunk 行物理削除) | `09 §3.1` line 126: Step 4 (`05 §3`)。Step 3 は tombstone **解決** (手置きファイルで resolver が tombstoned/not_found を返す、`kcs open` exit 4 に必要、CT3-EVIDENCE-006 / CT3-OPEN-003) のみ。tombstone の生成はしない |
-| `kcs evidence verify <pointer>` (単発) CLI と `--strict` | `09 §3.1` line 128: **Step 4** (`08 §4.3`)。Step 3 は verify が surface する alive/tombstoned/not_found の **resolver 計算** (CT3-EVIDENCE-006) を担うが、`kcs evidence verify` サブコマンド枠は Step 4。exit code 4 の検証は `kcs open`/`kcs view` (Step 3) で行う (CT3-OPEN-003) |
-| `kcs evidence verify --batch` / `kcs evidence retarget` | `09 §3.1` line 135-136: Phase 4+ (`08 §4.3`, `08 §5`) |
-| `kcs repair --verify-objects` (CAS 整合性検証) | `09 §3.1` line 127: Step 4 (`10 §7.5`)。`kcs repair --rebuild-db` の chunk/FTS/embedding 再導出 (CT3-CHUNK-012 / CT3-FTS-004 / CT3-EMBED-005) は Step 3 (`04 §5.7`)。コマンド枠は step2a CT2-TASK-010 で担保済み |
-| shallow 化の**生成** (tiered retention / `kcs gc` / tree 破棄) | `05 §2.2`, `09 §3.1` line 130-132: Phase 4+。Step 3 は shallow commit の **解決/失敗契約** (手置きの shallow commit で CT3-EVIDENCE-005 / CT3-CURSOR-005) のみ |
+| `restore --to` / `--force` / working tree 非破壊 | `09 §3.1` line 125: Step 4 (`05 §4`)。`kio open` の一時展開 (restore ではない、`06 §1.1`) は Step 3 (CT3-OPEN-002) として区別 |
+| `kio view <path> --at <commit>` の `--at` 分岐 | `--at` は time-travel → Step 4。Step 3 は pointer 指定の過去 object 返却 (再生成しない契約、CT3-OPEN-004) のみ |
+| purge の**実行** (tombstone 発行 / `commit_type=purged` commit / `--erase-tombstone` / chunk 行物理削除) | `09 §3.1` line 126: Step 4 (`05 §3`)。Step 3 は tombstone **解決** (手置きファイルで resolver が tombstoned/not_found を返す、`kio open` exit 4 に必要、CT3-EVIDENCE-006 / CT3-OPEN-003) のみ。tombstone の生成はしない |
+| `kio evidence verify <pointer>` (単発) CLI と `--strict` | `09 §3.1` line 128: **Step 4** (`08 §4.3`)。Step 3 は verify が surface する alive/tombstoned/not_found の **resolver 計算** (CT3-EVIDENCE-006) を担うが、`kio evidence verify` サブコマンド枠は Step 4。exit code 4 の検証は `kio open`/`kio view` (Step 3) で行う (CT3-OPEN-003) |
+| `kio evidence verify --batch` / `kio evidence retarget` | `09 §3.1` line 135-136: Phase 4+ (`08 §4.3`, `08 §5`) |
+| `kio repair --verify-objects` (CAS 整合性検証) | `09 §3.1` line 127: Step 4 (`10 §7.5`)。`kio repair --rebuild-db` の chunk/FTS/embedding 再導出 (CT3-CHUNK-012 / CT3-FTS-004 / CT3-EMBED-005) は Step 3 (`04 §5.7`)。コマンド枠は step2a CT2-TASK-010 で担保済み |
+| shallow 化の**生成** (tiered retention / `kio gc` / tree 破棄) | `05 §2.2`, `09 §3.1` line 130-132: Phase 4+。Step 3 は shallow commit の **解決/失敗契約** (手置きの shallow commit で CT3-EVIDENCE-005 / CT3-CURSOR-005) のみ |
 | GC の**実行** (shallow / prune / tiered / CoW / power-loss sweep) | `05 §2.2`, `09 §3.1`: Phase 4+。Step 1 CT-GC-* の schema 遵守を変えない |
 | chunk レベル semantic_fingerprint / retarget の match_method | `08 §5` / `09 §5.2`: retarget は Phase 4+。Step 3 は chunk identity (hash) のみ扱い、類似性 fingerprint は扱わない (`03 §5` hash vs fingerprint 分離) |
 | multimodal embedding のベンダー実地検証 (次元/料金/deprecation) | `07 §5.3`: 2026-07-03 再検証で**採用確定済み** (gemini-embedding-2 / 768 MRL / cosine / multimodal — WS-embed-2 裁定、text-only 緩和は撤回)。Step 3 は確定 profile での生成・互換判定契約 (CT3-EMBED-004、A.2) を検証する。image/audio embedding の**実生成**は Phase 4+ (profile 予約のみ) |
 | Summary / Classification / Rerank Adapter の生成本体 | `07 §5.4-5.6` optional。`09 §3.1` の Step 3 行に無い。Rerank の searched_scopes 非隠蔽 (CT3-OBS-004) のみ横断契約として参照 |
 | Prepare / Markdownize / incremental / task / budget / secrets / network opt-in | `09 §3.1`: Step 2。step2a で担保済み。Step 3 は normalized instance (unit object 群) を入力として受け、chunk 以降を担う |
 | CAS / tree / commit / hash 算出 / CLI 7 コマンド / lock | Step 1 (ws1a) で担保。Step 3 は commit の tree entry 射影 (tree_entries) を読むが tree/commit 生成は Step 1 |
-| `kcs search` と書き込み系の lock 相互作用 (`kcs index` と `kcs search` 同時実行 / rebuild 中の search) | `05 §6` (search は lock 取得しない / rebuild 中は旧 db or `KCS-E-INDEX-REBUILDING-001`) は横断契約。search が読み取り系で lock を取らない点は ws1a CT-LOCK-003 の延長で担保。`KCS-E-INDEX-REBUILDING-001` は rebuild-db (Step 2 枠) 実行中の search 挙動につき P2 参考に留め本書では固定しない |
+| `kio search` と書き込み系の lock 相互作用 (`kio index` と `kio search` 同時実行 / rebuild 中の search) | `05 §6` (search は lock 取得しない / rebuild 中は旧 db or `KIO-E-INDEX-REBUILDING-001`) は横断契約。search が読み取り系で lock を取らない点は ws1a CT-LOCK-003 の延長で担保。`KIO-E-INDEX-REBUILDING-001` は rebuild-db (Step 2 枠) 実行中の search 挙動につき P2 参考に留め本書では固定しない |
 
 **Step 3 の Done gate (r2 で整理)**: eval ハーネス (`eval/run_eval.py`) のフル実行は M3-2 (`--all-history`) /
 M3-3 (`--include-deleted`) のクエリを含むが、これらのフラグは Step 4 実装 (`09 §3.1`)。したがって

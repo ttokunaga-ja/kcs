@@ -12,7 +12,7 @@ that lets an AI (Codex) create the 20 realistic use-case folders.
 
 **Purpose.** Produce a small, *realistic* knowledge-work corpus — 20 use-case
 folders whose **file names, content, and formats look like a real person's actual
-folders** — so KCS can be dogfooded on realistic data and (optionally) measured
+folders** — so KIO can be dogfooded on realistic data and (optionally) measured
 with a realistic query set. The target user is a developer/researcher
 (local-first archive; "データはローカル、計算は最強の AI").
 
@@ -35,20 +35,20 @@ valuable *secondary* layer, kept optional and clearly separated (§6).
 Non-negotiable. Any behavior that only holds for a shortcut is rejected.
 
 - **Codex creates ONLY ordinary files and folders** (Office / PDF / Image / Text)
-  in a plain directory tree. **Codex must NEVER write anything under `.kcs`** — not
-  objects, not index DBs, not manifests-in-place-of-indexing. `.kcs` is created and
-  populated **exclusively by the real KCS pipeline**.
-- **The real KCS pipeline does everything downstream**, in the real order:
-  `kcs init` / `kcs index --approve --online` → scan (direct-child files) →
+  in a plain directory tree. **Codex must NEVER write anything under `.kio`** — not
+  objects, not index DBs, not manifests-in-place-of-indexing. `.kio` is created and
+  populated **exclusively by the real KIO pipeline**.
+- **The real KIO pipeline does everything downstream**, in the real order:
+  `kio init` / `kio index --approve --online` → scan (direct-child files) →
   **prepare** (Office→PDF **convert**, PDF text-layer extract) → offline
-  markdownize → **CAS store into `.kcs`** → enqueue + run **OCR (Mistral Batch)** for
+  markdownize → **CAS store into `.kio`** → enqueue + run **OCR (Mistral Batch)** for
   Office/scan-PDF/image → enriched markdownize → **embedding (Gemini)** → FTS +
-  vector index. No step is faked or bypassed. `.kcs` scopes for subfolders are the
+  vector index. No step is faked or bypassed. `.kio` scopes for subfolders are the
   pipeline's own auto-created child scopes, never hand-made.
 - **History is generated through the pipeline, not fabricated.** After the initial
   tree is created and indexed, **Codex mutates the ordinary files** — delete, edit,
-  add, and **move/rename folders and files** — and the pipeline is re-run so KCS's
-  own snapshot/commit DAG records real history. This is what exercises KCS's core
+  add, and **move/rename folders and files** — and the pipeline is re-run so KIO's
+  own snapshot/commit DAG records real history. This is what exercises KIO's core
   value (time-travel, `--all-history`, `--include-deleted`, rename raw_hash
   identity — the three north-star scenarios). The mutation rounds are part of the
   deliverable, not an afterthought.
@@ -61,8 +61,8 @@ Non-negotiable. Any behavior that only holds for a shortcut is rejected.
 1. **Create** — Codex generates the initial realistic folder tree + files (Office
    via Office plugin, images via image plugin, PDFs, text/code Codex writes
    directly). Plain files only.
-2. **Index** — the operator runs the real KCS pipeline (`kcs init` + `kcs index
-   --approve --online`) over the tree. KCS makes the `.kcs`, converts Office→PDF,
+2. **Index** — the operator runs the real KIO pipeline (`kio init` + `kio index
+   --approve --online`) over the tree. KIO makes the `.kio`, converts Office→PDF,
    OCRs, embeds, indexes. → commit #1 (the "initial" snapshot).
 3. **Evolve (history)** — Codex performs realistic mutations in rounds (a sprint of
    edits/adds; a folder reorg/rename; a cleanup that deletes stale files). Re-index
@@ -71,16 +71,16 @@ Non-negotiable. Any behavior that only holds for a shortcut is rejected.
    the resulting scopes (optionally against a planted query set, §6).
 
 The existing synthetic fixture already followed phases 1-2 correctly (Codex wrote
-plain files; `register_fixture.py` ran real `kcs index`; no `.kcs` was
+plain files; `register_fixture.py` ran real `kio index`; no `.kio` was
 hand-authored). This round (a) makes the phase-1 content **realistic** and (b) adds
 phase 3 (**real mutation history**), which the synthetic fixture never exercised.
 
 ---
 
-## 1. KCS pipeline coverage the corpus MUST exercise
+## 1. KIO pipeline coverage the corpus MUST exercise
 
-Authoritative format → lane map (cited from `crates/kcs-pipeline/src/{scan,prepare}.rs`,
-`crates/kcs-adapter/src/{office_convert,mistral_ocr,deterministic,pdf_decode}.rs`,
+Authoritative format → lane map (cited from `crates/kio-pipeline/src/{scan,prepare}.rs`,
+`crates/kio-adapter/src/{office_convert,mistral_ocr,deterministic,pdf_decode}.rs`,
 `docs/07-adapter-spec.md`). Extension → MIME happens once in `scan.rs:859-886`;
 anything not in the table becomes `application/octet-stream` and is content-sniffed.
 
@@ -111,11 +111,11 @@ whole product.
 Confirmed in code + spec (`scan.rs:155-247` `collect_direct_candidates` does a single
 `read_dir` and skips directories; `docs/03-data-model.md:264-270`):
 
-- **One `.kcs` indexes only files DIRECTLY in its folder.** `kcs index`
-  auto-creates a **child `.kcs`** in each subfolder that contains target files —
+- **One `.kio` indexes only files DIRECTLY in its folder.** `kio index`
+  auto-creates a **child `.kio`** in each subfolder that contains target files —
   **except** ignored subtrees and **VCS repo roots** (a folder with `.git` is
   skipped unless `[scope] index_vcs_repos = true`).
-- Files that sit only in subfolders of a scope root (with no `.kcs` there) are the
+- Files that sit only in subfolders of a scope root (with no `.kio` there) are the
   `ambient-home/` "recursive-realism" slice — present on disk, **invisible to
   search**. The existing fixture uses exactly this split (`home/` = indexed direct-child
   scopes; `ambient-home/` = excluded realism).
@@ -141,9 +141,9 @@ Confirmed in code + spec (`scan.rs:155-247` `collect_direct_candidates` does a s
 | Layer | Plugin | Realistic output to aim for | Notes / gaps |
 |---|---|---|---|
 | notes/logs/config/code/data | none (Codex writes bytes) | real prose notes, changelogs, meeting minutes, terraform/yaml, source files, JSON/CSV exports, `.ipynb` | Free lane. json/html/ipynb are indexed as **raw text** (no structural parse) — realistic content still fully searchable. |
-| Word docs | **Word/Office plugin** | reports, design docs, memos, contracts, SOPs — with **headings, tables, headers/footers, styles** | Needs `soffice` (LibreOffice) on the KCS-index machine or docx is skipped (`office_conversion_unavailable`). OOXML embeds timestamps → non-deterministic bytes on re-gen (§4). |
+| Word docs | **Word/Office plugin** | reports, design docs, memos, contracts, SOPs — with **headings, tables, headers/footers, styles** | Needs `soffice` (LibreOffice) on the KIO-index machine or docx is skipped (`office_conversion_unavailable`). OOXML embeds timestamps → non-deterministic bytes on re-gen (§4). |
 | slide decks | **PowerPoint plugin** | pitch decks, QBRs, incident reviews, research readouts — slides with **charts, diagrams, embedded images** | 1 slide = 1 OCR page. Same `soffice` requirement. |
-| spreadsheets | **Excel plugin** | budgets, trackers, close schedules, test matrices | **Realism only** — KCS archives but never searches xlsx. Good for exercising the skip path; do NOT put a fact/answer only in xlsx. |
+| spreadsheets | **Excel plugin** | budgets, trackers, close schedules, test matrices | **Realism only** — KIO archives but never searches xlsx. Good for exercising the skip path; do NOT put a fact/answer only in xlsx. |
 | charts / diagrams / figures | **image-gen (chart/diagram)** | matplotlib/PIL/mermaid-style charts, architecture diagrams, dashboards, control-coverage grids | Fact-bearing figures = the hard3 carrier. Must render values/labels/axes into the image (not into slide text) if used as an OCR answer. |
 | scanned documents | **image-gen (document/photo)** | photographed whiteboards, signed PDFs, scanned invoices/receipts, lab printouts, ID-less forms | The **scanned-PDF / image OCR** carrier (hard1). Must have **no text layer** — render text into pixels, then wrap image-only into PDF, or keep as png/jpeg. |
 | decorative photos | image-gen (diffusion) | product photos, site photos, cover images | Decoration only; must carry **no factual text** if you also plant queries. |
@@ -153,7 +153,7 @@ Confirmed in code + spec (`scan.rs:155-247` `collect_direct_candidates` does a s
   (needed for OCR carriers), not just decorative art? If not, use
   matplotlib/PIL/TeX→PNG for fact figures and reserve diffusion for decoration
   (this is exactly the split `q-hard §6.3` mandates).
-- Is **LibreOffice `soffice`** present on the machine that will run `kcs index`? If
+- Is **LibreOffice `soffice`** present on the machine that will run `kio index`? If
   not, the docx/pptx lane is inert (skipped, not an error). Confirm or install.
 - Does the Office plugin let you control body text precisely (needed if a docx is a
   paraphrase answer)? If not, keep Office files as filler/realism only and put
@@ -165,7 +165,7 @@ Confirmed in code + spec (`scan.rs:155-247` `collect_direct_candidates` does a s
 
 - **OOXML (docx/pptx) are non-deterministic** — the ZIP embeds wall-clock
   timestamps + doc IDs, so regenerating "the same" file yields different bytes →
-  different `raw_hash` → re-work. KCS normalizes the **converted PDF**'s dates
+  different `raw_hash` → re-work. KIO normalizes the **converted PDF**'s dates
   (`office_convert.rs:275-313`) but **not** your source file. For a dogfood corpus
   this is usually fine; if you want a **frozen** corpus (stable identity across
   runs), generate each file **once** and reuse the exact bytes (don't re-emit).
@@ -174,7 +174,7 @@ Confirmed in code + spec (`scan.rs:155-247` `collect_direct_candidates` does a s
 - **Text is hard-blocked from OCR** (privacy + ~10× cost) — you cannot force a
   `.txt` through OCR; the lane is chosen by format.
 - **Converter presence** decides the whole Office lane — verify `soffice` (or the
-  `KCS_OFFICE_CONVERTER` env) up front.
+  `KIO_OFFICE_CONVERTER` env) up front.
 
 ---
 
@@ -275,14 +275,14 @@ so the existing 24-query set keeps working on the realistic corpus.)
 ## 9. Codex generation brief (once approved) — phased, real-pipeline only
 
 **Hard rule (repeat of §0.5):** Codex writes ONLY ordinary files/folders. It never
-creates or touches `.kcs`. All `.kcs`, OCR, Office→PDF conversion, CAS storage,
-embedding, indexing, and history are done by the real KCS pipeline. No test-only
+creates or touches `.kio`. All `.kio`, OCR, Office→PDF conversion, CAS storage,
+embedding, indexing, and history are done by the real KIO pipeline. No test-only
 content or shortcuts.
 
 ### Phase 1 — Create (Codex, plain files only)
 - **Topology**: reuse the 20 personas × ~20 leaf folders (`persona_fixture_spec.py`
   vocab; see §7 + the p01 example). Files go **directly** in each file-bearing
-  folder (the pipeline auto-creates a child `.kcs` per such folder). **No `.git`**
+  folder (the pipeline auto-creates a child `.kio` per such folder). **No `.git`**
   in indexed areas (VCS roots are skipped) — use `repos/<name>/docs/` folders.
 - **Format spread per persona**: hit offline (md/txt/code/structured), online OCR
   (≥1 docx, ≥1 pptx, ≥1 scanned-PDF or image, ≥1 text-layer PDF), and ≥1
@@ -296,14 +296,14 @@ content or shortcuts.
   an index. Optionally `queries.jsonl` if §6b.
 
 ### Phase 2 — Index (operator runs the real pipeline)
-- `kcs init` + `kcs index --approve --online` over each persona root; KCS makes the
-  `.kcs` child scopes, converts Office→PDF, OCRs (Batch), embeds, indexes.
+- `kio init` + `kio index --approve --online` over each persona root; KIO makes the
+  `.kio` child scopes, converts Office→PDF, OCRs (Batch), embeds, indexes.
 - Cost: keep total OCR pages under the agreed ceiling; run via a spend-guarded
   driver (pattern: `ocr_batch_driver.py`). → commit #1 per scope.
 
 ### Phase 3 — Evolve (Codex mutates plain files → real history)
 Codex performs **realistic mutation rounds** on the ordinary files; the operator
-re-indexes after each round so KCS records real commits. Each mutation must be
+re-indexes after each round so KIO records real commits. Each mutation must be
 plausible for the role. Suggested rounds (design, not fixed):
 - **R1 edit sprint**: revise ~10-20% of live docs (update figures/values in an
   Office file, append to a runbook, correct a memo). → new versions; old versions

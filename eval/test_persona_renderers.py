@@ -79,7 +79,7 @@ class TestPersonaRenderers(unittest.TestCase):
                         renderers.variant_output_contract(family, variant),
                         (first.extension, first.media_type),
                     )
-                    self.assertEqual(first.renderer_id, "kcs-persona-renderer")
+                    self.assertEqual(first.renderer_id, "kio-persona-renderer")
                     self.assertEqual(first.renderer_schema_version, 1)
                     self.assertEqual(first.planned_contract_chunks, chunks)
                     self.assertEqual(

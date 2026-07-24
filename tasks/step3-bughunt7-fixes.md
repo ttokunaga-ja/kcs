@@ -22,14 +22,14 @@ Claude 系 subagent は本セッションで使用できなかったため、利
 ### R7-1 [critical] Tier B `--send-secrets` 承認が `secrets-approved.jsonl` の存在だけで成立し、空ファイル/別 scope コピーで candidate secret が online 送信される
 発見: GPT-5.4-B / 自己検証
 
-- **根本**: `secrets_send_approved` (`crates/kcs-cli/src/main.rs`) が
-  `.kcs/secrets-approved.jsonl.is_file()` だけを見ている。`write_secrets_approval` は `scope_id` を
+- **根本**: `secrets_send_approved` (`crates/kio-cli/src/main.rs`) が
+  `.kio/secrets-approved.jsonl.is_file()` だけを見ている。`write_secrets_approval` は `scope_id` を
   JSONL に書くが、読み取り側が scope 束縛を検証していない。
 - **再現**:
-  1. `api_secret.md` を含む scope で `kcs init`。
-  2. 空の `.kcs/secrets-approved.jsonl` を作る。
-  3. `KCS_TEST_GEMINI_EMBED=mock kcs index --approve --online --json`。
-  4. `.kcs/quarantine.jsonl` が `approval_method:"send_approved"` になり、Tier B ファイルの
+  1. `api_secret.md` を含む scope で `kio init`。
+  2. 空の `.kio/secrets-approved.jsonl` を作る。
+  3. `KIO_TEST_GEMINI_EMBED=mock kio index --approve --online --json`。
+  4. `.kio/quarantine.jsonl` が `approval_method:"send_approved"` になり、Tier B ファイルの
      embedding task が `status:"done"` になる。
 - **期待 vs 実際**: 期待 = 当該 scope で明示 `--send-secrets` した JSONL 行だけが hold を解除する。
   実際 = 空ファイルや別 scope のコピーで candidate secret text が embedding adapter へ送信されうる。
@@ -42,10 +42,10 @@ Claude 系 subagent は本セッションで使用できなかったため、利
 - **根本**: `run_search` の `embedding_opt_in` は `persistent_network_allowed_for(&repo, adapter_id)` だけで、
   default/global search が列挙した `exec_scopes` それぞれの embedding opt-in を確認しない。
 - **再現**:
-  1. scope A は `KCS_TEST_GEMINI_EMBED=mock kcs index --approve --online` で永続 opt-in。
-  2. scope B は `KCS_TEST_GEMINI_EMBED=mock kcs index --yes --online` で一回だけ embedding 生成
+  1. scope A は `KIO_TEST_GEMINI_EMBED=mock kio index --approve --online` で永続 opt-in。
+  2. scope B は `KIO_TEST_GEMINI_EMBED=mock kio index --yes --online` で一回だけ embedding 生成
      (`network_opt_in:false`)。
-  3. A から `KCS_TEST_QUERY_EMBED_TRACE=$trace KCS_TEST_GEMINI_EMBED=mock kcs search sharedterm --json`。
+  3. A から `KIO_TEST_QUERY_EMBED_TRACE=$trace KIO_TEST_GEMINI_EMBED=mock kio search sharedterm --json`。
   4. trace に query が記録され、JSON は `resolved_mode:"hybrid"` かつ `searched_scopes` に B を含む。
 - **期待 vs 実際**: 期待 = vector/hybrid で query を online embedding に送るなら、検索対象 scope すべてが
   当該 embedding adapter へ永続 opt-in 済みであること。実際 = 呼び出し元 A の opt-in だけで B も
@@ -60,7 +60,7 @@ Claude 系 subagent は本セッションで使用できなかったため、利
   `next_retry_at` を更新しない。`embeddable_task_state` / `batch retry` は `next_retry_at` と
   attempts を見るため、rate limit でも毎回即時 retry 可能になる。
 - **再現**:
-  `KCS_TEST_GEMINI_EMBED=rate_limit kcs index --approve --json` 後の embedding task は
+  `KIO_TEST_GEMINI_EMBED=rate_limit kio index --approve --json` 後の embedding task は
   `status:"failed", attempts:0, next_retry_at:null, fallback_reason:"rate_limit"`。
   `batch retry` 後も同じで `tasks_updated:1` が繰り返される。
 - **期待 vs 実際**: 期待 = markdownize と同じ retry policy に従い attempts 増加と backoff が残る。
@@ -73,12 +73,12 @@ Claude 系 subagent は本セッションで使用できなかったため、利
 
 - **根本**: `run_repair` は `args.iter().any(|arg| arg == "--rebuild-db")` だけを見ており、
   残り引数を検証しない。
-- **再現**: `kcs repair --rebuild-db --definitely-invalid EXTRA --json` が exit 0 で
+- **再現**: `kio repair --rebuild-db --definitely-invalid EXTRA --json` が exit 0 で
   `{"status":"rebuilt"}` を返す。
 - **期待 vs 実際**: 期待 = unknown flag / extra operand は exit 2。将来の `--verify-objects` 等も
   未実装なら明示エラー。実際 = Agent が未実行の検査を成功と誤認する。
 - **修正**: strict parser を導入し、`--rebuild-db` と既存互換の no-op `--yes` だけを許可。Step4 系 flag は
-  `KCS-E-CONFIG-NOT-IMPLEMENTED-001`、未知/余剰は invalid usage。
+  `KIO-E-CONFIG-NOT-IMPLEMENTED-001`、未知/余剰は invalid usage。
 
 ### R7-5 [major] embedding profile 変化後、profile-blind な `chunk_vec`/task 判定で互換性不整合が自己修復しない
 発見: GPT-5.4-E / 自己検証
@@ -87,9 +87,9 @@ Claude 系 subagent は本セッションで使用できなかったため、利
   `chunk_vec.chunk_id IS NULL`、task key は `embedding:<chunk_id>` だけ。旧 profile の `chunk_vec`
   があると、現 profile で再 enqueue / re-embed されない。
 - **再現**:
-  1. `KCS_TEST_GEMINI_EMBED=incompatible_profile kcs index --approve --json`
-  2. `KCS_TEST_GEMINI_EMBED=mock kcs index --approve --json`
-  3. `KCS_TEST_GEMINI_EMBED=mock kcs search alpha --json`
+  1. `KIO_TEST_GEMINI_EMBED=incompatible_profile kio index --approve --json`
+  2. `KIO_TEST_GEMINI_EMBED=mock kio index --approve --json`
+  3. `KIO_TEST_GEMINI_EMBED=mock kio search alpha --json`
   4. `resolved_mode:"text"`, `fallback_reason:"embedding_profile_incompatible"` のまま。
      SQLite `embeddings.profile_hash` も旧 `...incompat` のみ。
 - **期待 vs 実際**: 期待 = 現 profile に戻した index で同一 chunk が再 embedding され、vector/hybrid が復帰する。

@@ -184,7 +184,7 @@ class PersonaCapacitySuiteAndReceiptTests(unittest.TestCase):
         cls.peak = peak
         cls.required = required
         cls.measurement = capacity.build_declared_root_capacity_measurement(
-            destination_root="/private/tmp/kcs-persona-capacity",
+            destination_root="/private/tmp/kio-persona-capacity",
             filesystem_device=42,
             filesystem_allocation_unit_bytes=4096,
             free_bytes=required + 1000,
@@ -226,7 +226,7 @@ class PersonaCapacitySuiteAndReceiptTests(unittest.TestCase):
             self.plan,
             [self.tiny],
             expected_destination_root=(
-                expected_root or "/private/tmp/kcs-persona-capacity"
+                expected_root or "/private/tmp/kio-persona-capacity"
             ),
             expected_suite_manifest_sha256=SHA_B,
             amplifications=self.amplifications,
@@ -248,7 +248,7 @@ class PersonaCapacitySuiteAndReceiptTests(unittest.TestCase):
         self.assertEqual(per_replay["events"]["events"], 88)
         self.assertEqual(all_replays["events"]["events"], 264)
         self.assertEqual(plan["root_binding"], "forbidden_in_projection")
-        self.assertEqual(plan["contracts"]["actual_kcs_attestation"], "false")
+        self.assertEqual(plan["contracts"]["actual_kio_attestation"], "false")
 
     def test_fake_ready_plan_cannot_reach_capacity_check(self):
         fake = {
@@ -301,13 +301,13 @@ class PersonaCapacitySuiteAndReceiptTests(unittest.TestCase):
             check["blocking_evidence"],
         )
         self.assertEqual(check["physical_write_authorization"], "false")
-        self.assertEqual(check["actual_kcs_attestation"], "false")
+        self.assertEqual(check["actual_kio_attestation"], "false")
         receipt = self.build_receipt()
         self.assertEqual(
             receipt["approval_scope"],
             "capacity_only_not_physical_write_authorization",
         )
-        self.assertEqual(receipt["actual_kcs_attestation"], "false")
+        self.assertEqual(receipt["actual_kio_attestation"], "false")
         self.validate_receipt(receipt)
 
     def test_caps_and_reserves_still_fail_before_a_blocked_receipt(self):

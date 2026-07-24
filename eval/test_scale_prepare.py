@@ -23,7 +23,7 @@ import scale_fixture_spec as spec  # noqa: E402
 
 def _scope_report(root, name, index):
     scope = root / name
-    (scope / ".kcs").mkdir(parents=True, exist_ok=True)
+    (scope / ".kio").mkdir(parents=True, exist_ok=True)
     return {
         "name": name,
         "scope_id": f"{index:026d}",
@@ -39,7 +39,7 @@ def _create_registry(root, reports):
     try:
         conn.execute(
             "CREATE TABLE scopes ("
-            "scope_id TEXT NOT NULL, kcs_path TEXT NOT NULL, "
+            "scope_id TEXT NOT NULL, kio_path TEXT NOT NULL, "
             "root_path TEXT NOT NULL, "
             "participates_in_global_search INTEGER NOT NULL, "
             "indexed INTEGER NOT NULL, last_seen_at TEXT NOT NULL)"
@@ -49,7 +49,7 @@ def _create_registry(root, reports):
                 "INSERT INTO scopes VALUES (?, ?, ?, 1, 1, ?)",
                 (
                     report["scope_id"],
-                    str((Path(report["root_path"]) / ".kcs").resolve()),
+                    str((Path(report["root_path"]) / ".kio").resolve()),
                     report["root_path"],
                     "2026-07-13T00:00:00Z",
                 ),
@@ -62,7 +62,7 @@ def _create_registry(root, reports):
 
 class TestRegistryRecovery(unittest.TestCase):
     def setUp(self):
-        self.temp = tempfile.TemporaryDirectory(prefix="kcs-scale-prepare-")
+        self.temp = tempfile.TemporaryDirectory(prefix="kio-scale-prepare-")
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name) / "corpus"
         self.root.mkdir()
@@ -83,7 +83,7 @@ class TestRegistryRecovery(unittest.TestCase):
                 "INSERT INTO scopes VALUES (?, ?, ?, 1, 1, ?)",
                 (
                     "9" * 26,
-                    str((self.root / "extra" / ".kcs").absolute()),
+                    str((self.root / "extra" / ".kio").absolute()),
                     str((self.root / "extra").absolute()),
                     "2026-07-13T00:00:00Z",
                 ),
@@ -132,7 +132,7 @@ class TestRegistryRecovery(unittest.TestCase):
         try:
             conn.execute(
                 "CREATE TABLE scopes ("
-                "scope_id, kcs_path, root_path, "
+                "scope_id, kio_path, root_path, "
                 "participates_in_global_search, indexed)"
             )
             conn.execute(
@@ -153,7 +153,7 @@ class TestRegistryRecovery(unittest.TestCase):
         conn = sqlite3.connect(registry)
         try:
             conn.execute(
-                "UPDATE scopes SET kcs_path = ? WHERE scope_id = ?",
+                "UPDATE scopes SET kio_path = ? WHERE scope_id = ?",
                 (
                     "x" * (preparer.MAX_REGISTRY_PATH_BYTES + 1),
                     self.reports[0]["scope_id"],
@@ -213,7 +213,7 @@ class TestRegistryRecovery(unittest.TestCase):
                 return_value=(self.root, {}, manifest),
             ),
             mock.patch.object(attestor, "verify_source_files", return_value=2),
-            mock.patch.object(preparer, "_resolve_binary", return_value=Path("/kcs")),
+            mock.patch.object(preparer, "_resolve_binary", return_value=Path("/kio")),
             mock.patch.object(preparer, "_validate_isolated_device_root"),
             mock.patch.object(preparer, "subprocess_env", return_value={}),
             mock.patch.object(
@@ -227,7 +227,7 @@ class TestRegistryRecovery(unittest.TestCase):
                 preparer, "_registry_matches_attested_scopes", return_value=False
             ),
             mock.patch.object(preparer, "_reset_isolated_registry") as reset,
-            mock.patch.object(preparer, "_run_kcs", return_value=noop) as run_kcs,
+            mock.patch.object(preparer, "_run_kio", return_value=noop) as run_kio,
             mock.patch.object(
                 attestor,
                 "attest_scope",
@@ -242,15 +242,15 @@ class TestRegistryRecovery(unittest.TestCase):
             ),
         ):
             report, returned_attestation = preparer._prepare_corpus_locked(
-                self.root, "/kcs"
+                self.root, "/kio"
             )
 
         reset.assert_called_once_with(self.root)
-        self.assertEqual(run_kcs.call_count, 2)
+        self.assertEqual(run_kio.call_count, 2)
         self.assertTrue(
             all(
                 call.args[2] == preparer._OFFLINE_INDEX_ARGS
-                for call in run_kcs.call_args_list
+                for call in run_kio.call_args_list
             )
         )
         self.assertEqual(report["indexed_scopes"], ["scope-a", "scope-b"])
@@ -274,7 +274,7 @@ class TestRegistryRecovery(unittest.TestCase):
                 return_value=(self.root, {}, manifest),
             ),
             mock.patch.object(attestor, "verify_source_files", return_value=2),
-            mock.patch.object(preparer, "_resolve_binary", return_value=Path("/kcs")),
+            mock.patch.object(preparer, "_resolve_binary", return_value=Path("/kio")),
             mock.patch.object(preparer, "_validate_isolated_device_root"),
             mock.patch.object(preparer, "subprocess_env", return_value={}),
             mock.patch.object(
@@ -288,15 +288,15 @@ class TestRegistryRecovery(unittest.TestCase):
                 preparer, "_registry_matches_attested_scopes", return_value=True
             ),
             mock.patch.object(preparer, "_reset_isolated_registry") as reset,
-            mock.patch.object(preparer, "_run_kcs") as run_kcs,
+            mock.patch.object(preparer, "_run_kio") as run_kio,
             mock.patch.object(
                 attestor, "attest_corpus", return_value=attestation
             ),
         ):
-            report, _ = preparer._prepare_corpus_locked(self.root, "/kcs")
+            report, _ = preparer._prepare_corpus_locked(self.root, "/kio")
 
         reset.assert_not_called()
-        run_kcs.assert_not_called()
+        run_kio.assert_not_called()
         self.assertEqual(report["indexed_scopes"], [])
         self.assertEqual(report["reregistered_scopes"], [])
         self.assertEqual(
@@ -332,7 +332,7 @@ class TestPreparationBoundsAndLock(unittest.TestCase):
         self.assertLess(time.monotonic() - started, 1.0)
 
     def test_device_tree_enumeration_is_bounded(self):
-        with tempfile.TemporaryDirectory(prefix="kcs-device-bound-") as temp:
+        with tempfile.TemporaryDirectory(prefix="kio-device-bound-") as temp:
             root = Path(temp)
             device = root / spec.DEVICE_DIR_NAME
             device.mkdir()
@@ -360,7 +360,7 @@ class TestPreparationBoundsAndLock(unittest.TestCase):
 
     @unittest.skipUnless(hasattr(os, "mkfifo"), "FIFO requires POSIX")
     def test_device_tree_rejects_special_files(self):
-        with tempfile.TemporaryDirectory(prefix="kcs-device-special-") as temp:
+        with tempfile.TemporaryDirectory(prefix="kio-device-special-") as temp:
             root = Path(temp)
             device = root / spec.DEVICE_DIR_NAME
             device.mkdir()
@@ -371,7 +371,7 @@ class TestPreparationBoundsAndLock(unittest.TestCase):
                 preparer._validate_isolated_device_root(root)
 
     def test_main_holds_fixture_lock_through_atomic_reports(self):
-        with tempfile.TemporaryDirectory(prefix="kcs-scale-lock-") as temp:
+        with tempfile.TemporaryDirectory(prefix="kio-scale-lock-") as temp:
             root = Path(temp) / "corpus"
             active = {"value": False}
 
@@ -416,7 +416,7 @@ class TestPreparationBoundsAndLock(unittest.TestCase):
                 ),
                 redirect_stdout(io.StringIO()),
             ):
-                result = preparer.main(["--corpus", str(root), "--bin", "/kcs"])
+                result = preparer.main(["--corpus", str(root), "--bin", "/kio"])
 
             self.assertEqual(result, 0)
             self.assertFalse(active["value"])

@@ -3,10 +3,10 @@
 This module is deliberately an arithmetic/capacity oracle.  It expands one
 canonical persona W0 plan at a time and builds the corresponding canonical
 P/X/Y/N allocation, but it never builds a full event manifest and never
-observes KCS.  Worker/suite values accepted here are caller-declared schema
+observes KIO.  Worker/suite values accepted here are caller-declared schema
 projections only.  Artifact readback plus supervisor ``wait4`` evidence remains
 mandatory before any formal capacity gate; these projections cannot authorize
-a physical write or stand in for a KCS chunk/history attestation.
+a physical write or stand in for a KIO chunk/history attestation.
 """
 
 from __future__ import annotations
@@ -31,15 +31,15 @@ except ImportError:  # pragma: no cover - direct-script compatibility.
     import persona_structural_allocation as structural
 
 
-FULL_SCALE_LIMITS_SCHEMA = "kcs.persona.full-scale-limits/v1"
+FULL_SCALE_LIMITS_SCHEMA = "kio.persona.full-scale-limits/v1"
 FULL_SCALE_LIMITS_SCHEMA_VERSION = 1
-WORKER_RECEIPT_SCHEMA = "kcs.persona.full-scale-worker-declared-projection/v1"
+WORKER_RECEIPT_SCHEMA = "kio.persona.full-scale-worker-declared-projection/v1"
 WORKER_RECEIPT_SCHEMA_VERSION = 1
-SUITE_RECEIPT_SCHEMA = "kcs.persona.full-scale-suite-declared-projection/v1"
+SUITE_RECEIPT_SCHEMA = "kio.persona.full-scale-suite-declared-projection/v1"
 SUITE_RECEIPT_SCHEMA_VERSION = 1
 
 PROFILE = "full"
-PLANNING_STATUS = "planned_capacity_only_not_kcs_attestation"
+PLANNING_STATUS = "planned_capacity_only_not_kio_attestation"
 DECLARED_PROJECTION_STATUS = (
     "caller_declared_capacity_projection_not_formal_measurement"
 )
@@ -507,7 +507,7 @@ def _build_full_scale_limits_uncached():
             "planned_counts_only": True,
             "builds_full_event_manifests": False,
             "phase_counts_derived_from_canonical_allocations": True,
-            "actual_kcs_evidence": False,
+            "actual_kio_evidence": False,
             "authorizes_physical_write": False,
         },
         "derivation": {
@@ -780,7 +780,7 @@ def build_worker_capacity_receipt(
             "supervisor_wait4_required": True,
             "formal_capacity_gate_satisfied": False,
             "planned_counts_only": True,
-            "actual_kcs_evidence": False,
+            "actual_kio_evidence": False,
             "authorizes_physical_write": False,
         },
     }
@@ -907,7 +907,7 @@ def validate_worker_capacity_receipt(receipt, *, oracle=None):
         "supervisor_wait4_required": True,
         "formal_capacity_gate_satisfied": False,
         "planned_counts_only": True,
-        "actual_kcs_evidence": False,
+        "actual_kio_evidence": False,
         "authorizes_physical_write": False,
     }):
         raise FullScaleLimitsError("worker receipt evidence contract differs")
@@ -1080,7 +1080,7 @@ def build_suite_capacity_receipt(
             "single_worker_no_grandchildren_required": True,
             "formal_capacity_gate_satisfied": False,
             "planned_counts_only": True,
-            "actual_kcs_evidence": False,
+            "actual_kio_evidence": False,
             "authorizes_physical_write": False,
         },
     }
@@ -1235,7 +1235,7 @@ def validate_suite_capacity_receipt(receipt, *, worker_receipts, oracle=None):
         "single_worker_no_grandchildren_required": True,
         "formal_capacity_gate_satisfied": False,
         "planned_counts_only": True,
-        "actual_kcs_evidence": False,
+        "actual_kio_evidence": False,
         "authorizes_physical_write": False,
     }):
         raise FullScaleLimitsError("suite receipt evidence contract differs")

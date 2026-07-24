@@ -1,6 +1,6 @@
 # 01 Positioning
 
-KCS のプロダクト位置づけ・対象ユーザー・差別化・競合分析・MVP スコープ・Phase plan を **正本** として定義する。他ドキュメントが「KCS とは何か」を語る場合、本書を参照する。
+KIO のプロダクト位置づけ・対象ユーザー・差別化・競合分析・MVP スコープ・Phase plan を **正本** として定義する。他ドキュメントが「KIO とは何か」を語る場合、本書を参照する。
 
 > 関連: [02-philosophy.md](02-philosophy.md) (理念) / [09-mvp-scope.md](09-mvp-scope.md) (MVP / Phase / Step) / [10-operations.md](10-operations.md) (横断規約)
 
@@ -20,7 +20,7 @@ KCS のプロダクト位置づけ・対象ユーザー・差別化・競合分�
 日: 原文根拠付きローカル知識アーカイブ
 ```
 
-KCS は次のいずれでもない:
+KIO は次のいずれでもない:
 
 - 全部入りの "Git for knowledge"
 - 個人向け AI 検索ツール (Khoj / AnythingLLM 系)
@@ -29,7 +29,7 @@ KCS は次のいずれでもない:
 - Knowledge Graph プラットフォーム
 - offline-first 原理主義ツール (everything offline)
 
-KCS は次である:
+KIO は次である:
 
 > **ローカルファイルを、過去も含めて、AI と人間が根拠付きで探索できる知識アーカイブ。データの主権はローカルに置きつつ、計算は frontier AI (Mistral OCR / Gemini / Claude / GPT) を含む最強の手段を使う。**
 
@@ -37,9 +37,9 @@ KCS は次である:
 
 `local-first` は **データの主権がローカルにある** ことを意味する。`offline-first` は **ネット遮断でも動く** ことを含意する。両者は別物である。
 
-KCS の対象ユーザー (開発者・研究者) の現実のワークフローは、Markdownize や Embedding に Mistral OCR / Gemini / Claude / GPT 等の frontier AI を使うのが既定値である。ここで "everything offline" を強要すると、Perkeep が辿った「思想は近いが日常体験差を出せない」失敗を踏襲する。
+KIO の対象ユーザー (開発者・研究者) の現実のワークフローは、Markdownize や Embedding に Mistral OCR / Gemini / Claude / GPT 等の frontier AI を使うのが既定値である。ここで "everything offline" を強要すると、Perkeep が辿った「思想は近いが日常体験差を出せない」失敗を踏襲する。
 
-KCS の主張は「**原本・履歴・index の保管と主権はあなたのマシンにある / 計算結果 (Markdown, Embedding) もあなたのマシンに残る / 処理のためのファイル内容の送信は明示 opt-in で行い、何を・いつ・どの Adapter へ送ったかを記録する** ([07-adapter-spec.md §3](07-adapter-spec.md))」であり、API 呼び出し自体を禁止することではない。opt-in 後は frontier AI にファイル内容が送信される。これを隠さず、preview で network transmission policy として提示する ([06-cli-spec.md §2](06-cli-spec.md))。完全オフライン運用はローカル LLM Adapter や同梱 deterministic Adapter を選択するユーザーの自由として残るが、それは **デフォルトではない**。
+KIO の主張は「**原本・履歴・index の保管と主権はあなたのマシンにある / 計算結果 (Markdown, Embedding) もあなたのマシンに残る / 処理のためのファイル内容の送信は明示 opt-in で行い、何を・いつ・どの Adapter へ送ったかを記録する** ([07-adapter-spec.md §3](07-adapter-spec.md))」であり、API 呼び出し自体を禁止することではない。opt-in 後は frontier AI にファイル内容が送信される。これを隠さず、preview で network transmission policy として提示する ([06-cli-spec.md §2](06-cli-spec.md))。完全オフライン運用はローカル LLM Adapter や同梱 deterministic Adapter を選択するユーザーの自由として残るが、それは **デフォルトではない**。
 
 opt-in の単位・寿命・revoke の正本は [07-adapter-spec.md §3](07-adapter-spec.md)。
 
@@ -71,13 +71,13 @@ opt-in の単位・寿命・revoke の正本は [07-adapter-spec.md §3](07-adap
 最低ライン:
 
 ```bash
-kcs init
-kcs index --approve      # 取り込み + ベースライン index (初回は preview + 明示承認)
-kcs search "あの PDF"
-kcs open <検索結果の pointer>
+kio init
+kio index --approve      # 取り込み + ベースライン index (初回は preview + 明示承認)
+kio search "あの PDF"
+kio open <検索結果の pointer>
 ```
 
-これで価値が成立する状態を MVP の Definition of Done に含める。`kcs index` が**初回の**取り込みと検索 index 構築の入口であり (後着の online 成果は batch resume / retry / reindex の finalize が検索対象化する — [05-runtime.md §8.1](05-runtime.md))、成功時に auto snapshot も作られる — 明示 `kcs snapshot` は任意。この 4 コマンドは **API キー未設定でも成立する** (同梱 deterministic Adapter によるベースライン index + text 検索。[07-adapter-spec.md §2.1](07-adapter-spec.md))。frontier AI は意味検索・スキャン PDF・画像内テキストへ検索品質を引き上げる推奨 opt-in である。
+これで価値が成立する状態を MVP の Definition of Done に含める。`kio index` が**初回の**取り込みと検索 index 構築の入口であり (後着の online 成果は batch resume / retry / reindex の finalize が検索対象化する — [05-runtime.md §8.1](05-runtime.md))、成功時に auto snapshot も作られる — 明示 `kio snapshot` は任意。この 4 コマンドは **API キー未設定でも成立する** (同梱 deterministic Adapter によるベースライン index + text 検索。[07-adapter-spec.md §2.1](07-adapter-spec.md))。frontier AI は意味検索・スキャン PDF・画像内テキストへ検索品質を引き上げる推奨 opt-in である。
 
 即効価値と履歴価値は分けて訴求する。
 
@@ -106,7 +106,7 @@ kcs open <検索結果の pointer>
 
 「自分だけが新しい」という前提で進めると埋もれる。比較は思想ではなく **ユーザー体験差** を基準にする。
 
-| プロダクト | レイヤー | KCS との重なり | KCS との非重複 |
+| プロダクト | レイヤー | KIO との重なり | KIO との非重複 |
 | --- | --- | --- | --- |
 | **Perkeep** | content-addressed personal storage | content-addressed・ローカル中心・思想 | Markdown 正規化なし、AI 検索なし、Evidence Pointer なし、即効性弱 |
 | **git-annex** | 大容量ファイル × Git | content-addressed の発想、CLI 中心 | 知識検索なし、Markdown化・Embedding なし |
@@ -124,11 +124,11 @@ kcs open <検索結果の pointer>
 
 ## 4.4.1 NotebookLM との差別化 — citation と Evidence Pointer は別物
 
-NotebookLM の citation は「notebook にアップロード済みのソース内の該当箇所への参照」であり、クラウド上のコーパスに閉じる。Evidence Pointer は `commit / tree / raw_hash / chunk_hash / span` で根拠を不変に固定するため、次の 4 点で体験が異なる: (1) **不変性** — 原本のリネーム・移動・削除・上書き後も pointer は死なない。citation はソースを削除すれば消える。(2) **time-travel** — 過去の任意 snapshot 時点の内容を指せる。(3) **ローカル原本回帰** — `kcs open` で OS 規定アプリの原本そのものに戻れる。citation の終点はクラウド上のビューア。(4) **任意フォルダ横断** — アップロード操作なしに、手元の全 indexed scope (過去版・削除済み含む) を対象にする。NotebookLM は「選んだソースに質問する」体験、KCS は「持っている全ファイルから根拠を掘り出し、その根拠を固定する」体験であり、併用可能 (KCS で見つけた原本を NotebookLM に投入する使い方は妨げない)。
+NotebookLM の citation は「notebook にアップロード済みのソース内の該当箇所への参照」であり、クラウド上のコーパスに閉じる。Evidence Pointer は `commit / tree / raw_hash / chunk_hash / span` で根拠を不変に固定するため、次の 4 点で体験が異なる: (1) **不変性** — 原本のリネーム・移動・削除・上書き後も pointer は死なない。citation はソースを削除すれば消える。(2) **time-travel** — 過去の任意 snapshot 時点の内容を指せる。(3) **ローカル原本回帰** — `kio open` で OS 規定アプリの原本そのものに戻れる。citation の終点はクラウド上のビューア。(4) **任意フォルダ横断** — アップロード操作なしに、手元の全 indexed scope (過去版・削除済み含む) を対象にする。NotebookLM は「選んだソースに質問する」体験、KIO は「持っている全ファイルから根拠を掘り出し、その根拠を固定する」体験であり、併用可能 (KIO で見つけた原本を NotebookLM に投入する使い方は妨げない)。
 
-# 4.5 Perkeep 失敗分析 (KCS が学ぶべきこと)
+# 4.5 Perkeep 失敗分析 (KIO が学ぶべきこと)
 
-Perkeep は思想的に KCS と最も近い (content-addressed、ローカル中心、所有権、永続保存)。にもかかわらず一般化していない。仮説:
+Perkeep は思想的に KIO と最も近い (content-addressed、ローカル中心、所有権、永続保存)。にもかかわらず一般化していない。仮説:
 
 ```
 - セットアップが技術者向け (server プロセス, blob 概念, importer)
@@ -138,29 +138,29 @@ Perkeep は思想的に KCS と最も近い (content-addressed、ローカル中
 - "Why now?" の訴求が時代と噛み合わなかった
 ```
 
-KCS が同じ轍を踏まないための行動原則:
+KIO が同じ轍を踏まないための行動原則:
 
-1. **最初の体験を即効的にする**: `kcs init → kcs index --approve → kcs search "あの PDF" → kcs open <pointer>` で価値が出る状態。「思想」を最初に売らない。
-2. **ファイルシステムとの関係を明示**: 原本は元の場所にある。`.kcs` は原本を置き換えない隠しアーカイブ層 (CAS コピー + metadata — 容量は原本相当 + 派生を見込む)。Perkeep のように「blob store を原本の置き場にする」ことはしない。
+1. **最初の体験を即効的にする**: `kio init → kio index --approve → kio search "あの PDF" → kio open <pointer>` で価値が出る状態。「思想」を最初に売らない。
+2. **ファイルシステムとの関係を明示**: 原本は元の場所にある。`.kio` は原本を置き換えない隠しアーカイブ層 (CAS コピー + metadata — 容量は原本相当 + 派生を見込む)。Perkeep のように「blob store を原本の置き場にする」ことはしない。
 3. **content-addressed は手段、Evidence Pointer は目的**: ユーザーに blob/CAS を見せない。見せるのは「根拠が死なない」結果だけ。
 4. **既存ワークフローに乗る**: Obsidian vault / Documents / Downloads を **置き換えず横断する** 外部アーカイブ層として始める (詳細 §8)。
 
 # 4.6 重なる領域 = 相互運用 / 乗らない
 
-| 領域 | 重なる相手 | KCS のスタンス |
+| 領域 | 重なる相手 | KIO のスタンス |
 | --- | --- | --- |
-| 個人ノート vault | Obsidian | **置き換えない**。vault を含む親フォルダに `.kcs`。vault 内検索は Smart Connections に任せ、KCS は vault + Documents + Downloads + コードを横断 |
-| AI チャット UX | Khoj, AnythingLLM | **競合しない**。KCS は CLI + 構造化 API を提供し、Khoj/AnythingLLM がそれを呼べる関係を狙う |
-| 大容量ファイル管理 | git-annex | **対象が違う**。git-annex は同期・バックアップ。KCS は知識検索と Evidence。両立可能 |
+| 個人ノート vault | Obsidian | **置き換えない**。vault を含む親フォルダに `.kio`。vault 内検索は Smart Connections に任せ、KIO は vault + Documents + Downloads + コードを横断 |
+| AI チャット UX | Khoj, AnythingLLM | **競合しない**。KIO は CLI + 構造化 API を提供し、Khoj/AnythingLLM がそれを呼べる関係を狙う |
+| 大容量ファイル管理 | git-annex | **対象が違う**。git-annex は同期・バックアップ。KIO は知識検索と Evidence。両立可能 |
 | 画面履歴 | Microsoft Recall, Rewind | **競合しない**。レイヤーが違う (画面 vs ファイル) |
 | OS 統合 | Apple Intelligence, Windows Copilot | **競合しない**。OS ベンダーは横断アーカイブ層を提供しない |
-| 文書アーカイブ | Zotero, Paperless-ngx | **置き換えない**。Zotero ライブラリ等を含む親フォルダに `.kcs` を置き、専用アーカイブの外にあるファイルも含めて横断する |
+| 文書アーカイブ | Zotero, Paperless-ngx | **置き換えない**。Zotero ライブラリ等を含む親フォルダに `.kio` を置き、専用アーカイブの外にあるファイルも含めて横断する |
 
 ---
 
 # 5. MVP スコープ (絞り込み)
 
-KCS は要素が多すぎるので、MVP では **一次・二次** を厳格に分ける。
+KIO は要素が多すぎるので、MVP では **一次・二次** を厳格に分ける。
 
 ### 5.1 MVP に含める (Phase 1〜3)
 
@@ -231,10 +231,10 @@ Phase 5: Agent
 
 # 7. 二層構造: truth と cache
 
-データ・所有権・権限の正本は **各フォルダ直下の `.kcs`** に閉じる。device-local な `scope_registry` や将来の global aggregator は **検索キャッシュ・発見補助** に過ぎない。device-global の例外は **cost-ledger.sqlite** (再構築不可の運用台帳 — cache ではない、[03-data-model.md §4.1](03-data-model.md))。
+データ・所有権・権限の正本は **各フォルダ直下の `.kio`** に閉じる。device-local な `scope_registry` や将来の global aggregator は **検索キャッシュ・発見補助** に過ぎない。device-global の例外は **cost-ledger.sqlite** (再構築不可の運用台帳 — cache ではない、[03-data-model.md §4.1](03-data-model.md))。
 
 ```
-truth = folder-local .kcs
+truth = folder-local .kio
   - raw object / normalized / chunks / commits / refs
   - 権限境界 / partial sync / purge / export の単位
 
@@ -246,22 +246,22 @@ cache = scope_registry / aggregator
 
 ルール:
 
-- aggregator のみを更新して `.kcs` の状態が変わる実装は禁止。
-- aggregator 喪失は再構築可能 (各 `.kcs` を rescan)。`.kcs` 喪失は復旧不能。
-- 検索結果メタには「正本の `.kcs` パス」を必ず含める。
+- aggregator のみを更新して `.kio` の状態が変わる実装は禁止。
+- aggregator 喪失は再構築可能 (各 `.kio` を rescan)。`.kio` 喪失は復旧不能。
+- 検索結果メタには「正本の `.kio` パス」を必ず含める。
 
 ---
 
 # 8. 既存ワークフローとの関係
 
-KCS は既存ツールを置き換えない。**横断する**外部アーカイブ層として始める。
+KIO は既存ツールを置き換えない。**横断する**外部アーカイブ層として始める。
 
-| 既存ワークフロー | KCS の関係 |
+| 既存ワークフロー | KIO の関係 |
 | --- | --- |
-| Obsidian vault | vault を含む親フォルダに `.kcs`。vault 内検索は Smart Connections に任せ、KCS は vault + Documents + Downloads + コードを横断。 |
-| Git リポジトリ | リポジトリ自体には `.kcs` を置かない (Git に管理される)。`kcs index` は VCS repo root 配下に既定で子 `.kcs` を作らないため、**リポジトリ内のコードは既定では検索対象外** — コードも対象にするには `[scope] index_vcs_repos = true` の明示 opt-in ([03-data-model.md §3](03-data-model.md))。検索が横断するのは repo 外のファイルと他 scope である (横断検索は scope_registry 経由の全 scope 検索であり、親 `.kcs` 自体は直下のみ管理 — 03 §3)。 |
+| Obsidian vault | vault を含む親フォルダに `.kio`。vault 内検索は Smart Connections に任せ、KIO は vault + Documents + Downloads + コードを横断。 |
+| Git リポジトリ | リポジトリ自体には `.kio` を置かない (Git に管理される)。`kio index` は VCS repo root 配下に既定で子 `.kio` を作らないため、**リポジトリ内のコードは既定では検索対象外** — コードも対象にするには `[scope] index_vcs_repos = true` の明示 opt-in ([03-data-model.md §3](03-data-model.md))。検索が横断するのは repo 外のファイルと他 scope である (横断検索は scope_registry 経由の全 scope 検索であり、親 `.kio` 自体は直下のみ管理 — 03 §3)。 |
 | 既存ファイル整理 | Documents / Downloads など散らかった領域を整理せず、横断検索と Evidence で「整理しなくても見つかる」体験を提供。 |
-| Khoj / AnythingLLM | KCS の構造化 API を呼ぶ関係を狙う。チャット UX は彼らに任せる。 |
+| Khoj / AnythingLLM | KIO の構造化 API を呼ぶ関係を狙う。チャット UX は彼らに任せる。 |
 
 ---
 

@@ -35,11 +35,11 @@ except ImportError:  # pragma: no cover - direct-script compatibility.
     import persona_structural_allocation as structural
 
 
-CAPACITY_PLAN_SCHEMA = "kcs.persona.capacity-plan/v1"
-AMPLIFICATION_SCHEMA = "kcs.persona.pilot-capacity-amplification/v1"
-PILOT_MEASUREMENT_SCHEMA = "kcs.persona.pilot-capacity-measurement/v1"
-ROOT_MEASUREMENT_SCHEMA = "kcs.persona.root-capacity-measurement/v1"
-CAPACITY_RECEIPT_SCHEMA = "kcs.persona.root-bound-capacity-receipt/v1"
+CAPACITY_PLAN_SCHEMA = "kio.persona.capacity-plan/v1"
+AMPLIFICATION_SCHEMA = "kio.persona.pilot-capacity-amplification/v1"
+PILOT_MEASUREMENT_SCHEMA = "kio.persona.pilot-capacity-measurement/v1"
+ROOT_MEASUREMENT_SCHEMA = "kio.persona.root-capacity-measurement/v1"
+CAPACITY_RECEIPT_SCHEMA = "kio.persona.root-bound-capacity-receipt/v1"
 SCHEMA_VERSION = 1
 MAX_INTEGER = 2**63 - 1
 MIN_FILESYSTEM_ALLOCATION_UNIT = 512
@@ -62,17 +62,17 @@ PROFILES = frozenset(("tiny", "pilot", "full"))
 EXPECTED_PERSONA_IDS = tuple(persona["id"] for persona in spec.PERSONAS)
 EXPECTED_PERSONA_ID_SET = frozenset(EXPECTED_PERSONA_IDS)
 SHA256_RE = re.compile(r"[0-9a-f]{64}")
-PERSONA_WRAPPER_SCHEMA = "kcs.persona.w0.persona-generation-plan/v1"
+PERSONA_WRAPPER_SCHEMA = "kio.persona.w0.persona-generation-plan/v1"
 DECLARED_UNVERIFIED = "declared_unverified"
 MEASUREMENT_READBACK_REQUIRED = "measurement_receipt_readback_required"
 ROOT_MEASUREMENT_READBACK_REQUIRED = (
     "root_availability_measurement_readback_required"
 )
 PILOT_MEASUREMENT_PROJECTION_DOMAIN = (
-    "kcs.persona.pilot-capacity-measurement-projection/v1"
+    "kio.persona.pilot-capacity-measurement-projection/v1"
 )
 ROOT_MEASUREMENT_PROJECTION_DOMAIN = (
-    "kcs.persona.root-capacity-measurement-projection/v1"
+    "kio.persona.root-capacity-measurement-projection/v1"
 )
 
 
@@ -807,7 +807,7 @@ def build_persona_capacity_projection(
     else:  # No verified state is accepted until readback is implemented.
         readiness = "projection_ready_root_measurement_required"
     result = {
-        "schema": "kcs.persona.capacity-person-projection/v1",
+        "schema": "kio.persona.capacity-person-projection/v1",
         "schema_version": SCHEMA_VERSION,
         "fixture_id": spec.FIXTURE_ID,
         "profile": profile,
@@ -1056,8 +1056,8 @@ def build_capacity_plan(
             "filesystem_binding_phase": "root_bound_receipt_only",
             "staging_concurrency": "one_person_at_a_time",
             "w5_transient_concurrency": "all_personas_before_first_purge",
-            "planned_chunks_are_not_kcs_attestation": "required",
-            "actual_kcs_attestation": "false",
+            "planned_chunks_are_not_kio_attestation": "required",
+            "actual_kio_attestation": "false",
             "physical_write_authorization": "false",
         },
     }
@@ -1270,7 +1270,7 @@ def check_root_bound_capacity(
         }),
         "capacity_state": "blocked_measurement_receipt_readback_required",
         "physical_write_authorization": "false",
-        "actual_kcs_attestation": "false",
+        "actual_kio_attestation": "false",
     }
 
 
@@ -1308,7 +1308,7 @@ def build_capacity_receipt(
         "limits": limits,
         "check": check,
         "approval_scope": "capacity_only_not_physical_write_authorization",
-        "actual_kcs_attestation": "false",
+        "actual_kio_attestation": "false",
     }
     _without_bool_or_float(result, "capacity receipt")
     return result
@@ -1334,7 +1334,7 @@ def validate_capacity_receipt(
         "destination_root", "root_measurement", "root_measurement_sha256",
         "capacity_plan_sha256",
         "input_inventory_sha256", "suite_manifest_sha256", "limits",
-        "check", "approval_scope", "actual_kcs_attestation",
+        "check", "approval_scope", "actual_kio_attestation",
     }
     if type(receipt) is not dict or set(receipt) != fields:
         raise PersonaCapacityError("capacity receipt has an invalid field set")
@@ -1345,7 +1345,7 @@ def validate_capacity_receipt(
         or receipt["profile"] != plan.get("profile")
         or receipt["approval_scope"]
         != "capacity_only_not_physical_write_authorization"
-        or receipt["actual_kcs_attestation"] != "false"
+        or receipt["actual_kio_attestation"] != "false"
         or receipt["destination_root"]
         != _canonical_destination_root(expected_destination_root)
         or receipt["capacity_plan_sha256"] != capacity_plan_sha256(plan)

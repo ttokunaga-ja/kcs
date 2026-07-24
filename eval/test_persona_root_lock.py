@@ -33,7 +33,7 @@ def canonical_bytes(value):
 
 class PersonaRootLockTestCase(unittest.TestCase):
     def setUp(self):
-        self.temporary = tempfile.TemporaryDirectory(prefix="kcs-persona-lock-")
+        self.temporary = tempfile.TemporaryDirectory(prefix="kio-persona-lock-")
         self.addCleanup(self.temporary.cleanup)
         self.base = Path(self.temporary.name).resolve()
 
@@ -41,9 +41,9 @@ class PersonaRootLockTestCase(unittest.TestCase):
         root = self.base / name
         root.mkdir()
         binding = {
-            "schema": "kcs.persona.w0.root-binding/v1",
+            "schema": "kio.persona.w0.root-binding/v1",
             "schema_version": 1,
-            "fixture_id": "kcs-persona-pc-v1",
+            "fixture_id": "kio-persona-pc-v1",
             "profile": "tiny",
             "replay_id": "replay-01",
             "destination_root": str(root),
@@ -576,7 +576,7 @@ class TestReplayRootLease(PersonaRootLockTestCase):
 
     def test_binding_schema_and_canonical_form_are_enforced(self):
         invalid_cases = (
-            {"schema": "kcs.persona.w0.root-binding/v2"},
+            {"schema": "kio.persona.w0.root-binding/v2"},
             {"schema_version": True},
             {"fixture_id": "foreign-fixture"},
             {"suite_manifest_sha256": "not-a-digest"},

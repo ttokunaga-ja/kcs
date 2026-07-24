@@ -147,7 +147,7 @@ def run_batch_ocr(
     api_key = require_api_key()
     client = create_mistral_client(api_key)
     batch_request = {
-        "custom_id": "kcs-ocr-verification",
+        "custom_id": "kio-ocr-verification",
         "body": {
             "document": pdf_document_payload(pdf_path),
             "include_image_base64": True,
@@ -161,7 +161,7 @@ def run_batch_ocr(
         requests=[batch_request],
         model=REQUESTED_MODEL,
         endpoint="/v1/ocr",
-        metadata={"job_type": "kcs-ocr-verification"},
+        metadata={"job_type": "kio-ocr-verification"},
     )
     job_data = to_plain_data(created_job)
     deadline = time.monotonic() + timeout_seconds
@@ -429,7 +429,7 @@ def build_mock_figure_pages(ground_truth: dict[str, Any], tiny_png_base64: str) 
 
     scan = specs["scan_page"]
     scan_body = (
-        "KCS SCAN FIXTURE PAGE FIVE\n\n"
+        "KIO SCAN FIXTURE PAGE FIVE\n\n"
         "This entire page is rendered as a single raster image, a simulated scan of text-native content.\n\n"
         "Anchor tokens for retrieval checks: ALPHA-7731 BRAVO-2048 CHARLIE-9152\n\n"
         "If the page is returned only as an image with a placeholder, every token is lost to search."
@@ -453,7 +453,7 @@ def build_mock_figure_pages(ground_truth: dict[str, Any], tiny_png_base64: str) 
             "index": info["page_index"],
             "markdown": (
                 "# インフォグラフィックOCR評価\n\n![img-2.png](img-2.png)\n\n"
-                "KCS PIPELINE OVERVIEW\n\nIngest Markdownize Embed"
+                "KIO PIPELINE OVERVIEW\n\nIngest Markdownize Embed"
             ),
             "images": [
                 {

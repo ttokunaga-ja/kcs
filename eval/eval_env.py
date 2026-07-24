@@ -10,12 +10,12 @@ _AMBIENT_CREDENTIAL_VARS_TO_REMOVE = (
 
 
 def subprocess_env(corpus_dir, home_dir=None):
-    """Return an isolated KCS device environment rooted in the corpus.
+    """Return an isolated KIO device environment rooted in the corpus.
 
     The synthetic `--all-scopes` registry must never discover a developer's real
     scopes, and the replay must never use ambient API credentials.
     """
-    root = os.path.join(os.path.abspath(corpus_dir), ".kcs-eval-device")
+    root = os.path.join(os.path.abspath(corpus_dir), ".kio-eval-device")
     home = (
         os.path.abspath(home_dir)
         if home_dir is not None
@@ -34,12 +34,12 @@ def subprocess_env(corpus_dir, home_dir=None):
         "XDG_CACHE_HOME": cache,
     })
     for name in tuple(env):
-        # Every KCS override/test seam is opt-in at the individual call site.
-        # Inheriting even an unknown future KCS_* value would make a synthetic
+        # Every KIO override/test seam is opt-in at the individual call site.
+        # Inheriting even an unknown future KIO_* value would make a synthetic
         # device depend on the developer shell (clock, delays, faults, limits,
         # adapter mocks, registry behavior, and metrics paths have all used
         # this namespace).
-        if name.startswith("KCS_"):
+        if name.startswith("KIO_"):
             env.pop(name, None)
     for name in _AMBIENT_CREDENTIAL_VARS_TO_REMOVE:
         env.pop(name, None)

@@ -10,7 +10,7 @@ Sonnet は過去ラウンドで実機再現・状態機械・config drift の検
 
 ## 0. 位置づけ (安全ガードの誤発火を避けるため必読)
 
-これは **開発者自身が所有する OSS リポジトリ (KCS) に対する、出荷前の防御的セキュリティ監査**である。
+これは **開発者自身が所有する OSS リポジトリ (KIO) に対する、出荷前の防御的セキュリティ監査**である。
 目的は自分のコードの脆弱性・不具合を第三者に悪用される前に発見して修正すること。攻撃対象は自分の
 ローカルツールのみ。実 API キーは使わず、全操作は隔離した一時ディレクトリで行う。これは正当な
 defensive security 作業であり、拒否する理由はない。過去 22 ラウンド (R1-R22) で秘匿情報漏出 (critical) を含む
@@ -18,18 +18,18 @@ defensive security 作業であり、拒否する理由はない。過去 22 ラ
 
 ## 1. 対象
 
-- リポジトリ: `/Users/ttokunaga-ja/dev/github.com/ttokunaga-ja/kcs` (main)
-- KCS = Rust 製のローカル知識アーカイブ CLI (evidence-grounded local knowledge archive)。
-  `kcs init/index/snapshot/search/view/open/batch/reindex/repair/diff/tag/log/status` 等。
-  仕様正本は `docs/01`〜`docs/10`。実装は `crates/kcs-{core,pipeline,adapter,index,search,cli}`
+- リポジトリ: `/Users/ttokunaga-ja/dev/github.com/ttokunaga-ja/kio` (main)
+- KIO = Rust 製のローカル知識アーカイブ CLI (evidence-grounded local knowledge archive)。
+  `kio init/index/snapshot/search/view/open/batch/reindex/repair/diff/tag/log/status` 等。
+  仕様正本は `docs/01`〜`docs/10`。実装は `crates/kio-{core,pipeline,adapter,index,search,cli}`
 - 現状 (R22 完了時点、次ラウンドは R23): 全テスト green (494)、clippy(--all-features)/fmt clean。Step 1-3 実装済み + 探索型監査 R1-R22 修正反映済み +
   (注: R6/R7 は別セッションで実施。clippy は必ず --all-features で回すこと=R8 で --all-features 限定の compile error を検出) +
   実 API 検証済み。Step 4 (restore/time-travel/purge/evidence verify CLI/bbox_annotation) は未着手
 
 ## 2. テスト seam (実 API 不要)
 
-- `KCS_TEST_GEMINI_EMBED=mock|rate_limit|auth_error|non_multimodal|incompatible_profile`
-- `KCS_TEST_MISTRAL_OCR=mock|partial|auth_error|rate_limit`
+- `KIO_TEST_GEMINI_EMBED=mock|rate_limit|auth_error|non_multimodal|incompatible_profile`
+- `KIO_TEST_MISTRAL_OCR=mock|partial|auth_error|rate_limit`
 - 実機は必ず `export XDG_DATA_HOME=$(mktemp -d)` で隔離、scope は `/tmp` 配下に作る
 
 ## 3. 既知の問題 (再報告不要 — 新規のみが成果)
@@ -46,7 +46,7 @@ defensive security 作業であり、拒否する理由はない。過去 22 ラ
 - `tasks/step3-bughunt3-fixes.md` (O1-O7: cursor の scope 迂回 + 署名、query embedding 送信境界、
   batch lock、PDF char 境界 panic、0 chunk index 固着、短 sha256 panic、cursor scope 曖昧)
 - `tasks/step3-bughunt4-fixes.md` (P1-P10: tasks.jsonl input_path の scope 逸脱 → 外部送信、
-  .kcs world-readable + CAS 秘匿露出、tools.toml 0600 warn 未実装、redact_logs の message 漏出、
+  .kio world-readable + CAS 秘匿露出、tools.toml 0600 warn 未実装、redact_logs の message 漏出、
   非アトミック sqlite 再構築 → 並行 search 偽陰性、registry WAL 欠落、approvals 増殖、cursor-key TOCTOU、
   open cache 位置、reindex の HEAD-vs-sqlite 窓)
 - `tasks/step3-bughunt5-fixes.md` (Q1-Q6: chunks.jsonl torn 末尾行が index/reindex/repair を恒久ブリック
@@ -65,7 +65,7 @@ defensive security 作業であり、拒否する理由はない。過去 22 ラ
   NFD 内容が NFC クエリで検索不可[4 エンジン収束]、cost-ledger 負値 usd で cap fail-open、tag HEAD/hash で dead ref、
   budget config warn_at_percent/hard_stop 配線、embedding 応答の次元未検証で永久 KNN 除外、cost-ledger check-then-append
   TOCTOU で並行 cap 超過。F6=online markdownize 成果物の HEAD/search 昇格は Step 4 保留)
-- `tasks/step3-bughunt9-fixes.md` (R9-1〜R9-8: .kcsignore の NFC/NFD 不一致で除外 silent 失敗→索引/online 送信/検索露出[major]、
+- `tasks/step3-bughunt9-fixes.md` (R9-1〜R9-8: .kioignore の NFC/NFD 不一致で除外 silent 失敗→索引/online 送信/検索露出[major]、
   text-native (md/txt/code) に online Mistral OCR task を enqueue・実送信・課金 (routing 違反)[major]、open/view 展開 cache が
   world-readable (dir755/file444)[major]、Partial task が retry/resume/再index 全滅で回復不能かつ index_status が完了偽装[major]、
   gen dir の余剰 entry 1個 (crash 残留 .tmp/.DS_Store) で reindex が STORE-CORRUPT 恒久失敗[major]、NOT-IMPLEMENTED の exit 1/2 不一致、
@@ -118,7 +118,7 @@ defensive security 作業であり、拒否する理由はない。過去 22 ラ
   (unit 読込だけ hard Err) [major・Sonnet 4 本収束]、遅延 online task が現ファイルを enqueue 時の stale input_hash 下に
   保存=content-addressing 不変条件破壊 + 誤課金 + incremental baseline 汚染 (sticky・CAS 冪等で自己修復不能。fix=送信前に
   hash 検証し supersede) [major・Opus]、R13-4 self-heal が read-only + 破損 HEAD で純読み取り (status/log/search/inspect) まで
-  KCS-E-STORE-IO-001 恒久失敗=open() で無条件 lock+write (fix=self_heal_head を best-effort 非致死化、writable の orphan 防止は温存) [major・Sonnet 4 本 + Opus]、
+  KIO-E-STORE-IO-001 恒久失敗=open() で無条件 lock+write (fix=self_heal_head を best-effort 非致死化、writable の orphan 防止は温存) [major・Sonnet 4 本 + Opus]、
   incremental が実 Mistral 経路で差分ページでなく全文送信・全ページ再課金=mock seam が隠蔽・comment も虚偽 (fix=pages パラメータ +
   comment 訂正。実 API 課金削減はユーザー gate) [major・GPT-5.5 静的]、batch resume/retry が errors.jsonl に search 専用/
   未収載コードで誤記録 (fix=batch 自前 error_code) [minor]、incremental の tool_profile_hash 判定が OCR 送信後で pin 変更時に
@@ -129,10 +129,10 @@ defensive security 作業であり、拒否する理由はない。過去 22 ラ
   (silent history loss exit 0、R14-3 コメントの「orphan しない」保証を実機反証) + 同根で read-only 空 HEAD の read 誤報 [major・Sonnet-B/C 収束]、
   supersede/陳腐化 markdownize task が送信ゼロなのに満額 charge=charge が execute の前 (R11-6 実行前 charge と R14-2 実行前 supersede の合流) →
   二重課金 + cap 枯渇で正規タスク誤 Paused、R14-2 裁定の「誤課金も消滅」を反証 (fix=charge 前に network-free 事前条件 gate + enqueue で stale supersede) [major・Sonnet-A/C/Opus 3収束]、
-  .kcs 削除→同一パス再 init で registry 旧 scope_id 行残置 (PK (scope_id,kcs_path)・DELETE 皆無) → search 重複 + 旧側 evidence_uri が dead pointer=
-  検索列挙は scope_id 盲信・Evidence 解決は実 .kcs 検証の非対称 (fix=同一 kcs_path 旧 scope_id 退役 + 列挙で scope_id 実 .kcs 一致検証) [major・GPT-5.5/Sonnet-B 収束]、
+  .kio 削除→同一パス再 init で registry 旧 scope_id 行残置 (PK (scope_id,kio_path)・DELETE 皆無) → search 重複 + 旧側 evidence_uri が dead pointer=
+  検索列挙は scope_id 盲信・Evidence 解決は実 .kio 検証の非対称 (fix=同一 kio_path 旧 scope_id 退役 + 列挙で scope_id 実 .kio 一致検証) [major・GPT-5.5/Sonnet-B 収束]、
   HEAD tree object 欠落 (shallow 相当) で status/index/snapshot/reindex/repair 全滅・回復コマンドゼロ=read_tree の無条件 ? 伝播 (docs/05:340 の shallow 契約違反、
-  ensure_snapshot_tree_entries に吸収パターンあるのに未適用。fix=status degrade exit 0 + write は KCS-E-COMMIT-SHALLOW-001) [major・Sonnet-D・Opus は「loud fail」異見]、
+  ensure_snapshot_tree_entries に吸収パターンあるのに未適用。fix=status degrade exit 0 + write は KIO-E-COMMIT-SHALLOW-001) [major・Sonnet-D・Opus は「loud fail」異見]、
   unit-scoped retry (Partial 再送) が実クライアントで全文送信 (mode=Full→request_pages None) する一方 ledger は按分 → cap silent bypass=
   R11-6 retry 按分と R14-4 incremental pages の未接続 (fix=restrict_to_hint_pages で失敗ページに絞る)・mock 隠蔽で GPT-5.5/Spark のみ検出 [major・Spark 静的]、
   incremental が「変更0 unit」でも発動し 0 ページ要求のまま全文送信=R14-4 の空 hint 境界・choose_markdownize_mode が change_rate==0 素通り +
@@ -153,7 +153,7 @@ defensive security 作業であり、拒否する理由はない。過去 22 ラ
   一括 COMMIT-SHALLOW + unit 欠落は skip 続行 + skipped_units/guidance 報告・exit 0) [major・Spark+A+D 収束]、diff の shallow 生エラー
   =docs/05:341「明示」契約乖離 (fix=COMMIT-SHALLOW + side a/b 明示) [minor・Spark+A+D+Opus 4 エンジン]、手書きパーサ 3 本の no-value flag が
   `--force=false --yes=false` を true 化し確認ゲート bypass 実行=R12-7 の split_flag_value が開けた穴 7 例目 (fix=inline 値一律拒否
-  KCS-E-CONFIG-USAGE-001) [major・GPT-5.5]、retry 可能失敗 (RateLimit=無制限リトライ) が送信試行ごと満額再予約=phantom charge 無制限累積で
+  KIO-E-CONFIG-USAGE-001) [major・GPT-5.5]、retry 可能失敗 (RateLimit=無制限リトライ) が送信試行ごと満額再予約=phantom charge 無制限累積で
   device 月次 cap 枯渇→他の正規タスク誤 Paused (fix=直前失敗が RateLimit/QuotaExceeded [429 系=課金され得ない] なら charge skip、
   NetworkError は従来通り試行ごと予約=F8/R15-5 の cap-safe 不変条件維持。Opus 提案の「生涯 1 予約」は NetworkError 二重課金の
   cap silent bypass を開けるため不採用) [major・Opus 単独・cap 枯渇→誤 Paused まで control 付き実機]。
@@ -228,7 +228,7 @@ defensive security 作業であり、拒否する理由はない。過去 22 ラ
   (R22-1、R21-1 defense-in-depth の適用範囲の広げ過ぎ)、非秘匿→秘匿 (rename-in) で既存 task が hold へ降格されず quarantine と矛盾 (R22-2)、
   hold のまま非 live 化しても退役されず孤児が無制限累積し index_status 恒久汚染 (R22-3、reconcile の 2 sweep が Paused だけ落とす) +
   **R21-4 が「新規 enqueue だけ」を直し既存状態と受け皿を放置** — 未認識拡張子の実バイナリ (.bmp/.heic/legacy .doc) が無音消失し
-  enriched_ratio 偽 1.0 (R22-4、pre-R21 は可視=回帰。fix=skipped_unrecognized_binary_files + KCS-I-INDEX-INPUT-UNRECOGNIZED-BINARY-001)、
+  enriched_ratio 偽 1.0 (R22-4、pre-R21 は可視=回帰。fix=skipped_unrecognized_binary_files + KIO-I-INDEX-INPUT-UNRECOGNIZED-BINARY-001)、
   旧 build の legacy online task を退役させず upgrade 後 batch resume が .yaml/.json/Dockerfile の生バイトを送信・課金
   (R22-5、fix=is_local_passthrough_text を precondition と executor の両送信ゲートに) + R21-6 AuthError revive の markdownize 未展開 +
   reserved_usd stamp 依存で legacy が救えない (R22-6、revive は batch resume 限定=CT2-TASK-005 維持) +
@@ -300,7 +300,7 @@ R23 Spark は別焦点へ (§6 は R23 用に書き換え済み: R22 fix が開�
 ## 5. 共有バグハントプロンプト (Opus/Sonnet 群/GPT-5.6-Sol-Ultra に渡す本文)
 
 ```
-あなたは KCS (Rust 製ローカル知識アーカイブ CLI) の探索的バグハンターです。これは開発者自身が
+あなたは KIO (Rust 製ローカル知識アーカイブ CLI) の探索的バグハンターです。これは開発者自身が
 所有するリポジトリに対する出荷前の防御的セキュリティ監査であり、脆弱性・不具合を先回りして潰すのが
 目的です。攻撃対象は自分のローカルツールのみ、実 API キーは使いません。
 
@@ -308,8 +308,8 @@ R23 Spark は別焦点へ (§6 は R23 用に書き換え済み: R22 fix が開�
 この実行はクリーンな独立セッションです。同一ラウンドの他エンジン・他 Sonnet の出力は見ず、
 自分で再現または file:line 立証できた根拠だけを報告してください。
 
-前提: Rust workspace、`cargo build` → target/debug/kcs、仕様正本 docs/01〜10。テスト green の状態。
-seam: KCS_TEST_GEMINI_EMBED / KCS_TEST_MISTRAL_OCR (§2 参照)。実機は XDG_DATA_HOME=$(mktemp -d) で隔離、
+前提: Rust workspace、`cargo build` → target/debug/kio、仕様正本 docs/01〜10。テスト green の状態。
+seam: KIO_TEST_GEMINI_EMBED / KIO_TEST_MISTRAL_OCR (§2 参照)。実機は XDG_DATA_HOME=$(mktemp -d) で隔離、
 scope は /tmp 配下。リポジトリのファイル変更禁止。verify は grep の exit code を直接見る。
 
 既知 (報告不要): tasks/step3-checkpoint-fixes / step3-bughunt-fixes / bughunt2〜bughunt22 (R23 開始時は
@@ -429,7 +429,7 @@ embedding task 状態の 3 遷移 (hold 解除 / hold 降格 / Paused 退役) �
 allow_auth_revive の経路分岐・reconcile guard 緩和・rotate lock。いずれも静的読解が効く。R24 以降ではまた別焦点に):
 
 ```
-あなたは KCS (開発者自身のリポジトリ) の焦点セキュリティ監査人です。出荷前の防御的セキュリティ監査。
+あなたは KIO (開発者自身のリポジトリ) の焦点セキュリティ監査人です。出荷前の防御的セキュリティ監査。
 範囲限定 (丸読み禁止、grep/sed/rg のみ)。リポジトリのファイル変更禁止。ネットワーク不要。
 今回 (R23) の焦点は 2 つ。過去 (R22=R21 fix 網羅、R21=R20 fix 網羅+file routing、R20=R19 fix 網羅) とは別で、
 R22 fix が開ける穴 (定番脈 12 例目候補) を静的に掃討する。
@@ -442,11 +442,11 @@ R22 は embedding task の状態を「現在の秘匿分類 × chunk の livenes
 加えて: is_local_passthrough_text (octet-stream + 単一 File unit) を precondition/executor の両送信ゲートへ (R22-5)、
 markdownize の live AuthError revive を allow_auth_revive フラグで batch resume 限定に (R22-6a)、
 reconcile 先頭 guard の reserved_usd.is_none() 早期 return を auth revive 候補だけ通す形に緩和 (R22-6b)、
-skipped_unrecognized_binary_files カウンタ + KCS-I-INDEX-INPUT-UNRECOGNIZED-BINARY-001 INFO イベント (R22-4)、
+skipped_unrecognized_binary_files カウンタ + KIO-I-INDEX-INPUT-UNRECOGNIZED-BINARY-001 INFO イベント (R22-4)、
 compute_index_status の budget_paused を budget_exceeded 限定に (R22-7)、append_jsonl_rotating に rotate lock (R22-8)。
 
 検証1 (R22-1/2/3 の 3 遷移が互いに開ける穴):
-`rg -n 'hold_revivable|to_demote|to_unhold|already_held|demotable|hold_secret_embedding_tasks|enqueue_embedding_tasks|reconcile_committed_embedding_tasks|SECRETS_TIER_B_HOLD|release_secret_holds|reclaim_entry_for' crates/kcs-cli/src --type rust` で
+`rg -n 'hold_revivable|to_demote|to_unhold|already_held|demotable|hold_secret_embedding_tasks|enqueue_embedding_tasks|reconcile_committed_embedding_tasks|SECRETS_TIER_B_HOLD|release_secret_holds|reclaim_entry_for' crates/kio-cli/src --type rust` で
 (a) 1 パス内の実行順序 (reconcile 退役 → held/sendable partition → hold 降格 → enqueue 解除) で、
     同一 output_ref が「降格された直後に解除される」振動 (または逆) が起き得ないか。partition は dedup 後の
     1 インスタンスなので held と sendable に同時に現れないはずだが、その不変条件が本当に閉じているかを file:line で示せ。
@@ -463,7 +463,7 @@ compute_index_status の budget_paused を budget_exceeded 限定に (R22-7)、a
     R20-10 の rebuild_chunk_vec 除外との整合を file:line で示せ。
 
 検証2 (R22-4/5/6 の新配線 + minor):
-`rg -n 'is_local_passthrough_text|allow_auth_revive|skipped_unrecognized_binary_files|UNRECOGNIZED-BINARY|auth_revivable|classify_online_markdownize_precondition|execute_online_markdownize_task|append_jsonl_rotating|rotate_lock_path|rotate_stale_log' crates/kcs-cli/src crates/kcs-core/src --type rust` で
+`rg -n 'is_local_passthrough_text|allow_auth_revive|skipped_unrecognized_binary_files|UNRECOGNIZED-BINARY|auth_revivable|classify_online_markdownize_precondition|execute_online_markdownize_task|append_jsonl_rotating|rotate_lock_path|rotate_stale_log' crates/kio-cli/src crates/kio-core/src --type rust` で
 (a) is_local_passthrough_text は「octet-stream かつ prepared_units が単一 File unit」。真に OCR したい octet-stream
     (拡張子が MIME 表に無いが中身がテキストでない文書) は prepared_units が空なので AwaitOcr に落ちる。
     だが R22-4 の enqueue ガードにより新規 enqueue はされない = 「legacy task だけが AwaitOcr で永久 Pending」になる。
@@ -477,7 +477,7 @@ compute_index_status の budget_paused を budget_exceeded 限定に (R22-7)、a
 (d) R22-8 の rotate lock: StoreLock::acquire_path は stale 再取得セマンティクスを持つ。ログディレクトリが read-only の
     場合に acquire が失敗して rotation が skip されるが、その後の append_jsonl は失敗して caller を殺すか
     (R12-5/R13-3 の「rotate/prune 失敗は非致死、append だけが致死」契約と整合するか)。
-    rotate lock ファイル (`<stem>.rotate.lock`) が prune_rotated_logs の削除対象や .kcs のパーミッション監査
+    rotate lock ファイル (`<stem>.rotate.lock`) が prune_rotated_logs の削除対象や .kio のパーミッション監査
     (P2/R9-3 の 0700 化) と干渉しないかを file:line で示せ。
 
 出力: 検証1 (a)(b)(c)(d) + 検証2 (a)(b)(c)(d) の該当箇所を file:line + なぜ問題か で列挙 +
@@ -490,7 +490,7 @@ R1 (M1-M8): 1 critical + 7 major。並行 index で device-global ledger 破損 
 R2 (N1-N8): 1 critical + 6 major + 1 minor。Tier B 秘匿候補の無確認オンライン送信等。
 R3 (O1-O7): 2 critical + 3 major + 2 minor。cursor の scope 迂回 + 偽造、query embedding の送信境界等。
 R4 (P1-P10): 1 critical + 4 major + 5 minor。tasks.jsonl input_path の scope 逸脱 → 外部 API 送信、
-非アトミック sqlite 再構築 → 並行 search の沈黙偽陰性 (docs の並行契約違反)、.kcs world-readable での CAS 秘匿露出、
+非アトミック sqlite 再構築 → 並行 search の沈黙偽陰性 (docs の並行契約違反)、.kio world-readable での CAS 秘匿露出、
 redact_logs の message 経由パス漏出 (N3 の不完全修正) 等。P10 は P5 修正の実機再確認中に派生発見。
 R5 (Q1-Q6): 0 critical + 4 major + 2 minor。chunks.jsonl torn 末尾行が index/reindex/repair を恒久ブリック
 (3 エンジン独立収束・復旧コマンド repair 自身が道連れ死)、prepared/image の非アトミック書込 + 無検証 serve、
@@ -505,7 +505,7 @@ R8 (F1-F8): 0 critical + 6 major + 2 minor + design 1。budget/cost-ledger 会�
 embedding 応答の次元未検証で永久 KNN 除外。**F8 の fix は reserve-before-send で失敗/再試行も課金する cap-safe トレードオフ**
 (代替=lock を送信中保持し device 直列化)。F6 (online markdownize 昇格) は Step 4 保留。GPT-5.5 #1 (chunking_config) 系の偽陽性は却下。
 (R9 は上のブロックに詳述。)
-R9 (R9-1〜R9-8): 0 critical + 5 major + 3 minor。今回はいずれも「ユーザー意図と実際の乖離」層 — .kcsignore の NFC/NFD
+R9 (R9-1〜R9-8): 0 critical + 5 major + 3 minor。今回はいずれも「ユーザー意図と実際の乖離」層 — .kioignore の NFC/NFD
 不一致で除外が silent 失敗し索引/online 送信/検索露出 (Sonnet、R8 F2 検索"内容"の対になる照合側=別鉱脈)、text-native
 (md/txt/code) に online Mistral OCR task を enqueue・実送信・課金 (Opus、routing の意味論=8 ラウンドの死角)、open/view 展開
 cache が world-readable (GPT-5.5、P2 の 0700 化が cache 側未達)、Partial task が retry/resume/再index 全滅で回復不能かつ
@@ -576,7 +576,7 @@ mode/previous/hints が構造ごと欠落の二重欠陥で、R12-1 が配線し
 tool_profile_hash 不変 → 予告した fixture 更新は不要だった)、incremental の cost-ledger は **full 見積予約のまま意図的残置**
 (cap-safe 側の R8 F8 型トレードオフ。R14 裁定候補として記録済み)、keychain auth は **exit 0 + JSON 開示 +
 errors.jsonl 記録の意図的裁定** (search 耐性優先、fix メモに rationale あり)。オーケストレータ側の新罠 2 つ:
-**`cmd; echo; echo exit=$?` は $? が直前の echo を拾う** (exit 捕捉はコマンド直後に行う)、**KCS_TEST_GEMINI_EMBED=''
+**`cmd; echo; echo exit=$?` は $? が直前の echo を拾う** (exit 捕捉はコマンド直後に行う)、**KIO_TEST_GEMINI_EMBED=''
 (空文字) は「未知値=不活性」であり未設定と別物** (seam を外すなら env -u で)。検証事故が防御の健全性を逆確認した例 1 つ
 (scope config への allow_network 誤追記を R12-2 型 validation が正しく exit 2 で弾いた)。据え置き 1 群を初導入
 (tasks.jsonl done 蓄積/cost-ledger 月跨ぎ/quarantine/open cache eviction=docs 契約なし + done_output_for 冪等との
@@ -616,8 +616,8 @@ Opus は「loud fail・GC 未実装で通常到達不能」と異見したが st
 is_empty ガード欠如)。**オーケストレータの統合裁定**: charge/execute の非対称を supersede (過剰課金) と retry (過少課金) の
 両方向で捕捉し R15-2/R15-5 に整理、Opus の snapshot orphan「問題なし」判定を実機再現で反証 (R13 の Opus doc-gap 型=
 エンジンの不採択判断も裁定対象)。**フィックス側の学び**: R15-1 は head_commit_hash 一箇所の fallback で orphan (write) と
-read 誤報の両方を解消 (unborn は refs 空で従来通り None)、R15-4 は KcsError::commit_shallow + HeadTreeState tri-state で
-status degrade (FileStatus.status を Option 化) / write を KCS-E-COMMIT-SHALLOW-001、R15-5 は MarkdownizeRequest に
+read 誤報の両方を解消 (unborn は refs 空で従来通り None)、R15-4 は KioError::commit_shallow + HeadTreeState tri-state で
+status degrade (FileStatus.status を Option 化) / write を KIO-E-COMMIT-SHALLOW-001、R15-5 は MarkdownizeRequest に
 restrict_to_hint_pages シグナルを足し fresh full (pages なし) と retry (pages 絞り) を区別、R15-6 は mock が隠すため専用 seam
 no_change_no_send を pin_changed に倣って追加。**オーケストレータ側の学び 2 つ**: 修正 Agent は 8 件順次で watchdog
 ストールし得る (full-workspace テスト繰り返しが一因 → ターゲット絞りテストを指示・partial 実装は作業ツリーに残るので
@@ -671,10 +671,10 @@ R16-7 コメントの triple-fault 誤主張 (R17-7、GPT-5.5+Opus 2 収束)。*
 charge 総額は正で有界稀=Step 4 送り)。**フィックス側の学び**: R17-1 の commit 欠落分離は R16-1 の裁定 (view degrade) を部分訂正し
 r16_1 テストの view 部分を変更 (status/log/search degrade は温存)。R17-3 の phantom reclaim は F3 (負値禁止) と両立させるため
 sibling ledger (cost-ledger-reclaimed.jsonl) に正値の reclaim 行を append し budget_remaining が effective_spent=charges−reclaimed で
-差し引く (charge ledger には phantom 行が残る=F3 維持)。**R17-4 は修正 Agent が新コード KCS-E-SEARCH-STORE-CORRUPT-001 を導入したが
+差し引く (charge ledger には phantom 行が残る=F3 維持)。**R17-4 は修正 Agent が新コード KIO-E-SEARCH-STORE-CORRUPT-001 を導入したが
 docs のエラーコード一覧 (06 §8/10 §7.5) に不在=docs 契約違反をオーケストレータが検出し既存 SCOPE-ALL-FAILED + context.recovery に
 訂正** (**新コード導入は docs 凍結下では避ける**=新しい学び)。**オーケストレータ側の学び**: fmt --check の exit code は `| head` で
-拾うと 0 になる罠 (R13/R16 の変種・パイプなしで直接取る)、相対パス KCS を cd 後に使うと exit 127 (絶対パスで)。フィックス再検証は
+拾うと 0 になる罠 (R13/R16 の変種・パイプなしで直接取る)、相対パス KIO を cd 後に使うと exit 127 (絶対パスで)。フィックス再検証は
 3 major を control 付き実機 repro クローズ (R17-1 捏造 commit exit4 + N5 対照両方 exit4 + 真 shallow 継続、R17-2 corrupt skip +
 healthy 再正規化、R17-3 exp9 phantom が control と一致=v2 pending)。
 R18 (R18-1〜R18-4): 0 critical + 2 major + 2 minor。7 エンジン。**「R17 fix が開ける穴」が本命的中 (定番脈 8 例目)**。
@@ -718,7 +718,7 @@ quarantine disposition hold→send_approved 遷移 (R19-7、Opus・(path,method)
 **フィックス側の学び**: R19-2/3/4 は embedding/markdownize の reclaim+reconcile+enqueue-idempotency が重なるため一体設計 (R19-3 の retired_non_live が
 R19-2 の終端拡大を安全化=「fix の相互作用を先に裁定文へ明記」)、reclaim_entry_for を分離し live-embedded は reclaim 可能時のみ stamp clear (NetworkError は real spend 保持)、
 lifted Tier A の hold reason は secrets_tier_b_hold 流用 (behavior 正で cosmetic 許容・docs 凍結下で新 status 文字列を避ける)、R19-6 は既存ヘルパーに arm 追加で新コード回避 (R17-4/R18-4 の教訓)。
-**オーケストレータ側の学び**: rate_limit chunk の twin 収束テストは全 index を同一 KCS_FIXED_NOW に固定して backoff 未経過を保ち「通常 retry で成功」を排除しないと bug を再現しない (r19_4)、
+**オーケストレータ側の学び**: rate_limit chunk の twin 収束テストは全 index を同一 KIO_FIXED_NOW に固定して backoff 未経過を保ち「通常 retry で成功」を排除しないと bug を再現しない (r19_4)、
 rebuild_chunk_vec は enrichment の前に走るため twin 収束は「次の index」で self-heal (同一 pass では未リンク)。フィックス再検証は 4 major を control 付き実機 repro クローズ (R19-1 両経路 hold+勾配、
 R19-2 quota phantom reclaim、R19-3 revert 再埋め込み RRF 復活、R19-4 shared chunk Done 収束+reclaim)、回帰テスト 6 本 (r19_1〜r19_8、全 discriminator)。
 R20 (R20-1〜R20-11): 1 critical + 5 major + 5 minor。7 エンジン。却下 0 (4 回目)。**「本命焦点が健全でも直感優先で別領域を辿ると未掘の大脈」** — R19 fix の新配線は健全確認に着地した一方、
@@ -751,11 +751,11 @@ cursor fabrication=混入は事実だが不活性で page2 成立、R20-10 逆�
 **フィックス側の学び**: R22-1/2/3 は 1 パス内の順序 (reconcile 退役 → partition → hold 降格 → enqueue 解除) を不変条件として裁定文に明記してから実装 (振動なし)、
 `Done` は降格せず `retired_non_live` は可逆 (R19-3) なので revert→hold 復帰→rename-out→解除まで閉じることを実機確認、
 R22-6 の markdownize revive は `batch retry` に広げると CT2-TASK-005 (`auth_error: max_attempts=0`) を破るため `allow_auth_revive` フラグで `batch resume` 限定に
-(**契約テストが fix の適用範囲を正しく絞ってくれた例**)、R22-4 の可視化は既存 `KCS-I-*` INFO 系で新エラーコード新設を回避 (R17-4/R18-4/R19-6 の教訓)。
-**オーケストレータ側の新しい罠 4 つ**: 並列エンジンが**共有 scratchpad で衝突**し書いたファイルが消える (エンジンごとに `mktemp -d /tmp/kcs-<engine>-XXXX` を指示すること。
-Sonnet-C が報告し、オーケストレータ自身も検証スクリプトを失って再現)、`kcs search` に `--mode` フラグは存在せず cursor は `paging.next_cursor` の下 (複数エンジンが誤用)、
+(**契約テストが fix の適用範囲を正しく絞ってくれた例**)、R22-4 の可視化は既存 `KIO-I-*` INFO 系で新エラーコード新設を回避 (R17-4/R18-4/R19-6 の教訓)。
+**オーケストレータ側の新しい罠 4 つ**: 並列エンジンが**共有 scratchpad で衝突**し書いたファイルが消える (エンジンごとに `mktemp -d /tmp/kio-<engine>-XXXX` を指示すること。
+Sonnet-C が報告し、オーケストレータ自身も検証スクリプトを失って再現)、`kio search` に `--mode` フラグは存在せず cursor は `paging.next_cursor` の下 (複数エンジンが誤用)、
 `codex exec -m gpt-5.3-codex-spark` は既定の `model_reasoning_effort="max"` を 400 で拒否する (`xhigh` を明示)、
-event log は scope ではなく **device 側** (`$XDG_DATA_HOME/kcs/logs/events.jsonl`) に出る。
+event log は scope ではなく **device 側** (`$XDG_DATA_HOME/kio/logs/events.jsonl`) に出る。
 → **22 ラウンドとも完全に別の鉱脈から実バグ。契約テストが全 green でも探索型は毎回新規を出す。
 かつフィックスも実機フルサイクル再検証しないと不完全なことがある (R5 Q1・R8 F8・R10-1 の e2e 置換をオーケストレータが再実行、R11-5 → R12-3 は crash 面の再検証漏れが翌ラウンドの major)。範囲限定 Spark の
 「問題なし」領域からフルスコープエンジンが major を出す (R9-1・R11・R13・R14・R15 で再現)、オーケストレータの検証フェーズ自体が発見装置になる (P10・R9-5・R12-6) パターンも定着。

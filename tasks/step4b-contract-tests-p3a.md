@@ -9,9 +9,9 @@
 > 「未定義/曖昧の切り出し」方針。記法は `### QA<連番> ... - 正本 / 前提 / 操作 / 期待` 形式 (自己完結)。
 >
 > **現状確認の前置き**: `tasks/step4b-spec-gap.md` の「実装状態」欄は 2026-07-21 時点のスナップショットで
-> あり、本書作成時点 (2026-07-22) には Phase 1 (`crates/kcs-pipeline/src/ledger/` — cost-ledger.sqlite
+> あり、本書作成時点 (2026-07-22) には Phase 1 (`crates/kio-pipeline/src/ledger/` — cost-ledger.sqlite
 > 2 相プロトコル・abandon・`--reset-violations`・stalled 表示) と一部 Phase 2 相当の作業
-> (`--prune-orphans`/`--registry-prune` CLI 配線、`kcs search` の `--online`/`--offline`) が実際には
+> (`--prune-orphans`/`--registry-prune` CLI 配線、`kio search` の `--online`/`--offline`) が実際には
 > 既に着地しており、spec-gap の記述より実装が進んでいる箇所が複数ある。本書の各契約は spec-gap の
 > 文言ではなく **本書作成時点で直接読んだ現行コード** を「現状」として引用する (該当箇所ごとに
 > file:line を再確認済み)。
@@ -25,19 +25,19 @@
 
 ## 対象外 (他グループ・Phase 1/2 既済 — 混同注意)
 
-- **U1 のうち `kcs batch abandon` CLI と `kcs status` の `stalled` 表示**: Phase 1 で実装済み
-  (`crates/kcs-pipeline/src/ledger/ops.rs` `resolve_abandon_selector`/`execute_abandon`/`stalled_rows`、
-  `crates/kcs-cli/src/main.rs` `BatchCommand::Abandon`/`run_batch_abandon`)。
+- **U1 のうち `kio batch abandon` CLI と `kio status` の `stalled` 表示**: Phase 1 で実装済み
+  (`crates/kio-pipeline/src/ledger/ops.rs` `resolve_abandon_selector`/`execute_abandon`/`stalled_rows`、
+  `crates/kio-cli/src/main.rs` `BatchCommand::Abandon`/`run_batch_abandon`)。
   `step4b-contract-tests-ledger.md` **CL62-CL68** (abandon) / **CL37** (stalled) が正本。本書 §A は
   taskの**状態機械**部分 (hold_reason 3 値・paused/pending 分離) のみを扱う。
-- **U1 のうち `kcs batch retry --reset-violations`**: Phase 1 で実装済み
+- **U1 のうち `kio batch retry --reset-violations`**: Phase 1 で実装済み
   (`main.rs` `run_batch_reset_violations`、`RetryArgs.reset_violations`)。ledger.md §M note-6 が
-  裁定済み・`crates/kcs-cli/tests/step4b_ledger_contract.rs` に実 CLI テストあり。本書は再契約しない。
+  裁定済み・`crates/kio-cli/tests/step4b_ledger_contract.rs` に実 CLI テストあり。本書は再契約しない。
 - **U4 のうち check-then-reserve の Tx 機構本体 (device/folder/device_per_adapter 三条件・
   candidate=0 免除・ledger() 合成・sync 縮退 2 相)**: Phase 1 で実装済み
-  (`crates/kcs-pipeline/src/ledger/ops.rs` `check_then_reserve`、`step4b-contract-tests-ledger.md`
+  (`crates/kio-pipeline/src/ledger/ops.rs` `check_then_reserve`、`step4b-contract-tests-ledger.md`
   **CL56-CL61**)。本書 §D は CL56-61 が明示的に「立ち入らない」と宣言した残余 — **folder 層の
-  per_adapter が config パース・enqueue 時事前チェック・`kcs status` 表示のいずれからも消えていない
+  per_adapter が config パース・enqueue 時事前チェック・`kio status` 表示のいずれからも消えていない
   こと** のみを扱う (ledger.md §I 冒頭の但し書き参照)。`markdown`→`markdownize` の adapter_kind 文字列
   リネームは本書作成時点で**既に完了**しており (根拠は §D 前置き参照)、再契約しない。
 - **U11 のうち「二重課金防止の手段が sync/Batch の二段構えである」という事実確認**: Phase 1
@@ -52,29 +52,29 @@
   正しく動作しているか**」の現状確認 1 本のみ (§S 末尾、regression-lock)。
 - **fsck の検証ロジック本体・evidence pointer 解決・restore・purge 機構本体・検索 gate/cursor**:
   P2-A/B/C の管轄 (`step4b-contract-tests-p2{a,b,c}.md`)。本書は必要な箇所のみ参照する。
-- **`kcs evidence retarget` の実装そのもの**: Phase 4+ (08§5)。本書の対象外。
+- **`kio evidence retarget` の実装そのもの**: Phase 4+ (08§5)。本書の対象外。
 
 ## 実装対象ファイルの見込み (現状把握の記録 — 実装方針を指図するものではない)
 
-- `crates/kcs-pipeline/src/task.rs` — `TaskStatus`/`RetryErrorKind`/`RetryPolicy`/`retry_policy`
+- `crates/kio-pipeline/src/task.rs` — `TaskStatus`/`RetryErrorKind`/`RetryPolicy`/`retry_policy`
   (hold_reason 相当の分離が無い。§A)、`MAX_TASK_RECORDS` の hard reject のみ (§C)
-- `crates/kcs-pipeline/src/markdownize.rs` — `validate_markdownize_response`/`validate_full_response`/
+- `crates/kio-pipeline/src/markdownize.rs` — `validate_markdownize_response`/`validate_full_response`/
   `validate_unit_shapes` (§K/§L/§M の主戦場)
-- `crates/kcs-pipeline/src/budget.rs` / `crates/kcs-pipeline/src/ledger/ops.rs` — `BudgetCaps`
+- `crates/kio-pipeline/src/budget.rs` / `crates/kio-pipeline/src/ledger/ops.rs` — `BudgetCaps`
   (`folder_per_adapter` 残存) vs `BudgetCapConfig` (該当 field 無し) の不整合 (§D)
-- `crates/kcs-adapter/src/types.rs` — `AdapterRun`/`AdapterProfile`/`MarkdownizeResponse`/
+- `crates/kio-adapter/src/types.rs` — `AdapterRun`/`AdapterProfile`/`MarkdownizeResponse`/
   `EmbeddingResponse`/`validate_cosine_vector` (§F/§K/§N)
-- `crates/kcs-adapter/src/traits.rs` — 6 kind 別 trait のみ、Batch 実行契約 trait 皆無 (§O)
-- `crates/kcs-adapter/src/identity.rs` — `PROFILE_FIELDS` に `render_params`/`bbox_annotation` が
+- `crates/kio-adapter/src/traits.rs` — 6 kind 別 trait のみ、Batch 実行契約 trait 皆無 (§O)
+- `crates/kio-adapter/src/identity.rs` — `PROFILE_FIELDS` に `render_params`/`bbox_annotation` が
   無い (§J)
-- `crates/kcs-adapter/src/bbox_annotation.rs`/`mistral_ocr.rs`/`gemini_embedding.rs` — §J/§L/§N/§O
-- `crates/kcs-cli/src/main.rs` — Commands enum に `Adapter` 無し (§H)、`persistent_network_allowed_for_kcs_dir`
+- `crates/kio-adapter/src/bbox_annotation.rs`/`mistral_ocr.rs`/`gemini_embedding.rs` — §J/§L/§N/§O
+- `crates/kio-cli/src/main.rs` — Commands enum に `Adapter` 無し (§H)、`persistent_network_allowed_for_kio_dir`
   が device-global `consents.jsonl` を使い OR ゲート (§G)、`--online`/`--offline` の
   per-subcommand 配線状況 (§I)、`consecutive_incremental_count`/`previous_instance_for_path` (§R)
-- `crates/kcs-cli/src/verify_objects.rs` — `prune_orphans` (§S。PB14/16 は関数自身の doc comment が
+- `crates/kio-cli/src/verify_objects.rs` — `prune_orphans` (§S。PB14/16 は関数自身の doc comment が
   「本セッション未実装」と明記)
-- `crates/kcs-core/src/scope.rs` — `is_tier_a_secret_name`、scope.json は 3 key のみ (§B)
-- `crates/kcs-core/schemas/{scope,config}.schema.json` — `approvals`/`scan_approval` 皆無 (§B/§G)
+- `crates/kio-core/src/scope.rs` — `is_tier_a_secret_name`、scope.json は 3 key のみ (§B)
+- `crates/kio-core/schemas/{scope,config}.schema.json` — `approvals`/`scan_approval` 皆無 (§B/§G)
 
 ---
 
@@ -83,7 +83,7 @@
 ### QA1 hold_reason 3 値 enum が存在せず、budget/tier_b の 2 値のみが Paused を生成する [P0]
 - 正本: 04 §5.2 L679-683『pending → paused → pending 保留。**hold_reason = budget (§5.4) | auth |
   tier_b_approval** (10-operations.md §1.1)。解除条件 = 理由の解消...』
-- 前提: 現行 `TaskDescriptor` (`crates/kcs-pipeline/src/task.rs:45-52,76`) は理由を型なしの
+- 前提: 現行 `TaskDescriptor` (`crates/kio-pipeline/src/task.rs:45-52,76`) は理由を型なしの
   `fallback_reason: Option<String>` で表現し、`TaskStatus::Paused` を生成する本番コード上の呼出箇所は
   `main.rs:9728-9729`(`"budget_exceeded"`)・`main.rs:12229/12252/12293`
   (`SECRETS_TIER_B_HOLD="secrets_tier_b_hold"`)・`main.rs:14655-14665`
@@ -106,7 +106,7 @@
   本番コードからの参照は 0 件)。
 - 操作: online Adapter 呼出が auth_error で失敗するタスクを実行する。
 - 期待: spec が `auth` を hold_reason の閉 enum に含める以上、auth_error は (少なくとも
-  `kcs status` 上は) `paused (hold_reason=auth)` として表示され、user action (認証情報更新) で解除
+  `kio status` 上は) `paused (hold_reason=auth)` として表示され、user action (認証情報更新) で解除
   可能な状態として扱われるべきである。現行は `status=Failed` (exit 5 相当の permanent failure) に
   直行し、`RetryPolicy.paused` フィールド自体が本番コードから到達不能な死んだ抽象化になっている。
 
@@ -124,14 +124,14 @@
   `next_retry_at=<Retry-After 由来の時刻>` を維持し、`attempts` を消費しない (max_attempts=∞、
   04§5.3) ことを確認する。
 
-### QA4 `kcs status` は paused 件数を hold_reason 別に内訳表示しない [P1]
-- 正本: 10 §1 L117『`kcs status` は AI 強化の進捗 (done/pending/paused 件数) と **paused の理由
+### QA4 `kio status` は paused 件数を hold_reason 別に内訳表示しない [P1]
+- 正本: 10 §1 L117『`kio status` は AI 強化の進捗 (done/pending/paused 件数) と **paused の理由
   (budget/auth/tier_b_approval)** を表示する』
 - 前提: `Command::Status` の JSON 構築 (`main.rs:530-567`) は `"tasks": task_store.all()...` として
   生の task 配列をそのまま返すのみで、サーバー側集計を行わない。`paused_tasks` という集計 key は
-  `kcs index`/`kcs open` 等の**別コマンド**の出力にのみ存在し (`main.rs:841,1024,4549`)、
-  `kcs status` には存在せず、存在する場合も理由別内訳は持たない。
-- 操作: budget/tier_b の 2 理由で paused のタスクを混在させ `kcs status` を実行する。
+  `kio index`/`kio open` 等の**別コマンド**の出力にのみ存在し (`main.rs:841,1024,4549`)、
+  `kio status` には存在せず、存在する場合も理由別内訳は持たない。
+- 操作: budget/tier_b の 2 理由で paused のタスクを混在させ `kio status` を実行する。
 - 期待: 応答に paused 件数の理由別内訳 (少なくとも QA1 の 3 値 enum に対応する 3 バケット) が含まれる
   こと。現行は呼出側が生の `tasks[]` 配列をクライアント側で filter するしかない。
 
@@ -139,26 +139,26 @@
 
 ## B. Tier A/B 走査承認ゲートと承認記録の保存先 (U2)
 
-### QA5 `.kcs/scope.json` に `scan_approval` key が存在しない (scope.json は 3 key のみ) [P0]
-- 正本: 10 §1 L97『承認記録には...少なくとも次を残す (**保存先 = `.kcs/scope.json` の
+### QA5 `.kio/scope.json` に `scan_approval` key が存在しない (scope.json は 3 key のみ) [P0]
+- 正本: 10 §1 L97『承認記録には...少なくとも次を残す (**保存先 = `.kio/scope.json` の
   `scan_approval` key** — schema 検証対象 §12.3。adapter 単位の network opt-in 承認 `approvals[]`
   ...とは別 key)』
-- 前提: `crates/kcs-core/schemas/scope.schema.json` は `additionalProperties: false` で
-  `{kcs_format_version, scope_id, scope_path}` の 3 key のみを許可し、`scan_approval` は
+- 前提: `crates/kio-core/schemas/scope.schema.json` は `additionalProperties: false` で
+  `{kio_format_version, scope_id, scope_path}` の 3 key のみを許可し、`scan_approval` は
   schema にも実装 (`scope.rs:248-257` の `Repository::init` 書込み、`scope.rs:1720-1741` の
   読取り) にも存在しない (`grep -rn "scan_approval" crates/` は 0 件)。scope.json はこの 3 key から
   一切増えず (init 時に一度書かれた後は読み取り専用)。
-- 操作: `kcs init && kcs index --approve` を実行後、`.kcs/scope.json` を検査する。
+- 操作: `kio init && kio index --approve` を実行後、`.kio/scope.json` を検査する。
 - 期待: `scope.json` に `scan_approval` key (object) が追加され、`approved_at`/`actor`/
-  `approval_method`/`kcs_version`/`effective_ignore_hash`/`estimated_file_count`/
+  `approval_method`/`kio_version`/`effective_ignore_hash`/`estimated_file_count`/
   `estimated_total_bytes`/`estimated_markdownize_usd`/`estimated_embedding_usd` を持つ
   (10 §1 L101-113 の列挙)。現行は `scope.json` に一切追記されない。
 
 ### QA6 スキャン承認の実データは `approvals.jsonl` に adapter 行として書かれ、scope 単位の承認と adapter 単位の opt-in が未分離 [P0]
-- 正本: 10 §1 L97『(保存先 = `.kcs/scope.json` の `scan_approval` key) ... adapter 単位の
+- 正本: 10 §1 L97『(保存先 = `.kio/scope.json` の `scan_approval` key) ... adapter 単位の
   network opt-in 承認 `approvals[]` ... とは**別 key**』/ 07 §3 L169『初回スキャン承認 (10-operations.md
   §1) の記録とは別物 — あちらは scope 単位の取り込み承認、こちらは adapter 単位の network opt-in』
-- 前提: 現行の `write_approval_record` (`main.rs:15257-15321`) は `.kcs/approvals.jsonl` へ
+- 前提: 現行の `write_approval_record` (`main.rs:15257-15321`) は `.kio/approvals.jsonl` へ
   **adapter (tool_id) ごとに 1 行**を書き、各行に scan-approval 相当の field
   (`estimated_file_count`/`effective_ignore_hash`/`approved_at`/`approval_method`) を
   **重複して**埋め込む。scope 単位で 1 回だけ確定するはずの scan-approval と、adapter 単位で複数回
@@ -188,26 +188,26 @@
 
 ## C. Retry 予算カウンタ・tasks.jsonl 圧縮・partial の settled 化 (U3)
 
-### QA8 `.kcs/tasks.jsonl` に bounded compaction (既定 4096 行) が存在しない [P1]
-- 正本: 04 §5.1 L639-645『タスクストアは `.kcs/tasks.jsonl` (append-only・喪失許容)。
+### QA8 `.kio/tasks.jsonl` に bounded compaction (既定 4096 行) が存在しない [P1]
+- 正本: 04 §5.1 L639-645『タスクストアは `.kio/tasks.jsonl` (append-only・喪失許容)。
   **bounded compaction**: 書き込み系コマンド冒頭で行数が閾値 (既定 **4096 行**) を超えていたら、
-  `.kcs/.lock` 下で terminal task の行を落とし...非 terminal task は task_id ごとの最新行 1 行のみを
+  `.kio/.lock` 下で terminal task の行を落とし...非 terminal task は task_id ごとの最新行 1 行のみを
   ...再生成する』
-- 前提: `crates/kcs-pipeline/src/task.rs` は `MAX_TASK_RECORDS: usize = 100_000` の**hard reject**
+- 前提: `crates/kio-pipeline/src/task.rs` は `MAX_TASK_RECORDS: usize = 100_000` の**hard reject**
   のみを持ち (`task.rs:20`、超過時は `PipelineError::corrupt` で読み込み自体を失敗させる)、
   「4096」「compaction」「bounded」のいずれの語も crates 全体で grep 0 件。
 - 操作: `tasks.jsonl` に 5000 行 (terminal task の旧遷移行を含む) を書き込んだ状態で書き込み系
   コマンドを実行する。
 - 期待: 冒頭で compaction が発火し、terminal task の全行が落ち、非 terminal task は最新 1 行のみへ
   再生成される (temp 完書き→fsync→atomic rename)。現行は 100,000 行に達するまで一切圧縮されず、
-  達した瞬間は圧縮ではなく致命的な `KCS-E-STORE-CORRUPT-001` として読み込み自体が失敗する
+  達した瞬間は圧縮ではなく致命的な `KIO-E-STORE-CORRUPT-001` として読み込み自体が失敗する
   (spec が意図する「安全な自動圧縮」ではなく「無圧縮のまま突然の読み込み拒否」になる)。
 
 ### QA9 全 unit terminal な partial task の「settled」概念が存在しない [P1]
 - 正本: 04 §5.2 L718-721『**partial の settled 化**: 全 unit が terminal (done/failed permanent) と
   なり再投入対象が尽きた partial task は、表示上は partial のまま **task としては terminal
   (settled) として扱う** — staging cleanup を実行し、prune-orphans の blocker からも除外する』
-- 前提: `crates/kcs-pipeline/src/task.rs` の `TaskStatus` enum (45-52) に `Settled` 相当の値は無く、
+- 前提: `crates/kio-pipeline/src/task.rs` の `TaskStatus` enum (45-52) に `Settled` 相当の値は無く、
   `"settled"` という語も grep 0 件 (`ledger/model.rs` の `Outcome::UnknownSettled` は cost-ledger
   crash 回収の別概念であり、task 側の settled-partial とは無関係)。`task_can_complete_from_materialized_output`
   等の既存ヘルパ (`task.rs:632-642`) も all-unit-terminal 判定を持たない。
@@ -223,7 +223,7 @@
   `removed_unit_keys = []` と定める...この再投入の受け入れ検査 (§3.2) では **N = 合成した hints の
   集合 (= 失敗 unit のみ)**...合成 hints に対する §2.2 の unchanged 候補集合は空であり、V1 の
   完全一致は `unchanged_unit_keys = []` として評価する』
-- 前提: `crates/kcs-cli/src/main.rs` を `retry.*hint|synthesiz.*hint` で grep しても専用の合成関数は
+- 前提: `crates/kio-cli/src/main.rs` を `retry.*hint|synthesiz.*hint` で grep しても専用の合成関数は
   見つからず、`validate_markdownize_response` (`markdownize.rs:336-390`) は常に呼出元が渡す
   `prepared_units`/`hints` をそのまま母集合として使う汎用関数であり、「partial retry 時は N を
   失敗 unit 集合に限定する」という特別な合成ロジックの有無は本関数からは判別できない。
@@ -243,41 +243,41 @@
 
 > `check_then_reserve` (Tx 本体) は Phase 1 実装済み・CL56-61 が正本。本節は folder 層
 > `per_adapter` が「定義しない」対象であるにも関わらず config パース・enqueue 時事前チェック・
-> `kcs status` 表示の 3 箇所に残存している現状を扱う。
+> `kio status` 表示の 3 箇所に残存している現状を扱う。
 
-### QA11 enqueue 時事前チェックと `kcs status` 表示が folder 層 per_adapter を依然として参照する [P0]
+### QA11 enqueue 時事前チェックと `kio status` 表示が folder 層 per_adapter を依然として参照する [P0]
 - 正本: 04 §5.4 L768『`per_adapter` の下限は **device 層専用** (folder cap は total のみ —
   **folder 側 `[budget.per_adapter]` は定義しない**) で、第三条件として同様に判定する:
   `ledger(device, adapter_kind, 当月) + candidate < per_adapter_cap(adapter_kind)`』
-- 前提: `crates/kcs-pipeline/src/ledger/ops.rs` の `BudgetCapConfig`
+- 前提: `crates/kio-pipeline/src/ledger/ops.rs` の `BudgetCapConfig`
   (`device_cap`/`folder_cap`/`device_per_adapter_cap` の 3 field のみ、1352-1359) と
   `check_then_reserve` (1409-1446) は folder per_adapter を参照する field/分岐を一切持たない
   (真の Tx-atomic gate は spec どおり)。しかし **その手前**の enqueue 時事前チェック
   `budget_remaining_for_adapter` (`main.rs:14703-14730`、line 14726:
   `if let Some(adapter_cap) = budget_caps.folder_per_adapter.get(adapter_kind) { ... }`) は
-  folder per_adapter を read し remaining budget を狭める側に反映し、`kcs status` の budget JSON
+  folder per_adapter を read し remaining budget を狭める側に反映し、`kio status` の budget JSON
   (`main.rs:12683`: `"folder_per_adapter": caps.folder_per_adapter`) はこれをそのまま表示する。
-- 操作: `.kcs/config.toml` (folder) に `[budget.per_adapter] markdownize = 1.0` を設定し、
+- 操作: `.kio/config.toml` (folder) に `[budget.per_adapter] markdownize = 1.0` を設定し、
   device/folder 総額 cap には十分な残余がある状態でタスクを enqueue する。
 - 期待: folder 層に per_adapter という概念が存在しない以上、この設定はタスクの起動可否に一切
   影響しないべきである。現行は enqueue 時事前チェックが folder per_adapter で remaining を
   縮小するため、**真の Tx-atomic gate (`check_then_reserve`) では起動できるはずのタスクが、
   事前チェック段階で `paused(budget_exceeded)` に落ちる**不整合を再現できる (2 つの budget 判定
-  経路が異なる結論を出す)。`kcs status` の `folder_per_adapter` 表示も、存在しないはずの制約を
+  経路が異なる結論を出す)。`kio status` の `folder_per_adapter` 表示も、存在しないはずの制約を
   ユーザーに提示してしまう。
 
-### QA12 config schema が folder `.kcs/config.toml` の `[budget.per_adapter]` を拒否しない [P1]
+### QA12 config schema が folder `.kio/config.toml` の `[budget.per_adapter]` を拒否しない [P1]
 - 正本: 04 §5.4 L768『folder 側 `[budget.per_adapter]` は定義しない』
-- 前提: `crates/kcs-core/schemas/config.schema.json` の `budget.per_adapter`
+- 前提: `crates/kio-core/schemas/config.schema.json` の `budget.per_adapter`
   (schema.json:80-83) は device/folder 両方の config.toml に共通の 1 schema として適用され、
-  folder ファイルに対する特別な拒否規則を持たない。`crates/kcs-pipeline/src/budget.rs`
+  folder ファイルに対する特別な拒否規則を持たない。`crates/kio-pipeline/src/budget.rs`
   `read_budget_config` (192-266) も device/folder いずれの path に対しても同一のパース・
   検証ロジック (`is_valid_per_adapter_key` による enum 検証のみ) を適用し、「folder では
   この section 自体を禁止する」という file-role 別の分岐を持たない。
-- 操作: `.kcs/config.toml` (folder 側) に `[budget.per_adapter] embedding = 5.0` を書いて
+- 操作: `.kio/config.toml` (folder 側) に `[budget.per_adapter] embedding = 5.0` を書いて
   scope config を読み込ませる。
 - 期待: **[解釈割れ]** spec の「folder 側は定義しない」を (a) schema レベルで folder config への
-  この key の記述自体を `KCS-E-CONFIG-SCHEMA-001` で拒否すべき、と読むか、(b) 記述は許容し
+  この key の記述自体を `KIO-E-CONFIG-SCHEMA-001` で拒否すべき、と読むか、(b) 記述は許容し
   単に判定に使わない (QA11 の是正のみで足りる) と読むかは、本節の文言のみからは一意に決まらない。
   本契約は (a) の解釈を暫定採用し「folder config の `[budget.per_adapter]` は schema error」を
   期待とするが、確定は実装時の裁定を要する。
@@ -290,7 +290,7 @@
 - 正本: 04 §5.5 L880『LLM API の二重課金防止は二段構え: **sync 呼出は provider が idempotency key を
   提供する場合にそれを要求し**、Batch 投入は §5.8 の 2 相プロトコルを正本とする』(CL41 が
   「要求されることの事実確認」を既契約化、実装詳細は本書へ委譲— 対象外リスト参照)
-- 前提: `crates/kcs-adapter/src/` を `idempotency` (大小無視) で grep すると 0 件。sync 呼出を行う
+- 前提: `crates/kio-adapter/src/` を `idempotency` (大小無視) で grep すると 0 件。sync 呼出を行う
   唯一の実装 (`gemini_embedding.rs` の `GeminiEmbeddingClient::embed`) は `ureq` ベースの単純な
   POST 呼出であり、HTTP header や request body に idempotency key 相当のフィールドを一切含めない。
   provider (Vertex AI) が idempotency key を提供するかどうかの宣言・判定機構も存在しない。
@@ -299,25 +299,25 @@
   必須化)、提供しない場合は §5.4 の縮退 2 相 (batch_requests 行ベースの記帳冪等性) のみで
   二重課金を防止する — Adapter 層への idempotency_key 一律要求はしない、という条件分岐が
   存在すること。現行は分岐そのものが無く、常に「provider idempotency key 不使用」の状態と
-  等価である。**混同注意**: `crate::kcs_pipeline::task::idempotency_key`
+  等価である。**混同注意**: `crate::kio_pipeline::task::idempotency_key`
   (`task.rs:932-934`, `input_hash`+`tool_profile_hash` の sha256) は task/run の重複排除用の
   別概念であり (実際の dedup は `TaskKey`/`LedgerTaskKey` が担い、この関数自体は本番コードから
   呼ばれない死んだヘルパ)、本契約の provider-side idempotency key とは無関係。
 
 ### QA14 cost-ledger.sqlite のバックアップ手順・復元後 integrity_check が存在しない [P1]
-- 正本: 10 §7.5.2 (統合要約より、U12)『デバイスグローバルな cost-ledger.sqlite は `.kcs` コピーに
+- 正本: 10 §7.5.2 (統合要約より、U12)『デバイスグローバルな cost-ledger.sqlite は `.kio` コピーに
   含まれないため `sqlite3 ... .backup` による別バックアップ手順が必要...復元後は
   `PRAGMA integrity_check` + 両表存在確認...§5.8 の回復 (reconcile) 完了まで新規 Batch 投入禁止』
 - 前提: `crates/` 全体を `\.backup|integrity_check|PRAGMA integrity` で grep すると 0 件。
-  `cost-ledger.sqlite` 自体は Phase 1 で実装済みだが (`crates/kcs-pipeline/src/ledger/schema.rs`)、
-  バックアップ手順・復元検知・「復元後は新規 Batch 投入禁止」というガードは KCS 側のコード・
+  `cost-ledger.sqlite` 自体は Phase 1 で実装済みだが (`crates/kio-pipeline/src/ledger/schema.rs`)、
+  バックアップ手順・復元検知・「復元後は新規 Batch 投入禁止」というガードは KIO 側のコード・
   ドキュメント (docs/10-operations.md への文言記載のみ) いずれにも実行可能な形で存在しない。
 - 操作: `cost-ledger.sqlite` を手動バックアップ→破損させる→バックアップから復元する、という手順を
-  実行した状態で `kcs batch resume` 等の書き込み系コマンドを実行する。
-- 期待: KCS 側に復元検知の仕組みが無い以上、復元されたファイルは無条件に通常どおり扱われる
+  実行した状態で `kio batch resume` 等の書き込み系コマンドを実行する。
+- 期待: KIO 側に復元検知の仕組みが無い以上、復元されたファイルは無条件に通常どおり扱われる
   (「復元後は reconcile 完了まで新規投入禁止」という安全策が機能しない状態を再現できる)。
   この契約は現状「安全策皆無」であることの固定であり、実装が復元検知手段 (例: 起動時
-  `PRAGMA integrity_check` の常時実行、または明示 `kcs ledger reconcile` コマンドの新設) を
+  `PRAGMA integrity_check` の常時実行、または明示 `kio ledger reconcile` コマンドの新設) を
   持つべきという要求を含む。
 
 ### QA15 復元後の orphan job 判定 (provider_scope 全走査 + task key 4 組帰属判定) が存在しない [P1]
@@ -325,7 +325,7 @@
   batch_requests に対応行の無い job/upload を検出し task key 4 組で帰属判定、ローカル構成 scope に
   一致する job は orphan 候補として報告 (結果取得・削除を案内)、一致しない job は unknown として
   報告のみ (自動再投入・自動削除はしない)』
-- 前提: `crates/kcs-pipeline/src/ledger/ops.rs` の crash 回収 (`recovery_candidates`/
+- 前提: `crates/kio-pipeline/src/ledger/ops.rs` の crash 回収 (`recovery_candidates`/
   `recovery_mark_found`/`recovery_settle_unknown`) は**既存の `batch_requests` 行**を起点に
   found/confirmed-absent/unknown を判定する仕組みであり (§Z 参照)、「provider 側の job 一覧を
   全走査し、ローカル `batch_requests` に対応行が**存在しない** job を発見する」という逆方向の
@@ -345,9 +345,9 @@
 - 正本: 07 §4 L278-290『AdapterRun: task_id / input_hashes / output_hashes / status /
   **error_code** (機械判定用) / **error_category** (transient\|permanent\|rate_limit — 04§5.3の
   retry分類の入力) / **retry_after_ms** (optional — provider の Retry-After を透過)』
-- 前提: `crates/kcs-adapter/src/types.rs:48-55` の `AdapterRun` は
+- 前提: `crates/kio-adapter/src/types.rs:48-55` の `AdapterRun` は
   `{task_id, input_hashes, output_hashes, status, error_kind: Option<String>}` の 5 field のみ。
-  `error_code`/`error_category`/`retry_after_ms` は crates/kcs-adapter/src/ 全体で grep 0 件。
+  `error_code`/`error_category`/`retry_after_ms` は crates/kio-adapter/src/ 全体で grep 0 件。
 - 操作: online Adapter 呼出が transient エラー (429 相当、Retry-After ヘッダ付き) で失敗する。
 - 期待: `AdapterRun` に `error_code` (機械判定文字列) と `error_category="rate_limit"`、
   `retry_after_ms=<Retry-After 由来のミリ秒>` が個別 field として現れる。現行は単一の
@@ -357,18 +357,18 @@
 ### QA17 `usage` (one-of usd\|billable_units) が AdapterRun に存在せず、billable terminal 応答での必須化がない [P0]
 - 正本: 07 §4 L291-307『usage one-of { usd } \| { billable_units } — request 単位の課金報告...
   **billable な terminal 応答...で必須** — 欠落・不正値は estimated 記帳へ縮退する』
-- 前提: `usage`/`billable_units`/`usd` (課金 field として) は `crates/kcs-adapter/src/` 全体で
+- 前提: `usage`/`billable_units`/`usd` (課金 field として) は `crates/kio-adapter/src/` 全体で
   grep 0 件。`AdapterRun`/`AdapterProfile` いずれにもこの構造が無い。
 - 操作: billable な online Adapter が成功終端する。
 - 期待: 応答に `usage` (usd 実測額、または pages/tokens_in/tokens_out 等の kind 別 count 配列) が
-  含まれ、欠落時は KCS 側が estimated 縮退で吸収する。現行はこの field 自体が存在しないため、
+  含まれ、欠落時は KIO 側が estimated 縮退で吸収する。現行はこの field 自体が存在しないため、
   課金額は `AdapterRun` からは一切取得できない (§D/§O とも接続する構造的欠落)。
 
 ### QA18 `AdapterProfile` に `billable_kinds`/`reject_billing` が存在しない [P0]
 - 正本: 07 §4 L264-275『billable_kinds billable を宣言する Adapter (§5.7 条件6) は必須...
   reject_billing billable を宣言する Adapter (§5.7 条件6) は必須 — "billable"\|"nonbillable" の
   閉 enum』
-- 前提: `crates/kcs-adapter/src/types.rs:37-46` の `AdapterProfile` は
+- 前提: `crates/kio-adapter/src/types.rs:37-46` の `AdapterProfile` は
   `{adapter_kind, adapter_id, execution_mode, tool_profile_hash, version, capability_flags,
   allow_network}` の 7 field のみ。`billable_kinds`/`reject_billing` は crates 全体で grep 0 件。
 - 操作: billable を宣言する online Adapter (Markdownize/Embedding) の profile を構築する。
@@ -381,14 +381,14 @@
   **単価の正本は tools.toml** — tool-lock ではない)』/ 03 §11 L832-837 (`[markdown.
   mistral_ocr_markdownize.pricing] pages = 0.004` の TOML 例) / 04-pipeline.md §5.1
   L53『コスト概算は、現行 `tools.toml` の `[pricing]` 単価表...×推定ページ数/トークン数から算出する』
-- 前提: `"pricing"` を `crates/kcs-adapter/src/tool_lock.rs` と `crates/kcs-cli/src/main.rs` で
+- 前提: `"pricing"` を `crates/kio-adapter/src/tool_lock.rs` と `crates/kio-cli/src/main.rs` で
   grep すると **0 件**。`tool_lock.rs` の `TOOLS_ENTRY_FIELDS` (121-134、tools.toml の adapter
   entry に許可される field の閉リスト) にも `"pricing"` は含まれない — 現行の strict schema
   validation (R13-2, "unknown 型を全て拒否") の下では、spec 例の
   `[markdown.mistral_ocr_markdownize.pricing]` ネストテーブルを含む tools.toml は
   **未知 field として拒否されるか、単に無視される**可能性が高い。
-- 操作: `~/.config/kcs/tools.toml` に 03§11 の例のとおり `[markdown.mistral_ocr_markdownize.pricing]
-  pages = 0.004` を設定し、`kcs index --preview` (コスト概算) または billable 応答の USD 換算を
+- 操作: `~/.config/kio/tools.toml` に 03§11 の例のとおり `[markdown.mistral_ocr_markdownize.pricing]
+  pages = 0.004` を設定し、`kio index --preview` (コスト概算) または billable 応答の USD 換算を
   実行する。
 - 期待: pricing 単価表が読み込まれ、billable_units の USD 換算・preview のコスト概算に使われる。
   現行はこの節自体が実装に存在しないため、単価はどこからも解決されない (tool-lock 側にも
@@ -400,7 +400,7 @@
   terminal failed (invalid_input・非再試行) とし、送信しない (課金なし)』
 - 前提: `[adapter.policy] max_input_bytes` は `config.schema.json:139` に存在するが、この値を
   実際に「1 AdapterRun (= 1 request/job) の入力バイト数」と照合して送信前に拒否する検査コードの
-  有無は、本書の直接調査範囲では確認できていない (`crates/kcs-cli/src/main.rs` の送信経路の
+  有無は、本書の直接調査範囲では確認できていない (`crates/kio-cli/src/main.rs` の送信経路の
   該当箇所は他ドメイン (§K/§M) の調査で手一杯だった)。
 - 操作: `max_input_bytes` を小さく設定し、1 request が超過する入力 (例: 1 unit が巨大) と、
   task 全体 (複数 unit の合計) では超過するが個々の request は超過しない入力の 2 パターンを用意する。
@@ -418,37 +418,37 @@
 - 正本: 07 §3 L101-105『成立: (a) 初回スキャン承認フローで...**承認の成立 = approvals[] 行の
   materialize と、同一承認操作での scope config `allow_network=true` の設定の両方 (AND)** —
   行だけでは送信が有効にならない』
-- 前提: `persistent_network_allowed_for_kcs_dir` (`main.rs:9880-9890`) は
-  `if network_revoked_kcs_dir(...)? { return Ok(false); }` の次に
+- 前提: `persistent_network_allowed_for_kio_dir` (`main.rs:9880-9890`) は
+  `if network_revoked_kio_dir(...)? { return Ok(false); }` の次に
   `if read_allow_network_config(&user_config_toml_path())? == Some(true) { return Ok(true); }`
   を評価し、**config bool が true なら承認行の有無を確認せず即座に true を返す** — 行 (下記 QA22
   の `consents.jsonl`) の存在確認は config bool が false または未設定の場合のフォールバックとして
-  しか呼ばれない (`approval_row_present_in_kcs_dir`)。
-- 操作: 承認行を一切 materialize せず (対話承認も `--approve` も未実行)、`~/.config/kcs/config.toml`
-  (または `.kcs/config.toml`) の `allow_network` を手編集で `true` に設定した状態で online
+  しか呼ばれない (`approval_row_present_in_kio_dir`)。
+- 操作: 承認行を一切 materialize せず (対話承認も `--approve` も未実行)、`~/.config/kio/config.toml`
+  (または `.kio/config.toml`) の `allow_network` を手編集で `true` に設定した状態で online
   markdownize/embedding タスクを起動する。
 - 期待: 「承認の成立 = 行 materialize と boolean 設定の両方 (AND)」である以上、行が存在しない状態
   では boolean が true でも送信は成立しない (例外は初回 materialize — 未消費の場合のみ許容)。
   現行は boolean 単独で送信が成立する (OR 相当) ため、手編集した config だけでオンライン送信が
   始まることを再現できる。
 
-### QA22 承認状態の永続化先が `.kcs/scope.json` の `approvals[]` ではなく device-global `consents.jsonl` [P0]
-- 正本: 07 §3 L151-152『**保存先 = `.kcs/scope.json` の `approvals[]` 配列** (schema 検証対象
+### QA22 承認状態の永続化先が `.kio/scope.json` の `approvals[]` ではなく device-global `consents.jsonl` [P0]
+- 正本: 07 §3 L151-152『**保存先 = `.kio/scope.json` の `approvals[]` 配列** (schema 検証対象
   10§12.3、truth 03§4.1)』
 - 前提: 実際の gate 判定 (`trusted_consent_present`) が参照する永続データは
-  `data_home().join("kcs/consents.jsonl")` (`main.rs:14927-14928`) — **device-global** な
+  `data_home().join("kio/consents.jsonl")` (`main.rs:14927-14928`) — **device-global** な
   単一ファイルであり、行は `{schema_version, scope_id, canonical_root, tool_id, operation,
-  granted_at, kcs_version}` の形状 (`.kcs/scope.json` ではない)。`.kcs/scope.json` に
+  granted_at, kio_version}` の形状 (`.kio/scope.json` ではない)。`.kio/scope.json` に
   `approvals` property は存在せず (`scope.schema.json` の `additionalProperties:false` で
-  3 key のみ)、これとは別に scope-local `<kcs_dir>/approvals.jsonl` も存在するが、これは
+  3 key のみ)、これとは別に scope-local `<kio_dir>/approvals.jsonl` も存在するが、これは
   監査ログ専用で gate 判定には使われない (`scope.rs:348-349` のコメントが明記: "portable audit
   data, not active consent")。
-- 操作: 同一 scope_id を持つ 2 つの `.kcs` clone (fork 複製) を用意し、一方でのみ承認を成立させる。
-- 期待: spec は承認記録を `.kcs/scope.json` に置くことで **scope (フォルダ) ごと**に承認状態が
+- 操作: 同一 scope_id を持つ 2 つの `.kio` clone (fork 複製) を用意し、一方でのみ承認を成立させる。
+- 期待: spec は承認記録を `.kio/scope.json` に置くことで **scope (フォルダ) ごと**に承認状態が
   独立することを前提にしている。現行の `consents.jsonl` は `(scope_id, canonical_root)` の組を
   key にしているため類似の独立性は持つが、正本の保存場所・データ形状が spec と根本的に異なり、
-  `.kcs` を丸ごとコピー (`03-data-model.md §4.1` の truth 定義上、`.kcs` が正本であるべき) しても
-  承認状態が付いてこない (device-global ファイルは export/import・別デバイスへの `.kcs` 移動で
+  `.kio` を丸ごとコピー (`03-data-model.md §4.1` の truth 定義上、`.kio` が正本であるべき) しても
+  承認状態が付いてこない (device-global ファイルは export/import・別デバイスへの `.kio` 移動で
   再現されない) という副作用を生む。
 
 ### QA23 承認行に `execution_mode`/`tool_profile_hash` の記録が無く、profile 変更時の失効判定ができない [P1]
@@ -457,7 +457,7 @@
   不一致 = 失効 (再承認要求)』/ L164『`approvals[]` 要素の required field = scope_id/tool_id/
   execution_mode/tool_profile_hash/approved_at/approval_method/status』
 - 前提: `consents.jsonl` の行形状 (`main.rs:15014-15022`)
-  `{schema_version, scope_id, canonical_root, tool_id, operation, granted_at, kcs_version}` には
+  `{schema_version, scope_id, canonical_root, tool_id, operation, granted_at, kio_version}` には
   `execution_mode`/`tool_profile_hash`/`status` が存在しない。
 - 操作: online Adapter 承認後に `[markdownize].bbox_annotation` を切り替え (tool_profile_hash が
   変わる設定変更、07§3 L114-116 の明記どおり) てから online 送信を試みる。
@@ -469,46 +469,46 @@
 - 正本: 07 §3 L164-168『required field ... **status (`active`\|`revoked`)** — status=revoked の
   行は revoked_at も必須』
 - 前提: `consents.jsonl` の行は追記専用の許可ログであり (grant のみ、revoke に対応する行の
-  status 更新や `revoked_at` field は存在しない)、`network_revoked_kcs_dir`
+  status 更新や `revoked_at` field は存在しない)、`network_revoked_kio_dir`
   (`main.rs:14820-14825`) は revoke を `config.toml` の `allow_network=false` **のみ**で表現する
   scope 全体のkill switch であり、単一 Adapter 単位の revoke 状態は記録も判定もされない。
 - 操作: 2 つの online Adapter (markdownize・embedding) を承認済みの scope で、markdownize のみを
-  revoke する (§H の `kcs adapter revoke` 相当操作、現状は未実装のため代替手段が無い)。
+  revoke する (§H の `kio adapter revoke` 相当操作、現状は未実装のため代替手段が無い)。
 - 期待: markdownize の承認行が `status=revoked`・`revoked_at` 付きで更新され、embedding の承認・
   `allow_network` boolean は変化しない。現行はこの粒度の revoke を表現する記録形式自体が
-  存在しない (§H の `kcs adapter revoke` 未実装と表裏)。
+  存在しない (§H の `kio adapter revoke` 未実装と表裏)。
 
 ---
 
 ## H. 承認失効条件の拡張と単一 Adapter revoke 機構 (U80)
 
-### QA25 `kcs adapter revoke` コマンドが存在しない (トップレベル `Adapter` subcommand 皆無) [P0]
-- 正本: 06 §1 L31-43『kcs adapter revoke (\<tool_id\> \| --all) # Adapter の network 承認取り消し
-  (相互排他)』/ 07 §3 L136-137『単一 Adapter revoke の実行主体 = `kcs adapter revoke <tool_id>`』
-- 前提: `crates/kcs-cli/src/main.rs:152-193` の `enum Command` (18 variant: Init/Status/Snapshot/
+### QA25 `kio adapter revoke` コマンドが存在しない (トップレベル `Adapter` subcommand 皆無) [P0]
+- 正本: 06 §1 L31-43『kio adapter revoke (\<tool_id\> \| --all) # Adapter の network 承認取り消し
+  (相互排他)』/ 07 §3 L136-137『単一 Adapter revoke の実行主体 = `kio adapter revoke <tool_id>`』
+- 前提: `crates/kio-cli/src/main.rs:152-193` の `enum Command` (18 variant: Init/Status/Snapshot/
   Log/Diff/Inspect/Tag/Index/Batch/Repair/Search/Open/View/Restore/Gc/Purge/Reindex/Move/Evidence)
   に `Adapter` variant は存在しない (`grep -rn '"revoke"|AdapterRevoke|adapter revoke'` は
   main.rs:10855 の docstring 内言及 1 件のみで実装なし)。現行の唯一の revoke 相当機構は
-  `kcs index --revoke-network` (`IndexArgs.revoke_network: bool`, `main.rs:259`,
+  `kio index --revoke-network` (`IndexArgs.revoke_network: bool`, `main.rs:259`,
   `write_network_revoke_record` 呼出) — **scope 全体の kill switch のみ**で単一 Adapter 粒度を
   持たない。
-- 操作: `kcs adapter revoke mistral_ocr_markdownize` を実行する。
+- 操作: `kio adapter revoke mistral_ocr_markdownize` を実行する。
 - 期待: 新設の `Command::Adapter(AdapterArgs)` subcommand が存在し、`revoke <tool_id>`・
   `revoke --all` を受理する。現行は該当 subcommand が clap レベルで存在しないため usage error に
   なる。
 
-### QA26 `KCS-E-ADAPTER-APPROVAL-CONFLICT-001` が存在しない (revoke publish 直前 CAS 競合検出なし) [P0]
+### QA26 `KIO-E-ADAPTER-APPROVAL-CONFLICT-001` が存在しない (revoke publish 直前 CAS 競合検出なし) [P0]
 - 正本: 07 §3 L138-142『承認側の行 publish・self-heal も同じ lock 下で行い、**publish の直前に
   approval_pending の存在を再検証する** (CAS)...明示承認コマンドはこの再検証の不一致を
-  **明示エラー (KCS-E-ADAPTER-APPROVAL-CONFLICT-001 / exit 5)** で終端する』
-- 前提: `grep -rn "KCS-E-ADAPTER-APPROVAL-CONFLICT-001" crates/` は 0 件。現行の `KCS-E-ADAPTER-`
+  **明示エラー (KIO-E-ADAPTER-APPROVAL-CONFLICT-001 / exit 5)** で終端する』
+- 前提: `grep -rn "KIO-E-ADAPTER-APPROVAL-CONFLICT-001" crates/` は 0 件。現行の `KIO-E-ADAPTER-`
   namespace には `AUTH-001`(`main.rs:444`)・`CONTRACT-001`(`task.rs:918`等)・
   `TOOLS-PERM-001`(`main.rs:15422`) の 3 code のみが存在し、4 つ目の APPROVAL-CONFLICT-001 は
   未定義 (承認/`approval_pending` の概念自体が §G のとおり不在のため、この CAS 競合状態を検出する
   対象データも存在しない)。
-- 操作: 対話承認 (publish 直前) と並行して別プロセスから `kcs adapter revoke` を実行し、
+- 操作: 対話承認 (publish 直前) と並行して別プロセスから `kio adapter revoke` を実行し、
   対象の `approval_pending` を除去させる。
-- 期待: 承認コマンド側が publish 直前の再検証で不一致を検知し、`KCS-E-ADAPTER-APPROVAL-CONFLICT-001`
+- 期待: 承認コマンド側が publish 直前の再検証で不一致を検知し、`KIO-E-ADAPTER-APPROVAL-CONFLICT-001`
   (exit 5) で終端する (無音の no-op 成功にしない)。現行は `approval_pending` という中間状態自体が
   無いため、この競合シナリオ自体を構成できない。
 
@@ -522,7 +522,7 @@
   (scope.schema.json に property が無い)。したがって「4 組不問で pending を除去」「marker を
   同一 atomic write で true 化」という規則を実装する対象データがそもそも存在しない。
 - 操作: profile 変更で失効した pending 承認 (旧 execution_mode/tool_profile_hash) が残る状態で
-  `kcs adapter revoke <tool_id>` を実行する。
+  `kio adapter revoke <tool_id>` を実行する。
 - 期待: 4 組完全一致ではなく `(scope_id, tool_id)` のみで pending を除去し、同一 atomic write で
   `approvals_initialized` marker を true 化する。§G の schema/データ構造が新設されない限り、
   本契約は検証不能である (§G→§H の依存関係を明示する)。
@@ -531,57 +531,57 @@
 
 ## I. `--online`/`--offline` の適用範囲拡大 (U81)
 
-### QA28 [regression-lock] `kcs index`/`kcs search` は既に `--online`/`--offline` を持ち、明示 revoke が `--online` に優先する [P1]
+### QA28 [regression-lock] `kio index`/`kio search` は既に `--online`/`--offline` を持ち、明示 revoke が `--online` に優先する [P1]
 - 正本: 07 §3 L237-239『この優先で `--online` が上書きできるのは opt-in 未成立の既定閉鎖である。
   **明示 revoke (`allow_network = false` の明示設定) は `--online` より優先する** (kill switch の
-  趣旨)』/ 06 §1 L16-25 (`kcs index [--online|--offline]`)
+  趣旨)』/ 06 §1 L16-25 (`kio index [--online|--offline]`)
 - 前提: `IndexArgs` (`main.rs:246-267`, `online`/`offline` field) と `ParsedSearch`
   (`main.rs:912-934`, 手動 parse `parse_search_args`) は既に配線済み。優先順位は
   `embedding_online_allowed` (`main.rs:9945-9973`) が実装する:
   `if online { if network_revoked(repo)? { return Ok(false); } ... }` — **`--online` 指定時も
   まず revoke を確認し、revoke 済みなら false を返す**。
-- 操作: scope を明示 revoke (`allow_network=false`) した状態で `kcs search --vector --online` を
+- 操作: scope を明示 revoke (`allow_network=false`) した状態で `kio search --vector --online` を
   実行する。
 - 期待: revoke が優先し、`--online` は無効なまま (text fallback または `--vector` 明示時は
   error)。現行実装はこの優先順位を正しく満たしている — 本契約は regression-lock として固定し、
   以後の変更でこの優先順位が崩れないようにする。**混同注意**: 以下 QA29-31 は
   `--online`/`--offline` が**未配線**の他コマンドを扱う (この優先順位ロジック自体の欠陥ではない)。
 
-### QA29 `kcs repair --rebuild-db` に `--online`/`--offline` が配線されていない (docstring は誤って配線済みと主張) [P0]
-- 正本: 06 §1 L52-55『kcs repair (--rebuild-db [--online\|--offline] \| ...)...--rebuild-db は
+### QA29 `kio repair --rebuild-db` に `--online`/`--offline` が配線されていない (docstring は誤って配線済みと主張) [P0]
+- 正本: 06 §1 L52-55『kio repair (--rebuild-db [--online\|--offline] \| ...)...--rebuild-db は
   rebuild 後に enrichment を駆動し得るため online/offline 上書きの対象』
 - 前提: `parse_repair_args` (`main.rs:1049-, RepairMode` enum 1034-1045) は `--rebuild-db`・
   `--verify-objects`・`--prune-orphans`・`--registry-prune`・`--yes` のみを認識し、
   `--online`/`--offline` を渡すと `main.rs:1107-1110` の unknown-flag 分岐に落ちてエラーになる。
-  興味深いことに `main.rs:1047` 付近には「`kcs repair` accepts exactly one of
+  興味深いことに `main.rs:1047` 付近には「`kio repair` accepts exactly one of
   `--rebuild-db [--online|--offline]`...」という**現状と矛盾する docstring** が存在する
   (実装が追いついていない stale なコメント)。
-- 操作: `kcs repair --rebuild-db --online` を実行する。
+- 操作: `kio repair --rebuild-db --online` を実行する。
 - 期待: rebuild 後の enrichment (§5.4) がこの実行に限り online opt-in される。現行は
   unknown flag エラーになり、rebuild 後の enrichment は既存の永続 opt-in 状態にのみ従う
   (一時上書きができない)。
 
-### QA30 `kcs batch resume`/`kcs batch retry` に `--online`/`--offline` が配線されておらず、常時 offline=false/online=false で実行される [P0]
-- 正本: 06 §1 L21-30『kcs batch resume [--override-budget] [--online\|--offline] ... kcs batch
+### QA30 `kio batch resume`/`kio batch retry` に `--online`/`--offline` が配線されておらず、常時 offline=false/online=false で実行される [P0]
+- 正本: 06 §1 L21-30『kio batch resume [--override-budget] [--online\|--offline] ... kio batch
   retry [--online\|--offline] [--reset-violations <selector>]』
 - 前提: `ResumeArgs` (`main.rs:284-288`, `override_budget` のみ)・`RetryArgs`
   (`main.rs:290-296`, `reset_violations` のみ) いずれにも online/offline field が無い。
   実行経路 `execute_pending_tasks` (`main.rs:9509-9553`) は
   `embedding_online_allowed(repo, false, false, false)` (line 9546) を**ハードコード**しており、
   resume/retry からは一時 opt-in が原理的に不可能 (永続承認状態のみに従う)。
-- 操作: 永続 opt-in が未成立の scope で `kcs batch resume --online` を実行する。
+- 操作: 永続 opt-in が未成立の scope で `kio batch resume --online` を実行する。
 - 期待: 当該実行に限り online 送信が opt-in される。現行は `--online` という引数自体を受理せず
   (usage error)、受理できたとしても実行経路がハードコードされた false を渡すため無効化される。
 
-### QA31 `kcs reindex --force`/`--at` に `--online`/`--offline` が配線されていない [P1]
-- 正本: 07 §3 L220-222『適用対象は online 作業を駆動し得る全コマンド (`kcs index` / `kcs batch
-  resume` / `kcs batch retry` / `kcs reindex` — `--force` / `--at <commit>` のいずれも online
+### QA31 `kio reindex --force`/`--at` に `--online`/`--offline` が配線されていない [P1]
+- 正本: 07 §3 L220-222『適用対象は online 作業を駆動し得る全コマンド (`kio index` / `kio batch
+  resume` / `kio batch retry` / `kio reindex` — `--force` / `--at <commit>` のいずれも online
   embedding を駆動し得る...)』
-- 前提: `ParsedReindex` (`crates/kcs-cli/src/historical_reindex.rs:10-15`,
+- 前提: `ParsedReindex` (`crates/kio-cli/src/historical_reindex.rs:10-15`,
   `{force, yes, at}` のみ) に online/offline field が無く、embedding enrichment パス
   (`historical_reindex.rs:437`) も `embedding_online_allowed(repo, false, false, false)` を
   ハードコードする。
-- 操作: `kcs reindex --force --online` を実行する。
+- 操作: `kio reindex --force --online` を実行する。
 - 期待: reindex が駆動する embedding enrichment に一時 online opt-in が適用される。現行は
   引数自体が存在せず、常に永続承認状態のみに従う。
 
@@ -593,10 +593,10 @@
 - 正本: 07 §5.2 L370『値は出力に影響するため **tool_profile_hash に畳み込む** = 切替は世代判定に
   乗る』/ 03 §5.1 L357-359『bbox_annotation markdownize 専用: boolean — ... 実効値を採用時に
   畳み込む』
-- 前提: `crates/kcs-adapter/src/identity.rs` の `PROFILE_FIELDS` (9-23) には文字どおりの
+- 前提: `crates/kio-adapter/src/identity.rs` の `PROFILE_FIELDS` (9-23) には文字どおりの
   `"bbox_annotation"` key は含まれない。しかし `mistral_markdownize_profile(pin, enabled)`
   (`bbox_annotation.rs:53-77`) は `enabled` に応じて `output_schema`
-  (`"kcs-markdown+bbox-annotation-v1"` vs `"kcs-markdown-v1"`) と `prompt_template_hash`/
+  (`"kio-markdown+bbox-annotation-v1"` vs `"kio-markdown-v1"`) と `prompt_template_hash`/
   `prompt_template_id` の有無を変え、これらは全て `PROFILE_FIELDS` に含まれるため、結果として
   `identity::tool_profile_hash` の出力は enabled/disabled で異なる。
 - 操作: 同一 `model_version_pin` で `enabled=true`/`enabled=false` の 2 profile から
@@ -609,9 +609,9 @@
   そのまま列挙に加える」設計ではない。
 
 ### QA33 config.schema.json の `markdownize.bbox_annotation` がネスト object 形状で、spec の平坦 key 例と一致しない [P2]
-- 正本: 07 §5.2 L370『`.kcs/config.toml` の **`[markdownize] bbox_annotation = true`** (既定) で
+- 正本: 07 §5.2 L370『`.kio/config.toml` の **`[markdownize] bbox_annotation = true`** (既定) で
   制御』(平坦 TOML key の文字どおりの例)
-- 前提: `crates/kcs-core/schemas/config.schema.json:121-127` は
+- 前提: `crates/kio-core/schemas/config.schema.json:121-127` は
   `markdownize.bbox_annotation: {type: object, properties: {enabled: boolean}}` — 実際の TOML は
   `[markdownize.bbox_annotation]\nenabled = true` という**ネストテーブル**形状が必要であり、
   spec の文字どおりの例 `[markdownize]\nbbox_annotation = true` (平坦 boolean key) とは異なる。
@@ -631,7 +631,7 @@
   レンダリングはバイト安定であることを prepare Adapter の**採用要件**とする』(2026-07-03 確定、
   猶予のない正規要件)
 - 前提: `render_params`/`renderer_name`/`renderer_version`/`dpi`/`color_space` は
-  `crates/kcs-adapter/src/` 全体・crates 全体で grep 0 件。`PROFILE_FIELDS`
+  `crates/kio-adapter/src/` 全体・crates 全体で grep 0 件。`PROFILE_FIELDS`
   (`identity.rs:9-23`) にも該当 field は無く、`PrepareToolLockEntry`
   (`tool_lock.rs:21-27`) も `tool_id`/`profile_hash`/`kind` の 3 field のみで render 関連情報を
   持たない。
@@ -639,7 +639,7 @@
   想定) の tool_profile_hash を計算する。
 - 期待: `render_params` が hash 入力に含まれ、renderer 設定の変更が prepared_hash の世代判定
   (04§2.1) に反映される。現行はこの機構が丸ごと存在しない。**現行の同梱 Prepare Adapter
-  (`crates/kcs-pipeline/src/prepare.rs`) はページ画像レンダリングを行わない (PDF text layer 抽出の
+  (`crates/kio-pipeline/src/prepare.rs`) はページ画像レンダリングを行わない (PDF text layer 抽出の
   み) ため今日時点で実害は顕在化しないが、spec は 2026-07-03 に猶予なく確定した「採用要件」と
   明記しており、レンダリング系 Adapter が採用される前に schema/計算規約として先行整備すべき対象**
   であることを本契約は固定する。
@@ -667,20 +667,20 @@
 - 正本: 04 §3.1 (Adapter 出力契約 JSON 例) L295『"failed_units": [{ "unit_key": "...",
   "error_kind": "..." }]』/ 07 §5.2 L345-348『failed_units [{ unit_key, error_kind }] — 部分失敗の
   unit...persist されず manifest 側で failed へ遷移』
-- 前提: `crates/kcs-adapter/src/types.rs:194-203` の `MarkdownizeResponse` に `failed_units` は
+- 前提: `crates/kio-adapter/src/types.rs:194-203` の `MarkdownizeResponse` に `failed_units` は
   存在しない。`failed_units` という語自体は crates 全体で grep すると
-  `crates/kcs-cli/tests/step4b_ledger_contract.rs:15` のコメント (「CL40 は未実装」の注記) の
+  `crates/kio-cli/tests/step4b_ledger_contract.rs:15` のコメント (「CL40 は未実装」の注記) の
   1 件のみで、実 field/構造体としては皆無。
 - 操作: incremental Markdownize 応答で 1 unit のみ Adapter 側処理エラーとなる状況を用意する。
-- 期待: 応答に `failed_units: [{unit_key, error_kind}]` が含まれ、KCS 側は当該 unit を manifest
+- 期待: 応答に `failed_units: [{unit_key, error_kind}]` が含まれ、KIO 側は当該 unit を manifest
   上で `failed` へ遷移させる (persist はしない)。現行はこの field が無いため、部分失敗を
   Adapter が構造化して報告する手段が存在しない (§3.2 V1/V4/V6 いずれの被覆判定も
   failed_units 抜きで評価されている — 下記 QA38/QA39 参照)。
 
 ### QA37 `evidence_pointers` field が `MarkdownizeResponse` に残存し、常に空配列を書くだけの死んだ field になっている [P1]
 - 正本: 07 §5.2 L351-352『# Evidence Pointer は Adapter output に含めない — 必須フィールド...は
-  chunking と snapshot の後にしか存在しないため、発行は KCS core が行う』
-- 前提: `crates/kcs-adapter/src/types.rs:200` に `pub evidence_pointers: Vec<Value>` が残存する。
+  chunking と snapshot の後にしか存在しないため、発行は KIO core が行う』
+- 前提: `crates/kio-adapter/src/types.rs:200` に `pub evidence_pointers: Vec<Value>` が残存する。
   構築箇所 10 件 (`main.rs:10509,12921,12939`、`markdownize.rs:1660`、`mistral_ocr.rs:658`、
   `deterministic.rs:203,218`、テスト 2 件) は**すべて** `Vec::new()` を渡し、読み取り側でこの
   field を参照する箇所は crates 全体で 0 件。
@@ -694,12 +694,12 @@
   違反** — keys() の集合化では隠れるため、**各配列の要素数 = distinct unit_key 数**を
   あわせて検査する)...**unchanged_unit_keys は §2.2 の unchanged 候補集合と完全一致**
   (changed/added の unit を unchanged と申告して旧内容を成功公開させるのは違反 — 集合は
-  KCS 側確定)』
+  KIO 側確定)』
 - 前提: `validate_markdownize_response` (`markdownize.rs:336-390`) の
   `unit_keys()`/`set_from()` ヘルパ (1431-1437) は `Vec<String>` を `BTreeSet` へ変換するのみで
   要素数比較を行わない (同一配列内で `"page:1"` が 2 回出現しても `BTreeSet` 化で 1 要素に
   縮退し検出されない)。また `unchanged_keys` (354-358) は応答の `unchanged_unit_keys` を
-  そのまま信頼する集合として使い、KCS 側で独立計算した §2.2 unchanged 候補集合
+  そのまま信頼する集合として使い、KIO 側で独立計算した §2.2 unchanged 候補集合
   (`crate::prepare::map_units` の `unchanged: Vec<UnitReuse>`) と突合しない — Adapter が
   changed unit を虚偽で unchanged と申告しても検出されない。
 - 操作: (a) `updated_units` 配列内に同一 `unit_key` を 2 回含む応答。(b) 実際は変化した unit
@@ -765,14 +765,14 @@
 - 正本: 07 §2.1 L77『(同梱 deterministic Adapter の) 出力は単純な passthrough ではなく、
   Normalized Markdown v1 (§5.2.1) への決定的正規化である — **少なくとも Setext 見出し→ATX変換**・
   生 HTML block の fenced text 化・改行/空白/fence の正規化を行う』
-- 前提: `crates/kcs-adapter/src/deterministic.rs` を `Setext|setext` で grep すると 0 件。
+- 前提: `crates/kio-adapter/src/deterministic.rs` を `Setext|setext` で grep すると 0 件。
   同ファイルには BOM 除去 (`670-702` 付近、Q5 コメント) と code fence 整形 (`fence_code`,
   308-313) は存在するが、Setext 見出し (`Title\n=====` 形式) を ATX (`# Title`) へ変換する
   処理は存在しない。
 - 操作: `Title\n=====\n\nBody text` (Setext H1) を含む plain text/Markdown ファイルを同梱
   deterministic Adapter で markdownize する。
 - 期待: 出力が `# Title\n\nBody text` (ATX 形式) へ正規化される。現行は Setext 記法がそのまま
-  素通りし、v1 の「ATX 見出しのみ (Setext 禁止)」規約に違反した markdown が (KCS 側検査も
+  素通りし、v1 の「ATX 見出しのみ (Setext 禁止)」規約に違反した markdown が (KIO 側検査も
   QA41 のとおり機能しないため) そのまま persist される — オフライン基線 index で通常の
   Markdown 文書 (README 等、Setext 見出しは稀だが GitHub Flavored Markdown で許容される記法) が
   v1 違反のまま格納されるリスクを再現できる。
@@ -793,7 +793,7 @@
 ## M. fallback_to_full 制御応答と contract_violation retry の分離 (U87)
 
 ### QA44 fallback_to_full=true が mode 不問で無条件 contract_violation となり、制御応答としての再発行が行われない [P0]
-- 正本: 04 §3.2 L358『fallback_to_full=true の応答は V1〜V6 に先立ち制御応答として評価する...KCS は
+- 正本: 04 §3.2 L358『fallback_to_full=true の応答は V1〜V6 に先立ち制御応答として評価する...KIO は
   当該応答を成功・失敗のどちらの終端にもせず、**同一 task を mode=full で再発行する** (§3.1 の
   発動条件は再評価しない)。full 応答でのこの flag は contract violation = ループ防止』
 - 前提: `validate_markdownize_response` (`markdownize.rs:341-343`) は
@@ -809,7 +809,7 @@
 - 操作: mode=incremental で `fallback_to_full=true` の応答を返す状況を作る。
 - 期待: 当該 request が `outcome='fallback_to_full'` で確定記帳・state=3 (task は非終端) となり、
   `contract_violation_count`/`attempts` いずれも増加せず、直後に mode=full の新 request が相 1
-  として開始される。現行はいずれの経路も何らかの形で `KCS-E-ADAPTER-CONTRACT-001` を経由するか
+  として開始される。現行はいずれの経路も何らかの形で `KIO-E-ADAPTER-CONTRACT-001` を経由するか
   (offline)、記帳を一切経ずに黙って `None` を返す (online) かのどちらかであり、spec が定める
   「制御応答としての記帳付き再発行」を満たさない。
 
@@ -817,7 +817,7 @@
 - 正本: 04 §5.3 L738-740『contract_violation retryable max_attempts=1 (同一 mode で 1 回のみ
   再投入 — 出力揺れ対策。再違反は failed permanent = Adapter バグ。full への自動 fallback は
   しない)』
-- 前提: `crates/kcs-pipeline/src/task.rs:913-920` の `retry_policy` は
+- 前提: `crates/kio-pipeline/src/task.rs:913-920` の `retry_policy` は
   `RetryErrorKind::ContractViolation => RetryPolicy { retryable: false, max_attempts: Some(0),
   backoff: "full_fallback_once", ... }` — 旧仕様 (failed permanent, max_attempts=0, full
   fallback を 1 回自動投入) のままであり、新仕様 (retryable, max_attempts=1, 同一 mode で
@@ -831,18 +831,18 @@
   contract は **task 側 `RetryPolicy` の表示値・ローカル/offline 実行時の再試行許可判定**を
   対象とし、online/Batch 経路の durable 判定 (既に CL21 で正しく実装済み) とは別物である。
 
-### QA46 `KCS-E-ADAPTER-SPECVER-001` が存在せず、spec_version 不一致が汎用 contract_violation と区別されない [P0]
+### QA46 `KIO-E-ADAPTER-SPECVER-001` が存在せず、spec_version 不一致が汎用 contract_violation と区別されない [P0]
 - 正本: 07 §8.1 L693『5. spec_version 不一致なら、Adapter は invalid_input として失敗
-  (`KCS-E-ADAPTER-SPECVER-001` — 汎用 `KCS-E-ADAPTER-CONTRACT-001` (retryable 1回) と区別し、
+  (`KIO-E-ADAPTER-SPECVER-001` — 汎用 `KIO-E-ADAPTER-CONTRACT-001` (retryable 1回) と区別し、
   invalid_input 分類 = max_attempts 0 に一意に対応させる)』/ 04 §3.2 L367
   『full への自動 fallback は行わない (fallback は incremental capability 非互換の場合のみ)』
-- 前提: `grep -rn "KCS-E-ADAPTER-SPECVER-001" crates/` は 0 件 (docs にのみ記載)。
-  spec_version 不一致は現行コードでは汎用 `KCS-E-ADAPTER-CONTRACT-001` (`markdownize.rs:1440`)
+- 前提: `grep -rn "KIO-E-ADAPTER-SPECVER-001" crates/` は 0 件 (docs にのみ記載)。
+  spec_version 不一致は現行コードでは汎用 `KIO-E-ADAPTER-CONTRACT-001` (`markdownize.rs:1440`)
   として扱われる可能性が高く (専用の判定分岐が見当たらない)、QA45 是正後は
   `retryable/max_attempts=1` になる contract_violation と、spec_version 不一致
   (invalid_input・max_attempts=0・非再試行) が同一エラーコードに混在するリスクがある。
 - 操作: `spec_version` が Adapter の対応範囲外の request を送る。
-- 期待: `KCS-E-ADAPTER-SPECVER-001` (invalid_input, max_attempts=0) として failed permanent に
+- 期待: `KIO-E-ADAPTER-SPECVER-001` (invalid_input, max_attempts=0) として failed permanent に
   なり、full への自動 fallback もしない (capability 非互換とは異なる理由のため)。現行は
   この専用コードが存在せず、QA45 の是正と合わせて実装すると「同一 mode で 1 回再試行」の
   対象に spec_version 不一致まで誤って含まれてしまう回帰リスクがある。
@@ -874,11 +874,11 @@
   **変換・正規化後の最終 vector にも (3) と同じ有限・非ゼロ (かつ単位ノルム — 許容誤差内) を
   再検査する** (underflow の零 vector/overflow の Inf を index に入れない — 違反は同じ
   contract violation)』
-- 前提: `validate_cosine_vector` (`crates/kcs-adapter/src/types.rs:246-268`) は
+- 前提: `validate_cosine_vector` (`crates/kio-adapter/src/types.rs:246-268`) は
   finite かつ `norm_squared > 0.0` を検査するのみで、**L2 正規化そのもの (core 側での実施) も
   正規化後の単位ノルム再検査も行わない** — 関数名が示すとおり cosine 距離が定義可能かの
   検証に留まり、"unit norm within tolerance" の検査は存在しない。
-- 操作: 正規化前の (norm ≠ 1) raw vector を Adapter から受け取り、KCS 側の正規化パイプラインを
+- 操作: 正規化前の (norm ≠ 1) raw vector を Adapter から受け取り、KIO 側の正規化パイプラインを
   通す。
 - 期待: 正規化後の vector に対し、単位ノルム (許容誤差内) であることを再検査し、外れる場合は
   contract violation とする。現行は正規化処理自体・正規化後の再検査のいずれも
@@ -909,7 +909,7 @@
 - 前提: `send_embed_batch` (`main.rs:11753-11807`) は 1 task 内の最大 32 chunk
   (`EMBEDDING_BATCH_SIZE`) を**常に 1 回の `run_embedding_adapter` 呼出**にまとめる。
   `gemini_embedding.rs` に `sync`/`parallel` の語は 0 件、`tokio`/`rayon`/`par_iter`/`spawn` も
-  crates 全体で kcs-cli には 0 件 (完全同期・単一スレッド実行)。
+  crates 全体で kio-cli には 0 件 (完全同期・単一スレッド実行)。
 - 操作: 33 chunk (バッチ境界を跨ぐ) を含む embedding タスクを実行する。
 - 期待: 2 回の `run_embedding_adapter` 呼出が発生し、直列に (前の呼出の終端後に次を開始)
   実行される。現行はループが `for batch in embeddable.chunks(32)` で単純な逐次 for であり、
@@ -923,12 +923,12 @@
 ### QA51 [regression-lock] embeddings/chunk_vec の SQL 正本は既に 04-pipeline.md §4.3 に一本化されている [P2]
 - 正本: 07 §5.3 L464-466『embedding の SQLite schema (embeddings/chunk_vec) の正本は
   04-pipeline.md §4.3 とする...SQL 定義の重複記載は 2026-07-14 に解消し、本節から参照する』
-- 前提: `embeddings`/`chunk_vec` の `CREATE TABLE` は `crates/kcs-index/src/fts.rs` にのみ存在し、
-  `crates/kcs-adapter/` 側には重複定義が無い (spec-gap 記載の「適合済みの可能性」を本書作成時に
+- 前提: `embeddings`/`chunk_vec` の `CREATE TABLE` は `crates/kio-index/src/fts.rs` にのみ存在し、
+  `crates/kio-adapter/` 側には重複定義が無い (spec-gap 記載の「適合済みの可能性」を本書作成時に
   再確認済み)。
-- 操作: `crates/kcs-adapter/src/` 全体で `CREATE TABLE.*embeddings\|CREATE TABLE.*chunk_vec` を
+- 操作: `crates/kio-adapter/src/` 全体で `CREATE TABLE.*embeddings\|CREATE TABLE.*chunk_vec` を
   grep する。
-- 期待: 0 件 (SQL 定義が `kcs-index` 側に一本化されている)。現行は既に満たしている —
+- 期待: 0 件 (SQL 定義が `kio-index` 側に一本化されている)。現行は既に満たしている —
   regression-lock として固定する。
 
 ---
@@ -939,12 +939,12 @@
 - 正本: 07 §5.7 L498-515『Batch モードを持つ online Adapter...は、04-pipeline.md §5.8 の
   2 相プロトコルが要求する次の操作を trait として公開する: upload/create_job/get_job/
   list_jobs/list_uploads/delete_upload/fetch_output/provider_scope_id』
-- 前提: `crates/kcs-adapter/src/traits.rs` (全 61 行) は `PrepareAdapter`/`MarkdownizeAdapter`/
+- 前提: `crates/kio-adapter/src/traits.rs` (全 61 行) は `PrepareAdapter`/`MarkdownizeAdapter`/
   `EmbeddingAdapter`/`SummaryAdapter`/`ClassificationAdapter`/`RerankAdapter` の 6 trait のみを
   持ち、いずれも `profile()` + 単一 execute メソッドの 2 メソッドのみ。`upload`/`create_job`/
   `get_job`/`list_jobs`/`list_uploads`/`delete_upload`/`fetch_output`/`provider_scope_id` は
-  `mistral_ocr.rs`/`gemini_embedding.rs` を含め kcs-adapter クレート全体で grep 0 件 (`
-  provider_scope_id` という語は `kcs-pipeline/src/ledger/` 側に SQL 列として存在するのみで、
+  `mistral_ocr.rs`/`gemini_embedding.rs` を含め kio-adapter クレート全体で grep 0 件 (`
+  provider_scope_id` という語は `kio-pipeline/src/ledger/` 側に SQL 列として存在するのみで、
   Adapter が実装すべき trait メソッドとしては皆無)。
 - 操作: Batch 実行契約 trait の存在を検査する。
 - 期待: `BatchAdapter` (仮称) trait が新設され、8 操作全てを公開する。現行は trait 自体が
@@ -954,7 +954,7 @@
 ### QA53 `mistral_ocr_markdownize` は Batch モードを実装しておらず、spec が「採用済み」と記す実地検証との乖離がある [P0]
 - 正本: 07 §5.7 L552『`mistral_ocr_markdownize` の Batch モードは 2026-07-03 の実地検証...の
   範囲でこの条件下で採用済み』/ 07 §5.2 末尾『合成 fixture...を sync / **Batch 両モードで検証**』
-- 前提: `crates/kcs-adapter/src/mistral_ocr.rs` (2468 行) は `MarkdownizeAdapter` trait
+- 前提: `crates/kio-adapter/src/mistral_ocr.rs` (2468 行) は `MarkdownizeAdapter` trait
   (単発同期呼出) の実装のみを持つ。`custom_id`/`"batch"`/`"Batch"` は本ファイル全体で grep 0 件。
   `EnvMistralOcrClient` (line 92) も同期クライアントであり、Batch job 経路は存在しない。
 - 操作: Mistral OCR markdownize タスクを Batch モードで投入する。
@@ -972,7 +972,7 @@
   無い)。
 - 操作: 7 条件のうち 1 つ (例: 条件2「可視化遅延上限 10 分」) を満たさない provider 実装を
   接続しようとする。
-- 期待: KCS 側で採用可否判定に失敗し、Batch モードでの採用を拒否する (sync のみでの採用に
+- 期待: KIO 側で採用可否判定に失敗し、Batch モードでの採用を拒否する (sync のみでの採用に
   縮退するか、非採用とする)。現行はこの判定ロジック自体が存在しない (QA52 の Batch trait 新設に
   伴って初めて意味を持つ、依存契約)。
 
@@ -980,12 +980,12 @@
 - 正本: 07 §5.7 L540-545『投入拒否 (permanent 4xx) にも課金するか否かを宣言すること。課金する
   provider の Adapter は、拒否応答時に usage (...) を機械可読で返却する (この返却義務は
   **Batch 限定でなく sync online Adapter にも共通**)』
-- 前提: `AdapterError` (`crates/kcs-adapter/src/lib.rs:19-38`) の各 variant
+- 前提: `AdapterError` (`crates/kio-adapter/src/lib.rs:19-38`) の各 variant
   (`ContractViolation`/`Auth`/`RateLimit`/`QuotaExceeded`/`Network`/`ConfigSchema`/
   `NotImplemented`/`Io`) はいずれも `String` メッセージのみを持ち、拒否時の usage
   (`usd`/`billable_units`) を運べる構造を持たない (QA17 の `usage` field 不在と表裏)。
 - 操作: sync online Adapter が投入拒否 (課金対象の permanent 4xx) で失敗する状況を用意する。
-- 期待: エラー値に usage (宣言請求額) が付随し、KCS 側が `submit_rejected` として同一 Tx で
+- 期待: エラー値に usage (宣言請求額) が付随し、KIO 側が `submit_rejected` として同一 Tx で
   記帳できる。現行は `AdapterError` の型自体が usage を運べないため、拒否時の課金額は
   常に estimated 縮退にしかならない。
 
@@ -997,8 +997,8 @@
 - 正本: 07 §7 L613-633『ログに残してよいもの: ...network_consent (approvals\|cli_online — 送信を
   伴った実行のみ)...adapter_kind, input_hash, intent_token, **submission_seq**...
   **usage_validation** (missing\|invalid), **billing_source** (estimated)』
-- 前提: `network_consent`/`usage_validation`/`billing_source` は `crates/kcs-adapter/` 全体で
-  grep 0 件。`submission_seq` は `kcs-pipeline/src/ledger/` の SQL 列としては存在するが、
+- 前提: `network_consent`/`usage_validation`/`billing_source` は `crates/kio-adapter/` 全体で
+  grep 0 件。`submission_seq` は `kio-pipeline/src/ledger/` の SQL 列としては存在するが、
   Adapter 層のログ出力 field としては存在しない。
 - 操作: online Adapter 呼出のログ出力を検査する。
 - 期待: 4 field (該当条件下) がログレコードに含まれる。現行はいずれも欠落している。
@@ -1006,13 +1006,13 @@
 ### QA57 [regression-lock] `adapter_id` は `tools.toml` の `tool_id` と同一値である規約が既にテストで担保されている [P2]
 - 正本: 07 §7 L635『`adapter_id` は tools.toml の `tool_id` と同一値である (別 namespace を
   作らない — approvals[] (§3) の照合キーと一致し...)』
-- 前提: `crates/kcs-adapter/src/catalog.rs:725-733`
+- 前提: `crates/kio-adapter/src/catalog.rs:725-733`
   (`declared_adopted_embedding_profile_uses_adopted_profile_by_default`) が
   `assert_eq!(declared.tool_id, adopted.adapter_id);` を既に検証している。
 - 操作: 登録済み Adapter の `AdapterProfile.adapter_id` と `tools.toml` の対応 `tool_id` を
   比較する。
 - 期待: 一致する。現行は既存テストが担保している — regression-lock として固定し、§H
-  (`kcs adapter revoke <tool_id>`) が同じ照合キーに依拠できることを確認する。
+  (`kio adapter revoke <tool_id>`) が同じ照合キーに依拠できることを確認する。
 
 ---
 
@@ -1020,11 +1020,11 @@
 
 ### QA58 大型入力のストリーミング応答 (SSE/chunked JSON) 受信・unit 単位 persist が実装に存在しない [P0]
 - 正本: 07 §8.3 L728-730『大型 PDF (100+ pages) では TTFB を抑えるためストリーミング出力を許容
-  する。KCS は Adapter からの SSE/chunked JSON を受け取り、unit 完了ごとに persist する』
-- 前提: `crates/kcs-adapter/src/mistral_ocr.rs` (2468 行) を `stream|SSE|chunked` (大小無視) で
+  する。KIO は Adapter からの SSE/chunked JSON を受け取り、unit 完了ごとに persist する』
+- 前提: `crates/kio-adapter/src/mistral_ocr.rs` (2468 行) を `stream|SSE|chunked` (大小無視) で
   grep しても HTTP ストリーミングに関する実装は見当たらず (該当箇所は既存の「incremental な
   page 単位処理」を指すコメントのみで、SSE/chunked-JSON 受信とは別概念)、実装は単発同期
-  `.post()` 呼出で応答全体を一括受信する。`.kcs/staging/` 自体は purge.rs/scope.rs/restore.rs に
+  `.post()` 呼出で応答全体を一括受信する。`.kio/staging/` 自体は purge.rs/scope.rs/restore.rs に
   実在する (下記 QA59) が、ストリーミング応答の unit 単位受信・persist という入口が存在しない。
 - 操作: 100+ ページの PDF を Markdownize する。
 - 期待: SSE/chunked JSON でストリーミング受信し、unit 完了ごとに staging へ persist される
@@ -1034,18 +1034,18 @@
 ### QA59 staging root の「同一 root 名残存時の前置回復」「no-replace 公開」が markdownize 経路に存在しない [P0]
 - 正本: 07 §8.3 L747-752『同一 `(raw64, tool64, adapter_kind)` の staging root が既に存在する
   状態で新しい task を開始する場合、root 公開 (atomic rename) の**前**に旧 root の回復を、
-  呼び出し元コマンドが既に保持する `.kcs/.lock` の同一 critical section 内で完了する...root 公開の
+  呼び出し元コマンドが既に保持する `.kio/.lock` の同一 critical section 内で完了する...root 公開の
   rename は既存 root 名への上書きをしない (no-replace)』
-- 前提: `.kcs/staging/` は実在する (`purge.rs:1373` の `kcs_dir.join("staging")`、
+- 前提: `.kio/staging/` は実在する (`purge.rs:1373` の `kio_dir.join("staging")`、
   `scope.rs` の `create_raw_staging_file` 等) が、これらは purge 対象列挙・raw ingest 用の
   既存機構であり、**markdownize のストリーミング staging root**
   (`(raw64, tool64, adapter_kind)` 単位の descriptor 付き root) という専用レイアウトは
-  `crates/kcs-pipeline/src/markdownize.rs`/`crates/kcs-cli/src/main.rs` いずれにも存在しない
+  `crates/kio-pipeline/src/markdownize.rs`/`crates/kio-cli/src/main.rs` いずれにも存在しない
   (§S の PB14/16 が扱う「staging root」も同じ空白領域を指す — 本節はその**書込み側**の
   publish 規律、§S はその**読取/prune 側**の分類を扱う、表裏の関係)。
 - 操作: 同一 `(raw64, tool64, adapter_kind)` の staging root が残存する状態 (前回 crash の
   残骸) で新しい markdownize task を開始する。
-- 期待: 新 task 開始前に `.kcs/.lock` 下で旧 root の状態 (対応 task が terminal なら cleanup、
+- 期待: 新 task 開始前に `.kio/.lock` 下で旧 root の状態 (対応 task が terminal なら cleanup、
   non-terminal なら新規開始せず再開) を判定し、root 公開は no-replace rename で行う。現行は
   このレイアウト・回復ロジック自体が存在しないため、複数回の crash-retry で staging root が
   無制御に蓄積するか、上書きによる新旧 bytes 混在が起こりうる。
@@ -1072,10 +1072,10 @@
 - 正本: 10-operations.md (config 例からの削除、U94 統合要約)『config 例から `include_neighbors = 1`
   が削除された...schema 上もこのキーが不採用になった可能性がある (削除理由の記述なし)』
 - 前提: `config.schema.json:117` は `include_neighbors: {type: integer, minimum: 0}` を保持し、
-  `enforce_config_semantics` (`crates/kcs-core/src/scope.rs:2454-2468`) は値が 1 以外なら
-  `KcsError::not_implemented` で拒否する (コメント「R12-1: has no implementation concept」)。
+  `enforce_config_semantics` (`crates/kio-core/src/scope.rs:2454-2468`) は値が 1 以外なら
+  `KioError::not_implemented` で拒否する (コメント「R12-1: has no implementation concept」)。
   既存テスト `r12_1_incremental_include_neighbors_non_default_rejected`
-  (`crates/kcs-cli/tests/step3_p0_contract.rs:4820-4829`) がこの挙動を担保する。
+  (`crates/kio-cli/tests/step3_p0_contract.rs:4820-4829`) がこの挙動を担保する。
 - 操作: `include_neighbors = 1` と `include_neighbors = 2` をそれぞれ設定して config validation を
   実行する。
 - 期待: `= 1` は受理 (no-op)、`= 2` 以上は拒否。現行は既にこの挙動を満たしている —
@@ -1117,19 +1117,19 @@
 - 正本: 10 §7.5.1 L588-592 (`step4b-contract-tests-p2b.md` PB14 引用)『descriptor の無い
   staging root・path と不整合な staging root・terminal 化済み task にのみ対応する staging root
   ...を列挙し、locked repair として削除する』
-- 前提: `crates/kcs-cli/src/verify_objects.rs` の `pub fn prune_orphans` (2059-2228) 自身の
+- 前提: `crates/kio-cli/src/verify_objects.rs` の `pub fn prune_orphans` (2059-2228) 自身の
   doc comment (2038-2058) に次の記述がある: 『**NOT implemented this session — documented gap,
   not a silent omission**: PB14/16 (staging-root descriptor 3-way classification and the
   terminal-task escape hatch...)』。実際に本関数は staging root を一切列挙・削除しない
   (関数内に `staging` という語は 1 度も現れない — prepared/image object の live-set 差分削除の
-  みを行う)。既存の別機構 `delete_target_staging` (`purge.rs:1372-`, `.kcs/staging/` を
+  みを行う)。既存の別機構 `delete_target_staging` (`purge.rs:1372-`, `.kio/staging/` を
   raw_hash 属性で削除) は **purge 専用**であり、terminal task 判定・descriptor 整合性判定を
   一切行わない別目的の関数である (混同注意)。
 - 操作: (a) descriptor の無い staging root。(b) descriptor はあるが記載 path と実体が不一致な
   staging root。(c) descriptor・path とも整合するが対応 task が terminal
   (done/failed permanent/abandoned/settled partial) な staging root。(d) 同様に整合するが
   対応 task が non-terminal (pending/running/partial-with-retryable-failed-unit) な
-  staging root。の 4 パターンを用意して `kcs repair --verify-objects --prune-orphans` を
+  staging root。の 4 パターンを用意して `kio repair --verify-objects --prune-orphans` を
   実行する。
 - 期待: (a)(b)(c) は削除対象、(d) は削除対象外 (進行中 task の保全)。現行は 4 パターンいずれも
   `prune_orphans` の削除対象・拒否条件のどちらにも該当せず、単に無視される (放置されたままになる
@@ -1154,12 +1154,12 @@
 ### QA65 [regression-lock] open cache の purge/prune-orphans 時冪等削除は raw/image 型分離込みで既に正しく実装されている (PB17) [P1]
 - 正本: 10 §7.5.1 L616-626 (PB17 引用)『`--prune-orphans` は、当該 scope で canonical final
   event が `purged` **または `erased`** である各 raw_hash について
-  `~/.cache/kcs/open/<raw_hash digest64>/` の残存も検査し、存在すれば...削除対象に含める...
+  `~/.cache/kio/open/<raw_hash digest64>/` の残存も検査し、存在すれば...削除対象に含める...
   **image cache も同様に回収する**』
 - 前提: `prune_orphans` (`verify_objects.rs:2180-2219`) は (a) tombstone/erase-receipt の
   canonical final event が Purged\|Erased の raw_hash について
-  `cache_home().join("kcs/open").join(digest)` を削除し (2197-2205)、(b) 別途
-  `cache_home().join("kcs/open/image")` 配下を全走査して `live_images` に含まれない digest の
+  `cache_home().join("kio/open").join(digest)` を削除し (2197-2205)、(b) 別途
+  `cache_home().join("kio/open/image")` 配下を全走査して `live_images` に含まれない digest の
   ディレクトリを削除する (2207-2219) — raw 系と image 系が既に型分離された path
   (`open/<digest>/` vs `open/image/<digest>/`) で扱われている (spec-gap の U24 記載
   「image/型分離は無くflat namespace」は本書作成時点では既に解消済み)。
@@ -1175,33 +1175,33 @@
 
 ## T. registry live 重複 fail-closed の書込系コマンド・online 起動への拡大 (PB24 継承)
 
-### QA66 `kcs index` (書込系) は registry live 重複を一切検査しない [P0]
+### QA66 `kio index` (書込系) は registry live 重複を一切検査しない [P0]
 - 正本: 10 §3 L296-299『live 重複が解消するまでは、当該 scope_id での**書き込み系コマンド**と
-  online タスク起動 (相1) も `KCS-E-REGISTRY-DUP-001` で fail-closed とする』
-- 前提: `KCS-E-REGISTRY-DUP-001` を raise する唯一の関数 `registry_duplicate_error`
+  online タスク起動 (相1) も `KIO-E-REGISTRY-DUP-001` で fail-closed とする』
+- 前提: `KIO-E-REGISTRY-DUP-001` を raise する唯一の関数 `registry_duplicate_error`
   (`main.rs:8572-8584`、呼出元 `resolve_scope_id_in_registry_with_hint` 経由) の**全**呼出箇所
   (main.rs:4327 検索カーソル replay、main.rs:7419 evidence pointer 解決、main.rs:8677 object
   URI 解決 (open/view)、restore.rs:126 evidence-sourced restore、verify_objects.rs:118
   evidence verify) は**すべて読み取り系コマンド**である。`fn run_index(args: IndexArgs)`
   (main.rs:716) の本体を `resolve_scope` で grep すると 0 件 — registry 重複検査を一切呼ばない。
-- 操作: 同一 scope_id を持つ 2 つの live `.kcs` clone を用意し、一方で `kcs index` を実行する。
-- 期待: `KCS-E-REGISTRY-DUP-001` で拒否される (dedupe を要求)。現行は検査自体が呼ばれないため、
-  live 重複状態でも `kcs index` が通常どおり進行し、device-global `batch_requests` 行
+- 操作: 同一 scope_id を持つ 2 つの live `.kio` clone を用意し、一方で `kio index` を実行する。
+- 期待: `KIO-E-REGISTRY-DUP-001` で拒否される (dedupe を要求)。現行は検査自体が呼ばれないため、
+  live 重複状態でも `kio index` が通常どおり進行し、device-global `batch_requests` 行
   (PK に scope_id) を複数 clone が共有する状態を作れてしまう。
 
 ### QA67 online タスク起動の相 1 (`phase1_intent`/`check_then_reserve`) も registry live 重複を検査しない [P0]
-- 正本: 10 §3 L297-299『online タスク起動 (相1) も `KCS-E-REGISTRY-DUP-001` で fail-closed とする
+- 正本: 10 §3 L297-299『online タスク起動 (相1) も `KIO-E-REGISTRY-DUP-001` で fail-closed とする
   — device-global `batch_requests` の行 (PK に scope_id) を複数 clone が共有し、回復・終端・
   課金の帰属が混線するため (04-pipeline.md §5.8)』
 - 前提: online タスク起動の相 1 は `reserve_or_reuse_task_charge` (main.rs:14324、内部で
   `phase1_intent` を呼ぶ、ops.rs:283) と `record_free_local_charge` (main.rs:14468) の 2 経路
   だが、いずれも QA66 で列挙した registry-dup 検査の呼出元一覧に含まれない
-  (`crates/kcs-cli/src/online_task.rs` — 全 27 行 — も
+  (`crates/kio-cli/src/online_task.rs` — 全 27 行 — も
   `targets_standard_online_markdownize` という task 所有権判定関数のみで registry 検査は
   皆無)。
-- 操作: 同一 scope_id を持つ 2 つの live `.kcs` clone の一方で online markdownize/embedding
+- 操作: 同一 scope_id を持つ 2 つの live `.kio` clone の一方で online markdownize/embedding
   タスクを起動する (相1)。
-- 期待: `KCS-E-REGISTRY-DUP-001` で拒否される。現行は相1が無条件に進行し、
+- 期待: `KIO-E-REGISTRY-DUP-001` で拒否される。現行は相1が無条件に進行し、
   `batch_requests` PK (scope_id, adapter_kind, input_hash, tool_profile_hash) が
   2 clone 間で衝突・共有される状態を作れてしまう (どちらの clone が実際に相2a/2b/3を進めたか
   の帰属が構造的に混線する)。
@@ -1209,14 +1209,14 @@
 ### QA68 [regression-lock] registry live 重複検査は読み取り系コマンド (search cursor/evidence verify/open/view/restore) には既に正しく配線されている [P1]
 - 正本: 10 §3 L284-287 (`PB21`/`PB22` の正本と同一)『同一 scope_id の複数 live path は clone
   併存であり、fail-closed で扱う: global search は当該 scope_id を skip して excluded_scopes に
-  `KCS-E-REGISTRY-DUP-001` の理由付きで記録し、pointer 解決は候補一覧 error とする』
+  `KIO-E-REGISTRY-DUP-001` の理由付きで記録し、pointer 解決は候補一覧 error とする』
 - 前提: QA66 で列挙した 5 箇所 (検索カーソル replay・evidence pointer 解決・open/view の object
   URI 解決・restore の evidence-sourced 解決・evidence verify) は全て
-  `resolve_scope_id_in_registry`/`resolve_scope_target` 経由で `KCS-E-REGISTRY-DUP-001` を
+  `resolve_scope_id_in_registry`/`resolve_scope_target` 経由で `KIO-E-REGISTRY-DUP-001` を
   一貫して raise できる。
-- 操作: 同一 scope_id の live 重複状態で `kcs evidence verify`/`kcs open`/`kcs view`/
-  `kcs restore <evidence>` のいずれかを実行する。
-- 期待: `KCS-E-REGISTRY-DUP-001` で拒否される。現行は既にこの挙動を満たしている —
+- 操作: 同一 scope_id の live 重複状態で `kio evidence verify`/`kio open`/`kio view`/
+  `kio restore <evidence>` のいずれかを実行する。
+- 期待: `KIO-E-REGISTRY-DUP-001` で拒否される。現行は既にこの挙動を満たしている —
   regression-lock として固定し、QA66/QA67 の是正 (書込系・online 起動への拡張) がこの
   既存の読み取り系挙動を壊さないことの回帰防止に使う。
 
@@ -1230,7 +1230,7 @@
   mode が不明な場合は full として扱う...この full 扱いの受け入れ検査では、差集合の unit を
   当該 job の failed_units と見なして §3.2 (V6 を含む) を評価する...合成する failed_units の
   error_kind は network_error (retryable) に固定する』
-- 前提: `crates/kcs-cli/tests/step4b_ledger_contract.rs:14-18` の module doc comment 自身が
+- 前提: `crates/kio-cli/tests/step4b_ledger_contract.rs:14-18` の module doc comment 自身が
   『CL40...**is not implemented and not tested here**』と明記する。`custom_id` は
   crates 全体で grep 0 件 (`mistral_ocr.rs` を含む — Batch 出力 JSONL の custom_id 概念自体が
   §O の Batch trait 不在と表裏で存在しない)。`failed_units` も §K QA36 のとおり構造として
@@ -1262,7 +1262,7 @@
 - 正本: 04 §5.8 L1059-1091 (found/confirmed-absent/unknown の回復手順) と L953 (CL40 引用) の
   接続 — found と判定された job の出力を実際に markdownize content として復元するには、
   billing 層の「found」判定の**先**に content 層の custom_id 差分再導出 (QA69) が必要である。
-- 前提: `crates/kcs-pipeline/src/ledger/ops.rs` の module doc comment (1-17) 自身が
+- 前提: `crates/kio-pipeline/src/ledger/ops.rs` の module doc comment (1-17) 自身が
   『No 07-adapter-spec.md Batch trait exists in this codebase yet...so the actual provider
   upload/job-create/list-jobs calls this state machine drives are represented here only as
   the *data* a caller would have obtained from them』と明記する。`recovery_mark_found`
@@ -1309,7 +1309,7 @@
 ## W. 裁定 (§V の解釈割れ — 実装用、2026-07-22 オーケストレータ裁定)
 
 1. **QA7**: **built-in パターン集合の正規化テキストの sha256 を用いる** — 手動版文字列は更新忘れでテンプレ変更が承認記録に反映されないため不採用。目的 (何に対する承認かの固定) は実 hash が満たす。
-2. **QA12**: **schema レベルで拒否** — folder config の `[budget.per_adapter]` は unknown key として KCS-E-CONFIG-SCHEMA 系 error (10 §12.3 の「enum 外の未知キーは schema error」と同じ流儀)。
+2. **QA12**: **schema レベルで拒否** — folder config の `[budget.per_adapter]` は unknown key として KIO-E-CONFIG-SCHEMA 系 error (10 §12.3 の「enum 外の未知キーは schema error」と同じ流儀)。
 3. **QA20**: **1 AdapterRun 単位で判定** (07 の AdapterRun = 1 request 規範に従う)。実装が task 全体粒度ならバグとして修正。
 4. **QA33**: **spec の平坦 key (`[markdownize] bbox_annotation = true`) を正とし schema を追随** — config 例示は規範。
 5. **QA47**: **現行の位置合成方式を正とする** — Adapter が入力順序から id を合成し、受入検査は合成後 id で全単射を確認。順序保証は provider 採用の前提として記録 (順序非保証 provider はこの Adapter 形式で採用不可)。

@@ -6,7 +6,7 @@
 ## 根本診断 (4 エンジン収束)
 
 **pipeline / adapter / task / budget の各モジュールは関数単体としては概ね正しく実装されているが、
-`kcs index` に一切結線されていない dead code である** (grep 実証: 非テスト呼び出し元ゼロ)。CLI は
+`kio index` に一切結線されていない dead code である** (grep 実証: 非テスト呼び出し元ゼロ)。CLI は
 1 ファイル 1 unit の退化 baseline をインライン直書きするだけで、52 P0 テストの多くは「テストが
 テスト用の純関数だけを検証」する見かけ倒しになっている (常真 assert 2 件、vacuous 4 件を含む)。
 LOC 実測はテスト除き約 2,300-2,800 行で予算下限 3,500 を大きく下回る。
@@ -17,7 +17,7 @@ C-6〜C-11 の decisions 記録。unsafe / API キー / テスト内ネットワ
 
 ## 必須修正 (Step 2 完了ゲート)
 
-### F1 [critical] kcs index への pipeline 結線 (4/4)
+### F1 [critical] kio index への pipeline 結線 (4/4)
 `run_index` を scan → prepare_units → (mode 決定 choose_markdownize_mode) → Adapter.markdownize →
 validate_markdownize_response (V1-V6) → persist_normalized_instance → auto snapshot の実経路に組み替える。
 `write_baseline_artifacts` のインライン直書き (main.rs:451-523) は廃止。deterministic Adapter を
@@ -25,18 +25,18 @@ baseline 経路として実際に呼ぶこと (07 §2.1)。
 
 ### F2 [critical] 固定値 placeholder の全廃 (Spark/Opus/Sonnet)
 - `generated_at` / `approved_at` の固定文字列 "2026-04-25T12:00:00Z" → 実 UTC 時刻 (テスト固定は
-  kcs-core の fixed-now 経路 = debug gated を再利用)
-- `run_id` 固定 "run_00000000000000000000000000" → kcs-core の ULID 生成を pub 化して `run_`/`task_` prefix で採番 (decisions #21)
+  kio-core の fixed-now 経路 = debug gated を再利用)
+- `run_id` 固定 "run_00000000000000000000000000" → kio-core の ULID 生成を pub 化して `run_`/`task_` prefix で採番 (decisions #21)
 - deterministic adapter の tool_profile_hash リテラル転記 → `identity::tool_profile_hash()` の実行時計算
 
 ### F3 [critical] mistral_ocr Adapter の実装 (4/4)
 NotImplemented を解消: HTTP client (ureq (rustls) 等、依存追加可) + 起動時の版付きモデル名解決 → pin
-(07 §6)、表 inline、images[] の CAS 保存 (objects/images/) + placeholder → kcs:// URI 置換 (出現順対応、
+(07 §6)、表 inline、images[] の CAS 保存 (objects/images/) + placeholder → kio:// URI 置換 (出現順対応、
 decisions #25)、bbox/confidence は unit metadata。**テストは HTTP 層を trait モックで差し替え** (CI 外部通信ゼロは維持)。
 
 ### F4 [major] task 永続化と batch の実体 (4/4)
-in-memory VecDeque → `.kcs` 配下の永続 task store (04 §5.1 descriptor 全フィールド)。
-`kcs batch resume` / `retry` のハードコード応答を実装に置換 (状態遷移・retry budget・冪等性・
+in-memory VecDeque → `.kio` 配下の永続 task store (04 §5.1 descriptor 全フィールド)。
+`kio batch resume` / `retry` のハードコード応答を実装に置換 (状態遷移・retry budget・冪等性・
 budget pause からの --override-budget 再開)。cost ledger (decisions #22 の schema) の書き込みと
 二層 cap 判定 (`evaluate_budget` の常時許可を修正) を index/batch 経路に接続。
 
@@ -52,17 +52,17 @@ budget pause からの --override-budget 再開)。cost ledger (decisions #22 �
 - 受け入れ検査違反 / fallback_to_full=true 時の「全体 reject + full 1 回自動投入」(04 §3.2、
   fallback_to_full を契約違反と誤処理している現状を修正)
 
-### F7 [major] secrets / .kcsignore / tool-lock の仕上げ
+### F7 [major] secrets / .kioignore / tool-lock の仕上げ
 - Tier A パターン拡充 (.ssh/ .gnupg/ .aws/ .kube/config .docker/config.json 等、root-relative)
-- quarantine の実体 (承認後追加 Tier A の取り込み保留 + 記録 + kcs status 表示)
-- .kcsignore matcher を 03 §11.1 準拠に (`**` / rooted path / config→.kcsignore 連結 / negation 後勝ち)
+- quarantine の実体 (承認後追加 Tier A の取り込み保留 + 記録 + kio status 表示)
+- .kioignore matcher を 03 §11.1 準拠に (`**` / rooted path / config→.kioignore 連結 / negation 後勝ち)
 - tool-lock.json に index で使う実 Adapter entry を materialize (空 {spec_version:1} のままにしない)。
   auto snapshot の tree entry に normalize {tool_profile_hash, gen} を付与 (03 §8)
 
 ### F8 [major] テストの実体化 (テスト忠実性の回復)
 - 常真テストの置換: CT2-INCR-008 (incremental と full の生成物 identity を実比較)、CT2-TASK-003 (再実行で instance が増えないことを実 assert)
 - vacuous の修正: CT2-SECRETS-004 (`if let Some(commit)` スキップを排除 — 非機微ファイル同時追加で commit を強制し、.env が CAS に無いことも assert)、CT2-ADAPTER-013 (手動 mkdir でなくモック online Adapter 経由で第二 instance を生成)、CT2-ACCEPT-007 (persist されないこと + full fallback 投入を assert)、CT2-SECRETS-003/NETWORK-001 (実 task record で pending を検証)
-- pipeline 系 P0 (INCR/ACCEPT/TASK/BUDGET) は **CLI (kcs index) を通る結合テスト**にする — 純関数単体テストのみでの green を完了と見なさない
+- pipeline 系 P0 (INCR/ACCEPT/TASK/BUDGET) は **CLI (kio index) を通る結合テスト**にする — 純関数単体テストのみでの green を完了と見なさない
 
 ## 裁定メモ
 
@@ -75,7 +75,7 @@ budget pause からの --override-budget 再開)。cost ledger (decisions #22 �
 ```bash
 cargo test --workspace          # P0 52 green (結合テスト化後) + Step 1 回帰なし
 cargo clippy --all-targets -- -D warnings && cargo fmt --check
-grep 検証: kcs-pipeline / kcs-adapter の主要関数に非テスト呼び出し元が存在すること
+grep 検証: kio-pipeline / kio-adapter の主要関数に非テスト呼び出し元が存在すること
 ```
 
 ブランチ `step2c-impl` に追加コミット。完了後、発注側が再監査 (4 エンジン) を実施する。
@@ -100,8 +100,8 @@ persist_images の呼び出し元ゼロ、pin 解決は "-latest"→"mistral-ocr
 
 - **G1 [critical] budget cap の実効化** (4/4、Sonnet/Opus が実機立証): read_budget_caps の独自キー
   (device_monthly_usd_cap 等) は schema で拒否され、spec の正キーは読まれない → cap が構造的に無効。
-  修正: device cap = `~/.config/kcs/config.toml` (XDG 対応) の `[budget] monthly_usd_cap`、
-  folder cap = `.kcs/config.toml` の `[budget] monthly_usd_cap` を読む (04 §5.4 / 03 §11 準拠、
+  修正: device cap = `~/.config/kio/config.toml` (XDG 対応) の `[budget] monthly_usd_cap`、
+  folder cap = `.kio/config.toml` の `[budget] monthly_usd_cap` を読む (04 §5.4 / 03 §11 準拠、
   schema 変更不要)。CLI 経由の cap=0 → pause テストを追加
 - **G2 [critical] incremental の実体化** (4/4): map_units を index 経路に結線し、previous instance の
   復元・IncrementalHints の実算 (change_rate / consecutive / raw_hash_only_changed) で
@@ -109,13 +109,13 @@ persist_images の呼び出し元ゼロ、pin 解決は "-latest"→"mistral-ocr
   検証にはテスト用 incremental 対応 adapter を注入するフックを実装 (方式は decisions に記録)
 - **G3 [critical] mistral HTTP の実装**: ureq (rustls) 等を追加し EnvMistralOcrClient を実装 (キー
   未設定は明示エラー)。pin はモデル一覧 API で解決 (固定文字列置換の廃止、07 §6)。
-  **persist_images を markdownize 実経路で呼ぶ** (現状 kcs:// URI が全て dangling)。複数画像の
+  **persist_images を markdownize 実経路で呼ぶ** (現状 kio:// URI が全て dangling)。複数画像の
   bbox/confidence metadata (現状 first() のみ)
 - **G4 [major] task executor の実装** (Sonnet: TaskStatus::Running 使用箇所ゼロ): pending task を
   実行して Done/Failed/Partial へ遷移させる経路が存在しない。batch resume に executor ループを実装
 - **G5 [major] 受け入れ検査違反 → full 1 回自動再投入** (04 §3.2。validate Err の `?` 伝播を修正)
 - **G6 [major] PDF ページ単位抽出** (Sonnet 実機: 2 ページ PDF で両ページが同一 markdown になる実バグ)
-- **G7 [major] .kcsignore の `**` 対応** (Sonnet 実機: `**/*.log` が no-op)
+- **G7 [major] .kioignore の `**` 対応** (Sonnet 実機: `**/*.log` が no-op)
 - **G8 [major] opt-in の仕上げ**: (a) revoke 後の `--online` が opt-in を復活させる抜け穴 (Sonnet 実機)、
   (b) revoke 機構を 07 §3 の `adapter.policy.allow_network` config と整合させる (独自 sentinel file を
   廃止 or 併記)、(c) `--online` が初回スキャン承認を迂回しないことを確認・修正 (GPT-5.5 指摘、
@@ -149,7 +149,7 @@ CLI 結合化。**ただし今回も修正が新規 critical 退行を 2 件持�
   導入された再帰走査が、非 ignore のサブフォルダ配下ファイルを親 scope の markdownize/persist/
   task/課金に流し込む (03 §3「直下のみ」違反)。commit tree 側は正しく拒否するため orphan
   normalized instance + phantom cost + **プライバシー越境** (親の承認だけでサブフォルダ内容が
-  online 送信対象になる) が発生。修正: 再帰は ignore 判定と子 .kcs 検出のみに使い、候補化は
+  online 送信対象になる) が発生。修正: 再帰は ignore 判定と子 .kio 検出のみに使い、候補化は
   直下ファイル限定。**回帰ガード**: 「サブフォルダのファイルが親の objects/tasks/ledger に
   一切現れない」ことを assert する境界契約テストを追加。ct2_ignore_001 が違反挙動を「正」として
   固定しているので修正
@@ -166,7 +166,7 @@ CLI 結合化。**ただし今回も修正が新規 critical 退行を 2 件持�
 - **H6 [major] --online の opt-in 誤報告** (Sonnet 実機): approvals.jsonl の存在有無だけで判定し
   内容 (network_opt_in) を見ない。ct2_network_002 が誤挙動を assert しているので修正
 - **H7 [major] 画像 placeholder 置換がハイパーリンクを破壊** (Sonnet 実機): `](` の最初の出現を
-  無差別置換するため、画像より前のリンク URL が kcs:// URI に化け、実 placeholder は dangling。
+  無差別置換するため、画像より前のリンク URL が kio:// URI に化け、実 placeholder は dangling。
   画像構文 `![...](...)` のみをマッチ対象に
 - **H8 [major] PDF 疑似ページ分割の内容漏出** (Sonnet 実機: 3 ページ不均等 PDF で隣接ページへ
   漏出): 均等分割ヒューリスティックを廃し、content stream 境界とテキストの対応で分割
@@ -208,7 +208,7 @@ H5 の「revoke が --online に優先」は R3 G8a で要求した意図的仕�
   cap 60s) から算出し、batch retry/resume は next_retry_at 未到達の task をスキップ
 - I3 [major] PDF 境界検出の endstream 語衝突 (Sonnet 実機): 地の文に "endstream" を含むページが
   空 markdown 化 → full 検査で Failed。境界判定を「行頭 endstream トークン」に強化し、
-  prepare.rs / deterministic.rs の重複ヘルパを kcs-pipeline に一本化
+  prepare.rs / deterministic.rs の重複ヘルパを kio-pipeline に一本化
 - I4 [major] config.schema.json の scope が ignore を拒否 (additionalProperties:false)、loader は読む。
   schema に ignore: string[] を追加
 - I5 [minor 群]: 死 sentinel (network-revoked 拡張子なし) 削除 / profile() を network-free 化

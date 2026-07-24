@@ -4,7 +4,7 @@
 対象クエリ = eval/golden-queries-fixture-b.jsonl (24 問、hard1/2/3 × 8。
 測定前凍結)。3 エンジンの Recall@10 を同一人格サブツリーで比較する:
 
-- kcs:    登録済み fixture 環境 (register_fixture) に対する `kcs search
+- kio:    登録済み fixture 環境 (register_fixture) に対する `kio search
           --all-scopes`。--online-query で検索時 query embedding を許可
           (hard 系自然文の正規解答経路 — run_qhard と同じ裁定)。
 - mdfind: Spotlight ネイティブのクエリ意味論をそのまま使う
@@ -13,12 +13,12 @@
           クエリをスクリプト種別の断片 (ascii 語 / 数値 / カタカナ連 /
           漢字連) に分解し、断片ごとの `rga -l` 一致数でファイルを採点する
           「上振れ寄りの丁寧な使い方」を採用 (baseline への generosity は
-          KCS 優位主張を保守側に倒す)。
+          KIO 優位主張を保守側に倒す)。
 
-ゲート: KCS >= 0.8 かつ (KCS - mdfind) >= 0.3 かつ (KCS - rga) >= 0.3。
+ゲート: KIO >= 0.8 かつ (KIO - mdfind) >= 0.3 かつ (KIO - rga) >= 0.3。
 
 前提: baseline コーパスは Spotlight が索引する場所に置いた PRISTINE 複製
-(.kcs なし — KCS 派生物を baseline に見せない公平性)。
+(.kio なし — KIO 派生物を baseline に見せない公平性)。
 """
 import argparse
 import json
@@ -37,7 +37,7 @@ def env_for(fixture_root: Path, persona: str, online_query: bool):
     base = fixture_root / "env" / persona
     env = os.environ.copy()
     for name in tuple(env):
-        if name.startswith("KCS_TEST_"):
+        if name.startswith("KIO_TEST_"):
             env.pop(name, None)
         elif name in ("MISTRAL_API_KEY", "GEMINI_API_KEY") and not online_query:
             env.pop(name, None)
@@ -48,12 +48,12 @@ def env_for(fixture_root: Path, persona: str, online_query: bool):
 
 
 def first_scope_dir(fixture_root: Path, persona: str) -> Path:
-    for kcs_dir in sorted((fixture_root / persona).rglob(".kcs")):
-        return kcs_dir.parent
+    for kio_dir in sorted((fixture_root / persona).rglob(".kio")):
+        return kio_dir.parent
     raise SystemExit(f"no registered scope for {persona}")
 
 
-def kcs_top10(bin_path, fixture_root, persona, query, online_query):
+def kio_top10(bin_path, fixture_root, persona, query, online_query):
     proc = subprocess.run(
         [bin_path, "--json", "search", query, "--all-scopes"],
         cwd=first_scope_dir(fixture_root, persona),
@@ -106,9 +106,9 @@ def rga_top10(corpus: Path, persona: str, query: str):
 def main(argv=None):
     ap = argparse.ArgumentParser()
     ap.add_argument("--golden", default=os.path.join(HERE, "golden-queries-fixture-b.jsonl"))
-    ap.add_argument("--fixture-root", default="/private/tmp/kcs-fixture-run")
-    ap.add_argument("--baseline-corpus", default=os.path.expanduser("~/kcs-baseline-corpus"))
-    ap.add_argument("--bin", default="target/release/kcs")
+    ap.add_argument("--fixture-root", default="/private/tmp/kio-fixture-run")
+    ap.add_argument("--baseline-corpus", default=os.path.expanduser("~/kio-baseline-corpus"))
+    ap.add_argument("--bin", default="target/release/kio")
     ap.add_argument("--out", default=os.path.join(HERE, "baseline-results.json"))
     ap.add_argument("--online-query", action="store_true")
     args = ap.parse_args(argv)
@@ -122,7 +122,7 @@ def main(argv=None):
     for q in goldens:
         persona = q["persona"]
         expected = {e["file"] for e in q["expected"]}
-        kcs_titles, kcs_rc = kcs_top10(bin_path, fixture_root, persona, q["query"],
+        kio_titles, kio_rc = kio_top10(bin_path, fixture_root, persona, q["query"],
                                        args.online_query)
         md_names = mdfind_top10(corpus, persona, q["query"])
         rga_names = rga_top10(corpus, persona, q["query"])
@@ -130,44 +130,44 @@ def main(argv=None):
             "query_id": q["query_id"],
             "class": q["class"],
             "persona": persona,
-            "kcs_hit": any(t in expected for t in kcs_titles),
+            "kio_hit": any(t in expected for t in kio_titles),
             "mdfind_hit": any(n in expected for n in md_names),
             "rga_hit": any(n in expected for n in rga_names),
-            "kcs_rc": kcs_rc,
-            "kcs_top3": kcs_titles[:3],
+            "kio_rc": kio_rc,
+            "kio_top3": kio_titles[:3],
             "mdfind_top3": md_names[:3],
             "rga_top3": rga_names[:3],
             "expected": sorted(expected),
         }
         rows.append(row)
-        print(f"  {q['query_id']} ({q['class']}): kcs={'o' if row['kcs_hit'] else 'x'} "
+        print(f"  {q['query_id']} ({q['class']}): kio={'o' if row['kio_hit'] else 'x'} "
               f"mdfind={'o' if row['mdfind_hit'] else 'x'} rga={'o' if row['rga_hit'] else 'x'}",
               flush=True)
 
     n = len(rows)
     recall = {
-        "kcs": sum(r["kcs_hit"] for r in rows) / n,
+        "kio": sum(r["kio_hit"] for r in rows) / n,
         "mdfind": sum(r["mdfind_hit"] for r in rows) / n,
         "rga": sum(r["rga_hit"] for r in rows) / n,
     }
     gate = {
-        "kcs_ge_0_8": recall["kcs"] >= 0.8,
-        "margin_mdfind_ge_0_3": recall["kcs"] - recall["mdfind"] >= 0.3,
-        "margin_rga_ge_0_3": recall["kcs"] - recall["rga"] >= 0.3,
+        "kio_ge_0_8": recall["kio"] >= 0.8,
+        "margin_mdfind_ge_0_3": recall["kio"] - recall["mdfind"] >= 0.3,
+        "margin_rga_ge_0_3": recall["kio"] - recall["rga"] >= 0.3,
     }
     gate["pass"] = all(gate.values())
     by_class = {}
     for klass in ("hard1", "hard2", "hard3"):
         sub = [r for r in rows if r["class"] == klass]
         by_class[klass] = {
-            "kcs": sum(r["kcs_hit"] for r in sub),
+            "kio": sum(r["kio_hit"] for r in sub),
             "mdfind": sum(r["mdfind_hit"] for r in sub),
             "rga": sum(r["rga_hit"] for r in sub),
             "n": len(sub),
         }
     result = {"queries": rows, "recall_at_10": recall, "gate": gate,
               "by_class": by_class, "n": n,
-              "note": "09 §4.1 ベースライン優位 — KCS>=0.8 かつ各差>=0.3"}
+              "note": "09 §4.1 ベースライン優位 — KIO>=0.8 かつ各差>=0.3"}
     Path(args.out).write_text(json.dumps(result, ensure_ascii=False, indent=1))
     print(json.dumps({"recall_at_10": recall, "gate": gate, "by_class": by_class},
                      ensure_ascii=False, indent=1))

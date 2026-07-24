@@ -60,7 +60,7 @@ class TestPersonaPrepareReceipt(unittest.TestCase):
         cls.destination_root = "/synthetic/persona-replay-01"
         cls.plan = generator.build_generation_plan(cls.profile)
         cls.plan_sha = generator.generation_plan_sha256(cls.plan)
-        cls.binary_sha = _hash("trusted-kcs-binary-identity")
+        cls.binary_sha = _hash("trusted-kio-binary-identity")
         cls.root_binding = _root_binding(
             profile=cls.profile,
             replay_id=cls.replay_id,
@@ -228,7 +228,7 @@ class TestPersonaPrepareReceipt(unittest.TestCase):
             self.assertTrue(all(value is False for value in evidence["checks"].values()))
             for field in (
                 "semantic_checks_complete",
-                "actual_kcs_chunks_attested",
+                "actual_kio_chunks_attested",
                 "opaque_runtime_contents_attested",
                 "external_api_absence_attested",
                 "history_ready_attested",
@@ -239,7 +239,7 @@ class TestPersonaPrepareReceipt(unittest.TestCase):
             self.assertIs(row["canonical_fixture_projection_complete"], True)
             for field in (
                 "filesystem_mutation_performed",
-                "kcs_commands_executed_by_this_module",
+                "kio_commands_executed_by_this_module",
                 "external_api_execution_performed",
                 "history_ready_attested",
                 "history_assignment_executable",
@@ -379,12 +379,12 @@ class TestPersonaPrepareReceipt(unittest.TestCase):
 
         descriptors = [
             {
-                "relative_path": ".kcs-persona-history/receipts/b.json",
+                "relative_path": ".kio-persona-history/receipts/b.json",
                 "raw_sha256": _hash("b"),
                 "bytes": 1,
             },
             {
-                "relative_path": ".kcs-persona-history/receipts/a.json",
+                "relative_path": ".kio-persona-history/receipts/a.json",
                 "raw_sha256": _hash("a"),
                 "bytes": 1,
             },
@@ -509,7 +509,7 @@ class TestPersonaPrepareReceipt(unittest.TestCase):
         rebuild.assert_not_called()
 
         placeholder = {
-            "relative_path": ".kcs-persona-history/receipts/x.json",
+            "relative_path": ".kio-persona-history/receipts/x.json",
             "raw_sha256": _hash("x"),
             "bytes": 1,
         }

@@ -10,31 +10,31 @@
 
 **対象 U 項目**: `tasks/step4b-spec-gap.md` の **U5, U6, U7, U8, U9, U10, U11, U1 (abandon 部分のみ)**。
 U1 のうち `hold_reason` 3 値 enum・`paused`/`pending+next_retry_at` の分離自体は 04 §5.1 契約であり
-本書の対象外 (別ロットの契約テストが担う) — 本書が U1 から取り込むのは **`kcs batch abandon` CLI と
+本書の対象外 (別ロットの契約テストが担う) — 本書が U1 から取り込むのは **`kio batch abandon` CLI と
 `stalled` 表示**の部分のみ。U2/U3/U4/U12 は対象外 (U4 の budget cap 判定式 (check-then-reserve /
 candidate=0 免除 / per_adapter device 限定) は 04 §5.4 の同一パラグラフに同居するため、指示書の
 網羅領域 9 (budget cap) としてやむを得ず一部重複して契約化する — 該当契約の「正本」に明記する)。
 
 **実装対象ファイルの見込み** (契約の対象であり実装方針を指図するものではない — 現状把握の記録):
 
-- `crates/kcs-pipeline/src/budget.rs` — 全面置換対象。現状は `CostLedger` / `ReservationLedger` が
+- `crates/kio-pipeline/src/budget.rs` — 全面置換対象。現状は `CostLedger` / `ReservationLedger` が
   `cost-ledger.jsonl` + `cost-ledger-reservations.jsonl` + `cost-ledger-reclaimed.jsonl` +
-  `*.lock` の JSONL 3 ファイル構成 (旧仕様、2026-07-18 に spec 側では廃止済み)。`kcs-pipeline` は
+  `*.lock` の JSONL 3 ファイル構成 (旧仕様、2026-07-18 に spec 側では廃止済み)。`kio-pipeline` は
   現在 `rusqlite` に依存していない (`Cargo.toml` 確認済み) — 新設 SQLite ストアをこのクレートに置くなら
-  依存追加が要る。`rusqlite 0.32` はワークスペース共通依存で `kcs-cli` / `kcs-index` が既に使用
-  (`Cargo.toml` L31, `crates/kcs-index/Cargo.toml`)
-- `crates/kcs-pipeline/src/task.rs` — `TaskDescriptor` の `reservation_id`/`reserved_usd`/
+  依存追加が要る。`rusqlite 0.32` はワークスペース共通依存で `kio-cli` / `kio-index` が既に使用
+  (`Cargo.toml` L31, `crates/kio-index/Cargo.toml`)
+- `crates/kio-pipeline/src/task.rs` — `TaskDescriptor` の `reservation_id`/`reserved_usd`/
   `reserved_month` (JSONL 予約 claim の残骸) は SQLite 移行後は不要になる可能性が高いが、本書は
   ledger 側の契約のみを扱うため task.rs 側の変更要否は判定しない
-- `crates/kcs-cli/src/main.rs` — `cost_ledger_path()` (L13438-13440、現状
-  `data_home().join("kcs/cost-ledger.jsonl")`) の拡張子変更、F8 予約フロー (L12487 付近) の
+- `crates/kio-cli/src/main.rs` — `cost_ledger_path()` (L13438-13440、現状
+  `data_home().join("kio/cost-ledger.jsonl")`) の拡張子変更、F8 予約フロー (L12487 付近) の
   `BEGIN IMMEDIATE` Tx への置換、`BatchCommand` enum (L264-268、現状 `Resume`/`Retry` のみ) への
-  `Abandon` 追加、`kcs batch retry --reset-violations` フラグ追加、`kcs status` の `stalled` 表示、
-  `kcs search` vector|hybrid page 1 の device 行書込み配線
-- `crates/kcs-index/src/registry.rs` — 直接の変更対象ではないが、device-global SQLite
-  (`~/.local/share/kcs/scope-registry.sqlite`、WAL + busy_timeout、`kcs_core::xdg::xdg_dir`/
+  `Abandon` 追加、`kio batch retry --reset-violations` フラグ追加、`kio status` の `stalled` 表示、
+  `kio search` vector|hybrid page 1 の device 行書込み配線
+- `crates/kio-index/src/registry.rs` — 直接の変更対象ではないが、device-global SQLite
+  (`~/.local/share/kio/scope-registry.sqlite`、WAL + busy_timeout、`kio_core::xdg::xdg_dir`/
   `home_dir` によるパス解決) の**先例実装**として新設 `cost-ledger.sqlite` ストアの参考になる
-- `crates/kcs-core/src/xdg.rs` — 変更不要の見込み (`xdg_dir`/`home_dir` は既に
+- `crates/kio-core/src/xdg.rs` — 変更不要の見込み (`xdg_dir`/`home_dir` は既に
   `main.rs::data_home()` が利用しており、`cost-ledger.sqlite` パス解決にもそのまま使える)
 
 ---
@@ -52,7 +52,7 @@ candidate=0 免除 / per_adapter device 限定) は 04 §5.4 の同一パラグ�
 | CL41-CL47 (§G) | sync online 呼出の縮退 2 相 + idempotency 二段構え | 04 §5.4 (L768) / §5.5 (L880) |
 | CL48-CL55 (§H) | query embedding device 行 (stale_after_at/sweep/剪定) | 04 §5.4 (L769) |
 | CL56-CL61 (§I) | budget cap (check-then-reserve/candidate=0/per_adapter) | 04 §5.4 (L767-768) |
-| CL62-CL68 (§J) | `kcs batch abandon` CLI (U1 部分) | 04 §5.8 (L1075-1084) / 06 §1 (L44-51) |
+| CL62-CL68 (§J) | `kio batch abandon` CLI (U1 部分) | 04 §5.8 (L1075-1084) / 06 §1 (L44-51) |
 | CL69-CL71 (§K) | 横断規約 (error code / 配置 / リネーム grep) | 06 §7 (L343) / 10 §12.4, §12.7 |
 
 **優先度**: **P0** = このロットの完了条件、1 件でも failing なら「cost-ledger.sqlite 移行完了」と呼べない。
@@ -244,7 +244,7 @@ P0/P1 集計は末尾「集計」節。
 - 前提: 既存の terminal 行 (state=3、`error='network_error'` 相当、`upload_id`/`batch_job_id`/
   `provider_scope_id`/`completed_at` が非 NULL・旧 attempt の残骸掃除は完了済み・`intent_token` は
   既に NULL 化済み) がある。
-- 操作: `kcs batch retry` により当該行の相 1 を再発行する。
+- 操作: `kio batch retry` により当該行の相 1 を再発行する。
 - 期待: 同一 UPDATE 文で `upload_id`・`batch_job_id`・`job_create_started_at`・`stale_after_at`・
   `provider_scope_id`・`error`・`completed_at` の全てが NULL に戻り、`intent_token` に新しい
   UUIDv7・`state=0`・`estimated_usd` に新しい予約額が設定される。`attempts` は前 attempt から
@@ -305,7 +305,7 @@ P0/P1 集計は末尾「集計」節。
 - 正本: 04 §5.8 L979-980 (『**persist 直前に対象 raw の tombstone を再検査する** — purge 済みなら
   出力を破棄し、下記の reject 終端と同形 (error='purged') で閉じる』)
 - 前提: state=1、`batch_job_id` 記録済み。出力の fetch には成功するが、job 投入後・collect 前に
-  当該 raw が `kcs purge` された (tombstone が存在)。
+  当該 raw が `kio purge` された (tombstone が存在)。
 - 操作: 相 3 を実行する。
 - 期待: fetch した出力は persist されない (normalized manifest / unit object は一切書き込まれない)。
   reject 終端と同形の Tx: `cost_ledger` に `error='purged'` に対応する `outcome='purged'` 行が確定記帳
@@ -334,9 +334,9 @@ P0/P1 集計は末尾「集計」節。
   通算**であり mode 別に数えない』)
 - 前提: CL20 で `state=3`・`error='contract_violation'`・`contract_violation_count=1` になった行。
   upload 削除がまだ完了していない (残骸掃除未完)。
-- 操作: (a) 残骸掃除が未完のまま `kcs batch retry` を試みる。(b) 残骸掃除 (upload 全削除) 完了後に
-  `kcs batch retry` を実行し、再度 contract_violation で終端させる (`contract_violation_count` が
-  2 になる)。(c) その状態でさらに `kcs batch retry` を試みる (mode を full に切り替えて試す)。
+- 操作: (a) 残骸掃除が未完のまま `kio batch retry` を試みる。(b) 残骸掃除 (upload 全削除) 完了後に
+  `kio batch retry` を実行し、再度 contract_violation で終端させる (`contract_violation_count` が
+  2 になる)。(c) その状態でさらに `kio batch retry` を試みる (mode を full に切り替えて試す)。
 - 期待: (a) 新しい相 1 は開始されない (旧 token の残骸掃除完了が前提条件)。(b)
   `contract_violation_count=2` になった時点でこのタスクキーは failed permanent
   (`task_retry_allowed` 相当が false) — mode を full に切り替えても (c) は再投入不可 (count は
@@ -385,7 +385,7 @@ P0/P1 集計は末尾「集計」節。
   UPDATE し...』『この +1 は... 精算 estimated 行の採番 (期限超の +1 = 精算行の採番、**abandon の
   +1 = 最終 attempt の終端採番**) である』)
 - 前提: `batch_requests` 行 (state=0、`submission_seq=2`、`intent_token=T2`、`estimated_usd=0.8`) を
-  ユーザーが `kcs batch abandon` する。
+  ユーザーが `kio batch abandon` する。
 - 操作: abandon を実行する (CL62-CL68 の CLI 契約と接続する記帳部分のみ検証)。
 - 期待: `submission_seq` が `2→3` へ UPDATE されてから、`outcome='abandoned'`・`usd=0.8`・
   `estimated=1`・`batch_job_id=T2` の行が `submission_seq=3` で `cost_ledger` に記帳される。
@@ -413,7 +413,7 @@ P0/P1 集計は末尾「集計」節。
   不能の estimated 確定 = unknown_settled / 正常な制御応答 (fallback_to_full=true、§3.2) の request
   終端 = fallback_to_full』)
 - 前提: 8 通りの終端シナリオをそれぞれ用意する: (1) 正常 collect 成功、(2) §3.2 受け入れ検査 reject、
-  (3) provider が expired 報告、(4) `kcs batch abandon`、(5) 拒否課金 provider の submit 拒否
+  (3) provider が expired 報告、(4) `kio batch abandon`、(5) 拒否課金 provider の submit 拒否
   (07§5.7 条件 6)、(6) persist 直前 tombstone 検出、(7) 回復期限超過での estimated 精算、
   (8) Adapter が `fallback_to_full=true` を返す制御応答。
 - 操作: 各シナリオの終端 Tx を実行する。
@@ -470,7 +470,7 @@ P0/P1 集計は末尾「集計」節。
 - 操作: 終端 Tx を実行する。
 - 期待: provider 値 (`500 * 単価`) は使われず、`estimated_usd` を `estimated=1` で記帳する。
   **`usd=0` の確定記帳にはしない** (CL29 の非 billable 経路と区別)。`usage_validation=invalid` /
-  `billing_source=estimated` の warning ログ (event code `KCS-EV-ADAPTER-USAGE-001`、07§7
+  `billing_source=estimated` の warning ログ (event code `KIO-EV-ADAPTER-USAGE-001`、07§7
   L622-624) が出力される (ログ内容自体は本書の対象外、event code の発火有無のみ確認)。
 
 ### CL31 課金 field 単独の不良は受理判定・outcome・contract_violation_count を変えない [P0]
@@ -490,23 +490,23 @@ P0/P1 集計は末尾「集計」節。
 
 ## F. crash 回収 (書き込み系コマンド冒頭)
 
-> 04 §5.8 L1049-1057: 回復は `kcs index` / `kcs batch resume` / `kcs batch retry` /
-> `kcs batch abandon` / `kcs reindex` / `kcs repair --rebuild-db` の**冒頭**、`.kcs/.lock` 保持下で
+> 04 §5.8 L1049-1057: 回復は `kio index` / `kio batch resume` / `kio batch retry` /
+> `kio batch abandon` / `kio reindex` / `kio repair --rebuild-db` の**冒頭**、`.kio/.lock` 保持下で
 > 行う。未終端行 (state 0/1) と `intent_token` 非 NULL の終端行 (残骸掃除未完) を三値で照合する。
 > `request_kind='sync'` の行は対象外 (§G で別途扱う)。
 
 ### CL32 回収の起動条件・lock 保持・三値照合の対象行選定 [P0]
-- 正本: 04 §5.8 L1049-1055 (『**回復**（書き込み系 batch コマンド... の冒頭。これらは .kcs/.lock を
+- 正本: 04 §5.8 L1049-1055 (『**回復**（書き込み系 batch コマンド... の冒頭。これらは .kio/.lock を
   取得する書き込み系であり、相 1〜2b の遷移・token の発行も lock 保持下で行う）... 未終端の行
   (state 0/1) と intent_token 非 NULL の終端行 (= 残骸掃除未完) を三値で照合する。
   request_kind='sync' の行は job / upload 照合の対象外』)
 - 前提: `batch_requests` に (a) state=0 の行、(b) state=1 の行、(c) state=3・
   `intent_token` 非 NULL の行 (残骸掃除未完)、(d) state=2・`intent_token` NULL の行 (掃除済み完了行)、
   (e) `request_kind='sync'` の state=1 行、が混在。
-- 操作: `.kcs/.lock` を取得したうえで `kcs index` を実行し、回収対象行の列挙結果を検査する。
+- 操作: `.kio/.lock` を取得したうえで `kio index` を実行し、回収対象行の列挙結果を検査する。
 - 期待: (a)(b)(c) が回収対象に含まれる。(d) は対象外 (既に完全終端)。(e) は本節の対象外 (§5.4
   crash 回収 = §G が扱う) — job/upload 照合ルーチンには一切渡されない。回収処理全体が
-  `.kcs/.lock` 保持中に実行される (lock 未取得での回収呼び出しはエラー、または lock 取得を伴わない
+  `.kio/.lock` 保持中に実行される (lock 未取得での回収呼び出しはエラー、または lock 取得を伴わない
   経路が存在しないことを確認)。
 
 ### CL33 回収は新規送信ではないため network opt-in 不要 [P1]
@@ -514,7 +514,7 @@ P0/P1 集計は末尾「集計」節。
   あり**新規送信に当たらない — network opt-in / --online なしで実行できる**』)
 - 前提: 対象 scope の network 承認が無い (`approvals[]` 空、`allow_network=false`)。CL32 の
   回収対象行が存在する。
-- 操作: `--online` を付けずに `kcs index` を実行する。
+- 操作: `--online` を付けずに `kio index` を実行する。
 - 期待: 回収 (job 一覧照会・出力取得・upload 削除) は承認なしでも実行される (新規送信ゲートの
   対象外)。ただしこの回収を経て新しい相 1 (再投入) が必要になった場合、その**新規送信**は通常どおり
   opt-in を要求する (回収自体と再投入は別ゲート)。
@@ -560,18 +560,18 @@ P0/P1 集計は末尾「集計」節。
 - 操作: 3 パターンで回収ルーチンを実行する。
 - 期待: (a) 行は変更せず保持、次回再試行。(b) CL23 と同一の estimated 精算 (`submission_seq+1`)
   を行った後、新しい相 1 (新 `intent_token`・新 `submission_seq`) が開始される。(c) estimated
-  精算は行われるが**新しい相 1 は開始されない** — 掃除が完了するまで `kcs status` に stalled として
+  精算は行われるが**新しい相 1 は開始されない** — 掃除が完了するまで `kio status` に stalled として
   表示され続ける (CL39/CL66 と接続)。回復期限は `max(intent_token 時刻, job_create_started_at) +
   48h` で算出され、config で変更可能。
 
-### CL37 恒久 unknown: kcs status の stalled 表示、abandon が唯一の脱出路 [P0]
-- 正本: 04 §5.8 L1075-1076 (『**恒久 unknown**（資格情報喪失等）の行は kcs status に **stalled** として
-  表示し（表示には intent_token を含める）、kcs batch abandon... を脱出路とする』)
+### CL37 恒久 unknown: kio status の stalled 表示、abandon が唯一の脱出路 [P0]
+- 正本: 04 §5.8 L1075-1076 (『**恒久 unknown**（資格情報喪失等）の行は kio status に **stalled** として
+  表示し（表示には intent_token を含める）、kio batch abandon... を脱出路とする』)
 - 前提: CL36(c) のように掃除未完のまま何度回収を試みても job/upload の存在が確認できない行。
-- 操作: `kcs status` を実行する。
-- 期待: 当該行が `stalled` として表示され、表示に `intent_token` が含まれる。`kcs batch retry`
+- 操作: `kio status` を実行する。
+- 期待: 当該行が `stalled` として表示され、表示に `intent_token` が含まれる。`kio batch retry`
   (通常の再試行) では解消できない (CL36(c) が再投入をブロックし続けることの再確認)。唯一の解消
-  手段が `kcs batch abandon` であることを、他の全コマンド (`resume`/`retry`/`reindex`) を試しても
+  手段が `kio batch abandon` であることを、他の全コマンド (`resume`/`retry`/`reindex`) を試しても
   状態が変わらないことで示す。
 
 ### CL38 残骸掃除: terminal task の upload 削除、abandon済みは照合・記帳せず掃除のみ [P0]
@@ -587,11 +587,11 @@ P0/P1 集計は末尾「集計」節。
   差分として確認する。
 
 ### CL39 順序規範: 旧 attempt の照合・記帳・消し込み完了後にのみ retry 予算リセット + 新相1 [P0]
-- 正本: 04 §5.8 L1089-1091 (『**順序規範**: 明示 retry / kcs reindex --force が terminal task を
+- 正本: 04 §5.8 L1089-1091 (『**順序規範**: 明示 retry / kio reindex --force が terminal task を
   再投入する場合、**旧 intent_token の照合・記帳・消し込みを完了してから**、retry 予算のリセットと
   新しい相 1 を行う（逆順だと旧 attempt の発見・記帳が新 attempt の予算・記録を汚す）』)
 - 前提: terminal task (state=3) で残骸掃除が未完 (`intent_token` 非 NULL)。
-- 操作: `kcs batch retry` を実行する。
+- 操作: `kio batch retry` を実行する。
 - 期待: 実装が (誤って) 先に retry 予算をリセットして新しい相 1 を発行した場合、旧 attempt の
   found/confirmed-absent 判定が新 attempt の行 (別 `intent_token`) に対して行われてしまい、記帳・
   予算が汚染される回帰を再現できることを示す。正しい実装は旧 `intent_token` の照合・記帳・
@@ -727,8 +727,8 @@ P0/P1 集計は末尾「集計」節。
   別ケースで確認: 両 scope とも `timeout_seconds=100` の場合、`max(100,100)+60=160 < 600` のため
   `stale_after_at` = 相 1 実行時刻 + 600 秒 (下限が優先)。回収ルーチンは以後、config を再読みせず
   `stale_after_at` の保存値のみを参照する (config 変更後も既存行の判定は変わらない)。
-  **解釈が割れうる点**: 「参加 scope の実効値」を各 scope のどの config 層 (`~/.config/kcs/config.toml`
-  vs `.kcs/config.toml`) から解決するかは spec 上に明示された優先順位規則が無い — §L note-2 参照。
+  **解釈が割れうる点**: 「参加 scope の実効値」を各 scope のどの config 層 (`~/.config/kio/config.toml`
+  vs `.kio/config.toml`) から解決するかは spec 上に明示された優先順位規則が無い — §L note-2 参照。
 
 ### CL50 Retry-After 受信時の単調 CAS 延長 [P0]
 - 正本: 04 §5.4 L769 (『Retry-After を受信した保持プロセスは自 token の CAS UPDATE で
@@ -746,13 +746,13 @@ P0/P1 集計は末尾「集計」節。
 ### CL51 延長 UPDATE 0 行 = claim 喪失 → 以後の待機・再呼出・記帳を全中止 [P0]
 - 正本: 04 §5.4 L769 (『延長 UPDATE が 0 行（= 他プロセスが回収済み）なら claim 喪失として以後の
   待機・provider 再呼出・記帳を全て中止する — 下記の状態遷移 CAS 敗者規則と同じ非記帳。累積延長に
-  上限は設けない... 解放の脱出路は kcs batch abandon』)
+  上限は設けない... 解放の脱出路は kio batch abandon』)
 - 前提: 自プロセスが device 行を保持中 (token=T1) だが、CAS 延長 UPDATE の直前に別プロセスの
   stale 回収がこの行を `unknown_settled` として確定済み・`intent_token` を NULL 化済みだったとする。
 - 操作: 自プロセスが `WHERE intent_token = T1` 条件で延長 UPDATE を実行する。
 - 期待: UPDATE の影響行数が 0 (行は既に別 token/NULL になっている)。自プロセスはこれ以降の
   provider 待機・再呼出・課金記帳を一切行わない (二重計上防止)。累積延長回数に上限はない (脱出路は
-  `kcs batch abandon` のみ)。
+  `kio batch abandon` のみ)。
 
 ### CL52 bounded sweep の 256 行上限と配分順序 (自key最優先/剪定>=128/決定的順序) [P0]
 - 正本: 04 §5.4 L769 (『**1 回の実行あたり合計 256 行を上限とする bounded 処理**とし、配分と順序を
@@ -768,13 +768,13 @@ P0/P1 集計は末尾「集計」節。
   各集合内の処理順は `job_create_started_at`(sync stale) / `completed_at`(terminal) の昇順 + 4 組
   PK の byte 順で完全決定的 (同一入力なら毎回同じ 256 行が選ばれる)。
 
-### CL53 device 行の書込み主体は kcs search のみ、.kcs/.lock 不要、inline sweep は照会しない [P1]
-- 正本: 04 §5.4 L769 (『.kcs/.lock は不要 — device 行はどの scope にも属さず、直列化は cost-ledger
+### CL53 device 行の書込み主体は kio search のみ、.kio/.lock 不要、inline sweep は照会しない [P1]
+- 正本: 04 §5.4 L769 (『.kio/.lock は不要 — device 行はどの scope にも属さず、直列化は cost-ledger
   側の Tx が担う。**inline 回収では provider 照会を行わない** — 常に unknown 精算とする（検索
   応答性の保護。照会つき回収は書き込み系冒頭の crash 回収のみ）』)
-- 前提: `kcs search --vector` の page 1 実行中に device 行の inline sweep が発火する状況。
+- 前提: `kio search --vector` の page 1 実行中に device 行の inline sweep が発火する状況。
 - 操作: inline sweep 対象の stale device 行に対して回収を行う。
-- 期待: `.kcs/.lock` は一切取得されない (device 行の直列化は `BEGIN IMMEDIATE` Tx のみで担保)。
+- 期待: `.kio/.lock` は一切取得されない (device 行の直列化は `BEGIN IMMEDIATE` Tx のみで担保)。
   inline sweep で回収される stale 行は provider へ照会せず、常に `unknown_settled` として精算される
   (書き込み系コマンド冒頭の CL45 のような「照会可能なら確定」経路は inline では使われない —
   検索の応答性を優先するため)。
@@ -795,15 +795,15 @@ P0/P1 集計は末尾「集計」節。
   intent_token = <自 token> の条件付き（CAS）で行う... terminal device 行の剪定: scope_id='device'
   ∧ state IN (2, 3)（成功終端 = state 2 を含む）∧ intent_token IS NULL ∧
   contract_violation_count = 0 ∧ completed_at が前月以前... 剪定・確定済みの 4 組 key への
-  kcs batch abandon は対象なしの冪等成功』)
+  kio batch abandon は対象なしの冪等成功』)
 - 前提: (a) device 行が `state=2`（成功）・`intent_token IS NULL`・`contract_violation_count=0`・
   `completed_at`=前月。(b) 同条件だが `contract_violation_count=1`。(c) 同条件だが
   `completed_at`=当月。
-- 操作: terminal 剪定ルーチンを実行したのち、剪定された 4 組 key に対して `kcs batch abandon` を
+- 操作: terminal 剪定ルーチンを実行したのち、剪定された 4 組 key に対して `kio batch abandon` を
   実行する。
 - 期待: (a) のみ剪定 (DELETE) 対象になる — 成功終端 (state=2) も剪定対象に含まれることを確認
   (state=3 のみを剪定する誤実装との対比)。(b)(c) は剪定されない (`contract_violation_count=0`・
-  「前月以前」の両条件を厳密に要求)。(a) が剪定された後にその 4 組 key で `kcs batch abandon` を
+  「前月以前」の両条件を厳密に要求)。(a) が剪定された後にその 4 組 key で `kio batch abandon` を
   実行すると、対象行が存在しないため**対象なしの冪等成功** (exit 0) になる。
 
 ---
@@ -816,10 +816,10 @@ P0/P1 集計は末尾「集計」節。
 > 入らない。
 
 ### CL56 二層 cap: device cap が正、folder cap は任意の追加制限 [P0]
-- 正本: 04 §5.4 L767 (『cap は二層で判定する。device cap（... デバイス上の全 .kcs の当月合算に
-  適用、既定 $50）が正であり、folder cap（... その .kcs の当月消費のみに適用）は任意の追加制限。
+- 正本: 04 §5.4 L767 (『cap は二層で判定する。device cap（... デバイス上の全 .kio の当月合算に
+  適用、既定 $50）が正であり、folder cap（... その .kio の当月消費のみに適用）は任意の追加制限。
   folder cap 未設定なら device cap のみが効く』)
-- 前提: folder A (`.kcs/config.toml` に `monthly_usd_cap` 未設定)、folder B
+- 前提: folder A (`.kio/config.toml` に `monthly_usd_cap` 未設定)、folder B
   (`monthly_usd_cap=10.0` 設定済み)。device cap = $50。
 - 操作: 両 folder でタスクを起動しようとする。
 - 期待: folder A は device cap ($50) のみで判定される。folder B は `min(folder残余, device残余)`
@@ -872,17 +872,17 @@ P0/P1 集計は末尾「集計」節。
 ### CL61 per_adapter 設定キーの enum (markdownize/embedding/summary)、enum外はschema error [P1]
 - 正本: 04 §5.4 L768 (『設定キー名 = adapter_kind と同一 enum: markdownize / embedding / summary。
   enum 外の未知キーは schema error』)
-- 前提: `~/.config/kcs/config.toml` の `[budget.per_adapter]` に `unknown_kind = 5.0` を設定。
+- 前提: `~/.config/kio/config.toml` の `[budget.per_adapter]` に `unknown_kind = 5.0` を設定。
 - 操作: config を読み込む (schema validation)。
-- 期待: `KCS-E-CONFIG-SCHEMA-001` (exit 2) で拒否される。`markdownize`/`embedding`/`summary` の
+- 期待: `KIO-E-CONFIG-SCHEMA-001` (exit 2) で拒否される。`markdownize`/`embedding`/`summary` の
   3 キーのみが受理される。
 
 ---
 
-## J. `kcs batch abandon` CLI (U1 部分)
+## J. `kio batch abandon` CLI (U1 部分)
 
 ### CL62 CLI 構文と曖昧指定の拒否 [P0]
-- 正本: 06 §1 L44 (`kcs batch abandon <intent_token|scope/adapter/input_hash/tool_profile_hash>`)、
+- 正本: 06 §1 L44 (`kio batch abandon <intent_token|scope/adapter/input_hash/tool_profile_hash>`)、
   L46-47 (『指定子は intent_token または batch_requests の 4 組タスクキー（3 組では別 profile 行と
   曖昧 — 曖昧時は拒否して token を要求する』)
 - 前提: 同一 `(scope_id, adapter_kind, input_hash)` だが `tool_profile_hash` が異なる 2 行が
@@ -903,7 +903,7 @@ P0/P1 集計は末尾「集計」節。
   対象行を特定できる。
 
 ### CL64 abandon の効果: 確認済みユーザー操作で estimated 記帳 + terminal 化を同一 Tx [P0]
-- 正本: 04 §5.8 L1079-1080 (『kcs batch abandon... を脱出路とする: ユーザー確認で estimated
+- 正本: 04 §5.8 L1079-1080 (『kio batch abandon... を脱出路とする: ユーザー確認で estimated
   記帳 + state=3（error='abandoned'）+ completed_at』)
 - 前提: stalled 行 (CL37) に対して abandon を実行し、確認プロンプトで承諾する。
 - 操作: abandon を実行する。
@@ -923,14 +923,14 @@ P0/P1 集計は末尾「集計」節。
   いるかは spec 上不明。§L note-4 参照。
 
 ### CL66 対象なしは冪等成功 (exit 0)、terminal確定済み・device行剪定後・re-abandonを包含 [P0]
-- 正本: 04 §5.4 L769 (『剪定・確定済みの 4 組 key への kcs batch abandon は対象なしの冪等成功
+- 正本: 04 §5.4 L769 (『剪定・確定済みの 4 組 key への kio batch abandon は対象なしの冪等成功
   （exit 0 + 「対象なし」表示）』) / 06 §1 L50-51 (『対象行が無い場合（terminal 確定済み・device
   行の剪定後を含む）は対象なしの冪等成功 — exit 0 + 「対象なし」表示』)
 - 前提: (a) 既に `state=2`（成功）で完全終端・`intent_token` NULL の行を指定。(b) CL55 で剪定済み
   (行自体が存在しない) 4 組キーを指定。(c) CL64 で既に abandon 済み (state=3,
   error='abandoned') の行を再度 abandon しようとする (CL63 のとおり 4 組キー指定、かつ残骸掃除も
   完了済み)。(d) 存在したことのない架空の 4 組キー。
-- 操作: 各ケースで `kcs batch abandon` を実行する。
+- 操作: 各ケースで `kio batch abandon` を実行する。
 - 期待: (a)(b)(c)(d) の**全て**が exit 0 + 「対象なし」表示で終了する。(c) は二重に
   `submission_seq+1` の estimated 記帳を行わない (最初の abandon で既に確定済みの行を再度
   変更しない — 冪等)。確認プロンプトの要否 (対象が無いと分かった時点でプロンプト自体を出すか) は
@@ -940,19 +940,19 @@ P0/P1 集計は末尾「集計」節。
 - 正本: 04 §5.4 L768 (『sync 行は §5.8 の job / upload 照合・可視化猶予・回復期限の対象外（job /
   upload 相が無い）だが、abandon（同じ intent_token / 4 組指定）は適用できる』)
 - 前提: sync 行 (`request_kind='sync'`, state=0, 生存中 = stale ではない)。
-- 操作: この行を対象に `kcs batch abandon` を実行する。
+- 操作: この行を対象に `kio batch abandon` を実行する。
 - 期待: batch 行と同じ CLI・同じ確認プロンプト経路で abandon が成功する。sync 行には
   upload/job 掃除の概念が無いため、CL64 の記帳+terminal化のみが行われ、CL47 のとおり同一 Tx で
   `intent_token` が即座に NULL 化される (batch 行のような「掃除完了待ち」は発生しない)。
 
-### CL68 kcs status の stalled 表示から abandon 実行までの一貫性 (U1) [P0]
-- 正本: 04 §5.8 L1075-1076 (『恒久 unknown... の行は kcs status に stalled として表示し（表示には
+### CL68 kio status の stalled 表示から abandon 実行までの一貫性 (U1) [P0]
+- 正本: 04 §5.8 L1075-1076 (『恒久 unknown... の行は kio status に stalled として表示し（表示には
   intent_token を含める）』) + CL37/CL64 の接続確認。
 - 前提: CL37 のとおり stalled 表示されている行。
-- 操作: `kcs status` の出力から `intent_token` を読み取り、それをそのまま `kcs batch abandon
+- 操作: `kio status` の出力から `intent_token` を読み取り、それをそのまま `kio batch abandon
   <intent_token>` へ渡す。
-- 期待: `kcs status` が表示した `intent_token` が abandon の有効な selector として機能し
-  (CL62(a))、abandon 成功後は同じ `kcs status` の再実行でこの行がもはや stalled として表示されない
+- 期待: `kio status` が表示した `intent_token` が abandon の有効な selector として機能し
+  (CL62(a))、abandon 成功後は同じ `kio status` の再実行でこの行がもはや stalled として表示されない
   (`intent_token` が NULL 化されるまでは掃除完了待ちとして別表示になり得るが、少なくとも
   「照会不能な in-flight」としての stalled 表示ではなくなることを確認する)。
 
@@ -960,30 +960,30 @@ P0/P1 集計は末尾「集計」節。
 
 ## K. 横断規約
 
-### CL69 KCS-E-STORE-CONSTRAINT-001: CHECK到達は実装エラー、permanent・exit4即時中止 [P0]
+### CL69 KIO-E-STORE-CONSTRAINT-001: CHECK到達は実装エラー、permanent・exit4即時中止 [P0]
 - 正本: 04 §5.8 L1045-1047 (『DDL の CHECK は最終防衛線であり、CHECK 違反で Tx が失敗した場合は
-  実装エラー KCS-E-STORE-CONSTRAINT-001（permanent — ON CONFLICT DO NOTHING には吸収されず、
+  実装エラー KIO-E-STORE-CONSTRAINT-001（permanent — ON CONFLICT DO NOTHING には吸収されず、
   同じ値での再試行はループするだけのため再試行しない）』) / 06 §7 L343-344 (『記帳 CHECK 到達 =
   実装エラー（04 §5.8）。permanent・非再試行で command を即時中止・exit 4』)
 - 前提: 事前検証 (§E) を全て素通りしたにも関わらず (実装バグを想定して検証層を意図的に迂回した
   テストダブルで) CHECK 制約に違反する値を INSERT する。
 - 操作: 記帳を実行する。
-- 期待: `SQLITE_CONSTRAINT_CHECK` が実装エラー `KCS-E-STORE-CONSTRAINT-001` として即座に
+- 期待: `SQLITE_CONSTRAINT_CHECK` が実装エラー `KIO-E-STORE-CONSTRAINT-001` として即座に
   伝播し、コマンドが exit 4 で中止する。同じ入力での自動再試行は行われない (ON CONFLICT DO
   NOTHING はこの種の失敗を吸収しない — UNIQUE 違反と CHECK 違反は別の SQLite エラークラス)。
 
 ### CL70 cost-ledger.sqlite の配置・単一性・WAL/busy_timeout・schema変更regime [P0]
-- 正本: 04 §5.4 L770 (『累積コストは... ~/.local/share/kcs/cost-ledger.sqlite（デバイスグローバル
-  1 個。WAL + busy_timeout）に記録する（.kcs 内に ledger は置かない...）』) / 10 §7.5.3
+- 正本: 04 §5.4 L770 (『累積コストは... ~/.local/share/kio/cost-ledger.sqlite（デバイスグローバル
+  1 個。WAL + busy_timeout）に記録する（.kio 内に ledger は置かない...）』) / 10 §7.5.3
   L690-692 (『cost-ledger.sqlite はこのデフォルトの対象外 — 再構築不可の運用台帳... であり、schema
   変更は常に... in-place migration 要件に従う』) / 03 §4.1 L319, L321 (第三分類の位置づけ)
-- 前提: `XDG_DATA_HOME` 未設定・`HOME=/home/testuser` の環境。複数 `.kcs` scope が存在。
+- 前提: `XDG_DATA_HOME` 未設定・`HOME=/home/testuser` の環境。複数 `.kio` scope が存在。
 - 操作: 各 scope でタスクを実行し、`cost-ledger.sqlite` の実ファイルパスを確認する。
-- 期待: 全 scope が同一の単一ファイル `/home/testuser/.local/share/kcs/cost-ledger.sqlite` を
-  共有する (scope ごとに別ファイルにならない、`.kcs/` 配下にも作られない)。接続時に
+- 期待: 全 scope が同一の単一ファイル `/home/testuser/.local/share/kio/cost-ledger.sqlite` を
+  共有する (scope ごとに別ファイルにならない、`.kio/` 配下にも作られない)。接続時に
   `PRAGMA journal_mode` が `wal`、`PRAGMA busy_timeout` が 0 より大きい値に設定される
-  (`crates/kcs-index/src/registry.rs` の scope-registry.sqlite と同型の先例パターン)。
-  `index/sqlite.db` や `scope-registry.sqlite` が `kcs repair --rebuild-db` 等でデフォルト
+  (`crates/kio-index/src/registry.rs` の scope-registry.sqlite と同型の先例パターン)。
+  `index/sqlite.db` や `scope-registry.sqlite` が `kio repair --rebuild-db` 等でデフォルト
   rebuild 可能なのと異なり、`cost-ledger.sqlite` の schema 変更は常に in-place migration
   (既存行保全) のみが許される — rebuild 相当のコマンドが `cost-ledger.sqlite` を re-create しない
   ことを確認する。
@@ -998,7 +998,7 @@ P0/P1 集計は末尾「集計」節。
   rename ロジック自体が旧名を**文字列として**参照するのは移行コード内でのみ許容 — CL09-CL12 の
   移行ルーチン実装ファイルを除く)。
 - 期待: 移行ルーチン以外のコード (通常の記帳・予約・回収・abandon の経路) に旧 4 ファイル名への
-  参照が **0 件**。`crates/kcs-pipeline/src/budget.rs` の `CostLedger`/`ReservationLedger` が
+  参照が **0 件**。`crates/kio-pipeline/src/budget.rs` の `CostLedger`/`ReservationLedger` が
   JSONL の `OpenOptions::new().append(true)` で読み書きする現行コードパスが、SQLite 接続 +
   トランザクションベースの経路に置き換わっていること。
 
@@ -1019,8 +1019,8 @@ P0/P1 集計は末尾「集計」節。
 
 2. **device 行 stale_after_at の「参加 scope の実効値」の config 解決層**: 04 §5.4 L769 は
    「実効 timeout_seconds（device 行では参加 scope の実効値の最大値）」とだけ述べ、
-   `[adapter.policy] timeout_seconds` が `~/.config/kcs/tools.toml` (07§7 の掲載箇所から見ると
-   device 側設定に見える) と各 scope の `.kcs/config.toml` のどちらでオーバーライド可能かの
+   `[adapter.policy] timeout_seconds` が `~/.config/kio/tools.toml` (07§7 の掲載箇所から見ると
+   device 側設定に見える) と各 scope の `.kio/config.toml` のどちらでオーバーライド可能かの
    優先順位、および scope ごとに異なる Adapter 実装 (異なる embedding provider) を使っている
    場合の「実効値」の定義が、本 2 節の文言のみからは確定できない。CL49 で実装判断として
    「素朴な max(各参加 scope の解決済み timeout_seconds)」を仮に固定したが、config 優先順位の
@@ -1035,9 +1035,9 @@ P0/P1 集計は末尾「集計」節。
    ではあるが (CL45 はこの読みを採用)、spec の 2 節が独立して改訂され得ることを踏まえると、
    明示的な相互参照が無い点は「解釈が割れうる」として記録しておく。
 
-4. **`kcs batch abandon` / `kcs batch retry --reset-violations` の非対話確認スキップ手段**:
+4. **`kio batch abandon` / `kio batch retry --reset-violations` の非対話確認スキップ手段**:
    06§1 L44 の abandon 構文行、および L26 の `--reset-violations` 構文行は、いずれも
-   「確認プロンプト必須」とだけ述べ、`kcs purge`/`kcs restore` が持つ `[--yes]` 相当のフラグを
+   「確認プロンプト必須」とだけ述べ、`kio purge`/`kio restore` が持つ `[--yes]` 相当のフラグを
    構文上明記していない。CI やスクリプトから非対話実行する手段が「存在しない (常に TTY 確認が
    必須)」のか「単に構文表記から省略されているだけで `--yes` 相当が別途あるはず」なのかは
    06-cli-spec.md の当該行のみからは断定できない。CL65 は「非対話は exit 9」までを契約化し、
@@ -1081,4 +1081,4 @@ P0/P1 集計は末尾「集計」節。
   markdownize キー rename の実装確認)・U12 (cost-ledger バックアップ/復元後 reconcile) は本書の
   対象外 — 別ロットの契約テストが担う。U1 のうち `hold_reason` 3 値 enum 化・
   `pending→paused→pending` 遷移・rate_limit の `paused` からの分離は 04 §5.1 契約であり同様に
-  対象外 (本書は `kcs batch abandon` + `stalled` 表示の部分のみ)。
+  対象外 (本書は `kio batch abandon` + `stalled` 表示の部分のみ)。

@@ -12,26 +12,26 @@ from eval.eval_env import subprocess_env
 
 class TestEvalEnvironment(unittest.TestCase):
     def test_device_state_is_isolated_and_ambient_seams_are_removed(self):
-        with tempfile.TemporaryDirectory(prefix="kcs-eval-env-") as directory:
+        with tempfile.TemporaryDirectory(prefix="kio-eval-env-") as directory:
             corpus = Path(directory) / "persona"
             ambient = {
                 "GEMINI_API_KEY": "not-a-real-key",
                 "MISTRAL_API_KEY": "not-a-real-key",
-                "KCS_FIXED_NOW": "2030-01-01T00:00:00Z",
-                "KCS_TEST_GEMINI_EMBED": "mock",
-                "KCS_TEST_MISTRAL_OCR": "mock",
-                "KCS_TEST_MARKDOWNIZE_ADAPTER": "mock",
-                "KCS_TEST_SCOPE_SEARCH_DELAY_MS": "99999",
-                "KCS_TEST_HOLD_LOCK_MS": "99999",
-                "KCS_TEST_PURGE_FAIL_AFTER_PHASE": "publish",
-                "KCS_FUTURE_UNKNOWN_SEAM": "must-not-leak",
-                "KCS_UNRELATED_TEST_VALUE": "preserved",
-                "NON_KCS_UNRELATED_TEST_VALUE": "preserved",
+                "KIO_FIXED_NOW": "2030-01-01T00:00:00Z",
+                "KIO_TEST_GEMINI_EMBED": "mock",
+                "KIO_TEST_MISTRAL_OCR": "mock",
+                "KIO_TEST_MARKDOWNIZE_ADAPTER": "mock",
+                "KIO_TEST_SCOPE_SEARCH_DELAY_MS": "99999",
+                "KIO_TEST_HOLD_LOCK_MS": "99999",
+                "KIO_TEST_PURGE_FAIL_AFTER_PHASE": "publish",
+                "KIO_FUTURE_UNKNOWN_SEAM": "must-not-leak",
+                "KIO_UNRELATED_TEST_VALUE": "preserved",
+                "NON_KIO_UNRELATED_TEST_VALUE": "preserved",
             }
             with mock.patch.dict(os.environ, ambient, clear=False):
                 environment = subprocess_env(corpus)
 
-            device = corpus.absolute() / ".kcs-eval-device"
+            device = corpus.absolute() / ".kio-eval-device"
             self.assertEqual(environment["HOME"], str(device / "home"))
             self.assertEqual(environment["XDG_CONFIG_HOME"], str(device / "config"))
             self.assertEqual(environment["XDG_DATA_HOME"], str(device / "data"))
@@ -41,13 +41,13 @@ class TestEvalEnvironment(unittest.TestCase):
             self.assertTrue((device / "cache").is_dir())
             self.assertTrue((device / "home").is_dir())
             for name in ambient:
-                if name == "NON_KCS_UNRELATED_TEST_VALUE":
+                if name == "NON_KIO_UNRELATED_TEST_VALUE":
                     self.assertEqual(environment[name], "preserved")
                 else:
                     self.assertNotIn(name, environment)
 
     def test_persona_home_can_be_selected_explicitly(self):
-        with tempfile.TemporaryDirectory(prefix="kcs-eval-home-") as directory:
+        with tempfile.TemporaryDirectory(prefix="kio-eval-home-") as directory:
             corpus = Path(directory) / "persona"
             persona_home = corpus / "home"
             environment = subprocess_env(corpus, home_dir=persona_home)

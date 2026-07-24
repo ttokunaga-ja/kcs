@@ -149,7 +149,7 @@ out/generated-images/report.md
 ## 出力
 
 ```text
-fixtures/generated/kcs_ocr_verification.pdf
+fixtures/generated/kio_ocr_verification.pdf
 fixtures/generated/ground_truth.json   # schema_version 3 (figures / rasterized_text / handwriting / staged_boundary)
 out/raw_response.json
 out/ocr_response.json

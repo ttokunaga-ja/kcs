@@ -2,8 +2,8 @@
 """Initialize/index all scale scopes, then emit an exact SQLite attestation.
 
 This command intentionally ends each fresh scope with an explicitly offline
-``kcs index`` invocation.
-Do not append a separate ``kcs snapshot``: index already publishes the snapshot
+``kio index`` invocation.
+Do not append a separate ``kio snapshot``: index already publishes the snapshot
 and projects its HEAD tree into SQLite, while a later manual snapshot would
 advance HEAD before the lazy search projection occurs.
 """
@@ -65,11 +65,11 @@ def _resolve_binary(bin_path):
     try:
         metadata = path.lstat()
     except FileNotFoundError as exc:
-        raise ScalePreparationError(f"kcs binary is missing: {path}") from exc
+        raise ScalePreparationError(f"kio binary is missing: {path}") from exc
     if not _is_plain_regular_file(metadata):
-        raise ScalePreparationError(f"kcs binary must be a regular file: {path}")
+        raise ScalePreparationError(f"kio binary must be a regular file: {path}")
     if not os.access(path, os.X_OK):
-        raise ScalePreparationError(f"kcs binary is not executable: {path}")
+        raise ScalePreparationError(f"kio binary is not executable: {path}")
     return path
 
 
@@ -130,7 +130,7 @@ def _capture_file_bytes(handle):
     data = handle.read(MAX_SUBPROCESS_OUTPUT_BYTES + 1)
     if size > MAX_SUBPROCESS_OUTPUT_BYTES or len(data) > MAX_SUBPROCESS_OUTPUT_BYTES:
         raise ScalePreparationError(
-            "kcs subprocess output exceeded "
+            "kio subprocess output exceeded "
             f"{MAX_SUBPROCESS_OUTPUT_BYTES} bytes per stream"
         )
     return data
@@ -209,12 +209,12 @@ def _run_process_bounded(command, cwd, env):
         stderr = _capture_file_bytes(stderr_file)
         if overflow:
             raise ScalePreparationError(
-                "kcs subprocess output exceeded "
+                "kio subprocess output exceeded "
                 f"{MAX_SUBPROCESS_OUTPUT_BYTES} bytes per stream"
             )
         if timed_out:
             raise ScalePreparationError(
-                f"kcs subprocess exceeded {MAX_SUBPROCESS_RUNTIME_SECONDS} seconds"
+                f"kio subprocess exceeded {MAX_SUBPROCESS_RUNTIME_SECONDS} seconds"
             )
         return returncode, stdout, stderr
 
@@ -226,14 +226,14 @@ def _diagnostic(data):
     return value
 
 
-def _run_kcs(bin_path, scope_dir, args, env):
+def _run_kio(bin_path, scope_dir, args, env):
     command = [str(bin_path), "--json", *args]
     returncode, stdout_raw, stderr_raw = _run_process_bounded(
         command, scope_dir, env
     )
     if returncode != 0:
         raise ScalePreparationError(
-            f"kcs {' '.join(args)} failed in {scope_dir} "
+            f"kio {' '.join(args)} failed in {scope_dir} "
             f"(exit {returncode})\nstdout={_diagnostic(stdout_raw)}"
             f"\nstderr={_diagnostic(stderr_raw)}"
         )
@@ -242,12 +242,12 @@ def _run_kcs(bin_path, scope_dir, args, env):
         value = json.loads(stdout)
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise ScalePreparationError(
-            f"kcs {' '.join(args)} returned invalid JSON in {scope_dir}: "
+            f"kio {' '.join(args)} returned invalid JSON in {scope_dir}: "
             f"{_diagnostic(stdout_raw)!r}"
         ) from exc
     if not isinstance(value, dict):
         raise ScalePreparationError(
-            f"kcs {' '.join(args)} returned non-object JSON in {scope_dir}"
+            f"kio {' '.join(args)} returned non-object JSON in {scope_dir}"
         )
     return value
 
@@ -322,7 +322,7 @@ def _validate_reregistration_result(value, scope_manifest):
 
 
 def _registry_path(root):
-    return root / spec.DEVICE_DIR_NAME / "data" / "kcs" / "scope-registry.sqlite"
+    return root / spec.DEVICE_DIR_NAME / "data" / "kio" / "scope-registry.sqlite"
 
 
 def _registry_files_are_bounded(root):
@@ -357,7 +357,7 @@ def _registry_matches_attested_scopes(root, scope_reports):
                 return False
             shapes = conn.execute(
                 "SELECT typeof(scope_id), length(CAST(scope_id AS BLOB)), "
-                "typeof(kcs_path), length(CAST(kcs_path AS BLOB)), "
+                "typeof(kio_path), length(CAST(kio_path AS BLOB)), "
                 "typeof(root_path), length(CAST(root_path AS BLOB)), "
                 "CASE WHEN typeof(participates_in_global_search) = 'integer' "
                 "AND participates_in_global_search = 1 THEN 1 ELSE 0 END, "
@@ -370,9 +370,9 @@ def _registry_matches_attested_scopes(root, scope_reports):
                 scope_type != "text"
                 or scope_length is None
                 or scope_length > MAX_REGISTRY_SCOPE_ID_BYTES
-                or kcs_type != "text"
-                or kcs_length is None
-                or kcs_length > MAX_REGISTRY_PATH_BYTES
+                or kio_type != "text"
+                or kio_length is None
+                or kio_length > MAX_REGISTRY_PATH_BYTES
                 or root_type != "text"
                 or root_length is None
                 or root_length > MAX_REGISTRY_PATH_BYTES
@@ -381,8 +381,8 @@ def _registry_matches_attested_scopes(root, scope_reports):
                 for (
                     scope_type,
                     scope_length,
-                    kcs_type,
-                    kcs_length,
+                    kio_type,
+                    kio_length,
                     root_type,
                     root_length,
                     participates_ok,
@@ -391,7 +391,7 @@ def _registry_matches_attested_scopes(root, scope_reports):
             ):
                 return False
             rows = conn.execute(
-                "SELECT scope_id, kcs_path, root_path "
+                "SELECT scope_id, kio_path, root_path "
                 "FROM scopes LIMIT ?1",
                 (len(spec.SCOPES) + 1,),
             ).fetchall()
@@ -404,14 +404,14 @@ def _registry_matches_attested_scopes(root, scope_reports):
     try:
         expected = {
             report["scope_id"]: (
-                attestor._canonical(Path(report["root_path"]) / ".kcs"),
+                attestor._canonical(Path(report["root_path"]) / ".kio"),
                 attestor._canonical(report["root_path"]),
             )
             for report in scope_reports
         }
         actual = {
-            scope_id: (attestor._canonical(kcs_path), attestor._canonical(root_path))
-            for scope_id, kcs_path, root_path in rows
+            scope_id: (attestor._canonical(kio_path), attestor._canonical(root_path))
+            for scope_id, kio_path, root_path in rows
         }
     except (attestor.ScaleAttestationError, TypeError, ValueError):
         return False
@@ -459,13 +459,13 @@ def _existing_scope_attestations(root, manifest):
             ) from exc
         if not _is_plain_directory(scope_metadata):
             raise ScalePreparationError(f"scope directory is unsafe: {scope_dir}")
-        kcs_dir = scope_dir / ".kcs"
+        kio_dir = scope_dir / ".kio"
         try:
-            metadata = kcs_dir.lstat()
+            metadata = kio_dir.lstat()
         except FileNotFoundError:
             continue
         if not _is_plain_directory(metadata):
-            raise ScalePreparationError(f"scope .kcs path is unsafe: {kcs_dir}")
+            raise ScalePreparationError(f"scope .kio path is unsafe: {kio_dir}")
         try:
             reports[scope_manifest["name"]] = attestor.attest_scope(
                 root, scope_manifest
@@ -499,7 +499,7 @@ def _prepare_corpus_locked(corpus_dir, bin_path):
         if not _is_plain_directory(scope_metadata):
             raise ScalePreparationError(f"scope directory is unsafe: {scope_dir}")
     try:
-        attestor.verify_source_files(root, manifest, allow_kcs=True)
+        attestor.verify_source_files(root, manifest, allow_kio=True)
     except attestor.ScaleAttestationError as exc:
         raise ScalePreparationError(str(exc)) from exc
     binary = _resolve_binary(bin_path)
@@ -529,14 +529,14 @@ def _prepare_corpus_locked(corpus_dir, bin_path):
             ) from exc
         if not _is_plain_directory(scope_metadata):
             raise ScalePreparationError(f"scope directory is unsafe: {scope_dir}")
-        kcs_dir = scope_dir / ".kcs"
+        kio_dir = scope_dir / ".kio"
         scope_report = existing_reports.get(scope_manifest["name"])
         if scope_report is not None:
             if registry_current:
                 skipped.append(scope_manifest["name"])
                 scope_reports.append(scope_report)
                 continue
-            indexed = _run_kcs(binary, scope_dir, _OFFLINE_INDEX_ARGS, env)
+            indexed = _run_kio(binary, scope_dir, _OFFLINE_INDEX_ARGS, env)
             _validate_reregistration_result(indexed, scope_manifest)
             try:
                 refreshed_report = attestor.attest_scope(root, scope_manifest)
@@ -557,13 +557,13 @@ def _prepare_corpus_locked(corpus_dir, bin_path):
             continue
 
         try:
-            kcs_metadata = kcs_dir.lstat()
+            kio_metadata = kio_dir.lstat()
         except FileNotFoundError:
-            kcs_metadata = None
-        if kcs_metadata is not None and not _is_plain_directory(kcs_metadata):
-            raise ScalePreparationError(f"scope .kcs path is unsafe: {kcs_dir}")
-        if kcs_metadata is None:
-            initialized = _run_kcs(binary, scope_dir, ["init", "."], env)
+            kio_metadata = None
+        if kio_metadata is not None and not _is_plain_directory(kio_metadata):
+            raise ScalePreparationError(f"scope .kio path is unsafe: {kio_dir}")
+        if kio_metadata is None:
+            initialized = _run_kio(binary, scope_dir, ["init", "."], env)
             if initialized.get("status") != "initialized":
                 raise ScalePreparationError(
                     f"unexpected init result for {scope_manifest['name']}: {initialized}"
@@ -573,7 +573,7 @@ def _prepare_corpus_locked(corpus_dir, bin_path):
             # index gets one normal repair attempt and must satisfy strict output.
             pass
 
-        indexed = _run_kcs(binary, scope_dir, _OFFLINE_INDEX_ARGS, env)
+        indexed = _run_kio(binary, scope_dir, _OFFLINE_INDEX_ARGS, env)
         index_status = _validate_index_result(indexed, scope_manifest)
         try:
             scope_report = attestor.attest_scope(root, scope_manifest)
@@ -618,10 +618,10 @@ def prepare_corpus(corpus_dir, bin_path):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(
-        description="Initialize, index, and attest every KCS scale scope"
+        description="Initialize, index, and attest every KIO scale scope"
     )
     parser.add_argument("--corpus", required=True, help="scale collection root")
-    parser.add_argument("--bin", required=True, help="path to kcs executable")
+    parser.add_argument("--bin", required=True, help="path to kio executable")
     args = parser.parse_args(argv)
     try:
         # Keep initialization, registry recovery, exact attestation, and both

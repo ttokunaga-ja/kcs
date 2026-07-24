@@ -1,4 +1,4 @@
-# WS1a 契約テスト仕様書: Step 1 (kcs-core + kcs-cli)
+# WS1a 契約テスト仕様書: Step 1 (kio-core + kio-cli)
 
 > 本書は **実装より先にテストを固定する** ためのケース仕様。Rust 実装コードは含まない。
 > Step 1 実装者 (別エージェント) はこの仕様を「動かしてはならない契約」として消化する。
@@ -21,9 +21,9 @@
 | `CT-TREE-*` | tree entries ソート・重複禁止・直下のみ path・gen 欠落=0・flat スケール | `03 §3, §8, §8.1, §8.2` |
 | `CT-COMMIT-*` | commit_type enum・first parent・no-op・HEAD/refs・timestamp | `03 §8, §8.1` / `05 §2, §8` / `06 §12` |
 | `CT-GC-*` | `gc_policy × commit_type` / `protected` schema 遵守 (GC は実行しない) | `05 §2.1, §2.2, §2.6` |
-| `CT-SCOPE-*` | スコープ境界 (直下のみ・子 .kcs 独立) | `03 §3` |
+| `CT-SCOPE-*` | スコープ境界 (直下のみ・子 .kio 独立) | `03 §3` |
 | `CT-CLI-*` | 各コマンドの exit code / `--json` 完全 hash / error code 形式 / schema validation | `06 §1, §4, §7, §8, §11` |
-| `CT-LOCK-*` | 書き込み系コマンドの `.kcs/.lock` 排他 | `05 §5, §6` |
+| `CT-LOCK-*` | 書き込み系コマンドの `.kio/.lock` 排他 | `05 §5, §6` |
 | `CT-STATE-*` | files 状態分類のうち Step 1 で判定可能なもの | `03 §6, §8` |
 | `CT-OBS-*` | 観測ログ `events.jsonl` / `errors.jsonl` (Step 1 割当) | `06 §13` / `05 §7` / `09 §3.1` |
 
@@ -65,7 +65,7 @@ P0 総数は §D 末尾に集計。
 
 - `notes.md`   の raw = `b"# Notes\n"`        → `sha256:365d0b84ae63c2afc293dedd2b00bdf0dc8d6ef70c9297d90f9e5682ab0d72ee`
 - `report.pdf` の raw = `b"%PDF-1.4 dummy\n"` → `sha256:74bcb92d8088c950e45e4c43563332da2ca1e04b25d6d4016aa43f830d4cca8a`
-- `tool_profile_hash` プレースホルダ = `sha256(b"KCS-TEST-TOOL-PROFILE-1")` = `sha256:e067e42e6634b8043f46a4b7f55257ab10ca6266be80cc47b6a68a5aacd2c8f0`
+- `tool_profile_hash` プレースホルダ = `sha256(b"KIO-TEST-TOOL-PROFILE-1")` = `sha256:e067e42e6634b8043f46a4b7f55257ab10ca6266be80cc47b6a68a5aacd2c8f0`
   (Step 1 に Markdownize は無い。ここでは「entry に normalize ブロックが載る場合」の hash 安定性を検証する目的の固定値。§C-2 参照)
 
 入力オブジェクト (entries は path UTF-8 バイト昇順にソート済み: `notes.md` 0x6e < `report.pdf` 0x72):
@@ -104,8 +104,8 @@ fan-out   = 84 / 9d
 
 ### A.3 commit object JCS→sha256 ベクタ (`03 §8, §8.1`, parents 1 件)
 
-- parent commit プレースホルダ = `sha256(b"KCS-TEST-PARENT-COMMIT-1")` = `sha256:30fa71e5c11a90a28c8c0895382e8f45df431047fcc699afed45ee316cfbf65a`
-- `tool_lock_hash` ダミー = `sha256(b"KCS-TEST-TOOL-LOCK-1")` = `sha256:8a32a740871b1dd9db1bda186dce07e8e6c60d2cd316f21683ea2bd857c16ffb`
+- parent commit プレースホルダ = `sha256(b"KIO-TEST-PARENT-COMMIT-1")` = `sha256:30fa71e5c11a90a28c8c0895382e8f45df431047fcc699afed45ee316cfbf65a`
+- `tool_lock_hash` ダミー = `sha256(b"KIO-TEST-TOOL-LOCK-1")` = `sha256:8a32a740871b1dd9db1bda186dce07e8e6c60d2cd316f21683ea2bd857c16ffb`
 - `tree` = A.2 の `tree_hash`
 
 入力オブジェクト:
@@ -268,11 +268,11 @@ chunk_hash = sha256:8fefa4825444efb1a120df709f45764a9ac074a9a2c0002ee4307baa7bbf
 - Then: schema violation として拒否 (成功保存しない)。
 - 根拠: `03 §8.1` (「同一 `path` の重複 entry は禁止」)。
 
-**CT-TREE-003** — P0 — path 区切り (`/`) を含む path は `KCS-E-STORE-PATH-001` で拒否
+**CT-TREE-003** — P0 — path 区切り (`/`) を含む path は `KIO-E-STORE-PATH-001` で拒否
 - Given: entry `path = "sub/report.pdf"`。
 - When: tree 構築 / 保存。
-- Then: `error_code = KCS-E-STORE-PATH-001`、書き込みしない、exit 2 (schema validation 失敗)。
-- 根拠: `03 §3` (「`/` を含む path を持つ tree/pointer は schema violation `KCS-E-STORE-PATH-001`」) / `06 §8` (error code 定義) / `06 §7` (exit 2)。
+- Then: `error_code = KIO-E-STORE-PATH-001`、書き込みしない、exit 2 (schema validation 失敗)。
+- 根拠: `03 §3` (「`/` を含む path を持つ tree/pointer は schema violation `KIO-E-STORE-PATH-001`」) / `06 §8` (error code 定義) / `06 §7` (exit 2)。
 
 **CT-TREE-004** — P0 — `normalize.gen` 欠落は gen 0 と読む (forward compatible)
 - Given: `normalize` ブロックに `gen` を含まない過去形式の tree entry を読む。
@@ -288,10 +288,10 @@ chunk_hash = sha256:8fefa4825444efb1a120df709f45764a9ac074a9a2c0002ee4307baa7bbf
 
 **CT-TREE-006** — P2 — 直下ファイル数 soft limit 超過警告 (Step 2 送り)
 - Given: 直下ファイル数が 10,000 (soft limit) を超える scope。
-- When: `kcs index` を実行。
+- When: `kio index` を実行。
 - Then: 警告を表示するが処理は継続する (エラーにしない)。
-- 根拠: `03 §8.2` (「超過時 `kcs index` は警告を表示し…処理自体は継続する」)。
-- 補足: 警告の契機は spec 上 **`kcs index`** であり、`kcs index` は Step 2 割当 (`09 §3.1`)。
+- 根拠: `03 §8.2` (「超過時 `kio index` は警告を表示し…処理自体は継続する」)。
+- 補足: 警告の契機は spec 上 **`kio index`** であり、`kio index` は Step 2 割当 (`09 §3.1`)。
   したがって Step 1 では検証不能 → P2 (Step 2 で昇格)。snapshot 経路への警告適用は spec に無い
   (過剰契約になるため課さない)。
 
@@ -345,32 +345,32 @@ chunk_hash = sha256:8fefa4825444efb1a120df709f45764a9ac074a9a2c0002ee4307baa7bbf
 
 **CT-COMMIT-005** — P0 — no-op: tree 不変なら auto snapshot は新 commit を作らない
 - Given: HEAD commit の tree_hash = T。working tree が不変 (再計算しても tree_hash = T)。
-- When: `kcs index` 成功完了相当の auto snapshot 契機 (Step 1 では snapshot 経路で tree 再計算) が走る。
+- When: `kio index` 成功完了相当の auto snapshot 契機 (Step 1 では snapshot 経路で tree 再計算) が走る。
 - Then: 新 commit を作らない (no-op)。tree も CAS なので新規 object を生成しない。HEAD 不変。
 - 根拠: `05 §8.1` (「tree_hash が現在の HEAD の tree と一致する場合は commit を作らない (no-op)」) / `03 §8.2`。
 
-**CT-COMMIT-006** — P1 — manual `kcs snapshot`/`commit` の unchanged tree 時挙動
+**CT-COMMIT-006** — P1 — manual `kio snapshot`/`commit` の unchanged tree 時挙動
 - Given: HEAD tree 不変。
-- When: 明示 `kcs snapshot` / `kcs commit -m ...`。
+- When: 明示 `kio snapshot` / `kio commit -m ...`。
 - Then: **未定義 (§C-3)**。§8.1 の no-op は auto snapshot にのみ明記。テストは実装決定 (no-op か empty commit 生成か) を固定し、その決定を assert する。
 - 根拠: `05 §8.1` (no-op は auto に限定した記述) / `06 §1`。
 
 **CT-COMMIT-007** — P0 — HEAD / refs/heads/* / refs/tags/* の値は commit_hash
 - Given: commit C を作り HEAD を進める / tag を打つ。
-- When: `.kcs/HEAD`, `.kcs/refs/heads/main`, `.kcs/refs/tags/<name>` を読む。
+- When: `.kio/HEAD`, `.kio/refs/heads/main`, `.kio/refs/tags/<name>` を読む。
 - Then: 各ファイルの値は commit_hash (= `sha256:` + 64 hex) そのものである (symbolic ref 等の
   間接形式ではない)。
 - 根拠: `03 §8.1` (「`HEAD` / `refs/heads/*` / `refs/tags/*` の値は commit_hash」— HEAD 含め直値と定義済み)。
 
-**CT-COMMIT-008** — P0 (**Step 2 ゲートへ移動** — 2026-07-03 監査裁定: `kcs index` が Step 2 割当のため Step 1 では原理的に検証不能。4 エンジン監査一致) — commit_type=auto は index 成功完了時に生成される
+**CT-COMMIT-008** — P0 (**Step 2 ゲートへ移動** — 2026-07-03 監査裁定: `kio index` が Step 2 割当のため Step 1 では原理的に検証不能。4 エンジン監査一致) — commit_type=auto は index 成功完了時に生成される
 - Given: working tree に変更あり。
-- When: `kcs index` 成功完了 (Step 1 の取り込み経路)。
+- When: `kio index` 成功完了 (Step 1 の取り込み経路)。
 - Then: 同一プロセス内で `commit_type=auto` の commit が 1 つ作られる (tree 変化時)。
-- 根拠: `05 §8.1` (契機 2) / `09 §1.1` (「kcs index 完了時の auto snapshot」)。
-- 補足: Step 1 に本格 pipeline は無い。`kcs index` 自体が Step 2 割当のため、Step 1 で auto 契機を検証できない場合は本ケースを **P1 に降格 or Step 2 送り** とし、Step 1 は manual snapshot と no-op (CT-COMMIT-005) の検証に集中してよい (§C-4 関連)。
+- 根拠: `05 §8.1` (契機 2) / `09 §1.1` (「kio index 完了時の auto snapshot」)。
+- 補足: Step 1 に本格 pipeline は無い。`kio index` 自体が Step 2 割当のため、Step 1 で auto 契機を検証できない場合は本ケースを **P1 に降格 or Step 2 送り** とし、Step 1 は manual snapshot と no-op (CT-COMMIT-005) の検証に集中してよい (§C-4 関連)。
 
 **CT-COMMIT-009** — P1 — snapshot の自動 message 形式
-- Given: `-m` を省略した `kcs snapshot`。
+- Given: `-m` を省略した `kio snapshot`。
 - When: commit 生成。
 - Then: `message` が `"snapshot at <UTC timestamp>"` 形式 (timestamp は UTC ISO8601+Z)。
 - 根拠: `06 §1` (「-m 省略時は自動 message (\"snapshot at <UTC timestamp>\")」) / `06 §12`。
@@ -383,13 +383,13 @@ chunk_hash = sha256:8fefa4825444efb1a120df709f45764a9ac074a9a2c0002ee4307baa7bbf
 - 補足: 秒精度か μ秒精度 (`.123456Z`) かは両方許容 (§C-10)。
 
 **CT-COMMIT-011** — P1 — refs (heads / tags) 更新は temp + atomic rename (部分書き込みを外部に見せない)
-- Given: (a) refs/heads/main を新 commit へ進める。(b) `kcs tag` で refs/tags/<name> を作る。
+- Given: (a) refs/heads/main を新 commit へ進める。(b) `kio tag` で refs/tags/<name> を作る。
 - When: 更新中に別プロセスが同 ref を読む。
-- Then: 旧値か新値のいずれか (中間・切れた値を観測しない)。更新は `.kcs/.lock` 保持下で temp file 書き込み + atomic rename。heads と tags の両方で確認する。
-- 根拠: `05 §6` (「refs (refs/heads/main, refs/tags/*) の更新は `.kcs/.lock` 保持下で、temp file 書き込み + atomic rename により行う」)。
+- Then: 旧値か新値のいずれか (中間・切れた値を観測しない)。更新は `.kio/.lock` 保持下で temp file 書き込み + atomic rename。heads と tags の両方で確認する。
+- 根拠: `05 §6` (「refs (refs/heads/main, refs/tags/*) の更新は `.kio/.lock` 保持下で、temp file 書き込み + atomic rename により行う」)。
 
 **CT-COMMIT-012** — P1 — 生成 commit は `03 §8` schema の全フィールドを持つ
-- Given: `kcs snapshot` が生成した commit object。
+- Given: `kio snapshot` が生成した commit object。
 - When: フィールドを検査。
 - Then: `object_type` / `tree` / `parents` / `created_at` / `message` / `tool_lock_hash` / `stats` /
   `commit_type` を持つ。`stats` は `files_added` / `files_modified` / `files_deleted` (整数) を持つ。
@@ -417,8 +417,8 @@ chunk_hash = sha256:8fefa4825444efb1a120df709f45764a9ac074a9a2c0002ee4307baa7bbf
 **CT-GC-003** — P1 — Step 1 は GC を実行しない
 - Given: 任意の履歴。
 - When: Step 1 の通常操作 (init/status/snapshot/log/diff/inspect/tag)。
-- Then: tree/commit/raw いずれの object も回収・削除されない。shallow 化も起きない (Step 1 に GC 実行系は無い)。`kcs gc` は Step 1 対象外コマンド (§D 参照)。
-- 根拠: `05 §2.2` 冒頭 (「GC の実装は Phase 4+…MVP では GC を実行せず…schema のみ Step 1 の設計時から契約として遵守」) / `09 §3.1` (`kcs gc` = Phase 4+)。
+- Then: tree/commit/raw いずれの object も回収・削除されない。shallow 化も起きない (Step 1 に GC 実行系は無い)。`kio gc` は Step 1 対象外コマンド (§D 参照)。
+- 根拠: `05 §2.2` 冒頭 (「GC の実装は Phase 4+…MVP では GC を実行せず…schema のみ Step 1 の設計時から契約として遵守」) / `09 §3.1` (`kio gc` = Phase 4+)。
 
 **CT-GC-004** — P1 — protected(commit_type) マッピング
 - Given: 各 commit_type。
@@ -431,69 +431,69 @@ chunk_hash = sha256:8fefa4825444efb1a120df709f45764a9ac074a9a2c0002ee4307baa7bbf
 **CT-SCOPE-001** — P0 — 直下のみ (サブフォルダ配下ファイルは tree に入らない)
 - Given: scope 直下に `a.pdf`、サブフォルダ `sub/` 配下に `b.pdf`。
 - When: snapshot の tree を生成。
-- Then: tree entries は `a.pdf` のみ。`sub/` 配下は (`sub/` に子 `.kcs` があってもなくても) 親 tree に含めない。
+- Then: tree entries は `a.pdf` のみ。`sub/` 配下は (`sub/` に子 `.kio` があってもなくても) 親 tree に含めない。
 - 根拠: `03 §3` 規則1 (「管理対象は scope フォルダ直下のファイルに限る。…再帰包含は行わない」)。
 
 **CT-SCOPE-002** — P1 — path_at_commit / input_path も `/` を含まない
 - Given: Evidence Pointer / task descriptor (Step 3+) の path フィールド。
 - When: 生成する。
-- Then: `/` を含む場合 `KCS-E-STORE-PATH-001` (CT-TREE-003 と同一契約)。**Step 1 では tree entry path のみが実対象**、pointer/task は Step 3+ につき参考。
+- Then: `/` を含む場合 `KIO-E-STORE-PATH-001` (CT-TREE-003 と同一契約)。**Step 1 では tree entry path のみが実対象**、pointer/task は Step 3+ につき参考。
 - 根拠: `03 §3` 規則3 / `08 §2` (`path_at_commit` は `/` を含まない)。
 
 ### CT-CLI-* — CLI 契約 (`06 §1, §4, §7, §8, §11, §12`)
 
-**CT-CLI-001** — P0 — `kcs init` が `.kcs` レイアウトを生成
+**CT-CLI-001** — P0 — `kio init` が `.kio` レイアウトを生成
 - Given: 未初期化フォルダ。
-- When: `kcs init`。
-- Then: exit 0。`.kcs/` 配下に少なくとも `HEAD`, `refs/heads/`, `objects/{raw,trees,commits}/`, `config.toml`, `scope.json` を生成。`scope.json` に ULID の `scope_id` を採番 (以後不変)。現在フォルダのみ作成し子 `.kcs` は作らない。
-- 根拠: `06 §1` (「`kcs init` は現在フォルダの `.kcs` のみ作成」) / `03 §2` (レイアウト) / `03 §2` scope.json (「scope_id (init 時採番の ULID、以後不変)」)。
+- When: `kio init`。
+- Then: exit 0。`.kio/` 配下に少なくとも `HEAD`, `refs/heads/`, `objects/{raw,trees,commits}/`, `config.toml`, `scope.json` を生成。`scope.json` に ULID の `scope_id` を採番 (以後不変)。現在フォルダのみ作成し子 `.kio` は作らない。
+- 根拠: `06 §1` (「`kio init` は現在フォルダの `.kio` のみ作成」) / `03 §2` (レイアウト) / `03 §2` scope.json (「scope_id (init 時採番の ULID、以後不変)」)。
 
-**CT-CLI-002** — P1 — `kcs init` を初期化済みフォルダで実行
-- Given: 既に `.kcs` があるフォルダ。
-- When: `kcs init`。
+**CT-CLI-002** — P1 — `kio init` を初期化済みフォルダで実行
+- Given: 既に `.kio` があるフォルダ。
+- When: `kio init`。
 - Then: **未定義 (§C-5)**。テストは実装決定 (冪等 no-op / エラー exit 2) を固定し assert。scope_id を再採番しない (既存 scope_id 保全) ことは最低限の不変条件として P1 で確認。
 - 根拠: `03 §2` (scope_id 不変) — 二重 init は明記なし。
 
-**CT-CLI-003** — P0 — `kcs status` は exit 0 (clean/成功時)
+**CT-CLI-003** — P0 — `kio status` は exit 0 (clean/成功時)
 - Given: 初期化済み scope。
-- When: `kcs status`。
+- When: `kio status`。
 - Then: ファイル状態 (new/modified/deleted; §CT-STATE) を表示し exit 0。全 up_to_date 相当 (Step 1 は pipeline 無しなので「変更なし」) で 0。
 - 根拠: `06 §1` (status) / `06 §7` (`0 成功 / 全 up_to_date`)。
 - 補足: Step 1 での status の状態語彙は §C-4 (pipeline 由来状態の扱い) 参照。
 
-**CT-CLI-004** — P0 — `kcs snapshot` / `kcs commit` は同一履歴 object を作る (alias 同値)
+**CT-CLI-004** — P0 — `kio snapshot` / `kio commit` は同一履歴 object を作る (alias 同値)
 - Given: 変更ありの scope。
-- When: `kcs snapshot create -m "msg"` と、別 fixture で `kcs commit -m "msg"`。
+- When: `kio snapshot create -m "msg"` と、別 fixture で `kio commit -m "msg"`。
 - Then: 両者とも commit object を生成し exit 0。`commit` は `snapshot` の alias で内部的に同一 object を作る (同一入力なら同一 commit_hash)。
 - 根拠: `06 §1` (「`commit` は…alias。内部的には同じ履歴 object を作る」)。
 
-**CT-CLI-005** — P0 — `kcs log` は履歴 commit を列挙して exit 0
+**CT-CLI-005** — P0 — `kio log` は履歴 commit を列挙して exit 0
 - Given: 2 commit の履歴。
-- When: `kcs log`。
+- When: `kio log`。
 - Then: exit 0。両 commit が出力に含まれる (hash で識別)。
 - 根拠: `06 §1` (log) / `06 §7`。
 - 補足: **列挙順序・遡行規則 (first-parent / 全 DAG / 新旧順) は 06 に未定義** (§C-9)。順序は
   「決定論的に毎回同一」のみ assert し、具体順は実装確定後に固定する。
 
-**CT-CLI-006** — P0 — `kcs diff <a> <b>` は 2 commit の tree 差分を提示して exit 0
+**CT-CLI-006** — P0 — `kio diff <a> <b>` は 2 commit の tree 差分を提示して exit 0
 - Given: commit A (files: a.pdf) と commit B (files: a.pdf 変更 + b.pdf 追加)。
-- When: `kcs diff A B`。
+- When: `kio diff A B`。
 - Then: exit 0。変更のあったファイル (a.pdf, b.pdf) が差分として出力に現れ、無変更ファイルは差分と
   して現れない。差分の判定基盤は tree entry の raw_hash 比較。
 - 根拠: `06 §1` (diff) / `03 §8` (tree entries が比較対象データであること)。
 - 補足: **added/modified/deleted の表示分類・出力書式は 06/03 から導けない** (§C-7)。分類語彙は
   契約化せず、実装確定後に固定。差分ありでの exit code 意味論も未定義 (§C-7)。本テストは正常系 exit 0 のみ。
 
-**CT-CLI-007** — P0 — `kcs inspect <hash>` は object を JSON 表示
+**CT-CLI-007** — P0 — `kio inspect <hash>` は object を JSON 表示
 - Given: 保存済み tree / commit hash。
-- When: `kcs inspect <hash>`。
+- When: `kio inspect <hash>`。
 - Then: exit 0。当該 object の JSON を表示。`--json` では完全 hash (CT-CLI-009)。
 - 根拠: `06 §1` (「inspect <hash> object を JSON で表示」)。
 
-**CT-CLI-008** — P0 — `kcs tag <name> [<commit>]` が ref を作る
+**CT-CLI-008** — P0 — `kio tag <name> [<commit>]` が ref を作る
 - Given: commit C。
-- When: `kcs tag v1 C` (commit 省略時は HEAD 対象と仮定、§C-6)。
-- Then: exit 0。`.kcs/refs/tags/v1` の値が C の commit_hash (CT-COMMIT-007)。
+- When: `kio tag v1 C` (commit 省略時は HEAD 対象と仮定、§C-6)。
+- Then: exit 0。`.kio/refs/tags/v1` の値が C の commit_hash (CT-COMMIT-007)。
 - 根拠: `06 §1` (tag) / `03 §8.1` (refs/tags/* = commit_hash)。
 - 補足: 同名再 tag・tag 削除・commit 省略時の既定は未定義 (§C-6)。
 
@@ -513,19 +513,19 @@ chunk_hash = sha256:8fefa4825444efb1a120df709f45764a9ac074a9a2c0002ee4307baa7bbf
 **CT-CLI-011** — P0 — error object の形と error_code 形式
 - Given: 任意のエラー (例 CT-TREE-003 の path 違反)。
 - When: エラーを返す。
-- Then: `{ "error_code": "...", "message": "...", "context": {...} }` 形式。`error_code` は `KCS-E-<DOMAIN>-<SUBDOMAIN>-<NNN>` に一致 (DOMAIN は `06 §8` の 12 値のいずれか)。
+- Then: `{ "error_code": "...", "message": "...", "context": {...} }` 形式。`error_code` は `KIO-E-<DOMAIN>-<SUBDOMAIN>-<NNN>` に一致 (DOMAIN は `06 §8` の 12 値のいずれか)。
 - 根拠: `06 §4` (error 形式) / `06 §8` (error code namespace / DOMAIN 一覧)。
 
 **CT-CLI-012** — P0 — invalid usage / schema validation 失敗は exit 2 (Step 1 対象 schema 網羅)
-- Given: (a) 未知フラグ、(b) schema 違反の `.kcs/config.toml`、(c) schema 違反の `.kcs/scope.json`、
-  (d) schema 違反の `.kcs/manifest.json`、(e) enum 外 commit_type、(f) `/` 入り path。
+- Given: (a) 未知フラグ、(b) schema 違反の `.kio/config.toml`、(c) schema 違反の `.kio/scope.json`、
+  (d) schema 違反の `.kio/manifest.json`、(e) enum 外 commit_type、(f) `/` 入り path。
 - When: CLI 起動 / 当該操作を実行。
-- Then: いずれも exit 2。schema 違反 (b)(c)(d) は `KCS-E-CONFIG-SCHEMA-NNN` を返す。
-- 根拠: `06 §7` (`2 invalid usage / config 不正 / schema validation 失敗`) / `06 §11` (「validation 失敗は exit 2 + `KCS-E-CONFIG-SCHEMA-NNN`」/ 対象ファイル一覧) / `09 §3.1` (「JSON Schema validation (Step 1 は scope / manifest / config)」)。
+- Then: いずれも exit 2。schema 違反 (b)(c)(d) は `KIO-E-CONFIG-SCHEMA-NNN` を返す。
+- 根拠: `06 §7` (`2 invalid usage / config 不正 / schema validation 失敗`) / `06 §11` (「validation 失敗は exit 2 + `KIO-E-CONFIG-SCHEMA-NNN`」/ 対象ファイル一覧) / `09 §3.1` (「JSON Schema validation (Step 1 は scope / manifest / config)」)。
 
-**CT-CLI-013** — P1 — `kcs inspect` 存在しない hash
+**CT-CLI-013** — P1 — `kio inspect` 存在しない hash
 - Given: 未保存の hash。
-- When: `kcs inspect <hash>`。
+- When: `kio inspect <hash>`。
 - Then: エラー。error_code は STORE domain が妥当だが**具体コード・exit code は未定義 (§C-8)**。テストは実装決定を固定。
 - 根拠: `06 §8` (STORE domain) — 具体コード明記なし。
 
@@ -536,53 +536,53 @@ chunk_hash = sha256:8fefa4825444efb1a120df709f45764a9ac074a9a2c0002ee4307baa7bbf
 - 根拠: `06 §7` (exit code 一覧)。
 
 **CT-CLI-015** — P2 — Step 1 範囲外コマンドの扱い
-- Given: `kcs search` / `kcs index` / `kcs purge` / `kcs restore` 等 (Step 2+/3+/4)。
+- Given: `kio search` / `kio index` / `kio purge` / `kio restore` 等 (Step 2+/3+/4)。
 - When: Step 1 バイナリで実行。
 - Then: **未定義 (§C-14)**。テストは「未実装コマンドが exit 0 で成功を偽装しない」ことのみ確認し、
   具体 exit code は実装決定を固定する。
 - 根拠: `06 §1` (正本コマンド一覧) / `09 §3.1` (実装時期の割当) — 未実装期間の CLI 挙動は spec に無い。
 
-**CT-CLI-016** — P1 — `kcs init [<path>]` の path 指定
+**CT-CLI-016** — P1 — `kio init [<path>]` の path 指定
 - Given: 存在するフォルダ `<path>` (カレント以外)。
-- When: `kcs init <path>`。
-- Then: exit 0。`<path>/.kcs` が作られる (カレントには作らない)。生成内容は CT-CLI-001 と同一契約。
-- 根拠: `06 §1` (`kcs init [<path>]` 構文)。
+- When: `kio init <path>`。
+- Then: exit 0。`<path>/.kio` が作られる (カレントには作らない)。生成内容は CT-CLI-001 と同一契約。
+- 根拠: `06 §1` (`kio init [<path>]` 構文)。
 - 補足: `<path>` 不存在時の挙動 (作成 or エラー) は未定義 — 実装決定を固定 (§C-5 に併記)。
 
-**CT-CLI-017** — P1 — `kcs log --at <commit>` / `--since <dur>` の引数受理
+**CT-CLI-017** — P1 — `kio log --at <commit>` / `--since <dur>` の引数受理
 - Given: 有効な commit hash と `7d` 形式の duration。
-- When: `kcs log --at <commit>` / `kcs log --since 7d`。
+- When: `kio log --at <commit>` / `kio log --since 7d`。
 - Then: exit 0 (受理してエラーにしない)。不正な duration (例 `--since banana`) は exit 2 (invalid usage)。
-- 根拠: `06 §1` (`kcs log [--at <commit>] [--since <dur>]` 構文) / `05 §1.6` (`--since 7d` の duration 形式) / `06 §7` (exit 2)。
+- 根拠: `06 §1` (`kio log [--at <commit>] [--since <dur>]` 構文) / `05 §1.6` (`--since 7d` の duration 形式) / `06 §7` (exit 2)。
 - 補足: log における `--at` / `--since` の絞り込み意味論は未定義 (§C-9 に併記)。受理契約のみ。
 - **2026-07-03 監査裁定**: Step 1 は発注書暫定判断 #9 (受理して "not implemented" exit 1) を正とし、本ケースの exit 0/2 契約は **Step 4 (--at 実装時) に移行**する。文書間矛盾は本注記で解消。
 
-**CT-CLI-018** — P1 — 非互換 `kcs_format_version` は exit 8
-- Given: `kcs_format_version` が実装より MAJOR で新しい `.kcs`。
+**CT-CLI-018** — P1 — 非互換 `kio_format_version` は exit 8
+- Given: `kio_format_version` が実装より MAJOR で新しい `.kio`。
 - When: 任意のコマンドを実行。
 - Then: exit 8 (incompatible format version)。データを書き換えない。
-- 根拠: `06 §7` (`8 incompatible profile / format version`) / `03 §2` (`kcs_format_version`、semver は 10 §12.5)。
+- 根拠: `06 §7` (`8 incompatible profile / format version`) / `03 §2` (`kio_format_version`、semver は 10 §12.5)。
 
-### CT-LOCK-* — 並行性 / `.kcs/.lock` (`05 §5, §6`)
+### CT-LOCK-* — 並行性 / `.kio/.lock` (`05 §5, §6`)
 
 **CT-LOCK-001** — P0 — 書き込み系コマンドの同時実行で store が壊れない (排他不変条件)
-- Given: 同一 `.kcs` に対し 2 つの書き込み系プロセス (例 `kcs snapshot` × 2)。
+- Given: 同一 `.kio` に対し 2 つの書き込み系プロセス (例 `kio snapshot` × 2)。
 - When: ほぼ同時に起動。
 - Then: **高々 1 プロセスのみが critical section を進め**、object store / refs は一貫した状態を保つ (部分 commit・破損 ref・重複 HEAD 前進が起きない)。もう一方は「失敗」または「待機後に成功」のいずれか (§C-1)。最終的に矛盾のない履歴になる。
-- 根拠: `05 §5` (「同一 `.kcs` に対する多重起動は `.kcs/.lock` で防止する」) / `05 §6` (`.kcs/.lock` を取得するコマンド一覧に snapshot が含まれる)。
-- 注: 書き込み系一覧のうち Step 1 で存在するのは `kcs snapshot (= commit)`。`index/gc/purge/repair/move` は Step 2+。`kcs tag` は 05 §6 の一覧に無い (§C-12 の隣接論点)。
+- 根拠: `05 §5` (「同一 `.kio` に対する多重起動は `.kio/.lock` で防止する」) / `05 §6` (`.kio/.lock` を取得するコマンド一覧に snapshot が含まれる)。
+- 注: 書き込み系一覧のうち Step 1 で存在するのは `kio snapshot (= commit)`。`index/gc/purge/repair/move` は Step 2+。`kio tag` は 05 §6 の一覧に無い (§C-12 の隣接論点)。
 
 **CT-LOCK-002** — P1 — lock 競合時の敗者挙動 (fail-fast vs block-wait) と error code
 - Given: CT-LOCK-001 と同条件。
 - When: 敗者プロセスが lock を取れない。
-- Then: **未定義 (§C-1)**。spec は「防止」とのみ記述し、即時失敗か待機か、timeout、専用 error_code (現状 `KCS-E-*-LOCK-*` は未定義) を規定しない。テストは実装決定を固定し、選ばれた挙動を assert (即時失敗なら安定した error_code + exit、待機なら bounded な待機後成功)。
+- Then: **未定義 (§C-1)**。spec は「防止」とのみ記述し、即時失敗か待機か、timeout、専用 error_code (現状 `KIO-E-*-LOCK-*` は未定義) を規定しない。テストは実装決定を固定し、選ばれた挙動を assert (即時失敗なら安定した error_code + exit、待機なら bounded な待機後成功)。
 - 根拠: `05 §5, §6` — 敗者挙動の明記なし。
 
-**CT-LOCK-003** — P0 — 読み取り系 (log / inspect) は `.kcs/.lock` を取得しない
-- Given: 書き込み系 (`kcs snapshot`) 実行中。
-- When: 同時に `kcs log` / `kcs inspect` を実行。
-- Then: 読み取り系は lock を待たずに実行できる (旧スナップショットを読む)。読み取り系が `.kcs/.lock` を取得しない。
-- 根拠: `05 §6` (「読み取り系 (search / log / view / inspect / evidence verify / restore) は `.kcs/.lock` を取得しない」— Step 1 コマンドでは **log と inspect のみ** がこの明示リストに含まれる)。
+**CT-LOCK-003** — P0 — 読み取り系 (log / inspect) は `.kio/.lock` を取得しない
+- Given: 書き込み系 (`kio snapshot`) 実行中。
+- When: 同時に `kio log` / `kio inspect` を実行。
+- Then: 読み取り系は lock を待たずに実行できる (旧スナップショットを読む)。読み取り系が `.kio/.lock` を取得しない。
+- 根拠: `05 §6` (「読み取り系 (search / log / view / inspect / evidence verify / restore) は `.kio/.lock` を取得しない」— Step 1 コマンドでは **log と inspect のみ** がこの明示リストに含まれる)。
 - 補足: `status` / `diff` は 05 §6 の読み取り系リストにも書き込み系リストにも**現れない** — lock 分類は未定義 (§C-12)。本テストの対象から除外。
 
 **CT-LOCK-004** — P1 — refs の atomic 更新 (部分 ref 不可視)
@@ -592,15 +592,15 @@ chunk_hash = sha256:8fefa4825444efb1a120df709f45764a9ac074a9a2c0002ee4307baa7bbf
 
 **CT-STATE-001** — P0 — `new`: 初めて観測した原文
 - Given: scope 直下に未登録ファイル。
-- When: `kcs status`。
+- When: `kio status`。
 - Then: 当該ファイルの状態が `new` と分類・表示される。
 - 根拠: `03 §6` (状態分類 `new 初めて見つかった原文`) / `06 §1` (status はファイル状態を表示)。
-- 補足: 分類の**観測結果**のみを契約とする。files 行の生成・更新を `kcs status` が行うか
+- 補足: 分類の**観測結果**のみを契約とする。files 行の生成・更新を `kio status` が行うか
   (スキャンの実行主体・書き込み副作用) は 03 §6/§8 に未定義 (§C-13)。
 
 **CT-STATE-002** — P0 — `modified`: path 同じで raw_hash 変化
 - Given: 既登録 `a.pdf` の内容を変更 (raw_hash 変化)。
-- When: `kcs status`。
+- When: `kio status`。
 - Then: `modified` と分類・表示される。
 - 根拠: `03 §6` (`modified path 同じだが raw_hash が変わった`)。
 
@@ -623,15 +623,15 @@ chunk_hash = sha256:8fefa4825444efb1a120df709f45764a9ac074a9a2c0002ee4307baa7bbf
 ### CT-OBS-* — 観測ログ (`06 §13` / `05 §7`。`09 §3.1` で events/errors は Step 1 割当)
 
 **CT-OBS-001** — P0 — commit イベントが `events.jsonl` に記録される
-- Given: `kcs snapshot` で commit を作る。
-- When: `~/.local/share/kcs/logs/events.jsonl` を読む。
+- Given: `kio snapshot` で commit を作る。
+- When: `~/.local/share/kio/logs/events.jsonl` を読む。
 - Then: commit イベント行が追記されている。行は JSON で必須フィールド
   `ts, level, code, component, message, context` を持つ。`ts` は UTC ISO8601+Z (`06 §12`)。
 - 根拠: `06 §13` / `05 §7` (「events.jsonl 重要イベント (commit, gc, purge, schema migration)」/ 必須フィールド) / `09 §3.1` (観測ログ events/errors = Step 1)。
 
 **CT-OBS-002** — P0 — エラーが `errors.jsonl` に error_code 付きで記録される
-- Given: error_code を伴う失敗 (例 CT-TREE-003 の `KCS-E-STORE-PATH-001`)。
-- When: `~/.local/share/kcs/logs/errors.jsonl` を読む。
+- Given: error_code を伴う失敗 (例 CT-TREE-003 の `KIO-E-STORE-PATH-001`)。
+- When: `~/.local/share/kio/logs/errors.jsonl` を読む。
 - Then: 当該エラー行が追記され、必須フィールド `ts, level, code, component, message, context` を持ち、
   `code` が発生した error_code と一致する。
 - 根拠: `06 §13` / `05 §7` (「errors.jsonl error_code 付きの全エラー」/ 必須フィールド) / `09 §3.1`。
@@ -648,31 +648,31 @@ chunk_hash = sha256:8fefa4825444efb1a120df709f45764a9ac074a9a2c0002ee4307baa7bbf
 > spec から導出可能と再判定し、契約テストへ昇格済み — CT-HASH-005 / CT-COMMIT-007 / CT-COMMIT-004+A.3b / CT-TREE-008+A.2b)
 
 1. **lock 競合時の敗者挙動 + error code (要-spec)** — `05 §5,§6` は「防止」とのみ。即時失敗/待機、
-   timeout、専用 error_code (`KCS-E-*-LOCK-*` は未定義) が無い。影響: CT-LOCK-001/002。
+   timeout、専用 error_code (`KIO-E-*-LOCK-*` は未定義) が無い。影響: CT-LOCK-001/002。
 2. **Step 1 の raw-only tree entry の `normalize` ブロック (要-spec)** — `03 §8` の tree entry schema は
    `normalize: {tool_profile_hash, gen}` を持つが、Markdownize は Step 2。Step 1 で raw のみ取り込んだ
    ファイルの entry の `normalize` を何で埋めるか (省略可? tool_profile_hash=null? gen だけ?) が未定義。
    A.2 のベクタは「normalize 済み entry」を前提にしており、**Step 1 純 raw tree の正しい entry 形が別途必要**。
    影響: CT-HASH-003 / CT-TREE-001/009 の適用範囲。**Step 1 実装の最初の意思決定点**。
 3. **manual snapshot の unchanged-tree 挙動** — `05 §8.1` の no-op は auto snapshot にのみ明記。
-   明示 `kcs snapshot`/`commit` で tree 不変時、no-op か empty commit 生成か未定義。影響: CT-COMMIT-006。
-4. **Step 1 の `kcs status` 状態語彙** — `03 §6` の状態機械は normalized instance (Step 2) を前提とし、
+   明示 `kio snapshot`/`commit` で tree 不変時、no-op か empty commit 生成か未定義。影響: CT-COMMIT-006。
+4. **Step 1 の `kio status` 状態語彙** — `03 §6` の状態機械は normalized instance (Step 2) を前提とし、
    pipeline の無い Step 1 で `up_to_date` 等が何を意味するか未定義。Step 1 は raw_hash+path 由来の
    new/modified/deleted のみ判定可能と解すべきだが spec に「Step 1 の縮退状態」の記述が無い。影響: CT-CLI-003 / CT-STATE-005。
-   関連: CT-COMMIT-008 (`kcs index` 自体が Step 2 割当なのに auto snapshot 契機は index 完了時、という Step 境界の齟齬)。
-5. **`kcs init` の冪等性・path 引数の細部** — 初期化済みフォルダへの再 init が no-op かエラーか未定義
-   (scope_id 不変のみ既知)。`kcs init <path>` の `<path>` 不存在時の挙動も未定義。影響: CT-CLI-002/016。
-6. **`kcs tag` の詳細** — 同名再 tag (上書き/エラー)、tag 削除、`<commit>` 省略時の既定 (HEAD?) が未定義。影響: CT-CLI-008。
-7. **`kcs diff` の出力形式と exit code 意味論** — added/modified/deleted の表示分類・出力書式が
+   関連: CT-COMMIT-008 (`kio index` 自体が Step 2 割当なのに auto snapshot 契機は index 完了時、という Step 境界の齟齬)。
+5. **`kio init` の冪等性・path 引数の細部** — 初期化済みフォルダへの再 init が no-op かエラーか未定義
+   (scope_id 不変のみ既知)。`kio init <path>` の `<path>` 不存在時の挙動も未定義。影響: CT-CLI-002/016。
+6. **`kio tag` の詳細** — 同名再 tag (上書き/エラー)、tag 削除、`<commit>` 省略時の既定 (HEAD?) が未定義。影響: CT-CLI-008。
+7. **`kio diff` の出力形式と exit code 意味論** — added/modified/deleted の表示分類・出力書式が
    06/03 から導けない。差分ありで非 0 にするか (git `--exit-code` 相当) 常に 0 か、受理する ref 形
    (tag/HEAD/短縮 hash) も未定義。影響: CT-CLI-006。
-8. **`kcs inspect` の失敗 error/exit code** — 存在しない/不正 hash 時の具体 error_code (STORE?) と exit code が未定義。影響: CT-CLI-013。
-9. **`kcs log` の列挙順序・遡行規則・絞り込み意味論** — 新旧順 / first-parent か全 DAG か、
+8. **`kio inspect` の失敗 error/exit code** — 存在しない/不正 hash 時の具体 error_code (STORE?) と exit code が未定義。影響: CT-CLI-013。
+9. **`kio log` の列挙順序・遡行規則・絞り込み意味論** — 新旧順 / first-parent か全 DAG か、
    `--at` / `--since` が log で何を絞るかが 06 に無い。影響: CT-CLI-005/017。
-10. **created_at の精度** — 秒 (`Z`) か μ秒 (`.NNNNNNZ`) か、KCS が生成時どちらを出すか未定義 (`06 §12` は両方「正」)。影響: CT-COMMIT-010 の生成側再現性。
+10. **created_at の精度** — 秒 (`Z`) か μ秒 (`.NNNNNNZ`) か、KIO が生成時どちらを出すか未定義 (`06 §12` は両方「正」)。影響: CT-COMMIT-010 の生成側再現性。
 11. **tree entry `type` の値域** — `03 §8` 例は `"file"` のみ。symlink/その他の扱いが未定義 (直下のみ規則では実質 file のみ)。影響: CT-TREE-009。
 12. **`status` / `diff` の lock 分類** — `05 §6` の読み取り系明示リスト (search/log/view/inspect/
-    evidence verify/restore) にも書き込み系リストにも `status` / `diff` が現れない。`kcs tag` (refs 書き込み)
+    evidence verify/restore) にも書き込み系リストにも `status` / `diff` が現れない。`kio tag` (refs 書き込み)
     が書き込み系リストに無いのも同種の穴。影響: CT-LOCK-003 / CT-COMMIT-011。
 13. **files 行の生成・更新主体** — `03 §8` は files テーブルの不変条件 (DELETE しない等) を定めるが、
     どのコマンド (`status`? `index`? snapshot?) がスキャンして行を生成・更新するかは未定義。影響: CT-STATE-001/003/004。
@@ -688,16 +688,16 @@ chunk_hash = sha256:8fefa4825444efb1a120df709f45764a9ac074a9a2c0002ee4307baa7bbf
 | 除外項目 | 除外理由 (根拠) |
 | --- | --- |
 | Prepare / Markdownize (full/incremental) / Adapter 実行 / normalized_unit / 全文 view | `09 §3.1`: Step 2。`03 §2.1`, `07`, `04 §3`。ゆえに §C-4/§C-2 の pipeline 状態も除外 |
-| `kcs index` の実行系 (preview / 承認 / soft limit 警告含む) | `09 §3.1`: Step 2 (`06 §2`)。CT-TREE-006 / CT-COMMIT-008 は該当部分を P2/条件付きに留めた |
+| `kio index` の実行系 (preview / 承認 / soft limit 警告含む) | `09 §3.1`: Step 2 (`06 §2`)。CT-TREE-006 / CT-COMMIT-008 は該当部分を P2/条件付きに留めた |
 | chunk / embedding / FTS5 / sqlite-vec の生成 | `09 §3.1`: Step 3 (`04 §4`)。CT-HASH-011 (chunk) / A.5 は **P2 参考ベクタのみ** |
-| 検索 (text/vector/hybrid/RRF/MMR/cursor/multi-scope) | `09 §3.1`: Step 3 (`05 §1`)。`kcs search`・`searched_scopes` 等は対象外 |
-| Evidence Pointer 発行・解決 / `kcs open` / `kcs view` / verify / retarget | `09 §3.1`: Step 3-4 (`08`)。本書では Pointer 永続性は **hash 安定性テストの動機付け** (`08 §6`) としてのみ参照 |
+| 検索 (text/vector/hybrid/RRF/MMR/cursor/multi-scope) | `09 §3.1`: Step 3 (`05 §1`)。`kio search`・`searched_scopes` 等は対象外 |
+| Evidence Pointer 発行・解決 / `kio open` / `kio view` / verify / retarget | `09 §3.1`: Step 3-4 (`08`)。本書では Pointer 永続性は **hash 安定性テストの動機付け** (`08 §6`) としてのみ参照 |
 | restore / `--at` / `--all-history` / `--include-deleted` / time-travel | `09 §3.1`: Step 4 (`05 §4`) |
 | purge (tombstone / `commit_type=purged` 発行経路 / `--erase-tombstone` / Dead Pointer) | `09 §3.1`: Step 4 (`05 §3`, `08 §4`)。commit_type=purged は CT-COMMIT-001 で **enum 受理のみ** 確認、purge 実行はしない |
-| GC の **実行** (shallow 化 / tiered retention / prune / CoW / power-loss sweep / `kcs gc`) | `05 §2.2`, `09 §3.1`: Phase 4+。Step 1 は `gc_policy` / `protected` × `commit_type` **schema のみ** 遵守 (CT-GC-*) |
-| 初回スキャン preview + 明示承認 / `.kcsignore` / secrets Tier A/B / budget guardrail | `09 §3.1`: Step 2 (`06 §2`, `10 §1`) |
+| GC の **実行** (shallow 化 / tiered retention / prune / CoW / power-loss sweep / `kio gc`) | `05 §2.2`, `09 §3.1`: Phase 4+。Step 1 は `gc_policy` / `protected` × `commit_type` **schema のみ** 遵守 (CT-GC-*) |
+| 初回スキャン preview + 明示承認 / `.kioignore` / secrets Tier A/B / budget guardrail | `09 §3.1`: Step 2 (`06 §2`, `10 §1`) |
 | 定期 auto snapshot / Downloads watch / OS スケジューラ委譲 / on_idle | `05 §8.2`, `09 §3.1`: Phase 4+。Step 1 の auto 契機は index 完了時のみ (それも §C-4 の Step 境界注記付き) |
-| export / import (`.kcsz`) / `kcs move` | `09 §3.1`: Phase 4+ (`06 §10`, `05 §6` 予約) |
+| export / import (`.kioz`) / `kio move` | `09 §3.1`: Phase 4+ (`06 §10`, `05 §6` 予約) |
 | agent API 外部公開 / MCP / navigation | `09 §3.1`: Phase 5 (`06 §9`) |
 | 観測ログのうち `metrics.jsonl` / `access.jsonl` | `09 §3.1`: Step 3。Step 1 対象は `events.jsonl` / `errors.jsonl` のみ (CT-OBS-001/002 で担保) |
 | tool_profile_hash / tool_lock_hash / chunking_config_hash の **算出ロジック** | Adapter capability (Step 2) / chunk (Step 3) 由来。Step 1 では commit の `tool_lock_hash` を**外部入力の不透明値**として扱う (CT-HASH-004 でダミー値を用いる)。算出規約 `03 §5.1/§5.2/§5.3` のテストは WS 別 |

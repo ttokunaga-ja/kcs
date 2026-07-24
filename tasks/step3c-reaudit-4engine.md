@@ -16,7 +16,7 @@ GPT-5.5 / GPT-5.3-Codex-Spark (codex exec、read-only sandbox、静的監査)。
 
 ## 全エンジン一致の確認事項 (前ラウンド根本診断の解消)
 
-- `kcs search` は FTS5 MATCH (bm25) → fuse_rrf → rank ベース scope 間統合 →
+- `kio search` は FTS5 MATCH (bm25) → fuse_rrf → rank ベース scope 間統合 →
   diversify_candidates / chunk_vec (vec0) KNN に真正配線。自作スコアラ・手計算リランクの
   残骸なし (4/4 一致)
 - 品質ゲート再現 (Opus / Sonnet 独立): 227 green / clippy / fmt / eval M3-1 = 0.8889
@@ -27,12 +27,12 @@ GPT-5.5 / GPT-5.3-Codex-Spark (codex exec、read-only sandbox、静的監査)。
 
 採択 findings と処置 (全件、調整役がコード照合のうえ実在確認してから発注):
 
-1. [major] HYBRID-003 (Sonnet + GPT-5.5): CT の When (`kcs search`、auto) を検証しない
+1. [major] HYBRID-003 (Sonnet + GPT-5.5): CT の When (`kio search`、auto) を検証しない
    --vector テスト + auto「両方不可」が SCOPE-ALL-FAILED-001 になる実装
    → 全 scope 除外かつ全理由が index 不能 (index_missing/corrupt) なら
-   KCS-E-SEARCH-VEC-UNAVAIL-001 exit 1。到達不能系全滅は exit 4 を維持。テスト書換 + 対照 assert
+   KIO-E-SEARCH-VEC-UNAVAIL-001 exit 1。到達不能系全滅は exit 4 を維持。テスト書換 + 対照 assert
 2. [major] Evidence 手順 6/7 (GPT-5.5): chunk 行未実体化のポインタで view が空テキスト成功
-   → KCS-E-EVIDENCE-RETARGET-REQUIRED-001 exit 8 (08 §3.2 / 06 §7、decisions #33)。
+   → KIO-E-EVIDENCE-RETARGET-REQUIRED-001 exit 8 (08 §3.2 / 06 §7、decisions #33)。
    tree entry の profile 等値は強制しない (Step 1 raw-only tree / chunk_hash 自己証明性のため)
 3. [minor] cursor 消失 scope (GPT-5.5): query_hash 検証を cursor 自身の scope 集合で行い、
    未解決 scope は excluded + exit 3。consumed skip も解決可能 scope のみに補正

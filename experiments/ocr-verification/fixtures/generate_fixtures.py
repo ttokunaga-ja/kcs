@@ -13,7 +13,7 @@ from typing import Iterable
 
 ROOT = Path(__file__).resolve().parents[1]
 GENERATED_DIR = ROOT / "fixtures" / "generated"
-PDF_PATH = GENERATED_DIR / "kcs_ocr_verification.pdf"
+PDF_PATH = GENERATED_DIR / "kio_ocr_verification.pdf"
 GROUND_TRUTH_PATH = GENERATED_DIR / "ground_truth.json"
 
 PAGE_WIDTH = 595.0
@@ -42,8 +42,8 @@ TABLE_CELLS = [
 
 JAPANESE_TEXT = (
     "横書き日本語OCR評価\n"
-    "KCSは、個人の作業フォルダを内容アドレスで保存し、検索結果から原本へ戻れるようにする。\n"
-    "このページは句読点、数字12345、英字KCS、括弧(確認)を含む横書き本文である。\n"
+    "KIOは、個人の作業フォルダを内容アドレスで保存し、検索結果から原本へ戻れるようにする。\n"
+    "このページは句読点、数字12345、英字KIO、括弧(確認)を含む横書き本文である。\n"
     "誤字率を測るため、改行を含めた全文をground truthとして保持する。"
 )
 
@@ -67,14 +67,14 @@ FIGURE_CHART_LABELS = [
     "Total 2990",
 ]
 FIGURE_SCAN_LABELS = [
-    "KCS SCAN FIXTURE PAGE",
+    "KIO SCAN FIXTURE PAGE",
     "ALPHA-7731",
     "BRAVO-2048",
     "CHARLIE-9152",
     "returned only as an image",
 ]
 FIGURE_INFOGRAPHIC_LABELS = [
-    "KCS PIPELINE OVERVIEW",
+    "KIO PIPELINE OVERVIEW",
     "Ingest",
     "Markdownize",
     "Embed",
@@ -83,7 +83,7 @@ FIGURE_INFOGRAPHIC_LABELS = [
     "42 percent uplift",
 ]
 FIGURE_SCAN_LINES = [
-    "KCS SCAN FIXTURE PAGE FIVE",
+    "KIO SCAN FIXTURE PAGE FIVE",
     "",
     "This entire page is rendered as a single raster image, a",
     "simulated scan of text-native content.",
@@ -572,7 +572,7 @@ def render_infographic_png() -> bytes:
     img = Image.new("RGB", (width, height), (255, 255, 255))
     draw = ImageDraw.Draw(img)
     draw.rectangle([2, 2, width - 3, height - 3], outline=(0, 0, 0), width=2)
-    draw.text((40, 26), "KCS PIPELINE OVERVIEW", fill=(0, 0, 0), font=_figure_font(40))
+    draw.text((40, 26), "KIO PIPELINE OVERVIEW", fill=(0, 0, 0), font=_figure_font(40))
 
     stages = ["Ingest", "Markdownize", "Embed", "Index", "Search"]
     box_w, box_h = 150, 90
@@ -1117,8 +1117,8 @@ def page1_content() -> bytes:
 def page2_content() -> bytes:
     lines = [
         jp_text("横書き日本語OCR評価", 54, 782, 18),
-        jp_text("KCSは、個人の作業フォルダを内容アドレスで保存し、検索結果から原本へ戻れるようにする。", 54, 742, 11),
-        jp_text("このページは句読点、数字12345、英字KCS、括弧(確認)を含む横書き本文である。", 54, 710, 11),
+        jp_text("KIOは、個人の作業フォルダを内容アドレスで保存し、検索結果から原本へ戻れるようにする。", 54, 742, 11),
+        jp_text("このページは句読点、数字12345、英字KIO、括弧(確認)を含む横書き本文である。", 54, 710, 11),
         jp_text("誤字率を測るため、改行を含めた全文をground truthとして保持する。", 54, 678, 11),
     ]
     return "\n".join(lines).encode("ascii")

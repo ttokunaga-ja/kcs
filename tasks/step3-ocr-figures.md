@@ -2,7 +2,7 @@
 
 - 担当: WS-ocr-figures
 - 日付: 2026-07-03
-- 対象懸念 (ユーザー提起): Mistral OCR は PDF ページを画像レンダリングして処理するため、図・チャート・複雑レイアウト領域を `images[]` + placeholder として返し、本来テキスト/表として Markdown 化されるべき内容が**画像化されて欠落**する恐れ。KCS では image は CAS 保存 + `kcs://` URI 置換されるが、**画像内テキストは FTS/embedding の検索対象にならない** → 北極星 M3-1 (検索可能性) に直接影響。
+- 対象懸念 (ユーザー提起): Mistral OCR は PDF ページを画像レンダリングして処理するため、図・チャート・複雑レイアウト領域を `images[]` + placeholder として返し、本来テキスト/表として Markdown 化されるべき内容が**画像化されて欠落**する恐れ。KIO では image は CAS 保存 + `kio://` URI 置換されるが、**画像内テキストは FTS/embedding の検索対象にならない** → 北極星 M3-1 (検索可能性) に直接影響。
 - 変更範囲: `experiments/ocr-verification/` 配下の拡張と本ファイルのみ。`docs/` `crates/` は未変更。実 API は未実行 (fixture 生成の決定論性のみローカル検証)。
 
 ---
@@ -41,7 +41,7 @@
 
 - **`bbox_annotation`** (パラメータ `bbox_annotation_format`): OCR が抽出した各 bbox (チャート/図等) を、ユーザ指定の JSON Schema (Pydantic/Zod/JSON) で注釈する。スキーマ例は `image_type` / `short_description` / `summary`。**図のキャプション/説明、さらに図中テキストの書き起こしを要求できる**。**ページ上限なし** (全 bbox を個別処理)。
 - **`document_annotation`** (パラメータ `document_annotation_format` / `document_annotation_prompt`): 文書全体を 1 スキーマで注釈。**先頭 8 個の image bbox / 8 ページまで**の制約あり。
-- annotation は OCR 後の**追加の vision-LLM パス**であり生成物 (= 非決定的)。→ KCS の identity `(raw_hash, tool_profile_hash)` に annotation スキーマ+プロンプトを `tool_profile_hash` へ織り込む必要 (docs 判断事項)。
+- annotation は OCR 後の**追加の vision-LLM パス**であり生成物 (= 非決定的)。→ KIO の identity `(raw_hash, tool_profile_hash)` に annotation スキーマ+プロンプトを `tool_profile_hash` へ織り込む必要 (docs 判断事項)。
 
 ### 1.4 コスト (対策のトレードオフ用)
 
@@ -69,8 +69,8 @@
 | index | kind | 内容 | 画像内既知ラベル (欠落検出用) |
 | ---: | --- | --- | --- |
 | 4 | `raster_chart` | ラスタ棒グラフ (タイトル/カテゴリ/数値ラベルが画像内テキスト) | `REVENUE BY DEPT 2026Q1`, `Tokyo`, `Osaka`, `Nagoya`, `1250`, `980`, `760`, `Total 2990` |
-| 5 | `scan_page` | ページ全体を 1 枚のラスタにしたスキャン風テキスト | `KCS SCAN FIXTURE PAGE`, `ALPHA-7731`, `BRAVO-2048`, `CHARLIE-9152`, `returned only as an image` |
-| 6 | `infographic` | パイプライン概要インフォグラフィック (ボックス内テキスト) | `KCS PIPELINE OVERVIEW`, `Ingest`, `Markdownize`, `Embed`, `Index`, `Search`, `42 percent uplift` |
+| 5 | `scan_page` | ページ全体を 1 枚のラスタにしたスキャン風テキスト | `KIO SCAN FIXTURE PAGE`, `ALPHA-7731`, `BRAVO-2048`, `CHARLIE-9152`, `returned only as an image` |
+| 6 | `infographic` | パイプライン概要インフォグラフィック (ボックス内テキスト) | `KIO PIPELINE OVERVIEW`, `Ingest`, `Markdownize`, `Embed`, `Index`, `Search`, `42 percent uplift` |
 
 - `ground_truth.json` は `schema_version: 2`、`page_count: 7`、新規 `figures` セクション (各ページの `kind` / `expected_label_texts` / `risk`) を追加。旧 4 ページのセクションは不変 (既存の合格判定はそのまま維持)。
 - 各図表ページには日本語見出し (実ベクタテキスト) を別途置き、「常に取れるべき実テキスト」と「画像内テキスト」を分離。
@@ -143,7 +143,7 @@ python evaluate.py
 
 ## 6. 対策の設計案と推奨順位 (実装はしない)
 
-前提: KCS の image は既に CAS 保存 + `kcs://` URI 置換されるが、その**中身のテキストが検索対象外**なのが問題。対策は「図領域のテキスト/説明を検索対象 (FTS + embedding) に載せる」こと。
+前提: KIO の image は既に CAS 保存 + `kio://` URI 置換されるが、その**中身のテキストが検索対象外**なのが問題。対策は「図領域のテキスト/説明を検索対象 (FTS + embedding) に載せる」こと。
 
 | # | 対策 | 効果 | コスト | 複雑性/リスク |
 | --- | --- | --- | --- | --- |

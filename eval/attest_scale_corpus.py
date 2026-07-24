@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Attest the generated scale corpus against KCS's current search predicates.
+"""Attest the generated scale corpus against KIO's current search predicates.
 
 The important count is not ``COUNT(*) FROM chunks``.  It is the set that the
 production search path can serve at each scope's HEAD: a non-placeholder
@@ -188,15 +188,15 @@ def _require_plain_directory(path, label, allow_missing=False):
     return True
 
 
-def verify_source_files(root, manifest, allow_kcs=True):
+def verify_source_files(root, manifest, allow_kio=True):
     """Verify every source byte and reject unmanifested scope entries."""
     expected_total = 0
     for scope in manifest["scopes"]:
         scope_dir = root / scope["name"]
         _require_plain_directory(scope_dir, "scope directory")
         expected_names = {entry["path"] for entry in scope["files"]}
-        if allow_kcs:
-            expected_names.add(".kcs")
+        if allow_kio:
+            expected_names.add(".kio")
         actual_names = _bounded_child_names(
             scope_dir, len(expected_names), "scale scope"
         )
@@ -225,19 +225,19 @@ def verify_source_files(root, manifest, allow_kcs=True):
     return expected_total
 
 
-def _read_head(kcs_dir):
-    raw = _regular_file_bytes(kcs_dir / "HEAD", MAX_HEAD_BYTES, "scope HEAD")
+def _read_head(kio_dir):
+    raw = _regular_file_bytes(kio_dir / "HEAD", MAX_HEAD_BYTES, "scope HEAD")
     try:
         head = raw.decode("ascii").strip()
     except UnicodeDecodeError as exc:
-        raise ScaleAttestationError(f"scope HEAD is not ASCII: {kcs_dir / 'HEAD'}") from exc
+        raise ScaleAttestationError(f"scope HEAD is not ASCII: {kio_dir / 'HEAD'}") from exc
     if not HASH_RE.fullmatch(head):
         raise ScaleAttestationError(f"scope HEAD is not a SHA-256 commit: {head!r}")
     return head, raw
 
 
-def _read_scope_id(kcs_dir):
-    value = _read_json(kcs_dir / "scope.json", MAX_SCOPE_BYTES, "scope identity")
+def _read_scope_id(kio_dir):
+    value = _read_json(kio_dir / "scope.json", MAX_SCOPE_BYTES, "scope identity")
     if not isinstance(value, dict):
         raise ScaleAttestationError("scope.json must be an object")
     scope_id = value.get("scope_id")
@@ -246,8 +246,8 @@ def _read_scope_id(kcs_dir):
     return scope_id
 
 
-def _read_chunking_config(kcs_dir):
-    path = kcs_dir / "config.toml"
+def _read_chunking_config(kio_dir):
+    path = kio_dir / "config.toml"
     raw = _regular_file_bytes(path, MAX_CONFIG_BYTES, "scope config")
     try:
         value = tomllib.loads(raw.decode("utf-8"))
@@ -402,21 +402,21 @@ def _fts_coverage(conn):
 def attest_scope(root, scope_manifest):
     scope_dir = root / scope_manifest["name"]
     _require_plain_directory(scope_dir, "scope directory")
-    kcs_dir = scope_dir / ".kcs"
-    _require_plain_directory(kcs_dir, "scope .kcs directory")
-    purge_dir = kcs_dir / "purge"
+    kio_dir = scope_dir / ".kio"
+    _require_plain_directory(kio_dir, "scope .kio directory")
+    purge_dir = kio_dir / "purge"
     _require_plain_directory(purge_dir, "scope purge directory", allow_missing=True)
-    purge_journal = kcs_dir / "purge" / "in-progress.json"
+    purge_journal = kio_dir / "purge" / "in-progress.json"
     if generator._optional_lstat(purge_journal) is not None:
         raise ScaleAttestationError(f"scope has an in-progress purge: {purge_journal}")
-    _ensure_empty_runtime_tree(kcs_dir / "tombstones", "tombstones")
-    _ensure_empty_runtime_tree(kcs_dir / "purge" / "erase-receipts", "erase receipts")
+    _ensure_empty_runtime_tree(kio_dir / "tombstones", "tombstones")
+    _ensure_empty_runtime_tree(kio_dir / "purge" / "erase-receipts", "erase receipts")
 
-    head, head_raw_before = _read_head(kcs_dir)
-    scope_id = _read_scope_id(kcs_dir)
-    chunking = _read_chunking_config(kcs_dir)
-    _require_plain_directory(kcs_dir / "index", "scope index directory")
-    db_path = kcs_dir / "index" / "sqlite.db"
+    head, head_raw_before = _read_head(kio_dir)
+    scope_id = _read_scope_id(kio_dir)
+    chunking = _read_chunking_config(kio_dir)
+    _require_plain_directory(kio_dir / "index", "scope index directory")
+    db_path = kio_dir / "index" / "sqlite.db"
     conn = _open_read_only(db_path)
     try:
         tables = _table_names(conn)
@@ -435,7 +435,7 @@ def attest_scope(root, scope_manifest):
         if not tree_rows:
             raise ScaleAttestationError(
                 "HEAD has no projected tree_entries; prepare must stop at "
-                "`kcs index` and must not append a separate `kcs snapshot`"
+                "`kio index` and must not append a separate `kio snapshot`"
             )
         expected_tree = {
             entry["path"]: _prefixed_hash(entry["raw_sha256"])
@@ -518,7 +518,7 @@ def attest_scope(root, scope_manifest):
     finally:
         conn.close()
 
-    _, head_raw_after = _read_head(kcs_dir)
+    _, head_raw_after = _read_head(kio_dir)
     if head_raw_after != head_raw_before:
         raise ScaleAttestationError(f"scope HEAD changed during attestation: {scope_dir}")
     return {
@@ -549,18 +549,18 @@ def attest_registry(root, scope_reports):
         )
     device_dir = root / spec.DEVICE_DIR_NAME
     data_dir = device_dir / "data"
-    kcs_data_dir = data_dir / "kcs"
+    kio_data_dir = data_dir / "kio"
     _require_plain_directory(device_dir, "isolated device directory")
     _require_plain_directory(data_dir, "isolated device data directory")
-    _require_plain_directory(kcs_data_dir, "isolated device KCS directory")
-    path = kcs_data_dir / "scope-registry.sqlite"
+    _require_plain_directory(kio_data_dir, "isolated device KIO directory")
+    path = kio_data_dir / "scope-registry.sqlite"
     conn = _open_read_only(path)
     try:
         tables = _table_names(conn)
         if "scopes" not in tables:
             raise ScaleAttestationError("isolated scope registry lacks scopes table")
         all_rows = conn.execute(
-            "SELECT scope_id, kcs_path, root_path, "
+            "SELECT scope_id, kio_path, root_path, "
             "participates_in_global_search, indexed FROM scopes LIMIT 21"
         ).fetchall()
     except sqlite3.Error as exc:
@@ -574,7 +574,7 @@ def attest_registry(root, scope_reports):
         )
     expected = {
         report["scope_id"]: (
-            _canonical(Path(report["root_path"]) / ".kcs"),
+            _canonical(Path(report["root_path"]) / ".kio"),
             report["root_path"],
         )
         for report in scope_reports
@@ -582,12 +582,12 @@ def attest_registry(root, scope_reports):
     if len(expected) != len(scope_reports):
         raise ScaleAttestationError("scope ids are not unique across the 20 scopes")
     actual = {}
-    for scope_id, kcs_path, root_path, participates, indexed in all_rows:
+    for scope_id, kio_path, root_path, participates, indexed in all_rows:
         if participates != 1 or indexed != 1:
             raise ScaleAttestationError(
                 f"registry scope is not an indexed global participant: {scope_id}"
             )
-        actual[scope_id] = (_canonical(kcs_path), _canonical(root_path))
+        actual[scope_id] = (_canonical(kio_path), _canonical(root_path))
     if actual != expected:
         raise ScaleAttestationError("isolated scope registry paths/ids differ from scopes")
     return {
@@ -600,7 +600,7 @@ def attest_registry(root, scope_reports):
 def attest_corpus(corpus_dir):
     try:
         root, owner, manifest = generator.load_owned_manifest(corpus_dir)
-        source_files = verify_source_files(root, manifest, allow_kcs=True)
+        source_files = verify_source_files(root, manifest, allow_kio=True)
     except generator.ScaleGenerationError as exc:
         raise ScaleAttestationError(str(exc)) from exc
     scope_reports = [
@@ -656,7 +656,7 @@ def attest_corpus(corpus_dir):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(
-        description="Attest a prepared KCS scale corpus"
+        description="Attest a prepared KIO scale corpus"
     )
     parser.add_argument("--corpus", required=True, help="scale collection root")
     parser.add_argument(

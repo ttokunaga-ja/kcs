@@ -1,9 +1,9 @@
-# KCS 設計ドキュメント
+# KIO 設計ドキュメント
 
 > **Local-first knowledge archive, powered by frontier AI.**
 > **データはローカル、計算は最強の AI を使う。**
 
-KCS は **local-first** な知識アーカイブ。データの主権はあなたのマシンにあり、Markdownize や Embedding には Mistral OCR / Gemini / Claude / GPT 等の frontier AI を使う。"offline-first 原理主義" ではない。
+KIO は **local-first** な知識アーカイブ。データの主権はあなたのマシンにあり、Markdownize や Embedding には Mistral OCR / Gemini / Claude / GPT 等の frontier AI を使う。"offline-first 原理主義" ではない。
 
 二次表現: **Evidence-grounded local knowledge archive (原文根拠付きローカル知識アーカイブ)**。
 
@@ -11,7 +11,7 @@ KCS は **local-first** な知識アーカイブ。データの主権はあな�
 
 ---
 
-# 0. KCS の中核 (3 点)
+# 0. KIO の中核 (3 点)
 
 ```
 1. Evidence Pointer        path ではなく commit / tree / raw_hash / chunk_hash / span で根拠を指す
@@ -23,10 +23,10 @@ KCS は **local-first** な知識アーカイブ。データの主権はあな�
 最低体験ライン:
 
 ```bash
-kcs init
-kcs index --approve      # 取り込み + ベースライン index (成功時に auto snapshot)
-kcs search "あの PDF"
-kcs open <検索結果の pointer>
+kio init
+kio index --approve      # 取り込み + ベースライン index (成功時に auto snapshot)
+kio search "あの PDF"
+kio open <検索結果の pointer>
 ```
 
 # 0.1 ターゲットユーザー
@@ -42,11 +42,11 @@ kcs open <検索結果の pointer>
 # 0.2 二層構造 — truth と cache
 
 ```
-truth = folder-local .kcs                正本: raw object / normalized / chunks / commits / refs
+truth = folder-local .kio                正本: raw object / normalized / chunks / commits / refs
 cache = scope_registry / aggregator      検索キャッシュ: 探索対象一覧 / stale 検出 / UI 統合
 ```
 
-`scope_registry` のみで `.kcs` の状態を変える実装は禁止。詳細 [03-data-model.md §4](03-data-model.md)。
+`scope_registry` のみで `.kio` の状態を変える実装は禁止。詳細 [03-data-model.md §4](03-data-model.md)。
 
 ---
 
@@ -59,7 +59,7 @@ cache = scope_registry / aggregator      検索キャッシュ: 探索対象一�
 | 0 | [README.md](README.md) | 全体俯瞰・Reading Path (本書) |
 | **01** | [01-positioning.md](01-positioning.md) | **★最初に読む**。core 一文 / ターゲット / 差別化の核 / **競合分析 + Perkeep 失敗分析** / 既存ワークフロー / 発言禁止リスト |
 | **02** | [02-philosophy.md](02-philosophy.md) | 理念 (Evidence Pointer の根拠、Markdown 正規化の妥協点、忘れない vs purge) |
-| **03** | [03-data-model.md](03-data-model.md) | **★契約**: CAS / `.kcs` layout / object 種別 / identity / `tool_profile_hash` / 書き込み境界 / dedup スコープ |
+| **03** | [03-data-model.md](03-data-model.md) | **★契約**: CAS / `.kio` layout / object 種別 / identity / `tool_profile_hash` / 書き込み境界 / dedup スコープ |
 | **04** | [04-pipeline.md](04-pipeline.md) | **★契約**: ingest → prepare → markdownize (incremental) → chunk → embed → index / SQLite schema / batch (retry / budget) |
 | **05** | [05-runtime.md](05-runtime.md) | **★契約**: 検索 (paging / MMR / `--at`) / commit_type / GC / purge / restore / time-travel / 並行性 |
 | **06** | [06-cli-spec.md](06-cli-spec.md) | CLI 全コマンド / exit code / error code namespace / agent API / observability / GUI 用語翻訳 (Phase 4+) |
@@ -93,9 +93,9 @@ Phase 5: Agent            agent API / navigation / neighbors / node / edge
 Step 計画 (Phase 1-3 を実装):
 
 ```
-Step 1 (1-2ヶ月): kcs-core + kcs-cli (init / status / snapshot (=commit) / log / diff / inspect / tag)
-Step 2 (2-3ヶ月): kcs-pipeline + kcs-adapter (frontier AI default)
-Step 3 (2-3ヶ月): kcs-index + kcs-search (hybrid + Evidence Pointer)
+Step 1 (1-2ヶ月): kio-core + kio-cli (init / status / snapshot (=commit) / log / diff / inspect / tag)
+Step 2 (2-3ヶ月): kio-pipeline + kio-adapter (frontier AI default)
+Step 3 (2-3ヶ月): kio-index + kio-search (hybrid + Evidence Pointer)
 Step 4 (1.5-2ヶ月): restore + --at + time-travel + purge 最小形 (tombstone) + evidence verify
 ```
 

@@ -10,20 +10,20 @@ MVP は **「Evidence-grounded local knowledge archive」としての最小完�
 
 # 1. 初回スキャン前の承認
 
-KCS はデフォルトで全 indexed scope を検索対象にし、全ファイルを管理対象にする。ただし、初回スキャンでは、対象範囲 preview、除外提案、明示承認を必須にする。
+KIO はデフォルトで全 indexed scope を検索対象にし、全ファイルを管理対象にする。ただし、初回スキャンでは、対象範囲 preview、除外提案、明示承認を必須にする。
 
-目的はデフォルト全管理を弱めることではない。KCS が単なる検索インデックスではなく、原本を content-addressed object として保存する知識アーカイブであることを、ユーザーが理解したうえで開始するためである。
+目的はデフォルト全管理を弱めることではない。KIO が単なる検索インデックスではなく、原本を content-addressed object として保存する知識アーカイブであることを、ユーザーが理解したうえで開始するためである。
 
 必須フロー:
 
 ```text
-kcs init
+kio init
   ↓
 候補 scope を探索
   ↓
 対象フォルダ / 推定ファイル数 / 推定容量 / 大容量ファイル / 除外候補を preview
   ↓
-.kcsignore / 設定を調整
+.kioignore / 設定を調整
   ↓
 再 preview
   ↓
@@ -57,7 +57,7 @@ Estimated AI enrichment cost: ~$210 (markdownize ~$180, embedding ~$30)
 Current budget cap: $50/month → estimated completion: 5 months
 Options:
   [1] ベースライン index のみで開始 (コスト $0。AI 強化は後から)
-  [2] 除外 (.kcsignore) を調整して再 preview
+  [2] 除外 (.kioignore) を調整して再 preview
   [3] budget cap を変更
   [4] このまま続行 (cap 到達時に AI 強化タスクは paused)
 ```
@@ -66,7 +66,7 @@ Options:
 
 除外候補は提案であり、ユーザーの承認なしに自動除外しない。唯一の例外は secrets 系パターン
 (§1.1 Tier A) で、これは built-in デフォルト除外として最初から「除外済み」状態で preview に
-表示され、取り込むにはユーザーの明示的な解除操作 (対話承認時の個別選択、または .kcsignore の
+表示され、取り込むにはユーザーの明示的な解除操作 (対話承認時の個別選択、または .kioignore の
 negation 記述) が必要である。`--yes` はこの解除を行えない ([06-cli-spec.md §2](06-cli-spec.md))。
 
 ```text
@@ -92,9 +92,9 @@ Sensitive candidates (Tier B, 取り込み予定・要確認):
   api_tokens.md         filename matches *token*
 ```
 
-非対話環境では、承認済み scope または `--yes` / `--approve` のような明示オプションがない限り、`kcs index` は失敗させる。
+非対話環境では、承認済み scope または `--yes` / `--approve` のような明示オプションがない限り、`kio index` は失敗させる。
 
-承認記録には、少なくとも次を残す (**保存先 = `.kcs/scope.json` の `scan_approval` key** — schema 検証
+承認記録には、少なくとも次を残す (**保存先 = `.kio/scope.json` の `scan_approval` key** — schema 検証
 対象 §12.3。adapter 単位の network opt-in 承認 `approvals[]` ([07-adapter-spec.md §3](07-adapter-spec.md))
 とは別 key)。
 
@@ -104,7 +104,7 @@ root_path
 approved_at
 actor
 approval_method        # interactive | approve | yes
-kcs_version
+kio_version
 effective_ignore_hash
 estimated_file_count
 estimated_total_bytes
@@ -114,14 +114,14 @@ estimated_embedding_usd
 
 承認後の index は二段で進む ([04-pipeline.md §5](04-pipeline.md)): ベースライン index が先に完了し、AI 強化 (Markdownize / Embedding) は budget guardrail の管理下で後段として進む。AI 強化が未完了・paused の間、その状態を隠してはならない。
 
-- `kcs status` は AI 強化の進捗 (done / pending / paused 件数) と paused の理由 (budget / auth / tier_b_approval) を表示する (rate limit は paused ではなく pending + next_retry_at として表示 — [04-pipeline.md §5.2](04-pipeline.md))
+- `kio status` は AI 強化の進捗 (done / pending / paused 件数) と paused の理由 (budget / auth / tier_b_approval) を表示する (rate limit は paused ではなく pending + next_retry_at として表示 — [04-pipeline.md §5.2](04-pipeline.md))
 - 照合が恒久不能な in-flight Batch job (資格情報喪失等) は **stalled** として表示し続ける。脱出路は
-  `kcs batch abandon` のみ (自動では何も変更しない — [04-pipeline.md §5.8](04-pipeline.md))
+  `kio batch abandon` のみ (自動では何も変更しない — [04-pipeline.md §5.8](04-pipeline.md))
 - 検索レスポンスは index が部分的なとき `index_status` を返す ([05-runtime.md §1.7](05-runtime.md))
 
 ## 1.1 Secrets デフォルト除外 (built-in ignore template)
 
-KCS は secrets 系ファイルの取り込み・オンライン送信事故を防ぐため、built-in の除外テンプレート
+KIO は secrets 系ファイルの取り込み・オンライン送信事故を防ぐため、built-in の除外テンプレート
 を同梱する。パターンは 2 段階に分ける。
 
 **Tier A (デフォルト除外)**: 拡張子・ファイル名から secrets とほぼ確実に判定できるもの。
@@ -167,8 +167,8 @@ id_ed25519*
 規約:
 
 ```text
-1. テンプレートは KCS 本体に同梱し、バージョンを effective_ignore_hash の入力に含める
-2. Tier A の解除は、対話承認時の個別選択 または .kcsignore の negation (!pattern) のみ
+1. テンプレートは KIO 本体に同梱し、バージョンを effective_ignore_hash の入力に含める
+2. Tier A の解除は、対話承認時の個別選択 または .kioignore の negation (!pattern) のみ
 3. --yes は Tier A の解除・Tier B 警告のスキップを行えない (06-cli-spec.md §2)
 4. テンプレートの追加・変更は本節の更新を伴う (破壊的変更扱い)
 ```
@@ -179,16 +179,16 @@ id_ed25519*
 ```text
 Tier A 一致の新規ファイル:
   取り込み自体を保留 (quarantine)。CAS 保存・snapshot への取り込みを行わない。
-  kcs status に「取り込み保留 (secrets 候補)」として表示し、
-  取り込みには対話確認 または .kcsignore の明示編集を要する。
+  kio status に「取り込み保留 (secrets 候補)」として表示し、
+  取り込みには対話確認 または .kioignore の明示編集を要する。
   対話確認による取り込みは当該 raw_hash の取り込みとして完結する (再確認は内容変更 =
   新 raw_hash の時のみ — 変更版を再 quarantine するのは意図的な保守既定)。
 
 Tier B 一致の新規ファイル:
   ローカル取り込み (CAS 保存・ローカル index) は行うが、online_api Adapter への
   送信 task は **paused (hold_reason=tier_b_approval — [04-pipeline.md §5.2](04-pipeline.md))**
-  として保留し、kcs status に表示する。
-  対話確認 (kcs index の実行時プロンプト) で一括承認できる (承認 = paused 解除)。
+  として保留し、kio status に表示する。
+  対話確認 (kio index の実行時プロンプト) で一括承認できる (承認 = paused 解除)。
 
 非一致の新規ファイル:
   従来どおり自動取り込み (デフォルト全管理を維持)。
@@ -198,20 +198,20 @@ Tier B 一致の新規ファイル:
 
 # 2. 容量より利便性を優先する
 
-KCS は、容量効率よりも知識を失わないこと、あとから検索・履歴探索・復元できることを優先する。
+KIO は、容量効率よりも知識を失わないこと、あとから検索・履歴探索・復元できることを優先する。
 
 したがって、全ファイル管理をデフォルトとする方針は維持する。動画・巨大PDF・画像・Officeファイルも、ユーザーが明示的に ignore しない限り管理対象に含める。例外は secrets 系の built-in デフォルト除外 (§1.1 — 不可逆な漏洩リスク) と、§4 の走査境界既定 (system directory / VCS repo root / placeholder 等 — 安全側の既定であり容量目的ではない) のみ。
 
 ただし、プロダクトはこの事実を隠してはならない。
 
 ```text
-KCS は検索インデックスだけでなく、原本ファイルを content-addressed archive に保存します。
-各 `.kcs` が管理するのはその `.kcs` が置かれたフォルダ直下のファイルのみです。
-サブフォルダのファイルは (そこに `.kcs` があるか否かに関わらず) 親 `.kcs` は取り込みません。
-対象ファイルを含むサブフォルダには子 `.kcs` が作られ、独立したスコープとして管理されます
+KIO は検索インデックスだけでなく、原本ファイルを content-addressed archive に保存します。
+各 `.kio` が管理するのはその `.kio` が置かれたフォルダ直下のファイルのみです。
+サブフォルダのファイルは (そこに `.kio` があるか否かに関わらず) 親 `.kio` は取り込みません。
+対象ファイルを含むサブフォルダには子 `.kio` が作られ、独立したスコープとして管理されます
 (§4 の既定により VCS repo root 配下には作られません)。
-同じ `.kcs` 内では同じ内容を重複保存しません。
-別フォルダの別 `.kcs` に同じ内容のファイルが存在するのは、ユーザーが意図的に複数フォルダへ
+同じ `.kio` 内では同じ内容を重複保存しません。
+別フォルダの別 `.kio` に同じ内容のファイルが存在するのは、ユーザーが意図的に複数フォルダへ
 同じファイルを配置した場合に限られ、その場合はフォルダ単位の独立性を優先して重複保存します。
 ```
 
@@ -219,24 +219,24 @@ KCS は検索インデックスだけでなく、原本ファイルを content-a
 
 ```text
 推定追加容量
-`.kcs` 内 dedup 後の保存見込み
-別 `.kcs` 間で重複する可能性のある容量 (ユーザーが複数フォルダへ同じファイルを配置している場合のみ発生)
+`.kio` 内 dedup 後の保存見込み
+別 `.kio` 間で重複する可能性のある容量 (ユーザーが複数フォルダへ同じファイルを配置している場合のみ発生)
 大容量ファイル一覧
 現在の空き容量
 ディスク枯渇リスク
 除外候補
 ```
 
-ディスク枯渇が予測される場合、KCS は勝手に対象範囲を狭めない。続行、除外、延期、中断をユーザーに選ばせる。
+ディスク枯渇が予測される場合、KIO は勝手に対象範囲を狭めない。続行、除外、延期、中断をユーザーに選ばせる。
 
 ---
 
 # 3. Scope Registry (= cache only, NOT truth)
 
-KCS は **二層構造** をとる。データ・所有権・権限の **正本は各フォルダ直下の `.kcs`** に閉じる。device-local な scope_registry や将来の global aggregator は **検索キャッシュ・発見補助に過ぎない**。両者を混同しない。
+KIO は **二層構造** をとる。データ・所有権・権限の **正本は各フォルダ直下の `.kio`** に閉じる。device-local な scope_registry や将来の global aggregator は **検索キャッシュ・発見補助に過ぎない**。両者を混同しない。
 
 ```
-truth = folder-local .kcs
+truth = folder-local .kio
   raw object / normalized / chunks / commits / refs
   権限境界 / partial sync / purge / export の単位
 
@@ -249,7 +249,7 @@ cache = scope_registry / aggregator
 保存先:
 
 ```text
-~/.local/share/kcs/scope-registry.sqlite
+~/.local/share/kio/scope-registry.sqlite
 ```
 
 schema (本節が正本。2026-07-14 実装準拠で確定):
@@ -257,7 +257,7 @@ schema (本節が正本。2026-07-14 実装準拠で確定):
 ```sql
 CREATE TABLE scopes (
   scope_id TEXT NOT NULL,
-  kcs_path TEXT NOT NULL,
+  kio_path TEXT NOT NULL,
   root_path TEXT NOT NULL,
   participates_in_global_search INTEGER NOT NULL DEFAULT 1
       CHECK (typeof(participates_in_global_search) = 'integer'
@@ -265,7 +265,7 @@ CREATE TABLE scopes (
   indexed INTEGER NOT NULL DEFAULT 0    -- sqlite.db 構築済み (横断検索の対象候補)
       CHECK (typeof(indexed) = 'integer' AND indexed IN (0, 1)),
   last_seen_at TEXT NOT NULL,
-  PRIMARY KEY (scope_id, kcs_path)
+  PRIMARY KEY (scope_id, kio_path)
 );
 ```
 
@@ -273,38 +273,38 @@ CREATE TABLE scopes (
 
 - WAL モード + busy_timeout 5000ms で複数プロセスの書き込みを直列化する
   ([05-runtime.md](05-runtime.md) 同時実行規約)
-- upsert は `(scope_id, kcs_path)` を key に行い、`indexed` は単調 (MAX) にのみ更新する。`root_path` /
-  `kcs_path` は canonical 形で保存する (規則の正本 = [05-runtime.md §1.8](05-runtime.md): 絶対化 →
+- upsert は `(scope_id, kio_path)` を key に行い、`indexed` は単調 (MAX) にのみ更新する。`root_path` /
+  `kio_path` は canonical 形で保存する (規則の正本 = [05-runtime.md §1.8](05-runtime.md): 絶対化 →
   lexical 解決 → 末尾 separator 除去 → realpath、比較は byte 単位)
-- **stale 登録の退役**: `.kcs` を削除して同じ path で `init` し直すと新しい `scope_id` が採番される
+- **stale 登録の退役**: `.kio` を削除して同じ path で `init` し直すと新しい `scope_id` が採番される
   (scope_id は init 時採番の ULID、[03-data-model.md §2](03-data-model.md))。upsert の直前に、同一
-  `kcs_path` で `scope_id` が異なる行を削除する。**逆方向 (scope の移動) も同様に退役する**: 同一
-  `scope_id` を新しい `kcs_path` で観測 (再発見) したら、同一 scope_id の旧 path 行を削除する —
-  **ただし旧 path がなお到達可能 (存在し有効な `.kcs`) な場合は move と認定せず、削除しない**。
+  `kio_path` で `scope_id` が異なる行を削除する。**逆方向 (scope の移動) も同様に退役する**: 同一
+  `scope_id` を新しい `kio_path` で観測 (再発見) したら、同一 scope_id の旧 path 行を削除する —
+  **ただし旧 path がなお到達可能 (存在し有効な `.kio`) な場合は move と認定せず、削除しない**。
   同一 scope_id の複数 live path は clone 併存であり、**fail-closed で扱う**: global search は当該
-  scope_id を skip して `excluded_scopes` に `KCS-E-REGISTRY-DUP-001` の理由付きで記録し、pointer 解決は
+  scope_id を skip して `excluded_scopes` に `KIO-E-REGISTRY-DUP-001` の理由付きで記録し、pointer 解決は
   候補一覧 error とする ([08-evidence-pointer-spec.md §3.1](08-evidence-pointer-spec.md) — purge 状態の
   異なる clone へ黙って解決しない)。どちらを残すかはユーザーの dedupe に委ねる (複製へ新 scope_id を
   発行する fork は Phase 4+ 予約) —
   stale 行 (到達不能な旧 path) を放置すると、default 横断検索が毎回 skip して恒常的に partial (exit 3)
-  になり、その行経由の Evidence Pointer は `KCS-E-EVIDENCE-SCOPE-UNREACHABLE-001` になる — これが退役の
-  理由。**再 init・再発見のどちらも起こらない恒久消滅** (ドライブ撤去・`.kcs` ごとの削除等) の
-  stale 行は、`kcs repair --registry-prune` (確認プロンプト付き — 到達不能行を列挙し、live clone
+  になり、その行経由の Evidence Pointer は `KIO-E-EVIDENCE-SCOPE-UNREACHABLE-001` になる — これが退役の
+  理由。**再 init・再発見のどちらも起こらない恒久消滅** (ドライブ撤去・`.kio` ごとの削除等) の
+  stale 行は、`kio repair --registry-prune` (確認プロンプト付き — 到達不能行を列挙し、live clone
   検査 (上記) に該当しない行のみ削除。[06-cli-spec.md §1](06-cli-spec.md)) で退役できる —
   registry は検索キャッシュであり、削除しても truth は失われない (scope が再出現すれば再発見で
   再登録される)。live 重複はこれとは別で、上記のとおり fail-closed (search skip + 解決 error) で扱い、
   黙って二重に返すことはない。**live 重複が解消するまでは、当該 scope_id での書き込み系コマンドと
-  online タスク起動 (相 1) も `KCS-E-REGISTRY-DUP-001` で fail-closed とする** — device-global
+  online タスク起動 (相 1) も `KIO-E-REGISTRY-DUP-001` で fail-closed とする** — device-global
   `batch_requests` の行 (PK に scope_id) を複数 clone が共有し、回復・終端・課金の帰属が混線するため
   ([04-pipeline.md §5.8](04-pipeline.md))。dedupe 後に再開する。
-  **複合状態の優先順位 (全コマンド共通の preflight 順序)**: **(0) `kcs_format_version` 互換判定
-  (§12.5 — 自己より新しい store は read-only 縮退・書き込み系は KCS-E-STORE-VERSION-001。
+  **複合状態の優先順位 (全コマンド共通の preflight 順序)**: **(0) `kio_format_version` 互換判定
+  (§12.5 — 自己より新しい store は read-only 縮退・書き込み系は KIO-E-STORE-VERSION-001。
   §12.3 の「schema validation より先」と同じ原則で、他のすべての検査に先行する)** →
   (1) purge journal / epoch 検査
-  ([05-runtime.md §3.5](05-runtime.md)) → (2) registry live 重複 (KCS-E-REGISTRY-DUP-001) →
-  (3) index 可用性 (KCS-E-INDEX-REBUILDING-001) → (4) command 固有の検査。**(3) は復旧・初期化
-  コマンド自身 (`kcs repair --rebuild-db`・index 未作成時の初回 `kcs index`) には適用しない** —
-  復旧経路を preflight でブロックすると index 喪失後に恒久停止する。`kcs status` も拒否対象外
+  ([05-runtime.md §3.5](05-runtime.md)) → (2) registry live 重複 (KIO-E-REGISTRY-DUP-001) →
+  (3) index 可用性 (KIO-E-INDEX-REBUILDING-001) → (4) command 固有の検査。**(3) は復旧・初期化
+  コマンド自身 (`kio repair --rebuild-db`・index 未作成時の初回 `kio index`) には適用しない** —
+  復旧経路を preflight でブロックすると index 喪失後に恒久停止する。`kio status` も拒否対象外
   (journal active 等を拒否せず状態として表示 — [05-runtime.md §3.5](05-runtime.md))。同時成立時は先順の
   error を返し、multi-scope の `excluded_scopes.reason` も同順で決定する (実装順に依存させない —
   purge 再開・dedupe・rebuild のどれを先に行うべきかを automation が一意に判断できる)。読取系は
@@ -318,7 +318,7 @@ CREATE TABLE scopes (
   registry は cache なので削除は解決系には安全 (live scope は自分を再登録する)。**ただし live 重複の
   検出 (DUP gate) も registry に依存するため、削除直後は gate が一時的に盲目になる** — 各 clone の
   次回使用で再登録され次第回復する既知の窓 (削除を dedupe の手段にしない)
-- device data dir (`~/.local/share/kcs/`) は owner-only (0700) に制限する (best-effort。非 unix は
+- device data dir (`~/.local/share/kio/`) は owner-only (0700) に制限する (best-effort。非 unix は
   no-op。registry / cost-ledger / logs は利用パターンとスコープ地図を含むため)
 
 `approved_at` / `effective_ignore_hash` / `permission_status` は permission 系 (Phase 4+) の予約であり、
@@ -328,29 +328,29 @@ schema 変更規約に従う)。
 ### 不変条件 (cache vs truth)
 
 ```text
-1. scope_registry のみを更新して `.kcs` の状態が変わる実装は禁止。
-2. scope_registry 喪失は再構築可能 (各 `.kcs` を rescan)。
-3. `.kcs` 喪失は復旧不能 (registry には正本データがない)。
-4. 検索結果メタには「正本の `.kcs` パス」を必ず含める。
+1. scope_registry のみを更新して `.kio` の状態が変わる実装は禁止。
+2. scope_registry 喪失は再構築可能 (各 `.kio` を rescan)。
+3. `.kio` 喪失は復旧不能 (registry には正本データがない)。
+4. 検索結果メタには「正本の `.kio` パス」を必ず含める。
 5. raw object の所有権・dedup は scope_registry でグローバル化しない。
-   各 `.kcs/objects` 内に閉じる (横断 dedup を諦めた帰結。03-data-model.md §3)。
+   各 `.kio/objects` 内に閉じる (横断 dedup を諦めた帰結。03-data-model.md §3)。
 ```
 
-scope registry は共有 `.kcs` の正本ではない。フォルダ移動や外部ドライブ切断時は、`scope.json` の `scope_id` を使って再発見または stale 扱いにする (`folder_id` は同概念の旧称であり廃止)。
+scope registry は共有 `.kio` の正本ではない。フォルダ移動や外部ドライブ切断時は、`scope.json` の `scope_id` を使って再発見または stale 扱いにする (`folder_id` は同概念の旧称であり廃止)。
 
 ---
 
-# 4. フォルダごとの `.kcs` 運用
+# 4. フォルダごとの `.kio` 運用
 
-`.kcs` は基本的に各フォルダに生成される。ただし、空フォルダや未到達フォルダへ先回りして作る必要はない。
+`.kio` は基本的に各フォルダに生成される。ただし、空フォルダや未到達フォルダへ先回りして作る必要はない。
 
 推奨:
 
 ```text
-kcs init は現在フォルダの .kcs だけを作る
-kcs index は対象ファイルや子scopeを発見した時点で必要な .kcs を作る
-空フォルダには .kcs を作らない
-履歴やobjectを持たない .kcs は repair / cleanup で整理可能にする
+kio init は現在フォルダの .kio だけを作る
+kio index は対象ファイルや子scopeを発見した時点で必要な .kio を作る
+空フォルダには .kio を作らない
+履歴やobjectを持たない .kio は repair / cleanup で整理可能にする
 ```
 
 走査境界の既定 (2026-07-18 確定 — いずれも安全側。緩和は config で明示的に行う):
@@ -368,29 +368,29 @@ hardlink              通常ファイルとして扱う (同一 inode でも pat
 クラウド placeholder  内容を hydrate しない (placeholder のまま skip + status 表示 —
                       勝手なダウンロードで帯域・容量を消費しない)
 権限のないフォルダ    fail-closed: skip + status 表示 (エラーで走査全体を止めない)
-hidden directory      OS の hidden 属性・dotfile は通常どおり対象 (除外は .kcsignore / Tier A で
+hidden directory      OS の hidden 属性・dotfile は通常どおり対象 (除外は .kioignore / Tier A で
                       行う — 隠しであることは機微性の根拠にしない)
 system directory      built-in ignore (Tier A 相当) に含め既定除外
-.kcs 自身             ignore 評価より前に必ず prune (自己再帰の禁止)
-VCS リポジトリ root   既定で子 .kcs を生成しない。既存子 .kcs は grandfathered で継続有効 ([03-data-model.md §3](03-data-model.md))
+.kio 自身             ignore 評価より前に必ず prune (自己再帰の禁止)
+VCS リポジトリ root   既定で子 .kio を生成しない。既存子 .kio は grandfathered で継続有効 ([03-data-model.md §3](03-data-model.md))
 ```
 
 ---
 
 # 5. 物理レイアウト統一
 
-内部正本は `.kcs/objects/normalized_units/` (unit object 群 + manifest) に統一する
+内部正本は `.kio/objects/normalized_units/` (unit object 群 + manifest) に統一する
 ([03-data-model.md §2.1](03-data-model.md))。全文 Markdown は unit を決定論的に結合した
 view (再生成可能な cache) であり正本ではない。
 
-過去メモにある `.kcs/normalized/` は、bootstrap 時の簡略表記または仮想表示パスとして扱う。実装・契約ドキュメントでは、hash ベースの object store を正とする。
+過去メモにある `.kio/normalized/` は、bootstrap 時の簡略表記または仮想表示パスとして扱う。実装・契約ドキュメントでは、hash ベースの object store を正とする。
 
 ```text
 truth:
-  .kcs/objects/normalized_units/ab/cd/<raw64>.<tool64>.g<gen>/
+  .kio/objects/normalized_units/ab/cd/<raw64>.<tool64>.g<gen>/
 
 materialized view (cache):
-  .kcs/objects/normalized/ab/cd/<raw64>.<tool64>.g<gen>.md
+  .kio/objects/normalized/ab/cd/<raw64>.<tool64>.g<gen>.md
 
 virtual view:
   report.pdf.md
@@ -405,7 +405,7 @@ Evidence URI の identity は変更しない。新規の物理 object は canoni
 canonical への eager migration を行わない。normalized の同一 gen を更新する partial retry は、選択済みの
 legacy layout 内で instance/view を置き換えられる。事前の一括変換は不要。canonical / legacy の両方が存在する
 場合は両方を検証し、いずれかの不一致または競合を store corruption として fail closed する。これは物理ファイル名の portability correction であり、
-object hash 算出・論理 identity の変更や `kcs_format_version` の MAJOR bump ではない
+object hash 算出・論理 identity の変更や `kio_format_version` の MAJOR bump ではない
 ([03-data-model.md §2 / §8.1](03-data-model.md))。
 
 ---
@@ -435,24 +435,24 @@ Future:
 
 # 7. Purge の保証範囲
 
-`purge` は、KCS 管理下の object store (本文 bytes と派生 artifact — manifest object 含む)、index、pack、cache (`~/.cache/kcs/open/` の一時展開を含む — [05-runtime.md §3.5](05-runtime.md))、
-および KCS 自身のログ (`.kcs/logs/access.jsonl`、`~/.local/share/kcs/logs/` の
+`purge` は、KIO 管理下の object store (本文 bytes と派生 artifact — manifest object 含む)、index、pack、cache (`~/.cache/kio/open/` の一時展開を含む — [05-runtime.md §3.5](05-runtime.md))、
+および KIO 自身のログ (`.kio/logs/access.jsonl`、`~/.local/share/kio/logs/` の
 events / errors / metrics) から対象ファイル由来の情報を削除する操作である。
 **snapshot DAG (commit / tree object) は書き換えない** — tree entry のメタデータ (path, raw_hash) は
 履歴に残る (正本 [05-runtime.md §3.5](05-runtime.md)。完全な履歴書き換えは v2+/Phase 4+ —
 [06-cli-spec.md §6](06-cli-spec.md))。
-ログについては、**当該 scope の scope_id を持ち**対象の raw_hash / path / query を含む行の削除またはフィールドマスクを行う (device-global log の**別 scope の同一 raw_hash 行には触れない** — per-.kcs dedup により同一 bytes が独立 scope に併存し得るため。scope 由来の行は scope_id を必須 field とする — §12.6)。
+ログについては、**当該 scope の scope_id を持ち**対象の raw_hash / path / query を含む行の削除またはフィールドマスクを行う (device-global log の**別 scope の同一 raw_hash 行には触れない** — per-.kio dedup により同一 bytes が独立 scope に併存し得るため。scope 由来の行は scope_id を必須 field とする — §12.6)。
 `redact_logs` デフォルト true (§12.6) の運用では query / path / prompt は元から記録されないため、
 実務上のスクラブ対象は主に raw_hash 参照行に限られ軽量である。
 purge 自体の実行記録 (`commit_type=purged`、tombstone) は監査可能性のため残す ([05-runtime.md §3.2](05-runtime.md))。
 
-ただし、OS backup、Time Machine、クラウド同期の過去版、外部 export、ユーザーが手動コピーしたファイル、KCS 外のログまでは KCS 単体では保証しない。
+ただし、OS backup、Time Machine、クラウド同期の過去版、外部 export、ユーザーが手動コピーしたファイル、KIO 外のログまでは KIO 単体では保証しない。
 
 UI 文言は、過剰な保証を避ける。
 
 ```text
 推奨:
-  KCS 管理下の本文と派生物を全履歴から削除 (ファイル名と存在の記録は履歴に残ります)
+  KIO 管理下の本文と派生物を全履歴から削除 (ファイル名と存在の記録は履歴に残ります)
 
 避ける:
   世界中のすべてのコピーを完全削除
@@ -469,21 +469,21 @@ UI 文言は、過剰な保証を避ける。
   chunks.jsonl の**対象 chunk_id を参照する creation 行・publication event 行の全部**を含む。
   正本一覧は [05-runtime.md §3.5](05-runtime.md))
 pack / cache / index rebuild
-KCS 自身のログのスクラブ (該当行の削除またはマスク) と、その完了有無の結果表示
+KIO 自身のログのスクラブ (該当行の削除またはマスク) と、その完了有無の結果表示
 復元不能な最小 tombstone
 ```
 
 ---
 
-# 7.5 `.kcs` の整合性検証とバックアップ
+# 7.5 `.kio` の整合性検証とバックアップ
 
-「`.kcs` 喪失は復旧不能」(§3 不変条件 3) である以上、破損の検出手段とバックアップ手順を
+「`.kio` 喪失は復旧不能」(§3 不変条件 3) である以上、破損の検出手段とバックアップ手順を
 仕様として持つ。
 
-## 7.5.1 kcs repair --verify-objects (fsck 相当)
+## 7.5.1 kio repair --verify-objects (fsck 相当)
 
 ```bash
-kcs repair --verify-objects
+kio repair --verify-objects
 ```
 
 - `objects/` 配下の全 CAS object (raw / prepared / image / chunk / embedding / manifest / toollock / tree / commit) を [03-data-model.md §8.1](03-data-model.md) の per-type algorithm で検証し (embedding は vector 長・有限値・vector digest も — 03 §8.1)、
@@ -517,10 +517,10 @@ kcs repair --verify-objects
    → re-ingest で object を復元し、commit_type=repaired の commit を記録
      (復元した raw object は GC 対象外、05-runtime.md §2.6)
 2. 復元手段なし
-   → missing として errors.jsonl に KCS-E-STORE-CORRUPT-001 を記録し、
+   → missing として errors.jsonl に KIO-E-STORE-CORRUPT-001 を記録し、
      (normalized unit の done object 欠落も同様 — same-gen 再生成は行わない (unit object は
       immutable であり、非決定的な再生成は過去 commit の内容差し替えになる)。復元は backup
-      restore、または明示の新 gen (kcs reindex --force) で行う)
+      restore、または明示の新 gen (kio reindex --force) で行う)
      影響を受ける commit hash の bounded 一覧と
      `external_pointers_may_be_affected=true` を表示する。Evidence Pointer は self-contained で
      registry がないため、存在しない pointer 一覧を推測・捏造しない
@@ -534,9 +534,9 @@ event を削除せず監査を残すため説明能力を保つ) または erase
 corruption にしない。**説明範囲の限定**: tombstone / erase receipt が説明できるのは、当該 purge event の
 時点 (当該 purged / erased event の `in_commit`) **以前**の commit が参照する closure に限る — retire 後に再作成・再公開された
 object の欠落は corruption とする (古い退役 event が新規破損を隠さない)。**tree 欠落**は
-`.kcs/gc/shallowed/<commit64>` receipt が説明する場合のみ正常
+`.kio/gc/shallowed/<commit64>` receipt が説明する場合のみ正常
 (shallow — [05-runtime.md §2.2](05-runtime.md))、receipt なき欠落は corruption。receipt-covered bytes は working copy から
-自動復元しない。この receipt (= `.kcs/gc/shallowed/` の shallow receipt) は public pointer API と re-ingest barrier には使わない (erase receipt の用途列挙は別 — [08-evidence-pointer-spec.md §4.2](08-evidence-pointer-spec.md))。purge journal が active
+自動復元しない。この receipt (= `.kio/gc/shallowed/` の shallow receipt) は public pointer API と re-ingest barrier には使わない (erase receipt の用途列挙は別 — [08-evidence-pointer-spec.md §4.2](08-evidence-pointer-spec.md))。purge journal が active
 なら incomplete exit 3。marker 無し missing は ordinary store corruption、malformed / identity-conflicting
 receipt も corruption とする。verified raw と marker の共存の正常判定・修復は **canonical final event ([08-evidence-pointer-spec.md §3.1](08-evidence-pointer-spec.md) 手順 5) を基準にする** (marker 単独の末尾では判定しない — 別 marker のより新しい purge を見逃す): 共存が**正常**なのは canonical final event が `retired` の場合
 (resurrection — [05-runtime.md §3.5](05-runtime.md))。canonical final event が `erased` のまま verified raw が
@@ -547,7 +547,7 @@ verified raw が存在する場合**: canonical final purged event の `in_commi
 ref 到達可能な再 publication commit が存在するなら、crash した resurrection の完遂として `retired` を
 append して整合させる ([05-runtime.md §3.5](05-runtime.md) の補完規範と同一の因果条件)。**存在しなければ
 incomplete purge として exit 3 で報告する** (retired を append しない —
-purge 済み内容を fsck が復活させない。回復は同一対象への `kcs purge --raw-hash` の再実行で冪等に
+purge 済み内容を fsck が復活させない。回復は同一対象への `kio purge --raw-hash` の再実行で冪等に
 完遂できる — [09-mvp-scope.md §5.3](09-mvp-scope.md) の再 purge 規範。報告にはこの誘導を含める) (**receipt は除去しない** — 除去すると旧 commit が参照する
 manifest 欠落を説明するものが消える。**commit がまだ無い場合 — snapshot finalize 前の crash — は
 「未 finalize の進行状態」として incomplete (exit 3) とし、append しない** —
@@ -583,7 +583,7 @@ terminal `retired` の `resurrection_commit` 検証も erased 側と同一に必
 (erased 開始の文法は receipt 専用)。検証失敗の marker は説明能力を持たず corruption とする —
 偽 `in_commit` を持つ構造的に正しい tombstone が genuine missing を隠さない)。
 
-**orphan 掃除 (`--prune-orphans`)**: `kcs repair --verify-objects --prune-orphans` は、どの manifest
+**orphan 掃除 (`--prune-orphans`)**: `kio repair --verify-objects --prune-orphans` は、どの manifest
 からも参照されない orphan prepared / image (公開前 crash の残骸 — [05-runtime.md §3.5](05-runtime.md))
 と **descriptor の無い staging root・path と不整合な staging root (descriptor の有無を問わない)・
 terminal 化済み (done / failed permanent / abandoned / settled partial — [04-pipeline.md §5.2](04-pipeline.md)) task にのみ対応する staging root
@@ -610,16 +610,16 @@ descriptor の無い・path 不整合・terminal 化済み task の残骸は上�
 manifest 進行状態・active な purge journal のいずれかが存在する間は、prune を実行せず exit 3
 (retryable) で拒否する — **manifest 未確定の正規進行中 prepared / image を orphan と誤認して削除
 しない**ため (相 3 collect の入力を消すと再課金・欠落参照になる。終端・完了後に再実行する)。拒否応答には
-blocker の種別と対象 (intent_token または 4 組キー) を含め、次操作 (`kcs batch resume` /
-`kcs batch abandon` / journal 回復) を提示する — terminal (state 2/3) の行は blocker にならない。
+blocker の種別と対象 (intent_token または 4 組キー) を含め、次操作 (`kio batch resume` /
+`kio batch abandon` / journal 回復) を提示する — terminal (state 2/3) の行は blocker にならない。
 
 **purge 済み raw の open cache 残骸**: `--prune-orphans` は、当該 scope で canonical final event が
-`purged` **または `erased`** である各 raw_hash について `~/.cache/kcs/open/<raw_hash digest64>/` の
+`purged` **または `erased`** である各 raw_hash について `~/.cache/kio/open/<raw_hash digest64>/` の
 残存も検査し、存在すれば同じ locked repair の削除対象に含める ([06-cli-spec.md §1.1](06-cli-spec.md) の
 cache publish と起動直前検査の間の crash は、publish 済み cache を除去主体なしに残し得る —
 purge 完遂後の平文残存の回収経路。cache は再生成可能な非 truth であり、同一 raw が他 scope に
 live で存在しても削除は安全 — 次回の open が再展開する)。**image cache も同様に回収する**:
-orphan image の削除時は対応する `~/.cache/kcs/open/image/<image_hash digest64>/`
+orphan image の削除時は対応する `~/.cache/kio/open/image/<image_hash digest64>/`
 ([06-cli-spec.md §1.1](06-cli-spec.md)) を削除対象に含め、当該 scope のどの live manifest からも
 参照されない image の cache dir 残存も同じ検査で回収する (crash 窓の残存は raw と同型。**判定は
 当該 scope の manifest 列挙による** — 他 scope で live な同一 image の cache を削除し得るが、
@@ -632,23 +632,23 @@ MVP では手動実行のみとする。自動定期検証 (スケジューラ�
 正式なバックアップ手段は次の 2 つとし、専用コマンドは MVP では追加しない。
 
 ```text
-1. .kcs ディレクトリごとのコピー (MVP の推奨手段)
-   - コピー中に kcs が書き込まないこと (.kcs/.lock 未取得状態) を確認してから行う。
+1. .kio ディレクトリごとのコピー (MVP の推奨手段)
+   - コピー中に kio が書き込まないこと (.kio/.lock 未取得状態) を確認してから行う。
      **注意: この確認は check-then-act であり、確認とコピーの間の書き込みまでは防げない** —
-     コピー中に kcs コマンドを実行しないことがユーザー前提。厳密な原子性が必要なら
+     コピー中に kio コマンドを実行しないことがユーザー前提。厳密な原子性が必要なら
      filesystem スナップショット (APFS/btrfs 等) 上でコピーする。復元後は
-     `kcs repair --verify-objects` (§7.5.1) を必ず実行して整合を確認する
+     `kio repair --verify-objects` (§7.5.1) を必ず実行して整合を確認する
    - sqlite.db は repair --rebuild-db で再構築可能 (例外 = embeddings の `target_type='query_cache'` 行 — 復元されず破棄、喪失影響は cursor 拒否のみ [04-pipeline.md §4.3](04-pipeline.md))。ただし**最低保全集合は objects/ と refs/ では
      なく、[03-data-model.md §4.1](03-data-model.md) の truth 区分の全行** (scope.json / config /
      tool-lock / tombstones + erase receipts / chunks.jsonl / access.jsonl を含む) — これらは
      いずれも喪失時復旧不能である
-   - **デバイスグローバルの cost-ledger.sqlite は `.kcs` コピーに含まれない** — 別途
-     `sqlite3 "<KCS data dir>/cost-ledger.sqlite" ".backup <dest>"` (WAL-safe。**必ず実体の絶対パスで
+   - **デバイスグローバルの cost-ledger.sqlite は `.kio` コピーに含まれない** — 別途
+     `sqlite3 "<KIO data dir>/cost-ledger.sqlite" ".backup <dest>"` (WAL-safe。**必ず実体の絶対パスで
      指定する** — 相対パスはカレントに空 DB を新規作成し「正常にバックアップできた」ように見える。
-     例: `sqlite3 "${XDG_DATA_HOME:-$HOME/.local/share}/kcs/cost-ledger.sqlite" ".backup /backups/kcs-cost-ledger.sqlite"` —
+     例: `sqlite3 "${XDG_DATA_HOME:-$HOME/.local/share}/kio/cost-ledger.sqlite" ".backup /backups/kio-cost-ledger.sqlite"` —
      `<...>` は展開後も絶対パスであること。
      **復元後は `PRAGMA integrity_check` と cost_ledger / batch_requests 両表の存在を確認する**) で
-     バックアップし、復元は KCS プロセス非実行中に行い、復元後は
+     バックアップし、復元は KIO プロセス非実行中に行い、復元後は
      §5.8 の回復 (reconcile) が完了するまで新規 Batch 投入を行わない ([04-pipeline.md §5.4](04-pipeline.md))。
      **復元した DB は backup 以後の投入記録を失っている** — 復元後の初回回復では、**記録済み provider
      scope と現在構成の各 Batch client の provider_scope_id を合わせた集合**の全ページ一覧
@@ -657,27 +657,27 @@ MVP では手動実行のみとする。自動定期検証 (スケジューラ�
      `batch_requests` に対応行が無い job / upload を次の帰属規則で報告する (**job の帰属は token 形式では
      なく job metadata の task key 4 組が担う** — [04-pipeline.md §5.8](04-pipeline.md) の帰属規範と同一。
      UUIDv7 token 単独では帰属できない。出力 unit の対応付けに使う custom_id は別層 — 同 §5.8)。
-     **「ローカル構成の scope」= 判定時点の scope_registry の行のうち、root_path の `.kcs/scope.json` を
+     **「ローカル構成の scope」= 判定時点の scope_registry の行のうち、root_path の `.kio/scope.json` を
      実地検証 (読取 + scope_id 一致) できた scope_id 集合** (registry は cache — 喪失・prune 済みなら
      [05-runtime.md §6](05-runtime.md) の再構築 (ユーザー既知 root での再登録) を先行させる。未再登録
      scope の job は unknown 側に落ち、再登録後の再実行で orphan 候補へ移る — 報告は冪等):
      metadata の task key 4 組が完全に読め、かつ scope_id がこの集合に一致する job は
-     orphan 候補として報告し、結果取得 (読み取りのみで安全) と、**他 KCS インスタンスとの provider
+     orphan 候補として報告し、結果取得 (読み取りのみで安全) と、**他 KIO インスタンスとの provider
      scope 共有がないことを確認した上での**削除を案内する。metadata が一致しない・読めない job と、
      filename の token しか持たない upload は**帰属不能 (unknown) として報告のみ** — 結果取得・削除の
      どちらも案内しない (他インスタンス・他ツール由来があり得る)。自動再投入・自動削除はしない
      (二重課金と orphan 課金の可視化)
 
-2. kcs export <scope> --to <bundle.kcsz>
-   - .kcsz は export と同一の bundle 形式で、バックアップにも使える (bundle には承認・運用記録・
+2. kio export <scope> --to <bundle.kioz>
+   - .kioz は export と同一の bundle 形式で、バックアップにも使える (bundle には承認・運用記録・
      登録 path 等の機微 metadata が含まれる — 共有は同一信頼境界内を想定、[06-cli-spec.md §10](06-cli-spec.md))
    - export の実装は Phase 4+ ([09-mvp-scope.md](09-mvp-scope.md))。MVP のバックアップは
      lock 未取得確認 + ディレクトリコピー (手段 1) のみを提供する
-   - 復元は kcs import (同じく Phase 4+)
+   - 復元は kio import (同じく Phase 4+)
 ```
 
-復元後は `kcs repair --verify-objects` で整合性を確認する。外部ドライブ・クラウド
-ストレージの placeholder file 上の `.kcs` は破損リスクが高いため、§4 の境界方針の確定
+復元後は `kio repair --verify-objects` で整合性を確認する。外部ドライブ・クラウド
+ストレージの placeholder file 上の `.kio` は破損リスクが高いため、§4 の境界方針の確定
 までは推奨しない。
 
 ## 7.5.3 SQLite schema 変更の規約 (rebuild vs in-place migration)
@@ -685,7 +685,7 @@ MVP では手動実行のみとする。自動定期検証 (スケジューラ�
 sqlite.db / scope-registry.sqlite は正本から再構築可能な cache である ([03-data-model.md §4.1](03-data-model.md)。
 例外 = embeddings の `target_type='query_cache'` 行のみ再構築対象外 — 破棄で足りる、[04-pipeline.md §4.3](04-pipeline.md))。
 したがって schema 変更のデフォルト経路は **migration を書かず再構築する** こと
-(sqlite.db は `kcs repair --rebuild-db`、registry は各 `.kcs` の rescan)。
+(sqlite.db は `kio repair --rebuild-db`、registry は各 `.kio` の rescan)。
 
 **`cost-ledger.sqlite` はこのデフォルトの対象外** — 再構築不可の運用台帳 (課金記録 + in-flight Batch
 intent、[04-pipeline.md §5.4](04-pipeline.md)) であり、schema 変更は常に下記の in-place migration
@@ -774,7 +774,7 @@ MVP文書:
 
 # 10. Adapter セキュリティ
 
-R23 の Markdownize / Embedding Adapter は KCS 同梱の built-in target のみを実行し、
+R23 の Markdownize / Embedding Adapter は KIO 同梱の built-in target のみを実行し、
 任意コマンドや任意 URL への差し替えは受理しない。ローカルAPIや外部プロセスを扱う
 dispatcher は将来仕様であり、実装時には現行の入力・送信境界に加えて command 境界も
 明確にする。
@@ -821,7 +821,7 @@ secret redaction
 実装責務の分担:
 
 ```text
-KCS:
+KIO:
   - 変更検出 (raw_hash 変化 + unit_mapping による変化率算出, 04-pipeline.md §2.2)
   - 発動条件の判定 (capability / 閾値 / 連続回数)
   - Adapter への入力組み立て (旧 raw, 旧 Markdown, hints)
@@ -834,11 +834,11 @@ Markdownize Adapter:
   - 軽微でないと判断したら fallback_to_full=true を返す
 ```
 
-Adapter が `incremental_update` capability を宣言しない場合は、KCS は常に full モードで Adapter を呼ぶ。これにより既存 Adapter との後方互換が保たれる。
+Adapter が `incremental_update` capability を宣言しない場合は、KIO は常に full モードで Adapter を呼ぶ。これにより既存 Adapter との後方互換が保たれる。
 
 詳細仕様: [04-pipeline.md §2, §3](04-pipeline.md), [07-adapter-spec.md §8](07-adapter-spec.md)
 
-設定上書き例 (`.kcs/config.toml`):
+設定上書き例 (`.kio/config.toml`):
 
 ```toml
 [markdownize.incremental]
@@ -870,7 +870,7 @@ done criteria                    → 09-mvp-scope.md
 未統合で実装前に具体化が必要なもの:
 
 ```text
-.kcsignore spec                  → 03-data-model.md §11.1 に追記済み (2026-07-03)
+.kioignore spec                  → 03-data-model.md §11.1 に追記済み (2026-07-03)
 Normalized Markdown 形式 spec     → 07-adapter-spec.md §5.2.1 に最小凍結済み (2026-07-18)
 ```
 
@@ -884,7 +884,7 @@ Normalized Markdown 形式 spec     → 07-adapter-spec.md §5.2.1 に最小凍�
 
 ## 12.1 エラーコード namespace
 
-すべての error は `KCS-E-<DOMAIN>-<SUBDOMAIN>-<NNN>` 形式の **error_code** を持つ。`error_kind` などのフリーテキストはユーザー向け表示専用で、機械判定には `error_code` を使う (明示例外 = manifest `units[]` / Adapter 出力 `failed_units` の `error_kind` — [04-pipeline.md §5.3](04-pipeline.md) の閉 enum であり、unit 単位の retry 可否判定に使う)。
+すべての error は `KIO-E-<DOMAIN>-<SUBDOMAIN>-<NNN>` 形式の **error_code** を持つ。`error_kind` などのフリーテキストはユーザー向け表示専用で、機械判定には `error_code` を使う (明示例外 = manifest `units[]` / Adapter 出力 `failed_units` の `error_kind` — [04-pipeline.md §5.3](04-pipeline.md) の閉 enum であり、unit 単位の retry 可否判定に使う)。
 
 ```text
 DOMAIN:
@@ -898,19 +898,19 @@ DOMAIN:
   REGISTRY scope registry (live clone 重複・退役 — [§3])
   SYNC     同期・共有 (v2 予約。MVP では発行しない)
   ADAPTER  Adapter ロード・実行
-  EMBED    embedding profile / modality 検証 (KCS-E-EMBED-MODALITY-001 — [03-data-model.md §7](03-data-model.md))
+  EMBED    embedding profile / modality 検証 (KIO-E-EMBED-MODALITY-001 — [03-data-model.md §7](03-data-model.md))
   CONFIG   config / schema / 設定
   STORE    object store / fs IO
   AUTH     認証・認可
 ```
 
-例: `KCS-E-BATCH-NET-001`, `KCS-E-SEARCH-VEC-INCOMPAT-001`, `KCS-E-SEARCH-VEC-UNAVAIL-001`, `KCS-E-SEARCH-VEC-UNAUTHORIZED-001`, `KCS-E-COMMIT-SHALLOW-001`, `KCS-E-PURGE-NOT-FOUND-001`, `KCS-E-PURGE-JOURNAL-ACTIVE-001` (未完了 purge journal / epoch 不変違反による**読み取り系** preflight の拒否 (書き込み系は journal 回復を再開)。**restore の rename 後再検査が対象を closure に含む active journal を検出した場合の publish 後巻き戻し終端にも用いる** — retryable、exit 3、[05-runtime.md §3.5](05-runtime.md)), `KCS-E-COMMIT-RESTORE-CONFLICT-001` (restore の publish / 巻き戻しにおける no-replace 競合・dev/inode 不一致・退避 / 隔離の同名残存 — context に閉 enum `conflict_kind`・`retry_disposition` (transient / manual_action) と両者の所在を含む。retryable、exit 3、[05-runtime.md §3.5](05-runtime.md)), `KCS-E-ADAPTER-APPROVAL-CONFLICT-001` (承認 publish 直前の CAS 不一致 — 並行 revoke による pending 除去・再承認が必要。exit 5、[07-adapter-spec.md §3](07-adapter-spec.md)), `KCS-E-ADAPTER-SPECVER-001` (spec_version 不一致 — invalid_input / 非再試行、[07-adapter-spec.md §8.1](07-adapter-spec.md)), `KCS-E-STORE-PATH-001`, `KCS-E-STORE-CORRUPT-001`, `KCS-E-STORE-VERSION-001` (§12.5 — 新しい `kcs_format_version` の store への書き込み系実行・読解不能), `KCS-E-SEARCH-SCOPE-ALL-FAILED-001`, `KCS-E-SEARCH-CURSOR-001`, `KCS-E-INDEX-REBUILDING-001`, `KCS-E-EVIDENCE-SCOPE-UNREACHABLE-001`, `KCS-E-EVIDENCE-RETARGET-AMBIG-001`, `KCS-E-ADAPTER-CONTRACT-001`。各 code の定義箇所は該当 spec (06-cli-spec.md §8 に一覧と参照先) を参照。
+例: `KIO-E-BATCH-NET-001`, `KIO-E-SEARCH-VEC-INCOMPAT-001`, `KIO-E-SEARCH-VEC-UNAVAIL-001`, `KIO-E-SEARCH-VEC-UNAUTHORIZED-001`, `KIO-E-COMMIT-SHALLOW-001`, `KIO-E-PURGE-NOT-FOUND-001`, `KIO-E-PURGE-JOURNAL-ACTIVE-001` (未完了 purge journal / epoch 不変違反による**読み取り系** preflight の拒否 (書き込み系は journal 回復を再開)。**restore の rename 後再検査が対象を closure に含む active journal を検出した場合の publish 後巻き戻し終端にも用いる** — retryable、exit 3、[05-runtime.md §3.5](05-runtime.md)), `KIO-E-COMMIT-RESTORE-CONFLICT-001` (restore の publish / 巻き戻しにおける no-replace 競合・dev/inode 不一致・退避 / 隔離の同名残存 — context に閉 enum `conflict_kind`・`retry_disposition` (transient / manual_action) と両者の所在を含む。retryable、exit 3、[05-runtime.md §3.5](05-runtime.md)), `KIO-E-ADAPTER-APPROVAL-CONFLICT-001` (承認 publish 直前の CAS 不一致 — 並行 revoke による pending 除去・再承認が必要。exit 5、[07-adapter-spec.md §3](07-adapter-spec.md)), `KIO-E-ADAPTER-SPECVER-001` (spec_version 不一致 — invalid_input / 非再試行、[07-adapter-spec.md §8.1](07-adapter-spec.md)), `KIO-E-STORE-PATH-001`, `KIO-E-STORE-CORRUPT-001`, `KIO-E-STORE-VERSION-001` (§12.5 — 新しい `kio_format_version` の store への書き込み系実行・読解不能), `KIO-E-SEARCH-SCOPE-ALL-FAILED-001`, `KIO-E-SEARCH-CURSOR-001`, `KIO-E-INDEX-REBUILDING-001`, `KIO-E-EVIDENCE-SCOPE-UNREACHABLE-001`, `KIO-E-EVIDENCE-RETARGET-AMBIG-001`, `KIO-E-ADAPTER-CONTRACT-001`。各 code の定義箇所は該当 spec (06-cli-spec.md §8 に一覧と参照先) を参照。
 
 各 spec が定義した個別エラー (04-pipeline.md / 05-runtime.md / 06-cli-spec.md 等) はこの namespace に従う。新規 code 追加は本書および該当 spec の更新を伴う (破壊的変更扱い)。
 
 ## 12.2 CLI exit code
 
-KCS のすべての CLI コマンドは以下の exit code を返す。
+KIO のすべての CLI コマンドは以下の exit code を返す。
 
 ```text
 0   成功 / 全 up_to_date
@@ -932,26 +932,26 @@ dead pointer (tombstoned / not_found) は `4`、**scope_unreachable のみは re
 
 ## 12.3 設定ファイル schema validation
 
-すべての設定ファイルは JSON Schema (TOML は JSON 等価表現に変換して同 schema で validate) を持ち、CLI 起動時に schema-driven validation を行う。schema は KCS 本体に同梱する。
+すべての設定ファイルは JSON Schema (TOML は JSON 等価表現に変換して同 schema で validate) を持ち、CLI 起動時に schema-driven validation を行う。schema は KIO 本体に同梱する。
 
 ```text
-~/.config/kcs/tools.toml          → schemas/tools.schema.json
-~/.config/kcs/config.toml         → schemas/user-config.schema.json
-.kcs/config.toml                  → schemas/folder-config.schema.json
-.kcs/scope.json                   → schemas/scope.schema.json
-.kcs/tool-lock.json               → schemas/tool-lock.schema.json
-.kcs/manifest.json (簡易管理時)    → schemas/manifest.schema.json
+~/.config/kio/tools.toml          → schemas/tools.schema.json
+~/.config/kio/config.toml         → schemas/user-config.schema.json
+.kio/config.toml                  → schemas/folder-config.schema.json
+.kio/scope.json                   → schemas/scope.schema.json
+.kio/tool-lock.json               → schemas/tool-lock.schema.json
+.kio/manifest.json (簡易管理時)    → schemas/manifest.schema.json
 ```
 
-validation 失敗は exit code 2 で停止し、`KCS-E-CONFIG-SCHEMA-001` を返す。schema は semver で版管理し、breaking change は migration を要求 (§12.5)。
+validation 失敗は exit code 2 で停止し、`KIO-E-CONFIG-SCHEMA-001` を返す。schema は semver で版管理し、breaking change は migration を要求 (§12.5)。
 
-`scope.schema.json` は少なくとも次の key を定義する: `scope_id` (required)・子 `.kcs` リンク ([03-data-model.md §2](03-data-model.md))・`scan_approval` (optional — §1 の取り込み承認記録。required field は §1 の記録一覧と一致)・`approvals[]` (optional — adapter 単位の network opt-in。要素の required field = scope_id / tool_id / execution_mode / tool_profile_hash / approved_at / approval_method / status (`active` | `revoked`)、status=revoked の行は revoked_at も必須 — [07-adapter-spec.md §3](07-adapter-spec.md))・`approval_pending` (optional — 承認書込順の pending intent、[07-adapter-spec.md §3](07-adapter-spec.md)。**単一 object (配列にしない — 承認操作は `.kcs/.lock` で直列化され並存しない)**。required field = scope_id / tool_id / execution_mode / tool_profile_hash / **approved_at / approval_method** (公開行の監査値 — self-heal がそのまま publish する)。**要素単位の後方互換: approved_at / approval_method を欠く legacy pending は schema error にしない** — self-heal の完全一致条件を満たさないため publish はされず、次回 locked mutation で除去して明示承認を要求する (approvals[] status 補完と同型 — 要素単位の欠落で CLI 全体を exit 2 停止させない)。**この除去は `approvals_initialized` marker が無ければ同一 atomic write で true 化する** (revoke の pending 除去と同型 — 除去だけでは真正初回条件が復活し、次回の初回 materialize が明示承認要求を無音で迂回する。[07-adapter-spec.md §3](07-adapter-spec.md))。行 publish と同一 atomic write で除去)・`approvals_initialized` (optional boolean — 初回承認の行 publish、pending 除去・行 revoked 化を実行した revoke、または legacy pending の locked cleanup と同一 atomic write で true 化する消費済み marker ([07-adapter-spec.md §3](07-adapter-spec.md))。true かつ approvals[] 空 = 初回例外の消費済み (台帳喪失・revoke 後を含む) として blanket 自動 materialize を fail-closed にする、07 §3)。**未知 key は schema error** (fail-closed)。この検証は `kcs_format_version` の互換判定より**後**に走る — 自己の対応上限より新しい version の store は schema validation に入らず read-only + 新版誘導で縮退する ([03-data-model.md §2](03-data-model.md))。公開後に scope.schema.json へ key を追加する場合は `kcs_format_version` の MINOR bump を伴う (§12.5 — bump が旧実装をこの縮退経路へ導く。未知 key = schema error 自体は維持する: marker 等 security 意味を持つ key を旧実装が黙って無視すると迂回が復活するため)。両 key (および marker) を欠く旧 scope.json は valid であり、欠落 = 当該承認なしとして扱う (migration 不要の後方互換)。**要素単位の後方互換**: `status` フィールドを持たない approvals[] 行 (r9 スキーマ以前の承認記録) は schema error にせず **`status='active'` として読む** — 行は明示承認の記録であり、execution_mode / tool_profile_hash の一致検査 (失効判定) は従来どおり効く。次回の locked mutation で `status='active'` を atomic に補完書込みし、補完後は現行 schema で検証する (要素単位の欠落で CLI 全体を exit 2 停止させない)。
+`scope.schema.json` は少なくとも次の key を定義する: `scope_id` (required)・子 `.kio` リンク ([03-data-model.md §2](03-data-model.md))・`scan_approval` (optional — §1 の取り込み承認記録。required field は §1 の記録一覧と一致)・`approvals[]` (optional — adapter 単位の network opt-in。要素の required field = scope_id / tool_id / execution_mode / tool_profile_hash / approved_at / approval_method / status (`active` | `revoked`)、status=revoked の行は revoked_at も必須 — [07-adapter-spec.md §3](07-adapter-spec.md))・`approval_pending` (optional — 承認書込順の pending intent、[07-adapter-spec.md §3](07-adapter-spec.md)。**単一 object (配列にしない — 承認操作は `.kio/.lock` で直列化され並存しない)**。required field = scope_id / tool_id / execution_mode / tool_profile_hash / **approved_at / approval_method** (公開行の監査値 — self-heal がそのまま publish する)。**要素単位の後方互換: approved_at / approval_method を欠く legacy pending は schema error にしない** — self-heal の完全一致条件を満たさないため publish はされず、次回 locked mutation で除去して明示承認を要求する (approvals[] status 補完と同型 — 要素単位の欠落で CLI 全体を exit 2 停止させない)。**この除去は `approvals_initialized` marker が無ければ同一 atomic write で true 化する** (revoke の pending 除去と同型 — 除去だけでは真正初回条件が復活し、次回の初回 materialize が明示承認要求を無音で迂回する。[07-adapter-spec.md §3](07-adapter-spec.md))。行 publish と同一 atomic write で除去)・`approvals_initialized` (optional boolean — 初回承認の行 publish、pending 除去・行 revoked 化を実行した revoke、または legacy pending の locked cleanup と同一 atomic write で true 化する消費済み marker ([07-adapter-spec.md §3](07-adapter-spec.md))。true かつ approvals[] 空 = 初回例外の消費済み (台帳喪失・revoke 後を含む) として blanket 自動 materialize を fail-closed にする、07 §3)。**未知 key は schema error** (fail-closed)。この検証は `kio_format_version` の互換判定より**後**に走る — 自己の対応上限より新しい version の store は schema validation に入らず read-only + 新版誘導で縮退する ([03-data-model.md §2](03-data-model.md))。公開後に scope.schema.json へ key を追加する場合は `kio_format_version` の MINOR bump を伴う (§12.5 — bump が旧実装をこの縮退経路へ導く。未知 key = schema error 自体は維持する: marker 等 security 意味を持つ key を旧実装が黙って無視すると迂回が復活するため)。両 key (および marker) を欠く旧 scope.json は valid であり、欠落 = 当該承認なしとして扱う (migration 不要の後方互換)。**要素単位の後方互換**: `status` フィールドを持たない approvals[] 行 (r9 スキーマ以前の承認記録) は schema error にせず **`status='active'` として読む** — 行は明示承認の記録であり、execution_mode / tool_profile_hash の一致検査 (失効判定) は従来どおり効く。次回の locked mutation で `status='active'` を atomic に補完書込みし、補完後は現行 schema で検証する (要素単位の欠落で CLI 全体を exit 2 停止させない)。
 
-`folder-config.schema.json` は `[chunking].unicode_version` を **required** とする (省略不可・default なし — `kcs init` が実装同梱の UCD 版 (現在の既定 = 17.0.0) を明示記録する、[03-data-model.md §5.3](03-data-model.md) / [06-cli-spec.md §1](06-cli-spec.md))。**要素単位の後方互換**: これを欠く旧 `.kcs/config.toml` は schema error (exit 2) にせず**実装同梱版 (17.0.0) として読み、次回の locked mutation で atomic に補完書込みする** (approvals[] `status` の補完と同型 — required 化で既存 store の全 CLI を封鎖しない。補完後は現行 schema で検証する)。`[markdownize].bbox_annotation` (boolean、既定 true — [07-adapter-spec.md §5.2](07-adapter-spec.md)、値は tool_profile_hash に畳み込む) も本 schema の正式 key として定義する。
+`folder-config.schema.json` は `[chunking].unicode_version` を **required** とする (省略不可・default なし — `kio init` が実装同梱の UCD 版 (現在の既定 = 17.0.0) を明示記録する、[03-data-model.md §5.3](03-data-model.md) / [06-cli-spec.md §1](06-cli-spec.md))。**要素単位の後方互換**: これを欠く旧 `.kio/config.toml` は schema error (exit 2) にせず**実装同梱版 (17.0.0) として読み、次回の locked mutation で atomic に補完書込みする** (approvals[] `status` の補完と同型 — required 化で既存 store の全 CLI を封鎖しない。補完後は現行 schema で検証する)。`[markdownize].bbox_annotation` (boolean、既定 true — [07-adapter-spec.md §5.2](07-adapter-spec.md)、値は tool_profile_hash に畳み込む) も本 schema の正式 key として定義する。
 
 `tools.schema.json` は adapter ごとの `pricing` を定義する: **key = billable_units の kind 閉 enum (pages | tokens_in | tokens_out — [07-adapter-spec.md §4](07-adapter-spec.md))、値 = 有限・非負の USD 単価 (REAL)、未知 key は schema error**。**billable を宣言する Adapter ([07-adapter-spec.md §5.7](07-adapter-spec.md) 条件 6) は、AdapterProfile の `billable_kinds` (報告し得る kind の閉集合の宣言 — [07-adapter-spec.md §4](07-adapter-spec.md)) の全 kind が `pricing` に被覆されること (pricing keys ⊇ billable_kinds) を送信前に検査する (欠落は config error — fail-closed)**。billable 宣言 Adapter の profile required には `reject_billing` (閉 enum — [07-adapter-spec.md §4](07-adapter-spec.md)) も含める (**AdapterProfile の実行時受入規範であり、tools.schema.json の検証対象ではない** — legacy profile の欠落は 07 §4 のとおり fail-closed "billable" として読み、validation error にしない)。終端時に初めて解決不能と判明した場合の縮退は [04-pipeline.md §5.4](04-pipeline.md)。
 
-`user-config.schema.json` は device cap (`[budget]`、[04-pipeline.md §5.4](04-pipeline.md)) を含む。**log 保持の正規 key = `[observability] retention_days`** (整数 1〜3650・既定 30 — §12.6 の「config 上書き可」の実体。device logs (events / metrics / errors) と scope-local `.kcs/logs/access.jsonl` の双方に適用する)。
+`user-config.schema.json` は device cap (`[budget]`、[04-pipeline.md §5.4](04-pipeline.md)) を含む。**log 保持の正規 key = `[observability] retention_days`** (整数 1〜3650・既定 30 — §12.6 の「config 上書き可」の実体。device logs (events / metrics / errors) と scope-local `.kio/logs/access.jsonl` の双方に適用する)。
 
 ## 12.4 時刻・タイムゾーン
 
@@ -968,10 +968,10 @@ validation 失敗は exit code 2 で停止し、`KCS-E-CONFIG-SCHEMA-001` を返
 
 ## 12.5 semver / 互換性 promise
 
-KCS が公開する識別子は次のいずれかの semver 軸を持つ。
+KIO が公開する識別子は次のいずれかの semver 軸を持つ。
 
 ```text
-kcs_format_version       .kcs ディレクトリ全体のフォーマットバージョン (03-data-model.md §2)
+kio_format_version       .kio ディレクトリ全体のフォーマットバージョン (03-data-model.md §2)
 tool_lock_spec_version   tool-lock.json の schema バージョン (07-adapter-spec.md)
 profile_hash_spec        tool_profile_hash の計算規約バージョン (03-data-model.md)
 schema_version_<name>    各 config schema の semver
@@ -995,9 +995,9 @@ PATCH bump:
   - typo / コメント修正レベル。意味変更なし。
 ```
 
-**前方互換 (旧 reader × 新 store) の規約**: 上記 MINOR の「default 値で旧データを補える」は後方互換 (新 reader × 旧 store) の条件である。逆向きは store の version 側で受ける — reader は自己の対応上限より新しい `kcs_format_version` の store を **read-only + 新版誘導** で扱い ([03-data-model.md §2](03-data-model.md)、schema validation より先)、**公開後の scope.schema.json への key 追加は必ず MINOR bump を伴う** (§12.3 の「未知 key は schema error」を維持したまま旧実装に定義された降着点を与える)。Adapter I/O の「未知フィールドを無視 (MUST ignore)」規約 (下記) とは対象が異なる — scope.json は承認・security の正本であり無視許容にしない。`approvals_initialized` (§12.3) 自体は実装・store 公開前の schema 確定であり bump しない (tree v2/v3 と同じ扱い — 下記)。
+**前方互換 (旧 reader × 新 store) の規約**: 上記 MINOR の「default 値で旧データを補える」は後方互換 (新 reader × 旧 store) の条件である。逆向きは store の version 側で受ける — reader は自己の対応上限より新しい `kio_format_version` の store を **read-only + 新版誘導** で扱い ([03-data-model.md §2](03-data-model.md)、schema validation より先)、**公開後の scope.schema.json への key 追加は必ず MINOR bump を伴う** (§12.3 の「未知 key は schema error」を維持したまま旧実装に定義された降着点を与える)。Adapter I/O の「未知フィールドを無視 (MUST ignore)」規約 (下記) とは対象が異なる — scope.json は承認・security の正本であり無視許容にしない。`approvals_initialized` (§12.3) 自体は実装・store 公開前の schema 確定であり bump しない (tree v2/v3 と同じ扱い — 下記)。
 
-**read-only 縮退の具体挙動** (新しい store を検出した旧 reader の降着点): 書き込み系コマンド ([05-runtime.md §6](05-runtime.md) の `.kcs/.lock` 取得一覧が正本) は当該 store に対して**即時拒否** — error_code `KCS-E-STORE-VERSION-001`・exit 8 (incompatible format version)・新版への更新誘導 message を返す。multi-scope search では当該 scope を excluded_scopes として除外する (`fallback_reason` に同 code を記録 — query_cache を含む一切の書込を行わないため検索参加もさせない、[05-runtime.md §1.8](05-runtime.md))。単独 scope 指定の読み取り系 (log / view / open / inspect / evidence verify / status / diff / 単独 search) は store への**書込ゼロ**で best-effort 動作する (自己の知る schema で読解できない場合は同 code で error。単独 search は query_cache へ書けないため cursor replay は保証しない — 再検索が正)。
+**read-only 縮退の具体挙動** (新しい store を検出した旧 reader の降着点): 書き込み系コマンド ([05-runtime.md §6](05-runtime.md) の `.kio/.lock` 取得一覧が正本) は当該 store に対して**即時拒否** — error_code `KIO-E-STORE-VERSION-001`・exit 8 (incompatible format version)・新版への更新誘導 message を返す。multi-scope search では当該 scope を excluded_scopes として除外する (`fallback_reason` に同 code を記録 — query_cache を含む一切の書込を行わないため検索参加もさせない、[05-runtime.md §1.8](05-runtime.md))。単独 scope 指定の読み取り系 (log / view / open / inspect / evidence verify / status / diff / 単独 search) は store への**書込ゼロ**で best-effort 動作する (自己の知る schema で読解できない場合は同 code で error。単独 search は query_cache へ書けないため cursor replay は保証しない — 再検索が正)。
 
 **tree schema v2/v3 (2026-07-18 確定)**: tree entry へ `normalize.manifest_hash`、tree object へ
 `chunking_config_hash` (v2) と `chunk_set_hash` (v3 — 公開 chunk 集合の digest) を追加した
@@ -1013,7 +1013,7 @@ v2/v3 対応の rework が必要 ([09-mvp-scope.md](09-mvp-scope.md))。
 
 ## 12.6 観測 (observability)
 
-`logs/access.jsonl` 以外に、以下の構造化ログを `~/.local/share/kcs/logs/` に出す。
+`logs/access.jsonl` 以外に、以下の構造化ログを `~/.local/share/kio/logs/` に出す。
 
 ```text
 events.jsonl       重要イベント (commit, gc, purge, schema migration)
@@ -1026,7 +1026,7 @@ errors.jsonl       error_code 付きの全エラー
 ```text
 ts        UTC ISO8601 (§12.4)
 level     debug | info | warn | error
-code      error_code (KCS-E-) / event_code (KCS-EV-) / metric_code (KCS-M- — [05-runtime.md §7](05-runtime.md))
+code      error_code (KIO-E-) / event_code (KIO-EV-) / metric_code (KIO-M- — [05-runtime.md §7](05-runtime.md))
 component batch | search | commit | gc | ...
 message   人間可読な短文 (非機微テンプレートに限る — query / path / prompt 等の値は context 側に
           置いて redaction を通す。自由文へ機微値を埋め込まない)
@@ -1039,7 +1039,7 @@ context   必須 field (空 object 可) — 値は JSON object (tool_profile_has
 ```
 
 ログのローテーションは日次、保持は 30 日 (config 上書き可 — 正規 key = `[observability] retention_days`、§12.3)。**scope-local の
-`.kcs/logs/access.jsonl` も同じ規範の対象とする** (日次 rotation + 保持日数は同 config・既定 30 日 —
+`.kio/logs/access.jsonl` も同じ規範の対象とする** (日次 rotation + 保持日数は同 config・既定 30 日 —
 無操作でも検索対象であり続ける scope の unbounded 成長を防ぐ。purge の scrub は**全保持世代**に
 適用する — rotation は scrub の対象範囲を狭めない。access_events の正本性は保持期間内の記録に
 ついて成立し、期間経過後の世代破棄は監査要件に応じ config で延長して調整する)。`redact_logs` の
@@ -1056,16 +1056,16 @@ false への変更は明示設定のみで行える。
 ```text
 旧称                            | 現行                                | 出所
 -------------------------------- | ----------------------------------- | ----
-folder.json                      | scope.json                          | research/kcs.md §6
+folder.json                      | scope.json                          | research/kio.md §6
 folder_id                        | scope_id                            | 10-operations.md §3
 normalized_hash                  | (廃止)                               | research/hash.md §9
 canonical_text_hash              | (廃止)                               | research/diff.md §8
 canonical_hash                   | (廃止)                               | research/diff.md §17
 markdown_hash                    | (廃止)                               | research/diff.md §3
 Normalized-Hash: <Markdown header> | Tool-Profile-Hash: <Markdown header> | research/read_only.md §2
-.kcs/normalized/<path>.md        | .kcs/objects/normalized_units/ab/cd/<raw64>.<tool64>.g<gen>/ (正本) | research/kcs.md §11
+.kio/normalized/<path>.md        | .kio/objects/normalized_units/ab/cd/<raw64>.<tool64>.g<gen>/ (正本) | research/kio.md §11
 unit_id                          | unit_key / unit_ref                 | 03-data-model.md §2.1
-last_indexed_git_commit          | (廃止: Git 連携は持たない)             | research/kcs.md §10
+last_indexed_git_commit          | (廃止: Git 連携は持たない)             | research/kio.md §10
 output_hash (in normalization_runs) | (廃止)                            | research/hash.md §3
 cost-ledger.jsonl (+ -reservations / -reclaimed / .lock) | cost-ledger.sqlite (cost_ledger / batch_requests / schema_migrations の 3 表) | 04-pipeline.md §5.4
 ```

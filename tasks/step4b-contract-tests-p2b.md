@@ -1,7 +1,7 @@
 # Step4b 契約テスト仕様書: fsck 拡大 / evidence pointer 解決・verify・retarget (P2-B)
 
 > 本書は **実装より先にテストを固定する** ための契約仕様。Rust 実装コードは含まない。
-> 正本は `docs/10-operations.md` **§7.5 全体 (§7.5.1 kcs repair --verify-objects / §7.5.2 バックアップ運用 /
+> 正本は `docs/10-operations.md` **§7.5 全体 (§7.5.1 kio repair --verify-objects / §7.5.2 バックアップ運用 /
 > §7.5.3 SQLite schema 変更の規約)** と **§3 (Scope Registry)**、`docs/08-evidence-pointer-spec.md` **全体
 > (§2〜§8)**、`docs/04-pipeline.md` **§5.7 (Resume と Repair)**。各契約は spec の規範文からのみ期待値を
 > 導き、実装が「どう書かれそうか」からは導かない。曖昧・spec 沈黙の点は該当契約の「期待」内に
@@ -15,7 +15,7 @@ canonical final event の 4 分岐アルゴリズムと `purged→tombstoned` �
 `tasks/step4b-contract-tests-lifecycle.md` の **LC8-LC14** が既に契約化済み。本書は参照のみで再契約
 しない。U53 のうち本書が引き取るのは evidence verify の **6 値 status union 化**であり、これは U57 の
 契約 (§S) に統合済み)。
-加えて **Phase 1 引き継ぎ 1 件**: `kcs evidence verify` の canonical final event 正本化の共有化
+加えて **Phase 1 引き継ぎ 1 件**: `kio evidence verify` の canonical final event 正本化の共有化
 (発注側指示の「LC21 原則」— `tasks/step4b-contract-tests-lifecycle.md` **LC21** 「検証失敗 marker は
 入口非依存で corruption (fsck/resolver/re-purge 統一)」を土台に、本書 §X で**検証失敗に限らない**
 canonical dispatch 全体の共有化まで踏み込んで契約化する)。
@@ -25,8 +25,8 @@ canonical dispatch 全体の共有化まで踏み込んで契約化する)。
 - B 領域 (tombstone/erase receipt events[] lifecycle 本体、U13-U21/U35/U36) — Phase 1 で実装済み・
   `step4b-contract-tests-lifecycle.md` の LC1-LC61 が契約の正本。本書は参照するのみ (§X で明示的に
   参照する箇所のみ引用)
-- C 領域 (`kcs open` object URI 解決手順・cache — U22-U24) — 別 P2 グループ。本書 §M (U50) は
-  pointer **schema** としての object URI type 制約 (発行・受理の型そのもの) のみを扱い、`kcs open` の
+- C 領域 (`kio open` object URI 解決手順・cache — U22-U24) — 別 P2 グループ。本書 §M (U50) は
+  pointer **schema** としての object URI type 制約 (発行・受理の型そのもの) のみを扱い、`kio open` の
   cache 配置・EEXIST 処理・3 点起動前検査などの実装機構には立ち入らない
 - D 領域 (restore の退避・隔離・no-replace publish — U25-U27) — 別 P2 グループ
 - E 領域の残り (purge 削除範囲・staging・ログ scrub・working tree 警告・二重 purge — U28-U34/U37/U38) —
@@ -36,30 +36,30 @@ canonical dispatch 全体の共有化まで踏み込んで契約化する)。
   registry の live 重複**検出**契約のみを扱い、横断検索の `excluded_scopes` 統合・partial 表示は H 側の
   管轄 (該当箇所で明示的に境界を注記する)
 - A 領域残り (U1-U4/U11/U12)・I/J 領域残り・K/L 領域 — Phase 3
-- `kcs evidence retarget` の実装そのもの (U59/U60) は 08§5 が明記するとおり **Phase 4+** — 本書は
+- `kio evidence retarget` の実装そのもの (U59/U60) は 08§5 が明記するとおり **Phase 4+** — 本書は
   「実装されたときに満たすべき契約」を先行して固定するのみで、実装着手を要求しない
 
 ## 実装対象ファイルの見込み (現状把握の記録 — 実装方針を指図するものではない)
 
-- `crates/kcs-cli/src/verify_objects.rs` — `verify_objects_with_limits` の検証対象拡大 (embedding/
+- `crates/kio-cli/src/verify_objects.rs` — `verify_objects_with_limits` の検証対象拡大 (embedding/
   manifest/toollock 追加、L307-673 の inventory ループ群に新設種別を追加)、`verify_pointer_for_cli`
   (L96-196) の canonical dispatch 共有化 (現状は `read_tombstone`/`PurgeState::barrier_blocks` の
   単一 marker 判定 — §X 参照)、`commit_roots` (L1348-1501) への names.jsonl 検証追加、
   `--prune-orphans` 新設 (`run_evidence`/`verify_objects` 双方に隣接する新規モード)
-- `crates/kcs-cli/src/main.rs` — `parse_repair_args`/`RepairMode` (L1004-1067) への `PruneOrphans`/
+- `crates/kio-cli/src/main.rs` — `parse_repair_args`/`RepairMode` (L1004-1067) への `PruneOrphans`/
   `RegistryPrune` 追加、`resolve_scope_id_in_registry` (L6368-6411) の fail-closed 化、
   `resolve_pointer_for_cli` (L6170-6356) への手順 6a/6b 追加、`parse_object_uri` (L7281-7315) の
   `VALID_TYPES` 縮小、`run_evidence`/`verify_pointer_for_cli` 側の `--strict` reason 別 exit 分岐
-- `crates/kcs-core/src/dag.rs` — `NormalizeRef` (L15-20) への `manifest_hash` field 追加 (U40 の前提。
+- `crates/kio-core/src/dag.rs` — `NormalizeRef` (L15-20) への `manifest_hash` field 追加 (U40 の前提。
   現状は `tool_profile_hash`/`gen` のみ)
-- `crates/kcs-core/src/cas.rs` — `ObjectKind` (raw/tree/commit のみ)・`ContentObjectKind`
+- `crates/kio-core/src/cas.rs` — `ObjectKind` (raw/tree/commit のみ)・`ContentObjectKind`
   (prepared/image のみ) への manifest/toollock/embedding 種別追加 (`objects/manifests/`・
   `objects/toollocks/` は現状 grep 0 件)
-- `crates/kcs-index/src/fts.rs` — `chunk_publications` 表の新設 (現状 grep 0 件。`chunk_config_generations`
+- `crates/kio-index/src/fts.rs` — `chunk_publications` 表の新設 (現状 grep 0 件。`chunk_config_generations`
   のみ既存)、`index_metadata` (L546-676 済み実装 — U144 の一部は既に Phase 1 相当で充足)
-- `crates/kcs-index/src/registry.rs` — 直接の変更対象ではない (upsert/lookup は現状のまま)。fail-closed
+- `crates/kio-index/src/registry.rs` — 直接の変更対象ではない (upsert/lookup は現状のまま)。fail-closed
   判定は main.rs 側の呼び出し元が担う
-- `crates/kcs-search/src/evidence.rs` — `EvidencePointer`/`ValidatedEvidencePointer` は現状すでに
+- `crates/kio-search/src/evidence.rs` — `EvidencePointer`/`ValidatedEvidencePointer` は現状すでに
   schema_version の MAJOR-only 数値・未知フィールド許容・URI 大文字小文字保存を満たす (§K/§L で規範
   確認の regression-lock 契約とする)
 
@@ -118,7 +118,7 @@ P2 = 参考 (Phase 4+ 依存・文書のみ)。「**現行実装との既知の�
   `ContentObjectKind`(`cas.rs` L22-25: Prepared/Image のみ) いずれにも無い — 本契約はこの型が
   新設されることを前提とする)。dimensions 宣言値と実 vector 長が (a) 一致、(b) 不一致。vector 要素に
   (c) 全て有限、(d) `NaN` 混入、(e) `Infinity` 混入。object 本体の digest が (f) 一致、(g) 不一致。
-- 操作: `kcs repair --verify-objects` を実行する。
+- 操作: `kio repair --verify-objects` を実行する。
 - 期待: (a)(c)(f) は成功として検証通過。(b)(d)(e)(g) はいずれも finding (`embedding_corrupt` 相当)
   として報告される。**現行実装との既知の不整合**: `verify_objects.rs` に `"embed"`/`"dimension"`/
   `"finite"` の grep が 0 件であり、embedding の検証対象化そのものが未着手。
@@ -126,9 +126,9 @@ P2 = 参考 (Phase 4+ 依存・文書のみ)。「**現行実装との既知の�
 ### PB02 manifest / toollock を検証対象クロージャに追加 (対象種別の closure 化) [P0]
 - 正本: 10 §7.5.1 L489 (raw/prepared/image/chunk/embedding/**manifest**/**toollock**/tree/commit の
   9 種別列挙)。
-- 前提: `.kcs/objects/manifests/`・`.kcs/objects/toollocks/` に CAS object が存在する (03 §2 の
+- 前提: `.kio/objects/manifests/`・`.kio/objects/toollocks/` に CAS object が存在する (03 §2 の
   レイアウト)。
-- 操作: `kcs repair --verify-objects` を実行し、検証対象種別の一覧を検査する。
+- 操作: `kio repair --verify-objects` を実行し、検証対象種別の一覧を検査する。
 - 期待: manifest object (詳細は §B、PB04-06) と toollock object (canonical JCS bytes の content hash
   検証 — 03 §5.2) がいずれも fsck の検証対象種別に含まれる。**現行実装との既知の不整合**:
   `objects/manifests`・`objects/toollocks` は crates/ 全体で grep 0 件 (本コマンドで確認済み) —
@@ -155,12 +155,12 @@ P2 = 参考 (Phase 4+ 依存・文書のみ)。「**現行実装との既知の�
 
 ### PB04 tree entry の normalize.manifest_hash 追加と CAS 再 hash 検証 (パラメタ化) [P0]
 - 正本: 10 §7.5.1 L493-497 (上記引用)。
-- 前提: `NormalizeRef` (`kcs-core/src/dag.rs` L15-20) が `manifest_hash` field を持つ (現状は
+- 前提: `NormalizeRef` (`kio-core/src/dag.rs` L15-20) が `manifest_hash` field を持つ (現状は
   `tool_profile_hash`/`gen` のみ — 本契約の前提として追加される)。tree entry に (a) 実在する
   manifest object を指す `manifest_hash`、(b) 存在しない hash を指す `manifest_hash`、(c) 実在するが
   別 instance ((raw_hash, tool_profile_hash, gen) が entry 側と不一致) の manifest を指す
   `manifest_hash`。
-- 操作: `kcs repair --verify-objects` を実行する。
+- 操作: `kio repair --verify-objects` を実行する。
 - 期待: (a) は検証通過。(b) は manifest 欠落 finding (§B の説明範囲規則 — PB05 — に該当しない限り
   corruption)。(c) は「hash が正しいだけの別 instance manifest への誤配線」として corruption
   finding。**現行実装との既知の不整合**: `manifest_hash` field 自体が `dag.rs` に存在しないため、
@@ -175,7 +175,7 @@ P2 = 参考 (Phase 4+ 依存・文書のみ)。「**現行実装との既知の�
 - 前提: raw_hash `X` が canonical final event = `purged` (in_commit=`Cp`) で説明される。(a) `Cp` 以前の
   commit の tree entry の manifest が欠落。(b) `Cp` より後の (= retire 後に再作成・再公開された)
   commit の tree entry の manifest が欠落。
-- 操作: `kcs repair --verify-objects` を実行する。
+- 操作: `kio repair --verify-objects` を実行する。
 - 期待: (a) は正常な dead terminal として manifest 欠落を corruption としない (`dead_by_tombstone_count`
   等の既存カウンタに算入)。(b) は「古い退役 event が新規破損を隠さない」ため corruption と判定する
   (`manifest_corrupt` 相当の finding)。この判定は §D(PB05 自身)・fsck 側の raw 欠落説明スコープ
@@ -191,7 +191,7 @@ P2 = 参考 (Phase 4+ 依存・文書のみ)。「**現行実装との既知の�
   `normalized_units/.../manifest.json` (作業コピー) の canonical JCS hash が一致。(b) 不一致
   (finalize と次回 snapshot 間のクラッシュ窓を模したもの)。(c) manifest object 自体の再 hash が
   そもそも不一致 (PB04(c) の corrupt CAS bytes ケース)。
-- 操作: `kcs repair --verify-objects` を実行する。
+- 操作: `kio repair --verify-objects` を実行する。
 - 期待: (a) 検証通過。(b) は exit 3 の incomplete として報告され、corruption 件数には算入しない。
   (c) は corruption (exit 4 系 finding) として (b) と明確に区別される。非 HEAD commit の tree entry
   にはこの作業コピー照合を適用しない (作業コピーは常に最新世代を指すため、過去 commit の manifest と
@@ -212,7 +212,7 @@ P2 = 参考 (Phase 4+ 依存・文書のみ)。「**現行実装との既知の�
 - 前提: `names.jsonl` (03 §2 の論理名 truth ログ) に (a) schema 正当かつ `digest64` が
   `portable_tag_leaf(logical_name)` の再計算値と一致する行、(b) schema は正当だが digest64 が
   再計算値と不一致な行、(c) 必須 field を欠く schema 不正な行。
-- 操作: `kcs repair --verify-objects` を実行する。
+- 操作: `kio repair --verify-objects` を実行する。
 - 期待: (a) は検証通過。(b)(c) はいずれも corruption finding。**現行実装との既知の不整合**:
   `names.jsonl`/`names_jsonl` は crates/ 全体で grep 0 件 — 現行の tag 検証 (`verify_objects.rs`
   L1348-1501 `commit_roots`) は `refs/tags-v1/tag-<digest64>` (canonical) と `refs/tags/<logical_name>`
@@ -224,7 +224,7 @@ P2 = 参考 (Phase 4+ 依存・文書のみ)。「**現行実装との既知の�
 - 正本: 10 §7.5.1 L507-508『torn tail (最終の不完全行のみ切詰め — 途中の malformed 行は corruption)』
 - 前提: `names.jsonl` の (a) 最終行のみが途中で切れている (crash-safe append の想定される残骸)。
   (b) 途中の行 (最終行ではない) が malformed。
-- 操作: `kcs repair --verify-objects` を実行する。
+- 操作: `kio repair --verify-objects` を実行する。
 - 期待: (a) は最終行を切り詰めて正常読み取りとして扱う (corruption としない)。(b) は corruption
   finding として報告する — 「末尾のみ寛容、途中は不寛容」という非対称を実装が正しく区別すること
   (両方寛容にする実装、両方不寛容にする実装のいずれも契約違反)。
@@ -234,7 +234,7 @@ P2 = 参考 (Phase 4+ 依存・文書のみ)。「**現行実装との既知の�
   削除後の残存として正常)』
 - 前提: (a) `refs/tags-v1/tag-<digest64>` が存在するが、`names.jsonl` に対応する最終有効行が無い。
   (b) `names.jsonl` に行はあるが、対応する `refs/tags-v1/tag-<digest64>` が存在しない (tag 削除後)。
-- 操作: `kcs repair --verify-objects` を実行する。
+- 操作: `kio repair --verify-objects` を実行する。
 - 期待: (a) は corruption finding。(b) は finding なし (tag 削除後の残存として正常 — names.jsonl は
   append-only で削除時に行を落とさない設計であることを示唆する)。この非対称を実装が両方向とも
   corruption として扱う、または両方向とも許容してしまうことは契約違反。
@@ -246,12 +246,12 @@ P2 = 参考 (Phase 4+ 依存・文書のみ)。「**現行実装との既知の�
 ### PB10 normalized unit done object 欠落の same-gen 再生成禁止 [P0]
 - 正本: 10 §7.5.1 L521-523『(normalized unit の done object 欠落も同様 — same-gen 再生成は行わない
   (unit object は immutable であり、非決定的な再生成は過去 commit の内容差し替えになる)。復元は
-  backup restore、または明示の新 gen (kcs reindex --force) で行う)』
+  backup restore、または明示の新 gen (kio reindex --force) で行う)』
 - 前提: HEAD tree entry が指す normalized instance (raw_hash, tool_profile_hash, gen=N) の unit
   done object が欠落し working tree に原本が残っていない (recover_raw が適用できないケース)。
-- 操作: `kcs repair --verify-objects` を実行する。
+- 操作: `kio repair --verify-objects` を実行する。
 - 期待: 同一 gen=N での自動再生成 (再 Markdownize) は一切行われない — missing として finding のみ
-  報告する (`normalized_corrupt` 相当)。復旧手段として backup restore、または `kcs reindex --force`
+  報告する (`normalized_corrupt` 相当)。復旧手段として backup restore、または `kio reindex --force`
   による新 gen 発行のいずれかのみを案内する。**現行実装との既知の不整合**: `manifest_hash` 不在
   (PB04) につき「done 宣言 object」概念自体が明示的スキーマとして無く、この禁止規則を明文で強制する
   ロジックも無い。
@@ -261,7 +261,7 @@ P2 = 参考 (Phase 4+ 依存・文書のみ)。「**現行実装との既知の�
   警告 (path / reason) は exit に影響しない — 破損とは別に種別ごとの件数を表示する)』
 - 前提: (a) legacy 警告 (path 形式の legacy・reason enum 外の legacy) が複数件あるが corruption は
   0 件。(b) legacy 警告 0 件で corruption も 0 件。
-- 操作: `kcs repair --verify-objects` を実行する。
+- 操作: `kio repair --verify-objects` を実行する。
 - 期待: (a)(b) いずれも exit code は 0 (legacy 警告の有無・件数は exit を変えない)。legacy 警告は
   corruption カウンタとは別の種別ごとの件数として出力に含まれる。この規則は
   `step4b-contract-tests-lifecycle.md` **LC7** が tombstone/receipt の reason legacy 警告について
@@ -272,17 +272,17 @@ P2 = 参考 (Phase 4+ 依存・文書のみ)。「**現行実装との既知の�
 
 ## E. `--prune-orphans` 新設 (U43)
 
-> 正本: 10 §7.5.1 L586-614『`kcs repair --verify-objects --prune-orphans` は、どの manifest からも
+> 正本: 10 §7.5.1 L586-614『`kio repair --verify-objects --prune-orphans` は、どの manifest からも
 > 参照されない orphan prepared / image ... と descriptor の無い staging root・path と不整合な staging
 > root ... terminal 化済み ... task にのみ対応する staging root ... を列挙し、locked repair として
 > 削除する』
 
 ### PB12 CLI フラグ追加と `--rebuild-db`/`--verify-objects [--prune-orphans]`/`--registry-prune` の exactly-one 構文 [P0]
-- 正本: 10-operations.md §7.5.1 導入部の `kcs repair --verify-objects --prune-orphans` 構文、および
-  U46 統合要約の『`kcs repair` は `(--rebuild-db [--online|--offline] | --verify-objects
+- 正本: 10-operations.md §7.5.1 導入部の `kio repair --verify-objects --prune-orphans` 構文、および
+  U46 統合要約の『`kio repair` は `(--rebuild-db [--online|--offline] | --verify-objects
   [--prune-orphans] | --registry-prune)` の exactly-one 必須構文に拡張する』(spec-gap U46 統合要約、
   出典 gap-10-03 G11 等)。
-- 前提: `kcs repair` を (a) `--verify-objects --prune-orphans`、(b) `--prune-orphans` 単独 (
+- 前提: `kio repair` を (a) `--verify-objects --prune-orphans`、(b) `--prune-orphans` 単独 (
   `--verify-objects` を伴わない)、(c) `--rebuild-db --prune-orphans` (併用不可の組み合わせ) で実行。
 - 操作: 各 CLI 呼び出しを行う。
 - 期待: (a) は受理される。(b) は `--prune-orphans` は `--verify-objects` の修飾フラグでありそれ単独
@@ -295,7 +295,7 @@ P2 = 参考 (Phase 4+ 依存・文書のみ)。「**現行実装との既知の�
   の残骸)』
 - 前提: (a) いずれの normalized instance の manifest からも参照されない prepared object。(b) 何らかの
   live manifest から参照される prepared object。(a)(b) と同様に image object も用意する。
-- 操作: `kcs repair --verify-objects --prune-orphans` (確認プロンプトを承認) を実行する。
+- 操作: `kio repair --verify-objects --prune-orphans` (確認プロンプトを承認) を実行する。
 - 期待: (a) は削除対象に含まれ locked repair として物理削除される。(b) は削除されない (live 参照が
   ある限り保持)。この live 参照判定は purge closure の共有派生判定 (U30、02-philosophy §6.1) と同一
   規則を使う。
@@ -308,7 +308,7 @@ P2 = 参考 (Phase 4+ 依存・文書のみ)。「**現行実装との既知の�
   不一致、(c) descriptor があり path も整合するが対応する task が terminal (done/failed
   permanent/abandoned/settled partial)、(d) 同様に整合するが対応 task が non-terminal
   (pending/running/partial-with-retryable-failed-unit) の 4 パターンで用意する。
-- 操作: `kcs repair --verify-objects --prune-orphans` を実行する。
+- 操作: `kio repair --verify-objects --prune-orphans` を実行する。
 - 期待: (a)(b)(c) は削除対象。(d) は削除対象外 (進行中 task の保全 — PB15 の拒否条件と表裏)。partial
   task は「再投入可能な failed unit が残る場合のみ」non-terminal 扱いとし、全 unit terminal の
   settled partial (04 §5.2) は (c) 側 (削除対象) に分類する。
@@ -322,10 +322,10 @@ P2 = 参考 (Phase 4+ 依存・文書のみ)。「**現行実装との既知の�
   pending/running task が存在。(c) 未 finalize の manifest 進行状態 (HEAD tree entry の manifest.json
   と CAS manifest が不一致 — PB06 の (b) と同型)。(d) active な purge journal。他の削除対象 (orphan
   prepared 等) も同時に存在する。
-- 操作: `kcs repair --verify-objects --prune-orphans` を実行する。
+- 操作: `kio repair --verify-objects --prune-orphans` を実行する。
 - 期待: (a)(b)(c)(d) いずれか 1 つでも真なら、prune を一切実行せず (他に安全に削除できる orphan が
   あっても実行しない) exit 3 で拒否する。拒否応答には blocker の種別と対象 (intent_token または 4 組
-  キー) を含め、次操作 (`kcs batch resume` / `kcs batch abandon` / journal 回復) を提示する。
+  キー) を含め、次操作 (`kio batch resume` / `kio batch abandon` / journal 回復) を提示する。
 
 ### PB16 特定不能退出経路のエスケープハッチ (全 gen terminal + state 0/1 無し) [P1]
 - 正本: 10 §7.5.1 L600-609『**特定不能の退出経路**: (1) descriptor の (raw_hash, tool_profile_hash)
@@ -335,7 +335,7 @@ P2 = 参考 (Phase 4+ 依存・文書のみ)。「**現行実装との既知の�
 - 前提: staging root の descriptor から対応する task record が失われている (task 記録喪失は許容 —
   04 §1)。同一 (raw_hash, tool_profile_hash) の全 gen の normalized instance manifest が全 unit
   terminal であり、同 key の `batch_requests` 行に state 0/1 が無い。
-- 操作: `kcs repair --verify-objects --prune-orphans` を実行する。
+- 操作: `kio repair --verify-objects --prune-orphans` を実行する。
 - 期待: task 記録が特定できなくても削除対象に含まれる (PB15 の non-terminal-task 拒否には該当しない
   — 「対応 task を特定できない descriptor つき root は blocker 側に倒す」原則の**例外**としてこの
   条件だけは削除を許可する)。in-flight 信号は cost-ledger (`batch_requests`) 側で判定し、喪失許容の
@@ -343,12 +343,12 @@ P2 = 参考 (Phase 4+ 依存・文書のみ)。「**現行実装との既知の�
 
 ### PB17 purge 済み raw の open cache 残骸回収 (raw/image 型分離、C 領域との境界注記) [P1]
 - 正本: 10 §7.5.1 L616-626『`--prune-orphans` は、当該 scope で canonical final event が `purged`
-  **または `erased`** である各 raw_hash について `~/.cache/kcs/open/<raw_hash digest64>/` の残存も
+  **または `erased`** である各 raw_hash について `~/.cache/kio/open/<raw_hash digest64>/` の残存も
   検査し、存在すれば同じ locked repair の削除対象に含める ... **image cache も同様に回収する**』
-- 前提: canonical final event が `purged`/`erased` の raw_hash に対応する `~/.cache/kcs/open/<digest64>/`
+- 前提: canonical final event が `purged`/`erased` の raw_hash に対応する `~/.cache/kio/open/<digest64>/`
   が残存する (open 手順の publish 後・起動直前検査前の crash 窓を模したもの)。当該 scope のどの live
-  manifest からも参照されない image の `~/.cache/kcs/open/image/<digest64>/` も同様に残存する。
-- 操作: `kcs repair --verify-objects --prune-orphans` を実行する。
+  manifest からも参照されない image の `~/.cache/kio/open/image/<digest64>/` も同様に残存する。
+- 操作: `kio repair --verify-objects --prune-orphans` を実行する。
 - 期待: いずれの残存 cache dir も削除対象に含まれ、同じ locked repair で冪等に削除される。**境界
   注記**: cache の型分離 (`open/image/<digest64>/` への raw/image 分離自体) は C 領域 (U22-U24) の
   管轄であり本書は再契約しない — 本契約は `--prune-orphans` という**本書 F 領域の CLI フラグ**が
@@ -361,10 +361,10 @@ P2 = 参考 (Phase 4+ 依存・文書のみ)。「**現行実装との既知の�
 ### PB18 [regression-lock] target_type='query_cache' 行は rebuild 時に自然消滅する [P1]
 - 正本: 10 §7.5.1 L510-511『SQLite index は検証対象外 (破損時は `--rebuild-db` で再構築可能なため。
   embeddings の `target_type='query_cache'` 行のみ復元されず破棄 — 影響は cursor 拒否 04§4.3)』
-- 前提: 現行実装 `snapshot_chunk_embeddings` (`kcs-index/src/embedding_store.rs` L308-324 相当) は
+- 前提: 現行実装 `snapshot_chunk_embeddings` (`kio-index/src/embedding_store.rs` L308-324 相当) は
   `embeddings e JOIN chunks c ON e.target_type = 'chunk' AND c.text_hash = e.target_id` という INNER
   JOIN で rebuild 前後にわたり保持する行を選別している。
-- 操作: (a) `target_type='chunk'` の embedding 行を用意して `kcs repair --rebuild-db` を実行する。
+- 操作: (a) `target_type='chunk'` の embedding 行を用意して `kio repair --rebuild-db` を実行する。
   (b) `target_type='query_cache'` の embedding 行を用意して同様に実行する。
 - 期待: (a) は rebuild 後も保持される。(b) は rebuild 後に消失する (INNER JOIN の条件で
   `target_type != 'chunk'` の行が構造的に除外されるため) — 新規実装は不要、既存の JOIN 条件が
@@ -376,13 +376,13 @@ P2 = 参考 (Phase 4+ 依存・文書のみ)。「**現行実装との既知の�
 
 ### PB19 schema 変更の既定経路は rebuild、cost-ledger.sqlite のみ例外 [P1]
 - 正本: 10 §7.5.3 L687-691『schema 変更のデフォルト経路は **migration を書かず再構築する** こと
-  (sqlite.db は `kcs repair --rebuild-db`、registry は各 `.kcs` の rescan)。**`cost-ledger.sqlite` は
+  (sqlite.db は `kio repair --rebuild-db`、registry は各 `.kio` の rescan)。**`cost-ledger.sqlite` は
   このデフォルトの対象外**』
 - 前提: sqlite.db (検索加速層) と scope-registry.sqlite (registry) のいずれかに新しい列/表を追加する
   必要が生じた、という仮想シナリオ。
 - 操作: 当該変更の実装方針を検証する (コードレビュー水準の構造チェック — 新規 `ALTER TABLE` ベースの
   in-place migration 関数が sqlite.db/registry 用に追加されていないことを確認する)。
-- 期待: sqlite.db は `kcs repair --rebuild-db` (既存の `rebuild_sqlite_index`) が唯一の schema 更新
+- 期待: sqlite.db は `kio repair --rebuild-db` (既存の `rebuild_sqlite_index`) が唯一の schema 更新
   経路であり、registry は起動時の `CREATE TABLE IF NOT EXISTS` (`registry.rs` L76-86) のみで
   migration 関数を持たない。cost-ledger.sqlite (Phase 1 実装済み) だけが in-place migration の対象
   である。**[解釈割れ]**: 本契約は「現在そうなっている」ことの確認であり、将来の変更が既定経路を
@@ -393,47 +393,47 @@ P2 = 参考 (Phase 4+ 依存・文書のみ)。「**現行実装との既知の�
   データの保全が必要な場合 例: ... 旧 `chunks.chunking_config_hash` 列 → `chunk_config_generations`
   relation への分離 (Step 3) は in-place migration とした (実装済みの先例) 2. 起動のたびに全再構築
   するのが非現実的な大規模 store』
-- 前提: 現行実装 `migrate_legacy_chunk_config_column` (`kcs-index/src/fts.rs` L682 付近) が sqlite.db
+- 前提: 現行実装 `migrate_legacy_chunk_config_column` (`kio-index/src/fts.rs` L682 付近) が sqlite.db
   に対する唯一の in-place migration 関数である。
   この関数の存在理由 (append-only chunks 行の time-travel 検索実体の保全) が L713-714 の明示例外に
   該当する。
-- 操作: `kcs-index/src/fts.rs` 内の in-place migration 関数を列挙する (grep `ALTER TABLE`)。
+- 操作: `kio-index/src/fts.rs` 内の in-place migration 関数を列挙する (grep `ALTER TABLE`)。
 - 期待: `migrate_legacy_chunk_config_column` 以外に sqlite.db への in-place migration 関数が存在しない
   ことを regression-lock として固定する — 新しい migration 関数が追加される場合、それが L710-718 の
   2 例外いずれかに該当することをコメントで明記していない実装は本契約違反 (この「コメントでの根拠明記」
-  要求は 10 §7.5.3 自体の直接文言ではなく、KCS spec 監査シリーズの一般原則「fix 断言句に根拠 grep を
+  要求は 10 §7.5.3 自体の直接文言ではなく、KIO spec 監査シリーズの一般原則「fix 断言句に根拠 grep を
   課す」からの類推適用であることに留意)。
 
 ---
 
-## H. registry live 重複の fail-closed 処理 + `kcs repair --registry-prune` (U46)
+## H. registry live 重複の fail-closed 処理 + `kio repair --registry-prune` (U46)
 
 > 正本: 10 §3 L284-287『同一 scope_id の複数 live path は clone 併存であり、**fail-closed で扱う**:
-> global search は当該 scope_id を skip して `excluded_scopes` に `KCS-E-REGISTRY-DUP-001` の理由付きで
+> global search は当該 scope_id を skip して `excluded_scopes` に `KIO-E-REGISTRY-DUP-001` の理由付きで
 > 記録し、pointer 解決は候補一覧 error とする』
 
 ### PB21 live 重複は last_seen_at の差に関わらず fail-closed (自動選択の廃止) [P0]
 - 正本: 10 §3 L284-285 (上記引用)、08 §3.1 手順 1b L152-155『同一 scope_id が複数 **live** 登録されて
-  いる場合は選択しない — `KCS-E-REGISTRY-DUP-001` の候補一覧 error で fail-closed とし、dedupe を
+  いる場合は選択しない — `KIO-E-REGISTRY-DUP-001` の候補一覧 error で fail-closed とし、dedupe を
   要求する ... purge 状態の異なる clone へ黙って解決すると scope 単位 purge の判定を取り違えるため』
-- 前提: 同一 scope_id で 2 つの live `.kcs` 登録が存在し、`last_seen_at` が (a) 完全一致 (タイ)、
+- 前提: 同一 scope_id で 2 つの live `.kio` 登録が存在し、`last_seen_at` が (a) 完全一致 (タイ)、
   (b) 異なる (一方が明確に新しい)。
-- 操作: `kcs evidence verify <pointer scope_id=当該>` を実行する。
+- 操作: `kio evidence verify <pointer scope_id=当該>` を実行する。
 - 期待: (a)(b) いずれも候補一覧 error で fail-closed とする (どちらを解決対象にするか自動選択しない)。
   **現行実装との既知の不整合**: `resolve_scope_id_in_registry` (`main.rs` L6368-6411) は `last_seen_at`
-  が**タイの場合のみ** `scope_ambiguous_error` (`KCS-E-EVIDENCE-SCOPE-AMBIGUOUS-001`) を返し、タイで
+  が**タイの場合のみ** `scope_ambiguous_error` (`KIO-E-EVIDENCE-SCOPE-AMBIGUOUS-001`) を返し、タイで
   なければ (b) のケースで**依然として最新優先の自動選択**を行う (L6397-6410 — 「旧仕様の
   last_seen_at 最新を優先する自動選択」が temporal-tie 判定の陰でまだ生きている)。これは (b) のケース
   で本契約に反する。
 
-### PB22 KCS-E-REGISTRY-DUP-001 エラーコード + REGISTRY namespace 新設 [P0]
-- 正本: 10 §3 L285『`KCS-E-REGISTRY-DUP-001` の理由付きで記録』/ U46 統合要約『エラー namespace に
+### PB22 KIO-E-REGISTRY-DUP-001 エラーコード + REGISTRY namespace 新設 [P0]
+- 正本: 10 §3 L285『`KIO-E-REGISTRY-DUP-001` の理由付きで記録』/ U46 統合要約『エラー namespace に
   REGISTRY domain を新設する』
 - 前提: PB21 (a)(b) いずれかの live 重複状態。
-- 操作: `kcs evidence verify`/`kcs open`/`kcs view`/`kcs restore` のいずれかで当該 scope_id を解決する。
-- 期待: 返るエラーの `error_code` は `KCS-E-REGISTRY-DUP-001` (namespace `REGISTRY`) である。
-  **現行実装との既知の不整合**: `KCS-E-REGISTRY-DUP-001` は crates/ 全体で grep 0 件 (本コマンドで
-  確認済み) — 現行は `KCS-E-EVIDENCE-SCOPE-AMBIGUOUS-001` (namespace `EVIDENCE`) を使っており、
+- 操作: `kio evidence verify`/`kio open`/`kio view`/`kio restore` のいずれかで当該 scope_id を解決する。
+- 期待: 返るエラーの `error_code` は `KIO-E-REGISTRY-DUP-001` (namespace `REGISTRY`) である。
+  **現行実装との既知の不整合**: `KIO-E-REGISTRY-DUP-001` は crates/ 全体で grep 0 件 (本コマンドで
+  確認済み) — 現行は `KIO-E-EVIDENCE-SCOPE-AMBIGUOUS-001` (namespace `EVIDENCE`) を使っており、
   namespace ・code 名のいずれも新規則と異なる。両エラーの併存可否 (SCOPE-AMBIGUOUS を廃止して
   REGISTRY-DUP に一本化するか、別概念として残すか) は実装時に確定が必要。
 
@@ -446,37 +446,37 @@ P2 = 参考 (Phase 4+ 依存・文書のみ)。「**現行実装との既知の�
   URI 形式で `scope_path` が失われる場合の両方を用意する)。
 - 操作: 両表現で同一 scope_id を resolve する。
 - 期待: JSON 表現 (scope_path あり) と URI 表現 (scope_path 無し) の両方で、候補が
-  「registry live 行 + validated scope_path」の重複除去後 2 以上になるため同じ `KCS-E-REGISTRY-DUP-001`
+  「registry live 行 + validated scope_path」の重複除去後 2 以上になるため同じ `KIO-E-REGISTRY-DUP-001`
   候補一覧 error になる — 表現形式の違いで一方が alive、他方が error になってはならない。
 
 ### PB24 書き込み系コマンドと online task 起動 (相 1) も live 重複中は fail-closed [P0]
 - 正本: 10 §3 L296-299『**live 重複が解消するまでは、当該 scope_id での書き込み系コマンドと online
-  タスク起動 (相 1) も `KCS-E-REGISTRY-DUP-001` で fail-closed とする** — device-global
+  タスク起動 (相 1) も `KIO-E-REGISTRY-DUP-001` で fail-closed とする** — device-global
   `batch_requests` の行 (PK に scope_id) を複数 clone が共有し、回復・終端・課金の帰属が混線するため』
-- 前提: PB21 の live 重複状態にある scope で、(a) `kcs index` (書き込み系)、(b) online Batch 投入の
+- 前提: PB21 の live 重複状態にある scope で、(a) `kio index` (書き込み系)、(b) online Batch 投入の
   相 1 (`04-pipeline.md §5.8`) を試みる。
 - 操作: (a)(b) をそれぞれ実行する。
-- 期待: (a)(b) いずれも `KCS-E-REGISTRY-DUP-001` で拒否される (読み取り専用の `kcs status` のみ拒否
-  対象外 — 10 §3 L307)。dedupe (どちらか一方の `.kcs` の登録解除・削除) 後に再開できることを案内する。
+- 期待: (a)(b) いずれも `KIO-E-REGISTRY-DUP-001` で拒否される (読み取り専用の `kio status` のみ拒否
+  対象外 — 10 §3 L307)。dedupe (どちらか一方の `.kio` の登録解除・削除) 後に再開できることを案内する。
 
-### PB25 `kcs repair --registry-prune` の新設と live clone 検査の除外 [P0]
+### PB25 `kio repair --registry-prune` の新設と live clone 検査の除外 [P0]
 - 正本: 10 §3 L291-293『**再 init・再発見のどちらも起こらない恒久消滅**... の stale 行は、
-  `kcs repair --registry-prune` (確認プロンプト付き — 到達不能行を列挙し、live clone 検査 (上記) に
+  `kio repair --registry-prune` (確認プロンプト付き — 到達不能行を列挙し、live clone 検査 (上記) に
   該当しない行のみ削除)』
-- 前提: registry に (a) 到達不能 (`.kcs` が実在しない) な stale 行、(b) 到達可能だが scope_id が
+- 前提: registry に (a) 到達不能 (`.kio` が実在しない) な stale 行、(b) 到達可能だが scope_id が
   live 重複している行 (PB21 のケース) が混在する。
-- 操作: `kcs repair --registry-prune` を実行する (確認プロンプトを承認)。
+- 操作: `kio repair --registry-prune` を実行する (確認プロンプトを承認)。
 - 期待: (a) のみ削除対象となる。(b) は live clone (単に複数存在するだけで到達可能) であり
   `--registry-prune` の削除対象にはならない (dedupe はユーザーの判断に委ねる — 10 §3 L287
   「どちらを残すかはユーザーの dedupe に委ねる」)。確認プロンプト無しでの実行は拒否される。
   **現行実装との既知の不整合**: `--registry-prune` は main.rs に grep 0 件。
 
 ### PB26 [regression-lock] 再 init による stale 退役は既に正しい [P1]
-- 正本: 10 §3 L279-283『**stale 登録の退役**: `.kcs` を削除して同じ path で `init` し直すと新しい
-  `scope_id` が採番される ... upsert の直前に、同一 `kcs_path` で `scope_id` が異なる行を削除する』
-- 前提: 現行実装 `retire_stale_kcs_path` (`kcs-index/src/registry.rs` L94-109、テスト L274-306) は
+- 正本: 10 §3 L279-283『**stale 登録の退役**: `.kio` を削除して同じ path で `init` し直すと新しい
+  `scope_id` が採番される ... upsert の直前に、同一 `kio_path` で `scope_id` が異なる行を削除する』
+- 前提: 現行実装 `retire_stale_kio_path` (`kio-index/src/registry.rs` L94-109、テスト L274-306) は
   既にこの規則を満たす。
-- 操作: 既存の `.kcs` を削除して同一 path で再 init し `kcs index` を実行する。
+- 操作: 既存の `.kio` を削除して同一 path で再 init し `kio index` を実行する。
 - 期待: 旧 scope_id の登録行が削除され、新 scope_id の行のみが残る — regression-lock (再定義不要)。
   この regression-lock は PB21-25 の fail-closed 化が「同一 path での正当な再 init」まで誤って live
   重複として扱わないことの反証にもなる (再 init 後は旧行が retire 済みで live 重複が発生しないため)。
@@ -489,11 +489,11 @@ P2 = 参考 (Phase 4+ 依存・文書のみ)。「**現行実装との既知の�
 - 正本: 10 §7.5.2 L641-644『**最低保全集合は objects/ と refs/ ではなく、03-data-model.md §4.1 の
   truth 区分の全行** (scope.json / config / tool-lock / tombstones + erase receipts / chunks.jsonl /
   access.jsonl を含む) — これらはいずれも喪失時復旧不能である』
-- 前提: `.kcs` ディレクトリごとのコピー (MVP 推奨バックアップ手段、専用コマンド無し) を人間が
+- 前提: `.kio` ディレクトリごとのコピー (MVP 推奨バックアップ手段、専用コマンド無し) を人間が
   実行する運用手順。
 - 操作: ドキュメント上のバックアップ手順記述を検査する。
 - 期待: 手順が「`objects/` と `refs/` のみで十分」という誤った案内を含まないこと。**この契約は
-  P2 (文書検証)**: `kcs backup` 相当の専用コマンドが MVP に存在せず (grep 0 件)、`.kcs` ディレクトリ
+  P2 (文書検証)**: `kio backup` 相当の専用コマンドが MVP に存在せず (grep 0 件)、`.kio` ディレクトリ
   ごとの単純コピーが唯一の手段であるため、機械検証可能な形での契約は「コピー手段が truth 区分の
   いずれかのファイルを明示的に除外するコード上の frケー致 (allowlist によるファイル選別など) を
   持たないこと」の regression-lock に限られる。**[解釈割れ]**: 専用バックアップコマンドが存在しない
@@ -508,19 +508,19 @@ P2 = 参考 (Phase 4+ 依存・文書のみ)。「**現行実装との既知の�
 > publication / association introduction の再導出は chunks.jsonl を正本とする』
 
 ### PB28 [regression-lock 寄り] rebuild-db 後の last_lifecycle_epoch は現在値に初期化される (DEFAULT 0 ではない) [P1]
-- 正本: 04 §5.7 L913 (上記引用)、05 §3.5 L760-761『`kcs repair --rebuild-db` は完了 Tx で現 counter
+- 正本: 04 §5.7 L913 (上記引用)、05 §3.5 L760-761『`kio repair --rebuild-db` は完了 Tx で現 counter
   値に初期化する — DEFAULT 0 のままの全件誤検出を防ぐ』
-- 前提: `.kcs/tombstones/lifecycle-epoch` の現在値が `9` の状態で `kcs repair --rebuild-db` を実行する。
+- 前提: `.kio/tombstones/lifecycle-epoch` の現在値が `9` の状態で `kio repair --rebuild-db` を実行する。
 - 操作: rebuild 完了後の `index_metadata.last_lifecycle_epoch` を検査する。
 - 期待: `9` (DEFAULT の `0` ではない) に初期化される。**現状**: `run_repair` の RebuildDb 分岐
-  (`main.rs` L970-972) は `rebuild_step3_index` の直後に `recover_index_generation(repo.kcs_dir())`
+  (`main.rs` L970-972) は `rebuild_step3_index` の直後に `recover_index_generation(repo.kio_dir())`
   を呼び、これが `index_metadata` 未初期化なら `purge.read_lifecycle_epoch()` の現在値で
   `ensure_index_metadata` する (L4455-4460) ため、本契約は**実質的に既に満たされている**可能性が高い
   ([適合済みの可能性] — U144 の統合要約は Step 4b Phase 1 適用前の spec-gap 記述であり、Phase 1c
   で `recover_index_generation` が追加された結果、本契約は regression-lock として位置づけを見直す)。
   **[解釈割れ]**: `rebuild_sqlite_index` 自身の DB スワップ Tx とは別の後続呼び出しであり、spec 文言
   「同じ完了 Tx」を文字通り同一 SQL トランザクションと読むなら未達、`run_repair` 全体を包む
-  `.kcs/.lock` 保持区間 (`main.rs` L932 `_lock = repo.lock_store()`) を「完了」の単位と読むなら
+  `.kio/.lock` 保持区間 (`main.rs` L932 `_lock = repo.lock_store()`) を「完了」の単位と読むなら
   充足と評価が分かれる (§Y-4 参照)。いずれの読みでも、rebuild と `recover_index_generation` の間で
   crash した場合に次の書込コマンドが自己修復すること (§Y-4 で言及) を別途確認する契約として本項を
   維持する。
@@ -532,7 +532,7 @@ P2 = 参考 (Phase 4+ 依存・文書のみ)。「**現行実装との既知の�
 - 前提: `chunks.jsonl` に (a) chunk 作成行 (`first_seen_commit` を伴う) と、対応する publication
   event 行が揃っている。SQLite の `chunk_publications` 表は現状 crates/ 全体で grep 0 件 (`chunk_id`
   ごとの publication introduction を保持する専用表が存在しない)。
-- 操作: `kcs repair --rebuild-db` を実行する。
+- 操作: `kio repair --rebuild-db` を実行する。
 - 期待: `chunk_publications` (新設表) が chunks.jsonl の publication event 行から再構築され、各
   chunk の introduction commit が (a) のデータから正しく復元される。tree の `chunk_set_hash` は
   再導出結果の**照合のみ**に使われ、不一致自体が corruption 判定の根拠にはならない (chunks.jsonl が
@@ -545,7 +545,7 @@ P2 = 参考 (Phase 4+ 依存・文書のみ)。「**現行実装との既知の�
 - 前提: `chunks.jsonl` に publication event 行が (旧 store のため) 一切無い。同一 chunk が複数の
   祖先-子孫関係にある commit から到達可能 (例: `C1` → `C2` → `C3` の直線 DAG で全て同一 chunk を
   参照)。
-- 操作: `kcs repair --rebuild-db` を 2 通りの実装 (異なる commit 走査順) でシミュレートする。
+- 操作: `kio repair --rebuild-db` を 2 通りの実装 (異なる commit 走査順) でシミュレートする。
 - 期待: いずれの走査順でも、導出される introduction 集合は同一 (ancestor-minimal — この例では `C1`
   のみが introduction として採用され、`C2`/`C3` は「既採用 introduction (`C1`) の子孫」として除外
   される)。walk 順序に依存して異なる結果を出す実装は契約違反。
@@ -559,7 +559,7 @@ P2 = 参考 (Phase 4+ 依存・文書のみ)。「**現行実装との既知の�
 - 前提: publication event 行を (a) 対応する creation 行/chunk object が存在しない、(b) introduction
   commit object が store に存在しない、(c) introduction commit object は存在するが ref から到達不能
   (tag 削除後の disconnected commit)、の 3 パターンで用意する。
-- 操作: `kcs repair --rebuild-db` を実行する。
+- 操作: `kio repair --rebuild-db` を実行する。
 - 期待: (a)(b) は dangling として無視される (再構築結果に含まれない)。(c) は無視**されず**保持される
   — `--at`/`--all-history` の解決対象であり続ける。(a)/(b) と (c) を同一に「ref 到達不能なら無視」と
   扱う実装は (c) について契約違反。
@@ -571,24 +571,24 @@ P2 = 参考 (Phase 4+ 依存・文書のみ)。「**現行実装との既知の�
 ### PB32 [regression-lock] schema_version は既に MAJOR-only の整数として扱われている [P1]
 - 正本: 08 §2.1 L56『`schema_version` | Evidence Pointer schema の version — **wire 上は URI の `sv`
   (§2.3) と同じく MAJOR のみの整数** (semver の MINOR/PATCH は載せない)』
-- 前提: 現行実装 `EvidencePointer.schema_version: u64` (`kcs-search/src/evidence.rs` L104)、
+- 前提: 現行実装 `EvidencePointer.schema_version: u64` (`kio-search/src/evidence.rs` L104)、
   `EVIDENCE_POINTER_SCHEMA_VERSION: u64 = 1` (L7)。
 - 操作: pointer の inline JSON と URI (`?sv=`) の両方で `schema_version`/`sv` を検証する。
 - 期待: 両方とも単純な整数 (MINOR/PATCH の小数点付き表現や文字列は受理されない — `u64` 型と
   `value.parse::<u64>()` (`evidence.rs` L250) がこれを型レベルで保証する) — regression-lock。
 
-### PB33 未知 MAJOR は表現形式に依らず KCS-E-CONFIG-SCHEMA 系 exit 2 で統一拒否 [P0]
+### PB33 未知 MAJOR は表現形式に依らず KIO-E-CONFIG-SCHEMA 系 exit 2 で統一拒否 [P0]
 - 正本: 08 §8 L503『**未知 MAJOR の拒否は表現形式に依らない**: reader は自己の対応 MAJOR より新しい
   `schema_version` を、URI の `sv` (§2.3) と inline / batch JSON の `schema_version` field のどちらで
-  受けても KCS-E-CONFIG-SCHEMA 系 error (exit 2) で拒否する』
+  受けても KIO-E-CONFIG-SCHEMA 系 error (exit 2) で拒否する』
 - 前提: 未対応の `schema_version`/`sv` (現行対応 MAJOR = 1 に対し `2` 等) を (a) URI の `?sv=2`、
   (b) inline JSON の `"schema_version": 2` で与える。
-- 操作: `kcs evidence verify`/`kcs open`/`kcs view` などで pointer を解析する。
-- 期待: (a)(b) いずれも同一の `KCS-E-CONFIG-SCHEMA` 系 error・exit 2 で拒否される。**現状**:
-  `parse_evidence_pointer_uri` (`evidence.rs` L257-261) は `"KCS-E-CONFIG-SCHEMA-001"` を含む
+- 操作: `kio evidence verify`/`kio open`/`kio view` などで pointer を解析する。
+- 期待: (a)(b) いずれも同一の `KIO-E-CONFIG-SCHEMA` 系 error・exit 2 で拒否される。**現状**:
+  `parse_evidence_pointer_uri` (`evidence.rs` L257-261) は `"KIO-E-CONFIG-SCHEMA-001"` を含む
   `SearchError::Evidence` を返し、`EvidencePointer::validate` (L169-174) は inline JSON 経路で
   `"unsupported evidence schema version"` を返す — 呼び出し元 (`main.rs`) でこれらがいずれも
-  `KcsError::schema()`/exit 2 に正規化されることを end-to-end で確認する (両経路のエラー文字列自体は
+  `KioError::schema()`/exit 2 に正規化されることを end-to-end で確認する (両経路のエラー文字列自体は
   異なるが、最終的な `error_code` namespace と exit code が一致することが契約の対象)。
 
 ---
@@ -602,7 +602,7 @@ P2 = 参考 (Phase 4+ 依存・文書のみ)。「**現行実装との既知の�
   人間向け引用に使われることを防ぐ』
 - 前提: pointer の `path_at_commit` に実際の tree entry の path と異なる偽値を仕込む (`heading_path`
   も同様に偽値を仕込む)。raw_hash/tool_profile_hash/chunk_hash 等の必須 tuple は正当。
-- 操作: `kcs open <pointer>`/`kcs view <pointer>` を実行する。
+- 操作: `kio open <pointer>`/`kio view <pointer>` を実行する。
 - 期待: 出力される `path_at_commit`/`heading_path` は tree entry・chunk object から得られる canonical
   値であり、pointer 入力の偽値は無視される。**現行実装との既知の不整合**: `PointerResolution`
   (`main.rs` L5928-5933) は `path`/`text`/`temporary`/`commit_shallow` のみを持ち、
@@ -617,7 +617,7 @@ P2 = 参考 (Phase 4+ 依存・文書のみ)。「**現行実装との既知の�
   等の欠落表示とする (chunk object 由来の field は通常どおり canonical 値を表示する)』
 - 前提: shallow commit (tree object が GC 済み) を指す pointer を用意し、`path_at_commit` に
   もっともらしい値を仕込む。
-- 操作: `kcs open`/`kcs view` (PB34 が実装され表示フィールドが出力されるようになった前提) を実行する。
+- 操作: `kio open`/`kio view` (PB34 が実装され表示フィールドが出力されるようになった前提) を実行する。
 - 期待: `path_at_commit` は pointer 入力値ではなく `"path unavailable (commit_shallow)"` 相当の
   欠落表示になる。`heading_path`/`section_id` 等の chunk object 由来フィールドは (chunk object が
   shallow でも解決できるため) 通常どおり canonical 値を表示する。
@@ -642,10 +642,10 @@ P2 = 参考 (Phase 4+ 依存・文書のみ)。「**現行実装との既知の�
 - 正本: 08 §2.3 L110-113『**MVP で発行・受理される object URI は type=image のみ** — 発行面は
   07-adapter-spec.md §5.2 の画像参照置換だけで、他 type の URI は発行されない。受理側も image 以外は
   拒否 — 06-cli-spec.md §1.1 手順 1a。type を追加する場合は 06 §1.1 に open semantics を定義してから』
-- 前提: `kcs://<scope_id>/object/<type>/<hash>` 形式の object URI を type = (a) `image`、(b) `raw`、
+- 前提: `kio://<scope_id>/object/<type>/<hash>` 形式の object URI を type = (a) `image`、(b) `raw`、
   (c) `chunk`、(d) `normalized`、(e) `prepared` でそれぞれ用意する。
-- 操作: `kcs open`/`kcs view` に各 URI を渡す。
-- 期待: (a) のみ受理される。(b)(c)(d)(e) はいずれも拒否される (`KCS-E-CONFIG-...`/invalid usage 系、
+- 操作: `kio open`/`kio view` に各 URI を渡す。
+- 期待: (a) のみ受理される。(b)(c)(d)(e) はいずれも拒否される (`KIO-E-CONFIG-...`/invalid usage 系、
   exit 2)。**現行実装との既知の不整合**: `parse_object_uri` (`main.rs` L7299` VALID_TYPES`) は
   `["raw", "image", "chunk", "normalized", "prepared"]` の 5 型を parse 時点で受理しており、
   `resolve_object_uri` (L7326-7358) も raw/image/chunk/prepared の 4 型を実際に解決可能にしている
@@ -653,14 +653,14 @@ P2 = 参考 (Phase 4+ 依存・文書のみ)。「**現行実装との既知の�
   parse 段階で拒否する新規則と現状は大きく乖離する。
 
 ### PB38 [解釈割れ・P2] fork 複製 scope 内の旧 scope_id object URI は自 store の同一 hash で解決する [P2]
-- 正本: 08 §2.3 L114-117『fork 複製 (`kcs import --as-new-scope`) 内の旧 scope_id を含む object URI
+- 正本: 08 §2.3 L114-117『fork 複製 (`kio import --as-new-scope`) 内の旧 scope_id を含む object URI
   は、文脈 store に該当 hash の object があれば自 store で解決する (06-cli-spec.md §1.1 手順 1a —
   hash が identity)』
-- 前提: `kcs import --as-new-scope` 自体が現状未実装 (grep 0 件、Phase 4+ 相当の周辺機能)。
+- 前提: `kio import --as-new-scope` 自体が現状未実装 (grep 0 件、Phase 4+ 相当の周辺機能)。
 - 操作: (実装前提の記述のみ) — 自 store に同一 image_hash を持つ複製 scope で、複製元の (異なる)
   scope_id を含む object URI を解決しようとする。
-- 期待: **[解釈割れ]** `kcs import --as-new-scope` が存在しない現状、この規則を実機で検証する経路が
-  無い。本契約は将来 `kcs import --as-new-scope` が実装された際に満たすべき期待値を記録するのみで
+- 期待: **[解釈割れ]** `kio import --as-new-scope` が存在しない現状、この規則を実機で検証する経路が
+  無い。本契約は将来 `kio import --as-new-scope` が実装された際に満たすべき期待値を記録するのみで
   あり、P2 (Phase 4+ 依存、現時点では検証不能) として扱う。
 
 ---
@@ -674,17 +674,17 @@ P2 = 参考 (Phase 4+ 依存・文書のみ)。「**現行実装との既知の�
   `is_store_not_found` の場合 `(commit_shallow=true, entry_gen=None)` として tree 読み取り (手順
   3-4 相当) を丸ごとスキップし、以降 raw_present 判定 (手順 5) → chunk 解決 (手順 6-7) → 整合検証
   (手順 8、`entry_gen` が `None` のため gen 一致チェックのみスキップ) に進む。
-- 操作: shallow commit を指す pointer を `kcs open`/`kcs view` で解決する。
+- 操作: shallow commit を指す pointer を `kio open`/`kio view` で解決する。
 - 期待: tree entry に依存する処理 (手順 3-4 の tree 取得・raw_hash entry 検索、当時未実装の手順
   6a/6b) が一切実行されず、chunk_hash から直接 chunk を解決する — regression-lock (新規実装は不要)。
   非 strict では `commit_shallow: true` を伴い解決成功として返る (08§3.2 L294 の
   「shallow commit は pointer 解決の失敗要因ではない」)。
 
-### PB40 `kcs evidence verify --strict` は shallow 解決を alive でなく unverifiable(exit 3) に降格する [P0]
+### PB40 `kio evidence verify --strict` は shallow 解決を alive でなく unverifiable(exit 3) に降格する [P0]
 - 正本: 08 §3.1 手順 8 L266『`--strict` verify は shallow 経路の解決を alive でなく **unverifiable
   (exit 3)** として返す (時点帰属の偽装を「検証済み」と誤認させない)』/ 08 §4.3 L365『exit は reason
   の再試行可能性に従い分岐する — `commit_shallow` のみなら 3』
-- 前提: shallow commit を指す pointer で `kcs evidence verify <pointer> --strict` を実行する。
+- 前提: shallow commit を指す pointer で `kio evidence verify <pointer> --strict` を実行する。
 - 操作: 上記コマンドを実行し `status` と exit code を検査する。
 - 期待: `status: "unverifiable"`, `details.reason: "commit_shallow"`, exit code 3。**現行実装との
   既知の不整合**: `verify_pointer_for_cli` (`verify_objects.rs` L184-195) は shallow でも
@@ -701,7 +701,7 @@ P2 = 参考 (Phase 4+ 依存・文書のみ)。「**現行実装との既知の�
 - 前提: `--batch` 以外の単発 `--strict` verify で、`status="unverifiable"` かつ `details.reason` が
   (a) `commit_shallow` のみ、(b) `tree_v1`、(c) `manifest_missing` の 3 パターン (U54/U55 実装後を
   前提とする)。
-- 操作: 各パターンで `kcs evidence verify <pointer> --strict` を実行する。
+- 操作: 各パターンで `kio evidence verify <pointer> --strict` を実行する。
 - 期待: (a) は exit 3。(b)(c) は exit 4。`run_evidence` の現行ロジック (`__exit_code: 4` を
   無条件付与、L41-45) は reason 別分岐を一切持たないため、PB40 と合わせて `--strict` の exit 判定
   ロジック全体を reason テーブル駆動へ書き換える必要がある。
@@ -716,8 +716,8 @@ P2 = 参考 (Phase 4+ 依存・文書のみ)。「**現行実装との既知の�
 - 前提: 同一 commit の tree に同一 raw_hash を持つ entry が 2 つ存在し、異なる `normalize.
   tool_profile_hash` を持つ (`path=a.md` は `tool_profile_hash=T1`、`path=b.md` は `T2`)。pointer の
   `tool_profile_hash=T2`。
-- 操作: (a) `kcs open`/`kcs view`/`kcs restore` (`resolve_pointer_for_cli`, `main.rs` L6216-6257)、
-  (b) `kcs evidence verify` (`verify_pointer_for_cli`, `verify_objects.rs` L113-138) の両方で解決する。
+- 操作: (a) `kio open`/`kio view`/`kio restore` (`resolve_pointer_for_cli`, `main.rs` L6216-6257)、
+  (b) `kio evidence verify` (`verify_pointer_for_cli`, `verify_objects.rs` L113-138) の両方で解決する。
 - 期待: (a)(b) いずれも `T2` (pointer の tool_profile_hash) に binding する entry (`b.md`) が選ばれる。
   **現行実装との既知の不整合**: 両関数とも `tree.entries.iter().find(|entry| entry.raw_hash ==
   pointer.raw_hash)` で raw_hash 一致の**最初の 1 件**を機械的に採用しており (main.rs L6218-6221,
@@ -731,22 +731,22 @@ P2 = 参考 (Phase 4+ 依存・文書のみ)。「**現行実装との既知の�
   path を使い、pointer 入力の optional path は使わない)』
 - 前提: 同一 raw_hash・同一 tool_profile_hash (binding も同一) の entry が `path="z.md"` と
   `path="a.md"` の 2 つ存在する (同一 commit 内の複数 path 配置)。
-- 操作: `kcs open`/`kcs view` で解決する。
+- 操作: `kio open`/`kio view` で解決する。
 - 期待: `path="a.md"` (UTF-8 byte 順最小) が決定的に選ばれる。実行順序 (tree.entries の格納順) に
   依存する非決定的な選択は契約違反。
 
-### PB44 一致 entry ゼロ件は手順 5-7 短絡・KCS-E-STORE-CORRUPT-001 (現状の PURGE-NOT-FOUND-001 誤りをパラメタ化で是正) [P0]
-- 正本: 08 §3.1 手順 4 L176-178『一致 entry が無ければ手順 5〜7 を実行せず `KCS-E-STORE-CORRUPT-001`
+### PB44 一致 entry ゼロ件は手順 5-7 短絡・KIO-E-STORE-CORRUPT-001 (現状の PURGE-NOT-FOUND-001 誤りをパラメタ化で是正) [P0]
+- 正本: 08 §3.1 手順 4 L176-178『一致 entry が無ければ手順 5〜7 を実行せず `KIO-E-STORE-CORRUPT-001`
   (not_found 扱い — 手順 8 の不一致処理と同じ終端) へ短絡する』
 - 前提: pointer の raw_hash に一致する tree entry が commit の tree に**1 件も存在しない** (DAG は
   purge で書き換えられないため — 02-philosophy §2.4/10 §7 U29 — これは genuine corruption であり
   purge の正常な帰結ではない)。
 - 操作: (a) `resolve_pointer_for_cli` (open/view/restore)、(b) `verify_pointer_for_cli` (evidence
   verify) の両方で解決する。
-- 期待: (a)(b) いずれも `KCS-E-STORE-CORRUPT-001` で終端し、tombstone/marker の確認 (手順 5) を
+- 期待: (a)(b) いずれも `KIO-E-STORE-CORRUPT-001` で終端し、tombstone/marker の確認 (手順 5) を
   一切行わない。**現行実装との既知の不整合**: (a) は entry 不在時に `enforce_canonical_tombstone_only`
-  を呼んでから `purge_not_found_error` (`KCS-E-PURGE-NOT-FOUND-001`) を返し (main.rs L6222-6231)、
-  (b) も同様に `read_tombstone` を経て `not_found_verify_output` (`KCS-E-PURGE-NOT-FOUND-001`) を
+  を呼んでから `purge_not_found_error` (`KIO-E-PURGE-NOT-FOUND-001`) を返し (main.rs L6222-6231)、
+  (b) も同様に `read_tombstone` を経て `not_found_verify_output` (`KIO-E-PURGE-NOT-FOUND-001`) を
   返す (verify_objects.rs L119-124) — 両方とも marker 確認を経由してから誤ったエラーコード
   (PURGE-NOT-FOUND ではなく STORE-CORRUPT が正しい) で終端しており、本契約が要求する「手順 5 を
   実行せず短絡する」という順序そのものにも反する (tombstone なら tombstone を返す、という現状の
@@ -765,7 +765,7 @@ P2 = 参考 (Phase 4+ 依存・文書のみ)。「**現行実装との既知の�
   not_found)』
 - 前提: tree entry の manifest 内で、pointer の chunk が指す unit_key が (a) `status=done`、(b)
   `status` が done 以外 (in_flight 等、same-gen retry の後着を模したもの)。
-- 操作: `kcs open`/`kcs view` で解決する。
+- 操作: `kio open`/`kio view` で解決する。
 - 期待: (a) は手順 7 (本文取り出し) へ進む。(b) は not_found として終端する (chunk object 自体は
   存在しても、当該 commit 時点の証拠としては採用しない)。
 
@@ -777,7 +777,7 @@ P2 = 参考 (Phase 4+ 依存・文書のみ)。「**現行実装との既知の�
   できる)』
 - 前提: PB29 (`chunk_publications`) 実装後、chunk の introduction commit が pointer の commit の
   (a) ancestor-or-equal、(b) descendant (= pointer の commit より後に公開された = 未来の chunk)。
-- 操作: `kcs open`/`kcs view` で解決する。
+- 操作: `kio open`/`kio view` で解決する。
 - 期待: (a) は証拠として採用 (手順 7 へ進む)。(b) は not_found (corruption ではない — introduction
   レコードの不在/未来公開は「まだ確立していない association」であり fsck の corruption 対象にしない)。
 
@@ -785,13 +785,13 @@ P2 = 参考 (Phase 4+ 依存・文書のみ)。「**現行実装との既知の�
 - 正本: 08 §3.1 手順 6a L211-213『config association は**対象 tree の `chunking_config_hash` のもの**
   — 05-runtime.md §1.6 の検索側と同一の絞り込み。別 config の association は当該 commit への帰属を
   証明しない』/ L216-218『**sqlite.db 自体の不在・再構築中はこの検証を実行できない — not_found
-  ではなく `KCS-E-INDEX-REBUILDING-001` の再構築要求を返し**、検証不能を「不在の確定」と混同しない』
+  ではなく `KIO-E-INDEX-REBUILDING-001` の再構築要求を返し**、検証不能を「不在の確定」と混同しない』
 - 前提: 対象 chunk が chunking_config_hash=`Ca` の下では introduction 済みだが `Cb` (別 config) の
   下でのみ introduction されている状態。別途、sqlite.db が存在しない (未初期化) 状態。
 - 操作: (a) tree の chunking_config_hash が `Ca` の commit を pointer で解決する。(b) sqlite.db が
   存在しない状態で同じ pointer を解決する。
 - 期待: (a) は `Cb` の association では帰属を証明できないため not_found (`Ca` 側の association が
-  無ければ)。(b) は not_found ではなく `KCS-E-INDEX-REBUILDING-001` (exit 3、再構築要求) を返す —
+  無ければ)。(b) は not_found ではなく `KIO-E-INDEX-REBUILDING-001` (exit 3、再構築要求) を返す —
   検証不能と不在確定を混同しない。
 
 ---
@@ -801,14 +801,14 @@ P2 = 参考 (Phase 4+ 依存・文書のみ)。「**現行実装との既知の�
 ### PB48 manifest 欠落の説明範囲限定 (in_commit 以前限定) と manifest_missing 降格 [P0]
 - 正本: 08 §3.1 手順 6b L222-228『entry の manifest object が purge により欠落している場合 (... 説明
   範囲は fsck と同一 ...): 当該 purged / erased event の `in_commit` **以前**の commit が参照する
-  closure に限る — pointer の commit がこの範囲外なら 6b を適用せず KCS-E-STORE-CORRUPT-001
+  closure に限る — pointer の commit がこの範囲外なら 6b を適用せず KIO-E-STORE-CORRUPT-001
   (not_found 扱い) とする ... 手順 2a と同じ直接解決へ降格し、レスポンスに `manifest_missing: true`
   を付す』
 - 前提: raw_hash `X` の canonical final event = `purged` (in_commit=`Cp`)。manifest が欠落した pointer
   の commit が (a) `Cp` 以前、(b) `Cp` より後 (再作成・再公開分)。
-- 操作: `kcs open`/`kcs view` で解決する (PB04/PB45 実装後を前提)。
+- 操作: `kio open`/`kio view` で解決する (PB04/PB45 実装後を前提)。
 - 期待: (a) は直接解決へ降格し `manifest_missing: true` を伴って alive 相当を返す (手順 4 の tree
-  entry 照合は実施 — 手順 8 の entry 系照合も維持)。(b) は `KCS-E-STORE-CORRUPT-001` (not_found 扱い)。
+  entry 照合は実施 — 手順 8 の entry 系照合も維持)。(b) は `KIO-E-STORE-CORRUPT-001` (not_found 扱い)。
 
 ### PB49 retired event の resurrection_commit リンク経由の代替解決 [P0]
 - 正本: 08 §3.1 手順 6b L230-250『retired event に `resurrection_commit` があれば、そのリンク先
@@ -817,7 +817,7 @@ P2 = 参考 (Phase 4+ 依存・文書のみ)。「**現行実装との既知の�
   **canonical final event (手順 5) が retired の場合の当該 event のみ**』
 - 前提: pointer が purge **前**の古い commit `C1` を指す。tombstone の canonical final event が
   `retired` (resurrection_commit=`C2`)。`C1` 時点の tree entry の manifest は purge により欠落済み。
-- 操作: `kcs open`/`kcs view` で `C1` を指す旧 pointer を解決する。
+- 操作: `kio open`/`kio view` で `C1` を指す旧 pointer を解決する。
 - 期待: 手順 6b の直接解決 (PB48) だけでは `C1` 時点の manifest 欠落が説明されない場合でも、
   `resurrection_commit=C2` のリンクを辿り、`C2` 側の publication (chunk publication / config
   association introduction が `C2` を基準に ancestor-or-equal であること) を検証して alive を返す。
@@ -853,7 +853,7 @@ P2 = 参考 (Phase 4+ 依存・文書のみ)。「**現行実装との既知の�
   選択結果を差し替え、`tool_profile_hash` が pointer と一致しない entry を意図的に手順 6 以降へ
   渡す)。
 - 操作: この模擬状態で手順 7-8 相当のコードパスを実行する。
-- 期待: 手順 8 の再検証が独立して `tool_profile_hash` 不一致を検出し `KCS-E-STORE-CORRUPT-001` で
+- 期待: 手順 8 の再検証が独立して `tool_profile_hash` 不一致を検出し `KIO-E-STORE-CORRUPT-001` で
   終端する — 手順 4 の選択ロジックの正しさに依存せず、終端で必ず再検証が働くこと。**現状**: 現行
   実装 (`main.rs` L6242-6250 の選択時チェックと L6304-6317 の終端チェック) は同じ `entry_gen`/
   `tool_profile_hash` 変数を使い回しており、選択時チェック (手順 4 相当) と終端チェック (手順 8
@@ -865,7 +865,7 @@ P2 = 参考 (Phase 4+ 依存・文書のみ)。「**現行実装との既知の�
   限界は `commit_shallow: true` が表明し、`--strict` verify は shallow 経路の解決を alive でなく
   unverifiable (exit 3) として返す』
 - 前提: shallow commit を指す pointer。
-- 操作: `kcs open`/`kcs view`/`kcs evidence verify` で解決する。
+- 操作: `kio open`/`kio view`/`kio evidence verify` で解決する。
 - 期待: 応答に `commit_shallow: true` が含まれ (既存、PB39 で regression-lock 済み)、`--strict`
   evidence verify は PB40 の unverifiable 降格を適用する — 本契約は PB39/PB40 の「手順 8 の観点からの
   相互参照」であり、新規検証は課さない (§K 表の参照専用に近い軽量確認)。
@@ -881,12 +881,12 @@ P2 = 参考 (Phase 4+ 依存・文書のみ)。「**現行実装との既知の�
 > リテラルとして grep 0 件 (本コマンドで確認済み)。
 
 ### PB53 scope_unreachable は構造化 status であり raw error ではない [P0]
-- 正本: 08 §4.3 L356 (union 定義) / §3.2 L288-291『scope の .kcs に到達できない: scope_unreachable
-  — scope_path 不達かつ scope_registry に scope_id 未登録 → KCS-E-EVIDENCE-SCOPE-UNREACHABLE-001』
+- 正本: 08 §4.3 L356 (union 定義) / §3.2 L288-291『scope の .kio に到達できない: scope_unreachable
+  — scope_path 不達かつ scope_registry に scope_id 未登録 → KIO-E-EVIDENCE-SCOPE-UNREACHABLE-001』
 - 前提: 存在しない scope_id・到達不能な scope_path を持つ pointer。
-- 操作: `kcs evidence verify <pointer>` (`--strict` 無し) を実行する。
+- 操作: `kio evidence verify <pointer>` (`--strict` 無し) を実行する。
 - 期待: コマンドは exit 0 で完了し、JSON body の `status` が `"scope_unreachable"` である
-  (`details` に `error_code: KCS-E-EVIDENCE-SCOPE-UNREACHABLE-001` 相当を含めてよい)。**現行実装
+  (`details` に `error_code: KIO-E-EVIDENCE-SCOPE-UNREACHABLE-001` 相当を含めてよい)。**現行実装
   との既知の不整合**: `verify_pointer_for_cli` の冒頭 `resolve_scope_target` (L97) が失敗すると
   `?` 演算子でそのまま `Err` が伝播し、`run_evidence` (L31-47) はこれを **CLI トップレベルのエラー**
   として exit 非 0 で終了する (構造化 `status` フィールドを持つ成功レスポンスにならない) — verify
@@ -897,10 +897,10 @@ P2 = 参考 (Phase 4+ 依存・文書のみ)。「**現行実装との既知の�
 - 正本: 08 §4.3 L356, L366『live clone 重複は status `registry_duplicate` (候補一覧つき、exit 3 —
   §3.1 手順 1)』
 - 前提: §H (PB21) の live 重複状態にある scope_id を持つ pointer。
-- 操作: `kcs evidence verify <pointer>` (strict 有無それぞれ) を実行する。
-- 期待: `status: "registry_duplicate"`、`details` に候補 `.kcs` path の一覧を含み、exit code は
+- 操作: `kio evidence verify <pointer>` (strict 有無それぞれ) を実行する。
+- 期待: `status: "registry_duplicate"`、`details` に候補 `.kio` path の一覧を含み、exit code は
   strict の有無に関わらず 3 (retryable — PB56 の exit テーブルの一部)。現状はこの経路が
-  `KCS-E-EVIDENCE-SCOPE-AMBIGUOUS-001` の raw error になる (PB53 と同型の不整合 — §H の
+  `KIO-E-EVIDENCE-SCOPE-AMBIGUOUS-001` の raw error になる (PB53 と同型の不整合 — §H の
   fail-closed 化 (PB21-22) が先行実装されて初めて再現可能になるケースを含む)。
 
 ### PB55 unverifiable status と reason union (commit_shallow/tree_v1/manifest_missing) [P0]
@@ -908,7 +908,7 @@ P2 = 参考 (Phase 4+ 依存・文書のみ)。「**現行実装との既知の�
   `details.reason` で区別する: `commit_shallow` / `tree_v1` (手順 6a) / `manifest_missing` (手順 6b)』
 - 前提: PB40 (commit_shallow)・§P (U54, tree_v1)・§Q (U55, manifest_missing) がそれぞれ実装された
   3 パターンの pointer で `--strict` verify する。
-- 操作: 各パターンで `kcs evidence verify <pointer> --strict` を実行する。
+- 操作: 各パターンで `kio evidence verify <pointer> --strict` を実行する。
 - 期待: 3 パターンいずれも `status: "unverifiable"`、`details.reason` がそれぞれ対応する値。3 値が
   閉じた enum であり、他の自由文字列が現れないこと。
 
@@ -925,14 +925,14 @@ P2 = 参考 (Phase 4+ 依存・文書のみ)。「**現行実装との既知の�
   (恒久 vs 再試行可能) を単一の `status != "alive" => 4` という現行ロジック (`run_evidence` L41-45)
   で判定することはできない — reason/status ごとの exit テーブルへの全面書き換えが必要。
 
-### PB57 sqlite.db 利用不能時は status ではなく command-level KCS-E-INDEX-REBUILDING-001 [P1]
+### PB57 sqlite.db 利用不能時は status ではなく command-level KIO-E-INDEX-REBUILDING-001 [P1]
 - 正本: 08 §4.3 L367-370『**sqlite.db が不在・利用不能の場合は status ではなく command-level の
-  retryable error `KCS-E-INDEX-REBUILDING-001` (exit 3)** — 検査は完了していないため --strict なしでも
+  retryable error `KIO-E-INDEX-REBUILDING-001` (exit 3)** — 検査は完了していないため --strict なしでも
   0 を返さない (再構築中でも旧 sqlite.db が読めるなら通常応答)』
-- 前提: `.kcs/index/sqlite.db` が存在しない (初回 index 未完了、または rebuild-db 進行中で旧 DB も
+- 前提: `.kio/index/sqlite.db` が存在しない (初回 index 未完了、または rebuild-db 進行中で旧 DB も
   無い) 状態。
-- 操作: `kcs evidence verify <pointer>` (strict 無し) を実行する。
-- 期待: `status` フィールドを持つ成功レスポンスではなく、`KCS-E-INDEX-REBUILDING-001` の command-level
+- 操作: `kio evidence verify <pointer>` (strict 無し) を実行する。
+- 期待: `status` フィールドを持つ成功レスポンスではなく、`KIO-E-INDEX-REBUILDING-001` の command-level
   error (exit 3) を返す。`--strict` の有無に関わらずこの挙動は変わらない (「--strict なしでも 0 を
   返さない」)。**この規則は §P (PB47) の「sqlite.db 不在時は手順 6a を検証不能」規則と対をなすが、
   別の適用場面 (手順 6a は既に commit/tree/manifest 解決後の話、本契約は verify コマンド冒頭の DB
@@ -942,16 +942,16 @@ P2 = 参考 (Phase 4+ 依存・文書のみ)。「**現行実装との既知の�
 
 ## T. purge journal 進行中の evidence verify 拒否 (U58)
 
-### PB58 [regression-lock 寄り] active journal 中の verify は評価を行わず KCS-E-PURGE-JOURNAL-ACTIVE-001 (exit 3) [P1]
-- 正本: 08 §4.3 L387-389『active purge journal 中の verify は評価を行わず、KCS-E-PURGE 系 retryable
+### PB58 [regression-lock 寄り] active journal 中の verify は評価を行わず KIO-E-PURGE-JOURNAL-ACTIVE-001 (exit 3) [P1]
+- 正本: 08 §4.3 L387-389『active purge journal 中の verify は評価を行わず、KIO-E-PURGE 系 retryable
   (exit 3) を返す (05-runtime.md §3.5 の読取系規約 — marker 耐久化後・削除完了前の窓で「削除対象が
   alive」と誤答しないため)』
-- 前提: `.kcs/purge/journal` が active な状態 (`PurgeState::read_journal()` が `Some` を返す)。
-- 操作: `kcs evidence verify <pointer>` を実行する。
-- 期待: `status` を含む通常レスポンスではなく `KCS-E-PURGE-JOURNAL-ACTIVE-001` (retryable, exit 3)
+- 前提: `.kio/purge/journal` が active な状態 (`PurgeState::read_journal()` が `Some` を返す)。
+- 操作: `kio evidence verify <pointer>` を実行する。
+- 期待: `status` を含む通常レスポンスではなく `KIO-E-PURGE-JOURNAL-ACTIVE-001` (retryable, exit 3)
   で拒否される。**現状**: `verify_pointer_for_cli` 冒頭の `ReadBarrierCheckpoint::open` (L101、
   `main.rs` L6963-6973) が `purge.read_barrier_active()` を検査し、true なら
-  `purge_journal_active_error()` (`KCS-E-PURGE-JOURNAL-ACTIVE-001`, `ExitCode::PartialFailure`=3) を
+  `purge_journal_active_error()` (`KIO-E-PURGE-JOURNAL-ACTIVE-001`, `ExitCode::PartialFailure`=3) を
   返す — これは Step 4b Phase 1c で追加された §I read barrier (LC52-56) の副産物として**既に本契約を
   満たしている可能性が高い**([適合済みの可能性] — spec-gap の元記述はこの Phase 1c 追加前のコード
   読解に基づく)。本契約は regression-lock として維持し、raw_hash 単位ではなく scope 全体の active
@@ -961,15 +961,15 @@ P2 = 参考 (Phase 4+ 依存・文書のみ)。「**現行実装との既知の�
 
 ## U. retarget fail-closed 強化 + match_method 互換性分類 (U59, U60 — 実装は Phase 4+)
 
-> `kcs evidence retarget` の実装自体は 08§5『retarget の実装は Phase 4+』により本 Phase の対象外。
+> `kio evidence retarget` の実装自体は 08§5『retarget の実装は Phase 4+』により本 Phase の対象外。
 > 以下は実装着手時に満たすべき契約を先行して固定するものであり、現時点でのコード変更を要求しない。
 
 ### PB59 完全一致の複数候補は fail-closed (先勝ち禁止) [P1]
 - 正本: 08 §5 L429『**完全一致が複数 chunk に成立する場合も一意に定まらないため
-  `KCS-E-EVIDENCE-RETARGET-AMBIG-001` (fail-closed — 先勝ちで選ばない)**』
+  `KIO-E-EVIDENCE-RETARGET-AMBIG-001` (fail-closed — 先勝ちで選ばない)**』
 - 前提: (実装後を想定) 旧 pointer の `heading_path` が新 snapshot の 2 つ以上の chunk と完全一致する。
-- 操作: `kcs evidence retarget <old_pointer>` を実行する。
-- 期待: `status: "ambiguous"`, `error_code: "KCS-E-EVIDENCE-RETARGET-AMBIG-001"`、`candidates` に
+- 操作: `kio evidence retarget <old_pointer>` を実行する。
+- 期待: `status: "ambiguous"`, `error_code: "KIO-E-EVIDENCE-RETARGET-AMBIG-001"`、`candidates` に
   複数候補を含む。実装順序に依存して先頭候補を無条件採用することは契約違反。
 
 ### PB60 fuzzy 対応は text alignment 成立領域内限定・retargeted_from はレスポンス直下 [P1]
@@ -980,7 +980,7 @@ P2 = 参考 (Phase 4+ 依存・文書のみ)。「**現行実装との既知の�
   レベルフィールド**』
 - 前提: (実装後を想定) 新旧 tool_profile の unit-local byte offset が異なる 2 つの chunk 集合を用意し、
   (a) text alignment が成立する領域、(b) 成立しない領域でそれぞれ fuzzy 対応を試みる。
-- 操作: `kcs evidence retarget <old_pointer>` を実行する。
+- 操作: `kio evidence retarget <old_pointer>` を実行する。
 - 期待: (a) は `heading_path_fuzzy` で対応付けが成立しうる。(b) は ambiguous (fail-closed)。成功時の
   JSON は `{"status": "retargeted", "new_pointer": {...}, "retargeted_from": "<old_pointer>", ...}`
   の形で `retargeted_from` が `new_pointer` の**外側**のトップレベルに置かれる (内部にネストしない)。
@@ -997,13 +997,13 @@ P2 = 参考 (Phase 4+ 依存・文書のみ)。「**現行実装との既知の�
 
 ---
 
-## V. `kcs evidence verify --batch` (U61)
+## V. `kio evidence verify --batch` (U61)
 
 ### PB62 [regression-lock] --batch は明示的に Phase 4+ 対象外として拒否される [P1]
 - 正本: 08 §4.3 L391『`--batch` の実装は Phase 4+ (09-mvp-scope.md §3.1)。単発 verify は Step 4』
 - 前提: 現行実装 `parse_evidence_verify_args` (`verify_objects.rs` L70-74) は `"--batch"` を
-  無条件で `KcsError::invalid_usage("evidence verify --batch is outside the MVP")` として拒否する。
-- 操作: `kcs evidence verify --batch pointers.jsonl` を実行する。
+  無条件で `KioError::invalid_usage("evidence verify --batch is outside the MVP")` として拒否する。
+- 操作: `kio evidence verify --batch pointers.jsonl` を実行する。
 - 期待: exit 2 (invalid usage) で拒否され、`<pointer>` と `--batch` の相互排他が保たれる —
   regression-lock (spec 自身の Phase 4+ スコープ規定と現行実装が既に整合している)。
 
@@ -1015,7 +1015,7 @@ P2 = 参考 (Phase 4+ 依存・文書のみ)。「**現行実装との既知の�
 - 正本: 08 §2 L50『`path_at_commit` は... パス区切り (`/`) を含まない (03 §3。**例外**: 03 §3 の
   forward 規則以前に作られた検証済み legacy tree 由来の entry に限り、区切り等を含む旧 path をそのまま
   保持する — 表示専用であり resolver 入力には使わない）』
-- 前提: `TreeEntry::validate()` (`kcs-core/src/dag.rs` L44-71) は `is_logical_direct_child` (L92-98、
+- 前提: `TreeEntry::validate()` (`kio-core/src/dag.rs` L44-71) は `is_logical_direct_child` (L92-98、
   `/` 等を含む path を無条件拒否) を経由なく常に適用する — legacy tree 由来かどうかを判定する分岐が
   無い。
 - 操作: 区切りを含む legacy path を持つ (実装前提の) tree entry を validate する。
@@ -1035,7 +1035,7 @@ P2 = 参考 (Phase 4+ 依存・文書のみ)。「**現行実装との既知の�
 > **失敗** marker は入口非依存で corruption (fsck/resolver/re-purge 統一)」を既に契約化済みだが、
 > これは malformed marker の corruption 判定に限定した narrow な契約である。本節はそれを踏み台に、
 > **検証成功マーカー同士の canonical 集約そのもの** (LC8-10 の 4 分岐アルゴリズム全体) が
-> `kcs evidence verify` でも共有されることを契約化する — 08§3.1 手順 5 は resolver 系全般
+> `kio evidence verify` でも共有されることを契約化する — 08§3.1 手順 5 は resolver 系全般
 > (`search`/`open`/`view`/`evidence verify`/`restore`/`diff`/`inspect`) に等しく適用される規範で
 > あり、`evidence verify` だけ別の (単純化された) 判定ロジックを持ってよいという根拠は spec 上どこにも
 > 無い。
@@ -1052,11 +1052,11 @@ P2 = 参考 (Phase 4+ 依存・文書のみ)。「**現行実装との既知の�
 - 正本: 08 §3.1 手順 5 L187-190『(§3.2 の解決成功条件... をここで検査する — (i) が個別 marker の
   末尾で先に短絡しない: 例えば tombstone 末尾 purged@epoch10 + receipt 末尾 retired@epoch11 は
   canonical = retired であり (iii) 側)』(`step4b-contract-tests-lifecycle.md` **LC10** と同一
-  シナリオ、本契約はそれを `kcs evidence verify` 経由で再現する)。
+  シナリオ、本契約はそれを `kio evidence verify` 経由で再現する)。
 - 前提: raw_hash `X` の tombstone 末尾 event = `{kind:"purged", lifecycle_epoch:10}`、erase receipt
   末尾 event = `{kind:"retired", lifecycle_epoch:11}` (両方とも構造検証通過)。raw object `X` は CAS に
   存在する (retired の前提を満たす)。
-- 操作: `kcs evidence verify <X を指す pointer>` を実行する。
+- 操作: `kio evidence verify <X を指す pointer>` を実行する。
 - 期待: `status: "alive"` を返す (canonical final event = `retired` であり、tombstone 単独の末尾が
   `purged` であることに短絡しない)。**現行実装との既知の不整合**: `verify_pointer_for_cli` は
   `read_tombstone` (`main.rs` L6923-6938 → `PurgeState::read_tombstone(raw_hash)` の
@@ -1072,13 +1072,13 @@ P2 = 参考 (Phase 4+ 依存・文書のみ)。「**現行実装との既知の�
 - 前提: (a) canonical final event = `erased`・raw 不在 (LC12 相当)。(b) canonical final event =
   `retired`・raw 不在 (LC13 相当、resurrection のはずが raw が無い異常系)。(c) marker 皆無・raw 不在
   (LC14(a) 相当、unmarked corruption)。
-- 操作: 各パターンで `kcs evidence verify <pointer>` を実行する。
-- 期待: (a) `status:"not_found"`, `error_code:"KCS-E-PURGE-NOT-FOUND-001"`。(b)(c) は
-  `KCS-E-STORE-CORRUPT-001` (「not_found 相当だが corruption」— LC13/LC14 は not_found と区別される
+- 操作: 各パターンで `kio evidence verify <pointer>` を実行する。
+- 期待: (a) `status:"not_found"`, `error_code:"KIO-E-PURGE-NOT-FOUND-001"`。(b)(c) は
+  `KIO-E-STORE-CORRUPT-001` (「not_found 相当だが corruption」— LC13/LC14 は not_found と区別される
   独立コード)。**現行実装との既知の不整合**: `verify_pointer_for_cli` は raw 不在時、entry の有無に
   関わらず `not_found_verify_output` (`verify_objects.rs` L209-218) を呼び、**常に**
-  `KCS-E-PURGE-NOT-FOUND-001` を返す — (b)(c) のケースで `KCS-E-STORE-CORRUPT-001` を返すべきところを
-  誤って `KCS-E-PURGE-NOT-FOUND-001` にしてしまう。`main.rs` の `enforce_canonical_marker_barrier`
+  `KIO-E-PURGE-NOT-FOUND-001` を返す — (b)(c) のケースで `KIO-E-STORE-CORRUPT-001` を返すべきところを
+  誤って `KIO-E-PURGE-NOT-FOUND-001` にしてしまう。`main.rs` の `enforce_canonical_marker_barrier`
   が既に (a)(b)(c) を正しく区別する実装を持つため、本契約は「同じロジックを再実装せず共有せよ」
   という §PB66 の構造契約と対になる。
 
@@ -1086,13 +1086,13 @@ P2 = 参考 (Phase 4+ 依存・文書のみ)。「**現行実装との既知の�
 - 正本: 05 §3.5 L907『検証失敗の marker は入口を問わず (fsck・resolver・再 purge) 説明能力を持たない
   corruption とする』の前提となる一般原則 — 08§3.1 手順 5 の 4 分岐が resolver 全般の正本アルゴリズム
   であること (§冒頭の引用)、および `main.rs` L7020-7054 の doc comment 自身が述べる
-  「`kcs_core::purge::canonical_final_event` フェッド `enforce_canonical_marker_barrier`」という
+  「`kio_core::purge::canonical_final_event` フェッド `enforce_canonical_marker_barrier`」という
   設計。
 - 前提: PB64/PB65 で確認した挙動差分。
 - 操作: `verify_pointer_for_cli` の実装 (コードレビュー水準) を検査する。
 - 期待: `verify_pointer_for_cli` は `PurgeState::read_tombstone(...).is_active()` の単一 marker
   判定や `barrier_blocks` (active journal のみを見る、canonical lifecycle とは無関係 —
-  `purge.rs` L909-914) を lifecycle 判定の代替として使わず、`kcs_core::purge::canonical_final_event`
+  `purge.rs` L909-914) を lifecycle 判定の代替として使わず、`kio_core::purge::canonical_final_event`
   (両 marker の tail を集約する関数、`purge.rs` L564-594) または `main.rs` の
   `enforce_canonical_marker_barrier` そのものを呼び出す構造になっていること。`open`/`view`/`restore`
   向けの実装とは別に、`evidence verify` 専用の並行した 4 分岐判定ロジックを新規に書き起こす実装
@@ -1107,9 +1107,9 @@ P2 = 参考 (Phase 4+ 依存・文書のみ)。「**現行実装との既知の�
   `verify_pointer_for_cli` も fsck の `canonical_lookup` (`verify_objects.rs` L1517 以降) も、共に
   `PurgeState::read_tombstone`/`read_erase_receipt` (`purge.rs` L923-952、内部で
   `parse_tombstone_bytes`/`record.validate_structure()` を呼ぶ) を経由して読む。
-- 操作: (a) `kcs repair --verify-objects`、(b) `kcs evidence verify <pointer>` (raw が同時に不在の
+- 操作: (a) `kio repair --verify-objects`、(b) `kio evidence verify <pointer>` (raw が同時に不在の
   ケースを含めない — 純粋に「malformed record が読めるか」のみを見る) をそれぞれ実行する。
-- 期待: (a)(b) いずれも同一の `KCS-E-STORE-CORRUPT-001` で終端する — 両者が最終的に同じ低レベル
+- 期待: (a)(b) いずれも同一の `KIO-E-STORE-CORRUPT-001` で終端する — 両者が最終的に同じ低レベル
   parse/validate 関数 (`purge.rs` の `PurgeState::read_tombstone`) を呼んでいるため、LC21 が求める
   「malformed marker の corruption 判定一致」は**現状でも既に成立している可能性が高い**
   ([適合済みの可能性] — regression-lock として固定する)。**PB64-66 との違いに注意**: PB64-66 は
@@ -1120,15 +1120,15 @@ P2 = 参考 (Phase 4+ 依存・文書のみ)。「**現行実装との既知の�
 ### PB68 [統合契約] verify と open/view/restore は同一 fixture で同一 error_code/status を返す (cross-command 一致) [P0]
 - 正本: 08 §3.1 手順 5 冒頭『fsck と resolver で扱いを割らない』の一般原則を `evidence verify` と
   `open`/`view`/`restore` という**複数の resolver コマンド間**に適用したもの (08 の resolver 系
-  コマンド一覧 — §7.1『kcs evidence verify / kcs view / kcs open / kcs evidence retarget』はいずれも
+  コマンド一覧 — §7.1『kio evidence verify / kio view / kio open / kio evidence retarget』はいずれも
   同じ pointer 解決規範の消費者)。
 - 前提: PB64/PB65 の 4 パターン (canonical=purged / erased+raw不在 / retired+raw不在 / marker無し+raw
   不在) をそれぞれ用意する。
-- 操作: 同一 fixture に対して `kcs evidence verify <pointer>` と `kcs open <pointer>` (または
-  `kcs view <pointer>`) を実行し、返る `error_code` (または `status`) を突合する。
+- 操作: 同一 fixture に対して `kio evidence verify <pointer>` と `kio open <pointer>` (または
+  `kio view <pointer>`) を実行し、返る `error_code` (または `status`) を突合する。
 - 期待: 4 パターン全てで両コマンドの `error_code`/`status` が一致する (`tombstoned`↔
-  `KCS-E-PURGE-TOMBSTONED-001`, `not_found`↔`KCS-E-PURGE-NOT-FOUND-001`,
-  `KCS-E-STORE-CORRUPT-001`↔`KCS-E-STORE-CORRUPT-001` の 2 パターン)。PB66 の構造契約 (同一実装の
+  `KIO-E-PURGE-TOMBSTONED-001`, `not_found`↔`KIO-E-PURGE-NOT-FOUND-001`,
+  `KIO-E-STORE-CORRUPT-001`↔`KIO-E-STORE-CORRUPT-001` の 2 パターン)。PB66 の構造契約 (同一実装の
   共有) が満たされれば本契約は自動的に成立するはずであり、本契約はその**外部から観測可能な結果**を
   固定する end-to-end regression として位置づける (PB66 が構造を、PB68 が結果を固定する対の関係)。
 
@@ -1154,10 +1154,10 @@ P2 = 参考 (Phase 4+ 依存・文書のみ)。「**現行実装との既知の�
    スコープ外。
 3. **§I (PB27) / バックアップ最低保全集合の自動検証手段の欠如**: 専用バックアップコマンドが MVP に
    存在しないため、「truth 区分全行を含める」という規範を実行可能な形で検証する対象コード自体が
-   無い。将来 `kcs backup` 相当のコマンドが実装された場合に初めて本項目は通常の契約として機能する。
+   無い。将来 `kio backup` 相当のコマンドが実装された場合に初めて本項目は通常の契約として機能する。
 4. **§J (PB28) / 「同じ完了 Tx」の読み方**: 04§5.7/05§3.5 L760-761 の「完了 Tx で現 counter 値に
    初期化する」を、(a) `rebuild_sqlite_index` 自体の SQLite トランザクション単位で読むか、(b)
-   `run_repair` 全体が保持する `.kcs/.lock` の単位で読むかで、現行実装 (`recover_index_generation`
+   `run_repair` 全体が保持する `.kio/.lock` の単位で読むかで、現行実装 (`recover_index_generation`
    を `rebuild_step3_index` 直後に呼ぶ、`main.rs` L970-972) が「充足」か「未達」かの評価が分かれる。
    本書は両読みを併記し、いずれの場合も rebuild と `recover_index_generation` の間の crash 窓での
    自己修復可能性 (次回書込コマンドでの再訪) を別途確認する契約として PB28 を維持した。

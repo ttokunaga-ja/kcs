@@ -1,0 +1,153 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "kio_format_version": {
+      "type": "string",
+      "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$"
+    },
+    "scope": {
+      "type": "object",
+      "properties": {
+        "participates_in_global_search": { "type": "boolean" },
+        "ignore": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      },
+      "additionalProperties": false
+    },
+    "chunking": {
+      "type": "object",
+      "properties": {
+        "strategy": { "type": "string", "enum": ["heading"] },
+        "max_chars": { "type": "integer", "minimum": 1 }
+      },
+      "additionalProperties": false
+    },
+    "search": {
+      "type": "object",
+      "properties": {
+        "default_mode": {
+          "type": "string",
+          "enum": ["auto", "text", "vector", "hybrid"]
+        },
+        "fail_behavior": {
+          "type": "string",
+          "enum": ["fallback", "error", "warn"]
+        },
+        "rrf": {
+          "type": "object",
+          "properties": {
+            "k": { "type": "integer", "minimum": 1 },
+            "w_text": { "type": "number", "minimum": 0 },
+            "w_vector": { "type": "number", "minimum": 0 },
+            "candidate_depth": { "type": "integer", "minimum": 1 }
+          },
+          "additionalProperties": false
+        },
+        "diversify": {
+          "type": "object",
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "strategy": {
+              "type": "string",
+              "enum": ["mmr", "group_by_raw_hash", "off"]
+            },
+            "mmr_lambda": { "type": "number", "minimum": 0, "maximum": 1 },
+            "max_per_raw_hash": { "type": "integer", "minimum": 0 },
+            "mmr_depth": { "type": "integer", "minimum": 1 }
+          },
+          "additionalProperties": false
+        },
+        "multi_scope": {
+          "type": "object",
+          "properties": {
+            "parallelism": { "type": "integer", "minimum": 1, "maximum": 4 },
+            "per_scope_timeout_seconds": { "type": "integer", "minimum": 1 }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "budget": {
+      "type": "object",
+      "properties": {
+        "monthly_usd_cap": { "type": "number", "minimum": 0 },
+        "warn_at_percent": { "type": "integer", "minimum": 0, "maximum": 100 },
+        "hard_stop": { "type": "boolean" },
+        "per_adapter": {
+          "type": "object",
+          "additionalProperties": { "type": "number", "minimum": 0 }
+        }
+      },
+      "additionalProperties": false
+    },
+    "gc": {
+      "type": "object",
+      "properties": {
+        "mode": {
+          "type": "string",
+          "enum": ["manual_only", "after_index", "on_idle"]
+        },
+        "idle_threshold_seconds": { "type": "integer", "minimum": 0 },
+        "max_runtime_seconds": { "type": "integer", "minimum": 1 },
+        "auto_retention": { "type": "object" },
+        "derived_retention": { "type": "object" }
+      },
+      "additionalProperties": false
+    },
+    "logs": {
+      "type": "object",
+      "properties": {
+        "retention_days": { "type": "integer", "minimum": 1 }
+      },
+      "additionalProperties": false
+    },
+    "observability": {
+      "type": "object",
+      "properties": {
+        "retention_days": { "type": "integer", "minimum": 1, "maximum": 3650 }
+      },
+      "additionalProperties": false
+    },
+    "markdownize": {
+      "type": "object",
+      "properties": {
+        "incremental": {
+          "type": "object",
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "threshold": { "type": "number", "minimum": 0, "maximum": 1 },
+            "max_consecutive": { "type": "integer", "minimum": 0 }
+          },
+          "additionalProperties": false
+        },
+        "bbox_annotation": { "type": "boolean" }
+      },
+      "additionalProperties": false
+    },
+    "adapter": {
+      "type": "object",
+      "properties": {
+        "policy": {
+          "type": "object",
+          "properties": {
+            "allow_network": { "type": "boolean" },
+            "allowed_scope": { "type": "string" },
+            "max_input_bytes": { "type": "integer", "minimum": 1 },
+            "timeout_seconds": { "type": "integer", "minimum": 1 },
+            "redact_logs": { "type": "boolean" },
+            "store_request_body": { "type": "boolean" },
+            "store_response_body": { "type": "boolean" },
+            "require_command_confirmation": { "type": "boolean" }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

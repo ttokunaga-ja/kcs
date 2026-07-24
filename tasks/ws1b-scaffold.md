@@ -2,7 +2,7 @@
 
 ## 目的
 
-KCS Step 1 (kcs-core + kcs-cli) の実装土台となる Rust workspace を作る。**ビジネスロジックは実装しない** — 構造・CI・CLI 骨格のみ。
+KIO Step 1 (kio-core + kio-cli) の実装土台となる Rust workspace を作る。**ビジネスロジックは実装しない** — 構造・CI・CLI 骨格のみ。
 
 ## 必読 (このリポジトリの docs/ が正本)
 
@@ -16,17 +16,17 @@ KCS Step 1 (kcs-core + kcs-cli) の実装土台となる Rust workspace を作�
 Cargo.toml                 # workspace (resolver=2)
 rust-toolchain.toml        # stable
 .gitignore                 # target/ 等 (既存エントリを壊さない)
-crates/kcs-core/           # lib crate: 空のモジュール骨格 (cas / dag / scope) + placeholder test
-crates/kcs-cli/            # bin crate "kcs": clap derive
+crates/kio-core/           # lib crate: 空のモジュール骨格 (cas / dag / scope) + placeholder test
+crates/kio-cli/            # bin crate "kio": clap derive
 .github/workflows/ci.yml   # fmt --check / clippy -D warnings / test (ubuntu-latest, stable)
 ```
 
-## kcs-cli の骨格要件
+## kio-cli の骨格要件
 
 - サブコマンド: `init` / `status` / `snapshot` (alias `commit`) / `log` / `diff` / `inspect` / `tag`
 - 各コマンドは「not implemented」を stderr に出し、`docs/06-cli-spec.md` §7 の exit code 体系に沿った値で終了する
   (該当コードの選定理由をコード内コメントで §7 参照付きで記す)
-- exit code は enum / const で一元定義し、kcs-core 側に置く (§7 の 0-9 全値)
+- exit code は enum / const で一元定義し、kio-core 側に置く (§7 の 0-9 全値)
 - `--json` グローバルフラグの受け口だけ用意 (出力実装は不要)
 
 ## 制約

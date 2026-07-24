@@ -228,7 +228,7 @@ class TestPersonaFullScaleLimits(unittest.TestCase):
             "planned_counts_only": True,
             "builds_full_event_manifests": False,
             "phase_counts_derived_from_canonical_allocations": True,
-            "actual_kcs_evidence": False,
+            "actual_kio_evidence": False,
             "authorizes_physical_write": False,
         })
         self.assertTrue(limits.validate_full_scale_limits(self.oracle))
@@ -281,7 +281,7 @@ class TestPersonaFullScaleLimits(unittest.TestCase):
             "supervisor_wait4_required": True,
             "formal_capacity_gate_satisfied": False,
             "planned_counts_only": True,
-            "actual_kcs_evidence": False,
+            "actual_kio_evidence": False,
             "authorizes_physical_write": False,
         })
         self.assertNotIn("canonical_validator_completed", receipt["contracts"])
@@ -411,7 +411,7 @@ class TestPersonaFullScaleLimits(unittest.TestCase):
             "single_worker_no_grandchildren_required": True,
             "formal_capacity_gate_satisfied": False,
             "planned_counts_only": True,
-            "actual_kcs_evidence": False,
+            "actual_kio_evidence": False,
             "authorizes_physical_write": False,
         })
         self.assertNotIn("single_worker_no_grandchildren", receipt["contracts"])
@@ -453,7 +453,7 @@ class TestPersonaFullScaleLimits(unittest.TestCase):
         )
         cases.append(workspace)
         extra = copy.deepcopy(receipt)
-        extra["contracts"]["observed_kcs"] = True
+        extra["contracts"]["observed_kio"] = True
         cases.append(extra)
         for value in cases:
             with self.subTest(case=cases.index(value)), self.assertRaises(

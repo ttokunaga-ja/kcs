@@ -61,7 +61,7 @@ def _search_metric(result_count=1):
     return {
         "ts": "2026-07-13T00:00:00Z",
         "level": "info",
-        "code": "KCS-M-SEARCH-001",
+        "code": "KIO-M-SEARCH-001",
         "component": "search",
         "message": "search completed",
         "metric": "search.latency_ms",
@@ -122,27 +122,27 @@ class FixtureBindingTests(unittest.TestCase):
         self.assertEqual(cases[7]["file"], "document-0000.md")
 
     def test_release_binary_is_bounded_hashed_and_path_checked(self):
-        with tempfile.TemporaryDirectory(prefix="kcs-scale-binary-") as temp:
+        with tempfile.TemporaryDirectory(prefix="kio-scale-binary-") as temp:
             release = Path(temp) / "target" / "release"
             release.mkdir(parents=True)
-            binary = release / ("kcs.exe" if os.name == "nt" else "kcs")
+            binary = release / ("kio.exe" if os.name == "nt" else "kio")
             binary.write_bytes(b"release-binary")
             binary.chmod(binary.stat().st_mode | stat.S_IXUSR)
             binding = runner.resolve_release_binary(binary)
             self.assertEqual(binding["bytes"], len(b"release-binary"))
             self.assertEqual(len(binding["sha256"]), 64)
 
-            wrong = Path(temp) / "kcs"
+            wrong = Path(temp) / "kio"
             wrong.write_bytes(b"not-release-path")
             wrong.chmod(wrong.stat().st_mode | stat.S_IXUSR)
             with self.assertRaisesRegex(runner.ScaleLatencyError, "release artifact"):
                 runner.resolve_release_binary(wrong)
 
     def test_release_binary_rejects_reparse_backed_regular_file(self):
-        with tempfile.TemporaryDirectory(prefix="kcs-scale-binary-reparse-") as temp:
+        with tempfile.TemporaryDirectory(prefix="kio-scale-binary-reparse-") as temp:
             release = Path(temp) / "target" / "release"
             release.mkdir(parents=True)
-            binary = release / ("kcs.exe" if os.name == "nt" else "kcs")
+            binary = release / ("kio.exe" if os.name == "nt" else "kio")
             binary.write_bytes(b"release-binary")
             binary.chmod(binary.stat().st_mode | stat.S_IXUSR)
             with mock.patch.object(runner, "_is_plain_regular_file", return_value=False):
@@ -150,7 +150,7 @@ class FixtureBindingTests(unittest.TestCase):
                     runner.resolve_release_binary(binary)
 
     def test_stored_attestation_must_equal_live_attestation(self):
-        with tempfile.TemporaryDirectory(prefix="kcs-scale-attestation-") as temp:
+        with tempfile.TemporaryDirectory(prefix="kio-scale-attestation-") as temp:
             root = Path(temp)
             path = root / runner.spec.ATTESTATION_NAME
             value = {"passed": True, "totals": {"current_eligible_chunks": 120_000}}
@@ -224,7 +224,7 @@ class ResponseTests(unittest.TestCase):
 
 class MetricsTests(unittest.TestCase):
     def test_exactly_one_new_metric_is_read_and_validated(self):
-        with tempfile.TemporaryDirectory(prefix="kcs-scale-metric-") as temp:
+        with tempfile.TemporaryDirectory(prefix="kio-scale-metric-") as temp:
             path = Path(temp) / "metrics.jsonl"
             old = _metric_line(0)
             path.write_bytes(old)
@@ -238,7 +238,7 @@ class MetricsTests(unittest.TestCase):
             self.assertEqual(runner.validate_search_metric(metric, response), 12.5)
 
     def test_metric_rotation_reads_only_the_new_live_line(self):
-        with tempfile.TemporaryDirectory(prefix="kcs-scale-metric-rotate-") as temp:
+        with tempfile.TemporaryDirectory(prefix="kio-scale-metric-rotate-") as temp:
             path = Path(temp) / "metrics.jsonl"
             rotated = Path(temp) / "metrics-2026-07-12.jsonl"
             path.write_bytes(_metric_line(0))
@@ -250,7 +250,7 @@ class MetricsTests(unittest.TestCase):
             self.assertEqual(runner.validate_search_metric(metric, {"results": [{}]}), 12.5)
 
     def test_missing_or_multiple_metric_appends_fail_closed(self):
-        with tempfile.TemporaryDirectory(prefix="kcs-scale-metric-count-") as temp:
+        with tempfile.TemporaryDirectory(prefix="kio-scale-metric-count-") as temp:
             path = Path(temp) / "metrics.jsonl"
             path.write_bytes(_metric_line(0))
             missing = runner.snapshot_metrics_log(path)
@@ -265,7 +265,7 @@ class MetricsTests(unittest.TestCase):
                 runner.read_one_appended_metric(multiple)
 
     def test_metric_line_and_delta_bounds_are_enforced(self):
-        with tempfile.TemporaryDirectory(prefix="kcs-scale-metric-bound-") as temp:
+        with tempfile.TemporaryDirectory(prefix="kio-scale-metric-bound-") as temp:
             path = Path(temp) / "metrics.jsonl"
             snapshot = runner.snapshot_metrics_log(path)
             path.write_bytes(b"x" * 17 + b"\n")
@@ -280,7 +280,7 @@ class MetricsTests(unittest.TestCase):
                     runner.read_one_appended_metric(delta_snapshot)
 
     def test_metrics_log_rejects_reparse_backed_regular_file(self):
-        with tempfile.TemporaryDirectory(prefix="kcs-scale-metric-reparse-") as temp:
+        with tempfile.TemporaryDirectory(prefix="kio-scale-metric-reparse-") as temp:
             path = Path(temp) / "metrics.jsonl"
             path.write_bytes(_metric_line(0))
             with mock.patch.object(runner, "_is_plain_regular_file", return_value=False):
@@ -301,10 +301,10 @@ class MetricsTests(unittest.TestCase):
 class WorkloadTests(unittest.TestCase):
     def test_search_command_uses_default_scope_selector_and_auto_mode(self):
         case = {"query": "needle"}
-        command = runner.build_search_command("target/release/kcs", case, runner.SCENARIOS[0])
+        command = runner.build_search_command("target/release/kio", case, runner.SCENARIOS[0])
         self.assertEqual(
             command,
-            ["target/release/kcs", "--json", "search", "needle", "--limit", "10"],
+            ["target/release/kio", "--json", "search", "needle", "--limit", "10"],
         )
         for explicit in ("--all-scopes", "--text", "--vector", "--hybrid"):
             self.assertNotIn(explicit, command)
@@ -353,7 +353,7 @@ class WorkloadTests(unittest.TestCase):
         )
         self.assertEqual(
             report["M3-1"]["primary_clock_source"],
-            "KCS-M-SEARCH-001 search.latency_ms",
+            "KIO-M-SEARCH-001 search.latency_ms",
         )
         self.assertLess(
             report["M3-1"]["internal_search_statistics_ms"]["p95"],
@@ -369,7 +369,7 @@ class WorkloadTests(unittest.TestCase):
 
 class ProcessAndPublicationTests(unittest.TestCase):
     def test_report_defaults_to_sibling_and_rejects_corpus_descendants(self):
-        with tempfile.TemporaryDirectory(prefix="kcs-scale-report-path-") as temp:
+        with tempfile.TemporaryDirectory(prefix="kio-scale-report-path-") as temp:
             root = Path(temp) / "corpus"
             root.mkdir()
             default = runner._resolve_report_path(root, None)
@@ -380,7 +380,7 @@ class ProcessAndPublicationTests(unittest.TestCase):
                 runner._resolve_report_path(root, root / "child" / ".." / "report.json")
 
     def test_report_rejects_outside_symlink_parent_resolving_inside_corpus(self):
-        with tempfile.TemporaryDirectory(prefix="kcs-scale-report-link-") as temp:
+        with tempfile.TemporaryDirectory(prefix="kio-scale-report-link-") as temp:
             root = Path(temp) / "corpus"
             root.mkdir()
             apparent_outside = Path(temp) / "outside-link"
@@ -430,7 +430,7 @@ class ProcessAndPublicationTests(unittest.TestCase):
         self.assertLess(time.monotonic() - started, 2.0)
         self.assertFalse(
             any(
-                thread.name.startswith("kcs-scale-")
+                thread.name.startswith("kio-scale-")
                 for thread in threading.enumerate()
             )
         )
@@ -445,13 +445,13 @@ class ProcessAndPublicationTests(unittest.TestCase):
             )
         self.assertFalse(
             any(
-                thread.name.startswith("kcs-scale-")
+                thread.name.startswith("kio-scale-")
                 for thread in threading.enumerate()
             )
         )
 
     def test_atomic_report_publication(self):
-        with tempfile.TemporaryDirectory(prefix="kcs-scale-report-") as temp:
+        with tempfile.TemporaryDirectory(prefix="kio-scale-report-") as temp:
             path = Path(temp) / "report.json"
             runner._atomic_write_json(path, {"passed": True})
             self.assertEqual(json.loads(path.read_text(encoding="utf-8")), {"passed": True})
@@ -459,7 +459,7 @@ class ProcessAndPublicationTests(unittest.TestCase):
             self.assertEqual(leftovers, [])
 
     def test_atomic_report_rejects_reparse_backed_regular_destination(self):
-        with tempfile.TemporaryDirectory(prefix="kcs-scale-report-reparse-") as temp:
+        with tempfile.TemporaryDirectory(prefix="kio-scale-report-reparse-") as temp:
             path = Path(temp) / "report.json"
             path.write_text("{}\n", encoding="utf-8")
             with mock.patch.object(runner, "_is_plain_regular_file", return_value=False):
@@ -493,7 +493,7 @@ class ProcessAndPublicationTests(unittest.TestCase):
             events.append("measure")
             return report
 
-        with tempfile.TemporaryDirectory(prefix="kcs-scale-main-") as temp:
+        with tempfile.TemporaryDirectory(prefix="kio-scale-main-") as temp:
             root = Path(temp) / "corpus"
             root.mkdir()
             out = Path(temp) / "result.json"
@@ -505,7 +505,7 @@ class ProcessAndPublicationTests(unittest.TestCase):
                         "--corpus",
                         str(root),
                         "--bin",
-                        "target/release/kcs",
+                        "target/release/kio",
                         "--out",
                         str(out),
                     ]

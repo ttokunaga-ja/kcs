@@ -6,33 +6,33 @@
 ## 必須修正 (Step 1 完了ゲート — この 5 件が green になるまで完了と見なさない)
 
 ### F1 [critical] stale lock 回収の spec 非準拠 + TOCTOU (4/4 エンジン一致)
-`crates/kcs-core/src/scope.rs` `is_stale_lock` ほか。
+`crates/kio-core/src/scope.rs` `is_stale_lock` ほか。
 - 現状: mtime 30 分のみで判定。lock に書いた pid を一度も読まない。05 §6 の「保持プロセスが存在しない stale lock」基準に非準拠 (この一文は Step 1 ブロッカー解消のため e201d31 で追記された正本)
 - 競合窓: (a) 2 プロセスが同時に stale 判定 → 片方が再取得した正当 lock をもう片方が remove_file → 二重 writer。(b) `Drop for StoreLock` が無条件 remove → stale 回収後に他者が再取得した lock を旧プロセス終了時に削除
 - 修正: pid 生存確認 (kill(pid,0) 相当) で判定。回収は「remove → create_new 再試行」ではなく所有権を検証できる原子的手順に (例: lock 内容に token を含め、Drop/解放時に自 token 一致時のみ削除。回収は unlink 前に pid 再検証)
 - あわせて CT-LOCK-001 の実並行テスト (2 プロセス同時起動) を追加
 
 ### F2 [major] CT-LOCK-003 テスト欠落 (4/4 一致)
-lock 保持中に `kcs log` / `kcs inspect` / `status` / `diff` が成功することを検証するテストを contract_cli.rs に追加 (実装は正しい可能性が高いが契約テストが無い)。
+lock 保持中に `kio log` / `kio inspect` / `status` / `diff` が成功することを検証するテストを contract_cli.rs に追加 (実装は正しい可能性が高いが契約テストが無い)。
 
 ### F3 [major] CT-HASH-007 が恒真アサーション (GPT-5.5 + Sonnet 収束)
 `contract_vectors.rs` — 手組み JSON に元から無い `"tree_hash"` の不在確認のみで実質無検証。
 修正: CAS へ write → read → 再 hash → 保存キー一致の実 round-trip に置換。旧フィールド `tree_id`/`commit_id` 不在も保存バイト列で確認。
 
 ### F4 [major] JSON Schema validation が手書き if/else (3/4 が major)
-06 §11 / 09 §3.1 / 03 §11 は JSON Schema validation を名指し。`*.schema.json` が存在せず `jsonschema` 依存も無い。`validate_config` は kcs_format_version と [gc].mode のみで [chunking]/[budget] 等は無検査。
+06 §11 / 09 §3.1 / 03 §11 は JSON Schema validation を名指し。`*.schema.json` が存在せず `jsonschema` 依存も無い。`validate_config` は kio_format_version と [gc].mode のみで [chunking]/[budget] 等は無検査。
 修正: schema ファイル同梱 + `jsonschema` crate (発注書の依存候補に記載済み)。CT-CLI-012 の残ケース (未知フラグの spawn 版 exit 2、enum 外 commit_type) もテスト追加。
 
 ### F5 [major] Step 1 status の `up_to_date` 語彙が 03 §6 と衝突 (Sonnet major / Opus minor → 裁定: 採用)
 03 §6 の `up_to_date` は「最新 normalized instance あり」の意味で、CT-STATE-005 が「Step 1 で返すなら仕様矛盾」と明示。発注書 #4 の指示自体が誤りだった (発注側の責任)。
-修正: Step 1 の語彙を `up_to_date` → `unchanged` に改名 (実装 + テスト + tasks/ws1c-decisions.md #4)。tasks/ws1c-kcs-core.md #4 は裁定側で修正済みとする。
+修正: Step 1 の語彙を `up_to_date` → `unchanged` に改名 (実装 + テスト + tasks/ws1c-decisions.md #4)。tasks/ws1c-kio-core.md #4 は裁定側で修正済みとする。
 
 ## should-fix (Step 1 内で推奨、blocking ではない)
 
 - S1: JCS を `serde_jcs` に置換 (GPT-5.5 major → 裁定 minor: Opus が Step 1 スキーマ (ASCII キー・整数) では RFC 8785 とバイト一致を実証。ただし 03 §8.1 の文言契約は「RFC 8785」であり、dormant 逸脱を Step 2 前に解消する)
 - S2: manifest 再生成で deleted 行が消える (GPT-5.5 major / Opus minor → 裁定: P1。CT-STATE-003 準拠の merge 実装)
-- S3: error code 過負荷の分離 — usage 系が `KCS-E-CONFIG-SCHEMA-001` を流用 / 重複 path が `KCS-E-STORE-PATH-001` を流用
-- S4: `KCS_FIXED_NOW` が本番バイナリで常時有効 (created_at 偽装可能) → cfg ガード or 明示ドキュメント。自前暦変換 (`civil_from_days`) の直接テスト追加 (現状全テストが迂回)
+- S3: error code 過負荷の分離 — usage 系が `KIO-E-CONFIG-SCHEMA-001` を流用 / 重複 path が `KIO-E-STORE-PATH-001` を流用
+- S4: `KIO_FIXED_NOW` が本番バイナリで常時有効 (created_at 偽装可能) → cfg ガード or 明示ドキュメント。自前暦変換 (`civil_from_days`) の直接テスト追加 (現状全テストが迂回)
 - S5: symlink の無警告スキップ (10 §4 の「方針明示すべき境界」) → 警告出力 + decisions.md へ記録
 - S6: created_at の受け入れ検証強化 (現状 "T を含み Z で終わる" のみ)、HEAD と refs/heads/main の 2 段 rename 間の power-loss 窓の注記、非 UTF-8 ファイル名 1 件で全体失敗する挙動の再考
 
@@ -45,9 +45,9 @@ lock 保持中に `kcs log` / `kcs inspect` / `status` / `diff` が成功する�
 
 should-fix S1-S6 + N3 を実装 (Claude Opus) し、Codex クロスレビューの major 2 件を裁定修正:
 - S2 の merge 元を「旧 manifest」→「旧 HEAD tree (正) + 旧 manifest の deleted 行のみ」に変更 (stale manifest で削除記録を失わない)
-- created_at に月別日数 + うるう年判定を追加、leap second (:60) は不許可 (KCS は発行し得ない)
+- created_at に月別日数 + うるう年判定を追加、leap second (:60) は不許可 (KIO は発行し得ない)
 
-**backlog (minor、Step 2 以降)**: error code のヘルパ境界での文脈喪失 — ユーザーオペランド不正 (`read_commit` に非 commit hash 等) が `KCS-E-CONFIG-SCHEMA-001` を、on-disk 異常が `KCS-E-CONFIG-USAGE-001` を返すケースが残る。CLI オペランド解決経路での call-site mapping で解消予定。
+**backlog (minor、Step 2 以降)**: error code のヘルパ境界での文脈喪失 — ユーザーオペランド不正 (`read_commit` に非 commit hash 等) が `KIO-E-CONFIG-SCHEMA-001` を、on-disk 異常が `KIO-E-CONFIG-USAGE-001` を返すケースが残る。CLI オペランド解決経路での call-site mapping で解消予定。
 
 ## 監査で確認された健全事項 (修正不要)
 

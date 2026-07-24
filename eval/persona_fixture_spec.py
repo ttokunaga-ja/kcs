@@ -1,7 +1,7 @@
 """Deterministic specification for twenty independent synthetic PC owners.
 
 This is intentionally separate from ``scale_fixture_spec``.  One row here is
-one person, one PC umbrella, one isolated registry, and twenty direct-file KCS
+one person, one PC umbrella, one isolated registry, and twenty direct-file KIO
 scopes.  Ratios count W0 physical files; searchable chunk targets are a
 separate contract.
 """
@@ -12,7 +12,7 @@ import re
 
 SCHEMA_VERSION = 1
 SEED = 20260713
-FIXTURE_ID = "kcs-persona-pc-v1"
+FIXTURE_ID = "kio-persona-pc-v1"
 FORMAL_CURRENT_CHUNKS_PER_PERSON = 120_000
 EXPLORATORY_MINIMUM_CHUNKS = 100_001
 FORMAL_HISTORY_CHUNKS_PER_PERSON = 180_000
@@ -214,7 +214,7 @@ OS_SEMANTICS = (
 # marked planned below, and none of these rows grants searchability to a raw
 # format family.
 SIZE_BUCKET_ORDER = ("small", "medium", "large", "tail")
-SIZE_COMPLEXITY_PROFILE_ID = "kcs-persona-common-size-complexity-v1"
+SIZE_COMPLEXITY_PROFILE_ID = "kio-persona-common-size-complexity-v1"
 _SIZE_COMPLEXITY_ROWS = (
     (
         "text_code_chunks",

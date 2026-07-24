@@ -35,14 +35,14 @@ except ImportError:  # pragma: no cover - retained for repository script style.
     import persona_renderers as renderers
 
 
-PREPARE_RECEIPT_INTENT_SCHEMA = "kcs.persona.w0.prepare-receipt-intent/v1"
-PERSON_COMMAND_BINDING_SCHEMA = "kcs.persona.w0.person-command-binding/v1"
-SCOPE_COMMAND_BINDING_SCHEMA = "kcs.persona.w0.scope-command-binding/v1"
-ROOT_RECEIPT_SCHEMA = "kcs.persona.w0.prepare-root-receipt/v1"
-PERSON_RECEIPT_SCHEMA = "kcs.persona.w0.prepare-person-receipt/v1"
-DEVICE_RECEIPT_SCHEMA = "kcs.persona.w0.prepare-device-receipt/v1"
-SCOPE_RECEIPT_SCHEMA = "kcs.persona.w0.prepare-scope-receipt/v1"
-SEMANTIC_EVIDENCE_SCHEMA = "kcs.persona.w0.unimplemented-semantic-evidence/v1"
+PREPARE_RECEIPT_INTENT_SCHEMA = "kio.persona.w0.prepare-receipt-intent/v1"
+PERSON_COMMAND_BINDING_SCHEMA = "kio.persona.w0.person-command-binding/v1"
+SCOPE_COMMAND_BINDING_SCHEMA = "kio.persona.w0.scope-command-binding/v1"
+ROOT_RECEIPT_SCHEMA = "kio.persona.w0.prepare-root-receipt/v1"
+PERSON_RECEIPT_SCHEMA = "kio.persona.w0.prepare-person-receipt/v1"
+DEVICE_RECEIPT_SCHEMA = "kio.persona.w0.prepare-device-receipt/v1"
+SCOPE_RECEIPT_SCHEMA = "kio.persona.w0.prepare-scope-receipt/v1"
+SEMANTIC_EVIDENCE_SCHEMA = "kio.persona.w0.unimplemented-semantic-evidence/v1"
 
 EXPECTED_PERSONAS = 20
 EXPECTED_SCOPES_PER_PERSON = 20
@@ -76,7 +76,7 @@ _INTENT_CONTRACTS = {
 
 _NEGATIVE_CLAIMS = {
     "semantic_checks_complete": False,
-    "actual_kcs_chunks_attested": False,
+    "actual_kio_chunks_attested": False,
     "opaque_runtime_contents_attested": False,
     "external_api_absence_attested": False,
     "history_ready_attested": False,
@@ -127,7 +127,7 @@ DEVICE_SEMANTIC_CHECKS = (
 SCOPE_SEMANTIC_CHECKS = (
     "scope_root_binding_attested",
     "scope_id_attested",
-    "kcs_layout_attested",
+    "kio_layout_attested",
     "config_attested",
     "tool_lock_attested",
     "head_ref_attested",
@@ -745,7 +745,7 @@ def build_prepare_receipt_intent(
     if len(all_receipt_hashes) != len(set(all_receipt_hashes)):
         raise PersonaPrepareReceiptError("environment/command receipt hashes are duplicated")
     person_binding_root = _canonical_sha256({
-        "domain": "kcs.persona.w0.person-command-binding-root/v1",
+        "domain": "kio.persona.w0.person-command-binding-root/v1",
         "fixture_id": fixture_spec.FIXTURE_ID,
         "profile": profile,
         "replay_id": replay_id,
@@ -823,7 +823,7 @@ def _semantic_evidence(kind: str) -> dict:
 def _operational_false_claims() -> dict:
     return {
         "filesystem_mutation_performed": False,
-        "kcs_commands_executed_by_this_module": False,
+        "kio_commands_executed_by_this_module": False,
         "external_api_execution_performed": False,
         "history_ready_attested": False,
         "history_assignment_executable": False,
@@ -834,7 +834,7 @@ def _scope_contract_sha256(
     *, profile: str, persona_id: str, persona_plan_sha256: str, scope: dict
 ) -> str:
     return _canonical_sha256({
-        "domain": "kcs.persona.w0.scope-plan-binding/v1",
+        "domain": "kio.persona.w0.scope-plan-binding/v1",
         "fixture_id": fixture_spec.FIXTURE_ID,
         "profile": profile,
         "persona_id": persona_id,
@@ -1088,7 +1088,7 @@ def validate_prepare_receipt(value: object) -> dict:
         "prepare_receipt_intent",
         "prepare_receipt_intent_sha256", "persons", "totals",
         "canonical_fixture_projection_complete", "semantic_evidence",
-        "filesystem_mutation_performed", "kcs_commands_executed_by_this_module",
+        "filesystem_mutation_performed", "kio_commands_executed_by_this_module",
         "external_api_execution_performed", "history_ready_attested",
         "history_assignment_executable",
     }
@@ -1102,7 +1102,7 @@ def validate_prepare_receipt(value: object) -> dict:
             value[field] is not False
             for field in (
                 "filesystem_mutation_performed",
-                "kcs_commands_executed_by_this_module",
+                "kio_commands_executed_by_this_module",
                 "external_api_execution_performed",
                 "history_ready_attested",
                 "history_assignment_executable",

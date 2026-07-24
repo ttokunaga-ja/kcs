@@ -10,13 +10,13 @@ import hashlib
 
 SCHEMA_VERSION = 1
 SEED = 20260713
-FIXTURE_ID = "kcs-scale-120k-v1"
+FIXTURE_ID = "kio-scale-120k-v1"
 QUERY_WORKLOAD_ID = "exact-reference-v1"
 GENERATOR_ID = "eval/generate_scale_corpus.py"
 MANIFEST_NAME = "scale-corpus-manifest.json"
-OWNER_MARKER_NAME = ".kcs-scale-owner.json"
-LOCK_NAME = ".kcs-scale.lock"
-DEVICE_DIR_NAME = ".kcs-eval-device"
+OWNER_MARKER_NAME = ".kio-scale-owner.json"
+LOCK_NAME = ".kio-scale.lock"
+DEVICE_DIR_NAME = ".kio-eval-device"
 ATTESTATION_NAME = "scale-attestation.json"
 PREPARE_REPORT_NAME = "scale-prepare-report.json"
 
@@ -28,7 +28,7 @@ CHUNKING_CONFIG_HASH = (
 MINIMUM_CURRENT_CHUNKS = 100_001
 
 
-# ASCII-only portable leaves.  Each scope is a direct-child folder and KCS only
+# ASCII-only portable leaves.  Each scope is a direct-child folder and KIO only
 # indexes files directly below it (docs/03-data-model.md section 3).
 SCOPES = (
     {

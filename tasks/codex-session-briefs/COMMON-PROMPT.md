@@ -7,7 +7,7 @@
 
 # 任務
 
-KCS の評価用 fixture コーパスのうち、**ユースケース `NN` (`pNN`) の担当分だけ**を生成します。
+KIO の評価用 fixture コーパスのうち、**ユースケース `NN` (`pNN`) の担当分だけ**を生成します。
 
 このコーパスは既に骨格が確定しています。決めてよいのは **中身の realism だけ**です。
 
@@ -29,7 +29,7 @@ KCS の評価用 fixture コーパスのうち、**ユースケース `NN` (`pNN
 1. **担当ブリーフ (最重要・完全な仕様)**
 
    ```
-   /Users/ttokunaga-ja/dev/github.com/ttokunaga-ja/kcs/tasks/codex-session-briefs/usecase-NN-pNN.md
+   /Users/ttokunaga-ja/dev/github.com/ttokunaga-ja/kio/tasks/codex-session-briefs/usecase-NN-pNN.md
    ```
 
    全文を読んでください。担当ファイルの完全リスト、形式分布、正解クエリ契約、
@@ -38,7 +38,7 @@ KCS の評価用 fixture コーパスのうち、**ユースケース `NN` (`pNN
 2. **既存の定義済みソース資産** (骨格の正本。realism 版に書き換える対象)
 
    ```
-   /private/tmp/kcs-eval-gen-phase2-source-only-r8/eval-gen/
+   /private/tmp/kio-eval-gen-phase2-source-only-r8/eval-gen/
      ├ manifest.jsonl        ← 全ファイルの確定定義 (pNN の行だけ見る)
      ├ office-specs/         ← DOCX / PPTX の指示書
      ├ sources/pdf/          ← PDF の TeX ソース
@@ -53,27 +53,27 @@ KCS の評価用 fixture コーパスのうち、**ユースケース `NN` (`pNN
 # 出力先
 
 ```
-/private/tmp/kcs-realistic-corpus-v1/
+/private/tmp/kio-realistic-corpus-v1/
     corpus/pNN/...           ← 本体
     qhard-a/pNN/...          ← ブリーフに A パックの記載がある場合のみ
 ```
 
 - **自分の `pNN` 以外のディレクトリを、作らない・読み書きしない。**
   他の persona は別セッションが並行して担当しています。
-- KCS リポジトリ (`/Users/ttokunaga-ja/dev/github.com/ttokunaga-ja/kcs/`) には
+- KIO リポジトリ (`/Users/ttokunaga-ja/dev/github.com/ttokunaga-ja/kio/`) には
   **書き込まない**。読むだけです。
 
 ---
 
 # 絶対規則 — 1 つでも破ったら成果物は破棄されます
 
-1. **`.kcs` を作らない・触らない・書かない。**
-   KCS の内部 (objects / index / sqlite / CAS / それ相当の索引ファイル) を自分で作ることは
+1. **`.kio` を作らない・触らない・書かない。**
+   KIO の内部 (objects / index / sqlite / CAS / それ相当の索引ファイル) を自分で作ることは
    全面禁止です。作るのは **普通のファイルとフォルダだけ**。
 
 2. **OCR・Office→PDF 変換・embedding・索引化を自分で実行しない。**
-   これらは後段で **実際の KCS パイプライン**
-   (`kcs init` → `kcs index --approve --online`) だけが行います。
+   これらは後段で **実際の KIO パイプライン**
+   (`kio init` → `kio index --approve --online`) だけが行います。
    あなたはその入力となる素のファイルを置くだけです。
 
 3. **骨格を変えない。**
@@ -93,7 +93,7 @@ KCS の評価用 fixture コーパスのうち、**ユースケース `NN` (`pNN
    エンコーディングが混ざると索引から静かに落ちます。
 
 7. **ファイルは指定された leaf フォルダの直下にのみ置く。**
-   中間ディレクトリに勝手にファイルを置かない (KCS の索引はサブフォルダを再帰しません)。
+   中間ディレクトリに勝手にファイルを置かない (KIO の索引はサブフォルダを再帰しません)。
 
 8. **1 ファイル 5 MiB 以下。PDF / PPTX は 20 ページ・20 スライド以下。**
 
@@ -122,7 +122,7 @@ KCS の評価用 fixture コーパスのうち、**ユースケース `NN` (`pNN
 |---|---|
 | DOCX | **Word プラグイン** — 見出し・表・ヘッダ/フッタを持つ実務文書 |
 | PPTX | **PowerPoint プラグイン** — 図表画像を埋め込んだ実務スライド |
-| XLSX | **Excel プラグイン** — 実務の表 (KCS は索引しない realism 専用) |
+| XLSX | **Excel プラグイン** — 実務の表 (KIO は索引しない realism 専用) |
 | PNG / JPEG | **画像生成・レンダラ** — 数値/軸/凡例は**画素に描画**する |
 | PDF (テキスト層あり) | TeX を realistic に書き換えてビルド |
 | PDF (スキャン) | TeX → PDF → `pdftoppm -r 200 -png` → `img2pdf`。**テキスト層ゼロ**にする |
@@ -134,7 +134,7 @@ KCS の評価用 fixture コーパスのうち、**ユースケース `NN` (`pNN
 ### Step 4 — 自己検査
 ブリーフ §6 のチェックリストを**すべて**満たすまで終了しない。特に:
 - 生成ファイル数がブリーフの数値と完全一致しているか
-- `.kcs` を 1 つも作っていないか
+- `.kio` を 1 つも作っていないか
 - `home/` のファイルが全て leaf 直下か
 - 事実がコーパス内 1 回だけか、distractor に漏れていないか
 - hard1 がある場合、最終 PDF の `pdftotext` 出力が (空白除去後) 空か
@@ -146,7 +146,7 @@ KCS の評価用 fixture コーパスのうち、**ユースケース `NN` (`pNN
 ```
 ユースケース NN (pNN) 生成完了
 
-生成先: /private/tmp/kcs-realistic-corpus-v1/corpus/pNN/  (+ qhard-a/pNN/)
+生成先: /private/tmp/kio-realistic-corpus-v1/corpus/pNN/  (+ qhard-a/pNN/)
 ファイル数: home __ / ambient-home __ / A __  (ブリーフ指定値と一致: yes/no)
 形式内訳: md __ / code __ / structured __ / pdf __ / docx __ / pptx __ / image __ / xlsx __
 
@@ -156,7 +156,7 @@ KCS の評価用 fixture コーパスのうち、**ユースケース `NN` (`pNN
   - qXXNN (classX): 正解 <path> に事実「____」を埋め込み / distractor <path> は「____」
 
 自己検査:
-  [x] .kcs を作っていない
+  [x] .kio を作っていない
   [x] OCR/変換/embedding/索引化を実行していない
   [x] ファイル数・パス・形式がブリーフと完全一致
   [x] home/ のファイルは全て leaf 直下
@@ -173,7 +173,7 @@ KCS の評価用 fixture コーパスのうち、**ユースケース `NN` (`pNN
 
 # よくある失敗 (やってはいけないこと)
 
-- ❌ `.kcs` フォルダを作る / KCS の索引ファイルを自分で書く
+- ❌ `.kio` フォルダを作る / KIO の索引ファイルを自分で書く
 - ❌ 「索引した」「OCR した」「embedding した」と称して自分で処理する
 - ❌ ファイルを追加・削除・改名して「その方が自然だから」と骨格を変える
 - ❌ 事実の値を自分で決め直す / 言い換えてしまう

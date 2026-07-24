@@ -31,22 +31,22 @@ Sonnet-C は 3-way 比較 (正しい現行 commit=拒否 / 捏造 commit=通過 
 → オーケストレータが N5 gen 束縛の実機バイパスで反証** (R13 doc-gap / R15 snapshot orphan の Opus「問題なし」
 誤判定を実機で覆す型の 3 例目)。
 
-**根本原因**: `resolve_pointer_for_cli` (`crates/kcs-cli/src/main.rs:4435-4439`) が `read_commit(&pointer.commit)`
-の `KCS-E-STORE-NOT-FOUND-001` を `None` に潰し (R16-1)、`main.rs:4482-4486` で「真の shallow (`read_tree` が
+**根本原因**: `resolve_pointer_for_cli` (`crates/kio-cli/src/main.rs:4435-4439`) が `read_commit(&pointer.commit)`
+の `KIO-E-STORE-NOT-FOUND-001` を `None` に潰し (R16-1)、`main.rs:4482-4486` で「真の shallow (`read_tree` が
 STORE-NOT-FOUND = commit 実在・tree GC)」と「commit object 欠落 (`read_commit` 自体が STORE-NOT-FOUND)」を
 **同一の `(commit_shallow=true, entry_gen=None)` に合流**させる。`entry_gen=None` により:
 - N5 gen 束縛 (`main.rs:4531-4535`、`if let Some(entry_gen)`) が丸ごとスキップ
 - tree 所属チェック (`main.rs:4448-4461`、raw_hash が commit.tree の entry にあるか) がスキップ
 
 残る検証は chunk の (raw_hash, tool_profile_hash) 一致 (4520-4523) のみ。`pointer.commit` は `view`/`open` の
-引数 (`kcs://` URI か inline JSON) で完全にユーザー入力可能なため、実在の (raw_hash, chunk_hash, tool) 3 つ組を
+引数 (`kio://` URI か inline JSON) で完全にユーザー入力可能なため、実在の (raw_hash, chunk_hash, tool) 3 つ組を
 握った上で commit だけを捏造 hash に差し替えると、両検証を迂回して `commit_shallow:true` / exit 0 で解決成功する。
 
 **実機 (オーケストレータ独立再現)**:
 - basic: genuine pointer → `commit_shallow:false` exit 0 / commit を `sha256:<全0>` 等の捏造 hash に差替 →
   `commit_shallow:true` exit 0 で本文を返す。
 - **N5 対照 (実害の核心)**: `reindex --force` で gen 0→1 に更新 (chunk_id は gen を含むため gen0/gen1 で異なる)。
-  - Attack A (実在旧 commit C0 + gen1 chunk): `KCS-E-EVIDENCE-POINTER-INVALID-001` exit 4 — N5 が正しく拒否
+  - Attack A (実在旧 commit C0 + gen1 chunk): `KIO-E-EVIDENCE-POINTER-INVALID-001` exit 4 — N5 が正しく拒否
   - Attack B (捏造 commit + gen1 chunk): `commit_shallow:true` exit 0 で gen1 本文を返す — **N5 迂回成立**
   唯一の差は commit フィールドの真偽。tool_profile 変更で内容が変わる gen 間 (例: OCR エンジン更新) では、
   「古い commit の時点の証拠」として新世代の内容を偽装できる = evidence-grounded の時点保証の破れ。
@@ -61,7 +61,7 @@ R16-1 の回帰テスト `r16_1_missing_commit_object_degrades_reads_and_rejects
 
 **fix 方針**: resolve_pointer_for_cli の best-effort を「`read_commit` **成功** + `read_tree` STORE-NOT-FOUND
 (真の shallow)」に限定する。`read_commit` 自体の STORE-NOT-FOUND は Evidence 解決失敗
-(`KCS-E-EVIDENCE-POINTER-INVALID-001`: 参照 commit が解決できない = pointer 無効) に分離し、tree 所属/N5 gen
+(`KIO-E-EVIDENCE-POINTER-INVALID-001`: 参照 commit が解決できない = pointer 無効) に分離し、tree 所属/N5 gen
 の検証迂回を封じる。**R16-1 の status/log/search の commit 欠落 degrade は真正性の問題がないため維持**
 (resolve_pointer_for_cli だけが Evidence 真正性の入口)。r16_1 回帰テストの view 部分 (4785-4790) を「commit
 欠落時の view/open はエラー」に変更し、status/log/search の degrade 検証 (4763-4784) は温存。R16-1 の裁定文が
@@ -75,18 +75,18 @@ EVIDENCE-POINTER-INVALID exit 4、(b) 真の shallow (tree GC・commit 実在) �
 **発見**: Sonnet-A (実機 + R16-4 の適用範囲を git 対照で特定)。オーケストレータが 2 文書実機で再確認。
 
 **根本原因**: `run_reindex` の正規化ループ (`main.rs:2695-2715`) が `copy_normalized_instance_gen(...)?` を
-無条件 `?` で呼ぶ。破損/欠落 unit は `KCS-E-STORE-CORRUPT-001`/`STORE-IO-001` を返し、この `?` で scope 全体が
+無条件 `?` で呼ぶ。破損/欠落 unit は `KIO-E-STORE-CORRUPT-001`/`STORE-IO-001` を返し、この `?` で scope 全体が
 即死する。対照的に **R16-4 が追加した `rebuild_step3_index` (`main.rs:2844-2865`)** は同じ種別を
 `is_rebuild_skippable_unit_error` で捕捉して該当文書だけ skip + continue する。この耐性パターンが
 `run_reindex` の正規化ループ (rebuild より前段) には移植されていない (R16-4 が repair/index/reindex の **tree 読み**は
 `read_head_tree_for_rebuild` で共通化したが、reindex 固有の **unit コピー**ループは適用範囲外だった)。
 
 **実機**: 2 文書 (healthy.md + corrupt.md)、corrupt.md の manifest.json を破損 → `reindex --force --yes` が
-`KCS-E-STORE-CORRUPT-001` exit 4 で全体停止 (`reindexed_files` すら出ない)。healthy.md も再正規化されない。
+`KIO-E-STORE-CORRUPT-001` exit 4 で全体停止 (`reindexed_files` すら出ない)。healthy.md も再正規化されない。
 既存 index は無傷 (`search healthydoc` は 1 件) なので、reindex 操作だけが道連れ。
 
 **契約**: docs/10 §7.2「1 文書の破損が他の健全文書の回復まで拒否権を持たない」。R16-4 の設計原則が reindex に
-未適用。かつ `attach_skipped_units` の guidance (`main.rs:2944-2955`) が「`kcs reindex --force` で再正規化せよ」と
+未適用。かつ `attach_skipped_units` の guidance (`main.rs:2944-2955`) が「`kio reindex --force` で再正規化せよ」と
 案内するため、repair が唯一案内する回復手段そのものが破損で死ぬ (R16-4 が repair について指摘した
 「回復コマンドが回復対象の破損で死ぬ」の未修正の兄弟)。
 
@@ -109,7 +109,7 @@ TaskStatus::Paused)` のみを退役し、**`Failed` (rate_limit で送信済み
 自身 (`main.rs:8811-8816`) が「stale task が per-adapter markdownize cap を食い正規タスクを誤 Pause する」と
 Pending/Paused について認識していたが、Failed(rate_limit) 経路が未接続のまま残った。
 
-**実機**: PDF を `index --approve` → `KCS_TEST_MISTRAL_OCR=rate_limit batch resume` で v1=Failed(rate_limit) +
+**実機**: PDF を `index --approve` → `KIO_TEST_MISTRAL_OCR=rate_limit batch resume` で v1=Failed(rate_limit) +
 markdown ledger に満額 phantom 1 行 → PDF 編集 (raw_hash 変化) → `[budget.per_adapter] markdown` を「1 送信超・
 2 送信未満」に設定して再 index。control (rate_limit スキップ) では v2 = `pending ready_for_online_adapter`、
 phantom では v2 = `paused budget_exceeded`。crash 不要・rate_limit (無制限リトライ設計の常態) + 編集という
@@ -139,8 +139,8 @@ charge 経路 (`main.rs:6931`) の同型 (chunk が編集で非 live 化 → rat
 `index_unusable` の意味論 (both backends structurally gone) がこのクラスにも及ぶはずだが実装が追随していない。
 
 **実機**: 単一 scope で HEAD commit object のバイト改ざん (hash mismatch → store_corrupt) → `search` が
-`KCS-E-SEARCH-SCOPE-ALL-FAILED-001` exit 4 + 誘導なし。対照: sqlite.db 削除 (index_missing) → exit 1 +
-「run kcs repair --rebuild-db」誘導。
+`KIO-E-SEARCH-SCOPE-ALL-FAILED-001` exit 4 + 誘導なし。対照: sqlite.db 削除 (index_missing) → exit 1 +
+「run kio repair --rebuild-db」誘導。
 
 **fix 方針**: store 破損クラスが全 scope を除外したとき、回復ガイダンスを付与する。ただし **`index_missing` と
 同一化 (exit 1 + repair 誘導) は誤誘導**になる — `snapshot_shallow` は `repair --rebuild-db` では直らず
@@ -149,23 +149,23 @@ charge 経路 (`main.rs:6931`) の同型 (chunk が編集で非 live 化 → rat
 するか再 index」の、回復可能性に応じたガイダンスを付ける (安易な exit 同一化はしない)。回帰テスト: 単一 scope
 の store_corrupt / snapshot_shallow search が回復ガイダンス付きで返る。
 
-## R17-5 [minor] `resolve_commit` / `tag` の 3 箇所が R16-1/R16-5 の COMMIT-SHALLOW 系統変換の対象漏れ — shallow commit を hash リテラル / tag 名 / 暗黙 HEAD 経由で `diff`/`tag` に渡すと生 `KCS-E-STORE-NOT-FOUND-001` exit 4 (R16-5 が保証した COMMIT-SHALLOW exit 1 + side 明示に到達しない)
+## R17-5 [minor] `resolve_commit` / `tag` の 3 箇所が R16-1/R16-5 の COMMIT-SHALLOW 系統変換の対象漏れ — shallow commit を hash リテラル / tag 名 / 暗黙 HEAD 経由で `diff`/`tag` に渡すと生 `KIO-E-STORE-NOT-FOUND-001` exit 4 (R16-5 が保証した COMMIT-SHALLOW exit 1 + side 明示に到達しない)
 
 **収束**: Sonnet-B + Opus (2 エンジン) + 実機。
 
 **根本原因**: R16-1 が 8 call site の `read_commit` を系統的に COMMIT-SHALLOW 化したが、`resolve_commit` の
-hash 直値分岐 (`crates/kcs-core/src/scope.rs:689`) と tag 名解決分岐 (`scope.rs:696`)、および `tag()` 自身の検証読み
+hash 直値分岐 (`crates/kio-core/src/scope.rs:689`) と tag 名解決分岐 (`scope.rs:696`)、および `tag()` 自身の検証読み
 (`scope.rs:662`) の `read_commit(...)?` (無条件) を漏らした。`diff` (`scope.rs`) は `resolve_commit(a)?`/
 `resolve_commit(b)?` を `diff_side_tree` の R16-5 吸収より**先に**呼ぶため、hash リテラル経由で shallow commit を
 渡すと R16-5 の修正コードに到達する前に生エラーで落ちる。`"HEAD"` **文字列**経由は `head_commit_hash()` を返す
 だけで read_commit を挟まないため R16-5 に正しく到達する非対称。
 
 **実機**: HEAD 直近 commit の parent (C1) の commit object を削除 → `diff <C1-hash> HEAD` / `diff HEAD <C1-hash>` /
-`tag mytag <C1-hash>` の 3 経路すべて `KCS-E-STORE-NOT-FOUND-001` exit 4 (side/復旧文言なし)。`"HEAD"` 文字列
+`tag mytag <C1-hash>` の 3 経路すべて `KIO-E-STORE-NOT-FOUND-001` exit 4 (side/復旧文言なし)。`"HEAD"` 文字列
 経由の diff は COMMIT-SHALLOW exit 1 + side 明示の対照。
 
 **fix 方針**: `resolve_commit` の 2 箇所 (scope.rs:689,696) と `tag()` の検証読み (scope.rs:662) を、他 8 site と
-同じ `is_store_not_found` 捕捉で `KcsError::commit_shallow` に変換 (diff は side a/b、tag は write context を付与)。
+同じ `is_store_not_found` 捕捉で `KioError::commit_shallow` に変換 (diff は side a/b、tag は write context を付与)。
 回帰テスト: hash リテラル / tag 経由の shallow commit が `diff`/`tag` で COMMIT-SHALLOW exit 1。
 
 ## R17-6 [minor] `repair --rebuild-db` の `skipped_units` 報告が、実際には検索可能な (chunks.jsonl のキャッシュ chunk が生存する) 文書まで「要 reindex --force」と誤警告 — false alarm がユーザー/Agent を R17-2 で壊れた reindex --force に誘導する
@@ -174,7 +174,7 @@ hash 直値分岐 (`crates/kcs-core/src/scope.rs:689`) と tag 名解決分岐 (
 
 **根本原因**: `rebuild_step3_index` (`main.rs:2837-2865`) が normalized-unit 読込失敗を `skipped_units` に記録
 するが、`build_sqlite_index_at` (`main.rs:3311`) は chunks.jsonl を無条件に全読みして再インデックスするため、
-破損前に既に永続化済みの chunk がそのまま生き残り検索可能なまま。`skipped_units_guidance`「run kcs reindex
+破損前に既に永続化済みの chunk がそのまま生き残り検索可能なまま。`skipped_units_guidance`「run kio reindex
 --force to re-normalize」は「この文書は現在検索できない」を意味するべきなのに、検索は正常に機能している。しかも
 その reindex --force は R17-2 により壊れている (単一破損で scope 全体停止)。
 

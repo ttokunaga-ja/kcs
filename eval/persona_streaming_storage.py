@@ -42,8 +42,8 @@ except ImportError:  # pragma: no cover
     import persona_storage as storage
 
 
-STORAGE_ENVELOPE_SCHEMA = "kcs.persona.streaming-jsonl-storage-envelope/v1"
-READY_SCHEMA = "kcs.persona.streaming-jsonl-ready/v1"
+STORAGE_ENVELOPE_SCHEMA = "kio.persona.streaming-jsonl-storage-envelope/v1"
+READY_SCHEMA = "kio.persona.streaming-jsonl-ready/v1"
 SCHEMA_VERSION = 1
 CANONICALIZATION = "utf8-json-sort-keys-compact-no-floats-lf/v1"
 FORMAL_PUBLICATION_BLOCKER = "source_directory_inode_not_bound_by_rename"

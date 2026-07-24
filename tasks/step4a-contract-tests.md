@@ -7,7 +7,7 @@
 >
 > 対象: time-travel search、単発 Evidence verify、`repair --verify-objects`、restore、
 > purge 最小形、bbox annotation、online Markdownize promotion、M3-2/M3-3 eval。
-> 対象外: `kcs gc` 実行、tiered retention、Evidence verify batch、retarget、export/import、
+> 対象外: `kio gc` 実行、tiered retention、Evidence verify batch、retarget、export/import、
 > purge の DAG 書換え、filename 秘匿、定期 fsck。根拠: `09 §3.1`。
 
 ## 0. ID と完了規律
@@ -15,8 +15,8 @@
 | ID | 対象 | 主根拠 |
 | --- | --- | --- |
 | `CT4-TIMETRAVEL-*` | `--at` / `--all-history` / `--include-deleted` / `--since` | `05 §1.5-1.8` |
-| `CT4-VERIFY-*` | `kcs evidence verify <pointer> [--strict]` | `08 §3-4.3` |
-| `CT4-FSCK-*` | `kcs repair --verify-objects` | `10 §7.5` |
+| `CT4-VERIFY-*` | `kio evidence verify <pointer> [--strict]` | `08 §3-4.3` |
+| `CT4-FSCK-*` | `kio repair --verify-objects` | `10 §7.5` |
 | `CT4-RESTORE-*` | destination-only restore | `05 §4` / `06 §5` |
 | `CT4-PURGE-*` | tombstone / erase / scrub / purged commit | `05 §3` / `10 §7` |
 | `CT4-BBOX-*` | bbox annotation identity / metadata / searchable projection | `07 §5.2` |
@@ -26,7 +26,7 @@
 - **P0**: MVP completion gate. One failure blocks Step 4 completion.
 - **P1**: compatibility, concurrency, or recovery edge. Must be green before PR readiness unless a
   concrete platform-only CI job is the designated executor.
-- Every new read is bounded and no-follow/identity checked. Every store mutation holds `.kcs/.lock`
+- Every new read is bounded and no-follow/identity checked. Every store mutation holds `.kio/.lock`
   and uses atomic publication or a durable resumable journal. Canonical/legacy conflicts fail closed.
 - `eval/golden-queries.jsonl`, `eval/corpus_spec.py`, and history fixtures are frozen.
 
@@ -64,18 +64,18 @@ is its single-line JCS serialization, so the profile identity covers every trans
 description, strictness rule, field, and required-list order:
 
 ```text
-{"json_schema":{"name":"kcs_bbox_annotation_v1","schema":{"additionalProperties":false,"properties":{"short_description":{"description":"Describe the figure briefly in plain text. Do not use Markdown or HTML.","type":"string"},"transcribed_text":{"description":"Transcribe all visible text verbatim in plain text. Do not use Markdown or HTML.","type":"string"}},"required":["short_description","transcribed_text"],"type":"object"},"strict":true},"type":"json_schema"}
+{"json_schema":{"name":"kio_bbox_annotation_v1","schema":{"additionalProperties":false,"properties":{"short_description":{"description":"Describe the figure briefly in plain text. Do not use Markdown or HTML.","type":"string"},"transcribed_text":{"description":"Transcribe all visible text verbatim in plain text. Do not use Markdown or HTML.","type":"string"}},"required":["short_description","transcribed_text"],"type":"object"},"strict":true},"type":"json_schema"}
 prompt_template_hash = sha256:9404f8ffe2983113f082d255a61817ad0798e74aeb82cb5063a391fbcbea9ca8
 ```
 
 For frozen model `mistral-ocr-2505`, the canonical profile and hash are:
 
 ```text
-{"adapter_kind":"markdownize","adapter_role":"multimodal","model_or_tool_family":"mistral-ocr","model_version_pin":"mistral-ocr-2505","output_schema":"kcs-markdown+bbox-annotation-v1","prompt_template_hash":"sha256:9404f8ffe2983113f082d255a61817ad0798e74aeb82cb5063a391fbcbea9ca8","prompt_template_id":"kcs-mistral-bbox-annotation-v1","runtime_kind":"cloud","spec_version":1}
+{"adapter_kind":"markdownize","adapter_role":"multimodal","model_or_tool_family":"mistral-ocr","model_version_pin":"mistral-ocr-2505","output_schema":"kio-markdown+bbox-annotation-v1","prompt_template_hash":"sha256:9404f8ffe2983113f082d255a61817ad0798e74aeb82cb5063a391fbcbea9ca8","prompt_template_id":"kio-mistral-bbox-annotation-v1","runtime_kind":"cloud","spec_version":1}
 tool_profile_hash = sha256:830c45cada7e9ea8c6f6816579fa0493645208626201181f3763b4bc6bddda3e
 ```
 
-Disabling annotation preserves the existing `kcs-markdown-v1` profile identity. Enabled/disabled
+Disabling annotation preserves the existing `kio-markdown-v1` profile identity. Enabled/disabled
 outputs can never share a normalized instance.
 
 ### A.3 Tombstone schema
@@ -96,7 +96,7 @@ The record is bounded, identity checked, atomically published, and not a CAS obj
 ### A.4 Internal erase-receipt schema
 
 `--erase-tombstone` publishes no public tombstone. It atomically retains exactly this fsck-only,
-non-content record at `.kcs/purge/erase-receipts/ab/cd/<raw64>`:
+non-content record at `.kio/purge/erase-receipts/ab/cd/<raw64>`:
 
 ```json
 {
@@ -174,7 +174,7 @@ replay recomputes the grouped stream and skips that many final hits per scope.
 Aggregate history-walk limits are exact: an all-parent walk permits at most 100,000 unique commits,
 10,000,000 total tree entries, and 4 GiB of verified commit+tree bytes; a first-parent walk has its own
 independent counters with the same three maxima. Exceeding any cap fails before consuming the next
-item with `KCS-E-COMMIT-HISTORY-LIMIT-001`. Search returns no partial aliases for that scope and uses
+item with `KIO-E-COMMIT-HISTORY-LIMIT-001`. Search returns no partial aliases for that scope and uses
 normal partial/all-failed scope semantics. Purge-by-path uses the all-parent limits; restore-by-path
 uses first-parent limits and both fail before mutation/publication.
 
@@ -182,7 +182,7 @@ uses first-parent limits and both fail before mutation/publication.
 
 **CT4-TIMETRAVEL-001 — P0 — parser/exclusivity/duration.** Given each valid selector and every
 invalid combination/value; when search is parsed; then valid inputs execute and invalid inputs return
-`KCS-E-CONFIG-USAGE-001` exit 2 before registry/DB mutation. (`05 §1.6`, `06 §3`)
+`KIO-E-CONFIG-USAGE-001` exit 2 before registry/DB mutation. (`05 §1.6`, `06 §3`)
 
 **CT4-TIMETRAVEL-002 — P0 — exact `--at`.** Given C1(raw A), C2(raw B), and tag `old=C1`;
 when searching by C1 hash/tag and HEAD; then only the selected commit's identity triple is eligible,
@@ -209,7 +209,7 @@ uses the signed page-1 cutoff. (`05 §1.5-1.6`)
 
 **CT4-TIMETRAVEL-006 — P0 — cursor binding.** Given otherwise equal searches differing in selector,
 duration, or `--at`; when a cursor is replayed; then A.1 hashes differ and replay returns
-`KCS-E-SEARCH-CURSOR-001`; same selector preserves snapshot, `max_rowid`,
+`KIO-E-SEARCH-CURSOR-001`; same selector preserves snapshot, `max_rowid`,
 `max_association_rowid`, cutoff, and order. Given current config C2, page 1 freezes association maximum
 Amax while X has only C1; appending `(X,C2)` after page 1 cannot introduce X on page 2, while a fresh
 search may include it. Switching the effective config from C2 to an older C1 whose associations are
@@ -221,7 +221,7 @@ cursor error; current tokens emit `v=2`. A page boundary inside one chunk's mult
 at the next alias exactly once because `consumed` counts expanded hits.
 
 **CT4-TIMETRAVEL-007 — P0 — shallow rules.** Explicit `--at` to a shallow commit and any cursor whose
-frozen snapshot becomes shallow return `KCS-E-COMMIT-SHALLOW-001`. All-history/since must not treat
+frozen snapshot becomes shallow return `KIO-E-COMMIT-SHALLOW-001`. All-history/since must not treat
 cached `tree_entries` as truth: if a candidate's historical-path tree is shallow, that scope fails
 loudly as shallow instead of serving or silently omitting the hit. Include-deleted likewise fails if
 its bounded first-parent ancestry is incomplete. (`03 §2`, `04 §4.5`, `05 §2.2`)
@@ -259,8 +259,8 @@ Stable completed-inspection payloads are:
 
 ```json
 {"status":"alive","details":{"scope_id":"...","scope_path":"...","commit":"sha256:...","raw_hash":"sha256:...","tool_profile_hash":"sha256:...","chunk_hash":"sha256:...","commit_shallow":false}}
-{"status":"tombstoned","error_code":"KCS-E-PURGE-TOMBSTONED-001","details":{"purged_at":"...","purged_reason":"legal","purged_in_commit":"sha256:...","raw_hash":"sha256:...","scope_path":"..."}}
-{"status":"not_found","error_code":"KCS-E-PURGE-NOT-FOUND-001","details":{"raw_hash":"sha256:...","scope_path":"..."}}
+{"status":"tombstoned","error_code":"KIO-E-PURGE-TOMBSTONED-001","details":{"purged_at":"...","purged_reason":"legal","purged_in_commit":"sha256:...","raw_hash":"sha256:...","scope_path":"..."}}
+{"status":"not_found","error_code":"KIO-E-PURGE-NOT-FOUND-001","details":{"raw_hash":"sha256:...","scope_path":"..."}}
 ```
 
 Non-strict returns exit 0 for all three. Strict returns 0 only for alive and preserves the dead-state
@@ -292,7 +292,7 @@ tombstoned/not_found terminal result, never transient content leakage or silent 
 
 ## D. Object verification / fsck
 
-`repair --verify-objects` is an explicit store-writing repair command and holds `.kcs/.lock` end to
+`repair --verify-objects` is an explicit store-writing repair command and holds `.kio/.lock` end to
 end. It verifies documented raw/chunk/tree/commit CAS content paths plus normalized reference
 integrity; SQLite is outside fsck and remains rebuildable.
 
@@ -329,7 +329,7 @@ working file and is not tombstoned or covered by an erase receipt, repair re-ing
 and forces one `commit_type=repaired` commit. All repaired and no missing exits 0. (`10 §7.5`, `05 §2.6`)
 
 **CT4-FSCK-004 — P0 — unrecoverable report.** Ordinary missing remains exit 3, is appended to
-errors.jsonl as `KCS-E-STORE-CORRUPT-001`, and JSON lists bounded affected commit hashes plus
+errors.jsonl as `KIO-E-STORE-CORRUPT-001`, and JSON lists bounded affected commit hashes plus
 `external_pointers_may_be_affected=true` (pointers have no registry). It never invents a pointer list
 or emits bodies/secrets. (`10 §7.5`)
 
@@ -355,7 +355,7 @@ Canonical executable syntax for this phase (the goal objective resolves the olde
 conflict) is:
 
 ```text
-kcs restore <evidence|path|commit-ref> --to <dir> [--force] [--yes]
+kio restore <evidence|path|commit-ref> --to <dir> [--force] [--yes]
 ```
 
 Raw-hash shorthand is not a restore source. A commit ref is HEAD/full hash/tag. Evidence is a pointer
@@ -367,13 +367,13 @@ ancestry fails rather than guessing. Restore
 reads verified CAS only, never mutable working bytes.
 
 `--to` is an explicit external destination and may be outside the scope, but must not be the scope
-root, `.kcs`, or a `.kcs` descendant. It and all existing ancestors/leaves must be real non-reparse
+root, `.kio`, or a `.kio` descendant. It and all existing ancestors/leaves must be real non-reparse
 directories/files. Historical leaf names are validated for the current OS immediately before path
-construction. Restore is lock-free with respect to `.kcs` and never changes HEAD/manifest/index/CAS.
+construction. Restore is lock-free with respect to `.kio` and never changes HEAD/manifest/index/CAS.
 
 Stable JSON is `{status:"restored",source_kind,source_commit,destination,restored_count,
 overwritten_count,files:[{path,path_at_commit,raw_hash,overwritten}]}`. A late partial publication adds
-`error_code:"KCS-E-COMMIT-RESTORE-PARTIAL-001"`, `failed[]`, and exit 3.
+`error_code:"KIO-E-COMMIT-RESTORE-PARTIAL-001"`, `failed[]`, and exit 3.
 
 **CT4-RESTORE-001 — P0 — CLI/source.** Missing `--to`, raw shorthand, extras, or invalid `--yes`
 usage returns exit 2. HEAD/hash/tag, logical path, and pointer forms resolve deterministically; an
@@ -381,11 +381,11 @@ existing tag wins over a same-spelled path. (`05 §4`, `06 §5`)
 
 **CT4-RESTORE-002 — P0 — commit bytes/names.** A two-file historical commit restores each verified
 raw byte-for-byte under its historical name; an empty commit succeeds with count 0. Working tree and
-all `.kcs` state remain byte-identical. (`05 §4`)
+all `.kio` state remain byte-identical. (`05 §4`)
 
 **CT4-RESTORE-003 — P0 — deleted evidence/path.** A deleted-file pointer or logical path restores
 exactly one raw under its safe historical path. Every restore source requiring a shallow commit/tree
-returns `KCS-E-COMMIT-SHALLOW-001`; restore deliberately has a stricter rule than `view`/verify.
+returns `KIO-E-COMMIT-SHALLOW-001`; restore deliberately has a stricter rule than `view`/verify.
 (`08 §3.2`, `05 §4`)
 
 **CT4-RESTORE-004 — P0 — preflight/no clobber.** Any existing destination leaf conflicts even when
@@ -396,7 +396,7 @@ confirmation or `--yes`; rejection/non-TTY missing confirmation exits 9. Replace
 file and final bytes are exact. (`06 §5, §7`)
 
 **CT4-RESTORE-006 — P0 — destination safety.** Unsafe historical names, case-fold collisions,
-symlink/junction/hardlink/device leaves, destination scope root/`.kcs`, and ancestor replacement fail
+symlink/junction/hardlink/device leaves, destination scope root/`.kio`, and ancestor replacement fail
 before publication and never touch an outside target. (`03 §3`, Stage 0 materialization decision)
 
 **CT4-RESTORE-007 — P0 — dead/corrupt source.** Tombstoned/erased/unreachable sources exit 4;
@@ -411,7 +411,7 @@ two identical-byte tree entries restore both names; an old pointer retains its h
 
 **CT4-RESTORE-010 — P1 — ancestry bounds.** Logical-path restore succeeds at each exact independent
 first-parent commit/tree-entry/byte maximum and fails one unit beyond with
-`KCS-E-COMMIT-HISTORY-LIMIT-001`, publishing no destination file. Explicit evidence/commit restore
+`KIO-E-COMMIT-HISTORY-LIMIT-001`, publishing no destination file. Explicit evidence/commit restore
 does not perform this ancestry walk. (`05 §1.6, §4`)
 
 ## F. Purge minimum
@@ -419,13 +419,13 @@ does not perform this ancestry walk. (`05 §1.6, §4`)
 Typed CLI:
 
 ```text
-kcs purge <path> --reason <legal|privacy|misingest|copyright|other> [--erase-tombstone] [--yes]
-kcs purge --raw-hash sha256:<64hex> --reason <...> [--erase-tombstone] [--yes]
+kio purge <path> --reason <legal|privacy|misingest|copyright|other> [--erase-tombstone] [--yes]
+kio purge --raw-hash sha256:<64hex> --reason <...> [--erase-tombstone] [--yes]
 ```
 
 `path` and `--raw-hash` are exclusive. A path means every distinct raw ever bound to that logical
 path in the selected scope. Shallow history makes path resolution incomplete and fails; raw-hash
-purge remains possible. KCS never deletes the user's working file, so purge refuses while target bytes
+purge remains possible. KIO never deletes the user's working file, so purge refuses while target bytes
 remain anywhere in the current working tree. Default tombstones block future re-ingest. Erase mode
 leaves no block and discloses that later explicit reintroduction of identical bytes is possible.
 
@@ -433,18 +433,18 @@ An existing identical tombstone makes default purge idempotent exit 0 without an
 an existing tombstone into erase mode is deferred with the unresolved double-purge contract and is
 rejected. Missing raw with no tombstone is target-not-found exit 4.
 
-Purge holds the store lock and uses `.kcs/purge/in-progress.json` as an owner-only resumable journal.
+Purge holds the store lock and uses `.kio/purge/in-progress.json` as an owner-only resumable journal.
 After the tombstone/in-progress visibility barrier, every read/search/index path rejects target content.
 Failure after the barrier keeps the journal and returns retryable incomplete exit 3; rerun resumes.
-Device-global observability append/scrub uses `$XDG_DATA_HOME/kcs/logs/scrub.lock`; scope access-log
-append/scrub uses `.kcs/logs/access.scrub.lock`. Fixed acquisition order is scope store → reservation
+Device-global observability append/scrub uses `$XDG_DATA_HOME/kio/logs/scrub.lock`; scope access-log
+append/scrub uses `.kio/logs/access.scrub.lock`. Fixed acquisition order is scope store → reservation
 ledger → device observability → scope access log. Purge performs a final scrub before journal removal.
 
 Stable success JSON is `{status:"purged",purged_in_commit,reason,target_raw_count,
 deleted_counts,shared_artifacts_preserved,tombstone_mode,tombstone_count,erase_receipt_count,logs_scrubbed,
 log_files_scrubbed,log_rows_removed,log_fields_masked,guarantee,not_covered}`. It contains no target
 raw hash/path/query/prompt. Incomplete uses the same bounded counts plus
-`error_code:"KCS-E-PURGE-INCOMPLETE-001"` and exit 3.
+`error_code:"KIO-E-PURGE-INCOMPLETE-001"` and exit 3.
 
 **CT4-PURGE-001 — P0 — typed args/preview/confirmation.** Operand, exact reason enum, and confirmation
 are mandatory. Preview happens before mutation. `no` exits 9 and byte-for-byte state is unchanged. (`06 §6`, `10 §7`)
@@ -470,12 +470,12 @@ the reason enum. No DAG rewrite occurs. (`05 §3.2, §3.5`)
 
 **CT4-PURGE-006 — P0 — universal exclusion.** Default/at/history/deleted/since text/vector/hybrid,
 old cursors, raw/chunk/image object URIs, index/reindex, restore, and fsck cannot reveal or resurrect a
-target raw during the purge barrier or from remaining KCS-managed history after success. Default
+target raw during the purge barrier or from remaining KIO-managed history after success. Default
 tombstones bar future re-ingest; erase receipts only stop fsck auto-recovery and ordinary later
 explicit ingest remains allowed. (`05 §3`, `10 §7`)
 
 **CT4-PURGE-007 — P0 — scope isolation/aliases.** Same raw aliases in one scope are all affected;
-another `.kcs` with the same raw remains authoritative/alive/searchable. Global disposable cache may
+another `.kio` with the same raw remains authoritative/alive/searchable. Global disposable cache may
 be evicted but the other store is not mutated. (`05 §3.4`)
 
 **CT4-PURGE-008 — P0 — logs.** Current/rotated scope access and device events/errors/metrics logs are
@@ -484,13 +484,13 @@ The new audit event contains actor/reason/commit/counts only, never target ident
 reports rows removed/fields masked/files scrubbed. (`10 §7`)
 
 **CT4-PURGE-009 — P0 — journal/fault injection.** Failure before barrier has no destructive effect.
-Failure after each later phase leaks no content, returns `KCS-E-PURGE-INCOMPLETE-001` exit 3, and an
+Failure after each later phase leaks no content, returns `KIO-E-PURGE-INCOMPLETE-001` exit 3, and an
 idempotent rerun converges to the exact successful postcondition. (R23, `05 §6`)
 
 **CT4-PURGE-010 — P0 — path/live/shallow.** Path traverses all stored trees and collects all versions;
-shallow traversal fails. A live working copy yields `KCS-E-PURGE-WORKING-COPY-001` exit 4 and no
+shallow traversal fails. A live working copy yields `KIO-E-PURGE-WORKING-COPY-001` exit 4 and no
 mutation. The full-parent walk succeeds at each exact aggregate limit and fails one unit beyond with
-`KCS-E-COMMIT-HISTORY-LIMIT-001` before the journal/barrier or any mutation. (`05 §1.6, §3.1, §3.5`)
+`KIO-E-COMMIT-HISTORY-LIMIT-001` before the journal/barrier or any mutation. (`05 §1.6, §3.1, §3.5`)
 
 **CT4-PURGE-011 — P0 — link/bounds/races.** Symlink, junction, unexpected hardlink, oversized ledger,
 and ancestor replacement fail closed without unlinking outside the selected store. (R23)
@@ -499,17 +499,17 @@ and ancestor replacement fail closed without unlinking outside the selected stor
 contention exits 3; post-barrier readers see dead content while pre-barrier readers may finish their
 already-open verified handle. (`05 §6`)
 
-**CT4-PURGE-013 — P1 — guarantee wording.** Output says “removed from KCS-managed history” and lists
+**CT4-PURGE-013 — P1 — guarantee wording.** Output says “removed from KIO-managed history” and lists
 uncovered external backup/export/manual copies; it never claims universal deletion. (`10 §7`)
 
-**CT4-PURGE-GC-001 — P0 — GC remains deferred.** `kcs gc` returns the uniform not-implemented error
+**CT4-PURGE-GC-001 — P0 — GC remains deferred.** `kio gc` returns the uniform not-implemented error
 and deletes nothing; existing `GcPolicy` mappings still never select full commit deletion. (`05 §2`, `09 §3.1`)
 
 ## G. Bbox annotation
 
 Configuration is `markdownize.bbox_annotation.enabled` (boolean, default true). The request includes a
 fixed JSON schema with required `short_description` and `transcribed_text`; response arrays, strings,
-and coordinates use explicit cardinality/byte/geometry bounds. Scope `.kcs/config.toml` overrides the
+and coordinates use explicit cardinality/byte/geometry bounds. Scope `.kio/config.toml` overrides the
 user config value; absence at both levels means true. Tests use the built-in mock only.
 
 Unit metadata records each annotation bound to its image hash, bbox, description, and transcription.
@@ -533,13 +533,13 @@ Every escaped line receives a trusted blockquote prefix. Immediately after the i
 form is:
 
 ```text
-> KCS figure description: <line>   # repeated for each description line
-> KCS figure text: <line>          # repeated for each transcription line
+> KIO figure description: <line>   # repeated for each description line
+> KIO figure text: <line>          # repeated for each transcription line
 ```
 
-Thus provider headings, fences, links, autolinks, raw HTML, image syntax, controls, or fake `kcs://`
+Thus provider headings, fences, links, autolinks, raw HTML, image syntax, controls, or fake `kio://`
 text cannot create Markdown structure. The same post-escape strings are stored in structured metadata.
-This persisted projection is part of `kcs-markdown+bbox-annotation-v1`, so Evidence spans slice the
+This persisted projection is part of `kio-markdown+bbox-annotation-v1`, so Evidence spans slice the
 same bytes that search indexed.
 
 **CT4-BBOX-001 — P0 — identity/default.** Default enabled uses A.2 profile; explicit disabled preserves
@@ -557,7 +557,7 @@ found by text search. Image URI and CAS bytes remain unchanged. (`07 §5.2`)
 **CT4-BBOX-004 — P0 — validation/bounds.** Missing/extra/wrong-type fields, missing or duplicate
 `image_annotation` on a returned image, invalid bbox geometry, or the frozen count/string/aggregate
 bounds is contract violation with no partial publication. Annotation/image bijection follows exact
-page/image order. Adversarial `[x](kcs://...)`, `![x](...)`, `<img>`, `<kcs://...>`, entity, backtick,
+page/image order. Adversarial `[x](kio://...)`, `![x](...)`, `<img>`, `<kio://...>`, entity, backtick,
 and multiline inputs round-trip as text; the annotation subtree's CommonMark AST contains no
 provider-created link/image/raw-HTML/autolink node, and metadata holds the same escaped strings.
 (`07 §5.2`, R23)

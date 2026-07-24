@@ -1,4 +1,4 @@
-# Step2b 発注書: kcs-pipeline / kcs-adapter クレート骨格 (Step 2 準備)
+# Step2b 発注書: kio-pipeline / kio-adapter クレート骨格 (Step 2 準備)
 
 ## 目的
 
@@ -14,8 +14,8 @@ Step 2 (pipeline + adapter) 実装の土台となるクレート骨格を既存 
 ## 成果物
 
 ```text
-crates/kcs-pipeline/    # lib: scan / prepare / markdownize / task / budget モジュール骨格
-crates/kcs-adapter/     # lib: Adapter trait 群 + deterministic / mistral_ocr の空実装骨格
+crates/kio-pipeline/    # lib: scan / prepare / markdownize / task / budget モジュール骨格
+crates/kio-adapter/     # lib: Adapter trait 群 + deterministic / mistral_ocr の空実装骨格
 ```
 
 - workspace Cargo.toml の members に追加
@@ -23,7 +23,7 @@ crates/kcs-adapter/     # lib: Adapter trait 群 + deterministic / mistral_ocr �
   AdapterRequest/Response、07 §5.2 の入出力フィールド) + `todo!()` スタブ + placeholder test 1 個以上
 - **新規依存を追加しない** (serde / serde_json / thiserror 等の既存 workspace 依存のみ使用可。
   HTTP クライアント・rusqlite 等は本体実装 (Step2c) 側で追加する)
-- `docs/` 変更禁止。既存クレート (kcs-core / kcs-cli) の変更は workspace members 追記以外禁止
+- `docs/` 変更禁止。既存クレート (kio-core / kio-cli) の変更は workspace members 追記以外禁止
 
 ## 受け入れ条件
 

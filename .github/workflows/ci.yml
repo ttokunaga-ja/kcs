@@ -244,7 +244,7 @@ jobs:
           eval.test_persona_storage
           eval.test_persona_streaming_storage
           eval.test_persona_root_lock
-          eval.test_persona_kcs_runner
+          eval.test_persona_kio_runner
           eval.test_persona_prepare_receipt
           eval.test_persona_history_attestation
           eval.test_persona_renderers
@@ -262,7 +262,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: >-
-          KCS_RUN_PERSONA_FS_INTEGRATION=1
+          KIO_RUN_PERSONA_FS_INTEGRATION=1
           python3 -m unittest -v
           eval.test_generate_persona_corpus
 
@@ -274,14 +274,14 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo build --release --locked
-      - run: python3 eval/generate_scale_corpus.py --out /tmp/kcs-scale-tiny --profile tiny
-      - run: python3 eval/prepare_scale_corpus.py --corpus /tmp/kcs-scale-tiny --bin target/release/kcs
-      - run: python3 eval/attest_scale_corpus.py --corpus /tmp/kcs-scale-tiny
-      - run: python3 eval/generate_corpus.py --out /tmp/kcs-eval-corpus
-      - run: python3 eval/replay_history.py --corpus /tmp/kcs-eval-corpus --bin target/release/kcs
-      - run: python3 eval/run_eval.py --scenario M3-1 --corpus /tmp/kcs-eval-corpus --bin target/release/kcs
-      - run: python3 eval/run_eval.py --scenario M3-2 --corpus /tmp/kcs-eval-corpus --bin target/release/kcs
-      - run: python3 eval/run_eval.py --scenario M3-3 --corpus /tmp/kcs-eval-corpus --bin target/release/kcs
+      - run: python3 eval/generate_scale_corpus.py --out /tmp/kio-scale-tiny --profile tiny
+      - run: python3 eval/prepare_scale_corpus.py --corpus /tmp/kio-scale-tiny --bin target/release/kio
+      - run: python3 eval/attest_scale_corpus.py --corpus /tmp/kio-scale-tiny
+      - run: python3 eval/generate_corpus.py --out /tmp/kio-eval-corpus
+      - run: python3 eval/replay_history.py --corpus /tmp/kio-eval-corpus --bin target/release/kio
+      - run: python3 eval/run_eval.py --scenario M3-1 --corpus /tmp/kio-eval-corpus --bin target/release/kio
+      - run: python3 eval/run_eval.py --scenario M3-2 --corpus /tmp/kio-eval-corpus --bin target/release/kio
+      - run: python3 eval/run_eval.py --scenario M3-3 --corpus /tmp/kio-eval-corpus --bin target/release/kio
 
   msrv:
     runs-on: ubuntu-latest

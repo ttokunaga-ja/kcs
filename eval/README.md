@@ -1,4 +1,4 @@
-# KCS 検索評価ハーネス (synthetic)
+# KIO 検索評価ハーネス (synthetic)
 
 `docs/09-mvp-scope.md` §4.3 の **Recall 評価規約 (ゴールデンクエリ)** を実行するための
 合成コーパス + 履歴シナリオ + ゴールデンクエリ + 評価ランナー。設計宿題 #5
@@ -6,7 +6,7 @@
 
 - 依存: **Python3 標準ライブラリのみ** (追加インストール不要)。
 - 決定論: すべて固定 seed (`corpus_spec.SEED`) + hashlib 由来の seed。2 回実行で byte 同一。
-- `crates/` の `kcs` バイナリ (Step 1-2 実装済み) を使う。`cargo build --release` 済み前提。
+- `crates/` の `kio` バイナリ (Step 1-2 実装済み) を使う。`cargo build --release` 済み前提。
 
 ## ファイル構成
 
@@ -17,7 +17,7 @@
 | `replay_history.py` | 各 scope で `init → index → snapshot → 編集 → snapshot → リネーム → snapshot → 削除 → snapshot` を決定論再現。`history-manifest.json` を出力 |
 | `golden-queries.jsonl` | ゴールデンクエリ (M3-1 / M3-2 / M3-3 各 16+ 件)。**リポジトリ保持の正本** |
 | `history-manifest.json` | replay がリネーム/編集/削除したファイルの記録 (`replay_history.py` が生成) |
-| `run_eval.py` | 評価ランナー。`kcs search --json` で Recall@10 を集計。expected のニーモニック → 実 `section_id` の解決層 (docs/04 §4.1 slug) を持つ。`--dry-run` は expected 実在 + 解決チェック。`--scenario` でシナリオ絞り込み |
+| `run_eval.py` | 評価ランナー。`kio search --json` で Recall@10 を集計。expected のニーモニック → 実 `section_id` の解決層 (docs/04 §4.1 slug) を持つ。`--dry-run` は expected 実在 + 解決チェック。`--scenario` でシナリオ絞り込み |
 | `test_run_eval.py` | `run_eval` の単体テスト (slugify / 解決層 / recall_at_k / exit 分類)。`python3 -m unittest eval.test_run_eval` |
 | `scale_fixture_spec.py` | Recall corpus とは独立した性能 fixture の正本。20 scope と tiny/full の形を固定 |
 | `generate_scale_corpus.py` | owner marker 付きで 20 scope の性能 corpus を決定論生成。full は 4,000 files / 120,000 expected chunks |
@@ -35,22 +35,22 @@
 cargo build --release
 
 # 1. 合成コーパス生成 (決定論的)
-python3 eval/generate_corpus.py --out /tmp/kcs-eval-corpus
+python3 eval/generate_corpus.py --out /tmp/kio-eval-corpus
 
-# 2. 履歴シナリオ再現 (kcs init/index/snapshot を実行し history-manifest.json を更新)
-python3 eval/replay_history.py --corpus /tmp/kcs-eval-corpus --bin target/release/kcs
+# 2. 履歴シナリオ再現 (kio init/index/snapshot を実行し history-manifest.json を更新)
+python3 eval/replay_history.py --corpus /tmp/kio-eval-corpus --bin target/release/kio
 
 # 3a. dry-run: golden-queries の expected {scope,file,section} が
 #     corpus-manifest.json / history-manifest.json に実在し、かつ
 #     (raw_hash, section_id) へ解決できる (slugify が空でない) か検証 (Step 3 前でも通る)
-python3 eval/run_eval.py --dry-run --corpus /tmp/kcs-eval-corpus
+python3 eval/run_eval.py --dry-run --corpus /tmp/kio-eval-corpus
 
 # 3b. 本評価: Recall@10 をシナリオ別に集計。
-#     kcs search 未実装の間は全クエリ NOT-IMPLEMENTED → exit 2 (未実装を green にしない)。
-python3 eval/run_eval.py --corpus /tmp/kcs-eval-corpus --bin target/release/kcs
+#     kio search 未実装の間は全クエリ NOT-IMPLEMENTED → exit 2 (未実装を green にしない)。
+python3 eval/run_eval.py --corpus /tmp/kio-eval-corpus --bin target/release/kio
 
 # 3c. シナリオ絞り込み (複数指定可)。最終HEADのCIは3シナリオを個別に実行する。
-python3 eval/run_eval.py --scenario M3-1 --corpus /tmp/kcs-eval-corpus --bin target/release/kcs
+python3 eval/run_eval.py --scenario M3-1 --corpus /tmp/kio-eval-corpus --bin target/release/kio
 ```
 
 ### exit コード (docs/09 §4.3, 2026-07-03 J2 裁定)
@@ -58,7 +58,7 @@ python3 eval/run_eval.py --scenario M3-1 --corpus /tmp/kcs-eval-corpus --bin tar
 | 状況 | exit | 扱い |
 | --- | --- | --- |
 | 全シナリオ (対象) が Recall@10 >= 0.8 | `0` | PASS |
-| `KCS-E-*-NOT-IMPLEMENTED*` 系のクエリが 1 件以上 | `2` | 未実装。Recall 判定は無効 (green にしない) |
+| `KIO-E-*-NOT-IMPLEMENTED*` 系のクエリが 1 件以上 | `2` | 未実装。Recall 判定は無効 (green にしない) |
 | Recall 未達 / 実行失敗 (非 0 かつ非 3 exit・不正レスポンス・解決不能) | `1` | FAIL。当該クエリは recall 0 として集計に残す |
 
 exit `3` (部分成功) は stdout の JSON を採点対象にする (実装後の部分成功や実バグを未実装で握り潰さない)。
@@ -138,7 +138,7 @@ corpus を水増しせず、独立した fixture で測る。最初の層は再�
 - 20 leaf scopes × 200 Markdown files × 30 ATX sections = **120,000 current chunks**
 - 14 の利用者属性、20 の用途を engineering / research / ML-data / product / security / client / inbox に分ける
 - 1 section を既定 `[chunking] strategy="heading", max_chars=6000` の 1 chunk 未満に保つ
-- KCS は scope 直下だけを対象にするため、collection root 自体は scope にせず、20 leaf folders を個別 scope にする
+- KIO は scope 直下だけを対象にするため、collection root 自体は scope にせず、20 leaf folders を個別 scope にする
 
 folder と利用者・用途の対応は manifest にも保存する。
 
@@ -171,29 +171,29 @@ full は時間・ディスクを使う明示実行専用であり、通常 CI �
 ```bash
 # 軽量 smoke (20 scopes / 60 chunks)
 python3 eval/generate_scale_corpus.py \
-  --out /tmp/kcs-scale-tiny --profile tiny
+  --out /tmp/kio-scale-tiny --profile tiny
 python3 eval/prepare_scale_corpus.py \
-  --corpus /tmp/kcs-scale-tiny --bin target/release/kcs
+  --corpus /tmp/kio-scale-tiny --bin target/release/kio
 
 # 本番規模 (20 scopes / 4,000 files / 120,000 chunks): 手動性能計測時のみ
 python3 eval/generate_scale_corpus.py \
-  --out /tmp/kcs-scale-full --profile full
+  --out /tmp/kio-scale-full --profile full
 python3 eval/prepare_scale_corpus.py \
-  --corpus /tmp/kcs-scale-full --bin target/release/kcs
+  --corpus /tmp/kio-scale-full --bin target/release/kio
 
 # 任意時点で再検証 (read-only SQLite attestation)
-python3 eval/attest_scale_corpus.py --corpus /tmp/kcs-scale-full
+python3 eval/attest_scale_corpus.py --corpus /tmp/kio-scale-full
 
 # current-text 横断検索の手動計測。各scenario 5 warmup + 100標本、nearest-rank p50/p95/p99。
-# 既定reportは corpus外の /tmp/kcs-scale-full.latency.json。
+# 既定reportは corpus外の /tmp/kio-scale-full.latency.json。
 python3 eval/run_scale_eval.py \
-  --corpus /tmp/kcs-scale-full --bin target/release/kcs \
+  --corpus /tmp/kio-scale-full --bin target/release/kio \
   --warmups-per-scenario 5 --samples-per-scenario 100
 ```
 
-`prepare_scale_corpus.py` は各 scope を明示的な `kcs index --offline --yes` で終える。`index` 自体が snapshot と
-HEAD tree projection を公開するので、その直後に別の `kcs snapshot` を追加してはならない。
-device state は corpus 内の `.kcs-eval-device` に隔離され、開発者の実 registry や API key を使わない。
+`prepare_scale_corpus.py` は各 scope を明示的な `kio index --offline --yes` で終える。`index` 自体が snapshot と
+HEAD tree projection を公開するので、その直後に別の `kio snapshot` を追加してはならない。
+device state は corpus 内の `.kio-eval-device` に隔離され、開発者の実 registry や API key を使わない。
 
 出力の `scale-corpus-manifest.json` は全 source bytes、expected chunk 数、
 query契約を版管理する `query_workload_id=exact-reference-v1`、
@@ -210,7 +210,7 @@ query契約を版管理する `query_workload_id=exact-reference-v1`、
 `run_scale_eval.py` は release binary・manifest・保存済み/再計算attestation・platformをreportへ束縛し、
 各検索で既定の全scope選択、attested 20 scopes の成功、期待文書の上位10件入りを確認する。検索modeも
 明示指定せず、既定 `auto` が `embedding_endpoint_not_configured` により `text` へfallbackしたことを検証する。
-主指標は各検索が1行だけ追記する `KCS-M-SEARCH-001 search.latency_ms`、副指標はrunner計測のprocess wall timeで、
+主指標は各検索が1行だけ追記する `KIO-M-SEARCH-001 search.latency_ms`、副指標はrunner計測のprocess wall timeで、
 両方の生標本とp50/p95/p99を保存する。M3-1の `< 5秒` 判定は
 **high-selectivity default-auto current-text baseline** であり、広いqueryやhybridを含む正式なMVP性能gateではない。M3-2
 (`--all-history`) とM3-3 (`--include-deleted`) も同じ標本数で実行するが、このfixtureは単一HEADで
@@ -264,7 +264,7 @@ W0/W5とも120,000 contributor chunks、W5後はcurrent+history 180,000 chunks�
 - blocked-until-readback capacity projection: `eval/persona_capacity.py`
 - non-formal bounded JSONL artifact storage: `eval/persona_streaming_storage.py`
 - read-only replay-root lease primitive: `eval/persona_root_lock.py`
-- fail-closed KCS command/result boundary: `eval/persona_kcs_runner.py`
+- fail-closed KIO command/result boundary: `eval/persona_kio_runner.py`
 - canonical non-executing 20-person prepare-receipt composer:
   `eval/persona_prepare_receipt.py`
 - partial filesystem/content/quota semantic attestor:
@@ -300,7 +300,7 @@ contributorが19件にしかならず、20個すべてのscopeへ非ゼロchunk 
 1. W0のfolder/fileとphysical/logical/search-plan台帳を生成する。
 2. W0をprepare/init/indexし、編集前の履歴境界とactual chunk receiptを作る。
 3. mutation前にevent manifest全体をpreflightし、同じrootへW1〜W5を適用する。
-4. 同一の不変manifestから3つのfresh rootへ全waveを独立replayする（`.kcs`はコピーしない）。
+4. 同一の不変manifestから3つのfresh rootへ全waveを独立replayする（`.kio`はコピーしない）。
 5. 60 registries / 1,200 scopesが完成してからattest、Recall、history、latencyを測る。
 
 W0 indexを省くと編集前のbytesが履歴にならない。これは最終評価を前倒しする手順ではなく、
@@ -314,7 +314,7 @@ W0 indexを省くと編集前のbytesが履歴にならない。これは最終�
 20 scopesに制限して生成・再検算するAPIと、fullの正確なcount oracleも実装済みである。
 このoracleは1 replay当たり43,596 events、5,175 boundaries、48,771 schedule items、
 3 replayで130,788 / 15,525 / 146,313をcanonical allocationから導出するが、
-full event manifestの構築やKCS実測は行わない。
+full event manifestの構築やKIO実測は行わない。
 
 構造laneはtiny/pilotで1人11 events、fullで1人30 events。full W2は20 scopesすべてへ
 same-scope U renameを置き、cross-scope moveはraw-only travelerを使う。near PNGは親RGBの
@@ -348,11 +348,11 @@ tinyは旧builderの1,076 / 908 / 1,984、schedule SHA-256、suite-manifest SHA-
 receiptも未証明である。このstreaming実装はformal fullまたはW1〜W5の実行を許可しない。
 p01/fullのCI回帰は120,000 current、60,000 history、30 structural events、20-scope W2を
 一度の構築で検査する。W0 immutable verifierとpost-W0 envelope verifierは分離済みで、
-後者はcanonical intent、400 `.kcs`、20 `.kcs-eval-device`と固定control/receipt namespaceを
+後者はcanonical intent、400 `.kio`、20 `.kio-eval-device`と固定control/receipt namespaceを
 外側から検証する。opaque内部はtyped checker observationなしでは明示的にunattestedであり、
 history-readyを主張しない。partial semantic attestorはprofile、canonical persona/scope、
 contract quota算術、file bytes/content roots、typed runtime observationを束縛できるが、
-SQLite/CAS、HEAD/commit、KCS binary/config、root/prepare-intentの統合的検証ではなく、
+SQLite/CAS、HEAD/commit、KIO binary/config、root/prepare-intentの統合的検証ではなく、
 完全な400-scope入力でも`history_ready_attested=false`のままである。
 attestorは各directoryの子entryを名前またはMerkle childとして保持する前に
 16,384 direct entriesのhard capを適用する。
@@ -364,7 +364,7 @@ HEAD/registryは検査しないため、全semantic/history/execution/mutation c
 rootは`/`を許さず、4 KiB/64 components/255 bytes per component、person bindingは20 scopeを
 走査前に要求する。
 
-KCS runnerはstrict JSON/result validator、isolated environment recipe、binary snapshot、
+KIO runnerはstrict JSON/result validator、isolated environment recipe、binary snapshot、
 unbound receipt形式まで実装した。しかしpathname検証後の`Popen(cwd=...)`には
 same-user TOCTOUが残るため、`HANDLE_RELATIVE_EXECUTION_AVAILABLE`、
 `PERSONA_FILESYSTEM_MUTATION_AVAILABLE`、`TRUSTED_BINARY_EXECUTION_AVAILABLE`は全てfalseであり、
@@ -390,15 +390,15 @@ destination-root availabilityの読み戻しがない限りblockedで、receipt�
 bounded streaming storageはcanonical JSONL shardをno-replace publish/readbackできるが、
 verified source directory inodeをrenameのatomic preconditionにできないため、
 `formal_publication_attested=false` / `source_directory_inode_not_bound_by_rename`のままである。
-これらはformal full実測、W0 prepare、actual KCS chunk/history attestationの証拠ではない。
+これらはformal full実測、W0 prepare、actual KIO chunk/history attestationの証拠ではない。
 
 ```bash
 python3 eval/generate_persona_corpus.py plan \
-  --profile tiny --plan-out /private/tmp/kcs-persona-tiny-plan.json
-mkdir -p /private/tmp/kcs-persona-runs
+  --profile tiny --plan-out /private/tmp/kio-persona-tiny-plan.json
+mkdir -p /private/tmp/kio-persona-runs
 python3 eval/generate_persona_corpus.py generate \
-  --plan /private/tmp/kcs-persona-tiny-plan.json \
-  --out /private/tmp/kcs-persona-runs/replay-01 \
+  --plan /private/tmp/kio-persona-tiny-plan.json \
+  --out /private/tmp/kio-persona-runs/replay-01 \
   --replay-id replay-01
 ```
 
@@ -417,7 +417,7 @@ python3 -m unittest \
   eval.test_persona_storage \
   eval.test_persona_streaming_storage \
   eval.test_persona_root_lock \
-  eval.test_persona_kcs_runner \
+  eval.test_persona_kio_runner \
   eval.test_persona_prepare_receipt \
   eval.test_persona_history_attestation \
   eval.test_persona_renderers \
@@ -425,6 +425,6 @@ python3 -m unittest \
   eval.test_generate_persona_corpus \
   eval.test_eval_env
 
-KCS_RUN_PERSONA_FS_INTEGRATION=1 \
+KIO_RUN_PERSONA_FS_INTEGRATION=1 \
   python3 -m unittest eval.test_generate_persona_corpus
 ```

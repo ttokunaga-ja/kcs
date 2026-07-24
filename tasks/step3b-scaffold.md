@@ -1,4 +1,4 @@
-# Step3b 発注書: kcs-index / kcs-search クレート骨格 (Step 3 準備)
+# Step3b 発注書: kio-index / kio-search クレート骨格 (Step 3 準備)
 
 ## 目的
 
@@ -15,8 +15,8 @@ Step 3 (index + search) 実装の土台となるクレート骨格を既存 work
 ## 成果物
 
 ```text
-crates/kcs-index/     # lib: chunking / embedding store / fts / tree_entries 射影 / rebuild の型と trait 骨格
-crates/kcs-search/    # lib: query / rrf / mmr / cursor / multi_scope / evidence (pointer 発行・解決) の型と骨格
+crates/kio-index/     # lib: chunking / embedding store / fts / tree_entries 射影 / rebuild の型と trait 骨格
+crates/kio-search/    # lib: query / rrf / mmr / cursor / multi_scope / evidence (pointer 発行・解決) の型と骨格
 ```
 
 - workspace Cargo.toml の members に追加

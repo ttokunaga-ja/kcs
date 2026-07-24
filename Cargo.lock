@@ -681,7 +681,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "kcs-adapter"
+name = "kio-adapter"
 version = "0.1.0"
 dependencies = [
  "base64",
@@ -699,7 +699,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "kcs-cli"
+name = "kio-cli"
 version = "0.1.0"
 dependencies = [
  "assert_cmd",
@@ -707,11 +707,11 @@ dependencies = [
  "cap-primitives",
  "clap",
  "getrandom 0.3.4",
- "kcs-adapter",
- "kcs-core",
- "kcs-index",
- "kcs-pipeline",
- "kcs-search",
+ "kio-adapter",
+ "kio-core",
+ "kio-index",
+ "kio-pipeline",
+ "kio-search",
  "miniz_oxide",
  "rusqlite",
  "serde",
@@ -726,7 +726,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "kcs-core"
+name = "kio-core"
 version = "0.1.0"
 dependencies = [
  "jsonschema",
@@ -742,10 +742,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "kcs-index"
+name = "kio-index"
 version = "0.1.0"
 dependencies = [
- "kcs-core",
+ "kio-core",
  "rusqlite",
  "serde",
  "serde_jcs",
@@ -758,11 +758,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "kcs-pipeline"
+name = "kio-pipeline"
 version = "0.1.0"
 dependencies = [
- "kcs-adapter",
- "kcs-core",
+ "kio-adapter",
+ "kio-core",
  "rusqlite",
  "serde",
  "serde_jcs",
@@ -776,7 +776,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "kcs-search"
+name = "kio-search"
 version = "0.1.0"
 dependencies = [
  "base64",

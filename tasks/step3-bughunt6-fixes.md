@@ -13,11 +13,11 @@ docs で Step4/Phase4+/v2+ 明記) との重複はゼロを確認。
 - **自己検証**: R6-1 の wrong-scope approval による `--yes` 外部送信、R6-3/R6-4/R6-5 の実機再現、R6-7/R6-8 の file:line 検証
 
 **却下 / 保留**:
-- Spark の `kcs_format_version = "0.x"` が広すぎる指摘は minor 前方互換リスクとして保留。現行 `0.1.0` 系内の config
+- Spark の `kio_format_version = "0.x"` が広すぎる指摘は minor 前方互換リスクとして保留。現行 `0.1.0` 系内の config
   parse は後方互換を優先しており、実害再現なし。
 - `manifest.schema_version` / SQLite `user_version` 欠落は将来 migration 設計の論点。Step 4+ の schema migration で扱うべきで、
   現行 Step 3 の破壊的挙動は未再現。
-- human `kcs status` が tasks/budget を非 JSON 表示しない件は UX 契約不足。JSON 出力は完全で、今回の security/agent 契約修正からは除外。
+- human `kio status` が tasks/budget を非 JSON 表示しない件は UX 契約不足。JSON 出力は完全で、今回の security/agent 契約修正からは除外。
 
 ---
 
@@ -26,31 +26,31 @@ docs で Step4/Phase4+/v2+ 明記) との重複はゼロを確認。
 ### R6-1 [critical] approvals.jsonl が scope_id 未束縛で、空ファイル/別 scope の opt-in 行が online 送信を許す
 発見: Spark / GPT-5.5-C-static / 自己検証
 
-- **根本**: `approval_exists` (`crates/kcs-cli/src/main.rs`) が `approvals.jsonl.is_file()` だけを見ており、
+- **根本**: `approval_exists` (`crates/kio-cli/src/main.rs`) が `approvals.jsonl.is_file()` だけを見ており、
   `network_allowed` / `persistent_network_allowed_for` の JSONL scan も `scope_id` を検証していなかった。
   opt-in 単位は docs/07 の scope × adapter だが、実装は adapter だけで判断していた。
 - **再現**:
-  1. `kcs init` 後に空の `.kcs/approvals.jsonl` を作る。
-  2. `KCS_TEST_GEMINI_EMBED=mock kcs index --online --json` が exit 0、`approval_method:"existing"` で進む。
-  3. さらに別 scope_id の `network_opt_in:true` 行を markdownize/embedding 用に置き、`kcs index --yes --json` を実行すると、
+  1. `kio init` 後に空の `.kio/approvals.jsonl` を作る。
+  2. `KIO_TEST_GEMINI_EMBED=mock kio index --online --json` が exit 0、`approval_method:"existing"` で進む。
+  3. さらに別 scope_id の `network_opt_in:true` 行を markdownize/embedding 用に置き、`kio index --yes --json` を実行すると、
      `--yes` だけなのに `network_allowed:true` / `network_opt_in:true` となり、embedding task が done まで進んだ。
 - **期待 vs 実際**: 期待 = 現在 scope_id と tool_id が一致する opt-in 行だけが online 送信を許す。
   実際 = 空ファイルまたは別 scope の行で、現在 scope の文書が外部 adapter へ送信されうる。
-- **修正**: approval 判定を `scope_id(repo.kcs_dir())` + `tool_id` + `execution_mode=online_api` +
+- **修正**: approval 判定を `scope_id(repo.kio_dir())` + `tool_id` + `execution_mode=online_api` +
   `network_opt_in=true` に統一。既存 approval に依存する `--online` は adapter ごとの一致行を要求し、
   明示的な `--yes --online` / `--approve --online` の単発送信仕様は維持する。
 
 ### R6-2 [major] normalized_units の manifest/unit JSON 破損が repair/reindex を CONFIG-SCHEMA exit 2 で止め、writer も非アトミック
 発見: GPT-5.5-A / GPT-5.4-B
 
-- **根本**: `load_normalized_units` は manifest/unit JSON parse 失敗を `KCS-E-CONFIG-SCHEMA-001` にしており、
+- **根本**: `load_normalized_units` は manifest/unit JSON parse 失敗を `KIO-E-CONFIG-SCHEMA-001` にしており、
   `repair --rebuild-db` / `reindex --force` が store corruption ではなく usage/config error として止まる。
   さらに `persist_normalized_instance` は manifest/unit/view を最終パスへ `fs::write` しており、クラッシュで torn JSON を残しうる。
-- **再現**: `index --yes` 後、`.kcs/objects/normalized_units/**/<unit>.json` を `{"torn":` に切断。
-  `kcs repair --rebuild-db --json` が exit 2 `KCS-E-CONFIG-SCHEMA-001`。
-- **期待 vs 実際**: 期待 = 永続 store 破損は `KCS-E-STORE-CORRUPT-001` exit 4、対象 path 付き。
+- **再現**: `index --yes` 後、`.kio/objects/normalized_units/**/<unit>.json` を `{"torn":` に切断。
+  `kio repair --rebuild-db --json` が exit 2 `KIO-E-CONFIG-SCHEMA-001`。
+- **期待 vs 実際**: 期待 = 永続 store 破損は `KIO-E-STORE-CORRUPT-001` exit 4、対象 path 付き。
   実際 = config/schema error として誤分類され、復旧対象が不明瞭。
-- **修正**: normalized manifest/unit の serde error を `KCS-E-STORE-CORRUPT-001` に分類。
+- **修正**: normalized manifest/unit の serde error を `KIO-E-STORE-CORRUPT-001` に分類。
   pipeline writer は一時ディレクトリへ manifest/unit を揃えてから rename、normalized view は atomic replace。
   reindex の gen copy と `tool-lock.json` / network revoke config も atomic overwrite に変更。
 
@@ -58,30 +58,30 @@ docs で Step4/Phase4+/v2+ 明記) との重複はゼロを確認。
 発見: GPT-5.5-C-static / 自己検証
 
 - **根本**: `registry_all_targets` は registry に保存済みの `participates_in_global_search` だけを信用し、
-  実行時の `.kcs/config.toml` を再読込していなかった。config を false に変更しても次の register まで stale true が残る。
-- **再現**: scope A/B を index して registry 登録後、A の `.kcs/config.toml` を
-  `[scope] participates_in_global_search = false` に変更。B から `kcs search alphaonly --json` を実行すると、
+  実行時の `.kio/config.toml` を再読込していなかった。config を false に変更しても次の register まで stale true が残る。
+- **再現**: scope A/B を index して registry 登録後、A の `.kio/config.toml` を
+  `[scope] participates_in_global_search = false` に変更。B から `kio search alphaonly --json` を実行すると、
   A 固有語が default search に出た。
 - **期待 vs 実際**: opt-out は現在 config が正本。実際は stale registry cache が privacy 境界を上書き。
-- **修正**: registry target 列挙後、各 target の現 `.kcs/config.toml` を `participates_in_global_search` で再評価して filter。
+- **修正**: registry target 列挙後、各 target の現 `.kio/config.toml` を `participates_in_global_search` で再評価して filter。
 
 ### R6-4 [major] `view/open` の余剰引数と `reindex --at` が黙殺され、成功 JSON が返る
 発見: GPT-5.5-A / GPT-5.4-B
 
 - **根本**: `read_pointer_input` は最初の operand だけを読み、残りを捨てていた。`run_reindex` は `--force`/`--yes`
   の存在だけを `any()` で見て、`--at HEAD` や余剰 operand を無視して常に HEAD を reindex した。
-- **再現**: `kcs view <valid-pointer> --definitely-invalid EXTRA --json` が exit 0 で本文を返す。
-  `kcs reindex --force --yes --at HEAD --json` も HEAD reindex として成功。
+- **再現**: `kio view <valid-pointer> --definitely-invalid EXTRA --json` が exit 0 で本文を返す。
+  `kio reindex --force --yes --at HEAD --json` も HEAD reindex として成功。
 - **期待 vs 実際**: agent/API 利用では unknown flag は exit 2。未実装 `--at` は明示エラーでなければならない。
 - **修正**: pointer command は operand 1 個だけ許可。reindex は strict parser を導入し、`--at` は
-  `KCS-E-CONFIG-NOT-IMPLEMENTED-001`、unknown/extra は invalid usage。
+  `KIO-E-CONFIG-NOT-IMPLEMENTED-001`、unknown/extra は invalid usage。
 
 ### R6-5 [minor] inline JSON Evidence Pointer の `schema_version` が未検証で、future pointer が現行 resolver で解釈される
 発見: GPT-5.5-C-static
 
 - **根本**: URI parser は `?sv=` を `EVIDENCE_POINTER_SCHEMA_VERSION` と照合するが、inline JSON path は
   `serde_json::from_str::<EvidencePointer>` だけで version を見ていなかった。
-- **再現**: `search --json` の `evidence_pointer.schema_version` を 999 に書換え、`kcs view '<json>' --json` が exit 0。
+- **再現**: `search --json` の `evidence_pointer.schema_version` を 999 に書換え、`kio view '<json>' --json` が exit 0。
 - **期待 vs 実際**: future schema は拒否。実際は v1 として解釈。
 - **修正**: inline JSON parse 後に `schema_version == EVIDENCE_POINTER_SCHEMA_VERSION` を検証。
 
@@ -90,16 +90,16 @@ docs で Step4/Phase4+/v2+ 明記) との重複はゼロを確認。
 
 - **根本**: adapter `validate_tool_lock_value` と core `canonical_tool_lock_value` は integer かだけを見て、
   `spec_version != 1` を拒否していなかった。
-- **再現**: index 後の `.kcs/tool-lock.json` を `"spec_version":999` に変更し、`kcs status --json` が exit 0。
+- **再現**: index 後の `.kio/tool-lock.json` を `"spec_version":999` に変更し、`kio status --json` が exit 0。
 - **期待 vs 実際**: future tool-lock schema は現行 binary が解釈できないため fail closed。
 - **修正**: adapter/core の両方で `spec_version == 1` を必須化。
 
 ### R6-7 [minor] `PipelineError::Io` / `Contract` が CLI で CONFIG-SCHEMA に丸められる
 発見: GPT-5.4-B / file:line 検証
 
-- **根本**: `pipeline_to_kcs` の catch-all が `KcsError::schema(other.to_string())` で、
+- **根本**: `pipeline_to_kio` の catch-all が `KioError::schema(other.to_string())` で、
   `PipelineError::Io` と `PipelineError::Contract` を schema/config error に落としていた。
-- **期待 vs 実際**: I/O は `KcsError::io`、adapter/pipeline contract は保持された code で返すべき。
+- **期待 vs 実際**: I/O は `KioError::io`、adapter/pipeline contract は保持された code で返すべき。
 - **修正**: `PipelineError::Io {path,message}` と `Contract {code,message}` を個別 mapping。
 
 ### R6-8 [minor] `tool-lock.json` / network revoke config / normalized gen copy が非アトミック `fs::write`

@@ -65,7 +65,7 @@ class _LeaseState:
 _PROCESS_GUARD = threading.Lock()
 _ACTIVE_ROOT_IDENTITIES: set[tuple[int, int]] = set()
 _ROOT_BINDING_FILE_NAME = "w0-root-binding.json"
-_ROOT_BINDING_SCHEMA = "kcs.persona.w0.root-binding/v1"
+_ROOT_BINDING_SCHEMA = "kio.persona.w0.root-binding/v1"
 _MAX_ROOT_BINDING_BYTES = 64 * 1024
 _ROOT_BINDING_FIELDS = {
     "schema",

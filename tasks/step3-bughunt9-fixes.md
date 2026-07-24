@@ -12,7 +12,7 @@
 エスカレーションして確定 — P10 と同じ派生発見パターン)。
 
 エンジン別の主な貢献:
-- **Claude-Sonnet**: R9-1 (.kcsignore の NFC/NFD バイパス、対照実験 + online 送信/検索露出まで実機追跡)
+- **Claude-Sonnet**: R9-1 (.kioignore の NFC/NFD バイパス、対照実験 + online 送信/検索露出まで実機追跡)
 - **Claude-Opus**: R9-2 (text-native → OCR ルーティング違反、実機再現)、R9-6、R9-7
 - **GPT-5.5**: R9-3 (open cache permission)、R9-4 (Partial 行き止まり) — 静的立証、実機確定はオーケストレータ
 - **Spark**: R9-8 (temp 残留 5 箇所) + R9-5 の種。検証1 (パス正規化) は canonicalize 系経路の健全性確認
@@ -27,34 +27,34 @@ ignore 照合は範囲外 — 範囲限定の盲点をフルスコープエン�
 
 ## 必須修正 R9-1〜R9-8
 
-### R9-1 [major] `.kcsignore` / `[scope] ignore` の Unicode 正規化不一致で除外が silent 無効化 → 索引・online 送信・検索露出
+### R9-1 [major] `.kioignore` / `[scope] ignore` の Unicode 正規化不一致で除外が silent 無効化 → 索引・online 送信・検索露出
 発見: Claude-Sonnet (完全再現) / 対照実験で再確認: オーケストレータ
 
-- **根本**: `crates/kcs-pipeline/src/scan.rs:107-111` が candidate 名 (`input_path`) を生バイトのまま生成、
-  `scan.rs:156-210` が `.kcsignore` / `config.toml [scope] ignore` パターンも非正規化のまま読み、
+- **根本**: `crates/kio-pipeline/src/scan.rs:107-111` が candidate 名 (`input_path`) を生バイトのまま生成、
+  `scan.rs:156-210` が `.kioignore` / `config.toml [scope] ignore` パターンも非正規化のまま読み、
   `scan.rs:256-329` (`matches_ignore_pattern` / `wildcard_match_bytes`) がバイト単位比較。
-  kcs-pipeline は `unicode-normalization` に非依存 (他 4 クレートは依存済み) で正規化手段自体がない。
+  kio-pipeline は `unicode-normalization` に非依存 (他 4 クレートは依存済み) で正規化手段自体がない。
   macOS (APFS) はファイル名を作成時のバイト列のまま保持し、Finder/iCloud/zip/IME 由来で NFD 名は日常的に発生。
-- **再現** (隔離 tmp、実機): NFD 実ファイル `café-notes.md` + NFC パターンの `.kcsignore` → `index --offline --yes`
+- **再現** (隔離 tmp、実機): NFD 実ファイル `café-notes.md` + NFC パターンの `.kioignore` → `index --offline --yes`
   → `status` で当該ファイルが `unchanged` (= コミット済み・除外失敗)。対照 (同一正規形) は `new` (= 未追跡・除外成功)。
   Sonnet はさらに online mock で markdownize/embedding が Done (= 実送信経路通過)、`search` で本文 snippet 露出まで確認。
 - **期待 vs 実際**: 期待 = Unicode 正準等価なパターンは実ファイルを確実に除外。実際 = 正規形不一致で除外が無言で失敗し、
   除外意図のファイルが (a) コミット木へ、(b) online 承認済みなら Mistral OCR / Gemini embedding へ実送信、(c) 検索露出。
 - **修正**: `matches_ignore_pattern` の比較直前に両辺を NFC 化 (`.nfc().collect::<String>()`)。
-  `kcs-pipeline/Cargo.toml` に `unicode-normalization.workspace = true` を追加。
+  `kio-pipeline/Cargo.toml` に `unicode-normalization.workspace = true` を追加。
   `ScanCandidate.input_path` の生バイトは不変のまま (R8 F2 と同じ「照合の投影のみ正規化、identity は生バイト」方針)。
 
 ### R9-2 [major] text-native (Markdown / plain text / コード) に online Mistral OCR markdownize task が enqueue・実送信・課金 (docs/04 §3・docs/07 §2.1/§5.2 の routing 違反)
 発見: Claude-Opus (実機再現) / 再確認: オーケストレータ
 
-- **根本**: `enqueue_online_placeholder_task` (`crates/kcs-cli/src/main.rs:6408`) が `candidate.media_type` を
+- **根本**: `enqueue_online_placeholder_task` (`crates/kio-cli/src/main.rs:6408`) が `candidate.media_type` を
   一切見ずに online OCR task を作る (呼び出し 2 箇所も無条件)。実行側 `execute_online_markdownize_task`
   (`main.rs:4416`) にも media gate なし — `media_type_for_cli_path` が `text/markdown` と判定してもそのまま OCR へ。
 - **spec 根拠**: docs/04 §3「非 text-native は文書処理 API 系 Adapter (Mistral OCR、第一候補)」、
   docs/07 §2.1「同梱 deterministic Adapter 対象: plain text / Markdown / コード」、
   docs/07 §5.2「標準 Adapter (**非 text-native**): PDF / DOCX / PPTX / 画像の Markdownize 第一候補は Mistral OCR」。
 - **再現** (隔離 tmp、実機): `note.md` + `main.rs` の scope、`[adapter.policy] allow_network = true` (standing opt-in)
-  で `kcs index --yes` (**--online 不要**) → `online:mistral_ocr_markdownize` Pending ×2 →
+  で `kio index --yes` (**--online 不要**) → `online:mistral_ocr_markdownize` Pending ×2 →
   `batch resume` (mock) → `tasks_executed:2`、cost-ledger に `markdown` 課金 2 行。
 - **期待 vs 実際**: 期待 = text-native は deterministic で完結し online OCR task を作らない。実際 = 全 text ファイルの
   生バイトが第三者 OCR API へ送信され (privacy 面)、baseline の ~10 倍単価で課金され (cost 面)、
@@ -72,15 +72,15 @@ ignore 照合は範囲外 — 範囲限定の盲点をフルスコープエン�
 ### R9-3 [major] open/view の展開キャッシュが world-readable (dir 755 / file 444) — P2 の 0700 化が cache 側に及んでいない
 発見: GPT-5.5 (静的) / 実機確定: オーケストレータ
 
-- **根本**: `open_cas_byte_object` (`crates/kcs-cli/src/main.rs:3691-3729`) は `create_dir_all` + `fs::write` +
-  `set_readonly(true)` のみ。0700/0600 hardening は `$XDG_DATA_HOME/kcs` 側 (P2、`registry.rs:52`) だけで、
-  `$XDG_CACHE_HOME/kcs/open` subtree は umask 依存。
-- **再現** (実機、umask 022): working copy を消して `kcs open sha256:<raw>` → cache 展開。
-  `$XDG_CACHE_HOME/kcs` / `kcs/open` / `kcs/open/<hash12>` = **drwxr-xr-x (755)**、
+- **根本**: `open_cas_byte_object` (`crates/kio-cli/src/main.rs:3691-3729`) は `create_dir_all` + `fs::write` +
+  `set_readonly(true)` のみ。0700/0600 hardening は `$XDG_DATA_HOME/kio` 側 (P2、`registry.rs:52`) だけで、
+  `$XDG_CACHE_HOME/kio/open` subtree は umask 依存。
+- **再現** (実機、umask 022): working copy を消して `kio open sha256:<raw>` → cache 展開。
+  `$XDG_CACHE_HOME/kio` / `kio/open` / `kio/open/<hash12>` = **drwxr-xr-x (755)**、
   `doc.md` = **-r--r--r-- (444)**、本文が group/other から読める。`readonly` は改変防止であり秘匿ではない。
 - **期待 vs 実際**: 期待 = raw/prepared/image bytes を展開する cache は owner-only (dir 0700 / file 0600 or 0400)。
   実際 = multi-user ホストで文書本文・画像・OCR 前 raw data が漏れる。CAS 本体 (P2 で 0600) との非対称。
-- **修正**: `$XDG_CACHE_HOME/kcs` subtree を 0700 に固定、cache file は 0600 で作成してから必要なら 0400。
+- **修正**: `$XDG_CACHE_HOME/kio` subtree を 0700 に固定、cache file は 0600 で作成してから必要なら 0400。
   既存 cache の再利用時にも permission を検査・補正。
 
 ### R9-4 [major] online markdownize の Partial task が回復不能 (retry/resume/再 index 全滅) + `index_status` が完了偽装 (docs/04 §5.2 の `partial → done` 契約違反)
@@ -90,7 +90,7 @@ ignore 照合は範囲外 — 範囲限定の盲点をフルスコープエン�
   駆動対象に `Partial` なし、enqueue dedup は `Done|Partial` を既処理扱い (`main.rs:6442` 付近)、
   `compute_index_status` は `Done|Partial` を done 計上 (`main.rs:1880` 付近)。
   docs/04 §5.2 は `partial → done (失敗 unit の再投入がすべて成功)` と `unit_keys` による unit スコープ再投入を明記。
-- **再現** (隔離 tmp、実機): 2 ページ PDF を `index --approve` → `batch resume` (KCS_TEST_MISTRAL_OCR=partial) →
+- **再現** (隔離 tmp、実機): 2 ページ PDF を `index --approve` → `batch resume` (KIO_TEST_MISTRAL_OCR=partial) →
   task `partial`。以後 mock (全成功) で `batch retry` = `tasks_executed:0`、`batch resume` = 0、
   `index --yes` = noop / 新 task なし。task は `partial` のまま、`index_status` = **`enriched_ratio:1.0`,
   `pending_enrichment_tasks:0`** (欠落が完全に不可視)。
@@ -107,13 +107,13 @@ ignore 照合は範囲外 — 範囲限定の盲点をフルスコープエン�
 ### R9-5 [major] normalized gen dir の余剰 entry 1 個 (crash 残留 `.tmp-*` / `.DS_Store`) で `reindex` が STORE-CORRUPT 恒久失敗、`repair --rebuild-db` 無効、失敗 copy が部分 `.g<N+1>` を二次残留
 発見: オーケストレータ (Spark R9-8 の検証からエスカレーション、P10 型の派生発見) / 実機確定済み
 
-- **根本**: `copy_normalized_instance_gen` (`crates/kcs-cli/src/main.rs:4019` 付近の loop) が gen dir の
+- **根本**: `copy_normalized_instance_gen` (`crates/kio-cli/src/main.rs:4019` 付近の loop) が gen dir の
   `manifest.json` 以外の**全 entry** を無条件に `fs::read` + JSON parse し、失敗を `?` で伝播。
   呼び出し元 `run_reindex` (`main.rs:2228`) は normalize ref を持つ全 tree entry でこれを通る。
   writer 側 (`atomic_overwrite_file` `main.rs:3210` / `markdownize.rs:422`) は temp を**同じ gen dir に**作るため、
   crash (kill -9 / 電源断) の残骸 `.{name}.tmp-<pid>-<ulid>` がまさに読まれる場所に残る。`.DS_Store` でも同型。
 - **再現** (実機): gen dir に torn `.tmp-99999-…` を置く → `reindex --force --yes` =
-  `KCS-E-STORE-CORRUPT-001` exit 4。`repair --rebuild-db` は成功するが reindex は依然失敗 (治せない)。
+  `KIO-E-STORE-CORRUPT-001` exit 4。`repair --rebuild-db` は成功するが reindex は依然失敗 (治せない)。
   失敗した copy は部分コピー済みの次 gen dir を残す (二次残留)。junk の手動削除でのみ回復
   (削除後 reindex 成功を確認)。
 - **期待 vs 実際**: 期待 = 復旧系 (reindex/repair) は自身の crash 残骸や OS 由来 junk に耐える (Q1/R6-2 の教訓)。
@@ -121,15 +121,15 @@ ignore 照合は範囲外 — 範囲限定の盲点をフルスコープエン�
 - **修正**: copy loop で unit ファイルの命名規約に一致しない entry (dotfile / `.tmp-*` / 非 regular file) を skip。
   あわせて reindex 時に gen dir の孤児 `.tmp-*` を掃除 (Q1 の torn-tail truncate と同系の自己修復)。
 
-### R9-6 [minor] `KCS-E-CONFIG-NOT-IMPLEMENTED-001` の exit code が経路で 1/2 不一致 (Agent の分類が壊れる)
+### R9-6 [minor] `KIO-E-CONFIG-NOT-IMPLEMENTED-001` の exit code が経路で 1/2 不一致 (Agent の分類が壊れる)
 発見: Claude-Opus / 実機確認: オーケストレータ
 
-- **根本**: 正準 `KcsError::not_implemented` = `ExitCode::Failure` (=1) (`crates/kcs-core/src/error.rs:127`)。
+- **根本**: 正準 `KioError::not_implemented` = `ExitCode::Failure` (=1) (`crates/kio-core/src/error.rs:127`)。
   手組み 3 箇所が `InvalidUsage` (=2): `repair --verify-objects` (`main.rs:620`)、`reindex --at` (`main.rs:2286`)、
   search time-travel flags (`main.rs:2767`)。
 - **再現** (実測): `log --at foo` = exit 1、`reindex --at foo` = exit 2、`repair --verify-objects` = exit 2 —
   同一 error_code で exit class が分岐。
-- **修正**: 3 箇所を `KcsError::not_implemented(...)` に置換して exit 1 に統一。
+- **修正**: 3 箇所を `KioError::not_implemented(...)` に置換して exit 1 に統一。
 
 ### R9-7 [minor] `batch retry`/`resume` が対象外の Pending を裏で駆動・失敗させても `{tasks_executed:0, tasks_updated:0}` (隠れた online 送信試行が JSON 契約に出ない)
 発見: Claude-Opus / 実機確認: オーケストレータ
@@ -148,9 +148,9 @@ ignore 照合は範囲外 — 範囲限定の盲点をフルスコープエン�
 発見: GPT-5.3-Codex-Spark / file:line 確認: オーケストレータ
 
 - **箇所** (write_all/sync_all/rename 失敗の `?` で temp が残る):
-  `crates/kcs-core/src/cas.rs:155` (`atomic_write`) / `cas.rs:175` (`atomic_overwrite`) /
-  `crates/kcs-pipeline/src/task.rs:171` (`replace_all`) / `crates/kcs-adapter/src/mistral_ocr.rs:466`
-  (`atomic_write_image_object`) / `crates/kcs-cli/src/main.rs:5963` (`atomic_write_cas_object`)。
+  `crates/kio-core/src/cas.rs:155` (`atomic_write`) / `cas.rs:175` (`atomic_overwrite`) /
+  `crates/kio-pipeline/src/task.rs:171` (`replace_all`) / `crates/kio-adapter/src/mistral_ocr.rs:466`
+  (`atomic_write_image_object`) / `crates/kio-cli/src/main.rs:5963` (`atomic_write_cas_object`)。
   対照: `markdownize.rs:430` / `main.rs:2677` / `main.rs:3233` は `let _ = fs::remove_file(&tmp)` で掃除済み。
 - **影響**: ENOSPC/EIO 時に一意名の `.tmp-*` が CAS fanout / tasks dir に累積 (GC は Step 4 で存在せず)。
   ENOSPC 下では残留自体が空き容量をさらに食う。R9-5 の温床の一つ。
@@ -189,7 +189,7 @@ ignore 照合は範囲外 — 範囲限定の盲点をフルスコープエン�
   頼んでいない外部送信 (R9-2)、見えないはずの cache が見える (R9-3)、完了と表示される未完了 (R9-4)、
   復旧コマンドが junk に負ける (R9-5)。plumbing (並行/秘匿 gate/会計/crash-atomicity) は 8 ラウンドで堅牢化済みで、
   その上の「意味論・状態設計・OS 現実 (Finder/crash 残骸) との接触面」が今回の鉱脈だった。
-- R9-1/R9-2/R9-3 は privacy を正面に掲げる KCS のポジショニングに直結する露出系。R9-2 は F6 と併せて
+- R9-1/R9-2/R9-3 は privacy を正面に掲げる KIO のポジショニングに直結する露出系。R9-2 は F6 と併せて
   「online markdownize の end-to-end 価値」が Step 4 の宿題であることを再確認させる (課金して orphan を作る経路は
   routing gate で今すぐ止められる)。
 - 範囲限定 Spark の「問題なし」領域からフルスコープ Sonnet が R9-1 を出した点は、範囲限定+フルスコープの

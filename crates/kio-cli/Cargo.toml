@@ -1,0 +1,39 @@
+[package]
+name = "kio-cli"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license-file.workspace = true
+
+[[bin]]
+name = "kio"
+path = "src/main.rs"
+
+[dependencies]
+cap-primitives = "3.4.5"
+clap.workspace = true
+getrandom.workspace = true
+kio-adapter = { path = "../kio-adapter" }
+kio-core.workspace = true
+kio-index = { path = "../kio-index" }
+kio-pipeline = { path = "../kio-pipeline" }
+kio-search = { path = "../kio-search" }
+rusqlite = { workspace = true, features = ["hooks"] }
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+toml.workspace = true
+toml_edit.workspace = true
+unicode-normalization.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys.workspace = true
+
+[dev-dependencies]
+assert_cmd = "2"
+base64.workspace = true
+# step4b_flate_contract.rs compresses its PDF fixtures at test time so the
+# FlateDecode extraction path is exercised against real zlib streams.
+miniz_oxide.workspace = true
+serde_jcs.workspace = true
+tempfile = "3"

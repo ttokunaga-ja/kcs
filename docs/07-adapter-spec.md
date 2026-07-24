@@ -8,19 +8,19 @@ Adapter (Prepare / Markdownize / Embedding / Summary / Classification / Rerank) 
 
 # 1. 基本方針
 
-Prepare / Markdownize / Embedding / Summary / Classification / Rerank は KCS core に含めず、**Adapter に委譲** する。OCR は Markdownize Adapter の **内部能力 (capability)** として扱う。Embedding は Text / Image を分離せず、**単一マルチモーダル Embedding Adapter** に統合する。
+Prepare / Markdownize / Embedding / Summary / Classification / Rerank は KIO core に含めず、**Adapter に委譲** する。OCR は Markdownize Adapter の **内部能力 (capability)** として扱う。Embedding は Text / Image を分離せず、**単一マルチモーダル Embedding Adapter** に統合する。
 
 ```
-KCS core:                 Adapter:
+KIO core:                 Adapter:
   object store              Prepare
   snapshot                  Markdownize (OCR は内部能力)
   restore                   Embedding (multimodal)
   search                    Summary       optional
   task state                Classification optional
-  common KCS API            Rerank        optional
+  common KIO API            Rerank        optional
 ```
 
-Adapter の実行設定 (cmd / args / url / 認証情報) は **`.kcs/` の共有対象に含めない**。各デバイスの `~/.config/kcs/tools.toml` や OS keychain に保存する。`.kcs/` は生成済み artifact の provenance と互換性判定に必要な `profile_hash` だけを保持する。
+Adapter の実行設定 (cmd / args / url / 認証情報) は **`.kio/` の共有対象に含めない**。各デバイスの `~/.config/kio/tools.toml` や OS keychain に保存する。`.kio/` は生成済み artifact の provenance と互換性判定に必要な `profile_hash` だけを保持する。
 
 R23 の同梱 runtime が実行できる online target は `mistral_ocr_markdownize` と
 `gemini_embedding_2` の built-in 実装に限定する。これらの role では `cmd` / `args` /
@@ -38,10 +38,10 @@ R23 の同梱 runtime が実行できる online target は `mistral_ocr_markdown
 許容 (非推奨):
 3. tools.toml 直書き:  auth = "plain:<api_key>"
    - tools.toml の permission が 0600 (owner read/write のみ) でない場合、
-     KCS は起動時に warn を出す (errors.jsonl に level=warn で記録)
+     KIO は起動時に warn を出す (errors.jsonl に level=warn で記録)
 
 禁止 (既定どおり):
-   .kcs/ 配下・tool-lock.json・tool_profile_hash の入力への認証情報の混入
+   .kio/ 配下・tool-lock.json・tool_profile_hash の入力への認証情報の混入
 ```
 
 `tools.schema.json` は `auth` フィールドを `^(keychain|env|plain):` にマッチする文字列
@@ -62,19 +62,19 @@ deterministic_library    決定論的ライブラリ (PDF text extraction, parse
                          同じ入力 + 同じ profile なら同じ出力
 ```
 
-KCS API の契約は実行形態に依らず同じ。
+KIO API の契約は実行形態に依らず同じ。
 
 ```
-KCS core
+KIO core
   → task descriptor (task_id, adapter_kind, input_hash, allowed scope, network permission)
   → device-local Adapter
   → artifact descriptor (output_hash, status, error_code / error_category)
-  → KCS core
+  → KIO core
 ```
 
 ## 2.1 同梱 deterministic Adapter (ベースライン index)
 
-KCS は `deterministic_library` の Prepare / Markdownize Adapter を同梱する。対象: plain text / Markdown / コード、PDF text layer 抽出。OCR・レイアウト解析・画像理解は行わない。**出力は単純な passthrough ではなく、Normalized Markdown v1 (§5.2.1) への決定的正規化**である — 少なくとも Setext 見出し → ATX 変換・生 HTML block の fenced text 化・改行 / 空白 / fence の正規化を行う (§5.2.1 準拠が受け入れ検査 V5 の通過条件のため、passthrough では通常の Markdown (Setext 等) がオフライン基線 index で全滅する)。
+KIO は `deterministic_library` の Prepare / Markdownize Adapter を同梱する。対象: plain text / Markdown / コード、PDF text layer 抽出。OCR・レイアウト解析・画像理解は行わない。**出力は単純な passthrough ではなく、Normalized Markdown v1 (§5.2.1) への決定的正規化**である — 少なくとも Setext 見出し → ATX 変換・生 HTML block の fenced text 化・改行 / 空白 / fence の正規化を行う (§5.2.1 準拠が受け入れ検査 V5 の通過条件のため、passthrough では通常の Markdown (Setext 等) がオフライン基線 index で全滅する)。
 
 > **PDF text layer 抽出の範囲 (実装フィードバック 2026-07-23)**: 実世界の text-layer PDF
 > (TeX / LibreOffice 出力) は FlateDecode 圧縮 content stream + subset font の glyph index +
@@ -97,7 +97,7 @@ KCS は `deterministic_library` の Prepare / Markdownize Adapter を同梱す�
 
 # 3. ネットワーク送信原則と opt-in (正本)
 
-KCS core は、**明示オプトインなしにネットワーク越し API へファイル内容を送信してはならない**。
+KIO core は、**明示オプトインなしにネットワーク越し API へファイル内容を送信してはならない**。
 本節を network opt-in の正本とし、[06-cli-spec.md §2](06-cli-spec.md) / [10-operations.md §1](10-operations.md) / [01-positioning.md §1.1](01-positioning.md)
 は本節を参照する。
 
@@ -109,14 +109,14 @@ opt-in の単位・成立・寿命:
 
 ```text
 単位:   scope × adapter
-        (どの .kcs のファイルを、どの online_api Adapter (tool_id) に送るか)
+        (どの .kio のファイルを、どの online_api Adapter (tool_id) に送るか)
 
 成立:   (a) 初回スキャン承認フローで network transmission policy を承認
             (対話承認 または --approve。--yes では成立しない: 06-cli-spec.md §2)。
             **承認の成立 = approvals[] 行の materialize と、同一承認操作での scope config
             `allow_network = true` の設定の両方** (送信 gate は boolean と行の AND —
             行だけでは送信が有効にならない)
-        (b) 明示設定: .kcs/config.toml の adapter.policy.allow_network = true —
+        (b) 明示設定: .kio/config.toml の adapter.policy.allow_network = true —
             **boolean 単独では送信 gate (boolean × 行の AND) を満たさない**。行の materialize は
             承認操作 (対話 / --approve) のみで、config の手編集は kill switch の解除・意思表示に
             留まる (**例外 = 下記の初回 materialize**: `approvals_initialized` marker が無く
@@ -146,11 +146,11 @@ pending の除去または行の revoked 化を実際に実行した場合、`ap
 pending が唯一の区別子である crash 中間 (true × 行ゼロ × marker 無し) で revoke 後の次回実行の
 (b) 初回 materialize が、直前に revoke した承認を復活させない)。対象なし (行なし・
 pending なし・既 revoked) は冪等成功 (exit 0 + 「対象なし」表示 — **marker も書かない**: 未使用
-scope の初回 materialize 経路を revoke の空振りで消費しない)。**単一 Adapter revoke の実行主体 = `kcs adapter revoke <tool_id>`**
-([06-cli-spec.md §1](06-cli-spec.md) — `.kcs/.lock` 下の locked mutation、[05-runtime.md §6](05-runtime.md))。
+scope の初回 materialize 経路を revoke の空振りで消費しない)。**単一 Adapter revoke の実行主体 = `kio adapter revoke <tool_id>`**
+([06-cli-spec.md §1](06-cli-spec.md) — `.kio/.lock` 下の locked mutation、[05-runtime.md §6](05-runtime.md))。
 承認側の行 publish・self-heal も同じ lock 下で行い、**publish の直前に `approval_pending` の存在を
 再検証する** (CAS — 並行する revoke が除去した pending を publish しない)。明示承認コマンド
-(対話 / --approve) はこの再検証の不一致を**明示エラー (KCS-E-ADAPTER-APPROVAL-CONFLICT-001 / exit 5 —
+(対話 / --approve) はこの再検証の不一致を**明示エラー (KIO-E-ADAPTER-APPROVAL-CONFLICT-001 / exit 5 —
 並行 revoke との競合・再承認が必要) で終端する** (無音の no-op
 成功にしない。self-heal は発火条件不成立として非発火のままでよい)。
         新規オンライン送信 task の発行停止は、kill switch では scope 全体・単一 Adapter revoke では
@@ -161,7 +161,7 @@ scope の初回 materialize 経路を revoke の空振りで消費しない)。*
 記録:   承認記録に scope_id / tool_id / **execution_mode / tool_profile_hash (承認時点)** /
         approved_at / approval_method を残す。送信前に現在の execution_mode / profile と照合し、
         不一致 = 失効 (再承認要求) — 保存しないと「変わった場合は失効」を永続状態から判定できない。
-        **保存先 = `.kcs/scope.json` の `approvals[]` 配列** (schema 検証対象
+        **保存先 = `.kio/scope.json` の `approvals[]` 配列** (schema 検証対象
         [10-operations.md §12.3](10-operations.md)、truth [03-data-model.md §4.1](03-data-model.md))。
         `(scope_id, tool_id)` 単位の行で、失効・revoke は当該行の **status=revoked + revoked_at への
         更新** (atomic rename) で行う (行は削除しない — 監査保全)。送信 gate は
@@ -218,7 +218,7 @@ scope の初回 materialize 経路を revoke の空振りで消費しない)。*
         marker 無し」= 真正初回条件が復活し、次回実行の (b) 初回 materialize が「明示承認を要求する」
         を無音で迂回する。対象なしでは書かない)。**scope 全体の revoke** は逆順 (全行の revoked 化 → boolean false) — 中間
         (revoked × true) は gate の AND で送信不能 (安全側) のまま恒久に安全であり、**boolean の
-        false 化は kill switch 操作 (config 編集) 側の責務 — 自動整合はしない** (`kcs adapter revoke
+        false 化は kill switch 操作 (config 編集) 側の責務 — 自動整合はしない** (`kio adapter revoke
         --all` の終状態 (全行 revoked × true、[06-cli-spec.md §1](06-cli-spec.md) の「boolean は
         変えない」) と scope 全体 revoke の crash 中間を状態だけでは区別できないため。
         **単一 Adapter revoke は当該行の更新のみ**)。
@@ -231,9 +231,9 @@ approvals / cli_online — を含める)。`--offline` は逆向きの一時上�
 hold_reason は変更しない ([04-pipeline.md §5.2/§5.4](04-pipeline.md) — enqueue のみ + index_status に
 pending 可視化)。`--override-budget` と併用した場合も budget pause の解除のみ行い、送信はしない)。
 適用対象は online 作業を駆動し得る全コマンド
-(`kcs index` / `kcs batch resume` / `kcs batch retry` / `kcs reindex` — `--force` / `--at <commit>`
-のいずれも online embedding を駆動し得る — / `kcs repair --rebuild-db` (rebuild 後の enrichment —
-[04-pipeline.md §5.4](04-pipeline.md)) / **`kcs search` — vector|hybrid の page 1 の query embedding**
+(`kio index` / `kio batch resume` / `kio batch retry` / `kio reindex` — `--force` / `--at <commit>`
+のいずれも online embedding を駆動し得る — / `kio repair --rebuild-db` (rebuild 後の enrichment —
+[04-pipeline.md §5.4](04-pipeline.md)) / **`kio search` — vector|hybrid の page 1 の query embedding**
 ([05-runtime.md §1.1](05-runtime.md) の consent gate: payload は query 文字列のみ。送信可否 = 参加
 scope の 1 つ以上に当該 embedding Adapter の active 承認 + 当該 scope の実効 `allow_network` = true
 (§3 の gate と同一規範 — 未設定・key 喪失は不成立)。承認ゼロ・gate 不成立は text fallback / `--vector` は
@@ -244,7 +244,7 @@ sync 呼出のみ)。
 優先関係は次のとおり:
 
 ```text
-CLI (--online / --offline)  >  .kcs/config.toml (scope)  >  ~/.config/kcs/config.toml (user)
+CLI (--online / --offline)  >  .kio/config.toml (scope)  >  ~/.config/kio/config.toml (user)
 ```
 
 この優先で `--online` が上書きできるのは **opt-in 未成立 (`allow_network` 未設定) の既定閉鎖**である。
@@ -341,7 +341,7 @@ PDF page image、Office intermediate、抽出済み image など、後続 Markdo
 
 **Office intermediate の変換機構 (DOCX / PPTX — 実装フィードバック 2026-07-23)**: DOCX / PPTX の
 unit 化 ([04-pipeline.md §2](04-pipeline.md) の表) は外部 renderer (LibreOffice headless
-`soffice --convert-to pdf`。解決順 = `KCS_OFFICE_CONVERTER` env → PATH 上の `soffice`) による
+`soffice --convert-to pdf`。解決順 = `KIO_OFFICE_CONVERTER` env → PATH 上の `soffice`) による
 **変換 PDF 経由**とする。DOCX は変換 PDF の page を `page:N`、PPTX は 1 page = 1 slide の対応で
 `slide:N` として列挙する。**変換出力は決定論化する** — PDF の `/CreationDate` `/ModDate` `/ID` 等の
 揮発メタデータを同長固定値へ正規化してから hash する (xref offset を壊さない)。これにより同一
@@ -378,7 +378,7 @@ output:
   fallback_to_full             bool
   reason
   # Evidence Pointer は Adapter output に含めない — 必須フィールド (chunk_hash / commit) は
-  # chunking と snapshot の後にしか存在しないため、発行は KCS core が行う (08 §2.1)
+  # chunking と snapshot の後にしか存在しないため、発行は KIO core が行う (08 §2.1)
 capability_flags:
   ocr, layout_detection, table_extraction, speech_to_text, incremental_update
 ```
@@ -388,7 +388,7 @@ incremental の詳細プロンプト規約は §8 (生成 LLM 系のみ。§8 �
 **標準 Adapter (非 text-native)**: PDF / DOCX / PPTX / 画像の Markdownize 第一候補は Mistral OCR 系文書処理 API (`mistral_ocr_markdownize`) とする (経緯: 旧 `research/markdown.md` — git 履歴)。規約:
 
 - 表は Markdown 本文に inline で保持する (`table_format=null` 相当)。独立 table object は作らない。
-- 文書内 embedded image は抽出して image object ([03-data-model.md §2](03-data-model.md)) として保存し、Markdown 内の参照は `kcs://<scope_id>/object/image/<image_hash>` に置換する ([08-evidence-pointer-spec.md §2.3](08-evidence-pointer-spec.md))。実装は Step 2 ([09-mvp-scope.md §3.1](09-mvp-scope.md))。
+- 文書内 embedded image は抽出して image object ([03-data-model.md §2](03-data-model.md)) として保存し、Markdown 内の参照は `kio://<scope_id>/object/image/<image_hash>` に置換する ([08-evidence-pointer-spec.md §2.3](08-evidence-pointer-spec.md))。実装は Step 2 ([09-mvp-scope.md §3.1](09-mvp-scope.md))。
 - bbox / page / confidence score は unit metadata に記録する。**Evidence Pointer の必須 schema には含めない** (optional フィールドとしての露出は Phase 4+ 判断。forward compatibility は [08-evidence-pointer-spec.md §8](08-evidence-pointer-spec.md))。
 - **図中テキストの検索可能性 — bbox_annotation を採用 (2026-07-04 実 API 境界調査で確定)**: 実測
   (`experiments/ocr-verification`、段階 fixture C0-C5 + 曖昧画像 15 枚) により、表は複雑・ラスタ化でも
@@ -396,7 +396,7 @@ incremental の詳細プロンプト規約は §8 (生成 LLM 系のみ。§8 �
   し (C3 が境界)、ホワイトボード写真風は ~55%、フロー図入りスライドは ~41% を失うことを確認。
   対策として Mistral の **bbox_annotation (+25% コスト) を既定 ON** とし、images[] として返る領域の
   説明+書き起こしを取得して unit metadata に記録し、chunk 化時に image 参照近傍へ検索可能テキスト
-  として取り込む (`.kcs/config.toml` の `[markdownize] bbox_annotation = true` (既定) で制御 — folder-config schema の正式 key ([10-operations.md §12.3](10-operations.md))。**値は出力に影響するため tool_profile_hash に畳み込む** = 切替は世代判定に乗る)。Markdownize は文書 1 版につき 1 回のコストであり
+  として取り込む (`.kio/config.toml` の `[markdownize] bbox_annotation = true` (既定) で制御 — folder-config schema の正式 key ([10-operations.md §12.3](10-operations.md))。**値は出力に影響するため tool_profile_hash に畳み込む** = 切替は世代判定に乗る)。Markdownize は文書 1 版につき 1 回のコストであり
   incremental 再利用でさらに希釈されるため +25% は budget 内。生成 LLM (Gemini Vision) による二次
   Markdownize fallback は annotation で不足する場合の Phase 4+ 保留のまま。実装は Step 4 (契約は
   step4a で確定)。
@@ -410,7 +410,7 @@ incremental の詳細プロンプト規約は §8 (生成 LLM 系のみ。§8 �
     {
       "type": "json_schema",
       "json_schema": {
-        "name": "kcs_bbox_annotation_v1",
+        "name": "kio_bbox_annotation_v1",
         "strict": true,
         "schema": {
           "type": "object",
@@ -435,7 +435,7 @@ incremental の詳細プロンプト規約は §8 (生成 LLM 系のみ。§8 �
     CommonMark source escape に通す: original `&`→`&amp;`、`<`→`&lt;`、`>`→`&gt;`、それ以外の
     ASCII punctuation (`U+0021..002F`, `U+003A..0040`, `U+005B..0060`, `U+007B..007E`) は文字の前に
     `\` を 1 個付け、その他は変更しない。変換後の各行を trusted prefix
-    `> KCS figure description: ` / `> KCS figure text: ` の後へ置き、対応 image URI 直後の persisted
+    `> KIO figure description: ` / `> KIO figure text: ` の後へ置き、対応 image URI 直後の persisted
     unit Markdown に入れる。unit metadata にも同じ post-escape strings を保持し、検索 bytes と Evidence
     span の元を一致させる。この変換後の CommonMark AST は provider 由来の link / image / raw HTML /
     autolink node を 1 件も含んではならない
@@ -458,7 +458,7 @@ Evidence Pointer のバイト位置は保存された bytes に対して定義�
 - **見出し**: ATX (`#`〜`######`) のみ (Setext 禁止)。chunk 境界規則 ([04-pipeline.md §4.1](04-pipeline.md))
   の入力
 - **表**: GFM table 記法で inline 保持 (§5.2 規約と同じ — 独立 table object は作らない)
-- **画像参照**: `![...](kcs://<scope_id>/object/image/<image_hash>)` のみ
+- **画像参照**: `![...](kio://<scope_id>/object/image/<image_hash>)` のみ
   ([08-evidence-pointer-spec.md §2.3](08-evidence-pointer-spec.md))
 - **生 HTML / autolink**: 禁止。**provider 由来の生テキストを Markdown 本文へ埋め込む場合は、由来を
   問わず §5.2 bbox_annotation と同じ CommonMark source escape を適用する** (`&` `<` `>` の実体参照化 +
@@ -466,7 +466,7 @@ Evidence Pointer のバイト位置は保存された bytes に対して定義�
 - **code fence**: CommonMark の ``` fence (チルダ不可)。**fence 内の「無変換」は構文的変換 (escape /
   参照置換) の禁止のみを意味する — エンコーディング (UTF-8/NFC)・改行 (LF)・trailing space 禁止は
   fence 内にも適用する** (適用しないと CRLF/NFD を含むコードで v1 の byte 決定性が壊れる)
-- 上記の準拠は KCS 側受け入れ検査 ([04-pipeline.md §3.2](04-pipeline.md)) の構造検証に含める
+- 上記の準拠は KIO 側受け入れ検査 ([04-pipeline.md §3.2](04-pipeline.md)) の構造検証に含める
 
 media 別の変換規約 (何を見出しにするか等) は Adapter 実装の裁量 (tool_profile_hash が識別する)。
 本節が固定するのは**バイト表現の規約のみ**である。
@@ -488,17 +488,17 @@ metadata:
 
 Text Embedding Adapter / Image Embedding Adapter は**採用しない**。同一 Embedding Adapter が同一 profile で多モダリティを単一 vector space へ写像する。
 
-> **実地検証済み — 単一 multimodal profile を採用 (2026-07-03 再検証で確定)**: 初回調査は「Gemini Embedding 2 multimodal は preview で pin 不可」を根拠に text-only 緩和を適用したが、事実誤認 (`gemini-embedding-2` は 2026-04-22 に GA、pinned stable 版あり) が判明し**撤回**。再検証 (`tasks/step3-embedding-verify.md` の再検証節) により本節冒頭の本来の契約どおり **単一マルチモーダル Embedding Adapter** を採用する。確定 profile: **`gemini-embedding-2` (GA 版を Adapter が起動時解決して pin、§6) / 768 次元 (MRL 切り詰め — 切り詰め後次元も profile に固定) / cosine / `modality="multimodal"` / `mode="online"`** (Vertex はバッチ推論非対応のため sync 呼出 — client 側の並列は**タスク間** (別 batch_requests 行) で行い、単一タスク内の複数 request は直列 ([04-pipeline.md §5.4](04-pipeline.md) の縮退 2 相)。429 は rate_limit 分類で backoff — §5.7)。MVP で実際に embed するのは text chunk のみだが、profile を multimodal にしておくことで Phase 4+ の image/audio embedding を [03-data-model.md §7](03-data-model.md) の全 re-index なしに追加できる。text 品質は MTEB で前世代 text 専用モデルを上回り日本語も同格 (再検証節)。コスト: 10 万 chunk 初回 ≈ $10 (単月 budget 内)。**非 multimodal の embedding profile (`modality="text"` 等、別ベクトル空間への埋め込み) は採用不可** — tool-lock materialize / adapter 登録時に `KCS-E-EMBED-MODALITY-001` (exit 2) で拒否する ([03-data-model.md §7](03-data-model.md))。
+> **実地検証済み — 単一 multimodal profile を採用 (2026-07-03 再検証で確定)**: 初回調査は「Gemini Embedding 2 multimodal は preview で pin 不可」を根拠に text-only 緩和を適用したが、事実誤認 (`gemini-embedding-2` は 2026-04-22 に GA、pinned stable 版あり) が判明し**撤回**。再検証 (`tasks/step3-embedding-verify.md` の再検証節) により本節冒頭の本来の契約どおり **単一マルチモーダル Embedding Adapter** を採用する。確定 profile: **`gemini-embedding-2` (GA 版を Adapter が起動時解決して pin、§6) / 768 次元 (MRL 切り詰め — 切り詰め後次元も profile に固定) / cosine / `modality="multimodal"` / `mode="online"`** (Vertex はバッチ推論非対応のため sync 呼出 — client 側の並列は**タスク間** (別 batch_requests 行) で行い、単一タスク内の複数 request は直列 ([04-pipeline.md §5.4](04-pipeline.md) の縮退 2 相)。429 は rate_limit 分類で backoff — §5.7)。MVP で実際に embed するのは text chunk のみだが、profile を multimodal にしておくことで Phase 4+ の image/audio embedding を [03-data-model.md §7](03-data-model.md) の全 re-index なしに追加できる。text 品質は MTEB で前世代 text 専用モデルを上回り日本語も同格 (再検証節)。コスト: 10 万 chunk 初回 ≈ $10 (単月 budget 内)。**非 multimodal の embedding profile (`modality="text"` 等、別ベクトル空間への埋め込み) は採用不可** — tool-lock materialize / adapter 登録時に `KIO-E-EMBED-MODALITY-001` (exit 2) で拒否する ([03-data-model.md §7](03-data-model.md))。
 
 embedding の SQLite schema (`embeddings` / `chunk_vec`) の正本は [04-pipeline.md §4.3](04-pipeline.md)
 とする (本節は profile — モデル / 次元 / 距離 / modality — の正本。SQL 定義の重複記載は 2026-07-14 に
 解消し、本節から参照する)。
 
-sqlite-vec の制約で vector table を物理分割してもよいが、概念上は単一の Embedding Adapter / 単一の `profile_hash`。profile が一致しない場合、KCS は vector 検索を強行せず再生成または text fallback。
+sqlite-vec の制約で vector table を物理分割してもよいが、概念上は単一の Embedding Adapter / 単一の `profile_hash`。profile が一致しない場合、KIO は vector 検索を強行せず再生成または text fallback。
 
 > **実装フィードバック — chunk 埋め込みの contextual 化 (2026-07-24)**: MVP の実データ
 > ベースライン評価 (09 §4.1) で、vector レーンが「本文 1〜2 文＋定型 filler」の実機規模
-> (人格あたり 50 ファイル) で薄い解答本文を浮上させられず、`KCS ≥ 0.8` 腕が未達だった。
+> (人格あたり 50 ファイル) で薄い解答本文を浮上させられず、`KIO ≥ 0.8` 腕が未達だった。
 > **ファイル名はユーザーが付けた意図信号**であるため、chunk の埋め込み**入力**を
 > `{humanized filename}\n\n{chunk 本文}` とする (contextual retrieval)。`humanized filename`
 > は basename stem の決定的変換 (`-`/`_`→空白、ASCII camelCase 境界→空白、空白畳み込み。
@@ -551,7 +551,7 @@ output:  reranked_result_ids, scores
 metadata: profile_hash, searched_scopes, fallback_reason
 ```
 
-Rerank Adapter は KCS の検索結果を再順位付けするだけで、**searched_scopes / fallback_reason を隠蔽してはならない**。
+Rerank Adapter は KIO の検索結果を再順位付けするだけで、**searched_scopes / fallback_reason を隠蔽してはならない**。
 
 ## 5.7 Batch 実行契約とプロバイダ採用条件
 
@@ -588,17 +588,17 @@ provider_scope_id()            下記の不変識別子を返す
 
 1. job 一覧照会 (または token による job 発見) と **upload 一覧照会**が可能であること — これが無いと
    未記録 in-flight・未記録 upload 残骸の回復が構造的に不可能になる
-2. job 作成 → 一覧可視化の遅延に上限があること (KCS の可視化猶予 既定 10 分以内)。**upload →
+2. job 作成 → 一覧可視化の遅延に上限があること (KIO の可視化猶予 既定 10 分以内)。**upload →
    一覧可視化にも同じ上限を適用する** ([04-pipeline.md §5.8](04-pipeline.md) の upload 照合が前提とする)。
    upload() は upload_id を返し (返却型必須)、list_uploads は pagination を提供すること
-3. job / 一覧情報の保持期間が KCS の回復期限 (既定 48h) 以上であること
+3. job / 一覧情報の保持期間が KIO の回復期限 (既定 48h) 以上であること
 4. job metadata / filename に client 任意の識別子 (intent_token) を埋め込めること
 5. account / workspace の**安定した**識別子を取得できること (取得不能なら reservation の照合が恒久
-   unknown になり、`kcs batch abandon` 頼みの運用になる)
+   unknown になり、`kio batch abandon` 頼みの運用になる)
 6. 投入拒否 (permanent 4xx) にも課金するか否かを宣言すること。**課金する provider の Adapter は、
    拒否応答時に usage (`usd` = 宣言請求額 | `billable_units` — §4 の one-of と同形、第三の field は
    設けない) を機械可読で返却する** (この返却義務は Batch 限定で
-   なく **sync online Adapter にも共通** — [04-pipeline.md §5.4](04-pipeline.md) の sync 記帳規律が参照する) — KCS は submit_rejected の
+   なく **sync online Adapter にも共通** — [04-pipeline.md §5.4](04-pipeline.md) の sync 記帳規律が参照する) — KIO は submit_rejected の
    terminal 化と同一 Tx で記帳する (**報告値が有効なら provider 値 (`estimated=0`)、無効・欠落は
    estimated 縮退** — [04-pipeline.md §5.4](04-pipeline.md) の事前検証と DDL 注記)
 
@@ -618,20 +618,20 @@ provider_scope_id()            下記の不変識別子を返す
 > 認証解決可) なら Batch」。`request_kind='sync'` の生存予約行のみ §5.8 の回復意味論保全のため
 > sync で完遂する。v1 確定事項: **1 job = 1 task** (`batch_job_id` 列がそのまま回復キー)、
 > custom_id = task の input_hash、job metadata = flat 5 key (`intent_token` / `scope_id` /
-> `adapter_kind` / `input_hash` / `tool_profile_hash`)、upload filename = `kcs-<intent_token>.jsonl`。
+> `adapter_kind` / `input_hash` / `tool_profile_hash`)、upload filename = `kio-<intent_token>.jsonl`。
 > 単価はコード内に per-page 定数の正本が無いため、tools.toml の `[pricing] pages = 0.002`
 > (batch 単価) 宣言を推奨する。終端の記帳: provider `TIMEOUT_EXCEEDED` は出力を読めず実費不明 =
 > `expired` として**予約額の estimated 記帳** (§5.8 と同じ over-count 安全側)、`FAILED`/`CANCELLED`
 > は未完了 entry 非課金の前提で 0 記帳。繰延 (backlog 記録): incremental Markdownize の batch 化
 > (v1 は Full 送信へ縮退)、batch 出力の埋め込み画像の CAS 保存、`provider_scope_id` /
 > `list_uploads` / pagination の実 API 契約試験 (§5.2 の未実施項目 — v1 は
-> `KCS_MISTRAL_WORKSPACE_ID` 上書き + 既定 `"mistral:default"`)。
+> `KIO_MISTRAL_WORKSPACE_ID` 上書き + 既定 `"mistral:default"`)。
 
 ---
 
 # 6. tool-lock.json
 
-`.kcs/tool-lock.json` は使用 Adapter の identity を記録する。実行可能情報 (`cmd`, `args`, `url`, 認証情報) は **絶対に含めない**:
+`.kio/tool-lock.json` は使用 Adapter の identity を記録する。実行可能情報 (`cmd`, `args`, `url`, 認証情報) は **絶対に含めない**:
 
 ```json
 {
@@ -661,7 +661,7 @@ provider_scope_id()            下記の不変識別子を返す
 
 `tool_lock_hash` は **[03-data-model.md §5.2](03-data-model.md) の canonical 入力** (spec_version + 各 role の tool_id / profile_hash — embedding のみ + dimensions / distance / modality) を JCS 畳み込みした identity — **tool-lock.json 全体ではない**。`kind` / `capabilities` / `mode` は作業コピーの表示・検証用 field であり identity に含めない (toollock object へ保存されるのも §5.2 の canonical bytes)。
 
-config (`~/.config/kcs/tools.toml`) では `mistral-ocr-latest` のような可変 alias を指定してよい。ただし **OCR API は応答内で alias を実バージョンに解決しない** (2026-07-03 実測: 応答の `model` フィールドは `mistral-ocr-latest` のまま返る。`experiments/ocr-verification`)。したがって Adapter は **API 呼び出し自体を版付きモデル名で行う**: alias が設定されている場合は、Adapter が実行開始時に提供元のモデル一覧 API から現行の版付き名を解決してから呼び出し、その版を `tool_profile_hash` の `model_version_pin` に記録する ([03-data-model.md §5.1](03-data-model.md) — 可変 alias の pin は禁止)。モデル更新は `tool_changed` として扱われ、再 Markdownize は first-instance-wins / gen の既存機構 (§9) に乗る。
+config (`~/.config/kio/tools.toml`) では `mistral-ocr-latest` のような可変 alias を指定してよい。ただし **OCR API は応答内で alias を実バージョンに解決しない** (2026-07-03 実測: 応答の `model` フィールドは `mistral-ocr-latest` のまま返る。`experiments/ocr-verification`)。したがって Adapter は **API 呼び出し自体を版付きモデル名で行う**: alias が設定されている場合は、Adapter が実行開始時に提供元のモデル一覧 API から現行の版付き名を解決してから呼び出し、その版を `tool_profile_hash` の `model_version_pin` に記録する ([03-data-model.md §5.1](03-data-model.md) — 可変 alias の pin は禁止)。モデル更新は `tool_changed` として扱われ、再 Markdownize は first-instance-wins / gen の既存機構 (§9) に乗る。
 
 ---
 
@@ -696,7 +696,7 @@ started_at, finished_at
 adapter_kind, input_hash, intent_token, submission_seq
 usage_validation (missing | invalid), billing_source (estimated)
                              (非機微 — 課金 field 縮退の warning ([04-pipeline.md §5.4](04-pipeline.md)
-                              の記帳値事前検証)。event code は KCS-EV-ADAPTER-USAGE-001)
+                              の記帳値事前検証)。event code は KIO-EV-ADAPTER-USAGE-001)
                              (非機微。**cost_ledger / batch_requests への到達は 4 組 key
                               (scope_id, adapter_kind, input_hash, tool_profile_hash) +
                               submission_seq が正** — intent_token は補助 (成功行の batch_job_id は
@@ -720,18 +720,18 @@ usage_validation (missing | invalid), billing_source (estimated)
 MVP における Adapter の脅威モデルを次のとおり確定する。
 
 ```text
-1. R23 で実行される Adapter は KCS 同梱の built-in target のみで、trusted code として
+1. R23 で実行される Adapter は KIO 同梱の built-in target のみで、trusted code として
    扱う。将来の外部 dispatcher を実装する場合も、ユーザーが明示的にインストールし
-   ~/.config/kcs/tools.toml に設定した Adapter だけを trusted code として扱う。
+   ~/.config/kio/tools.toml に設定した Adapter だけを trusted code として扱う。
 
-2. [adapter.policy] は「KCS 側の入力制御 + 事後監査」の規約であり、
+2. [adapter.policy] は「KIO 側の入力制御 + 事後監査」の規約であり、
    sandbox による強制保証ではない。
    - `max_input_bytes` は **AdapterRun 1 回の入力 (prepared input の canonical bytes 合計)** に
      適用する (**AdapterRun = 1 回の Adapter 呼出 = 1 request / job** — §4・§5.7 の課金報告と同一
      単位。task 全体の総量上限ではない — 総量は budget cap 側が律する) — 超過は送信前に当該 task を
      terminal failed (invalid_input・非再試行) とし、送信しない (課金なし)
-   - KCS は allowed_scope 外のファイルを Adapter に渡さない (入力制御)
-   - KCS は allow_network=false の Adapter にオンライン送信前提の task を発行しない
+   - KIO は allowed_scope 外のファイルを Adapter に渡さない (入力制御)
+   - KIO は allow_network=false の Adapter にオンライン送信前提の task を発行しない
    - AdapterRun (task_id / input_hashes / output_hashes / status) を監査ログとして残す
 
 3. 将来の外部 dispatcher における、悪意ある・侵害された Adapter プロセス自体の挙動 (allowed_scope 外の読み取り、
@@ -739,7 +739,7 @@ MVP における Adapter の脅威モデルを次のとおり確定する。
    OS レベルのサンドボックス強制は Phase 4+ の再設計論点とする。
 
 4. 第三者 Adapter の配布・署名・検証 (サプライチェーン) は v2 以降のスコープ外。
-   MVP で同梱・文書化するのは KCS 公式 Adapter のみ。
+   MVP で同梱・文書化するのは KIO 公式 Adapter のみ。
 ```
 
 将来の外部 dispatcher に初回実行時の承認 UI を追加する場合は、この前提を反映した
@@ -760,24 +760,24 @@ MVP における Adapter の脅威モデルを次のとおり確定する。
 1. "unchanged" と判断した unit は出力に含めない (旧 unit を再利用)
 2. 変更 unit は完全に書き直す (部分編集ではなく full unit replacement)
    → Markdown の局所一貫性を保つ
-3. heading 構造の変更は KCS には影響しない (chunk side で対応)
+3. heading 構造の変更は KIO には影響しない (chunk side で対応)
 4. Adapter が「軽微とは言えない」と判断したら fallback_to_full=true で短絡
    (受理側は unit 検査に先立つ制御応答として扱い、同一 task を mode=full で再発行する —
    [04-pipeline.md §3.2](04-pipeline.md) の制御応答規則。full 応答での本 flag は contract violation)
-   閾値の Adapter 側 hint は KCS 側 hint と衝突したら **KCS 側を優先**
-5. spec_version 不一致なら、Adapter は invalid_input として失敗 (`KCS-E-ADAPTER-SPECVER-001` — 汎用 `KCS-E-ADAPTER-CONTRACT-001` (retryable 1 回) と区別し、[04-pipeline.md §5.3](04-pipeline.md) の invalid_input 分類 = max_attempts 0 に一意に対応させる)
-6. 出力は KCS 側の受け入れ検査 (04-pipeline.md §3.2) を通過しなければ persist されない。
-   違反は KCS-E-ADAPTER-CONTRACT-001 として reject され、**incremental capability 非互換の場合に
+   閾値の Adapter 側 hint は KIO 側 hint と衝突したら **KIO 側を優先**
+5. spec_version 不一致なら、Adapter は invalid_input として失敗 (`KIO-E-ADAPTER-SPECVER-001` — 汎用 `KIO-E-ADAPTER-CONTRACT-001` (retryable 1 回) と区別し、[04-pipeline.md §5.3](04-pipeline.md) の invalid_input 分類 = max_attempts 0 に一意に対応させる)
+6. 出力は KIO 側の受け入れ検査 (04-pipeline.md §3.2) を通過しなければ persist されない。
+   違反は KIO-E-ADAPTER-CONTRACT-001 として reject され、**incremental capability 非互換の場合に
    限り** full に fallback する (spec_version 非互換は下記のとおり fallback しない)
 ```
 
-`spec_version` の bump 規約は [10-operations.md §12.5](10-operations.md) を正とする。**full fallback (§8.4) が有効なのは incremental capability だけが非互換な場合に限る** — full request も同じ `spec_version` を含むため、spec_version 自体の非互換は full で呼び直しても同じ invalid_input を再生するだけである。この場合は `KCS-E-ADAPTER-SPECVER-001` (§8.1 手順 5 — invalid_input / 非再試行) として当該 online Adapter のタスクを failed permanent (Adapter 更新が必要) にし、同梱 deterministic Adapter のベースライン (§2.1) は影響を受けず継続する。
+`spec_version` の bump 規約は [10-operations.md §12.5](10-operations.md) を正とする。**full fallback (§8.4) が有効なのは incremental capability だけが非互換な場合に限る** — full request も同じ `spec_version` を含むため、spec_version 自体の非互換は full で呼び直しても同じ invalid_input を再生するだけである。この場合は `KIO-E-ADAPTER-SPECVER-001` (§8.1 手順 5 — invalid_input / 非再試行) として当該 online Adapter のタスクを failed permanent (Adapter 更新が必要) にし、同梱 deterministic Adapter のベースライン (§2.1) は影響を受けず継続する。
 
 ## 8.2 推奨プロンプト構造 (frontier AI 系)
 
 ```
 SYSTEM:
-  You are a markdownization adapter for KCS.
+  You are a markdownization adapter for KIO.
   Given the previous markdown of <unit_key> and the new raw input,
   produce updated markdown for changed units only.
   Keep unchanged units out of the output.
@@ -802,10 +802,10 @@ USER:
 
 ## 8.3 ストリーミング応答
 
-大型 PDF (100+ pages) では TTFB を抑えるためストリーミング出力を許容する。KCS は Adapter からの SSE / chunked JSON を受け取り、unit 完了ごとに persist する。
+大型 PDF (100+ pages) では TTFB を抑えるためストリーミング出力を許容する。KIO は Adapter からの SSE / chunked JSON を受け取り、unit 完了ごとに persist する。
 
 ストリーミング中の unit は staging 領域に persist し (**配置と耐久 descriptor は
-[03-data-model.md §2](03-data-model.md) の `.kcs/staging/` — purge / status / prune-orphans の
+[03-data-model.md §2](03-data-model.md) の `.kio/staging/` — purge / status / prune-orphans の
 帰属列挙の正本**)、応答完了後に**全体集合が受け入れ検査
 ([04-pipeline.md §3.2](04-pipeline.md)) を通過した時点で manifest へ一括確定する** (検査前の unit は
 公開しない — §3.2 の「違反応答は 1 unit も persist しない」と整合)。ストリーミング失敗時は staging を
@@ -815,23 +815,23 @@ USER:
 staging を同一遷移で冪等に cleanup する (**遷移内の順序は terminal 状態の耐久化 (done は manifest
 一括確定の耐久化) が先、cleanup が後** — 逆順だと crash 時に公開元 bytes を失う。crash 時は遷移の
 回復 replay で cleanup も再実行される。
-非 terminal task の staging は `kcs status` に表示し、prune-orphans の blocker として可視化する一方、
+非 terminal task の staging は `kio status` に表示し、prune-orphans の blocker として可視化する一方、
 terminal 化済み task の残存 root は cleanup 失敗の残骸として prune-orphans の削除対象 —
 [10-operations.md §7.5.1](10-operations.md))** — manifest には `pending`
 という unit 状態は存在しない ([03-data-model.md §2.1](03-data-model.md) の遷移は failed → done のみ)。
 **同一 root 名の残存時の前置回復**: 同一 `(raw64, tool64, adapter_kind)` の staging root が既に
 存在する状態で新しい task を開始する場合、root 公開 (atomic rename) の**前**に旧 root の回復を、
-**呼び出し元コマンドが既に保持する `.kcs/.lock` の同一 critical section 内で**完了する
+**呼び出し元コマンドが既に保持する `.kio/.lock` の同一 critical section 内で**完了する
 (04 §5.8 と同水準 — 別 lock の再取得はしない) — 対応 task が terminal なら cleanup を完遂してから公開し、非 terminal なら
 新 task を開始せず当該 task を再開する。root 公開の rename は**既存 root 名への上書きをしない**
 (no-replace — 新旧世代の bytes 混在を防ぐ。世代識別は path に載せない — [03-data-model.md §2](03-data-model.md) の配置は不変)。
 
 **retry の合成規則**: staging の完了済み bytes は凍結する。retry 応答は**全 unit を含んでよい**
 (未完了 unit のみへの絞り込みは任意の転送最適化 — Adapter は staging の内容を知り得ないため
-KCS は要求しない)。**凍結保全と合成が適用されるのは transport 中断 (stream 失敗) からの resume に
+KIO は要求しない)。**凍結保全と合成が適用されるのは transport 中断 (stream 失敗) からの resume に
 限る** — 受け入れ検査 reject (contract violation — [04-pipeline.md §3.2](04-pipeline.md)) 起因の
 再投入では staging を破棄して開始する (違反 unit を含み得る staging を first-instance-wins で
-勝たせると、修正済み retry 応答が破棄され再違反が確定するため)。KCS が staging + retry 応答を合成する際、**まず生の retry 応答の各配列に V1 / V6 の配列内 unit_key 重複検査と配列間の排他検査
+勝たせると、修正済み retry 応答が破棄され再違反が確定するため)。KIO が staging + retry 応答を合成する際、**まず生の retry 応答の各配列に V1 / V6 の配列内 unit_key 重複検査と配列間の排他検査
 (pairwise disjoint — V1 の 4 集合 / V6 の 3 集合) を適用し** (staged-key の
 再出現で重複・非排他が消える前に契約違反を検出する)、その後 **staging に確定済みの unit_key と
 重複する応答 unit は黙って破棄する** (staging 側が first instance — first-instance-wins
@@ -844,19 +844,19 @@ KCS は要求しない)。**凍結保全と合成が適用されるのは transp
 
 ## 8.4 Capability 宣言なしの Adapter
 
-`capabilities` に `incremental_update` を含まない Adapter は、KCS が **常に full モード** で呼ぶ。これにより既存 Adapter との後方互換が保たれる。
+`capabilities` に `incremental_update` を含まない Adapter は、KIO が **常に full モード** で呼ぶ。これにより既存 Adapter との後方互換が保たれる。
 
 ---
 
 # 9. 再現性ポリシー
 
-Adapter の完全な再実行決定性は要求しない。KCS が保証するのは:
+Adapter の完全な再実行決定性は要求しない。KIO が保証するのは:
 
 ```
 raw_hash 不変                既存 artifact を尊重 (first-instance-wins)
 raw_hash 変化                 新 artifact 候補を作る
 explicit re-normalize         同 (raw_hash, tool_profile_hash) に対して gen+1 の新 normalized
-                              instance を作る (kcs reindex --force、または prepared_hash 変化起因の
+                              instance を作る (kio reindex --force、または prepared_hash 変化起因の
                               自動 gen+1 — 03-data-model.md §2.1 の例外)。旧 instance は
                               保全され、既存 commit / Evidence Pointer は旧 gen を参照し続ける
                               (03-data-model.md §2.1)

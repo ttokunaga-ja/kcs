@@ -46,16 +46,16 @@ HEAD `5d0b926`、全 485 テスト green・clippy(--all-features)/fmt clean の�
 **「hold の解除」という正当な遷移まで恒久的に禁止**した。R20-1 が捕捉した「非秘匿→秘匿」方向の**対**が未実装。
 
 **根本原因 (file:line)**:
-- `crates/kcs-cli/src/main.rs:7219-7226` — `pending` を `held`/`sendable` に partition。`hold_secret_embedding_tasks(held)` で
+- `crates/kio-cli/src/main.rs:7219-7226` — `pending` を `held`/`sendable` に partition。`hold_secret_embedding_tasks(held)` で
   新規 hold を作る一方、**チャンクが `held` → `sendable` に転じたときに hold を解除する対称処理が存在しない**。
-- `crates/kcs-cli/src/main.rs:8136-8145` (`enqueue_embedding_tasks` の `existing`) — `RETIRED_NON_LIVE` のみ除外。
+- `crates/kio-cli/src/main.rs:8136-8145` (`enqueue_embedding_tasks` の `existing`) — `RETIRED_NON_LIVE` のみ除外。
   Paused/`secrets_tier_b_hold` は `existing` に含まれるため `continue` され、新規 Pending task も作られない。
-- `crates/kcs-cli/src/main.rs:7709` (`embeddable_task_state`) — `Some(SECRETS_TIER_B_HOLD) => false` (R21-1 の防御) により、
+- `crates/kio-cli/src/main.rs:7709` (`embeddable_task_state`) — `Some(SECRETS_TIER_B_HOLD) => false` (R21-1 の防御) により、
   仮にフィルタへ到達しても held task は決して再駆動されない。
-- `crates/kcs-cli/src/main.rs:10291-10306` (`release_secret_holds`) — Paused/hold → Pending へ戻す唯一の関数。
+- `crates/kio-cli/src/main.rs:10291-10306` (`release_secret_holds`) — Paused/hold → Pending へ戻す唯一の関数。
   呼出しは `main.rs:615-617` の `if args.send_secrets` のみ。再 index 時の解除経路が皆無。
 
-**期待 vs 実際 (control 付き実機、`KCS_TEST_GEMINI_EMBED=mock`、回復コマンドを個別のクリーン scope で網羅)**:
+**期待 vs 実際 (control 付き実機、`KIO_TEST_GEMINI_EMBED=mock`、回復コマンドを個別のクリーン scope で網羅)**:
 ```
 [CONTROL] notes.md のみ                          → embedding task done、embeddings=1
 [EXP-A] password_notes.md を index --online      → paused/secrets_tier_b_hold、embeddings=0
@@ -65,7 +65,7 @@ HEAD `5d0b926`、全 485 テスト green・clippy(--all-features)/fmt clean の�
         → index --online --send-secrets  ← これだけが done/embedding_adapter_done へ解放
 [EXP-B] password_backup.md + notes.md (byte-identical) を index → dedup で秘匿側が生存し held
         → rm password_backup.md (秘匿双子を削除)、全回復コマンド試行 → embeddings=0 のまま
-[observability] kcs status は**存在しないパス** password_notes.md の approval_method="hold" を報告し続け、
+[observability] kio status は**存在しないパス** password_notes.md の approval_method="hold" を報告し続け、
                 notes.md は files[].status="unchanged" とだけ出る (脱落の手掛かりゼロ)
 ```
 期待 = 現在パスが非秘匿なら R20-1 と対称に hold を解除して通常 embed。実際 = 永久 held。
@@ -92,16 +92,16 @@ defense-in-depth はそのまま維持する。
 
 ---
 
-### R22-2 [major] 既に非 hold な embedding タスク (Pending/Failed/Done) を持つチャンクは、現在パスが後から Tier B 秘匿名になっても `Paused/secrets_tier_b_hold` へ**降格されない** — `hold_secret_embedding_tasks` の idempotency ガードが降格自体を永久に妨げ、`kcs status` のタスク一覧と `quarantine.jsonl` の "hold" 記録が恒久的に矛盾する
+### R22-2 [major] 既に非 hold な embedding タスク (Pending/Failed/Done) を持つチャンクは、現在パスが後から Tier B 秘匿名になっても `Paused/secrets_tier_b_hold` へ**降格されない** — `hold_secret_embedding_tasks` の idempotency ガードが降格自体を永久に妨げ、`kio status` のタスク一覧と `quarantine.jsonl` の "hold" 記録が恒久的に矛盾する
 
 **エンジン**: Claude-Sonnet-A (control 実機・4 コマンド網羅) + Claude-Sonnet-B (独立 control 実機・AuthError/RateLimit 経由でも再現) + オーケストレータ (独立 control 実機)。
 **脈/型**: R21-7 の**適用範囲の絞り漏れ**。R21-7 は `existing` から `RETIRED_NON_LIVE` だけを特例除外したが、
 「既存タスクがあれば無条件 skip」という根本設計は不変のまま。R22-1 の**逆方向**。
 
 **根本原因 (file:line)**:
-- `crates/kcs-cli/src/main.rs:8055-8060` (`hold_secret_embedding_tasks` の `existing`) — `task_type == Embedding &&
+- `crates/kio-cli/src/main.rs:8055-8060` (`hold_secret_embedding_tasks` の `existing`) — `task_type == Embedding &&
   fallback_reason != RETIRED_NON_LIVE` のみでフィルタ。既存タスクの `status` も現在の held 該当性も一切見ない。
-- `crates/kcs-cli/src/main.rs:8069-8072` — `existing.contains(&output_ref)` なら**無条件 `continue`**。
+- `crates/kio-cli/src/main.rs:8069-8072` — `existing.contains(&output_ref)` なら**無条件 `continue`**。
   よって `held` に落ちたチャンクの既存タスクは Paused へ昇格されず、`sendable` にも入らないので送信もされない
   (完全に浮遊した状態)。
 - R21-6 の revive (`main.rs:7900-7929`) が `fallback_reason = None` にクリアした task も、
@@ -116,7 +116,7 @@ index / index --online / batch resume / batch retry / repair --rebuild-db を全
   → embeddings=0 (送信はされない = fail-safe。R21-1 dedup + partition が送信側を守っている)
 ```
 期待 = チャンクの現在パスが秘匿名になった時点で、既存タスクの状態に関わらず `Paused/secrets_tier_b_hold` に収束し
-`kcs status` に held として可視化される (N1a / R19-1 の開示契約)。実際 = `fallback_reason` が無関係な値
+`kio status` に held として可視化される (N1a / R19-1 の開示契約)。実際 = `fallback_reason` が無関係な値
 (`network_opt_in_required` / `null`) のまま張り付き、「オンライン承認すれば直る」と利用者を誤誘導する一方、
 quarantine は "hold" を主張し続ける。恒久 pending として `index_status` も汚染する。
 
@@ -137,8 +137,8 @@ R20-10 の `rebuild_chunk_vec` 除外に委ねる (`Done` を Paused に戻す�
 `Paused` を状態集合から落としている。
 
 **根本原因 (file:line)**:
-- `crates/kcs-cli/src/main.rs:7876-7886` (reclaim sweep) — `matches!(task.status, Pending | Running | Failed)` で `Paused` を除外。
-- `crates/kcs-cli/src/main.rs:7967-7972` (retire-non-live sweep) — `if !matches!(task.status, Pending | Running) { continue; }`
+- `crates/kio-cli/src/main.rs:7876-7886` (reclaim sweep) — `matches!(task.status, Pending | Running | Failed)` で `Paused` を除外。
+- `crates/kio-cli/src/main.rs:7967-7972` (retire-non-live sweep) — `if !matches!(task.status, Pending | Running) { continue; }`
   で `Paused` を除外。
 - 結果、hold されたまま編集/削除された chunk の task は永久に `Paused` のまま `compute_index_status`
   (`main.rs:2446-2458`) に pending として数えられる。
@@ -170,12 +170,12 @@ Claude-Sonnet-D (独立 control 実機・全回復コマンド網羅) + オー�
 + 「observability の失敗系素通り」脈との合流。
 
 **根本原因 (file:line)**:
-- `crates/kcs-cli/src/main.rs:8847` — `if prepare.prepared_units.is_empty() {`
-- `crates/kcs-cli/src/main.rs:8858-8862` — R21-4 の新規ガード `if candidate.media_type != "application/octet-stream" {
+- `crates/kio-cli/src/main.rs:8847` — `if prepare.prepared_units.is_empty() {`
+- `crates/kio-cli/src/main.rs:8858-8862` — R21-4 の新規ガード `if candidate.media_type != "application/octet-stream" {
   enqueue_online_placeholder_task(...)?; }`
-- `crates/kcs-cli/src/main.rs:8879` — `continue;` (`result.failed_files` / `skipped_*` 増分も `append_event_log` も無い)
+- `crates/kio-cli/src/main.rs:8879` — `continue;` (`result.failed_files` / `skipped_*` 増分も `append_event_log` も無い)
 - **対比**: 同一ループの oversized 処理 (`main.rs:8787-8798`) は `result.skipped_oversized_files += 1` +
-  `append_event_log("KCS-I-INDEX-INPUT-OVERSIZED-001", ...)` を必ず伴う。R21-4 の新ガードだけがこのパターンを踏襲していない。
+  `append_event_log("KIO-I-INDEX-INPUT-OVERSIZED-001", ...)` を必ず伴う。R21-4 の新ガードだけがこのパターンを踏襲していない。
 - `media_type_for_cli_path` (`main.rs:8370-8397`) / `media_type_for_path` (`scan.rs:418-445`) は
   png/jpg/jpeg/webp/gif と docx/xlsx/pptx のみ実 MIME を割り当て、それ以外は全て `application/octet-stream` に丸める。
 
@@ -196,9 +196,9 @@ photo.bmp (BM ヘッダ + ランダム 2000 B) と ok.md を index --yes
 
 **修正案**: R21-4 のガードは撤回せず (撤回すると R21-3 の AwaitOcr で永久 pending になり churn 懸念が戻る)、
 oversized と同じ可視化パターンを与える: `IndexPipelineResult` に `skipped_unrecognized_binary_files` カウンタを追加し、
-既存の event log 機構で `KCS-I-INDEX-*` 系の **INFO イベント**を 1 行記録する
-(docs 凍結下なので `KCS-E-*` エラーコード新設は行わない = R17-4/R18-4/R19-6 の教訓)。
-`kcs status` / `index --json` の双方から可視化する。
+既存の event log 機構で `KIO-I-INDEX-*` 系の **INFO イベント**を 1 行記録する
+(docs 凍結下なので `KIO-E-*` エラーコード新設は行わない = R17-4/R18-4/R19-6 の教訓)。
+`kio status` / `index --json` の双方から可視化する。
 
 ---
 
@@ -209,19 +209,19 @@ oversized と同じ可視化パターンを与える: `IndexPipelineResult` に 
 R21-4 は「これから作る task」を直したが、「すでに tasks.jsonl に存在する task」を放置した。
 
 **根本原因 (file:line)**:
-- `crates/kcs-cli/src/main.rs:8896` — R21-4 の fresh enqueue ガード (新規 task のみ抑止)。
-- `crates/kcs-cli/src/main.rs:6463` (`classify_online_markdownize_precondition`) — `is_text_native_media(&media_type)` は
+- `crates/kio-cli/src/main.rs:8896` — R21-4 の fresh enqueue ガード (新規 task のみ抑止)。
+- `crates/kio-cli/src/main.rs:6463` (`classify_online_markdownize_precondition`) — `is_text_native_media(&media_type)` は
   `text/markdown|text/plain|text/x-code` の 3 MIME のみ。`.yaml/.json/Dockerfile` は `application/octet-stream` なので **false**。
-- `crates/kcs-pipeline/src/prepare.rs:90` — octet-stream でも `bytes_are_text()` が true なら `prepared_units` は非空。
+- `crates/kio-pipeline/src/prepare.rs:90` — octet-stream でも `bytes_are_text()` が true なら `prepared_units` は非空。
   よって precondition は **`Send`** を返す。
-- `crates/kcs-cli/src/main.rs:6484, 6513-6517` (`execute_online_markdownize_task`) — 同じ 3 MIME 判定なので
+- `crates/kio-cli/src/main.rs:6484, 6513-6517` (`execute_online_markdownize_task`) — 同じ 3 MIME 判定なので
   第二ゲートも素通しし、生バイトを adapter に渡す。
 
 **期待 vs 実際 (control 付き実機、旧 build 相当の legacy task を tasks.jsonl に注入して upgrade を再現)**:
 ```
 config.yaml を R21 適用済み build で index --yes → online task は作られない (R21-4 の enqueue ガードは正しく効く)
 旧 build 相当の legacy task (output_ref=online:mistral_ocr_markdownize, input_path=config.yaml) を注入
-index --online --approve --yes; batch resume (KCS_TEST_MISTRAL_OCR=mock)
+index --online --approve --yes; batch resume (KIO_TEST_MISTRAL_OCR=mock)
 → {"status":"resumed","tasks_attempted":1,"tasks_executed":1,"tasks_failed":0}
 → legacy task = done/online_adapter_done、cost-ledger の adapter_kind="markdown" に課金行 1 件
 ```
@@ -247,17 +247,17 @@ passthrough された (= `prepared_units` が単一 File unit)」タスクを `R
 R21 の裁定文自身が markdownize への展開を要求していた (`tasks/step3-bughunt21-fixes.md:173`) が、実装は embedding のみ。
 
 **根本原因 (file:line)**:
-- `crates/kcs-cli/src/main.rs:7901-7929` — R21-6 の revive は `reconcile_committed_embedding_tasks` の中、
+- `crates/kio-cli/src/main.rs:7901-7929` — R21-6 の revive は `reconcile_committed_embedding_tasks` の中、
   つまり **embedding 専用**。markdownize の live AuthError task を扱う対応物が存在しない。
-- `crates/kcs-cli/src/main.rs:7877-7882` — 同関数の先頭 guard が `task.reserved_usd.is_none()` を `return false` で弾く。
-  `reserved_*` は R18-1 以降に導入された optional フィールド (`crates/kcs-pipeline/src/task.rs:61`) なので、
+- `crates/kio-cli/src/main.rs:7877-7882` — 同関数の先頭 guard が `task.reserved_usd.is_none()` を `return false` で弾く。
+  `reserved_*` は R18-1 以降に導入された optional フィールド (`crates/kio-pipeline/src/task.rs:61`) なので、
   **それ以前に作られた AuthError タスクは revive に到達しない**。
-- `crates/kcs-pipeline/src/task.rs:338-345` — `retry_policy(AuthError)` = `retryable:false, max_attempts:Some(0)` により
+- `crates/kio-pipeline/src/task.rs:338-345` — `retry_policy(AuthError)` = `retryable:false, max_attempts:Some(0)` により
   `batch retry` からも `filter_embeddable_by_task_state` からも永久に除外される。
 
 **期待 vs 実際 (control 付き実機)**:
 ```
-[markdownize] mixed.pdf を index --online --approve; batch resume (KCS_TEST_MISTRAL_OCR=auth_error)
+[markdownize] mixed.pdf を index --online --approve; batch resume (KIO_TEST_MISTRAL_OCR=auth_error)
   → exit=5、online task = failed/auth_error、reserved_usd=1.523e-4
   → 資格情報修復 (mock) 後、index --online / batch retry / batch resume / repair --rebuild-db を全試行
   → failed/auth_error、reserved_usd=1.523e-4 のまま (4 通りとも無変化。phantom が cap を食い続ける)
@@ -283,7 +283,7 @@ reclaim だけを stamp 有無で分岐**させる (stamp が無ければ reclai
 (R11-8 は Failed を pending に数えない**偽陰性**で別物・別行)。
 
 **根本原因 (file:line)**:
-- `crates/kcs-cli/src/main.rs:2455-2458` — `TaskStatus::Paused => { pending += 1; budget_paused = true; }` が
+- `crates/kio-cli/src/main.rs:2455-2458` — `TaskStatus::Paused => { pending += 1; budget_paused = true; }` が
   `fallback_reason` を一切見ない。
 - Paused の `fallback_reason` は 2 種のみ (`budget_exceeded` = `main.rs:7470-7476`/`6130-6131`、
   `secrets_tier_b_hold` = `main.rs:8093`/`8110`)。後者は予算と完全に無関係。
@@ -292,14 +292,14 @@ reclaim だけを stamp 有無で分岐**させる (stamp が無ければ reclai
 **期待 vs 実際 (control 実機、リネーム不要・Tier B ファイルが 1 つ live なだけ)**:
 ```
 password_reset_flow.md (Tier B 誤検知だが実体は非秘匿ドキュメント) を index --online
-kcs status → budget: device_remaining_usd=50.0, device_spent_usd=0.0, warned=false  (予算は無傷)
-kcs search  → index_status: {budget_paused: true, enriched_ratio: 0.5, pending_enrichment_tasks: 1}
+kio status → budget: device_remaining_usd=50.0, device_spent_usd=0.0, warned=false  (予算は無傷)
+kio search  → index_status: {budget_paused: true, enriched_ratio: 0.5, pending_enrichment_tasks: 1}
 ```
 期待 = `budget_paused` は予算枯渇 (`device/folder_remaining <= 0`) または `budget_exceeded` Paused のみ真。
 実際 = 秘匿ホールドで真になり、Agent は「予算を上げれば解決」と誤誘導される (正しい対処は `--send-secrets`)。
 R22-1 と合わさると、リネームで固着したファイルが以後**永久に** `budget_paused=true` を出し続ける。
 
-**severity 裁定**: Sonnet-C は major を主張したが、(i) データ喪失も漏出も無い、(ii) `kcs status` の
+**severity 裁定**: Sonnet-C は major を主張したが、(i) データ喪失も漏出も無い、(ii) `kio status` の
 `tasks[].fallback_reason` と `quarantine[]` から正しい理由は判別可能、(iii) 実装側コメント
 (`main.rs:2418-2419`) は「`budget_paused` is any paused task」と自己記述しており内部的には一貫している、
 の 3 点から **minor** (Opus の裁定) を採る。docs 側の文言が実装より狭いという drift。
@@ -316,8 +316,8 @@ R22-1 と合わさると、リネームで固着したファイルが以後**永
 **脈/型**: R13-3 が導入したローテ機構の TOCTOU。「非アトミック writer」脈の残り。
 
 **根本原因 (file:line)**:
-- `crates/kcs-core/src/scope.rs:1224-1228` (`append_jsonl_rotating`) — `rotate → prune → append` に排他が無い。
-- `crates/kcs-core/src/scope.rs:1247-1250` (`rotate_stale_log`) — `if !dated.exists() { fs::rename(path, &dated)?; }`。
+- `crates/kio-core/src/scope.rs:1224-1228` (`append_jsonl_rotating`) — `rotate → prune → append` に排他が無い。
+- `crates/kio-core/src/scope.rs:1247-1250` (`rotate_stale_log`) — `if !dated.exists() { fs::rename(path, &dated)?; }`。
 
 **成立する interleaving**: P1/P2 が同じ stale live file を stat し、どちらも `dated.exists() == false` を観測する
 → P1 が旧 live を `dated` へ rename し (前日分を保存)、新 live に 1 行 append する
@@ -331,7 +331,7 @@ R22-1 と合わさると、リネームで固着したファイルが以後**永
 ローテ失敗は既に非致死と裁定済み (R12-5/R13-3) のため **minor**。
 
 **修正案**: ローテ + prune + append の全体を、対象ログごとの排他ロック下で行う
-(既存の device lock ヘルパーを流用し、`.kcs/logs/<stem>.lock` を取る)。
+(既存の device lock ヘルパーを流用し、`.kio/logs/<stem>.lock` を取る)。
 `dated.exists()` の再チェックをロック内で行えば TOCTOU が閉じる。
 
 ---
@@ -364,7 +364,7 @@ R22-1 と合わさると、リネームで固着したファイルが以後**永
 **推奨実装分担**: R22-1/2/3 (秘匿 × liveness の状態収束・delicate) はオーケストレータ or 単一 Agent が context 保持。
 R22-4/R22-5 (file-routing) と R22-6 (AuthError 横展開) は別 Agent。R22-7/R22-8 は独立。
 各 fix ごとにターゲット絞りテスト + critical/major は control 付き実機 repro クローズ。
-**docs 変更禁止・新エラーコード新設禁止** (R17-4/R18-4/R19-6 の教訓。R22-4 の可視化は既存 `KCS-I-*` INFO 系で行う)。
+**docs 変更禁止・新エラーコード新設禁止** (R17-4/R18-4/R19-6 の教訓。R22-4 の可視化は既存 `KIO-I-*` INFO 系で行う)。
 
 ---
 
@@ -413,7 +413,7 @@ R22-4/R22-5 (file-routing) と R22-6 (AuthError 横展開) は別 Agent。R22-7/
   PDF 内画像の抽出自体が Step 4 (`bbox_annotation`) 未着手で `image_object_hashes` は常に空。
   **docs 明示の MVP 制約**であり新規バグではない (FlateDecode 据え置きと同じ扱い)。
 - **GPT-5.6-Sol-Ultra R22-4 (vector opt-in preflight が per-scope 隔離より先に stale scope を読み健全 scope も全滅)**:
-  実機で 3 変種すべて反証 — scope ディレクトリ削除 / `scope.json` 破損 / `.kcs` を `chmod 000` (permission error) の
+  実機で 3 変種すべて反証 — scope ディレクトリ削除 / `scope.json` 破損 / `.kio` を `chmod 000` (permission error) の
   いずれでも `exit 3` + `excluded_scopes:[{reason:"unreachable"}]` + **健全 scope の結果を保持** (results=6)。
   静的読解のみのエンジンによる規模・伝播主張は実測で裁定する原則 (R11 の FTS fatal 却下と同型)。
 - **GPT-5.6-Sol-Ultra R22-5 (partial search が失敗 scope を cursor に混ぜ次ページを自己破壊)**:
@@ -427,7 +427,7 @@ R22-4/R22-5 (file-routing) と R22-6 (AuthError 横展開) は別 Agent。R22-7/
   ベクタは非秘匿ファイルの内容と完全同一で、秘匿パスが Evidence として露出することもない。
 
 **オーケストレータ自身の仮説も 1 件自己却下**: R21-5 の placeholder コメント
-(`<!-- KCS deterministic baseline page:2 sha256:... -->`) が FTS に載り検索結果に返る件は、
+(`<!-- KIO deterministic baseline page:2 sha256:... -->`) が FTS に載り検索結果に返る件は、
 空 unit のプレースホルダとして **R21-5 以前から存在する既存パターン** (Sonnet-B の判定を採用)。
 mixed PDF では online enhancement が併走するため証拠喪失も無く、新規バグとしては報告しない。
 
@@ -468,8 +468,8 @@ Opus doc-gap 型 (R13/R15/R17/R18) の 5 例目だが、今回は Opus 自身が
 
 - **並列エンジンが共有 scratchpad で衝突する** (Sonnet-C 報告): `/private/tmp/claude-501/<session>/scratchpad/` を
   複数エンジンが同時に使い、書いたファイルが他エンジンに上書き/削除された。**エンジンごとに一意な作業ディレクトリ**
-  (`mktemp -d /tmp/kcs-<engine>-XXXX`) を指示すること。
-- **`kcs search` に `--mode` フラグは存在しない** (複数エンジンが誤用)。mode は config / `--text` 等で決まる。
+  (`mktemp -d /tmp/kio-<engine>-XXXX`) を指示すること。
+- **`kio search` に `--mode` フラグは存在しない** (複数エンジンが誤用)。mode は config / `--text` 等で決まる。
   cursor は `paging.next_cursor` の下にある (トップレベルではない)。
 - **`codex exec -m gpt-5.3-codex-spark` は `model_reasoning_effort="max"` を 400 で拒否する**
   (`none|minimal|low|medium|high|xhigh` のみ)。Spark には `xhigh` を明示すること。

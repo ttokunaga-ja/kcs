@@ -57,7 +57,7 @@ class TestScaleSpec(unittest.TestCase):
 
 class TestScaleGeneration(unittest.TestCase):
     def setUp(self):
-        self.temp = tempfile.TemporaryDirectory(prefix="kcs-scale-test-")
+        self.temp = tempfile.TemporaryDirectory(prefix="kio-scale-test-")
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name) / "corpus"
 
@@ -82,7 +82,7 @@ class TestScaleGeneration(unittest.TestCase):
         self.assertEqual(loaded["query_workload_id"], spec.QUERY_WORKLOAD_ID)
         self.assertEqual(loaded["shape"]["expected_current_chunks"], 60)
         self.assertEqual(
-            attestor.verify_source_files(self.root, loaded, allow_kcs=True), 20
+            attestor.verify_source_files(self.root, loaded, allow_kio=True), 20
         )
 
     def test_query_workload_identity_is_required(self):
@@ -153,15 +153,15 @@ class TestScaleGeneration(unittest.TestCase):
         manifest, _ = generator.write_corpus(self.root, "tiny")
         scope_dir = self.root / manifest["scopes"][0]["name"]
         source = scope_dir / manifest["scopes"][0]["files"][0]["path"]
-        kcs_dir = scope_dir / ".kcs"
-        kcs_dir.mkdir()
+        kio_dir = scope_dir / ".kio"
+        kio_dir.mkdir()
         device_dir = self.root / spec.DEVICE_DIR_NAME
         device_dir.mkdir()
         runtime = self.root / spec.ATTESTATION_NAME
         runtime.write_bytes(b"{}\n")
         original_lstat = Path.lstat
 
-        for target in (scope_dir, source, kcs_dir, device_dir, runtime):
+        for target in (scope_dir, source, kio_dir, device_dir, runtime):
             with self.subTest(target=target):
                 def fake_lstat(path, *args, **kwargs):
                     metadata = original_lstat(path, *args, **kwargs)

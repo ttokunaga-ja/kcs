@@ -25,7 +25,7 @@ def env_for(fixture_root: Path, env_name: str, online_query: bool):
     base = fixture_root / "env" / env_name
     env = os.environ.copy()
     for name in tuple(env):
-        if name.startswith("KCS_TEST_"):
+        if name.startswith("KIO_TEST_"):
             env.pop(name, None)
         elif name in ("MISTRAL_API_KEY", "GEMINI_API_KEY") and not online_query:
             # hard1/hard3 の自然文クエリは字句非一致が設計そのもの — 検索時
@@ -40,18 +40,18 @@ def env_for(fixture_root: Path, env_name: str, online_query: bool):
 
 def first_scope_dir(fixture_root: Path, tree: str) -> Path:
     root = fixture_root / tree
-    for kcs_dir in sorted(root.rglob(".kcs")):
-        return kcs_dir.parent
+    for kio_dir in sorted(root.rglob(".kio")):
+        return kio_dir.parent
     raise SystemExit(f"no registered scope found under {root}")
 
 
 def main(argv=None):
     ap = argparse.ArgumentParser()
     ap.add_argument("--golden", default=os.path.join(HERE, "golden-queries-qhard.jsonl"))
-    ap.add_argument("--fixture-root", default="/private/tmp/kcs-fixture-run")
+    ap.add_argument("--fixture-root", default="/private/tmp/kio-fixture-run")
     ap.add_argument("--tree", default="qhard", help="fixture-root 直下の対象ツリー名")
     ap.add_argument("--env-name", default="qhard", help="fixture-root/env/ 配下の環境名")
-    ap.add_argument("--bin", default="target/release/kcs")
+    ap.add_argument("--bin", default="target/release/kio")
     ap.add_argument("--out", default=os.path.join(HERE, "qhard-results.json"))
     ap.add_argument("--k", type=int, default=10)
     ap.add_argument("--online-query", action="store_true",

@@ -121,7 +121,7 @@ class TestPersonaGenerationPlan(unittest.TestCase):
                 generator.validate_generation_plan(case)
 
     def test_plan_file_is_no_replace_canonical_and_duplicate_keys_fail(self):
-        with tempfile.TemporaryDirectory(prefix="kcs-persona-plan-") as temporary:
+        with tempfile.TemporaryDirectory(prefix="kio-persona-plan-") as temporary:
             path = Path(temporary).resolve() / "plans" / "tiny.json"
             plan, written = generator.write_generation_plan(path, "tiny")
             self.assertTrue(written)
@@ -178,7 +178,7 @@ class TestPersonaGenerationPlan(unittest.TestCase):
         self.assertIn("synthetic persona-PC W0 corpus", completed.stdout)
 
     def test_direct_plan_cli_writes_outside_git_and_reports_planned_only(self):
-        with tempfile.TemporaryDirectory(prefix="kcs-persona-cli-") as temporary:
+        with tempfile.TemporaryDirectory(prefix="kio-persona-cli-") as temporary:
             plan_path = Path(temporary).resolve() / "tiny.json"
             completed = subprocess.run(
                 [
@@ -201,7 +201,7 @@ class TestPersonaGenerationPlan(unittest.TestCase):
             report = json.loads(completed.stdout)
             self.assertEqual(report["physical_sources"], 4_000)
             self.assertEqual(report["planned_contract_chunks"], 4_131)
-            self.assertFalse(report["actual_kcs_chunks_attested"])
+            self.assertFalse(report["actual_kio_chunks_attested"])
             self.assertEqual(generator.load_generation_plan(plan_path), self.plan)
 
     def test_windows_physical_publication_is_blocked_until_durability_exists(self):
@@ -258,7 +258,7 @@ class TestPreparedPersonaSuite(unittest.TestCase):
         self.assertGreater(capacity["required_peak"]["inodes"], 4_000 * 3)
 
     def test_capacity_receipt_is_bound_to_destination_filesystem_and_limits(self):
-        with tempfile.TemporaryDirectory(prefix="kcs-persona-capacity-") as temporary:
+        with tempfile.TemporaryDirectory(prefix="kio-persona-capacity-") as temporary:
             base = Path(temporary).resolve()
             destination = base / "replay-01"
             receipt = generator._capacity_receipt(
@@ -321,11 +321,11 @@ class TestHistoryPrepareEnvelope(unittest.TestCase):
         self.assertEqual(len(intent["scope_store_directories"]), 400)
         self.assertEqual(len(intent["device_state_directories"]), 20)
         self.assertTrue(
-            all(path.endswith("/.kcs") for path in intent["scope_store_directories"])
+            all(path.endswith("/.kio") for path in intent["scope_store_directories"])
         )
         self.assertTrue(
             all(
-                path.endswith("/.kcs-eval-device")
+                path.endswith("/.kio-eval-device")
                 for path in intent["device_state_directories"]
             )
         )
@@ -342,7 +342,7 @@ class TestHistoryPrepareEnvelope(unittest.TestCase):
         )
 
         tampered = copy.deepcopy(intent)
-        tampered["scope_store_directories"][0] += "/nested/.kcs"
+        tampered["scope_store_directories"][0] += "/nested/.kio"
         with self.assertRaisesRegex(
             generator.PersonaGenerationError, "canonical expansion"
         ):
@@ -365,7 +365,7 @@ class TestHistoryPrepareEnvelope(unittest.TestCase):
             immutable.assert_not_called()
 
         if hasattr(os, "symlink") and os.name != "nt":
-            with tempfile.TemporaryDirectory(prefix="kcs-prepare-ancestor-") as temporary:
+            with tempfile.TemporaryDirectory(prefix="kio-prepare-ancestor-") as temporary:
                 base = Path(temporary)
                 real_parent = base / "real-parent"
                 real_parent.mkdir()
@@ -397,21 +397,21 @@ class TestHistoryPrepareEnvelope(unittest.TestCase):
             self.plan,
             "replay-02",
             receipt_files=[{
-                "relative_path": ".kcs-persona-history/receipts/w0.json",
+                "relative_path": ".kio-persona-history/receipts/w0.json",
                 "raw_sha256": hashlib.sha256(receipt).hexdigest(),
                 "bytes": len(receipt),
             }],
             control_files=[{
-                "relative_path": ".kcs-persona-history/control/barrier.json",
+                "relative_path": ".kio-persona-history/control/barrier.json",
                 "raw_sha256": hashlib.sha256(control).hexdigest(),
                 "bytes": len(control),
             }],
         )
         self.assertEqual(
             intent["receipt_files"][0]["relative_path"],
-            ".kcs-persona-history/receipts/w0.json",
+            ".kio-persona-history/receipts/w0.json",
         )
-        with tempfile.TemporaryDirectory(prefix="kcs-prepare-declared-") as temporary:
+        with tempfile.TemporaryDirectory(prefix="kio-prepare-declared-") as temporary:
             root = Path(temporary)
             receipt_path = root / intent["receipt_files"][0]["relative_path"]
             control_path = root / intent["control_files"][0]["relative_path"]
@@ -475,26 +475,26 @@ class TestHistoryPrepareEnvelope(unittest.TestCase):
 
     @staticmethod
     def _write_minimal_envelope(root):
-        (root / "base" / "leaf" / ".kcs").mkdir(parents=True)
-        (root / "devices" / "p01" / ".kcs-eval-device").mkdir(parents=True)
+        (root / "base" / "leaf" / ".kio").mkdir(parents=True)
+        (root / "devices" / "p01" / ".kio-eval-device").mkdir(parents=True)
         (root / "base" / "leaf" / "source.txt").write_bytes(b"source")
         return (
             {"base/leaf/source.txt"},
             {
-                "base", "base/leaf", "base/leaf/.kcs",
-                "devices", "devices/p01", "devices/p01/.kcs-eval-device",
+                "base", "base/leaf", "base/leaf/.kio",
+                "devices", "devices/p01", "devices/p01/.kio-eval-device",
             },
-            {"base/leaf/.kcs", "devices/p01/.kcs-eval-device"},
+            {"base/leaf/.kio", "devices/p01/.kio-eval-device"},
         )
 
     def test_envelope_walk_rejects_unknown_nested_managed_symlink_and_hardlink(self):
-        with tempfile.TemporaryDirectory(prefix="kcs-prepare-walk-") as temporary:
+        with tempfile.TemporaryDirectory(prefix="kio-prepare-walk-") as temporary:
             root = Path(temporary)
             files, directories, opaque = self._write_minimal_envelope(root)
             generator._walk_history_prepare_envelope(
                 root, files, directories, opaque
             )
-            (root / "base" / ".kcs").mkdir()
+            (root / "base" / ".kio").mkdir()
             with self.assertRaisesRegex(
                 generator.PersonaGenerationError, "unexpected entry"
             ):
@@ -502,7 +502,7 @@ class TestHistoryPrepareEnvelope(unittest.TestCase):
                     root, files, directories, opaque
                 )
 
-        with tempfile.TemporaryDirectory(prefix="kcs-prepare-link-") as temporary:
+        with tempfile.TemporaryDirectory(prefix="kio-prepare-link-") as temporary:
             root = Path(temporary)
             files, directories, opaque = self._write_minimal_envelope(root)
             target = root / "base" / "leaf" / "source.txt"
@@ -519,7 +519,7 @@ class TestHistoryPrepareEnvelope(unittest.TestCase):
                 )
 
         if hasattr(os, "symlink"):
-            with tempfile.TemporaryDirectory(prefix="kcs-prepare-symlink-") as temporary:
+            with tempfile.TemporaryDirectory(prefix="kio-prepare-symlink-") as temporary:
                 root = Path(temporary)
                 files, directories, opaque = self._write_minimal_envelope(root)
                 alias = root / "base" / "leaf" / "alias.txt"
@@ -536,7 +536,7 @@ class TestHistoryPrepareEnvelope(unittest.TestCase):
                     )
 
         if hasattr(os, "mkfifo"):
-            with tempfile.TemporaryDirectory(prefix="kcs-prepare-special-") as temporary:
+            with tempfile.TemporaryDirectory(prefix="kio-prepare-special-") as temporary:
                 root = Path(temporary)
                 files, directories, opaque = self._write_minimal_envelope(root)
                 fifo = root / "base" / "leaf" / "special.pipe"
@@ -553,15 +553,15 @@ class TestHistoryPrepareEnvelope(unittest.TestCase):
                     )
 
     def test_opaque_runtime_is_explicitly_unattested_or_callback_attested(self):
-        with tempfile.TemporaryDirectory(prefix="kcs-prepare-opaque-") as temporary:
+        with tempfile.TemporaryDirectory(prefix="kio-prepare-opaque-") as temporary:
             root = Path(temporary)
             _files, _directories, opaque = self._write_minimal_envelope(root)
             # Contents are deliberately not interpreted by the generic
             # envelope verifier, even when structurally suspicious.
-            (root / "base" / "leaf" / ".kcs" / "arbitrary").write_bytes(b"x")
+            (root / "base" / "leaf" / ".kio" / "arbitrary").write_bytes(b"x")
             descriptors = [
                 {
-                    "kind": "scope_store" if path.endswith("/.kcs") else "device_state",
+                    "kind": "scope_store" if path.endswith("/.kio") else "device_state",
                     "relative_path": path,
                 }
                 for path in sorted(opaque)
@@ -636,7 +636,7 @@ class TestHistoryPrepareEnvelope(unittest.TestCase):
             for parent in pure.parents:
                 if str(parent) != ".":
                     expected_directories.add(parent.as_posix())
-        with tempfile.TemporaryDirectory(prefix="kcs-public-envelope-") as temporary:
+        with tempfile.TemporaryDirectory(prefix="kio-public-envelope-") as temporary:
             root = Path(temporary)
             for relative in sorted(
                 expected_directories,
@@ -649,7 +649,7 @@ class TestHistoryPrepareEnvelope(unittest.TestCase):
                 "root": str(root.absolute()),
                 "profile": "tiny",
                 "replay_id": "replay-03",
-                "actual_kcs_chunks_attested": False,
+                "actual_kio_chunks_attested": False,
                 "immutable_w0_verified": True,
                 "strict_full_tree_verified": False,
             }
@@ -734,13 +734,13 @@ class TestHistoryPrepareEnvelope(unittest.TestCase):
 
 
 @unittest.skipUnless(
-    os.environ.get("KCS_RUN_PERSONA_FS_INTEGRATION") == "1",
-    "set KCS_RUN_PERSONA_FS_INTEGRATION=1 for the 8k-file publication test",
+    os.environ.get("KIO_RUN_PERSONA_FS_INTEGRATION") == "1",
+    "set KIO_RUN_PERSONA_FS_INTEGRATION=1 for the 8k-file publication test",
 )
 class TestPersonaFilesystemIntegration(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.temporary = tempfile.TemporaryDirectory(prefix="kcs-persona-generator-")
+        cls.temporary = tempfile.TemporaryDirectory(prefix="kio-persona-generator-")
         cls.base = Path(cls.temporary.name).resolve()
         cls.plan = generator.build_generation_plan("tiny")
         cls.first = cls.base / "replay-01"

@@ -70,14 +70,14 @@ class TestPointerSection(unittest.TestCase):
 
 class TestPointerAttestation(unittest.TestCase):
     def setUp(self):
-        self.temp = tempfile.TemporaryDirectory(prefix="kcs-eval-attest-")
+        self.temp = tempfile.TemporaryDirectory(prefix="kio-eval-attest-")
         self.addCleanup(self.temp.cleanup)
         self.scope_name = spec.SCOPES[0]
         self.scope_id = "scope_eval_attestation"
         self.scope_dir = os.path.join(self.temp.name, self.scope_name)
-        self.kcs_dir = os.path.join(self.scope_dir, ".kcs")
-        os.makedirs(self.kcs_dir)
-        with open(os.path.join(self.kcs_dir, "scope.json"), "w", encoding="utf-8") as fh:
+        self.kio_dir = os.path.join(self.scope_dir, ".kio")
+        os.makedirs(self.kio_dir)
+        with open(os.path.join(self.kio_dir, "scope.json"), "w", encoding="utf-8") as fh:
             json.dump({"scope_id": self.scope_id}, fh)
 
         self.raw_hash = "sha256:" + "11" * 32
@@ -106,7 +106,7 @@ class TestPointerAttestation(unittest.TestCase):
         object_hash = object_hash or run_eval._hash_bytes(data)
         digest = object_hash.removeprefix("sha256:")
         directory = os.path.join(
-            self.kcs_dir, "objects", subdir, digest[:2], digest[2:4])
+            self.kio_dir, "objects", subdir, digest[:2], digest[2:4])
         os.makedirs(directory, exist_ok=True)
         with open(os.path.join(directory, digest), "wb") as fh:
             fh.write(data)
@@ -384,12 +384,12 @@ class TestClassifyOutcome(unittest.TestCase):
     def test_not_implemented_on_stderr(self):
         outcome = {
             "returncode": 1, "stdout": "",
-            "stderr": '{"error_code":"KCS-E-CONFIG-NOT-IMPLEMENTED-001",'
+            "stderr": '{"error_code":"KIO-E-CONFIG-NOT-IMPLEMENTED-001",'
                       '"message":"not implemented"}',
         }
         kind, resp, code, _ = run_eval.classify_outcome(outcome)
         self.assertEqual(kind, "unimplemented")
-        self.assertEqual(code, "KCS-E-CONFIG-NOT-IMPLEMENTED-001")
+        self.assertEqual(code, "KIO-E-CONFIG-NOT-IMPLEMENTED-001")
 
     def test_exit0_scored(self):
         outcome = {"returncode": 0, "stdout": '{"results":[]}', "stderr": ""}
@@ -407,10 +407,10 @@ class TestClassifyOutcome(unittest.TestCase):
 
     def test_other_nonzero_is_fail(self):
         outcome = {"returncode": 5, "stdout": "",
-                   "stderr": '{"error_code":"KCS-E-SEARCH-BOOM-001","message":"boom"}'}
+                   "stderr": '{"error_code":"KIO-E-SEARCH-BOOM-001","message":"boom"}'}
         kind, resp, code, detail = run_eval.classify_outcome(outcome)
         self.assertEqual(kind, "fail")
-        self.assertEqual(code, "KCS-E-SEARCH-BOOM-001")
+        self.assertEqual(code, "KIO-E-SEARCH-BOOM-001")
 
     def test_exit0_but_garbage_is_fail(self):
         outcome = {"returncode": 0, "stdout": "not json", "stderr": ""}

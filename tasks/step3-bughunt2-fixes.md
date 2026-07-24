@@ -18,14 +18,14 @@ null 許容は許容範囲)。今回の鉱脈は **秘匿情報漏出 (3 件)**�
   (`--approve-secrets` 相当フラグ or config) で hold 解除 — **対話プロンプトはこのビルドに未実装
   だが、hold + 明示フラグ承認は実装可能**。承認手段は decisions に記録。
   回帰テスト: Tier B ファイルが index --online で送信されず status quarantine に出る / 明示承認で送信される
-- **N2 [major] 手動 kcs snapshot が Tier A secrets を CAS + tree に焼き込む** (Opus 実機 + 発注側再確認):
+- **N2 [major] 手動 kio snapshot が Tier A secrets を CAS + tree に焼き込む** (Opus 実機 + 発注側再確認):
   `run_index` は excluded を auto_snapshot に渡すが、`Command::Snapshot` は
   `repo.snapshot(msg, None)` で secret フィルタを素通し。`.env` / `*.pem` の平文が objects/raw と
   最新 tree に混入 (10 §1.1 の「CAS 保存・snapshot 取り込みを行わない」違反、不可逆漏洩)。
   修正: 手動 snapshot も build_scan_preview で Tier A を算出し excluded_paths として渡す (index と同経路)。
   回帰テスト: init → .env 配置 → snapshot で .env が CAS/tree に出ないこと
 - **N3 [major] errors.jsonl が redact_logs=true でも path を平文記録** (Opus + GPT-5.5):
-  KcsError の context の `path`/`query`/`prompt` を append_observation が無加工で書く。10 §7 は
+  KioError の context の `path`/`query`/`prompt` を append_observation が無加工で書く。10 §7 は
   「path は元から記録されない」を前提に purge のスクラブ対象を raw_hash 行に限定しているため、
   redaction 違反 + purge の取りこぼしの二重問題。修正: redact_logs 有効時に append_observation で
   context の path/query/prompt を再帰的に `[redacted]` (or basename) へマスク

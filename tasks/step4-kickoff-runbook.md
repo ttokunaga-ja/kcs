@@ -1,15 +1,15 @@
 # Step 4 着手ランブック (新セッション貼り付け用)
 
 このファイル全体を新しい Claude Code セッションに貼れば、長い会話コンテキストを引き継がずに
-KCS の Step 4 実装を開始できる。自己完結の着手手順。
+KIO の Step 4 実装を開始できる。自己完結の着手手順。
 
 ---
 
 ## 0. これは何か
 
-KCS = 開発者自身が所有する Rust 製ローカル知識アーカイブ CLI (evidence-grounded local knowledge
-archive)。`/Users/ttokunaga-ja/dev/github.com/ttokunaga-ja/kcs` (main)。仕様正本 docs/01〜10、
-実装は crates/kcs-{core,pipeline,adapter,index,search,cli}。
+KIO = 開発者自身が所有する Rust 製ローカル知識アーカイブ CLI (evidence-grounded local knowledge
+archive)。`/Users/ttokunaga-ja/dev/github.com/ttokunaga-ja/kio` (main)。仕様正本 docs/01〜10、
+実装は crates/kio-{core,pipeline,adapter,index,search,cli}。
 
 **Step 1-3 は実装・多エンジン監査・実 API 検証まで完了して main にマージ済み** (着手時点でテスト
 green ~267、clippy/fmt clean)。北極星シナリオ M3-1 は実 Gemini hybrid で Recall@10=1.0 を達成済み。
@@ -21,19 +21,19 @@ green ~267、clippy/fmt clean)。北極星シナリオ M3-1 は実 Gemini hybrid
 
 ## 1. Step 4 のスコープ (正本 = docs/09-mvp-scope.md §3.1、LOC 1,500-2,500 / 1.5-2 ヶ月)
 
-1. **restore** (`kcs restore --to <commit|tag>`): working tree を過去 snapshot に戻す
-   (05 §4)。shallow commit からの restore は既に KCS-E-COMMIT-SHALLOW-001 で拒否済み
+1. **restore** (`kio restore --to <commit|tag>`): working tree を過去 snapshot に戻す
+   (05 §4)。shallow commit からの restore は既に KIO-E-COMMIT-SHALLOW-001 で拒否済み
 2. **time-travel 検索フラグ** (`--at <commit>` / `--all-history` / `--include-deleted` / `--since`):
    05 §1.6 の chunk 集合 join 意味論。Step 3 は基盤 (tree_entries HEAD 射影 / chunks append-only /
    first_seen_commit 刻印) を用意済みで、フラグは「受理して Step 4 エラー」の状態 → 本実装に置換
 3. **purge 最小形**: tombstone + `commit_type=purged` + 検索除外 + `--erase-tombstone` + ログスクラブ
    (05 §3 / 08 §4.1 / 10 §7)。完全な履歴書き換え (tree/commit 再結線・filename 秘匿) は v2+/Phase 4+ で範囲外
-4. **`kcs evidence verify <pointer>`** (単発 CLI): 08 §4.3。resolver 内部関数は Step 3 で実装済み、
+4. **`kio evidence verify <pointer>`** (単発 CLI): 08 §4.3。resolver 内部関数は Step 3 で実装済み、
    CLI 露出が Step 4
-5. **`kcs repair --verify-objects`**: CAS object の content hash 整合性検証 (10 §7.5、KCS-E-STORE-CORRUPT-001)
+5. **`kio repair --verify-objects`**: CAS object の content hash 整合性検証 (10 §7.5、KIO-E-STORE-CORRUPT-001)
 6. **bbox_annotation の実装** (07 §5.2、2026-07-04 実 API 境界調査で採用確定・既定 ON・+25% コスト):
    Mistral OCR の images[] 領域 (チャート/グラフ内テキスト、境界 = C3) の説明+書き起こしを取得し
-   unit metadata に載せて chunk 化時に検索対象へ。`.kcs/config.toml` で無効化可
+   unit metadata に載せて chunk 化時に検索対象へ。`.kio/config.toml` で無効化可
 7. **eval M3-2 / M3-3 の結線と Done 判定**: golden-queries.jsonl に M3-2 (16 件、`--all-history`) /
    M3-3 (16 件、`--include-deleted`) が凍結済み。time-travel 実装後に `run_eval.py --scenario M3-2/M3-3`
    で Recall@10 >= 0.8 を実測 (text-only 0.8889 / hybrid 1.0 が M3-1 の実績)

@@ -1,4 +1,4 @@
-# Step2a 契約テスト仕様書: Step 2 (kcs-pipeline + kcs-adapter)
+# Step2a 契約テスト仕様書: Step 2 (kio-pipeline + kio-adapter)
 
 > 本書は **実装より先にテストを固定する** ためのケース仕様。Rust 実装コードは含まない。
 > Step 2 実装者 (別エージェント) はこの仕様を「動かしてはならない契約」として消化する。
@@ -6,7 +6,7 @@
 > spec に記述がない挙動は勝手に契約化せず、末尾 §C「未定義事項」に切り出す。
 >
 > 手本は `tasks/ws1a-contract-tests.md` (Step 1)。ID 体系・ベクタの書き方・§C の未定義リストの
-> 扱い方を踏襲する。Step 1 から持ち越した **CT-COMMIT-008** (`kcs index` 成功完了時 commit_type=auto)
+> 扱い方を踏襲する。Step 1 から持ち越した **CT-COMMIT-008** (`kio index` 成功完了時 commit_type=auto)
 > は本書 CT2-INDEX-* に取り込む (2026-07-03 監査裁定で Step 2 ゲートへ移動済み)。
 >
 > 改訂 r2 (2026-07-03): Codex クロスレビュー反映。ベクタ 6 件 + 変化率 4 件は再計算一致につき不変
@@ -15,8 +15,8 @@
 > 要-spec を 5 件に再集計 (うち 4 件は 2026-07-03 に発注側が spec 追記予定)。A.1/A.3 の profile ベクタは
 > **計算規約検証用 fixture** であり、実装が採用する実 profile 値の契約ではないことを明記。
 
-対象クレート (Step 2): `kcs-pipeline` + `kcs-adapter`
-実装範囲の正本: `docs/09-mvp-scope.md §3.1` の **Step 2 行** — 初回スキャン preview + 承認 / `.kcsignore` /
+対象クレート (Step 2): `kio-pipeline` + `kio-adapter`
+実装範囲の正本: `docs/09-mvp-scope.md §3.1` の **Step 2 行** — 初回スキャン preview + 承認 / `.kioignore` /
 preview コスト概算 / Prepare / Markdownize (full + incremental) / 同梱 deterministic Adapter (ベースライン index) /
 Mistral OCR 標準 Adapter + image object / batch / retry / resume / budget guardrail / task・artifact descriptor /
 secrets Tier A/B + quarantine + `--yes` 制約。
@@ -30,14 +30,14 @@ secrets Tier A/B + quarantine + `--yes` 制約。
 | `CT2-PROFILE-*` | `tool_profile_hash` / `tool_lock_hash` / `prompt_template_hash` 算出規約 (cmd/url/auth 排除・null 省略・alias 禁止) + Step 2 追加 schema validation | `03 §5.1, §5.2` / `07 §4, §6` / `06 §11` |
 | `CT2-UNIT-*` | prepared unit / `unit_ref` / normalized instance レイアウト / manifest / fingerprint 再利用 / unit_mapping / 変化率 | `03 §2, §2.1` / `04 §2, §2.1, §2.2` |
 | `CT2-INCR-*` | incremental 発動条件 (AND 5) と各否定 → full fallback / identity 不変性 | `04 §3.1` / `07 §8.4` |
-| `CT2-ACCEPT-*` | incremental 出力の受け入れ検査 V1〜V6 + `KCS-E-ADAPTER-CONTRACT-001` | `04 §3.2` / `07 §8.1` |
+| `CT2-ACCEPT-*` | incremental 出力の受け入れ検査 V1〜V6 + `KIO-E-ADAPTER-CONTRACT-001` | `04 §3.2` / `07 §8.1` |
 | `CT2-TASK-*` | task 状態機械 / retry budget / resume / 冪等性 / partial | `04 §5.1, §5.2, §5.3, §5.5, §5.7` |
 | `CT2-BUDGET-*` | 二層 cap 判定 / pause / `--override-budget` / cost ledger | `04 §5.4` |
-| `CT2-APPROVE-*` | 初回スキャン preview + 明示承認 / `.kcsignore` / 非対話 exit 2 / cost 概算 | `10 §1` / `06 §2` |
+| `CT2-APPROVE-*` | 初回スキャン preview + 明示承認 / `.kioignore` / 非対話 exit 2 / cost 概算 | `10 §1` / `06 §2` |
 | `CT2-SECRETS-*` | secrets Tier A/B / quarantine / `--yes` 制約 / `approval_method` | `10 §1.1` / `06 §2` |
 | `CT2-NETWORK-*` | network opt-in (scope × adapter / 未承認 pending / revoke / `--approve` 成立・`--yes` 不成立) | `07 §3` / `06 §2` |
 | `CT2-ADAPTER-*` | 同梱 deterministic Adapter (ベースライン index) / Mistral OCR 規約 / 共通メタデータ / policy | `07 §2.1, §5.2, §4, §7` |
-| `CT2-IMAGE-*` | embedded image 抽出・image object 保存 / `kcs://` object 参照置換 | `03 §2` / `07 §5.2` / `08 §2.3` |
+| `CT2-IMAGE-*` | embedded image 抽出・image object 保存 / `kio://` object 参照置換 | `03 §2` / `07 §5.2` / `08 §2.3` |
 | `CT2-INDEX-*` | index preview→approve→snapshot / index 完了時 auto snapshot (CT-COMMIT-008 継承) / no-op | `05 §8.1` / `06 §1` / `09 §1.1` |
 
 **優先度**
@@ -64,8 +64,8 @@ JCS 近似は `json.dumps(obj, separators=(',',':'), ensure_ascii=False, sort_ke
 > 実装の RFC 8785 準拠 JCS で別途固定する。実装が本ベクタと不一致になった場合、まず「実装の JCS が
 > RFC 8785 準拠か」を疑うこと。
 >
-> **fixture と契約の分離 (重要)**: A.1〜A.3 / A.6 の profile 値 (`mistral-ocr-2505` / `kcs-deterministic-text` /
-> `gemini-multimodal-embedding` 等) は**計算規約を検証するための入力 fixture** であり、KCS 公式 Adapter の
+> **fixture と契約の分離 (重要)**: A.1〜A.3 / A.6 の profile 値 (`mistral-ocr-2505` / `kio-deterministic-text` /
+> `gemini-multimodal-embedding` 等) は**計算規約を検証するための入力 fixture** であり、KIO 公式 Adapter の
 > 実 profile 値・実 tool-lock 値の契約では**ない**。特に `gemini_multimodal_embedding` (1536 次元) は
 > `07 §5.3` が「例示であり、ベンダー・次元数の裏取り済み値ではない」と明記する未確定 profile。
 > 契約は「この入力ならこの hash」という**算出関数の固定**のみで、実装の実運用 profile が
@@ -76,14 +76,14 @@ JCS 近似は `json.dumps(obj, separators=(',',':'), ensure_ascii=False, sort_ke
 **PROFILE-1 (mistral_ocr, online_api / 文書処理 API)** — prompt/sampling は当該 Adapter に無く null 省略:
 
 ```text
-canonical: {"adapter_kind":"markdownize","adapter_role":"multimodal","model_or_tool_family":"mistral-ocr","model_version_pin":"mistral-ocr-2505","output_schema":"kcs-markdown-v1","runtime_kind":"cloud","spec_version":1}
+canonical: {"adapter_kind":"markdownize","adapter_role":"multimodal","model_or_tool_family":"mistral-ocr","model_version_pin":"mistral-ocr-2505","output_schema":"kio-markdown-v1","runtime_kind":"cloud","spec_version":1}
 tool_profile_hash = sha256:24bd9e903241740fc9fe94fb72a6ff3e697b3c0859bd5aef1b49728a207e81ed
 ```
 
 **PROFILE-2 (同梱 deterministic markdownize, deterministic_library)**:
 
 ```text
-canonical: {"adapter_kind":"markdownize","adapter_role":"text","model_or_tool_family":"kcs-deterministic-text","model_version_pin":"1.0.0","output_schema":"kcs-markdown-v1","runtime_kind":"local","spec_version":1}
+canonical: {"adapter_kind":"markdownize","adapter_role":"text","model_or_tool_family":"kio-deterministic-text","model_version_pin":"1.0.0","output_schema":"kio-markdown-v1","runtime_kind":"local","spec_version":1}
 tool_profile_hash = sha256:76c01950d19edffc1b8ca75e06d7754fb52cd05db1bb10e3268f81392bf54095
 ```
 
@@ -97,13 +97,13 @@ tool_profile_hash = sha256:c2bda78e217e1f9e12cd17ddac6c46e28a50b8060976f533f76f1
 **PROFILE-4 (同梱 deterministic prepare, deterministic_library)** — tool_lock ベクタ用:
 
 ```text
-canonical: {"adapter_kind":"prepare","adapter_role":"text","model_or_tool_family":"kcs-deterministic-prepare","model_version_pin":"1.0.0","runtime_kind":"local","spec_version":1}
+canonical: {"adapter_kind":"prepare","adapter_role":"text","model_or_tool_family":"kio-deterministic-prepare","model_version_pin":"1.0.0","runtime_kind":"local","spec_version":1}
 tool_profile_hash = sha256:20b67a9d7e7e2654379f16f20b445d007e95abac7c8f85d6da65beccff7e6b03
 ```
 
 **null 省略規則の検証 (PROFILE-1-NULL)**: PROFILE-1 に
 `prompt_template_id / prompt_template_hash / sampling / dimensions / distance / modality` を
-**すべて `null` 値で追加**した profile を canonicalize すると、KCS は null キーを hash 入力から落とすため、
+**すべて `null` 値で追加**した profile を canonicalize すると、KIO は null キーを hash 入力から落とすため、
 canonical バイト列と `tool_profile_hash` は PROFILE-1 と**完全一致**する
 (= `sha256:24bd9e90...81ed`)。「省略と null を識別しない」(`03 §5.1`) の実証。
 
@@ -189,11 +189,11 @@ unchanged 10 + added 1 に分解して回避することを示す (`04 §2.2` �
 (WS1a A.1 RAW-2 の値を流用)、`tool_profile_hash = sha256:24bd…81ed` (A.1 PROFILE-1)、`gen=0` のとき:
 
 ```text
-instance dir: .kcs/objects/normalized_units/bb/e1/
+instance dir: .kio/objects/normalized_units/bb/e1/
               sha256:bbe1da2edd1819b58ce32163144923f850fc7f2c7b4fe130635c6b54a8e7ac59.sha256:24bd9e903241740fc9fe94fb72a6ff3e697b3c0859bd5aef1b49728a207e81ed.g0/
   manifest.json                 # order 付き unit 一覧 + unit status (正本)
   3c2fa650872d5484.json         # unit object (unit_key=page:12, A.4)
-全文 view (cache): .kcs/objects/normalized/bb/e1/
+全文 view (cache): .kio/objects/normalized/bb/e1/
               <raw_hash>.<tool_profile_hash>.g0.md
 ```
 
@@ -274,12 +274,12 @@ fan-out `ab/cd` は raw_hash の digest 先頭 2/次 2 文字 (`bb`/`e1`、`03 �
 - 根拠: `03 §5.1` (「spec_version の bump は breaking change 扱い」) / `10 §12.5`。
 
 **CT2-PROFILE-010** — P0 — Step 2 追加 schema validation (tools.toml / tool-lock.json)
-- Given: (a) schema 違反の `~/.config/kcs/tools.toml` (例: `auth` が `^(keychain|env|plain):` 形式外)、
-  (b) schema 違反の `.kcs/tool-lock.json`。
+- Given: (a) schema 違反の `~/.config/kio/tools.toml` (例: `auth` が `^(keychain|env|plain):` 形式外)、
+  (b) schema 違反の `.kio/tool-lock.json`。
 - When: CLI 起動 / 当該ファイルを使う操作。
-- Then: いずれも exit 2 + `KCS-E-CONFIG-SCHEMA-NNN`。Step 1 対象 (scope/manifest/config) に加え、
+- Then: いずれも exit 2 + `KIO-E-CONFIG-SCHEMA-NNN`。Step 1 対象 (scope/manifest/config) に加え、
   Step 2 で tools.toml / tool-lock.json が validation 対象に入る。
-- 根拠: `06 §11` (schema 一覧 / validation 失敗 exit 2 + `KCS-E-CONFIG-SCHEMA-NNN` / `auth` 形式は 07 §1) /
+- 根拠: `06 §11` (schema 一覧 / validation 失敗 exit 2 + `KIO-E-CONFIG-SCHEMA-NNN` / `auth` 形式は 07 §1) /
   `09 §3.1` (「JSON Schema validation (Step 1 は scope / manifest / config。以後各 Step で対象 schema を追加)」) /
   `10 §12.3`。
 
@@ -354,8 +354,8 @@ fan-out `ab/cd` は raw_hash の digest 先頭 2/次 2 文字 (`bb`/`e1`、`03 �
 **CT2-UNIT-009** — P1 — 全文 view は決定論的結合の cache (正本ではない)
 - Given: done/failed 混在の instance。
 - When: 全文 view を組み立てる。
-- Then: `order` 昇順、done は末尾連続改行除去、failed は `<!-- KCS-MISSING-UNIT <unit_key> <error_kind> -->`、
-  `"\n\n"` 結合 + 末尾 `"\n"`、§10 ヘッダ付与。view の破損・喪失は `kcs repair` 再生成で解消し、
+- Then: `order` 昇順、done は末尾連続改行除去、failed は `<!-- KIO-MISSING-UNIT <unit_key> <error_kind> -->`、
+  `"\n\n"` 結合 + 末尾 `"\n"`、§10 ヘッダ付与。view の破損・喪失は `kio repair` 再生成で解消し、
   up_to_date 判定に view の存在を使わない。
 - 根拠: `03 §2.1` (view 組み立て規則 5 手順 + ヘッダ) / `03 §6` (「全文 view の存在は判定に使わない」)。
 
@@ -369,7 +369,7 @@ fan-out `ab/cd` は raw_hash の digest 先頭 2/次 2 文字 (`bb`/`e1`、`03 �
 **CT2-UNIT-011** — P1 — up_to_date 状態分類 (Step 2 で判定可能な全状態)
 - Given: (a) 未 Markdownize / (b) 全 unit done / (c) raw 変化 / (d) tool_profile 変化 / (e) 一部 unit failed /
   (f) manifest done だが unit object 欠落。
-- When: `kcs status` 相当の判定。
+- When: `kio status` 相当の判定。
 - Then: (a)`pending` (b)`up_to_date` (c)`modified` (d)`tool_changed` (e)`partial` (f)`missing_output`。
   判定は「最新 instance の manifest + unit object の存在のみ」で、Markdown content hash 一致は条件に含めない。
 - 根拠: `03 §6` (判定擬似コード / 状態分類 8 種) / `03 §5`。
@@ -419,13 +419,13 @@ fan-out `ab/cd` は raw_hash の digest 先頭 2/次 2 文字 (`bb`/`e1`、`03 �
 **CT2-INCR-004** — P0 — 否定3: capability 宣言なし → 常に full
 - Given: Adapter が `incremental_update` を宣言しない (同梱 deterministic 等)。
 - When: Markdownize。
-- Then: KCS は**常に** full モードで呼ぶ (後方互換)。
+- Then: KIO は**常に** full モードで呼ぶ (後方互換)。
 - 根拠: `04 §3.1` (条件 3) / `07 §8.4` (「capabilities に incremental_update を含まない Adapter は常に full」)。
 
 **CT2-INCR-005** — P0 — 否定4: 変化率 ≥ threshold → full
 - Given: 変化率 0.40 (RATE-B ≥ default 0.30)。
 - When: Markdownize。
-- Then: `mode=full`。threshold は `.kcs/config.toml [markdownize.incremental] threshold` (default 0.30)。
+- Then: `mode=full`。threshold は `.kio/config.toml [markdownize.incremental] threshold` (default 0.30)。
 - 根拠: `04 §3.1` (条件 4) / `03 §11` (threshold 設定)。
 
 **CT2-INCR-006** — P0 — 否定5: 直前 N 回連続 incremental → full 強制 (style drift 防止)
@@ -435,7 +435,7 @@ fan-out `ab/cd` は raw_hash の digest 先頭 2/次 2 文字 (`bb`/`e1`、`03 �
 - 根拠: `04 §3.1` (条件 5) / `03 §11` (`max_consecutive=5`)。
 
 **CT2-INCR-007** — P1 — 連続回数カウンタ復元不能時は full 強制 (安全側)
-- Given: `kcs repair --rebuild-db` で incremental 連続回数カウンタが復元不能。
+- Given: `kio repair --rebuild-db` で incremental 連続回数カウンタが復元不能。
 - When: 次回 Markdownize。
 - Then: full を強制 (style drift 防止側に倒す)。
 - 根拠: `04 §5.7` (「incremental の連続回数が復元不能な場合、次回 Markdownize は full を強制」)。
@@ -446,29 +446,29 @@ fan-out `ab/cd` は raw_hash の digest 先頭 2/次 2 文字 (`bb`/`e1`、`03 �
 - Then: identity は `(raw_hash, tool_profile_hash)` のまま。`tool_profile_hash` 入力に incremental flag を含めない。
 - 根拠: `04 §3.1` (「identity 不変性」)。
 
-**CT2-INCR-009** — P1 — spec_version 不一致 → Adapter は invalid_input 失敗、KCS は full で呼び直す
-- Given: Adapter 入出力 schema の `spec_version` が KCS と不一致。
+**CT2-INCR-009** — P1 — spec_version 不一致 → Adapter は invalid_input 失敗、KIO は full で呼び直す
+- Given: Adapter 入出力 schema の `spec_version` が KIO と不一致。
 - When: incremental 呼び出し。
-- Then: Adapter は `invalid_input` として失敗し、KCS は当該 Adapter を capability なし扱いにして full で呼び直す
+- Then: Adapter は `invalid_input` として失敗し、KIO は当該 Adapter を capability なし扱いにして full で呼び直す
   (index を止めない)。
 - 根拠: `07 §8.1` (5) / `07 §8.4` / `10 §12.5` (spec_version bump 規約と full fallback)。
 
 **CT2-INCR-010** — P1 — fallback_to_full=true 受信で full 再投入
 - Given: Adapter が incremental 出力で `fallback_to_full=true` を返す。
-- When: KCS が受信。
-- Then: 同一入力で full モードへ再投入する。閾値 hint が KCS 側と衝突したら KCS 側を優先。
+- When: KIO が受信。
+- Then: 同一入力で full モードへ再投入する。閾値 hint が KIO 側と衝突したら KIO 側を優先。
 - 根拠: `04 §3.1` (Adapter 拒否権) / `07 §8.1` (4)。
 
 ### CT2-ACCEPT-* — incremental 出力の受け入れ検査 V1〜V6 (`04 §3.2` / `07 §8.1`)
 
 > 新 unit 全集合 `N = unchanged 候補 ∪ changed ∪ added` (`04 §3.2`)。各違反を個別テスト化する。
-> 違反時は `KCS-E-ADAPTER-CONTRACT-001` で**全体 reject** (unit 1 つも persist しない)、full へ自動 fallback。
+> 違反時は `KIO-E-ADAPTER-CONTRACT-001` で**全体 reject** (unit 1 つも persist しない)、full へ自動 fallback。
 
 **CT2-ACCEPT-001** — P0 — V1 被覆・排他: 3 集合の和 = N かつ互いに素
 - Given: `keys(updated_units) ∪ keys(added_units) ∪ unchanged_unit_keys ≠ N` (unit の返し忘れ)、
   または 3 集合が交差 (二重出力)。
 - When: persist 前検査。
-- Then: reject (`KCS-E-ADAPTER-CONTRACT-001`)、full fallback (`fallback_reason="contract_violation"`)。
+- Then: reject (`KIO-E-ADAPTER-CONTRACT-001`)、full fallback (`fallback_reason="contract_violation"`)。
 - 根拠: `04 §3.2` (V1)。
 
 **CT2-ACCEPT-002** — P0 — V2 removed 一致: removed_unit_keys = hints.removed_unit_keys
@@ -540,13 +540,13 @@ fan-out `ab/cd` は raw_hash の digest 先頭 2/次 2 文字 (`bb`/`e1`、`03 �
 - Given: 各エラー種別。
 - When: retry を評価。
 - Then:
-  - `network_error` retryable, max 5, exp(base=2s, cap=60s) full jitter, `KCS-E-BATCH-NET-001`
-  - `rate_limit` retryable, max ∞, honor Retry-After, `KCS-E-BATCH-RATE-001`
-  - `auth_error` max 0 (user action), `KCS-E-BATCH-AUTH-001`
-  - `quota_exceeded` retryable, max 3, fixed 1h, `KCS-E-BATCH-QUOTA-001`
-  - `invalid_input` permanent, max 0, `KCS-E-BATCH-INPUT-001`
-  - `contract_violation` permanent, max 0 (full fallback 1 回自動), `KCS-E-ADAPTER-CONTRACT-001`
-  - `budget_exceeded` paused, `KCS-E-BATCH-BUDGET-001`
+  - `network_error` retryable, max 5, exp(base=2s, cap=60s) full jitter, `KIO-E-BATCH-NET-001`
+  - `rate_limit` retryable, max ∞, honor Retry-After, `KIO-E-BATCH-RATE-001`
+  - `auth_error` max 0 (user action), `KIO-E-BATCH-AUTH-001`
+  - `quota_exceeded` retryable, max 3, fixed 1h, `KIO-E-BATCH-QUOTA-001`
+  - `invalid_input` permanent, max 0, `KIO-E-BATCH-INPUT-001`
+  - `contract_violation` permanent, max 0 (full fallback 1 回自動), `KIO-E-ADAPTER-CONTRACT-001`
+  - `budget_exceeded` paused, `KIO-E-BATCH-BUDGET-001`
 - 根拠: `04 §5.3` (エラー種別と Retry Budget)。
 
 **CT2-TASK-003** — P0 — 冪等性: 同一 (input_hash, tool_profile_hash) 再実行で二重 artifact を作らない
@@ -560,7 +560,7 @@ fan-out `ab/cd` は raw_hash の digest 先頭 2/次 2 文字 (`bb`/`e1`、`03 �
 - Given: partial task (一部 unit failed)。
 - When: retry。
 - Then: done unit は保全 (first-instance-wins)。retry は**失敗 unit のみ**対象。chunking/embedding/index は
-  done unit 由来のみ実行 (failed unit 由来 chunk は index に載せない)。`kcs status` に失敗 unit_key と error_kind を表示。
+  done unit 由来のみ実行 (failed unit 由来 chunk は index に載せない)。`kio status` に失敗 unit_key と error_kind を表示。
 - 根拠: `04 §5.2` (partial の規範) / `03 §6` (partial)。
 
 **CT2-TASK-005** — P1 — retry の再投入形 (capability 有無で分岐)
@@ -574,7 +574,7 @@ fan-out `ab/cd` は raw_hash の digest 先頭 2/次 2 文字 (`bb`/`e1`、`03 �
 - Given: partial の失敗 unit。
 - When: 再投入成功 / permanent error。
 - Then: `failed → done` の一方向遷移のみ。error_kind が permanent (invalid_input 等) の unit は再投入せず
-  partial のまま `kcs status` に表示し続ける。
+  partial のまま `kio status` に表示し続ける。
 - 根拠: `04 §5.2` (manifest unit status 遷移) / `03 §2.1` (`failed → done` 一方向)。
 
 **CT2-TASK-007** — P1 — stale detection: heartbeat + 5min 超過で別 worker が pull 可能
@@ -584,10 +584,10 @@ fan-out `ab/cd` は raw_hash の digest 先頭 2/次 2 文字 (`bb`/`e1`、`03 �
 - 根拠: `04 §5.2` (「running が heartbeat_at + 5min を超えたら stale」)。
 
 **CT2-TASK-008** — P1 — resume: 中断状態 (running stale / pending) を再開
-- Given: `kcs batch resume`。
+- Given: `kio batch resume`。
 - When: 実行。
 - Then: running stale / pending の task を再開する。
-- 根拠: `04 §5.7` (「kcs batch resume: 中断状態 (running stale, pending) を再開」) / `06 §1`。
+- 根拠: `04 §5.7` (「kio batch resume: 中断状態 (running stale, pending) を再開」) / `06 §1`。
 
 **CT2-TASK-009** — P1 — task テーブル喪失は object store から再検出可能 (attempts のみ喪失容認)
 - Given: `task` テーブルを消去。
@@ -597,7 +597,7 @@ fan-out `ab/cd` は raw_hash の digest 先頭 2/次 2 文字 (`bb`/`e1`、`03 �
 - 根拠: `04 §5.2` / `04 §5.7` (「failed の喪失は pending への退行」/ task 喪失許容)。
 
 **CT2-TASK-010** — P1 — repair --rebuild-db の復元範囲
-- Given: SQLite を消去し `kcs repair --rebuild-db`。
+- Given: SQLite を消去し `kio repair --rebuild-db`。
 - When: 再構築。
 - Then: 復元される: normalization_runs の done/partial/missing_output 相当、最新 gen、run_id/parent_gen、
   prepared_units 台帳、chunks/embeddings/FTS。喪失容認: failed run 記録 (error/fallback_reason/attempts)、
@@ -612,7 +612,7 @@ fan-out `ab/cd` は raw_hash の digest 先頭 2/次 2 文字 (`bb`/`e1`、`03 �
 - 根拠: `04 §5.6` / `10 §12.2`。
 
 **CT2-TASK-012** — P2 — embedding の content ベース再利用
-- Given: `(text_hash, embedding profile_hash, dimensions, distance, modality)` 一致の既存 embedding が同一 .kcs 内。
+- Given: `(text_hash, embedding profile_hash, dimensions, distance, modality)` 一致の既存 embedding が同一 .kio 内。
 - When: embedding task。
 - Then: Adapter を呼ばず既存 vector を再利用 (incremental 後の unchanged unit 由来 chunk は再生成しない)。
 - 根拠: `04 §5.5` (embedding の content ベース再利用)。**embedding は Step 3 主対象**につき P2。
@@ -630,7 +630,7 @@ fan-out `ab/cd` は raw_hash の digest 先頭 2/次 2 文字 (`bb`/`e1`、`03 �
 ### CT2-BUDGET-* — 二層 cost guardrail (`04 §5.4`)
 
 **CT2-BUDGET-001** — P0 — 二層 cap の判定式 (device と folder の残余 min)
-- Given: device cap $50 (当月合算)、folder cap $10 (当該 .kcs)。
+- Given: device cap $50 (当月合算)、folder cap $10 (当該 .kio)。
 - When: scope S の新規タスク起動可否を判定。
 - Then: 起動可は `ledger(S, 当月) < folder_cap(S)` **かつ** `ledger(device, 当月) < device_cap`。
   effective cap = 両者の残余の min。folder cap 未設定なら device cap のみ。`per_adapter` 下限も両層で判定。
@@ -639,20 +639,20 @@ fan-out `ab/cd` は raw_hash の digest 先頭 2/次 2 文字 (`bb`/`e1`、`03 �
 **CT2-BUDGET-002** — P0 — cap 到達で新規 paused、走行中タスクは完走
 - Given: いずれかの cap を超過。
 - When: 判定。
-- Then: 走行中タスクは完了させ、新規タスクは `paused`。`kcs status` に超過 cap 種別 (`device`|`folder`) と scope を表示。
+- Then: 走行中タスクは完了させ、新規タスクは `paused`。`kio status` に超過 cap 種別 (`device`|`folder`) と scope を表示。
 - 根拠: `04 §5.4` (「走行中タスクは完了させ、新規タスクは paused」/ status 表示)。
 
 **CT2-BUDGET-003** — P0 — --override-budget で両層無視して再開
 - Given: budget pause 状態。
-- When: `kcs batch resume --override-budget`。
+- When: `kio batch resume --override-budget`。
 - Then: 当月の device cap / folder cap の**両方**を無視して再開。
 - 根拠: `04 §5.4` / `06 §1` (「budget 超過 pause は --override-budget 必須」)。
 
 **CT2-BUDGET-004** — P1 — cost ledger はデバイスグローバル 1 個 + scope_id 付与
-- Given: 複数 .kcs のタスク実行。
+- Given: 複数 .kio のタスク実行。
 - When: コスト記録。
-- Then: `~/.local/share/kcs/cost-ledger.sqlite` (デバイスグローバル 1 個) に Adapter 報告値
-  (input/output token × 単価) を記録し、各記録に `scope_id` を付与。`.kcs` 内に ledger を置かない。
+- Then: `~/.local/share/kio/cost-ledger.sqlite` (デバイスグローバル 1 個) に Adapter 報告値
+  (input/output token × 単価) を記録し、各記録に `scope_id` を付与。`.kio` 内に ledger を置かない。
   folder cap 判定は ledger の scope 別集計。
 - 根拠: `04 §5.4` (ledger の配置 / scope_id 付与 / cache-truth 規約)。
 
@@ -683,18 +683,18 @@ fan-out `ab/cd` は raw_hash の digest 先頭 2/次 2 文字 (`bb`/`e1`、`03 �
 
 **CT2-APPROVE-001** — P0 — 未承認 scope の非対話 index は exit 2 で失敗
 - Given: 未承認 scope、非対話環境 (`isatty=false`)、`--yes`/`--approve` なし。
-- When: `kcs index`。
+- When: `kio index`。
 - Then: exit 2 で失敗 (何も書き込まない)。
 - 根拠: `06 §2` (「非対話環境では … `--yes`/`--approve` がない限り exit 2」) / `10 §1`。
 
 **CT2-APPROVE-002** — P0 — --preview は何も書き込まない
 - Given: 未承認 scope。
-- When: `kcs index --preview`。
+- When: `kio index --preview`。
 - Then: preview のみ表示、raw object 保存・Adapter 実行を開始しない。
 - 根拠: `06 §2` (「preview のみ。何も書き込まない」)。
 
 **CT2-APPROVE-003** — P0 — preview の必須表示項目
-- Given: `kcs index --preview`。
+- Given: `kio index --preview`。
 - When: preview を検査。
 - Then: 少なくとも root/scope、推定ファイル数、推定容量、大容量ファイル、有効 ignore、除外候補、
   secrets 機微候補警告 (Tier A/B)、network transmission policy、adapter execution mode、
@@ -705,22 +705,22 @@ fan-out `ab/cd` は raw_hash の digest 先頭 2/次 2 文字 (`bb`/`e1`、`03 �
 
 **CT2-APPROVE-004** — P0 — --approve で承認し index 開始
 - Given: 未承認 scope。
-- When: `kcs index --approve`。
+- When: `kio index --approve`。
 - Then: preview を承認して index を開始する。承認記録を残す (CT2-SECRETS-005)。
 - 根拠: `06 §2` (「preview を承認、index 開始」) / `10 §1`。
 
-**CT2-APPROVE-005** — P1 — .kcsignore + config の除外適用 (自動除外しない)
-- Given: `.kcsignore` に除外パターン、config の ignore。
+**CT2-APPROVE-005** — P1 — .kioignore + config の除外適用 (自動除外しない)
+- Given: `.kioignore` に除外パターン、config の ignore。
 - When: index。
 - Then: 除外候補は**提案**でありユーザー承認なしに自動除外しない (唯一の例外は secrets Tier A、CT2-SECRETS-001)。
-  `.kcsignore` で明示除外したパターンは管理対象外。
+  `.kioignore` で明示除外したパターンは管理対象外。
 - 根拠: `10 §1` (「除外候補は提案であり、ユーザーの承認なしに自動除外しない」) / `06 §2`。
-- 補足: `.kcsignore` の文法 (gitignore 互換 / negation `!pattern` の順序) は spec 未確定 (§C-5)。
+- 補足: `.kioignore` の文法 (gitignore 互換 / negation `!pattern` の順序) は spec 未確定 (§C-5)。
 
 **CT2-APPROVE-006** — P1 — cost 概算が effective budget cap を超える場合は承認前に警告 + 選択肢提示
 - Given: 概算合計が当月 effective budget cap を超過。
 - When: preview。
-- Then: 承認前に警告し、cap 内での推定完了時期 (月数) と選択肢 (ベースラインのみ / .kcsignore 調整 / cap 変更 / 続行)
+- Then: 承認前に警告し、cap 内での推定完了時期 (月数) と選択肢 (ベースラインのみ / .kioignore 調整 / cap 変更 / 続行)
   を提示。
 - 根拠: `10 §1` (cost 超過警告と選択肢) / `04 §5.4` (effective cap)。
 
@@ -732,7 +732,7 @@ fan-out `ab/cd` は raw_hash の digest 先頭 2/次 2 文字 (`bb`/`e1`、`03 �
 
 **CT2-APPROVE-008** — P2 — 承認後の AI 強化進捗を隠さない
 - Given: AI 強化が paused/pending。
-- When: `kcs status`。
+- When: `kio status`。
 - Then: done/pending/paused 件数と paused 理由 (budget/auth/rate limit) を表示。検索は部分 index 時 `index_status` を返す
   (返却自体は Step 3)。
 - 根拠: `10 §1` (「AI 強化が未完了・paused の間、その状態を隠してはならない」/ status 表示項目) /
@@ -742,13 +742,13 @@ fan-out `ab/cd` は raw_hash の digest 先頭 2/次 2 文字 (`bb`/`e1`、`03 �
 
 **CT2-SECRETS-001** — P0 — Tier A はデフォルト除外 (「除外済み」で preview 表示)
 - Given: scope に `.env` / `*.pem` / `id_rsa*` / `.ssh/` 等 Tier A 一致ファイル。
-- When: `kcs index --preview`。
+- When: `kio index --preview`。
 - Then: built-in デフォルト除外として「除外済み」状態で preview に表示。取り込むには明示解除
-  (対話承認時の個別選択 または `.kcsignore` の negation `!pattern`) が必要。
+  (対話承認時の個別選択 または `.kioignore` の negation `!pattern`) が必要。
 - 根拠: `10 §1.1` (Tier A / パターン一覧 / 解除方法) / `10 §1`。
 
 **CT2-SECRETS-002** — P0 — --yes は Tier A の解除ができない
-- Given: Tier A 一致ファイルを含む scope、`kcs index --yes`。
+- Given: Tier A 一致ファイルを含む scope、`kio index --yes`。
 - When: index。
 - Then: `--yes` はローカル取り込み承認のみ自動化し、Tier A の解除・Tier B 警告スキップを**行えない**。
   Tier A ファイルは除外されたまま。
@@ -758,20 +758,20 @@ fan-out `ab/cd` は raw_hash の digest 先頭 2/次 2 文字 (`bb`/`e1`、`03 �
 - Given: `*credentials*` / `*token*` 等 Tier B 一致ファイル。
 - When: index。
 - Then: ローカル取り込み (CAS 保存・ローカル index) は行うが、初回 preview の「機微ファイル候補」欄に列挙。
-  承認後に追加された Tier B 新規ファイルは online_api Adapter への送信 task を pending のまま保留し `kcs status` に表示。
+  承認後に追加された Tier B 新規ファイルは online_api Adapter への送信 task を pending のまま保留し `kio status` に表示。
 - 根拠: `10 §1.1` (Tier B / 承認後追加の Tier B 扱い) / `10 §1`。
 
 **CT2-SECRETS-004** — P0 — quarantine: 承認後追加の Tier A 新規ファイルは取り込み保留
 - Given: scope 承認後にフォルダへ追加された Tier A 一致ファイル。
 - When: 自動処理。
-- Then: 取り込み自体を保留 (quarantine)。CAS 保存・snapshot への取り込みを行わない。`kcs status` に
-  「取り込み保留 (secrets 候補)」表示。取り込みには対話確認 または `.kcsignore` 明示編集を要する。
+- Then: 取り込み自体を保留 (quarantine)。CAS 保存・snapshot への取り込みを行わない。`kio status` に
+  「取り込み保留 (secrets 候補)」表示。取り込みには対話確認 または `.kioignore` 明示編集を要する。
 - 根拠: `10 §1.1` (「承認後に追加されたファイルの扱い」Tier A: quarantine)。
 
 **CT2-SECRETS-005** — P1 — approval_method の記録 (interactive | approve | yes)
 - Given: 各承認経路。
 - When: 承認記録を検査。
-- Then: 承認記録に `scope_id / root_path / approved_at / actor / approval_method / kcs_version /
+- Then: 承認記録に `scope_id / root_path / approved_at / actor / approval_method / kio_version /
   effective_ignore_hash / estimated_*` を残す。`approval_method` は対話=`interactive`、`--approve`=`approve`、
   `--yes`=`yes` を記録し、事後監査で区別できる。
 - 根拠: `10 §1` (承認記録項目) / `06 §2` (「approval_method に "yes" が記録され、対話承認と事後監査で区別」)。
@@ -785,7 +785,7 @@ fan-out `ab/cd` は raw_hash の digest 先頭 2/次 2 文字 (`bb`/`e1`、`03 �
 ### CT2-NETWORK-* — network opt-in (`07 §3` / `06 §2`)
 
 **CT2-NETWORK-001** — P0 — 未承認 scope では online task 不発行・pending 残留
-- Given: network opt-in 未成立の scope、`kcs index --yes`。
+- Given: network opt-in 未成立の scope、`kio index --yes`。
 - When: index を開始。
 - Then: online_api Adapter への送信 task は**発行されず pending のまま残る**。Markdownize は同梱 deterministic
   Adapter で実行 (タスクを止めない)、Embedding task は生成しない。
@@ -810,7 +810,7 @@ fan-out `ab/cd` は raw_hash の digest 先頭 2/次 2 文字 (`bb`/`e1`、`03 �
 - 根拠: `07 §3` (寿命: 永続。tool_id/execution_mode 変更で失効)。
 
 **CT2-NETWORK-005** — P1 — revoke で新規オンライン送信 task を停止
-- Given: `.kcs/config.toml` の `adapter.policy.allow_network = false`。
+- Given: `.kio/config.toml` の `adapter.policy.allow_network = false`。
 - When: 以後の index。
 - Then: 当該 scope の新規オンライン送信 task を発行しない (送信済みデータの取り消しは保証しない)。
 - 根拠: `07 §3` (revoke)。
@@ -820,9 +820,9 @@ fan-out `ab/cd` は raw_hash の digest 先頭 2/次 2 文字 (`bb`/`e1`、`03 �
 - When: 実行。
 - Then: (a) その 1 回の実行に限り online task 発行可。**永続記録を作らない** (次回実行は opt-in 未成立に戻る)。
   (b) その実行では online task を発行しない。優先関係は
-  `CLI (--online/--offline) > .kcs/config.toml (scope) > ~/.config/kcs/config.toml (user)`。
+  `CLI (--online/--offline) > .kio/config.toml (scope) > ~/.config/kio/config.toml (user)`。
 - 根拠: `07 §3` (`--online` は一時 opt-in / 優先関係)。
-- 補足: `--online`/`--offline` フラグは `06 §1` の正本コマンド一覧 (kcs index 構文) に**未掲載**。
+- 補足: `--online`/`--offline` フラグは `06 §1` の正本コマンド一覧 (kio index 構文) に**未掲載**。
   `06 §1` は「他 spec が新しいフラグに言及する場合、本節への追加を伴う」と定めるため 06 §1 への
   同期が必要 (**発注側で追記予定**)。それまで本テストの根拠は `07 §3` (network opt-in の正本) とする。
 
@@ -838,7 +838,7 @@ fan-out `ab/cd` は raw_hash の digest 先頭 2/次 2 文字 (`bb`/`e1`、`03 �
 
 **CT2-ADAPTER-001** — P0 — ベースライン index: キーなしで init→snapshot→search→open が成立
 - Given: online Adapter 未設定 (API キーなし)。
-- When: `kcs index` (承認後)。
+- When: `kio index` (承認後)。
 - Then: 同梱 deterministic Adapter (plain text / Markdown / コード passthrough + fence 正規化 / PDF text layer 抽出)
   で Markdownize を実行し、ベースライン index を完了する。OCR・レイアウト解析・画像理解は行わない。
 - 根拠: `07 §2.1` (同梱 deterministic Adapter / ベースライン index の最低体験ライン)。
@@ -878,17 +878,17 @@ fan-out `ab/cd` は raw_hash の digest 先頭 2/次 2 文字 (`bb`/`e1`、`03 �
 - 根拠: `07 §4` (共通メタデータ) / `06 §8` (error_code)。
 
 **CT2-ADAPTER-007** — P1 — task/artifact descriptor (Adapter 境界の内部 API)
-- Given: KCS core → Adapter の呼び出し。
+- Given: KIO core → Adapter の呼び出し。
 - When: descriptor を検査。
 - Then: task descriptor は `task_id / adapter_kind / input_hash / allowed scope / network permission`。
   artifact descriptor は `output_hash / status / error_kind`。実行設定 (url/認証/コマンドパス) は
-  device-local config に置き `.kcs/` に保存しない。
+  device-local config に置き `.kio/` に保存しない。
 - 根拠: `07 §2` (task/artifact descriptor) / `06 §9` (Adapter API / 実行設定は device-local)。
 
 **CT2-ADAPTER-008** — P1 — Adapter policy: allowed_scope 外を渡さない / allow_network=false に online task を発行しない
 - Given: `[adapter.policy] allowed_scope="." allow_network=false`。
 - When: task 発行。
-- Then: KCS は allowed_scope 外のファイルを Adapter に渡さない (入力制御)。allow_network=false の Adapter に
+- Then: KIO は allowed_scope 外のファイルを Adapter に渡さない (入力制御)。allow_network=false の Adapter に
   オンライン送信前提の task を発行しない。AdapterRun を監査ログに残す。sandbox 強制ではなく宣言 + 事後監査。
 - 根拠: `07 §7` (policy) / `07 §7.1` (信頼境界: 入力制御 + 事後監査、sandbox 保証ではない)。
 
@@ -900,10 +900,10 @@ fan-out `ab/cd` は raw_hash の digest 先頭 2/次 2 文字 (`bb`/`e1`、`03 �
   API response body / 秘密情報。`redact_logs` デフォルト true。
 - 根拠: `07 §7` (ログに残してよいもの / 残してはならないもの) / `10 §12.6` (redact_logs)。
 
-**CT2-ADAPTER-010** — P1 — 認証情報は .kcs/ に含めない (keychain/env/plain prefix)
+**CT2-ADAPTER-010** — P1 — 認証情報は .kio/ に含めない (keychain/env/plain prefix)
 - Given: Adapter 認証設定。
 - When: 保存先を検査。
-- Then: `~/.config/kcs/tools.toml` or OS keychain に保存。`.kcs/` (tool-lock.json / tool_profile_hash 入力) に
+- Then: `~/.config/kio/tools.toml` or OS keychain に保存。`.kio/` (tool-lock.json / tool_profile_hash 入力) に
   認証情報を混入しない。`auth` は `^(keychain|env|plain):` 形式。`plain:` かつ tools.toml が 0600 でない場合は
   起動時 warn (errors.jsonl level=warn)。
 - 根拠: `07 §1` (認証情報の保存規約 / 禁止) / `06 §11`。
@@ -946,42 +946,42 @@ fan-out `ab/cd` は raw_hash の digest 先頭 2/次 2 文字 (`bb`/`e1`、`03 �
   fan-out は image_hash digest の先頭 2/次 2 文字。`media_type` は unit metadata に記録。
 - 根拠: `03 §2` (images レイアウト / image type Step 2) / `03 §8.1` (image_hash = content hash) / `07 §5.2`。
 
-**CT2-IMAGE-002** — P0 — Markdown 内の画像参照を kcs:// object URI に置換
+**CT2-IMAGE-002** — P0 — Markdown 内の画像参照を kio:// object URI に置換
 - Given: 抽出済み image_hash。
 - When: Markdown を組み立て。
-- Then: Markdown 内の参照を `kcs://<scope_id>/object/image/<image_hash>` に置換。この URI は object 参照であり
+- Then: Markdown 内の参照を `kio://<scope_id>/object/image/<image_hash>` に置換。この URI は object 参照であり
   Evidence Pointer ではない (第 2 セグメントがリテラル `object`)。
-- 根拠: `07 §5.2` (参照置換) / `08 §2.3` (`kcs://<scope_id>/object/image/<image_hash>` / object 参照の区別)。
+- 根拠: `07 §5.2` (参照置換) / `08 §2.3` (`kio://<scope_id>/object/image/<image_hash>` / object 参照の区別)。
 
 **CT2-IMAGE-003** — P1 — 生成する object 参照 URI の形式 (解決は Step 3)
 - Given: Markdownize が生成した Markdown 内の image 参照 URI。
 - When: URI を検査。
-- Then: `kcs://<scope_id>/object/image/<image_hash>` 形式で、`<scope_id>` は当該 scope の scope.json の
+- Then: `kio://<scope_id>/object/image/<image_hash>` 形式で、`<scope_id>` は当該 scope の scope.json の
   実値、`<image_hash>` は `sha256:` prefix 込みの実 image_hash (CT2-IMAGE-001 で保存された object と一致)。
   第 2 セグメントはリテラル `object` (Evidence Pointer URI の第 2 セグメント commit は常に `sha256:`
   prefix を持つため衝突しない)。
 - 根拠: `08 §2.3` (object 参照 URI の形式 / Evidence Pointer との区別)。
-- 補足: `kcs open` による当該 URI の**解決**は Step 3 (`09 §3.1`: kcs open = Step 3)。Step 2 の契約は
+- 補足: `kio open` による当該 URI の**解決**は Step 3 (`09 §3.1`: kio open = Step 3)。Step 2 の契約は
   **URI 生成まで** (r2 で縮小)。
 
 **CT2-IMAGE-004** — P2 — Mistral OCR の placeholder 形式も §5.2 想定どおり
 - Given: OCR が画像を placeholder として返すケース (2026-07-03 実地検証: placeholder 形式 1/1)。
 - When: image 抽出・参照置換。
-- Then: placeholder 経由でも image object 保存 + kcs:// 参照置換が成立。
+- Then: placeholder 経由でも image object 保存 + kio:// 参照置換が成立。
 - 根拠: `07 §5.2` (実地検証注記: placeholder 形式も §5.2 想定どおり)。
 
 ### CT2-INDEX-* — index preview→snapshot / auto snapshot (`05 §8.1` / `06 §1` / `09 §1.1`)
 
 **CT2-INDEX-001** — P0 — index 一連: preview → approve → 取り込み → auto snapshot
 - Given: 未承認 scope に変更あり。
-- When: `kcs index --approve` (承認後 index)。
+- When: `kio index --approve` (承認後 index)。
 - Then: preview 承認 → raw object 保存 → (deterministic/online) Markdownize → 成功完了時に同一プロセス内で
   auto snapshot (commit_type=auto) を作る。
-- 根拠: `10 §1` (必須フロー) / `05 §8.1` (契機 2) / `09 §1.1` (「kcs index 完了時の auto snapshot」)。
+- 根拠: `10 §1` (必須フロー) / `05 §8.1` (契機 2) / `09 §1.1` (「kio index 完了時の auto snapshot」)。
 
 **CT2-INDEX-002** — P0 (CT-COMMIT-008 継承) — index 成功完了時に commit_type=auto を生成 (tree 変化時)
 - Given: working tree に変更あり (tree_hash が HEAD と異なる)。
-- When: `kcs index` 成功完了。
+- When: `kio index` 成功完了。
 - Then: 同一プロセス内で `commit_type=auto` の commit が 1 つ作られる。commit object は Step 1 の schema
   (`03 §8`) に従い、`tool_lock_hash` には**実装の実 tool-lock.json から `03 §5.2` の規約で算出した値**が
   注入される (WS1a CT-HASH-004 のダミー値からの差分。A.3 は算出規約の fixture であり、実運用値が
@@ -996,7 +996,7 @@ fan-out `ab/cd` は raw_hash の digest 先頭 2/次 2 文字 (`bb`/`e1`、`03 �
 
 **CT2-INDEX-004** — P1 — index 完了時 commit イベントが events.jsonl に記録される
 - Given: auto snapshot が commit を作る。
-- When: `~/.local/share/kcs/logs/events.jsonl` を読む。
+- When: `~/.local/share/kio/logs/events.jsonl` を読む。
 - Then: commit イベント行が追記され、必須フィールド `ts, level, code, component, message, context` を持つ。
   `ts` は UTC ISO8601+Z。
 - 根拠: `05 §7` / `10 §12.6` / `06 §12` (timestamp)。
@@ -1010,17 +1010,17 @@ fan-out `ab/cd` は raw_hash の digest 先頭 2/次 2 文字 (`bb`/`e1`、`03 �
 
 **CT2-INDEX-006** — P2 — 直下ファイル数 soft limit (10,000) 超過で警告 + 継続
 - Given: 直下ファイル数が 10,000 (soft limit) を超える scope。
-- When: `kcs index`。
+- When: `kio index`。
 - Then: 警告を表示 (サブフォルダ分割 or ignore を提案) するが処理は継続 (エラーにしない)。
-- 根拠: `03 §8.2` (「超過時 kcs index は警告を表示し … 処理自体は継続する」)。
-- 補足: WS1a CT-TREE-006 では Step 1 に kcs index が無く P2 だったが、Step 2 で index 実装につき本書で検証する。
+- 根拠: `03 §8.2` (「超過時 kio index は警告を表示し … 処理自体は継続する」)。
+- 補足: WS1a CT-TREE-006 では Step 1 に kio index が無く P2 だったが、Step 2 で index 実装につき本書で検証する。
 
-**CT2-INDEX-007** — P1 — 対象ファイルを含むサブフォルダに子 .kcs を生成 (ignore サブツリーには生成しない)
+**CT2-INDEX-007** — P1 — 対象ファイルを含むサブフォルダに子 .kio を生成 (ignore サブツリーには生成しない)
 - Given: 対象ファイルを含むサブフォルダと、ignore されたサブフォルダ。
-- When: `kcs index`。
-- Then: 対象ファイルを含むサブフォルダには子 `.kcs` を生成 (独立スコープ)。ignore サブツリーには生成しない。
+- When: `kio index`。
+- Then: 対象ファイルを含むサブフォルダには子 `.kio` を生成 (独立スコープ)。ignore サブツリーには生成しない。
   親 tree にはサブフォルダ配下を含めない (直下のみ、`03 §3`)。
-- 根拠: `03 §3` 規則2 (子 .kcs 生成 / ignore は生成しない) / `10 §4` / `06 §1`。
+- 根拠: `03 §3` 規則2 (子 .kio 生成 / ignore は生成しない) / `10 §4` / `06 §1`。
 
 ---
 
@@ -1029,7 +1029,7 @@ fan-out `ab/cd` は raw_hash の digest 先頭 2/次 2 文字 (`bb`/`e1`、`03 �
 > これらは **憶測で契約化しない**。各テストは「実装が選んだ挙動を固定し決定論性を assert する」に留め、
 > 値の正本化は spec 追記後に行う。**要-spec は #1〜#5 の 5 件**。#1〜#4 (いずれも fingerprint /
 > prepared / unit_key / prompt 正規化の**決定性**に関わり、artifact identity の再現性を左右する) は
-> **2026-07-03 に発注側が spec 追記予定** (クロスレビューで妥当性確認済み)。#5 (.kcsignore) は
+> **2026-07-03 に発注側が spec 追記予定** (クロスレビューで妥当性確認済み)。#5 (.kioignore) は
 > `10 §11` が「追記予定」と明記済みの既知 TODO。#6 以降は実装者判断で固定し、事後に spec へ反映すれば足りる。
 >
 > (r2 注記: 旧 #6「sampling float の JCS 直列化」は spec 未定義ではない (`03 §5.1` が RFC 8785 準拠と
@@ -1059,7 +1059,7 @@ fan-out `ab/cd` は raw_hash の digest 先頭 2/次 2 文字 (`bb`/`e1`、`03 �
    A.2 ベクタは「半角空白・タブを行末空白、CRLF を step2 で `\n` 化」の解釈で計算した (spec 追記との
    一致確認後に確定契約とする — CT2-PROFILE-005 補足)。影響: CT2-PROFILE-005。
 
-5. **.kcsignore の文法仕様 (要-spec, 既知 TODO)** — `10 §11` が「.kcsignore spec → 03-data-model.md へ
+5. **.kioignore の文法仕様 (要-spec, 既知 TODO)** — `10 §11` が「.kioignore spec → 03-data-model.md へ
    追記予定」と**明示的に未統合**と認めている。gitignore 互換か、negation `!pattern` の評価順・文法詳細が
    未定義 (negation による Tier A 解除という**操作の存在自体**は `10 §1.1` 規約 2 で定義済み — 未定義なのは
    文法と評価順のみ)。影響: CT2-APPROVE-005 / CT2-SECRETS-001。
@@ -1074,7 +1074,7 @@ fan-out `ab/cd` は raw_hash の digest 先頭 2/次 2 文字 (`bb`/`e1`、`03 �
 8. **cost-ledger.sqlite の schema** — `04 §5.4` は配置とキー (`scope_id` 付与) を定めるが、テーブル schema
    (期間集計の粒度、月境界の TZ) が未定義。folder/device cap の集計に影響。影響: CT2-BUDGET-004。実装者判断。
 
-9. **quarantine 解除の記録形式** — `10 §1.1` は quarantine 解除に「対話確認 または .kcsignore 明示編集」を
+9. **quarantine 解除の記録形式** — `10 §1.1` は quarantine 解除に「対話確認 または .kioignore 明示編集」を
    要すると定めるが、解除操作の記録 (誰が/いつ/どのファイル) の形式が未定義。影響: CT2-SECRETS-004。実装者判断。
 
 10. **scanned PDF (text layer 無し) の deterministic Adapter 挙動** — `07 §2.1` は deterministic Adapter が
@@ -1082,7 +1082,7 @@ fan-out `ab/cd` は raw_hash の digest 先頭 2/次 2 文字 (`bb`/`e1`、`03 �
     (空 unit / skip / pending) が未定義。ベースライン index の被覆に影響。影響: CT2-ADAPTER-001。実装者判断。
 
 11. **Mistral OCR image placeholder の正確な token 形式** — `07 §5.2` 実地検証注記は placeholder 形式に触れるが、
-    Markdown 内の placeholder token の正確な文字列と kcs:// 置換の対応規則が未明記。影響: CT2-IMAGE-004。実装者判断。
+    Markdown 内の placeholder token の正確な文字列と kio:// 置換の対応規則が未明記。影響: CT2-IMAGE-004。実装者判断。
 
 ---
 
@@ -1093,18 +1093,18 @@ fan-out `ab/cd` は raw_hash の digest 先頭 2/次 2 文字 (`bb`/`e1`、`03 �
 | 除外項目 | 除外理由 (根拠) |
 | --- | --- |
 | chunk / Embedding の**生成本体** / FTS5 / sqlite-vec | `09 §3.1`: Step 3 (`04 §4`)。本書は embedding の再利用短絡 (CT2-TASK-012, CT2-BUDGET) を **P2 参考**に留め、chunk identity・chunking_config_hash・chunk_fts trigger は対象外 |
-| 検索 (text/vector/hybrid/RRF/MMR/cursor/multi-scope) / `kcs search` / `index_status` | `09 §3.1`: Step 3 (`05 §1`)。CT2-ADAPTER-002 の「text fallback で検索成立」は成立可能性の設計前提としてのみ言及し、検索実体は検証しない |
-| Evidence Pointer の**発行・解決** / `kcs open` / `kcs view` / verify / retarget | `09 §3.1`: Step 3-4 (`08`)。本書は image object の `kcs://object` URI の**生成形式** (CT2-IMAGE-002/003) と、Evidence Pointer に bbox を載せない契約 (CT2-ADAPTER-004) のみ参照。`kcs open` による URI 解決・pointer 解決本体は Step 3 |
+| 検索 (text/vector/hybrid/RRF/MMR/cursor/multi-scope) / `kio search` / `index_status` | `09 §3.1`: Step 3 (`05 §1`)。CT2-ADAPTER-002 の「text fallback で検索成立」は成立可能性の設計前提としてのみ言及し、検索実体は検証しない |
+| Evidence Pointer の**発行・解決** / `kio open` / `kio view` / verify / retarget | `09 §3.1`: Step 3-4 (`08`)。本書は image object の `kio://object` URI の**生成形式** (CT2-IMAGE-002/003) と、Evidence Pointer に bbox を載せない契約 (CT2-ADAPTER-004) のみ参照。`kio open` による URI 解決・pointer 解決本体は Step 3 |
 | chunking_config_hash の算出・chunk 世代判定・再 chunk task | `09 §3.1`: Step 3 (`04 §4.6` / `03 §5.3`)。Step 2 の identity は `(raw_hash, tool_profile_hash)` に閉じる |
-| `kcs reindex --force` (gen+1 の新 instance 作成) | `09 §3.1`: Step 3 (`07 §9`)。Step 2 は通常 gen=0 のみ。gen フィールドの**保持・読み取り**は CT2-UNIT/INDEX で確認するが `--force` 経路は張らない |
+| `kio reindex --force` (gen+1 の新 instance 作成) | `09 §3.1`: Step 3 (`07 §9`)。Step 2 は通常 gen=0 のみ。gen フィールドの**保持・読み取り**は CT2-UNIT/INDEX で確認するが `--force` 経路は張らない |
 | restore / `--at` / `--all-history` / `--include-deleted` / time-travel | `09 §3.1`: Step 4 (`05 §4`) |
 | purge (tombstone / `commit_type=purged` 発行 / `--erase-tombstone` / Dead Pointer) / ログスクラブ | `09 §3.1`: Step 4 (`05 §3`, `08 §4`, `10 §7`) |
-| GC の**実行** (shallow 化 / tiered retention / prune / CoW / `kcs gc`) | `05 §2.2`, `09 §3.1`: Phase 4+。Step 2 は gc_policy schema (Step 1 の CT-GC-* で担保済み) を変えない |
+| GC の**実行** (shallow 化 / tiered retention / prune / CoW / `kio gc`) | `05 §2.2`, `09 §3.1`: Phase 4+。Step 2 は gc_policy schema (Step 1 の CT-GC-* で担保済み) を変えない |
 | 定期 auto snapshot / Downloads watch / OS スケジューラ委譲 / on_idle | `05 §8.2`, `09 §3.1`: Phase 4+。Step 2 の auto 契機は **index 完了時のみ** (CT2-INDEX-002) |
 | 観測ログのうち `metrics.jsonl` / `access.jsonl` | `09 §3.1`: Step 3。Step 2 が新規に依存するのは events/errors (Step 1 で担保済み) + cost-ledger のみ |
 | multimodal embedding profile の**ベンダー実地検証** (次元数/料金/deprecation) | `07 §5.3` リスク注記: Step 2 着手**前**の実地検証タスクであり、契約テストではなく採用判断。緩和 (text 単一 Embedding) 適用時も M3 Done 条件に影響しない |
 | Step 1 で担保済みの CAS / tree / commit / hash 算出 / CLI 7 コマンド / lock | WS1a (`tasks/ws1a-contract-tests.md`) で担保。本書は commit の `tool_lock_hash` を**実 tool-lock.json からの算出値**で注入する点 (CT2-INDEX-002。A.3 は算出規約の fixture) のみ Step 1 から差分追加 |
-| export / import (`.kcsz`) / `kcs move` / agent API 外部公開 / MCP | `09 §3.1`: Phase 4-5 (`06 §10`, `05 §6`, `06 §9`) |
+| export / import (`.kioz`) / `kio move` / agent API 外部公開 / MCP | `09 §3.1`: Phase 4-5 (`06 §10`, `05 §6`, `06 §9`) |
 
 ---
 
@@ -1116,5 +1116,5 @@ fan-out `ab/cd` は raw_hash の digest 先頭 2/次 2 文字 (`bb`/`e1`、`03 �
 - **spec 未定義事項**: 11 件 (§C。r2 で旧 #6 を A 節注記へ移設)。うち **要-spec は 5 件**:
   §C-1 (page fingerprint の具体アルゴリズム)、§C-2 (prepared_hash のレンダリング決定性)、
   §C-3 (unit_key の正準生成規則)、§C-4 (prompt_template_hash step1 の空白定義と lone CR) —
-  以上 4 件は **2026-07-03 に発注側が spec 追記予定** — および §C-5 (.kcsignore 文法、`10 §11` が
+  以上 4 件は **2026-07-03 に発注側が spec 追記予定** — および §C-5 (.kioignore 文法、`10 §11` が
   未統合と明記済みの既知 TODO)。残り 6 件は実装者判断で固定 → 事後 spec 反映で足りる。

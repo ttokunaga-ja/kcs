@@ -1,4 +1,4 @@
-"""KCS 検索評価ハーネス — 合成コーパスと履歴シナリオの単一定義 (正本).
+"""KIO 検索評価ハーネス — 合成コーパスと履歴シナリオの単一定義 (正本).
 
 docs/09-mvp-scope.md §4.3 のゴールデンクエリ評価規約に対応する合成コーパスと
 履歴シナリオ (編集 / リネーム / 削除) を **決定論的** に定義するモジュール。
@@ -411,7 +411,7 @@ ANCHORS = [
         "title": "旧フォーマット v0 仕様", "role": "m3_3_delete",
         "sections": [
             {"slug": "version", "heading": "廃止バージョン",
-             "facts": ["v0.1.0 は廃止済み。kcs_format_version に統一された。"]},
+             "facts": ["v0.1.0 は廃止済み。kio_format_version に統一された。"]},
             {"slug": "field", "heading": "廃止フィールド",
              "facts": ["旧フィールド tree_id / commit_id は廃止された。"]},
         ],

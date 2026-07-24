@@ -4,7 +4,7 @@
 > という事実誤認に基づき text-only 緩和 (gemini-embedding-001 / modality=text) を推奨していたが、
 > ユーザー指摘と再検証により**誤りと確定し、当該分析・推奨は全文破棄した** (git 履歴にのみ残る)。
 > 別ベクトル空間への埋め込み (非 multimodal profile) は [03-data-model.md §7](../docs/03-data-model.md) /
-> [07-adapter-spec.md §5.3](../docs/07-adapter-spec.md) により**採用不可** (`KCS-E-EMBED-MODALITY-001` で拒否)。
+> [07-adapter-spec.md §5.3](../docs/07-adapter-spec.md) により**採用不可** (`KIO-E-EMBED-MODALITY-001` で拒否)。
 
 ## 確定判定
 
@@ -46,8 +46,8 @@
 ## 強制 (2026-07-03 追加)
 
 - 03 §7: `modality` は `"multimodal"` に固定。非 multimodal profile は tool-lock materialize / adapter 登録で
-  `KCS-E-EMBED-MODALITY-001` (exit 2) として拒否
-- 06 §8: `KCS-E-EMBED-MODALITY-001` を登録済み
+  `KIO-E-EMBED-MODALITY-001` (exit 2) として拒否
+- 06 §8: `KIO-E-EMBED-MODALITY-001` を登録済み
 - step3a: CT3-EMBED-008 (P0) が拒否契約を検証。CT3-EMBED-004 + A.2 ベクタは本 profile で凍結済み
   (tool_profile_hash `sha256:66aff638…`、embedding_hash `sha256:7bd32d26…`)
 

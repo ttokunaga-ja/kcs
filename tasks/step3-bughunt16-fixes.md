@@ -25,18 +25,18 @@
 **根本原因**: `is_store_not_found` 吸収パターンが `read_tree` にしか適用されておらず、`read_commit` は
 全 call site で無条件 `?`。R15-4 の `run_reindex` では「10 行差で tree は COMMIT-SHALLOW 変換・commit は
 素通し」という極端な非対称になっている。call site 一覧 (4 エンジンの合算・裁定時点):
-- `crates/kcs-core/src/scope.rs:740` `head_tree_state()` — 直後の 741 `read_tree` だけ Shallow 吸収 (R15-4)
-- `crates/kcs-core/src/scope.rs:509` `log()` — 履歴走査中の**どの祖先** commit が欠けても全滅 (Sonnet-B が
+- `crates/kio-core/src/scope.rs:740` `head_tree_state()` — 直後の 741 `read_tree` だけ Shallow 吸収 (R15-4)
+- `crates/kio-core/src/scope.rs:509` `log()` — 履歴走査中の**どの祖先** commit が欠けても全滅 (Sonnet-B が
   root commit 欠落で「健全な直近 2 件も返らない」ことを実機確認)
-- `crates/kcs-core/src/scope.rs:523-524` `diff()` (R16-5 と共通)
-- `crates/kcs-core/src/scope.rs:420-422` `snapshot_with_type()` の prior-commit 読込 (`.transpose()?`)
-- `crates/kcs-cli/src/main.rs:2042` / `2045` `ensure_snapshot_tree_entries()` 両分岐 (= 全 search が経由)
-- `crates/kcs-cli/src/main.rs:2607` `run_reindex()`
-- `crates/kcs-cli/src/main.rs:2721` `rebuild_step3_index()` (= index/reindex/repair --rebuild-db が共有)
-- `crates/kcs-cli/src/main.rs:4225` `resolve_pointer_for_cli()` (= view/open の Evidence 解決の唯一の入口)
+- `crates/kio-core/src/scope.rs:523-524` `diff()` (R16-5 と共通)
+- `crates/kio-core/src/scope.rs:420-422` `snapshot_with_type()` の prior-commit 読込 (`.transpose()?`)
+- `crates/kio-cli/src/main.rs:2042` / `2045` `ensure_snapshot_tree_entries()` 両分岐 (= 全 search が経由)
+- `crates/kio-cli/src/main.rs:2607` `run_reindex()`
+- `crates/kio-cli/src/main.rs:2721` `rebuild_step3_index()` (= index/reindex/repair --rebuild-db が共有)
+- `crates/kio-cli/src/main.rs:4225` `resolve_pointer_for_cli()` (= view/open の Evidence 解決の唯一の入口)
 
 **実機 (オーケストレータ再確認分)**: HEAD commit object を 1 個 `rm` →
-`status`/`log`/`search`/`view <有効URI>` 全て `KCS-E-STORE-NOT-FOUND-001` exit 4。復元で全て exit 0。
+`status`/`log`/`search`/`view <有効URI>` 全て `KIO-E-STORE-NOT-FOUND-001` exit 4。復元で全て exit 0。
 Sonnet-D の対照実験: sqlite.db 欠落は `Excluded("index_missing")` exit 3 で正しく part-failure するのに
 commit 欠落だけ素通り。Sonnet-B の対照: raw CAS object 欠落は status/search/view とも exit 0 (正規化
 キャッシュ経由で本文復元) — **commit object だけがガード漏れ**という切り分け。
@@ -44,15 +44,15 @@ commit 欠落だけ素通り。Sonnet-B の対照: raw CAS object 欠落は stat
 **契約**: R14-3/R15-1/R15-4 で確立した「純読取りは破損を生き延びる・write は明確なエラーコードで拒否」。
 特に `view` は docs/05:345「shallow commit を指す Evidence Pointer の解決は失敗しない (raw_hash/chunk_hash
 による直接解決)」の明文保証があり、解決前段の `read_commit` 無条件 `?` はこの保証を直接破る
-(evidence-grounded という中核価値の破れ)。docs/05:329「commit object の削除操作は KCS に存在しない」は
-KCS 自身の操作の話であり、外部破損 (disk error/誤操作/部分復元) は R13-4/R15-4 と同じ防御対象クラス。
+(evidence-grounded という中核価値の破れ)。docs/05:329「commit object の削除操作は KIO に存在しない」は
+KIO 自身の操作の話であり、外部破損 (disk error/誤操作/部分復元) は R13-4/R15-4 と同じ防御対象クラス。
 
 **fix 方針**: commit object 欠落を tree 欠落と同格の「shallow 相当」として系統適用する。
 - read 系: `head_tree_state()` の `read_commit` を `read_tree` と同じ `is_store_not_found` 吸収で
   Shallow 側に畳む (status は既存の degrade 表示)。`log()` は欠落地点で走査を打ち切り、取得済み prefix +
   truncated 明示 (silent 全滅にしない)。`resolve_pointer_for_cli` は commit 読込を best-effort 化し
   raw_hash/chunk_hash 直接解決を継続 (docs/05:345 / docs/08 §3.1 準拠)。
-- write 系 (snapshot/index/reindex/repair): `KCS-E-COMMIT-SHALLOW-001` + 復旧ガイダンスへ変換
+- write 系 (snapshot/index/reindex/repair): `KIO-E-COMMIT-SHALLOW-001` + 復旧ガイダンスへ変換
   (新エラーコードは増やさない — 回復手段・意味論が tree 欠落と同一のため。rationale をコードコメントに残す)。
 - search 系は R16-2/R16-3 と一体で設計 (下記)。**重要**: `ensure_snapshot_tree_entries` の commit 欠落を
   単純に `Ok(false)` に畳むと、fresh search が R16-3 の silent 空結果に合流して「loud 死→silent 偽陰性」の
@@ -66,14 +66,14 @@ KCS 自身の操作の話であり、外部破損 (disk error/誤操作/部分�
 正しく part-failure) が裏付け。オーケストレータが 2 scope 実機で再確認: 健全時 results 2/searched 2 →
 scope B の commit object 削除後、全体が exit 4 で scope A の結果も全喪失。`--scope .` 限定なら A は正常。
 
-**根拠**: `crates/kcs-cli/src/main.rs:1360` — per-scope ループの `Err(ScopeSearchError::Fatal(error)) =>
+**根拠**: `crates/kio-cli/src/main.rs:1360` — per-scope ループの `Err(ScopeSearchError::Fatal(error)) =>
 return Err(error)` が収集済み candidates/searched を破棄して全体 abort。同関数内で `index_corrupt`
 (1626-1628)・`index_rebuilding` (1659-1663)・vector 容量超過 (1707-1709、R10-1(a)) は Excluded に
 畳まれているのに、store 破損系の Fatal だけ増幅経路が残る。docs/05 §1.8「一部 scope 失敗 → 結果を返し
 excluded_scopes に記録 (exit 3)、全 scope 失敗 → エラー」。
 
-**fix 方針**: `search_one_scope` の Fatal のうち **store 破損クラス (KCS-E-STORE-NOT-FOUND-001 /
-KCS-E-STORE-CORRUPT-001 / KCS-E-STORE-IO-001 / KCS-E-COMMIT-SHALLOW-001)** を
+**fix 方針**: `search_one_scope` の Fatal のうち **store 破損クラス (KIO-E-STORE-NOT-FOUND-001 /
+KIO-E-STORE-CORRUPT-001 / KIO-E-STORE-IO-001 / KIO-E-COMMIT-SHALLOW-001)** を
 `Excluded(reason="store_corrupt")` に降格し、既存の「全 scope 失敗 → SCOPE-ALL-FAILED exit 4」集約に
 乗せる。**Fatal 全般の一般化はしない** (真のプログラミングエラー/予期しないエラーは fail-fast が正 —
 Sonnet-A の「Fatal 全般を格下げ」案は過剰適用として絞る)。cursor 経路の Shallow hard-fail (05 §2.2) は不変。
@@ -104,7 +104,7 @@ Sonnet-A の「Fatal 全般を格下げ」案は過剰適用として絞る)。c
 **収束**: Spark (静的・reindex L2608 との対照つき) + Sonnet-A (実機 + git show 8ddee42 で R15-4 fix が
 run_reindex のみと確認 + docs/10:417-418 の復旧保証との乖離) + Sonnet-D (実機 + unit 欠落の補強)。
 オーケストレータ再確認: shallow tree で repair exit 4 (raw STORE-NOT-FOUND) / reindex は exit 1
-COMMIT-SHALLOW (R15-4 修正済みの対照)。unit 1 個削除で repair exit 1 KCS-E-STORE-IO-001・全体失敗、
+COMMIT-SHALLOW (R15-4 修正済みの対照)。unit 1 個削除で repair exit 1 KIO-E-STORE-IO-001・全体失敗、
 復元で exit 0。
 
 **根拠**: `rebuild_step3_index` (main.rs:2716-2722) の `read_commit`/`read_tree` が無条件 `?` で、
@@ -116,20 +116,20 @@ unit 欠落側は `load_normalized_units` (main.rs:2871-2909) の無条件 `?` �
 できる」の保証に反する。
 
 **fix 方針**: (a) `rebuild_step3_index` 冒頭 (または read_tree 箇所) で R15-4 と同じ
-STORE-NOT-FOUND→`KcsError::commit_shallow` 変換 (共有関数側に置き repair/index/reindex を一括カバー)。
+STORE-NOT-FOUND→`KioError::commit_shallow` 変換 (共有関数側に置き repair/index/reindex を一括カバー)。
 (b) unit 読込失敗は該当 raw_hash を skip して残りの再構築を続行し、JSON に `skipped_units` (件数 + 対象 +
 理由) と「`reindex --force` で raw から再正規化せよ」のガイダンスを明示 (silent 縮小にしない)。
 回帰テスト: shallow で COMMIT-SHALLOW、unit 1 個欠落で「他文書は再構築 + skipped_units 報告」の 2 本。
 
-## R16-5 [minor] `kcs diff` が shallow commit で生 `KCS-E-STORE-NOT-FOUND-001` (不透明 hash) — docs/05:341「片方が shallow なら全ファイル差分は不能と明示」の契約乖離
+## R16-5 [minor] `kio diff` が shallow commit で生 `KIO-E-STORE-NOT-FOUND-001` (不透明 hash) — docs/05:341「片方が shallow なら全ファイル差分は不能と明示」の契約乖離
 
 **収束**: Spark + Sonnet-A + Sonnet-D + Opus の 4 エンジン (severity は A=major / D=minor / Opus=minor →
 loud に倒れる・データ損失なし・到達は corruption 経由のみ、で **minor 裁定**)。オーケストレータ実機確認済み
 (exit 4・生 hash のみ)。
 
-**根拠**: `Repository::diff` (`crates/kcs-core/src/scope.rs:519-524`) の `read_commit`/`read_tree` 無条件 `?`。
+**根拠**: `Repository::diff` (`crates/kio-core/src/scope.rs:519-524`) の `read_commit`/`read_tree` 無条件 `?`。
 
-**fix 方針**: R16-1 と同じ吸収で `KCS-E-COMMIT-SHALLOW-001` + どちら側 (a/b) が shallow かを context で明示。
+**fix 方針**: R16-1 と同じ吸収で `KIO-E-COMMIT-SHALLOW-001` + どちら側 (a/b) が shallow かを context で明示。
 
 ## R16-6 [major] 手書きパーサの no-value flag が `--flag=<値>` の値を黙殺して true 化 — `reindex --force=false --yes=false` (明示否定) が確認ゲートを bypass してフル実行 exit 0 (R12-7 fix が開けた穴=定番脈 7 例目)
 
@@ -143,7 +143,7 @@ loud に倒れる・データ損失なし・到達は corruption 経由のみ、
 `--all-scopes=false` が all-scopes 有効化等)。clap-derive 側の bool flag は `--json=false` を拒否するため、
 typed コマンドとの一貫性も破れている。
 
-**fix 方針**: 値を取らない flag は `inline.is_some()` を `KCS-E-CONFIG-USAGE-001`
+**fix 方針**: 値を取らない flag は `inline.is_some()` を `KIO-E-CONFIG-USAGE-001`
 (`flag --force does not take a value` 形式) で一律拒否 (=true も含めて拒否 — clap の SetTrue と同じ挙動に
 揃える)。3 パーサすべて。回帰テスト: `reindex --force=false` / `repair --rebuild-db=false` /
 `search q --text=false` が exit 2。
@@ -151,9 +151,9 @@ typed コマンドとの一貫性も破れている。
 ## R16-7 [major] retry 可能失敗 (特に RateLimit=無制限リトライ) が送信試行のたびに満額を再予約 — phantom charge が無制限累積し、device 月次 cap を枯渇させて他の正規タスクを budget_exceeded で誤 Paused (R15-2 の被害を retry/reclaim 経路で再現)
 
 **発見**: Opus (単独・cap 枯渇→誤 Paused まで control 付き実機)。オーケストレータ再確認: PDF 1 文書を
-`index --online --approve --yes` → `KCS_TEST_MISTRAL_OCR=rate_limit` で batch resume + retry×2
-(KCS_FIXED_NOW で backoff 跨ぎ) → **ledger が 2→3→4 行、毎回同一の満額 0.1331751 USD、送信成功ゼロ**。
-RateLimit は `retry_policy` (crates/kcs-pipeline/src/task.rs:312-318) で max_attempts=None (無制限) のため
+`index --online --approve --yes` → `KIO_TEST_MISTRAL_OCR=rate_limit` で batch resume + retry×2
+(KIO_FIXED_NOW で backoff 跨ぎ) → **ledger が 2→3→4 行、毎回同一の満額 0.1331751 USD、送信成功ゼロ**。
+RateLimit は `retry_policy` (crates/kio-pipeline/src/task.rs:312-318) で max_attempts=None (無制限) のため
 累積に上限がない。embedding 側 (main.rs:6614) も同型 (Opus が 2→6 行を実測)。
 
 **既知トレードオフとの境界 (重要)**: F8 (reserve-before-send・失敗でも予約を戻さない) と R11-6/R15-5

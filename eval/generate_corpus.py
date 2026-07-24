@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""合成コーパス生成 (KCS 検索評価ハーネス, docs/09-mvp-scope.md §4.3).
+"""合成コーパス生成 (KIO 検索評価ハーネス, docs/09-mvp-scope.md §4.3).
 
 決定論的に 200-500 ファイル規模・複数 scope の合成コーパスを生成する。
 - 依存: Python3 標準ライブラリのみ。
@@ -9,8 +9,8 @@
 - 生成後 <out>/corpus-manifest.json に全ファイルの {scope, file, sections} を記録する。
 
 使い方:
-    python3 eval/generate_corpus.py --out /tmp/kcs-eval-corpus
-    python3 eval/generate_corpus.py --out /tmp/kcs-eval-corpus --force
+    python3 eval/generate_corpus.py --out /tmp/kio-eval-corpus
+    python3 eval/generate_corpus.py --out /tmp/kio-eval-corpus --force
 """
 
 import argparse
@@ -97,7 +97,7 @@ def write_corpus(out_dir, force):
 
 
 def main(argv=None):
-    ap = argparse.ArgumentParser(description="KCS 合成コーパス生成 (決定論的)")
+    ap = argparse.ArgumentParser(description="KIO 合成コーパス生成 (決定論的)")
     ap.add_argument("--out", required=True, help="出力ディレクトリ")
     ap.add_argument("--force", action="store_true", help="非空ディレクトリでも上書き")
     args = ap.parse_args(argv)

@@ -4,7 +4,7 @@ The contributor allocator freezes P/X/Y/N arithmetic.  This module freezes
 the independent path/materialization lane needed to exercise rename, move,
 create, exact/near duplicate, derived format, archive, delete, and restore.
 
-The allocation is deliberately root independent and contains no observed KCS
+The allocation is deliberately root independent and contains no observed KIO
 claims.  Raw hashes and complete before/after source states belong to the
 subsequent immutable event manifest.  All cross-scope and lifecycle sentinels
 are raw-only with zero contributor quota.  Same-scope rename and exact alias
@@ -27,7 +27,7 @@ except ImportError:  # pragma: no cover - direct-script compatibility.
     import persona_renderers as renderers
 
 
-STRUCTURAL_ALLOCATION_SCHEMA = "kcs.persona.structural-allocation/v1"
+STRUCTURAL_ALLOCATION_SCHEMA = "kio.persona.structural-allocation/v1"
 STRUCTURAL_ALLOCATION_SCHEMA_VERSION = 1
 
 WAVE_ORDER = ("W1", "W2", "W3", "W4", "W5")

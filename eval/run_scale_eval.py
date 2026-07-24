@@ -193,17 +193,17 @@ def resolve_release_binary(bin_path):
     try:
         metadata = path.lstat()
     except FileNotFoundError as exc:
-        raise ScaleLatencyError(f"release kcs binary is missing: {path}") from exc
+        raise ScaleLatencyError(f"release kio binary is missing: {path}") from exc
     if not _is_plain_regular_file(metadata):
-        raise ScaleLatencyError(f"release kcs binary must be a regular file: {path}")
-    if path.parent.name != "release" or path.name not in ("kcs", "kcs.exe"):
+        raise ScaleLatencyError(f"release kio binary must be a regular file: {path}")
+    if path.parent.name != "release" or path.name not in ("kio", "kio.exe"):
         raise ScaleLatencyError(
-            "--bin must identify the release artifact target/release/kcs "
-            f"(or kcs.exe), got: {path}"
+            "--bin must identify the release artifact target/release/kio "
+            f"(or kio.exe), got: {path}"
         )
     if not os.access(path, os.X_OK):
-        raise ScaleLatencyError(f"release kcs binary is not executable: {path}")
-    digest = _hash_regular_file(path, MAX_BINARY_BYTES, "release kcs binary")
+        raise ScaleLatencyError(f"release kio binary is not executable: {path}")
+    digest = _hash_regular_file(path, MAX_BINARY_BYTES, "release kio binary")
     return {"path": str(path), **digest}
 
 
@@ -464,7 +464,7 @@ def validate_search_metric(metric, response):
         not isinstance(metric["ts"], str)
         or not metric["ts"]
         or metric["level"] != "info"
-        or metric["code"] != "KCS-M-SEARCH-001"
+        or metric["code"] != "KIO-M-SEARCH-001"
         or metric["component"] != "search"
         or metric["message"] != "search completed"
         or metric["metric"] != "search.latency_ms"
@@ -562,7 +562,7 @@ def run_bounded_process(command, cwd, env, timeout_seconds):
             stderr=subprocess.PIPE,
         )
     except OSError as exc:
-        raise ScaleLatencyError(f"cannot execute release kcs binary: {command[0]}") from exc
+        raise ScaleLatencyError(f"cannot execute release kio binary: {command[0]}") from exc
     assert process.stdout is not None
     assert process.stderr is not None
 
@@ -573,7 +573,7 @@ def run_bounded_process(command, cwd, env, timeout_seconds):
     state_lock = threading.Lock()
     readers = [
         threading.Thread(
-            name="kcs-scale-stdout-reader",
+            name="kio-scale-stdout-reader",
             target=_capture_pipe_bounded,
             args=(
                 process.stdout,
@@ -589,7 +589,7 @@ def run_bounded_process(command, cwd, env, timeout_seconds):
             daemon=False,
         ),
         threading.Thread(
-            name="kcs-scale-stderr-reader",
+            name="kio-scale-stderr-reader",
             target=_capture_pipe_bounded,
             args=(
                 process.stderr,
@@ -645,7 +645,7 @@ def run_bounded_process(command, cwd, env, timeout_seconds):
     duration_ms = (time.perf_counter_ns() - started) / 1_000_000.0
     if capture_errors:
         raise ScaleLatencyError(
-            f"failed to capture kcs subprocess output: {capture_errors[0]}"
+            f"failed to capture kio subprocess output: {capture_errors[0]}"
         )
     if overflow.is_set():
         with state_lock:
@@ -655,10 +655,10 @@ def run_bounded_process(command, cwd, env, timeout_seconds):
             "stderr": MAX_STDERR_BYTES,
         }
         detail = ", ".join(f"{stream} exceeded {limits[stream]} bytes" for stream in streams)
-        raise ScaleLatencyError(f"kcs subprocess output limit exceeded: {detail}")
+        raise ScaleLatencyError(f"kio subprocess output limit exceeded: {detail}")
     if timed_out:
         raise ScaleLatencyError(
-            f"kcs search exceeded {timeout_seconds:.3f}s timeout "
+            f"kio search exceeded {timeout_seconds:.3f}s timeout "
             f"(observed {duration_ms:.3f}ms)"
         )
     stdout = captured.get("stdout", b"")
@@ -666,7 +666,7 @@ def run_bounded_process(command, cwd, env, timeout_seconds):
     try:
         stdout_text = stdout.decode("utf-8")
     except UnicodeDecodeError as exc:
-        raise ScaleLatencyError("kcs search stdout is not UTF-8") from exc
+        raise ScaleLatencyError("kio search stdout is not UTF-8") from exc
     stderr_text = stderr.decode("utf-8", errors="replace")
     return {
         "returncode": returncode,
@@ -798,7 +798,7 @@ def execute_workload(query_mix, samples_per_scenario, warmups_per_scenario, exec
             "measurement_class": scenario["measurement_class"],
             "formal_history_latency": scenario["formal_history_latency"],
             "formal_hybrid_mvp_latency_gate": False,
-            "primary_clock_source": "KCS-M-SEARCH-001 search.latency_ms",
+            "primary_clock_source": "KIO-M-SEARCH-001 search.latency_ms",
             "secondary_clock_source": "runner process wall time",
             "warmup_count": len(collected[name]["warmups"]),
             "sample_count": len(measurements),
@@ -970,7 +970,7 @@ def run_locked_measurement(
     query_mix = build_query_mix(manifest, live_before)
     env = subprocess_env(root)
     cwd = root / manifest["scopes"][0]["name"]
-    metrics_path = Path(env["XDG_DATA_HOME"]) / "kcs" / "logs" / "metrics.jsonl"
+    metrics_path = Path(env["XDG_DATA_HOME"]) / "kio" / "logs" / "metrics.jsonl"
 
     def execute_one(scenario, case, _phase, _sequence):
         command = build_search_command(binary_before["path"], case, scenario)
@@ -999,7 +999,7 @@ def run_locked_measurement(
 
     binary_after = resolve_release_binary(bin_path)
     if binary_after != binary_before:
-        raise ScaleLatencyError("release kcs binary changed during measurement")
+        raise ScaleLatencyError("release kio binary changed during measurement")
     live_after = attestor.attest_corpus(root)
     if live_after != live_before:
         raise ScaleLatencyError("scale fixture attestation changed during measurement")
@@ -1016,7 +1016,7 @@ def run_locked_measurement(
     ]
     return {
         "schema_version": 1,
-        "benchmark": "kcs-default-auto-high-selectivity-current-text-scale-baseline",
+        "benchmark": "kio-default-auto-high-selectivity-current-text-scale-baseline",
         "passed": m31_passed,
         "formal_hybrid_mvp_latency_gate": False,
         "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -1038,7 +1038,7 @@ def run_locked_measurement(
             "requested_search_mode": "auto",
             "required_resolved_mode": "text",
             "required_fallback_reason": "embedding_endpoint_not_configured",
-            "primary_clock_source": "KCS-M-SEARCH-001 search.latency_ms",
+            "primary_clock_source": "KIO-M-SEARCH-001 search.latency_ms",
             "secondary_clock_source": "runner process wall time",
             "result_limit": RESULT_LIMIT,
             "query_mix_size": len(query_mix),
@@ -1080,7 +1080,7 @@ def main(argv=None):
     )
     parser.add_argument("--corpus", required=True, help="prepared full scale corpus")
     parser.add_argument(
-        "--bin", required=True, help="release artifact target/release/kcs (or kcs.exe)"
+        "--bin", required=True, help="release artifact target/release/kio (or kio.exe)"
     )
     parser.add_argument("--out", help="JSON report path")
     parser.add_argument(

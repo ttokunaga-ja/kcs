@@ -3,7 +3,7 @@
 This module joins the whole-source P/X/Y/N history allocation with the
 quota-neutral structural allocation.  It deliberately records rendered-byte
 facts, complete tagged before/after state, commit-boundary intent, and a
-logical schedule without claiming that KCS or a filesystem was observed.
+logical schedule without claiming that KIO or a filesystem was observed.
 
 The three arrays ``events``, ``boundaries``, and ``schedule`` are independent
 canonical inventories.  In particular, an ordinary ``index_auto`` boundary
@@ -34,10 +34,10 @@ except ImportError:  # pragma: no cover - direct-script compatibility.
     import persona_structural_allocation as structural
 
 
-EVENT_MANIFEST_SCHEMA = "kcs.persona.event-manifest/v1"
+EVENT_MANIFEST_SCHEMA = "kio.persona.event-manifest/v1"
 EVENT_MANIFEST_SCHEMA_VERSION = 1
-MANAGED_EVENT_STATE_SCHEMA = "kcs.persona.managed-event-state/v1"
-LOGICAL_TIME_SCHEMA = "kcs.persona.logical-time/v1"
+MANAGED_EVENT_STATE_SCHEMA = "kio.persona.managed-event-state/v1"
+LOGICAL_TIME_SCHEMA = "kio.persona.logical-time/v1"
 PLANNING_STATUS = "planned_not_observed"
 WAVE_ORDER = ("W1", "W2", "W3", "W4", "W5")
 
@@ -615,7 +615,7 @@ def _structural_events(structural_plan, resolver):
         if value["operation"] == "restore_to_active_scope":
             restored = after[0]
             source_command = {
-                "kind": "kcs_restore_path",
+                "kind": "kio_restore_path",
                 "scope_key": value["command_scope_key"],
                 "commit_boundary_kind": "none",
                 "force": False,
@@ -689,7 +689,7 @@ def _build_boundaries(persona_id, regular_by_wave, purge_events):
                 "scope_key": scope_key,
                 "source_id": None,
                 "covered_event_ids": event_ids,
-                "command": {"kind": "kcs_index_auto"},
+                "command": {"kind": "kio_index_auto"},
                 "expected_commit_result": "new_auto_commit",
                 "status": PLANNING_STATUS,
             }
@@ -710,7 +710,7 @@ def _build_boundaries(persona_id, regular_by_wave, purge_events):
             "source_id": source_id,
             "covered_event_ids": [event["event_id"]],
             "command": {
-                "kind": "kcs_purge_path",
+                "kind": "kio_purge_path",
                 "reason": "legal",
                 "confirmation": "yes",
             },
@@ -737,7 +737,7 @@ def _build_boundaries(persona_id, regular_by_wave, purge_events):
                 for event in purge_events
                 if event["source_command"]["scope_key"] == scope_key
             ),
-            "command": {"kind": "kcs_index_auto"},
+            "command": {"kind": "kio_index_auto"},
             "expected_commit_result": "no_new_commit",
             "status": PLANNING_STATUS,
         }
@@ -1286,7 +1286,7 @@ def _validate_structural_leaf(event, before, after):
 
     command = event["source_command"]
     expected_command_kind = (
-        "kcs_restore_path"
+        "kio_restore_path"
         if operation == "restore_to_active_scope"
         else f"filesystem_{operation}"
     )
@@ -1437,7 +1437,7 @@ def _validate_structural_leaf(event, before, after):
             len(restored_ids) != 1
             or after[0]["materialization_id"] == restored_ids[0]
             or command != {
-                "kind": "kcs_restore_path",
+                "kind": "kio_restore_path",
                 "scope_key": locator["source_scope_key"],
                 "commit_boundary_kind": "none",
                 "force": False,

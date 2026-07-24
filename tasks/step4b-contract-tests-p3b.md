@@ -31,8 +31,8 @@ ancestor gate の実装配線])。
 
 **対象外 (他グループ・他 Phase — 混同注意)**:
 
-- A 領域 (cost-ledger 全体)・I 領域 (adapter 契約) — 別 Phase 3 グループ。本書は `KCS-E-ADAPTER-APPROVAL-CONFLICT-001` /
-  `KCS-E-ADAPTER-SPECVER-001` (U124 が例示する新規コード群のうち adapter 承認 CAS 競合・spec_version 不一致の
+- A 領域 (cost-ledger 全体)・I 領域 (adapter 契約) — 別 Phase 3 グループ。本書は `KIO-E-ADAPTER-APPROVAL-CONFLICT-001` /
+  `KIO-E-ADAPTER-SPECVER-001` (U124 が例示する新規コード群のうち adapter 承認 CAS 競合・spec_version 不一致の
   **具体的な発火条件**) には立ち入らない — これらは承認 publish/self-heal の内部設計 (07-adapter-spec.md §3/§8.1)
   を要し、本書の精読対象 (06/10/05/03) の外側にある。本書が扱うのは DOMAIN 一覧上の呼称・既存コードとの
   整合確認までである
@@ -45,33 +45,33 @@ ancestor gate の実装配線])。
 
 ## 実装対象ファイルの見込み (現状把握の記録 — 実装方針を指図するものではない)
 
-- `crates/kcs-cli/src/main.rs` — `scope_unreachable_error` (L8552-8559, 唯一の呼出元 `resolve_scope_target`
+- `crates/kio-cli/src/main.rs` — `scope_unreachable_error` (L8552-8559, 唯一の呼出元 `resolve_scope_target`
   L7727-7749)、`ExitCode` 分岐、`ReadBarrierCheckpoint`/`check_index_generation_current` の呼出順序
   (log/diff/inspect が L627 型、open/view/search が purge-journal 優先型)、`Command::Log` (L623-640,
   `--at`/`--since` 双方が `not_implemented`)、preflight 関連の各種ヘルパ
-- `crates/kcs-core/src/scope.rs` — `validated_scope_id` (L1720-1741, schema 検証が `kcs_format_version`
+- `crates/kio-core/src/scope.rs` — `validated_scope_id` (L1720-1741, schema 検証が `kio_format_version`
   判定より先行)・`validate_config` (L1695-1714, 同型のバグ)・`log()` (L1310-1337, HEAD 起点 first-parent
   walk のみ)・`open_scope_file_nofollow`/`stage_scope_file` (L2810-2977, ingest 安全規則)・no-op 判定
   (L1196-1214, tree_hash のみ比較)
-- `crates/kcs-core/src/dag.rs` — `TreeEntry`/`NormalizeRef` (L15-30, `manifest_hash` のみ)・`CommitObject`
+- `crates/kio-core/src/dag.rs` — `TreeEntry`/`NormalizeRef` (L15-30, `manifest_hash` のみ)・`CommitObject`
   (`purged_raws` 保有・`CommitType` 検証)・`is_logical_direct_child`/`is_platform_safe_direct_child`
   (L116-136, path 拒否集合)
-- `crates/kcs-core/src/cas.rs` — `ObjectKind` (Raw/Tree/Commit)・`ContentObjectKind`
+- `crates/kio-core/src/cas.rs` — `ObjectKind` (Raw/Tree/Commit)・`ContentObjectKind`
   (Prepared/Image/Embedding/Manifest/Toollock) の 2 enum 分離
-- `crates/kcs-core/src/portable.rs` — `portable_collision_key` (L15-23, NFC + 標準 Unicode lowercase、
+- `crates/kio-core/src/portable.rs` — `portable_collision_key` (L15-23, NFC + 標準 Unicode lowercase、
   simple case folding ではない)
-- `crates/kcs-pipeline/src/prepare.rs` — `canonical_unit_key` (L225-233, XLSX sheet 名エスケープ未実装)・
+- `crates/kio-pipeline/src/prepare.rs` — `canonical_unit_key` (L225-233, XLSX sheet 名エスケープ未実装)・
   `lcs_fingerprint_pairs` (L447-477, tie-break が旧 index 優先)
-- `crates/kcs-pipeline/src/markdownize.rs` — `NormalizedInstanceManifest` (L142-151, `parent_instance`
+- `crates/kio-pipeline/src/markdownize.rs` — `NormalizedInstanceManifest` (L142-151, `parent_instance`
   field 欠落)
-- `crates/kcs-index/src/fts.rs` — `chunks`/`chunk_config_generations`/`chunk_fts`/`chunk_vec`/
+- `crates/kio-index/src/fts.rs` — `chunks`/`chunk_config_generations`/`chunk_fts`/`chunk_vec`/
   `embeddings` の各 DDL、`index_metadata`
-- `crates/kcs-index/src/embedding_store.rs` — `EmbeddingTargetType::QueryCache` (未配線)・
+- `crates/kio-index/src/embedding_store.rs` — `EmbeddingTargetType::QueryCache` (未配線)・
   `write_chunk_embedding` (target_type='chunk' 固定)
-- `crates/kcs-index/src/registry.rs` — `scopes` DDL・`retire_stale_kcs_path` (到達可能性を見ない削除)
-- `crates/kcs-core/src/xdg.rs` — 権限設定コード自体は無い (0700 は `registry.rs`/`ledger/schema.rs` に
+- `crates/kio-index/src/registry.rs` — `scopes` DDL・`retire_stale_kio_path` (到達可能性を見ない削除)
+- `crates/kio-core/src/xdg.rs` — 権限設定コード自体は無い (0700 は `registry.rs`/`ledger/schema.rs` に
   重複実装)
-- `crates/kcs-cli/src/search_history.rs` — `SearchHistoryBinding`/`SearchHistoryPlan` (per-binding 情報は
+- `crates/kio-cli/src/search_history.rs` — `SearchHistoryBinding`/`SearchHistoryPlan` (per-binding 情報は
   保持済みだが per-binding config 解決は未接続、PC33/44 の土台)
 
 ---
@@ -80,10 +80,10 @@ ancestor gate の実装配線])。
 
 | 接頭辞範囲 | 対象契約領域 | 対応 U 項目 |
 | --- | --- | --- |
-| QB1-QB9 (§A) | K: dead pointer 再分類・error_code 機械判定・preflight 順序・kcs_format_version 検証順序 | U121-U128 |
+| QB1-QB9 (§A) | K: dead pointer 再分類・error_code 機械判定・preflight 順序・kio_format_version 検証順序 | U121-U128 |
 | QB10-QB24 (§B) | L: lock/registry/scan境界/import-export/observability/エントリ文言 | U130-U142 (U129 除く) |
 | QB25-QB49 (§C) | J: 耐久書込・unit/diff schema・SQLite DDL 精密化・tree schema v2/v3・CAS 種別・path 規則 | U95,96,98-112,114-119 |
-| QB50-QB58 (§D) | `kcs log --at/--since` 本実装 | (06§1 L61 のみが正本、他は隣接規約からの導出) |
+| QB50-QB58 (§D) | `kio log --at/--since` 本実装 | (06§1 L61 のみが正本、他は隣接規約からの導出) |
 | QB59-QB66 (§E) | P2 繰越 (PC20/25/26/33/44 の未決配線) | (H 領域、PC20/25/26/33/44 の続き) |
 
 **優先度**: **P0** = このロットの完了条件、1 件でも failing なら「K/L/J 残りの spec 追随完了」と呼べない。
@@ -95,23 +95,23 @@ ancestor gate の実装配線])。
 
 U123 (evidence verify 系 exit code 規則) は 5 つのサブクレームに分解できる: (1) `--strict` の
 scope_unreachable-only → exit 3、(2) `unverifiable` の reason 別分岐、(3) sqlite.db 不在の統一規則、
-(4) multi-scope SCOPE-ALL-FAILED の優先順位、(5) `kcs open/view/restore` の dead pointer 再分類。
+(4) multi-scope SCOPE-ALL-FAILED の優先順位、(5) `kio open/view/restore` の dead pointer 再分類。
 このうち (1)(2)(3) は `step4b-contract-tests-p2b.md` の PB53/PB55/PB56/PB57 が、(4) は
-`step4b-contract-tests-p2c.md` の PC56 が既に契約化・的中確認済み (`kcs evidence verify` 自身の
-exit 分岐)。(5) は QB1 が扱う一般ヘルパのバグそのものであり、`kcs evidence verify` 自身は既に
+`step4b-contract-tests-p2c.md` の PC56 が既に契約化・的中確認済み (`kio evidence verify` 自身の
+exit 分岐)。(5) は QB1 が扱う一般ヘルパのバグそのものであり、`kio evidence verify` 自身は既に
 `scope_unreachable_error` の生エラーを構造化 (exit 0/3) に変換する独自経路 (`verify_objects.rs:118-130`)
 を持つため QB1 の対象外 — U123 の実装完了は「PB53/55/56/57 + PC56 + QB1」の合成で成立する
 (本書はこの事実を記録するのみで、新規契約は追加しない)。
 
 ### QB1 dead pointer の exit 3 再分類 (open / view / restore) [P0]
-- 正本: 06-cli-spec.md §7 L370 (『kcs open / view / restore      dead pointer (tombstoned / not_found) は 4。
+- 正本: 06-cli-spec.md §7 L370 (『kio open / view / restore      dead pointer (tombstoned / not_found) は 4。
   scope_unreachable は 3 (retryable — 08 §4.3)』) / 10-operations.md §12.2 L931 (『dead pointer
   (tombstoned / not_found) は `4`、**scope_unreachable のみは retryable の `3`**』)
 - 前提: pointer の `scope_id` が registry / scope_path のどちらでも解決不能 (scope root が unmount・削除済み)。
-  `kcs open <pointer>` / `kcs view <pointer>` / `kcs restore <pointer> --to <dir>` の 3 コマンドで
+  `kio open <pointer>` / `kio view <pointer>` / `kio restore <pointer> --to <dir>` の 3 コマンドで
   パラメタ化する。
 - 操作: 各コマンドを到達不能な scope を指す pointer で実行する。
-- 期待: 3 コマンドいずれも `KCS-E-EVIDENCE-SCOPE-UNREACHABLE-001` を返し、exit code は **3**
+- 期待: 3 コマンドいずれも `KIO-E-EVIDENCE-SCOPE-UNREACHABLE-001` を返し、exit code は **3**
   (`ExitCode::PartialFailure`) である。**現状**: `scope_unreachable_error` (main.rs:8552-8559) は
   `ExitCode::PermanentFailure` (4) を返す唯一の実装であり、`resolve_scope_target` (main.rs:7727-7749) 経由で
   open/view (`resolve_pointer_for_cli`・`resolve_object_uri`)・restore (`restore.rs:126`
@@ -124,7 +124,7 @@ exit 分岐)。(5) は QB1 が扱う一般ヘルパのバグそのものであ�
   失敗判定には使わない** — 失敗判定は exit code (非 0) が正 (例 = text fallback の
   05-runtime.md §1.7 応答契約)』)
 - 前提: search が embedding 未承認等の理由で text fallback した応答 (`error_code` に
-  `KCS-E-SEARCH-VEC-UNAUTHORIZED-001` 等の非 null 値が入りつつ結果は正常に返る)。
+  `KIO-E-SEARCH-VEC-UNAUTHORIZED-001` 等の非 null 値が入りつつ結果は正常に返る)。
 - 操作: プロセスの exit code と、出力 JSON の `error_code` フィールドの両方を機械的に取得する。
 - 期待: exit code は **0** であり、`error_code` が非 null であることは exit code の値に一切影響しない
   (`error_code` の値をどう変えても exit 0 のまま — 構造的な分離を主張する)。この分離は実装上
@@ -136,45 +136,45 @@ exit 分岐)。(5) は QB1 が扱う一般ヘルパのバグそのものであ�
 
 ### QB3 軽量規範 3 件の現状固定確認 (EMBED domain 適用時点・fallback_reason 自由語彙・CONFIG-SCHEMA-001 確定) [P2]
 - 正本: (a) 03-data-model.md §7 (『**modality は `"multimodal"` に固定する**...採用不可であり、tool-lock への
-  materialize / adapter 登録の時点で `KCS-E-EMBED-MODALITY-001` (exit 2...) として拒否する』) /
+  materialize / adapter 登録の時点で `KIO-E-EMBED-MODALITY-001` (exit 2...) として拒否する』) /
   (b) 06-cli-spec.md §9 L429-431 (『fallback_reason は自由語彙 — 閉 enum にしない。機械判定は error_code 側が
   正であり、Agent は未知の fallback_reason 値を無視してよい』) /
-  (c) 06-cli-spec.md §11 L503 (『validation 失敗は **exit 2** + `KCS-E-CONFIG-SCHEMA-001`』)
+  (c) 06-cli-spec.md §11 L503 (『validation 失敗は **exit 2** + `KIO-E-CONFIG-SCHEMA-001`』)
 - 前提: (a) 非 multimodal embedding profile を tool-lock materialize 時に登録しようとする。(b) search
   応答の `fallback_reason` フィールドの型定義。(c) config schema validation 失敗時に返る error_code。
 - 操作: (a) `modality != "multimodal"` の profile で materialize を実行。(b) `ResolvedMode.fallback_reason`
   (main.rs:1149-1162) の型を確認。(c) 不正な config.toml で任意コマンドを実行。
-- 期待: (a) `KCS-E-EMBED-MODALITY-001` (exit 2) で拒否 (tool_lock.rs:468 で既存実装確認)。(b) 型は
-  `Option<String>` であり閉 enum ではない (schema/コード上の制約なし)。(c) 常に `KCS-E-CONFIG-SCHEMA-001`
+- 期待: (a) `KIO-E-EMBED-MODALITY-001` (exit 2) で拒否 (tool_lock.rs:468 で既存実装確認)。(b) 型は
+  `Option<String>` であり閉 enum ではない (schema/コード上の制約なし)。(c) 常に `KIO-E-CONFIG-SCHEMA-001`
   (NNN プレースホルダは残らない、grep 0 件)。**現状**: 3 件とも既に適合 (spec-gap の「適合済みの可能性」
   判定を確定) — 本契約は現状固定の回帰ロック。
 
 ### QB4 preflight (0)-(4) 同時違反優先順位マトリクス [P0]
 - 正本: 10-operations.md §3 L300-305 (『**複合状態の優先順位 (全コマンド共通の preflight 順序)**: (0)
-  `kcs_format_version` 互換判定...→ (1) purge journal / epoch 検査 → (2) registry live 重複
-  (KCS-E-REGISTRY-DUP-001) → (3) index 可用性 (KCS-E-INDEX-REBUILDING-001) → (4) command 固有の検査。
+  `kio_format_version` 互換判定...→ (1) purge journal / epoch 検査 → (2) registry live 重複
+  (KIO-E-REGISTRY-DUP-001) → (3) index 可用性 (KIO-E-INDEX-REBUILDING-001) → (4) command 固有の検査。
   ...同時成立時は先順の error を返し』)
 - 前提: 単一 scope が同時に 2 つ以上の preflight 条件に違反する組合せをパラメタ化する: (a) (0)+(1)
   (format-version 非互換 かつ active purge journal)、(b) (1)+(2) (active purge journal かつ registry
   live 重複)、(c) (2)+(3) (registry live 重複 かつ sqlite.db 不在)、(d) (0)+(3) (format-version 非互換
   かつ sqlite.db 不在)。
-- 操作: 各組合せで `kcs log <path>`/`kcs view <pointer>` を実行する (読取系代表 2 種)。
-- 期待: いずれの組合せでも、より若い番号の条件に対応する error_code が返る ((a)→`KCS-E-STORE-VERSION-001`
-  exit 8、(b)→`KCS-E-PURGE-JOURNAL-ACTIVE-001` exit 3、(c)→`KCS-E-REGISTRY-DUP-001`、
-  (d)→`KCS-E-STORE-VERSION-001` exit 8)。より若くない番号の error は一切観測されない。**現状**:
+- 操作: 各組合せで `kio log <path>`/`kio view <pointer>` を実行する (読取系代表 2 種)。
+- 期待: いずれの組合せでも、より若い番号の条件に対応する error_code が返る ((a)→`KIO-E-STORE-VERSION-001`
+  exit 8、(b)→`KIO-E-PURGE-JOURNAL-ACTIVE-001` exit 3、(c)→`KIO-E-REGISTRY-DUP-001`、
+  (d)→`KIO-E-STORE-VERSION-001` exit 8)。より若くない番号の error は一切観測されない。**現状**:
   `LC53` (lifecycle.md) が (1)-(3) の単独発火は個別に契約化済みだが、**同時発生時にどちらが勝つか**を
-  証明する組合せテストは存在しない (単一違反の直列列挙のみ)。(0) 自体 (kcs_format_version) を preflight
+  証明する組合せテストは存在しない (単一違反の直列列挙のみ)。(0) 自体 (kio_format_version) を preflight
   順序に組み込む契約も無い。
 
 ### QB5 restore の preflight 順序異常 (format-version が purge-journal より先行) [P0]
-- 正本: 10-operations.md §3 L300-302 (『(0) kcs_format_version 互換判定...(1) purge journal / epoch 検査』、
+- 正本: 10-operations.md §3 L300-302 (『(0) kio_format_version 互換判定...(1) purge journal / epoch 検査』、
   (0) は「他のすべての検査に先行する」と明記) — この一般順序が restore にも適用されるべきという前提のもと、
   現行の open/view の実装順序 (purge-journal → index-generation → format-version、後述 QB6 参照) との
   **内部不整合**を pin する。
 - 前提: 同一 pointer に対し (i) format-version 非互換、(ii) active purge journal、を同時に満たす scope
-  への `kcs restore <pointer> --to <dir>` 実行。
+  への `kio restore <pointer> --to <dir>` 実行。
 - 操作: restore を実行し、返る error_code を観測する。
-- 期待: `KCS-E-STORE-VERSION-001` (exit 8) が返る — (0) が最優先という一般規則どおり。**現状**:
+- 期待: `KIO-E-STORE-VERSION-001` (exit 8) が返る — (0) が最優先という一般規則どおり。**現状**:
   `restore.rs:113-129` (`resolve_evidence_source`) は `resolve_scope_target` (purge-journal 検査より前に
   format-version チェックを含む `Repository::open` を内包) を先に呼び、呼出元 `run()` が
   `ReadBarrierCheckpoint::open`/`check_index_generation_current` (purge-journal/index-generation 検査) を
@@ -188,10 +188,10 @@ exit 分岐)。(5) は QB1 が扱う一般ヘルパのバグそのものであ�
 - 正本: 10-operations.md §3 L300-311 (同上、「全コマンド共通の preflight 順序」と明記し「読取系はこの順序を
   冒頭 1 回適用し」と続く — コマンド種別による順序差異を許容する文言は無い)
 - 前提: (i) format-version 非互換 かつ (ii) active purge journal を同時に満たす scope。
-  `kcs diff <a> <b>` (main.rs:641-651 型) と `kcs open <pointer>` (resolve_scope_target 経由) の
+  `kio diff <a> <b>` (main.rs:641-651 型) と `kio open <pointer>` (resolve_scope_target 経由) の
   2 コマンドでパラメタ化する。
 - 操作: 各コマンドを実行し、返る error_code を比較する。
-- 期待: 両コマンドとも同一の error_code (`KCS-E-STORE-VERSION-001`、(0) 優先) を返す — コマンド種別に
+- 期待: 両コマンドとも同一の error_code (`KIO-E-STORE-VERSION-001`、(0) 優先) を返す — コマンド種別に
   依らず同じ判定結果になる。**現状**: `diff`/`log`/`inspect` は `Repository::open_current()` (format-version
   含む) → `ReadBarrierCheckpoint::open` (purge-journal) の順 (main.rs:627-633 型) で (0)→(1)。一方
   `open`/`view` は `resolve_scope_target` の内部で purge-journal 相当の `ReadBarrierCheckpoint::open` を
@@ -201,97 +201,97 @@ exit 分岐)。(5) は QB1 が扱う一般ヘルパのバグそのものであ�
   failing test として固定する。
 
 ### QB7 書き込み系コマンドの (0)(2)(3) 適用確認 [P1]
-- 正本: 10-operations.md §3 L305-307 (『(3) は復旧・初期化コマンド自身...には適用しない...kcs status も
+- 正本: 10-operations.md §3 L305-307 (『(3) は復旧・初期化コマンド自身...には適用しない...kio status も
   拒否対象外』の除外規定から逆に、除外されない書き込み系コマンドには (0)(2)(3) が適用されると読める。
   06-cli-spec.md §10 の REGISTRY-DUP 引用文 (10§3 L296-299)『live 重複が解消するまでは、当該 scope_id での
-  **書き込み系コマンドと online タスク起動 (相 1) も** `KCS-E-REGISTRY-DUP-001` で fail-closed とする』)
-- 前提: registry に同一 scope_id の live clone が 2 つ存在する状態 (KCS-E-REGISTRY-DUP-001 の発火条件)。
-  `kcs index` (復旧・初期化コマンドではない通常の書き込み系) を対象にする。
-- 操作: `kcs index --approve` を実行する。
-- 期待: `KCS-E-REGISTRY-DUP-001` で fail-closed に拒否される (index を開始しない)。**現状**: 書き込み系
+  **書き込み系コマンドと online タスク起動 (相 1) も** `KIO-E-REGISTRY-DUP-001` で fail-closed とする』)
+- 前提: registry に同一 scope_id の live clone が 2 つ存在する状態 (KIO-E-REGISTRY-DUP-001 の発火条件)。
+  `kio index` (復旧・初期化コマンドではない通常の書き込み系) を対象にする。
+- 操作: `kio index --approve` を実行する。
+- 期待: `KIO-E-REGISTRY-DUP-001` で fail-closed に拒否される (index を開始しない)。**現状**: 書き込み系
   コマンド (`run_index`/`run_reindex`/`run_repair`/`run_batch`/`purge::run`) はいずれも `Repository::open_current()`
   (format-version = (0)) → `lock_store()` → tool-lock 検証、という直線的な流れのみで、registry live 重複
   ((2)) や sqlite.db 可用性 ((3)) を明示的に検査する preflight 呼出は main.rs の各 `run_*` 冒頭に見当たらない
   (`ReadBarrierCheckpoint`/`check_index_generation_current` は読取系専用ヘルパで書き込み系からは呼ばれない) —
   (2) の適用有無は未確認区分として本契約が検証対象にする。
 
-### QB8 kcs_format_version 判定の schema validation 前倒し (scope.json) [P0]
+### QB8 kio_format_version 判定の schema validation 前倒し (scope.json) [P0]
 - 正本: 03-data-model.md §2 L154 (『**互換判定は scope.json の schema validation より先に評価する** —
   自己の対応上限より新しい version の store は未知 key の schema error に入らず **read-only + 新版誘導**
-  で縮退する』) / 10-operations.md §12.3 L948 (『この検証は `kcs_format_version` の互換判定より**後**に
+  で縮退する』) / 10-operations.md §12.3 L948 (『この検証は `kio_format_version` の互換判定より**後**に
   走る — 自己の対応上限より新しい version の store は schema validation に入らず read-only + 新版誘導で
   縮退する』)
-- 前提: `.kcs/scope.json` の `kcs_format_version` が自己の対応上限より新しく、かつ同じ scope.json が
+- 前提: `.kio/scope.json` の `kio_format_version` が自己の対応上限より新しく、かつ同じ scope.json が
   現行 schema にとって未知の key を含む (将来 MINOR bump で追加されたであろう key を模擬)。
-- 操作: このスコープに対し任意の読取系コマンド (`kcs status`) を実行する。
-- 期待: `KCS-E-STORE-VERSION-001` (exit 8) が返り、`KCS-E-CONFIG-SCHEMA-001` (exit 2、未知 key の
+- 操作: このスコープに対し任意の読取系コマンド (`kio status`) を実行する。
+- 期待: `KIO-E-STORE-VERSION-001` (exit 8) が返り、`KIO-E-CONFIG-SCHEMA-001` (exit 2、未知 key の
   schema error) は返らない。**現状**: `validated_scope_id` (scope.rs:1720-1741) は
-  `validate_json_schema(SchemaKind::Scope, &value)?` を**先に**実行し、`kcs_format_version` の
+  `validate_json_schema(SchemaKind::Scope, &value)?` を**先に**実行し、`kio_format_version` の
   `validate_format_version(version)?` はその後・かつ `Some(version)` の場合のみ実行される — 未知 key を
-  含む scope.json は `kcs_format_version` の値を見る前に `KCS-E-CONFIG-SCHEMA-001` で弾かれる。QB4/QB6 の
+  含む scope.json は `kio_format_version` の値を見る前に `KIO-E-CONFIG-SCHEMA-001` で弾かれる。QB4/QB6 の
   一般順序不整合とは独立に、**この 1 関数内の順序そのもの**が規範と逆であることを直接 pin する。
-- [解釈割れ]: `.kcs/config.toml` も `kcs_format_version` を保持し (`Repository::init` が両ファイルに
+- [解釈割れ]: `.kio/config.toml` も `kio_format_version` を保持し (`Repository::init` が両ファイルに
   書き込む、scope.rs:243-257)、`validate_config` (scope.rs:1695-1714) が全く同型の順序バグを持つ。
-  しかし 03-data-model.md §2 L154 が明示するのは `scope.json` の `kcs_format_version` フィールドのみで
-  あり (『保存場所 = `.kcs/scope.json` の `kcs_format_version` フィールド』)、config.toml 側のコピーが
+  しかし 03-data-model.md §2 L154 が明示するのは `scope.json` の `kio_format_version` フィールドのみで
+  あり (『保存場所 = `.kio/scope.json` の `kio_format_version` フィールド』)、config.toml 側のコピーが
   同じ規範の対象かは spec が明言しない。config.toml 側の同型バグは注記に留め、本契約は scope.json に
   限定する。
 
 ### QB9 新版 store + 未知 key の縮退シナリオ (書込ゼロ・即時拒否の確認) [P0]
 - 正本: 10-operations.md §12.5 L1000 (『書き込み系コマンド...は当該 store に対して**即時拒否** —
-  error_code `KCS-E-STORE-VERSION-001`・exit 8...単独 scope 指定の読み取り系 (log / view / open / inspect /
+  error_code `KIO-E-STORE-VERSION-001`・exit 8...単独 scope 指定の読み取り系 (log / view / open / inspect /
   evidence verify / status / diff / 単独 search) は store への**書込ゼロ**で best-effort 動作する』)
-- 前提: QB8 と同一の「新版 store + 未知 key」シナリオ。書き込み系 (`kcs index`) と読取系 (`kcs status`)
+- 前提: QB8 と同一の「新版 store + 未知 key」シナリオ。書き込み系 (`kio index`) と読取系 (`kio status`)
   の 2 コマンドでパラメタ化する。
 - 操作: 各コマンドを実行する。
-- 期待: 書き込み系は即時 `KCS-E-STORE-VERSION-001` (exit 8) で何も書き込まない (raw object 保存や
+- 期待: 書き込み系は即時 `KIO-E-STORE-VERSION-001` (exit 8) で何も書き込まない (raw object 保存や
   SQLite への書込が一切発生しないことを、実行前後のファイル一覧・mtime 差分で確認)。読取系も同じ
   error_code を返すが、これは「書込ゼロの best-effort」であり検索や inspect 等の**副作用を伴わない**
   操作である限りにおいて許容される、という区別を明示する。**現状**: QB8 の順序バグにより両方とも
-  実際には `KCS-E-CONFIG-SCHEMA-001` (exit 2) を返すため、この期待そのものが QB8 の修正を前提とする —
+  実際には `KIO-E-CONFIG-SCHEMA-001` (exit 2) を返すため、この期待そのものが QB8 の修正を前提とする —
   QB8 が直る前提での事後条件として記述する。
 
 ---
 
 # §B. L 領域 — その他 (U130-U142、U129 除く)
 
-### QB10 kcs view の構文修正確認 (`<commit>` 単独 → `<path> --at <commit>`) [P1]
-- 正本: 05-runtime.md §2.2 L534 (『shallow 後の commit を対象に view した場合 (`kcs view <path> --at <commit>`
-  — 文法の正本は 06-cli-spec.md §1。commit の metadata 表示は `kcs log` / `kcs inspect` 系が担う)』) /
-  05-runtime.md §4.2 L1009-1011 (『kcs view <evidence-at-commit-X> / kcs view <path> --at <commit>』)
-- 前提: `View(UnsupportedArgs)` (main.rs:180, `Vec<String>` の柔軟パーサ) 経由で `kcs view` を呼ぶ。
-- 操作: (a) `kcs view <path> --at <commit>` (path 位置引数 + `--at` flag) の形式で呼ぶ。(b) 過去の
-  `kcs view <commit>` 単独形式 (commit のみで path を指さない) で呼ぶ。
+### QB10 kio view の構文修正確認 (`<commit>` 単独 → `<path> --at <commit>`) [P1]
+- 正本: 05-runtime.md §2.2 L534 (『shallow 後の commit を対象に view した場合 (`kio view <path> --at <commit>`
+  — 文法の正本は 06-cli-spec.md §1。commit の metadata 表示は `kio log` / `kio inspect` 系が担う)』) /
+  05-runtime.md §4.2 L1009-1011 (『kio view <evidence-at-commit-X> / kio view <path> --at <commit>』)
+- 前提: `View(UnsupportedArgs)` (main.rs:180, `Vec<String>` の柔軟パーサ) 経由で `kio view` を呼ぶ。
+- 操作: (a) `kio view <path> --at <commit>` (path 位置引数 + `--at` flag) の形式で呼ぶ。(b) 過去の
+  `kio view <commit>` 単独形式 (commit のみで path を指さない) で呼ぶ。
 - 期待: (a) は受理され、当該 commit 時点の `<path>` の内容を返す (`normalize.manifest_hash` が指す
   manifest object 由来の unit 完成状態を使う — PB45 で既に契約化済みの部分、参照のみ)。(b) は
-  `KCS-E-CONFIG-USAGE-001` (exit 2) で拒否される (commit 単独ではメタ情報しか持たず、表示すべき path が
-  一意に定まらないため — commit のメタ表示自体は `kcs log`/`kcs inspect` の責務であるという spec の
+  `KIO-E-CONFIG-USAGE-001` (exit 2) で拒否される (commit 単独ではメタ情報しか持たず、表示すべき path が
+  一意に定まらないため — commit のメタ表示自体は `kio log`/`kio inspect` の責務であるという spec の
   役割分担に従う)。**現状**: `read_pointer_input` (main.rs:6840-6845) は最初の引数を pointer として
   読むのみで、`<path> --at <commit>` という 2 引数 (位置引数 + flag) の組合せを明示的に処理する分岐は
   未確認 — 本契約が実際の受理形式を固定する。
 
-### QB11 `.kcs/.lock` 対象コマンド一覧の現状確認 (パラメタ化) [P1]
-- 正本: 05-runtime.md §6 L1034-1038 (『`.kcs/.lock` を取得するコマンド (書き込み系): kcs index /
-  kcs snapshot ... / kcs batch resume / kcs batch retry / kcs batch abandon / kcs reindex /
-  kcs adapter revoke』) / 同 L1052 (『読み取り系 (search / log / view / open / inspect / evidence verify /
-  restore / status / diff) は `.kcs/.lock` を取得しない』)
-- 前提: `kcs batch resume` / `kcs batch retry` / `kcs batch abandon` / `kcs reindex` / `kcs open` の
+### QB11 `.kio/.lock` 対象コマンド一覧の現状確認 (パラメタ化) [P1]
+- 正本: 05-runtime.md §6 L1034-1038 (『`.kio/.lock` を取得するコマンド (書き込み系): kio index /
+  kio snapshot ... / kio batch resume / kio batch retry / kio batch abandon / kio reindex /
+  kio adapter revoke』) / 同 L1052 (『読み取り系 (search / log / view / open / inspect / evidence verify /
+  restore / status / diff) は `.kio/.lock` を取得しない』)
+- 前提: `kio batch resume` / `kio batch retry` / `kio batch abandon` / `kio reindex` / `kio open` の
   5 コマンドでパラメタ化する。
-- 操作: 各コマンドを、`.kcs/.lock` の取得有無を計測できる形 (lock ファイルの mtime・並行 2 プロセスの
+- 操作: 各コマンドを、`.kio/.lock` の取得有無を計測できる形 (lock ファイルの mtime・並行 2 プロセスの
   排他確認) で実行する。
-- 期待: 前 4 者は `.kcs/.lock` を取得する。`kcs open` は取得しない。**現状**: `run_batch` (main.rs:8889-8905)
+- 期待: 前 4 者は `.kio/.lock` を取得する。`kio open` は取得しない。**現状**: `run_batch` (main.rs:8889-8905)
   が `lock_store()` を関数冒頭で 1 回取得しコマンド分岐全体を覆うため resume/retry/abandon の 3 者は
-  既に充足。`run_reindex` (main.rs:4383-4387) も充足。`kcs open` はいずれの呼出経路にも `lock_store()`
-  呼出が無く既に充足。**`kcs adapter revoke` はコマンド自体が存在しない** (`Command` enum に `Adapter`
+  既に充足。`run_reindex` (main.rs:4383-4387) も充足。`kio open` はいずれの呼出経路にも `lock_store()`
+  呼出が無く既に充足。**`kio adapter revoke` はコマンド自体が存在しない** (`Command` enum に `Adapter`
   variant 無し) ため本契約のパラメータから除外する (I 領域の管轄、対象外)。本契約は 4 コマンド分の
   **回帰ロック**として機能する (既に正しいことの確認)。
 
 ### QB12 複合 lock 順序の実装確認と cost-ledger.sqlite の位置づけ [P1]
 - 正本: 05-runtime.md §6 L1058 (『複合 lock 順序は scope store → cost-ledger.sqlite (Tx) → device
   observability → scope access とし、逆順取得を禁止する』)
-- 前提: `kcs purge` の実行 (scope store lock → purge publication lock → device scrub.lock → scope
+- 前提: `kio purge` の実行 (scope store lock → purge publication lock → device scrub.lock → scope
   access scrub.lock の順に取得する経路を持つ、purge.rs:283-301/1474-1483/1542-1544)。
-- 操作: `kcs purge` を対象 raw_hash 指定で実行し、各 lock の取得順序をコードパス上で追跡する。
+- 操作: `kio purge` を対象 raw_hash 指定で実行し、各 lock の取得順序をコードパス上で追跡する。
 - 期待: 取得順序が scope-store → (purge publication は scope store の下位に位置する scope 固有 lock として)
   → device-scrub → scope-access の順で、逆順取得が発生しない。**現状**: `purge.rs` の実装順序は
   scope-store-lock → purge-publication-lock → device-scrub.lock → scope-access.scrub.lock で規範の
@@ -309,7 +309,7 @@ exit 分岐)。(5) は QB1 が扱う一般ヘルパのバグそのものであ�
   journal 不在 + epoch 不変 + lifecycle counter 不変) の**最終検査と同一 critical section** で行う —
   scrub 完了後の再 append で purge の削除 postcondition を破らない。最終検査で拒否した場合の記録には
   対象 path / query / raw_hash を含めない』)
-- 前提: `access.jsonl` へ `raw_hash` を含む行を append する読取系コマンド (`kcs open <raw_hash>`) の
+- 前提: `access.jsonl` へ `raw_hash` を含む行を append する読取系コマンド (`kio open <raw_hash>`) の
   実行中に、並行して同一 raw_hash への purge が完了する競合。
 - 操作: (a) 3 点検査通過 → append 正常系。(b) 3 点検査中に purge journal が active化 (競合検出) →
   append 拒否系、をそれぞれ発生させる。
@@ -322,64 +322,64 @@ exit 分岐)。(5) は QB1 が扱う一般ヘルパのバグそのものであ�
 
 ### QB14 registry 再構築の入力範囲 + `scrub.lock` パス解決 (現状固定、パラメタ化 2 件) [P2]
 - 正本: (a) 05-runtime.md §6 L1057 (『**再構築の入力はユーザーが知る探索 root** — registry 喪失後は
-  `.kcs` の所在一覧も失われるため、各 root での `kcs index` 再実行が再登録を兼ねる。KCS が自力で
+  `.kio` の所在一覧も失われるため、各 root での `kio index` 再実行が再登録を兼ねる。KIO が自力で
   全ディスクを走査することはしない』) / (b) 同 L1058 (『device logs では
-  `${XDG_DATA_HOME:-$HOME/.local/share}/kcs/logs/scrub.lock`』)
+  `${XDG_DATA_HOME:-$HOME/.local/share}/kio/logs/scrub.lock`』)
 - 前提: (a) `scope-registry.sqlite` が破損・削除された状態。(b) `XDG_DATA_HOME` 環境変数が未設定の
   実行環境。
-- 操作: (a) registry 削除後に `kcs status` 等を実行し、全ディスク走査が発生しないことを確認する。
-  (b) `XDG_DATA_HOME` 未設定のまま `kcs purge` を実行し `scrub.lock` の実パスを観測する。
-- 期待: (a) KCS は既知の root 以外を自発的に走査しない (=「全ディスク走査を行う」コードパスが存在しない
-  ことの確認 — 各 `.kcs` は個別の `kcs index` 実行でのみ再登録される)。(b) `scrub.lock` は
-  `$HOME/.local/share/kcs/logs/scrub.lock` に解決され、カレントディレクトリ相対のような不正パスには
+- 操作: (a) registry 削除後に `kio status` 等を実行し、全ディスク走査が発生しないことを確認する。
+  (b) `XDG_DATA_HOME` 未設定のまま `kio purge` を実行し `scrub.lock` の実パスを観測する。
+- 期待: (a) KIO は既知の root 以外を自発的に走査しない (=「全ディスク走査を行う」コードパスが存在しない
+  ことの確認 — 各 `.kio` は個別の `kio index` 実行でのみ再登録される)。(b) `scrub.lock` は
+  `$HOME/.local/share/kio/logs/scrub.lock` に解決され、カレントディレクトリ相対のような不正パスには
   ならない。**現状**: (a) 全ディスク走査を行う実装 (`WalkDir` 等の再帰クレート使用) はそもそも存在しない
   ため構造的に充足。(b) `data_home()` (scope.rs:2696-2704) は `xdg_dir("XDG_DATA_HOME")` が失敗した
   場合に `home_dir().join(".local/share")` へ正しくフォールバックする (`xdg.rs` の単体テストで検証済み)
   — spec-gap が疑っていた「不正パス生成バグ」は現行実装には存在しない。本契約は両サブクレームとも
   現状固定の回帰ロック。
 
-### QB15 VCS リポジトリ root 配下の子 `.kcs` 生成除外 (前提機構の欠如を明記) [P1]
+### QB15 VCS リポジトリ root 配下の子 `.kio` 生成除外 (前提機構の欠如を明記) [P1]
 - 正本: 03-data-model.md §3 L267 (『**VCS リポジトリ root (`.git` 等の VCS 管理ディレクトリを持つフォルダ)
-  とその配下にも既定では子 `.kcs` を生成しない** (skip + status 表示。`[scope] index_vcs_repos = true`
-  で opt-in) ... **本既定の導入以前に生成済みの既存子 `.kcs` は grandfathered**』)
-- 前提: **本契約が検証しようとする「子 `.kcs` の自動生成」機構自体が、`kcs index` の現行実装には
-  存在しない** (`.kcs` を除く通常のサブディレクトリはそもそも走査対象から単純に skip されるのみで
+  とその配下にも既定では子 `.kio` を生成しない** (skip + status 表示。`[scope] index_vcs_repos = true`
+  で opt-in) ... **本既定の導入以前に生成済みの既存子 `.kio` は grandfathered**』)
+- 前提: **本契約が検証しようとする「子 `.kio` の自動生成」機構自体が、`kio index` の現行実装には
+  存在しない** (`.kio` を除く通常のサブディレクトリはそもそも走査対象から単純に skip されるのみで
   (`scan.rs:117`/`scope.rs:627-628` が `is_dir()`/`is_file()` チェックで弾く)、対象ファイルを含む
-  サブフォルダへ子 `.kcs` を生成する再帰探索コードパスは grep 0 件)。したがって「VCS repo root を
+  サブフォルダへ子 `.kio` を生成する再帰探索コードパスは grep 0 件)。したがって「VCS repo root を
   除外する」規則を対象を持たないまま実装するのは無意味であり、本契約は **前提機構が実装されたとき**
   に満たすべき事後条件として先行固定する。
-- 操作: (将来) 子 `.kcs` 自動生成が実装された時点で、`.git` を持つフォルダとその配下に対して
-  `kcs index` を実行する。
-- 期待: 子 `.kcs` は生成されず、当該フォルダは `kcs status` 等で skip 表示される。`[scope]
-  index_vcs_repos = true` を設定した場合のみ子 `.kcs` が生成される。本既定の導入前に既に存在する
-  子 `.kcs` (grandfathered) は本規則の影響を受けず有効な scope のまま残る。**現状の代替確認**:
+- 操作: (将来) 子 `.kio` 自動生成が実装された時点で、`.git` を持つフォルダとその配下に対して
+  `kio index` を実行する。
+- 期待: 子 `.kio` は生成されず、当該フォルダは `kio status` 等で skip 表示される。`[scope]
+  index_vcs_repos = true` を設定した場合のみ子 `.kio` が生成される。本既定の導入前に既に存在する
+  子 `.kio` (grandfathered) は本規則の影響を受けず有効な scope のまま残る。**現状の代替確認**:
   `folder-config.schema.json` に `[scope] index_vcs_repos` キーが定義されているか (config schema
   レベルでの先行受理) だけは今すぐ検証可能であり、本契約の**弱い部分集合**として実施する — grep
   `index_vcs_repos` は crates 全域で 0 件 (schema にもキー未定義)。
 
-### QB16 `kcs import --as-new-scope` の fork 機構 [P1]
+### QB16 `kio import --as-new-scope` の fork 機構 [P1]
 - 正本: 06-cli-spec.md §10 (『bundle の scope_id が registry に live 登録済みなら拒否
-  (`KCS-E-REGISTRY-DUP-001`)...複製として取り込むには `--as-new-scope` で新 scope_id を採番...fork は
+  (`KIO-E-REGISTRY-DUP-001`)...複製として取り込むには `--as-new-scope` で新 scope_id を採番...fork は
   旧 scope の approvals[]・初回スキャン承認 (scan_approval)・adapter.policy.allow_network を引き継がない
-  ...`.kcs/logs/` は継承しない (空で開始)』)
-- 前提: `kcs import` コマンド自体が `Command` enum に存在しない (`Import` variant 無し、`Gc`/`Move`/
+  ...`.kio/logs/` は継承しない (空で開始)』)
+- 前提: `kio import` コマンド自体が `Command` enum に存在しない (`Import` variant 無し、`Gc`/`Move`/
   `Evidence` のような `UnsupportedArgs` placeholder としてすら存在しない — コマンド文字列自体が
   未定義)。
-- 操作: (将来実装後) 既に live 登録済みの scope_id を持つ `.kcsz` bundle を、`--as-new-scope` 付き/
+- 操作: (将来実装後) 既に live 登録済みの scope_id を持つ `.kioz` bundle を、`--as-new-scope` 付き/
   無しでそれぞれ import する。
-- 期待: `--as-new-scope` 無しは `KCS-E-REGISTRY-DUP-001` で拒否。付きは新 ULID の scope_id を採番し、
+- 期待: `--as-new-scope` 無しは `KIO-E-REGISTRY-DUP-001` で拒否。付きは新 ULID の scope_id を採番し、
   展開後の scope.json には旧 `approvals[]`/`scan_approval`/`approvals_initialized`/`approval_pending`
-  が存在せず、`config.toml` の `allow_network` は `false` にリセットされ、`.kcs/logs/` は空
+  が存在せず、`config.toml` の `allow_network` は `false` にリセットされ、`.kio/logs/` は空
   (旧 scope の行を一切持たない) で開始する。展開・sanitize は private directory 内で完結させてから
   atomic に publish する (scope.json のみ新・config のみ旧という中間状態を外部に見せない)。**現状**:
   機構自体が完全に未実装 (0 件) — 本契約は将来実装への先行固定。
 
-### QB17 `.kcsz` bundle の機微 metadata 含有警告 [P2]
+### QB17 `.kioz` bundle の機微 metadata 含有警告 [P2]
 - 正本: 06-cli-spec.md §10 末尾 (『bundle には scope.json の approvals[]・logs/ の運用記録・登録 path
   等の機微 metadata が含まれる — 共有は同一信頼境界内 (自分の別端末・バックアップ) を想定し、第三者
   公開用の sanitize (承認・log・path の除去) は Phase 4+ の export mode で扱う』)
-- 前提: `.kcsz` の export/import 機構自体が未実装 (`kcsz` grep 0 件、`export`/`Export` grep 0 件)。
-- 操作: (将来実装後) `kcs export <scope> --to <bundle.kcsz>` を実行する。
+- 前提: `.kioz` の export/import 機構自体が未実装 (`kioz` grep 0 件、`export`/`Export` grep 0 件)。
+- 操作: (将来実装後) `kio export <scope> --to <bundle.kioz>` を実行する。
 - 期待: 生成された bundle には approvals[]・logs/・登録 path がそのまま含まれ、CLI は出力またはドキュメント
   上でこれらが機微情報であり第三者への公開を想定しない旨を明示する。第三者公開用の sanitize (承認・log・
   path 除去) は明示的に提供しない (Phase 4+ の別モード)。**現状**: 機構自体が未実装 — 本契約は将来
@@ -387,10 +387,10 @@ exit 分岐)。(5) は QB1 が扱う一般ヘルパのバグそのものであ�
 
 ### QB18 observability config key の改称 (`[logs]` → `[observability]`) と scope_id 必須化 [P1]
 - 正本: 10-operations.md §12.3 L954 (『log 保持の正規 key = **`[observability] retention_days`**
-  (整数 1〜3650・既定 30)...device logs...と scope-local `.kcs/logs/access.jsonl` の双方に適用する』) /
+  (整数 1〜3650・既定 30)...device logs...と scope-local `.kio/logs/access.jsonl` の双方に適用する』) /
   §12.6 L1033-1038 (『**scope 由来の行は context.scope_id を必須とする**...複数 scope に跨る行は
   scope_id を持たない — そのためこれらの行には raw_hash / path / query 等の対象由来値を記録しない』)
-- 前提: `~/.config/kcs/config.toml` に `retention_days` を設定した状態。
+- 前提: `~/.config/kio/config.toml` に `retention_days` を設定した状態。
 - 操作: (a) `[observability] retention_days = 60` を設定して読み込む。(b) 現行の `[logs] retention_days`
   設定を読み込む。(c) scope 由来のログ行 (`access.jsonl` 1 行) の必須 field を検査する。
 - 期待: (a) が実効値として反映される (現行は無視されるべき形式)。(c) 全ての scope 由来行が
@@ -401,17 +401,17 @@ exit 分岐)。(5) は QB1 が扱う一般ヘルパのバグそのものであ�
   required 化されているかは未確認)。
 
 ### QB19 scope-local `access.jsonl` の retention_days 適用確認 (現状固定) [P2]
-- 正本: 10-operations.md §12.6 L1041-1045 (『**scope-local の `.kcs/logs/access.jsonl` も同じ規範の
+- 正本: 10-operations.md §12.6 L1041-1045 (『**scope-local の `.kio/logs/access.jsonl` も同じ規範の
   対象とする** (日次 rotation + 保持日数は同 config・既定 30 日 — 無操作でも検索対象であり続ける scope
   の unbounded 成長を防ぐ。purge の scrub は**全保持世代**に適用する — rotation は scrub の対象範囲を
   狭めない)』)
-- 前提: `.kcs/logs/access.jsonl` が既定保持日数を超えて存在する scope。
+- 前提: `.kio/logs/access.jsonl` が既定保持日数を超えて存在する scope。
 - 操作: 保持日数超過後に任意のコマンドを実行し (rotation は書込系コマンド実行時に発火する前提)、
   `access.jsonl` の rotation 挙動を観測する。同時に、rotation 済みの複数世代ファイルが存在する状態で
-  `kcs purge` を実行し scrub が全世代に及ぶかを確認する。
+  `kio purge` を実行し scrub が全世代に及ぶかを確認する。
 - 期待: `access.jsonl` は device-global の `events.jsonl` 等と同じ rotation/保持ロジックの対象になる。
   purge のログ scrub は現行世代だけでなく rotation 済みの過去世代ファイルも対象にする。**現状**:
-  `access.jsonl` の append は `append_jsonl_cli` → `kcs_core::scope::append_jsonl_rotating` を経由し、
+  `access.jsonl` の append は `append_jsonl_cli` → `kio_core::scope::append_jsonl_rotating` を経由し、
   device-global ログと**同一のローテーション実装**を共有する (main.rs:6593-6607/6621-6622) —
   scope-local ログが device-global と別の (rotation の無い) 経路を持つという懸念は現行実装には
   当たらない。本契約は現状固定の回帰ロック。scrub の全世代適用については別途 purge.rs の scrub 対象
@@ -423,7 +423,7 @@ exit 分岐)。(5) は QB1 が扱う一般ヘルパのバグそのものであ�
   open 後の fstat で regular file・同一 device/inode を検証する』)
 - 前提: scope 直下に、取り込み対象の実ファイルへの symlink を配置する (走査時に TOCTOU 攻撃を模擬:
   lstat 判定後に symlink 先を差し替える)。
-- 操作: `kcs index` を実行し、symlink エントリの取り込み可否と、判定後の差し替えに対する耐性を確認する。
+- 操作: `kio index` を実行し、symlink エントリの取り込み可否と、判定後の差し替えに対する耐性を確認する。
 - 期待: symlink は追跡されず skip + status 表示される。判定後にファイル実体が差し替わった場合は
   `scope_file_changed` エラーで当該ファイルの取り込みを拒否する (中間状態を取り込まない)。**現状**:
   `open_scope_file_nofollow` (scope.rs:2810-2841) が lstat → O_NOFOLLOW open → fstat 照合の 3 段階検査
@@ -435,7 +435,7 @@ exit 分岐)。(5) は QB1 が扱う一般ヘルパのバグそのものであ�
   `effective_ignore_hash` の入力に含める**』)
 - 前提: OS 別の system directory (Unix の `/proc`・`/sys`、Windows の `C:\Windows\System32` 等) を
   スコープ配下に模擬できる環境 (シンボリックリンクやマウントで代用可能な範囲)。
-- 操作: system directory 相当のパスを含む scope で `kcs index --preview` を実行する。
+- 操作: system directory 相当のパスを含む scope で `kio index --preview` を実行する。
 - 期待: system directory は Tier A 相当の built-in ignore として自動的に除外され、preview の
   「除外済み」欄に表示される。**現状**: `is_tier_a_secret_name` (scope.rs:2710-2717 型) は secrets
   パターンのみを判定し、system directory 用の別パターンリストは grep 0 件 (`/proc`・`/sys`・
@@ -450,7 +450,7 @@ exit 分岐)。(5) は QB1 が扱う一般ヘルパのバグそのものであ�
   確認する。
 - 期待: template のバージョンが変われば `effective_ignore_hash` も変わる (承認記録の再確認契機になる)。
   **現状**: `effective_ignore_hash` は `hash_bytes(b"built-in-tier-a-v1")` (main.rs:15299 型) という
-  **固定リテラル**の hash であり、実際の `.kcsignore` 内容や config ignore パターンを一切入力に含めない
+  **固定リテラル**の hash であり、実際の `.kioignore` 内容や config ignore パターンを一切入力に含めない
   — 「パターン更新が承認記録に反映される」という規範の意図 (ユーザー設定込みの実効 ignore 内容が
   変われば再確認が促される) を現状のハードコード定数は満たさない。QB21 の system directory 追加時に
   この値も連動して変わるべきだが、現状は変わらない。
@@ -458,19 +458,19 @@ exit 分岐)。(5) は QB1 が扱う一般ヘルパのバグそのものであ�
 ### QB23 U138/U139/U140/U141 複合現状固定確認 (エントリコマンド文言・purge/erase 例外注記・
   Phase4 auto snapshot 改称・構造化 API 除外、パラメタ化 4 件) [P2]
 - 正本 (spec-gap 統合要約からの二次引用 — 原典 README.md / 01-positioning.md は本書の精読対象外):
-  (a) 『最低体験ラインの入口を `kcs snapshot` から `kcs index --approve` に変更する...`kcs open` も
-  引数なしから `kcs open <検索結果のpointer>` に変更する』(U138)。
+  (a) 『最低体験ラインの入口を `kio snapshot` から `kio index --approve` に変更する...`kio open` も
+  引数なしから `kio open <検索結果のpointer>` に変更する』(U138)。
   (b) 『Evidence Pointer/CAS の恒久性の説明に「ユーザー明示の purge/erase を除く」という例外を明記する』
   (U139)。
   (c) 『「Phase 4: 自動化/auto snapshot」を「定期 auto snapshot」に改称し、取り込み完了時 auto snapshot
   は MVP である旨を明記する』(U140)。
   (d) 『MVP では外部 Agent 向けの構造化 API サーフェスを持たず、`--json` フラグ出力のみで足りる』(U141)。
-- 前提: (a) `kcs index`/`kcs open` の引数要件。(b)-(d) はいずれも文書表現の確認であり実装への直接
+- 前提: (a) `kio index`/`kio open` の引数要件。(b)-(d) はいずれも文書表現の確認であり実装への直接
   影響が薄いと spec-gap 自身が注記する項目 (「過剰抽出の疑い」「適合済みの可能性」)。
-- 操作: (a) `kcs index` を引数無しで実行、`kcs open` を引数無しで実行。(b)-(d) は README.md /
+- 操作: (a) `kio index` を引数無しで実行、`kio open` を引数無しで実行。(b)-(d) は README.md /
   01-positioning.md の該当箇所 (本書の管轄外) を確認する。
-- 期待: (a) `kcs index` 単独実行は非対話環境で `KCS-E-CONFIG-USAGE-001` (exit 2) となり、`--approve`/
-  `--yes` が実質的なエントリゲートである。`kcs open` 単独実行 (pointer 無し) も同じく exit 2。
+- 期待: (a) `kio index` 単独実行は非対話環境で `KIO-E-CONFIG-USAGE-001` (exit 2) となり、`--approve`/
+  `--yes` が実質的なエントリゲートである。`kio open` 単独実行 (pointer 無し) も同じく exit 2。
   (b)(c)(d) は実装への影響が無いことを確認する現状固定 (b: purge/erase 後の到達不能性は
   `step4b-contract-tests-lifecycle.md` の LC 系が実装確認済み。c: 取り込み完了時 auto snapshot は
   `main.rs:723` 型で MVP コード経路に既に存在。d: `--json` 以外の構造化 API 面は grep 0 件)。
@@ -480,8 +480,8 @@ exit 分岐)。(5) は QB1 が扱う一般ヘルパのバグそのものであ�
 
 ### QB24 U142 Step 割当表整合 + Recall@10 射影の `path_at_commit` 追加 [P1]
 - 正本 (spec-gap 統合要約からの二次引用 — 原典 09-mvp-scope.md §3/§4.3 は本書の精読対象外):
-  『実装割当表に `kcs adapter revoke` (Step 2)、`kcs repair --registry-prune` (Step 3)、
-  `kcs repair --rebuild-db` (Step 3)、`--prune-orphans` (Step 4) を新規追加する...`--all-history`
+  『実装割当表に `kio adapter revoke` (Step 2)、`kio repair --registry-prune` (Step 3)、
+  `kio repair --rebuild-db` (Step 3)、`--prune-orphans` (Step 4) を新規追加する...`--all-history`
   シナリオ (M3-2) の Recall@10 計算を、旧 distinct 射影 `(raw_hash, section)` から新
   `(raw_hash, section, path_at_commit)` に変更し、リネーム前後を別要素として数える (golden-queries.jsonl
   の expected 要素 format にも `path_at_commit` フィールドを追加)』
@@ -503,7 +503,7 @@ exit 分岐)。(5) は QB1 が扱う一般ヘルパのバグそのものであ�
 
 # §C. J 領域 — schema / path / CAS / 正本表の残り (U95,96,98-112,114-119)
 
-**U116 について**: 「kcs_format_version の保存場所・判定タイミング確定」の判定タイミング部分は
+**U116 について**: 「kio_format_version の保存場所・判定タイミング確定」の判定タイミング部分は
 §A QB8/QB9 が scope.json を対象に既に扱う (同一関数 `validated_scope_id` の同一バグ) — 本節では
 再契約しない。以下 J 領域の契約は U95〜U119 のうち U97/U113/U120 (Phase 1 済み) と U116 (§A 参照) を
 除いた残りを扱う。
@@ -646,15 +646,15 @@ exit 分岐)。(5) は QB1 が扱う一般ヘルパのバグそのものであ�
   存在するが、`grep "target_type.*query_cache"` は crates 全域で INSERT/SELECT の実処理コードに
   一致しない (唯一の `INSERT INTO embeddings` である `write_chunk_embedding` は `target_type='chunk'`
   固定)。query embedding のキャッシュ機構自体は `compute_query_embedding_page1`
-  (main.rs:10860-10958) が実装するが、これは `kcs_pipeline::ledger` (cost-ledger.sqlite 側の
-  device-row protocol) を経由するものであり、本節が規定する `kcs-index` 側の `embeddings` 表への
+  (main.rs:10860-10958) が実装するが、これは `kio_pipeline::ledger` (cost-ledger.sqlite 側の
+  device-row protocol) を経由するものであり、本節が規定する `kio-index` 側の `embeddings` 表への
   書込とは**別の仕組み**である — 本契約が指す schema 面の書込は未実装。
 
 ### QB34 query_cache の読出し (cursor replay 再利用) パス新設 [P0]
 - 正本: 05-runtime.md §1.5 (該当節、QB33 の隣接文脈 — `step4b-contract-tests-p2c.md` PC25 が既に引用
   済み: 『vector / hybrid の replay は page 1 の query vector を再利用する — query の再 embedding は
   行わない』) / 04-pipeline.md §4.3 L548 (『この行だけは `objects/` から再構築できないため
-  `kcs repair --rebuild-db` では復元せず破棄する』)
+  `kio repair --rebuild-db` では復元せず破棄する』)
 - 前提: vector|hybrid 検索の page 1 を実行済み (QB33 が正しく機能していれば query_cache 行が存在する
   状態)。embedding adapter を「呼び出しごとに異なるベクトルを返すモック」に差し替える。
 - 操作: `--cursor <token>` で page 2 を replay する。
@@ -672,7 +672,7 @@ exit 分岐)。(5) は QB1 が扱う一般ヘルパのバグそのものであ�
   停止する』)
 - 前提: 同一 chunk (同一 `text_hash`) に対し、旧 profile と現行 profile の 2 件の embedding 行が
   並存する状態 (embedding profile 更新後の rebuild シナリオ)。
-- 操作: `kcs repair --rebuild-db` を実行し `chunk_vec` の再構築を観測する。同様に、同一 chunk に
+- 操作: `kio repair --rebuild-db` を実行し `chunk_vec` の再構築を観測する。同様に、同一 chunk に
   現行 profile の embedding 行が偶発的に 2 件重複する (データ破損模擬) ケースも試す。
 - 期待: 旧 profile の行は無視され、現行 profile の 1 件のみが `chunk_vec` に展開される
   (0 件なら pending として text-only 継続、chunk_vec 行を作らない)。現行 profile の重複 2 件以上は
@@ -728,8 +728,8 @@ exit 分岐)。(5) は QB1 が扱う一般ヘルパのバグそのものであ�
   (dag.rs:32-40) は `entries`/`object_type` のみを持ち、tree レベルの `chunking_config_hash`/
   `chunk_set_hash` フィールドは grep 0 件 (entry レベルの `NormalizeRef.manifest_hash` のみ存在)。
 
-### QB39 `kcs diff` の derived-only 変化検出義務 [P1]
-- 正本: 06-cli-spec.md §1 L94 (『`kcs diff` の差分種別: raw / path の差分に加え、tree schema v2/v3 が
+### QB39 `kio diff` の derived-only 変化検出義務 [P1]
+- 正本: 06-cli-spec.md §1 L94 (『`kio diff` の差分種別: raw / path の差分に加え、tree schema v2/v3 が
   生む derived-only の変化 — `normalize_manifest_changed` (unit の failed → done 完成を含む) /
   `chunking_config_changed` / `chunk_set_changed` (公開 chunk 集合のみの変化) / `tool_lock_changed`
   (旧新 tool_lock_hash と変更 role) / `resurrection_published`...を差分として表示する
@@ -738,7 +738,7 @@ exit 分岐)。(5) は QB1 が扱う一般ヘルパのバグそのものであ�
 - 前提: 2 つの commit `Ca`/`Cb` が同一 tree_hash かつ同一 raw_hash 集合を持つが (raw/path 差分は
   0 件)、`Cb` の tree の `manifest_hash` が `Ca` と異なる (same-gen partial retry の finalize による
   derived-only commit — no-op 規則の例外扱いで別 commit が作られたケース)。
-- 操作: `kcs diff Ca Cb` を実行する。
+- 操作: `kio diff Ca Cb` を実行する。
 - 期待: raw/path 差分が 0 件であっても `normalize_manifest_changed` を含む差分エントリが返り、
   「差分なし」ではなく derived-only の変化として表示される。片側が v1 tree (該当フィールド欠落) の
   場合は `unknown` と表示される。**現状**: `Repository::diff` (scope.rs:1339-1374) は
@@ -760,16 +760,16 @@ exit 分岐)。(5) は QB1 が扱う一般ヘルパのバグそのものであ�
   未実装。
 
 ### QB41 prepared_hash 変化駆動の自動 gen+1 経路 (第二の合法経路) [P1]
-- 正本: 03-data-model.md §2.1 (『`gen = 現最大 + 1` の新 instance を作れるのは `kcs reindex --force` と、
+- 正本: 03-data-model.md §2.1 (『`gen = 現最大 + 1` の新 instance を作れるのは `kio reindex --force` と、
   **prepare profile / renderer 変更による `prepared_hash` 変化が駆動する再 Markdownize** (§6 —
   first-instance-wins の第二の合法経路。オンライン課金を伴うため 04 §4.6 と同型の確認プロンプト +
   budget guardrail の対象) だけであり』)
 - 前提: 既存 instance (gen=0) を持つ raw_hash に対し、prepare Adapter の renderer version が変更され
   `prepared_hash` が変化する状態 (`--force` 明示指定は無い)。
-- 操作: `kcs index` (通常の incremental 経路) を実行する。
+- 操作: `kio index` (通常の incremental 経路) を実行する。
 - 期待: `prepared_hash` 変化を検出し、`--force` 無しでも新 gen (gen=1) の instance が作られる (自動
   gen+1)。オンライン課金を伴うため確認プロンプト (または `--yes` 相当) を要求し、budget guardrail の
-  対象になる。**現状**: gen+1 を駆動する経路は `kcs reindex --force` のみが確認されており (U105 の
+  対象になる。**現状**: gen+1 を駆動する経路は `kio reindex --force` のみが確認されており (U105 の
   spec-gap 統合要約に基づく)、prepared_hash 変化起因の自動トリガーは未確認区分 — 本契約が
   具体シナリオを固定する。
 
@@ -797,20 +797,20 @@ exit 分岐)。(5) は QB1 が扱う一般ヘルパのバグそのものであ�
   tool_lock_hash の両方を比較する』)
 - 前提: tree_hash が HEAD と一致するが、embedding profile 更新により `tool_lock_hash` が変化した
   状態 (resurrection ではない通常のケース)。
-- 操作: `kcs index`/`kcs reindex --force` の auto snapshot 判定を実行する。
+- 操作: `kio index`/`kio reindex --force` の auto snapshot 判定を実行する。
 - 期待: tree_hash が一致していても `tool_lock_hash` が HEAD と異なる場合は no-op とせず新規 commit を
   作る。**現状**: no-op 判定 (scope.rs:1196-1214) は `resurrection_candidates.is_empty()` と
   `head_tree_hash == tree_hash` のみを条件にし、`tool_lock_hash` の比較は行わない (tool_lock_hash は
   この判定より後、新 commit を実際に作る段階で読み取られるのみ) — tool_lock_hash のみが変化し
   tree_hash が不変のケースは誤って no-op になる。
 
-### QB44 auto snapshot 契機 3 (`kcs batch resume`/`kcs batch retry`) の未配線確認 [P1]
-- 正本: 05-runtime.md §8.1 (『**3. `kcs batch resume` / `kcs batch retry` / `kcs reindex --force`
+### QB44 auto snapshot 契機 3 (`kio batch resume`/`kio batch retry`) の未配線確認 [P1]
+- 正本: 05-runtime.md §8.1 (『**3. `kio batch resume` / `kio batch retry` / `kio reindex --force`
   がオンライン成果 (normalized / chunk) を finalize した成功完了時も同様に auto snapshot を作る**』)
-- 前提: pending の online task を持つ scope で `kcs batch resume`/`kcs batch retry` を実行し、
+- 前提: pending の online task を持つ scope で `kio batch resume`/`kio batch retry` を実行し、
   online 成果 (normalized/chunk) の finalize が成功する状態。
 - 操作: 各コマンドの実行後、HEAD の tree_hash が finalize 成果を反映した新 commit を指すか確認する。
-- 期待: `kcs batch resume`/`kcs batch retry` いずれも成功 finalize 後に auto snapshot (commit_type=auto)
+- 期待: `kio batch resume`/`kio batch retry` いずれも成功 finalize 後に auto snapshot (commit_type=auto)
   を作る。**現状**: `auto_snapshot_with_bound_normalize` の呼出元は `run_index` (main.rs:790-809) と
   `run_reindex` (main.rs:4503-4522) の 2 箇所のみ確認されており、batch resume/retry の経路からの
   呼出は grep 0 件 — 3 契機のうち 2 つのみ配線済みで、規範が要求する 3 番目 (batch resume/retry) が
@@ -832,7 +832,7 @@ exit 分岐)。(5) は QB1 が扱う一般ヘルパのバグそのものであ�
   (呼出タイミングが finalize と一致するかは未検証)、`ContentObjectKind::Toollock` の書込呼出は
   grep 0 件 — toollock 側は CAS 種別が定義されているのみで実際の materialize 時書込みが未実装。
 
-### QB46 `.kcs/staging/` descriptor 構造 + 耐久 publish 手順の新設 [P0]
+### QB46 `.kio/staging/` descriptor 構造 + 耐久 publish 手順の新設 [P0]
 - 正本: 03-data-model.md §2 (『配置 = `staging/<raw64>.<tool64>.<adapter_kind>/`、各 root 直下に耐久
   descriptor.json (scope_id / raw_hash / tool_profile_hash / adapter_kind)。**root の公開 = private
   temp directory に descriptor ごと完書き → fsync → root 名へ atomic rename (no-replace) → 親
@@ -851,25 +851,25 @@ exit 分岐)。(5) は QB1 が扱う一般ヘルパのバグそのものであ�
 ### QB47 tag 正規化の simple case folding 化 + 未割当 code point 拒否 (パラメタ化 2 件) [P0]
 - 正本: 03-data-model.md §2 (『NFC 正規化 + Unicode **simple case folding (locale 非依存 — full
   folding・locale 別規則は使わない)** が同じ名前は case-insensitive collision として同一 slot を
-  占める...**実装同梱の UCD 版で未割当の code point を含む tag 名は `KCS-E-CONFIG-USAGE-001` で
+  占める...**実装同梱の UCD 版で未割当の code point を含む tag 名は `KIO-E-CONFIG-USAGE-001` で
   拒否する**』)
 - 前提: (a) full Unicode lowercase と simple case folding が異なる結果を生む文字 (例: ドイツ語の
   `ß` — full lowercase では変化しないが、`ẞ` (大文字 ß) の lowercase 先は実装依存差が生じ得る一方、
   simple case folding は 1:1 対応が保証された固定表を使う)。(b) 実装同梱 UCD 版で未割当の code point
   を含む tag 名。
 - 操作: (a) `portable_collision_key` に該当文字を含む 2 つの tag 候補名を渡し、衝突判定を比較する。
-  (b) 未割当 code point を含む tag 名で `kcs tag <name>` を実行する。
+  (b) 未割当 code point を含む tag 名で `kio tag <name>` を実行する。
 - 期待: (a) simple case folding の結果に基づいて衝突判定される (full lowercase 由来の判定と食い違う
-  具体ケースが存在すれば、それが規範との乖離を証明する)。(b) `KCS-E-CONFIG-USAGE-001` (exit 2) で
+  具体ケースが存在すれば、それが規範との乖離を証明する)。(b) `KIO-E-CONFIG-USAGE-001` (exit 2) で
   拒否される。**現状**: `portable_collision_key` (portable.rs:15-23) は
   `value.nfc().flat_map(char::to_lowercase).collect()` — Rust 標準の **full Unicode lowercase**
   マッピングであり、専用の simple case folding テーブルを実装しない。未割当 code point の拒否ロジックも
-  grep 0 件 (`KCS-E-CONFIG-USAGE-001` が tag 名検証コンテキストで発火する箇所は未確認)。
+  grep 0 件 (`KIO-E-CONFIG-USAGE-001` が tag 名検証コンテキストで発火する箇所は未確認)。
 
 ### QB48 正規化 view 組立規則: `order` 一意性制約 + comment-safe percent-encode (パラメタ化 2 件) [P1]
 - 正本: 03-data-model.md §2.1 (『manifest.units[] を `order` 昇順に走査する (`order` は unit 間で一意 —
-  **重複は KCS-E-STORE-CORRUPT-001 の corruption**。値自体で順序が確定するため tie-break は存在しない)』
-  / 『固定文字列 `<!-- KCS-MISSING-UNIT <unit_key> <error_kind> -->` を採用する (unit_key / error_kind は
+  **重複は KIO-E-STORE-CORRUPT-001 の corruption**。値自体で順序が確定するため tie-break は存在しない)』
+  / 『固定文字列 `<!-- KIO-MISSING-UNIT <unit_key> <error_kind> -->` を採用する (unit_key / error_kind は
   **comment-safe に挿入する** — `--` を含む値は percent-encode。生値の挿入は comment を途中終端し
   view の構造を壊す)』)
 - 前提: (a) 同一 manifest 内に `order` が重複する 2 つの unit エントリ。(b) `unit_key` に `--` を含む
@@ -877,48 +877,48 @@ exit 分岐)。(5) は QB1 が扱う一般ヘルパのバグそのものであ�
   将来の Adapter 出力異常で発生し得るケースとして扱う)。
 - 操作: (a) 重複 `order` を含む manifest で全文 view を再生成する。(b) `--` を含む `unit_key`/
   `error_kind` を持つ failed unit で view を再生成する。
-- 期待: (a) `KCS-E-STORE-CORRUPT-001` で corruption として拒否される (view 生成を続行しない)。
-  (b) 生成される `KCS-MISSING-UNIT` コメント行の `unit_key`/`error_kind` 中の `--` が percent-encode
+- 期待: (a) `KIO-E-STORE-CORRUPT-001` で corruption として拒否される (view 生成を続行しない)。
+  (b) 生成される `KIO-MISSING-UNIT` コメント行の `unit_key`/`error_kind` 中の `--` が percent-encode
   され、Markdown コメント構造が途中終端しない。**現状**: `markdownize.rs:1359-1362` 型の
-  `KCS-MISSING-UNIT` マーカー生成コードは `unit_key`/`error_kind` を無エスケープで直接埋め込む
+  `KIO-MISSING-UNIT` マーカー生成コードは `unit_key`/`error_kind` を無エスケープで直接埋め込む
   (percent-encode 処理は grep 0 件)。`order` 重複検知ロジックも view 生成コード内に見当たらない
   (未検証区分)。
 
 ### QB49 scope-registry の「旧 path 到達可能なら move 非認定」判定 + device data dir 0700 + path
   validation 拒否集合拡大 (パラメタ化 3 件) [P0]
 - 正本: (a) 10-operations.md §3 (『逆方向 (scope の移動) も同様に退役する: 同一 scope_id を新しい
-  kcs_path で観測 (再発見) したら、同一 scope_id の旧 path 行を削除する — **ただし旧 path がなお
-  到達可能 (存在し有効な `.kcs`) な場合は move と認定せず、削除しない**』)。(b) 10-operations.md §3
-  (『device data dir (`~/.local/share/kcs/`) は owner-only (0700) に制限する』)。(c) 03-data-model.md
+  kio_path で観測 (再発見) したら、同一 scope_id の旧 path 行を削除する — **ただし旧 path がなお
+  到達可能 (存在し有効な `.kio`) な場合は move と認定せず、削除しない**』)。(b) 10-operations.md §3
+  (『device data dir (`~/.local/share/kio/`) は owner-only (0700) に制限する』)。(c) 03-data-model.md
   §3 (『`\` ・単独の `.` / `..`・NUL・control 文字を含む path、および well-formed UTF-8 でない byte
   列の path も拒否する』)
-- 前提: (a) 同一 scope_id が旧 `kcs_path` (到達可能・有効な `.kcs` が現存) と新 `kcs_path` (新規
-  観測) の両方で registry に存在する状態 (真の move ではなく、`.kcs` をコピーして別 path に複製した
-  ケース = clone 併存)。(b) `~/.local/share/kcs/` 配下のディレクトリ (`logs/` を含む) のパーミッション。
+- 前提: (a) 同一 scope_id が旧 `kio_path` (到達可能・有効な `.kio` が現存) と新 `kio_path` (新規
+  観測) の両方で registry に存在する状態 (真の move ではなく、`.kio` をコピーして別 path に複製した
+  ケース = clone 併存)。(b) `~/.local/share/kio/` 配下のディレクトリ (`logs/` を含む) のパーミッション。
   (c) tree entry の `path` にバックスラッシュ (`\`) または制御文字 (0x01 等) を含む新規 ingest。
-- 操作: (a) registry upsert (新 `kcs_path` の観測) を実行し、旧 `kcs_path` 行が削除されるか確認する。
-  (b) `~/.local/share/kcs/logs/` のパーミッションを確認する。(c) 新規 ingest 時に該当 path を持つ
+- 操作: (a) registry upsert (新 `kio_path` の観測) を実行し、旧 `kio_path` 行が削除されるか確認する。
+  (b) `~/.local/share/kio/logs/` のパーミッションを確認する。(c) 新規 ingest 時に該当 path を持つ
   tree entry を作成しようとする。
-- 期待: (a) 旧 `kcs_path` が到達可能である限り、旧行は削除**されず** (真の move ではなく clone 併存と
-  して扱われ、live 重複の fail-closed 規則 (`KCS-E-REGISTRY-DUP-001`) の対象になる)。(b) `logs/` を
+- 期待: (a) 旧 `kio_path` が到達可能である限り、旧行は削除**されず** (真の move ではなく clone 併存と
+  して扱われ、live 重複の fail-closed 規則 (`KIO-E-REGISTRY-DUP-001`) の対象になる)。(b) `logs/` を
   含む device data dir 配下が owner-only (0700 相当、他ユーザーから読めない) である。(c) `\`/制御
-  文字を含む path は `KCS-E-STORE-PATH-001` で拒否される。**現状**: (a) `retire_stale_kcs_path`
-  (registry.rs:103-109) は同一 `kcs_path` に別 `scope_id` がある場合の削除のみを扱い、
-  「同一 scope_id・新 kcs_path 観測時に旧 path の到達可能性を検査する」ロジック自体が存在しない —
+  文字を含む path は `KIO-E-STORE-PATH-001` で拒否される。**現状**: (a) `retire_stale_kio_path`
+  (registry.rs:103-109) は同一 `kio_path` に別 `scope_id` がある場合の削除のみを扱い、
+  「同一 scope_id・新 kio_path 観測時に旧 path の到達可能性を検査する」ロジック自体が存在しない —
   到達可能性チェックを行うのは `registry_prune` (`--registry-prune` 明示実行時のみ) であり、通常の
   upsert 経路には組み込まれていない。(b) `xdg.rs` 自体に権限設定コードは無いが、`registry.rs:55-64`
   と `ledger/schema.rs:146-152` がそれぞれ独立に対象ファイルの親ディレクトリ (実質
-  `~/.local/share/kcs/`) を 0700 化しており、機能的には既に充足している可能性が高い (2 箇所の
+  `~/.local/share/kio/`) を 0700 化しており、機能的には既に充足している可能性が高い (2 箇所の
   重複実装という設計上の指摘は残る)。(c) `is_logical_direct_child` (dag.rs:116-121) は `/` と NUL の
   みを拒否し、`\`・その他の制御文字は許容している — 拡大が必要。
 
 ---
 
-# §D. `kcs log --at/--since` 本実装
+# §D. `kio log --at/--since` 本実装
 
-**精読対象の限界について明示する**: `kcs log` 自体の挙動を規定する規範文は、リポジトリ全体で
-06-cli-spec.md §1 L61 の 1 行 (『kcs log [--at <commit>] [--since <dur>]』) のみである。
-05-runtime.md §2.2 L534 が触れるのは「shallow commit のメタ情報表示は `kcs log`/`kcs inspect` が担う」
+**精読対象の限界について明示する**: `kio log` 自体の挙動を規定する規範文は、リポジトリ全体で
+06-cli-spec.md §1 L61 の 1 行 (『kio log [--at <commit>] [--since <dur>]』) のみである。
+05-runtime.md §2.2 L534 が触れるのは「shallow commit のメタ情報表示は `kio log`/`kio inspect` が担う」
 という**責務分担**の言及だけで、`--at`/`--since` 自体の意味論には立ち入らない。本節の契約群は
 やむを得ず、(a) 同名フラグが search/view/reindex で持つ確立済みの意味論 (『時点指定』としての
 `--at <commit>`、search の『期間指定』としての `--since <duration>`) からの**類推**、(b) 一般的な
@@ -928,43 +928,43 @@ exit code/error code の横断規約 (§7/§8, §12) への当てはめ、の 2 
 候補」として提示する)。
 
 ### QB50 `--at <commit>`: history walk の起点を HEAD から指定 commit へ変更 [P0] [解釈割れ]
-- 正本: 06-cli-spec.md §1 L61 (『kcs log [--at <commit>] [--since <dur>]』のみ — 挙動は無規定)。
+- 正本: 06-cli-spec.md §1 L61 (『kio log [--at <commit>] [--since <dur>]』のみ — 挙動は無規定)。
   類推元: 06-cli-spec.md §3 L226 (search の『--at は --scope 単一指定を必須とする...05 §1.6』) /
   05-runtime.md §1.6 L214 (『--at <commit> 指定 commit 時点で indexed だった chunks のみ対象』) —
-  「`--at <commit>` = 現在 (HEAD) ではなく指定 commit を基点として扱う」という KCS 全体で一貫した
+  「`--at <commit>` = 現在 (HEAD) ではなく指定 commit を基点として扱う」という KIO 全体で一貫した
   フラグ意味論からの類推。
 - 前提: 3 世代の commit 履歴 `C1 → C2 → C3(HEAD)` を持つ scope。
-- 操作: `kcs log --at C2` を実行する。
+- 操作: `kio log --at C2` を実行する。
 - 期待: `[解釈割れ]` 返る `entries` は `C2` を起点とした history (すなわち `C2, C1`) であり、`C3`
   (HEAD、`C2` の子孫) を含まない — `--at` 指定 commit そのものと、その祖先のみを返す。**現状**:
   `Command::Log` (main.rs:623-640) は `args.at.is_some()` の場合に無条件で
-  `KcsError::not_implemented("log --at/--since")` を返す (未実装)。`repo.log()`
+  `KioError::not_implemented("log --at/--since")` を返す (未実装)。`repo.log()`
   (scope.rs:1310-1337) は `head_commit_hash()` のみを起点にする固定実装であり、任意 commit を起点に
   する引数を受け付けない。
 
 ### QB51 `--at <commit>` で shallow commit を指定した場合の拒否 [P0] [解釈割れ]
-- 正本: 05-runtime.md §2.2 L534-545 (shallow commit の一般規則列挙: 『kcs restore <shallow-commit> は
-  KCS-E-COMMIT-SHALLOW-001 で拒否』『kcs search --at <shallow-commit>...も KCS-E-COMMIT-SHALLOW-001 で
-  失敗する (tree 全体を要するため)』) — この列挙に `kcs log --at` は明示されていないが、`kcs log --at`
+- 正本: 05-runtime.md §2.2 L534-545 (shallow commit の一般規則列挙: 『kio restore <shallow-commit> は
+  KIO-E-COMMIT-SHALLOW-001 で拒否』『kio search --at <shallow-commit>...も KIO-E-COMMIT-SHALLOW-001 で
+  失敗する (tree 全体を要するため)』) — この列挙に `kio log --at` は明示されていないが、`kio log --at`
   も対象 commit 以前の履歴を辿るには tree ではなく commit object の parent chain のみを要するため、
   厳密には tree を要求しない可能性がある ([解釈割れ] の核心)。
 - 前提: shallow 化された commit `Cs` (tree 破棄済み、commit object は現存) を含む履歴。
-- 操作: `kcs log --at Cs` を実行する。
+- 操作: `kio log --at Cs` を実行する。
 - 期待: `[解釈割れ]` 2 つの候補: (a) shallow commit の tree 欠落は log の「commit 履歴列挙」という
-  性質上 **無関係** であり (`kcs log` は tree ではなく commit object の `parents` chain のみを辿る、
+  性質上 **無関係** であり (`kio log` は tree ではなく commit object の `parents` chain のみを辿る、
   scope.rs:1310-1337 の現行実装と整合)、正常に応答してよい。(b) 05-runtime.md の shallow 規則列挙が
-  「`--at` を受け付ける全コマンドで一律 KCS-E-COMMIT-SHALLOW-001」という原則の具体例に過ぎないなら、
-  `kcs log --at` も拒否すべき。本書は (a) を推奨解釈とする (tree を読まない操作に shallow 制約を
+  「`--at` を受け付ける全コマンドで一律 KIO-E-COMMIT-SHALLOW-001」という原則の具体例に過ぎないなら、
+  `kio log --at` も拒否すべき。本書は (a) を推奨解釈とする (tree を読まない操作に shallow 制約を
   課す理由が無いため) が、実装時の明示裁定を要求する。
 
 ### QB52 `--since <duration>`: `commit.created_at >= now - <duration>` によるフィルタ [P0] [解釈割れ]
 - 正本: 06-cli-spec.md §1 L61 のみ (挙動無規定)。類推元: 05-runtime.md §1.6 L221/L234 (search の
   『--since <duration> `--since 7d` のように期間指定』『--all-history 集合を
   chunks.created_at >= now - <duration> で絞る』) — search の `--since` が commit ではなく
-  chunk の `created_at` を絞る一方、`kcs log` は commit を列挙する操作であるため、絞り対象は
+  chunk の `created_at` を絞る一方、`kio log` は commit を列挙する操作であるため、絞り対象は
   自然に `commit.created_at` になるという類推。
 - 前提: 3 commit `C1(created_at=T-10d) → C2(T-3d) → C3(T, HEAD)` を持つ scope。
-- 操作: `kcs log --since 7d` を実行する (現在時刻 = T)。
+- 操作: `kio log --since 7d` を実行する (現在時刻 = T)。
 - 期待: `[解釈割れ]` `entries` は `created_at >= T-7d` を満たす `C3, C2` のみを含み `C1` を除外する
   (HEAD からの history walk は継続するが、結果配列を `created_at` でフィルタする)。デフォルトの
   history walk 起点 (HEAD、`--at` 未指定時) は変更しない。**現状**: 未実装 (`not_implemented`)。
@@ -972,18 +972,18 @@ exit code/error code の横断規約 (§7/§8, §12) への当てはめ、の 2 
 ### QB53 `--at`/`--since` 未指定時の既存挙動への非破壊性 (回帰確認) [P1]
 - 正本: 06-cli-spec.md §1 L61 (両オプションとも `[...]` で optional と明記 — 省略時は現行の HEAD 起点
   history walk のままであるべき、という構文上の自明な要件)。
-- 前提: `--at`/`--since` の実装後も、フラグ無しの `kcs log` 呼出が既存挙動を維持する必要がある。
-- 操作: `--at`/`--since` いずれも指定せず `kcs log` を実行する。
+- 前提: `--at`/`--since` の実装後も、フラグ無しの `kio log` 呼出が既存挙動を維持する必要がある。
+- 操作: `--at`/`--since` いずれも指定せず `kio log` を実行する。
 - 期待: 現行の `repo.log()` (HEAD 起点、first-parent-only 相当の `commit.parents.first()` walk、
   祖先 commit object 欠落時は `truncated: true` を伴う healthy prefix を返す R16-1 の挙動) が
   そのまま維持される。**現状**: 現行実装そのもの (回帰ロック)。
 
 ### QB54 `--at <commit>` の commit 解決規則 (HEAD / tag / full hash) [P1] [解釈割れ]
 - 正本: 06-cli-spec.md §5 (restore の commit 引数規則、類推元): 『commit は HEAD / tag / full commit
-  hash』。`kcs log --at` の commit 引数が同じ受理形式を共有するかは spec が明言しない。
+  hash』。`kio log --at` の commit 引数が同じ受理形式を共有するかは spec が明言しない。
 - 前提: (a) `HEAD` という文字列。(b) 既存 tag 名。(c) full commit hash (64 hex)。(d) 短縮 hash
   (12 hex 等)。
-- 操作: `kcs log --at <各形式>` を実行する。
+- 操作: `kio log --at <各形式>` を実行する。
 - 期待: `[解釈割れ]` (a)(b)(c) は restore/diff と同じ `resolve_commit` 相当の解決規則を再利用して
   受理される可能性が高い (diff コマンドが既に `resolve_commit(a)`/`resolve_commit(b)` で HEAD/tag/
   hash を解決している — scope.rs:1339-1341 型)。(d) 短縮 hash を受理するかは restore の「raw_hash
@@ -996,10 +996,10 @@ exit code/error code の横断規約 (§7/§8, §12) への当てはめ、の 2 
   並記されており、構文上は併用可能に見える — search の `--at`/`--since` も相互排他とは明記されない
   05-runtime.md §1.6)。
 - 前提: `--at C2 --since 5d` の同時指定。
-- 操作: `kcs log --at C2 --since 5d` を実行する。
+- 操作: `kio log --at C2 --since 5d` を実行する。
 - 期待: `[解釈割れ]` 2 候補: (a) `--at C2` で history walk の起点を `C2` に変更したうえで、
   その結果 (`C2` とその祖先) をさらに `created_at >= now-5d` で絞る (積集合)。(b) 相互排他として
-  `KCS-E-CONFIG-USAGE-001` (exit 2) で拒否する (search の `--at` が『`--scope` 単一指定を必須とする』
+  `KIO-E-CONFIG-USAGE-001` (exit 2) で拒否する (search の `--at` が『`--scope` 単一指定を必須とする』
   ような特殊な相互作用規則を持つのと同様、log でも何らかの制約があり得る)。本書は spec の並記構文
   ([...]  [...] の独立した optional 表記) を根拠に (a) を推奨解釈とするが確定はしない。
 
@@ -1008,29 +1008,29 @@ exit code/error code の横断規約 (§7/§8, §12) への当てはめ、の 2 
   (『--since <duration> `--since 7d` のように期間指定』— search の例示は `"7d"` のみ)。
 - 前提: `"7d"` (日数)・`"24h"` (時間、search 側で明示例は無いが `"7d"` 形式からの単位拡張の可能性)・
   不正な文字列 `"abc"`。
-- 操作: `kcs log --since <各値>` を実行する。
+- 操作: `kio log --since <各値>` を実行する。
 - 期待: `[解釈割れ]` `"7d"` は受理される (search と同一の構文パーサを再利用すると仮定)。`"24h"` 等の
   他単位が受理されるかは search 側の実装 (`search_time::TimeSelector` 型) の対応単位に従う
   ([解釈割れ] — 本書は search 用のパーサをそのまま流用することを推奨する)。不正な文字列は
-  `KCS-E-CONFIG-USAGE-001` (exit 2) で拒否される。
+  `KIO-E-CONFIG-USAGE-001` (exit 2) で拒否される。
 
 ### QB57 `--json` 出力形式の一貫性 (`entries`/`truncated` の維持) [P1]
 - 正本: 06-cli-spec.md §4 (『すべての CLI は `--json` を持つ...`--json` で機械可読』) — 既存の
   `LogReport { entries: Vec<LogEntry>, truncated: bool }` (scope.rs:174-178) という shape 自体は
   spec 上明記されないが、`--at`/`--since` 実装がこの既存 shape を破壊しないことを回帰確認する。
-- 前提: `--at`/`--since` いずれかを指定した `kcs log --json` 呼出。
+- 前提: `--at`/`--since` いずれかを指定した `kio log --json` 呼出。
 - 操作: 出力 JSON の top-level キーを検査する。
 - 期待: `entries` (配列) と `truncated` (boolean) の 2 キーが引き続き存在する (`--at`/`--since` は
   対象範囲を絞るだけで、レスポンスの shape 自体は変えない)。**現状**: 該当分岐が `not_implemented`
   のため未検証。
 
 ### QB58 `--at <commit>` の解決不能 commit 指定に対するエラー分類 [P1]
-- 正本: 06-cli-spec.md §8 (『`KCS-E-CONFIG-USAGE-001` (invalid usage / 不正オペランド — 例: ...不正
+- 正本: 06-cli-spec.md §8 (『`KIO-E-CONFIG-USAGE-001` (invalid usage / 不正オペランド — 例: ...不正
   hash 引数)』) — 存在しない commit hash や tag 名を指定した場合の一般的な不正オペランド分類からの
   適用。
 - 前提: 存在しない commit hash (64 hex だが未知の値) を `--at` に指定する。
-- 操作: `kcs log --at sha256:<未知の64hex>` を実行する。
-- 期待: `KCS-E-CONFIG-USAGE-001` (exit 2) で拒否される (`KCS-E-STORE-NOT-FOUND-001` のような内部
+- 操作: `kio log --at sha256:<未知の64hex>` を実行する。
+- 期待: `KIO-E-CONFIG-USAGE-001` (exit 2) で拒否される (`KIO-E-STORE-NOT-FOUND-001` のような内部
   store エラーをそのまま外部に漏らさない — diff の commit 解決失敗時の扱いと同型であるべき、
   という一般規約からの適用)。
 
@@ -1057,11 +1057,11 @@ PC20/PC25/PC26/PC33/PC44 は `step4b-contract-tests-p2c.md` (Phase 2-C) で既�
 
 ### QB60 PC20: index/batch finalize (chunk_fts 内容変化を伴う再インデックス) の回転点特定 [P0]
 - 正本: PC20 と同一引用 (『index / batch finalize で chunk_fts の内容が変化した場合』)
-- 前提: `kcs index` が複数ファイルの Markdownize → chunk 化 → auto snapshot finalize という複数段階を
+- 前提: `kio index` が複数ファイルの Markdownize → chunk 化 → auto snapshot finalize という複数段階を
   経て完了する状態。PC20 自身の「現状」記述は (a)(b)(c)(f) の 4 契機の不在のみを述べ (d) (index/batch
   finalize) を明示的に current-state 記述から欠落させている — この非対称自体が本項目の未確定を
   示唆する。
-- 操作: `kcs index` の実行中、auto snapshot finalize (05-runtime.md §8.1 の 3 段階耐久順序: (1)
+- 操作: `kio index` の実行中、auto snapshot finalize (05-runtime.md §8.1 の 3 段階耐久順序: (1)
   chunks.jsonl append+fsync → (2) SQLite 反映 → (3) commit/ref publish) の各段階終了直後に
   `index_generation` を観測する。
 - 期待: `index_generation` が変化するのは段階 (2) (SQLite 反映) 完了時点であり、段階 (1)/(3) では
@@ -1087,20 +1087,20 @@ PC20/PC25/PC26/PC33/PC44 は `step4b-contract-tests-p2c.md` (Phase 2-C) で既�
 - 操作: `--cursor <token>` で page 2 を replay する。embedding adapter をモックに差し替える。
 - 期待: S1・S2 それぞれの `query_cache` 行が独立に読み出され (S1 用の digest と S2 用の digest は
   各 scope の embedding profile が異なれば異なり得る)、adapter は一度も呼ばれない。一方の scope の
-  `query_cache` 行が欠落 (削除・剪定済み) している場合は、その scope のみ `KCS-E-SEARCH-CURSOR-001`
+  `query_cache` 行が欠落 (削除・剪定済み) している場合は、その scope のみ `KIO-E-SEARCH-CURSOR-001`
   相当で除外され、他方の scope は正常に replay を継続する ([解釈割れ]: multi-scope 全体を
   cursor エラーにするか、当該 scope のみ除外するかは PC25/26 の単一 scope 前提の記述からは
   確定しない — 09 §1.8 の multi-scope 部分失敗規則 (05-runtime.md §1.8) との整合を裁定に委ねる)。
 
 ### QB63 PC25/26: query_cache 行の 256 行剪定との競合タイミング [P1]
 - 正本: PC26 (p2c.md) が引用する 05-runtime.md §1.5 (『不一致は corruption として当該行を削除し...
-  KCS-E-SEARCH-CURSOR-001』) / 04-pipeline.md §4.3 (256 行剪定規則、QB33 参照)
+  KIO-E-SEARCH-CURSOR-001』) / 04-pipeline.md §4.3 (256 行剪定規則、QB33 参照)
 - 前提: ある scope の `query_cache` 行数が既に 256 件に達している状態で、別の新規 vector|hybrid
   検索の page 1 が実行され、剪定によって最小 rowid の行 (= 直前の page 1 が書き込んだ行だった場合) が
   削除される競合。
 - 操作: (a) page 1 実行 → query_cache 行 A が最小 rowid として書き込まれる。(b) 別クエリの page 1 が
   256 件超過の剪定を発火し行 A を削除する。(c) 元の cursor で page 2 を replay する。
-- 期待: (c) は行 A が存在しないため `KCS-E-SEARCH-CURSOR-001` で拒否される (再検索に誘導する
+- 期待: (c) は行 A が存在しないため `KIO-E-SEARCH-CURSOR-001` で拒否される (再検索に誘導する
   メッセージを含む) — 256 行という上限が「同時に有効な cursor 数の上限」を暗に意味することを
   明示する回帰的な境界確認。
 
@@ -1129,7 +1129,7 @@ PC20/PC25/PC26/PC33/PC44 は `step4b-contract-tests-p2c.md` (Phase 2-C) で既�
 - 前提: `--include-deleted` の補完対象 (削除済みファイルの最終版、`pointer_commit=Cdel`) が指す
   chunk の `introduction_commit` が `Cdel` の子孫であるシナリオ (chunk_publications 表が QB29/PC37 の
   実装後に存在する前提)。
-- 操作: `kcs search "<query>" --include-deleted` を実行する。
+- 操作: `kio search "<query>" --include-deleted` を実行する。
 - 期待: 当該 chunk は補完結果に含まれない (introduction が binding commit の祖先でも自分自身でもない
   ため)。PC33 (通常の `--all-history` binding) と PC44 (`--include-deleted` の補完 binding) が
   **同一の correlated EXISTS 判定関数**を共有することも確認する (05-runtime.md §1.6 の実装規範
@@ -1142,7 +1142,7 @@ PC20/PC25/PC26/PC33/PC44 は `step4b-contract-tests-p2c.md` (Phase 2-C) で既�
   独立性を追加確認する。
 - 前提: 3 binding (config 値 `Hx`/`Hy`/`Hz`、すべて相異なる) が同一 `--all-history` 検索結果に
   含まれる状態。
-- 操作: `kcs search "<query>" --all-history --text` を実行する。
+- 操作: `kio search "<query>" --all-history --text` を実行する。
 - 期待: 3 binding それぞれが自身の config 値で独立にフィルタされ、いずれか 1 つの値へ暗黙に
   収斂しない (例えば "最初に評価された binding の値が残り 2 件にも適用される" ような実装バグを
   この 3 値ケースが検出する)。
@@ -1160,20 +1160,20 @@ PC20/PC25/PC26/PC33/PC44 は `step4b-contract-tests-p2c.md` (Phase 2-C) で既�
 QB5-QB7 で「結果として観測される順序」のみを契約化し、実装が単一関数への統合を選ぶか各コマンド
 個別修正を選ぶかは実装判断に委ねる。
 
-### Z2. `config.toml` の `kcs_format_version` 重複コピーが同一規範の対象か (QB8 関連)
-03-data-model.md §2 L154 が明示するのは `.kcs/scope.json` の `kcs_format_version` フィールドのみ
-(『保存場所 = `.kcs/scope.json` の `kcs_format_version` フィールド』)。しかし現行実装は
-`Repository::init` (scope.rs:243-257) が `config.toml` にも同一内容の `kcs_format_version` を書き込み、
+### Z2. `config.toml` の `kio_format_version` 重複コピーが同一規範の対象か (QB8 関連)
+03-data-model.md §2 L154 が明示するのは `.kio/scope.json` の `kio_format_version` フィールドのみ
+(『保存場所 = `.kio/scope.json` の `kio_format_version` フィールド』)。しかし現行実装は
+`Repository::init` (scope.rs:243-257) が `config.toml` にも同一内容の `kio_format_version` を書き込み、
 `validate_config` (scope.rs:1695-1714) が scope.json と同型の検証順序バグを独立に持つ。spec が
 config.toml 側のこのフィールドの規範的地位に触れていない以上、(a) config.toml 側は単なる vestigial
-な複製であり修正対象外、(b) 実質的に同じ `kcs_format_version` 概念である以上 config.toml 側も
+な複製であり修正対象外、(b) 実質的に同じ `kio_format_version` 概念である以上 config.toml 側も
 同じ順序規範の対象、のどちらであるべきかは裁定を要する。QB8 は scope.json のみを対象とし、本項目は
 config.toml 側の扱いを保留する。
 
 ### Z3. 複合 lock 順序における cost-ledger.sqlite の位置づけ (QB12 関連)
 05-runtime.md §6 L1058 の『複合 lock 順序は scope store → cost-ledger.sqlite (Tx) → device
 observability → scope access とし、逆順取得を禁止する』という文言は、cost-ledger.sqlite が
-`.kcs/.lock` (`StoreLock`) 系とは別の `BEGIN IMMEDIATE` Tx による独自シリアライズ機構を持つという
+`.kio/.lock` (`StoreLock`) 系とは別の `BEGIN IMMEDIATE` Tx による独自シリアライズ機構を持つという
 実装事実 (scope.rs:3345-3351 のコメントが明示) と表面的に緊張する。この文言は (a) 「scope store lock
 を保持したまま cost-ledger の Tx を開始してはならない (Tx 取得中に scope store lock を待たせない)」
 という具体的な待機順序制約、(b) 「両者は独立した直列化機構であり、列挙順は概念上の相対的な粗さの
@@ -1198,8 +1198,8 @@ QB24 の 3 要素へ更新済みだったが、同ファイル内 `assess_histor
 (無関係 query のノイズでは満たせない原則・Recall 指標本体・edited/deleted ガードは不変)。
 「fix が開けた穴」36 例目 (射影 fix → 下流ガード非伝播)。
 
-### Z5. `kcs log --at/--since` の意味論全体 (QB50/51/52/54/55/56 関連)
-06-cli-spec.md における `kcs log` の規範は §1 L61 の 1 行 (フラグの存在のみ) に尽きる。§D の
+### Z5. `kio log --at/--since` の意味論全体 (QB50/51/52/54/55/56 関連)
+06-cli-spec.md における `kio log` の規範は §1 L61 の 1 行 (フラグの存在のみ) に尽きる。§D の
 6 契約 (QB50: `--at` の history walk 起点変更、QB51: shallow commit 指定時の拒否要否、QB52:
 `--since` のフィルタ対象、QB54: commit 引数の受理形式、QB55: `--at`+`--since` 併用時の意味、QB56:
 `--since` の duration 構文) はいずれも search/view/restore の確立済みフラグ意味論からの**類推**で
@@ -1211,14 +1211,14 @@ QB24 の 3 要素へ更新済みだったが、同ファイル内 `assess_histor
 PC25/PC26 (p2c.md) の正本引用はいずれも単一 scope の replay を前提に書かれており、multi-scope
 検索で複数 scope がそれぞれ独立の `query_cache` 行を持つ状況で、**一部の scope のみ**行が欠落
 (剪定・破損等) した場合に、(a) 05-runtime.md §1.8 の multi-scope 部分失敗規則に従い当該 scope のみ
-`excluded_scopes` へ計上して他 scope の replay は継続する、(b) cursor 全体を `KCS-E-SEARCH-CURSOR-001`
+`excluded_scopes` へ計上して他 scope の replay は継続する、(b) cursor 全体を `KIO-E-SEARCH-CURSOR-001`
 で無効化し全 scope の再検索を要求する、のどちらであるべきかは明記が無い。QB62 は (a) を推奨解釈と
 して記述するが確定はしない。
 
 # §裁定 (§Z の解釈割れ — 実装用、2026-07-22 オーケストレータ裁定)
 
 1. **Z1 (preflight 実装単位)**: **共有関数へ統合する** — 契約は観測順序のみだが、3 経路の独立実装は非伝播バグの温床 (本プロジェクトで実証済みのパターン) のため実装戦略として統合を指示。
-2. **Z2 (config.toml の kcs_format_version)**: **config.toml 側の書込・検証を廃止し scope.json へ一本化** — spec の保存場所規範 (03 §2) どおり。再 init 方針で互換負債なし。
+2. **Z2 (config.toml の kio_format_version)**: **config.toml 側の書込・検証を廃止し scope.json へ一本化** — spec の保存場所規範 (03 §2) どおり。再 init 方針で互換負債なし。
 3. **Z3 (複合 lock 順序)**: **(a) 待機順序制約** — cost-ledger Tx 保持中に scope store lock 系を取得することを禁止 (逆順禁止の字義)。順方向 (store lock 保持中の Tx 開始) は可。契約は逆順取得の不在確認。
 4. **Z4 (eval/ の Recall 射影)**: **対象範囲内** — eval/run_eval.py は本ワークストリームの資産 (Phase 1a で既修正実績)。U142 の射影 ((raw_hash, section, path_at_commit)) を確認・追随し test_run_eval.py で固定。
 5. **Z5 (log --at/--since)**: **QB50〜QB56 の類推期待値を採用して実装** — search/view/restore の確立済み意味論からの類推は本プロジェクトの正当な導出。spec 側への明文追記は Phase 4 の実装フィードバック記録へ (凍結例外ではなく提案として)。
@@ -1233,13 +1233,13 @@ PC25/PC26 (p2c.md) の正本引用はいずれも単一 scope の replay を前�
 | §A K 領域 (error code / exit code 横断) | U121-U128 | QB1-QB9 (9 件: P0 6 / P1 2 / P2 1) |
 | §B L 領域 (lock/registry/scan境界/import-export/observability/文言) | U130-U142 (U129 除外) | QB10-QB24 (15 件: P0 1 / P1 10 / P2 4) |
 | §C J 領域 (耐久書込・schema・DDL・tree v2/v3・CAS・path) | U95,96,98-112,114-119 | QB25-QB49 (25 件: P0 13 / P1 11 / P2 1) |
-| §D `kcs log --at/--since` 本実装 | (06§1 L61 のみ正本) | QB50-QB58 (9 件: P0 4 / P1 5) |
+| §D `kio log --at/--since` 本実装 | (06§1 L61 のみ正本) | QB50-QB58 (9 件: P0 4 / P1 5) |
 | §E P2 繰越 (PC20/25/26/33/44 の未決配線) | H 領域 (継続) | QB59-QB66 (8 件: P0 5 / P1 3) |
 | **合計** | | **66 件 (P0 29 / P1 31 / P2 6)** |
 
 解釈割れ: **6 件** (§Z Z1-Z6)。
 
 対象外として明示的に除外した項目: U129 (Phase 4+ GC、対象外)、U97/U113/U120 (Phase 1 済み)、
-B-H 領域全体 (Phase 1/2 契約済み)、A/I 領域 (別 Phase 3 グループ)、`KCS-E-ADAPTER-APPROVAL-CONFLICT-001`/
-`KCS-E-ADAPTER-SPECVER-001` の具体的発火条件 (I 領域の管轄、07-adapter-spec.md 精読を要するため本書の
+B-H 領域全体 (Phase 1/2 契約済み)、A/I 領域 (別 Phase 3 グループ)、`KIO-E-ADAPTER-APPROVAL-CONFLICT-001`/
+`KIO-E-ADAPTER-SPECVER-001` の具体的発火条件 (I 領域の管轄、07-adapter-spec.md 精読を要するため本書の
 対象外)。

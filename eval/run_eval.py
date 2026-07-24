@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""評価ランナー (KCS 検索評価ハーネス, docs/09-mvp-scope.md §4.3).
+"""評価ランナー (KIO 検索評価ハーネス, docs/09-mvp-scope.md §4.3).
 
-golden-queries.jsonl を読み、`kcs search --json` を叩いて Recall@10 を
+golden-queries.jsonl を読み、`kio search --json` を叩いて Recall@10 を
 シナリオ別 (M3-1 / M3-2 / M3-3) に集計し、results.json + report.md を出力する。
 
 判定 (docs/09 §4.3、射影は step4b-contract-tests-p3b.md QB24/裁定4 で 3 要素化):
@@ -23,11 +23,11 @@ golden-queries.jsonl を読み、`kcs search --json` を叩いて Recall@10 を
         -> (raw_hash="sha256:"+raw_sha256, section_id=slugify(heading),
             path_at_commit=file)
     に解決する。raw_sha256 は corpus/history manifest がファイル bytes から記録する。
-    path_at_commit は expected.file そのもの (スコープ相対パス、KCS の
+    path_at_commit は expected.file そのもの (スコープ相対パス、KIO の
     evidence_pointer.path_at_commit と同じ空間)。
 
 exit コード (2026-07-03 J2 裁定):
-    - `KCS-E-*-NOT-IMPLEMENTED*` 系 error_code のクエリ: unimplemented (採点対象外)。
+    - `KIO-E-*-NOT-IMPLEMENTED*` 系 error_code のクエリ: unimplemented (採点対象外)。
       1 件でもあれば最終 exit 2 (未実装状態を green にしない)。
     - exit 3 (部分成功): stdout の JSON を parse して採点対象。
     - その他の非 0 exit: 当該クエリ fail (recall 0)。scored 集合に 0.0 を加える。
@@ -42,9 +42,9 @@ exit コード (2026-07-03 J2 裁定):
 
 使い方:
     # 事前: generate_corpus.py と replay_history.py を実行しておく
-    python3 eval/run_eval.py --dry-run --corpus /tmp/kcs-eval-corpus
-    python3 eval/run_eval.py --corpus /tmp/kcs-eval-corpus --bin target/release/kcs
-    python3 eval/run_eval.py --scenario M3-1 --corpus /tmp/kcs-eval-corpus --bin target/release/kcs
+    python3 eval/run_eval.py --dry-run --corpus /tmp/kio-eval-corpus
+    python3 eval/run_eval.py --corpus /tmp/kio-eval-corpus --bin target/release/kio
+    python3 eval/run_eval.py --scenario M3-1 --corpus /tmp/kio-eval-corpus --bin target/release/kio
 """
 
 import argparse
@@ -151,22 +151,22 @@ def _expected_history_messages(scope):
     if deletes:
         messages.extend([
             "delete: " + ", ".join(item["file"] for item in deletes),
-            "kcs index auto snapshot",
+            "kio index auto snapshot",
         ])
     renames = [item for item in spec.HISTORY["renames"] if item["scope"] == scope]
     if renames:
         messages.extend([
             "rename: " + ", ".join(
                 f"{item['old_file']}->{item['new_file']}" for item in renames),
-            "kcs index auto snapshot",
+            "kio index auto snapshot",
         ])
     edits = [item for item in spec.HISTORY["edits"] if item["scope"] == scope]
     if edits:
         messages.extend([
             "edit: " + ", ".join(item["file"] for item in edits),
-            "kcs index auto snapshot",
+            "kio index auto snapshot",
         ])
-    messages.extend(["baseline", "kcs index auto snapshot"])
+    messages.extend(["baseline", "kio index auto snapshot"])
     return messages
 
 
@@ -470,7 +470,7 @@ def scope_dir_for(corpus_dir, scope):
 
 
 def run_search(bin_path, corpus_dir, query, flags):
-    """kcs search --json を実行し returncode/stdout/stderr をそのまま返す."""
+    """kio search --json を実行し returncode/stdout/stderr をそのまま返す."""
     # multi-scope search はデフォルト全 indexed scope 横断 (docs/05 §1.8)。
     # ここでは代表として最初の scope ディレクトリを cwd に実行する。
     cwd = scope_dir_for(corpus_dir, spec.SCOPES[0])
@@ -516,7 +516,7 @@ def _parse_json(text):
 
 
 def _is_not_implemented(error_code):
-    return bool(error_code) and error_code.startswith("KCS-E-") \
+    return bool(error_code) and error_code.startswith("KIO-E-") \
         and "NOT-IMPLEMENTED" in error_code
 
 
@@ -641,8 +641,8 @@ def _hash_bytes(data):
 def _chunk_identity_hash(chunk):
     # 03-data-model.md §8.1: byte_start/byte_end are the unit-local UTF-8 byte
     # span (2026-07 rename from char_start/char_end). This must track
-    # crates/kcs-core/src/cas.rs ChunkObject::identity_hash() exactly, or a real
-    # on-disk chunk object (produced by the compiled `kcs` binary, which the
+    # crates/kio-core/src/cas.rs ChunkObject::identity_hash() exactly, or a real
+    # on-disk chunk object (produced by the compiled `kio` binary, which the
     # PointerAttestor below reads and re-verifies) would silently mismatch here.
     identity_fields = (
         "spec_version", "raw_hash", "tool_profile_hash", "gen", "unit_key",
@@ -709,9 +709,9 @@ class PointerAttestor:
         # The frozen corpus has a small fixed scope list; never scan arbitrary
         # filesystem descendants while resolving an untrusted pointer scope_id.
         for scope in spec.SCOPES:
-            kcs_dir = os.path.join(scope_dir_for(self.corpus_dir, scope), ".kcs")
-            scope_path = os.path.join(kcs_dir, "scope.json")
-            if not os.path.isdir(kcs_dir):
+            kio_dir = os.path.join(scope_dir_for(self.corpus_dir, scope), ".kio")
+            scope_path = os.path.join(kio_dir, "scope.json")
+            if not os.path.isdir(kio_dir):
                 continue
             try:
                 value, _ = _read_json_bounded(scope_path, 64 * 1024, "scope record")
@@ -726,14 +726,14 @@ class PointerAttestor:
                 self.scope_errors[scope_id] = "scope_id is ambiguous"
                 self.scope_dirs.pop(scope_id, None)
                 continue
-            self.scope_dirs[scope_id] = kcs_dir
+            self.scope_dirs[scope_id] = kio_dir
 
     @staticmethod
-    def _object_path(kcs_dir, subdir, object_hash):
+    def _object_path(kio_dir, subdir, object_hash):
         if not isinstance(object_hash, str) or not HASH_RE.fullmatch(object_hash):
             raise PointerAttestationError("pointer contains an invalid object hash")
         digest = object_hash.removeprefix("sha256:")
-        return os.path.join(kcs_dir, "objects", subdir, digest[:2], digest[2:4], digest)
+        return os.path.join(kio_dir, "objects", subdir, digest[:2], digest[2:4], digest)
 
     def _read_object(self, scope_id, kind, object_hash):
         key = (scope_id, kind, object_hash)
@@ -741,11 +741,11 @@ class PointerAttestor:
             return self.object_cache[key]
         if scope_id in self.scope_errors:
             raise PointerAttestationError(self.scope_errors[scope_id])
-        kcs_dir = self.scope_dirs.get(scope_id)
-        if kcs_dir is None:
+        kio_dir = self.scope_dirs.get(scope_id)
+        if kio_dir is None:
             raise PointerAttestationError("pointer scope_id is not in the synthetic corpus")
         subdir, max_bytes = self._KINDS[kind]
-        path = self._object_path(kcs_dir, subdir, object_hash)
+        path = self._object_path(kio_dir, subdir, object_hash)
         remaining = MAX_POINTER_ATTESTATION_BYTES - self.verified_bytes
         if remaining <= 0:
             raise PointerAttestationError("pointer attestation byte bound exhausted")
@@ -956,7 +956,7 @@ def _working_tree_fingerprint(corpus_dir):
     for scope in spec.SCOPES:
         scope_dir = scope_dir_for(corpus_dir, scope)
         for name in sorted(os.listdir(scope_dir)):
-            if name == ".kcs":
+            if name == ".kio":
                 continue
             path = os.path.join(scope_dir, name)
             if os.path.isfile(path):
@@ -977,7 +977,7 @@ def verify_deleted_restore(bin_path, corpus_dir, history_manifest, deleted_resul
             problems.append(f"deleted result absent for restore: {entry['scope']}/{entry['file']}")
             continue
         pointer = result.get("evidence_pointer")
-        with tempfile.TemporaryDirectory(prefix="kcs-eval-restore-") as destination:
+        with tempfile.TemporaryDirectory(prefix="kio-eval-restore-") as destination:
             proc = subprocess.run(
                 [bin_path, "--json", "restore", json.dumps(pointer, separators=(",", ":")),
                  "--to", destination],
@@ -1003,7 +1003,7 @@ def verify_deleted_restore(bin_path, corpus_dir, history_manifest, deleted_resul
 
 def run_full_eval(queries, resolver, history_manifest, corpus_dir, bin_path,
                   out_path, report_path, active):
-    print("=== eval: kcs search 実行 + Recall@10 集計 ===")
+    print("=== eval: kio search 実行 + Recall@10 集計 ===")
     results = {"target_recall_at_10": RECALL_TARGET, "scenarios": {}, "queries": []}
     per_scenario_scores = {s: [] for s in active}
     per_scenario_latencies = {s: [] for s in active}
@@ -1135,7 +1135,7 @@ def run_full_eval(queries, resolver, history_manifest, corpus_dir, bin_path,
 
     # exit コード判定 (J2 裁定)。
     if n_unimplemented > 0:
-        print(f"[note] kcs search が未実装のクエリが {n_unimplemented} 件 "
+        print(f"[note] kio search が未実装のクエリが {n_unimplemented} 件 "
               f"(NOT-IMPLEMENTED)。Recall 判定は未実装のため無効。")
         print(f"       results: {out_path}")
         print(f"       report:  {report_path}")
@@ -1166,14 +1166,14 @@ def run_full_eval(queries, resolver, history_manifest, corpus_dir, bin_path,
 
 def _write_report(path, results, active):
     counts = results.get("counts", {})
-    lines = ["# KCS 検索評価レポート (synthetic)", ""]
+    lines = ["# KIO 検索評価レポート (synthetic)", ""]
     lines.append(f"- 目標: 各シナリオ Recall@10 >= {RECALL_TARGET} (docs/09 §4.3)")
     lines.append(f"- クエリ数: {counts.get('n_queries', 0)} "
                  f"(scored={counts.get('n_scored', 0)} / "
                  f"failed={counts.get('n_failed', 0)} / "
                  f"unimplemented={counts.get('n_unimplemented', 0)})")
     if counts.get("n_unimplemented", 0) > 0:
-        lines.append("- 状態: **kcs search 未実装のクエリあり (NOT-IMPLEMENTED)**。"
+        lines.append("- 状態: **kio search 未実装のクエリあり (NOT-IMPLEMENTED)**。"
                      "Recall 判定は無効 (exit 2)。")
     lines.append("")
     lines.append("| シナリオ | クエリ数 | scored | Recall@10 | p95 ms | 目標 ms | 判定 |")
@@ -1210,14 +1210,14 @@ def _write_report(path, results, active):
 
 # --------------------------------------------------------------------------- #
 def main(argv=None):
-    ap = argparse.ArgumentParser(description="KCS 検索評価ランナー")
+    ap = argparse.ArgumentParser(description="KIO 検索評価ランナー")
     ap.add_argument("--golden", default=os.path.join(HERE, "golden-queries.jsonl"))
     ap.add_argument("--corpus", help="コーパスディレクトリ (corpus-manifest.json を含む)")
     ap.add_argument("--corpus-manifest",
                     help="corpus-manifest.json のパス (既定 <corpus>/corpus-manifest.json)")
     ap.add_argument("--history-manifest", default=None,
                     help="既定 <corpus>/history-manifest.json")
-    ap.add_argument("--bin", default="target/release/kcs")
+    ap.add_argument("--bin", default="target/release/kio")
     ap.add_argument("--out", default=os.path.join(HERE, "results.json"))
     ap.add_argument("--report", default=os.path.join(HERE, "report.md"))
     ap.add_argument("--scenario", action="append", choices=SCENARIOS, default=None,
@@ -1268,7 +1268,7 @@ def main(argv=None):
         raise SystemExit("[error] 実行モードには --corpus が必要 (scope の cwd に使う)。")
     bin_path = os.path.abspath(args.bin)
     if not os.path.exists(bin_path):
-        raise SystemExit(f"[error] kcs バイナリ不在: {bin_path}")
+        raise SystemExit(f"[error] kio バイナリ不在: {bin_path}")
     corpus_dir = os.path.abspath(args.corpus)
     replay_problems = validate_replayed_history(bin_path, corpus_dir, history_manifest)
     if replay_problems:

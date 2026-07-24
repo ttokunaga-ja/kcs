@@ -26,7 +26,7 @@ MAX_OWNER_BYTES = 64 * 1024
 MAX_MANIFEST_BYTES = 16 * 1024 * 1024
 MAX_LOCK_BYTES = 4 * 1024
 HASH_HEX_LENGTH = 64
-LOCK_BYTES = b"kcs-scale-fixture-lock-v1\n"
+LOCK_BYTES = b"kio-scale-fixture-lock-v1\n"
 ATOMIC_TEMP_RANDOM_RE = re.compile(r"[a-z0-9_]{8}")
 WINDOWS_REPARSE_POINT_ATTRIBUTE = 0x400
 KNOWN_RUNTIME_FILES = {
@@ -326,7 +326,7 @@ def _allowed_root_names():
 def _allowed_scope_names(profile_name):
     selected = spec.profile(profile_name)
     return {
-        ".kcs",
+        ".kio",
         *(spec.document_name(index) for index in range(selected["files_per_scope"])),
     }
 
@@ -374,10 +374,10 @@ def _check_owned_tree(root, profile_name):
             )
         for path in scope_children:
             metadata = path.lstat()
-            if path.name == ".kcs":
+            if path.name == ".kio":
                 if not _is_plain_directory(metadata):
                     raise ScaleGenerationError(
-                        f"scope .kcs path is unsafe: {path}"
+                        f"scope .kio path is unsafe: {path}"
                     )
             elif not _is_plain_regular_file(metadata):
                 raise ScaleGenerationError(f"scope source path is unsafe: {path}")
@@ -442,7 +442,7 @@ def _recover_owned_atomic_temp(root, profile_name):
         candidates.append(path)
 
     allowed_scope = _allowed_scope_names(profile_name)
-    source_targets = allowed_scope - {".kcs"}
+    source_targets = allowed_scope - {".kio"}
     for scope in spec.SCOPES:
         scope_dir = root / scope["name"]
         metadata = _optional_lstat(scope_dir)
@@ -723,10 +723,10 @@ def _reset_owned_output_locked(root):
             scope_dir, allowed_scope_count, f"reset scope {scope['name']}"
         ):
             child_metadata = child.lstat()
-            if child.name == ".kcs":
+            if child.name == ".kio":
                 if not _is_plain_directory(child_metadata):
                     raise ScaleGenerationError(
-                        f"scope .kcs reset path is unsafe: {child}"
+                        f"scope .kio reset path is unsafe: {child}"
                     )
             elif not _is_plain_regular_file(child_metadata):
                 raise ScaleGenerationError(
@@ -847,7 +847,7 @@ def write_corpus(out_dir, profile_name="tiny", reset_owned=False):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(
-        description="Generate the independent KCS scale corpus"
+        description="Generate the independent KIO scale corpus"
     )
     parser.add_argument("--out", required=True, help="output collection root")
     parser.add_argument(

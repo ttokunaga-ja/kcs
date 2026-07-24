@@ -24,7 +24,7 @@ sound 確認。しかし「同型ギャップの兄弟探し」で新規 critica
 - **L3 [major] view/open の短縮ハッシュ解決が snapshot 後に破綻** (Opus 実機): `resolve_short_hash` /
   `load_searchable_chunks` が **tree_entries.json (ファイル射影)** を `commit_hash == HEAD` で filter
   するが、9b61e51 の lazy 射影は SQLite 側のみで JSON は refresh されない → snapshot 直後は
-  KCS-E-CONFIG-USAGE-001 (search は同条件で成功する非対称)。修正: 短縮ハッシュ解決を SQLite
+  KIO-E-CONFIG-USAGE-001 (search は同条件で成功する非対称)。修正: 短縮ハッシュ解決を SQLite
   tree_entries + `ensure_snapshot_tree_entries` 経由に一本化 (JSON 射影は廃止候補 — 残すなら同時
   refresh)。回帰テスト: index → snapshot → view/open (短縮ハッシュ) が成功
 - **L4 [major] embedding の opt-in が Mistral 承認に相乗り** (GPT-5.5): `persistent_network_allowed`

@@ -1,5 +1,5 @@
 {
- "golden": "/Users/ttokunaga-ja/dev/github.com/ttokunaga-ja/kcs/eval/golden-queries-qhard.jsonl",
+ "golden": "/Users/ttokunaga-ja/dev/github.com/ttokunaga-ja/kio/eval/golden-queries-qhard.jsonl",
  "queries": [
   {
    "query_id": "qa01",

@@ -1,21 +1,21 @@
 #!/usr/bin/env python3
-"""履歴シナリオの決定論的再現 (KCS 検索評価ハーネス, docs/09-mvp-scope.md §4.3).
+"""履歴シナリオの決定論的再現 (KIO 検索評価ハーネス, docs/09-mvp-scope.md §4.3).
 
 生成済みコーパス (generate_corpus.py の出力) に対し、各 scope で
-    kcs init -> kcs index --approve -> kcs snapshot
+    kio init -> kio index --approve -> kio snapshot
     -> 編集 -> snapshot -> リネーム -> snapshot -> 削除 -> snapshot
 の履歴を **決定論的** に再現する (M3-2 リネーム / M3-3 削除の評価に必要)。
 
 - 操作列は corpus_spec.HISTORY で固定 (どのファイルを編集/リネーム/削除するか)。
 - どのファイルを rename/delete/edit したかを --manifest (既定 eval/history-manifest.json)
   に記録する。commit hash / timestamp は非決定なので記録しない (件数・メッセージのみ)。
-- 最後に各 scope で `kcs log` を叩き、履歴 commit が積まれたことを検証する。
+- 最後に各 scope で `kio log` を叩き、履歴 commit が積まれたことを検証する。
 
-前提: 対象は generate_corpus.py 直後のフレッシュなコーパス (.kcs 未作成)。
+前提: 対象は generate_corpus.py 直後のフレッシュなコーパス (.kio 未作成)。
 
 使い方:
-    python3 eval/replay_history.py --corpus /tmp/kcs-eval-corpus \\
-        --bin target/release/kcs --manifest eval/history-manifest.json
+    python3 eval/replay_history.py --corpus /tmp/kio-eval-corpus \\
+        --bin target/release/kio --manifest eval/history-manifest.json
 """
 
 import argparse
@@ -52,8 +52,8 @@ def _sections_for(scope, file_):
     return [{"slug": s["slug"], "heading": s["heading"]} for s in anchor["sections"]]
 
 
-def run_kcs(bin_path, scope_dir, args, tolerate_partial=True, corpus_dir=None):
-    """kcs を scope_dir で実行し JSON を返す。index の partial(exit3) は許容."""
+def run_kio(bin_path, scope_dir, args, tolerate_partial=True, corpus_dir=None):
+    """kio を scope_dir で実行し JSON を返す。index の partial(exit3) は許容."""
     cmd = [bin_path, "--json"] + args
     corpus_dir = corpus_dir or os.path.dirname(scope_dir)
     proc = subprocess.run(
@@ -67,7 +67,7 @@ def run_kcs(bin_path, scope_dir, args, tolerate_partial=True, corpus_dir=None):
     # また合成コーパスは全て正常 normalize される想定。exit!=0 かつ tolerate 外なら失敗。
     if proc.returncode != 0 and not (tolerate_partial and proc.returncode == 3):
         raise ReplayError(
-            f"kcs {' '.join(args)} in {scope_dir} exit={proc.returncode}\n"
+            f"kio {' '.join(args)} in {scope_dir} exit={proc.returncode}\n"
             f"stdout={proc.stdout}\nstderr={proc.stderr}")
     try:
         return json.loads(proc.stdout) if proc.stdout.strip() else {}
@@ -123,9 +123,9 @@ def replay(corpus_dir, bin_path):
         if not os.path.isdir(scope_dir):
             raise ReplayError(f"scope ディレクトリ不在: {scope_dir}")
 
-        run_kcs(bin_path, scope_dir, ["init", "."], corpus_dir=corpus_dir)
-        run_kcs(bin_path, scope_dir, ["index", "--approve"], corpus_dir=corpus_dir)
-        run_kcs(bin_path, scope_dir, ["snapshot", "-m", "baseline"], corpus_dir=corpus_dir)
+        run_kio(bin_path, scope_dir, ["init", "."], corpus_dir=corpus_dir)
+        run_kio(bin_path, scope_dir, ["index", "--approve"], corpus_dir=corpus_dir)
+        run_kio(bin_path, scope_dir, ["snapshot", "-m", "baseline"], corpus_dir=corpus_dir)
 
         steps = ["baseline"]
 
@@ -136,9 +136,9 @@ def replay(corpus_dir, bin_path):
                 old_hashes[(scope, e["file"])] = _sha256_file(
                     os.path.join(scope_dir, e["file"]))
                 apply_edit(scope_dir, e)
-            run_kcs(bin_path, scope_dir, ["index", "--approve"], corpus_dir=corpus_dir)
+            run_kio(bin_path, scope_dir, ["index", "--approve"], corpus_dir=corpus_dir)
             files = ", ".join(e["file"] for e in edits)
-            run_kcs(bin_path, scope_dir, ["snapshot", "-m", f"edit: {files}"],
+            run_kio(bin_path, scope_dir, ["snapshot", "-m", f"edit: {files}"],
                     corpus_dir=corpus_dir)
             steps.append("edit")
 
@@ -149,9 +149,9 @@ def replay(corpus_dir, bin_path):
                 old_hashes[(scope, r["old_file"])] = _sha256_file(
                     os.path.join(scope_dir, r["old_file"]))
                 apply_rename(scope_dir, r)
-            run_kcs(bin_path, scope_dir, ["index", "--approve"], corpus_dir=corpus_dir)
+            run_kio(bin_path, scope_dir, ["index", "--approve"], corpus_dir=corpus_dir)
             pairs = ", ".join(f"{r['old_file']}->{r['new_file']}" for r in renames)
-            run_kcs(bin_path, scope_dir, ["snapshot", "-m", f"rename: {pairs}"],
+            run_kio(bin_path, scope_dir, ["snapshot", "-m", f"rename: {pairs}"],
                     corpus_dir=corpus_dir)
             steps.append("rename")
 
@@ -162,14 +162,14 @@ def replay(corpus_dir, bin_path):
                 old_hashes[(scope, d["file"])] = _sha256_file(
                     os.path.join(scope_dir, d["file"]))
                 apply_delete(scope_dir, d)
-            run_kcs(bin_path, scope_dir, ["index", "--approve"], corpus_dir=corpus_dir)
+            run_kio(bin_path, scope_dir, ["index", "--approve"], corpus_dir=corpus_dir)
             files = ", ".join(d["file"] for d in deletes)
-            run_kcs(bin_path, scope_dir, ["snapshot", "-m", f"delete: {files}"],
+            run_kio(bin_path, scope_dir, ["snapshot", "-m", f"delete: {files}"],
                     corpus_dir=corpus_dir)
             steps.append("delete")
 
-        # 検証: kcs log
-        log = run_kcs(bin_path, scope_dir, ["log"], corpus_dir=corpus_dir)
+        # 検証: kio log
+        log = run_kio(bin_path, scope_dir, ["log"], corpus_dir=corpus_dir)
         commits = log.get("commits", [])
         per_scope[scope] = {
             "steps": steps,
@@ -218,9 +218,9 @@ def build_manifest(per_scope, old_hashes):
 
 def main(argv=None):
     here = os.path.dirname(os.path.abspath(__file__))
-    ap = argparse.ArgumentParser(description="KCS 履歴シナリオ再現 (決定論的)")
+    ap = argparse.ArgumentParser(description="KIO 履歴シナリオ再現 (決定論的)")
     ap.add_argument("--corpus", required=True, help="generate_corpus.py の出力ディレクトリ")
-    ap.add_argument("--bin", default="target/release/kcs", help="kcs バイナリのパス")
+    ap.add_argument("--bin", default="target/release/kio", help="kio バイナリのパス")
     ap.add_argument("--manifest", default=None,
                     help="履歴 manifest の出力先 (既定 <corpus>/history-manifest.json)")
     args = ap.parse_args(argv)
@@ -228,7 +228,7 @@ def main(argv=None):
     corpus_dir = os.path.abspath(args.corpus)
     bin_path = os.path.abspath(args.bin)
     if not os.path.exists(bin_path):
-        raise SystemExit(f"[error] kcs バイナリ不在: {bin_path} "
+        raise SystemExit(f"[error] kio バイナリ不在: {bin_path} "
                          f"(cargo build --release 済みか確認)")
 
     manifest_path = args.manifest or os.path.join(corpus_dir, "history-manifest.json")

@@ -28,10 +28,10 @@ except ImportError:  # pragma: no cover - exercised by the repository test style
     import persona_fixture_spec as fixture_spec
 
 
-OWNER_MARKER_NAME = ".kcs-persona-owner.json"
-STAGING_OWNER_MARKER_NAME = ".kcs-persona-staging-owner.json"
-NOREPLACE_PROBE_SOURCE = ".kcs-persona-noreplace-source"
-NOREPLACE_PROBE_DESTINATION = ".kcs-persona-noreplace-destination"
+OWNER_MARKER_NAME = ".kio-persona-owner.json"
+STAGING_OWNER_MARKER_NAME = ".kio-persona-staging-owner.json"
+NOREPLACE_PROBE_SOURCE = ".kio-persona-noreplace-source"
+NOREPLACE_PROBE_DESTINATION = ".kio-persona-noreplace-destination"
 OWNER_ID = "eval/persona_storage.py"
 OWNER_SCHEMA_VERSION = 1
 MAX_OWNER_BYTES = 64 * 1024

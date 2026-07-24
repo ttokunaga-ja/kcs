@@ -38,11 +38,11 @@ except ImportError:  # pragma: no cover - direct-script compatibility.
     import persona_suite_event_manifest as suite_events
 
 
-PERSON_CONTROL_SCHEMA = "kcs.persona.streaming-event-person-control/v1"
-SUITE_CONTROL_SCHEMA = "kcs.persona.streaming-event-suite-control/v1"
-LOCATOR_SCHEMA = "kcs.persona.streaming-event-locator/v1"
-SCHEDULE_LOCATOR_SCHEMA = "kcs.persona.streaming-suite-schedule-locator/v1"
-MMR_SCHEMA = "kcs.persona.streaming-schedule-mmr/v1"
+PERSON_CONTROL_SCHEMA = "kio.persona.streaming-event-person-control/v1"
+SUITE_CONTROL_SCHEMA = "kio.persona.streaming-event-suite-control/v1"
+LOCATOR_SCHEMA = "kio.persona.streaming-event-locator/v1"
+SCHEDULE_LOCATOR_SCHEMA = "kio.persona.streaming-suite-schedule-locator/v1"
+MMR_SCHEMA = "kio.persona.streaming-schedule-mmr/v1"
 SCHEMA_VERSION = 1
 STATUS = "planned_not_observed_non_authorizing"
 FORMAL_PUBLICATION_BLOCKER = stream_storage.FORMAL_PUBLICATION_BLOCKER
@@ -532,7 +532,7 @@ def build_persona_event_artifact(
             },
             "artifacts": artifacts,
             "content_binding_sha256": _digest({
-                "domain": "kcs.persona.streaming-event-person-content/v1",
+                "domain": "kio.persona.streaming-event-person-content/v1",
                 "persona_id": persona_id,
                 "persona_event_plan_sha256": _digest(event_plan),
                 "event_manifest_sha256": event_manifest_sha256,
@@ -752,7 +752,7 @@ def verify_persona_event_artifact(destination, profile, persona_id):
     ):
         raise PersonaSuiteEventStreamingError("person logical output binding differs")
     expected_content_binding = _digest({
-        "domain": "kcs.persona.streaming-event-person-content/v1",
+        "domain": "kio.persona.streaming-event-person-content/v1",
         "persona_id": persona_id,
         "persona_event_plan_sha256": expected_inputs[
             "persona_event_plan_sha256"
@@ -1128,7 +1128,7 @@ def _mmr_root(bindings):
     value = {
         "schema": MMR_SCHEMA,
         "schema_version": SCHEMA_VERSION,
-        "domain": "kcs.persona.streaming-suite-schedule-locator-mmr/v1",
+        "domain": "kio.persona.streaming-suite-schedule-locator-mmr/v1",
         "leaf_count": leaf_count,
         "ordered_peaks": [
             {"height": height, "sha256": digest}
@@ -1360,7 +1360,7 @@ def compose_suite_event_artifact(
             "locators": _artifact_projection(locator_receipt),
         },
         "content_binding_sha256": _digest({
-            "domain": "kcs.persona.streaming-event-suite-content/v1",
+            "domain": "kio.persona.streaming-event-suite-content/v1",
             "inputs": inputs,
             "schedule_sha256": schedule_sha256,
             "suite_event_manifest_sha256": suite_manifest_sha256,
@@ -1607,7 +1607,7 @@ def verify_suite_event_artifact(destination, profile, persona_artifact_roots):
     ):
         raise PersonaSuiteEventStreamingError("suite logical output binding differs")
     expected_content_binding = _digest({
-        "domain": "kcs.persona.streaming-event-suite-content/v1",
+        "domain": "kio.persona.streaming-event-suite-content/v1",
         "inputs": expected_inputs,
         "schedule_sha256": schedule_sha256,
         "suite_event_manifest_sha256": suite_manifest_sha256,

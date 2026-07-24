@@ -52,35 +52,35 @@ lift は本ラウンドでは測定不能 (モックで 0.389 に低下するの
 - **K5** (d243359): per-scope sub-cursor {scope_id, snapshot_commit, max_rowid, consumed}。
   再計算は snapshot_commit の tree_entries (無ければ tree object から再展開) +
   rowid <= max_rowid で集合固定。shallow snapshot の cursor 再計算は
-  KCS-E-COMMIT-SHALLOW-001
+  KIO-E-COMMIT-SHALLOW-001
 - **K6** (75d0c6d): 08 §3.1 の解決順を完全実装 (scope 2 段解決 → commit → shallow 判定 →
   tree gate → tombstone → chunk/raw)。tombstoned / not_found / scope_unreachable の
-  3 値実区別、`kcs://<scope>/object/<type>/<hash>` URI 受理。誤解を招く kcs-search の
+  3 値実区別、`kio://<scope>/object/<type>/<hash>` URI 受理。誤解を招く kio-search の
   resolver スタブは削除。新 error code 2 件は ws1c-decisions #32
 - **K4** (07948af): GeminiEmbeddingAdapter (Mistral 方式 client trait、429 backoff、
-  起動時 pin 解決) + KCS_TEST_GEMINI_EMBED モック seam + TaskType::Embedding 生成/実行
+  起動時 pin 解決) + KIO_TEST_GEMINI_EMBED モック seam + TaskType::Embedding 生成/実行
   (network opt-in・budget・cost ledger 接続) + sqlite-vec 0.1.6 で chunk_vec を vec0 実体化
   (embeddings テーブルが正、rebuild-db は embeddings→chunk_vec 再導出で vector 検索を保存)
-  + tool-lock embedding entry 書込で KCS-E-EMBED-MODALITY-001 検証が実配線 + hybrid は
+  + tool-lock embedding entry 書込で KIO-E-EMBED-MODALITY-001 検証が実配線 + hybrid は
   chunk_vec KNN (cosine 距離順) → RRF、MMR に実 embedding 供給
 - **K7** (d243359): index_status {enriched_ratio (task ledger の done/total、対象件数加重),
   pending_enrichment_tasks, budget_paused} を search --json に常時付与
-- **K8** (d243359 ほか): metrics = KCS-M-SEARCH-001 / component "search" / 05 §7 envelope。
+- **K8** (d243359 ほか): metrics = KIO-M-SEARCH-001 / component "search" / 05 §7 envelope。
   検索対象は現行 chunking_config_hash のみ。rebuild-db テストは「SQLite が実検索に使われる」
   前提で実体化 (ct3_fts_004 / ct3_embed_005)。open の JSON 返却は ws1c-decisions #31 に記録
 - **K1** (de7b379): P0 60/60 の契約⇔テスト対応を確立 (tasks/step3c-p0-matrix.md)。
-  常真 3 件 (HYBRID-002 / EMBED-002 / EMBED-003) は KCS_TEST_GEMINI_EMBED seam で
+  常真 3 件 (HYBRID-002 / EMBED-002 / EMBED-003) は KIO_TEST_GEMINI_EMBED seam で
   compatible / incompatible / 未生成の embedding 状態を実際に作り分けて実体化。
   MULTI-001 は MULTI-008 から分離して独立検証。弱テスト 8 件補強
 
 ## 死コードの扱い (前ラウンド根本診断への恒久対応)
 
 「正実装のまま未配線」を再発させないため、未配線のライブラリ scaffold は今ラウンドで
-**配線するか削除するか**に二分した。削除分 (de7b379): kcs-index の tree_entries.rs /
-rebuild.rs、kcs-search の multi_scope.rs / query.rs の未使用 response 型・SearchEngine・
+**配線するか削除するか**に二分した。削除分 (de7b379): kio-index の tree_entries.rs /
+rebuild.rs、kio-search の multi_scope.rs / query.rs の未使用 response 型・SearchEngine・
 search() スタブ / lib.rs placeholder テスト、embedding_store の validate_embedding_profile
 (実施行は tool_lock::validate_embedding_entry と matches_adopted に配線済み)、
-kcs-search の evidence resolver スタブ (75d0c6d)、EmbeddingStore trait (07948af)。
+kio-search の evidence resolver スタブ (75d0c6d)、EmbeddingStore trait (07948af)。
 
 ## 未実装・限界の明示 (過小開示の禁止に基づく全数開示)
 
@@ -89,7 +89,7 @@ kcs-search の evidence resolver スタブ (75d0c6d)、EmbeddingStore trait (079
    ベストエフォートで、モックで contract のみ検証。実 API 検証は発注側
 2. **hybrid の品質 lift は未実測** (モックは意味信号なし)。配線と契約のみ保証
 3. time-travel フラグ (--at / --all-history / --include-deleted / --since) は従来どおり
-   KCS-E-CONFIG-NOT-IMPLEMENTED-001 (Step3c 発注範囲外)
+   KIO-E-CONFIG-NOT-IMPLEMENTED-001 (Step3c 発注範囲外)
 4. KNN は全 chunk_vec 行を取得後に live 集合フィルタ (sqlite-vec が KNN LIMIT を join より
    先に適用するため)。MVP 規模では十分、大規模化時は metadata partitioning を検討
 5. クエリ embedding のコストは非計上 (微小。budget guardrail は bulk index が対象)。
@@ -98,7 +98,7 @@ kcs-search の evidence resolver スタブ (75d0c6d)、EmbeddingStore trait (079
    専用の CLI assert は無し。auth_error/rate_limit seam は index 経路に配線済みだが
    専用テスト無し (K1 必須外)
 7. shallow commit の判定は「tree object 物理欠損」(Step 3 に shallow 生成系が無いため)。
-   store 破損と区別しない。KCS-E-EVIDENCE-SCOPE-AMBIGUOUS-001 経路はテスト未カバー
+   store 破損と区別しない。KIO-E-EVIDENCE-SCOPE-AMBIGUOUS-001 経路はテスト未カバー
    (P0 外)。CT3-CHUNK-009 の「indexing 途中は不可視」節は同期 CLI では実質検証不能
 8. registry 登録パスは canonicalize していない (シンボリックリンク経由の重複登録が
    理論上可能)。eval ハーネスは XDG_DATA_HOME を隔離せず継承するため、実行時は

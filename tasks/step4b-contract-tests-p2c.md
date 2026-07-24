@@ -17,7 +17,7 @@ Phase 割当は spec-gap 全体表の「Phase 2」。
 1 本の確認契約に圧縮 (PC48)。
 
 **対象外 (他グループ・Phase 3 送り — 混同注意)**:
-- `kcs restore` / `kcs view` (05 §4) — D 領域 (restore) 担当
+- `kio restore` / `kio view` (05 §4) — D 領域 (restore) 担当
 - purge の機構本体 (05 §3, §3.5) — E 領域担当。本書は `purge_blocks_raw` 等の**検索側フィルタ適用点**を
   前提として参照するのみ (Phase 1 で実装済み、再契約しない)
 - Evidence Pointer の解決手順・6a/6b/verify (08) — G 領域担当。05 §1.7 のレスポンス内
@@ -36,9 +36,9 @@ Phase 割当は spec-gap 全体表の「Phase 2」。
 
 ## 実装対象ファイルの見込み (契約の対象であり実装方針を指図するものではない — 現状把握の記録)
 
-- `crates/kcs-cli/src/main.rs` — 本書が扱う挙動のほぼ全てがこのファイルに集中する:
+- `crates/kio-cli/src/main.rs` — 本書が扱う挙動のほぼ全てがこのファイルに集中する:
   `resolve_vector_availability`/`resolve_search_mode` (mode 解決, L1167-1309)、
-  `embedding_opt_in_for_scopes`/`persistent_network_allowed_for_kcs_dir` (gate, L8512-8544)、
+  `embedding_opt_in_for_scopes`/`persistent_network_allowed_for_kio_dir` (gate, L8512-8544)、
   `compute_query_embedding_page1` (L9444-9525)、`query_units`/`build_fts_tiers`/`fts_keyword_group`
   (MATCH 生成, L3427-3608)、`execute_fts_tier`/`vector_scope_search`/`fetch_live_meta`
   (candidate_depth, L2651-2886)、`search_one_scope_inner` (chunking_config_hash・shallow・HEAD 不在,
@@ -47,23 +47,23 @@ Phase 割当は spec-gap 全体表の「Phase 2」。
   L5317-5494)、`effective_search_config`/`effective_search_tuning` (multi-scope 実効値,
   L5169-5298)、`parse_search_args` (`--at`+`--scope`/`--online`/`--offline` 欠落, L5012-5141)、
   run_search_inner 内の exit 分割集計 (L1748-1891)
-- `crates/kcs-search/src/cursor.rs` — `ScopeCursor`/`CursorToken` (L29-61): `index_generation` フィールド
+- `crates/kio-search/src/cursor.rs` — `ScopeCursor`/`CursorToken` (L29-61): `index_generation` フィールド
   なし、`query_vector_digest` フィールドなし
-- `crates/kcs-search/src/query.rs` — `QueryHashInput` (L102-114): `query_vector_digest` なし
-- `crates/kcs-search/src/mmr.rs` — 確認済み適合 (変更不要)
-- `crates/kcs-search/src/rrf.rs` — `fuse_rrf` の `candidate_depth` 適用はマージ段のみ (確認済み、SQL 側の
+- `crates/kio-search/src/query.rs` — `QueryHashInput` (L102-114): `query_vector_digest` なし
+- `crates/kio-search/src/mmr.rs` — 確認済み適合 (変更不要)
+- `crates/kio-search/src/rrf.rs` — `fuse_rrf` の `candidate_depth` 適用はマージ段のみ (確認済み、SQL 側の
   変更が本体)
-- `crates/kcs-index/src/fts.rs` / `crates/kcs-index/src/rows.rs` — `chunks.first_seen_commit` は単一列
+- `crates/kio-index/src/fts.rs` / `crates/kio-index/src/rows.rs` — `chunks.first_seen_commit` は単一列
   (rows.rs:20)。`chunk_publications` 表は存在しない (grep 0 件)。`chunk_config_generations` に
   `introduction_commit` 列なし (fts.rs:521-527)
-- `crates/kcs-index/src/embedding_store.rs` — `EmbeddingTargetType::QueryCache` (L585) は文字列変換の
+- `crates/kio-index/src/embedding_store.rs` — `EmbeddingTargetType::QueryCache` (L585) は文字列変換の
   1 箇所のみで書込・読出経路が存在しない
-- `crates/kcs-cli/src/historical_reindex.rs` — `retained_history_instances` (L97-207) は
+- `crates/kio-cli/src/historical_reindex.rs` — `retained_history_instances` (L97-207) は
   `all_parents(head)` で全履歴を対象化 (HEAD 限定なし)
-- `crates/kcs-cli/src/search_history.rs` / `search_time.rs` — 確認済み適合 (時点セレクタ・cursor 継承の
+- `crates/kio-cli/src/search_history.rs` / `search_time.rs` — 確認済み適合 (時点セレクタ・cursor 継承の
   基礎は健全。§1.6 の ancestor-or-equal 判定は tree walk による binding 存在確認のみで、chunk 自体の
   introduction 時点は見ていない — J 節参照)
-- `crates/kcs-cli/src/multi_scope.rs` — `[search.multi_scope]` (parallelism/timeout) の解決のみを担当。
+- `crates/kio-cli/src/multi_scope.rs` — `[search.multi_scope]` (parallelism/timeout) の解決のみを担当。
   U74 が扱う `[search]` (default_mode 等) の実効値解決とは**別の設定名前空間**であり対象外
 
 ---
@@ -100,8 +100,8 @@ P0/P1/P2 集計は末尾「集計」節。
 
 ### PC1 auto/--hybrid の 7 行解決順と判定順序 (先勝ち) [P0]
 - 正本: 05 §1.1 L25-36 (『--offline 指定 → text fallback ... embedding profile_hash 不一致 →
-  text fallback (KCS-E-SEARCH-VEC-INCOMPAT-001) ... embedding 承認なし → text fallback
-  (KCS-E-SEARCH-VEC-UNAUTHORIZED-001) ... 同一 query が in-flight → text fallback
+  text fallback (KIO-E-SEARCH-VEC-INCOMPAT-001) ... embedding 承認なし → text fallback
+  (KIO-E-SEARCH-VEC-UNAUTHORIZED-001) ... 同一 query が in-flight → text fallback
   (embedding_in_flight) ... query embedding 応答が... contract violation → text fallback
   (embedding_contract_violation) ... 上記のいずれにも該当せず vector のみ利用不能 → text ... 両方利用可能
   → hybrid ... 両方不可 → error』) / L38-39 (『解決順の列挙は判定順序でもある — 複数条件が同時に成立
@@ -109,10 +109,10 @@ P0/P1/P2 集計は末尾「集計」節。
   承認なし (UNAUTHORIZED) に先行)』)
 - 前提: 単一 scope、`auto` モード。7 通りの条件単独ケースに加え、(h) `--offline` 指定 **かつ** embedding
   profile 不一致が同時に真であるケース。
-- 操作: 各条件を単独発生させて `kcs search --json` を実行。(h) は両条件を同時に満たす環境で実行。
+- 操作: 各条件を単独発生させて `kio search --json` を実行。(h) は両条件を同時に満たす環境で実行。
 - 期待: (a)-(f) の 6 通りは対応する `fallback_reason`/`error_code` で `resolved_mode="text"`,
   `fallback=true`, exit 0。(g) 両方利用可能は `resolved_mode="hybrid"`。両方不可は
-  `KCS-E-SEARCH-VEC-UNAVAIL-001` で `--hybrid` 時は fail_behavior 次第 (PC2 参照)、auto は常に text。
+  `KIO-E-SEARCH-VEC-UNAVAIL-001` で `--hybrid` 時は fail_behavior 次第 (PC2 参照)、auto は常に text。
   (h) は `fallback_reason="offline"` を採用する (offline が最初に列挙されているため、profile 不一致より
   優先)。**現状**: `resolve_search_mode`/`VectorAvailability` (main.rs L1097-1309) は
   `embedding_endpoint_not_configured → embedding_index_missing → embedding_opt_in_required →
@@ -130,10 +130,10 @@ P0/P1/P2 集計は末尾「集計」節。
 - 前提: `[search].fail_behavior = "error"`。(a) 承認なし (embedding_not_authorized) で `--hybrid`。
   (b) `--offline` で `--hybrid`。(c) embedding_in_flight で `--hybrid`。(d) embedding_contract_violation
   で `--hybrid`。
-- 操作: 各ケースで `kcs search --hybrid` を実行 (fail_behavior=error のまま)。
+- 操作: 各ケースで `kio search --hybrid` を実行 (fail_behavior=error のまま)。
 - 期待: (a)(b) は `fail_behavior=error` にもかかわらず **text fallback (exit 0)** のまま —
   ユーザー意思由来の縮退は設定で error 化できない。(c)(d) は `fail_behavior=error` に従って
-  **hard error** (exit 1、`KCS-E-SEARCH-VEC-UNAVAIL-001`) になる。**現状**: `resolve_search_mode`
+  **hard error** (exit 1、`KIO-E-SEARCH-VEC-UNAVAIL-001`) になる。**現状**: `resolve_search_mode`
   (main.rs L1263-1307) は `VectorAvailability::Unavailable`/`Incompatible` の 2 種類しか区別せず、
   fail_behavior は無条件に両方へ適用される — 「ユーザー意思 vs 技術的過渡失敗」の分岐自体が
   存在しない (7 行モデル自体が未実装のため、この分岐点も構造的に欠落)。
@@ -143,7 +143,7 @@ P0/P1/P2 集計は末尾「集計」節。
   fallback_reason) に加えて構造化 warning を stderr / --json の warnings[] へ出す — exit code も
   fallback と同じ (error にしない)』)
 - 前提: `[search].fail_behavior = "warn"`、vector 技術的過渡不可 (index 未構築等) で auto/--hybrid。
-- 操作: `kcs search --hybrid --json` を実行。
+- 操作: `kio search --hybrid --json` を実行。
 - 期待: `resolved_mode="text"`, `fallback=true`, exit 0、`warning` フィールドが非 null。**現状**:
   `SearchFailBehavior::Warn` (main.rs L1282-1295) は既にこの挙動を実装済み — ただし応答スキーマは
   単一の `"warning"` 文字列 field であり、spec 文言の `warnings[]` (配列) とは形が異なる。
@@ -162,29 +162,29 @@ P0/P1/P2 集計は末尾「集計」節。
   allow_network = true (§3 の gate と同一規範)』)
 - 前提: multi-scope 検索 (scope S1, S2 が参加)。S1 は embedding adapter への active 承認 + 実効
   `allow_network=true`。S2 は未承認 (allow_network 未設定)。query は 2 文字以上、auto モード。
-- 操作: `kcs search "query text" --json` を実行 (S1, S2 双方が参加する検索)。
+- 操作: `kio search "query text" --json` を実行 (S1, S2 双方が参加する検索)。
 - 期待: 少なくとも 1 scope (S1) が gate を満たすため、query embedding は**送信される** (vector/hybrid
   が候補になり得る — profile 互換なら S1 の vector 検索が有効、S2 は未承認でも送信された query vector
   を用いた vector 検索に参加してよい (07 §3 「送信は 1 回であり scope 別の再送信は発生しない」に相当する
   05 §1.8 L390 の規定)。**現状**: `embedding_opt_in_for_scopes` (main.rs L8537-8544) は
-  `for exec in exec_scopes { if !persistent_network_allowed_for_kcs_dir(...) { return Ok(false) } }`
+  `for exec in exec_scopes { if !persistent_network_allowed_for_kio_dir(...) { return Ok(false) } }`
   — **1 つでも未承認 scope があれば全体が false になる AND 集約**。上記シナリオでは
   `embedding_opt_in=false` となり、`resolve_vector_availability` が `embedding_opt_in_required` で
   text fallback してしまう (S1 が承認済みでも送信されない) — spec の OR 定義と正反対の縮退。
 
-### PC5 `kcs search [--online|--offline]` フラグが存在しない [P0]
-- 正本: 05 §1.2 L78 (『`kcs search "..." [--online|--offline]` — query embedding の一時 opt-in /
+### PC5 `kio search [--online|--offline]` フラグが存在しない [P0]
+- 正本: 05 §1.2 L78 (『`kio search "..." [--online|--offline]` — query embedding の一時 opt-in /
   当該実行の新規送信禁止 (§1.1 consent gate)』) / 07 §3 L214-219 (『CLI フラグ --online は... 一時
   opt-in で... 永続的な承認状態を作らない... --offline は逆向きの一時上書きで、当該実行の新規送信を
   禁止する』)
 - 前提: なし。
-- 操作: `kcs search "query" --online` および `kcs search "query" --offline` を実行。
+- 操作: `kio search "query" --online` および `kio search "query" --offline` を実行。
 - 期待: `--online` は未承認 scope の gate を当該実行に限り一時的に開く (approvals[] 行は作らない、07
   §7 の log に `cli_online` として記録)。`--offline` は承認の有無に関わらず当該実行の query embedding
   送信を禁止し、auto/--hybrid は `fallback_reason="offline"` の text fallback、`--vector` 明示は
-  `KCS-E-SEARCH-VEC-UNAVAIL-001` で error (PC1 参照)。**現状**: `parse_search_args`
+  `KIO-E-SEARCH-VEC-UNAVAIL-001` で error (PC1 参照)。**現状**: `parse_search_args`
   (main.rs L5012-5141) にこの 2 フラグの分岐が無く、`grep -c '"--online"\|"--offline"'` は
-  main.rs 全体で **0 件** — 未知フラグとして `KCS-E-CONFIG-USAGE-001` (invalid usage) になる
+  main.rs 全体で **0 件** — 未知フラグとして `KIO-E-CONFIG-USAGE-001` (invalid usage) になる
   (フラグ自体が構文レベルで拒否される)。
 
 ### PC6 送信可否の最終検証は相 1 claim Tx 内 (BEGIN IMMEDIATE 保持下) での再読 [P0]
@@ -194,8 +194,8 @@ P0/P1/P2 集計は末尾「集計」節。
   (BEGIN IMMEDIATE 保持下) の最終再読... 再読後に完了した revoke の当該送信は in-flight として許容』)
 - 前提: 検索実行開始時点では embedding 承認が有効。`compute_query_embedding_page1` の
   `device_claim` (相 1、`BEGIN IMMEDIATE` Tx) 開始 **直前**に、別プロセスが
-  `kcs adapter revoke <embedding_tool_id>` を完了させる。
-- 操作: 上記タイミングで `kcs search --hybrid` を実行する (revoke が gate 判定より後、claim Tx より
+  `kio adapter revoke <embedding_tool_id>` を完了させる。
+- 操作: 上記タイミングで `kio search --hybrid` を実行する (revoke が gate 判定より後、claim Tx より
   前に完了するよう制御する結合テスト、または再読ロジックの単体テストとして「Tx 開始後に approvals[] を
   再読して boolean/行の現在値を評価する」ことを直接検証する)。
 - 期待: 相 1 claim Tx 内で approvals[]/allow_network boolean を**再読**し、revoke 後の現在値
@@ -214,7 +214,7 @@ P0/P1/P2 集計は末尾「集計」節。
   fail_behavior の対象)
 - 前提: query embedding の応答が 07 §5.3 の受入検査 (次元数不一致等の contract violation) に
   違反する。
-- 操作: `kcs search --hybrid --json` を実行。
+- 操作: `kio search --hybrid --json` を実行。
 - 期待: `fallback_reason="embedding_contract_violation"` で text fallback (auto) または
   fail_behavior 準拠 (`--hybrid`)。**現状**: `grep -n "embedding_contract_violation"` は
   main.rs 全体で 0 件 — `run_embedding_adapter` (main.rs L9368-9386 付近) の失敗は
@@ -255,11 +255,11 @@ P0/P1/P2 集計は末尾「集計」節。
   NFC 正規化を一切行わず、Unicode 空白分割によるシンプルな token 化ではない (記号のみの token は
   `is_word`/`is_cjk` どちらにも該当せず消失する)。
 
-### PC10 token 0 個の query は KCS-E-CONFIG-USAGE-001 (exit 2) — 現状は空結果 exit 0 [P0]
-- 正本: 05 §1.3 L115 (『token が 0 個の query は KCS-E-CONFIG-USAGE-001 (exit 2)』)
+### PC10 token 0 個の query は KIO-E-CONFIG-USAGE-001 (exit 2) — 現状は空結果 exit 0 [P0]
+- 正本: 05 §1.3 L115 (『token が 0 個の query は KIO-E-CONFIG-USAGE-001 (exit 2)』)
 - 前提: query = `"   "` (空白のみ、3 文字)。
-- 操作: `kcs search "   "` を実行。
-- 期待: 起動時に `KCS-E-CONFIG-USAGE-001` (exit 2) で拒否する (index/registry へのアクセス前)。
+- 操作: `kio search "   "` を実行。
+- 期待: 起動時に `KIO-E-CONFIG-USAGE-001` (exit 2) で拒否する (index/registry へのアクセス前)。
   **現状**: `parsed.query.chars().count() < 2` (main.rs L1929) の早期 return は文字数 3 の空白
   query を通過させ、`query_units` が `(vec![], vec![])` を返した結果 `build_fts_tiers` が空 tiers を
   返し、`fts_scope_search` が黙って空候補を返す — **exit 0 の空結果**になり usage error にならない
@@ -270,7 +270,7 @@ P0/P1/P2 集計は末尾「集計」節。
   場合 (例: 1〜2 文字の日本語 query — MATCH は 0 件になる)、text バックエンドは chunks.text への
   bounded LIKE スキャン (上限 = candidate_depth、instr ベースの部分一致) へ fallback する』)
 - 前提: query = `"認証"` (2 文字、CJK)。同一 scope に `"...認証仕様..."` を含む chunk が存在する。
-- 操作: `kcs search "認証" --text` を実行。
+- 操作: `kio search "認証" --text` を実行。
 - 期待: FTS5 MATCH が 0 件になるため `chunks.text` への bounded LIKE (instr) スキャンへ fallback し、
   上限 candidate_depth 件を返す (該当 chunk がヒットする)。**現状**: `parsed.query.chars().count() < 2`
   は 2 文字の `"認証"` を通過させる (`count()==2`) が、`query_units` の CJK 分岐は `run.len() >= 3`
@@ -286,7 +286,7 @@ P0/P1/P2 集計は末尾「集計」節。
 - 前提: query = `"AI 認証"` (token: `AI` (2 文字, ASCII), `認証` (2 文字, CJK) — 双方 3 文字未満だが
   トークン化上は別種)。比較のため query = `"authentication AI"` (token: `authentication` (14 文字),
   `AI` (2 文字)) も用意する。
-- 操作: それぞれ `kcs search "<query>" --text` を実行。
+- 操作: それぞれ `kio search "<query>" --text` を実行。
 - 期待: 後者は `authentication` を MATCH 式に渡し、`AI` は同一 bounded query 内で
   `instr(chunks.text, 'AI') > 0` 相当の AND 条件として LIMIT 前に適用する (`AI` は MATCH 式に
   含まれない)。前者 (両 token とも 3 文字未満) は PC11 の全短語 fallback に該当する。**現状**:
@@ -300,7 +300,7 @@ P0/P1/P2 集計は末尾「集計」節。
   distance 順で LIMIT candidate_depth を確定する (brute-force KNN)』)
 - 前提: query = `"authentication AI"` (PC12 と同一)、hybrid モード。vector 側の候補プールに `AI` を
   含まない chunk が上位に多数存在する。
-- 操作: `kcs search "authentication AI" --hybrid` を実行。
+- 操作: `kio search "authentication AI" --hybrid` を実行。
 - 期待: vector 側も `AI` の instr 述語を JOIN 済み母集合 (brute-force KNN、distance 順 LIMIT
   candidate_depth) に適用してから候補を確定する — `AI` を含まない chunk は vector 候補プールにも
   入らない。**現状**: 短語 instr 条件の実装自体が存在しない (PC11/PC12) ため、vector 側の適用点も
@@ -326,7 +326,7 @@ P0/P1/P2 集計は末尾「集計」節。
   クエリで実行コストが数十倍に膨張する (VM step 1,074 → 70,374)』)
 - 前提: `[search.rrf] candidate_depth = 500` (デフォルト 200 から変更)。大ヒット数 (1000+ 一致行) の
   query。
-- 操作: `kcs search "<高頻度語>" --text` を、candidate_depth=200 (デフォルト) と 500 の 2 通りの設定で
+- 操作: `kio search "<高頻度語>" --text` を、candidate_depth=200 (デフォルト) と 500 の 2 通りの設定で
   実行し、`EXPLAIN QUERY PLAN` の VM step 数、および実際に返る候補件数 (RRF 入力前の text_ranks 長) を
   比較する。
 - 期待: candidate_depth=500 設定時、text_ranks は最大 500 件まで返り得る (200 に固定されない)。
@@ -342,7 +342,7 @@ P0/P1/P2 集計は末尾「集計」節。
 - 前提: scope の embedding index に 5000 chunk。うち eligibility 述語 (時点条件 + config association
   + 短語 instr、PC13) を満たすのは 150 件のみで、それらの distance 順位は全体の下位 (5000 件中
   4000 位以降) に偏っている。`[search.rrf] candidate_depth = 200`。
-- 操作: `kcs search "<query>" --vector` を実行する。
+- 操作: `kio search "<query>" --vector` を実行する。
 - 期待: 述語適用**後**の母集合 (150 件) に対して distance 順 LIMIT candidate_depth (200) を確定する
   ため、150 件全てが候補になり得る。**現状**: `vector_scope_search` (main.rs L2651-2705) は
   `let k = total.min(VECTOR_KNN_MAX_K)` (`VECTOR_KNN_MAX_K = 4096`、L2612) を**述語適用前**に
@@ -358,7 +358,7 @@ P0/P1/P2 集計は末尾「集計」節。
   candidate_depth 件... を... 取得し、和集合を候補プールとする』) — PC15/PC16 の結合確認。
 - 前提: `[search.rrf] candidate_depth = 300`。text 側に 250 件、vector 側に 250 件の eligible
   候補 (重複なし) が存在する hybrid 検索。
-- 操作: `kcs search "<query>" --hybrid --json` を実行し、RRF 融合前の各バックエンド候補件数を計測する
+- 操作: `kio search "<query>" --hybrid --json` を実行し、RRF 融合前の各バックエンド候補件数を計測する
   (内部計測 API またはログ経由)。
 - 期待: text 側・vector 側とも最大 300 件まで取得される (PC15/PC16 実装後の結合的帰結)。**現状**:
   PC15/PC16 が未実装のため、text は 200 件、vector も (述語後件数次第で) 200 件で頭打ちになり得る。
@@ -374,7 +374,7 @@ P0/P1/P2 集計は末尾「集計」節。
   適用しない — pairwise similarity が全対で計算できないため。dedup のみ適用し RRF 順で返す』)
 - 前提: (a) hybrid 検索、候補 4 件全て embedding あり (通常 MMR 適用ケース)。(b) 同じ 4 件のうち
   1 件だけ embedding が無い (部分 enrichment シナリオ)。
-- 操作: `diversify_candidates` (kcs-search/src/mmr.rs) を両ケースで実行する。
+- 操作: `diversify_candidates` (kio-search/src/mmr.rs) を両ケースで実行する。
 - 期待: (a) 初回選択は `selected` 空集合のため diversity_penalty=0 として relevance 最高 (かつ
   同点なら候補順) を選ぶ。(b) 1 件でも `embedding=None` があれば MMR 自体を適用せず、
   `max_per_raw_hash` dedup のみ RRF 順に適用する。**確認**: `mmr.rs::diversify_candidates`
@@ -390,7 +390,7 @@ P0/P1/P2 集計は末尾「集計」節。
 ### PC19 ScopeCursor へ index_generation (ULID) フィールドを追加する (schema) [P0]
 - 正本: 05 §1.5 L178-180 (『scope ごとの sub-cursor は {scope_id, snapshot_commit,
   index_generation, max_rowid, max_association_rowid, chunking_config_hash, consumed}』)
-- 前提: `ScopeCursor` (`crates/kcs-search/src/cursor.rs` L29-38) の現行フィールド集合。
+- 前提: `ScopeCursor` (`crates/kio-search/src/cursor.rs` L29-38) の現行フィールド集合。
 - 操作: cursor 発行ルーチンで page 1 の `ScopeCursor` を構築する。
 - 期待: `index_generation: String` (ULID 文字列) フィールドを含む。`CursorToken::validate_contract`
   (cursor.rs L72-149) が当該フィールドの必須性・非空性を検証する。**現状**: `ScopeCursor` struct
@@ -398,32 +398,32 @@ P0/P1/P2 集計は末尾「集計」節。
   のため追加なしにこの field を含む cursor JSON は decode エラーになる — 純粋な追加が必要)。
 
 ### PC20 index_generation は列挙された 6 契機のいずれでも新規採番し、同一 SQLite Tx で回転する [P0]
-- 正本: 05 §1.5 L180-184 (『rebuild (kcs repair --rebuild-db)・purge・embedding enrichment の
+- 正本: 05 §1.5 L180-184 (『rebuild (kio repair --rebuild-db)・purge・embedding enrichment の
   finalize・index / batch finalize で chunk_fts の内容が変化した場合・tombstone lifecycle の更新...・
   および GC の shallow 化実行... の、いずれでも新規採番する ULID』) / L188 (『回転はそれを引き起こした
   SQLite 書込... と同一の SQLite Tx で行う』)
 - 前提: `index_metadata` 表 (04 §4.1) に既存の `index_generation` 値が記録されている scope。
-- 操作: パラメタ化: (a) `kcs repair --rebuild-db`、(b) `kcs purge --raw-hash X`、(c) embedding
-  enrichment のバッチ finalize、(d) `kcs index` の chunk_fts 変化を伴う再インデックス、(e) tombstone
+- 操作: パラメタ化: (a) `kio repair --rebuild-db`、(b) `kio purge --raw-hash X`、(c) embedding
+  enrichment のバッチ finalize、(d) `kio index` の chunk_fts 変化を伴う再インデックス、(e) tombstone
   の retire (lifecycle event append)、(f) GC の shallow 化実行 (Phase 4+ 実装後) — の 6 通りをそれぞれ
   単独発生させる。
 - 期待: (a)-(f) いずれの後も `index_metadata.index_generation` が新しい ULID に変わっている
   (単調カウンタではなく ULID であることも確認 — 値の形式検証)。当該書込を行う SQLite Tx がコミットする
   のと**同一 Tx** で回転していること (Tx 途中で kill してロールバックされた場合、旧 generation の
   ままであることを別途確認)。**現状**: `index_generation` という概念自体が `index_metadata` 表
-  (kcs-index/src/fts.rs) に存在しない。近い機構として `last_lifecycle_epoch` (tombstone lifecycle
+  (kio-index/src/fts.rs) に存在しない。近い機構として `last_lifecycle_epoch` (tombstone lifecycle
   専用、main.rs L2358-2367 で比較・除外にのみ使用) はあるが、rebuild/purge/embedding
   finalize/GC-shallow の 4 契機には一切連動しない。
 
-### PC21 index_generation 不一致の cursor replay は KCS-E-SEARCH-CURSOR-001 で拒否する [P0]
-- 正本: 05 §1.5 L188-191 (『replay 時に現在値と不一致なら KCS-E-SEARCH-CURSOR-001 で拒否する
+### PC21 index_generation 不一致の cursor replay は KIO-E-SEARCH-CURSOR-001 で拒否する [P0]
+- 正本: 05 §1.5 L188-191 (『replay 時に現在値と不一致なら KIO-E-SEARCH-CURSOR-001 で拒否する
   (再検索が正) — rebuild は rowid を再採番し、purge は append-only 前提を破って行を削除し、後発
   embedding は hybrid の候補集合・順位を変えるため、いずれも旧 cursor の max_rowid / consumed の
   意味を失わせる』)
 - 前提: page 1 発行後、cursor に埋め込まれた `index_generation` と異なる値になるイベント (PC20 の
   いずれか) が発生した状態で page 2 を replay する。
-- 操作: `kcs search "<query>" --cursor <token>` を実行する。
-- 期待: `KCS-E-SEARCH-CURSOR-001` (exit 2) で拒否し、`context.reason` に不一致の事実を示す
+- 操作: `kio search "<query>" --cursor <token>` を実行する。
+- 期待: `KIO-E-SEARCH-CURSOR-001` (exit 2) で拒否し、`context.reason` に不一致の事実を示す
   (例 `"index_generation_mismatch"`)。**現状**: フィールド自体が無い (PC19) ため、この検査経路も
   存在しない。
 
@@ -432,8 +432,8 @@ P0/P1/P2 集計は末尾「集計」節。
   当該 scope の HEAD tree の値... 、時点指定 = 対象 tree の値 — §1.6)。replay 時の対象値と不一致なら
   拒否する』)
 - 前提: page 1 を `--at Ca` (過去 commit、chunking_config_hash = `H_old`) で実行した後、HEAD の
-  現在の chunking config を `H_new` (`H_new != H_old`) へ変更する (`.kcs/config.toml` の
-  `[chunking]` を書き換えて `kcs index` を再実行)。
+  現在の chunking config を `H_new` (`H_new != H_old`) へ変更する (`.kio/config.toml` の
+  `[chunking]` を書き換えて `kio index` を再実行)。
 - 操作: page 1 発行後、`--cursor <token>` (selector は自動継承で `--at Ca` のまま) で page 2 を
   replay する。
 - 期待: page 2 の比較対象は「`--at Ca` という対象 tree の config 値 `H_old`」であり、HEAD の現在値
@@ -469,7 +469,7 @@ P0/P1/P2 集計は末尾「集計」節。
   vector|hybrid のとき非 null で存在する (text mode では省略)。`QueryHashInput` の
   `query_vector_digest` も同様に vector|hybrid のときのみ hash 入力に含まれる。**現状**:
   `CursorToken` (cursor.rs L49-61) にこのフィールドが無く、`QueryHashInput`
-  (kcs-search/src/query.rs L102-114) にも同様に無い — grep `"query_vector_digest"` は
+  (kio-search/src/query.rs L102-114) にも同様に無い — grep `"query_vector_digest"` は
   リポジトリ全体で 0 件。
 
 ### PC25 vector|hybrid の replay は page 1 の query vector を再利用し再 embedding しない [P0]
@@ -483,7 +483,7 @@ P0/P1/P2 集計は末尾「集計」節。
 - 操作: `--cursor <token>` で page 2 を replay する。
 - 期待: page 2 は embedding adapter を**呼び出さない** (モックが 2 回目に呼ばれないことを確認)。
   page 1 で保存済みの query vector を `embeddings(target_type='query_cache')` から読み出して
-  vector 検索に使う。**現状**: `EmbeddingTargetType::QueryCache` (kcs-index/src/embedding_store.rs
+  vector 検索に使う。**現状**: `EmbeddingTargetType::QueryCache` (kio-index/src/embedding_store.rs
   L585) は文字列変換の実装が 1 箇所あるのみで、書込・読出のいずれの経路も存在しない (grep
   `"QueryCache"` = リポジトリ全体で 1 件のみ)。`compute_query_embedding` (main.rs L9535-)
   はカーソル replay (page 2+) でも**毎回無条件に再 embedding を呼ぶ**
@@ -492,14 +492,14 @@ P0/P1/P2 集計は末尾「集計」節。
 
 ### PC26 読み出した query vector 行は sha256 を target_id と再照合し、不一致は削除 + CURSOR-001 [P1]
 - 正本: 05 §1.5 L207 (『読み出した行は vector BLOB の sha256 を target_id (= query_vector_digest) と
-  再照合する — 不一致は corruption として当該行を削除し、同じく KCS-E-SEARCH-CURSOR-001... ただし
-  kcs_format_version が自己の対応上限より新しい scope では削除を行わず CURSOR-001 へ短絡する
+  再照合する — 不一致は corruption として当該行を削除し、同じく KIO-E-SEARCH-CURSOR-001... ただし
+  kio_format_version が自己の対応上限より新しい scope では削除を行わず CURSOR-001 へ短絡する
   (書込ゼロ規範)』)
 - 前提: (a) `query_cache` 行の vector BLOB が破損 (sha256 が target_id と不一致)。(b) 同じ破損だが
-  当該 scope の `kcs_format_version` が自己の対応上限より新しい。
+  当該 scope の `kio_format_version` が自己の対応上限より新しい。
 - 操作: PC25 の replay 経路でこの行を読み出す。
-- 期待: (a) 行を削除した上で `KCS-E-SEARCH-CURSOR-001` を返す。(b) 行を**削除せず** (書込ゼロ)
-  `KCS-E-SEARCH-CURSOR-001` へ短絡する。**現状**: PC25 が未実装のため読み出し自体が発生せず、
+- 期待: (a) 行を削除した上で `KIO-E-SEARCH-CURSOR-001` を返す。(b) 行を**削除せず** (書込ゼロ)
+  `KIO-E-SEARCH-CURSOR-001` へ短絡する。**現状**: PC25 が未実装のため読み出し自体が発生せず、
   この検証・削除ロジックも存在しない。
 
 ### PC27 text mode では query_vector_digest フィールドを省略する [P2]
@@ -522,7 +522,7 @@ P0/P1/P2 集計は末尾「集計」節。
   プール末尾を終端にすると最後の alias group を取り残す)』)
 - 前提: `--all-history` + `--offset` で、末尾が 1 つの alias group (複数 path を持つ chunk) に
   かかる件数を指定する。
-- 操作: `kcs search "<query>" --all-history --offset <N> --limit <M> --json` を実行し、
+- 操作: `kio search "<query>" --all-history --offset <N> --limit <M> --json` を実行し、
   `next_cursor` の有無を確認する。
 - 期待: `next_cursor` の有無判定は `slice_end < expanded.len()` (alias 展開後の final stream 長)
   であり、alias group の途中で打ち切られない。**確認**: main.rs L1972-1984
@@ -536,7 +536,7 @@ P0/P1/P2 集計は末尾「集計」節。
   継続する (per-scope の事前 skip は global 選択を変えるため行わない)』)
 - 前提: multi-scope (S1, S2) の page 1 発行済み cursor で page 2 を replay する。S1 の consumed=3,
   S2 の consumed=5。
-- 操作: `kcs search "<query>" --cursor <token>` を実行する。
+- 操作: `kio search "<query>" --cursor <token>` を実行する。
 - 期待: 各 scope を再クエリした後、cross-scope merge → diversify → alias 展開までを再計算した
   **最終 stream** に対して、S1 由来 hit を 3 件、S2 由来 hit を 5 件 skip してから limit 件を返す
   (scope ごとの事前 SQL LIMIT OFFSET ではない)。**確認**: main.rs L1972-2040 の
@@ -550,12 +550,12 @@ P0/P1/P2 集計は末尾「集計」節。
 
 ### PC30 [確認済み] --vector 明示 + 非互換は fail_behavior に依らず error [P1]
 - 正本: 05 §1.6 L215-218 (『--at <commit> --vector: 指定時点の embedding profile が現在と互換なら
-  OK、非互換なら KCS-E-SEARCH-VEC-INCOMPAT-001 (--vector 明示時は fail_behavior に依らず error —
+  OK、非互換なら KIO-E-SEARCH-VEC-INCOMPAT-001 (--vector 明示時は fail_behavior に依らず error —
   §1.2 と同じ。text への fallback は auto / --hybrid のみ)』)
 - 前提: `[search].fail_behavior = "fallback"` (デフォルト)。`--at <commit> --vector` で対象時点の
   embedding profile が現在と非互換。
-- 操作: `kcs search "<query>" --at <commit> --vector` を実行する。
-- 期待: fail_behavior 設定に関わらず `KCS-E-SEARCH-VEC-INCOMPAT-001` で error (exit 1)。**確認**:
+- 操作: `kio search "<query>" --at <commit> --vector` を実行する。
+- 期待: fail_behavior 設定に関わらず `KIO-E-SEARCH-VEC-INCOMPAT-001` で error (exit 1)。**確認**:
   `resolve_search_mode` (main.rs L1247-1262) の `SearchMode::Vector` 分岐は fail_behavior を
   一切参照せず、非互換なら常に `vector_unavailable_error()` を返す構造であることを確認済み — この
   部分は新旧 spec で変わらず適合。回帰確認のみを目的とした契約として固定する。
@@ -566,7 +566,7 @@ P0/P1/P2 集計は末尾「集計」節。
   対象 tree の値、--all-history / --include-deleted は各 binding tree の値で判定する』)
 - 前提: PC22 と同一シナリオの単純版 — `--at Ca` (config = `H_old`) 検索、現在の config.toml は
   `H_new`。
-- 操作: `kcs search "<query>" --at Ca --text` を実行する。
+- 操作: `kio search "<query>" --at Ca --text` を実行する。
 - 期待: `chunk_config_generations.chunking_config_hash = H_old` の association を持つ chunk のみを
   対象とする (現在値 `H_new` との照合ではない)。**現状**: `search_one_scope_inner` L2465-2467/L2492
   (fts_scope_search 呼出時の `chunking_config_hash` 引数) が常に `read_chunking_config(&repo)`
@@ -583,7 +583,7 @@ P0/P1/P2 集計は末尾「集計」節。
 - 前提: `--at Cv1` (config association が一切無い v1 tree 由来 commit)。当該 chunk には
   `chunking_config_hash = Hx` (introduction_commit = Ca, ancestor of Cv1) と `Hy`
   (introduction_commit = Cb, ancestor of Cv1) の 2 association があり、`Hx < Hy` (byte 順)。
-- 操作: `kcs search "<query>" --at Cv1 --text` を実行する。
+- 操作: `kio search "<query>" --at Cv1 --text` を実行する。
 - 期待: `Hx` (byte 順最小) を決定的に代用して対象とする。association が 0 件の場合は空集合を返し、
   応答に注記 (`fallback_reason` 相当のフィールド) を付す。**現状**: v1 tree 用の代用ロジックは
   grep 0 件 — 未実装 (U69 のこの部分は「部分」ではなく実質「未実装」)。
@@ -592,7 +592,7 @@ P0/P1/P2 集計は末尾「集計」節。
 - 正本: 05 §1.6 L238 (『--all-history / --include-deleted は各 binding tree の値で判定する』)
 - 前提: `--all-history` 検索で、binding A (commit Ca, config `Hx`) と binding B (commit Cb, config
   `Hy`, `Hx != Hy`) が同一検索に含まれる。
-- 操作: `kcs search "<query>" --all-history --text` を実行する。
+- 操作: `kio search "<query>" --all-history --text` を実行する。
 - 期待: binding A は `Hx` で、binding B は `Hy` でそれぞれ独立に config フィルタを適用する (単一の
   グローバル値ではない)。**現状**: `fts_scope_search`/`vector_scope_search` は呼出全体で単一の
   `chunking_config_hash: &str` パラメータしか受け取らない構造 (main.rs L2797-2800,
@@ -603,17 +603,17 @@ P0/P1/P2 集計は末尾「集計」節。
 
 ## I. HEAD 不在 scope の取り扱い (05 §1.6 / 02-philosophy.md §11)
 
-### PC34 単独 scope + HEAD 不在 (bare モード) は KCS-E-INDEX-REBUILDING-001 / exit 3、cursor 発行なし [P0]
+### PC34 単独 scope + HEAD 不在 (bare モード) は KIO-E-INDEX-REBUILDING-001 / exit 3、cursor 発行なし [P0]
 - 正本: 05 §1.6 L241 (『HEAD 不在 (初回 auto snapshot 前・snapshot finalize 未完) の scope は index
-  未完了として扱う — 検索は当該 scope を KCS-E-INDEX-REBUILDING-001 で excluded_scopes に計上し
+  未完了として扱う — 検索は当該 scope を KIO-E-INDEX-REBUILDING-001 で excluded_scopes に計上し
   (単独 scope なら exit 3)、cursor は発行しない』)
-- 前提: `.kcs init` 直後、`kcs index` 未実行 (HEAD ref 不在) の単独 scope。`--scope .` で
+- 前提: `.kio init` 直後、`kio index` 未実行 (HEAD ref 不在) の単独 scope。`--scope .` で
   bare (--at なし) 検索。
-- 操作: `kcs search "<query>" --scope .` を実行する。
-- 期待: `KCS-E-INDEX-REBUILDING-001` (exit 3)、`next_cursor` は発行されない。**現状**:
+- 操作: `kio search "<query>" --scope .` を実行する。
+- 期待: `KIO-E-INDEX-REBUILDING-001` (exit 3)、`next_cursor` は発行されない。**現状**:
   `search_one_scope_inner` L2316-2319 は HEAD 不在を `ScopeSearchError::Excluded("not_indexed")`
   として返し、この理由は `history_plan_error`/exit 分割ロジック (main.rs L1748-1891) のどの
-  特別分岐にも該当せず、汎用 `scope_all_failed_error` (`KCS-E-SEARCH-SCOPE-ALL-FAILED-001`,
+  特別分岐にも該当せず、汎用 `scope_all_failed_error` (`KIO-E-SEARCH-SCOPE-ALL-FAILED-001`,
   **exit 4**) に落ちる (L1887-1890) — spec が要求する exit 3 / INDEX-REBUILDING-001 とは
   code・exit 両方が異なる。
 
@@ -623,7 +623,7 @@ P0/P1/P2 集計は末尾「集計」節。
   HEAD 非依存に解決する』)
 - 前提: PC34 と同一 scope (HEAD 不在) だが、当該 scope に手動 commit `Ca` が存在する
   (HEAD ref だけが未設定、または壊れている状態を人工的に作る)。
-- 操作: `kcs search "<query>" --at Ca --scope .` を実行する。
+- 操作: `kio search "<query>" --at Ca --scope .` を実行する。
 - 期待: HEAD 不在でも `Ca` を対象に検索が成立する (`not_indexed`/`INDEX-REBUILDING` 除外の対象に
   ならない)。**現状**: `search_one_scope_inner` L2303-2321 は `time.selector.at()` が `Some` の
   場合 `repo.resolve_commit(operand)` を直接呼び、HEAD 参照 (`head_commit_hash()`) を経由しない
@@ -635,7 +635,7 @@ P0/P1/P2 集計は末尾「集計」節。
 - 正本: 05 §1.6 L241 (前掲) + 05 §1.8 部分失敗表 (L404-408、『一部 scope 失敗... 結果を返し
   excluded_scopes に記録 exit 3』)
 - 前提: multi-scope 検索 (S1: HEAD あり・indexed、S2: HEAD 不在)。
-- 操作: `kcs search "<query>"` (デフォルト全 scope) を実行する。
+- 操作: `kio search "<query>"` (デフォルト全 scope) を実行する。
 - 期待: S1 の結果を返し、`excluded_scopes` に `{scope_id: S2, reason: "index_rebuilding"}`
   (またはそれに相当する専用 reason) を記録、exit 3。**現状**: `not_indexed` reason
   (main.rs L2319) は `store_corruption_recovery_hint`/`index_unusable`/`store_corruption` の
@@ -656,10 +656,10 @@ P0/P1/P2 集計は末尾「集計」節。
   追記 — 04-pipeline.md §4.1)。新規の config association も同じ commit を introduction_commit として
   刻む』)
 - 前提: 新規 chunk (raw_hash=Ra) が auto snapshot 作成時に commit `Ca` で初めて公開される。
-- 操作: `kcs index` (auto snapshot 経路) を実行する。
+- 操作: `kio index` (auto snapshot 経路) を実行する。
 - 期待: `chunks` 行に `first_seen_commit=Ca` が刻まれると同時に、`chunk_publications` へ
   `(chunk_id, introduction_commit=Ca)` の行が追記される。**現状**: `chunk_publications` 表は
-  DDL・grep 双方で 0 件 (`chunks.first_seen_commit` (kcs-index/src/rows.rs L20) が単一列として
+  DDL・grep 双方で 0 件 (`chunks.first_seen_commit` (kio-index/src/rows.rs L20) が単一列として
   唯一の記録)。
 
 ### PC38 デフォルト/--at の対象は「chunk_publications のいずれかの introduction_commit が対象 commit の
@@ -671,12 +671,12 @@ ancestor-or-equal である chunk」に限る — 現状は publish 済みなら
   その子孫 commit `Cb` (`Ca` → `Cb`) の auto snapshot 時点 (`chunk_publications.introduction_commit
   = Cb` のみ、`Ca` 時点ではまだ chunk 化されていなかった、という同一 raw_hash が commit 間で
   chunking 未完了だった実運用シナリオを模擬)。
-- 操作: `kcs search "<query>" --at Ca --text` を実行する (`Ca` は `Cb` の祖先で、`Cb` 自身は
+- 操作: `kio search "<query>" --at Ca --text` を実行する (`Ca` は `Cb` の祖先で、`Cb` 自身は
   対象外)。
 - 期待: 当該 chunk は `--at Ca` の結果に**含まれない** (`introduction_commit=Cb` は `Ca` の
   ancestor-or-equal ではない — `Cb` は `Ca` の子孫)。**現状**: `fetch_live_meta`/`execute_fts_tier`
   (main.rs L2726, L2842) の条件は `c.first_seen_commit IS NOT NULL` のみであり、`--at` の対象
-  commit との ancestor 関係を一切見ない — `kcs_eligible_identity` 一時表 (PC39 参照) が
+  commit との ancestor 関係を一切見ない — `kio_eligible_identity` 一時表 (PC39 参照) が
   `(raw_hash, tool_profile_hash, gen)` の**存在**のみで判定するため、上記シナリオでは誤って
   ヒットする。
 
@@ -687,10 +687,10 @@ ancestor-or-equal である chunk」に限る — 現状は publish 済みなら
   `normalize` 済みで存在する (`search_history.rs::plan_search_history` の `TimeSelector::At`
   分岐が `entry.normalize.is_some()` のみを条件に `SearchContentKey` を作る、main.rs L216-224
   相当のロジック)。
-- 操作: `kcs search "<content-specific-token>" --at Ca --text --json` を実行する。
+- 操作: `kio search "<content-specific-token>" --at Ca --text --json` を実行する。
 - 期待 (PC38 実装後): `results` は空 (0 件)。**現状の実測期待 (回帰の可視化)**: `results` に該当
   chunk が**含まれてしまう** — `install_eligible_identities` (search_history.rs L169-196) が
-  tree の `normalize` 存在のみを鍵に `kcs_eligible_identity` を構築し、`fetch_live_meta` 等が
+  tree の `normalize` 存在のみを鍵に `kio_eligible_identity` を構築し、`fetch_live_meta` 等が
   `first_seen_commit IS NOT NULL` の bare 条件と AND するだけなので、`Cb` 時点で公開された chunk が
   `Ca` 時点の検索にも紛れ込む。本契約は PC38 の fix 前後で assert を反転させる形で保持し、fix の
   「開けた穴」再発防止 (根拠 grep 必須の教訓) に用いる。
@@ -701,10 +701,10 @@ ancestor-or-equal である chunk」に限る — 現状は publish 済みなら
   association が遡及出現することを防ぐ)』)
 - 前提: chunk `chunk_a` の config association が commit `Cc` (`introduction_commit=Cc`) で追加された
   (chunking config 変更後の再 chunk による後発 association)。`Cc` の祖先 `Ca` で検索する。
-- 操作: `kcs search "<query>" --at Ca --text` を実行する。
+- 操作: `kio search "<query>" --at Ca --text` を実行する。
 - 期待: この config association は `Ca` の時点ではまだ存在しない (`Cc` は `Ca` の子孫) ため、
   当該 association 経由での chunk ヒットは成立しない。**現状**: `chunk_config_generations`
-  DDL (kcs-index/src/fts.rs L521-527, L725-731) の列は `association_rowid, chunk_id,
+  DDL (kio-index/src/fts.rs L521-527, L725-731) の列は `association_rowid, chunk_id,
   chunking_config_hash, created_at` の 4 列のみ — `introduction_commit` 列が存在しない
   (`association_rowid <= max_association_rowid` という rowid 順序による近似はあるが、これは
   「cursor 発行後に増えた行を除く」ための境界であり、「commit 祖先関係」とは別軸)。
@@ -753,7 +753,7 @@ ancestor-or-equal である chunk」に限る — 現状は publish 済みなら
 - 前提: `--include-deleted` の補完 binding (削除済みファイルの最終版、pointer_commit=`Cdel`) が
   指す chunk の `introduction_commit` が `Cdel` の**子孫** (削除後に完了した非同期 chunk 化) である
   シナリオ。
-- 操作: `kcs search "<query>" --include-deleted --text` を実行する。
+- 操作: `kio search "<query>" --include-deleted --text` を実行する。
 - 期待: 当該 chunk は `--include-deleted` の補完結果に**含まれない** (introduction が binding
   commit の祖先でも自分自身でもないため)。**現状**: PC37-38 と同根で未実装。
 
@@ -767,17 +767,17 @@ ancestor-or-equal である chunk」に限る — 現状は publish 済みなら
 - 前提: multi-scope 検索 (S1, S2)。S1 の `--all-history` walk 対象 DAG の一部祖先 commit が
   shallow 化済み (tree 破棄) だが、S1 の walk 対象には**到達可能な非 shallow commit も存在する**
   (walk 全体が shallow なわけではない)。S2 は健全。
-- 操作: `kcs search "<query>" --all-history` を実行する。
+- 操作: `kio search "<query>" --all-history` を実行する。
 - 期待: S1 の walk は shallow 祖先を skip して継続し、到達可能な非 shallow 部分の結果は返る。
   応答全体は S1・S2 双方の結果を含み、`shallow_skipped` (S1 分) を可視化した上で **exit 3**
   (S1 が完全ではないため partial)。**現状**: `HistoryReader::read_required`
-  (kcs-core/src/history.rs L507-520) は shallow/missing object に遭遇した瞬間
-  `history_shallow_error` (`KCS-E-COMMIT-SHALLOW-001`) を `Err` として即座に伝播し、
+  (kio-core/src/history.rs L507-520) は shallow/missing object に遭遇した瞬間
+  `history_shallow_error` (`KIO-E-COMMIT-SHALLOW-001`) を `Err` として即座に伝播し、
   `history_plan_error` (main.rs L2182-2190) がこれを無条件に `ScopeSearchError::Shallow` へ
   写像する。呼出元ループ (main.rs L1679-1689) は `ScopeSearchError::Shallow` を受け取ると
   **`run_search_inner` 関数全体を即座に `return Err(...)` で終了させる** — S1 だけでなく **S2 の
   既に計算済みの健全な結果も含め、multi-scope 検索コマンド全体**が
-  `KCS-E-COMMIT-SHALLOW-001` (exit 1) で失敗する。コメント (main.rs L1680-1682) は「Only
+  `KIO-E-COMMIT-SHALLOW-001` (exit 1) で失敗する。コメント (main.rs L1680-1682) は「Only
   reachable on the cursor path」と主張するが、`TimeSelector::AllHistory` 等のフレッシュ
   (非 cursor) 経路 (main.rs L2402-2405, `history_plan_error(error, exec.from_cursor)` の
   `from_cursor` 引数は SHALLOW 分岐では使われない) からも到達することを PC47 で確認する — 影響範囲は
@@ -787,20 +787,20 @@ ancestor-or-equal である chunk」に限る — 現状は publish 済みなら
 ### PC46 shallow_skipped 件数のレスポンス可視化 [P1]
 - 正本: PC45 と同一引用 (05 §1.6 L263-264)。
 - 前提: PC45 の fix 後の状態。S1 の walk で 2 件の shallow 祖先を skip した。
-- 操作: `kcs search "<query>" --all-history --json` を実行する。
+- 操作: `kio search "<query>" --all-history --json` を実行する。
 - 期待: レスポンス JSON に `shallow_skipped` (数値、または `searched_scopes[]`/
   `excluded_scopes[]` 相当の per-scope 内訳を持つ構造) が S1 について `2` を示す。
   **[解釈割れ]** 集計の置き場所 (トップレベル合算 か per-scope 内訳か) は §Q note-3 参照。
   **現状**: フィールド自体が grep 0 件 (未実装)。
 
 ### PC47 [確認済み境界] cursor replay で snapshot_commit 自体が shallow の場合は引き続き command 全体を hard-fail する [P1]
-- 正本: 05 §2.2 L541-542 (『kcs search --at <shallow-commit> と、shallow 化 commit を snapshot と
-  する cursor の再計算も KCS-E-COMMIT-SHALLOW-001 で失敗する (tree 全体を要するため)』) / 05 §1.8
+- 正本: 05 §2.2 L541-542 (『kio search --at <shallow-commit> と、shallow 化 commit を snapshot と
+  する cursor の再計算も KIO-E-COMMIT-SHALLOW-001 で失敗する (tree 全体を要するため)』) / 05 §1.8
   L479 (『cursor 中の snapshot_commit が shallow 化済み... の場合、cursor の再計算は
-  KCS-E-COMMIT-SHALLOW-001 で失敗する... cursor なしの再検索を案内する』)
+  KIO-E-COMMIT-SHALLOW-001 で失敗する... cursor なしの再検索を案内する』)
 - 前提: page 1 発行済み cursor の `snapshot_commit` 自体が (page 1 発行後に) shallow 化された。
 - 操作: `--cursor <token>` で page 2 を replay する。
-- 期待: **command 全体**が `KCS-E-COMMIT-SHALLOW-001` (exit 1) で hard-fail する (PC45 の
+- 期待: **command 全体**が `KIO-E-COMMIT-SHALLOW-001` (exit 1) で hard-fail する (PC45 の
   「skip して継続」規則の対象外 — snapshot_commit そのものが shallow の場合は tree 全体が必要な
   ため代替不能)。**現状**: main.rs L1679-1689 のこの経路は spec と一致 (確認済み)。PC45 の
   fix がこの cursor 経路の hard-fail を壊さないことを結合テストとして固定する (PC45 が「fresh
@@ -819,13 +819,13 @@ ancestor-or-equal である chunk」に限る — 現状は publish 済みなら
   separator 除去、(4) symlink 解決 (realpath) の順で正規化する。比較は byte 単位』)
 - 前提: (a) `--scope /work/a` (単独、`--descendants` なし)。(b) `--scope /work/a --descendants`
   で registry に `/work/a` と `/work/ab` の 2 scope が存在する。
-- 操作: (a)(b) それぞれで `kcs search "<query>"` を実行する。
+- 操作: (a)(b) それぞれで `kio search "<query>"` を実行する。
 - 期待: (a) `/work/a` の scope のみが対象になる (前方一致で `/work/ab` 等を誤って含めない)。(b)
   `/work/a` (self) と `/work/a/...` 配下のみが対象になり、`/work/ab` は対象外。**確認**: (a) は
   `enumerate_scope_targets` の非 `--descendants` 分岐 (main.rs L5333) が `scope_target(&root)`
-  経由で `Repository::open_for_search` (kcs-core/src/scope.rs L315-328) を直接呼び、内部で
+  経由で `Repository::open_for_search` (kio-core/src/scope.rs L315-328) を直接呼び、内部で
   `path.canonicalize()` (絶対化+lexical解決+symlink解決を realpath として一括実行) してから
-  当該パス**そのもの**の `.kcs` を開く構造のため、registry 上の前方一致を経由する余地が構造的に
+  当該パス**そのもの**の `.kio` を開く構造のため、registry 上の前方一致を経由する余地が構造的に
   無く「完全一致」が自明に成立する。(b) は `registry_targets_under`
   (main.rs L5396-5403) が Rust 標準 `Path::starts_with` (path-component 単位の比較で
   `/work/a` と `/work/ab` を混同しない) を用いており適合。回帰確認のみを目的とした契約として
@@ -840,11 +840,11 @@ ancestor-or-equal である chunk」に限る — 現状は publish 済みなら
   [search] 実効値 (default_mode / rrf / diversify / candidate_depth / fail_behavior) は user
   config (device 層) を用いる — folder 値は --scope 単一指定時のみ適用する (scope 間で異なる
   folder 値の統合は定義しない』)
-- 前提: カレントディレクトリの scope `S_cwd` の `.kcs/config.toml` に
-  `[search] default_mode = "text"` が明示設定されている。`~/.config/kcs/config.toml`
+- 前提: カレントディレクトリの scope `S_cwd` の `.kio/config.toml` に
+  `[search] default_mode = "text"` が明示設定されている。`~/.config/kio/config.toml`
   (user/device 層) には `[search] default_mode = "hybrid"`。デフォルト (`--scope` 省略、全 scope
   対象) で検索する。
-- 操作: `kcs search "<query>" --json` (CWD = `S_cwd`、`--scope` 省略) を実行する。
+- 操作: `kio search "<query>" --json` (CWD = `S_cwd`、`--scope` 省略) を実行する。
 - 期待: multi-scope (全 scope 対象) のため、実効 `default_mode` は **user 層の `"hybrid"`**
   (`S_cwd` の folder 値 `"text"` は使われない)。**現状**: `effective_search_config`/
   `effective_search_tuning` (main.rs L5169-5298) は `run_search_inner` の先頭
@@ -857,7 +857,7 @@ ancestor-or-equal である chunk」に限る — 現状は publish 済みなら
 ### PC50 単独 `--scope .` (当該 1 scope のみ) は folder 値を適用してよい [P1]
 - 正本: PC49 と同一引用 (『folder 値は --scope 単一指定時のみ適用する』)。
 - 前提: PC49 と同一 config だが、`--scope .` (単独、`--descendants` なし) を明示する。
-- 操作: `kcs search "<query>" --scope . --json` を実行する。
+- 操作: `kio search "<query>" --scope . --json` を実行する。
 - 期待: `S_cwd` の folder 値 `"text"` が適用される (単独 scope 指定なので folder 値を使ってよい)。
   **現状**: 単独 scope の場合、結果的に `effective_search_config(&repo)` が対象とする scope
   (`S_cwd`) と実行対象 scope が一致するため、**この特定ケースに限っては現状のロジックでも
@@ -876,7 +876,7 @@ ancestor-or-equal である chunk」に限る — 現状は publish 済みなら
 - 前提: 同一 query・同一 scope 集合で `fail_behavior` のみを `"fallback"` → `"warn"` に変更する。
 - 操作: 両設定でそれぞれ page 1 を発行し、`query_hash` を比較する。
 - 期待: `query_hash` は不変 (fail_behavior の変更だけでは cursor が invalid にならない)。
-  **確認**: `QueryHashInput` (kcs-search/src/query.rs L102-114) のフィールド集合に
+  **確認**: `QueryHashInput` (kio-search/src/query.rs L102-114) のフィールド集合に
   `fail_behavior` が含まれないことを確認済み — 回帰確認のみを目的とした契約として固定する。
 
 ---
@@ -885,11 +885,11 @@ ancestor-or-equal である chunk」に限る — 現状は publish 済みなら
 
 ### PC52 --vector 明示時、一部 scope が profile 非互換なら当該 scope のみ excluded_scopes へ除外する (fallback しない) [P0]
 - 正本: 05 §1.8 L390 (『--vector 明示時は fallback しない — profile 不一致の scope を
-  KCS-E-SEARCH-VEC-INCOMPAT-001 の excluded_scopes として除外し、全 scope 除外なら error — §1.2 の
+  KIO-E-SEARCH-VEC-INCOMPAT-001 の excluded_scopes として除外し、全 scope 除外なら error — §1.2 の
   「失敗時は error」と同じ』)
 - 前提: multi-scope (S1: profile 互換、S2: profile 非互換)。
-- 操作: `kcs search "<query>" --vector` を実行する。
-- 期待: S2 のみ `excluded_scopes` (`reason` に `KCS-E-SEARCH-VEC-INCOMPAT-001` 相当を記録) に
+- 操作: `kio search "<query>" --vector` を実行する。
+- 期待: S2 のみ `excluded_scopes` (`reason` に `KIO-E-SEARCH-VEC-INCOMPAT-001` 相当を記録) に
   除外し、S1 の vector 結果を返す (exit 3、partial)。**現状**: `resolve_vector_availability`
   (main.rs L1167-1207) は `exec_scopes` 全体を単一ループで走査して**1 つの**
   `VectorAvailability` を返す構造 (`any_incompatible || (any_compatible && any_absent)` の
@@ -898,25 +898,25 @@ ancestor-or-equal である chunk」に限る — 現状は publish 済みなら
   error** になる。per-scope 除外という概念がこの関数の粒度に存在しない (scope 単位でなく
   「検索全体」単位の判定)。
 
-### PC53 kcs_format_version が対応上限より新しい scope は KCS-E-STORE-VERSION-001 で除外し書込ゼロ [P0]
-- 正本: 05 §1.8 L390 (『kcs_format_version が自己の対応上限より新しい scope も同様に
-  excluded_scopes として除外する (KCS-E-STORE-VERSION-001 を fallback_reason に記録・当該 scope
+### PC53 kio_format_version が対応上限より新しい scope は KIO-E-STORE-VERSION-001 で除外し書込ゼロ [P0]
+- 正本: 05 §1.8 L390 (『kio_format_version が自己の対応上限より新しい scope も同様に
+  excluded_scopes として除外する (KIO-E-STORE-VERSION-001 を fallback_reason に記録・当該 scope
   へは query_cache を含む一切の書込を行わない — 10-operations.md §12.5)』)
-- 前提: multi-scope (S1: 通常, S2: `kcs_format_version` が自己の対応上限より新しい)。
-- 操作: `kcs search "<query>" --hybrid` を実行する (S2 は vector page 1 の query_cache 書込対象に
+- 前提: multi-scope (S1: 通常, S2: `kio_format_version` が自己の対応上限より新しい)。
+- 操作: `kio search "<query>" --hybrid` を実行する (S2 は vector page 1 の query_cache 書込対象に
   なり得る状況)。
-- 期待: S2 は `KCS-E-STORE-VERSION-001` で `excluded_scopes` へ除外され、S2 の `.kcs` へは
+- 期待: S2 は `KIO-E-STORE-VERSION-001` で `excluded_scopes` へ除外され、S2 の `.kio` へは
   (query_cache を含め) 一切の書込が発生しない。S1 の結果は返る (exit 3)。**現状**: grep
-  `"KCS-E-STORE-VERSION-001"` はリポジトリ全体で 0 件 — `kcs_format_version` の対応上限チェック
+  `"KIO-E-STORE-VERSION-001"` はリポジトリ全体で 0 件 — `kio_format_version` の対応上限チェック
   自体が検索経路に存在しない。
 
 ### PC54 全 scope が STORE-VERSION 除外なら exit 8 (SCOPE-ALL-FAILED より優先) [P0]
 - 正本: 05 §1.8 L390-391 (『全 scope が STORE-VERSION 除外なら command は
-  KCS-E-STORE-VERSION-001 / exit 8 を返す (SCOPE-ALL-FAILED (3/4) より優先 — REBUILDING と同型の
+  KIO-E-STORE-VERSION-001 / exit 8 を返す (SCOPE-ALL-FAILED (3/4) より優先 — REBUILDING と同型の
   昇格）』) / 06 §7 L330 (`8 incompatible profile / format version`)
-- 前提: multi-scope (S1, S2 とも `kcs_format_version` が対応上限より新しい)。
-- 操作: `kcs search "<query>"` を実行する。
-- 期待: `KCS-E-STORE-VERSION-001` (exit 8) — 汎用 `KCS-E-SEARCH-SCOPE-ALL-FAILED-001` (exit 3/4)
+- 前提: multi-scope (S1, S2 とも `kio_format_version` が対応上限より新しい)。
+- 操作: `kio search "<query>"` を実行する。
+- 期待: `KIO-E-STORE-VERSION-001` (exit 8) — 汎用 `KIO-E-SEARCH-SCOPE-ALL-FAILED-001` (exit 3/4)
   にならない。**現状**: PC53 が未実装のため、この昇格分岐も存在しない (main.rs L1748-1891 の
   昇格チェック列 `all_purge_journal_active`/`all_rebuilding`/`index_unusable`/
   `store_corruption` のいずれにも STORE-VERSION 相当が無い)。
@@ -924,24 +924,24 @@ ancestor-or-equal である chunk」に限る — 現状は publish 済みなら
 ### PC55 全 scope 同一理由除外の一般昇格規則 (VERSION→8・REBUILDING→3・INCOMPAT→8・journal→3・DUP→3) [P0]
 - 正本: 05 §1.8 L391-392 (『全 scope の除外理由が同一 code の場合、command は当該 code とその単独
   実行時の exit を返す (一般規則) — VERSION → exit 8・REBUILDING → exit 3・INCOMPAT → exit 8・
-  journal (KCS-E-PURGE-JOURNAL-ACTIVE-001) → exit 3・DUP → exit 3 (ユーザーの dedupe 後に回復可能
+  journal (KIO-E-PURGE-JOURNAL-ACTIVE-001) → exit 3・DUP → exit 3 (ユーザーの dedupe 後に回復可能
   — 08-evidence-pointer-spec.md §4.3 の registry_duplicate = 3 と同一分類)』)
 - 前提: パラメタ化。全 scope (S1, S2) が同一理由で除外される 5 パターン: (a) VERSION, (b)
   REBUILDING (既存 `all_rebuilding` 分岐で確認済み — 回帰境界として含める), (c) INCOMPAT
-  (`--vector` 明示、全 scope 非互換), (d) journal (`KCS-E-PURGE-JOURNAL-ACTIVE-001`、既存
-  `all_purge_journal_active` 分岐で確認済み), (e) DUP (`KCS-E-REGISTRY-DUP-001` 相当、同一
+  (`--vector` 明示、全 scope 非互換), (d) journal (`KIO-E-PURGE-JOURNAL-ACTIVE-001`、既存
+  `all_purge_journal_active` 分岐で確認済み), (e) DUP (`KIO-E-REGISTRY-DUP-001` 相当、同一
   scope_id の重複 live clone)。
-- 操作: 各パターンで `kcs search "<query>"` (該当モード) を実行する。
+- 操作: 各パターンで `kio search "<query>"` (該当モード) を実行する。
 - 期待: (a)→exit 8, (b)→exit 3 [確認済み], (c)→exit 8, (d)→exit 3 [確認済み], (e)→exit 3。
   **現状**: (b)(d) は main.rs L1756-1786 に既存実装があり適合 (確認済み・回帰対象として含める)。
   (a)(c)(e) は対応する除外理由・昇格分岐が存在しない (PC53, PC52, および DUP 除外自体が検索経路に
-  無い — grep `"KCS-E-REGISTRY-DUP-001"` は main.rs で 0 件)。
+  無い — grep `"KIO-E-REGISTRY-DUP-001"` は main.rs で 0 件)。
 
 ### PC56 混在理由の優先順位: VERSION → journal → DUP → REBUILDING [P1]
 - 正本: 06 §7 L364 (『優先順位は VERSION → journal → DUP → REBUILDING (10 §3)。05 §2.6・08 §3.1』)
 - 前提: multi-scope (S1: VERSION 除外理由, S2: REBUILDING 除外理由) — 異なる 2 理由が混在するが、
   優先順位表に載る 2 者。
-- 操作: `kcs search "<query>"` を実行する。
+- 操作: `kio search "<query>"` を実行する。
 - 期待: 優先順位表の並びに従い、**VERSION が REBUILDING より優先**するため、この混在は「同一理由
   昇格」ではなく通常は PC57 の「混在時分割」則が適用されるはずだが、優先順位表の存在は「昇格判定
   そのものを行う前に、複数の同時該当し得る特別理由がある場合にどちらの特別分類を先に評価するか」を
@@ -961,13 +961,13 @@ ancestor-or-equal である chunk」に限る — 現状は publish 済みなら
 - 前提: multi-scope 3 scope。(a) S1=REBUILDING (retryable), S2=store_corrupt (permanent),
   S3=timeout (retryable) の混在。(b) S1=store_corrupt, S2=snapshot_shallow の全 permanent 混在
   (既存 `store_corruption` 分岐で確認済みの境界)。
-- 操作: 各パターンで `kcs search "<query>"` を実行する。
+- 操作: 各パターンで `kio search "<query>"` を実行する。
 - 期待: (a) retryable (REBUILDING, timeout) を含むため **exit 3**。(b) 全 permanent のため
   **exit 4** [確認済み — main.rs L1828-1834 の `store_corruption` 集約が該当]。**現状**: (a)
   のような「retryable と permanent が混在」する場合の明示的な分割ロジックが
   `run_search_inner` (main.rs L1748-1891) に存在せず、どの特別集約 (`all_rebuilding`,
   `index_unusable`, `store_corruption`) にも該当しないため最終フォールバックの
-  `scope_all_failed_error` (`KCS-E-SEARCH-SCOPE-ALL-FAILED-001`) に落ちるが、その関数
+  `scope_all_failed_error` (`KIO-E-SEARCH-SCOPE-ALL-FAILED-001`) に落ちるが、その関数
   (main.rs L3335 付近) が retryable/permanent を判別して exit 3/4 を分割しているかは
   未確認 — 少なくとも VERSION/DUP を交えた混在ケースは対応する除外理由自体が無い (PC53, 55(e))
   ため機械的に検証不能。
@@ -976,7 +976,7 @@ ancestor-or-equal である chunk」に限る — 現状は publish 済みなら
 - 正本: 05 §1.8 L390 (『embedding 承認の consent gate (§1.1) は送信 gate であり per-scope の除外
   条件ではない — 承認ゼロなら検索全体が text fallback (excluded_scopes には計上しない)』)
 - 前提: multi-scope (S1, S2 とも embedding 承認ゼロ)。
-- 操作: `kcs search "<query>"` (auto) を実行する。
+- 操作: `kio search "<query>"` (auto) を実行する。
 - 期待: 検索全体が text fallback (`fallback_reason="embedding_not_authorized"`) になり、
   `excluded_scopes` は空 (S1, S2 のどちらも除外理由として計上されない — 両 scope の text 結果は
   通常どおり返る)。**確認**: `embedding_opt_in` (main.rs L1501-1504) は `resolve_vector_availability`
@@ -986,15 +986,15 @@ ancestor-or-equal である chunk」に限る — 現状は publish 済みなら
 
 ---
 
-## O. `kcs search --at` の multi-scope 制約新設 (06-cli-spec.md §3)
+## O. `kio search --at` の multi-scope 制約新設 (06-cli-spec.md §3)
 
 ### PC59 `--at` は `--scope` 単一指定を必須とする — `--scope` 省略 (デフォルト全 scope) はエラー [P0]
-- 正本: 06 §3 L226-227 (『`kcs search "..." --at <commit> --scope <path>` — --at は --scope
+- 正本: 06 §3 L226-227 (『`kio search "..." --at <commit> --scope <path>` — --at は --scope
   単一指定を必須とする (独立 DAG の multi-scope に単一 commit は適用不能 — 05 §1.6)』) / 05 §1.6
-  統合要約 (spec-gap U77: 『kcs search --at <commit> に --scope 単一指定必須の制約を新設する』)
+  統合要約 (spec-gap U77: 『kio search --at <commit> に --scope 単一指定必須の制約を新設する』)
 - 前提: registry に複数 scope が登録されている。
-- 操作: `kcs search "<query>" --at <commit>` (`--scope` 省略) を実行する。
-- 期待: `KCS-E-CONFIG-USAGE-001` (exit 2、invalid usage) — 「`--at` は `--scope` 単一指定を要する」
+- 操作: `kio search "<query>" --at <commit>` (`--scope` 省略) を実行する。
+- 期待: `KIO-E-CONFIG-USAGE-001` (exit 2、invalid usage) — 「`--at` は `--scope` 単一指定を要する」
   旨のメッセージ。**現状**: `parse_search_args` (main.rs L5012-5141) に `--at` と `scope`/
   `descendants`/`all_scopes` を関連付ける検証が無く、`enumerate_scope_targets` は `--scope` 省略時
   そのまま全 scope を列挙し (main.rs L5340-5346)、各 scope が `--at` の commit をそれぞれ独立に
@@ -1006,7 +1006,7 @@ ancestor-or-equal である chunk」に限る — 現状は publish 済みなら
 - 前提: (a) `--at <commit> --scope /work/a --descendants` (`/work/a` 配下に複数 scope)。(b)
   `--at <commit> --scope /work/a` (`--descendants` なし、単一 scope)。
 - 操作: (a)(b) それぞれ実行する。
-- 期待: (a) は `KCS-E-CONFIG-USAGE-001` (exit 2)。(b) は正常に単一 scope へ解決される (PC30 等
+- 期待: (a) は `KIO-E-CONFIG-USAGE-001` (exit 2)。(b) は正常に単一 scope へ解決される (PC30 等
   既存の `--at` 単体契約と整合)。**現状**: (a) も (b) と同様に usage error にならず、
   `--descendants` で複数解決された各 scope に対して `--at` がそれぞれ独立に適用される
   (バリデーション自体が存在しないため)。
@@ -1023,12 +1023,12 @@ ancestor-or-equal である chunk」に限る — 現状は publish 済みなら
   到達不能な chunk と embedding 課金を生むだけになる』
 - 前提: HEAD tree に `path_a` (raw_hash=Ra) が存在する。過去 commit `Cold` (HEAD の祖先、現在の
   HEAD tree には存在しない) にのみ `path_b` (raw_hash=Rb, 別内容) が存在した。chunking config を
-  変更し `kcs index` (rebuild 経路) を実行する。
+  変更し `kio index` (rebuild 経路) を実行する。
 - 操作: rebuild 後、新 chunking_config_hash に対する `chunk_config_generations` association が
   `Ra` 由来 chunk と `Rb` 由来 chunk のそれぞれに作られたかを検査する。
 - 期待: `Ra` (HEAD 参照) には新 config の association が作られる。`Rb` (HEAD 非参照、過去 commit
   のみ) には作られない。**現状**: `retained_history_instances` (historical_reindex.rs L97-207) は
-  `HistoryReader::new(kcs_dir).all_parents(head)` (main.rs L3937, L9771 から呼出) で
+  `HistoryReader::new(kio_dir).all_parents(head)` (main.rs L3937, L9771 から呼出) で
   **全履歴**の normalized instance を対象化しており、HEAD tree 限定のフィルタが存在しない —
   `Rb` にも新 config の association が作られ、到達不能な embedding タスクが生成される。
 
@@ -1046,7 +1046,7 @@ ancestor-or-equal である chunk」に限る — 現状は publish 済みなら
   (H 領域 U69/U71)』) — U145 と U69 (PC32) の整合性確認。
 - 前提: PC61 実装後 (`Rb` に新 config association が作られない状態)。`Rb` を含む過去 commit
   `Cold` に対し `--at Cold` で検索する。
-- 操作: `kcs search "<query>" --at Cold --text` を実行する。
+- 操作: `kio search "<query>" --at Cold --text` を実行する。
 - 期待: `Rb` は新 config の association を持たないため、PC32 の「config 未記録扱い→
   ancestor-or-equal introduction の byte 順最小代用」規則で解決される (search が空振りにならない
   — U145 による再 chunk 対象縮小が、U69 の代用規則と組み合わさって初めて「履歴 instance も検索
@@ -1139,7 +1139,7 @@ eval M3-2/M3-3 (09 §4.3 Recall@10 >= 0.8) の失敗 14 件が全て次の 2 構
   U68→PC28, U73→PC48, U76→PC29 として契約 1-2 本ずつに圧縮する方針を確定)
 - **解釈が割れうる点**: 4 件 (§Q note-1〜4)。いずれも実装判断で暫定固定せず、実装時の確定待ちとして
   記録するに留めた (裁定は行っていない)
-- **対象外として明示的に切り出した項目**: `kcs restore`/`kcs view` (D 領域)、purge 機構本体 (E 領域)、
+- **対象外として明示的に切り出した項目**: `kio restore`/`kio view` (D 領域)、purge 機構本体 (E 領域)、
   Evidence Pointer 解決手順・§1.7 のレスポンス pointer 構築アルゴリズム (G 領域)、07-adapter-spec.md
   §3 の承認 publish/revoke CLI 本体 (I 領域)、cost-ledger device 行の sweep/剪定機構
   (`step4b-contract-tests-ledger.md` §H で契約済み)、GC 実行系本体 (Phase 4+)

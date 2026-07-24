@@ -4,7 +4,7 @@
 The writer intentionally supports only the ``tiny`` profile.  ``pilot`` and
 ``full`` plans are deterministic, but physical publication stays blocked
 until streaming ledger publication and pilot-derived byte/inode limits exist.
-Planned contract chunks in this module are never post-index KCS evidence.
+Planned contract chunks in this module are never post-index KIO evidence.
 """
 
 from __future__ import annotations
@@ -32,18 +32,18 @@ except ImportError:  # pragma: no cover - covered by direct-script smoke tests.
     import persona_storage as storage
 
 
-PLAN_SCHEMA = "kcs.persona.w0.generation-plan/v1"
+PLAN_SCHEMA = "kio.persona.w0.generation-plan/v1"
 PERSONA_GENERATION_PLAN_SCHEMA = (
-    "kcs.persona.w0.persona-generation-plan/v1"
+    "kio.persona.w0.persona-generation-plan/v1"
 )
-PERSONA_MANIFEST_SCHEMA = "kcs.persona.w0.persona/v1"
-CAPACITY_RECEIPT_SCHEMA = "kcs.persona.w0.capacity-receipt/v1"
-ROOT_BINDING_SCHEMA = "kcs.persona.w0.root-binding/v1"
-HISTORY_PREPARE_INTENT_SCHEMA = "kcs.persona.history-prepare-intent/v1"
+PERSONA_MANIFEST_SCHEMA = "kio.persona.w0.persona/v1"
+CAPACITY_RECEIPT_SCHEMA = "kio.persona.w0.capacity-receipt/v1"
+ROOT_BINDING_SCHEMA = "kio.persona.w0.root-binding/v1"
+HISTORY_PREPARE_INTENT_SCHEMA = "kio.persona.history-prepare-intent/v1"
 RUNTIME_DIRECTORY_ATTESTATION_SCHEMA = (
-    "kcs.persona.runtime-directory-attestation/v1"
+    "kio.persona.runtime-directory-attestation/v1"
 )
-RUNTIME_ATTESTATION_ROOT_SCHEMA = "kcs.persona.runtime-attestation-root/v1"
+RUNTIME_ATTESTATION_ROOT_SCHEMA = "kio.persona.runtime-attestation-root/v1"
 PLAN_FILE_NAME = "w0-plan.json"
 SUITE_FILE_NAME = manifest.SUITE_MANIFEST_NAME
 CAPACITY_FILE_NAME = "generation-capacity-receipt.json"
@@ -62,15 +62,15 @@ MAX_HISTORY_PREPARE_DECLARED_TOTAL_BYTES = 512 * 1024 * 1024
 MAX_HISTORY_PREPARE_RELATIVE_PATH_BYTES = 1_024
 MAX_HISTORY_PREPARE_PATH_COMPONENTS = 32
 
-SCOPE_STORE_DIRECTORY_NAME = ".kcs"
-DEVICE_STATE_DIRECTORY_NAME = ".kcs-eval-device"
-HISTORY_PREPARE_RECEIPT_DIRECTORY = ".kcs-persona-history/receipts"
-HISTORY_PREPARE_CONTROL_DIRECTORY = ".kcs-persona-history/control"
+SCOPE_STORE_DIRECTORY_NAME = ".kio"
+DEVICE_STATE_DIRECTORY_NAME = ".kio-eval-device"
+HISTORY_PREPARE_RECEIPT_DIRECTORY = ".kio-persona-history/receipts"
+HISTORY_PREPARE_CONTROL_DIRECTORY = ".kio-persona-history/control"
 RUNTIME_SCOPE_STORE_SEMANTIC_CONTRACT = (
-    "kcs.persona.scope-store-history-ready/v1"
+    "kio.persona.scope-store-history-ready/v1"
 )
 RUNTIME_DEVICE_STATE_SEMANTIC_CONTRACT = (
-    "kcs.persona.device-state-isolation/v1"
+    "kio.persona.device-state-isolation/v1"
 )
 _HISTORY_WINDOWS_RESERVED = {"con", "prn", "aux", "nul"} | {
     f"{prefix}{number}"
@@ -1099,8 +1099,8 @@ def build_history_prepare_intent(
     """Build a root-independent, read-only W0 runtime-envelope intent.
 
     Receipt/control descriptors bind an exact root-relative plain file by
-    byte length and SHA-256.  They may not be placed inside either opaque KCS
-    runtime directory.  This function plans no mutation and runs no KCS
+    byte length and SHA-256.  They may not be placed inside either opaque KIO
+    runtime directory.  This function plans no mutation and runs no KIO
     subprocess.
     """
     validate_generation_plan(plan)
@@ -1393,7 +1393,7 @@ def _root_binding(prepared, capacity_receipt, replay_id, destination):
         ),
         "persona_manifest_root_sha256": _sha256(
             manifest.canonical_json_bytes({
-                "domain": "kcs.persona.w0.persona-manifest-root/v1",
+                "domain": "kio.persona.w0.persona-manifest-root/v1",
                 "personas": persona_rows,
             })
         ),
@@ -1774,7 +1774,7 @@ def _verify_w0_immutable_content_prepared(plan, root, replay_id, prepared):
         "scope_shards": plan["totals"]["scope_shards"],
         "physical_sources": plan["totals"]["physical_sources"],
         "planned_contract_chunks": plan["totals"]["planned_contract_chunks"],
-        "actual_kcs_chunks_attested": False,
+        "actual_kio_chunks_attested": False,
         "immutable_w0_verified": True,
         "strict_full_tree_verified": False,
         "durability_reconfirmed": False,
@@ -1787,7 +1787,7 @@ def verify_w0_immutable_content(plan, root, replay_id):
 
     Extra paths are intentionally ignored here and must be checked by
     :func:`verify_history_prepare_envelope`.  This API never creates, removes,
-    rewrites, fsyncs, or invokes KCS.
+    rewrites, fsyncs, or invokes KIO.
     """
     if replay_id not in REPLAY_IDS:
         raise PersonaGenerationError(f"invalid replay id: {replay_id!r}")
@@ -1929,7 +1929,7 @@ def _verify_replay_root_prepared(
         "scope_shards": plan["totals"]["scope_shards"],
         "physical_sources": plan["totals"]["physical_sources"],
         "planned_contract_chunks": plan["totals"]["planned_contract_chunks"],
-        "actual_kcs_chunks_attested": False,
+        "actual_kio_chunks_attested": False,
         "verified": True,
     }
 
@@ -2011,7 +2011,7 @@ def _walk_history_prepare_envelope(
                             )
                         directory_inodes.add(inode)
                         actual_directories.add(relative)
-                        # KCS and device runtime formats require a semantic
+                        # KIO and device runtime formats require a semantic
                         # attestor.  Generic recursion must not legitimize an
                         # arbitrary internal tree merely because it is made of
                         # regular files and directories.
@@ -2178,12 +2178,12 @@ def verify_history_prepare_envelope(
 ):
     """Verify the exact post-W0/pre-mutation filesystem envelope read-only.
 
-    A validated intent is mandatory.  ``.kcs`` scope stores and per-device
-    ``.kcs-eval-device`` trees are opaque boundaries: without a supplied
+    A validated intent is mandatory.  ``.kio`` scope stores and per-device
+    ``.kio-eval-device`` trees are opaque boundaries: without a supplied
     read-only semantic attestor their contents are not traversed or claimed
     valid, and the result explicitly reports ``opaque_unattested``.  Unknown,
     nested managed, symlink/reparse/special, and hard-linked entries outside
-    those opaque boundaries fail closed.  This function runs no KCS process,
+    those opaque boundaries fail closed.  This function runs no KIO process,
     mutates nothing, and never marks history replay executable or history
     readiness attested.
     """
@@ -2534,7 +2534,7 @@ def main(argv=None):
                 "plan_sha256": generation_plan_sha256(plan),
                 **plan["totals"],
                 "written": written,
-                "actual_kcs_chunks_attested": False,
+                "actual_kio_chunks_attested": False,
             }
         elif args.command == "generate":
             result = generate_replay(

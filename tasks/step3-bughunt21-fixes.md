@@ -40,10 +40,10 @@ HEAD `914e569`、全 478 テスト green・clippy(--all-features)/fmt clean の�
 **エンジン**: Claude-Sonnet-C (control 実機) + オーケストレータ独立 control。**脈/型**: R20-1 の `te.path` 変更を辿って露出した「同一 chunk_id が複数 live path を持つ」空間軸の前提未検証 (fix が開ける穴 11 例目の一角)。
 
 **根本原因 (file:line)**:
-- `crates/kcs-cli/src/main.rs:7727-7748` (`live_chunks_without_embedding`) — `chunks c JOIN tree_entries te ON te.raw_hash=c.raw_hash AND te.tool_profile_hash=c.tool_profile_hash AND te.gen=c.gen` に **path 制約も `DISTINCT` も無い**。`chunk_id` は content-addressed (`crates/kcs-index/src/chunking.rs:60-77`、path を含まない) なので、同一内容が N 個の live path に存在すると 1 chunk_id が **N 行に fan-out** (各行 `te.path` のみ相違)。
-- `crates/kcs-cli/src/main.rs:7183-7189` — fan-out した同一 chunk_id の各インスタンスを `raw_path` (=各 te.path) 基準で `held`/`sendable` に**独立に**振り分ける。秘匿名インスタンス→`held`、非秘匿名インスタンス→`sendable`。
-- `crates/kcs-cli/src/main.rs:7947-7953` (`hold_secret_embedding_tasks`) が output_ref=`embedding:<chunk_id>` の Paused `secrets_tier_b_hold` タスクを作成。
-- `crates/kcs-cli/src/main.rs:7662-7674` (`embeddable_task_state`) — **真因**。`TaskStatus::Paused => override_budget || task.fallback_reason.as_deref() != Some("budget_exceeded")`。`secrets_tier_b_hold` は `"budget_exceeded"` ではないので **常に `true`** (「budget 起因以外の Paused は再送安全」というコメントが秘匿ホールドにまで誤適用)。`filter_embeddable_by_task_state` (`7637-7658`) が sendable インスタンスをこの判定に通し、送信ループが output_ref 一致で **held タスクそのものを Paused→Done に書き換えて送信**。
+- `crates/kio-cli/src/main.rs:7727-7748` (`live_chunks_without_embedding`) — `chunks c JOIN tree_entries te ON te.raw_hash=c.raw_hash AND te.tool_profile_hash=c.tool_profile_hash AND te.gen=c.gen` に **path 制約も `DISTINCT` も無い**。`chunk_id` は content-addressed (`crates/kio-index/src/chunking.rs:60-77`、path を含まない) なので、同一内容が N 個の live path に存在すると 1 chunk_id が **N 行に fan-out** (各行 `te.path` のみ相違)。
+- `crates/kio-cli/src/main.rs:7183-7189` — fan-out した同一 chunk_id の各インスタンスを `raw_path` (=各 te.path) 基準で `held`/`sendable` に**独立に**振り分ける。秘匿名インスタンス→`held`、非秘匿名インスタンス→`sendable`。
+- `crates/kio-cli/src/main.rs:7947-7953` (`hold_secret_embedding_tasks`) が output_ref=`embedding:<chunk_id>` の Paused `secrets_tier_b_hold` タスクを作成。
+- `crates/kio-cli/src/main.rs:7662-7674` (`embeddable_task_state`) — **真因**。`TaskStatus::Paused => override_budget || task.fallback_reason.as_deref() != Some("budget_exceeded")`。`secrets_tier_b_hold` は `"budget_exceeded"` ではないので **常に `true`** (「budget 起因以外の Paused は再送安全」というコメントが秘匿ホールドにまで誤適用)。`filter_embeddable_by_task_state` (`7637-7658`) が sendable インスタンスをこの判定に通し、送信ループが output_ref 一致で **held タスクそのものを Paused→Done に書き換えて送信**。
 
 **期待 vs 実際 (control 付き実機、`--send-secrets` は一度も未使用)**:
 ```
@@ -67,8 +67,8 @@ HEAD `914e569`、全 478 テスト green・clippy(--all-features)/fmt clean の�
 **エンジン**: Claude-Opus + GPT-5.5 (独立、file:line) + オーケストレータ (会計値実測)。**脈/型**: R20-2 の適用範囲の絞り漏れ — R20-2 は「retired_non_live revive が重複 output_ref を生む」1 経路だけを塞いだが「同一内容が複数 path」という別ソースは未対処。R21-1 と共通 root (JOIN fan-out)。
 
 **根本原因 (file:line)**:
-- `crates/kcs-cli/src/main.rs:7727-7748` — R21-1 と同じ path 無制約 JOIN。
-- `crates/kcs-cli/src/main.rs:7991-8004, 8024-8055` (`enqueue_embedding_tasks`) — `existing` 集合はループ前スナップショットで append ループ中に更新されない。`pending` 内の重複 chunk_id が各々 `task_store.append` → **同一 output_ref のタスク N 本**。送信ループの `plan_embed_batch` は同一バッチ内で embeddings 未書込みのため両方を send 判定 → N 回送信・N 回課金。
+- `crates/kio-cli/src/main.rs:7727-7748` — R21-1 と同じ path 無制約 JOIN。
+- `crates/kio-cli/src/main.rs:7991-8004, 8024-8055` (`enqueue_embedding_tasks`) — `existing` 集合はループ前スナップショットで append ループ中に更新されない。`pending` 内の重複 chunk_id が各々 `task_store.append` → **同一 output_ref のタスク N 本**。送信ループの `plan_embed_batch` は同一バッチ内で embeddings 未書込みのため両方を send 判定 → N 回送信・N 回課金。
 
 **期待 vs 実際 (control 実機、会計値実測)**:
 ```
@@ -87,19 +87,19 @@ HEAD `914e569`、全 478 テスト green・clippy(--all-features)/fmt clean の�
 **エンジン**: Claude-Sonnet-A + Claude-Sonnet-B + GPT-5.5 + オーケストレータ (4 エンジン収束)。**脈/型**: R20-5 の適用範囲の絞り漏れ (fix が開ける穴、dead-end を別関数に温存)。R20-5 が名指しで塞いだ dead-end が同一ラウンド内の別関数に残存。
 
 **根本原因 (file:line)**:
-- `crates/kcs-cli/src/main.rs:6412-6441` (`online_markdownize_precondition_ok`) — 最終行 `!prepare.prepared_units.is_empty()` (6441) が非空を要求。R20 以前は「テキストレイヤ有り PDF の AI 強化」限定で prepared_units は常に非空だった前提のまま。
-- `crates/kcs-cli/src/main.rs:8701-8726` (R20-5 `enqueue_online_placeholder_task` 合流) — `prepare.prepared_units.is_empty()` が**まさに**このタスクを enqueue するトリガー (スキャン PDF/画像/OOXML/binary はローカルで絶対に非空にならない)。
-- `crates/kcs-cli/src/main.rs:6003-6020` (`execute_pending_markdownize_tasks`) — precondition 失敗で adapter を一度も呼ばず `retire_online_task_reclaiming` で即 `RETIRED_NON_LIVE`・non-retryable 固定。第二ゲート `execute_online_markdownize_task` (`6493-6497`) も同前提未修正 (ゲート1で先に死ぬため現状未到達だがゲート1だけ直すとここで再死)。
-- `crates/kcs-cli/src/main.rs:2436-2444` (R20-7) — `retired_non_live` を `compute_index_status` 分母から除外するため、この恒久失敗が `enriched_ratio` に一切反映されず `enriched_ratio:1.0`/`pending_enrichment_tasks:0` の偽の健全性を報告 (完全な沈黙型)。
+- `crates/kio-cli/src/main.rs:6412-6441` (`online_markdownize_precondition_ok`) — 最終行 `!prepare.prepared_units.is_empty()` (6441) が非空を要求。R20 以前は「テキストレイヤ有り PDF の AI 強化」限定で prepared_units は常に非空だった前提のまま。
+- `crates/kio-cli/src/main.rs:8701-8726` (R20-5 `enqueue_online_placeholder_task` 合流) — `prepare.prepared_units.is_empty()` が**まさに**このタスクを enqueue するトリガー (スキャン PDF/画像/OOXML/binary はローカルで絶対に非空にならない)。
+- `crates/kio-cli/src/main.rs:6003-6020` (`execute_pending_markdownize_tasks`) — precondition 失敗で adapter を一度も呼ばず `retire_online_task_reclaiming` で即 `RETIRED_NON_LIVE`・non-retryable 固定。第二ゲート `execute_online_markdownize_task` (`6493-6497`) も同前提未修正 (ゲート1で先に死ぬため現状未到達だがゲート1だけ直すとここで再死)。
+- `crates/kio-cli/src/main.rs:2436-2444` (R20-7) — `retired_non_live` を `compute_index_status` 分母から除外するため、この恒久失敗が `enriched_ratio` に一切反映されず `enriched_ratio:1.0`/`pending_enrichment_tasks:0` の偽の健全性を報告 (完全な沈黙型)。
 
 **期待 vs 実際 (control 実機、mock/auth_error 両シナリオで adapter 未到達を確認)**:
 ```
 scan.pdf (BT無しスキャン PDF) / photo.png / DOCX を index --online → pending ready_for_online_adapter
-batch resume (KCS_TEST_MISTRAL_OCR=mock) → exit 4, tasks_executed:0, status=failed/retired_non_live, attempts=1
+batch resume (KIO_TEST_MISTRAL_OCR=mock) → exit 4, tasks_executed:0, status=failed/retired_non_live, attempts=1
 index --online → batch resume を 3 サイクル → online task 行が毎回再生成 (計 6 行)、adapter は一度も呼ばれず
 search → index_status: enriched_ratio=1.0, pending_enrichment_tasks=0 (偽の "完全 enrich 済")
 ```
-期待 = R20-5/R20-6 設計通り「非 text-native は online OCR で AI 強化」(docs/07:75, ws1c-decisions #24)。実際 = enqueue 側の穴 (R20-4/5/6) は直ったが送信側 precondition が未更新で全タスクを初回試行で永久死。スキャン PDF/画像/OOXML は Step 2 以来一度も OCR に到達せず、R20 の 340 行後もなお到達しない。`KCS_TEST_MISTRAL_OCR` を実駆動するテストがリポジトリに 1 つも無い (`rg KCS_TEST_MISTRAL_OCR --type rust` = catalog.rs の定数宣言のみ) ことが 20 ラウンド素通りの理由。
+期待 = R20-5/R20-6 設計通り「非 text-native は online OCR で AI 強化」(docs/07:75, ws1c-decisions #24)。実際 = enqueue 側の穴 (R20-4/5/6) は直ったが送信側 precondition が未更新で全タスクを初回試行で永久死。スキャン PDF/画像/OOXML は Step 2 以来一度も OCR に到達せず、R20 の 340 行後もなお到達しない。`KIO_TEST_MISTRAL_OCR` を実駆動するテストがリポジトリに 1 つも無い (`rg KIO_TEST_MISTRAL_OCR --type rust` = catalog.rs の定数宣言のみ) ことが 20 ラウンド素通りの理由。
 
 **修正案**: `online_markdownize_precondition_ok` (6441) と `execute_online_markdownize_task` (6493) の「prepared_units 空=無効」判定を、task の output_ref が online placeholder (`online:{adapter_id}`) の場合は**除外** (空は正常な「全文書 OCR 送信」シグナル)。既存の text-native チェック (6429) と hash 一致チェック (6418) で stale 検出は維持。docs 変更禁止・既存エラーコードのみ。
 
@@ -110,9 +110,9 @@ search → index_status: enriched_ratio=1.0, pending_enrichment_tasks=0 (偽の 
 **エンジン**: Claude-Opus (`.yaml/.json/Dockerfile` 送信+課金 control) + GPT-5.5 (大文字拡張子) + オーケストレータ (`README.MD` 送信+課金 5.4e-6 実測)。**脈/型**: R9-2 (text-native→OCR=routing 違反) の適用範囲の絞り漏れ。pre-existing (pre-R20 build でも同一挙動) だが R1-R20 で未報告の新規。
 
 **根本原因 (file:line)**:
-- `crates/kcs-cli/src/main.rs:8260-8262` (`is_text_native_media`) — `text/markdown|text/plain|text/x-code` の **3 MIME のみ**判定。大文字拡張子 (`media_type_for_path`/`media_type_for_cli_path` が `ext` を lowercase せず match、`.MD`/`.TXT`/`.RS` → octet-stream) や content-sniff でテキスト判定された `.yaml/.json` (application/octet-stream) は全て false。
-- `crates/kcs-cli/src/main.rs:9575` (`enqueue_online_placeholder_task`) — online OCR enqueue のゲートが `is_text_native_media(&candidate.media_type)` なので上記テキストを skip しない。
-- `crates/kcs-cli/src/main.rs:8986` — ローカル markdownize 成功 (prepared_units 非空) 後、無条件に `enqueue_online_placeholder_task` を呼ぶ。octet-stream テキストは prepared_units 非空 → R21-3 の precondition を**通過して実際に送信される** (R21-3 の binary 経路=空 prepared_units とは別)。
+- `crates/kio-cli/src/main.rs:8260-8262` (`is_text_native_media`) — `text/markdown|text/plain|text/x-code` の **3 MIME のみ**判定。大文字拡張子 (`media_type_for_path`/`media_type_for_cli_path` が `ext` を lowercase せず match、`.MD`/`.TXT`/`.RS` → octet-stream) や content-sniff でテキスト判定された `.yaml/.json` (application/octet-stream) は全て false。
+- `crates/kio-cli/src/main.rs:9575` (`enqueue_online_placeholder_task`) — online OCR enqueue のゲートが `is_text_native_media(&candidate.media_type)` なので上記テキストを skip しない。
+- `crates/kio-cli/src/main.rs:8986` — ローカル markdownize 成功 (prepared_units 非空) 後、無条件に `enqueue_online_placeholder_task` を呼ぶ。octet-stream テキストは prepared_units 非空 → R21-3 の precondition を**通過して実際に送信される** (R21-3 の binary 経路=空 prepared_units とは別)。
 
 **期待 vs 実際 (control 実機)**:
 ```
@@ -135,8 +135,8 @@ batch resume (mock) → tasks_executed, cost-ledger adapter_kind="markdown" に�
 **エンジン**: Claude-Sonnet-C (リポジトリ同梱 fixture) + Claude-Sonnet-D (自作 fixture) + オーケストレータ (mixed.pdf control)。**脈/型**: R20-4 の適用範囲の絞り漏れ (「相似形の粒度違い」— document-level `all()` vs page-level)。
 
 **根本原因 (file:line)**:
-- `crates/kcs-pipeline/src/prepare.rs:110` — `if pages.iter().all(|page| !is_probably_real_text(page)) { ...empty(OCR送り)... }`。判定が「全ページが非テキストか」の document 全体 AND ゲート。1 ページでも `is_probably_real_text` を通れば残り全ページ (ゴミ込み) がそのまま `prepared_units` に採用される。
-- `crates/kcs-pipeline/src/prepare.rs:282-293` (`is_probably_real_text`) 自体はページ単位の printable 比率判定だが、結果が個々ページの採否ではなく document 二値判定にしか使われていない。
+- `crates/kio-pipeline/src/prepare.rs:110` — `if pages.iter().all(|page| !is_probably_real_text(page)) { ...empty(OCR送り)... }`。判定が「全ページが非テキストか」の document 全体 AND ゲート。1 ページでも `is_probably_real_text` を通れば残り全ページ (ゴミ込み) がそのまま `prepared_units` に採用される。
+- `crates/kio-pipeline/src/prepare.rs:282-293` (`is_probably_real_text`) 自体はページ単位の printable 比率判定だが、結果が個々ページの採否ではなく document 二値判定にしか使われていない。
 
 **期待 vs 実際 (control 実機、offline で再現可)**:
 ```
@@ -155,15 +155,15 @@ mixed.pdf (実テキスト page:1 + ランダムバイト圧縮ストリーム p
 **エンジン**: Claude-Sonnet-B (control 実機、4 コマンド網羅) + オーケストレータ (control 実機)。**脈/型**: R20-3 の適用範囲の絞り漏れ — R20-3 は非 live 化 AuthError の reclaim を足したが、live のまま詰まる AuthError は未対処。
 
 **根本原因 (file:line)**:
-- `crates/kcs-pipeline/src/task.rs:338-345` — `retry_policy(AuthError)` = `retryable:false, max_attempts:Some(0)`。
-- `crates/kcs-cli/src/main.rs:8118-8126` (`task_retry_allowed`) — `policy.retryable` を要求するため `batch retry` から永久に対象外。
-- `crates/kcs-cli/src/main.rs:7637-7658` (`filter_embeddable_by_task_state`) → `embeddable_task_state` (`7671`) — Failed は `task_retry_due && task_retry_allowed` で `index --online` からも除外。
-- `crates/kcs-cli/src/main.rs:7991-8004` (`enqueue_embedding_tasks`) — auth_error タスクの output_ref が `existing` に含まれ、`revivable` は `RETIRED_NON_LIVE` 限定なので新規 enqueue も revive も対象外。
+- `crates/kio-pipeline/src/task.rs:338-345` — `retry_policy(AuthError)` = `retryable:false, max_attempts:Some(0)`。
+- `crates/kio-cli/src/main.rs:8118-8126` (`task_retry_allowed`) — `policy.retryable` を要求するため `batch retry` から永久に対象外。
+- `crates/kio-cli/src/main.rs:7637-7658` (`filter_embeddable_by_task_state`) → `embeddable_task_state` (`7671`) — Failed は `task_retry_due && task_retry_allowed` で `index --online` からも除外。
+- `crates/kio-cli/src/main.rs:7991-8004` (`enqueue_embedding_tasks`) — auth_error タスクの output_ref が `existing` に含まれ、`revivable` は `RETIRED_NON_LIVE` 限定なので新規 enqueue も revive も対象外。
 - reclaim: task が **live のまま Failed** なので R20-3 の非 live 化 reclaim (`reconcile_committed_embedding_tasks`/supersede/sweep) に一切触れられず、`reserved_usd` が当月 cap を永久消費。
 
 **期待 vs 実際 (control 実機、file 一切未編集)**:
 ```
-index --online (KCS_TEST_GEMINI_EMBED=auth_error) → embedding task failed/auth_error, reserved_usd=2.1375e-6, attempts=1
+index --online (KIO_TEST_GEMINI_EMBED=auth_error) → embedding task failed/auth_error, reserved_usd=2.1375e-6, attempts=1
 [資格情報修正 = mock 成功] index --online / batch retry / batch resume / repair --rebuild-db を全て試行
   → 4 通りとも task 変化なし (failed/auth_error のまま)、reserved_usd 据置、reclaim ledger 0 行
 唯一 reindex --force (破壊的全再チャンク=chunk_id 変更で非 live 化強制) だけが回復
@@ -178,9 +178,9 @@ docs/04-pipeline.md:529 は `auth_error user action required max_attempts=0` と
 
 **エンジン**: Claude-Sonnet-D (control 実機) + オーケストレータ (control 実機)。**脈/型**: R20-2 revive パターンの横展開漏れ (sendable 分岐にのみ実装、held 分岐に未展開)。
 
-**根本原因 (file:line)**: `crates/kcs-cli/src/main.rs:7947-7953` (`hold_secret_embedding_tasks`) — `existing` は status を問わず全 embedding task の output_ref を集める (`fallback_reason` フィルタなし)。対照: `enqueue_embedding_tasks` (`7995-8002`) は R19-3/R20-2 で `RETIRED_NON_LIVE` を `existing` から除外 + in-place revive を実装。この救済が sendable 分岐にしか無いため、retired_non_live 化した chunk が Tier B 名で live 復活すると、古い retired タスクが `existing` に居るせいで新規 hold タスクが作られない。
+**根本原因 (file:line)**: `crates/kio-cli/src/main.rs:7947-7953` (`hold_secret_embedding_tasks`) — `existing` は status を問わず全 embedding task の output_ref を集める (`fallback_reason` フィルタなし)。対照: `enqueue_embedding_tasks` (`7995-8002`) は R19-3/R20-2 で `RETIRED_NON_LIVE` を `existing` から除外 + in-place revive を実装。この救済が sendable 分岐にしか無いため、retired_non_live 化した chunk が Tier B 名で live 復活すると、古い retired タスクが `existing` に居るせいで新規 hold タスクが作られない。
 
-**期待 vs 実際 (control 実機)**: retired_non_live 化 (rate_limit 失敗→編集で非 live) 後、元バイト列を Tier B 名で復活 → 該当 chunk の embedding task は `failed/retired_non_live` のまま更新されず、Paused hold タスクは作られない。`index_status` は R20-7 の除外で `enriched_ratio:1.0`/`pending:0` (chunk が完全に不可視)、quarantine.jsonl の "hold" 行だけが手掛かり。秘匿送信は起きない (fail-safe) が、`kcs status` で held と可視化されるべき chunk が消える observability 欠陥。`--send-secrets` を明示すれば sendable 分岐の revive で回復するため minor。
+**期待 vs 実際 (control 実機)**: retired_non_live 化 (rate_limit 失敗→編集で非 live) 後、元バイト列を Tier B 名で復活 → 該当 chunk の embedding task は `failed/retired_non_live` のまま更新されず、Paused hold タスクは作られない。`index_status` は R20-7 の除外で `enriched_ratio:1.0`/`pending:0` (chunk が完全に不可視)、quarantine.jsonl の "hold" 行だけが手掛かり。秘匿送信は起きない (fail-safe) が、`kio status` で held と可視化されるべき chunk が消える observability 欠陥。`--send-secrets` を明示すれば sendable 分岐の revive で回復するため minor。
 
 **修正案**: `hold_secret_embedding_tasks` の `existing` を `enqueue_embedding_tasks` と同じ `.filter(|t| t.fallback_reason.as_deref() != Some(RETIRED_NON_LIVE))` でフィルタし、revivable な RETIRED_NON_LIVE タスクを Paused/`secrets_tier_b_hold` へ in-place revive する (R20-2 の revive を held 分岐へ横展開)。R21-1 の root 修正 (JOIN dedup) 後も held 分岐で独立に必要。
 
@@ -209,7 +209,7 @@ docs/04-pipeline.md:529 は `auth_error user action required max_attempts=0` と
 
 ## 据え置き (1 件)
 
-- **FlateDecode/zlib 展開の不在** (Sonnet-C): `pdf_stream_text_pages`/`pdf_literal_strings` はいずれも `String::from_utf8_lossy(生バイト)` を読み、`rg 'flate|inflate|deflate|zlib' crates/kcs-{adapter,pipeline}` = 0 件。Word/ブラウザ印刷/LaTeX 生成 PDF は content stream をほぼ FlateDecode 圧縮するため、docs/07:71 の「ローカル PDF text layer 抽出」が実運用 PDF の大多数で機能せず OCR 経路 (R21-3 修正後は正しく OCR、offline は永久 pending) へ落ちる。**correctness の主部は R21-3 (OCR 到達) で解消**、残る「ローカル無料抽出すべき」はコスト最適化/機能拡張であり R20 regression ではない (pre-existing・design)。flate 展開実装は Step 4 or 別途 enhancement として据え置き、docs 凍結解除時に「圧縮 PDF は OCR 必須」を開示検討。
+- **FlateDecode/zlib 展開の不在** (Sonnet-C): `pdf_stream_text_pages`/`pdf_literal_strings` はいずれも `String::from_utf8_lossy(生バイト)` を読み、`rg 'flate|inflate|deflate|zlib' crates/kio-{adapter,pipeline}` = 0 件。Word/ブラウザ印刷/LaTeX 生成 PDF は content stream をほぼ FlateDecode 圧縮するため、docs/07:71 の「ローカル PDF text layer 抽出」が実運用 PDF の大多数で機能せず OCR 経路 (R21-3 修正後は正しく OCR、offline は永久 pending) へ落ちる。**correctness の主部は R21-3 (OCR 到達) で解消**、残る「ローカル無料抽出すべき」はコスト最適化/機能拡張であり R20 regression ではない (pre-existing・design)。flate 展開実装は Step 4 or 別途 enhancement として据え置き、docs 凍結解除時に「圧縮 PDF は OCR 必須」を開示検討。
 
 ## 却下 (0 件)
 

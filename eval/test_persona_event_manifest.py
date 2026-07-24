@@ -254,7 +254,7 @@ class TestPersonaEventManifest(unittest.TestCase):
             if event["operation"] == "restore_to_active_scope"
         )
         self.assertEqual(
-            restore["source_command"]["kind"], "kcs_restore_path"
+            restore["source_command"]["kind"], "kio_restore_path"
         )
         self.assertEqual(
             restore["source_command"]["commit_boundary_kind"], "none"
@@ -351,7 +351,7 @@ class TestPersonaEventManifest(unittest.TestCase):
             self.assertEqual(
                 purge_boundary["command"],
                 {
-                    "kind": "kcs_purge_path",
+                    "kind": "kio_purge_path",
                     "reason": "legal",
                     "confirmation": "yes",
                 },

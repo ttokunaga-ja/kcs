@@ -31,7 +31,7 @@
 名指しした脈に本命的中。**Opus は reclaim「する」経路の cap-safe 不変条件だけを確認し reclaim「しない」退役経路 (embedding 全体) を未探索**
 (「fail-open 経路なし」は正しいが phantom 保持による false-pause を見落とし)。
 
-**根本原因**: embedding の F8 charge は送信前に `cost_ledger` へ実 charge 行を append する (`crates/kcs-cli/src/main.rs:7170`
+**根本原因**: embedding の F8 charge は送信前に `cost_ledger` へ実 charge 行を append する (`crates/kio-cli/src/main.rs:7170`
 付近、`charge_cost_ledger_under_lock` / `EMBEDDING_ADAPTER_KIND`) が、markdownize (`main.rs:5989-5998`) と違い
 task に `reserved_usd`/`reserved_month` を一切 stamp しない (`EmbeddingTransition` に予約フィールドがなく `apply_embedding_transitions`
 [`main.rs:7278-7305`] は status/fallback_reason/attempts/next_retry_at のみ書戻し、`TaskDescriptor` 既定は `reserved_*: None`
@@ -45,8 +45,8 @@ retryable Failed を Pending に戻す→次パスの reconcile が `main.rs:758
 (cost-ledger 不変) ため、retry がむしろ回収不能を確定させ markdownize (R18-2) より悪い**。
 
 **実機 (オーケストレータ独立再現・control 付き)**: `XDG_DATA_HOME`/`HOME` を都度 `mktemp -d` で隔離、scope は /tmp 配下。
-seam は init 時にも `KCS_TEST_GEMINI_EMBED` を設定 (embedding tool-lock 具現化に必要)。
-- phantom scope: `KCS_TEST_GEMINI_EMBED=rate_limit index --approve --yes --online` → embedding task
+seam は init 時にも `KIO_TEST_GEMINI_EMBED` を設定 (embedding tool-lock 具現化に必要)。
+- phantom scope: `KIO_TEST_GEMINI_EMBED=rate_limit index --approve --yes --online` → embedding task
   `status=failed reason=rate_limit reserved_usd=None` + `cost-ledger.jsonl` に `{"adapter_kind":"embedding","usd":0.000135225}`。
   文書編集 (新 chunk) + `[budget.per_adapter] embedding=0.000214` (1 doc コストの 1.5×=phantom+legit 未満) 設定 → `mock` 再 index →
   **`paused_tasks:1` (executed 0)、新 embedding task `paused budget_exceeded`**。旧 Failed(rate_limit) は放置・`cost-ledger-reclaimed.jsonl`
@@ -78,7 +78,7 @@ discriminator 2 本。
 reclaim もしない。結果、R17-3 fix 前と同じ phantom-eats-cap→誤 Pause が削除/rename/precondition 経路で生存。
 
 **実機 (オーケストレータ独立再現・control 付き)**:
-- phantom scope: doc.pdf (20KB) を `KCS_TEST_MISTRAL_OCR=rate_limit index --online` + `batch resume` →
+- phantom scope: doc.pdf (20KB) を `KIO_TEST_MISTRAL_OCR=rate_limit index --online` + `batch resume` →
   `cost-ledger.jsonl` markdown usd=0.002・task `Failed(rate_limit) reserved_usd=0.002`。**`rm doc.pdf`** + doc2.pdf (4KB) 追加
   (削除、編集ではない) + `[budget.per_adapter] markdown=0.0012` (doc2 コスト 0.0004 < cap < phantom 0.002) → `mock` index+resume →
   **doc2.pdf が `paused budget_exceeded` (tasks_executed:0)**。削除された doc.pdf の Failed(rate_limit) phantom は放置・reclaim なし。
@@ -94,19 +94,19 @@ precondition 退役 (`main.rs:5862-5882`) でも、退役対象が rate_limit/qu
 (退役 helper の共通化)。NetworkError は保守的に残す (R18-1 と同じ非対称)。回帰テスト: 削除された doc の rate_limit phantom が
 再 index/batch resume 後に reclaim され、無関係な新 doc が phantom なしで実行 (control と一致)。
 
-## R18-3 [minor] R17-3 が新設した reclaim ledger を執行ゲート (`budget_remaining_for_adapter`) には netting したが、`kcs status` / index・batch の budget 報告 (`budget_status_json` / `scope_budget_warning`) には配線し忘れた — reclaim 後も gross charge で spent/remaining/warning を表示し、Agent が budget を過小 remaining で誤監視する
+## R18-3 [minor] R17-3 が新設した reclaim ledger を執行ゲート (`budget_remaining_for_adapter`) には netting したが、`kio status` / index・batch の budget 報告 (`budget_status_json` / `scope_budget_warning`) には配線し忘れた — reclaim 後も gross charge で spent/remaining/warning を表示し、Agent が budget を過小 remaining で誤監視する
 
 **収束**: GPT-5.5 + Opus。
 
 **根本原因**: 執行ゲート `budget_remaining_for_adapter` (`main.rs:9250-9293`) は charge − reclaim の netting を行う
 (`(monthly_total(...) - reclaim_ledger.monthly_total(...)).max(0.0)`)。しかし報告系は netting しない: `budget_status_json`
-(`main.rs:7883-7888`、`kcs status` の budget / index・repair の budget) と `scope_budget_warning` (`main.rs:7927-7932`、
+(`main.rs:7883-7888`、`kio status` の budget / index・repair の budget) と `scope_budget_warning` (`main.rs:7927-7932`、
 index・batch の budget_warning) は `ledger.monthly_total` のみを読み、非 netted 値を `budget_warning` (`main.rs:7897`/`7933`) に渡す。
 reclaim 済み phantom を spend に計上し続けて remaining を過小報告し、`warn_at_percent` も取消済み phantom で誤発火し得る。
 執行は正しく netting するので exit/pause には影響せず **fail-safe (remaining を過小報告する側)** だが、R17-3 のユーザー/Agent 可視の
-狙い (phantom が cap を食わない) が status 上で成立せず、Agent が `kcs status` で budget を監視すると誤自制する。
+狙い (phantom が cap を食わない) が status 上で成立せず、Agent が `kio status` で budget を監視すると誤自制する。
 
-**実機**: OCR rate_limit phantom → 編集 supersede reclaim (reclaim ledger に 1.5e-6 書かれる) 後も `kcs status --json` の
+**実機**: OCR rate_limit phantom → 編集 supersede reclaim (reclaim ledger に 1.5e-6 書かれる) 後も `kio status --json` の
 `folder_spent_usd` が phantom 込みのまま変化しない (Opus 実機確認)。
 
 **fix 方針**: `budget_status_json` / `scope_budget_warning` の spent を `budget_remaining_for_adapter` と同じ

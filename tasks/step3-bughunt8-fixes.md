@@ -31,7 +31,7 @@ NFC/NFD 検索 (F2、**4 エンジン収束**)。catalog.rs の adapter identity
 発見: Claude-Opus / 完全再現: オーケストレータ
 
 - **根本**: offline/deterministic markdownize が毎ファイル `deterministic_baseline usd=estimate_local_baseline_cost(size)`
-  を device-global ledger に記帳 (`crates/kcs-cli/src/main.rs:5908-5915`)。`budget_remaining_for_adapter` の
+  を device-global ledger に記帳 (`crates/kio-cli/src/main.rs:5908-5915`)。`budget_remaining_for_adapter` の
   `device_spent = monthly_total(month, None)` (`main.rs:6508`) は**全 adapter_kind を合算**するため
   deterministic_baseline も cap に効く。docs/04:568「ローカル LLM 利用時は単価 0 として記録 (= cap に効かない)」に違反。
 - **再現** (隔離 tmp): cap $0.0005、`index --offline --yes` (API 非送信) → ledger `deterministic_baseline usd=0.002`
@@ -45,10 +45,10 @@ NFC/NFD 検索 (F2、**4 エンジン収束**)。catalog.rs の adapter identity
 ### F2 [major] NFC/NFD 正規化不一致で検索が silent false negative (NFD 内容が NFC クエリでヒットしない)
 発見: **4 エンジン独立収束** (オーケストレータ / GPT-5.5 / Opus / Sonnet)
 
-- **根本**: FTS 索引テキストは chunk 本文の生スライスで NFC 正規化しない (`crates/kcs-index/src/fts.rs:66` は NUL 除去のみ、
+- **根本**: FTS 索引テキストは chunk 本文の生スライスで NFC 正規化しない (`crates/kio-index/src/fts.rs:66` は NUL 除去のみ、
   正規化するのは `chunking.rs:80 slugify_heading` の見出し slug だけ)。CLI の FTS クエリ経路
   (`build_fts_tiers`/`query_units`、`main.rs:2058`/`1957`) も生クエリ。tokenizer は Trigram (Unicode 非正規化)。
-  `kcs-search/src/query.rs:85` の `.nfc()` は cursor の query_hash 専用で MATCH 構築に繋がっていない (= 存在するのに未配線)。
+  `kio-search/src/query.rs:85` の `.nfc()` は cursor の query_hash 専用で MATCH 構築に繋がっていない (= 存在するのに未配線)。
 - **再現** (隔離 tmp): 本文に NFD の "café"/"がぎぐげご" を含む doc を index → `search <NFC 形>` = **0 件**、
   `search <NFD 形>` = 1 件。ASCII 対照は正常。macOS/APFS・一部 IME・OCR/PDF 抽出由来で NFD は頻出。exit 0 で沈黙空。
 - **期待 vs 実際**: 期待 = Unicode 正準等価 (NFC/NFD) はどちらの入力形でも同一内容を検索できる。実際 = NFD 内容が NFC
@@ -62,9 +62,9 @@ NFC/NFD 検索 (F2、**4 エンジン収束**)。catalog.rs の adapter identity
 ### F7 [major] Gemini embedding が要求次元と異なる長さのベクトルを返しても無検証で永続化 → chunk が永久に KNN 検索から除外、課金済み・自己修復不能
 発見: Claude-Sonnet / stub server で再現
 
-- **根本**: `parse_embeddings` (`crates/kcs-adapter/src/gemini_embedding.rs:146-171`) は `embeddings.len() == items.len()`
+- **根本**: `parse_embeddings` (`crates/kio-adapter/src/gemini_embedding.rs:146-171`) は `embeddings.len() == items.len()`
   (件数) のみ検証、各 `values.len() == dimensions` (次元) を一切チェックしない。`write_chunk_embedding`
-  (`crates/kcs-index/src/embedding_store.rs:91-123`) は呼出元の `dimensions` (=ハードコード 768) をそのまま書き、
+  (`crates/kio-index/src/embedding_store.rs:91-123`) は呼出元の `dimensions` (=ハードコード 768) をそのまま書き、
   実 vector バイト長と突き合わせない。`link_chunk_vec` (`embedding_store.rs:128-136`) は
   `vector.len() != CHUNK_VEC_DIMENSIONS*4` なら `Ok(())` で無言スキップ (chunk_vec に入らない) が、呼出元
   `send_embed_batch` (`main.rs:4875-4916`) はこれを成功として課金・done 化。
@@ -79,7 +79,7 @@ NFC/NFD 検索 (F2、**4 エンジン収束**)。catalog.rs の adapter identity
 ### F3 [major] cost-ledger の負値/非有限 usd が無検証で、budget remaining を増やし cap を fail-open させる
 発見: GPT-5.5 / 実機確認: オーケストレータ
 
-- **根本**: `append_monthly` (`crates/kcs-pipeline/src/budget.rs:83-99`) と `monthly_total_for_adapter`
+- **根本**: `append_monthly` (`crates/kio-pipeline/src/budget.rs:83-99`) と `monthly_total_for_adapter`
   (`budget.rs:101-140` の `total += entry.usd`) が `usd` の `is_finite() && >= 0` を検証しない。JSON として読める
   負値行がそのまま合算され、`remaining = cap - spent` の spent が減って device/folder cap 超過を隠せる。
 - **実機**: ledger に `usd:5.0` と `usd:-1000.0` を注入 → status 受理・corrupt 化せず、monthly_total が負に。
@@ -88,39 +88,39 @@ NFC/NFD 検索 (F2、**4 エンジン収束**)。catalog.rs の adapter identity
 - **期待 vs 実際**: 期待 = ledger の usd は finite かつ >= 0、違反行は budget 判定から除外 or corrupt 扱い。
   実際 = 負値をそのまま計上し cap を無効化。
 - **修正**: read (`monthly_total_for_adapter`) と append (`append_monthly`) の両方で `usd.is_finite() && usd >= 0.0`
-  を必須にし、違反は `KCS-E-STORE-CORRUPT-001` 相当に分類 (または集計から除外)。
+  を必須にし、違反は `KIO-E-STORE-CORRUPT-001` 相当に分類 (または集計から除外)。
 
 ### F8 [major] device-global cost-ledger の budget check-then-append に跨り排他制御が無く、複数 scope の並行 index が月次 cap を超過できる (TOCTOU)
 発見: Claude-Sonnet / 2 scope 並行で再現
 
 - **根本**: budget 判定 → API 送信 → `append_monthly` の一連 (`main.rs:4772-4805` embedding、markdownize も同型) が
-  read-then-act。`StoreLock` は scope 単位 (`.kcs/.lock`、`scope.rs:1141`/`main.rs:421`) で、cost-ledger は
-  device-global (`main.rs:7056-7058` `$XDG_DATA_HOME/kcs/cost-ledger.jsonl`、全 scope 共有・ロック対象外)。
+  read-then-act。`StoreLock` は scope 単位 (`.kio/.lock`、`scope.rs:1141`/`main.rs:421`) で、cost-ledger は
+  device-global (`main.rs:7056-7058` `$XDG_DATA_HOME/kio/cost-ledger.jsonl`、全 scope 共有・ロック対象外)。
   scope A と B が互いの直前消費を見ずに許可判定 → 合算で cap 超過。
 - **再現** (隔離 tmp、per_adapter embedding cap 0.00006、mock): 2 scope 同時 `index --approve --online` →
   ledger 合算 0.0000756 (cap の 126%)、両 task "done"・無警告。窓は ledger サイズに依存せず常時存在。
 - **期待 vs 実際**: 期待 = device/folder/per_adapter cap を月内で絶対に超過しない。実際 = 並行 online index が合算で超過。
 - **修正**: cost-ledger の read-check-append を device-global な単一ファイルロック
-  (`$XDG_DATA_HOME/kcs/cost-ledger.lock`) で囲み、budget 判定〜append を直列化する。lock は check の直前に取得し
+  (`$XDG_DATA_HOME/kio/cost-ledger.lock`) で囲み、budget 判定〜append を直列化する。lock は check の直前に取得し
   append 後に解放 (API 送信を跨ぐと device 全体を直列化するため、送信は lock 外・append 直前に lock 下で再判定でも可。
   最小実装は「lock → 再 read → cap 判定 → append → unlock」を charge のたびに)。
 
-### F4 [minor] `kcs tag` が到達不能な ref (name=`HEAD` / `sha256:<64hex>`) を「成功」として作成する
+### F4 [minor] `kio tag` が到達不能な ref (name=`HEAD` / `sha256:<64hex>`) を「成功」として作成する
 発見: GPT-5.5 / Opus (2 エンジン) / 実機確認
 
-- **根本**: `Repository::tag()` (`crates/kcs-core/src/scope.rs:499`) は `validate_ref_operand`
+- **根本**: `Repository::tag()` (`crates/kio-core/src/scope.rs:499`) は `validate_ref_operand`
   (`scope.rs:1049`) 通過後に `refs/tags/<name>` を書くが、同 validator は `HEAD` と `sha256:<64hex>` 形を弾かない。
   `resolve_commit()` (`scope.rs:523`) は `value=="HEAD"` (:530) と `is_hash(value)` (:535) を**タグ探索より先**に
   解釈するため、その名のタグは永久に shadow (dead ref)。
-- **再現**: `kcs tag HEAD` → exit 0・`refs/tags/HEAD` 生成。`kcs tag sha256:aaaa…(64)` → exit 0 だが
-  `kcs diff sha256:aaaa… HEAD` → `KCS-E-STORE-NOT-FOUND-001` (tag は無視されハッシュ解決される)。
+- **再現**: `kio tag HEAD` → exit 0・`refs/tags/HEAD` 生成。`kio tag sha256:aaaa…(64)` → exit 0 だが
+  `kio diff sha256:aaaa… HEAD` → `KIO-E-STORE-NOT-FOUND-001` (tag は無視されハッシュ解決される)。
 - **期待 vs 実際**: 期待 = 解決不能な名前の tag 作成は拒否。実際 = 成功 JSON を返し dead ref を残す。
 - **修正**: `validate_ref_operand` (`scope.rs:1049`) に `value == "HEAD" || is_hash(value)` を拒否条件へ追加。
 
 ### F5 [minor] documented budget config `warn_at_percent` / `hard_stop` が黙殺される (doc-vs-impl 乖離)
 発見: Claude-Opus (確度 中)
 
-- **根本**: docs/04:550-551 が両キーを config 例に掲載し `BudgetConfig` (`crates/kcs-pipeline/src/budget.rs:18-19`)
+- **根本**: docs/04:550-551 が両キーを config 例に掲載し `BudgetConfig` (`crates/kio-pipeline/src/budget.rs:18-19`)
   にフィールドもあるが、`read_budget_config`/`ParsedBudgetConfig` (`budget.rs:227-292`) は `monthly_usd_cap` と
   `per_adapter` のみ抽出し両キーを参照しない。80% 警告は未実装、`hard_stop=false` も効かず常に hard pause。
 - **期待 vs 実際**: 期待 = doc 通り 80% 警告 / soft-stop。実際 = 無視。

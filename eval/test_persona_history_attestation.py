@@ -33,8 +33,8 @@ def _semantic_evidence(
         if kind == "scope_store"
         else generator.RUNTIME_DEVICE_STATE_SEMANTIC_CONTRACT
     )
-    return attestation.KcsSemanticEvidence(
-        schema=attestation.KCS_SEMANTIC_EVIDENCE_SCHEMA,
+    return attestation.KioSemanticEvidence(
+        schema=attestation.KIO_SEMANTIC_EVIDENCE_SCHEMA,
         schema_version=1,
         kind=kind,
         attestor_schema=schema,
@@ -62,7 +62,7 @@ def _scope_contract(persona_id="p01", profile="tiny", ordinal=0):
     persona = fixture_spec.get_persona(persona_id)
     scope = fixture_spec.scope_specs(persona)[ordinal]
     relative = (
-        f"devices/{persona_id}-{persona['role']}/home/{scope['relative_path']}/.kcs"
+        f"devices/{persona_id}-{persona['role']}/home/{scope['relative_path']}/.kio"
     )
     target = fixture_spec.scope_contributor_chunk_targets(
         persona, profile
@@ -106,10 +106,10 @@ def _write_owned_root_controls(root):
 
 class TestBoundedContentRoot(unittest.TestCase):
     def test_root_is_location_and_timestamp_independent_but_binds_tree_bytes(self):
-        with tempfile.TemporaryDirectory(prefix="kcs-attest-a-") as first_tmp, \
-                tempfile.TemporaryDirectory(prefix="kcs-attest-b-") as second_tmp:
-            first = Path(first_tmp) / ".kcs"
-            second = Path(second_tmp) / ".kcs"
+        with tempfile.TemporaryDirectory(prefix="kio-attest-a-") as first_tmp, \
+                tempfile.TemporaryDirectory(prefix="kio-attest-b-") as second_tmp:
+            first = Path(first_tmp) / ".kio"
+            second = Path(second_tmp) / ".kio"
             for root in (first, second):
                 (root / "objects" / "aa").mkdir(parents=True)
                 (root / "empty").mkdir()
@@ -154,7 +154,7 @@ class TestBoundedContentRoot(unittest.TestCase):
         }
         for label, build in builders.items():
             with self.subTest(label=label), tempfile.TemporaryDirectory() as temporary:
-                root = Path(temporary) / ".kcs"
+                root = Path(temporary) / ".kio"
                 root.mkdir()
                 if label == "symlink":
                     (root / "target").write_bytes(b"x")
@@ -170,7 +170,7 @@ class TestBoundedContentRoot(unittest.TestCase):
 
     def test_merkle_walk_does_not_materialize_whole_tree_json(self):
         with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary) / ".kcs"
+            root = Path(temporary) / ".kio"
             root.mkdir()
             for index in range(100):
                 (root / f"entry-{index:03d}").write_bytes(str(index).encode())
@@ -185,7 +185,7 @@ class TestBoundedContentRoot(unittest.TestCase):
 
     def test_entry_byte_and_depth_limits_are_enforced(self):
         with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary) / ".kcs"
+            root = Path(temporary) / ".kio"
             (root / "one" / "two").mkdir(parents=True)
             (root / "one" / "two" / "value").write_bytes(b"12345")
             cases = (
@@ -210,7 +210,7 @@ class TestBoundedContentRoot(unittest.TestCase):
 
     def test_direct_entry_limit_accepts_exact_cap_and_rejects_next_entry(self):
         with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary) / ".kcs"
+            root = Path(temporary) / ".kio"
             root.mkdir()
             limits = replace(
                 attestation.DEFAULT_LIMITS,
@@ -298,7 +298,7 @@ class TestBoundedContentRoot(unittest.TestCase):
     @unittest.skipIf(os.name == "nt", "POSIX safe-open flags")
     def test_missing_safe_open_flags_fail_closed(self):
         with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary) / ".kcs"
+            root = Path(temporary) / ".kio"
             root.mkdir()
             (root / "file").write_bytes(b"value")
             for flag in (
@@ -318,7 +318,7 @@ class TestBoundedContentRoot(unittest.TestCase):
     @unittest.skipIf(os.name == "nt", "POSIX descriptor semantics")
     def test_root_descriptor_is_closed_when_post_open_fstat_fails(self):
         with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary) / ".kcs"
+            root = Path(temporary) / ".kio"
             root.mkdir()
             closed = []
             real_close = os.close
@@ -342,7 +342,7 @@ class TestBoundedContentRoot(unittest.TestCase):
     @unittest.skipIf(os.name == "nt", "POSIX descriptor semantics")
     def test_root_descriptor_is_closed_on_base_exception(self):
         with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary) / ".kcs"
+            root = Path(temporary) / ".kio"
             root.mkdir()
             captured = []
             original_open = os.open
@@ -897,7 +897,7 @@ class TestRuntimeCallbackReceipt(unittest.TestCase):
             outside = trusted / "outside-store"
             outside.mkdir()
             (outside / "HEAD").write_bytes(b"outside")
-            parked = runtime.with_name(".kcs-parked")
+            parked = runtime.with_name(".kio-parked")
             descriptor = {"kind": "scope_store", "relative_path": relative}
 
             def checker(bound, _observed_descriptor, content):
@@ -1238,7 +1238,7 @@ class TestRuntimeCallbackReceipt(unittest.TestCase):
 
             with self.assertRaisesRegex(
                 attestation.PersonaHistoryAttestationError,
-                "changed during KCS semantic checking",
+                "changed during KIO semantic checking",
             ):
                 attestation.build_runtime_directory_receipt(
                     root,
@@ -1280,7 +1280,7 @@ class TestRuntimeCallbackReceipt(unittest.TestCase):
                     trusted_root=alias,
                     semantic_checker=checker,
                 )
-            outside = base / "outside" / ".kcs"
+            outside = base / "outside" / ".kio"
             outside.mkdir(parents=True)
             with self.assertRaisesRegex(
                 attestation.PersonaHistoryAttestationError,
@@ -1323,15 +1323,15 @@ class TestChunkAndPartialReceipts(unittest.TestCase):
     def test_scope_and_person_receipts_are_irreducibly_partial(self):
         with tempfile.TemporaryDirectory() as temporary:
             base = Path(temporary)
-            scope_path = base / "x" / ".kcs"
-            device_path = base / "device" / ".kcs-eval-device"
+            scope_path = base / "x" / ".kio"
+            device_path = base / "device" / ".kio-eval-device"
             scope_path.mkdir(parents=True)
             device_path.mkdir(parents=True)
             scope = attestation.build_partial_scope_receipt(
                 profile="tiny",
                 persona_id="p01",
                 scope_key="p01-primary-01",
-                relative_path="devices/p01-software-engineer/home/x/.kcs",
+                relative_path="devices/p01-software-engineer/home/x/.kio",
                 directory_content=attestation.walk_directory_content_root(scope_path),
                 chunk_arithmetic=_valid_arithmetic(),
             )
@@ -1340,13 +1340,13 @@ class TestChunkAndPartialReceipts(unittest.TestCase):
                 persona_id="p01",
                 expected_contract_contributor_chunks=7,
                 device_relative_path=(
-                    "devices/p01-software-engineer/.kcs-eval-device"
+                    "devices/p01-software-engineer/.kio-eval-device"
                 ),
                 device_content=attestation.walk_directory_content_root(device_path),
                 scopes=(scope,),
             )
             self.assertFalse(scope.history_ready_attested)
-            self.assertFalse(scope.kcs_semantics_attested)
+            self.assertFalse(scope.kio_semantics_attested)
             self.assertFalse(person.history_ready_attested)
             self.assertFalse(person.scope_coverage_complete)
             with self.assertRaises(TypeError):
@@ -1356,7 +1356,7 @@ class TestChunkAndPartialReceipts(unittest.TestCase):
                     profile="tiny",
                     persona_id="p01",
                     scope_key="x",
-                    relative_path="x/.kcs",
+                    relative_path="x/.kio",
                     directory_content=scope.directory_content,
                     chunk_arithmetic=scope.chunk_arithmetic,
                     history_ready_attested=True,
@@ -1365,15 +1365,15 @@ class TestChunkAndPartialReceipts(unittest.TestCase):
     def test_scope_and_people_iterables_are_consumed_only_to_overflow_sentinel(self):
         with tempfile.TemporaryDirectory() as temporary:
             base = Path(temporary)
-            scope_path = base / "x" / ".kcs"
-            device_path = base / "device" / ".kcs-eval-device"
+            scope_path = base / "x" / ".kio"
+            device_path = base / "device" / ".kio-eval-device"
             scope_path.mkdir(parents=True)
             device_path.mkdir(parents=True)
             scope = attestation.build_partial_scope_receipt(
                 profile="tiny",
                 persona_id="p01",
                 scope_key="p01-primary-01",
-                relative_path="devices/p01-software-engineer/home/x/.kcs",
+                relative_path="devices/p01-software-engineer/home/x/.kio",
                 directory_content=attestation.walk_directory_content_root(scope_path),
                 chunk_arithmetic=_valid_arithmetic(),
             )
@@ -1393,7 +1393,7 @@ class TestChunkAndPartialReceipts(unittest.TestCase):
                     persona_id="p01",
                     expected_contract_contributor_chunks=7,
                     device_relative_path=(
-                        "devices/p01-software-engineer/.kcs-eval-device"
+                        "devices/p01-software-engineer/.kio-eval-device"
                     ),
                     device_content=attestation.walk_directory_content_root(device_path),
                     scopes=endless_scopes(),
@@ -1404,7 +1404,7 @@ class TestChunkAndPartialReceipts(unittest.TestCase):
                 profile="tiny",
                 persona_id="p01",
                 expected_contract_contributor_chunks=7,
-                device_relative_path="devices/p01-software-engineer/.kcs-eval-device",
+                device_relative_path="devices/p01-software-engineer/.kio-eval-device",
                 device_content=attestation.walk_directory_content_root(device_path),
                 scopes=(scope,),
             )
@@ -1496,7 +1496,7 @@ class TestSuiteCoverageGate(unittest.TestCase):
             for scope_spec in fixture_spec.scope_specs(persona):
                 identity += 1
                 relative = (
-                    f"devices/{slug}/home/{scope_spec['relative_path']}/.kcs"
+                    f"devices/{slug}/home/{scope_spec['relative_path']}/.kio"
                 )
                 target = scope_targets[scope_spec["scope_key"]]
                 arithmetic = _valid_arithmetic(target, 0)
@@ -1519,7 +1519,7 @@ class TestSuiteCoverageGate(unittest.TestCase):
                     runtime_callback_receipt=runtime if include_runtime else None,
                 ))
             identity += 1
-            device_relative = f"devices/{slug}/.kcs-eval-device"
+            device_relative = f"devices/{slug}/.kio-eval-device"
             device_content, device_runtime = cls._runtime(
                 "device_state",
                 identity,
@@ -1547,7 +1547,7 @@ class TestSuiteCoverageGate(unittest.TestCase):
         receipt = attestation.build_suite_receipt(
             profile="tiny",
             people=people,
-            kcs_semantics_callback_attested=False,
+            kio_semantics_callback_attested=False,
         )
         self.assertEqual(receipt.personas, 20)
         self.assertEqual(receipt.scope_stores, 400)
@@ -1556,8 +1556,8 @@ class TestSuiteCoverageGate(unittest.TestCase):
         self.assertFalse(receipt.semantic_coverage_attested)
         self.assertFalse(receipt.history_ready_attested)
 
-        self.assertFalse(people[0].scopes[0].kcs_semantics_attested)
-        self.assertFalse(people[0].kcs_semantics_attested)
+        self.assertFalse(people[0].scopes[0].kio_semantics_attested)
+        self.assertFalse(people[0].kio_semantics_attested)
         self.assertFalse(
             people[0].scopes[0]
             .runtime_callback_receipt.formal_transport_attested
@@ -1569,7 +1569,7 @@ class TestSuiteCoverageGate(unittest.TestCase):
             attestation.build_suite_receipt(
                 profile="tiny",
                 people=people,
-                kcs_semantics_callback_attested=True,
+                kio_semantics_callback_attested=True,
             )
         with self.assertRaises(attestation.PersonaHistoryAttestationError):
             replace(receipt, history_ready_attested=True)
@@ -1593,7 +1593,7 @@ class TestSuiteCoverageGate(unittest.TestCase):
                 attestation.build_suite_receipt(
                     profile="tiny",
                     people=case,
-                    kcs_semantics_callback_attested=True,
+                    kio_semantics_callback_attested=True,
                 )
 
     def test_profile_and_scope_quota_substitution_fail_closed(self):

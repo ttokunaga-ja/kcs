@@ -19,14 +19,14 @@
 - Hybrid search (paging / MMR / cursor)
 - Evidence Pointer
 - snapshot DAG (commit / tree)
-- kcs index 完了時の auto snapshot (定期 auto snapshot / watch は Phase 4。[05-runtime.md §8](05-runtime.md))
+- kio index 完了時の auto snapshot (定期 auto snapshot / watch は Phase 4。[05-runtime.md §8](05-runtime.md))
 - restore (--to 必須)
 - time-travel search (--at / --all-history / --include-deleted)
 - ベースライン index (deterministic 抽出 + FTS。API キーなしで init→index→search→open が成立 — [01-positioning.md §3](01-positioning.md))
 - 初回スキャン preview + 明示承認
 - budget guardrail (cost ceiling / kill switch)
 - purge 最小形 (tombstone + commit_type=purged + 検索除外 + ログスクラブ。M3-3 の完了条件)
-- kcs evidence verify <pointer> (単発。--batch は含まない)
+- kio evidence verify <pointer> (単発。--batch は含まない)
 ```
 
 ## 1.2 MVP で捨てる (v2 以降に倒す)
@@ -40,11 +40,11 @@
 - 高度な分類器の自動移動 (auto_organize は提案表示のみ)
 - 多デバイス同期 (synchronization は v2+)
 - Adapter の OS サンドボックス強制・第三者 Adapter の配布/署名 (07-adapter-spec.md §7.1)
-- GC の実装一式 (kcs gc / tiered retention / CoW 並行 GC / power-loss sweep)
+- GC の実装一式 (kio gc / tiered retention / CoW 並行 GC / power-loss sweep)
 - purge の完全な履歴書き換え (tree/commit 再結線・filename 秘匿ケース。05-runtime.md §3.5)
-- export / import (.kcsz bundle)
-- kcs evidence verify --batch / kcs evidence retarget の実装
-- agent API の外部公開・発見導線 (外部 Agent は MVP では kcs search --json 等の CLI 契約を使う)
+- export / import (.kioz bundle)
+- kio evidence verify --batch / kio evidence retarget の実装
+- agent API の外部公開・発見導線 (外部 Agent は MVP では kio search --json 等の CLI 契約を使う)
 ```
 
 これらは **MVP の旗印にしない** だけで、設計検討は続けてよい。Phase 4-5 ラベルを付けて archive。
@@ -68,9 +68,9 @@ Phase 5: Agent           agent API / navigation / neighbors / node / edge
 # 3. 実装 Step とコード規模上限
 
 ```
-Step 1 (1-2ヶ月): kcs-core + kcs-cli で init / status / snapshot / log / diff / inspect / tag
+Step 1 (1-2ヶ月): kio-core + kio-cli で init / status / snapshot / log / diff / inspect / tag
                   → CAS と snapshot DAG の正しさを早期検証
-Step 2 (2-3ヶ月): kcs-pipeline + kcs-adapter
+Step 2 (2-3ヶ月): kio-pipeline + kio-adapter
                   → 同梱 deterministic Adapter でベースライン抽出 (normalized まで。**検索の成立は
                     Step 3 の chunk/FTS/search 実装と合わせて** — §3 の割当が正)
                   → 推奨構成は大手 LLM API による AI 強化 (opt-in)
@@ -78,7 +78,7 @@ Step 2 (2-3ヶ月): kcs-pipeline + kcs-adapter
                     v2/v3 対応 (manifest_hash / chunking_config_hash / chunk_set_hash) の rework が必要
                     (あわせて manifest object 保存 (03 §2.1)・chunk_publications / index_metadata 表・
                     config association の introduction_commit 列 (04 §4.1) も同期間の実装対象)
-Step 3 (2-3ヶ月): kcs-index + kcs-search (hybrid + Evidence Pointer)
+Step 3 (2-3ヶ月): kio-index + kio-search (hybrid + Evidence Pointer)
 Step 4 (1.5-2ヶ月): restore + --at + time-travel
                     + purge 最小形 (tombstone) + evidence verify (単発)
 ```
@@ -101,7 +101,7 @@ Step 別の目安 (テスト除く):
                                  総額上限 16,000 に切られる — 全 Step 同時に上限へ達する配分は取らない)
 ```
 
-これを超えるなら設計肥大化の兆候。§3.1 で Phase 4+ に割り当てた機能を Step 1-4 に前倒しした場合も同じ兆候として扱う。テスト除き 16,000 LOC を超えたら削減先を検討する: multi-scope search の設定項目縮小 ([05-runtime.md §1.8](05-runtime.md))、`kcs repair --verify-objects` の自動定期実行の Phase 4+ 送り、export/import 予約行の据え置き等。総額上限 11,000-16,000 LOC 自体は動かさない。7 クレートを一度に書こうとしないこと。Step 1 を書く前に Phase 4-5 の細部を詰めると空中楼閣化する。
+これを超えるなら設計肥大化の兆候。§3.1 で Phase 4+ に割り当てた機能を Step 1-4 に前倒しした場合も同じ兆候として扱う。テスト除き 16,000 LOC を超えたら削減先を検討する: multi-scope search の設定項目縮小 ([05-runtime.md §1.8](05-runtime.md))、`kio repair --verify-objects` の自動定期実行の Phase 4+ 送り、export/import 予約行の据え置き等。総額上限 11,000-16,000 LOC 自体は動かさない。7 クレートを一度に書こうとしないこと。Step 1 を書く前に Phase 4-5 の細部を詰めると空中楼閣化する。
 
 ## 3.1 機能 × Step 割当表
 
@@ -114,37 +114,37 @@ Step 別の目安 (テスト除く):
 | `gc_policy` × `commit_type` 対応の schema 遵守 (GC 実行はしない) | [05-runtime.md §2.2](05-runtime.md) | Step 1 |
 | JSON Schema validation (Step 1 は scope / manifest / config。以後各 Step で対象 schema を追加) | [06-cli-spec.md §11](06-cli-spec.md) | Step 1〜 |
 | 観測ログ `events.jsonl` / `errors.jsonl` | [06-cli-spec.md §13](06-cli-spec.md) | Step 1 |
-| 初回スキャン preview + 明示承認 / `.kcsignore` | [06-cli-spec.md §2](06-cli-spec.md) / [10-operations.md §1](10-operations.md) | Step 2 |
+| 初回スキャン preview + 明示承認 / `.kioignore` | [06-cli-spec.md §2](06-cli-spec.md) / [10-operations.md §1](10-operations.md) | Step 2 |
 | preview のコスト概算・budget 超過警告 | [06-cli-spec.md §2](06-cli-spec.md) / [10-operations.md §1](10-operations.md) | Step 2 |
 | Prepare / Markdownize (full + incremental) / Adapter 実行 | [07-adapter-spec.md](07-adapter-spec.md) / [04-pipeline.md §3](04-pipeline.md) | Step 2 |
 | 同梱 deterministic Adapter によるベースライン抽出 (normalized まで — 検索成立は Step 3 の index/search と合わせて) | [07-adapter-spec.md §2.1](07-adapter-spec.md) | Step 2 |
 | Mistral OCR 系標準 Markdownize Adapter + embedded image 抽出・image object 保存 | [07-adapter-spec.md §5.2](07-adapter-spec.md) / [03-data-model.md §2](03-data-model.md) | Step 2 |
 | batch / retry / resume / budget guardrail | [04-pipeline.md §5](04-pipeline.md) | Step 2 |
-| `kcs index` 完了時の auto snapshot (no-op 条件・HEAD 更新 — §1.1 の MVP 項目) | [05-runtime.md §8](05-runtime.md) | Step 2 |
-| `kcs adapter revoke` (network 承認の取り消し — opt-in 系と同時) | [07-adapter-spec.md §3](07-adapter-spec.md) / [06-cli-spec.md §1](06-cli-spec.md) | Step 2 |
-| `kcs repair --registry-prune` (恒久到達不能 registry 行の確認付き退役) | [10-operations.md §3](10-operations.md) | Step 3 |
+| `kio index` 完了時の auto snapshot (no-op 条件・HEAD 更新 — §1.1 の MVP 項目) | [05-runtime.md §8](05-runtime.md) | Step 2 |
+| `kio adapter revoke` (network 承認の取り消し — opt-in 系と同時) | [07-adapter-spec.md §3](07-adapter-spec.md) / [06-cli-spec.md §1](06-cli-spec.md) | Step 2 |
+| `kio repair --registry-prune` (恒久到達不能 registry 行の確認付き退役) | [10-operations.md §3](10-operations.md) | Step 3 |
 | 構造化 task/artifact descriptor (Adapter 境界の内部 API) | [06-cli-spec.md §9](06-cli-spec.md) | Step 2 |
 | secrets Tier A/B 除外 + quarantine + `--yes` 制約 + `approval_method` 記録 | [10-operations.md §1.1](10-operations.md) / [06-cli-spec.md §2](06-cli-spec.md) | Step 2 |
 | chunk / Embedding / FTS5 / sqlite-vec | [04-pipeline.md §4](04-pipeline.md) | Step 3 |
 | hybrid search (RRF / MMR / paging / cursor) | [05-runtime.md §1](05-runtime.md) | Step 3 |
-| Evidence Pointer 発行・解決 / `kcs open` / `kcs view` | [08-evidence-pointer-spec.md §2-3](08-evidence-pointer-spec.md) | Step 3 |
-| `kcs search --json` (外部 Agent 向け最小契約) + `index_status` | [05-runtime.md §1.7](05-runtime.md) | Step 3 |
-| `kcs reindex` (gen+1 の再 Markdownize / 再 index) | [07-adapter-spec.md §9](07-adapter-spec.md) / [09-mvp-scope.md §5.1](09-mvp-scope.md) | Step 3 |
+| Evidence Pointer 発行・解決 / `kio open` / `kio view` | [08-evidence-pointer-spec.md §2-3](08-evidence-pointer-spec.md) | Step 3 |
+| `kio search --json` (外部 Agent 向け最小契約) + `index_status` | [05-runtime.md §1.7](05-runtime.md) | Step 3 |
+| `kio reindex` (gen+1 の再 Markdownize / 再 index) | [07-adapter-spec.md §9](07-adapter-spec.md) / [09-mvp-scope.md §5.1](09-mvp-scope.md) | Step 3 |
 | 観測ログ `metrics.jsonl` / `access.jsonl` (M3 の latency 計測に必要) | [06-cli-spec.md §13](06-cli-spec.md) / [05-runtime.md §7](05-runtime.md) | Step 3 |
 | `restore --to` / `--at` / `--all-history` / `--include-deleted` | [05-runtime.md §4](05-runtime.md) | Step 4 |
 | purge 最小形 (tombstone + `commit_type=purged` + 検索除外 + `--erase-tombstone` + ログスクラブ [10-operations.md §7](10-operations.md)) | [05-runtime.md §3](05-runtime.md) / [08-evidence-pointer-spec.md §4.1](08-evidence-pointer-spec.md) | Step 4 |
-| `kcs repair --rebuild-db` (SQLite index 再構築 — 破損時の復旧経路) | [10-operations.md §7.5.3](10-operations.md) | Step 3 |
-| `kcs repair --verify-objects` (CAS object 整合性検証) / `--prune-orphans` (orphan prepared/image 削除 — 法務 purge の完結手段) | [10-operations.md §7.5](10-operations.md) | Step 4 |
-| `kcs evidence verify <pointer>` (単発) | [08-evidence-pointer-spec.md §4.3](08-evidence-pointer-spec.md) | Step 4 |
+| `kio repair --rebuild-db` (SQLite index 再構築 — 破損時の復旧経路) | [10-operations.md §7.5.3](10-operations.md) | Step 3 |
+| `kio repair --verify-objects` (CAS object 整合性検証) / `--prune-orphans` (orphan prepared/image 削除 — 法務 purge の完結手段) | [10-operations.md §7.5](10-operations.md) | Step 4 |
+| `kio evidence verify <pointer>` (単発) | [08-evidence-pointer-spec.md §4.3](08-evidence-pointer-spec.md) | Step 4 |
 | purge の完全な履歴書き換え (tree/commit 再結線・filename 秘匿ケース) | [05-runtime.md §3.5](05-runtime.md) / [08-evidence-pointer-spec.md §4.2](08-evidence-pointer-spec.md) | v2+ / Phase 4+ |
-| `kcs gc` (on-demand / shallow / prune-unreachable) | [05-runtime.md §2.2-2.3](05-runtime.md) | Phase 4+ |
+| `kio gc` (on-demand / shallow / prune-unreachable) | [05-runtime.md §2.2-2.3](05-runtime.md) | Phase 4+ |
 | tiered retention GC (auto snapshot と同時に導入) | [05-runtime.md §2.4](05-runtime.md) | Phase 4+ |
 | CoW 並行 GC / power-loss sweep | [05-runtime.md §2.5](05-runtime.md) | Phase 4+ |
 | 定期 auto snapshot / on_idle GC (OS スケジューラ委譲、常駐なし) | [05-runtime.md §8](05-runtime.md) / [05-runtime.md §2.3](05-runtime.md) | Phase 4+ |
-| export / import (`.kcsz`) | [06-cli-spec.md §10](06-cli-spec.md) | Phase 4+ |
-| `kcs evidence verify --batch` | [08-evidence-pointer-spec.md §4.3](08-evidence-pointer-spec.md) | Phase 4+ |
-| `kcs evidence retarget` | [08-evidence-pointer-spec.md §5](08-evidence-pointer-spec.md) | Phase 4+ |
-| `kcs move` (scope 内移動の明示追跡。現状は lock 対象として予約のみ、full spec は未定) | [05-runtime.md §6](05-runtime.md) | Phase 4+ (予約) |
+| export / import (`.kioz`) | [06-cli-spec.md §10](06-cli-spec.md) | Phase 4+ |
+| `kio evidence verify --batch` | [08-evidence-pointer-spec.md §4.3](08-evidence-pointer-spec.md) | Phase 4+ |
+| `kio evidence retarget` | [08-evidence-pointer-spec.md §5](08-evidence-pointer-spec.md) | Phase 4+ |
+| `kio move` (scope 内移動の明示追跡。現状は lock 対象として予約のみ、full spec は未定) | [05-runtime.md §6](05-runtime.md) | Phase 4+ (予約) |
 | agent API の外部公開・発見導線 / navigation | [06-cli-spec.md §9](06-cli-spec.md) | Phase 5 |
 | GUI 用語翻訳マッピング | [06-cli-spec.md §14](06-cli-spec.md) | Phase 4+ |
 
@@ -166,23 +166,23 @@ Step 1 開始日: **2026-07-16**。本日 (2026-07-02) 時点の Step 1 ブロ�
 
 ```
 状況:  PDF のファイル名は覚えていない。本文の数値や用語の一部だけ覚えている。
-操作:  kcs search "X の根拠 数値Y" → kcs open <evidence>
+操作:  kio search "X の根拠 数値Y" → kio open <evidence>
 検証:  hybrid search / Evidence Pointer 表示 / 原本回帰
 完了:  - p95 < 5 秒 (20 scopes / 合計 10 万 chunk indexed、横断検索デフォルトで計測)
        - Evidence Pointer に commit + raw_hash + chunk_hash + heading_path + span
-       - kcs open は OS 規定アプリで原本を開く (working tree 優先、無ければ CAS から
+       - kio open は OS 規定アプリで原本を開く (working tree 優先、無ければ CAS から
          read-only 一時展開。06-cli-spec.md §1.1)
        - ベースライン優位: 既存手段で失敗しやすいクエリ集合 Q_hard (スキャン PDF の
          画像内テキスト / 語彙一致しない言い換え / 図表・画像の内容参照、20 問以上) で、
          Spotlight (mdfind) と ripgrep-all をベースラインに Recall@10 を比較し、
-         KCS >= 0.8 かつ各ベースラインを 0.3 以上上回る
+         KIO >= 0.8 かつ各ベースラインを 0.3 以上上回る
 ```
 
 ## M3-2: 「リネーム済みファイルの過去版を含めて検索」
 
 ```
 状況:  資料をリネームした。過去名で書いた他メモから「あの資料」を探したい。
-操作:  kcs search "認証仕様" --all-history → kcs view <evidence-at-commit-X>
+操作:  kio search "認証仕様" --all-history → kio view <evidence-at-commit-X>
 検証:  --all-history / raw_hash 同一性 (リネームで死なない) / 過去版閲覧
 完了:  - リネーム前後で同じ raw_hash の chunk が両方ヒット
        - 結果に path_at_commit と現在 path を併記
@@ -193,10 +193,10 @@ Step 1 開始日: **2026-07-16**。本日 (2026-07-02) 時点の Step 1 ブロ�
 
 ```
 状況:  半年前に削除した資料の中の数字をもう一度見たい。
-操作:  kcs search "API リミット 1000" --include-deleted → kcs restore <ev> --to ./recovered/
+操作:  kio search "API リミット 1000" --include-deleted → kio restore <ev> --to ./recovered/
 検証:  CAS 永続性 / --include-deleted / restore の working tree 非破壊
 完了:  - 削除済みファイルの chunk が結果に出る
-       - kcs restore は --to <dir> を必須 (working tree 直接書き戻し禁止)
+       - kio restore は --to <dir> を必須 (working tree 直接書き戻し禁止)
        - purge 済み (canonical final event = purged — 08 §3.1 手順 5。commit_type=purged はその監査痕跡) は検索結果から除外される (purged chunk 行は物理削除済み — search 経由では到達しない)。tombstone 応答は既存 Evidence Pointer (過去回答の保存分) を restore / verify / open に与えた場合の挙動 (08 §4)
 ```
 
@@ -206,12 +206,12 @@ Step 1 開始日: **2026-07-16**。本日 (2026-07-02) 時点の Step 1 ブロ�
 Latency       p50 / p95 / p99       目標: M3-1 p95 < 5秒, M3-2/3 p95 < 7秒
                                     (前提: 20 scopes / 合計 10 万 chunk。05-runtime.md §1.8)
 Recall        Recall@10 / @20       目標: 各シナリオで Recall@10 >= 0.8
-Baseline      Q_hard での対 Spotlight/rga 優位   目標: M3-1 完了条件のとおり (KCS >= 0.8, 差 >= 0.3)
+Baseline      Q_hard での対 Spotlight/rga 優位   目標: M3-1 完了条件のとおり (KIO >= 0.8, 差 >= 0.3)
 Evidence      必須フィールド充足率   目標: 100%
 Working tree  上書き 0 件            CI で常時検出。違反はリリースブロッカー
 
 初回体験 (基準データセット D1: PDF 1,000 本 / 5GB 相当)
-TTFV (baseline)   kcs init → ベースライン index 完了 → 初回 kcs search 成功
+TTFV (baseline)   kio init → ベースライン index 完了 → 初回 kio search 成功
                                        目標: 30 分以内 / LLM コスト $0
 TTFV (enriched)   online 承認 → 最初の 100 ファイルが AI 強化済みで検索可能
                                        目標: 承認から 15 分以内
@@ -232,7 +232,7 @@ Step 1 着手後は **シナリオの追加・差し替えしない**。Phase 1-
 
 ```text
 synthetic  リポジトリ同梱の合成コーパス (公開可能な文書 + 生成文書、200-500 ファイル規模)。
-           複数 scope (.kcs) 構成で fixture 化し、fixture script が
+           複数 scope (.kio) 構成で fixture 化し、fixture script が
            「編集 → commit → リネーム → commit → 削除 → commit」の履歴シナリオを
            決定論的に再現する。CI / Done 判定の正本
 dogfood    開発者自身の実フォルダ (非公開)。数値は公開せず、3 シナリオの主観成功確認に使う
@@ -270,7 +270,7 @@ Done 条件 = synthetic で各シナリオ Recall@10 >= 0.8
 採用: 最初に確定したインスタンスを永続化、以後は再生成しない (first-instance wins)。
 実装:
   - normalization_run のキャッシュヒット判定で短絡
-  - 新 generation (gen+1) の instance 作成は kcs reindex --force、または prepared_hash 変化起因の自動 gen+1 ([03-data-model.md §2.1](03-data-model.md) の例外) のみ許可 (上書き・削除はしない)
+  - 新 generation (gen+1) の instance 作成は kio reindex --force、または prepared_hash 変化起因の自動 gen+1 ([03-data-model.md §2.1](03-data-model.md) の例外) のみ許可 (上書き・削除はしない)
   - 新 instance 作成時 (raw 跨ぎ incremental の g0 を含む) は manifest の parent_gen (同一 raw 内) / parent_instance = {raw_hash, tool_profile_hash, gen} (raw 跨ぎ incremental のみ必須 — full では null) でチェーンを残す (parent_run_id は task cache の揮発情報 — 永続 provenance ではない。[03-data-model.md §8](03-data-model.md))
   - 過去 commit / 既存 Evidence Pointer は tree entry の gen により旧 instance を参照し続ける
 正本: 03-data-model.md §6, 04-pipeline.md §5.5
@@ -285,7 +285,7 @@ Status: decided (Step 1 着手前確定)
 未決: 「最新 Markdown へ pointer を切り替える」操作 (cherry-pick 相当)。
 
 設計案:
-  kcs evidence retarget <pointer> [--latest|--at <commit>]
+  kio evidence retarget <pointer> [--latest|--at <commit>]
   - 同一 raw_hash 配下で最新の Markdownize 結果を取得
   - heading_path の一致 (exact → fuzzy + span 重なり率 — fuzzy は text alignment 成立領域のみ、08 §5) で対応付け
   - 意味ベースの対応付け (semantic_fingerprint) は MVP から除外 (Phase 4+ の optional 拡張)
@@ -293,8 +293,8 @@ Status: decided (Step 1 着手前確定)
   - 元 pointer は不変。新 pointer と retargeted_from (response 直下 — pointer 外) を返す
 
 決定済み:
-  - CLI 形: kcs evidence retarget <pointer> [--latest|--at <commit>] (正本 08 §5)
-  - 対応なし (曖昧) 時のエラーコード: KCS-E-EVIDENCE-RETARGET-AMBIG-001 (正本 08 §5)
+  - CLI 形: kio evidence retarget <pointer> [--latest|--at <commit>] (正本 08 §5)
+  - 対応なし (曖昧) 時のエラーコード: KIO-E-EVIDENCE-RETARGET-AMBIG-001 (正本 08 §5)
   - AI Agent からの API 形: 06-cli-spec.md §4 の --json 契約に従う (正本 08 §5)
   - 元 pointer は不変。新 pointer と retargeted_from (response 直下 — pointer 外) を返す (正本 08 §5)
 
@@ -315,10 +315,10 @@ Status: draft (retarget 実装は Phase 4+ のため、期日は Phase 4 着手�
 設計案:
   1. raw_hash の canonical final event = `purged` (全 marker 正本化 — 08 §3.1 手順 5) → tombstone レスポンス
      { "status": "tombstoned", "purged_at", "purged_reason", "purged_in_commit", "raw_hash" } (正本 08 §4.1)
-  2. raw_hash が完全削除 → KCS-E-PURGE-NOT-FOUND-001
+  2. raw_hash が完全削除 → KIO-E-PURGE-NOT-FOUND-001
 
   検出 API:
-  kcs evidence verify <pointer> [--strict]
+  kio evidence verify <pointer> [--strict]
     → status = 6 値 union (正本 08 §4.3 — alive | tombstoned | not_found |
                scope_unreachable | unverifiable | registry_duplicate)
 
@@ -327,8 +327,8 @@ Status: draft (retarget 実装は Phase 4+ のため、期日は Phase 4 着手�
     tree/commit 再結線・filename 秘匿の履歴書き換えは含まない — §3.1 のとおり v2+/Phase 4+) は
     法的要件上必要な場合のみ (正本 08 §4.2)
   - tombstone レスポンス schema (正本 08 §4.1)
-  - 完全削除時は KCS-E-PURGE-NOT-FOUND-001 (正本 08 §4.2)
-  - 検出 API: kcs evidence verify <pointer> [--strict] → 6 値 union (正本 08 §4.3)
+  - 完全削除時は KIO-E-PURGE-NOT-FOUND-001 (正本 08 §4.2)
+  - 検出 API: kio evidence verify <pointer> [--strict] → 6 値 union (正本 08 §4.3)
 
 残未決:
   - bulk verify (--batch) のスループット要件 (実装自体が Phase 4+)
@@ -346,18 +346,18 @@ Status: コアセマンティクスは decided。残未決 1 件 (bulk verify �
 問題: 「旧 raw + 旧 Markdown + 新 raw を Adapter に渡して差分更新」の挙動を Adapter 任せにすると揺れる。
 
 設計 (schema は確定済み, [04-pipeline.md §3.1](04-pipeline.md)):
-  入力 schema / 出力 schema は KCS が固定。
+  入力 schema / 出力 schema は KIO が固定。
   Adapter 側プロンプト規約:
   - "unchanged" と判断した unit は出力に含めない (旧 unit を再利用)
   - 変更 unit は完全に書き直す (部分編集ではなく)
-  - heading 構造の変更は KCS には影響しない (chunk side で対応)
+  - heading 構造の変更は KIO には影響しない (chunk side で対応)
   - Adapter が「軽微とは言えない」と判断したら fallback_to_full=true
 
 決定済み:
   - 入出力 schema (正本 04 §3.1)
   - プロンプト規約 5 項: unchanged unit 非出力 / full unit replacement /
     heading 変更は chunk side 対応 / fallback_to_full 短絡 (正本 07 §8.1)
-  - fallback_to_full の閾値 hint 衝突時は KCS 側を優先 (正本 07 §8.1)
+  - fallback_to_full の閾値 hint 衝突時は KIO 側を優先 (正本 07 §8.1)
   - ストリーミング応答: 許容。staging に保持し全体検査後に一括公開、中断は failed (retryable) — pending 状態は無い (正本 07 §8.3)
   - spec_version 不一致は Adapter が invalid_input として失敗、当該 Adapter は failed permanent (full fallback は incremental capability 非互換のみ — 正本 07 §8.1)
   - spec_version の bump 規約 (正本 10 §12.5)

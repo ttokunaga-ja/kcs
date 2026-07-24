@@ -7,11 +7,11 @@ Source of the P0 list: `tasks/step3a-contract-tests.md` §0/§B/末尾集計. Co
 from the doc: **60 P0** (CHUNK 11 / EMBED 5 / FTS 4 / HYBRID 6 / MMR 4 / CURSOR 5 / MULTI 5 /
 EVIDENCE 7 / URI 3 / OPEN 4 / REINDEX 3 / OBS 3 = 60). Matches the doc's own tally.
 
-Legend — Type: `CLI` = `crates/kcs-cli/tests/step3_p0_contract.rs` integration test;
-`unit` = `#[cfg(test)]` in the named `kcs-index`/`kcs-search` module. Verdict: `ok` = would
+Legend — Type: `CLI` = `crates/kio-cli/tests/step3_p0_contract.rs` integration test;
+`unit` = `#[cfg(test)]` in the named `kio-index`/`kio-search` module. Verdict: `ok` = would
 fail if the contract were broken (adversarially confirmed by reading the test body against
 the implementation, and in most cases by confirming the exercised function is actually
-*wired* into `kcs-cli/src/main.rs`, not a dead seam); `New` = test added/strengthened this
+*wired* into `kio-cli/src/main.rs`, not a dead seam); `New` = test added/strengthened this
 round (all listed under "Changes made" below, with before/after reasoning).
 
 All 60 rows below carry `ok` **after this round's fixes** — see "Gaps found and fixed" for
@@ -30,7 +30,7 @@ what was wrong before and what closed it.
 | CHUNK-007 | `ct3_chunk_007_chunking_config_change_appends_new_generation_chunks` + **New** `ct3_chunk_007_search_only_serves_current_chunking_config_generation` | CLI | ok (combined) — original only checked chunks.jsonl line count grew (append-only half of the contract); new test proves the other half (K8: "検索対象は現行 chunking_config_hash の chunk のみ") by showing the stale-generation chunk_hash disappears from search results while its row is still on disk |
 | CHUNK-008 | `ct3_chunk_008_deleted_file_does_not_remove_existing_chunk_rows` | CLI | ok |
 | CHUNK-009 | `ct3_chunk_009_chunks_have_first_seen_commit_after_index` | CLI | ok, with a caveat — verifies the post-condition (first_seen_commit stamped after a successful index) but not the "invisible during indexing" half of the Then clause, which needs an observable mid-index state; impractical to test synchronously in this harness without a fragile multi-process/polling rig. Flagged as residual limitation, not fixed this round. |
-| CHUNK-010 | `ct3_chunk_010_head_tree_entries_are_populated_with_gen_after_index` (**New**) | CLI | ok — asserts the real `sqlite.db` tree_entries rows written by `kcs index` (HEAD commit, gen=0) and cross-checks a live search result. (An earlier unit test targeted the `kcs_index::tree_entries::project_commit_tree` scaffold, which was dead code — never called by the CLI — and has been REMOVED in the final dead-code sweep together with the module.) |
+| CHUNK-010 | `ct3_chunk_010_head_tree_entries_are_populated_with_gen_after_index` (**New**) | CLI | ok — asserts the real `sqlite.db` tree_entries rows written by `kio index` (HEAD commit, gen=0) and cross-checks a live search result. (An earlier unit test targeted the `kio_index::tree_entries::project_commit_tree` scaffold, which was dead code — never called by the CLI — and has been REMOVED in the final dead-code sweep together with the module.) |
 | CHUNK-012 | `ct3_chunk_012_repair_rebuild_db_preserves_search_result` | CLI | ok — deletes sqlite.db, rebuilds, re-runs the same query, asserts identical `evidence_uri` |
 
 ## CT3-EMBED (5 P0)
@@ -41,7 +41,7 @@ what was wrong before and what closed it.
 | EMBED-002 | `ct3_embed_002_incompatible_profile_falls_back_or_errors` | CLI | ok — **de-tautologized**: uses the `incompatible_profile` seam, which writes genuinely multimodal/768-dim embeddings with a deliberately wrong `profile_hash` (`main.rs` `EmbeddingSeam::Incompatible` / `declared_embedding_profile`), not "no embeddings at all". Confirmed distinct from EMBED-007 (UNAVAIL vs INCOMPAT error codes) |
 | EMBED-003 | `ct3_embed_003_cross_scope_incompatibility_falls_back_to_text_merge` | CLI | ok — **de-tautologized**: scope `a` gets compatible ("mock") embeddings, scope `b` gets the incompatible seam; only the genuine mismatch forces the cross-scope text-only merge |
 | EMBED-004 | `embedding_store::tests::ct3_embed_004_adopted_profile_is_multimodal_768_cosine` (rewired to the WIRED gate `EmbeddingProfileSummary::matches_adopted`, asserting adopted profile matches and text-modality / wrong-dims do not) + CLI `ct3_hybrid_001_auto_resolves_to_hybrid_with_rrf_fusion` (end-to-end: hybrid only resolves when the stored profile matches) | unit + CLI | ok — the formerly-tested `validate_embedding_profile` was dead code and has been REMOVED in the final sweep; the unit test now targets the function the product actually calls |
-| EMBED-008 | CLI `ct3_embed_008_non_multimodal_profile_is_rejected_at_index` (exit 2, `KCS-E-EMBED-MODALITY-001`, real `materialize_tool_lock → validate_embedding_entry` path) + kcs-adapter `tool_lock` unit tests on `validate_embedding_entry` | CLI + unit | ok — the duplicate unit test on dead `validate_embedding_profile` has been REMOVED in the final sweep; coverage anchors on the wired enforcement path |
+| EMBED-008 | CLI `ct3_embed_008_non_multimodal_profile_is_rejected_at_index` (exit 2, `KIO-E-EMBED-MODALITY-001`, real `materialize_tool_lock → validate_embedding_entry` path) + kio-adapter `tool_lock` unit tests on `validate_embedding_entry` | CLI + unit | ok — the duplicate unit test on dead `validate_embedding_profile` has been REMOVED in the final sweep; coverage anchors on the wired enforcement path |
 
 ## CT3-FTS (4 P0)
 
@@ -50,7 +50,7 @@ what was wrong before and what closed it.
 | FTS-001 | `fts::tests::ct3_fts_001_external_content_triggers_sync_insert_delete` | unit | ok — inserts, searches, deletes, re-searches (empty), proving `chunks_ai`/`chunks_ad` trigger sync |
 | FTS-002 | `fts::tests::ct3_fts_002_first_seen_commit_update_does_not_rewrite_fts` | unit | ok |
 | FTS-003 | `fts::tests::ct3_fts_003_trigram_matches_cjk_substrings_and_short_query_skips` + CLI `ct3_fts_003_two_character_query_is_skipped_with_zero_results` | unit + CLI | ok (combined) |
-| FTS-004 | `fts::tests::ct3_fts_004_schema_can_be_rebuilt_from_chunks` (weak alone — only calls schema creation once, no prior data to prove anything survives) + CLI `ct3_fts_004_rebuild_db_reenables_fts_search` | unit + CLI | ok (combined) — the CLI test is the one doing real work: deletes sqlite.db, confirms search now hard-fails (`KCS-E-SEARCH-SCOPE-ALL-FAILED-001`), rebuilds, confirms search works again |
+| FTS-004 | `fts::tests::ct3_fts_004_schema_can_be_rebuilt_from_chunks` (weak alone — only calls schema creation once, no prior data to prove anything survives) + CLI `ct3_fts_004_rebuild_db_reenables_fts_search` | unit + CLI | ok (combined) — the CLI test is the one doing real work: deletes sqlite.db, confirms search now hard-fails (`KIO-E-SEARCH-SCOPE-ALL-FAILED-001`), rebuilds, confirms search works again |
 
 ## CT3-HYBRID (6 P0)
 
@@ -58,7 +58,7 @@ what was wrong before and what closed it.
 | --- | --- | --- | --- |
 | HYBRID-001 | `ct3_hybrid_001_auto_resolves_to_hybrid_with_rrf_fusion` | CLI | ok — scenario (d). Asserts `resolved_mode=hybrid`, clean fallback fields, `diversify.strategy=mmr` (impossible without real embeddings, since text-only reports `group_by_raw_hash`), and that the hybrid result set is a strict superset of the text-only set (proves vector recall genuinely contributes, not just a relabeled text search) |
 | HYBRID-002 | `ct3_hybrid_002_auto_vector_configured_but_absent_falls_back_visibly` (**strengthened in 2d13784**: asserts per-cause fallback_reason strings and in-test pair discrimination — same query resolves hybrid after mock embeddings are generated) | CLI | ok |
-| HYBRID-003 | `ct3_hybrid_003_text_and_vector_unavailable_is_an_error` (**rewritten in re-audit fix 2d13784**: auto mode, no flags, sqlite.db deleted → exit 1 KCS-E-SEARCH-VEC-UNAVAIL-001, with pre-deletion success counter-assertion) | CLI | ok — the original version passed --vector and its deletion step was inert (found by Sonnet/GPT-5.5 in the 4-engine re-audit, tasks/step3c-reaudit-4engine.md) |
+| HYBRID-003 | `ct3_hybrid_003_text_and_vector_unavailable_is_an_error` (**rewritten in re-audit fix 2d13784**: auto mode, no flags, sqlite.db deleted → exit 1 KIO-E-SEARCH-VEC-UNAVAIL-001, with pre-deletion success counter-assertion) | CLI | ok — the original version passed --vector and its deletion step was inert (found by Sonnet/GPT-5.5 in the 4-engine re-audit, tasks/step3c-reaudit-4engine.md) |
 | HYBRID-004 | `rrf::tests::ct3_hybrid_004_rrf_score_and_rank_vector` | unit | ok — exact match against A.4 (`c2,c1,c3,c4,c5` order, `123/3782` score) |
 | HYBRID-005 | `rrf::tests::ct3_hybrid_005_rrf_tie_breaks_by_chunk_id` | unit | ok |
 | HYBRID-006 | `ct3_hybrid_006_text_mode_uses_text_rank_without_fusion` | CLI | ok |
@@ -90,7 +90,7 @@ what was wrong before and what closed it.
 | MULTI-002 | `ct3_multi_002_cross_scope_merge_is_rank_based` | CLI | ok — strong test: scope `a`'s hit sits in a long filler-heavy chunk (low BM25), scope `b`'s in a short chunk (high BM25); asserts both get the *same* RRF score (`1/61` exactly) and the merge is rank-based, not raw-score-based |
 | MULTI-003 | `ct3_multi_003_diversify_caps_raw_hash_across_scopes` | CLI | ok — 4 scopes with identical content (same raw_hash), confirms `max_per_raw_hash=3` caps the merged stream |
 | MULTI-004 | `ct3_multi_004_single_scope_response_lists_searched_scopes` (**strengthened**: now also asserts `scope_id`/`scope_path`/`snapshot_at` are present and well-formed in `searched_scopes[0]`, not just array length) | CLI | ok |
-| MULTI-005 | `ct3_multi_005_partial_failure_returns_results_with_exit_3` (**strengthened**: now also asserts `excluded_scopes[0].reason` is non-empty) + `ct3_multi_005_all_failed_returns_exit_4` | CLI | ok — scenario (b): chmod-000's a sibling scope's `.kcs`, confirms exit 3 + results + excluded_scopes with a reason |
+| MULTI-005 | `ct3_multi_005_partial_failure_returns_results_with_exit_3` (**strengthened**: now also asserts `excluded_scopes[0].reason` is non-empty) + `ct3_multi_005_all_failed_returns_exit_4` | CLI | ok — scenario (b): chmod-000's a sibling scope's `.kio`, confirms exit 3 + results + excluded_scopes with a reason |
 
 ## CT3-EVIDENCE (7 P0)
 
@@ -110,7 +110,7 @@ what was wrong before and what closed it.
 | --- | --- | --- | --- |
 | URI-001 | `evidence::tests::ct3_uri_001_json_uri_json_roundtrip_drops_only_optional_fields` | unit | ok — exact URI string match against A.6, confirms the 7 optional fields drop and required fields survive |
 | URI-002 | `evidence::tests::ct3_uri_002_object_reference_is_distinct_from_evidence_pointer` + CLI `ct3_uri_002_open_resolves_object_raw_uri` + `ct3_uri_002_open_rejects_invalid_object_uri` | unit + CLI | ok |
-| URI-003 | `ct3_uri_003_inline_json_pointer_is_accepted_by_view` (only exercised 1 of 5 prefix branches) + **New** `ct3_uri_003_stdin_dash_prefix_is_accepted_by_view` + **New** `ct3_uri_003_unrecognized_pointer_prefix_is_invalid_usage_exit_2` | CLI | ok (combined) — `kcs://` branch is covered elsewhere (all `ct3_open_*`/`ct3_evidence_*` tests); `sha256:` short-form branch is P1 (OPEN-005, implemented via `resolve_short_hash` but not P0); new tests close the previously-untested `-` stdin branch and the "other → exit 2" branch |
+| URI-003 | `ct3_uri_003_inline_json_pointer_is_accepted_by_view` (only exercised 1 of 5 prefix branches) + **New** `ct3_uri_003_stdin_dash_prefix_is_accepted_by_view` + **New** `ct3_uri_003_unrecognized_pointer_prefix_is_invalid_usage_exit_2` | CLI | ok (combined) — `kio://` branch is covered elsewhere (all `ct3_open_*`/`ct3_evidence_*` tests); `sha256:` short-form branch is P1 (OPEN-005, implemented via `resolve_short_hash` but not P0); new tests close the previously-untested `-` stdin branch and the "other → exit 2" branch |
 
 ## CT3-OPEN (4 P0)
 
@@ -134,7 +134,7 @@ what was wrong before and what closed it.
 | ID | Test(s) | Type | Verdict |
 | --- | --- | --- | --- |
 | OBS-001 | `ct3_obs_001_index_status_reports_partial_enrichment` | CLI | ok |
-| OBS-002 | `ct3_obs_002_metrics_jsonl_records_per_search_latency` + `ct3_obs_002_metrics_do_not_record_query_text` + `ct3_obs_002_metrics_use_search_namespace_code_and_component` | CLI | ok — combined coverage includes the K8 fix (`KCS-M-SEARCH-001` / component `search`) |
+| OBS-002 | `ct3_obs_002_metrics_jsonl_records_per_search_latency` + `ct3_obs_002_metrics_do_not_record_query_text` + `ct3_obs_002_metrics_use_search_namespace_code_and_component` | CLI | ok — combined coverage includes the K8 fix (`KIO-M-SEARCH-001` / component `search`) |
 | OBS-003 | `ct3_obs_003_access_jsonl_records_redacted_search` + `ct3_obs_003_access_log_has_required_envelope_fields` | CLI | ok |
 
 ---
@@ -152,7 +152,7 @@ All 5 present as CLI tests, explicitly labeled in comments:
 ## Formerly-tautological 3 (K1 explicit callout) — confirmed de-tautologized
 
 HYBRID-002 / EMBED-002 / EMBED-003 all now construct genuinely distinguishable
-compatible/incompatible embedding states via the `KCS_TEST_GEMINI_EMBED` seam
+compatible/incompatible embedding states via the `KIO_TEST_GEMINI_EMBED` seam
 (`mock` / `incompatible_profile` / absent), verified by reading `main.rs`'s
 `EmbeddingSeam`/`declared_embedding_profile` (writes a deliberately wrong `profile_hash`
 for `Incompatible`, `modality="text"` for `NonMultimodal`) — not "vector is always absent."
@@ -166,8 +166,8 @@ explicitly passes the flag. No overlap/dependency between the two.
 
 ## Changes made this round
 
-New test files touched: `crates/kcs-index/src/chunking.rs`,
-`crates/kcs-cli/tests/step3_p0_contract.rs`.
+New test files touched: `crates/kio-index/src/chunking.rs`,
+`crates/kio-cli/tests/step3_p0_contract.rs`.
 
 1. **New** `chunking::tests::ct3_chunk_004_max_chars_splits_at_paragraph_boundary_and_shares_section`
    — CT3-CHUNK-004's rule 5 (paragraph-boundary greedy split) was unverified by the existing
@@ -182,9 +182,9 @@ New test files touched: `crates/kcs-index/src/chunking.rs`,
    proves the K8 "search only serves current chunking_config_hash" half by showing the stale
    chunk_hash disappears from search results while its row survives on disk.
 4. **New** `ct3_chunk_010_head_tree_entries_are_populated_with_gen_after_index` — the
-   dedicated CT3-CHUNK-010 unit test targets `kcs_index::tree_entries::project_commit_tree`,
-   which is dead code (never called from `kcs-cli/src/main.rs`; the CLI has its own inline-SQL
-   tree_entries writer). This CLI test inspects the real `sqlite.db` after `kcs index`.
+   dedicated CT3-CHUNK-010 unit test targets `kio_index::tree_entries::project_commit_tree`,
+   which is dead code (never called from `kio-cli/src/main.rs`; the CLI has its own inline-SQL
+   tree_entries writer). This CLI test inspects the real `sqlite.db` after `kio index`.
 5. **New** `ct3_uri_003_stdin_dash_prefix_is_accepted_by_view` and
    `ct3_uri_003_unrecognized_pointer_prefix_is_invalid_usage_exit_2` — CT3-URI-003 requires 5
    prefix branches; only `{` (inline JSON) had a dedicated P0 test. Closes the `-` stdin and
@@ -193,7 +193,7 @@ New test files touched: `crates/kcs-index/src/chunking.rs`,
    checking 3 of the 6 required Evidence Pointer fields (missing `schema_version`,
    `tool_profile_hash`, `scope_id`); now checks all 6, at the actual hand-assembled
    `--json` output level (the CLI builds JSON via `json!{}` macros, not by relying on
-   `kcs-search`'s struct field types, so presence has to be checked at that boundary).
+   `kio-search`'s struct field types, so presence has to be checked at that boundary).
 7. **Strengthened** `ct3_multi_004_single_scope_response_lists_searched_scopes` — now
    asserts `searched_scopes[0]` actually has well-formed `scope_id`/`scope_path`/
    `snapshot_at`, not just that the array has length 1.
@@ -208,24 +208,24 @@ New test files touched: `crates/kcs-index/src/chunking.rs`,
     → `ct3_embed_008_non_multimodal_profile_is_rejected_at_index` — was missing the `008`
     required by the `ct3_<domain>_<nnn>_<description>` convention.
 
-Net: +6 new test functions (2 in `kcs-index`, 4 in `kcs-cli/tests`), 3 strengthened
+Net: +6 new test functions (2 in `kio-index`, 4 in `kio-cli/tests`), 3 strengthened
 in-place, 2 renamed. `cargo test --workspace`: 224 → 230.
 
 ## Implementation doubts found (not fixed — reporting only, per instructions)
 
-1. **`kcs_index::tree_entries::project_commit_tree` is dead code.** It has its own unit
+1. **`kio_index::tree_entries::project_commit_tree` is dead code.** It has its own unit
    test (`ct3_chunk_010_tree_entries_project_head_commit_with_gen`) and looks like a
-   deliberate library implementation of the CT3-CHUNK-010 contract, but `kcs-cli/src/main.rs`
+   deliberate library implementation of the CT3-CHUNK-010 contract, but `kio-cli/src/main.rs`
    never imports or calls it — the CLI reimplements HEAD tree-entry projection independently
    via `ensure_snapshot_tree_entries`/`write_tree_entries`/`rebuild_sqlite_index` (raw SQL).
    The product behavior is correct (confirmed by the new CLI-level test added this round),
-   but the kcs-index function + its test are decorative. Worth either wiring it in for real
+   but the kio-index function + its test are decorative. Worth either wiring it in for real
    or deleting it to avoid a second "tested but unused" surface re-triggering the same audit
    finding from the previous round.
-2. **`kcs_index::embedding_store::validate_embedding_profile` is dead code**, for both of the
+2. **`kio_index::embedding_store::validate_embedding_profile` is dead code**, for both of the
    contracts it's meant to serve:
-   - The EMBED-008 modality gate (`KCS-E-EMBED-MODALITY-001`) is actually enforced by
-     `kcs-adapter::tool_lock::validate_embedding_entry` (reached via
+   - The EMBED-008 modality gate (`KIO-E-EMBED-MODALITY-001`) is actually enforced by
+     `kio-adapter::tool_lock::validate_embedding_entry` (reached via
      `materialize_tool_lock → load_tool_lock`), a separate, independently-tested
      implementation of the same rule.
    - The EMBED-004/EMBED-002 dimension/distance/profile_hash compat check at search time is
@@ -241,7 +241,7 @@ in-place, 2 renamed. `cargo test --workspace`: 224 → 230.
    and non-blocking scale this time (the real enforcement exists elsewhere and is tested).
 3. **CT3-CHUNK-009's "chunk invisible during indexing" clause is untested** and, as far as I
    can tell, impractical to test synchronously within this integration-test harness (it would
-   require observing SQLite/search state from a second process while `kcs index` is
+   require observing SQLite/search state from a second process while `kio index` is
    mid-run, or an injected pause hook). The post-condition half (first_seen_commit stamped
    after success) is tested. Flagging as a residual gap rather than building a fragile
    concurrency test under this round's time budget.
@@ -262,26 +262,26 @@ in-place, 2 renamed. `cargo test --workspace`: 224 → 230.
 cargo fmt --check                                    # clean, no output
 cargo clippy --workspace --all-targets -- -D warnings # clean, 0 warnings
 cargo test --workspace                                # 230 passed; 0 failed (was 224 baseline)
-  - kcs-adapter: 17 passed
-  - kcs (bin unit tests): 6 passed
-  - kcs-cli/tests/contract_cli.rs: 9 passed
-  - kcs-cli/tests/step2_p0_contract.rs: 70 passed
-  - kcs-cli/tests/step3_p0_contract.rs: 55 passed (was 47; +6 new, 2 renamed, 3 strengthened in place)
-  - kcs-core: 6 passed
-  - kcs-core/tests/contract_vectors.rs: 14 passed
-  - kcs-index: 25 passed (was 23; +2 new)
-  - kcs-pipeline: 14 passed
-  - kcs-search: 14 passed
+  - kio-adapter: 17 passed
+  - kio (bin unit tests): 6 passed
+  - kio-cli/tests/contract_cli.rs: 9 passed
+  - kio-cli/tests/step2_p0_contract.rs: 70 passed
+  - kio-cli/tests/step3_p0_contract.rs: 55 passed (was 47; +6 new, 2 renamed, 3 strengthened in place)
+  - kio-core: 6 passed
+  - kio-core/tests/contract_vectors.rs: 14 passed
+  - kio-index: 25 passed (was 23; +2 new)
+  - kio-pipeline: 14 passed
+  - kio-search: 14 passed
   - doc-tests: 0 (all crates)
 ```
 
 ## Post-sweep note (coordinator, final round)
 
 The implementation doubts above were ACTED ON after this matrix was first written:
-`kcs_index::tree_entries` (module), `kcs_index::rebuild` (module),
-`kcs_search::multi_scope` (module), `kcs_search::query`'s unused response types +
-`SearchEngine` trait + `search()` stub, `kcs_index::embedding_store::validate_embedding_profile`,
-and the kcs-search lib placeholder test were all removed as dead scaffold code
+`kio_index::tree_entries` (module), `kio_index::rebuild` (module),
+`kio_search::multi_scope` (module), `kio_search::query`'s unused response types +
+`SearchEngine` trait + `search()` stub, `kio_index::embedding_store::validate_embedding_profile`,
+and the kio-search lib placeholder test were all removed as dead scaffold code
 (same policy as the K6 stub removal). ct3_embed_004 was rewired to the wired
 `matches_adopted` gate. Final totals: 227 workspace tests green / clippy -D warnings / fmt.
 

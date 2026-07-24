@@ -6,18 +6,18 @@
 ## 必須修正 M1-M8
 
 - **M1 [critical] 並行実行でストア破損 → 全 scope 巻き添え** (Sonnet 実機):
-  (a) 05 §6 が明記する `.kcs/.lock` が `kcs index` / `repair` / `reindex` に未配線 (snapshot/tag のみ)。
-  run_index/run_repair/run_reindex の先頭で StoreLock::acquire (敗者は KCS-E-STORE-LOCKED-001 exit 3)。
+  (a) 05 §6 が明記する `.kio/.lock` が `kio index` / `repair` / `reindex` に未配線 (snapshot/tag のみ)。
+  run_index/run_repair/run_reindex の先頭で StoreLock::acquire (敗者は KIO-E-STORE-LOCKED-001 exit 3)。
   (b) 全 JSONL append (cas.rs append_jsonl / main.rs append_jsonl_cli / write_approval_record /
   TaskStore::append / CostLedger::append_monthly) が「serde_json::to_writer の複数 write + 改行の
   別 write」でレコードを書くため、O_APPEND でもバイト単位でインターリーブする。**1 レコードを
   String に組んでから単一 write_all** に統一 (これで device-global な cost-ledger.jsonl の
   cross-scope 競合も実質解消)。
-  (c) 破損 JSONL の読取エラーが KCS-E-CONFIG-SCHEMA-001 (exit 2) と誤報される —
+  (c) 破損 JSONL の読取エラーが KIO-E-CONFIG-SCHEMA-001 (exit 2) と誤報される —
   TaskStore::all / CostLedger::monthly_total_for_adapter の parse 失敗は
-  KCS-E-STORE-CORRUPT-001 + 対象ファイルパスを message に含める形へ。
+  KIO-E-STORE-CORRUPT-001 + 対象ファイルパスを message に含める形へ。
   回帰テスト: 2 プロセス並行 index → 一方が LOCKED-001 exit 3、ledger/tasks が有効な JSONL のまま
-- **M2 [major] kcs view (非 --json) が本文を表示しない** (Sonnet 実機): print_output が status
+- **M2 [major] kio view (非 --json) が本文を表示しない** (Sonnet 実機): print_output が status
   最優先で "viewed" しか出さない。text フィールドを表示する分岐を追加
 - **M3 [major] raw_hash 短縮解決が複数 chunk で「ambiguous」** (Sonnet 実機): resolve_short_hash が
   chunk 一致数で判定するため、見出し 2 つ以上の普通のファイルで open/view が失敗。08 §2.3 規則 4
@@ -36,8 +36,8 @@
   open_raw_object (objects/raw) に流れる。object_type ごとに正しい CAS ディレクトリへ分岐
 - **M8 [major] user/folder config の schema 未検証** (GPT-5.5): 起動時検証は tools.toml のみで、
   config.toml は負の budget cap 等が素通り (10 §12 / 06 §11 違反)。dispatch 前に config.schema.json で
-  検証 (exit 2 KCS-E-CONFIG-SCHEMA-001) + budget reader に非負ガード
-- minor: 未テスト error code 2 件 (KCS-E-CONFIG-NOT-IMPLEMENTED-001 / KCS-E-EVIDENCE-SCOPE-
+  検証 (exit 2 KIO-E-CONFIG-SCHEMA-001) + budget reader に非負ガード
+- minor: 未テスト error code 2 件 (KIO-E-CONFIG-NOT-IMPLEMENTED-001 / KIO-E-EVIDENCE-SCOPE-
   AMBIGUOUS-001) のテスト追加 (Spark)
 
 ## 受け入れ条件

@@ -30,9 +30,9 @@ except ImportError:  # pragma: no cover - direct-script compatibility.
     import persona_manifest as canonical_manifest
 
 
-SUITE_EVENT_MANIFEST_SCHEMA = "kcs.persona.suite-event-manifest/v1"
+SUITE_EVENT_MANIFEST_SCHEMA = "kio.persona.suite-event-manifest/v1"
 SUITE_EVENT_MANIFEST_SCHEMA_VERSION = 1
-SUITE_SCHEDULE_SCHEMA = "kcs.persona.suite-event-schedule/v1"
+SUITE_SCHEDULE_SCHEMA = "kio.persona.suite-event-schedule/v1"
 PLANNING_STATUS = "planned_not_observed"
 WAVE_ORDER = ("W1", "W2", "W3", "W4", "W5")
 PHASE_ORDER = (

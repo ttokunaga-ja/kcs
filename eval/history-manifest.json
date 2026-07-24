@@ -319,13 +319,13 @@
       "commit_count": 8,
       "messages": [
         "delete: old-api-limits.md, leaked-draft-pricing.md",
-        "kcs index auto snapshot",
+        "kio index auto snapshot",
         "rename: rag-pipeline.md->retrieval-pipeline.md",
-        "kcs index auto snapshot",
+        "kio index auto snapshot",
         "edit: benchmark-draft.md",
-        "kcs index auto snapshot",
+        "kio index auto snapshot",
         "baseline",
-        "kcs index auto snapshot"
+        "kio index auto snapshot"
       ],
       "steps": [
         "baseline",
@@ -338,11 +338,11 @@
       "commit_count": 6,
       "messages": [
         "delete: scratch-numbers.md",
-        "kcs index auto snapshot",
+        "kio index auto snapshot",
         "rename: interview-notes.md->user-research-summary.md",
-        "kcs index auto snapshot",
+        "kio index auto snapshot",
         "baseline",
-        "kcs index auto snapshot"
+        "kio index auto snapshot"
       ],
       "steps": [
         "baseline",
@@ -354,13 +354,13 @@
       "commit_count": 8,
       "messages": [
         "delete: cancelled-project-osprey.md",
-        "kcs index auto snapshot",
+        "kio index auto snapshot",
         "rename: vendor-eval.md->supplier-assessment.md",
-        "kcs index auto snapshot",
+        "kio index auto snapshot",
         "edit: budget-review.md",
-        "kcs index auto snapshot",
+        "kio index auto snapshot",
         "baseline",
-        "kcs index auto snapshot"
+        "kio index auto snapshot"
       ],
       "steps": [
         "baseline",
@@ -373,11 +373,11 @@
       "commit_count": 6,
       "messages": [
         "delete: falcon-incident-0421.md, falcon-old-schema.md",
-        "kcs index auto snapshot",
+        "kio index auto snapshot",
         "rename: falcon-migration.md->falcon-cutover-plan.md",
-        "kcs index auto snapshot",
+        "kio index auto snapshot",
         "baseline",
-        "kcs index auto snapshot"
+        "kio index auto snapshot"
       ],
       "steps": [
         "baseline",
@@ -389,11 +389,11 @@
       "commit_count": 6,
       "messages": [
         "delete: kestrel-poc-metrics.md",
-        "kcs index auto snapshot",
+        "kio index auto snapshot",
         "rename: kestrel-security.md->kestrel-threat-model.md",
-        "kcs index auto snapshot",
+        "kio index auto snapshot",
         "baseline",
-        "kcs index auto snapshot"
+        "kio index auto snapshot"
       ],
       "steps": [
         "baseline",
@@ -405,13 +405,13 @@
       "commit_count": 8,
       "messages": [
         "delete: deprecated-approach.md",
-        "kcs index auto snapshot",
+        "kio index auto snapshot",
         "rename: auth-spec.md->authentication-guide.md",
-        "kcs index auto snapshot",
+        "kio index auto snapshot",
         "edit: model-selection.md",
-        "kcs index auto snapshot",
+        "kio index auto snapshot",
         "baseline",
-        "kcs index auto snapshot"
+        "kio index auto snapshot"
       ],
       "steps": [
         "baseline",
@@ -424,11 +424,11 @@
       "commit_count": 6,
       "messages": [
         "delete: legacy-format-v0.md",
-        "kcs index auto snapshot",
+        "kio index auto snapshot",
         "rename: evidence-pointer-spec.md->evidence-pointer-contract.md",
-        "kcs index auto snapshot",
+        "kio index auto snapshot",
         "baseline",
-        "kcs index auto snapshot"
+        "kio index auto snapshot"
       ],
       "steps": [
         "baseline",

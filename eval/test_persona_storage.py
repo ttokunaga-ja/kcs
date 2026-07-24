@@ -21,11 +21,11 @@ MANIFEST_SHA = "2" * 64
 
 class StorageTestCase(unittest.TestCase):
     def setUp(self):
-        self.temporary = tempfile.TemporaryDirectory(prefix="kcs-persona-storage-")
+        self.temporary = tempfile.TemporaryDirectory(prefix="kio-persona-storage-")
         self.addCleanup(self.temporary.cleanup)
         self.base = Path(self.temporary.name).resolve()
         self.home = self.base / "users" / "test-user"
-        self.repo = self.home / "dev" / "kcs"
+        self.repo = self.home / "dev" / "kio"
         self.home.mkdir(parents=True)
         self.repo.mkdir(parents=True)
         self.output = self.home / "persona-runs" / "replay-01"
@@ -77,7 +77,7 @@ class TestOwnerMarker(StorageTestCase):
                 "plan_sha256",
             },
         )
-        self.assertEqual(building["fixture_id"], "kcs-persona-pc-v1")
+        self.assertEqual(building["fixture_id"], "kio-persona-pc-v1")
         self.assertEqual(building["state"], "building")
 
         ready = storage.make_owner_marker(
@@ -605,7 +605,7 @@ class TestCapacityPlanning(unittest.TestCase):
                 storage.check_capacity(plan, availability, limits)
 
     def test_probe_uses_nearest_existing_plain_ancestor(self):
-        with tempfile.TemporaryDirectory(prefix="kcs-persona-probe-") as temporary:
+        with tempfile.TemporaryDirectory(prefix="kio-persona-probe-") as temporary:
             existing = Path(temporary).resolve()
             destination = existing / "not-yet" / "replay-01"
             statvfs = SimpleNamespace(f_favail=456)
@@ -623,7 +623,7 @@ class TestCapacityPlanning(unittest.TestCase):
             statvfs_call.assert_called_once_with(existing)
 
     def test_explicit_inode_budget_supports_platforms_without_statvfs(self):
-        with tempfile.TemporaryDirectory(prefix="kcs-persona-probe-") as temporary:
+        with tempfile.TemporaryDirectory(prefix="kio-persona-probe-") as temporary:
             destination = Path(temporary).resolve() / "replay-01"
             with mock.patch.object(
                 storage.shutil, "disk_usage", return_value=SimpleNamespace(free=123)
