@@ -392,9 +392,10 @@ field `current_path` に同じ値を入れ、identical-byte twins では singula
 path 非依存で 1 行のまま、path alias は snapshot HEAD から全 parent DAG の tree と snapshot HEAD tree
 から導出する。
 
-実装 pipeline は固定する: scope ごとに text/vector を rank → scope 内 RRF し、その rank を cross-scope
-merge → global MMR/`max_per_raw_hash` する。pre-alias tie は immutable `(scope_id,chunk_hash)` の UTF-8
-byte order とする。その確定 semantic position ごとに historical/deleted aliases を展開し、parent
+実装 pipeline は固定する: scope ごとに text/vector を rank → scope 内 RRF し、その候補を cross-scope
+merge → global MMR/`max_per_raw_hash` する。cross-scope merge の RRF は **vector 項のみ global cosine
+順位で振り直す** (§1.8 step 3、text 項は per-scope rank のまま — 2026-07-24)。pre-alias tie は immutable
+`(scope_id,chunk_hash)` の UTF-8 byte order とする。その確定 semantic position ごとに historical/deleted aliases を展開し、parent
 score/rank をコピーして、group 内を
 `(scope_id,chunk_hash,path_at_commit,evidence_pointer.commit)` の UTF-8 byte order で整列してから paginate
 する。`scope_path` は display hint なので順序に使わない。alias は MMR cosine competition や
@@ -415,7 +416,9 @@ score/rank をコピーして、group 内を
 1. scope ごとに独立にクエリを実行する。並列度は min(4, scope 数)、per-scope timeout は 2 秒 (いずれも config で上書き可)
 2. scope 内では §1.1〜§1.3 までを実行し、RRF 済み unique semantic chunk 上位 candidate_depth 件を
    候補として返す。§1.4 の MMR/dedup は scope 内でまだ適用しない
-3. scope 間の統合は **rank ベース** で行う。各 scope の RRF スコア (rank のみから決まる) をそのまま比較して降順マージする。**BM25 / vector の raw スコアを scope 間で比較・正規化してはならない** (コーパス統計が index ごとに異なり比較不能)。pre-alias 同点は immutable `(scope_id,chunk_hash)` で安定化する
+3. scope 間の統合は RRF ベースで行い、pre-alias 同点は immutable `(scope_id,chunk_hash)` で安定化する。ただし text と vector で扱いを分ける:
+   - **text backend の rank は per-scope のまま**融合する。**BM25 の raw スコアを scope 間で比較・正規化してはならない** (コーパス統計 = IDF・doc length が index ごとに異なり比較不能。CT3-MULTI-002)。
+   - **vector backend の rank は cross-scope で GLOBAL に振り直す (2026-07-24)**。全 scope は単一の embedding profile を共有する ([03-data-model.md §7](03-data-model.md)) ため、chunk の query への cosine は **scope 間で比較可能**である。よって per-scope の vector 候補 (`vector_rank` 保持) を全 scope 横断で cosine 降順に整列した順位を、RRF の vector 項の rank として用いる (per-scope 順位ではなく)。これにより、あるスコープ内 rank-2 でも絶対 cosine が高い解答が、他スコープの rank-1 (低 cosine) に埋もれず浮上する (contextual embedding round で判明した「`--all-scopes` ヒット ⟺ スコープ内 vector 順位==1」の bury を解消)。cosine は決定的で、replay は page 1 の query vector をバイト同一で再利用する (§1.5 の R23-01) ため、この global 振り直しはページ跨ぎで安定である。**単一 scope 検索では global vector 順位は per-scope 順位と一致する**ため振り直しは行わない (浮動小数の tie-flip 回避)。text-only 検索は本項の対象外 (vector 項なし = 従来どおり per-scope RRF スコアで降順マージ)
 4. diversify (MMR / group_by_raw_hash, §1.4) は統合後の候補列に対して適用する。**multi-scope 検索の
    `[search]` 実効値 (**default_mode** / rrf / diversify / candidate_depth / fail_behavior) は
    user config (device 層) を用いる** — folder 値は `--scope` 単一指定時のみ適用する (scope 間で

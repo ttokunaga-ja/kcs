@@ -1705,11 +1705,20 @@ struct ScoredCandidate {
     scope_path: PathBuf,
     chunk_hash: String,
     rrf_score: f64,
+    /// This candidate's per-scope text/vector backend ranks (from `fuse_rrf`),
+    /// carried up so the cross-scope merge can re-fuse the VECTOR backend by a
+    /// GLOBAL cosine rank (05 §1.8, 2026-07-24). `text_rank` stays per-scope
+    /// (BM25 is not cross-corpus comparable — CT3-MULTI-002); `vector_rank`'s
+    /// presence marks a per-scope vector candidate, whose rank VALUE the merge
+    /// replaces with its global cosine standing. `None`/`None` in text mode.
+    text_rank: Option<u64>,
+    vector_rank: Option<u64>,
     meta: ChunkMeta,
     /// Deterministic path/commit aliases expanded only after global diversify.
     bindings: Vec<SearchHistoryBinding>,
-    /// The chunk's embedding (hybrid/vector mode only), fed into MMR (05 §1.4).
-    /// `None` in text mode, which makes MMR skip and only the raw_hash dedup run.
+    /// The chunk's embedding (hybrid/vector mode only), fed into MMR (05 §1.4)
+    /// and the global cosine re-rank (05 §1.8). `None` in text mode, which makes
+    /// MMR skip and only the raw_hash dedup run.
     embedding: Option<Vec<f32>>,
 }
 
@@ -1754,6 +1763,104 @@ struct SearchedScopeInfo {
     /// walk skipped rather than hard-failing on, for `--all-history` /
     /// `--since` / `--include-deleted`. Zero for every other selector.
     shallow_skipped: u64,
+}
+
+/// Re-fuse each candidate's `rrf_score` with a GLOBAL vector rank (05 §1.8,
+/// 2026-07-24). Only vector/hybrid mode with a page-1 query vector reaches here.
+///
+/// The TEXT term is preserved exactly (per-scope `text_rank`, never a raw-BM25
+/// cross-corpus comparison — CT3-MULTI-002). The VECTOR term is rebuilt: among
+/// the per-scope vector candidates (`vector_rank.is_some()`), rank every one by
+/// its cosine to the query — a quantity that IS comparable across scopes because
+/// all scopes share one embedding profile (03 §7) — and use that global rank in
+/// the RRF term in place of the per-scope one. Cosine order is deterministic and
+/// the query vector is replayed byte-identically on later pages (R23-01), so the
+/// resulting merge order is stable across pagination.
+///
+/// The caller guards on >1 distinct scope: a single-scope pool's global vector
+/// rank already equals its per-scope one, so re-fusing there would only risk a
+/// float tie-flip against the pinned per-scope order. This function re-checks the
+/// guard so it is safe to call unconditionally.
+fn regrade_vector_rank_globally(
+    candidates: &mut [ScoredCandidate],
+    query_vec: &[f32],
+    config: RrfConfig,
+) {
+    let distinct_scopes = candidates
+        .iter()
+        .map(|candidate| candidate.scope_id.as_str())
+        .collect::<BTreeSet<_>>()
+        .len();
+    if distinct_scopes <= 1 {
+        return;
+    }
+    // Global vector ranking over the per-scope vector candidates, by cosine desc,
+    // tie-broken (scope_id, chunk_hash) to match the merge's own deterministic
+    // tie-break.
+    let mut vector_members: Vec<usize> = candidates
+        .iter()
+        .enumerate()
+        .filter(|(_, candidate)| candidate.vector_rank.is_some() && candidate.embedding.is_some())
+        .map(|(index, _)| index)
+        .collect();
+    let cosine_of = |index: usize| -> f64 {
+        candidates[index]
+            .embedding
+            .as_deref()
+            .map(|embedding| cosine_similarity(query_vec, embedding))
+            .unwrap_or(f64::NEG_INFINITY)
+    };
+    vector_members.sort_by(|&a, &b| {
+        cosine_of(b)
+            .total_cmp(&cosine_of(a))
+            .then_with(|| {
+                candidates[a]
+                    .scope_id
+                    .as_bytes()
+                    .cmp(candidates[b].scope_id.as_bytes())
+            })
+            .then_with(|| candidates[a].chunk_hash.cmp(&candidates[b].chunk_hash))
+    });
+    let mut global_vector_rank = vec![None; candidates.len()];
+    for (rank0, &index) in vector_members.iter().enumerate() {
+        global_vector_rank[index] = Some(rank0 as u64 + 1);
+    }
+    for (index, candidate) in candidates.iter_mut().enumerate() {
+        let text_term = candidate
+            .text_rank
+            .map(|rank| config.w_text / (config.k + rank) as f64)
+            .unwrap_or(0.0);
+        let vector_term = global_vector_rank[index]
+            .map(|rank| config.w_vector / (config.k + rank) as f64)
+            .unwrap_or(0.0);
+        candidate.rrf_score = text_term + vector_term;
+    }
+}
+
+/// Exact cosine similarity of two equal-length vectors (f64 accumulation). The
+/// stored/query embeddings are L2-normalized (07 §5.3), so in the ideal case
+/// this equals their dot product; dividing by the norms keeps it exact under any
+/// residual denormalization and matches `vec_distance_cosine`'s own metric.
+/// Returns `NEG_INFINITY` for a length mismatch or a zero-norm vector (neither
+/// occurs for accepted embeddings) so such a candidate sorts last rather than
+/// poisoning the order with a NaN.
+fn cosine_similarity(a: &[f32], b: &[f32]) -> f64 {
+    if a.len() != b.len() {
+        return f64::NEG_INFINITY;
+    }
+    let mut dot = 0.0f64;
+    let mut norm_a = 0.0f64;
+    let mut norm_b = 0.0f64;
+    for (x, y) in a.iter().zip(b) {
+        let (x, y) = (f64::from(*x), f64::from(*y));
+        dot += x * y;
+        norm_a += x * x;
+        norm_b += y * y;
+    }
+    if norm_a == 0.0 || norm_b == 0.0 {
+        return f64::NEG_INFINITY;
+    }
+    dot / (norm_a.sqrt() * norm_b.sqrt())
 }
 
 fn run_search(args: UnsupportedArgs) -> Result<Value> {
@@ -2619,8 +2726,24 @@ fn run_search_inner(args: UnsupportedArgs, started: Instant) -> Result<Value> {
     // bounded LIKE fallback (`execute_like_fallback`) instead of a forced
     // empty result. `searched`/`candidates` above already reflect that.
 
-    // Cross-scope merge is rank-based: RRF score desc, tie-break (scope_id,
-    // chunk_hash) — never compare raw BM25 across corpora (05 §1.8 / CT3-MULTI-002).
+    // Cross-scope merge (05 §1.8): sort by RRF score desc, tie-break (scope_id,
+    // chunk_hash). The TEXT backend's contribution stays per-scope-rank-based —
+    // raw BM25 is never compared across corpora (CT3-MULTI-002, per-corpus
+    // IDF/length stats make it incomparable). The VECTOR backend's contribution,
+    // however, IS globally comparable: every scope shares one embedding profile
+    // (03 §7), so a chunk's cosine to the query is meaningful across scopes.
+    // `regrade_vector_rank_globally` (2026-07-24) therefore re-fuses `rrf_score`
+    // with a GLOBAL cosine rank for the vector term, so a within-scope rank-2
+    // answer with a high absolute cosine is no longer buried under every other
+    // scope's rank-1 (the airtight `--all-scopes hit ⟺ within-scope rank == 1`
+    // failure the contextual-embedding round surfaced). Guarded to >1 scope so a
+    // single-scope search is byte-identical to the per-scope fusion (its global
+    // vector rank already equals its per-scope one).
+    if matches!(mode.resolved, SearchMode::Vector | SearchMode::Hybrid) {
+        if let Some(query_vec) = query_embedding.as_deref() {
+            regrade_vector_rank_globally(&mut candidates, query_vec, rrf_config);
+        }
+    }
     candidates.sort_by(|a, b| {
         b.rrf_score
             .total_cmp(&a.rrf_score)
@@ -3585,6 +3708,8 @@ fn search_one_scope_inner(
             scope_path: exec.target.kcs_dir.clone(),
             chunk_hash: candidate.chunk_hash,
             rrf_score: candidate.rrf_score,
+            text_rank: candidate.text_rank,
+            vector_rank: candidate.vector_rank,
             meta: chunk_meta.clone(),
             bindings: grouped_bindings
                 .get(&SearchContentKey {
@@ -14358,8 +14483,7 @@ fn send_embed_batch(
     let items = to_send
         .iter()
         .map(|group| {
-            let context =
-                embedding_store::chunk_embedding_context(&group.representative.raw_path);
+            let context = embedding_store::chunk_embedding_context(&group.representative.raw_path);
             EmbeddingItem {
                 id: group.representative.chunk_id.clone(),
                 text: Some(embedding_store::contextualized_embedding_input(
@@ -21152,6 +21276,96 @@ mod tests {
         let attempt = valid.reserve_file(4).unwrap();
         valid.finish_success(&attempt, 4);
         assert_eq!(valid.remaining_bytes, 6);
+    }
+
+    /// 05 §1.8 (2026-07-24): the cross-scope merge re-fuses the VECTOR term with
+    /// a GLOBAL cosine rank, so a within-scope rank-2 answer whose absolute cosine
+    /// is high outranks another scope's rank-1 whose cosine is low — the exact
+    /// `--all-scopes hit ⟺ within-scope rank == 1` bury this fixes. The text term
+    /// stays per-scope (CT3-MULTI-002). Basis-vector embeddings pin the cosines.
+    #[test]
+    fn cross_scope_merge_regrades_vector_term_by_global_cosine() {
+        use super::{regrade_vector_rank_globally, ChunkMeta, ScoredCandidate};
+        use kcs_search::rrf::RrfConfig;
+
+        fn axis_vector(components: &[(usize, f32)]) -> Vec<f32> {
+            let mut vector = vec![0.0f32; super::CHUNK_VEC_DIMENSIONS];
+            for &(axis, value) in components {
+                vector[axis] = value;
+            }
+            vector
+        }
+        fn candidate(
+            scope_id: &str,
+            chunk_hash: &str,
+            vector_rank: u64,
+            embedding: Vec<f32>,
+        ) -> ScoredCandidate {
+            ScoredCandidate {
+                scope_index: 0,
+                scope_id: scope_id.to_owned(),
+                scope_path: std::path::PathBuf::from("/x/.kcs"),
+                chunk_hash: chunk_hash.to_owned(),
+                rrf_score: 1.0 / (60.0 + vector_rank as f64),
+                text_rank: None,
+                vector_rank: Some(vector_rank),
+                meta: ChunkMeta {
+                    raw_hash: chunk_hash.to_owned(),
+                    tool_profile_hash: "sha256:p".to_owned(),
+                    gen: 0,
+                    heading_path: None,
+                    section_id: None,
+                    byte_start: 0,
+                    byte_end: 1,
+                    text: String::new(),
+                },
+                bindings: Vec::new(),
+                embedding: Some(embedding),
+            }
+        }
+
+        // query = e0. Scope A: a1 cosine 1.0 (A rank-1), a2 cosine ~0.9 (A rank-2).
+        // Scope B: b1 cosine ~0.5 (B rank-1). Per-scope RRF would put a1 and b1
+        // (both rank-1) above a2 (rank-2); global cosine must lift a2 above b1.
+        let query = axis_vector(&[(0, 1.0)]);
+        let mut candidates = vec![
+            candidate("scope_a", "a1", 1, axis_vector(&[(0, 1.0)])),
+            candidate("scope_a", "a2", 2, axis_vector(&[(0, 0.9), (1, 0.436)])),
+            candidate("scope_b", "b1", 1, axis_vector(&[(0, 0.5), (1, 0.866)])),
+        ];
+        let config = RrfConfig {
+            k: 60,
+            w_text: 1.0,
+            w_vector: 1.0,
+            candidate_depth: 200,
+        };
+        regrade_vector_rank_globally(&mut candidates, &query, config);
+        candidates.sort_by(|a, b| {
+            b.rrf_score
+                .total_cmp(&a.rrf_score)
+                .then_with(|| a.scope_id.as_bytes().cmp(b.scope_id.as_bytes()))
+                .then_with(|| a.chunk_hash.cmp(&b.chunk_hash))
+        });
+        let order: Vec<&str> = candidates.iter().map(|c| c.chunk_hash.as_str()).collect();
+        assert_eq!(
+            order,
+            vec!["a1", "a2", "b1"],
+            "global cosine must lift scope_a's rank-2 (high cosine) above scope_b's rank-1 (low cosine)"
+        );
+
+        // Single-scope pool: the guard leaves rrf_score untouched (its global
+        // vector rank already equals its per-scope one).
+        let mut single = vec![
+            candidate("scope_a", "a1", 1, axis_vector(&[(0, 1.0)])),
+            candidate("scope_a", "a2", 2, axis_vector(&[(0, 0.9), (1, 0.436)])),
+        ];
+        let before: Vec<f64> = single.iter().map(|c| c.rrf_score).collect();
+        regrade_vector_rank_globally(&mut single, &query, config);
+        let after: Vec<f64> = single.iter().map(|c| c.rrf_score).collect();
+        assert_eq!(
+            before, after,
+            "single-scope pool must be left byte-identical"
+        );
     }
 
     #[test]

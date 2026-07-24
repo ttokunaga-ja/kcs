@@ -1789,7 +1789,11 @@ fn r23_21_hybrid_per_scope_candidates_are_truncated_to_candidate_depth() {
     // mock vector (a hash of this repeated text, not the bare query) stays far
     // from the query, so it never challenges `_.md`'s cosine-1.0 vector rank 1.
     let filler = "depthprobe divergence fixture ".repeat(30);
-    fs::write(dir.path().join("text_favored.md"), format!("# T\n\n{filler}\n")).unwrap();
+    fs::write(
+        dir.path().join("text_favored.md"),
+        format!("# T\n\n{filler}\n"),
+    )
+    .unwrap();
     kcs(&dir, &["init"]).assert().success();
     json_success_embed(&dir, "mock", &["index", "--approve"]);
 
@@ -7212,7 +7216,11 @@ fn r19_4_duplicate_content_failed_chunk_converges_via_twin() {
     // embedded bare under one identical `embedding_hash`, exactly as the pre-
     // addendum `a.md`/`b.md` pair did. (KCS indexes only a scope's own directory,
     // not subfolders, so same-basename files in sibling subdirs are not an option.)
-    fs::write(dir.path().join("_.md"), format!("# 見出し AAAA\n\n{shared}")).unwrap();
+    fs::write(
+        dir.path().join("_.md"),
+        format!("# 見出し AAAA\n\n{shared}"),
+    )
+    .unwrap();
     kcs(&dir, &["init"]).assert().success();
     // Pin ALL passes to one instant so _.md's rate_limit chunks are never retry-DUE (their
     // 2s backoff never elapses) — the ONLY way its shared chunk can complete is the R19-4
@@ -7224,7 +7232,11 @@ fn r19_4_duplicate_content_failed_chunk_converges_via_twin() {
     // __.md carries the IDENTICAL section under an equally context-free name (same
     // text_hash, same `None` context, different chunk_id). Indexing it with mock embeds
     // the shared text into the `embeddings` table under the identity _.md's chunk shares.
-    fs::write(dir.path().join("__.md"), format!("# 見出し BBBB\n\n{shared}")).unwrap();
+    fs::write(
+        dir.path().join("__.md"),
+        format!("# 見出し BBBB\n\n{shared}"),
+    )
+    .unwrap();
     json_success_embed_at(&dir, "mock", now, &["index", "--approve", "--online"]);
     // `rebuild_chunk_vec` runs BEFORE embedding enrichment in a given index pass, so it is
     // the NEXT pass that links a.md's shared chunk_id to the twin's now-persisted vector —

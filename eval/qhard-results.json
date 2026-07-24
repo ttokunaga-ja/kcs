@@ -1,0 +1,145 @@
+{
+ "golden": "/Users/ttokunaga-ja/dev/github.com/ttokunaga-ja/kcs/eval/golden-queries-qhard.jsonl",
+ "queries": [
+  {
+   "query_id": "qa01",
+   "class": "hard1",
+   "hit": true,
+   "top": [
+    "incident-brief.pdf",
+    "failover-summary.pdf",
+    "incident-brief.pdf",
+    "retention-exception.pdf",
+    "latency-comparison.pptx"
+   ],
+   "expected": [
+    "incident-brief.pdf"
+   ],
+   "returncode": 0,
+   "duration_ms": 945.7
+  },
+  {
+   "query_id": "qa02",
+   "class": "hard1",
+   "hit": true,
+   "top": [
+    "retention-exception.pdf",
+    "data-governance.pdf",
+    "data-governance.pdf",
+    "incident-brief.pdf",
+    "backlog-trend.pptx"
+   ],
+   "expected": [
+    "data-governance.pdf"
+   ],
+   "returncode": 0,
+   "duration_ms": 565.1
+  },
+  {
+   "query_id": "qa03",
+   "class": "hard1",
+   "hit": true,
+   "top": [
+    "pricing-outline.pdf",
+    "customer-brief.pdf",
+    "customer-brief.pdf",
+    "retention-exception.pdf",
+    "validation-grid.png"
+   ],
+   "expected": [
+    "customer-brief.pdf"
+   ],
+   "returncode": 0,
+   "duration_ms": 565.7
+  },
+  {
+   "query_id": "qa04",
+   "class": "hard1",
+   "hit": true,
+   "top": [
+    "panel-schedule.pdf",
+    "pricing-outline.pdf",
+    "interview-review.pdf",
+    "interview-review.pdf",
+    "incident-brief.pdf"
+   ],
+   "expected": [
+    "interview-review.pdf"
+   ],
+   "returncode": 0,
+   "duration_ms": 575.7
+  },
+  {
+   "query_id": "qa05",
+   "class": "hard3",
+   "hit": true,
+   "top": [
+    "latency-chart.pptx",
+    "latency-comparison.pptx",
+    "latency-comparison.pptx",
+    "incident-brief.pdf",
+    "queue-trend.pptx"
+   ],
+   "expected": [
+    "latency-chart.pptx"
+   ],
+   "returncode": 0,
+   "duration_ms": 625.6
+  },
+  {
+   "query_id": "qa06",
+   "class": "hard3",
+   "hit": true,
+   "top": [
+    "ablation-grid.png",
+    "incident-brief.pdf",
+    "validation-grid.png",
+    "latency-comparison.pptx",
+    "defect-map.jpeg"
+   ],
+   "expected": [
+    "ablation-grid.png"
+   ],
+   "returncode": 0,
+   "duration_ms": 714.5
+  },
+  {
+   "query_id": "qa07",
+   "class": "hard3",
+   "hit": true,
+   "top": [
+    "queue-trend.pptx",
+    "context-overview.md",
+    "panel-schedule.pdf",
+    "queue-trend.pptx",
+    "backlog-trend.pptx"
+   ],
+   "expected": [
+    "queue-trend.pptx"
+   ],
+   "returncode": 0,
+   "duration_ms": 573.3
+  },
+  {
+   "query_id": "qa08",
+   "class": "hard3",
+   "hit": true,
+   "top": [
+    "defect-map.jpeg",
+    "latency-chart.pptx",
+    "queue-trend.pptx",
+    "validation-grid.png",
+    "backlog-trend.pptx"
+   ],
+   "expected": [
+    "defect-map.jpeg"
+   ],
+   "returncode": 0,
+   "duration_ms": 786.0
+  }
+ ],
+ "hits": 8,
+ "total": 8,
+ "recall_fraction": 1.0,
+ "note": "M3-1 Done 判定は run_eval.py の M3-1 18 問との合算 26 問 >= 21 (09 §5.5 #5, 2026-07-23 再凍結)"
+}
