@@ -10,7 +10,7 @@
     "file": "g1_terminal_02.png",
     "family": "G1",
     "tokens": ["G1-02-TOKEN-6194"],
-    "visible_text": "terminal; $ kio verify --ocr; status: mixed image text; token: G1-02-TOKEN-6194; メモ: 画像内テキスト確認; done in 42 ms; $",
+    "visible_text": "terminal; $ kcs verify --ocr; status: mixed image text; token: G1-02-TOKEN-6194; メモ: 画像内テキスト確認; done in 42 ms; $",
     "expect": "text-dominant"
   },
   {
@@ -66,7 +66,7 @@
     "file": "g4_receipt_photo_01.png",
     "family": "G4",
     "tokens": ["G4-01-TOKEN-4086"],
-    "visible_text": "領収書; G4-01-TOKEN-4086; 日付 2026-07-03; OCR検証費; 合計 4,860円; 担当 KIO",
+    "visible_text": "領収書; G4-01-TOKEN-4086; 日付 2026-07-03; OCR検証費; 合計 4,860円; 担当 KCS",
     "expect": "image-dominant"
   },
   {

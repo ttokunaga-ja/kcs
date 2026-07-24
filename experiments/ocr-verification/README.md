@@ -93,6 +93,14 @@ python evaluate.py
 - 系統 (family): G1 UI/エディタ, G2 スライド, G3 ホワイトボード, G4 写真書類, G5 インフォグラフィック
 - 各画像は `tokens` (一意トークン)・`visible_text`・`expect` (`text-dominant` / `mixed` / `image-dominant`) を持つ
 
+> **`ground-truth.json` を一括置換の対象にしないこと。**
+> `visible_text` は「画像の**画素に描かれている文字**」の写しであり、プロダクトの現在名ではありません。
+> 画像は 2026-07 の旧名時点で生成されており、`g1_terminal_02.png` には `$ kcs verify --ocr`、
+> `g4_receipt_photo_01.png` には `担当 KCS` が**画素として焼き込まれています**。
+> ここを新名へ書き換えると、OCR が正しく読めた場合に不一致と採点され、**採点が静かに壊れます**
+> (KCS→Kio リネーム時に実際に混入し、画像を目視して復元しました)。
+> 名前を変えたい場合は ground truth ではなく**画像を再生成**してください。
+
 ### 1. PDF と ground truth を生成
 
 ```bash
