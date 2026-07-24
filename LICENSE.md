@@ -90,13 +90,21 @@ A **product** can be a good or service, or a combination of them.
 
 ---
 
-The following plain-text lines are provided by the licensor with the software.
-Under [Notices](#notices), anyone who receives any part of the software must
-also receive these lines.
+## Licensor-provided information — not part of the standard PolyForm Shield 1.0.0 text
+
+Everything above this heading is the unmodified text of PolyForm Shield License
+1.0.0. Nothing below adds to, limits, or changes those terms. The lines below
+are supplied by the licensor with the software, as that text contemplates.
+
+The `Required Notice:` line is supplied for [Notices](#notices): anyone who
+receives any part of the software must also receive that line. The separate
+`Licensor Line of Business:` line is supplied for
+[Discontinued Products](#discontinued-products) and is not a required notice.
 
 Required Notice: Copyright 2026 TOKUNAGA Takumi (https://github.com/ttokunaga-ja/kio)
 
 Licensor Line of Business: Kio — a local-first knowledge archive that indexes, searches and preserves local files with evidence pointers (https://github.com/ttokunaga-ja/kio)
 
-Kio is also available under a separate commercial license for uses that
-[Noncompete](#noncompete) does not permit. See COMMERCIAL-LICENSE.md.
+For reference only, and granting no rights: uses that [Noncompete](#noncompete)
+does not permit may be licensed separately by written agreement with the
+licensor. See COMMERCIAL-LICENSE.md.

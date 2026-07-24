@@ -63,6 +63,12 @@ Toolchain is `stable` (see `rust-toolchain.toml`); the workspace declares
 By submitting a contribution to this project, you agree to the following terms
 for that contribution and every contribution you have previously submitted.
 
+> **The English text of this Contributor License Agreement is the binding text.**
+> The Japanese section at the end of this file is a partial summary provided for
+> convenience only; it is not a complete translation, and where the two differ,
+> the English text controls. If you cannot read the English text, please do not
+> submit a contribution.
+>
 > This section is a license grant, not legal advice. If you are contributing on
 > behalf of an employer, or you are unsure whether you hold the rights described
 > below, please get advice before submitting.
@@ -88,8 +94,12 @@ This last clause is the point of this agreement. Kio is offered both under a
 source-available license and under negotiated commercial licenses
 ([COMMERCIAL-LICENSE.md](COMMERCIAL-LICENSE.md)). The licensor cannot offer a
 commercial license covering your contribution without your permission to do so.
-If you are not willing to grant that, please do not submit a contribution — open
-an issue describing the change instead, and it can be implemented independently.
+
+If you are not willing to grant that, **do not submit code, patches, tests,
+documentation text, or other material for inclusion.** You may still open an
+issue limited to a high-level description of the problem or the behavior you
+want; such an issue is not a contribution under section 1 and grants no license
+to its text, and the licensor may implement the underlying idea independently.
 
 **4. Patent license.** You grant the licensor and every recipient of Kio a
 perpetual, worldwide, non-exclusive, irrevocable, royalty-free patent license to
@@ -132,8 +142,14 @@ Agreement above for that contribution.
 
 # 日本語
 
+> **重要**: 拘束力を持つのは**英文の CLA 全文**です。以下の日本語は便宜のための
+> **部分的な要約であり、完全な対訳ではありません**。英文には、遡及適用・取消不能性・譲渡可能性・
+> 多階層のサブライセンス・第三者素材の開示・無保証など、下記に記載のない条項が含まれます。
+> 両者が異なる場合は**英文が優先**します。**英文を理解できない場合は、貢献を提出しないでください。**
+> 本節は参考訳であり、法的助言ではありません。
+
 貢献をご検討いただきありがとうございます。Kio は**デュアルライセンス**のため、
-Pull Request を出す前に上記の **Contributor License Agreement (CLA)** を必ずお読みください。
+Pull Request を出す前に上記の **Contributor License Agreement (CLA) 英文全文**を必ずお読みください。
 
 ## 実装の前に
 
