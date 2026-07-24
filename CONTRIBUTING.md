@@ -1,5 +1,21 @@
 # Contributing to Kio
 
+> ## Kio is not accepting external code contributions yet
+>
+> Kio is pre-release and maintained by one person. The contribution process —
+> in particular the Contributor License Agreement below — has not been through
+> legal review, and it would be unfair to ask you to sign something we are not
+> yet confident in. **Pull requests are therefore not being merged at this
+> time.**
+>
+> **What is welcome right now:** bug reports, questions, and design feedback as
+> issues. Security problems should go through [SECURITY.md](SECURITY.md), not a
+> public issue.
+>
+> The rest of this document describes the process we intend to use once
+> contributions open. It is published so you can see the terms in advance, not
+> because they are in force. Watch the repository for the announcement.
+
 Thank you for considering a contribution. Please read the
 [Contributor License Agreement](#contributor-license-agreement) below before
 opening a pull request — Kio is dual-licensed, and that has consequences for
@@ -141,6 +157,18 @@ Agreement above for that contribution.
 ---
 
 # 日本語
+
+> ## Kio は現在、外部からのコード貢献を受け付けていません
+>
+> Kio はプレリリースであり、単独メンテナで開発しています。以下の CLA は法務レビューを
+> 受けておらず、確信の持てない条件への同意をお願いするのは不適切と考えるため、
+> **現時点で Pull Request はマージしません**。
+>
+> **歓迎するもの**: バグ報告・質問・設計へのフィードバック (issue でどうぞ)。
+> セキュリティの問題は public issue ではなく [SECURITY.md](SECURITY.md) の手順でお願いします。
+>
+> 以下は貢献を受け付け始めた際に適用する予定の手続きです。事前に条件を確認できるよう
+> 公開しているもので、現在効力を持つものではありません。
 
 > **重要**: 拘束力を持つのは**英文の CLA 全文**です。以下の日本語は便宜のための
 > **部分的な要約であり、完全な対訳ではありません**。英文には、遡及適用・取消不能性・譲渡可能性・

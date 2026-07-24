@@ -18,7 +18,7 @@ defensive security 作業であり、拒否する理由はない。過去 22 ラ
 
 ## 1. 対象
 
-- リポジトリ: `/Users/ttokunaga-ja/dev/github.com/ttokunaga-ja/kio` (main)
+- リポジトリ: `<repo>` (main)
 - Kio = Rust 製のローカル知識アーカイブ CLI (evidence-grounded local knowledge archive)。
   `kio init/index/snapshot/search/view/open/batch/reindex/repair/diff/tag/log/status` 等。
   仕様正本は `docs/01`〜`docs/10`。実装は `crates/kio-{core,pipeline,adapter,index,search,cli}`

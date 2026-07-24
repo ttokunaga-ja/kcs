@@ -77,8 +77,15 @@ the implementation follows them, not the other way around.
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md). Kio is dual-licensed, so contributions
-are covered by a CLA; please read it before opening a pull request.
+**Kio is not accepting external code contributions yet** — bug reports,
+questions, and design feedback as issues are very welcome. See
+[CONTRIBUTING.md](CONTRIBUTING.md) for the reasoning and for the terms that will
+apply once contributions open.
+
+## Security
+
+Please report vulnerabilities privately — see [SECURITY.md](SECURITY.md). Do not
+open a public issue for a security problem.
 
 ## License
 
@@ -154,8 +161,13 @@ opt-in 後は対象ファイルの内容が当該 Adapter へ送信され、**�
 
 ## 貢献
 
-貢献方法は [CONTRIBUTING.md](CONTRIBUTING.md) を参照してください。Kio は**デュアルライセンス**の
-ため、貢献には **CLA** が適用されます。Pull Request を開く前に必ずお読みください。
+**現在、外部からのコード貢献は受け付けていません。** バグ報告・質問・設計へのフィードバックは
+issue で歓迎します。理由と、受付開始後に適用予定の条件は [CONTRIBUTING.md](CONTRIBUTING.md) を
+参照してください。
+
+## セキュリティ
+
+脆弱性は public issue ではなく、[SECURITY.md](SECURITY.md) の手順で**非公開でご報告ください**。
 
 ## ライセンス
 

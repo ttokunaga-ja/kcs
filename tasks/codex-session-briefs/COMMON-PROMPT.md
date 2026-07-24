@@ -29,7 +29,7 @@ Kio の評価用 fixture コーパスのうち、**ユースケース `NN` (`pNN
 1. **担当ブリーフ (最重要・完全な仕様)**
 
    ```
-   /Users/ttokunaga-ja/dev/github.com/ttokunaga-ja/kio/tasks/codex-session-briefs/usecase-NN-pNN.md
+   <repo>/tasks/codex-session-briefs/usecase-NN-pNN.md
    ```
 
    全文を読んでください。担当ファイルの完全リスト、形式分布、正解クエリ契約、
@@ -60,7 +60,7 @@ Kio の評価用 fixture コーパスのうち、**ユースケース `NN` (`pNN
 
 - **自分の `pNN` 以外のディレクトリを、作らない・読み書きしない。**
   他の persona は別セッションが並行して担当しています。
-- Kio リポジトリ (`/Users/ttokunaga-ja/dev/github.com/ttokunaga-ja/kio/`) には
+- Kio リポジトリ (`<repo>/`) には
   **書き込まない**。読むだけです。
 
 ---

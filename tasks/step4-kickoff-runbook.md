@@ -8,7 +8,7 @@ Kio の Step 4 実装を開始できる。自己完結の着手手順。
 ## 0. これは何か
 
 Kio = 開発者自身が所有する Rust 製ローカル知識アーカイブ CLI (evidence-grounded local knowledge
-archive)。`/Users/ttokunaga-ja/dev/github.com/ttokunaga-ja/kio` (main)。仕様正本 docs/01〜10、
+archive)。`<repo>` (main)。仕様正本 docs/01〜10、
 実装は crates/kio-{core,pipeline,adapter,index,search,cli}。
 
 **Step 1-3 は実装・多エンジン監査・実 API 検証まで完了して main にマージ済み** (着手時点でテスト
