@@ -139,7 +139,7 @@ P0/P1/P2 集計は末尾 §Q。
 ### PA04 tombstone 判定 (手順2) は working tree/cache の状態に関わらず最優先で独立に適用される [P0]
 - 正本: 06 §1.1 L135-138『2. tombstone 判定 (最優先): raw_hash の **canonical final event が
   `purged`**...working tree・cache の状態に**関わらず** §7 の規約どおり exit 4 — purge 済み原本が
-  folder に残っていても KIO 経由では開かない』
+  folder に残っていても Kio 経由では開かない』
 - 前提: raw_hash `X` の canonical final event が `purged`。working tree に `X` と同一 raw_hash の
   ファイルが実在し、かつ `~/.cache/kio/open/<X digest64>/` に過去の展開 cache も残存している。
 - 操作: `kio open` に `X` を指す pointer/raw_hash を渡す。
@@ -707,14 +707,14 @@ P0/P1/P2 集計は末尾 §Q。
   維持しつつ、PA37 の「同一 path ではないが同一 bytes」という別名残存ケースに限って警告表示を新設する、
   という折衷解も spec と非矛盾に見える)。
 
-### PA39 現状の `KIO-E-PURGE-WORKING-COPY-001` hard block は working tree 直接削除をしない KIO の原則と両立する形で残置してよい [P2]
-- 正本: 02 §2.4 引用『KIO はユーザーのファイルを削除しない』/ 05 §3.5 L741『working tree の原本には
+### PA39 現状の `KIO-E-PURGE-WORKING-COPY-001` hard block は working tree 直接削除をしない Kio の原則と両立する形で残置してよい [P2]
+- 正本: 02 §2.4 引用『Kio はユーザーのファイルを削除しない』/ 05 §3.5 L741『working tree の原本には
   触れない』
 - 前提: PA38 の解釈割れを受け、`refuse_live_working_copy` を維持する裁定が下されたと仮定する。
 - 操作: raw_hash `X` が現在の HEAD tree に同一 path・同一 raw_hash で存在する状態 (working tree
   ファイルがそのまま生きている、リネームなし) で purge を試みる。
 - 期待: `KIO-E-PURGE-WORKING-COPY-001` (exit 4) で拒否され、working tree のファイルには一切触れない
-  (削除・リネームしない) — この場合の hard block は「KIO はユーザーファイルを削除しない」原則と
+  (削除・リネームしない) — この場合の hard block は「Kio はユーザーファイルを削除しない」原則と
   矛盾しない (むしろ purge が完了したのに原本が生き残ることの防止として機能する)。本契約は PA38 の
   解釈割れとは独立に、hard block を採用する場合でも working tree 自体には不干渉であることを固定する。
 

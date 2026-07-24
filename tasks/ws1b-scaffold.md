@@ -2,7 +2,7 @@
 
 ## 目的
 
-KIO Step 1 (kio-core + kio-cli) の実装土台となる Rust workspace を作る。**ビジネスロジックは実装しない** — 構造・CI・CLI 骨格のみ。
+Kio Step 1 (kio-core + kio-cli) の実装土台となる Rust workspace を作る。**ビジネスロジックは実装しない** — 構造・CI・CLI 骨格のみ。
 
 ## 必読 (このリポジトリの docs/ が正本)
 

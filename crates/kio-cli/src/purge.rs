@@ -299,14 +299,14 @@ fn execute_phase_machine(
     // final source recheck/staging/publication window. Lock order is always scope
     // store -> purge publication; restore takes only the latter.
     let _publication_lock = StoreLock::acquire_path(purge_publication_lock_path(repo.kio_dir()))?;
-    // Re-run after reacquiring the store lock: a prior KIO writer could have
+    // Re-run after reacquiring the store lock: a prior Kio writer could have
     // crashed between preview cleanup and this confirmed phase-machine entry.
     cleanup_orphan_raw_ingest_temps(repo.kio_dir())?;
 
     let state = PurgeState::new(repo.kio_dir());
     let active = state.read_journal()?;
     // PA37-39 (§K, U34; §R ruling #1): a working-tree residual of the exact
-    // same bytes is a WARNING, never a purge-blocking hard failure — "KIO
+    // same bytes is a WARNING, never a purge-blocking hard failure — "Kio
     // does not delete the user's files" cuts the other way here: purge must
     // still complete (05 §3.5 L741 "working tree の原本には触れない" — this
     // check exists to warn, not to hold the object-store side hostage to a
@@ -1678,7 +1678,7 @@ fn validate_real_directory(path: &Path) -> Result<()> {
     }
     // On Windows, `is_symlink` does not cover every directory reparse-point
     // kind (notably junctions).  Purge recursively deletes normalized/cache
-    // trees, so descending through one could unlink files outside KIO.  Verify
+    // trees, so descending through one could unlink files outside Kio.  Verify
     // the opened directory handle before every traversal step.
     #[cfg(windows)]
     if !kio_core::cas::windows_directory_is_real(path)
@@ -1965,7 +1965,7 @@ fn success_report(plan: &PurgePlan, report: &PurgeReport) -> Value {
             "external backups and Time Machine",
             "exported or manually copied files",
             "cloud-sync past versions",
-            "logs outside KIO management"
+            "logs outside Kio management"
         ],
     })
 }

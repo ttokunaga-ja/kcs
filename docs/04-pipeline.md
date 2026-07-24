@@ -32,7 +32,7 @@ SQLite (FTS5 + sqlite-vec, query acceleration)
 
 ## 1.1 ingest / スキャンの安全規則
 
-working tree の読み取りは次の規則に従う (出典: 旧 `research/folder-history-sqlite-design.md` §20 の監査済み規範の KIO 適応 — 2026-07-18 撤去、git 履歴で参照可):
+working tree の読み取りは次の規則に従う (出典: 旧 `research/folder-history-sqlite-design.md` §20 の監査済み規範の Kio 適応 — 2026-07-18 撤去、git 履歴で参照可):
 
 - **単一 open**: raw_hash の計算と保存する bytes は**同一の open・同一のストリーム**から得る。hash 用と
   保存用に 2 回 open すると、その間の書き換えで「hash A の名前に内容 B」が保存され得る (CAS の破壊)
@@ -175,7 +175,7 @@ fingerprint 導入 (Phase 4+) まで採用しない)。プラットフォーム�
 ## 2.2 unit_mapping — 旧新 unit の対応付け
 
 ページ挿入/削除で位置ベースの unit_key (`page:12` 等) はずれるため、キーの単純比較では
-先頭挿入 1 枚で全 unit が「変更」になってしまう。KIO は Markdownize の前に、fingerprint
+先頭挿入 1 枚で全 unit が「変更」になってしまう。Kio は Markdownize の前に、fingerprint
 ベースで旧 unit と新 unit を対応付ける (**unit_mapping**)。
 
 入力: 旧 instance の manifest (order 順) と、新 raw の prepared unit 列 (order 順)。
@@ -205,7 +205,7 @@ fingerprint 導入 (Phase 4+) まで採用しない)。プラットフォーム�
 帰結:
 
 ```text
-unchanged        reason="fingerprint_exact" の新 unit。KIO が旧 unit の markdown を
+unchanged        reason="fingerprint_exact" の新 unit。Kio が旧 unit の markdown を
                  新 unit_key で再利用する (LLM 呼び出しなし)。unit object は新 instance へ
                  複製し、reused_from に旧 (raw_hash, gen, unit_key) を記録する
 changed_unit_keys reason="order_aligned" の新 unit_key
@@ -280,7 +280,7 @@ raw / prepared → normalized。非 text-native は文書処理 API 系 Adapter 
 ```
 
 `hints` の changed / added / removed は unit_mapping (§2.2) の帰結をそのまま渡す。
-`fingerprint_exact` で対応が付いた unit (unchanged) は KIO が unit_key を付け替えて再利用済み
+`fingerprint_exact` で対応が付いた unit (unchanged) は Kio が unit_key を付け替えて再利用済み
 であり、Adapter には渡さない。
 
 **Adapter 出力契約**:
@@ -302,9 +302,9 @@ Adapter 側に「軽微とは言えない」拒否権あり (`fallback_to_full=t
 
 **identity 不変性**: incremental/full で出力が異なっても identity は `(raw_hash, tool_profile_hash)` のまま。`tool_profile_hash` 計算入力に incremental flag は含めない。
 
-## 3.2 incremental 出力の受け入れ検査 (KIO 側 validation)
+## 3.2 incremental 出力の受け入れ検査 (Kio 側 validation)
 
-KIO は Adapter の incremental 出力を **manifest / objects へ確定 persist (publish) する前に** 次を
+Kio は Adapter の incremental 出力を **manifest / objects へ確定 persist (publish) する前に** 次を
 検証する (受け入れ検査前の staging への耐久 persist ([07-adapter-spec.md §8.3](07-adapter-spec.md))
 は禁止対象ではない — 「検査前の unit は公開しない」の「公開」がこの確定 persist)。新 unit 全集合 `N` は
 unit_mapping (§2.2) の帰結 (`unchanged 候補 ∪ changed ∪ added`)。
@@ -318,9 +318,9 @@ V1 被覆・排他: keys(updated_units) ∪ keys(added_units) ∪ unchanged_unit
               failed_units には適用しない)。さらに
               keys(failed_units) ⊆ hints.changed_unit_keys ∪ hints.added_unit_keys
               (Adapter に渡していない unchanged 候補 — fingerprint-exact 再利用 unit — は
-              KIO 側確定であり failed にできない)。さらに
+              Kio 側確定であり failed にできない)。さらに
               unchanged_unit_keys は §2.2 の unchanged 候補集合と**完全一致** (changed / added の
-              unit を unchanged と申告して旧内容を成功公開させるのは違反 — 集合は KIO 側確定)
+              unit を unchanged と申告して旧内容を成功公開させるのは違反 — 集合は Kio 側確定)
 V2 removed:   removed_unit_keys が hints.removed_unit_keys と完全一致
 V3 越権禁止:  keys(updated_units) ⊆ hints.changed_unit_keys
               (hints に無い unit の書き換え = unchanged unit の再出力違反の検出)
@@ -350,12 +350,12 @@ V6 mode:      mode_used = "full" の場合は full 出力契約として検証:
 (`base16(sha256(unit_key))[0:16]` — [03-data-model.md §2](03-data-model.md)) **へ写像されること**を
 いう。同一 unit_key の再出現 (full retry・incremental 更新・staging 凍結分の再受領) は衝突では
 ない — first-instance-wins と凍結規則の側で扱う。検査対象は persist 前に確定する**合成後の最終
-unit 集合** (応答の unit + KIO 合成の unchanged 再利用 unit + 既存 manifest から保持する unit —
+unit 集合** (応答の unit + Kio 合成の unchanged 再利用 unit + 既存 manifest から保持する unit —
 full / incremental / retry 合成のいずれも、合成後の集合に対して unit_key → unit_ref の単射性を
 検査する)。衝突があれば persist 先 `<unit_ref>.json` が競合するため当該応答を whole-response
 reject とする (実用上は起こらない 64bit 衝突の防衛線 — 検査は persist 前の V 検査と同時に行う)。
 
-**制御応答 (fallback_to_full=true)**: `fallback_to_full=true` の応答は V1〜V6 に**先立ち**制御応答として評価する — unit 配列・unchanged / removed は空であること (非空は contract violation)。KIO は当該応答を成功・失敗のどちらの終端にもせず、**同一 task を `mode=full` で再発行する** (§3.1 の発動条件は再評価しない — Adapter 判断を尊重。full 応答での `fallback_to_full=true` は contract violation = ループ防止)。この評価順が無いと、§8.1 の「短絡」拒否権 ([07-adapter-spec.md §8.1](07-adapter-spec.md)) が V1 被覆違反 → 再試行 → failed permanent の死路になる。**終端の単位は request である**: 正常な制御応答の受領は当該 request の終端 (task は非終端) — 実測 usage を `outcome='fallback_to_full'` で確定記帳し state=3 を同一 Tx で行い (§5.4 / §5.8。sync 行は同 Tx で intent_token を NULL 化、batch 行は残骸掃除完了時 = 通常規則)、その後 `mode=full` の新 request を相 1 (submission_seq = MAX+1) として開始する (§5.4 の直列化規範を満たす)。正常な制御応答は `attempts` / `contract_violation_count` のどちらにも数えない (違反ではなく §5.2 の retry でもない) — 発動条件 5 の連続 incremental カウンタにも数えない (§3.1)。
+**制御応答 (fallback_to_full=true)**: `fallback_to_full=true` の応答は V1〜V6 に**先立ち**制御応答として評価する — unit 配列・unchanged / removed は空であること (非空は contract violation)。Kio は当該応答を成功・失敗のどちらの終端にもせず、**同一 task を `mode=full` で再発行する** (§3.1 の発動条件は再評価しない — Adapter 判断を尊重。full 応答での `fallback_to_full=true` は contract violation = ループ防止)。この評価順が無いと、§8.1 の「短絡」拒否権 ([07-adapter-spec.md §8.1](07-adapter-spec.md)) が V1 被覆違反 → 再試行 → failed permanent の死路になる。**終端の単位は request である**: 正常な制御応答の受領は当該 request の終端 (task は非終端) — 実測 usage を `outcome='fallback_to_full'` で確定記帳し state=3 を同一 Tx で行い (§5.4 / §5.8。sync 行は同 Tx で intent_token を NULL 化、batch 行は残骸掃除完了時 = 通常規則)、その後 `mode=full` の新 request を相 1 (submission_seq = MAX+1) として開始する (§5.4 の直列化規範を満たす)。正常な制御応答は `attempts` / `contract_violation_count` のどちらにも数えない (違反ではなく §5.2 の retry でもない) — 発動条件 5 の連続 incremental カウンタにも数えない (§3.1)。
 
 違反時の挙動:
 
@@ -547,7 +547,7 @@ CREATE VIRTUAL TABLE chunk_vec USING vec0(
 
 **query cache (`target_type='query_cache'`)**: cursor replay が pin する page 1 の query vector ([05-runtime.md §1.5](05-runtime.md)) の正本。`target_id` = **query_vector_digest** = `"sha256:" + base16(sha256(vector BLOB))`。`id` は [03-data-model.md §8.1](03-data-model.md) の embedding identity 式を `target_type: "query_cache"` / `target_hash: <query_vector_digest>` で適用して導出する — 同一 (digest, profile) の再挿入は同一 `id` に確定するため `ON CONFLICT(id) DO NOTHING` で冪等。**INSERT と 256 行剪定は同一 SQLite Tx で cursor 返却前に完了する** (剪定が別 Tx だと返却済み cursor の行を直後に消し得る)。vector BLOB の canonical 表現は **float32 little-endian の連続配列 (`dimensions` 個、L2 正規化済み)** — chunk embedding の保存表現と同一で、digest はこの bytes に対して計算する。**query 本文・text_hash は保存しない** (保存物は vector と digest のみ — redact 既定 ([10-operations.md §7](10-operations.md)) と整合し、行削除はいつでも安全 = 影響は当該 cursor の拒否のみ)。書込は検索に参加した各 scope の sqlite.db へ行い、上限は **scope あたり 256 行** (超過時は最小 rowid の行から削除)。書込先は embedding 承認の有無と無関係である (consent gate ([05-runtime.md §1.1](05-runtime.md)) は新規送信の規範であり、受信済み query vector のローカル cache 書込は対象外 — 保存物に query 本文は含まれない)。この行だけは `objects/` から再構築できないため `kio repair --rebuild-db` では復元せず破棄する (依存 cursor は `KIO-E-SEARCH-CURSOR-001` → 再検索が正)。purge の SQLite 行列挙の候補にも含めない (文書 lifecycle と無関係 — [05-runtime.md §3.5](05-runtime.md))。chunk_vec へは展開しない (検索対象ではない)。
 
-KIO は Text/Image を分けず **単一マルチモーダル Embedding Adapter** のみを許可する (非 multimodal profile は `KIO-E-EMBED-MODALITY-001` で採用拒否、[03-data-model.md §7](03-data-model.md))。
+Kio は Text/Image を分けず **単一マルチモーダル Embedding Adapter** のみを許可する (非 multimodal profile は `KIO-E-EMBED-MODALITY-001` で採用拒否、[03-data-model.md §7](03-data-model.md))。
 
 ## 4.4 その他のテーブル / ストアの正本
 
@@ -941,9 +941,9 @@ chunk の文字数のみ**を対象とし、再利用 chunk (API 非呼出) は�
 
 Batch 型 online Adapter ([07-adapter-spec.md §5.7](07-adapter-spec.md)) は「upload → job 作成 →
 collect」の各段の間にクラッシュ窓があり、provider 側に課金・機密の実体 (upload・job) が残る。
-§5.5 の done 短絡はローカル出力の重複を防ぐだけで、**provider 側に作成済みの job を KIO が知らない
+§5.5 の done 短絡はローカル出力の重複を防ぐだけで、**provider 側に作成済みの job を Kio が知らない
 状態 (無記録の in-flight)** は防げない。二重課金防止は次の 2 相プロトコルを正本とする (設計出典:
-旧 `research/folder-history-sqlite-design.md` §9 の多エンジン監査 r8〜r20 で固めた機構の KIO 適応 —
+旧 `research/folder-history-sqlite-design.md` §9 の多エンジン監査 r8〜r20 で固めた機構の Kio 適応 —
 2026-07-18 撤去、git 履歴で参照可。原則 = **外部に副作用を起こす前に意図を耐久記録する**。課金の
 記録喪失は有界だが、無記録の in-flight job は無制限に残る)。
 

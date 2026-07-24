@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""履歴シナリオの決定論的再現 (KIO 検索評価ハーネス, docs/09-mvp-scope.md §4.3).
+"""履歴シナリオの決定論的再現 (Kio 検索評価ハーネス, docs/09-mvp-scope.md §4.3).
 
 生成済みコーパス (generate_corpus.py の出力) に対し、各 scope で
     kio init -> kio index --approve -> kio snapshot
@@ -218,7 +218,7 @@ def build_manifest(per_scope, old_hashes):
 
 def main(argv=None):
     here = os.path.dirname(os.path.abspath(__file__))
-    ap = argparse.ArgumentParser(description="KIO 履歴シナリオ再現 (決定論的)")
+    ap = argparse.ArgumentParser(description="Kio 履歴シナリオ再現 (決定論的)")
     ap.add_argument("--corpus", required=True, help="generate_corpus.py の出力ディレクトリ")
     ap.add_argument("--bin", default="target/release/kio", help="kio バイナリのパス")
     ap.add_argument("--manifest", default=None,

@@ -3,10 +3,10 @@
 This module is deliberately an arithmetic/capacity oracle.  It expands one
 canonical persona W0 plan at a time and builds the corresponding canonical
 P/X/Y/N allocation, but it never builds a full event manifest and never
-observes KIO.  Worker/suite values accepted here are caller-declared schema
+observes Kio.  Worker/suite values accepted here are caller-declared schema
 projections only.  Artifact readback plus supervisor ``wait4`` evidence remains
 mandatory before any formal capacity gate; these projections cannot authorize
-a physical write or stand in for a KIO chunk/history attestation.
+a physical write or stand in for a Kio chunk/history attestation.
 """
 
 from __future__ import annotations

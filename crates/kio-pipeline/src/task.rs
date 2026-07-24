@@ -13,7 +13,7 @@ use crate::store_path::{resolve_existing_store_path, StorePathKind};
 use crate::{IoResultExt, PipelineError, Result};
 
 /// Hard limits for persisted task state. They are deliberately above the normal
-/// batch sizes, but finite so an adopted `tasks.jsonl` cannot make KIO allocate
+/// batch sizes, but finite so an adopted `tasks.jsonl` cannot make Kio allocate
 /// attacker-selected amounts before it reaches semantic validation.
 pub const MAX_TASK_STORE_BYTES: u64 = 64 * 1024 * 1024;
 pub const MAX_TASK_RECORD_BYTES: u64 = 256 * 1024;

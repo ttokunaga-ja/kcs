@@ -62,7 +62,7 @@ GPT-5.5 #1 + Opus 所見1 (独立収束)。オーケストレータ実証 r12a /
   store_request_body / store_response_body / require_command_confirmation)。docs/07:97 は
   `.kio/config.toml` を明示。docs/10:706-707 (§12.6) は redact_logs を「false への変更は明示設定のみで
   行える」と現行機能として明記。docs/07 §7.1 で Phase 4+ とされるのは OS sandbox 強制のみで、
-  KIO 側入力制御 + 事後監査は MVP 契約
+  Kio 側入力制御 + 事後監査は MVP 契約
 - schema は `adapter.policy` に allow_network のみ + `additionalProperties: false`
   (config.schema.json:73-81)
 - **実証 (r12a)**: scope config に `[adapter.policy] allow_network=false / redact_logs=true` (docs の例の
@@ -83,7 +83,7 @@ GPT-5.5 #1 + Opus 所見1 (独立収束)。オーケストレータ実証 r12a /
    require_command_confirmation=false。デフォルト値は無害受理 (現行動作と一致: scope 封じ込め=P1、
    本文非保存、確認フロー既存)
 4. max_input_bytes は入力ゲートとして実配線 (prepare/enqueue 前のサイズ検査 — docs/07 §7.1.2 の
-   「KIO 側の入力制御」は MVP 契約)。timeout_seconds は実配線が小さく収まるなら配線、
+   「Kio 側の入力制御」は MVP 契約)。timeout_seconds は実配線が小さく収まるなら配線、
    大工事になるなら非デフォルト値を NOT-IMPLEMENTED で loud 拒否 (silent 受理だけは不可)
 5. 回帰テスト: docs/07 §7 ブロック全文を scope config に貼って全コマンド exit 0 (非デフォルト
    enforcement 値を含む場合はその key だけ loud エラー) / user config redact_logs=false が

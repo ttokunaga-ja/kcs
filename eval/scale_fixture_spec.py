@@ -28,7 +28,7 @@ CHUNKING_CONFIG_HASH = (
 MINIMUM_CURRENT_CHUNKS = 100_001
 
 
-# ASCII-only portable leaves.  Each scope is a direct-child folder and KIO only
+# ASCII-only portable leaves.  Each scope is a direct-child folder and Kio only
 # indexes files directly below it (docs/03-data-model.md section 3).
 SCOPES = (
     {

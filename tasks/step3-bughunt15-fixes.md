@@ -166,7 +166,7 @@ device budget cap を silent bypass (F8 予約が過少)。R11-6 (retry 按分) 
 
 ## R15-6 [major] incremental Markdownize が「変更 0・追加 0 unit」でも発動し、0 ページ要求のまま全文書を送信 (R14-4 の空 hint 境界・mock 隠蔽)
 
-**収束**: Claude-Sonnet-D (所見2)。静的立証 + KIO 側決定木の mock 実証。
+**収束**: Claude-Sonnet-D (所見2)。静的立証 + Kio 側決定木の mock 実証。
 
 **根拠 (file:line)**:
 - `crates/kio-pipeline/src/markdownize.rs:242-251` `choose_markdownize_mode` — `change_rate >= threshold` のみ Full に落とす。
@@ -179,7 +179,7 @@ device budget cap を silent bypass (F8 予約が過少)。R11-6 (retry 按分) 
 - 契約: `docs/04-pipeline.md:236-237` 「fingerprint_exact で unchanged な unit は Adapter に渡さない」。全 unit unchanged なら通信不要のはず。
 
 **再現 (Sonnet-D, mock)**: v2 PDF (先頭コメントのみ変更・ページ本文 byte 不変) → `mode:"incremental", changed_unit_keys:[], status:"done"`
-= KIO 側決定木がこの分岐へ確実に到達。既存 R14-4 テスト (`r14_4_incremental_scopes_pages_to_changed_units`) は非空 hint のみ検証 = 空 hint 境界未網羅。
+= Kio 側決定木がこの分岐へ確実に到達。既存 R14-4 テスト (`r14_4_incremental_scopes_pages_to_changed_units`) は非空 hint のみ検証 = 空 hint 境界未網羅。
 
 **期待 vs 実際**: 期待 = 変化率 0 なら 100% 再利用で adapter 呼び出しゼロ。実際 = incremental 発動 + 実クライアントで全文アップロード
 (metadata-only 変更 = PDF 再保存等の現実シナリオで発動)。空 `pages` を実 API が拒否すれば task 恒久再失敗ループの恐れも (未検証)。

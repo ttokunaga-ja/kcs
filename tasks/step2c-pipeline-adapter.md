@@ -2,7 +2,7 @@
 
 ## 目的
 
-KIO Step 2 の本体実装。**契約テスト仕様 `tasks/step2a-contract-tests.md` (r2) の P0 52 件を green にする**ことが完了条件。
+Kio Step 2 の本体実装。**契約テスト仕様 `tasks/step2a-contract-tests.md` (r2) の P0 52 件を green にする**ことが完了条件。
 
 ## 前提 (main に揃っている)
 

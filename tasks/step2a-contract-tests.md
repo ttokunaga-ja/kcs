@@ -65,7 +65,7 @@ JCS 近似は `json.dumps(obj, separators=(',',':'), ensure_ascii=False, sort_ke
 > RFC 8785 準拠か」を疑うこと。
 >
 > **fixture と契約の分離 (重要)**: A.1〜A.3 / A.6 の profile 値 (`mistral-ocr-2505` / `kio-deterministic-text` /
-> `gemini-multimodal-embedding` 等) は**計算規約を検証するための入力 fixture** であり、KIO 公式 Adapter の
+> `gemini-multimodal-embedding` 等) は**計算規約を検証するための入力 fixture** であり、Kio 公式 Adapter の
 > 実 profile 値・実 tool-lock 値の契約では**ない**。特に `gemini_multimodal_embedding` (1536 次元) は
 > `07 §5.3` が「例示であり、ベンダー・次元数の裏取り済み値ではない」と明記する未確定 profile。
 > 契約は「この入力ならこの hash」という**算出関数の固定**のみで、実装の実運用 profile が
@@ -103,7 +103,7 @@ tool_profile_hash = sha256:20b67a9d7e7e2654379f16f20b445d007e95abac7c8f85d6da65b
 
 **null 省略規則の検証 (PROFILE-1-NULL)**: PROFILE-1 に
 `prompt_template_id / prompt_template_hash / sampling / dimensions / distance / modality` を
-**すべて `null` 値で追加**した profile を canonicalize すると、KIO は null キーを hash 入力から落とすため、
+**すべて `null` 値で追加**した profile を canonicalize すると、Kio は null キーを hash 入力から落とすため、
 canonical バイト列と `tool_profile_hash` は PROFILE-1 と**完全一致**する
 (= `sha256:24bd9e90...81ed`)。「省略と null を識別しない」(`03 §5.1`) の実証。
 
@@ -419,7 +419,7 @@ fan-out `ab/cd` は raw_hash の digest 先頭 2/次 2 文字 (`bb`/`e1`、`03 �
 **CT2-INCR-004** — P0 — 否定3: capability 宣言なし → 常に full
 - Given: Adapter が `incremental_update` を宣言しない (同梱 deterministic 等)。
 - When: Markdownize。
-- Then: KIO は**常に** full モードで呼ぶ (後方互換)。
+- Then: Kio は**常に** full モードで呼ぶ (後方互換)。
 - 根拠: `04 §3.1` (条件 3) / `07 §8.4` (「capabilities に incremental_update を含まない Adapter は常に full」)。
 
 **CT2-INCR-005** — P0 — 否定4: 変化率 ≥ threshold → full
@@ -446,17 +446,17 @@ fan-out `ab/cd` は raw_hash の digest 先頭 2/次 2 文字 (`bb`/`e1`、`03 �
 - Then: identity は `(raw_hash, tool_profile_hash)` のまま。`tool_profile_hash` 入力に incremental flag を含めない。
 - 根拠: `04 §3.1` (「identity 不変性」)。
 
-**CT2-INCR-009** — P1 — spec_version 不一致 → Adapter は invalid_input 失敗、KIO は full で呼び直す
-- Given: Adapter 入出力 schema の `spec_version` が KIO と不一致。
+**CT2-INCR-009** — P1 — spec_version 不一致 → Adapter は invalid_input 失敗、Kio は full で呼び直す
+- Given: Adapter 入出力 schema の `spec_version` が Kio と不一致。
 - When: incremental 呼び出し。
-- Then: Adapter は `invalid_input` として失敗し、KIO は当該 Adapter を capability なし扱いにして full で呼び直す
+- Then: Adapter は `invalid_input` として失敗し、Kio は当該 Adapter を capability なし扱いにして full で呼び直す
   (index を止めない)。
 - 根拠: `07 §8.1` (5) / `07 §8.4` / `10 §12.5` (spec_version bump 規約と full fallback)。
 
 **CT2-INCR-010** — P1 — fallback_to_full=true 受信で full 再投入
 - Given: Adapter が incremental 出力で `fallback_to_full=true` を返す。
-- When: KIO が受信。
-- Then: 同一入力で full モードへ再投入する。閾値 hint が KIO 側と衝突したら KIO 側を優先。
+- When: Kio が受信。
+- Then: 同一入力で full モードへ再投入する。閾値 hint が Kio 側と衝突したら Kio 側を優先。
 - 根拠: `04 §3.1` (Adapter 拒否権) / `07 §8.1` (4)。
 
 ### CT2-ACCEPT-* — incremental 出力の受け入れ検査 V1〜V6 (`04 §3.2` / `07 §8.1`)
@@ -878,7 +878,7 @@ fan-out `ab/cd` は raw_hash の digest 先頭 2/次 2 文字 (`bb`/`e1`、`03 �
 - 根拠: `07 §4` (共通メタデータ) / `06 §8` (error_code)。
 
 **CT2-ADAPTER-007** — P1 — task/artifact descriptor (Adapter 境界の内部 API)
-- Given: KIO core → Adapter の呼び出し。
+- Given: Kio core → Adapter の呼び出し。
 - When: descriptor を検査。
 - Then: task descriptor は `task_id / adapter_kind / input_hash / allowed scope / network permission`。
   artifact descriptor は `output_hash / status / error_kind`。実行設定 (url/認証/コマンドパス) は
@@ -888,7 +888,7 @@ fan-out `ab/cd` は raw_hash の digest 先頭 2/次 2 文字 (`bb`/`e1`、`03 �
 **CT2-ADAPTER-008** — P1 — Adapter policy: allowed_scope 外を渡さない / allow_network=false に online task を発行しない
 - Given: `[adapter.policy] allowed_scope="." allow_network=false`。
 - When: task 発行。
-- Then: KIO は allowed_scope 外のファイルを Adapter に渡さない (入力制御)。allow_network=false の Adapter に
+- Then: Kio は allowed_scope 外のファイルを Adapter に渡さない (入力制御)。allow_network=false の Adapter に
   オンライン送信前提の task を発行しない。AdapterRun を監査ログに残す。sandbox 強制ではなく宣言 + 事後監査。
 - 根拠: `07 §7` (policy) / `07 §7.1` (信頼境界: 入力制御 + 事後監査、sandbox 保証ではない)。
 

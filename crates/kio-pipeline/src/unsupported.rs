@@ -214,7 +214,7 @@ impl UnsupportedInputStore {
             let information =
                 crate::windows_file::information(&handle).pipeline_io(&self.kio_dir)?;
             if !information.is_real_directory() {
-                return Err(self.corrupt("KIO store root is not a real directory"));
+                return Err(self.corrupt("Kio store root is not a real directory"));
             }
             let canonical = self.kio_dir.canonicalize().pipeline_io(&self.kio_dir)?;
             Ok(StoreRootSnapshot {
@@ -228,7 +228,7 @@ impl UnsupportedInputStore {
         {
             let metadata = fs::symlink_metadata(&self.kio_dir).pipeline_io(&self.kio_dir)?;
             if metadata.file_type().is_symlink() || !metadata.file_type().is_dir() {
-                return Err(self.corrupt("KIO store root is not a real directory"));
+                return Err(self.corrupt("Kio store root is not a real directory"));
             }
             let canonical = self.kio_dir.canonicalize().pipeline_io(&self.kio_dir)?;
             Ok(StoreRootSnapshot {
@@ -287,12 +287,12 @@ impl UnsupportedInputStore {
         #[cfg(not(windows))]
         let same_root_identity = same_file_identity(&current_root.metadata, &root.metadata);
         if current_root.canonical != root.canonical || !same_root_identity {
-            return Err(self.corrupt("KIO store root changed while the store was opened"));
+            return Err(self.corrupt("Kio store root changed while the store was opened"));
         }
         let canonical_file = opened_path.canonicalize().pipeline_io(opened_path)?;
         if canonical_file.parent() != Some(root.canonical.as_path()) {
             return Err(self
-                .corrupt("unsupported-input store resolves outside the canonical KIO directory"));
+                .corrupt("unsupported-input store resolves outside the canonical Kio directory"));
         }
         Ok(())
     }

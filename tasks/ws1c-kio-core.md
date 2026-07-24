@@ -2,7 +2,7 @@
 
 ## 目的
 
-KIO Step 1 の本体実装。**契約テスト仕様 `tasks/ws1a-contract-tests.md` の P0 39 件を green にする**ことが完了条件。CAS + snapshot DAG + CLI 7 コマンド。
+Kio Step 1 の本体実装。**契約テスト仕様 `tasks/ws1a-contract-tests.md` の P0 39 件を green にする**ことが完了条件。CAS + snapshot DAG + CLI 7 コマンド。
 
 ## 前提 (main に揃っている)
 

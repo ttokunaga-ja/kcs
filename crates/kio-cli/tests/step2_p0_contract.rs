@@ -2795,7 +2795,7 @@ fn r13_1_online_incremental_acceptance_fail_falls_back_to_full() {
     )
     .unwrap();
     json_success(&dir, ["index", "--yes"]);
-    // incr_incomplete: the incremental response drops a requested page → the KIO
+    // incr_incomplete: the incremental response drops a requested page → the Kio
     // acceptance check fails → the online route re-sends Full (which returns every
     // page) → the task completes as Full, not incremental.
     json_success_with_env(

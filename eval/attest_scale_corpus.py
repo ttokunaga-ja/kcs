@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Attest the generated scale corpus against KIO's current search predicates.
+"""Attest the generated scale corpus against Kio's current search predicates.
 
 The important count is not ``COUNT(*) FROM chunks``.  It is the set that the
 production search path can serve at each scope's HEAD: a non-placeholder
@@ -552,7 +552,7 @@ def attest_registry(root, scope_reports):
     kio_data_dir = data_dir / "kio"
     _require_plain_directory(device_dir, "isolated device directory")
     _require_plain_directory(data_dir, "isolated device data directory")
-    _require_plain_directory(kio_data_dir, "isolated device KIO directory")
+    _require_plain_directory(kio_data_dir, "isolated device Kio directory")
     path = kio_data_dir / "scope-registry.sqlite"
     conn = _open_read_only(path)
     try:
@@ -656,7 +656,7 @@ def attest_corpus(corpus_dir):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(
-        description="Attest a prepared KIO scale corpus"
+        description="Attest a prepared Kio scale corpus"
     )
     parser.add_argument("--corpus", required=True, help="scale collection root")
     parser.add_argument(

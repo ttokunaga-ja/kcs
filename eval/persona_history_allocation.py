@@ -16,7 +16,7 @@ exists, so the transient pre-purge checkpoint is +4% current and +4% history;
 purge then removes 4% current and 4% already-historical chunks. Replacements
 preserve the removed source's scope, renderer variant, and quota one-for-one.
 
-This is a planned-chunk contract, not post-index KIO evidence.  Structural
+This is a planned-chunk contract, not post-index Kio evidence.  Structural
 rename/move/duplicate/archive/restore sentinels are intentionally separate
 and must have zero contract quota so they cannot perturb this arithmetic.
 """

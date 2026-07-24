@@ -1,13 +1,13 @@
 # Step 4 着手ランブック (新セッション貼り付け用)
 
 このファイル全体を新しい Claude Code セッションに貼れば、長い会話コンテキストを引き継がずに
-KIO の Step 4 実装を開始できる。自己完結の着手手順。
+Kio の Step 4 実装を開始できる。自己完結の着手手順。
 
 ---
 
 ## 0. これは何か
 
-KIO = 開発者自身が所有する Rust 製ローカル知識アーカイブ CLI (evidence-grounded local knowledge
+Kio = 開発者自身が所有する Rust 製ローカル知識アーカイブ CLI (evidence-grounded local knowledge
 archive)。`/Users/ttokunaga-ja/dev/github.com/ttokunaga-ja/kio` (main)。仕様正本 docs/01〜10、
 実装は crates/kio-{core,pipeline,adapter,index,search,cli}。
 

@@ -427,7 +427,7 @@ R22-4/R22-5 (file-routing) と R22-6 (AuthError 横展開) は別 Agent。R22-7/
   ベクタは非秘匿ファイルの内容と完全同一で、秘匿パスが Evidence として露出することもない。
 
 **オーケストレータ自身の仮説も 1 件自己却下**: R21-5 の placeholder コメント
-(`<!-- KIO deterministic baseline page:2 sha256:... -->`) が FTS に載り検索結果に返る件は、
+(`<!-- Kio deterministic baseline page:2 sha256:... -->`) が FTS に載り検索結果に返る件は、
 空 unit のプレースホルダとして **R21-5 以前から存在する既存パターン** (Sonnet-B の判定を採用)。
 mixed PDF では online enhancement が併走するため証拠喪失も無く、新規バグとしては報告しない。
 

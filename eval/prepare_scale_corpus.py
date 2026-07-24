@@ -618,7 +618,7 @@ def prepare_corpus(corpus_dir, bin_path):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(
-        description="Initialize, index, and attest every KIO scale scope"
+        description="Initialize, index, and attest every Kio scale scope"
     )
     parser.add_argument("--corpus", required=True, help="scale collection root")
     parser.add_argument("--bin", required=True, help="path to kio executable")

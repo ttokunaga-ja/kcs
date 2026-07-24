@@ -1,4 +1,4 @@
-//! Core types shared by KIO crates.
+//! Core types shared by Kio crates.
 
 pub mod cas;
 pub mod dag;

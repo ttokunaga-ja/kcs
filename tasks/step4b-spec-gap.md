@@ -66,7 +66,7 @@
 - 出典: gap-04 G48, G49, gap-10-03 G8, G58, G59, sol G35, gap-rest G7
 - spec §: 04-pipeline.md §5.4, 10-operations.md §7.5.3, §12.4, 01-positioning.md §7
 - 種別: schema
-- 統合要約: cost-ledgerのストア形式を旧「3 JSONL + lock」構成から `cost_ledger` / `batch_requests` / `schema_migrations` の3 SQLiteテーブル (WAL、各表に非負性・有限性・enum等のCHECK制約) へ全面移行する (2026-07-18廃止)。cost-ledger.sqliteはKIOのtruth/cache二層モデルのどちらにも属さない第三分類 (再構築不可だがcacheでもない、deviceローカルの運用データ) と明示し、SQLite schema変更は「既定rebuild」の対象外で常にin-place migration (既存行保全必須) に従う。JSONL→SQLite移行は2相 (SQLite import + schema_migrationsマーカー行を同一Tx→旧JSONLをrename) の冪等プロトコルで行い、形状検出はsqlite_masterのCREATE文canonical比較 (列存在検査のみではCHECK制約差分を検出できない) で行う。全永続データの時刻はUTC ISO8601+Z固定という原則に対し、cost-ledger.sqliteの内部時刻列 (recorded_at/job_create_started_at/stale_after_at/completed_at/created_at/schema_migrations.applied_at) のみはUTC epochミリ秒INTEGERとする例外を新設する。
+- 統合要約: cost-ledgerのストア形式を旧「3 JSONL + lock」構成から `cost_ledger` / `batch_requests` / `schema_migrations` の3 SQLiteテーブル (WAL、各表に非負性・有限性・enum等のCHECK制約) へ全面移行する (2026-07-18廃止)。cost-ledger.sqliteはKioのtruth/cache二層モデルのどちらにも属さない第三分類 (再構築不可だがcacheでもない、deviceローカルの運用データ) と明示し、SQLite schema変更は「既定rebuild」の対象外で常にin-place migration (既存行保全必須) に従う。JSONL→SQLite移行は2相 (SQLite import + schema_migrationsマーカー行を同一Tx→旧JSONLをrename) の冪等プロトコルで行い、形状検出はsqlite_masterのCREATE文canonical比較 (列存在検査のみではCHECK制約差分を検出できない) で行う。全永続データの時刻はUTC ISO8601+Z固定という原則に対し、cost-ledger.sqliteの内部時刻列 (recorded_at/job_create_started_at/stale_after_at/completed_at/created_at/schema_migrations.applied_at) のみはUTC epochミリ秒INTEGERとする例外を新設する。
 
 - **実装状態: [未実装]** cost-ledger は JSONL+lock 構成のまま (budget.rs: CostLedger/ReservationLedger は serde `append_monthly`/`append_event` で JSONL 追記)。"sqlite"/"rusqlite"/"schema_migrations" は budget.rs・task.rs に grep 0件
 ### U6 Online Batch 二重課金防止2相プロトコル本体 [P0]
@@ -243,7 +243,7 @@
 - 出典: gap-10-03 G42, gap-rest G8, G12 (順序部分)
 - spec §: 10-operations.md §7, 02-philosophy.md §2.4, §6.1
 - 種別: 挙動 (破壊的変更)
-- 統合要約: 旧spec は「purgeはsnapshot DAG (tree/commit) から対象ファイル由来の情報を削除する操作」としていたが、新spec は明確に反転する: snapshot DAG (commit/tree object) は書き換えない — tree entryのメタデータ (path, raw_hash) は履歴に残る。削除事実の記録 (tombstone) を物理削除より先に耐久化する順序を明示し (クラッシュ時に「消えたのに痕跡が無い」状態を防ぐため)、UI推奨文言も「KIO管理下の履歴から完全削除」から「KIO管理下の本文と派生物を全履歴から削除 (ファイル名と存在の記録は履歴に残ります)」へ変更しこの挙動反転を反映する。
+- 統合要約: 旧spec は「purgeはsnapshot DAG (tree/commit) から対象ファイル由来の情報を削除する操作」としていたが、新spec は明確に反転する: snapshot DAG (commit/tree object) は書き換えない — tree entryのメタデータ (path, raw_hash) は履歴に残る。削除事実の記録 (tombstone) を物理削除より先に耐久化する順序を明示し (クラッシュ時に「消えたのに痕跡が無い」状態を防ぐため)、UI推奨文言も「Kio管理下の履歴から完全削除」から「Kio管理下の本文と派生物を全履歴から削除 (ファイル名と存在の記録は履歴に残ります)」へ変更しこの挙動反転を反映する。
 
 - **実装状態: [適合済みの可能性]** `purged_snapshot` (scope.rs:931-967) は `excluded_paths` 空でtree/commitのentryを書き換えず (working tree再scan方式)、`PurgedCommitCreated`相 (purge.rs:264-268) が `ContentDeleted`相 (purge.rs:274-278) より先行しterminal record(tombstone)を先に耐久publish済み — DAG非書換・削除前記録の両方が既に成立
 ### U30 purge削除対象の拡大 (prepared/image追加・manifest object・共有派生live参照0条件) [P0]
@@ -373,7 +373,7 @@
 - 種別: 挙動
 - 統合要約: 旧spec の「最悪 objects/ と refs/ が保全されていれば復旧できる」から、新spec の「最低保全集合は objects/ と refs/ ではなく、§4.1 の truth区分の全行 (scope.json/config/tool-lock/tombstones+erase receipts/chunks.jsonl/access.jsonlを含む)」に変更する。旧spec 通りobjects/+refs/のみをバックアップ対象とすると、新spec 下では復旧不能なデータを喪失する。
 
-- **実装状態: [判定不能]** KIO に backup サブコマンド自体が無い (purge.rs:1472 は「external backups and Time Machine」というユーザー向け注記のみ)。実装面のドキュメントのみの規範でgrep対象が無い。
+- **実装状態: [判定不能]** Kio に backup サブコマンド自体が無い (purge.rs:1472 は「external backups and Time Machine」というユーザー向け注記のみ)。実装面のドキュメントのみの規範でgrep対象が無い。
 ### U144 rebuild-db の index_metadata 初期化と publication/introduction 再導出アルゴリズム [P1]
 - 出典: gap-04 G61, G62
 - spec §: 04-pipeline.md §5.7
@@ -657,21 +657,21 @@
 - 出典: gap-04 G12, G13, G14, G16, gap-07-06 G12, G13, sol G28
 - spec §: 04-pipeline.md §3, §3.2, 07-adapter-spec.md §5.2
 - 種別: schema / 挙動
-- 統合要約: incremental時のhints構造体のフィールド名を`added`/`removed`から`added_unit_keys`/`removed_unit_keys`に変更する。Adapter出力から`evidence_pointers`フィールドを削除し、部分失敗を表す`failed_units [{unit_key, error_kind}]`を新設する (Evidence Pointerの発行主体はAdapterではなくKIO core、chunkingとsnapshotの後)。旧spec は「persistする前に検証する」とだけ規定していたが、新spec は「manifest/objectsへ確定persist (publish) する前に検証する」に精緻化し、受け入れ検査前のstagingへの耐久persistは禁止対象ではないと明記する。V1 (被覆・排他) がfailed_unitsを含む4集合の和=N・互いに素へ拡張され、同一配列内のunit_key重複も違反と規定する (各配列の要素数=distinct unit_key数を検査)。failed_units⊆hints.changed∪added、unchanged_unit_keysは§2.2の候補集合と完全一致という制約も新設。V5 (形式検査) にNormalized Markdown v1規約への機械検証可能な適合検査が追加され、違反unitを含む応答はrejectする。異なるunit_keyが同一unit_ref (`base16(sha256(unit_key))[0:16]`) へ写像される「衝突」を検査する規則を新設し、対象はpersist前に確定する合成後の最終unit集合、衝突があれば当該応答をwhole-response rejectする。
+- 統合要約: incremental時のhints構造体のフィールド名を`added`/`removed`から`added_unit_keys`/`removed_unit_keys`に変更する。Adapter出力から`evidence_pointers`フィールドを削除し、部分失敗を表す`failed_units [{unit_key, error_kind}]`を新設する (Evidence Pointerの発行主体はAdapterではなくKio core、chunkingとsnapshotの後)。旧spec は「persistする前に検証する」とだけ規定していたが、新spec は「manifest/objectsへ確定persist (publish) する前に検証する」に精緻化し、受け入れ検査前のstagingへの耐久persistは禁止対象ではないと明記する。V1 (被覆・排他) がfailed_unitsを含む4集合の和=N・互いに素へ拡張され、同一配列内のunit_key重複も違反と規定する (各配列の要素数=distinct unit_key数を検査)。failed_units⊆hints.changed∪added、unchanged_unit_keysは§2.2の候補集合と完全一致という制約も新設。V5 (形式検査) にNormalized Markdown v1規約への機械検証可能な適合検査が追加され、違反unitを含む応答はrejectする。異なるunit_keyが同一unit_ref (`base16(sha256(unit_key))[0:16]`) へ写像される「衝突」を検査する規則を新設し、対象はpersist前に確定する合成後の最終unit集合、衝突があれば当該応答をwhole-response rejectする。
 
 - **実装状態: [部分]** added_unit_keys/removed_unit_keys は既にリネーム済み (kio-pipeline/src/prepare.rs:71-72)。failed_units 0件 (未追加)。evidence_pointersフィールドはAdapterResponseに残存 (kio-adapter/src/types.rs:200、削除予定と矛盾)。
-### U86 Normalized Markdown v1 形式の新設と KIO 側検証 [P0]
+### U86 Normalized Markdown v1 形式の新設と Kio 側検証 [P0]
 - 出典: gap-04 G15, gap-07-06 G2, G15, sol G26
 - spec §: 04-pipeline.md §3.2, 07-adapter-spec.md §2.1, §5.2.1
 - 種別: schema
-- 統合要約: 全Markdownize Adapter出力が従うべき「Normalized Markdown v1」形式を新設する: UTF-8(BOM禁止)・NFC正規化・LF改行のみ・trailing space禁止・ATX見出しのみ(Setext禁止)・GFM table・画像参照形式固定・生HTML/autolink禁止 (escape規約)・code fence内でもエンコーディング/改行規約適用、をv1として凍結し、KIO側受け入れ検査の構造検証対象とする。同梱deterministic Adapterの出力仕様も「passthrough + fence正規化」から「Normalized Markdown v1への決定的正規化」に変更し、Setext見出し→ATX変換・生HTML blockのfenced text化・改行/空白/fence正規化を必須化する。
+- 統合要約: 全Markdownize Adapter出力が従うべき「Normalized Markdown v1」形式を新設する: UTF-8(BOM禁止)・NFC正規化・LF改行のみ・trailing space禁止・ATX見出しのみ(Setext禁止)・GFM table・画像参照形式固定・生HTML/autolink禁止 (escape規約)・code fence内でもエンコーディング/改行規約適用、をv1として凍結し、Kio側受け入れ検査の構造検証対象とする。同梱deterministic Adapterの出力仕様も「passthrough + fence正規化」から「Normalized Markdown v1への決定的正規化」に変更し、Setext見出し→ATX変換・生HTML blockのfenced text化・改行/空白/fence正規化を必須化する。
 
 - **実装状態: [未実装]** "Normalized Markdown"/NFC/BOM等の検証 0件。validate_unit_shapes (markdownize.rs:1397-1417) はmarkdown非空とunit_key/type一致のみ検査、書式検証なし。
 ### U87 fallback_to_full 制御応答と contract_violation retry の分離 [P1]
 - 出典: gap-04 G17, G18, gap-07-06 G23, G24, gap-10-03 G74, sol G29
 - spec §: 04-pipeline.md §3.2, §5.3, 07-adapter-spec.md §8.1, 10-operations.md §12.5
 - 種別: 新規機能 / 挙動 / エラー分類
-- 統合要約: `fallback_to_full=true`の応答をV1〜V6に先立つ「制御応答」として評価する規則を新設する: unit配列・unchanged/removedは空必須、KIOは成功/失敗どちらの終端にもせず同一taskをmode=fullで再発行 (§3.1条件は再評価しない)。終端の単位はrequestであり、正常な制御応答は当該requestの終端 (taskは非終端) として`outcome='fallback_to_full'`で記帳・state=3とし、続けてmode=fullの新requestを相1として開始する。full応答でこのflagが立った場合はcontract violationとする。contract_violationの扱いを「failed permanent, max_attempts=0 (full fallbackを1回自動投入)」から「retryable, max_attempts=1 (同一modeで1回のみ再試行、再違反はfailed permanent)」へ変更し、full への自動フォールバックは廃止 (fallbackはincremental capability非互換の場合のみ)。spec_version不一致時のエラーコードを`KIO-E-ADAPTER-SPECVER-001`に確定し (max_attempts 0のinvalid_input分類)、full fallbackが有効なのはincremental capabilityのみが非互換な場合に限り、spec_version自体が非互換な場合は当該online Adapterのtaskをfailed permanentとする (full再試行しても同じ拒否を再生するため)。
+- 統合要約: `fallback_to_full=true`の応答をV1〜V6に先立つ「制御応答」として評価する規則を新設する: unit配列・unchanged/removedは空必須、Kioは成功/失敗どちらの終端にもせず同一taskをmode=fullで再発行 (§3.1条件は再評価しない)。終端の単位はrequestであり、正常な制御応答は当該requestの終端 (taskは非終端) として`outcome='fallback_to_full'`で記帳・state=3とし、続けてmode=fullの新requestを相1として開始する。full応答でこのflagが立った場合はcontract violationとする。contract_violationの扱いを「failed permanent, max_attempts=0 (full fallbackを1回自動投入)」から「retryable, max_attempts=1 (同一modeで1回のみ再試行、再違反はfailed permanent)」へ変更し、full への自動フォールバックは廃止 (fallbackはincremental capability非互換の場合のみ)。spec_version不一致時のエラーコードを`KIO-E-ADAPTER-SPECVER-001`に確定し (max_attempts 0のinvalid_input分類)、full fallbackが有効なのはincremental capabilityのみが非互換な場合に限り、spec_version自体が非互換な場合は当該online Adapterのtaskをfailed permanentとする (full再試行しても同じ拒否を再生するため)。
 
 - **実装状態: [未実装]** fallback_to_full=trueは常に即contract_violation (markdownize.rs:341-342、mode不問、制御応答パス無し)。ContractViolationのretry_policyは`retryable:false, max_attempts:Some(0)`のまま (kio-pipeline/src/task.rs:890-897、旧仕様のまま)。KIO-E-ADAPTER-SPECVER-001 0件。
 ### U88 Embedding 応答の受入検査新設 [P1]

@@ -1,4 +1,4 @@
-# KIO 検索評価ハーネス (synthetic)
+# Kio 検索評価ハーネス (synthetic)
 
 `docs/09-mvp-scope.md` §4.3 の **Recall 評価規約 (ゴールデンクエリ)** を実行するための
 合成コーパス + 履歴シナリオ + ゴールデンクエリ + 評価ランナー。設計宿題 #5
@@ -138,7 +138,7 @@ corpus を水増しせず、独立した fixture で測る。最初の層は再�
 - 20 leaf scopes × 200 Markdown files × 30 ATX sections = **120,000 current chunks**
 - 14 の利用者属性、20 の用途を engineering / research / ML-data / product / security / client / inbox に分ける
 - 1 section を既定 `[chunking] strategy="heading", max_chars=6000` の 1 chunk 未満に保つ
-- KIO は scope 直下だけを対象にするため、collection root 自体は scope にせず、20 leaf folders を個別 scope にする
+- Kio は scope 直下だけを対象にするため、collection root 自体は scope にせず、20 leaf folders を個別 scope にする
 
 folder と利用者・用途の対応は manifest にも保存する。
 
@@ -264,7 +264,7 @@ W0/W5とも120,000 contributor chunks、W5後はcurrent+history 180,000 chunks�
 - blocked-until-readback capacity projection: `eval/persona_capacity.py`
 - non-formal bounded JSONL artifact storage: `eval/persona_streaming_storage.py`
 - read-only replay-root lease primitive: `eval/persona_root_lock.py`
-- fail-closed KIO command/result boundary: `eval/persona_kio_runner.py`
+- fail-closed Kio command/result boundary: `eval/persona_kio_runner.py`
 - canonical non-executing 20-person prepare-receipt composer:
   `eval/persona_prepare_receipt.py`
 - partial filesystem/content/quota semantic attestor:
@@ -314,7 +314,7 @@ W0 indexを省くと編集前のbytesが履歴にならない。これは最終�
 20 scopesに制限して生成・再検算するAPIと、fullの正確なcount oracleも実装済みである。
 このoracleは1 replay当たり43,596 events、5,175 boundaries、48,771 schedule items、
 3 replayで130,788 / 15,525 / 146,313をcanonical allocationから導出するが、
-full event manifestの構築やKIO実測は行わない。
+full event manifestの構築やKio実測は行わない。
 
 構造laneはtiny/pilotで1人11 events、fullで1人30 events。full W2は20 scopesすべてへ
 same-scope U renameを置き、cross-scope moveはraw-only travelerを使う。near PNGは親RGBの
@@ -352,7 +352,7 @@ p01/fullのCI回帰は120,000 current、60,000 history、30 structural events、
 外側から検証する。opaque内部はtyped checker observationなしでは明示的にunattestedであり、
 history-readyを主張しない。partial semantic attestorはprofile、canonical persona/scope、
 contract quota算術、file bytes/content roots、typed runtime observationを束縛できるが、
-SQLite/CAS、HEAD/commit、KIO binary/config、root/prepare-intentの統合的検証ではなく、
+SQLite/CAS、HEAD/commit、Kio binary/config、root/prepare-intentの統合的検証ではなく、
 完全な400-scope入力でも`history_ready_attested=false`のままである。
 attestorは各directoryの子entryを名前またはMerkle childとして保持する前に
 16,384 direct entriesのhard capを適用する。
@@ -364,7 +364,7 @@ HEAD/registryは検査しないため、全semantic/history/execution/mutation c
 rootは`/`を許さず、4 KiB/64 components/255 bytes per component、person bindingは20 scopeを
 走査前に要求する。
 
-KIO runnerはstrict JSON/result validator、isolated environment recipe、binary snapshot、
+Kio runnerはstrict JSON/result validator、isolated environment recipe、binary snapshot、
 unbound receipt形式まで実装した。しかしpathname検証後の`Popen(cwd=...)`には
 same-user TOCTOUが残るため、`HANDLE_RELATIVE_EXECUTION_AVAILABLE`、
 `PERSONA_FILESYSTEM_MUTATION_AVAILABLE`、`TRUSTED_BINARY_EXECUTION_AVAILABLE`は全てfalseであり、
@@ -390,7 +390,7 @@ destination-root availabilityの読み戻しがない限りblockedで、receipt�
 bounded streaming storageはcanonical JSONL shardをno-replace publish/readbackできるが、
 verified source directory inodeをrenameのatomic preconditionにできないため、
 `formal_publication_attested=false` / `source_directory_inode_not_bound_by_rename`のままである。
-これらはformal full実測、W0 prepare、actual KIO chunk/history attestationの証拠ではない。
+これらはformal full実測、W0 prepare、actual Kio chunk/history attestationの証拠ではない。
 
 ```bash
 python3 eval/generate_persona_corpus.py plan \

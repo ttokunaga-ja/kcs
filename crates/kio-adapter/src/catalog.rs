@@ -246,7 +246,7 @@ pub fn run_standard_online_markdownize_with_bytes(
                 &send_raw_hash,
                 &response,
             )?;
-            // Test-only KIO response seams run after the provider page mapping has
+            // Test-only Kio response seams run after the provider page mapping has
             // passed its exact-bijection checks. This preserves partial/fallback
             // lifecycle coverage without weakening the OCR transport contract.
             if std::env::var(TEST_STANDARD_ONLINE_MARKDOWNIZE_ENV)
@@ -422,7 +422,7 @@ fn declared_markdown_model() -> Result<String> {
 /// `GET /v1/models` to expand a `*-latest` alias) but never uploads the document or bills
 /// OCR. The incremental gate compares this *resolved* profile against the prior instance
 /// BEFORE deciding to send: a changed pin is a different tool_profile, which is not an
-/// eligible incremental (docs/04 §3.1 condition 2), so KIO must fall straight to a Full
+/// eligible incremental (docs/04 §3.1 condition 2), so Kio must fall straight to a Full
 /// send instead of wasting an incremental send (and, post-R14-4, a full-document upload)
 /// only to discard it. Keep the seam arms in sync with `run_standard_online_markdownize`.
 pub fn resolve_standard_online_markdownize_profile(scope_id: &str) -> Result<AdapterProfile> {
@@ -611,7 +611,7 @@ impl MistralOcrClient for MockStandardOnlineMarkdownizeClient {
                         confidence: Some("0.99".to_owned()),
                         annotation: request.bbox_annotation_enabled.then(|| {
                             let text = format!(
-                                "KIO bbox label {} value 1000",
+                                "Kio bbox label {} value 1000",
                                 hint.unit_key
                             );
                             crate::bbox_annotation::BboxAnnotation {
@@ -1066,10 +1066,10 @@ mod tests {
             "sha256:9b2490fd9b25c25db6e83baccd86552c038679605f04af4f7f47000391b0d289"
         );
         let unit = &outcome.response.updated_units[0];
-        assert!(unit.markdown.contains(r"KIO bbox label page\:1 value 1000"));
+        assert!(unit.markdown.contains(r"Kio bbox label page\:1 value 1000"));
         assert_eq!(
             unit.metadata["bbox_annotations"][0]["transcribed_text"],
-            "KIO bbox label page\\:1 value 1000"
+            "Kio bbox label page\\:1 value 1000"
         );
         let images = temp.path().join("objects/image");
         assert!(

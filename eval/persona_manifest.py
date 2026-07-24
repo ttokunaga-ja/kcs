@@ -1,8 +1,8 @@
 """Canonical W0 ledgers for the synthetic persona-PC fixture.
 
 The generator writes one shard per direct-file scope.  Rows contain only
-portable, persona-home-relative identities: absolute roots, KIO scope IDs,
-commit hashes, mtimes, and actual KIO chunk hashes belong in later receipts.
+portable, persona-home-relative identities: absolute roots, Kio scope IDs,
+commit hashes, mtimes, and actual Kio chunk hashes belong in later receipts.
 
 The three immutable ledgers deliberately separate:
 

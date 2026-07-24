@@ -1,9 +1,9 @@
-# KIO 設計ドキュメント
+# Kio 設計ドキュメント
 
 > **Local-first knowledge archive, powered by frontier AI.**
 > **データはローカル、計算は最強の AI を使う。**
 
-KIO は **local-first** な知識アーカイブ。データの主権はあなたのマシンにあり、Markdownize や Embedding には Mistral OCR / Gemini / Claude / GPT 等の frontier AI を使う。"offline-first 原理主義" ではない。
+Kio は **local-first** な知識アーカイブ。データの主権はあなたのマシンにあり、Markdownize や Embedding には Mistral OCR / Gemini / Claude / GPT 等の frontier AI を使う。"offline-first 原理主義" ではない。
 
 二次表現: **Evidence-grounded local knowledge archive (原文根拠付きローカル知識アーカイブ)**。
 
@@ -11,7 +11,7 @@ KIO は **local-first** な知識アーカイブ。データの主権はあな�
 
 ---
 
-# 0. KIO の中核 (3 点)
+# 0. Kio の中核 (3 点)
 
 ```
 1. Evidence Pointer        path ではなく commit / tree / raw_hash / chunk_hash / span で根拠を指す

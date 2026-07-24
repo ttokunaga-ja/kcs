@@ -10,9 +10,9 @@ MVP は **「Evidence-grounded local knowledge archive」としての最小完�
 
 # 1. 初回スキャン前の承認
 
-KIO はデフォルトで全 indexed scope を検索対象にし、全ファイルを管理対象にする。ただし、初回スキャンでは、対象範囲 preview、除外提案、明示承認を必須にする。
+Kio はデフォルトで全 indexed scope を検索対象にし、全ファイルを管理対象にする。ただし、初回スキャンでは、対象範囲 preview、除外提案、明示承認を必須にする。
 
-目的はデフォルト全管理を弱めることではない。KIO が単なる検索インデックスではなく、原本を content-addressed object として保存する知識アーカイブであることを、ユーザーが理解したうえで開始するためである。
+目的はデフォルト全管理を弱めることではない。Kio が単なる検索インデックスではなく、原本を content-addressed object として保存する知識アーカイブであることを、ユーザーが理解したうえで開始するためである。
 
 必須フロー:
 
@@ -121,7 +121,7 @@ estimated_embedding_usd
 
 ## 1.1 Secrets デフォルト除外 (built-in ignore template)
 
-KIO は secrets 系ファイルの取り込み・オンライン送信事故を防ぐため、built-in の除外テンプレート
+Kio は secrets 系ファイルの取り込み・オンライン送信事故を防ぐため、built-in の除外テンプレート
 を同梱する。パターンは 2 段階に分ける。
 
 **Tier A (デフォルト除外)**: 拡張子・ファイル名から secrets とほぼ確実に判定できるもの。
@@ -167,7 +167,7 @@ id_ed25519*
 規約:
 
 ```text
-1. テンプレートは KIO 本体に同梱し、バージョンを effective_ignore_hash の入力に含める
+1. テンプレートは Kio 本体に同梱し、バージョンを effective_ignore_hash の入力に含める
 2. Tier A の解除は、対話承認時の個別選択 または .kioignore の negation (!pattern) のみ
 3. --yes は Tier A の解除・Tier B 警告のスキップを行えない (06-cli-spec.md §2)
 4. テンプレートの追加・変更は本節の更新を伴う (破壊的変更扱い)
@@ -198,14 +198,14 @@ Tier B 一致の新規ファイル:
 
 # 2. 容量より利便性を優先する
 
-KIO は、容量効率よりも知識を失わないこと、あとから検索・履歴探索・復元できることを優先する。
+Kio は、容量効率よりも知識を失わないこと、あとから検索・履歴探索・復元できることを優先する。
 
 したがって、全ファイル管理をデフォルトとする方針は維持する。動画・巨大PDF・画像・Officeファイルも、ユーザーが明示的に ignore しない限り管理対象に含める。例外は secrets 系の built-in デフォルト除外 (§1.1 — 不可逆な漏洩リスク) と、§4 の走査境界既定 (system directory / VCS repo root / placeholder 等 — 安全側の既定であり容量目的ではない) のみ。
 
 ただし、プロダクトはこの事実を隠してはならない。
 
 ```text
-KIO は検索インデックスだけでなく、原本ファイルを content-addressed archive に保存します。
+Kio は検索インデックスだけでなく、原本ファイルを content-addressed archive に保存します。
 各 `.kio` が管理するのはその `.kio` が置かれたフォルダ直下のファイルのみです。
 サブフォルダのファイルは (そこに `.kio` があるか否かに関わらず) 親 `.kio` は取り込みません。
 対象ファイルを含むサブフォルダには子 `.kio` が作られ、独立したスコープとして管理されます
@@ -227,13 +227,13 @@ KIO は検索インデックスだけでなく、原本ファイルを content-a
 除外候補
 ```
 
-ディスク枯渇が予測される場合、KIO は勝手に対象範囲を狭めない。続行、除外、延期、中断をユーザーに選ばせる。
+ディスク枯渇が予測される場合、Kio は勝手に対象範囲を狭めない。続行、除外、延期、中断をユーザーに選ばせる。
 
 ---
 
 # 3. Scope Registry (= cache only, NOT truth)
 
-KIO は **二層構造** をとる。データ・所有権・権限の **正本は各フォルダ直下の `.kio`** に閉じる。device-local な scope_registry や将来の global aggregator は **検索キャッシュ・発見補助に過ぎない**。両者を混同しない。
+Kio は **二層構造** をとる。データ・所有権・権限の **正本は各フォルダ直下の `.kio`** に閉じる。device-local な scope_registry や将来の global aggregator は **検索キャッシュ・発見補助に過ぎない**。両者を混同しない。
 
 ```
 truth = folder-local .kio
@@ -435,8 +435,8 @@ Future:
 
 # 7. Purge の保証範囲
 
-`purge` は、KIO 管理下の object store (本文 bytes と派生 artifact — manifest object 含む)、index、pack、cache (`~/.cache/kio/open/` の一時展開を含む — [05-runtime.md §3.5](05-runtime.md))、
-および KIO 自身のログ (`.kio/logs/access.jsonl`、`~/.local/share/kio/logs/` の
+`purge` は、Kio 管理下の object store (本文 bytes と派生 artifact — manifest object 含む)、index、pack、cache (`~/.cache/kio/open/` の一時展開を含む — [05-runtime.md §3.5](05-runtime.md))、
+および Kio 自身のログ (`.kio/logs/access.jsonl`、`~/.local/share/kio/logs/` の
 events / errors / metrics) から対象ファイル由来の情報を削除する操作である。
 **snapshot DAG (commit / tree object) は書き換えない** — tree entry のメタデータ (path, raw_hash) は
 履歴に残る (正本 [05-runtime.md §3.5](05-runtime.md)。完全な履歴書き換えは v2+/Phase 4+ —
@@ -446,13 +446,13 @@ events / errors / metrics) から対象ファイル由来の情報を削除す�
 実務上のスクラブ対象は主に raw_hash 参照行に限られ軽量である。
 purge 自体の実行記録 (`commit_type=purged`、tombstone) は監査可能性のため残す ([05-runtime.md §3.2](05-runtime.md))。
 
-ただし、OS backup、Time Machine、クラウド同期の過去版、外部 export、ユーザーが手動コピーしたファイル、KIO 外のログまでは KIO 単体では保証しない。
+ただし、OS backup、Time Machine、クラウド同期の過去版、外部 export、ユーザーが手動コピーしたファイル、Kio 外のログまでは Kio 単体では保証しない。
 
 UI 文言は、過剰な保証を避ける。
 
 ```text
 推奨:
-  KIO 管理下の本文と派生物を全履歴から削除 (ファイル名と存在の記録は履歴に残ります)
+  Kio 管理下の本文と派生物を全履歴から削除 (ファイル名と存在の記録は履歴に残ります)
 
 避ける:
   世界中のすべてのコピーを完全削除
@@ -469,7 +469,7 @@ UI 文言は、過剰な保証を避ける。
   chunks.jsonl の**対象 chunk_id を参照する creation 行・publication event 行の全部**を含む。
   正本一覧は [05-runtime.md §3.5](05-runtime.md))
 pack / cache / index rebuild
-KIO 自身のログのスクラブ (該当行の削除またはマスク) と、その完了有無の結果表示
+Kio 自身のログのスクラブ (該当行の削除またはマスク) と、その完了有無の結果表示
 復元不能な最小 tombstone
 ```
 
@@ -643,12 +643,12 @@ MVP では手動実行のみとする。自動定期検証 (スケジューラ�
      tool-lock / tombstones + erase receipts / chunks.jsonl / access.jsonl を含む) — これらは
      いずれも喪失時復旧不能である
    - **デバイスグローバルの cost-ledger.sqlite は `.kio` コピーに含まれない** — 別途
-     `sqlite3 "<KIO data dir>/cost-ledger.sqlite" ".backup <dest>"` (WAL-safe。**必ず実体の絶対パスで
+     `sqlite3 "<Kio data dir>/cost-ledger.sqlite" ".backup <dest>"` (WAL-safe。**必ず実体の絶対パスで
      指定する** — 相対パスはカレントに空 DB を新規作成し「正常にバックアップできた」ように見える。
      例: `sqlite3 "${XDG_DATA_HOME:-$HOME/.local/share}/kio/cost-ledger.sqlite" ".backup /backups/kio-cost-ledger.sqlite"` —
      `<...>` は展開後も絶対パスであること。
      **復元後は `PRAGMA integrity_check` と cost_ledger / batch_requests 両表の存在を確認する**) で
-     バックアップし、復元は KIO プロセス非実行中に行い、復元後は
+     バックアップし、復元は Kio プロセス非実行中に行い、復元後は
      §5.8 の回復 (reconcile) が完了するまで新規 Batch 投入を行わない ([04-pipeline.md §5.4](04-pipeline.md))。
      **復元した DB は backup 以後の投入記録を失っている** — 復元後の初回回復では、**記録済み provider
      scope と現在構成の各 Batch client の provider_scope_id を合わせた集合**の全ページ一覧
@@ -662,7 +662,7 @@ MVP では手動実行のみとする。自動定期検証 (スケジューラ�
      [05-runtime.md §6](05-runtime.md) の再構築 (ユーザー既知 root での再登録) を先行させる。未再登録
      scope の job は unknown 側に落ち、再登録後の再実行で orphan 候補へ移る — 報告は冪等):
      metadata の task key 4 組が完全に読め、かつ scope_id がこの集合に一致する job は
-     orphan 候補として報告し、結果取得 (読み取りのみで安全) と、**他 KIO インスタンスとの provider
+     orphan 候補として報告し、結果取得 (読み取りのみで安全) と、**他 Kio インスタンスとの provider
      scope 共有がないことを確認した上での**削除を案内する。metadata が一致しない・読めない job と、
      filename の token しか持たない upload は**帰属不能 (unknown) として報告のみ** — 結果取得・削除の
      どちらも案内しない (他インスタンス・他ツール由来があり得る)。自動再投入・自動削除はしない
@@ -774,7 +774,7 @@ MVP文書:
 
 # 10. Adapter セキュリティ
 
-R23 の Markdownize / Embedding Adapter は KIO 同梱の built-in target のみを実行し、
+R23 の Markdownize / Embedding Adapter は Kio 同梱の built-in target のみを実行し、
 任意コマンドや任意 URL への差し替えは受理しない。ローカルAPIや外部プロセスを扱う
 dispatcher は将来仕様であり、実装時には現行の入力・送信境界に加えて command 境界も
 明確にする。
@@ -821,7 +821,7 @@ secret redaction
 実装責務の分担:
 
 ```text
-KIO:
+Kio:
   - 変更検出 (raw_hash 変化 + unit_mapping による変化率算出, 04-pipeline.md §2.2)
   - 発動条件の判定 (capability / 閾値 / 連続回数)
   - Adapter への入力組み立て (旧 raw, 旧 Markdown, hints)
@@ -834,7 +834,7 @@ Markdownize Adapter:
   - 軽微でないと判断したら fallback_to_full=true を返す
 ```
 
-Adapter が `incremental_update` capability を宣言しない場合は、KIO は常に full モードで Adapter を呼ぶ。これにより既存 Adapter との後方互換が保たれる。
+Adapter が `incremental_update` capability を宣言しない場合は、Kio は常に full モードで Adapter を呼ぶ。これにより既存 Adapter との後方互換が保たれる。
 
 詳細仕様: [04-pipeline.md §2, §3](04-pipeline.md), [07-adapter-spec.md §8](07-adapter-spec.md)
 
@@ -910,7 +910,7 @@ DOMAIN:
 
 ## 12.2 CLI exit code
 
-KIO のすべての CLI コマンドは以下の exit code を返す。
+Kio のすべての CLI コマンドは以下の exit code を返す。
 
 ```text
 0   成功 / 全 up_to_date
@@ -932,7 +932,7 @@ dead pointer (tombstoned / not_found) は `4`、**scope_unreachable のみは re
 
 ## 12.3 設定ファイル schema validation
 
-すべての設定ファイルは JSON Schema (TOML は JSON 等価表現に変換して同 schema で validate) を持ち、CLI 起動時に schema-driven validation を行う。schema は KIO 本体に同梱する。
+すべての設定ファイルは JSON Schema (TOML は JSON 等価表現に変換して同 schema で validate) を持ち、CLI 起動時に schema-driven validation を行う。schema は Kio 本体に同梱する。
 
 ```text
 ~/.config/kio/tools.toml          → schemas/tools.schema.json
@@ -968,7 +968,7 @@ validation 失敗は exit code 2 で停止し、`KIO-E-CONFIG-SCHEMA-001` を返
 
 ## 12.5 semver / 互換性 promise
 
-KIO が公開する識別子は次のいずれかの semver 軸を持つ。
+Kio が公開する識別子は次のいずれかの semver 軸を持つ。
 
 ```text
 kio_format_version       .kio ディレクトリ全体のフォーマットバージョン (03-data-model.md §2)

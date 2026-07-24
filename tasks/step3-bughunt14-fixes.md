@@ -88,7 +88,7 @@
   同 scope の OFFLINE インスタンス (tool 76c0) は raw=v1・phash=v1 (正)。
   → **v1 identity が v2 内容を保持** = 不変条件破壊を確定。
 
-**docs 契約**: identity = (raw_hash, tool_profile_hash) (MEMORY「KIO の hash と fingerprint の分離」・
+**docs 契約**: identity = (raw_hash, tool_profile_hash) (MEMORY「Kio の hash と fingerprint の分離」・
 docs/03 §8)。raw_hash X 下の normalized instance の内容は raw X 由来であること。
 
 **修正方針**:
@@ -159,7 +159,7 @@ docs/03 §8)。raw_hash X 下の normalized instance の内容は raw X 由来�
   (差分課金) が本番未達。R13 の既知残置「incremental の cost-ledger が full 予約 (過大予約で cap-safe)」の
   前提 (送信は incremental) 自体が誤りだったことも判明。
 
-**docs 契約**: docs/07 §8「文書処理系ルートは unchanged unit を KIO 側で再利用」。catalog.rs comment の
+**docs 契約**: docs/07 §8「文書処理系ルートは unchanged unit を Kio 側で再利用」。catalog.rs comment の
 「changed のみ再送/再課金」はこの規範の実装意図。
 
 **修正方針** (real-API 検証はユーザー gate、コード側は testable に):

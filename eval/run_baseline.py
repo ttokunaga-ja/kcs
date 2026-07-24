@@ -13,12 +13,12 @@
           クエリをスクリプト種別の断片 (ascii 語 / 数値 / カタカナ連 /
           漢字連) に分解し、断片ごとの `rga -l` 一致数でファイルを採点する
           「上振れ寄りの丁寧な使い方」を採用 (baseline への generosity は
-          KIO 優位主張を保守側に倒す)。
+          Kio 優位主張を保守側に倒す)。
 
-ゲート: KIO >= 0.8 かつ (KIO - mdfind) >= 0.3 かつ (KIO - rga) >= 0.3。
+ゲート: Kio >= 0.8 かつ (Kio - mdfind) >= 0.3 かつ (Kio - rga) >= 0.3。
 
 前提: baseline コーパスは Spotlight が索引する場所に置いた PRISTINE 複製
-(.kio なし — KIO 派生物を baseline に見せない公平性)。
+(.kio なし — Kio 派生物を baseline に見せない公平性)。
 """
 import argparse
 import json
@@ -167,7 +167,7 @@ def main(argv=None):
         }
     result = {"queries": rows, "recall_at_10": recall, "gate": gate,
               "by_class": by_class, "n": n,
-              "note": "09 §4.1 ベースライン優位 — KIO>=0.8 かつ各差>=0.3"}
+              "note": "09 §4.1 ベースライン優位 — Kio>=0.8 かつ各差>=0.3"}
     Path(args.out).write_text(json.dumps(result, ensure_ascii=False, indent=1))
     print(json.dumps({"recall_at_10": recall, "gate": gate, "by_class": by_class},
                      ensure_ascii=False, indent=1))

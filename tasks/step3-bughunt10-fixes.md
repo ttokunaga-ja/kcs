@@ -9,7 +9,7 @@
   **既存ガード (M6/N5/L3、tree→commit→refs 書込順、CAS hash 検証) が正しく成立していることを確認** (実質 0 新規)。
 
 ## 位置づけ
-開発者自身が所有する OSS (KIO) の出荷前防御的セキュリティ監査。全再現は隔離 tmp (`XDG_DATA_HOME=$(mktemp -d)`、
+開発者自身が所有する OSS (Kio) の出荷前防御的セキュリティ監査。全再現は隔離 tmp (`XDG_DATA_HOME=$(mktemp -d)`、
 scope は /tmp 配下) で実施、実 API キー不使用、リポジトリ無変更 (git clean を維持)。
 
 ---
@@ -60,7 +60,7 @@ scope は /tmp 配下) で実施、実 API キー不使用、リポジトリ無�
   実際=`ignore=["secret.txt"]` は validation 成功だが除外ゼロ → CAS 取り込み + 検索露出 + online opt-in 下で cloud API 送信。R9-1 (silent 除外→露出) と同型・別根 (config-key drift)。
 - 修正方針 (**採用=(A) 仕様準拠の拒否**): `config.schema.json` から top-level `ignore` (9-12 行) を削除 → top-level `additionalProperties:false` により明示 schema error (exit 2) で loud に落ちる。stale test `n3_config_ignore_array_validates` を「top-level `ignore` は拒否・`[scope] ignore` が正」に更新。
   - 代替 (B) fail-safe: `load_config_ignore` で top-level `ignore` も `[scope].ignore` と union する (無言露出は消えるが、仕様に無い機構を追加=非推奨)。**セキュリティ判断が絡むため、ユーザーが (B) を選好する場合は push 前レビューで上書き可**。
-  - KIO の「silent 欠落の禁止」(docs/04 §5.2 の思想) と schema strictness (随所の additionalProperties:false) に照らし (A) を既定採用。
+  - Kio の「silent 欠落の禁止」(docs/04 §5.2 の思想) と schema strictness (随所の additionalProperties:false) に照らし (A) を既定採用。
 
 ## R10-3 [major] ignore パターン照合が**大文字小文字を区別**し、case-insensitive FS (APFS 既定) では case 違いの実ファイルを除外できず露出
 
@@ -130,7 +130,7 @@ scope は /tmp 配下) で実施、実 API キー不使用、リポジトリ無�
   - 対照: cache-miss 経路は `hash_bytes(&bytes) != hash` を検証 (3732、Q2)。つまり Q2 の verify-on-read は CAS object にだけ適用され、cache 再利用に未適用
   - 副次: cache key が `hash[0:12]` (48bit) + basename で full-hash より弱く、prefix+basename 衝突で別 object 混入 (低確率)
 - 期待 vs 実際: 期待=派生 cache も CAS 同様アトミックに書かれ、提供 bytes が raw_hash と一致 (docs/08 raw object identity)。
-  実際=torn cache が以後の open で無検証提供され、破損 bytes が真正 Evidence として返る。KIO 全体のアトミック書込規律 (`atomic_write`/`atomic_overwrite` が随所) に反する唯一の直書き。
+  実際=torn cache が以後の open で無検証提供され、破損 bytes が真正 Evidence として返る。Kio 全体のアトミック書込規律 (`atomic_write`/`atomic_overwrite` が随所) に反する唯一の直書き。
 - 修正方針: cache 書込を**アトミック化** (同一ディレクトリの temp ファイルへ書き→`fs::rename` で最終パスへ、R9-3 の 0600→0400 permission 規律は temp 側で維持)。torn partial が最終パスに残らなくなり cache-hit 信頼が回復。加えて cache dir を full-hash に広げ 12桁衝突も封じる (per-hit 再 hash は不要)。
 
 ## R10-7 [minor] `kio index --online --yes` が online markdownize を**どの batch でも送れない dead-end**として enqueue (embedding は inline 送信されるのに markdownize だけ取り残る非対称)

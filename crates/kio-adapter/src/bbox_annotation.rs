@@ -99,10 +99,10 @@ impl BboxAnnotation {
     #[must_use]
     pub fn markdown_block(&self) -> String {
         let description = prefixed_lines(
-            "> KIO figure description: ",
+            "> Kio figure description: ",
             self.short_description.as_str(),
         );
-        let transcription = prefixed_lines("> KIO figure text: ", self.transcribed_text.as_str());
+        let transcription = prefixed_lines("> Kio figure text: ", self.transcribed_text.as_str());
         format!("{description}\n{transcription}")
     }
 }
@@ -316,7 +316,7 @@ mod tests {
         );
         assert_eq!(
             annotation.markdown_block(),
-            "> KIO figure description: Café\n> KIO figure description: \\# \\[x\\]\\(kio\\:\\/\\/fake\\) &lt;img&gt; &amp;amp\\; \\`fence\\`\n> KIO figure text: \\!\\[x\\]\\(https\\:\\/\\/example\\.test\\/x\\)\n> KIO figure text: &lt;kio\\:\\/\\/evil&gt;"
+            "> Kio figure description: Café\n> Kio figure description: \\# \\[x\\]\\(kio\\:\\/\\/fake\\) &lt;img&gt; &amp;amp\\; \\`fence\\`\n> Kio figure text: \\!\\[x\\]\\(https\\:\\/\\/example\\.test\\/x\\)\n> Kio figure text: &lt;kio\\:\\/\\/evil&gt;"
         );
         assert_eq!(totals.images, 1);
     }

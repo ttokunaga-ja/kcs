@@ -8,16 +8,16 @@ Adapter (Prepare / Markdownize / Embedding / Summary / Classification / Rerank) 
 
 # 1. 基本方針
 
-Prepare / Markdownize / Embedding / Summary / Classification / Rerank は KIO core に含めず、**Adapter に委譲** する。OCR は Markdownize Adapter の **内部能力 (capability)** として扱う。Embedding は Text / Image を分離せず、**単一マルチモーダル Embedding Adapter** に統合する。
+Prepare / Markdownize / Embedding / Summary / Classification / Rerank は Kio core に含めず、**Adapter に委譲** する。OCR は Markdownize Adapter の **内部能力 (capability)** として扱う。Embedding は Text / Image を分離せず、**単一マルチモーダル Embedding Adapter** に統合する。
 
 ```
-KIO core:                 Adapter:
+Kio core:                 Adapter:
   object store              Prepare
   snapshot                  Markdownize (OCR は内部能力)
   restore                   Embedding (multimodal)
   search                    Summary       optional
   task state                Classification optional
-  common KIO API            Rerank        optional
+  common Kio API            Rerank        optional
 ```
 
 Adapter の実行設定 (cmd / args / url / 認証情報) は **`.kio/` の共有対象に含めない**。各デバイスの `~/.config/kio/tools.toml` や OS keychain に保存する。`.kio/` は生成済み artifact の provenance と互換性判定に必要な `profile_hash` だけを保持する。
@@ -38,7 +38,7 @@ R23 の同梱 runtime が実行できる online target は `mistral_ocr_markdown
 許容 (非推奨):
 3. tools.toml 直書き:  auth = "plain:<api_key>"
    - tools.toml の permission が 0600 (owner read/write のみ) でない場合、
-     KIO は起動時に warn を出す (errors.jsonl に level=warn で記録)
+     Kio は起動時に warn を出す (errors.jsonl に level=warn で記録)
 
 禁止 (既定どおり):
    .kio/ 配下・tool-lock.json・tool_profile_hash の入力への認証情報の混入
@@ -62,19 +62,19 @@ deterministic_library    決定論的ライブラリ (PDF text extraction, parse
                          同じ入力 + 同じ profile なら同じ出力
 ```
 
-KIO API の契約は実行形態に依らず同じ。
+Kio API の契約は実行形態に依らず同じ。
 
 ```
-KIO core
+Kio core
   → task descriptor (task_id, adapter_kind, input_hash, allowed scope, network permission)
   → device-local Adapter
   → artifact descriptor (output_hash, status, error_code / error_category)
-  → KIO core
+  → Kio core
 ```
 
 ## 2.1 同梱 deterministic Adapter (ベースライン index)
 
-KIO は `deterministic_library` の Prepare / Markdownize Adapter を同梱する。対象: plain text / Markdown / コード、PDF text layer 抽出。OCR・レイアウト解析・画像理解は行わない。**出力は単純な passthrough ではなく、Normalized Markdown v1 (§5.2.1) への決定的正規化**である — 少なくとも Setext 見出し → ATX 変換・生 HTML block の fenced text 化・改行 / 空白 / fence の正規化を行う (§5.2.1 準拠が受け入れ検査 V5 の通過条件のため、passthrough では通常の Markdown (Setext 等) がオフライン基線 index で全滅する)。
+Kio は `deterministic_library` の Prepare / Markdownize Adapter を同梱する。対象: plain text / Markdown / コード、PDF text layer 抽出。OCR・レイアウト解析・画像理解は行わない。**出力は単純な passthrough ではなく、Normalized Markdown v1 (§5.2.1) への決定的正規化**である — 少なくとも Setext 見出し → ATX 変換・生 HTML block の fenced text 化・改行 / 空白 / fence の正規化を行う (§5.2.1 準拠が受け入れ検査 V5 の通過条件のため、passthrough では通常の Markdown (Setext 等) がオフライン基線 index で全滅する)。
 
 > **PDF text layer 抽出の範囲 (実装フィードバック 2026-07-23)**: 実世界の text-layer PDF
 > (TeX / LibreOffice 出力) は FlateDecode 圧縮 content stream + subset font の glyph index +
@@ -97,7 +97,7 @@ KIO は `deterministic_library` の Prepare / Markdownize Adapter を同梱す�
 
 # 3. ネットワーク送信原則と opt-in (正本)
 
-KIO core は、**明示オプトインなしにネットワーク越し API へファイル内容を送信してはならない**。
+Kio core は、**明示オプトインなしにネットワーク越し API へファイル内容を送信してはならない**。
 本節を network opt-in の正本とし、[06-cli-spec.md §2](06-cli-spec.md) / [10-operations.md §1](10-operations.md) / [01-positioning.md §1.1](01-positioning.md)
 は本節を参照する。
 
@@ -378,7 +378,7 @@ output:
   fallback_to_full             bool
   reason
   # Evidence Pointer は Adapter output に含めない — 必須フィールド (chunk_hash / commit) は
-  # chunking と snapshot の後にしか存在しないため、発行は KIO core が行う (08 §2.1)
+  # chunking と snapshot の後にしか存在しないため、発行は Kio core が行う (08 §2.1)
 capability_flags:
   ocr, layout_detection, table_extraction, speech_to_text, incremental_update
 ```
@@ -435,7 +435,7 @@ incremental の詳細プロンプト規約は §8 (生成 LLM 系のみ。§8 �
     CommonMark source escape に通す: original `&`→`&amp;`、`<`→`&lt;`、`>`→`&gt;`、それ以外の
     ASCII punctuation (`U+0021..002F`, `U+003A..0040`, `U+005B..0060`, `U+007B..007E`) は文字の前に
     `\` を 1 個付け、その他は変更しない。変換後の各行を trusted prefix
-    `> KIO figure description: ` / `> KIO figure text: ` の後へ置き、対応 image URI 直後の persisted
+    `> Kio figure description: ` / `> Kio figure text: ` の後へ置き、対応 image URI 直後の persisted
     unit Markdown に入れる。unit metadata にも同じ post-escape strings を保持し、検索 bytes と Evidence
     span の元を一致させる。この変換後の CommonMark AST は provider 由来の link / image / raw HTML /
     autolink node を 1 件も含んではならない
@@ -466,7 +466,7 @@ Evidence Pointer のバイト位置は保存された bytes に対して定義�
 - **code fence**: CommonMark の ``` fence (チルダ不可)。**fence 内の「無変換」は構文的変換 (escape /
   参照置換) の禁止のみを意味する — エンコーディング (UTF-8/NFC)・改行 (LF)・trailing space 禁止は
   fence 内にも適用する** (適用しないと CRLF/NFD を含むコードで v1 の byte 決定性が壊れる)
-- 上記の準拠は KIO 側受け入れ検査 ([04-pipeline.md §3.2](04-pipeline.md)) の構造検証に含める
+- 上記の準拠は Kio 側受け入れ検査 ([04-pipeline.md §3.2](04-pipeline.md)) の構造検証に含める
 
 media 別の変換規約 (何を見出しにするか等) は Adapter 実装の裁量 (tool_profile_hash が識別する)。
 本節が固定するのは**バイト表現の規約のみ**である。
@@ -494,11 +494,11 @@ embedding の SQLite schema (`embeddings` / `chunk_vec`) の正本は [04-pipeli
 とする (本節は profile — モデル / 次元 / 距離 / modality — の正本。SQL 定義の重複記載は 2026-07-14 に
 解消し、本節から参照する)。
 
-sqlite-vec の制約で vector table を物理分割してもよいが、概念上は単一の Embedding Adapter / 単一の `profile_hash`。profile が一致しない場合、KIO は vector 検索を強行せず再生成または text fallback。
+sqlite-vec の制約で vector table を物理分割してもよいが、概念上は単一の Embedding Adapter / 単一の `profile_hash`。profile が一致しない場合、Kio は vector 検索を強行せず再生成または text fallback。
 
 > **実装フィードバック — chunk 埋め込みの contextual 化 (2026-07-24)**: MVP の実データ
 > ベースライン評価 (09 §4.1) で、vector レーンが「本文 1〜2 文＋定型 filler」の実機規模
-> (人格あたり 50 ファイル) で薄い解答本文を浮上させられず、`KIO ≥ 0.8` 腕が未達だった。
+> (人格あたり 50 ファイル) で薄い解答本文を浮上させられず、`Kio ≥ 0.8` 腕が未達だった。
 > **ファイル名はユーザーが付けた意図信号**であるため、chunk の埋め込み**入力**を
 > `{humanized filename}\n\n{chunk 本文}` とする (contextual retrieval)。`humanized filename`
 > は basename stem の決定的変換 (`-`/`_`→空白、ASCII camelCase 境界→空白、空白畳み込み。
@@ -551,7 +551,7 @@ output:  reranked_result_ids, scores
 metadata: profile_hash, searched_scopes, fallback_reason
 ```
 
-Rerank Adapter は KIO の検索結果を再順位付けするだけで、**searched_scopes / fallback_reason を隠蔽してはならない**。
+Rerank Adapter は Kio の検索結果を再順位付けするだけで、**searched_scopes / fallback_reason を隠蔽してはならない**。
 
 ## 5.7 Batch 実行契約とプロバイダ採用条件
 
@@ -588,17 +588,17 @@ provider_scope_id()            下記の不変識別子を返す
 
 1. job 一覧照会 (または token による job 発見) と **upload 一覧照会**が可能であること — これが無いと
    未記録 in-flight・未記録 upload 残骸の回復が構造的に不可能になる
-2. job 作成 → 一覧可視化の遅延に上限があること (KIO の可視化猶予 既定 10 分以内)。**upload →
+2. job 作成 → 一覧可視化の遅延に上限があること (Kio の可視化猶予 既定 10 分以内)。**upload →
    一覧可視化にも同じ上限を適用する** ([04-pipeline.md §5.8](04-pipeline.md) の upload 照合が前提とする)。
    upload() は upload_id を返し (返却型必須)、list_uploads は pagination を提供すること
-3. job / 一覧情報の保持期間が KIO の回復期限 (既定 48h) 以上であること
+3. job / 一覧情報の保持期間が Kio の回復期限 (既定 48h) 以上であること
 4. job metadata / filename に client 任意の識別子 (intent_token) を埋め込めること
 5. account / workspace の**安定した**識別子を取得できること (取得不能なら reservation の照合が恒久
    unknown になり、`kio batch abandon` 頼みの運用になる)
 6. 投入拒否 (permanent 4xx) にも課金するか否かを宣言すること。**課金する provider の Adapter は、
    拒否応答時に usage (`usd` = 宣言請求額 | `billable_units` — §4 の one-of と同形、第三の field は
    設けない) を機械可読で返却する** (この返却義務は Batch 限定で
-   なく **sync online Adapter にも共通** — [04-pipeline.md §5.4](04-pipeline.md) の sync 記帳規律が参照する) — KIO は submit_rejected の
+   なく **sync online Adapter にも共通** — [04-pipeline.md §5.4](04-pipeline.md) の sync 記帳規律が参照する) — Kio は submit_rejected の
    terminal 化と同一 Tx で記帳する (**報告値が有効なら provider 値 (`estimated=0`)、無効・欠落は
    estimated 縮退** — [04-pipeline.md §5.4](04-pipeline.md) の事前検証と DDL 注記)
 
@@ -720,18 +720,18 @@ usage_validation (missing | invalid), billing_source (estimated)
 MVP における Adapter の脅威モデルを次のとおり確定する。
 
 ```text
-1. R23 で実行される Adapter は KIO 同梱の built-in target のみで、trusted code として
+1. R23 で実行される Adapter は Kio 同梱の built-in target のみで、trusted code として
    扱う。将来の外部 dispatcher を実装する場合も、ユーザーが明示的にインストールし
    ~/.config/kio/tools.toml に設定した Adapter だけを trusted code として扱う。
 
-2. [adapter.policy] は「KIO 側の入力制御 + 事後監査」の規約であり、
+2. [adapter.policy] は「Kio 側の入力制御 + 事後監査」の規約であり、
    sandbox による強制保証ではない。
    - `max_input_bytes` は **AdapterRun 1 回の入力 (prepared input の canonical bytes 合計)** に
      適用する (**AdapterRun = 1 回の Adapter 呼出 = 1 request / job** — §4・§5.7 の課金報告と同一
      単位。task 全体の総量上限ではない — 総量は budget cap 側が律する) — 超過は送信前に当該 task を
      terminal failed (invalid_input・非再試行) とし、送信しない (課金なし)
-   - KIO は allowed_scope 外のファイルを Adapter に渡さない (入力制御)
-   - KIO は allow_network=false の Adapter にオンライン送信前提の task を発行しない
+   - Kio は allowed_scope 外のファイルを Adapter に渡さない (入力制御)
+   - Kio は allow_network=false の Adapter にオンライン送信前提の task を発行しない
    - AdapterRun (task_id / input_hashes / output_hashes / status) を監査ログとして残す
 
 3. 将来の外部 dispatcher における、悪意ある・侵害された Adapter プロセス自体の挙動 (allowed_scope 外の読み取り、
@@ -739,7 +739,7 @@ MVP における Adapter の脅威モデルを次のとおり確定する。
    OS レベルのサンドボックス強制は Phase 4+ の再設計論点とする。
 
 4. 第三者 Adapter の配布・署名・検証 (サプライチェーン) は v2 以降のスコープ外。
-   MVP で同梱・文書化するのは KIO 公式 Adapter のみ。
+   MVP で同梱・文書化するのは Kio 公式 Adapter のみ。
 ```
 
 将来の外部 dispatcher に初回実行時の承認 UI を追加する場合は、この前提を反映した
@@ -760,13 +760,13 @@ MVP における Adapter の脅威モデルを次のとおり確定する。
 1. "unchanged" と判断した unit は出力に含めない (旧 unit を再利用)
 2. 変更 unit は完全に書き直す (部分編集ではなく full unit replacement)
    → Markdown の局所一貫性を保つ
-3. heading 構造の変更は KIO には影響しない (chunk side で対応)
+3. heading 構造の変更は Kio には影響しない (chunk side で対応)
 4. Adapter が「軽微とは言えない」と判断したら fallback_to_full=true で短絡
    (受理側は unit 検査に先立つ制御応答として扱い、同一 task を mode=full で再発行する —
    [04-pipeline.md §3.2](04-pipeline.md) の制御応答規則。full 応答での本 flag は contract violation)
-   閾値の Adapter 側 hint は KIO 側 hint と衝突したら **KIO 側を優先**
+   閾値の Adapter 側 hint は Kio 側 hint と衝突したら **Kio 側を優先**
 5. spec_version 不一致なら、Adapter は invalid_input として失敗 (`KIO-E-ADAPTER-SPECVER-001` — 汎用 `KIO-E-ADAPTER-CONTRACT-001` (retryable 1 回) と区別し、[04-pipeline.md §5.3](04-pipeline.md) の invalid_input 分類 = max_attempts 0 に一意に対応させる)
-6. 出力は KIO 側の受け入れ検査 (04-pipeline.md §3.2) を通過しなければ persist されない。
+6. 出力は Kio 側の受け入れ検査 (04-pipeline.md §3.2) を通過しなければ persist されない。
    違反は KIO-E-ADAPTER-CONTRACT-001 として reject され、**incremental capability 非互換の場合に
    限り** full に fallback する (spec_version 非互換は下記のとおり fallback しない)
 ```
@@ -777,7 +777,7 @@ MVP における Adapter の脅威モデルを次のとおり確定する。
 
 ```
 SYSTEM:
-  You are a markdownization adapter for KIO.
+  You are a markdownization adapter for Kio.
   Given the previous markdown of <unit_key> and the new raw input,
   produce updated markdown for changed units only.
   Keep unchanged units out of the output.
@@ -802,7 +802,7 @@ USER:
 
 ## 8.3 ストリーミング応答
 
-大型 PDF (100+ pages) では TTFB を抑えるためストリーミング出力を許容する。KIO は Adapter からの SSE / chunked JSON を受け取り、unit 完了ごとに persist する。
+大型 PDF (100+ pages) では TTFB を抑えるためストリーミング出力を許容する。Kio は Adapter からの SSE / chunked JSON を受け取り、unit 完了ごとに persist する。
 
 ストリーミング中の unit は staging 領域に persist し (**配置と耐久 descriptor は
 [03-data-model.md §2](03-data-model.md) の `.kio/staging/` — purge / status / prune-orphans の
@@ -828,10 +828,10 @@ terminal 化済み task の残存 root は cleanup 失敗の残骸として prun
 
 **retry の合成規則**: staging の完了済み bytes は凍結する。retry 応答は**全 unit を含んでよい**
 (未完了 unit のみへの絞り込みは任意の転送最適化 — Adapter は staging の内容を知り得ないため
-KIO は要求しない)。**凍結保全と合成が適用されるのは transport 中断 (stream 失敗) からの resume に
+Kio は要求しない)。**凍結保全と合成が適用されるのは transport 中断 (stream 失敗) からの resume に
 限る** — 受け入れ検査 reject (contract violation — [04-pipeline.md §3.2](04-pipeline.md)) 起因の
 再投入では staging を破棄して開始する (違反 unit を含み得る staging を first-instance-wins で
-勝たせると、修正済み retry 応答が破棄され再違反が確定するため)。KIO が staging + retry 応答を合成する際、**まず生の retry 応答の各配列に V1 / V6 の配列内 unit_key 重複検査と配列間の排他検査
+勝たせると、修正済み retry 応答が破棄され再違反が確定するため)。Kio が staging + retry 応答を合成する際、**まず生の retry 応答の各配列に V1 / V6 の配列内 unit_key 重複検査と配列間の排他検査
 (pairwise disjoint — V1 の 4 集合 / V6 の 3 集合) を適用し** (staged-key の
 再出現で重複・非排他が消える前に契約違反を検出する)、その後 **staging に確定済みの unit_key と
 重複する応答 unit は黙って破棄する** (staging 側が first instance — first-instance-wins
@@ -844,13 +844,13 @@ KIO は要求しない)。**凍結保全と合成が適用されるのは transp
 
 ## 8.4 Capability 宣言なしの Adapter
 
-`capabilities` に `incremental_update` を含まない Adapter は、KIO が **常に full モード** で呼ぶ。これにより既存 Adapter との後方互換が保たれる。
+`capabilities` に `incremental_update` を含まない Adapter は、Kio が **常に full モード** で呼ぶ。これにより既存 Adapter との後方互換が保たれる。
 
 ---
 
 # 9. 再現性ポリシー
 
-Adapter の完全な再実行決定性は要求しない。KIO が保証するのは:
+Adapter の完全な再実行決定性は要求しない。Kio が保証するのは:
 
 ```
 raw_hash 不変                既存 artifact を尊重 (first-instance-wins)

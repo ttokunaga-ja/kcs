@@ -847,7 +847,7 @@ def write_corpus(out_dir, profile_name="tiny", reset_owned=False):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(
-        description="Generate the independent KIO scale corpus"
+        description="Generate the independent Kio scale corpus"
     )
     parser.add_argument("--out", required=True, help="output collection root")
     parser.add_argument(

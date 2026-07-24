@@ -7214,7 +7214,7 @@ fn r19_4_duplicate_content_failed_chunk_converges_via_twin() {
     // two files use CONTEXT-FREE names (`_.md` / `__.md`, stems that humanize to
     // nothing → `chunk_embedding_context` is `None`). Their shared section is then
     // embedded bare under one identical `embedding_hash`, exactly as the pre-
-    // addendum `a.md`/`b.md` pair did. (KIO indexes only a scope's own directory,
+    // addendum `a.md`/`b.md` pair did. (Kio indexes only a scope's own directory,
     // not subfolders, so same-basename files in sibling subdirs are not an option.)
     fs::write(
         dir.path().join("_.md"),

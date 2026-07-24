@@ -1238,7 +1238,7 @@ class TestRuntimeCallbackReceipt(unittest.TestCase):
 
             with self.assertRaisesRegex(
                 attestation.PersonaHistoryAttestationError,
-                "changed during KIO semantic checking",
+                "changed during Kio semantic checking",
             ):
                 attestation.build_runtime_directory_receipt(
                     root,

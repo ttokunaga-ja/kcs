@@ -136,7 +136,7 @@ default: k = 60, w_text = 1.0, w_vector = 1.0
   構造的に割る (eval M3-2/M3-3 実測で失敗 14 件全てがこの 2 構造に帰着)
   **決定的 query 正規化 (MATCH 生成の前段・2026-07-22 実装フィードバック #1)**: 生成に先立ち、
   各 token (フィードバック #2 の細分後は各 unit) に決定的な同値展開を適用してよい — (1) 4 桁以上の純数値 token の桁区切り同値形
-  (`3600` ↔ `3,600`)、(2) KIO 同梱の固定対訳辞書 (実装リリースに固定・実行時変更不可) による
+  (`3600` ↔ `3,600`)、(2) Kio 同梱の固定対訳辞書 (実装リリースに固定・実行時変更不可) による
   用語の対訳形。展開結果は当該 token と同値 phrase の OR 並置として投入する。
   「query 由来でない追加語」の禁止が指すのは入力に由来しない語 (推測・履歴・文脈からの注入) で
   あり、**入力 token から固定規則で決定的に導出される同値形は query 由来である** — この展開が
@@ -536,7 +536,7 @@ commit_type ∈ { 'manual', 'auto', 'imported', 'migrated', 'repaired', 'merged'
 | --- | --- | --- | --- |
 | manual | 明示 commit | true | none |
 | auto | 自動 snapshot (取り込み完了時 = MVP / 定期 = Phase 4、§8) | false | shallow (個数 / 時間で tree を減衰) |
-| imported | 外部 KIO から取り込んだ commit | true | none |
+| imported | 外部 Kio から取り込んだ commit | true | none |
 | migrated | format 変換時の中間 commit | false | shallow |
 | repaired | repair 操作の中間 commit | false | shallow |
 | merged | 共有版マージ (Phase 5+) | true | none |
@@ -559,7 +559,7 @@ gc_policy(commit_type):
   purged    → none
 ```
 
-**full (commit object の削除) はどの commit_type にも適用しない。** commit object は append-only であり、これを消す操作は KIO に存在しない (purge も commit / tree を書き換えない、§3.5)。
+**full (commit object の削除) はどの commit_type にも適用しない。** commit object は append-only であり、これを消す操作は Kio に存在しない (purge も commit / tree を書き換えない、§3.5)。
 
 なお `kio repair --verify-objects` ([10-operations.md §7.5](10-operations.md)) が生成する `repaired` commit は破損 object の再取り込みによる復旧点であり、その復元した raw object は GC 対象外 (§2.6)。したがって commit の tree が shallow 化されても復旧した raw 内容は保持され、object としては実効的に none 相当である。
 
@@ -588,7 +588,7 @@ GC は独立した常駐プロセスを持たない (§5 プロセスモデル)�
 
 1. `manual_only` (MVP デフォルト): `kio gc` の明示実行のみ
 2. `after_index` (Phase 4+ の GC 実行系実装後のデフォルト): `kio index` / `kio snapshot` の成功終了後、同一プロセス内で `max_runtime_seconds` を上限に実行する。上限到達で中断し、残りは次回に持ち越す (`kio index` 実行中とは重ならないため I/O / lock 競合が起きない)
-3. `on_idle` (Phase 4+): OS スケジューラ委譲の定期 auto snapshot 実行時 (§8)、直近の KIO 書き込み操作から `idle_threshold_seconds` 以上経過していれば便乗実行する
+3. `on_idle` (Phase 4+): OS スケジューラ委譲の定期 auto snapshot 実行時 (§8)、直近の Kio 書き込み操作から `idle_threshold_seconds` 以上経過していれば便乗実行する
 
 GC 実行系の実装自体は Phase 4+ (§2.6)。config schema は Step 1 の設計時から遵守する。
 
@@ -692,7 +692,7 @@ kio purge <path|--raw-hash <h>> --reason <legal|privacy|misingest|copyright|othe
 
 ## 3.2 「忘れない」と purge の両立
 
-KIO は「原則として忘れない」が、**purge は「忘れる」のではなく「消した事実を記録して忘れる」操作**。purge 後も:
+Kio は「原則として忘れない」が、**purge は「忘れる」のではなく「消した事実を記録して忘れる」操作**。purge 後も:
 
 ```
 - commit_type = "purged" の新 commit が記録される
@@ -776,7 +776,7 @@ purge は **object の物理削除 + default tombstone または内部 erase rec
 - commit_type=purged の新 commit (purge 実行後の working tree を指す)
 ```
 
-**working tree の原本には触れない** (KIO はユーザーのファイルを削除しない)。したがって purge の
+**working tree の原本には触れない** (Kio はユーザーのファイルを削除しない)。したがって purge の
 preview と完了表示は、対象 raw_hash と同一 bytes の原本が working tree に残存する場合に**必ず警告する**:
 残存原本は次回 `kio index` の自動 scan で再取り込みされ、既存 pointer は再び alive になる
 ([08-evidence-pointer-spec.md §4.2](08-evidence-pointer-spec.md))。恒久的に除外するには原本の削除または
@@ -876,7 +876,7 @@ phase 順序    = prepared (closure 確定・記帳)
               案内する** (bak / quarantine とも出力 path ごとの mutation 前検査 — --force 限定にすると
               先行 crash で宛先が消えた後の非 --force 再実行が stale 退避を素通しする) (crash 残存の隔離物が purge 済み
               内容の生存コピーか第三者ファイルかは機械判別できない。隔離・退避は `--to` 配下のユーザー
-              領域であり [04-pipeline.md §1.1](04-pipeline.md) の temp 掃除の対象外 — KIO は自動削除
+              領域であり [04-pipeline.md §1.1](04-pipeline.md) の temp 掃除の対象外 — Kio は自動削除
               しない)。
               **publish の rename は非 --force・--force とも no-replace 相当 (RENAME_NOREPLACE 等) で行い、
               競合検出時は無変更で失敗する** (非 --force = preflight の不存在判定後に現れた第三者ファイルを
@@ -892,7 +892,7 @@ phase 順序    = prepared (closure 確定・記帳)
               保全し、退避名を stderr に表示して退避の dev/inode を記録する** (置換 rename は旧内容を破壊
               するため、保全なしには下記の巻き戻しが原状回復にならない。**同名の退避が既に存在する場合は
               先行 restore の未完残存として拒否し、回復手順 (退避の手動復帰または削除) を案内する** —
-              残存退避はユーザー領域のファイルであり KIO は自動削除しない。crash で退避だけが残っても、
+              残存退避はユーザー領域のファイルであり Kio は自動削除しない。crash で退避だけが残っても、
               次回の同 path への --force restore がこの拒否で検出・案内する)。**restore はさらに rename
               完了後に同 3 点を再検査し、変化を検出したら対象 raw の canonical 状態
               ([08-evidence-pointer-spec.md §3.1](08-evidence-pointer-spec.md) 手順 5) を
@@ -922,7 +922,7 @@ phase 順序    = prepared (closure 確定・記帳)
               両者の所在 (隔離名・退避名を含む) を表示して RESTORE-CONFLICT で終端する — 窓内の第三者
               置換を消さない。crash で隔離だけが残っても、次回の同 path への restore が同名残存の拒否で
               検出・案内する。巻き戻しにより publish の事後取消が --force 上書きを含めて成立 —
-              lock 非取得のまま残余窓を閉じる。purge closure を KIO 自身が破らない)。open は
+              lock 非取得のまま残余窓を閉じる。purge closure を Kio 自身が破らない)。open は
               OS アプリ起動の直前 (一時展開の cache publish 後) に再検査する (起動後は取消不能 —
               検査はそこまでに完了させる。拒否時は当該一時展開 — publish 済み cache を含む — を
               dev/inode 対照の上で除去して終端する。[06-cli-spec.md §1](06-cli-spec.md))
@@ -1021,7 +1021,7 @@ kio restore <evidence|path|commit> --to <dir>
 - publish (--force 含む)・隔離・復帰の rename は全て no-replace。巻き戻しの削除も退避の復帰・
   除去も、path 上の対照ではなく決定的隔離名 `<basename>.kio-restore-quarantine` への隔離 rename +
   rename した実体の dev/inode 検証で行う (隔離名は stderr に表示。同名残存 = 先行未完として拒否 +
-  回復案内。隔離・退避はユーザー領域 — 04 §1.1 の temp 掃除の対象外、KIO は自動削除しない)
+  回復案内。隔離・退避はユーザー領域 — 04 §1.1 の temp 掃除の対象外、Kio は自動削除しない)
 - 競合処置は段階別 (--force publish 競合 = 退避を復帰 / 隔離実体の不一致 = 元 path へ復帰を試行 /
   退避の不一致・復帰 rename 失敗 = 不触) — いずれも両所在を表示して
   KIO-E-COMMIT-RESTORE-CONFLICT-001 (retryable exit 3、context に conflict_kind・retry_disposition)
@@ -1053,10 +1053,10 @@ kio view <path> --at <commit>
 
 # 5. プロセスモデル (常駐なし)
 
-KIO は **常駐 daemon を持たない**。すべての処理は CLI コマンドのプロセス内で完結する。
+Kio は **常駐 daemon を持たない**。すべての処理は CLI コマンドのプロセス内で完結する。
 
 - interval 発火 (定期 auto snapshot, Phase 4) は OS スケジューラ (launchd / systemd user timer / Task Scheduler) から CLI を起動する委譲方式とする (§8.2)
-- idle 検出 (GC on_idle, Phase 4+) も同様に委譲実行時に判定し、KIO 自身は常駐しない (§2.3)
+- idle 検出 (GC on_idle, Phase 4+) も同様に委譲実行時に判定し、Kio 自身は常駐しない (§2.3)
 - 同一 `.kio` に対する多重起動は `.kio/.lock` で防止する (§6)
 
 # 6. 並行性 / Locking
@@ -1092,7 +1092,7 @@ batch 系と reindex は外部副作用 (upload / job 作成) と batch_requests
 - refs (refs/heads/main, canonical refs/tags-v1/*) の更新は `.kio/.lock` 保持下で、temp file 書き込み + atomic rename により行う (部分書き込みを外部に見せない)。legacy refs/tags/* は read-only compatibility とする
 - `kio repair --verify-objects` の raw object 復旧と repaired commit publication も、同じ lock の下で private temp + hash 再検証 + atomic publish を使う
 - `kio repair --rebuild-db` 実行中の `kio search` は、再構築完了までの間旧 sqlite.db (存在すれば) を読むか、`KIO-E-INDEX-REBUILDING-001` を返す。再構築の完了も atomic rename (sqlite.db.tmp → sqlite.db) で切り替える
-- scope-registry.sqlite / cost-ledger.sqlite (~/.local/share/kio/) は WAL モード + busy_timeout (デフォルト 5000ms) で複数プロセスの同時書き込みを直列化する。registry は cache であり ([03-data-model.md §4](03-data-model.md))、破損時は各 `.kio` の rescan で再構築する (**再構築の入力はユーザーが知る探索 root** — registry 喪失後は `.kio` の所在一覧も失われるため、各 root での `kio index` 再実行が再登録を兼ねる。KIO が自力で全ディスクを走査することはしない)。cost-ledger.sqlite は**再構築不可の運用台帳** ([03-data-model.md §4.1](03-data-model.md) / [04-pipeline.md §5.4](04-pipeline.md))
+- scope-registry.sqlite / cost-ledger.sqlite (~/.local/share/kio/) は WAL モード + busy_timeout (デフォルト 5000ms) で複数プロセスの同時書き込みを直列化する。registry は cache であり ([03-data-model.md §4](03-data-model.md))、破損時は各 `.kio` の rescan で再構築する (**再構築の入力はユーザーが知る探索 root** — registry 喪失後は `.kio` の所在一覧も失われるため、各 root での `kio index` 再実行が再登録を兼ねる。Kio が自力で全ディスクを走査することはしない)。cost-ledger.sqlite は**再構築不可の運用台帳** ([03-data-model.md §4.1](03-data-model.md) / [04-pipeline.md §5.4](04-pipeline.md))
 - purge の log scrub と通常 append/rotation は、device logs では `${XDG_DATA_HOME:-$HOME/.local/share}/kio/logs/scrub.lock`、scope access logs では `.kio/logs/access.scrub.lock` を共有する。複合 lock 順序は scope store → cost-ledger.sqlite (Tx) → device observability → scope access とし、逆順取得を禁止する。**scope 由来 log の append 順序**: 読取系が対象の path / query / raw_hash を含む行を append する場合、当該 append は scrub lock を保持したまま、3 点検査 (§6 — journal 不在 + epoch 不変 + lifecycle counter 不変) の**最終検査と同一 critical section** で行う — scrub 完了後の再 append で purge の削除 postcondition を破らない。最終検査で拒否した場合の記録には対象 path / query / raw_hash を含めない
 
 # 7. 観測 (Observability)

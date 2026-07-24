@@ -344,7 +344,7 @@ pub fn commit_hash(commit: &CommitObject) -> Result<String> {
 /// (UTC ISO8601, `06 §12`). An optional fractional-second suffix `.NNN…` before
 /// the trailing `Z` is accepted (`06 §12` permits microsecond precision). Checks
 /// digit positions, separators, and calendar validity (month-aware day count
-/// including leap years). Leap seconds (`:60`) are rejected — KIO only emits
+/// including leap years). Leap seconds (`:60`) are rejected — Kio only emits
 /// second-precision timestamps derived from Unix time, which never produce
 /// `:60` (WS1d cross-review ruling).
 fn is_valid_created_at(value: &str) -> bool {
@@ -527,7 +527,7 @@ mod tests {
             "2026-04-32T00:00:00Z",  // day 32
             "2026-04-29T24:00:00Z",  // hour 24
             "2026-04-29T12:60:00Z",  // minute 60
-            "2026-04-29T12:00:60Z",  // leap second not emitted by KIO
+            "2026-04-29T12:00:60Z",  // leap second not emitted by Kio
             "2026-02-30T00:00:00Z",  // Feb 30
             "2026-04-31T00:00:00Z",  // Apr 31
             "2023-02-29T00:00:00Z",  // non-leap Feb 29

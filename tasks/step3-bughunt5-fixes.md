@@ -102,7 +102,7 @@ docs で Step4/Phase4+/v2+ 明記) との重複はゼロを確認。
   検知のいずれかで Pending/Failed に戻り再試行。実際 = Running は流入のみ・流出無しの吸収状態。
   `search` の `enriched_ratio` は 1.0 に到達しなくなる (Running を pending 扱いで数える `main.rs:1840`) が、
   直す手段がツール内に存在しない。
-- **修正案**: KIO は単一ユーザで batch は folder store lock を保持するため、**lock 取得時点で見える Running task は
+- **修正案**: Kio は単一ユーザで batch は folder store lock を保持するため、**lock 取得時点で見える Running task は
   必然的に orphan** (他プロセスは lock を取れない)。batch resume/retry と index の enrichment 起動時に、
   Running task を Pending へ reclaim して再実行する (もしくは heartbeat_at 閾値による stale-reclaim を配線)。
 

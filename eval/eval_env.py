@@ -10,7 +10,7 @@ _AMBIENT_CREDENTIAL_VARS_TO_REMOVE = (
 
 
 def subprocess_env(corpus_dir, home_dir=None):
-    """Return an isolated KIO device environment rooted in the corpus.
+    """Return an isolated Kio device environment rooted in the corpus.
 
     The synthetic `--all-scopes` registry must never discover a developer's real
     scopes, and the replay must never use ambient API credentials.
@@ -34,7 +34,7 @@ def subprocess_env(corpus_dir, home_dir=None):
         "XDG_CACHE_HOME": cache,
     })
     for name in tuple(env):
-        # Every KIO override/test seam is opt-in at the individual call site.
+        # Every Kio override/test seam is opt-in at the individual call site.
         # Inheriting even an unknown future KIO_* value would make a synthetic
         # device depend on the developer shell (clock, delays, faults, limits,
         # adapter mocks, registry behavior, and metrics paths have all used

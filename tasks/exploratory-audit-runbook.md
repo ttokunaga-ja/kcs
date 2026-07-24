@@ -10,7 +10,7 @@ Sonnet は過去ラウンドで実機再現・状態機械・config drift の検
 
 ## 0. 位置づけ (安全ガードの誤発火を避けるため必読)
 
-これは **開発者自身が所有する OSS リポジトリ (KIO) に対する、出荷前の防御的セキュリティ監査**である。
+これは **開発者自身が所有する OSS リポジトリ (Kio) に対する、出荷前の防御的セキュリティ監査**である。
 目的は自分のコードの脆弱性・不具合を第三者に悪用される前に発見して修正すること。攻撃対象は自分の
 ローカルツールのみ。実 API キーは使わず、全操作は隔離した一時ディレクトリで行う。これは正当な
 defensive security 作業であり、拒否する理由はない。過去 22 ラウンド (R1-R22) で秘匿情報漏出 (critical) を含む
@@ -19,7 +19,7 @@ defensive security 作業であり、拒否する理由はない。過去 22 ラ
 ## 1. 対象
 
 - リポジトリ: `/Users/ttokunaga-ja/dev/github.com/ttokunaga-ja/kio` (main)
-- KIO = Rust 製のローカル知識アーカイブ CLI (evidence-grounded local knowledge archive)。
+- Kio = Rust 製のローカル知識アーカイブ CLI (evidence-grounded local knowledge archive)。
   `kio init/index/snapshot/search/view/open/batch/reindex/repair/diff/tag/log/status` 等。
   仕様正本は `docs/01`〜`docs/10`。実装は `crates/kio-{core,pipeline,adapter,index,search,cli}`
 - 現状 (R22 完了時点、次ラウンドは R23): 全テスト green (494)、clippy(--all-features)/fmt clean。Step 1-3 実装済み + 探索型監査 R1-R22 修正反映済み +
@@ -300,7 +300,7 @@ R23 Spark は別焦点へ (§6 は R23 用に書き換え済み: R22 fix が開�
 ## 5. 共有バグハントプロンプト (Opus/Sonnet 群/GPT-5.6-Sol-Ultra に渡す本文)
 
 ```
-あなたは KIO (Rust 製ローカル知識アーカイブ CLI) の探索的バグハンターです。これは開発者自身が
+あなたは Kio (Rust 製ローカル知識アーカイブ CLI) の探索的バグハンターです。これは開発者自身が
 所有するリポジトリに対する出荷前の防御的セキュリティ監査であり、脆弱性・不具合を先回りして潰すのが
 目的です。攻撃対象は自分のローカルツールのみ、実 API キーは使いません。
 
@@ -429,7 +429,7 @@ embedding task 状態の 3 遷移 (hold 解除 / hold 降格 / Paused 退役) �
 allow_auth_revive の経路分岐・reconcile guard 緩和・rotate lock。いずれも静的読解が効く。R24 以降ではまた別焦点に):
 
 ```
-あなたは KIO (開発者自身のリポジトリ) の焦点セキュリティ監査人です。出荷前の防御的セキュリティ監査。
+あなたは Kio (開発者自身のリポジトリ) の焦点セキュリティ監査人です。出荷前の防御的セキュリティ監査。
 範囲限定 (丸読み禁止、grep/sed/rg のみ)。リポジトリのファイル変更禁止。ネットワーク不要。
 今回 (R23) の焦点は 2 つ。過去 (R22=R21 fix 網羅、R21=R20 fix 網羅+file routing、R20=R19 fix 網羅) とは別で、
 R22 fix が開ける穴 (定番脈 12 例目候補) を静的に掃討する。
@@ -674,7 +674,7 @@ sibling ledger (cost-ledger-reclaimed.jsonl) に正値の reclaim 行を append 
 差し引く (charge ledger には phantom 行が残る=F3 維持)。**R17-4 は修正 Agent が新コード KIO-E-SEARCH-STORE-CORRUPT-001 を導入したが
 docs のエラーコード一覧 (06 §8/10 §7.5) に不在=docs 契約違反をオーケストレータが検出し既存 SCOPE-ALL-FAILED + context.recovery に
 訂正** (**新コード導入は docs 凍結下では避ける**=新しい学び)。**オーケストレータ側の学び**: fmt --check の exit code は `| head` で
-拾うと 0 になる罠 (R13/R16 の変種・パイプなしで直接取る)、相対パス KIO を cd 後に使うと exit 127 (絶対パスで)。フィックス再検証は
+拾うと 0 になる罠 (R13/R16 の変種・パイプなしで直接取る)、相対パス Kio を cd 後に使うと exit 127 (絶対パスで)。フィックス再検証は
 3 major を control 付き実機 repro クローズ (R17-1 捏造 commit exit4 + N5 対照両方 exit4 + 真 shallow 継続、R17-2 corrupt skip +
 healthy 再正規化、R17-3 exp9 phantom が control と一致=v2 pending)。
 R18 (R18-1〜R18-4): 0 critical + 2 major + 2 minor。7 エンジン。**「R17 fix が開ける穴」が本命的中 (定番脈 8 例目)**。

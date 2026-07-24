@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Focused tests for the bounded, unbound persona W0 KIO runner core."""
+"""Focused tests for the bounded, unbound persona W0 Kio runner core."""
 
 import hashlib
 import json

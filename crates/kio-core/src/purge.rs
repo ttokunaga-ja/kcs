@@ -1912,7 +1912,7 @@ fn write_private_replace(kio_dir: &Path, path: &Path, bytes: &[u8], max_bytes: u
 fn ensure_secure_parent(kio_dir: &Path, path: &Path) -> Result<PathBuf> {
     let root_metadata = fs::symlink_metadata(kio_dir).map_err(state_io)?;
     if !directory_is_real(kio_dir, &root_metadata)? {
-        return Err(corrupt_state("KIO root is not a real directory"));
+        return Err(corrupt_state("Kio root is not a real directory"));
     }
     let root = kio_dir.canonicalize().map_err(state_io)?;
     let parent = path
@@ -1920,7 +1920,7 @@ fn ensure_secure_parent(kio_dir: &Path, path: &Path) -> Result<PathBuf> {
         .ok_or_else(|| corrupt_state("purge state path has no parent"))?;
     let relative = parent
         .strip_prefix(kio_dir)
-        .map_err(|_| corrupt_state("purge state path escapes KIO root"))?;
+        .map_err(|_| corrupt_state("purge state path escapes Kio root"))?;
     let mut current = kio_dir.to_path_buf();
     for component in relative.components() {
         let Component::Normal(component) = component else {
@@ -1940,7 +1940,7 @@ fn ensure_secure_parent(kio_dir: &Path, path: &Path) -> Result<PathBuf> {
         }
         let canonical = current.canonicalize().map_err(state_io)?;
         if !canonical.starts_with(&root) {
-            return Err(corrupt_state("purge state ancestor escapes KIO root"));
+            return Err(corrupt_state("purge state ancestor escapes Kio root"));
         }
     }
     Ok(parent.to_path_buf())

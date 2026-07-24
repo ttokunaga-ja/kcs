@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""評価ランナー (KIO 検索評価ハーネス, docs/09-mvp-scope.md §4.3).
+"""評価ランナー (Kio 検索評価ハーネス, docs/09-mvp-scope.md §4.3).
 
 golden-queries.jsonl を読み、`kio search --json` を叩いて Recall@10 を
 シナリオ別 (M3-1 / M3-2 / M3-3) に集計し、results.json + report.md を出力する。
@@ -23,7 +23,7 @@ golden-queries.jsonl を読み、`kio search --json` を叩いて Recall@10 を
         -> (raw_hash="sha256:"+raw_sha256, section_id=slugify(heading),
             path_at_commit=file)
     に解決する。raw_sha256 は corpus/history manifest がファイル bytes から記録する。
-    path_at_commit は expected.file そのもの (スコープ相対パス、KIO の
+    path_at_commit は expected.file そのもの (スコープ相対パス、Kio の
     evidence_pointer.path_at_commit と同じ空間)。
 
 exit コード (2026-07-03 J2 裁定):
@@ -1166,7 +1166,7 @@ def run_full_eval(queries, resolver, history_manifest, corpus_dir, bin_path,
 
 def _write_report(path, results, active):
     counts = results.get("counts", {})
-    lines = ["# KIO 検索評価レポート (synthetic)", ""]
+    lines = ["# Kio 検索評価レポート (synthetic)", ""]
     lines.append(f"- 目標: 各シナリオ Recall@10 >= {RECALL_TARGET} (docs/09 §4.3)")
     lines.append(f"- クエリ数: {counts.get('n_queries', 0)} "
                  f"(scored={counts.get('n_scored', 0)} / "
@@ -1210,7 +1210,7 @@ def _write_report(path, results, active):
 
 # --------------------------------------------------------------------------- #
 def main(argv=None):
-    ap = argparse.ArgumentParser(description="KIO 検索評価ランナー")
+    ap = argparse.ArgumentParser(description="Kio 検索評価ランナー")
     ap.add_argument("--golden", default=os.path.join(HERE, "golden-queries.jsonl"))
     ap.add_argument("--corpus", help="コーパスディレクトリ (corpus-manifest.json を含む)")
     ap.add_argument("--corpus-manifest",

@@ -752,7 +752,7 @@ impl<C: MistralOcrClient> MarkdownizeAdapter for MistralOcrMarkdownizeAdapter<C>
 /// images, so the provider page set is the first trusted
 /// unit boundary available to the adapter. The response parser already bounds
 /// the page count; this additionally requires a contiguous, duplicate-free
-/// 0-based page sequence before minting KIO unit keys.
+/// 0-based page sequence before minting Kio unit keys.
 fn discovered_unit_hints(
     media_type: &str,
     raw_hash: &str,
@@ -886,7 +886,7 @@ fn expected_page_indices(request: &MarkdownizeRequest) -> Result<Option<Vec<usiz
 }
 
 /// R14-4: build the Mistral `/v1/ocr` request body. `pages = Some(..)` scopes the OCR to
-/// exactly those 0-indexed pages (the incremental cost fix, docs/07 §8: KIO re-processes
+/// exactly those 0-indexed pages (the incremental cost fix, docs/07 §8: Kio re-processes
 /// only the changed+added units and reuses the rest); `pages = None` processes the whole
 /// document (Full send). Pure + HTTP-free so the page scoping is unit-testable.
 ///
@@ -2122,7 +2122,7 @@ mod tests {
         let uri = image_object_uri("scope", &image_hash(&page.images[0].bytes));
         assert!(replaced.contains(&uri));
         let projected = project_bbox_annotations(&replaced, "scope", &page.images).unwrap();
-        assert!(projected.contains(&format!("{uri})\n> KIO figure description:")));
+        assert!(projected.contains(&format!("{uri})\n> Kio figure description:")));
         assert!(projected.contains(r"ZXQ\-UNIQUE 1000"));
         let metadata = page_metadata("mistral-ocr-2505", Some(&page.images));
         assert_eq!(

@@ -669,7 +669,7 @@ chunk_hash = sha256:8fefa4825444efb1a120df709f45764a9ac074a9a2c0002ee4307baa7bbf
 8. **`kio inspect` の失敗 error/exit code** — 存在しない/不正 hash 時の具体 error_code (STORE?) と exit code が未定義。影響: CT-CLI-013。
 9. **`kio log` の列挙順序・遡行規則・絞り込み意味論** — 新旧順 / first-parent か全 DAG か、
    `--at` / `--since` が log で何を絞るかが 06 に無い。影響: CT-CLI-005/017。
-10. **created_at の精度** — 秒 (`Z`) か μ秒 (`.NNNNNNZ`) か、KIO が生成時どちらを出すか未定義 (`06 §12` は両方「正」)。影響: CT-COMMIT-010 の生成側再現性。
+10. **created_at の精度** — 秒 (`Z`) か μ秒 (`.NNNNNNZ`) か、Kio が生成時どちらを出すか未定義 (`06 §12` は両方「正」)。影響: CT-COMMIT-010 の生成側再現性。
 11. **tree entry `type` の値域** — `03 §8` 例は `"file"` のみ。symlink/その他の扱いが未定義 (直下のみ規則では実質 file のみ)。影響: CT-TREE-009。
 12. **`status` / `diff` の lock 分類** — `05 §6` の読み取り系明示リスト (search/log/view/inspect/
     evidence verify/restore) にも書き込み系リストにも `status` / `diff` が現れない。`kio tag` (refs 書き込み)

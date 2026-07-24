@@ -2,7 +2,7 @@
 
 ## 目的
 
-KIO Step 3 の本体実装。**契約テスト仕様 `tasks/step3a-contract-tests.md` (r3) の P0 60 件を green にする**ことが完了条件。
+Kio Step 3 の本体実装。**契約テスト仕様 `tasks/step3a-contract-tests.md` (r3) の P0 60 件を green にする**ことが完了条件。
 
 ## 前提 (main に揃っている)
 

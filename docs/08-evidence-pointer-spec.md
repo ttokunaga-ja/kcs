@@ -1,6 +1,6 @@
 # 08 Evidence Pointer Spec
 
-KIO の中核概念 **Evidence Pointer** の正式仕様。外部 AI Agent や他ツールが KIO と相互運用する際の契約となるため、独立 spec として保持する。
+Kio の中核概念 **Evidence Pointer** の正式仕様。外部 AI Agent や他ツールが Kio と相互運用する際の契約となるため、独立 spec として保持する。
 
 > 関連: [03-data-model.md §1, §5](03-data-model.md) (CAS / identity) / [05-runtime.md §3](05-runtime.md) (purge / Dead Pointer) / [02-philosophy.md](02-philosophy.md) (なぜ Evidence Pointer か)
 
@@ -15,15 +15,15 @@ KIO の中核概念 **Evidence Pointer** の正式仕様。外部 AI Agent や�
 - 上書き保存で意味が変わる
 - 過去版に戻れない
 
-KIO は **path ではなく content-addressed object** で根拠を指すことで、これらの脆弱性を排除する。
+Kio は **path ではなく content-addressed object** で根拠を指すことで、これらの脆弱性を排除する。
 
 ```
 通常:  "report.pdf:42"                  → 移動・リネーム・削除で死ぬ
-KIO:   commit + raw_hash + chunk_hash   → ファイル移動・リネーム・削除に耐える
+Kio:   commit + raw_hash + chunk_hash   → ファイル移動・リネーム・削除に耐える
        + path_at_commit + span            (purge されない限り永続)
 ```
 
-これは KIO の差別化の中核 ([01-positioning.md](01-positioning.md))。
+これは Kio の差別化の中核 ([01-positioning.md](01-positioning.md))。
 
 ---
 
@@ -435,7 +435,7 @@ retarget は **AI Agent からの呼び出しを前提** にしているため�
 # 6. 不変性保証 (immutability guarantee)
 
 ```
-- 既存 Evidence Pointer は KIO によって書き換えられない
+- 既存 Evidence Pointer は Kio によって書き換えられない
 - raw_hash / chunk_hash / tool_profile_hash / commit は append-only
 - pointer の意味する場所 (= 生成時に解決可能だった raw + chunk) は purge されない限り解決可能
 - 解決失敗は schema 上区別される (tombstoned / not_found / scope_unreachable / registry_duplicate。verify はさらに unverifiable — §4.3 の 6 値 union が正本)
@@ -443,13 +443,13 @@ retarget は **AI Agent からの呼び出しを前提** にしているため�
 - "古い pointer" を "最新版" に勝手に飛ばさない (retarget は明示操作)
 ```
 
-これは AI Agent が KIO から取得した Evidence を **長期参照** できる契約となる。
+これは AI Agent が Kio から取得した Evidence を **長期参照** できる契約となる。
 
 ---
 
 # 7. 外部 Agent との相互運用
 
-KIO は Evidence Pointer を **JSON object として AI Agent に返す**。Agent はこれを記憶し、後続の検証・参照・引用に使える。
+Kio は Evidence Pointer を **JSON object として AI Agent に返す**。Agent はこれを記憶し、後続の検証・参照・引用に使える。
 
 ## 7.1 検索結果に含める形
 

@@ -45,7 +45,7 @@ lock 保持中に `kio log` / `kio inspect` / `status` / `diff` が成功する�
 
 should-fix S1-S6 + N3 を実装 (Claude Opus) し、Codex クロスレビューの major 2 件を裁定修正:
 - S2 の merge 元を「旧 manifest」→「旧 HEAD tree (正) + 旧 manifest の deleted 行のみ」に変更 (stale manifest で削除記録を失わない)
-- created_at に月別日数 + うるう年判定を追加、leap second (:60) は不許可 (KIO は発行し得ない)
+- created_at に月別日数 + うるう年判定を追加、leap second (:60) は不許可 (Kio は発行し得ない)
 
 **backlog (minor、Step 2 以降)**: error code のヘルパ境界での文脈喪失 — ユーザーオペランド不正 (`read_commit` に非 commit hash 等) が `KIO-E-CONFIG-SCHEMA-001` を、on-disk 異常が `KIO-E-CONFIG-USAGE-001` を返すケースが残る。CLI オペランド解決経路での call-site mapping で解消予定。
 

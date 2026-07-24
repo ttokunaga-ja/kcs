@@ -44,8 +44,8 @@ commit 欠落だけ素通り。Sonnet-B の対照: raw CAS object 欠落は stat
 **契約**: R14-3/R15-1/R15-4 で確立した「純読取りは破損を生き延びる・write は明確なエラーコードで拒否」。
 特に `view` は docs/05:345「shallow commit を指す Evidence Pointer の解決は失敗しない (raw_hash/chunk_hash
 による直接解決)」の明文保証があり、解決前段の `read_commit` 無条件 `?` はこの保証を直接破る
-(evidence-grounded という中核価値の破れ)。docs/05:329「commit object の削除操作は KIO に存在しない」は
-KIO 自身の操作の話であり、外部破損 (disk error/誤操作/部分復元) は R13-4/R15-4 と同じ防御対象クラス。
+(evidence-grounded という中核価値の破れ)。docs/05:329「commit object の削除操作は Kio に存在しない」は
+Kio 自身の操作の話であり、外部破損 (disk error/誤操作/部分復元) は R13-4/R15-4 と同じ防御対象クラス。
 
 **fix 方針**: commit object 欠落を tree 欠落と同格の「shallow 相当」として系統適用する。
 - read 系: `head_tree_state()` の `read_commit` を `read_tree` と同じ `is_store_not_found` 吸収で

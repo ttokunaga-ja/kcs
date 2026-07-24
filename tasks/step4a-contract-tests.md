@@ -425,7 +425,7 @@ kio purge --raw-hash sha256:<64hex> --reason <...> [--erase-tombstone] [--yes]
 
 `path` and `--raw-hash` are exclusive. A path means every distinct raw ever bound to that logical
 path in the selected scope. Shallow history makes path resolution incomplete and fails; raw-hash
-purge remains possible. KIO never deletes the user's working file, so purge refuses while target bytes
+purge remains possible. Kio never deletes the user's working file, so purge refuses while target bytes
 remain anywhere in the current working tree. Default tombstones block future re-ingest. Erase mode
 leaves no block and discloses that later explicit reintroduction of identical bytes is possible.
 
@@ -533,8 +533,8 @@ Every escaped line receives a trusted blockquote prefix. Immediately after the i
 form is:
 
 ```text
-> KIO figure description: <line>   # repeated for each description line
-> KIO figure text: <line>          # repeated for each transcription line
+> Kio figure description: <line>   # repeated for each description line
+> Kio figure text: <line>          # repeated for each transcription line
 ```
 
 Thus provider headings, fences, links, autolinks, raw HTML, image syntax, controls, or fake `kio://`

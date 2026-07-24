@@ -310,11 +310,11 @@
   `PRAGMA integrity_check` + 両表存在確認...§5.8 の回復 (reconcile) 完了まで新規 Batch 投入禁止』
 - 前提: `crates/` 全体を `\.backup|integrity_check|PRAGMA integrity` で grep すると 0 件。
   `cost-ledger.sqlite` 自体は Phase 1 で実装済みだが (`crates/kio-pipeline/src/ledger/schema.rs`)、
-  バックアップ手順・復元検知・「復元後は新規 Batch 投入禁止」というガードは KIO 側のコード・
+  バックアップ手順・復元検知・「復元後は新規 Batch 投入禁止」というガードは Kio 側のコード・
   ドキュメント (docs/10-operations.md への文言記載のみ) いずれにも実行可能な形で存在しない。
 - 操作: `cost-ledger.sqlite` を手動バックアップ→破損させる→バックアップから復元する、という手順を
   実行した状態で `kio batch resume` 等の書き込み系コマンドを実行する。
-- 期待: KIO 側に復元検知の仕組みが無い以上、復元されたファイルは無条件に通常どおり扱われる
+- 期待: Kio 側に復元検知の仕組みが無い以上、復元されたファイルは無条件に通常どおり扱われる
   (「復元後は reconcile 完了まで新規投入禁止」という安全策が機能しない状態を再現できる)。
   この契約は現状「安全策皆無」であることの固定であり、実装が復元検知手段 (例: 起動時
   `PRAGMA integrity_check` の常時実行、または明示 `kio ledger reconcile` コマンドの新設) を
@@ -361,7 +361,7 @@
   grep 0 件。`AdapterRun`/`AdapterProfile` いずれにもこの構造が無い。
 - 操作: billable な online Adapter が成功終端する。
 - 期待: 応答に `usage` (usd 実測額、または pages/tokens_in/tokens_out 等の kind 別 count 配列) が
-  含まれ、欠落時は KIO 側が estimated 縮退で吸収する。現行はこの field 自体が存在しないため、
+  含まれ、欠落時は Kio 側が estimated 縮退で吸収する。現行はこの field 自体が存在しないため、
   課金額は `AdapterRun` からは一切取得できない (§D/§O とも接続する構造的欠落)。
 
 ### QA18 `AdapterProfile` に `billable_kinds`/`reject_billing` が存在しない [P0]
@@ -672,14 +672,14 @@
   `crates/kio-cli/tests/step4b_ledger_contract.rs:15` のコメント (「CL40 は未実装」の注記) の
   1 件のみで、実 field/構造体としては皆無。
 - 操作: incremental Markdownize 応答で 1 unit のみ Adapter 側処理エラーとなる状況を用意する。
-- 期待: 応答に `failed_units: [{unit_key, error_kind}]` が含まれ、KIO 側は当該 unit を manifest
+- 期待: 応答に `failed_units: [{unit_key, error_kind}]` が含まれ、Kio 側は当該 unit を manifest
   上で `failed` へ遷移させる (persist はしない)。現行はこの field が無いため、部分失敗を
   Adapter が構造化して報告する手段が存在しない (§3.2 V1/V4/V6 いずれの被覆判定も
   failed_units 抜きで評価されている — 下記 QA38/QA39 参照)。
 
 ### QA37 `evidence_pointers` field が `MarkdownizeResponse` に残存し、常に空配列を書くだけの死んだ field になっている [P1]
 - 正本: 07 §5.2 L351-352『# Evidence Pointer は Adapter output に含めない — 必須フィールド...は
-  chunking と snapshot の後にしか存在しないため、発行は KIO core が行う』
+  chunking と snapshot の後にしか存在しないため、発行は Kio core が行う』
 - 前提: `crates/kio-adapter/src/types.rs:200` に `pub evidence_pointers: Vec<Value>` が残存する。
   構築箇所 10 件 (`main.rs:10509,12921,12939`、`markdownize.rs:1660`、`mistral_ocr.rs:658`、
   `deterministic.rs:203,218`、テスト 2 件) は**すべて** `Vec::new()` を渡し、読み取り側でこの
@@ -694,12 +694,12 @@
   違反** — keys() の集合化では隠れるため、**各配列の要素数 = distinct unit_key 数**を
   あわせて検査する)...**unchanged_unit_keys は §2.2 の unchanged 候補集合と完全一致**
   (changed/added の unit を unchanged と申告して旧内容を成功公開させるのは違反 — 集合は
-  KIO 側確定)』
+  Kio 側確定)』
 - 前提: `validate_markdownize_response` (`markdownize.rs:336-390`) の
   `unit_keys()`/`set_from()` ヘルパ (1431-1437) は `Vec<String>` を `BTreeSet` へ変換するのみで
   要素数比較を行わない (同一配列内で `"page:1"` が 2 回出現しても `BTreeSet` 化で 1 要素に
   縮退し検出されない)。また `unchanged_keys` (354-358) は応答の `unchanged_unit_keys` を
-  そのまま信頼する集合として使い、KIO 側で独立計算した §2.2 unchanged 候補集合
+  そのまま信頼する集合として使い、Kio 側で独立計算した §2.2 unchanged 候補集合
   (`crate::prepare::map_units` の `unchanged: Vec<UnitReuse>`) と突合しない — Adapter が
   changed unit を虚偽で unchanged と申告しても検出されない。
 - 操作: (a) `updated_units` 配列内に同一 `unit_key` を 2 回含む応答。(b) 実際は変化した unit
@@ -772,7 +772,7 @@
 - 操作: `Title\n=====\n\nBody text` (Setext H1) を含む plain text/Markdown ファイルを同梱
   deterministic Adapter で markdownize する。
 - 期待: 出力が `# Title\n\nBody text` (ATX 形式) へ正規化される。現行は Setext 記法がそのまま
-  素通りし、v1 の「ATX 見出しのみ (Setext 禁止)」規約に違反した markdown が (KIO 側検査も
+  素通りし、v1 の「ATX 見出しのみ (Setext 禁止)」規約に違反した markdown が (Kio 側検査も
   QA41 のとおり機能しないため) そのまま persist される — オフライン基線 index で通常の
   Markdown 文書 (README 等、Setext 見出しは稀だが GitHub Flavored Markdown で許容される記法) が
   v1 違反のまま格納されるリスクを再現できる。
@@ -793,7 +793,7 @@
 ## M. fallback_to_full 制御応答と contract_violation retry の分離 (U87)
 
 ### QA44 fallback_to_full=true が mode 不問で無条件 contract_violation となり、制御応答としての再発行が行われない [P0]
-- 正本: 04 §3.2 L358『fallback_to_full=true の応答は V1〜V6 に先立ち制御応答として評価する...KIO は
+- 正本: 04 §3.2 L358『fallback_to_full=true の応答は V1〜V6 に先立ち制御応答として評価する...Kio は
   当該応答を成功・失敗のどちらの終端にもせず、**同一 task を mode=full で再発行する** (§3.1 の
   発動条件は再評価しない)。full 応答でのこの flag は contract violation = ループ防止』
 - 前提: `validate_markdownize_response` (`markdownize.rs:341-343`) は
@@ -878,7 +878,7 @@
   finite かつ `norm_squared > 0.0` を検査するのみで、**L2 正規化そのもの (core 側での実施) も
   正規化後の単位ノルム再検査も行わない** — 関数名が示すとおり cosine 距離が定義可能かの
   検証に留まり、"unit norm within tolerance" の検査は存在しない。
-- 操作: 正規化前の (norm ≠ 1) raw vector を Adapter から受け取り、KIO 側の正規化パイプラインを
+- 操作: 正規化前の (norm ≠ 1) raw vector を Adapter から受け取り、Kio 側の正規化パイプラインを
   通す。
 - 期待: 正規化後の vector に対し、単位ノルム (許容誤差内) であることを再検査し、外れる場合は
   contract violation とする。現行は正規化処理自体・正規化後の再検査のいずれも
@@ -972,7 +972,7 @@
   無い)。
 - 操作: 7 条件のうち 1 つ (例: 条件2「可視化遅延上限 10 分」) を満たさない provider 実装を
   接続しようとする。
-- 期待: KIO 側で採用可否判定に失敗し、Batch モードでの採用を拒否する (sync のみでの採用に
+- 期待: Kio 側で採用可否判定に失敗し、Batch モードでの採用を拒否する (sync のみでの採用に
   縮退するか、非採用とする)。現行はこの判定ロジック自体が存在しない (QA52 の Batch trait 新設に
   伴って初めて意味を持つ、依存契約)。
 
@@ -985,7 +985,7 @@
   `NotImplemented`/`Io`) はいずれも `String` メッセージのみを持ち、拒否時の usage
   (`usd`/`billable_units`) を運べる構造を持たない (QA17 の `usage` field 不在と表裏)。
 - 操作: sync online Adapter が投入拒否 (課金対象の permanent 4xx) で失敗する状況を用意する。
-- 期待: エラー値に usage (宣言請求額) が付随し、KIO 側が `submit_rejected` として同一 Tx で
+- 期待: エラー値に usage (宣言請求額) が付随し、Kio 側が `submit_rejected` として同一 Tx で
   記帳できる。現行は `AdapterError` の型自体が usage を運べないため、拒否時の課金額は
   常に estimated 縮退にしかならない。
 
@@ -1020,7 +1020,7 @@
 
 ### QA58 大型入力のストリーミング応答 (SSE/chunked JSON) 受信・unit 単位 persist が実装に存在しない [P0]
 - 正本: 07 §8.3 L728-730『大型 PDF (100+ pages) では TTFB を抑えるためストリーミング出力を許容
-  する。KIO は Adapter からの SSE/chunked JSON を受け取り、unit 完了ごとに persist する』
+  する。Kio は Adapter からの SSE/chunked JSON を受け取り、unit 完了ごとに persist する』
 - 前提: `crates/kio-adapter/src/mistral_ocr.rs` (2468 行) を `stream|SSE|chunked` (大小無視) で
   grep しても HTTP ストリーミングに関する実装は見当たらず (該当箇所は既存の「incremental な
   page 単位処理」を指すコメントのみで、SSE/chunked-JSON 受信とは別概念)、実装は単発同期

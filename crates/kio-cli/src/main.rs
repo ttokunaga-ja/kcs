@@ -5235,7 +5235,7 @@ fn thousands_separated(digits: &str) -> String {
 }
 
 /// Deterministic query normalization (05 §1.3 L116-123, 2026-07-22 spec
-/// feedback #1): KIO's own fixed, release-pinned bilingual vocabulary —
+/// feedback #1): Kio's own fixed, release-pinned bilingual vocabulary —
 /// recovered unchanged from the pre-PC8 `fts_keyword_expansions`
 /// (`git show e3f2a94^:crates/kio-cli/src/main.rs`), which this restores.
 /// Forward direction only (English keyword -> Japanese term, matching the
@@ -10301,7 +10301,7 @@ fn is_normalized_unit_file(name: &str) -> bool {
             .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
 }
 
-/// Whether `name` looks like one of KIO's own atomic-write temp files
+/// Whether `name` looks like one of Kio's own atomic-write temp files
 /// (`.tmp-<pid>-...` or `.<name>.tmp-<pid>-...`). Used by R9-5 to GC a
 /// crash-orphaned temp left inside a gen dir by a killed writer.
 fn is_orphan_temp_name(name: &str) -> bool {
@@ -10820,7 +10820,7 @@ fn run_orphan_attribution_walk(
                         },
                         "guidance": {
                             "result_fetch": "read-only-safe: fetching this job's result does not create new state",
-                            "deletion": "delete only after confirming no other KIO instance shares this provider scope",
+                            "deletion": "delete only after confirming no other Kio instance shares this provider scope",
                         },
                     }));
                 }
@@ -11141,7 +11141,7 @@ fn stalled_batch_status_json() -> Result<Vec<Value>> {
 
 /// Q3: reclaim orphaned `Running` tasks back to `Pending`. A task is flipped to
 /// `Running` only by `execute_pending_markdownize_tasks`, immediately before an
-/// online send, and back to Done/Partial/Failed once it returns. KIO is
+/// online send, and back to Done/Partial/Failed once it returns. Kio is
 /// single-user and every executor (`batch resume` / `batch retry` / index
 /// enrichment) holds the folder store lock end-to-end, so any `Running` task
 /// observed while holding that lock is necessarily an orphan from a process that
@@ -12517,7 +12517,7 @@ enum OnlineMarkdownizePrecondition {
     /// Genuine failure — retire the task (file gone / edited-since-enqueue / text-native /
     /// oversize). The recovery is a fresh re-index, not a retry.
     Retire,
-    /// The file is live and recognized, but KIO does not yet have a bounded local
+    /// The file is live and recognized, but Kio does not yet have a bounded local
     /// conversion contract that can feed it to the OCR adapter. Keep it Pending without
     /// charging or sending; currently this is the Office-container path.
     AwaitConversion,
@@ -13139,7 +13139,7 @@ fn try_online_incremental_markdownize(
         }
         (response, outcome.profile.tool_profile_hash)
     };
-    // KIO orchestrates the unchanged reuse (docs/07 §8: the document-processing
+    // Kio orchestrates the unchanged reuse (docs/07 §8: the document-processing
     // route reuses unchanged units KIO-side rather than via the adapter). Inject the
     // unchanged new keys so `normalized_units_from_response` copies their markdown
     // from the prior instance with `reused_from` set. In the 0-change path this is
@@ -15946,7 +15946,7 @@ fn run_index_pipeline(
     // task is held unless the scope carries an explicit `--send-secrets` approval.
     let secrets_approved = secrets_send_approved(repo);
     // R12-2: the documented `adapter.policy.max_input_bytes` input gate (07 §7.1.2 —
-    // "KIO 側の入力制御" is an MVP contract). Scope config wins over user config,
+    // "Kio 側の入力制御" is an MVP contract). Scope config wins over user config,
     // default 100 MB. A file larger than the cap is never handed to the Markdownize
     // adapter (below); it stays archived but unenriched, and the count is disclosed.
     let max_input_bytes = effective_max_input_bytes(repo);
@@ -20362,7 +20362,7 @@ fn ensure_device_dirs_resolvable() -> Result<()> {
             return Err(KioError::invalid_usage(format!(
                 "cannot resolve an absolute base directory for device-global state: \
                  set $HOME to an absolute path or export an absolute ${var} \
-                 (KIO refuses to write device-global state under the working directory)"
+                 (Kio refuses to write device-global state under the working directory)"
             )));
         }
     }

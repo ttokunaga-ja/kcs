@@ -10,7 +10,7 @@ pub(crate) enum StorePathKind {
 }
 
 /// Resolve an existing store-relative path without accepting symlinks at any
-/// level below the canonical KIO directory. Missing suffixes are reported as
+/// level below the canonical Kio directory. Missing suffixes are reported as
 /// `None` so callers can validate references before their output is created.
 pub(crate) fn resolve_existing_store_path(
     kio_dir: &Path,
@@ -33,7 +33,7 @@ pub(crate) fn resolve_existing_store_path(
     if root_metadata.file_type().is_symlink() || !root_metadata.file_type().is_dir() {
         return Err(unsafe_store_path(
             kio_dir,
-            "KIO store root is not a real directory",
+            "Kio store root is not a real directory",
         ));
     }
     let canonical_root = kio_dir.canonicalize().pipeline_io(kio_dir)?;
@@ -70,7 +70,7 @@ pub(crate) fn resolve_existing_store_path(
         if !canonical.starts_with(&canonical_root) {
             return Err(unsafe_store_path(
                 &current,
-                "store path resolves outside the canonical KIO directory",
+                "store path resolves outside the canonical Kio directory",
             ));
         }
         if is_last {
@@ -100,7 +100,7 @@ pub(crate) fn ensure_store_directory_path(kio_dir: &Path, relative: &Path) -> Re
     if root_metadata.file_type().is_symlink() || !root_metadata.file_type().is_dir() {
         return Err(unsafe_store_path(
             kio_dir,
-            "KIO store root is not a real directory",
+            "Kio store root is not a real directory",
         ));
     }
     let canonical_root = kio_dir.canonicalize().pipeline_io(kio_dir)?;
@@ -124,7 +124,7 @@ pub(crate) fn ensure_store_directory_path(kio_dir: &Path, relative: &Path) -> Re
         if !canonical.starts_with(&canonical_root) {
             return Err(unsafe_store_path(
                 &current,
-                "store directory resolves outside the canonical KIO directory",
+                "store directory resolves outside the canonical Kio directory",
             ));
         }
     }

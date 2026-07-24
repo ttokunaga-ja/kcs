@@ -429,7 +429,7 @@ def build_mock_figure_pages(ground_truth: dict[str, Any], tiny_png_base64: str) 
 
     scan = specs["scan_page"]
     scan_body = (
-        "KIO SCAN FIXTURE PAGE FIVE\n\n"
+        "Kio SCAN FIXTURE PAGE FIVE\n\n"
         "This entire page is rendered as a single raster image, a simulated scan of text-native content.\n\n"
         "Anchor tokens for retrieval checks: ALPHA-7731 BRAVO-2048 CHARLIE-9152\n\n"
         "If the page is returned only as an image with a placeholder, every token is lost to search."
@@ -453,7 +453,7 @@ def build_mock_figure_pages(ground_truth: dict[str, Any], tiny_png_base64: str) 
             "index": info["page_index"],
             "markdown": (
                 "# インフォグラフィックOCR評価\n\n![img-2.png](img-2.png)\n\n"
-                "KIO PIPELINE OVERVIEW\n\nIngest Markdownize Embed"
+                "Kio PIPELINE OVERVIEW\n\nIngest Markdownize Embed"
             ),
             "images": [
                 {

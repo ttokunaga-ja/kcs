@@ -348,7 +348,7 @@ impl<C> GeminiEmbeddingAdapter<C> {
             "adapter_role": "multimodal",
             "dimensions": self.dimensions,
             "distance": "cosine",
-            // 2026-07-24 (07 §5.3 contextual-embedding addendum): KIO prepends a
+            // 2026-07-24 (07 §5.3 contextual-embedding addendum): Kio prepends a
             // chunk's humanized filename to the embedded text
             // (`embedding_store::contextualized_embedding_input`). That changes
             // what a chunk vector MEANS, so it is part of the vector-space

@@ -11,7 +11,7 @@ pub const SHA256_DIGEST_LENGTH: usize = 64;
 const FULL_HASH_REQUIREMENT: &str =
     "hash must be `sha256:` followed by 64 lowercase hexadecimal characters";
 
-/// A full SHA-256 identifier that has passed the KIO object-hash grammar.
+/// A full SHA-256 identifier that has passed the Kio object-hash grammar.
 ///
 /// The borrowed representation prevents callers from accidentally substituting
 /// unvalidated input after validation. Filesystem fanout should be derived from
@@ -45,7 +45,7 @@ impl<'a> ValidatedHash<'a> {
     }
 }
 
-/// A pointer whose hash-bearing fields all satisfy the KIO object-hash grammar.
+/// A pointer whose hash-bearing fields all satisfy the Kio object-hash grammar.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ValidatedEvidencePointer<'a> {
     pointer: &'a EvidencePointer,
@@ -82,7 +82,7 @@ impl<'a> ValidatedEvidencePointer<'a> {
     }
 }
 
-/// Validates the canonical KIO object-hash representation and returns its
+/// Validates the canonical Kio object-hash representation and returns its
 /// lowercase 64-character digest without the `sha256:` prefix.
 pub fn validate_full_hash(hash: &str) -> Result<&str> {
     let digest = hash

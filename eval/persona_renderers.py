@@ -1,6 +1,6 @@
 """Deterministic, dependency-free source renderers for persona-PC fixtures.
 
-The renderer deliberately returns *planned* contract chunks, not observed KIO
+The renderer deliberately returns *planned* contract chunks, not observed Kio
 chunk hashes.  A later attestation phase is authoritative for actual chunks.
 Every function is pure with respect to the host: no clock, randomness, network,
 filesystem, locale, or optional package is consulted.
@@ -34,7 +34,7 @@ RENDERER_SCHEMA_VERSION = 1
 CHUNKING_MAX_CHARS = 6_000
 CODE_LAST_CHUNK_CHARS = 512
 MAX_RAW_SOURCE_BYTES = 512 * 1024 * 1024
-# The current KIO adapter input ceiling is stricter than the raw-file storage
+# The current Kio adapter input ceiling is stricter than the raw-file storage
 # contract.  Core fixtures must stay eligible rather than become
 # ``skipped_oversized`` before their disposition can be attested.
 MAX_ADAPTER_INPUT_BYTES = 100 * 1024 * 1024
@@ -66,7 +66,7 @@ class SourceRequest:
 
 @dataclass(frozen=True)
 class LogicalMember:
-    """Planned logical membership; never evidence of an observed KIO chunk."""
+    """Planned logical membership; never evidence of an observed Kio chunk."""
 
     unit_key: str
     kind: str
@@ -431,7 +431,7 @@ def _render_text_pdf(request):
         content_id = page_id + 1
         kids.append(f"{page_id} 0 R")
         text = _pdf_literal(
-            f"KIO {request.source_id} version {request.version} page {index} evidence {digest[:20]}"
+            f"Kio {request.source_id} version {request.version} page {index} evidence {digest[:20]}"
         )
         stream = f"BT /F1 10 Tf 72 720 Td ({text}) Tj ET\n".encode("ascii")
         objects.append(
@@ -609,7 +609,7 @@ def _render_docx(request):
             "word/document.xml",
             "http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument",
         ),
-        "docProps/app.xml": _app_properties("KIO Persona Renderer"),
+        "docProps/app.xml": _app_properties("Kio Persona Renderer"),
         "docProps/core.xml": _core_properties(request),
         "word/_rels/document.xml.rels": _xml(
             '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"/>'
@@ -638,7 +638,7 @@ def _render_xlsx(request):
             "xl/workbook.xml",
             "http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument",
         ),
-        "docProps/app.xml": _app_properties("KIO Persona Renderer"),
+        "docProps/app.xml": _app_properties("Kio Persona Renderer"),
         "docProps/core.xml": _core_properties(request),
         "xl/_rels/workbook.xml.rels": _xml(
             '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
@@ -671,17 +671,17 @@ def _render_xlsx(request):
 
 def _ppt_theme():
     return _xml(
-        '<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" name="KIO">'
-        '<a:themeElements><a:clrScheme name="KIO"><a:dk1><a:srgbClr val="000000"/></a:dk1>'
+        '<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" name="Kio">'
+        '<a:themeElements><a:clrScheme name="Kio"><a:dk1><a:srgbClr val="000000"/></a:dk1>'
         '<a:lt1><a:srgbClr val="FFFFFF"/></a:lt1><a:dk2><a:srgbClr val="1F497D"/></a:dk2>'
         '<a:lt2><a:srgbClr val="EEECE1"/></a:lt2><a:accent1><a:srgbClr val="4F81BD"/></a:accent1>'
         '<a:accent2><a:srgbClr val="C0504D"/></a:accent2><a:accent3><a:srgbClr val="9BBB59"/></a:accent3>'
         '<a:accent4><a:srgbClr val="8064A2"/></a:accent4><a:accent5><a:srgbClr val="4BACC6"/></a:accent5>'
         '<a:accent6><a:srgbClr val="F79646"/></a:accent6><a:hlink><a:srgbClr val="0000FF"/></a:hlink>'
         '<a:folHlink><a:srgbClr val="800080"/></a:folHlink></a:clrScheme>'
-        '<a:fontScheme name="KIO"><a:majorFont><a:latin typeface="Arial"/></a:majorFont>'
+        '<a:fontScheme name="Kio"><a:majorFont><a:latin typeface="Arial"/></a:majorFont>'
         '<a:minorFont><a:latin typeface="Arial"/></a:minorFont></a:fontScheme>'
-        '<a:fmtScheme name="KIO"><a:fillStyleLst><a:solidFill><a:schemeClr val="phClr"/></a:solidFill></a:fillStyleLst>'
+        '<a:fmtScheme name="Kio"><a:fillStyleLst><a:solidFill><a:schemeClr val="phClr"/></a:solidFill></a:fillStyleLst>'
         '<a:lnStyleLst><a:ln w="9525"><a:solidFill><a:schemeClr val="phClr"/></a:solidFill></a:ln></a:lnStyleLst>'
         '<a:effectStyleLst><a:effectStyle><a:effectLst/></a:effectStyle></a:effectStyleLst>'
         '<a:bgFillStyleLst><a:solidFill><a:schemeClr val="phClr"/></a:solidFill></a:bgFillStyleLst>'
@@ -720,7 +720,7 @@ def _render_pptx(request):
             "ppt/presentation.xml",
             "http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument",
         ),
-        "docProps/app.xml": _app_properties("KIO Persona Renderer"),
+        "docProps/app.xml": _app_properties("Kio Persona Renderer"),
         "docProps/core.xml": _core_properties(request),
         "ppt/_rels/presentation.xml.rels": _xml(
             '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'

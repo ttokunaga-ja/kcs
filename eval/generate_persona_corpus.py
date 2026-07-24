@@ -4,7 +4,7 @@
 The writer intentionally supports only the ``tiny`` profile.  ``pilot`` and
 ``full`` plans are deterministic, but physical publication stays blocked
 until streaming ledger publication and pilot-derived byte/inode limits exist.
-Planned contract chunks in this module are never post-index KIO evidence.
+Planned contract chunks in this module are never post-index Kio evidence.
 """
 
 from __future__ import annotations
@@ -1099,8 +1099,8 @@ def build_history_prepare_intent(
     """Build a root-independent, read-only W0 runtime-envelope intent.
 
     Receipt/control descriptors bind an exact root-relative plain file by
-    byte length and SHA-256.  They may not be placed inside either opaque KIO
-    runtime directory.  This function plans no mutation and runs no KIO
+    byte length and SHA-256.  They may not be placed inside either opaque Kio
+    runtime directory.  This function plans no mutation and runs no Kio
     subprocess.
     """
     validate_generation_plan(plan)
@@ -1787,7 +1787,7 @@ def verify_w0_immutable_content(plan, root, replay_id):
 
     Extra paths are intentionally ignored here and must be checked by
     :func:`verify_history_prepare_envelope`.  This API never creates, removes,
-    rewrites, fsyncs, or invokes KIO.
+    rewrites, fsyncs, or invokes Kio.
     """
     if replay_id not in REPLAY_IDS:
         raise PersonaGenerationError(f"invalid replay id: {replay_id!r}")
@@ -2011,7 +2011,7 @@ def _walk_history_prepare_envelope(
                             )
                         directory_inodes.add(inode)
                         actual_directories.add(relative)
-                        # KIO and device runtime formats require a semantic
+                        # Kio and device runtime formats require a semantic
                         # attestor.  Generic recursion must not legitimize an
                         # arbitrary internal tree merely because it is made of
                         # regular files and directories.
@@ -2183,7 +2183,7 @@ def verify_history_prepare_envelope(
     read-only semantic attestor their contents are not traversed or claimed
     valid, and the result explicitly reports ``opaque_unattested``.  Unknown,
     nested managed, symlink/reparse/special, and hard-linked entries outside
-    those opaque boundaries fail closed.  This function runs no KIO process,
+    those opaque boundaries fail closed.  This function runs no Kio process,
     mutates nothing, and never marks history replay executable or history
     readiness attested.
     """

@@ -1,6 +1,6 @@
 # 01 Positioning
 
-KIO のプロダクト位置づけ・対象ユーザー・差別化・競合分析・MVP スコープ・Phase plan を **正本** として定義する。他ドキュメントが「KIO とは何か」を語る場合、本書を参照する。
+Kio のプロダクト位置づけ・対象ユーザー・差別化・競合分析・MVP スコープ・Phase plan を **正本** として定義する。他ドキュメントが「Kio とは何か」を語る場合、本書を参照する。
 
 > 関連: [02-philosophy.md](02-philosophy.md) (理念) / [09-mvp-scope.md](09-mvp-scope.md) (MVP / Phase / Step) / [10-operations.md](10-operations.md) (横断規約)
 
@@ -20,7 +20,7 @@ KIO のプロダクト位置づけ・対象ユーザー・差別化・競合分�
 日: 原文根拠付きローカル知識アーカイブ
 ```
 
-KIO は次のいずれでもない:
+Kio は次のいずれでもない:
 
 - 全部入りの "Git for knowledge"
 - 個人向け AI 検索ツール (Khoj / AnythingLLM 系)
@@ -29,7 +29,7 @@ KIO は次のいずれでもない:
 - Knowledge Graph プラットフォーム
 - offline-first 原理主義ツール (everything offline)
 
-KIO は次である:
+Kio は次である:
 
 > **ローカルファイルを、過去も含めて、AI と人間が根拠付きで探索できる知識アーカイブ。データの主権はローカルに置きつつ、計算は frontier AI (Mistral OCR / Gemini / Claude / GPT) を含む最強の手段を使う。**
 
@@ -37,9 +37,9 @@ KIO は次である:
 
 `local-first` は **データの主権がローカルにある** ことを意味する。`offline-first` は **ネット遮断でも動く** ことを含意する。両者は別物である。
 
-KIO の対象ユーザー (開発者・研究者) の現実のワークフローは、Markdownize や Embedding に Mistral OCR / Gemini / Claude / GPT 等の frontier AI を使うのが既定値である。ここで "everything offline" を強要すると、Perkeep が辿った「思想は近いが日常体験差を出せない」失敗を踏襲する。
+Kio の対象ユーザー (開発者・研究者) の現実のワークフローは、Markdownize や Embedding に Mistral OCR / Gemini / Claude / GPT 等の frontier AI を使うのが既定値である。ここで "everything offline" を強要すると、Perkeep が辿った「思想は近いが日常体験差を出せない」失敗を踏襲する。
 
-KIO の主張は「**原本・履歴・index の保管と主権はあなたのマシンにある / 計算結果 (Markdown, Embedding) もあなたのマシンに残る / 処理のためのファイル内容の送信は明示 opt-in で行い、何を・いつ・どの Adapter へ送ったかを記録する** ([07-adapter-spec.md §3](07-adapter-spec.md))」であり、API 呼び出し自体を禁止することではない。opt-in 後は frontier AI にファイル内容が送信される。これを隠さず、preview で network transmission policy として提示する ([06-cli-spec.md §2](06-cli-spec.md))。完全オフライン運用はローカル LLM Adapter や同梱 deterministic Adapter を選択するユーザーの自由として残るが、それは **デフォルトではない**。
+Kio の主張は「**原本・履歴・index の保管と主権はあなたのマシンにある / 計算結果 (Markdown, Embedding) もあなたのマシンに残る / 処理のためのファイル内容の送信は明示 opt-in で行い、何を・いつ・どの Adapter へ送ったかを記録する** ([07-adapter-spec.md §3](07-adapter-spec.md))」であり、API 呼び出し自体を禁止することではない。opt-in 後は frontier AI にファイル内容が送信される。これを隠さず、preview で network transmission policy として提示する ([06-cli-spec.md §2](06-cli-spec.md))。完全オフライン運用はローカル LLM Adapter や同梱 deterministic Adapter を選択するユーザーの自由として残るが、それは **デフォルトではない**。
 
 opt-in の単位・寿命・revoke の正本は [07-adapter-spec.md §3](07-adapter-spec.md)。
 
@@ -106,7 +106,7 @@ kio open <検索結果の pointer>
 
 「自分だけが新しい」という前提で進めると埋もれる。比較は思想ではなく **ユーザー体験差** を基準にする。
 
-| プロダクト | レイヤー | KIO との重なり | KIO との非重複 |
+| プロダクト | レイヤー | Kio との重なり | Kio との非重複 |
 | --- | --- | --- | --- |
 | **Perkeep** | content-addressed personal storage | content-addressed・ローカル中心・思想 | Markdown 正規化なし、AI 検索なし、Evidence Pointer なし、即効性弱 |
 | **git-annex** | 大容量ファイル × Git | content-addressed の発想、CLI 中心 | 知識検索なし、Markdown化・Embedding なし |
@@ -124,11 +124,11 @@ kio open <検索結果の pointer>
 
 ## 4.4.1 NotebookLM との差別化 — citation と Evidence Pointer は別物
 
-NotebookLM の citation は「notebook にアップロード済みのソース内の該当箇所への参照」であり、クラウド上のコーパスに閉じる。Evidence Pointer は `commit / tree / raw_hash / chunk_hash / span` で根拠を不変に固定するため、次の 4 点で体験が異なる: (1) **不変性** — 原本のリネーム・移動・削除・上書き後も pointer は死なない。citation はソースを削除すれば消える。(2) **time-travel** — 過去の任意 snapshot 時点の内容を指せる。(3) **ローカル原本回帰** — `kio open` で OS 規定アプリの原本そのものに戻れる。citation の終点はクラウド上のビューア。(4) **任意フォルダ横断** — アップロード操作なしに、手元の全 indexed scope (過去版・削除済み含む) を対象にする。NotebookLM は「選んだソースに質問する」体験、KIO は「持っている全ファイルから根拠を掘り出し、その根拠を固定する」体験であり、併用可能 (KIO で見つけた原本を NotebookLM に投入する使い方は妨げない)。
+NotebookLM の citation は「notebook にアップロード済みのソース内の該当箇所への参照」であり、クラウド上のコーパスに閉じる。Evidence Pointer は `commit / tree / raw_hash / chunk_hash / span` で根拠を不変に固定するため、次の 4 点で体験が異なる: (1) **不変性** — 原本のリネーム・移動・削除・上書き後も pointer は死なない。citation はソースを削除すれば消える。(2) **time-travel** — 過去の任意 snapshot 時点の内容を指せる。(3) **ローカル原本回帰** — `kio open` で OS 規定アプリの原本そのものに戻れる。citation の終点はクラウド上のビューア。(4) **任意フォルダ横断** — アップロード操作なしに、手元の全 indexed scope (過去版・削除済み含む) を対象にする。NotebookLM は「選んだソースに質問する」体験、Kio は「持っている全ファイルから根拠を掘り出し、その根拠を固定する」体験であり、併用可能 (Kio で見つけた原本を NotebookLM に投入する使い方は妨げない)。
 
-# 4.5 Perkeep 失敗分析 (KIO が学ぶべきこと)
+# 4.5 Perkeep 失敗分析 (Kio が学ぶべきこと)
 
-Perkeep は思想的に KIO と最も近い (content-addressed、ローカル中心、所有権、永続保存)。にもかかわらず一般化していない。仮説:
+Perkeep は思想的に Kio と最も近い (content-addressed、ローカル中心、所有権、永続保存)。にもかかわらず一般化していない。仮説:
 
 ```
 - セットアップが技術者向け (server プロセス, blob 概念, importer)
@@ -138,7 +138,7 @@ Perkeep は思想的に KIO と最も近い (content-addressed、ローカル中
 - "Why now?" の訴求が時代と噛み合わなかった
 ```
 
-KIO が同じ轍を踏まないための行動原則:
+Kio が同じ轍を踏まないための行動原則:
 
 1. **最初の体験を即効的にする**: `kio init → kio index --approve → kio search "あの PDF" → kio open <pointer>` で価値が出る状態。「思想」を最初に売らない。
 2. **ファイルシステムとの関係を明示**: 原本は元の場所にある。`.kio` は原本を置き換えない隠しアーカイブ層 (CAS コピー + metadata — 容量は原本相当 + 派生を見込む)。Perkeep のように「blob store を原本の置き場にする」ことはしない。
@@ -147,11 +147,11 @@ KIO が同じ轍を踏まないための行動原則:
 
 # 4.6 重なる領域 = 相互運用 / 乗らない
 
-| 領域 | 重なる相手 | KIO のスタンス |
+| 領域 | 重なる相手 | Kio のスタンス |
 | --- | --- | --- |
-| 個人ノート vault | Obsidian | **置き換えない**。vault を含む親フォルダに `.kio`。vault 内検索は Smart Connections に任せ、KIO は vault + Documents + Downloads + コードを横断 |
-| AI チャット UX | Khoj, AnythingLLM | **競合しない**。KIO は CLI + 構造化 API を提供し、Khoj/AnythingLLM がそれを呼べる関係を狙う |
-| 大容量ファイル管理 | git-annex | **対象が違う**。git-annex は同期・バックアップ。KIO は知識検索と Evidence。両立可能 |
+| 個人ノート vault | Obsidian | **置き換えない**。vault を含む親フォルダに `.kio`。vault 内検索は Smart Connections に任せ、Kio は vault + Documents + Downloads + コードを横断 |
+| AI チャット UX | Khoj, AnythingLLM | **競合しない**。Kio は CLI + 構造化 API を提供し、Khoj/AnythingLLM がそれを呼べる関係を狙う |
+| 大容量ファイル管理 | git-annex | **対象が違う**。git-annex は同期・バックアップ。Kio は知識検索と Evidence。両立可能 |
 | 画面履歴 | Microsoft Recall, Rewind | **競合しない**。レイヤーが違う (画面 vs ファイル) |
 | OS 統合 | Apple Intelligence, Windows Copilot | **競合しない**。OS ベンダーは横断アーカイブ層を提供しない |
 | 文書アーカイブ | Zotero, Paperless-ngx | **置き換えない**。Zotero ライブラリ等を含む親フォルダに `.kio` を置き、専用アーカイブの外にあるファイルも含めて横断する |
@@ -160,7 +160,7 @@ KIO が同じ轍を踏まないための行動原則:
 
 # 5. MVP スコープ (絞り込み)
 
-KIO は要素が多すぎるので、MVP では **一次・二次** を厳格に分ける。
+Kio は要素が多すぎるので、MVP では **一次・二次** を厳格に分ける。
 
 ### 5.1 MVP に含める (Phase 1〜3)
 
@@ -254,14 +254,14 @@ cache = scope_registry / aggregator
 
 # 8. 既存ワークフローとの関係
 
-KIO は既存ツールを置き換えない。**横断する**外部アーカイブ層として始める。
+Kio は既存ツールを置き換えない。**横断する**外部アーカイブ層として始める。
 
-| 既存ワークフロー | KIO の関係 |
+| 既存ワークフロー | Kio の関係 |
 | --- | --- |
-| Obsidian vault | vault を含む親フォルダに `.kio`。vault 内検索は Smart Connections に任せ、KIO は vault + Documents + Downloads + コードを横断。 |
+| Obsidian vault | vault を含む親フォルダに `.kio`。vault 内検索は Smart Connections に任せ、Kio は vault + Documents + Downloads + コードを横断。 |
 | Git リポジトリ | リポジトリ自体には `.kio` を置かない (Git に管理される)。`kio index` は VCS repo root 配下に既定で子 `.kio` を作らないため、**リポジトリ内のコードは既定では検索対象外** — コードも対象にするには `[scope] index_vcs_repos = true` の明示 opt-in ([03-data-model.md §3](03-data-model.md))。検索が横断するのは repo 外のファイルと他 scope である (横断検索は scope_registry 経由の全 scope 検索であり、親 `.kio` 自体は直下のみ管理 — 03 §3)。 |
 | 既存ファイル整理 | Documents / Downloads など散らかった領域を整理せず、横断検索と Evidence で「整理しなくても見つかる」体験を提供。 |
-| Khoj / AnythingLLM | KIO の構造化 API を呼ぶ関係を狙う。チャット UX は彼らに任せる。 |
+| Khoj / AnythingLLM | Kio の構造化 API を呼ぶ関係を狙う。チャット UX は彼らに任せる。 |
 
 ---
 

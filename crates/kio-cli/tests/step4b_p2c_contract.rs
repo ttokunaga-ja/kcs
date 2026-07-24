@@ -1887,7 +1887,7 @@ fn pc8_fts5_operator_keywords_and_quotes_are_literal_not_syntax() {
 /// Recall@10 >= 0.8 gate) measured 13/14 failures tracing to exactly this
 /// gap. A plain-digit query still finds a document that only ever spelled
 /// the number with thousands separators (and the reverse), and an English
-/// query still finds a document that only ever used KIO's own fixed
+/// query still finds a document that only ever used Kio's own fixed
 /// Japanese vocabulary for the same term — without any hand-authored
 /// synonym/history/context injection (PC8's actual, narrower ban).
 #[test]
@@ -1938,7 +1938,7 @@ fn pc8_deterministic_numeric_and_bilingual_equivalence_forms_are_restored() {
          without separators: {grouped_query}"
     );
 
-    // An English query finds a doc using only KIO's own fixed チャンク/トークン
+    // An English query finds a doc using only Kio's own fixed チャンク/トークン
     // dictionary translation.
     let bilingual_query = success(&dir, &["search", "chunk size 512 token", "--text"]);
     assert!(

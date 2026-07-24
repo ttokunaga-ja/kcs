@@ -175,7 +175,7 @@ Step 1 開始日: **2026-07-16**。本日 (2026-07-02) 時点の Step 1 ブロ�
        - ベースライン優位: 既存手段で失敗しやすいクエリ集合 Q_hard (スキャン PDF の
          画像内テキスト / 語彙一致しない言い換え / 図表・画像の内容参照、20 問以上) で、
          Spotlight (mdfind) と ripgrep-all をベースラインに Recall@10 を比較し、
-         KIO >= 0.8 かつ各ベースラインを 0.3 以上上回る
+         Kio >= 0.8 かつ各ベースラインを 0.3 以上上回る
 ```
 
 ## M3-2: 「リネーム済みファイルの過去版を含めて検索」
@@ -206,7 +206,7 @@ Step 1 開始日: **2026-07-16**。本日 (2026-07-02) 時点の Step 1 ブロ�
 Latency       p50 / p95 / p99       目標: M3-1 p95 < 5秒, M3-2/3 p95 < 7秒
                                     (前提: 20 scopes / 合計 10 万 chunk。05-runtime.md §1.8)
 Recall        Recall@10 / @20       目標: 各シナリオで Recall@10 >= 0.8
-Baseline      Q_hard での対 Spotlight/rga 優位   目標: M3-1 完了条件のとおり (KIO >= 0.8, 差 >= 0.3)
+Baseline      Q_hard での対 Spotlight/rga 優位   目標: M3-1 完了条件のとおり (Kio >= 0.8, 差 >= 0.3)
 Evidence      必須フィールド充足率   目標: 100%
 Working tree  上書き 0 件            CI で常時検出。違反はリリースブロッカー
 
@@ -346,18 +346,18 @@ Status: コアセマンティクスは decided。残未決 1 件 (bulk verify �
 問題: 「旧 raw + 旧 Markdown + 新 raw を Adapter に渡して差分更新」の挙動を Adapter 任せにすると揺れる。
 
 設計 (schema は確定済み, [04-pipeline.md §3.1](04-pipeline.md)):
-  入力 schema / 出力 schema は KIO が固定。
+  入力 schema / 出力 schema は Kio が固定。
   Adapter 側プロンプト規約:
   - "unchanged" と判断した unit は出力に含めない (旧 unit を再利用)
   - 変更 unit は完全に書き直す (部分編集ではなく)
-  - heading 構造の変更は KIO には影響しない (chunk side で対応)
+  - heading 構造の変更は Kio には影響しない (chunk side で対応)
   - Adapter が「軽微とは言えない」と判断したら fallback_to_full=true
 
 決定済み:
   - 入出力 schema (正本 04 §3.1)
   - プロンプト規約 5 項: unchanged unit 非出力 / full unit replacement /
     heading 変更は chunk side 対応 / fallback_to_full 短絡 (正本 07 §8.1)
-  - fallback_to_full の閾値 hint 衝突時は KIO 側を優先 (正本 07 §8.1)
+  - fallback_to_full の閾値 hint 衝突時は Kio 側を優先 (正本 07 §8.1)
   - ストリーミング応答: 許容。staging に保持し全体検査後に一括公開、中断は failed (retryable) — pending 状態は無い (正本 07 §8.3)
   - spec_version 不一致は Adapter が invalid_input として失敗、当該 Adapter は failed permanent (full fallback は incremental capability 非互換のみ — 正本 07 §8.1)
   - spec_version の bump 規約 (正本 10 §12.5)

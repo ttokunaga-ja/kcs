@@ -18,7 +18,7 @@ fresh corpus / `eval/run_eval.py` 全 3 シナリオ):
 
 **残るユーザー側 Done 手続き (実データが必要な 2 点 — 09 §4.1/§4.2)**:
 1. M3-1 Q_hard の一回限り増補 (18 → 20 問以上) + 再凍結 (件数と digest を 09 §5.5 #5 行へ追記)
-2. 実コーパスでの対 Spotlight (mdfind) / ripgrep-all baseline 比較 (KIO >= 0.8 かつ差 >= 0.3)
+2. 実コーパスでの対 Spotlight (mdfind) / ripgrep-all baseline 比較 (Kio >= 0.8 かつ差 >= 0.3)
 
 ## 0.5 実データ fixture での M3-1 増補ゲートと online 実走 (2026-07-23)
 
@@ -39,9 +39,9 @@ qhard 8 問は測定前に凍結投入 — miss 2 問 (qa02 hard1 / qa07 hard3) 
   mistral の tools.toml pricing 宣言ガイダンス (`pages = 0.002`) — 無宣言だと確定記帳が常に
   estimated 縮退で過大計上。
 - **baseline 比較を実測 (2026-07-23、`eval/run_baseline.py` + 凍結 24 問 `golden-queries-fixture-b.jsonl`)**:
-  Recall@10 = **KIO 8/24 (0.333) / mdfind 0/24 / rga 0/24** (rga は pandoc 導入 + 断片採点の
+  Recall@10 = **Kio 8/24 (0.333) / mdfind 0/24 / rga 0/24** (rga は pandoc 導入 + 断片採点の
   上振れ運用でも 0 — Q_hard の設計どおり字句エンジンは全滅)。**差 >= 0.3 は両者に対し成立、
-  KIO >= 0.8 の腕が未達 = ゲート OPEN**。クラス別 KIO: hard1 3/8・hard2 5/8・hard3 0/8。
+  Kio >= 0.8 の腕が未達 = ゲート OPEN**。クラス別 Kio: hard1 3/8・hard2 5/8・hard3 0/8。
   診断 (実験 = 多様化 off / vector 単独 / text 単独の順位追跡): 候補には入るが**ランキングで
   20 位圏外** — vector 単独でも圏外 (自然文 query と thin 文書 + boilerplate filler 群の
   embedding 近接が answer を上回る)、text は漢字複合断片 (切替判断/時間条件 等) が
@@ -52,9 +52,9 @@ qhard 8 問は測定前に凍結投入 — miss 2 問 (qa02 hard1 / qa07 hard3) 
   改善は一般規則のみ (golden 過適合禁止) で再測定する。
 - **検索品質ラウンド r1 = contextual chunk embedding を実装・実測 (2026-07-24、`451431c`)**:
   chunk の埋め込み入力を `{人間化ファイル名}\n\n{本文}` に変更 (07 §5.3 addendum)。fixture 全
-  2,321 chunk を新 profile (`09ff0784`) で再埋め込み ($0.0096)。**凍結 24 問を再測定 = KIO
+  2,321 chunk を新 profile (`09ff0784`) で再埋め込み ($0.0096)。**凍結 24 問を再測定 = Kio
   9/24 (hard1 4・hard2 1・hard3 4)** — 8→9 の微増、かつ hard2 が 5→1 に**後退**。差 >= 0.3 は
-  両 baseline に対し成立継続、`KIO >= 0.8` は依然 OPEN。
+  両 baseline に対し成立継続、`Kio >= 0.8` は依然 OPEN。
   - **診断 (airtight)**: 各解答文書の**スコープ内** vector 順位を測ると、`--all-scopes ヒット
     ⟺ スコープ内順位 == 1` が 24/24 で完全一致。9 ヒットは全て within-rank 1、15 ミスは全て
     within-rank >= 2。contextual 化は within-scope の vector 品質を確かに改善し (解答が
@@ -84,8 +84,8 @@ qhard 8 問は測定前に凍結投入 — miss 2 問 (qa02 hard1 / qa07 hard3) 
   text-only 不変 → **workspace 1268/0・回帰ゼロ**。単体テスト
   `cross_scope_merge_regrades_vector_term_by_global_cosine` で「scope A rank-2 (高 cosine) が
   scope B rank-1 (低 cosine) を上回る」を basis vector で固定。
-  - **凍結 24 問を再測定 = KIO 8→9→**`22/24 (0.917)`** — hard1 8/8・hard2 8/8・hard3 6/8。
-    差 >= 0.3 両成立 + `KIO >= 0.8` 達成 = 09 §4.1 baseline ゲート PASS (`gate.pass=true`)**。
+  - **凍結 24 問を再測定 = Kio 8→9→**`22/24 (0.917)`** — hard1 8/8・hard2 8/8・hard3 6/8。
+    差 >= 0.3 両成立 + `Kio >= 0.8` 達成 = 09 §4.1 baseline ゲート PASS (`gate.pass=true`)**。
     残 2 ミスは hard3 の画像系 (qb23=OCR 抽出不能の画像 husk・qb09)。測定
     `eval/baseline-results-2026-07-24b.json`。
   - **合算 M3-1 ゲートも改善**: qhard `6/8 → 8/8`。synthetic M3-1 (18 問・text-only・本変更の対象外)

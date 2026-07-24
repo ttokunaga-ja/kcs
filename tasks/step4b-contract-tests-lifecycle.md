@@ -680,7 +680,7 @@ publication/introduction 再導出アルゴリズム (U144 — last_lifecycle_ep
 - 操作: 読取系コマンド (`kio search` 等) を実行する。
 - 期待: (a)(b) いずれも `KIO-E-INDEX-REBUILDING-001` と同じ error_code・retryable・exit 3 を返す。
   読取系はこの場で counter や last_lifecycle_epoch を書き換えたり index_generation を回転したり
-  しない (回復は書込系のみ — §L44)。KIO 自身はこのエラーに対して内部でリトライループを行わない
+  しない (回復は書込系のみ — §L44)。Kio 自身はこのエラーに対して内部でリトライループを行わない
   (呼出側 CLI/自動化がリトライするかは呼出側の判断)。**この検査は §I の purge-epoch/journal 2 点
   検査とは別のチェックであり、混同しない** (§G 冒頭の note 参照)。
 
@@ -781,7 +781,7 @@ publication/introduction 再導出アルゴリズム (U144 — last_lifecycle_ep
 - 正本: 05 §3.5 L814-816『読み取り系 (status を除く §6 の全読取コマンド — search / log / view /
   inspect / evidence verify / restore / diff / open) は、冒頭と「本文・存在情報を返す直前」の 2 点で
   検査する』
-- 前提: KIO の読取系コマンド一覧。
+- 前提: Kio の読取系コマンド一覧。
 - 操作: 各コマンドが barrier 対象かどうかを分類する。
 - 期待: `search`・`log`・`view`・`inspect`・`evidence verify`・`restore`・`diff`・`open` の 8 個が
   対象 (この 8 個以外の読取系コマンドが存在する場合、spec のこの列挙にない限り対象外)。`kio status`

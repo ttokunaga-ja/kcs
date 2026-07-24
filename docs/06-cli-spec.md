@@ -1,6 +1,6 @@
 # 06 CLI Spec
 
-KIO の CLI 契約。GUI は MVP 範囲外 (Phase 4+) だが、将来の用語翻訳マッピングを最後に明記する。
+Kio の CLI 契約。GUI は MVP 範囲外 (Phase 4+) だが、将来の用語翻訳マッピングを最後に明記する。
 
 > 関連: [03-data-model.md](03-data-model.md) (`.kio` レイアウト) / [04-pipeline.md](04-pipeline.md) (batch / retry / budget) / [05-runtime.md](05-runtime.md) (検索 / restore / GC / purge) / [09-mvp-scope.md](09-mvp-scope.md) (Phase plan)
 
@@ -82,7 +82,7 @@ kio reindex [--force] [--at <commit>] [--yes] [--online|--offline]  # --at = 過
                                         # (raw 跨ぎ incremental の三つ組 — full では null) で永続記録 — parent_run_id は
                                         # task cache の揮発情報 (03-data-model.md §8、09-mvp-scope.md §5.1)。--force は確認プロンプト必須 (--yes で省略可)
 kio move --propose <src> <dst>          # 原本移動の提案。Agent はこちらのみ (Phase 4+、MVP 対象外)
-kio move --accept <id> | --reject <id>  # 提案の承認/却下。KIO が原本を mv できる唯一の経路 (03-data-model.md §10)。書き込み境界の予約定義
+kio move --accept <id> | --reject <id>  # 提案の承認/却下。Kio が原本を mv できる唯一の経路 (03-data-model.md §10)。書き込み境界の予約定義
 kio evidence verify <pointer> [--strict]
 kio evidence verify --batch <pointers.jsonl> [--strict]  # <pointer> と --batch は相互排他 (--batch は Phase 4+ — §7、08 §4.3)
 kio evidence retarget <pointer> [--latest|--at <commit>]  # 設計確定後 (09-mvp-scope.md §5.2)。
@@ -134,7 +134,7 @@ code point を含む名前を拒否し ([03-data-model.md §2](03-data-model.md)
    ([05-runtime.md §3.5](05-runtime.md))。以降の手順 2-5 は raw 系入力のみ
 2. tombstone 判定 (最優先): raw_hash の **canonical final event が `purged`** (全 marker の正本化 —
    08-evidence-pointer-spec.md §3.1 手順 5) なら、working tree・cache の状態に
-   関わらず §7 の規約どおり exit 4 — purge 済み原本が folder に残っていても KIO 経由では開かない
+   関わらず §7 の規約どおり exit 4 — purge 済み原本が folder に残っていても Kio 経由では開かない
    (canonical が `retired` (退役) なら対象外 — 再 ingest による退役は 05-runtime.md §3.5 の resurrection 規則)
 3. working tree 解決:
    現在の working tree に同一 raw_hash を持つファイルが存在すれば (path_at_commit と
@@ -278,7 +278,7 @@ kio restore <pointer> --to ./recovered/ --force    # 既存上書き許可 (確�
 - publish (--force 含む)・隔離・復帰の rename は全て no-replace。巻き戻しの削除も退避の復帰・
   除去も、path 上の対照ではなく決定的隔離名 `<basename>.kio-restore-quarantine` への隔離 rename +
   rename した実体の dev/inode 検証で行う (隔離名は stderr に表示。同名残存 = 先行未完として拒否 +
-  回復案内。隔離・退避はユーザー領域 — KIO は自動削除しない)
+  回復案内。隔離・退避はユーザー領域 — Kio は自動削除しない)
 - 競合処置は段階別 (--force publish 競合 = 退避を復帰 / 隔離実体の不一致 = 元 path へ復帰を試行 /
   退避の不一致・復帰 rename 失敗 = 不触) — いずれも両所在を表示して
   KIO-E-COMMIT-RESTORE-CONFLICT-001 (retryable exit 3、context に conflict_kind・retry_disposition)
@@ -419,7 +419,7 @@ CLI と同等の操作を、AI Agent と Adapter が共通利用する **構造�
 MCP server 等の Agent 統合導線は Phase 5 の検討論点であり、MVP では設計しない。Adapter API (task descriptor / artifact descriptor) は Step 2 から必要となる別契約で、[07-adapter-spec.md](07-adapter-spec.md) を正本とする。
 
 ```
-KIO API が保証するもの:
+Kio API が保証するもの:
   - 入力 object hash を明示
   - 処理対象 scope を明示
   - execution_mode (online_api | offline_api | deterministic_library) を明示
@@ -434,12 +434,12 @@ KIO API が保証するもの:
 URL、認証情報、コマンドパス、ライブラリ選択などの実行設定は **device-local config** に置き、`.kio/` には保存しない。
 
 ```
-KIO core
+Kio core
   → task descriptor
   → device-local Adapter
   → online API / offline API / deterministic library
   → artifact descriptor
-  → KIO core
+  → Kio core
 ```
 
 Adapter 種別と契約は [07-adapter-spec.md](07-adapter-spec.md)。

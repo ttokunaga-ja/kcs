@@ -3,7 +3,7 @@
 This module joins the whole-source P/X/Y/N history allocation with the
 quota-neutral structural allocation.  It deliberately records rendered-byte
 facts, complete tagged before/after state, commit-boundary intent, and a
-logical schedule without claiming that KIO or a filesystem was observed.
+logical schedule without claiming that Kio or a filesystem was observed.
 
 The three arrays ``events``, ``boundaries``, and ``schedule`` are independent
 canonical inventories.  In particular, an ordinary ``index_auto`` boundary

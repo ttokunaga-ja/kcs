@@ -9,7 +9,7 @@ This module deliberately separates two different claims:
   checker API for compatibility, but is not an executable attestation
   authority; and
 * :func:`build_handle_bound_runtime_directory_receipt` constructs a typed
-  observation only after an explicit KIO checker reads through a private directory
+  observation only after an explicit Kio checker reads through a private directory
   descriptor opened component-by-component from a canonical trusted-root
   descriptor.  Its typed result binds profile/person/scope/path/content root/
   chunk arithmetic, and the tree plus namespace are revalidated afterwards.
@@ -21,9 +21,9 @@ This module deliberately separates two different claims:
   observations fix ``formal_transport_attested`` false and cannot enter the
   legacy nine-field history-envelope callback protocol.
 
-The generic walker does not understand SQLite, KIO commits, CAS objects, HEAD,
+The generic walker does not understand SQLite, Kio commits, CAS objects, HEAD,
 or device-registry semantics.  A content root must therefore never be called a
-KIO semantic attestation by itself.
+Kio semantic attestation by itself.
 """
 
 from __future__ import annotations
@@ -168,7 +168,7 @@ DEFAULT_LIMITS = AttestationLimits()
 
 @dataclass(frozen=True)
 class DirectoryContentRoot:
-    """A filesystem-only snapshot; it makes no KIO semantic claim."""
+    """A filesystem-only snapshot; it makes no Kio semantic claim."""
 
     schema: str
     schema_version: int
@@ -220,7 +220,7 @@ class BoundRuntimeDirectory:
     trusted replay-root descriptor.  The receipt builder closes it immediately
     after the checker returns and rejects closing, descriptor-number rebinding,
     or making it inheritable.  A checker using this experimental transport must
-    resolve every KIO file and subdirectory relative to this descriptor;
+    resolve every Kio file and subdirectory relative to this descriptor;
     ``path`` is diagnostic identity, not authority for reopening the runtime
     namespace.  The checker can still duplicate or transiently replace the
     descriptor, so this object is not a formal execution capability.
@@ -282,7 +282,7 @@ class BoundRuntimeDirectory:
 
 @dataclass(frozen=True)
 class KioSemanticEvidence:
-    """Checker-local KIO assertion bound to one observed runtime snapshot.
+    """Checker-local Kio assertion bound to one observed runtime snapshot.
 
     ``semantics_attested`` records what the external checker asserted.  It is
     not proof that the in-process/pathname transport is formal.
@@ -314,7 +314,7 @@ class KioSemanticEvidence:
             or self.semantics_attested is not True
         ):
             raise PersonaHistoryAttestationError(
-                "KIO semantic evidence is absent or incompatible"
+                "Kio semantic evidence is absent or incompatible"
             )
         if self.kind == "scope_store":
             if (
@@ -337,7 +337,7 @@ class RuntimeDirectoryReceipt:
     """Exact callback receipt consumed by the history-prepare envelope.
 
     Current builders are intentionally non-formal.  The fixed-false provenance
-    prevents a typed handle/path callback from being promoted into a suite KIO
+    prevents a typed handle/path callback from being promoted into a suite Kio
     semantics claim merely because its external checker asserted success.
     """
 
@@ -619,7 +619,7 @@ class PartialPersonReceipt:
 
 @dataclass(frozen=True)
 class SuiteAttestationReceipt:
-    """Root-independent W0 coverage projection, never formal KIO readiness."""
+    """Root-independent W0 coverage projection, never formal Kio readiness."""
 
     schema: str
     schema_version: int
@@ -696,7 +696,7 @@ class SuiteAttestationReceipt:
             )
         if self.kio_semantics_callback_attested or self.semantic_coverage_attested:
             raise PersonaHistoryAttestationError(
-                "current callback transports cannot attest formal KIO semantics"
+                "current callback transports cannot attest formal Kio semantics"
             )
 
 
@@ -1507,7 +1507,7 @@ def _validate_runtime_semantic_evidence(
 ) -> KioSemanticEvidence:
     if type(evidence) is not KioSemanticEvidence:
         raise PersonaHistoryAttestationError(
-            "KIO semantic checker did not return typed evidence"
+            "Kio semantic checker did not return typed evidence"
         )
     if (
         evidence.kind != kind
@@ -1515,7 +1515,7 @@ def _validate_runtime_semantic_evidence(
         or evidence.content_root_sha256 != content.content_root_sha256
     ):
         raise PersonaHistoryAttestationError(
-            "KIO semantic evidence is not bound to this runtime snapshot"
+            "Kio semantic evidence is not bound to this runtime snapshot"
         )
     return evidence
 
@@ -1529,7 +1529,7 @@ def build_handle_bound_runtime_directory_receipt(
     limits: AttestationLimits = DEFAULT_LIMITS,
     _trusted_root_fd: int | None = None,
 ) -> RuntimeDirectoryReceipt:
-    """Run a concrete KIO checker against one held runtime directory FD.
+    """Run a concrete Kio checker against one held runtime directory FD.
 
     This is an experimental, non-authoritative semantic-checker transport.  The
     target is opened component-by-component from ``trusted_root`` with
@@ -1540,7 +1540,7 @@ def build_handle_bound_runtime_directory_receipt(
     duplicate/transiently rebind its descriptor.
 
     The checker is still responsible for using ``bound.directory_fd`` for every
-    semantic read.  This transport does not itself understand KIO, grant
+    semantic read.  This transport does not itself understand Kio, grant
     execution authority, or make the suite history-ready.
     """
     kind, relative_path = _validated_runtime_descriptor(descriptor)
@@ -1548,7 +1548,7 @@ def build_handle_bound_runtime_directory_receipt(
         raise PersonaHistoryAttestationError("limits must be AttestationLimits")
     if not callable(semantic_checker):
         raise PersonaHistoryAttestationError(
-            "an explicit handle-bound KIO semantic checker is required"
+            "an explicit handle-bound Kio semantic checker is required"
         )
     _require_handle_platform()
     trusted = _canonical_existing_absolute_directory(
@@ -1665,7 +1665,7 @@ def build_handle_bound_runtime_directory_receipt(
                 evidence = semantic_checker(bound, dict(descriptor), before)
             except Exception as error:
                 raise PersonaHistoryAttestationError(
-                    "handle-bound KIO semantic checker failed"
+                    "handle-bound Kio semantic checker failed"
                 ) from error
         finally:
             try:
@@ -1698,7 +1698,7 @@ def build_handle_bound_runtime_directory_receipt(
             checker_fd = None
         if checker_descriptor_tampered:
             raise PersonaHistoryAttestationError(
-                "handle-bound KIO semantic checker changed its supplied descriptor"
+                "handle-bound Kio semantic checker changed its supplied descriptor"
             )
         evidence = _validate_runtime_semantic_evidence(
             evidence,
@@ -1710,7 +1710,7 @@ def build_handle_bound_runtime_directory_receipt(
         after = _walk_directory_fd(target_fd, target_metadata, limits)
         if after != before:
             raise PersonaHistoryAttestationError(
-                "runtime directory changed during handle-bound KIO semantic checking"
+                "runtime directory changed during handle-bound Kio semantic checking"
             )
         target_after = os.fstat(target_fd)
         if _stable_metadata(target_after) != _stable_metadata(target_metadata):
@@ -1810,7 +1810,7 @@ def build_lease_bound_runtime_directory_receipt(
         raise PersonaHistoryAttestationError("limits must be AttestationLimits")
     if not callable(semantic_checker):
         raise PersonaHistoryAttestationError(
-            "an explicit handle-bound KIO semantic checker is required"
+            "an explicit handle-bound Kio semantic checker is required"
         )
     expected_root = (
         lease.root if type(lease) is root_lock.ReplayRootLease else None
@@ -1841,7 +1841,7 @@ def build_runtime_directory_receipt(
     semantic_checker: SemanticChecker,
     limits: AttestationLimits = DEFAULT_LIMITS,
 ) -> RuntimeDirectoryReceipt:
-    """Build a compatibility receipt with a pathname-based KIO checker.
+    """Build a compatibility receipt with a pathname-based Kio checker.
 
     The checker is intentionally a required keyword argument.  A generic tree
     walk cannot be promoted accidentally.  ``trusted_root`` is also mandatory;
@@ -1855,7 +1855,7 @@ def build_runtime_directory_receipt(
     kind, relative_path = _validated_runtime_descriptor(descriptor)
     if not callable(semantic_checker):
         raise PersonaHistoryAttestationError(
-            "an explicit KIO semantic checker is required"
+            "an explicit Kio semantic checker is required"
         )
     root = _canonical_existing_absolute_directory(path, "runtime path")
     before = _walk_trusted_runtime_content_root(
@@ -1868,7 +1868,7 @@ def build_runtime_directory_receipt(
         evidence = semantic_checker(root, dict(descriptor), before)
     except Exception as error:
         raise PersonaHistoryAttestationError(
-            "KIO semantic checker failed"
+            "Kio semantic checker failed"
         ) from error
     evidence = _validate_runtime_semantic_evidence(
         evidence,
@@ -1884,7 +1884,7 @@ def build_runtime_directory_receipt(
     )
     if after != before:
         raise PersonaHistoryAttestationError(
-            "runtime directory changed during KIO semantic checking"
+            "runtime directory changed during Kio semantic checking"
         )
     return RuntimeDirectoryReceipt(
         schema=generator.RUNTIME_DIRECTORY_ATTESTATION_SCHEMA,
@@ -1909,7 +1909,7 @@ def make_runtime_attestor(
     """Reject promotion of the non-formal pathname checker transport."""
     if not callable(semantic_checker):
         raise PersonaHistoryAttestationError(
-            "an explicit KIO semantic checker is required"
+            "an explicit Kio semantic checker is required"
         )
     raise PersonaHistoryAttestationError(
         "non-formal pathname checker cannot enter the callback protocol"
@@ -1925,7 +1925,7 @@ def make_handle_bound_runtime_attestor(
     """Reject promotion of the non-authoritative handle checker."""
     if not callable(semantic_checker):
         raise PersonaHistoryAttestationError(
-            "an explicit handle-bound KIO semantic checker is required"
+            "an explicit handle-bound Kio semantic checker is required"
         )
     raise PersonaHistoryAttestationError(
         "non-formal handle checker cannot enter the callback protocol"
@@ -1941,7 +1941,7 @@ def make_lease_bound_runtime_attestor(
     """Reject promotion of the lease-derived non-authoritative checker."""
     if not callable(semantic_checker):
         raise PersonaHistoryAttestationError(
-            "an explicit handle-bound KIO semantic checker is required"
+            "an explicit handle-bound Kio semantic checker is required"
         )
     raise PersonaHistoryAttestationError(
         "non-formal lease-bound checker cannot enter the callback protocol"
@@ -2211,7 +2211,7 @@ def build_suite_receipt(
     claim formal semantic coverage.  Current typed checker observations all
     carry fixed-false transport provenance, so requesting the legacy semantic
     callback flag is rejected before persona expansion.  This module has not
-    validated SQLite/CAS, HEAD/commit relations, KIO binary/config, plan, root,
+    validated SQLite/CAS, HEAD/commit relations, Kio binary/config, plan, root,
     or prepare-intent binding and always leaves semantic coverage and history
     readiness false.  A later isolated full semantic attestor must produce the
     stronger claim through a provenance-carrying protocol.

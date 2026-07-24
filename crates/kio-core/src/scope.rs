@@ -556,7 +556,7 @@ impl Repository {
         limits: ArchiveLimits,
         purge_self_targets: &BTreeSet<String>,
     ) -> Result<WorkingTree> {
-        // The caller holds `.kio/.lock`, so no live KIO writer can own an
+        // The caller holds `.kio/.lock`, so no live Kio writer can own an
         // `.ingest-*` leaf. Remove crash-orphaned raw bytes before creating any
         // new staging file; otherwise a tombstoned re-ingest killed before its
         // authorization check could remain in KIO-managed storage indefinitely.
@@ -2502,7 +2502,7 @@ fn config_home() -> PathBuf {
 }
 
 /// R12-2 / R12-1: enforce the *semantics* of documented config keys that the JSON
-/// Schema can only type-check. A key whose value selects behavior KIO has not
+/// Schema can only type-check. A key whose value selects behavior Kio has not
 /// implemented is rejected LOUDLY (`KIO-E-CONFIG-NOT-IMPLEMENTED-001`, exit 1 —
 /// R9-6 convention) rather than silently ignored, but the documented DEFAULT value
 /// is always accepted as a harmless no-op so pasting the docs/07 §7 `[adapter.policy]`
@@ -5144,7 +5144,7 @@ mod tests {
     /// comment): purge's own final `publish_ref=true` snapshot must succeed
     /// — and its tree must NOT carry the purged entry — even while the
     /// purge target's exact bytes are still physically present in the
-    /// working tree (KIO never deletes the working-tree original). Before
+    /// working tree (Kio never deletes the working-tree original). Before
     /// the fix, this raw publication attempt hit `archive_staged_working_tree`'s
     /// barrier check (an active journal targeting this same raw_hash) and the
     /// whole snapshot failed with `KIO-E-PURGE-INCOMPLETE-001` — reachable any

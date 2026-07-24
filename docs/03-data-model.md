@@ -6,7 +6,7 @@
 
 # 1. 概念モデル — CAS + Snapshot DAG
 
-KIO は Git inspired な content-addressed store と snapshot DAG を、ローカルファイル全体に拡張したアーカイブ。
+Kio は Git inspired な content-addressed store と snapshot DAG を、ローカルファイル全体に拡張したアーカイブ。
 
 ```
 Object 種別:
@@ -348,7 +348,7 @@ adapter_kind          "prepare" | "markdownize" | "embedding" | ...
 adapter_role          "text" | "image" | "multimodal"
 model_or_tool_family  "gemini-2.5-pro" | "gpt-4o" | "tesseract" の正規化名
 model_version_pin     ベンダー側 immutable tag (latest 等の可変 alias は禁止)
-prompt_template_id    KIO が管理する prompt 識別子
+prompt_template_id    Kio が管理する prompt 識別子
 prompt_template_hash  prompt 本文を canonical 化した sha256
 sampling              {temperature, top_p, top_k, max_tokens, seed}
 output_schema         期待する Markdown / JSON schema id とバージョン
@@ -780,7 +780,7 @@ per-`.kio` の prepared/normalized/embedding 重複と purge の `.kio` 単位�
 # 10. 書き込み主体マトリクス
 
 ```
-レイヤー                       | User | KIO  | Agent (提案) | Agent (自動適用)
+レイヤー                       | User | Kio  | Agent (提案) | Agent (自動適用)
 ------------------------------ | ---- | ---- | ------------ | ----------------
 原本 (raw)                     | yes  | no*  | propose      | no
 原本の移動 (file system mv)     | yes  | yes* | propose      | user 承認後のみ
@@ -793,7 +793,7 @@ commits / refs (履歴)           | no   | yes  | no           | yes (auto commi
 extraction issues              | yes  | yes  | yes          | yes
 ```
 
-`*` 「原本の移動」は `kio move --accept` 経由でのみ KIO が原本を mv する。原本の **内容** は不変なので write ではなく移動。Agent が `kio move --accept` を直接呼ぶことは禁止 (`--propose` 経由のみ)。
+`*` 「原本の移動」は `kio move --accept` 経由でのみ Kio が原本を mv する。原本の **内容** は不変なので write ではなく移動。Agent が `kio move --accept` を直接呼ぶことは禁止 (`--propose` 経由のみ)。
 
 normalized (unit object および全文 view) は **read-only artifact**。全文 view の生成時に付与する
 Markdown ヘッダ template (Source の filename も comment-safe に挿入する — `--` を含む名前は
@@ -807,7 +807,7 @@ content は identity を持たない (§5 の normalized_hash 不採用) ため�
 
 ```markdown
 <!--
-KIO GENERATED FILE
+Kio GENERATED FILE
 Do not edit manually.
 Source: report.pdf
 Raw-Hash: sha256:...
@@ -836,7 +836,7 @@ pages = 0.004                                # unit kind → USD 単価。換算
 tokens_in = 0.00000015
 ```
 
-現行版の認証付き Markdownize / Embedding adapter は KIO 組込み target のみを実行する。`cmd` / `args` / `url` による任意 target は受理せず、旧設定にこれらのキーがある場合は削除して組込み adapter 宣言へ移行する。Summary / Classification / Rerank など未実装 role の外部 dispatch 契約は [07-adapter-spec.md §7](07-adapter-spec.md) の将来仕様であり、現行 runtime が実行できることを意味しない。
+現行版の認証付き Markdownize / Embedding adapter は Kio 組込み target のみを実行する。`cmd` / `args` / `url` による任意 target は受理せず、旧設定にこれらのキーがある場合は削除して組込み adapter 宣言へ移行する。Summary / Classification / Rerank など未実装 role の外部 dispatch 契約は [07-adapter-spec.md §7](07-adapter-spec.md) の将来仕様であり、現行 runtime が実行できることを意味しない。
 
 `.kio/config.toml`:
 

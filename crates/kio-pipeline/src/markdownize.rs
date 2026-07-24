@@ -260,7 +260,7 @@ pub fn markdownize_units(request: MarkdownizeStageRequest) -> Result<Markdownize
         gen: 0,
         mode: request.mode,
         markdown: format!(
-            "<!-- KIO deterministic baseline {} {} -->\n",
+            "<!-- Kio deterministic baseline {} {} -->\n",
             unit_key, request.new_raw.raw_hash
         ),
         metadata: BTreeMap::new(),
@@ -434,7 +434,7 @@ pub fn validate_markdownize_response(
 
     // V1 (part 3): failed_units ⊆ hints.changed ∪ hints.added — an
     // unchanged-candidate unit was never sent to the Adapter, so it cannot
-    // fail (KIO reuses it directly).
+    // fail (Kio reuses it directly).
     let hints_changed = set_from(&hints.changed_unit_keys);
     let hints_added = set_from(&hints.added_unit_keys);
     let touched_by_kio = hints_changed
@@ -969,7 +969,7 @@ fn read_contained_normalized_file(
 ) -> Result<Vec<u8>> {
     let relative = path
         .strip_prefix(kio_dir)
-        .map_err(|_| normalized_corrupt(path, "normalized object is outside the KIO directory"))?;
+        .map_err(|_| normalized_corrupt(path, "normalized object is outside the Kio directory"))?;
     let canonical = resolve_existing_store_path(kio_dir, relative, StorePathKind::RegularFile)?
         .ok_or_else(|| missing_normalized_object(path, "normalized object does not exist"))?;
     if canonical.parent() != Some(canonical_dir) {
@@ -1263,7 +1263,7 @@ pub fn persist_normalized_instance(
         let tmp_relative = tmp_dir.strip_prefix(kio_dir.as_ref()).map_err(|_| {
             normalized_corrupt(
                 &tmp_dir,
-                "normalized temp path is outside the KIO directory",
+                "normalized temp path is outside the Kio directory",
             )
         })?;
         let result = (|| -> Result<()> {
@@ -1480,7 +1480,7 @@ fn atomic_overwrite_store_file(kio_dir: &Path, relative: &Path, bytes: &[u8]) ->
     let tmp_relative = tmp.strip_prefix(kio_dir).map_err(|_| {
         normalized_corrupt(
             &tmp,
-            "normalized view temp path is outside the KIO directory",
+            "normalized view temp path is outside the Kio directory",
         )
     })?;
     let result = write_synced_file(&tmp, bytes).and_then(|_| {

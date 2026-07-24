@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""Fail-closed W0 KIO command runner primitives for persona-PC fixtures.
+"""Fail-closed W0 Kio command runner primitives for persona-PC fixtures.
 
 This module is deliberately narrower than a persona prepare orchestrator.  It
 validates the two fresh-W0 commands ``init .`` and ``index --offline --yes``,
 but public environment creation and all binary execution remain fail-closed
 until trusted binary provenance plus a handle-relative, network-contained
 execution boundary can keep ``cwd`` and every mutable device path inside the
-leased replay root.  It does not inspect KIO internals, reset a device registry,
+leased replay root.  It does not inspect Kio internals, reset a device registry,
 delete a ``.kio`` directory, run a history wave, or claim that a persona is
 history-ready.
 
@@ -516,7 +516,7 @@ def _run_process_bounded(command, cwd, environment, limits):
 def _require_trusted_binary_execution():
     if TRUSTED_BINARY_EXECUTION_AVAILABLE is not True:
         raise PersonaKioRunnerError(
-            "trusted persona KIO binary execution is unavailable"
+            "trusted persona Kio binary execution is unavailable"
         )
 
 
@@ -1007,7 +1007,7 @@ def _safe_kio_directory(scope, *, required):
 def _require_handle_relative_execution():
     if HANDLE_RELATIVE_EXECUTION_AVAILABLE is not True:
         raise PersonaKioRunnerError(
-            "handle-relative persona KIO execution is unavailable"
+            "handle-relative persona Kio execution is unavailable"
         )
 
 

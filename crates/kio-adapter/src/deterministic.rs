@@ -345,7 +345,7 @@ fn default_hint(raw_hash: &str) -> PreparedUnitHint {
 /// would be rejected by the same v1 structural check this baseline must
 /// satisfy (04 §3.2 V5).
 fn baseline_placeholder(unit_key: &str, prepared_hash: &str) -> String {
-    format!("KIO deterministic baseline: {unit_key} {prepared_hash}\n")
+    format!("Kio deterministic baseline: {unit_key} {prepared_hash}\n")
 }
 
 fn markdown_unit_from_hint(

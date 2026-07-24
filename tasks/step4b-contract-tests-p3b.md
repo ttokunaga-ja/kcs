@@ -322,14 +322,14 @@ exit 分岐)。(5) は QB1 が扱う一般ヘルパのバグそのものであ�
 
 ### QB14 registry 再構築の入力範囲 + `scrub.lock` パス解決 (現状固定、パラメタ化 2 件) [P2]
 - 正本: (a) 05-runtime.md §6 L1057 (『**再構築の入力はユーザーが知る探索 root** — registry 喪失後は
-  `.kio` の所在一覧も失われるため、各 root での `kio index` 再実行が再登録を兼ねる。KIO が自力で
+  `.kio` の所在一覧も失われるため、各 root での `kio index` 再実行が再登録を兼ねる。Kio が自力で
   全ディスクを走査することはしない』) / (b) 同 L1058 (『device logs では
   `${XDG_DATA_HOME:-$HOME/.local/share}/kio/logs/scrub.lock`』)
 - 前提: (a) `scope-registry.sqlite` が破損・削除された状態。(b) `XDG_DATA_HOME` 環境変数が未設定の
   実行環境。
 - 操作: (a) registry 削除後に `kio status` 等を実行し、全ディスク走査が発生しないことを確認する。
   (b) `XDG_DATA_HOME` 未設定のまま `kio purge` を実行し `scrub.lock` の実パスを観測する。
-- 期待: (a) KIO は既知の root 以外を自発的に走査しない (=「全ディスク走査を行う」コードパスが存在しない
+- 期待: (a) Kio は既知の root 以外を自発的に走査しない (=「全ディスク走査を行う」コードパスが存在しない
   ことの確認 — 各 `.kio` は個別の `kio index` 実行でのみ再登録される)。(b) `scrub.lock` は
   `$HOME/.local/share/kio/logs/scrub.lock` に解決され、カレントディレクトリ相対のような不正パスには
   ならない。**現状**: (a) 全ディスク走査を行う実装 (`WalkDir` 等の再帰クレート使用) はそもそも存在しない
@@ -931,7 +931,7 @@ exit code/error code の横断規約 (§7/§8, §12) への当てはめ、の 2 
 - 正本: 06-cli-spec.md §1 L61 (『kio log [--at <commit>] [--since <dur>]』のみ — 挙動は無規定)。
   類推元: 06-cli-spec.md §3 L226 (search の『--at は --scope 単一指定を必須とする...05 §1.6』) /
   05-runtime.md §1.6 L214 (『--at <commit> 指定 commit 時点で indexed だった chunks のみ対象』) —
-  「`--at <commit>` = 現在 (HEAD) ではなく指定 commit を基点として扱う」という KIO 全体で一貫した
+  「`--at <commit>` = 現在 (HEAD) ではなく指定 commit を基点として扱う」という Kio 全体で一貫した
   フラグ意味論からの類推。
 - 前提: 3 世代の commit 履歴 `C1 → C2 → C3(HEAD)` を持つ scope。
 - 操作: `kio log --at C2` を実行する。

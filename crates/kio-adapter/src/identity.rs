@@ -28,7 +28,7 @@ const PROFILE_FIELDS: &[&str] = &[
     "distance",
     "modality",
     // 2026-07-24 (07 §5.3 contextual-embedding addendum): embedding-only — how
-    // KIO constructs the text handed to the Embedding Adapter (currently
+    // Kio constructs the text handed to the Embedding Adapter (currently
     // `chunk_filename_context_v1`: humanized filename prepended to the chunk
     // body). It changes what a vector MEANS, so it belongs to the vector-space
     // identity the profile hash pins (03 §7). Absent from every non-embedding

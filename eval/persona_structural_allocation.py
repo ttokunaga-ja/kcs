@@ -4,7 +4,7 @@ The contributor allocator freezes P/X/Y/N arithmetic.  This module freezes
 the independent path/materialization lane needed to exercise rename, move,
 create, exact/near duplicate, derived format, archive, delete, and restore.
 
-The allocation is deliberately root independent and contains no observed KIO
+The allocation is deliberately root independent and contains no observed Kio
 claims.  Raw hashes and complete before/after source states belong to the
 subsequent immutable event manifest.  All cross-scope and lifecycle sentinels
 are raw-only with zero contributor quota.  Same-scope rename and exact alias

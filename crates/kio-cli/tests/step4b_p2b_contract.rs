@@ -1161,7 +1161,7 @@ fn pb48_pb49_manifest_missing_resolves_via_resurrection_link_after_reingest() {
     let purged = success(&dir, &["evidence", "verify", &old_pointer_json]);
     assert_eq!(purged["status"], "tombstoned", "{purged}");
 
-    // KIO never deletes the working-tree original (05 §3.5), so the exact
+    // Kio never deletes the working-tree original (05 §3.5), so the exact
     // same bytes are still sitting in evidence.md -- the next `kio index`
     // re-ingests and resurrects (retires the tombstone) in the same locked
     // mutation, reproducing the identical chunk_hash at gen 0.
