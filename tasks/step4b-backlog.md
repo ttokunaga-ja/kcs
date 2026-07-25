@@ -395,17 +395,24 @@ R24b で 3/3 系統一致、うち 2 件が fatal だった **H2-3 / H2-4 / H2-5
 | I5 | `get_job` が poll 応答を **metadata 級 (1 MB)** として読む。実際は `GET /v1beta/{name}` が唯一の endpoint で、成功した job の応答は**全 inline 結果を 2 重に**載せる (実測 47,905 B/member) | **メンバ数に比例して踏む。** p01 の 33 メンバ job が 40 回のポーリングで一度も回収されず、provider 側には全ベクトルが揃っていた。小さい scope では通るため規模を上げるまで出ない |
 | I6 | 「読めなかったので保持」が `tasks_inflight` に混ざり、**正常な待機と区別できない** | I1 と I5 の両方をこの沈黙が隠した。`tasks_inflight_unreadable` を追加し、保持理由を stderr に出す |
 | I7 | **XLSX が黙って pending のまま滞留する。** task は `status: pending` / `fallback_reason: "network_opt_in_required"` (opt-in 済みでも変わらない) のまま残り、`unsupported_inputs: []` ・ `task_errors: []` ・ `tasks_complete: true` が異常なしと報告していた | ユーザー裁定 (2026-07-25) = **案 B: PDF 変換を経ずローカルで直接抽出**。07 §5.1 の「対象外」を解除し `kio_adapter::xlsx_extract` を実装。読めない workbook は `KIO-E-PREPARE-XLSX-EXTRACT-001` で落とす (空成功にしない) |
+| I4 | 応答の `usageMetadata.promptTokenCount` を捨てており、embedding は常に `estimated=1` で記帳される | 台帳が実額を映さない。`GeminiBatchEmbedOutput` に token 数を載せ、全単射が成立し全行が usage を報告した時だけ `estimated: false` へ移す。**全単射不成立・usage 欠落・一部行のみ報告の 3 経路は予約見積りへ退避** (部分合計は静かに過少になる)。実 API で検算: 853 tokens × $0.0000001 = $0.00008530、`estimated=0` 一致 |
+| I8 | `get_job` と `fetch_inlined_results` が**同じ URL を 2 回叩く** (成功 job では 1.5 MB を二重にダウンロード) | 上限が分岐したのはこの構造が原因。`poll_job` が 1 回取得して record と results を同時に返す形へ寄せ、I5 の再発経路自体を消した |
 
 修正: 封筒解決を `batch_object` / `parse_job_listing` / `inlined_response_lines` に集約し、
 **モックを provider と同じ封筒へ通した**。採取した実応答そのものを固定する回帰テスト 4 本
 (`real_poll_response_*` / `real_listing_response_*` / `the_documented_listing_key_is_still_accepted`)。
 
+I4 と同時に、確定記帳の**レーン非対応**も塞いだ。両記帳経路が `registered_declared_pricing`
+を素で読んでおり、markdownize は宣言値がたまたま Batch 単価だったため batch でだけ正しく見えて
+いた — **`--realtime` の OCR は実額の半分で記帳されていた**。過少記帳は budget cap が構造的に
+防げない方向 (cap は小さい方の数字しか見ない) なので、`lane_adjusted_pricing` を単一の適用点に
+統一した。
+
 ### 7.2 未修正
 
 | ID | 内容 |
 |---|---|
-| I4 | 応答の `usageMetadata.promptTokenCount` を捨てており、embedding は常に `estimated=1` で記帳される。実測は予約見積りの約 1/2 なので**安全側**だが台帳が実額を映さない。`GeminiBatchEmbedOutput` に token 数を載せて `estimated: false` へ移す |
-| I8 | `get_job` と `fetch_inlined_results` が**同じ URL を 2 回叩く** (成功 job では 1.5 MB を二重にダウンロード)。上限が分岐したのはこの構造が原因なので、1 回取得して両方を parse する形へ寄せると I5 の再発経路自体が消える |
+| I11 | **terminal 化した行を `batch resume` のたびに再送・再課金する。** 非再試行エラー (auth 等) は `unknown_settled` で予約額を実額として記帳し state=3 で終端するが、次の `batch resume` が新しい `submission_seq` で予約を切り直して同じことを繰り返す。実測: 鍵を読ませずに `batch resume` を 3 回叩いただけで `submission_seq` 2→4→6、**$0.001934 × 3 が積み上がった** (provider は 401 を返しており 1 円も課金していない)。`unknown_settled` 自体は「post-hoc 照会能力のない Adapter は常に unknown 精算」という CL45 の設計どおりで、旧 JSONL 設計が AuthError を 0 へ戻していたのを意図的に捨てた結果 (`settle_task_charge_unknown` の doc comment に明記) — 争点はそこではなく、**終端後に無制限へ再試行が走ること**。ポーリングは 1 実行で数十パス回るので、鍵が切れた状態で長時間回すと monthly cap まで空課金で埋まりうる。同一 (key, mode) の `unknown_settled` 回数に上限を持たせるか、terminal 行の再駆動に backoff を課す |
 | I10 | **予約見積りは保守側ではない。** 33 実ジョブの実測トークンと突き合わせた結果、`estimate_embedding_tokens` の誤差は **-32% 〜 +52%**、**8/33 (24%) が過少見積り**だった (集計では +20.5% 過大なので総額は安全側に見えるが、個別ジョブは違う)。確定記帳は I4 で実測に移ったので台帳は正しくなったが、**budget cap の事前判定は依然この見積りを使う** — 過少なジョブは cap を素通りしうる。`--realtime` は 2 倍単価なので影響も 2 倍。安全側へ倒す (例: 見積りに margin、または送信前に token 数を数える) か、cap 判定側で margin を持つか |
 | I9 | **sheet に埋め込まれた chart / 画像が読めない。** 直接抽出の原理的な穴で、`XlsxDocument::media_paths` が件数だけ報告する。塞ぐには「file X の sheet M の中の image N」という evidence 上の同一性が要り、`image_object_hashes` は 3 構造体に**宣言があるだけで書き手も読み手も無い**。dogfood corpus は 20/20 が chart 0 件なので今回の索引化には影響しないが、**実世界の Excel には普通に入る** |
 
