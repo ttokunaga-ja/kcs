@@ -831,7 +831,7 @@ impl GeminiEmbeddingClient for MockAdoptedEmbeddingClient {
         _model_pin: &str,
         dimensions: u32,
         _idempotency_header: Option<(&str, &str)>,
-    ) -> Result<Vec<EmbeddingVector>> {
+    ) -> Result<crate::gemini_embedding::EmbedBatchOutput> {
         match self.execution {
             AdoptedEmbeddingExecution::AuthError => {
                 return Err(AdapterError::Auth("mock auth failure".to_owned()))
@@ -847,16 +847,21 @@ impl GeminiEmbeddingClient for MockAdoptedEmbeddingClient {
             }
             _ => {}
         }
-        Ok(items
-            .iter()
-            .map(|item| EmbeddingVector {
-                id: item.id.clone(),
-                vector: deterministic_embedding_vector(
-                    item.text.as_deref().unwrap_or(""),
-                    dimensions as usize,
-                ),
-            })
-            .collect())
+        Ok(crate::gemini_embedding::EmbedBatchOutput {
+            vectors: items
+                .iter()
+                .map(|item| EmbeddingVector {
+                    id: item.id.clone(),
+                    vector: deterministic_embedding_vector(
+                        item.text.as_deref().unwrap_or(""),
+                        dimensions as usize,
+                    ),
+                })
+                .collect(),
+            // A mock cannot invent a provider's token count; `None` keeps this
+            // seam on the honest degrade-to-estimate path.
+            prompt_tokens: None,
+        })
     }
 }
 

@@ -134,10 +134,75 @@ fn success_script(job: &str, key: &str) -> String {
         "job_name": job,
         "inlined_responses": [{
             "metadata": { "key": key },
-            "output": { "response": { "embedding": { "values": values } } },
+            "output": { "response": {
+                "embedding": { "values": values },
+                // The live endpoint reports this per line; the fixture must
+                // too, or the settlement path it drives is never exercised.
+                "usageMetadata": { "promptTokenCount": 40 },
+            } },
         }],
     })
     .to_string()
+}
+
+/// Same job, but the provider omitted the usage report.
+fn success_script_without_usage(job: &str, key: &str) -> String {
+    let component = 1.0f64 / (768.0f64).sqrt();
+    serde_json::json!({
+        "state_sequence": ["BATCH_STATE_SUCCEEDED"],
+        "job_name": job,
+        "inlined_responses": [{
+            "metadata": { "key": key },
+            "output": { "response": { "embedding": { "values": vec![component; 768] } } },
+        }],
+    })
+    .to_string()
+}
+
+/// I4's degrade path. A provider that reports no token count must still settle
+/// — at the conservative reservation, flagged `estimated`. Trusting a missing
+/// report as zero would settle the charge at $0 and let the budget cap release
+/// spending the provider has already billed.
+#[test]
+fn a_result_without_a_usage_report_settles_at_the_reservation_estimate() {
+    let dir = scope();
+    let capture = dir.path().join("capture.jsonl");
+    json(
+        &dir,
+        &serde_json::json!({
+            "state_sequence": ["BATCH_STATE_PENDING"],
+            "job_name": "batches/no-usage",
+            "capture_path": capture.to_string_lossy(),
+        })
+        .to_string(),
+        &["index", "--approve", "--online"],
+    );
+    let key = submitted_key(&capture);
+
+    let resumed = json(
+        &dir,
+        &success_script_without_usage("batches/no-usage", &key),
+        &["batch", "resume"],
+    );
+    assert_eq!(resumed["tasks_executed"], 1, "{resumed}");
+    assert_eq!(
+        ledger_query(
+            &dir,
+            "SELECT outcome || '|' || estimated FROM cost_ledger WHERE adapter_kind = 'embedding'"
+        ),
+        "succeeded|1",
+        "a missing usage report must fall back to the estimate, not to zero"
+    );
+    assert!(
+        ledger_query(
+            &dir,
+            "SELECT CAST(usd AS TEXT) FROM cost_ledger WHERE adapter_kind = 'embedding'"
+        )
+        .parse::<f64>()
+        .unwrap()
+            > 0.0,
+        "the fallback charge must be the reservation, never 0"
+    );
 }
 
 /// `index --online` on the default (Batch) lane SUBMITS a job and returns; the
@@ -227,14 +292,15 @@ fn batch_resume_collects_the_vectors_and_clears_the_intent_token() {
         "2|1",
         "terminal state with the token cleared"
     );
-    // Settled at the BATCH rate, and `estimated` because the endpoint reports
-    // no token count (QA17).
+    // I4: settled on the token count the provider reported, at the BATCH rate
+    // — `estimated=0`. This used to be `1` on the belief that the endpoint
+    // reports no usage, which the wire contradicts.
     assert_eq!(
         ledger_query(
             &dir,
             "SELECT outcome || '|' || estimated FROM cost_ledger WHERE adapter_kind = 'embedding'"
         ),
-        "succeeded|1"
+        "succeeded|0"
     );
 
     // The collected vector is real: an explicit vector search resolves with it.

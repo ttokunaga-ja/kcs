@@ -406,6 +406,7 @@ R24b で 3/3 系統一致、うち 2 件が fatal だった **H2-3 / H2-4 / H2-5
 |---|---|
 | I4 | 応答の `usageMetadata.promptTokenCount` を捨てており、embedding は常に `estimated=1` で記帳される。実測は予約見積りの約 1/2 なので**安全側**だが台帳が実額を映さない。`GeminiBatchEmbedOutput` に token 数を載せて `estimated: false` へ移す |
 | I8 | `get_job` と `fetch_inlined_results` が**同じ URL を 2 回叩く** (成功 job では 1.5 MB を二重にダウンロード)。上限が分岐したのはこの構造が原因なので、1 回取得して両方を parse する形へ寄せると I5 の再発経路自体が消える |
+| I10 | **予約見積りは保守側ではない。** 33 実ジョブの実測トークンと突き合わせた結果、`estimate_embedding_tokens` の誤差は **-32% 〜 +52%**、**8/33 (24%) が過少見積り**だった (集計では +20.5% 過大なので総額は安全側に見えるが、個別ジョブは違う)。確定記帳は I4 で実測に移ったので台帳は正しくなったが、**budget cap の事前判定は依然この見積りを使う** — 過少なジョブは cap を素通りしうる。`--realtime` は 2 倍単価なので影響も 2 倍。安全側へ倒す (例: 見積りに margin、または送信前に token 数を数える) か、cap 判定側で margin を持つか |
 | I9 | **sheet に埋め込まれた chart / 画像が読めない。** 直接抽出の原理的な穴で、`XlsxDocument::media_paths` が件数だけ報告する。塞ぐには「file X の sheet M の中の image N」という evidence 上の同一性が要り、`image_object_hashes` は 3 構造体に**宣言があるだけで書き手も読み手も無い**。dogfood corpus は 20/20 が chart 0 件なので今回の索引化には影響しないが、**実世界の Excel には普通に入る** |
 
 ### 7.3 運用上の学び

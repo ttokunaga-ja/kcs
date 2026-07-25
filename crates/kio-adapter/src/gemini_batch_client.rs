@@ -155,6 +155,20 @@ pub struct GeminiBatchJobRecord {
     pub responses_file: Option<String>,
 }
 
+/// The result of one [`GeminiBatchClient::poll_job`] call.
+#[derive(Debug, Clone)]
+pub struct GeminiBatchPoll {
+    pub record: GeminiBatchJobRecord,
+    /// `Some` when the polled document carried inline results — i.e. the job
+    /// finished and its output rode along in the same response. `None` while
+    /// it is still queued or running.
+    ///
+    /// A record whose state is `Succeeded` but whose results are `None` is an
+    /// anomaly, not a normal in-between: the caller must hold the row and say
+    /// it could not read it, never settle it as complete.
+    pub results: Option<Vec<GeminiBatchEmbedOutput>>,
+}
+
 /// One embedding result line, keyed back to the caller's request key.
 #[derive(Debug, Clone)]
 pub struct GeminiBatchEmbedOutput {
@@ -164,6 +178,14 @@ pub struct GeminiBatchEmbedOutput {
     pub values: Option<Vec<f32>>,
     /// Provider error object for this line, when present.
     pub error: Option<Value>,
+    /// `response.usageMetadata.promptTokenCount` for this line.
+    ///
+    /// The endpoint DOES report token counts — both here and on the
+    /// synchronous `embedContent`. The adapter used to assert the opposite in
+    /// a comment and degrade `usage` to `None`, which made every embedding
+    /// charge settle at the reservation estimate instead of what was actually
+    /// billed (07 §5.3, 2026-07-25 correction).
+    pub prompt_tokens: Option<u64>,
 }
 
 /// One inline request element: the caller's key plus the text to embed.
@@ -274,12 +296,18 @@ pub trait GeminiBatchClient {
         inputs: &[GeminiBatchEmbedInput],
     ) -> Result<GeminiBatchJobRecord>;
 
-    fn get_job(&self, name: &str) -> Result<GeminiBatchJobRecord>;
+    /// One poll: the job record and, once the job has finished, its results.
+    ///
+    /// This is deliberately ONE call. `GET /v1beta/{name}` is the only batch
+    /// endpoint, so the state and the output live in the same document —
+    /// asking twice downloaded a succeeded job's payload twice (1.5 MB, for a
+    /// 33-member job) and, worse, let the two reads acquire DIFFERENT byte
+    /// bounds. One of them was sized for "metadata", which silently stranded
+    /// every job past ~20 members. A single fetch makes that divergence
+    /// unrepresentable rather than merely fixed.
+    fn poll_job(&self, name: &str) -> Result<GeminiBatchPoll>;
 
     fn list_jobs(&self) -> Result<Vec<GeminiBatchJobRecord>>;
-
-    /// Read the inline results of a succeeded job.
-    fn fetch_inlined_results(&self, name: &str) -> Result<Vec<GeminiBatchEmbedOutput>>;
 }
 
 // ---------------------------------------------------------------------------
@@ -397,6 +425,14 @@ fn inlined_response_lines(value: &Value) -> Option<&Vec<Value>> {
 /// Extract `inlinedResponses[]` into keyed outputs. A line without a usable
 /// `metadata.key` is a contract violation: silently dropping it would leave the
 /// caller's chunk permanently unembedded while the job counted as complete.
+/// The API returns counts as JSON numbers here and as quoted strings in
+/// `batchStats`; accept both rather than silently dropping a token count.
+fn json_u64(value: &Value) -> Option<u64> {
+    value
+        .as_u64()
+        .or_else(|| value.as_str().and_then(|text| text.parse().ok()))
+}
+
 pub(crate) fn parse_inlined_results(value: &Value) -> Result<Vec<GeminiBatchEmbedOutput>> {
     let lines = inlined_response_lines(value).ok_or_else(|| {
         AdapterError::ContractViolation("Gemini batch result missing inlinedResponses".to_owned())
@@ -415,11 +451,19 @@ pub(crate) fn parse_inlined_results(value: &Value) -> Result<Vec<GeminiBatchEmbe
             })?
             .to_owned();
         let output = line.get("output").unwrap_or(line);
+        // `response.usageMetadata.promptTokenCount` — what the provider
+        // actually billed for this line.
+        let prompt_tokens = output
+            .get("response")
+            .and_then(|response| response.get("usageMetadata"))
+            .and_then(|usage| usage.get("promptTokenCount"))
+            .and_then(json_u64);
         if let Some(error) = output.get("error").filter(|error| !error.is_null()) {
             outputs.push(GeminiBatchEmbedOutput {
                 key,
                 values: None,
                 error: Some(error.clone()),
+                prompt_tokens,
             });
             continue;
         }
@@ -446,6 +490,7 @@ pub(crate) fn parse_inlined_results(value: &Value) -> Result<Vec<GeminiBatchEmbe
             key,
             values: Some(values),
             error: None,
+            prompt_tokens,
         });
     }
     Ok(outputs)
@@ -554,14 +599,22 @@ impl GeminiBatchClient for EnvGeminiBatchClient {
         parse_job_record(&value)
     }
 
-    fn get_job(&self, name: &str) -> Result<GeminiBatchJobRecord> {
+    fn poll_job(&self, name: &str) -> Result<GeminiBatchPoll> {
         let value = self.get_json(
             &format!("{}/v1beta/{name}", self.base_url()),
-            // Same URL and same document as `fetch_inlined_results` — one bound.
             BATCH_POLL_MAX_BYTES,
-            "Gemini batch job response",
+            "Gemini batch poll response",
         )?;
-        parse_job_record(&value)
+        let record = parse_job_record(&value)?;
+        // Results ride in the SAME document once the job finishes. Their
+        // absence is how "still running" looks, so it is not an error here —
+        // but a `Succeeded` record with no results is, and the caller is the
+        // one that can tell those apart.
+        let results = match inlined_response_lines(&value) {
+            Some(_) => Some(parse_inlined_results(&value)?),
+            None => None,
+        };
+        Ok(GeminiBatchPoll { record, results })
     }
 
     fn list_jobs(&self) -> Result<Vec<GeminiBatchJobRecord>> {
@@ -593,17 +646,6 @@ impl GeminiBatchClient for EnvGeminiBatchClient {
         Ok(records)
     }
 
-    fn fetch_inlined_results(&self, name: &str) -> Result<Vec<GeminiBatchEmbedOutput>> {
-        let value = self.get_json(
-            &format!("{}/v1beta/{name}", self.base_url()),
-            // `EMBEDDING_RESPONSE_MAX_BYTES` (8 MB) is the SYNCHRONOUS
-            // single-embedding bound and is too small here: it caps a batch at
-            // ~170 members, well under the caller's 512-member ceiling.
-            BATCH_POLL_MAX_BYTES,
-            "Gemini batch result response",
-        )?;
-        parse_inlined_results(&value)
-    }
 }
 
 fn http_error(error: ureq::Error) -> AdapterError {
@@ -788,17 +830,38 @@ impl GeminiBatchClient for MockGeminiBatchClient {
         Ok(record)
     }
 
-    fn get_job(&self, name: &str) -> Result<GeminiBatchJobRecord> {
-        self.capture(json!({ "call": "get_job", "name": name }));
+    fn poll_job(&self, name: &str) -> Result<GeminiBatchPoll> {
+        self.capture(json!({ "call": "poll_job", "name": name }));
         self.fail_if_named(name)?;
-        self.fail_if_scripted("get_job")?;
+        self.fail_if_scripted("poll_job")?;
         let step = self.poll_step();
         let state = self
             .script
             .state_sequence
             .get(step)
             .map_or("BATCH_STATE_SUCCEEDED", String::as_str);
-        self.record(state)
+        let record = self.record(state)?;
+        // Mirror the wire: results appear only once the job is terminal, and
+        // they arrive in the SAME response as the record.
+        let results = if record.state.is_terminal() {
+            // Route the scripted lines through the provider's actual envelope
+            // rather than handing the parser its innermost shape — the drift
+            // that made 13 contract tests pass over an uncollectable lane.
+            Some(parse_inlined_results(&json!({
+                "name": self.script.job_name,
+                "metadata": {
+                    "name": self.script.job_name,
+                    "state": "BATCH_STATE_SUCCEEDED",
+                    "output": {
+                        "inlinedResponses": { "inlinedResponses": self.script.inlined_responses },
+                    },
+                },
+                "done": true,
+            }))?)
+        } else {
+            None
+        };
+        Ok(GeminiBatchPoll { record, results })
     }
 
     fn list_jobs(&self) -> Result<Vec<GeminiBatchJobRecord>> {
@@ -810,27 +873,6 @@ impl GeminiBatchClient for MockGeminiBatchClient {
         parse_job_listing(&json!({ "operations": self.script.jobs_listing }))
     }
 
-    fn fetch_inlined_results(&self, name: &str) -> Result<Vec<GeminiBatchEmbedOutput>> {
-        self.capture(json!({ "call": "fetch_inlined_results", "name": name }));
-        self.fail_if_named(name)?;
-        self.fail_if_scripted("fetch_results")?;
-        // The mock used to hand the parser `{"inlinedResponses": [...]}` — the
-        // innermost shape, which is the one shape the provider never returns.
-        // Every contract test therefore passed while no real job could be
-        // collected. Wrap the scripted lines in the provider's actual envelope
-        // so this seam cannot drift from the wire again.
-        parse_inlined_results(&json!({
-            "name": self.script.job_name,
-            "metadata": {
-                "name": self.script.job_name,
-                "state": "BATCH_STATE_SUCCEEDED",
-                "output": {
-                    "inlinedResponses": { "inlinedResponses": self.script.inlined_responses },
-                },
-            },
-            "done": true,
-        }))
-    }
 }
 
 /// The active embedding Batch client: the mock seam when
@@ -1149,6 +1191,32 @@ mod tests {
     }
 
     #[test]
+    fn real_poll_response_carries_the_billed_token_counts() {
+        // I4: the provider DOES report per-line `promptTokenCount`. Dropping it
+        // made every embedding charge settle at the reservation estimate
+        // instead of at what was billed.
+        let value: Value = serde_json::from_str(REAL_POLL_RESPONSE).unwrap();
+        let outputs = parse_inlined_results(&value).unwrap();
+        assert_eq!(outputs[0].prompt_tokens, Some(81));
+        assert_eq!(outputs[1].prompt_tokens, Some(25));
+    }
+
+    #[test]
+    fn a_line_without_a_usage_report_yields_no_token_count() {
+        // Absence must stay `None` (which routes billing to the conservative
+        // estimate), never a fabricated zero — a zero would settle the charge
+        // at $0 and let the budget cap release spending already incurred.
+        let value = json!({
+            "inlinedResponses": [{
+                "metadata": { "key": "chunk-a" },
+                "output": { "response": { "embedding": { "values": [1.0] } } },
+            }]
+        });
+        let outputs = parse_inlined_results(&value).unwrap();
+        assert_eq!(outputs[0].prompt_tokens, None);
+    }
+
+    #[test]
     fn real_poll_response_yields_a_terminal_job_record() {
         let value: Value = serde_json::from_str(REAL_POLL_RESPONSE).unwrap();
         let record = parse_job_record(&value).unwrap();
@@ -1219,19 +1287,21 @@ mod tests {
             .unwrap();
         assert_eq!(created.state, GeminiBatchState::Pending);
         assert_eq!(created.display_name, "kio-tok");
-        assert_eq!(
-            client.get_job(&created.name).unwrap().state,
-            GeminiBatchState::Pending
-        );
-        assert_eq!(
-            client.get_job(&created.name).unwrap().state,
-            GeminiBatchState::Running
-        );
-        assert_eq!(
-            client.get_job(&created.name).unwrap().state,
-            GeminiBatchState::Succeeded
-        );
-        let outputs = client.fetch_inlined_results(&created.name).unwrap();
+        let pending = client.poll_job(&created.name).unwrap();
+        assert_eq!(pending.record.state, GeminiBatchState::Pending);
+        // A job that has not finished carries no results, and that absence is
+        // normal rather than a read failure.
+        assert!(pending.results.is_none());
+
+        let running = client.poll_job(&created.name).unwrap();
+        assert_eq!(running.record.state, GeminiBatchState::Running);
+        assert!(running.results.is_none());
+
+        // I8: the terminal poll delivers the record AND the results in ONE
+        // call, because the provider delivers them in one document.
+        let done = client.poll_job(&created.name).unwrap();
+        assert_eq!(done.record.state, GeminiBatchState::Succeeded);
+        let outputs = done.results.expect("a succeeded job carries its results");
         assert_eq!(outputs.len(), 1);
         assert_eq!(outputs[0].key, "chunk-a");
         let _ = std::fs::remove_dir_all(&dir);

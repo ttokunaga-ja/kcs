@@ -17,8 +17,9 @@ use crate::http_policy::{
 use crate::identity::{is_mutable_model_alias, tool_profile_hash};
 use crate::traits::{EmbeddingAdapter, PreferredRequestKind};
 use crate::types::{
-    validate_cosine_vector, AdapterKind, AdapterProfile, EmbeddingItem, EmbeddingRequest,
-    EmbeddingResponse, EmbeddingVector, ExecutionMode,
+    validate_cosine_vector, AdapterKind, AdapterProfile, AdapterUsage, BillableUnit,
+    BillableUnitKind, EmbeddingItem, EmbeddingRequest, EmbeddingResponse, EmbeddingVector,
+    ExecutionMode,
 };
 use crate::{AdapterError, Result};
 use serde_json::{json, Value};
@@ -49,7 +50,17 @@ pub trait GeminiEmbeddingClient: Clone {
         model_pin: &str,
         dimensions: u32,
         idempotency_header: Option<(&str, &str)>,
-    ) -> Result<Vec<EmbeddingVector>>;
+    ) -> Result<EmbedBatchOutput>;
+}
+
+/// One `:batchEmbedContents` response: the vectors, plus the token count the
+/// provider reported for the call.
+#[derive(Debug, Clone, Default)]
+pub struct EmbedBatchOutput {
+    pub vectors: Vec<EmbeddingVector>,
+    /// `usageMetadata.promptTokenCount` — a total for the whole call, which is
+    /// also the granularity the provider bills at.
+    pub prompt_tokens: Option<u64>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -171,7 +182,7 @@ impl GeminiEmbeddingClient for EnvGeminiEmbeddingClient {
         model_pin: &str,
         dimensions: u32,
         idempotency_header: Option<(&str, &str)>,
-    ) -> Result<Vec<EmbeddingVector>> {
+    ) -> Result<EmbedBatchOutput> {
         let api_key = Self::api_key()?;
         // `:batchEmbedContents` embeds the whole batch in ONE SYNCHRONOUS
         // request — the batching here is client-side, and this is the Sync lane
@@ -214,8 +225,25 @@ impl GeminiEmbeddingClient for EnvGeminiEmbeddingClient {
             EMBEDDING_RESPONSE_MAX_BYTES,
             "Gemini embedding response",
         )?;
-        parse_embeddings(&response, items, dimensions)
+        Ok(EmbedBatchOutput {
+            vectors: parse_embeddings(&response, items, dimensions)?,
+            prompt_tokens: parse_prompt_tokens(&response),
+        })
     }
+}
+
+/// `usageMetadata.promptTokenCount`, when the response carried one.
+///
+/// The endpoint reports a total for the CALL rather than per request, which is
+/// what the previous comment here observed — but it then concluded there was
+/// "no real signal to self-report", and a per-call total is exactly the
+/// granularity the provider bills at. Reporting `None` made every synchronous
+/// embedding settle at the caller's reservation estimate instead of at cost.
+fn parse_prompt_tokens(response: &Value) -> Option<u64> {
+    let value = response.get("usageMetadata")?.get("promptTokenCount")?;
+    value
+        .as_u64()
+        .or_else(|| value.as_str().and_then(|text| text.parse().ok()))
 }
 
 fn parse_embeddings(
@@ -416,7 +444,7 @@ impl<C: GeminiEmbeddingClient> EmbeddingAdapter for GeminiEmbeddingAdapter<C> {
             request.idempotency_token.as_deref(),
         )?;
         let model_pin = self.client.resolve_model_pin(&self.configured_model)?;
-        let vectors = self.client.embed(
+        let batch = self.client.embed(
             &request.items,
             &model_pin,
             self.dimensions,
@@ -424,6 +452,7 @@ impl<C: GeminiEmbeddingClient> EmbeddingAdapter for GeminiEmbeddingAdapter<C> {
                 .as_ref()
                 .map(|(name, value)| (name.as_str(), value.as_str())),
         )?;
+        let vectors = batch.vectors;
         if vectors.len() != request.items.len() {
             return Err(AdapterError::ContractViolation(
                 "embedding response count does not match request".to_owned(),
@@ -445,12 +474,20 @@ impl<C: GeminiEmbeddingClient> EmbeddingAdapter for GeminiEmbeddingAdapter<C> {
             // QA49: the profile in force for this response, so the consumer
             // can reject a same-dimension vector from an unexpected profile.
             embedding_profile_hash: tool_profile_hash(&self.profile_value()).ok(),
-            // QA17: `batchEmbedContents`'s response carries no per-request
-            // token count (unlike `generateContent`'s `usageMetadata`), so
-            // there is no real signal to self-report here. `None` degrades
-            // to the caller's reservation estimate — the same behavior as
-            // before this field existed, not a regression.
-            usage: None,
+            // I4 (2026-07-25, measured against the live endpoint): the
+            // response DOES carry `usageMetadata.promptTokenCount` — as a
+            // per-CALL total, not per request, which is the granularity the
+            // provider bills at. This used to report `None` on the reasoning
+            // that a per-request count was absent, which made every
+            // synchronous embedding settle at the caller's reservation
+            // estimate rather than at cost. `None` remains the honest answer
+            // when the field is missing, and still degrades that way.
+            usage: batch.prompt_tokens.map(|count| AdapterUsage::BillableUnits {
+                billable_units: vec![BillableUnit {
+                    kind: BillableUnitKind::TokensIn,
+                    count,
+                }],
+            }),
         })
     }
 }
@@ -505,19 +542,70 @@ mod tests {
             _model_pin: &str,
             dimensions: u32,
             _idempotency_header: Option<(&str, &str)>,
-        ) -> Result<Vec<EmbeddingVector>> {
-            Ok(items
-                .iter()
-                .map(|item| EmbeddingVector {
-                    id: item.id.clone(),
-                    vector: {
-                        let mut vector = vec![0.0; dimensions as usize];
-                        vector[0] = 1.0;
-                        vector
-                    },
-                })
-                .collect())
+        ) -> Result<EmbedBatchOutput> {
+            Ok(EmbedBatchOutput {
+                vectors: items
+                    .iter()
+                    .map(|item| EmbeddingVector {
+                        id: item.id.clone(),
+                        vector: {
+                            let mut vector = vec![0.0; dimensions as usize];
+                            vector[0] = 1.0;
+                            vector
+                        },
+                    })
+                    .collect(),
+                prompt_tokens: Some(7),
+            })
         }
+    }
+
+    #[test]
+    fn the_reported_token_count_becomes_a_billable_unit() {
+        // I4: measured against the live `:batchEmbedContents` — the response
+        // carries `usageMetadata.promptTokenCount` as a per-CALL total. The
+        // adapter used to report `usage: None` on the reasoning that a
+        // per-REQUEST count was absent, which is true and beside the point:
+        // per-call is the granularity the provider bills at.
+        let adapter =
+            GeminiEmbeddingAdapter::new(StubClient, ADOPTED_MODEL_PIN, ADOPTED_DIMENSIONS);
+        let response = adapter
+            .embed(EmbeddingRequest {
+                input_type: EmbeddingInputType::MarkdownChunk,
+                items: vec![EmbeddingItem {
+                    id: "a".to_owned(),
+                    text: Some("hello".to_owned()),
+                    path: None,
+                    mime: None,
+                }],
+                idempotency_token: None,
+            })
+            .expect("embed");
+        match response.usage {
+            Some(AdapterUsage::BillableUnits { billable_units }) => {
+                assert_eq!(billable_units.len(), 1);
+                assert_eq!(billable_units[0].kind, BillableUnitKind::TokensIn);
+                assert_eq!(billable_units[0].count, 7);
+            }
+            other => panic!("expected a tokens_in report, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_response_without_usage_metadata_reports_nothing() {
+        // `None` still degrades to the caller's reservation estimate, which is
+        // the conservative direction; a fabricated 0 would not be.
+        assert_eq!(parse_prompt_tokens(&json!({ "embeddings": [] })), None);
+        assert_eq!(
+            parse_prompt_tokens(&json!({ "usageMetadata": { "promptTokenCount": 42 } })),
+            Some(42)
+        );
+        // The API quotes counts as strings in some fields; accept both rather
+        // than dropping a real count.
+        assert_eq!(
+            parse_prompt_tokens(&json!({ "usageMetadata": { "promptTokenCount": "42" } })),
+            Some(42)
+        );
     }
 
     #[test]

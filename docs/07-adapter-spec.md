@@ -637,14 +637,32 @@ Text Embedding Adapter / Image Embedding Adapter は**採用しない**。同一
 >   > パーサへ直接与えていたためである。**モックは provider と同じ封筒を通すこと**
 >   > (seam が wire から乖離した瞬間、その経路のテストは何も保証しなくなる)。
 >
-> - **応答はトークン数を返す (2026-07-25 実 API 実行で訂正)**: 下の「課金報告」は
->   `usage` を `None` に degrade すると述べているが、実際の応答は各結果行に
->   `response.usageMetadata.promptTokenCount` (および `promptTokenDetails[].modality`) を
->   持つ。したがって embedding の Batch レーンは**実測トークン数で確定記帳できる**。
->   現実装はこれを捨てて予約見積りのまま `estimated=1` で記帳しており、金額は保守側
->   (実測の約 2 倍) に倒れるため安全側の誤差ではあるが、台帳が実額を映さない。
->   `GeminiBatchEmbedOutput` に token 数を持たせて `BilledAmount { estimated: false }` へ
->   移すこと (未実施 — [tasks/step4b-backlog.md](../tasks/step4b-backlog.md) §6.2)。
+> - **応答はトークン数を返す (2026-07-25 実 API 実行で訂正・同日実装)**: 下の「課金報告」は
+>   `usage` を `None` に degrade すると述べているが、**両レーンとも事実に反する**。
+>   Batch は各結果行に `response.usageMetadata.promptTokenCount` を持ち、同期の
+>   `:batchEmbedContents` は**呼び出し単位の合計**として同じフィールドを返す。
+>   同期側の旧コメント「per-request のトークン数が無い」は字義どおり正しいが、
+>   **課金の粒度は呼び出し単位**なので「自己申告する信号が無い」という結論が誤りだった。
+>
+>   したがって embedding は**両レーンとも実測トークンで確定記帳する**。ただし次の 3 つは
+>   保守側 (予約見積り) を維持する — いずれも**過少記帳**になる経路だからである:
+>   (a) 全単射が不成立の回収 (欠けた結果のトークン合計は本来の請求を下回る)、
+>   (b) usage 報告が無い応答 (0 と解釈すると $0 で確定し、cap が既発生の支出を解放する)、
+>   (c) 一部の行にしか報告が無い場合 (部分合計は静かに過少になる — all-or-nothing で退避)。
+>
+>   **予約見積りは保守側ではない (2026-07-25 実測)**: 33 実ジョブで突き合わせた
+>   `estimate_embedding_tokens` の誤差は **-32% 〜 +52%**、**8/33 (24%) が過少**だった。
+>   確定記帳は実測へ移ったが、**budget cap の事前判定は依然この見積りを使う**ため、
+>   過少なジョブは cap を素通りしうる ([tasks/step4b-backlog.md](../tasks/step4b-backlog.md) I10)。
+>
+> - **単価はレーンで割る — 宣言値は標準 (sync) 単価 (2026-07-25 統一)**: 確定記帳の経路には
+>   レーン概念が無く、両 settle site が `registered_declared_pricing` を**生で**読んでいた。
+>   markdownize でそれが正しく見えていたのは宣言値がたまたま Batch 単価だったためで、
+>   その結果 **`--realtime` の OCR は実額の半分で記帳されていた**。過少記帳は budget cap が
+>   構造的に防げない方向 (cap は小さい方の数字しか見ない) なので、`lane_adjusted_pricing`
+>   を単一の適用点とし、**全 role で「宣言値 = 標準単価、Batch = 0.5 倍」に統一**する。
+>   `tools.toml` の `[markdown.*.pricing] pages` は $4 / 1,000 pages (= 0.004) を宣言すること。
+>   予約と確定は**同じ単価解決を通す** — 別々の源から引くと両者が乖離する。
 >
 > **レーンは invocation 単位で 1 つ (2026-07-24 ユーザー裁定)**: OCR と embedding を
 > **別レーンに分けない** — 1 回の実行では**両方 Batch か、両方即時か**のいずれかである。

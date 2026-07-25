@@ -11956,8 +11956,11 @@ fn execute_pending_markdownize_tasks(
                 // absent/malformed/uncovered (`resolve_billing_from_reported_usage`'s
                 // existing CL27/CL28 rules).
                 let markdownize_profile = online_markdownize_profile_for(repo)?;
+                // This arm IS the synchronous send, so it settles at the
+                // standard rate. Reading the declaration raw made that true by
+                // accident and made the batch arm below wrong.
                 let markdownize_pricing =
-                    kio_adapter::tool_lock::registered_declared_pricing("markdown");
+                    lane_adjusted_pricing("markdown", PreferredRequestKind::Sync);
                 let (billed, uncovered_pricing_kinds) = resolve_billing_from_reported_usage(
                     outcome.usage.as_ref(),
                     &declared_billable_kind_strings(&markdownize_profile),
@@ -14777,6 +14780,23 @@ fn record_batch_submit_failure(
     );
 }
 
+/// Total `promptTokenCount` a job's result lines reported, or `None` when not
+/// every line carried one.
+///
+/// All-or-nothing on purpose. A partial sum would silently under-state the
+/// charge, and the ledger's own rule (CL28) is that an incomplete usage report
+/// degrades to the conservative reservation rather than being trusted in part.
+/// Returning `None` is what routes it there.
+fn reported_prompt_tokens(results: &[kio_adapter::gemini_batch_client::GeminiBatchEmbedOutput]) -> Option<u64> {
+    if results.is_empty() {
+        return None;
+    }
+    results
+        .iter()
+        .map(|result| result.prompt_tokens)
+        .try_fold(0u64, |total, tokens| Some(total + tokens?))
+}
+
 /// The batch row's `input_hash` for a job: a digest over the job's member
 /// content identities, in a canonical order.
 ///
@@ -15109,17 +15129,22 @@ fn poll_batch_embedding_jobs(repo: &Repository, ledger: &LedgerDb) -> Result<Exe
         // collection for every other row in the scope (head-of-line blocking)
         // and reported a transient network error as a permanent config fault.
         // The OCR lane has always held-and-retried here; this matches it.
-        let job = match client.get_job(job_name) {
-            Ok(job) => job,
+        // I8: ONE fetch. The state and the results live in the same document,
+        // so asking twice downloaded a finished job's payload twice and let the
+        // two reads take different byte bounds — which is how every job past
+        // ~20 members came to be silently unreadable.
+        let poll = match client.poll_job(job_name) {
+            Ok(poll) => poll,
             Err(error) => {
                 // Held, not failed — but say so. A bare `inflight += 1` here
                 // reads as "still queued" and hid two permanent faults.
-                eprintln!("kio: holding {job_name}: job state unreadable: {error}");
+                eprintln!("kio: holding {job_name}: poll unreadable: {error}");
                 outcome.inflight += 1;
                 outcome.held_unreadable += 1;
                 continue;
             }
         };
+        let job = poll.record;
         if !job.state.is_terminal() {
             outcome.inflight += 1;
             continue;
@@ -15152,18 +15177,15 @@ fn poll_batch_embedding_jobs(repo: &Repository, ledger: &LedgerDb) -> Result<Exe
             outcome.failed += 1;
             continue;
         }
-        // G2: same §5.8 unknown rule. The job reached a terminal state but its
-        // results are not readable right now — settling on that would either
-        // discard the vectors (Succeeded with nothing persisted) or burn a
-        // retry (Terminal). Hold the row instead; the next pass re-reads it.
-        let results = match client.fetch_inlined_results(job_name) {
-            Ok(results) => results,
-            Err(error) => {
-                eprintln!("kio: holding {job_name}: results unreadable: {error}");
-                outcome.inflight += 1;
-                outcome.held_unreadable += 1;
-                continue;
-            }
+        // G2: same §5.8 unknown rule. The job says SUCCEEDED but the response
+        // carried no results — settling on that would either discard the
+        // vectors (Succeeded with nothing persisted) or burn a retry
+        // (Terminal). Hold the row instead; the next pass re-reads it.
+        let Some(results) = poll.results else {
+            eprintln!("kio: holding {job_name}: job succeeded but carried no results");
+            outcome.inflight += 1;
+            outcome.held_unreadable += 1;
+            continue;
         };
         let mut persisted = 0usize;
         // R24 (4 系統一致): 07 §5.3 (1) requires the result ids to be a BIJECTION
@@ -15240,11 +15262,51 @@ fn poll_batch_embedding_jobs(repo: &Repository, ledger: &LedgerDb) -> Result<Exe
             },
             (!complete)
                 .then_some("embedding batch results are not a bijection onto the job's inputs"),
-            // QA17 posture: the endpoint reports no token count, so the
-            // reservation estimate stands as the settled charge.
-            BilledAmount {
-                usd: row.estimated_usd,
-                estimated: true,
+            // I4: the endpoint DOES report a token count per result line, so a
+            // complete job settles on what was actually billed rather than on
+            // the reservation. The old QA17 posture ("no token count, the
+            // estimate stands") was written from a comment in the sync adapter
+            // that the wire contradicts.
+            //
+            // An INCOMPLETE job keeps the reservation: its results are, by
+            // definition, not the whole job, so their token sum would
+            // under-state the charge — and under-stating is the one direction
+            // the budget cap cannot defend against.
+            if complete {
+                let reported = reported_prompt_tokens(&results).map(|tokens| {
+                    kio_adapter::types::AdapterUsage::BillableUnits {
+                        billable_units: vec![kio_adapter::types::BillableUnit {
+                            kind: kio_adapter::types::BillableUnitKind::TokensIn,
+                            count: tokens,
+                        }],
+                    }
+                });
+                let (billed, uncovered) = resolve_billing_from_reported_usage(
+                    reported.as_ref(),
+                    // The embedding adapter declares exactly one billable kind
+                    // (`gemini_embedding`'s profile: `TokensIn`). Its module is
+                    // private, so the set is restated rather than fabricated
+                    // from an `AdapterProfile` this call site does not have.
+                    &std::collections::BTreeSet::from(["tokens_in".to_owned()]),
+                    // The SAME rate resolution the reservation used, fallback
+                    // included. Pricing the two sides from different sources is
+                    // how a reservation and its settlement drift apart, and
+                    // `registered_declared_pricing` alone returns an empty map
+                    // when nothing is declared — which would silently pin every
+                    // charge to the estimate.
+                    &std::collections::BTreeMap::from([(
+                        "tokens_in".to_owned(),
+                        embedding_usd_per_token(PreferredRequestKind::Batch),
+                    )]),
+                    row.estimated_usd,
+                );
+                warn_uncovered_pricing_kinds_once(EMBEDDING_ADAPTER_KIND, &uncovered);
+                billed
+            } else {
+                BilledAmount {
+                    usd: row.estimated_usd,
+                    estimated: true,
+                }
             },
             !complete,
             true,
@@ -15368,10 +15430,36 @@ const EMBEDDING_SYNC_USD_PER_TOKEN: f64 = 0.000_000_2; // $0.20 / 1M
 /// comes from `tools.toml`, whose `[pricing]` keys are a closed enum
 /// (`pages` / `tokens_in` / `tokens_out`, `tool_lock::PRICING_KIND_ENUM`) with
 /// no lane dimension — a declaration cannot state both lanes. The declared
-/// `tokens_in` is therefore read as the STANDARD rate and the batch rate is
+/// price is therefore read as the STANDARD rate and the batch rate is
 /// derived, so a user who corrects the published price keeps the 2:1 ratio the
 /// provider actually bills.
-const EMBEDDING_BATCH_RATE_MULTIPLIER: f64 = 0.5;
+///
+/// The ratio is 2:1 for BOTH priced roles — OCR is $4 vs $2 per 1,000 pages and
+/// embedding is $0.20 vs $0.10 per 1M tokens — so one multiplier covers them.
+const BATCH_RATE_MULTIPLIER: f64 = 0.5;
+
+/// A role's declared `[pricing]` table with `lane` applied to every entry.
+///
+/// This is the single point where a declared price becomes a charge, and it
+/// exists because there was no such point: both settlement sites read
+/// `registered_declared_pricing` RAW. That was accidentally right for
+/// markdownize — its declaration happened to hold the batch rate — which made
+/// a `--realtime` OCR run settle at half what the provider bills. An
+/// under-record is the direction a budget cap cannot protect against, since
+/// the cap only ever sees the too-small number.
+///
+/// Reading every declaration as the standard rate makes the two roles obey one
+/// rule (07 §5.3) instead of opposite conventions that have to be remembered
+/// per role.
+fn lane_adjusted_pricing(
+    role: &str,
+    lane: PreferredRequestKind,
+) -> std::collections::BTreeMap<String, f64> {
+    kio_adapter::tool_lock::registered_declared_pricing(role)
+        .into_iter()
+        .map(|(kind, standard)| (kind, lane_rate(standard, lane)))
+        .collect()
+}
 
 /// The online send lane resolved for THIS invocation.
 ///
@@ -15484,16 +15572,16 @@ fn embedding_usd_per_token(lane: PreferredRequestKind) -> f64 {
         .get("tokens_in")
         .copied()
         .unwrap_or(EMBEDDING_SYNC_USD_PER_TOKEN);
-    embedding_lane_rate(standard, lane)
+    lane_rate(standard, lane)
 }
 
 /// The lane split applied to a STANDARD per-token rate, whatever its source.
 /// Split out from [`embedding_usd_per_token`] so the declared-pricing path is
 /// testable: `register_declared_pricing` is a process-global `OnceLock`, so a
 /// unit test cannot install a `tools.toml` price and observe the result.
-fn embedding_lane_rate(standard: f64, lane: PreferredRequestKind) -> f64 {
+fn lane_rate(standard: f64, lane: PreferredRequestKind) -> f64 {
     match lane {
-        PreferredRequestKind::Batch => standard * EMBEDDING_BATCH_RATE_MULTIPLIER,
+        PreferredRequestKind::Batch => standard * BATCH_RATE_MULTIPLIER,
         PreferredRequestKind::Sync => standard,
     }
 }
@@ -19808,8 +19896,10 @@ fn collect_batch_markdownize_output(
     };
     // Success terminal: bill exactly as the sync settle does — the adapter
     // usage report resolved through declared kinds + tools.toml pricing,
-    // degrading to the reservation estimate.
-    let markdownize_pricing = kio_adapter::tool_lock::registered_declared_pricing("markdown");
+    // degrading to the reservation estimate — but at the BATCH rate. This
+    // collector only ever runs for a batch job, and it used to read the
+    // declaration raw, i.e. at the sync rate.
+    let markdownize_pricing = lane_adjusted_pricing("markdown", PreferredRequestKind::Batch);
     let (billed, uncovered_pricing_kinds) = resolve_billing_from_reported_usage(
         usage.as_ref(),
         &declared_billable_kind_strings(online_profile),
@@ -21558,7 +21648,7 @@ mod tests {
     use kio_adapter::catalog::deterministic_embedding_vector;
 
     use super::{
-        effective_invocation_lane, embedding_lane_rate, embedding_usd_per_token,
+        effective_invocation_lane, embedding_usd_per_token, lane_rate,
         estimate_embedding_cost, estimate_embedding_tokens, markdownize_send_lane, parsed_repair,
         parsed_search, query_embedding_send_lane, realtime_lane_requested, resolve_invocation_lane,
         terminal_safe_text, Cli, Command, LaneOverride, MarkdownizeSendLane, PreferredRequestKind,
@@ -23141,8 +23231,8 @@ mod tests {
     fn a_declared_price_is_the_standard_rate_and_batch_is_still_half() {
         // An arbitrary declared rate, deliberately not the published one.
         let declared = 0.000_000_5;
-        let sync = embedding_lane_rate(declared, PreferredRequestKind::Sync);
-        let batch = embedding_lane_rate(declared, PreferredRequestKind::Batch);
+        let sync = lane_rate(declared, PreferredRequestKind::Sync);
+        let batch = lane_rate(declared, PreferredRequestKind::Batch);
         assert!(
             (sync - declared).abs() < 1e-15,
             "sync must be the declared rate: {sync}"
@@ -23151,6 +23241,31 @@ mod tests {
             (batch - declared / 2.0).abs() < 1e-15,
             "batch must be half the declared rate, not equal to it: {batch}"
         );
+    }
+
+    /// The lane split is a property of the LANE, not of the embedding role.
+    /// Both priced roles bill 2:1 (OCR $4 vs $2 per 1,000 pages, embedding
+    /// $0.20 vs $0.10 per 1M tokens), and `markdownize` settlement used to read
+    /// its declaration raw at both sites — right only because that declaration
+    /// happened to hold the batch rate, which made a `--realtime` OCR run
+    /// settle at half the provider's charge.
+    #[test]
+    fn the_lane_split_applies_to_a_page_price_the_same_way() {
+        let declared_pages = 0.004;
+        assert!((lane_rate(declared_pages, PreferredRequestKind::Sync) - 0.004).abs() < 1e-15);
+        assert!((lane_rate(declared_pages, PreferredRequestKind::Batch) - 0.002).abs() < 1e-15);
+    }
+
+    /// An under-record is the direction a budget cap cannot defend against: the
+    /// cap only ever sees the too-small number, so it releases spending that
+    /// the provider has already billed for. Pin the ordering explicitly.
+    #[test]
+    fn a_batch_rate_is_never_above_the_sync_rate_for_any_declared_price() {
+        for declared in [0.0, 1e-9, 0.002, 0.004, 7.5] {
+            let sync = lane_rate(declared, PreferredRequestKind::Sync);
+            let batch = lane_rate(declared, PreferredRequestKind::Batch);
+            assert!(batch <= sync, "batch {batch} must not exceed sync {sync}");
+        }
     }
 
     #[test]
