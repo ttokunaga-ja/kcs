@@ -15,6 +15,7 @@ pub mod pdf_decode;
 pub mod tool_lock;
 pub mod traits;
 pub mod types;
+pub mod xlsx_extract;
 
 use thiserror::Error;
 

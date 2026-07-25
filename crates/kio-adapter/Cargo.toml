@@ -24,6 +24,13 @@ getrandom.workspace = true
 # Authenticated adapter responses use identity encoding so wire and decoded
 # byte ceilings cannot be bypassed through transparent decompression.
 ureq = { version = "2", default-features = false, features = ["json", "tls"] }
+# XLSX sheet extraction (07 §5.1): OOXML is namespaced XML with entity escaping
+# and attribute-order-independent structure — the class of parsing where a
+# hand-rolled reader fails SILENTLY, producing plausible wrong text rather than
+# an error. Pure Rust, no default features, no transitive deps. The ZIP
+# container around it is read in-crate instead: its failure mode is a loud
+# refusal, and the decompression bounds are ours to set (`xlsx_extract`).
+quick-xml = { version = "0.37", default-features = false }
 
 [dev-dependencies]
 tempfile = "3"

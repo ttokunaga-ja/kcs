@@ -394,6 +394,7 @@ R24b で 3/3 系統一致、うち 2 件が fatal だった **H2-3 / H2-4 / H2-5
 | I3 | モック seam が `{"inlinedResponses": [...]}` という**実 API が返さない形**をパーサへ直接与えていた | I1/I2 を契約テストで検出できなかった原因。`list_jobs` も封筒を迂回していた |
 | I5 | `get_job` が poll 応答を **metadata 級 (1 MB)** として読む。実際は `GET /v1beta/{name}` が唯一の endpoint で、成功した job の応答は**全 inline 結果を 2 重に**載せる (実測 47,905 B/member) | **メンバ数に比例して踏む。** p01 の 33 メンバ job が 40 回のポーリングで一度も回収されず、provider 側には全ベクトルが揃っていた。小さい scope では通るため規模を上げるまで出ない |
 | I6 | 「読めなかったので保持」が `tasks_inflight` に混ざり、**正常な待機と区別できない** | I1 と I5 の両方をこの沈黙が隠した。`tasks_inflight_unreadable` を追加し、保持理由を stderr に出す |
+| I7 | **XLSX が黙って pending のまま滞留する。** task は `status: pending` / `fallback_reason: "network_opt_in_required"` (opt-in 済みでも変わらない) のまま残り、`unsupported_inputs: []` ・ `task_errors: []` ・ `tasks_complete: true` が異常なしと報告していた | ユーザー裁定 (2026-07-25) = **案 B: PDF 変換を経ずローカルで直接抽出**。07 §5.1 の「対象外」を解除し `kio_adapter::xlsx_extract` を実装。読めない workbook は `KIO-E-PREPARE-XLSX-EXTRACT-001` で落とす (空成功にしない) |
 
 修正: 封筒解決を `batch_object` / `parse_job_listing` / `inlined_response_lines` に集約し、
 **モックを provider と同じ封筒へ通した**。採取した実応答そのものを固定する回帰テスト 4 本
@@ -404,8 +405,8 @@ R24b で 3/3 系統一致、うち 2 件が fatal だった **H2-3 / H2-4 / H2-5
 | ID | 内容 |
 |---|---|
 | I4 | 応答の `usageMetadata.promptTokenCount` を捨てており、embedding は常に `estimated=1` で記帳される。実測は予約見積りの約 1/2 なので**安全側**だが台帳が実額を映さない。`GeminiBatchEmbedOutput` に token 数を載せて `estimated: false` へ移す |
-| I7 | **XLSX が黙って pending のまま滞留する。** 07 §5.1 は XLSX 変換機構を「本追記の対象外 (将来ラウンド)」と明記しており除外自体は仕様どおりだが、**その帰結の報告が無い**: task は `status: pending` / `fallback_reason: "network_opt_in_required"` (opt-in 済みでも変わらない) のまま残り、`unsupported_inputs: []` ・ `task_errors: []` ・ `tasks_complete: true` は異常なしと報告する。`enriched_ratio` だけが 1.0 に届かない。**正しい disposition は仕様寄りの判断** (`unsupported_inputs` へ載せるか、`deferred` の別バケットを作るか) なので未着手。corpus 全体で xlsx 20 件が該当 |
 | I8 | `get_job` と `fetch_inlined_results` が**同じ URL を 2 回叩く** (成功 job では 1.5 MB を二重にダウンロード)。上限が分岐したのはこの構造が原因なので、1 回取得して両方を parse する形へ寄せると I5 の再発経路自体が消える |
+| I9 | **sheet に埋め込まれた chart / 画像が読めない。** 直接抽出の原理的な穴で、`XlsxDocument::media_paths` が件数だけ報告する。塞ぐには「file X の sheet M の中の image N」という evidence 上の同一性が要り、`image_object_hashes` は 3 構造体に**宣言があるだけで書き手も読み手も無い**。dogfood corpus は 20/20 が chart 0 件なので今回の索引化には影響しないが、**実世界の Excel には普通に入る** |
 
 ### 7.3 運用上の学び
 

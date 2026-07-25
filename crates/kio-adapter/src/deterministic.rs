@@ -229,6 +229,13 @@ fn office_unit_hints(pages: &[String], unit_kind: UnitKind) -> Vec<PreparedUnitH
 enum SourceDocument {
     Text(String),
     PdfPages(Vec<String>),
+    /// XLSX worksheets, already rendered to Markdown by
+    /// [`crate::xlsx_extract`], in workbook order. A `sheet:` unit resolves by
+    /// ORDER rather than by name: the unit key carries QB27's escaping and
+    /// duplicate-occurrence suffix, so matching the raw sheet name against it
+    /// would need that transform reapplied here — and the prepare stage
+    /// already emitted the units in this exact order.
+    Sheets(Vec<String>),
 }
 
 fn source_document_from_verified_bytes(
@@ -245,6 +252,17 @@ fn source_document_from_verified_bytes(
     if request.media_type == "application/pdf" {
         return extract_pdf_text_pages_bounded(bytes, MAX_DETERMINISTIC_PDF_PAGES)
             .map(SourceDocument::PdfPages);
+    }
+    if crate::xlsx_extract::is_xlsx_media(&request.media_type) {
+        return crate::xlsx_extract::extract_xlsx(bytes).map(|document| {
+            SourceDocument::Sheets(
+                document
+                    .sheets
+                    .into_iter()
+                    .map(|sheet| sheet.markdown)
+                    .collect(),
+            )
+        });
     }
     let text = String::from_utf8_lossy(bytes).into_owned();
     let text = text
@@ -370,6 +388,10 @@ fn markdown_unit_from_hint(
                 String::new()
             };
             format!("{}\n", page_text.trim())
+        }
+        Some(SourceDocument::Sheets(sheets)) => {
+            let sheet = sheets.get(hint.order as usize).cloned().unwrap_or_default();
+            format!("{}\n", sheet.trim())
         }
         // text/plain and sniffed octet-stream TEXT (R20-6 passthrough:
         // .xml/.html/.eml/.csv/...) — fence it exactly like code. Raw

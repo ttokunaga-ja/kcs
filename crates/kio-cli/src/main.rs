@@ -17919,20 +17919,34 @@ fn write_prepared_objects(
     // index` with KIO-E-CONFIG-SCHEMA-001 (found on real img2pdf rasters,
     // 2026-07-23 fixture registration). The office arm always had this
     // guard; the PDF arm was the asymmetry.
-    let pdf_pages = if media_type == "application/pdf" && !prepared_units.is_empty() {
+    //
+    // 07 §5.1 (2026-07-25): XLSX joins the same shape with a third source. Its
+    // unit is a worksheet and its declared `prepared_hash` is that sheet's
+    // extracted Markdown, so the bytes to store are re-derived by re-running
+    // the extractor — deterministic and local, no converter involved.
+    let unit_texts = if media_type == "application/pdf" && !prepared_units.is_empty() {
         Some(pdf_text_pages_bounded(bytes).map_err(pipeline_to_kio)?)
     } else if is_office_media(media_type) && !prepared_units.is_empty() {
         let converted = convert_office_to_pdf(bytes, media_type).map_err(adapter_to_kio)?;
         Some(pdf_text_pages_bounded(&converted).map_err(pipeline_to_kio)?)
+    } else if kio_adapter::xlsx_extract::is_xlsx_media(media_type) && !prepared_units.is_empty() {
+        Some(
+            kio_adapter::xlsx_extract::extract_xlsx(bytes)
+                .map_err(adapter_to_kio)?
+                .sheets
+                .into_iter()
+                .map(|sheet| sheet.markdown)
+                .collect(),
+        )
     } else {
         None
     };
-    if pdf_pages
+    if unit_texts
         .as_ref()
-        .is_some_and(|pages| pages.len() != prepared_hashes.len())
+        .is_some_and(|texts| texts.len() != prepared_hashes.len())
     {
         return Err(KioError::schema(
-            "prepared PDF page and object hash cardinalities differ",
+            "prepared unit text and object hash cardinalities differ",
         ));
     }
     for (index, prepared_hash) in prepared_hashes.iter().enumerate() {
@@ -17940,10 +17954,10 @@ fn write_prepared_objects(
             return Err(KioError::schema("prepared object hash is invalid"));
         }
         let path = cas_object_path(repo.kio_dir(), "prepared", prepared_hash)?;
-        let object_bytes = pdf_pages
+        let object_bytes = unit_texts
             .as_ref()
-            .and_then(|pages| pages.get(index))
-            .map_or(bytes, |page| page.as_bytes());
+            .and_then(|texts| texts.get(index))
+            .map_or(bytes, |text| text.as_bytes());
         if hash_bytes(object_bytes) != *prepared_hash
             || prepared_units[index].prepared_hash != *prepared_hash
         {
@@ -23176,6 +23190,7 @@ mod tests {
             auth_failed: 1,
             failed_retryable: 1,
             inflight: 0,
+            held_unreadable: 0,
         };
         assert_eq!(batch_exit_override(&all), Some(ExitCode::AuthError));
         assert_eq!(

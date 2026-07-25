@@ -5,6 +5,7 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use unicode_normalization::UnicodeNormalization as _;
 
 use crate::{IoResultExt, Result};
 
@@ -121,10 +122,16 @@ pub fn prepare_units_from_bytes(
     // 07 §5.1 (2026-07-23 addendum): DOCX/PPTX route through the Office
     // converter below instead of the octet-stream/text gates — they are
     // recognized binary formats with their own unit-ization path, not a
-    // passthrough or an OCR-only dead end. XLSX stays untouched/excluded
-    // (`is_office_media`'s contract) and keeps today's OCR-routing behavior.
+    // passthrough or an OCR-only dead end.
     let is_office = kio_adapter::office_convert::is_office_media(media_type);
-    if !is_text_native && !is_pdf && !is_office && media_type != "application/octet-stream" {
+    // 07 §5.1 (2026-07-25 ruling): XLSX does NOT go through the converter. A
+    // sheet has no visual unit — rendering one to PDF paginates it by print
+    // area and cuts a wide table down the middle, leaving the halves of every
+    // row in different units with nothing to rejoin them by. It is extracted
+    // directly instead, below.
+    let is_xlsx = kio_adapter::xlsx_extract::is_xlsx_media(media_type);
+    if !is_text_native && !is_pdf && !is_office && !is_xlsx && media_type != "application/octet-stream"
+    {
         return Ok(empty_prepare_output());
     }
     let bytes = request.bytes;
@@ -138,7 +145,7 @@ pub fn prepare_units_from_bytes(
             ),
         ));
     }
-    if !is_text_native && !is_pdf && !is_office && !bytes_are_text(bytes) {
+    if !is_text_native && !is_pdf && !is_office && !is_xlsx && !bytes_are_text(bytes) {
         // Binary octet-stream (an unrecognized-extension binary blob): do NOT evidence its
         // raw bytes as text — route to OCR like the other non-text-native media above.
         // (Office media is binary too, but never reaches this text-passthrough check either
@@ -146,6 +153,49 @@ pub fn prepare_units_from_bytes(
         return Ok(empty_prepare_output());
     }
     let unit_type = unit_type_for_media_type(request.media_type);
+    // 07 §5.1 (2026-07-25 ruling): one unit per worksheet, keyed by the sheet's
+    // own name (QB27), with the unit's hash and fingerprint taken from the
+    // extracted Markdown — the same shape the PDF branch uses for page text, so
+    // an edit inside one sheet reprepares that sheet alone.
+    if is_xlsx {
+        let document = kio_adapter::xlsx_extract::extract_xlsx(bytes).map_err(|err| {
+            crate::PipelineError::contract("KIO-E-PREPARE-XLSX-EXTRACT-001", err.to_string())
+        })?;
+        let unit_keys = sheet_unit_keys(
+            &document
+                .sheets
+                .iter()
+                .map(|sheet| sheet.name.clone())
+                .collect::<Vec<_>>(),
+        );
+        let mut prepared_units = Vec::with_capacity(document.sheets.len());
+        for (index, sheet) in document.sheets.iter().enumerate() {
+            let unit_key = unit_keys[index].clone();
+            let markdown = sheet.markdown.as_bytes();
+            prepared_units.push(PreparedUnit {
+                order: index as u64,
+                unit_key,
+                unit_type: UnitType::Sheet,
+                prepared_hash: hash_bytes(markdown),
+                fingerprint: fingerprint_for_bytes(markdown, markdown),
+                mime: Some(request.media_type.to_owned()),
+                page_number: None,
+            });
+        }
+        return Ok(PrepareStageOutput {
+            prepared_object_hashes: prepared_units
+                .iter()
+                .map(|unit| unit.prepared_hash.clone())
+                .collect(),
+            prepared_units,
+            // An embedded chart is genuinely visual and direct extraction
+            // cannot read it. Routing those to the image → OCR lane needs an
+            // evidence identity for "image N inside sheet M" that does not
+            // exist yet, so this stays empty rather than half-wired — the
+            // extractor counts them so the gap is visible (backlog §7.2 I9).
+            image_object_hashes: Vec::new(),
+        });
+    }
     // 07 §5.1 (2026-07-23 addendum): DOCX/PPTX unit-ize via a converted-PDF
     // intermediate produced by an external renderer (LibreOffice `soffice`).
     // No renderer in this environment → stay silent/crash-free — the exact
@@ -287,10 +337,44 @@ pub fn canonical_unit_key(unit_type: UnitType, selector: &str) -> String {
     match unit_type {
         UnitType::Page => format!("page:{}", selector.trim_start_matches('0').max("1")),
         UnitType::Slide => format!("slide:{}", selector.trim_start_matches('0').max("1")),
-        UnitType::Sheet => format!("sheet:{selector}"),
+        // QB27 (04 §2 L125-128): NFC-normalize, then escape a literal `#` in
+        // the sheet's own name to `##`. The caller appends `#2`, `#3` to the
+        // second and later sheets sharing a name; escaping first is what keeps
+        // the two uses of `#` from colliding — a real sheet named `A#2` becomes
+        // `sheet:A##2` and cannot be read as the second sheet named `A`
+        // (`sheet:A#2`).
+        UnitType::Sheet => format!(
+            "sheet:{}",
+            selector.nfc().collect::<String>().replace('#', "##")
+        ),
         UnitType::Image => format!("image:{selector}"),
         UnitType::File | UnitType::HeadingSection | UnitType::Symbol => "doc:1".to_owned(),
     }
+}
+
+/// QB27 (04 §2 L125-128): the `sheet:` unit key for each worksheet, in workbook
+/// order.
+///
+/// Two transforms, and the order between them is the whole point. Each name is
+/// NFC-normalized and has its own `#` escaped to `##` first; only then does the
+/// 2nd and later sheet sharing a name take `#2`, `#3`. Suffixing first would
+/// make a real sheet named `A#2` collide with the second sheet named `A`.
+#[must_use]
+pub fn sheet_unit_keys(names: &[String]) -> Vec<String> {
+    let mut seen: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+    names
+        .iter()
+        .map(|name| {
+            let base = canonical_unit_key(UnitType::Sheet, name);
+            let occurrence = seen.entry(base.clone()).or_insert(0);
+            *occurrence += 1;
+            if *occurrence == 1 {
+                base
+            } else {
+                format!("{base}#{occurrence}")
+            }
+        })
+        .collect()
 }
 
 #[must_use]
@@ -927,21 +1011,58 @@ mod tests {
     }
 
     #[test]
-    fn office_xlsx_is_unaffected_and_still_prepares_empty_output() {
-        // Regression pin: XLSX is explicitly excluded from `is_office_media`
-        // (deferred — 07 §5.1), so it must still hit the very first gate and
-        // return empty output unconditionally, byte-identical to this
-        // function's behavior before the Office-conversion change
-        // (`unit_type_for_media_type`'s Sheet arm remains unreachable from
-        // `prepare_units_from_bytes`, exactly as it was before).
+    fn an_unreadable_xlsx_is_an_error_not_a_silently_empty_prepare() {
+        // 07 §5.1 (2026-07-25): XLSX now extracts directly instead of being
+        // excluded. A workbook we cannot open must say so — returning empty
+        // output would index the file as "present, no content", which is
+        // exactly how the deferred XLSX used to disappear (backlog I7).
         let raw_xlsx = b"fake xlsx bytes";
         let raw_hash = hash_bytes(raw_xlsx);
-        let output = prepare_units_from_bytes(PrepareStageBytesRequest {
+        let error = prepare_units_from_bytes(PrepareStageBytesRequest {
             raw_hash: &raw_hash,
             media_type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             input_path: "sheet.xlsx",
             tool_profile_hash: "sha256:test",
             bytes: raw_xlsx,
+        })
+        .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("KIO-E-PREPARE-XLSX-EXTRACT-001"));
+    }
+
+    #[test]
+    fn qb27_escapes_a_sheet_name_before_numbering_a_duplicate() {
+        // 04 §2 L125-128. The order matters: a real sheet named `A#2` must not
+        // collide with the second sheet named `A`.
+        assert_eq!(
+            sheet_unit_keys(&["A#2".to_owned(), "A".to_owned(), "A".to_owned()]),
+            vec!["sheet:A##2", "sheet:A", "sheet:A#2"]
+        );
+        assert_eq!(
+            canonical_unit_key(UnitType::Sheet, "Sheet#1"),
+            "sheet:Sheet##1"
+        );
+        // Three sheets sharing a name number in order of appearance.
+        assert_eq!(
+            sheet_unit_keys(&["s".to_owned(), "s".to_owned(), "s".to_owned()]),
+            vec!["sheet:s", "sheet:s#2", "sheet:s#3"]
+        );
+    }
+
+    #[test]
+    fn a_legacy_binary_office_format_still_prepares_nothing() {
+        // `.ppt`/`.doc` (the pre-OOXML binaries) are neither `is_office_media`
+        // nor XLSX, so they keep hitting the first gate. Pinned so widening the
+        // gate for XLSX did not widen it for these.
+        let raw = b"fake ppt bytes";
+        let raw_hash = hash_bytes(raw);
+        let output = prepare_units_from_bytes(PrepareStageBytesRequest {
+            raw_hash: &raw_hash,
+            media_type: "application/vnd.ms-powerpoint",
+            input_path: "deck.ppt",
+            tool_profile_hash: "sha256:test",
+            bytes: raw,
         })
         .unwrap();
         assert!(output.prepared_units.is_empty());

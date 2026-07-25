@@ -352,8 +352,33 @@ renderer 版内で prepared_hash が安定し、renderer 更新による出力�
 同一 identity)。**renderer が環境に存在しない場合、当該 Office ファイルの online タスクは enqueue
 しない** (doomed task を作らない) — `index_status` ([05-runtime.md §1.7](05-runtime.md)) に理由付きで
 可視化する。実行時の変換失敗は contract_violation ([04-pipeline.md §5.3](04-pipeline.md) — 同一入力の
-再試行 1 回) に合流する。XLSX (sheet) と音声の変換機構は本追記の対象外 (未定義のまま — 将来ラウンド。
-sheet 名の正準化規則は step4b QB27 参照)。
+再試行 1 回) に合流する。音声の変換機構は本追記の対象外 (未定義のまま — 将来ラウンド)。
+
+**XLSX の unit 化 (実装フィードバック 2026-07-25 — 上の「対象外」を解除)**: XLSX は
+**変換 PDF を経由しない**。DOCX / PPTX が変換 PDF に載るのは page と slide が**それ自体で視覚的な
+unit** だからであり、sheet にはそれが無い。実測: 10 列 1 シートを `soffice` で PDF 化すると
+**2 ページに縦割り**され、ヘッダ `作業区分` が 1 ページ目・その値が 2 ページ目へ分かれ、
+**同一行の左右半分を再結合する手がかりが残らない**。行の同一性が壊れた unit は evidence pointer の
+指し先として誤りであり、OCR を通せばさらに劣化する。加えて cell は**既に構造化テキスト**であり、
+画素へ落として読み戻すのは失われていない構造を壊す往復である。
+
+したがって XLSX は**ローカルで決定論的に直接抽出する** (`kio_adapter::xlsx_extract`)。
+
+- **unit = worksheet 1 枚**。`unit_key` は 04 §2 / QB27 の `sheet:` 規則 —
+  NFC 正規化 → 元名の `#` を `##` へ escape → **その後で**同名 2 枚目以降に `#2` / `#3` を付す
+  (順序が逆だと実名 `A#2` が「`A` の 2 枚目」と衝突する)。
+- `prepared_hash` / `fingerprint` は**抽出後 Markdown のバイト列**から取る (PDF 分岐が page text から
+  取るのと同じ形)。1 シートの編集はそのシートだけを再 prepare する。
+- **数値書式は装飾ではない。** `0%` 書式の下の格納値 `0.5` は **50%** を意味し、日付は serial 日数
+  として格納される。生値を索引に入れることは体裁の問題ではなく**検索を汚す誤答**なので、
+  `numFmt` (ECMA-376 §18.8.30 の組み込み ID + `styles.xml` のカスタム書式) を適用してから索引化する。
+  dogfood corpus は 20/20 ファイルがカスタム `numFmt` を宣言していた。
+- **読めない workbook は空成功にしない** — `KIO-E-PREPARE-XLSX-EXTRACT-001` で落とす。空を返すと
+  「存在するが内容なし」として索引に載り、繰延中の XLSX が消えていたのと同じ形になる。
+- **sheet に埋め込まれた chart / 画像は本追記の対象外。** これは真に視覚的で直接抽出では読めないが、
+  「file X の sheet M の中の image N」という evidence 上の同一性が未定義であり、
+  `image_object_hashes` は 3 つの構造体に**宣言があるだけで書き手も読み手も無い**。
+  半端に配線せず、抽出器が**件数を報告して穴を可視に保つ** (`XlsxDocument::media_paths`)。
 
 ## 5.2 Markdownize
 
