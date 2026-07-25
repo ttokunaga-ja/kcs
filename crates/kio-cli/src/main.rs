@@ -1931,6 +1931,166 @@ struct SearchedScopeInfo {
 /// rank already equals its per-scope one, so re-fusing there would only risk a
 /// float tie-flip against the pinned per-scope order. This function re-checks the
 /// guard so it is safe to call unconditionally.
+/// `$XDG_CACHE_HOME/kio/global-text.sqlite` — the device-level collection BM25
+/// is scored against. Cache root, not data root: it is derived entirely from
+/// the scopes and costs only a rebuild to lose.
+fn global_text_index_path() -> PathBuf {
+    cache_home().join("kio/global-text.sqlite")
+}
+
+/// Bring the global text cache level with the scopes this search just read,
+/// then rank the query against the whole collection.
+///
+/// Refresh is lazy and driven by `index_generation`, which rotates on any
+/// change to a scope's index — so an unchanged scope costs one string compare.
+/// The first search after this lands pays a full build (1.26 MB of chunk text
+/// for the dogfood corpus); later ones pay only for scopes that moved.
+///
+/// Every failure here returns `None` and leaves the per-scope ranks alone. A
+/// cache is not allowed to break a search: the worst it may do is decline to
+/// improve one.
+fn global_text_ranks_for(
+    searched: &[SearchedScopeInfo],
+    match_expr: &str,
+    config: RrfConfig,
+) -> Option<BTreeMap<(String, String), u64>> {
+    if searched.len() <= 1 {
+        // One scope IS the collection; its per-scope ranks are already global.
+        return None;
+    }
+    let mut index = match kio_index::global_text::GlobalTextIndex::open(&global_text_index_path()) {
+        Ok(index) => index,
+        Err(error) => {
+            log_global_text_degraded(&format!("open failed: {error}"));
+            return None;
+        }
+    };
+    // Bookkeeping only — `index_generation` decides staleness, so a clock that
+    // jumps changes nothing but this timestamp.
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_millis() as i64)
+        .unwrap_or_default();
+    for scope in searched {
+        let cached = index.scope_generation(&scope.scope_id).ok().flatten();
+        if cached.as_deref() == Some(scope.index_generation.as_str()) {
+            continue;
+        }
+        match collect_scope_chunks(&scope.scope_path) {
+            Ok(chunks) => {
+                if let Err(error) =
+                    index.refresh_scope(&scope.scope_id, &scope.index_generation, &chunks, now_ms)
+                {
+                    log_global_text_degraded(&format!(
+                        "refresh {} failed: {error}",
+                        scope.scope_id
+                    ));
+                    return None;
+                }
+            }
+            Err(error) => {
+                // A scope we cannot read is one we cannot account for in the
+                // collection statistics, so the collection is not the corpus
+                // and its ranks are not global. Decline rather than rank
+                // against a corpus with a hole in it.
+                log_global_text_degraded(&format!("read {} failed: {error}", scope.scope_id));
+                return None;
+            }
+        }
+    }
+    // Depth matches the per-scope candidate depth: a chunk that cannot reach
+    // the fusion cannot be helped by a better rank inside it.
+    match index.scores(match_expr, config.candidate_depth.max(1)) {
+        Ok(scores) => Some(kio_index::global_text::global_text_ranks(&scores)),
+        Err(error) => {
+            log_global_text_degraded(&format!("score failed: {error}"));
+            None
+        }
+    }
+}
+
+/// Read one scope's chunk text for the global collection.
+///
+/// Membership is `first_seen_commit IS NOT NULL` — the chunk is committed
+/// rather than mid-write. The query-time liveness filters (cursor bound,
+/// config-generation association, eligible identity, ancestor gate) are
+/// deliberately NOT replicated: they decide what a search may RETURN, and this
+/// index never returns anything. It only supplies collection statistics, and
+/// the per-scope tier remains the sole gate on candidates. Duplicating those
+/// predicates here would put the liveness rules in two places, which is how
+/// they drift apart.
+fn collect_scope_chunks(kio_dir: &Path) -> Result<Vec<kio_index::global_text::GlobalChunk>> {
+    let db = kio_dir.join("index/sqlite.db");
+    let conn = Connection::open_with_flags(&db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .map_err(|error| KioError::schema(format!("global text read {}: {error}", db.display())))?;
+    // `chunk_id` is what `ScoredCandidate.chunk_hash` carries (the merge names
+    // the column after the identity it is, not after the table's column), so
+    // the key this index stores lines up with the key the merge looks up.
+    let mut stmt = conn
+        .prepare(
+            "SELECT chunk_id, text, heading_path FROM chunks
+             WHERE first_seen_commit IS NOT NULL",
+        )
+        .map_err(|error| KioError::schema(format!("global text query: {error}")))?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok(kio_index::global_text::GlobalChunk {
+                chunk_hash: row.get(0)?,
+                text: row.get(1)?,
+                heading_path: row.get(2)?,
+            })
+        })
+        .map_err(|error| KioError::schema(format!("global text rows: {error}")))?;
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row.map_err(|error| KioError::schema(format!("global text row: {error}")))?);
+    }
+    Ok(out)
+}
+
+/// Swap each candidate's per-scope text rank for its rank over the whole
+/// collection.
+///
+/// A candidate the collection has no score for loses its text term rather than
+/// keeping the per-scope one: mixing the two scales back together is the defect
+/// this replaces. Losing the term costs that candidate its text contribution;
+/// keeping a per-scope rank-1 would hand it the largest term available.
+fn apply_global_text_ranks(
+    candidates: &mut [ScoredCandidate],
+    ranks: &BTreeMap<(String, String), u64>,
+) {
+    for candidate in candidates.iter_mut() {
+        if candidate.text_rank.is_none() {
+            continue;
+        }
+        candidate.text_rank = ranks
+            .get(&(candidate.scope_id.clone(), candidate.chunk_hash.clone()))
+            .copied();
+    }
+}
+
+/// Recompute `rrf_score` from whatever ranks the candidates now carry. Used by
+/// text-only mode, where no vector pass follows to do it.
+fn rescore_from_ranks(candidates: &mut [ScoredCandidate], config: RrfConfig) {
+    for candidate in candidates.iter_mut() {
+        let text_term = candidate
+            .text_rank
+            .map(|rank| config.w_text / (config.k + rank) as f64)
+            .unwrap_or(0.0);
+        let vector_term = candidate
+            .vector_rank
+            .map(|rank| config.w_vector / (config.k + rank) as f64)
+            .unwrap_or(0.0);
+        candidate.rrf_score = text_term + vector_term;
+    }
+}
+
+/// One line to `errors.jsonl` when the global text cache steps aside, so a
+/// search that silently reverted to per-scope ranks is still explicable.
+fn log_global_text_degraded(detail: &str) {
+    eprintln!("kio: global text index unavailable, using per-scope text ranks ({detail})");
+}
+
 fn regrade_vector_rank_globally(
     candidates: &mut [ScoredCandidate],
     query_vec: &[f32],
@@ -2877,22 +3037,51 @@ fn run_search_inner(args: SearchArgs, started: Instant) -> Result<Value> {
     // empty result. `searched`/`candidates` above already reflect that.
 
     // Cross-scope merge (05 §1.8): sort by RRF score desc, tie-break (scope_id,
-    // chunk_hash). The TEXT backend's contribution stays per-scope-rank-based —
-    // raw BM25 is never compared across corpora (CT3-MULTI-002, per-corpus
-    // IDF/length stats make it incomparable). The VECTOR backend's contribution,
-    // however, IS globally comparable: every scope shares one embedding profile
-    // (03 §7), so a chunk's cosine to the query is meaningful across scopes.
-    // `regrade_vector_rank_globally` (2026-07-24) therefore re-fuses `rrf_score`
-    // with a GLOBAL cosine rank for the vector term, so a within-scope rank-2
-    // answer with a high absolute cosine is no longer buried under every other
-    // scope's rank-1 (the airtight `--all-scopes hit ⟺ within-scope rank == 1`
-    // failure the contextual-embedding round surfaced). Guarded to >1 scope so a
-    // single-scope search is byte-identical to the per-scope fusion (its global
-    // vector rank already equals its per-scope one).
+    // chunk_hash). BOTH backend terms are re-ranked globally first, because RRF
+    // adds them and a sum is only meaningful when its addends share a scale.
+    //
+    // VECTOR was made global in 2026-07-24: every scope shares one embedding
+    // profile (03 §7), so a chunk's cosine to the query is comparable across
+    // scopes, and `regrade_vector_rank_globally` re-fuses with a global cosine
+    // rank rather than leaving a within-scope rank-2 answer buried under every
+    // other scope's rank-1.
+    //
+    // TEXT was left per-scope in that round, on the correct observation that
+    // raw BM25 is not comparable across corpora (CT3-MULTI-002: per-corpus IDF
+    // and length statistics). Correct — and it then summed that per-scope rank
+    // with the global vector rank anyway, which is the same error one step
+    // later. Phase 3 measured what it costs: on the dogfood corpus a raster-PDF
+    // answer that `--mode vector` ranks 1st came back 38th under hybrid, behind
+    // 37 chunks whose only merit was being rank-1 inside their own small folder
+    // (`1/61 + 1/130` beating a bare `1/61`). Across the 32 acceptance
+    // contracts hybrid scored strictly worse than vector alone — rank1 6 vs 14,
+    // top5 21 vs 30 — with the gap concentrated exactly on the classes OCR and
+    // embeddings were bought to reach.
+    //
+    // The premise is what had to go, not the fusion: BM25 is incomparable
+    // across corpora only while there are several corpora.
+    // `global_text_ranks_for` scores the query once against a device-level
+    // index holding every scope's chunks, so the text term becomes a rank over
+    // the whole collection — the answer `dfs_query_then_fetch` gives a sharded
+    // Elasticsearch, which reports the same distortion for the same reason
+    // (tiny shards see too little of the corpus to score it). No normalization
+    // function, no tuned constant: one collection, one BM25.
+    let global_text = query_plan
+        .match_expr
+        .as_deref()
+        .and_then(|expr| global_text_ranks_for(&searched, expr, rrf_config));
+    if let Some(ranks) = global_text.as_ref() {
+        apply_global_text_ranks(&mut candidates, ranks);
+    }
     if matches!(mode.resolved, SearchMode::Vector | SearchMode::Hybrid) {
         if let Some(query_vec) = query_embedding.as_deref() {
             regrade_vector_rank_globally(&mut candidates, query_vec, rrf_config);
         }
+    } else if global_text.is_some() {
+        // Text-only mode has no second pass to fold the new ranks into the
+        // score, so do it here rather than leaving `rrf_score` describing the
+        // per-scope ranks the candidates no longer carry.
+        rescore_from_ranks(&mut candidates, rrf_config);
     }
     candidates.sort_by(|a, b| {
         b.rrf_score

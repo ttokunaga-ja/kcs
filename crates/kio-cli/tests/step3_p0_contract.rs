@@ -1202,15 +1202,21 @@ fn ct3_multi_002_cross_scope_merge_is_rank_based() {
     let b = parent.path().join("b");
     fs::create_dir_all(&a).unwrap();
     fs::create_dir_all(&b).unwrap();
-    // Scope a: the term sits in a long, filler-heavy chunk (low BM25); scope b: a
-    // short chunk (high BM25). Raw BM25 differs; RRF (rank-only) does not.
-    let filler = "filler ".repeat(60);
-    fs::write(
-        a.join("a.md"),
-        format!("# A\n\n## Sec\nzephyrterm {filler}\n"),
-    )
-    .unwrap();
-    fs::write(b.join("b.md"), "# B\n\n## Sec\nzephyrterm\n").unwrap();
+    // Byte-identical chunks in both scopes: one corpus, one BM25, so this is a
+    // GENUINE tie and the tie-break is what decides the order.
+    //
+    // This fixture used to differ between the scopes (filler-padded in `a`,
+    // bare in `b`) and assert the two scores came out EQUAL — offered as proof
+    // that "the merge compares ranks, not raw BM25". It did compare ranks, but
+    // PER-SCOPE ones, so it was equally proof that a weak match topping a small
+    // folder scored the same as a strong one topping another. Phase 3 measured
+    // where that leads (a `--mode vector` rank-1 answer landing 38th under
+    // hybrid). `ct3_multi_009` now owns the differing-strength case and expects
+    // the corpus-wide order; what remains here is the rank-not-score property
+    // and the deterministic tie-break.
+    for (dir, name) in [(&a, "a.md"), (&b, "b.md")] {
+        fs::write(dir.join(name), "# Doc\n\n## Sec\nzephyrterm\n").unwrap();
+    }
     json_success_path(&a, &data_home, &["init"]);
     json_success_path(&b, &data_home, &["init"]);
     // Make immutable scope-id order intentionally oppose mutable path order.
@@ -1222,15 +1228,94 @@ fn ct3_multi_002_cross_scope_merge_is_rank_based() {
     let search = json_success_path(&a, &data_home, &["search", "zephyrterm"]);
     let results = search["results"].as_array().unwrap();
     assert_eq!(results.len(), 2);
-    // Identical RRF score proves the merge compares ranks, not raw BM25.
-    assert_eq!(results[0]["score"], results[1]["score"]);
-    let expected = 1.0f64 / 61.0;
-    assert!((results[0]["score"].as_f64().unwrap() - expected).abs() < 1e-12);
+    // The emitted score is a function of RANK, never of the BM25 magnitude:
+    // global ranks 1 and 2 give exactly these two values.
+    assert!((results[0]["score"].as_f64().unwrap() - 1.0 / 61.0).abs() < 1e-12);
+    assert!((results[1]["score"].as_f64().unwrap() - 1.0 / 62.0).abs() < 1e-12);
     // Deterministic tie-break by scope_id: b's low id precedes a's high id even
     // though registry/input order is path a then path b. R23-20 (03 §4 L296):
     // scope_path is the canonical `.kio` directory.
     assert!(value_path_ends_with(&results[0]["scope_path"], "b/.kio"));
     assert!(value_path_ends_with(&results[1]["scope_path"], "a/.kio"));
+}
+
+/// The text term is ranked over the WHOLE corpus, so a small scope's rank-1
+/// does not buy what a corpus-wide rank-1 buys.
+///
+/// Phase 3 measured the cost of the previous per-scope arrangement on the
+/// dogfood corpus: an answer `--mode vector` ranked 1st came back 38th under
+/// hybrid, behind 37 chunks whose only merit was topping their own small
+/// folder. BM25 is not comparable across corpora — which is a reason to stop
+/// having several corpora, not a reason to sum incomparable ranks. Scoring the
+/// query once against a device-level index of every scope's chunks is the same
+/// answer `dfs_query_then_fetch` gives a sharded Elasticsearch.
+///
+/// The fixture makes the two disagree on purpose: scope `a` buries the term in
+/// filler (weak BM25), scope `b` states it alone (strong BM25). Per-scope, both
+/// are rank 1 and score identically. Globally, `b` must win.
+#[test]
+fn ct3_multi_009_text_rank_is_global_not_per_scope() {
+    let parent = tempfile::tempdir().unwrap();
+    let data_home = parent.path().join("xdg");
+    let a = parent.path().join("a");
+    let b = parent.path().join("b");
+    fs::create_dir_all(&a).unwrap();
+    fs::create_dir_all(&b).unwrap();
+    let filler = "filler ".repeat(60);
+    fs::write(
+        a.join("a.md"),
+        format!("# A\n\n## Sec\nzephyrterm {filler}\n"),
+    )
+    .unwrap();
+    fs::write(b.join("b.md"), "# B\n\n## Sec\nzephyrterm\n").unwrap();
+    json_success_path(&a, &data_home, &["init"]);
+    json_success_path(&b, &data_home, &["init"]);
+    // The weak match gets the LOW scope_id, so if the merge fell back to the
+    // deterministic tie-break it would put `a` first — the failure this test
+    // would otherwise pass by accident.
+    replace_scope_id(&a, "00000000000000000000000001");
+    replace_scope_id(&b, "7ZZZZZZZZZZZZZZZZZZZZZZZZZ");
+    json_success_path(&a, &data_home, &["index", "--approve"]);
+    json_success_path(&b, &data_home, &["index", "--approve"]);
+
+    let search = json_success_path(&a, &data_home, &["search", "zephyrterm"]);
+    let results = search["results"].as_array().unwrap();
+    assert_eq!(results.len(), 2);
+    assert!(
+        value_path_ends_with(&results[0]["scope_path"], "b/.kio"),
+        "the corpus-wide better match must lead: {results:#?}"
+    );
+    assert!(
+        results[0]["score"].as_f64().unwrap() > results[1]["score"].as_f64().unwrap(),
+        "global ranks 1 and 2 must produce different scores, not a per-scope tie: {results:#?}"
+    );
+    // Exactly the two global ranks, so the scores are checkable rather than
+    // merely ordered.
+    assert!((results[0]["score"].as_f64().unwrap() - 1.0 / 61.0).abs() < 1e-12);
+    assert!((results[1]["score"].as_f64().unwrap() - 1.0 / 62.0).abs() < 1e-12);
+}
+
+/// A single-scope search is byte-identical to the per-scope fusion: one scope
+/// IS the collection, so there is nothing to re-rank and no cache to consult.
+#[test]
+fn ct3_multi_010_single_scope_search_needs_no_global_text_index() {
+    let parent = tempfile::tempdir().unwrap();
+    let data_home = parent.path().join("xdg");
+    let a = parent.path().join("a");
+    fs::create_dir_all(&a).unwrap();
+    fs::write(a.join("a.md"), "# A\n\n## Sec\nzephyrterm alone\n").unwrap();
+    json_success_path(&a, &data_home, &["init"]);
+    json_success_path(&a, &data_home, &["index", "--approve"]);
+    let search = json_success_path(&a, &data_home, &["search", "zephyrterm"]);
+    assert_eq!(search["results"].as_array().unwrap().len(), 1);
+    assert!(
+        (search["results"][0]["score"].as_f64().unwrap() - 1.0 / 61.0).abs() < 1e-12,
+        "unchanged per-scope rank-1 score: {search:#?}"
+    );
+    assert!(
+        !data_home.join("cache/kio/global-text.sqlite").exists(),
+        "a single-scope search must not build the cross-scope cache"
+    );
 }
 
 #[test]

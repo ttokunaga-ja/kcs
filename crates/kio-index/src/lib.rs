@@ -6,6 +6,7 @@
 pub mod chunking;
 pub mod embedding_store;
 pub mod fts;
+pub mod global_text;
 pub mod registry;
 pub mod rows;
 pub mod vec;
