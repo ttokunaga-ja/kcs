@@ -586,6 +586,41 @@ Text Embedding Adapter / Image Embedding Adapter は**採用しない**。同一
 >   一致しなければ `Succeeded` ではなく contract violation として終端し、
 >   欠けたメンバを次の (より小さい) job の対象として残す。スキーマ変更は不要。
 >
+> - **実物の wire 形 (2026-07-25 実 API 実行で確定)**: 上の「照会」「回収」の記述は
+>   公式リファレンスの語彙に沿ったもので、**実際の応答とは 3 点ずれていた**。実行時に
+>   採取した応答を正本とし、次を契約とする (`gemini_batch_client.rs` の `real_*` テストが
+>   採取した応答そのものを固定している)。
+>
+>   1. **すべて long-running-operation の封筒である。** job レコードは最上位ではなく
+>      `metadata` の下にある (`metadata.state` / `metadata.displayName` / `metadata.name`)。
+>      完了後は `response` にも出力の複製が現れるが、こちらは `state` も `name` も持たない。
+>   2. **一覧は `operations` キーで返る** (`batches` ではない)。`batches` だけを読むと
+>      **常に空ページ**になり、回復走査は「回収すべき job は無い」と解釈して**黙って**
+>      何もしない (§7.5.2 の inventory が恒久に空になる)。
+>   3. **結果配列はキー名より 1 段深い。** `inlinedResponses` は出力先オブジェクトの名で、
+>      その中の `inlinedResponses` が配列である
+>      (`metadata.output.inlinedResponses.inlinedResponses[]` および
+>      `response.inlinedResponses.inlinedResponses[]`)。各要素は
+>      `{ response: { embedding: { values }, usageMetadata }, metadata: { key } }` で、
+>      `output` でのラップは**無い**。
+>
+>   > 実装欠陥として観測された帰結: 2 と 3 により、**実 job は 1 件も回収できない**。
+>   > 3 は `fetch_inlined_results` を contract violation にし、照会側の G2 規則
+>   > (「その行だけ in-flight のまま保持」) がそれを飲み込むため、**終端した job が
+>   > 診断なしで永久に in-flight のまま滞留する**。契約テストは全て通っていた —
+>   > モック seam が `{"inlinedResponses": [...]}` という**実 API が返さない最内側の形**を
+>   > パーサへ直接与えていたためである。**モックは provider と同じ封筒を通すこと**
+>   > (seam が wire から乖離した瞬間、その経路のテストは何も保証しなくなる)。
+>
+> - **応答はトークン数を返す (2026-07-25 実 API 実行で訂正)**: 下の「課金報告」は
+>   `usage` を `None` に degrade すると述べているが、実際の応答は各結果行に
+>   `response.usageMetadata.promptTokenCount` (および `promptTokenDetails[].modality`) を
+>   持つ。したがって embedding の Batch レーンは**実測トークン数で確定記帳できる**。
+>   現実装はこれを捨てて予約見積りのまま `estimated=1` で記帳しており、金額は保守側
+>   (実測の約 2 倍) に倒れるため安全側の誤差ではあるが、台帳が実額を映さない。
+>   `GeminiBatchEmbedOutput` に token 数を持たせて `BilledAmount { estimated: false }` へ
+>   移すこと (未実施 — [tasks/step4b-backlog.md](../tasks/step4b-backlog.md) §6.2)。
+>
 > **レーンは invocation 単位で 1 つ (2026-07-24 ユーザー裁定)**: OCR と embedding を
 > **別レーンに分けない** — 1 回の実行では**両方 Batch か、両方即時か**のいずれかである。
 > したがってレーン選択は adapter ごとの `preferred_request_kind()` を既定値としつつ、

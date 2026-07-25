@@ -378,3 +378,36 @@ R24b で 3/3 系統一致、うち 2 件が fatal だった **H2-3 / H2-4 / H2-5
 | F10 | `active_embedding_send_lane` の doc コメントが「driver は未着手」のまま陳腐化 | 3/6 |
 | H2-7 | reachability 読取り失敗を無視し、参照中オブジェクトを orphan 扱いしうる | 1/3 (要調査・fatal 候補) |
 | H2-8 | 契約テストが `registry-prune` の拒否経路を網羅していない (列挙・拘束・blocked は §6.1 で充足) | 3/3 |
+
+## 7. Phase 2 canary が実 API で検出した欠陥 (2026-07-25)
+
+**7 系統の静的監査も 13 本の契約テストも通り抜けた**。いずれも実 API へ 1 scope 投げた
+時点で即座に露出した。詳細と正本は [07-adapter-spec.md §5.3](../docs/07-adapter-spec.md) の
+「実物の wire 形」訂正ブロック。
+
+### 7.1 修正済み (2026-07-25)
+
+| ID | 内容 | 影響 |
+|---|---|---|
+| I1 | `parse_inlined_results` が実応答の**二重ネスト** `inlinedResponses.inlinedResponses[]` を解決できない | **実 job が 1 件も回収できない。** 終端した job が診断なしで永久に in-flight。G2 の「その行だけ保持」規則がエラーを飲み込むため無症状 |
+| I2 | `list_jobs` が一覧キーを `batches` で読む (実物は `operations`) | 回復走査の inventory が**常に空**。相 2b 中断行が恒久に宙吊り |
+| I3 | モック seam が `{"inlinedResponses": [...]}` という**実 API が返さない形**をパーサへ直接与えていた | I1/I2 を契約テストで検出できなかった原因。`list_jobs` も封筒を迂回していた |
+
+修正: 封筒解決を `batch_object` / `parse_job_listing` / `inlined_response_lines` に集約し、
+**モックを provider と同じ封筒へ通した**。採取した実応答そのものを固定する回帰テスト 4 本
+(`real_poll_response_*` / `real_listing_response_*` / `the_documented_listing_key_is_still_accepted`)。
+
+### 7.2 未修正
+
+| ID | 内容 |
+|---|---|
+| I4 | 応答の `usageMetadata.promptTokenCount` を捨てており、embedding は常に `estimated=1` で記帳される。実測は予約見積りの約 1/2 なので**安全側**だが台帳が実額を映さない。`GeminiBatchEmbedOutput` に token 数を載せて `estimated: false` へ移す |
+
+### 7.3 運用上の学び
+
+**モック seam が wire から乖離すると、その経路のテストは何も保証しない。** I3 は
+「テストが通っている」ことを根拠に I1/I2 を見逃させた。静的監査 7 系統も、
+モックが定義する形を正としたため検出できていない。
+
+→ **外部 API を持つ経路は、採取した実応答を固定する回帰テストを最低 1 本持つこと。**
+→ **モックは provider と同じ封筒を通すこと** (パース済みの内側を直接与えない)。

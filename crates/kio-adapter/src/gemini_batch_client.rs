@@ -14,7 +14,17 @@
 //! - poll:   `GET  {base}/v1beta/{name}` where `name` = `batches/{id}`
 //! - list:   `GET  {base}/v1beta/batches?pageSize=N[&pageToken=…]`
 //! - cancel: `POST {base}/v1beta/{name}:cancel`
-//! - results: inline in the poll response under `response.inlinedResponses[]`
+//! - results: inline in the poll response, under BOTH
+//!   `metadata.output.inlinedResponses.inlinedResponses[]` and
+//!   `response.inlinedResponses.inlinedResponses[]`
+//!
+//! Every response is a long-running-operation envelope: the batch record lives
+//! under `metadata` (not at the top level), the listing returns its page under
+//! `operations` (not `batches`), and the result lines sit one level deeper than
+//! the key name suggests — the outer `inlinedResponses` is the output
+//! destination, the inner one is the repeated field inside it. See
+//! [`batch_object`], [`parse_job_listing`] and [`inlined_response_lines`]; the
+//! captured shapes are pinned by the `real_*` tests at the bottom of this file.
 //!
 //! Job-level attribution: the Gemini batch object exposes only `displayName`
 //! as a free-form job-level string (unlike Mistral's `metadata` object), so the
@@ -257,10 +267,12 @@ pub trait GeminiBatchClient {
 // Parsing (shared by the real client and the mock)
 // ---------------------------------------------------------------------------
 
-/// A create/get response wraps the batch either at the top level or under
-/// `metadata` / `response` (long-running-operation envelope). Accept both.
+/// Unwrap the long-running-operation envelope. The batch record itself lives
+/// under `metadata`; once the job is `done` a copy of the output also appears
+/// under `response` (which carries no `state`/`name`, so it never wins here).
+/// A bare, unwrapped object is accepted too.
 fn batch_object(value: &Value) -> &Value {
-    for key in ["response", "metadata"] {
+    for key in ["metadata", "response"] {
         if let Some(inner) = value.get(key) {
             if inner.get("state").is_some() || inner.get("name").is_some() {
                 return inner;
@@ -276,6 +288,15 @@ pub(crate) fn parse_job_record(value: &Value) -> Result<GeminiBatchJobRecord> {
         .get("name")
         .and_then(Value::as_str)
         .filter(|name| !name.is_empty())
+        // A listing entry carries `name` on the envelope; only the poll
+        // response repeats it inside `metadata`. Falling back keeps an entry
+        // that omits the inner copy from failing the whole page.
+        .or_else(|| {
+            value
+                .get("name")
+                .and_then(Value::as_str)
+                .filter(|name| !name.is_empty())
+        })
         .ok_or_else(|| {
             AdapterError::ContractViolation("Gemini batch response missing name".to_owned())
         })?
@@ -307,21 +328,60 @@ pub(crate) fn parse_job_record(value: &Value) -> Result<GeminiBatchJobRecord> {
     })
 }
 
+/// Extract the entries of a `batches.list` page. The provider returns them
+/// under `operations` (it is an operations listing); `batches` is the name used
+/// by the REST reference. Reading only `batches` yielded an empty page against
+/// the real API — silently, since an empty page is also how the walk learns
+/// there is nothing to recover.
+pub(crate) fn parse_job_listing(value: &Value) -> Result<Vec<GeminiBatchJobRecord>> {
+    let Some(entries) = value
+        .get("operations")
+        .or_else(|| value.get("batches"))
+        .and_then(Value::as_array)
+    else {
+        return Ok(Vec::new());
+    };
+    entries.iter().map(parse_job_record).collect()
+}
+
+/// Locate the result lines inside a poll response.
+///
+/// The array sits one level below the key that names it: the outer
+/// `inlinedResponses` is the output destination, the inner one is the repeated
+/// field inside it. The provider exposes two copies — `metadata.output.…` and
+/// `response.…` — and the REST reference documents a third, singly-nested
+/// `dest.inlinedResponses[]`. Resolving only the singly-nested form is what
+/// made every real job unreadable: `fetch_inlined_results` raised a contract
+/// violation, the poll site held the row as "still in flight" (04 §5.8
+/// unknown), and the job stayed uncollected forever with no diagnostic.
+fn inlined_response_lines(value: &Value) -> Option<&Vec<Value>> {
+    /// Peel however many `inlinedResponses` wrappers stand between the key and
+    /// the array, so both the nested and the flat shape resolve.
+    fn lines_at(node: &Value) -> Option<&Vec<Value>> {
+        match node {
+            Value::Array(lines) => Some(lines),
+            _ => node.get("inlinedResponses").and_then(lines_at),
+        }
+    }
+    let object = batch_object(value);
+    [
+        object.get("output"),
+        object.get("dest"),
+        Some(object),
+        value.get("response"),
+    ]
+    .into_iter()
+    .flatten()
+    .find_map(|root| root.get("inlinedResponses").and_then(lines_at))
+}
+
 /// Extract `inlinedResponses[]` into keyed outputs. A line without a usable
 /// `metadata.key` is a contract violation: silently dropping it would leave the
 /// caller's chunk permanently unembedded while the job counted as complete.
 pub(crate) fn parse_inlined_results(value: &Value) -> Result<Vec<GeminiBatchEmbedOutput>> {
-    let object = batch_object(value);
-    let lines = object
-        .get("dest")
-        .and_then(|dest| dest.get("inlinedResponses"))
-        .or_else(|| object.get("inlinedResponses"))
-        .and_then(Value::as_array)
-        .ok_or_else(|| {
-            AdapterError::ContractViolation(
-                "Gemini batch result missing inlinedResponses".to_owned(),
-            )
-        })?;
+    let lines = inlined_response_lines(value).ok_or_else(|| {
+        AdapterError::ContractViolation("Gemini batch result missing inlinedResponses".to_owned())
+    })?;
     let mut outputs = Vec::with_capacity(lines.len());
     for line in lines {
         let key = line
@@ -496,17 +556,11 @@ impl GeminiBatchClient for EnvGeminiBatchClient {
                 None => format!("{base}/v1beta/batches?pageSize={BATCH_LIST_PAGE_SIZE}"),
             };
             let value = self.get_json(&url, BATCH_METADATA_MAX_BYTES, "Gemini batch listing")?;
-            let entries = value
-                .get("batches")
-                .and_then(Value::as_array)
-                .cloned()
-                .unwrap_or_default();
+            let entries = parse_job_listing(&value)?;
             if entries.is_empty() {
                 break;
             }
-            for entry in &entries {
-                records.push(parse_job_record(entry)?);
-            }
+            records.extend(entries);
             page_token = value
                 .get("nextPageToken")
                 .and_then(Value::as_str)
@@ -727,18 +781,32 @@ impl GeminiBatchClient for MockGeminiBatchClient {
     fn list_jobs(&self) -> Result<Vec<GeminiBatchJobRecord>> {
         self.capture(json!({ "call": "list_jobs" }));
         self.fail_if_scripted("list_jobs")?;
-        self.script
-            .jobs_listing
-            .iter()
-            .map(parse_job_record)
-            .collect()
+        // Route the scripted entries through the same envelope the provider
+        // sends, rather than calling the entry parser directly — see the note
+        // on `fetch_inlined_results` below.
+        parse_job_listing(&json!({ "operations": self.script.jobs_listing }))
     }
 
     fn fetch_inlined_results(&self, name: &str) -> Result<Vec<GeminiBatchEmbedOutput>> {
         self.capture(json!({ "call": "fetch_inlined_results", "name": name }));
         self.fail_if_named(name)?;
         self.fail_if_scripted("fetch_results")?;
-        parse_inlined_results(&json!({ "inlinedResponses": self.script.inlined_responses }))
+        // The mock used to hand the parser `{"inlinedResponses": [...]}` — the
+        // innermost shape, which is the one shape the provider never returns.
+        // Every contract test therefore passed while no real job could be
+        // collected. Wrap the scripted lines in the provider's actual envelope
+        // so this seam cannot drift from the wire again.
+        parse_inlined_results(&json!({
+            "name": self.script.job_name,
+            "metadata": {
+                "name": self.script.job_name,
+                "state": "BATCH_STATE_SUCCEEDED",
+                "output": {
+                    "inlinedResponses": { "inlinedResponses": self.script.inlined_responses },
+                },
+            },
+            "done": true,
+        }))
     }
 }
 
@@ -955,6 +1023,146 @@ mod tests {
     fn missing_inlined_responses_is_an_error_not_an_empty_result() {
         let value = json!({ "name": "batches/abc", "state": "BATCH_STATE_SUCCEEDED" });
         assert!(parse_inlined_results(&value).is_err());
+    }
+
+    // -----------------------------------------------------------------------
+    // Wire shapes captured from the live provider on 2026-07-25.
+    //
+    // These are verbatim responses (embedding vectors truncated to 3 elements,
+    // one entry kept per page) from a real `gemini-embedding-2` batch. They
+    // exist because the mock seam had been feeding the parser hand-built shapes
+    // the API never sends: `{"inlinedResponses": [...]}` for results and
+    // `{"batches": [...]}` for the listing. Every contract test passed, and no
+    // real job could be collected or recovered. Assert against the wire.
+    // -----------------------------------------------------------------------
+
+    /// `GET /v1beta/batches/{id}` for a succeeded embedding batch.
+    const REAL_POLL_RESPONSE: &str = r#"{
+      "name": "batches/pq1j6cr5x7usrrlj98tlukhnsav7gcq5lt8x",
+      "metadata": {
+        "@type": "type.googleapis.com/google.ai.generativelanguage.v1main.EmbedContentBatch",
+        "model": "models/gemini-embedding-2",
+        "displayName": "kio-019f96a0-c9e2-7687-b146-f586fe4930b8",
+        "output": {
+          "inlinedResponses": {
+            "inlinedResponses": [
+              {
+                "response": {
+                  "embedding": { "values": [-0.01657847, 0.020118287, 0.026177283] },
+                  "usageMetadata": { "promptTokenCount": 81 }
+                },
+                "metadata": { "key": "sha256:aaa" }
+              },
+              {
+                "response": {
+                  "embedding": { "values": [0.0013260875, 0.038272932, 0.03331437] },
+                  "usageMetadata": { "promptTokenCount": 25 }
+                },
+                "metadata": { "key": "sha256:bbb" }
+              }
+            ]
+          }
+        },
+        "createTime": "2026-07-25T00:15:48.588771827Z",
+        "endTime": "2026-07-25T00:17:11.340704784Z",
+        "batchStats": { "requestCount": "5", "successfulRequestCount": "5" },
+        "state": "BATCH_STATE_SUCCEEDED",
+        "name": "batches/pq1j6cr5x7usrrlj98tlukhnsav7gcq5lt8x"
+      },
+      "done": true,
+      "response": {
+        "@type": "type.googleapis.com/google.ai.generativelanguage.v1main.EmbedContentBatch",
+        "inlinedResponses": {
+          "inlinedResponses": [
+            {
+              "response": {
+                "embedding": { "values": [-0.01657847, 0.020118287, 0.026177283] },
+                "usageMetadata": { "promptTokenCount": 81 }
+              },
+              "metadata": { "key": "sha256:aaa" }
+            },
+            {
+              "response": {
+                "embedding": { "values": [0.0013260875, 0.038272932, 0.03331437] },
+                "usageMetadata": { "promptTokenCount": 25 }
+              },
+              "metadata": { "key": "sha256:bbb" }
+            }
+          ]
+        }
+      }
+    }"#;
+
+    /// `GET /v1beta/batches?pageSize=N`.
+    const REAL_LIST_RESPONSE: &str = r#"{
+      "operations": [
+        {
+          "name": "batches/o828in12yctmkpzraz93m0a2p6nqerf2fpre",
+          "metadata": {
+            "@type": "type.googleapis.com/google.ai.generativelanguage.v1main.EmbedContentBatch",
+            "model": "models/gemini-embedding-2",
+            "displayName": "kio-019f96a5-b5a5-7cb2-ba6e-8ddfccafc483",
+            "createTime": "2026-07-25T00:21:11.123599637Z",
+            "endTime": "2026-07-25T00:22:44.923079258Z",
+            "batchStats": { "requestCount": "6", "pendingRequestCount": "6" },
+            "state": "BATCH_STATE_SUCCEEDED",
+            "name": "batches/o828in12yctmkpzraz93m0a2p6nqerf2fpre"
+          },
+          "done": true
+        }
+      ]
+    }"#;
+
+    #[test]
+    fn real_poll_response_yields_the_embedding_vectors() {
+        let value: Value = serde_json::from_str(REAL_POLL_RESPONSE).unwrap();
+        let outputs = parse_inlined_results(&value)
+            .expect("the live poll shape must resolve, or no job is ever collectable");
+        assert_eq!(outputs.len(), 2);
+        assert_eq!(outputs[0].key, "sha256:aaa");
+        assert_eq!(outputs[0].values.as_ref().unwrap().len(), 3);
+        assert_eq!(outputs[1].key, "sha256:bbb");
+        assert!(outputs.iter().all(|output| output.error.is_none()));
+    }
+
+    #[test]
+    fn real_poll_response_yields_a_terminal_job_record() {
+        let value: Value = serde_json::from_str(REAL_POLL_RESPONSE).unwrap();
+        let record = parse_job_record(&value).unwrap();
+        assert_eq!(record.name, "batches/pq1j6cr5x7usrrlj98tlukhnsav7gcq5lt8x");
+        assert_eq!(record.state, GeminiBatchState::Succeeded);
+        assert!(record.state.is_terminal());
+        // The recovery walk keys off this, so an empty display name would make
+        // every real job unattributable.
+        assert_eq!(
+            display_name_intent_token(&record.display_name),
+            Some("019f96a0-c9e2-7687-b146-f586fe4930b8")
+        );
+    }
+
+    #[test]
+    fn real_listing_response_yields_the_page_entries() {
+        let value: Value = serde_json::from_str(REAL_LIST_RESPONSE).unwrap();
+        let records = parse_job_listing(&value)
+            .expect("the live listing shape must resolve, or recovery never finds a job");
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].name, "batches/o828in12yctmkpzraz93m0a2p6nqerf2fpre");
+        assert_eq!(records[0].state, GeminiBatchState::Succeeded);
+        assert_eq!(
+            display_name_intent_token(&records[0].display_name),
+            Some("019f96a5-b5a5-7cb2-ba6e-8ddfccafc483")
+        );
+    }
+
+    #[test]
+    fn the_documented_listing_key_is_still_accepted() {
+        let value = json!({
+            "batches": [{ "name": "batches/abc", "state": "BATCH_STATE_RUNNING" }]
+        });
+        let records = parse_job_listing(&value).unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].name, "batches/abc");
+        assert!(parse_job_listing(&json!({})).unwrap().is_empty());
     }
 
     #[test]
